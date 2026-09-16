@@ -1539,6 +1539,23 @@ async def verificar_margem_snapshot(ctx: dict) -> None:
             logger.warning("margem_auto_hold_cron_failed", error=str(e)[:200])
 
 
+async def margem_reavaliar_reprovados(ctx: dict) -> None:
+    """Revisita, de hora em hora, os pedidos que o robô da Margem reprovou e
+    que ainda estão em Aguardando Cancelamento (Vinicius, 16/09/2026 — caso
+    297400: reprovado com repasse provisório da Shopee, margem final passava
+    pela Condição Especial). Rebusca o financeiro do pedido, refresca o
+    snapshot e, se a margem oficial agora atende, devolve o pedido ao fluxo
+    como o Aprovar faria. Detalhes em services/margem_auto_hold."""
+    from app.services.margem_auto_hold import reavaliar_reprovados
+
+    async with session_scope() as s:
+        try:
+            res = await reavaliar_reprovados(s)
+            logger.info("margem_reavaliar_reprovados_done", **res)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("margem_reavaliar_reprovados_failed", error=str(e)[:200])
+
+
 async def sync_lock_safety_release(ctx: dict) -> None:
     """SSH-parity: terminate backends idle >30min holding our SYNC_NAMESPACE
     advisory lock. Counterpart to SSH's in-memory 30-min safety timeout.
@@ -2313,6 +2330,7 @@ class WorkerSettings:
         push_lote_stock_to_bling_job,
         alerts_cleanup,
         condicao_especial_gc,
+        margem_reavaliar_reprovados,
         low_stock_polling,
         import_listings_run,
         auto_import_link,
@@ -2549,6 +2567,11 @@ class WorkerSettings:
         # (que também reconstrói, throttle 5min). Este cron garante a
         # propagação em períodos ociosos. Serializado pelo advisory lock.
         cron(verificar_margem_snapshot, minute={15, 45}, run_at_startup=False),
+        # Reavaliação dos reprovados pelo robô: de hora em hora, em :35 — fora
+        # do :15/:45 (snapshot + hold), do :10/:40 (retry do financeiro) e do
+        # :20 (period sync). Rebusca financeiro + Bling por pedido; poucos
+        # candidatos (≈10 reprovações automáticas/dia). Ver margem_auto_hold.
+        cron(margem_reavaliar_reprovados, minute=35, run_at_startup=False, timeout=600),
         # Cron `check_marketplace_shipped_orders` MOVIDO pra
         # WorkerSettingsMarketplace (fila `davinci_marketplace`). Função
         # continua em `functions` deste worker como fallback (enqueue
@@ -2881,6 +2904,7 @@ __all__ = [
     "auto_link_run",
     "alerts_cleanup",
     "condicao_especial_gc",
+    "margem_reavaliar_reprovados",
     "background_jobs_gc",
     "bling_notas_token_refresh",
     "bling_orders_safety_net_tick",

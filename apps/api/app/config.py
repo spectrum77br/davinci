@@ -276,6 +276,12 @@ class Settings(BaseSettings):
     # Roda após cada rebuild do snapshot (cron :15/:45 e botão "atualizar").
     # Kill-switch: MARGEM_AUTO_HOLD=false no .env.
     margem_auto_hold: bool = True
+    # Reavaliação dos reprovados pelo robô (Vinicius, 16/09 — caso 297400):
+    # de hora em hora, pedido que o robô reprovou e ainda está em Aguardando
+    # Cancelamento é rejulgado com o repasse atualizado da plataforma; se a
+    # margem passou (mínima ou Condição Especial), volta pro fluxo sozinho.
+    # Kill-switch: MARGEM_REAVALIAR_REPROVADOS=false no .env.
+    margem_reavaliar_reprovados: bool = True
 
     # Safety-net cron que re-sincroniza pedidos suspeitos de stale com o
     # Bling (webhooks perdidos). Desligável via ENABLE_BLING_ORDERS_SAFETY_NET=false.

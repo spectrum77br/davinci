@@ -81,12 +81,35 @@ pedido no Threema (destinatários do margem_auto) e não toca no pedido.
 Dedup pela auditoria (margem_audit, acao='alerta_margem_alta'), gravada só
 depois de pelo menos um envio bem-sucedido — Threema fora do ar → tenta de
 novo no próximo tick.
+
+REAVALIAÇÃO DOS REPROVADOS PELO ROBÔ (Vinicius, 16/09/2026 — caso 297400):
+o robô reprova 30 min depois de o pedido entrar, com o repasse que a
+plataforma informava NAQUELE instante. Na Shopee esse número é provisório:
+o 297400 (Hotwav, Condição Especial ≥16% vigente) foi reprovado às 14:17 com
+margem < 16% e horas depois o escrow subiu pra R$ 585,07 (17,1%) — os 13
+pedidos irmãos do mesmo produto passaram pela condição; só ele ficou preso,
+porque nada revisitava um 'Reprovado'. Decisão: NÃO mexer na reprovação
+imediata (regra de 11/09), mas o robô passa a REAVALIAR, de hora em hora
+(cron `margem_reavaliar_reprovados`), os pedidos que ELE reprovou, que ainda
+estão em Aguardando Cancelamento e cuja reprovação tem mais de
+REAVALIACAO_IDADE_MINIMA. Antes de julgar, rebusca o financeiro do pedido na
+plataforma e refresca o snapshot (`_atualizar_financeiro`), pra não depender
+do re-sync de hora em hora. Se a margem oficial agora passa (mínima OU
+Condição Especial) e nada mais pende → libera como o botão Aprovar (recado nas
+Observações, 83955 → Atendido → Em aberto, pino 'Aprovado', auditoria do robô)
+e avisa no Threema (`margem_auto`). Se passa mas sobrou saldo divergente →
+só troca o pino pra 'Pendente' (fica segurado, volta pra aba pra alguém
+decidir). Se continua baixa ou sem margem conhecida → não faz nada e não
+avisa. Reprovação/aprovação feita por PESSOA nunca é reavaliada
+(bling_orders.aprovado_por preenchido ou auditoria humana posterior), e o
+robô nunca aprova só localmente: se o Bling recusar a situação, o pedido fica
+como está e a próxima hora tenta de novo.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
 
 import httpx
 import structlog
@@ -106,19 +129,30 @@ from app.services.logistica_bling import build_observacoes_put_body, compose_obs
 from app.services.margem_audit import record_margem_audit
 from app.services.marketplaces.bling import BlingClient
 from app.services.verificar_margem import (
+    BLING_ORDERS_TABLE,
     SITUACAO_BLING_TABLE,
     SNAPSHOT_TABLE,
+    patch_status_for_pedido,
     qualified_table,
 )
 
 logger = structlog.get_logger()
 
 SITUACAO_EM_ABERTO = 6
+# Degrau obrigatório do Bling pra sair de Aguardando Cancelamento (mesmo
+# caminho do Aprovar da aba: routers/margens._apply_bling_decision_by_pedido).
+SITUACAO_ATENDIDO = 9
 SITUACAO_AGUARDANDO_CANCELAMENTO = 83955
 
 # Margem acima disto é "fora do normal" (provável custo errado no cadastro):
 # alerta no Threema, sem mexer no pedido. Fração, como o snapshot (0.60 = 60%).
 MARGEM_ALTA_LIMIAR = 0.60
+
+# Reavaliação dos reprovados pelo robô (ver docstring): idade mínima da
+# reprovação antes da primeira revisita — dá tempo de a plataforma consolidar
+# o repasse — e até quando insistir (mesma janela da aba Pendentes).
+REAVALIACAO_IDADE_MINIMA = timedelta(minutes=90)
+REAVALIACAO_JANELA_DIAS = 30
 
 _MARGEM_AUDIT_TABLE = qualified_table("margem_audit")
 
@@ -546,4 +580,424 @@ async def run(
     out: dict = {"held": held, "reprovados": reprovados, "failed": failed, "alertas": alertas}
     if skipped:
         out["skipped"] = skipped
+    return out
+
+
+# --- Reavaliação dos reprovados pelo robô (ver docstring do módulo) ---------
+
+
+def _reavaliacao_candidatos_sql() -> str:
+    # Fonte do pino é bling_orders (sobrevive ao rebuild do snapshot). A
+    # ÚLTIMA reprovação automática do pedido vem da auditoria (acao='status',
+    # 'Reprovado', origem margens_auto, mudado_por NULL) — é ela que dá a
+    # idade. `aprovado_por IS NULL`: Aprovar/Reprovar no clique grava o autor
+    # (mesmo quando o Bling não é tocado, ex.: confirmar a reprovação de um
+    # 83955), então autor preenchido = pessoa decidiu, não revisita. O NOT
+    # EXISTS cobre qualquer outra ação humana depois da reprovação.
+    return f"""
+        WITH reprovo AS (
+            SELECT DISTINCT ON (a.pedido_bling) a.pedido_bling, a.created_at
+            FROM {_MARGEM_AUDIT_TABLE} a
+            WHERE a.acao = 'status'
+              AND a.valor_novo = 'Reprovado'
+              AND a.origem = 'margens_auto'
+              AND a.mudado_por IS NULL
+            ORDER BY a.pedido_bling, a.created_at DESC
+        )
+        SELECT bo.numero            AS pedido_bling,
+               MAX(bo.bling_id)     AS bling_id,
+               r.created_at         AS reprovado_em
+        FROM {BLING_ORDERS_TABLE} bo
+        JOIN reprovo r ON r.pedido_bling = bo.numero
+        WHERE bo.situacao = '{SITUACAO_AGUARDANDO_CANCELAMENTO}'
+          AND bo.status = 'Reprovado'
+          AND bo.aprovado_por IS NULL
+          AND bo.bling_id IS NOT NULL
+          AND r.created_at <= :limite
+          AND r.created_at >= :inicio_janela
+          AND NOT EXISTS (
+                SELECT 1 FROM {_MARGEM_AUDIT_TABLE} h
+                 WHERE h.pedido_bling = bo.numero
+                   AND h.mudado_por IS NOT NULL
+                   AND h.created_at > r.created_at)
+        GROUP BY bo.numero, r.created_at
+        ORDER BY bo.numero
+    """
+
+
+def _reavaliacao_julgar_sql() -> str:
+    # Mesmos gatilhos da aba/robô (fonte única em routers/margens.py), agregados
+    # por pedido. `margem_conhecida` exige margem oficial em TODAS as linhas:
+    # sem repasse real não há o que julgar (nunca libera às cegas).
+    from app.routers.margens import (
+        _ATTENTION_MARGEM_SQL,
+        _ATTENTION_SALDO_SQL,
+        _LUCRO_OFICIAL_SQL,
+        _MARGEM_DATA_ESPECIAL_SQL,
+        _MARGEM_OFICIAL_SQL,
+        _SITUACOES_SALDO_DIVERGENTE_IN,
+    )
+
+    # Saldo divergente só é triado em Em aberto/etiqueta (o pedido segurado
+    # está em 83955, onde o gatilho é sempre falso). A pergunta aqui é "se eu
+    # devolver pra Em aberto, o saldo vai pender?" — então o recorte de
+    # situação é neutralizado só nesta expressão.
+    guarda = f"(v.situacao IN ({_SITUACOES_SALDO_DIVERGENTE_IN})"
+    if guarda not in _ATTENTION_SALDO_SQL:  # pragma: no cover — trava de manutenção
+        raise RuntimeError("_ATTENTION_SALDO_SQL mudou de forma; ajuste a reavaliação")
+    saldo_como_em_aberto = _ATTENTION_SALDO_SQL.replace(guarda, "(TRUE", 1)
+
+    return f"""
+        SELECT COUNT(*)                         AS linhas,
+               MAX(COALESCE(v.plataforma_bling, v.plataforma_financeiro))
+                                                AS plataforma,
+               MAX(v.loja_nome)                 AS conta,
+               BOOL_AND({_MARGEM_OFICIAL_SQL} IS NOT NULL)
+                                                AS margem_conhecida,
+               BOOL_OR({_ATTENTION_MARGEM_SQL}) AS margem_baixa,
+               BOOL_OR({_MARGEM_DATA_ESPECIAL_SQL})
+                                                AS condicao_especial,
+               BOOL_OR({saldo_como_em_aberto}
+                       AND v.marketplace_liquido_base_margem_item IS NOT NULL)
+                                                AS saldo_divergente,
+               MIN({_MARGEM_OFICIAL_SQL}) * 100 AS margem,
+               MAX(v.margem_minima) * 100       AS minima,
+               SUM({_LUCRO_OFICIAL_SQL})        AS lucro,
+               string_agg(DISTINCT NULLIF(btrim(v.produto), ''), '; ')
+                                                AS produto
+        FROM {SNAPSHOT_TABLE} v
+        WHERE v.bling_id = :bling_id
+    """
+
+
+async def _atualizar_financeiro(session: AsyncSession, bling_id: int) -> None:
+    """Rebusca o repasse do pedido na plataforma e refresca o snapshot dele.
+
+    A reprovação foi decidida com o número que a plataforma dava 30 min depois
+    da venda; a reavaliação só faz sentido com o número de agora. Best-effort:
+    API fora → loga e o julgamento segue com o snapshot atual (empate = nada
+    muda, tenta de novo na próxima hora). Import tardio: marketplace_financials
+    importa verificar_margem, como este módulo — evita ciclo no import.
+
+    Mesmo advisory lock por pedido do job `sync_marketplace_financials_for_
+    order_run` (worker.py): a fila do financeiro pode estar buscando este
+    pedido neste instante (re-sync do Bling); sem o lock, dois upserts da mesma
+    linha se atropelam."""
+    from app.services.marketplace_financials import (
+        run_sync_marketplace_financials_for_bling_order,
+    )
+    from app.services.verificar_margem import refresh_for_bling_id
+
+    try:
+        await session.execute(
+            text("SELECT pg_advisory_xact_lock(hashtext(:k))"),
+            {"k": f"marketplace_financials:{bling_id}"},
+        )
+        await run_sync_marketplace_financials_for_bling_order(
+            session, bling_order_id=bling_id, trigger="reavaliacao"
+        )
+        await session.commit()  # solta o lock junto
+        await refresh_for_bling_id(session, bling_id)
+    except Exception as e:  # noqa: BLE001 — julga com o que tem
+        await session.rollback()
+        logger.warning("margem_reavaliar_financeiro_falhou", bling_id=bling_id, erro=str(e)[:200])
+
+
+def _mensagem_liberado(motivo: str) -> str:
+    return (
+        f"Margem DaVinci: pedido liberado automaticamente ({motivo}) — "
+        "reprovação anterior revista com o repasse atualizado da plataforma; "
+        "situação devolvida para Em aberto."
+    )
+
+
+async def _liberar_one(
+    session: AsyncSession,
+    client: BlingClient,
+    *,
+    pedido_bling: str,
+    bling_id: int,
+    motivo: str,
+    hoje: date | None,
+) -> bool:
+    """Desfaz a reprovação automática como o Aprovar da aba faria.
+
+    Lê o pedido no Bling e só age se ele AINDA está em Aguardando
+    Cancelamento (ou parado no degrau Atendido de uma tentativa anterior):
+    situação diferente = alguém mexeu no painel do Bling, o robô não toca e
+    devolve False. Ordem das escritas igual ao hold: Observações primeiro
+    (4xx = validação da venda, recado fica de fora), depois a situação —
+    83955 → Atendido → Em aberto. Falha na situação propaga: NADA local muda
+    (o robô nunca aprova só no DaVinci — deixaria a venda presa no Bling com
+    pino Aprovado) e a próxima hora tenta de novo."""
+    order = await client.get_order(bling_id)
+    situacao_bling = str((order.get("situacao") or {}).get("id") or "").strip()
+    if situacao_bling and situacao_bling not in (
+        str(SITUACAO_AGUARDANDO_CANCELAMENTO),
+        str(SITUACAO_ATENDIDO),
+    ):
+        logger.info(
+            "margem_reavaliar_situacao_inesperada",
+            pedido_bling=pedido_bling,
+            bling_id=bling_id,
+            situacao_bling=situacao_bling,
+        )
+        return False
+
+    atual = order.get("observacoes")
+    novo = compose_observacoes(atual, _mensagem_liberado(motivo), hoje=hoje)
+    if novo != (atual or "").strip():
+        try:
+            await client.update_order(bling_id, build_observacoes_put_body(order, novo))
+        except httpx.HTTPStatusError as e:
+            status = e.response.status_code
+            if status >= 500 or status == 429:
+                raise
+            logger.warning(
+                "margem_reavaliar_obs_rejeitada",
+                pedido_bling=pedido_bling,
+                bling_id=bling_id,
+                status=status,
+                bling=e.response.text[:300],
+            )
+
+    steps: list[int] = []
+    if situacao_bling != str(SITUACAO_ATENDIDO):
+        steps.append(SITUACAO_ATENDIDO)
+    steps.append(SITUACAO_EM_ABERTO)
+    for step in steps:
+        await client.update_order_situacao(bling_id, step)
+
+    await session.execute(
+        update(BlingOrder)
+        .where(BlingOrder.bling_id == bling_id)
+        .values(situacao=str(SITUACAO_EM_ABERTO), status="Aprovado")
+    )
+    await patch_status_for_pedido(
+        session,
+        pedido_bling=pedido_bling,
+        status="Aprovado",
+        situacao=str(SITUACAO_EM_ABERTO),
+    )
+    await record_margem_audit(
+        session,
+        acao="situacao",
+        pedido_bling=pedido_bling,
+        bling_id=bling_id,
+        sku=None,
+        valor_antigo=str(SITUACAO_AGUARDANDO_CANCELAMENTO),
+        valor_novo=str(SITUACAO_EM_ABERTO),
+        origem="margens_auto",
+        mudado_por=None,
+    )
+    await record_margem_audit(
+        session,
+        acao="status",
+        pedido_bling=pedido_bling,
+        bling_id=bling_id,
+        sku=None,
+        valor_antigo="Reprovado",
+        valor_novo="Aprovado",
+        origem="margens_auto",
+        mudado_por=None,
+    )
+    await session.commit()
+    return True
+
+
+async def _voltar_pendente_one(session: AsyncSession, *, pedido_bling: str, bling_id: int) -> None:
+    """Margem passou, mas sobrou outra pendência (saldo divergente): o pedido
+    continua segurado no Bling, só o pino vira 'Pendente' — a linha volta pra
+    aba Pendentes (exceção do segurado na listagem) pra alguém decidir."""
+    await session.execute(
+        update(BlingOrder).where(BlingOrder.bling_id == bling_id).values(status="Pendente")
+    )
+    await patch_status_for_pedido(session, pedido_bling=pedido_bling, status="Pendente")
+    await record_margem_audit(
+        session,
+        acao="status",
+        pedido_bling=pedido_bling,
+        bling_id=bling_id,
+        sku=None,
+        valor_antigo="Reprovado",
+        valor_novo="Pendente",
+        origem="margens_auto",
+        mudado_por=None,
+    )
+    await session.commit()
+
+
+async def _avisar_threema_reavaliacao(
+    session: AsyncSession, r: Mapping, *, pedido_bling: str, motivo: str, liberado: bool
+) -> None:
+    """Aviso da reavaliação pros mesmos destinatários do hold (`margem_auto`).
+    Best-effort como o do hold: falha de envio não desfaz nada."""
+    recipients = await _recipients_margem_auto(session)
+    if not recipients:
+        return
+    if liberado:
+        cabecalho = "DaVinci — Margem: pedido liberado automaticamente"
+        rodape = (
+            "Reprovação anterior revista com o repasse atualizado da plataforma — "
+            "situação devolvida para Em aberto, o pedido segue o fluxo normal.\n"
+        )
+    else:
+        cabecalho = "DaVinci — Margem: pedido reprovado voltou para análise"
+        rodape = (
+            "A margem passou a atender, mas o saldo continua divergente — o pedido "
+            "segue em Aguardando Cancelamento, na aba Pendentes, para decisão.\n"
+        )
+    msg = informar.mensagem_margem_pedido(
+        informar.MargemPedido(
+            pedido=pedido_bling,
+            loja=_loja(r),
+            motivo=motivo,
+            margem=None if r["margem"] is None else float(r["margem"]),  # type: ignore[arg-type]
+            minima=None if r["minima"] is None else float(r["minima"]),  # type: ignore[arg-type]
+            lucro=None if r["lucro"] is None else float(r["lucro"]),  # type: ignore[arg-type]
+            produto=r.get("produto"),
+        ),
+        cabecalho=cabecalho,
+        rodape=rodape + f"Ver no DaVinci: {aprovar_link.url_margem(pedido_bling)}",
+    )
+    try:
+        result = await threema.ThreemaClient().send_to_all(msg, recipients)
+        logger.info(
+            "margem_reavaliar_threema",
+            pedido_bling=pedido_bling,
+            liberado=liberado,
+            sent=result.get("sent", []),
+            failed=result.get("failed", []),
+        )
+    except Exception as e:  # noqa: BLE001 — aviso é acessório
+        logger.warning(
+            "margem_reavaliar_threema_falhou", pedido_bling=pedido_bling, erro=str(e)[:200]
+        )
+
+
+async def _ainda_reprovado_pelo_robo(session: AsyncSession, bling_id: int) -> bool:
+    """Reconfere o espelho DEPOIS do refetch (que re-sincroniza o pedido): se
+    o Bling já moveu o pedido ou alguém decidiu no meio, não toca."""
+    row = (
+        await session.execute(
+            select(BlingOrder.situacao, BlingOrder.status, BlingOrder.aprovado_por)
+            .where(BlingOrder.bling_id == bling_id)
+            .order_by(BlingOrder.item_index.asc().nullsfirst())
+            .limit(1)
+        )
+    ).first()
+    return (
+        row is not None
+        and str(row.situacao or "") == str(SITUACAO_AGUARDANDO_CANCELAMENTO)
+        and (row.status or "") == "Reprovado"
+        and row.aprovado_por is None
+    )
+
+
+async def reavaliar_reprovados(
+    session: AsyncSession,
+    *,
+    client: BlingClient | None = None,
+    hoje: date | None = None,
+    agora: datetime | None = None,
+) -> dict:
+    """Revisita os pedidos reprovados pelo robô ainda em Aguardando
+    Cancelamento (ver docstring do módulo). Retorna contadores p/ log."""
+    if not get_settings().margem_reavaliar_reprovados:
+        return {"avaliados": 0, "liberados": 0, "pendentes": 0, "failed": 0, "skipped": "disabled"}
+
+    agora = agora or datetime.now(UTC)
+    rows = (
+        (
+            await session.execute(
+                text(_reavaliacao_candidatos_sql()),
+                {
+                    "limite": agora - REAVALIACAO_IDADE_MINIMA,
+                    "inicio_janela": agora - timedelta(days=REAVALIACAO_JANELA_DIAS),
+                },
+            )
+        )
+        .mappings()
+        .all()
+    )
+    out: dict = {
+        "avaliados": len(rows),
+        "liberados": 0,
+        "pendentes": 0,
+        "ainda_baixa": 0,
+        "sem_margem": 0,
+        "failed": 0,
+    }
+    if not rows:
+        return out
+
+    for cand in rows:
+        pedido_bling = str(cand["pedido_bling"])
+        bling_id = int(cand["bling_id"])
+        try:
+            await _atualizar_financeiro(session, bling_id)
+            if not await _ainda_reprovado_pelo_robo(session, bling_id):
+                logger.info("margem_reavaliar_pulou_mexido", pedido_bling=pedido_bling)
+                continue
+            r = (
+                (await session.execute(text(_reavaliacao_julgar_sql()), {"bling_id": bling_id}))
+                .mappings()
+                .one()
+            )
+            if not r["linhas"] or not r["margem_conhecida"]:
+                out["sem_margem"] += 1
+                continue
+            if r["margem_baixa"]:
+                out["ainda_baixa"] += 1
+                continue
+
+            motivo = (
+                "margem passou a atender a Condição Especial do segmento"
+                if r["condicao_especial"]
+                else "margem passou a atender o mínimo"
+            )
+            if r["saldo_divergente"]:
+                await _voltar_pendente_one(session, pedido_bling=pedido_bling, bling_id=bling_id)
+                out["pendentes"] += 1
+                logger.info("margem_reavaliar_pendente", pedido_bling=pedido_bling, motivo=motivo)
+                await _avisar_threema_reavaliacao(
+                    session, r, pedido_bling=pedido_bling, motivo=motivo, liberado=False
+                )
+                continue
+
+            client = client or await _bling_client(session)
+            if client is None:
+                logger.warning("margem_reavaliar_sem_bling", pedido_bling=pedido_bling)
+                out["failed"] += 1
+                out["skipped"] = "bling_integration_missing"
+                continue
+            liberado = await _liberar_one(
+                session,
+                client,
+                pedido_bling=pedido_bling,
+                bling_id=bling_id,
+                motivo=motivo,
+                hoje=hoje,
+            )
+            if not liberado:
+                continue
+            out["liberados"] += 1
+            logger.info(
+                "margem_reavaliar_liberado",
+                pedido_bling=pedido_bling,
+                bling_id=bling_id,
+                motivo=motivo,
+                margem=None if r["margem"] is None else float(r["margem"]),
+                minima=None if r["minima"] is None else float(r["minima"]),
+            )
+            await _avisar_threema_reavaliacao(
+                session, r, pedido_bling=pedido_bling, motivo=motivo, liberado=True
+            )
+        except Exception as e:  # noqa: BLE001 — um pedido não derruba os demais
+            out["failed"] += 1
+            await session.rollback()
+            erro = str(e)[:200]
+            if isinstance(e, httpx.HTTPStatusError):
+                erro = f"{erro} | bling: {e.response.text[:300]}"
+            logger.warning("margem_reavaliar_falhou", pedido_bling=pedido_bling, erro=erro)
     return out
