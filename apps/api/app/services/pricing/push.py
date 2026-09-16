@@ -11,12 +11,13 @@ to a non-ML account returns HTTP 501 (mapped from this service's outcome).
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 import structlog
@@ -206,6 +207,70 @@ def sku_casa_no_departamento(
 
     # celular/eletro: casa pelo SKU base (parte antes do ".")
     return main_sku.split(".", 1)[0] in sku_base_set
+
+
+async def enviar_preco_para_links(
+    client: Any,
+    platform: Any,
+    links: list[ProductLink],
+    preco: float,
+    *,
+    sku_by_product: dict[UUID, str],
+) -> dict[UUID, Any]:
+    """Manda o preço para cada anúncio e INSISTE no que recusou por limite de
+    taxa, em rodadas com espera crescente.
+
+    Antes era uma passada só: um envio de 136 variações voltava "96/136 ok;
+    last error: http_429" e as 40 restantes ficavam com o preço velho, caladas.
+    Eduardo, 16/09/2026: "não pode ser parcial, tem que ser completamente".
+
+    Depois do primeiro 429 o envio passa a ser espaçado — insistir no mesmo
+    ritmo que estourou o limite só gera mais 429. O espaçamento é adaptativo de
+    propósito: enquanto o marketplace aceita, vai rápido.
+
+    Só o limite de taxa volta pra fila. Erro de verdade (preço inválido,
+    anúncio encerrado, credencial recusada) não é retentado.
+    """
+    resultados: dict[UUID, Any] = {}
+    pendentes = list(links)
+    intervalo = 0.0
+    for rodada, espera in enumerate((0.0, *_ESPERAS_LIMITE_S)):
+        if not pendentes:
+            break
+        ultima_rodada = rodada == len(_ESPERAS_LIMITE_S)
+        if espera:
+            logger.info(
+                "pricing_push_limite_taxa_esperando",
+                rodada=rodada,
+                segundos=espera,
+                faltam=len(pendentes),
+            )
+            await asyncio.sleep(espera)
+        ainda: list[ProductLink] = []
+        for link in pendentes:
+            if intervalo:
+                await asyncio.sleep(intervalo)
+            result = _reclassify_skipped(
+                await _dispatch_price_update_link(
+                    client, platform, link, preco,
+                    product_sku=sku_by_product.get(link.product_id),
+                )
+            )
+            resultados[link.id] = result
+            if result.status == SyncStatus.RETRYABLE:
+                intervalo = intervalo or _INTERVALO_APOS_LIMITE_S
+                if not ultima_rodada:
+                    ainda.append(link)
+        pendentes = ainda
+    return resultados
+
+
+# Esperas entre as rodadas de reenvio quando o marketplace recusa por limite de
+# taxa. Quatro rodadas, ~76s no pior caso — cabe no clique do operador e dá
+# tempo do teto da Amazon (algumas req/s em Listings) se abrir.
+_ESPERAS_LIMITE_S = (3.0, 8.0, 20.0, 45.0)
+# Ritmo entre anúncios DEPOIS do primeiro 429, para não estourar de novo.
+_INTERVALO_APOS_LIMITE_S = 0.25
 
 
 async def _resolve_product_links_for_push(
@@ -583,18 +648,19 @@ async def push_one(
     first_variation: str | None = None
     last_error_code: str | None = None
     last_error_detail: str | None = None
+    resultados = await enviar_preco_para_links(
+        client,
+        integration.platform,
+        links,
+        float(outcome.price),
+        sku_by_product=sku_by_product,
+    )
+
     for link in links:
         if first_item is None:
             first_item = link.external_id
             first_variation = link.variation_id
-        result = await _dispatch_price_update_link(
-            client,
-            integration.platform,
-            link,
-            float(outcome.price),
-            product_sku=sku_by_product.get(link.product_id),
-        )
-        result = _reclassify_skipped(result)
+        result = resultados[link.id]
         # SSH-style per-link entry (externalId/success/skipped/message) plus
         # the original status/error_code fields kept for back-compat. UI
         # surfaces `message` directly and uses `skipped` to bucket
