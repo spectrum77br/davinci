@@ -899,10 +899,54 @@ async def _tiktok_recusa_registrada(client: TikTokClient, rid: str) -> dict | No
     return None
 
 
-def _texto_tiktok_encerrada(caso: dict, recusa: dict | None) -> str:
+async def _tiktok_outro_caso_pago(
+    client: TikTokClient, oid: str, rid: str
+) -> tuple[dict, bool] | None:
+    """Outra solicitação do MESMO pedido que pagou o comprador (ex. só reembolso).
+    Caso 294865 (16/09): a devolução "danificado" foi cancelada pelo comprador em 13 s
+    e a de SÓ REEMBOLSO ("não recebido") foi aprovada pela TikTok por falta de resposta —
+    o histórico dizia "valor ficou com o vendedor" com R$ 744 pagos. Devolve
+    (caso, aprovado_por_prazo) ou None. Best-effort."""
+    try:
+        casos = await client.get_return_list(order_ids=[oid])
+    except Exception:  # noqa: BLE001
+        return None
+    pagos = [
+        c for c in casos or []
+        if isinstance(c, dict)
+        and str(c.get("return_id") or "") != rid
+        and str(c.get("return_status") or "").upper()
+        in ("RETURN_OR_REFUND_REQUEST_COMPLETE", "RETURN_OR_REFUND_REQUEST_SUCCESS")
+    ]
+    if not pagos:
+        return None
+    caso = max(pagos, key=lambda c: int(c.get("update_time") or 0))
+    try:
+        eventos = await client.get_return_records(str(caso.get("return_id")))
+    except Exception:  # noqa: BLE001
+        eventos = []
+    return caso, any("TIMEOUT" in str(e.get("event") or "").upper() for e in eventos or [])
+
+
+def _texto_tiktok_encerrada(
+    caso: dict, recusa: dict | None, outro: tuple[dict, bool] | None = None
+) -> str:
     status = str(caso.get("return_status") or "").upper()
     arb = str(caso.get("arbitration_status") or "").upper()
     partes = ["Devolução já ENCERRADA na TikTok Shop"]
+    if outro is not None and status == "RETURN_OR_REFUND_REQUEST_CANCEL":
+        pago, por_prazo = outro
+        tipo = "só reembolso" if str(pago.get("return_type") or "").upper() == "REFUND" else "devolução"
+        valor = (pago.get("refund_amount") or {}).get("refund_total")
+        txt = (
+            f"esta solicitação foi cancelada pelo comprador, mas a de {tipo} "
+            f"{pago.get('return_id')} do mesmo pedido PAGOU o comprador"
+            + (f" (R$ {valor})" if valor else "")
+        )
+        if por_prazo:
+            txt += " — aprovada pela TikTok por FALTA DE RESPOSTA no prazo"
+        partes.append(txt)
+        return " — ".join(partes) + ". Nada mais a abrir pela API; só pela Central do Vendedor."
     if status in _TT_ENCERRADOS:
         partes.append(_TT_ENCERRADOS[status])
     if arb in _TT_ARB_ENCERRADA:
@@ -959,7 +1003,14 @@ async def _disparar_tiktok(
         # arbitrou (devolução lançada tarde no DaVinci). Retentar "aguardando
         # pacote" de hora em hora era mentira: falha de vez, desfecho no histórico.
         recusa = await _tiktok_recusa_registrada(client, rid)
-        session.add(chamados_svc.registrar_sistema(ch, _texto_tiktok_encerrada(caso, recusa)))
+        outro = (
+            await _tiktok_outro_caso_pago(client, (dev.pedido_marketplace or "").strip(), rid)
+            if status == "RETURN_OR_REFUND_REQUEST_CANCEL"
+            else None
+        )
+        session.add(
+            chamados_svc.registrar_sistema(ch, _texto_tiktok_encerrada(caso, recusa, outro))
+        )
         raise chamados_svc.ChamadoError(
             "tiktok_ja_recusada" if recusa is not None else "tiktok_devolucao_encerrada"
         )

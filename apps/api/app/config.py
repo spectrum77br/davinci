@@ -282,6 +282,10 @@ class Settings(BaseSettings):
     # (o sweep segue funcionando normal). Set via
     # NF_SEM_ESTOQUE_THREEMA_RECIPIENTS no .env.
     nf_sem_estoque_threema_recipients: str = ""
+    # Quem recebe o aviso "comprador pediu SÓ REEMBOLSO na TikTok — contestar até X"
+    # (services/chamados_tiktok_reembolso, Eduardo 16/09). Vazio = mesmo grupo do
+    # aviso de estoque acima. Set via TIKTOK_REEMBOLSO_THREEMA_RECIPIENTS no .env.
+    tiktok_reembolso_threema_recipients: str = ""
     # Quem recebe o aviso "loja parou de responder sobre envio"
     # (marketplace_shipment_check). Eduardo, 15/09: esse aviso é técnico — vai
     # só pra ele, não pra lista geral de operação. Vazio = cai na lista geral.

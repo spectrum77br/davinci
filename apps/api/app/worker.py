@@ -1389,6 +1389,21 @@ async def chamados_replica_automatica(ctx: dict) -> None:
     logger.info("chamados_devolucao_sync_done", **resp)
 
 
+async def chamados_tiktok_reembolso_vigia(ctx: dict) -> None:
+    """A cada 30 min (:10/:40): pedido de SÓ REEMBOLSO na TikTok vira chamado com o
+    prazo e aviso no Threema (Eduardo 16/09 — o 294865 foi aprovado pela TikTok por
+    falta de resposta: R$ 744). Contestar continua humano (réplica do chamado)."""
+    from app.services import chamados_tiktok_reembolso
+
+    try:
+        async with session_scope() as s:
+            summary = await chamados_tiktok_reembolso.run_vigia(s)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("chamados_tiktok_reembolso_falhou", err=str(e)[:300])
+        return
+    logger.info("chamados_tiktok_reembolso_done", **summary)
+
+
 async def bling_situacoes_sync(ctx: dict) -> None:
     """1x/dia (08:50 UTC = 05:50 BRT) e no startup do worker: catálogo
     `situacao_bling` igual ao módulo Vendas do Bling — situação nova entra,
@@ -2974,6 +2989,8 @@ class WorkerSettings:
         # Toda hora (:25): réplica automática + acompanhamento dos Chamados
         # (todo chamado de API do ML fecha sozinho quando o claim encerra).
         cron(chamados_replica_automatica, minute=25, run_at_startup=False),
+        # A cada 30 min (:10/:40): só reembolso da TikTok → chamado com prazo + Threema.
+        cron(chamados_tiktok_reembolso_vigia, minute={10, 40}, run_at_startup=False, timeout=600),
         # 1x/dia (05:50 BRT) e no startup: catálogo de situações = Bling (2 GETs).
         cron(bling_situacoes_sync, hour=8, minute=50, run_at_startup=True, timeout=120),
         # Motor da Logística SOZINHO a cada 5 min (:02, :07... — deslocado dos

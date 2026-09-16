@@ -524,6 +524,11 @@ async def enviar_mensagem(
     elif ch.canal == "robo":
         # Fila do robô de browser (formulário/protocolo). Ele marca enviada.
         msg.status = "pendente"
+    elif (ch.origem_ref or "").startswith("tiktok_reembolso:"):
+        # Só reembolso da TikTok (Eduardo 16/09): a réplica é a contestação.
+        from app.services import chamados_tiktok_reembolso  # lazy: ele importa este módulo
+
+        await chamados_tiktok_reembolso.contestar(session, ch, msg)
     elif ch.origem == "devolucao" and not _eh_ml(ch):
         # Shopee/TikTok: sem API de mensagem na disputa — a réplica reabre a
         # abertura (se ainda não saiu) ou fica só no histórico (Eduardo 07/09:
