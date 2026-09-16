@@ -1646,3 +1646,34 @@ async def test_legenda_do_criativo_ganha_do_padrao_da_marca(db):
 
     criadas = await svc.agendar(db, creative=c, file=f, redes=[rede])
     assert criadas[0].legenda == "escrita nesse vídeo"
+
+
+async def test_um_sku_so_serve_pra_aprovacao_e_pra_legenda(
+    client, db, make_user, auth_as, _monta_criativos
+):
+    """O SKU da VARIANTE tem que servir nos dois cadastros ao mesmo tempo.
+
+    O criativo carrega "dg023.ra" (o preto avulso); a Tabela de Preços carrega
+    a LINHA "dg023", porque a pasta de fotos no MEGA é da linha. Antes, o
+    operador ficava preso entre os dois: escrevia a variante e a aprovação não
+    achava a pasta; escrevia a linha e o vínculo com o produto se perdia (só as
+    variantes existem em `product_links`), e a legenda voltava pro genérico.
+    """
+    from app.models import PricingProduct
+    from app.routers.marketing_creatives import _match_product_by_sku, _skus_a_tentar
+
+    # A ordem importa: o exato manda; a linha é a rede de segurança.
+    assert _skus_a_tentar("dg023.ra") == ["dg023.ra", "dg023"]
+    assert _skus_a_tentar("dg023") == ["dg023"]
+    assert _skus_a_tentar("dg023.ra+a003.ra") == ["dg023.ra+a003.ra", "dg023"]
+    assert _skus_a_tentar("  ") == []
+
+    linha = PricingProduct(sku="dg023", name="WP53", fotos_path="/mega/dg023")
+    # A variante NÃO está na Tabela de Preços — é exatamente o caso real.
+    assert _match_product_by_sku([linha], "dg023.ra") is None
+    # …e é por isso que a segunda tentativa existe.
+    assert _match_product_by_sku([linha], "dg023") is linha
+
+    # Se um dia a Tabela listar a variante, ela ganha do genérico.
+    variante = PricingProduct(sku="dg023.ra", name="WP53 Preto", fotos_path="/mega/ra")
+    assert _match_product_by_sku([linha, variante], "dg023.ra") is variante

@@ -592,6 +592,26 @@ async def delete_arquivo(
     return _row_out(row)
 
 
+def _skus_a_tentar(sku: str) -> list[str]:
+    """O SKU escrito e, depois, a LINHA dele — nessa ordem.
+
+    O criativo carrega o SKU da VARIANTE ("dg023.ra" é o preto avulso,
+    "dg023.ra+a003.ra" é o combo com fone); a Tabela de Preços carrega a LINHA
+    ("dg023"), porque a pasta de fotos no MEGA é da linha, não de cada cor.
+
+    Sem esta queda o operador ficava entre dois cadastros: escrevia a variante
+    e a aprovação não achava a pasta, escrevia a linha e a legenda perdia o
+    produto (`product_links` só tem as variantes). Medido em 16/09/2026: dos 13
+    SKUs distintos dos criativos, 1 casa exato e 13 casam pela linha.
+
+    O exato vem primeiro de propósito: se um dia a Tabela de Preços listar a
+    variante, é ela que manda.
+    """
+    escrito = (sku or "").strip()
+    base = escrito.split(".")[0].strip()
+    return [x for x in dict.fromkeys([escrito, base]) if x]
+
+
 def _match_product_by_sku(
     products: list[PricingProduct], sku: str
 ) -> PricingProduct | None:
@@ -640,16 +660,20 @@ async def aprovar_creative(
             raise HTTPException(404, detail={"code": "arquivo_sumiu"})
         paths.append((rec, abs_path))
 
-    candidates = (
-        (
-            await session.execute(
-                select(PricingProduct).where(PricingProduct.sku.ilike(f"%{sku}%"))
+    product = None
+    for tentativa in _skus_a_tentar(sku):
+        candidates = (
+            (
+                await session.execute(
+                    select(PricingProduct).where(PricingProduct.sku.ilike(f"%{tentativa}%"))
+                )
             )
+            .scalars()
+            .all()
         )
-        .scalars()
-        .all()
-    )
-    product = _match_product_by_sku(list(candidates), sku)
+        product = _match_product_by_sku(list(candidates), tentativa)
+        if product is not None:
+            break
     if product is None:
         raise HTTPException(404, detail={"code": "produto_nao_encontrado"})
     dest = (product.fotos_path or "").strip()
