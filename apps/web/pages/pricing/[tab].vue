@@ -208,7 +208,7 @@ const KIT_NOMES_CELULAR: Record<number, string> = {
   2: 'Celular + Fone',
   3: 'Celular + Relógio',
   4: 'Celular + Fone + Relógio',
-  5: 'Celular + Carregador',
+  5: 'Celular + Relógio + Airtag',
   6: 'Celular + Fone + Airtag',
   7: 'Celular + Óculos',
   8: 'Celular + Airtag',
