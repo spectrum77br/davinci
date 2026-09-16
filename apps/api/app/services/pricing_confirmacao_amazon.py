@@ -246,8 +246,14 @@ async def _avisar(
     divergentes: list[dict[str, Any]],
 ) -> None:
     texto = _texto_aviso(integ.name, enviado, divergentes)
+    ids = parse_key(push.key)
+    # Dedupe pela CÉLULA e pelo preço, não pelo envio: o operador clica três
+    # vezes na mesma célula em minutos e o problema é um só — três avisos
+    # iguais no Threema só ensinam a ignorar o aviso.
+    account_id, product_id = ids if ids else (None, None)
+    dedupe = f"pricing_confirmacao:{account_id}:{product_id}:{enviado:.0f}"
     try:
-        await emit_alert(
+        criado = await emit_alert(
             session,
             user_id=push.user_id,
             type=AlertType.GENERIC,
@@ -258,15 +264,21 @@ async def _avisar(
             ),
             message=texto,
             payload={"push_key": push.key, "enviado": enviado, "divergentes": divergentes},
-            dedupe_key=f"pricing_confirmacao:{push.key}",
+            dedupe_key=dedupe,
             notify_telegram=False,
         )
     except Exception as e:  # noqa: BLE001
         logger.warning("pricing_confirmacao_alert_falhou", err=str(e)[:200])
+        criado = None
+    if criado is None:
+        # Já avisado por esta célula/preço: registra, não repete o Threema.
+        logger.info("pricing_confirmacao_ja_avisado", dedupe=dedupe)
+        return
     destinos = threema.parse_recipients(get_settings().nf_sem_estoque_threema_recipients)
     if not destinos:
         return
     try:
         await threema.ThreemaClient().send_to_all(texto, destinos)
+        logger.info("pricing_confirmacao_avisado", destinos=len(destinos), dedupe=dedupe)
     except Exception as e:  # noqa: BLE001
         logger.warning("pricing_confirmacao_threema_falhou", err=str(e)[:200])

@@ -143,7 +143,9 @@ async def test_envio_nao_aplicado_vira_divergente_e_avisa(db, make_user, monkeyp
     assert row.status == "divergente"
     assert {d["sku"] for d in row.divergentes} == {"b111", "b113"}
     assert len(avisos) == 1
-    assert avisos[0]["dedupe_key"] == f"pricing_confirmacao:{key}"
+    conta, produto = conf.parse_key(key)
+    # Dedupe é por célula e preço, não por envio: clicar 3x não gera 3 avisos.
+    assert avisos[0]["dedupe_key"] == f"pricing_confirmacao:{conta}:{produto}:445"
     assert "599" in avisos[0]["message"]
 
 
