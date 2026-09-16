@@ -164,6 +164,50 @@ async def _resolve_product_type(
     return int(leaf.sort_order or 0) + 1
 
 
+def sku_casa_no_departamento(
+    sku_do_anuncio: str,
+    *,
+    dept: str,
+    sku_full_set: set[str],
+    sku_base_set: set[str],
+) -> bool:
+    """O SKU vinculado ao anúncio pertence a esta célula da Tabela de Preços?
+
+    Estava embutida no laço do push e por isso nunca foi testada — foi assim
+    que passou despercebido que TODA coluna de kit da mala devolvia "no_link"
+    mesmo com o anúncio vinculado (Eduardo, 16/09/2026, Amazon kfa).
+
+    `sku_full_set` são os SKUs da célula inteiros; `sku_base_set`, a parte
+    antes do primeiro ponto. Ambos já em minúsculas.
+    """
+    sku = (sku_do_anuncio or "").lower()
+    if not sku:
+        return False
+
+    if dept == "catalogo":
+        # catálogo: só SKU simples e igualdade exata
+        return "+" not in sku and sku in sku_full_set
+
+    # mainSku = lado esquerdo do kit (descarta os acessórios do "+")
+    main_sku = sku.split("+", 1)[0]
+
+    if dept == "mala":
+        # Duas formas de casar:
+        # 1) IGUAL ao da célula, inclusive quando a célula é um kit. Era o que
+        #    faltava: a célula de kit tem SKU "b109.20+a075+bp003+a076", e
+        #    comparar só o lado esquerdo ("b109.20") contra esse conjunto nunca
+        #    casava.
+        # 2) Lado esquerdo do kit do ANÚNCIO contra um SKU simples da célula —
+        #    o comportamento que já existia.
+        # Exato primeiro, de propósito: dois kits do mesmo produto
+        # ("b109.20+a075" e "b109.20+a999") têm o mesmo lado esquerdo, então
+        # casar só por ele empurraria preço pro anúncio errado.
+        return sku in sku_full_set or main_sku in sku_full_set
+
+    # celular/eletro: casa pelo SKU base (parte antes do ".")
+    return main_sku.split(".", 1)[0] in sku_base_set
+
+
 async def _resolve_product_links_for_push(
     session: AsyncSession,
     *,
@@ -229,23 +273,10 @@ async def _resolve_product_links_for_push(
             continue
         sku_lc = sku.lower()
 
-        if is_catalogo:
-            # catálogo: só SKUs simples (sem "+") e match exato
-            if "+" in sku_lc:
-                continue
-            if sku_lc not in sku_full_set:
-                continue
-        else:
-            # mainSku = parte antes do "+" (descarta o lado direito de kits)
-            main_sku = sku_lc.split("+", 1)[0]
-            if is_mala:
-                # mala: match exato do mainSku contra o conjunto completo
-                if main_sku not in sku_full_set:
-                    continue
-            else:
-                # celular/eletro: match por SKU base (parte antes do ".")
-                if main_sku.split(".", 1)[0] not in sku_base_set:
-                    continue
+        if not sku_casa_no_departamento(
+            sku_lc, dept=dept, sku_full_set=sku_full_set, sku_base_set=sku_base_set
+        ):
+            continue
 
         matched_links.append(link)
 
