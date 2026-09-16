@@ -82,7 +82,8 @@ const PREVIEW_DEBOUNCE_MS = 500
 // convidar a escrever um link que ninguém quer.
 const PLACEHOLDERS: { nome: string; vem: string }[] = [
   { nome: 'marca', vem: 'nome da marca' },
-  { nome: 'produto', vem: 'nome do produto vinculado — vazio quando não há' },
+  { nome: 'produto', vem: 'modelo + memória + cor, já limpo do código de estoque (ex.: Fossibot F109S 256 GB Preto)' },
+  { nome: 'produto_modelo', vem: 'só o modelo, pra usar no meio da frase (ex.: Fossibot F109S)' },
   { nome: 'whatsapp', vem: 'WhatsApp do SAC da marca' },
   { nome: 'email_sac', vem: 'e-mail do SAC da marca' },
   { nome: 'instagram', vem: '@ da conta que vai receber o post' },
@@ -651,14 +652,14 @@ async function remover(m: LegendaModelo) {
         <header class="flex flex-wrap items-center gap-2 border-b bg-muted/40 px-3 py-2">
           <h2 class="text-sm font-medium">Padrão da marca</h2>
           <span class="text-xs text-muted-foreground">
-            vale pra todo criativo desta marca que não tem produto vinculado
+            usado quando o produto do criativo não tem legenda própria — inclusive nos vinculados
           </span>
           <Button v-if="canEdit" size="sm" variant="outline" class="ml-auto" @click="abrirCriar(null)">
             <Plus class="size-4 mr-1" /> variação
           </Button>
         </header>
         <p v-if="!separadas.padrao.length" class="px-3 py-4 text-sm text-amber-600">
-          Sem padrão da marca. Criativo sem produto vinculado fica sem legenda e o robô recusa agendar.
+          Sem padrão da marca. Todo criativo cujo produto não tenha legenda própria fica sem legenda, e o robô recusa agendar.
         </p>
         <ul v-else class="divide-y">
           <li v-for="m in separadas.padrao" :key="m.id" class="flex items-start gap-3 px-3 py-3">
@@ -757,7 +758,7 @@ async function remover(m: LegendaModelo) {
                 :disabled="!canEdit || saving"
                 @change="agendaPrevia"
               >
-                <option value="">Padrão da marca (todo criativo sem produto)</option>
+                <option value="">Padrão da marca (quando o produto não tem legenda própria)</option>
                 <option v-for="o in produtoOptions" :key="o.id" :value="o.id">{{ o.label }}</option>
               </select>
               <div v-if="canEdit && !produtosBloqueado" class="mt-2 flex gap-2">

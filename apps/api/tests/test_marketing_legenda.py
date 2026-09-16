@@ -595,6 +595,7 @@ async def test_placeholders_de_nunca_devolve_none(db: AsyncSession, make_user):
     assert v == {
         "marca": "Sem Dados",
         "produto": "",
+        "produto_modelo": "",
         "whatsapp": "",
         "email_sac": "",
         "instagram": "",
@@ -650,3 +651,80 @@ async def test_variacao_quebrada_nao_derruba_a_legenda_escrita_a_mao(db):
     r = await svc.resolver(db, creative=c, file=f, rede=rede, legenda_manual="escrita à mão")
     assert r.origem == svc.ORIGEM_MANUAL
     assert r.texto == "escrita à mão"
+
+
+# ─────────── nome de vitrine: ERP → legenda (16/09/2026) ───────────
+
+
+def test_nome_de_vitrine_cobre_os_12_produtos_reais():
+    """`products.name` é nome de ERP. Estes 12 são os do acervo em produção.
+
+    Publicar "Uranyx Fossibot F109S 24.256 - Preto" num Reel é jogar código de
+    estoque na cara do cliente. O fabricante FICA: a própria conta escreve
+    "O Uranyx Oukitel WP60 une resistência militar…".
+    """
+    from app.services.marketing.legenda import nome_de_vitrine
+
+    esperado = {
+        "Oscal Flat 3C 16.128 - Laranja": ("Oscal Flat 3C 128 GB Laranja", "Oscal Flat 3C"),
+        "Oscal Marine 1 12.128 - Preto": ("Oscal Marine 1 128 GB Preto", "Oscal Marine 1"),
+        "Uranyx Fossibot F109S 24.256 - Preto": (
+            "Fossibot F109S 256 GB Preto",
+            "Fossibot F109S",
+        ),
+        "Uranyx Fossibot F112 Pro 5G 24.256 - Verde": (
+            "Fossibot F112 Pro 5G 256 GB Verde",
+            "Fossibot F112 Pro 5G",
+        ),
+        "Uranyx Fossibot F117 24.256 - Preto": ("Fossibot F117 256 GB Preto", "Fossibot F117"),
+        "Uranyx Oukitel WP53 24.128 - Preto": ("Oukitel WP53 128 GB Preto", "Oukitel WP53"),
+        "Uranyx S5 16.128 - Prata": ("S5 128 GB Prata", "S5"),
+    }
+    for bruto, (completo, modelo) in esperado.items():
+        assert nome_de_vitrine(bruto, "Uranyx") == (completo, modelo), bruto
+
+
+def test_nome_de_vitrine_nao_estraga_o_que_nao_reconhece():
+    """Produto novo com nome fora da forma esperada aparece sem avisar.
+
+    Melhor uma legenda com o nome cru do que uma legenda com o nome pela
+    metade — o post não se edita.
+    """
+    from app.services.marketing.legenda import nome_de_vitrine
+
+    assert nome_de_vitrine("Cafeteira Expresso Turbo", "Uranyx") == (
+        "Cafeteira Expresso Turbo",
+        "Cafeteira Expresso Turbo",
+    )
+    assert nome_de_vitrine("Uranyx Air Fryer Grill", "Uranyx") == (
+        "Air Fryer Grill",
+        "Air Fryer Grill",
+    )
+    assert nome_de_vitrine(None, "Uranyx") == ("", "")
+    assert nome_de_vitrine("", None) == ("", "")
+
+
+async def test_placeholder_produto_sai_limpo_na_legenda(db, make_user):
+    """Ponta a ponta: o que a marca escreve com {{ produto }} sai de vitrine."""
+    from app.models import MarketingLegendaModelo, Product
+    from app.services.marketing import legenda as svc
+
+    dono = await make_user()
+    marca = await _marca(db, "Uranyx")
+    p = Product(user_id=dono.id, sku="dgtest", name="Uranyx Fossibot F109S 24.256 - Preto")
+    db.add(p)
+    await db.flush()
+    c, f = await _criativo(db, marca=marca)
+    c.product_id = p.id
+    rede = await _conta(db, marca, conta="uranyx.teste")
+    db.add(
+        MarketingLegendaModelo(
+            marca_id=marca.id,
+            texto="{{ marca }} {{ produto }} — só o modelo: {{ produto_modelo }}",
+        )
+    )
+    await db.commit()
+
+    r = await svc.resolver(db, creative=c, file=f, rede=rede)
+    assert r.texto == "Uranyx Fossibot F109S 256 GB Preto — só o modelo: Fossibot F109S"
+    assert "24.256" not in r.texto

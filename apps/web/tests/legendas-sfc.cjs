@@ -110,7 +110,7 @@ return { LEGENDA_MAX, PREVIEW_DEBOUNCE_MS, PLACEHOLDERS, LEGENDA_ERROS, EXEMPLO_
   assert.equal(H.LEGENDA_MAX, 2200)
   assert.deepEqual(
     H.PLACEHOLDERS.map((p) => p.nome),
-    ['marca', 'produto', 'whatsapp', 'email_sac', 'instagram'],
+    ['marca', 'produto', 'produto_modelo', 'whatsapp', 'email_sac', 'instagram'],
   )
   // `site` está na allowlist do backend mas fica FORA dos textos (decisão do
   // Eduardo, 16/09/2026): oferecer na tela seria convidar a usá-lo.

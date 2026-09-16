@@ -76,7 +76,29 @@ LEGENDA_MAX = 2200
 # fica FORA dos textos por decisão do Eduardo (16/09/2026): nenhuma das duas
 # marcas manda pra site. Existir na allowlist é o que permite ligar o
 # placeholder depois sem migration nem deploy de código.
-PLACEHOLDERS = ("marca", "produto", "whatsapp", "email_sac", "instagram", "site")
+PLACEHOLDERS = (
+    "marca",
+    "produto",
+    "produto_modelo",
+    "whatsapp",
+    "email_sac",
+    "instagram",
+    "site",
+)
+
+# `products.name` é nome de ERP, não de vitrine. Os 12 do acervo seguem uma
+# forma só: "[marca] [fabricante] [modelo] [RAM.armazenamento] - [cor]", como
+# em "Uranyx Fossibot F109S 24.256 - Preto". Publicar isso cru no Instagram é
+# jogar código de estoque na cara do cliente.
+#
+# A limpeza tira só o que é redundante ou interno:
+#   • o prefixo da MARCA, porque `{{ marca }}` já existe e "O Uranyx Uranyx
+#     Fossibot…" é o que sairia;
+#   • o par RAM.armazenamento, que vira "256 GB" — o número que a pessoa
+#     reconhece. A RAM some do rótulo: quem compara RAM lê a ficha, não o Reel.
+# O FABRICANTE FICA. A própria conta escreve "O Uranyx Oukitel WP60 une
+# resistência militar…" — o nome do fabricante é parte de como a marca fala.
+_RE_MEMORIA = re.compile(r"\b(\d{1,3})\.(\d{2,4})\b")
 
 ORIGEM_MANUAL = "manual"
 ORIGEM_CRIATIVO = "criativo"
@@ -137,6 +159,36 @@ _DETERMINANTES_COM_GENERO = frozenset(
 _RE_ANTES_DO_PRODUTO = re.compile(r"(\w+)\s*\{\{-?\s*produto\b", re.IGNORECASE)
 
 
+def nome_de_vitrine(bruto: str | None, marca_nome: str | None) -> tuple[str, str]:
+    """`products.name` → (rótulo completo, só o modelo).
+
+    "Uranyx Fossibot F109S 24.256 - Preto" vira
+    ("Fossibot F109S 256 GB Preto", "Fossibot F109S").
+
+    Nome que não segue a forma esperada volta praticamente inteiro (só sem o
+    prefixo da marca): é melhor uma legenda com o nome cru do que uma legenda
+    com o nome pela metade — e nome de produto novo aparece sem avisar.
+    """
+    bruto = (bruto or "").strip()
+    if not bruto:
+        return "", ""
+    corpo, _, cor = bruto.partition(" - ")
+    corpo, cor = corpo.strip(), cor.strip()
+    # Prefixo da marca fora: "{{ marca }} {{ produto }}" é a construção que a
+    # conta usa, e repetir o nome ali é o erro mais visível de todos.
+    prefixo = (marca_nome or "").strip()
+    if prefixo and corpo.lower().startswith(prefixo.lower()):
+        corpo = corpo[len(prefixo):].strip()
+    memoria = ""
+    achou = _RE_MEMORIA.search(corpo)
+    if achou:
+        memoria = f"{achou.group(2)} GB"
+        corpo = (corpo[: achou.start()] + corpo[achou.end():]).strip()
+    modelo = " ".join(corpo.split())
+    completo = " ".join(x for x in (modelo, memoria, cor) if x)
+    return completo, modelo
+
+
 @dataclass(frozen=True)
 class LegendaResolvida:
     """O que a cascata decidiu, pronto pra gravar e pra rotular na tela.
@@ -171,9 +223,11 @@ def placeholders_de(
     O telefone passa pelo `formatar_fone` do e-mail (mesma marca, mesmo
     número, mesmo formato nos dois canais).
     """
+    completo, modelo = nome_de_vitrine(produto_nome, marca.nome if marca else None)
     return {
         "marca": (marca.nome if marca else "") or "",
-        "produto": (produto_nome or "").strip(),
+        "produto": completo,
+        "produto_modelo": modelo,
         "whatsapp": formatar_fone(marca.sac_fone) if marca else "",
         "email_sac": (marca.sac_email if marca else "") or "",
         "instagram": (rede.conta if rede else "") or "",
