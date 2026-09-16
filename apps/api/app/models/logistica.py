@@ -222,10 +222,13 @@ class LogisticaRoboComando(Base, TimestampMixin):
     __tablename__ = "logistica_robo_comando"
 
     id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
-    logistica_id: Mapped[UUID] = mapped_column(
+    # Opcional desde a migration 0282: o robô do Mac também recebe tarefa que
+    # não pertence a um pedido — a primeira é a leitura diária da caixa do Tuta
+    # atrás dos códigos de devolução.
+    logistica_id: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True),
         ForeignKey("logistica.id", ondelete="CASCADE"),
-        nullable=False,
+        nullable=True,
         index=True,
     )
     acao: Mapped[str] = mapped_column(Text, nullable=False)

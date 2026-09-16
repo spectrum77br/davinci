@@ -1824,6 +1824,19 @@ async def marketplace_financials_retry(ctx: dict) -> None:
     logger.info("marketplace_financials_retry_done", **result)
 
 
+async def tuta_devolucoes_tick(ctx: dict) -> None:
+    """07:00 BRT — manda o robô do Mac ler a caixa do Tuta e avisa o thatcher
+    no Threema com os códigos de devolução do dia.
+
+    Passa pelo robô porque o Tuta não tem IMAP nem API pública e as regras de
+    caixa dele não encaminham para fora — ver services/tuta_devolucoes.py."""
+    from app.services import tuta_devolucoes
+
+    async with session_scope() as s:
+        cmd = await tuta_devolucoes.enfileirar(s)
+    logger.info("tuta_devolucoes_tick_done", enfileirado=bool(cmd))
+
+
 async def marketplace_financials_esteira_lenta(ctx: dict) -> None:
     """Fila dos pedidos cujo financeiro esbarrou na API (403/429/5xx/sem token)
     ou num repasse que a plataforma ainda não publicou.
@@ -3028,6 +3041,8 @@ class WorkerSettings:
         # no sino em horário de expediente, com tempo de reconectar a conta.
         cron(meta_token_refresh, hour=12, minute=35, run_at_startup=False),
         cron(marketplace_financials_retry, minute={10, 40}, run_at_startup=False),
+        # 10:00 UTC = 07:00 BRT — leitura diária da caixa do Tuta.
+        cron(tuta_devolucoes_tick, hour=10, minute=0, run_at_startup=False),
         # Esteira lenta: backlog de falha de API. Fila e teto próprios pra não
         # competir com o retry dos pedidos do dia.
         cron(
@@ -3486,6 +3501,7 @@ __all__ = [
     "ml_backfill_run",
     "ml_token_refresh",
     "marketplace_financials_retry",
+    "tuta_devolucoes_tick",
     "marketplace_financials_esteira_lenta",
     "marketplace_financials_ressuscitar",
     "tiktok_unsettled_sweep",

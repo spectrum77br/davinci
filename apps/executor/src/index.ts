@@ -24,6 +24,7 @@ import * as adspower from "./adspower";
 import * as shopee from "./shopee";
 import * as flashsale from "./flashsale";
 import * as melhorenvio from "./melhorenvio";
+import * as tuta from "./tuta";
 import * as davinci from "./davinci";
 import type { LeasedCommand, LeasedLogisticaCommand } from "./davinci";
 
@@ -131,7 +132,60 @@ async function processCommand(cmd: LeasedCommand): Promise<void> {
 /** Robô da Logística: "Suspender entrega" no painel do Melhor Envio (perfil
  *  AdsPower logado lá, MELHORENVIO_ADSPOWER_USER_ID). Modo seco enquanto
  *  MELHORENVIO_CALIBRATED != true: devolve o que achou, sem clicar em Solicitar. */
+/** Leitura diária da caixa do Tuta (códigos de devolução). Só LÊ: não abre
+ *  e-mail, não marca como lido, não responde e não apaga. Quem filtra o que é
+ *  devolução é o servidor — ver services/tuta_devolucoes.py. */
+async function processTutaCommand(cmd: LeasedLogisticaCommand): Promise<void> {
+  const userId = cfg.tutaAdspowerUserId;
+  if (!userId) {
+    await davinci.reportLogistica(
+      cmd.id,
+      "failed",
+      JSON.stringify({
+        ok: false,
+        reason:
+          "TUTA_ADSPOWER_USER_ID vazio no executor (perfil do AdsPower logado no Tuta não configurado)",
+      })
+    );
+    return;
+  }
+  let browser: Awaited<ReturnType<typeof tuta.connect>> | null = null;
+  try {
+    const ws = await adspower.start(userId);
+    browser = await tuta.connect(ws);
+    const r = await tuta.lerCaixa(browser.page);
+    await davinci.reportLogistica(cmd.id, r.ok ? "done" : "failed", JSON.stringify(r));
+    log.info(`Tuta: ok=${r.ok} linhas=${r.linhas ?? 0}${r.reason ? ` (${r.reason})` : ""}`);
+  } catch (err: any) {
+    const login = err instanceof tuta.TutaPrecisaLogin || err?.name === "TutaPrecisaLogin";
+    const msg = String(err?.message || err);
+    if (login) log.warn(`Tuta: precisa de login manual no perfil do AdsPower`);
+    else log.error(`Tuta falhou: ${msg}`);
+    await davinci.reportLogistica(
+      cmd.id,
+      "failed",
+      JSON.stringify({
+        ok: false,
+        reason: login
+          ? `needs_manual_login: entre no Tuta pelo perfil do AdsPower (${msg})`
+          : msg.slice(0, 1500),
+      })
+    );
+  } finally {
+    if (browser) await tuta.disconnect(browser.browser);
+    try {
+      await adspower.stop(userId);
+    } catch (e) {
+      log.error(`falha ao fechar profile ${userId}: ${String(e)}`);
+    }
+  }
+}
+
 async function processLogisticaCommand(cmd: LeasedLogisticaCommand): Promise<void> {
+  if (cmd.acao === "tuta_devolucoes") {
+    await processTutaCommand(cmd);
+    return;
+  }
   if (cmd.acao !== "melhorenvio_suspender") {
     await davinci.reportLogistica(cmd.id, "failed", `ação não suportada pelo executor: ${cmd.acao}`);
     return;

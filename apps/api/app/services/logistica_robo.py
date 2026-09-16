@@ -31,7 +31,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Logistica, LogisticaRoboComando
-from app.services import logistica_amazon_canal, logistica_track
+from app.services import logistica_amazon_canal, logistica_track, tuta_devolucoes
 
 logger = structlog.get_logger()
 
@@ -147,7 +147,13 @@ async def registrar_resultado(
     cmd.status = "done" if ok else "failed"
     cmd.result = (result or "")[:2000] or None
     cmd.completed_at = datetime.now(UTC)
-    row = await session.get(Logistica, cmd.logistica_id)
+    # Comando que não é de um pedido (ex.: leitura do Tuta) vem sem vínculo.
+    row = await session.get(Logistica, cmd.logistica_id) if cmd.logistica_id else None
+    if cmd.acao == tuta_devolucoes.ACAO:
+        await session.commit()
+        await tuta_devolucoes.entregar_resultado(session, cmd.result)
+        logger.info("logistica_robo_resultado", comando=str(comando_id), status=cmd.status)
+        return cmd
     if row is not None and cmd.acao == ACAO_SUSPENDER:
         row.suspensao_status = STATUS_SOLICITADA if ok else STATUS_FALHOU
         row.suspensao_detalhe = cmd.result
