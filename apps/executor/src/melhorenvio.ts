@@ -109,7 +109,7 @@ const FIND_SEARCH_JS = `(function(){${H}
 function findCardJS(rastreio: string): string {
   return `(function(){${H}
   var alvo=${JSON.stringify(rastreio.toUpperCase())};
-  ['data-me-card','data-me-expand'].forEach(function(a){[].slice.call(document.querySelectorAll('['+a+']')).forEach(function(e){e.removeAttribute(a);});});
+  ['data-me-card','data-me-menu'].forEach(function(a){[].slice.call(document.querySelectorAll('['+a+']')).forEach(function(e){e.removeAttribute(a);});});
   var leaf=[].slice.call(document.querySelectorAll('span,div,td,p,a,strong,b,small')).filter(function(e){return vis(e)&&e.children.length<=2&&txt(e).toUpperCase().indexOf(alvo)>=0;});
   if(!leaf.length)return {found:false};
   var el=leaf[0];
@@ -117,9 +117,19 @@ function findCardJS(rastreio: string): string {
   var n=0;while(!card&&el&&n<6){el=el.parentElement;n++;if(el&&el.querySelectorAll('button,a,[role="button"]').length>=1)card=el;}
   if(!card)card=leaf[0].parentElement;
   card.setAttribute('data-me-card','1');
-  var exp=[].slice.call(card.querySelectorAll('button,a,[role="button"],i,svg,span')).filter(function(e){var s=((e.getAttribute('aria-label')||'')+' '+(e.getAttribute('title')||'')+' '+(e.className&&e.className.baseVal!==undefined?e.className.baseVal:e.className||'')+' '+txt(e)).toLowerCase();return vis(e)&&/expand|chevron|arrow|seta|caret|toggle|detalhe|abrir|ver mais/.test(s);});
-  if(exp.length){exp[exp.length-1].setAttribute('data-me-expand','1');}
-  return {found:true,cardText:txt(card).slice(0,160),hasExpand:exp.length>0};
+  // Os três pontinhos da linha. O Melhor Envio rotula os ícones com
+  // aria-label, e os três da linha são distintos: "Abrir novo ticket de
+  // atendimento", "Abrir menu de ações do envio" e "Visualizar detalhes do
+  // envio". Mirar no rótulo é preciso; procurar por TEXTO não funciona porque
+  // o botão não tem texto nenhum.
+  var men=[].slice.call(card.querySelectorAll('button,a,[role="button"]')).filter(function(e){
+    var s=((e.getAttribute('aria-label')||'')+' '+(e.getAttribute('title')||'')).toLowerCase();
+    return vis(e)&&/menu de a[çc][õo]es|a[çc][õo]es do envio/.test(s);
+  });
+  if(men.length){men[0].setAttribute('data-me-menu','1');}
+  return {found:true,cardText:txt(card).slice(0,160),hasMenu:men.length>0,
+          menuLabel:men.length?(men[0].getAttribute('aria-label')||''):'',
+          botoesDaLinha:[].slice.call(card.querySelectorAll('button,[role="button"]')).filter(vis).map(function(e){return (e.getAttribute('aria-label')||e.getAttribute('title')||txt(e)||'(sem rótulo)').slice(0,50);})};
 })()`;
 }
 
@@ -234,16 +244,33 @@ export async function suspenderEntrega(
     };
   }
   log.info(`ME ${rastreio}: envio encontrado — "${card.cardText}"`);
-  if (card.hasExpand) await clickCenter(page, '[data-me-expand="1"]');
-  else await clickCenter(page, '[data-me-card="1"]');
+  // 3) três pontinhos da linha → "Suspender entrega"
+  //
+  // A tela é uma TABELA, não cartões: cada linha tem ícones sem texto à
+  // direita. O menu de ações abre por um botão rotulado
+  // "Abrir menu de ações do envio" — não existe nenhum botão escrito "Ações
+  // do envio", que era o que este robô procurava e nunca achava.
+  if (!card.hasMenu) {
+    const shot = await screenshot(page, `sem-menu-${rastreio}`);
+    const d = await evalJS<any>(page, DUMP_JS);
+    return {
+      ok: false,
+      found: true,
+      requested: false,
+      dry: true,
+      reason:
+        "achei o envio mas não achei o botão de ações na linha dele; botões vistos: "
+        + (card.botoesDaLinha || []).join(" | "),
+      url: d?.url,
+      buttons: d?.buttons,
+      screenshot: shot,
+    };
+  }
+  log.info(`ME ${rastreio}: abrindo menu de ações ("${card.menuLabel}")`);
+  await clickCenter(page, '[data-me-menu="1"]');
   await sleep(1200);
 
-  // 3) "Ações do envio" → "Suspender entrega"
-  const acoes = await evalJS<any>(page, findBtnJS("a[çc][õo]es do envio|a[çc][õo]es", "card"));
-  if (acoes?.ok) {
-    await clickCenter(page, '[data-me-btn="1"]');
-    await sleep(900);
-  }
+  // O menu é flutuante e fica FORA da linha, por isso a busca é na página.
   const susp = await evalJS<any>(page, findBtnJS("suspender entrega|suspender a entrega", "any"));
   if (!susp?.ok) {
     const shot = await screenshot(page, `sem-suspender-${rastreio}`);
@@ -253,9 +280,9 @@ export async function suspenderEntrega(
       found: true,
       requested: false,
       dry: true,
-      reason: acoes?.ok
-        ? 'menu "Ações do envio" abriu, mas "Suspender entrega" não apareceu (envio não elegível ou tela mudou)'
-        : 'não achei "Ações do envio" nem "Suspender entrega" no envio',
+      reason:
+        'o menu de ações abriu, mas "Suspender entrega" não apareceu '
+        + "(envio não elegível, ou a tela mudou)",
       url: d?.url,
       buttons: d?.buttons,
       screenshot: shot,
