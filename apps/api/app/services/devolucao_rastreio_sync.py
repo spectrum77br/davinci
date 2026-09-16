@@ -259,6 +259,7 @@ async def run(session: AsyncSession, *, pedidos: Collection[str] | None = None) 
             row.rastreio_auto = tracking
             row.transportadora_auto = (info.carrier or "").strip() or None
             row.devolucao_status_auto = (info.status or "").strip() or None
+            row.devolucao_tipo_auto = (info.return_type or "").strip() or None
             row.devolucao_id_auto = (info.return_id or "").strip() or None
             row.fonte_auto = info.fonte
             if info.created_at:

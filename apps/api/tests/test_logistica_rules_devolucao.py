@@ -32,6 +32,43 @@ def test_tiktok_viva_e_encerrada():
     assert devolucao_status_pt("TikTok", cancelada) is None
 
 
+def test_tiktok_so_reembolso_tem_texto_proprio():
+    """Caso `return_type=REFUND` (294865): não vem pacote — o texto diz o que
+    a loja tem a fazer (responder no TikTok), e "pago" não vira "devolução
+    concluída"."""
+    pendente = {"return_status": "RETURN_OR_REFUND_REQUEST_PENDING", "return_type": "REFUND"}
+    pago = {"return_status": "RETURN_OR_REFUND_REQUEST_COMPLETE", "return_type": "REFUND"}
+    assert devolucao_status_pt("TikTok", pendente) == "Reembolso solicitado — responder no TikTok"
+    assert devolucao_status_pt("TikTok", pago) == "Reembolso pago sem devolução (TikTok)"
+    # Vivo sem tradução: prefixo de reembolso, nunca esconde.
+    assert devolucao_status_pt("TikTok", {**pendente, "return_status": "NOVO_X"}) == (
+        "Reembolso: NOVO_X"
+    )
+    # Cancelado é cancelado, seja qual for o tipo.
+    assert devolucao_status_pt(
+        "TikTok", {**pendente, "return_status": "RETURN_OR_REFUND_REQUEST_CANCEL"}
+    ) is None
+    # Com devolução (ou sem tipo, linha antiga) o texto continua o de sempre.
+    assert devolucao_status_pt(
+        "TikTok", {**pago, "return_type": "RETURN_AND_REFUND"}
+    ) == "Devolução concluída (TikTok)"
+    assert devolucao_status_pt("TikTok", {"return_status": "RETURN_OR_REFUND_REQUEST_COMPLETE"}) == (
+        "Devolução concluída (TikTok)"
+    )
+
+
+def test_tiktok_so_reembolso_nunca_chegou():
+    """`data_retorno_concluido`: caso só-reembolso fechado NÃO é pacote que
+    chegou — a coluna "Chegou em" fica vazia."""
+    from app.services.logistica_rules import data_retorno_concluido
+
+    datas = {"return_status": {"em": "2026-09-16T02:29:54+00:00", "fonte": "davinci"}}
+    com_pacote = {"return_status": "RETURN_OR_REFUND_REQUEST_COMPLETE", "return_type": "RETURN_AND_REFUND"}
+    so_reembolso = {**com_pacote, "return_type": "REFUND"}
+    assert data_retorno_concluido("TikTok", com_pacote, datas) == "2026-09-16T02:29:54+00:00"
+    assert data_retorno_concluido("TikTok", so_reembolso, datas) is None
+
+
 def test_ml_status_do_envio_da_devolucao():
     """ML (caso 291745): `ready_to_ship` = cliente ainda vai postar — a aba
     mostrava a ENTREGA original ("Entregue → Curitiba/PR")."""

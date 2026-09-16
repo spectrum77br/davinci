@@ -41,6 +41,10 @@ class DevolucaoRastreio(Base, TimestampMixin):
     devolucao_status_auto: Mapped[str | None] = mapped_column(Text, nullable=True)
     devolucao_id_auto: Mapped[str | None] = mapped_column(Text, nullable=True)
     fonte_auto: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # TIPO do caso (migration 0285): TikTok `return_type` — REFUND = só
+    # reembolso, o cliente fica com o produto e nenhum pacote volta. None
+    # quando a plataforma não separa.
+    devolucao_tipo_auto: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Quando a devolução foi ABERTA no marketplace → "Em devolução desde" real
     # (o backfill da 0236 carimbou 02/09 em todo mundo).
     devolucao_criada_em: Mapped[datetime | None] = mapped_column(

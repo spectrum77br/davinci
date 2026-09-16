@@ -333,14 +333,13 @@ def _clean(v: str | None) -> str | None:
 
 
 def _clean_meli(m: dict[str, str] | None) -> dict[str, str]:
-    """Mantém só os campos conhecidos com valor não-vazio."""
+    """Mantém só os campos conhecidos com valor não-vazio: os 8 do Meli mais o
+    `return_type` que o sweep do TikTok grava (devolução × só reembolso) —
+    uma edição manual da assinatura não pode apagá-lo."""
     if not m:
         return {}
-    return {
-        f: str(m[f]).strip()
-        for f in logistica_rules.FIELD_ORDER
-        if m.get(f) and str(m[f]).strip()
-    }
+    campos = [*logistica_rules.FIELD_ORDER, "return_type"]
+    return {f: str(m[f]).strip() for f in campos if m.get(f) and str(m[f]).strip()}
 
 
 # ---- Opções + sugestão ----
@@ -1379,6 +1378,13 @@ async def patch_logistica(
         # contar a partir de agora (fonte "davinci"); o que ele não mexeu
         # mantém a data que já tinha.
         novo_status = _clean_meli(data["meli_status"])
+        # O modal só edita os campos de status — o TIPO do caso do TikTok
+        # (devolução × só reembolso) é do sweep e não aparece no formulário;
+        # sem isto, salvar o modal apagaria o tipo e a assinatura regrediria
+        # pra "Devolução solicitada".
+        tipo_atual = (c.meli_status or {}).get("return_type")
+        if tipo_atual and "return_type" not in (data["meli_status"] or {}):
+            novo_status["return_type"] = str(tipo_atual)
         c.status_datas = logistica_datas.aplicar(c, novo_status)
         c.meli_status = novo_status
     if "rastreio" in data:

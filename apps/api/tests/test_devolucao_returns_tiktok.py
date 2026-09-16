@@ -103,6 +103,7 @@ async def test_devolucao_viva_com_rastreio_mapeia_campos(db, monkeypatch):
             created_at=datetime.fromtimestamp(1756900000, tz=UTC),
             updated_at=datetime.fromtimestamp(1756950000, tz=UTC),
             return_id="R1",
+            return_type="RETURN_AND_REFUND",
         )
     }
     assert out["291001"].created_at.tzinfo is UTC
@@ -135,6 +136,9 @@ async def test_devolucao_sem_rastreio_tracking_none(db, monkeypatch):
     assert out["291001"].status == "RETURN_OR_REFUND_REQUEST_PENDING"
     assert out["291001"].tracking is None
     assert out["291001"].carrier is None
+    # O tipo vai junto: é o que separa "só reembolso" de devolução na aba.
+    assert out["291001"].return_type == "REFUND"
+    assert out["291002"].return_type == "RETURN_AND_REFUND"
     assert out["291002"].status == "AWAITING_BUYER_SHIP"
     assert out["291002"].tracking is None
     assert out["291002"].carrier is None

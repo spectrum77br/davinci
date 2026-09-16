@@ -35,6 +35,9 @@ from app.services.marketplaces.tiktok import TikTokClient
 logger = structlog.get_logger()
 
 _TIKTOK_PLATAFORMAS = logistica_rules._TIKTOK_PLATAFORMAS
+# Campos da assinatura que só o sweep de pós-venda escreve (returns API):
+# o status do caso e o TIPO (devolução + reembolso × só reembolso × troca).
+_CAMPOS_DO_SWEEP = ("return_status", "return_type")
 
 
 def _tiktok_localizacao(track: dict) -> str | None:
@@ -174,12 +177,13 @@ async def enrich_row(
 
     enr = await build_enrichment(client, order_id)
     meli = enr["meli_status"]
-    # `return_status` vem do sweep de pós-venda (returns API), não do
-    # build_enrichment — preserva no re-enrich, senão a devolução detectada
-    # sumiria da assinatura no tick seguinte e a regra de status regrediria.
-    ret = (row.meli_status or {}).get("return_status")
-    if ret:
-        meli = {**meli, "return_status": ret}
+    # `return_status`/`return_type` vêm do sweep de pós-venda (returns API),
+    # não do build_enrichment — preserva no re-enrich, senão a devolução
+    # detectada sumiria da assinatura no tick seguinte e a regra regrediria.
+    for campo in _CAMPOS_DO_SWEEP:
+        val = (row.meli_status or {}).get(campo)
+        if val:
+            meli = {**meli, campo: val}
     # Antes de trocar o status: o carimbo compara o valor velho com o novo.
     row.status_datas = logistica_datas.aplicar(row, meli, enr.get("datas"))
     row.meli_status = meli
@@ -221,9 +225,10 @@ async def sweep_pos_venda(session: AsyncSession) -> dict:
     - `get_order_status_map` (50 pedidos/chamada): status vivo mudou
       (DELIVERED, COMPLETED, ...) → atualiza meli_status + carimbo de data;
     - `get_return_list` (returns/search): devolução que o order_status do
-      TikTok NEM TEM como mostrar → grava `meli_status["return_status"]`;
-      `assinatura_tiktok` então rende "Devolução solicitada". Havendo mais de
-      um caso pro mesmo pedido, vale o VIVO mais recente.
+      TikTok NEM TEM como mostrar → grava `meli_status["return_status"]` +
+      `["return_type"]`; `assinatura_tiktok` então rende "Devolução
+      solicitada" / "Reembolso solicitado" / etc. Havendo mais de um caso pro
+      mesmo pedido, vale o VIVO mais recente (`_melhor_devolucao_por_pedido`).
 
     Retorna {"ids": [UUID...], **contadores}. O recarregar passa os ids como
     `extras` do `_ids_pendentes` — extras furam o escondimento — e o fluxo
@@ -288,25 +293,22 @@ async def sweep_pos_venda(session: AsyncSession) -> dict:
                 conta=conta, err=str(e)[:200],
             )
             devolucoes = []
-        melhor: dict[str, tuple[bool, int, str]] = {}
-        for d in devolucoes:
-            oid = str(d.get("order_id") or "").strip()
-            st = str(d.get("return_status") or "").strip().upper()
-            if not oid or not st:
-                continue
-            vivo = st not in logistica_rules._TIKTOK_RETURN_ENCERRADO
-            cand = (vivo, int(d.get("update_time") or 0), st)
-            if oid not in melhor or cand[:2] > melhor[oid][:2]:
-                melhor[oid] = cand
+        melhor = _melhor_devolucao_por_pedido(devolucoes)
         for r in linhas:
-            got = melhor.get((r.pedido_marketplace or "").strip())
-            if got is None:
+            d = melhor.get((r.pedido_marketplace or "").strip())
+            if d is None:
                 continue
-            st = got[2]
-            atual = ((r.meli_status or {}).get("return_status") or "").strip().upper()
-            if st != atual:
-                meli = dict(r.meli_status or {})
-                meli["return_status"] = st
+            novo = _sinal_do_caso(d)
+            if not novo.get("return_status"):
+                continue
+            meli_atual = r.meli_status or {}
+            atual = {
+                campo: (meli_atual.get(campo) or "").strip().upper()
+                for campo in _CAMPOS_DO_SWEEP
+            }
+            if novo != atual:
+                meli = {k: v for k, v in meli_atual.items() if k not in _CAMPOS_DO_SWEEP}
+                meli.update({k: v for k, v in novo.items() if v})
                 r.meli_status = meli
                 r.status_lido_em = datetime.now(UTC)
                 mudados.add(r.id)
@@ -336,25 +338,37 @@ def _epoch_int(v: object) -> int:
         return 0
 
 
+def _sinal_do_caso(d: dict) -> dict[str, str]:
+    """O que o sweep grava na assinatura a partir de um caso do returns/search:
+    `{"return_status": ..., "return_type": ...}` (maiúsculas; ausente → "")."""
+    return {
+        campo: str(d.get(campo) or "").strip().upper() for campo in _CAMPOS_DO_SWEEP
+    }
+
+
 def _tiktok_return_info(d: dict) -> ReturnInfo:
     """Caso do returns/search → `ReturnInfo`. Devolução só-reembolso (return_type
-    REFUND) não tem pacote: entra mesmo assim, com tracking None."""
+    REFUND) não tem pacote: entra mesmo assim, com tracking None — e o tipo vai
+    junto pra aba Acompanhamento não chamar de devolução."""
+    sinal = _sinal_do_caso(d)
     return ReturnInfo(
         fonte="tiktok",
-        status=str(d.get("return_status") or "").strip().upper() or None,
+        status=sinal["return_status"] or None,
         tracking=str(d.get("return_tracking_number") or "").strip() or None,
         carrier=str(d.get("return_provider_name") or "").strip() or None,
         created_at=epoch_to_dt(d.get("create_time")),
         updated_at=epoch_to_dt(d.get("update_time")),
         return_id=str(d.get("return_id") or "").strip() or None,
+        return_type=sinal["return_type"] or None,
     )
 
 
 def _melhor_devolucao_por_pedido(devolucoes: Iterable[dict]) -> dict[str, dict]:
     """{order_id: caso} — havendo mais de um caso pro mesmo pedido vale o VIVO
     (fora de `_TIKTOK_RETURN_ENCERRADO`) mais recente; sem vivo, o mais recente.
-    "Recente" = `update_time` (fallback `create_time`). Mesma regra do
-    `sweep_pos_venda`, mas guardando o caso inteiro (rastreio, transportadora)."""
+    "Recente" = `update_time` (fallback `create_time`). Serve o `sweep_pos_venda`
+    (que grava status + tipo na assinatura) e o `returns_por_pedido` (que
+    guarda o caso inteiro: rastreio, transportadora)."""
     melhor: dict[str, tuple[tuple[bool, int], dict]] = {}
     for d in devolucoes:
         if not isinstance(d, dict):

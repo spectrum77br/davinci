@@ -553,6 +553,9 @@ _STATUS_AUTO_CHEGOU = {
     "ml": {"DELIVERED"},
     "tiktok": {"RETURN_OR_REFUND_REQUEST_SUCCESS", "RETURN_OR_REFUND_REQUEST_COMPLETE"},
 }
+# TikTok `return_type` em que NÃO vem pacote: o caso fecha com o dinheiro
+# devolvido e o produto com o cliente — "Chegou em" não se aplica.
+_TIPO_AUTO_SEM_PACOTE = {"REFUND"}
 
 
 def _chegou_em(
@@ -564,6 +567,7 @@ def _chegou_em(
     fonte_auto: str | None,
     devolucao_atualizada_em: datetime | None,
     pacote_entregue_em: datetime | None = None,
+    devolucao_tipo_auto: str | None = None,
 ) -> date | None:
     """Coluna "Chegou em" (Eduardo 10/09, escolha dele: manter "Em devolução
     desde" no INÍCIO e mostrar a chegada ao lado): dia em que o marketplace
@@ -579,6 +583,11 @@ def _chegou_em(
 
     if pacote_entregue_em is not None:
         return pacote_entregue_em.astimezone(SAO_PAULO).date()
+    # Caso SÓ reembolso (0285): não vem pacote, então nenhum dos dois caminhos
+    # abaixo pode carimbar chegada — nem a Logística (linha antiga, gravada
+    # antes do tipo existir, ainda diz só "COMPLETE") nem o sync do retorno.
+    if (devolucao_tipo_auto or "").strip().upper() in _TIPO_AUTO_SEM_PACOTE:
+        return None
     iso = logistica_rules.data_retorno_concluido(plataforma, meli_status, status_datas)
     dt = iso_to_dt(iso) if iso else None
     if dt is None and devolucao_atualizada_em is not None:
@@ -634,6 +643,7 @@ def _com_status_da_devolucao(
     fonte_auto: str | None = None,
     localizacao_auto: str | None = None,
     pacote_entregue_em: datetime | None = None,
+    tipo_auto: str | None = None,
 ) -> dict:
     """Devolução VIVA → `localizacao` vira o status da devolução (+ o último
     evento do pacote de volta, quando o 17track já mandou) e a entrega original
@@ -649,8 +659,10 @@ def _com_status_da_devolucao(
         return d
     dev = None
     if status_auto and fonte_auto:
+        # `tipo_auto` separa devolução de SÓ reembolso no TikTok (0285).
         dev = logistica_rules.devolucao_status_pt(
-            _FONTE_PLATAFORMA.get(fonte_auto, fonte_auto), {"return_status": status_auto}
+            _FONTE_PLATAFORMA.get(fonte_auto, fonte_auto),
+            {"return_status": status_auto, "return_type": tipo_auto or ""},
         )
     if dev is None:
         dev = logistica_rules.devolucao_status_pt(lg_plataforma, lg_meli_status or {})
@@ -697,6 +709,7 @@ async def acompanhamento_rows(session: AsyncSession) -> list[dict]:
                     r.localizacao_auto,
                     r.localizacao_auto_data,
                     r.devolucao_status_auto,
+                    r.devolucao_tipo_auto,
                     r.pacote_entregue_em,
                     r.fonte_auto,
                     r.observacao,
@@ -766,6 +779,7 @@ async def acompanhamento_rows(session: AsyncSession) -> list[dict]:
         lg_meli_status = d.pop("lg_meli_status", None)
         lg_status_datas = d.pop("lg_status_datas", None)
         status_auto = d.pop("devolucao_status_auto", None)
+        tipo_auto = d.pop("devolucao_tipo_auto", None)
         fonte_auto = d.pop("fonte_auto", None)
         devolucao_atualizada_em = d.pop("devolucao_atualizada_em", None)
         d["aguardando_devolucao_data"], d["aguardando_devolucao_data_estimada"] = _data_entrada(
@@ -793,6 +807,7 @@ async def acompanhamento_rows(session: AsyncSession) -> list[dict]:
             fonte_auto=fonte_auto,
             devolucao_atualizada_em=devolucao_atualizada_em,
             pacote_entregue_em=pacote_entregue_em,
+            devolucao_tipo_auto=tipo_auto,
         )
         out.append(
             _com_status_da_devolucao(
@@ -804,6 +819,7 @@ async def acompanhamento_rows(session: AsyncSession) -> list[dict]:
                 fonte_auto=fonte_auto,
                 localizacao_auto=d.pop("localizacao_auto", None),
                 pacote_entregue_em=pacote_entregue_em,
+                tipo_auto=tipo_auto,
             )
         )
         d.pop("localizacao_auto_data", None)
@@ -953,6 +969,7 @@ async def patch_acompanhamento_rastreio(
                 fonte_auto=row.fonte_auto,
                 devolucao_atualizada_em=row.devolucao_atualizada_em,
                 pacote_entregue_em=row.pacote_entregue_em,
+                devolucao_tipo_auto=row.devolucao_tipo_auto,
             ),
         },
         localizacao_manual=row.localizacao,
@@ -962,6 +979,7 @@ async def patch_acompanhamento_rastreio(
         fonte_auto=row.fonte_auto,
         localizacao_auto=row.localizacao_auto,
         pacote_entregue_em=row.pacote_entregue_em,
+        tipo_auto=row.devolucao_tipo_auto,
     )
     return AcompanhamentoRastreioOut(**d)
 

@@ -793,7 +793,11 @@ async def consultar_pedido(session: AsyncSession, *, dono: User, args: dict[str,
         if rastreio.pacote_entregue_em:
             partes.append(f"pacote entregue ao vendedor em {_d(rastreio.pacote_entregue_em)}")
         if rastreio.devolucao_status_auto:
-            partes.append(f"status da devolução: {rastreio.devolucao_status_auto}")
+            # Só reembolso (TikTok `return_type` REFUND): não é devolução —
+            # o cliente fica com o produto; o texto tem que dizer isso.
+            so_reembolso = (rastreio.devolucao_tipo_auto or "").strip().upper() == "REFUND"
+            rotulo = "status do reembolso (sem devolução)" if so_reembolso else "status da devolução"
+            partes.append(f"{rotulo}: {rastreio.devolucao_status_auto}")
         if partes:
             linhas.append("Rastreio da devolução: " + " · ".join(partes))
 

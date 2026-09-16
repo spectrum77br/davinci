@@ -322,6 +322,32 @@ _TIKTOK_RETURN_ENCERRADO = {
     "RETURN_OR_REFUND_REQUEST_REJECT",
     "REFUND_OR_RETURN_REQUEST_REJECT",
 }
+# Caso que TERMINOU com o dinheiro devolvido ao cliente (a TikTok usa as duas
+# grafias). Com devolução, significa que o pacote voltou e foi aceito; só
+# reembolso, que o cliente ficou com o produto E com o dinheiro.
+_TIKTOK_RETURN_CONCLUIDO = {
+    "RETURN_OR_REFUND_REQUEST_SUCCESS",
+    "RETURN_OR_REFUND_REQUEST_COMPLETE",
+}
+# `return_type` do returns/search: o que o cliente PEDIU. O vocabulário de
+# `return_status` é o mesmo pros três, então sem o tipo "reembolso sem
+# devolver" parecia devolução (real: 294865, 10/09 — o cliente cancelou a
+# devolução e um minuto depois abriu SÓ reembolso alegando pacote incompleto;
+# o painel mostrou "Devolução solicitada", o Bling foi pra Aguardando
+# Devolução, ninguém respondeu no TikTok e em 5 dias a plataforma aprovou por
+# prazo: R$ 744 devolvidos, produto com o cliente).
+TIKTOK_RETURN_TYPE_LABELS_PT: dict[str, str] = {
+    "RETURN_AND_REFUND": "Devolução + reembolso",
+    "REFUND": "Só reembolso (produto fica com o cliente)",
+    "REPLACEMENT": "Troca",
+}
+_TIKTOK_TIPO_SO_REEMBOLSO = "REFUND"
+
+
+def _tiktok_so_reembolso(status: dict[str, str] | None) -> bool:
+    """True quando o caso vivo do TikTok é SÓ reembolso — não vem pacote."""
+    tipo = ((status or {}).get("return_type") or "").strip().upper()
+    return tipo == _TIKTOK_TIPO_SO_REEMBOLSO
 
 
 def assinatura_tiktok(status: dict[str, str] | None) -> str:
@@ -331,11 +357,23 @@ def assinatura_tiktok(status: dict[str, str] | None) -> str:
     Exceção: o vocabulário de order_status do TikTok NEM TEM devolução — o
     pedido segue DELIVERED/COMPLETED enquanto a returns API mostra o caso vivo
     (real: 585411441781475242 e cia., 28/08). O sweep de pós-venda grava esse
-    sinal em `return_status`; havendo um vivo, a assinatura vira "Devolução
-    solicitada" (mesmo rótulo da Shopee) pra regra da aba Status disparar."""
+    sinal em `return_status` (+ `return_type`); havendo um vivo, a assinatura
+    vira uma das quatro chaves abaixo, pra regra da aba Status disparar:
+
+      - "Devolução solicitada"        devolução em andamento (pacote vai voltar)
+      - "Devolução concluída"         pacote voltou, reembolso pago
+      - "Reembolso solicitado"        SÓ reembolso, esperando a loja responder
+      - "Reembolso pago sem devolução" SÓ reembolso, pago — produto ficou com
+                                       o cliente
+
+    "Devolução solicitada" é o mesmo rótulo da Shopee. As chaves são o texto
+    que se cadastra na aba Status — sem data/valor, senão a regra não casa."""
     ret = ((status or {}).get("return_status") or "").strip().upper()
     if ret and ret not in _TIKTOK_RETURN_ENCERRADO:
-        return "Devolução solicitada"
+        so_reembolso = _tiktok_so_reembolso(status)
+        if ret in _TIKTOK_RETURN_CONCLUIDO:
+            return "Reembolso pago sem devolução" if so_reembolso else "Devolução concluída"
+        return "Reembolso solicitado" if so_reembolso else "Devolução solicitada"
     v = ((status or {}).get("order_status") or "").strip().upper()
     if not v:
         return ""
@@ -364,8 +402,32 @@ _TIKTOK_RETURN_LABELS_PT = {
     "RETURN_OR_REFUND_REQUEST_PENDING": "Devolução solicitada — aguardando resposta",
     "AWAITING_BUYER_SHIP": "Devolução aprovada — aguardando o cliente enviar",
     "BUYER_SHIPPED_ITEM": "Cliente enviou o item de volta",
+    "AWAITING_BUYER_RESPONSE": "Devolução — aguardando resposta do cliente",
+    "REJECT_RECEIVE_PACKAGE": "Loja recusou o pacote recebido — em análise",
     "RETURN_OR_REFUND_REQUEST_SUCCESS": "Devolução concluída (TikTok)",
     "RETURN_OR_REFUND_REQUEST_COMPLETE": "Devolução concluída (TikTok)",
+}
+# Mesmo caso, quando é SÓ reembolso (não vem pacote): o que a loja tem a fazer
+# é responder dentro do prazo do TikTok — senão a plataforma aprova sozinha.
+_TIKTOK_REEMBOLSO_LABELS_PT = {
+    "RETURN_OR_REFUND_REQUEST_PENDING": "Reembolso solicitado — responder no TikTok",
+    "AWAITING_BUYER_RESPONSE": "Reembolso — aguardando resposta do cliente",
+    "RETURN_OR_REFUND_REQUEST_SUCCESS": "Reembolso pago sem devolução (TikTok)",
+    "RETURN_OR_REFUND_REQUEST_COMPLETE": "Reembolso pago sem devolução (TikTok)",
+}
+# Balãozinho da coluna "Status Plataforma" (detalhe_para): o status CRU do caso
+# em PT, neutro quanto ao tipo — o tipo vai na linha ao lado ("Tipo do caso").
+TIKTOK_RETURN_STATUS_LABELS_PT: dict[str, str] = {
+    "RETURN_OR_REFUND_REQUEST_PENDING": "Aberto — aguardando resposta da loja",
+    "AWAITING_BUYER_RESPONSE": "Aguardando resposta do cliente",
+    "AWAITING_BUYER_SHIP": "Aprovado — aguardando o cliente enviar",
+    "BUYER_SHIPPED_ITEM": "Cliente enviou o item de volta",
+    "REJECT_RECEIVE_PACKAGE": "Loja recusou o pacote recebido",
+    "RETURN_OR_REFUND_REQUEST_SUCCESS": "Concluído — reembolso pago",
+    "RETURN_OR_REFUND_REQUEST_COMPLETE": "Concluído — reembolso pago",
+    "RETURN_OR_REFUND_REQUEST_CANCEL": "Cancelado pelo cliente",
+    "RETURN_OR_REFUND_REQUEST_REJECT": "Recusado pela loja",
+    "REFUND_OR_RETURN_REQUEST_REJECT": "Recusado pela loja",
 }
 # ML: `return_status` = status do ENVIO da devolução (shipment do return do
 # claim — logistica_meli.returns_por_pedido / build_enrichment).
@@ -405,15 +467,15 @@ def retorno_em_transito(plataforma: str | None, status: dict[str, str] | None) -
 # na rua). Dois caminhos, porque a devolução do ML tem dois formatos: o envio
 # ORIGINAL que volta (`ship_substatus = returned`, caso do 290327) e o envio da
 # DEVOLUÇÃO do claim (`return_status = DELIVERED`). No TikTok o caso fechado já
-# significa item recebido. A Shopee fica DE FORA de propósito: o vocabulário
-# dela (PROCESSING/JUDGING/ACCEPTED/REFUND_PAID) fala do CASO, não do pacote —
-# melhor a coluna vazia que uma data inventada.
+# significa item recebido — EXCETO quando o caso é só reembolso (return_type
+# REFUND): fechou com o dinheiro devolvido e nenhum pacote a caminho. A Shopee
+# fica DE FORA de propósito: o vocabulário dela (PROCESSING/JUDGING/ACCEPTED/
+# REFUND_PAID) fala do CASO, não do pacote — melhor a coluna vazia que uma
+# data inventada.
 _SHIP_SUBSTATUS_CHEGOU = frozenset({"returned"})
 _RETURN_STATUS_CHEGOU: dict[str, frozenset[str]] = {
     "ml": frozenset({"DELIVERED"}),
-    "tiktok": frozenset(
-        {"RETURN_OR_REFUND_REQUEST_SUCCESS", "RETURN_OR_REFUND_REQUEST_COMPLETE"}
-    ),
+    "tiktok": frozenset(_TIKTOK_RETURN_CONCLUIDO),
 }
 
 
@@ -444,6 +506,8 @@ def data_retorno_concluido(
         sub = str(ms.get("ship_substatus") or "").strip().lower()
         if sub in _SHIP_SUBSTATUS_CHEGOU:
             return _carimbo("ship_substatus")
+    if chave == "tiktok" and _tiktok_so_reembolso(ms):
+        return None
     ret = str(ms.get("return_status") or "").strip().upper()
     if ret and ret in _RETURN_STATUS_CHEGOU[chave]:
         return _carimbo("return_status")
@@ -451,9 +515,11 @@ def data_retorno_concluido(
 
 
 def devolucao_status_pt(plataforma: str | None, status: dict[str, str] | None) -> str | None:
-    """Texto em PT da devolução VIVA de Shopee/TikTok/ML, ou None quando não
-    há caso aberto (sem `return_status`, ou encerrado — cancelado/recusado).
-    Status vivo sem tradução vira "Devolução: <STATUS>" (nunca esconde)."""
+    """Texto em PT do caso VIVO de pós-venda de Shopee/TikTok/ML, ou None
+    quando não há caso aberto (sem `return_status`, ou encerrado — cancelado/
+    recusado). Status vivo sem tradução vira "Devolução: <STATUS>" (nunca
+    esconde). No TikTok, caso só-reembolso (`return_type` REFUND) tem texto
+    próprio — não vem pacote, o que há pra fazer é responder no prazo."""
     ret = ((status or {}).get("return_status") or "").strip().upper()
     if not ret:
         return None
@@ -465,6 +531,8 @@ def devolucao_status_pt(plataforma: str | None, status: dict[str, str] | None) -
     if p in _TIKTOK_PLATAFORMAS:
         if ret in _TIKTOK_RETURN_ENCERRADO:
             return None
+        if _tiktok_so_reembolso(status):
+            return _TIKTOK_REEMBOLSO_LABELS_PT.get(ret, f"Reembolso: {ret}")
         return _TIKTOK_RETURN_LABELS_PT.get(ret, f"Devolução: {ret}")
     if p in _ML_PLATAFORMAS:
         if ret in _ML_RETURN_ENCERRADO:
@@ -626,9 +694,17 @@ _CAMPOS_POR_PLATAFORMA: dict[str, tuple[list[str], dict[str, str], dict[str, dic
         {"order_status": SHOPEE_STATUS_LABELS_PT, "logistics_status": SHOPEE_LOG_LABELS_PT},
     ),
     "tiktok": (
-        ["order_status"],
-        {"order_status": "Status do pedido"},
-        {"order_status": TIKTOK_STATUS_LABELS_PT},
+        ["order_status", "return_type", "return_status"],
+        {
+            "order_status": "Status do pedido",
+            "return_type": "Tipo do caso",
+            "return_status": "Status do caso",
+        },
+        {
+            "order_status": TIKTOK_STATUS_LABELS_PT,
+            "return_type": TIKTOK_RETURN_TYPE_LABELS_PT,
+            "return_status": TIKTOK_RETURN_STATUS_LABELS_PT,
+        },
     ),
     "amazon": (
         ["order_status", "easyship_status"],

@@ -46,6 +46,11 @@ class ReturnInfo(NamedTuple):
     # 17track (push/pull) — o sync não mexe na localização gravada.
     localizacao: str | None = None
     localizacao_em: datetime | None = None  # carimbo desse evento (UTC)
+    # TIPO do caso quando o marketplace separa (TikTok `return_type`:
+    # RETURN_AND_REFUND | REFUND | REPLACEMENT). "REFUND" = só reembolso, o
+    # cliente fica com o produto e nenhum pacote volta — a aba Acompanhamento
+    # precisa saber pra não chamar de devolução. None = a plataforma não diz.
+    return_type: str | None = None
 
 
 def epoch_to_dt(v: Any) -> datetime | None:

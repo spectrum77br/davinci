@@ -89,6 +89,51 @@ def test_assinatura_tiktok_traduz():
     assert logistica_rules.assinatura_tiktok(None) == ""
 
 
+def test_assinatura_tiktok_separa_devolucao_de_so_reembolso():
+    """Vinicius 16/09: "reembolso pedido e devolução solicitada são duas
+    informações diferentes" (294865: devolução cancelada + caso SÓ reembolso
+    um minuto depois, aprovado por prazo em 5 dias). O status é o mesmo nos
+    dois; o `return_type` é o que separa — e vira chave própria na aba Status."""
+    f = logistica_rules.assinatura_tiktok
+    devolucao = {"order_status": "DELIVERED", "return_type": "RETURN_AND_REFUND"}
+    reembolso = {"order_status": "DELIVERED", "return_type": "REFUND"}
+    for vivo in ("RETURN_OR_REFUND_REQUEST_PENDING", "AWAITING_BUYER_SHIP", "BUYER_SHIPPED_ITEM"):
+        assert f({**devolucao, "return_status": vivo}) == "Devolução solicitada"
+        assert f({**reembolso, "return_status": vivo}) == "Reembolso solicitado"
+    for pago in ("RETURN_OR_REFUND_REQUEST_COMPLETE", "RETURN_OR_REFUND_REQUEST_SUCCESS"):
+        assert f({**devolucao, "return_status": pago}) == "Devolução concluída"
+        assert f({**reembolso, "return_status": pago}) == "Reembolso pago sem devolução"
+    # Encerrado (cancelou/recusou) volta pro status do pedido, seja qual for o tipo.
+    for fim in ("RETURN_OR_REFUND_REQUEST_CANCEL", "REFUND_OR_RETURN_REQUEST_REJECT"):
+        assert f({**devolucao, "return_status": fim}) == "Entregue"
+        assert f({**reembolso, "return_status": fim}) == "Entregue"
+    # Linha antiga, gravada antes do tipo existir: continua devolução (era o
+    # comportamento de sempre; o próximo sweep preenche o tipo).
+    assert f({"order_status": "COMPLETED", "return_status": "BUYER_SHIPPED_ITEM"}) == (
+        "Devolução solicitada"
+    )
+    assert f({"order_status": "COMPLETED", "return_status": "RETURN_OR_REFUND_REQUEST_COMPLETE"}) == (
+        "Devolução concluída"
+    )
+
+
+def test_detalhe_tiktok_mostra_tipo_e_status_do_caso_em_pt():
+    """Balãozinho da coluna: tipo e status do caso traduzidos, na ordem."""
+    linhas = logistica_rules.detalhe_para(
+        "TikTok",
+        {
+            "order_status": "COMPLETED",
+            "return_status": "RETURN_OR_REFUND_REQUEST_COMPLETE",
+            "return_type": "REFUND",
+        },
+    )
+    assert [(x["rotulo"], x["valor"]) for x in linhas] == [
+        ("Status do pedido", "Concluído"),
+        ("Tipo do caso", "Só reembolso (produto fica com o cliente)"),
+        ("Status do caso", "Concluído — reembolso pago"),
+    ]
+
+
 def test_assinatura_para_despacha_tiktok():
     tt = {"order_status": "COMPLETED"}
     assert logistica_rules.assinatura_para("TikTok", tt) == "Concluído"

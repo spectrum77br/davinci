@@ -114,6 +114,51 @@ async def test_crud_lifecycle(
 
 
 @pytest.mark.asyncio
+async def test_editar_o_modal_nao_apaga_o_tipo_do_caso_tiktok(
+    client: AsyncClient, admin: User, auth_as: Callable[[User | None], None]
+):
+    """O modal da Logística só manda os campos de status; o `return_type`
+    (devolução × só reembolso) é do sweep do TikTok e não aparece no
+    formulário. Salvar o modal não pode apagá-lo — senão "Reembolso
+    solicitado" regride pra "Devolução solicitada" e a regra errada casa."""
+    auth_as(admin)
+    r = await client.post(
+        "/api/logistica",
+        json={
+            "pedido_bling": "294865",
+            "plataforma": "TikTok",
+            "meli_status": {
+                "order_status": "DELIVERED",
+                "return_status": "RETURN_OR_REFUND_REQUEST_PENDING",
+                "return_type": "REFUND",
+            },
+        },
+    )
+    assert r.status_code == 201, r.text
+    cid = r.json()["id"]
+    assert r.json()["meli_status"]["return_type"] == "REFUND"
+    assert r.json()["status_plataforma"] == "Reembolso solicitado"
+
+    # O modal reenvia só o que conhece (sem return_type).
+    r = await client.patch(
+        f"/api/logistica/{cid}",
+        json={
+            "meli_status": {
+                "order_status": "COMPLETED",
+                "return_status": "RETURN_OR_REFUND_REQUEST_PENDING",
+            },
+            "observacao": "cliente diz que o pacote veio vazio",
+        },
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["meli_status"]["return_type"] == "REFUND"
+    assert r.json()["meli_status"]["order_status"] == "COMPLETED"
+    assert r.json()["status_plataforma"] == "Reembolso solicitado"
+
+    await client.delete(f"/api/logistica/{cid}")
+
+
+@pytest.mark.asyncio
 async def test_status_detalhe_traz_a_data_de_cada_campo(
     client: AsyncClient, admin: User, auth_as: Callable[[User | None], None]
 ):
