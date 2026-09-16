@@ -45,6 +45,24 @@ class DevolucaoRastreio(Base, TimestampMixin):
     # reembolso, o cliente fica com o produto e nenhum pacote volta. None
     # quando a plataforma não separa.
     devolucao_tipo_auto: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # PRAZO DE RESPOSTA DA LOJA (migration 0286, Vinicius 16/09: "colocar no
+    # painel o prazo pra não perder mais prazo"): o que o marketplace espera
+    # da loja neste caso (TikTok `seller_next_action_response.action`) e até
+    # quando. Passado o prazo a plataforma decide sozinha. Reescrito a cada
+    # rodada do sync — None quando não há mais nada pendente da loja.
+    acao_auto: Mapped[str | None] = mapped_column(Text, nullable=True)
+    prazo_acao_auto: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # Aviso Threema do prazo: quando saiu e PRA QUAL prazo (um aviso por caso
+    # e por prazo — se a plataforma abrir outra ação com prazo novo, avisa de
+    # novo).
+    aviso_prazo_acao_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    aviso_prazo_acao_para: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     # Quando a devolução foi ABERTA no marketplace → "Em devolução desde" real
     # (o backfill da 0236 carimbou 02/09 em todo mundo).
     devolucao_criada_em: Mapped[datetime | None] = mapped_column(

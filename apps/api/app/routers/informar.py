@@ -37,7 +37,7 @@ aparecer informar na aba margem").
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Annotated
 
 import structlog
@@ -90,6 +90,9 @@ _CONTEXTOS = (
     "juridico",
     "logistica_amazon",
     "logistica_amazon_auto",
+    # Aviso automático do prazo de resposta nas devoluções (Acompanhamento) —
+    # services/devolucao_acao_avisos. Cadastro pelo modal Informar da aba.
+    "devolucoes_auto",
 )
 _CONTEXTOS_ENVIO = ("logistica", "controle_estoque", "margem", "devolucoes", "logistica_amazon")
 
@@ -321,7 +324,7 @@ async def _linhas_devolucoes(session: AsyncSession) -> list[str]:
     rows = await acompanhamento_rows(session)
     hoje = datetime.now(SAO_PAULO).date()
     vistos: set[str] = set()
-    entries: list[tuple[str, str, int | None, str | None]] = []
+    entries: list[tuple[str, str, int | None, str | None, str | None]] = []
     for r in rows:  # grão de ITEM → dedup por pedido, mantendo a ordem da aba
         pedido = (r.get("pedido_bling") or "").strip()
         if not pedido or pedido in vistos:
@@ -333,12 +336,20 @@ async def _linhas_devolucoes(session: AsyncSession) -> list[str]:
             for p in ((r.get("plataforma") or "").strip(), (r.get("loja") or "").strip())
             if p
         )
+        # Prazo de resposta da loja (16/09): a mesma coluna da aba, em BRT.
+        prazo = r.get("prazo_resposta")
+        prazo_txt = None
+        if isinstance(prazo, datetime):
+            if prazo.tzinfo is None:
+                prazo = prazo.replace(tzinfo=UTC)
+            prazo_txt = prazo.astimezone(SAO_PAULO).strftime("%d/%m %H:%M")
         entries.append(
             (
                 pedido,
                 loja,
                 (hoje - entrada).days if entrada else None,
                 r.get("localizacao"),
+                prazo_txt,
             )
         )
     return informar.linhas_devolucoes(entries)

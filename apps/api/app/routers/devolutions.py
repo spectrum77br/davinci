@@ -633,6 +633,19 @@ def _ultima_movimentacao(
     return max(d if d.tzinfo else d.replace(tzinfo=UTC) for d in candidatos)
 
 
+def _prazo_resposta(
+    fonte_auto: str | None, acao_auto: str | None, prazo_acao_auto: datetime | None
+) -> tuple[datetime | None, str | None]:
+    """Coluna "Prazo p/ responder" (Vinicius 16/09): o prazo que o marketplace
+    deu pra loja agir neste caso e a ação em PT. Sem prazo → (None, None):
+    ação sem prazo não vira coluna (não há o que vencer)."""
+    from app.services import logistica_rules  # tardio: evita ciclo router↔services
+
+    if prazo_acao_auto is None:
+        return None, None
+    return prazo_acao_auto, logistica_rules.acao_plataforma_pt(fonte_auto, acao_auto)
+
+
 def _com_status_da_devolucao(
     d: dict,
     *,
@@ -710,6 +723,8 @@ async def acompanhamento_rows(session: AsyncSession) -> list[dict]:
                     r.localizacao_auto_data,
                     r.devolucao_status_auto,
                     r.devolucao_tipo_auto,
+                    r.acao_auto,
+                    r.prazo_acao_auto,
                     r.pacote_entregue_em,
                     r.fonte_auto,
                     r.observacao,
@@ -782,6 +797,9 @@ async def acompanhamento_rows(session: AsyncSession) -> list[dict]:
         tipo_auto = d.pop("devolucao_tipo_auto", None)
         fonte_auto = d.pop("fonte_auto", None)
         devolucao_atualizada_em = d.pop("devolucao_atualizada_em", None)
+        d["prazo_resposta"], d["acao_resposta"] = _prazo_resposta(
+            fonte_auto, d.pop("acao_auto", None), d.pop("prazo_acao_auto", None)
+        )
         d["aguardando_devolucao_data"], d["aguardando_devolucao_data_estimada"] = _data_entrada(
             entrada_bling=d.pop("entrada_bling", None),
             entrada_manual=d.pop("entrada_manual", None),
@@ -961,6 +979,8 @@ async def patch_acompanhamento_rastreio(
             "aguardando_devolucao_data": entrada,
             "aguardando_devolucao_data_estimada": estimada,
             "dias_em_devolucao": (hoje_sp - entrada).days if entrada else None,
+            "prazo_resposta": _prazo_resposta(row.fonte_auto, row.acao_auto, row.prazo_acao_auto)[0],
+            "acao_resposta": _prazo_resposta(row.fonte_auto, row.acao_auto, row.prazo_acao_auto)[1],
             "devolucao_chegou_em": _chegou_em(
                 plataforma=lg["lg_plataforma"] if lg else None,
                 meli_status=lg["lg_meli_status"] if lg else None,

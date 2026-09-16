@@ -20,6 +20,7 @@ import {
   Trash2,
   Undo2,
   X,
+  AlertTriangle,
 } from 'lucide-vue-next'
 import { isoToday } from '~/lib/date'
 
@@ -829,6 +830,10 @@ type AcompanhamentoRow = {
   lancada: boolean
   // Observação livre por PEDIDO: recado pra quem acompanha o pacote.
   observacao: string | null
+  // "Prazo p/ responder" (16/09): até quando o marketplace espera uma ação da
+  // loja neste caso, e qual (em PT). null = nada pendente da loja.
+  prazo_resposta: string | null
+  acao_resposta: string | null
 }
 type AcompanhamentoPage = { items: AcompanhamentoRow[]; total_pedidos: number }
 type RastreioSaved = {
@@ -846,6 +851,8 @@ type RastreioSaved = {
   // Dia em que o pacote de volta chegou aqui (coluna "Chegou em").
   devolucao_chegou_em: string | null
   observacao: string | null
+  prazo_resposta: string | null
+  acao_resposta: string | null
 }
 
 type Tab = 'acompanhamento' | 'lancamentos'
@@ -860,6 +867,8 @@ const acompSearch = ref('')
 const acompPlataformaFilter = ref('all')
 const acompLojaFilter = ref('all')
 const acompParadoFilter = ref<'all' | '7' | '15' | '30'>('all')
+// Só pedidos com prazo de resposta da loja vencendo em 24 h (ou vencido).
+const acompPrazoFilter = ref(false)
 // Status de devolução do pacote (10/09): 'chegou' = Devolvido ("Chegou em"
 // preenchido, a plataforma confirmou); 'pendente' = Não Devolvido.
 const acompChegadaFilter = ref<'all' | 'chegou' | 'pendente'>('all')
@@ -907,6 +916,7 @@ const acompFiltered = computed(() => {
     if (minDias != null && (r.dias_em_devolucao ?? -1) < minDias) return false
     if (acompChegadaFilter.value === 'chegou' && !r.devolucao_chegou_em) return false
     if (acompChegadaFilter.value === 'pendente' && r.devolucao_chegou_em) return false
+    if (acompPrazoFilter.value && !contestacaoUrgente(r.prazo_resposta)) return false
     if (term) {
       const hay = [
         r.pedido_bling, r.pedido_marketplace, r.cliente, r.sku, r.produto,
@@ -928,6 +938,8 @@ const acompTotalPedidos = computed(() => pedidosDe(acompRows.value).size)
 const acompSemRastreio = computed(() => pedidosDe(acompRows.value.filter((r) => !r.rastreio)).size)
 const acompSemLocalizacao = computed(() => pedidosDe(acompRows.value.filter((r) => !r.localizacao)).size)
 const acompParados15 = computed(() => pedidosDe(acompRows.value.filter((r) => (r.dias_em_devolucao ?? 0) >= 15)).size)
+// Pedidos cujo prazo de resposta na plataforma vence em menos de 24 h (ou já venceu).
+const acompPrazoUrgente = computed(() => pedidosDe(acompRows.value.filter((r) => contestacaoUrgente(r.prazo_resposta))).size)
 
 // Data pura (YYYY-MM-DD) SEM passar por new Date() — evita o clássico
 // "-1 dia" do fuso (Date interpreta como meia-noite UTC).
@@ -982,6 +994,8 @@ async function saveRastreio(
         r.aguardando_devolucao_data_estimada = res.aguardando_devolucao_data_estimada
         r.devolucao_chegou_em = res.devolucao_chegou_em
         r.observacao = res.observacao
+        r.prazo_resposta = res.prazo_resposta
+        r.acao_resposta = res.acao_resposta
       }
     }
   } catch (e: any) {
@@ -1603,6 +1617,7 @@ async function backfillAddresses() {
         <StatCard label="Sem rastreio" :value="acompSemRastreio" :icon="AlertCircle" tone="warning" />
         <StatCard label="Sem localização" :value="acompSemLocalizacao" :icon="Clock" tone="warning" />
         <StatCard label="Parados 15+ dias" :value="acompParados15" :icon="Clock" tone="danger" />
+        <StatCard label="Responder em 24 h" :value="acompPrazoUrgente" :icon="AlertTriangle" tone="danger" hint="prazo da plataforma" />
       </div>
 
       <div class="flex flex-wrap items-center gap-2">
@@ -1633,6 +1648,10 @@ async function backfillAddresses() {
           <option value="chegou">Devolvido</option>
           <option value="pendente">Não Devolvido</option>
         </select>
+        <label class="inline-flex items-center gap-1.5 h-9 rounded-md border bg-background px-2 text-sm cursor-pointer" title="Só pedidos cujo prazo de resposta na plataforma vence em menos de 24 h ou já venceu">
+          <input v-model="acompPrazoFilter" type="checkbox" class="size-3.5" />
+          Responder em 24 h
+        </label>
         <span class="ml-auto text-xs text-muted-foreground">
           {{ acompFiltered.length }} de {{ acompRows.length }} itens · rastreio, localização e observação salvam ao sair do campo
         </span>
@@ -1642,7 +1661,7 @@ async function backfillAddresses() {
         <table class="min-w-[2000px] text-xs border-collapse">
           <thead class="sticky top-0 z-20 bg-background">
             <tr>
-              <th class="px-2 py-1 text-left text-[11px] font-semibold border-b" colspan="12">Pedido aguardando devolução (Bling)</th>
+              <th class="px-2 py-1 text-left text-[11px] font-semibold border-b" colspan="14">Pedido aguardando devolução (Bling)</th>
               <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-amber-50 dark:bg-amber-900/20" colspan="3" title="Preenchido sozinho: código e status do PACOTE QUE VOLTA (devolução na Shopee/TikTok/ML, atualizado a cada 30 min) — senão o rastreio da entrega original (Logística). O que você digitar aqui vale mais que o automático">Rastreio</th>
               <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-emerald-50 dark:bg-emerald-900/20" colspan="2">Devolução</th>
             </tr>
@@ -1660,6 +1679,7 @@ async function backfillAddresses() {
               <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[125px]" title="Dia em que o pedido entrou em Aguardando Devolução">Em devolução desde</th>
               <th class="px-2 py-1 text-center font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[60px]" title="Há quantos dias o pedido está aguardando devolução">Dias</th>
               <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px]" title="Dia em que o marketplace confirmou que o pacote de volta chegou aqui. Vazio = ainda não chegou (ou a plataforma não informa).">Chegou em</th>
+              <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[120px] bg-red-50 dark:bg-red-900/20" title="Até quando a plataforma espera uma resposta da loja neste caso (TikTok: confirmar/recusar o pacote recebido, responder ao reembolso…). Passado o prazo ela decide sozinha. Vermelho = menos de 24 h ou vencido. Passe o mouse na célula pra ver o que fazer.">Prazo p/ responder</th>
               <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[160px] bg-amber-50 dark:bg-amber-900/20 border-l-[3px] border-gray-400 dark:border-gray-600">Rastreio</th>
               <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[220px] bg-amber-50 dark:bg-amber-900/20">Última localização</th>
               <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[135px] bg-amber-50 dark:bg-amber-900/20" title="Preenchida sozinha quando a localização muda">Data últ. movimentação</th>
@@ -1671,13 +1691,13 @@ async function backfillAddresses() {
           </thead>
           <tbody>
             <tr v-if="acompLoading && !acompRows.length">
-              <td colspan="17" class="py-8 text-center text-muted-foreground">
+              <td colspan="19" class="py-8 text-center text-muted-foreground">
                 <Loader2 class="size-4 inline animate-spin mr-1.5" />
                 carregando…
               </td>
             </tr>
             <tr v-else-if="!acompFiltered.length">
-              <td colspan="17" class="py-8 text-center text-muted-foreground">nenhum pedido aguardando devolução</td>
+              <td colspan="19" class="py-8 text-center text-muted-foreground">nenhum pedido aguardando devolução</td>
             </tr>
             <tr
               v-for="row in acompFiltered"
@@ -1733,6 +1753,13 @@ async function backfillAddresses() {
                   <CheckCircle2 class="size-3" />
                   {{ fmtDateOnly(row.devolucao_chegou_em) }}
                 </span>
+                <span v-else class="text-muted-foreground">—</span>
+              </td>
+              <td class="px-2 py-1 whitespace-nowrap bg-red-50/40 dark:bg-red-900/10">
+                <div v-if="row.prazo_resposta" class="flex flex-col gap-0.5" :title="row.acao_resposta || 'Responder na plataforma'">
+                  <span :class="contestacaoUrgente(row.prazo_resposta) ? 'font-medium text-red-600 dark:text-red-400' : 'text-muted-foreground'">{{ fmtDateTime(row.prazo_resposta) }}</span>
+                  <span class="text-[10px]" :class="contestacaoUrgente(row.prazo_resposta) ? 'text-red-600 dark:text-red-400' : 'text-muted-foreground'">{{ contestacaoLabel(row.prazo_resposta) }}</span>
+                </div>
                 <span v-else class="text-muted-foreground">—</span>
               </td>
               <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10 border-l-[3px] border-gray-400 dark:border-gray-600">
@@ -2652,7 +2679,9 @@ async function backfillAddresses() {
     <InformarThreemaModal
       :open="informarOpen"
       contexto="devolucoes"
-      descricao="Manda no Threema a lista de pedidos aguardando devolução (a mesma da aba Acompanhamento), com dias parados e última localização de cada um."
+      contexto-auto="devolucoes_auto"
+      enviar-com-auto
+      descricao="Quem está marcado recebe no Threema o aviso automático de prazo: quando falta menos de 24 h pra loja responder na plataforma (TikTok: confirmar ou recusar o pacote recebido), um aviso por caso e por prazo. O pedido de só reembolso tem aviso próprio pela aba Chamados. 'Enviar agora' manda a lista dos pedidos aguardando devolução (a mesma da aba Acompanhamento), com dias parados, última localização e prazo. A seleção fica salva."
       @close="informarOpen = false"
     />
   </div>

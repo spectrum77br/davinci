@@ -395,6 +395,7 @@ _CLEANUP_TABLES = (
     "logistica_mensagem_cliente",
     "logistica_mensagem_template",
     "logistica",
+    "devolucao_rastreio",
     "threema_informar_config",
     "user_settings",
     "users",

@@ -346,11 +346,47 @@ def _sinal_do_caso(d: dict) -> dict[str, str]:
     }
 
 
+def _acao_pendente(d: dict) -> tuple[str | None, datetime | None]:
+    """A ação que a TikTok espera da loja neste caso e o prazo mais próximo:
+    `seller_next_action_response: [{action, deadline(epoch s)}]`. Havendo mais
+    de uma, vale a de prazo mais curto. Nunca levanta (entrada suja → None):
+    o sync do retorno trata TypeError como "fetcher sem kwarg" e refaria a
+    chamada inteira."""
+    melhor: tuple[str | None, datetime | None] = (None, None)
+    for a in (d.get("seller_next_action_response") or []) if isinstance(d, dict) else []:
+        if not isinstance(a, dict):
+            continue
+        prazo = epoch_to_dt(a.get("deadline"))
+        if prazo is None:
+            continue
+        if melhor[1] is None or prazo < melhor[1]:
+            melhor = (str(a.get("action") or "").strip().upper() or None, prazo)
+    return melhor
+
+
+def _acao_pendente_do_pedido(casos: Iterable[dict]) -> tuple[str | None, datetime | None]:
+    """Entre os casos VIVOS do pedido (fora de encerrado/concluído), a ação
+    com o prazo mais curto — cada caso tem o próprio prazo."""
+    melhor: tuple[str | None, datetime | None] = (None, None)
+    for d in casos:
+        if not isinstance(d, dict):
+            continue
+        st = str(d.get("return_status") or "").strip().upper()
+        if st in logistica_rules._TIKTOK_RETURN_ENCERRADO or st in logistica_rules._TIKTOK_RETURN_CONCLUIDO:
+            continue
+        acao, prazo = _acao_pendente(d)
+        if prazo is not None and (melhor[1] is None or prazo < melhor[1]):
+            melhor = (acao, prazo)
+    return melhor
+
+
 def _tiktok_return_info(d: dict) -> ReturnInfo:
     """Caso do returns/search → `ReturnInfo`. Devolução só-reembolso (return_type
     REFUND) não tem pacote: entra mesmo assim, com tracking None — e o tipo vai
-    junto pra aba Acompanhamento não chamar de devolução."""
+    junto pra aba Acompanhamento não chamar de devolução. A ação pendente da
+    loja + prazo vêm no mesmo payload (custo zero de API)."""
     sinal = _sinal_do_caso(d)
+    acao, prazo = _acao_pendente(d)
     return ReturnInfo(
         fonte="tiktok",
         status=sinal["return_status"] or None,
@@ -360,6 +396,8 @@ def _tiktok_return_info(d: dict) -> ReturnInfo:
         updated_at=epoch_to_dt(d.get("update_time")),
         return_id=str(d.get("return_id") or "").strip() or None,
         return_type=sinal["return_type"] or None,
+        acao_pendente=acao,
+        prazo_acao=prazo,
     )
 
 
@@ -431,8 +469,18 @@ async def returns_por_pedido(
                 conta=conta, pedidos=len(pedidos), err=str(e)[:200],
             )
             continue
-        for oid, d in _melhor_devolucao_por_pedido(devolucoes).items():
+        melhor = _melhor_devolucao_por_pedido(devolucoes)
+        por_pedido: dict[str, list[dict]] = {}
+        for d in devolucoes:
+            if isinstance(d, dict):
+                por_pedido.setdefault(str(d.get("order_id") or "").strip(), []).append(d)
+        for oid, d in melhor.items():
             info = _tiktok_return_info(d)
+            # Prazo: o mais curto entre TODOS os casos vivos do pedido, não só
+            # o do caso escolhido pro status/rastreio — dois casos abertos no
+            # mesmo pedido (devolução + reembolso) têm prazos independentes.
+            acao, prazo = _acao_pendente_do_pedido(por_pedido.get(oid) or [d])
+            info = info._replace(acao_pendente=acao, prazo_acao=prazo)
             for pb in pedidos.get(oid) or ():
                 out[pb] = info
     return out

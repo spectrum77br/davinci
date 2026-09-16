@@ -260,6 +260,10 @@ async def run(session: AsyncSession, *, pedidos: Collection[str] | None = None) 
             row.transportadora_auto = (info.carrier or "").strip() or None
             row.devolucao_status_auto = (info.status or "").strip() or None
             row.devolucao_tipo_auto = (info.return_type or "").strip() or None
+            # Prazo de resposta da loja (0286): reescrito sempre — quando a
+            # plataforma para de pedir ação, o prazo some da tela.
+            row.acao_auto = (info.acao_pendente or "").strip() or None
+            row.prazo_acao_auto = info.prazo_acao
             row.devolucao_id_auto = (info.return_id or "").strip() or None
             row.fonte_auto = info.fonte
             if info.created_at:
@@ -299,11 +303,27 @@ async def run(session: AsyncSession, *, pedidos: Collection[str] | None = None) 
         except Exception as e:  # noqa: BLE001 — 17track fora do ar não derruba o sync
             logger.warning("devolucao_rastreio_sync_17track_falhou", err=str(e)[:200])
 
+    # Prazos de resposta acabaram de ser atualizados: hora de avisar quem
+    # precisa responder na plataforma (Threema, um aviso por caso e prazo).
+    # Best-effort: Threema fora do ar/sem cadastro não derruba o sync.
+    avisos: dict[str, int] = {}
+    try:
+        from app.services import devolucao_acao_avisos
+
+        # Só os pedidos cujo caso foi relido AGORA: conta que deu 429 fica com o
+        # prazo da rodada anterior na tela, mas não rende aviso com dado velho.
+        avisos = await devolucao_acao_avisos.run(
+            session, pedidos=[p for p in alvo if str(p) in infos], linhas=linhas
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("devolucao_acao_avisos_falhou", err=str(e)[:200])
+
     summary = {
         "pedidos": len(alvo),
         "com_logistica": len(linhas),
         "devolucoes": len(infos),
         "gravados": gravados,
+        "avisos_prazo": avisos.get("enviados", 0),
         "codigos_17track": registrados,
         "correios_consultados": pull["consultados"],
         "correios_entregues": pull["entregues"],

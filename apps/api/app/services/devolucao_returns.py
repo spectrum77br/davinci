@@ -51,6 +51,14 @@ class ReturnInfo(NamedTuple):
     # cliente fica com o produto e nenhum pacote volta — a aba Acompanhamento
     # precisa saber pra não chamar de devolução. None = a plataforma não diz.
     return_type: str | None = None
+    # O que o MARKETPLACE está esperando da loja neste caso, e até quando
+    # (UTC). TikTok `seller_next_action_response`: SELLER_RESPOND_RECEIVE_PACKAGE
+    # (confirmar/recusar o pacote que chegou), SELLER_RESPOND_REFUND, ...;
+    # passado o prazo a plataforma decide sozinha (aprova/reembolsa) — foi o
+    # 294865 (Vinicius 16/09: "pra não perder mais prazo"). None = nada
+    # pendente da loja, ou a plataforma não informa.
+    acao_pendente: str | None = None
+    prazo_acao: datetime | None = None
 
 
 def epoch_to_dt(v: Any) -> datetime | None:

@@ -415,6 +415,31 @@ _TIKTOK_REEMBOLSO_LABELS_PT = {
     "RETURN_OR_REFUND_REQUEST_SUCCESS": "Reembolso pago sem devolução (TikTok)",
     "RETURN_OR_REFUND_REQUEST_COMPLETE": "Reembolso pago sem devolução (TikTok)",
 }
+# O que a plataforma espera da LOJA num caso vivo (TikTok
+# `seller_next_action_response.action`), em texto de gente. Vai na coluna
+# "Prazo p/ responder" da aba Acompanhamento e no aviso Threema. Ação sem
+# tradução aparece crua (nunca esconde um prazo).
+TIKTOK_ACAO_LABELS_PT: dict[str, str] = {
+    "SELLER_RESPOND_RECEIVE_PACKAGE": "Confirmar ou recusar o pacote recebido no TikTok",
+    "SELLER_RESPOND_REFUND": "Responder ao pedido de reembolso no TikTok",
+    "SELLER_RESPOND_RETURN": "Responder à solicitação de devolução no TikTok",
+    "SELLER_RESPOND_REPLACEMENT": "Responder ao pedido de troca no TikTok",
+    "SELLER_RESPOND_CANCEL": "Responder ao pedido de cancelamento no TikTok",
+}
+
+
+def acao_plataforma_pt(fonte: str | None, acao: str | None) -> str | None:
+    """Texto em PT da ação pendente da loja; None sem ação. `fonte` é a do
+    ReturnInfo ("tiktok" | "shopee" | "ml") ou o rótulo da plataforma."""
+    a = (acao or "").strip().upper()
+    if not a:
+        return None
+    f = (fonte or "").strip().lower()
+    if f == "tiktok" or f in _TIKTOK_PLATAFORMAS:
+        return TIKTOK_ACAO_LABELS_PT.get(a, f"Ação pendente: {a}")
+    return f"Ação pendente: {a}"
+
+
 # Balãozinho da coluna "Status Plataforma" (detalhe_para): o status CRU do caso
 # em PT, neutro quanto ao tipo — o tipo vai na linha ao lado ("Tipo do caso").
 TIKTOK_RETURN_STATUS_LABELS_PT: dict[str, str] = {

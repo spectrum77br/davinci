@@ -68,20 +68,26 @@ def linhas_estoque(entries: Iterable[tuple[str, str, str]]) -> list[str]:
 
 
 def linhas_devolucoes(
-    entries: Iterable[tuple[str, str, int | None, str | None]],
+    entries: Iterable[tuple[str, str, int | None, str | None] | tuple[str, str, int | None, str | None, str | None]],
 ) -> list[str]:
-    """Entradas `(pedido, loja, dias em devolução, última localização)` →
-    `Pedido N (loja) — X dias — localização`. Uma linha por PEDIDO aguardando
-    devolução (aba Acompanhamento). Preserva a ordem recebida — a aba já manda
-    o pedido mais parado primeiro. Sem localização → "sem localização"."""
+    """Entradas `(pedido, loja, dias em devolução, última localização[, prazo
+    de resposta])` → `Pedido N (loja) — X dias — localização — responder até …`.
+    Uma linha por PEDIDO aguardando devolução (aba Acompanhamento). Preserva a
+    ordem recebida — a aba já manda o pedido mais parado primeiro. Sem
+    localização → "sem localização". O prazo (16/09) só entra quando a
+    plataforma espera uma ação da loja."""
     out: list[str] = []
-    for pedido, loja, dias, localizacao in entries:
+    for entry in entries:
+        pedido, loja, dias, localizacao = entry[:4]
+        prazo = entry[4] if len(entry) > 4 else None
         linha = f"Pedido {pedido}"
         if (loja or "").strip():
             linha += f" ({loja.strip()})"
         if dias is not None:
             linha += f" — {dias} dia{'s' if dias != 1 else ''}"
         linha += f" — {(localizacao or '').strip() or 'sem localização'}"
+        if (prazo or "").strip():
+            linha += f" — ⚠️ responder até {prazo.strip()}"
         out.append(linha)
     return out
 

@@ -341,6 +341,11 @@ class AcompanhamentoItemOut(BaseModel):
     # Observação livre por PEDIDO (10/09): recado pra quem acompanha o pacote;
     # existe antes de a devolução ser lançada.
     observacao: str | None = None
+    # "Prazo p/ responder" (16/09): até quando o marketplace espera uma ação da
+    # loja neste caso (UTC) e qual ação, em PT. None = nada pendente da loja.
+    # Passado o prazo a plataforma decide sozinha.
+    prazo_resposta: datetime | None = None
+    acao_resposta: str | None = None
 
 
 class AcompanhamentoOut(BaseModel):
@@ -383,3 +388,6 @@ class AcompanhamentoRastreioOut(BaseModel):
     # status da devolução e a entrega original ("Pedido entregue") vem aqui
     # (tooltip). None = sem devolução viva (localizacao é a entrega mesmo).
     entrega_localizacao: str | None = None
+    # "Prazo p/ responder" + ação (mesma conta do GET), pro front espelhar.
+    prazo_resposta: datetime | None = None
+    acao_resposta: str | None = None
