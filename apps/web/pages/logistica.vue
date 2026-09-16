@@ -1459,7 +1459,14 @@ const CHAMADO_ERROS: Record<string, string> = {
   logistica_reclamacao_sem_acao:
     'O Mercado Livre não liberou falar com o mediador neste chamado.',
   encaminhado_ao_robo:
-    'Sem reclamação do comprador pela venda — encaminhado ao robô do formulário de ajuda (aba Chamados, canal robô); o protocolo volta pra cá quando abrir.',
+    'Encaminhado ao robô (aba Chamados, canal robô): no Mercado Livre pelo formulário de ajuda, na TikTok e na Shopee pelo Seller Center. O protocolo volta pra cá quando abrir.',
+  chamado_manual_na_aba:
+    'Já existe chamado deste pedido registrado à mão na aba Chamados, ainda sem protocolo — preencha o nº lá e ele aparece aqui.',
+  chamado_resolvido_na_aba: 'O chamado deste pedido foi resolvido na aba Chamados sem protocolo — nada a abrir.',
+  chamado_de_outra_origem:
+    'Já existe chamado aberto deste pedido em outra aba (Devoluções/Vendas/Margem) — o robô não abre um segundo.',
+  robo_sem_protocolo:
+    'O robô disse que abriu, mas não trouxe o nº do chamado — confira na aba Chamados e preencha o protocolo.',
 }
 const sendingChamado = ref<Set<string>>(new Set())
 // O motor tentou abrir sozinho e o ML recusou: mostra o motivo (mesma tabela

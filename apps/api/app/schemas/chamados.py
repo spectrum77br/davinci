@@ -292,6 +292,11 @@ class AgentLeaseIn(BaseModel):
     # Só um tipo de tarefa: o robô do formulário pega `abrir` e o do Tuta pega
     # `responder` — sem isso um lease marcava `enviando` as tarefas do outro.
     tipo: Literal["abrir", "responder"] | None = None
+    # Plataforma que ESTE robô atende. Vazio = consumidor padrão (o robô do
+    # formulário do ML, cujo código não muda): recebe tudo MENOS TikTok/Shopee.
+    # "tiktok" / "shopee" = só as tarefas dessa plataforma (abrir no Seller
+    # Center); "ml" = só Mercado Livre. Mesmo desenho do lease de NF.
+    plataforma: str | None = None
 
 
 class AgentLeaseOut(BaseModel):

@@ -412,14 +412,23 @@ async def abrir_chamado_logistica(
         if existente is not None and existente.status in ("pendente", "enviando", "enviada"):
             return ch  # robô já está com a tarefa (ou já abriu)
         ch.canal = "robo"
+        ch.plataforma = ch.plataforma or row.plataforma
+        if (row.plataforma or "").strip().lower() in logistica_meli._ML_PLATAFORMAS:
+            aviso = (
+                "Pedido sem reclamação aberta pelo comprador — chamado encaminhado ao "
+                "robô do formulário de ajuda do Mercado Livre"
+            )
+        else:
+            # TikTok/Shopee não têm API pra loja abrir reclamação: a regra da
+            # aba Status manda direto pro robô abrir no Seller Center
+            # (Vinicius 16/09: "se chegar no painel de chamado, o robô abre").
+            aviso = (
+                f"{(row.plataforma or 'Plataforma').strip()} não tem API pra abrir "
+                "chamado pela venda — encaminhado ao robô pra abrir no Seller Center"
+            )
         session.add(
             registrar_sistema(
-                ch,
-                (
-                    "Pedido sem reclamação aberta pelo comprador — chamado encaminhado ao "
-                    f"robô do formulário de ajuda do Mercado Livre"
-                    f"{' (regra: ' + regra + ')' if regra else ''}"
-                ),
+                ch, aviso + (f" (regra: {regra})" if regra else "")
             )
         )
         abertura = nova_mensagem(

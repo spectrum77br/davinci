@@ -931,6 +931,18 @@ async def agent_lease(
         conds.append(sem_protocolo)
     elif body.tipo == "responder":
         conds.append(~sem_protocolo)
+    # Plataforma: TikTok/Shopee (regra da aba Status → robô abre no Seller
+    # Center) só saem pra quem pede por elas; o consumidor padrão (robô do
+    # formulário do ML) nunca as recebe — senão tentaria abrir no lugar errado.
+    plat_col = func.lower(func.trim(func.coalesce(Chamado.plataforma, "")))
+    plat = (body.plataforma or "").strip().lower()
+    if plat == "ml":
+        conds.append(plat_col.in_(_PLATAFORMA_ML))
+    elif plat:
+        aceitas = _PLATAFORMAS_SELLER_CENTER.get(plat, (plat,))
+        conds.append(plat_col.in_(aceitas))
+    else:
+        conds.append(plat_col.not_in(_PLATAFORMAS_SO_COM_PEDIDO))
     rows = (
         await session.execute(
             select(ChamadoMensagem, Chamado)
@@ -1100,6 +1112,15 @@ _ACAO_TXT = {
     "humano": "precisa de humano",
 }
 _PLATAFORMA_ML = ("ml", "mercado livre", "mercadolivre", "meli")
+# Plataformas sem API de reclamação: o chamado da aba Status vai pro robô abrir
+# no Seller Center, e só o robô que PEDE por elas no lease as recebe.
+_PLATAFORMAS_SELLER_CENTER: dict[str, tuple[str, ...]] = {
+    "tiktok": ("tiktok", "tik tok", "tiktok shop"),
+    "shopee": ("shopee",),
+}
+_PLATAFORMAS_SO_COM_PEDIDO: tuple[str, ...] = tuple(
+    p for aceitas in _PLATAFORMAS_SELLER_CENTER.values() for p in aceitas
+)
 
 
 async def _anexos_da_abertura(session: AsyncSession, ch: Chamado) -> list[ChamadoAnexo]:

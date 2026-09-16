@@ -31,6 +31,7 @@ from app.services import (
     logistica_amazon,
     logistica_amazon_bling,
     logistica_bling,
+    logistica_chamados_robo,
     logistica_match,
     logistica_meli,
     logistica_rules,
@@ -503,11 +504,13 @@ async def _enriquecer_e_aplicar(
     bling_amz = await _amazon_bling_best_effort(session)
     ids_alvo = [i for ids in alvo.values() for i in ids]
     # Executores da aba Status (Eduardo 07/09: "não está abrindo chamado
-    # automático e nem mandando a mensagem no Threema"): abrir chamado (ML) e
-    # Threema rodam ANTES da troca de situação no Bling — a regra com
+    # automático e nem mandando a mensagem no Threema"): abrir chamado (ML pela
+    # API/robô do formulário; TikTok e Shopee direto pro robô do Seller Center)
+    # e Threema rodam ANTES da troca de situação no Bling — a regra com
     # `status_atual` ainda é a ativa nesse instante; depois que o status muda
     # ela deixa de valer e o chamado/aviso nunca sairia.
     chamados = await logistica_meli.abrir_chamados_em_lote(session, ids_alvo)
+    chamados_robo = await logistica_chamados_robo.abrir_chamados_em_lote(session, ids_alvo)
     threema_lote = await logistica_bling.enviar_threema_em_lote(session, ids_alvo)
     lote = await logistica_bling.aplicar_status_em_lote(session, ids_alvo)
     resumo = {
@@ -517,6 +520,7 @@ async def _enriquecer_e_aplicar(
         **{f"amazon_enrich_{k}": v for k, v in enr_amazon.items()},
         **{f"amazon_bling_{k}": v for k, v in bling_amz.items()},
         **{f"chamado_{k}": v for k, v in chamados.items()},
+        **{f"chamado_robo_{k}": v for k, v in chamados_robo.items()},
         **{f"threema_{k}": v for k, v in threema_lote.items()},
         **{f"status_{k}": v for k, v in lote.items()},
     }
