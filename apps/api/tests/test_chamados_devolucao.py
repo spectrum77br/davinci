@@ -1247,13 +1247,18 @@ async def test_shopee_ja_contestada_a_mao_nao_e_prazo_vencido(client, make_user,
     assert any("physical damage" in t and "senha de uso" in t for t in hist), hist
 
 
-async def test_ml_claim_encerrado_e_texto_manual_no_chamado(client, make_user, auth_as, db, ml):
+async def test_ml_claim_encerrado_e_texto_manual_no_chamado(client, make_user, auth_as, db, ml, monkeypatch):
     """Medido 08/09 (283344): claim fechado pelo mediador em 18/08 e o campo
     `chamado` com texto do operador ("aberto manual…") — o texto NÃO é claim id
     e o encerrado falha de vez, com o desfecho no histórico."""
     user = await make_user(permissions=_perms())
     auth_as(user)
     ml.fechado = True
+
+    async def _pag(session, ch):
+        return {"sem_prejuizo": False, "resumo": "estorno ao comprador — o valor NÃO ficou com a loja"}
+
+    monkeypatch.setattr(svc, "_pagamento_ml", _pag)
     await _seed_pedido(db, user, numero="283344", numeroloja="2000017099328204")
     r = await client.post(
         "/api/devolutions",
@@ -1514,3 +1519,62 @@ async def test_ml_sem_reclamacao_vai_pro_formulario_depois_de_24h(client, make_u
     assert lease.status_code == 200, lease.text
     tarefas = [t for t in lease.json()["tarefas"] if t["mensagem_id"] == str(ab.id)]
     assert len(tarefas) == 1 and tarefas[0]["tipo"] == "abrir", lease.json()
+
+
+async def test_ml_claim_encerrado_sem_prejuizo_nao_abre(client, make_user, auth_as, db, ml, monkeypatch):
+    """Eduardo 16/09: "reclamação encerrada depende — vai ter casos que não vai
+    compensar". Coberto pelo ML (a loja ficou com o valor) → não vai pro formulário."""
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+    ml.fechado = True
+
+    async def _pag(session, ch):
+        return {"sem_prejuizo": True, "resumo": "pago pelo programa de proteção do ML — NÃO saiu da conta da loja"}
+
+    monkeypatch.setattr(svc, "_pagamento_ml", _pag)
+    await _seed_pedido(db, user, numero="285250", numeroloja="2000017099328299")
+    r = await client.post(
+        "/api/devolutions",
+        json={"conta": "aguiar", "pedido_bling": "285250", "pedido_marketplace": "2000017099328299",
+              "condicao_produto": "Novo", "motivo_devolucao": "Bloqueado"},
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["chamado_ml_status"] == "falhou"
+    assert r.json()["chamado_ml_erro"] == "ml_claim_encerrada_sem_prejuizo"
+    ch = await _chamado_de(db, "285250")
+    assert ch.canal == "api"
+    assert any("SEM PREJUÍZO" in t and "proteção" in t for t in await _sistema(db, ch.id))
+
+
+async def test_ml_texto_manual_no_chamado_tambem_vai_pro_formulario(client, make_user, auth_as, db, ml, monkeypatch):
+    """Eduardo 16/09: "manual o robô mexe também" — anotação do operador no campo chamado
+    não bloqueia o formulário; vai pra observação."""
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+
+    async def _pag(session, ch):
+        return {"sem_prejuizo": False}
+
+    monkeypatch.setattr(svc, "_pagamento_ml", _pag)
+    await _seed_pedido(db, user, numero="283399", numeroloja="2000017099328300")
+    r = await client.post(
+        "/api/devolutions",
+        json={"conta": "aguiar", "pedido_bling": "283399", "pedido_marketplace": "2000017099328300",
+              "condicao_produto": "Novo", "motivo_devolucao": "Bloqueado"},
+    )
+    assert r.status_code == 201, r.text
+    ch = await _chamado_de(db, "283399")
+    ab = await _abertura(db, ch.id)
+    # simula: abertura tinha falhado e o operador anotou no campo chamado; claim encerrado
+    ch.chamado = "08/09 aberto manual chamado dentro da venda"
+    ch.canal = "api"
+    ab.canal = "api"
+    ab.status = "falhou"
+    ml.fechado = True
+    await db.commit()
+    msg = await svc.disparar_por_id(db, ch.id)
+    await db.commit()
+    ch = await _chamado_de(db, "283399")
+    assert msg.status == "pendente" and msg.canal == "robo"
+    assert ch.canal == "robo" and ch.chamado is None
+    assert "aberto manual" in (ch.observacao or "")

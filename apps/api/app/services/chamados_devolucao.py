@@ -737,6 +737,17 @@ def _ml_decidido_contra_nos(claim: dict) -> bool:
     return not beneficiados or "complainant" in beneficiados
 
 
+async def _pagamento_ml(session: AsyncSession, ch: Chamado) -> dict:
+    """Fatos do pagamento da venda (chamados_pagamento_ml). Best-effort: erro → {}."""
+    from app.services import chamados_pagamento_ml  # lazy: evita ciclo de import
+
+    try:
+        return await chamados_pagamento_ml.pagamento_da_venda(session, ch.pedido_bling or "", {})
+    except Exception as e:  # noqa: BLE001
+        logger.info("chamado_devolucao_pagamento_ml_falhou", chamado_id=str(ch.id), err=str(e)[:160])
+        return {}
+
+
 def _encaminhar_formulario_ml(
     session: AsyncSession, ch: Chamado, msg: ChamadoMensagem, contexto: str
 ) -> ChamadoMensagem:
@@ -750,13 +761,16 @@ def _encaminhar_formulario_ml(
     msg.status = "pendente"
     msg.erro = None
     ch.canal = "robo"
-    if claim.isdigit():
-        ch.chamado = None  # o protocolo novo do formulário entra aqui
+    if claim and not claim.isdigit():
+        # texto do operador no campo chamado ("08/09 aberto manual…"): o robô também
+        # trata (Eduardo 16/09) — a anotação vai pra observação, não se perde
+        ch.observacao = f"{(ch.observacao or '').rstrip()}\n{claim}".strip()
+    ch.chamado = None  # o protocolo novo do formulário entra aqui
     session.add(
         chamados_svc.registrar_sistema(
             ch,
             "A API do Mercado Livre não aceita esta contestação"
-            + (f" (reclamação {claim} encerrada)" if claim.isdigit() else " (sem reclamação aberta pelo comprador)")
+            + (f" (reclamação {claim} encerrada)" if claim.isdigit() else (" (reclamação encerrada)" if claim else " (sem reclamação aberta pelo comprador)"))
             + " — enviado pro robô do formulário de ajuda do ML; o protocolo aparece aqui quando ele abrir.",
         )
     )
@@ -1432,8 +1446,23 @@ async def disparar(
             msg.erro = "devolucao_prazo_esgotado"
         return msg
     except _MlEncerradaError as e:
-        manual = (ch.chamado or "").strip() and not (ch.chamado or "").strip().isdigit()
-        if _ml_decidido_contra_nos(e.claim) and not manual:
+        # Eduardo 16/09: "reclamação encerrada depende — vai ter casos que não vai
+        # compensar continuar". Só vai pro formulário se decidiu contra nós E o
+        # dinheiro saiu da loja; coberto pelo ML (a loja ficou com o valor) não compensa.
+        if _ml_decidido_contra_nos(e.claim):
+            pag = await _pagamento_ml(session, ch)
+            if pag.get("sem_prejuizo"):
+                session.add(
+                    chamados_svc.registrar_sistema(
+                        ch,
+                        "Reclamação encerrada, mas SEM PREJUÍZO: "
+                        + (pag.get("resumo") or "o ML cobriu e a loja ficou com o valor")
+                        + " — não compensa abrir chamado.",
+                    )
+                )
+                msg.status = "falhou"
+                msg.erro = "ml_claim_encerrada_sem_prejuizo"
+                return msg
             return _encaminhar_formulario_ml(
                 session, ch, msg,
                 _texto_ml_encerrada(e.claim).replace(" Nada mais a abrir pela API.", "")
