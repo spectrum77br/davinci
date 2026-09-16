@@ -22,10 +22,9 @@ from typing import Any
 from uuid import UUID
 
 import structlog
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import get_settings
 from app.models import (
     Integration,
     IntegrationPlatform,
@@ -35,6 +34,7 @@ from app.models import (
     ProductLink,
 )
 from app.models.enums import AlertSeverity, AlertType
+from app.models.user import User
 from app.security.cipher import decrypt_json
 from app.services import threema
 from app.services.alerts import emit_alert
@@ -106,6 +106,24 @@ async def _links_por_external_id(
         )
     ).scalars().all()
     return {lk.external_id: lk for lk in rows}
+
+
+# Quem recebe o Threema. Eduardo (16/09/2026): "envie a mensagem somente para o
+# heisenberg". É o nome do usuário no DaVinci; o ID do Threema sai da ficha
+# dele — trocar de pessoa é mudar o cadastro, não o código. Sem grupo: este
+# aviso é de decisão de preço, não de operação.
+DESTINATARIO_THREEMA = "heisenberg"
+
+
+async def _destinos_threema(session: AsyncSession) -> list[str]:
+    user = (
+        await session.execute(
+            select(User)
+            .where(func.lower(User.name) == DESTINATARIO_THREEMA)
+            .where(User.threema.is_not(None))
+        )
+    ).scalars().first()
+    return threema.parse_recipients(user.threema if user else None)
 
 
 def _texto_aviso(conta: str, enviado: float, divergentes: list[dict[str, Any]]) -> str:
@@ -274,8 +292,9 @@ async def _avisar(
         # Já avisado por esta célula/preço: registra, não repete o Threema.
         logger.info("pricing_confirmacao_ja_avisado", dedupe=dedupe)
         return
-    destinos = threema.parse_recipients(get_settings().nf_sem_estoque_threema_recipients)
+    destinos = await _destinos_threema(session)
     if not destinos:
+        logger.warning("pricing_confirmacao_sem_destinatario", usuario=DESTINATARIO_THREEMA)
         return
     try:
         await threema.ThreemaClient().send_to_all(texto, destinos)

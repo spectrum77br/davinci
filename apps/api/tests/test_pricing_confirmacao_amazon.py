@@ -90,7 +90,11 @@ def _arma(monkeypatch, precos: dict[str, float | None]):
 
     monkeypatch.setattr(conf, "_integracao_amazon_da_conta", fake_integ)
     monkeypatch.setattr(conf, "_links_por_external_id", fake_links)
-    monkeypatch.setattr(conf.get_settings(), "nf_sem_estoque_threema_recipients", "", raising=False)
+
+    async def sem_threema(session):
+        return []
+
+    monkeypatch.setattr(conf, "_destinos_threema", sem_threema)
     return lambda _i: _FakeAmazon(precos)
 
 
@@ -179,3 +183,17 @@ async def test_nao_confere_duas_vezes_nem_cedo_demais(db, make_user, monkeypatch
     assert r1["vistos"] == 1 and r2["vistos"] == 0
     n = (await db.execute(select(PricingPushConfirmacao))).scalars().all()
     assert [x.push_key for x in n] == [key]
+
+
+async def test_threema_vai_so_para_o_heisenberg(db, make_user):
+    """Eduardo: "envie a mensagem somente para o heisenberg". Sai da ficha do
+    usuário, não de grupo de configuração."""
+    outro = await make_user()
+    outro.name, outro.threema = "thatcher", "THATCHER1"
+    await db.commit()
+    assert await conf._destinos_threema(db) == []  # só thatcher cadastrado → ninguém
+
+    edu = await make_user()
+    edu.name, edu.threema = "Heisenberg", "CDSA84BZ"  # maiúscula: comparação é sem caixa
+    await db.commit()
+    assert await conf._destinos_threema(db) == ["CDSA84BZ"]
