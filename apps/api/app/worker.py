@@ -1837,6 +1837,17 @@ async def tuta_devolucoes_tick(ctx: dict) -> None:
     logger.info("tuta_devolucoes_tick_done", enfileirado=bool(cmd))
 
 
+async def pricing_confirmacao_amazon_tick(ctx: dict) -> None:
+    """A cada 10 min: lê na Amazon o preço VIVO dos anúncios enviados pela
+    Tabela de Preços e avisa se a loja não aplicou o que o DaVinci mandou.
+    Ver services/pricing_confirmacao_amazon.py."""
+    from app.services.pricing_confirmacao_amazon import confirmar_pushes_recentes
+
+    async with session_scope() as s:
+        result = await confirmar_pushes_recentes(s)
+    logger.info("pricing_confirmacao_amazon_tick_done", **result)
+
+
 async def marketplace_financials_esteira_lenta(ctx: dict) -> None:
     """Fila dos pedidos cujo financeiro esbarrou na API (403/429/5xx/sem token)
     ou num repasse que a plataforma ainda não publicou.
@@ -3041,6 +3052,13 @@ class WorkerSettings:
         # no sino em horário de expediente, com tempo de reconectar a conta.
         cron(meta_token_refresh, hour=12, minute=35, run_at_startup=False),
         cron(marketplace_financials_retry, minute={10, 40}, run_at_startup=False),
+        # Conferência do preço vivo na Amazon depois dos envios da Tabela.
+        cron(
+            pricing_confirmacao_amazon_tick,
+            minute={4, 14, 24, 34, 44, 54},
+            run_at_startup=True,
+            timeout=600,
+        ),
         # 10:00 UTC = 07:00 BRT — leitura diária da caixa do Tuta.
         cron(tuta_devolucoes_tick, hour=10, minute=0, run_at_startup=False),
         # Esteira lenta: backlog de falha de API. Fila e teto próprios pra não
@@ -3501,6 +3519,7 @@ __all__ = [
     "ml_backfill_run",
     "ml_token_refresh",
     "marketplace_financials_retry",
+    "pricing_confirmacao_amazon_tick",
     "tuta_devolucoes_tick",
     "marketplace_financials_esteira_lenta",
     "marketplace_financials_ressuscitar",

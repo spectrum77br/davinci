@@ -391,3 +391,31 @@ class PricingPushIdempotency(Base):
         DateTime(timezone=True), server_default=text("now()"), nullable=False
     )
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class PricingPushConfirmacao(Base):
+    """Conferência do preço VIVO na Amazon depois de um envio.
+
+    O envio pela Listings API é aceito e guardado, mas a Amazon decide depois se
+    aplica (16/09/2026: 445 aceito, loja seguiu a 599). Um cron lê o preço vivo
+    minutos depois de cada envio e registra aqui: `confirmado`, `divergente`
+    (com a lista em `divergentes`) ou `sem_leitura` (API não respondeu; o
+    próximo tick tenta de novo enquanto a janela durar)."""
+
+    __tablename__ = "pricing_push_confirmacao"
+
+    push_key: Mapped[str] = mapped_column(String(128), primary_key=True)
+    user_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), nullable=False)
+    account_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), nullable=False)
+    product_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), nullable=False)
+    integration_id: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True), nullable=True)
+    preco_enviado: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    conferidos: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    divergentes: Mapped[list] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb")
+    )
+    conferido_em: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()"), nullable=False
+    )

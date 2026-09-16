@@ -1,14 +1,15 @@
 from app.models.alert import Alert
-from app.models.claude_conector import ClaudeConector
 from app.models.audit import AuditFinding, AuditRun, AuditUpload
-from app.models.automacao import Automacao
 from app.models.auth_code import AuthCode
+from app.models.automacao import Automacao
 from app.models.base import Base
 from app.models.bling_envio_correcao import BlingEnvioCorrecao
 from app.models.bling_envio_evento import BlingEnvioEvento
 from app.models.bling_kit_component import BlingKitComponent
 from app.models.bling_nota import BlingNota, BlingNotaEmitida
 from app.models.bling_order import BlingOrder, PrevisaoImpressa
+from app.models.chamado import Chamado, ChamadoAnexo, ChamadoMensagem, ChamadoPedido
+from app.models.claude_conector import ClaudeConector
 from app.models.company import Cadastro, CadastroStore, Company, Store
 from app.models.company_certificate import CompanyCertificate
 from app.models.devolucao_anexo import DevolucaoAnexo
@@ -35,8 +36,8 @@ from app.models.enums import (
     IntegrationPlatform,
     LinkSyncStatus,
     ListingRequestStatus,
-    MarcaInpiStatus,
     ListingStatus,
+    MarcaInpiStatus,
     Marketplace,
     PricingPlatform,
     RedeSocialPlataforma,
@@ -47,11 +48,12 @@ from app.models.enums import (
     VerificacaoStatus,
 )
 from app.models.estoque_dia_finalizado import EstoqueDiaFinalizado
+from app.models.fatura import Fatura
 from app.models.financeiro import (
-    DNPConfig,
-    DNPProduto,
     CertificacoesSyncHistorico,
     CertificacoesSyncState,
+    DNPConfig,
+    DNPProduto,
     FinanceiroConsorcio,
     FinanceiroSimulacao,
     FinanceiroSuprimentos,
@@ -82,27 +84,10 @@ from app.models.logistica import (
     LogisticaStatus,
     LogisticaStatusAnexo,
 )
-from app.models.margem_audit import MargemAudit
-from app.models.prioridade_estoque_movimento import PrioridadeEstoqueMovimento
-from app.models.margem_saldo_manual import MargemSaldoManual
 from app.models.marca import Marca, MarcaEmailAssinatura, MarcaEmailPadrao, RedeSocial
+from app.models.margem_audit import MargemAudit
+from app.models.margem_saldo_manual import MargemSaldoManual
 from app.models.margens import Margens
-from app.models.nf import (
-    NfCatalogoMala,
-    NfCommand,
-    NfEtiqueta,
-    NfEtiquetaArquivo,
-    NfFaturador,
-    NfFaturamento,
-    NfImpressao,
-    NfNota,
-)
-from app.models.marketing_legenda import MarketingLegendaModelo
-from app.models.marketing_postagem import (
-    STATUS_EM_VOO,
-    MarketingPostagem,
-    RedeSocialToken,
-)
 from app.models.marketing import (
     MarketingAccount,
     MarketingCampaign,
@@ -113,19 +98,37 @@ from app.models.marketing import (
     MarketingPattern,
     MarketingSchedule,
 )
+from app.models.marketing_legenda import MarketingLegendaModelo
+from app.models.marketing_postagem import (
+    STATUS_EM_VOO,
+    MarketingPostagem,
+    RedeSocialToken,
+)
 from app.models.marketplace_financial import (
     MarketplaceFinancialEvent,
     MarketplaceOrderFinancial,
     MarketplaceOrderFreightReconciliation,
+)
+from app.models.nf import (
+    NfCatalogoMala,
+    NfCommand,
+    NfEtiqueta,
+    NfEtiquetaArquivo,
+    NfFaturador,
+    NfFaturamento,
+    NfImpressao,
+    NfNota,
 )
 from app.models.pricing import (
     AuditDismissedSku,
     PricingAccount,
     PricingOverride,
     PricingProduct,
+    PricingPushConfirmacao,
     PricingPushIdempotency,
     StoreInfo,
 )
+from app.models.prioridade_estoque_movimento import PrioridadeEstoqueMovimento
 from app.models.product import (
     BackgroundJob,
     BackgroundJobDetail,
@@ -133,14 +136,12 @@ from app.models.product import (
     ProductCategory,
     ProductLink,
 )
-from app.models.chamado import Chamado, ChamadoAnexo, ChamadoMensagem, ChamadoPedido
 from app.models.refund import Refund
 from app.models.segment import Segment, SegmentSpecialDate
 from app.models.situacao_bling import SituacaoBling
 from app.models.stock_check import StockCheck
 from app.models.stock_movement import StockMovement
 from app.models.sync_log import SyncLog
-from app.models.fatura import Fatura
 from app.models.tarefa import Tarefa
 from app.models.user import User
 from app.models.user_settings import UserSettings
@@ -254,6 +255,7 @@ __all__ = [
     "PricingOverride",
     "PricingPlatform",
     "PricingProduct",
+    "PricingPushConfirmacao",
     "PricingPushIdempotency",
     "Product",
     "ProductCategory",

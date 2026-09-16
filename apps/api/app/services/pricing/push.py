@@ -704,7 +704,14 @@ async def push_one(
     if ok_count == len(links):
         agg_ok = True
         agg_code = "ok"
-        agg_detail = None
+        # Amazon aceita o envio e decide depois se aplica: "ok" aqui é "aceito",
+        # não "valendo na loja". O conferente (pricing_confirmacao_amazon) lê o
+        # preço vivo minutos depois e avisa se divergir.
+        agg_detail = (
+            "aceito pela Amazon — o preço vivo é conferido em ~10 min (aviso se divergir)"
+            if integration.platform == IntegrationPlatform.AMAZON
+            else None
+        )
         post_status = CellStatus.AUTO
     elif ok_count > 0:
         agg_ok = True
