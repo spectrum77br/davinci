@@ -293,7 +293,16 @@ class MarketingCreative(Base, TimestampMixin):
 
     id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
     modelo: Mapped[str] = mapped_column(String(160), nullable=False)
+    # `marca` (texto livre, como sempre foi) + `marca_id` (migration 0279): o
+    # elo com Cadastros › Marcas, que é de onde a postagem tira as CONTAS de
+    # rede social. O backfill da 0279 casa lower(marca) = marcas.slug.
     marca: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    marca_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("marcas.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     sku: Mapped[str | None] = mapped_column(String(512), nullable=True)
     # Equipe de marketing dona da linha (nome livre; casa com
     # users.marketing_teams). NULL = sem equipe (só admin/sem-equipe vê).
@@ -331,5 +340,11 @@ class MarketingCreativeFile(Base, TimestampMixin):
     file_size: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     # Caminho relativo a settings.uploads_dir (ex.: "creatives/<id>/<nome>").
     file_rel: Mapped[str] = mapped_column(String(512), nullable=False)
+    # SHA-256 do conteúdo, carimbado no upload (migration 0279). Serve a três
+    # coisas na postagem automática: idempotência, "esse vídeo já foi postado?"
+    # e a trava de reusar o MESMO vídeo em marcas diferentes — Instagram e
+    # TikTok punem conteúdo repetido entre contas em SILÊNCIO (a conta perde
+    # recomendação; não vem erro nenhum de API).
+    sha256: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
 
     creative: Mapped[MarketingCreative] = relationship(back_populates="files")

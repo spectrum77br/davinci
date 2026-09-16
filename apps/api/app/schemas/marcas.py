@@ -355,6 +355,11 @@ class RedeSocialPatch(BaseModel):
     verificacao_obs: str | None = None
     obs: str | None = None
     ativo: bool | None = None
+    # Postagem automática dos criativos (robô): interruptor + tetos DESTA
+    # conta. null nos tetos = usa o padrão do servidor.
+    postagem_auto: bool | None = None
+    postagem_max_dia: int | None = None
+    postagem_intervalo_min: int | None = None
 
     _v_conta = field_validator("conta", mode="before")(_handle)
     _v_texto = field_validator(*_TEXTO_REDE, mode="before")(_texto)
@@ -386,6 +391,16 @@ class RedeSocialOut(BaseModel):
     verificacao_obs: str | None = None
     obs: str | None = None
     ativo: bool
+    # Postagem automática (robô dos criativos) — ver models/marca.py.
+    postagem_auto: bool = False
+    postagem_max_dia: int | None = None
+    postagem_intervalo_min: int | None = None
+    # Credencial de publicação (redes_sociais_tokens): NUNCA o token, só o
+    # que a tela precisa mostrar.
+    has_token: bool = False
+    token_status: str | None = None
+    token_conta_externa: str | None = None
+    token_expires_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -400,6 +415,43 @@ class RedesSociaisGridRow(BaseModel):
 class RedesSociaisGridOut(BaseModel):
     plataformas: list[str]
     rows: list[RedesSociaisGridRow]
+
+
+class ConectarContaIn(BaseModel):
+    """Token de publicação colado pelo operador na tela (nunca trafega em
+    chat/log). `external_user_id` é opcional: quando vazio, o backend
+    descobre pelo próprio token (as Páginas do portfólio e a conta do
+    Instagram ligada a cada uma)."""
+
+    access_token: str = Field(repr=False)
+    external_user_id: str | None = None
+
+    @field_validator("access_token", mode="before")
+    @classmethod
+    def _v_token(cls, v: Any) -> str:
+        s = str(v or "").strip()
+        if len(s) < 20:
+            raise ValueError("token_invalido")
+        return s
+
+
+class ContaExternaOut(BaseModel):
+    """O que o token enxerga: cada Página e a conta do Instagram ligada a
+    ela — é o que a tela mostra pro operador escolher/conferir."""
+
+    page_id: str | None = None
+    page_nome: str | None = None
+    ig_user_id: str | None = None
+    ig_username: str | None = None
+
+
+class ConexaoOut(BaseModel):
+    ok: bool
+    external_user_id: str | None = None
+    external_username: str | None = None
+    token_expires_at: datetime | None = None
+    # O que o token enxerga (pra conferência visual na tela).
+    contas: list[ContaExternaOut] = []
 
 
 class SenhaOut(BaseModel):
@@ -563,6 +615,9 @@ class EmailTesteOut(BaseModel):
 
 
 __all__ = [
+    "ConectarContaIn",
+    "ConexaoOut",
+    "ContaExternaOut",
     "EmailContexto",
     "EmailPadraoCreate",
     "EmailPadraoOut",

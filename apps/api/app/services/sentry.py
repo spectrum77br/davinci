@@ -16,6 +16,44 @@ logger = structlog.get_logger()
 _initialized = False
 
 
+_CHAVES_DE_SEGREDO = ("token", "secret", "senha", "password", "signature", "sig=")
+
+
+def _sem_query_com_segredo(event, _hint=None):
+    """Apaga query string de span/breadcrumb quando ela cheira a segredo.
+
+    Vale pra QUALQUER host, não só a Meta: query string com token não deveria
+    sair daqui de jeito nenhum, e a lista de integrações que gravam URL só
+    cresce. Só apaga o que casa — o resto do trace continua útil pra
+    diagnóstico.
+    """
+
+    def _limpa(d) -> None:
+        if not isinstance(d, dict):
+            return
+        # `http.query` é só a query: se casar, some inteira.
+        valor = d.get("http.query")
+        if isinstance(valor, str) and any(c in valor.lower() for c in _CHAVES_DE_SEGREDO):
+            d["http.query"] = "***"
+        # Na URL completa, só a query é apagada — o caminho continua legível
+        # (é o que diz QUAL chamada falhou). "debug_token" no path não é
+        # segredo; `?input_token=…` é.
+        for campo in ("url", "http.url"):
+            valor = d.get(campo)
+            if not isinstance(valor, str) or "?" not in valor:
+                continue
+            caminho, _, query = valor.partition("?")
+            if any(c in query.lower() for c in _CHAVES_DE_SEGREDO):
+                d[campo] = f"{caminho}?***"
+
+    for span in event.get("spans") or []:
+        _limpa(span.get("data") if isinstance(span, dict) else None)
+    for migalha in (event.get("breadcrumbs") or {}).get("values") or []:
+        _limpa(migalha.get("data") if isinstance(migalha, dict) else None)
+    _limpa((event.get("contexts") or {}).get("trace", {}).get("data"))
+    return event
+
+
 def init_sentry(*, component: str) -> bool:
     """Returns True if Sentry was initialized in this call."""
     global _initialized
@@ -46,11 +84,29 @@ def init_sentry(*, component: str) -> bool:
             "sac_senha_enc",
             "password_enc",
             "pwd",
+            # Robô de postagem: o token da Meta entra pelo body do
+            # POST /redes-sociais/{id}/conectar e publica na conta da marca —
+            # vaza-lo é dar a conta. `token_enc` é o BYTEA cifrado, mas nem
+            # cifrado precisa sair daqui.
+            "access_token",
+            "refresh_token",
+            "token_enc",
+            "input_token",
+            "page_access_token",
+            "page_token",
         ],
         recursive=True,
     )
     sentry_sdk.init(
         dsn=s.sentry_dsn,
+        # O EventScrubber só mascara CHAVE de dicionário. A integração de
+        # httpx (auto-habilitada) grava a QUERY STRING das chamadas de saída
+        # em `span.data["http.query"]` — chave que nenhum denylist alcança, e
+        # a Graph API da Meta exige `?input_token=<token>` no debug_token.
+        # Sem estes dois ganchos, ~10% das conexões de conta mandariam o token
+        # de publicação da marca em claro pro Sentry.
+        before_send=_sem_query_com_segredo,
+        before_send_transaction=_sem_query_com_segredo,
         environment=s.env,
         traces_sample_rate=sample_rate,
         send_default_pii=False,

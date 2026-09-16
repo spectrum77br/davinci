@@ -97,6 +97,11 @@ from app.models.nf import (
     NfImpressao,
     NfNota,
 )
+from app.models.marketing_postagem import (
+    STATUS_EM_VOO,
+    MarketingPostagem,
+    RedeSocialToken,
+)
 from app.models.marketing import (
     MarketingAccount,
     MarketingCampaign,
@@ -221,6 +226,7 @@ __all__ = [
     "MarketingDecision",
     "MarketingMetric",
     "MarketingPattern",
+    "MarketingPostagem",
     "MarketingSchedule",
     "BlingKitComponent",
     "Marketplace",
@@ -240,6 +246,7 @@ __all__ = [
     "PLATFORMS",
     "REDES_SOCIAIS_PLATAFORMAS",
     "RedeSocial",
+    "RedeSocialToken",
     "RedeSocialPlataforma",
     "PricingAccount",
     "PricingOverride",
@@ -256,6 +263,7 @@ __all__ = [
     "Refund",
     "Segment",
     "SegmentSpecialDate",
+    "STATUS_EM_VOO",
     "SituacaoBling",
     "StockCheck",
     "StockMovement",

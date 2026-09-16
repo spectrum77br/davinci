@@ -35,6 +35,7 @@ from sqlalchemy import (
     Date,
     ForeignKey,
     Index,
+    Integer,
     LargeBinary,
     String,
     Text,
@@ -167,6 +168,16 @@ class RedeSocial(Base, TimestampMixin):
         server_default=text("'nao_solicitado'"),
     )
     verificacao_obs: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # ---- postagem automática dos criativos (migration 0279). O robô só
+    # publica em conta com `postagem_auto` ligada — é o interruptor por conta.
+    # Os tetos são por conta e NULL = usa o padrão do servidor
+    # (settings.marketing_postagem_max_dia / _intervalo_min): o Eduardo pediu
+    # que os limites fossem configuráveis pra rodar automático sem babá.
+    postagem_auto: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    postagem_max_dia: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    postagem_intervalo_min: Mapped[int | None] = mapped_column(Integer, nullable=True)
     obs: Mapped[str | None] = mapped_column(Text, nullable=True)
     ativo: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=True, server_default=text("true")

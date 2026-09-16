@@ -224,6 +224,31 @@ class Settings(BaseSettings):
     # marionete .env to turn the integration on.
     marketing_agent_token: str = ""
 
+    # ─── Robô de postagem dos criativos (Marketing × Redes Sociais) ───────
+    # `marketing_postagem_commit` é a TRAVA, no espírito do SELECTORS_
+    # CALIBRATED do executor: com False o robô percorre tudo (valida arquivo,
+    # monta o payload, grava o resultado) mas NÃO chama a Meta — é assim que
+    # se testa local e em produção antes de soltar de verdade.
+    marketing_postagem_commit: bool = False
+    # Versão da Graph API em UM lugar só.
+    meta_graph_version: str = "v26.0"
+    # Teto saudável por conta (o técnico é 100/24h no IG e 30/24h no FB).
+    marketing_postagem_max_dia: int = 2
+    marketing_postagem_intervalo_min: int = 90
+    # Agendamento que venceu demais (worker parado) não sai sozinho: vira
+    # `revisar` e alguém decide.
+    marketing_postagem_atraso_max_min: int = 360
+    # Quanto tempo à frente dá pra agendar. Trava contra ano digitado errado
+    # ("2027") — o post ficaria pendurado meses sem ninguém lembrar.
+    marketing_postagem_horizonte_dias: int = 60
+    # Como o vídeo chega na Meta no Instagram:
+    #   "link"    = a Meta BAIXA de um link assinado de 15 min (funciona sem
+    #               Página do Facebook — é o caso das marcas hoje);
+    #   "binario" = upload direto do servidor (não expõe nada), mas só existe
+    #               na trilha Facebook Login, que exige Página vinculada.
+    # Quando as marcas ganharem Página, virar "binario" (e só isso).
+    marketing_postagem_upload: str = "link"
+
     # Token M2M do executor de IMPORTAÇÃO DE NF (marionete AdsPower da Fase
     # 3a-4). Guarda os /nf-cadastro/agent/* (lease/result). Vazio = endpoints
     # FECHADOS (401). O executor local abre o AdsPower do faturador, loga no

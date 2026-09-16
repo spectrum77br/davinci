@@ -19,10 +19,24 @@
 // o modal/sair da página. POST/PATCH só levam a senha quando o usuário
 // digitou uma (chave ausente = backend mantém, schemas/marcas.py); limpar é
 // sempre um null explícito.
+//
+// Publicação automática (Eduardo, 15/09/2026): além da senha de LOGIN acima,
+// cada conta pode ter uma CREDENCIAL DE PUBLICAÇÃO (token gerado no Business
+// Suite) e o interruptor `postagem_auto`. O robô da aba Marketing › Criativos
+// só publica sozinho onde os dois estão ligados — publicar na mão pela aba
+// Criativos funciona de qualquer jeito. Os tetos por conta (posts/dia,
+// intervalo mínimo) são opcionais: NULL = padrão do servidor (2 posts/dia,
+// 90 min, config.py::marketing_postagem_*).
+//
+// O token é colado no sub-modal "conectar" (POST /{id}/conectar), é cifrado
+// no servidor e NUNCA volta: a listagem só traz has_token / token_status /
+// token_conta_externa / token_expires_at. Por isso o plaintext do token não
+// é copiado pra nenhuma variável reativa nossa, não entra em log, :title,
+// URL nem localStorage, e é zerado ao fechar o sub-modal / sair da página.
 import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
 import { TABS_CADASTROS } from '~/lib/navGroups'
 import {
-  AlertCircle, BadgeCheck, Check, Copy, ExternalLink, Eye, EyeOff, Loader2, Pencil, Plus, RefreshCw, Trash2, X,
+  AlertCircle, BadgeCheck, Check, Copy, ExternalLink, Eye, EyeOff, Loader2, Pencil, Plug, Plus, RefreshCw, Send, Trash2, Unlink, X,
 } from 'lucide-vue-next'
 import {
   PLATAFORMAS, PLATAFORMA_LABELS, VERIFICACAO_GUIA, VERIFICACAO_LABELS, VERIFICACAO_STATUS, fmtFone, perfilUrl,
@@ -81,13 +95,47 @@ type RedeSocialOut = {
   verificacao_obs: string | null
   obs: string | null
   ativo: boolean
+  // Publicação automática: interruptor + tetos DESTA conta (null = padrão
+  // do servidor). O robô lê isso em services/marketing/postagens.py.
+  postagem_auto: boolean
+  postagem_max_dia: number | null
+  postagem_intervalo_min: number | null
+  // Estado da credencial de publicação (redes_sociais_tokens) — NUNCA o
+  // token em si; `token_conta_externa` é o @/nome que ele autoriza.
+  has_token: boolean
+  token_status: string | null
+  token_conta_externa: string | null
+  token_expires_at: string | null
   created_at: string
   updated_at: string
+}
+
+// ContaExternaOut: o que o token enxerga (uma Página + a conta do Instagram
+// ligada a ela). Só chega quando o backend NÃO conseguiu decidir sozinho —
+// aí o operador escolhe e reenvia com `external_user_id`.
+type ContaExterna = {
+  page_id: string | null
+  page_nome: string | null
+  ig_user_id: string | null
+  ig_username: string | null
+}
+
+// ConexaoOut: ok=true já gravou a credencial; ok=false = precisa escolher.
+type ConexaoOut = {
+  ok: boolean
+  external_user_id: string | null
+  external_username: string | null
+  token_expires_at: string | null
+  contas: ContaExterna[]
 }
 
 // cells tem chave pra toda plataforma (lista vazia = marca sem conta nela).
 type GridRow = { marca: MarcaRef; cells: Record<string, RedeSocialOut[]> }
 type Grid = { plataformas: string[]; rows: GridRow[] }
+
+// Teto por conta: o <input type="number"> devolve number quando há valor e
+// '' quando o campo está vazio — e vazio é justamente "herda o padrão".
+type Teto = string | number
 
 type Form = {
   marca_id: string
@@ -102,15 +150,32 @@ type Form = {
   verificacao_obs: string
   ativo: boolean
   obs: string
+  postagem_auto: boolean
+  postagem_max_dia: Teto
+  postagem_intervalo_min: Teto
 }
 type Modo = 'create' | 'edit'
 
 // ---------- helpers puros (testados em tests/redes-sociais-sfc.cjs)
 
+// Teto por conta (posts/dia, intervalo mínimo): campo vazio = herda o padrão
+// do servidor, e isso vai como null EXPLÍCITO no PATCH — é o jeito de voltar
+// ao padrão depois de ter fixado um número. Lixo digitado (0, negativo,
+// texto) também vira null: melhor herdar o padrão do que mandar um teto sem
+// sentido pro robô (Eduardo, 15/09/2026).
+function tetoOuNull(v: Teto | null | undefined): number | null {
+  const s = String(v ?? '').trim()
+  if (!s) return null
+  const n = Math.trunc(Number(s))
+  return Number.isFinite(n) && n > 0 ? n : null
+}
+
 // Corpo do POST/PATCH da conta. `senha` só entra quando o usuário digitou
 // uma E ela é diferente da revelada pelo olho (`senhaSalva`): chave ausente
 // = backend mantém; reenviar o plaintext revelado seria tráfego à toa.
-// `ativo` só no PATCH — conta nova nasce ativa (RedeSocialCreate).
+// `ativo` e os campos de postagem só no PATCH — RedeSocialCreate não tem
+// esses campos (conta nova nasce ativa, sem token e sem postagem_auto).
+// O TOKEN nunca passa por aqui: ele vai só no POST /{id}/conectar.
 function montaBody(f: Form, modo: Modo, senhaSalva: string | null): Record<string, unknown> {
   const body: Record<string, unknown> = {
     marca_id: f.marca_id,
@@ -124,10 +189,71 @@ function montaBody(f: Form, modo: Modo, senhaSalva: string | null): Record<strin
     verificacao_obs: f.verificacao_obs.trim() || null,
     obs: f.obs.trim() || null,
   }
-  if (modo === 'edit') body.ativo = f.ativo
+  if (modo === 'edit') {
+    body.ativo = f.ativo
+    body.postagem_auto = f.postagem_auto
+    body.postagem_max_dia = tetoOuNull(f.postagem_max_dia)
+    body.postagem_intervalo_min = tetoOuNull(f.postagem_intervalo_min)
+  }
   // Sem trim: espaço pode ser parte da senha (schemas/marcas.py::_senha).
   if (f.senha && f.senha !== senhaSalva) body.senha = f.senha
   return body
+}
+
+// O robô só publica sozinho quando a conta tem credencial E o interruptor
+// ligado (postagens.py::pode_publicar_local) — é essa dupla que o
+// indicadorzinho do grid mostra.
+function postagemAutoOn(r: { postagem_auto?: boolean; has_token?: boolean }): boolean {
+  return !!r.postagem_auto && !!r.has_token
+}
+
+// status da credencial (redes_sociais_tokens.status): ok | expirado | revogado.
+const TOKEN_STATUS_LABELS: Record<string, string> = {
+  ok: 'conectado',
+  expirado: 'token vencido',
+  revogado: 'token revogado',
+}
+
+type TokenEstado = {
+  has_token?: boolean
+  token_status?: string | null
+  token_conta_externa?: string | null
+} | null | undefined
+
+// Pill do estado da credencial no modal: nunca o token, só o @/nome que ele
+// autoriza (token_conta_externa) e o status quando não está ok.
+function tokenPillTexto(r: TokenEstado): string {
+  if (!r?.has_token) return 'sem token'
+  const conta = (r.token_conta_externa || '').trim().replace(/^@+/, '')
+  const base = conta ? `conectado como @${conta}` : 'conectado'
+  const st = r.token_status || 'ok'
+  return st === 'ok' ? base : `${base} · ${TOKEN_STATUS_LABELS[st] || st}`
+}
+
+// Verde só quando dá pra publicar; âmbar quando venceu/foi revogado (o robô
+// para sozinho); cinza sem credencial.
+function tokenPillClass(r: TokenEstado): string {
+  if (!r?.has_token) return 'bg-muted text-muted-foreground'
+  return (r.token_status || 'ok') === 'ok'
+    ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300'
+    : 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300'
+}
+
+// Escolha do operador quando o backend não consegue decidir: o valor do
+// rádio é o id que o `external_user_id` espera — ig_user_id no Instagram,
+// page_id nas Páginas (routers/redes_sociais.py::conectar_conta).
+function contaExternaId(c: ContaExterna, plataforma: string): string {
+  const id = plataforma === 'instagram' ? c.ig_user_id : c.page_id
+  return (id || '').trim()
+}
+
+// Rótulo do rádio: o que o operador reconhece (nome da Página e o @ do IG).
+function contaExternaLabel(c: ContaExterna): string {
+  const partes: string[] = []
+  if (c.page_nome) partes.push(c.page_nome)
+  if (c.ig_username) partes.push(`@${String(c.ig_username).replace(/^@+/, '')}`)
+  if (partes.length) return partes.join(' · ')
+  return c.page_id || c.ig_user_id || 'conta sem nome'
 }
 
 // Tooltip do chip: contato EFETIVO (marcado "da marca" quando herdado) e o
@@ -144,6 +270,10 @@ function chipTitle(r: RedeSocialOut): string {
   if (!r.ativo) partes.push('inativa')
   if (r.senha_origem === 'conta') partes.push('senha própria')
   else if (r.senha_origem === 'marca') partes.push('senha da marca')
+  // Postagem automática: o tooltip diz por que o pontinho do Send aparece —
+  // e avisa quando o interruptor está ligado mas falta credencial (o robô
+  // não publica assim).
+  if (r.postagem_auto) partes.push(r.has_token ? 'postagem automática' : 'postagem automática (sem token)')
   if (r.obs) partes.push(r.obs)
   return partes.join(' · ')
 }
@@ -325,9 +455,11 @@ const colspan = computed(() => 4 + PLATAFORMAS.length + MARCA_TEXT_COLS.length)
 async function load() {
   loading.value = true
   error.value = null
-  // Recarregar descarta qualquer senha revelada (SPEC v2) — na célula e no modal.
+  // Recarregar descarta qualquer senha revelada (SPEC v2) — na célula e no
+  // modal — e o token que estivesse colado no sub-modal de conectar.
   clearRevealed()
   hideSenhaModal()
+  fecharConexao()
   try {
     const g = await api<Grid>('/api/redes-sociais/grid')
     avisaDivergencia(g.plataformas)
@@ -610,6 +742,11 @@ function emptyForm(marcaId = '', plataforma: Plataforma = PLATAFORMAS[0]): Form 
     verificacao_obs: '',
     ativo: true,
     obs: '',
+    // Conta nova nasce sem publicação automática: o bloco só aparece na
+    // edição, porque conectar a credencial precisa da conta já salva.
+    postagem_auto: false,
+    postagem_max_dia: '',
+    postagem_intervalo_min: '',
   }
 }
 
@@ -632,6 +769,7 @@ const urlAbrir = computed(() => form.value.url.trim() || urlSugerida.value)
 function openCreate(marcaId = '', plataforma: Plataforma = PLATAFORMAS[0]) {
   if (!canEdit.value) return
   hideSenhaModal()
+  fecharConexao()
   form.value = emptyForm(marcaId, plataforma)
   modalErr.value = null
   modal.value = { rede: null }
@@ -639,6 +777,7 @@ function openCreate(marcaId = '', plataforma: Plataforma = PLATAFORMAS[0]) {
 
 function openEdit(r: RedeSocialOut) {
   hideSenhaModal()
+  fecharConexao()
   form.value = {
     marca_id: r.marca_id,
     plataforma: r.plataforma as Plataforma,
@@ -656,14 +795,19 @@ function openEdit(r: RedeSocialOut) {
     verificacao_obs: r.verificacao_obs || '',
     ativo: r.ativo,
     obs: r.obs || '',
+    postagem_auto: !!r.postagem_auto,
+    // null = herda o padrão do servidor → campo vazio (o placeholder diz qual é).
+    postagem_max_dia: r.postagem_max_dia == null ? '' : r.postagem_max_dia,
+    postagem_intervalo_min: r.postagem_intervalo_min == null ? '' : r.postagem_intervalo_min,
   }
   modalErr.value = null
   modal.value = { rede: r }
 }
 
 function closeModal() {
-  // Zera o formulário inteiro (inclusive senha) ao fechar — spec v2.
+  // Zera o formulário inteiro (inclusive senha e o token colado) ao fechar — spec v2.
   hideSenhaModal()
+  fecharConexao()
   form.value = emptyForm()
   modalErr.value = null
   modal.value = null
@@ -834,6 +978,151 @@ const senhaPlaceholder = computed(() => {
   return ''
 })
 
+// ============================================== credencial de publicação (token)
+// Sub-modal "conectar" do bloco Publicação automática. O operador cola o
+// token do Business Suite e ele vai DIRETO pro POST /{id}/conectar: o
+// plaintext só existe no v-model do campo enquanto o sub-modal está aberto
+// (é preciso pra reenviar quando o backend devolve ok=false pedindo a
+// escolha da conta) e é zerado ao fechar / salvar / sair da página. Nada de
+// log, title, URL ou localStorage — o backend também não devolve o token
+// em endpoint nenhum (Eduardo, 15/09/2026).
+
+// Códigos novos do /conectar. Ficam aqui (e não em lib/apiError.ts) porque
+// são só desta tela; se virarem de mais alguém, sobem pro MARCAS_ERROS.
+const CONEXAO_ERROS: Record<string, string> = {
+  ...MARCAS_ERROS,
+  token_recusado_pela_meta: 'A Meta recusou esse token — gere um novo no Business Suite e cole de novo',
+  token_invalido: 'Token inválido — cole o token inteiro, sem espaços',
+}
+
+const conexao = ref<{ rede: RedeSocialOut } | null>(null)
+const tokenValor = ref('')
+const tokenVisible = ref(false)
+const conectando = ref(false)
+const conexaoErr = ref<string | null>(null)
+// Só quando o backend não consegue decidir sozinho (ok=false): o que o token
+// enxerga vira opção de rádio. Nada aqui é segredo — são nomes de Página/@.
+const conexaoContas = ref<ContaExterna[]>([])
+const conexaoEscolha = ref('')
+
+// Rótulo da plataforma da conta que está sendo conectada — vem da conta
+// salva, não do select do formulário (que pode estar alterado sem salvar).
+const conexaoPlataformaLabel = computed(() => {
+  const p = conexao.value?.rede.plataforma as Plataforma | undefined
+  return (p && PLATAFORMA_LABELS[p]) || p || ''
+})
+
+const tokenPillTitle = computed(() => {
+  const rede = modal.value?.rede
+  if (!rede?.has_token) return 'sem credencial — o robô não publica sozinho nesta conta'
+  const partes = ['a credencial fica cifrada no servidor e não é exibida']
+  if (rede.token_expires_at) {
+    const d = new Date(rede.token_expires_at)
+    if (!Number.isNaN(d.getTime())) partes.unshift(`vence em ${d.toLocaleDateString('pt-BR')}`)
+  }
+  return partes.join(' — ')
+})
+
+function abrirConexao() {
+  if (!modal.value?.rede || !canEdit.value) return
+  tokenValor.value = ''
+  tokenVisible.value = false
+  conexaoErr.value = null
+  conexaoContas.value = []
+  conexaoEscolha.value = ''
+  conexao.value = { rede: modal.value.rede }
+}
+
+function fecharConexao() {
+  // Zera o plaintext do token — inclusive quando o operador desiste no meio
+  // da escolha da conta.
+  tokenValor.value = ''
+  tokenVisible.value = false
+  conexaoErr.value = null
+  conexaoContas.value = []
+  conexaoEscolha.value = ''
+  conexao.value = null
+}
+
+// Reflete o novo estado da credencial na conta aberta E na cópia do grid
+// (o PATCH/POST não recarrega a grade inteira).
+function aplicaConta(rede: RedeSocialOut, patch: Partial<RedeSocialOut>) {
+  const alvos = new Set<RedeSocialOut>([rede])
+  const doGrid = rowDaMarca(rede.marca_id)?.cells[rede.plataforma]?.find((x) => x.id === rede.id)
+  if (doGrid) alvos.add(doGrid)
+  const aberta = modal.value?.rede
+  if (aberta && aberta.id === rede.id) alvos.add(aberta)
+  for (const alvo of alvos) Object.assign(alvo, patch)
+}
+
+async function conectar() {
+  const rede = conexao.value?.rede
+  if (!rede || !canEdit.value || conectando.value) return
+  const token = tokenValor.value.trim()
+  if (!token) {
+    conexaoErr.value = 'cole o token gerado no Business Suite'
+    return
+  }
+  if (conexaoContas.value.length && !conexaoEscolha.value) {
+    conexaoErr.value = 'escolha qual conta este token deve publicar'
+    return
+  }
+  conectando.value = true
+  conexaoErr.value = null
+  try {
+    const r = await api<ConexaoOut>(`/api/redes-sociais/${rede.id}/conectar`, {
+      method: 'POST',
+      // O token vai no CORPO (nunca na URL) e não fica em variável nossa.
+      body: { access_token: token, external_user_id: conexaoEscolha.value || null },
+    })
+    if (!r.ok) {
+      // Token válido, mas o backend não soube casar com o @ cadastrado: a
+      // tela mostra o que ele enxerga e o operador escolhe — o campo do
+      // token continua preenchido só porque o reenvio precisa dele.
+      conexaoContas.value = r.contas || []
+      conexaoEscolha.value = ''
+      conexaoErr.value = conexaoContas.value.length
+        ? 'escolha qual conta este token deve publicar e confirme'
+        : 'este token não enxerga nenhuma Página/conta — gere outro com as permissões da conta'
+      return
+    }
+    aplicaConta(rede, {
+      has_token: true,
+      token_status: 'ok',
+      token_conta_externa: r.external_username || r.external_user_id,
+      token_expires_at: r.token_expires_at,
+    })
+    fecharConexao()
+  } catch (e: any) {
+    conexaoErr.value = apiErrMsg(e, CONEXAO_ERROS)
+  } finally {
+    conectando.value = false
+  }
+}
+
+async function desconectar() {
+  const rede = modal.value?.rede
+  if (!rede?.has_token || !canEdit.value) return
+  const nome = rede.conta ? `@${rede.conta}` : 'esta conta'
+  if (!confirm(`Desconectar a credencial de ${nome}?\n\nO robô para de publicar sozinho nesta conta na hora.`)) return
+  saving.value = true
+  modalErr.value = null
+  try {
+    await api(`/api/redes-sociais/${rede.id}/conectar`, { method: 'DELETE' })
+    aplicaConta(rede, {
+      has_token: false,
+      token_status: null,
+      token_conta_externa: null,
+      token_expires_at: null,
+    })
+    fecharConexao()
+  } catch (e: any) {
+    modalErr.value = apiErrMsg(e, CONEXAO_ERROS)
+  } finally {
+    saving.value = false
+  }
+}
+
 // Filtrar também descarta senha revelada (SPEC v2) — célula e modal.
 watch(search, () => {
   clearRevealed()
@@ -843,8 +1132,10 @@ watch(search, () => {
 onUnmounted(() => {
   clearRevealed()
   hideSenhaModal()
+  fecharConexao()
   form.value.senha = ''
   senhaMarcaValor.value = ''
+  tokenValor.value = ''
 })
 
 // O grid não tem senha — pode carregar no SSR (padrão store-info.vue).
@@ -1124,6 +1415,15 @@ await load()
                     class="size-1.5 rounded-full shrink-0"
                     :class="dotClass(r.verificacao_status)"
                   />
+                  <!-- conta que o robô publica sozinho (token + postagem_auto):
+                       um Send miúdo, só pra dar de ver na grade -->
+                  <span
+                    v-if="postagemAutoOn(r)"
+                    class="shrink-0 inline-flex"
+                    title="postagem automática ligada"
+                  >
+                    <Send class="size-2.5 text-emerald-600" />
+                  </span>
                 </button>
                 <button
                   v-if="canEdit"
@@ -1279,6 +1579,89 @@ await load()
               </button>
             </div>
           </div>
+          <!-- Publicação automática (Eduardo, 15/09/2026): credencial da
+               conta + interruptor do robô + tetos desta conta. Só na edição:
+               conectar precisa da conta já salva e RedeSocialCreate não tem
+               esses campos (a conta nasce sem token e sem postagem_auto). -->
+          <div v-if="modal.rede" class="col-span-2 border rounded-md p-3 space-y-2">
+            <div class="flex items-center gap-2 flex-wrap">
+              <Send class="size-4 text-muted-foreground shrink-0" />
+              <h3 class="text-sm font-semibold">Publicação automática</h3>
+              <span
+                class="text-[11px] rounded-full px-2 py-0.5 whitespace-nowrap"
+                :class="tokenPillClass(modal.rede)"
+                :title="tokenPillTitle"
+              >
+                {{ tokenPillTexto(modal.rede) }}
+              </span>
+              <div v-if="canEdit" class="ml-auto flex items-center gap-2">
+                <template v-if="modal.rede.has_token">
+                  <button
+                    type="button"
+                    class="text-[11px] text-muted-foreground hover:text-foreground hover:underline disabled:opacity-50"
+                    :disabled="saving"
+                    title="colar outro token no lugar deste (para renovar um vencido, por exemplo)"
+                    @click="abrirConexao"
+                  >
+                    trocar token
+                  </button>
+                  <Button size="sm" variant="ghost" class="text-destructive hover:text-destructive" :disabled="saving" @click="desconectar">
+                    <Unlink class="size-4 mr-1" /> desconectar
+                  </Button>
+                </template>
+                <Button v-else size="sm" variant="outline" :disabled="saving" @click="abrirConexao">
+                  <Plug class="size-4 mr-1" /> conectar
+                </Button>
+              </div>
+            </div>
+
+            <label class="flex items-start gap-2 text-sm">
+              <input v-model="form.postagem_auto" type="checkbox" :disabled="!canEdit" class="mt-1" />
+              <span>
+                postar automaticamente nesta conta
+                <span class="block text-[11px] text-muted-foreground">
+                  o robô só publica sozinho em conta com isto ligado; publicar manualmente na aba Criativos funciona de qualquer jeito
+                </span>
+              </span>
+            </label>
+            <p v-if="form.postagem_auto && !modal.rede.has_token" class="text-[11px] text-amber-600 dark:text-amber-400">
+              ligado, mas sem credencial — conecte o token para o robô conseguir publicar.
+            </p>
+
+            <div class="grid grid-cols-2 gap-3">
+              <div>
+                <Label>posts por dia</Label>
+                <Input
+                  v-model="form.postagem_max_dia"
+                  type="number"
+                  min="1"
+                  step="1"
+                  :disabled="!canEdit"
+                  placeholder="padrão: 2"
+                  autocomplete="off"
+                />
+              </div>
+              <div>
+                <Label>intervalo mínimo (min)</Label>
+                <Input
+                  v-model="form.postagem_intervalo_min"
+                  type="number"
+                  min="1"
+                  step="1"
+                  :disabled="!canEdit"
+                  placeholder="padrão: 90"
+                  autocomplete="off"
+                />
+              </div>
+            </div>
+            <p class="text-[11px] text-muted-foreground">
+              em branco usa o padrão do servidor (2 posts/dia, 90 min entre um post e outro nesta conta)
+            </p>
+          </div>
+          <p v-else class="col-span-2 text-[11px] text-muted-foreground">
+            publicação automática (token e limites): configure depois de salvar a conta.
+          </p>
+
           <!-- verificação (Meta Verified): o DaVinci só registra o andamento -->
           <div>
             <Label>Verificação</Label>
@@ -1316,6 +1699,92 @@ await load()
               {{ saving ? 'salvando…' : 'Salvar' }}
             </Button>
           </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- sub-modal: conectar a credencial de publicação (POST /{id}/conectar).
+         Fica ACIMA do modal da conta (z-[60]) porque é um passo dentro dele.
+         O token é digitado mascarado (padrão nf-cadastros.vue) e nunca é
+         relido do servidor: some daqui assim que a conexão dá certo. -->
+    <div v-if="conexao" class="fixed inset-0 bg-black/60 flex items-center justify-center z-[60] p-4" @click.self="fecharConexao">
+      <div class="bg-background border rounded-lg w-full max-w-lg p-5 space-y-3 max-h-[90vh] overflow-auto">
+        <div class="flex items-center gap-2">
+          <Plug class="size-4 text-muted-foreground shrink-0" />
+          <h2 class="text-base font-semibold">Conectar publicação</h2>
+          <span class="text-xs text-muted-foreground truncate">
+            {{ conexao.rede.conta ? `@${conexao.rede.conta}` : 'conta sem @' }} · {{ conexaoPlataformaLabel }}
+          </span>
+          <Button class="ml-auto" size="sm" variant="ghost" :disabled="conectando" @click="fecharConexao">
+            <X class="size-4" />
+          </Button>
+        </div>
+
+        <p class="text-[11px] text-muted-foreground">
+          O token vem do <strong>Business Suite</strong> → Configurações → Usuários → <strong>Usuários do sistema</strong>
+          (System users) → <strong>Gerar novo token</strong> (Generate new token), escolhendo o app e as permissões da
+          Página/Instagram desta conta.
+        </p>
+
+        <div class="relative">
+          <Input
+            v-model="tokenValor"
+            type="text"
+            autocomplete="off"
+            data-1p-ignore
+            data-lpignore="true"
+            data-form-type="other"
+            name="rede-social-token"
+            spellcheck="false"
+            class="pr-9 font-mono"
+            :style="tokenVisible ? undefined : { WebkitTextSecurity: 'disc' }"
+            placeholder="cole aqui o token"
+            @keydown.enter.prevent="conectar"
+          />
+          <button
+            type="button"
+            class="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+            :title="tokenVisible ? 'ocultar' : 'mostrar o que foi colado'"
+            @click="tokenVisible = !tokenVisible"
+          >
+            <EyeOff v-if="tokenVisible" class="size-4" />
+            <Eye v-else class="size-4" />
+          </button>
+        </div>
+        <p class="text-[11px] text-muted-foreground">
+          O token não sai mais daqui: fica cifrado no servidor e não volta em tela, log ou link — para trocar, cole um novo.
+        </p>
+
+        <!-- ok=false: o backend não soube casar o token com o @ cadastrado e
+             devolveu o que ele enxerga — o operador escolhe e reenvia. -->
+        <div v-if="conexaoContas.length" class="border rounded-md p-2 space-y-1">
+          <div class="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+            este token enxerga — escolha a conta
+          </div>
+          <label
+            v-for="(c, i) in conexaoContas"
+            :key="contaExternaId(c, conexao.rede.plataforma) || i"
+            class="flex items-center gap-2 text-sm"
+            :class="{ 'opacity-50': !contaExternaId(c, conexao.rede.plataforma) }"
+          >
+            <input
+              v-model="conexaoEscolha"
+              type="radio"
+              name="conexao-conta"
+              :value="contaExternaId(c, conexao.rede.plataforma)"
+              :disabled="!contaExternaId(c, conexao.rede.plataforma)"
+            />
+            <span class="truncate">{{ contaExternaLabel(c) }}</span>
+          </label>
+        </div>
+
+        <div v-if="conexaoErr" class="text-sm text-red-500">erro: {{ conexaoErr }}</div>
+
+        <div class="flex justify-end gap-2">
+          <Button variant="ghost" size="sm" :disabled="conectando" @click="fecharConexao">cancelar</Button>
+          <Button size="sm" :disabled="conectando || !tokenValor" @click="conectar">
+            {{ conectando ? 'conectando…' : 'Conectar' }}
+          </Button>
         </div>
       </div>
     </div>

@@ -213,8 +213,12 @@ if settings.enable_marketing:
     # prod boots even when marketing_* tables don't exist on the DB.
     from app.routers import marketing as marketing_router
     from app.routers import marketing_creatives as marketing_creatives_router
+    from app.routers import marketing_postagens as marketing_postagens_router
     app.include_router(marketing_router.router)
     app.include_router(marketing_creatives_router.router)
+    # O link assinado do vídeo vai no PATH; fora do access log.
+    marketing_creatives_router.mascarar_link_no_access_log()
+    app.include_router(marketing_postagens_router.router)
 
 
 @app.get("/api/health")

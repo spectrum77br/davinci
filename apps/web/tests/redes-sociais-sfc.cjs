@@ -8,6 +8,14 @@
 // recarregar/filtrar/desmontar; o corpo do POST/PATCH da conta nunca leva
 // senha vazia nem reenvia a revelada; "voltar a herdar" e "limpar" mandam
 // null explícito; tooltip do chip nunca inclui senha. Só dados FALSOS aqui.
+//
+// v3.2 (Eduardo, 15/09/2026) — Publicação automática: o TOKEN de publicação
+// só existe no v-model do sub-modal "conectar", vai no CORPO do POST
+// /{id}/conectar e some ao fechar/recarregar/desmontar (nunca em log,
+// :title, URL ou localStorage); ok=false devolve as contas que o token
+// enxerga pro operador escolher e reenviar com external_user_id; o PATCH da
+// conta leva postagem_auto e os tetos, com null explícito quando o campo
+// está vazio (= herda o padrão do servidor).
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
@@ -65,9 +73,43 @@ assert.match(script, /api\/marcas\/\$\{[^}]+\}\/logo\?v=/, 'miniatura do logo co
 // A senha nunca vai parar num title/tooltip.
 // (referência ao VALOR: .get(), `${…}` ou ramo de ternário — `!form.senha ?` como condição é ok.)
 assert.ok(
-  !/:title="[^"]*(revealedSenhas\.get\(|\$\{\s*(form\.senha|senhaMarcaValor)\b|[?:]\s*(form\.senha|senhaMarcaValor)\s*(?=[):"]|$))/.test(tpl),
-  'senha nunca em title',
+  !/:title="[^"]*(revealedSenhas\.get\(|\$\{\s*(form\.senha|senhaMarcaValor|tokenValor)\b|[?:]\s*(form\.senha|senhaMarcaValor|tokenValor)\s*(?=[):"]|$))/.test(tpl),
+  'senha/token nunca em title',
 )
+
+// ---------------------------------------------------------------- token de publicação
+// Campo do token com a mesma blindagem da senha (nf-cadastros.vue).
+assert.match(tpl, /name="rede-social-token"/, 'sub-modal tem o campo do token')
+{
+  const campo = tpl.slice(tpl.indexOf('name="rede-social-token"') - 400, tpl.indexOf('name="rede-social-token"') + 400)
+  assert.match(campo, /data-1p-ignore/, 'token ignora 1Password')
+  assert.match(campo, /WebkitTextSecurity/, 'token mascarado por CSS')
+  assert.match(campo, /autocomplete="off"/, 'token sem autocomplete')
+  assert.ok(!/type="password"/.test(campo), 'token não é input[type=password]')
+}
+// O plaintext do token só sai no corpo do POST /conectar — nunca na URL,
+// em log ou em armazenamento do navegador.
+assert.match(script, /\/conectar`,\s*\{\s*\n?\s*method: 'POST'/, 'POST /{id}/conectar')
+assert.match(script, /body: \{ access_token: token, external_user_id: conexaoEscolha\.value \|\| null \}/, 'token vai no corpo, com a escolha do operador')
+assert.match(script, /\/conectar`, \{ method: 'DELETE' \}/, 'DELETE /{id}/conectar')
+// (as linhas de comentário explicam JUSTAMENTE que não se guarda nada — só
+//  o código conta aqui)
+const scriptCode = script.split('\n').filter((l) => !l.trim().startsWith('//')).join('\n')
+assert.ok(!/localStorage|sessionStorage|document\.cookie/.test(scriptCode + tpl), 'token/senha nunca em armazenamento do navegador')
+assert.ok(!/(console\.\w+|api)\([^)]*\btokenValor\b/.test(script), 'tokenValor nunca vai pra log (só pro corpo do POST, via `token`)')
+assert.ok(!/\$\{\s*(token|tokenValor)/.test(script), 'token nunca interpolado em URL/template string')
+// Zerado ao fechar / recarregar / sair.
+assert.match(script, /function fecharConexao\(\)[\s\S]*?tokenValor\.value = ''/, 'fecharConexao zera o token')
+assert.match(script, /onUnmounted\(\(\) => \{[\s\S]*?tokenValor\.value = ''/, 'onUnmounted zera o token')
+// Indicadorzinho do grid + bloco novo do modal.
+assert.match(tpl, /v-if="postagemAutoOn\(r\)"[\s\S]{0,200}title="postagem automática ligada"/, 'pontinho de postagem automática no grid')
+assert.match(tpl, /Publicação automática/, 'bloco Publicação automática no modal')
+assert.match(tpl, /postar automaticamente nesta conta/, 'checkbox do interruptor')
+assert.match(tpl, /publicar manualmente na aba Criativos funciona de qualquer jeito/, 'hint do interruptor')
+assert.match(tpl, /placeholder="padrão: 2"/, 'placeholder de posts por dia')
+assert.match(tpl, /placeholder="padrão: 90"/, 'placeholder do intervalo mínimo')
+assert.match(tpl, /Generate new token/, 'diz de onde vem o token')
+assert.match(tpl, /fica cifrado no servidor/, 'aviso de que o token não sai mais dali')
 // Só-view: bloco olho/copiar do modal atrás de canEdit; Salvar idem.
 assert.match(tpl, /<div v-if="canEdit" class="absolute right-2/, 'olho/copiar do modal só com edit')
 assert.match(tpl, /<Button v-if="canEdit" :disabled="saving \|\| !form\.marca_id" @click="saveRede">/, 'Salvar só com edit')
@@ -93,15 +135,19 @@ const end = script.indexOf('// ---------- fim helpers puros')
 assert.ok(start > 0 && end > start, 'marcadores dos helpers puros presentes')
 const helpersJs = transpile(script.slice(start, end), ts.ModuleKind.ESNext)
 const H = new Function('PLATAFORMA_LABELS', 'VERIFICACAO_LABELS', 'fmtFone', helpersJs + `
-return { montaBody, chipTitle, rowMatches, sincronizaEfetivos, dotClass, VERIFICACAO_CURTO, verifLabel, senhaHintTexto };
+return { montaBody, chipTitle, rowMatches, sincronizaEfetivos, dotClass, VERIFICACAO_CURTO, verifLabel, senhaHintTexto,
+  tetoOuNull, postagemAutoOn, tokenPillTexto, tokenPillClass, contaExternaId, contaExternaLabel, TOKEN_STATUS_LABELS };
 `)(redes.PLATAFORMA_LABELS, redes.VERIFICACAO_LABELS, redes.fmtFone)
 
 const SENHA_FALSA = 'senha-falsa-teste-123'
+// Token FALSO (>= 20 chars, como o validador do backend exige) — nada real.
+const TOKEN_FALSO = 'TOKEN-FALSO-DE-TESTE-0123456789'
 function form(over = {}) {
   return {
     marca_id: 'm1', plataforma: 'instagram', conta: '  loja.teste ', usuario: '', url: '',
     email: ' SAC@teste.com ', fone: '', senha: '', verificacao_status: 'em_andamento',
     verificacao_obs: '  protocolo 123 ', ativo: false, obs: '  ',
+    postagem_auto: false, postagem_max_dia: '', postagem_intervalo_min: '',
     ...over,
   }
 }
@@ -111,6 +157,9 @@ function form(over = {}) {
   const b = H.montaBody(form(), 'create', null)
   assert.ok(!('senha' in b), 'create sem senha digitada não manda a chave')
   assert.ok(!('ativo' in b), 'create não manda ativo (nasce ativa)')
+  // RedeSocialCreate não tem os campos de postagem — conta nova nasce sem
+  // token e com postagem_auto = false.
+  assert.ok(!('postagem_auto' in b) && !('postagem_max_dia' in b) && !('postagem_intervalo_min' in b), 'create não manda postagem_*')
   assert.equal(b.conta, 'loja.teste')
   assert.equal(b.email, 'SAC@teste.com')
   assert.equal(b.usuario, null)
@@ -131,6 +180,67 @@ function form(over = {}) {
   const b = H.montaBody(form({ senha: SENHA_FALSA }), 'edit', SENHA_FALSA)
   assert.equal(b.ativo, false)
   assert.ok(!('senha' in b), 'senha revelada igual à salva não é reenviada')
+  // Postagem: interruptor sempre vai; teto vazio = null EXPLÍCITO (volta a
+  // herdar o padrão do servidor).
+  assert.equal(b.postagem_auto, false)
+  assert.equal(b.postagem_max_dia, null)
+  assert.equal(b.postagem_intervalo_min, null)
+  const b2 = H.montaBody(form({ postagem_auto: true, postagem_max_dia: 4, postagem_intervalo_min: ' 30 ' }), 'edit', null)
+  assert.equal(b2.postagem_auto, true)
+  assert.equal(b2.postagem_max_dia, 4)
+  assert.equal(b2.postagem_intervalo_min, 30)
+  // O token NUNCA passa pelo corpo da conta (vai só no /conectar).
+  assert.ok(!JSON.stringify(b2).includes(TOKEN_FALSO) && !('access_token' in b2))
+}
+
+// tetoOuNull: vazio/lixo = null (herda o padrão), número positivo inteiro passa
+{
+  assert.equal(H.tetoOuNull(''), null)
+  assert.equal(H.tetoOuNull('   '), null)
+  assert.equal(H.tetoOuNull(null), null)
+  assert.equal(H.tetoOuNull(undefined), null)
+  assert.equal(H.tetoOuNull('0'), null, 'zero não é teto')
+  assert.equal(H.tetoOuNull('-3'), null)
+  assert.equal(H.tetoOuNull('abc'), null)
+  assert.equal(H.tetoOuNull(' 5 '), 5)
+  assert.equal(H.tetoOuNull(3), 3)
+  assert.equal(H.tetoOuNull('2.7'), 2, 'fração vira inteiro')
+}
+
+// postagemAutoOn: o robô precisa dos DOIS (token + interruptor)
+{
+  assert.equal(H.postagemAutoOn({ postagem_auto: true, has_token: true }), true)
+  assert.equal(H.postagemAutoOn({ postagem_auto: true, has_token: false }), false)
+  assert.equal(H.postagemAutoOn({ postagem_auto: false, has_token: true }), false)
+  assert.equal(H.postagemAutoOn({}), false)
+}
+
+// tokenPillTexto/Class: estado da credencial — nunca o token
+{
+  assert.equal(H.tokenPillTexto(null), 'sem token')
+  assert.equal(H.tokenPillTexto({ has_token: false, token_conta_externa: 'poofy' }), 'sem token')
+  assert.equal(H.tokenPillTexto({ has_token: true, token_conta_externa: '@poofy', token_status: 'ok' }), 'conectado como @poofy')
+  assert.equal(H.tokenPillTexto({ has_token: true, token_conta_externa: null }), 'conectado')
+  assert.equal(H.tokenPillTexto({ has_token: true, token_conta_externa: 'poofy', token_status: 'expirado' }), 'conectado como @poofy · token vencido')
+  assert.equal(H.tokenPillTexto({ has_token: true, token_conta_externa: 'poofy', token_status: 'revogado' }), 'conectado como @poofy · token revogado')
+  assert.ok(!H.tokenPillTexto({ has_token: true, token_conta_externa: TOKEN_FALSO }).includes('access_token'))
+  assert.match(H.tokenPillClass(null), /bg-muted/)
+  assert.match(H.tokenPillClass({ has_token: true }), /emerald/)
+  assert.match(H.tokenPillClass({ has_token: true, token_status: 'expirado' }), /amber/)
+  assert.deepEqual(Object.keys(H.TOKEN_STATUS_LABELS).sort(), ['expirado', 'ok', 'revogado'])
+}
+
+// contaExternaId/Label: o rádio manda o id que o backend espera
+{
+  const c = { page_id: 'p1', page_nome: 'Poofy Oficial', ig_user_id: 'ig1', ig_username: 'poofy.oficial' }
+  assert.equal(H.contaExternaId(c, 'instagram'), 'ig1', 'Instagram casa por ig_user_id')
+  assert.equal(H.contaExternaId(c, 'facebook'), 'p1', 'Página casa por page_id')
+  assert.equal(H.contaExternaId({ page_id: null, ig_user_id: null }, 'instagram'), '', 'sem id = opção desabilitada')
+  assert.equal(H.contaExternaLabel(c), 'Poofy Oficial · @poofy.oficial')
+  assert.equal(H.contaExternaLabel({ page_nome: null, ig_username: '@só.ig' }), '@só.ig', 'não duplica o @')
+  assert.equal(H.contaExternaLabel({ page_nome: 'Só Página' }), 'Só Página')
+  assert.equal(H.contaExternaLabel({ page_id: 'p9' }), 'p9')
+  assert.equal(H.contaExternaLabel({}), 'conta sem nome')
 }
 // edit: senha alterada por cima da revelada → vai
 {
@@ -151,6 +261,8 @@ function redeOut(over = {}) {
     usuario: 'login.teste', url: null, email: null, fone: null, has_senha: false,
     email_efetivo: 'sac@teste.com', fone_efetivo: '11999990000', has_senha_efetiva: true, senha_origem: 'marca',
     verificacao_status: 'em_andamento', verificacao_obs: 'protocolo 9', obs: 'obs fake', ativo: false,
+    postagem_auto: false, postagem_max_dia: null, postagem_intervalo_min: null,
+    has_token: false, token_status: null, token_conta_externa: null, token_expires_at: null,
     created_at: '', updated_at: '',
     ...over,
   }
@@ -173,9 +285,17 @@ function redeOut(over = {}) {
   assert.ok(!t2.includes('(da marca)'))
   assert.match(t2, /senha própria/)
   assert.match(t2, /verificado/)
-  // não solicitado não aparece; sem senha nenhuma não fala de senha
+  // não solicitado não aparece; sem senha nenhuma não fala de senha; sem
+  // postagem automática não fala de postagem
   const t3 = H.chipTitle(redeOut({ verificacao_status: 'nao_solicitado', verificacao_obs: null, senha_origem: null, has_senha_efetiva: false }))
-  assert.ok(!t3.includes('não solicitado') && !t3.includes('senha'))
+  assert.ok(!t3.includes('não solicitado') && !t3.includes('senha') && !t3.includes('postagem'))
+  // postagem automática: o tooltip diz que está ligada — e avisa quando falta token
+  const t4 = H.chipTitle(redeOut({ postagem_auto: true, has_token: true }))
+  assert.match(t4, /· postagem automática ·/)
+  assert.ok(!t4.includes('sem token'))
+  assert.match(H.chipTitle(redeOut({ postagem_auto: true, has_token: false })), /postagem automática \(sem token\)/)
+  // o tooltip nunca carrega o token (a API nem devolve o valor)
+  assert.ok(!H.chipTitle(redeOut({ postagem_auto: true, has_token: true, token_conta_externa: 'poofy' })).includes(TOKEN_FALSO))
   // plataforma fora do lib (removida do enum) cai no valor cru, sem quebrar
   assert.match(H.chipTitle(redeOut({ plataforma: 'orkut', usuario: null, email_efetivo: null, fone_efetivo: null, verificacao_status: 'nao_solicitado', verificacao_obs: null, ativo: true, senha_origem: null, obs: null })), /^orkut$/)
 }
@@ -265,6 +385,9 @@ const exportsForTest = `return {
   modal, form, saving, modalErr, modo, marcaDoForm, emailPlaceholder, fonePlaceholder, urlSugerida, urlAbrir,
   openCreate, openEdit, closeModal, saveRede, removeRede,
   senhaVisible, senhaSalva, senhaOrigemRevelada, toggleSenha, copySenha, voltarHerdarSenha, senhaHint, senhaPlaceholder,
+  conexao, tokenValor, tokenVisible, conectando, conexaoErr, conexaoContas, conexaoEscolha,
+  abrirConexao, fecharConexao, conectar, desconectar, tokenPillTexto, tokenPillTitle, postagemAutoOn,
+  conexaoPlataformaLabel, contaExternaId,
 }`
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor
 const factory = new AsyncFunction(
@@ -290,7 +413,10 @@ function rede(over = {}) {
     id: 'r1', marca_id: 'm1', marca_nome: 'Poofy', plataforma: 'instagram', conta: 'poofy', usuario: null,
     url: null, email: null, fone: null, has_senha: false, email_efetivo: 'sac@poofy.x', fone_efetivo: '11987654321',
     has_senha_efetiva: true, senha_origem: 'marca', verificacao_status: 'nao_solicitado', verificacao_obs: null,
-    obs: null, ativo: true, created_at: 't', updated_at: 't', ...over,
+    obs: null, ativo: true,
+    postagem_auto: false, postagem_max_dia: null, postagem_intervalo_min: null,
+    has_token: false, token_status: null, token_conta_externa: null, token_expires_at: null,
+    created_at: 't', updated_at: 't', ...over,
   }
 }
 const digits = (s) => (s == null ? null : String(s).replace(/\D/g, '') || null)
@@ -304,15 +430,65 @@ function gridOf(marcas, contas) {
   }
 }
 
-async function page({ canEdit = true, marcas = [marcaRef()], contas = [rede()], confirmAnswer = true, postError = null } = {}) {
+// ConexaoOut falso: sem `external_user_id` escolhido devolve ok=false com as
+// duas contas que o "token" enxerga (é o caso em que o operador escolhe);
+// com a escolha, grava.
+const CONTAS_EXTERNAS = [
+  { page_id: 'p1', page_nome: 'Poofy Oficial', ig_user_id: 'ig1', ig_username: 'poofy.oficial' },
+  { page_id: 'p2', page_nome: 'Poofy Outlet', ig_user_id: 'ig2', ig_username: 'poofy.outlet' },
+]
+function conexaoAmbigua(body) {
+  if (!body.external_user_id) {
+    return { ok: false, external_user_id: null, external_username: null, token_expires_at: null, contas: CONTAS_EXTERNAS }
+  }
+  const c = CONTAS_EXTERNAS.find((x) => x.ig_user_id === body.external_user_id)
+  return {
+    ok: true,
+    external_user_id: body.external_user_id,
+    external_username: c ? c.ig_username : null,
+    token_expires_at: '2026-12-01T00:00:00+00:00',
+    contas: CONTAS_EXTERNAS,
+  }
+}
+const conexaoDireta = () => ({
+  ok: true, external_user_id: 'ig1', external_username: 'poofy', token_expires_at: null, contas: [],
+})
+
+async function page({
+  canEdit = true, marcas = [marcaRef()], contas = [rede()], confirmAnswer = true, postError = null,
+  conexaoResp = conexaoDireta, conectarError = null,
+} = {}) {
   const calls = []
   const timers = []
   const clipboard = []
   const unmountHooks = []
   const confirms = []
+  // Corpos que chegaram no POST /conectar — é onde o token PODE aparecer.
+  const conectarBodies = []
   const api = (url, opts) => {
     calls.push({ url, opts })
     if (url === '/api/redes-sociais/grid') return Promise.resolve(gridOf(marcas, contas))
+    if (/\/conectar$/.test(url)) {
+      const r = contas.find((x) => `/api/redes-sociais/${x.id}/conectar` === url)
+      assert.ok(r, `conta conhecida: ${url}`)
+      if (opts?.method === 'DELETE') {
+        Object.assign(r, { has_token: false, token_status: null, token_conta_externa: null, token_expires_at: null })
+        return Promise.resolve(null)
+      }
+      assert.equal(opts?.method, 'POST', 'conectar é POST')
+      conectarBodies.push(opts.body)
+      if (conectarError) return Promise.reject(conectarError)
+      const resp = conexaoResp(opts.body)
+      if (resp.ok) {
+        Object.assign(r, {
+          has_token: true,
+          token_status: 'ok',
+          token_conta_externa: resp.external_username || resp.external_user_id,
+          token_expires_at: resp.token_expires_at,
+        })
+      }
+      return Promise.resolve(resp)
+    }
     if (url.endsWith('/sac-senha')) return Promise.resolve({ senha: FAKE.senhaMarca, origem: 'marca' })
     if (url.endsWith('/senha')) {
       const r = contas.find((x) => `/api/redes-sociais/${x.id}/senha` === url)
@@ -358,7 +534,7 @@ async function page({ canEdit = true, marcas = [marcaRef()], contas = [rede()], 
     [], apiError.apiErrMsg, apiError.MARCAS_ERROS,
     redes.PLATAFORMAS, redes.PLATAFORMA_LABELS, redes.VERIFICACAO_GUIA, redes.VERIFICACAO_LABELS, redes.VERIFICACAO_STATUS, redes.fmtFone, redes.perfilUrl,
   )
-  return { state, calls, timers, clipboard, unmountHooks, confirms, marcas, contas }
+  return { state, calls, timers, clipboard, unmountHooks, confirms, marcas, contas, conectarBodies }
 }
 const settle = () => new Promise(setImmediate)
 const senhaCalls = (calls) => calls.filter((c) => /\/senha$|\/sac-senha$/.test(c.url))
@@ -669,10 +845,188 @@ async function run() {
     assert.equal(s.modalErr.value, 'Essa conta já está cadastrada nessa plataforma')
     assert.ok(s.modal.value, 'modal fica aberto com o erro')
   }
+
+  // ------------------------------------------------ publicação automática (v3.2)
+
+  // Bloco do modal: interruptor + tetos. Campo vazio = null EXPLÍCITO no
+  // PATCH (volta a herdar o padrão do servidor); pill mostra o @ da
+  // credencial, nunca o token.
+  {
+    const { state: s, calls } = await page({
+      contas: [rede({ postagem_auto: true, postagem_max_dia: 3, has_token: true, token_status: 'ok', token_conta_externa: 'poofy' })],
+    })
+    const r = s.grid.value.rows[0].cells.instagram[0]
+    assert.equal(s.postagemAutoOn(r), true, 'indicadorzinho do grid ligado (token + interruptor)')
+    s.openEdit(r)
+    assert.equal(s.form.value.postagem_auto, true)
+    assert.equal(s.form.value.postagem_max_dia, 3)
+    assert.equal(s.form.value.postagem_intervalo_min, '', 'null vira campo vazio (herda o padrão)')
+    assert.equal(s.tokenPillTexto(s.modal.value.rede), 'conectado como @poofy')
+    assert.match(s.tokenPillTitle.value, /cifrada no servidor/)
+    s.form.value.postagem_max_dia = ''
+    s.form.value.postagem_intervalo_min = 45
+    await s.saveRede()
+    const p = patches(calls).at(-1)
+    assert.equal(p.url, '/api/redes-sociais/r1')
+    assert.equal(p.opts.body.postagem_auto, true)
+    assert.equal(p.opts.body.postagem_max_dia, null, 'campo vazio volta pro padrão do servidor')
+    assert.equal(p.opts.body.postagem_intervalo_min, 45)
+
+    s.openEdit(s.grid.value.rows[0].cells.instagram[0])
+    assert.equal(s.form.value.postagem_intervalo_min, 45, 'teto salvo volta no campo')
+    s.form.value.postagem_auto = false
+    await s.saveRede()
+    assert.equal(patches(calls).at(-1).opts.body.postagem_auto, false, 'desligar o interruptor é PATCH explícito')
+    assert.equal(s.postagemAutoOn(s.grid.value.rows[0].cells.instagram[0]), false)
+  }
+
+  // Conectar (caminho feliz): token vai só no CORPO do POST /conectar, some
+  // do campo assim que grava, e a linha do grid passa a mostrar a credencial.
+  {
+    const { state: s, calls, conectarBodies } = await page()
+    s.openEdit(s.grid.value.rows[0].cells.instagram[0])
+    assert.equal(s.tokenPillTexto(s.modal.value.rede), 'sem token')
+    assert.match(s.tokenPillTitle.value, /o robô não publica sozinho/)
+    s.abrirConexao()
+    assert.equal(s.conexao.value.rede.id, 'r1')
+    assert.equal(s.tokenValor.value, '', 'sub-modal abre com o campo vazio')
+    assert.equal(s.tokenVisible.value, false, 'token começa mascarado')
+    assert.equal(s.conexaoPlataformaLabel.value, 'Instagram')
+    await s.conectar()
+    assert.equal(conectarBodies.length, 0, 'sem token não chama a API')
+    assert.match(s.conexaoErr.value, /cole o token/)
+    s.tokenValor.value = `  ${TOKEN_FALSO}  `
+    await s.conectar()
+    assert.deepEqual(conectarBodies, [{ access_token: TOKEN_FALSO, external_user_id: null }], 'token no corpo, sem espaços')
+    assert.equal(calls.at(-1).url, '/api/redes-sociais/r1/conectar')
+    assert.equal(s.conexao.value, null, 'fecha ao conectar')
+    assert.equal(s.tokenValor.value, '', 'plaintext do token zerado depois do POST')
+    assert.equal(s.modal.value.rede.has_token, true)
+    assert.equal(s.tokenPillTexto(s.modal.value.rede), 'conectado como @poofy')
+    assert.equal(s.grid.value.rows[0].cells.instagram[0].has_token, true, 'grid atualizado sem recarregar')
+    // O token não aparece em nenhuma URL nem em nenhum outro corpo.
+    for (const c of calls) {
+      assert.ok(!c.url.includes(TOKEN_FALSO), 'token nunca na URL')
+      if (!/\/conectar$/.test(c.url)) {
+        assert.ok(!JSON.stringify(c.opts || {}).includes(TOKEN_FALSO), `token não vaza em ${c.url}`)
+      }
+    }
+    // Com credencial, ligar o interruptor acende o indicadorzinho do grid.
+    s.form.value.postagem_auto = true
+    await s.saveRede()
+    assert.equal(s.postagemAutoOn(s.grid.value.rows[0].cells.instagram[0]), true)
+  }
+
+  // Conectar (ok=false): o backend não soube casar o @ e devolveu o que o
+  // token enxerga — o operador escolhe e o MESMO token é reenviado com
+  // external_user_id.
+  {
+    const { state: s, conectarBodies } = await page({ conexaoResp: conexaoAmbigua })
+    s.openEdit(s.grid.value.rows[0].cells.instagram[0])
+    s.abrirConexao()
+    s.tokenValor.value = TOKEN_FALSO
+    await s.conectar()
+    assert.equal(s.conexao.value.rede.id, 'r1', 'sub-modal continua aberto pra escolha')
+    assert.deepEqual(s.conexaoContas.value.map((c) => c.ig_username), ['poofy.oficial', 'poofy.outlet'])
+    assert.match(s.conexaoErr.value, /escolha qual conta/)
+    assert.equal(s.modal.value.rede.has_token, false, 'nada gravado enquanto não escolhe')
+    assert.equal(s.tokenValor.value, TOKEN_FALSO, 'campo mantém o token só porque o reenvio precisa dele')
+    await s.conectar()
+    assert.equal(conectarBodies.length, 1, 'sem escolher não reenvia')
+    assert.equal(s.contaExternaId(s.conexaoContas.value[1], 'instagram'), 'ig2')
+    s.conexaoEscolha.value = 'ig2'
+    await s.conectar()
+    assert.equal(conectarBodies.length, 2)
+    assert.deepEqual(conectarBodies[1], { access_token: TOKEN_FALSO, external_user_id: 'ig2' })
+    assert.equal(s.modal.value.rede.token_conta_externa, 'poofy.outlet')
+    assert.equal(s.tokenPillTexto(s.modal.value.rede), 'conectado como @poofy.outlet')
+    assert.equal(s.tokenValor.value, '', 'token zerado depois de gravar')
+    assert.equal(s.conexaoContas.value.length, 0, 'as opções somem junto')
+  }
+
+  // O token nunca sobrevive a fechar / recarregar / desmontar.
+  {
+    const { state: s, unmountHooks } = await page()
+    const abre = () => {
+      s.openEdit(s.grid.value.rows[0].cells.instagram[0])
+      s.abrirConexao()
+      s.tokenValor.value = TOKEN_FALSO
+    }
+    abre()
+    s.fecharConexao()
+    assert.equal(s.tokenValor.value, '', 'cancelar zera')
+    abre()
+    s.closeModal()
+    assert.equal(s.conexao.value, null, 'fechar a conta fecha o sub-modal')
+    assert.equal(s.tokenValor.value, '', 'fechar a conta zera o token')
+    abre()
+    await s.load()
+    assert.equal(s.tokenValor.value, '', 'recarregar zera o token')
+    abre()
+    unmountHooks[0]()
+    assert.equal(s.tokenValor.value, '', 'sair da página zera o token')
+  }
+
+  // Erros do /conectar: código novo (em memória) e o 422 do validador.
+  {
+    const { state: s } = await page({ conectarError: { data: { detail: { code: 'token_recusado_pela_meta', erro: 'OAuth' } } } })
+    s.openEdit(s.grid.value.rows[0].cells.instagram[0])
+    s.abrirConexao()
+    s.tokenValor.value = TOKEN_FALSO
+    await s.conectar()
+    assert.match(s.conexaoErr.value, /^A Meta recusou esse token/)
+    assert.ok(s.conexao.value, 'sub-modal fica aberto com o erro')
+    assert.equal(s.modal.value.rede.has_token, false)
+    assert.equal(s.conectando.value, false, 'botão volta a funcionar')
+
+    const { state: s2 } = await page({
+      conectarError: { data: { detail: [{ loc: ['body', 'access_token'], msg: 'Value error, token_invalido' }] } },
+    })
+    s2.openEdit(s2.grid.value.rows[0].cells.instagram[0])
+    s2.abrirConexao()
+    s2.tokenValor.value = 'curto'
+    await s2.conectar()
+    assert.equal(s2.conexaoErr.value, 'access_token: Token inválido — cole o token inteiro, sem espaços')
+  }
+
+  // Desconectar: confirm + DELETE /conectar; o robô para de publicar sozinho.
+  {
+    const { state: s, calls, confirms } = await page({
+      contas: [rede({ has_token: true, token_conta_externa: 'poofy', postagem_auto: true })],
+    })
+    s.openEdit(s.grid.value.rows[0].cells.instagram[0])
+    await s.desconectar()
+    assert.equal(confirms.length, 1)
+    assert.match(confirms.at(-1), /@poofy/)
+    assert.equal(calls.filter((c) => c.opts?.method === 'DELETE').at(-1).url, '/api/redes-sociais/r1/conectar')
+    assert.equal(s.modal.value.rede.has_token, false)
+    assert.equal(s.tokenPillTexto(s.modal.value.rede), 'sem token')
+    assert.equal(
+      s.postagemAutoOn(s.grid.value.rows[0].cells.instagram[0]), false,
+      'sem credencial o robô não publica, mesmo com o interruptor ligado',
+    )
+    assert.ok(s.modal.value, 'a conta continua aberta')
+
+    const { state: s2, calls: c2 } = await page({ contas: [rede({ has_token: true })], confirmAnswer: false })
+    s2.openEdit(s2.grid.value.rows[0].cells.instagram[0])
+    await s2.desconectar()
+    assert.equal(c2.filter((c) => /\/conectar$/.test(c.url)).length, 0, 'confirm recusado não desconecta')
+  }
+
+  // Só-view não conecta nem desconecta.
+  {
+    const { state: s, calls } = await page({ canEdit: false, contas: [rede({ has_token: true, token_conta_externa: 'poofy' })] })
+    s.openEdit(s.grid.value.rows[0].cells.instagram[0])
+    assert.equal(s.tokenPillTexto(s.modal.value.rede), 'conectado como @poofy', 'só-view vê o estado')
+    s.abrirConexao()
+    assert.equal(s.conexao.value, null, 'só-view não abre o sub-modal do token')
+    await s.desconectar()
+    assert.equal(calls.filter((c) => /\/conectar$/.test(c.url)).length, 0)
+  }
 }
 
 run().then(() => {
-  console.log('PASS: SFC parse + template compile; higiene de senha; helpers puros; script setup com api falso (grid, inline PATCH /marca, senha da marca, modal da conta, guia)')
+  console.log('PASS: SFC parse + template compile; higiene de senha e do token; helpers puros; script setup com api falso (grid, inline PATCH /marca, senha da marca, modal da conta, guia, publicação automática: conectar/escolher conta/desconectar e tetos por conta)')
 }).catch((e) => {
   console.error(e)
   process.exit(1)

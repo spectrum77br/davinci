@@ -13,8 +13,11 @@ sempre admin. Independente do recurso "marketing" (dashboards de Ads).
 from __future__ import annotations
 
 import contextlib
+import logging
+import re
 import shutil
 from datetime import datetime, timezone
+from hashlib import sha256
 from pathlib import Path
 from typing import Annotated, Any
 from uuid import UUID, uuid4
@@ -23,7 +26,7 @@ import structlog
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
@@ -36,6 +39,7 @@ from app.models import (
     User,
     UserRole,
 )
+from app.services.marketing import link_criativo
 from app.services.mega_fotos import MegaError, sidecar_request
 
 logger = structlog.get_logger()
@@ -222,6 +226,78 @@ async def patch_creative(
     return _row_out(row)
 
 
+# MIME que pode ser servido INLINE, no mesmo origin do app. Qualquer outro
+# desce como anexo octet-stream: `file_mime` vem do `Content-Type` que o
+# NAVEGADOR DO UPLOADER mandou — quem sobe o arquivo escolhe o valor. Servir
+# isso inline deixa alguém com permissão de editar criativo publicar um
+# `text/html` e rodar script na sessão de quem abrir o "vídeo", no mesmo
+# domínio do DaVinci (cookie de sessão junto).
+# Teto por arquivo. O criativo real tem 26-41 MB; 200 MB dá folga larga e
+# ainda impede que um upload sozinho encha o disco do servidor (não há cota
+# por equipe, e o disco é o mesmo da API e do Postgres).
+MAX_BYTES_ARQUIVO = 200 * 1024 * 1024
+
+_MIME_INLINE_OK = frozenset({
+    "video/mp4",
+    "video/quicktime",
+    "video/webm",
+    "image/jpeg",
+    "image/png",
+    "image/webp",
+    "image/gif",
+    "application/pdf",
+})
+# O endpoint PÚBLICO só existe pra Meta baixar Reel. Ali a lista é menor
+# ainda: só vídeo.
+_MIME_VIDEO_OK = frozenset({"video/mp4", "video/quicktime", "video/webm"})
+
+
+def _mime_seguro(mime: str | None, *, permitidos: frozenset[str]) -> tuple[str, str]:
+    """(media_type, content_disposition) — nunca devolve o MIME cru do uploader.
+
+    Fora da allowlist o arquivo continua servido (o operador precisa baixar o
+    que subiu), mas como `application/octet-stream` + `attachment`, que o
+    navegador não executa.
+    """
+    limpo = (mime or "").split(";")[0].strip().lower()
+    if limpo in permitidos:
+        return limpo, "inline"
+    return "application/octet-stream", "attachment"
+
+
+def _caminho_confinado(file_rel: str | None) -> Path | None:
+    """Resolve `uploads_dir/file_rel` e prova que não escapou do diretório.
+
+    `file_rel` vem do BANCO, e o banco é alimentado pelo upload — que já
+    sanitiza o nome. Isto é a segunda tranca: uma linha antiga, um import ou
+    um bug futuro que grave "../../etc/passwd" não vira leitura arbitrária.
+    """
+    if not (file_rel or "").strip():
+        return None
+    raiz = Path(get_settings().uploads_dir).resolve()
+    try:
+        alvo = (raiz / file_rel).resolve()
+        alvo.relative_to(raiz)
+    except (ValueError, OSError):
+        return None
+    return alvo
+
+
+async def _tem_postagem(session: AsyncSession, file_id: UUID) -> bool:
+    """Existe postagem (de qualquer estado) presa a este arquivo?"""
+    from app.models.marketing_postagem import MarketingPostagem
+
+    return bool(
+        (
+            await session.execute(
+                select(func.count())
+                .select_from(MarketingPostagem)
+                .where(MarketingPostagem.file_id == file_id)
+            )
+        ).scalar_one()
+    )
+
+
 @router.post("/{creative_id}/arquivo")
 async def upload_arquivos(
     creative_id: UUID,
@@ -246,10 +322,38 @@ async def upload_arquivos(
         name = Path(up.filename or "arquivo").name
         if not name or name in {".", ".."}:
             raise HTTPException(400, detail={"code": "nome_invalido"})
-        abs_path = base / name
-        with abs_path.open("wb") as fh:
-            shutil.copyfileobj(up.file, fh)
         old = existing.get(name)
+        if old is not None and await _tem_postagem(session, old.id):
+            # Substituir o registro apaga o antigo, e a FK das postagens é
+            # CASCADE: o histórico do que já foi publicado (e as agendadas)
+            # iria junto, calado. Quem quer trocar o vídeo sobe com outro nome.
+            raise HTTPException(
+                409, detail={"code": "arquivo_com_postagem", "arquivo": name}
+            )
+        abs_path = base / name
+        # O sha256 sai do MESMO fluxo de bytes que está sendo gravado: é ele
+        # que permite dizer "esse vídeo já rodou em outra marca" (Instagram e
+        # TikTok punem conteúdo repetido entre contas, e em silêncio).
+        digest = sha256()
+        escrito = 0
+        with abs_path.open("wb") as fh:
+            while pedaco := up.file.read(1024 * 1024):
+                escrito += len(pedaco)
+                if escrito > MAX_BYTES_ARQUIVO:
+                    # Aborta no meio e não deixa lixo: sem isto um POST grande
+                    # enche o disco antes de qualquer validação.
+                    fh.close()
+                    abs_path.unlink(missing_ok=True)
+                    raise HTTPException(
+                        413,
+                        detail={
+                            "code": "arquivo_grande_demais",
+                            "arquivo": name,
+                            "max_mb": MAX_BYTES_ARQUIVO // (1024 * 1024),
+                        },
+                    )
+                digest.update(pedaco)
+                fh.write(pedaco)
         if old is not None:  # mesmo nome substitui o registro antigo
             row.files.remove(old)
         rec = MarketingCreativeFile(
@@ -258,6 +362,7 @@ async def upload_arquivos(
             file_mime=up.content_type or "application/octet-stream",
             file_size=abs_path.stat().st_size,
             file_rel=f"creatives/{row.id}/{name}",
+            sha256=digest.hexdigest(),
         )
         row.files.append(rec)
         existing[name] = rec
@@ -274,6 +379,72 @@ async def upload_arquivos(
     return _row_out(row)
 
 
+_RX_LINK_NO_PATH = re.compile(r"(/api/marketing/creatives/video/)[^/\s?]+")
+
+
+def mascarar_link_no_access_log() -> None:
+    """Tira o token do link assinado do access log do uvicorn.
+
+    O token vai no PATH (a Meta busca por GET, sem header nosso), e o access
+    log guarda o path inteiro. Quem lê o log do container ganharia 15 minutos
+    de acesso ao vídeo sem sessão nenhuma. Mesmo molde do
+    `claude_conector.mascarar_token_no_access_log`.
+    """
+
+    class _Mascara(logging.Filter):
+        def filter(self, record: logging.LogRecord) -> bool:
+            args = record.args
+            if isinstance(args, tuple) and len(args) >= 3 and isinstance(args[2], str):
+                record.args = (*args[:2], _RX_LINK_NO_PATH.sub(r"\1***", args[2]), *args[3:])
+            return True
+
+    logging.getLogger("uvicorn.access").addFilter(_Mascara())
+
+
+@router.get("/video/{token}", include_in_schema=False)
+async def video_publico(
+    token: str,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> FileResponse:
+    """Vídeo do criativo por LINK ASSINADO, sem sessão — é assim que a Meta
+    baixa o arquivo pra publicar o Reel quando a marca não tem Página do
+    Facebook (trilha Instagram Login usa `video_url`, e a doc exige servidor
+    público). Token HMAC de 15 min gerado no momento de publicar
+    (services/marketing/link_criativo.py); fora disso o acesso continua sendo
+    só pelo download autenticado abaixo. Declarado ANTES das rotas
+    /{creative_id}/… pra não ser capturado por elas."""
+    file_id = link_criativo.validar_token(token)
+    if file_id is None:
+        raise HTTPException(404, detail={"code": "link_invalido_ou_expirado"})
+    rec = (
+        await session.execute(
+            select(MarketingCreativeFile).where(MarketingCreativeFile.id == file_id)
+        )
+    ).scalar_one_or_none()
+    if rec is None:
+        raise HTTPException(404, detail={"code": "arquivo_nao_encontrado"})
+    abs_path = _caminho_confinado(rec.file_rel)
+    if abs_path is None or not abs_path.is_file():
+        raise HTTPException(404, detail={"code": "arquivo_sumiu"})
+    # Esta porta é aberta: quem tiver o link de 15 min baixa sem sessão. Então
+    # ela serve VÍDEO e nada mais — nunca o MIME que o uploader escolheu.
+    media_type, _ = _mime_seguro(rec.file_mime, permitidos=_MIME_VIDEO_OK)
+    if media_type == "application/octet-stream":
+        raise HTTPException(404, detail={"code": "arquivo_nao_e_video"})
+    logger.info(
+        "criativo_video_publico_servido",
+        file_id=str(rec.id),
+        creative_id=str(rec.creative_id),
+        bytes=rec.file_size,
+    )
+    return FileResponse(
+        abs_path,
+        media_type=media_type,
+        filename=rec.file_name,
+        headers={"Cache-Control": "private, max-age=60", "X-Content-Type-Options": "nosniff"},
+    )
+
+
 @router.get("/{creative_id}/arquivo/{file_id}")
 async def download_arquivo(
     creative_id: UUID,
@@ -287,15 +458,20 @@ async def download_arquivo(
     rec = next((f for f in row.files if f.id == file_id), None)
     if rec is None:
         raise HTTPException(404, detail={"code": "sem_arquivo"})
-    abs_path = Path(get_settings().uploads_dir) / rec.file_rel
-    if not abs_path.is_file():
+    abs_path = _caminho_confinado(rec.file_rel)
+    if abs_path is None or not abs_path.is_file():
         raise HTTPException(404, detail={"code": "arquivo_sumiu"})
-    # inline = abre no navegador (preview de imagem/vídeo); ?download=1 força baixar
+    # inline = abre no navegador (preview de imagem/vídeo); ?download=1 força
+    # baixar. O MIME NUNCA é o do uploader: fora da allowlist vira anexo
+    # octet-stream, senão um `text/html` subido como "criativo" rodaria script
+    # em app.hadken.com com o cookie de sessão de quem clicasse.
+    media_type, disposicao = _mime_seguro(rec.file_mime, permitidos=_MIME_INLINE_OK)
     return FileResponse(
         abs_path,
         filename=rec.file_name,
-        media_type=rec.file_mime or "application/octet-stream",
-        content_disposition_type="attachment" if download else "inline",
+        media_type=media_type,
+        content_disposition_type="attachment" if download else disposicao,
+        headers={"X-Content-Type-Options": "nosniff"},
     )
 
 

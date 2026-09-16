@@ -708,6 +708,468 @@ async def marketing_flash_duplicate(ctx: dict) -> None:
     logger.info("marketing_flash_duplicate_tick", **r)
 
 
+async def marketing_postagens_promover(ctx: dict) -> None:
+    """Robô de postagem (Eduardo, 15/09/2026) — a cada minuto: a agenda vira fila.
+
+    `agendado_para <= agora` → `pendente`, que é o que o publicador do próximo
+    tick enxerga. Agendamento atrasado demais (`marketing_postagem_atraso_max_
+    min`, 6h por default — worker parado, deploy longo, servidor de volta na
+    segunda) NÃO sai sozinho: vira `revisar` e um humano decide, porque "o post
+    das 19h de sexta" publicado no domingo de manhã é pior que post nenhum.
+    Mesmo cuidado do `valuation_estoque_catchup` com catch-up antigo.
+
+    Só escreve no banco — não fala com a Meta — então mora aqui no worker
+    central, como o `marketing_reconcile_schedules`. Gated por
+    `enable_marketing` (no-op em prod até ligar o módulo)."""
+    if not _settings.enable_marketing:
+        return
+    from app.services.marketing.postagens import promover_agendadas
+
+    async with session_scope() as s:
+        try:
+            r = await promover_agendadas(s) or {}
+        except Exception as e:  # noqa: BLE001
+            logger.error("marketing_postagens_promover_failed", err=str(e)[:300])
+            return
+    if any(bool(v) for v in r.values()):
+        logger.info("marketing_postagens_promover_tick", **r)
+
+
+async def marketing_postagens_publicar(ctx: dict) -> None:
+    """A cada minuto: publica as postagens que já podem sair.
+
+    `proximas_para_publicar` é quem decide QUEM sai (fila `pendente`, teto
+    diário por conta, espaçamento de 90 min) e já deixa as linhas reservadas —
+    aqui só se executa, na ordem que ela devolveu.
+
+    A trava é `settings.marketing_postagem_commit` (False por default, mesmo
+    espírito do SELECTORS_CALIBRATED do executor): sem ela o robô percorre
+    TUDO — acha o arquivo no disco, resolve a conta, monta a legenda — e grava
+    `DRY: publicaria em @conta` sem tocar na Meta. É assim que se testa local e
+    em produção antes de soltar de verdade na conta da marca.
+
+    Com commit ligado: decifra o token da conta (`cipher.decrypt_json`, que
+    nunca é logado), chama o `meta_client` da plataforma e grava o resultado. O
+    `container_id` é persistido pelo callback ANTES da chamada que publica —
+    publicar não tem desfazer, então a reconciliação precisa ter por onde
+    perguntar "será que saiu?" se este processo morrer no meio.
+
+    Uma exceção inesperada NÃO derruba o tick: aquela linha fica reservada e o
+    `marketing_postagens_reconciliar` a resolve (consultando, nunca
+    republicando)."""
+    if not _settings.enable_marketing:
+        return
+    from pathlib import Path
+
+    from app.models.marketing import MarketingCreativeFile
+    from app.models.marketing_postagem import (
+        STATUS_FALHOU,
+        STATUS_PUBLICADO,
+        STATUS_REVISAR,
+        MarketingPostagem,
+        RedeSocialToken,
+    )
+    from app.services.marketing import link_criativo, meta_client
+    from app.services.marketing import postagens as _postagens
+
+    async with session_scope() as s:
+        try:
+            fila = await _postagens.proximas_para_publicar(s) or []
+        except Exception as e:  # noqa: BLE001
+            logger.error("marketing_postagens_publicar_failed", err=str(e)[:300])
+            return
+        # Cópia em valores simples ANTES do laço: se uma postagem estourar, o
+        # `rollback` do except EXPIRA todas as linhas da sessão — ler
+        # `postagem.id` da linha seguinte viraria lazy-load, proibido em sessão
+        # async. Com o retrato em mãos, uma falha não contamina as outras.
+        alvos = [
+            {
+                "id": p.id,
+                "conta": p.conta or "conta sem @",
+                "plataforma": p.plataforma,
+                "file_id": p.file_id,
+                "rede_social_id": p.rede_social_id,
+                "legenda": p.legenda or "",
+                "opcoes": p.opcoes or {},
+            }
+            for p in fila
+        ]
+        publicadas = secas = falhas = adiadas = 0
+        # Orçamento do tick: o job tem 1200s no cron, e um Reel sozinho pode
+        # levar 600s de upload + 300s de poll. Passado o teto, o que ainda NÃO
+        # foi tocado volta pra fila — melhor o próximo tick pegar do que o arq
+        # matar o processo no meio de uma publicação.
+        comeco = datetime.now(UTC)
+        orcamento = timedelta(seconds=600)
+        for indice, alvo in enumerate(alvos):
+            conta = alvo["conta"]
+            if datetime.now(UTC) - comeco > orcamento:
+                await _postagens.devolver_para_fila(
+                    s,
+                    [a["id"] for a in alvos[indice:]],
+                    motivo="a fila do minuto encheu — volta no próximo ciclo",
+                )
+                break
+            try:
+                # AGENDAR NÃO É AUTORIZAR PRA SEMPRE. Entre o agendamento e
+                # este instante o criativo pode ter sido reprovado, a conta
+                # desativada, o `postagem_auto` desligado ou a conta pode ter
+                # recebido outros posts. As guardas rodam de novo, agora.
+                linha = await s.get(MarketingPostagem, alvo["id"])
+                motivo = await _postagens.revalidar(s, linha) if linha else "postagem_sumiu"
+                if motivo in _postagens.MOTIVOS_ADIAVEIS:
+                    # Só ainda não é hora: volta pra fila sem gastar tentativa.
+                    # É isto que segura a rajada de catch-up depois de o worker
+                    # ficar parado — sem ele os posts atrasados sairiam todos
+                    # colados na mesma conta.
+                    await _postagens.adiar(s, linha, motivo=motivo)
+                    adiadas += 1
+                    continue
+                if motivo:
+                    await _postagens.registrar_resultado(
+                        s,
+                        alvo["id"],
+                        status=STATUS_FALHOU,
+                        result=f"não pôde publicar em {conta}: {motivo}",
+                    )
+                    falhas += 1
+                    continue
+
+                arquivo = await s.get(MarketingCreativeFile, alvo["file_id"])
+                caminho = (
+                    Path(_settings.uploads_dir) / arquivo.file_rel if arquivo else None
+                )
+                # Conferir o arquivo ANTES do modo seco: um "DRY ok" com o
+                # vídeo sumido do disco seria um teste que mente.
+                if caminho is None or not caminho.is_file():
+                    await _postagens.registrar_resultado(
+                        s,
+                        alvo["id"],
+                        status=STATUS_FALHOU,
+                        result="arquivo do criativo não está no disco do servidor",
+                    )
+                    falhas += 1
+                    continue
+
+                if not _settings.marketing_postagem_commit:
+                    await _postagens.registrar_resultado(
+                        s,
+                        alvo["id"],
+                        status=STATUS_PUBLICADO,
+                        result=(
+                            f"DRY: publicaria em {conta} ({alvo['plataforma']}) — "
+                            f"{arquivo.file_name}"
+                        ),
+                    )
+                    secas += 1
+                    continue
+
+                tok = (
+                    await s.execute(
+                        select(RedeSocialToken).where(
+                            RedeSocialToken.rede_social_id == alvo["rede_social_id"]
+                        )
+                    )
+                ).scalars().first()
+                if tok is None or not tok.token_enc or not tok.external_user_id:
+                    await _postagens.registrar_resultado(
+                        s,
+                        alvo["id"],
+                        status=STATUS_FALHOU,
+                        result=f"{conta} não tem token conectado — reconecte a conta",
+                    )
+                    falhas += 1
+                    continue
+                try:
+                    segredos = decrypt_json(tok.token_enc)
+                    # O token da PÁGINA é o que a doc de Content Publishing
+                    # pede ("A Page access token requested from your app user
+                    # who can perform the CREATE_CONTENT task on the Page").
+                    # Só existe na trilha do Facebook e é gravado no conectar;
+                    # sem ele, cai no token colado — que costuma funcionar
+                    # quando o usuário do sistema tem CREATE_CONTENT, e é o
+                    # único que existe na trilha do Instagram.
+                    access_token = (
+                        segredos.get("page_access_token") or segredos.get("access_token") or ""
+                    ).strip()
+                except Exception:  # noqa: BLE001
+                    # Nada do erro de cifra vai pro `result`: ele pode carregar
+                    # pedaço do material cifrado.
+                    access_token = ""
+                if not access_token:
+                    await _postagens.registrar_resultado(
+                        s,
+                        alvo["id"],
+                        status=STATUS_FALHOU,
+                        result=f"token de {conta} ilegível — reconecte a conta",
+                    )
+                    falhas += 1
+                    continue
+
+                async def _gravar_container(cid: str, _pid=alvo["id"], _s=s) -> None:
+                    """Carimba o id externo assim que ele existe — antes de publicar.
+
+                    UPDATE direto (e não a linha do ORM) porque este commit pode
+                    acontecer depois de um rollback de outra postagem do mesmo
+                    tick, com os objetos expirados."""
+                    await _s.execute(
+                        update(MarketingPostagem)
+                        .where(MarketingPostagem.id == _pid)
+                        .values(container_id=cid)
+                    )
+                    await _s.commit()
+
+                if alvo["plataforma"] == meta_client.PLATAFORMA_FACEBOOK:
+                    res = await meta_client.publicar_reel_facebook(
+                        page_id=tok.external_user_id,
+                        token=access_token,
+                        video_path=caminho,
+                        legenda=alvo["legenda"],
+                        # A agenda é NOSSA: quando a linha chega aqui, a hora já
+                        # passou. Usar o `SCHEDULED` nativo do Facebook faria a
+                        # mesma postagem se comportar diferente do Instagram
+                        # (que não tem agendamento na API) — e o operador
+                        # perderia o botão de cancelar.
+                        agendado_para=None,
+                        ao_criar_container=_gravar_container,
+                    )
+                elif alvo["plataforma"] == meta_client.PLATAFORMA_INSTAGRAM:
+                    # Sem Página do Facebook (caso das marcas hoje) a Meta
+                    # BAIXA o vídeo: mandamos um link assinado que vale 15 min
+                    # e é gerado agora, nunca guardado. Com Página, o setting
+                    # vira "binario" e o arquivo sobe direto (nada exposto).
+                    # A trilha Instagram Login (conta sem Página) NÃO tem
+                    # upload binário: ali o link é obrigatório, independente do
+                    # setting.
+                    so_link = (
+                        _settings.marketing_postagem_upload == "link"
+                        or tok.provedor == meta_client.PROVEDOR_INSTAGRAM
+                    )
+                    link = link_criativo.url_video(alvo["file_id"]) if so_link else None
+                    res = await meta_client.publicar_reel_instagram(
+                        ig_user_id=tok.external_user_id,
+                        token=access_token,
+                        video_path=caminho,
+                        legenda=alvo["legenda"],
+                        share_to_feed=bool(alvo["opcoes"].get("share_to_feed", True)),
+                        video_url=link,
+                        # Quem escolhe o host da Graph é a ORIGEM DO TOKEN.
+                        provedor=tok.provedor,
+                        ao_criar_container=_gravar_container,
+                    )
+                else:
+                    await _postagens.registrar_resultado(
+                        s,
+                        alvo["id"],
+                        status=STATUS_FALHOU,
+                        result=f"plataforma ainda não suportada: {alvo['plataforma']}",
+                    )
+                    falhas += 1
+                    continue
+
+                # Saúde da credencial na própria linha do token — é o que a tela
+                # de Redes Sociais mostra sem nunca decifrar nada.
+                if res.ok:
+                    tok.last_ok_at = datetime.now(UTC)
+                else:
+                    tok.last_error = (res.erro or "")[:500] or None
+                if res.ok:
+                    status_final, texto = STATUS_PUBLICADO, f"publicado em {conta}"
+                elif res.ambiguo:
+                    # A chamada que publica SAIU e a resposta se perdeu. Chamar
+                    # isso de "falhou" libera o retry — e o retry publica o
+                    # segundo Reel. Fica em `revisar`: o reconciliador pergunta
+                    # à Meta pelo container antes de qualquer coisa.
+                    status_final = STATUS_REVISAR
+                    texto = (
+                        f"a Meta não respondeu depois do passo que publica em {conta}: "
+                        f"{res.erro or 'sem resposta'}. NÃO republique — confira a conta "
+                        "(o reconciliador consulta sozinho no próximo ciclo)."
+                    )
+                else:
+                    status_final, texto = STATUS_FALHOU, (res.erro or "falhou sem motivo")
+                await _postagens.registrar_resultado(
+                    s,
+                    alvo["id"],
+                    status=status_final,
+                    result=texto[:2000],
+                    post_external_id=res.post_external_id,
+                    post_url=res.post_url,
+                    container_id=res.container_id,
+                )
+                publicadas += 1 if res.ok else 0
+                falhas += 0 if res.ok else 1
+            except Exception as e:  # noqa: BLE001
+                # A linha fica reservada de propósito: quem resolve é o
+                # reconciliador, CONSULTANDO — retentar cego duplicaria o Reel.
+                await s.rollback()
+                logger.error(
+                    "marketing_postagens_publicar_item_failed",
+                    postagem=str(alvo["id"]),
+                    err=str(e)[:300],
+                )
+    if publicadas or secas or falhas or adiadas:
+        logger.info(
+            "marketing_postagens_publicar_tick",
+            publicadas=publicadas,
+            secas=secas,
+            falhas=falhas,
+            adiadas=adiadas,
+        )
+
+
+async def marketing_postagens_reconciliar(ctx: dict) -> None:
+    """A cada 10 min: postagem presa em `containering`/`publicando` há > 15 min.
+
+    Publicar NÃO é idempotente: um timeout DEPOIS que a Meta aceitou é
+    indistinguível de uma falha antes dela. Então aqui não existe retry — o
+    robô PERGUNTA pelo `container_id`/`post_external_id` que ficou gravado:
+
+      • saiu     → `publicado`, com o link (e ninguém republica);
+      • não saiu → `revisar`, que é um humano decidindo se refaz.
+
+    Em modo seco nem pergunta: sem commit nenhuma chamada à Meta aconteceu, uma
+    linha presa só pode ser worker morto no meio — vai direto pra `revisar`."""
+    if not _settings.enable_marketing:
+        return
+    from app.models.marketing_postagem import (
+        STATUS_CONTAINERING,
+        STATUS_PUBLICADO,
+        STATUS_PUBLICANDO,
+        STATUS_REVISAR,
+        MarketingPostagem,
+        RedeSocialToken,
+    )
+    from app.services.marketing import meta_client
+    from app.services.marketing import postagens as _postagens
+
+    limite = datetime.now(UTC) - timedelta(minutes=15)
+    # Depois de 48h insistindo, a Meta não vai mudar de ideia: a linha fica em
+    # `revisar` pro operador e o cron para de perguntar.
+    idade_max = datetime.now(UTC) - timedelta(hours=48)
+    async with session_scope() as s:
+        presas = (
+            await s.execute(
+                select(MarketingPostagem)
+                .where(
+                    or_(
+                        and_(
+                            MarketingPostagem.status.in_(
+                                (STATUS_CONTAINERING, STATUS_PUBLICANDO)
+                            ),
+                            # `claimed_at` é o carimbo de quando o publicador
+                            # pegou a linha; sem ele (estado escrito por outro
+                            # caminho) vale o `updated_at`.
+                            or_(
+                                MarketingPostagem.claimed_at <= limite,
+                                and_(
+                                    MarketingPostagem.claimed_at.is_(None),
+                                    MarketingPostagem.updated_at <= limite,
+                                ),
+                            ),
+                        ),
+                        # A DÚVIDA também volta aqui: o publicador manda pra
+                        # `revisar` quando a chamada que publica não respondeu.
+                        # Essa linha tem container e não tem link — é
+                        # exatamente a pergunta que este cron sabe fazer, e
+                        # deixá-la parada seria empurrar pro operador uma
+                        # resposta que a Meta dá de graça.
+                        and_(
+                            MarketingPostagem.status == STATUS_REVISAR,
+                            MarketingPostagem.container_id.isnot(None),
+                            MarketingPostagem.post_url.is_(None),
+                            MarketingPostagem.created_at >= idade_max,
+                        ),
+                    )
+                )
+                .order_by(MarketingPostagem.claimed_at.asc())
+                .limit(50)
+            )
+        ).scalars().all()
+        if not presas:
+            return
+        # Mesmo retrato em valores simples do publicador: o rollback de uma
+        # linha expira as outras da sessão.
+        alvos = [
+            {
+                "id": p.id,
+                "plataforma": p.plataforma,
+                "container_id": p.container_id,
+                "post_external_id": p.post_external_id,
+                "post_url": p.post_url,
+                "rede_social_id": p.rede_social_id,
+            }
+            for p in presas
+        ]
+        resolvidas = revisar = 0
+        for alvo in alvos:
+            ident = alvo["post_external_id"] or alvo["container_id"]
+            try:
+                token = ""
+                provedor = meta_client.PROVEDOR_FACEBOOK
+                if _settings.marketing_postagem_commit and ident:
+                    tok = (
+                        await s.execute(
+                            select(RedeSocialToken).where(
+                                RedeSocialToken.rede_social_id == alvo["rede_social_id"]
+                            )
+                        )
+                    ).scalars().first()
+                    if tok is not None and tok.token_enc:
+                        provedor = tok.provedor
+                        try:
+                            token = (
+                                decrypt_json(tok.token_enc).get("access_token") or ""
+                            ).strip()
+                        except Exception:  # noqa: BLE001
+                            token = ""
+                if not token:
+                    await _postagens.registrar_resultado(
+                        s,
+                        alvo["id"],
+                        status=STATUS_REVISAR,
+                        result=(
+                            "presa sem como consultar a Meta "
+                            f"(modo seco ou conta sem token) — id externo: {ident or '—'}"
+                        ),
+                    )
+                    revisar += 1
+                    continue
+                res = await meta_client.consultar_publicacao(
+                    plataforma=alvo["plataforma"],
+                    token=token,
+                    container_id=alvo["container_id"],
+                    post_external_id=alvo["post_external_id"],
+                    provedor=provedor,
+                )
+                await _postagens.registrar_resultado(
+                    s,
+                    alvo["id"],
+                    status=STATUS_PUBLICADO if res.ok else STATUS_REVISAR,
+                    result=(
+                        res.erro or f"reconciliado: a Meta confirmou a publicação ({ident})"
+                    )[:2000],
+                    post_external_id=res.post_external_id or alvo["post_external_id"],
+                    post_url=res.post_url or alvo["post_url"],
+                    container_id=res.container_id or alvo["container_id"],
+                )
+                resolvidas += 1 if res.ok else 0
+                revisar += 0 if res.ok else 1
+            except Exception as e:  # noqa: BLE001
+                await s.rollback()
+                logger.error(
+                    "marketing_postagens_reconciliar_item_failed",
+                    postagem=str(alvo["id"]),
+                    err=str(e)[:300],
+                )
+    logger.info(
+        "marketing_postagens_reconciliar_tick",
+        presas=len(alvos),
+        publicadas=resolvidas,
+        revisar=revisar,
+    )
+
+
 async def daily_sync_scheduler(ctx: dict) -> None:
     """Every 5min: enqueue sync_all for users whose `daily_sync_time` falls
     inside the current 5-minute window in America/Sao_Paulo, only if no
@@ -1264,6 +1726,83 @@ async def ml_token_refresh(ctx: dict) -> None:
 async def tiktok_token_refresh(ctx: dict) -> None:
     """Refresh TikTok tokens expiring within 12h (TikTok AT lasts ~24h)."""
     await _refresh_tokens_for(IntegrationPlatform.TIKTOK, expiring_within_s=12 * 3600)
+
+
+async def meta_token_refresh(ctx: dict) -> None:
+    """Tokens das contas de rede social (robô de postagem) vencendo em 7 dias.
+
+    Diferente dos irmãos acima, este NÃO renova — ainda: o token de Página da
+    Meta é de longa duração (~60 dias) e a troca (`grant_type=fb_exchange_
+    token`) exige app_id/app_secret do app da Meta, que não estão no settings.
+    Quando entrarem, a renovação cabe exatamente aqui. Por ora ele faz o que dá
+    pra fazer sem segredo nenhum: marca `expirado` o que já venceu e AVISA os
+    admins com uma semana de antecedência — senão a primeira notícia de token
+    vencido seria um post que não saiu.
+
+    `redes_sociais_tokens.token_expires_at` está em claro justamente pra esta
+    varredura não precisar decifrar nada (mesma escolha das integrações). O
+    token em si não é lido aqui."""
+    if not _settings.enable_marketing:
+        return
+    from app.models import RedeSocial, RedeSocialToken
+
+    agora = datetime.now(UTC)
+    limite = agora + timedelta(days=7)
+    async with session_scope() as s:
+        linhas = (
+            await s.execute(
+                select(RedeSocialToken, RedeSocial)
+                .join(RedeSocial, RedeSocial.id == RedeSocialToken.rede_social_id)
+                .where(
+                    RedeSocialToken.token_expires_at.is_not(None),
+                    RedeSocialToken.token_expires_at <= limite,
+                    # Revogado já foi avisado e não volta sozinho.
+                    RedeSocialToken.status != "revogado",
+                )
+                .order_by(RedeSocialToken.token_expires_at.asc())
+            )
+        ).all()
+        if not linhas:
+            return
+        admin_ids = (
+            await s.execute(select(User.id).where(User.role == UserRole.ADMIN))
+        ).scalars().all()
+        avisados = 0
+        for tok, rede in linhas:
+            vencido = tok.token_expires_at <= agora
+            if vencido and tok.status != "expirado":
+                tok.status = "expirado"
+                tok.last_error = "token vencido — reconecte a conta"
+            conta = rede.conta or rede.usuario or rede.plataforma
+            dias = max(0, (tok.token_expires_at - agora).days)
+            texto = (
+                f"O token de {conta} ({rede.plataforma}) "
+                + ("VENCEU" if vencido else f"vence em {dias} dia(s)")
+                + ". Enquanto isso o robô não consegue publicar nessa conta: "
+                "reconecte em Cadastros › Redes Sociais."
+            )
+            for uid in admin_ids:
+                # Dedupe por DIA: um aviso por conta por dia até alguém
+                # reconectar (o cron roda 1×/dia, mas um restart não duplica).
+                a = await emit_alert(
+                    s,
+                    user_id=uid,
+                    type=AlertType.GENERIC,
+                    severity=AlertSeverity.ERROR if vencido else AlertSeverity.WARNING,
+                    title=f"Rede social: token {'vencido' if vencido else 'vencendo'} ({conta})",
+                    message=texto,
+                    payload={
+                        "rede_social_id": str(rede.id),
+                        "plataforma": rede.plataforma,
+                        "expira_em": tok.token_expires_at.isoformat(),
+                    },
+                    dedupe_key=f"rede_social_token:{tok.id}:{agora:%Y%m%d}",
+                    notify_telegram=False,
+                )
+                if a is not None:
+                    avisados += 1
+        await s.commit()
+    logger.info("meta_token_refresh_done", contas=len(linhas), avisados=avisados)
 
 
 async def refunds_freight_backfill(ctx: dict) -> None:
@@ -2484,6 +3023,10 @@ class WorkerSettings:
         cron(shopee_token_refresh, hour={0, 4, 8, 12, 16, 20}, minute=0, run_at_startup=False),
         cron(ml_token_refresh, minute={0, 30}, run_at_startup=False),
         cron(tiktok_token_refresh, hour={0, 6, 12, 18}, minute=45, run_at_startup=False),
+        # Token das contas de rede social (robô de postagem): a janela de aviso
+        # é de 7 dias, então 1×/dia basta. 12:35 UTC = 09:35 BRT — o alerta cai
+        # no sino em horário de expediente, com tempo de reconectar a conta.
+        cron(meta_token_refresh, hour=12, minute=35, run_at_startup=False),
         cron(marketplace_financials_retry, minute={10, 40}, run_at_startup=False),
         # Esteira lenta: backlog de falha de API. Fila e teto próprios pra não
         # competir com o retry dos pedidos do dia.
@@ -2555,6 +3098,28 @@ class WorkerSettings:
         # Igual ao reconciler, só ESCREVE no outbox (comandos 'browser' pra
         # marionete local via /agent/lease), então roda aqui no central.
         cron(marketing_flash_duplicate, hour=4, minute=0, run_at_startup=False),
+        # Robô de postagem dos criativos (Marketing × Redes Sociais). Roda no
+        # central: quem publica é o SERVIDOR, pela Graph API oficial — nada
+        # disso passa pelo executor do Mac (que existe só porque a API de Ads
+        # da Shopee é bloqueada). Mac desligado às 19h = post agendado perdido.
+        # A agenda vira fila a cada minuto…
+        cron(marketing_postagens_promover, run_at_startup=False),
+        # …e o publicador também roda a cada minuto. `timeout=1200` com folga
+        # sobre o teto do upload (600s) + o poll da transcodificação (300s):
+        # o job precisa TERMINAR por conta própria, porque um kill do arq no
+        # meio da chamada que publica deixa a postagem sem resposta. O próprio
+        # laço para em `_ORCAMENTO_TICK` e devolve o que não deu tempo.
+        # Dois ticks se sobreporem é inofensivo: cada um reserva linhas
+        # diferentes (SKIP LOCKED no `proximas_para_publicar`).
+        cron(marketing_postagens_publicar, run_at_startup=False, timeout=1200),
+        # Reconciliação a cada 10 min, no :05 (longe do congestionamento do
+        # :00): postagem presa é CONSULTADA, nunca retentada.
+        cron(
+            marketing_postagens_reconciliar,
+            minute={5, 15, 25, 35, 45, 55},
+            run_at_startup=False,
+            timeout=300,
+        ),
         # Marketing: Shopee round-robin MOVED to the agent-node block below —
         # only the dedicated machine (MARKETING_AGENT_NODE=1) talks to Shopee
         # Ads, so the central server never competes on the same partner-id
