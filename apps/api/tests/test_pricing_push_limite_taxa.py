@@ -18,7 +18,7 @@ from uuid import uuid4
 import pytest
 
 from app.services.marketplaces.base import SyncStatus
-from app.services.pricing import push as P
+from app.services.pricing import push as pricing_push
 
 pytestmark = pytest.mark.asyncio
 
