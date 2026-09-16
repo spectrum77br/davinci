@@ -56,14 +56,21 @@ STATUS_SEM_LEITURA = "sem_leitura"
 
 
 def parse_key(key: str) -> tuple[UUID, UUID] | None:
-    """`cell:{account_id}:{product_id}:{ts}` → (account_id, product_id)."""
+    """`cell:{product_id}:{account_id}:{ts}` → (account_id, product_id).
+
+    A ordem na chave é PRODUTO primeiro, conta depois — conferido no banco em
+    16/09/2026 (o primeiro UUID existe em pricing_products, o segundo em
+    pricing_accounts). Ler ao contrário fazia o conferente procurar uma conta
+    com o id do produto, não achar nada e pular todos os envios em silêncio
+    (vistos=0 no primeiro tick)."""
     partes = (key or "").split(":")
     if len(partes) < 4 or partes[0] != "cell":
         return None
     try:
-        return UUID(partes[1]), UUID(partes[2])
+        product_id, account_id = UUID(partes[1]), UUID(partes[2])
     except ValueError:
         return None
+    return account_id, product_id
 
 
 def diverge(enviado: float, vivo: float | None) -> bool:

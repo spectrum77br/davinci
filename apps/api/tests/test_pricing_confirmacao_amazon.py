@@ -21,9 +21,11 @@ from app.services import pricing_confirmacao_amazon as conf
 pytestmark = pytest.mark.asyncio
 
 
-def test_parse_key():
-    a, p = uuid4(), uuid4()
-    assert conf.parse_key(f"cell:{a}:{p}:1789572929233") == (a, p)
+def test_parse_key_produto_vem_primeiro_na_chave():
+    """`cell:{produto}:{conta}:{ts}` — a ordem inversa foi o bug do primeiro
+    tick em produção (vistos=0)."""
+    conta, produto = uuid4(), uuid4()
+    assert conf.parse_key(f"cell:{produto}:{conta}:1789572929233") == (conta, produto)
     assert conf.parse_key("cell:nao-e-uuid:x:1") is None
     assert conf.parse_key("outra:coisa") is None
     assert conf.parse_key("") is None
