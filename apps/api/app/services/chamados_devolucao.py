@@ -718,6 +718,51 @@ def _fmt_brt(v: object) -> str:
 _ML_BENEFICIADO = {"complainant": "COMPRADOR", "respondent": "VENDEDOR"}
 
 
+class _MlEncerradaError(chamados_svc.ChamadoError):
+    """Reclamação do ML já encerrada — carrega o claim pra decidir o formulário."""
+
+    def __init__(self, code: str, claim: dict):
+        super().__init__(code)
+        self.claim = claim
+
+
+# Depois disso sem reclamação aberta pelo comprador, a devolução do ML vai pro
+# formulário de ajuda (robô) em vez de esperar pra sempre (Eduardo 16/09: "nosso
+# agente tem que enviar o chamado correto" — 287876/287144/291752 parados desde 09/09).
+ML_FORMULARIO_APOS = timedelta(hours=24)
+
+
+def _ml_decidido_contra_nos(claim: dict) -> bool:
+    beneficiados = {str(b).lower() for b in ((claim.get("resolution") or {}).get("benefited") or [])}
+    return not beneficiados or "complainant" in beneficiados
+
+
+def _encaminhar_formulario_ml(
+    session: AsyncSession, ch: Chamado, msg: ChamadoMensagem, contexto: str
+) -> ChamadoMensagem:
+    """A API do ML não aceita a contestação (reclamação encerrada ou inexistente):
+    a abertura vira tarefa do robô do FORMULÁRIO de ajuda (canal robo, `pendente`,
+    sem nº — o /agent/lease entrega como `abrir` e o robô devolve o protocolo).
+    Mesmo caminho da Logística (07/09: "se não der pela venda, pelo formulário")."""
+    claim = (ch.chamado or "").strip()
+    msg.texto = f"{(msg.texto or '').rstrip()}\n{contexto}"
+    msg.canal = "robo"
+    msg.status = "pendente"
+    msg.erro = None
+    ch.canal = "robo"
+    if claim.isdigit():
+        ch.chamado = None  # o protocolo novo do formulário entra aqui
+    session.add(
+        chamados_svc.registrar_sistema(
+            ch,
+            "A API do Mercado Livre não aceita esta contestação"
+            + (f" (reclamação {claim} encerrada)" if claim.isdigit() else " (sem reclamação aberta pelo comprador)")
+            + " — enviado pro robô do formulário de ajuda do ML; o protocolo aparece aqui quando ele abrir.",
+        )
+    )
+    return msg
+
+
 def _texto_ml_encerrada(claim: dict) -> str:
     res = claim.get("resolution") or {}
     quem = ", ".join(
@@ -791,7 +836,7 @@ async def _resolver_claim_ml(
         if pode_gravar:
             ch.chamado = str(fechado.get("id"))
         session.add(chamados_svc.registrar_sistema(ch, _texto_ml_encerrada(fechado)))
-        raise chamados_svc.ChamadoError("ml_claim_encerrada")
+        raise _MlEncerradaError("ml_claim_encerrada", fechado)
     raise _PendenteError("devolucao_sem_return")
 
 
@@ -1333,8 +1378,8 @@ async def disparar(
     lugar do texto padrão). Nunca levanta; NÃO commita."""
     agora = agora or datetime.now(UTC)
     msg = await mensagem_abertura(session, ch)
-    if msg is None or msg.status == "enviada":
-        return msg
+    if msg is None or msg.status == "enviada" or msg.canal == "robo":
+        return msg  # canal robo = já está com o robô do formulário
     if not chamados_svc.motivo_pede_chamado(dev):
         # Motivo que deixou de abrir chamado (ex. "item incorreto", 07/09): a
         # abertura que ficou pendente falha de vez em vez de retentar pra sempre.
@@ -1368,12 +1413,34 @@ async def disparar(
         else:
             raise chamados_svc.ChamadoError("plataforma_sem_api")
     except _PendenteError as p:
+        criada = msg.created_at
+        if (
+            plat == PLAT_ML
+            and p.code == "devolucao_sem_claim"
+            and criada is not None
+            and agora - criada > ML_FORMULARIO_APOS
+        ):
+            return _encaminhar_formulario_ml(
+                session, ch, msg,
+                "Não há reclamação aberta pelo comprador nesta venda para registrar a contestação. "
+                "Pedimos a análise do caso por aqui.",
+            )
         msg.status = "pendente"
         msg.erro = p.code
-        criada = msg.created_at
         if criada is not None and agora - criada > PRAZO_PENDENTE:
             msg.status = "falhou"
             msg.erro = "devolucao_prazo_esgotado"
+        return msg
+    except _MlEncerradaError as e:
+        manual = (ch.chamado or "").strip() and not (ch.chamado or "").strip().isdigit()
+        if _ml_decidido_contra_nos(e.claim) and not manual:
+            return _encaminhar_formulario_ml(
+                session, ch, msg,
+                _texto_ml_encerrada(e.claim).replace(" Nada mais a abrir pela API.", "")
+                + " — sem análise da nossa parte. Pedimos a revisão do caso.",
+            )
+        msg.status = "falhou"
+        msg.erro = e.code
         return msg
     except chamados_svc.ChamadoError as e:
         msg.status = "falhou"
@@ -1525,6 +1592,7 @@ async def processar_pendentes(
             .where(
                 ChamadoMensagem.tipo == TIPO_ABERTURA,
                 ChamadoMensagem.status == "pendente",
+                ChamadoMensagem.canal != "robo",  # tarefa do robô do formulário
                 Chamado.origem == "devolucao",
                 Chamado.resolvido.is_(False),
             )

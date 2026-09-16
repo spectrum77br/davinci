@@ -1261,15 +1261,27 @@ async def test_ml_claim_encerrado_e_texto_manual_no_chamado(client, make_user, a
               "condicao_produto": "Novo", "motivo_devolucao": "Bloqueado"},
     )
     assert r.status_code == 201, r.text
-    assert r.json()["chamado_ml_status"] == "falhou"
-    assert r.json()["chamado_ml_erro"] == "ml_claim_encerrada"
+    # 16/09 (Eduardo: "nosso agente tem que enviar o chamado correto"): encerrada a favor
+    # do comprador → vai pro robô do FORMULÁRIO de ajuda (canal robo, pendente, sem nº)
+    assert r.json()["chamado_ml_status"] == "pendente", r.json()
     assert ml.reviews == []
     ch = (await db.execute(select(Chamado).where(Chamado.pedido_bling == "283344"))).scalar_one()
-    assert ch.chamado == "777"
+    await db.refresh(ch)
+    assert ch.canal == "robo" and ch.chamado is None
+    ab = await _abertura(db, ch.id)
+    assert ab.canal == "robo" and ab.status == "pendente" and ab.erro is None
+    assert "Reclamação 777" in ab.texto and "revisão do caso" in ab.texto
     hist = await _sistema(db, ch.id)
     assert any("777" in t and "ENCERRADA" in t and "COMPRADOR" in t and "18/08" in t for t in hist), hist
+    assert any("robô do formulário" in t for t in hist), hist
+    # o cron da API não mexe na tarefa do robô
+    s = await svc.processar_pendentes(db)
+    assert s["verificados"] == 0
     # operador escreveu no campo chamado: não é claim id → resolve pelo pedido e preserva o texto
     ch.chamado = "08/09 aberto manual chamado dentro da venda"
+    ch.canal = "api"
+    ab.canal = "api"
+    ab.status = "falhou"
     ml.fechado = False
     ml.acao = True
     await db.commit()
@@ -1466,3 +1478,39 @@ async def test_reembolso_com_valor_lancado_fica_e_avisa(client, make_user, auth_
         )
     ).scalar_one_or_none()
     assert alerta is not None and "revisar" in alerta.title
+
+
+async def test_ml_sem_reclamacao_vai_pro_formulario_depois_de_24h(client, make_user, auth_as, db, ml, monkeypatch):
+    """Eduardo 16/09: 287876/287144/291752 ficaram "sem devolução aberta no ML (tenta a
+    cada hora)" desde 09/09 — nada foi enviado. Depois de 24 h sem reclamação, a
+    abertura vai pro robô do formulário e o /agent/lease entrega como `abrir`."""
+    from app.config import get_settings
+
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+    ml.claims = ()
+    await _seed_pedido(db, user, numero="287876", numeroloja="2000017000000001")
+    r = await client.post(
+        "/api/devolutions",
+        json={"conta": "aguiar", "pedido_bling": "287876", "pedido_marketplace": "2000017000000001",
+              "condicao_produto": "Novo", "motivo_devolucao": "Não recebido"},
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["chamado_ml_status"] == "pendente"
+    assert r.json()["chamado_ml_erro"] == "devolucao_sem_claim"  # < 24 h: ainda espera
+    ch = await _chamado_de(db, "287876")
+    assert ch.canal == "api"
+    s = await svc.processar_pendentes(db, agora=datetime.now(UTC) + timedelta(hours=25))
+    assert s["verificados"] == 1
+    ch = await _chamado_de(db, "287876")
+    ab = await _abertura(db, ch.id)
+    await db.refresh(ab)
+    assert ch.canal == "robo" and ab.canal == "robo" and ab.status == "pendente" and ab.erro is None
+    assert "Não há reclamação aberta" in ab.texto
+
+    token = "tok-form-1609"
+    monkeypatch.setattr(get_settings(), "nf_agent_token", token)
+    lease = await client.post("/api/chamados/agent/lease", headers={"X-Agent-Token": token}, json={"limite": 10})
+    assert lease.status_code == 200, lease.text
+    tarefas = [t for t in lease.json()["tarefas"] if t["mensagem_id"] == str(ab.id)]
+    assert len(tarefas) == 1 and tarefas[0]["tipo"] == "abrir", lease.json()

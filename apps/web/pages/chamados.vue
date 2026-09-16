@@ -188,7 +188,7 @@ const ERROS: Record<string, string> = {
   devolucao_sem_foto: 'aguardando foto na tela Devoluções',
   return_review_indisponivel: 'ML ainda não liberou a revisão da devolução (tenta a cada hora)',
   devolucao_sem_claim: 'sem devolução aberta no ML pra esse pedido (tenta a cada hora)',
-  devolucao_sem_return: 'sem devolução aberta no ML pra esse pedido (tenta a cada hora)',
+  devolucao_sem_return: 'o comprador não abriu devolução na plataforma pra esse pedido (tenta a cada hora)',
   devolucao_sem_pedido_marketplace: 'devolução sem nº do pedido do ML',
   devolucao_prazo_esgotado: 'ficou 45 dias pendente — abrir na mão',
   devolucao_nao_encontrada: 'lançamento da devolução não encontrado',
