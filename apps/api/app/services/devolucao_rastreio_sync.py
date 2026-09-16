@@ -24,9 +24,10 @@ outros; um pedido sem devolução conhecida fica como está.
 
 from __future__ import annotations
 
+import inspect
 import unicodedata
 from collections.abc import Collection
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import structlog
 from sqlalchemy import select, text
@@ -38,6 +39,14 @@ from app.services import logistica_rules, logistica_track
 from app.services.devolucao_returns import ReturnInfo
 
 logger = structlog.get_logger()
+
+# Depois da entrega do pacote de volta, o detalhe da devolução continua sendo
+# consultado por estes dias: cobre o prazo de conferência da loja (Shopee: 3
+# dias corridos) com folga...
+DIAS_DETALHE_APOS_ENTREGA = 5
+# ...e enquanto o caso estiver numa situação em que a plataforma ainda pode
+# pedir algo da loja (evidência, proposta, compensação) — poucos casos.
+STATUS_COM_DETALHE = frozenset({"REQUESTED", "JUDGING", "SELLER_DISPUTE"})
 
 _SITUACAO_AGUARDANDO_DEVOLUCAO = "83957"
 
@@ -62,12 +71,17 @@ async def _fetch_por_marketplace(
     key: str,
     linhas: list[Logistica],
     ja_entregues: set[str] | None = None,
+    reconsultar: set[str] | None = None,
 ) -> dict[str, ReturnInfo]:
     """Chama o `returns_por_pedido` do módulo do marketplace. Import tardio e
     tolerante: módulo sem a função (ainda) ou erro → dict vazio + log.
 
-    `ja_entregues` poupa a consulta extra do detalhe nas devoluções que já
-    constam entregues (só a Shopee aceita o parâmetro hoje)."""
+    `ja_entregues` = pedidos cujo pacote de volta já consta entregue (a Shopee
+    usa pra não refazer a leitura da SPX). `reconsultar` = os que, mesmo
+    entregues, ainda precisam do DETALHE (prazo de resposta da loja). Só os
+    kwargs que a função aceita são passados — inspecionar a assinatura evita
+    o antigo `except TypeError`, que refazia a chamada inteira quando um
+    TypeError vinha de DENTRO do fetcher."""
     try:
         if key == "tiktok":
             from app.services import logistica_tiktok as mod
@@ -79,10 +93,13 @@ async def _fetch_por_marketplace(
         if fn is None:
             logger.warning("devolucao_rastreio_sync_sem_fetcher", marketplace=key)
             return {}
-        try:
-            out = await fn(session, linhas, ja_entregues=ja_entregues or set())
-        except TypeError:
-            out = await fn(session, linhas)  # marketplace que ainda não aceita
+        aceita = inspect.signature(fn).parameters
+        kwargs: dict[str, set[str]] = {}
+        if "ja_entregues" in aceita:
+            kwargs["ja_entregues"] = ja_entregues or set()
+        if "reconsultar" in aceita:
+            kwargs["reconsultar"] = reconsultar or set()
+        out = await fn(session, linhas, **kwargs)
         return dict(out or {})
     except Exception as e:  # noqa: BLE001 — um marketplace não derruba os outros
         logger.warning("devolucao_rastreio_sync_fetch_falhou", marketplace=key, err=str(e)[:300])
@@ -212,22 +229,34 @@ async def run(session: AsyncSession, *, pedidos: Collection[str] | None = None) 
             por_mk.setdefault(k, []).append(linha)
 
     # Devolução já marcada como entregue não precisa da consulta extra de
-    # detalhe a cada rodada — o dado não volta atrás.
-    ja_entregues = set(
-        (
-            await session.execute(
-                select(DevolucaoRastreio.pedido_bling).where(
-                    DevolucaoRastreio.pacote_entregue_em.is_not(None)
-                )
-            )
+    # detalhe a cada rodada — o dado não volta atrás. EXCETO quando o prazo
+    # de resposta da loja pode existir, que só vem no detalhe: nos primeiros
+    # dias depois da entrega (Shopee: 3 dias corridos pra conferir), enquanto
+    # o caso estiver em análise/disputa (a Shopee pode pedir evidência) ou
+    # enquanto houver prazo recente gravado.
+    agora_ = datetime.now(UTC)
+    entregues_rows = (
+        await session.execute(
+            select(
+                DevolucaoRastreio.pedido_bling,
+                DevolucaoRastreio.pacote_entregue_em,
+                DevolucaoRastreio.devolucao_status_auto,
+                DevolucaoRastreio.prazo_acao_auto,
+            ).where(DevolucaoRastreio.pacote_entregue_em.is_not(None))
         )
-        .scalars()
-        .all()
-    )
+    ).all()
+    ja_entregues = {r.pedido_bling for r in entregues_rows}
+    reconsultar = {
+        r.pedido_bling
+        for r in entregues_rows
+        if r.pacote_entregue_em >= agora_ - timedelta(days=DIAS_DETALHE_APOS_ENTREGA)
+        or (r.devolucao_status_auto or "").strip().upper() in STATUS_COM_DETALHE
+        or (r.prazo_acao_auto is not None and r.prazo_acao_auto >= agora_ - timedelta(days=1))
+    }
 
     infos: dict[str, ReturnInfo] = {}
     for key, ls in por_mk.items():
-        got = await _fetch_por_marketplace(session, key, ls, ja_entregues)
+        got = await _fetch_por_marketplace(session, key, ls, ja_entregues, reconsultar)
         for pedido, info in got.items():
             if isinstance(info, ReturnInfo) and pedido:
                 infos[str(pedido)] = info
@@ -261,9 +290,12 @@ async def run(session: AsyncSession, *, pedidos: Collection[str] | None = None) 
             row.devolucao_status_auto = (info.status or "").strip() or None
             row.devolucao_tipo_auto = (info.return_type or "").strip() or None
             # Prazo de resposta da loja (0286): reescrito sempre — quando a
-            # plataforma para de pedir ação, o prazo some da tela.
-            row.acao_auto = (info.acao_pendente or "").strip() or None
-            row.prazo_acao_auto = info.prazo_acao
+            # plataforma para de pedir ação, o prazo some da tela. Exceto
+            # quando o marketplace NÃO respondeu a consulta de onde o prazo sai
+            # (detalhe com erro): fica o da rodada anterior.
+            if not info.prazo_desconhecido:
+                row.acao_auto = (info.acao_pendente or "").strip() or None
+                row.prazo_acao_auto = info.prazo_acao
             row.devolucao_id_auto = (info.return_id or "").strip() or None
             row.fonte_auto = info.fonte
             if info.created_at:
@@ -313,7 +345,9 @@ async def run(session: AsyncSession, *, pedidos: Collection[str] | None = None) 
         # Só os pedidos cujo caso foi relido AGORA: conta que deu 429 fica com o
         # prazo da rodada anterior na tela, mas não rende aviso com dado velho.
         avisos = await devolucao_acao_avisos.run(
-            session, pedidos=[p for p in alvo if str(p) in infos], linhas=linhas
+            session,
+            pedidos=[p for p in alvo if str(p) in infos and not infos[str(p)].prazo_desconhecido],
+            linhas=linhas,
         )
     except Exception as e:  # noqa: BLE001
         logger.warning("devolucao_acao_avisos_falhou", err=str(e)[:200])

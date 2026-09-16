@@ -379,3 +379,179 @@ async def test_run_threema_caido_nao_carimba(db: AsyncSession):
 
     assert out["falhas"] == 1 and out["enviados"] == 0
     assert (await _rastreio(db, p1)).aviso_prazo_acao_at is None
+
+
+# ---- Shopee -------------------------------------------------------------------
+
+
+def _det_shopee(**kw) -> dict:
+    """Detalhe da devolução no formato real (medido em prod 16/09, pedido 292317:
+    entregue 16/09 09:54 BRT → return_seller_due_date 19/09 09:50)."""
+    base = {
+        "status": "PROCESSING", "return_solution": 0, "needs_logistics": True,
+        "due_date": 1788890340, "return_seller_due_date": 1789825800, "return_ship_due_date": 1789823640,
+        "reverse_logistics_status": "LOGISTICS_DELIVERY_DONE", "update_time": 1789566866, "create_time": 1788721140,
+        "seller_proof": {"seller_proof_status": "", "seller_evidence_deadline": None},
+        "seller_compensation": {"seller_compensation_status": "", "seller_compensation_due_date": None},
+        "negotiation": {"negotiation_status": "", "latest_solution": "RETURN_REFUND", "offer_due_date": None},
+    }
+    base.update(kw)
+    return base
+
+
+def test_shopee_prazo_de_conferir_so_com_o_pacote_entregue():
+    f = logistica_shopee._acao_pendente_shopee
+    assert f(_det_shopee(), "PROCESSING") == (
+        "SHOPEE_CONFERIR_PACOTE", datetime.fromtimestamp(1789825800, tz=UTC)
+    )
+    # A Shopee manda a data ANTES da entrega (estimativa, ex. 289941): não vale.
+    assert f(_det_shopee(reverse_logistics_status="LOGISTICS_PICKUP_DONE"), "PROCESSING") == (None, None)
+    # Já contestou / já pagou: não há mais o que conferir.
+    assert f(_det_shopee(), "SELLER_DISPUTE") == (None, None)
+    assert f(_det_shopee(), "REFUND_PAID") == (None, None)
+    # Sem a data, sem prazo.
+    assert f(_det_shopee(return_seller_due_date=None), "PROCESSING") == (None, None)
+
+
+def test_shopee_outros_prazos_da_loja_e_o_mais_curto_vence():
+    f = logistica_shopee._acao_pendente_shopee
+    # Pedido recém-aberto esperando a loja responder.
+    assert f(_det_shopee(status="REQUESTED", reverse_logistics_status="LOGISTICS_NOT_STARTED"), "REQUESTED") == (
+        "SHOPEE_RESPONDER_SOLICITACAO", datetime.fromtimestamp(1788890340, tz=UTC)
+    )
+    # Em análise (JUDGING) a vez é da Shopee: sem prazo da loja…
+    assert f(_det_shopee(status="JUDGING", reverse_logistics_status="LOGISTICS_NOT_STARTED"), "JUDGING") == (None, None)
+    # …a não ser que ela peça prova.
+    assert f(
+        _det_shopee(status="JUDGING", reverse_logistics_status="LOGISTICS_NOT_STARTED",
+                    seller_proof={"seller_proof_status": "PENDING", "seller_evidence_deadline": 1789000000}),
+        "JUDGING",
+    ) == ("SHOPEE_ENVIAR_EVIDENCIAS", datetime.fromtimestamp(1789000000, tz=UTC))
+    # Proposta do cliente pendente com prazo.
+    assert f(
+        _det_shopee(negotiation={"negotiation_status": "PENDING_RESPOND", "offer_due_date": 1789700000}), "PROCESSING"
+    ) == ("SHOPEE_RESPONDER_PROPOSTA", datetime.fromtimestamp(1789700000, tz=UTC))
+    # Proposta pendente SEM data (caso real 289370) → cai no próximo prazo válido.
+    assert f(
+        _det_shopee(negotiation={"negotiation_status": "PENDING_RESPOND", "offer_due_date": None}), "PROCESSING"
+    ) == ("SHOPEE_CONFERIR_PACOTE", datetime.fromtimestamp(1789825800, tz=UTC))
+    # Entrada suja não levanta.
+    assert f(None, None) == (None, None)
+    assert f({"seller_proof": "x", "negotiation": 3}, "PROCESSING") == (None, None)
+    assert logistica_rules.acao_plataforma_pt("shopee", "SHOPEE_CONFERIR_PACOTE") == (
+        "Conferir o pacote recebido e responder na Shopee"
+    )
+
+
+class _FakeShopeeComDetalhe:
+    """get_return_list (janela por create_time) + get_return_detail."""
+
+    def __init__(self, caso: dict, det: dict):
+        self.caso, self.det, self.detalhes = caso, det, 0
+
+    async def get_return_list(self, *, create_time_from=None, create_time_to=None, **kw):
+        return [self.caso] if create_time_from <= int(self.caso["create_time"]) <= create_time_to else []
+
+    async def get_return_detail(self, return_sn):
+        self.detalhes += 1
+        return self.det
+
+
+def _patch_shopee(monkeypatch, fake) -> None:
+    from types import SimpleNamespace
+
+    async def _integ(session, conta):
+        return SimpleNamespace(name=conta)
+
+    monkeypatch.setattr(logistica_shopee, "_shopee_integration_for_conta", _integ)
+    monkeypatch.setattr(logistica_shopee, "_build_shopee_client", lambda s, i, *, lock=None: fake)
+
+
+@pytest.mark.asyncio
+async def test_shopee_returns_por_pedido_traz_o_prazo_e_respeita_os_dois_conjuntos(db: AsyncSession, monkeypatch):
+    """`ja_entregues` sozinho poupa o detalhe (como sempre); `reconsultar`
+    força o detalhe mesmo entregue (prazo de conferir); erro no detalhe deixa
+    o prazo como DESCONHECIDO (o sync mantém o anterior) em vez de apagar."""
+    import time
+    from datetime import date
+
+    agora = int(time.time())
+    caso = {"order_sn": "SN1", "return_sn": "R1", "status": "PROCESSING", "create_time": agora - 10 * 86400,
+            "update_time": agora - 3600, "tracking_number": "BR123"}
+    det = _det_shopee(update_time=agora - 3600, return_seller_due_date=agora + 3 * 86400)
+    fake = _FakeShopeeComDetalhe(caso, det)
+    _patch_shopee(monkeypatch, fake)
+    linha = Logistica(plataforma="Shopee", conta="atv", pedido_bling="292317", pedido_marketplace="SN1",
+                      data=date.today() - timedelta(days=12))
+
+    out = await logistica_shopee.returns_por_pedido(db, [linha])
+    info = out["292317"]
+    assert info.acao_pendente == "SHOPEE_CONFERIR_PACOTE"
+    assert info.prazo_acao == datetime.fromtimestamp(agora + 3 * 86400, tz=UTC)
+    assert info.entregue_em is not None and fake.detalhes == 1 and not info.prazo_desconhecido
+
+    # Entregue há tempo e fora do `reconsultar`: sem detalhe, sem prazo (janela fechou).
+    out = await logistica_shopee.returns_por_pedido(db, [linha], ja_entregues={"292317"})
+    assert out["292317"].prazo_acao is None and fake.detalhes == 1
+
+    # Entregue há pouco (em `reconsultar`): consulta o detalhe mesmo assim.
+    out = await logistica_shopee.returns_por_pedido(db, [linha], ja_entregues={"292317"}, reconsultar={"292317"})
+    assert out["292317"].acao_pendente == "SHOPEE_CONFERIR_PACOTE" and fake.detalhes == 2
+
+    # Detalhe caiu: prazo desconhecido (não apaga), status/rastreio da lista seguem.
+    async def _boom(return_sn):
+        raise RuntimeError("shopee 429")
+
+    monkeypatch.setattr(fake, "get_return_detail", _boom)
+    out = await logistica_shopee.returns_por_pedido(db, [linha])
+    assert out["292317"].prazo_desconhecido is True and out["292317"].prazo_acao is None
+    assert out["292317"].status == "PROCESSING" and out["292317"].tracking == "BR123"
+
+
+@pytest.mark.asyncio
+async def test_sync_mantem_o_prazo_quando_o_detalhe_nao_respondeu(db: AsyncSession, fakes):
+    pedido = f"4{uuid4().hex[:6]}"
+    await _seed(db, pedido)
+    fakes["tiktok"][pedido] = ReturnInfo(
+        fonte="tiktok", status="BUYER_SHIPPED_ITEM", tracking=None, carrier=None,
+        created_at=AGORA, updated_at=AGORA, return_id="R1",
+        acao_pendente="SELLER_RESPOND_RECEIVE_PACKAGE", prazo_acao=PRAZO_18,
+    )
+    await sync.run(db, pedidos=[pedido])
+    fakes["tiktok"][pedido] = fakes["tiktok"][pedido]._replace(
+        acao_pendente=None, prazo_acao=None, prazo_desconhecido=True
+    )
+    await sync.run(db, pedidos=[pedido])
+    r = await _rastreio(db, pedido)
+    assert r.prazo_acao_auto == PRAZO_18 and r.acao_auto == "SELLER_RESPOND_RECEIVE_PACKAGE"
+
+
+@pytest.mark.asyncio
+async def test_sync_reconsulta_o_detalhe_nos_primeiros_dias_apos_a_entrega(db: AsyncSession, fakes, monkeypatch):
+    """`ja_entregues` só leva quem chegou há mais de DIAS_DETALHE_APOS_ENTREGA
+    dias — o prazo de conferir (3 dias) mora no detalhe."""
+    recente, antigo = (f"9{uuid4().hex[:6]}" for _ in range(2))
+    for p in (recente, antigo):
+        db.add(Logistica(pedido_bling=p, plataforma="Shopee", pedido_marketplace=f"SN-{p}", conta="atv"))
+    agora = datetime.now(UTC)
+    db.add(DevolucaoRastreio(pedido_bling=recente, pacote_entregue_em=agora - timedelta(days=2)))
+    db.add(DevolucaoRastreio(pedido_bling=antigo, pacote_entregue_em=agora - timedelta(days=10)))
+    await db.commit()
+    em_analise = f"9{uuid4().hex[:6]}"
+    db.add(Logistica(pedido_bling=em_analise, plataforma="Shopee", pedido_marketplace=f"SN-{em_analise}", conta="atv"))
+    db.add(DevolucaoRastreio(pedido_bling=em_analise, pacote_entregue_em=agora - timedelta(days=20),
+                             devolucao_status_auto="JUDGING"))
+    await db.commit()
+    visto: dict = {}
+
+    async def _shopee(session, linhas, ja_entregues=None, reconsultar=None):
+        visto["ja_entregues"] = set(ja_entregues or ())
+        visto["reconsultar"] = set(reconsultar or ())
+        return {}
+
+    monkeypatch.setattr(logistica_shopee, "returns_por_pedido", _shopee)
+    await sync.run(db, pedidos=[recente, antigo, em_analise])
+    # Todos os entregues continuam em `ja_entregues` (decisões da SPX não mudam)…
+    assert {recente, antigo, em_analise} <= visto["ja_entregues"]
+    # …mas só quem chegou há pouco ou ainda está em análise volta ao detalhe.
+    assert visto["reconsultar"] == {recente, em_analise}

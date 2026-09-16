@@ -59,6 +59,10 @@ class ReturnInfo(NamedTuple):
     # pendente da loja, ou a plataforma não informa.
     acao_pendente: str | None = None
     prazo_acao: datetime | None = None
+    # True = o marketplace NÃO respondeu a consulta de onde o prazo sai (ex.:
+    # detalhe da Shopee deu erro nesta rodada) — o sync mantém o prazo da
+    # rodada anterior em vez de apagar. False = prazo acima é a verdade atual.
+    prazo_desconhecido: bool = False
 
 
 def epoch_to_dt(v: Any) -> datetime | None:

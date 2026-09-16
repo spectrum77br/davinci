@@ -383,6 +383,53 @@ def _entregue_em_do_detalhe(det: dict | None) -> datetime | None:
     return None
 
 
+# Status do caso em que, com o pacote de volta ENTREGUE, a loja ainda tem o
+# que fazer: conferir e, se veio errado, contestar antes do prazo
+# (`return_seller_due_date`, 3 dias corridos — medido em prod 16/09:
+# entregue 16/09 09:54 → prazo 19/09 09:50). SELLER_DISPUTE já contestou;
+# REFUND_PAID/CLOSED acabou.
+_SHOPEE_STATUS_CONFERIR = {"PROCESSING", "ACCEPTED"}
+
+
+def _acao_pendente_shopee(det: dict | None, status: str | None) -> tuple[str | None, datetime | None]:
+    """O que a Shopee espera da LOJA neste caso e até quando — a ação de prazo
+    mais curto (Vinicius 16/09: "prazo de resposta da loja no painel"). Tudo
+    vem do DETALHE da devolução:
+
+      - REQUESTED + `due_date`: responder à solicitação;
+      - `seller_proof.seller_proof_status == PENDING` + `seller_evidence_deadline`:
+        a Shopee pediu prova da loja (2 dias);
+      - `negotiation.negotiation_status == PENDING_RESPOND` + `offer_due_date`:
+        o cliente fez uma proposta;
+      - pacote de volta ENTREGUE + status em `_SHOPEE_STATUS_CONFERIR` +
+        `return_seller_due_date`: conferir o pacote e responder (3 dias). A
+        Shopee às vezes já manda essa data ANTES da entrega (estimativa, ex.
+        289941 em 16/09) — por isso o gate da entrega;
+      - `seller_compensation_status == PENDING_REQUEST` + due date: pedir
+        compensação.
+    Nunca levanta; sem nada pendente → (None, None)."""
+    d = det if isinstance(det, dict) else {}
+    st = str(status or d.get("status") or "").strip().upper()
+    cands: list[tuple[str, datetime | None]] = []
+    if st == "REQUESTED":
+        cands.append(("SHOPEE_RESPONDER_SOLICITACAO", epoch_to_dt(d.get("due_date"))))
+    proof = d.get("seller_proof") if isinstance(d.get("seller_proof"), dict) else {}
+    if str(proof.get("seller_proof_status") or "").strip().upper() == "PENDING":
+        cands.append(("SHOPEE_ENVIAR_EVIDENCIAS", epoch_to_dt(proof.get("seller_evidence_deadline"))))
+    neg = d.get("negotiation") if isinstance(d.get("negotiation"), dict) else {}
+    if str(neg.get("negotiation_status") or "").strip().upper() == "PENDING_RESPOND":
+        cands.append(("SHOPEE_RESPONDER_PROPOSTA", epoch_to_dt(neg.get("offer_due_date"))))
+    if st in _SHOPEE_STATUS_CONFERIR and _entregue_em_do_detalhe(d) is not None:
+        cands.append(("SHOPEE_CONFERIR_PACOTE", epoch_to_dt(d.get("return_seller_due_date"))))
+    comp = d.get("seller_compensation") if isinstance(d.get("seller_compensation"), dict) else {}
+    if str(comp.get("seller_compensation_status") or "").strip().upper() == "PENDING_REQUEST":
+        cands.append(("SHOPEE_PEDIR_COMPENSACAO", epoch_to_dt(comp.get("seller_compensation_due_date"))))
+    validos = [(a, pz) for a, pz in cands if pz is not None]
+    if not validos:
+        return (None, None)
+    return min(validos, key=lambda x: x[1])
+
+
 def _return_info(d: dict, status: str) -> ReturnInfo:
     tracking = d.get("tracking_number")
     tracking = tracking.strip() if isinstance(tracking, str) else None
@@ -544,6 +591,7 @@ async def returns_por_pedido(
     linhas: list[Logistica],
     *,
     ja_entregues: set[str] | None = None,
+    reconsultar: set[str] | None = None,
 ) -> dict[str, ReturnInfo]:
     """Devolução (o pacote que VOLTA) de cada linha Shopee: `{pedido_bling:
     ReturnInfo}`. Pedido sem devolução conhecida fica de fora do dict.
@@ -644,11 +692,14 @@ async def returns_por_pedido(
                         out[pedido] = rts
                 continue
             info = _return_info(got[1], got[2])
-            # Uma chamada a mais por devolução AINDA NÃO entregue, pra saber se
-            # o pacote de volta chegou — a lista não traz esse campo, só o
-            # detalhe. Quem já está marcado como entregue não é reconsultado.
+            # Uma chamada a mais por devolução AINDA NÃO entregue — ou entregue
+            # mas em `reconsultar` (o sync manda quem chegou há poucos dias ou
+            # ainda está em análise: é quando existe o prazo de resposta da
+            # loja) — pra saber se o pacote de volta chegou e o que a Shopee
+            # espera da loja. A lista não traz nada disso, só o detalhe. O
+            # `ja_chegou` continua valendo sozinho pras decisões da SPX abaixo.
             det: dict | None = None
-            if info.return_id and not ja_chegou:
+            if info.return_id and (not ja_chegou or pedido in (reconsultar or set())):
                 try:
                     det = await client.get_return_detail(info.return_id)
                     entregue = _entregue_em_do_detalhe(det)
@@ -658,8 +709,14 @@ async def returns_por_pedido(
                         pedido=pedido, return_sn=info.return_id, err=str(e)[:200],
                     )
                     entregue = None
+                    # Sem resposta da Shopee não dá pra dizer que o prazo sumiu:
+                    # o sync mantém o da rodada anterior.
+                    info = info._replace(prazo_desconhecido=True)
                 if entregue is not None:
                     info = info._replace(entregue_em=entregue)
+                if det is not None:
+                    acao, prazo = _acao_pendente_shopee(det, info.status)
+                    info = info._replace(acao_pendente=acao, prazo_acao=prazo)
             # Caso sem perna reversa (só reembolso) com a ida falhada: a volta
             # está no rastreio da IDA, não no caso.
             rts: ReturnInfo | None = None

@@ -115,6 +115,10 @@ async def test_devolucao_viva_com_rastreio_mapeia_campos(db, monkeypatch):
             created_at=epoch_to_dt(agora - 3 * _DIA),
             updated_at=epoch_to_dt(agora - _DIA),
             return_id="RS001",
+            # O client falso não tem get_return_detail → "detalhe não
+            # respondeu": o prazo de resposta fica DESCONHECIDO (o sync
+            # mantém o da rodada anterior), não apagado.
+            prazo_desconhecido=True,
         )
     }
     assert out["291000"].created_at.tzinfo is UTC
@@ -232,6 +236,7 @@ async def test_pedido_sem_devolucao_fica_fora_e_ignora_linhas_fora_do_escopo(mon
             fonte="shopee", status="ACCEPTED", tracking="BR1", carrier=None,
             created_at=out["100"].created_at, updated_at=out["100"].updated_at,
             return_id="RS-1",
+            prazo_desconhecido=True,  # client falso sem get_return_detail
         )
     }
 

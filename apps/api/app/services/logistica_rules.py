@@ -428,6 +428,17 @@ TIKTOK_ACAO_LABELS_PT: dict[str, str] = {
 }
 
 
+# Idem pra Shopee — chaves sintéticas de `logistica_shopee._acao_pendente_shopee`
+# (a Shopee não nomeia ações; cada prazo mora num campo do detalhe).
+SHOPEE_ACAO_LABELS_PT: dict[str, str] = {
+    "SHOPEE_RESPONDER_SOLICITACAO": "Responder à solicitação de devolução na Shopee",
+    "SHOPEE_ENVIAR_EVIDENCIAS": "Enviar as evidências pedidas pela Shopee",
+    "SHOPEE_RESPONDER_PROPOSTA": "Responder à proposta do cliente na Shopee",
+    "SHOPEE_CONFERIR_PACOTE": "Conferir o pacote recebido e responder na Shopee",
+    "SHOPEE_PEDIR_COMPENSACAO": "Solicitar a compensação na Shopee",
+}
+
+
 def acao_plataforma_pt(fonte: str | None, acao: str | None) -> str | None:
     """Texto em PT da ação pendente da loja; None sem ação. `fonte` é a do
     ReturnInfo ("tiktok" | "shopee" | "ml") ou o rótulo da plataforma."""
@@ -437,6 +448,8 @@ def acao_plataforma_pt(fonte: str | None, acao: str | None) -> str | None:
     f = (fonte or "").strip().lower()
     if f == "tiktok" or f in _TIKTOK_PLATAFORMAS:
         return TIKTOK_ACAO_LABELS_PT.get(a, f"Ação pendente: {a}")
+    if f == "shopee" or f in _SHOPEE_PLATAFORMAS:
+        return SHOPEE_ACAO_LABELS_PT.get(a, f"Ação pendente: {a}")
     return f"Ação pendente: {a}"
 
 
