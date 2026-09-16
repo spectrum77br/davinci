@@ -367,12 +367,47 @@ def _chave_rodizio(
     return (1, quando, str(modelo.id))
 
 
+# `{{ produto }}` (com ou sem espaço, com ou sem filtro depois). Serve pra
+# saber se uma variação NOMEIA o produto — não pra validar sintaxe.
+_RE_USA_PRODUTO = re.compile(r"\{\{-?\s*produto\b")
+
+
+def _nomeia_produto(modelo: MarketingLegendaModelo) -> bool:
+    return bool(_RE_USA_PRODUTO.search(modelo.texto or ""))
+
+
+def _elegiveis(
+    variacoes: list[MarketingLegendaModelo], *, tem_produto: bool
+) -> list[MarketingLegendaModelo]:
+    """Filtra os padrões da marca pelo que o criativo REALMENTE tem.
+
+    Eduardo, 16/09/2026: *"pelo menos cai no padrão que cita o modelo se tiver
+    modelo"*. Sem isto o rodízio trata todos como iguais e pode escolher um
+    texto que ignora o produto justamente quando o produto é conhecido — a
+    informação mais específica que existe, jogada fora por sorteio.
+
+    O outro lado é pior e é o motivo real do filtro: criativo SEM produto que
+    pegasse uma variação com `{{ produto }}` publicaria o buraco
+    ("Tecnologia que aguenta o teu dia 🔋  — da Uranyx"). Essas ficam de fora,
+    e se sobrar nenhuma o degrau inteiro falha — a guarda `sem_legenda` avisa,
+    que é melhor que um post com falha no meio da frase.
+
+    Com produto, a preferência é só preferência: não havendo nenhuma que o
+    nomeie, as genéricas valem — elas estão inteiras, só não são específicas.
+    """
+    if not tem_produto:
+        return [v for v in variacoes if not _nomeia_produto(v)]
+    nomeiam = [v for v in variacoes if _nomeia_produto(v)]
+    return nomeiam or variacoes
+
+
 async def _variacao(
     session: AsyncSession,
     *,
     marca_id: UUID,
     product_id: UUID | None,
     rede: RedeSocial | None,
+    tem_produto: bool = True,
 ) -> tuple[MarketingLegendaModelo, int, int] | None:
     """A variação escolhida + (quantas elegíveis, posição da escolhida).
 
@@ -390,6 +425,10 @@ async def _variacao(
         else MarketingLegendaModelo.product_id.is_(None)
     )
     variacoes = list((await session.execute(q.order_by(MarketingLegendaModelo.id))).scalars().all())
+    if product_id is None:
+        # Só o degrau da MARCA filtra: a variação de produto já é específica
+        # por definição, e ali `{{ produto }}` sempre tem o que preencher.
+        variacoes = _elegiveis(variacoes, tem_produto=tem_produto)
     if not variacoes:
         return None
     usos = await _ultimo_uso(session, rede, [v.id for v in variacoes])
@@ -456,7 +495,13 @@ async def _da_biblioteca(
         escolha = await _variacao(session, marca_id=marca.id, product_id=product_id, rede=rede)
         if escolha is not None:
             return _resolvida(escolha, ORIGEM_PRODUTO, contexto)
-    escolha = await _variacao(session, marca_id=marca.id, product_id=None, rede=rede)
+    escolha = await _variacao(
+        session,
+        marca_id=marca.id,
+        product_id=None,
+        rede=rede,
+        tem_produto=bool(contexto["produto"]),
+    )
     if escolha is not None:
         return _resolvida(escolha, ORIGEM_MARCA, contexto)
     return _NENHUMA

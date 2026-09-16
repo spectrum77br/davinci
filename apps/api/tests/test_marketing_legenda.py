@@ -751,3 +751,82 @@ def test_marca_toda_minuscula_sobe_a_primeira_letra():
     # Quem já escreveu com caixa fica intocado.
     assert nome_de("LOCAGIL") == "LOCAGIL"
     assert nome_de("Charlots Park") == "Charlots Park"
+
+
+# ─────── padrão da marca escolhe conforme o criativo tem produto ou não ───────
+
+
+async def test_com_produto_prefere_o_padrao_que_nomeia_o_produto(db, make_user):
+    """Ter o nome do produto e publicar um texto que o ignora é jogar fora a
+    informação mais específica que existe — por sorteio."""
+    from app.models import MarketingLegendaModelo, Product
+    from app.services.marketing import legenda as svc
+
+    dono = await make_user()
+    marca = await _marca(db, "PrefereProduto")
+    p = Product(user_id=dono.id, sku="pp1", name="Uranyx Fossibot F109S 24.256 - Preto")
+    db.add(p)
+    await db.flush()
+    c, f = await _criativo(db, marca=marca)
+    c.product_id = p.id
+    rede = await _conta(db, marca, conta="prefere.oficial")
+    # A genérica é a MAIS ANTIGA de propósito: sem o filtro o rodízio pegaria
+    # ela (empate desempata pela ordem de criação) e o produto sumiria.
+    db.add(MarketingLegendaModelo(marca_id=marca.id, texto="texto generico sem nada"))
+    await db.commit()
+    db.add(MarketingLegendaModelo(marca_id=marca.id, texto="{{ produto }} — olha isso"))
+    await db.commit()
+
+    r = await svc.resolver(db, creative=c, file=f, rede=rede)
+    assert r.origem == svc.ORIGEM_MARCA
+    # Saiu a que nomeia o produto, e não a genérica mais antiga.
+    assert "olha isso" in r.texto
+    assert "F109S" in r.texto and "256 GB" in r.texto
+    assert "generico" not in r.texto
+
+
+async def test_sem_produto_nao_publica_o_buraco(db):
+    """Criativo sem produto pegando um padrão com `{{ produto }}` publicaria
+    "Tecnologia que aguenta o teu dia 🔋  — da Uranyx". O texto com o
+    placeholder fica de fora; se sobrar nenhum, o degrau falha e a guarda
+    `sem_legenda` avisa — melhor que post com falha no meio da frase."""
+    from app.models import MarketingLegendaModelo
+    from app.services.marketing import legenda as svc
+
+    marca = await _marca(db, "SemProduto")
+    c, f = await _criativo(db, marca=marca)  # nasce sem product_id
+    rede = await _conta(db, marca, conta="semproduto.oficial")
+    db.add(MarketingLegendaModelo(marca_id=marca.id, texto="{{ produto }} — olha isso"))
+    await db.commit()
+
+    # Só existe a que nomeia produto: nada elegível.
+    r = await svc.resolver(db, creative=c, file=f, rede=rede)
+    assert r.origem == svc.ORIGEM_NENHUMA
+    assert r.texto is None
+
+    # Com uma genérica disponível, é ela que sai.
+    db.add(MarketingLegendaModelo(marca_id=marca.id, texto="texto que vale sempre"))
+    await db.commit()
+    r2 = await svc.resolver(db, creative=c, file=f, rede=rede)
+    assert r2.texto == "texto que vale sempre"
+
+
+async def test_com_produto_mas_so_ha_generica_usa_a_generica(db, make_user):
+    """A preferência é preferência, não exigência: texto genérico está
+    inteiro, só não é específico."""
+    from app.models import MarketingLegendaModelo, Product
+    from app.services.marketing import legenda as svc
+
+    dono = await make_user()
+    marca = await _marca(db, "SoGenerica")
+    p = Product(user_id=dono.id, sku="sg1", name="Uranyx S5 16.128 - Prata")
+    db.add(p)
+    await db.flush()
+    c, f = await _criativo(db, marca=marca)
+    c.product_id = p.id
+    rede = await _conta(db, marca, conta="sogenerica.oficial")
+    db.add(MarketingLegendaModelo(marca_id=marca.id, texto="texto generico"))
+    await db.commit()
+
+    r = await svc.resolver(db, creative=c, file=f, rede=rede)
+    assert r.texto == "texto generico"
