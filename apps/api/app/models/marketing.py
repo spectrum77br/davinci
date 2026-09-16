@@ -304,10 +304,27 @@ class MarketingCreative(Base, TimestampMixin):
         index=True,
     )
     sku: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    # Produto do criativo (migration 0282). Resolvido no POST/PATCH a partir
+    # do `sku`, igual ao `marca_id` — NUNCA casado por string na hora de
+    # publicar. A corrente é sku → product_links.external_sku → products (o
+    # sufixo .ra/.pi/.ci é variante de cor, então casa também pela base).
+    # É ele que escolhe o modelo de legenda do PRODUTO; sem produto a
+    # cascata cai no padrão da marca, então NULL não trava nada.
+    product_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("products.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     # Equipe de marketing dona da linha (nome livre; casa com
     # users.marketing_teams). NULL = sem equipe (só admin/sem-equipe vê).
     equipe: Mapped[str | None] = mapped_column(String(64), nullable=True)
     roteiro: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Override de legenda DESTE vídeo: ganha da biblioteca de modelos e é o
+    # degrau mais alto da cascata depois da própria postagem. Não confundir
+    # com `roteiro` — aquilo é briefing de produção ("cena, fala, texto na
+    # tela"), em inglês, e publicá-lo põe instrução de gravação no Instagram.
+    legenda: Mapped[str | None] = mapped_column(Text, nullable=True)
     aprovado: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     pushed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     pushed_dest: Mapped[str | None] = mapped_column(String(512), nullable=True)

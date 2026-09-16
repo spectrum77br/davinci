@@ -97,6 +97,7 @@ from app.models.nf import (
     NfImpressao,
     NfNota,
 )
+from app.models.marketing_legenda import MarketingLegendaModelo
 from app.models.marketing_postagem import (
     STATUS_EM_VOO,
     MarketingPostagem,
@@ -224,6 +225,7 @@ __all__ = [
     "MarketingCreative",
     "MarketingCreativeFile",
     "MarketingDecision",
+    "MarketingLegendaModelo",
     "MarketingMetric",
     "MarketingPattern",
     "MarketingPostagem",

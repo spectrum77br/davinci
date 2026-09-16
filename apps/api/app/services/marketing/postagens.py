@@ -56,6 +56,7 @@ from app.models.marketing_postagem import (
     STATUS_PUBLICANDO,
     STATUS_REVISAR,
 )
+from app.services.marketing import legenda as legenda_svc
 
 logger = structlog.get_logger()
 
@@ -366,6 +367,15 @@ async def agendar(
     Recusa a operação INTEIRA no primeiro motivo (RoboError com o código): o
     operador marcou 3 contas esperando as 3; publicar 2 e engolir a terceira
     num toast seria pior que voltar o erro.
+
+    A LEGENDA É RESOLVIDA POR CONTA, dentro do laço — nunca uma vez pro lote.
+    Parece detalhe e não é: `{{ instagram }}` é o @ de CADA conta, e o rodízio
+    de variações é por conta. Resolver fora do laço mandaria o texto da
+    primeira (com o @ dela) pra todas as outras.
+
+    `legenda` só chega preenchida quando o operador REESCREVEU o texto na tela;
+    aí ela vale igual pra todas as contas, porque foi uma pessoa que escolheu.
+    Vindo vazia, cada conta recebe o que a cascata decidir pra ela.
     """
     if not redes:
         raise RoboError("sem_conta")
@@ -411,6 +421,25 @@ async def agendar(
         )
         if motivo:
             raise RoboError(motivo)
+        try:
+            resolvida = await legenda_svc.resolver(
+                session,
+                creative=creative,
+                file=file,
+                rede=rede,
+                legenda_manual=legenda,
+            )
+        except legenda_svc.TemplateInvalidoError as e:
+            # Variação quebrada na biblioteca. Recusar é o certo: legenda meio
+            # renderizada no Instagram não se conserta editando o post.
+            raise RoboError("legenda_template_invalido") from e
+        if resolvida.texto is None:
+            # Reel sem legenda é criativo queimado — a legenda é o único texto
+            # que a busca do Instagram e o Google leem daquele vídeo. Pro robô
+            # (hora marcada) isso é recusa seca; o clique manual passa, porque
+            # ali tem gente olhando e a tela já avisou.
+            if automatico:
+                raise RoboError("sem_legenda")
         criadas.append(
             MarketingPostagem(
                 creative_id=creative.id,
@@ -421,7 +450,10 @@ async def agendar(
                 # MarketingCommand.platform.
                 plataforma=rede.plataforma,
                 conta=rede.conta,
-                legenda=legenda,
+                legenda=resolvida.texto,
+                # Qual variação saiu — é daqui que o rodízio da PRÓXIMA
+                # postagem descobre o que já foi usado nesta conta.
+                legenda_modelo_id=resolvida.modelo_id,
                 opcoes=opcoes or {},
                 agendado_para=quando,
                 status=STATUS_AGENDADO if quando else STATUS_PENDENTE,

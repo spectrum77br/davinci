@@ -419,6 +419,50 @@ type ContaPostagem = {
 // dos dois é o que vale pra um texto que vai pros dois.
 const LEGENDA_MAX = 2200
 
+// De onde saiu o texto que está no textarea (cascata do backend:
+// postagem → criativo → produto → marca → nada). Traduzido aqui porque o
+// endpoint manda o código; origem que a tela não conhecer passa crua, igual
+// ao statusLabel — backend novo não pode virar rótulo mentiroso.
+const LEGENDA_ORIGEM_LABEL: Record<string, string> = {
+  manual: 'escrita agora',
+  criativo: 'legenda deste vídeo',
+  produto: 'legenda do produto',
+  marca: 'padrão da marca',
+  nenhuma: 'sem legenda',
+}
+
+// Resposta de GET /api/marketing/legendas/resolvida, já limpa.
+type LegendaResolvida = { texto: string; origem: string; total: number; indice: number }
+
+// O backend pode mandar lixo (ou nada) sem derrubar o modal. Duas decisões
+// moram aqui: o texto é cortado no limite do Instagram — não adianta mostrar o
+// que não caberia no post — e texto VAZIO é sempre `nenhuma`, venha a origem
+// que vier, porque é o texto que vai (ou não vai) pro Instagram e é ele que o
+// aviso âmbar descreve.
+function normalizaLegenda(resp: any): LegendaResolvida {
+  const texto = typeof resp?.texto === 'string' ? resp.texto.slice(0, LEGENDA_MAX) : ''
+  const total = Number.isFinite(resp?.total_variacoes) ? Math.trunc(resp.total_variacoes) : 0
+  const bruto = Number.isFinite(resp?.indice) ? Math.trunc(resp.indice) : 0
+  // `indice` é 1-based (variação 2 de 4); fora da faixa vira 0 = não mostra.
+  const indice = bruto >= 1 && bruto <= total ? bruto : 0
+  const origem = texto.trim() ? String(resp?.origem ?? '').trim() : 'nenhuma'
+  return { texto, origem, total: total > 0 ? total : 0, indice }
+}
+
+// Rótulo discreto acima do textarea: "padrão da marca · variação 2 de 4 ·
+// 412/2200". É o único contador da caixa — o operador precisa saber de onde
+// veio aquele texto ANTES de decidir editar.
+function legendaRotulo(o: { origem: string; total: number; indice: number; tamanho: number }): string {
+  const partes: string[] = []
+  const org = (o.origem || '').trim()
+  if (org) partes.push(LEGENDA_ORIGEM_LABEL[org] || org)
+  // "variação 1 de 1" é ruído: o rodízio só interessa quando há mais de um
+  // texto disputando a vez naquela conta.
+  if (o.total > 1 && o.indice >= 1) partes.push(`variação ${o.indice} de ${o.total}`)
+  partes.push(`${o.tamanho}/${LEGENDA_MAX}`)
+  return partes.join(' · ')
+}
+
 // Espelha STATUS_EM_VOO de app/models/marketing_postagem.py: enquanto está
 // num desses, a postagem ainda vai acontecer.
 const STATUS_EM_VOO = ['agendado', 'pendente', 'containering', 'publicando']
@@ -614,12 +658,18 @@ function montaBody(o: {
   fileId: string
   redeSocialIds: string[]
   legenda: string
+  legendaOrigem: string
   quando: 'agora' | 'agendar'
   dataHora: string
   shareToFeed: boolean
   temInstagram: boolean
 }): Record<string, any> {
-  const legenda = (o.legenda || '').trim()
+  // A legenda SÓ viaja quando o operador reescreveu o texto. O que a tela
+  // mostra é a legenda resolvida para UMA conta — mandá-la de volta faria o
+  // @ daquela conta ir pras outras (`{{ instagram }}`) e congelaria o rodízio
+  // em uma variação só. Vindo vazia, o backend resolve por conta, dentro do
+  // laço do `agendar()`.
+  const legenda = o.legendaOrigem === 'manual' ? (o.legenda || '').trim() : ''
   // share_to_feed só existe no Instagram (o Reel aparecer também no feed);
   // mandar pro Facebook seria opção morta viajando no payload.
   const opcoes: Record<string, any> = o.temInstagram ? { share_to_feed: o.shareToFeed } : {}
@@ -727,6 +777,16 @@ const pubContas = ref<ContaPostagem[]>([])
 const pubContasLoading = ref(false)
 const pubSel = ref<string[]>([])
 const pubLegenda = ref('')
+// De onde veio o texto do textarea. Começa em `nenhuma` (e não em `manual`),
+// senão o carregador abaixo se recusaria a preencher o campo do próprio modal
+// que acabou de abrir.
+const pubLegendaOrigem = ref('nenhuma')
+const pubLegendaTotal = ref(0)
+const pubLegendaIndice = ref(0)
+const pubLegendaLoading = ref(false)
+// A consulta da legenda falhou (backend antigo ou sem permissão). Não é erro
+// de operação — é aviso pra escrever à mão, então não vai pro `pubErr`.
+const pubLegendaErro = ref(false)
 const pubQuando = ref<'agora' | 'agendar'>('agora')
 const pubDataHora = ref('')
 const pubShareToFeed = ref(true)
@@ -741,6 +801,16 @@ const pubMarcaNome = computed(() => {
 })
 const pubContasSel = computed(() => pubContas.value.filter((c) => pubSel.value.includes(c.id)))
 const pubTemInstagram = computed(() => pubContasSel.value.some((c) => c.plataforma === 'instagram'))
+
+// Quem manda no aviso é o TEXTO, não a origem: apagar à mão a legenda que veio
+// do padrão da marca deixa o post tão mudo quanto não ter achado modelo nenhum.
+const pubSemLegenda = computed(() => !pubLegenda.value.trim())
+const pubLegendaRotulo = computed(() => legendaRotulo({
+  origem: pubLegendaOrigem.value,
+  total: pubLegendaTotal.value,
+  indice: pubLegendaIndice.value,
+  tamanho: pubLegenda.value.length,
+}))
 
 // A marca do criativo: `marca_id` quando o backend manda; senão casa o texto
 // da coluna (que sempre foi o slug) com o cadastro, pra não obrigar o
@@ -765,10 +835,16 @@ function openPublicar(r: Creative) {
   // Vídeo primeiro: o robô publica Reels; imagem é a exceção.
   const video = r.files.find((f) => f.file_mime?.startsWith('video/'))
   pubFileId.value = (video ?? r.files[0])?.id ?? ''
-  // O roteiro é BRIEFING de produção ("cena, fala, texto na tela"), não
-  // legenda (models/marketing_postagem.py) — entra como rascunho editável pro
-  // operador cortar o que é instrução de gravação.
-  pubLegenda.value = (r.roteiro ?? '').slice(0, LEGENDA_MAX)
+  // A legenda NÃO sai mais do `roteiro`: roteiro é prompt de geração do vídeo
+  // (em inglês, "cena, fala, texto na tela") e os dois únicos preenchidos em
+  // produção são assim — não é texto de Instagram. Quem diz a legenda é a
+  // cascata do backend (legenda do criativo → produto → padrão da marca),
+  // pedida logo abaixo já RENDERIZADA, pra tela e post baterem byte a byte.
+  pubLegenda.value = ''
+  pubLegendaOrigem.value = 'nenhuma'
+  pubLegendaTotal.value = 0
+  pubLegendaIndice.value = 0
+  pubLegendaErro.value = false
   pubQuando.value = 'agora'
   pubDataHora.value = proximaHoraBrt()
   pubShareToFeed.value = true
@@ -783,6 +859,11 @@ function closePublicar() {
   pubContas.value = []
   pubSel.value = []
   pubLegenda.value = ''
+  pubLegendaOrigem.value = 'nenhuma'
+  pubLegendaTotal.value = 0
+  pubLegendaIndice.value = 0
+  pubLegendaLoading.value = false
+  pubLegendaErro.value = false
   pubErr.value = ''
 }
 
@@ -792,6 +873,10 @@ async function loadContas() {
   pubCommit.value = null
   if (!pubMarcaId.value) {
     pubErr.value = 'Escolha a marca pra ver as contas de rede social.'
+    // Sem marca ainda pode haver legenda do próprio vídeo ou do produto (quem
+    // resolve a cascata é o backend, pelo criativo) — só o @ da conta é que
+    // ainda não existe.
+    await carregaLegenda()
     return
   }
   pubContasLoading.value = true
@@ -821,6 +906,11 @@ async function loadContas() {
   } finally {
     pubContasLoading.value = false
   }
+  // Depois das contas, nunca antes: o `{{ instagram }}` da legenda é o @ da
+  // conta que vai receber o post, então só dá pra renderizar o texto sabendo
+  // qual conta ficou marcada. Vale pro arquivo e pra marca também (os dois
+  // recarregam esta lista).
+  await carregaLegenda()
 }
 
 function toggleConta(c: ContaPostagem) {
@@ -828,6 +918,68 @@ function toggleConta(c: ContaPostagem) {
   pubSel.value = pubSel.value.includes(c.id)
     ? pubSel.value.filter((x) => x !== c.id)
     : [...pubSel.value, c.id]
+  void carregaLegenda()
+}
+
+// Cada consulta leva um número; só a última manda no textarea. Trocar de conta
+// depressa dispara duas idas ao servidor e a que volta por último não é
+// necessariamente a mais nova — escrever a resposta velha por cima poria no
+// campo um texto que não é o da conta marcada, e o que está no campo é o que
+// vai pro Instagram.
+let legendaSeq = 0
+
+async function carregaLegenda() {
+  const r = pub.value
+  if (!r) return
+  // Texto escrito à mão é do operador: trocar a conta muda o @ do modelo, mas
+  // não pode apagar o que ele digitou.
+  if (pubLegendaOrigem.value === 'manual') return
+  const seq = ++legendaSeq
+  pubLegendaLoading.value = true
+  pubLegendaErro.value = false
+  try {
+    const q = new URLSearchParams({ creative_id: r.id })
+    if (pubFileId.value) q.set('file_id', pubFileId.value)
+    // Uma conta só: o texto mostrado é o da PRIMEIRA marcada (é dela o @ do
+    // placeholder). Com várias marcadas o backend resolve de novo pra cada uma
+    // ao agendar — inclusive o rodízio, que é por conta.
+    const conta = pubSel.value[0]
+    if (conta) q.set('rede_social_id', conta)
+    const resp = await api<any>(`/api/marketing/legendas/resolvida?${q.toString()}`)
+    if (seq !== legendaSeq || pub.value !== r) return
+    const l = normalizaLegenda(resp)
+    pubLegenda.value = l.texto
+    pubLegendaOrigem.value = l.origem
+    pubLegendaTotal.value = l.total
+    pubLegendaIndice.value = l.indice
+  } catch {
+    if (seq !== legendaSeq || pub.value !== r) return
+    // 404 (backend antigo, sem o endpoint) ou 403 (sem permissão): textarea
+    // vazio e a tela inteira. O que NÃO pode voltar a acontecer é cair no
+    // roteiro — é prompt de vídeo em inglês, não legenda.
+    pubLegenda.value = ''
+    pubLegendaOrigem.value = 'nenhuma'
+    pubLegendaTotal.value = 0
+    pubLegendaIndice.value = 0
+    pubLegendaErro.value = true
+  } finally {
+    if (seq === legendaSeq) pubLegendaLoading.value = false
+  }
+}
+
+// Sem `v-model` de propósito: a mesma digitação que muda o texto muda a ORIGEM
+// pra "manual", e ler o valor do evento não depende da ordem em que os dois
+// listeners (o do v-model e este) correriam.
+function onLegendaInput(e: Event) {
+  const alvo = e.target as HTMLTextAreaElement | null
+  pubLegenda.value = alvo && typeof alvo.value === 'string' ? alvo.value : ''
+  // Apagar tudo à mão volta a ser "sem legenda" — e volta a pedir confirmação
+  // no publicar.
+  pubLegendaOrigem.value = pubLegenda.value.trim() ? 'manual' : 'nenhuma'
+  // Variação é do modelo que veio do cadastro; texto editado não é mais ela.
+  pubLegendaTotal.value = 0
+  pubLegendaIndice.value = 0
+  pubLegendaErro.value = false
 }
 
 async function salvarPostagem() {
@@ -850,6 +1002,13 @@ async function salvarPostagem() {
     pubErr.value = 'Data e hora do agendamento inválidas.'
     return
   }
+  // Reel sem legenda é criativo queimado: a legenda é o único texto que a
+  // busca do Instagram e o Google leem daquele vídeo — e post não se edita
+  // depois. Mesma régua do cancelar: o que não tem desfazer pede confirm.
+  if (pubSemLegenda.value && !window.confirm(
+    'Esse post vai pro ar SEM legenda nenhuma — e legenda não dá pra acrescentar depois. '
+    + 'Publicar assim mesmo?',
+  )) return
   pubSaving.value = true
   try {
     await api('/api/marketing/postagens', {
@@ -859,6 +1018,7 @@ async function salvarPostagem() {
         fileId: pubFileId.value,
         redeSocialIds: pubSel.value,
         legenda: pubLegenda.value,
+        legendaOrigem: pubLegendaOrigem.value,
         quando: pubQuando.value,
         dataHora: pubDataHora.value,
         shareToFeed: pubShareToFeed.value,
@@ -1461,20 +1621,38 @@ async function cancelarPostagem(p: Postagem) {
           <div>
             <div class="mb-1 flex items-center gap-2 font-medium">
               Legenda
+              <Loader2 v-if="pubLegendaLoading" class="size-3 shrink-0 animate-spin text-muted-foreground" />
               <span
-                class="ml-auto font-normal"
+                class="ml-auto truncate font-normal"
                 :class="pubLegenda.length > LEGENDA_MAX ? 'text-destructive' : 'text-muted-foreground'"
-              >{{ pubLegenda.length }} / {{ LEGENDA_MAX }}</span>
+              >{{ pubLegendaRotulo }}</span>
             </div>
             <textarea
-              v-model="pubLegenda"
+              :value="pubLegenda"
               rows="5"
               :maxlength="LEGENDA_MAX"
               class="w-full rounded-md border bg-background px-2 py-1.5 text-xs leading-snug outline-none focus:ring-2 focus:ring-ring"
               placeholder="Texto que vai junto do post…"
+              @input="onLegendaInput"
             />
-            <p class="mt-1 text-[11px] text-muted-foreground">
-              Veio do roteiro — corte o que é instrução de gravação antes de publicar.
+            <p
+              v-if="pubSemLegenda && !pubLegendaLoading"
+              class="mt-1 rounded border border-amber-500/30 bg-amber-500/10 px-2 py-1.5 text-amber-700 dark:text-amber-400"
+            >
+              <AlertTriangle class="mr-1 inline size-3.5" />
+              Esse post vai sair <strong>sem legenda</strong> — e legenda não dá pra acrescentar
+              depois que o post está no ar. Escreva aqui, ou cadastre o padrão da marca.
+            </p>
+            <p v-else class="mt-1 text-[11px] text-muted-foreground">
+              Texto já pronto: é exatamente isso que vai pro post. Editar aqui vale só pra esta
+              postagem — o padrão fica em Cadastros › Marcas.
+            </p>
+            <!-- Sem o v-else-if de propósito: quando a consulta falha o campo
+                 fica vazio, então o aviso âmbar de cima aparece e este aqui é o
+                 que explica POR QUE não veio nada. -->
+            <p v-if="pubLegendaErro" class="mt-1 text-[11px] text-muted-foreground">
+              Não deu pra consultar a legenda padrão (servidor desatualizado ou sem permissão) —
+              escreva a legenda à mão.
             </p>
           </div>
 

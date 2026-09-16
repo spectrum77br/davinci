@@ -51,6 +51,11 @@ export const TABS_CADASTROS: RouteTab[] = [
   { to: '/redes-sociais', label: 'Redes Sociais', resource: 'redes_sociais' },
   // Padrões de e-mail por marca e canal (logo, assinatura, prévia, teste).
   { to: '/email-padroes', label: 'E-mails', resource: 'email_padroes' },
+  // Biblioteca de legendas do robô de postagem (Eduardo, 16/09/2026): cadastro
+  // DA MARCA, como os padrões de e-mail — por isso mora aqui e não na aba
+  // Criativos. A permissão é a da tela dos criativos (`marketing_criativos`),
+  // que é quem manda no robô de postagem.
+  { to: '/legendas', label: 'Legendas', resource: 'marketing_criativos' },
 ]
 
 export const TABS_NF: RouteTab[] = [

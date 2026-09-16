@@ -25,7 +25,7 @@ from uuid import UUID, uuid4
 import structlog
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -37,9 +37,11 @@ from app.models import (
     MarketingCreative,
     MarketingCreativeFile,
     PricingProduct,
+    ProductLink,
     User,
     UserRole,
 )
+from app.schemas.marketing_legendas import legenda_opcional
 from app.services.marketing import link_criativo
 from app.services.mega_fotos import MegaError, sidecar_request
 
@@ -66,6 +68,15 @@ def _row_out(row: MarketingCreative) -> dict[str, Any]:
         "sku": row.sku,
         "equipe": row.equipe,
         "roteiro": row.roteiro,
+        # Override da legenda POR VÍDEO — 2º degrau da cascata, acima dos
+        # modelos de produto/marca. O `roteiro` NÃO é legenda: é briefing de
+        # gravação, e foi o pré-preenchimento dele no modal que pôs prompt de
+        # vídeo em inglês na cara do Instagram.
+        "legenda": row.legenda,
+        # Produto resolvido pelo SKU no salvamento. NULL não trava postagem
+        # nenhuma (a legenda cai no padrão da marca), mas a tela mostra — é o
+        # que denuncia o SKU digitado errado.
+        "product_id": str(row.product_id) if row.product_id else None,
         "files": [_file_out(f) for f in row.files],
         "aprovado": row.aprovado,
         "pushed_at": row.pushed_at.isoformat() if row.pushed_at else None,
@@ -155,6 +166,11 @@ class CreativeIn(BaseModel):
     sku: str | None = None
     equipe: str | None = None
     roteiro: str | None = None
+    # Legenda escrita à mão pra ESTE vídeo. Vazio vira NULL de propósito: é
+    # o NULL que faz a cascata seguir pra biblioteca da marca/produto.
+    legenda: str | None = None
+
+    _v_legenda = field_validator("legenda", mode="before")(legenda_opcional)
 
 
 @router.post("")
@@ -179,8 +195,10 @@ async def create_creative(
         marca=(payload.marca or "").strip() or None,
         marca_id=await _marca_id_do_texto(session, payload.marca),
         sku=(payload.sku or "").strip() or None,
+        product_id=await _product_id_do_sku(session, payload.sku),
         equipe=equipe,
         roteiro=payload.roteiro,
+        legenda=payload.legenda,
         created_by=user.id,
     )
     session.add(row)
@@ -212,12 +230,46 @@ async def _marca_id_do_texto(session: AsyncSession, marca: str | None) -> UUID |
     )
 
 
+async def _product_id_do_sku(session: AsyncSession, sku: str | None) -> UUID | None:
+    """Resolve o SKU do criativo para o id do produto, pela ponte dos anúncios.
+
+    Medido nos 41 criativos de produção: `product_links.external_sku` casa
+    39; `pricing_products` casa 21 e `products.sku`, zero. Por isso a corrente
+    é criativo → product_links → products, e não o SKU cru do cadastro.
+
+    Casa pelo SKU inteiro OU pela BASE (`dg017.pi` → `dg017`), porque o
+    sufixo é variante de cor e o anúncio costuma estar cadastrado só na base.
+    O casamento exato ganha do casamento por base, e o desempate segue por
+    data/id: cor diferente do mesmo produto cai no mesmo `product_id`, mas a
+    ordem precisa ser determinística — senão a legenda troca de produto entre
+    dois salvamentos sem ninguém mexer em nada.
+
+    Resolvido no SALVAMENTO, nunca na hora de publicar. Casar string no
+    instante do post é o que faz a legenda mudar sozinha quando alguém
+    renomeia um anúncio — mesmo motivo do `_marca_id_do_texto` acima.
+    """
+    alvo = (sku or "").strip().lower()
+    if not alvo:
+        return None
+    base = alvo.split(".")[0]
+    externo = func.lower(func.btrim(ProductLink.external_sku))
+    return await session.scalar(
+        select(ProductLink.product_id)
+        .where(externo.in_([alvo, base]))
+        .order_by((externo == alvo).desc(), ProductLink.created_at, ProductLink.id)
+        .limit(1)
+    )
+
+
 class CreativePatch(BaseModel):
     modelo: str | None = None
     marca: str | None = None
     sku: str | None = None
     equipe: str | None = None
     roteiro: str | None = None
+    legenda: str | None = None
+
+    _v_legenda = field_validator("legenda", mode="before")(legenda_opcional)
 
 
 @router.patch("/{creative_id}")
@@ -242,6 +294,12 @@ async def patch_creative(
         row.marca_id = await _marca_id_do_texto(session, row.marca)
     if "sku" in data:
         row.sku = (data["sku"] or "").strip() or None
+        # O produto acompanha o SKU SEMPRE — inclusive virando NULL quando a
+        # célula é esvaziada ou aponta pra um SKU sem anúncio. Mesma regra do
+        # `marca_id` logo acima: célula certa na tela e vínculo apontando pro
+        # produto antigo é divergência que ninguém vê até a legenda sair
+        # falando do produto errado.
+        row.product_id = await _product_id_do_sku(session, row.sku)
     if "equipe" in data:
         nova = (data["equipe"] or "").strip() or None
         allowed = _user_equipes(user)
@@ -250,6 +308,8 @@ async def patch_creative(
         row.equipe = nova
     if "roteiro" in data:
         row.roteiro = data["roteiro"]
+    if "legenda" in data:
+        row.legenda = data["legenda"]
     await session.commit()
     return _row_out(row)
 

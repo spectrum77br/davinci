@@ -213,6 +213,22 @@ async def _postagem(
     return p
 
 
+async def _legenda_padrao(
+    db: AsyncSession, marca: Marca, texto: str = "Legenda padrão da {{ marca }}"
+) -> None:
+    """Uma variação padrão para a marca.
+
+    Desde que o `agendar` recusa agendamento sem legenda (`sem_legenda`), todo
+    teste que marca HORA precisa de pelo menos uma variação — senão barra antes
+    de exercitar o que ele quer provar. "Publicar agora" continua passando sem
+    biblioteca: ali tem gente olhando.
+    """
+    from app.models import MarketingLegendaModelo
+
+    db.add(MarketingLegendaModelo(marca_id=marca.id, texto=texto))
+    await db.commit()
+
+
 async def _user_edit(make_user, auth_as, **kw) -> User:
     u = await make_user(
         permissions={"marketing_criativos": {"view": True, "edit": True}}, **kw
@@ -275,6 +291,7 @@ async def test_post_com_agendado_para_naive_e_lido_como_brt(
     marca = await _marca(db)
     c, f = await _criativo(db, marca=marca)
     rede = await _conta(db, marca)
+    await _legenda_padrao(db, marca)
 
     r = await client.post(
         API, json=_body(c, f, [rede], agendado_para="2026-10-01T19:30:00")
@@ -1564,3 +1581,68 @@ async def test_trocar_a_marca_na_celula_sincroniza_o_marca_id(
     await client.patch(f"{API_CRIATIVOS}/{c.id}", json={"marca": "marca-que-nao-existe"})
     await db.refresh(c)
     assert c.marca_id is None
+
+
+# ─────────── legenda: cascata dentro do agendar (16/09/2026) ───────────
+
+
+async def test_legenda_e_resolvida_por_conta_e_nao_uma_vez_pro_lote(db):
+    """Duas contas marcadas = duas legendas, cada uma com o @ DELA.
+
+    `{{ instagram }}` é o @ de cada conta. Resolver a legenda uma vez fora do
+    laço mandaria o texto da primeira — com o arroba errado — pras outras.
+    """
+    from app.models import MarketingLegendaModelo
+
+    marca = await _marca(db, "PorConta")
+    c, f = await _criativo(db, marca=marca)
+    r1 = await _conta(db, marca, conta="primeira.conta")
+    r2 = await _conta(db, marca, plataforma="facebook", conta="segunda.conta")
+    db.add(MarketingLegendaModelo(marca_id=marca.id, texto="Siga @{{ instagram }}"))
+    await db.commit()
+
+    criadas = await svc.agendar(db, creative=c, file=f, redes=[r1, r2])
+
+    textos = {p.conta: p.legenda for p in criadas}
+    assert textos["primeira.conta"] == "Siga @primeira.conta"
+    assert textos["segunda.conta"] == "Siga @segunda.conta"
+    # E as duas registram QUAL variação saiu, senão o rodízio não gira.
+    assert all(p.legenda_modelo_id is not None for p in criadas)
+
+
+async def test_agendamento_sem_legenda_e_recusado(db):
+    """Sem biblioteca e sem texto no criativo, agendar é recusado.
+
+    Reel sem legenda é criativo queimado — já aconteceu uma vez em produção.
+    Pro robô isso é recusa seca; o clique manual passa, porque ali tem gente
+    olhando e a tela avisa antes.
+    """
+    marca = await _marca(db, "SemLegenda")
+    c, f = await _criativo(db, marca=marca)
+    rede = await _conta(db, marca, conta="semlegenda.oficial")
+
+    with pytest.raises(svc.RoboError) as e:
+        await svc.agendar(
+            db, creative=c, file=f, redes=[rede],
+            agendado_para=datetime.now(UTC) + timedelta(hours=3),
+        )
+    assert e.value.code == "sem_legenda"
+
+    # "Publicar agora" (sem hora) passa: é decisão de gente.
+    criadas = await svc.agendar(db, creative=c, file=f, redes=[rede])
+    assert criadas[0].legenda is None
+
+
+async def test_legenda_do_criativo_ganha_do_padrao_da_marca(db):
+    """A cascata respeita a ordem: o texto escrito no vídeo vence o da marca."""
+    from app.models import MarketingLegendaModelo
+
+    marca = await _marca(db, "Cascata")
+    c, f = await _criativo(db, marca=marca)
+    rede = await _conta(db, marca, conta="cascata.oficial")
+    db.add(MarketingLegendaModelo(marca_id=marca.id, texto="padrão da marca"))
+    c.legenda = "escrita nesse vídeo"
+    await db.commit()
+
+    criadas = await svc.agendar(db, creative=c, file=f, redes=[rede])
+    assert criadas[0].legenda == "escrita nesse vídeo"

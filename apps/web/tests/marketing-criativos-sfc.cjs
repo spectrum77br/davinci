@@ -6,6 +6,13 @@
 // legenda) e os helpers PUROS do modal — montagem do corpo do POST, conversão
 // BRT → ISO com offset explícito e tradução dos motivos de uma conta não
 // poder receber post. Só dados FALSOS aqui; nenhuma chamada de rede.
+//
+// Legenda automática (Eduardo, 16/09/2026): o modal parou de pré-preencher com
+// `roteiro` (prompt de geração de vídeo, em inglês) e passou a pedir a legenda
+// JÁ RENDERIZADA ao backend. O que está travado aqui é o que custa caro se
+// quebrar: roteiro nunca mais vira legenda, o texto mostrado é o que vai no
+// POST, endpoint fora do ar não derruba a tela, e post sem legenda pede
+// confirmação — Reel mudo é criativo queimado.
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
@@ -76,9 +83,41 @@ assert.match(tpl, /type="datetime-local"/, 'input de data/hora do agendamento')
 assert.match(tpl, /type="radio" value="agora"/, 'opção publicar agora')
 assert.match(tpl, /type="radio" value="agendar"/, 'opção agendar')
 
-// Contador da legenda (2200) e trava no próprio input.
-assert.match(tpl, /\{\{ pubLegenda\.length \}\} \/ \{\{ LEGENDA_MAX \}\}/, 'contador da legenda')
+// Rótulo da legenda (origem · variação · 412/2200) e trava no próprio input.
+assert.match(tpl, /\{\{ pubLegendaRotulo \}\}/, 'rótulo com origem e contador da legenda')
 assert.match(tpl, /:maxlength="LEGENDA_MAX"/, 'textarea limitada ao mesmo máximo')
+assert.ok(!/\{\{ pubLegenda\.length \}\}/.test(tpl), 'um contador só na caixa (o do rótulo)')
+
+// A legenda vem do backend JÁ RENDERIZADA; o roteiro (prompt de geração do
+// vídeo, em inglês) nunca mais entra no textarea. Esta é a razão de existir da
+// mudança inteira — se voltar, volta escondido numa linha dessas.
+assert.ok(
+  !/pubLegenda\.value = \(?r\.roteiro/.test(script),
+  'legenda não é mais pré-preenchida com o roteiro',
+)
+{
+  const caixa = tpl.indexOf('<!-- legenda -->')
+  assert.ok(caixa > 0, 'marcador da caixa da legenda presente')
+  assert.ok(!/roteiro/.test(tpl.slice(caixa)), 'roteiro não aparece na caixa da legenda')
+}
+assert.match(
+  script,
+  /\/api\/marketing\/legendas\/resolvida\?\$\{q\.toString\(\)\}/,
+  'legenda resolvida vem do backend',
+)
+// Sem v-model: é o @input que grava o texto E marca a origem como manual.
+assert.match(tpl, /:value="pubLegenda"/, 'textarea controlada pelo estado')
+assert.match(tpl, /@input="onLegendaInput"/, 'digitar marca a legenda como manual')
+assert.ok(!/v-model="pubLegenda"/.test(tpl), 'v-model trocado pelo handler explícito')
+
+// Post sem legenda: aviso âmbar na tela e confirm no publicar (mesma régua do
+// cancelar — o que não tem desfazer pergunta antes).
+assert.match(tpl, /v-if="pubSemLegenda && !pubLegendaLoading"/, 'aviso âmbar de post sem legenda')
+assert.match(
+  script,
+  /async function salvarPostagem[\s\S]{0,1600}pubSemLegenda\.value && !window\.confirm/,
+  'publicar sem legenda pede confirm',
+)
 
 // Conta sem token fica DESABILITADA com o motivo ao lado (nunca some da lista:
 // o operador precisa ver que a conta existe e por que não dá).
@@ -113,6 +152,15 @@ assert.match(tpl, /v-for="o in marcaOptions"/, 'selects usam as marcas carregada
 // Trocar/subir arquivo numa linha com postagem agendada avisa antes.
 assert.match(script, /temPostagemEmVoo\(r\) && !window\.confirm/, 'upload avisa sobre agendamento')
 
+// A legenda resolvida é de UMA conta (o {{ instagram }} é o @ dela). Mandá-la
+// de volta no POST faria o arroba da primeira ir pras outras e congelaria o
+// rodízio numa variação só — o backend resolve por conta no agendar().
+assert.match(
+  script,
+  /legendaOrigem === 'manual' \? \(o\.legenda \|\| ''\)\.trim\(\) : ''/,
+  'legenda só viaja quando foi reescrita à mão',
+)
+
 // ---------------------------------------------------------------- helpers puros
 const start = script.indexOf('// ---------- helpers puros')
 const end = script.indexOf('// ---------- fim helpers puros')
@@ -123,7 +171,7 @@ return {
   LEGENDA_MAX, STATUS_EM_VOO, brtParaIso, proximaHoraBrt, fmtBrtCurto, fmtBrtLongo,
   contaLabel, plataformaLabel, motivoConta, motivoPublicar, montaBody, normalizaContas,
   statusLabel, statusPill, podeCancelar, emVoo, ordenaPostagens, postagemQuando, postagemTitle,
-  POSTAGEM_ERR_MAP,
+  POSTAGEM_ERR_MAP, legendaRotulo, normalizaLegenda, LEGENDA_ORIGEM_LABEL,
 };
 `)(dateLib.isoToday, redes.PLATAFORMA_LABELS, apiError.MARCAS_ERROS)
 
@@ -212,7 +260,8 @@ assert.deepEqual(H.STATUS_EM_VOO, ['agendado', 'pendente', 'containering', 'publ
 {
   const base = {
     creativeId: 'c1', fileId: 'f1', redeSocialIds: ['r1', 'r2'],
-    legenda: '  legenda de teste  ', quando: 'agora', dataHora: '2026-09-16T14:30',
+    legenda: '  legenda de teste  ', legendaOrigem: 'manual',
+    quando: 'agora', dataHora: '2026-09-16T14:30',
     shareToFeed: true, temInstagram: false,
   }
   const agora = H.montaBody(base)
@@ -221,6 +270,14 @@ assert.deepEqual(H.STATUS_EM_VOO, ['agendado', 'pendente', 'containering', 'publ
   assert.deepEqual(agora.rede_social_ids, ['r1', 'r2'])
   assert.notEqual(agora.rede_social_ids, base.redeSocialIds, 'copia a lista (não manda a reativa)')
   assert.equal(agora.legenda, 'legenda de teste', 'legenda com trim')
+  // Legenda RESOLVIDA (não reescrita) não volta no corpo: ela é de uma conta
+  // só, e o backend resolve por conta dentro do agendar().
+  for (const origem of ['marca', 'produto', 'criativo', 'nenhuma']) {
+    assert.equal(
+      H.montaBody({ ...base, legendaOrigem: origem }).legenda, null,
+      `origem ${origem} não manda a legenda de volta`,
+    )
+  }
   assert.equal(agora.agendado_para, null, 'publicar agora = sem agendamento')
   assert.deepEqual(agora.opcoes, {}, 'sem Instagram, sem share_to_feed')
 
@@ -266,6 +323,52 @@ assert.deepEqual(H.STATUS_EM_VOO, ['agendado', 'pendente', 'containering', 'publ
   }
   // pode_postar só é verdade quando vem true de verdade (nada de "truthy").
   assert.equal(H.normalizaContas([{ id: 'r9', pode_postar: 'sim' }]).contas[0].pode_postar, false)
+}
+
+// legendaRotulo: "padrão da marca · variação 2 de 4 · 412/2200".
+{
+  const r = (o) => H.legendaRotulo({ origem: 'marca', total: 4, indice: 2, tamanho: 412, ...o })
+  assert.equal(r(), 'padrão da marca · variação 2 de 4 · 412/2200')
+  assert.equal(r({ origem: 'manual', total: 0, indice: 0 }), 'escrita agora · 412/2200')
+  assert.equal(r({ origem: 'criativo', total: 0, indice: 0 }), 'legenda deste vídeo · 412/2200')
+  assert.equal(r({ origem: 'produto', total: 0, indice: 0 }), 'legenda do produto · 412/2200')
+  assert.equal(r({ origem: 'nenhuma', total: 0, indice: 0, tamanho: 0 }), 'sem legenda · 0/2200')
+  // Variação só quando há rodízio de verdade: "variação 1 de 1" é ruído.
+  assert.equal(r({ total: 1, indice: 1 }), 'padrão da marca · 412/2200')
+  assert.equal(r({ total: 4, indice: 0 }), 'padrão da marca · 412/2200')
+  // Origem que a tela não conhece passa crua (mesma regra do statusLabel) e
+  // nunca some o contador — é ele que diz se estourou o limite.
+  assert.equal(r({ origem: 'campanha', total: 0, indice: 0 }), 'campanha · 412/2200')
+  assert.equal(r({ origem: '', total: 0, indice: 0 }), '412/2200')
+  assert.match(r({ tamanho: 2400 }), /2400\/2200$/, 'estouro aparece no mesmo rótulo')
+  // Todas as origens do contrato viram pt-BR, sem código cru na cara do operador.
+  for (const o of ['manual', 'criativo', 'produto', 'marca', 'nenhuma']) {
+    assert.ok(H.LEGENDA_ORIGEM_LABEL[o], `origem traduzida: ${o}`)
+    assert.ok(!H.LEGENDA_ORIGEM_LABEL[o].includes('_'), `sem código cru: ${o}`)
+  }
+}
+
+// normalizaLegenda: a resposta do endpoint, limpa. Texto vazio é SEMPRE
+// "nenhuma" — é o texto que vai (ou não) pro Instagram, não a origem.
+{
+  const ok = H.normalizaLegenda({ texto: 'Conheça a Poofy', origem: 'marca', total_variacoes: 4, indice: 2 })
+  assert.deepEqual(ok, { texto: 'Conheça a Poofy', origem: 'marca', total: 4, indice: 2 })
+  assert.equal(H.normalizaLegenda({ texto: '', origem: 'marca' }).origem, 'nenhuma', 'texto vazio = sem legenda')
+  assert.equal(H.normalizaLegenda({ texto: '   ', origem: 'produto' }).origem, 'nenhuma', 'só espaço também')
+  assert.equal(H.normalizaLegenda({ texto: 'x' }).origem, '', 'origem ausente não vira mentira')
+  // Índice é 1-based; fora da faixa não vira "variação 0 de 4" na tela.
+  assert.equal(H.normalizaLegenda({ texto: 'x', total_variacoes: 4, indice: 0 }).indice, 0)
+  assert.equal(H.normalizaLegenda({ texto: 'x', total_variacoes: 4, indice: 9 }).indice, 0)
+  assert.equal(H.normalizaLegenda({ texto: 'x', total_variacoes: 4, indice: 4 }).indice, 4)
+  assert.equal(H.normalizaLegenda({ texto: 'x', total_variacoes: -2 }).total, 0)
+  assert.equal(H.normalizaLegenda({ texto: 'x', total_variacoes: '4' }).total, 0, 'número em string não conta')
+  // Texto maior que o limite do Instagram é cortado ANTES de aparecer: mostrar
+  // o que não caberia no post seria mentir pro operador.
+  assert.equal(H.normalizaLegenda({ texto: 'a'.repeat(3000), origem: 'marca' }).texto.length, H.LEGENDA_MAX)
+  // Lixo não derruba o modal.
+  for (const ruim of [null, undefined, {}, 'x', 42, { texto: 123 }]) {
+    assert.deepEqual(H.normalizaLegenda(ruim), { texto: '', origem: 'nenhuma', total: 0, indice: 0 })
+  }
 }
 
 // status → pill/rótulo/cancelável
@@ -363,6 +466,8 @@ const exportsForTest = `return {
   rows, marcas, marcaOptions, marcaValues, postagens, postagensDe, temPostagemEmVoo,
   pub, pubFiles, pubFileId, pubMarcaId, pubMarcaNome, pubContas, pubSel, pubLegenda,
   pubQuando, pubDataHora, pubShareToFeed, pubCommit, pubErr, pubTemInstagram,
+  pubLegendaOrigem, pubLegendaTotal, pubLegendaIndice, pubLegendaErro, pubLegendaRotulo,
+  pubSemLegenda, onLegendaInput,
   openPublicar, closePublicar, toggleConta, salvarPostagem, cancelarPostagem, loadPostagens,
   motivoPublicar, pickFile,
 }`
@@ -393,9 +498,20 @@ function criativo(over = {}) {
   }
 }
 
+// Resposta de GET /api/marketing/legendas/resolvida — o texto já vem
+// RENDERIZADO (o {{ produto }}/{{ instagram }} resolvem no backend), que é o
+// ponto: o modal mostra byte a byte o que vai pro Instagram.
+const LEGENDA_FAKE = {
+  texto: 'Conheça a Cafeteira Poofy — fala com a gente no @poofy',
+  origem: 'marca',
+  total_variacoes: 4,
+  indice: 2,
+}
+
 async function tela({
   canEdit = true, linhas = [criativo()], contasResp = { commit: false, contas: CONTAS_FAKE },
   marcasErro = false, postagensIniciais = [], postError = null, confirmAnswer = true,
+  legendaResp = LEGENDA_FAKE,
 } = {}) {
   const calls = []
   const toastLog = []
@@ -416,6 +532,12 @@ async function tela({
         : Promise.resolve(postagensIniciais)
     }
     if (url.startsWith('/api/marketing/postagens/contas')) return Promise.resolve(contasResp)
+    if (url.startsWith('/api/marketing/legendas/resolvida')) {
+      // 'erro' = backend antigo (404) ou sem permissão (403).
+      return legendaResp === 'erro'
+        ? Promise.reject(new Error('404'))
+        : Promise.resolve(legendaResp)
+    }
     if (opts?.method === 'POST' && url === '/api/marketing/postagens') {
       return postError ? Promise.reject(postError) : Promise.resolve({})
     }
@@ -464,7 +586,7 @@ async function run() {
   }
 
   // Abrir o modal: marca casada pelo slug, vídeo escolhido na frente da
-  // imagem, legenda vinda do roteiro, conta bloqueada não entra na seleção.
+  // imagem, legenda resolvida pelo backend, conta bloqueada não entra na seleção.
   {
     const { s, calls } = await tela()
     s.openPublicar(s.rows.value[0])
@@ -473,7 +595,11 @@ async function run() {
     assert.equal(s.pubMarcaId.value, 'm1', 'marca casada pelo slug da coluna')
     assert.equal(s.pubMarcaNome.value, 'Poofy')
     assert.equal(s.pubFileId.value, 'fvid', 'vídeo na frente da imagem (o robô publica Reels)')
-    assert.equal(s.pubLegenda.value, 'cena 1: mostrar o produto na mão', 'roteiro entra como rascunho')
+    assert.equal(s.pubLegenda.value, LEGENDA_FAKE.texto, 'legenda resolvida, já renderizada')
+    assert.notEqual(s.pubLegenda.value, s.rows.value[0].roteiro, 'roteiro nunca vira legenda')
+    assert.equal(s.pubLegendaOrigem.value, 'marca')
+    assert.equal(s.pubSemLegenda.value, false, 'com texto, nada de aviso âmbar')
+    assert.match(s.pubLegendaRotulo.value, /^padrão da marca · variação 2 de 4 · \d+\/2200$/)
     assert.equal(s.pubQuando.value, 'agora')
     assert.match(s.pubDataHora.value, /^\d{4}-\d{2}-\d{2}T\d{2}:00$/, 'data/hora default é hora cheia')
     assert.equal(s.pubCommit.value, false, 'modo seco veio do servidor')
@@ -481,8 +607,8 @@ async function run() {
     assert.equal(s.pubTemInstagram.value, true)
     // creative_id + file_id vão junto: é o que faz o backend responder com o
     // mesmo veredito do publicador (teto do dia, vídeo repetido, em voo).
-    const contasUrl = calls.at(-1).url
-    assert.ok(contasUrl.startsWith('/api/marketing/postagens/contas?'), contasUrl)
+    const contasUrl = calls.map((c) => c.url).filter((u) => u.startsWith('/api/marketing/postagens/contas?')).at(-1)
+    assert.ok(contasUrl, 'pediu as contas da marca')
     assert.match(contasUrl, /marca_id=m1/)
     assert.match(contasUrl, /creative_id=c1/)
     assert.match(contasUrl, /file_id=fvid/)
@@ -506,6 +632,106 @@ async function run() {
     assert.equal(s.pubCommit.value, true)
   }
 
+  // Legenda resolvida: a conta marcada entra na consulta, porque é o @ dela
+  // que o modelo usa — trocar de conta troca o texto.
+  {
+    const { s, calls } = await tela({
+      contasResp: { commit: true, contas: CONTAS_FAKE.map((c) => ({ ...c, pode_postar: true, motivo: null })) },
+    })
+    s.openPublicar(s.rows.value[0])
+    await new Promise(setImmediate)
+    const legendas = () => calls.map((c) => c.url).filter((u) => u.startsWith('/api/marketing/legendas/resolvida'))
+    const primeira = legendas().at(-1)
+    assert.match(primeira, /creative_id=c1/)
+    assert.match(primeira, /file_id=fvid/)
+    // Duas contas liberadas = nenhuma marcada: sem conta, sem `rede_social_id`
+    // (o backend ainda resolve o padrão da marca, só não sabe o @).
+    assert.ok(!primeira.includes('rede_social_id'), primeira)
+    s.toggleConta(s.pubContas.value[0])
+    await new Promise(setImmediate)
+    assert.match(legendas().at(-1), /rede_social_id=r1/, 'marcar a conta refaz a consulta')
+    assert.equal(legendas().length, 2)
+  }
+
+  // Legenda editada à mão: vira `manual`, perde a variação (não é mais o
+  // modelo do cadastro) e NÃO é sobrescrita quando a conta muda — o texto do
+  // operador é dele.
+  {
+    const { s, calls } = await tela({
+      contasResp: { commit: true, contas: CONTAS_FAKE.map((c) => ({ ...c, pode_postar: true, motivo: null })) },
+    })
+    s.openPublicar(s.rows.value[0])
+    await new Promise(setImmediate)
+    s.onLegendaInput({ target: { value: 'texto que o operador escreveu' } })
+    assert.equal(s.pubLegenda.value, 'texto que o operador escreveu')
+    assert.equal(s.pubLegendaOrigem.value, 'manual')
+    assert.equal(s.pubLegendaRotulo.value, 'escrita agora · 29/2200')
+    const antes = calls.filter((c) => c.url.startsWith('/api/marketing/legendas/resolvida')).length
+    s.toggleConta(s.pubContas.value[0])
+    await new Promise(setImmediate)
+    assert.equal(s.pubLegenda.value, 'texto que o operador escreveu', 'trocar de conta não apaga o que ele digitou')
+    assert.equal(
+      calls.filter((c) => c.url.startsWith('/api/marketing/legendas/resolvida')).length,
+      antes,
+      'nem vai ao servidor de novo',
+    )
+    // É o texto editado que vai no POST.
+    await s.salvarPostagem()
+    assert.equal(posts(calls).at(-1).opts.body.legenda, 'texto que o operador escreveu')
+
+    // Apagar tudo à mão volta pro estado "sem legenda" (e ao aviso âmbar).
+    const { s: s2 } = await tela()
+    s2.openPublicar(s2.rows.value[0])
+    await new Promise(setImmediate)
+    s2.onLegendaInput({ target: { value: '   ' } })
+    assert.equal(s2.pubLegendaOrigem.value, 'nenhuma')
+    assert.equal(s2.pubSemLegenda.value, true)
+    assert.match(s2.pubLegendaRotulo.value, /^sem legenda · 3\/2200$/)
+  }
+
+  // Endpoint fora do ar (404 do backend antigo / 403 sem permissão): textarea
+  // VAZIO, nunca o roteiro, e a tela continua inteira.
+  {
+    const { s } = await tela({ legendaResp: 'erro' })
+    s.openPublicar(s.rows.value[0])
+    await new Promise(setImmediate)
+    assert.equal(s.pubLegenda.value, '', 'cai pro textarea vazio')
+    assert.equal(s.pubLegendaErro.value, true, 'a tela conta por que o campo veio vazio')
+    assert.equal(s.pubSemLegenda.value, true)
+    assert.ok(s.pub.value, 'modal continua aberto e usável')
+    assert.deepEqual(s.pubSel.value, ['r1'], 'as contas carregaram do mesmo jeito')
+  }
+
+  // Publicar SEM legenda: confirmação a mais. Reel mudo é criativo queimado —
+  // a legenda é o único texto que a busca do Instagram lê do vídeo.
+  {
+    const vazia = { texto: '', origem: 'nenhuma', total_variacoes: 0, indice: 0 }
+    const { s, calls, confirms } = await tela({ legendaResp: vazia, confirmAnswer: false })
+    s.openPublicar(s.rows.value[0])
+    await new Promise(setImmediate)
+    assert.equal(s.pubSemLegenda.value, true)
+    assert.match(s.pubLegendaRotulo.value, /^sem legenda · 0\/2200$/)
+    await s.salvarPostagem()
+    assert.equal(confirms.length, 1, 'perguntou antes')
+    assert.match(confirms[0], /sem legenda/i)
+    assert.ok(!/senha|token/i.test(confirms[0]), 'confirm nunca fala de credencial')
+    assert.equal(posts(calls).length, 0, 'recusar não publica nada')
+
+    const { s: s2, calls: c2, confirms: cf2 } = await tela({ legendaResp: vazia })
+    s2.openPublicar(s2.rows.value[0])
+    await new Promise(setImmediate)
+    await s2.salvarPostagem()
+    assert.equal(cf2.length, 1)
+    assert.equal(posts(c2).at(-1).opts.body.legenda, null, 'confirmado, vai com legenda null')
+
+    // Com legenda não pergunta nada — a confirmação extra é só pro post mudo.
+    const { s: s3, confirms: cf3 } = await tela()
+    s3.openPublicar(s3.rows.value[0])
+    await new Promise(setImmediate)
+    await s3.salvarPostagem()
+    assert.equal(cf3.length, 0)
+  }
+
   // Agendar: POST com o corpo certo, toast, modal fecha e a agenda recarrega.
   {
     const { s, calls, toastLog } = await tela()
@@ -513,7 +739,9 @@ async function run() {
     await new Promise(setImmediate)
     s.pubQuando.value = 'agendar'
     s.pubDataHora.value = '2026-09-16T14:30'
-    s.pubLegenda.value = '  vem ver esse produto  '
+    // Digitar de verdade (o handler é quem marca origem=manual) — setar o ref
+    // na mão provaria um caminho que não existe na tela.
+    s.onLegendaInput({ target: { value: '  vem ver esse produto  ' } })
     await s.salvarPostagem()
     const post = posts(calls).at(-1)
     assert.equal(post.url, '/api/marketing/postagens')
@@ -621,7 +849,7 @@ async function run() {
 }
 
 run().then(() => {
-  console.log('PASS: SFC parse + template compile; higiene (sem token/senha, rel=noopener, confirm no cancelar); helpers puros (BRT→ISO, corpo do POST, contas, pills, motivos); script setup com api falso (modal, travas, cancelar)')
+  console.log('PASS: SFC parse + template compile; higiene (sem token/senha, rel=noopener, confirm no cancelar, roteiro fora da legenda); helpers puros (BRT→ISO, corpo do POST, contas, pills, motivos, rótulo/origem da legenda); script setup com api falso (modal, travas, legenda resolvida, edição manual, endpoint fora do ar, confirm do post sem legenda, cancelar)')
 }).catch((e) => {
   console.error(e)
   process.exit(1)

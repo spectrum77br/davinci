@@ -94,6 +94,24 @@ class MarketingPostagem(Base, TimestampMixin):
     # produção ("cena, fala, texto na tela"): entra como rascunho no modal,
     # mas publicar o roteiro cru poria instrução de gravação no Instagram.
     legenda: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Qual variação da biblioteca produziu a `legenda` acima (migration 0282).
+    # É ESTADO DO RODÍZIO, não fonte do texto: a escolha é "a variação que faz
+    # mais tempo que não sai nesta conta", e ela se lê daqui, sem tabela de
+    # contador. A legenda que vai pro Instagram é a de cima, snapshot —
+    # reescrever o modelo depois não muda post nenhum. SET NULL porque apagar
+    # a variação não pode apagar o histórico do que já foi publicado.
+    legenda_modelo_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        # Nome curto na mão: a convenção do repo geraria 66 caracteres e o
+        # Postgres trunca em 63 calado — aí o nome do model e o da migration
+        # deixariam de bater (mesmo motivo de fk_product_categories_parent_bling_cat_id).
+        ForeignKey(
+            "marketing_legenda_modelos.id",
+            ondelete="SET NULL",
+            name="fk_marketing_postagens_legenda_modelo_id_legenda_modelos",
+        ),
+        nullable=True,
+    )
     # share_to_feed, thumb_offset, título do Short… (espelha MarketingCommand.payload)
     opcoes: Mapped[dict] = mapped_column(
         JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
