@@ -65,6 +65,9 @@ AMAZON_ESPERA_INTERVALO_HORAS = 12
 # tenta de novo 2×/dia, NÃO gasta o teto de tentativas, e só desiste depois de
 # ESPERA_MAX_DIAS. Quando o token volta, a própria esteira reenche a Margem.
 ESPERA_INTERVALO_HORAS = AMAZON_ESPERA_INTERVALO_HORAS
+# Teto de trabalho por rodada da esteira. O cron tem timeout de 900s; parar em
+# 780 deixa margem pra fechar a transação e logar o que ficou pra trás.
+ESTEIRA_LIMITE_S = 780.0
 ESPERA_MAX_DIAS = AMAZON_ESPERA_MAX_DIAS
 
 _RX_FALHA_TRANSITORIA = re.compile(
@@ -308,16 +311,40 @@ async def run_due_marketplace_financial_retries(
 
 
 async def _rodar_lote(
-    session: AsyncSession, bling_ids: list[int], *, trigger: str
+    session: AsyncSession,
+    bling_ids: list[int],
+    *,
+    trigger: str,
+    limite_s: float | None = None,
 ) -> dict[str, int]:
     """Um commit POR PEDIDO, não um por lote.
 
     Esta fila existe justamente para linhas que já falharam. Com um commit
     único no fim, um erro de banco no 40º pedido derrubava a sessão e jogava
     fora o trabalho dos 39 anteriores — e o lote seguinte tropeçaria nos
-    mesmos. Isolado por pedido, o problema fica contido em uma linha."""
+    mesmos. Isolado por pedido, o problema fica contido em uma linha.
+
+    `limite_s` faz o lote PARAR SOZINHO antes de o arq matá-lo por timeout.
+    Uma consulta ao financeiro do TikTok leva ~37s; com o lote cheio, a rodada
+    estourava os 900s do cron e o job era marcado como falho toda vez —
+    barulho que esconde falha de verdade. Parar por conta própria devolve
+    resumo honesto (`restaram`) em vez de morrer no meio."""
+    inicio = datetime.now(UTC)
     ok = error = 0
+    processados = 0
     for bling_id in bling_ids:
+        if limite_s is not None:
+            gasto = (datetime.now(UTC) - inicio).total_seconds()
+            if gasto >= limite_s:
+                logger.info(
+                    "marketplace_financials_lote_parou_no_limite",
+                    trigger=trigger,
+                    processados=processados,
+                    restaram=len(bling_ids) - processados,
+                    segundos=round(gasto),
+                )
+                break
+        processados += 1
         try:
             result = await run_sync_marketplace_financials_for_bling_order(
                 session,
@@ -338,7 +365,12 @@ async def _rodar_lote(
                 error=str(e)[:500],
             )
             error += 1
-    return {"queued": len(bling_ids), "ok": ok, "error": error}
+    return {
+        "queued": processados,
+        "ok": ok,
+        "error": error,
+        "restaram": len(bling_ids) - processados,
+    }
 
 
 async def run_esteira_lenta_financials(
@@ -390,7 +422,10 @@ async def run_esteira_lenta_financials(
             if i < len(fila):
                 intercalado.append(fila[i])
 
-    return await _rodar_lote(session, intercalado, trigger="esteira_lenta")
+    # O cron mata em 900s; paramos em 780 pra fechar a rodada com resumo.
+    return await _rodar_lote(
+        session, intercalado, trigger="esteira_lenta", limite_s=ESTEIRA_LIMITE_S
+    )
 
 
 async def run_ressuscitar_financials(

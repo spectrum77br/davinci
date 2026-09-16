@@ -329,7 +329,7 @@ async def test_um_pedido_com_erro_nao_derruba_o_resto_do_lote(db, make_user, mon
     resumo = await _rodar_lote(db, [1, 2, 3], trigger="esteira_lenta")
 
     assert vistos == [1, 2, 3]
-    assert resumo == {"queued": 3, "ok": 2, "error": 1}
+    assert resumo == {"queued": 3, "ok": 2, "error": 1, "restaram": 0}
 
 
 async def _persistir_sucesso(db, integ, *, external_order_id, bling_id, frete, taxa):
@@ -614,3 +614,39 @@ async def test_contador_envenenado_do_modelo_antigo_nao_mata_no_primeiro_erro(db
 
     assert linha.attempts == 1
     assert linha.next_retry_at is not None
+
+
+async def test_lote_para_sozinho_antes_do_timeout_do_cron(db, make_user, monkeypatch):
+    """Uma consulta ao financeiro do TikTok leva ~37s. Com o lote cheio a rodada
+    estourava os 900s do cron e o job era marcado como falho TODA vez — barulho
+    que esconde falha de verdade."""
+    await _integ(db, make_user)
+    vistos: list[int] = []
+    import app.services.marketplace_financials as mf
+
+    # Cada pedido "gasta" 100s no relógio que o lote usa.
+    relogio = {"agora": datetime.now(UTC)}
+
+    class FakeDatetime:
+        @staticmethod
+        def now(tz=None):
+            return relogio["agora"]
+
+    async def fake_sync(session, *, bling_order_id, **kw):
+        vistos.append(bling_order_id)
+        relogio["agora"] = relogio["agora"] + timedelta(seconds=100)
+        return {"ok": True, "status": "posted"}
+
+    monkeypatch.setattr(
+        "app.services.marketplace_financials.run_sync_marketplace_financials_for_bling_order",
+        fake_sync,
+    )
+    monkeypatch.setattr(mf, "datetime", FakeDatetime)
+
+    resumo = await mf._rodar_lote(db, list(range(1, 21)), trigger="esteira_lenta", limite_s=450)
+
+    # Para na 5ª (5 x 100s = 500s > 450s) em vez de varrer as 20.
+    assert len(vistos) == 5
+    assert resumo["queued"] == 5
+    assert resumo["restaram"] == 15
+    assert resumo["ok"] == 5
