@@ -1002,6 +1002,17 @@ const conectando = ref(false)
 const conexaoErr = ref<string | null>(null)
 // Só quando o backend não consegue decidir sozinho (ok=false): o que o token
 // enxerga vira opção de rádio. Nada aqui é segredo — são nomes de Página/@.
+// Por que uma linha que o token ENXERGA mesmo assim não pode ser escolhida.
+// Caso real: Página criada e compartilhada, mas sem o Instagram vinculado —
+// ela volta do /me/accounts sem `instagram_business_account`, e sem isso não
+// há onde publicar. Sem esta frase o operador vê um rádio apagado e não tem
+// como adivinhar o que falta.
+function motivoIndisponivel(plataforma: string): string {
+  return plataforma === 'instagram'
+    ? 'sem Instagram vinculado a essa Página'
+    : 'sem id utilizável nessa conta'
+}
+
 const conexaoContas = ref<ContaExterna[]>([])
 const conexaoEscolha = ref('')
 
@@ -1775,6 +1786,10 @@ await load()
               :disabled="!contaExternaId(c, conexao.rede.plataforma)"
             />
             <span class="truncate">{{ contaExternaLabel(c) }}</span>
+            <span
+              v-if="!contaExternaId(c, conexao.rede.plataforma)"
+              class="shrink-0 text-[11px] text-amber-600 dark:text-amber-500"
+            >— {{ motivoIndisponivel(conexao.rede.plataforma) }}</span>
           </label>
         </div>
 

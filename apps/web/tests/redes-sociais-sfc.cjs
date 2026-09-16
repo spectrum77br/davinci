@@ -129,6 +129,13 @@ assert.match(tpl, /@click\.stop="startEdit\(row, 'whatsapp_verificacao_status'\)
   assert.match(thead, /sticky left-0/, 'Marca sticky')
 }
 
+// Conta que o token enxerga mas não dá pra escolher precisa DIZER por quê —
+// senão o operador vê um rádio apagado e não tem como adivinhar o que falta
+// (caso real: Página sem Instagram vinculado).
+assert.match(script, /function motivoIndisponivel/, 'existe o motivo do rádio desabilitado')
+assert.match(tpl, /motivoIndisponivel\(conexao\.rede\.plataforma\)/, 'o motivo aparece no template')
+assert.match(script, /sem Instagram vinculado a essa P/, 'texto do motivo para Instagram')
+
 // ---------------------------------------------------------------- helpers puros
 const start = script.indexOf('// ---------- helpers puros')
 const end = script.indexOf('// ---------- fim helpers puros')
