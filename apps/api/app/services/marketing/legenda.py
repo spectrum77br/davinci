@@ -224,8 +224,17 @@ def placeholders_de(
     número, mesmo formato nos dois canais).
     """
     completo, modelo = nome_de_vitrine(produto_nome, marca.nome if marca else None)
+    # O cadastro guarda a marca em minúscula ("uranyx", "locagil") porque ali
+    # ela é chave de busca. Numa legenda pública isso vira "da uranyx", que
+    # salta aos olhos. Só a PRIMEIRA letra sobe, e só quando o nome está todo
+    # em minúsculo: preserva "LOCAGIL" de quem escreveu em caixa alta,
+    # "Charlots Park" de quem escreveu certo, e não estraga "7buyers" (a
+    # primeira posição é um dígito e `capitalize` não mexe).
+    nome_marca = (marca.nome if marca else "") or ""
+    if nome_marca and nome_marca.islower():
+        nome_marca = nome_marca.capitalize()
     return {
-        "marca": (marca.nome if marca else "") or "",
+        "marca": nome_marca,
         "produto": completo,
         "produto_modelo": modelo,
         "whatsapp": formatar_fone(marca.sac_fone) if marca else "",

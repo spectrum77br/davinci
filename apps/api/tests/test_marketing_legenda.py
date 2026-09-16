@@ -728,3 +728,26 @@ async def test_placeholder_produto_sai_limpo_na_legenda(db, make_user):
     r = await svc.resolver(db, creative=c, file=f, rede=rede)
     assert r.texto == "Uranyx Fossibot F109S 256 GB Preto — só o modelo: Fossibot F109S"
     assert "24.256" not in r.texto
+
+
+def test_marca_toda_minuscula_sobe_a_primeira_letra():
+    """O cadastro guarda "uranyx" em minúscula porque ali é chave de busca.
+
+    Numa legenda pública "da uranyx" salta aos olhos. Só a primeira letra sobe,
+    e só quando o nome está todo minúsculo — quem escreveu "LOCAGIL" ou
+    "Charlots Park" fica como está.
+    """
+    from app.models import Marca
+    from app.services.marketing.legenda import placeholders_de
+
+    def nome_de(n: str) -> str:
+        return placeholders_de(Marca(nome=n, slug="x"), None, None)["marca"]
+
+    assert nome_de("uranyx") == "Uranyx"
+    assert nome_de("locagil") == "Locagil"
+    assert nome_de("charlots") == "Charlots"
+    # Dígito na frente: `capitalize` não tem o que subir, e tudo bem.
+    assert nome_de("7buyers") == "7buyers"
+    # Quem já escreveu com caixa fica intocado.
+    assert nome_de("LOCAGIL") == "LOCAGIL"
+    assert nome_de("Charlots Park") == "Charlots Park"
