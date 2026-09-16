@@ -39,8 +39,8 @@ def _sem_espera(monkeypatch):
     async def _dorme(_s):
         return None
 
-    monkeypatch.setattr(P.asyncio, "sleep", _dorme)
-    monkeypatch.setattr(P, "_reclassify_skipped", lambda r: r)
+    monkeypatch.setattr(pricing_push.asyncio, "sleep", _dorme)
+    monkeypatch.setattr(pricing_push, "_reclassify_skipped", lambda r: r)
 
 
 async def test_anuncio_que_recusou_por_limite_e_reenviado_ate_passar(monkeypatch):
@@ -54,8 +54,8 @@ async def test_anuncio_que_recusou_por_limite_e_reenviado_ate_passar(monkeypatch
             return _res(SyncStatus.RETRYABLE, "http_429")
         return _res(SyncStatus.OK)
 
-    monkeypatch.setattr(P, "_dispatch_price_update_link", fake)
-    r = await P.enviar_preco_para_links(None, None, links, 110.0, sku_by_product={})
+    monkeypatch.setattr(pricing_push, "_dispatch_price_update_link", fake)
+    r = await pricing_push.enviar_preco_para_links(None, None, links, 110.0, sku_by_product={})
 
     assert all(r[lk.id].status == SyncStatus.OK for lk in links)
     assert tentativas["b"] == 3
@@ -73,8 +73,8 @@ async def test_erro_de_verdade_nao_e_reenviado(monkeypatch):
         tentativas["n"] += 1
         return _res(SyncStatus.FATAL, "amazon_auth_403")
 
-    monkeypatch.setattr(P, "_dispatch_price_update_link", fake)
-    r = await P.enviar_preco_para_links(None, None, links, 110.0, sku_by_product={})
+    monkeypatch.setattr(pricing_push, "_dispatch_price_update_link", fake)
+    r = await pricing_push.enviar_preco_para_links(None, None, links, 110.0, sku_by_product={})
 
     assert tentativas["n"] == 1
     assert r[links[0].id].status == SyncStatus.FATAL
@@ -90,10 +90,10 @@ async def test_desiste_depois_das_rodadas_e_devolve_o_ultimo_resultado(monkeypat
         tentativas["n"] += 1
         return _res(SyncStatus.RETRYABLE, "http_429")
 
-    monkeypatch.setattr(P, "_dispatch_price_update_link", fake)
-    r = await P.enviar_preco_para_links(None, None, links, 110.0, sku_by_product={})
+    monkeypatch.setattr(pricing_push, "_dispatch_price_update_link", fake)
+    r = await pricing_push.enviar_preco_para_links(None, None, links, 110.0, sku_by_product={})
 
-    assert tentativas["n"] == len(P._ESPERAS_LIMITE_S) + 1
+    assert tentativas["n"] == len(pricing_push._ESPERAS_LIMITE_S) + 1
     assert r[links[0].id].status == SyncStatus.RETRYABLE
 
 
@@ -106,7 +106,7 @@ async def test_todo_anuncio_recebe_resultado(monkeypatch):
             SyncStatus.RETRYABLE, "http_429"
         )
 
-    monkeypatch.setattr(P, "_dispatch_price_update_link", fake)
-    r = await P.enviar_preco_para_links(None, None, links, 110.0, sku_by_product={})
+    monkeypatch.setattr(pricing_push, "_dispatch_price_update_link", fake)
+    r = await pricing_push.enviar_preco_para_links(None, None, links, 110.0, sku_by_product={})
 
     assert set(r.keys()) == {lk.id for lk in links}
