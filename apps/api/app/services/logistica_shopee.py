@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Collection
 from datetime import UTC, datetime, timedelta
+from typing import NamedTuple
 from uuid import UUID
 
 import structlog
@@ -397,6 +398,147 @@ def _return_info(d: dict, status: str) -> ReturnInfo:
     )
 
 
+# ---------------------------------------------------------------------------
+# Pacote que volta pela SPX do envio de IDA (entrega falhou).
+#
+# Medido em 16/09/2026 (pedido 295534 e mais 28): quando a SPX não consegue
+# entregar, o comprador abre "não recebi" e a Shopee aceita o caso como SÓ
+# REEMBOLSO (`needs_logistics=false`, `tracking_number` vazio,
+# `reverse_logistics_status` LOGISTICS_NOT_STARTED) — ou o pedido é cancelado
+# sem caso nenhum. O pacote volta pro vendedor pelo MESMO rastreio da ida, e o
+# único lugar que conta isso é `get_tracking_info(order_sn)`: eventos
+# RETURN_STARTED ("Pedido será devolvido ao vendedor") → RETURN_INITIATED →
+# RETURNED ("Pedido devolvido"). O `logistics_status` agregado do pedido fica
+# em LOGISTICS_DELIVERY_FAILED o tempo todo, então só os EVENTOS servem.
+# ---------------------------------------------------------------------------
+
+# Status agregado da ida (logistica.meli_status.logistics_status) que diz que
+# o pacote NÃO chegou ao comprador — candidato a voltar pela SPX.
+_SHOPEE_IDA_FALHOU = {"LOGISTICS_DELIVERY_FAILED", "LOGISTICS_RETURNED", "LOGISTICS_LOST"}
+# Eventos do rastreio da ida que pertencem à volta ao remetente.
+_SHOPEE_RTS_EVENTOS = {"RETURN_STARTED", "RETURN_INITIATED", "RETURNED", "LOGISTICS_RETURNED"}
+# Evento que fecha a volta: o pacote foi entregue ao vendedor.
+_SHOPEE_RTS_ENTREGUE = {"RETURNED", "LOGISTICS_RETURNED"}
+# Status SINTÉTICO gravado em devolucao_rastreio.devolucao_status_auto quando o
+# pedido volta pela ida SEM caso de devolução na Shopee (pedido cancelado após
+# a falha de entrega). Tradução em logistica_rules._SHOPEE_RETURN_LABELS_PT.
+STATUS_RTS = "RTS"
+
+
+class RtsIda(NamedTuple):
+    """O que o rastreio da IDA conta sobre a volta ao vendedor."""
+
+    iniciado_em: datetime | None  # 1º evento de volta (vira "Em devolução desde")
+    ultimo_em: datetime | None  # último evento de qualquer tipo
+    localizacao: str | None  # descrição do último evento
+    entregue_em: datetime | None  # evento RETURNED — chegou no vendedor
+
+
+def rts_da_ida(track: dict | None) -> RtsIda | None:
+    """Lê os eventos de `get_tracking_info` e devolve o retrato da volta ao
+    remetente, ou None quando o rastreio da ida não tem nenhum evento de volta
+    (pacote ainda tentando entregar, ou já entregue ao comprador)."""
+    eventos = [e for e in ((track or {}).get("tracking_info") or []) if isinstance(e, dict)]
+    volta = [
+        e for e in eventos
+        if str(e.get("logistics_status") or "").strip().upper() in _SHOPEE_RTS_EVENTOS
+    ]
+    if not volta:
+        return None
+    top = max(eventos, key=lambda e: _epoch_int(e.get("update_time")))
+    entregues = [
+        e for e in volta
+        if str(e.get("logistics_status") or "").strip().upper() in _SHOPEE_RTS_ENTREGUE
+    ]
+    return RtsIda(
+        iniciado_em=epoch_to_dt(min(_epoch_int(e.get("update_time")) for e in volta)),
+        ultimo_em=epoch_to_dt(top.get("update_time")),
+        localizacao=(str(top.get("description") or "").strip() or None),
+        entregue_em=(
+            epoch_to_dt(max(_epoch_int(e.get("update_time")) for e in entregues))
+            if entregues
+            else None
+        ),
+    )
+
+
+def _epoch_int(v: object) -> int:
+    """Epoch (s) tolerante: "1789565570", 1789565570.0 → 1789565570; lixo → 0
+    (um evento ilegível não pode derrubar a rodada Shopee inteira)."""
+    try:
+        return int(float(v))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0
+
+
+def _ida_falhou(linha: Logistica) -> bool:
+    st = str(((linha.meli_status or {}).get("logistics_status")) or "").strip().upper()
+    return st in _SHOPEE_IDA_FALHOU
+
+
+def _caso_vivo_na_linha(linha: Logistica) -> bool:
+    """O sweep de pós-venda já viu um caso VIVO deste pedido
+    (`meli_status.return_status`). Não achá-lo na varredura de agora é lacuna
+    da lista (`get_return_list` é best-effort e devolve [] em erro), não
+    ausência de caso — não pode virar RTS sintético por cima do que a aba já
+    mostra."""
+    ret = str(((linha.meli_status or {}).get("return_status")) or "").strip().upper()
+    return bool(ret) and ret not in logistica_rules._SHOPEE_RETURN_ENCERRADO
+
+
+def _sem_perna_reversa(det: dict | None, info: ReturnInfo) -> bool:
+    """O caso de devolução NÃO vai trazer pacote pela reversa: só reembolso
+    (`needs_logistics=false`) ou sem código de retorno."""
+    d = det or {}
+    if d.get("needs_logistics") is False:
+        return True
+    return not (info.tracking or "").strip()
+
+
+_CARRIER_IDA = "Shopee Xpress (volta pela ida)"
+
+
+async def _rts_da_ida_do_pedido(client: ShopeeClient, linha: Logistica) -> ReturnInfo | None:
+    """Consulta o rastreio da IDA de uma linha cuja entrega falhou e devolve um
+    `ReturnInfo` da volta ao remetente (status sintético `STATUS_RTS`), ou None
+    quando a ida ainda não tem evento de volta. Best-effort: erro de API loga e
+    devolve None (a linha fica como estava)."""
+    order_sn = (linha.pedido_marketplace or "").strip()
+    if not order_sn:
+        return None
+    try:
+        track = await client.get_tracking_info(order_sn)
+    except Exception as e:  # noqa: BLE001 — extra, não derruba o sync
+        logger.warning(
+            "logistica_shopee_rts_tracking_falhou",
+            pedido=linha.pedido_bling, order_sn=order_sn, err=str(e)[:200],
+        )
+        return None
+    rts = rts_da_ida(track)
+    if rts is None:
+        return None
+    # O código da ida já está na linha da Logística (build_enrichment); só
+    # pergunta de novo se ela estiver vazia.
+    tracking = (linha.rastreio or "").strip() or None
+    if tracking is None:
+        try:
+            tracking = await client.get_tracking_number(order_sn)
+        except Exception:  # noqa: BLE001
+            tracking = None
+    return ReturnInfo(
+        fonte="shopee",
+        status=STATUS_RTS,
+        tracking=tracking,
+        carrier=_CARRIER_IDA,
+        created_at=rts.iniciado_em,
+        updated_at=rts.ultimo_em,
+        return_id=None,
+        entregue_em=rts.entregue_em,
+        localizacao=rts.localizacao,
+        localizacao_em=rts.ultimo_em,
+    )
+
+
 async def returns_por_pedido(
     session: AsyncSession,
     linhas: list[Logistica],
@@ -487,15 +629,26 @@ async def returns_por_pedido(
             ate = de
 
         for r in rows:
-            got = melhor.get((r.pedido_marketplace or "").strip())
-            if got is None:
-                continue
+            order_sn = (r.pedido_marketplace or "").strip()
             pedido = (r.pedido_bling or "").strip()
+            ja_chegou = pedido in (ja_entregues or set())
+            got = melhor.get(order_sn)
+            if got is None:
+                # Sem caso na Shopee. Se a ida falhou, o pacote pode estar
+                # voltando pela SPX mesmo assim (pedido cancelado) — senão a
+                # aba fica em branco. Linha que já conhece um caso VIVO fica
+                # como está: a lista pode só ter falhado nesta rodada.
+                if _ida_falhou(r) and not ja_chegou and not _caso_vivo_na_linha(r):
+                    rts = await _rts_da_ida_do_pedido(client, r)
+                    if rts is not None:
+                        out[pedido] = rts
+                continue
             info = _return_info(got[1], got[2])
             # Uma chamada a mais por devolução AINDA NÃO entregue, pra saber se
             # o pacote de volta chegou — a lista não traz esse campo, só o
             # detalhe. Quem já está marcado como entregue não é reconsultado.
-            if info.return_id and pedido not in (ja_entregues or set()):
+            det: dict | None = None
+            if info.return_id and not ja_chegou:
                 try:
                     det = await client.get_return_detail(info.return_id)
                     entregue = _entregue_em_do_detalhe(det)
@@ -507,6 +660,40 @@ async def returns_por_pedido(
                     entregue = None
                 if entregue is not None:
                     info = info._replace(entregue_em=entregue)
+            # Caso sem perna reversa (só reembolso) com a ida falhada: a volta
+            # está no rastreio da IDA, não no caso.
+            rts: ReturnInfo | None = None
+            if info.entregue_em is None and _ida_falhou(r) and _sem_perna_reversa(det, info):
+                if ja_chegou:
+                    # Já provou a volta numa rodada anterior: completa o código
+                    # e a transportadora pela própria linha, sem ir à API —
+                    # senão o sync regravaria rastreio/transportadora vazios.
+                    info = info._replace(
+                        tracking=info.tracking or (r.rastreio or "").strip() or None,
+                        carrier=info.carrier or _CARRIER_IDA,
+                    )
+                else:
+                    rts = await _rts_da_ida_do_pedido(client, r)
+                    if rts is not None:
+                        mexidas = [d for d in (info.updated_at, rts.updated_at) if d is not None]
+                        info = info._replace(
+                            tracking=info.tracking or rts.tracking,
+                            carrier=info.carrier or rts.carrier,
+                            # "Data últ. movimentação": o evento da SPX conta.
+                            updated_at=max(mexidas) if mexidas else None,
+                            entregue_em=rts.entregue_em,
+                            localizacao=rts.localizacao,
+                            localizacao_em=rts.localizacao_em,
+                        )
+                # Caso ENCERRADO (CANCELLED/CLOSED) não pinta a aba
+                # (devolucao_status_pt → None) e esconderia a volta pela SPX
+                # que acabamos de ler: o status vira o sintético RTS. O
+                # return_id fica — chamado e prazo usam só ele.
+                if (
+                    (info.status or "").upper() in logistica_rules._SHOPEE_RETURN_ENCERRADO
+                    and (rts is not None or ja_chegou)
+                ):
+                    info = info._replace(status=STATUS_RTS)
             out[pedido] = info
 
     logger.info(

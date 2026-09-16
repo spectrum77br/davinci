@@ -263,12 +263,25 @@ async def run(session: AsyncSession, *, pedidos: Collection[str] | None = None) 
             row.fonte_auto = info.fonte
             if info.created_at:
                 row.devolucao_criada_em = info.created_at
-            if info.updated_at:
+            # A "última mexida" só anda pra frente: numa rodada em que a
+            # Shopee não é reconsultada (pacote já chegou) o carimbo do caso
+            # não pode voltar pra trás do evento da SPX gravado antes.
+            if info.updated_at and (
+                row.devolucao_atualizada_em is None
+                or info.updated_at > row.devolucao_atualizada_em
+            ):
                 row.devolucao_atualizada_em = info.updated_at
             # Só carimba a chegada; nunca apaga (a plataforma pode parar de
             # informar numa rodada e a data não pode sumir da tela).
             if info.entregue_em and row.pacote_entregue_em is None:
                 row.pacote_entregue_em = info.entregue_em
+            # Localização vinda do PRÓPRIO marketplace (Shopee: pacote voltando
+            # pela SPX da ida). Só quando ele informa — senão quem manda na
+            # localização continua sendo o 17track.
+            loc = (info.localizacao or "").strip() or None
+            if loc and loc != row.localizacao_auto:
+                row.localizacao_auto = loc
+                row.localizacao_auto_data = info.localizacao_em or agora
             row.auto_sync_at = agora
             gravados += 1
     # Commit SEMPRE (mesmo sem devolução nova): o refresh de token dos clients

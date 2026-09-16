@@ -40,6 +40,12 @@ class ReturnInfo(NamedTuple):
     # processamento" mesmo com o pacote já entregue — a Shopee sabia e ninguém
     # perguntava (o dado só existe no DETALHE da devolução, não na lista).
     entregue_em: datetime | None = None
+    # Última localização FÍSICA do pacote de volta quando o próprio marketplace
+    # a informa (Shopee: descrição do último evento da SPX quando a entrega
+    # falhou e o pacote volta pelo rastreio da IDA). None = quem sabe é o
+    # 17track (push/pull) — o sync não mexe na localização gravada.
+    localizacao: str | None = None
+    localizacao_em: datetime | None = None  # carimbo desse evento (UTC)
 
 
 def epoch_to_dt(v: Any) -> datetime | None:

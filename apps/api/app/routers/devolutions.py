@@ -952,6 +952,7 @@ async def patch_acompanhamento_rastreio(
                 devolucao_status_auto=row.devolucao_status_auto,
                 fonte_auto=row.fonte_auto,
                 devolucao_atualizada_em=row.devolucao_atualizada_em,
+                pacote_entregue_em=row.pacote_entregue_em,
             ),
         },
         localizacao_manual=row.localizacao,
@@ -960,6 +961,7 @@ async def patch_acompanhamento_rastreio(
         status_auto=row.devolucao_status_auto,
         fonte_auto=row.fonte_auto,
         localizacao_auto=row.localizacao_auto,
+        pacote_entregue_em=row.pacote_entregue_em,
     )
     return AcompanhamentoRastreioOut(**d)
 

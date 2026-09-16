@@ -355,6 +355,10 @@ _SHOPEE_RETURN_LABELS_PT = {
     "ACCEPTED": "Devolução aceita",
     "SELLER_DISPUTE": "Devolução contestada pelo vendedor",
     "REFUND_PAID": "Reembolso pago pela Shopee",
+    # Status SINTÉTICO (logistica_shopee.STATUS_RTS): a entrega falhou, não há
+    # caso de devolução na Shopee e o pacote volta pro vendedor pelo rastreio
+    # da ida (SPX). O evento da SPX vai ao lado ("· Pedido devolvido").
+    "RTS": "Entrega falhou — pacote de volta pela Shopee Xpress",
 }
 _TIKTOK_RETURN_LABELS_PT = {
     "RETURN_OR_REFUND_REQUEST_PENDING": "Devolução solicitada — aguardando resposta",
