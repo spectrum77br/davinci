@@ -93,19 +93,23 @@ const DUMP_JS = `(function(){${H}
   return {url:location.href,title:document.title,buttons:out.slice(0,80),text:(document.body.innerText||'').replace(/\\s+/g,' ').slice(0,500)};
 })()`;
 
-// Campo de busca da lista de envios (placeholder tipo "Buscar", "Pesquisar",
-// "código de rastreio"…). Marca com data-me-search.
-const FIND_SEARCH_JS = `(function(){${H}
-  [].slice.call(document.querySelectorAll('[data-me-search]')).forEach(function(e){e.removeAttribute('data-me-search');});
-  var ins=[].slice.call(document.querySelectorAll('input[type="search"],input[type="text"],input:not([type])')).filter(vis);
-  var pick=ins.find(function(i){return /busc|pesquis|rastre|c[oó]digo|procur|filtr/i.test((i.placeholder||'')+' '+(i.getAttribute('aria-label')||'')+' '+(i.name||''));})||ins[0];
-  if(!pick)return {ok:false};
-  pick.setAttribute('data-me-search','1');
-  return {ok:true,placeholder:pick.placeholder||'',name:pick.name||''};
+// Bloco (linha da tabela) do envio que contém o rastreio; marca a linha
+// (data-me-card) e o botão de menu de ações dela (data-me-menu).
+//
+// Não existe mais um helper de busca: a busca desta tela é por destinatário ou
+// ORD e não aceita código de rastreio, então usá-la só escondia o envio.
+// Sub-aba "Postados" dentro de "Liberados e postados". É um elemento sem href
+// (troca de aba por JS), então mira-se no texto exato.
+const CLICAR_ABA_POSTADOS_JS = `(function(){${H}
+  var cand=[].slice.call(document.querySelectorAll('div,button,a,li,span,[role="tab"]')).filter(function(e){
+    return vis(e)&&txt(e).toLowerCase()==='postados';
+  });
+  if(!cand.length)return {ok:false};
+  var el=cand[cand.length-1];
+  el.click();
+  return {ok:true,texto:txt(el)};
 })()`;
 
-// Bloco (card/linha) do envio que contém o rastreio; marca o bloco
-// (data-me-card) e, se houver, a seta de expandir (data-me-expand).
 function findCardJS(rastreio: string): string {
   return `(function(){${H}
   var alvo=${JSON.stringify(rastreio.toUpperCase())};
@@ -205,22 +209,23 @@ export async function suspenderEntrega(
   const dump0 = await evalJS<any>(page, DUMP_JS);
   log.info(`ME ${rastreio}: tela inicial ${dump0?.url} botões=${(dump0?.buttons || []).length}`);
 
-  // 1) busca pelo rastreio
-  const search = await evalJS<any>(page, FIND_SEARCH_JS);
-  if (search?.ok) {
-    await clickCenter(page, '[data-me-search="1"]');
-    await page.keyboard.down("Control").catch(() => undefined);
-    await page.keyboard.press("KeyA").catch(() => undefined);
-    await page.keyboard.up("Control").catch(() => undefined);
-    await page.keyboard.down("Meta").catch(() => undefined);
-    await page.keyboard.press("KeyA").catch(() => undefined);
-    await page.keyboard.up("Meta").catch(() => undefined);
-    await page.keyboard.press("Backspace").catch(() => undefined);
-    await page.keyboard.type(rastreio, { delay: 30 }).catch(() => undefined);
-    await page.keyboard.press("Enter").catch(() => undefined);
-    await sleep(3000);
+  // 1) abrir a aba POSTADOS
+  //
+  // "Envios › Liberados e postados" tem duas sub-abas e a que abre por padrão é
+  // LIBERADOS, que está vazia. O envio postado só aparece em POSTADOS. Antes se
+  // tentava resolver isso pela âncora #postados na URL, mas num arquivo .env o
+  // "#" começa um comentário: o endereço chegava aqui truncado e o robô caía em
+  // Liberados. Clicar na aba, como uma pessoa faria, não depende de URL.
+  //
+  // Também NÃO se digita mais o rastreio na busca: a busca desta tela é por
+  // "dados do destinatário ou ORD" e não aceita código de rastreio — jogar o
+  // rastreio ali zerava a lista e escondia justamente o envio procurado.
+  const aba = await evalJS<any>(page, CLICAR_ABA_POSTADOS_JS);
+  if (aba?.ok) {
+    await sleep(4000);
+    log.info(`ME ${rastreio}: abri a aba "${aba.texto}"`);
   } else {
-    log.warn(`ME ${rastreio}: campo de busca não encontrado — seguindo pela lista`);
+    log.warn(`ME ${rastreio}: não achei a aba "Postados" — seguindo com a tela como veio`);
   }
 
   // 2) card do envio
