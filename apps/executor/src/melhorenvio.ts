@@ -327,7 +327,17 @@ export async function suspenderEntrega(
   await sleep(1200);
 
   // 4) confirmação: SOLICITAR
-  const sol = await evalJS<any>(page, findBtnJS("^solicitar$|^confirmar$|^sim, suspender", "modal"));
+  //
+  // O rótulo exato do botão de confirmação nunca foi visto por ninguém, então a
+  // regex aceita as variações plausíveis. Se mesmo assim nada aparecer, o
+  // recado NÃO pode ser um "falhou" seco: o clique em "Suspender entrega" já
+  // foi dado, e se essa tela não tiver confirmação o pedido já está suspenso.
+  // Dizer "falhou" aí levaria alguém a tentar de novo ou a tratar na mão um
+  // envio que já foi suspenso.
+  const sol = await evalJS<any>(
+    page,
+    findBtnJS("^solicitar|^confirmar|^sim[, ]|^suspender$|suspens[ãa]o$", "modal")
+  );
   const dModal = await evalJS<any>(page, DUMP_JS);
   if (!sol?.ok) {
     const shot = await screenshot(page, `sem-solicitar-${rastreio}`);
@@ -335,8 +345,11 @@ export async function suspenderEntrega(
       ok: false,
       found: true,
       requested: false,
-      dry: true,
-      reason: 'cliquei em "Suspender entrega" mas a confirmação "Solicitar" não apareceu',
+      dry: false,
+      reason:
+        'ATENÇÃO: cliquei em "Suspender entrega" e NENHUMA confirmação apareceu. '
+        + "Se esta tela não pede confirmação, a suspensão JÁ FOI FEITA. "
+        + "Confira no painel do Melhor Envio antes de tentar de novo ou tratar na mão.",
       url: dModal?.url,
       buttons: dModal?.buttons,
       screenshot: shot,
