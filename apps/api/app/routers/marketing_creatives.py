@@ -26,13 +26,14 @@ import structlog
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.db import get_session
 from app.deps.auth import require_admin, require_permission
 from app.models import (
+    Marca,
     MarketingCreative,
     MarketingCreativeFile,
     PricingProduct,
@@ -176,6 +177,7 @@ async def create_creative(
         id=uuid4(),
         modelo=modelo,
         marca=(payload.marca or "").strip() or None,
+        marca_id=await _marca_id_do_texto(session, payload.marca),
         sku=(payload.sku or "").strip() or None,
         equipe=equipe,
         roteiro=payload.roteiro,
@@ -185,6 +187,29 @@ async def create_creative(
     await session.commit()
     row = await _get_row(session, row.id)
     return _row_out(row)
+
+
+async def _marca_id_do_texto(session: AsyncSession, marca: str | None) -> UUID | None:
+    """Resolve o texto livre da coluna `marca` para o id do cadastro.
+
+    A coluna `marca` é texto digitado na célula da planilha; `marca_id` é a
+    ligação de verdade com Cadastros › Marcas, e é ELA que o robô de postagem
+    usa pra decidir em quais contas o vídeo pode sair. Sem esta resolução as
+    duas divergem calado: quem troca a marca na tela muda só o texto, o id
+    continua apontando pra marca antiga, e o robô recusa a publicação dizendo
+    "essa conta é de outra marca" numa linha que na tela parece certa.
+
+    Casa por `slug` e também por `nome` (a marca renomeada mantém o slug
+    antigo — "charlots" com slug "poofy" é o caso real que provocou isto).
+    """
+    alvo = (marca or "").strip().lower()
+    if not alvo:
+        return None
+    return await session.scalar(
+        select(Marca.id).where(
+            or_(func.lower(Marca.slug) == alvo, func.lower(Marca.nome) == alvo)
+        ).limit(1)
+    )
 
 
 class CreativePatch(BaseModel):
@@ -212,6 +237,9 @@ async def patch_creative(
         row.modelo = modelo
     if "marca" in data:
         row.marca = (data["marca"] or "").strip() or None
+        # O id acompanha o texto SEMPRE — inclusive virando NULL quando a
+        # célula é esvaziada ou aponta pra uma marca que não está no cadastro.
+        row.marca_id = await _marca_id_do_texto(session, row.marca)
     if "sku" in data:
         row.sku = (data["sku"] or "").strip() or None
     if "equipe" in data:

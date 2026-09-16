@@ -1523,3 +1523,44 @@ def test_sentry_apaga_query_com_segredo_e_preserva_o_resto():
     assert "debug_token" in limpo["spans"][0]["data"]["url"]
     # Query sem segredo fica intacta: o trace continua servindo pra diagnóstico.
     assert limpo["spans"][1]["data"]["http.query"] == "page=2"
+
+
+async def test_trocar_a_marca_na_celula_sincroniza_o_marca_id(
+    client, db, make_user, auth_as, _monta_criativos
+):
+    """A célula Marca é texto; `marca_id` é a ligação com Cadastros › Marcas —
+    e é ela que o robô usa pra decidir em quais contas o vídeo pode sair.
+
+    Sem sincronizar, quem troca a marca na tela muda só o texto: o id continua
+    na marca antiga e a publicação é recusada com "essa conta é de outra
+    marca" numa linha que na tela parece certíssima. Foi exatamente o que
+    aconteceu em produção no primeiro teste.
+    """
+    u = await make_user(permissions={"marketing_criativos": {"view": True, "edit": True}})
+    auth_as(u)
+    antiga = await _marca(db, "Uranyx")
+    # Marca renomeada: o nome mudou, o slug ficou o antigo — caso real da
+    # Charlots, que tem slug "poofy".
+    nova = Marca(nome="Charlots", slug="poofy")
+    db.add(nova)
+    await db.commit()
+    await db.refresh(nova)
+    c, _f = await _criativo(db, marca=antiga)
+    assert c.marca_id == antiga.id
+
+    r = await client.patch(f"{API_CRIATIVOS}/{c.id}", json={"marca": "poofy"})
+    assert r.status_code == 200, r.text
+    await db.refresh(c)
+    assert c.marca == "poofy"
+    assert c.marca_id == nova.id, "o id ficou na marca antiga"
+
+    # Também casa pelo NOME, não só pelo slug.
+    await client.patch(f"{API_CRIATIVOS}/{c.id}", json={"marca": "Charlots"})
+    await db.refresh(c)
+    assert c.marca_id == nova.id
+
+    # Marca que não existe no cadastro zera o id — não deixa apontando pra
+    # marca errada.
+    await client.patch(f"{API_CRIATIVOS}/{c.id}", json={"marca": "marca-que-nao-existe"})
+    await db.refresh(c)
+    assert c.marca_id is None
