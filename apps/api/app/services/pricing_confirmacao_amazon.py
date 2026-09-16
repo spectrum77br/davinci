@@ -9,7 +9,7 @@ aceita sem "issues" e não aplica.
 
 Não dá para forçar a Amazon daqui. O que dá é NÃO FICAR CALADO: minutos depois
 do envio, ler o preço que está valendo (offers[], não o atributo) e, se for
-diferente do enviado, registrar e avisar — no sino e no Threema.
+diferente do enviado, registrar e avisar no sino do DaVinci.
 
 Fonte dos envios: `pricing_push_idempotency` (já guarda conta, produto, preço e
 os anúncios que responderam ok). Registro da conferência: `pricing_push_confirmacao`.
@@ -22,7 +22,7 @@ from typing import Any
 from uuid import UUID
 
 import structlog
-from sqlalchemy import func, select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
@@ -34,9 +34,7 @@ from app.models import (
     ProductLink,
 )
 from app.models.enums import AlertSeverity, AlertType
-from app.models.user import User
 from app.security.cipher import decrypt_json
-from app.services import threema
 from app.services.alerts import emit_alert
 from app.services.marketplaces.amazon import AmazonClient
 
@@ -55,19 +53,25 @@ STATUS_DIVERGENTE = "divergente"
 STATUS_SEM_LEITURA = "sem_leitura"
 
 
-def parse_key(key: str) -> tuple[UUID, UUID] | None:
-    """`cell:{product_id}:{account_id}:{ts}` → (account_id, product_id).
+_PREFIXOS_TELA = ("cell", "col", "all-visible")
 
-    A ordem na chave é PRODUTO primeiro, conta depois — conferido no banco em
-    16/09/2026 (o primeiro UUID existe em pricing_products, o segundo em
-    pricing_accounts). Ler ao contrário fazia o conferente procurar uma conta
-    com o id do produto, não achar nada e pular todos os envios em silêncio
-    (vistos=0 no primeiro tick)."""
+
+def parse_key(key: str) -> tuple[UUID, UUID] | None:
+    """Chave de idempotência da Tabela de Preços → (account_id, product_id).
+
+    A tela (apps/web/pages/pricing/[tab].vue) manda três formatos:
+    - célula:          `cell:{produto}:{conta}:{ts}`
+    - coluna inteira:  `col:{conta}:{ts}:{produto}:{conta}`
+    - todos visíveis:  `all-visible:{ts}:{produto}:{conta}`
+    Nos dois últimos os dois ÚLTIMOS pedaços são sempre produto e conta. Até
+    16/09 só a célula era conferida: os 105 envios de coluna do dia passaram
+    em branco com o texto "conferido em ~10 min" na tela."""
     partes = (key or "").split(":")
-    if len(partes) < 4 or partes[0] != "cell":
+    if len(partes) < 4 or partes[0] not in _PREFIXOS_TELA:
         return None
+    bruto = (partes[1], partes[2]) if partes[0] == "cell" else (partes[-2], partes[-1])
     try:
-        product_id, account_id = UUID(partes[1]), UUID(partes[2])
+        product_id, account_id = UUID(bruto[0]), UUID(bruto[1])
     except ValueError:
         return None
     return account_id, product_id
@@ -99,31 +103,17 @@ async def _links_por_external_id(
     if not external_ids:
         return {}
     rows = (
-        await session.execute(
-            select(ProductLink)
-            .where(ProductLink.integration_id == integration_id)
-            .where(ProductLink.external_id.in_(external_ids))
+        (
+            await session.execute(
+                select(ProductLink)
+                .where(ProductLink.integration_id == integration_id)
+                .where(ProductLink.external_id.in_(external_ids))
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     return {lk.external_id: lk for lk in rows}
-
-
-# Quem recebe o Threema. Eduardo (16/09/2026): "envie a mensagem somente para o
-# heisenberg". É o nome do usuário no DaVinci; o ID do Threema sai da ficha
-# dele — trocar de pessoa é mudar o cadastro, não o código. Sem grupo: este
-# aviso é de decisão de preço, não de operação.
-DESTINATARIO_THREEMA = "heisenberg"
-
-
-async def _destinos_threema(session: AsyncSession) -> list[str]:
-    user = (
-        await session.execute(
-            select(User)
-            .where(func.lower(User.name) == DESTINATARIO_THREEMA)
-            .where(User.threema.is_not(None))
-        )
-    ).scalars().first()
-    return threema.parse_recipients(user.threema if user else None)
 
 
 def _texto_aviso(conta: str, enviado: float, divergentes: list[dict[str, Any]]) -> str:
@@ -163,18 +153,24 @@ async def confirmar_pushes_recentes(
                     PricingPushConfirmacao.created_at >= inicio
                 )
             )
-        ).scalars().all()
+        )
+        .scalars()
+        .all()
     )
     pushes = (
-        await session.execute(
-            select(PricingPushIdempotency)
-            .where(PricingPushIdempotency.key.like("cell:%"))
-            .where(PricingPushIdempotency.created_at >= inicio)
-            .where(PricingPushIdempotency.created_at <= fim)
-            .order_by(PricingPushIdempotency.created_at.desc())
-            .limit(limite * 3)
+        (
+            await session.execute(
+                select(PricingPushIdempotency)
+                .where(or_(*[PricingPushIdempotency.key.like(f"{p}:%") for p in _PREFIXOS_TELA]))
+                .where(PricingPushIdempotency.created_at >= inicio)
+                .where(PricingPushIdempotency.created_at <= fim)
+                .order_by(PricingPushIdempotency.created_at.desc())
+                .limit(limite * 3)
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
 
     resumo = {"vistos": 0, "confirmados": 0, "divergentes": 0, "sem_leitura": 0, "pulados": 0}
     feitos = 0
@@ -267,7 +263,7 @@ async def _avisar(
     ids = parse_key(push.key)
     # Dedupe pela CÉLULA e pelo preço, não pelo envio: o operador clica três
     # vezes na mesma célula em minutos e o problema é um só — três avisos
-    # iguais no Threema só ensinam a ignorar o aviso.
+    # iguais só ensinam a ignorar o aviso.
     account_id, product_id = ids if ids else (None, None)
     dedupe = f"pricing_confirmacao:{account_id}:{product_id}:{enviado:.0f}"
     try:
@@ -289,15 +285,10 @@ async def _avisar(
         logger.warning("pricing_confirmacao_alert_falhou", err=str(e)[:200])
         criado = None
     if criado is None:
-        # Já avisado por esta célula/preço: registra, não repete o Threema.
+        # Já avisado por esta célula/preço: registra, não repete o sino.
         logger.info("pricing_confirmacao_ja_avisado", dedupe=dedupe)
         return
-    destinos = await _destinos_threema(session)
-    if not destinos:
-        logger.warning("pricing_confirmacao_sem_destinatario", usuario=DESTINATARIO_THREEMA)
-        return
-    try:
-        await threema.ThreemaClient().send_to_all(texto, destinos)
-        logger.info("pricing_confirmacao_avisado", destinos=len(destinos), dedupe=dedupe)
-    except Exception as e:  # noqa: BLE001
-        logger.warning("pricing_confirmacao_threema_falhou", err=str(e)[:200])
+    # Só o sino do DaVinci. Eduardo (16/09): "pode remover essa mensagem no
+    # Threema do preço" — antes ia pro grupo, depois só pro heisenberg, agora
+    # não vai. O sino continua para quem fez o envio.
+    logger.info("pricing_confirmacao_avisado_no_sino", dedupe=dedupe)

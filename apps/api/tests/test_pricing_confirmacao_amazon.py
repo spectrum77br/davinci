@@ -46,14 +46,18 @@ def test_texto_do_aviso_lista_os_anuncios_e_o_motivo_provavel():
     assert "regra de precificação automática" in t.lower()
 
 
-async def _push(db, user, *, preco: str, links: list[str], minutos_atras: int = 30):
-    key = f"cell:{uuid4()}:{uuid4()}:{int(datetime.now(UTC).timestamp()*1000)}"
+async def _push(
+    db, user, *, preco: str, links: list[str], minutos_atras: int = 30, key: str | None = None
+):
+    key = key or f"cell:{uuid4()}:{uuid4()}:{int(datetime.now(UTC).timestamp() * 1000)}"
     row = PricingPushIdempotency(
         key=key,
         user_id=user.id,
         request_hash="x",
         response={
-            "ok": True, "code": "ok", "price": preco,
+            "ok": True,
+            "code": "ok",
+            "price": preco,
             "payload": {"links": [{"externalId": s, "success": True} for s in links]},
         },
         expires_at=datetime.now(UTC) + timedelta(days=1),
@@ -90,11 +94,6 @@ def _arma(monkeypatch, precos: dict[str, float | None]):
 
     monkeypatch.setattr(conf, "_integracao_amazon_da_conta", fake_integ)
     monkeypatch.setattr(conf, "_links_por_external_id", fake_links)
-
-    async def sem_threema(session):
-        return []
-
-    monkeypatch.setattr(conf, "_destinos_threema", sem_threema)
     return lambda _i: _FakeAmazon(precos)
 
 
@@ -185,15 +184,42 @@ async def test_nao_confere_duas_vezes_nem_cedo_demais(db, make_user, monkeypatch
     assert [x.push_key for x in n] == [key]
 
 
-async def test_threema_vai_so_para_o_heisenberg(db, make_user):
-    """Eduardo: "envie a mensagem somente para o heisenberg". Sai da ficha do
-    usuário, não de grupo de configuração."""
-    outro = await make_user()
-    outro.name, outro.threema = "thatcher", "THATCHER1"
-    await db.commit()
-    assert await conf._destinos_threema(db) == []  # só thatcher cadastrado → ninguém
+def test_parse_key_coluna_e_todos_visiveis():
+    """Envio de coluna e "todos visíveis" trazem produto e conta no FIM da
+    chave — eram ignorados (105 envios de coluna em 16/09 sem conferência)."""
+    conta, produto = uuid4(), uuid4()
+    assert conf.parse_key(f"col:{conta}:1789576456287:{produto}:{conta}") == (conta, produto)
+    assert conf.parse_key(f"all-visible:1789576456287:{produto}:{conta}") == (conta, produto)
+    assert conf.parse_key(f"all-visible:1789576456287:{conta}") is None  # formato antigo
+    assert conf.parse_key("manual-test-1") is None
 
-    edu = await make_user()
-    edu.name, edu.threema = "Heisenberg", "CDSA84BZ"  # maiúscula: comparação é sem caixa
-    await db.commit()
-    assert await conf._destinos_threema(db) == ["CDSA84BZ"]
+
+async def test_envio_de_coluna_tambem_e_conferido(db, make_user, monkeypatch):
+    await _limpa(db)
+    user = await make_user()
+    fab = _arma(monkeypatch, {"b111": 599.0})
+    conta, produto = uuid4(), uuid4()
+    ts = int(datetime.now(UTC).timestamp() * 1000)
+    push = await _push(
+        db, user, preco="445", links=["b111"], key=f"col:{conta}:{ts}:{produto}:{conta}"
+    )
+    avisos: list[dict] = []
+
+    async def fake_alert(session, **kw):
+        avisos.append(kw)
+        return SimpleNamespace(id=uuid4())
+
+    monkeypatch.setattr(conf, "emit_alert", fake_alert)
+    out = await conf.confirmar_pushes_recentes(db, client_factory=fab)
+    assert out["divergentes"] == 1
+    row = (await db.execute(select(PricingPushConfirmacao))).scalars().one()
+    assert (row.push_key, row.account_id, row.product_id) == (push, conta, produto)
+    assert avisos and avisos[0]["dedupe_key"] == f"pricing_confirmacao:{conta}:{produto}:445"
+
+
+def test_aviso_fica_so_no_sino():
+    """Eduardo: "pode remover essa mensagem no Threema do preço"."""
+    import inspect
+
+    fonte = inspect.getsource(conf._avisar).lower().replace("threema do preço", "")
+    assert "threema" not in fonte
