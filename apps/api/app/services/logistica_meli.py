@@ -1193,15 +1193,16 @@ def _reembolso_ml(orders: list[dict]) -> _ReembolsoML:
     `/orders/{id}`, zero chamada a mais): soma de `transaction_amount_refunded`
     e a data mais recente entre os estornados.
 
-    Quem pagou: `status_detail` com "bpp" (Buyer Protection Program —
-    `partially_bpp_refunded`/`bpp_refunded`) = o Mercado Livre devolveu do
-    próprio bolso (o claim vem com `resolution.applied_coverage=true`); o nosso
-    valor ficou → NÃO saiu do nosso. Caso 296695 (Vinicius 17/09): mediação
-    fechada a favor do comprador, R$ 52,97 devolvidos pelo ML via cobertura.
-    Sem "bpp" e com estorno = saiu do nosso."""
+    Estorno no pagamento = saiu do NOSSO: o pagamento é o dinheiro da venda, e
+    devolvê-lo (inteiro ou em parte) é tirá-lo da loja. O `status_detail`
+    "bpp_refunded"/"partially_bpp_refunded" e o `resolution.applied_coverage`
+    do claim só dizem que o ML executou o estorno pela Proteção ao Comprador —
+    medido 17/09 nos 12 pedidos ML em devolução: TODOS vieram assim, inclusive
+    devolução normal (`item_returned`), então não servem pra dizer que o ML
+    pagou do próprio bolso. Quando o ML cobre de verdade, o pagamento não é
+    estornado (o comprador recebe por fora) e aqui fica "não saiu nada"."""
     total = Decimal("0")
     quando: datetime | None = None
-    bpp = False
     for o in orders:
         for pg in (o or {}).get("payments") or []:
             if not isinstance(pg, dict):
@@ -1213,18 +1214,11 @@ def _reembolso_ml(orders: list[dict]) -> _ReembolsoML:
             if v <= 0:
                 continue
             total += v
-            if "bpp" in str(pg.get("status_detail") or "").lower():
-                bpp = True
             em = iso_to_dt(pg.get("date_last_modified"))
             if em is not None and (quando is None or em > quando):
                 quando = em
     if total <= 0:
         return _ReembolsoML(False, None, None, None)
-    if bpp:
-        return _ReembolsoML(
-            False, total, quando,
-            "Devolvido ao cliente pelo Mercado Livre (cobertura/BPP) — o nosso valor ficou",
-        )
     return _ReembolsoML(True, total, quando, "Pagamento estornado ao cliente no Mercado Livre")
 
 

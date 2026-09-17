@@ -63,14 +63,15 @@ def _order_ml(*payments, mediations=()):
     return {"status": "partially_refunded", "payments": list(payments), "mediations": [{"id": m} for m in mediations]}
 
 
-def test_ml_estorno_coberto_pelo_ml_bpp_nao_saiu_do_nosso():
-    # 296695 real: mediação fechada a favor do comprador, R$ 52,97 via BPP.
+def test_ml_estorno_parcial_via_bpp_tambem_saiu_do_nosso():
+    # 296695 real: mediação fechada a favor do comprador, R$ 52,97 estornados
+    # do pagamento ("partially_bpp_refunded") — dinheiro da venda que voltou.
     o = _order_ml(
         {"transaction_amount_refunded": 0.0, "status_detail": "accredited", "date_last_modified": "2026-09-16T15:16:22.000-04:00"},
         {"transaction_amount_refunded": 52.97, "status_detail": "partially_bpp_refunded", "date_last_modified": "2026-09-16T15:16:21.000-04:00"},
     )
     r = logistica_meli._reembolso_ml([o])
-    assert r.pago is False and r.valor == Decimal("52.97")
+    assert r.pago is True and r.valor == Decimal("52.97")
     assert r.em == datetime(2026, 9, 16, 19, 16, 21, tzinfo=UTC)
     assert "Mercado Livre" in (r.detalhe or "")
 
