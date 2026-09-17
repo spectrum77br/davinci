@@ -23,8 +23,8 @@ import sqlalchemy as sa
 
 from alembic import op
 
-revision: str = "0288_devolucao_reembolso"
-down_revision: str | None = "0287_chamado_status_plataforma"
+revision: str = "0289_devolucao_reembolso"
+down_revision: str | None = "0288_dm_instagram"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

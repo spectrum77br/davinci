@@ -64,7 +64,7 @@ class DevolucaoRastreio(Base, TimestampMixin):
     aviso_prazo_acao_para: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
-    # REEMBOLSO (migration 0288, Vinicius 17/09: "o importante é saber se
+    # REEMBOLSO (migration 0289, Vinicius 17/09: "o importante é saber se
     # estamos com o dinheiro ainda ou se já devolveu para o cliente"). True =
     # já saiu dinheiro do NOSSO (a plataforma devolveu ao cliente e desconta da
     # loja); False = nada saiu (caso vivo/cancelado, ou a plataforma pagou do
