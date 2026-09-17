@@ -1971,7 +1971,7 @@ async function backfillAddresses() {
               <!-- Vídeo (17/09): vídeo da expedição do pedido. "solicitar" trava
                    a aba Pedidos da equipe do SKU no Controle de Estoque até ela
                    colar o link; apagar o link (com motivo) devolve pra refazer. -->
-              <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[200px] bg-emerald-50 dark:bg-emerald-900/20" title="Vídeo da expedição do pedido. Solicitar = a equipe do SKU fica travada na aba Pedidos do Controle de Estoque até colar o link (ou responder que não tem o vídeo). Apagar o link, com motivo, devolve pra equipe refazer.">Vídeo</th>
+              <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[120px] bg-emerald-50 dark:bg-emerald-900/20" title="Vídeo da expedição do pedido. Solicitar = a equipe do SKU fica travada na aba Pedidos do Controle de Estoque até colar o link (ou responder que não tem o vídeo). Apagar o link, com motivo, devolve pra equipe refazer.">Vídeo</th>
               <th class="px-2 py-1 text-center font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[95px] bg-emerald-50 dark:bg-emerald-900/20">Lançada</th>
               <!-- Painel (17/09): botão pra mover o pedido pro outro painel quando a
                    plataforma classificou errado (a regra automática não mexe mais). -->
@@ -2101,7 +2101,7 @@ async function backfillAddresses() {
                 <div v-if="videoApagando === row.pedido_bling" class="flex items-center gap-1">
                   <input
                     v-model="videoMotivo"
-                    class="h-6 w-full rounded border border-amber-400 bg-background px-1 text-[11px] focus:outline-none focus:ring-1 focus:ring-primary"
+                    class="h-6 w-44 rounded border border-amber-400 bg-background px-1 text-[11px] focus:outline-none focus:ring-1 focus:ring-primary"
                     placeholder="motivo pra refazer (ex.: não mostra o lacre)"
                     @keydown.enter.prevent="videoMotivo.trim().length >= 3 && solicitarVideo(row, videoMotivo)"
                     @keydown.esc="videoApagando = null"
@@ -2129,7 +2129,7 @@ async function backfillAddresses() {
                     :title="`Enviado por ${row.video_enviado_por || '?'} em ${fmtDateTime(row.video_enviado_em)}\n${row.video_link}`"
                   >
                     <ExternalLink class="size-3 shrink-0" />
-                    <span class="truncate max-w-[150px]">{{ row.video_link.replace(/^https?:\/\//i, '') }}</span>
+                    <span class="truncate max-w-[120px]">{{ row.video_link.replace(/^https?:\/\//i, '') }}</span>
                   </a>
                   <button
                     v-if="canEdit"
@@ -2162,7 +2162,7 @@ async function backfillAddresses() {
                 </div>
                 <div v-else-if="row.video_status === 'sem_video'" class="flex items-center gap-1">
                   <span
-                    class="inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-medium bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300 truncate max-w-[150px]"
+                    class="inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-medium bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300 truncate max-w-[120px]"
                     :title="`${row.video_enviado_por || '?'} em ${fmtDateTime(row.video_enviado_em)}: ${row.video_sem_motivo || ''}`"
                   >
                     sem vídeo: {{ row.video_sem_motivo }}
