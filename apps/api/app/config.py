@@ -283,6 +283,21 @@ class Settings(BaseSettings):
     # se contorna com uma tag que não fomos aprovados a usar.
     dm_janela_horas: int = 24
 
+    # ─── O cérebro da resposta de DM ──────────────────────────────────────
+    # Provedor compatível com a interface da OpenAI (Groq, e qualquer outro
+    # depois) — por isso base_url e modelo são setting, não constante: trocar
+    # de provedor não pode obrigar a mexer no DaVinci.
+    llm_base_url: str = "https://api.groq.com/openai/v1"
+    llm_model: str = "openai/gpt-oss-120b"
+    llm_api_key: str = ""
+    # Liga o cérebro. Separado do `dm_resposta_commit`: dá pra GERAR resposta
+    # sem ENVIAR (é o modo seco), que é como se lê uma semana do que ele teria
+    # dito antes de soltar.
+    dm_ia_ativa: bool = False
+    # Teto de segurança por chamada — prompt gigante é conta grande e resposta
+    # ruim. O modelo só precisa da última mensagem pra decidir.
+    dm_ia_max_chars_entrada: int = 1500
+
     # Token M2M do executor de IMPORTAÇÃO DE NF (marionete AdsPower da Fase
     # 3a-4). Guarda os /nf-cadastro/agent/* (lease/result). Vazio = endpoints
     # FECHADOS (401). O executor local abre o AdsPower do faturador, loga no

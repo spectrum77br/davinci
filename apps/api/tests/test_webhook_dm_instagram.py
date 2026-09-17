@@ -270,3 +270,47 @@ async def test_conta_desconhecida_responde_200_sem_gravar(
 
     total = await db.scalar(select(func.count()).select_from(DmMensagem))
     assert total == 0
+
+@pytest.mark.parametrize(
+    "texto",
+    [
+        "quero falar com um atendente",
+        "tem como falar com alguém aí?",
+        "ATENDENTE",
+        "isso é robô? queria uma pessoa de verdade",
+    ],
+)
+@pytest.mark.asyncio
+async def test_pedido_de_humano_tira_o_robo_da_conversa(
+    client: AsyncClient, db: AsyncSession, texto: str
+):
+    """Exigência de política da Meta: sempre tem que haver saída para gente.
+
+    Generoso de propósito — atender alguém que o robô daria conta custa pouco;
+    ignorar quem pediu ajuda é violação e queima a conta da marca.
+    """
+    rede = await _conta(db)
+
+    r = await _post(client, _evento(mid=f"mid.{abs(hash(texto))}", texto=texto))
+    assert r.status_code == 200
+
+    conversa = await db.scalar(
+        select(DmConversa).where(DmConversa.rede_social_id == rede.id)
+    )
+    assert conversa is not None
+    assert conversa.auto is False
+    assert conversa.status == "humano"
+
+
+@pytest.mark.asyncio
+async def test_pergunta_normal_nao_escala(client: AsyncClient, db: AsyncSession):
+    rede = await _conta(db)
+
+    r = await _post(client, _evento(texto="essa mala cabe na cabine?"))
+    assert r.status_code == 200
+
+    conversa = await db.scalar(
+        select(DmConversa).where(DmConversa.rede_social_id == rede.id)
+    )
+    assert conversa is not None
+    assert conversa.auto is True  # o robô continua na conversa

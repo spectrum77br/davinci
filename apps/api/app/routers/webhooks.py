@@ -15,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import unicodedata
 from datetime import UTC, datetime
 from typing import Annotated, Any
 from uuid import UUID
@@ -654,6 +655,19 @@ async def receive_bling_webhook(
 # enfileira e devolve 200 SEMPRE — inclusive para conta desconhecida e JSON
 # inválido. Nada de lógica de negócio aqui dentro.
 
+# O cliente pedindo gente. Sem acento e em minúscula: o texto é normalizado
+# antes de comparar, porque ninguém digita "ATENDENTE" — digita "queria
+# falar com um atendente".
+_ESCAPE_HUMANO = (
+    "atendente",
+    "humano",
+    "pessoa de verdade",
+    "falar com alguem",
+    "falar com uma pessoa",
+    "quero falar com",
+    "nao e robo",
+)
+
 META_SIG_FAIL_KEY = "webhook:meta:sig_fail_count"
 META_SIG_FAIL_SNAPSHOT_KEY = "webhook:meta:sig_fail_last"
 
@@ -680,6 +694,20 @@ def _verify_meta_signature(body: bytes, header: str | None) -> bool:
     return hmac.compare_digest(
         expected.encode(), sig[len("sha256=") :].encode("latin-1", "ignore")
     )
+
+
+def _pediu_humano(texto: str | None) -> bool:
+    """O cliente pediu gente. Deliberadamente generoso.
+
+    Falso positivo aqui só faz um humano atender alguém que o robô daria
+    conta. O contrário — ignorar quem pediu ajuda — é violação de política da
+    Meta e é o tipo de coisa que queima a conta da marca.
+    """
+    if not texto:
+        return False
+    plano = unicodedata.normalize("NFKD", texto.lower())
+    plano = "".join(c for c in plano if not unicodedata.combining(c))
+    return any(p in plano for p in _ESCAPE_HUMANO)
 
 
 async def _conta_do_evento(session: AsyncSession, ig_user_id: str) -> DmConta | None:
@@ -926,6 +954,13 @@ async def _gravar_dm(
             return
         # Apagamento chegou sem a original (webhook fora de ordem): grava a
         # lápide mesmo assim, pro histórico não mentir que nunca existiu.
+
+    # Política da Meta: experiência automatizada precisa de caminho para
+    # humano. É aqui que ele existe — e sai da frente do robô na hora.
+    if dados["direcao"] == DIRECAO_RECEBIDA and _pediu_humano(dados.get("texto")):
+        conversa.auto = False
+        conversa.status = CONVERSA_HUMANO
+        logger.info("dm_escape_humano", conversa=str(conversa.id))
 
     session.add(
         DmMensagem(

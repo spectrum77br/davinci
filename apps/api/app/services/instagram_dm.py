@@ -30,9 +30,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.models import DmConta, DmConversa, DmMensagem, RedeSocial
 from app.models.instagram_dm import (
+    CONVERSA_ABERTA,
     CONVERSA_HUMANO,
     CONVERSA_RESPONDIDA,
     DIRECAO_ENVIADA,
+    DIRECAO_RECEBIDA,
+    MSG_EM_VOO,
     MSG_ENVIADA,
     MSG_ENVIANDO,
     MSG_FALHOU,
@@ -41,6 +44,7 @@ from app.models.instagram_dm import (
     MSG_SECO,
 )
 from app.security.cipher import decrypt_json
+from app.services import dm_ia
 from app.services.marketing import meta_client
 
 logger = structlog.get_logger()
@@ -253,8 +257,97 @@ async def enviar(session: AsyncSession, msg: DmMensagem) -> None:
     )
 
 
+# Aviso de automação. Política da Meta: experiência automatizada tem que se
+# identificar e oferecer caminho para humano. Sai UMA vez por conversa, na
+# primeira resposta — repetir em toda mensagem vira ruído.
+AVISO_AUTOMACAO = (
+    "\n\n(resposta automática — escreva ATENDENTE se preferir falar com uma pessoa)"
+)
+
+
+async def gerar_pendentes(session: AsyncSession, *, limit: int = 10) -> int:
+    """Para cada conversa esperando resposta, pede uma ao cérebro.
+
+    O que NÃO passar no validador não vira resposta pior: vira humano. É a
+    regra que sustenta o resto — o robô cala quando não tem o que dizer com
+    segurança, e alguém assume.
+    """
+    s = get_settings()
+    corte = datetime.now(UTC) - timedelta(hours=s.dm_janela_horas)
+    conversas = (
+        await session.scalars(
+            select(DmConversa)
+            .where(
+                DmConversa.status == CONVERSA_ABERTA,
+                DmConversa.auto.is_(True),
+                DmConversa.ultima_recebida_em.is_not(None),
+                DmConversa.ultima_recebida_em >= corte,
+            )
+            .order_by(DmConversa.ultima_recebida_em.asc())
+            .limit(limit)
+        )
+    ).all()
+
+    geradas = 0
+    for conversa in conversas:
+        em_voo = await session.scalar(
+            select(DmMensagem).where(
+                DmMensagem.conversa_id == conversa.id,
+                DmMensagem.status.in_((*MSG_EM_VOO, MSG_SECO)),
+            )
+        )
+        if em_voo is not None:
+            continue
+
+        ultima = await session.scalar(
+            select(DmMensagem)
+            .where(
+                DmMensagem.conversa_id == conversa.id,
+                DmMensagem.direcao == DIRECAO_RECEBIDA,
+                DmMensagem.apagada_em.is_(None),
+            )
+            .order_by(DmMensagem.ocorrido_em.desc())
+            .limit(1)
+        )
+        if ultima is None or not (ultima.texto or "").strip():
+            # Sem texto (foto, figurinha, áudio): o robô não tenta adivinhar.
+            conversa.status = CONVERSA_HUMANO
+            conversa.auto = False
+            await session.commit()
+            continue
+
+        texto, motivo = await dm_ia.redigir(session, conversa, ultima.texto or "")
+        if texto is None:
+            conversa.status = CONVERSA_HUMANO
+            conversa.auto = False
+            await session.commit()
+            logger.info("dm_sem_resposta", conversa=str(conversa.id), motivo=motivo)
+            continue
+
+        if not conversa.avisada_automacao:
+            texto = f"{texto}{AVISO_AUTOMACAO}"
+            conversa.avisada_automacao = True
+
+        session.add(
+            DmMensagem(
+                conversa_id=conversa.id,
+                direcao=DIRECAO_ENVIADA,
+                tipo="texto",
+                texto=texto,
+                status=MSG_PENDENTE,
+            )
+        )
+        await session.commit()
+        geradas += 1
+
+    if geradas:
+        logger.info("dm_geradas", n=geradas)
+    return geradas
+
+
 async def responder_pendentes(session: AsyncSession, *, limit: int = 10) -> int:
-    """Um tick: pega o lease e envia cada uma. Devolve quantas tratou."""
+    """Um tick: gera o que falta e envia o que está pronto."""
+    await gerar_pendentes(session, limit=limit)
     pendentes = await proximas_para_enviar(session, limit=limit)
     for msg in pendentes:
         await enviar(session, msg)

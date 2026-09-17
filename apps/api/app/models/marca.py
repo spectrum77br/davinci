@@ -110,6 +110,11 @@ class Marca(Base, TimestampMixin):
         index=True,
     )
     site: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # O que o robô de DM pode afirmar sobre esta marca (migration 0290).
+    # É o CONTEXTO, não o texto da resposta: o modelo lê isto pra escrever.
+    # Só entra aqui o que a marca afirma publicamente — nada de preço, prazo
+    # ou spec não confirmada, porque o que sai em atendimento vincula.
+    dm_contexto: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Logo em bytes no banco (≤ 1 MB, png/jpeg/gif validado pelos magic
     # bytes): vai no backup e não depende do volume de uploads. `deferred`:
     # os bytes só vêm quando alguém pede (GET /logo, e-mail) — a listagem e
