@@ -44,7 +44,7 @@ from app.models.instagram_dm import (
     MSG_SECO,
 )
 from app.security.cipher import decrypt_json
-from app.services import dm_ia
+from app.services import dm_alerta, dm_ia
 from app.services.marketing import meta_client
 
 logger = structlog.get_logger()
@@ -186,6 +186,7 @@ async def enviar(session: AsyncSession, msg: DmMensagem) -> None:
         conversa.auto = False
         await session.commit()
         logger.info("dm_recusada", conversa=str(conversa.id), motivo=motivo)
+        await dm_alerta.avisar(conversa, chave="recusada", motivo=motivo)
         return
 
     if not pode_enviar(conversa.participante_id):
@@ -255,6 +256,16 @@ async def enviar(session: AsyncSession, msg: DmMensagem) -> None:
         status=msg.status,
         code=resultado.code,
     )
+    # Depois do commit, sempre: avisar sobre o que deu rollback manda o
+    # Eduardo abrir uma conversa que não mudou.
+    if msg.status == MSG_REVISAR:
+        await dm_alerta.avisar(conversa, chave="ambiguo", motivo=msg.motivo or "")
+    elif msg.status == MSG_FALHOU and not conversa.auto:
+        await dm_alerta.avisar(
+            conversa,
+            chave="falha_envio",
+            motivo=f"falhou {msg.attempts}x ao enviar: {resultado.erro or 'sem detalhe'}",
+        )
 
 
 # DECISÃO DO EDUARDO (17/09/2026): o robô NÃO se anuncia. "deixa por debaixo
@@ -358,6 +369,11 @@ async def gerar_pendentes(session: AsyncSession, *, limit: int = 10) -> int:
             conversa.status = CONVERSA_HUMANO
             conversa.auto = False
             await session.commit()
+            await dm_alerta.avisar(
+                conversa,
+                chave="sem_texto",
+                motivo="mandou foto, áudio ou figurinha — o robô não adivinha",
+            )
             continue
 
         texto, motivo = await dm_ia.redigir(session, conversa, trocas)
@@ -366,6 +382,12 @@ async def gerar_pendentes(session: AsyncSession, *, limit: int = 10) -> int:
             conversa.auto = False
             await session.commit()
             logger.info("dm_sem_resposta", conversa=str(conversa.id), motivo=motivo)
+            await dm_alerta.avisar(
+                conversa,
+                chave="sem_resposta",
+                motivo=motivo,
+                texto=ultima.texto,
+            )
             continue
 
         session.add(

@@ -55,6 +55,7 @@ from app.models.instagram_dm import (
     MSG_RECEBIDA,
 )
 from app.redis_client import redis
+from app.services import dm_alerta
 from app.worker_pool import get_arq_pool, get_arq_sync_pool
 
 logger = structlog.get_logger()
@@ -963,7 +964,10 @@ async def _gravar_dm(
 
     # Política da Meta: experiência automatizada precisa de caminho para
     # humano. É aqui que ele existe — e sai da frente do robô na hora.
-    if dados["direcao"] == DIRECAO_RECEBIDA and _pediu_humano(dados.get("texto")):
+    pediu_humano = dados["direcao"] == DIRECAO_RECEBIDA and _pediu_humano(
+        dados.get("texto")
+    )
+    if pediu_humano:
         conversa.auto = False
         conversa.status = CONVERSA_HUMANO
         logger.info("dm_escape_humano", conversa=str(conversa.id))
@@ -991,3 +995,15 @@ async def _gravar_dm(
         # retenta por horas.
         await session.rollback()
         logger.info("meta_webhook_reentrega", mid=dados["mid"])
+        return
+
+    # O aviso sai DEPOIS do commit, e só se ele passou: a reentrega da Meta
+    # cai no `IntegrityError` acima, e avisar ali tocaria o celular do Eduardo
+    # de novo pela mesma frase, horas depois.
+    if pediu_humano:
+        await dm_alerta.avisar(
+            conversa,
+            chave="pediu_humano",
+            motivo="pediu atendente",
+            texto=dados.get("texto"),
+        )
