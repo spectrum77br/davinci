@@ -74,6 +74,12 @@ from app.models.importacao import (
     ImportResumo,
 )
 from app.models.informar import ThreemaInformarConfig
+from app.models.instagram_dm import (
+    MSG_EM_VOO,
+    DmConta,
+    DmConversa,
+    DmMensagem,
+)
 from app.models.integration import Integration, OAuthState
 from app.models.listing import Listing, ListingRequest
 from app.models.logistica import (
@@ -198,9 +204,13 @@ __all__ = [
     "ImportKitBase",
     "ImportKitMark",
     "ImportKitVariation",
+    "DmConta",
+    "DmConversa",
+    "DmMensagem",
     "Integration",
     "IntegrationPlatform",
     "LinkSyncStatus",
+    "MSG_EM_VOO",
     "Listing",
     "ListingRequest",
     "ListingRequestStatus",

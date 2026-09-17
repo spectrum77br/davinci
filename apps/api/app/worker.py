@@ -735,6 +735,32 @@ async def marketing_postagens_promover(ctx: dict) -> None:
         logger.info("marketing_postagens_promover_tick", **r)
 
 
+async def dm_responder_pendentes(ctx: dict) -> None:
+    """A cada minuto: manda as respostas de DM enfileiradas.
+
+    Cliente com o celular na mão espera resposta em segundos — resposta em 40
+    minutos é pior que nenhuma. Por isso tick de 1 minuto, e o lease usa SKIP
+    LOCKED, então dois ticks se sobrepondo é inofensivo: cada um reserva
+    linhas diferentes.
+
+    As travas ficam TODAS dentro do serviço (`dm_resposta_commit`, a allowlist
+    de IGSIDs e o `dm_auto` por conta) — aqui não se decide nada, só se chama.
+    Com o commit desligado, este cron percorre o caminho inteiro e grava
+    `seco`, que é como se roda uma semana em produção lendo o que o robô TERIA
+    dito, sem escrever pra cliente nenhum.
+    """
+    from app.services import instagram_dm as _dm
+
+    async with session_scope() as s:
+        try:
+            tratadas = await _dm.responder_pendentes(s, limit=10)
+        except Exception as e:  # noqa: BLE001
+            logger.error("dm_responder_failed", err=str(e)[:300])
+            return
+    if tratadas:
+        logger.info("dm_responder_tick", tratadas=tratadas)
+
+
 async def marketing_postagens_publicar(ctx: dict) -> None:
     """A cada minuto: publica as postagens que já podem sair.
 
@@ -3168,6 +3194,9 @@ class WorkerSettings:
         # Dois ticks se sobreporem é inofensivo: cada um reserva linhas
         # diferentes (SKIP LOCKED no `proximas_para_publicar`).
         cron(marketing_postagens_publicar, run_at_startup=False, timeout=1200),
+        # Resposta de DM: mesmo tick de 1 minuto, pelo mesmo motivo —
+        # mensagem é reativa e o cliente está esperando agora.
+        cron(dm_responder_pendentes, run_at_startup=False, timeout=300),
         # Reconciliação a cada 10 min, no :05 (longe do congestionamento do
         # :00): postagem presa é CONSULTADA, nunca retentada.
         cron(

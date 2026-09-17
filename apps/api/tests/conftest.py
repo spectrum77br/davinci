@@ -325,6 +325,9 @@ _CLEANUP_TABLES = (
     "marketing_postagens",  # FK -> criativos/redes_sociais: antes dos dois
     "marketing_creative_files",
     "marketing_creatives",
+    "dm_mensagens",  # FK -> dm_conversas: antes dela
+    "dm_contas",  # FK -> redes_sociais
+    "dm_conversas",  # FK -> redes_sociais/users: antes dos dois
     "redes_sociais_tokens",
     "redes_sociais",  # FK CASCADE -> marcas: antes de marcas
     "marca_email_padroes",

@@ -896,3 +896,72 @@ async def consultar_publicacao(
         return ResultadoPublicacao(
             ok=False, container_id=container_id, erro=msg[:500], ambiguo=ambiguo
         )
+
+
+# ─────────────────────── Mensagem direta (DM do Instagram) ───────────────────
+#
+# O espelho invertido de publicar: aqui não existe `container_id`, então não
+# existe o passo "será que saiu?". Publicar errado se apaga; mensagem enviada
+# chega no celular da pessoa e não se desvê. Por isso `ambiguo` aqui é mais
+# grave que na postagem — quem recebe manda pra revisão HUMANA e não retenta.
+
+
+@dataclass(frozen=True)
+class ResultadoMensagem:
+    ok: bool
+    # O `mid` que a Meta devolve para a mensagem que ACABOU de sair. É o que
+    # permite reconhecer o eco dela voltando pelo webhook.
+    mid: str | None = None
+    erro: str | None = None
+    code: int | None = None
+    ambiguo: bool = False
+
+
+async def enviar_dm(
+    token: str,
+    *,
+    ig_id: str,
+    destinatario: str,
+    texto: str,
+    provedor: str = PROVEDOR_INSTAGRAM,
+) -> ResultadoMensagem:
+    """Responde uma DM.
+
+    `ig_id` é o id da conta profissional (17841...), `destinatario` é o IGSID
+    de quem escreveu — os dois vêm do próprio webhook. `provedor` decide o
+    host: a trilha Instagram Login fala com graph.instagram.com, a trilha
+    Facebook Login com graph.facebook.com e token de Página.
+
+    A janela de 24h NÃO é conferida aqui: quem conhece o relógio da conversa
+    é o serviço, e checar duas vezes esconderia de qual lado veio a recusa.
+    """
+    corpo = {"recipient": {"id": destinatario}, "message": {"text": texto}}
+    try:
+        async with httpx.AsyncClient(timeout=_TIMEOUT_API) as c:
+            resp = await c.post(
+                _graph(f"{ig_id}/messages", provedor),
+                json=corpo,
+                headers=_headers(token),
+            )
+        dados = _resposta_json(resp, token=token)
+    except MetaError as e:
+        # Erro COM código é resposta da Meta: ela recebeu e recusou, então a
+        # mensagem não saiu. Dá pra tratar como falha de verdade.
+        logger.warning(
+            "dm_envio_recusado", ig_id=ig_id, code=e.code, erro=_redigir(str(e), token)
+        )
+        return ResultadoMensagem(ok=False, erro=str(e), code=e.code, ambiguo=_eh_ambiguo(e))
+    except Exception as exc:  # noqa: BLE001
+        # Timeout / queda de rede: a chamada PODE ter chegado. Não dá pra
+        # dizer que falhou, e não dá pra perguntar. Vai pra humano.
+        ambiguo = _eh_ambiguo(exc)
+        logger.warning(
+            "dm_envio_incerto", ig_id=ig_id, ambiguo=ambiguo, erro=_redigir(str(exc), token)
+        )
+        return ResultadoMensagem(
+            ok=False, erro=_redigir(str(exc), token), ambiguo=ambiguo
+        )
+
+    mid = dados.get("message_id") or dados.get("mid")
+    logger.info("dm_enviada", ig_id=ig_id, tem_mid=bool(mid))
+    return ResultadoMensagem(ok=True, mid=str(mid) if mid else None)

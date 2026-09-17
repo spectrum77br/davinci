@@ -178,6 +178,13 @@ class RedeSocial(Base, TimestampMixin):
     )
     postagem_max_dia: Mapped[int | None] = mapped_column(Integer, nullable=True)
     postagem_intervalo_min: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # ---- resposta automática de DM (migration 0288). Mesmo interruptor por
+    # conta que o `postagem_auto`, e pelo mesmo motivo: ligar uma marca de
+    # cada vez é toggle de linha, não deploy. Nasce DESLIGADO — responder
+    # cliente sem ninguém ter lido o que o robô diria é o erro caro.
+    dm_auto: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
     obs: Mapped[str | None] = mapped_column(Text, nullable=True)
     ativo: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=True, server_default=text("true")

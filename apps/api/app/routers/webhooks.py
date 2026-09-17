@@ -20,8 +20,9 @@ from typing import Annotated, Any
 from uuid import UUID
 
 import structlog
-from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response, status
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
@@ -30,13 +31,25 @@ from app.models import (
     BackgroundJob,
     BackgroundJobStatus,
     BackgroundJobType,
+    DmConta,
+    DmConversa,
+    DmMensagem,
     IntegrationPlatform,
     LinkSyncStatus,
     Product,
     ProductLink,
+    RedeSocial,
     StockMovement,
     SyncLog,
     SyncLogAction,
+)
+from app.models.instagram_dm import (
+    CONVERSA_HUMANO,
+    DIRECAO_ECO,
+    DIRECAO_RECEBIDA,
+    MSG_DESCARTADA,
+    MSG_EM_VOO,
+    MSG_RECEBIDA,
 )
 from app.redis_client import redis
 from app.worker_pool import get_arq_pool, get_arq_sync_pool
@@ -59,14 +72,24 @@ SIG_FAIL_SNAPSHOT_TTL = 7200
 
 
 async def _bump_sig_failure(
-    reason: str, snapshot: dict[str, Any] | None = None
+    reason: str,
+    snapshot: dict[str, Any] | None = None,
+    *,
+    contador: str = SIG_FAIL_COUNTER_KEY,
+    snapshot_key: str = SIG_FAIL_SNAPSHOT_KEY,
 ) -> None:
+    """Conta falha de assinatura. A CHAVE é parâmetro de propósito.
+
+    O contador do Bling é o que avisa quando o estoque de 8 mil pedidos/mês
+    para de sincronizar. Se a rota da Meta escrevesse nele, qualquer um com
+    um curl envenenaria esse alarme sem precisar de segredo nenhum.
+    """
     try:
-        await redis.incr(SIG_FAIL_COUNTER_KEY)
-        await redis.expire(SIG_FAIL_COUNTER_KEY, SIG_FAIL_COUNTER_TTL)
+        await redis.incr(contador)
+        await redis.expire(contador, SIG_FAIL_COUNTER_TTL)
         if snapshot is not None:
             await redis.set(
-                SIG_FAIL_SNAPSHOT_KEY,
+                snapshot_key,
                 json.dumps({"reason": reason, **snapshot}, default=str),
                 ex=SIG_FAIL_SNAPSHOT_TTL,
             )
@@ -96,7 +119,9 @@ async def _verify_bling_signature(
     if sig.startswith("sha256="):
         sig = sig[len("sha256=") :]
     expected = hmac.new(secret, body, hashlib.sha256).hexdigest()
-    if hmac.compare_digest(expected, sig):
+    # BYTES: com str não-ASCII o compare_digest levanta TypeError e o
+    # webhook devolve 500 em vez de seguir. Mesmo defeito da rota da Meta.
+    if hmac.compare_digest(expected.encode(), sig.encode("latin-1", "ignore")):
         return
     bling_headers = {
         k: v for k, v in (headers_seen or {}).items()
@@ -616,3 +641,312 @@ async def receive_bling_webhook(
         "links": len(link_ids),
         "delivery_id": delivery_key,
     }
+
+
+# ─────────────────────────── DM do Instagram ───────────────────────────
+# Espelho invertido do webhook do Bling: lá o risco de spoof é baixo porque o
+# handler só age sobre payload que resolve num Product nosso; aqui o handler
+# alimenta um robô que MANDA MENSAGEM NO NOME DA MARCA. Por isso a assinatura
+# é DURA — sem segredo configurado ou sem assinatura válida, 403 e pronto.
+#
+# A Meta exige 200 em até 5 segundos e desativa a assinatura depois de
+# algumas falhas seguidas. Então, depois que a assinatura passa: grava,
+# enfileira e devolve 200 SEMPRE — inclusive para conta desconhecida e JSON
+# inválido. Nada de lógica de negócio aqui dentro.
+
+META_SIG_FAIL_KEY = "webhook:meta:sig_fail_count"
+META_SIG_FAIL_SNAPSHOT_KEY = "webhook:meta:sig_fail_last"
+
+
+def _verify_meta_signature(body: bytes, header: str | None) -> bool:
+    """HMAC-SHA256 do corpo CRU com a chave secreta do app.
+
+    O corpo cru importa: a Meta assina os bytes que enviou, com os não-ASCII
+    já escapados. Reserializar o JSON (`json.dumps`) quebra a assinatura de
+    forma intermitente — e em português, com acento e emoji, quebra sempre.
+    """
+    s = get_settings()
+    # A do app do Instagram primeiro: é ela que assina o objeto `instagram`.
+    secret = (s.instagram_app_secret or s.meta_app_secret or "").encode()
+    if not secret or not header:
+        return False
+    sig = header.strip()
+    if not sig.startswith("sha256="):
+        return False
+    expected = hmac.new(secret, body, hashlib.sha256).hexdigest()
+    # BYTES, não str: `compare_digest` com str não-ASCII levanta TypeError,
+    # e header é decodificado em latin-1 — um curl com byte alto viraria 500
+    # em vez de 403, com traceback no log.
+    return hmac.compare_digest(
+        expected.encode(), sig[len("sha256=") :].encode("latin-1", "ignore")
+    )
+
+
+async def _conta_do_evento(session: AsyncSession, ig_user_id: str) -> DmConta | None:
+    """Qual das 4 marcas recebeu a mensagem.
+
+    O payload traz o id do Instagram da conta, não a marca. `external_user_id`
+    do token é justamente esse id — é por ele que se resolve, nunca por @.
+    """
+    return await session.scalar(select(DmConta).where(DmConta.ig_user_id == ig_user_id))
+
+
+def _dados_da_mensagem(ev: dict[str, Any]) -> dict[str, Any] | None:
+    """Achata um item de `entry[].messaging[]` no que a gente guarda.
+
+    Devolve None para evento que não é mensagem (entrega, leitura), que não
+    interessa e não deve virar linha.
+    """
+    msg = ev.get("message")
+    if isinstance(msg, dict):
+        anexos = msg.get("attachments") or []
+        primeiro = anexos[0] if isinstance(anexos, list) and anexos else {}
+        payload_anexo = primeiro.get("payload") if isinstance(primeiro, dict) else {}
+        if msg.get("is_deleted"):
+            tipo = "apagada"
+        elif anexos:
+            tipo = "anexo"
+        elif ev.get("message_reply_to") or msg.get("reply_to"):
+            tipo = "story_reply"
+        else:
+            tipo = "texto"
+        return {
+            "mid": msg.get("mid"),
+            # `is_echo` é a mensagem que a PRÓPRIA conta enviou voltando pelo
+            # mesmo webhook. Sem separar isso, o robô responde a si mesmo.
+            "direcao": DIRECAO_ECO if msg.get("is_echo") else DIRECAO_RECEBIDA,
+            "tipo": tipo,
+            "texto": msg.get("text"),
+            "anexo_tipo": (primeiro.get("type") if isinstance(primeiro, dict) else None),
+            "anexo_url": (
+                payload_anexo.get("url") if isinstance(payload_anexo, dict) else None
+            ),
+            "apagada": bool(msg.get("is_deleted")),
+        }
+    reacao = ev.get("reaction")
+    if isinstance(reacao, dict):
+        return {
+            "mid": reacao.get("mid"),
+            "direcao": DIRECAO_RECEBIDA,
+            "tipo": "reacao",
+            "texto": reacao.get("emoji"),
+            "anexo_tipo": None,
+            "anexo_url": None,
+            "apagada": False,
+        }
+    postback = ev.get("postback")
+    if isinstance(postback, dict):
+        return {
+            "mid": postback.get("mid"),
+            "direcao": DIRECAO_RECEBIDA,
+            "tipo": "postback",
+            "texto": postback.get("title") or postback.get("payload"),
+            "anexo_tipo": None,
+            "anexo_url": None,
+            "apagada": False,
+        }
+    return None
+
+
+@router.get("/meta/instagram")
+async def verify_meta_webhook(request: Request) -> Response:
+    """Handshake da Meta.
+
+    Devolve o `hub.challenge` como TEXTO PURO. Retornar o valor direto de uma
+    rota FastAPI o serializaria em JSON (`"123"`, com aspas) e a Meta recusa a
+    URL — é a causa nº 1 de "The URL couldn't be validated".
+    """
+    s = get_settings()
+    p = request.query_params
+    esperado = s.meta_webhook_verify_token or ""
+    recebido = p.get("hub.verify_token") or ""
+    if (
+        esperado
+        and p.get("hub.mode") == "subscribe"
+        # BYTES pelo mesmo motivo: `?hub.verify_token=ção` viraria 500 — e é
+        # justamente este GET que a Meta chama pra validar a URL.
+        and hmac.compare_digest(esperado.encode(), recebido.encode("utf-8", "ignore"))
+    ):
+        logger.info("meta_webhook_verificado")
+        return Response(content=p.get("hub.challenge") or "", media_type="text/plain")
+    logger.warning("meta_webhook_verify_recusado", tem_segredo=bool(esperado))
+    return Response(status_code=status.HTTP_403_FORBIDDEN)
+
+
+@router.post("/meta/instagram")
+async def receive_meta_webhook(
+    request: Request,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    x_hub_signature_256: Annotated[str | None, Header(alias="X-Hub-Signature-256")] = None,
+) -> dict[str, Any]:
+    body = await request.body()
+    if not _verify_meta_signature(body, x_hub_signature_256):
+        await _bump_sig_failure(
+            "meta_bad_signature",
+            {"body_len": len(body)},
+            contador=META_SIG_FAIL_KEY,
+            snapshot_key=META_SIG_FAIL_SNAPSHOT_KEY,
+        )
+        logger.warning("meta_webhook_sig_invalida", body_len=len(body))
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="assinatura inválida")
+
+    try:
+        parsed = json.loads(body or b"{}")
+    except json.JSONDecodeError:
+        return {"ack": True, "ignored": "invalid_json"}
+    if not isinstance(parsed, dict) or parsed.get("object") != "instagram":
+        return {"ack": True, "ignored": "objeto_inesperado"}
+
+    gravadas = 0
+    # Teto nos dois laços: mesmo com assinatura válida, um payload gigante
+    # viraria um commit por item sem limite.
+    for entry in (parsed.get("entry") or [])[:200]:
+        if not isinstance(entry, dict):
+            continue
+        for ev in (entry.get("messaging") or [])[:200]:
+            if not isinstance(ev, dict):
+                continue
+            dados = _dados_da_mensagem(ev)
+            if not dados or not dados.get("mid"):
+                continue
+
+            # Quem é a CONTA depende da direção: no eco, a conta é quem mandou.
+            sender = (ev.get("sender") or {}).get("id")
+            recipient = (ev.get("recipient") or {}).get("id")
+            eco = dados["direcao"] == DIRECAO_ECO
+            ig_conta = sender if eco else recipient
+            igsid = recipient if eco else sender
+            if not ig_conta or not igsid:
+                continue
+
+            try:
+                await _gravar_dm(
+                    session,
+                    ig_conta=str(ig_conta),
+                    igsid=str(igsid),
+                    dados=dados,
+                    ev=ev,
+                )
+                gravadas += 1
+            except Exception as e:  # noqa: BLE001
+                # Nunca deixar uma mensagem ruim derrubar o 200: a Meta
+                # desativa a assinatura depois de falhas seguidas, e aí para
+                # de chegar DM em silêncio.
+                await session.rollback()
+                # `str(e)` do SQLAlchemy inclui [SQL: ...] e [parameters: ...] — ou seja,
+                # o texto da DM iria pro log. Só o tipo.
+                logger.warning(
+                    "meta_webhook_grava_falhou",
+                    err=type(e).__name__,
+                    mid=dados.get("mid"),
+                )
+
+    return {"ack": True, "gravadas": gravadas}
+
+
+async def _gravar_dm(
+    session: AsyncSession,
+    *,
+    ig_conta: str,
+    igsid: str,
+    dados: dict[str, Any],
+    ev: dict[str, Any],
+) -> None:
+    token = await _conta_do_evento(session, ig_conta)
+    if token is None:
+        # Conta que não é nossa (ou token ainda não conectado). Não é erro:
+        # loga e segue — 200 mesmo assim.
+        logger.info("meta_webhook_conta_desconhecida", ig_conta=ig_conta)
+        return
+
+    ts = ev.get("timestamp")
+    ocorrido = (
+        datetime.fromtimestamp(ts / 1000, tz=UTC)
+        if isinstance(ts, int | float) and ts > 0
+        else datetime.now(UTC)
+    )
+
+    conversa = await session.scalar(
+        select(DmConversa).where(
+            DmConversa.rede_social_id == token.rede_social_id,
+            DmConversa.participante_id == igsid,
+        )
+    )
+    if conversa is None:
+        # Snapshot do @ da marca, como MarketingPostagem faz: apagar a conta
+        # não pode deixar o histórico sem saber de quem era a conversa.
+        rede = await session.get(RedeSocial, token.rede_social_id)
+        conversa = DmConversa(
+            rede_social_id=token.rede_social_id,
+            plataforma="instagram",
+            conta=(rede.conta if rede else None),
+            participante_id=igsid,
+        )
+        session.add(conversa)
+        await session.flush()
+
+    if dados["direcao"] == DIRECAO_RECEBIDA:
+        conversa.ultima_recebida_em = ocorrido
+    else:
+        conversa.ultima_enviada_em = ocorrido
+        # Humano (ou outro app) respondeu pela caixa de entrada: o robô se
+        # cala nesta conversa. Responder por cima de atendimento em andamento
+        # é o jeito mais rápido de passar vergonha.
+        conversa.auto = False
+        conversa.status = CONVERSA_HUMANO
+
+    # APAGADA ("unsent"): o evento chega com o MESMO `mid` da mensagem
+    # original. Não é INSERT — morreria no UNIQUE e seria confundido com
+    # reentrega. É UPDATE que ESVAZIA o conteúdo: guardar o texto que a
+    # pessoa apagou é o oposto do que ela pediu. A Meta exige que a gravação
+    # do App Review mostre esse tratamento.
+    if dados["apagada"]:
+        anterior = await session.scalar(
+            select(DmMensagem).where(DmMensagem.mid == dados["mid"])
+        )
+        if anterior is not None:
+            anterior.tipo = "apagada"
+            anterior.texto = None
+            anterior.anexo_url = None
+            anterior.payload = {}
+            anterior.apagada_em = ocorrido
+            # Resposta que ainda não saiu perde o sentido: responder a uma
+            # mensagem apagada é responder ao que não existe mais.
+            pendentes = await session.scalars(
+                select(DmMensagem).where(
+                    DmMensagem.conversa_id == conversa.id,
+                    DmMensagem.status.in_(MSG_EM_VOO),
+                )
+            )
+            for pendente in pendentes:
+                pendente.status = MSG_DESCARTADA
+                pendente.motivo = "cliente apagou a mensagem"
+            await session.commit()
+            logger.info("meta_webhook_apagada", mid=dados["mid"])
+            return
+        # Apagamento chegou sem a original (webhook fora de ordem): grava a
+        # lápide mesmo assim, pro histórico não mentir que nunca existiu.
+
+    session.add(
+        DmMensagem(
+            conversa_id=conversa.id,
+            mid=dados["mid"],
+            direcao=dados["direcao"],
+            tipo=dados["tipo"],
+            texto=dados["texto"],
+            anexo_tipo=dados["anexo_tipo"],
+            anexo_url=dados["anexo_url"],
+            payload=ev,
+            ocorrido_em=ocorrido,
+            apagada_em=ocorrido if dados["apagada"] else None,
+            status=MSG_RECEBIDA,
+        )
+    )
+    try:
+        await session.commit()
+    except IntegrityError:
+        # `mid` UNIQUE: é a reentrega da Meta chegando de novo. Rotina de
+        # deploy, não exceção — a api reiniciando devolve não-200 e ela
+        # retenta por horas.
+        await session.rollback()
+        logger.info("meta_webhook_reentrega", mid=dados["mid"])

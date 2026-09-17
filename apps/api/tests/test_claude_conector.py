@@ -112,6 +112,8 @@ async def test_handshake_e_lista_de_ferramentas(
         "listar_tarefas",
         "concluir_tarefa",
         "consultar_pedido",
+        "listar_dms",
+        "responder_dm",
     ]
     assert tools[0]["inputSchema"]["required"] == ["descricao"]
     assert tools[0]["annotations"]["destructiveHint"] is False
@@ -376,6 +378,8 @@ async def test_lista_pendentes_e_conclui_pelo_codigo(
         "listar_tarefas",
         "concluir_tarefa",
         "consultar_pedido",
+        "listar_dms",
+        "responder_dm",
     ]
 
     r = await client.post(url, json=_tool(3, "listar_tarefas"))

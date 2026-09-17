@@ -249,6 +249,40 @@ class Settings(BaseSettings):
     # Quando as marcas ganharem Página, virar "binario" (e só isso).
     marketing_postagem_upload: str = "link"
 
+    # ─── Robô de resposta das DMs do Instagram ───────────────────────────
+    # A CHAVE SECRETA DO APP da Meta. Ela valida o `X-Hub-Signature-256` de
+    # todo webhook de mensagem — e é a MESMA que hoje falta para renovar o
+    # token sozinho. Sem ela o webhook não é confiável e a rota recusa tudo:
+    # endpoint público que manda mensagem no nome da marca não pode aceitar
+    # payload não assinado.
+    meta_app_secret: str = ""
+    # A trilha Instagram Login tem um app ANINHADO com chave secreta PRÓPRIA
+    # (Painel → Instagram → Configuração da API com login do Instagram). O
+    # webhook do objeto `instagram` é assinado com ELA, não com a do app Meta
+    # — trocar as duas dá 403 em todo evento, e o sintoma parece "a Meta não
+    # está mandando nada". Vazia = cai no `meta_app_secret`.
+    instagram_app_secret: str = ""
+    # String que NÓS inventamos e digitamos no painel da Meta ao cadastrar o
+    # callback. A Meta devolve no handshake (GET) para provar que a URL é
+    # nossa. Não é senha da Meta; gerar com `openssl rand -hex 24`.
+    meta_webhook_verify_token: str = ""
+    # A TRAVA, gêmea do `marketing_postagem_commit`: com False o robô faz o
+    # caminho inteiro (classifica, escolhe a resposta, confere a janela de
+    # 24h) e grava `seco` em vez de enviar. É assim que se roda uma semana em
+    # produção, contra DM real, lendo o que ele TERIA dito.
+    dm_resposta_commit: bool = False
+    # IGSIDs separados por vírgula que recebem resposta REAL mesmo com o
+    # commit desligado. A Meta não tem sandbox de DM — esta lista é o
+    # sandbox: o Instagram pessoal do Eduardo vê o caminho inteiro rodar
+    # enquanto o mundo fica no seco.
+    dm_resposta_allowlist: str = ""
+    # Teto por conta por dia. Tempestade de webhook ou laço de eco não pode
+    # virar 400 DMs — espelha o marketing_postagem_max_dia.
+    dm_resposta_max_dia: int = 50
+    # Janela da Meta para responder sem tag. Fora dela vai pra humano; NUNCA
+    # se contorna com uma tag que não fomos aprovados a usar.
+    dm_janela_horas: int = 24
+
     # Token M2M do executor de IMPORTAÇÃO DE NF (marionete AdsPower da Fase
     # 3a-4). Guarda os /nf-cadastro/agent/* (lease/result). Vazio = endpoints
     # FECHADOS (401). O executor local abre o AdsPower do faturador, loga no
