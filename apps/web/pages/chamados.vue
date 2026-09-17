@@ -23,7 +23,7 @@ definePageMeta({ middleware: ['permission'], permission: { resource: 'chamados',
 // Aba "Chamados" (Pós-venda): centraliza os chamados abertos nas plataformas,
 // no formato da planilha — Data | pedido bling | pedido marketplace |
 // plataforma | produto | sku | conta | status bling | origem | chamado |
-// status | últ. resposta | alterar status bling | observação | valor.
+// status (+ quem falou por último) | observação | alterar status bling | valor.
 // O sim/não "monitoramento" saiu em 15/09 (Eduardo): o robô acompanha TODO
 // chamado de API do ML e fecha sozinho quando o claim encerra — nada a marcar.
 // 17/09 (Vinicius): o grupo "Réplica" (botão responder + réplica automática)
@@ -1079,7 +1079,7 @@ async function reabrir(row: ChamadoRow) {
             <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-amber-50 dark:bg-amber-900/20" colspan="5">Chamado</th>
             <th class="px-2 py-1 text-left text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-violet-50 dark:bg-violet-900/20" colspan="1">Jurídico</th>
             <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-emerald-50 dark:bg-emerald-900/20" colspan="1">Bling</th>
-            <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600" colspan="3">Controle</th>
+            <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600" colspan="2">Controle</th>
           </tr>
           <tr class="border-b">
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[80px]">Data</th>
@@ -1093,24 +1093,23 @@ async function reabrir(row: ChamadoRow) {
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[100px] bg-amber-50 dark:bg-amber-900/20 border-l-[3px] border-gray-400 dark:border-gray-600">Origem</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[190px] bg-amber-50 dark:bg-amber-900/20">Chamado</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px] bg-amber-50 dark:bg-amber-900/20">Canal</th>
-            <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[190px] bg-amber-50 dark:bg-amber-900/20" title="O que a plataforma diz do chamado, e desde quando">Status</th>
-            <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[150px] bg-amber-50 dark:bg-amber-900/20" title="Quando e quem falou por último (nós ou a plataforma)">Últ. resposta</th>
+            <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[230px] bg-amber-50 dark:bg-amber-900/20" title="O que a plataforma diz do chamado (e desde quando) + quem falou por último">Status</th>
+            <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[220px] bg-amber-50 dark:bg-amber-900/20">Observação</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[170px] bg-violet-50 dark:bg-violet-900/20 border-l-[3px] border-gray-400 dark:border-gray-600" title="Encaminhado ao jurídico: quando, por quem, observação e link do dossiê">Jurídico</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[210px] bg-emerald-50 dark:bg-emerald-900/20 border-l-[3px] border-gray-400 dark:border-gray-600">Alterar status Bling</th>
-            <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[220px] border-l-[3px] border-gray-400 dark:border-gray-600">Observação</th>
-            <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px]" title="Resultado do chamado (R$): positivo = lucro, negativo = prejuízo">Valor</th>
+            <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px] border-l-[3px] border-gray-400 dark:border-gray-600" title="Resultado do chamado (R$): positivo = lucro, negativo = prejuízo">Valor</th>
             <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[120px]"></th>
           </tr>
         </thead>
         <tbody>
           <tr v-if="loading && !items.length">
-            <td colspan="18" class="py-8 text-center text-muted-foreground">
+            <td colspan="17" class="py-8 text-center text-muted-foreground">
               <Loader2 class="size-4 inline animate-spin mr-1.5" />
               carregando…
             </td>
           </tr>
           <tr v-else-if="!visiveis.length">
-            <td colspan="18" class="py-8 text-center text-muted-foreground">{{ items.length ? 'nenhum chamado com esse status nesta página' : 'sem chamados' }}</td>
+            <td colspan="17" class="py-8 text-center text-muted-foreground">{{ items.length ? 'nenhum chamado com esse status nesta página' : 'sem chamados' }}</td>
           </tr>
           <tr v-for="row in visiveis" :key="row.id" class="border-t hover:brightness-95 dark:hover:brightness-110" :class="{ 'opacity-60': row.resolvido }">
             <td class="px-2 py-1 whitespace-nowrap text-muted-foreground">{{ fmtDate(row.data) }}</td>
@@ -1157,18 +1156,28 @@ async function reabrir(row: ChamadoRow) {
                 <option v-for="c in CANAIS" :key="c.value" :value="c.value" :title="c.hint">{{ c.label }}</option>
               </select>
             </td>
+            <!-- Status (17/09, Vinicius "status e últ. resposta não seria a mesma coisa?"):
+                 uma célula só — 1ª linha o status (com a data quando ela não é a da última
+                 fala: oficial da API, robô pediu gente); 2ª linha quem falou por último. -->
             <td class="px-2 py-1 bg-amber-50/40 dark:bg-amber-900/10">
               <div class="space-y-0.5">
-                <span class="inline-block rounded px-1.5 py-0.5 text-[11px] font-medium whitespace-nowrap" :class="statusInfo(row).cls" :title="statusInfo(row).hint">{{ statusInfo(row).label }}</span>
-                <div v-if="row.status_aba_at" class="text-[11px] text-muted-foreground whitespace-nowrap">desde {{ fmtDateTime(row.status_aba_at) }}</div>
+                <div class="flex items-center gap-1.5 whitespace-nowrap">
+                  <span class="inline-block rounded px-1.5 py-0.5 text-[11px] font-medium" :class="statusInfo(row).cls" :title="statusInfo(row).hint">{{ statusInfo(row).label }}</span>
+                  <span v-if="row.status_aba_at && row.status_aba_at !== row.ultima_resposta_at" class="text-[11px] text-muted-foreground">{{ fmtDateTime(row.status_aba_at) }}</span>
+                </div>
+                <div v-if="row.ultima_resposta_at" class="text-[11px] whitespace-nowrap" :class="row.ultima_resposta_direcao === 'recebida' ? 'text-orange-600 dark:text-orange-400' : 'text-emerald-700 dark:text-emerald-300'">
+                  <span v-if="row.status_aba_at && row.status_aba_at !== row.ultima_resposta_at" class="text-muted-foreground">últ. resposta </span>{{ fmtDateTime(row.ultima_resposta_at) }} · {{ quemRespondeu(row) }}
+                </div>
               </div>
             </td>
-            <td class="px-2 py-1 bg-amber-50/40 dark:bg-amber-900/10">
-              <div v-if="row.ultima_resposta_at" class="space-y-0.5">
-                <div class="whitespace-nowrap">{{ fmtDateTime(row.ultima_resposta_at) }}</div>
-                <div class="text-[11px] whitespace-nowrap" :class="row.ultima_resposta_direcao === 'recebida' ? 'text-orange-600 dark:text-orange-400' : 'text-emerald-700 dark:text-emerald-300'">{{ quemRespondeu(row) }}</div>
-              </div>
-              <span v-else class="text-muted-foreground">—</span>
+            <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
+              <input
+                :value="row.observacao || ''"
+                :disabled="!canEdit"
+                :class="sheetInputClass"
+                @input="(e) => setRowText(row, 'observacao', (e.target as HTMLInputElement).value)"
+                @change="saveRow(row)"
+              />
             </td>
             <td class="px-2 py-1 bg-violet-50/40 dark:bg-violet-900/10 border-l-[3px] border-gray-400 dark:border-gray-600">
               <div v-if="row.juridico_enviado_at" class="space-y-0.5 text-[11px]">
@@ -1203,17 +1212,8 @@ async function reabrir(row: ChamadoRow) {
                 </button>
               </div>
             </td>
-            <td class="px-1 py-0.5 border-l-[3px] border-gray-400 dark:border-gray-600">
-              <input
-                :value="row.observacao || ''"
-                :disabled="!canEdit"
-                :class="sheetInputClass"
-                @input="(e) => setRowText(row, 'observacao', (e.target as HTMLInputElement).value)"
-                @change="saveRow(row)"
-              />
-            </td>
             <!-- Resultado do chamado (R$): positivo = lucro, negativo = prejuízo — Eduardo 03/09 e 15/09 -->
-            <td class="px-1 py-0.5">
+            <td class="px-1 py-0.5 border-l-[3px] border-gray-400 dark:border-gray-600">
               <input
                 :value="row.valor_recuperado ?? ''"
                 :disabled="!canEdit"
