@@ -170,12 +170,12 @@ def fakes(monkeypatch):
     monkeypatch.setattr(logistica_meli, "returns_por_pedido", _mk("ml"), raising=False)
 
     async def _register(numbers):
-        return {"ok": True}
+        return {"ok": list(numbers), "sem_quota": False}
 
     monkeypatch.setattr(logistica_track, "register", _register)
 
-    async def _sem_correios(session):
-        return {"consultados": 0, "entregues": 0, "localizacoes": 0}
+    async def _sem_correios(session, *, vivos=None):
+        return {"consultados": 0, "entregues": 0, "localizacoes": 0, "desconhecidos": []}
 
     monkeypatch.setattr(sync, "_puxar_correios", _sem_correios)
     # O sync chama os avisos com o Threema real: aqui um falso que nunca manda.

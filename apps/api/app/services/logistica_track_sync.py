@@ -81,8 +81,10 @@ async def sem_quota_desde() -> str | None:
         return None
 
 
-async def _em_quarentena(numeros: list[str]) -> set[str]:
-    """Números que falharam por motivo não-saldo há menos de um dia."""
+async def em_quarentena(numeros: list[str]) -> set[str]:
+    """Números que falharam por motivo não-saldo há menos de um dia. A
+    quarentena é da CONTA do 17track, não da tela: o sync de Devoluções
+    (devolucao_rastreio_sync) usa a mesma pro pacote de volta."""
     if not numeros:
         return set()
     try:
@@ -92,7 +94,7 @@ async def _em_quarentena(numeros: list[str]) -> set[str]:
     return {n for n, v in zip(numeros, vals, strict=False) if v}
 
 
-async def _por_de_quarentena(numeros: list[str]) -> None:
+async def por_de_quarentena(numeros: list[str]) -> None:
     if not numeros:
         return
     try:
@@ -222,7 +224,7 @@ async def _run(
     todos_pendentes = sorted(
         {_num(r.rastreio) for r in linhas if _num(r.rastreio) != _num(r.rastreio_17track)}
     )
-    presos = await _em_quarentena(todos_pendentes)
+    presos = await em_quarentena(todos_pendentes)
     if presos:
         logger.info("logistica_track_sync_quarentena", numeros=len(presos))
         todos_pendentes = [n for n in todos_pendentes if n not in presos]
@@ -256,7 +258,7 @@ async def _run(
         # Recusado sem ser por saldo = problema do próprio número (formato,
         # transportadora). Quarentena de 1 dia pra não reenviar de 15 em 15 min.
         if not sem_quota:
-            await _por_de_quarentena([n for n in pendentes if n not in ok])
+            await por_de_quarentena([n for n in pendentes if n not in ok])
 
     # --- 2) puxar a localização dos que já estão registrados ---
     atualizados = 0

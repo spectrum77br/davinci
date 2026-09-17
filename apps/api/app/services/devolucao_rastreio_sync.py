@@ -15,8 +15,11 @@ Fluxo (cron a cada 30 min + botão de recarregar quando houver):
   3. grava em `devolucao_rastreio.*_auto` (grão pedido; o MANUAL continua
      mandando na aba) — inclusive `devolucao_criada_em`, que vira o "Em
      devolução desde" real;
-  4. registra no 17track os códigos Correios (`...BR`) novos — a localização
-     do pacote de volta chega pelo webhook (routers/logistica_track).
+  4. registra no 17track os códigos Correios (`...BR`) novos E os que o
+     17track disser que não conhece (registro que falhou numa rodada anterior
+     — sem saldo, rede) — a localização do pacote de volta chega pelo webhook
+     (routers/logistica_track) e pelo pull de cada rodada (`_puxar_correios`).
+     Como na Logística, só conta como registrado o que o 17track confirmou.
 
 Best-effort em todas as camadas: um marketplace fora do ar não derruba os
 outros; um pedido sem devolução conhecida fica como está.
@@ -28,6 +31,7 @@ import inspect
 import unicodedata
 from collections.abc import Collection
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import structlog
 from sqlalchemy import select, text
@@ -35,7 +39,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.models import DevolucaoRastreio, Logistica
-from app.services import logistica_rules, logistica_track
+from app.services import logistica_rules, logistica_track, logistica_track_sync
 from app.services.devolucao_returns import ReturnInfo
 
 logger = structlog.get_logger()
@@ -64,6 +68,12 @@ def _plataforma_key(plataforma: str | None) -> str | None:
     if p in logistica_rules._TIKTOK_PLATAFORMAS:
         return "tiktok"
     return None
+
+
+def _num(rastreio: str | None) -> str:
+    """Número do jeito que o 17track o devolve (MAIÚSCULAS, sem espaços) — é
+    assim que a resposta dele precisa casar com o que mandamos."""
+    return (rastreio or "").strip().upper()
 
 
 async def _fetch_por_marketplace(
@@ -151,7 +161,9 @@ def _texto_diz_entregue(localizacao: str | None) -> bool:
     return alvo in txt
 
 
-async def _puxar_correios(session: AsyncSession) -> dict[str, int]:
+async def _puxar_correios(
+    session: AsyncSession, *, vivos: Collection[str] | None = None
+) -> dict[str, Any]:
     """Rede de segurança do rastreio do pacote de VOLTA.
 
     Até aqui a localização física só entrava pelo PUSH do 17track. Push é
@@ -160,6 +172,14 @@ async def _puxar_correios(session: AsyncSession) -> dict[str, int]:
     Correios em 09/09 e ainda sem "Chegou em" (Eduardo, 10/09). Agora o sync
     também PERGUNTA o estado dos códigos já registrados. Consulta é grátis no
     17track (crédito só se gasta ao registrar), então roda a cada rodada.
+
+    Devolve também `desconhecidos`: códigos que o 17track diz NÃO conhecer, de
+    pedido em `vivos` (os que ainda estão em Aguardando Devolução; None = todos)
+    — `run` registra esses de novo. Vinicius 17/09: o 291955 (AP436496123BR)
+    e o 292357 entraram em 04/09, dia em que a conta do 17track estava sem
+    saldo; o registro falhou uma vez, nunca foi refeito, e a Localização ficou
+    13 dias parada no status do TikTok enquanto os Correios já mostravam o
+    pacote a caminho.
     """
     linhas = list(
         (
@@ -173,12 +193,12 @@ async def _puxar_correios(session: AsyncSession) -> dict[str, int]:
         .scalars()
         .all()
     )
-    por_codigo = {
-        (r.rastreio_auto or "").strip(): r
-        for r in linhas
-        if logistica_track.is_correios(r.rastreio_auto or "")
+    resumo: dict[str, Any] = {
+        "consultados": 0,
+        "entregues": 0,
+        "localizacoes": 0,
+        "desconhecidos": [],
     }
-    resumo = {"consultados": len(por_codigo), "entregues": 0, "localizacoes": 0}
 
     # Antes de perguntar: a prova pode já estar guardada aqui. O 17track APAGA
     # o número depois da entrega (consultar AP444879986BR hoje devolve "não
@@ -190,6 +210,16 @@ async def _puxar_correios(session: AsyncSession) -> dict[str, int]:
             row.pacote_entregue_em = row.localizacao_auto_data or datetime.now(UTC)
             resumo["entregues"] += 1
 
+    # Só quem ainda não chegou entra na consulta: um número que o 17track já
+    # apagou (entregue) voltaria como "desconhecido" e seria registrado de
+    # novo — 1 crédito à toa.
+    por_codigo = {
+        _num(r.rastreio_auto): r
+        for r in linhas
+        if r.pacote_entregue_em is None and logistica_track.is_correios(r.rastreio_auto or "")
+    }
+    resumo["consultados"] = len(por_codigo)
+
     if not por_codigo:
         if resumo["entregues"]:
             await session.commit()
@@ -198,10 +228,12 @@ async def _puxar_correios(session: AsyncSession) -> dict[str, int]:
         got = await logistica_track.fetch_detalhado(sorted(por_codigo))
     except Exception as e:  # noqa: BLE001 — 17track fora do ar não derruba o sync
         logger.warning("devolucao_rastreio_pull_falhou", err=str(e)[:200])
+        if resumo["entregues"]:
+            await session.commit()
         return resumo
     agora = datetime.now(UTC)
     for numero, dados in (got.get("info") or {}).items():
-        row = por_codigo.get(numero)
+        row = por_codigo.get(_num(numero))
         if row is None:
             continue
         loc = (dados.get("localizacao") or "").strip()
@@ -212,12 +244,21 @@ async def _puxar_correios(session: AsyncSession) -> dict[str, int]:
         if str(dados.get("status") or "").strip() == "Delivered":
             row.pacote_entregue_em = dados.get("sync_at") or agora
             resumo["entregues"] += 1
+    vivos_set = {str(p) for p in vivos} if vivos is not None else None
+    resumo["desconhecidos"] = sorted(
+        {
+            _num(n)
+            for n in (got.get("desconhecidos") or [])
+            if _num(n) in por_codigo
+            and (vivos_set is None or por_codigo[_num(n)].pedido_bling in vivos_set)
+        }
+    )
     if resumo["entregues"] or resumo["localizacoes"]:
         await session.commit()
     return resumo
 
 
-async def run(session: AsyncSession, *, pedidos: Collection[str] | None = None) -> dict[str, int]:
+async def run(session: AsyncSession, *, pedidos: Collection[str] | None = None) -> dict[str, Any]:
     """Sincroniza o rastreio automático das devoluções. `pedidos` restringe
     (o recarregar de um pedido); sem ele, todos os 83957."""
     alvo = list(pedidos) if pedidos is not None else await pedidos_em_devolucao(session)
@@ -284,7 +325,7 @@ async def run(session: AsyncSession, *, pedidos: Collection[str] | None = None) 
                 row.localizacao_auto = None
                 row.localizacao_auto_data = None
                 if logistica_track.is_correios(tracking):
-                    novos_codigos.append(tracking)
+                    novos_codigos.append(_num(tracking))
             row.rastreio_auto = tracking
             row.transportadora_auto = (info.carrier or "").strip() or None
             row.devolucao_status_auto = (info.status or "").strip() or None
@@ -325,15 +366,49 @@ async def run(session: AsyncSession, *, pedidos: Collection[str] | None = None) 
     # (TikTok/Shopee/ML) só dá flush — sem commit o token rotacionado se perde.
     await session.commit()
 
-    pull = await _puxar_correios(session)
+    pull = await _puxar_correios(session, vivos=alvo)
 
+    # Registra no 17track os códigos novos desta rodada + os que ele disse não
+    # conhecer (registro anterior falhou por saldo/rede, ou o 17track apagou).
+    # Só o que o 17track CONFIRMOU conta como registrado; o resto volta na
+    # rodada seguinte pelo pull — antes o registro era tentado uma única vez,
+    # sem olhar a resposta, e um "sem saldo" naquele minuto deixava o pacote
+    # sem localização pra sempre (291955/292357, 04/09).
+    pendentes = sorted(set(novos_codigos) | set(pull["desconhecidos"]))
+    presos = await logistica_track_sync.em_quarentena(pendentes)
+    if presos:
+        pendentes = [n for n in pendentes if n not in presos]
     registrados = 0
-    if novos_codigos:
+    sem_quota = False
+    if pendentes:
         try:
-            await logistica_track.register(sorted(set(novos_codigos)))
-            registrados = len(set(novos_codigos))
+            res = await logistica_track.register(pendentes)
         except Exception as e:  # noqa: BLE001 — 17track fora do ar não derruba o sync
             logger.warning("devolucao_rastreio_sync_17track_falhou", err=str(e)[:200])
+            res = {"ok": [], "sem_quota": False}
+        ok = {_num(n) for n in (res.get("ok") or [])}
+        sem_quota = bool(res.get("sem_quota"))
+        # Mesma conta da Logística: o aviso de saldo esgotado da tela vale
+        # pros dois fluxos.
+        await logistica_track_sync.marcar_sem_quota(sem_quota)
+        registrados = len(ok)
+        recusados = [n for n in pendentes if n not in ok]
+        if recusados and not sem_quota:
+            # Recusa que NÃO é saldo = problema do próprio número (formato,
+            # transportadora). Um dia de quarentena, senão volta a cada 30 min.
+            await logistica_track_sync.por_de_quarentena(recusados)
+            logger.warning(
+                "devolucao_rastreio_sync_17track_recusou", numeros=recusados[:10], n=len(recusados)
+            )
+        if sem_quota:
+            logger.warning(
+                "devolucao_rastreio_sync_17track_sem_quota",
+                pendentes=len(pendentes),
+                mensagem=(
+                    "17track sem saldo — a Localização do pacote de volta não atualiza "
+                    "até recarregar"
+                ),
+            )
 
     # Prazos de resposta acabaram de ser atualizados: hora de avisar quem
     # precisa responder na plataforma (Threema, um aviso por caso e prazo).
@@ -359,6 +434,8 @@ async def run(session: AsyncSession, *, pedidos: Collection[str] | None = None) 
         "gravados": gravados,
         "avisos_prazo": avisos.get("enviados", 0),
         "codigos_17track": registrados,
+        "codigos_17track_pendentes": max(0, len(pendentes) - registrados),
+        "sem_quota": sem_quota,
         "correios_consultados": pull["consultados"],
         "correios_entregues": pull["entregues"],
         "correios_localizacoes": pull["localizacoes"],

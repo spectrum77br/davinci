@@ -213,7 +213,7 @@ async def test_pull_carimba_entrega_que_o_push_perdeu(db, monkeypatch):
     resumo = await svc._puxar_correios(db)
 
     assert perguntados == [["AP111111111BR", "AP444879986BR"]]  # SPX ficou fora
-    assert resumo == {"consultados": 2, "entregues": 1, "localizacoes": 2}
+    assert resumo == {"consultados": 2, "entregues": 1, "localizacoes": 2, "desconhecidos": []}
     entregue = await db.get(DevolucaoRastreio, "293437")
     a_caminho = await db.get(DevolucaoRastreio, "900001")
     await db.refresh(entregue)

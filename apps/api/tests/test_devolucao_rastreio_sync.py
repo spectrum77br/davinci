@@ -19,7 +19,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import DevolucaoRastreio, Logistica
 from app.services import devolucao_rastreio_sync as svc
-from app.services import logistica_meli, logistica_shopee, logistica_tiktok, logistica_track
+from app.services import (
+    logistica_meli,
+    logistica_shopee,
+    logistica_tiktok,
+    logistica_track,
+    logistica_track_sync,
+)
 from app.services.devolucao_returns import ReturnInfo, epoch_to_dt, iso_to_dt
 
 pytestmark = pytest.mark.asyncio
@@ -38,9 +44,19 @@ def _info(fonte: str, **kw) -> ReturnInfo:
 
 @pytest.fixture
 def fakes(monkeypatch):
-    """Fetchers falsos por marketplace + 17track falso; devolve os registros."""
-    calls: dict[str, list] = {"tiktok": [], "shopee": [], "ml": [], "register": []}
-    respostas: dict[str, dict[str, ReturnInfo]] = {"tiktok": {}, "shopee": {}, "ml": {}}
+    """Fetchers falsos por marketplace + 17track falso; devolve os registros.
+
+    `respostas["17track"]` controla o falso: `desconhecidos` (o que o pull diz
+    não conhecer), `ok` (None = aceita tudo que for registrado), `sem_quota`,
+    `quarentena` (números presos). `calls` guarda register / sem_quota /
+    quarentena pra os testes conferirem."""
+    calls: dict[str, list] = {
+        "tiktok": [], "shopee": [], "ml": [], "register": [], "sem_quota": [], "quarentena": [],
+    }
+    respostas: dict[str, dict] = {
+        "tiktok": {}, "shopee": {}, "ml": {},
+        "17track": {"desconhecidos": [], "ok": None, "sem_quota": False, "quarentena": set()},
+    }
 
     def _mk(key):
         async def _fn(session, linhas):
@@ -54,9 +70,28 @@ def fakes(monkeypatch):
 
     async def _register(numbers):
         calls["register"].append(list(numbers))
-        return {"ok": True}
+        t = respostas["17track"]
+        ok = list(numbers) if t["ok"] is None else list(t["ok"])
+        return {"ok": [] if t["sem_quota"] else ok, "sem_quota": t["sem_quota"]}
+
+    async def _fetch_detalhado(numbers):
+        desc = [n for n in numbers if n in respostas["17track"]["desconhecidos"]]
+        return {"info": {}, "desconhecidos": desc}
+
+    async def _em_quarentena(numeros):
+        return {n for n in numeros if n in respostas["17track"]["quarentena"]}
+
+    async def _por_de_quarentena(numeros):
+        calls["quarentena"].append(list(numeros))
+
+    async def _marcar_sem_quota(flag):
+        calls["sem_quota"].append(flag)
 
     monkeypatch.setattr(logistica_track, "register", _register)
+    monkeypatch.setattr(logistica_track, "fetch_detalhado", _fetch_detalhado)
+    monkeypatch.setattr(logistica_track_sync, "em_quarentena", _em_quarentena)
+    monkeypatch.setattr(logistica_track_sync, "por_de_quarentena", _por_de_quarentena)
+    monkeypatch.setattr(logistica_track_sync, "marcar_sem_quota", _marcar_sem_quota)
     return calls, respostas
 
 
@@ -158,6 +193,106 @@ async def test_sem_fetcher_no_modulo_nao_quebra(db: AsyncSession, fakes, monkeyp
     monkeypatch.delattr(logistica_meli, "returns_por_pedido", raising=False)
     out = await svc.run(db, pedidos=[p])
     assert out["devolucoes"] == 0
+
+
+async def test_reregistra_codigo_que_o_17track_nao_conhece(db: AsyncSession, fakes):
+    """Vinicius 17/09 — 291955 (AP436496123BR): o código entrou em 04/09, dia em
+    que a conta do 17track estava sem saldo; o registro falhou uma vez e nunca
+    foi refeito, e a Localização ficou parada no status do TikTok. Agora o pull
+    de cada rodada pergunta ao 17track, e o que ele não conhece é registrado
+    de novo — mesmo não sendo código novo."""
+    calls, respostas = fakes
+    p = f"9{uuid4().hex[:6]}"
+    await _seed_logistica(db, p, "TikTok")
+    db.add(DevolucaoRastreio(pedido_bling=p, rastreio_auto="AP436496123BR"))
+    await db.commit()
+    respostas["tiktok"][p] = _info("tiktok", tracking="AP436496123BR")  # mesmo código
+    respostas["17track"]["desconhecidos"] = ["AP436496123BR"]
+
+    out = await svc.run(db, pedidos=[p])
+
+    assert calls["register"] == [["AP436496123BR"]]
+    assert out["codigos_17track"] == 1 and out["codigos_17track_pendentes"] == 0
+    assert out["sem_quota"] is False
+    assert calls["sem_quota"] == [False]  # aviso de saldo apagado: a conta respondeu
+    assert calls["quarentena"] == []
+
+    # 17track passou a conhecer → rodada seguinte não registra de novo.
+    respostas["17track"]["desconhecidos"] = []
+    calls["register"].clear()
+    await svc.run(db, pedidos=[p])
+    assert calls["register"] == []
+
+
+async def test_sem_saldo_so_conta_o_que_o_17track_confirmou_e_tenta_de_novo(db: AsyncSession, fakes):
+    """Antes: `register` era chamado uma vez, sem olhar a resposta, e "sem
+    saldo" naquele minuto virava pacote sem localização pra sempre."""
+    calls, respostas = fakes
+    p = f"9{uuid4().hex[:6]}"
+    await _seed_logistica(db, p, "TikTok")
+    respostas["tiktok"][p] = _info("tiktok", tracking="AP442031490BR")
+    respostas["17track"]["sem_quota"] = True
+
+    out = await svc.run(db, pedidos=[p])
+
+    assert calls["register"] == [["AP442031490BR"]]
+    assert out["codigos_17track"] == 0 and out["codigos_17track_pendentes"] == 1
+    assert out["sem_quota"] is True
+    assert calls["sem_quota"] == [True]  # a tela da Logística mostra o aviso
+    assert calls["quarentena"] == []  # saldo não é culpa do número
+
+    # Saldo recarregado: o pull diz que o 17track não conhece → registra de novo.
+    respostas["17track"]["sem_quota"] = False
+    respostas["17track"]["desconhecidos"] = ["AP442031490BR"]
+    calls["register"].clear()
+    out = await svc.run(db, pedidos=[p])
+    assert calls["register"] == [["AP442031490BR"]]
+    assert out["codigos_17track"] == 1
+
+
+async def test_recusa_que_nao_e_saldo_vai_pra_quarentena(db: AsyncSession, fakes):
+    calls, respostas = fakes
+    p = f"9{uuid4().hex[:6]}"
+    await _seed_logistica(db, p, "TikTok")
+    respostas["tiktok"][p] = _info("tiktok", tracking="XX000000000BR")
+    respostas["17track"]["ok"] = []  # 17track recusou (formato/transportadora)
+
+    out = await svc.run(db, pedidos=[p])
+
+    assert calls["register"] == [["XX000000000BR"]]
+    assert calls["quarentena"] == [["XX000000000BR"]]
+    assert out["codigos_17track"] == 0
+
+    # Preso na quarentena: a rodada seguinte não manda de novo.
+    respostas["17track"]["quarentena"] = {"XX000000000BR"}
+    respostas["17track"]["desconhecidos"] = ["XX000000000BR"]
+    calls["register"].clear()
+    await svc.run(db, pedidos=[p])
+    assert calls["register"] == []
+
+
+async def test_pull_so_reregistra_pedido_ainda_em_devolucao(db: AsyncSession, fakes):
+    """Pedido que já saiu de Aguardando Devolução (e pacote já entregue, que o
+    17track apaga) não pode voltar pro registro — seria crédito à toa."""
+    calls, respostas = fakes
+    vivo, morto, chegou = (f"9{uuid4().hex[:6]}" for _ in range(3))
+    db.add_all([
+        DevolucaoRastreio(pedido_bling=vivo, rastreio_auto="AP111111111BR"),
+        DevolucaoRastreio(pedido_bling=morto, rastreio_auto="AP222222222BR"),
+        DevolucaoRastreio(
+            pedido_bling=chegou, rastreio_auto="AP333333333BR",
+            localizacao_auto="Piracicaba/SP — Objeto entregue ao destinatário",
+            localizacao_auto_data=datetime.now(UTC),
+        ),
+    ])
+    await db.commit()
+    respostas["17track"]["desconhecidos"] = ["AP111111111BR", "AP222222222BR", "AP333333333BR"]
+
+    resumo = await svc._puxar_correios(db, vivos=[vivo, chegou])
+
+    assert resumo["desconhecidos"] == ["AP111111111BR"]
+    # O entregue nem foi perguntado: a prova já estava no texto guardado.
+    assert resumo["consultados"] == 2 and resumo["entregues"] == 1
 
 
 def test_helpers_de_data():
