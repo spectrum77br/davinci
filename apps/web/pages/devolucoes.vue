@@ -576,7 +576,6 @@ const sheetInputClass = 'h-7 w-full rounded-none border-0 bg-transparent px-1 te
 const sheetSelectClass = `${sheetInputClass} cursor-pointer`
 const sheetMoneyInputClass = `${sheetInputClass} text-right tabular-nums`
 const sheetInputRequiredClass = `${sheetInputClass} ring-1 ring-red-400`
-const sheetSelectRequiredClass = `${sheetSelectClass} ring-1 ring-red-400`
 
 function linkRequired(condicao: string | null | undefined) {
   return condicao === 'Extraviado' || condicao === 'Sucata' || condicao === 'Manutenção'
@@ -1300,11 +1299,10 @@ function buildPayload(d: DevolutionDraft) {
 // Produtos que falharem ou cujo modal for cancelado continuam no rascunho.
 async function createAllDevolutions() {
   if (!canEdit.value || !drafts.value.length) return
+  // Condição vazia ("—") é aceita (Vinicius, 17/09): a linha entra sem condição
+  // e o operador preenche depois na lista. Sem condição nada dispara (estoque,
+  // reembolso, situação no Bling) — o pedido só não conta como resolvido.
   for (const d of drafts.value) {
-    if (!d.condicao_produto) {
-      lookupError.value = 'Escolha a condição de todos os produtos'
-      return
-    }
     if (linkRequired(d.condicao_produto) && !d.link_abertura) {
       lookupError.value = 'Link de abertura obrigatório para Extraviado / Sucata / Manutenção'
       return
@@ -2170,7 +2168,7 @@ async function backfillAddresses() {
                 <input v-model.number="d.custo_produto" type="text" inputmode="decimal" :class="sheetMoneyInputClass" />
               </td>
               <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
-                <select v-model="d.condicao_produto" :class="d.condicao_produto ? sheetSelectClass : sheetSelectRequiredClass" @change="(e) => { if (['Extraviado', 'Sucata', 'Manutenção'].includes((e.target as HTMLSelectElement).value)) d.reembolso = true }">
+                <select v-model="d.condicao_produto" :class="sheetSelectClass" @change="(e) => { if (['Extraviado', 'Sucata', 'Manutenção'].includes((e.target as HTMLSelectElement).value)) d.reembolso = true }">
                   <option value="">—</option>
                   <option v-for="c in CONDICOES_PRODUTO" :key="c" :value="c">{{ c }}</option>
                 </select>
