@@ -634,6 +634,16 @@ function fmtDate(v: string | null) {
   if (Number.isNaN(d.getTime())) return v
   return d.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: '2-digit' })
 }
+// Coluna "Reembolso": linha miúda "R$ 744,00 · 16/09" (valor e/ou data).
+function reembolsoSub(row: { reembolso_valor: number | null; reembolso_em: string | null }): string {
+  const partes: string[] = []
+  if (row.reembolso_valor != null) partes.push(brl(row.reembolso_valor))
+  if (row.reembolso_em) {
+    const d = new Date(row.reembolso_em)
+    if (!Number.isNaN(d.getTime())) partes.push(d.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' }))
+  }
+  return partes.join(' · ')
+}
 function prazoOverdue(v: string | null): boolean {
   if (!v) return false
   const d = new Date(v)
@@ -834,6 +844,14 @@ type AcompanhamentoRow = {
   // loja neste caso, e qual (em PT). null = nada pendente da loja.
   prazo_resposta: string | null
   acao_resposta: string | null
+  // "Reembolso" (17/09): true = já saiu dinheiro do nosso (a plataforma
+  // devolveu ao cliente e desconta da loja); false = não saiu (caso vivo, ou a
+  // plataforma pagou do próprio bolso); null = não se sabe. Valor/data do que
+  // foi devolvido ao cliente; `detalhe` vai no balão.
+  reembolso: boolean | null
+  reembolso_valor: number | null
+  reembolso_em: string | null
+  reembolso_detalhe: string | null
 }
 type AcompanhamentoPage = { items: AcompanhamentoRow[]; total_pedidos: number }
 type RastreioSaved = {
@@ -853,6 +871,10 @@ type RastreioSaved = {
   observacao: string | null
   prazo_resposta: string | null
   acao_resposta: string | null
+  reembolso: boolean | null
+  reembolso_valor: number | null
+  reembolso_em: string | null
+  reembolso_detalhe: string | null
 }
 
 type Tab = 'acompanhamento' | 'lancamentos'
@@ -996,6 +1018,10 @@ async function saveRastreio(
         r.observacao = res.observacao
         r.prazo_resposta = res.prazo_resposta
         r.acao_resposta = res.acao_resposta
+        r.reembolso = res.reembolso
+        r.reembolso_valor = res.reembolso_valor
+        r.reembolso_em = res.reembolso_em
+        r.reembolso_detalhe = res.reembolso_detalhe
       }
     }
   } catch (e: any) {
@@ -1680,6 +1706,11 @@ async function backfillAddresses() {
               <th class="px-2 py-1 text-center font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[60px]" title="Há quantos dias o pedido está aguardando devolução">Dias</th>
               <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px]" title="Dia em que o marketplace confirmou que o pacote de volta chegou aqui. Vazio = ainda não chegou (ou a plataforma não informa).">Chegou em</th>
               <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[120px] bg-red-50 dark:bg-red-900/20" title="Até quando a plataforma espera uma resposta da loja neste caso (TikTok: confirmar/recusar o pacote recebido, responder ao reembolso; Shopee: conferir o pacote recebido em 3 dias, enviar evidências, responder à proposta). Mercado Livre: revisar a devolução recebida — prazo calculado, entrega + 3 dias). Passado o prazo ela decide sozinha. Vermelho = menos de 24 h ou vencido. Passe o mouse na célula pra ver o que fazer.">Prazo p/ responder</th>
+              <!-- Reembolso (17/09): "estamos com o dinheiro ainda ou já devolveu
+                   pro cliente?" — Sim = saiu do nosso (valor e data embaixo);
+                   Não = ainda com a gente (inclui quando a plataforma pagou do
+                   próprio bolso). -->
+              <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[90px] bg-sky-50 dark:bg-sky-900/20" title="Já saiu dinheiro do nosso? Sim = a plataforma devolveu ao cliente e desconta da loja (valor e data embaixo). Não = o dinheiro continua com a gente — caso ainda aberto, cancelado, ou a plataforma pagou do próprio bolso (cobertura do Mercado Livre, compensação da Shopee). Vazio = a plataforma não informou ainda. Passe o mouse na célula pra ver a fonte.">Reembolso</th>
               <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[160px] bg-amber-50 dark:bg-amber-900/20 border-l-[3px] border-gray-400 dark:border-gray-600">Rastreio</th>
               <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[220px] bg-amber-50 dark:bg-amber-900/20">Última localização</th>
               <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[135px] bg-amber-50 dark:bg-amber-900/20" title="Preenchida sozinha quando a localização muda">Data últ. movimentação</th>
@@ -1691,13 +1722,13 @@ async function backfillAddresses() {
           </thead>
           <tbody>
             <tr v-if="acompLoading && !acompRows.length">
-              <td colspan="19" class="py-8 text-center text-muted-foreground">
+              <td colspan="20" class="py-8 text-center text-muted-foreground">
                 <Loader2 class="size-4 inline animate-spin mr-1.5" />
                 carregando…
               </td>
             </tr>
             <tr v-else-if="!acompFiltered.length">
-              <td colspan="19" class="py-8 text-center text-muted-foreground">nenhum pedido aguardando devolução</td>
+              <td colspan="20" class="py-8 text-center text-muted-foreground">nenhum pedido aguardando devolução</td>
             </tr>
             <tr
               v-for="row in acompFiltered"
@@ -1759,6 +1790,16 @@ async function backfillAddresses() {
                 <div v-if="row.prazo_resposta" class="flex flex-col gap-0.5" :title="row.acao_resposta || 'Responder na plataforma'">
                   <span :class="contestacaoUrgente(row.prazo_resposta) ? 'font-medium text-red-600 dark:text-red-400' : 'text-muted-foreground'">{{ fmtDateTime(row.prazo_resposta) }}</span>
                   <span class="text-[10px]" :class="contestacaoUrgente(row.prazo_resposta) ? 'text-red-600 dark:text-red-400' : 'text-muted-foreground'">{{ contestacaoLabel(row.prazo_resposta) }}</span>
+                </div>
+                <span v-else class="text-muted-foreground">—</span>
+              </td>
+              <td class="px-2 py-1 whitespace-nowrap bg-sky-50/40 dark:bg-sky-900/10" :title="row.reembolso_detalhe || (row.reembolso == null ? 'A plataforma ainda não informou' : '')">
+                <div v-if="row.reembolso != null" class="flex flex-col gap-0.5">
+                  <span
+                    class="inline-flex w-fit items-center rounded px-1.5 py-0.5 text-[11px] font-medium"
+                    :class="row.reembolso ? 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300' : 'bg-muted text-muted-foreground'"
+                  >{{ row.reembolso ? 'Sim' : 'Não' }}</span>
+                  <span v-if="row.reembolso && reembolsoSub(row)" class="text-[10px] text-muted-foreground">{{ reembolsoSub(row) }}</span>
                 </div>
                 <span v-else class="text-muted-foreground">—</span>
               </td>

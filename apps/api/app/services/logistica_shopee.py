@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Collection
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal, InvalidOperation
 from typing import NamedTuple
 from uuid import UUID
 
@@ -430,10 +431,45 @@ def _acao_pendente_shopee(det: dict | None, status: str | None) -> tuple[str | N
     return min(validos, key=lambda x: x[1])
 
 
+# Status do caso em que a Shopee JÁ PAGOU o reembolso ao cliente (e desconta
+# da loja no escrow). Medido 17/09 em 3 contas: 15/15 casos ACCEPTED cujo
+# escrow foi lido depois da mudança tinham `seller_return_refund` negativo;
+# nenhum PROCESSING/JUDGING tinha. REFUND_PAID (da doc) não apareceu em 250
+# casos no BR — a lista fica em ACCEPTED mesmo depois de pago.
+_SHOPEE_STATUS_REEMBOLSADO = {"ACCEPTED", "REFUND_PAID"}
+
+
+def _valor(v: object) -> Decimal | None:
+    try:
+        return Decimal(str(v)) if v not in (None, "") else None
+    except (InvalidOperation, ValueError):
+        return None
+
+
+def _reembolso_do_caso(
+    d: dict, status: str | None
+) -> tuple[bool, Decimal | None, datetime | None, str | None]:
+    """Já saiu dinheiro do nosso neste caso? Só o status do caso: ACCEPTED =
+    reembolso pago (valor `refund_amount`, data `update_time`). A compensação
+    que a Shopee paga à loja não vem na lista/detalhe do caso
+    (`seller_compensation_status` sempre vazio no BR) — quem cruza isso com o
+    escrow já baixado é o sync (devolucao_rastreio_sync)."""
+    st = str(status or d.get("status") or "").strip().upper()
+    if st not in _SHOPEE_STATUS_REEMBOLSADO:
+        return False, None, None, None
+    return (
+        True,
+        _valor(d.get("refund_amount")),
+        epoch_to_dt(d.get("update_time")),
+        "Caso aceito na Shopee — reembolso pago ao cliente",
+    )
+
+
 def _return_info(d: dict, status: str) -> ReturnInfo:
     tracking = d.get("tracking_number")
     tracking = tracking.strip() if isinstance(tracking, str) else None
     return_sn = str(d.get("return_sn") or "").strip()
+    pago, valor, em, detalhe = _reembolso_do_caso(d, status)
     return ReturnInfo(
         fonte="shopee",
         status=status,
@@ -442,6 +478,10 @@ def _return_info(d: dict, status: str) -> ReturnInfo:
         created_at=epoch_to_dt(d.get("create_time")),
         updated_at=epoch_to_dt(d.get("update_time")),
         return_id=return_sn or None,
+        reembolso=pago,
+        reembolso_valor=valor,
+        reembolso_em=em,
+        reembolso_detalhe=detalhe,
     )
 
 

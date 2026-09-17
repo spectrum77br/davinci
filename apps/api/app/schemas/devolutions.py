@@ -346,6 +346,14 @@ class AcompanhamentoItemOut(BaseModel):
     # Passado o prazo a plataforma decide sozinha.
     prazo_resposta: datetime | None = None
     acao_resposta: str | None = None
+    # "Reembolso" (17/09): True = já saiu dinheiro do nosso (a plataforma
+    # devolveu ao cliente e desconta da loja); False = não saiu (caso vivo, ou
+    # a plataforma pagou do próprio bolso); None = não se sabe. Valor/data do
+    # que foi devolvido ao cliente; `detalhe` é o texto do balão.
+    reembolso: bool | None = None
+    reembolso_valor: float | None = None
+    reembolso_em: datetime | None = None
+    reembolso_detalhe: str | None = None
 
 
 class AcompanhamentoOut(BaseModel):
@@ -391,3 +399,8 @@ class AcompanhamentoRastreioOut(BaseModel):
     # "Prazo p/ responder" + ação (mesma conta do GET), pro front espelhar.
     prazo_resposta: datetime | None = None
     acao_resposta: str | None = None
+    # "Reembolso" (mesma conta do GET), pro front espelhar.
+    reembolso: bool | None = None
+    reembolso_valor: float | None = None
+    reembolso_em: datetime | None = None
+    reembolso_detalhe: str | None = None

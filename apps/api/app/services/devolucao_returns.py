@@ -18,6 +18,7 @@ própria plataforma; pedido sem devolução conhecida fica de fora do dict).
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any, NamedTuple
 
 
@@ -63,6 +64,18 @@ class ReturnInfo(NamedTuple):
     # detalhe da Shopee deu erro nesta rodada) — o sync mantém o prazo da
     # rodada anterior em vez de apagar. False = prazo acima é a verdade atual.
     prazo_desconhecido: bool = False
+    # REEMBOLSO (Vinicius 17/09: "o importante é saber se estamos com o
+    # dinheiro ainda ou se já devolveu para o cliente"). True = a plataforma
+    # já devolveu dinheiro ao cliente E tirou do nosso (TikTok caso concluído,
+    # Shopee caso ACCEPTED — medido 17/09: 15/15 com desconto no escrow —, ML
+    # pagamento estornado sem cobertura). False = nada saiu do nosso: caso
+    # vivo/cancelado, ou a plataforma pagou do próprio bolso (ML `bpp`/cobertura,
+    # Shopee compensação). None = a plataforma não diz. O sync ainda cruza com o
+    # extrato financeiro já baixado (devolucao_rastreio_sync).
+    reembolso: bool | None = None
+    reembolso_valor: Decimal | None = None  # quanto foi devolvido ao cliente
+    reembolso_em: datetime | None = None  # quando (UTC)
+    reembolso_detalhe: str | None = None  # texto curto pro balão (fonte/motivo)
 
 
 def epoch_to_dt(v: Any) -> datetime | None:

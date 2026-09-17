@@ -31,16 +31,17 @@ import inspect
 import unicodedata
 from collections.abc import Collection
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from decimal import Decimal, InvalidOperation
+from typing import Any, NamedTuple
 
 import structlog
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
-from app.models import DevolucaoRastreio, Logistica
+from app.models import DevolucaoRastreio, Logistica, MarketplaceOrderFinancial
 from app.services import logistica_rules, logistica_track, logistica_track_sync
-from app.services.devolucao_returns import ReturnInfo
+from app.services.devolucao_returns import ReturnInfo, epoch_to_dt
 
 logger = structlog.get_logger()
 
@@ -258,6 +259,125 @@ async def _puxar_correios(
     return resumo
 
 
+class _Extrato(NamedTuple):
+    """O que o extrato financeiro JÁ BAIXADO (marketplace_order_financials) diz
+    do pedido: reembolso descontado da loja e compensação paga pela Shopee."""
+
+    plataforma: str
+    reembolso: Decimal | None  # descontado do repasse (positivo)
+    compensacao: Decimal | None  # Shopee pagou à loja (positivo)
+    compensacao_em: datetime | None
+    lido_em: datetime | None
+
+
+def _dec(v: object) -> Decimal | None:
+    try:
+        return Decimal(str(v)) if v not in (None, "") else None
+    except (InvalidOperation, ValueError):
+        return None
+
+
+def _mais_recente(*datas: datetime | None) -> datetime | None:
+    validas = [d for d in datas if d is not None]
+    return max(validas) if validas else None
+
+
+def _compensacao_shopee(raw: dict | None) -> tuple[Decimal | None, datetime | None]:
+    """`order_income.order_adjustment[]` do escrow guardado em `raw`: ajuste com
+    motivo "... Compensation" e valor positivo = a Shopee pagou a loja (medido
+    17/09 pelo sync dos Chamados: `seller_compensation_status` do caso vem
+    sempre vazio no BR; só o escrow mostra a compensação, com valor e data)."""
+    esc = (raw or {}).get("escrow") if isinstance(raw, dict) else None
+    if not isinstance(esc, dict):
+        return None, None
+    ajustes = esc.get("order_adjustment") or (esc.get("order_income") or {}).get("order_adjustment")
+    total: Decimal | None = None
+    quando: datetime | None = None
+    for a in ajustes if isinstance(ajustes, list) else []:
+        if not isinstance(a, dict):
+            continue
+        v = _dec(a.get("amount"))
+        motivo = str(a.get("adjustment_reason") or "").lower()
+        if v is None or v <= 0 or "compensation" not in motivo:
+            continue
+        total = (total or Decimal("0")) + v
+        em = epoch_to_dt(a.get("date"))
+        if em is not None and (quando is None or em > quando):
+            quando = em
+    return total, quando
+
+
+async def _reembolsos_do_extrato(
+    session: AsyncSession, pedidos: Collection[str]
+) -> dict[str, _Extrato]:
+    """Por pedido, o que o extrato já baixado diz. Pedido com mais de uma linha
+    (pack/refund parcial) soma. Não chama API nenhuma: é o escrow/statement que
+    o financeiro do marketplace já guarda e re-lê por conta própria."""
+    if not pedidos:
+        return {}
+    rows = (
+        await session.execute(
+            select(MarketplaceOrderFinancial).where(
+                MarketplaceOrderFinancial.pedido_bling.in_(list(pedidos))
+            )
+        )
+    ).scalars().all()
+    out: dict[str, _Extrato] = {}
+    for f in rows:
+        pedido = f.pedido_bling or ""
+        reembolso = abs(f.refund_amount) if f.refund_amount else None
+        comp, comp_em = _compensacao_shopee(f.raw)
+        cur = out.get(pedido)
+        plat = str(getattr(f.platform, "value", f.platform) or "")
+        if cur is None:
+            out[pedido] = _Extrato(plat, reembolso, comp, comp_em, f.fetched_at)
+            continue
+        out[pedido] = _Extrato(
+            cur.plataforma or plat,
+            (cur.reembolso or Decimal("0")) + reembolso if reembolso else cur.reembolso,
+            (cur.compensacao or Decimal("0")) + comp if comp else cur.compensacao,
+            _mais_recente(cur.compensacao_em, comp_em),
+            _mais_recente(cur.lido_em, f.fetched_at),
+        )
+    return out
+
+
+_PLATAFORMA_EXTRATO_PT = {"shopee": "Shopee", "tiktok": "TikTok", "ml": "Mercado Livre"}
+
+
+def _aplicar_reembolso(
+    row: DevolucaoRastreio, info: ReturnInfo | None, ext: _Extrato | None
+) -> None:
+    """Coluna "Reembolso": o caso no marketplace diz se a plataforma pagou o
+    cliente; o extrato diz se DESCONTOU da loja (e se a Shopee compensou).
+    Regra: compensação paga → nada saiu do nosso (Não); desconto no extrato →
+    Sim com o valor do extrato; senão vale o que o caso disse. Sem informação
+    nova a linha fica como estava (não apaga o que já se sabia)."""
+    pago = info.reembolso if info is not None else None
+    valor = info.reembolso_valor if info is not None else None
+    em = info.reembolso_em if info is not None else None
+    detalhe = info.reembolso_detalhe if info is not None else None
+    if ext is not None and ext.compensacao and ext.compensacao > 0:
+        pago = False
+        valor = valor or ext.reembolso
+        em = em or ext.compensacao_em
+        detalhe = f"Shopee compensou a loja em R$ {ext.compensacao:.2f} — o nosso valor ficou"
+    elif ext is not None and ext.reembolso and ext.reembolso > 0:
+        # O extrato manda sobre o caso: desconto lançado = saiu do nosso, mesmo
+        # que o caso ainda apareça em análise (Shopee fecha o caso depois).
+        pago = True
+        valor = ext.reembolso
+        em = em or ext.lido_em
+        plat = _PLATAFORMA_EXTRATO_PT.get(ext.plataforma, ext.plataforma)
+        detalhe = detalhe or f"Reembolso descontado no extrato ({plat})"
+    if pago is None and valor is None:
+        return
+    row.reembolso_auto = pago
+    row.reembolso_valor_auto = valor
+    row.reembolso_em_auto = em
+    row.reembolso_detalhe_auto = detalhe
+
+
 async def run(session: AsyncSession, *, pedidos: Collection[str] | None = None) -> dict[str, Any]:
     """Sincroniza o rastreio automático das devoluções. `pedidos` restringe
     (o recarregar de um pedido); sem ele, todos os 83957."""
@@ -305,20 +425,37 @@ async def run(session: AsyncSession, *, pedidos: Collection[str] | None = None) 
     agora = datetime.now(UTC)
     gravados = 0
     novos_codigos: list[str] = []
-    if infos:
+    # Extrato financeiro já baixado: quem diz se o reembolso foi DESCONTADO da
+    # loja (Shopee/TikTok) e se a Shopee compensou. Pedido sem caso conhecido
+    # mas com desconto no extrato (pacote voltando pela SPX, cancelamento)
+    # também ganha linha — a coluna "Reembolso" precisa dele.
+    extratos = await _reembolsos_do_extrato(session, alvo)
+    com_extrato = {p for p, e in extratos.items() if (e.reembolso or e.compensacao)}
+    gravar = set(infos) | (com_extrato & {str(p) for p in alvo})
+    reembolsos = 0
+    if gravar:
         existentes = {
             r.pedido_bling: r
             for r in (
                 await session.execute(
-                    select(DevolucaoRastreio).where(DevolucaoRastreio.pedido_bling.in_(list(infos)))
+                    select(DevolucaoRastreio).where(DevolucaoRastreio.pedido_bling.in_(list(gravar)))
                 )
             ).scalars().all()
         }
+        for pedido in gravar - set(infos):
+            row = existentes.get(pedido)
+            if row is None:
+                row = DevolucaoRastreio(pedido_bling=pedido)
+                session.add(row)
+            _aplicar_reembolso(row, None, extratos.get(pedido))
+            reembolsos += 1 if row.reembolso_auto else 0
         for pedido, info in infos.items():
             row = existentes.get(pedido)
             if row is None:
                 row = DevolucaoRastreio(pedido_bling=pedido)
                 session.add(row)
+            _aplicar_reembolso(row, info, extratos.get(pedido))
+            reembolsos += 1 if row.reembolso_auto else 0
             tracking = (info.tracking or "").strip() or None
             if tracking and tracking != row.rastreio_auto:
                 # Código novo → localização anterior (de outro código) não vale mais.
@@ -432,6 +569,7 @@ async def run(session: AsyncSession, *, pedidos: Collection[str] | None = None) 
         "com_logistica": len(linhas),
         "devolucoes": len(infos),
         "gravados": gravados,
+        "reembolsos": reembolsos,
         "avisos_prazo": avisos.get("enviados", 0),
         "codigos_17track": registrados,
         "codigos_17track_pendentes": max(0, len(pendentes) - registrados),

@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Collection, Iterable
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal, InvalidOperation
 from uuid import UUID
 
 import structlog
@@ -380,6 +381,44 @@ def _acao_pendente_do_pedido(casos: Iterable[dict]) -> tuple[str | None, datetim
     return melhor
 
 
+def _valor(v: object) -> Decimal | None:
+    try:
+        return Decimal(str(v)) if v not in (None, "") else None
+    except (InvalidOperation, ValueError):
+        return None
+
+
+def _reembolso_do_pedido(
+    casos: Iterable[dict],
+) -> tuple[bool, Decimal | None, datetime | None, str | None]:
+    """Já saiu dinheiro do nosso pra este pedido? Olha TODOS os casos do pedido
+    (um cancelado + um concluído é comum: 294865): caso em
+    `_TIKTOK_RETURN_CONCLUIDO` = a TikTok pagou o reembolso ao cliente e
+    desconta da loja no repasse. Soma `refund_amount.refund_total` dos
+    concluídos; data = `update_time` mais recente deles. Sem concluído →
+    (False, None, None, None)."""
+    total: Decimal | None = None
+    quando: datetime | None = None
+    n = 0
+    for d in casos:
+        if not isinstance(d, dict):
+            continue
+        st = str(d.get("return_status") or "").strip().upper()
+        if st not in logistica_rules._TIKTOK_RETURN_CONCLUIDO:
+            continue
+        n += 1
+        ra = d.get("refund_amount") if isinstance(d.get("refund_amount"), dict) else {}
+        v = _valor(ra.get("refund_total"))
+        if v is not None:
+            total = (total or Decimal("0")) + v
+        em = epoch_to_dt(d.get("update_time"))
+        if em is not None and (quando is None or em > quando):
+            quando = em
+    if not n:
+        return False, None, None, None
+    return True, total, quando, "Caso concluído no TikTok — reembolso pago ao cliente"
+
+
 def _tiktok_return_info(d: dict) -> ReturnInfo:
     """Caso do returns/search → `ReturnInfo`. Devolução só-reembolso (return_type
     REFUND) não tem pacote: entra mesmo assim, com tracking None — e o tipo vai
@@ -480,7 +519,17 @@ async def returns_por_pedido(
             # o do caso escolhido pro status/rastreio — dois casos abertos no
             # mesmo pedido (devolução + reembolso) têm prazos independentes.
             acao, prazo = _acao_pendente_do_pedido(por_pedido.get(oid) or [d])
-            info = info._replace(acao_pendente=acao, prazo_acao=prazo)
+            # Reembolso: idem, qualquer caso CONCLUÍDO do pedido já tirou
+            # dinheiro do nosso (coluna "Reembolso" da aba Acompanhamento).
+            pago, valor, em, detalhe = _reembolso_do_pedido(por_pedido.get(oid) or [d])
+            info = info._replace(
+                acao_pendente=acao,
+                prazo_acao=prazo,
+                reembolso=pago,
+                reembolso_valor=valor,
+                reembolso_em=em,
+                reembolso_detalhe=detalhe,
+            )
             for pb in pedidos.get(oid) or ():
                 out[pb] = info
     return out

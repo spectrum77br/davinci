@@ -104,6 +104,7 @@ async def test_devolucao_viva_com_rastreio_mapeia_campos(db, monkeypatch):
             updated_at=datetime.fromtimestamp(1756950000, tz=UTC),
             return_id="R1",
             return_type="RETURN_AND_REFUND",
+            reembolso=False,  # caso vivo: a TikTok ainda não pagou o cliente
         )
     }
     assert out["291001"].created_at.tzinfo is UTC

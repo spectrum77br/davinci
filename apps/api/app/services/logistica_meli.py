@@ -34,6 +34,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Collection
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal, InvalidOperation
 from typing import Any, NamedTuple
 from uuid import UUID
 
@@ -1180,6 +1181,71 @@ async def _orders_do_pedido(client: MercadoLivreClient, pedido: str) -> list[dic
     return orders
 
 
+class _ReembolsoML(NamedTuple):
+    pago: bool  # saiu dinheiro do NOSSO
+    valor: Decimal | None  # devolvido ao cliente (mesmo quando o ML cobriu)
+    em: datetime | None
+    detalhe: str | None
+
+
+def _reembolso_ml(orders: list[dict]) -> _ReembolsoML:
+    """Reembolso ao cliente a partir dos PAGAMENTOS do pedido (já vêm no
+    `/orders/{id}`, zero chamada a mais): soma de `transaction_amount_refunded`
+    e a data mais recente entre os estornados.
+
+    Quem pagou: `status_detail` com "bpp" (Buyer Protection Program —
+    `partially_bpp_refunded`/`bpp_refunded`) = o Mercado Livre devolveu do
+    próprio bolso (o claim vem com `resolution.applied_coverage=true`); o nosso
+    valor ficou → NÃO saiu do nosso. Caso 296695 (Vinicius 17/09): mediação
+    fechada a favor do comprador, R$ 52,97 devolvidos pelo ML via cobertura.
+    Sem "bpp" e com estorno = saiu do nosso."""
+    total = Decimal("0")
+    quando: datetime | None = None
+    bpp = False
+    for o in orders:
+        for pg in (o or {}).get("payments") or []:
+            if not isinstance(pg, dict):
+                continue
+            try:
+                v = Decimal(str(pg.get("transaction_amount_refunded") or 0))
+            except (InvalidOperation, ValueError):
+                v = Decimal("0")
+            if v <= 0:
+                continue
+            total += v
+            if "bpp" in str(pg.get("status_detail") or "").lower():
+                bpp = True
+            em = iso_to_dt(pg.get("date_last_modified"))
+            if em is not None and (quando is None or em > quando):
+                quando = em
+    if total <= 0:
+        return _ReembolsoML(False, None, None, None)
+    if bpp:
+        return _ReembolsoML(
+            False, total, quando,
+            "Devolvido ao cliente pelo Mercado Livre (cobertura/BPP) — o nosso valor ficou",
+        )
+    return _ReembolsoML(True, total, quando, "Pagamento estornado ao cliente no Mercado Livre")
+
+
+def _so_reembolso(reemb: _ReembolsoML, claim_id: str | None) -> ReturnInfo:
+    """Pedido com caso no ML mas SEM devolução (mediação/reclamação sem pacote de
+    volta, ou cancelamento com estorno): só a parte do reembolso interessa."""
+    return ReturnInfo(
+        fonte="ml",
+        status=None,
+        tracking=None,
+        carrier=None,
+        created_at=None,
+        updated_at=None,
+        return_id=claim_id,
+        reembolso=reemb.pago,
+        reembolso_valor=reemb.valor,
+        reembolso_em=reemb.em,
+        reembolso_detalhe=reemb.detalhe,
+    )
+
+
 async def _return_info_for_pedido(client: MercadoLivreClient, pedido: str) -> ReturnInfo | None:
     """`ReturnInfo` do pacote que VOLTA de um pedido ML; None sem devolução.
 
@@ -1188,13 +1254,16 @@ async def _return_info_for_pedido(client: MercadoLivreClient, pedido: str) -> Re
     de volta (tracking_number/status/tracking_method). Claim sem return (404)
     e shipment que falhe são tolerados; levanta só se o pedido não existir."""
     orders = await _orders_do_pedido(client, pedido)
+    reemb = _reembolso_ml(orders)
     claim_ids: list[str] = []
     for o in orders:
         for cid in _mediation_ids(o):
             if str(cid) not in claim_ids:
                 claim_ids.append(str(cid))
     if not claim_ids:
-        return None
+        # Sem caso — mas com estorno (cancelamento com reembolso) a coluna
+        # "Reembolso" ainda precisa saber. Sem os dois: desconhecido.
+        return _so_reembolso(reemb, None) if reemb.valor is not None else None
 
     cands: list[_ReturnCand] = []
     for cid in claim_ids:
@@ -1207,7 +1276,9 @@ async def _return_info_for_pedido(client: MercadoLivreClient, pedido: str) -> Re
             continue
         cands.extend(_return_candidate(cid, ret) for ret in _returns_as_list(rets))
     if not cands:
-        return None
+        # Caso sem devolução (mediação/reclamação só de dinheiro, como o
+        # 296695): nada de pacote, mas o reembolso conta.
+        return _so_reembolso(reemb, claim_ids[-1])
 
     vivos = [c for c in cands if c.live]
     esc = max(vivos or cands, key=_cand_key)
@@ -1281,6 +1352,10 @@ async def _return_info_for_pedido(client: MercadoLivreClient, pedido: str) -> Re
         acao_pendente=acao,
         prazo_acao=prazo,
         prazo_desconhecido=prazo_desconhecido,
+        reembolso=reemb.pago,
+        reembolso_valor=reemb.valor,
+        reembolso_em=reemb.em,
+        reembolso_detalhe=reemb.detalhe,
     )
 
 

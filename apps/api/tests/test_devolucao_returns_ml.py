@@ -144,6 +144,7 @@ async def test_devolucao_viva_com_rastreio_mapeia_campos(db, patch_ml):
             created_at=datetime(2026, 8, 20, 13, 0, tzinfo=UTC),
             updated_at=datetime(2026, 8, 22, 15, 0, tzinfo=UTC),
             return_id="5001",
+            reembolso=False,  # pedido sem pagamento estornado
         )
     }
     # Return já datado => não gasta chamada no claim.
@@ -299,7 +300,15 @@ async def test_pedido_sem_devolucao_fica_fora(db, patch_ml):
 
     out = await logistica_meli.returns_por_pedido(db, rows)
 
-    assert out == {}
+    # Sem mediação e sem estorno: desconhecido, fica fora. Claim sem return
+    # (mediação só de dinheiro, como o 296695): entra SÓ com o reembolso —
+    # sem status/rastreio — pra coluna "Reembolso" saber que não saiu nada.
+    assert out == {
+        "B2": ReturnInfo(
+            fonte="ml", status=None, tracking=None, carrier=None,
+            created_at=None, updated_at=None, return_id="5002", reembolso=False,
+        )
+    }
     assert fake.fetched("returns") == ["5002"]
     assert fake.fetched("shipment") == []
 
@@ -321,6 +330,7 @@ async def test_devolucao_aberta_sem_envio_ainda(db, patch_ml):
     assert out["B1"] == ReturnInfo(
         fonte="ml", status="opened", tracking=None, carrier=None,
         created_at=datetime(2026, 8, 30, 12, 0, tzinfo=UTC), updated_at=None, return_id="5001",
+        reembolso=False,
     )
     assert fake.fetched("shipment") == []
 

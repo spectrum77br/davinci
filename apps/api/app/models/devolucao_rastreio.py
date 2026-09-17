@@ -1,7 +1,8 @@
 from datetime import date, datetime
+from decimal import Decimal
 from uuid import UUID
 
-from sqlalchemy import Date, DateTime, ForeignKey, Text
+from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Numeric, Text
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -63,6 +64,20 @@ class DevolucaoRastreio(Base, TimestampMixin):
     aviso_prazo_acao_para: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # REEMBOLSO (migration 0288, Vinicius 17/09: "o importante é saber se
+    # estamos com o dinheiro ainda ou se já devolveu para o cliente"). True =
+    # já saiu dinheiro do NOSSO (a plataforma devolveu ao cliente e desconta da
+    # loja); False = nada saiu (caso vivo/cancelado, ou a plataforma pagou do
+    # próprio bolso — ML cobertura/BPP, Shopee compensação); NULL = não se sabe.
+    # Fontes: o caso no marketplace (returns_por_pedido) cruzado com o extrato
+    # financeiro já baixado (marketplace_order_financials). `_detalhe` é o
+    # texto do balão (de onde veio a resposta).
+    reembolso_auto: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    reembolso_valor_auto: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
+    reembolso_em_auto: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    reembolso_detalhe_auto: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Quando a devolução foi ABERTA no marketplace → "Em devolução desde" real
     # (o backfill da 0236 carimbou 02/09 em todo mundo).
     devolucao_criada_em: Mapped[datetime | None] = mapped_column(
