@@ -24,6 +24,7 @@ chamado como resolvido com um evento de sistema. Best-effort por chamado.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from decimal import Decimal, InvalidOperation
 from uuid import UUID
 
 import structlog
@@ -40,6 +41,12 @@ logger = structlog.get_logger()
 
 AUTOR = {cd.PLAT_ML: "Mercado Livre", cd.PLAT_TIKTOK: "TikTok Shop", cd.PLAT_SHOPEE: "Shopee"}
 AUTOR_ACOMP = "acompanhamento"
+# Abertura que falhou mas cujo caso segue vivo (ou já decidido) na plataforma.
+ABERTURA_FALHOU_ACOMPANHA = (
+    "shopee_ja_contestada", "shopee_prazo_contestacao_esgotado", "shopee_devolucao_encerrada",
+    "tiktok_ja_recusada", "tiktok_devolucao_encerrada",
+    "ml_claim_encerrada", "ml_claim_encerrada_sem_prejuizo",
+)
 
 # ---- TikTok --------------------------------------------------------------------
 _TT_STATUS_TXT: dict[str, tuple[str, bool]] = {
@@ -134,10 +141,12 @@ async def registrar_recebida(session: AsyncSession, ch: Chamado, plat: str, text
     return True
 
 
-def _encerrar(session: AsyncSession, ch: Chamado, motivo: str) -> None:
+def _encerrar(
+    session: AsyncSession, ch: Chamado, motivo: str, *, valor: Decimal | None = None
+) -> None:
     if ch.resolvido:
         return
-    session.add(chamados_svc.marcar_resolvido(ch, True, autor_nome=AUTOR_ACOMP))
+    session.add(chamados_svc.marcar_resolvido(ch, True, autor_nome=AUTOR_ACOMP, valor=valor))
     logger.info("chamado_devolucao_encerrado", chamado_id=str(ch.id), motivo=motivo)
 
 
@@ -281,6 +290,37 @@ async def _enviar_prova_shopee(
     return True
 
 
+def _brl(v: Decimal) -> str:
+    return f"R$ {v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+async def _compensacoes_pagas(client, order_sn: str) -> list[tuple[Decimal, str, str]]:
+    """Compensação que a Shopee JÁ PAGOU ao vendedor: `order_adjustment` do escrow
+    com motivo "... Compensation" e valor positivo → [(valor, dd/mm, motivo)].
+
+    Medido 17/09 (288567/290985/289899, disputas abertas À MÃO no Seller Center):
+    o `get_return_detail` fica ACCEPTED com `seller_compensation_status` VAZIO para
+    sempre — só o escrow mostra "Logistics Related Compensation" com valor e data.
+    """
+    fn = getattr(client, "get_escrow_detail", None)
+    if fn is None or not order_sn:
+        return []
+    esc = await fn(order_sn) or {}
+    ajustes = (
+        esc.get("order_adjustment") or (esc.get("order_income") or {}).get("order_adjustment") or []
+    )
+    out = []
+    for a in ajustes if isinstance(ajustes, list) else []:
+        motivo = str((a or {}).get("adjustment_reason") or "")
+        try:
+            valor = Decimal(str((a or {}).get("amount")))
+        except (InvalidOperation, ValueError):
+            continue
+        if "compensation" in motivo.lower() and valor > 0:
+            out.append((valor, _fmt_dt(a.get("date")), motivo))
+    return out
+
+
 async def _sync_shopee(session: AsyncSession, ch: Chamado, dev: Devolution | None) -> int:
     dev_q = dev or Devolution(conta=ch.conta or "", pedido_bling=ch.pedido_bling,
                               pedido_marketplace=ch.pedido_marketplace)
@@ -317,6 +357,27 @@ async def _sync_shopee(session: AsyncSession, ch: Chamado, dev: Devolution | Non
         novos += await registrar_recebida(session, ch, cd.PLAT_SHOPEE, txt)
         if fim:
             _encerrar(session, ch, f"shopee:{status}")
+    # 17/09 (Eduardo, 288567 "ganhamos e o robô deixou na aba"): disputa ganha
+    # aparece só como compensação paga no escrow do pedido.
+    tem_disputa = bool(det.get("dispute_reason")) or bool(comp.get("compensation_amount"))
+    if not ch.resolvido and tem_disputa:
+        order_sn = (dev_q.pedido_marketplace or ch.pedido_marketplace or "").strip()
+        try:
+            pagas = await _compensacoes_pagas(client, order_sn)
+        except Exception as e:  # noqa: BLE001 — escrow é apoio; o resto do sync vale
+            logger.info(
+                "chamado_devolucao_shopee_escrow_falhou", chamado_id=str(ch.id), err=str(e)[:120]
+            )
+            pagas = []
+        if pagas:
+            total = sum((v for v, _, _ in pagas), Decimal("0"))
+            partes = "; ".join(f"{_brl(v)}{(' em ' + d) if d else ''} ({m})" for v, d, m in pagas)
+            novos += await registrar_recebida(
+                session, ch, cd.PLAT_SHOPEE,
+                f"Shopee PAGOU a compensação ao vendedor — disputa ganha: {partes}.",
+            )
+            _encerrar(session, ch, "shopee:compensacao_paga",
+                      valor=total if ch.valor_recuperado is None else None)
     return novos
 
 
@@ -384,7 +445,14 @@ async def sync_respostas(session: AsyncSession) -> dict:
                 Chamado.resolvido.is_(False),
                 Chamado.chamado.is_not(None),
                 ChamadoMensagem.tipo == cd.TIPO_ABERTURA,
-                ChamadoMensagem.status == "enviada",
+                or_(
+                    ChamadoMensagem.status == "enviada",
+                    # 17/09: abertura que "falhou" porque a disputa já existia (feita à
+                    # mão), o prazo venceu ou o caso já fechou também tem desfecho na
+                    # plataforma — sem isto o chamado ficava aberto pra sempre (288567).
+                    and_(ChamadoMensagem.status == "falhou",
+                         ChamadoMensagem.erro.in_(ABERTURA_FALHOU_ACOMPANHA)),
+                ),
             )
             .order_by(Chamado.created_at)
         )

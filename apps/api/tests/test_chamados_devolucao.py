@@ -1246,6 +1246,35 @@ async def test_shopee_ja_contestada_a_mao_nao_e_prazo_vencido(client, make_user,
     hist = await _sistema(db, ch.id)
     assert any("physical damage" in t and "senha de uso" in t for t in hist), hist
 
+    # 17/09 (Eduardo, 288567): disputa feita à mão e GANHA — o return segue ACCEPTED
+    # com compensação sem status; só o escrow mostra a compensação paga. O
+    # acompanhamento tem que olhar esse chamado e fechá-lo com o valor.
+    from app.services import chamados_devolucao_sync as sync
+
+    escrow = {"order_income": {"total_adjustment_amount": 728.22}, "order_adjustment": []}
+
+    async def _escrow(order_sn):
+        assert order_sn == "2608114J8V05YV"
+        return escrow
+
+    fake.get_escrow_detail = _escrow
+    s0 = await sync.sync_respostas(db)
+    assert s0["verificados"] == 1 and s0["encerrados"] == 0, s0
+    await db.refresh(ch)
+    assert ch.resolvido is False
+    escrow["order_adjustment"] = [
+        {"adjustment_reason": "Shipping Fee Adjustment", "amount": -3.5, "currency": "BRL", "date": 1787911000},
+        {"adjustment_reason": "Logistics Related Compensation", "amount": 728.22, "currency": "BRL", "date": 1787911294},
+    ]
+    s1 = await sync.sync_respostas(db)
+    assert s1["encerrados"] == 1, s1
+    await db.refresh(ch)
+    assert ch.resolvido is True and float(ch.valor_recuperado) == 728.22
+    txts = await _recebidas(db, ch.id)
+    assert any("PAGOU a compensação" in t and "R$ 728,22" in t and "28/08" in t for t in txts), txts
+    assert any("lucro de R$ 728,22" in t for t in await _sistema(db, ch.id))
+    assert (await sync.sync_respostas(db))["verificados"] == 0
+
 
 async def test_ml_claim_encerrado_e_texto_manual_no_chamado(client, make_user, auth_as, db, ml, monkeypatch):
     """Medido 08/09 (283344): claim fechado pelo mediador em 18/08 e o campo
@@ -1578,3 +1607,45 @@ async def test_ml_texto_manual_no_chamado_tambem_vai_pro_formulario(client, make
     assert msg.status == "pendente" and msg.canal == "robo"
     assert ch.canal == "robo" and ch.chamado is None
     assert "aberto manual" in (ch.observacao or "")
+
+
+async def test_agendar_disparo_foto_logo_depois_do_create_reagenda(monkeypatch):
+    """17/09 (292317): create enfileira o disparo (sai "sem foto"); as fotos chegam
+    7 s depois e o enqueue com o mesmo _job_id volta None — antes o disparo das
+    fotos sumia. Agora reagenda um disparo adiado com outro id."""
+    from types import SimpleNamespace
+    from uuid import uuid4
+
+    from app import worker_pool
+
+    chamadas: list[dict] = []
+    existentes: set[str] = set()
+
+    class _Pool:
+        async def enqueue_job(self, fn, *args, _job_id=None, _defer_by=None):
+            chamadas.append({"fn": fn, "args": args, "id": _job_id, "defer": _defer_by})
+            if _job_id in existentes:
+                return None
+            existentes.add(_job_id)
+            return SimpleNamespace(job_id=_job_id)
+
+    async def _pool():
+        return _Pool()
+
+    class _Relogio(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 9, 17, 10, 46, 25, tzinfo=UTC)
+
+    monkeypatch.setattr(worker_pool, "get_arq_pool", _pool)
+    monkeypatch.setattr(svc, "ENFILEIRAR", True)
+    monkeypatch.setattr(svc, "datetime", _Relogio)
+    ch = SimpleNamespace(id=uuid4())
+    await svc.agendar_disparo(None, ch, None)  # create
+    assert len(chamadas) == 1 and chamadas[0]["defer"] is None
+    await svc.agendar_disparo(None, ch, None)  # 1ª foto: id fixo já existe → adiado
+    assert len(chamadas) == 3
+    assert chamadas[2]["id"] != chamadas[0]["id"] and chamadas[2]["id"].startswith(f"chamado_devolucao_disparar:{ch.id}:")
+    assert chamadas[2]["defer"] == svc.DISPARO_ADIADO
+    await svc.agendar_disparo(None, ch, None)  # 2ª foto no mesmo instante: mesma vaga adiada, nada novo roda
+    assert [c["id"] for c in chamadas].count(chamadas[2]["id"]) == 2

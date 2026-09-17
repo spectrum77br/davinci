@@ -156,6 +156,9 @@ LINK_SAFET_AMAZON = "https://sellercentral.amazon.com.br/safet-claims"
 
 # Em teste o disparo roda inline na mesma sessão (sem Redis).
 ENFILEIRAR = True
+# Disparo reagendado quando já existe um pro mesmo chamado (foto chegando logo
+# depois do create): espera as fotos terminarem de subir.
+DISPARO_ADIADO = timedelta(seconds=45)
 
 
 class _PendenteError(Exception):
@@ -1594,11 +1597,27 @@ async def agendar_disparo(session: AsyncSession, ch: Chamado, dev: Devolution) -
             # _job_id fixo por chamado: create + upload de foto no mesmo segundo
             # enfileiravam DOIS disparos que corriam em paralelo (visto 07/09:
             # um "sem foto" e o outro mandou a disputa sem evidência).
-            await pool.enqueue_job(
+            job = await pool.enqueue_job(
                 "chamado_devolucao_disparar",
                 str(ch.id),
                 _job_id=f"chamado_devolucao_disparar:{ch.id}",
             )
+            if job is None:
+                # 17/09 (292317): o id fixo já existia (disparo do create rodando, ou
+                # o resultado dele guardado por 1 h) e o disparo das FOTOS, que
+                # chegaram 7 s depois, era descartado em silêncio — o chamado ficou
+                # "aguardando foto" com 5 fotos anexadas. Reagenda um disparo ADIADO
+                # (uma vaga a cada 10 s por chamado); o lock do job no worker garante
+                # que dois disparos do mesmo chamado nunca rodam juntos.
+                await pool.enqueue_job(
+                    "chamado_devolucao_disparar",
+                    str(ch.id),
+                    _job_id=(
+                        f"chamado_devolucao_disparar:{ch.id}:"
+                        f"{int(datetime.now(UTC).timestamp()) // 10}"
+                    ),
+                    _defer_by=DISPARO_ADIADO,
+                )
             return
         except Exception as e:  # noqa: BLE001 — fila indisponível → inline
             logger.warning(

@@ -1425,6 +1425,12 @@ async def chamado_devolucao_disparar(ctx: dict, chamado_id: str) -> None:
     de devoluções ao marcar o motivo / anexar foto; o cron :25 retenta o que
     ficar pendente."""
     async with session_scope() as s:
+        # 17/09: create + fotos agora podem gerar 2 jobs (o 2º adiado) — um de cada
+        # vez; o 2º vê a abertura já `enviada` e não contesta de novo.
+        await s.execute(
+            text("SELECT pg_advisory_xact_lock(hashtext(:k))"),
+            {"k": f"chamado_devolucao_disparar:{chamado_id}"},
+        )
         msg = await chamados_devolucao.disparar_por_id(s, UUID(chamado_id))
         await s.commit()
     logger.info(
