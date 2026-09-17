@@ -119,6 +119,7 @@ async def test_devolucao_viva_com_rastreio_mapeia_campos(db, monkeypatch):
             # respondeu": o prazo de resposta fica DESCONHECIDO (o sync
             # mantém o da rodada anterior), não apagado.
             prazo_desconhecido=True,
+            return_type="RETURN_AND_REFUND",  # needs_logistics=True: volta pacote
             reembolso=False,  # PROCESSING: a Shopee ainda não pagou o cliente
         )
     }
@@ -238,6 +239,7 @@ async def test_pedido_sem_devolucao_fica_fora_e_ignora_linhas_fora_do_escopo(mon
             created_at=out["100"].created_at, updated_at=out["100"].updated_at,
             return_id="RS-1",
             prazo_desconhecido=True,  # client falso sem get_return_detail
+            return_type="RETURN_AND_REFUND",
             # ACCEPTED = reembolso pago ao cliente (coluna "Reembolso").
             reembolso=True,
             reembolso_valor=None,  # o _ret do teste não traz refund_amount

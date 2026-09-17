@@ -1,6 +1,8 @@
 from datetime import date, datetime
 from uuid import UUID
 
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
@@ -304,6 +306,9 @@ class DevolutionLookupOut(BaseModel):
     ja_devolvido: bool = False
 
 
+FilaDevolucao = Literal["acompanhamento", "fraude"]
+
+
 class AcompanhamentoItemOut(BaseModel):
     """Linha (por ITEM do pedido) da aba Acompanhamento — pedidos hoje em
     'Aguardando Devolução' (83957) no Bling, com cliente e rastreio manual."""
@@ -354,6 +359,11 @@ class AcompanhamentoItemOut(BaseModel):
     reembolso_valor: float | None = None
     reembolso_em: datetime | None = None
     reembolso_detalhe: str | None = None
+    # PAINEL (17/09): 'acompanhamento' = volta pacote; 'fraude' = só dinheiro
+    # (chegou vazio, reembolso sem devolução, mediação). `fila_manual` = alguém
+    # moveu na mão (a regra automática não mexe mais).
+    fila: FilaDevolucao = "acompanhamento"
+    fila_manual: bool = False
 
 
 class AcompanhamentoOut(BaseModel):
@@ -374,6 +384,9 @@ class AcompanhamentoRastreioPatch(BaseModel):
     em_devolucao_desde: date | None = None
     # Observação livre (10/09): "" limpa; omitido não mexe.
     observacao: str | None = None
+    # Mover entre os painéis (17/09): 'acompanhamento' | 'fraude'. Omitido não
+    # mexe. Fixa a escolha (vale mais que a regra automática).
+    fila: FilaDevolucao | None = None
 
 
 class AcompanhamentoRastreioOut(BaseModel):
@@ -404,3 +417,6 @@ class AcompanhamentoRastreioOut(BaseModel):
     reembolso_valor: float | None = None
     reembolso_em: datetime | None = None
     reembolso_detalhe: str | None = None
+    # Painel efetivo (mesma conta do GET), pro front espelhar.
+    fila: FilaDevolucao = "acompanhamento"
+    fila_manual: bool = False

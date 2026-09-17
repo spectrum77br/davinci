@@ -306,7 +306,8 @@ async def test_pedido_sem_devolucao_fica_fora(db, patch_ml):
     assert out == {
         "B2": ReturnInfo(
             fonte="ml", status=None, tracking=None, carrier=None,
-            created_at=None, updated_at=None, return_id="5002", reembolso=False,
+            created_at=None, updated_at=None, return_id="5002", return_type="REFUND",
+            reembolso=False,
         )
     }
     assert fake.fetched("returns") == ["5002"]

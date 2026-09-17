@@ -1224,7 +1224,9 @@ def _reembolso_ml(orders: list[dict]) -> _ReembolsoML:
 
 def _so_reembolso(reemb: _ReembolsoML, claim_id: str | None) -> ReturnInfo:
     """Pedido com caso no ML mas SEM devolução (mediação/reclamação sem pacote de
-    volta, ou cancelamento com estorno): só a parte do reembolso interessa."""
+    volta, ou cancelamento com estorno): só a parte do reembolso interessa.
+    `return_type` "REFUND" (vocabulário do TikTok) = não vem pacote — é o que
+    manda o pedido pra aba Fraude."""
     return ReturnInfo(
         fonte="ml",
         status=None,
@@ -1233,6 +1235,7 @@ def _so_reembolso(reemb: _ReembolsoML, claim_id: str | None) -> ReturnInfo:
         created_at=None,
         updated_at=None,
         return_id=claim_id,
+        return_type="REFUND",
         reembolso=reemb.pago,
         reembolso_valor=reemb.valor,
         reembolso_em=reemb.em,

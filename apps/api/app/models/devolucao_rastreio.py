@@ -78,6 +78,16 @@ class DevolucaoRastreio(Base, TimestampMixin):
         DateTime(timezone=True), nullable=True
     )
     reembolso_detalhe_auto: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # PAINEL (migration 0290, Vinicius 17/09): a aba Devoluções se divide em
+    # "Acompanhamento" (volta pacote — uma pessoa cuida) e "Fraude" (só
+    # dinheiro: "chegou vazio", reembolso sem devolução, mediação — outra
+    # pessoa cuida). A regra automática é o tipo do caso (`devolucao_tipo_auto`
+    # REFUND = fraude); quem mover na mão fixa aqui, e a regra não mexe mais.
+    # 'acompanhamento' | 'fraude' | NULL (automático).
+    fila_manual: Mapped[str | None] = mapped_column(Text, nullable=True)
+    fila_manual_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     # Quando a devolução foi ABERTA no marketplace → "Em devolução desde" real
     # (o backfill da 0236 carimbou 02/09 em todo mundo).
     devolucao_criada_em: Mapped[datetime | None] = mapped_column(

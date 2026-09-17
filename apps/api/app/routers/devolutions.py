@@ -553,9 +553,28 @@ _STATUS_AUTO_CHEGOU = {
     "ml": {"DELIVERED"},
     "tiktok": {"RETURN_OR_REFUND_REQUEST_SUCCESS", "RETURN_OR_REFUND_REQUEST_COMPLETE"},
 }
-# TikTok `return_type` em que NÃO vem pacote: o caso fecha com o dinheiro
-# devolvido e o produto com o cliente — "Chegou em" não se aplica.
+# `return_type` em que NÃO vem pacote (TikTok REFUND; Shopee needs_logistics
+# = false e mediação do ML sem devolução também gravam "REFUND"): o caso fecha
+# com o dinheiro devolvido e o produto com o cliente — "Chegou em" não se
+# aplica, e o pedido vai pro painel Fraude.
 _TIPO_AUTO_SEM_PACOTE = {"REFUND"}
+
+_FILAS = ("acompanhamento", "fraude")
+
+
+def _fila(fila_manual: str | None, devolucao_tipo_auto: str | None) -> tuple[str, bool]:
+    """Painel do pedido na tela Devoluções (Vinicius 17/09): "Acompanhamento"
+    = volta pacote (uma pessoa cuida do que foi/vai ser devolvido); "Fraude" =
+    só dinheiro — cliente alega que chegou vazio, pede reembolso sem devolver,
+    mediação. Regra: tipo do caso sem pacote → fraude; senão acompanhamento.
+    Quem moveu na mão (botão da tela) fixa o painel e a regra não mexe mais.
+    Devolve (painel, foi_movido_na_mao)."""
+    manual = (fila_manual or "").strip().lower()
+    if manual in _FILAS:
+        return manual, True
+    if (devolucao_tipo_auto or "").strip().upper() in _TIPO_AUTO_SEM_PACOTE:
+        return "fraude", False
+    return "acompanhamento", False
 
 
 def _chegou_em(
@@ -732,6 +751,7 @@ async def acompanhamento_rows(session: AsyncSession) -> list[dict]:
                     r.reembolso_valor_auto  AS reembolso_valor,
                     r.reembolso_em_auto     AS reembolso_em,
                     r.reembolso_detalhe_auto AS reembolso_detalhe,
+                    r.fila_manual,
                     v.plataforma_bling          AS plataforma,
                     COALESCE(NULLIF(btrim(v.loja_nome), ''),
                              'Loja ' || v.bling_loja_id, 'Sem loja') AS loja,
@@ -800,6 +820,7 @@ async def acompanhamento_rows(session: AsyncSession) -> list[dict]:
         status_auto = d.pop("devolucao_status_auto", None)
         tipo_auto = d.pop("devolucao_tipo_auto", None)
         fonte_auto = d.pop("fonte_auto", None)
+        d["fila"], d["fila_manual"] = _fila(d.pop("fila_manual", None), tipo_auto)
         devolucao_atualizada_em = d.pop("devolucao_atualizada_em", None)
         d["prazo_resposta"], d["acao_resposta"] = _prazo_resposta(
             fonte_auto, d.pop("acao_auto", None), d.pop("prazo_acao_auto", None)
@@ -907,6 +928,12 @@ async def patch_acompanhamento_rastreio(
     if "observacao" in data:
         # Recado livre pra quem acompanha (10/09): "" limpa; omitido não mexe.
         row.observacao = (data["observacao"] or "").strip() or None
+    if data.get("fila"):
+        # Mover entre os painéis (17/09): fixa a escolha; a regra automática
+        # (tipo do caso) não mexe mais neste pedido.
+        if data["fila"] != row.fila_manual:
+            row.fila_manual = data["fila"]
+            row.fila_manual_at = datetime.now(UTC)
     row.updated_by = user.id
     await session.commit()
     await session.refresh(row)
@@ -989,6 +1016,8 @@ async def patch_acompanhamento_rastreio(
             "reembolso_valor": row.reembolso_valor_auto,
             "reembolso_em": row.reembolso_em_auto,
             "reembolso_detalhe": row.reembolso_detalhe_auto,
+            "fila": _fila(row.fila_manual, row.devolucao_tipo_auto)[0],
+            "fila_manual": _fila(row.fila_manual, row.devolucao_tipo_auto)[1],
             "devolucao_chegou_em": _chegou_em(
                 plataforma=lg["lg_plataforma"] if lg else None,
                 meli_status=lg["lg_meli_status"] if lg else None,

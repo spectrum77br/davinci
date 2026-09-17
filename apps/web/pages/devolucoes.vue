@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import {
   AlertCircle,
+  ArrowRightLeft,
   CheckCircle2,
   ChevronLeft,
   ChevronRight,
@@ -17,6 +18,7 @@ import {
   Plus,
   RotateCcw,
   Search,
+  ShieldAlert,
   Trash2,
   Undo2,
   X,
@@ -852,7 +854,13 @@ type AcompanhamentoRow = {
   reembolso_valor: number | null
   reembolso_em: string | null
   reembolso_detalhe: string | null
+  // Painel (17/09): 'acompanhamento' = volta pacote; 'fraude' = só dinheiro
+  // (chegou vazio, reembolso sem devolução, mediação). `fila_manual` = alguém
+  // moveu na mão pelo botão da linha.
+  fila: Fila
+  fila_manual: boolean
 }
+type Fila = 'acompanhamento' | 'fraude'
 type AcompanhamentoPage = { items: AcompanhamentoRow[]; total_pedidos: number }
 type RastreioSaved = {
   pedido_bling: string
@@ -875,12 +883,20 @@ type RastreioSaved = {
   reembolso_valor: number | null
   reembolso_em: string | null
   reembolso_detalhe: string | null
+  fila: Fila
+  fila_manual: boolean
 }
 
-type Tab = 'acompanhamento' | 'lancamentos'
-// Acompanhamento é a aba inicial (folha do Eduardo, 2026-09-02); a aba
-// Lançamentos guarda TODO o conteúdo antigo da página, intacto.
+type Tab = 'acompanhamento' | 'fraude' | 'lancamentos'
+// Acompanhamento é a aba inicial (folha do Eduardo, 2026-09-02); Fraude
+// (Vinicius 17/09) é a mesma tabela, só com os pedidos em que NÃO volta
+// pacote (só dinheiro) — outra pessoa cuida; a aba Lançamentos guarda TODO o
+// conteúdo antigo da página, intacto.
 const tab = ref<Tab>('acompanhamento')
+// As abas Acompanhamento e Fraude compartilham a lista e o markup: o que muda
+// é o painel (`fila`) de cada linha.
+const abaDePedidos = computed(() => tab.value === 'acompanhamento' || tab.value === 'fraude')
+const filaAtiva = computed<Fila>(() => (tab.value === 'fraude' ? 'fraude' : 'acompanhamento'))
 
 const acompRows = ref<AcompanhamentoRow[]>([])
 const acompLoading = ref(false)
@@ -929,10 +945,18 @@ const acompLojas = computed(() => {
   return [...s].sort()
 })
 
+// Linhas do painel aberto (Acompanhamento ou Fraude) — cards e filtros
+// contam só o que a pessoa daquele painel vê.
+const acompNaFila = computed(() => acompRows.value.filter((r) => r.fila === filaAtiva.value))
+const acompFilaTotais = computed(() => ({
+  acompanhamento: pedidosDe(acompRows.value.filter((r) => r.fila === 'acompanhamento')).size,
+  fraude: pedidosDe(acompRows.value.filter((r) => r.fila === 'fraude')).size,
+}))
+
 const acompFiltered = computed(() => {
   const term = acompSearch.value.trim().toLowerCase()
   const minDias = acompParadoFilter.value === 'all' ? null : Number(acompParadoFilter.value)
-  return acompRows.value.filter((r) => {
+  return acompNaFila.value.filter((r) => {
     if (acompPlataformaFilter.value !== 'all' && r.plataforma !== acompPlataformaFilter.value) return false
     if (acompLojaFilter.value !== 'all' && r.loja !== acompLojaFilter.value) return false
     if (minDias != null && (r.dias_em_devolucao ?? -1) < minDias) return false
@@ -956,12 +980,12 @@ function pedidosDe(rows: AcompanhamentoRow[]): Set<string> {
   for (const r of rows) if (r.pedido_bling) s.add(r.pedido_bling)
   return s
 }
-const acompTotalPedidos = computed(() => pedidosDe(acompRows.value).size)
-const acompSemRastreio = computed(() => pedidosDe(acompRows.value.filter((r) => !r.rastreio)).size)
-const acompSemLocalizacao = computed(() => pedidosDe(acompRows.value.filter((r) => !r.localizacao)).size)
-const acompParados15 = computed(() => pedidosDe(acompRows.value.filter((r) => (r.dias_em_devolucao ?? 0) >= 15)).size)
+const acompTotalPedidos = computed(() => pedidosDe(acompNaFila.value).size)
+const acompSemRastreio = computed(() => pedidosDe(acompNaFila.value.filter((r) => !r.rastreio)).size)
+const acompSemLocalizacao = computed(() => pedidosDe(acompNaFila.value.filter((r) => !r.localizacao)).size)
+const acompParados15 = computed(() => pedidosDe(acompNaFila.value.filter((r) => (r.dias_em_devolucao ?? 0) >= 15)).size)
 // Pedidos cujo prazo de resposta na plataforma vence em menos de 24 h (ou já venceu).
-const acompPrazoUrgente = computed(() => pedidosDe(acompRows.value.filter((r) => contestacaoUrgente(r.prazo_resposta))).size)
+const acompPrazoUrgente = computed(() => pedidosDe(acompNaFila.value.filter((r) => contestacaoUrgente(r.prazo_resposta))).size)
 
 // Data pura (YYYY-MM-DD) SEM passar por new Date() — evita o clássico
 // "-1 dia" do fuso (Date interpreta como meia-noite UTC).
@@ -1022,10 +1046,45 @@ async function saveRastreio(
         r.reembolso_valor = res.reembolso_valor
         r.reembolso_em = res.reembolso_em
         r.reembolso_detalhe = res.reembolso_detalhe
+        r.fila = res.fila
+        r.fila_manual = res.fila_manual
       }
     }
   } catch (e: any) {
     pushToast({ kind: 'error', title: 'Erro ao salvar rastreio', lines: [apiError(e)] })
+  } finally {
+    const next = new Set(acompSaving.value)
+    next.delete(key)
+    acompSaving.value = next
+  }
+}
+
+// Mover o pedido pro outro painel (17/09): fixa a escolha no servidor (a regra
+// automática não mexe mais) e a linha some desta aba na hora — todas as
+// linhas do mesmo pedido vão juntas.
+async function moverFila(row: AcompanhamentoRow, destino: Fila) {
+  if (!canEdit.value || !row.pedido_bling || row.fila === destino) return
+  const key = `${row.pedido_bling}|fila`
+  if (acompSaving.value.has(key)) return
+  acompSaving.value = new Set([...acompSaving.value, key])
+  try {
+    const res = await api<RastreioSaved>(
+      `/api/devolutions/acompanhamento/${encodeURIComponent(row.pedido_bling)}`,
+      { method: 'PATCH', body: { fila: destino } },
+    )
+    for (const r of acompRows.value) {
+      if (r.pedido_bling === res.pedido_bling) {
+        r.fila = res.fila
+        r.fila_manual = res.fila_manual
+      }
+    }
+    pushToast({
+      kind: 'success',
+      title: destino === 'fraude' ? 'Movido para Fraude' : 'Movido para Acompanhamento',
+      lines: [`Pedido ${row.pedido_bling}`],
+    })
+  } catch (e: any) {
+    pushToast({ kind: 'error', title: 'Erro ao mover o pedido', lines: [apiError(e)] })
   } finally {
     const next = new Set(acompSaving.value)
     next.delete(key)
@@ -1619,7 +1678,19 @@ async function backfillAddresses() {
       >
         <PackageSearch class="size-4" />
         Acompanhamento
-        <span class="rounded bg-muted px-1.5 text-[11px] tabular-nums">{{ acompTotalPedidos }}</span>
+        <span class="rounded bg-muted px-1.5 text-[11px] tabular-nums">{{ acompFilaTotais.acompanhamento }}</span>
+      </button>
+      <!-- Fraude (17/09): pedidos em que NÃO volta pacote — só dinheiro
+           (chegou vazio, reembolso sem devolução, mediação). Mesma tabela. -->
+      <button
+        class="px-3 py-1.5 rounded text-sm transition-colors inline-flex items-center gap-1.5"
+        :class="tab === 'fraude' ? 'bg-background shadow-sm font-medium' : 'hover:bg-background/60 text-muted-foreground'"
+        title="Pedidos em que não volta pacote: o cliente alega que chegou vazio / não recebeu, pede reembolso sem devolver ou abre mediação só de dinheiro"
+        @click="tab = 'fraude'"
+      >
+        <ShieldAlert class="size-4" />
+        Fraude
+        <span class="rounded bg-muted px-1.5 text-[11px] tabular-nums">{{ acompFilaTotais.fraude }}</span>
       </button>
       <button
         class="px-3 py-1.5 rounded text-sm transition-colors inline-flex items-center gap-1.5"
@@ -1631,15 +1702,16 @@ async function backfillAddresses() {
       </button>
     </div>
 
-    <!-- ══ Aba Acompanhamento — pedidos em Aguardando Devolução no Bling ══ -->
-    <template v-if="tab === 'acompanhamento'">
+    <!-- ══ Abas Acompanhamento / Fraude — pedidos em Aguardando Devolução no
+         Bling; a mesma tabela, filtrada pelo painel (`fila`) de cada linha ══ -->
+    <template v-if="abaDePedidos">
       <div v-if="acompError" class="flex items-center gap-2 rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-400">
         <AlertCircle class="size-4" />
         {{ acompError }}
       </div>
 
       <div class="grid grid-cols-2 lg:grid-cols-4 gap-3">
-        <StatCard label="Pedidos em devolução" :value="acompTotalPedidos" :icon="PackageSearch" />
+        <StatCard :label="tab === 'fraude' ? 'Casos de fraude' : 'Pedidos em devolução'" :value="acompTotalPedidos" :icon="tab === 'fraude' ? ShieldAlert : PackageSearch" />
         <StatCard label="Sem rastreio" :value="acompSemRastreio" :icon="AlertCircle" tone="warning" />
         <StatCard label="Sem localização" :value="acompSemLocalizacao" :icon="Clock" tone="warning" />
         <StatCard label="Parados 15+ dias" :value="acompParados15" :icon="Clock" tone="danger" />
@@ -1679,7 +1751,7 @@ async function backfillAddresses() {
           Responder em 24 h
         </label>
         <span class="ml-auto text-xs text-muted-foreground">
-          {{ acompFiltered.length }} de {{ acompRows.length }} itens · rastreio, localização e observação salvam ao sair do campo
+          {{ acompFiltered.length }} de {{ acompNaFila.length }} itens · rastreio, localização e observação salvam ao sair do campo
         </span>
       </div>
 
@@ -1718,17 +1790,20 @@ async function backfillAddresses() {
                    pacote — salva ao sair do campo, como rastreio/localização. -->
               <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[240px] bg-emerald-50 dark:bg-emerald-900/20 border-l-[3px] border-gray-400 dark:border-gray-600" title="Recado livre pra quem acompanha este pacote — salva ao sair do campo">Observação</th>
               <th class="px-2 py-1 text-center font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[95px] bg-emerald-50 dark:bg-emerald-900/20">Lançada</th>
+              <!-- Painel (17/09): botão pra mover o pedido pro outro painel quando a
+                   plataforma classificou errado (a regra automática não mexe mais). -->
+              <th class="px-2 py-1 text-center font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[120px] bg-emerald-50 dark:bg-emerald-900/20" title="Acompanhamento = volta pacote; Fraude = só dinheiro (chegou vazio, reembolso sem devolução). A plataforma decide sozinha pelo tipo do caso; o botão fixa o painel na mão.">Painel</th>
             </tr>
           </thead>
           <tbody>
             <tr v-if="acompLoading && !acompRows.length">
-              <td colspan="20" class="py-8 text-center text-muted-foreground">
+              <td colspan="21" class="py-8 text-center text-muted-foreground">
                 <Loader2 class="size-4 inline animate-spin mr-1.5" />
                 carregando…
               </td>
             </tr>
             <tr v-else-if="!acompFiltered.length">
-              <td colspan="20" class="py-8 text-center text-muted-foreground">nenhum pedido aguardando devolução</td>
+              <td colspan="21" class="py-8 text-center text-muted-foreground">{{ tab === 'fraude' ? 'nenhum caso de fraude' : 'nenhum pedido aguardando devolução' }}</td>
             </tr>
             <tr
               v-for="row in acompFiltered"
@@ -1856,6 +1931,19 @@ async function backfillAddresses() {
                   @click="goLancar(row)"
                 >
                   lançar
+                </Button>
+              </td>
+              <td class="px-1 py-0.5 text-center bg-emerald-50/40 dark:bg-emerald-900/10">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  class="h-6 px-2 text-[11px]"
+                  :disabled="!canEdit || isSavingRastreio(row.pedido_bling, 'fila')"
+                  :title="(row.fila_manual ? 'Movido na mão. ' : 'Classificado pela plataforma. ') + (row.fila === 'fraude' ? 'Mandar de volta pro Acompanhamento (volta pacote)' : 'Mandar pra Fraude (só dinheiro, não volta pacote)')"
+                  @click="moverFila(row, row.fila === 'fraude' ? 'acompanhamento' : 'fraude')"
+                >
+                  <ArrowRightLeft class="size-3 mr-1" />
+                  {{ row.fila === 'fraude' ? 'Acompanhamento' : 'Fraude' }}
                 </Button>
               </td>
             </tr>

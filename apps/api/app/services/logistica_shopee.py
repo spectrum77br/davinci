@@ -465,6 +465,21 @@ def _reembolso_do_caso(
     )
 
 
+def _tipo_do_caso(d: dict) -> str | None:
+    """`needs_logistics` da Shopee → tipo no vocabulário do TikTok, que a aba
+    Acompanhamento já entende: False = SÓ reembolso (o cliente fica com o
+    produto; "não recebi"/"chegou vazio") → "REFUND"; True = pacote volta →
+    "RETURN_AND_REFUND"; ausente → None. É isso que separa a aba Fraude
+    (Vinicius 17/09: "o cliente alega que chegou vazio, pede reembolso sem
+    devolução — outra pessoa cuida") da Acompanhamento."""
+    needs = d.get("needs_logistics")
+    if needs is False:
+        return "REFUND"
+    if needs is True:
+        return "RETURN_AND_REFUND"
+    return None
+
+
 def _return_info(d: dict, status: str) -> ReturnInfo:
     tracking = d.get("tracking_number")
     tracking = tracking.strip() if isinstance(tracking, str) else None
@@ -478,6 +493,7 @@ def _return_info(d: dict, status: str) -> ReturnInfo:
         created_at=epoch_to_dt(d.get("create_time")),
         updated_at=epoch_to_dt(d.get("update_time")),
         return_id=return_sn or None,
+        return_type=_tipo_do_caso(d),
         reembolso=pago,
         reembolso_valor=valor,
         reembolso_em=em,
