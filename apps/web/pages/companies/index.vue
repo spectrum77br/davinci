@@ -27,6 +27,7 @@ type CompanyOut = {
   razao_social: string
   apelido: string
   responsavel_id: string | null
+  responsavel_nome: string | null
   uf: string | null
   cnpj: string | null
   inscricao_estadual: string | null
@@ -88,47 +89,15 @@ async function refresh() {
 }
 await refresh()
 
-// Distinct cpf_name list (responsáveis), alphabetical, lowered for keys.
+// Responsáveis conhecidos (para o filtro e para o autocompletar do campo),
+// tirados da própria grade — o Responsável é um dado DA EMPRESA.
 const responsaveisOpts = computed(() => {
   const set = new Set<string>()
-  for (const s of storeInfos.value) {
-    const n = (s.cpf_name || '').trim()
+  for (const r of grid.value?.rows || []) {
+    const n = (r.company.responsavel_nome || '').trim()
     if (n) set.add(n)
   }
   return Array.from(set).sort((a, b) => a.localeCompare(b, 'pt-BR'))
-})
-
-// Aggregate store_info per company.apelido for the Responsável column.
-// Returns the first non-empty cpf_name + the list of store_info ids that
-// share this account_name (so editing can fan out a PATCH to each).
-const respByApelido = computed(() => {
-  const m = new Map<string, { cpf: string; ids: string[] }>()
-  for (const s of storeInfos.value) {
-    const k = normConta(s.account_name)
-    if (!k) continue
-    const e = m.get(k) || { cpf: '', ids: [] }
-    e.ids.push(s.id)
-    if (!e.cpf && s.cpf_name) e.cpf = s.cpf_name
-    m.set(k, e)
-  }
-  return m
-})
-
-// Companies linked to a given responsável: a company "has" the responsavel
-// when at least one of its store_info rows (matched by store_info.platform
-// + store.apelido_override or stores+apelido) shares the cpf_name. Pragmatic
-// match: company.apelido (lower) equals any store_info.account_name (lower)
-// linked to that responsavel. Falls back to true when no filter selected.
-const responsavelByCompany = computed(() => {
-  const filtered = filterResponsavel.value
-    ? storeInfos.value.filter((s) => (s.cpf_name || '').trim() === filterResponsavel.value)
-    : storeInfos.value
-  const namesByLower = new Set<string>()
-  for (const s of filtered) {
-    const n = normConta(s.account_name)
-    if (n) namesByLower.add(n)
-  }
-  return namesByLower
 })
 
 const filteredRows = computed(() => {
@@ -137,14 +106,12 @@ const filteredRows = computed(() => {
   if (filterUf.value) rows = rows.filter(r => (r.company.uf || '').toUpperCase() === filterUf.value.toUpperCase())
   if (filterMk.value) rows = rows.filter(r => r.stores[filterMk.value] != null)
   if (filterResponsavel.value) {
-    const allowed = responsavelByCompany.value
-    rows = rows.filter(r => allowed.has(normConta(r.company.apelido)))
+    rows = rows.filter(r => (r.company.responsavel_nome || '').trim() === filterResponsavel.value)
   }
   if (search.value) {
     const q = search.value.toLowerCase()
-    const respMap = respByApelido.value
     rows = rows.filter(r => {
-      const resp = (respMap.get(normConta(r.company.apelido))?.cpf || '').toLowerCase()
+      const resp = (r.company.responsavel_nome || '').toLowerCase()
       return (
         r.company.razao_social.toLowerCase().includes(q) ||
         r.company.apelido.toLowerCase().includes(q) ||
@@ -194,53 +161,37 @@ async function createCompany() {
 }
 
 // ---------- inline Responsável edit ----------
-const editingResp = ref<string | null>(null) // apelido_lower being edited
+// A chave é o ID DA EMPRESA, não o apelido: "dream 2" e "Dream 2" são duas
+// empresas com o mesmo apelido normalizado — pelo apelido, clicar numa abria
+// as duas e salvar numa escrevia na outra.
+const editingResp = ref<string | null>(null) // company.id being edited
 const respValue = ref('')
 const respSaving = ref(false)
-function startEditResp(apelido: string) {
+function startEditResp(row: GridRow) {
   if (!canEdit.value) return
-  const k = normConta(apelido)
-  editingResp.value = k
-  respValue.value = respByApelido.value.get(k)?.cpf || ''
+  editingResp.value = row.company.id
+  respValue.value = row.company.responsavel_nome || ''
 }
 function cancelEditResp() {
   editingResp.value = null
   respValue.value = ''
 }
-async function commitEditResp(apelido: string) {
-  const k = normConta(apelido)
-  if (editingResp.value !== k) return
+async function commitEditResp(row: GridRow) {
+  if (editingResp.value !== row.company.id) return
   const next = respValue.value.trim()
-  const entry = respByApelido.value.get(k)
-  if (next === (entry?.cpf || '')) {
-    cancelEditResp()
-    return
-  }
-  if (!entry || entry.ids.length === 0) {
-    // No store_info row exists yet — Responsável lives on store_info.cpf_name,
-    // so we can't persist it until at least one loja exists for this company.
-    error.value = `Crie uma loja para "${apelido}" antes de atribuir um responsável.`
+  if (next === (row.company.responsavel_nome || '')) {
     cancelEditResp()
     return
   }
   respSaving.value = true
   try {
-    // Fan out the patch: every store_info row sharing this account_name
-    // gets the same cpf_name. Mirrors how the Responsável filter aggregates.
-    await Promise.all(
-      entry.ids.map((id) =>
-        api(`/api/pricing/store-info/${id}`, {
-          method: 'PATCH',
-          body: { cpf_name: next || null },
-        }),
-      ),
-    )
-    // Patch in-memory so the cell updates without a full refresh.
-    for (const s of storeInfos.value) {
-      if (normConta(s.account_name) === k) {
-        s.cpf_name = next || null
-      }
-    }
+    // O Responsável é da EMPRESA: grava no cadastro dela e não depende de
+    // existir loja. O responsável de cada LOJA continua na tela Lojas.
+    await api(`/api/companies/${row.company.id}`, {
+      method: 'PATCH',
+      body: { responsavel_nome: next || null },
+    })
+    row.company.responsavel_nome = next || null
   } catch (e: any) {
     error.value = e?.data?.detail?.code || e?.message || 'erro'
   } finally {
@@ -687,33 +638,29 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
             <td
               class="px-3 py-2 text-xs max-w-40"
               :class="{
-                'cursor-pointer hover:bg-accent/30':
-                  canEdit && editingResp !== normConta(row.company.apelido),
+                'cursor-pointer hover:bg-accent/30': canEdit && editingResp !== row.company.id,
               }"
-              :title="respByApelido.get(normConta(row.company.apelido))?.cpf || ''"
-              @click="
-                canEdit
-                && editingResp !== normConta(row.company.apelido)
-                && startEditResp(row.company.apelido)
-              "
+              :title="row.company.responsavel_nome || ''"
+              @click="canEdit && editingResp !== row.company.id && startEditResp(row)"
             >
               <input
-                v-if="editingResp === normConta(row.company.apelido)"
+                v-if="editingResp === row.company.id"
                 v-model="respValue"
                 type="text"
+                list="resp-nomes"
                 class="w-full text-xs bg-transparent outline-none border-b border-blue-500"
                 :disabled="respSaving"
                 autofocus
-                @blur="commitEditResp(row.company.apelido)"
-                @keydown.enter.prevent="commitEditResp(row.company.apelido)"
+                @blur="commitEditResp(row)"
+                @keydown.enter.prevent="commitEditResp(row)"
                 @keydown.escape.prevent="cancelEditResp"
               />
               <span
                 v-else
-                :class="{ 'text-muted-foreground': !respByApelido.get(normConta(row.company.apelido))?.cpf }"
+                :class="{ 'text-muted-foreground': !row.company.responsavel_nome }"
                 class="block truncate"
               >
-                {{ respByApelido.get(normConta(row.company.apelido))?.cpf || '—' }}
+                {{ row.company.responsavel_nome || '—' }}
               </span>
             </td>
             <td
@@ -999,4 +946,7 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
       </div>
     </div>
   </div>
+  <datalist id="resp-nomes">
+    <option v-for="n in responsaveisOpts" :key="n" :value="n" />
+  </datalist>
 </template>

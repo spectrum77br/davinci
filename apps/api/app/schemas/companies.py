@@ -62,6 +62,10 @@ def _normalize_company_payload(data: Any) -> Any:
     if "cnpj" in data:
         strict = uf is None or uf in _BR_UFS
         data["cnpj"] = _normalize_cnpj(data.get("cnpj"), strict=strict)
+    if "responsavel_nome" in data:
+        # "" e "   " viram NULL: senão a tela ganha uma opção-fantasma no
+        # filtro "todos responsáveis".
+        data["responsavel_nome"] = (data.get("responsavel_nome") or "").strip() or None
     return data
 
 
@@ -69,6 +73,7 @@ class CompanyBase(BaseModel):
     razao_social: str
     apelido: str
     responsavel_id: UUID | None = None
+    responsavel_nome: str | None = None
     uf: str | None = None
     cnpj: str | None = None
     inscricao_estadual: str | None = None
@@ -91,6 +96,7 @@ class CompanyPatch(BaseModel):
     razao_social: str | None = None
     apelido: str | None = None
     responsavel_id: UUID | None = None
+    responsavel_nome: str | None = None
     uf: str | None = None
     cnpj: str | None = None
     inscricao_estadual: str | None = None

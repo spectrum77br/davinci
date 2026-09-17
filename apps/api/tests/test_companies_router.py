@@ -236,3 +236,61 @@ async def test_companies_grid_store_info_fallback_ignora_espacos(
     assert row["stores"]["ml"] is not None, "match deve ignorar espaços"
     assert row["stores"]["ml"]["from_store_info"] is True
     assert row["stores"]["shopee"] is None
+
+
+@pytest.mark.asyncio
+async def test_responsavel_nome_da_empresa_sem_loja(client, make_user, auth_as):
+    """Eduardo, 17/09/2026: "vai ter empresas que não vão ter lojas [...] o
+    responsável precisa deixar colocar o nome". O Responsável é da EMPRESA:
+    não depende de existir loja nenhuma."""
+    admin = await make_user(role=UserRole.ADMIN)
+    auth_as(admin)
+    r = await client.post(
+        "/api/companies", json={"razao_social": "FIORE ARMARINHO LTDA", "apelido": "fiore"}
+    )
+    assert r.status_code == 201, r.text
+    cid = r.json()["id"]
+    assert r.json()["responsavel_nome"] is None
+
+    r = await client.patch(f"/api/companies/{cid}", json={"responsavel_nome": "  josefina  "})
+    assert r.status_code == 200, r.text
+    assert r.json()["responsavel_nome"] == "josefina"  # espaços das pontas saem
+
+    # aparece na grade, que é de onde a tela lê a coluna
+    r = await client.get("/api/companies/grid")
+    assert r.status_code == 200
+    linha = next(x for x in r.json()["rows"] if x["company"]["id"] == cid)
+    assert linha["company"]["responsavel_nome"] == "josefina"
+
+
+@pytest.mark.asyncio
+async def test_responsavel_nome_vazio_limpa_o_campo(client, make_user, auth_as):
+    """String vazia vira NULL — senão o filtro "todos responsáveis" ganha uma
+    opção em branco."""
+    admin = await make_user(role=UserRole.ADMIN)
+    auth_as(admin)
+    cid = (
+        await client.post(
+            "/api/companies",
+            json={"razao_social": "ATLAS LTDA", "apelido": "atlas", "responsavel_nome": "isabel"},
+        )
+    ).json()["id"]
+    r = await client.patch(f"/api/companies/{cid}", json={"responsavel_nome": "   "})
+    assert r.status_code == 200, r.text
+    assert r.json()["responsavel_nome"] is None
+
+
+@pytest.mark.asyncio
+async def test_patch_de_outro_campo_nao_apaga_o_responsavel(client, make_user, auth_as):
+    """`exclude_unset`: editar só a UF não pode limpar quem é o responsável."""
+    admin = await make_user(role=UserRole.ADMIN)
+    auth_as(admin)
+    cid = (
+        await client.post(
+            "/api/companies",
+            json={"razao_social": "MOVA LTDA", "apelido": "mova", "responsavel_nome": "ingrid"},
+        )
+    ).json()["id"]
+    r = await client.patch(f"/api/companies/{cid}", json={"uf": "sp"})
+    assert r.status_code == 200, r.text
+    assert r.json()["responsavel_nome"] == "ingrid"

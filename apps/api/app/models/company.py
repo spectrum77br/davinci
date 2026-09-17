@@ -36,6 +36,10 @@ class Company(Base, TimestampMixin):
         ForeignKey("users.id", ondelete="SET NULL"),
         nullable=True,
     )
+    # Responsável da EMPRESA (nome livre). `store_info.cpf_name` é outro
+    # campo: o responsável DAQUELA LOJA. Eduardo, 17/09: empresa sem loja
+    # também precisa ter responsável.
+    responsavel_nome: Mapped[str | None] = mapped_column(Text, nullable=True)
     uf: Mapped[str | None] = mapped_column(String(2), nullable=True)
     cnpj: Mapped[str | None] = mapped_column(String(14), unique=True, nullable=True)
     inscricao_estadual: Mapped[str | None] = mapped_column(Text, nullable=True)
