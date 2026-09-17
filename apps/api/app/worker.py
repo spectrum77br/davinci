@@ -32,6 +32,12 @@ from app.models import (
 )
 from app.redis_client import redis
 from app.security.cipher import decrypt_json, encrypt_json
+from app.services import (
+    chamados_devolucao,
+    chamados_devolucao_sync,
+    chamados_pendencias,
+    threema,
+)
 from app.services.advisory_lock import release_stale_sync_locks, try_user_sync_lock
 from app.services.alerts import emit_alert
 from app.services.audit.runner import run_audit
@@ -40,7 +46,6 @@ from app.services.bling_kit_create import create_bling_kit_for_mark_job
 from app.services.bling_notas_token_refresh import run_refresh_bling_notas_tokens
 from app.services.bling_orders import run_ingest_bling_order
 from app.services.bling_product_create import run_auto_create_product_from_bling
-from app.services import chamados_devolucao, chamados_devolucao_sync, threema
 from app.services.bling_situacoes_sync import sync_situacoes_bling
 from app.services.chamados import run_replica_automatica as run_chamados_replica_automatica
 from app.services.email import get_email_sender, render_otp_html
@@ -1413,6 +1418,14 @@ async def chamados_replica_automatica(ctx: dict) -> None:
     async with session_scope() as s:
         resp = await chamados_devolucao_sync.sync_respostas(s)
     logger.info("chamados_devolucao_sync_done", **resp)
+    # 17/09: abertura que a API não consegue fazer (sem return, sem foto…) parava
+    # aqui pra sempre. A varredura roteia pro robô ou pro humano e avisa no Threema.
+    async with session_scope() as s:
+        presas = await chamados_pendencias.varrer(s)
+    logger.info(
+        "chamados_pendencias_done",
+        **{k: v for k, v in presas.items() if k != "avisos"},
+    )
 
 
 async def chamados_tiktok_reembolso_vigia(ctx: dict) -> None:
