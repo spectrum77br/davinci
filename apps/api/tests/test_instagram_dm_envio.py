@@ -343,3 +343,56 @@ async def test_cerebro_sem_resposta_manda_pra_humano(db: AsyncSession):
     await db.refresh(c)
     assert c.auto is False
     assert c.status == "humano"
+
+
+@pytest.mark.asyncio
+async def test_manda_o_historico_nao_so_a_ultima(db: AsyncSession):
+    """Regressão do primeiro teste real.
+
+    A pessoa perguntou "quanto custa essa mala de 24?" e depois "essa mala
+    cabe na cabine?". Sem histórico, "essa mala" não quer dizer nada — e o
+    modelo respondeu sobre outra mala. Pergunta encadeada é o normal numa DM.
+    """
+    c, msg = await _cenario(db)
+    msg.status = "seco"
+    msg.created_at = datetime.now(UTC) - timedelta(minutes=20)
+    msg.completed_at = msg.created_at
+    await db.commit()
+
+    # Tempos distintos de propósito: na mesma transação o `created_at` sai
+    # igual para todas, e aí "já respondi depois da última recebida" dá
+    # verdadeiro. Em produção elas chegam em instantes diferentes.
+    base = datetime.now(UTC) - timedelta(minutes=10)
+    for i, (direcao, texto) in enumerate(
+        [
+            ("recebida", "quanto custa essa mala de 24?"),
+            ("enviada", "Quem confirma o valor é o time."),
+            ("recebida", "essa mala cabe na cabine?"),
+        ]
+    ):
+        quando = base + timedelta(minutes=i)
+        db.add(
+            DmMensagem(
+                conversa_id=c.id,
+                mid=f"mid.hist{i}",
+                direcao=direcao,
+                tipo="texto",
+                texto=texto,
+                ocorrido_em=quando,
+                created_at=quando,
+                status="recebida" if direcao == "recebida" else "enviada",
+            )
+        )
+    c.ultima_recebida_em = base + timedelta(minutes=2)
+    await db.commit()
+
+    with patch.object(
+        instagram_dm.dm_ia, "redigir", new=AsyncMock(return_value=("ok", "ok"))
+    ) as cerebro:
+        await instagram_dm.gerar_pendentes(db)
+
+    trocas = cerebro.await_args.args[2]
+    textos = [texto for _, texto in trocas]
+    assert "quanto custa essa mala de 24?" in textos, "perdeu o referente"
+    assert "essa mala cabe na cabine?" in textos
+    assert len(trocas) >= 3

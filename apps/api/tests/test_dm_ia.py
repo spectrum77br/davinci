@@ -97,3 +97,23 @@ def test_mascara_nao_estraga_texto_normal():
 
 def test_cpf_sem_pontuacao_tambem_e_mascarado():
     assert "[CPF]" in mascarar("cpf 12345678900")
+
+
+# ─────────────── acabamento ───────────────
+
+
+@pytest.mark.parametrize(
+    ("bruto", "esperado"),
+    [
+        ("11930000710", "(11) 93000-0710"),
+        ("1930000710", "(19) 3000-0710"),
+        ("", ""),
+        (None, ""),
+        ("11 93000-0710", "(11) 93000-0710"),
+    ],
+)
+def test_formata_telefone(bruto, esperado):
+    """Telefone cru no meio da frase parece erro, e a pessoa desconfia."""
+    from app.services.dm_ia import formatar_fone
+
+    assert formatar_fone(bruto) == esperado

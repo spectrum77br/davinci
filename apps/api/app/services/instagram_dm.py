@@ -319,15 +319,25 @@ async def gerar_pendentes(session: AsyncSession, *, limit: int = 10) -> int:
         if ultima_saida is not None and ultima_saida >= conversa.ultima_recebida_em:
             continue
 
-        ultima = await session.scalar(
-            select(DmMensagem)
-            .where(
-                DmMensagem.conversa_id == conversa.id,
-                DmMensagem.direcao == DIRECAO_RECEBIDA,
-                DmMensagem.apagada_em.is_(None),
-            )
-            .order_by(DmMensagem.ocorrido_em.desc())
-            .limit(1)
+        # As últimas trocas, não só a última mensagem: "essa mala", "e o
+        # preto?", "e o kit?" só querem dizer alguma coisa com o que veio antes.
+        recentes = list(
+            (
+                await session.scalars(
+                    select(DmMensagem)
+                    .where(
+                        DmMensagem.conversa_id == conversa.id,
+                        DmMensagem.apagada_em.is_(None),
+                        DmMensagem.texto.is_not(None),
+                    )
+                    .order_by(DmMensagem.created_at.desc())
+                    .limit(8)
+                )
+            ).all()
+        )[::-1]
+        trocas = [(m.direcao, m.texto or "") for m in recentes]
+        ultima = next(
+            (m for m in reversed(recentes) if m.direcao == DIRECAO_RECEBIDA), None
         )
         if ultima is None or not (ultima.texto or "").strip():
             # Sem texto (foto, figurinha, áudio): o robô não tenta adivinhar.
@@ -336,7 +346,7 @@ async def gerar_pendentes(session: AsyncSession, *, limit: int = 10) -> int:
             await session.commit()
             continue
 
-        texto, motivo = await dm_ia.redigir(session, conversa, ultima.texto or "")
+        texto, motivo = await dm_ia.redigir(session, conversa, trocas)
         if texto is None:
             conversa.status = CONVERSA_HUMANO
             conversa.auto = False

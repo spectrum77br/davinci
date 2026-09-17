@@ -297,6 +297,9 @@ class Settings(BaseSettings):
     # Teto de segurança por chamada — prompt gigante é conta grande e resposta
     # ruim. O modelo só precisa da última mensagem pra decidir.
     dm_ia_max_chars_entrada: int = 1500
+    # Quantas trocas vão junto. Sem histórico o modelo perde o referente
+    # ("essa mala"); com histórico demais, gasta token e sai dado à toa.
+    dm_ia_max_trocas: int = 6
 
     # Token M2M do executor de IMPORTAÇÃO DE NF (marionete AdsPower da Fase
     # 3a-4). Guarda os /nf-cadastro/agent/* (lease/result). Vazio = endpoints
