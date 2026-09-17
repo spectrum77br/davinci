@@ -61,6 +61,10 @@ MARCA_DESFECHO = "Desfecho do pedido de só reembolso"
 MARCA_PEDE_FOTO = "Pedido de foto/vídeo enviado no Threema"
 MARCA_AUTO = "Só reembolso CONTESTADO na TikTok"
 MAX_TENTATIVAS_AUTO = 3
+# 17/09 (Eduardo): caso que pede decisão de gente (296936 "caixa de sabonete, tenho fotos e
+# vídeo"; 293313 queixa de parcelamento) — com esta marca no histórico o robô NÃO contesta
+# sozinho; faltando 12 h só avisa pra decidirem à mão.
+MARCA_SEM_AUTO = "Contestação automática DESLIGADA"
 AUTOR_ROBO = "robô"
 # Motivo de recusa preferido (medido 16/09 no 4042339029758936508): a lista pra só
 # reembolso vem com reverse_reject_request_reason_1..4 + motivo de cancelamento inválido.
@@ -356,7 +360,10 @@ async def run_vigia(session, *, agora: datetime | None = None, dry_run: bool = F
             resumo["urgentes"] += 1
             if dry_run:
                 continue
-            r = await contestar_sozinho(session, ch, client, caso, rid, oid)
+            if any(MARCA_SEM_AUTO in t for t in hist):
+                r = "contestação automática desligada nesse chamado — decisão de vocês"
+            else:
+                r = await contestar_sozinho(session, ch, client, caso, rid, oid)
             if r == "contestado":
                 resumo["contestados"] = resumo.get("contestados", 0) + 1
             elif not any(MARCA_URGENTE in t for t in hist):

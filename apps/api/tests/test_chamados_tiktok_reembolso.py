@@ -167,6 +167,22 @@ async def test_vigia_sem_entrega_nao_contesta_sozinho_e_alerta_uma_vez(db, make_
     assert len(urg) == 1 and "sem entrega" in urg[0], threema_fake
 
 
+async def test_vigia_contestacao_automatica_desligada_so_avisa(db, make_user, monkeypatch, threema_fake):
+    fake = _FakeTikTok()
+    await _seed(db, make_user, fake, monkeypatch)
+    await svc.run_vigia(db, agora=AGORA)
+    ch = (await db.execute(select(Chamado).where(Chamado.origem_ref == f"tiktok_reembolso:{RID}"))).scalar_one()
+    from app.services import chamados as chamados_svc
+    db.add(chamados_svc.registrar_sistema(ch, f"{svc.MARCA_SEM_AUTO} (Eduardo 17/09): decidir à mão."))
+    await db.commit()
+    quase = datetime.fromtimestamp(PRAZO - 3600, UTC)
+    await svc.run_vigia(db, agora=quase)
+    await svc.run_vigia(db, agora=quase)
+    assert fake.rejects == []
+    urg = [t for t, _ in threema_fake if "NÃO contestou" in t]
+    assert len(urg) == 1 and "desligada" in urg[0], threema_fake
+
+
 async def test_vigia_desfecho_aprovado_por_falta_de_resposta(db, make_user, monkeypatch, threema_fake):
     fake = _FakeTikTok()
     await _seed(db, make_user, fake, monkeypatch)
