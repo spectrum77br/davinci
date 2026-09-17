@@ -234,9 +234,6 @@ async def enviar(session: AsyncSession, msg: DmMensagem) -> None:
         msg.mid = resultado.mid or msg.mid
         conversa.ultima_enviada_em = agora
         conversa.status = CONVERSA_RESPONDIDA
-        # Só agora: a pessoa recebeu de fato o aviso de que é automático.
-        if AVISO_AUTOMACAO.strip() in (msg.texto or ""):
-            conversa.avisada_automacao = True
     elif resultado.ambiguo:
         # A chamada PODE ter saído e não há como perguntar. Ninguém retenta
         # em cima disso — a diferença cruel entre mensagem e postagem.
@@ -260,12 +257,21 @@ async def enviar(session: AsyncSession, msg: DmMensagem) -> None:
     )
 
 
-# Aviso de automação. Política da Meta: experiência automatizada tem que se
-# identificar e oferecer caminho para humano. Sai UMA vez por conversa, na
-# primeira resposta — repetir em toda mensagem vira ruído.
-AVISO_AUTOMACAO = (
-    "\n\n(resposta automática — escreva ATENDENTE se preferir falar com uma pessoa)"
-)
+# DECISÃO DO EDUARDO (17/09/2026): o robô NÃO se anuncia. "deixa por debaixo
+# dos panos, só quando digitar atendente" — o parêntese de aviso colado no fim
+# da resposta quebrava o tom da marca.
+#
+# O que isso troca: a política da Meta pede que experiência automatizada se
+# identifique "quando exigido pela legislação aplicável" — no Brasil não é
+# regra cravada, e como o app não passa por análise, ninguém confere. Risco de
+# plataforma, baixo, assumido.
+#
+# O que NÃO muda: o caminho para humano continua existindo e funcionando. Ele
+# nunca dependeu do aviso — `_pediu_humano` no webhook pega "quero falar com
+# alguém", "tem uma pessoa aí", "isso é robô?", que é como a pessoa escreve
+# sozinha. Só deixou de ser anunciado.
+#
+# Se um dia o app for para análise, é aqui que o aviso volta.
 
 
 async def gerar_pendentes(session: AsyncSession, *, limit: int = 10) -> int:
@@ -361,12 +367,6 @@ async def gerar_pendentes(session: AsyncSession, *, limit: int = 10) -> int:
             await session.commit()
             logger.info("dm_sem_resposta", conversa=str(conversa.id), motivo=motivo)
             continue
-
-        # O aviso vai no texto, mas o flag NÃO é marcado aqui: em modo seco a
-        # mensagem nunca sai, e marcar aqui fazia a pessoa receber a resposta
-        # seguinte SEM nunca ter sido avisada. Quem carimba é o envio.
-        if not conversa.avisada_automacao:
-            texto = f"{texto}{AVISO_AUTOMACAO}"
 
         session.add(
             DmMensagem(

@@ -452,20 +452,14 @@ async def test_humano_assumiu_nao_volta_a_gerar(db: AsyncSession):
 
 
 @pytest.mark.asyncio
-async def test_aviso_de_automacao_so_conta_quando_a_mensagem_sai(
-    db: AsyncSession, monkeypatch
-):
-    """Em modo seco a mensagem não sai — então o aviso não foi dado.
+async def test_resposta_sai_sem_aviso_de_automacao(db: AsyncSession):
+    """Decisão do Eduardo: o robô não se anuncia.
 
-    A primeira versão marcava o flag na GERAÇÃO. Resultado real em produção: o
-    aviso foi colado numa resposta seca, o flag ficou true, e a resposta
-    seguinte saiu de verdade SEM aviso. A pessoa recebeu robô sem ser avisada.
+    O caminho para humano continua existindo — só deixou de ser anunciado no
+    texto. Quem testa o caminho em si é
+    `test_pedido_de_humano_tira_o_robo_da_conversa`, no arquivo do webhook.
     """
     c, antiga = await _cenario(db)
-    # `_cenario` deixa uma resposta pendente e nenhuma mensagem recebida.
-    # Tira a pendente do caminho (a trava de "uma em voo" impediria gerar) e
-    # põe uma pergunta MAIS NOVA que ela, senão o gerador entende que já
-    # respondemos depois da última recebida.
     agora = datetime.now(UTC)
     antiga.status = "enviada"
     antiga.created_at = agora - timedelta(hours=2)
@@ -479,16 +473,11 @@ async def test_aviso_de_automacao_so_conta_quando_a_mensagem_sai(
     )
     c.ultima_recebida_em = agora
     await db.commit()
-    assert c.avisada_automacao is False
 
     with patch.object(
-        instagram_dm.dm_ia, "redigir", new=AsyncMock(return_value=("Oi!", "ok"))
+        instagram_dm.dm_ia, "redigir", new=AsyncMock(return_value=("Oi! Tudo ótimo.", "ok"))
     ):
         await instagram_dm.gerar_pendentes(db)
-
-    await db.refresh(c)
-    # gerou com o aviso no texto, mas NÃO carimbou: nada saiu ainda
-    assert c.avisada_automacao is False
 
     gerada = await db.scalar(
         select(DmMensagem)
@@ -496,4 +485,5 @@ async def test_aviso_de_automacao_so_conta_quando_a_mensagem_sai(
         .order_by(DmMensagem.created_at.desc())
     )
     assert gerada is not None
-    assert "ATENDENTE" in (gerada.texto or "")
+    assert gerada.texto == "Oi! Tudo ótimo."  # nada colado no fim
+    assert "resposta automática" not in (gerada.texto or "")
