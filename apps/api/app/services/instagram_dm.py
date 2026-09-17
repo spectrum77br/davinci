@@ -30,9 +30,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.models import DmConta, DmConversa, DmMensagem, RedeSocial
 from app.models.instagram_dm import (
-    CONVERSA_ABERTA,
     CONVERSA_HUMANO,
     CONVERSA_RESPONDIDA,
+    CONVERSA_SILENCIADA,
     DIRECAO_ENVIADA,
     DIRECAO_RECEBIDA,
     MSG_EM_VOO,
@@ -234,6 +234,9 @@ async def enviar(session: AsyncSession, msg: DmMensagem) -> None:
         msg.mid = resultado.mid or msg.mid
         conversa.ultima_enviada_em = agora
         conversa.status = CONVERSA_RESPONDIDA
+        # Só agora: a pessoa recebeu de fato o aviso de que é automático.
+        if AVISO_AUTOMACAO.strip() in (msg.texto or ""):
+            conversa.avisada_automacao = True
     elif resultado.ambiguo:
         # A chamada PODE ter saído e não há como perguntar. Ninguém retenta
         # em cima disso — a diferença cruel entre mensagem e postagem.
@@ -278,7 +281,12 @@ async def gerar_pendentes(session: AsyncSession, *, limit: int = 10) -> int:
         await session.scalars(
             select(DmConversa)
             .where(
-                DmConversa.status == CONVERSA_ABERTA,
+                # NÃO filtrar por `aberta`: assim que a primeira resposta sai,
+                # a conversa vira `respondida` e cairia fora da fila para
+                # sempre — a segunda pergunta do cliente nunca seria vista.
+                # Quem decide é `auto` (humano assumiu?) e a comparação de
+                # tempo lá embaixo (chegou coisa nova depois da resposta?).
+                DmConversa.status.notin_((CONVERSA_HUMANO, CONVERSA_SILENCIADA)),
                 DmConversa.auto.is_(True),
                 DmConversa.ultima_recebida_em.is_not(None),
                 DmConversa.ultima_recebida_em >= corte,
@@ -354,9 +362,11 @@ async def gerar_pendentes(session: AsyncSession, *, limit: int = 10) -> int:
             logger.info("dm_sem_resposta", conversa=str(conversa.id), motivo=motivo)
             continue
 
+        # O aviso vai no texto, mas o flag NÃO é marcado aqui: em modo seco a
+        # mensagem nunca sai, e marcar aqui fazia a pessoa receber a resposta
+        # seguinte SEM nunca ter sido avisada. Quem carimba é o envio.
         if not conversa.avisada_automacao:
             texto = f"{texto}{AVISO_AUTOMACAO}"
-            conversa.avisada_automacao = True
 
         session.add(
             DmMensagem(

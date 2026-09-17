@@ -45,7 +45,9 @@ from app.models import (
     SyncLogAction,
 )
 from app.models.instagram_dm import (
+    CONVERSA_ABERTA,
     CONVERSA_HUMANO,
+    CONVERSA_RESPONDIDA,
     DIRECAO_ECO,
     DIRECAO_RECEBIDA,
     MSG_DESCARTADA,
@@ -915,6 +917,10 @@ async def _gravar_dm(
 
     if dados["direcao"] == DIRECAO_RECEBIDA:
         conversa.ultima_recebida_em = ocorrido
+        # Cliente escreveu de novo: a conversa volta a esperar resposta.
+        # Sem isso ela ficaria `respondida` desde a primeira vez.
+        if conversa.status == CONVERSA_RESPONDIDA:
+            conversa.status = CONVERSA_ABERTA
     else:
         conversa.ultima_enviada_em = ocorrido
         # Humano (ou outro app) respondeu pela caixa de entrada: o robô se

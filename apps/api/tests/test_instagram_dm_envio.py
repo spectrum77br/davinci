@@ -16,6 +16,7 @@ from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -396,3 +397,103 @@ async def test_manda_o_historico_nao_so_a_ultima(db: AsyncSession):
     assert "quanto custa essa mala de 24?" in textos, "perdeu o referente"
     assert "essa mala cabe na cabine?" in textos
     assert len(trocas) >= 3
+
+
+@pytest.mark.asyncio
+async def test_conversa_respondida_volta_a_gerar(db: AsyncSession):
+    """Regressão do segundo teste real.
+
+    Depois da primeira resposta a conversa vira `respondida`. Filtrar por
+    `aberta` no gerador a tirava da fila PARA SEMPRE — a segunda pergunta do
+    cliente nunca era vista. Quem decide é `auto` e a comparação de tempo.
+    """
+    c, msg = await _cenario(db)
+    msg.status = "enviada"
+    msg.created_at = datetime.now(UTC) - timedelta(minutes=5)
+    msg.enviada_em = msg.created_at
+    c.status = "respondida"  # exatamente o estado que travava
+    c.ultima_enviada_em = msg.created_at
+    await db.commit()
+
+    db.add(
+        DmMensagem(
+            conversa_id=c.id, mid="mid.segunda.pergunta", direcao="recebida",
+            tipo="texto", texto="qual mala você me indica?",
+            ocorrido_em=datetime.now(UTC), created_at=datetime.now(UTC),
+        )
+    )
+    c.ultima_recebida_em = datetime.now(UTC)
+    await db.commit()
+
+    with patch.object(
+        instagram_dm.dm_ia, "redigir", new=AsyncMock(return_value=("Depende do uso!", "ok"))
+    ) as cerebro:
+        geradas = await instagram_dm.gerar_pendentes(db)
+
+    cerebro.assert_awaited_once()
+    assert geradas == 1
+
+
+@pytest.mark.asyncio
+async def test_humano_assumiu_nao_volta_a_gerar(db: AsyncSession):
+    """O contrário: conversa com humano não é reaberta pelo robô."""
+    c, msg = await _cenario(db)
+    msg.status = "enviada"
+    msg.created_at = datetime.now(UTC) - timedelta(minutes=5)
+    c.status = "humano"
+    c.auto = False
+    await db.commit()
+    c.ultima_recebida_em = datetime.now(UTC)
+    await db.commit()
+
+    with patch.object(instagram_dm.dm_ia, "redigir", new=AsyncMock()) as cerebro:
+        await instagram_dm.gerar_pendentes(db)
+    cerebro.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_aviso_de_automacao_so_conta_quando_a_mensagem_sai(
+    db: AsyncSession, monkeypatch
+):
+    """Em modo seco a mensagem não sai — então o aviso não foi dado.
+
+    A primeira versão marcava o flag na GERAÇÃO. Resultado real em produção: o
+    aviso foi colado numa resposta seca, o flag ficou true, e a resposta
+    seguinte saiu de verdade SEM aviso. A pessoa recebeu robô sem ser avisada.
+    """
+    c, antiga = await _cenario(db)
+    # `_cenario` deixa uma resposta pendente e nenhuma mensagem recebida.
+    # Tira a pendente do caminho (a trava de "uma em voo" impediria gerar) e
+    # põe uma pergunta MAIS NOVA que ela, senão o gerador entende que já
+    # respondemos depois da última recebida.
+    agora = datetime.now(UTC)
+    antiga.status = "enviada"
+    antiga.created_at = agora - timedelta(hours=2)
+    antiga.enviada_em = antiga.created_at
+    db.add(
+        DmMensagem(
+            conversa_id=c.id, mid="mid.pergunta.aviso", direcao="recebida",
+            tipo="texto", texto="oi, tudo bem?",
+            ocorrido_em=agora, created_at=agora,
+        )
+    )
+    c.ultima_recebida_em = agora
+    await db.commit()
+    assert c.avisada_automacao is False
+
+    with patch.object(
+        instagram_dm.dm_ia, "redigir", new=AsyncMock(return_value=("Oi!", "ok"))
+    ):
+        await instagram_dm.gerar_pendentes(db)
+
+    await db.refresh(c)
+    # gerou com o aviso no texto, mas NÃO carimbou: nada saiu ainda
+    assert c.avisada_automacao is False
+
+    gerada = await db.scalar(
+        select(DmMensagem)
+        .where(DmMensagem.conversa_id == c.id, DmMensagem.status == "pendente")
+        .order_by(DmMensagem.created_at.desc())
+    )
+    assert gerada is not None
+    assert "ATENDENTE" in (gerada.texto or "")
