@@ -31,6 +31,8 @@ async def counts(db):
 
 @pytest.mark.asyncio
 async def test_account_reserves_codes_only_on_selected_marketplace(db, client, make_user, auth_as):
+    """Fone e e-mail só ficam presos no marketplace da conta; servidor, em todos
+    (17/09: servidor é perfil do AdsPower, um navegador só)."""
     admin, company, rows, body = await seed(db, make_user, auth_as)
     response = await client.post("/api/stores/account", json=body)
     assert response.status_code == 201, response.text
@@ -40,13 +42,15 @@ async def test_account_reserves_codes_only_on_selected_marketplace(db, client, m
     assert info.account_name == company.apelido
     assert info.user_id == admin.id
     for row in rows:
+        so_neste_marketplace = row.tipo is not CadastroTipo.SERVIDOR
         for marketplace in ("ml", "shopee"):
             response = await client.get("/api/cadastros/available", params={
                 "tipo": row.tipo.value, "marketplace": marketplace,
             })
             assert response.status_code == 200
             ids = {r["id"] for r in response.json()}
-            assert (str(row.id) in ids) == (marketplace == "shopee")
+            livre = marketplace == "shopee" and so_neste_marketplace
+            assert (str(row.id) in ids) == livre, (row.tipo, marketplace)
 
 
 @pytest.mark.asyncio

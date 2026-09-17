@@ -39,7 +39,6 @@ async def _store(db, marketplace):
     [
         (CadastroTipo.FONE, "phone"),
         (CadastroTipo.EMAIL, "email"),
-        (CadastroTipo.SERVIDOR, "server"),
     ],
 )
 async def test_available_checks_all_sources_only_on_selected_marketplace(
@@ -75,6 +74,64 @@ async def test_available_checks_all_sources_only_on_selected_marketplace(
         )
         assert response.status_code == 200, response.text
         assert {row["id"] for row in response.json()} == assigned[other] | {str(free.id)}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fonte", ["vinculo", "raw_link", "store_info"])
+async def test_servidor_ocupado_some_de_todos_os_marketplaces(
+    db, client, make_user, auth_as, fonte
+):
+    """Servidor é perfil do AdsPower: usado no ML, não aparece na Shopee (17/09)."""
+    admin = await make_user(role=UserRole.ADMIN)
+    auth_as(admin)
+    ocupado = await _cadastro(db, CadastroTipo.SERVIDOR, "  AdsPower-104 ")
+    livre = await _cadastro(db, CadastroTipo.SERVIDOR, "adspower-105")
+    if fonte == "vinculo":
+        store = await _store(db, Marketplace.ML)
+        db.add(CadastroStore(cadastro_id=ocupado.id, store_id=store.id))
+    elif fonte == "raw_link":
+        ocupado.raw_links = {" Mercado Livre ": "conta importada"}
+    else:
+        db.add(
+            StoreInfo(
+                user_id=admin.id,
+                platform=" ML ",
+                account_name="conta existente",
+                server="\tADSPOWER-104 ",
+            )
+        )
+    await db.commit()
+
+    for mk in (Marketplace.ML, Marketplace.SHOPEE, Marketplace.TIKTOK):
+        response = await client.get(
+            "/api/cadastros/available", params={"tipo": "servidor", "marketplace": mk.value}
+        )
+        assert response.status_code == 200, response.text
+        assert {row["id"] for row in response.json()} == {str(livre.id)}, mk
+
+
+@pytest.mark.asyncio
+async def test_fone_e_email_continuam_reservados_por_marketplace(db, make_user):
+    """A regra global vale só pro servidor — a mesma linha atende 2 plataformas."""
+    owner = await make_user(role=UserRole.ADMIN)
+    for tipo, campo, codigo in (
+        (CadastroTipo.FONE, "phone", "11999990000"),
+        (CadastroTipo.EMAIL, "email", "conta@exemplo.com"),
+    ):
+        cadastro = await _cadastro(db, tipo, codigo)
+        db.add(
+            StoreInfo(
+                user_id=owner.id,
+                platform="ml",
+                account_name=f"conta {tipo.value}",
+                **{campo: codigo},
+            )
+        )
+        await db.flush()
+        assert await available_cadastros(db, tipo, Marketplace.ML) == []
+        assert [c.id for c in await available_cadastros(db, tipo, Marketplace.SHOPEE)] == [
+            cadastro.id
+        ]
 
 
 @pytest.mark.asyncio
@@ -129,21 +186,21 @@ async def test_assigned_code_cannot_be_reused_through_an_active_duplicate(
 @pytest.mark.parametrize("platform", ["ml", " ML ", "mercadolivre", " Mercado Livre "])
 async def test_mercado_livre_store_info_aliases_reserve_the_same_resource(db, make_user, platform):
     owner = await make_user(role=UserRole.ADMIN)
-    cadastro = await _cadastro(db, CadastroTipo.SERVIDOR, "  AdsPower-42  ")
+    cadastro = await _cadastro(db, CadastroTipo.FONE, "  11951090424  ")
     db.add(
         StoreInfo(
             user_id=owner.id,
             platform=platform,
             account_name="conta existente",
-            server="adspower-42",
+            phone="11951090424",
         )
     )
     await db.flush()
 
-    assert await available_cadastros(db, CadastroTipo.SERVIDOR, Marketplace.ML) == []
-    assert [
-        c.id for c in await available_cadastros(db, CadastroTipo.SERVIDOR, Marketplace.AMAZON)
-    ] == [cadastro.id]
+    assert await available_cadastros(db, CadastroTipo.FONE, Marketplace.ML) == []
+    assert [c.id for c in await available_cadastros(db, CadastroTipo.FONE, Marketplace.AMAZON)] == [
+        cadastro.id
+    ]
 
 
 @pytest.mark.asyncio

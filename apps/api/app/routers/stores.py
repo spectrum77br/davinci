@@ -23,7 +23,11 @@ from app.models import (
     User,
 )
 from app.schemas.companies import StoreAccountCreate, StoreCreate, StoreOut, StorePatch
-from app.services.cadastro_availability import available_cadastros, normalize_cadastro_code
+from app.services.cadastro_availability import (
+    available_cadastros,
+    normalize_cadastro_code,
+    ocupacao_global,
+)
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/api/stores", tags=["stores"])
@@ -156,9 +160,16 @@ async def create_store_account(
             )
 
     # Serializa o mesmo recurso no marketplace, inclusive códigos duplicados
-    # em cadastros diferentes. Outro marketplace tem uma reserva independente.
+    # em cadastros diferentes. Telefone e e-mail têm reserva independente em
+    # outro marketplace; servidor (perfil do AdsPower) é único em todos eles, e
+    # por isso a chave dele ignora o marketplace — senão duas criações
+    # simultâneas em plataformas diferentes passariam pelo mesmo servidor.
     lock_keys = sorted(
-        f"store-account:{mk.value}:{tipo.value}:{normalize_cadastro_code(by_id[cid].codigo)}"
+        "store-account:{}:{}:{}".format(
+            "*" if ocupacao_global(tipo) else mk.value,
+            tipo.value,
+            normalize_cadastro_code(by_id[cid].codigo),
+        )
         for tipo, cid in selection.items()
     )
     for key in lock_keys:

@@ -19,6 +19,18 @@ _STOREINFO_FIELD_FOR_TIPO = {
     CadastroTipo.SERVIDOR: StoreInfo.server,
 }
 
+# Tipos cuja ocupação vale pra TODOS os marketplaces (Eduardo 17/09): um servidor
+# é um perfil do AdsPower, ou seja UM navegador logado. Se ele já está numa conta
+# de Mercado Livre, não pode aparecer como livre na Shopee — nem pra mesma
+# empresa. Telefone e e-mail continuam reserváveis por marketplace (a mesma linha
+# atende contas de plataformas diferentes).
+_TIPOS_EXCLUSIVOS_GLOBAIS = frozenset({CadastroTipo.SERVIDOR})
+
+
+def ocupacao_global(tipo: CadastroTipo) -> bool:
+    """`True` quando o recurso, uma vez usado, some da lista de todo marketplace."""
+    return tipo in _TIPOS_EXCLUSIVOS_GLOBAIS
+
 
 def normalize_cadastro_code(value: str | None) -> str:
     return (value or "").strip().lower()
@@ -32,12 +44,17 @@ def _normalize_platform(value: str | None) -> str:
 async def available_cadastros(
     session: AsyncSession, tipo: CadastroTipo, marketplace: Marketplace
 ) -> list[Cadastro]:
-    """Retorna recursos ativos e livres apenas no marketplace escolhido.
+    """Retorna recursos ativos e livres pro marketplace escolhido.
 
     Um vínculo importado ainda não resolvido também reserva o recurso. A
     ocupação é comparada por tipo e código, para que outro cadastro com o mesmo
     código não permita reutilizar um telefone, e-mail ou perfil já vinculado.
+
+    Telefone e e-mail são reservados POR marketplace (a mesma linha atende contas
+    de plataformas diferentes); servidor é reservado em TODOS eles, porque é um
+    perfil do AdsPower — ver `ocupacao_global`.
     """
+    global_ = ocupacao_global(tipo)
     cadastros = (
         (
             await session.execute(
@@ -51,24 +68,21 @@ async def available_cadastros(
         normalize_cadastro_code(cadastro.codigo)
         for cadastro in cadastros
         if any(
-            _normalize_platform(platform) == marketplace.value
+            (global_ or _normalize_platform(platform) == marketplace.value)
             and (bool(value.strip()) if isinstance(value, str) else bool(value))
             for platform, value in (cadastro.raw_links or {}).items()
         )
     }
 
-    linked_codes = (
-        (
-            await session.execute(
-                select(Cadastro.codigo)
-                .join(CadastroStore, CadastroStore.cadastro_id == Cadastro.id)
-                .join(Store, Store.id == CadastroStore.store_id)
-                .where(Cadastro.tipo == tipo, Store.marketplace == marketplace)
-            )
-        )
-        .scalars()
-        .all()
+    linked_stmt = (
+        select(Cadastro.codigo)
+        .join(CadastroStore, CadastroStore.cadastro_id == Cadastro.id)
+        .join(Store, Store.id == CadastroStore.store_id)
+        .where(Cadastro.tipo == tipo)
     )
+    if not global_:
+        linked_stmt = linked_stmt.where(Store.marketplace == marketplace)
+    linked_codes = (await session.execute(linked_stmt)).scalars().all()
     busy_codes.update(normalize_cadastro_code(code) for code in linked_codes)
 
     field = _STOREINFO_FIELD_FOR_TIPO.get(tipo)
@@ -79,7 +93,7 @@ async def available_cadastros(
         busy_codes.update(
             normalize_cadastro_code(code)
             for platform, code in store_info_rows
-            if _normalize_platform(platform) == marketplace.value
+            if global_ or _normalize_platform(platform) == marketplace.value
         )
 
     return [
