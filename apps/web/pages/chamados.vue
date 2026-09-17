@@ -51,15 +51,15 @@ const FECHAMENTO: Partial<Record<Origem, string[]>> = { logistica: ['Resolvido',
 const STATUS_ABA: { value: string; label: string; cls: string; hint: string }[] = [
   { value: 'respondeu', label: 'Plataforma respondeu', cls: 'bg-orange-500/15 text-orange-700 dark:text-orange-300', hint: 'a plataforma falou por último — estamos devendo resposta (o robô analisa)' },
   { value: 'humano', label: 'Precisa de humano', cls: 'bg-red-500/15 text-red-700 dark:text-red-300', hint: 'o robô não soube o que fazer com a última resposta da plataforma' },
-  { value: 'prova', label: 'Plataforma pediu prova', cls: 'bg-orange-500/15 text-orange-700 dark:text-orange-300', hint: 'a Shopee pediu evidência extra na disputa' },
+  { value: 'prova', label: 'Pediu prova', cls: 'bg-orange-500/15 text-orange-700 dark:text-orange-300', hint: 'a Shopee pediu evidência extra na disputa' },
   { value: 'aguardando', label: 'Aguardando plataforma', cls: 'bg-sky-500/15 text-sky-700 dark:text-sky-300', hint: 'nós falamos por último — a bola está com a plataforma' },
-  { value: 'em_analise', label: 'Em análise na plataforma', cls: 'bg-violet-500/15 text-violet-700 dark:text-violet-300', hint: 'disputa/mediação em julgamento pela plataforma' },
-  { value: 'reembolso_pago', label: 'Reembolso pago — aguardando compensação', cls: 'bg-amber-500/15 text-amber-700 dark:text-amber-300', hint: 'a Shopee reembolsou o comprador; se a compensação à loja não vier em 24 h, conta como perdido' },
+  { value: 'em_analise', label: 'Em análise', cls: 'bg-violet-500/15 text-violet-700 dark:text-violet-300', hint: 'disputa/mediação em julgamento pela plataforma' },
+  { value: 'reembolso_pago', label: 'Reembolso pago', cls: 'bg-amber-500/15 text-amber-700 dark:text-amber-300', hint: 'a Shopee reembolsou o comprador; se a compensação à loja não vier em 24 h, conta como perdido' },
   { value: 'fila', label: 'Na fila do robô', cls: 'bg-muted text-muted-foreground', hint: 'abertura/réplica ainda não saiu' },
   { value: 'falhou', label: 'Envio falhou', cls: 'bg-red-500/15 text-red-700 dark:text-red-300', hint: 'o último envio à plataforma falhou — ver histórico' },
   { value: 'sem_acompanhamento', label: 'Sem acompanhamento', cls: 'bg-muted text-muted-foreground', hint: 'registrado à mão — o DaVinci não consulta essa plataforma' },
-  { value: 'ganhamos', label: 'Encerrado — ganhamos', cls: 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300', hint: 'a plataforma decidiu a favor da loja' },
-  { value: 'perdemos', label: 'Encerrado — perdemos', cls: 'bg-red-500/15 text-red-700 dark:text-red-300', hint: 'a plataforma decidiu a favor do comprador' },
+  { value: 'ganhamos', label: 'Ganhamos', cls: 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300', hint: 'a plataforma decidiu a favor da loja' },
+  { value: 'perdemos', label: 'Perdemos', cls: 'bg-red-500/15 text-red-700 dark:text-red-300', hint: 'a plataforma decidiu a favor do comprador' },
   { value: 'encerrado', label: 'Encerrado', cls: 'bg-muted text-muted-foreground', hint: 'chamado resolvido' },
 ]
 const STATUS_POR_CODIGO = Object.fromEntries(STATUS_ABA.map((s) => [s.value, s]))
@@ -341,6 +341,18 @@ function fmtDateTime(v: string | null) {
   const d = new Date(v)
   if (Number.isNaN(d.getTime())) return v
   return d.toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', year: '2-digit', hour: '2-digit', minute: '2-digit' })
+}
+
+// dd/mm hh:mm — só pra célula Status, que precisa ser estreita.
+function fmtCurto(v: string | null) {
+  if (!v) return ''
+  const d = new Date(v)
+  if (Number.isNaN(d.getTime())) return v
+  const dd = String(d.getDate()).padStart(2, '0')
+  const mm = String(d.getMonth() + 1).padStart(2, '0')
+  const hh = String(d.getHours()).padStart(2, '0')
+  const mi = String(d.getMinutes()).padStart(2, '0')
+  return `${dd}/${mm} ${hh}:${mi}`
 }
 
 function origemLabel(o: Origem) {
@@ -1159,14 +1171,14 @@ async function reabrir(row: ChamadoRow) {
             <!-- Status (17/09, Vinicius "status e últ. resposta não seria a mesma coisa?"):
                  uma célula só — 1ª linha o status (com a data quando ela não é a da última
                  fala: oficial da API, robô pediu gente); 2ª linha quem falou por último. -->
-            <td class="px-2 py-1 w-[1%] whitespace-nowrap bg-amber-50/40 dark:bg-amber-900/10">
+            <td class="px-2 py-1 w-[1%] max-w-[210px] bg-amber-50/40 dark:bg-amber-900/10">
               <div class="space-y-0.5">
-                <div class="flex items-center gap-1.5 whitespace-nowrap">
-                  <span class="inline-block rounded px-1.5 py-0.5 text-[11px] font-medium" :class="statusInfo(row).cls" :title="statusInfo(row).hint">{{ statusInfo(row).label }}</span>
-                  <span v-if="row.status_aba_at && row.status_aba_at !== row.ultima_resposta_at" class="text-[11px] text-muted-foreground">{{ fmtDateTime(row.status_aba_at) }}</span>
+                <div class="flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
+                  <span class="inline-block rounded px-1.5 py-0.5 text-[11px] font-medium whitespace-nowrap" :class="statusInfo(row).cls" :title="statusInfo(row).hint">{{ statusInfo(row).label }}</span>
+                  <span v-if="row.status_aba_at && row.status_aba_at !== row.ultima_resposta_at" class="text-[11px] text-muted-foreground whitespace-nowrap">{{ fmtCurto(row.status_aba_at) }}</span>
                 </div>
-                <div v-if="row.ultima_resposta_at" class="text-[11px] whitespace-nowrap" :class="row.ultima_resposta_direcao === 'recebida' ? 'text-orange-600 dark:text-orange-400' : 'text-emerald-700 dark:text-emerald-300'">
-                  <span v-if="row.status_aba_at && row.status_aba_at !== row.ultima_resposta_at" class="text-muted-foreground">últ. resposta </span>{{ fmtDateTime(row.ultima_resposta_at) }} · {{ quemRespondeu(row) }}
+                <div v-if="row.ultima_resposta_at" class="text-[11px] whitespace-nowrap" :class="row.ultima_resposta_direcao === 'recebida' ? 'text-orange-600 dark:text-orange-400' : 'text-emerald-700 dark:text-emerald-300'" :title="`última resposta: ${fmtDateTime(row.ultima_resposta_at)} · ${quemRespondeu(row)}`">
+                  <span v-if="row.status_aba_at && row.status_aba_at !== row.ultima_resposta_at" class="text-muted-foreground">últ. </span>{{ fmtCurto(row.ultima_resposta_at) }} · {{ quemRespondeu(row) }}
                 </div>
               </div>
             </td>
