@@ -61,6 +61,25 @@ STATUS_FECHAMENTO_POR_ORIGEM: dict[str, tuple[str, ...]] = {
 AUTOR_SISTEMA = "sistema"
 AUTOR_AUTO = "réplica automática"
 
+# Coluna "Status" da aba (Vinicius 17/09: "o chamado está com status
+# finalizado, aberto, de todas as plataformas"). Os OFICIAIS vêm da API e ficam
+# em `Chamado.status_plataforma` (+ desde quando); os DERIVADOS a listagem
+# calcula do histórico na hora — quem falou por último, o que o cérebro pediu —
+# e não persistem. O painel traduz o código pro rótulo.
+STATUS_EM_ANALISE = "em_analise"  # plataforma julgando a disputa
+STATUS_PROVA = "prova"  # plataforma pediu prova extra
+STATUS_REEMBOLSO_PAGO = "reembolso_pago"  # Shopee reembolsou o comprador; compensação ainda não veio
+STATUS_GANHAMOS = "ganhamos"
+STATUS_PERDEMOS = "perdemos"
+STATUS_ENCERRADO = "encerrado"  # encerrou sem dizer quem ganhou
+STATUS_AGUARDANDO = "aguardando"  # nós falamos por último
+STATUS_RESPONDEU = "respondeu"  # plataforma falou por último
+STATUS_HUMANO = "humano"  # cérebro pediu gente
+STATUS_FILA = "fila"  # abertura/réplica ainda na fila do robô
+STATUS_FALHOU = "falhou"  # último envio falhou
+STATUS_SEM_ACOMPANHAMENTO = "sem_acompanhamento"  # registrado à mão, nada consulta a plataforma
+STATUS_FINAIS = frozenset({STATUS_GANHAMOS, STATUS_PERDEMOS, STATUS_ENCERRADO})
+
 
 class ChamadoError(Exception):
     """Falha de negócio com código legível pro endpoint (422)."""
@@ -650,6 +669,100 @@ def marcar_resolvido(
     return registrar_sistema(ch, f"Chamado reaberto{(' por ' + autor_nome) if autor_nome else ''}")
 
 
+# ---------------------------------------------------------------- status da aba
+
+
+def set_status_plataforma(ch: Chamado, codigo: str, quando: datetime | None = None) -> bool:
+    """Grava o status oficial da plataforma (e desde quando) se mudou. `quando`
+    = hora da plataforma; sem ela, agora. Repetir o mesmo status não mexe na
+    data (a coluna mostra "desde"); um status FINAL não volta pra intermediário
+    (o sync roda de hora em hora e a API pode seguir dizendo "em análise" num
+    caso já decidido)."""
+    if ch.status_plataforma == codigo:
+        return False
+    if ch.status_plataforma in STATUS_FINAIS and codigo not in STATUS_FINAIS:
+        return False
+    ch.status_plataforma = codigo
+    ch.status_plataforma_at = quando or datetime.now(UTC)
+    return True
+
+
+def status_da_aba(
+    ch: Chamado,
+    *,
+    ultima_fala: ChamadoMensagem | None,
+    ultima_analise: ChamadoMensagem | None,
+    analise_pede_humano: bool,
+) -> tuple[str, datetime | None]:
+    """(código, desde quando) que a coluna Status mostra pra linha.
+
+    `ultima_fala` = última mensagem enviada/recebida (qualquer status de envio);
+    `ultima_analise` = última análise do cérebro, `analise_pede_humano` se ela
+    terminou em "precisa de humano". Ordem: resolvido > cérebro pediu gente (e
+    ninguém falou depois) > status oficial da API (uma resposta da plataforma
+    mais nova que ele vira "respondeu" até a gente replicar) > quem falou por
+    último > nada consulta a plataforma."""
+    if ch.resolvido:
+        if ch.status_plataforma in (STATUS_GANHAMOS, STATUS_PERDEMOS):
+            return ch.status_plataforma, ch.status_plataforma_at or ch.resolvido_at
+        return STATUS_ENCERRADO, ch.resolvido_at
+    fala_em = _quando(ultima_fala)
+    if (
+        analise_pede_humano
+        and ultima_analise is not None
+        and (fala_em is None or ultima_analise.created_at >= fala_em)
+    ):
+        return STATUS_HUMANO, ultima_analise.created_at
+    if ch.status_plataforma:
+        if (
+            ultima_fala is not None
+            and ultima_fala.direcao == "recebida"
+            and fala_em is not None
+            and (ch.status_plataforma_at is None or fala_em > ch.status_plataforma_at)
+        ):
+            return STATUS_RESPONDEU, fala_em
+        return ch.status_plataforma, ch.status_plataforma_at
+    if ultima_fala is None:
+        return STATUS_SEM_ACOMPANHAMENTO, None
+    if ultima_fala.direcao == "recebida":
+        return STATUS_RESPONDEU, fala_em
+    if ultima_fala.status == "pendente":
+        return STATUS_FILA, fala_em
+    if ultima_fala.status == "falhou":
+        return STATUS_FALHOU, fala_em
+    return STATUS_AGUARDANDO, fala_em
+
+
+def _quando(m: ChamadoMensagem | None) -> datetime | None:
+    if m is None:
+        return None
+    return m.enviada_at or m.created_at
+
+
+def ml_beneficiado(claim: dict) -> str:
+    """`resolution.benefited` do claim (string ou lista) em minúsculas."""
+    benef = (claim.get("resolution") or {}).get("benefited")
+    if isinstance(benef, list):
+        benef = benef[0] if benef else None
+    return str(benef or "").strip().lower()
+
+
+def ml_status_encerrado(claim: dict) -> str:
+    """Status da aba pra um claim do ML fechado: quem o ML beneficiou."""
+    return {
+        "respondent": STATUS_GANHAMOS,
+        "complainant": STATUS_PERDEMOS,
+    }.get(ml_beneficiado(claim), STATUS_ENCERRADO)
+
+
+def ml_quando(claim: dict) -> datetime | None:
+    """Hora da última mudança do claim (resolução, senão last_updated)."""
+    from app.services.devolucao_returns import iso_to_dt  # lazy: evita import circular
+
+    res = claim.get("resolution") or {}
+    return iso_to_dt(res.get("date_created") or claim.get("last_updated") or claim.get("date_created"))
+
+
 # ---------------------------------------------------------------- cron
 
 
@@ -708,10 +821,13 @@ async def run_replica_automatica(session: AsyncSession, *, agora: datetime | Non
                     ch.resolvido = True
                     ch.resolvido_at = agora
                     ch.auto_ligada = False
+                    set_status_plataforma(ch, ml_status_encerrado(claim), ml_quando(claim))
                     session.add(
                         registrar_sistema(ch, "Chamado encerrado na plataforma (claim fechado)")
                     )
                     resolvidos += 1
+                elif (claim.get("stage") or "").lower() == "dispute":
+                    set_status_plataforma(ch, STATUS_EM_ANALISE, ml_quando(claim))
             except Exception as e:  # noqa: BLE001
                 falhas += 1
                 logger.warning(

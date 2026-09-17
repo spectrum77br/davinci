@@ -80,6 +80,14 @@ class Chamado(Base, TimestampMixin):
         Boolean, nullable=False, default=False, server_default="false", index=True
     )
     resolvido_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Status OFICIAL que a plataforma deu ao chamado pela API (Vinicius 17/09,
+    # migration 0287): código de services.chamados.STATUS_* + desde quando.
+    # NULL = a API não disse nada; a listagem deriva do histórico (aguardando
+    # plataforma / plataforma respondeu / precisa de humano).
+    status_plataforma: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status_plataforma_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     observacao: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Resultado do chamado em R$ — coluna "Valor" do grupo Controle (Eduardo
     # 03/09, migration 0240). Positivo = lucro ("100 reais ganhamos"), negativo

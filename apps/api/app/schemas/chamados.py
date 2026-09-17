@@ -78,6 +78,18 @@ class ChamadoOut(BaseModel):
     updated_at: datetime
     mensagens_total: int = 0
     ultima_mensagem_at: datetime | None = None
+    # Coluna "Status" da aba (Vinicius 17/09): código de services.chamados.STATUS_*
+    # + desde quando. `status_plataforma` é o oficial gravado pela API;
+    # `status_aba` é o que a linha mostra (oficial, ou derivado do histórico).
+    status_plataforma: str | None = None
+    status_plataforma_at: datetime | None = None
+    status_aba: str | None = None
+    status_aba_at: datetime | None = None
+    # Última FALA real (nossa ou da plataforma; não análise nem evento) —
+    # coluna "Últ. resposta": quando, `enviada` (nós) | `recebida` (plataforma), quem.
+    ultima_resposta_at: datetime | None = None
+    ultima_resposta_direcao: str | None = None
+    ultima_resposta_autor: str | None = None
     anexos_auto: list[ChamadoAnexoOut] = []
     # Jurídico (migration 0248)
     juridico_enviado_at: datetime | None = None

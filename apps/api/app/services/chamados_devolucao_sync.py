@@ -19,11 +19,16 @@ hora (junto do `chamados_replica_automatica`): pra cada chamado de origem
 Cada estado/mensagem novo vira UMA mensagem `recebida` no histórico (dedupe
 pelo texto — o cron pode rodar quantas vezes quiser); estado final marca o
 chamado como resolvido com um evento de sistema. Best-effort por chamado.
+
+17/09 (Vinicius, coluna "Status" da aba): cada passada também grava em
+`Chamado.status_plataforma` o que a plataforma diz do caso (em análise, pediu
+prova, reembolso pago, ganhamos/perdemos) e desde quando — ver
+`chamados.set_status_plataforma`.
 """
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from uuid import UUID
 
@@ -76,6 +81,18 @@ _TT_ARB_TXT: dict[str, tuple[str, bool]] = {
     "SUPPORT_BUYER": ("Arbitragem da TikTok decidida a favor do COMPRADOR (reembolso).", False),
     "CLOSED": ("Arbitragem encerrada na TikTok.", False),
 }
+# Coluna Status da aba (17/09): o que cada estado da TikTok significa pra loja.
+_TT_STATUS_STATUS: dict[str, str] = {
+    "RETURN_OR_REFUND_REQUEST_CANCEL": chamados_svc.STATUS_GANHAMOS,
+    "REFUND_OR_RETURN_REQUEST_REJECT": chamados_svc.STATUS_GANHAMOS,
+    "RETURN_OR_REFUND_REQUEST_SUCCESS": chamados_svc.STATUS_PERDEMOS,
+    "RETURN_OR_REFUND_REQUEST_COMPLETE": chamados_svc.STATUS_PERDEMOS,
+}
+_TT_ARB_STATUS: dict[str, str] = {
+    "IN_PROGRESS": chamados_svc.STATUS_EM_ANALISE,
+    "SUPPORT_SELLER": chamados_svc.STATUS_GANHAMOS,
+    "SUPPORT_BUYER": chamados_svc.STATUS_PERDEMOS,
+}
 
 # ---- Shopee --------------------------------------------------------------------
 _SH_STATUS_TXT: dict[str, tuple[str, bool]] = {
@@ -89,6 +106,24 @@ _SH_COMP_TXT: dict[str, tuple[str, bool]] = {
     "REJECTED": ("Shopee NEGOU a compensação ao vendedor.", True),
     "REQUESTED": ("Pedido de compensação registrado na Shopee — aguardando análise.", False),
 }
+_SH_COMP_STATUS: dict[str, str] = {
+    "APPROVED": chamados_svc.STATUS_GANHAMOS,
+    "REJECTED": chamados_svc.STATUS_PERDEMOS,
+    "REQUESTED": chamados_svc.STATUS_EM_ANALISE,
+}
+# Medido 17/09 nas 16 disputas Shopee da aba: `seller_compensation_status` vem
+# SEMPRE vazio no BR — a decisão aparece em `compensation_amount` (+ lista) e,
+# no escrow, como `order_adjustment` "Logistics Related Compensation". Quando a
+# disputa foi registrada e a Shopee reembolsou o comprador SEM compensar a loja
+# (`seller_return_refund` < 0 ou ajuste "reembolso aprovado"), ela finalizou
+# contra a loja — o 2608300N7X5K2HF fechou 4 min depois da disputa. Como no caso
+# ganho a compensação chegou ~1 h depois do reembolso (2608170J49H1EBQ), o
+# "perdemos" só é decretado passada esta carência desde o reembolso.
+_SH_PERDEMOS_CARENCIA = timedelta(hours=24)
+_SH_PERDEMOS_TXT = (
+    "Shopee ENCERROU a disputa sem compensação — reembolso integral ao comprador (perdemos)."
+)
+_SH_SEM_REEMBOLSO_TXT = "Devolução encerrada na Shopee SEM reembolso ao comprador (ganhamos)."
 
 
 def _fmt_dt(v) -> str:
@@ -175,12 +210,17 @@ async def _sync_tiktok(session: AsyncSession, ch: Chamado, dev: Devolution | Non
     novos = 0
     status = str(caso.get("return_status") or "").strip().upper()
     arb = str(caso.get("arbitration_status") or "").strip().upper()
+    quando = epoch_to_dt(caso.get("update_time"))
     if arb in _TT_ARB_TXT:
         txt, fim = _TT_ARB_TXT[arb]
         novos += await registrar_recebida(session, ch, cd.PLAT_TIKTOK, txt)
+        if arb in _TT_ARB_STATUS:
+            chamados_svc.set_status_plataforma(ch, _TT_ARB_STATUS[arb], quando)
     if status in _TT_STATUS_TXT:
         txt, fim = _TT_STATUS_TXT[status]
         novos += await registrar_recebida(session, ch, cd.PLAT_TIKTOK, txt)
+        if status in _TT_STATUS_STATUS:
+            chamados_svc.set_status_plataforma(ch, _TT_STATUS_STATUS[status], quando)
         if fim:
             _encerrar(session, ch, f"tiktok:{status}")
     # linha do tempo: notas do comprador / da plataforma (best-effort)
@@ -294,7 +334,23 @@ def _brl(v: Decimal) -> str:
     return f"R$ {v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
 
-async def _compensacoes_pagas(client, order_sn: str) -> list[tuple[Decimal, str, str]]:
+def _numero(v) -> float:
+    try:
+        return float(v or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _ajustes_escrow(esc: dict) -> list[dict]:
+    """`order_adjustment` do escrow — vem dentro de `order_income` (API) ou na
+    raiz (payloads antigos/teste)."""
+    ajustes = (
+        esc.get("order_adjustment") or (esc.get("order_income") or {}).get("order_adjustment") or []
+    )
+    return [a for a in ajustes if isinstance(a, dict)] if isinstance(ajustes, list) else []
+
+
+def _compensacoes_pagas(esc: dict) -> list[tuple[Decimal, str, str]]:
     """Compensação que a Shopee JÁ PAGOU ao vendedor: `order_adjustment` do escrow
     com motivo "... Compensation" e valor positivo → [(valor, dd/mm, motivo)].
 
@@ -302,23 +358,32 @@ async def _compensacoes_pagas(client, order_sn: str) -> list[tuple[Decimal, str,
     o `get_return_detail` fica ACCEPTED com `seller_compensation_status` VAZIO para
     sempre — só o escrow mostra "Logistics Related Compensation" com valor e data.
     """
-    fn = getattr(client, "get_escrow_detail", None)
-    if fn is None or not order_sn:
-        return []
-    esc = await fn(order_sn) or {}
-    ajustes = (
-        esc.get("order_adjustment") or (esc.get("order_income") or {}).get("order_adjustment") or []
-    )
     out = []
-    for a in ajustes if isinstance(ajustes, list) else []:
-        motivo = str((a or {}).get("adjustment_reason") or "")
+    for a in _ajustes_escrow(esc):
+        motivo = str(a.get("adjustment_reason") or "")
         try:
-            valor = Decimal(str((a or {}).get("amount")))
+            valor = Decimal(str(a.get("amount")))
         except (InvalidOperation, ValueError):
             continue
         if "compensation" in motivo.lower() and valor > 0:
             out.append((valor, _fmt_dt(a.get("date")), motivo))
     return out
+
+
+def _reembolso_pago(esc: dict) -> tuple[bool, datetime | None]:
+    """O escrow já desconta o reembolso ao comprador? `seller_return_refund`
+    negativo (medido 17/09: -779 no 2608300N7X5K2HF) ou ajuste negativo de
+    reembolso ("Ajuste após reembolso aprovado", 2608300N932530Q). Devolve
+    também a data do ajuste, quando há."""
+    oi = esc.get("order_income") if isinstance(esc.get("order_income"), dict) else {}
+    pago = _numero(oi.get("seller_return_refund")) < 0
+    quando: datetime | None = None
+    for a in _ajustes_escrow(esc):
+        motivo = str(a.get("adjustment_reason") or "").lower()
+        if _numero(a.get("amount")) < 0 and ("reembolso" in motivo or "refund" in motivo):
+            pago = True
+            quando = quando or epoch_to_dt(a.get("date"))
+    return pago, quando
 
 
 async def _sync_shopee(session: AsyncSession, ch: Chamado, dev: Devolution | None) -> int:
@@ -340,44 +405,98 @@ async def _sync_shopee(session: AsyncSession, ch: Chamado, dev: Devolution | Non
         await session.flush()
         if await _enviar_prova_shopee(session, ch, dev, client, det):
             novos += 1
+    quando = epoch_to_dt(det.get("update_time"))
+    if str(prova.get("seller_proof_status") or "").upper() == "PENDING":
+        chamados_svc.set_status_plataforma(ch, chamados_svc.STATUS_PROVA, quando)
     comp = det.get("seller_compensation") or {}
     comp_status = (
         str(comp.get("seller_compensation_status") or "").upper().replace("COMPENSATION_", "")
     )
+    valor = _numero(comp.get("compensation_amount"))
     if comp_status in _SH_COMP_TXT:
         txt, fim = _SH_COMP_TXT[comp_status]
-        valor = comp.get("compensation_amount")
-        if comp_status == "APPROVED" and valor:
-            txt = f"{txt} Valor: R$ {valor}."
+        if comp_status == "APPROVED" and valor > 0:
+            txt = f"{txt} Valor: R$ {comp.get('compensation_amount')}."
         novos += await registrar_recebida(session, ch, cd.PLAT_SHOPEE, txt)
+        chamados_svc.set_status_plataforma(ch, _SH_COMP_STATUS[comp_status], quando)
         if fim:
             _encerrar(session, ch, f"shopee:comp:{comp_status}")
+    elif status in ("SELLER_DISPUTE", "JUDGING"):
+        chamados_svc.set_status_plataforma(ch, chamados_svc.STATUS_EM_ANALISE, quando)
+    # 17/09 (Eduardo, 288567 "ganhamos e o robô deixou na aba"; Vinicius, 292128
+    # "perdi ou ganhei?"): no BR a decisão da disputa não muda o return — só o
+    # escrow do pedido conta a história (compensação paga / reembolso ao comprador).
+    tem_disputa = bool(det.get("dispute_reason")) or valor > 0
+    if not ch.resolvido and tem_disputa:
+        novos += await _desfecho_shopee(session, ch, client, det, dev_q, status, quando, valor)
     if status in _SH_STATUS_TXT:
         txt, fim = _SH_STATUS_TXT[status]
         novos += await registrar_recebida(session, ch, cd.PLAT_SHOPEE, txt)
         if fim:
+            if status == "CANCELLED":
+                chamados_svc.set_status_plataforma(ch, chamados_svc.STATUS_GANHAMOS, quando)
+            elif not ch.status_plataforma:
+                chamados_svc.set_status_plataforma(ch, chamados_svc.STATUS_ENCERRADO, quando)
             _encerrar(session, ch, f"shopee:{status}")
-    # 17/09 (Eduardo, 288567 "ganhamos e o robô deixou na aba"): disputa ganha
-    # aparece só como compensação paga no escrow do pedido.
-    tem_disputa = bool(det.get("dispute_reason")) or bool(comp.get("compensation_amount"))
-    if not ch.resolvido and tem_disputa:
-        order_sn = (dev_q.pedido_marketplace or ch.pedido_marketplace or "").strip()
-        try:
-            pagas = await _compensacoes_pagas(client, order_sn)
-        except Exception as e:  # noqa: BLE001 — escrow é apoio; o resto do sync vale
-            logger.info(
-                "chamado_devolucao_shopee_escrow_falhou", chamado_id=str(ch.id), err=str(e)[:120]
-            )
-            pagas = []
-        if pagas:
-            total = sum((v for v, _, _ in pagas), Decimal("0"))
-            partes = "; ".join(f"{_brl(v)}{(' em ' + d) if d else ''} ({m})" for v, d, m in pagas)
-            novos += await registrar_recebida(
-                session, ch, cd.PLAT_SHOPEE,
-                f"Shopee PAGOU a compensação ao vendedor — disputa ganha: {partes}.",
-            )
-            _encerrar(session, ch, "shopee:compensacao_paga",
-                      valor=total if ch.valor_recuperado is None else None)
+    return novos
+
+
+async def _desfecho_shopee(
+    session: AsyncSession, ch: Chamado, client, det: dict, dev_q: Devolution,
+    status: str, quando: datetime | None, valor: float,
+) -> int:
+    """Desfecho da disputa pelo escrow do pedido (uma leitura):
+    - compensação paga → ganhamos, fecha com o valor recuperado;
+    - `compensation_amount` no return sem ajuste no escrow ainda → ganhamos também;
+    - comprador reembolsado e nada pra loja → "reembolso pago"; passada a carência
+      (`_SH_PERDEMOS_CARENCIA`) ou com o return CLOSED → perdemos, fecha;
+    - CLOSED sem reembolso ao comprador → ganhamos.
+    Escrow indisponível = não decide (o resto do sync vale)."""
+    oid = (dev_q.pedido_marketplace or ch.pedido_marketplace or det.get("order_sn") or "").strip()
+    if not oid:
+        return 0
+    try:
+        esc = await client.get_escrow_detail(oid) or {}
+    except Exception as e:  # noqa: BLE001 — escrow é apoio; o resto do sync vale
+        logger.info("chamado_devolucao_shopee_escrow_falhou", chamado_id=str(ch.id), err=str(e)[:120])
+        return 0
+    pagas = _compensacoes_pagas(esc)
+    if pagas:
+        total = sum((v for v, _, _ in pagas), Decimal("0"))
+        partes = "; ".join(f"{_brl(v)}{(' em ' + d) if d else ''} ({m})" for v, d, m in pagas)
+        novos = await registrar_recebida(
+            session, ch, cd.PLAT_SHOPEE,
+            f"Shopee PAGOU a compensação ao vendedor — disputa ganha: {partes}.",
+        )
+        chamados_svc.set_status_plataforma(ch, chamados_svc.STATUS_GANHAMOS, quando)
+        _encerrar(session, ch, "shopee:compensacao_paga",
+                  valor=total if ch.valor_recuperado is None else None)
+        return novos
+    if valor > 0:
+        txt, _fim = _SH_COMP_TXT["APPROVED"]
+        novos = await registrar_recebida(
+            session, ch, cd.PLAT_SHOPEE,
+            f"{txt} Valor: R$ {det.get('seller_compensation', {}).get('compensation_amount')}.",
+        )
+        chamados_svc.set_status_plataforma(ch, chamados_svc.STATUS_GANHAMOS, quando)
+        _encerrar(session, ch, "shopee:comp:valor",
+                  valor=Decimal(str(valor)) if ch.valor_recuperado is None else None)
+        return novos
+    reembolsado, reembolsado_em = _reembolso_pago(esc)
+    if not reembolsado:
+        if status == "CLOSED":
+            chamados_svc.set_status_plataforma(ch, chamados_svc.STATUS_GANHAMOS, quando)
+            return await registrar_recebida(session, ch, cd.PLAT_SHOPEE, _SH_SEM_REEMBOLSO_TXT)
+        return 0
+    chamados_svc.set_status_plataforma(
+        ch, chamados_svc.STATUS_REEMBOLSO_PAGO, reembolsado_em or quando
+    )
+    desde = ch.status_plataforma_at or datetime.now(UTC)
+    if status != "CLOSED" and datetime.now(UTC) - desde < _SH_PERDEMOS_CARENCIA:
+        return 0
+    novos = await registrar_recebida(session, ch, cd.PLAT_SHOPEE, _SH_PERDEMOS_TXT)
+    chamados_svc.set_status_plataforma(ch, chamados_svc.STATUS_PERDEMOS, desde)
+    _encerrar(session, ch, "shopee:reembolso_sem_compensacao")
     return novos
 
 
@@ -414,7 +533,7 @@ async def _sync_ml(session: AsyncSession, ch: Chamado, dev: Devolution | None) -
         )
     if (claim.get("status") or "").lower() == "closed":
         res = claim.get("resolution") or {}
-        benef = str(res.get("benefited") or "").lower()
+        benef = chamados_svc.ml_beneficiado(claim)
         quem = {"respondent": "a favor do VENDEDOR", "complainant": "a favor do COMPRADOR"}.get(
             benef, "sem beneficiado informado"
         )
@@ -424,7 +543,15 @@ async def _sync_ml(session: AsyncSession, ch: Chamado, dev: Devolution | None) -
             f"Reclamação encerrada no Mercado Livre — decisão {quem}"
             + (f" (motivo: {motivo})" if motivo else "") + ".",
         )
+        chamados_svc.set_status_plataforma(
+            ch, chamados_svc.ml_status_encerrado(claim), chamados_svc.ml_quando(claim)
+        )
         _encerrar(session, ch, "ml:closed")
+    elif (claim.get("stage") or "").lower() == "dispute":
+        # Mediação: o ML entrou como juiz — em análise até o claim fechar.
+        chamados_svc.set_status_plataforma(
+            ch, chamados_svc.STATUS_EM_ANALISE, chamados_svc.ml_quando(claim)
+        )
     return novos
 
 

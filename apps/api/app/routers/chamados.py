@@ -122,28 +122,28 @@ def _mensagem_out(m: ChamadoMensagem) -> ChamadoMensagemOut:
 
 
 async def _to_out(session: AsyncSession, rows: list[Chamado]) -> list[ChamadoOut]:
-    """Monta a saída em LOTE: status Bling vivo, contagem/última mensagem e
-    anexos da réplica automática — 3 queries pra página inteira."""
+    """Monta a saída em LOTE: status Bling vivo, histórico resumido (contagem,
+    última fala, status da aba) e anexos da réplica automática — 3 queries pra
+    página inteira."""
     if not rows:
         return []
     ids = [r.id for r in rows]
     status_map = await svc.status_bling_atual_map(
         session, {r.pedido_bling for r in rows if r.pedido_bling}
     )
-    contagem = {
-        cid: (total, ultima)
-        for cid, total, ultima in (
-            await session.execute(
-                select(
-                    ChamadoMensagem.chamado_id,
-                    func.count(ChamadoMensagem.id),
-                    func.max(ChamadoMensagem.created_at),
-                )
-                .where(ChamadoMensagem.chamado_id.in_(ids), ChamadoMensagem.tipo != TIPO_HISTORICO)
-                .group_by(ChamadoMensagem.chamado_id)
-            )
-        ).all()
-    }
+    # 17/09 (Vinicius): a linha mostra a última FALA (nossa ou da plataforma —
+    # análise do robô e evento não contam) e o Status, que depende de quem falou
+    # por último e do que o cérebro pediu. A conversa completa (`historico`)
+    # fica fora, como antes.
+    por_chamado: dict[UUID, list[ChamadoMensagem]] = {}
+    for m in (
+        await session.execute(
+            select(ChamadoMensagem)
+            .where(ChamadoMensagem.chamado_id.in_(ids), ChamadoMensagem.tipo != TIPO_HISTORICO)
+            .order_by(ChamadoMensagem.created_at)
+        )
+    ).scalars():
+        por_chamado.setdefault(m.chamado_id, []).append(m)
     anexos_auto: dict[UUID, list[ChamadoAnexoOut]] = {}
     for a in (
         await session.execute(
@@ -162,11 +162,28 @@ async def _to_out(session: AsyncSession, rows: list[Chamado]) -> list[ChamadoOut
 
     out: list[ChamadoOut] = []
     for r in rows:
-        total, ultima = contagem.get(r.id, (0, None))
+        msgs = por_chamado.get(r.id, [])
         o = ChamadoOut.model_validate(r)
         o.status_bling_atual = status_map.get(r.pedido_bling or "") or r.status_bling
-        o.mensagens_total = int(total or 0)
-        o.ultima_mensagem_at = ultima
+        o.mensagens_total = len(msgs)
+        o.ultima_mensagem_at = msgs[-1].created_at if msgs else None
+        falas = [m for m in msgs if m.direcao in ("enviada", "recebida")]
+        entregues = [m for m in falas if m.status not in ("pendente", "falhou")]
+        if entregues:
+            u = entregues[-1]
+            o.ultima_resposta_at = u.enviada_at or u.created_at
+            o.ultima_resposta_direcao = u.direcao
+            o.ultima_resposta_autor = u.autor_nome
+        analises = [m for m in msgs if m.tipo == "analise"]
+        ultima_analise = analises[-1] if analises else None
+        o.status_aba, o.status_aba_at = svc.status_da_aba(
+            r,
+            ultima_fala=falas[-1] if falas else None,
+            ultima_analise=ultima_analise,
+            analise_pede_humano=bool(
+                ultima_analise and ultima_analise.texto.endswith(_ACAO_TXT["humano"])
+            ),
+        )
         o.auto_proximo_envio_at = svc.auto_proximo_envio(r)
         o.anexos_auto = anexos_auto.get(r.id, [])
         if r.juridico_enviado_por:

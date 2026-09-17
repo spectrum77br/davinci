@@ -870,6 +870,8 @@ async def test_sync_tiktok_resposta_no_historico_e_encerra(client, make_user, au
     assert any("Recusa do pacote registrada" in t for t in txts)
     assert any("ARBITRAGEM" in t for t in txts)
     assert any("Comprador" in t and "Discordo" in t for t in txts)
+    await db.refresh(ch)
+    assert ch.status_plataforma == "em_analise"  # coluna Status (17/09)
     # rodar de novo não duplica
     s2 = await sync.sync_respostas(db)
     assert s2["novos"] == 0
@@ -880,6 +882,7 @@ async def test_sync_tiktok_resposta_no_historico_e_encerra(client, make_user, au
     assert s3["novos"] == 2 and s3["encerrados"] == 1
     await db.refresh(ch)
     assert ch.resolvido is True
+    assert ch.status_plataforma == "ganhamos"
     # resolvido some da varredura
     assert (await sync.sync_respostas(db))["verificados"] == 0
 
@@ -957,6 +960,7 @@ async def test_sync_shopee_prova_extra_e_compensacao(client, make_user, auth_as,
     assert any("APROVOU a compensação" in t and "786.71" in t for t in txts)
     await db.refresh(ch)
     assert ch.resolvido is True
+    assert ch.status_plataforma == "ganhamos"
 
 
 async def test_sync_ml_mensagens_do_mediador_e_decisao(client, make_user, auth_as, db, ml, monkeypatch):
@@ -1000,6 +1004,127 @@ async def test_sync_ml_mensagens_do_mediador_e_decisao(client, make_user, auth_a
     assert any("a favor do VENDEDOR" in t for t in txts)
     await db.refresh(ch)
     assert ch.resolvido is True
+    assert ch.status_plataforma == "ganhamos"
+
+
+async def _chamado_shopee_sync(client, make_user, auth_as, db, monkeypatch, *, numero, numeroloja, det, escrow):
+    """Devolução Shopee com disputa aberta pela API e um fake que devolve `det`
+    (get_return_detail) e `escrow` (get_escrow_detail) — dicts mutáveis."""
+    from app.models import DevolucaoRastreio
+
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+    fake = _FakeShopee()
+
+    async def _det(return_sn):
+        return {"return_sn": return_sn, "return_solution": 0, "needs_logistics": True,
+                "order_sn": numeroloja, "seller_proof": {"seller_proof_status": ""}, **det}
+
+    async def _escrow(order_sn):
+        assert order_sn == numeroloja
+        return {"order_income": dict(escrow)}
+
+    fake.get_return_detail = _det
+    fake.get_escrow_detail = _escrow
+
+    async def _c(session, *a):
+        return fake
+
+    monkeypatch.setattr(svc, "_shopee_client_para", _c)
+    await _seed_pedido(db, user, numero=numero, numeroloja=numeroloja,
+                       platform="shopee", conta="mega", loja="90")
+    db.add(DevolucaoRastreio(pedido_bling=numero, devolucao_id_auto=f"2608{numero}", fonte_auto="shopee"))
+    await db.commit()
+    r = await client.post(
+        "/api/devolutions",
+        json={"conta": "mega", "pedido_bling": numero, "pedido_marketplace": numeroloja,
+              "condicao_produto": "Não devolvido", "motivo_devolucao": "Não recebido"},
+    )
+    assert r.json()["chamado_ml_status"] == "enviada", r.json()
+    return (await db.execute(select(Chamado).where(Chamado.pedido_bling == numero))).scalar_one()
+
+
+async def test_sync_shopee_br_perde_pelo_escrow_com_carencia(client, make_user, auth_as, db, ml, monkeypatch):
+    """17/09 (medido em 16 disputas): no BR `seller_compensation_status` vem
+    vazio. A Shopee decidiu CONTRA a loja quando a disputa está registrada, o
+    comprador já foi reembolsado (escrow) e a compensação não veio — com 24 h
+    de carência, porque no caso ganho (2608170J49H1EBQ) a compensação chegou
+    ~1 h depois do reembolso."""
+    import time
+    from datetime import timedelta
+
+    from app.services import chamados_devolucao_sync as sync
+
+    det = {"status": "ACCEPTED", "update_time": int(time.time()) - 600, "dispute_reason": None,
+           "seller_compensation": {"seller_compensation_status": "", "compensation_amount": 0}}
+    escrow = {"seller_return_refund": 0, "order_adjustment": []}
+    ch = await _chamado_shopee_sync(client, make_user, auth_as, db, monkeypatch,
+                                    numero="292630", numeroloja="260827SYNC30", det=det, escrow=escrow)
+    # disputa registrada, comprador ainda não reembolsado → nada decidido
+    det["dispute_reason"] = ["Did not receive the return product"]
+    s = await sync.sync_respostas(db)
+    assert s["verificados"] == 1 and s["encerrados"] == 0
+    await db.refresh(ch)
+    assert ch.status_plataforma is None
+    # comprador reembolsado → "reembolso pago", chamado segue aberto (carência)
+    escrow["seller_return_refund"] = -779
+    s = await sync.sync_respostas(db)
+    assert s["encerrados"] == 0
+    await db.refresh(ch)
+    assert ch.status_plataforma == "reembolso_pago" and ch.resolvido is False
+    desde = ch.status_plataforma_at
+    assert desde is not None
+    # passou a carência sem compensação → perdemos, encerra, "desde" é o reembolso
+    monkeypatch.setattr(sync, "_SH_PERDEMOS_CARENCIA", timedelta(0))
+    s = await sync.sync_respostas(db)
+    assert s["encerrados"] == 1 and s["novos"] == 1
+    await db.refresh(ch)
+    assert ch.status_plataforma == "perdemos" and ch.resolvido is True
+    assert ch.status_plataforma_at == desde
+    assert any("sem compensação" in t for t in await _recebidas(db, ch.id))
+    lst = (await client.get("/api/chamados", params={"mostrar": "resolvidos"})).json()["items"]
+    assert next(i for i in lst if i["id"] == str(ch.id))["status_aba"] == "perdemos"
+
+
+async def test_sync_shopee_br_ganha_pelo_valor_ou_sem_reembolso(client, make_user, auth_as, db, ml, monkeypatch):
+    """Ganhou = `compensation_amount` > 0 (mesmo com status vazio) — ou a
+    devolução fechou (CLOSED) sem o comprador ser reembolsado."""
+    import time
+
+    from app.services import chamados_devolucao_sync as sync
+
+    det = {"status": "ACCEPTED", "update_time": int(time.time()) - 600, "dispute_reason": None,
+           "seller_compensation": {"seller_compensation_status": "", "compensation_amount": 0}}
+    escrow = {"seller_return_refund": -877, "order_adjustment": []}
+    ch = await _chamado_shopee_sync(client, make_user, auth_as, db, monkeypatch,
+                                    numero="292631", numeroloja="260827SYNC31", det=det, escrow=escrow)
+    det["dispute_reason"] = ["Received return products with physical damage"]  # a nossa disputa
+    s = await sync.sync_respostas(db)
+    assert s["encerrados"] == 0
+    await db.refresh(ch)
+    assert ch.status_plataforma == "reembolso_pago"
+    # a compensação chegou → ganhamos (status final, não volta pra intermediário)
+    det["seller_compensation"] = {"seller_compensation_status": "", "compensation_amount": 728.22,
+                                  "compensation_amount_list": [{"compensation_type": "LOGISTICS_RELATED_COMPENSATION", "compensation_amount": 728.22}]}
+    s = await sync.sync_respostas(db)
+    assert s["encerrados"] == 1
+    await db.refresh(ch)
+    assert ch.status_plataforma == "ganhamos" and ch.resolvido is True
+    assert any("APROVOU a compensação" in t and "728.22" in t for t in await _recebidas(db, ch.id))
+
+    # outra devolução: fechou sem reembolso ao comprador → ganhamos
+    det2 = {"status": "ACCEPTED", "update_time": int(time.time()) - 600, "dispute_reason": None,
+            "seller_compensation": {"seller_compensation_status": "", "compensation_amount": 0}}
+    escrow2 = {"seller_return_refund": 0, "order_adjustment": []}
+    ch2 = await _chamado_shopee_sync(client, make_user, auth_as, db, monkeypatch,
+                                     numero="292632", numeroloja="260827SYNC32", det=det2, escrow=escrow2)
+    det2["status"] = "CLOSED"
+    det2["dispute_reason"] = ["Received return products with physical damage"]
+    s = await sync.sync_respostas(db)
+    assert s["encerrados"] == 1
+    await db.refresh(ch2)
+    assert ch2.status_plataforma == "ganhamos" and ch2.resolvido is True
+    assert any("SEM reembolso" in t for t in await _recebidas(db, ch2.id))
 
 
 # ─── Shopee: prazo vencido, foto grande e réplica manual (07/09) ──────────────

@@ -45,6 +45,7 @@ from app.models import (
 )
 from app.services import chamados as chamados_svc
 from app.services import logistica_tiktok, threema
+from app.services.devolucao_returns import epoch_to_dt
 from app.services.marketplaces.tiktok import TikTokClient
 
 logger = structlog.get_logger()
@@ -73,6 +74,13 @@ _DESFECHOS = {
     "RETURN_OR_REFUND_REQUEST_SUCCESS": "reembolso aprovado ao comprador",
     "RETURN_OR_REFUND_REQUEST_CANCEL": "o comprador cancelou o pedido de reembolso",
     "REFUND_OR_RETURN_REQUEST_REJECT": "reembolso RECUSADO (valor fica com o vendedor)",
+}
+# Coluna Status da aba (17/09): o desfecho em ganhou/perdeu.
+_STATUS_ABA = {
+    "RETURN_OR_REFUND_REQUEST_COMPLETE": chamados_svc.STATUS_PERDEMOS,
+    "RETURN_OR_REFUND_REQUEST_SUCCESS": chamados_svc.STATUS_PERDEMOS,
+    "RETURN_OR_REFUND_REQUEST_CANCEL": chamados_svc.STATUS_GANHAMOS,
+    "REFUND_OR_RETURN_REQUEST_REJECT": chamados_svc.STATUS_GANHAMOS,
 }
 
 
@@ -387,6 +395,9 @@ async def run_vigia(session, *, agora: datetime | None = None, dry_run: bool = F
         resumo["desfechos"] += 1
         if not dry_run:
             session.add(chamados_svc.registrar_sistema(ch, texto_desfecho(caso, eventos)))
+            status_aba = _STATUS_ABA.get(str(caso.get("return_status") or "").upper())
+            if status_aba:
+                chamados_svc.set_status_plataforma(ch, status_aba, epoch_to_dt(caso.get("update_time")))
     if not dry_run:
         await session.commit()
     return resumo

@@ -4,7 +4,7 @@ réplica automática + acompanhamento do cron, valor ao resolver, filtro por con
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import select
@@ -670,6 +670,10 @@ async def test_chamado_api_ml_fecha_sozinho_quando_ml_encerra(
     assert out["resolvidos"] == 1
     ch = (await db.execute(select(Chamado).where(Chamado.id == cid))).scalar_one()
     assert ch.resolvido is True
+    # coluna Status (17/09): claim fechado sem `resolution` = encerrado sem vencedor
+    assert ch.status_plataforma == svc.STATUS_ENCERRADO
+    lst = (await client.get("/api/chamados", params={"mostrar": "resolvidos"})).json()["items"]
+    assert next(i for i in lst if i["id"] == cid)["status_aba"] == "encerrado"
     manual = (await db.execute(select(Chamado).where(Chamado.id == cid_manual))).scalar_one()
     assert manual.resolvido is False
     hist = await client.get(f"/api/chamados/{cid}/mensagens")
@@ -932,3 +936,113 @@ async def test_agent_analisar_canais_manual_e_api_sem_replica(
     assert (
         await client.post("/api/chamados/agent/analisar", headers=hdr, json={"canais": ["x"]})
     ).status_code == 422
+
+
+async def test_lista_status_da_aba_e_ultima_resposta(client, make_user, auth_as, db):
+    """17/09 (Vinicius): a coluna Status diz o que a plataforma diz do chamado —
+    oficial da API quando há, senão derivado de quem falou por último e do que o
+    cérebro pediu — e a Últ. resposta mostra a última FALA (análise e evento do
+    sistema não contam)."""
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+    r = await client.post(
+        "/api/chamados",
+        json={"origem": "margem", "pedido_bling": "1", "canal": "manual", "plataforma": "shopee"},
+    )
+    cid = r.json()["id"]
+
+    async def linha() -> dict:
+        body = (await client.get("/api/chamados", params={"mostrar": "todos"})).json()
+        return next(i for i in body["items"] if i["id"] == cid)
+
+    def fala(ch, **kw):
+        # created_at é `now()` do Postgres = início da transação da fixture `db`,
+        # anterior às réplicas feitas pela API — carimba a hora real.
+        m = svc.nova_mensagem(ch, status="registrada", **kw)
+        m.created_at = datetime.now(UTC)
+        return m
+
+    # só o evento "Chamado registrado": nada consulta essa plataforma
+    row = await linha()
+    assert row["status_aba"] == "sem_acompanhamento"
+    assert row["ultima_resposta_at"] is None
+
+    # nós falamos (réplica manual registrada) → aguardando plataforma
+    rep = await client.post(f"/api/chamados/{cid}/mensagens", data={"texto": "Segue a réplica"})
+    assert rep.status_code == 201, rep.text
+    row = await linha()
+    assert row["status_aba"] == "aguardando"
+    assert row["ultima_resposta_direcao"] == "enviada"
+    assert row["ultima_resposta_autor"] == rep.json()["autor_nome"]
+    assert row["status_aba_at"] == row["ultima_resposta_at"]
+
+    # a plataforma respondeu (monitor) → respondeu; última fala é dela
+    ch = (await db.execute(select(Chamado).where(Chamado.id == UUID(cid)))).scalar_one()
+    db.add(
+        fala(
+            ch, texto="Precisamos de fotos", tipo="resposta", direcao="recebida",
+            autor_nome="monitor"
+        )
+    )
+    await db.commit()
+    row = await linha()
+    assert row["status_aba"] == "respondeu"
+    assert row["ultima_resposta_direcao"] == "recebida"
+    assert row["ultima_resposta_autor"] == "monitor"
+
+    # cérebro pediu gente → precisa de humano (a análise não vira "última resposta")
+    db.add(
+        fala(
+            ch, texto="Análise do robô [duvida]: não sei o que responder → precisa de humano",
+            tipo="analise", direcao="sistema", autor_nome="cérebro"
+        )
+    )
+    await db.commit()
+    row = await linha()
+    assert row["status_aba"] == "humano"
+    assert row["ultima_resposta_direcao"] == "recebida"
+
+    # status oficial da API: vale, até a plataforma falar de novo depois dele
+    ch.status_plataforma = svc.STATUS_EM_ANALISE
+    ch.status_plataforma_at = datetime.now(UTC)
+    await db.commit()
+    assert (await linha())["status_aba"] == "humano"  # cérebro pediu gente e ninguém falou depois
+    db.add(
+        fala(
+            ch, texto="Decisão em até 3 dias", tipo="resposta", direcao="recebida",
+            autor_nome="Shopee"
+        )
+    )
+    await db.commit()
+    assert (await linha())["status_aba"] == "respondeu"
+    # nós replicamos de novo → volta pro oficial (em análise)
+    assert (
+        await client.post(f"/api/chamados/{cid}/mensagens", data={"texto": "Seguem as fotos"})
+    ).status_code == 201
+    row = await linha()
+    assert row["status_aba"] == "em_analise"
+    assert row["ultima_resposta_direcao"] == "enviada"
+
+    # réplica ainda na fila do robô conta como status, mas não como resposta dada
+    assert (await client.patch(f"/api/chamados/{cid}", json={"canal": "robo"})).status_code == 200
+    ch.status_plataforma = None
+    await db.commit()
+    fila = await client.post(f"/api/chamados/{cid}/mensagens", data={"texto": "na fila"})
+    assert fila.json()["status"] == "pendente"
+    row = await linha()
+    assert row["status_aba"] == "fila"
+    assert row["ultima_resposta_autor"] == rep.json()["autor_nome"]  # a última ENTREGUE
+
+    # resolvido → encerrado; se a API disse quem ganhou, mostra isso
+    ok = await client.post(
+        f"/api/chamados/{cid}/resolver", json={"resolvido": True, "valor_recuperado": 10}
+    )
+    assert ok.status_code == 200, ok.text
+    assert (await linha())["status_aba"] == "encerrado"
+    ch.status_plataforma = svc.STATUS_GANHAMOS
+    await db.commit()
+    assert (await linha())["status_aba"] == "ganhamos"
+
+    # filtro/ordem dos códigos: um status final nunca vira intermediário
+    assert svc.set_status_plataforma(ch, svc.STATUS_EM_ANALISE) is False
+    assert ch.status_plataforma == svc.STATUS_GANHAMOS

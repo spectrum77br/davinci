@@ -8,13 +8,11 @@ import {
   History,
   ImagePlus,
   Loader2,
-  MessageSquareReply,
   Plus,
   RotateCcw,
   Scale,
   Search,
   Send,
-  Settings2,
   Trash2,
   Undo2,
   X,
@@ -25,9 +23,13 @@ definePageMeta({ middleware: ['permission'], permission: { resource: 'chamados',
 // Aba "Chamados" (Pós-venda): centraliza os chamados abertos nas plataformas,
 // no formato da planilha — Data | pedido bling | pedido marketplace |
 // plataforma | produto | sku | conta | status bling | origem | chamado |
-// réplica | réplica automática | alterar status bling | observação | valor.
+// status | últ. resposta | alterar status bling | observação | valor.
 // O sim/não "monitoramento" saiu em 15/09 (Eduardo): o robô acompanha TODO
 // chamado de API do ML e fecha sozinho quando o claim encerra — nada a marcar.
+// 17/09 (Vinicius): o grupo "Réplica" (botão responder + réplica automática)
+// saiu da tabela — a réplica automática nunca foi ligada e a resposta manual
+// continua dentro do histórico. No lugar: Status (o que a plataforma diz do
+// chamado, e desde quando) e Últ. resposta (quando e quem falou por último).
 
 type Origem = 'margem' | 'logistica' | 'devolucao' | 'vendas'
 type Canal = 'api' | 'robo' | 'manual'
@@ -45,6 +47,35 @@ const CANAIS: { value: Canal; label: string; hint: string }[] = [
 ]
 // Ao fechar: Logística → Resolvido ou Perdimento (célula M2 da planilha).
 const FECHAMENTO: Partial<Record<Origem, string[]>> = { logistica: ['Resolvido', 'Perdimento'] }
+// Coluna Status (17/09): código que a API manda → rótulo e cor. A ordem é a do filtro.
+const STATUS_ABA: { value: string; label: string; cls: string; hint: string }[] = [
+  { value: 'respondeu', label: 'Plataforma respondeu', cls: 'bg-orange-500/15 text-orange-700 dark:text-orange-300', hint: 'a plataforma falou por último — estamos devendo resposta (o robô analisa)' },
+  { value: 'humano', label: 'Precisa de humano', cls: 'bg-red-500/15 text-red-700 dark:text-red-300', hint: 'o robô não soube o que fazer com a última resposta da plataforma' },
+  { value: 'prova', label: 'Plataforma pediu prova', cls: 'bg-orange-500/15 text-orange-700 dark:text-orange-300', hint: 'a Shopee pediu evidência extra na disputa' },
+  { value: 'aguardando', label: 'Aguardando plataforma', cls: 'bg-sky-500/15 text-sky-700 dark:text-sky-300', hint: 'nós falamos por último — a bola está com a plataforma' },
+  { value: 'em_analise', label: 'Em análise na plataforma', cls: 'bg-violet-500/15 text-violet-700 dark:text-violet-300', hint: 'disputa/mediação em julgamento pela plataforma' },
+  { value: 'reembolso_pago', label: 'Reembolso pago — aguardando compensação', cls: 'bg-amber-500/15 text-amber-700 dark:text-amber-300', hint: 'a Shopee reembolsou o comprador; se a compensação à loja não vier em 24 h, conta como perdido' },
+  { value: 'fila', label: 'Na fila do robô', cls: 'bg-muted text-muted-foreground', hint: 'abertura/réplica ainda não saiu' },
+  { value: 'falhou', label: 'Envio falhou', cls: 'bg-red-500/15 text-red-700 dark:text-red-300', hint: 'o último envio à plataforma falhou — ver histórico' },
+  { value: 'sem_acompanhamento', label: 'Sem acompanhamento', cls: 'bg-muted text-muted-foreground', hint: 'registrado à mão — o DaVinci não consulta essa plataforma' },
+  { value: 'ganhamos', label: 'Encerrado — ganhamos', cls: 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300', hint: 'a plataforma decidiu a favor da loja' },
+  { value: 'perdemos', label: 'Encerrado — perdemos', cls: 'bg-red-500/15 text-red-700 dark:text-red-300', hint: 'a plataforma decidiu a favor do comprador' },
+  { value: 'encerrado', label: 'Encerrado', cls: 'bg-muted text-muted-foreground', hint: 'chamado resolvido' },
+]
+const STATUS_POR_CODIGO = Object.fromEntries(STATUS_ABA.map((s) => [s.value, s]))
+function statusInfo(row: ChamadoRow) {
+  return STATUS_POR_CODIGO[row.status_aba || ''] || { value: row.status_aba || '', label: row.status_aba || '—', cls: 'bg-muted text-muted-foreground', hint: '' }
+}
+// Quem falou por último, pra coluna Últ. resposta: "nós · robô" / "plataforma · Shopee".
+function quemRespondeu(row: ChamadoRow): string {
+  const autor = (row.ultima_resposta_autor || '').trim()
+  if (row.ultima_resposta_direcao === 'recebida') {
+    const plat = autor && autor !== 'monitor' ? autor : (row.plataforma || 'plataforma').toUpperCase()
+    return `plataforma · ${plat}`
+  }
+  const nos = autor === 'cérebro' || autor.startsWith('robô') ? 'robô' : autor === 'sistema' ? 'automático' : autor || 'nós'
+  return `nós · ${nos}`
+}
 
 type Anexo = { id: string; mensagem_id: string | null; filename: string; content_type: string; size_bytes: number; created_at: string }
 type Mensagem = {
@@ -98,6 +129,15 @@ type ChamadoRow = {
   updated_at: string
   mensagens_total: number
   ultima_mensagem_at: string | null
+  // Coluna Status: código (STATUS_ABA) + desde quando; oficial da API ou derivado do histórico.
+  status_plataforma: string | null
+  status_plataforma_at: string | null
+  status_aba: string | null
+  status_aba_at: string | null
+  // Última FALA real (nossa ou da plataforma) — coluna Últ. resposta.
+  ultima_resposta_at: string | null
+  ultima_resposta_direcao: 'enviada' | 'recebida' | null
+  ultima_resposta_autor: string | null
   anexos_auto: Anexo[]
 }
 type Page = { items: ChamadoRow[]; total: number; limit: number; offset: number; plataformas: string[]; contas: string[] }
@@ -135,6 +175,8 @@ const plataformaFilter = ref<'all' | string>('all')
 // Filtro por conta (Eduardo 15/09: "ex. ML Aguiar 2") — a lista segue a plataforma.
 const contaFilter = ref<'all' | string>('all')
 const mostrar = ref<'abertos' | 'resolvidos' | 'todos'>('abertos')
+// Filtro pela coluna Status — na página carregada (o status é calculado na listagem).
+const statusFilter = ref<'all' | string>('all')
 // Aba Jurídico (Eduardo 04/09): tudo que foi encaminhado ao jurídico, aberto ou resolvido.
 const tab = ref<'chamados' | 'juridico'>('chamados')
 
@@ -158,6 +200,7 @@ const busy = ref<Set<string>>(new Set())
 const rowSaveQueue = new Map<string, Promise<void>>()
 
 const totalPages = computed(() => Math.max(1, Math.ceil(total.value / PAGE_SIZE)))
+const visiveis = computed(() => statusFilter.value === 'all' ? items.value : items.value.filter((r) => r.status_aba === statusFilter.value))
 const rangeStart = computed(() => (total.value === 0 ? 0 : (page.value - 1) * PAGE_SIZE + 1))
 const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
 
@@ -750,6 +793,15 @@ async function enviarReplica() {
     hist.files = []
     row.mensagens_total += 1
     row.ultima_mensagem_at = m.created_at
+    if (m.status === 'enviada' || m.status === 'registrada') {
+      row.ultima_resposta_at = m.enviada_at || m.created_at
+      row.ultima_resposta_direcao = 'enviada'
+      row.ultima_resposta_autor = m.autor_nome
+    }
+    if (!row.resolvido && (row.status_aba === 'respondeu' || row.status_aba === 'humano' || row.status_aba === 'aguardando' || row.status_aba === 'fila' || row.status_aba === 'falhou' || row.status_aba === 'sem_acompanhamento')) {
+      row.status_aba = m.status === 'pendente' ? 'fila' : m.status === 'falhou' ? 'falhou' : 'aguardando'
+      row.status_aba_at = m.enviada_at || m.created_at
+    }
     if (m.status === 'falhou') toasts.warning('Réplica registrada, mas o envio falhou', ERROS[m.erro || ''] || m.erro || '')
     else if (m.status === 'pendente') toasts.info('Réplica na fila do robô', 'Será enviada na próxima passada.')
     else if (m.status === 'enviada') toasts.success('Réplica enviada', 'Mensagem entregue na plataforma.')
@@ -768,97 +820,6 @@ function statusMensagemClass(s: Mensagem['status']) {
     enviada: 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300',
     falhou: 'bg-red-500/15 text-red-600 dark:text-red-300',
   }[s]
-}
-
-// ----------------------------------------------------------------- réplica automática
-
-const auto = reactive({
-  open: false,
-  row: null as ChamadoRow | null,
-  ligada: false,
-  dias: 2 as number | null,
-  mensagem: '',
-  saving: false,
-  uploading: false,
-  erro: null as string | null,
-})
-
-function openAuto(row: ChamadoRow) {
-  auto.open = true
-  auto.row = row
-  auto.ligada = row.auto_ligada
-  auto.dias = row.auto_dias ?? 2
-  auto.mensagem = row.auto_mensagem || ''
-  auto.erro = null
-}
-
-function closeAuto() {
-  auto.open = false
-  auto.row = null
-}
-
-async function salvarAuto() {
-  const row = auto.row
-  if (!row || !canEdit.value) return
-  if (auto.ligada && (!auto.dias || auto.dias < 1)) {
-    auto.erro = 'informe a frequência em dias (mínimo 1)'
-    return
-  }
-  if (auto.ligada && !auto.mensagem.trim()) {
-    auto.erro = 'digite a mensagem que será reenviada'
-    return
-  }
-  auto.saving = true
-  auto.erro = null
-  try {
-    const updated = await api<ChamadoRow>(`/api/chamados/${row.id}`, {
-      method: 'PATCH',
-      body: {
-        auto_ligada: auto.ligada,
-        auto_dias: auto.dias || null,
-        auto_mensagem: auto.mensagem.trim() || null,
-      },
-    })
-    replaceRow(updated)
-    auto.row = updated
-    toasts.success(auto.ligada ? 'Réplica automática ligada' : 'Réplica automática desligada', auto.ligada ? `A cada ${auto.dias} dia(s).` : '')
-    closeAuto()
-  } catch (e: any) {
-    auto.erro = apiError(e)
-  } finally {
-    auto.saving = false
-  }
-}
-
-async function uploadAutoAnexo(ev: Event) {
-  const row = auto.row
-  const input = ev.target as HTMLInputElement
-  const file = input.files?.[0]
-  input.value = ''
-  if (!row || !file) return
-  auto.uploading = true
-  auto.erro = null
-  try {
-    const fd = new FormData()
-    fd.append('file', file)
-    const a = await api<Anexo>(`/api/chamados/${row.id}/anexos-auto`, { method: 'POST', body: fd })
-    row.anexos_auto = [...(row.anexos_auto || []), a]
-  } catch (e: any) {
-    auto.erro = apiError(e)
-  } finally {
-    auto.uploading = false
-  }
-}
-
-async function removeAutoAnexo(a: Anexo) {
-  const row = auto.row
-  if (!row || !confirm('Remover esta imagem da réplica automática?')) return
-  try {
-    await api(`/api/chamados/anexos/${a.id}`, { method: 'DELETE' })
-    row.anexos_auto = row.anexos_auto.filter((x) => x.id !== a.id)
-  } catch (e: any) {
-    auto.erro = apiError(e)
-  }
 }
 
 // ----------------------------------------------------------------- resolver
@@ -1102,6 +1063,10 @@ async function reabrir(row: ChamadoRow) {
         <option value="resolvidos">encerrados</option>
         <option value="todos">todos</option>
       </select>
+      <select v-model="statusFilter" class="h-9 rounded-md border bg-background px-2 text-sm" title="filtrar pela coluna Status">
+        <option value="all">todos status</option>
+        <option v-for="s in STATUS_ABA" :key="s.value" :value="s.value">{{ s.label }}</option>
+      </select>
       <span class="ml-auto text-xs text-muted-foreground">{{ rangeStart }}–{{ rangeEnd }} de {{ total }}</span>
     </div>
 
@@ -1111,8 +1076,7 @@ async function reabrir(row: ChamadoRow) {
         <thead class="sticky top-0 z-20 bg-background">
           <tr>
             <th class="px-2 py-1 text-left text-[11px] font-semibold border-b" colspan="8">Identificação</th>
-            <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-amber-50 dark:bg-amber-900/20" colspan="3">Chamado</th>
-            <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-sky-50 dark:bg-sky-900/20" colspan="2">Réplica</th>
+            <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-amber-50 dark:bg-amber-900/20" colspan="5">Chamado</th>
             <th class="px-2 py-1 text-left text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-violet-50 dark:bg-violet-900/20" colspan="1">Jurídico</th>
             <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-emerald-50 dark:bg-emerald-900/20" colspan="1">Bling</th>
             <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600" colspan="3">Controle</th>
@@ -1129,8 +1093,8 @@ async function reabrir(row: ChamadoRow) {
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[100px] bg-amber-50 dark:bg-amber-900/20 border-l-[3px] border-gray-400 dark:border-gray-600">Origem</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[190px] bg-amber-50 dark:bg-amber-900/20">Chamado</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px] bg-amber-50 dark:bg-amber-900/20">Canal</th>
-            <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[190px] bg-sky-50 dark:bg-sky-900/20 border-l-[3px] border-gray-400 dark:border-gray-600">Réplica</th>
-            <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[220px] bg-sky-50 dark:bg-sky-900/20">Réplica automática</th>
+            <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[190px] bg-amber-50 dark:bg-amber-900/20" title="O que a plataforma diz do chamado, e desde quando">Status</th>
+            <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[150px] bg-amber-50 dark:bg-amber-900/20" title="Quando e quem falou por último (nós ou a plataforma)">Últ. resposta</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[170px] bg-violet-50 dark:bg-violet-900/20 border-l-[3px] border-gray-400 dark:border-gray-600" title="Encaminhado ao jurídico: quando, por quem, observação e link do dossiê">Jurídico</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[210px] bg-emerald-50 dark:bg-emerald-900/20 border-l-[3px] border-gray-400 dark:border-gray-600">Alterar status Bling</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[220px] border-l-[3px] border-gray-400 dark:border-gray-600">Observação</th>
@@ -1140,15 +1104,15 @@ async function reabrir(row: ChamadoRow) {
         </thead>
         <tbody>
           <tr v-if="loading && !items.length">
-            <td colspan="16" class="py-8 text-center text-muted-foreground">
+            <td colspan="18" class="py-8 text-center text-muted-foreground">
               <Loader2 class="size-4 inline animate-spin mr-1.5" />
               carregando…
             </td>
           </tr>
-          <tr v-else-if="!items.length">
-            <td colspan="16" class="py-8 text-center text-muted-foreground">sem chamados</td>
+          <tr v-else-if="!visiveis.length">
+            <td colspan="18" class="py-8 text-center text-muted-foreground">{{ items.length ? 'nenhum chamado com esse status nesta página' : 'sem chamados' }}</td>
           </tr>
-          <tr v-for="row in items" :key="row.id" class="border-t hover:brightness-95 dark:hover:brightness-110" :class="{ 'opacity-60': row.resolvido }">
+          <tr v-for="row in visiveis" :key="row.id" class="border-t hover:brightness-95 dark:hover:brightness-110" :class="{ 'opacity-60': row.resolvido }">
             <td class="px-2 py-1 whitespace-nowrap text-muted-foreground">{{ fmtDate(row.data) }}</td>
             <td class="px-2 py-1 font-mono whitespace-nowrap">{{ row.pedido_bling || '—' }}</td>
             <td class="px-2 py-1 font-mono text-muted-foreground whitespace-nowrap">{{ row.pedido_marketplace || '—' }}</td>
@@ -1180,7 +1144,7 @@ async function reabrir(row: ChamadoRow) {
                 <button
                   type="button"
                   class="shrink-0 inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[11px] hover:bg-muted"
-                  title="histórico do chamado (data, hora e quem enviou)"
+                  title="histórico do chamado e resposta à plataforma"
                   @click="openHistorico(row)"
                 >
                   <History class="size-3.5" />
@@ -1193,32 +1157,18 @@ async function reabrir(row: ChamadoRow) {
                 <option v-for="c in CANAIS" :key="c.value" :value="c.value" :title="c.hint">{{ c.label }}</option>
               </select>
             </td>
-            <td class="px-2 py-1 bg-sky-50/40 dark:bg-sky-900/10 border-l-[3px] border-gray-400 dark:border-gray-600">
-              <div class="flex items-center gap-2">
-                <Button size="sm" variant="outline" class="h-7 px-2" :disabled="!canEdit || row.resolvido" @click="openHistorico(row, true)">
-                  <MessageSquareReply class="size-3.5 mr-1" />
-                  responder
-                </Button>
-                <span v-if="row.ultima_mensagem_at" class="text-[11px] text-muted-foreground whitespace-nowrap">últ. {{ fmtDateTime(row.ultima_mensagem_at) }}</span>
+            <td class="px-2 py-1 bg-amber-50/40 dark:bg-amber-900/10">
+              <div class="space-y-0.5">
+                <span class="inline-block rounded px-1.5 py-0.5 text-[11px] font-medium whitespace-nowrap" :class="statusInfo(row).cls" :title="statusInfo(row).hint">{{ statusInfo(row).label }}</span>
+                <div v-if="row.status_aba_at" class="text-[11px] text-muted-foreground whitespace-nowrap">desde {{ fmtDateTime(row.status_aba_at) }}</div>
               </div>
             </td>
-            <td class="px-2 py-1 bg-sky-50/40 dark:bg-sky-900/10">
-              <div class="flex items-center gap-2">
-                <button
-                  type="button"
-                  class="inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[11px] hover:bg-muted"
-                  :disabled="!canEdit && !row.auto_ligada"
-                  title="configurar réplica automática"
-                  @click="openAuto(row)"
-                >
-                  <Settings2 class="size-3.5" />
-                  <span v-if="row.auto_ligada" class="font-medium text-emerald-700 dark:text-emerald-300">ligada · a cada {{ row.auto_dias }}d</span>
-                  <span v-else class="text-muted-foreground">desligada</span>
-                </button>
-                <span v-if="row.auto_ligada && row.auto_proximo_envio_at" class="text-[11px] text-muted-foreground whitespace-nowrap" :title="`última: ${fmtDateTime(row.auto_ultimo_envio_at)}`">
-                  próx. {{ fmtDateTime(row.auto_proximo_envio_at) }}
-                </span>
+            <td class="px-2 py-1 bg-amber-50/40 dark:bg-amber-900/10">
+              <div v-if="row.ultima_resposta_at" class="space-y-0.5">
+                <div class="whitespace-nowrap">{{ fmtDateTime(row.ultima_resposta_at) }}</div>
+                <div class="text-[11px] whitespace-nowrap" :class="row.ultima_resposta_direcao === 'recebida' ? 'text-orange-600 dark:text-orange-400' : 'text-emerald-700 dark:text-emerald-300'">{{ quemRespondeu(row) }}</div>
               </div>
+              <span v-else class="text-muted-foreground">—</span>
             </td>
             <td class="px-2 py-1 bg-violet-50/40 dark:bg-violet-900/10 border-l-[3px] border-gray-400 dark:border-gray-600">
               <div v-if="row.juridico_enviado_at" class="space-y-0.5 text-[11px]">
@@ -1464,63 +1414,6 @@ async function reabrir(row: ChamadoRow) {
       </div>
     </div>
 
-    <!-- modal: réplica automática -->
-    <div v-if="auto.open && auto.row" class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" @click.self="closeAuto">
-      <div class="w-full max-w-xl rounded-lg border bg-background shadow-xl">
-        <div class="flex items-start justify-between gap-3 border-b px-4 py-3">
-          <div>
-            <div class="text-sm font-semibold">Réplica automática · pedido {{ auto.row.pedido_bling || auto.row.pedido_marketplace }}</div>
-            <div class="text-xs text-muted-foreground">Reenvia a mensagem abaixo (com as fotos) a cada N dias enquanto ligada e o chamado estiver aberto. Canal: {{ auto.row.canal }}.</div>
-          </div>
-          <button type="button" class="rounded p-1 hover:bg-muted" @click="closeAuto"><X class="size-4" /></button>
-        </div>
-        <div class="space-y-3 px-4 py-3">
-          <div class="flex flex-wrap items-center gap-4">
-            <label class="inline-flex items-center gap-2 text-sm">
-              <input v-model="auto.ligada" type="checkbox" class="size-4 rounded border accent-primary" :disabled="!canEdit" />
-              <span :class="auto.ligada ? 'font-medium text-emerald-700 dark:text-emerald-300' : ''">{{ auto.ligada ? 'ligada' : 'desligada' }}</span>
-            </label>
-            <label class="inline-flex items-center gap-2 text-sm">
-              enviar a cada
-              <input v-model.number="auto.dias" type="number" min="1" max="365" class="h-8 w-16 rounded-md border bg-background px-2 text-sm text-center" :disabled="!canEdit" />
-              dia(s)
-            </label>
-            <span v-if="auto.row.auto_ligada && auto.row.auto_proximo_envio_at" class="text-xs text-muted-foreground">próximo envio {{ fmtDateTime(auto.row.auto_proximo_envio_at) }}</span>
-          </div>
-          <textarea v-model="auto.mensagem" rows="5" class="w-full rounded-md border bg-background px-3 py-2 text-sm" placeholder="mensagem que será reenviada…" :disabled="!canEdit" />
-          <div class="space-y-1">
-            <div class="flex flex-wrap items-center gap-2">
-              <label v-if="canEdit" class="inline-flex cursor-pointer items-center gap-1 rounded border px-2 py-1 text-xs hover:bg-muted">
-                <Loader2 v-if="auto.uploading" class="size-3.5 animate-spin" />
-                <ImagePlus v-else class="size-3.5" />
-                anexar foto
-                <input type="file" accept="image/png,image/jpeg,image/webp,image/gif" class="hidden" :disabled="auto.uploading" @change="uploadAutoAnexo" />
-              </label>
-              <span class="text-[11px] text-muted-foreground">{{ auto.row.anexos_auto.length }} foto(s)</span>
-            </div>
-            <div v-if="auto.row.anexos_auto.length" class="flex flex-wrap gap-2">
-              <div v-for="a in auto.row.anexos_auto" :key="a.id" class="relative">
-                <a :href="anexoUrl(a.id)" target="_blank" rel="noopener" :title="a.filename">
-                  <img :src="anexoUrl(a.id)" :alt="a.filename" class="h-20 w-20 rounded border object-cover" />
-                </a>
-                <button v-if="canEdit" type="button" class="absolute -right-1.5 -top-1.5 rounded-full border bg-background p-0.5 text-red-500 hover:bg-red-500/10" title="remover" @click="removeAutoAnexo(a)">
-                  <X class="size-3" />
-                </button>
-              </div>
-            </div>
-          </div>
-          <div v-if="auto.erro" class="text-xs text-red-500">{{ auto.erro }}</div>
-        </div>
-        <div class="flex items-center justify-end gap-2 border-t px-4 py-3">
-          <Button size="sm" variant="ghost" @click="closeAuto">cancelar</Button>
-          <Button size="sm" :disabled="!canEdit || auto.saving" @click="salvarAuto">
-            <Loader2 v-if="auto.saving" class="size-4 mr-1.5 animate-spin" />
-            salvar
-          </Button>
-        </div>
-      </div>
-    </div>
-
     <!-- modal: resolver -->
     <div v-if="resolver.open && resolver.row" class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" @click.self="closeResolver">
       <div class="w-full max-w-md rounded-lg border bg-background shadow-xl">
@@ -1529,7 +1422,7 @@ async function reabrir(row: ChamadoRow) {
           <button type="button" class="rounded p-1 hover:bg-muted" @click="closeResolver"><X class="size-4" /></button>
         </div>
         <div class="space-y-3 px-4 py-3 text-sm">
-          <p class="text-muted-foreground">O chamado sai da lista de abertos e a réplica automática é desligada.</p>
+          <p class="text-muted-foreground">O chamado sai da lista de abertos.</p>
           <label class="block space-y-1">
             <span class="text-xs font-medium">Situação no Bling ao fechar</span>
             <select v-model="resolver.situacao" class="h-9 w-full rounded-md border bg-background px-2 text-sm">
