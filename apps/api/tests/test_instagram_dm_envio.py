@@ -257,3 +257,89 @@ async def test_falha_com_codigo_nao_escala_na_primeira(db: AsyncSession, monkeyp
     assert msg.attempts == 1
     await db.refresh(c)
     assert c.auto is True  # ainda não desistiu da conversa
+
+
+# ─────────────────── geração (o cérebro) ───────────────────
+
+
+@pytest.mark.asyncio
+async def test_resposta_seca_nao_trava_a_conversa(db: AsyncSession):
+    """Regressão: `seco` é terminal, não é "em voo".
+
+    A primeira versão tratava `seco` como resposta em voo, e com isso a
+    conversa nunca mais gerava nada — travava no primeiro rascunho. Justamente
+    no modo em que a gente ia rodar uma semana lendo o que o robô diria.
+    """
+    c, msg = await _cenario(db)
+
+    # primeira pergunta já rascunhada e marcada como seca
+    msg.status = "seco"
+    msg.completed_at = datetime.now(UTC)
+    await db.commit()
+
+    # chega pergunta NOVA, mais recente que a resposta
+    db.add(
+        DmMensagem(
+            conversa_id=c.id,
+            mid="mid.segunda",
+            direcao="recebida",
+            tipo="texto",
+            texto="quanto custa essa mala de 24?",
+            ocorrido_em=datetime.now(UTC),
+        )
+    )
+    c.ultima_recebida_em = datetime.now(UTC)
+    await db.commit()
+
+    with patch.object(
+        instagram_dm.dm_ia,
+        "redigir",
+        new=AsyncMock(return_value=("Quem confirma o valor é o time.", "ok")),
+    ) as cerebro:
+        geradas = await instagram_dm.gerar_pendentes(db)
+
+    cerebro.assert_awaited_once()
+    assert geradas == 1
+
+
+@pytest.mark.asyncio
+async def test_nao_responde_duas_vezes_a_mesma_mensagem(db: AsyncSession):
+    """O contrário: já respondeu DEPOIS da última recebida? Não gera de novo."""
+    c, msg = await _cenario(db)
+    msg.status = "seco"
+    msg.completed_at = datetime.now(UTC)
+    await db.commit()  # a resposta é mais nova que a `ultima_recebida_em`
+
+    with patch.object(instagram_dm.dm_ia, "redigir", new=AsyncMock()) as cerebro:
+        geradas = await instagram_dm.gerar_pendentes(db)
+
+    cerebro.assert_not_awaited()
+    assert geradas == 0
+
+
+@pytest.mark.asyncio
+async def test_cerebro_sem_resposta_manda_pra_humano(db: AsyncSession):
+    """Validador barrou, provedor caiu, marca sem contexto: tudo vira humano."""
+    c, msg = await _cenario(db)
+    msg.status = "seco"
+    msg.completed_at = datetime.now(UTC)
+    await db.commit()
+    db.add(
+        DmMensagem(
+            conversa_id=c.id, mid="mid.dificil", direcao="recebida", tipo="texto",
+            texto="qual o prazo de entrega?", ocorrido_em=datetime.now(UTC),
+        )
+    )
+    c.ultima_recebida_em = datetime.now(UTC)
+    await db.commit()
+
+    with patch.object(
+        instagram_dm.dm_ia,
+        "redigir",
+        new=AsyncMock(return_value=(None, "a resposta continha prazo em números")),
+    ):
+        await instagram_dm.gerar_pendentes(db)
+
+    await db.refresh(c)
+    assert c.auto is False
+    assert c.status == "humano"

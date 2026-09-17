@@ -290,13 +290,33 @@ async def gerar_pendentes(session: AsyncSession, *, limit: int = 10) -> int:
 
     geradas = 0
     for conversa in conversas:
+        # Uma resposta EM VOO bloqueia (é a trava de não responder duas vezes).
+        # `seco` NÃO bloqueia: ele é terminal, já terminou, só não saiu — e
+        # tratá-lo como em voo travava a conversa para sempre no primeiro
+        # rascunho, que é exatamente o modo em que a gente ia rodar uma semana
+        # lendo o que o robô diria.
         em_voo = await session.scalar(
             select(DmMensagem).where(
                 DmMensagem.conversa_id == conversa.id,
-                DmMensagem.status.in_((*MSG_EM_VOO, MSG_SECO)),
+                DmMensagem.status.in_(MSG_EM_VOO),
             )
         )
         if em_voo is not None:
+            continue
+
+        # Já respondemos DEPOIS da última mensagem dela? Então não há o que
+        # responder. É esta comparação, e não a existência de uma resposta
+        # antiga, que decide.
+        ultima_saida = await session.scalar(
+            select(DmMensagem.created_at)
+            .where(
+                DmMensagem.conversa_id == conversa.id,
+                DmMensagem.direcao == DIRECAO_ENVIADA,
+            )
+            .order_by(DmMensagem.created_at.desc())
+            .limit(1)
+        )
+        if ultima_saida is not None and ultima_saida >= conversa.ultima_recebida_em:
             continue
 
         ultima = await session.scalar(
