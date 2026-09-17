@@ -17,7 +17,7 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import {
   Boxes, Truck, ClipboardList, Loader2, RefreshCw,
   AlertTriangle, Download, Printer, FileText, FileUp, Upload, Trash2,
-  ArrowUp, ArrowDown, Megaphone, Check, LifeBuoy,
+  ArrowUp, ArrowDown, Megaphone, Check, LifeBuoy, Send, Video,
 } from 'lucide-vue-next'
 import { isoDateBrt, isoDaysAgo, isoToday } from '~/lib/date'
 
@@ -104,6 +104,23 @@ type EnvioRow = {
   // Status da conferência da aba Estoque para aquele dia. Vem do
   // backend — comparação count(StockCheck conferido) vs count(produtos).
   conferencia_estoque: 'total' | 'parcial' | 'nenhuma'
+}
+
+// Solicitação de vídeo da expedição (tela Devoluções, 17/09): uma por
+// PEDIDO, com os itens dentro. Vem de /api/estoque/videos-pendentes, já
+// cercada pela tag do SKU (mesma regra da aba Pedidos).
+type VideoPendente = {
+  pedido_bling: string
+  pedido_marketplace: string
+  loja: string
+  cliente: string
+  itens: { sku: string; produto: string; quantidade: number }[]
+  solicitado_em: string | null
+  solicitado_por: string | null
+  // Quem apagou o link na Devoluções disse por quê — "refazer: ...".
+  refazer_motivo: string | null
+  // Etiqueta guardada (pedidos desde 03/08) — botão pra imprimir de novo.
+  etiqueta_disponivel: boolean
 }
 
 // ── State ─────────────────────────────────────────────────────────────
@@ -323,6 +340,90 @@ async function refreshConferenciaHoje() {
   }
 }
 
+// ── Vídeos solicitados pela Devoluções (Vinicius 17/09) ───────────────
+// Enquanto houver solicitação pra um pedido da equipe, a aba Pedidos fica
+// trancada: "Envie o link do vídeo do pedido abaixo antes de acessar seus
+// pedidos". Independe do dia do filtro. Admin e churchill nunca travam
+// (mesma regra da aba Envios), mas veem a lista pra poder responder.
+const videosPendentes = ref<VideoPendente[]>([])
+const videoLinkDraft = reactive<Record<string, string>>({})
+const videoSemMotivoDraft = reactive<Record<string, string>>({})
+const videoSemAberto = ref<Set<string>>(new Set())
+const videoEnviando = ref<Set<string>>(new Set())
+const videoErro = ref<string | null>(null)
+async function refreshVideosPendentes() {
+  try {
+    const params = new URLSearchParams()
+    if ((canUseTagFilter.value || isGerenteEtiquetas.value) && tagOverride.value)
+      params.set('tag', tagOverride.value)
+    const r = await api<{ data: VideoPendente[]; total: number }>(
+      `/api/estoque/videos-pendentes${params.toString() ? `?${params.toString()}` : ''}`,
+    )
+    videosPendentes.value = r.data || []
+  } catch {
+    // não-fatal: mantém a lista anterior (a trava cai pro lado seguro).
+  }
+}
+const canAccessPedidos = computed(() => {
+  if (isAdmin.value) return true
+  // Mesmo bypass do churchill da aba Envios (ver canAccessEnvios).
+  if (auth.user?.email === 'maconer06@tuta.com') return true
+  return videosPendentes.value.length === 0
+})
+// Etiqueta do pedido de novo, pra achar o vídeo. carimbar=false: não conta
+// como 1ª impressão (o pedido já saiu faz tempo).
+function etiquetaVideoUrl(p: VideoPendente) {
+  return `/api/estoque/pedidos/${encodeURIComponent(p.pedido_bling)}/etiqueta?carimbar=false`
+}
+function fmtVideoQuando(iso: string | null) {
+  if (!iso) return '—'
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return iso
+  return d.toLocaleString('pt-BR', {
+    day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit',
+    timeZone: 'America/Sao_Paulo',
+  })
+}
+function toggleSemVideo(p: VideoPendente) {
+  const next = new Set(videoSemAberto.value)
+  if (next.has(p.pedido_bling)) next.delete(p.pedido_bling)
+  else next.add(p.pedido_bling)
+  videoSemAberto.value = next
+}
+async function responderVideo(p: VideoPendente, modo: 'link' | 'sem') {
+  const link = (videoLinkDraft[p.pedido_bling] || '').trim()
+  const motivo = (videoSemMotivoDraft[p.pedido_bling] || '').trim()
+  if (modo === 'link' && !link) return
+  if (modo === 'sem' && motivo.length < 3) return
+  if (videoEnviando.value.has(p.pedido_bling)) return
+  videoEnviando.value = new Set([...videoEnviando.value, p.pedido_bling])
+  videoErro.value = null
+  try {
+    await api(`/api/estoque/videos-pendentes/${encodeURIComponent(p.pedido_bling)}`, {
+      method: 'POST',
+      body: modo === 'link' ? { link } : { sem_video_motivo: motivo },
+    })
+    videosPendentes.value = videosPendentes.value.filter((v) => v.pedido_bling !== p.pedido_bling)
+    delete videoLinkDraft[p.pedido_bling]
+    delete videoSemMotivoDraft[p.pedido_bling]
+    // A aba destrava sozinha quando a última pendência sai — carrega os pedidos.
+    if (tab.value === 'pedidos' && !videosPendentes.value.length) void loadPedidos()
+  } catch (e: any) {
+    const code = e?.data?.detail?.code
+    videoErro.value = code === 'video_link_invalido'
+      ? `Pedido ${p.pedido_bling}: o link do vídeo não parece válido.`
+      : code === 'video_nao_pendente'
+        ? `Pedido ${p.pedido_bling}: essa solicitação já foi respondida ou cancelada.`
+        : `Pedido ${p.pedido_bling}: não deu pra enviar (${e?.data?.detail?.message || code || e?.message || 'erro'}).`
+    // Pode ter sido cancelada na Devoluções — recarrega a lista.
+    void refreshVideosPendentes()
+  } finally {
+    const next = new Set(videoEnviando.value)
+    next.delete(p.pedido_bling)
+    videoEnviando.value = next
+  }
+}
+
 const loading = ref(false)
 const errorText = ref<string | null>(null)
 
@@ -427,6 +528,8 @@ watch(tab, (newTab) => {
   // O bloqueio da aba Envios depende da conferência de hoje — refetch
   // sempre que a tab muda pra refletir alterações feitas em outra aba.
   void refreshConferenciaHoje()
+  // Idem pro bloqueio da aba Pedidos (vídeos solicitados pela Devoluções).
+  void refreshVideosPendentes()
 })
 watch([dia, tagOverride, statusFilter], () => {
   if (tab.value !== 'envios') void loadCurrentTab()
@@ -442,6 +545,7 @@ watch([enviosInicio, enviosFim, conferidoFilter], () => {
 })
 watch(tagOverride, () => {
   if (tab.value === 'envios') void loadCurrentTab()
+  void refreshVideosPendentes()
 })
 
 // ── Aba: Upload NF (XML → ML) ─────────────────────────────────────────
@@ -528,6 +632,7 @@ async function processNfFiles() {
 onMounted(() => {
   void loadCurrentTab()
   void refreshConferenciaHoje()
+  void refreshVideosPendentes()
 })
 
 // ── Conferido toggle (per section) ────────────────────────────────────
@@ -661,6 +766,8 @@ function autoRefreshTick() {
     if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return
   }
   void loadCurrentTab()
+  // Solicitação nova de vídeo (Devoluções) aparece sem recarregar a página.
+  if (tab.value === 'pedidos') void refreshVideosPendentes()
 }
 
 onMounted(() => {
@@ -2077,7 +2184,149 @@ async function conferirTodos() {
     <!-- Stats bar: total + breakdown por tag. Reflete pedidosFiltered
          (search + filtros). Tag extraída do SKU no frontend — ver
          extractPedidoTag(). -->
-    <div v-if="tab === 'pedidos'" class="flex flex-wrap items-center gap-2 text-xs">
+    <!-- Vídeos solicitados pela Devoluções (17/09). Pro operador é uma TRAVA:
+         enquanto houver pedido de vídeo pra um pedido da equipe dele, a aba só
+         mostra esta lista (canAccessPedidos). Admin e churchill não travam,
+         mas veem a mesma lista pra poder responder. -->
+    <div
+      v-if="tab === 'pedidos' && videosPendentes.length"
+      class="border rounded-md overflow-x-auto"
+      :class="canAccessPedidos ? 'border-amber-400' : ''"
+    >
+      <div class="px-4 text-center space-y-1" :class="canAccessPedidos ? 'py-3' : 'py-6'">
+        <p class="text-sm" :class="canAccessPedidos ? 'text-amber-700 dark:text-amber-400' : 'text-muted-foreground'">
+          {{ canAccessPedidos
+            ? `📹 ${videosPendentes.length} vídeo${videosPendentes.length !== 1 ? 's' : ''} solicitado${videosPendentes.length !== 1 ? 's' : ''} pela Devoluções`
+            : '⚠️ Envie o link do vídeo do pedido abaixo antes de acessar seus pedidos.' }}
+        </p>
+        <p class="text-[11px] text-muted-foreground">
+          Cole o link do vídeo da expedição de cada pedido. Não tem o vídeo? Clique em "não tenho o vídeo" e diga o motivo.
+        </p>
+      </div>
+      <table class="grid-table w-full text-xs border-collapse">
+        <thead>
+          <tr class="bg-muted/30 text-[10px] uppercase tracking-wide">
+            <th class="text-left">Solicitado</th>
+            <th class="text-left">Pedido Bling</th>
+            <th class="text-left">Marketplace</th>
+            <th class="text-left">Loja</th>
+            <th class="text-left">Cliente</th>
+            <th class="text-left">SKU</th>
+            <th class="text-left">Produto</th>
+            <th class="text-right">Qtd</th>
+            <th class="text-center">Etiqueta</th>
+            <th class="text-left min-w-[300px]">Link do vídeo</th>
+          </tr>
+        </thead>
+        <tbody>
+          <template v-for="p in videosPendentes" :key="p.pedido_bling">
+            <!-- Uma linha por item, igual à aba Pedidos; campo de link só na 1ª. -->
+            <tr
+              v-for="(it, i) in p.itens"
+              :key="`${p.pedido_bling}-${i}`"
+              :class="{ 'border-t-2 border-t-muted-foreground/30': i === 0 }"
+            >
+              <td class="whitespace-nowrap text-[11px] align-top">
+                <template v-if="i === 0">
+                  {{ fmtVideoQuando(p.solicitado_em) }}
+                  <div class="text-[9px] text-muted-foreground">{{ p.solicitado_por || '' }}</div>
+                  <div
+                    v-if="p.refazer_motivo"
+                    class="text-[10px] text-red-600 dark:text-red-400 font-medium whitespace-normal max-w-[180px]"
+                    title="O link anterior foi apagado na Devoluções — refazer o vídeo"
+                  >
+                    refazer: {{ p.refazer_motivo }}
+                  </div>
+                </template>
+              </td>
+              <td class="font-mono text-[11px] align-top">{{ i === 0 ? p.pedido_bling : '' }}</td>
+              <td class="font-mono text-[11px] align-top">{{ i === 0 ? (p.pedido_marketplace || '—') : '' }}</td>
+              <td class="align-top">{{ i === 0 ? (p.loja || '—') : '' }}</td>
+              <td class="truncate max-w-[160px] align-top" :title="p.cliente || ''">{{ i === 0 ? (p.cliente || '—') : '' }}</td>
+              <td class="font-mono text-[11px] align-top">{{ it.sku || '—' }}</td>
+              <td class="truncate max-w-[280px] align-top" :title="it.produto || ''">{{ it.produto || '—' }}</td>
+              <td class="text-right align-top">{{ it.quantidade }}</td>
+              <td class="text-center align-top">
+                <a
+                  v-if="i === 0 && p.etiqueta_disponivel"
+                  :href="etiquetaVideoUrl(p)"
+                  target="_blank"
+                  rel="noopener"
+                  class="inline-flex items-center gap-1 rounded-md border bg-primary text-primary-foreground px-2 py-1 text-[10px] hover:opacity-90"
+                  title="Abrir a etiqueta do pedido de novo (pra achar o vídeo)"
+                >
+                  <Printer class="size-3" />
+                  Imprimir
+                </a>
+                <span
+                  v-else-if="i === 0"
+                  class="text-[10px] text-muted-foreground/50"
+                  title="Etiqueta não guardada (pedido anterior a 03/08)"
+                >—</span>
+              </td>
+              <td class="align-top">
+                <template v-if="i === 0">
+                  <div class="flex items-center gap-1">
+                    <input
+                      v-model="videoLinkDraft[p.pedido_bling]"
+                      type="url"
+                      placeholder="cole o link do vídeo"
+                      class="h-7 flex-1 border rounded px-2 bg-background text-[11px]"
+                      :disabled="videoEnviando.has(p.pedido_bling)"
+                      @keydown.enter.prevent="responderVideo(p, 'link')"
+                    />
+                    <button
+                      type="button"
+                      class="inline-flex items-center gap-1 rounded-md bg-primary text-primary-foreground px-2 py-1 text-[10px] disabled:opacity-50"
+                      :disabled="!(videoLinkDraft[p.pedido_bling] || '').trim() || videoEnviando.has(p.pedido_bling)"
+                      title="Enviar o link pra Devoluções"
+                      @click="responderVideo(p, 'link')"
+                    >
+                      <Loader2 v-if="videoEnviando.has(p.pedido_bling)" class="size-3 animate-spin" />
+                      <Send v-else class="size-3" />
+                      enviar
+                    </button>
+                  </div>
+                  <div class="mt-1">
+                    <button
+                      v-if="!videoSemAberto.has(p.pedido_bling)"
+                      type="button"
+                      class="text-[10px] text-muted-foreground underline hover:text-foreground"
+                      @click="toggleSemVideo(p)"
+                    >
+                      não tenho o vídeo
+                    </button>
+                    <div v-else class="flex items-center gap-1">
+                      <input
+                        v-model="videoSemMotivoDraft[p.pedido_bling]"
+                        placeholder="por que não tem o vídeo?"
+                        class="h-7 flex-1 border border-red-400 rounded px-2 bg-background text-[11px]"
+                        :disabled="videoEnviando.has(p.pedido_bling)"
+                        @keydown.enter.prevent="responderVideo(p, 'sem')"
+                      />
+                      <button
+                        type="button"
+                        class="inline-flex items-center gap-1 rounded-md border border-red-400 px-2 py-1 text-[10px] text-red-600 disabled:opacity-50 dark:text-red-400"
+                        :disabled="(videoSemMotivoDraft[p.pedido_bling] || '').trim().length < 3 || videoEnviando.has(p.pedido_bling)"
+                        title="Responder que não tem o vídeo — a Devoluções vê o motivo"
+                        @click="responderVideo(p, 'sem')"
+                      >
+                        enviar sem vídeo
+                      </button>
+                      <button type="button" class="text-[10px] text-muted-foreground" @click="toggleSemVideo(p)">
+                        cancelar
+                      </button>
+                    </div>
+                  </div>
+                </template>
+              </td>
+            </tr>
+          </template>
+        </tbody>
+      </table>
+      <p v-if="videoErro" class="px-4 py-2 text-xs text-red-500">{{ videoErro }}</p>
+    </div>
+    <div v-if="tab === 'pedidos' && canAccessPedidos" class="flex flex-wrap items-center gap-2 text-xs">
       <span class="inline-flex items-center gap-1.5 rounded-md bg-primary text-primary-foreground px-2.5 py-1 font-semibold">
         Total: {{ totalPedidos }} pedidos
       </span>
@@ -2192,7 +2441,7 @@ async function conferirTodos() {
         Abrir chamados de atraso ({{ selecionadosCount }})
       </button>
     </div>
-    <div v-if="tab === 'pedidos'" class="border rounded-md overflow-x-auto">
+    <div v-if="tab === 'pedidos' && canAccessPedidos" class="border rounded-md overflow-x-auto">
       <table class="grid-table w-full text-xs border-collapse">
         <thead>
           <tr class="bg-muted/30 text-[10px] uppercase tracking-wide">

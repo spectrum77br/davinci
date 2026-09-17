@@ -343,9 +343,41 @@ class SituacaoBlingResult(BaseModel):
 
 
 FilaDevolucao = Literal["acompanhamento", "fraude"]
+# Vídeo da expedição (17/09): 'nao_solicitado' → 'pendente' (a equipe do SKU
+# fica travada na aba Pedidos do Controle de Estoque até responder) →
+# 'enviado' (link) | 'sem_video' (respondeu "não tenho o vídeo" + motivo).
+# Apagar o link (com motivo) volta pra 'pendente'.
+VideoStatus = Literal["nao_solicitado", "pendente", "enviado", "sem_video"]
 
 
-class AcompanhamentoItemOut(BaseModel):
+class AcompanhamentoVideoFields(BaseModel):
+    """Estado do vídeo da expedição de UM pedido (grão = pedido, espelhado em
+    todas as linhas/itens). Nomes de quem pediu/respondeu já resolvidos."""
+
+    video_status: VideoStatus = "nao_solicitado"
+    video_link: str | None = None
+    video_solicitado_em: datetime | None = None
+    video_solicitado_por: str | None = None
+    video_enviado_em: datetime | None = None
+    video_enviado_por: str | None = None
+    # Motivo de "não tenho o vídeo" (resposta da equipe sem link).
+    video_sem_motivo: str | None = None
+    # Motivo dado por quem apagou o link — a equipe vê "refazer: ...".
+    video_refazer_motivo: str | None = None
+
+
+class AcompanhamentoVideoOut(AcompanhamentoVideoFields):
+    pedido_bling: str
+
+
+class AcompanhamentoVideoSolicitarIn(BaseModel):
+    """Solicitar (ou pedir de novo) o vídeo. `motivo` só faz sentido quando o
+    link anterior foi apagado ("refazer: ...") — omitido na 1ª solicitação."""
+
+    motivo: str | None = Field(default=None, max_length=500)
+
+
+class AcompanhamentoItemOut(AcompanhamentoVideoFields):
     """Linha (por ITEM do pedido) da aba Acompanhamento — pedidos hoje em
     'Aguardando Devolução' (83957) no Bling, com cliente e rastreio manual."""
 

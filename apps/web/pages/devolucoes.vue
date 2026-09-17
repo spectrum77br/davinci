@@ -21,6 +21,7 @@ import {
   ShieldAlert,
   Trash2,
   Undo2,
+  Video,
   X,
   AlertTriangle,
 } from 'lucide-vue-next'
@@ -864,8 +865,24 @@ type AcompanhamentoRow = {
   // moveu na mão pelo botão da linha.
   fila: Fila
   fila_manual: boolean
+  // Vídeo da expedição (17/09): pedido pela coluna Vídeo à equipe do SKU, que
+  // responde no Controle de Estoque (aba Pedidos travada até responder).
+  video_status: VideoStatus
+  video_link: string | null
+  video_solicitado_em: string | null
+  video_solicitado_por: string | null
+  video_enviado_em: string | null
+  video_enviado_por: string | null
+  video_sem_motivo: string | null
+  video_refazer_motivo: string | null
 }
 type Fila = 'acompanhamento' | 'fraude'
+type VideoStatus = 'nao_solicitado' | 'pendente' | 'enviado' | 'sem_video'
+type VideoOut = { pedido_bling: string } & Pick<
+  AcompanhamentoRow,
+  | 'video_status' | 'video_link' | 'video_solicitado_em' | 'video_solicitado_por'
+  | 'video_enviado_em' | 'video_enviado_por' | 'video_sem_motivo' | 'video_refazer_motivo'
+>
 type AcompanhamentoPage = { items: AcompanhamentoRow[]; total_pedidos: number }
 type RastreioSaved = {
   pedido_bling: string
@@ -1097,6 +1114,87 @@ async function moverFila(row: AcompanhamentoRow, destino: Fila) {
   }
 }
 
+// ── Vídeo da expedição (Vinicius 17/09) ──────────────────────────────
+// "solicitar" cria a pendência: a equipe do SKU (mesma cerca de tag da aba
+// Pedidos) fica travada na aba Pedidos do Controle de Estoque até colar o
+// link — que volta pra esta coluna. Apagar o link pede um motivo curto e
+// devolve a pendência pra equipe refazer; "cancelar" desfaz um pedido feito
+// por engano. Grão = pedido: a resposta espelha nas linhas irmãs.
+const videoApagando = ref<string | null>(null)
+const videoMotivo = ref('')
+function aplicarVideo(res: VideoOut) {
+  for (const r of acompRows.value) {
+    if (r.pedido_bling === res.pedido_bling) {
+      r.video_status = res.video_status
+      r.video_link = res.video_link
+      r.video_solicitado_em = res.video_solicitado_em
+      r.video_solicitado_por = res.video_solicitado_por
+      r.video_enviado_em = res.video_enviado_em
+      r.video_enviado_por = res.video_enviado_por
+      r.video_sem_motivo = res.video_sem_motivo
+      r.video_refazer_motivo = res.video_refazer_motivo
+    }
+  }
+}
+async function solicitarVideo(row: AcompanhamentoRow, motivo?: string) {
+  if (!canEdit.value || !row.pedido_bling) return
+  const key = `${row.pedido_bling}|video`
+  if (acompSaving.value.has(key)) return
+  acompSaving.value = new Set([...acompSaving.value, key])
+  try {
+    const res = await api<VideoOut>(
+      `/api/devolutions/acompanhamento/${encodeURIComponent(row.pedido_bling)}/video/solicitar`,
+      { method: 'POST', body: { motivo: motivo?.trim() || null } },
+    )
+    aplicarVideo(res)
+    videoApagando.value = null
+    videoMotivo.value = ''
+    pushToast({
+      kind: 'success',
+      title: motivo ? 'Link apagado — equipe vai refazer' : 'Vídeo solicitado',
+      lines: [`Pedido ${row.pedido_bling}: a equipe do SKU vê no Controle de Estoque`],
+    })
+  } catch (e: any) {
+    pushToast({ kind: 'error', title: 'Erro ao solicitar o vídeo', lines: [apiError(e)] })
+  } finally {
+    const next = new Set(acompSaving.value)
+    next.delete(key)
+    acompSaving.value = next
+  }
+}
+async function cancelarVideo(row: AcompanhamentoRow) {
+  if (!canEdit.value || !row.pedido_bling) return
+  const key = `${row.pedido_bling}|video`
+  if (acompSaving.value.has(key)) return
+  acompSaving.value = new Set([...acompSaving.value, key])
+  try {
+    const res = await api<VideoOut>(
+      `/api/devolutions/acompanhamento/${encodeURIComponent(row.pedido_bling)}/video`,
+      { method: 'DELETE' },
+    )
+    aplicarVideo(res)
+    pushToast({ kind: 'success', title: 'Solicitação de vídeo cancelada', lines: [`Pedido ${row.pedido_bling}`] })
+  } catch (e: any) {
+    pushToast({ kind: 'error', title: 'Erro ao cancelar a solicitação', lines: [apiError(e)] })
+  } finally {
+    const next = new Set(acompSaving.value)
+    next.delete(key)
+    acompSaving.value = next
+  }
+}
+function abrirApagarVideo(row: AcompanhamentoRow) {
+  videoApagando.value = row.pedido_bling
+  videoMotivo.value = ''
+}
+// Link já enviado por pedido — entra pronto no "Link envio" ao lançar.
+const videoLinkPorPedido = computed(() => {
+  const m = new Map<string, string>()
+  for (const r of acompRows.value) {
+    if (r.pedido_bling && r.video_link) m.set(r.pedido_bling, r.video_link)
+  }
+  return m
+})
+
 // "Lançar": pula pra aba Lançamentos com o pedido já buscado — mesmo fluxo
 // do botão "adicionar pedido".
 function goLancar(row: AcompanhamentoRow) {
@@ -1239,7 +1337,8 @@ function selectAllProducts() {
       link_abertura: '',
       reembolso: false,
       motivo_devolucao: '',
-      link_envio: '',
+      // Vídeo já enviado pela equipe (coluna Vídeo) vira o Link envio.
+      link_envio: (row.pedido_bling && videoLinkPorPedido.value.get(row.pedido_bling)) || '',
       fotos: [],
       custo_manutencao: null,
       tecnico: '',
@@ -1839,9 +1938,9 @@ async function backfillAddresses() {
         <table class="min-w-[2000px] text-xs border-collapse">
           <thead class="sticky top-0 z-20 bg-background">
             <tr>
-              <th class="px-2 py-1 text-left text-[11px] font-semibold border-b" colspan="14">Pedido aguardando devolução (Bling)</th>
+              <th class="px-2 py-1 text-left text-[11px] font-semibold border-b" colspan="15">Pedido aguardando devolução (Bling)</th>
               <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-amber-50 dark:bg-amber-900/20" colspan="3" title="Preenchido sozinho: código e status do PACOTE QUE VOLTA (devolução na Shopee/TikTok/ML, atualizado a cada 30 min) — senão o rastreio da entrega original (Logística). O que você digitar aqui vale mais que o automático">Rastreio</th>
-              <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-emerald-50 dark:bg-emerald-900/20" colspan="2">Devolução</th>
+              <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-emerald-50 dark:bg-emerald-900/20" colspan="4">Devolução</th>
             </tr>
             <tr class="border-b">
               <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[115px]">Data pedido</th>
@@ -1869,6 +1968,10 @@ async function backfillAddresses() {
               <!-- Observação (10/09): recado livre por pedido pra quem acompanha o
                    pacote — salva ao sair do campo, como rastreio/localização. -->
               <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[240px] bg-emerald-50 dark:bg-emerald-900/20 border-l-[3px] border-gray-400 dark:border-gray-600" title="Recado livre pra quem acompanha este pacote — salva ao sair do campo">Observação</th>
+              <!-- Vídeo (17/09): vídeo da expedição do pedido. "solicitar" trava
+                   a aba Pedidos da equipe do SKU no Controle de Estoque até ela
+                   colar o link; apagar o link (com motivo) devolve pra refazer. -->
+              <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[200px] bg-emerald-50 dark:bg-emerald-900/20" title="Vídeo da expedição do pedido. Solicitar = a equipe do SKU fica travada na aba Pedidos do Controle de Estoque até colar o link (ou responder que não tem o vídeo). Apagar o link, com motivo, devolve pra equipe refazer.">Vídeo</th>
               <th class="px-2 py-1 text-center font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[95px] bg-emerald-50 dark:bg-emerald-900/20">Lançada</th>
               <!-- Painel (17/09): botão pra mover o pedido pro outro painel quando a
                    plataforma classificou errado (a regra automática não mexe mais). -->
@@ -1877,13 +1980,13 @@ async function backfillAddresses() {
           </thead>
           <tbody>
             <tr v-if="acompLoading && !acompRows.length">
-              <td colspan="21" class="py-8 text-center text-muted-foreground">
+              <td colspan="22" class="py-8 text-center text-muted-foreground">
                 <Loader2 class="size-4 inline animate-spin mr-1.5" />
                 carregando…
               </td>
             </tr>
             <tr v-else-if="!acompFiltered.length">
-              <td colspan="21" class="py-8 text-center text-muted-foreground">{{ tab === 'fraude' ? 'nenhum caso de fraude' : 'nenhum pedido aguardando devolução' }}</td>
+              <td colspan="22" class="py-8 text-center text-muted-foreground">{{ tab === 'fraude' ? 'nenhum caso de fraude' : 'nenhum pedido aguardando devolução' }}</td>
             </tr>
             <tr
               v-for="row in acompFiltered"
@@ -1991,6 +2094,102 @@ async function backfillAddresses() {
                   @keydown.enter="(e) => (e.target as HTMLInputElement).blur()"
                   @blur="(e) => saveRastreio(row, 'observacao', (e.target as HTMLInputElement).value)"
                 />
+              </td>
+              <!-- Vídeo (17/09): solicitar → solicitado → link (apagar com
+                   motivo devolve pra equipe) | sem vídeo (motivo + pedir de novo). -->
+              <td class="px-1 py-0.5 bg-emerald-50/40 dark:bg-emerald-900/10">
+                <div v-if="videoApagando === row.pedido_bling" class="flex items-center gap-1">
+                  <input
+                    v-model="videoMotivo"
+                    class="h-6 w-full rounded border border-amber-400 bg-background px-1 text-[11px] focus:outline-none focus:ring-1 focus:ring-primary"
+                    placeholder="motivo pra refazer (ex.: não mostra o lacre)"
+                    @keydown.enter.prevent="videoMotivo.trim().length >= 3 && solicitarVideo(row, videoMotivo)"
+                    @keydown.esc="videoApagando = null"
+                  />
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    class="h-6 px-1.5 text-[11px]"
+                    :disabled="videoMotivo.trim().length < 3 || isSavingRastreio(row.pedido_bling, 'video')"
+                    title="Apagar o link e devolver pra equipe refazer"
+                    @click="solicitarVideo(row, videoMotivo)"
+                  >
+                    apagar
+                  </Button>
+                  <button type="button" class="text-muted-foreground hover:text-foreground" title="Deixar como está" @click="videoApagando = null">
+                    <X class="size-3" />
+                  </button>
+                </div>
+                <div v-else-if="row.video_status === 'enviado' && row.video_link" class="flex items-center gap-1">
+                  <a
+                    :href="normalizeUrl(row.video_link)"
+                    target="_blank"
+                    rel="noopener"
+                    class="inline-flex items-center gap-1 text-primary underline min-w-0"
+                    :title="`Enviado por ${row.video_enviado_por || '?'} em ${fmtDateTime(row.video_enviado_em)}\n${row.video_link}`"
+                  >
+                    <ExternalLink class="size-3 shrink-0" />
+                    <span class="truncate max-w-[150px]">{{ row.video_link.replace(/^https?:\/\//i, '') }}</span>
+                  </a>
+                  <button
+                    v-if="canEdit"
+                    type="button"
+                    class="text-muted-foreground hover:text-red-500"
+                    title="Apagar o link e pedir pra equipe refazer"
+                    @click="abrirApagarVideo(row)"
+                  >
+                    <Trash2 class="size-3" />
+                  </button>
+                </div>
+                <div v-else-if="row.video_status === 'pendente'" class="flex items-center gap-1">
+                  <span
+                    class="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300 whitespace-nowrap"
+                    :title="`Pedido por ${row.video_solicitado_por || '?'} em ${fmtDateTime(row.video_solicitado_em)}${row.video_refazer_motivo ? ' — refazer: ' + row.video_refazer_motivo : ''}. A equipe do SKU vê no Controle de Estoque.`"
+                  >
+                    <Clock class="size-3" />
+                    {{ row.video_refazer_motivo ? 'refazer' : 'solicitado' }} {{ fmtDate(row.video_solicitado_em) }}
+                  </span>
+                  <button
+                    v-if="canEdit"
+                    type="button"
+                    class="text-muted-foreground hover:text-red-500 disabled:opacity-50"
+                    :disabled="isSavingRastreio(row.pedido_bling, 'video')"
+                    title="Cancelar a solicitação (pedido por engano)"
+                    @click="cancelarVideo(row)"
+                  >
+                    <X class="size-3" />
+                  </button>
+                </div>
+                <div v-else-if="row.video_status === 'sem_video'" class="flex items-center gap-1">
+                  <span
+                    class="inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-medium bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300 truncate max-w-[150px]"
+                    :title="`${row.video_enviado_por || '?'} em ${fmtDateTime(row.video_enviado_em)}: ${row.video_sem_motivo || ''}`"
+                  >
+                    sem vídeo: {{ row.video_sem_motivo }}
+                  </span>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    class="h-6 px-1.5 text-[11px]"
+                    :disabled="!canEdit || isSavingRastreio(row.pedido_bling, 'video')"
+                    title="Pedir o vídeo de novo"
+                    @click="solicitarVideo(row)"
+                  >
+                    <RotateCcw class="size-3" />
+                  </Button>
+                </div>
+                <Button
+                  v-else
+                  size="sm"
+                  variant="outline"
+                  class="h-6 px-2 text-[11px]"
+                  :disabled="!canEdit || isSavingRastreio(row.pedido_bling, 'video')"
+                  title="Pedir o vídeo da expedição deste pedido à equipe do SKU (Controle de Estoque)"
+                  @click="solicitarVideo(row)"
+                >
+                  <Video class="size-3 mr-1" />
+                  solicitar
+                </Button>
               </td>
               <td class="px-2 py-1 text-center bg-emerald-50/40 dark:bg-emerald-900/10">
                 <span

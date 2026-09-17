@@ -45,6 +45,7 @@ from app.deps.auth import require_permission
 from app.models import (
     BlingEnvioEvento,
     BlingOrder,
+    DevolucaoRastreio,
     EstoqueDiaFinalizado,
     PrevisaoImpressa,
     Product,
@@ -2308,3 +2309,216 @@ async def estoque_atualizar_bling(
     finally:
         _refresh_state["running"] = False
         _refresh_state["started_at"] = None
+
+
+# ─── VÍDEO DA EXPEDIÇÃO (solicitado pela tela Devoluções) ─────────────────
+# Vinicius, 17/09: quem acompanha a devolução aperta "solicitar" na coluna
+# Vídeo (routers/devolutions.py: /acompanhamento/{pedido}/video/solicitar).
+# A equipe do SKU — mesma cerca de tag da aba Pedidos (_tags_pedidos) — vê a
+# solicitação aqui e fica travada na aba Pedidos até responder: colar o link
+# do vídeo, ou "não tenho o vídeo" com motivo. Admin e churchill nunca travam
+# (mesma regra da aba Envios; decidido no front). A etiqueta pra reimprimir é
+# a mesma da aba Pedidos (GET /pedidos/{pedido}/etiqueta?carimbar=false).
+
+
+class VideoRespostaIn(BaseModel):
+    """Exatamente UM dos dois: `link` (vídeo encontrado) ou
+    `sem_video_motivo` ("não tenho o vídeo" — por quê)."""
+
+    link: str | None = Field(default=None, max_length=2000)
+    sem_video_motivo: str | None = Field(default=None, max_length=500)
+
+
+def _videos_pendentes_where():
+    return and_(
+        DevolucaoRastreio.video_solicitado_em.isnot(None),
+        DevolucaoRastreio.video_enviado_em.is_(None),
+    )
+
+
+async def _pedidos_na_cerca(
+    session: AsyncSession, pedidos: list[str], tags: list[str] | None
+) -> set[str]:
+    """Dentre `pedidos`, os que têm ALGUM item cujo SKU cai nas `tags` do
+    chamador (None = sem cerca). Mesma clause da aba Pedidos."""
+    if not pedidos:
+        return set()
+    where = [BlingOrder.numero.in_(pedidos)]
+    if tags is not None:
+        where.append(or_(*[_sql_clause_for_tag(BlingOrder.item_codigo, t) for t in tags]))
+    rows = (
+        await session.execute(select(BlingOrder.numero).where(and_(*where)).distinct())
+    ).scalars().all()
+    return {r for r in rows if r}
+
+
+@router.get("/videos-pendentes")
+async def list_videos_pendentes(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("controle_estoque", "view"))],
+    tag: str | None = Query(None),
+) -> dict[str, Any]:
+    """Solicitações de vídeo ainda sem resposta, só dos pedidos que o chamador
+    enxerga na aba Pedidos (cerca de tag pelo SKU). Independe do filtro de
+    dia: a trava vale enquanto houver pendência. Uma entrada por PEDIDO, com
+    os itens dentro (a tela mostra pedido, cliente, SKU, qtd e etiqueta)."""
+    tags = _tags_pedidos(user, tag)
+    pendentes = (
+        await session.execute(
+            select(DevolucaoRastreio)
+            .where(_videos_pendentes_where())
+            .order_by(DevolucaoRastreio.video_solicitado_em.asc())
+        )
+    ).scalars().all()
+    if not pendentes:
+        return {"data": [], "total": 0}
+    visiveis = await _pedidos_na_cerca(session, [r.pedido_bling for r in pendentes], tags)
+    pendentes = [r for r in pendentes if r.pedido_bling in visiveis]
+    if not pendentes:
+        return {"data": [], "total": 0}
+    pedidos = [r.pedido_bling for r in pendentes]
+
+    orders = (
+        await session.execute(
+            select(BlingOrder)
+            .where(BlingOrder.numero.in_(pedidos))
+            .order_by(BlingOrder.numero, BlingOrder.item_index)
+        )
+    ).scalars().all()
+    store_ids: set[int] = set()
+    for o in orders:
+        try:
+            store_ids.add(int(o.loja))
+        except (TypeError, ValueError):
+            continue
+    store_name_by_id: dict[int, str] = {}
+    if store_ids:
+        for r in (
+            await session.execute(
+                select(Store.bling_store_id, Integration.name, Integration.platform)
+                .join(Integration, Integration.id == Store.integration_id, isouter=True)
+                .where(Store.bling_store_id.in_(store_ids))
+            )
+        ).all():
+            try:
+                bsid = int(r.bling_store_id)
+            except (TypeError, ValueError):
+                continue
+            store_name_by_id[bsid] = (
+                f"{r.platform} {r.name}".strip() if r.platform else (r.name or str(bsid))
+            )
+    com_etiqueta = set(
+        (
+            await session.execute(
+                select(NfEtiquetaArquivo.pedido_bling).where(
+                    NfEtiquetaArquivo.pedido_bling.in_(pedidos),
+                    func.length(NfEtiquetaArquivo.blob) > 0,
+                )
+            )
+        ).scalars().all()
+    )
+    solicitantes: dict[UUID, str | None] = {}
+    ids = {r.video_solicitado_por for r in pendentes if r.video_solicitado_por}
+    if ids:
+        solicitantes = dict(
+            (await session.execute(select(User.id, User.name).where(User.id.in_(ids)))).all()
+        )
+
+    itens_por_pedido: dict[str, list[dict[str, Any]]] = {}
+    cabecalho: dict[str, dict[str, Any]] = {}
+    for o in orders:
+        numero = o.numero or ""
+        itens_por_pedido.setdefault(numero, []).append({
+            "sku": o.item_codigo or "",
+            "produto": o.item_descricao or "",
+            "quantidade": o.item_quantidade or 1,
+        })
+        if numero not in cabecalho:
+            try:
+                bsid: int | None = int(o.loja)
+            except (TypeError, ValueError):
+                bsid = None
+            cabecalho[numero] = {
+                "pedido_marketplace": o.numeroloja or "",
+                "cliente": o.nome_destinatario or "",
+                "loja": (store_name_by_id.get(bsid) if bsid is not None else None)
+                or (o.loja or ""),
+            }
+    data = []
+    for r in pendentes:
+        cab = cabecalho.get(r.pedido_bling, {})
+        data.append({
+            "pedido_bling": r.pedido_bling,
+            "pedido_marketplace": cab.get("pedido_marketplace", ""),
+            "loja": cab.get("loja", ""),
+            "cliente": cab.get("cliente", ""),
+            "itens": itens_por_pedido.get(r.pedido_bling, []),
+            "solicitado_em": r.video_solicitado_em.isoformat() if r.video_solicitado_em else None,
+            "solicitado_por": (
+                solicitantes.get(r.video_solicitado_por) if r.video_solicitado_por else None
+            ),
+            "refazer_motivo": r.video_refazer_motivo,
+            "etiqueta_disponivel": r.pedido_bling in com_etiqueta,
+        })
+    return {"data": data, "total": len(data)}
+
+
+@router.post("/videos-pendentes/{pedido_bling}")
+async def responder_video_pendente(
+    pedido_bling: str,
+    body: VideoRespostaIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("controle_estoque", "edit"))],
+) -> dict[str, Any]:
+    """Responde a solicitação: cola o link do vídeo OU "não tenho o vídeo" com
+    motivo. Só pedidos pendentes e dentro da cerca de tag do chamador. O
+    resultado aparece na coluna Vídeo da tela Devoluções."""
+    pedido_bling = pedido_bling.strip()
+    link = (body.link or "").strip()
+    motivo = (body.sem_video_motivo or "").strip()
+    if bool(link) == bool(motivo):
+        raise HTTPException(
+            422,
+            detail={
+                "code": "video_resposta_invalida",
+                "message": "Informe o link do vídeo OU o motivo de não ter o vídeo",
+            },
+        )
+    if link:
+        if any(c.isspace() for c in link) or "." not in link or len(link) < 8:
+            raise HTTPException(
+                422, detail={"code": "video_link_invalido", "message": "Link do vídeo inválido"}
+            )
+        if not link.lower().startswith(("http://", "https://")):
+            link = "https://" + link
+    elif len(motivo) < 3:
+        raise HTTPException(
+            422, detail={"code": "motivo_curto", "message": "Explique por que não tem o vídeo"}
+        )
+
+    row = await session.get(DevolucaoRastreio, pedido_bling)
+    if row is None or row.video_solicitado_em is None or row.video_enviado_em is not None:
+        raise HTTPException(404, detail={"code": "video_nao_pendente"})
+    tags = _tags_pedidos(user, None)
+    if pedido_bling not in await _pedidos_na_cerca(session, [pedido_bling], tags):
+        raise HTTPException(403, detail={"code": "pedido_fora_da_sua_tag"})
+
+    row.video_enviado_em = datetime.now(UTC)
+    row.video_enviado_por = user.id
+    row.video_link = link or None
+    row.video_sem_motivo = motivo or None
+    row.video_refazer_motivo = None
+    row.updated_by = user.id
+    await session.commit()
+    logger.info(
+        "devolucao_video_respondido",
+        pedido_bling=pedido_bling,
+        com_link=bool(link),
+        sem_video=bool(motivo),
+        user_id=str(user.id),
+    )
+    return {
+        "ok": True,
+        "pedido_bling": pedido_bling,
+        "video_status": "enviado" if link else "sem_video",
+    }

@@ -114,6 +114,31 @@ class DevolucaoRastreio(Base, TimestampMixin):
     # estar lançada (a Observação da aba Lançamentos só existe após o
     # lançamento). Editada inline, salva ao sair do campo.
     observacao: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # VÍDEO DA EXPEDIÇÃO (migration 0293, Vinicius 17/09): quem acompanha a
+    # devolução pede o vídeo do pedido; a equipe do SKU (mesma cerca de tag
+    # da aba Pedidos do Controle de Estoque) só acessa a aba Pedidos depois
+    # de colar o link. Pendente = solicitado_em preenchido e enviado_em vazio.
+    # Apagar o link (com `video_refazer_motivo`) volta a pendente; "não tenho
+    # o vídeo" responde sem link, com `video_sem_motivo`.
+    video_link: Mapped[str | None] = mapped_column(Text, nullable=True)
+    video_solicitado_em: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    video_solicitado_por: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    video_enviado_em: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    video_enviado_por: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    video_sem_motivo: Mapped[str | None] = mapped_column(Text, nullable=True)
+    video_refazer_motivo: Mapped[str | None] = mapped_column(Text, nullable=True)
     updated_by: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True),
         ForeignKey("users.id", ondelete="SET NULL"),

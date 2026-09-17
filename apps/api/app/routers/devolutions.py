@@ -33,6 +33,8 @@ from app.schemas.devolutions import (
     AcompanhamentoOut,
     AcompanhamentoRastreioOut,
     AcompanhamentoRastreioPatch,
+    AcompanhamentoVideoOut,
+    AcompanhamentoVideoSolicitarIn,
     BlingStockResultOut,
     DevolucaoAnexoOut,
     DevolutionCreate,
@@ -809,6 +811,14 @@ async def acompanhamento_rows(session: AsyncSession) -> list[dict]:
                     r.reembolso_em_auto     AS reembolso_em,
                     r.reembolso_detalhe_auto AS reembolso_detalhe,
                     r.fila_manual,
+                    -- Vídeo da expedição (17/09): estado + quem pediu/respondeu.
+                    r.video_link,
+                    r.video_solicitado_em,
+                    r.video_enviado_em,
+                    r.video_sem_motivo,
+                    r.video_refazer_motivo,
+                    uvs.name                    AS video_solicitado_por,
+                    uve.name                    AS video_enviado_por,
                     v.plataforma_bling          AS plataforma,
                     COALESCE(NULLIF(btrim(v.loja_nome), ''),
                              'Loja ' || v.bling_loja_id, 'Sem loja') AS loja,
@@ -845,6 +855,8 @@ async def acompanhamento_rows(session: AsyncSession) -> list[dict]:
                 JOIN "{SCHEMA}".bling_orders bo ON bo.id = v.bling_order_item_id
                 LEFT JOIN "{SCHEMA}".devolucao_rastreio r
                        ON r.pedido_bling = v.pedido_bling::text
+                LEFT JOIN "{SCHEMA}".users uvs ON uvs.id = r.video_solicitado_por
+                LEFT JOIN "{SCHEMA}".users uve ON uve.id = r.video_enviado_por
                 LEFT JOIN LATERAL (
                     SELECT NULLIF(btrim(l.rastreio), '')    AS rastreio,
                            NULLIF(btrim(l.localizacao), '') AS localizacao,
@@ -878,6 +890,12 @@ async def acompanhamento_rows(session: AsyncSession) -> list[dict]:
         tipo_auto = d.pop("devolucao_tipo_auto", None)
         fonte_auto = d.pop("fonte_auto", None)
         d["fila"], d["fila_manual"] = _fila(d.pop("fila_manual", None), tipo_auto)
+        d["video_status"] = _video_status(
+            link=d.get("video_link"),
+            solicitado_em=d.get("video_solicitado_em"),
+            enviado_em=d.get("video_enviado_em"),
+            sem_motivo=d.get("video_sem_motivo"),
+        )
         devolucao_atualizada_em = d.pop("devolucao_atualizada_em", None)
         d["prazo_resposta"], d["acao_resposta"] = _prazo_resposta(
             fonte_auto, d.pop("acao_auto", None), d.pop("prazo_acao_auto", None)
@@ -924,6 +942,137 @@ async def acompanhamento_rows(session: AsyncSession) -> list[dict]:
         )
         d.pop("localizacao_auto_data", None)
     return out
+
+
+# ── Vídeo da expedição (Vinicius 17/09) ─────────────────────────────────
+# Quem acompanha a devolução pede o vídeo do pedido; a equipe do SKU (mesma
+# cerca de tag da aba Pedidos) responde no Controle de Estoque
+# (routers/estoque.py: /videos-pendentes). Aqui: solicitar / pedir de novo
+# (apagou o link, com motivo) / cancelar.
+
+
+def _video_status(
+    *,
+    link: str | None,
+    solicitado_em: datetime | None,
+    enviado_em: datetime | None,
+    sem_motivo: str | None,
+) -> str:
+    """Pendente = solicitado e ainda sem resposta. Respondido = link
+    ('enviado') ou "não tenho o vídeo" ('sem_video'). Senão, nunca pedido."""
+    if solicitado_em is not None and enviado_em is None:
+        return "pendente"
+    if link:
+        return "enviado"
+    if enviado_em is not None and sem_motivo:
+        return "sem_video"
+    return "nao_solicitado"
+
+
+async def _video_out(session: AsyncSession, row: DevolucaoRastreio) -> AcompanhamentoVideoOut:
+    ids = {i for i in (row.video_solicitado_por, row.video_enviado_por) if i}
+    nomes: dict[UUID, str | None] = {}
+    if ids:
+        nomes = dict(
+            (await session.execute(select(User.id, User.name).where(User.id.in_(ids)))).all()
+        )
+    return AcompanhamentoVideoOut(
+        pedido_bling=row.pedido_bling,
+        video_status=_video_status(
+            link=row.video_link,
+            solicitado_em=row.video_solicitado_em,
+            enviado_em=row.video_enviado_em,
+            sem_motivo=row.video_sem_motivo,
+        ),
+        video_link=row.video_link,
+        video_solicitado_em=row.video_solicitado_em,
+        video_solicitado_por=nomes.get(row.video_solicitado_por) if row.video_solicitado_por else None,
+        video_enviado_em=row.video_enviado_em,
+        video_enviado_por=nomes.get(row.video_enviado_por) if row.video_enviado_por else None,
+        video_sem_motivo=row.video_sem_motivo,
+        video_refazer_motivo=row.video_refazer_motivo,
+    )
+
+
+async def _rastreio_do_pedido(session: AsyncSession, pedido_bling: str) -> DevolucaoRastreio:
+    """Linha de devolucao_rastreio do pedido (cria se não existe). 404 se o
+    pedido não está no espelho do Bling — mesma checagem do PATCH."""
+    exists = (
+        await session.execute(
+            select(func.count()).select_from(BlingOrder).where(BlingOrder.numero == pedido_bling)
+        )
+    ).scalar_one()
+    if not exists:
+        raise HTTPException(404, detail={"code": "pedido_not_found"})
+    row = await session.get(DevolucaoRastreio, pedido_bling)
+    if row is None:
+        row = DevolucaoRastreio(pedido_bling=pedido_bling)
+        session.add(row)
+    return row
+
+
+@router.post(
+    "/acompanhamento/{pedido_bling}/video/solicitar",
+    response_model=AcompanhamentoVideoOut,
+)
+async def solicitar_video(
+    pedido_bling: str,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("devolucoes", "edit"))],
+    body: AcompanhamentoVideoSolicitarIn | None = None,
+) -> AcompanhamentoVideoOut:
+    """Pede (ou pede DE NOVO) o vídeo da expedição do pedido. A partir daqui a
+    equipe do SKU fica travada na aba Pedidos do Controle de Estoque até colar
+    o link (ou responder "não tenho o vídeo"). Chamado com o link já
+    preenchido = "apaguei, refaz": o link some e `motivo` vai pra equipe."""
+    pedido_bling = pedido_bling.strip()
+    row = await _rastreio_do_pedido(session, pedido_bling)
+    motivo = ((body.motivo if body else None) or "").strip() or None
+    tinha_resposta = row.video_enviado_em is not None
+    row.video_solicitado_em = datetime.now(UTC)
+    row.video_solicitado_por = user.id
+    row.video_enviado_em = None
+    row.video_enviado_por = None
+    row.video_link = None
+    row.video_sem_motivo = None
+    row.video_refazer_motivo = motivo if tinha_resposta else None
+    row.updated_by = user.id
+    await session.commit()
+    await session.refresh(row)
+    logger.info(
+        "devolucao_video_solicitado",
+        pedido_bling=pedido_bling,
+        refazer=tinha_resposta,
+        motivo=motivo,
+        user_id=str(user.id),
+    )
+    return await _video_out(session, row)
+
+
+@router.delete("/acompanhamento/{pedido_bling}/video", response_model=AcompanhamentoVideoOut)
+async def cancelar_video(
+    pedido_bling: str,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("devolucoes", "edit"))],
+) -> AcompanhamentoVideoOut:
+    """Cancela a solicitação (pedido por engano): a equipe destrava e a coluna
+    volta a "solicitar". Apaga também link/motivo já respondidos."""
+    pedido_bling = pedido_bling.strip()
+    row = await session.get(DevolucaoRastreio, pedido_bling)
+    if row is None:
+        raise HTTPException(404, detail={"code": "pedido_not_found"})
+    row.video_solicitado_em = None
+    row.video_solicitado_por = None
+    row.video_enviado_em = None
+    row.video_enviado_por = None
+    row.video_link = None
+    row.video_sem_motivo = None
+    row.video_refazer_motivo = None
+    row.updated_by = user.id
+    await session.commit()
+    await session.refresh(row)
+    logger.info("devolucao_video_cancelado", pedido_bling=pedido_bling, user_id=str(user.id))
+    return await _video_out(session, row)
 
 
 @router.get("/acompanhamento", response_model=AcompanhamentoOut)
