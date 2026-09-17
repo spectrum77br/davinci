@@ -63,6 +63,12 @@ const STATUS_ABA: { value: string; label: string; cls: string; hint: string }[] 
   { value: 'encerrado', label: 'Encerrado', cls: 'bg-muted text-muted-foreground', hint: 'chamado resolvido' },
 ]
 const STATUS_POR_CODIGO = Object.fromEntries(STATUS_ABA.map((s) => [s.value, s]))
+// A 1ª linha do Status só leva data quando ele é OFICIAL da plataforma e a data não é a
+// da última fala (Vinicius 17/09: no "precisa de humano" a hora do robô desistir não ajuda).
+const STATUS_COM_DATA = new Set(['em_analise', 'prova', 'reembolso_pago', 'ganhamos', 'perdemos', 'encerrado'])
+function mostraDataStatus(row: ChamadoRow): boolean {
+  return !!row.status_aba_at && STATUS_COM_DATA.has(row.status_aba || '') && row.status_aba_at !== row.ultima_resposta_at
+}
 function statusInfo(row: ChamadoRow) {
   return STATUS_POR_CODIGO[row.status_aba || ''] || { value: row.status_aba || '', label: row.status_aba || '—', cls: 'bg-muted text-muted-foreground', hint: '' }
 }
@@ -1175,10 +1181,10 @@ async function reabrir(row: ChamadoRow) {
               <div class="space-y-0.5">
                 <div class="flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
                   <span class="inline-block rounded px-1.5 py-0.5 text-[11px] font-medium whitespace-nowrap" :class="statusInfo(row).cls" :title="statusInfo(row).hint">{{ statusInfo(row).label }}</span>
-                  <span v-if="row.status_aba_at && row.status_aba_at !== row.ultima_resposta_at" class="text-[11px] text-muted-foreground whitespace-nowrap">{{ fmtCurto(row.status_aba_at) }}</span>
+                  <span v-if="mostraDataStatus(row)" class="text-[11px] text-muted-foreground whitespace-nowrap">{{ fmtCurto(row.status_aba_at) }}</span>
                 </div>
                 <div v-if="row.ultima_resposta_at" class="text-[11px] whitespace-nowrap" :class="row.ultima_resposta_direcao === 'recebida' ? 'text-orange-600 dark:text-orange-400' : 'text-emerald-700 dark:text-emerald-300'" :title="`última resposta: ${fmtDateTime(row.ultima_resposta_at)} · ${quemRespondeu(row)}`">
-                  <span v-if="row.status_aba_at && row.status_aba_at !== row.ultima_resposta_at" class="text-muted-foreground">últ. </span>{{ fmtCurto(row.ultima_resposta_at) }} · {{ quemRespondeu(row) }}
+                  <span v-if="mostraDataStatus(row)" class="text-muted-foreground">últ. </span>{{ fmtCurto(row.ultima_resposta_at) }} · {{ quemRespondeu(row) }}
                 </div>
               </div>
             </td>
