@@ -11,9 +11,9 @@ trouxe com atraso.
 
 Além de inserir, cada rodada REALINHA o `status_bling` de quem já está na
 tabela com o espelho `bling_orders` (que o sync do Bling mantém fresco) — sem
-isso o painel ficava com a foto do momento da ingestão e um pedido que virava
-"Problemas" depois nunca ganhava o passe-livre de 360 dias (caso real: 289863,
-18/08).
+isso o painel ficava com a foto do momento da ingestão e as regras da aba
+Status (que dependem da situação atual) julgavam um estado velho (caso real:
+289863, 18/08, que virou "Problemas" depois de entrar na tabela).
 """
 from __future__ import annotations
 
@@ -112,9 +112,9 @@ _REFRESH_STATUS_SQL = text(
 
 async def refresh_status_bling(session: AsyncSession) -> list[UUID]:
     """Realinha `logistica.status_bling` com a situação atual do espelho
-    `bling_orders`. Retorna os ids das linhas que mudaram. É o que faz um pedido
-    que virou "Problemas" DEPOIS de entrar na tabela aparecer no painel (o
-    passe-livre de 360d olha esse campo).
+    `bling_orders`. Retorna os ids das linhas que mudaram. É o que faz a regra
+    certa da aba Status valer pra um pedido que mudou de situação DEPOIS de
+    entrar na tabela (a máquina de estados olha esse campo).
 
     A lista de ids é o sinal BARATO de "esse pedido mexeu": o recarregar usa ela
     pra não varrer as milhares de linhas que continuam iguais."""
@@ -470,7 +470,6 @@ async def _ids_pendentes(
         if (
             resolvido
             and not logistica_match.deve_monitorar(cands, r.status_bling)
-            and not logistica_match.problema_bling_visivel(r.status_bling, r.data)
             and not logistica_match.devolucao_travada(
                 cands,
                 plataforma=r.plataforma,

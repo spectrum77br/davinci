@@ -604,3 +604,61 @@ async def test_anexo_viewer_serve_mas_nao_edita(
     assert r.status_code == 403
     r = await client.delete(f"/api/logistica/anexos/{aid}")
     assert r.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_problemas_no_bling_obedece_o_monitorar_da_aba_status(
+    client: AsyncClient, admin: User, auth_as: Callable[[User | None], None]
+):
+    """Caso real 17/09 (TikTok 296936 e mais 5): pedido em "Problemas" no Bling
+    com regra cadastrada pro estado, sem Monitorar e sem ação, aparecia no
+    painel só pelo passe-livre de 360 dias. O passe-livre saiu: "Problemas" é
+    um estado como outro qualquer — regra vazia esconde, Monitorar mostra."""
+    auth_as(admin)
+    r = await client.post(
+        "/api/logistica/status",
+        json={
+            "plataforma": "TikTok",
+            "status_plataforma": "Reembolso solicitado",
+            "status_atual": "Problemas",
+        },
+    )
+    assert r.status_code == 201, r.text
+    sid = r.json()["id"]
+    r = await client.post(
+        "/api/logistica",
+        json={
+            "data": "2026-09-13",
+            "pedido_bling": "296936",
+            "pedido_marketplace": "586055935181358579",
+            "plataforma": "TikTok",
+            "conta": "mini",
+            "meli_status": {
+                "return_type": "REFUND",
+                "order_status": "DELIVERED",
+                "return_status": "RETURN_OR_REFUND_REQUEST_PENDING",
+            },
+            "status_bling": "Problemas",
+            "chamado": "4042357484883052019",
+        },
+    )
+    assert r.status_code == 201, r.text
+    lid = r.json()["id"]
+
+    async def _linha() -> dict:
+        r = await client.get("/api/logistica?plataforma=tiktok")
+        return next(x for x in r.json() if x["id"] == lid)
+
+    row = await _linha()
+    assert row["status_plataforma"] == "Reembolso solicitado"
+    assert row["acao_match"] is True
+    # Regra do estado sem ação e sem Monitorar → resolvido e não monitorado:
+    # o painel esconde (só no "Mostrar tudo"), mesmo estando em "Problemas".
+    assert row["acao_resolvido"] is True
+    assert row["acao_monitorar"] is False
+
+    # Monitorar na regra DESSE estado → volta pro painel.
+    r = await client.patch(f"/api/logistica/status/{sid}", json={"monitoramento": True})
+    assert r.status_code == 200, r.text
+    row = await _linha()
+    assert row["acao_monitorar"] is True

@@ -13,15 +13,9 @@ pra saber o que executar, então o que a UI mostra bate com o que o sistema far�
 
 from __future__ import annotations
 
-from datetime import date, timedelta
-
 from app.models import LogisticaStatus
 from app.services import logistica_rules
 from app.services.bling_situacoes import NOME_ENVIADO_ETIQUETA, NOME_ENVIADO_ETIQUETA_LEGADO
-
-# Passe-livre do painel: pedido com situação Bling "Problemas" fica visível
-# por este prazo, não importa o que as regras digam (pedido do usuário 18/08).
-PROBLEMA_BLING_DIAS = 360
 
 # Situações do Bling ANTERIORES a "Aguardando Devolução" na esteira: o pedido
 # ainda está tocando como venda normal. Usadas por `devolucao_travada`.
@@ -122,24 +116,6 @@ def regras_aplicaveis(
     return exatas + curingas
 
 
-def problema_bling_visivel(
-    status_bling: str | None,
-    data: date | None,
-    *,
-    dias: int = PROBLEMA_BLING_DIAS,
-) -> bool:
-    """True se o pedido está em "Problemas" no Bling dentro da janela de `dias`.
-
-    Esses pedidos IGNORAM o resolvido das regras e ficam sempre no painel —
-    problema não some por regra. Pedido sem data conta como dentro da janela
-    (melhor mostrar demais que esconder um problema)."""
-    if _norm(status_bling) != "problemas":
-        return False
-    if data is None:
-        return True
-    return data >= date.today() - timedelta(days=dias)
-
-
 def devolucao_travada(
     rules: list[LogisticaStatus],
     *,
@@ -155,7 +131,7 @@ def devolucao_travada(
     o robô não tem transição pra executar e `estado_resolvido` chega a esconder a
     linha do painel (Eduardo 04/09: o 291683 tinha devolução aprovada no ML e
     seguia "Entregue", sem aparecer em lugar nenhum). Quem chama usa isto pra
-    NÃO esconder — igual ao passe-livre de `problema_bling_visivel`.
+    NÃO esconder.
 
     Regra cadastrada pro estado atual (mesmo "não faz nada") = decisão do
     operador, não buraco: devolve False e o painel segue obedecendo a regra.
@@ -204,8 +180,11 @@ def estado_resolvido(
 
     Regra SEM NENHUMA ação = chave conhecida/ok → esconde. Pra manter uma chave
     à vista, o operador marca Monitorar na regra; pra espiar o que está
-    escondido existe o botão "Mostrar tudo" do painel. ("Problemas" no Bling
-    fura tudo isso via `problema_bling_visivel` — aplicado por quem chama.)
+    escondido existe o botão "Mostrar tudo" do painel. Vale pra qualquer
+    situação do Bling, "Problemas" inclusive: o passe-livre de 360 dias que
+    segurava todo pedido em "Problemas" na tela (18/08) saiu em 17/09 porque
+    passava por cima do Monitorar cadastrado pro estado — o operador viu 6
+    TikTok "resolvidos" que não queria ver e decidiu que a aba Status manda.
 
     Qualquer ação pendente (abrir chamado/reembolso ou mensagem de
     chamado/Bling/Threema) mantém a linha visível — ainda há trabalho. A

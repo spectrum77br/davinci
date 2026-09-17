@@ -188,7 +188,7 @@ def test_estado_resolvido_curinga_e_casos_negativos():
 def test_estado_resolvido_regra_sem_acao_esconde():
     # Regra sem NENHUMA ação = chave conhecida/ok → esconde. Pra manter a chave
     # à vista o operador marca Monitorar; pra espiar os escondidos existe o
-    # "Mostrar tudo" do painel (e "Problemas" fura tudo via problema_bling_visivel).
+    # "Mostrar tudo" do painel.
     vazia = _rule(status_plataforma="Pago | Entregue")
     assert logistica_match.estado_resolvido([vazia], "Entregue") is True
     assert logistica_match.estado_resolvido([vazia], None) is True  # nem depende do status
@@ -215,8 +215,8 @@ def test_estado_resolvido_acao_de_outro_estado_nao_conta():
     # Caso real 287618: mesma chave com 2 regras. Uma pro estado "Em andamento"
     # (com chamado/reembolso/monitorar/mensagens), outra pro estado "Problemas"
     # (sem ação). O pedido está em "Problemas" → a regra de "Em andamento" NÃO se
-    # aplica agora; a vazia aplicável esconde (quem mantém pedido com problema
-    # no painel é o passe-livre problema_bling_visivel, aplicado por quem chama).
+    # aplica agora; a vazia aplicável esconde. "Problemas" não tem passe-livre
+    # (saiu em 17/09): pra ver o pedido nesse estado, Monitorar na regra dele.
     acao = _rule(
         status_plataforma="Retido", status_atual="Em andamento",
         abrir_chamado=True, abrir_reembolso=True,
@@ -293,25 +293,23 @@ def test_estado_resolvido_threema_enviado_resolve():
     )
 
 
-def test_problema_bling_visivel_janela_360():
-    # Pedido em "Problemas" no Bling ganha passe-livre no painel por 360 dias:
-    # ignora o resolvido das regras. Fora da janela (ou outro status), não.
-    from datetime import date, timedelta
-
-    hoje = date.today()
-    assert logistica_match.problema_bling_visivel("Problemas", hoje) is True
-    assert (
-        logistica_match.problema_bling_visivel(" problemas ", hoje - timedelta(days=359))
-        is True
+def test_problemas_sem_passe_livre_obedece_o_monitorar_do_estado():
+    # Caso real 17/09: 6 TikTok em "Problemas" (Reembolso solicitado / pago sem
+    # devolução / Devolução solicitada) com regra cadastrada pro estado, sem
+    # Monitorar e sem ação, apareciam no painel só pelo passe-livre de 360d.
+    # Agora "Problemas" é um estado como outro qualquer: regra vazia esconde,
+    # Monitorar na regra do estado mostra. A regra de transição (DE = Em
+    # andamento, com Monitorar) não empresta o monitoramento depois da troca.
+    transicao = _rule(
+        status_plataforma="Reembolso solicitado", status_atual="Em andamento",
+        alterar_status_bling="Problemas", abrir_chamado=True, monitoramento=True,
     )
-    assert (
-        logistica_match.problema_bling_visivel("Problemas", hoje - timedelta(days=361))
-        is False
-    )
-    # Sem data = mostra (melhor sobrar que esconder um problema).
-    assert logistica_match.problema_bling_visivel("Problemas", None) is True
-    assert logistica_match.problema_bling_visivel("Atendido", hoje) is False
-    assert logistica_match.problema_bling_visivel(None, hoje) is False
+    em_problemas = _rule(status_plataforma="Reembolso solicitado", status_atual="Problemas")
+    rules = [transicao, em_problemas]
+    assert logistica_match.estado_resolvido(rules, "Problemas", chamado_aberto=True) is True
+    assert logistica_match.deve_monitorar(rules, "Problemas") is False  # → escondido
+    em_problemas.monitoramento = True
+    assert logistica_match.deve_monitorar(rules, "Problemas") is True  # → visível
 
 
 def test_devolucao_travada_caso_291683():
