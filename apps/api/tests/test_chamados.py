@@ -823,6 +823,62 @@ async def test_agent_analisar_e_analise_do_cerebro(client, make_user, auth_as, d
     assert re_.status_code == 200 and re_.json()["resolvido"] is False
 
 
+async def test_cerebro_nao_reabre_chamado_fechado_pela_plataforma_ou_pessoa(
+    client, make_user, auth_as, db, monkeypatch
+):
+    """17/09: o acompanhamento fechou 290985/289899 (compensação paga = ganhamos) às
+    08:25 e o cérebro, às 09:00, leu "Shopee PAGOU a compensação" como resposta nova,
+    mandou pra humano e REABRIU. Fechado pela plataforma ou por pessoa não volta pro
+    cérebro nem é reaberto; fechado pelo monitor antigo/cérebro continua reabrível."""
+    from decimal import Decimal
+
+    from app.config import get_settings
+    from app.services import chamados as svc
+
+    monkeypatch.setattr(get_settings(), "nf_agent_token", _TOKEN)
+    hdr = {"X-Agent-Token": _TOKEN}
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+    r = await client.post(
+        "/api/chamados/agent/registrar",
+        headers=hdr,
+        json={"pedido_bling": "290985", "origem": "margem", "conta": "kfa",
+              "pedido_marketplace": "2000013416880001", "chamado": "479700001",
+              "mensagem": "abertura", "status_envio": "enviada"},
+    )
+    cid = r.json()["chamado_id"]
+    ch = (await db.execute(select(Chamado).where(Chamado.id == cid))).scalar_one()
+    for quem in ("acompanhamento", "cairo sa"):
+        db.add(svc.marcar_resolvido(ch, True, autor_nome=quem, valor=Decimal("865.82")))
+        await db.commit()
+        rec = await client.post(
+            "/api/chamados/agent/recebida", headers=hdr,
+            json={"chamado": "479700001", "texto": f"Shopee PAGOU a compensação ({quem})"},
+        )
+        assert rec.status_code == 200, rec.text
+        lst = (await client.post("/api/chamados/agent/analisar", headers=hdr, json={})).json()
+        assert lst["chamados"] == [], (quem, lst)
+        an = await client.post(
+            "/api/chamados/agent/analise", headers=hdr,
+            json={"chamado_id": cid, "classe": "dev_indefinido", "resumo": "?",
+                  "acao": "humano", "reabrir": True},
+        )
+        assert an.status_code == 200 and an.json()["resolvido"] is True, (quem, an.json())
+    # fechado pelo monitor antigo: continua voltando e reabrindo
+    db.add(svc.marcar_resolvido(ch, True, autor_nome="monitor"))
+    await db.commit()
+    await client.post("/api/chamados/agent/recebida", headers=hdr,
+                      json={"chamado": "479700001", "texto": "Preciso das medidas da embalagem."})
+    lst = (await client.post("/api/chamados/agent/analisar", headers=hdr, json={})).json()
+    assert len(lst["chamados"]) == 1
+    an = await client.post(
+        "/api/chamados/agent/analise", headers=hdr,
+        json={"chamado_id": cid, "classe": "pede_medidas", "resumo": "medidas",
+              "acao": "esperar", "reabrir": True},
+    )
+    assert an.json()["resolvido"] is False
+
+
 async def test_agent_analisar_canais_manual_e_api_sem_replica(
     client, make_user, auth_as, db, monkeypatch
 ):

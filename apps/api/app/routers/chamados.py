@@ -1122,6 +1122,49 @@ async def agent_recebida(
 
 # ---- cérebro dos chamados (robô do Tuta, 08/09) -----------------------------
 AUTOR_CEREBRO = "cérebro"
+# 17/09 (Eduardo, "Plataforma respondeu" e ninguém respondeu): o cérebro reabriu às 09:00
+# os chamados que o acompanhamento fechou às 08:25 com a decisão da plataforma (290985 e
+# 289899 GANHOS, 290920) — leu "Shopee PAGOU a compensação" como resposta nova e mandou
+# pra humano. Reabrir sozinho só vale pro que o monitor antigo fechou cedo demais (o
+# motivo original) ou o próprio cérebro fechou; decisão da plataforma e pessoa, não.
+_FECHOU_REABRIVEL = (
+    f"Chamado marcado como resolvido por {AUTOR_MONITOR}%",
+    f"Chamado marcado como resolvido por {AUTOR_CEREBRO}%",
+)
+
+
+def _ultimo_fechamento():
+    """Texto do último evento "Chamado marcado como resolvido…" do chamado (correlacionado)."""
+    return (
+        select(ChamadoMensagem.texto)
+        .where(
+            ChamadoMensagem.chamado_id == Chamado.id,
+            ChamadoMensagem.tipo == "sistema",
+            ChamadoMensagem.texto.like("Chamado marcado como resolvido%"),
+        )
+        .order_by(ChamadoMensagem.created_at.desc())
+        .limit(1)
+        .correlate(Chamado)
+        .scalar_subquery()
+    )
+
+
+async def _cerebro_pode_reabrir(session: AsyncSession, ch: Chamado) -> bool:
+    ult = (
+        await session.execute(
+            select(ChamadoMensagem.texto)
+            .where(
+                ChamadoMensagem.chamado_id == ch.id,
+                ChamadoMensagem.tipo == "sistema",
+                ChamadoMensagem.texto.like("Chamado marcado como resolvido%"),
+            )
+            .order_by(ChamadoMensagem.created_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if ult is None:
+        return True
+    return any(ult.startswith(p.rstrip("%")) for p in _FECHOU_REABRIVEL)
 _ACAO_TXT = {
     "esperar": "aguardar a plataforma",
     "responder": "réplica enfileirada pro robô",
@@ -1188,7 +1231,13 @@ async def agent_analisar(
         .group_by(ChamadoMensagem.chamado_id)
         .subquery()
     )
-    conds = [Chamado.canal.in_(body.canais), or_(ana.c.ult.is_(None), rec.c.ult > ana.c.ult)]
+    fechou = _ultimo_fechamento()
+    conds = [
+        Chamado.canal.in_(body.canais),
+        or_(ana.c.ult.is_(None), rec.c.ult > ana.c.ult),
+        # resolvido pela plataforma/pessoa não volta pro cérebro (17/09)
+        or_(Chamado.resolvido.is_(False), fechou.is_(None), *[fechou.like(p) for p in _FECHOU_REABRIVEL]),
+    ]
     if body.plataforma:
         plat = body.plataforma.strip().lower()
         aceitas = _PLATAFORMA_ML if plat == "ml" else (plat,)
@@ -1295,7 +1344,7 @@ async def agent_analise(
     # se o caso ainda está vivo no ML (só a abertura, ou fomos nós que falamos
     # por último), o cérebro reabre pra aba mostrar que está em andamento.
     reabrir = body.acao == "responder" or (body.acao in ("humano", "esperar") and body.reabrir)
-    if reabrir and ch.resolvido:
+    if reabrir and ch.resolvido and await _cerebro_pode_reabrir(session, ch):
         session.add(svc.marcar_resolvido(ch, False, autor_nome=AUTOR_CEREBRO))
     if body.acao == "responder":
         replica = svc.nova_mensagem(
