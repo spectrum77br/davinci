@@ -17,9 +17,15 @@ SELLER_RESPOND_REFUND →
   - quando o caso sai de pendente (recusado, aprovado, cancelado), registra o desfecho
     no histórico — aprovado por falta de resposta fica dito com todas as letras.
 
-Contestar é decisão HUMANA: a réplica manual do chamado (texto + fotos anexadas) vira a
-recusa do reembolso na TikTok (POST returns/{id}/reject, decision REJECT_REFUND). Nada é
-recusado sozinho.
+Contestar: a réplica manual do chamado (texto + fotos anexadas) vira a recusa do reembolso
+na TikTok (POST returns/{id}/reject, decision REJECT_REFUND).
+
+17/09 (Eduardo, 293798 "por que não respondeu?"): o robô responde 100%. Na abertura o
+Threema PEDE FOTO E VÍDEO da expedição/embalagem e diz a hora da contestação automática;
+faltando 12 h pro prazo, se ninguém contestou, o robô contesta SOZINHO com os fatos da
+entrega + as fotos anexadas no chamado (a API aceita só imagem, uma vez: foto que chegar
+depois — e vídeo — só pela Central do Vendedor). Pedido sem entrega registrada não é
+contestado sozinho ("não recebido" pode ser verdade): vai pro humano.
 """
 from __future__ import annotations
 
@@ -51,6 +57,10 @@ ALERTA_URGENTE = timedelta(hours=12)
 MARCA_ABERTURA = "Comprador pediu SÓ REEMBOLSO na TikTok"
 MARCA_URGENTE = "Faltam menos de 12 h"
 MARCA_DESFECHO = "Desfecho do pedido de só reembolso"
+MARCA_PEDE_FOTO = "Pedido de foto/vídeo enviado no Threema"
+MARCA_AUTO = "Só reembolso CONTESTADO na TikTok"
+MAX_TENTATIVAS_AUTO = 3
+AUTOR_ROBO = "robô"
 # Motivo de recusa preferido (medido 16/09 no 4042339029758936508): a lista pra só
 # reembolso vem com reverse_reject_request_reason_1..4 + motivo de cancelamento inválido.
 MOTIVO_PREFERIDO = "reverse_reject_request_reason_1"
@@ -146,21 +156,88 @@ async def _nota_e_motivo(client: TikTokClient, rid: str) -> tuple[str, str, list
     return "", "", eventos or []
 
 
-async def _entrega(client: TikTokClient, oid: str) -> str:
+async def _entrega_dados(client: TikTokClient, oid: str) -> dict:
+    """{quando (epoch), transp, rastreio} da entrega; {} sem entrega registrada."""
     try:
         od = await client.get_order_detail(oid)
     except Exception:  # noqa: BLE001
-        return ""
+        return {}
     o = (od.get("orders") or [od])[0] if isinstance(od, dict) and od else {}
-    if not isinstance(o, dict):
-        return ""
+    if not isinstance(o, dict) or not _fmt(o.get("delivery_time")):
+        return {}
     itens = o.get("line_items") or []
-    rastreio = next((li.get("tracking_number") for li in itens if li.get("tracking_number")), "")
-    transp = next((li.get("shipping_provider_name") for li in itens if li.get("shipping_provider_name")), "")
-    quando = _fmt(o.get("delivery_time"))
-    if not quando:
+    return {
+        "quando": o.get("delivery_time"),
+        "rastreio": next((x["tracking_number"] for x in itens if x.get("tracking_number")), ""),
+        "transp": next(
+            (x["shipping_provider_name"] for x in itens if x.get("shipping_provider_name")), ""
+        ),
+    }
+
+
+async def _entrega(client: TikTokClient, oid: str) -> str:
+    e = await _entrega_dados(client, oid)
+    if not e:
         return ""
-    return f"Pedido ENTREGUE em {quando}" + (f" ({transp} {rastreio})" if rastreio else "") + "."
+    return (f"Pedido ENTREGUE em {_fmt(e['quando'])}"
+            + (f" ({e['transp']} {e['rastreio']})" if e["rastreio"] else "") + ".")
+
+
+def hora_auto(prazo: int) -> str:
+    return _fmt(prazo - int(ALERTA_URGENTE.total_seconds()))
+
+
+def texto_pede_foto(conta: str, pedido: str, caso: dict, nota: str, prazo: int) -> str:
+    return (
+        f"📸 TikTok {conta}: comprador pediu SÓ REEMBOLSO ({_valor(caso)}) — pedido {pedido}."
+        + (f" Nota: {nota[:160]}." if nota else "")
+        + " Tem FOTO e VÍDEO da expedição/embalagem desse pedido? Anexe as FOTOS no chamado"
+        f" (aba Chamados) até {hora_auto(prazo)}: nessa hora o robô CONTESTA SOZINHO com os"
+        " fatos da entrega e as fotos que estiverem lá. Vídeo a TikTok não aceita pela API —"
+        " guarde pra subir na Central do Vendedor se ela pedir prova."
+        f" Prazo final da TikTok: {_fmt(prazo)}."
+    )
+
+
+def texto_contestacao(
+    caso: dict, *, oid: str, produto: str | None, entrega: dict, nota: str,
+    pedido_em: object, comprador_mandou_prova: bool, fotos: int,
+) -> str:
+    """Texto da recusa automática — só FATOS que o DaVinci/TikTok confirmam."""
+    item = f"{oid} ({produto})" if produto else oid
+    partes = [
+        "Contestamos o pedido de reembolso.",
+        f"O pedido {item} foi entregue em {_fmt(entrega.get('quando'))}"
+        + (f" pela {entrega['transp']}" if entrega.get("transp") else "")
+        + (f" (rastreio {entrega['rastreio']})" if entrega.get("rastreio") else "")
+        + ", sem ocorrência de avaria ou violação registrada na entrega.",
+    ]
+    try:
+        dias = (int(pedido_em) - int(entrega.get("quando"))) // 86400  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        dias = -1
+    alegacao = "A alegação do comprador" + (f' ("{nota[:200]}")' if nota else "")
+    quando = f" foi feita em {_fmt(pedido_em)}" if _fmt(pedido_em) else " foi feita"
+    depois = f", {dias} dia(s) após a entrega" if dias >= 1 else ""
+    prova = "" if comprador_mandou_prova else ", sem nenhuma foto ou vídeo que a comprove"
+    partes.append(f"{alegacao}{quando}{depois}{prova}.")
+    if fotos:
+        partes.append(f"Seguem {fotos} foto(s) da expedição/embalagem.")
+    partes.append(
+        "Solicitamos que o reembolso seja negado ou que a transportadora apure o peso registrado"
+        " na coleta e na entrega."
+    )
+    return " ".join(partes)
+
+
+def _pedido_do_comprador(eventos: list[dict]) -> tuple[object, bool]:
+    """(create_time do pedido de reembolso, comprador anexou foto/vídeo?)."""
+    for ev in eventos or []:
+        if str(ev.get("event") or "").upper() in ("ORDER_REFUND", "ORDER_RETURN"):
+            chaves = ("images", "videos", "image_list", "video_list", "attachments")
+            midia = any(ev.get(k) for k in chaves)
+            return ev.get("create_time"), bool(midia)
+    return None, False
 
 
 def _destinatarios() -> list[str]:
@@ -255,26 +332,34 @@ async def run_vigia(session, *, agora: datetime | None = None, dry_run: bool = F
                 session.add(ch)
                 await session.flush()
                 session.add(chamados_svc.registrar_sistema(ch, texto))
-                await _avisar(
-                    f"⚠️ TikTok {ch.conta}: comprador pediu SÓ REEMBOLSO ({_valor(caso)}) — "
-                    f"pedido {ch.pedido_bling or oid}. {('Nota: ' + nota[:160] + '. ') if nota else ''}"
-                    f"Contestar até {_fmt(prazo)} (depois a TikTok aprova sozinha). Chamado aberto na aba Chamados."
-                )
-                continue
-            if prazo - ts < ALERTA_URGENTE.total_seconds() and not any(
-                MARCA_URGENTE in t for t in await _historico(session, ch)
-            ):
-                resumo["urgentes"] += 1
-                if dry_run:
+                if prazo - ts >= ALERTA_URGENTE.total_seconds():
+                    await _pedir_foto(session, ch, conta, oid, caso, nota, prazo)
                     continue
-                session.add(
-                    chamados_svc.registrar_sistema(
-                        ch, f"{MARCA_URGENTE} pra contestar o só reembolso (prazo {_fmt(prazo)})."
-                    )
-                )
+            hist = await _historico(session, ch)
+            if prazo - ts >= ALERTA_URGENTE.total_seconds():
+                # chamado aberto antes de 17/09: pede foto/vídeo uma vez
+                if not any(MARCA_PEDE_FOTO in t for t in hist):
+                    resumo["pede_foto"] = resumo.get("pede_foto", 0) + 1
+                    if not dry_run:
+                        nota, _m, _ev = await _nota_e_motivo(client, rid)
+                        await _pedir_foto(session, ch, conta, oid, caso, nota, prazo)
+                continue
+            # faltam menos de 12 h e ninguém contestou → o robô contesta sozinho
+            resumo["urgentes"] += 1
+            if dry_run:
+                continue
+            r = await contestar_sozinho(session, ch, client, caso, rid, oid)
+            if r == "contestado":
+                resumo["contestados"] = resumo.get("contestados", 0) + 1
+            elif not any(MARCA_URGENTE in t for t in hist):
+                session.add(chamados_svc.registrar_sistema(
+                    ch, f"{MARCA_URGENTE} pra contestar o só reembolso (prazo {_fmt(prazo)}): {r}."
+                ))
                 await _avisar(
-                    f"🚨 TikTok {ch.conta}: faltam menos de 12 h pra contestar o só reembolso do pedido "
-                    f"{ch.pedido_bling or oid} ({_valor(caso)}) — prazo {_fmt(prazo)}."
+                    f"🚨 TikTok {ch.conta}: faltam menos de 12 h e o robô NÃO contestou o só"
+                    f" reembolso do pedido {ch.pedido_bling or oid} ({_valor(caso)}): {r}."
+                    f" Contestar à mão até {_fmt(prazo)}"
+                    " (réplica no chamado ou Central do Vendedor)."
                 )
         pendentes_vistos.update(
             str(c.get("return_id")) for c in casos or [] if e_pendente_de_resposta(c)
@@ -348,9 +433,73 @@ async def _client_e_caso(session, ch: Chamado, rid: str) -> tuple[TikTokClient, 
     return ultimo, None
 
 
-async def contestar(session, ch: Chamado, msg: ChamadoMensagem) -> ChamadoMensagem:
-    """Réplica manual num chamado de só reembolso → recusa do reembolso na TikTok.
-    Nunca levanta: falha vira `status='falhou'` + `erro`."""
+async def _pedir_foto(
+    session, ch: Chamado, conta: str, oid: str, caso: dict, nota: str, prazo: int
+) -> None:
+    await _avisar(texto_pede_foto(ch.conta or conta, ch.pedido_bling or oid, caso, nota, prazo))
+    session.add(chamados_svc.registrar_sistema(
+        ch, f"{MARCA_PEDE_FOTO} (contestação automática às {hora_auto(prazo)})."
+    ))
+
+
+async def contestar_sozinho(
+    session, ch: Chamado, client: TikTokClient, caso: dict, rid: str, oid: str
+) -> str:
+    """Faltando 12 h: contesta com os fatos da entrega + TODAS as fotos anexadas no chamado.
+    Devolve "contestado" ou o motivo de não ter contestado."""
+    entrega = await _entrega_dados(client, oid)
+    if not entrega:
+        return "pedido sem entrega registrada na TikTok (não contesto sozinho)"
+    tentativas = len((await session.execute(
+        select(ChamadoMensagem.id).where(
+            ChamadoMensagem.chamado_id == ch.id,
+            ChamadoMensagem.tipo == "replica",
+            ChamadoMensagem.autor_nome == AUTOR_ROBO,
+        )
+    )).all())
+    if tentativas >= MAX_TENTATIVAS_AUTO:
+        return f"já tentei contestar {tentativas}x e a TikTok recusou"
+    nota, _m, eventos = await _nota_e_motivo(client, rid)
+    pedido_em, comprador_mandou_prova = _pedido_do_comprador(eventos)
+    anexos = (
+        await session.execute(
+            select(ChamadoAnexo)
+            .where(ChamadoAnexo.chamado_id == ch.id)
+            .order_by(ChamadoAnexo.created_at)
+        )
+    ).scalars().all()
+    fotos = [a for a in anexos if (a.content_type or "").startswith("image/")][:MAX_FOTOS]
+    msg = chamados_svc.nova_mensagem(
+        ch,
+        texto=texto_contestacao(caso, oid=oid, produto=ch.produto, entrega=entrega, nota=nota,
+                                pedido_em=pedido_em, comprador_mandou_prova=comprador_mandou_prova,
+                                fotos=len(fotos)),
+        tipo="replica",
+        direcao="enviada",
+        autor_nome=AUTOR_ROBO,
+        status="pendente",
+    )
+    msg.canal = "api"
+    session.add(msg)
+    await session.flush()
+    await contestar(session, ch, msg, anexos=fotos)
+    if msg.status != "enviada":
+        return f"a TikTok recusou a contestação ({msg.erro})"
+    await _avisar(
+        f"🤖 TikTok {ch.conta}: o robô CONTESTOU sozinho o só reembolso do pedido"
+        f" {ch.pedido_bling or oid} ({_valor(caso)}) com {len(fotos)} foto(s)."
+        + ("" if fotos else " Tem foto/vídeo da expedição? Agora só pela Central do Vendedor"
+           " (se a TikTok pedir prova).")
+    )
+    return "contestado"
+
+
+async def contestar(
+    session, ch: Chamado, msg: ChamadoMensagem, *, anexos: list[ChamadoAnexo] | None = None
+) -> ChamadoMensagem:
+    """Réplica num chamado de só reembolso → recusa do reembolso na TikTok (manual: fotos da
+    própria réplica; automática: `anexos` = fotos do chamado). Nunca levanta: falha vira
+    `status='falhou'` + `erro`."""
     from app.services.chamados_devolucao import preparar_foto
 
     rid = (ch.origem_ref or "")[len(PREFIXO_REF):] or (ch.chamado or "")
@@ -360,16 +509,25 @@ async def contestar(session, ch: Chamado, msg: ChamadoMensagem) -> ChamadoMensag
             raise chamados_svc.ChamadoError("tiktok_reembolso_nao_encontrado")
         if not e_pendente_de_resposta(caso):
             _n, _m, eventos = await _nota_e_motivo(client, rid)
-            session.add(chamados_svc.registrar_sistema(ch, texto_desfecho(caso, eventos)))
-            raise chamados_svc.ChamadoError("tiktok_reembolso_nao_pendente")
+            if not any(MARCA_DESFECHO in t for t in await _historico(session, ch)):
+                session.add(chamados_svc.registrar_sistema(ch, texto_desfecho(caso, eventos)))
+            status = str(caso.get("return_status") or "").upper()
+            arbitragem = str(caso.get("arbitration_status") or "")
+            ja = status == "REFUND_OR_RETURN_REQUEST_REJECT" or bool(arbitragem)
+            raise chamados_svc.ChamadoError(
+                "tiktok_reembolso_ja_contestado" if ja else "tiktok_reembolso_nao_pendente"
+            )
         motivo = _motivo_recusa(await client.get_reject_reasons(rid))
         if not motivo:
             raise chamados_svc.ChamadoError("tiktok_motivo_indisponivel")
-        anexos = (
-            await session.execute(
-                select(ChamadoAnexo).where(ChamadoAnexo.mensagem_id == msg.id).order_by(ChamadoAnexo.created_at)
-            )
-        ).scalars().all()
+        if anexos is None:
+            anexos = (
+                await session.execute(
+                    select(ChamadoAnexo)
+                    .where(ChamadoAnexo.mensagem_id == msg.id)
+                    .order_by(ChamadoAnexo.created_at)
+                )
+            ).scalars().all()
         images: list[dict] = []
         for a in [x for x in anexos if (x.content_type or "").startswith("image/")][:MAX_FOTOS]:
             nome, dados, ctype = preparar_foto(a)  # type: ignore[arg-type] — mesmos campos do DevolucaoAnexo
@@ -393,7 +551,9 @@ async def contestar(session, ch: Chamado, msg: ChamadoMensagem) -> ChamadoMensag
         msg.enviada_at = datetime.now(UTC)
         session.add(
             chamados_svc.registrar_sistema(
-                ch, f"Só reembolso CONTESTADO na TikTok (motivo {motivo}, {len(images)} foto(s))."
+                ch, f"{MARCA_AUTO} (motivo {motivo}, {len(images)} foto(s))"
+                + (" — contestação automática do robô (12 h antes do prazo)."
+                   if msg.autor_nome == AUTOR_ROBO else ".")
             )
         )
     except chamados_svc.ChamadoError as e:

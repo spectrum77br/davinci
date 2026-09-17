@@ -12,7 +12,7 @@ import pytest
 from sqlalchemy import select
 
 from app.config import get_settings
-from app.models import BlingOrder, Chamado, ChamadoMensagem, Integration, IntegrationPlatform, StoreInfo
+from app.models import BlingOrder, Chamado, ChamadoAnexo, ChamadoMensagem, Integration, IntegrationPlatform, StoreInfo
 from app.services import chamados_devolucao, logistica_tiktok, threema
 from app.services import chamados_tiktok_reembolso as svc
 
@@ -33,7 +33,8 @@ class _FakeTikTok:
         self.status = status
         self.prazo = prazo
         self.records = [{"event": "ORDER_REFUND", "note": "Pacote chegou vazio",
-                         "reason_text": "Pacote recebido, mas faltam alguns itens", "create_time": 1789},]
+                         "reason_text": "Pacote recebido, mas faltam alguns itens", "create_time": 1789478344},]
+        self.entregue = True
         self.uploads: list[tuple] = []
         self.rejects: list[dict] = []
 
@@ -56,6 +57,8 @@ class _FakeTikTok:
         return list(self.records)
 
     async def get_order_detail(self, order_id):
+        if not self.entregue:
+            return {"orders": [{"status": "IN_TRANSIT", "line_items": []}]}
         return {"orders": [{"status": "DELIVERED", "delivery_time": 1788958680,
                             "line_items": [{"tracking_number": "999881910210731", "shipping_provider_name": "J&T Express Brazil"}]}]}
 
@@ -70,6 +73,7 @@ class _FakeTikTok:
     async def reject_return(self, return_id, *, decision, reject_reason, comment, images=None, idempotency_key=None):
         self.rejects.append({"return_id": return_id, "decision": decision, "reason": reject_reason,
                              "comment": comment, "images": images, "idem": idempotency_key})
+        self.status = "REFUND_OR_RETURN_REQUEST_REJECT"  # a TikTok tira o caso de pendente
         return {}
 
 
@@ -104,7 +108,7 @@ async def _sistema(db, ch_id) -> list[str]:
         .order_by(ChamadoMensagem.created_at))).scalars().all())
 
 
-async def test_vigia_abre_chamado_com_prazo_avisa_e_nao_duplica(db, make_user, monkeypatch, threema_fake):
+async def test_vigia_abre_chamado_pede_foto_e_contesta_sozinho_12h_antes(db, make_user, monkeypatch, threema_fake):
     fake = _FakeTikTok()
     await _seed(db, make_user, fake, monkeypatch)
 
@@ -115,20 +119,59 @@ async def test_vigia_abre_chamado_com_prazo_avisa_e_nao_duplica(db, make_user, m
     hist = await _sistema(db, ch.id)
     assert any("SÓ REEMBOLSO" in t and "640.54" in t and "Pacote chegou vazio" in t and "18/09 10:19" in t
                and "999881910210731" in t for t in hist), hist
-    assert len(threema_fake) == 1 and "18/09 10:19" in threema_fake[0][0] and threema_fake[0][1] == ["CDSA84BZ"]
+    # 17/09: o Threema PEDE foto e vídeo e diz a hora da contestação automática
+    assert len(threema_fake) == 1 and threema_fake[0][1] == ["CDSA84BZ"]
+    aviso = threema_fake[0][0]
+    assert "FOTO e VÍDEO" in aviso and "17/09 22:19" in aviso and "18/09 10:19" in aviso, aviso
 
-    # 2ª passada: não abre de novo nem avisa de novo
+    # 2ª passada: não abre de novo nem pede foto de novo
     r2 = await svc.run_vigia(db, agora=AGORA)
-    assert r2["abertos"] == 0 and len(threema_fake) == 1
-    assert len((await db.execute(select(Chamado).where(Chamado.origem_ref == f"tiktok_reembolso:{RID}"))).scalars().all()) == 1
+    assert r2["abertos"] == 0 and len(threema_fake) == 1 and fake.rejects == []
 
-    # menos de 12 h: aviso urgente UMA vez
+    # alguém anexou foto no chamado; faltando menos de 12 h o robô contesta SOZINHO com ela
+    db.add(ChamadoAnexo(chamado_id=ch.id, filename="pesagem.png", content_type="image/png",
+                        size_bytes=len(PNG_1PX), blob=PNG_1PX))
+    await db.commit()
     quase = datetime.fromtimestamp(PRAZO - 3600, UTC)
     r3 = await svc.run_vigia(db, agora=quase)
-    assert r3["urgentes"] == 1 and len(threema_fake) == 2 and "menos de 12 h" in threema_fake[1][0]
-    await svc.run_vigia(db, agora=quase)
-    assert len(threema_fake) == 2
+    assert r3["urgentes"] == 1 and r3.get("contestados") == 1, r3
+    assert len(fake.rejects) == 1
+    rj = fake.rejects[0]
+    assert (rj["decision"], rj["reason"]) == ("REJECT_REFUND", "reverse_reject_request_reason_1")
+    assert len(rj["images"]) == 1 and fake.uploads[0][0] == "pesagem.png"
+    assert "entregue em 09/09 09:58" in rj["comment"] and "999881910210731" in rj["comment"], rj["comment"]
+    assert "Pacote chegou vazio" in rj["comment"] and "6 dia(s) após a entrega" in rj["comment"], rj["comment"]
+    assert "1 foto(s)" in rj["comment"]
+    rep = (await db.execute(select(ChamadoMensagem).where(ChamadoMensagem.chamado_id == ch.id,
+                                                          ChamadoMensagem.tipo == "replica"))).scalar_one()
+    assert rep.status == "enviada" and rep.autor_nome == "robô"
+    assert len(threema_fake) == 2 and "CONTESTOU sozinho" in threema_fake[1][0]
+    assert any("CONTESTADO" in t and "automática" in t for t in await _sistema(db, ch.id))
 
+    # a TikTok tirou de pendente: não contesta de novo; o desfecho vai pro histórico
+    r4 = await svc.run_vigia(db, agora=quase)
+    assert len(fake.rejects) == 1 and r4["desfechos"] == 1
+    assert any("RECUSADO" in t for t in await _sistema(db, ch.id))
+
+
+async def test_vigia_sem_entrega_nao_contesta_sozinho_e_alerta_uma_vez(db, make_user, monkeypatch, threema_fake):
+    fake = _FakeTikTok()
+    fake.entregue = False
+    await _seed(db, make_user, fake, monkeypatch)
+    await svc.run_vigia(db, agora=AGORA)
+    quase = datetime.fromtimestamp(PRAZO - 3600, UTC)
+    await svc.run_vigia(db, agora=quase)
+    await svc.run_vigia(db, agora=quase)
+    assert fake.rejects == []
+    urg = [t for t, _ in threema_fake if "NÃO contestou" in t]
+    assert len(urg) == 1 and "sem entrega" in urg[0], threema_fake
+
+
+async def test_vigia_desfecho_aprovado_por_falta_de_resposta(db, make_user, monkeypatch, threema_fake):
+    fake = _FakeTikTok()
+    await _seed(db, make_user, fake, monkeypatch)
+    await svc.run_vigia(db, agora=AGORA)
+    ch = (await db.execute(select(Chamado).where(Chamado.origem_ref == f"tiktok_reembolso:{RID}"))).scalar_one()
     # TikTok aprovou por falta de resposta → desfecho dito com todas as letras, uma vez
     fake.status = "RETURN_OR_REFUND_REQUEST_COMPLETE"
     fake.records.append({"event": "SELLER_REJECT_APPLICATION_TIMEOUT_REFUND", "create_time": PRAZO})
@@ -168,6 +211,11 @@ async def test_replica_do_chamado_contesta_o_reembolso_com_foto(client, make_use
     r2 = await client.post(f"/api/chamados/{ch.id}/mensagens", data={"texto": "de novo"})
     assert r2.status_code == 201 and r2.json()["status"] == "falhou"
     assert r2.json()["erro"] == "tiktok_reembolso_nao_pendente"
+    # já contestado (recusa registrada): foto nova só pela Central do Vendedor
+    fake.status = "REFUND_OR_RETURN_REQUEST_REJECT"
+    r3 = await client.post(f"/api/chamados/{ch.id}/mensagens", data={"texto": "mais foto"},
+                           files=[("files", ("x.png", PNG_1PX, "image/png"))])
+    assert r3.json()["erro"] == "tiktok_reembolso_ja_contestado"
     assert len(fake.rejects) == 1
 
 
