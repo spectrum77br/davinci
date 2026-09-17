@@ -329,6 +329,14 @@ class Settings(BaseSettings):
     # do horário da tela Lojas (agência); correios é contínuo.
     nf_auto_ml: bool = False
 
+    # Prioridade de estoque: como o robô troca o SKU do pedido no Bling.
+    # False (hoje) = EDITA o item; o Bling guarda a composição antiga colada
+    # nesse item e baixa o kit velho, por isso o robô compensa com POST
+    # /estoques. True = SUBSTITUI o item (tira o antigo, põe um novo sem id)
+    # pra o Bling refazer a composição e baixar o kit certo sozinho — aí a
+    # compensação é desligada. Set via PRIORIDADE_SUBSTITUI_ITEM no .env.
+    prioridade_substitui_item: bool = False
+
     # Threema IDs (vírgula) avisados quando o sweep move um pedido pra
     # Aguardando Cancelamento por estoque negativo. Vazio = aviso desligado
     # (o sweep segue funcionando normal). Set via

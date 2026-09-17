@@ -31,6 +31,11 @@ Devoluções): ENTRADA em cada componente antigo e SAÍDA em cada componente
 novo — ver services/prioridade_estoque_movimentos.py (registro em
 transação própria, retry, estorno em cancelamento, aviso Threema). Produto
 simples: nenhum movimento.
+DESDE 17/09 existe o modo `prioridade_substitui_item` (config): em vez de
+EDITAR o item, o PUT SUBSTITUI (item novo, sem `id`) — aí o Bling refaz a
+composição, baixa o kit certo e a compensação é desligada; quem confere é
+services/prioridade_estoque_conferencia.py, que lê o extrato depois da
+etiqueta e só compensa se o Bling tiver baixado o kit velho.
 Toda troca vira linha no margem_audit (acao='sku',
 origem='prioridade_estoque', mudado_por=None = robô) E linha datada nas
 Observações do pedido no Bling ("dd/mm - SKU trocado pela prioridade de
@@ -49,6 +54,7 @@ import structlog
 from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import get_settings
 from app.db import session_scope
 from app.models import BlingOrder, PricingProduct
 from app.services import nf_emissao_gerar
@@ -159,6 +165,41 @@ async def _mapa_prioridades(session: AsyncSession) -> dict[str, str]:
     return mapa
 
 
+def aplicar_trocas_nos_itens(
+    itens: list[dict], trocas: list[dict], *, substituir: bool
+) -> tuple[list[dict], list[dict]]:
+    """Monta a lista de `itens` do PUT e diz quais trocas casaram.
+
+    `substituir=False` (jeito antigo): EDITA o item no lugar, mantendo o `id`.
+    O Bling trata isso como "mesmo item" e continua com a composição que
+    fotografou quando o pedido entrou — por isso baixa o kit VELHO e o robô
+    precisa compensar por fora (e sobra reserva órfã no componente novo).
+
+    `substituir=True`: tira o item antigo e põe um item NOVO, sem `id` — o
+    Bling refaz a composição, reserva e baixa o kit certo sozinho. É a
+    correção de raiz; a compensação fica desligada e o conferente vigia.
+
+    Copia rasa por item: nunca muda o dict que veio do Bling.
+    """
+    por_codigo = {t["antigo"].strip().lower(): t for t in trocas}
+    novos: list[dict] = []
+    aplicadas: list[dict] = []
+    for bi in itens:
+        t = por_codigo.get((bi.get("codigo") or "").strip().lower())
+        if t is None:
+            novos.append(bi)
+            continue
+        item = {k: v for k, v in bi.items() if not (substituir and k == "id")}
+        item["codigo"] = t["alvo"]
+        item["produto"] = {"id": t["alvo_id"]}
+        if t.get("alvo_nome"):
+            item["descricao"] = t["alvo_nome"]
+        novos.append(item)
+        if t not in aplicadas:
+            aplicadas.append(t)
+    return novos, aplicadas
+
+
 async def aplicar_prioridade_estoque(
     session: AsyncSession, numeros: list[str] | None = None
 ) -> dict:
@@ -177,9 +218,11 @@ async def aplicar_prioridade_estoque(
         "falhas": 0,
         "estoque_movimentos": 0,
         "estoque_falhas": 0,
+        "sem_compensacao": 0,
     }
     if numeros is not None and not numeros:
         return summary
+    substituir_item = bool(get_settings().prioridade_substitui_item)
     mapa = await _mapa_prioridades(session)
     if not mapa:
         return summary  # ninguém preencheu Prioridade — no-op barato
@@ -282,20 +325,9 @@ async def aplicar_prioridade_estoque(
         try:
             order = await client.get_order(int(bling_id))
             body = build_observacoes_put_body(order, order.get("observacoes") or "")
-            aplicadas: list[dict] = []
-            for t in trocas:
-                bateu = False
-                for bi in body.get("itens") or []:
-                    if (bi.get("codigo") or "").strip().lower() == t[
-                        "antigo"
-                    ].strip().lower():
-                        bi["codigo"] = t["alvo"]
-                        bi["produto"] = {"id": t["alvo_id"]}
-                        if t.get("alvo_nome"):
-                            bi["descricao"] = t["alvo_nome"]
-                        bateu = True
-                if bateu:
-                    aplicadas.append(t)
+            body["itens"], aplicadas = aplicar_trocas_nos_itens(
+                body.get("itens") or [], trocas, substituir=substituir_item
+            )
             if not aplicadas:
                 # Espelho local não bate com o Bling — não arrisca o PUT.
                 continue
@@ -319,6 +351,13 @@ async def aplicar_prioridade_estoque(
             continue
 
         kits = [(t["antigo"], t["alvo"], int(t["qtd"])) for t in aplicadas if "+" in t["antigo"]]
+        if kits and substituir_item:
+            # Item novo = composição nova: o próprio Bling baixa o kit certo.
+            # Compensar aqui baixaria DUAS vezes. O conferente
+            # (prioridade_estoque_conferencia) olha o extrato depois da
+            # etiqueta e compensa só se o Bling tiver baixado o kit velho.
+            summary["sem_compensacao"] += 1
+            kits = []
         if kits:
             # Um plano por pedido: kits que compartilham componente somam.
             mov = await compensar_estoque_kits(
