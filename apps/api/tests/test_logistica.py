@@ -662,3 +662,70 @@ async def test_problemas_no_bling_obedece_o_monitorar_da_aba_status(
     assert r.status_code == 200, r.text
     row = await _linha()
     assert row["acao_monitorar"] is True
+
+
+@pytest.mark.asyncio
+async def test_lista_traz_o_ticket_da_aba_chamados_sem_protocolo(
+    client: AsyncClient, db: AsyncSession, admin: User, auth_as: Callable[[User | None], None]
+):
+    """Caso real 17/09 (Amazon 291365): o SAFE-T é aberto na mão e a Amazon não
+    tem API; a Devoluções cria o ticket na aba Chamados sem protocolo e a
+    Logística mostrava "—". Agora a linha traz o ticket (`chamado_aba`): aberto
+    sem nº = pendente; com nº = aberto; prefere o aberto ao encerrado; pedido
+    sem ticket = None."""
+    from datetime import UTC, datetime
+
+    from app.models import Chamado
+
+    auth_as(admin)
+
+    async def _linha(pedido: str, plataforma: str, marketplace: str) -> str:
+        r = await client.post(
+            "/api/logistica",
+            json={
+                "data": "2026-08-19",
+                "pedido_bling": pedido,
+                "pedido_marketplace": marketplace,
+                "plataforma": plataforma,
+                "conta": "kfa",
+                "meli_status": {"order_status": "Shipped"},
+                "status_bling": "Problemas",
+            },
+        )
+        assert r.status_code == 201, r.text
+        return r.json()["id"]
+
+    pendente = await _linha("291365", "Amazon", "702-9900278-1982616")
+    com_numero = await _linha("291366", "Amazon", "702-0000000-0000001")
+    sem_ticket = await _linha("291367", "Amazon", "702-0000000-0000002")
+    db.add_all([
+        # encerrado velho + aberto novo sem nº → vale o aberto
+        Chamado(pedido_bling="291365", plataforma="amazon", conta="kfa", origem="logistica",
+                canal="manual", chamado="21878808451", resolvido=True,
+                created_at=datetime(2026, 8, 1, tzinfo=UTC)),
+        Chamado(pedido_bling="291365", plataforma="amazon", conta="kfa", origem="devolucao",
+                canal="manual", data=datetime(2026, 9, 9, tzinfo=UTC).date(),
+                observacao="Aberto automaticamente pela devolução — motivo: Não recebido"),
+        Chamado(pedido_bling="291366", plataforma="amazon", conta="kfa", origem="devolucao",
+                canal="manual", chamado="52020-49750-0878840"),
+    ])
+    await db.commit()
+
+    r = await client.get("/api/logistica?plataforma=amazon")
+    assert r.status_code == 200, r.text
+    por_id = {x["id"]: x for x in r.json()}
+
+    t = por_id[pendente]["chamado_aba"]
+    assert t["chamado"] is None and t["resolvido"] is False
+    assert t["origem"] == "devolucao" and t["canal"] == "manual" and t["data"] == "2026-09-09"
+    assert por_id[pendente]["chamado"] is None  # a linha continua sem protocolo
+
+    t = por_id[com_numero]["chamado_aba"]
+    assert t["chamado"] == "52020-49750-0878840" and t["resolvido"] is False
+
+    assert por_id[sem_ticket]["chamado_aba"] is None
+
+    # Resposta de uma linha só (PATCH) também carrega o ticket.
+    r = await client.patch(f"/api/logistica/{pendente}", json={"observacao": "x"})
+    assert r.status_code == 200, r.text
+    assert r.json()["chamado_aba"]["origem"] == "devolucao"

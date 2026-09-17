@@ -30,6 +30,7 @@ from app.deps.auth import require_permission
 from app.deps.team_scope import TeamScope, resolve_team_scope
 from app.models import (
     BlingOrder,
+    Chamado,
     Logistica,
     LogisticaMensagemCliente,
     LogisticaStatus,
@@ -43,6 +44,7 @@ from app.schemas.logistica import (
     AnexoOut,
     AtualizarRastreioOut,
     CandidatoOut,
+    ChamadoAbaOut,
     EnviarThreemaIn,
     EnviarThreemaOut,
     LogisticaCreate,
@@ -203,11 +205,50 @@ async def _mensagens_for(session: AsyncSession, c: Logistica) -> list[MensagemCl
     return (await _mensagens_map(session, {c.id})).get(c.id, [])
 
 
+def _chamado_aba_out(ch: Chamado) -> ChamadoAbaOut:
+    return ChamadoAbaOut(
+        id=ch.id,
+        chamado=(ch.chamado or "").strip() or None,
+        canal=ch.canal or "",
+        origem=ch.origem or "",
+        resolvido=bool(ch.resolvido),
+        data=ch.data,
+        created_at=ch.created_at,
+    )
+
+
+async def _chamados_aba_map(
+    session: AsyncSession, pedidos: set[str]
+) -> dict[str, ChamadoAbaOut]:
+    """Ticket da aba Chamados por pedido Bling, numa query só (DISTINCT ON):
+    prefere o ABERTO mais recente; sem aberto, o encerrado mais recente. É o
+    que a coluna Chamado mostra enquanto a linha não tem protocolo (Vinicius
+    17/09, Amazon 291365: SAFE-T se abre na mão e a Amazon não tem API — ao
+    menos dá pra ver se alguém já abriu ou se está pendente)."""
+    pedidos = {p for p in pedidos if (p or "").strip()}
+    if not pedidos:
+        return {}
+    rows = (
+        await session.execute(
+            select(Chamado)
+            .where(Chamado.pedido_bling.in_(pedidos))
+            .distinct(Chamado.pedido_bling)
+            .order_by(Chamado.pedido_bling, Chamado.resolvido.asc(), Chamado.created_at.desc())
+        )
+    ).scalars().all()
+    return {ch.pedido_bling: _chamado_aba_out(ch) for ch in rows if ch.pedido_bling}
+
+
+async def _chamado_aba_for(session: AsyncSession, c: Logistica) -> ChamadoAbaOut | None:
+    return (await _chamados_aba_map(session, {c.pedido_bling or ""})).get(c.pedido_bling or "")
+
+
 def _to_out(
     c: Logistica,
     rules: list[LogisticaStatus] | None = None,
     produtos: list[LogisticaProdutoOut] | None = None,
     mensagens: list[MensagemClienteOut] | None = None,
+    chamado_aba: ChamadoAbaOut | None = None,
 ) -> LogisticaOut:
     """`rules` = candidatas da aba Status que casam a chave deste pedido (máquina
     de estados). A regra ATIVA (desambiguada pela situação atual do Bling) alimenta
@@ -256,6 +297,7 @@ def _to_out(
         aviso_prazo_amazon_3d_at=c.aviso_prazo_amazon_3d_at,
         aviso_prazo_amazon_vencido_at=c.aviso_prazo_amazon_vencido_at,
         mensagens_cliente=mensagens or [],
+        chamado_aba=chamado_aba,
         suspensao_status=c.suspensao_status,
         suspensao_em=c.suspensao_em,
         suspensao_detalhe=c.suspensao_detalhe,
@@ -687,6 +729,8 @@ async def list_logistica(
             if (c.plataforma or "").strip().lower() in logistica_rules._AMAZON_PLATAFORMAS
         },
     )
+    # Ticket da aba Chamados de cada pedido (coluna Chamado sem protocolo).
+    chamados_map = await _chamados_aba_map(session, {c.pedido_bling or "" for c in rows})
     out: list[LogisticaOut] = []
     for c in rows:
         assinatura = logistica_rules.assinatura_para(c.plataforma, c.meli_status or {})
@@ -699,6 +743,7 @@ async def list_logistica(
                 cands,
                 produtos=produtos_map.get(c.pedido_bling or ""),
                 mensagens=mensagens_map.get(c.id),
+                chamado_aba=chamados_map.get(c.pedido_bling or ""),
             )
         )
     return out
@@ -795,6 +840,7 @@ async def suspender_entrega(
         await _match_rules(session, c),
         produtos=await _produtos_for(session, c),
         mensagens=await _mensagens_for(session, c),
+        chamado_aba=await _chamado_aba_for(session, c),
     )
 
 
@@ -948,6 +994,7 @@ async def create_logistica(
         await _match_rules(session, c),
         produtos=await _produtos_for(session, c),
         mensagens=await _mensagens_for(session, c),
+        chamado_aba=await _chamado_aba_for(session, c),
     )
 
 
@@ -983,6 +1030,7 @@ async def atualizar_meli(
         await _match_rules(session, c),
         produtos=await _produtos_for(session, c),
         mensagens=await _mensagens_for(session, c),
+        chamado_aba=await _chamado_aba_for(session, c),
     )
 
 
@@ -1017,6 +1065,7 @@ async def atualizar_shopee(
         await _match_rules(session, c),
         produtos=await _produtos_for(session, c),
         mensagens=await _mensagens_for(session, c),
+        chamado_aba=await _chamado_aba_for(session, c),
     )
 
 
@@ -1052,6 +1101,7 @@ async def atualizar_tiktok(
         await _match_rules(session, c),
         produtos=await _produtos_for(session, c),
         mensagens=await _mensagens_for(session, c),
+        chamado_aba=await _chamado_aba_for(session, c),
     )
 
 
@@ -1087,6 +1137,7 @@ async def atualizar_amazon(
         await _match_rules(session, c),
         produtos=await _produtos_for(session, c),
         mensagens=await _mensagens_for(session, c),
+        chamado_aba=await _chamado_aba_for(session, c),
     )
 
 
@@ -1123,6 +1174,7 @@ async def atualizar_rastreio(
             await _match_rules(session, c),
             produtos=await _produtos_for(session, c),
             mensagens=await _mensagens_for(session, c),
+            chamado_aba=await _chamado_aba_for(session, c),
         ),
     )
 
@@ -1242,6 +1294,7 @@ async def enviar_chamado(
         await _match_rules(session, c),
         produtos=await _produtos_for(session, c),
         mensagens=await _mensagens_for(session, c),
+        chamado_aba=await _chamado_aba_for(session, c),
     )
 
 
@@ -1404,6 +1457,7 @@ async def patch_logistica(
         await _match_rules(session, c),
         produtos=await _produtos_for(session, c),
         mensagens=await _mensagens_for(session, c),
+        chamado_aba=await _chamado_aba_for(session, c),
     )
 
 

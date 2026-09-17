@@ -40,6 +40,22 @@ class MensagemClienteOut(BaseModel):
     tentativas: int = 0
 
 
+class ChamadoAbaOut(BaseModel):
+    """Ticket do mesmo pedido na aba Chamados (o aberto mais recente; se só há
+    encerrado, o encerrado mais recente). É o que responde "já abriram chamado?"
+    quando a linha ainda não tem protocolo: ticket aberto SEM nº = alguém ainda
+    precisa abrir na plataforma (na Amazon, o SAFE-T no Seller Central — não há
+    API); ticket com nº = aberto (o motor copia o nº pra linha em até 5 min)."""
+
+    id: UUID
+    chamado: str | None = None
+    canal: str
+    origem: str
+    resolvido: bool = False
+    data: date | None = None
+    created_at: datetime
+
+
 class MensagemTemplateOut(BaseModel):
     """Texto de um evento da mensagem ao cliente (tela Logística › Mensagens ao
     cliente). `padrao`=True quando ainda é o texto do código (sem linha no banco)."""
@@ -139,6 +155,8 @@ class LogisticaOut(BaseModel):
     aviso_prazo_amazon_vencido_at: datetime | None = None
     # Mensagens mandadas ao comprador (histórico; só leitura).
     mensagens_cliente: list[MensagemClienteOut] = Field(default_factory=list)
+    # Ticket da aba Chamados do pedido (ver ChamadoAbaOut). Só leitura.
+    chamado_aba: ChamadoAbaOut | None = None
     # Suspensão de entrega no Melhor Envio pelo robô: pendente | solicitada |
     # falhou (+ quando foi pedida e o detalhe do robô). Só leitura.
     suspensao_status: str | None = None

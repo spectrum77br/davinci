@@ -95,6 +95,18 @@ type Logistica = {
   // e motivo da recusa do ML (vazio = nunca tentou / abriu). Só leitura.
   chamado_auto_at: string | null
   chamado_auto_erro: string | null
+  // Ticket do pedido na aba Chamados (o aberto mais recente; senão o encerrado
+  // mais recente). Responde "já abriram chamado?" enquanto a linha não tem
+  // protocolo — na Amazon o SAFE-T é aberto na mão e não tem API. Só leitura.
+  chamado_aba: {
+    id: string
+    chamado: string | null
+    canal: string
+    origem: string
+    resolvido: boolean
+    data: string | null
+    created_at: string
+  } | null
   // ---- Amazon (projeto de 15/09/2026) ----
   amazon_canal?: 'dba' | 'proprio' | 'fba' | null
   amazon_canal_label?: string
@@ -1469,6 +1481,24 @@ const CHAMADO_ERROS: Record<string, string> = {
     'O robô disse que abriu, mas não trouxe o nº do chamado — confira na aba Chamados e preencha o protocolo.',
 }
 const sendingChamado = ref<Set<string>>(new Set())
+// Coluna Chamado sem protocolo na linha: o que a aba Chamados diz do pedido.
+// Aberto sem nº = alguém ainda precisa abrir na plataforma (Amazon: SAFE-T no
+// Seller Center); aberto com nº = já foi (o motor copia o nº pra linha em até
+// 5 min); encerrado = fechado na aba. Vazio = nunca teve ticket.
+function chamadoAbaResumo(c: Logistica): { texto: string; tom: 'pendente' | 'ok' | 'encerrado' } | null {
+  if (c.chamado || !c.chamado_aba) return null
+  const t = c.chamado_aba
+  const quando = t.data ? fmtDia(t.data) : fmtQuando(t.created_at)
+  const desde = quando ? ` desde ${quando}` : ''
+  if (!t.resolvido) {
+    if (t.chamado) return { texto: `${t.chamado} (aba Chamados)`, tom: 'ok' }
+    if (t.canal === 'robo') return { texto: `pendente: robô abrindo${desde}`, tom: 'pendente' }
+    const oque = isAmazon(c) ? 'abrir SAFE-T' : 'abrir chamado'
+    return { texto: `pendente: ${oque}${desde} (aba Chamados)`, tom: 'pendente' }
+  }
+  if (t.chamado) return { texto: `${t.chamado} · encerrado na aba Chamados`, tom: 'encerrado' }
+  return { texto: `encerrado na aba Chamados sem nº${desde}`, tom: 'encerrado' }
+}
 // O motor tentou abrir sozinho e o ML recusou: mostra o motivo (mesma tabela
 // de erros do botão) e quando foi — o robô tenta de novo em 6 h.
 function chamadoAutoAviso(c: Logistica): string | null {
@@ -2057,7 +2087,12 @@ async function aplicarStatusBling(c: Logistica) {
               </td>
               <td class="px-3 py-2 whitespace-nowrap">
                 <div class="flex items-center gap-1.5">
-                  <span class="flex-1">{{ c.chamado || '—' }}</span>
+                  <span
+                    v-if="chamadoAbaResumo(c)"
+                    class="flex-1 max-w-[260px] whitespace-normal text-[12px] leading-tight"
+                    :class="chamadoAbaResumo(c)!.tom === 'pendente' ? 'text-amber-700 dark:text-amber-400' : chamadoAbaResumo(c)!.tom === 'encerrado' ? 'text-muted-foreground' : ''"
+                  >{{ chamadoAbaResumo(c)!.texto }}</span>
+                  <span v-else class="flex-1">{{ c.chamado || '—' }}</span>
                   <button
                     v-if="canEdit && isMl(c) && c.pedido_marketplace && c.acao_resumo.includes('Abrir chamado')"
                     class="shrink-0 inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded border hover:bg-muted/40 disabled:opacity-50"
@@ -2155,7 +2190,7 @@ async function aplicarStatusBling(c: Logistica) {
                 </button>
               </template>
             </div>
-            <div><span class="text-muted-foreground">Chamado:</span> {{ c.chamado || '—' }}</div>
+            <div><span class="text-muted-foreground">Chamado:</span> {{ c.chamado || chamadoAbaResumo(c)?.texto || '—' }}</div>
             <template v-if="tab === 'amazon' && amazonSub === 'proprio'">
               <div>
                 <span class="text-muted-foreground">Previsão transportadora:</span>
