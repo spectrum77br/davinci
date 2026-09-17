@@ -938,7 +938,6 @@ async function loadAcompanhamento() {
 async function backfillAcompanhamento() {
   await backfillAddresses()
   await loadAcompanhamento()
-  void loadSituacoesBling()
 }
 
 const acompPlataformas = computed(() => {
@@ -1397,6 +1396,10 @@ async function loadSituacoesBling() {
     situacoesBling.value = []
   }
 }
+
+// Carrega junto com a página (os `const` acima precisam existir antes — por
+// isso aqui, e não no Promise.all lá em cima).
+void loadSituacoesBling()
 
 function isSavingSituacao(pedido: string | null): boolean {
   return !!pedido && situacaoSaving.value.has(pedido)
