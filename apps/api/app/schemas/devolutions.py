@@ -90,6 +90,11 @@ class DevolutionOut(BaseModel):
     chamado_ml_erro: str | None = None
     # Plataforma do chamado (ml | tiktok | shopee | amazon…) — rotula o status.
     chamado_plataforma: str | None = None
+    # Situação ATUAL do pedido no Bling (espelho bling_orders, via número do
+    # pedido) — coluna "Status Bling" da aba Lançamentos (Vinicius 17/09).
+    # Preenchidos pela listagem/create/patch; devolutions não guarda.
+    situacao_bling_id: int | None = None
+    situacao_bling_nome: str | None = None
     # Fotos/vídeos anexados à linha (metadados; blob pelo endpoint /anexos/{id}).
     anexos: list[DevolucaoAnexoOut] = []
 
@@ -304,6 +309,37 @@ class DevolutionLookupOut(BaseModel):
     uf_destino: str | None = None
     # True quando já existe devolução lançada para este pedido+sku (front esmaece).
     ja_devolvido: bool = False
+    # Situação atual do pedido no Bling (pra escolher pra onde mandar já no lançamento).
+    situacao_bling_id: int | None = None
+    situacao_bling_nome: str | None = None
+
+
+class SituacaoBlingOut(BaseModel):
+    id: int
+    nome: str
+
+
+class SituacoesBlingOut(BaseModel):
+    """Situações ATIVAS do Bling (catálogo situacao_bling) — dropdown "Status
+    Bling" da aba Lançamentos."""
+
+    items: list[SituacaoBlingOut]
+
+
+class SituacaoBlingPatch(BaseModel):
+    """Mudar a situação do pedido no Bling na mão (Vinicius 17/09: "alterar
+    status bling em Lançamentos e selecionar pra qual quer alterar")."""
+
+    situacao_id: int
+
+
+class SituacaoBlingResult(BaseModel):
+    pedido_bling: str
+    situacao_id: int
+    situacao_nome: str | None = None
+    # True = o Bling recusou a transição direta e a mudança passou por
+    # "Aguardando Devolução" antes (caminhos de mão única do Bling).
+    via_desvio: bool = False
 
 
 FilaDevolucao = Literal["acompanhamento", "fraude"]

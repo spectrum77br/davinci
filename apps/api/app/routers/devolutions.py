@@ -5,6 +5,7 @@ from typing import Annotated
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
+import httpx
 import structlog
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from fastapi.responses import Response, StreamingResponse
@@ -24,6 +25,7 @@ from app.models import (
     Devolution,
     Product,
     Refund,
+    SituacaoBling,
     User,
 )
 from app.schemas.devolutions import (
@@ -39,6 +41,10 @@ from app.schemas.devolutions import (
     DevolutionPage,
     DevolutionPatch,
     DevolutionProductOut,
+    SituacaoBlingOut,
+    SituacaoBlingPatch,
+    SituacaoBlingResult,
+    SituacoesBlingOut,
     SkuSuffixesOut,
     SkuSuffixVariant,
     StockCorrectionIn,
@@ -49,6 +55,9 @@ from app.services.alerts import emit_alert
 from app.services.devolution_stock_return import (
     _STOCK_TRIGGER_CONDICOES,
     _SUFFIX_TAGS,
+    SITUACAO_AGUARDANDO_DEVOLUCAO,
+    _get_bling_client,
+    _is_same_situacao_error,
     _sku_base,
     _sku_tag,
     apply_order_situacao,
@@ -56,6 +65,7 @@ from app.services.devolution_stock_return import (
     return_product_to_bling_stock,
     reverse_stock_movement,
 )
+from app.services.margem_audit import record_margem_audit
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/api/devolutions", tags=["devolutions"])
@@ -274,6 +284,48 @@ def _cliente_scalar_subquery():
     )
 
 
+async def _situacoes_por_pedido(
+    session: AsyncSession, numeros: set[str | None]
+) -> dict[str, tuple[int | None, str | None]]:
+    """Situação ATUAL de cada pedido no espelho bling_orders (`numero` se repete
+    entre anos: vale o pedido mais recente) + nome do catálogo — coluna
+    "Status Bling" da aba Lançamentos. {numero: (id, nome)}."""
+    alvo = sorted({(n or "").strip() for n in numeros if (n or "").strip()})
+    if not alvo:
+        return {}
+    rows = (
+        await session.execute(
+            select(BlingOrder.numero, BlingOrder.situacao, BlingOrder.data)
+            .where(BlingOrder.numero.in_(alvo))
+            .order_by(BlingOrder.numero, BlingOrder.data.desc().nullslast())
+        )
+    ).all()
+    por_pedido: dict[str, str | None] = {}
+    for numero, situacao, _data in rows:
+        por_pedido.setdefault(numero, situacao)  # primeiro = mais recente
+    ids = {int(v) for v in por_pedido.values() if v and str(v).isdigit()}
+    nomes: dict[int, str] = {}
+    if ids:
+        nomes = {
+            int(i): n
+            for i, n in (
+                await session.execute(
+                    select(SituacaoBling.id, SituacaoBling.nome).where(SituacaoBling.id.in_(ids))
+                )
+            ).all()
+        }
+    out: dict[str, tuple[int | None, str | None]] = {}
+    for numero, situacao in por_pedido.items():
+        sid = int(situacao) if situacao and str(situacao).isdigit() else None
+        out[numero] = (sid, nomes.get(sid) if sid is not None else None)
+    return out
+
+
+def _aplica_situacao(out: DevolutionOut, sit: tuple[int | None, str | None] | None) -> None:
+    if sit is not None:
+        out.situacao_bling_id, out.situacao_bling_nome = sit
+
+
 async def _chamados_por_pedido(
     session: AsyncSession, numeros: set[str | None]
 ) -> dict[str, Chamado]:
@@ -398,6 +450,9 @@ async def _completar_out(
     aberturas = await _aberturas_por_chamado(session, chamados) if ch is not None else {}
     _aplica_chamado(out, ch, aberturas.get(ch.id) if ch is not None else None)
     out.anexos = (await _anexos_por_devolucao(session, [row.id])).get(row.id, [])
+    _aplica_situacao(
+        out, (await _situacoes_por_pedido(session, {row.pedido_bling})).get((row.pedido_bling or "").strip())
+    )
     return out
 
 
@@ -474,6 +529,7 @@ async def list_devolutions(
     chamados = await _chamados_por_pedido(session, {dev.pedido_bling for dev, _ in rows})
     aberturas = await _aberturas_por_chamado(session, chamados)
     anexos = await _anexos_por_devolucao(session, [dev.id for dev, _ in rows])
+    situacoes = await _situacoes_por_pedido(session, {dev.pedido_bling for dev, _ in rows})
     items: list[DevolutionOut] = []
     for dev, cliente in rows:
         out = DevolutionOut.model_validate(dev)
@@ -481,6 +537,7 @@ async def list_devolutions(
         ch = chamados.get((dev.pedido_bling or "").strip())
         _aplica_chamado(out, ch, aberturas.get(ch.id) if ch is not None else None)
         out.anexos = anexos.get(dev.id, [])
+        _aplica_situacao(out, situacoes.get((dev.pedido_bling or "").strip()))
         items.append(out)
 
     return DevolutionPage(
@@ -1079,6 +1136,121 @@ _EXPORT_COLUMNS: list[tuple[str, str]] = [
 ]
 
 
+@router.get("/situacoes-bling", response_model=SituacoesBlingOut)
+async def situacoes_bling(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(require_permission("devolucoes", "view"))],
+) -> SituacoesBlingOut:
+    """Situações ATIVAS do Bling (catálogo local) pro seletor "Status Bling" da
+    aba Lançamentos — as mesmas que a aba Status da Logística oferece."""
+    rows = (
+        await session.execute(
+            select(SituacaoBling.id, SituacaoBling.nome)
+            .where(SituacaoBling.ativo.is_(True))
+            .order_by(SituacaoBling.nome)
+        )
+    ).all()
+    return SituacoesBlingOut(items=[SituacaoBlingOut(id=int(i), nome=n) for i, n in rows])
+
+
+@router.post("/pedido/{pedido_bling}/situacao-bling", response_model=SituacaoBlingResult)
+async def alterar_situacao_bling(
+    pedido_bling: str,
+    body: SituacaoBlingPatch,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("devolucoes", "edit"))],
+) -> SituacaoBlingResult:
+    """Muda a situação do pedido no Bling NA MÃO, pela aba Lançamentos
+    (Vinicius 17/09): o lançamento sozinho só mexe na situação em Extraviado /
+    Sucata / Manutenção / Novo-Usado-Trocado; "Não devolvido" e afins deixavam
+    o pedido em Aguardando Devolução — e por isso ele não saía da aba Fraude
+    (292022). Mesmo PATCH de situação da aba Status da Logística.
+
+    Se o Bling recusar a transição direta (caminhos de mão única), tenta o
+    desvio por "Aguardando Devolução" e depois o alvo; se nem assim, devolve
+    o motivo do Bling. Atualiza o espelho local na hora (o pedido some das
+    abas Acompanhamento/Fraude sem esperar a sincronização) e grava na
+    auditoria quem mudou."""
+    pedido = pedido_bling.strip()
+    alvo = int(body.situacao_id)
+    sit = (
+        await session.execute(
+            select(SituacaoBling.nome, SituacaoBling.ativo).where(SituacaoBling.id == alvo)
+        )
+    ).first()
+    if sit is None or not sit.ativo:
+        raise HTTPException(422, detail={"code": "situacao_desconhecida"})
+    order_row = (
+        await session.execute(
+            select(BlingOrder.bling_id, BlingOrder.situacao)
+            .where(BlingOrder.numero == pedido, BlingOrder.bling_id.is_not(None))
+            .order_by(BlingOrder.data.desc().nullslast())
+            .limit(1)
+        )
+    ).first()
+    if order_row is None:
+        raise HTTPException(404, detail={"code": "pedido_not_found"})
+    bling_id = int(order_row.bling_id)
+    situacao_antiga = order_row.situacao
+    client = await _get_bling_client(session)
+    if client is None:
+        raise HTTPException(503, detail={"code": "bling_sem_integracao"})
+
+    via_desvio = False
+    try:
+        await client.update_order_situacao(bling_id, alvo)
+    except httpx.HTTPStatusError as exc:
+        texto = exc.response.text or ""
+        if _is_same_situacao_error(exc.response.status_code, texto):
+            pass  # já está no alvo — idempotente
+        elif str(situacao_antiga) != str(SITUACAO_AGUARDANDO_DEVOLUCAO) and alvo != SITUACAO_AGUARDANDO_DEVOLUCAO:
+            try:
+                await client.update_order_situacao(bling_id, SITUACAO_AGUARDANDO_DEVOLUCAO)
+                await client.update_order_situacao(bling_id, alvo)
+                via_desvio = True
+            except httpx.HTTPStatusError as exc2:
+                raise HTTPException(
+                    400,
+                    detail={
+                        "code": "bling_recusou_situacao",
+                        "message": (exc2.response.text or str(exc2))[:300],
+                    },
+                ) from exc2
+        else:
+            raise HTTPException(
+                400,
+                detail={"code": "bling_recusou_situacao", "message": texto[:300] or str(exc)},
+            ) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(
+            502, detail={"code": "bling_indisponivel", "message": str(exc)[:200]}
+        ) from exc
+
+    # Espelho local na hora: as abas Acompanhamento/Fraude leem daqui.
+    await session.execute(
+        update(BlingOrder).where(BlingOrder.numero == pedido).values(situacao=str(alvo))
+    )
+    await record_margem_audit(
+        session,
+        acao="situacao",
+        pedido_bling=pedido,
+        bling_id=bling_id,
+        valor_antigo=situacao_antiga,
+        valor_novo=alvo,
+        origem="devolucoes_manual",
+        mudado_por=user.id,
+    )
+    await session.commit()
+    logger.info(
+        "devolucao_situacao_bling_manual",
+        pedido_bling=pedido, bling_id=bling_id, de=situacao_antiga, para=alvo,
+        via_desvio=via_desvio, user_id=str(user.id),
+    )
+    return SituacaoBlingResult(
+        pedido_bling=pedido, situacao_id=alvo, situacao_nome=sit.nome, via_desvio=via_desvio
+    )
+
+
 @router.get("/export.xlsx")
 async def export_devolutions(
     session: Annotated[AsyncSession, Depends(get_session)],
@@ -1314,6 +1486,11 @@ async def lookup_devolution_order(
             (r.get("pedido_bling") or "").strip(),
             (r.get("sku") or "").strip().lower(),
         ) in devolvidos
+    # Situação atual no Bling (seletor "Status Bling" já no lançamento).
+    situacoes = await _situacoes_por_pedido(session, {r.get("pedido_bling") for r in expanded})
+    for r in expanded:
+        sid, nome = situacoes.get((r.get("pedido_bling") or "").strip(), (None, None))
+        r["situacao_bling_id"], r["situacao_bling_nome"] = sid, nome
 
     return [DevolutionLookupOut.model_validate({k: v for k, v in r.items() if not k.startswith("_")}) for r in expanded]
 

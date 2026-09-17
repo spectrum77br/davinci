@@ -52,6 +52,9 @@ type DevolutionRow = {
   pedido_marketplace: string | null
   conta: string
   cliente?: string | null
+  // Situação ATUAL do pedido no Bling (coluna "Status Bling", 17/09).
+  situacao_bling_id?: number | null
+  situacao_bling_nome?: string | null
   sku: string | null
   produtos: string | null
   custo_produto: number | null
@@ -128,7 +131,10 @@ type LookupRow = {
   nome_destinatario: string | null
   cep_destino: string | null
   ja_devolvido?: boolean
+  situacao_bling_id?: number | null
+  situacao_bling_nome?: string | null
 }
+type SituacaoBling = { id: number; nome: string }
 
 type DevolutionDraft = LookupRow & {
   condicao_produto: string
@@ -932,6 +938,7 @@ async function loadAcompanhamento() {
 async function backfillAcompanhamento() {
   await backfillAddresses()
   await loadAcompanhamento()
+  void loadSituacoesBling()
 }
 
 const acompPlataformas = computed(() => {
@@ -1312,6 +1319,7 @@ async function createAllDevolutions() {
   lookupError.value = null
   const remaining: DevolutionDraft[] = []
   let added = 0
+  const pedidoDoRascunho = drafts.value[0]?.pedido_bling || null
   try {
     for (const d of [...drafts.value]) {
       // No ADD: Novo/Usado/Trocado SEMPRE processam estoque (automático, sem
@@ -1357,10 +1365,81 @@ async function createAllDevolutions() {
     if (added > 0) {
       pushToast({ kind: 'success', title: 'Devoluções adicionadas', lines: [`${added} produto${added === 1 ? '' : 's'}`] })
       void refreshTotals()
+      // "Status Bling" escolhido no formulário: aplica UMA vez pro pedido,
+      // depois dos produtos criados (o lançamento pode ter mexido na situação
+      // sozinho — Extraviado etc.; a escolha da pessoa vale por último).
+      if (addSituacaoId.value != null && pedidoDoRascunho) {
+        await alterarSituacaoBling(pedidoDoRascunho, addSituacaoId.value)
+      }
+      addSituacaoId.value = null
     }
   } finally {
     creating.value = false
   }
+}
+
+// "Status Bling" (Vinicius 17/09): mudar a situação do pedido no Bling direto
+// da aba Lançamentos — o lançamento sozinho só mexe nela em Extraviado /
+// Sucata / Manutenção / Novo-Usado-Trocado, e um pedido lançado como "Não
+// devolvido" ficava pra sempre em Aguardando Devolução (e nas abas
+// Acompanhamento/Fraude). Lista = situações ativas do Bling.
+const situacoesBling = ref<SituacaoBling[]>([])
+// Escolha feita no formulário de adicionar (uma por pedido — todas as linhas do
+// rascunho são do mesmo pedido); aplicada depois que os produtos foram criados.
+const addSituacaoId = ref<number | null>(null)
+const situacaoSaving = ref<Set<string>>(new Set())
+
+async function loadSituacoesBling() {
+  try {
+    const res = await api<{ items: SituacaoBling[] }>('/api/devolutions/situacoes-bling')
+    situacoesBling.value = res.items
+  } catch {
+    situacoesBling.value = []
+  }
+}
+
+function isSavingSituacao(pedido: string | null): boolean {
+  return !!pedido && situacaoSaving.value.has(pedido)
+}
+
+// Muda no Bling e espelha em TODAS as linhas do pedido (grão é item). O
+// backend já atualizou o espelho local, então o pedido some das abas
+// Acompanhamento/Fraude no próximo carregar.
+async function alterarSituacaoBling(pedido: string | null, situacaoId: number | null): Promise<boolean> {
+  if (!canEdit.value || !pedido || situacaoId == null) return false
+  if (situacaoSaving.value.has(pedido)) return false
+  situacaoSaving.value = new Set([...situacaoSaving.value, pedido])
+  try {
+    const res = await api<{ pedido_bling: string; situacao_id: number; situacao_nome: string | null; via_desvio: boolean }>(
+      `/api/devolutions/pedido/${encodeURIComponent(pedido)}/situacao-bling`,
+      { method: 'POST', body: { situacao_id: situacaoId } },
+    )
+    for (const r of items.value) {
+      if (r.pedido_bling === res.pedido_bling) {
+        r.situacao_bling_id = res.situacao_id
+        r.situacao_bling_nome = res.situacao_nome
+      }
+    }
+    pushToast({
+      kind: 'success',
+      title: `Pedido ${pedido} → ${res.situacao_nome || res.situacao_id}`,
+      lines: res.via_desvio ? ['O Bling só aceitou passando por Aguardando Devolução antes.'] : [],
+    })
+    return true
+  } catch (e: any) {
+    pushToast({ kind: 'error', title: `Bling não mudou a situação do ${pedido}`, lines: [apiError(e)] })
+    return false
+  } finally {
+    const next = new Set(situacaoSaving.value)
+    next.delete(pedido)
+    situacaoSaving.value = next
+  }
+}
+
+function onRowSituacaoChange(row: DevolutionRow, raw: string) {
+  const id = raw ? Number(raw) : null
+  if (id == null || id === (row.situacao_bling_id ?? null)) return
+  void alterarSituacaoBling(row.pedido_bling, id)
 }
 
 function rowPatchPayload(row: DevolutionRow) {
@@ -2067,6 +2146,9 @@ async function backfillAddresses() {
               <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[120px] bg-amber-50 dark:bg-amber-900/20">Custo manutenção</th>
               <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[120px] bg-amber-50 dark:bg-amber-900/20">Técnico</th>
               <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[120px] bg-amber-50 dark:bg-amber-900/20">Devolver estoque</th>
+              <!-- Status Bling (17/09): pra onde mandar o pedido no Bling já no
+                   lançamento (uma escolha por pedido; aplicada depois de criar). -->
+              <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[170px] bg-sky-50 dark:bg-sky-900/20" title="Situação do pedido no Bling. Escolha pra onde mandar ao lançar (uma escolha vale pro pedido inteiro). Vazio = não mexe — o lançamento continua mudando sozinho só em Extraviado / Sucata / Manutenção / Novo / Usado / Trocado.">Status Bling</th>
               <!-- Observação já no lançamento (10/09): antes só dava pra
                    preencher na listagem, depois de criar. Mesma coluna
                    verde da tabela de baixo; o payload já mandava o campo. -->
@@ -2150,6 +2232,12 @@ async function backfillAddresses() {
                   />
                 </button>
                 <span v-else class="text-muted-foreground">—</span>
+              </td>
+              <td class="px-1 py-0.5 bg-sky-50/40 dark:bg-sky-900/10" :title="d.situacao_bling_nome ? `Hoje no Bling: ${d.situacao_bling_nome}` : ''">
+                <select v-model="addSituacaoId" :class="sheetSelectClass" :disabled="!canEdit">
+                  <option :value="null">{{ d.situacao_bling_nome ? `manter: ${d.situacao_bling_nome}` : 'não mexer' }}</option>
+                  <option v-for="sit in situacoesBling" :key="sit.id" :value="sit.id">{{ sit.nome }}</option>
+                </select>
               </td>
               <td class="px-1 py-0.5 bg-emerald-50/40 dark:bg-emerald-900/10 border-l-[3px] border-gray-400 dark:border-gray-600">
                 <input v-model="d.observacao" :class="sheetInputClass" placeholder="observação" />
@@ -2276,6 +2364,9 @@ async function backfillAddresses() {
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[140px] bg-amber-50 dark:bg-amber-900/20">Data devolvido estoque</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px] bg-amber-50 dark:bg-amber-900/20">Prazo</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px] bg-amber-50 dark:bg-amber-900/20" title="Até quando a plataforma aceita contestar a devolução recebida (Shopee/TikTok). Vermelho = menos de 24 h ou vencido.">Prazo contest.</th>
+            <!-- Status Bling (17/09): situação atual do pedido no Bling + seletor
+                 pra mudar na hora (mesmo PATCH da aba Status da Logística). -->
+            <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[170px] bg-sky-50 dark:bg-sky-900/20" title="Situação atual do pedido no Bling. Escolher outra muda no Bling na hora (vale pro pedido inteiro) e o pedido sai das abas Acompanhamento/Fraude se deixar de ser Aguardando Devolução.">Status Bling</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[240px] bg-emerald-50 dark:bg-emerald-900/20 border-l-[3px] border-gray-400 dark:border-gray-600">Observação</th>
             <th v-if="isAdmin" class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[120px] bg-slate-50 dark:bg-slate-800/40 border-l-[3px] border-gray-400 dark:border-gray-600">Atualizado</th>
             <th v-if="canDelete" class="px-2 py-1 text-center font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[50px]"></th>
@@ -2283,13 +2374,13 @@ async function backfillAddresses() {
         </thead>
         <tbody>
           <tr v-if="loading && !items.length">
-            <td :colspan="(isAdmin ? 24 : 22) + (canDelete ? 1 : 0)" class="py-8 text-center text-muted-foreground">
+            <td :colspan="(isAdmin ? 25 : 23) + (canDelete ? 1 : 0)" class="py-8 text-center text-muted-foreground">
               <Loader2 class="size-4 inline animate-spin mr-1.5" />
               carregando…
             </td>
           </tr>
           <tr v-else-if="!items.length">
-            <td :colspan="(isAdmin ? 24 : 22) + (canDelete ? 1 : 0)" class="py-8 text-center text-muted-foreground">sem registros</td>
+            <td :colspan="(isAdmin ? 25 : 23) + (canDelete ? 1 : 0)" class="py-8 text-center text-muted-foreground">sem registros</td>
           </tr>
           <tr v-for="row in items" :key="row.id" class="border-t hover:brightness-95 dark:hover:brightness-110">
             <td class="px-2 py-1 whitespace-nowrap text-muted-foreground">{{ fmtDateTime(row.data) }}</td>
@@ -2503,6 +2594,19 @@ async function backfillAddresses() {
                 <span class="text-[10px]" :class="contestacaoUrgente(row.prazo_contestacao) ? 'text-red-600 dark:text-red-400' : 'text-muted-foreground'">{{ contestacaoLabel(row.prazo_contestacao) }}</span>
               </div>
               <span v-else class="text-muted-foreground">—</span>
+            </td>
+            <td class="px-1 py-0.5 bg-sky-50/40 dark:bg-sky-900/10">
+              <select
+                :value="row.situacao_bling_id ?? ''"
+                :disabled="!canEdit || !row.pedido_bling || isSavingSituacao(row.pedido_bling)"
+                :class="sheetSelectClass"
+                :title="row.situacao_bling_nome ? `Hoje no Bling: ${row.situacao_bling_nome}` : 'Situação desconhecida'"
+                @change="(e) => onRowSituacaoChange(row, (e.target as HTMLSelectElement).value)"
+              >
+                <option v-if="row.situacao_bling_id == null" value="">—</option>
+                <option v-else-if="!situacoesBling.some((s) => s.id === row.situacao_bling_id)" :value="row.situacao_bling_id">{{ row.situacao_bling_nome || row.situacao_bling_id }}</option>
+                <option v-for="sit in situacoesBling" :key="sit.id" :value="sit.id">{{ sit.nome }}</option>
+              </select>
             </td>
             <td class="px-1 py-0.5 bg-emerald-50/40 dark:bg-emerald-900/10 border-l-[3px] border-gray-400 dark:border-gray-600">
               <input
