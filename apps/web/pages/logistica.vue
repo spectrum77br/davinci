@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
-import { Plus, RefreshCw, X, Trash2, Search, Send, ImagePlus, ChevronLeft, ChevronRight, Copy, NotebookPen, ArrowLeftRight, UserRound, MessageCircle, Eye, Megaphone, MapPin, Mail, Ban } from 'lucide-vue-next'
+import { Plus, RefreshCw, X, Trash2, Search, Send, ImagePlus, ChevronLeft, ChevronRight, Copy, NotebookPen, ArrowLeftRight, UserRound, MessageCircle, Eye, Megaphone, MapPin, Mail, Ban, ExternalLink } from 'lucide-vue-next'
 
 definePageMeta({
   middleware: ['permission'],
@@ -2093,6 +2093,19 @@ async function aplicarStatusBling(c: Logistica) {
                     :class="chamadoAbaResumo(c)!.tom === 'pendente' ? 'text-amber-700 dark:text-amber-400' : chamadoAbaResumo(c)!.tom === 'encerrado' ? 'text-muted-foreground' : ''"
                   >{{ chamadoAbaResumo(c)!.texto }}</span>
                   <span v-else class="flex-1">{{ c.chamado || '—' }}</span>
+                  <!-- Ticket na aba Chamados: abre a aba já filtrada pelo pedido,
+                       em nova guia do navegador (Vinicius 17/09). -->
+                  <a
+                    v-if="c.chamado_aba && c.pedido_bling"
+                    :href="`/chamados?search=${encodeURIComponent(c.pedido_bling)}`"
+                    target="_blank"
+                    rel="noopener"
+                    class="shrink-0 inline-flex items-center justify-center rounded border p-0.5 text-muted-foreground hover:bg-muted/40 hover:text-foreground"
+                    title="Ver na aba Chamados (abre em nova guia)"
+                    @click.stop
+                  >
+                    <ExternalLink class="size-3" />
+                  </a>
                   <button
                     v-if="canEdit && isMl(c) && c.pedido_marketplace && c.acao_resumo.includes('Abrir chamado')"
                     class="shrink-0 inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded border hover:bg-muted/40 disabled:opacity-50"
