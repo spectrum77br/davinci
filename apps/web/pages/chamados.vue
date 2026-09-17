@@ -1093,8 +1093,8 @@ async function reabrir(row: ChamadoRow) {
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[100px] bg-amber-50 dark:bg-amber-900/20 border-l-[3px] border-gray-400 dark:border-gray-600">Origem</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[190px] bg-amber-50 dark:bg-amber-900/20">Chamado</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px] bg-amber-50 dark:bg-amber-900/20">Canal</th>
-            <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[230px] bg-amber-50 dark:bg-amber-900/20" title="O que a plataforma diz do chamado (e desde quando) + quem falou por último">Status</th>
-            <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[220px] bg-amber-50 dark:bg-amber-900/20">Observação</th>
+            <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap w-[1%] bg-amber-50 dark:bg-amber-900/20" title="O que a plataforma diz do chamado (e desde quando) + quem falou por último">Status</th>
+            <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap w-[150px] min-w-[120px] max-w-[150px] bg-amber-50 dark:bg-amber-900/20">Observação</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[170px] bg-violet-50 dark:bg-violet-900/20 border-l-[3px] border-gray-400 dark:border-gray-600" title="Encaminhado ao jurídico: quando, por quem, observação e link do dossiê">Jurídico</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[210px] bg-emerald-50 dark:bg-emerald-900/20 border-l-[3px] border-gray-400 dark:border-gray-600">Alterar status Bling</th>
             <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px] border-l-[3px] border-gray-400 dark:border-gray-600" title="Resultado do chamado (R$): positivo = lucro, negativo = prejuízo">Valor</th>
@@ -1159,7 +1159,7 @@ async function reabrir(row: ChamadoRow) {
             <!-- Status (17/09, Vinicius "status e últ. resposta não seria a mesma coisa?"):
                  uma célula só — 1ª linha o status (com a data quando ela não é a da última
                  fala: oficial da API, robô pediu gente); 2ª linha quem falou por último. -->
-            <td class="px-2 py-1 bg-amber-50/40 dark:bg-amber-900/10">
+            <td class="px-2 py-1 w-[1%] whitespace-nowrap bg-amber-50/40 dark:bg-amber-900/10">
               <div class="space-y-0.5">
                 <div class="flex items-center gap-1.5 whitespace-nowrap">
                   <span class="inline-block rounded px-1.5 py-0.5 text-[11px] font-medium" :class="statusInfo(row).cls" :title="statusInfo(row).hint">{{ statusInfo(row).label }}</span>
@@ -1170,9 +1170,10 @@ async function reabrir(row: ChamadoRow) {
                 </div>
               </div>
             </td>
-            <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
+            <td class="px-1 py-0.5 w-[150px] max-w-[150px] bg-amber-50/40 dark:bg-amber-900/10">
               <input
                 :value="row.observacao || ''"
+                :title="row.observacao || ''"
                 :disabled="!canEdit"
                 :class="sheetInputClass"
                 @input="(e) => setRowText(row, 'observacao', (e.target as HTMLInputElement).value)"
