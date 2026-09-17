@@ -78,7 +78,7 @@ class DevolucaoRastreio(Base, TimestampMixin):
         DateTime(timezone=True), nullable=True
     )
     reembolso_detalhe_auto: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # PAINEL (migration 0290, Vinicius 17/09): a aba Devoluções se divide em
+    # PAINEL (migration 0291, Vinicius 17/09): a aba Devoluções se divide em
     # "Acompanhamento" (volta pacote — uma pessoa cuida) e "Fraude" (só
     # dinheiro: "chegou vazio", reembolso sem devolução, mediação — outra
     # pessoa cuida). A regra automática é o tipo do caso (`devolucao_tipo_auto`
