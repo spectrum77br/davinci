@@ -439,6 +439,24 @@ SHOPEE_ACAO_LABELS_PT: dict[str, str] = {
 }
 
 
+# Idem pro Mercado Livre — "ML_<ACTION>" das `available_actions` do vendedor
+# no claim, mais a janela de revisão calculada (`logistica_meli._acao_pendente_ml`).
+ML_ACAO_LABELS_PT: dict[str, str] = {
+    "ML_REVISAR_DEVOLUCAO": (
+        "Revisar a devolução recebida no Mercado Livre e reportar se veio errado "
+        "(prazo calculado: entrega + 3 dias)"
+    ),
+    "ML_SEND_MESSAGE_TO_COMPLAINANT": "Responder ao comprador na reclamação do Mercado Livre",
+    "ML_SEND_MESSAGE_TO_MEDIATOR": "Responder ao mediador do Mercado Livre",
+    "ML_REFUND": "Decidir o reembolso na reclamação do Mercado Livre",
+    "ML_ALLOW_RETURN": "Aceitar a devolução no Mercado Livre",
+    "ML_ALLOW_PARTIAL_REFUND": "Responder à proposta de reembolso parcial no Mercado Livre",
+    "ML_OPEN_DISPUTE": "Abrir mediação no Mercado Livre",
+    "ML_SEND_ATTACHMENTS": "Enviar os anexos pedidos na reclamação do Mercado Livre",
+    "ML_ADD_SHIPPING_EVIDENCE": "Enviar a comprovação de envio no Mercado Livre",
+}
+
+
 def acao_plataforma_pt(fonte: str | None, acao: str | None) -> str | None:
     """Texto em PT da ação pendente da loja; None sem ação. `fonte` é a do
     ReturnInfo ("tiktok" | "shopee" | "ml") ou o rótulo da plataforma."""
@@ -450,6 +468,8 @@ def acao_plataforma_pt(fonte: str | None, acao: str | None) -> str | None:
         return TIKTOK_ACAO_LABELS_PT.get(a, f"Ação pendente: {a}")
     if f == "shopee" or f in _SHOPEE_PLATAFORMAS:
         return SHOPEE_ACAO_LABELS_PT.get(a, f"Ação pendente: {a}")
+    if f == "ml" or f in _ML_PLATAFORMAS:
+        return ML_ACAO_LABELS_PT.get(a, f"Ação pendente: {a}")
     return f"Ação pendente: {a}"
 
 

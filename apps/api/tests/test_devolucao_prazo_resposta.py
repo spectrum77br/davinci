@@ -555,3 +555,115 @@ async def test_sync_reconsulta_o_detalhe_nos_primeiros_dias_apos_a_entrega(db: A
     assert {recente, antigo, em_analise} <= visto["ja_entregues"]
     # …mas só quem chegou há pouco ou ainda está em análise volta ao detalhe.
     assert visto["reconsultar"] == {recente, em_analise}
+
+
+# ---- Mercado Livre -------------------------------------------------------------
+
+
+def _claim_ml(acoes: list[dict]) -> dict:
+    return {
+        "id": 5570660970, "type": "mediations", "stage": "dispute", "status": "closed",
+        "players": [
+            {"role": "complainant", "type": "buyer", "available_actions": []},
+            {"role": "respondent", "type": "seller", "available_actions": acoes},
+            {"role": "mediator", "type": "internal", "available_actions": [{"action": "x", "due_date": "2026-09-30T00:00:00.000-04:00"}]},
+        ],
+    }
+
+
+def test_ml_revisao_calculada_so_com_o_pacote_entregue_e_a_acao_liberada():
+    f = logistica_meli._acao_pendente_ml
+    entregue = datetime(2026, 9, 15, 10, 40, tzinfo=UTC)
+    # Caso real 292172 (16/09): claim encerrado, pacote entregue, revisão liberada.
+    liberada = _claim_ml([{"action": "return_review_fail", "mandatory": False, "due_date": None},
+                          {"action": "return_review_ok", "mandatory": False, "due_date": None}])
+    assert f(liberada, entregue) == ("ML_REVISAR_DEVOLUCAO", entregue + timedelta(days=3))
+    # Sem entrega ao vendedor ainda → sem prazo (a janela não abriu).
+    assert f(liberada, None) == (None, None)
+    # Entregue, mas o ML já fechou a janela (ação sumiu) → sem prazo.
+    assert f(_claim_ml([]), entregue) == (None, None)
+    # Ação do mediador com due_date NÃO é da loja.
+    assert f(_claim_ml([]), None) == (None, None)
+
+
+def test_ml_acao_com_due_date_do_proprio_ml_vence_a_calculada():
+    f = logistica_meli._acao_pendente_ml
+    entregue = datetime(2026, 9, 15, 10, 40, tzinfo=UTC)
+    claim = _claim_ml([
+        {"action": "send_message_to_mediator", "mandatory": True, "due_date": "2026-09-16T08:00:00.000-04:00"},
+        {"action": "return_review_fail", "mandatory": False, "due_date": None},
+    ])
+    acao, prazo = f(claim, entregue)
+    assert acao == "ML_SEND_MESSAGE_TO_MEDIATOR"
+    assert prazo == datetime(2026, 9, 16, 12, 0, tzinfo=UTC)
+    assert logistica_rules.acao_plataforma_pt("ml", acao) == "Responder ao mediador do Mercado Livre"
+    assert logistica_rules.acao_plataforma_pt("Mercado Livre", "ML_REVISAR_DEVOLUCAO").startswith(
+        "Revisar a devolução recebida no Mercado Livre"
+    )
+    # Entrada suja não levanta.
+    assert f(None, entregue) == (None, None)
+    assert f({"players": "x"}, entregue) == (None, None)
+
+
+@pytest.mark.asyncio
+async def test_ml_return_info_traz_o_prazo_e_marca_desconhecido_se_o_claim_falhar(monkeypatch):
+    """Caminho completo com client falso: pedido → claim → returns (perna do
+    vendedor entregue) → shipment → claim (ações) → prazo calculado."""
+    # Entregue ONTEM (janela de revisão aberta) — datas relativas a hoje.
+    entregue = (datetime.now(UTC) - timedelta(days=1)).replace(microsecond=0)
+    iso = entregue.strftime("%Y-%m-%dT%H:%M:%S.000+00:00")
+    ret = {
+        "id": 159477768, "status": "delivered", "status_money": "refunded", "refund_at": "delivered",
+        "date_created": "2026-09-10T10:00:00.000-04:00", "last_updated": iso,
+        "shipments": [{"id": 901, "status": "delivered", "destination": {"name": "seller_address"}}],
+    }
+    claim = _claim_ml([{"action": "return_review_fail", "mandatory": False, "due_date": None}])
+
+    class _Fake:
+        falhar_claim = False
+
+        async def get_order(self, oid):
+            return {"id": oid, "mediations": [{"id": 5570660970}]}
+
+        async def get_claim_returns(self, cid):
+            return [ret]
+
+        async def get_shipment(self, sid):
+            return {"id": sid, "status": "delivered", "tracking_number": "ML123", "tracking_method": "Mercado Envios",
+                    "status_history": {"date_delivered": iso}, "last_updated": iso}
+
+        async def get_claim(self, cid):
+            if self.falhar_claim:
+                raise RuntimeError("ml 500")
+            return claim
+
+    fake = _Fake()
+    info = await logistica_meli._return_info_for_pedido(fake, "2000012345")
+    assert info.entregue_em == entregue
+    assert info.acao_pendente == "ML_REVISAR_DEVOLUCAO"
+    assert info.prazo_acao == entregue + timedelta(days=3)
+    assert not info.prazo_desconhecido
+
+    fake.falhar_claim = True
+    info = await logistica_meli._return_info_for_pedido(fake, "2000012345")
+    assert info.prazo_desconhecido is True and info.prazo_acao is None
+    assert info.entregue_em == entregue  # o resto segue normal
+
+    # Entregue há muito tempo (janela fechada): não gasta chamada no claim.
+    fake.falhar_claim = False
+    velho = (datetime.now(UTC) - timedelta(days=20)).strftime("%Y-%m-%dT%H:%M:%S.000+00:00")
+    ret["last_updated"] = velho
+
+    async def _sh_velho(sid):
+        return {"id": sid, "status": "delivered", "status_history": {"date_delivered": velho}, "last_updated": velho}
+
+    fake.get_shipment = _sh_velho
+    chamadas = {"claim": 0}
+
+    async def _claim_contando(cid):
+        chamadas["claim"] += 1
+        return claim
+
+    fake.get_claim = _claim_contando
+    info = await logistica_meli._return_info_for_pedido(fake, "2000012345")
+    assert chamadas["claim"] == 0 and info.prazo_acao is None and not info.prazo_desconhecido

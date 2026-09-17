@@ -1076,6 +1076,57 @@ def _entregue_ao_vendedor(ret: dict, detalhe: dict | None = None) -> datetime | 
     )
 
 
+# Janela de REVISÃO da devolução no ML: depois que o pacote chega ao vendedor,
+# ele tem estes dias pra abrir e reportar produto errado/danificado
+# (`return_review_fail`). A API não manda a data; a doc de returns diz que o
+# reembolso sai "3 dias depois de o vendedor receber" (`refund_at:
+# delivered`) — é a mesma janela. Vinicius 16/09: "acho que é 2 ou 3 dias
+# após a devolução chegar". Calculado = entrega + N (marcado na tela).
+ML_DIAS_REVISAO = 3
+_ML_ACAO_REVISAO = "return_review_fail"
+
+
+def _jogadores_vendedor(claim: dict | None) -> list[dict]:
+    """Ações liberadas pro VENDEDOR no claim (player `type=seller`; nas
+    mediações vem como `role=respondent`) — lista crua de `available_actions`."""
+    out: list[dict] = []
+    for p in (claim or {}).get("players") or []:
+        if not isinstance(p, dict):
+            continue
+        if (p.get("type") or "").lower() == "seller" or (p.get("role") or "").lower() == "respondent":
+            out.extend(a for a in (p.get("available_actions") or []) if isinstance(a, dict))
+    return out
+
+
+def _acao_pendente_ml(
+    claim: dict | None, entregue_em: datetime | None
+) -> tuple[str | None, datetime | None]:
+    """O que o ML espera da LOJA e até quando — a ação de prazo mais curto:
+
+      - qualquer `available_actions[]` do vendedor com `due_date` (o ML dá
+        data quando exige resposta: mensagem ao comprador/mediador, decidir
+        reembolso...) → "ML_<ACTION>";
+      - `return_review_fail` liberado + pacote já ENTREGUE ao vendedor →
+        "ML_REVISAR_DEVOLUCAO" com prazo CALCULADO = entrega + ML_DIAS_REVISAO
+        (medido 16/09: só aparece depois da entrega; some quando a janela
+        fecha).
+    Nunca levanta; sem nada → (None, None)."""
+    cands: list[tuple[str, datetime]] = []
+    acoes = _jogadores_vendedor(claim)
+    for a in acoes:
+        nome = str(a.get("action") or "").strip().lower()
+        due = iso_to_dt(a.get("due_date"))
+        if nome and due is not None:
+            cands.append((f"ML_{nome.upper()}", due))
+    if entregue_em is not None and any(
+        str(a.get("action") or "").strip().lower() == _ML_ACAO_REVISAO for a in acoes
+    ):
+        cands.append(("ML_REVISAR_DEVOLUCAO", entregue_em + timedelta(days=ML_DIAS_REVISAO)))
+    if not cands:
+        return (None, None)
+    return min(cands, key=lambda x: x[1])
+
+
 def _return_candidate(claim_id: str, ret: dict) -> _ReturnCand:
     sh = _return_shipment(ret)
     sid = sh.get("shipment_id") or sh.get("id")
@@ -1173,18 +1224,27 @@ async def _return_info_for_pedido(client: MercadoLivreClient, pedido: str) -> Re
             )
             sh = {}
 
+    claim: dict | None = None
+    claim_falhou = False
+
+    async def _claim() -> dict:
+        nonlocal claim, claim_falhou
+        if claim is None:
+            try:
+                claim = await client.get_claim(esc.claim_id) or {}
+            except Exception as e:  # noqa: BLE001
+                logger.info(
+                    "logistica_meli_claim_failed", pedido=pedido, claim_id=esc.claim_id,
+                    err=str(e)[:120],
+                )
+                claim, claim_falhou = {}, True
+        return claim
+
     created_at = esc.created_at
     if created_at is None:
         # Return sem data → quando o claim abriu (uma chamada a mais, só aqui).
-        try:
-            claim = await client.get_claim(esc.claim_id) or {}
-        except Exception as e:  # noqa: BLE001
-            logger.info(
-                "logistica_meli_claim_failed", pedido=pedido, claim_id=esc.claim_id,
-                err=str(e)[:120],
-            )
-            claim = {}
-        created_at = iso_to_dt(claim.get("date_created")) or iso_to_dt(sh.get("date_created"))
+        c = await _claim()
+        created_at = iso_to_dt(c.get("date_created")) or iso_to_dt(sh.get("date_created"))
 
     updated_at = max(
         (d for d in (iso_to_dt(sh.get("last_updated")), esc.updated_at) if d is not None),
@@ -1193,6 +1253,22 @@ async def _return_info_for_pedido(client: MercadoLivreClient, pedido: str) -> Re
     status = str(sh.get("status") or "").strip() or esc.shipment_status or None
     tracking = str(sh.get("tracking_number") or "").strip() or None
     carrier = str(sh.get("tracking_method") or "").strip() or None
+    entregue_em = _entregue_ao_vendedor(esc.raw, sh)
+    # Prazo de resposta da loja (Vinicius 16/09): as ações que o ML liberou
+    # pro vendedor moram no claim — uma chamada a mais SÓ enquanto a janela de
+    # revisão pode estar aberta (pacote chegou há poucos dias). Em trânsito
+    # não gasta chamada: nessa fase o ML não dá prazo à loja (medido 16/09,
+    # 13 pedidos, nenhum due_date).
+    acao = prazo = None
+    prazo_desconhecido = False
+    if entregue_em is not None and entregue_em >= datetime.now(UTC) - timedelta(
+        days=ML_DIAS_REVISAO + 2
+    ):
+        c = await _claim()
+        if claim_falhou:
+            prazo_desconhecido = True
+        else:
+            acao, prazo = _acao_pendente_ml(c, entregue_em)
     return ReturnInfo(
         fonte="ml",
         status=status,
@@ -1201,7 +1277,10 @@ async def _return_info_for_pedido(client: MercadoLivreClient, pedido: str) -> Re
         created_at=created_at,
         updated_at=updated_at,
         return_id=esc.claim_id,
-        entregue_em=_entregue_ao_vendedor(esc.raw, sh),
+        entregue_em=entregue_em,
+        acao_pendente=acao,
+        prazo_acao=prazo,
+        prazo_desconhecido=prazo_desconhecido,
     )
 
 
