@@ -367,3 +367,49 @@ async def test_lease_so_entrega_tiktok_shopee_pra_quem_pede(db, client, monkeypa
     # tudo já está `enviando`: nova rodada não devolve nada
     r = await client.post("/api/chamados/agent/lease", headers=hdr, json={"tipo": "abrir", "plataforma": "ml"})
     assert r.json()["tarefas"] == []
+
+
+# ---- espelho do chamado de outra aba na coluna Chamado da Logística ----------
+
+
+async def test_espelhar_chamados_traz_o_protocolo_da_aba_chamados(db):
+    """Caso real 17/09 (TikTok 290968): chamado aberto pela Devoluções (origem
+    `devolucao`, com protocolo, não resolvido) e a Logística mostrando "—",
+    porque a regra do estado não pede "Abrir chamado" e só o executor
+    espelhava. O recarregar agora copia o protocolo do chamado ABERTO mais
+    recente do pedido; resolvido e sem protocolo não contam; linha que já tem
+    chamado não é sobrescrita."""
+    from app.services import logistica_ingest
+
+    sem = _linha("TikTok", pedido_bling="300101", pedido_marketplace="TT101")
+    ja_tem = _linha("TikTok", pedido_bling="300102", pedido_marketplace="TT102", chamado="manual-1")
+    so_resolvido = _linha("TikTok", pedido_bling="300103", pedido_marketplace="TT103")
+    sem_protocolo = _linha("TikTok", pedido_bling="300104", pedido_marketplace="TT104")
+    db.add_all([sem, ja_tem, so_resolvido, sem_protocolo])
+    db.add_all([
+        # dois abertos com protocolo: vale o mais recente
+        Chamado(pedido_bling="300101", plataforma="TikTok", conta="mini", origem="devolucao",
+                canal="api", chamado="4042140600202003570",
+                created_at=datetime(2026, 9, 10, 17, 11, tzinfo=UTC)),
+        Chamado(pedido_bling="300101", plataforma="TikTok", conta="mini", origem="vendas",
+                canal="api", chamado="4042999999999999999",
+                created_at=datetime(2026, 9, 16, 9, 0, tzinfo=UTC)),
+        Chamado(pedido_bling="300102", plataforma="TikTok", conta="mini", origem="devolucao",
+                canal="api", chamado="4042000000000000001"),
+        Chamado(pedido_bling="300103", plataforma="TikTok", conta="mini", origem="devolucao",
+                canal="api", chamado="4042000000000000002", resolvido=True),
+        Chamado(pedido_bling="300104", plataforma="TikTok", conta="mini", origem="logistica",
+                canal="robo"),
+    ])
+    await db.commit()
+
+    ids = await logistica_ingest.espelhar_chamados(db)
+    assert ids == [sem.id]
+    for row in (sem, ja_tem, so_resolvido, sem_protocolo):
+        await db.refresh(row)
+    assert sem.chamado == "4042999999999999999" and sem.chamado_auto_at is not None
+    assert ja_tem.chamado == "manual-1"
+    assert so_resolvido.chamado is None
+    assert sem_protocolo.chamado is None
+    # Segunda rodada: nada novo a espelhar.
+    assert await logistica_ingest.espelhar_chamados(db) == []

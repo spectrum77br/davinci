@@ -125,6 +125,49 @@ async def refresh_status_bling(session: AsyncSession) -> list[UUID]:
     return mudaram
 
 
+# Chamado aberto em OUTRA aba (Devoluções, Vendas, robô) aparece na coluna
+# Chamado da Logística. Até 17/09 só o executor "Abrir chamado" da aba Status
+# espelhava o protocolo — pedido cuja regra não abre chamado ficava com "—"
+# mesmo com chamado vivo na aba Chamados (Vinicius, TikTok 290968: aberto pela
+# devolução em 10/09, motivo Golpe). Um UPDATE barato, sem API: por pedido
+# Bling, o chamado NÃO resolvido mais recente que já tem protocolo. Resolvido
+# não conta — mesma leitura do executor (`_chamado_de_outra_origem`), senão a
+# regra "Abrir chamado" acharia que já há chamado e não abriria outro.
+# Schema pelo settings (e não fixo como no refresh acima) pra rodar no banco
+# de teste também.
+_ESPELHAR_CHAMADOS_SQL = """
+    UPDATE "{schema}".logistica l
+       SET chamado = c.chamado,
+           chamado_auto_at = now(),
+           chamado_auto_erro = NULL,
+           updated_at = now()
+      FROM (
+            SELECT DISTINCT ON (pedido_bling) pedido_bling, chamado
+              FROM "{schema}".chamados
+             WHERE resolvido IS FALSE
+               AND coalesce(trim(chamado), '') <> ''
+               AND coalesce(trim(pedido_bling), '') <> ''
+             ORDER BY pedido_bling, created_at DESC
+           ) c
+     WHERE c.pedido_bling = l.pedido_bling
+       AND coalesce(trim(l.chamado), '') = ''
+    RETURNING l.id
+    """
+
+
+async def espelhar_chamados(session: AsyncSession) -> list[UUID]:
+    """Copia pra `logistica.chamado` o protocolo do chamado aberto do mesmo
+    pedido na aba Chamados, quando a linha ainda não tem. Retorna os ids das
+    linhas que ganharam chamado (o recarregar re-avalia essas: com chamado, a
+    regra "Abrir chamado" já está cumprida)."""
+    sql = text(_ESPELHAR_CHAMADOS_SQL.format(schema=get_settings().database_schema))
+    res = await session.execute(sql)
+    ids = list(res.scalars().all())
+    await session.commit()
+    logger.info("logistica_espelhar_chamados", changed=len(ids))
+    return ids
+
+
 # Pedido do usuário (25/08): situações que encerram o acompanhamento somem da
 # aba sozinhas. Cancelado/Resolvido/Perdimento saem na hora; Entregue segura 90
 # dias (janela de reclamação do comprador no marketplace) e depois sai. Sem
@@ -547,19 +590,27 @@ async def recarregar_ml(session: AsyncSession) -> dict[str, int]:
     de marketplace, leve, em 1-3 min.
     """
     mudaram = await refresh_status_bling(session)
+    # Chamado aberto em outra aba passa a constar na linha (coluna Chamado).
+    com_chamado = await espelhar_chamados(session)
     # Quem acabou de virar Cancelado/Resolvido/Perdimento (ou Entregue velho)
     # sai daqui mesmo — o _ids_pendentes só considera linhas existentes, então
     # os ids apagados em `mudaram` não voltam.
     removed = await cleanup_finalizados(session)
-    alvo = await _ids_pendentes(session, extras=list(mudaram))
+    alvo = await _ids_pendentes(session, extras=list(mudaram) + com_chamado)
     logger.info(
         "logistica_recarregar_inicio",
         status_refresh=len(mudaram),
+        chamados_espelhados=len(com_chamado),
         cleanup=removed,
         **{f"alvo_{k}": len(v) for k, v in alvo.items()},
     )
     resumo = await _enriquecer_e_aplicar(session, alvo, origem="recarregar")
-    return {"status_refresh": len(mudaram), "cleanup": removed, **resumo}
+    return {
+        "status_refresh": len(mudaram),
+        "chamados_espelhados": len(com_chamado),
+        "cleanup": removed,
+        **resumo,
+    }
 
 
 async def sweeps_pos_venda(
