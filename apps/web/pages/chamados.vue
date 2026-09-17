@@ -242,6 +242,7 @@ const ERROS: Record<string, string> = {
   devolucao_prazo_esgotado: 'ficou 45 dias pendente — abrir na mão',
   devolucao_nao_encontrada: 'lançamento da devolução não encontrado',
   tiktok_aguardando_pacote: 'TikTok ainda não liberou a recusa do pacote (tenta a cada hora)',
+  tiktok_recusa_bloqueada: 'TikTok ainda não aceita recusar o pacote (em trânsito) — o robô tenta a cada hora; perto do prazo, recusar ou pedir prorrogação na Central do Vendedor',
   tiktok_arbitragem: 'em arbitragem na TikTok',
   tiktok_quick_refund: 'TikTok já reembolsou (quick refund) — só apelação no Seller Center',
   tiktok_ja_recusada: 'já recusada na TikTok (recusa feita no Seller Center — veja o histórico)',

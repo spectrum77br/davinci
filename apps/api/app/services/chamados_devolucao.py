@@ -1110,14 +1110,23 @@ async def _disparar_tiktok(
         if ref.get("height"):
             img["height"] = int(ref["height"])
         images.append(img)
-    await client.reject_return(
-        rid,
-        decision="REJECT_RECEIVED_PACKAGE",
-        reject_reason=reason,
-        comment=texto,
-        images=images or None,
-        idempotency_key=str(uuid5(_NS_TIKTOK, f"{ch.id}:{rid}")),
-    )
+    try:
+        await client.reject_return(
+            rid,
+            decision="REJECT_RECEIVED_PACKAGE",
+            reject_reason=reason,
+            comment=texto,
+            images=images or None,
+            idempotency_key=str(uuid5(_NS_TIKTOK, f"{ch.id}:{rid}")),
+        )
+    except RuntimeError as e:
+        # 17/09 (292357, prazo 18/09 08:47, R$ 1.570,75): pacote de volta ainda em trânsito
+        # nos Correios e a TikTok respondeu 25011035 "could not reject parcel now" — o
+        # chamado ficava `falhou` e ninguém tentava de novo. Fica pendente: o cron :25 tenta
+        # a cada hora até a TikTok liberar (ou o caso sair de BUYER_SHIPPED_ITEM).
+        if "25011035" in str(e):
+            raise _PendenteError("tiktok_recusa_bloqueada") from e
+        raise
     return rid, REASON_NOME.get(reason, reason)
 
 

@@ -124,6 +124,13 @@ _SH_PERDEMOS_TXT = (
     "Shopee ENCERROU a disputa sem compensação — reembolso integral ao comprador (perdemos)."
 )
 _SH_SEM_REEMBOLSO_TXT = "Devolução encerrada na Shopee SEM reembolso ao comprador (ganhamos)."
+# 17/09 (Eduardo, 292317 "a Shopee não nos respondeu?"): a Shopee reembolsou o comprador 1 h
+# depois da disputa, sem compensar a loja, e o histórico ficou mudo 24 h (só a coluna Status
+# mudava). Diz na hora; a carência de 24 h continua valendo só pra FECHAR como perdido.
+_SH_REEMBOLSO_SEM_COMP_TXT = (
+    "Shopee REEMBOLSOU o comprador sem compensação à loja — a disputa foi recusada. "
+    "Se a compensação não aparecer em 24 h, o chamado fecha como perdido."
+)
 
 
 def _fmt_dt(v) -> str:
@@ -491,10 +498,11 @@ async def _desfecho_shopee(
     chamados_svc.set_status_plataforma(
         ch, chamados_svc.STATUS_REEMBOLSO_PAGO, reembolsado_em or quando
     )
+    avisou = await registrar_recebida(session, ch, cd.PLAT_SHOPEE, _SH_REEMBOLSO_SEM_COMP_TXT)
     desde = ch.status_plataforma_at or datetime.now(UTC)
     if status != "CLOSED" and datetime.now(UTC) - desde < _SH_PERDEMOS_CARENCIA:
-        return 0
-    novos = await registrar_recebida(session, ch, cd.PLAT_SHOPEE, _SH_PERDEMOS_TXT)
+        return int(avisou)
+    novos = int(avisou) + await registrar_recebida(session, ch, cd.PLAT_SHOPEE, _SH_PERDEMOS_TXT)
     chamados_svc.set_status_plataforma(ch, chamados_svc.STATUS_PERDEMOS, desde)
     _encerrar(session, ch, "shopee:reembolso_sem_compensacao")
     return novos

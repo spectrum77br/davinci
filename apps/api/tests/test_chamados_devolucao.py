@@ -534,6 +534,42 @@ async def test_tiktok_recusa_pacote_com_foto(client, make_user, auth_as, db, ml,
     assert ml.reviews == []  # nada foi pro ML
 
 
+async def test_tiktok_recusa_bloqueada_em_transito_fica_pendente(client, make_user, auth_as, db, ml, monkeypatch):
+    """17/09 (292357): pacote de volta ainda em trânsito → TikTok 25011035 "could not reject
+    parcel now". O chamado fica PENDENTE (o cron tenta a cada hora), não `falhou`."""
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+    fake = _FakeTikTok()
+    bloqueia = {"on": True}
+    original = fake.reject_return
+
+    async def _reject(return_id, **kw):
+        if bloqueia["on"]:
+            raise RuntimeError("tiktok_reject_return code=25011035 msg=could not reject parcel now")
+        return await original(return_id, **kw)
+
+    fake.reject_return = _reject
+
+    async def _c(session, *a):
+        return fake
+
+    monkeypatch.setattr(svc, "_tiktok_client_para", _c)
+    await _seed_pedido(db, user, numero="292357", numeroloja="585720267786520360",
+                       platform="tiktok", conta="jlas", loja="77")
+    r = await client.post(
+        "/api/devolutions",
+        json={"conta": "jlas", "pedido_bling": "292357", "pedido_marketplace": "585720267786520360",
+              "condicao_produto": "Novo", "motivo_devolucao": "Não recebido"},
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["chamado_ml_status"] == "pendente", r.json()
+    assert r.json()["chamado_ml_erro"] == "tiktok_recusa_bloqueada"
+    bloqueia["on"] = False
+    pend = await svc.processar_pendentes(db)
+    assert pend["abertos"] == 1, pend
+    assert len(fake.rejects) == 1 and fake.rejects[0]["reason"] == "reverse_reject_return_parcel_reason_4"
+
+
 async def test_tiktok_aguarda_pacote_e_quick_refund(client, make_user, auth_as, db, ml, monkeypatch):
     user = await make_user(permissions=_perms())
     auth_as(user)
@@ -1072,6 +1108,8 @@ async def test_sync_shopee_br_perde_pelo_escrow_com_carencia(client, make_user, 
     assert s["encerrados"] == 0
     await db.refresh(ch)
     assert ch.status_plataforma == "reembolso_pago" and ch.resolvido is False
+    # 17/09 (292317): o histórico diz na hora que a Shopee reembolsou sem compensar
+    assert sum(1 for t in await _recebidas(db, ch.id) if "REEMBOLSOU o comprador sem compensação" in t) == 1
     desde = ch.status_plataforma_at
     assert desde is not None
     # passou a carência sem compensação → perdemos, encerra, "desde" é o reembolso
