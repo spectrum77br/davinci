@@ -281,3 +281,45 @@ async def test_devolucao_cancelada_nao_diz_que_valor_ficou_com_vendedor_se_outro
     assert "só reembolso B" in txt and "PAGOU o comprador" in txt and "744" in txt and "FALTA DE RESPOSTA" in txt
     # sem outro caso: texto antigo
     assert "valor ficou com o vendedor" in chamados_devolucao._texto_tiktok_encerrada(caso, None, None)
+
+
+def test_texto_contestacao_cabe_no_limite_da_tiktok_e_preserva_o_video():
+    """18/09, 296936: 560 caracteres voltaram 98001004 "seller words is over limit". O texto
+    tem que caber em COMENTARIO_MAX_BYTES mantendo entrega + link do vídeo inteiros."""
+    caso = {"return_id": RID, "refund_amount": {"refund_total": "803.2"}}
+    entrega = {"quando": 1789588803, "transp": "J&T Express Brazil", "rastreio": "999882054197026"}
+    video = "https://drive.google.com/file/d/1D2sVeoy7bVzpkzqd0OJve0Fgv4xbxzlM/view?usp=drivesdk"
+    nota = "Recebi uma caixa de sabonete ao invés do celular!\nTenho fotos e video abrindo o pacote !"
+    txt = svc.texto_contestacao(
+        caso, oid=OID, produto="Hotwav A17 Pro Max 12.128 - Laranja", entrega=entrega, nota=nota,
+        pedido_em=1789620000, comprador_mandou_prova=True, fotos=0, video=video,
+        observacao="Peso conferido na expedição: 0,412 kg, igual ao da etiqueta. " * 6,
+    )
+    assert len(txt.encode("utf-8")) <= svc.COMENTARIO_MAX_BYTES, len(txt.encode("utf-8"))
+    assert txt.startswith("Contestamos o pedido de reembolso.")
+    assert "entregue em 16/09 17:00 pela J&T Express Brazil (rastreio 999882054197026)" in txt
+    assert video in txt and "Peso conferido" in txt, txt
+    # o que não coube saiu do fim (a alegação do comprador / o fechamento), não do meio
+    assert "caixa de sabonete" not in txt or txt.endswith(("negado.", "…"))
+
+    # sem nada opcional o texto fica inteiro, com o fechamento
+    curto = svc.texto_contestacao(caso, oid=OID, produto=None, entrega=entrega, nota="",
+                                  pedido_em=None, comprador_mandou_prova=False, fotos=2)
+    assert curto.endswith("Pedimos que o reembolso seja negado.") and "2 foto(s)" in curto
+    # o caso real do 296936 (nota do comprador + link do Drive) cabe inteiro
+    real = svc.texto_contestacao(
+        caso, oid=OID, produto="Hotwav A17 Pro Max 12.128 - Laranja", entrega=entrega, nota=nota,
+        pedido_em=1789620000, comprador_mandou_prova=True, fotos=0, video=video,
+    )
+    assert len(real.encode("utf-8")) <= svc.COMENTARIO_MAX_BYTES, real
+    assert video in real and "caixa de sabonete" in real and real.endswith("negado."), real
+
+
+def test_caber_corta_em_bytes_sem_partir_caractere():
+    assert svc.caber(["a" * 10], limite=10) == "a" * 10
+    assert svc.caber(["ação " * 200], limite=50).encode("utf-8").__len__() <= 50
+    # parte que não cabe e sobra pouca (< 40 bytes): fica fora inteira
+    assert svc.caber(["x" * 480, "segunda parte longa demais"], limite=500) == "x" * 480
+    # cabe cortada num espaço quando sobra espaço razoável
+    t = svc.caber(["x" * 400, "palavra " * 30], limite=500)
+    assert t.startswith("x" * 400 + " palavra") and len(t.encode()) <= 500 and t.endswith("…")

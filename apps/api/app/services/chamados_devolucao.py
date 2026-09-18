@@ -1159,7 +1159,7 @@ async def _recusar_reembolso(
         rid,
         decision="REJECT_REFUND",
         reject_reason=motivo,
-        comment=texto[:2000],
+        comment=texto,  # texto_contestacao já cabe em COMENTARIO_MAX_BYTES
         images=images or None,
         idempotency_key=str(uuid5(_NS_TIKTOK, f"{ch.id}:{rid}")),
     )
@@ -1254,7 +1254,8 @@ async def _disparar_tiktok(
             rid,
             decision="REJECT_RECEIVED_PACKAGE",
             reject_reason=reason,
-            comment=texto,
+            # Limite do comment da TikTok (98001004 "seller words over limit", 18/09).
+            comment=tiktok_reembolso.caber([texto]),
             images=images or None,
             idempotency_key=str(uuid5(_NS_TIKTOK, f"{ch.id}:{rid}")),
         )

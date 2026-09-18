@@ -70,6 +70,10 @@ AUTOR_ROBO = "robô"
 # ("O motivo da devolução do comprador não é válido" = _1) + motivo de cancelamento inválido.
 MOTIVO_PREFERIDO = "reverse_reject_request_reason_1"
 MAX_FOTOS = 6
+# Limite do `comment` do reject na TikTok. Medido 18/09 no 296936: 560 caracteres
+# voltaram "98001004 Invalid parameters — the length of seller words is over limit".
+# Contado em BYTES UTF-8 pra valer nas duas leituras possíveis (caractere ou byte).
+COMENTARIO_MAX_BYTES = 500
 _NS = uuid5(NAMESPACE_URL, "davinci:tiktok_reembolso")
 _BRT = timedelta(hours=-3)
 
@@ -170,45 +174,86 @@ async def _entrega_dados(client: TikTokClient, oid: str) -> dict:
     }
 
 
+def _bytes(txt: str) -> int:
+    return len(txt.encode("utf-8"))
+
+
+def _cortar(txt: str, limite: int) -> str:
+    """Corta em BYTES UTF-8 sem partir caractere, de preferência num espaço."""
+    if _bytes(txt) <= limite:
+        return txt
+    raw = txt.encode("utf-8")[:limite]
+    txt = raw.decode("utf-8", errors="ignore")
+    if " " in txt:
+        txt = txt[: txt.rfind(" ")]
+    return txt.rstrip(" ,;:")
+
+
+def caber(partes: list[str], limite: int = COMENTARIO_MAX_BYTES) -> str:
+    """Junta as partes (ordem = prioridade) dentro do limite: o que não cabe cai a partir
+    do FIM — a última parte que ainda entra é cortada num espaço; as seguintes ficam fora.
+    Garante que as partes iniciais (entrega, link do vídeo) sobrevivam inteiras."""
+    partes = [p.strip() for p in partes if (p or "").strip()]
+    saida: list[str] = []
+    usados = 0
+    for parte in partes:
+        custo = _bytes(parte) + (1 if saida else 0)
+        if usados + custo <= limite:
+            saida.append(parte)
+            usados += custo
+            continue
+        sobra = limite - usados - (1 if saida else 0)
+        # Só corta se sobrar espaço pra algo que ainda faça sentido (uma frase curta);
+        # reserva os 3 bytes do "…".
+        if sobra >= 40:
+            cortada = _cortar(parte, sobra - 3)
+            if cortada and not cortada.endswith("."):
+                cortada += "…"
+            saida.append(cortada)
+        break
+    return " ".join(saida)
+
+
 def texto_contestacao(
     caso: dict, *, oid: str, produto: str | None, entrega: dict, nota: str,
     pedido_em: object, comprador_mandou_prova: bool, fotos: int,
     video: str | None = None, observacao: str | None = None,
 ) -> str:
-    """Texto da recusa — só FATOS que o DaVinci/TikTok confirmam. `video` = link do vídeo
-    da expedição (a API não aceita vídeo: vai como link no texto); `observacao` = o que o
-    operador escreveu no lançamento (opcional)."""
+    """Texto da recusa — só FATOS que o DaVinci/TikTok confirmam, dentro do limite do
+    `comment` da TikTok (COMENTARIO_MAX_BYTES). Ordem = prioridade: entrega, LINK DO VÍDEO
+    (a API não aceita vídeo: vai como link), alegação do comprador, fotos, observação do
+    lançamento, pedido final. O que não couber sai do fim."""
     item = f"{oid} ({produto})" if produto else oid
     partes = ["Contestamos o pedido de reembolso."]
     if entrega.get("quando"):
         partes.append(
-            f"O pedido {item} foi entregue em {_fmt(entrega.get('quando'))}"
+            f"Pedido {item} entregue em {_fmt(entrega.get('quando'))}"
             + (f" pela {entrega['transp']}" if entrega.get("transp") else "")
             + (f" (rastreio {entrega['rastreio']})" if entrega.get("rastreio") else "")
-            + ", sem ocorrência de avaria ou violação registrada na entrega."
+            + ", sem avaria/violação na entrega."
         )
     else:
         partes.append(f"Pedido {item}.")
+    if video:
+        partes.append(f"Vídeo da expedição: {video}")
+    # A observação do lançamento é evidência NOSSA (ex.: peso conferido) — vem antes da
+    # alegação do comprador, que a TikTok já conhece.
+    if (observacao or "").strip():
+        partes.append(observacao.strip())
+    if fotos:
+        partes.append(f"Seguem {fotos} foto(s) da expedição/embalagem.")
     try:
         dias = (int(pedido_em) - int(entrega.get("quando"))) // 86400  # type: ignore[arg-type]
     except (TypeError, ValueError):
         dias = -1
-    alegacao = "A alegação do comprador" + (f' ("{nota[:200]}")' if nota else "")
-    quando = f" foi feita em {_fmt(pedido_em)}" if _fmt(pedido_em) else " foi feita"
+    nota = " ".join((nota or "").split())  # a nota vem com quebras de linha
+    alegacao = "Alegação do comprador" + (f' ("{nota[:80]}")' if nota else "")
+    quando = f" feita em {_fmt(pedido_em)}" if _fmt(pedido_em) else ""
     depois = f", {dias} dia(s) após a entrega" if dias >= 1 else ""
-    prova = "" if comprador_mandou_prova else ", sem nenhuma foto ou vídeo que a comprove"
+    prova = "" if comprador_mandou_prova else ", sem foto ou vídeo que a comprove"
     partes.append(f"{alegacao}{quando}{depois}{prova}.")
-    if video:
-        partes.append(f"Vídeo da expedição/embalagem deste pedido (conferência do conteúdo): {video}")
-    if fotos:
-        partes.append(f"Seguem {fotos} foto(s) da expedição/embalagem.")
-    if (observacao or "").strip():
-        partes.append(observacao.strip())
-    partes.append(
-        "Solicitamos que o reembolso seja negado ou que a transportadora apure o peso registrado"
-        " na coleta e na entrega."
-    )
-    return " ".join(partes)
+    partes.append("Pedimos que o reembolso seja negado.")
+    return caber(partes)
 
 
 def _pedido_do_comprador(eventos: list[dict]) -> tuple[object, bool]:
@@ -561,7 +606,7 @@ async def contestar(
             rid,
             decision="REJECT_REFUND",
             reject_reason=motivo,
-            comment=(msg.texto or "")[:2000],
+            comment=caber([msg.texto or ""]),
             images=images or None,
             idempotency_key=str(uuid5(_NS, f"{ch.id}:{msg.id}")),
         )
