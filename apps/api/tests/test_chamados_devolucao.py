@@ -2194,3 +2194,113 @@ async def test_sync_tiktok_pedido_refeito_pelo_comprador_nao_e_ganhamos(client, 
     assert any("refez o pedido" in t and "4042163882929260440" in t and "aguardando a nossa resposta" in t for t in txts), txts
     assert not any("valor fica com o vendedor" in t for t in txts)
     assert (await _status_aba(db, ch))[0] == "respondeu"
+
+
+# ---------------------------------------------------------------- Shopee: só reembolso já aprovado → robô (18/09)
+
+
+class _FakeShopeeReembolsoAprovado(_FakeShopee):
+    """Só reembolso que a Shopee já aprovou e pagou: lista de motivos VAZIA e sem
+    prazo — medido 18/09 nos 5 chamados "esperando liberar" (292270, 293406,
+    292535, 293135, 293749)."""
+
+    def __init__(self, *, reason: str = "NOT_RECEIPT", text_reason: str = ""):
+        super().__init__(status="ACCEPTED")
+        self.reason = reason
+        self.text_reason = text_reason
+
+    async def get_return_detail(self, return_sn):
+        return {"return_sn": return_sn, "status": "ACCEPTED", "return_solution": 1, "needs_logistics": False,
+                "reason": self.reason, "text_reason": self.text_reason, "refund_amount": "1013.32",
+                "update_time": 1789567860, "seller_compensation": {"seller_compensation_status": ""}}
+
+    async def get_return_dispute_reason(self, return_sn):
+        return []
+
+
+async def _lancar_shopee_reembolso(client, db, make_user, auth_as, monkeypatch, fake, *, numero, sn, logistica: dict | None):
+    from app.models import DevolucaoRastreio, Logistica
+
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+
+    async def _c(session, *a):
+        return fake
+
+    monkeypatch.setattr(svc, "_shopee_client_para", _c)
+    await _seed_pedido(db, user, numero=numero, numeroloja=sn, platform="shopee", conta="minas", loja="91")
+    db.add(DevolucaoRastreio(pedido_bling=numero, devolucao_id_auto=f"2609{numero}RF", fonte_auto="shopee",
+                             devolucao_tipo_auto="REFUND", devolucao_status_auto="ACCEPTED"))
+    if logistica is not None:
+        db.add(Logistica(pedido_bling=numero, pedido_marketplace=sn, plataforma="shopee", conta="minas",
+                         meli_status={"order_status": "COMPLETED", "logistics_status": logistica["situacao"]},
+                         localizacao=logistica.get("localizacao"), entregue_em=logistica.get("entregue_em")))
+    await db.commit()
+    r = await client.post(
+        "/api/devolutions",
+        json={"conta": "minas", "pedido_bling": numero, "pedido_marketplace": sn,
+              "condicao_produto": "Não devolvido", "motivo_devolucao": "Não recebido",
+              "link_envio": "https://drive.x/video-" + numero, "observacao": "Peso conferido na expedição."},
+    )
+    assert r.status_code == 201, r.text
+    return r, user
+
+
+async def test_shopee_so_reembolso_ja_aprovado_vai_pro_robo_pedir_compensacao(client, make_user, auth_as, db, ml, monkeypatch):
+    """292270 (Vinicius 18/09): SPX não entregou, a Shopee reembolsou o cliente em 5 min
+    e descontou da loja. Ficar "esperando a Shopee liberar" por 45 dias era mentira:
+    a abertura vai pro robô abrir chamado no Seller Center pedindo a compensação."""
+    from app.config import get_settings
+
+    fake = _FakeShopeeReembolsoAprovado(reason="NOT_RECEIPT", text_reason="Estou aguardando desde o dia 31.08")
+    r, _user = await _lancar_shopee_reembolso(
+        client, db, make_user, auth_as, monkeypatch, fake, numero="292270", sn="2608258J2C6V3C",
+        logistica={"situacao": "LOGISTICS_PICKUP_DONE",
+                   "localizacao": "Em breve o seu pedido seguirá para o entregador responsável pela sua região."},
+    )
+    assert r.json()["chamado_ml_status"] == "pendente" and r.json()["chamado_ml_erro"] is None, r.json()
+    assert fake.disputes == []
+    ch = await _chamado_de(db, "292270")
+    ab = await _abertura(db, ch.id)
+    assert ch.canal == "robo" and ab.canal == "robo" and ab.status == "pendente" and ch.chamado is None
+    txt = ab.texto
+    assert txt.startswith("O comprador pediu reembolso SEM devolução do produto alegando que não recebeu o pedido"), txt
+    assert '"Estou aguardando desde o dia 31.08"' in txt and "R$ 1013.32" in txt
+    assert "NÃO foi entregue ao comprador (última situação: Em breve o seu pedido" in txt, txt
+    assert "Pedido 2608258J2C6V3C" in txt and "Peso conferido" in txt and "https://drive.x/video-292270" in txt
+    assert "Solicitamos a compensação pelo extravio" in txt and "Solicitamos a análise do caso" not in txt
+    assert "O pacote da devolução ainda não chegou" not in txt
+    hist = await _sistema_txts(db, ch.id)
+    assert any("Shopee já aprovou o só reembolso" in t and "robô" in t for t in hist), hist
+    # a coluna Status: na fila do robô (não "esperando liberar")
+    assert (await _status_aba(db, ch))[0] == "fila"
+    # o robô da Shopee recebe como `abrir`
+    token = "tok-shopee-1809"
+    monkeypatch.setattr(get_settings(), "nf_agent_token", token)
+    lease = await client.post("/api/chamados/agent/lease", headers={"X-Agent-Token": token},
+                              json={"limite": 10, "plataforma": "shopee"})
+    assert lease.status_code == 200, lease.text
+    tarefas = [t for t in lease.json()["tarefas"] if t["mensagem_id"] == str(ab.id)]
+    assert len(tarefas) == 1 and tarefas[0]["tipo"] == "abrir", lease.json()
+    # o cron das pendências não mexe mais (é tarefa do robô)
+    s = await svc.processar_pendentes(db)
+    assert s["verificados"] == 0
+
+
+async def test_shopee_so_reembolso_entregue_vai_pro_robo_contestar(client, make_user, auth_as, db, ml, monkeypatch):
+    """292535: entregue pela SPX, cliente disse "caixa vazia", Shopee aprovou sozinha
+    depois dos 2 dias. É fraude do cliente: chamado contesta com vídeo e fotos."""
+    fake = _FakeShopeeReembolsoAprovado(reason="SUSPICIOUS_PARCEL", text_reason="recebi o pacote vazio")
+    r, _user = await _lancar_shopee_reembolso(
+        client, db, make_user, auth_as, monkeypatch, fake, numero="292535", sn="260826BRGU0D18",
+        logistica={"situacao": "LOGISTICS_DELIVERY_DONE", "localizacao": "Pedido entregue",
+                   "entregue_em": datetime(2026, 9, 2, 17, 0, tzinfo=UTC)},
+    )
+    ch = await _chamado_de(db, "292535")
+    ab = await _abertura(db, ch.id)
+    assert ch.canal == "robo" and ab.status == "pendente"
+    txt = ab.texto
+    assert "alegando que recebeu o pacote vazio/violado" in txt and '"recebi o pacote vazio"' in txt
+    assert "ENTREGUE ao comprador em 02/09 14:00" in txt, txt
+    assert "Contestamos a alegação do comprador e solicitamos a revisão do reembolso" in txt
+    assert "compensação pelo extravio" not in txt

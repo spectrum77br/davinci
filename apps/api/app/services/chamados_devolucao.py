@@ -180,6 +180,17 @@ class _PendenteError(Exception):
         super().__init__(code)
 
 
+class _RoboError(Exception):
+    """A API da plataforma não tem mais o que fazer neste caso — a abertura vira
+    tarefa do ROBÔ do Seller Center (canal robo, `pendente`): `texto` é o que o
+    robô escreve lá, `nota` o que fica no histórico."""
+
+    def __init__(self, texto: str, nota: str):
+        self.texto = texto
+        self.nota = nota
+        super().__init__(nota)
+
+
 # ---------------------------------------------------------------- plataforma
 
 
@@ -1396,6 +1407,152 @@ def _epoch(v: object) -> datetime | None:
     return datetime.fromtimestamp(n, tz=UTC) if n > 0 else None
 
 
+# Motivo do pedido de só reembolso na Shopee (`reason` do get_return_detail),
+# em português, pro texto do chamado.
+_SHOPEE_REASON_PT = {
+    "NOT_RECEIPT": "não recebeu o pedido",
+    "SUSPICIOUS_PARCEL": "recebeu o pacote vazio/violado",
+    "MISSING_ITEM": "faltou item no pacote",
+    "WRONG_ITEM": "recebeu produto errado",
+    "PHYSICAL_DMG": "recebeu o produto danificado",
+    "FUNCTIONAL_DMG": "recebeu o produto com defeito",
+    "NOT_AS_DESCRIBED": "produto diferente do anúncio",
+}
+# Situações da SPX (Logistica.meli_status.logistics_status) em que a ida NÃO
+# chegou ao comprador: o reembolso é extravio/atraso da transportadora, não
+# alegação do cliente — o pedido ao suporte é outro (compensação).
+_SHOPEE_IDA_NAO_ENTREGUE = {"LOGISTICS_DELIVERY_FAILED", "LOGISTICS_RETURNED", "LOGISTICS_LOST"}
+_SHOPEE_IDA_ENTREGUE = {"LOGISTICS_DELIVERY_DONE"}
+
+
+async def _entrega_shopee(session: AsyncSession, dev: Devolution) -> dict:
+    """O que a Logística sabe da IDA do pedido: {situacao (SPX), localizacao,
+    entregue_em}. {} sem linha."""
+    from app.models import Logistica  # tardio: evita ciclo
+
+    pb = (dev.pedido_bling or "").strip()
+    if not pb:
+        return {}
+    row = (
+        await session.execute(
+            select(Logistica).where(Logistica.pedido_bling == pb).order_by(Logistica.created_at)
+        )
+    ).scalars().first()
+    if row is None:
+        return {}
+    ms = row.meli_status if isinstance(row.meli_status, dict) else {}
+    return {
+        "situacao": str(ms.get("logistics_status") or "").strip().upper(),
+        "localizacao": (row.localizacao or "").strip(),
+        "entregue_em": row.entregue_em,
+    }
+
+
+def _nota_robo_shopee_reembolso(det: dict, return_sn: str) -> str:
+    valor = det.get("refund_amount")
+    quando = _fmt_brt(det.get("update_time"))
+    return (
+        f"A Shopee já aprovou o só reembolso {return_sn}"
+        + (f" (R$ {valor})" if valor else "")
+        + (f" em {quando}" if quando else "")
+        + " — não há mais o que responder no caso pela API. Enviado pro robô abrir "
+        "chamado no Seller Center; o protocolo aparece aqui quando ele abrir."
+    )
+
+
+async def _texto_robo_shopee_reembolso(
+    session: AsyncSession, dev: Devolution, det: dict, fotos: list[DevolucaoAnexo], texto: str
+) -> str:
+    """O que o robô escreve no chamado do Seller Center pra um só reembolso já
+    aprovado: SPX não entregou → pedido de compensação pelo extravio; entregue e
+    o comprador alega (vazio/errado/danificado) → contestação com o vídeo e as
+    fotos da expedição. `texto` = o texto padrão da abertura, de onde vêm a
+    identificação do pedido, a observação e o link do vídeo."""
+    reason = str(det.get("reason") or "").strip().upper()
+    alegacao = _SHOPEE_REASON_PT.get(
+        reason, reason.lower().replace("_", " ") or "motivo não informado"
+    )
+    nota = " ".join(str(det.get("text_reason") or "").split())
+    valor = det.get("refund_amount")
+    aprovado_em = _fmt_brt(det.get("update_time"))
+    entrega = await _entrega_shopee(session, dev)
+    situacao = entrega.get("situacao") or ""
+    linhas = [
+        f"O comprador pediu reembolso SEM devolução do produto alegando que {alegacao}"
+        + (f' ("{nota[:200]}")' if nota else "")
+        + ". A Shopee aprovou o reembolso"
+        + (f" de R$ {valor}" if valor else "")
+        + (f" em {aprovado_em}" if aprovado_em else "")
+        + " e descontou o valor da loja."
+    ]
+    # identificação, observação, fotos e vídeo vêm do texto padrão (linhas 2+)
+    corpo = [
+        ln for ln in (texto or "").split("\n")[1:]
+        if ln.strip() and not ln.startswith("Solicitamos")
+    ]
+    if situacao in _SHOPEE_IDA_NAO_ENTREGUE or (
+        reason == "NOT_RECEIPT" and situacao and situacao not in _SHOPEE_IDA_ENTREGUE
+    ):
+        onde = entrega.get("localizacao") or ""
+        linhas.append(
+            "O pedido foi postado pela SPX e NÃO foi entregue ao comprador"
+            + (f" (última situação: {onde})" if onde else "")
+            + ". O produto não voltou pra loja."
+        )
+        linhas.extend(corpo)
+        linhas.append(
+            "Solicitamos a compensação pelo extravio/falha de entrega da SPX e a devolução "
+            "do pacote ao remetente."
+        )
+    else:
+        entregue = entrega.get("entregue_em")
+        if situacao in _SHOPEE_IDA_ENTREGUE or entregue is not None:
+            linhas.append(
+                "O rastreio da SPX mostra o pedido ENTREGUE ao comprador"
+                + (f" em {_fmt_brt(entregue)}" if entregue is not None else "")
+                + ", sem avaria/violação registrada na entrega."
+            )
+        linhas.extend(corpo)
+        linhas.append(
+            "Contestamos a alegação do comprador e solicitamos a revisão do reembolso "
+            "(estorno à loja)."
+        )
+    return "\n".join(linhas)
+
+
+def _encaminhar_robo(
+    session: AsyncSession,
+    ch: Chamado,
+    msg: ChamadoMensagem,
+    fotos: list[DevolucaoAnexo],
+    texto: str,
+    nota: str,
+) -> ChamadoMensagem:
+    """A abertura vira tarefa do robô do Seller Center (canal robo, `pendente`,
+    sem nº — o /agent/lease entrega como `abrir` e o robô devolve o protocolo).
+    As fotos da devolução vão junto na tarefa. Mesmo caminho do formulário do ML."""
+    msg.texto = texto
+    msg.canal = "robo"
+    msg.status = "pendente"
+    msg.erro = None
+    ch.canal = "robo"
+    ch.chamado = None  # o protocolo novo do Seller Center entra aqui
+    for a in fotos:
+        session.add(
+            ChamadoAnexo(
+                chamado_id=ch.id,
+                mensagem_id=msg.id,
+                filename=a.filename,
+                content_type=a.content_type,
+                size_bytes=a.size_bytes,
+                blob=a.blob,
+                created_by=a.created_by,
+            )
+        )
+    session.add(chamados_svc.registrar_sistema(ch, nota))
+    return msg
+
+
 async def _subir_foto_shopee(client: ShopeeClient, return_sn: str, a: DevolucaoAnexo) -> str:
     """convert_image com a foto reduzida pro teto da Shopee; se mesmo assim o
     nginx responder 413, encolhe mais uma vez e tenta de novo."""
@@ -1430,11 +1587,16 @@ async def _disparar_shopee(
     ch.chamado = return_sn
     det = await client.get_return_detail(return_sn)
     status = str(det.get("status") or "").strip().upper()
+    # return_solution 1 / needs_logistics false = só reembolso: não há pacote
+    # voltando — a disputa é contra a alegação do comprador (fotos da expedição).
+    so_reembolso = str(det.get("return_solution")) == "1" or det.get("needs_logistics") is False
     if status in ("SELLER_DISPUTE", "JUDGING"):
         raise chamados_svc.ChamadoError("shopee_ja_contestada")
     if status in ("CLOSED", "CANCELLED"):
         raise chamados_svc.ChamadoError("shopee_devolucao_encerrada")
-    if status not in ("REQUESTED", "PROCESSING", "ACCEPTED"):
+    if status not in ("REQUESTED", "PROCESSING", "ACCEPTED") and not (
+        so_reembolso and status == "REFUND_PAID"
+    ):
         raise _PendenteError("shopee_aguardando_pacote")
     contestacao = det.get("dispute_reason") or []
     if isinstance(contestacao, str):
@@ -1463,11 +1625,19 @@ async def _disparar_shopee(
     # medido ao vivo: vem "PENDING_REQUEST" (sem o prefixo COMPENSATION_ da doc)
     if comp_status.replace("COMPENSATION_", "") in ("REQUESTED", "APPROVED", "REJECTED"):
         raise chamados_svc.ChamadoError("shopee_ja_contestada")
-    # return_solution 1 / needs_logistics false = só reembolso: não há pacote
-    # voltando — a disputa é contra a alegação do comprador (fotos da expedição).
-    so_reembolso = str(det.get("return_solution")) == "1" or det.get("needs_logistics") is False
     reasons = await client.get_return_dispute_reason(return_sn)
     if not reasons:
+        if so_reembolso and status in ("ACCEPTED", "REFUND_PAID"):
+            # 18/09 (Vinicius; 292270/293406/292535/293135/293749): só reembolso que
+            # a Shopee JÁ aprovou e pagou — a lista de motivos vem vazia e sem prazo,
+            # e vai continuar (o caso acabou pra API). Ficar "esperando liberar" de
+            # hora em hora por 45 dias era mentira. Mesmo desenho da TikTok: se ainda
+            # dá pra responder o caso, responde pela API; se não, abre CHAMADO pelo
+            # robô do Seller Center, com os fatos, o vídeo e as fotos.
+            raise _RoboError(
+                await _texto_robo_shopee_reembolso(session, dev, det, fotos, texto),
+                _nota_robo_shopee_reembolso(det, return_sn),
+            )
         # Medido 07/09: depois do `return_seller_due_date` (prazo de validação do
         # vendedor, ~3 dias após a entrega do pacote) a lista vem VAZIA — a
         # Shopee não aceita mais contestação. Antes do prazo, ainda pode liberar.
@@ -1600,6 +1770,8 @@ async def disparar(
             msg.status = "falhou"
             msg.erro = "devolucao_prazo_esgotado"
         return msg
+    except _RoboError as r:
+        return _encaminhar_robo(session, ch, msg, fotos, r.texto, r.nota)
     except _MlEncerradaError as e:
         # Eduardo 16/09: "reclamação encerrada depende — vai ter casos que não vai
         # compensar continuar". Só vai pro formulário se decidiu contra nós E o
