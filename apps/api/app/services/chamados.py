@@ -79,6 +79,12 @@ STATUS_FILA = "fila"  # abertura/réplica ainda na fila do robô
 STATUS_FALHOU = "falhou"  # último envio falhou
 STATUS_SEM_ACOMPANHAMENTO = "sem_acompanhamento"  # registrado à mão, nada consulta a plataforma
 STATUS_ESPERANDO_LIBERAR = "esperando_liberar"  # a plataforma ainda não libera abrir/contestar
+# 18/09 (Vinicius, 296936): a recusa que MANDAMOS não é "ganhamos" — a plataforma
+# registrou e o outro lado ainda pode recorrer. O sync grava `aguardando` como
+# status oficial; a coluna explica o porquê.
+MOTIVO_STATUS_OFICIAL = {
+    STATUS_AGUARDANDO: "nossa recusa registrada — o comprador ainda pode recorrer",
+}
 
 # 18/09 (Eduardo: "está uma zona, precisamos dos status verdadeiros"): o erro da
 # última mensagem nossa diz DE QUEM é a vez — e a coluna tem que dizer isso.
@@ -810,7 +816,11 @@ def status_e_motivo_da_aba(
             and not (analise_pede_esperar and analise_depois)
         ):
             return STATUS_RESPONDEU, fala_em, None
-        return ch.status_plataforma, ch.status_plataforma_at, None
+        return (
+            ch.status_plataforma,
+            ch.status_plataforma_at,
+            MOTIVO_STATUS_OFICIAL.get(ch.status_plataforma),
+        )
     if ultima_fala is None:
         return STATUS_SEM_ACOMPANHAMENTO, None, None
     if ultima_fala.direcao == "recebida":

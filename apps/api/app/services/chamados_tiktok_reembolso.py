@@ -26,8 +26,10 @@ O vigia (cron :10/:40) então só:
     faltando 3 h (Vinicius 18/09). Dedupe em `devolucao_rastreio.aviso_prazo_acao_at/
     _para` — mesma semântica do `devolucao_acao_avisos`, que pula os casos só-reembolso
     justamente porque este módulo cuida deles;
-  - registra o **desfecho** (recusado / aprovado / aprovado por falta de resposta) no
+  - registra o **desfecho** (aprovado / aprovado por falta de resposta / cancelado) no
     chamado que respondeu — inclusive nos chamados antigos `tiktok_reembolso:<id>`.
+    "Vendedor recusou" NÃO é desfecho (é a nossa recusa; o comprador ainda recorre) —
+    daí em diante quem acompanha é o sync dos chamados, até a TikTok decidir.
 Ele NÃO abre chamado e NÃO contesta sozinho. A réplica manual num chamado antigo continua
 sendo a recusa (`contestar`).
 """
@@ -81,14 +83,21 @@ _DESFECHOS = {
     "RETURN_OR_REFUND_REQUEST_COMPLETE": "reembolso PAGO ao comprador",
     "RETURN_OR_REFUND_REQUEST_SUCCESS": "reembolso aprovado ao comprador",
     "RETURN_OR_REFUND_REQUEST_CANCEL": "o comprador cancelou o pedido de reembolso",
-    "REFUND_OR_RETURN_REQUEST_REJECT": "reembolso RECUSADO (valor fica com o vendedor)",
 }
+# 18/09 (Vinicius, 296936): "vendedor recusou" (REFUND_OR_RETURN_REQUEST_REJECT) NÃO é
+# desfecho — é a nossa recusa registrada; o comprador ainda pode abrir disputa (recorreu
+# em 5 de 5 casos medidos). Quem acompanha daí em diante é o sync dos chamados
+# (chamados_devolucao_sync): aguardando plataforma → arbitragem → decisão.
+STATUS_RECUSADO = "REFUND_OR_RETURN_REQUEST_REJECT"
+TEXTO_RECUSA_REGISTRADA = (
+    "Recusa do reembolso já registrada na TikTok — o comprador ainda pode recorrer; "
+    "o acompanhamento segue até a decisão."
+)
 # Coluna Status da aba (17/09): o desfecho em ganhou/perdeu.
 _STATUS_ABA = {
     "RETURN_OR_REFUND_REQUEST_COMPLETE": chamados_svc.STATUS_PERDEMOS,
     "RETURN_OR_REFUND_REQUEST_SUCCESS": chamados_svc.STATUS_PERDEMOS,
     "RETURN_OR_REFUND_REQUEST_CANCEL": chamados_svc.STATUS_GANHAMOS,
-    "REFUND_OR_RETURN_REQUEST_REJECT": chamados_svc.STATUS_GANHAMOS,
 }
 
 
@@ -133,6 +142,8 @@ def _valor(caso: dict) -> str:
 
 def texto_desfecho(caso: dict, eventos: list[dict]) -> str:
     status = str(caso.get("return_status") or "").upper()
+    if status == STATUS_RECUSADO:
+        return TEXTO_RECUSA_REGISTRADA  # sem MARCA_DESFECHO: o desfecho de verdade vem depois
     base = _DESFECHOS.get(status, f"situação {status or 'desconhecida'}")
     extra = ""
     for ev in eventos or []:
@@ -504,16 +515,40 @@ async def run_vigia(session, *, agora: datetime | None = None, dry_run: bool = F
                 continue
         if caso is None or not e_so_reembolso(caso) or e_pendente_de_resposta(caso):
             continue
+        status = str(caso.get("return_status") or "").upper()
+        if status == STATUS_RECUSADO:
+            continue  # nossa recusa, não desfecho — o sync dos chamados acompanha
+        if status == "RETURN_OR_REFUND_REQUEST_CANCEL" and _refeito(casos_vistos, caso):
+            continue  # o comprador refez o pedido: a briga segue no caso novo (sync)
         _n, _m, eventos = await _nota_e_motivo(client, rid)
         resumo["desfechos"] += 1
         if not dry_run:
             session.add(chamados_svc.registrar_sistema(ch, texto_desfecho(caso, eventos)))
-            status_aba = _STATUS_ABA.get(str(caso.get("return_status") or "").upper())
+            status_aba = _STATUS_ABA.get(status)
             if status_aba:
                 chamados_svc.set_status_plataforma(ch, status_aba, epoch_to_dt(caso.get("update_time")))
     if not dry_run:
         await session.commit()
     return resumo
+
+
+def _refeito(casos_vistos: dict, caso: dict) -> bool:
+    """Há pedido de só reembolso mais novo do mesmo pedido (o comprador refez)?"""
+    oid = str(caso.get("order_id") or "")
+    rid = str(caso.get("return_id") or "")
+    try:
+        base = int(caso.get("create_time") or 0)
+    except (TypeError, ValueError):
+        base = 0
+    for _client, outro, _conta in casos_vistos.values():
+        if str(outro.get("order_id") or "") != oid or str(outro.get("return_id") or "") == rid:
+            continue
+        try:
+            if int(outro.get("create_time") or 0) > base:
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
 
 
 def _motivo_recusa(reasons: list[dict]) -> str | None:

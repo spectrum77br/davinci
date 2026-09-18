@@ -106,3 +106,18 @@ def test_wrapper_antigo_devolve_so_codigo_e_data():
     cod, quando = svc.status_da_aba(_ch(), ultima_fala=_msg("enviada"), ultima_analise=None,
                                     analise_pede_humano=False)
     assert cod == svc.STATUS_AGUARDANDO and quando == T0
+
+
+def test_recusa_registrada_e_aguardando_plataforma_com_motivo():
+    """296936 (Vinicius 18/09): a recusa que mandamos virava "Ganhamos". O sync grava
+    `aguardando` como status oficial e a coluna diz por quê."""
+    ch = _ch(status_plataforma=svc.STATUS_AGUARDANDO, status_plataforma_at=T0)
+    cod, quando, motivo = _status(ch, _msg("enviada", status="enviada", minutos=-5))
+    assert (cod, quando) == (svc.STATUS_AGUARDANDO, T0)
+    assert motivo == "nossa recusa registrada — o comprador ainda pode recorrer"
+    # o comprador falou DEPOIS da recusa → é a vez de alguém ler
+    cod, _, _ = _status(ch, _msg("recebida", status="registrada", minutos=30))
+    assert cod == svc.STATUS_RESPONDEU
+    # nota antiga do comprador (anterior à recusa) não muda nada
+    cod, _, _ = _status(ch, _msg("recebida", status="registrada", minutos=-600))
+    assert cod == svc.STATUS_AGUARDANDO

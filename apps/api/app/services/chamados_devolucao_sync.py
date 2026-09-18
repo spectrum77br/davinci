@@ -6,10 +6,14 @@ hora (junto do `chamados_replica_automatica`): pra cada chamado de origem
 `devolucao`, canal `api`, aberto e já ENVIADO, consulta a plataforma:
 
 - **TikTok**: returns/search por order_id → `return_status` / `arbitration_status`
-  (REJECT_RECEIVE_PACKAGE = recusa registrada; IN_PROGRESS = comprador contestou;
-  SUPPORT_SELLER/SUPPORT_BUYER = decisão; RETURN_OR_REFUND_REQUEST_CANCEL =
-  vendedor ficou com o valor; ..._SUCCESS/_COMPLETE = reembolsado) + linha do
-  tempo (`returns/{id}/records`: notas do comprador/plataforma).
+  (REJECT_RECEIVE_PACKAGE / REFUND_OR_RETURN_REQUEST_REJECT = a NOSSA recusa
+  registrada, o comprador ainda pode recorrer → aguardando plataforma;
+  IN_PROGRESS = comprador contestou; SUPPORT_SELLER/SUPPORT_BUYER = decisão;
+  RETURN_OR_REFUND_REQUEST_CANCEL = vendedor ficou com o valor — a não ser que o
+  comprador tenha refeito o pedido, aí o chamado segue o caso novo;
+  ..._SUCCESS/_COMPLETE = reembolsado; recusa sem recurso por 10 dias = ganhamos)
+  + linha do tempo (`returns/{id}/records`: notas do comprador/plataforma, com
+  a hora real de cada nota).
 - **Shopee**: get_return_detail → `status` (SELLER_DISPUTE/JUDGING/CLOSED…),
   `seller_proof` (Shopee pediu prova extra + prazo), `seller_compensation`
   (APPROVED/REJECTED = decisão).
@@ -56,11 +60,6 @@ ABERTURA_FALHOU_ACOMPANHA = (
 # ---- TikTok --------------------------------------------------------------------
 _TT_STATUS_TXT: dict[str, tuple[str, bool]] = {
     # texto, encerra?
-    "REJECT_RECEIVE_PACKAGE": (
-        "Recusa do pacote registrada na TikTok. O comprador pode contestar (arbitragem) "
-        "no prazo da plataforma.",
-        False,
-    ),
     "RETURN_OR_REFUND_REQUEST_CANCEL": (
         "Devolução CANCELADA na TikTok — a recusa foi mantida e o valor fica com o vendedor.",
         True,
@@ -73,8 +72,30 @@ _TT_STATUS_TXT: dict[str, tuple[str, bool]] = {
         "Devolução concluída na TikTok com reembolso ao comprador.",
         True,
     ),
-    "REFUND_OR_RETURN_REQUEST_REJECT": ("Solicitação de devolução recusada na TikTok.", True),
 }
+# 18/09 (Vinicius, 296936): "vendedor recusou" NÃO é ganhamos — é a NOSSA recusa
+# registrada na TikTok; o comprador ainda pode abrir disputa (medido ao vivo em
+# 60 dias: recorreu em 5 de 5 só-reembolsos e 17 de 17 pacotes recusados, de
+# 4 min a 3,7 dias depois; a TikTok levou de 11 min a 35 dias pra decidir).
+# Antes o caso virava "Ganhamos" e o chamado FECHAVA às 12:25 — se o comprador
+# recorresse, ninguém via a disputa nem a decisão. Agora: evento de sistema (não
+# é fala da plataforma), status "aguardando plataforma" e o acompanhamento
+# segue até a TikTok decidir; sem recurso em TT_RECUSA_CARENCIA, ganhamos.
+_TT_RECUSA_NOSSA: dict[str, str] = {
+    "REFUND_OR_RETURN_REQUEST_REJECT": (
+        "Recusa do reembolso registrada na TikTok. O comprador ainda pode contestar "
+        "(disputa) ou refazer o pedido no prazo da plataforma — o acompanhamento segue "
+        "até a decisão."
+    ),
+    "REJECT_RECEIVE_PACKAGE": (
+        "Recusa do pacote registrada na TikTok. O comprador ainda pode contestar "
+        "(arbitragem) no prazo da plataforma — o acompanhamento segue até a decisão."
+    ),
+}
+TT_RECUSA_CARENCIA = timedelta(days=10)
+_TT_RECUSA_VENCIDA_TXT = (
+    "10 dias sem recurso do comprador depois da recusa — a recusa ficou valendo (ganhamos)."
+)
 _TT_ARB_TXT: dict[str, tuple[str, bool]] = {
     "IN_PROGRESS": ("O comprador contestou a recusa: caso em ARBITRAGEM na TikTok.", False),
     "SUPPORT_SELLER": ("Arbitragem da TikTok decidida A FAVOR DO VENDEDOR.", False),
@@ -84,7 +105,6 @@ _TT_ARB_TXT: dict[str, tuple[str, bool]] = {
 # Coluna Status da aba (17/09): o que cada estado da TikTok significa pra loja.
 _TT_STATUS_STATUS: dict[str, str] = {
     "RETURN_OR_REFUND_REQUEST_CANCEL": chamados_svc.STATUS_GANHAMOS,
-    "REFUND_OR_RETURN_REQUEST_REJECT": chamados_svc.STATUS_GANHAMOS,
     "RETURN_OR_REFUND_REQUEST_SUCCESS": chamados_svc.STATUS_PERDEMOS,
     "RETURN_OR_REFUND_REQUEST_COMPLETE": chamados_svc.STATUS_PERDEMOS,
 }
@@ -92,6 +112,16 @@ _TT_ARB_STATUS: dict[str, str] = {
     "IN_PROGRESS": chamados_svc.STATUS_EM_ANALISE,
     "SUPPORT_SELLER": chamados_svc.STATUS_GANHAMOS,
     "SUPPORT_BUYER": chamados_svc.STATUS_PERDEMOS,
+}
+_TT_TIPO = {"REFUND": "só reembolso", "RETURN_AND_REFUND": "devolução"}
+_TT_STATUS_NOME = {
+    "RETURN_OR_REFUND_REQUEST_PENDING": "aguardando a nossa resposta",
+    "REFUND_OR_RETURN_REQUEST_REJECT": "já recusado",
+    "AWAITING_BUYER_SHIP": "aguardando o comprador postar",
+    "BUYER_SHIPPED_ITEM": "pacote a caminho",
+    "RETURN_OR_REFUND_REQUEST_SUCCESS": "reembolso aprovado",
+    "RETURN_OR_REFUND_REQUEST_COMPLETE": "reembolsado",
+    "RETURN_OR_REFUND_REQUEST_CANCEL": "cancelado",
 }
 
 # ---- Shopee --------------------------------------------------------------------
@@ -148,20 +178,25 @@ def _fmt_dt(v) -> str:
         return ""
 
 
-async def _ja_tem(session: AsyncSession, ch: Chamado, texto: str) -> bool:
-    return (
-        await session.execute(
-            select(ChamadoMensagem.id).where(
-                ChamadoMensagem.chamado_id == ch.id,
-                ChamadoMensagem.direcao == "recebida",
-                ChamadoMensagem.texto == texto,
-            ).limit(1)
-        )
-    ).scalar_one_or_none() is not None
+async def _ja_tem(
+    session: AsyncSession, ch: Chamado, texto: str, *, direcao: str | None = "recebida"
+) -> bool:
+    q = select(ChamadoMensagem.id).where(
+        ChamadoMensagem.chamado_id == ch.id, ChamadoMensagem.texto == texto
+    )
+    if direcao:
+        q = q.where(ChamadoMensagem.direcao == direcao)
+    return (await session.execute(q.limit(1))).scalar_one_or_none() is not None
 
 
-async def registrar_recebida(session: AsyncSession, ch: Chamado, plat: str, texto: str) -> bool:
-    """Grava a resposta da plataforma no histórico (uma vez por texto)."""
+async def registrar_recebida(
+    session: AsyncSession, ch: Chamado, plat: str, texto: str, *, quando: datetime | None = None
+) -> bool:
+    """Grava a resposta da plataforma no histórico (uma vez por texto). `quando` =
+    hora em que a plataforma/comprador falou de verdade (linha do tempo da TikTok):
+    a mensagem entra com essa data, não com a da passada do cron — a nota original
+    do comprador (anterior à nossa recusa) não pode virar "plataforma respondeu"
+    depois que respondemos (18/09, 296936)."""
     bruto = (texto or "").strip()
     # 15/09: mediador do ML vem em HTML — grava legível. O dedupe olha as duas
     # formas: as mensagens antigas ficaram gravadas cruas e não podem duplicar.
@@ -179,7 +214,19 @@ async def registrar_recebida(session: AsyncSession, ch: Chamado, plat: str, text
         status="registrada",
     )
     msg.canal = "api"
+    if quando is not None:
+        msg.created_at = quando
+        msg.enviada_at = quando
     session.add(msg)
+    return True
+
+
+async def registrar_evento(session: AsyncSession, ch: Chamado, texto: str) -> bool:
+    """Evento de sistema no histórico, uma vez por texto (qualquer direção — as
+    linhas antigas têm o mesmo aviso gravado como `recebida`)."""
+    if await _ja_tem(session, ch, texto, direcao=None):
+        return False
+    session.add(chamados_svc.registrar_sistema(ch, texto))
     return True
 
 
@@ -204,7 +251,30 @@ async def _dev_de(session: AsyncSession, ch: Chamado) -> Devolution | None:
 # ---------------------------------------------------------------- TikTok
 
 
-async def _sync_tiktok(session: AsyncSession, ch: Chamado, dev: Devolution | None) -> int:
+def _tiktok_caso_novo(casos: list[dict], caso: dict) -> dict | None:
+    """Solicitação mais nova do MESMO pedido, aberta depois desta (o comprador
+    refez o pedido). None se não há."""
+    try:
+        base = int(caso.get("create_time") or 0)
+    except (TypeError, ValueError):
+        base = 0
+    rid = str(caso.get("return_id") or "")
+    novos = []
+    for c in casos:
+        if str(c.get("return_id") or "") == rid:
+            continue
+        try:
+            criado = int(c.get("create_time") or 0)
+        except (TypeError, ValueError):
+            continue
+        if criado > base:
+            novos.append((criado, c))
+    return max(novos, key=lambda x: x[0])[1] if novos else None
+
+
+async def _sync_tiktok(
+    session: AsyncSession, ch: Chamado, dev: Devolution | None, *, agora: datetime | None = None
+) -> int:
     dev = dev or Devolution(conta=ch.conta or "", pedido_bling=ch.pedido_bling,
                             pedido_marketplace=ch.pedido_marketplace)
     client = await cd._tiktok_client_para(session, ch, dev)
@@ -218,11 +288,47 @@ async def _sync_tiktok(session: AsyncSession, ch: Chamado, dev: Devolution | Non
     status = str(caso.get("return_status") or "").strip().upper()
     arb = str(caso.get("arbitration_status") or "").strip().upper()
     quando = epoch_to_dt(caso.get("update_time"))
+    agora = agora or datetime.now(UTC)
     if arb in _TT_ARB_TXT:
         txt, fim = _TT_ARB_TXT[arb]
         novos += await registrar_recebida(session, ch, cd.PLAT_TIKTOK, txt)
         if arb in _TT_ARB_STATUS:
             chamados_svc.set_status_plataforma(ch, _TT_ARB_STATUS[arb], quando)
+    if status in _TT_RECUSA_NOSSA:
+        # A nossa recusa, confirmada pela TikTok: evento (não é fala da plataforma).
+        novos += await registrar_evento(session, ch, _TT_RECUSA_NOSSA[status])
+        if not arb:
+            if quando is not None and agora - quando >= TT_RECUSA_CARENCIA:
+                novos += await registrar_recebida(
+                    session, ch, cd.PLAT_TIKTOK, _TT_RECUSA_VENCIDA_TXT
+                )
+                chamados_svc.set_status_plataforma(ch, chamados_svc.STATUS_GANHAMOS, agora)
+                _encerrar(session, ch, f"tiktok:{status}:sem_recurso")
+            else:
+                chamados_svc.set_status_plataforma(ch, chamados_svc.STATUS_AGUARDANDO, quando)
+    novo = (
+        _tiktok_caso_novo(casos, caso)
+        if status == "RETURN_OR_REFUND_REQUEST_CANCEL" and arb != "SUPPORT_SELLER"
+        else None
+    )
+    if novo is not None:
+        # Medido 18/09 (jlas 585710261573748632): o comprador EDITOU o pedido — a
+        # TikTok cancela a solicitação antiga e cria outra. Não é ganhamos: a
+        # briga continua no caso novo, e é ele que o chamado passa a acompanhar
+        # (a réplica do chamado responde o caso novo).
+        novo_id = str(novo.get("return_id") or "")
+        st_novo = str(novo.get("return_status") or "").upper()
+        tipo = _TT_TIPO.get(str(novo.get("return_type") or "").upper(), "solicitação")
+        situacao = _TT_STATUS_NOME.get(st_novo, st_novo.lower() or "situação desconhecida")
+        novos += await registrar_recebida(
+            session, ch, cd.PLAT_TIKTOK,
+            f"O comprador refez o pedido na TikTok: {tipo} {novo_id} ({situacao}) — a "
+            f"solicitação {rid} foi cancelada por isso. O chamado passa a acompanhar o "
+            "caso novo.",
+            quando=epoch_to_dt(novo.get("create_time")),
+        )
+        ch.chamado = novo_id
+        return novos
     if status in _TT_STATUS_TXT:
         txt, fim = _TT_STATUS_TXT[status]
         novos += await registrar_recebida(session, ch, cd.PLAT_TIKTOK, txt)
@@ -252,7 +358,8 @@ async def _sync_tiktok(session: AsyncSession, ch: Chamado, dev: Devolution | Non
         )
         quando = _fmt_dt(r.get("create_time"))
         novos += await registrar_recebida(
-            session, ch, cd.PLAT_TIKTOK, f"{quem}{(' ' + quando) if quando else ''}: {nota}"
+            session, ch, cd.PLAT_TIKTOK, f"{quem}{(' ' + quando) if quando else ''}: {nota}",
+            quando=epoch_to_dt(r.get("create_time")),
         )
     return novos
 
@@ -566,7 +673,7 @@ async def _sync_ml(session: AsyncSession, ch: Chamado, dev: Devolution | None) -
 # ---------------------------------------------------------------- cron
 
 
-async def sync_respostas(session: AsyncSession) -> dict:
+async def sync_respostas(session: AsyncSession, *, agora: datetime | None = None) -> dict:
     """Passada do cron: chamados de devolução ABERTOS via API (abertura enviada)
     → consulta a plataforma, grava respostas novas e encerra os finalizados.
     Best-effort por chamado; commita no fim."""
@@ -637,7 +744,10 @@ async def sync_respostas(session: AsyncSession) -> dict:
         verificados += 1
         try:
             dev = await _dev_de(session, ch)
-            n = await fn(session, ch, dev)
+            if fn is _sync_tiktok:
+                n = await _sync_tiktok(session, ch, dev, agora=agora)
+            else:
+                n = await fn(session, ch, dev)
             novos += n
             if ch.resolvido:
                 encerrados += 1

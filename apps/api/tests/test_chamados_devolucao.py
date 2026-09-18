@@ -862,6 +862,34 @@ async def _recebidas(db, chamado_id):
     return [m.texto for m in rows]
 
 
+async def _sistema_txts(db, chamado_id):
+    rows = (
+        await db.execute(
+            select(ChamadoMensagem)
+            .where(ChamadoMensagem.chamado_id == chamado_id, ChamadoMensagem.tipo == "sistema")
+            .order_by(ChamadoMensagem.created_at)
+        )
+    ).scalars().all()
+    return [m.texto for m in rows]
+
+
+async def _status_aba(db, ch):
+    """(código, motivo) da coluna Status como a listagem calcula."""
+    from app.services import chamados as chamados_svc
+
+    msgs = (
+        await db.execute(
+            select(ChamadoMensagem).where(ChamadoMensagem.chamado_id == ch.id)
+            .order_by(ChamadoMensagem.created_at, ChamadoMensagem.id)
+        )
+    ).scalars().all()
+    falas = [m for m in msgs if m.direcao in ("enviada", "recebida")]
+    cod, _q, motivo = chamados_svc.status_e_motivo_da_aba(
+        ch, ultima_fala=falas[-1] if falas else None, ultima_analise=None, analise_pede_humano=False
+    )
+    return cod, motivo
+
+
 async def test_sync_tiktok_resposta_no_historico_e_encerra(client, make_user, auth_as, db, ml, monkeypatch):
     from app.services import chamados_devolucao_sync as sync
 
@@ -903,7 +931,10 @@ async def test_sync_tiktok_resposta_no_historico_e_encerra(client, make_user, au
     s1 = await sync.sync_respostas(db)
     assert s1["verificados"] == 1 and s1["novos"] == 3 and s1["encerrados"] == 0
     txts = await _recebidas(db, ch.id)
-    assert any("Recusa do pacote registrada" in t for t in txts)
+    # 18/09: a nossa recusa registrada é evento de sistema, não fala da plataforma
+    assert not any("Recusa do pacote registrada" in t for t in txts)
+    assert any("Recusa do pacote registrada" in t and "ainda pode contestar" in t
+               for t in await _sistema_txts(db, ch.id))
     assert any("ARBITRAGEM" in t for t in txts)
     assert any("Comprador" in t and "Discordo" in t for t in txts)
     await db.refresh(ch)
@@ -2030,3 +2061,136 @@ async def test_tiktok_com_pacote_e_so_reembolso_decidido_segue_o_pacote(client, 
     assert r.status_code == 201, r.text
     assert r.json()["chamado_ml_status"] == "enviada", r.json()
     assert fake.rejects[0]["decision"] == "REJECT_RECEIVED_PACKAGE"
+
+
+# ---------------------------------------------------------------- recusa ≠ ganhamos (18/09, 296936)
+
+
+class _FakeTikTokRecusa(_FakeTikTokReembolso):
+    """Só reembolso com relógio de verdade: `update_time` da recusa, arbitragem e um
+    eventual pedido refeito pelo comprador."""
+
+    def __init__(self):
+        super().__init__()
+        self.update_time = int(datetime(2026, 9, 18, 14, 48, tzinfo=UTC).timestamp())  # 18/09 11:48 BRT
+        self.create_time = int(datetime(2026, 9, 17, 5, 37, tzinfo=UTC).timestamp())  # 17/09 02:37 BRT
+        self.arb = ""
+        self.refeito: dict | None = None
+
+    async def get_return_list(self, *, order_ids=None, **kw):
+        casos = await super().get_return_list(order_ids=order_ids, **kw)
+        casos[0]["update_time"] = self.update_time
+        casos[0]["create_time"] = self.create_time
+        if self.arb:
+            casos[0]["arbitration_status"] = self.arb
+        if self.refeito is not None:
+            casos.append(self.refeito)
+        return casos
+
+
+async def _lancar_296936(client, db, make_user, auth_as, monkeypatch, fake):
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+    await _seed_reembolso(db, user, monkeypatch, fake)
+    r = await client.post(
+        "/api/devolutions",
+        json={"conta": "mini", "pedido_bling": "296936", "pedido_marketplace": OID_REEMB,
+              "condicao_produto": "Não devolvido", "motivo_devolucao": "Golpe"},
+    )
+    assert r.status_code == 201 and r.json()["chamado_ml_status"] == "enviada", r.text
+    assert len(fake.rejects) == 1
+    fake.status_reembolso = "REFUND_OR_RETURN_REQUEST_REJECT"
+    return (await db.execute(select(Chamado).where(Chamado.pedido_bling == "296936"))).scalar_one()
+
+
+async def test_sync_tiktok_recusa_do_reembolso_e_aguardando_ate_a_tiktok_decidir(client, make_user, auth_as, db, ml, monkeypatch):
+    """296936 (Vinicius 18/09): a TikTok diz "vendedor recusou" — era a NOSSA recusa e o
+    painel mostrava Ganhamos e fechava o chamado às 12:25; o comprador ainda podia
+    recorrer (recorreu em 5 de 5 casos medidos). Agora: aguardando plataforma, chamado
+    aberto, e o desfecho só quando a TikTok decidir."""
+    from app.services import chamados_devolucao_sync as sync
+
+    fake = _FakeTikTokRecusa()
+    ch = await _lancar_296936(client, db, make_user, auth_as, monkeypatch, fake)
+    recusa = datetime.fromtimestamp(fake.update_time, UTC)
+
+    s1 = await sync.sync_respostas(db, agora=recusa + timedelta(minutes=37))
+    assert s1["verificados"] == 1 and s1["encerrados"] == 0, s1
+    await db.refresh(ch)
+    assert ch.resolvido is False
+    assert ch.status_plataforma == "aguardando" and ch.status_plataforma_at == recusa
+    sist = await _sistema_txts(db, ch.id)
+    assert any("Recusa do reembolso registrada" in t and "ainda pode contestar" in t for t in sist), sist
+    assert not any("Solicitação de devolução recusada" in t for t in await _recebidas(db, ch.id))
+    # a nota original do comprador entra com a hora dela (antes da recusa) — não vira "respondeu"
+    nota = (await db.execute(select(ChamadoMensagem).where(
+        ChamadoMensagem.chamado_id == ch.id, ChamadoMensagem.direcao == "recebida"))).scalars().one()
+    assert "caixa de sabonete" in nota.texto and nota.created_at == datetime.fromtimestamp(1789620000, UTC)
+    assert await _status_aba(db, ch) == ("aguardando", "nossa recusa registrada — o comprador ainda pode recorrer")
+    # de novo: nada duplica, continua aguardando
+    s2 = await sync.sync_respostas(db, agora=recusa + timedelta(hours=2))
+    assert s2["novos"] == 0 and s2["encerrados"] == 0
+
+    # o comprador recorreu → em análise, chamado continua aberto
+    fake.arb = "IN_PROGRESS"
+    fake.update_time += 3600
+    s3 = await sync.sync_respostas(db, agora=recusa + timedelta(hours=3))
+    await db.refresh(ch)
+    assert s3["encerrados"] == 0 and ch.resolvido is False
+    assert ch.status_plataforma == "em_analise"
+    assert any("ARBITRAGEM" in t for t in await _recebidas(db, ch.id))
+
+    # a TikTok decidiu a favor da loja → ganhamos, fecha
+    fake.arb = "SUPPORT_SELLER"
+    fake.status_reembolso = "RETURN_OR_REFUND_REQUEST_CANCEL"
+    fake.update_time += 3600
+    s4 = await sync.sync_respostas(db, agora=recusa + timedelta(days=2))
+    await db.refresh(ch)
+    assert s4["encerrados"] == 1 and ch.resolvido is True and ch.status_plataforma == "ganhamos"
+    assert any("A FAVOR DO VENDEDOR" in t for t in await _recebidas(db, ch.id))
+
+
+async def test_sync_tiktok_recusa_sem_recurso_em_10_dias_e_ganhamos(client, make_user, auth_as, db, ml, monkeypatch):
+    from app.services import chamados_devolucao_sync as sync
+
+    fake = _FakeTikTokRecusa()
+    ch = await _lancar_296936(client, db, make_user, auth_as, monkeypatch, fake)
+    recusa = datetime.fromtimestamp(fake.update_time, UTC)
+
+    s1 = await sync.sync_respostas(db, agora=recusa + timedelta(days=9, hours=23))
+    await db.refresh(ch)
+    assert s1["encerrados"] == 0 and ch.resolvido is False and ch.status_plataforma == "aguardando"
+
+    s2 = await sync.sync_respostas(db, agora=recusa + timedelta(days=10, minutes=1))
+    await db.refresh(ch)
+    assert s2["encerrados"] == 1 and ch.resolvido is True and ch.status_plataforma == "ganhamos"
+    assert any("10 dias sem recurso" in t and "ganhamos" in t for t in await _recebidas(db, ch.id))
+
+
+async def test_sync_tiktok_pedido_refeito_pelo_comprador_nao_e_ganhamos(client, make_user, auth_as, db, ml, monkeypatch):
+    """jlas 585710261573748632 (medido 18/09): o comprador EDITOU o pedido depois da
+    recusa — a TikTok cancela o antigo e cria outro. Não é ganhamos: o chamado passa a
+    acompanhar o caso novo, e é a nossa vez de responder."""
+    from app.services import chamados_devolucao_sync as sync
+
+    fake = _FakeTikTokRecusa()
+    ch = await _lancar_296936(client, db, make_user, auth_as, monkeypatch, fake)
+    recusa = datetime.fromtimestamp(fake.update_time, UTC)
+    fake.status_reembolso = "RETURN_OR_REFUND_REQUEST_CANCEL"
+    fake.arb = "CLOSED"
+    novo_em = fake.update_time + 7200
+    fake.refeito = {
+        "order_id": OID_REEMB, "return_id": "4042163882929260440", "return_type": "REFUND",
+        "return_status": "RETURN_OR_REFUND_REQUEST_PENDING", "create_time": novo_em, "update_time": novo_em,
+        "seller_next_action_response": [{"action": "SELLER_RESPOND_REFUND", "deadline": novo_em + 2 * 86400}],
+        "refund_amount": {"currency": "BRL", "refund_total": "803.2"},
+    }
+    s1 = await sync.sync_respostas(db, agora=recusa + timedelta(hours=3))
+    await db.refresh(ch)
+    assert s1["encerrados"] == 0 and ch.resolvido is False
+    assert ch.status_plataforma is None
+    assert ch.chamado == "4042163882929260440"
+    txts = await _recebidas(db, ch.id)
+    assert any("refez o pedido" in t and "4042163882929260440" in t and "aguardando a nossa resposta" in t for t in txts), txts
+    assert not any("valor fica com o vendedor" in t for t in txts)
+    assert (await _status_aba(db, ch))[0] == "respondeu"

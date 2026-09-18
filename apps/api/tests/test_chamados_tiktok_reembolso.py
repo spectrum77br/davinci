@@ -178,15 +178,22 @@ async def test_vigia_lancamento_respondido_nao_avisa_e_registra_desfecho(db, mak
     assert r["respondidos"] == 1 and r["avisos_12h"] == 0 and r["avisos_3h"] == 0, r
     assert threema_fake == []
 
-    # a TikTok decidiu (recusou): desfecho no chamado do lançamento, uma vez, com o status da aba
+    # "vendedor recusou" é a NOSSA recusa, não desfecho (Vinicius 18/09, 296936): o vigia
+    # não decreta ganhamos — o comprador ainda pode recorrer; o sync acompanha.
     fake.status = "REFUND_OR_RETURN_REQUEST_REJECT"
     r2 = await svc.run_vigia(db, agora=_em(0.5))
-    assert r2["desfechos"] == 1, r2
-    hist = await _sistema(db, ch.id)
-    assert any("RECUSADO" in t for t in hist), hist
-    assert ch.status_plataforma == chamados_svc.STATUS_GANHAMOS
+    assert r2["desfechos"] == 0, r2
+    assert not any(svc.MARCA_DESFECHO in t for t in await _sistema(db, ch.id))
+    assert ch.status_plataforma is None
+    # a TikTok decidiu (recusa mantida, solicitação cancelada): desfecho, uma vez
+    fake.status = "RETURN_OR_REFUND_REQUEST_CANCEL"
     r3 = await svc.run_vigia(db, agora=_em(0.4))
-    assert r3["desfechos"] == 0
+    assert r3["desfechos"] == 1, r3
+    hist = await _sistema(db, ch.id)
+    assert any(svc.MARCA_DESFECHO in t and "cancelou" in t for t in hist), hist
+    assert ch.status_plataforma == chamados_svc.STATUS_GANHAMOS
+    r4 = await svc.run_vigia(db, agora=_em(0.3))
+    assert r4["desfechos"] == 0
 
 
 async def test_vigia_lancamento_travado_avisa_o_que_falta(db, make_user, monkeypatch, threema_fake):
