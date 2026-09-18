@@ -1155,6 +1155,56 @@ async def test_sync_shopee_br_perde_pelo_escrow_com_carencia(client, make_user, 
     assert next(i for i in lst if i["id"] == str(ch.id))["status_aba"] == "perdemos"
 
 
+async def test_sync_shopee_reembolso_anterior_a_disputa_nao_e_perdemos(client, make_user, auth_as, db, ml, monkeypatch):
+    """18/09 (289545, Apple Watch, só reembolso pago em 15/09 e disputa registrada
+    em 18/09 17:25): o sync fechou o chamado como PERDIDO 7 s depois de aberto,
+    porque contou a carência desde o reembolso — de 3 dias antes. Reembolso
+    anterior à disputa não é resposta a ela; e com o pedido de compensação em
+    análise (REQUESTED) a Shopee ainda não decidiu."""
+    import time
+    from datetime import timedelta
+
+    from app.services import chamados_devolucao_sync as sync
+
+    agora = int(time.time())
+    det = {"status": "ACCEPTED", "update_time": agora - 600, "dispute_reason": None,
+           "seller_compensation": {"seller_compensation_status": "PENDING_REQUEST", "compensation_amount": 0}}
+    escrow = {"seller_return_refund": 0,
+              "order_adjustment": [{"adjustment_reason": "Ajuste após reembolso aprovado", "amount": -1296.26,
+                                    "date": agora - 3 * 86400}]}
+    ch = await _chamado_shopee_sync(client, make_user, auth_as, db, monkeypatch,
+                                    numero="289545", numeroloja="260808RXSGH0JK", det=det, escrow=escrow)
+    # disputa registrada agora; a compensação foi PEDIDA e está em análise
+    det["dispute_reason"] = ["Buyer's claim is incorrect"]
+    det["seller_compensation"]["seller_compensation_status"] = "REQUESTED"
+    monkeypatch.setattr(sync, "_SH_PERDEMOS_CARENCIA", timedelta(0))
+    s = await sync.sync_respostas(db)
+    assert s["encerrados"] == 0
+    await db.refresh(ch)
+    assert ch.resolvido is False and ch.status_plataforma == "em_analise"
+    txts = await _recebidas(db, ch.id)
+    assert any("aguardando análise" in t for t in txts)
+    assert not any("REEMBOLSOU" in t or "perdemos" in t for t in txts)
+    # de hora em hora, sem novidade: continua em análise
+    s = await sync.sync_respostas(db)
+    assert s["encerrados"] == 0 and s["novos"] == 0
+    # reembolso DEPOIS da disputa com a compensação ainda em análise: avisa, mas não fecha
+    escrow["order_adjustment"].append({"adjustment_reason": "Ajuste após reembolso aprovado", "amount": -10,
+                                       "date": agora + 60})
+    escrow["order_adjustment"][0]["date"] = agora + 60
+    s = await sync.sync_respostas(db)
+    assert s["encerrados"] == 0
+    await db.refresh(ch)
+    assert ch.resolvido is False
+    assert sum(1 for t in await _recebidas(db, ch.id) if "REEMBOLSOU o comprador sem compensação" in t) == 1
+    # a Shopee decidiu: compensação aprovada → ganhamos
+    det["seller_compensation"] = {"seller_compensation_status": "APPROVED", "compensation_amount": 1185.16}
+    s = await sync.sync_respostas(db)
+    assert s["encerrados"] == 1
+    await db.refresh(ch)
+    assert ch.resolvido is True and ch.status_plataforma == "ganhamos"
+
+
 async def test_sync_shopee_br_ganha_pelo_valor_ou_sem_reembolso(client, make_user, auth_as, db, ml, monkeypatch):
     """Ganhou = `compensation_amount` > 0 (mesmo com status vazio) — ou a
     devolução fechou (CLOSED) sem o comprador ser reembolsado."""

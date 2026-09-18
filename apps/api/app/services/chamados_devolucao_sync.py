@@ -542,7 +542,9 @@ async def _sync_shopee(session: AsyncSession, ch: Chamado, dev: Devolution | Non
     # escrow do pedido conta a história (compensação paga / reembolso ao comprador).
     tem_disputa = bool(det.get("dispute_reason")) or valor > 0
     if not ch.resolvido and tem_disputa:
-        novos += await _desfecho_shopee(session, ch, client, det, dev_q, status, quando, valor)
+        novos += await _desfecho_shopee(
+            session, ch, client, det, dev_q, status, quando, valor, comp_status=comp_status
+        )
     if status in _SH_STATUS_TXT:
         txt, fim = _SH_STATUS_TXT[status]
         novos += await registrar_recebida(session, ch, cd.PLAT_SHOPEE, txt)
@@ -555,15 +557,28 @@ async def _sync_shopee(session: AsyncSession, ch: Chamado, dev: Devolution | Non
     return novos
 
 
+async def _disputa_registrada_em(session: AsyncSession, ch: Chamado) -> datetime | None:
+    """Quando a NOSSA disputa entrou na Shopee (abertura enviada pela API)."""
+    ab = await cd.mensagem_abertura(session, ch)
+    if ab is None or ab.status != "enviada":
+        return None
+    return ab.enviada_at or ab.created_at
+
+
 async def _desfecho_shopee(
     session: AsyncSession, ch: Chamado, client, det: dict, dev_q: Devolution,
-    status: str, quando: datetime | None, valor: float,
+    status: str, quando: datetime | None, valor: float, *, comp_status: str = "",
 ) -> int:
     """Desfecho da disputa pelo escrow do pedido (uma leitura):
     - compensação paga → ganhamos, fecha com o valor recuperado;
     - `compensation_amount` no return sem ajuste no escrow ainda → ganhamos também;
-    - comprador reembolsado e nada pra loja → "reembolso pago"; passada a carência
-      (`_SH_PERDEMOS_CARENCIA`) ou com o return CLOSED → perdemos, fecha;
+    - comprador reembolsado DEPOIS da disputa e nada pra loja → "reembolso pago";
+      passada a carência (`_SH_PERDEMOS_CARENCIA`) ou com o return CLOSED →
+      perdemos, fecha — a menos que o pedido de compensação siga em análise
+      (`seller_compensation_status` REQUESTED: a Shopee ainda não decidiu);
+    - reembolso ANTERIOR à disputa (só reembolso já pago quando contestamos) não
+      é resposta a ela: 18/09 (289545) o chamado fechou como perdido 7 s depois
+      de aberto porque o reembolso era de 3 dias antes;
     - CLOSED sem reembolso ao comprador → ganhamos.
     Escrow indisponível = não decide (o resto do sync vale)."""
     oid = (dev_q.pedido_marketplace or ch.pedido_marketplace or det.get("order_sn") or "").strip()
@@ -602,12 +617,17 @@ async def _desfecho_shopee(
             chamados_svc.set_status_plataforma(ch, chamados_svc.STATUS_GANHAMOS, quando)
             return await registrar_recebida(session, ch, cd.PLAT_SHOPEE, _SH_SEM_REEMBOLSO_TXT)
         return 0
+    disputa_em = await _disputa_registrada_em(session, ch)
+    if reembolsado_em is not None and disputa_em is not None and reembolsado_em < disputa_em:
+        return 0  # reembolso de antes da disputa: a Shopee ainda não respondeu
     chamados_svc.set_status_plataforma(
         ch, chamados_svc.STATUS_REEMBOLSO_PAGO, reembolsado_em or quando
     )
     avisou = await registrar_recebida(session, ch, cd.PLAT_SHOPEE, _SH_REEMBOLSO_SEM_COMP_TXT)
     desde = ch.status_plataforma_at or datetime.now(UTC)
-    if status != "CLOSED" and datetime.now(UTC) - desde < _SH_PERDEMOS_CARENCIA:
+    if status != "CLOSED" and (
+        datetime.now(UTC) - desde < _SH_PERDEMOS_CARENCIA or comp_status == "REQUESTED"
+    ):
         return int(avisou)
     novos = int(avisou) + await registrar_recebida(session, ch, cd.PLAT_SHOPEE, _SH_PERDEMOS_TXT)
     chamados_svc.set_status_plataforma(ch, chamados_svc.STATUS_PERDEMOS, desde)
