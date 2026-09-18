@@ -78,6 +78,53 @@ STATUS_HUMANO = "humano"  # cérebro pediu gente
 STATUS_FILA = "fila"  # abertura/réplica ainda na fila do robô
 STATUS_FALHOU = "falhou"  # último envio falhou
 STATUS_SEM_ACOMPANHAMENTO = "sem_acompanhamento"  # registrado à mão, nada consulta a plataforma
+STATUS_ESPERANDO_LIBERAR = "esperando_liberar"  # a plataforma ainda não libera abrir/contestar
+
+# 18/09 (Eduardo: "está uma zona, precisamos dos status verdadeiros"): o erro da
+# última mensagem nossa diz DE QUEM é a vez — e a coluna tem que dizer isso.
+# A plataforma ainda não liberou (o retry de hora em hora resolve sozinho):
+ERROS_ESPERA_PLATAFORMA = frozenset({
+    "shopee_motivo_indisponivel", "shopee_aguardando_pacote", "tiktok_aguardando_pacote",
+    "tiktok_recusa_bloqueada", "tiktok_arbitragem", "return_review_indisponivel",
+})
+# Falta algo que só gente resolve (foto, quebra-cabeça, login, tarefa sem API):
+ERROS_PEDEM_HUMANO = frozenset({
+    "devolucao_sem_foto", "devolucao_motivo_sem_chamado", "devolucao_sem_pedido_marketplace",
+    "devolucao_sem_claim", "devolucao_nao_encontrada", "shopee_captcha_humano",
+    "plataforma_sem_api", "plataforma_sem_api_replica", "sem_perfil_adspower", "perfil_deslogado",
+})
+# Texto curto que a coluna mostra embaixo do status.
+MOTIVO_DO_ERRO = {
+    "shopee_motivo_indisponivel": "Shopee ainda não libera o motivo da contestação",
+    "shopee_aguardando_pacote": "pacote da devolução ainda em trânsito",
+    "tiktok_aguardando_pacote": "pacote da devolução ainda em trânsito",
+    "tiktok_recusa_bloqueada": "TikTok ainda não libera a recusa",
+    "tiktok_arbitragem": "em arbitragem na TikTok",
+    "return_review_indisponivel": "ML ainda não libera a revisão",
+    "devolucao_sem_foto": "falta foto na devolução",
+    "devolucao_motivo_sem_chamado": "motivo não abre chamado nessa plataforma",
+    "devolucao_sem_pedido_marketplace": "falta o nº do pedido no marketplace",
+    "devolucao_sem_claim": "sem reclamação aberta no ML",
+    "devolucao_nao_encontrada": "devolução não encontrada",
+    "shopee_captcha_humano": "formulário pronto — falta o quebra-cabeça",
+    "plataforma_sem_api": "tarefa da equipe (plataforma sem API)",
+    "plataforma_sem_api_replica": "réplica sem API — responder no Seller Center",
+    "sem_perfil_adspower": "conta sem perfil no AdsPower",
+    "perfil_deslogado": "perfil do AdsPower deslogado",
+}
+# Falha que o acompanhamento já segue (contestada à mão, prazo, caso encerrado):
+# não é "envio falhou" pro operador.
+ERROS_ACOMPANHADOS = frozenset({
+    "shopee_ja_contestada", "shopee_prazo_contestacao_esgotado", "shopee_devolucao_encerrada",
+    "tiktok_ja_recusada", "tiktok_devolucao_encerrada", "ml_claim_encerrada",
+    "ml_claim_encerrada_sem_prejuizo",
+})
+
+
+def _erro_pede_humano(erro: str) -> bool:
+    e = (erro or "").strip()
+    # o robô da página do ML grava a frase inteira ("tem foto anexada: …")
+    return e in ERROS_PEDEM_HUMANO or e.startswith("tem foto anexada")
 STATUS_FINAIS = frozenset({STATUS_GANHAMOS, STATUS_PERDEMOS, STATUS_ENCERRADO})
 
 
@@ -693,44 +740,84 @@ def status_da_aba(
     ultima_fala: ChamadoMensagem | None,
     ultima_analise: ChamadoMensagem | None,
     analise_pede_humano: bool,
+    analise_pede_esperar: bool = False,
 ) -> tuple[str, datetime | None]:
-    """(código, desde quando) que a coluna Status mostra pra linha.
+    """(código, desde quando) da coluna Status — ver `status_e_motivo_da_aba`."""
+    codigo, quando, _motivo = status_e_motivo_da_aba(
+        ch,
+        ultima_fala=ultima_fala,
+        ultima_analise=ultima_analise,
+        analise_pede_humano=analise_pede_humano,
+        analise_pede_esperar=analise_pede_esperar,
+    )
+    return codigo, quando
 
-    `ultima_fala` = última mensagem enviada/recebida (qualquer status de envio);
-    `ultima_analise` = última análise do cérebro, `analise_pede_humano` se ela
-    terminou em "precisa de humano". Ordem: resolvido > cérebro pediu gente (e
-    ninguém falou depois) > status oficial da API (uma resposta da plataforma
-    mais nova que ele vira "respondeu" até a gente replicar) > quem falou por
-    último > nada consulta a plataforma."""
+
+def status_e_motivo_da_aba(
+    ch: Chamado,
+    *,
+    ultima_fala: ChamadoMensagem | None,
+    ultima_analise: ChamadoMensagem | None,
+    analise_pede_humano: bool,
+    analise_pede_esperar: bool = False,
+) -> tuple[str, datetime | None, str | None]:
+    """(código, desde quando, motivo curto) que a coluna Status mostra.
+
+    Ordem (18/09 — a coluna diz DE QUEM é a vez, de verdade):
+      1. resolvido → ganhamos / perdemos / encerrado;
+      2. o cérebro pediu gente e ninguém falou depois → precisa de humano;
+      3. a NOSSA última mensagem não saiu: o erro dela diz o porquê —
+         plataforma ainda não libera → esperando a plataforma liberar;
+         falta foto/quebra-cabeça/login/tarefa sem API → precisa de humano;
+         sem erro → na fila (robô ou API); falhou de verdade → envio falhou;
+      4. status oficial da API (resposta mais nova que ele → respondeu);
+      5. a plataforma falou por último → respondeu, a menos que o robô já leu
+         e decidiu aguardar (antes a linha ficava "respondeu" pra sempre);
+      6. nós falamos por último → aguardando plataforma."""
     if ch.resolvido:
         if ch.status_plataforma in (STATUS_GANHAMOS, STATUS_PERDEMOS):
-            return ch.status_plataforma, ch.status_plataforma_at or ch.resolvido_at
-        return STATUS_ENCERRADO, ch.resolvido_at
+            return ch.status_plataforma, ch.status_plataforma_at or ch.resolvido_at, None
+        return STATUS_ENCERRADO, ch.resolvido_at, None
     fala_em = _quando(ultima_fala)
-    if (
-        analise_pede_humano
-        and ultima_analise is not None
-        and (fala_em is None or ultima_analise.created_at >= fala_em)
-    ):
-        return STATUS_HUMANO, ultima_analise.created_at
+    analise_depois = (
+        ultima_analise is not None and (fala_em is None or ultima_analise.created_at >= fala_em)
+    )
+    if analise_pede_humano and analise_depois:
+        return STATUS_HUMANO, ultima_analise.created_at, "o robô pediu revisão humana"
+    if ultima_fala is not None and ultima_fala.direcao == "enviada":
+        erro = (ultima_fala.erro or "").strip()
+        st = ultima_fala.status
+        if st in ("pendente", "enviando"):
+            if erro in ERROS_ESPERA_PLATAFORMA:
+                return STATUS_ESPERANDO_LIBERAR, fala_em, MOTIVO_DO_ERRO.get(erro)
+            if _erro_pede_humano(erro):
+                return STATUS_HUMANO, fala_em, MOTIVO_DO_ERRO.get(erro, erro[:80])
+            quem = "na fila do robô" if (ultima_fala.canal or "") == "robo" else "saindo pela API"
+            return STATUS_FILA, fala_em, quem
+        if st == "falhou":
+            if _erro_pede_humano(erro):
+                return STATUS_HUMANO, fala_em, MOTIVO_DO_ERRO.get(erro, erro[:80])
+            if erro not in ERROS_ACOMPANHADOS:
+                return STATUS_FALHOU, fala_em, erro[:80] or None
+        if st == "registrada" and _erro_pede_humano(erro):
+            return STATUS_HUMANO, fala_em, MOTIVO_DO_ERRO.get(erro, erro[:80])
     if ch.status_plataforma:
         if (
             ultima_fala is not None
             and ultima_fala.direcao == "recebida"
             and fala_em is not None
             and (ch.status_plataforma_at is None or fala_em > ch.status_plataforma_at)
+            and not (analise_pede_esperar and analise_depois)
         ):
-            return STATUS_RESPONDEU, fala_em
-        return ch.status_plataforma, ch.status_plataforma_at
+            return STATUS_RESPONDEU, fala_em, None
+        return ch.status_plataforma, ch.status_plataforma_at, None
     if ultima_fala is None:
-        return STATUS_SEM_ACOMPANHAMENTO, None
+        return STATUS_SEM_ACOMPANHAMENTO, None, None
     if ultima_fala.direcao == "recebida":
-        return STATUS_RESPONDEU, fala_em
-    if ultima_fala.status == "pendente":
-        return STATUS_FILA, fala_em
-    if ultima_fala.status == "falhou":
-        return STATUS_FALHOU, fala_em
-    return STATUS_AGUARDANDO, fala_em
+        if analise_pede_esperar and analise_depois:
+            return STATUS_AGUARDANDO, ultima_analise.created_at, "o robô leu a resposta e decidiu aguardar"
+        return STATUS_RESPONDEU, fala_em, None
+    return STATUS_AGUARDANDO, fala_em, None
 
 
 def _quando(m: ChamadoMensagem | None) -> datetime | None:

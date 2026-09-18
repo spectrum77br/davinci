@@ -201,12 +201,15 @@ async def _to_out(session: AsyncSession, rows: list[Chamado]) -> list[ChamadoOut
             o.ultima_resposta_autor = u.autor_nome
         analises = [m for m in msgs if m.tipo == "analise"]
         ultima_analise = analises[-1] if analises else None
-        o.status_aba, o.status_aba_at = svc.status_da_aba(
+        o.status_aba, o.status_aba_at, o.status_aba_motivo = svc.status_e_motivo_da_aba(
             r,
             ultima_fala=falas[-1] if falas else None,
             ultima_analise=ultima_analise,
             analise_pede_humano=bool(
                 ultima_analise and ultima_analise.texto.endswith(_ACAO_TXT["humano"])
+            ),
+            analise_pede_esperar=bool(
+                ultima_analise and ultima_analise.texto.endswith(_ACAO_TXT["esperar"])
             ),
         )
         o.auto_proximo_envio_at = svc.auto_proximo_envio(r)

@@ -42,7 +42,8 @@ const ORIGENS: { value: Origem; label: string }[] = [
 ]
 const CANAIS: { value: Canal; label: string; hint: string }[] = [
   { value: 'manual', label: 'manual', hint: 'só registra no histórico' },
-  { value: 'api', label: 'API ML', hint: 'mediação do Mercado Livre via API' },
+  // 17/09: era "API ML" — aparecia assim em linha de TikTok/Shopee e confundia.
+  { value: 'api', label: 'API', hint: 'mediação/disputa pela API da plataforma (ML, Shopee, TikTok)' },
   { value: 'robo', label: 'robô', hint: 'formulário/protocolo — fila do robô' },
 ]
 // Ao fechar: Logística → Resolvido ou Perdimento (célula M2 da planilha).
@@ -53,6 +54,9 @@ const STATUS_ABA: { value: string; label: string; cls: string; hint: string }[] 
   { value: 'humano', label: 'Precisa de humano', cls: 'bg-red-500/15 text-red-700 dark:text-red-300', hint: 'o robô não soube o que fazer com a última resposta da plataforma' },
   { value: 'prova', label: 'Pediu prova', cls: 'bg-orange-500/15 text-orange-700 dark:text-orange-300', hint: 'a Shopee pediu evidência extra na disputa' },
   { value: 'aguardando', label: 'Aguardando plataforma', cls: 'bg-sky-500/15 text-sky-700 dark:text-sky-300', hint: 'nós falamos por último — a bola está com a plataforma' },
+  // 18/09: a plataforma ainda não deixa abrir/contestar (motivo indisponível, pacote em
+  // trânsito). Não é fila do robô nem precisa de gente — o sistema tenta de hora em hora.
+  { value: 'esperando_liberar', label: 'Esperando plataforma liberar', cls: 'bg-sky-500/10 text-sky-700 dark:text-sky-300', hint: 'a plataforma ainda não libera abrir/contestar (motivo indisponível, pacote em trânsito) — o sistema tenta de hora em hora' },
   { value: 'em_analise', label: 'Em análise', cls: 'bg-violet-500/15 text-violet-700 dark:text-violet-300', hint: 'disputa/mediação em julgamento pela plataforma' },
   { value: 'reembolso_pago', label: 'Reembolso pago', cls: 'bg-amber-500/15 text-amber-700 dark:text-amber-300', hint: 'a Shopee reembolsou o comprador; se a compensação à loja não vier em 24 h, conta como perdido' },
   { value: 'fila', label: 'Na fila do robô', cls: 'bg-muted text-muted-foreground', hint: 'abertura/réplica ainda não saiu' },
@@ -140,6 +144,7 @@ type ChamadoRow = {
   status_plataforma_at: string | null
   status_aba: string | null
   status_aba_at: string | null
+  status_aba_motivo?: string | null
   // Última FALA real (nossa ou da plataforma) — coluna Últ. resposta.
   ultima_resposta_at: string | null
   ultima_resposta_direcao: 'enviada' | 'recebida' | null
@@ -220,7 +225,7 @@ const ERROS: Record<string, string> = {
   chamado_anexo_tipo_invalido: 'anexo precisa ser imagem (png/jpg/webp/gif)',
   chamado_anexo_muito_grande: 'imagem acima de 8 MB',
   chamado_sem_numero: 'informe o nº do chamado antes de enviar pela API',
-  chamado_nao_ml: 'canal API só vale pra pedidos do Mercado Livre',
+  chamado_nao_ml: 'fora da devolução, a réplica pela API só existe no Mercado Livre — em Shopee/TikTok responda pelo Seller Center (canal robô ou manual)',
   chamado_sem_integracao_ml: 'conta sem integração ML no DaVinci',
   chamado_encerrado: 'o chamado já está encerrado no Mercado Livre',
   chamado_sem_acao: 'o ML não permite mensagem nesse chamado agora',
@@ -338,6 +343,9 @@ function rotuloTipo(m: Mensagem): string {
   if (m.direcao === 'sistema') return 'sistema'
   if (m.direcao === 'recebida') return m.tipo === 'analise' ? 'análise do robô' : 'plataforma'
   if (m.tipo === 'replica_auto') return 'réplica automática'
+  // 17/09 (Amazon "não tem nem nexo"): nota de plataforma sem API não foi enviada a
+  // ninguém — é tarefa pra equipe, não abertura.
+  if (m.tipo === 'abertura' && m.erro === 'plataforma_sem_api') return 'tarefa da equipe (sem API)'
   if (m.tipo === 'abertura') return 'abertura na plataforma'
   return 'réplica'
 }
@@ -819,6 +827,7 @@ async function enviarReplica() {
     }
     if (!row.resolvido && (row.status_aba === 'respondeu' || row.status_aba === 'humano' || row.status_aba === 'aguardando' || row.status_aba === 'fila' || row.status_aba === 'falhou' || row.status_aba === 'sem_acompanhamento')) {
       row.status_aba = m.status === 'pendente' ? 'fila' : m.status === 'falhou' ? 'falhou' : 'aguardando'
+      row.status_aba_motivo = null
       row.status_aba_at = m.enviada_at || m.created_at
     }
     if (m.status === 'falhou') toasts.warning('Réplica registrada, mas o envio falhou', ERROS[m.erro || ''] || m.erro || '')
@@ -1181,9 +1190,11 @@ async function reabrir(row: ChamadoRow) {
             <td class="px-2 py-1 w-[1%] max-w-[210px] bg-amber-50/40 dark:bg-amber-900/10">
               <div class="space-y-0.5">
                 <div class="flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
-                  <span class="inline-block rounded px-1.5 py-0.5 text-[11px] font-medium whitespace-nowrap" :class="statusInfo(row).cls" :title="statusInfo(row).hint">{{ statusInfo(row).label }}</span>
+                  <span class="inline-block rounded px-1.5 py-0.5 text-[11px] font-medium whitespace-nowrap" :class="statusInfo(row).cls" :title="row.status_aba_motivo ? `${statusInfo(row).label}: ${row.status_aba_motivo}` : statusInfo(row).hint">{{ statusInfo(row).label }}</span>
                   <span v-if="mostraDataStatus(row)" class="text-[11px] text-muted-foreground whitespace-nowrap">{{ fmtCurto(row.status_aba_at) }}</span>
                 </div>
+                <!-- 18/09: o porquê do status (falta foto, quebra-cabeça, Shopee ainda não libera…) -->
+                <div v-if="row.status_aba_motivo" class="text-[11px] leading-tight text-muted-foreground truncate" :title="row.status_aba_motivo">{{ row.status_aba_motivo }}</div>
                 <div v-if="row.ultima_resposta_at" class="text-[11px] whitespace-nowrap" :class="row.ultima_resposta_direcao === 'recebida' ? 'text-orange-600 dark:text-orange-400' : 'text-emerald-700 dark:text-emerald-300'" :title="`última resposta: ${fmtDateTime(row.ultima_resposta_at)} · ${quemRespondeu(row)}`">
                   <span v-if="mostraDataStatus(row)" class="text-muted-foreground">últ. </span>{{ fmtCurto(row.ultima_resposta_at) }} · {{ quemRespondeu(row) }}
                 </div>

@@ -85,6 +85,8 @@ class ChamadoOut(BaseModel):
     status_plataforma_at: datetime | None = None
     status_aba: str | None = None
     status_aba_at: datetime | None = None
+    # 18/09: por que está nesse status ("falta foto na devolução", "Shopee ainda não libera…")
+    status_aba_motivo: str | None = None
     # Última FALA real (nossa ou da plataforma; não análise nem evento) —
     # coluna "Últ. resposta": quando, `enviada` (nós) | `recebida` (plataforma), quem.
     ultima_resposta_at: datetime | None = None
