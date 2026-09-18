@@ -1911,12 +1911,12 @@ async function backfillAddresses() {
         {{ acompError }}
       </div>
 
-      <div class="grid grid-cols-2 lg:grid-cols-4 gap-3">
-        <StatCard :label="tab === 'fraude' ? 'Casos de fraude' : 'Pedidos em devolução'" :value="acompTotalPedidos" :icon="tab === 'fraude' ? ShieldAlert : PackageSearch" />
-        <StatCard label="Sem rastreio" :value="acompSemRastreio" :icon="AlertCircle" tone="warning" />
-        <StatCard label="Sem localização" :value="acompSemLocalizacao" :icon="Clock" tone="warning" />
-        <StatCard label="Parados 15+ dias" :value="acompParados15" :icon="Clock" tone="danger" />
-        <StatCard label="Responder em 24 h" :value="acompPrazoUrgente" :icon="AlertTriangle" tone="danger" hint="prazo da plataforma" />
+      <div class="grid grid-cols-2 lg:grid-cols-5 gap-2">
+        <StatCard :label="tab === 'fraude' ? 'Casos de fraude' : 'Pedidos em devolução'" :value="acompTotalPedidos" :icon="tab === 'fraude' ? ShieldAlert : PackageSearch" compact />
+        <StatCard label="Sem rastreio" :value="acompSemRastreio" :icon="AlertCircle" tone="warning" compact />
+        <StatCard label="Sem localização" :value="acompSemLocalizacao" :icon="Clock" tone="warning" compact />
+        <StatCard label="Parados 15+ dias" :value="acompParados15" :icon="Clock" tone="danger" compact />
+        <StatCard label="Responder em 24 h" :value="acompPrazoUrgente" :icon="AlertTriangle" tone="danger" hint="prazo da plataforma" compact />
       </div>
 
       <div class="flex flex-wrap items-center gap-2">
@@ -2259,10 +2259,10 @@ async function backfillAddresses() {
       {{ error }}
     </div>
 
-    <div v-show="tab === 'lancamentos'" class="grid grid-cols-2 lg:grid-cols-3 gap-3">
-      <StatCard label="Total devoluções" :value="qtd(totalPedidos, 'pedido', 'pedidos')" :hint="qtd(total, 'item', 'itens')" :icon="Undo2" />
-      <StatCard label="Enviada para Reembolso" :value="qtd(reembolsoPedidos, 'pedido', 'pedidos')" :hint="qtd(reembolsoItens, 'item', 'itens')" :icon="Clock" tone="warning" />
-      <StatCard label="Custo manutenção (pág.)" :value="brl(totalCustoManutencao)" tone="danger" />
+    <div v-show="tab === 'lancamentos'" class="grid grid-cols-2 lg:grid-cols-3 gap-2">
+      <StatCard label="Total devoluções" :value="qtd(totalPedidos, 'pedido', 'pedidos')" :hint="qtd(total, 'item', 'itens')" :icon="Undo2" compact />
+      <StatCard label="Enviada para Reembolso" :value="qtd(reembolsoPedidos, 'pedido', 'pedidos')" :hint="qtd(reembolsoItens, 'item', 'itens')" :icon="Clock" tone="warning" compact />
+      <StatCard label="Custo manutenção (pág.)" :value="brl(totalCustoManutencao)" tone="danger" compact />
     </div>
 
     <div v-if="tab === 'lancamentos' && addOpen" class="rounded-md border bg-background">

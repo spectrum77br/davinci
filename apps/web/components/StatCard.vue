@@ -8,6 +8,9 @@ const props = defineProps<{
   hint?: string
   icon?: any
   tone?: 'default' | 'success' | 'warning' | 'danger'
+  // 18/09 (Vinicius: "tô achando muito grande"): versão enxuta pros resumos que
+  // ficam em cima de uma tabela (Chamados, Devoluções) — menos altura, número menor.
+  compact?: boolean
 }>()
 
 // 18/09: `tone` passou a colorir o número (Chamados e Devoluções já passavam o
@@ -27,13 +30,13 @@ const corValor = computed(() => {
 </script>
 
 <template>
-  <div class="rounded-xl border bg-card p-4 flex flex-col gap-2">
-    <div class="flex items-center gap-2">
-      <component :is="icon" v-if="icon" class="size-[18px] text-muted-foreground" />
-      <span class="text-xs uppercase tracking-wider font-medium text-muted-foreground">{{ label }}</span>
+  <div class="border bg-card flex flex-col" :class="compact ? 'rounded-lg px-3 py-2 gap-0.5' : 'rounded-xl p-4 gap-2'">
+    <div class="flex items-center gap-1.5 min-w-0">
+      <component :is="icon" v-if="icon" class="shrink-0 text-muted-foreground" :class="compact ? 'size-3.5' : 'size-[18px]'" />
+      <span class="uppercase tracking-wider font-medium text-muted-foreground truncate" :class="compact ? 'text-[10px]' : 'text-xs'" :title="label">{{ label }}</span>
     </div>
     <div class="flex items-end gap-2">
-      <div class="text-2xl font-semibold tracking-tight tabular-nums" :class="corValor">{{ value }}</div>
+      <div class="font-semibold tracking-tight tabular-nums" :class="[compact ? 'text-lg leading-6' : 'text-2xl', corValor]">{{ value }}</div>
       <span
         v-if="delta !== undefined"
         class="inline-flex items-center gap-0.5 text-[11px] font-medium pb-1"
@@ -44,6 +47,6 @@ const corValor = computed(() => {
         {{ Math.abs(delta).toFixed(1) }}%
       </span>
     </div>
-    <div v-if="hint" class="text-xs text-muted-foreground">{{ hint }}</div>
+    <div v-if="hint" class="text-muted-foreground" :class="compact ? 'text-[11px] leading-4 truncate' : 'text-xs'" :title="hint">{{ hint }}</div>
   </div>
 </template>

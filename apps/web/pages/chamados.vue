@@ -1122,20 +1122,20 @@ async function reabrir(row: ChamadoRow) {
     </div>
 
     <!-- resumo (18/09): total do servidor + grupos da coluna Status na página carregada; clicar filtra -->
-    <div v-if="tab === 'chamados'" class="grid grid-cols-2 lg:grid-cols-5 gap-3">
-      <button type="button" class="rounded-xl text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-primary" title="mostrar todos os status" @click="statusFilter = 'all'">
-        <StatCard :label="resumoTotalLabel" :value="total" :icon="MessagesSquare" :hint="resumoPorOrigem || undefined" />
+    <div v-if="tab === 'chamados'" class="grid grid-cols-2 lg:grid-cols-5 gap-2">
+      <button type="button" class="rounded-lg text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-primary" title="mostrar todos os status" @click="statusFilter = 'all'">
+        <StatCard :label="resumoTotalLabel" :value="total" :icon="MessagesSquare" :hint="resumoPorOrigem || undefined" compact />
       </button>
       <button
         v-for="g in resumoGrupos"
         :key="g.key"
         type="button"
-        class="rounded-xl text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+        class="rounded-lg text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-primary"
         :class="statusFilter === `g:${g.key}` ? 'ring-2 ring-primary' : ''"
         :title="statusFilter === `g:${g.key}` ? 'tirar o filtro' : `filtrar: ${g.label}`"
         @click="filtrarGrupo(g.key)"
       >
-        <StatCard :label="g.label" :value="g.n" :icon="g.icon" :tone="g.tone" :hint="g.hint" />
+        <StatCard :label="g.label" :value="g.n" :icon="g.icon" :tone="g.tone" :hint="g.hint" compact />
       </button>
     </div>
 
