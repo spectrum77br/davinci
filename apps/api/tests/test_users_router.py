@@ -276,3 +276,27 @@ async def test_delete_user_soft_deletes(client, make_user, auth_as):
     assert "del@davinci-test.com" in rows
     assert rows["del@davinci-test.com"]["status"] == "suspended"
     assert rows["del@davinci-test.com"]["disabled_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_patch_video_trava_tags_normaliza_e_devolve(client, make_user, auth_as):
+    """Trava de vídeo (17/09): lista de tags da whitelist, normalizada como
+    stock_tags (lowercase, dedupe, desconhecidas fora); [] limpa → null."""
+    admin = await make_user(role=UserRole.ADMIN)
+    target = await make_user(email="factor@davinci-test.com")
+    auth_as(admin)
+    r = await client.patch(
+        f"/api/users/{target.id}",
+        json={
+            "stock_tags": ["mala", "eletro", "cd"],
+            "video_trava_tags": ["Mala", "mala", "eletro", "xx"],
+        },
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["video_trava_tags"] == ["mala", "eletro"]
+    r = await client.get(f"/api/users/{target.id}")
+    assert r.status_code == 200, r.text
+    assert r.json()["video_trava_tags"] == ["mala", "eletro"]
+    r = await client.patch(f"/api/users/{target.id}", json={"video_trava_tags": []})
+    assert r.status_code == 200, r.text
+    assert r.json()["video_trava_tags"] is None

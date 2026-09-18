@@ -19,6 +19,9 @@ type UserDetail = {
   duoke: string | null
   threema: string | null
   stock_tags: string[] | null
+  // Trava de vídeo (17/09): tags cujas solicitações de vídeo trancam a aba
+  // Pedidos deste usuário (subconjunto de stock_tags). null = nunca tranca.
+  video_trava_tags: string[] | null
   commercial_team: 1 | 2 | null
   sales_teams: number[] | null
   marketing_teams: string[] | null
@@ -72,6 +75,7 @@ const form = reactive({
   duoke: '',
   threema: '',
   stock_tags: [] as string[],
+  video_trava_tags: [] as string[],
   commercial_team: null as 1 | 2 | null,
   marketing_teams: [] as string[],
   status: 'pending' as 'pending' | 'active' | 'suspended',
@@ -88,6 +92,7 @@ function resetForm() {
   form.duoke = user.value.duoke || ''
   form.threema = user.value.threema || ''
   form.stock_tags = [...(user.value.stock_tags || [])]
+  form.video_trava_tags = [...(user.value.video_trava_tags || [])]
   form.commercial_team = user.value.commercial_team ?? null
   form.marketing_teams = [...(user.value.marketing_teams || [])]
   form.status = user.value.status
@@ -95,8 +100,21 @@ function resetForm() {
 
 function toggleStockTag(slug: string) {
   const i = form.stock_tags.indexOf(slug)
-  if (i >= 0) form.stock_tags.splice(i, 1)
-  else form.stock_tags.push(slug)
+  if (i >= 0) {
+    form.stock_tags.splice(i, 1)
+    // Sem a tag de estoque o usuário nem vê o pedido — a trava perde o sentido.
+    const j = form.video_trava_tags.indexOf(slug)
+    if (j >= 0) form.video_trava_tags.splice(j, 1)
+  } else {
+    form.stock_tags.push(slug)
+  }
+}
+// Trava de vídeo: só tags que o usuário tem em Tags de Estoque.
+function toggleVideoTravaTag(slug: string) {
+  if (!form.stock_tags.includes(slug)) return
+  const i = form.video_trava_tags.indexOf(slug)
+  if (i >= 0) form.video_trava_tags.splice(i, 1)
+  else form.video_trava_tags.push(slug)
 }
 
 // Os vínculos de acesso são independentes da organização comercial.
@@ -333,6 +351,8 @@ async function saveCadastral() {
     // Operator-of-stock tags — empty array clears (backend treats []
     // and null identically).
     body.stock_tags = [...form.stock_tags]
+    // Trava de vídeo — subconjunto das tags acima; vazio limpa (nunca tranca).
+    body.video_trava_tags = [...form.video_trava_tags]
     // Organização comercial; preserva os vínculos individuais de acesso às lojas.
     body.commercial_team = form.commercial_team
     // Equipe de Marketing (nomes livres — mesma semântica).
@@ -459,6 +479,37 @@ async function removeUser() {
               /controle-estoque e mostra a união de produtos das tags selecionadas.
               <span v-if="form.stock_tags.length">
                 Selecionadas: <code>{{ form.stock_tags.join(', ') }}</code>
+              </span>
+            </p>
+          </div>
+          <!-- Trava de vídeo (Vinicius 17/09): quais solicitações de vídeo
+               (tela Devoluções) trancam a aba Pedidos deste usuário. Só tags
+               que ele tem em Tags de Estoque; vazio = só vê a lista como aviso. -->
+          <div class="md:col-span-2">
+            <Label>Trava de vídeo (aba Pedidos)</Label>
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-1.5 mt-1 border rounded-md p-2 bg-background">
+              <label
+                v-for="opt in STOCK_TAG_OPTIONS"
+                :key="opt.slug"
+                class="inline-flex items-center gap-1.5 text-sm rounded px-1.5 py-0.5"
+                :class="form.stock_tags.includes(opt.slug) ? 'cursor-pointer hover:bg-muted/50' : 'opacity-40 cursor-not-allowed'"
+                :title="form.stock_tags.includes(opt.slug) ? '' : 'Marque primeiro em Tags de Estoque'"
+              >
+                <input
+                  type="checkbox"
+                  :checked="form.video_trava_tags.includes(opt.slug)"
+                  :disabled="!form.stock_tags.includes(opt.slug)"
+                  @change="toggleVideoTravaTag(opt.slug)"
+                />
+                <span>{{ opt.label }}</span>
+              </label>
+            </div>
+            <p class="text-[11px] text-muted-foreground mt-1">
+              Uma solicitação de vídeo (tela Devoluções) pra pedido dessas tags tranca a aba Pedidos
+              do Controle de Estoque deste usuário até ele responder. Vazio = nunca tranca, só vê a
+              lista como aviso. Só dá pra marcar tags que ele tem em Tags de Estoque.
+              <span v-if="form.video_trava_tags.length">
+                Trava por: <code>{{ form.video_trava_tags.join(', ') }}</code>
               </span>
             </p>
           </div>

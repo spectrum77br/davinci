@@ -6,6 +6,8 @@ Cobre:
 - POST /api/devolutions/acompanhamento/{pedido}/video/solicitar → pendente;
 - GET /api/estoque/videos-pendentes só pra quem tem a tag do SKU (cerca da aba
   Pedidos); admin vê tudo; etiqueta_disponivel quando a etiqueta está guardada;
+  `trava` só quando a tag do pedido está em users.video_trava_tags (o login de
+  gerência, com várias tags e nada marcado, vê a pendência só como aviso);
 - POST /api/estoque/videos-pendentes/{pedido}: link (normalizado com https://)
   ou "não tenho o vídeo" + motivo; fora da cerca = 403; não pendente = 404;
 - pedir de novo depois do link (apagou, com motivo) → pendente + refazer_motivo;
@@ -46,6 +48,7 @@ async def _user(
     role: UserRole = UserRole.USER,
     permissions: dict | None = None,
     stock_tags: list[str] | None = None,
+    video_trava_tags: list[str] | None = None,
 ) -> User:
     email = f"{name}-{uuid.uuid4().hex[:6]}@davinci-test.com"
     u = User(
@@ -56,6 +59,7 @@ async def _user(
         status=UserStatus.ACTIVE,
         permissions=permissions or {},
         stock_tags=stock_tags,
+        video_trava_tags=video_trava_tags,
     )
     db.add(u)
     await db.commit()
@@ -135,8 +139,16 @@ async def test_fluxo_solicitar_responder_refazer_sem_video_cancelar(
     schema = get_settings().database_schema
     await _seed(db, schema)
     vini = await _user(db, name="vinicius", permissions=_PERM_DEV)
-    ra = await _user(db, name="azeroth", permissions=_PERM_CE, stock_tags=["ra"])
-    sp = await _user(db, name="coreia", permissions=_PERM_CE, stock_tags=["sp"])
+    ra = await _user(
+        db, name="azeroth", permissions=_PERM_CE, stock_tags=["ra"], video_trava_tags=["ra"]
+    )
+    sp = await _user(
+        db, name="coreia", permissions=_PERM_CE, stock_tags=["sp"], video_trava_tags=["sp"]
+    )
+    # Gerência: vê ra/sp/pi mas não marcou nada em "Trava de vídeo" → só aviso.
+    gerente = await _user(
+        db, name="londres", permissions=_PERM_CE, stock_tags=["ra", "sp", "pi"]
+    )
     try:
         # Antes de pedir: nada pendente, coluna em "solicitar".
         auth_as(vini)
@@ -166,6 +178,15 @@ async def test_fluxo_solicitar_responder_refazer_sem_video_cancelar(
         assert p["solicitado_por"] == "vinicius"
         assert p["etiqueta_disponivel"] is False
         assert p["refazer_motivo"] is None
+        assert p["trava"] is True
+        assert pend["total_trava"] == 1
+
+        # Gerência vê a mesma pendência, mas ela não tranca a aba dela.
+        auth_as(gerente)
+        r = await client.get("/api/estoque/videos-pendentes")
+        assert r.status_code == 200, r.text
+        assert r.json()["total"] == 1 and r.json()["total_trava"] == 0
+        assert r.json()["data"][0]["trava"] is False
 
         auth_as(sp)
         r = await client.get("/api/estoque/videos-pendentes")
@@ -293,6 +314,8 @@ async def test_admin_ve_tudo_e_etiqueta_guardada(client, db: AsyncSession, auth_
         assert r.status_code == 200, r.text
         assert r.json()["total"] == 1
         assert r.json()["data"][0]["etiqueta_disponivel"] is True
+        # Admin nunca tranca.
+        assert r.json()["data"][0]["trava"] is False
         # Admin filtrando uma tag que não é do pedido: some.
         r = await client.get("/api/estoque/videos-pendentes?tag=sp")
         assert r.json()["total"] == 0

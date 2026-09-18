@@ -70,6 +70,11 @@ class User(Base, TimestampMixin):
     # eletro/insumos. Tag-to-SKU mapping lives in services/marketing
     # ... actually in routers/estoque.py (TAG_PATTERNS).
     stock_tags: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
+    # Trava de vídeo (migration 0294, Vinicius 17/09): tags cujas solicitações
+    # de vídeo (tela Devoluções) TRANCAM a aba Pedidos do Controle de Estoque
+    # deste usuário até ele responder. Subconjunto de stock_tags; NULL/[] =
+    # nunca tranca, só vê a lista como aviso. Editado na tela de Usuários.
+    video_trava_tags: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
 
     # Códigos internos de acesso às lojas (multi). Preservam o escopo
     # individual existente; o vínculo vive em StoreInfo.sales_team.

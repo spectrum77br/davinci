@@ -51,6 +51,7 @@ def _to_out(u: User) -> UserOut:
         sales_teams=u.sales_teams or None,
         commercial_team=u.commercial_team,
         marketing_teams=u.marketing_teams or None,
+        video_trava_tags=u.video_trava_tags or None,
         permissions=u.permissions or {},
         has_password=u.password_hash is not None,
         last_login_at=u.last_login_at,
@@ -184,6 +185,7 @@ async def create_user(
         sales_teams=_normalize_sales_teams(body.sales_teams),
         commercial_team=body.commercial_team,
         marketing_teams=_normalize_marketing_teams(body.marketing_teams),
+        video_trava_tags=_normalize_stock_tags(body.video_trava_tags),
         role=UserRole.USER,
         status=UserStatus.PENDING,
         permissions=perms,
@@ -248,6 +250,11 @@ async def patch_user(
     # marketing_teams: nomes livres de equipe. Mesma semântica.
     if "marketing_teams" in data:
         u.marketing_teams = _normalize_marketing_teams(data["marketing_teams"])
+
+    # video_trava_tags (17/09): tags cujas solicitações de vídeo trancam a aba
+    # Pedidos deste usuário. Mesma whitelist/normalização das stock_tags.
+    if "video_trava_tags" in data:
+        u.video_trava_tags = _normalize_stock_tags(data["video_trava_tags"])
 
     await session.commit()
     await session.refresh(u)

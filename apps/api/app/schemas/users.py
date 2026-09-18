@@ -89,6 +89,9 @@ class UserOut(BaseModel):
     sales_teams: list[int] | None = None
     commercial_team: CommercialTeam | None = None
     marketing_teams: list[str] | None = None
+    # Trava de vídeo (17/09): tags cujas solicitações de vídeo trancam a aba
+    # Pedidos deste usuário (subconjunto de stock_tags). null = nunca tranca.
+    video_trava_tags: list[str] | None = None
     permissions: dict
     # Apenas indica se há senha definida — o hash nunca sai da API.
     has_password: bool = False
@@ -121,6 +124,7 @@ class UserCreate(BaseModel):
     sales_teams: list[int] | None = None
     commercial_team: CommercialTeam | None = None
     marketing_teams: list[str] | None = None
+    video_trava_tags: list[str] | None = None
     permissions: Permissions | None = None
 
 
@@ -145,6 +149,9 @@ class UserPatch(BaseModel):
     sales_teams: list[int] | None = None
     commercial_team: CommercialTeam | None = None
     marketing_teams: list[str] | None = None
+    # Trava de vídeo: mesma whitelist/normalização das stock_tags; [] / null
+    # limpa (o usuário passa a só ver a lista como aviso).
+    video_trava_tags: list[str] | None = None
     status: str | None = Field(default=None, pattern="^(pending|active|suspended)$")
 
 

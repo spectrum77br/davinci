@@ -121,6 +121,9 @@ type VideoPendente = {
   refazer_motivo: string | null
   // Etiqueta guardada (pedidos desde 03/08) — botão pra imprimir de novo.
   etiqueta_disponivel: boolean
+  // true = tranca a aba deste usuário (tag marcada em "Trava de vídeo" no
+  // cadastro dele); false = só aviso, responde se quiser.
+  trava: boolean
 }
 
 // ── State ─────────────────────────────────────────────────────────────
@@ -341,10 +344,12 @@ async function refreshConferenciaHoje() {
 }
 
 // ── Vídeos solicitados pela Devoluções (Vinicius 17/09) ───────────────
-// Enquanto houver solicitação pra um pedido da equipe, a aba Pedidos fica
+// Enquanto houver solicitação que TRANCA (tag marcada em "Trava de vídeo" no
+// cadastro do usuário — o backend já diz qual, `trava`), a aba Pedidos fica
 // trancada: "Envie o link do vídeo do pedido abaixo antes de acessar seus
-// pedidos". Independe do dia do filtro. Admin e churchill nunca travam
-// (mesma regra da aba Envios), mas veem a lista pra poder responder.
+// pedidos". As outras pendências da cerca dele são só aviso. Independe do dia
+// do filtro. Admin nunca tranca. Sem passe-livre por e-mail aqui: churchill,
+// londres e cairo obedecem ao cadastro como todo mundo (Vinicius 17/09).
 const videosPendentes = ref<VideoPendente[]>([])
 const videoLinkDraft = reactive<Record<string, string>>({})
 const videoSemMotivoDraft = reactive<Record<string, string>>({})
@@ -366,10 +371,11 @@ async function refreshVideosPendentes() {
 }
 const canAccessPedidos = computed(() => {
   if (isAdmin.value) return true
-  // Mesmo bypass do churchill da aba Envios (ver canAccessEnvios).
-  if (auth.user?.email === 'maconer06@tuta.com') return true
-  return videosPendentes.value.length === 0
+  return !videosPendentes.value.some((v) => v.trava)
 })
+// Há pendência que NÃO tranca junto com as que trancam? Aí vale explicar
+// quais são quais (só nos logins com várias tags, tipo cairo.sa).
+const videosSoAviso = computed(() => videosPendentes.value.some((v) => !v.trava))
 // Etiqueta do pedido de novo, pra achar o vídeo. carimbar=false: não conta
 // como 1ª impressão (o pedido já saiu faz tempo).
 function etiquetaVideoUrl(p: VideoPendente) {
@@ -2185,9 +2191,9 @@ async function conferirTodos() {
          (search + filtros). Tag extraída do SKU no frontend — ver
          extractPedidoTag(). -->
     <!-- Vídeos solicitados pela Devoluções (17/09). Pro operador é uma TRAVA:
-         enquanto houver pedido de vídeo pra um pedido da equipe dele, a aba só
-         mostra esta lista (canAccessPedidos). Admin e churchill não travam,
-         mas veem a mesma lista pra poder responder. -->
+         enquanto houver pedido de vídeo de tag marcada em "Trava de vídeo" no
+         cadastro dele, a aba só mostra esta lista (canAccessPedidos). O resto
+         da cerca dele (e o admin) vê a mesma lista só como aviso. -->
     <div
       v-if="tab === 'pedidos' && videosPendentes.length"
       class="border rounded-md overflow-x-auto"
@@ -2201,6 +2207,9 @@ async function conferirTodos() {
         </p>
         <p class="text-[11px] text-muted-foreground">
           Cole o link do vídeo da expedição de cada pedido. Não tem o vídeo? Clique em "não tenho o vídeo" e diga o motivo.
+          <template v-if="!canAccessPedidos && videosSoAviso">
+            Os pedidos marcados <span class="text-red-600 dark:text-red-400 font-medium">trava</span> são da sua equipe e trancam a aba; os outros são só aviso.
+          </template>
         </p>
       </div>
       <table class="grid-table w-full text-xs border-collapse">
@@ -2229,6 +2238,11 @@ async function conferirTodos() {
               <td class="whitespace-nowrap text-[11px] align-top">
                 <template v-if="i === 0">
                   {{ fmtVideoQuando(p.solicitado_em) }}
+                  <span
+                    v-if="p.trava && !canAccessPedidos"
+                    class="ml-1 inline-block rounded bg-red-100 px-1 py-px text-[9px] font-medium text-red-700 dark:bg-red-900/30 dark:text-red-300"
+                    title="Tag marcada em Trava de vídeo no seu cadastro — tranca a aba até responder"
+                  >trava</span>
                   <div class="text-[9px] text-muted-foreground">{{ p.solicitado_por || '' }}</div>
                   <div
                     v-if="p.refazer_motivo"

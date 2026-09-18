@@ -2316,9 +2316,11 @@ async def estoque_atualizar_bling(
 # Vídeo (routers/devolutions.py: /acompanhamento/{pedido}/video/solicitar).
 # A equipe do SKU — mesma cerca de tag da aba Pedidos (_tags_pedidos) — vê a
 # solicitação aqui e fica travada na aba Pedidos até responder: colar o link
-# do vídeo, ou "não tenho o vídeo" com motivo. Admin e churchill nunca travam
-# (mesma regra da aba Envios; decidido no front). A etiqueta pra reimprimir é
-# a mesma da aba Pedidos (GET /pedidos/{pedido}/etiqueta?carimbar=false).
+# do vídeo, ou "não tenho o vídeo" com motivo. Quem tranca: só as tags marcadas
+# em "Trava de vídeo" no cadastro do usuário (users.video_trava_tags —
+# Vinicius 17/09, depois de o cairo.sa, que tem as 11 tags, travar por tudo);
+# o resto da lista é aviso. Admin nunca tranca. A etiqueta pra reimprimir é a
+# mesma da aba Pedidos (GET /pedidos/{pedido}/etiqueta?carimbar=false).
 
 
 class VideoRespostaIn(BaseModel):
@@ -2361,8 +2363,15 @@ async def list_videos_pendentes(
     """Solicitações de vídeo ainda sem resposta, só dos pedidos que o chamador
     enxerga na aba Pedidos (cerca de tag pelo SKU). Independe do filtro de
     dia: a trava vale enquanto houver pendência. Uma entrada por PEDIDO, com
-    os itens dentro (a tela mostra pedido, cliente, SKU, qtd e etiqueta)."""
+    os itens dentro (a tela mostra pedido, cliente, SKU, qtd e etiqueta).
+    `trava` = True quando algum item cai numa tag marcada em "Trava de vídeo"
+    no cadastro do chamador (tranca a aba); False = só aviso."""
     tags = _tags_pedidos(user, tag)
+    trava_tags: set[str] = set()
+    if user.role != UserRole.ADMIN:
+        trava_tags = {
+            t.lower() for t in (user.video_trava_tags or []) if isinstance(t, str)
+        }
     pendentes = (
         await session.execute(
             select(DevolucaoRastreio)
@@ -2447,20 +2456,27 @@ async def list_videos_pendentes(
     data = []
     for r in pendentes:
         cab = cabecalho.get(r.pedido_bling, {})
+        itens = itens_por_pedido.get(r.pedido_bling, [])
+        tags_pedido = {_classify_sku_tag(i["sku"]) for i in itens} - {None}
         data.append({
             "pedido_bling": r.pedido_bling,
             "pedido_marketplace": cab.get("pedido_marketplace", ""),
             "loja": cab.get("loja", ""),
             "cliente": cab.get("cliente", ""),
-            "itens": itens_por_pedido.get(r.pedido_bling, []),
+            "itens": itens,
             "solicitado_em": r.video_solicitado_em.isoformat() if r.video_solicitado_em else None,
             "solicitado_por": (
                 solicitantes.get(r.video_solicitado_por) if r.video_solicitado_por else None
             ),
             "refazer_motivo": r.video_refazer_motivo,
             "etiqueta_disponivel": r.pedido_bling in com_etiqueta,
+            # Tranca a aba deste usuário? Só se algum item cai numa tag marcada
+            # em "Trava de vídeo" no cadastro dele.
+            "trava": bool(tags_pedido & trava_tags),
         })
-    return {"data": data, "total": len(data)}
+    # Os que trancam primeiro (é o que a pessoa precisa responder pra liberar).
+    data.sort(key=lambda d: (not d["trava"], d["solicitado_em"] or ""))
+    return {"data": data, "total": len(data), "total_trava": sum(1 for d in data if d["trava"])}
 
 
 @router.post("/videos-pendentes/{pedido_bling}")
