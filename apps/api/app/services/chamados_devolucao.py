@@ -159,6 +159,11 @@ ENFILEIRAR = True
 # Disparo reagendado quando já existe um pro mesmo chamado (foto chegando logo
 # depois do create): espera as fotos terminarem de subir.
 DISPARO_ADIADO = timedelta(seconds=45)
+# 18/09 (293839, TikTok Mini, Golpe): a tela salva a devolução e SÓ DEPOIS sobe as
+# fotos, uma por uma (13:30:51 → 13:30:55–13:31:01). O disparo saía no mesmo segundo
+# do create, com 0 foto, e a TikTok só aceita imagem uma vez na recusa. O PRIMEIRO
+# disparo agora espera esta janela, pra as fotos do mesmo cadastro irem junto.
+JANELA_FOTOS = timedelta(seconds=60)
 
 
 class _PendenteError(Exception):
@@ -1610,6 +1615,7 @@ async def agendar_disparo(session: AsyncSession, ch: Chamado, dev: Devolution) -
                 "chamado_devolucao_disparar",
                 str(ch.id),
                 _job_id=f"chamado_devolucao_disparar:{ch.id}",
+                _defer_by=JANELA_FOTOS,
             )
             if job is None:
                 # 17/09 (292317): o id fixo já existia (disparo do create rodando, ou

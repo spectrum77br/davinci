@@ -1805,10 +1805,43 @@ async def test_agendar_disparo_foto_logo_depois_do_create_reagenda(monkeypatch):
     monkeypatch.setattr(svc, "datetime", _Relogio)
     ch = SimpleNamespace(id=uuid4())
     await svc.agendar_disparo(None, ch, None)  # create
-    assert len(chamadas) == 1 and chamadas[0]["defer"] is None
+    # 18/09 (293839): o 1º disparo já espera a janela das fotos do mesmo cadastro
+    assert len(chamadas) == 1 and chamadas[0]["defer"] == svc.JANELA_FOTOS
     await svc.agendar_disparo(None, ch, None)  # 1ª foto: id fixo já existe → adiado
     assert len(chamadas) == 3
     assert chamadas[2]["id"] != chamadas[0]["id"] and chamadas[2]["id"].startswith(f"chamado_devolucao_disparar:{ch.id}:")
     assert chamadas[2]["defer"] == svc.DISPARO_ADIADO
     await svc.agendar_disparo(None, ch, None)  # 2ª foto no mesmo instante: mesma vaga adiada, nada novo roda
     assert [c["id"] for c in chamadas].count(chamadas[2]["id"]) == 2
+
+
+async def test_primeiro_disparo_espera_as_fotos_do_mesmo_cadastro(db, monkeypatch):
+    """293839 (18/09, TikTok Mini, Golpe): a devolução era salva às 13:30:51, o
+    chamado saía no MESMO segundo com 0 foto, e as 5 fotos chegavam de 13:30:55 a
+    13:31:01. O primeiro disparo agora vai pra fila com a janela das fotos."""
+    chamadas: list[dict] = []
+
+    class _Pool:
+        async def enqueue_job(self, nome, *args, **kw):
+            chamadas.append({"nome": nome, **kw})
+            return object()
+
+    async def _pool():
+        return _Pool()
+
+    import app.worker_pool as wp
+
+    monkeypatch.setattr(svc, "ENFILEIRAR", True)
+    monkeypatch.setattr(wp, "get_arq_pool", _pool)
+    ch = Chamado(pedido_bling="293839", plataforma="TikTok", conta="TikTok Mini",
+                 origem="devolucao", canal="api", data=datetime.now(UTC).date())
+    db.add(ch)
+    await db.flush()
+    dev = Devolution(conta="TikTok Mini", motivo_devolucao="Golpe")
+
+    await svc.agendar_disparo(db, ch, dev)
+
+    assert len(chamadas) == 1
+    assert chamadas[0]["nome"] == "chamado_devolucao_disparar"
+    assert chamadas[0]["_defer_by"] == svc.JANELA_FOTOS
+    assert svc.JANELA_FOTOS.total_seconds() >= 30
