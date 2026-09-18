@@ -1958,7 +1958,9 @@ async def test_tiktok_so_reembolso_lancamento_responde_o_caso_do_vigia(client, m
     txt = rj["comment"]
     assert "entregue em 16/09 17:00" in txt and "J&T Express Brazil" in txt and "999882054197026" in txt, txt
     assert "caixa de sabonete" in txt and "https://drive.x/video-296936" in txt and "Peso conferido" in txt, txt
-    assert rj["images"] is None and rj["idem"]
+    # sem foto na linha, vai o cartão do vídeo (QR + link) como imagem (18/09)
+    assert [i["image_id"] for i in rj["images"]] == ["tos/video-expedicao.png"] and rj["idem"]
+    assert "foto(s) da expedição" not in txt  # o cartão não conta como foto
     ch = (await db.execute(select(Chamado).where(Chamado.pedido_bling == "296936"))).scalar_one()
     assert ch.chamado == RID_REEMB and ch.canal == "api" and ch.origem == "devolucao"
     hist = list((await db.execute(select(ChamadoMensagem.texto).where(ChamadoMensagem.chamado_id == ch.id,

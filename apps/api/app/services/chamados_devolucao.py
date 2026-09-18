@@ -39,7 +39,13 @@ Fluxo:
    `api` (no ML o cron fecha sozinho quando o claim encerrar).
 
 Vídeo: nenhuma das APIs aceita vídeo do vendedor; o link do vídeo entra no
-texto e o arquivo fica guardado na linha.
+texto e o arquivo fica guardado na linha. Sem NENHUMA foto e com o link do
+vídeo (coluna Vídeo do Acompanhamento ou "Link envio"), o disparo gera o
+CARTÃO DO VÍDEO — imagem com QR code + link (`devolucao_cartao_video`) — e
+manda como foto, porque Shopee/TikTok/ML exigem imagem no módulo de evidência
+(Vinicius 18/09, 289545: "faz um PDF escrito 'segue vídeo da expedição, clique
+para ver o vídeo' e manda o link"). O cartão fica anexado na linha (sem
+`created_by`) e é trocado quando o link muda.
 """
 
 from __future__ import annotations
@@ -60,12 +66,14 @@ from app.models import (
     DevolucaoAnexo,
     DevolucaoRastreio,
     Devolution,
+    NfEtiquetaArquivo,
     StoreInfo,
     User,
     UserRole,
 )
 from app.services import chamados as chamados_svc
 from app.services import chamados_tiktok_reembolso as tiktok_reembolso
+from app.services import devolucao_cartao_video as cartao_video
 from app.services import logistica_meli, logistica_rules, logistica_shopee, logistica_tiktok
 from app.services.marketplaces.ml import MercadoLivreClient
 from app.services.marketplaces.shopee import ShopeeClient
@@ -158,6 +166,8 @@ PRAZO_PENDENTE = timedelta(days=45)
 # Namespace pro idempotency_key do reject da TikTok (mesmo chamado+return →
 # mesma chave → a TikTok não duplica a decisão num retry).
 _NS_TIKTOK = UUID("6f2a9c1e-5b3d-4c8e-9a1f-2d7e8b4c3a10")
+# Namespace do id do cartão do vídeo (pedido + link → mesmo id em todo disparo).
+_NS_CARTAO_VIDEO = UUID("b7c1d5a2-3e4f-4a6b-8c9d-0e1f2a3b4c5d")
 LINK_SAFET_AMAZON = "https://sellercentral.amazon.com.br/safet-claims"
 
 # Em teste o disparo roda inline na mesma sessão (sem Redis).
@@ -281,10 +291,12 @@ def texto_padrao(
     *,
     fotos: int = 0,
     link_envio: str | None = None,
+    cartao_video: bool = False,
 ) -> str:
     """Mensagem que vai pra plataforma (o operador não digita nada — é
     automático). `reason` é o motivo do ML (SRF*) — nas outras plataformas o
-    texto é o mesmo, só muda o código enviado."""
+    texto é o mesmo, só muda o código enviado. `cartao_video` = a imagem em
+    anexo é o cartão com QR code + link do vídeo (não há foto da linha)."""
     motivo = (dev.motivo_devolucao or "").strip()
     if motivo.lower() in ("bloqueado", "mudou de ideia"):
         intro = (
@@ -307,6 +319,11 @@ def texto_padrao(
         linhas.append(f"Observação: {dev.observacao.strip()}")
     if fotos:
         linhas.append(f"Seguem {fotos} foto(s) em anexo como evidência.")
+    if cartao_video:
+        linhas.append(
+            "Em anexo, imagem com o QR code e o link do vídeo da expedição "
+            "(a evidência é o vídeo, gravado no momento do envio)."
+        )
     envio = (link_envio or dev.link_envio or "").strip()
     if envio:
         linhas.append(f"Comprovante da expedição (fotos/vídeo do envio): {envio}")
@@ -551,6 +568,70 @@ def _ref_foto(anexo: DevolucaoAnexo) -> dict:
         except ValueError:
             return {}
     return {"ref": raw} if raw else {}
+
+
+def _e_cartao_video(a: DevolucaoAnexo) -> bool:
+    return a.created_by is None and a.filename == cartao_video.CARTAO_VIDEO_NOME
+
+
+async def _link_video(session: AsyncSession, dev: Devolution, linhas: list[Devolution]) -> str:
+    """Link do vídeo da expedição: o "Link envio" de qualquer linha do kit ou,
+    sem ele, a coluna Vídeo do Acompanhamento (pedido)."""
+    envio = next(((d.link_envio or "").strip() for d in linhas if (d.link_envio or "").strip()), "")
+    if envio:
+        return envio
+    pb = (dev.pedido_bling or "").strip()
+    if not pb:
+        return ""
+    row = (
+        await session.execute(
+            select(DevolucaoRastreio.video_link)
+            .where(DevolucaoRastreio.pedido_bling == pb)
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    return (row or "").strip()
+
+
+async def _cartao_do_video(
+    session: AsyncSession, dev: Devolution, anexos: list[DevolucaoAnexo], link: str
+) -> DevolucaoAnexo:
+    """Anexo com o cartão do vídeo (PNG: QR code + link) pra esse link. Reusa o
+    que já existe (mesmo id = mesmo pedido + link, então sobe uma vez só —
+    `ml_file_name`); cartão de um link antigo é apagado. NÃO commita."""
+    chave = (dev.pedido_bling or "").strip() or str(dev.id)
+    aid = uuid5(_NS_CARTAO_VIDEO, f"{chave}:{link}")
+    atual = next((a for a in anexos if a.id == aid), None)
+    for a in anexos:
+        if a.id != aid and _e_cartao_video(a):
+            await session.delete(a)
+    if atual is not None:
+        return atual
+    # A etiqueta que foi colada no pacote (guardada pelo fluxo da NF), quando há.
+    etiqueta = None
+    pb = (dev.pedido_bling or "").strip()
+    if pb:
+        etiqueta = (
+            await session.execute(
+                select(NfEtiquetaArquivo.blob).where(NfEtiquetaArquivo.pedido_bling == pb)
+            )
+        ).scalar_one_or_none()
+    png = cartao_video.gerar_cartao_video(
+        link, pedido=dev.pedido_marketplace, produto=dev.produtos, sku=dev.sku,
+        etiqueta_pdf=etiqueta or None,
+    )
+    atual = DevolucaoAnexo(
+        id=aid,
+        devolution_id=dev.id,
+        filename=cartao_video.CARTAO_VIDEO_NOME,
+        content_type="image/png",
+        size_bytes=len(png),
+        blob=png,
+        created_by=None,
+    )
+    session.add(atual)
+    await session.flush()
+    return atual
 
 
 # ---------------------------------------------------------------- fluxo
@@ -1160,7 +1241,8 @@ async def _recusar_reembolso(
     fotos = fotos[:TIKTOK_MAX_FOTOS]
     texto = tiktok_reembolso.texto_contestacao(
         caso, oid=oid, produto=(ch.produto or dev.produtos), entrega=entrega, nota=nota,
-        pedido_em=pedido_em, comprador_mandou_prova=prova, fotos=len(fotos),
+        pedido_em=pedido_em, comprador_mandou_prova=prova,
+        fotos=len([a for a in fotos if not _e_cartao_video(a)]),  # o cartão não é foto
         video=video or None, observacao=observacao or None,
     )
     if msg is not None:
@@ -1731,12 +1813,29 @@ async def disparar(
         fotos = []
     if plat in (PLAT_TIKTOK, PLAT_SHOPEE):
         fotos = [a for a in fotos if (a.content_type or "").lower() in FOTO_TIPOS_IMAGEM]
-    # O link da expedição pode estar em outra linha do kit.
-    envio = next(
-        ((d.link_envio or "").strip() for d in linhas if (d.link_envio or "").strip()), None
-    )
+    # O link do vídeo pode estar em outra linha do kit ou na coluna Vídeo do
+    # Acompanhamento: vai no texto de qualquer jeito.
+    link = await _link_video(session, dev, linhas)
+    # Só o vídeo, nenhuma foto: o cartão (QR + link + etiqueta) vai como a foto —
+    # as APIs exigem imagem e não aceitam vídeo. Não em "Danificado" (a prova é a
+    # foto do dano, o vídeo da expedição não substitui) nem no motivo "do pacote"
+    # do ML (sem anexo).
+    fotos_reais = [a for a in fotos if not _e_cartao_video(a)]
+    cartao = None
+    if not fotos_reais:
+        cabe_cartao = bool(link) and not exige_foto(dev) and not (
+            plat == PLAT_ML and reason in REASONS_DO_PACOTE
+        )
+        if cabe_cartao:
+            cartao = await _cartao_do_video(session, dev, anexos, link)
+            fotos = [cartao]
+        else:
+            for a in fotos:  # cartão órfão (link apagado / motivo trocado)
+                await session.delete(a)
+            fotos = []
     msg.texto = (texto_override or "").strip() or texto_padrao(
-        dev, reason, fotos=len(fotos), link_envio=envio
+        dev, reason, fotos=len(fotos_reais), link_envio=link or None,
+        cartao_video=cartao is not None,
     )
     referencia = detalhe = None
     try:
