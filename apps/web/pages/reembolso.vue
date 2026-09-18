@@ -69,6 +69,7 @@ type RefundExistente = {
   reembolso: number | null
   conferido: boolean
   criado_por: string | null
+  de_outra_equipe?: boolean
 }
 
 type LookupPage = {
@@ -667,13 +668,19 @@ async function saveRow(row: RefundRow): Promise<void> {
                 class="text-xs tabular-nums"
               >
                 <span class="text-muted-foreground">{{ fmtDateTime(r.data) }}</span>
-                <span class="mx-1.5">·</span>
-                <span>{{ r.conta || '—' }}</span>
-                <span class="mx-1.5">·</span>
-                <span>{{ r.tipo || 'sem tipo' }}</span>
-                <span class="mx-1.5">·</span>
-                <span class="font-medium">{{ brl(r.reembolso) }}</span>
-                <span v-if="r.criado_por" class="text-muted-foreground"> · por {{ r.criado_por }}</span>
+                <template v-if="r.de_outra_equipe">
+                  <span class="mx-1.5">·</span>
+                  <span class="text-muted-foreground">lançamento de outra equipe</span>
+                </template>
+                <template v-else>
+                  <span class="mx-1.5">·</span>
+                  <span>{{ r.conta || '—' }}</span>
+                  <span class="mx-1.5">·</span>
+                  <span>{{ r.tipo || 'sem tipo' }}</span>
+                  <span class="mx-1.5">·</span>
+                  <span class="font-medium">{{ brl(r.reembolso) }}</span>
+                  <span v-if="r.criado_por" class="text-muted-foreground"> · por {{ r.criado_por }}</span>
+                </template>
                 <span v-if="r.conferido" class="text-muted-foreground"> · finalizado</span>
               </li>
             </ul>

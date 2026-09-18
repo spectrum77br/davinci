@@ -259,6 +259,75 @@ async def test_refund_que_o_proprio_usuario_lancou_nao_some_da_lista(
 
 
 @pytest.mark.asyncio
+async def test_nao_ve_o_que_outra_pessoa_lancou_em_outra_equipe(
+    db: AsyncSession,
+    client: AsyncClient,
+    auth_as: Callable[[User | None], None],
+    scope_setup: dict,
+):
+    """Regressão de segurança do ramo `created_by`.
+
+    O teste vizinho só prova que o autor enxerga o que é dele. Aqui a linha de
+    outra equipe tem um autor IDENTIFICADO e diferente — se o ramo novo casasse
+    errado (por exemplo comparando com NULL ou ignorando o id), o reembolso da
+    outra equipe apareceria.
+    """
+    outro = _mk_user(UserRole.USER, [2])
+    eu = _mk_user(UserRole.USER, [1])
+    db.add_all([outro, eu])
+    await db.flush()
+    db.add(
+        Refund(
+            pedido_bling="ped-do-outro",
+            conta="conta-beta",
+            plataforma="shopee",
+            created_by=outro.id,
+        )
+    )
+    await db.commit()
+    auth_as(eu)
+
+    r = await client.get("/api/refunds")
+    assert r.status_code == 200
+    pedidos = {i["pedido_bling"] for i in r.json()["items"]}
+    assert "ped-do-outro" not in pedidos
+    assert "ped2" not in pedidos
+
+
+@pytest.mark.asyncio
+async def test_seletor_de_plataforma_nao_encolhe_com_o_filtro_escolhido(
+    db: AsyncSession,
+    client: AsyncClient,
+    auth_as: Callable[[User | None], None],
+    scope_setup: dict,
+):
+    """O seletor lista as plataformas da equipe, não a que já está filtrada.
+
+    Aplicar o `where` inteiro nessa consulta deixava só a plataforma
+    selecionada na lista, e a pessoa ficava presa nela sem como voltar.
+    """
+    u = _mk_user(UserRole.USER, [1])
+    db.add(u)
+    await db.flush()
+    db.add_all(
+        [
+            Refund(pedido_bling="ped1", conta="conta-alpha", plataforma="ml", created_by=u.id),
+            Refund(pedido_bling="ped1", conta="conta-alpha", plataforma="amazon", created_by=u.id),
+        ]
+    )
+    await db.commit()
+    auth_as(u)
+
+    r = await client.get("/api/refunds?platform=ml")
+    assert r.status_code == 200
+    corpo = r.json()
+    assert {i["plataforma"] for i in corpo["items"]} == {"ml"}, "a lista respeita o filtro"
+    # ...mas o seletor continua oferecendo as outras, senão não dá pra trocar.
+    assert "amazon" in corpo["platforms"]
+    assert "shopee" in corpo["platforms"]
+
+
+@pytest.mark.asyncio
 async def test_equipe_sem_loja_cadastrada_ainda_ve_o_que_lancou(
     db: AsyncSession,
     client: AsyncClient,

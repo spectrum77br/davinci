@@ -225,11 +225,15 @@ async def list_refunds(
         func.coalesce(func.sum(Refund.reembolso), 0.0),
         func.count().filter(Refund.conferido.is_(False)),
     ).where(*where)
-    # Mesmo `where` das outras três queries: sem isso o seletor de plataforma
-    # oferecia opções de equipes que o usuário não enxerga na lista.
+    # O seletor de plataforma leva SÓ o recorte de equipe, nunca os filtros que
+    # o usuário escolheu: com o `where` inteiro ele passa a listar apenas a
+    # plataforma já selecionada e a pessoa fica presa nela, sem como trocar.
+    platforms_where = [Refund.plataforma.is_not(None)]
+    if team_clause is not None:
+        platforms_where.append(team_clause)
     platforms_stmt = (
         select(Refund.plataforma)
-        .where(*where, Refund.plataforma.is_not(None))
+        .where(*platforms_where)
         .distinct()
         .order_by(Refund.plataforma)
     )
@@ -465,6 +469,7 @@ async def lookup_refund_order(
 
     rows = await _execute(_lookup_refund_sql("vw_conciliacao_margens_marketplace"))
     historico_disponivel = False
+    bling_numero: str | None = None
 
     if not rows:
         bling_numero = await _find_bling_numero(session, pedido)
@@ -478,12 +483,21 @@ async def lookup_refund_order(
     return RefundLookupPage(
         items=[RefundLookupOut.model_validate(dict(row)) for row in rows],
         historico_disponivel=historico_disponivel,
-        **(await _reembolsos_ja_lancados(session, pedido, rows)),
+        **(
+            await _reembolsos_ja_lancados(
+                session, pedido, rows, bling_numero=bling_numero, user=_u,
+            )
+        ),
     )
 
 
 async def _reembolsos_ja_lancados(
-    session: AsyncSession, pedido: str, rows: list
+    session: AsyncSession,
+    pedido: str,
+    rows: list,
+    *,
+    bling_numero: str | None,
+    user: User,
 ) -> dict:
     """O que já existe para o pedido consultado, para a tela avisar antes de
     adicionar outro.
@@ -502,6 +516,11 @@ async def _reembolsos_ja_lancados(
     números que apareceram para ESTE pedido, nunca um prefixo ou parte.
     """
     numeros: set[str] = {pedido.strip()}
+    # No caminho do histórico as `rows` vêm vazias e só o texto digitado entraria
+    # no conjunto — o aviso não apareceria justamente no pedido mais antigo, que
+    # é onde o relançamento é mais provável.
+    if bling_numero:
+        numeros.add(str(bling_numero).strip())
     for row in rows:
         d = dict(row)
         for chave in ("pedido_bling", "pedido_marketplace"):
@@ -527,16 +546,29 @@ async def _reembolsos_ja_lancados(
         )
     ).all()
 
+    # O aviso precisa alcançar lançamento de outra equipe — é o que a pessoa não
+    # vê e acaba repetindo. Mas o detalhe (valor e quem lançou) só sai para o que
+    # ela já poderia ver na lista: fora disso vai só a existência e a data, que
+    # bastam para ela parar e perguntar, sem expor número de outra equipe.
+    scope = await resolve_team_scope(session, user)
+    contas_visiveis = set() if scope.unrestricted else scope.account_names
+
+    def _visivel(r: Refund) -> bool:
+        if scope.unrestricted or r.created_by == user.id:
+            return True
+        return (r.conta or "").strip().lower() in contas_visiveis
+
     return {
         "reembolsos_existentes": len(achados),
         "reembolsos_do_pedido": [
             RefundExistenteOut(
                 data=r.data,
-                conta=r.conta,
-                tipo=r.tipo,
-                reembolso=r.reembolso,
+                conta=r.conta if _visivel(r) else None,
+                tipo=r.tipo if _visivel(r) else None,
+                reembolso=r.reembolso if _visivel(r) else None,
                 conferido=bool(r.conferido),
-                criado_por=nome,
+                criado_por=nome if _visivel(r) else None,
+                de_outra_equipe=not _visivel(r),
             )
             for r, nome in achados
         ],

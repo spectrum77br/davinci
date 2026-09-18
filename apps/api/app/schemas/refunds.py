@@ -184,6 +184,10 @@ class RefundExistenteOut(BaseModel):
     reembolso: float | None = None
     conferido: bool = False
     criado_por: str | None = None
+    # Lançamento de equipe que o usuário não enxerga: a tela avisa que existe,
+    # com a data, mas sem valor, conta nem autor — o suficiente para ele parar e
+    # perguntar, sem expor número de outra equipe.
+    de_outra_equipe: bool = False
 
 
 class RefundLookupPage(BaseModel):

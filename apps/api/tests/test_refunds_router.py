@@ -612,3 +612,52 @@ async def test_lookup_avisa_quando_o_pedido_ja_tem_reembolso(
     # Também acha pelo número do marketplace, que é o outro jeito de digitar.
     por_marketplace = await client.get("/api/refunds/order-lookup?pedido=SHP-77")
     assert por_marketplace.json()["reembolsos_existentes"] == 1
+
+
+async def test_lookup_avisa_tambem_no_caminho_do_historico(
+    client,
+    db: AsyncSession,
+    make_user,
+    auth_as,
+):
+    """O aviso tem que valer quando o pedido só existe no histórico.
+
+    Nesse caminho a view recente não devolve linha nenhuma e o número do Bling
+    vem de bling_orders. Se ele não entrar na busca, o aviso não aparece
+    justamente no pedido antigo, que é onde o relançamento é mais provável.
+    """
+    user = await make_user(permissions=_refund_permissions())
+    auth_as(user)
+    schema = get_settings().database_schema
+    await db.execute(
+        text(f'DROP VIEW IF EXISTS "{schema}".vw_conciliacao_margens_marketplace')
+    )
+    # View vazia: nenhum pedido está na janela recente.
+    await db.execute(
+        text(
+            f"""
+            CREATE VIEW "{schema}".vw_conciliacao_margens_marketplace AS
+            SELECT * FROM (VALUES
+                (NULL::timestamptz, NULL::text, NULL::text,
+                 NULL::text, NULL::text, NULL::text, NULL::numeric)
+            ) AS t(data, pedido_bling, pedido_marketplace, plataforma_bling,
+                   plataforma_financeiro, loja_nome, bling_custo_produtos)
+            WHERE false
+            """  # noqa: S608
+        )
+    )
+    db.add(BlingOrder(numero="299001"))
+    await db.commit()
+
+    created = await client.post(
+        "/api/refunds",
+        json={"pedido_bling": "299001", "conta": "Shopee ATV", "tipo": "Cliente"},
+    )
+    assert created.status_code == 201
+
+    r = await client.get("/api/refunds/order-lookup?pedido=299001")
+    assert r.status_code == 200
+    corpo = r.json()
+    assert corpo["historico_disponivel"] is True
+    assert corpo["reembolsos_existentes"] == 1, "o aviso vale também no histórico"
+    assert corpo["reembolsos_do_pedido"][0]["conta"] == "Shopee ATV"
