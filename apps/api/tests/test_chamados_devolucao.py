@@ -1845,3 +1845,188 @@ async def test_primeiro_disparo_espera_as_fotos_do_mesmo_cadastro(db, monkeypatc
     assert chamadas[0]["nome"] == "chamado_devolucao_disparar"
     assert chamadas[0]["_defer_by"] == svc.JANELA_FOTOS
     assert svc.JANELA_FOTOS.total_seconds() >= 30
+
+
+# ── Só reembolso da TikTok (Vinicius 18/09, caso 296936 "caixa de sabonete") ──
+# O caso cai em Devoluções › Fraude; o pessoal monta vídeo e fotos e faz o LANÇAMENTO;
+# o lançamento responde o caso que o vigia achou (recusa do reembolso) com o texto
+# montado sozinho — fatos da entrega, alegação do comprador, link do vídeo, fotos.
+
+RID_REEMB = "4042357484883052019"
+OID_REEMB = "586055935181358579"
+PRAZO_REEMB = 1790055431  # 22/09 02:37 BRT
+
+
+class _FakeTikTokReembolso(_FakeTikTok):
+    def __init__(self, *, status: str = "RETURN_OR_REFUND_REQUEST_PENDING", com_pacote: bool = False):
+        super().__init__()  # self.status = do caso COM pacote (BUYER_SHIPPED_ITEM)
+        self.status_reembolso = status
+        self.com_pacote = com_pacote
+        self.records = [{"event": "ORDER_REFUND", "note": "Recebi uma caixa de sabonete ao invés do celular!",
+                         "reason_text": "Pacote recebido, mas faltam alguns itens", "create_time": 1789620000}]
+
+    async def get_return_list(self, *, order_ids=None, **kw):
+        caso = {
+            "order_id": OID_REEMB, "return_id": RID_REEMB, "return_type": "REFUND",
+            "return_status": self.status_reembolso, "update_time": 20,
+            "seller_next_action_response": [{"action": "SELLER_RESPOND_REFUND", "deadline": PRAZO_REEMB}]
+            if self.status_reembolso == "RETURN_OR_REFUND_REQUEST_PENDING" else [],
+            "refund_amount": {"currency": "BRL", "refund_total": "803.2"},
+            "return_reason_text": "Package received but missing item",
+        }
+        casos = [caso]
+        if self.com_pacote:
+            casos += await _FakeTikTok.get_return_list(self, order_ids=order_ids)
+        return casos
+
+    async def get_order_detail(self, order_id):
+        return {"orders": [{"status": "DELIVERED", "delivery_time": 1789588803,
+                            "line_items": [{"tracking_number": "999882054197026", "shipping_provider_name": "J&T Express Brazil"}]}]}
+
+    async def get_reject_reasons(self, return_id, *, locale="pt-BR"):
+        if return_id != RID_REEMB:  # caso COM pacote: motivos de recusa do pacote
+            return await _FakeTikTok.get_reject_reasons(self, return_id, locale=locale)
+        return [{"name": "reverse_reject_request_reason_4", "text": "A entrega do produto está dentro do prazo"},
+                {"name": "reverse_reject_request_reason_1", "text": "O motivo da devolução do comprador não é válido"}]
+
+
+async def _seed_reembolso(db, user, monkeypatch, fake, *, fila: str | None = "fraude", video: str | None = "https://drive.x/video-296936"):
+    from app.models import DevolucaoRastreio
+
+    async def _c(session, *a):
+        return fake
+
+    monkeypatch.setattr(svc, "_tiktok_client_para", _c)
+    await _seed_pedido(db, user, numero="296936", numeroloja=OID_REEMB, platform="tiktok", conta="mini", loja="88")
+    db.add(DevolucaoRastreio(pedido_bling="296936", fonte_auto="tiktok", devolucao_id_auto=RID_REEMB,
+                             devolucao_tipo_auto="REFUND", devolucao_status_auto="RETURN_OR_REFUND_REQUEST_PENDING",
+                             acao_auto="SELLER_RESPOND_REFUND", fila_manual=fila, video_link=video))
+    await db.commit()
+
+
+async def test_tiktok_so_reembolso_lancamento_responde_o_caso_do_vigia(client, make_user, auth_as, db, ml, monkeypatch):
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+    fake = _FakeTikTokReembolso()
+    await _seed_reembolso(db, user, monkeypatch, fake)
+
+    r = await client.post(
+        "/api/devolutions",
+        json={"conta": "mini", "pedido_bling": "296936", "pedido_marketplace": OID_REEMB,
+              "condicao_produto": "Não devolvido", "motivo_devolucao": "Não recebido",
+              "observacao": "Peso conferido na expedição."},
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["chamado_plataforma"] == "tiktok"
+    assert r.json()["chamado_ml_status"] == "enviada", r.json()
+    # o vídeo da coluna Vídeo entrou sozinho no Link envio
+    assert r.json()["link_envio"] == "https://drive.x/video-296936"
+    assert len(fake.rejects) == 1
+    rj = fake.rejects[0]
+    assert (rj["return_id"], rj["decision"], rj["reason"]) == (RID_REEMB, "REJECT_REFUND", "reverse_reject_request_reason_1")
+    txt = rj["comment"]
+    assert "entregue em 16/09 17:00" in txt and "J&T Express Brazil" in txt and "999882054197026" in txt, txt
+    assert "caixa de sabonete" in txt and "https://drive.x/video-296936" in txt and "Peso conferido" in txt, txt
+    assert rj["images"] is None and rj["idem"]
+    ch = (await db.execute(select(Chamado).where(Chamado.pedido_bling == "296936"))).scalar_one()
+    assert ch.chamado == RID_REEMB and ch.canal == "api" and ch.origem == "devolucao"
+    hist = list((await db.execute(select(ChamadoMensagem.texto).where(ChamadoMensagem.chamado_id == ch.id,
+                                                                      ChamadoMensagem.tipo == "sistema"))).scalars())
+    assert any("CONTESTADO" in t and "lançamento" in t and "vídeo no texto" in t for t in hist), hist
+    assert any("recusa do SÓ REEMBOLSO" in t for t in hist), hist
+    assert ml.reviews == []
+
+    # foto anexada depois: já respondeu, nada mais sai (idempotente)
+    up = await client.post(f"/api/devolutions/{r.json()['id']}/anexos",
+                           files={"file": ("caixa.png", PNG_1PX, "image/png")})
+    assert up.status_code == 201 and len(fake.rejects) == 1
+
+
+async def test_tiktok_so_reembolso_fotos_vao_junto(client, make_user, auth_as, db, ml, monkeypatch):
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+    fake = _FakeTikTokReembolso()
+    await _seed_reembolso(db, user, monkeypatch, fake, fila="acompanhamento", video=None)
+    # sem vídeo e sem foto: segura (não responde sem a informação certa)
+    r = await client.post(
+        "/api/devolutions",
+        json={"conta": "mini", "pedido_bling": "296936", "pedido_marketplace": OID_REEMB,
+              "condicao_produto": "Não devolvido", "motivo_devolucao": "Golpe"},
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["chamado_ml_status"] == "pendente" and r.json()["chamado_ml_erro"] == "devolucao_sem_video"
+    assert fake.rejects == []
+    # chegou a foto: responde com ela
+    up = await client.post(f"/api/devolutions/{r.json()['id']}/anexos",
+                           files={"file": ("pesagem.png", PNG_1PX, "image/png")})
+    assert up.status_code == 201 and up.json()["chamado_ml_status"] == "enviada", up.json()
+    rj = fake.rejects[0]
+    assert rj["decision"] == "REJECT_REFUND" and rj["images"] == [{"image_id": "tos/pesagem.png", "mime_type": "image/png", "width": 100, "height": 80}]
+    assert "1 foto(s)" in rj["comment"]
+
+
+async def test_tiktok_so_reembolso_em_fraude_exige_video_pra_lancar(client, make_user, auth_as, db, ml, monkeypatch):
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+    fake = _FakeTikTokReembolso()
+    await _seed_reembolso(db, user, monkeypatch, fake, fila="fraude", video=None)
+    r = await client.post(
+        "/api/devolutions",
+        json={"conta": "mini", "pedido_bling": "296936", "pedido_marketplace": OID_REEMB,
+              "condicao_produto": "Não devolvido", "motivo_devolucao": "Não recebido"},
+    )
+    assert r.status_code == 422 and r.json()["detail"]["code"] == "video_obrigatorio", r.text
+    assert fake.rejects == []
+    # link colado à mão no Link envio vale como vídeo
+    r2 = await client.post(
+        "/api/devolutions",
+        json={"conta": "mini", "pedido_bling": "296936", "pedido_marketplace": OID_REEMB,
+              "condicao_produto": "Não devolvido", "motivo_devolucao": "Não recebido",
+              "link_envio": "https://drive.x/manual"},
+    )
+    assert r2.status_code == 201, r2.text
+    assert r2.json()["chamado_ml_status"] == "enviada" and "https://drive.x/manual" in fake.rejects[0]["comment"]
+    # Item Incorreto não abre chamado nem exige vídeo (é erro nosso)
+    r3 = await client.post(
+        "/api/devolutions",
+        json={"conta": "mini", "pedido_bling": "296936", "pedido_marketplace": OID_REEMB,
+              "condicao_produto": "Novo", "motivo_devolucao": "Item Incorreto"},
+    )
+    assert r3.status_code == 201, r3.text
+    assert len(fake.rejects) == 1
+
+
+async def test_tiktok_so_reembolso_ja_decidido_falha_com_desfecho(client, make_user, auth_as, db, ml, monkeypatch):
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+    fake = _FakeTikTokReembolso(status="RETURN_OR_REFUND_REQUEST_COMPLETE")
+    fake.records.append({"event": "SELLER_REJECT_APPLICATION_TIMEOUT_REFUND", "create_time": PRAZO_REEMB})
+    await _seed_reembolso(db, user, monkeypatch, fake)
+    r = await client.post(
+        "/api/devolutions",
+        json={"conta": "mini", "pedido_bling": "296936", "pedido_marketplace": OID_REEMB,
+              "condicao_produto": "Não devolvido", "motivo_devolucao": "Não recebido"},
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["chamado_ml_status"] == "falhou" and r.json()["chamado_ml_erro"] == "tiktok_reembolso_nao_pendente"
+    ch = (await db.execute(select(Chamado).where(Chamado.pedido_bling == "296936"))).scalar_one()
+    hist = list((await db.execute(select(ChamadoMensagem.texto).where(ChamadoMensagem.chamado_id == ch.id,
+                                                                      ChamadoMensagem.tipo == "sistema"))).scalars())
+    assert any("reembolso PAGO" in t and "FALTA DE RESPOSTA" in t for t in hist), hist
+    assert fake.rejects == []
+
+
+async def test_tiktok_com_pacote_e_so_reembolso_decidido_segue_o_pacote(client, make_user, auth_as, db, ml, monkeypatch):
+    # Só-reembolso já decidido + devolução COM pacote viva: quem manda é o pacote (fluxo de sempre).
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+    fake = _FakeTikTokReembolso(status="RETURN_OR_REFUND_REQUEST_CANCEL", com_pacote=True)
+    await _seed_reembolso(db, user, monkeypatch, fake)
+    r = await client.post(
+        "/api/devolutions",
+        json={"conta": "mini", "pedido_bling": "296936", "pedido_marketplace": OID_REEMB,
+              "condicao_produto": "Não devolvido", "motivo_devolucao": "Não recebido"},
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["chamado_ml_status"] == "enviada", r.json()
+    assert fake.rejects[0]["decision"] == "REJECT_RECEIVED_PACKAGE"

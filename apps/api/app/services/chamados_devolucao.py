@@ -13,6 +13,11 @@ da devolução recebida com problema:
   (`POST /return_refund/202309/returns/{return_id}/reject`,
   decision REJECT_RECEIVED_PACKAGE + reverse_reject_return_parcel_reason_1..5);
   só com return_status=BUYER_SHIPPED_ITEM, dentro do prazo do vendedor.
+  Caso de SÓ REEMBOLSO (`return_type=REFUND`, o que o vigia
+  `chamados_tiktok_reembolso` acompanha — Vinicius 18/09, caso 296936): o
+  lançamento responde ESSE caso (decision REJECT_REFUND) com os fatos da
+  entrega, as fotos e o link do vídeo — o texto é montado sozinho, o motivo do
+  lançamento não muda a resposta (`_recusar_reembolso`).
 - **Shopee**: disputa (`POST /api/v2/returns/dispute` com motivo de
   `get_return_dispute_reason` + fotos por módulo de evidência); a partir do
   pacote entregue/aceito (status ACCEPTED, compensação pendente).
@@ -60,6 +65,7 @@ from app.models import (
     UserRole,
 )
 from app.services import chamados as chamados_svc
+from app.services import chamados_tiktok_reembolso as tiktok_reembolso
 from app.services import logistica_meli, logistica_rules, logistica_shopee, logistica_tiktok
 from app.services.marketplaces.ml import MercadoLivreClient
 from app.services.marketplaces.shopee import ShopeeClient
@@ -885,19 +891,46 @@ async def _disparar_ml(
     return claim_id, REASON_NOME.get(reason, reason)
 
 
-async def _return_tiktok(
-    client: TikTokClient, dev: Devolution, preferido: str | None
-) -> dict | None:
-    """Caso de devolução do pedido na TikTok (returns/search por order_id),
-    com status FRESCO. Prefere o id que o Acompanhamento já conhece; senão o
-    vivo mais recente. Só RETURN_AND_REFUND tem pacote."""
+async def _casos_tiktok(client: TikTokClient, dev: Devolution) -> list[dict]:
+    """TODOS os casos do pedido na TikTok (returns/search por order_id), com status
+    FRESCO — devolução com pacote e só reembolso."""
     oid = (dev.pedido_marketplace or "").strip()
     if not oid:
         raise _PendenteError("devolucao_sem_pedido_marketplace")
+    return [c for c in await client.get_return_list(order_ids=[oid]) if isinstance(c, dict)]
+
+
+def _caso_so_reembolso(casos: list[dict], preferido: str | None) -> dict | None:
+    """O caso de SÓ REEMBOLSO que o lançamento deve responder (Vinicius 18/09: "o sistema
+    verifica se o vigia tem alguma informação; se tiver, responde o caso do vigia").
+    Pendente de resposta (prefere o id que o Acompanhamento conhece, senão o mais
+    recente). Sem pendente: se o pedido tem devolução COM pacote, é ela que manda (None);
+    senão devolve o só-reembolso já decidido, pra registrar o desfecho em vez de ficar
+    "aguardando pacote" pra sempre."""
+    so = [c for c in casos if tiktok_reembolso.e_so_reembolso(c)]
+    if not so:
+        return None
+    pend = [c for c in so if tiktok_reembolso.e_pendente_de_resposta(c)]
+    if pend:
+        for c in pend:
+            if preferido and str(c.get("return_id") or "") == preferido:
+                return c
+        return max(pend, key=lambda c: int(c.get("update_time") or 0))
+    com_pacote = [
+        c for c in casos if str(c.get("return_type") or "").upper() in ("", "RETURN_AND_REFUND")
+    ]
+    if com_pacote:
+        return None
+    return max(so, key=lambda c: int(c.get("update_time") or 0))
+
+
+def _return_tiktok(casos: list[dict], dev: Devolution, preferido: str | None) -> dict | None:
+    """Caso de devolução COM pacote do pedido. Prefere o id que o Acompanhamento já
+    conhece; senão o vivo mais recente. Só RETURN_AND_REFUND tem pacote."""
+    oid = (dev.pedido_marketplace or "").strip()
     casos = [
-        c for c in await client.get_return_list(order_ids=[oid])
-        if isinstance(c, dict)
-        and str(c.get("return_type") or "").upper() in ("", "RETURN_AND_REFUND")
+        c for c in casos
+        if str(c.get("return_type") or "").upper() in ("", "RETURN_AND_REFUND")
     ]
     if not casos:
         return None
@@ -1035,21 +1068,141 @@ def _texto_tiktok_encerrada(
     return " — ".join(partes) + ". Nada mais a abrir pela API."
 
 
+async def _subir_fotos_tiktok(
+    session: AsyncSession, client: TikTokClient, fotos: list[DevolucaoAnexo]
+) -> list[dict]:
+    """Sobe as fotos da linha uma vez cada (`ml_file_name` guarda a referência) e
+    devolve a lista `images` do reject."""
+    images: list[dict] = []
+    for a in fotos[:TIKTOK_MAX_FOTOS]:
+        ref = _ref_foto(a)
+        if not ref.get("uri"):
+            nome, dados, ctype = preparar_foto(a)
+            d = await client.upload_image(nome, dados, ctype)
+            ref = {
+                "uri": d.get("uri"),
+                "width": d.get("width"),
+                "height": d.get("height"),
+                "mime": ctype,
+            }
+            a.ml_file_name = json.dumps(ref)
+            await session.flush()
+        img: dict = {"image_id": ref["uri"], "mime_type": ref.get("mime") or a.content_type}
+        if ref.get("width"):
+            img["width"] = int(ref["width"])
+        if ref.get("height"):
+            img["height"] = int(ref["height"])
+        images.append(img)
+    return images
+
+
+async def _recusar_reembolso(
+    session: AsyncSession,
+    ch: Chamado,
+    dev: Devolution,
+    client: TikTokClient,
+    caso: dict,
+    fotos: list[DevolucaoAnexo],
+    rastreio: DevolucaoRastreio | None,
+    msg: ChamadoMensagem | None,
+    texto_operador: str | None,
+) -> tuple[str, str]:
+    """Lançamento → recusa do SÓ REEMBOLSO no caso que o vigia achou. O texto é montado
+    sozinho (fatos da entrega + alegação do comprador + link do vídeo + fotos); o que o
+    operador digitou entra só como observação. Vídeo obrigatório: sem link de vídeo
+    (coluna Vídeo / "Link envio") e sem foto, fica `pendente` — "não adianta responder sem
+    as informações corretas" (Vinicius 18/09)."""
+    rid = str(caso.get("return_id") or "").strip()
+    if not rid:
+        raise _PendenteError("devolucao_sem_return")
+    ch.chamado = rid
+    oid = (dev.pedido_marketplace or "").strip()
+    if not tiktok_reembolso.e_pendente_de_resposta(caso):
+        _n, _m, eventos = await tiktok_reembolso._nota_e_motivo(client, rid)
+        session.add(
+            chamados_svc.registrar_sistema(ch, tiktok_reembolso.texto_desfecho(caso, eventos))
+        )
+        status = str(caso.get("return_status") or "").upper()
+        ja = status == "REFUND_OR_RETURN_REQUEST_REJECT" or bool(caso.get("arbitration_status"))
+        raise chamados_svc.ChamadoError(
+            "tiktok_reembolso_ja_contestado" if ja else "tiktok_reembolso_nao_pendente"
+        )
+    linhas = await _linhas_do_pedido(session, dev)
+    video = (rastreio.video_link or "").strip() if rastreio is not None else ""
+    video = video or next(
+        ((d.link_envio or "").strip() for d in linhas if (d.link_envio or "").strip()), ""
+    )
+    if not video and not fotos:
+        raise _PendenteError("devolucao_sem_video")
+    motivo = tiktok_reembolso._motivo_recusa(await client.get_reject_reasons(rid))
+    if not motivo:
+        raise chamados_svc.ChamadoError("tiktok_motivo_indisponivel")
+    nota, _m, eventos = await tiktok_reembolso._nota_e_motivo(client, rid)
+    pedido_em, prova = tiktok_reembolso._pedido_do_comprador(eventos)
+    entrega = await tiktok_reembolso._entrega_dados(client, oid)
+    observacao = " ".join(
+        t for t in (
+            (texto_operador or "").strip(),
+            *((d.observacao or "").strip() for d in linhas),
+        ) if t
+    )
+    fotos = fotos[:TIKTOK_MAX_FOTOS]
+    texto = tiktok_reembolso.texto_contestacao(
+        caso, oid=oid, produto=(ch.produto or dev.produtos), entrega=entrega, nota=nota,
+        pedido_em=pedido_em, comprador_mandou_prova=prova, fotos=len(fotos),
+        video=video or None, observacao=observacao or None,
+    )
+    if msg is not None:
+        msg.texto = texto
+    images = await _subir_fotos_tiktok(session, client, fotos)
+    await client.reject_return(
+        rid,
+        decision="REJECT_REFUND",
+        reject_reason=motivo,
+        comment=texto[:2000],
+        images=images or None,
+        idempotency_key=str(uuid5(_NS_TIKTOK, f"{ch.id}:{rid}")),
+    )
+    session.add(
+        chamados_svc.registrar_sistema(
+            ch,
+            f"{tiktok_reembolso.MARCA_AUTO} pelo lançamento (motivo {motivo},"
+            f" {len(images)} foto(s){', vídeo no texto' if video else ''}).",
+        )
+    )
+    return rid, "recusa do SÓ REEMBOLSO — " + REASON_NOME.get(motivo, motivo)
+
+
 async def _disparar_tiktok(
-    session: AsyncSession, ch: Chamado, dev: Devolution, fotos: list[DevolucaoAnexo], texto: str
+    session: AsyncSession,
+    ch: Chamado,
+    dev: Devolution,
+    fotos: list[DevolucaoAnexo],
+    texto: str,
+    *,
+    msg: ChamadoMensagem | None = None,
+    texto_operador: str | None = None,
 ) -> tuple[str, str]:
     motivo = _motivo(dev)
     reason = reason_tiktok(dev)
     if reason is None:
         raise _PendenteError("devolucao_motivo_sem_chamado")
-    if exige_foto(dev) and not fotos:
-        raise _PendenteError("devolucao_sem_foto")
     client = await _tiktok_client_para(session, ch, dev)
     rastreio = await _rastreio_devolucao(session, dev, PLAT_TIKTOK)
     preferido = (ch.chamado or "").strip() or (
         (rastreio.devolucao_id_auto or "").strip() if rastreio else ""
     )
-    caso = await _return_tiktok(client, dev, preferido or None)
+    casos = await _casos_tiktok(client, dev)
+    # "O sistema verifica se o vigia tem alguma informação; se tiver, responde o caso do
+    # vigia; se não tiver, abre o chamado novo" (Vinicius 18/09).
+    so_reembolso = _caso_so_reembolso(casos, preferido or None)
+    if so_reembolso is not None:
+        return await _recusar_reembolso(
+            session, ch, dev, client, so_reembolso, fotos, rastreio, msg, texto_operador
+        )
+    if exige_foto(dev) and not fotos:
+        raise _PendenteError("devolucao_sem_foto")
+    caso = _return_tiktok(casos, dev, preferido or None)
     if caso is None:
         raise _PendenteError("devolucao_sem_return")
     rid = str(caso.get("return_id") or "").strip()
@@ -1095,26 +1248,7 @@ async def _disparar_tiktok(
         if not alt:
             raise chamados_svc.ChamadoError("tiktok_motivo_indisponivel")
         reason = alt
-    images: list[dict] = []
-    for a in fotos[:TIKTOK_MAX_FOTOS]:
-        ref = _ref_foto(a)
-        if not ref.get("uri"):
-            nome, dados, ctype = preparar_foto(a)
-            d = await client.upload_image(nome, dados, ctype)
-            ref = {
-                "uri": d.get("uri"),
-                "width": d.get("width"),
-                "height": d.get("height"),
-                "mime": ctype,
-            }
-            a.ml_file_name = json.dumps(ref)
-            await session.flush()
-        img: dict = {"image_id": ref["uri"], "mime_type": ref.get("mime") or a.content_type}
-        if ref.get("width"):
-            img["width"] = int(ref["width"])
-        if ref.get("height"):
-            img["height"] = int(ref["height"])
-        images.append(img)
+    images = await _subir_fotos_tiktok(session, client, fotos)
     try:
         await client.reject_return(
             rid,
@@ -1438,7 +1572,10 @@ async def disparar(
         if plat == PLAT_ML:
             referencia, detalhe = await _disparar_ml(session, ch, dev, fotos, msg.texto)
         elif plat == PLAT_TIKTOK:
-            referencia, detalhe = await _disparar_tiktok(session, ch, dev, fotos, msg.texto)
+            referencia, detalhe = await _disparar_tiktok(
+                session, ch, dev, fotos, msg.texto, msg=msg,
+                texto_operador=(texto_override or "").strip() or None,
+            )
         elif plat == PLAT_SHOPEE:
             referencia, detalhe = await _disparar_shopee(session, ch, dev, fotos, msg.texto)
         else:

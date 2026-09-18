@@ -1957,6 +1957,7 @@ async def create_devolution(
     )
     if _custo_e_tecnico_preenchidos(row):
         row.reembolso = True
+    await _exigir_video_fraude(session, row)
     _exigir_link_envio(row)
     session.add(row)
     if body.condicao_produto in _REFUND_CONDICOES:
@@ -2046,6 +2047,7 @@ async def patch_devolution(
     if "sku" in data:
         row.tag = _sku_tag(row.sku)
     if {"motivo_devolucao", "link_envio", "sku"} & set(data):
+        await _exigir_video_fraude(session, row)
         _exigir_link_envio(row)
 
     new_condicao = row.condicao_produto
@@ -2185,6 +2187,37 @@ async def patch_devolution(
     if final_sr is not None:
         out.bling_stock_result = BlingStockResultOut(**final_sr)
     return await _completar_out(session, row, out)
+
+
+async def _exigir_video_fraude(session: AsyncSession, row: Devolution) -> None:
+    """Trava (Vinicius 18/09): pedido na aba **Fraude** (caso de só reembolso — o
+    lançamento é o que responde a TikTok, com o vídeo) só lança com o vídeo da
+    expedição. O link da coluna Vídeo entra sozinho no "Link envio"; sem vídeo e
+    sem link colado, não lança ("não adianta responder sem as informações
+    corretas"). Só pros motivos que abrem chamado — Item Incorreto não responde."""
+    if not chamados_devolucao.chamados_svc.motivo_pede_chamado(row):
+        return
+    pb = (row.pedido_bling or "").strip()
+    if not pb:
+        return
+    rast = await session.get(DevolucaoRastreio, pb)
+    if rast is None or _fila(rast.fila_manual, rast.devolucao_tipo_auto)[0] != "fraude":
+        return
+    if (row.link_envio or "").strip():
+        return
+    if (rast.video_link or "").strip():
+        row.link_envio = rast.video_link.strip()
+        return
+    raise HTTPException(
+        422,
+        detail={
+            "code": "video_obrigatorio",
+            "message": (
+                "Vídeo obrigatório: pedido na aba Fraude — anexe o vídeo pela coluna "
+                "Vídeo (ou cole o link no Link envio) antes de lançar"
+            ),
+        },
+    )
 
 
 def _exigir_link_envio(row: Devolution) -> None:

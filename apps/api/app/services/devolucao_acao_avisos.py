@@ -84,11 +84,12 @@ def falta(prazo: datetime | None, agora: datetime | None = None) -> str:
 
 def _tem_robo_proprio(row: DevolucaoRastreio) -> bool:
     """O pedido de SÓ reembolso pendente (TikTok `return_type` REFUND +
-    ação SELLER_RESPOND_REFUND) já tem robô próprio: o
-    `chamados_tiktok_reembolso` abre chamado com o prazo e avisa no Threema na
-    abertura e faltando 12 h (Eduardo 16/09). Aqui não repete — a coluna da
-    aba continua mostrando o prazo dele. Só essa combinação exata: qualquer
-    outra ação num caso só-reembolso ninguém mais avisa."""
+    ação SELLER_RESPOND_REFUND) já tem robô próprio: o vigia
+    `chamados_tiktok_reembolso` avisa no Threema faltando 12 h e 3 h sem
+    resposta (carimbando as MESMAS colunas aviso_prazo_acao_*). Aqui não
+    repete — a coluna da aba continua mostrando o prazo dele. Só essa
+    combinação exata: qualquer outra ação num caso só-reembolso ninguém mais
+    avisa."""
     return (
         (row.devolucao_tipo_auto or "").strip().upper() == "REFUND"
         and (row.acao_auto or "").strip().upper() == "SELLER_RESPOND_REFUND"

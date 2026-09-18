@@ -1429,9 +1429,11 @@ async def chamados_replica_automatica(ctx: dict) -> None:
 
 
 async def chamados_tiktok_reembolso_vigia(ctx: dict) -> None:
-    """A cada 30 min (:10/:40): pedido de SÓ REEMBOLSO na TikTok vira chamado com o
-    prazo e aviso no Threema (Eduardo 16/09 — o 294865 foi aprovado pela TikTok por
-    falta de resposta: R$ 744). Contestar continua humano (réplica do chamado)."""
+    """A cada 30 min (:10/:40): vigia do SÓ REEMBOLSO na TikTok — avisa no Threema
+    faltando 12 h e 3 h sem resposta e registra o desfecho no chamado (Vinicius 18/09:
+    o caso cai em Devoluções › Fraude e é o LANÇAMENTO que responde a TikTok; o vigia
+    não abre chamado nem contesta sozinho). Origem: 294865 aprovado pela TikTok por
+    falta de resposta, R$ 744 (Eduardo 16/09)."""
     from app.services import chamados_tiktok_reembolso
 
     try:

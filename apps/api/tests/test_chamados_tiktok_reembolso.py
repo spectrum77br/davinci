@@ -1,7 +1,8 @@
 # ruff: noqa: E501
-"""Só reembolso da TikTok → chamado com prazo, aviso e contestação pela réplica
-(services/chamados_tiktok_reembolso). Eduardo 16/09: o 294865 foi aprovado pela
-TikTok por falta de resposta (R$ 744) porque o robô só olhava devolução com pacote."""
+"""Só reembolso da TikTok: vigia do prazo (avisos 12 h / 3 h, desfecho) — o caso cai em
+Devoluções › Fraude e é o LANÇAMENTO que responde (services/chamados_tiktok_reembolso,
+Vinicius 18/09). Origem: Eduardo 16/09, o 294865 aprovado pela TikTok por falta de
+resposta (R$ 744) porque o robô só olhava devolução com pacote."""
 
 from __future__ import annotations
 
@@ -12,7 +13,15 @@ import pytest
 from sqlalchemy import select
 
 from app.config import get_settings
-from app.models import BlingOrder, Chamado, ChamadoAnexo, ChamadoMensagem, Integration, IntegrationPlatform, StoreInfo
+from app.models import (
+    BlingOrder,
+    Chamado,
+    ChamadoMensagem,
+    DevolucaoRastreio,
+    Integration,
+    IntegrationPlatform,
+    StoreInfo,
+)
 from app.services import chamados_devolucao, logistica_tiktok, threema
 from app.services import chamados_tiktok_reembolso as svc
 
@@ -108,102 +117,119 @@ async def _sistema(db, ch_id) -> list[str]:
         .order_by(ChamadoMensagem.created_at))).scalars().all())
 
 
-async def test_vigia_abre_chamado_pede_foto_e_contesta_sozinho_12h_antes(db, make_user, monkeypatch, threema_fake):
+def _em(h_antes: float) -> datetime:
+    return datetime.fromtimestamp(PRAZO - int(h_antes * 3600), UTC)
+
+
+def _chamado_devolucao(**kw) -> Chamado:
+    """O chamado que o LANÇAMENTO abre (origem devolucao) e que respondeu o caso RID."""
+    base = {"data": AGORA.date(), "pedido_bling": "293798", "pedido_marketplace": OID, "plataforma": "tiktok",
+            "conta": "mini", "origem": "devolucao", "origem_ref": str(uuid4()), "chamado": RID, "canal": "api"}
+    base.update(kw)
+    return Chamado(**base)
+
+
+async def test_vigia_nao_abre_chamado_so_avisa_12h_e_3h(db, make_user, monkeypatch, threema_fake):
+    """Vinicius 18/09: o caso cai em Fraude e é o lançamento que responde — o vigia não abre
+    chamado nem contesta sozinho; avisa faltando 12 h e, sem resposta, faltando 3 h."""
     fake = _FakeTikTok()
     await _seed(db, make_user, fake, monkeypatch)
 
-    r = await svc.run_vigia(db, agora=AGORA)
-    assert r["pendentes"] == 1 and r["abertos"] == 1, r
-    ch = (await db.execute(select(Chamado).where(Chamado.origem_ref == f"tiktok_reembolso:{RID}"))).scalar_one()
-    assert (ch.pedido_bling, ch.plataforma, ch.conta, ch.chamado, ch.canal, ch.origem) == ("293798", "tiktok", "mini", RID, "api", "vendas")
-    hist = await _sistema(db, ch.id)
-    assert any("SÓ REEMBOLSO" in t and "640.54" in t and "Pacote chegou vazio" in t and "18/09 10:19" in t
-               and "999881910210731" in t for t in hist), hist
-    # 17/09: o Threema PEDE foto e vídeo e diz a hora da contestação automática
-    assert len(threema_fake) == 1 and threema_fake[0][1] == ["CDSA84BZ"]
+    r = await svc.run_vigia(db, agora=AGORA)  # faltam ~44 h
+    assert r["pendentes"] == 1 and r["avisos_12h"] == 0 and r["avisos_3h"] == 0, r
+    assert (await db.execute(select(Chamado))).scalars().all() == []
+    assert threema_fake == [] and fake.rejects == []
+
+    r2 = await svc.run_vigia(db, agora=_em(11))
+    assert r2["avisos_12h"] == 1 and len(threema_fake) == 1 and threema_fake[0][1] == ["CDSA84BZ"], r2
     aviso = threema_fake[0][0]
-    assert "FOTO e VÍDEO" in aviso and "17/09 22:19" in aviso and "18/09 10:19" in aviso, aviso
+    assert aviso.startswith("⚠️") and "SÓ REEMBOLSO" in aviso and "640.54" in aviso and "293798" in aviso, aviso
+    assert "Faltam 11 h" in aviso and "18/09 10:19" in aviso and "Pacote chegou vazio" in aviso, aviso
+    assert "LANÇAMENTO" in aviso and "Fraude" in aviso and "vídeo obrigatório" in aviso, aviso
+    rast = await db.get(DevolucaoRastreio, "293798")
+    assert rast is not None and rast.aviso_prazo_acao_para == datetime.fromtimestamp(PRAZO, UTC)
 
-    # 2ª passada: não abre de novo nem pede foto de novo
-    r2 = await svc.run_vigia(db, agora=AGORA)
-    assert r2["abertos"] == 0 and len(threema_fake) == 1 and fake.rejects == []
+    # mesma faixa: não repete
+    r3 = await svc.run_vigia(db, agora=_em(10))
+    assert r3["avisos_12h"] == 0 and r3["avisos_3h"] == 0 and len(threema_fake) == 1
 
-    # alguém anexou foto no chamado; faltando menos de 12 h o robô contesta SOZINHO com ela
-    db.add(ChamadoAnexo(chamado_id=ch.id, filename="pesagem.png", content_type="image/png",
-                        size_bytes=len(PNG_1PX), blob=PNG_1PX))
-    await db.commit()
-    quase = datetime.fromtimestamp(PRAZO - 3600, UTC)
-    r3 = await svc.run_vigia(db, agora=quase)
-    assert r3["urgentes"] == 1 and r3.get("contestados") == 1, r3
-    assert len(fake.rejects) == 1
-    rj = fake.rejects[0]
-    assert (rj["decision"], rj["reason"]) == ("REJECT_REFUND", "reverse_reject_request_reason_1")
-    assert len(rj["images"]) == 1 and fake.uploads[0][0] == "pesagem.png"
-    assert "entregue em 09/09 09:58" in rj["comment"] and "999881910210731" in rj["comment"], rj["comment"]
-    assert "Pacote chegou vazio" in rj["comment"] and "6 dia(s) após a entrega" in rj["comment"], rj["comment"]
-    assert "1 foto(s)" in rj["comment"]
-    rep = (await db.execute(select(ChamadoMensagem).where(ChamadoMensagem.chamado_id == ch.id,
-                                                          ChamadoMensagem.tipo == "replica"))).scalar_one()
-    assert rep.status == "enviada" and rep.autor_nome == "robô"
-    assert len(threema_fake) == 2 and "CONTESTOU sozinho" in threema_fake[1][0]
-    assert any("CONTESTADO" in t and "automática" in t for t in await _sistema(db, ch.id))
+    # faltando menos de 3 h: último aviso, uma vez
+    r4 = await svc.run_vigia(db, agora=_em(2))
+    assert r4["avisos_3h"] == 1 and len(threema_fake) == 2, r4
+    assert threema_fake[1][0].startswith("🚨") and "ÚLTIMO AVISO" in threema_fake[1][0]
+    r5 = await svc.run_vigia(db, agora=_em(1.5))
+    assert r5["avisos_3h"] == 0 and len(threema_fake) == 2
 
-    # a TikTok tirou de pendente: não contesta de novo; o desfecho vai pro histórico
-    r4 = await svc.run_vigia(db, agora=quase)
-    assert len(fake.rejects) == 1 and r4["desfechos"] == 1
-    assert any("RECUSADO" in t for t in await _sistema(db, ch.id))
+    assert (await db.execute(select(Chamado))).scalars().all() == [] and fake.rejects == []
 
 
-async def test_vigia_sem_entrega_nao_contesta_sozinho_e_alerta_uma_vez(db, make_user, monkeypatch, threema_fake):
-    fake = _FakeTikTok()
-    fake.entregue = False
-    await _seed(db, make_user, fake, monkeypatch)
-    await svc.run_vigia(db, agora=AGORA)
-    quase = datetime.fromtimestamp(PRAZO - 3600, UTC)
-    await svc.run_vigia(db, agora=quase)
-    await svc.run_vigia(db, agora=quase)
-    assert fake.rejects == []
-    urg = [t for t, _ in threema_fake if "NÃO contestou" in t]
-    assert len(urg) == 1 and "sem entrega" in urg[0], threema_fake
-
-
-async def test_vigia_contestacao_automatica_desligada_so_avisa(db, make_user, monkeypatch, threema_fake):
+async def test_vigia_lancamento_respondido_nao_avisa_e_registra_desfecho(db, make_user, monkeypatch, threema_fake):
     fake = _FakeTikTok()
     await _seed(db, make_user, fake, monkeypatch)
-    await svc.run_vigia(db, agora=AGORA)
-    ch = (await db.execute(select(Chamado).where(Chamado.origem_ref == f"tiktok_reembolso:{RID}"))).scalar_one()
     from app.services import chamados as chamados_svc
-    db.add(chamados_svc.registrar_sistema(ch, f"{svc.MARCA_SEM_AUTO} (Eduardo 17/09): decidir à mão."))
+    ch = _chamado_devolucao()
+    db.add(ch)
+    await db.flush()
+    db.add(chamados_svc.nova_mensagem(ch, texto="Contestamos...", tipo="abertura",
+                                      autor_nome=chamados_svc.AUTOR_SISTEMA, status="enviada"))
     await db.commit()
-    quase = datetime.fromtimestamp(PRAZO - 3600, UTC)
-    await svc.run_vigia(db, agora=quase)
-    await svc.run_vigia(db, agora=quase)
-    assert fake.rejects == []
-    urg = [t for t, _ in threema_fake if "NÃO contestou" in t]
-    assert len(urg) == 1 and "desligada" in urg[0], threema_fake
+
+    r = await svc.run_vigia(db, agora=_em(1))
+    assert r["respondidos"] == 1 and r["avisos_12h"] == 0 and r["avisos_3h"] == 0, r
+    assert threema_fake == []
+
+    # a TikTok decidiu (recusou): desfecho no chamado do lançamento, uma vez, com o status da aba
+    fake.status = "REFUND_OR_RETURN_REQUEST_REJECT"
+    r2 = await svc.run_vigia(db, agora=_em(0.5))
+    assert r2["desfechos"] == 1, r2
+    hist = await _sistema(db, ch.id)
+    assert any("RECUSADO" in t for t in hist), hist
+    assert ch.status_plataforma == chamados_svc.STATUS_GANHAMOS
+    r3 = await svc.run_vigia(db, agora=_em(0.4))
+    assert r3["desfechos"] == 0
 
 
-async def test_vigia_desfecho_aprovado_por_falta_de_resposta(db, make_user, monkeypatch, threema_fake):
+async def test_vigia_lancamento_travado_avisa_o_que_falta(db, make_user, monkeypatch, threema_fake):
     fake = _FakeTikTok()
     await _seed(db, make_user, fake, monkeypatch)
-    await svc.run_vigia(db, agora=AGORA)
-    ch = (await db.execute(select(Chamado).where(Chamado.origem_ref == f"tiktok_reembolso:{RID}"))).scalar_one()
+    from app.services import chamados as chamados_svc
+    ch = _chamado_devolucao()
+    db.add(ch)
+    await db.flush()
+    msg = chamados_svc.nova_mensagem(ch, texto="x", tipo="abertura", autor_nome=chamados_svc.AUTOR_SISTEMA,
+                                     status="pendente")
+    msg.erro = "devolucao_sem_video"
+    db.add(msg)
+    await db.commit()
+
+    r = await svc.run_vigia(db, agora=_em(5))
+    assert r["avisos_12h"] == 1 and len(threema_fake) == 1, r
+    assert "resposta ainda NÃO saiu (devolucao_sem_video)" in threema_fake[0][0], threema_fake[0][0]
+
+
+async def test_vigia_desfecho_aprovado_por_falta_de_resposta_em_chamado_antigo(db, make_user, monkeypatch, threema_fake):
+    fake = _FakeTikTok()
+    await _seed(db, make_user, fake, monkeypatch)
+    ch = _chamado_devolucao(origem="vendas", origem_ref=f"tiktok_reembolso:{RID}")  # chamado do vigia antigo
+    db.add(ch)
+    await db.commit()
     # TikTok aprovou por falta de resposta → desfecho dito com todas as letras, uma vez
     fake.status = "RETURN_OR_REFUND_REQUEST_COMPLETE"
     fake.records.append({"event": "SELLER_REJECT_APPLICATION_TIMEOUT_REFUND", "create_time": PRAZO})
     r4 = await svc.run_vigia(db, agora=datetime.fromtimestamp(PRAZO + 60, UTC))
-    assert r4["desfechos"] == 1
+    assert r4["desfechos"] == 1, r4
     hist = await _sistema(db, ch.id)
     assert any("reembolso PAGO" in t and "FALTA DE RESPOSTA" in t for t in hist), hist
     r5 = await svc.run_vigia(db, agora=datetime.fromtimestamp(PRAZO + 120, UTC))
     assert r5["desfechos"] == 0
 
 
-async def test_replica_do_chamado_contesta_o_reembolso_com_foto(client, make_user, auth_as, db, monkeypatch, threema_fake):
+async def test_replica_em_chamado_antigo_continua_contestando_com_foto(client, make_user, auth_as, db, monkeypatch, threema_fake):
     fake = _FakeTikTok()
     await _seed(db, make_user, fake, monkeypatch)
-    await svc.run_vigia(db, agora=AGORA)
-    ch = (await db.execute(select(Chamado).where(Chamado.origem_ref == f"tiktok_reembolso:{RID}"))).scalar_one()
+    ch = _chamado_devolucao(origem="vendas", origem_ref=f"tiktok_reembolso:{RID}")
+    db.add(ch)
+    await db.commit()
     user = await make_user(permissions={"chamados": {"view": True, "edit": True, "delete": True}})
     auth_as(user)
 

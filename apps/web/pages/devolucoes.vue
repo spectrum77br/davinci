@@ -217,6 +217,10 @@ const ML_STATUS_ERROS: Record<string, string> = {
   tiktok_devolucao_encerrada: 'devolução já encerrada na TikTok (reembolsada/decidida) — nada mais a abrir pela API',
   ml_claim_encerrada: 'reclamação já encerrada no ML — nada mais a abrir pela API (veja o histórico)',
   tiktok_motivo_indisponivel: 'TikTok não aceita esse motivo nesse estado',
+  // só reembolso (18/09): o lançamento responde o caso que o vigia achou
+  devolucao_sem_video: 'aguardando o vídeo da expedição (coluna Vídeo da aba Fraude ou Link envio) — tenta a cada hora',
+  tiktok_reembolso_nao_pendente: 'o pedido de só reembolso já foi decidido na TikTok — veja o desfecho no histórico do chamado',
+  tiktok_reembolso_ja_contestado: 'só reembolso já contestado na TikTok (recusado / em arbitragem) — veja o histórico do chamado',
   shopee_aguardando_pacote: 'Shopee ainda não liberou a disputa — tenta a cada hora',
   shopee_ja_contestada: 'já contestada na Shopee (disputa feita no Seller Center — veja o histórico)',
   shopee_devolucao_encerrada: 'devolução já encerrada na Shopee',
@@ -597,6 +601,16 @@ function isMalaOuEletro(sku: string | null | undefined) {
 // Trava (Eduardo 04/09): "mala e eletro é obrigatória, desde que esteja nos motivos que abrem chamado".
 function linkEnvioRequired(sku: string | null | undefined, motivo: string | null | undefined) {
   return MOTIVOS_ABREM_CHAMADO.includes((motivo || '').trim().toLowerCase()) && isMalaOuEletro(sku)
+}
+// Trava (Vinicius 18/09): pedido na aba Fraude (só reembolso — o lançamento responde a
+// TikTok com o vídeo) só lança com o vídeo: o link da coluna Vídeo entra sozinho no
+// "Link envio"; sem vídeo e sem link colado, o backend recusa (422 video_obrigatorio).
+const MSG_VIDEO_OBRIGATORIO =
+  'Vídeo obrigatório: pedido na aba Fraude — anexe o vídeo pela coluna Vídeo (ou cole o link no Link envio) antes de lançar'
+function videoFraudeRequired(pedido: string | null | undefined, motivo: string | null | undefined) {
+  if (!pedido || !MOTIVOS_ABREM_CHAMADO.includes((motivo || '').trim().toLowerCase())) return false
+  const row = acompRows.value.find((r) => r.pedido_bling === pedido)
+  return !!row && row.fila === 'fraude' && !row.video_link
 }
 
 function apiError(e: any) {
@@ -1410,6 +1424,10 @@ async function createAllDevolutions() {
       lookupError.value = 'Link de envio obrigatório: mala/eletro com motivo que abre chamado'
       return
     }
+    if (videoFraudeRequired(d.pedido_bling, d.motivo_devolucao) && !d.link_envio) {
+      lookupError.value = MSG_VIDEO_OBRIGATORIO
+      return
+    }
   }
   creating.value = true
   lookupError.value = null
@@ -1629,6 +1647,10 @@ async function saveRow(row: DevolutionRow) {
   }
   if (linkEnvioRequired(row.sku, row.motivo_devolucao) && !row.link_envio) {
     error.value = 'Link de envio obrigatório: mala/eletro com motivo que abre chamado'
+    return
+  }
+  if (videoFraudeRequired(row.pedido_bling, row.motivo_devolucao) && !row.link_envio) {
+    error.value = MSG_VIDEO_OBRIGATORIO
     return
   }
   setSaving(row.id, true)
