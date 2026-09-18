@@ -5,16 +5,21 @@ import {
   CheckCircle2,
   ChevronLeft,
   ChevronRight,
+  Gavel,
   History,
+  Hourglass,
   ImagePlus,
   Loader2,
+  MessagesSquare,
   Plus,
+  Reply,
   RotateCcw,
   Scale,
   Search,
   Send,
   Trash2,
   Undo2,
+  UserRound,
   X,
 } from 'lucide-vue-next'
 
@@ -211,7 +216,55 @@ const busy = ref<Set<string>>(new Set())
 const rowSaveQueue = new Map<string, Promise<void>>()
 
 const totalPages = computed(() => Math.max(1, Math.ceil(total.value / PAGE_SIZE)))
-const visiveis = computed(() => statusFilter.value === 'all' ? items.value : items.value.filter((r) => r.status_aba === statusFilter.value))
+// Resumo no topo (Vinicius 18/09: "quantidade de chamados igual tem nos outros
+// painéis, a soma deles"). O total vem do servidor (todos os filtros, todas as
+// páginas); os grupos juntam os status da coluna Status por quem está com a
+// bola e são contados na página carregada — como o filtro de status, porque o
+// status é calculado na listagem. Clicar num card filtra por ele.
+type ResumoGrupo = { key: string; label: string; codes: string[]; tone: 'default' | 'warning' | 'danger'; icon: any; hint: string }
+const RESUMO_GRUPOS: ResumoGrupo[] = [
+  { key: 'humano', label: 'Precisa de humano', codes: ['humano'], tone: 'danger', icon: UserRound, hint: 'o robô não soube o que fazer com a resposta da plataforma' },
+  { key: 'nossa_vez', label: 'Nossa vez de responder', codes: ['respondeu', 'prova', 'falhou'], tone: 'warning', icon: Reply, hint: 'plataforma respondeu, pediu prova ou o envio falhou' },
+  { key: 'esperando', label: 'Esperando', codes: ['aguardando', 'esperando_liberar', 'em_analise', 'fila'], tone: 'default', icon: Hourglass, hint: 'com a plataforma, em análise ou na fila do robô' },
+  { key: 'decidido', label: 'Decididos', codes: ['ganhamos', 'perdemos', 'reembolso_pago', 'encerrado'], tone: 'default', icon: Gavel, hint: 'ganhamos, perdemos, reembolso pago ou encerrado' },
+]
+const GRUPO_POR_FILTRO: Record<string, ResumoGrupo> = Object.fromEntries(RESUMO_GRUPOS.map((g) => [`g:${g.key}`, g]))
+// Mais de uma página: os grupos e a divisão por origem só enxergam a página carregada.
+const resumoParcial = computed(() => items.value.length < total.value)
+const resumoTotalLabel = computed(() => mostrar.value === 'abertos' ? 'Chamados abertos' : mostrar.value === 'resolvidos' ? 'Chamados encerrados' : 'Chamados')
+const resumoPorOrigem = computed(() => {
+  const partes = ORIGENS.map((o) => ({ label: o.label, n: items.value.filter((r) => r.origem === o.value).length })).filter((x) => x.n > 0)
+  if (!partes.length) return ''
+  const texto = partes.map((x) => `${x.label} ${x.n}`).join(' · ')
+  return resumoParcial.value ? `nesta página: ${texto}` : texto
+})
+// Nome curto de cada status pra caber na legenda do card ("envio falhou 2 · pediu prova 1").
+const STATUS_CURTO: Record<string, string> = {
+  respondeu: 'plataforma respondeu', prova: 'pediu prova', falhou: 'envio falhou',
+  aguardando: 'com a plataforma', esperando_liberar: 'esperando liberar', em_analise: 'em análise', fila: 'fila do robô',
+  ganhamos: 'ganhamos', perdemos: 'perdemos', reembolso_pago: 'reembolso pago', encerrado: 'encerrado',
+}
+const resumoGrupos = computed(() => RESUMO_GRUPOS.map((g) => {
+  const partes = g.codes
+    .map((c) => ({ label: STATUS_CURTO[c] || (STATUS_POR_CODIGO[c]?.label || c).toLowerCase(), n: items.value.filter((r) => r.status_aba === c).length }))
+    .filter((x) => x.n > 0)
+  // Grupo com vários status e algum contado: a legenda vira a divisão; senão, a explicação fixa.
+  const detalhe = g.codes.length > 1 && partes.length ? partes.map((x) => `${x.label} ${x.n}`).join(' · ') : ''
+  const hint = detalhe || g.hint
+  return { ...g, n: partes.reduce((soma, x) => soma + x.n, 0), hint: resumoParcial.value ? `${hint} (nesta página)` : hint }
+}))
+function filtrarGrupo(key: string) {
+  const v = `g:${key}`
+  statusFilter.value = statusFilter.value === v ? 'all' : v
+}
+// Filtro da coluna Status: um código ou um grupo do resumo (`g:...`).
+const visiveis = computed(() => {
+  const f = statusFilter.value
+  if (f === 'all') return items.value
+  const grupo = GRUPO_POR_FILTRO[f]
+  if (grupo) return items.value.filter((r) => grupo.codes.includes(r.status_aba || ''))
+  return items.value.filter((r) => r.status_aba === f)
+})
 const rangeStart = computed(() => (total.value === 0 ? 0 : (page.value - 1) * PAGE_SIZE + 1))
 const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
 
@@ -1068,6 +1121,24 @@ async function reabrir(row: ChamadoRow) {
       </div>
     </div>
 
+    <!-- resumo (18/09): total do servidor + grupos da coluna Status na página carregada; clicar filtra -->
+    <div v-if="tab === 'chamados'" class="grid grid-cols-2 lg:grid-cols-5 gap-3">
+      <button type="button" class="rounded-xl text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-primary" title="mostrar todos os status" @click="statusFilter = 'all'">
+        <StatCard :label="resumoTotalLabel" :value="total" :icon="MessagesSquare" :hint="resumoPorOrigem || undefined" />
+      </button>
+      <button
+        v-for="g in resumoGrupos"
+        :key="g.key"
+        type="button"
+        class="rounded-xl text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+        :class="statusFilter === `g:${g.key}` ? 'ring-2 ring-primary' : ''"
+        :title="statusFilter === `g:${g.key}` ? 'tirar o filtro' : `filtrar: ${g.label}`"
+        @click="filtrarGrupo(g.key)"
+      >
+        <StatCard :label="g.label" :value="g.n" :icon="g.icon" :tone="g.tone" :hint="g.hint" />
+      </button>
+    </div>
+
     <!-- filtros -->
     <div class="flex flex-wrap items-center gap-2">
       <div class="relative">
@@ -1093,7 +1164,12 @@ async function reabrir(row: ChamadoRow) {
       </select>
       <select v-model="statusFilter" class="h-9 rounded-md border bg-background px-2 text-sm" title="filtrar pela coluna Status">
         <option value="all">todos status</option>
-        <option v-for="s in STATUS_ABA" :key="s.value" :value="s.value">{{ s.label }}</option>
+        <optgroup label="resumo">
+          <option v-for="g in RESUMO_GRUPOS" :key="g.key" :value="`g:${g.key}`">{{ g.label }}</option>
+        </optgroup>
+        <optgroup label="status">
+          <option v-for="s in STATUS_ABA" :key="s.value" :value="s.value">{{ s.label }}</option>
+        </optgroup>
       </select>
       <span class="ml-auto text-xs text-muted-foreground">{{ rangeStart }}–{{ rangeEnd }} de {{ total }}</span>
     </div>
@@ -1200,14 +1276,15 @@ async function reabrir(row: ChamadoRow) {
                 </div>
               </div>
             </td>
+            <!-- 18/09 (Vinicius): a célula mostra só o começo; clicou, abre o balão com o
+                 texto inteiro (ObservacaoPopover) — a linha não muda de altura. -->
             <td class="px-1 py-0.5 w-[150px] max-w-[150px] bg-amber-50/40 dark:bg-amber-900/10">
-              <input
-                :value="row.observacao || ''"
-                :title="row.observacao || ''"
+              <ObservacaoPopover
+                :model-value="row.observacao"
                 :disabled="!canEdit"
-                :class="sheetInputClass"
-                @input="(e) => setRowText(row, 'observacao', (e.target as HTMLInputElement).value)"
-                @change="saveRow(row)"
+                :titulo="`Observação · ${row.pedido_bling || row.pedido_marketplace || 'chamado'}`"
+                @update:model-value="(v) => setRowText(row, 'observacao', v)"
+                @save="saveRow(row)"
               />
             </td>
             <td class="px-2 py-1 bg-violet-50/40 dark:bg-violet-900/10 border-l-[3px] border-gray-400 dark:border-gray-600">
