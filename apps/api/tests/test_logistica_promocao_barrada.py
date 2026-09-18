@@ -65,3 +65,95 @@ from app.services.logistica_bling import pacote_ainda_com_o_vendedor as ainda_aq
 )
 def test_quando_a_plataforma_diz_que_o_pacote_nao_saiu(plataforma, status, esperado, porque):
     assert ainda_aqui(plataforma, status) is esperado, porque
+
+
+# ── Envio próprio: a Amazon nunca confirma; os Correios é que viram o pacote ──
+# 18/09/2026: regra "amazon | Enviado / Em digitação → Em andamento" barrada
+# pra sempre nos pedidos 296762 e 297371 (SEDEX, "Objeto em transferência"),
+# porque MFN não tem EasyShip e o "Enviado" da Amazon nasce com a NF.
+
+_PROPRIO = {"order_status": "Shipped", "fulfillment_channel": "MFN"}
+
+
+@pytest.mark.parametrize(
+    ("status", "correios_saiu", "esperado", "porque"),
+    [
+        (_PROPRIO, True, False, "Envio próprio com movimentação nos Correios: saiu"),
+        (_PROPRIO, False, True, "Envio próprio sem evento dos Correios: só a NF saiu"),
+        ({"order_status": "Shipped"}, True, False,
+         "sem fulfillment_channel também é MFN sem EasyShip"),
+        ({"order_status": "Shipped", "easyship_status": "PendingDropOff"}, True, True,
+         "DBA: com EasyShip presente a palavra da Amazon continua mandando"),
+        ({"order_status": "Unshipped", "fulfillment_channel": "MFN"}, True, True,
+         "Amazon nem diz Enviado — Correios não substituem a confirmação do pedido"),
+        ({}, True, True, "sem leitura da Amazon não se inventa confirmação"),
+    ],
+)
+def test_correios_confirmam_saida_so_no_envio_proprio(status, correios_saiu, esperado, porque):
+    assert ainda_aqui("Amazon", status, correios_saiu=correios_saiu) is esperado, porque
+
+
+def test_correios_saiu_nao_muda_as_outras_plataformas():
+    # A evidência dos Correios é só pra quem não tem como confirmar (Amazon MFN).
+    ml = {"ship_status": "ready_to_ship", "ship_substatus": "printed"}
+    assert ainda_aqui("Mercado Livre", ml, correios_saiu=True) is True
+    assert ainda_aqui("Shopee", {"order_status": "PROCESSED"}, correios_saiu=True) is True
+
+
+def _linha(**kw):
+    from datetime import UTC, datetime
+
+    from app.models import Logistica
+
+    base = {
+        "plataforma": "Amazon",
+        "meli_status": dict(_PROPRIO),
+        "rastreio": "AD929596725BR",
+        "localizacao": "Indaiatuba/SP — Objeto em transferência - por favor aguarde",
+        "localizacao_at": datetime(2026, 9, 18, 10, 0, tzinfo=UTC),
+        "entregue_em": None,
+    }
+    base.update(kw)
+    return Logistica(**base)
+
+
+@pytest.mark.parametrize(
+    ("kw", "esperado", "porque"),
+    [
+        ({}, True, "evento físico dos Correios (em transferência)"),
+        ({"localizacao_at": None}, False,
+         "localizacao_at vazio = Localização ainda é o proxy da Amazon (cidade do comprador)"),
+        ({"localizacao": "BR — Etiqueta emitida"}, False,
+         "só a etiqueta: o rastreio existe, mas o pacote não foi postado"),
+        ({"localizacao": "Tres Marias/MG — Objeto ainda não chegou à unidade"}, True,
+         "evento de trânsito (visto em produção), não é pré-postagem"),
+        ({"localizacao": "BR — Etiqueta emitida", "entregue_em": "x"}, True,
+         "entrega carimbada vale mesmo com Localização velha"),
+    ],
+)
+def test_correios_confirmam_saida(kw, esperado, porque):
+    from datetime import UTC, datetime
+
+    from app.services.logistica_bling import correios_confirmam_saida
+
+    if kw.get("entregue_em") == "x":
+        kw["entregue_em"] = datetime(2026, 9, 23, 12, 0, tzinfo=UTC)
+    assert correios_confirmam_saida(_linha(**kw)) is esperado, porque
+
+
+@pytest.mark.parametrize(
+    ("loc", "esperado"),
+    [
+        ("BR — Etiqueta emitida", True),
+        ("Sao Paulo/SP — Pré-postagem registrada", True),
+        ("Objeto aguardando postagem pelo remetente", True),
+        ("Sao Paulo/SP — Objeto postado", False),
+        ("Indaiatuba/SP — Objeto em transferência - por favor aguarde", False),
+        ("Tres Marias/MG — Objeto ainda não chegou à unidade", False),
+        (None, False),
+    ],
+)
+def test_evento_pre_postagem(loc, esperado):
+    from app.services.logistica_track import evento_pre_postagem
+
+    assert evento_pre_postagem(loc) is esperado

@@ -608,6 +608,27 @@ def evento_grave(localizacao: str | None) -> str | None:
     return None
 
 
+# Eventos que aparecem no rastreio ANTES de o pacote ser postado (a etiqueta
+# foi gerada, a pré-postagem registrada) — vistos em produção como
+# "BR — Etiqueta emitida". Um rastreio só com isso não prova que o pacote saiu
+# do galpão; ver logistica_bling.correios_confirmam_saida.
+EVENTOS_PRE_POSTAGEM: tuple[str, ...] = (
+    "etiqueta emitida",
+    "etiqueta gerada",
+    "aguardando postagem",
+    "pre-postagem",
+    "pre postagem",
+    "prepostagem",
+    "nao postado",
+)
+
+
+def evento_pre_postagem(localizacao: str | None) -> bool:
+    """O último evento dos Correios ainda é de pré-postagem (pacote não saiu)?"""
+    txt = _sem_acento(localizacao)
+    return any(_sem_acento(chave) in txt for chave in EVENTOS_PRE_POSTAGEM)
+
+
 def parse_push_entregues(payload: dict) -> set[str]:
     """Números do push cujo estado é ENTREGUE (mesmo desempacotamento do
     `parse_push`, sem mexer no contrato dele)."""

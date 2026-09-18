@@ -1583,6 +1583,10 @@ const STATUS_BLING_ERROS: Record<string, string> = {
   logistica_status_bling_desconhecido: 'A situação alvo não existe no catálogo do Bling.',
   logistica_status_atual_divergente:
     'O pedido não está no "Status Atual" que a regra exige — a mudança não foi aplicada pra não regredir.',
+  logistica_promocao_sem_envio_confirmado:
+    'A plataforma ainda não confirmou que o pacote saiu (Amazon: EasyShip coletado ou, no Envio próprio, o rastreio dos Correios com movimentação) — não foi marcado como "Em andamento".',
+  logistica_status_override_humano:
+    'O sistema já levou este pedido a esse status e alguém o tirou de lá — não reaplica enquanto o Status Plataforma não mudar.',
   logistica_sem_pedido_bling: 'Linha sem número de pedido Bling.',
   logistica_pedido_bling_nao_achado: 'Pedido não encontrado no Bling.',
   logistica_sem_integracao_bling: 'Integração Bling não configurada.',

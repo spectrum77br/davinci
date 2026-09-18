@@ -37,8 +37,8 @@ from app.models import (
     SituacaoBling,
 )
 from app.security.cipher import decrypt_json, encrypt_json
-from app.services import logistica_match, logistica_rules, threema
-from app.services.amazon_shipment_status import amazon_shipment_confirmed
+from app.services import logistica_match, logistica_rules, logistica_track, threema
+from app.services.amazon_shipment_status import AMAZON_SHIPPED, amazon_shipment_confirmed
 from app.services.bling_situacoes import SITUACAO_ENVIADO_ETIQUETA, SITUACOES_ENVIADO_ETIQUETA
 from app.services.marketplaces.bling import BlingClient
 
@@ -444,11 +444,33 @@ async def preview_alterar_status_bling(session: AsyncSession, row: Logistica) ->
 # Amazon exige confirmação física positiva para promover a 15: ausência do
 # EasyShip não comprova envio (caso 296762, 14/09). Nas demais plataformas,
 # preserva a trava contra um sinal explícito de que o pacote não saiu.
+#
+# Envio próprio (MFN sem EasyShip) é o caso em que a Amazon NUNCA confirma: o
+# "Enviado" dela nasce com a NF e não existe EasyShip pra dizer que o pacote
+# foi coletado. Aí quem viu o pacote são os Correios — 18/09, pedidos 296762 e
+# 297371 já "em transferência" e a regra Enviado / Em digitação → Em andamento
+# barrada pra sempre. Com EasyShip presente, a palavra da Amazon segue mandando.
 _SITUACAO_EM_ANDAMENTO_ID = 15
 
 
-def pacote_ainda_com_o_vendedor(plataforma: str | None, meli_status: dict | None) -> bool:
-    """Barra saída contrariada pela plataforma ou não confirmada na Amazon."""
+def correios_confirmam_saida(row: Logistica) -> bool:
+    """Os Correios já viram o pacote? Entrega carimbada, ou um evento físico do
+    rastreio — qualquer coisa além de "Etiqueta emitida"/pré-postagem, que
+    existem antes de o pacote sair. `localizacao_at` vazio = a Localização
+    ainda é o proxy do marketplace, não leitura dos Correios."""
+    if row.entregue_em is not None:
+        return True
+    if row.localizacao_at is None:
+        return False
+    return not logistica_track.evento_pre_postagem(row.localizacao)
+
+
+def pacote_ainda_com_o_vendedor(
+    plataforma: str | None, meli_status: dict | None, *, correios_saiu: bool = False
+) -> bool:
+    """Barra saída contrariada pela plataforma ou não confirmada na Amazon.
+    `correios_saiu` (ver `correios_confirmam_saida`) só conta onde a plataforma
+    não tem como confirmar: Amazon Envio próprio."""
     from app.services.marketplace_shipment_check import (
         _ML_CONFIRMED_SHIPPED_SUBSTATUS,
         _ML_SHIPPED,
@@ -459,7 +481,13 @@ def pacote_ainda_com_o_vendedor(plataforma: str | None, meli_status: dict | None
     m = meli_status or {}
     p = (plataforma or "").strip().lower()
     if p in _AMAZON_PLATAFORMAS:
-        return not amazon_shipment_confirmed(m)
+        if amazon_shipment_confirmed(m):
+            return False
+        if str(m.get("order_status") or "").strip() not in AMAZON_SHIPPED:
+            return True
+        if str(m.get("easyship_status") or "").strip():
+            return True  # DBA: o EasyShip está dizendo que ainda não saiu
+        return not correios_saiu
     if p in _SHOPEE_PLATAFORMAS:
         ordem = str(m.get("order_status") or "").strip().upper()
         return bool(ordem) and ordem not in _SHOPEE_SHIPPED
@@ -493,7 +521,7 @@ async def apply_alterar_status_bling(session: AsyncSession, row: Logistica) -> d
         raise BlingObsError("logistica_status_atual_divergente")
     alvo, alvo_id = r["alvo"], r["alvo_id"]
     if alvo_id == _SITUACAO_EM_ANDAMENTO_ID and pacote_ainda_com_o_vendedor(
-        row.plataforma, row.meli_status or {}
+        row.plataforma, row.meli_status or {}, correios_saiu=correios_confirmam_saida(row)
     ):
         logger.info(
             "logistica_status_promocao_barrada",
