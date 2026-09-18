@@ -94,7 +94,14 @@ type PedidoRow = {
   // relatório 10×15). Null = nunca. A tela mostra "🖨 HH:MM" sob o selo
   // amarelo pra ninguém separar o mesmo pedido duas vezes.
   previsao_impressa_em: string | null
+  // Vídeo da embalagem (Vinicius, 18/09): pede quando o pedido tem mais de
+  // 1 unidade (soma dos itens do pedido inteiro — 2 do mesmo SKU ou 2
+  // produtos diferentes). `video` = link do Google Drive salvo pelo botão
+  // antes de Obs (grão de pedido: as linhas do mesmo pedido mostram igual).
+  pede_video: boolean
+  video: PedidoVideo | null
 }
+type PedidoVideo = { link: string; salvo_em: string | null; salvo_por: string | null }
 type EnvioRow = {
   data: string
   // Contagem oficial: ledger por evento (shipping_day, corte 10:00 —
@@ -104,6 +111,14 @@ type EnvioRow = {
   // Status da conferência da aba Estoque para aquele dia. Vem do
   // backend — comparação count(StockCheck conferido) vs count(produtos).
   conferencia_estoque: 'total' | 'parcial' | 'nenhuma'
+  // Vídeos da embalagem do dia: pedidos com mais de 1 unidade × link salvo.
+  // `nenhum` = nenhum pedido do dia pede vídeo.
+  videos: {
+    necessarios: number
+    feitos: number
+    pendentes: string[]
+    status: 'feito' | 'parcial' | 'nao_feito' | 'nenhum'
+  }
 }
 
 // Solicitação de vídeo da expedição (tela Devoluções, 17/09): uma por
@@ -690,6 +705,87 @@ async function patchPedidoObs(row: PedidoRow, newObs: string) {
   try {
     await toggleCheck('pedido', row.id, refDate, row.conferido, newObs)
   } catch { /* next reload reverts */ }
+}
+
+// ── Vídeo da embalagem (botão antes de Obs, 18/09) ────────────────────
+// O empacotador filma a caixa, sobe no Google Drive e cola o link aqui.
+// Obrigatório quando o pedido tem mais de 1 unidade (`pede_video`); nos
+// outros o botão fica discreto, mas também salva. O modal traz o passo a
+// passo do Drive porque a equipe não é do ramo (Vinicius).
+const videoModal = ref<{
+  pedido: string
+  link: string
+  jaTem: boolean
+  salvando: boolean
+  erro: string | null
+  ajuda: boolean
+} | null>(null)
+function abrirVideo(row: PedidoRow) {
+  if (!row.pedido_bling) return
+  videoModal.value = {
+    pedido: row.pedido_bling,
+    link: row.video?.link || '',
+    jaTem: !!row.video,
+    salvando: false,
+    erro: null,
+    // Sem vídeo ainda → já abre com o passo a passo à vista.
+    ajuda: !row.video,
+  }
+}
+function aplicarVideo(pedido: string, video: PedidoVideo | null) {
+  for (const r of pedidos.value) if (r.pedido_bling === pedido) r.video = video
+}
+async function salvarVideo() {
+  const m = videoModal.value
+  if (!m || m.salvando) return
+  const link = m.link.trim()
+  if (!link) {
+    m.erro = 'Cole o link do vídeo no Google Drive.'
+    return
+  }
+  m.salvando = true
+  m.erro = null
+  try {
+    const r = await api<PedidoVideo & { pedido_bling: string }>(
+      `/api/estoque/pedidos/${encodeURIComponent(m.pedido)}/video`,
+      { method: 'PUT', body: { link } },
+    )
+    aplicarVideo(m.pedido, { link: r.link, salvo_em: r.salvo_em, salvo_por: r.salvo_por })
+    videoModal.value = null
+  } catch (e: any) {
+    const code = e?.data?.detail?.code
+    m.erro = code === 'video_link_nao_drive'
+      ? 'Esse link não é do Google Drive. Abra o vídeo no Drive, toque em Compartilhar e copie o link (drive.google.com/...).'
+      : code === 'pedido_nao_encontrado'
+        ? `Pedido ${m.pedido} não encontrado.`
+        : `Não deu pra salvar (${e?.data?.detail?.message || code || e?.message || 'erro'}).`
+  } finally {
+    m.salvando = false
+  }
+}
+async function removerVideo() {
+  const m = videoModal.value
+  if (!m || m.salvando || !m.jaTem) return
+  m.salvando = true
+  m.erro = null
+  try {
+    await api(`/api/estoque/pedidos/${encodeURIComponent(m.pedido)}/video`, { method: 'DELETE' })
+    aplicarVideo(m.pedido, null)
+    videoModal.value = null
+  } catch (e: any) {
+    m.erro = `Não deu pra remover (${e?.data?.detail?.code || e?.message || 'erro'}).`
+  } finally {
+    m.salvando = false
+  }
+}
+function videoTitulo(row: PedidoRow) {
+  if (row.video) {
+    const quem = row.video.salvo_por ? ` por ${row.video.salvo_por}` : ''
+    return `Vídeo salvo ${fmtDataHoraBrt(row.video.salvo_em)}${quem} — clique pra abrir, ✎ pra trocar`
+  }
+  return row.pede_video
+    ? 'Pedido com mais de 1 unidade: filme a embalagem e salve o link do Google Drive'
+    : 'Salvar o link do vídeo da embalagem (opcional neste pedido)'
 }
 // Etiqueta transformada (landing zone da NF automática). URL relativa → o
 // cookie de sessão vai junto quando o <a> abre numa aba nova.
@@ -2484,6 +2580,7 @@ async function conferirTodos() {
                 <ArrowUp v-else-if="sortKey === col.key" class="size-3" />
               </button>
             </th>
+            <th class="text-center" title="Vídeo da embalagem: obrigatório quando o pedido tem mais de 1 unidade. Salva o link do Google Drive.">Vídeo</th>
             <th class="text-left bg-emerald-50/40">Obs</th>
             <th class="text-center">Imprimir Etiqueta</th>
             <th class="text-center" title="Chamado do pedido: o de atraso na postagem (botão em lote, qualquer loja) ou o de pedido parado (só Mercado Livre, pelo formulário de ajuda).">Chamado</th>
@@ -2491,7 +2588,7 @@ async function conferirTodos() {
         </thead>
         <tbody>
           <tr v-if="pedidosFiltered.length === 0">
-            <td colspan="15" class="py-6 text-center text-muted-foreground">
+            <td colspan="16" class="py-6 text-center text-muted-foreground">
               Nenhum pedido para esse dia.
             </td>
           </tr>
@@ -2588,6 +2685,41 @@ async function conferirTodos() {
                 🖨 {{ previsaoImpressaHora(row) }}
               </div>
             </td>
+            <td class="text-center whitespace-nowrap">
+              <!-- Com link: abre o vídeo; ✎ troca/remove. Sem link: botão —
+                   destacado quando o pedido pede vídeo (mais de 1 unidade). -->
+              <template v-if="row.video">
+                <a
+                  :href="row.video.link"
+                  target="_blank"
+                  rel="noopener"
+                  class="inline-flex items-center gap-1 rounded-md border border-emerald-300 bg-emerald-50 px-2 py-1 text-[10px] font-medium text-emerald-700 hover:bg-emerald-100 dark:border-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300"
+                  :title="videoTitulo(row)"
+                >
+                  <Video class="size-3" />
+                  Vídeo
+                </a>
+                <button
+                  type="button"
+                  class="ml-1 text-muted-foreground hover:text-foreground"
+                  title="Trocar ou remover o link"
+                  @click="abrirVideo(row)"
+                >✎</button>
+              </template>
+              <button
+                v-else
+                type="button"
+                class="inline-flex items-center gap-1 rounded-md border px-2 py-1 text-[10px] font-medium"
+                :class="row.pede_video
+                  ? 'border-rose-400 bg-rose-50 text-rose-700 hover:bg-rose-100 dark:border-rose-700 dark:bg-rose-900/30 dark:text-rose-300'
+                  : 'text-muted-foreground hover:bg-muted/40'"
+                :title="videoTitulo(row)"
+                @click="abrirVideo(row)"
+              >
+                <Video class="size-3" />
+                {{ row.pede_video ? 'Vídeo obrigatório' : 'Vídeo' }}
+              </button>
+            </td>
             <td class="bg-emerald-50/30">
               <input
                 :value="row.observacao || ''"
@@ -2672,12 +2804,13 @@ async function conferirTodos() {
             <th class="text-left">Data</th>
             <th class="text-right">Envios</th>
             <th class="text-center">Conf. Estoque</th>
+            <th class="text-center" title="Vídeo da embalagem dos pedidos do dia com mais de 1 unidade">Vídeos</th>
             <th class="text-center bg-gray-100/40">Conferido</th>
           </tr>
         </thead>
         <tbody>
           <tr v-if="envios.items.length === 0">
-            <td colspan="4" class="py-6 text-center text-muted-foreground">
+            <td colspan="5" class="py-6 text-center text-muted-foreground">
               Nenhum envio no período.
             </td>
           </tr>
@@ -2706,6 +2839,30 @@ async function conferirTodos() {
                 }}
               </span>
             </td>
+            <td class="text-center">
+              <!-- Feito / Parcial x/y / Não feito, só dos pedidos que pedem
+                   vídeo (mais de 1 unidade). Passando o mouse: quais faltam. -->
+              <span
+                v-if="row.videos.status === 'nenhum'"
+                class="text-muted-foreground"
+                title="Nenhum pedido do dia com mais de 1 unidade"
+              >—</span>
+              <span
+                v-else
+                class="inline-block px-1.5 py-0.5 rounded text-[10px] font-medium"
+                :class="{
+                  'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300': row.videos.status === 'feito',
+                  'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300': row.videos.status === 'parcial',
+                  'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300': row.videos.status === 'nao_feito',
+                }"
+                :title="row.videos.pendentes.length
+                  ? `Faltam ${row.videos.pendentes.length}: ${row.videos.pendentes.join(', ')}`
+                  : `${row.videos.feitos} pedido(s) com vídeo`"
+              >
+                {{ row.videos.status === 'feito' ? 'Feito' : row.videos.status === 'parcial' ? 'Parcial' : 'Não feito' }}
+                {{ row.videos.feitos }}/{{ row.videos.necessarios }}
+              </span>
+            </td>
             <td class="text-center bg-gray-100/30">
               <input
                 v-if="isAdmin"
@@ -2727,6 +2884,7 @@ async function conferirTodos() {
           <tr>
             <td class="text-right">Total (conferidos)</td>
             <td class="text-right">{{ envios.total }}</td>
+            <td></td>
             <td></td>
             <td class="text-center text-muted-foreground text-[10px]">
               geral: {{ envios.total_envios }}
@@ -2993,6 +3151,81 @@ async function conferirTodos() {
             <LifeBuoy v-else class="size-4" />
             Abrir {{ atrasoGruposComPedidos.length }} chamado(s)
           </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Vídeo da embalagem: cola o link do Google Drive + passo a passo -->
+    <div
+      v-if="videoModal"
+      class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+      @click.self="videoModal = null"
+    >
+      <div class="w-full max-w-lg overflow-hidden rounded-xl border bg-background shadow-2xl">
+        <div class="flex items-center gap-3 border-b px-5 py-4">
+          <Video class="size-6 shrink-0 text-rose-600" />
+          <div>
+            <div class="text-base font-semibold">Vídeo da embalagem — pedido {{ videoModal.pedido }}</div>
+            <div class="text-xs text-muted-foreground">Cole aqui o link do vídeo no Google Drive.</div>
+          </div>
+        </div>
+        <div class="space-y-3 px-5 py-4 text-sm">
+          <input
+            v-model="videoModal.link"
+            type="url"
+            autofocus
+            placeholder="https://drive.google.com/file/d/..."
+            class="w-full rounded-md border bg-background px-3 py-2 text-sm"
+            @keydown.enter.prevent="salvarVideo"
+          />
+          <div v-if="videoModal.erro" class="rounded-md border border-red-300 bg-red-50 px-3 py-2 text-xs text-red-700 dark:border-red-800 dark:bg-red-950/40 dark:text-red-300">
+            {{ videoModal.erro }}
+          </div>
+          <button
+            type="button"
+            class="text-xs text-primary underline-offset-2 hover:underline"
+            @click="videoModal.ajuda = !videoModal.ajuda"
+          >
+            {{ videoModal.ajuda ? 'Esconder o passo a passo' : 'Como faço o vídeo e pego o link? (passo a passo)' }}
+          </button>
+          <ol v-if="videoModal.ajuda" class="list-decimal space-y-1.5 rounded-md border bg-muted/30 px-4 py-3 pl-8 text-xs leading-relaxed">
+            <li><b>Filme a embalagem</b> com o celular: mostre a etiqueta com o nº do pedido e cada produto entrando na caixa, até fechar.</li>
+            <li>Abra o app <b>Google Drive</b> no celular, toque em <b>+</b> → <b>Enviar</b> e escolha o vídeo. Espere terminar de enviar (aparece 100%).</li>
+            <li>Toque nos <b>três pontinhos ⋮</b> ao lado do vídeo → <b>Gerenciar acesso</b> (ou <b>Compartilhar</b>).</li>
+            <li>Em <b>Acesso geral</b>, troque <b>Restrito</b> por <b>Qualquer pessoa com o link</b>. Sem isso ninguém consegue abrir o vídeo.</li>
+            <li>Toque em <b>Copiar link</b>, volte aqui, cole no campo acima e clique em <b>Salvar</b>.</li>
+          </ol>
+        </div>
+        <div class="flex items-center justify-between gap-2 border-t bg-muted/30 px-5 py-3">
+          <button
+            v-if="videoModal.jaTem"
+            type="button"
+            class="text-xs text-red-600 hover:underline disabled:opacity-50"
+            :disabled="videoModal.salvando"
+            @click="removerVideo"
+          >
+            Remover link
+          </button>
+          <span v-else></span>
+          <div class="flex gap-2">
+            <button
+              type="button"
+              class="rounded-md border px-4 py-2 text-sm hover:bg-muted/40"
+              :disabled="videoModal.salvando"
+              @click="videoModal = null"
+            >
+              Cancelar
+            </button>
+            <button
+              type="button"
+              class="inline-flex items-center gap-1 rounded-md bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground hover:opacity-90 disabled:opacity-50"
+              :disabled="videoModal.salvando"
+              @click="salvarVideo"
+            >
+              <Loader2 v-if="videoModal.salvando" class="size-4 animate-spin" />
+              Salvar
+            </button>
+          </div>
         </div>
       </div>
     </div>

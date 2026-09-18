@@ -48,6 +48,7 @@ from app.models.enums import (
     VerificacaoStatus,
 )
 from app.models.estoque_dia_finalizado import EstoqueDiaFinalizado
+from app.models.estoque_pedido_video import EstoquePedidoVideo
 from app.models.fatura import Fatura
 from app.models.financeiro import (
     CertificacoesSyncHistorico,
@@ -195,6 +196,7 @@ __all__ = [
     "DevolucaoAnexo",
     "Devolution",
     "EstoqueDiaFinalizado",
+    "EstoquePedidoVideo",
     "FinanceiroConsorcio",
     "FinanceiroSimulacao",
     "FinanceiroSuprimentos",

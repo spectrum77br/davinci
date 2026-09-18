@@ -29,6 +29,7 @@ from __future__ import annotations
 
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Annotated, Any
+from urllib.parse import urlparse
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
@@ -47,6 +48,7 @@ from app.models import (
     BlingOrder,
     DevolucaoRastreio,
     EstoqueDiaFinalizado,
+    EstoquePedidoVideo,
     PrevisaoImpressa,
     Product,
     User,
@@ -768,6 +770,26 @@ async def list_estoque_pedidos(
             n for n, ts in tags_por_pedido.items() if len(ts) >= 2
         }
 
+    # Vídeo da embalagem (Vinicius, 18/09): pedido com MAIS DE 1 UNIDADE pede
+    # vídeo — soma dos itens do pedido INTEIRO (2 do mesmo SKU ou 2 produtos
+    # diferentes na mesma caixa), sem a cerca de tag, como o compartilhado.
+    # O link salvo pelo botão "Vídeo" da aba fica em estoque_pedido_video.
+    unidades_por_pedido: dict[str, int] = {}
+    video_por_pedido: dict[str, dict[str, Any]] = {}
+    if numeros:
+        un_rows = (
+            await session.execute(
+                select(
+                    BlingOrder.numero,
+                    func.sum(func.coalesce(BlingOrder.item_quantidade, 1)),
+                )
+                .where(BlingOrder.numero.in_(numeros))
+                .group_by(BlingOrder.numero)
+            )
+        ).all()
+        unidades_por_pedido = {n: int(u or 0) for n, u in un_rows}
+        video_por_pedido = await _videos_por_pedido(session, numeros)
+
     # Hora do ENVIO (coluna "Envio" da tela): instante em que o pedido entrou
     # na situação 15 ("em andamento"), lido do ledger bling_envio_evento
     # (trigger de banco — migration 0156). Pedido antigo (pré-ledger) não tem
@@ -854,6 +876,13 @@ async def list_estoque_pedidos(
             "estoque_compartilhado": (
                 bool(o.numero) and o.numero in compartilhado_por_pedido
             ),
+            # Pede vídeo da embalagem (mais de 1 unidade no pedido) e o link
+            # já salvo (null = ainda sem vídeo). Grão de pedido: todas as
+            # linhas do mesmo pedido mostram o mesmo.
+            "pede_video": pede_video(
+                unidades_por_pedido.get(o.numero or "", o.item_quantidade or 1)
+            ),
+            "video": video_por_pedido.get(o.numero) if o.numero else None,
             "etiqueta_em": (
                 etiquetas_por_pedido[o.numero].isoformat()
                 if o.numero in etiquetas_por_pedido
@@ -1493,6 +1522,9 @@ async def list_estoque_envios(
     )).all()}
 
     locks_str = {d.isoformat() for d in locks}
+    # Vídeos da embalagem por dia (18/09): pedidos do dia com mais de 1
+    # unidade × link salvo. Mesma cerca de tag dos envios.
+    videos_by_day = await _videos_por_dia(session, ledger_where)
     all_days = sorted(ledger_by_day, reverse=True)
 
     items: list[dict[str, Any]] = []
@@ -1529,6 +1561,7 @@ async def list_estoque_envios(
             "envios": envios_n,
             "conferido": conf,
             "conferencia_estoque": conferencia_estoque,
+            "videos": videos_by_day.get(dia_str) or _VIDEOS_DIA_VAZIO,
         })
         total_envios += envios_n
         if conf:
@@ -2538,3 +2571,171 @@ async def responder_video_pendente(
         "pedido_bling": pedido_bling,
         "video_status": "enviado" if link else "sem_video",
     }
+
+
+# ---------------------------------------------------------------------------
+# Vídeo da embalagem por pedido (Vinicius, 18/09/2026)
+#
+# "Todo pedido que a quantidade for mais de 1 pede vídeo (ex.: 2 Apple Watch
+# no mesmo pedido)". Botão "Vídeo" antes de Obs na aba Pedidos salva o link
+# (sempre Google Drive) em estoque_pedido_video; a aba Envios mostra por dia
+# Feito / Parcial / Não feito contando só os pedidos que pedem vídeo. É a
+# prova pra disputa "chegou vazio / veio só um" — a mesma coisa que a
+# Devoluções pede depois pelo `videos-pendentes`.
+# ---------------------------------------------------------------------------
+
+# Quantidade mínima de unidades no pedido (soma dos itens) pra exigir vídeo.
+VIDEO_MIN_UNIDADES = 2
+_VIDEOS_DIA_VAZIO: dict[str, Any] = {
+    "necessarios": 0, "feitos": 0, "pendentes": [], "status": "nenhum",
+}
+# O vídeo mora sempre no Google Drive: qualquer outra coisa colada no campo
+# ("ok", "feito", link do WhatsApp) não é prova e não conta.
+_DRIVE_HOSTS = ("drive.google.com", "docs.google.com")
+
+
+def pede_video(unidades: int) -> bool:
+    return unidades >= VIDEO_MIN_UNIDADES
+
+
+def normalizar_link_drive(link: str) -> str:
+    """Link do Google Drive com https; levanta 422 pra qualquer outra coisa."""
+    link = (link or "").strip()
+    if link and not link.lower().startswith(("http://", "https://")):
+        link = "https://" + link
+    host = urlparse(link).netloc.lower() if link else ""
+    if not link or any(c.isspace() for c in link) or host not in _DRIVE_HOSTS:
+        raise HTTPException(
+            422,
+            detail={
+                "code": "video_link_nao_drive",
+                "message": "Cole o link do vídeo no Google Drive (drive.google.com)",
+            },
+        )
+    return link
+
+
+class PedidoVideoIn(BaseModel):
+    link: str = Field(..., max_length=2000)
+
+
+def _video_out(row: EstoquePedidoVideo, salvo_por_nome: str | None) -> dict[str, Any]:
+    return {
+        "link": row.link,
+        "salvo_em": row.updated_at.isoformat() if row.updated_at else None,
+        "salvo_por": salvo_por_nome,
+    }
+
+
+async def _videos_por_pedido(
+    session: AsyncSession, numeros: set[str]
+) -> dict[str, dict[str, Any]]:
+    """{pedido_bling: {link, salvo_em, salvo_por}} dos pedidos com vídeo salvo."""
+    if not numeros:
+        return {}
+    rows = (
+        await session.execute(
+            select(EstoquePedidoVideo, User.name, User.email)
+            .join(User, User.id == EstoquePedidoVideo.salvo_por, isouter=True)
+            .where(EstoquePedidoVideo.pedido_bling.in_(numeros))
+        )
+    ).all()
+    return {v.pedido_bling: _video_out(v, name or email) for v, name, email in rows}
+
+
+async def _videos_por_dia(session: AsyncSession, ledger_where: list) -> dict[str, dict[str, Any]]:
+    """Por shipping_day: quantos pedidos pedem vídeo (mais de 1 unidade,
+    somando os itens do pedido INTEIRO), quantos já têm link e quais faltam.
+    `ledger_where` = a mesma janela/cerca de tag da contagem de envios."""
+    ev = (
+        select(BlingEnvioEvento.shipping_day, BlingEnvioEvento.bling_id)
+        .where(and_(*ledger_where))
+        .distinct()
+        .subquery("ev")
+    )
+    unidades = func.sum(func.coalesce(BlingOrder.item_quantidade, 1))
+    ped = (
+        select(ev.c.shipping_day.label("dia"), BlingOrder.numero.label("numero"))
+        .join(BlingOrder, BlingOrder.bling_id == ev.c.bling_id)
+        .where(BlingOrder.numero.isnot(None))
+        .group_by(ev.c.shipping_day, BlingOrder.numero)
+        .having(unidades >= VIDEO_MIN_UNIDADES)
+        .subquery("ped")
+    )
+    rows = (
+        await session.execute(
+            select(ped.c.dia, ped.c.numero, EstoquePedidoVideo.link)
+            .join(EstoquePedidoVideo, EstoquePedidoVideo.pedido_bling == ped.c.numero, isouter=True)
+        )
+    ).all()
+    out: dict[str, dict[str, Any]] = {}
+    for dia, numero, link in rows:
+        d = out.setdefault(
+            dia.isoformat(), {"necessarios": 0, "feitos": 0, "pendentes": []}
+        )
+        d["necessarios"] += 1
+        if link:
+            d["feitos"] += 1
+        else:
+            d["pendentes"].append(numero)
+    for d in out.values():
+        d["pendentes"].sort()
+        d["status"] = (
+            "feito" if d["feitos"] >= d["necessarios"]
+            else "parcial" if d["feitos"] > 0
+            else "nao_feito"
+        )
+    return out
+
+
+@router.put("/pedidos/{pedido_bling}/video")
+async def salvar_video_pedido(
+    pedido_bling: str,
+    body: PedidoVideoIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("controle_estoque", "edit"))],
+) -> dict[str, Any]:
+    """Salva (ou troca) o link do vídeo da embalagem do pedido."""
+    pedido_bling = pedido_bling.strip()
+    link = normalizar_link_drive(body.link)
+    existe = (
+        await session.execute(
+            select(BlingOrder.numero).where(BlingOrder.numero == pedido_bling).limit(1)
+        )
+    ).scalar_one_or_none()
+    if existe is None:
+        raise HTTPException(404, detail={"code": "pedido_nao_encontrado"})
+    agora = datetime.now(UTC)
+    await session.execute(
+        pg_insert(EstoquePedidoVideo)
+        .values(pedido_bling=pedido_bling, link=link, salvo_por=user.id, updated_at=agora)
+        .on_conflict_do_update(
+            index_elements=[EstoquePedidoVideo.pedido_bling],
+            set_={"link": link, "salvo_por": user.id, "updated_at": agora},
+        )
+    )
+    await session.commit()
+    row = await session.get(EstoquePedidoVideo, pedido_bling)
+    assert row is not None
+    logger.info(
+        "estoque_pedido_video_salvo", pedido_bling=pedido_bling, user_id=str(user.id)
+    )
+    return {"pedido_bling": pedido_bling, **_video_out(row, user.name or user.email)}
+
+
+@router.delete("/pedidos/{pedido_bling}/video", status_code=204)
+async def remover_video_pedido(
+    pedido_bling: str,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("controle_estoque", "edit"))],
+) -> Response:
+    """Tira o link (colado no pedido errado, por exemplo)."""
+    row = await session.get(EstoquePedidoVideo, pedido_bling.strip())
+    if row is None:
+        raise HTTPException(404, detail={"code": "video_nao_encontrado"})
+    await session.delete(row)
+    await session.commit()
+    logger.info(
+        "estoque_pedido_video_removido", pedido_bling=pedido_bling, user_id=str(user.id)
+    )
+    return Response(status_code=204)
