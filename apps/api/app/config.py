@@ -249,6 +249,27 @@ class Settings(BaseSettings):
     # Quando as marcas ganharem Página, virar "binario" (e só isso).
     marketing_postagem_upload: str = "link"
 
+    # ─── YouTube (Shorts) ────────────────────────────────────────────────
+    # Credenciais do CLIENTE OAuth, não da conta: são do app inteiro e as
+    # mesmas para os quatro canais. O que é por canal é o refresh token, que
+    # vive cifrado na linha da conta em `redes_sociais_tokens`.
+    #
+    # Descoberto por teste em 18/09/2026, contra o que a doc do Google diz:
+    # projeto NÃO verificado e NÃO auditado publica PÚBLICO normalmente. A
+    # doc afirma que todo upload de projeto criado depois de 28/07/2020 nasce
+    # privado; subimos um vídeo e ele saiu público (isPrivate=false,
+    # playabilityStatus=OK). Mesmo padrão da Meta esta semana — a doc
+    # descrevia uma trava que não é aplicada.
+    #
+    # O que a tela de consentimento PRECISA estar é "Em produção": em modo de
+    # testes o refresh token morre em 7 dias e o robô emudece sem avisar.
+    youtube_client_id: str = ""
+    youtube_client_secret: str = ""
+    # Privacidade do que o robô publica. "public" é o que o fluxo quer; deixar
+    # configurável porque "unlisted" é o modo de ensaio de verdade aqui — não
+    # existe dry-run que prove upload sem gastar um vídeo real.
+    youtube_privacidade: str = "public"
+
     # ─── Robô de resposta das DMs do Instagram ───────────────────────────
     # A CHAVE SECRETA DO APP da Meta. Ela valida o `X-Hub-Signature-256` de
     # todo webhook de mensagem — e é a MESMA que hoje falta para renovar o

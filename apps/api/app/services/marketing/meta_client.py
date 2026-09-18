@@ -85,8 +85,14 @@ FB_AGENDA_MAX = timedelta(days=29)
 
 PLATAFORMA_FACEBOOK = "facebook"
 PLATAFORMA_INSTAGRAM = "instagram"
-# As únicas duas que este cliente publica hoje. TikTok (exige consentimento
-# humano por upload) e YouTube (exige app verificado) ficaram fora de escopo.
+# As únicas duas que ESTE cliente publica — YouTube saiu daqui em 18/09/2026
+# e mora em `youtube_client.py`, com outro protocolo. O TikTok continua fora:
+# publicar em público exige auditoria com vídeo demo, e a diretriz deles recusa
+# por escrito "ferramenta para subir conteúdo nas contas que você administra".
+#
+# (E o motivo que estava escrito aqui para o YouTube estava errado: NÃO exige
+# app verificado. Provamos subindo um vídeo por projeto não auditado — saiu
+# público. A doc do Google descrevia uma trava que não é aplicada.)
 PLATAFORMAS_SUPORTADAS: tuple[str, ...] = (PLATAFORMA_FACEBOOK, PLATAFORMA_INSTAGRAM)
 
 

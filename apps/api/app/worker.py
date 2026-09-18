@@ -800,7 +800,7 @@ async def marketing_postagens_publicar(ctx: dict) -> None:
         MarketingPostagem,
         RedeSocialToken,
     )
-    from app.services.marketing import link_criativo, meta_client
+    from app.services.marketing import link_criativo, meta_client, youtube_client
     from app.services.marketing import postagens as _postagens
 
     async with session_scope() as s:
@@ -921,7 +921,13 @@ async def marketing_postagens_publicar(ctx: dict) -> None:
                     # quando o usuário do sistema tem CREATE_CONTENT, e é o
                     # único que existe na trilha do Instagram.
                     access_token = (
-                        segredos.get("page_access_token") or segredos.get("access_token") or ""
+                        segredos.get("page_access_token")
+                        or segredos.get("access_token")
+                        # YouTube guarda o REFRESH token (que não expira) e
+                        # troca por um access de 1h na hora de publicar. Aqui
+                        # a variável só precisa provar "existe credencial".
+                        or segredos.get("refresh_token")
+                        or ""
                     ).strip()
                 except Exception:  # noqa: BLE001
                     # Nada do erro de cifra vai pro `result`: ele pode carregar
@@ -987,6 +993,18 @@ async def marketing_postagens_publicar(ctx: dict) -> None:
                         # Quem escolhe o host da Graph é a ORIGEM DO TOKEN.
                         provedor=tok.provedor,
                         ao_criar_container=_gravar_container,
+                    )
+                elif alvo["plataforma"] == youtube_client.PLATAFORMA_YOUTUBE:
+                    # Sem container: o upload resumável devolve o id do vídeo
+                    # na mesma chamada que envia os bytes. O que a gente
+                    # carimba é a SESSÃO de upload, antes de subir — se o
+                    # processo morrer no meio, é o registro que impede alguém
+                    # de republicar às cegas e duplicar vídeo no canal.
+                    res = await youtube_client.publicar_video_youtube(
+                        refresh_token=access_token,
+                        video_path=caminho,
+                        legenda=alvo["legenda"],
+                        ao_abrir_sessao=_gravar_container,
                     )
                 else:
                     await _postagens.registrar_resultado(

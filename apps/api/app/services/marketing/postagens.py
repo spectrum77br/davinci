@@ -68,7 +68,9 @@ BRT = ZoneInfo("America/Sao_Paulo")
 # consentimento humano por upload (Content Sharing Guidelines) e o YouTube
 # publicaria privado enquanto o app não for verificado — as duas ficam
 # documentadas como fora de escopo e a conta aparece na tela com o motivo.
-PLATAFORMAS_SUPORTADAS = ("instagram", "facebook")
+# `youtube` entrou em 18/09/2026: o upload é resumável e sai PÚBLICO mesmo
+# com projeto não auditado — provado por teste, contra o que a doc diz.
+PLATAFORMAS_SUPORTADAS = ("instagram", "facebook", "youtube")
 
 # Limite da legenda na Meta (mesmo número no schema, que barra antes de
 # chegar aqui — a constante fica nos dois lados por clareza).
