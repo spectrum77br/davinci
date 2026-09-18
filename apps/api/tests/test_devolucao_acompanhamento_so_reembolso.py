@@ -82,3 +82,30 @@ def test_sem_tipo_no_sync_cai_no_texto_de_devolucao():
         pacote_entregue_em=None,
     )
     assert d["localizacao"] == "Cliente enviou o item de volta"
+
+
+def test_ml_cancelado_com_pacote_de_volta_carimba_chegada_pelo_returned():
+    """287876 (18/09): cancelamento por não entrega — sem claim, estorno em
+    02/08 e o envio de ida `returned` em 17/09. O sync deixa o tipo vazio
+    (logistica_meli._com_pacote_voltando) e a chegada vem do `returned`."""
+    from app.routers.devolutions import _fila
+
+    meli = {
+        "order_status": "cancelled",
+        "cancel_group": "internal",
+        "ship_status": "not_delivered",
+        "ship_substatus": "returned",
+    }
+    datas = {"ship_substatus": {"em": "2026-09-17T19:20:06.374000+00:00", "fonte": "aprox"}}
+    chegou = _chegou_em(
+        plataforma="Mercado Livre",
+        meli_status=meli,
+        status_datas=datas,
+        devolucao_status_auto=None,
+        fonte_auto="ml",
+        devolucao_atualizada_em=None,
+        pacote_entregue_em=None,
+        devolucao_tipo_auto=None,
+    )
+    assert chegou is not None and chegou.isoformat() == "2026-09-17"
+    assert _fila(None, None) == ("acompanhamento", False)

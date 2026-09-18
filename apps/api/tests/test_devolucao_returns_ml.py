@@ -417,3 +417,79 @@ def test_mediation_ids_preserva_o_comportamento_do_enrichment():
     assert logistica_meli._mediation_ids(order) == [7, 8]
     assert logistica_meli._mediation_ids({"mediations": []}) == []
     assert logistica_meli._mediation_ids({}) == []
+
+
+# ── Cancelamento por não entrega: o pacote volta pelo envio de ida ──────────
+# 287876 (18/09): ML cancelou com estorno em 02/08 e não abriu claim; o envio
+# original voltou (`not_delivered` → `returned` em 17/09). Só o estorno aparece
+# pela API → "REFUND" → aba Fraude sem "Chegou em", com o pacote na loja.
+
+_ESTORNO = {
+    "status": "cancelled",
+    "shipping": {"id": 1},
+    "mediations": [],
+    "payments": [
+        {
+            "transaction_amount_refunded": 71.62,
+            "date_last_modified": "2026-08-02T13:39:49.000-03:00",
+        }
+    ],
+}
+
+
+def _row_envio(pedido_bling: str, pedido_mk: str, ship_substatus: str, ship_status="not_delivered"):
+    r = _row(pedido_bling, pedido_mk)
+    r.meli_status = {
+        "order_status": "cancelled",
+        "ship_status": ship_status,
+        "ship_substatus": ship_substatus,
+    }
+    return r
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sub", ["returned", "returning_to_sender", "returned_to_hub"])
+async def test_estorno_com_envio_voltando_nao_e_so_dinheiro(db, patch_ml, sub):
+    patch_ml(FakeML(orders={"ML1": _ESTORNO}))
+    rows = await _seed(db, [_row_envio("B1", "ML1", sub)])
+
+    out = await logistica_meli.returns_por_pedido(db, rows)
+
+    info = out["B1"]
+    assert info.return_type is None, "há pacote de volta: Acompanhamento, chegada pelo `returned`"
+    # O reembolso continua contando: saiu dinheiro do nosso em 02/08.
+    assert info.reembolso is True and str(info.reembolso_valor) == "71.62"
+    assert info.reembolso_em == datetime(2026, 8, 2, 16, 39, 49, tzinfo=UTC)
+
+
+@pytest.mark.asyncio
+async def test_estorno_sem_envio_voltando_continua_so_dinheiro(db, patch_ml):
+    patch_ml(FakeML(orders={"ML1": _ESTORNO}))
+    rows = await _seed(db, [_row_envio("B1", "ML1", "", ship_status="delivered")])
+
+    out = await logistica_meli.returns_por_pedido(db, rows)
+
+    assert out["B1"].return_type == "REFUND", "entregue ao cliente e estornado: não volta pacote"
+
+
+@pytest.mark.asyncio
+async def test_mediacao_sem_return_com_envio_voltando_tambem_e_pacote(db, patch_ml):
+    # Claim sem return (404) mas o envio de ida está voltando: o pacote existe.
+    patch_ml(FakeML(orders={"ML2": dict(_ESTORNO, mediations=[{"id": 5002}])}, returns={}))
+    rows = await _seed(db, [_row_envio("B2", "ML2", "returning_to_sender")])
+
+    out = await logistica_meli.returns_por_pedido(db, rows)
+
+    assert out["B2"].return_type is None
+    assert out["B2"].return_id == "5002"
+
+
+def test_pacote_volta_pelo_envio_so_no_ml():
+    from app.services.logistica_rules import pacote_volta_pelo_envio
+
+    assert pacote_volta_pelo_envio("Mercado Livre", {"ship_substatus": "returned"}) is True
+    voltando = {"ship_substatus": "returning_to_sender"}
+    assert pacote_volta_pelo_envio("Mercado Livre", voltando) is True
+    assert pacote_volta_pelo_envio("Mercado Livre", {"ship_substatus": "delivered"}) is False
+    assert pacote_volta_pelo_envio("Mercado Livre", {}) is False
+    assert pacote_volta_pelo_envio("Shopee", {"ship_substatus": "returned"}) is False

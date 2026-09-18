@@ -537,6 +537,18 @@ _RETURN_STATUS_CHEGOU: dict[str, frozenset[str]] = {
 }
 
 
+def pacote_volta_pelo_envio(plataforma: str | None, status: dict[str, str] | None) -> bool:
+    """True quando o envio ORIGINAL do ML está voltando ou já voltou pro
+    vendedor (`returning_to_sender`… ou `returned`): há pacote de volta mesmo
+    sem claim/return no ML — caso do cancelamento por não entrega (287876,
+    18/09: cancelado com estorno em 02/08, pacote de volta em 17/09)."""
+    p = (plataforma or "").strip().lower()
+    if p not in _ML_PLATAFORMAS:
+        return False
+    sub = str((status or {}).get("ship_substatus") or "").strip().lower()
+    return sub in RETORNO_EM_TRANSITO or sub in _SHIP_SUBSTATUS_CHEGOU
+
+
 def data_retorno_concluido(
     plataforma: str | None,
     status: dict[str, str] | None,

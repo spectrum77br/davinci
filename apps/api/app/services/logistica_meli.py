@@ -1226,7 +1226,9 @@ def _so_reembolso(reemb: _ReembolsoML, claim_id: str | None) -> ReturnInfo:
     """Pedido com caso no ML mas SEM devolução (mediação/reclamação sem pacote de
     volta, ou cancelamento com estorno): só a parte do reembolso interessa.
     `return_type` "REFUND" (vocabulário do TikTok) = não vem pacote — é o que
-    manda o pedido pra aba Fraude."""
+    manda o pedido pra aba Fraude. Quem chama (`returns_por_pedido`) desfaz
+    esse "REFUND" quando o envio de ida está voltando/voltou: ver
+    `_com_pacote_voltando`."""
     return ReturnInfo(
         fonte="ml",
         status=None,
@@ -1241,6 +1243,21 @@ def _so_reembolso(reemb: _ReembolsoML, claim_id: str | None) -> ReturnInfo:
         reembolso_em=reemb.em,
         reembolso_detalhe=reemb.detalhe,
     )
+
+
+def _com_pacote_voltando(info: ReturnInfo, linhas: list[Logistica]) -> ReturnInfo:
+    """Desfaz o "REFUND" (só dinheiro) quando a Logística mostra o envio de
+    ida voltando/voltado pro vendedor. O ML não abre claim/return no
+    cancelamento por não entrega: o pacote volta pelo próprio envio
+    (`not_delivered` → `returning_to_sender` → `returned`), e só o estorno
+    aparece pela API — o pedido caía na aba Fraude sem "Chegou em" (287876,
+    18/09: estorno 02/08, pacote de volta 17/09). Tipo None = a plataforma não
+    separa; a chegada então vem do `returned` (data_retorno_concluido)."""
+    if (info.return_type or "").strip().upper() != "REFUND":
+        return info
+    if any(logistica_rules.pacote_volta_pelo_envio(r.plataforma, r.meli_status) for r in linhas):
+        return info._replace(return_type=None)
+    return info
 
 
 async def _return_info_for_pedido(client: MercadoLivreClient, pedido: str) -> ReturnInfo | None:
@@ -1396,6 +1413,7 @@ async def returns_por_pedido(
     # O mesmo pedido do marketplace pode estar em mais de uma linha: consulta
     # uma vez e espelha em todos os pedido_bling.
     por_pedido: dict[tuple[str, str], list[str]] = {}
+    linhas_por_pedido: dict[tuple[str, str], list[Logistica]] = {}
     skipped = 0
     for r in alvo:
         if r.conta not in cache:
@@ -1403,6 +1421,7 @@ async def returns_por_pedido(
             continue
         chave = (str(r.conta), str(r.pedido_marketplace).strip())
         por_pedido.setdefault(chave, []).append(str(r.pedido_bling).strip())
+        linhas_por_pedido.setdefault(chave, []).append(r)
     if skipped:
         logger.info("logistica_meli_returns_sem_integracao", linhas=skipped)
 
@@ -1424,6 +1443,7 @@ async def returns_por_pedido(
                 continue
             if info is None:
                 continue
+            info = _com_pacote_voltando(info, linhas_por_pedido[(conta, pedido)])
             for pedido_bling in por_pedido[(conta, pedido)]:
                 out[pedido_bling] = info
     logger.info(
