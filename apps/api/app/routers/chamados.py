@@ -123,8 +123,8 @@ def _mensagem_out(m: ChamadoMensagem) -> ChamadoMensagemOut:
 
 async def _to_out(session: AsyncSession, rows: list[Chamado]) -> list[ChamadoOut]:
     """Monta a saída em LOTE: status Bling vivo, histórico resumido (contagem,
-    última fala, status da aba) e anexos da réplica automática — 3 queries pra
-    página inteira."""
+    última fala, status da aba — do CASO, juntando as linhas irmãs) e anexos da
+    réplica automática — 4 queries pra página inteira."""
     if not rows:
         return []
     ids = [r.id for r in rows]
@@ -135,15 +135,40 @@ async def _to_out(session: AsyncSession, rows: list[Chamado]) -> list[ChamadoOut
     # análise do robô e evento não contam) e o Status, que depende de quem falou
     # por último e do que o cérebro pediu. A conversa completa (`historico`)
     # fica fora, como antes.
+    #
+    # 18/09: a conversa é do CASO, não da linha — a mesma consulta do ML vale pra
+    # vários pedidos e o leitor grava a resposta numa linha, o cérebro replica por
+    # outra (ver `_mensagens_do_caso`). As linhas irmãs podem estar fora da página
+    # (resolvidas, outro filtro), por isso a busca é pelo protocolo + conta.
+    chave_por_linha = {r.id: _chave_caso(r) for r in rows}
+    irmas: dict[tuple[str, str], list[UUID]] = {}
+    protocolos = {c[0] for c in chave_por_linha.values() if c}
+    if protocolos:
+        for cid, protocolo, conta in (
+            await session.execute(
+                select(Chamado.id, Chamado.chamado, Chamado.conta).where(Chamado.chamado.in_(protocolos))
+            )
+        ).all():
+            irmas.setdefault(((protocolo or "").strip(), (conta or "").strip().lower()), []).append(cid)
+    ids_caso = set(ids) | {cid for grupo in irmas.values() for cid in grupo}
     por_chamado: dict[UUID, list[ChamadoMensagem]] = {}
     for m in (
         await session.execute(
             select(ChamadoMensagem)
-            .where(ChamadoMensagem.chamado_id.in_(ids), ChamadoMensagem.tipo != TIPO_HISTORICO)
-            .order_by(ChamadoMensagem.created_at)
+            .where(ChamadoMensagem.chamado_id.in_(ids_caso), ChamadoMensagem.tipo != TIPO_HISTORICO)
+            .order_by(ChamadoMensagem.created_at, _ORDEM_SISTEMA_SQL, ChamadoMensagem.id)
         )
     ).scalars():
         por_chamado.setdefault(m.chamado_id, []).append(m)
+
+    def mensagens_do_caso(r: Chamado) -> list[ChamadoMensagem]:
+        chave = chave_por_linha[r.id]
+        grupo = (set(irmas.get(chave, [])) if chave else set()) | {r.id}
+        if len(grupo) == 1:
+            return por_chamado.get(r.id, [])
+        juntas = [m for cid in grupo for m in por_chamado.get(cid, [])]
+        juntas.sort(key=_ordem_mensagem)
+        return _sem_repetidas(juntas)
     anexos_auto: dict[UUID, list[ChamadoAnexoOut]] = {}
     for a in (
         await session.execute(
@@ -162,7 +187,7 @@ async def _to_out(session: AsyncSession, rows: list[Chamado]) -> list[ChamadoOut
 
     out: list[ChamadoOut] = []
     for r in rows:
-        msgs = por_chamado.get(r.id, [])
+        msgs = mensagens_do_caso(r)
         o = ChamadoOut.model_validate(r)
         o.status_bling_atual = status_map.get(r.pedido_bling or "") or r.status_bling
         o.mensagens_total = len(msgs)
@@ -458,35 +483,41 @@ TIPO_HISTORICO = "historico"
 # vazio. Aqui o histórico é do CASO: todas as linhas da conta com o mesmo
 # protocolo NUMÉRICO (texto livre tipo "Disputa na venda" não agrupa), sem repetir
 # a mensagem gravada em todas as linhas (mesmo tipo e texto em até 2 min).
-async def _mensagens_do_caso(session: AsyncSession, ch: Chamado, *, com_anexos: bool = False) -> list[ChamadoMensagem]:
+#
+# 18/09 (Vinicius, mesma consulta 478538390 × 3 pedidos): a coluna Status e a
+# Últ. resposta da lista usam a MESMA junção (`_chave_caso` + `_sem_repetidas`)
+# — olhando só a própria linha, o 290397 ficava "Plataforma respondeu" 3 dias
+# depois de o robô já ter replicado pela linha irmã.
+def _chave_caso(ch: Chamado) -> tuple[str, str] | None:
+    """(protocolo, conta) que junta as linhas de um mesmo caso; None quando o
+    protocolo não é numérico (texto livre não agrupa)."""
     protocolo = (ch.chamado or "").strip()
     if protocolo.isdigit() and len(protocolo) >= 6:
-        ids = (
-            await session.execute(
-                select(Chamado.id).where(
-                    Chamado.chamado == protocolo,
-                    func.lower(func.coalesce(Chamado.conta, "")) == (ch.conta or "").strip().lower(),
-                )
-            )
-        ).scalars().all() or [ch.id]
-    else:
-        ids = [ch.id]
-    q = select(ChamadoMensagem).where(ChamadoMensagem.chamado_id.in_(ids))
-    if com_anexos:
-        q = q.options(selectinload(ChamadoMensagem.anexos))
-    # 15/09 (Eduardo: "colocar a mensagem e depois caso encerrado"): a fala e o evento
-    # "Chamado marcado como resolvido" nascem na MESMA transação (mesmo created_at) — o
-    # desempate pelo id (uuid aleatório) punha o encerrado antes da mensagem. Empate: sistema por último.
-    # e entre os eventos de sistema do mesmo instante, a análise vem antes do
-    # "Chamado marcado como resolvido/reaberto" (tipo sistema).
-    ordem_sistema = case(
-        ((ChamadoMensagem.direcao == "sistema") & (ChamadoMensagem.tipo == "sistema"), 2),
-        (ChamadoMensagem.direcao == "sistema", 1),
-        else_=0,
-    )
-    rows = (await session.execute(q.order_by(ChamadoMensagem.created_at, ordem_sistema, ChamadoMensagem.id))).scalars().all()
-    if len(ids) == 1:
-        return list(rows)
+        return protocolo, (ch.conta or "").strip().lower()
+    return None
+
+
+# 15/09 (Eduardo: "colocar a mensagem e depois caso encerrado"): a fala e o evento
+# "Chamado marcado como resolvido" nascem na MESMA transação (mesmo created_at) — o
+# desempate pelo id (uuid aleatório) punha o encerrado antes da mensagem. Empate: sistema por último.
+# e entre os eventos de sistema do mesmo instante, a análise vem antes do
+# "Chamado marcado como resolvido/reaberto" (tipo sistema).
+_ORDEM_SISTEMA_SQL = case(
+    ((ChamadoMensagem.direcao == "sistema") & (ChamadoMensagem.tipo == "sistema"), 2),
+    (ChamadoMensagem.direcao == "sistema", 1),
+    else_=0,
+)
+
+
+def _ordem_mensagem(m: ChamadoMensagem) -> tuple:
+    """Mesma ordem do SQL acima, pra juntar em memória as linhas irmãs de um caso."""
+    sistema = 2 if (m.direcao == "sistema" and m.tipo == "sistema") else 1 if m.direcao == "sistema" else 0
+    return m.created_at, sistema, str(m.id)
+
+
+def _sem_repetidas(rows: list[ChamadoMensagem]) -> list[ChamadoMensagem]:
+    """Tira a mensagem gravada em todas as linhas do caso (mesma direção, tipo e
+    texto em até 2 min). `rows` já em ordem cronológica."""
     vistos: dict[tuple, object] = {}
     out: list[ChamadoMensagem] = []
     for m in rows:
@@ -497,6 +528,28 @@ async def _mensagens_do_caso(session: AsyncSession, ch: Chamado, *, com_anexos: 
         vistos[chave] = m.created_at
         out.append(m)
     return out
+
+
+async def _mensagens_do_caso(session: AsyncSession, ch: Chamado, *, com_anexos: bool = False) -> list[ChamadoMensagem]:
+    chave = _chave_caso(ch)
+    if chave is not None:
+        ids = (
+            await session.execute(
+                select(Chamado.id).where(
+                    Chamado.chamado == chave[0],
+                    func.lower(func.coalesce(Chamado.conta, "")) == chave[1],
+                )
+            )
+        ).scalars().all() or [ch.id]
+    else:
+        ids = [ch.id]
+    q = select(ChamadoMensagem).where(ChamadoMensagem.chamado_id.in_(ids))
+    if com_anexos:
+        q = q.options(selectinload(ChamadoMensagem.anexos))
+    rows = (await session.execute(q.order_by(ChamadoMensagem.created_at, _ORDEM_SISTEMA_SQL, ChamadoMensagem.id))).scalars().all()
+    if len(ids) == 1:
+        return list(rows)
+    return _sem_repetidas(list(rows))
 
 
 # ------------------------------------------------------------- histórico / réplica

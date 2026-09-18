@@ -1102,3 +1102,79 @@ async def test_lista_status_da_aba_e_ultima_resposta(client, make_user, auth_as,
     # filtro/ordem dos códigos: um status final nunca vira intermediário
     assert svc.set_status_plataforma(ch, svc.STATUS_EM_ANALISE) is False
     assert ch.status_plataforma == svc.STATUS_GANHAMOS
+
+
+async def test_lista_status_do_caso_junta_linhas_irmas(client, make_user, auth_as, db):
+    """18/09 (Vinicius, consulta 478538390 × 3 pedidos): a mesma consulta do ML
+    vale pra vários pedidos (uma linha por pedido) e a conversa fica espalhada —
+    o leitor grava a resposta do ML numa linha, o cérebro replica por outra. O
+    Status e a Últ. resposta são do CASO (mesmo protocolo + conta), como o
+    histórico já era; olhando só a própria linha, o 290397 ficava "Plataforma
+    respondeu" depois de o robô já ter replicado."""
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+
+    async def cria(pedido: str, *, conta: str = "kfa", chamado: str = "478538390") -> str:
+        r = await client.post(
+            "/api/chamados",
+            json={
+                "origem": "logistica", "pedido_bling": pedido, "canal": "manual",
+                "plataforma": "ml", "conta": conta, "chamado": chamado,
+            },
+        )
+        assert r.status_code == 201, r.text
+        return r.json()["id"]
+
+    a = await cria("292529")
+    b = await cria("290490")
+    c = await cria("290397")
+    outra_conta = await cria("300001", conta="aguiar")  # mesmo nº, outra conta: caso diferente
+    texto_livre = await cria("288184", chamado="Disputa na venda")  # texto livre não agrupa
+
+    async def linhas() -> dict[str, dict]:
+        body = (await client.get("/api/chamados", params={"mostrar": "todos"})).json()
+        return {i["id"]: i for i in body["items"]}
+
+    t0 = datetime.now(UTC)
+
+    def fala(ch, minutos: int, **kw):
+        m = svc.nova_mensagem(ch, status="registrada", **kw)
+        m.created_at = t0 + timedelta(minutes=minutos)
+        return m
+
+    chs = {
+        cid: (await db.execute(select(Chamado).where(Chamado.id == UUID(cid)))).scalar_one()
+        for cid in (a, b, c, outra_conta, texto_livre)
+    }
+    # ML respondeu (monitor) — gravado só na linha C
+    db.add(fala(chs[c], 1, texto="Recebi sua solicitação", tipo="resposta", direcao="recebida", autor_nome="monitor"))
+    # réplica manual gravada em TODAS as linhas no mesmo instante (conta uma vez)
+    for cid in (a, b, c):
+        db.add(fala(chs[cid], 2, texto="Retomo o caso", tipo="replica", direcao="enviada", autor_nome="robô (página do caso)"))
+    # ML respondeu de novo (linha C) e o cérebro replicou depois — pela linha B
+    db.add(fala(chs[c], 3, texto="Estamos analisando", tipo="resposta", direcao="recebida", autor_nome="monitor"))
+    db.add(fala(chs[b], 4, texto="Análise do robô [cutucao]: cobrança → réplica enfileirada", tipo="analise", direcao="sistema", autor_nome="cérebro"))
+    db.add(fala(chs[b], 4, texto="Olá, tudo bem? Retomo o caso", tipo="replica", direcao="enviada", autor_nome="cérebro"))
+    # a outra conta só recebeu resposta da plataforma
+    db.add(fala(chs[outra_conta], 5, texto="Oi", tipo="resposta", direcao="recebida", autor_nome="monitor"))
+    await db.commit()
+
+    rows = await linhas()
+    # as três linhas do caso mostram a mesma coisa: nós (robô) falamos por último
+    for cid in (a, b, c):
+        row = rows[cid]
+        assert row["status_aba"] == "aguardando", (cid, row["status_aba"])
+        assert row["ultima_resposta_direcao"] == "enviada"
+        assert row["ultima_resposta_autor"] == "cérebro"
+        # "registrado" ×3 e a réplica manual ×3 nasceram no mesmo minuto com o mesmo
+        # texto → contam uma vez (como no histórico): 1 + 2 respostas + 1 + análise + réplica do robô
+        assert row["mensagens_total"] == 6
+    # mesmo nº em outra conta e texto livre: cada um só com a própria conversa
+    assert rows[outra_conta]["status_aba"] == "respondeu"
+    assert rows[outra_conta]["mensagens_total"] == 2
+    assert rows[texto_livre]["status_aba"] == "sem_acompanhamento"
+    assert rows[texto_livre]["mensagens_total"] == 1
+
+    # o histórico da linha C (o modal) conta a mesma conversa que a lista
+    hist = (await client.get(f"/api/chamados/{c}/mensagens")).json()
+    assert len(hist) == 6

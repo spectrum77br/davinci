@@ -2096,7 +2096,10 @@ async function aplicarStatusBling(c: Logistica) {
                     class="flex-1 max-w-[260px] whitespace-normal text-[12px] leading-tight"
                     :class="chamadoAbaResumo(c)!.tom === 'pendente' ? 'text-amber-700 dark:text-amber-400' : chamadoAbaResumo(c)!.tom === 'encerrado' ? 'text-muted-foreground' : ''"
                   >{{ chamadoAbaResumo(c)!.texto }}</span>
-                  <span v-else class="flex-1">{{ c.chamado || '—' }}</span>
+                  <!-- Mesma largura máxima do resumo acima: sem ela o texto ocupava a
+                       célula inteira e empurrava o ↗ pra borda direita da coluna —
+                       "sumia" nas linhas com o chamado preenchido aqui (288184, 18/09). -->
+                  <span v-else class="flex-1 max-w-[260px] truncate" :title="c.chamado || undefined">{{ c.chamado || '—' }}</span>
                   <!-- Ticket na aba Chamados: abre a aba já filtrada pelo pedido,
                        em nova guia do navegador (Vinicius 17/09). -->
                   <a
