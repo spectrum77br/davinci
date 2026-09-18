@@ -18,6 +18,7 @@ from app.deps.team_scope import TeamScope, resolve_team_scope
 from app.models import BlingOrder, Refund, SituacaoBling, User
 from app.schemas.refunds import (
     RefundCreate,
+    RefundExistenteOut,
     RefundLookupOut,
     RefundLookupPage,
     RefundOrderCostOut,
@@ -64,14 +65,32 @@ def _search_clause(search: str):
     )
 
 
-def _team_scope_clause(scope: TeamScope):
+def _team_scope_clause(scope: TeamScope, user_id: UUID):
     """Restringe os reembolsos à equipe do usuário (não-admin com equipe). Casa
-    por `conta` (nome da conta normalizado) OU por `pedido_bling` de um pedido
-    das lojas da equipe (bling_orders.loja == bling_store_id). Retorna None
-    quando irrestrito (admin / sem equipe). Sem chaves = clause que zera."""
+    por `created_by` (o que ele mesmo lançou) OU por `conta` (nome da conta
+    normalizado) OU por `pedido_bling` de um pedido das lojas da equipe
+    (bling_orders.loja == bling_store_id). Retorna None quando irrestrito
+    (admin / sem equipe).
+
+    O ramo `created_by` NÃO é conveniência: o POST não valida escopo, então
+    quem lançasse um reembolso de conta fora da própria equipe gravava uma
+    linha que sumia da tela dele. Caso real: pedido 289662 (Shopee Vortan, loja
+    da equipe 101) lançado por quem é da equipe 102 em 20/08/2026 e relançado
+    no dia seguinte; a conferência pegou e anotou "duplicado" na primeira linha.
+    No 281297 o próprio operador escreveu na observação que relançou por causa
+    do "erro de não aparecer salvo". Quem só tem equipe sem loja cadastrada
+    (bug de cadastro) enxergava a lista inteira vazia; agora vê ao menos o que
+    é dele.
+
+    Atenção ao casamento por `conta`: os reembolsos gravam o nome com a
+    plataforma na frente ("Shopee ATV") e `store_info.account_name` guarda só
+    "atv", então esse ramo não casa nada hoje (0 de 961 linhas em 18/09/2026).
+    Está mantido de propósito, para quando as duas grafias forem unificadas;
+    a visibilidade real vem do `pedido_bling` e, agora, do `created_by`.
+    """
     if scope.unrestricted:
         return None
-    ors = []
+    ors = [Refund.created_by == user_id]
     if scope.account_names:
         ors.append(
             func.lower(func.btrim(Refund.conta)).in_(scope.account_names)
@@ -84,8 +103,6 @@ def _team_scope_clause(scope: TeamScope):
                 )
             )
         )
-    if not ors:
-        return text("1=0")
     return or_(*ors)
 
 
@@ -189,7 +206,7 @@ async def list_refunds(
     data_fim: date | None = Query(None),
 ) -> RefundPage:
     where = _build_where(search, platform, tipo, conferido, data_inicio, data_fim)
-    team_clause = _team_scope_clause(await resolve_team_scope(session, user))
+    team_clause = _team_scope_clause(await resolve_team_scope(session, user), user.id)
     if team_clause is not None:
         where = [*where, team_clause]
 
@@ -208,9 +225,11 @@ async def list_refunds(
         func.coalesce(func.sum(Refund.reembolso), 0.0),
         func.count().filter(Refund.conferido.is_(False)),
     ).where(*where)
+    # Mesmo `where` das outras três queries: sem isso o seletor de plataforma
+    # oferecia opções de equipes que o usuário não enxerga na lista.
     platforms_stmt = (
         select(Refund.plataforma)
-        .where(Refund.plataforma.is_not(None))
+        .where(*where, Refund.plataforma.is_not(None))
         .distinct()
         .order_by(Refund.plataforma)
     )
@@ -459,7 +478,69 @@ async def lookup_refund_order(
     return RefundLookupPage(
         items=[RefundLookupOut.model_validate(dict(row)) for row in rows],
         historico_disponivel=historico_disponivel,
+        **(await _reembolsos_ja_lancados(session, pedido, rows)),
     )
+
+
+async def _reembolsos_ja_lancados(
+    session: AsyncSession, pedido: str, rows: list
+) -> dict:
+    """O que já existe para o pedido consultado, para a tela avisar antes de
+    adicionar outro.
+
+    Ignora o filtro de equipe e o "a finalizar" DE PROPÓSITO: são os dois
+    caminhos pelos quais um lançamento some da tela de quem o fez, e é
+    justamente deles que o operador precisa ser avisado.
+
+    Devolve a LISTA, não só o número: um pedido pode ter vários reembolsos
+    legítimos (tipos ou contas diferentes — 119 pedidos em produção estão nessa
+    situação, um deles com 40 linhas de Extraviado). Um contador solto viraria
+    ruído e o operador aprenderia a ignorar o aviso.
+
+    O número digitado pode ser o do Bling ou o do marketplace; as linhas do
+    lookup trazem o par dos dois, então a busca cobre os dois campos. Só entram
+    números que apareceram para ESTE pedido, nunca um prefixo ou parte.
+    """
+    numeros: set[str] = {pedido.strip()}
+    for row in rows:
+        d = dict(row)
+        for chave in ("pedido_bling", "pedido_marketplace"):
+            valor = d.get(chave)
+            if valor is not None and str(valor).strip():
+                numeros.add(str(valor).strip())
+    numeros = {n for n in numeros if n}
+    if not numeros:
+        return {"reembolsos_existentes": 0, "reembolsos_do_pedido": []}
+
+    achados = (
+        await session.execute(
+            select(Refund, User.name)
+            .join(User, User.id == Refund.created_by, isouter=True)
+            .where(
+                or_(
+                    Refund.pedido_bling.in_(numeros),
+                    Refund.pedido_marketplace.in_(numeros),
+                )
+            )
+            .order_by(desc(Refund.created_at))
+            .limit(20)
+        )
+    ).all()
+
+    return {
+        "reembolsos_existentes": len(achados),
+        "reembolsos_do_pedido": [
+            RefundExistenteOut(
+                data=r.data,
+                conta=r.conta,
+                tipo=r.tipo,
+                reembolso=r.reembolso,
+                conferido=bool(r.conferido),
+                criado_por=nome,
+            )
+            for r, nome in achados
+        ],
+    }
 
 
 @router.get("/order-cost", response_model=RefundOrderCostOut)

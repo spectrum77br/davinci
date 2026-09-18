@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import {
   AlertCircle,
+  Check,
   ChevronLeft,
   ChevronRight,
   Download,
@@ -61,9 +62,20 @@ type LookupRow = {
   custo_manutencao: number | null
 }
 
+type RefundExistente = {
+  data: string | null
+  conta: string | null
+  tipo: string | null
+  reembolso: number | null
+  conferido: boolean
+  criado_por: string | null
+}
+
 type LookupPage = {
   items: LookupRow[]
   historico_disponivel: boolean
+  reembolsos_existentes?: number
+  reembolsos_do_pedido?: RefundExistente[]
 }
 
 type RefundDraft = LookupRow & {
@@ -126,6 +138,16 @@ const lookupLoading = ref(false)
 const lookupResults = ref<LookupRow[]>([])
 const lookupError = ref<string | null>(null)
 const historicoDisponivel = ref(false)
+// O que já existe para o pedido consultado. Serve de freio ao relançamento: a
+// lista da tela é filtrada por equipe E por "a finalizar", então um lançamento
+// que já existe pode não estar à vista de quem está prestes a repeti-lo.
+const reembolsosExistentes = ref(0)
+const reembolsosDoPedido = ref<RefundExistente[]>([])
+// Confirmação do que acabou de ser salvo. A lista é ordenada pela DATA DO
+// PEDIDO, não pela de criação, então um lançamento de pedido antigo nasce fora
+// da primeira página: sem essa confirmação a pessoa continua achando que não
+// salvou, que é a origem de todo o problema.
+const salvoAviso = ref<{ pedido: string | null; conta: string | null } | null>(null)
 const historicoLoading = ref(false)
 const historicoElapsedMs = ref(0)
 const creating = ref(false)
@@ -321,12 +343,24 @@ watch([platform, tipoFilter, conferidoFilter, dataInicio, dataFim], () => {
 })
 watch(page, () => load())
 
+function verSalvoNaLista() {
+  const pedido = salvoAviso.value?.pedido
+  if (!pedido) return
+  search.value = pedido
+  page.value = 1
+  salvoAviso.value = null
+  load()
+}
+
 function openAdd() {
+  salvoAviso.value = null
   addOpen.value = true
   lookupPedido.value = ''
   lookupResults.value = []
   lookupError.value = null
   historicoDisponivel.value = false
+  reembolsosExistentes.value = 0
+  reembolsosDoPedido.value = []
   historicoLoading.value = false
   historicoElapsedMs.value = 0
   draft.value = null
@@ -338,6 +372,8 @@ function closeAdd() {
   lookupResults.value = []
   lookupError.value = null
   historicoDisponivel.value = false
+  reembolsosExistentes.value = 0
+  reembolsosDoPedido.value = []
   historicoLoading.value = false
   historicoElapsedMs.value = 0
   draft.value = null
@@ -364,11 +400,15 @@ function fmtElapsed(ms: number) {
 
 async function lookupOrder(forceRefresh = false) {
   const pedido = lookupPedido.value.trim()
-  if (!pedido) return
+  // Os resets vêm ANTES da saída por campo vazio: senão o aviso e o rascunho do
+  // pedido anterior ficam na tela com a busca já apagada.
   lookupError.value = null
   lookupResults.value = []
   historicoDisponivel.value = false
+  reembolsosExistentes.value = 0
+  reembolsosDoPedido.value = []
   draft.value = null
+  if (!pedido) return
   let timerHandle: ReturnType<typeof setInterval> | null = null
   if (forceRefresh) {
     historicoLoading.value = true
@@ -386,6 +426,8 @@ async function lookupOrder(forceRefresh = false) {
     const res = await api<LookupPage>(`/api/refunds/order-lookup?${params.toString()}`)
     lookupResults.value = res.items
     historicoDisponivel.value = !!res.historico_disponivel
+    reembolsosExistentes.value = res.reembolsos_existentes ?? 0
+    reembolsosDoPedido.value = res.reembolsos_do_pedido ?? []
     if (res.items.length === 1) selectLookup(res.items[0])
     if (!res.items.length && !historicoDisponivel.value) {
       lookupError.value = forceRefresh ? 'pedido não encontrado no histórico' : 'pedido não encontrado'
@@ -437,6 +479,11 @@ async function createRefund() {
     const created = await api<RefundRow>('/api/refunds', { method: 'POST', body })
     if (page.value === 1) items.value = [created, ...items.value].slice(0, PAGE_SIZE)
     total.value += 1
+    // A lista é ordenada pela DATA DO PEDIDO: um lançamento de pedido antigo
+    // não fica no topo no próximo carregamento, e some da primeira página. A
+    // confirmação abaixo fica na tela com um atalho para achar a linha, em vez
+    // de deixar a pessoa concluir que não salvou.
+    salvoAviso.value = { pedido: created.pedido_bling, conta: created.conta }
     closeAdd()
   } catch (e: any) {
     lookupError.value = apiError(e)
@@ -508,6 +555,26 @@ async function saveRow(row: RefundRow): Promise<void> {
       {{ error }}
     </div>
 
+    <div
+      v-if="salvoAviso"
+      role="status"
+      class="flex flex-wrap items-center gap-2 rounded-md border border-emerald-500/40 bg-emerald-500/10 px-4 py-3"
+    >
+      <Check class="size-5 shrink-0 text-emerald-600 dark:text-emerald-400" />
+      <span class="text-sm">
+        Reembolso salvo
+        <template v-if="salvoAviso.pedido">
+          para o pedido <span class="font-mono">{{ salvoAviso.pedido }}</span>
+        </template>
+        <template v-if="salvoAviso.conta"> ({{ salvoAviso.conta }})</template>.
+        A lista é ordenada pela data do pedido, então ele pode não estar nesta página.
+      </span>
+      <Button v-if="salvoAviso.pedido" size="sm" variant="outline" @click="verSalvoNaLista">
+        ver na lista
+      </Button>
+      <Button size="sm" variant="ghost" @click="salvoAviso = null">fechar</Button>
+    </div>
+
     <div v-if="addOpen" class="rounded-md border bg-background">
       <div class="flex flex-wrap items-end gap-3 border-b px-3 py-3">
         <label class="space-y-1">
@@ -576,6 +643,44 @@ async function saveRow(row: RefundRow): Promise<void> {
               <Search class="size-4 mr-1.5" />
               buscar no historico
             </Button>
+          </div>
+        </div>
+      </div>
+
+      <div
+        v-if="reembolsosExistentes > 0"
+        role="alert"
+        class="border-b border-amber-500/40 bg-amber-500/10 px-4 py-3"
+      >
+        <div class="flex items-start gap-3">
+          <AlertCircle class="mt-0.5 size-5 shrink-0 text-amber-500" />
+          <div class="flex-1">
+            <div class="text-sm font-medium text-amber-700 dark:text-amber-300">
+              Este pedido já tem
+              {{ reembolsosExistentes }}
+              {{ reembolsosExistentes === 1 ? 'reembolso lançado' : 'reembolsos lançados' }}
+            </div>
+            <ul class="mt-2 space-y-1">
+              <li
+                v-for="(r, i) in reembolsosDoPedido"
+                :key="`ja-${i}`"
+                class="text-xs tabular-nums"
+              >
+                <span class="text-muted-foreground">{{ fmtDateTime(r.data) }}</span>
+                <span class="mx-1.5">·</span>
+                <span>{{ r.conta || '—' }}</span>
+                <span class="mx-1.5">·</span>
+                <span>{{ r.tipo || 'sem tipo' }}</span>
+                <span class="mx-1.5">·</span>
+                <span class="font-medium">{{ brl(r.reembolso) }}</span>
+                <span v-if="r.criado_por" class="text-muted-foreground"> · por {{ r.criado_por }}</span>
+                <span v-if="r.conferido" class="text-muted-foreground"> · finalizado</span>
+              </li>
+            </ul>
+            <p class="mt-2 text-xs text-muted-foreground">
+              Um pedido pode ter mais de um reembolso legítimo, de tipos ou
+              contas diferentes. Confira a lista acima antes de adicionar.
+            </p>
           </div>
         </div>
       </div>

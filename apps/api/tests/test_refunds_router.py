@@ -190,6 +190,8 @@ async def test_lookup_refund_order_reads_recent_conciliation_view(
             }
         ],
         "historico_disponivel": False,
+        "reembolsos_existentes": 0,
+        "reembolsos_do_pedido": [],
     }
 
 
@@ -231,7 +233,12 @@ async def test_lookup_refund_order_surfaces_history_cta_when_recent_view_misses(
     response = await client.get("/api/refunds/order-lookup?pedido=OLD999")
 
     assert response.status_code == 200
-    assert response.json() == {"items": [], "historico_disponivel": True}
+    assert response.json() == {
+        "items": [],
+        "historico_disponivel": True,
+        "reembolsos_existentes": 0,
+        "reembolsos_do_pedido": [],
+    }
 
 
 async def test_lookup_refund_order_reads_full_view_when_history_requested(
@@ -308,6 +315,8 @@ async def test_lookup_refund_order_reads_full_view_when_history_requested(
             }
         ],
         "historico_disponivel": False,
+        "reembolsos_existentes": 0,
+        "reembolsos_do_pedido": [],
     }
 
 
@@ -539,3 +548,67 @@ async def test_reembolso_at_carimba_quando_o_valor_e_lancado(client, make_user, 
               "reembolso": -10.0},
     )
     assert r.status_code == 201 and r.json()["reembolso_at"] is not None
+
+
+async def test_lookup_avisa_quando_o_pedido_ja_tem_reembolso(
+    client,
+    db: AsyncSession,
+    make_user,
+    auth_as,
+):
+    """A busca do pedido conta os reembolsos já lançados, sem filtro de equipe.
+
+    É o freio contra o relançamento: a lista da tela é filtrada por equipe, e o
+    aviso precisa aparecer inclusive quando o lançamento anterior é de outra
+    pessoa ou de uma conta que o usuário não enxerga.
+    """
+    user = await make_user(permissions=_refund_permissions())
+    auth_as(user)
+    schema = get_settings().database_schema
+    await db.execute(
+        text(f'DROP VIEW IF EXISTS "{schema}".vw_conciliacao_margens_marketplace')
+    )
+    await db.execute(
+        text(
+            f"""
+            CREATE VIEW "{schema}".vw_conciliacao_margens_marketplace AS
+            SELECT * FROM (VALUES
+                ('2026-09-10T12:00:00+00:00'::timestamptz, '298001'::text, 'SHP-77'::text,
+                 'shopee'::text, NULL::text, 'Shopee ATV'::text, 30.00::numeric)
+            ) AS t(data, pedido_bling, pedido_marketplace, plataforma_bling,
+                   plataforma_financeiro, loja_nome, bling_custo_produtos)
+            """  # noqa: S608
+        )
+    )
+    await db.commit()
+
+    antes = await client.get("/api/refunds/order-lookup?pedido=298001")
+    assert antes.status_code == 200
+    assert antes.json()["reembolsos_existentes"] == 0
+
+    created = await client.post(
+        "/api/refunds",
+        json={
+            "pedido_bling": "298001",
+            "conta": "Shopee ATV",
+            "plataforma": "shopee",
+            "tipo": "Cliente",
+        },
+    )
+    assert created.status_code == 201
+
+    depois = await client.get("/api/refunds/order-lookup?pedido=298001")
+    corpo = depois.json()
+    assert corpo["reembolsos_existentes"] == 1
+    # A tela precisa da LISTA, não só do número: um pedido pode ter vários
+    # lançamentos legítimos, e sem o detalhe o operador não sabe qual é qual.
+    ja = corpo["reembolsos_do_pedido"]
+    assert len(ja) == 1
+    assert ja[0]["conta"] == "Shopee ATV"
+    assert ja[0]["tipo"] == "Cliente"
+    assert ja[0]["conferido"] is False
+    assert ja[0]["criado_por"] == user.name
+
+    # Também acha pelo número do marketplace, que é o outro jeito de digitar.
+    por_marketplace = await client.get("/api/refunds/order-lookup?pedido=SHP-77")
+    assert por_marketplace.json()["reembolsos_existentes"] == 1

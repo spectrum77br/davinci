@@ -222,6 +222,71 @@ async def test_refunds_and_logistica_scoped(
 
 
 @pytest.mark.asyncio
+async def test_refund_que_o_proprio_usuario_lancou_nao_some_da_lista(
+    db: AsyncSession,
+    client: AsyncClient,
+    auth_as: Callable[[User | None], None],
+    scope_setup: dict,
+):
+    """Quem lança um reembolso SEMPRE o enxerga, mesmo fora da sua equipe.
+
+    O POST não valida escopo: dava pra gravar um reembolso de conta de outra
+    equipe e a linha sumia da lista de quem acabou de criá-la. A pessoa achava
+    que não tinha salvado e relançava o mesmo pedido — foi o que aconteceu no
+    pedido 289662 em 20-21/08/2026, pego depois na conferência.
+    """
+    u = _mk_user(UserRole.USER, [1])
+    db.add(u)
+    await db.commit()
+    auth_as(u)
+
+    # conta-beta é da equipe 2; o pedido também não é de loja da equipe 1.
+    created = await client.post(
+        "/api/refunds",
+        json={"pedido_bling": "ped-fora", "conta": "conta-beta", "plataforma": "shopee"},
+    )
+    assert created.status_code == 201
+
+    r = await client.get("/api/refunds")
+    assert r.status_code == 200
+    body = r.json()
+    pedidos = {i["pedido_bling"] for i in body["items"]}
+    assert "ped-fora" in pedidos, "o autor tem que ver o que ele mesmo lançou"
+    # E continua sem enxergar o que é da outra equipe e não foi ele que criou.
+    assert "ped2" not in pedidos
+    # O rodapé conta o mesmo conjunto da lista.
+    assert body["total"] == len(body["items"])
+
+
+@pytest.mark.asyncio
+async def test_equipe_sem_loja_cadastrada_ainda_ve_o_que_lancou(
+    db: AsyncSession,
+    client: AsyncClient,
+    auth_as: Callable[[User | None], None],
+    scope_setup: dict,
+):
+    """Equipe que não existe em store_info zerava a lista inteira (`1=0`).
+
+    Caso real: um usuário com as equipes 201 e 10001, que não têm nenhuma loja,
+    via a tela de Reembolso sempre vazia — inclusive o que ele mesmo lançava.
+    """
+    u = _mk_user(UserRole.USER, [9999])
+    db.add(u)
+    await db.commit()
+    auth_as(u)
+
+    created = await client.post(
+        "/api/refunds",
+        json={"pedido_bling": "ped-sem-equipe", "conta": "qualquer", "plataforma": "shopee"},
+    )
+    assert created.status_code == 201
+
+    r = await client.get("/api/refunds")
+    pedidos = {i["pedido_bling"] for i in r.json()["items"]}
+    assert pedidos == {"ped-sem-equipe"}
+
+
+@pytest.mark.asyncio
 async def test_admin_sees_both(
     db: AsyncSession,
     client: AsyncClient,

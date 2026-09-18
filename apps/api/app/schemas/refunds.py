@@ -172,11 +172,31 @@ class RefundLookupOut(BaseModel):
     custo_manutencao: float | None = None
 
 
+class RefundExistenteOut(BaseModel):
+    """Reembolso que JÁ existe para o pedido consultado, para a tela mostrar
+    antes de adicionar outro. Um pedido pode ter vários lançamentos legítimos
+    (tipos diferentes, contas diferentes), então o aviso precisa dizer QUAIS
+    são — só o número treina o operador a ignorar."""
+
+    data: datetime | None = None
+    conta: str | None = None
+    tipo: str | None = None
+    reembolso: float | None = None
+    conferido: bool = False
+    criado_por: str | None = None
+
+
 class RefundLookupPage(BaseModel):
     items: list[RefundLookupOut]
     # Lookup-only: True when the recent conciliation view missed the order but
     # bling_orders has it, so the frontend can offer the slow history search.
     historico_disponivel: bool = False
+    # O que JÁ existe para esse pedido (qualquer autor, qualquer equipe, e
+    # também o que já foi finalizado). Ignora o escopo de propósito: os dois
+    # caminhos que escondem um lançamento são justamente a equipe e o filtro
+    # "a finalizar", e é deles que o operador precisa ser avisado.
+    reembolsos_existentes: int = 0
+    reembolsos_do_pedido: list[RefundExistenteOut] = []
 
 
 class RefundOrderCostOut(BaseModel):
