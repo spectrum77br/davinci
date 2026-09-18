@@ -61,6 +61,10 @@ const error = ref<string | null>(null)
 const filterMk = ref<string>('')
 const filterUf = ref<string>('')
 const filterResponsavel = ref<string>('')
+const filterContabilidade = ref<string>('')
+// Valor interno do filtro para empresa com a contabilidade em branco — usar
+// string vazia colidiria com a opção "todas".
+const SEM_CONTABILIDADE = '__sem__'
 const search = ref<string>('')
 const showNew = ref(false)
 
@@ -91,6 +95,21 @@ await refresh()
 
 // Responsáveis conhecidos (para o filtro e para o autocompletar do campo),
 // tirados da própria grade — o Responsável é um dado DA EMPRESA.
+// Contabilidades existentes + QUANTAS empresas em cada uma. A contagem sai da
+// grade inteira, não das linhas filtradas: o número tem que dizer quantas
+// existem, senão ele mudaria conforme o próprio filtro e não serviria de guia.
+const contabilidadeOpts = computed(() => {
+  const conta = new Map<string, number>()
+  for (const r of grid.value?.rows || []) {
+    const v = (r.company.contabilidade || '').trim()
+    const chave = v || SEM_CONTABILIDADE
+    conta.set(chave, (conta.get(chave) || 0) + 1)
+  }
+  return Array.from(conta.entries())
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], 'pt-BR'))
+    .map(([valor, total]) => ({ valor, total }))
+})
+
 const responsaveisOpts = computed(() => {
   const set = new Set<string>()
   for (const r of grid.value?.rows || []) {
@@ -108,15 +127,28 @@ const filteredRows = computed(() => {
   if (filterResponsavel.value) {
     rows = rows.filter(r => (r.company.responsavel_nome || '').trim() === filterResponsavel.value)
   }
+  if (filterContabilidade.value) {
+    rows = rows.filter((r) => {
+      const v = (r.company.contabilidade || '').trim()
+      return filterContabilidade.value === SEM_CONTABILIDADE ? !v : v === filterContabilidade.value
+    })
+  }
   if (search.value) {
     const q = search.value.toLowerCase()
     rows = rows.filter(r => {
       const resp = (r.company.responsavel_nome || '').toLowerCase()
+      // Contabilidade e operação entram na busca porque é o movimento natural:
+      // digitar "CT" ou "INTERMEDIAÇÃO" aqui e esperar a lista filtrar. Sem
+      // isso a busca devolvia zero e parecia defeito.
+      const contab = (r.company.contabilidade || '').toLowerCase()
+      const oper = (r.company.operacao || '').toLowerCase()
       return (
         r.company.razao_social.toLowerCase().includes(q) ||
         r.company.apelido.toLowerCase().includes(q) ||
         (r.company.cnpj || '').includes(q) ||
-        resp.includes(q)
+        resp.includes(q) ||
+        contab.includes(q) ||
+        oper.includes(q)
       )
     })
   }
@@ -484,7 +516,7 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
         <RefreshCw class="size-4 mr-1" /> recarregar
       </Button>
       <div class="ml-auto flex gap-2 flex-wrap">
-        <Input v-model="search" placeholder="razão social / apelido / CNPJ / responsável" class="w-64" />
+        <Input v-model="search" placeholder="razão social / apelido / CNPJ / responsável / contabilidade" class="w-64" />
         <Input v-model="filterUf" placeholder="UF" class="w-20" />
         <select v-model="filterMk" class="border rounded px-2 text-sm bg-background">
           <option value="">todos marketplaces</option>
@@ -493,6 +525,12 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
         <select v-model="filterResponsavel" class="border rounded px-2 text-sm bg-background">
           <option value="">todos responsáveis</option>
           <option v-for="r in responsaveisOpts" :key="r" :value="r">{{ r }}</option>
+        </select>
+        <select v-model="filterContabilidade" class="border rounded px-2 text-sm bg-background">
+          <option value="">todas contabilidades</option>
+          <option v-for="c in contabilidadeOpts" :key="c.valor" :value="c.valor">
+            {{ c.valor === SEM_CONTABILIDADE ? 'sem contabilidade' : c.valor }} ({{ c.total }})
+          </option>
         </select>
         <Button v-if="canEdit" size="sm" @click="showNew = true">
           <Plus class="size-4 mr-1" /> Nova empresa
