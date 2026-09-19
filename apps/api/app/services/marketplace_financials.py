@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
@@ -1322,20 +1323,40 @@ async def _fetch_ml(
     # price). Gated on the `order_has_discount` tag to avoid an extra ML call on
     # the (common) no-discount orders. Falls back to the billing detail's
     # seller charge if the breakdown call fails.
+    #
+    # Num pack, cada sub-pedido carrega o PRÓPRIO cupom: o breakdown é por
+    # pedido, então soma-se o de todos os casados. Consultar só o primário
+    # deixava o cupom dos irmãos de fora (pack 2000015104547867: 2,97 gravado
+    # contra 6,00 na tela do ML — "Preço dos produtos 559,07" = 565,07 − 6,00).
     order_discounts: dict[str, Any] | None = None
+    sibling_discounts: dict[str, dict[str, Any]] = {}
     discount: Decimal | None = None
-    has_discount = isinstance(order, dict) and "order_has_discount" in (
-        order.get("tags") or []
-    )
-    if has_discount:
+    for matched in matched_orders:
+        if "order_has_discount" not in (matched.get("tags") or []):
+            continue
+        matched_id = _text_value(matched.get("id")) or order_id
+        is_primary = matched is order
         try:
-            order_discounts = await client.get_order_discounts(order_id)
-            discount = _ml_seller_funded_discount(order_discounts)
+            breakdown = await client.get_order_discounts(matched_id)
+            part = _ml_seller_funded_discount(breakdown)
+            if is_primary:
+                order_discounts = breakdown
+            else:
+                sibling_discounts[matched_id] = breakdown
         except Exception as e:  # noqa: BLE001 — fall back to billing on any failure
             logger.warning(
-                "ml_order_discounts_failed", order_id=order_id, error=str(e)[:300]
+                "ml_order_discounts_failed", order_id=matched_id, error=str(e)[:300]
             )
-            discount = _ml_billing_seller_discount(billing)
+            # O billing detail consultado é só o do pedido primário; um irmão
+            # que falhou fica sem desconto (contribui 0), como já acontecia —
+            # mas deixa o motivo no raw pra quem for comparar com a tela do ML.
+            if is_primary:
+                part = _ml_billing_seller_discount(billing)
+            else:
+                part = None
+                sibling_discounts[matched_id] = {"error": str(e)[:300]}
+        if part is not None:
+            discount = (discount or Decimal("0")) + part
 
     payments = order.get("payments") if isinstance(order, dict) else []
     if not isinstance(payments, list):
@@ -1346,12 +1367,17 @@ async def _fetch_ml(
     )
     # Freight is shipment-level: every sub-order of a pack/carrinho shares
     # one shipping_id and /shipments/costs returns the WHOLE shipment cost.
-    # `_fetch_ml_freight_reconciliations` prorates it by this order's share
-    # of the shipment (`_ml_order_freight_share`), so multi-order shipments
-    # don't dump the full freight on a single order
-    # (`_ml_actual_freight_total` still dedups by shipping_id within the
-    # order).
-    freights = await _fetch_ml_freight_reconciliations(client, order, order_id, currency)
+    # `_fetch_ml_freight_reconciliations` prorates it by the share of the
+    # shipment that belongs to the orders aggregated here (primary + matched
+    # siblings — `_ml_order_freight_share`), so multi-order shipments don't
+    # dump the full freight on a single order, and a pack consolidated in one
+    # Bling order doesn't keep only the primary's slice while gross and
+    # commission already cover every sibling (pack 2000015104547867 stored
+    # 67,88 against the 135,75 ML charged). `_ml_actual_freight_total` still
+    # dedups by shipping_id within the order.
+    freights = await _fetch_ml_freight_reconciliations(
+        client, order, order_id, currency, siblings=matched_orders[1:]
+    )
     freight_actual_total = _ml_actual_freight_total(freights)
     freight = freight_actual_total or payment_shipping_cost
     net = None
@@ -1414,6 +1440,7 @@ async def _fetch_ml(
             "billing": billing,
             "billing_error": billing_error,
             "order_discounts": order_discounts,
+            "sibling_order_discounts": sibling_discounts or None,
             "payment_shipping_cost": str(payment_shipping_cost)
             if payment_shipping_cost is not None
             else None,
@@ -1439,7 +1466,16 @@ async def _fetch_ml_freight_reconciliations(
     order: dict[str, Any],
     order_id: str,
     currency: str,
+    *,
+    siblings: list[dict[str, Any]] | None = None,
 ) -> list[FreightReconciliationDraft]:
+    """Linhas de conciliação de frete do pedido (uma por item).
+
+    `siblings` são os sub-pedidos do pack casados com o mesmo pedido Bling
+    (ver expansão de pack em `_fetch_ml`): os itens deles viram linhas
+    também, e o custo real do envio é rateado pela participação do
+    CONJUNTO (primário + irmãos), já que gross/comissão somam todos eles.
+    """
     if not isinstance(order, dict):
         return [
             FreightReconciliationDraft(
@@ -1461,7 +1497,41 @@ async def _fetch_ml_freight_reconciliations(
     shipping_status = _text_value(shipping.get("status"))
 
     order_items = order.get("order_items")
-    items = order_items if isinstance(order_items, list) and order_items else [{}]
+    # (pedido dono da linha, item) — o primário sempre gera ao menos uma
+    # linha (mesmo sem itens), os irmãos só as dos itens que têm.
+    items: list[tuple[str, Any]] = [
+        (order_id, item)
+        for item in (order_items if isinstance(order_items, list) and order_items else [{}])
+    ]
+    matched_order_ids: list[str] = [order_id]
+    # Irmão em OUTRO envio (não deveria existir: pack do ML = um envio) fica
+    # fora das linhas — senão nasceria linha com o shipping_id do primário e
+    # o custo de um envio que não é o dele. Fica registrado no raw.
+    siblings_outro_envio: dict[str, str | None] = {}
+    for sibling in siblings or []:
+        if not isinstance(sibling, dict):
+            continue
+        sibling_id = _text_value(sibling.get("id"))
+        if not sibling_id or sibling_id in matched_order_ids:
+            continue
+        sibling_shipping = (
+            sibling.get("shipping") if isinstance(sibling.get("shipping"), dict) else {}
+        )
+        sibling_shipping_id = _text_value(sibling_shipping.get("id"))
+        if sibling_shipping_id and sibling_shipping_id != shipping_id:
+            siblings_outro_envio[sibling_id] = sibling_shipping_id
+            logger.warning(
+                "ml_pack_sibling_other_shipment",
+                order_id=order_id,
+                sibling_id=sibling_id,
+                shipping_id=shipping_id,
+                sibling_shipping_id=sibling_shipping_id,
+            )
+            continue
+        matched_order_ids.append(sibling_id)
+        sibling_items = sibling.get("order_items")
+        if isinstance(sibling_items, list):
+            items.extend((sibling_id, item) for item in sibling_items if isinstance(item, dict))
 
     costs_payload: dict[str, Any] | None = None
     costs_error: str | None = None
@@ -1486,17 +1556,17 @@ async def _fetch_ml_freight_reconciliations(
         # INTEIRO. Atribuir tudo a um pedido só inflava o frete real (ex.:
         # envio 47116394474: 30 un / 29 pedidos, custo 228,00 = 30 x 7,60;
         # o pedido 2000016540781180, com 1 un, ficava com 228 e gerava
-        # refund Logistica falso de 220,40). Rateia pela participação do
-        # pedido no pacote (peso x qty; fallback qty).
+        # refund Logistica falso de 220,40). Rateia pela participação dos
+        # pedidos casados no pacote (peso x qty; fallback qty).
         if freight_actual is not None:
-            share = _ml_order_freight_share(shipment_items_payload, order_id)
+            share = _ml_order_freight_share(shipment_items_payload, matched_order_ids)
             if share is not None and share < 1:
                 freight_actual = _money_from_decimal(freight_actual * share)
     else:
         costs_error = "missing_shipping_id"
 
     rows: list[FreightReconciliationDraft] = []
-    for item_index, item in enumerate(items):
+    for item_index, (item_order_id, item) in enumerate(items):
         item_payload = item if isinstance(item, dict) else {}
         marketplace_item = (
             item_payload.get("item") if isinstance(item_payload.get("item"), dict) else {}
@@ -1574,7 +1644,11 @@ async def _fetch_ml_freight_reconciliations(
                 dimension_weight=dimensions.get("weight"),
                 dimensions_text=_text_value(dimensions.get("text")),
                 raw={
-                    "order_id": order_id,
+                    "order_id": item_order_id,
+                    "matched_order_ids": (
+                        matched_order_ids if len(matched_order_ids) > 1 else None
+                    ),
+                    "siblings_outro_envio": siblings_outro_envio or None,
                     "shipment_costs": costs_payload if item_index == 0 else None,
                     "shipment_items": shipment_items_payload if item_index == 0 else None,
                     "shipping_options_free": quote_payload,
@@ -1588,16 +1662,23 @@ async def _fetch_ml_freight_reconciliations(
 
 def _ml_order_freight_share(
     shipment_items_payload: dict[str, Any] | list[Any] | None,
-    order_id: str | None,
+    order_id: str | int | Iterable[str] | None,
 ) -> Decimal | None:
     """Participação do pedido no custo do envio (0 < share <= 1).
 
+    `order_id` pode ser um id só ou os ids dos sub-pedidos de um pack que
+    foram agregados num único pedido Bling — a participação é a soma deles.
     Pondera por peso x quantidade quando todos os itens têm peso; senão
     por quantidade. Retorna None se o payload não permitir calcular
     (sem itens, pedido ausente do envio, totais zerados) — nesse caso o
     chamador mantém o custo cheio (comportamento antigo).
     """
-    if not isinstance(shipment_items_payload, list) or not order_id:
+    order_ids = (
+        {str(order_id)}
+        if isinstance(order_id, (str, int))
+        else {str(oid) for oid in (order_id or []) if oid}
+    )
+    if not isinstance(shipment_items_payload, list) or not order_ids:
         return None
     total = Decimal("0")
     mine = Decimal("0")
@@ -1617,7 +1698,7 @@ def _ml_order_freight_share(
     for it_order_id, qty, weight in rows:
         value = qty * weight if use_weight else qty
         total += value
-        if it_order_id == str(order_id):
+        if it_order_id in order_ids:
             mine += value
     if total <= 0 or mine <= 0:
         return None
