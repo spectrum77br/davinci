@@ -6,13 +6,16 @@ import { PopoverContent, PopoverPortal, PopoverRoot, PopoverTrigger } from 'reka
 // clicou, abre um balão por cima da tabela com o texto inteiro, editável.
 // Esc, Ctrl+Enter ou clicar fora fecha; se o texto mudou, emite `save` — o
 // mesmo papel do @change do input de uma linha que ficava na célula. Quem não
-// pode editar também abre, só pra ler.
+// pode editar também abre, só pra ler. 19/09: também nas colunas Última
+// localização e Observação da tela Devoluções — `dica` é uma linha miúda
+// abaixo do título (ex.: a entrega original, que ficava no title do input).
 const props = withDefaults(defineProps<{
   modelValue: string | null
   disabled?: boolean
   placeholder?: string
   titulo?: string
-}>(), { disabled: false, placeholder: '', titulo: 'Observação' })
+  dica?: string
+}>(), { disabled: false, placeholder: '', titulo: 'Observação', dica: '' })
 
 const emit = defineEmits<{
   (e: 'update:modelValue', value: string): void
@@ -62,6 +65,7 @@ function focarCaixa(e: Event) {
         @open-auto-focus="focarCaixa"
       >
         <div class="mb-1 text-[11px] font-medium text-muted-foreground">{{ titulo }}</div>
+        <div v-if="dica" class="mb-1 text-[11px] text-muted-foreground">{{ dica }}</div>
         <textarea
           ref="caixa"
           :value="modelValue || ''"

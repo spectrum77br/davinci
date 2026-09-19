@@ -948,6 +948,30 @@ const acompPrazoFilter = ref(false)
 const acompChegadaFilter = ref<'all' | 'chegou' | 'pendente'>('all')
 // Chaves "pedido|campo" com PATCH em voo — trava o input e evita corrida.
 const acompSaving = ref<Set<string>>(new Set())
+// Rascunho das células com balão (Última localização / Observação, 19/09):
+// o texto digitado no balão fica aqui até fechar; `saveRastreio` compara com
+// o valor da linha e manda pro backend só o que mudou.
+const acompDraft = ref<Record<string, string>>({})
+function draftKey(row: AcompanhamentoRow, field: 'localizacao' | 'observacao'): string {
+  return `${row.pedido_bling}|${field}`
+}
+function draftOf(row: AcompanhamentoRow, field: 'localizacao' | 'observacao'): string {
+  return acompDraft.value[draftKey(row, field)] ?? row[field] ?? ''
+}
+function setDraft(row: AcompanhamentoRow, field: 'localizacao' | 'observacao', value: string) {
+  acompDraft.value = { ...acompDraft.value, [draftKey(row, field)]: value }
+}
+async function saveDraft(row: AcompanhamentoRow, field: 'localizacao' | 'observacao') {
+  const key = draftKey(row, field)
+  const value = acompDraft.value[key]
+  if (value === undefined) return
+  try {
+    await saveRastreio(row, field, value)
+  } finally {
+    const { [key]: _gone, ...rest } = acompDraft.value
+    acompDraft.value = rest
+  }
+}
 
 async function loadAcompanhamento() {
   acompLoading.value = true
@@ -2093,28 +2117,30 @@ async function backfillAddresses() {
                   @blur="(e) => saveRastreio(row, 'rastreio', (e.target as HTMLInputElement).value)"
                 />
               </td>
+              <!-- 19/09 (Vinicius): texto longo — a célula mostra só o começo; clicou,
+                   abre o balão com o texto inteiro (ObservacaoPopover), editável. -->
               <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
-                <input
-                  :value="row.localizacao || ''"
-                  :title="row.entrega_localizacao ? `Status da devolução (automático). Entrega original: ${row.entrega_localizacao}` : undefined"
+                <ObservacaoPopover
+                  :model-value="draftOf(row, 'localizacao')"
                   :disabled="!canEdit || isSavingRastreio(row.pedido_bling, 'localizacao')"
-                  :class="sheetInputClass"
+                  :titulo="`Última localização · ${row.pedido_bling || ''}`"
+                  :dica="row.entrega_localizacao ? `Status da devolução (automático). Entrega original: ${row.entrega_localizacao}` : ''"
                   placeholder="onde o pacote está"
-                  @keydown.enter="(e) => (e.target as HTMLInputElement).blur()"
-                  @blur="(e) => saveRastreio(row, 'localizacao', (e.target as HTMLInputElement).value)"
+                  @update:model-value="(v) => setDraft(row, 'localizacao', v)"
+                  @save="saveDraft(row, 'localizacao')"
                 />
               </td>
               <td class="px-2 py-1 whitespace-nowrap text-muted-foreground bg-amber-50/40 dark:bg-amber-900/10" title="Preenchida sozinha quando a localização muda">
                 {{ fmtDateTime(row.localizacao_data) }}
               </td>
               <td class="px-1 py-0.5 bg-emerald-50/40 dark:bg-emerald-900/10 border-l-[3px] border-gray-400 dark:border-gray-600">
-                <input
-                  :value="row.observacao || ''"
+                <ObservacaoPopover
+                  :model-value="draftOf(row, 'observacao')"
                   :disabled="!canEdit || isSavingRastreio(row.pedido_bling, 'observacao')"
-                  :class="sheetInputClass"
+                  :titulo="`Observação · ${row.pedido_bling || ''}`"
                   placeholder="recado pra quem acompanha"
-                  @keydown.enter="(e) => (e.target as HTMLInputElement).blur()"
-                  @blur="(e) => saveRastreio(row, 'observacao', (e.target as HTMLInputElement).value)"
+                  @update:model-value="(v) => setDraft(row, 'observacao', v)"
+                  @save="saveDraft(row, 'observacao')"
                 />
               </td>
               <!-- Vídeo (17/09): solicitar → solicitado → link (apagar com
@@ -2830,13 +2856,13 @@ async function backfillAddresses() {
                 <option v-for="sit in situacoesBling" :key="sit.id" :value="sit.id">{{ sit.nome }}</option>
               </select>
             </td>
-            <td class="px-1 py-0.5 bg-emerald-50/40 dark:bg-emerald-900/10 border-l-[3px] border-gray-400 dark:border-gray-600">
-              <input
-                :value="row.observacao || ''"
+            <td class="px-1 py-0.5 w-[150px] max-w-[150px] bg-emerald-50/40 dark:bg-emerald-900/10 border-l-[3px] border-gray-400 dark:border-gray-600">
+              <ObservacaoPopover
+                :model-value="row.observacao"
                 :disabled="!canEdit"
-                :class="sheetInputClass"
-                @input="(e) => setRowText(row, 'observacao', (e.target as HTMLInputElement).value)"
-                @blur="saveRow(row)"
+                :titulo="`Observação · ${row.pedido_bling || row.pedido_marketplace || ''}`"
+                @update:model-value="(v) => setRowText(row, 'observacao', v)"
+                @save="saveRow(row)"
               />
             </td>
             <td v-if="isAdmin" class="px-2 py-1 whitespace-nowrap text-muted-foreground bg-slate-50/40 dark:bg-slate-800/20 border-l-[3px] border-gray-400 dark:border-gray-600" title="Última alteração feita neste registro">{{ fmtDateTime(row.updated_at) }}</td>
