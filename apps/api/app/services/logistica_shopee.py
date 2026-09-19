@@ -208,6 +208,8 @@ async def enrich_row(
 # Janela do sweep de pós-venda: linhas Shopee com `data` (data do pedido) até
 # 45 dias atrás — cobre com folga o prazo de devolução da Shopee (7 dias após a
 # entrega). ~2.9k linhas ≈ 58 chamadas em lote por varredura (medido 28/08).
+# Vale pro order_status em lote; a lista de devoluções é da loja inteira e
+# casa com venda de qualquer idade (ver sweep_pos_venda).
 _SWEEP_JANELA_DIAS = 45
 # Máximo que a returns API aceita por chamada (recusa janela maior).
 _RETURNS_JANELA_DIAS = 15
@@ -231,6 +233,15 @@ async def sweep_pos_venda(session: AsyncSession) -> dict:
       `meli_status["return_status"]`; `assinatura_shopee` então rende
       "Devolução solicitada". Havendo mais de um caso pro mesmo pedido, vale
       o VIVO mais recente (ex. 290580: um CANCELLED + um ACCEPTED → ACCEPTED).
+      A lista é da LOJA inteira, então ela casa com linha de QUALQUER idade
+      (não só as 45 dias) — e venda viva sem linha nenhuma (saiu da aba por
+      Entregue > 90 dias, ou nunca entrou) é recriada do espelho do Bling
+      (`logistica_ingest.recriar_linhas_do_bling`). Caso real 19/09: Shopee
+      260605AEK4ND5R / 279446, celular de 05/06 com devolução por "garantia de
+      90 dias" aberta em 03/09 — o sweep baixava a devolução e descartava; a
+      loja só soube pelo Seller Center com o pacote já de volta e 1 dia de
+      prazo. Só caso VIVO recria linha: devolução cancelada de venda velha
+      não tem o que acompanhar.
 
     Retorna {"ids": [UUID...], **contadores}. O recarregar passa os ids como
     `extras` do `_ids_pendentes` — extras furam o escondimento — e o fluxo
@@ -253,7 +264,7 @@ async def sweep_pos_venda(session: AsyncSession) -> dict:
         por_conta.setdefault((r.conta or "").strip(), []).append(r)
 
     mudados: set[UUID] = set()
-    n_status = n_returns = contas_ok = 0
+    n_status = n_returns = contas_ok = n_recriadas = 0
     agora = int(datetime.now(UTC).timestamp())
     ret_from = agora - _RETURNS_JANELA_DIAS * 24 * 3600 + 300
     for conta, linhas in por_conta.items():
@@ -305,7 +316,25 @@ async def sweep_pos_venda(session: AsyncSession) -> dict:
             cand = (vivo, int(d.get("update_time") or 0), st)
             if sn not in melhor or cand[:2] > melhor[sn][:2]:
                 melhor[sn] = cand
-        for r in linhas:
+        # Devolução de venda fora da janela de 45 dias: casa com a linha velha
+        # que ainda existir e recria (do espelho do Bling) a de venda viva
+        # que já saiu da aba.
+        alvo_ret = list(linhas)
+        faltam = set(melhor) - {(r.pedido_marketplace or "").strip() for r in linhas}
+        if faltam:
+            velhas = await _linhas_shopee_por_venda(session, faltam)
+            alvo_ret.extend(velhas)
+            faltam -= {(r.pedido_marketplace or "").strip() for r in velhas}
+        vivas_sem_linha = [sn for sn in faltam if melhor[sn][0]]
+        if vivas_sem_linha:
+            from app.services import logistica_ingest  # lazy: evita ciclo de import
+
+            novas = await logistica_ingest.recriar_linhas_do_bling(
+                session, "shopee", vivas_sem_linha
+            )
+            alvo_ret.extend(novas)
+            n_recriadas += len(novas)
+        for r in alvo_ret:
             got = melhor.get((r.pedido_marketplace or "").strip())
             if got is None:
                 continue
@@ -337,10 +366,32 @@ async def sweep_pos_venda(session: AsyncSession) -> dict:
     await session.commit()
     summary = {
         "seen": len(rows), "contas": contas_ok,
-        "order_status": n_status, "returns": n_returns,
+        "order_status": n_status, "returns": n_returns, "recriadas": n_recriadas,
     }
     logger.info("logistica_shopee_sweep_pos_venda", **summary)
     return {"ids": list(mudados), **summary}
+
+
+async def _linhas_shopee_por_venda(
+    session: AsyncSession, vendas: Collection[str]
+) -> list[Logistica]:
+    """Linhas Shopee (qualquer idade) das vendas dadas — número do pedido no
+    marketplace. É o que casa a devolução da lista da loja com a linha que o
+    sweep não carregou por estar fora da janela de 45 dias."""
+    if not vendas:
+        return []
+    return list(
+        (
+            await session.execute(
+                select(Logistica).where(
+                    func.lower(func.trim(Logistica.plataforma)).in_(
+                        tuple(_SHOPEE_PLATAFORMAS)
+                    ),
+                    Logistica.pedido_marketplace.in_(sorted(vendas)),
+                )
+            )
+        ).scalars().all()
+    )
 
 
 # Devolução de pedidos ANTIGOS: a returns API só filtra por janela de até 15

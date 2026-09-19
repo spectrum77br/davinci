@@ -41,6 +41,10 @@ from app.services import (
 
 logger = structlog.get_logger()
 
+# Schema pela configuração (os testes rodam em `davinci_test`), como faz
+# nf_emissao_gerar — os SQLs mais antigos deste módulo ainda fixam `davinci.`.
+_SCHEMA = get_settings().database_schema
+
 # Chave (store_info.platform) -> rótulo gravado em `logistica.plataforma`
 # (o filtro da aba por marketplace usa esse rótulo; ver routers/logistica).
 _PLATAFORMA_LABELS = {
@@ -172,27 +176,42 @@ async def espelhar_chamados(session: AsyncSession) -> list[UUID]:
 # aba sozinhas. Cancelado/Resolvido/Perdimento saem na hora; Entregue segura 90
 # dias (janela de reclamação do comprador no marketplace) e depois sai. Sem
 # data não apaga — melhor sobrar uma linha que sumir cedo demais.
+#
+# Entregue velho com DEVOLUÇÃO VIVA fica (19/09, Shopee 260605AEK4ND5R /
+# 279446: celular vendido em 05/06, devolução por "garantia de 90 dias" aberta
+# em 03/09). O sweep de pós-venda marca `return_status` e commita antes de o
+# executor trocar a situação no Bling; o recarregar (cron de 5 min, outro
+# worker) rodava a faxina nesse meio e apagava a linha — a devolução sumia sem
+# ninguém ver. Caso encerrado (CANCELLED/CLOSED na Shopee, cancelado/concluído
+# no TikTok) libera a saída normal.
 _CLEANUP_SQL = text(
-    """
-    DELETE FROM davinci.logistica
+    f"""
+    DELETE FROM "{_SCHEMA}".logistica
      WHERE lower(coalesce(status_bling, '')) IN ('cancelado', 'resolvido', 'perdimento')
         OR (
             lower(coalesce(status_bling, '')) = 'entregue'
             AND data IS NOT NULL
             AND data < CURRENT_DATE - 90
+            AND (
+                coalesce(meli_status->>'return_status', '') = ''
+                OR upper(meli_status->>'return_status') = ANY(:encerrados)
+            )
         )
-    """
+    """  # noqa: S608
 )
 
 
 async def cleanup_finalizados(session: AsyncSession) -> int:
     """Apaga da aba Logística os pedidos que não precisam mais de acompanhamento:
     situação Bling Cancelado, Resolvido ou Perdimento — e Entregue com mais de
-    90 dias. Some SÓ da Logística; o pedido segue intacto em `bling_orders` e
-    nas outras telas. Roda logo depois do `refresh_status_bling` (é o
-    realinhamento que traz a situação fresca) em toda ingestão e no recarregar
-    do painel, então a tabela se mantém enxuta sem faxina manual."""
-    res = await session.execute(_CLEANUP_SQL)
+    90 dias (salvo devolução viva na assinatura). Some SÓ da Logística; o
+    pedido segue intacto em `bling_orders` e nas outras telas. Roda logo depois
+    do `refresh_status_bling` (é o realinhamento que traz a situação fresca) em
+    toda ingestão e no recarregar do painel, então a tabela se mantém enxuta
+    sem faxina manual."""
+    res = await session.execute(
+        _CLEANUP_SQL, {"encerrados": sorted(logistica_rules.RETURN_ENCERRADO)}
+    )
     removed = res.rowcount or 0
     await session.commit()
     logger.info("logistica_cleanup_finalizados", removed=removed)
@@ -207,10 +226,6 @@ async def cleanup_finalizados(session: AsyncSession) -> int:
 # não acontecer mais isso"). Antes de apagar, o que o operador escreveu na linha
 # velha (observação / chamado / divergência) passa pra linha nova da MESMA venda
 # quando ela ainda está vazia.
-# Schema pela configuração (os testes rodam em `davinci_test`), como faz
-# nf_emissao_gerar — os SQLs mais antigos deste módulo ainda fixam `davinci.`.
-_SCHEMA = get_settings().database_schema
-
 _HERDAR_DO_EXCLUIDO_SQL = text(
     f"""
     UPDATE "{_SCHEMA}".logistica novo
@@ -338,6 +353,76 @@ async def cleanup_excluidos(
         pedidos=removidos[:50],
     )
     return len(removidos)
+
+
+# Devolução aberta MUITO depois da venda (19/09: Shopee 260605AEK4ND5R /
+# 279446, celular de 05/06, "garantia de 90 dias" — mais dois de junho na
+# mesma quinzena, Jlas 279106 e mega 279819). O pedido já tinha saído da aba
+# (Entregue > 90 dias) e a ingestão só olha 60 dias, então o sweep baixava a
+# devolução e descartava por não ter linha. Mesmo SELECT da ingestão, sem
+# janela de data e por número da venda no marketplace; Cancelado/Resolvido/
+# Perdimento continuam de fora (a equipe já lançou esses — a devolução fica
+# ACCEPTED pra sempre na Shopee).
+_RECRIAR_DO_BLING_SQL = text(
+    f"""
+    SELECT DISTINCT ON (bo.numeroloja)
+        bo.numero, bo.numeroloja, bo.data::date AS data, si.account_name, sb.nome
+    FROM "{_SCHEMA}".bling_orders bo
+    JOIN "{_SCHEMA}".store_info si
+        ON si.bling_store_id::text = bo.loja AND si.platform = :platform
+    LEFT JOIN "{_SCHEMA}".situacao_bling sb ON sb.id::text = bo.situacao
+    WHERE bo.numeroloja = ANY(:numerosloja)
+      AND bo.numero IS NOT NULL
+      AND bo.situacao IS DISTINCT FROM 'excluido'
+      AND (sb.nome IS NULL OR sb.nome NOT IN ('Cancelado', 'Resolvido', 'Perdimento'))
+      AND NOT EXISTS (
+          SELECT 1 FROM "{_SCHEMA}".logistica l WHERE l.pedido_bling = bo.numero
+      )
+    ORDER BY bo.numeroloja, bo.data DESC, bo.item_index
+    """  # noqa: S608
+)
+
+
+async def recriar_linhas_do_bling(
+    session: AsyncSession, platform: str, numerosloja: Collection[str]
+) -> list[Logistica]:
+    """Recria na Logística, a partir do espelho `bling_orders`, as linhas das
+    vendas dadas (número no marketplace) — qualquer idade. É o caminho de
+    volta pra venda que saiu da aba (ou nunca entrou) e ganhou pós-venda
+    depois: os sweeps chamam com as vendas que a returns API listou e não têm
+    linha. Venda desconhecida no Bling, excluída ou já lançada (Cancelado/
+    Resolvido/Perdimento) fica de fora. Devolve as linhas novas, já no
+    `session` (flush feito), com `meli_status` vazio pra quem chamou carimbar."""
+    sns = sorted({(n or "").strip() for n in numerosloja if (n or "").strip()})
+    if not sns:
+        return []
+    res = await session.execute(
+        _RECRIAR_DO_BLING_SQL, {"platform": platform, "numerosloja": sns}
+    )
+    novas: list[Logistica] = []
+    for numero, numeroloja, data, conta, situacao in res.all():
+        novas.append(
+            Logistica(
+                data=data,
+                pedido_bling=str(numero),
+                pedido_marketplace=str(numeroloja),
+                plataforma=_PLATAFORMA_LABELS[platform],
+                conta=conta,
+                meli_status={},
+                status_bling=situacao,
+            )
+        )
+    if novas:
+        session.add_all(novas)
+        await session.flush()
+        logger.info(
+            "logistica_recriadas_do_bling",
+            platform=platform,
+            pedidos=[n.pedido_bling for n in novas][:50],
+            sem_linha=len(sns),
+            recriadas=len(novas),
+        )
+    return novas
 
 
 async def _ingest_platform(

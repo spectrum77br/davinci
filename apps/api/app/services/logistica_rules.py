@@ -499,6 +499,18 @@ _ML_RETURN_LABELS_PT = {
 }
 _ML_RETURN_ENCERRADO = {"CANCELLED", "CANCELED", "CLOSED", "EXPIRED", "REJECTED"}
 
+# `return_status` que significa "esse caso de devolução NÃO precisa mais de
+# ninguém" em QUALQUER plataforma (união dos três vocabulários; no TikTok o
+# concluído-com-reembolso também terminou). Quem só tem a linha e não quer
+# saber a plataforma — a faxina da Logística, que segura Entregue velho com
+# devolução viva — testa contra isto. Vazio = sem caso conhecido.
+RETURN_ENCERRADO = frozenset(
+    _SHOPEE_RETURN_ENCERRADO
+    | _TIKTOK_RETURN_ENCERRADO
+    | _TIKTOK_RETURN_CONCLUIDO
+    | _ML_RETURN_ENCERRADO
+)
+
 
 # Substatus do ML em que o pacote está VOLTANDO pro vendedor. Enquanto o envio
 # estiver aqui a linha não pode "descansar": a regra da aba Status já levou o
