@@ -74,18 +74,30 @@ class ChamadoOut(BaseModel):
     # Resultado do chamado em R$ — coluna "Valor" do Controle (Eduardo 03/09):
     # positivo = lucro, negativo = prejuízo (15/09); None = ainda sem valor.
     valor_recuperado: Decimal | None = None
+    # 19/09: sugestão do robô/plataforma (nada fecha sozinho — a pessoa confirma
+    # ao concluir). A janela Resolver pré-preenche com ela.
+    valor_sugerido: Decimal | None = None
+    # 19/09 (só mostrar): custo dos itens do pedido no espelho bling_orders —
+    # SUM(preco_custo × quantidade) — e o detalhe "sku × qtd; …" pra pessoa
+    # decidir o lucro/prejuízo ao concluir.
+    custo_produto: Decimal | None = None
+    custo_detalhe: str | None = None
+    # 19/09: texto da instrução nossa que o robô ainda não leu (tipo `instrucao`
+    # mais nova que a última `analise`) — a linha fica Análise Robô.
+    instrucao_pendente: str | None = None
     created_at: datetime
     updated_at: datetime
     mensagens_total: int = 0
     ultima_mensagem_at: datetime | None = None
-    # Coluna "Status" da aba (Vinicius 17/09): código de services.chamados.STATUS_*
-    # + desde quando. `status_plataforma` é o oficial gravado pela API;
-    # `status_aba` é o que a linha mostra (oficial, ou derivado do histórico).
+    # Coluna "Status" da aba. `status_plataforma` é o OFICIAL gravado pela API
+    # (services.chamados.STATUS_*, Vinicius 17/09) + desde quando; `status_aba` é
+    # o que a linha mostra — 19/09: um dos cinco ABA_* (analise_humano /
+    # analise_robo / aguard_plataforma / encerrado / concluido), derivado na hora.
     status_plataforma: str | None = None
     status_plataforma_at: datetime | None = None
     status_aba: str | None = None
     status_aba_at: datetime | None = None
-    # 18/09: por que está nesse status ("falta foto na devolução", "Shopee ainda não libera…")
+    # 18/09: por que está nesse status ("falta foto na devolução", "ganhamos — lucro de R$ 10")
     status_aba_motivo: str | None = None
     # Última FALA real (nossa ou da plataforma; não análise nem evento) —
     # coluna "Últ. resposta": quando, `enviada` (nós) | `recebida` (plataforma), quem.
@@ -226,6 +238,18 @@ class AlterarStatusOut(BaseModel):
     situacao_id: int
 
 
+class InstrucaoIn(BaseModel):
+    """19/09: recado de uma pessoa PRO ROBÔ (não vai pra plataforma). Vira mensagem
+    `instrucao` no histórico; o cérebro lê no `/agent/analisar` e responde."""
+
+    texto: str = Field(min_length=1, max_length=2000)
+
+    @field_validator("texto", mode="before")
+    @classmethod
+    def _strip(cls, v: str) -> str:
+        return (v or "").strip()
+
+
 class ResolverIn(BaseModel):
     resolvido: bool = True
     # Opcional: situação Bling a aplicar junto (ex. Resolvido / Perdimento).
@@ -351,8 +375,11 @@ class AgentRecebidaOut(BaseModel):
 
 
 class AgentAnalisarIn(BaseModel):
-    """Chamados de canal robô com resposta da plataforma ainda não analisada
-    pelo cérebro (última `recebida` mais nova que a última `analise`)."""
+    """Chamados com trabalho pro cérebro: resposta da plataforma ainda não
+    analisada (última `recebida` mais nova que a última `analise`), bloqueio da
+    API sem análise depois dele (19/09, `bloqueio`) ou instrução nossa pendente
+    (19/09, `instrucao` — qualquer canal, mesmo Encerrado). `plataforma` e
+    `canais` filtram SÓ a resposta nova: instrução e bloqueio saem sempre."""
 
     limite: int = Field(default=20, ge=1, le=100)
     plataforma: str | None = "ml"
@@ -372,6 +399,25 @@ class AgentMensagemOut(BaseModel):
     texto: str
 
 
+class AgentInstrucaoOut(BaseModel):
+    """19/09: instrução de uma pessoa que o robô ainda não leu — obedecer com
+    prioridade sobre a regra normal; a análise (POST /agent/analise) consome."""
+
+    texto: str
+    autor: str | None = None
+    quando: datetime
+
+
+class AgentBloqueioOut(BaseModel):
+    """19/09: a plataforma não libera a ação pela API (`erro` da última fala nossa,
+    pendente/enviando). Vinicius: o robô procura OUTRO caminho — `responder` é
+    aceito em canal api com bloqueio e vira tarefa no Seller Center."""
+
+    erro: str
+    motivo: str | None = None
+    desde: datetime | None = None
+
+
 class AgentChamadoAnaliseOut(BaseModel):
     chamado_id: UUID
     chamado: str | None = None
@@ -384,9 +430,15 @@ class AgentChamadoAnaliseOut(BaseModel):
     origem: str
     resolvido: bool
     valor_recuperado: Decimal | None = None
+    valor_sugerido: Decimal | None = None
+    # 19/09: status oficial da plataforma (ganhamos/perdemos/encerrado = Encerrado,
+    # falta pessoa fechar) — o robô só volta aqui com instrução.
+    status_plataforma: str | None = None
     observacao: str | None = None
     created_at: datetime
     mensagens: list[AgentMensagemOut]
+    instrucao: AgentInstrucaoOut | None = None
+    bloqueio: AgentBloqueioOut | None = None
     # Prints capturados na abertura (e os sem mensagem) — o cérebro pode
     # reanexá-los na réplica quando o ML pede "os comprovantes" de novo.
     anexos_abertura: list[UUID] = []
@@ -402,9 +454,12 @@ AcaoAnalise = Literal["esperar", "responder", "resolver", "humano"]
 
 
 class AgentAnaliseIn(BaseModel):
-    """Decisão do cérebro sobre a última resposta da plataforma: registra a
-    análise no histórico e executa a ação (enfileira réplica pro robô do
-    Tuta, resolve com valor recuperado, ou pede humano)."""
+    """Decisão do cérebro sobre a última resposta da plataforma (ou sobre uma
+    instrução/bloqueio): registra a análise no histórico e executa a ação
+    (enfileira réplica pro robô, pede humano, espera). 19/09: `resolver` NÃO
+    fecha mais — põe o chamado em Encerrado e `valor_recuperado` vira
+    SUGESTÃO (`Chamado.valor_sugerido`, em qualquer ação; negativo = prejuízo);
+    a pessoa conclui pela aba."""
 
     chamado_id: UUID
     classe: str = Field(min_length=1, max_length=60)
@@ -412,7 +467,7 @@ class AgentAnaliseIn(BaseModel):
     acao: AcaoAnalise
     texto_replica: str | None = None
     reanexar_abertura: bool = False
-    valor_recuperado: Decimal | None = Field(default=None, ge=0)
+    valor_recuperado: Decimal | None = None
     observacao: str | None = None
     # `humano` num chamado que o monitor antigo já tinha fechado: reabre.
     reabrir: bool = False

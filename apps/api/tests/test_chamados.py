@@ -81,8 +81,10 @@ class _FakeML:
         self.closed = closed
         self.actions = actions
         self.sent: list[tuple[str, str, str]] = []
+        self.calls = 0
 
     async def get_claim(self, claim_id):
+        self.calls += 1
         return {
             "status": "closed" if self.closed else "opened",
             "players": [
@@ -106,6 +108,22 @@ class _FakeBling:
 
     async def update_order_situacao(self, bling_order_id: int, situacao_id: int) -> None:
         self.situacao_set.append((bling_order_id, situacao_id))
+
+
+def _sem_bling_ao_resolver(monkeypatch) -> list[str]:
+    """19/09 (Vinicius): resolver com `pedido_bling` EXIGE a nova situação no Bling.
+    Os testes que não são sobre o Bling passam uma e este stub só anota o nome
+    (sem catálogo de situações nem cliente do Bling)."""
+    aplicadas: list[str] = []
+
+    async def _aplicar(session, ch, nome):
+        aplicadas.append(nome)
+        ch.status_bling = nome
+        session.add(svc.registrar_sistema(ch, f"Status Bling alterado para {nome}"))
+        return {"bling_order_id": 0, "situacao": nome, "situacao_id": 0}
+
+    monkeypatch.setattr(svc, "aplicar_status_bling", _aplicar)
+    return aplicadas
 
 
 async def test_list_requires_view_permission(client, make_user, auth_as):
@@ -288,6 +306,18 @@ async def test_alterar_status_bling_e_resolver(client, make_user, auth_as, db, m
     assert sem_valor.status_code == 422
     assert sem_valor.json()["detail"]["code"] == "chamado_valor_obrigatorio"
     assert fake.situacao_set == [(123456, 83960)]
+    # 19/09 (Vinicius): com pedido no Bling, a NOVA situação é obrigatória ("status
+    # atual do Bling e o que vai trocar, obrigatório")
+    sem_situacao = await client.post(
+        f"/api/chamados/{cid}/resolver", json={"resolvido": True, "valor_recuperado": -150.5}
+    )
+    assert sem_situacao.status_code == 422
+    assert sem_situacao.json()["detail"]["code"] == "chamado_situacao_obrigatoria"
+    assert fake.situacao_set == [(123456, 83960)]
+    # a listagem traz a situação ATUAL do pedido (lookup vivo) pra janela mostrar
+    assert (await client.get("/api/chamados")).json()["items"][0]["status_bling_atual"] == (
+        "Problemas"
+    )
 
     # resolver aplicando Perdimento junto, com prejuízo de R$ 150,50
     res = await client.post(
@@ -347,9 +377,10 @@ async def test_valor_recuperado_grava_e_valida(client, make_user, auth_as):
     assert p.json()["valor_recuperado"] is None
 
 
-async def test_replica_automatica_respeita_dias(client, make_user, auth_as, db):
+async def test_replica_automatica_respeita_dias(client, make_user, auth_as, db, monkeypatch):
     user = await make_user(permissions=_perms())
     auth_as(user)
+    _sem_bling_ao_resolver(monkeypatch)
     r = await client.post(
         "/api/chamados", json={"origem": "margem", "pedido_bling": "7", "canal": "manual"}
     )
@@ -404,7 +435,8 @@ async def test_replica_automatica_respeita_dias(client, make_user, auth_as, db):
 
     # resolvido → desliga e para (valor é obrigatório ao resolver — 15/09)
     fechado = await client.post(
-        f"/api/chamados/{cid}/resolver", json={"resolvido": True, "valor_recuperado": 0}
+        f"/api/chamados/{cid}/resolver",
+        json={"resolvido": True, "valor_recuperado": 0, "situacao": "Resolvido"},
     )
     assert fechado.status_code == 200, fechado.text
     out = await svc.run_replica_automatica(db, agora=ligado_em + timedelta(days=10))
@@ -413,13 +445,61 @@ async def test_replica_automatica_respeita_dias(client, make_user, auth_as, db):
     assert ch.auto_ligada is False
 
 
+async def test_replica_automatica_para_no_encerrado_pela_plataforma(
+    client, make_user, auth_as, db
+):
+    """19/09 (ajuste A2): a Shopee decidiu (compensação paga → Encerrado) num chamado
+    com réplica automática ligada — a próxima passada do cron NÃO pode cobrar a
+    plataforma de novo: o closer desliga `auto_ligada` e a query do cron pula os
+    Encerrados de qualquer jeito."""
+    from decimal import Decimal
+
+    from app.services import chamados_devolucao_sync as sync
+
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+    r = await client.post(
+        "/api/chamados",
+        json={"origem": "devolucao", "pedido_bling": "7", "canal": "api", "plataforma": "shopee"},
+    )
+    cid = r.json()["id"]
+    p = await client.patch(
+        f"/api/chamados/{cid}",
+        json={"auto_ligada": True, "auto_dias": 2, "auto_mensagem": "Aguardo retorno."},
+    )
+    assert p.status_code == 200, p.text
+    ligado_em = datetime.fromisoformat(p.json()["auto_ultimo_envio_at"])
+    ch = (await db.execute(select(Chamado).where(Chamado.id == cid))).scalar_one()
+    ch.status_plataforma = svc.STATUS_GANHAMOS
+    ch.status_plataforma_at = datetime.now(UTC)
+    await sync._encerrado_na_plataforma(
+        db, ch, "shopee:compensacao_paga", valor=Decimal("120.00")
+    )
+    await db.commit()
+    await db.refresh(ch)
+    assert ch.auto_ligada is False and ch.status_plataforma == svc.STATUS_GANHAMOS
+    assert float(ch.valor_sugerido) == 120.0 and ch.resolvido is False
+    # mesmo que alguém religasse a flag, o cron não enfileira nada num Encerrado
+    ch.auto_ligada = True
+    await db.commit()
+    out = await svc.run_replica_automatica(db, agora=ligado_em + timedelta(days=10))
+    assert out["enviados"] == 0 and out["verificados"] == 0
+    msgs = (
+        await db.execute(select(ChamadoMensagem).where(ChamadoMensagem.chamado_id == cid))
+    ).scalars().all()
+    assert not [m for m in msgs if m.tipo == "replica_auto"]
+    row = (await client.get("/api/chamados")).json()["items"][0]
+    assert row["auto_proximo_envio_at"] is None and row["status_aba"] == "encerrado"
+
+
 _TOKEN = "tok-chamados-teste"  # noqa: S105
 
 
 async def test_agent_fluxo_completo(client, make_user, auth_as, db, monkeypatch):
     """Robô registra o chamado aberto (protocolo) → operador responde pela aba
     (canal robô = pendente) → lease entrega a tarefa → resultado marca enviada
-    → monitor grava a resposta e resolve."""
+    → monitor grava a resposta e diz que a plataforma encerrou → Encerrado (19/09:
+    nada fecha sozinho) → pessoa conclui."""
     from app.config import get_settings
 
     monkeypatch.setattr(get_settings(), "nf_agent_token", _TOKEN)
@@ -502,7 +582,7 @@ async def test_agent_fluxo_completo(client, make_user, auth_as, db, monkeypatch)
     assert res.json()["status"] == "enviada" and res.json()["enviada_at"]
     assert len(res.json()["anexos"]) == 1
 
-    # 5) monitor lê a resposta do ML e fecha
+    # 5) monitor lê a resposta do ML e diz que a plataforma encerrou → Encerrado, não fecha
     rec = await client.post(
         "/api/chamados/agent/recebida",
         headers=hdr,
@@ -515,12 +595,34 @@ async def test_agent_fluxo_completo(client, make_user, auth_as, db, monkeypatch)
         },
     )
     assert rec.status_code == 200, rec.text
-    assert rec.json()["resolvido"] is True
+    assert rec.json()["resolvido"] is False
     hist = await client.get(f"/api/chamados/{cid}/mensagens")
     direcoes = [(h["direcao"], h["tipo"], h["status"]) for h in hist.json()]
     assert ("recebida", "resposta", "registrada") in direcoes
     assert any(h["texto"].startswith("Reembolso aprovado") for h in hist.json())
-    assert (await client.get("/api/chamados")).json()["total"] == 0  # resolvido saiu dos abertos
+    assert any("Monitor: plataforma encerrou" in h["texto"] for h in hist.json())
+    item = (await client.get("/api/chamados")).json()["items"][0]  # continua nos abertos
+    assert item["resolvido"] is False and item["status_plataforma"] == "encerrado"
+    assert item["status_aba"] == "encerrado"
+    assert item["status_aba_motivo"] == "plataforma encerrou sem decisão"
+    # monitor repetindo `resolvido` (relê a caixa) não duplica o evento
+    rec2 = await client.post(
+        "/api/chamados/agent/recebida", headers=hdr,
+        json={"chamado": "462456014", "resumo": "Reembolso aprovado R$ 12,00", "resolvido": True,
+              "texto": "Analisamos e o reembolso de R$ 12,00 será creditado."},
+    )
+    assert rec2.json()["mensagem_id"] == rec.json()["mensagem_id"]
+    hist2 = (await client.get(f"/api/chamados/{cid}/mensagens")).json()
+    assert sum(1 for h in hist2 if "Monitor: plataforma encerrou" in h["texto"]) == 1
+    # 6) só a pessoa fecha (com a nova situação do Bling — obrigatória, 19/09)
+    aplicadas = _sem_bling_ao_resolver(monkeypatch)
+    ok = await client.post(
+        f"/api/chamados/{cid}/resolver",
+        json={"resolvido": True, "valor_recuperado": 12, "situacao": "Resolvido"},
+    )
+    assert ok.status_code == 200 and ok.json()["status_aba"] == "concluido"
+    assert aplicadas == ["Resolvido"] and ok.json()["status_bling"] == "Resolvido"
+    assert (await client.get("/api/chamados")).json()["total"] == 0  # concluído saiu dos abertos
 
 
 async def test_agent_recebida_por_protocolo_e_idempotente(
@@ -528,7 +630,7 @@ async def test_agent_recebida_por_protocolo_e_idempotente(
 ):
     """Monitor do Tuta só conhece o PROTOCOLO (assunto "Serviço ao Cliente
     [Case: N]"): `recebida` acha o chamado só pelo `chamado`; reler a caixa
-    não duplica a mesma resposta no histórico (e `resolvido` ainda fecha)."""
+    não duplica a mesma resposta no histórico (e `resolvido` põe em Encerrado)."""
     from app.config import get_settings
 
     monkeypatch.setenv("NF_AGENT_TOKEN", _TOKEN)
@@ -571,7 +673,7 @@ async def test_agent_recebida_por_protocolo_e_idempotente(
     hist = (await client.get(f"/api/chamados/{cid}/mensagens")).json()
     assert sum(1 for h in hist if h["direcao"] == "recebida") == 1
 
-    # resposta nova fecha o chamado
+    # resposta nova com `resolvido`: Encerrado (falta a pessoa fechar), não resolvido
     rec3 = await client.post(
         "/api/chamados/agent/recebida",
         headers=hdr,
@@ -581,8 +683,11 @@ async def test_agent_recebida_por_protocolo_e_idempotente(
             "resolvido": True,
         },
     )
-    assert rec3.status_code == 200 and rec3.json()["resolvido"] is True
+    assert rec3.status_code == 200 and rec3.json()["resolvido"] is False
     assert rec3.json()["mensagem_id"] != mid
+    ch = (await db.execute(select(Chamado).where(Chamado.id == UUID(cid)))).scalar_one()
+    await db.refresh(ch)
+    assert ch.resolvido is False and ch.status_plataforma == svc.STATUS_ENCERRADO
 
     # protocolo desconhecido → 404
     nf = await client.post(
@@ -593,7 +698,10 @@ async def test_agent_recebida_por_protocolo_e_idempotente(
 
 async def test_agent_lease_abrir_e_falha(client, make_user, auth_as, db, monkeypatch):
     """Chamado criado na aba com canal robô e SEM protocolo → tarefa `abrir`;
-    resultado ok com protocolo grava na linha; falha fica visível."""
+    resultado ok com protocolo grava na linha. 19/09 (Vinicius: "envio falhou →
+    fila do robô; se não conseguir, humano"): falha volta pra fila (o lease
+    reentrega) até 3 tentativas; na 3ª fica `falhou`; erro que pede gente falha
+    de primeira."""
     from app.config import get_settings
 
     monkeypatch.setattr(get_settings(), "nf_agent_token", _TOKEN)
@@ -628,12 +736,49 @@ async def test_agent_lease_abrir_e_falha(client, make_user, auth_as, db, monkeyp
         "tarefas"
     ]
     assert lease2[0]["tipo"] == "responder"
-    falha = await client.post(
-        "/api/chamados/agent/resultado",
-        headers=hdr,
-        json={"mensagem_id": m2["id"], "ok": False, "erro": "formulário mudou"},
-    )
-    assert falha.json()["status"] == "falhou" and falha.json()["erro"] == "formulário mudou"
+    async def falhar(mid: str, erro: str) -> dict:
+        r = await client.post(
+            "/api/chamados/agent/resultado", headers=hdr,
+            json={"mensagem_id": mid, "ok": False, "erro": erro},
+        )
+        assert r.status_code == 200, r.text
+        return r.json()
+
+    async def linha() -> dict:
+        items = (await client.get("/api/chamados")).json()["items"]
+        return next(i for i in items if i["id"] == cid)
+
+    # 1ª e 2ª falhas: volta pra `pendente` com o erro, o lease entrega de novo
+    for n in (1, 2):
+        falha = await falhar(m2["id"], "formulário mudou")
+        assert falha["status"] == "pendente" and falha["erro"] == "formulário mudou", falha
+        row = await linha()
+        assert row["status_aba"] == "analise_robo"
+        assert row["status_aba_motivo"] == (
+            f"na fila do robô — tentativa {n} de 3 falhou: formulário mudou"
+        )
+        de_novo = (await client.post("/api/chamados/agent/lease", headers=hdr, json={})).json()
+        de_novo = de_novo["tarefas"]
+        assert [t["mensagem_id"] for t in de_novo] == [m2["id"]]
+    hist = (await client.get(f"/api/chamados/{cid}/mensagens")).json()
+    assert [h["texto"] for h in hist if h["texto"].startswith("Envio falhou")] == [
+        "Envio falhou (tentativa 1 de 3): formulário mudou — volta pra fila do robô",
+        "Envio falhou (tentativa 2 de 3): formulário mudou — volta pra fila do robô",
+    ]
+    # 3ª: esgotou → falhou, vira Análise Humano
+    falha = await falhar(m2["id"], "formulário mudou")
+    assert falha["status"] == "falhou" and falha["erro"] == "formulário mudou"
+    row = await linha()
+    assert row["status_aba"] == "analise_humano"
+    assert row["status_aba_motivo"] == "envio falhou: formulário mudou"
+    vazio = (await client.post("/api/chamados/agent/lease", headers=hdr, json={})).json()
+    assert vazio["tarefas"] == []
+    # erro que pede gente não volta pra fila: falha de primeira
+    m3 = (await client.post(f"/api/chamados/{cid}/mensagens", data={"texto": "outra"})).json()
+    await client.post("/api/chamados/agent/lease", headers=hdr, json={})
+    falha = await falhar(m3["id"], "shopee_captcha_humano")
+    assert falha["status"] == "falhou"
+    assert (await linha())["status_aba_motivo"] == "formulário pronto — falta o quebra-cabeça"
     assert (
         await client.post(
             "/api/chamados/agent/resultado",
@@ -648,7 +793,8 @@ async def test_chamado_api_ml_fecha_sozinho_quando_ml_encerra(
 ):
     """Eduardo 15/09: o robô acompanha TODOS os chamados — sem flag. Todo
     chamado aberto de canal API do ML com nº de claim é consultado; canal
-    manual não é (não tem API), mesmo com nº."""
+    manual não é (não tem API), mesmo com nº. 19/09 (Vinicius): claim fechado
+    põe em Encerrado — não resolve; a pessoa conclui."""
     user = await make_user(permissions=_perms())
     auth_as(user)
     fake = _FakeML(closed=True)
@@ -667,24 +813,31 @@ async def test_chamado_api_ml_fecha_sozinho_quando_ml_encerra(
     )
     cid_manual = r2.json()["id"]
     out = await svc.run_replica_automatica(db)
-    assert out["resolvidos"] == 1
+    assert out["encerrados"] == 1
     ch = (await db.execute(select(Chamado).where(Chamado.id == cid))).scalar_one()
-    assert ch.resolvido is True
+    assert ch.resolvido is False and ch.resolvido_at is None
     # coluna Status (17/09): claim fechado sem `resolution` = encerrado sem vencedor
     assert ch.status_plataforma == svc.STATUS_ENCERRADO
-    lst = (await client.get("/api/chamados", params={"mostrar": "resolvidos"})).json()["items"]
+    lst = (await client.get("/api/chamados", params={"mostrar": "abertos"})).json()["items"]
     assert next(i for i in lst if i["id"] == cid)["status_aba"] == "encerrado"
     manual = (await db.execute(select(Chamado).where(Chamado.id == cid_manual))).scalar_one()
-    assert manual.resolvido is False
+    assert manual.resolvido is False and manual.status_plataforma is None
     hist = await client.get(f"/api/chamados/{cid}/mensagens")
-    assert any("encerrado na plataforma" in h["texto"] for h in hist.json())
+    assert any(
+        "encerrada no Mercado Livre — aguardando fechamento" in h["texto"] for h in hist.json()
+    )
+    # já Encerrado: o cron não consulta de novo (nem repete o evento)
+    fake.calls = 0
+    out = await svc.run_replica_automatica(db)
+    assert out["encerrados"] == 0 and fake.calls == 0
 
 
 async def test_agent_analisar_e_analise_do_cerebro(client, make_user, auth_as, db, monkeypatch):
     """Cérebro dos chamados (08/09): lista chamados robô com resposta do ML
-    ainda não analisada (mesmo já fechados pelo monitor antigo), registra a
-    análise, enfileira a réplica com os prints da abertura, e resolve com o
-    valor recuperado quando o ML devolve o dinheiro."""
+    ainda não analisada, registra a análise, enfileira a réplica com os prints
+    da abertura. 19/09 (Vinicius): `resolver` NÃO fecha — põe em Encerrado com
+    o valor como SUGESTÃO; a pessoa conclui. Encerrado só volta pro cérebro com
+    instrução, e a instrução tira o chamado do Encerrado quando ele responde."""
     from app.config import get_settings
 
     monkeypatch.setattr(get_settings(), "nf_agent_token", _TOKEN)
@@ -715,34 +868,40 @@ async def test_agent_analisar_e_analise_do_cerebro(client, make_user, auth_as, d
     )
     assert up.status_code == 201, up.text
 
-    # sem resposta do ML → nada a analisar
-    vazio = await client.post("/api/chamados/agent/analisar", headers=hdr, json={})
-    assert vazio.status_code == 200 and vazio.json()["chamados"] == []
+    async def analisar(**kw) -> list[dict]:
+        r = await client.post("/api/chamados/agent/analisar", headers=hdr, json=kw)
+        assert r.status_code == 200, r.text
+        return r.json()["chamados"]
 
-    # monitor antigo grava a resposta e FECHA o chamado (comportamento velho)
+    async def linha() -> dict:
+        body = (await client.get("/api/chamados", params={"mostrar": "todos"})).json()
+        return next(i for i in body["items"] if i["id"] == cid)
+
+    # sem resposta do ML → nada a analisar
+    assert await analisar() == []
+
+    # monitor grava a resposta
     rec = await client.post(
         "/api/chamados/agent/recebida",
         headers=hdr,
         json={
             "chamado": "479765445",
             "texto": "Preciso que informe as medidas da embalagem final usada no envio.",
-            "resolvido": True,
         },
     )
     assert rec.status_code == 200, rec.text
-    lst = (await client.post("/api/chamados/agent/analisar", headers=hdr, json={})).json()
-    assert len(lst["chamados"]) == 1
-    c = lst["chamados"][0]
-    assert c["chamado"] == "479765445" and c["resolvido"] is True and c["analises"] == 0
+    lst = await analisar()
+    assert len(lst) == 1
+    c = lst[0]
+    assert c["chamado"] == "479765445" and c["resolvido"] is False and c["analises"] == 0
+    assert c["instrucao"] is None and c["bloqueio"] is None and c["status_plataforma"] is None
     assert {m["tipo"] for m in c["mensagens"]} >= {"abertura", "resposta", "sistema"}
     assert len(c["anexos_abertura"]) == 1
+    assert (await linha())["status_aba"] == "analise_robo"
     # outra plataforma não entra
-    outra = await client.post(
-        "/api/chamados/agent/analisar", headers=hdr, json={"plataforma": "shopee"}
-    )
-    assert outra.json()["chamados"] == []
+    assert await analisar(plataforma="shopee") == []
 
-    # cérebro responde com as medidas, reanexando o print → reabre e enfileira pro Tuta
+    # cérebro responde com as medidas, reanexando o print → enfileira pro Tuta
     an = await client.post(
         "/api/chamados/agent/analise",
         headers=hdr,
@@ -764,9 +923,7 @@ async def test_agent_analisar_e_analise_do_cerebro(client, make_user, auth_as, d
     assert len(tarefas) == 1
     assert tarefas[0]["texto"].startswith("Medidas") and len(tarefas[0]["anexos"]) == 1
     # já analisada: some da lista até chegar resposta nova
-    assert (await client.post("/api/chamados/agent/analisar", headers=hdr, json={})).json()[
-        "chamados"
-    ] == []
+    assert await analisar() == []
     # `responder` sem texto é recusado
     ruim = await client.post(
         "/api/chamados/agent/analise",
@@ -775,15 +932,15 @@ async def test_agent_analisar_e_analise_do_cerebro(client, make_user, auth_as, d
     )
     assert ruim.status_code == 422
 
-    # ML devolve o dinheiro → cérebro resolve com valor recuperado
+    # ML devolve o dinheiro → cérebro SUGERE fechar com o valor: Encerrado, não resolvido
     await client.post(
         "/api/chamados/agent/recebida",
         headers=hdr,
         json={"chamado": "479765445", "texto": "Te devolvemos R$21,60 pela diferença."},
     )
-    lst2 = (await client.post("/api/chamados/agent/analisar", headers=hdr, json={})).json()
-    assert len(lst2["chamados"]) == 1
-    assert lst2["chamados"][0]["replicas_robo"] == 1 and lst2["chamados"][0]["analises"] == 1
+    lst2 = await analisar()
+    assert len(lst2) == 1
+    assert lst2[0]["replicas_robo"] == 1 and lst2[0]["analises"] == 1
     fim = await client.post(
         "/api/chamados/agent/analise",
         headers=hdr,
@@ -797,19 +954,78 @@ async def test_agent_analisar_e_analise_do_cerebro(client, make_user, auth_as, d
         },
     )
     assert fim.status_code == 200, fim.text
-    assert fim.json()["resolvido"] is True
+    assert fim.json()["resolvido"] is False
     ch = (await db.execute(select(Chamado).where(Chamado.id == cid))).scalar_one()
     await db.refresh(ch)
-    assert float(ch.valor_recuperado) == 21.6
+    assert ch.resolvido is False and ch.valor_recuperado is None
+    assert float(ch.valor_sugerido) == 21.6
+    assert ch.status_plataforma == svc.STATUS_ENCERRADO
     assert "crédito confirmado" in (ch.observacao or "")
     hist = (await client.get(f"/api/chamados/{cid}/mensagens")).json()
     assert sum(1 for h in hist if h["tipo"] == "analise") == 2
-    assert (await client.post("/api/chamados/agent/analisar", headers=hdr, json={})).json()[
-        "chamados"
-    ] == []
+    assert any(h["texto"].endswith("→ robô sugere fechar") for h in hist)
+    assert any(
+        "Robô sugere fechar" in h["texto"] and "aguardando fechamento" in h["texto"] for h in hist
+    )
+    row = await linha()
+    assert row["status_aba"] == "encerrado"
+    assert row["status_aba_motivo"] == (
+        "plataforma encerrou sem decisão · robô sugere lucro de R$ 21,60"
+    )
+    assert float(row["valor_sugerido"]) == 21.6
+    # Encerrado não volta pro cérebro (mesmo com resposta nova)…
+    assert await analisar() == []
+    await client.post(
+        "/api/chamados/agent/recebida",
+        headers=hdr,
+        json={"chamado": "479765445", "texto": "Algo mais?"},
+    )
+    assert await analisar() == []
+    assert (await linha())["status_aba"] == "encerrado"
+
+    # …só com instrução de uma pessoa (19/09)
+    ins = await client.post(
+        f"/api/chamados/{cid}/instrucao",
+        json={"texto": "  Responde que o crédito não caiu na conta ainda.  "},
+    )
+    assert ins.status_code == 200, ins.text
+    assert ins.json()["status_aba"] == "encerrado"  # Encerrado manda; a instrução fica pendente
+    assert ins.json()["instrucao_pendente"] == "Responde que o crédito não caiu na conta ainda."
+    vazia = await client.post(f"/api/chamados/{cid}/instrucao", json={"texto": "  "})
+    assert vazia.status_code == 422
+    lst3 = await analisar()
+    assert len(lst3) == 1 and lst3[0]["status_plataforma"] == "encerrado"
+    assert lst3[0]["instrucao"]["texto"] == "Responde que o crédito não caiu na conta ainda."
+    assert lst3[0]["instrucao"]["autor"] == (user.name or user.email)
+    assert float(lst3[0]["valor_sugerido"]) == 21.6
+    assert any(m["tipo"] == "instrucao" for m in lst3[0]["mensagens"])
+    # a análise consome a instrução; `responder` por instrução tira do Encerrado
+    re_ = await client.post(
+        "/api/chamados/agent/analise",
+        headers=hdr,
+        json={"chamado_id": cid, "classe": "instrucao", "resumo": "pessoa mandou cobrar",
+              "acao": "responder", "texto_replica": "O crédito ainda não caiu."},
+    )
+    assert re_.status_code == 200 and re_.json()["resolvido"] is False
+    assert await analisar() == []
+    row = await linha()
+    assert row["instrucao_pendente"] is None and row["status_plataforma"] is None
+    assert row["status_aba"] == "analise_robo" and row["status_aba_motivo"] == "na fila do robô"
+    hist = (await client.get(f"/api/chamados/{cid}/mensagens")).json()
+    assert any("saiu de Encerrado" in h["texto"] for h in hist)
+
     # `esperar` + `reabrir`: chamado que o monitor antigo fechou cedo volta a
     # ficar aberto (o caso segue vivo no ML)
-    re_ = await client.post(
+    await db.refresh(ch)
+    db.add(svc.marcar_resolvido(ch, True, autor_nome="monitor"))
+    await db.commit()
+    await client.post(
+        "/api/chamados/agent/recebida",
+        headers=hdr,
+        json={"chamado": "479765445", "texto": "Preciso das medidas."},
+    )
+    assert len(await analisar()) == 1
+    re2 = await client.post(
         "/api/chamados/agent/analise",
         headers=hdr,
         json={
@@ -820,7 +1036,7 @@ async def test_agent_analisar_e_analise_do_cerebro(client, make_user, auth_as, d
             "reabrir": True,
         },
     )
-    assert re_.status_code == 200 and re_.json()["resolvido"] is False
+    assert re2.status_code == 200 and re2.json()["resolvido"] is False
 
 
 async def test_cerebro_nao_reabre_chamado_fechado_pela_plataforma_ou_pessoa(
@@ -994,13 +1210,16 @@ async def test_agent_analisar_canais_manual_e_api_sem_replica(
     ).status_code == 422
 
 
-async def test_lista_status_da_aba_e_ultima_resposta(client, make_user, auth_as, db):
+async def test_lista_status_da_aba_e_ultima_resposta(
+    client, make_user, auth_as, db, monkeypatch
+):
     """17/09 (Vinicius): a coluna Status diz o que a plataforma diz do chamado —
     oficial da API quando há, senão derivado de quem falou por último e do que o
     cérebro pediu — e a Últ. resposta mostra a última FALA (análise e evento do
     sistema não contam)."""
     user = await make_user(permissions=_perms())
     auth_as(user)
+    _sem_bling_ao_resolver(monkeypatch)
     r = await client.post(
         "/api/chamados",
         json={"origem": "margem", "pedido_bling": "1", "canal": "manual", "plataforma": "shopee"},
@@ -1018,16 +1237,17 @@ async def test_lista_status_da_aba_e_ultima_resposta(client, make_user, auth_as,
         m.created_at = datetime.now(UTC)
         return m
 
-    # só o evento "Chamado registrado": nada consulta essa plataforma
+    # só o evento "Chamado registrado": nada consulta essa plataforma → é de gente
     row = await linha()
-    assert row["status_aba"] == "sem_acompanhamento"
+    assert row["status_aba"] == "analise_humano"
+    assert row["status_aba_motivo"] == "registrado à mão — acompanhar no site"
     assert row["ultima_resposta_at"] is None
 
     # nós falamos (réplica manual registrada) → aguardando plataforma
     rep = await client.post(f"/api/chamados/{cid}/mensagens", data={"texto": "Segue a réplica"})
     assert rep.status_code == 201, rep.text
     row = await linha()
-    assert row["status_aba"] == "aguardando"
+    assert row["status_aba"] == "aguard_plataforma"
     assert row["ultima_resposta_direcao"] == "enviada"
     assert row["ultima_resposta_autor"] == rep.json()["autor_nome"]
     assert row["status_aba_at"] == row["ultima_resposta_at"]
@@ -1042,7 +1262,9 @@ async def test_lista_status_da_aba_e_ultima_resposta(client, make_user, auth_as,
     )
     await db.commit()
     row = await linha()
-    assert row["status_aba"] == "respondeu"
+    # manual da Shopee: não há robô que responda → gente (Seller Center)
+    assert row["status_aba"] == "analise_humano"
+    assert row["status_aba_motivo"] == "plataforma respondeu — responder no Seller Center"
     assert row["ultima_resposta_direcao"] == "recebida"
     assert row["ultima_resposta_autor"] == "monitor"
 
@@ -1055,14 +1277,16 @@ async def test_lista_status_da_aba_e_ultima_resposta(client, make_user, auth_as,
     )
     await db.commit()
     row = await linha()
-    assert row["status_aba"] == "humano"
+    assert row["status_aba"] == "analise_humano"
+    assert row["status_aba_motivo"] == "o robô pediu revisão humana"
     assert row["ultima_resposta_direcao"] == "recebida"
 
     # status oficial da API: vale, até a plataforma falar de novo depois dele
     ch.status_plataforma = svc.STATUS_EM_ANALISE
     ch.status_plataforma_at = datetime.now(UTC)
     await db.commit()
-    assert (await linha())["status_aba"] == "humano"  # cérebro pediu gente e ninguém falou depois
+    # cérebro pediu gente e ninguém falou depois
+    assert (await linha())["status_aba"] == "analise_humano"
     db.add(
         fala(
             ch, texto="Decisão em até 3 dias", tipo="resposta", direcao="recebida",
@@ -1070,13 +1294,14 @@ async def test_lista_status_da_aba_e_ultima_resposta(client, make_user, auth_as,
         )
     )
     await db.commit()
-    assert (await linha())["status_aba"] == "respondeu"
-    # nós replicamos de novo → volta pro oficial (em análise)
+    assert (await linha())["status_aba"] == "analise_humano"
+    # nós replicamos de novo → volta pro oficial (em análise = bola com a plataforma)
     assert (
         await client.post(f"/api/chamados/{cid}/mensagens", data={"texto": "Seguem as fotos"})
     ).status_code == 201
     row = await linha()
-    assert row["status_aba"] == "em_analise"
+    assert row["status_aba"] == "aguard_plataforma"
+    assert row["status_aba_motivo"] == "em análise na plataforma"
     assert row["ultima_resposta_direcao"] == "enviada"
 
     # réplica ainda na fila do robô conta como status, mas não como resposta dada
@@ -1086,18 +1311,45 @@ async def test_lista_status_da_aba_e_ultima_resposta(client, make_user, auth_as,
     fila = await client.post(f"/api/chamados/{cid}/mensagens", data={"texto": "na fila"})
     assert fila.json()["status"] == "pendente"
     row = await linha()
-    assert row["status_aba"] == "fila"
+    assert row["status_aba"] == "analise_robo"
+    assert row["status_aba_motivo"] == "na fila do robô"
     assert row["ultima_resposta_autor"] == rep.json()["autor_nome"]  # a última ENTREGUE
 
-    # resolvido → encerrado; se a API disse quem ganhou, mostra isso
+    # instrução nossa pro robô → Análise Robô com o texto (mesmo com o cérebro tendo pedido gente)
+    ins = await client.post(
+        f"/api/chamados/{cid}/instrucao", json={"texto": "Cobra a Shopee de novo"}
+    )
+    assert ins.status_code == 200, ins.text
+    assert ins.json()["status_aba"] == "analise_robo"
+    assert ins.json()["status_aba_motivo"] == "instrução pendente pro robô: Cobra a Shopee de novo"
+    assert ins.json()["instrucao_pendente"] == "Cobra a Shopee de novo"
+    hist = (await client.get(f"/api/chamados/{cid}/mensagens")).json()
+    i = next(h for h in hist if h["tipo"] == "instrucao")
+    assert i["direcao"] == "sistema" and i["status"] == "registrada"
+    assert i["autor_nome"] == rep.json()["autor_nome"]
+
+    # a plataforma decidiu (status final) e ninguém fechou → Encerrado
+    ch.status_plataforma = svc.STATUS_GANHAMOS
+    ch.status_plataforma_at = datetime.now(UTC)
+    await db.commit()
+    row = await linha()
+    assert row["status_aba"] == "encerrado" and row["status_aba_motivo"] == "ganhamos"
+    assert row["status_aba_at"] == row["status_plataforma_at"]
+
+    # só a pessoa conclui: Concluído, com o resultado no motivo
     ok = await client.post(
-        f"/api/chamados/{cid}/resolver", json={"resolvido": True, "valor_recuperado": 10}
+        f"/api/chamados/{cid}/resolver",
+        json={"resolvido": True, "valor_recuperado": 10, "situacao": "Resolvido"},
     )
     assert ok.status_code == 200, ok.text
-    assert (await linha())["status_aba"] == "encerrado"
-    ch.status_plataforma = svc.STATUS_GANHAMOS
-    await db.commit()
-    assert (await linha())["status_aba"] == "ganhamos"
+    row = await linha()
+    assert row["status_aba"] == "concluido"
+    assert row["status_aba_motivo"] == "ganhamos — lucro de R$ 10,00"
+    assert row["status_aba_at"] == row["resolvido_at"]
+    # 19/09 (ajuste A4): instrução NÃO entra em Concluído — a pessoa reabre pela aba antes
+    neg = await client.post(f"/api/chamados/{cid}/instrucao", json={"texto": "Cobra de novo"})
+    assert neg.status_code == 422 and neg.json()["detail"]["code"] == "chamado_concluido"
+    assert (await linha())["status_aba"] == "concluido"
 
     # filtro/ordem dos códigos: um status final nunca vira intermediário
     assert svc.set_status_plataforma(ch, svc.STATUS_EM_ANALISE) is False
@@ -1163,18 +1415,386 @@ async def test_lista_status_do_caso_junta_linhas_irmas(client, make_user, auth_a
     # as três linhas do caso mostram a mesma coisa: nós (robô) falamos por último
     for cid in (a, b, c):
         row = rows[cid]
-        assert row["status_aba"] == "aguardando", (cid, row["status_aba"])
+        assert row["status_aba"] == "aguard_plataforma", (cid, row["status_aba"])
         assert row["ultima_resposta_direcao"] == "enviada"
         assert row["ultima_resposta_autor"] == "cérebro"
         # "registrado" ×3 e a réplica manual ×3 nasceram no mesmo minuto com o mesmo
         # texto → contam uma vez (como no histórico): 1 + 2 respostas + 1 + análise + réplica do robô
         assert row["mensagens_total"] == 6
     # mesmo nº em outra conta e texto livre: cada um só com a própria conversa
-    assert rows[outra_conta]["status_aba"] == "respondeu"
+    # (manual do ML: o robô assume → a resposta é do robô)
+    assert rows[outra_conta]["status_aba"] == "analise_robo"
     assert rows[outra_conta]["mensagens_total"] == 2
-    assert rows[texto_livre]["status_aba"] == "sem_acompanhamento"
+    assert rows[texto_livre]["status_aba"] == "analise_humano"
     assert rows[texto_livre]["mensagens_total"] == 1
 
     # o histórico da linha C (o modal) conta a mesma conversa que a lista
     hist = (await client.get(f"/api/chamados/{c}/mensagens")).json()
     assert len(hist) == 6
+
+
+async def test_agent_bloqueio_robo_assume_canal_api_por_outro_caminho(
+    client, make_user, auth_as, db, monkeypatch
+):
+    """19/09 (Vinicius): a plataforma não libera pela API (abertura presa com
+    `shopee_motivo_indisponivel`) → não é "esperar": o robô procura outro caminho.
+    `/agent/analisar` traz o chamado com `bloqueio` (sem resposta nova) e
+    `responder` em canal api COM bloqueio é aceito: canal vira robô, a fala presa
+    sai da fila (`substituida_pelo_robo`) e a réplica do robô vai pro lease da
+    Shopee. `esperar` num bloqueado deixa a linha em Aguard. Plataforma."""
+    from app.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "nf_agent_token", _TOKEN)
+    hdr = {"X-Agent-Token": _TOKEN}
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+
+    async def cria(pedido: str, sn: str) -> tuple[str, Chamado]:
+        r = await client.post(
+            "/api/chamados",
+            json={"origem": "devolucao", "pedido_bling": pedido, "plataforma": "shopee",
+                  "conta": "minas", "canal": "api", "chamado": sn},
+        )
+        assert r.status_code == 201, r.text
+        ch = (
+            await db.execute(select(Chamado).where(Chamado.id == UUID(r.json()["id"])))
+        ).scalar_one()
+        m = svc.nova_mensagem(
+            ch, texto="Contestação da devolução", tipo="abertura", status="pendente"
+        )
+        m.canal = "api"
+        m.erro = "shopee_motivo_indisponivel"
+        m.created_at = datetime.now(UTC)
+        db.add(m)
+        await db.commit()
+        return r.json()["id"], ch
+
+    cid, ch = await cria("292270", "2608258J2C6V3C")
+    cid2, _ch2 = await cria("293406", "2608258J2C6V3D")
+
+    async def analisar(**kw) -> list[dict]:
+        r = await client.post(
+            "/api/chamados/agent/analisar", headers=hdr,
+            json={"plataforma": "shopee", "canais": ["robo", "api", "manual"], **kw},
+        )
+        assert r.status_code == 200, r.text
+        return r.json()["chamados"]
+
+    async def linha(i: str) -> dict:
+        body = (await client.get("/api/chamados", params={"mostrar": "todos"})).json()
+        return next(x for x in body["items"] if x["id"] == i)
+
+    row = await linha(cid)
+    assert row["status_aba"] == "analise_robo"
+    assert row["status_aba_motivo"] == (
+        "plataforma não libera: Shopee ainda não libera o motivo da contestação — "
+        "robô procura outro caminho"
+    )
+    lst = await analisar()
+    assert {c["chamado_id"] for c in lst} == {cid, cid2}
+    c = next(x for x in lst if x["chamado_id"] == cid)
+    assert c["bloqueio"]["erro"] == "shopee_motivo_indisponivel"
+    assert c["bloqueio"]["motivo"] == "Shopee ainda não libera o motivo da contestação"
+    assert c["bloqueio"]["desde"] and c["instrucao"] is None
+    # 19/09 (ajuste A5): bloqueio sai pra quem chamar — os filtros `canais` e
+    # `plataforma` valem só pra "resposta nova"; a chamada padrão (canal robô, sem
+    # plataforma) e uma de outra plataforma também trazem os dois
+    padrao = (await client.post("/api/chamados/agent/analisar", headers=hdr, json={})).json()
+    assert {x["chamado_id"] for x in padrao["chamados"]} == {cid, cid2}
+    assert {x["chamado_id"] for x in await analisar(canais=["robo"])} == {cid, cid2}
+    assert {x["chamado_id"] for x in await analisar(plataforma="ml")} == {cid, cid2}
+
+    # `esperar` no bloqueado: gravado, sai da lista e a linha fica Aguard. Plataforma
+    esp = await client.post(
+        "/api/chamados/agent/analise", headers=hdr,
+        json={"chamado_id": cid2, "classe": "aguardar_pacote", "resumo": "sem caminho ainda",
+              "acao": "esperar"},
+    )
+    assert esp.status_code == 200, esp.text
+    assert [x["chamado_id"] for x in await analisar()] == [cid]
+    row2 = await linha(cid2)
+    assert row2["status_aba"] == "aguard_plataforma"
+    assert row2["status_aba_motivo"] == (
+        "Shopee ainda não libera o motivo da contestação — o robô decidiu aguardar"
+    )
+
+    # `responder` no bloqueado: o robô assume por outro caminho
+    ok = await client.post(
+        "/api/chamados/agent/analise", headers=hdr,
+        json={"chamado_id": cid, "classe": "outro_caminho", "resumo": "abrir no Seller Center",
+              "acao": "responder", "texto_replica": "Solicitamos a compensação pelo extravio."},
+    )
+    assert ok.status_code == 200, ok.text
+    assert ok.json()["replica_id"]
+    await db.refresh(ch)
+    assert ch.canal == "robo"
+    msgs = (await db.execute(
+        select(ChamadoMensagem).where(ChamadoMensagem.chamado_id == ch.id)
+        .order_by(ChamadoMensagem.created_at, ChamadoMensagem.id)
+    )).scalars().all()
+    presa = next(m for m in msgs if m.erro == "substituida_pelo_robo")
+    assert presa.status == "falhou" and presa.tipo == "abertura"
+    replica = next(m for m in msgs if m.id == UUID(ok.json()["replica_id"]))
+    assert replica.canal == "robo" and replica.status == "pendente" and replica.tipo == "replica"
+    assert any("assumido pelo robô" in m.texto and "Seller Center" in m.texto for m in msgs)
+    assert await analisar() == []
+    row = await linha(cid)
+    assert row["canal"] == "robo" and row["status_aba"] == "analise_robo"
+    assert row["status_aba_motivo"] == "na fila do robô"
+    lease = await client.post(
+        "/api/chamados/agent/lease", headers=hdr, json={"plataforma": "shopee"}
+    )
+    tarefas = lease.json()["tarefas"]
+    assert [t["mensagem_id"] for t in tarefas] == [ok.json()["replica_id"]]
+    assert tarefas[0]["tipo"] == "responder" and tarefas[0]["chamado"] == "2608258J2C6V3C"
+    # a fala substituída não é "envio falhou" pra ninguém
+    await client.post(
+        "/api/chamados/agent/resultado", headers=hdr,
+        json={"mensagem_id": ok.json()["replica_id"], "ok": True},
+    )
+    assert (await linha(cid))["status_aba"] == "aguard_plataforma"
+
+    # canal api SEM bloqueio continua recusado
+    r3 = await client.post(
+        "/api/chamados",
+        json={"origem": "devolucao", "pedido_bling": "293002", "plataforma": "shopee",
+              "conta": "minas", "canal": "api", "chamado": "2608258J2C6V3E"},
+    )
+    ruim = await client.post(
+        "/api/chamados/agent/analise", headers=hdr,
+        json={"chamado_id": r3.json()["id"], "classe": "x", "resumo": "y", "acao": "responder",
+              "texto_replica": "z"},
+    )
+    assert ruim.status_code == 422 and ruim.json()["detail"]["code"] == "canal_sem_robo"
+
+
+async def test_ganhamos_lido_da_api_nao_vira_encerrado_sem_decisao(
+    client, make_user, auth_as, db, monkeypatch
+):
+    """19/09 (ajuste A1): o sync leu "ganhamos" da API; depois o monitor do Tuta
+    diz `resolvido=true` e o cérebro manda `resolver`. Nenhum dos dois pode
+    rebaixar pra "encerrado sem decisão" (`set_status_plataforma` aceita trocar um
+    final por outro) nem repetir o evento — o `resolver` só grava a sugestão."""
+    from app.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "nf_agent_token", _TOKEN)
+    hdr = {"X-Agent-Token": _TOKEN}
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+    r = await client.post(
+        "/api/chamados/agent/registrar",
+        headers=hdr,
+        json={"pedido_bling": "295001", "origem": "margem", "conta": "kfa",
+              "pedido_marketplace": "2000013416880010", "chamado": "479700010",
+              "mensagem": "abertura", "status_envio": "enviada"},
+    )
+    cid = r.json()["chamado_id"]
+    ch = (await db.execute(select(Chamado).where(Chamado.id == cid))).scalar_one()
+    decidido_em = datetime(2026, 9, 18, 10, 0, tzinfo=UTC)
+    assert svc.set_status_plataforma(ch, svc.STATUS_GANHAMOS, decidido_em) is True
+    ch.auto_ligada = True
+    ch.auto_dias = 3
+    ch.auto_mensagem = "Aguardo."
+    await db.commit()
+
+    async def linha() -> dict:
+        body = (await client.get("/api/chamados", params={"mostrar": "todos"})).json()
+        return next(i for i in body["items"] if i["id"] == cid)
+
+    async def eventos_encerrou() -> int:
+        hist = (await client.get(f"/api/chamados/{cid}/mensagens")).json()
+        # só eventos de sistema (a própria análise termina em "robô sugere fechar")
+        return sum(
+            1 for h in hist
+            if h["tipo"] == "sistema" and "aguardando fechamento" in h["texto"]
+        )
+
+    # monitor: "plataforma encerrou" (duas vezes — relê a caixa)
+    for _ in range(2):
+        rec = await client.post(
+            "/api/chamados/agent/recebida", headers=hdr,
+            json={"chamado": "479700010", "texto": "Caso encerrado a favor do vendedor.",
+                  "resolvido": True},
+        )
+        assert rec.status_code == 200 and rec.json()["resolvido"] is False
+    await db.refresh(ch)
+    assert ch.status_plataforma == svc.STATUS_GANHAMOS
+    assert ch.status_plataforma_at == decidido_em
+    assert ch.resolvido is False
+    assert await eventos_encerrou() == 0
+    row = await linha()
+    assert row["status_aba"] == "encerrado" and row["status_aba_motivo"] == "ganhamos"
+
+    # cérebro: `resolver` com valor → só a sugestão; status e data intactos
+    an = await client.post(
+        "/api/chamados/agent/analise", headers=hdr,
+        json={"chamado_id": cid, "classe": "ganhamos", "resumo": "ML deu ganho de causa",
+              "acao": "resolver", "valor_recuperado": "45.90"},
+    )
+    assert an.status_code == 200 and an.json()["resolvido"] is False
+    await db.refresh(ch)
+    assert ch.status_plataforma == svc.STATUS_GANHAMOS
+    assert ch.status_plataforma_at == decidido_em
+    assert float(ch.valor_sugerido) == 45.9 and ch.valor_recuperado is None
+    assert await eventos_encerrou() == 0
+    row = await linha()
+    assert row["status_aba_motivo"] == "ganhamos · robô sugere lucro de R$ 45,90"
+    # (A2) a réplica automática segue ligada no banco, mas Encerrado não tem próxima
+    assert row["auto_proximo_envio_at"] is None
+
+
+async def test_resolver_do_cerebro_tira_da_fila_o_que_estava_pendente(
+    client, make_user, auth_as, db, monkeypatch
+):
+    """19/09 (ajuste A3): o cérebro mandou fechar (Encerrado) enquanto uma réplica
+    do robô ainda estava `pendente` na fila — ela vira `registrada` com evento;
+    senão o lease a entregava de novo num caso que já acabou. Encerrado também
+    desliga a réplica automática."""
+    from app.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "nf_agent_token", _TOKEN)
+    hdr = {"X-Agent-Token": _TOKEN}
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+    r = await client.post(
+        "/api/chamados/agent/registrar",
+        headers=hdr,
+        json={"pedido_bling": "295002", "origem": "margem", "conta": "kfa",
+              "pedido_marketplace": "2000013416880011", "chamado": "479700011",
+              "mensagem": "abertura", "status_envio": "enviada"},
+    )
+    cid = r.json()["chamado_id"]
+    rep = await client.post(f"/api/chamados/{cid}/mensagens", data={"texto": "Cobrando."})
+    assert rep.status_code == 201 and rep.json()["status"] == "pendente"
+    await client.patch(
+        f"/api/chamados/{cid}",
+        json={"auto_ligada": True, "auto_dias": 2, "auto_mensagem": "Aguardo retorno."},
+    )
+    an = await client.post(
+        "/api/chamados/agent/analise", headers=hdr,
+        json={"chamado_id": cid, "classe": "sem_saida", "resumo": "ML não vai devolver",
+              "acao": "resolver", "valor_recuperado": "-30"},
+    )
+    assert an.status_code == 200, an.text
+    ch = (await db.execute(select(Chamado).where(Chamado.id == cid))).scalar_one()
+    await db.refresh(ch)
+    assert ch.status_plataforma == svc.STATUS_ENCERRADO and ch.auto_ligada is False
+    m = (
+        await db.execute(select(ChamadoMensagem).where(ChamadoMensagem.id == rep.json()["id"]))
+    ).scalar_one()
+    assert m.status == "registrada" and m.erro is None
+    hist = (await client.get(f"/api/chamados/{cid}/mensagens")).json()
+    assert any("pendente(s) na fila cancelada(s)" in h["texto"] for h in hist)
+    lease = (await client.post("/api/chamados/agent/lease", headers=hdr, json={})).json()
+    assert lease["tarefas"] == []
+    row = (await client.get("/api/chamados")).json()["items"][0]
+    assert row["status_aba"] == "encerrado" and row["auto_proximo_envio_at"] is None
+
+
+async def test_instrucao_em_encerrado_ganhamos_mantem_decisao_e_enfileira(
+    client, make_user, auth_as, db, monkeypatch
+):
+    """19/09 (ajuste A4/A5): instrução num chamado Shopee (canal api) Encerrado
+    `ganhamos` sai pro cérebro na chamada PADRÃO (sem canais/plataforma — os
+    filtros valem só pra resposta nova) e `responder` mantém o `ganhamos`
+    (decisão lida da API) — só o Encerrado SEM decisão sai do estado."""
+    from app.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "nf_agent_token", _TOKEN)
+    hdr = {"X-Agent-Token": _TOKEN}
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+    r = await client.post(
+        "/api/chamados",
+        json={"origem": "devolucao", "pedido_bling": "295003", "plataforma": "shopee",
+              "conta": "minas", "canal": "api", "chamado": "2608258J2C6V99"},
+    )
+    cid = r.json()["id"]
+    ch = (await db.execute(select(Chamado).where(Chamado.id == cid))).scalar_one()
+    decidido_em = datetime(2026, 9, 18, 10, 0, tzinfo=UTC)
+    svc.set_status_plataforma(ch, svc.STATUS_GANHAMOS, decidido_em)
+    await db.commit()
+    # chamada padrão (canal robô, sem plataforma): nada antes da instrução…
+    padrao = (await client.post("/api/chamados/agent/analisar", headers=hdr, json={})).json()
+    assert padrao["chamados"] == []
+    ins = await client.post(
+        f"/api/chamados/{cid}/instrucao", json={"texto": "Pede a compensação do frete também."}
+    )
+    assert ins.status_code == 200, ins.text
+    assert ins.json()["status_aba"] == "encerrado"
+    # …e com ela o chamado Shopee/api aparece mesmo sem `canais`/`plataforma`
+    padrao = (await client.post("/api/chamados/agent/analisar", headers=hdr, json={})).json()
+    assert [x["chamado_id"] for x in padrao["chamados"]] == [cid]
+    assert padrao["chamados"][0]["instrucao"]["texto"] == "Pede a compensação do frete também."
+    assert padrao["chamados"][0]["canal"] == "api"
+    assert padrao["chamados"][0]["plataforma"] == "shopee"
+    # filtro de outra plataforma/canal também não esconde a instrução
+    outra = (
+        await client.post(
+            "/api/chamados/agent/analisar", headers=hdr,
+            json={"plataforma": "ml", "canais": ["robo"]},
+        )
+    ).json()
+    assert [x["chamado_id"] for x in outra["chamados"]] == [cid]
+    # canal api sem bloqueio: `responder` continua sem por onde sair (422) — o robô
+    # responde `humano` com o motivo; canal robô responde de verdade
+    ruim = await client.post(
+        "/api/chamados/agent/analise", headers=hdr,
+        json={"chamado_id": cid, "classe": "x", "resumo": "y", "acao": "responder",
+              "texto_replica": "z"},
+    )
+    assert ruim.status_code == 422 and ruim.json()["detail"]["code"] == "canal_sem_robo"
+    ch.canal = "robo"
+    await db.commit()
+    ok = await client.post(
+        "/api/chamados/agent/analise", headers=hdr,
+        json={"chamado_id": cid, "classe": "instrucao", "resumo": "pessoa mandou pedir o frete",
+              "acao": "responder", "texto_replica": "Solicitamos também a compensação do frete."},
+    )
+    assert ok.status_code == 200, ok.text
+    assert ok.json()["replica_id"] and ok.json()["resolvido"] is False
+    await db.refresh(ch)
+    assert ch.status_plataforma == svc.STATUS_GANHAMOS
+    assert ch.status_plataforma_at == decidido_em
+    hist = (await client.get(f"/api/chamados/{cid}/mensagens")).json()
+    assert not any("saiu de Encerrado" in h["texto"] for h in hist)
+    # a réplica enfileirada por instrução sai pelo lease mesmo em Encerrado
+    lease = (
+        await client.post("/api/chamados/agent/lease", headers=hdr, json={"plataforma": "shopee"})
+    ).json()
+    assert [t["mensagem_id"] for t in lease["tarefas"]] == [ok.json()["replica_id"]]
+    assert (await client.post("/api/chamados/agent/analisar", headers=hdr, json={})).json()[
+        "chamados"
+    ] == []
+    row = (await client.get("/api/chamados")).json()["items"][0]
+    assert row["status_aba"] == "encerrado" and row["instrucao_pendente"] is None
+
+
+async def test_lista_custo_do_produto_so_mostrar(client, make_user, auth_as, db):
+    """19/09: a janela Resolver mostra o custo dos itens do pedido (espelho
+    bling_orders) pra pessoa decidir lucro/prejuízo — SUM(preco_custo × qtd),
+    linhas sem custo não somam mas aparecem no detalhe."""
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+    await _seed_pedido(db, user, numero="293000")
+    rows = (
+        await db.execute(select(BlingOrder).where(BlingOrder.numero == "293000"))
+    ).scalars().all()
+    for r in rows:
+        if r.item_codigo == "uaf001m1.110":
+            r.preco_custo = 210.5
+            r.item_quantidade = 2
+        else:
+            r.preco_custo = None  # embalagem sem custo cadastrado
+    await db.commit()
+    r = await client.post("/api/chamados", json={"origem": "devolucao", "pedido_bling": "293000"})
+    assert r.status_code == 201, r.text
+    assert float(r.json()["custo_produto"]) == 421.0
+    assert r.json()["custo_detalhe"] == "uaf001m1.110 × 2; a001 × 1"
+    assert r.json()["valor_sugerido"] is None
+    # pedido fora do espelho: sem custo
+    r2 = await client.post("/api/chamados", json={"origem": "margem", "pedido_bling": "999999"})
+    assert r2.json()["custo_produto"] is None and r2.json()["custo_detalhe"] is None
+    lst = (await client.get("/api/chamados")).json()["items"]
+    assert float(next(i for i in lst if i["id"] == r.json()["id"])["custo_produto"]) == 421.0
+

@@ -21,8 +21,15 @@ hora (junto do `chamados_replica_automatica`): pra cada chamado de origem
   (`claims/{id}/messages`).
 
 Cada estado/mensagem novo vira UMA mensagem `recebida` no histórico (dedupe
-pelo texto — o cron pode rodar quantas vezes quiser); estado final marca o
-chamado como resolvido com um evento de sistema. Best-effort por chamado.
+pelo texto — o cron pode rodar quantas vezes quiser). Best-effort por chamado.
+
+19/09 (Vinicius): estado final NÃO fecha mais o chamado. Até aqui o
+acompanhamento marcava `resolvido` sozinho e gravava o valor — e ninguém
+conferia lucro/prejuízo nem a situação do Bling. Agora a decisão da plataforma
+põe o chamado no estado "Encerrado" (`status_plataforma` final + evento
+"Plataforma encerrou o caso (…) — aguardando fechamento") e a compensação lida
+na API vira SUGESTÃO (`valor_sugerido`); só uma pessoa conclui, pelo
+`/resolver`. Chamado já Encerrado sai da varredura (ver `_encerrado_na_plataforma`).
 
 17/09 (Vinicius, coluna "Status" da aba): cada passada também grava em
 `Chamado.status_plataforma` o que a plataforma diz do caso (em análise, pediu
@@ -230,12 +237,25 @@ async def registrar_evento(session: AsyncSession, ch: Chamado, texto: str) -> bo
     return True
 
 
-def _encerrar(
+async def _encerrado_na_plataforma(
     session: AsyncSession, ch: Chamado, motivo: str, *, valor: Decimal | None = None
 ) -> None:
+    """A plataforma encerrou o caso: estado Encerrado (19/09) — status oficial
+    final (quem chamou já gravou ganhamos/perdemos; senão `encerrado`), a
+    compensação como sugestão de valor e UM evento de sistema. Não fecha: a
+    pessoa conclui pela aba. Chamado já resolvido: nada."""
     if ch.resolvido:
         return
-    session.add(chamados_svc.marcar_resolvido(ch, True, autor_nome=AUTOR_ACOMP, valor=valor))
+    if ch.status_plataforma not in chamados_svc.STATUS_FINAIS:
+        chamados_svc.set_status_plataforma(ch, chamados_svc.STATUS_ENCERRADO)
+    # 19/09: com a decisão tomada, a réplica automática não tem mais a quem cobrar
+    # — desliga aqui pra próxima passada do cron não enfileirar nada.
+    ch.auto_ligada = False
+    if valor is not None and ch.valor_sugerido is None:
+        ch.valor_sugerido = valor
+    await registrar_evento(
+        session, ch, f"Plataforma encerrou o caso ({motivo}) — aguardando fechamento"
+    )
     logger.info("chamado_devolucao_encerrado", chamado_id=str(ch.id), motivo=motivo)
 
 
@@ -303,7 +323,7 @@ async def _sync_tiktok(
                     session, ch, cd.PLAT_TIKTOK, _TT_RECUSA_VENCIDA_TXT
                 )
                 chamados_svc.set_status_plataforma(ch, chamados_svc.STATUS_GANHAMOS, agora)
-                _encerrar(session, ch, f"tiktok:{status}:sem_recurso")
+                await _encerrado_na_plataforma(session, ch, f"tiktok:{status}:sem_recurso")
             else:
                 chamados_svc.set_status_plataforma(ch, chamados_svc.STATUS_AGUARDANDO, quando)
     novo = (
@@ -335,7 +355,7 @@ async def _sync_tiktok(
         if status in _TT_STATUS_STATUS:
             chamados_svc.set_status_plataforma(ch, _TT_STATUS_STATUS[status], quando)
         if fim:
-            _encerrar(session, ch, f"tiktok:{status}")
+            await _encerrado_na_plataforma(session, ch, f"tiktok:{status}")
     # linha do tempo: notas do comprador / da plataforma (best-effort)
     try:
         registros = await client.get_return_records(rid)
@@ -534,14 +554,14 @@ async def _sync_shopee(session: AsyncSession, ch: Chamado, dev: Devolution | Non
         novos += await registrar_recebida(session, ch, cd.PLAT_SHOPEE, txt)
         chamados_svc.set_status_plataforma(ch, _SH_COMP_STATUS[comp_status], quando)
         if fim:
-            _encerrar(session, ch, f"shopee:comp:{comp_status}")
+            await _encerrado_na_plataforma(session, ch, f"shopee:comp:{comp_status}")
     elif status in ("SELLER_DISPUTE", "JUDGING"):
         chamados_svc.set_status_plataforma(ch, chamados_svc.STATUS_EM_ANALISE, quando)
     # 17/09 (Eduardo, 288567 "ganhamos e o robô deixou na aba"; Vinicius, 292128
     # "perdi ou ganhei?"): no BR a decisão da disputa não muda o return — só o
     # escrow do pedido conta a história (compensação paga / reembolso ao comprador).
     tem_disputa = bool(det.get("dispute_reason")) or valor > 0
-    if not ch.resolvido and tem_disputa:
+    if ch.status_plataforma not in chamados_svc.STATUS_FINAIS and tem_disputa:
         novos += await _desfecho_shopee(
             session, ch, client, det, dev_q, status, quando, valor, comp_status=comp_status
         )
@@ -553,7 +573,7 @@ async def _sync_shopee(session: AsyncSession, ch: Chamado, dev: Devolution | Non
                 chamados_svc.set_status_plataforma(ch, chamados_svc.STATUS_GANHAMOS, quando)
             elif not ch.status_plataforma:
                 chamados_svc.set_status_plataforma(ch, chamados_svc.STATUS_ENCERRADO, quando)
-            _encerrar(session, ch, f"shopee:{status}")
+            await _encerrado_na_plataforma(session, ch, f"shopee:{status}")
     return novos
 
 
@@ -598,8 +618,7 @@ async def _desfecho_shopee(
             f"Shopee PAGOU a compensação ao vendedor — disputa ganha: {partes}.",
         )
         chamados_svc.set_status_plataforma(ch, chamados_svc.STATUS_GANHAMOS, quando)
-        _encerrar(session, ch, "shopee:compensacao_paga",
-                  valor=total if ch.valor_recuperado is None else None)
+        await _encerrado_na_plataforma(session, ch, "shopee:compensacao_paga", valor=total)
         return novos
     if valor > 0:
         txt, _fim = _SH_COMP_TXT["APPROVED"]
@@ -608,8 +627,9 @@ async def _desfecho_shopee(
             f"{txt} Valor: R$ {det.get('seller_compensation', {}).get('compensation_amount')}.",
         )
         chamados_svc.set_status_plataforma(ch, chamados_svc.STATUS_GANHAMOS, quando)
-        _encerrar(session, ch, "shopee:comp:valor",
-                  valor=Decimal(str(valor)) if ch.valor_recuperado is None else None)
+        await _encerrado_na_plataforma(
+            session, ch, "shopee:comp:valor", valor=Decimal(str(valor))
+        )
         return novos
     reembolsado, reembolsado_em = _reembolso_pago(esc)
     if not reembolsado:
@@ -631,7 +651,7 @@ async def _desfecho_shopee(
         return int(avisou)
     novos = int(avisou) + await registrar_recebida(session, ch, cd.PLAT_SHOPEE, _SH_PERDEMOS_TXT)
     chamados_svc.set_status_plataforma(ch, chamados_svc.STATUS_PERDEMOS, desde)
-    _encerrar(session, ch, "shopee:reembolso_sem_compensacao")
+    await _encerrado_na_plataforma(session, ch, "shopee:reembolso_sem_compensacao")
     return novos
 
 
@@ -681,7 +701,7 @@ async def _sync_ml(session: AsyncSession, ch: Chamado, dev: Devolution | None) -
         chamados_svc.set_status_plataforma(
             ch, chamados_svc.ml_status_encerrado(claim), chamados_svc.ml_quando(claim)
         )
-        _encerrar(session, ch, "ml:closed")
+        await _encerrado_na_plataforma(session, ch, "ml:closed")
     elif (claim.get("stage") or "").lower() == "dispute":
         # Mediação: o ML entrou como juiz — em análise até o claim fechar.
         chamados_svc.set_status_plataforma(
@@ -693,10 +713,18 @@ async def _sync_ml(session: AsyncSession, ch: Chamado, dev: Devolution | None) -
 # ---------------------------------------------------------------- cron
 
 
+# 19/09: a plataforma já decidiu (Encerrado) — não há mais o que ler; o chamado
+# fica esperando a pessoa concluir e sai da varredura (antes saía por `resolvido`).
+# O mesmo filtro vale pra réplica automática e pro reenvio de abertura pendente —
+# mora em `chamados_svc` pra todo cron usar o mesmo.
+_nao_encerrado = chamados_svc.NAO_ENCERRADO_SQL
+
+
 async def sync_respostas(session: AsyncSession, *, agora: datetime | None = None) -> dict:
     """Passada do cron: chamados de devolução ABERTOS via API (abertura enviada)
-    → consulta a plataforma, grava respostas novas e encerra os finalizados.
-    Best-effort por chamado; commita no fim."""
+    e ainda sem decisão da plataforma → consulta a plataforma, grava respostas
+    novas e põe os decididos no estado Encerrado (`encerrados` conta os que
+    mudaram nesta passada). Best-effort por chamado; commita no fim."""
     rows = (
         await session.execute(
             select(Chamado, ChamadoMensagem)
@@ -705,6 +733,7 @@ async def sync_respostas(session: AsyncSession, *, agora: datetime | None = None
                 Chamado.origem == "devolucao",
                 Chamado.canal == "api",
                 Chamado.resolvido.is_(False),
+                _nao_encerrado,
                 Chamado.chamado.is_not(None),
                 ChamadoMensagem.tipo == cd.TIPO_ABERTURA,
                 or_(
@@ -728,6 +757,7 @@ async def sync_respostas(session: AsyncSession, *, agora: datetime | None = None
             select(Chamado).where(
                 Chamado.canal == "api",
                 Chamado.resolvido.is_(False),
+                _nao_encerrado,
                 Chamado.origem != "devolucao",
                 or_(
                     and_(
@@ -769,7 +799,7 @@ async def sync_respostas(session: AsyncSession, *, agora: datetime | None = None
             else:
                 n = await fn(session, ch, dev)
             novos += n
-            if ch.resolvido:
+            if ch.status_plataforma in chamados_svc.STATUS_FINAIS:
                 encerrados += 1
             await session.flush()
         except Exception as e:  # noqa: BLE001

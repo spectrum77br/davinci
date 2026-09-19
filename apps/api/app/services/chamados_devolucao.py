@@ -648,7 +648,9 @@ async def garantir_chamado(session: AsyncSession, dev: Devolution) -> Chamado | 
     ch = await chamados_svc.abrir_chamado_devolucao(session, dev)
     if ch is None:
         ch = await chamados_svc.chamado_da_devolucao(session, dev)
-    if ch is None or ch.resolvido:
+    # 19/09: Encerrado (a plataforma já decidiu / o motivo foi retirado) conta como
+    # fechado aqui — não reenfileira a contestação de um caso que já acabou.
+    if ch is None or ch.resolvido or ch.status_plataforma in chamados_svc.STATUS_FINAIS:
         return None
     if not (ch.plataforma or "").strip():
         ch.plataforma = await _plataforma_da_conta(session, dev.conta or ch.conta)
@@ -720,16 +722,17 @@ async def encerrar_chamado_por_motivo(
 
     Kit (várias linhas, 1 chamado): só encerra quando NENHUMA linha do pedido
     ainda tem motivo que pede chamado; enquanto isso só anota no histórico que
-    o item chegou e o chamado segue pelos outros. Ao encerrar: evento no
-    histórico; se a contestação já tinha sido ENVIADA na plataforma, aviso pra
-    desistir dela no painel (nenhuma das APIs tem "cancelar disputa"); se ainda
-    estava pendente na fila, sai da fila (`registrada`). Não mexe no Valor do
-    chamado. Devolve "encerrado", "kit_parcial" ou None (nada a fazer). NÃO
-    commita."""
+    o item chegou e o chamado segue pelos outros. Ao encerrar — 19/09
+    (Vinicius): NÃO fecha; põe o chamado no estado Encerrado (status oficial
+    `encerrado` + evento) e a pessoa conclui pela aba — se a contestação já
+    tinha sido ENVIADA na plataforma, aviso pra desistir dela no painel
+    (nenhuma das APIs tem "cancelar disputa"); se ainda estava pendente na
+    fila, sai da fila (`registrada`). Não mexe no Valor do chamado. Devolve
+    "encerrado", "kit_parcial" ou None (nada a fazer). NÃO commita."""
     if chamados_svc.motivo_pede_chamado(dev):
         return None
     ch = await chamados_svc.chamado_da_devolucao(session, dev)
-    if ch is None or ch.resolvido:
+    if ch is None or ch.resolvido or ch.status_plataforma in chamados_svc.STATUS_FINAIS:
         return None
     de = (motivo_anterior or "").strip() or "—"
     para = (dev.motivo_devolucao or "").strip() or "—"
@@ -759,12 +762,13 @@ async def encerrar_chamado_por_motivo(
         )
         return "kit_parcial"
     quem = autor_nome or chamados_svc.AUTOR_SISTEMA
-    session.add(chamados_svc.marcar_resolvido(ch, True, autor_nome=quem))
+    chamados_svc.set_status_plataforma(ch, chamados_svc.STATUS_ENCERRADO)
+    ch.auto_ligada = False  # réplica automática não faz sentido sem razão de existir
     session.add(
         chamados_svc.registrar_sistema(
             ch,
-            f"Motivo da devolução mudou de \"{de}\" para \"{para}\" (não pede mais "
-            "chamado): chamado encerrado pela tela Devoluções",
+            f"Motivo da devolução retirado (de \"{de}\" para \"{para}\", por {quem}) — "
+            "chamado sem razão de existir, aguardando fechamento",
         )
     )
     abertura = await mensagem_abertura(session, ch)
@@ -2055,8 +2059,10 @@ async def processar_pendentes(
     session: AsyncSession, *, agora: datetime | None = None
 ) -> dict:
     """Cron (de hora em hora): retenta as aberturas `pendente` (plataforma
-    ainda não liberou, foto que chegou depois). Best-effort por linha; commita
-    no fim."""
+    ainda não liberou, foto que chegou depois). Chamado Encerrado (19/09: a
+    plataforma já decidiu, falta a pessoa concluir) fica de fora como o
+    resolvido — abrir contestação num caso decidido não faz sentido. Best-effort
+    por linha; commita no fim."""
     rows = (
         await session.execute(
             select(ChamadoMensagem, Chamado)
@@ -2067,6 +2073,7 @@ async def processar_pendentes(
                 ChamadoMensagem.canal != "robo",  # tarefa do robô do formulário
                 Chamado.origem == "devolucao",
                 Chamado.resolvido.is_(False),
+                chamados_svc.NAO_ENCERRADO_SQL,
             )
             .order_by(ChamadoMensagem.created_at)
         )

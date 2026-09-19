@@ -2,6 +2,7 @@
 import {
   AlertCircle,
   ArrowLeftRight,
+  Bot,
   CheckCircle2,
   ChevronLeft,
   ChevronRight,
@@ -12,7 +13,6 @@ import {
   Loader2,
   MessagesSquare,
   Plus,
-  Reply,
   RotateCcw,
   Scale,
   Search,
@@ -35,6 +35,13 @@ definePageMeta({ middleware: ['permission'], permission: { resource: 'chamados',
 // saiu da tabela — a réplica automática nunca foi ligada e a resposta manual
 // continua dentro do histórico. No lugar: Status (o que a plataforma diz do
 // chamado, e desde quando) e Últ. resposta (quando e quem falou por último).
+// 19/09 (Vinicius, Chamados v2): os 13 status da coluna viraram 5, por QUEM
+// está com a bola — Análise Humano, Análise Robô, Aguard. Plataforma,
+// Encerrado (a plataforma fechou, falta uma pessoa dar lucro/prejuízo) e
+// Concluído (fechado por pessoa). Nada mais fecha sozinho: "Encerrado" é
+// estado, não fechamento. O porquê do status saiu da célula ("painel bem
+// limpo") e ficou só no tooltip do chip. No histórico entrou a "instrução pro
+// robô": recado que não vai pra plataforma — o robô lê na próxima passada.
 
 type Origem = 'margem' | 'logistica' | 'devolucao' | 'vendas'
 type Canal = 'api' | 'robo' | 'manual'
@@ -53,33 +60,32 @@ const CANAIS: { value: Canal; label: string; hint: string }[] = [
 ]
 // Ao fechar: Logística → Resolvido ou Perdimento (célula M2 da planilha).
 const FECHAMENTO: Partial<Record<Origem, string[]>> = { logistica: ['Resolvido', 'Perdimento'] }
-// Coluna Status (17/09): código que a API manda → rótulo e cor. A ordem é a do filtro.
+// Coluna Status (19/09): os 5 códigos que a API manda em `status_aba` → rótulo e
+// cor. A ordem é a do filtro. Regra do Vinicius: primeiro o robô; gente só quando
+// o robô desiste. O motivo (o porquê exato) vem em `status_aba_motivo` e só
+// aparece no tooltip do chip.
 const STATUS_ABA: { value: string; label: string; cls: string; hint: string }[] = [
-  { value: 'respondeu', label: 'Plataforma respondeu', cls: 'bg-orange-500/15 text-orange-700 dark:text-orange-300', hint: 'a plataforma falou por último — estamos devendo resposta (o robô analisa)' },
-  { value: 'humano', label: 'Precisa de humano', cls: 'bg-red-500/15 text-red-700 dark:text-red-300', hint: 'o robô não soube o que fazer com a última resposta da plataforma' },
-  { value: 'prova', label: 'Pediu prova', cls: 'bg-orange-500/15 text-orange-700 dark:text-orange-300', hint: 'a Shopee pediu evidência extra na disputa' },
-  { value: 'aguardando', label: 'Aguardando plataforma', cls: 'bg-sky-500/15 text-sky-700 dark:text-sky-300', hint: 'nós falamos por último — a bola está com a plataforma' },
-  // 18/09: a plataforma ainda não deixa abrir/contestar (motivo indisponível, pacote em
-  // trânsito). Não é fila do robô nem precisa de gente — o sistema tenta de hora em hora.
-  { value: 'esperando_liberar', label: 'Esperando plataforma liberar', cls: 'bg-sky-500/10 text-sky-700 dark:text-sky-300', hint: 'a plataforma ainda não libera abrir/contestar (motivo indisponível, pacote em trânsito) — o sistema tenta de hora em hora' },
-  { value: 'em_analise', label: 'Em análise', cls: 'bg-violet-500/15 text-violet-700 dark:text-violet-300', hint: 'disputa/mediação em julgamento pela plataforma' },
-  { value: 'reembolso_pago', label: 'Reembolso pago', cls: 'bg-amber-500/15 text-amber-700 dark:text-amber-300', hint: 'a Shopee reembolsou o comprador; se a compensação à loja não vier em 24 h, conta como perdido' },
-  { value: 'fila', label: 'Na fila do robô', cls: 'bg-muted text-muted-foreground', hint: 'abertura/réplica ainda não saiu' },
-  { value: 'falhou', label: 'Envio falhou', cls: 'bg-red-500/15 text-red-700 dark:text-red-300', hint: 'o último envio à plataforma falhou — ver histórico' },
-  { value: 'sem_acompanhamento', label: 'Sem acompanhamento', cls: 'bg-muted text-muted-foreground', hint: 'registrado à mão — o DaVinci não consulta essa plataforma' },
-  { value: 'ganhamos', label: 'Ganhamos', cls: 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300', hint: 'a plataforma decidiu a favor da loja' },
-  { value: 'perdemos', label: 'Perdemos', cls: 'bg-red-500/15 text-red-700 dark:text-red-300', hint: 'a plataforma decidiu a favor do comprador' },
-  { value: 'encerrado', label: 'Encerrado', cls: 'bg-muted text-muted-foreground', hint: 'chamado resolvido' },
+  { value: 'analise_humano', label: 'Análise Humano', cls: 'bg-red-500/15 text-red-700 dark:text-red-300', hint: 'o robô não conseguiu — precisa de gente' },
+  { value: 'analise_robo', label: 'Análise Robô', cls: 'bg-indigo-500/15 text-indigo-700 dark:text-indigo-300', hint: 'o robô tem trabalho aqui: responder, reenviar, achar outro caminho, ou uma instrução sua' },
+  { value: 'aguard_plataforma', label: 'Aguard. Plataforma', cls: 'bg-sky-500/15 text-sky-700 dark:text-sky-300', hint: 'a bola está com a plataforma' },
+  { value: 'encerrado', label: 'Encerrado', cls: 'bg-amber-500/15 text-amber-700 dark:text-amber-300', hint: 'a plataforma encerrou o caso — falta fechar com lucro/prejuízo' },
+  { value: 'concluido', label: 'Concluído', cls: 'bg-muted text-muted-foreground', hint: 'fechado por uma pessoa' },
 ]
 const STATUS_POR_CODIGO = Object.fromEntries(STATUS_ABA.map((s) => [s.value, s]))
-// A 1ª linha do Status só leva data quando ele é OFICIAL da plataforma e a data não é a
-// da última fala (Vinicius 17/09: no "precisa de humano" a hora do robô desistir não ajuda).
-const STATUS_COM_DATA = new Set(['em_analise', 'prova', 'reembolso_pago', 'ganhamos', 'perdemos', 'encerrado'])
+// A data ao lado do chip só vale quando é uma decisão: a plataforma encerrou ou uma
+// pessoa concluiu (19/09). Nos outros três, a hora do robô desistir ou da fala não
+// ajuda (Vinicius 17/09) — a 2ª linha já diz quando foi a última resposta.
+const STATUS_COM_DATA = new Set(['encerrado', 'concluido'])
 function mostraDataStatus(row: ChamadoRow): boolean {
   return !!row.status_aba_at && STATUS_COM_DATA.has(row.status_aba || '') && row.status_aba_at !== row.ultima_resposta_at
 }
 function statusInfo(row: ChamadoRow) {
   return STATUS_POR_CODIGO[row.status_aba || ''] || { value: row.status_aba || '', label: row.status_aba || '—', cls: 'bg-muted text-muted-foreground', hint: '' }
+}
+// Tooltip do chip (19/09: o motivo saiu da célula — "painel bem limpo"): rótulo + porquê.
+function statusTitle(row: ChamadoRow): string {
+  const info = statusInfo(row)
+  return row.status_aba_motivo ? `${info.label} — ${row.status_aba_motivo}` : `${info.label} — ${info.hint}`
 }
 // Quem falou por último, pra coluna Últ. resposta: "nós · robô" / "plataforma · Shopee".
 function quemRespondeu(row: ChamadoRow): string {
@@ -150,6 +156,13 @@ type ChamadoRow = {
   status_aba: string | null
   status_aba_at: string | null
   status_aba_motivo?: string | null
+  // 19/09 (Chamados v2): custo do produto (soma preco_custo × qtd do pedido no
+  // Bling) só pra ver na janela Resolver; sugestão de resultado do robô/plataforma
+  // (o humano confirma ao fechar); instrução pendente pro robô (texto).
+  custo_produto?: number | string | null
+  custo_detalhe?: string | null
+  valor_sugerido?: number | string | null
+  instrucao_pendente?: string | null
   // Última FALA real (nossa ou da plataforma) — coluna Últ. resposta.
   ultima_resposta_at: string | null
   ultima_resposta_direcao: 'enviada' | 'recebida' | null
@@ -173,6 +186,10 @@ const PAGE_SIZE = 100
 
 const { api } = useApi()
 const toasts = useToasts()
+// 19/09: `isAdmin` era usado no template sem existir no script — o botão
+// "destinatários" do jurídico nunca aparecia (nem pro admin) e o typecheck acusava.
+const auth = useAuthStore()
+const isAdmin = computed(() => auth.user?.role === 'admin')
 const canEdit = useCan('chamados', 'edit')
 const canDelete = useCan('chamados', 'delete')
 
@@ -221,48 +238,40 @@ const totalPages = computed(() => Math.max(1, Math.ceil(total.value / PAGE_SIZE)
 // páginas); os grupos juntam os status da coluna Status por quem está com a
 // bola e são contados na página carregada — como o filtro de status, porque o
 // status é calculado na listagem. Clicar num card filtra por ele.
-type ResumoGrupo = { key: string; label: string; codes: string[]; tone: 'default' | 'warning' | 'danger'; icon: any; hint: string }
+type ResumoGrupo = { key: string; label: string; tone: 'default' | 'warning' | 'danger'; icon: any; hint: string }
+// 19/09: um card por status (a chave É o código de `status_aba`). "Concluído" só
+// aparece quando o select "mostrar" traz os concluídos — em "abertos" seria sempre 0.
 const RESUMO_GRUPOS: ResumoGrupo[] = [
-  { key: 'humano', label: 'Precisa de humano', codes: ['humano'], tone: 'danger', icon: UserRound, hint: 'o robô não soube o que fazer com a resposta da plataforma' },
-  { key: 'nossa_vez', label: 'Nossa vez de responder', codes: ['respondeu', 'prova', 'falhou'], tone: 'warning', icon: Reply, hint: 'plataforma respondeu, pediu prova ou o envio falhou' },
-  { key: 'esperando', label: 'Esperando', codes: ['aguardando', 'esperando_liberar', 'em_analise', 'fila'], tone: 'default', icon: Hourglass, hint: 'com a plataforma, em análise ou na fila do robô' },
-  { key: 'decidido', label: 'Decididos', codes: ['ganhamos', 'perdemos', 'reembolso_pago', 'encerrado'], tone: 'default', icon: Gavel, hint: 'ganhamos, perdemos, reembolso pago ou encerrado' },
+  { key: 'analise_humano', label: 'Análise Humano', tone: 'danger', icon: UserRound, hint: 'o robô não conseguiu — precisa de gente' },
+  { key: 'analise_robo', label: 'Análise Robô', tone: 'default', icon: Bot, hint: 'o robô tem trabalho aqui' },
+  { key: 'aguard_plataforma', label: 'Aguard. Plataforma', tone: 'default', icon: Hourglass, hint: 'a bola está com a plataforma' },
+  { key: 'encerrado', label: 'Encerrado', tone: 'warning', icon: Gavel, hint: 'a plataforma encerrou — falta fechar com lucro/prejuízo' },
 ]
-const GRUPO_POR_FILTRO: Record<string, ResumoGrupo> = Object.fromEntries(RESUMO_GRUPOS.map((g) => [`g:${g.key}`, g]))
+const RESUMO_CONCLUIDO: ResumoGrupo = { key: 'concluido', label: 'Concluído', tone: 'default', icon: CheckCircle2, hint: 'fechado por uma pessoa' }
 // Mais de uma página: os grupos e a divisão por origem só enxergam a página carregada.
 const resumoParcial = computed(() => items.value.length < total.value)
-const resumoTotalLabel = computed(() => mostrar.value === 'abertos' ? 'Chamados abertos' : mostrar.value === 'resolvidos' ? 'Chamados encerrados' : 'Chamados')
+const resumoTotalLabel = computed(() => mostrar.value === 'abertos' ? 'Chamados abertos' : mostrar.value === 'resolvidos' ? 'Chamados concluídos' : 'Chamados')
 const resumoPorOrigem = computed(() => {
   const partes = ORIGENS.map((o) => ({ label: o.label, n: items.value.filter((r) => r.origem === o.value).length })).filter((x) => x.n > 0)
   if (!partes.length) return ''
   const texto = partes.map((x) => `${x.label} ${x.n}`).join(' · ')
   return resumoParcial.value ? `nesta página: ${texto}` : texto
 })
-// Nome curto de cada status pra caber na legenda do card ("envio falhou 2 · pediu prova 1").
-const STATUS_CURTO: Record<string, string> = {
-  respondeu: 'plataforma respondeu', prova: 'pediu prova', falhou: 'envio falhou',
-  aguardando: 'com a plataforma', esperando_liberar: 'esperando liberar', em_analise: 'em análise', fila: 'fila do robô',
-  ganhamos: 'ganhamos', perdemos: 'perdemos', reembolso_pago: 'reembolso pago', encerrado: 'encerrado',
-}
-const resumoGrupos = computed(() => RESUMO_GRUPOS.map((g) => {
-  const partes = g.codes
-    .map((c) => ({ label: STATUS_CURTO[c] || (STATUS_POR_CODIGO[c]?.label || c).toLowerCase(), n: items.value.filter((r) => r.status_aba === c).length }))
-    .filter((x) => x.n > 0)
-  // Grupo com vários status e algum contado: a legenda vira a divisão; senão, a explicação fixa.
-  const detalhe = g.codes.length > 1 && partes.length ? partes.map((x) => `${x.label} ${x.n}`).join(' · ') : ''
-  const hint = detalhe || g.hint
-  return { ...g, n: partes.reduce((soma, x) => soma + x.n, 0), hint: resumoParcial.value ? `${hint} (nesta página)` : hint }
-}))
+const resumoGrupos = computed(() => {
+  const grupos = mostrar.value === 'abertos' ? RESUMO_GRUPOS : [...RESUMO_GRUPOS, RESUMO_CONCLUIDO]
+  return grupos.map((g) => ({
+    ...g,
+    n: items.value.filter((r) => r.status_aba === g.key).length,
+    hint: resumoParcial.value ? `${g.hint} (nesta página)` : g.hint,
+  }))
+})
 function filtrarGrupo(key: string) {
-  const v = `g:${key}`
-  statusFilter.value = statusFilter.value === v ? 'all' : v
+  statusFilter.value = statusFilter.value === key ? 'all' : key
 }
-// Filtro da coluna Status: um código ou um grupo do resumo (`g:...`).
+// Filtro da coluna Status (um código; o card do resumo usa o mesmo filtro).
 const visiveis = computed(() => {
   const f = statusFilter.value
   if (f === 'all') return items.value
-  const grupo = GRUPO_POR_FILTRO[f]
-  if (grupo) return items.value.filter((r) => grupo.codes.includes(r.status_aba || ''))
   return items.value.filter((r) => r.status_aba === f)
 })
 const rangeStart = computed(() => (total.value === 0 ? 0 : (page.value - 1) * PAGE_SIZE + 1))
@@ -288,6 +297,10 @@ const ERROS: Record<string, string> = {
   chamado_sem_integracao_bling: 'sem integração Bling',
   chamado_status_bling_erro: 'o Bling recusou a mudança de situação',
   chamado_valor_obrigatorio: 'informe o valor do chamado (lucro ou prejuízo) antes de resolver',
+  // 19/09 (Vinicius): com pedido Bling, a nova situação é obrigatória ao resolver.
+  chamado_situacao_obrigatoria: 'escolha a nova situação no Bling',
+  // 19/09: instrução não entra em chamado Concluído — a pessoa reabre pela aba antes.
+  chamado_concluido: 'chamado concluído — reabra pela aba pra instruir o robô',
   sem_destinatarios: 'cadastre os destinatários do jurídico (botão destinatários)',
   threema_nao_configurado: 'Threema não configurado no servidor',
   threema_envio_falhou: 'o Threema não entregou pra nenhum destinatário',
@@ -321,6 +334,9 @@ const ERROS: Record<string, string> = {
   plataforma_sem_api: 'plataforma sem API — abrir na mão',
   chamado_sem_integracao_tiktok: 'conta sem integração TikTok no DaVinci',
   chamado_sem_integracao_shopee: 'conta sem integração Shopee no DaVinci',
+  // 19/09: a plataforma não liberava pela API e o robô assumiu por outro caminho (Seller Center)
+  substituida_pelo_robo: 'o robô assumiu por outro caminho',
+  chamado_instrucao_vazia: 'digite a instrução',
 }
 
 function apiError(e: any) {
@@ -364,12 +380,13 @@ function resultadoTexto(v: number | string | null | undefined) {
 // vira um balão; falas repetidas em mensagens seguintes aparecem uma vez só.
 type Bolha = {
   chave: string
-  lado: 'nos' | 'eles' | 'sistema'
+  // 19/09: 'instrucao' = recado de uma pessoa pro robô (não foi pra plataforma).
+  lado: 'nos' | 'eles' | 'sistema' | 'instrucao'
   autor: string
   quando: string
   texto: string
   meta: string
-  status: string | null
+  status: Mensagem['status'] | null
   erro: string | null
   anexos: Anexo[]
 }
@@ -712,6 +729,10 @@ const hist = reactive({
   files: [] as File[],
   sending: false,
   erro: null as string | null,
+  // 19/09: instrução pro robô — separada da réplica porque NÃO vai pra plataforma.
+  instrucao: '',
+  instrucaoSending: false,
+  instrucaoErro: null as string | null,
 })
 
 // 15/09 (Eduardo: "preciso de todo o contexto da conversa"): a conversa COMPLETA
@@ -774,6 +795,17 @@ const bolhas = computed<Bolha[]>(() => {
   for (const m of hist.mensagens) {
     if (m.tipo === 'historico') continue
     const t = new Date(m.enviada_at || m.created_at).getTime()
+    if (m.tipo === 'instrucao') {
+      itens.push({
+        t, ord: ord++,
+        b: {
+          chave: m.id, lado: 'instrucao', autor: m.autor_nome || 'nós',
+          quando: fmtDateTime(m.created_at), texto: m.texto, meta: 'instrução pro robô',
+          status: null, erro: null, anexos: m.anexos,
+        },
+      })
+      continue
+    }
     if (m.direcao === 'sistema') {
       itens.push({
         t, ord: ord++,
@@ -822,6 +854,8 @@ async function openHistorico(row: ChamadoRow, focoReplica = false) {
   hist.texto = ''
   hist.files = []
   hist.erro = null
+  hist.instrucao = ''
+  hist.instrucaoErro = null
   hist.mensagens = []
   hist.loading = true
   try {
@@ -878,9 +912,12 @@ async function enviarReplica() {
       row.ultima_resposta_direcao = 'enviada'
       row.ultima_resposta_autor = m.autor_nome
     }
-    if (!row.resolvido && (row.status_aba === 'respondeu' || row.status_aba === 'humano' || row.status_aba === 'aguardando' || row.status_aba === 'fila' || row.status_aba === 'falhou' || row.status_aba === 'sem_acompanhamento')) {
-      row.status_aba = m.status === 'pendente' ? 'fila' : m.status === 'falhou' ? 'falhou' : 'aguardando'
-      row.status_aba_motivo = null
+    // Atualiza a coluna Status sem recarregar (19/09, códigos novos): na fila do robô →
+    // Análise Robô; falhou na hora → Análise Humano; saiu/registrada → Aguard. Plataforma.
+    // Encerrado/Concluído não mudam por uma réplica — a decisão da plataforma manda.
+    if (!row.resolvido && (row.status_aba === 'analise_humano' || row.status_aba === 'analise_robo' || row.status_aba === 'aguard_plataforma')) {
+      row.status_aba = m.status === 'pendente' ? 'analise_robo' : m.status === 'falhou' ? 'analise_humano' : 'aguard_plataforma'
+      row.status_aba_motivo = m.status === 'pendente' ? 'na fila do robô' : m.status === 'falhou' ? `envio falhou: ${ERROS[m.erro || ''] || m.erro || ''}` : null
       row.status_aba_at = m.enviada_at || m.created_at
     }
     if (m.status === 'falhou') toasts.warning('Réplica registrada, mas o envio falhou', ERROS[m.erro || ''] || m.erro || '')
@@ -891,6 +928,33 @@ async function enviarReplica() {
     hist.erro = apiError(e)
   } finally {
     hist.sending = false
+  }
+}
+
+// 19/09: instrução pro robô. Não vai pra plataforma — vira mensagem tipo `instrucao`
+// no histórico e o chamado cai em Análise Robô até o robô passar e responder aqui.
+async function enviarInstrucao() {
+  const row = hist.row
+  if (!row || !canEdit.value) return
+  const texto = hist.instrucao.trim()
+  if (!texto) {
+    hist.instrucaoErro = ERROS.chamado_instrucao_vazia
+    return
+  }
+  hist.instrucaoSending = true
+  hist.instrucaoErro = null
+  try {
+    const updated = await api<ChamadoRow>(`/api/chamados/${row.id}/instrucao`, { method: 'POST', body: { texto } })
+    replaceRow(updated)
+    hist.row = updated
+    hist.instrucao = ''
+    // A instrução entra na linha do tempo pelo próprio histórico (tipo `instrucao`).
+    hist.mensagens = await api<Mensagem[]>(`/api/chamados/${updated.id}/mensagens`)
+    toasts.success('Instrução registrada', 'O robô lê na próxima passada e responde aqui no histórico.')
+  } catch (e: any) {
+    hist.instrucaoErro = apiError(e)
+  } finally {
+    hist.instrucaoSending = false
   }
 }
 
@@ -912,6 +976,8 @@ const resolver = reactive({
   // Valor OBRIGATÓRIO ao resolver (Eduardo 15/09): lucro ou prejuízo + quanto.
   tipo: 'lucro' as 'lucro' | 'prejuizo',
   valor: '' as string,
+  // 19/09: veio da sugestão do robô/plataforma (valor_sugerido), não da coluna Valor.
+  sugerido: false,
   saving: false,
   erro: null as string | null,
 })
@@ -925,6 +991,14 @@ const resolverValor = computed<number | null>(() => {
   return resolver.tipo === 'prejuizo' ? -n : n
 })
 const resolverValorOk = computed(() => resolverValor.value !== null)
+// 19/09 (Vinicius: "status atual do Bling e o que vai trocar, obrigatório"): com
+// pedido Bling a nova situação é obrigatória — sem "não alterar". Sem pedido Bling
+// não há o que trocar e o select nem aparece.
+const resolverExigeSituacao = computed(() => !!resolver.row?.pedido_bling)
+const resolverSituacaoOk = computed(() => !resolverExigeSituacao.value || !!resolver.situacao)
+// Situação atual no Bling pra pessoa ver de onde está saindo: a viva (lookup) ou a
+// gravada no chamado.
+const resolverSituacaoAtual = computed(() => resolver.row?.status_bling_atual || resolver.row?.status_bling || '—')
 
 function opcoesFechamento(row: ChamadoRow): string[] {
   return FECHAMENTO[row.origem] || []
@@ -935,8 +1009,14 @@ function openResolver(row: ChamadoRow) {
   resolver.row = row
   resolver.situacao = ''
   resolver.erro = null
-  // Pré-preenche com o que já está na coluna Valor (negativo = prejuízo).
-  const atual = row.valor_recuperado === null || row.valor_recuperado === undefined ? NaN : Number(row.valor_recuperado)
+  // Pré-preenche com o que já está na coluna Valor (negativo = prejuízo). Coluna vazia
+  // e o robô/plataforma sugeriu um resultado (19/09) → entra a sugestão; a pessoa confirma.
+  let atual = row.valor_recuperado === null || row.valor_recuperado === undefined ? NaN : Number(row.valor_recuperado)
+  resolver.sugerido = false
+  if (Number.isNaN(atual) && row.valor_sugerido !== null && row.valor_sugerido !== undefined && row.valor_sugerido !== '') {
+    const sug = Number(row.valor_sugerido)
+    if (!Number.isNaN(sug)) { atual = sug; resolver.sugerido = true }
+  }
   resolver.tipo = !Number.isNaN(atual) && atual < 0 ? 'prejuizo' : 'lucro'
   resolver.valor = Number.isNaN(atual) ? '' : String(Math.abs(atual))
   nextTick(() => (document.getElementById('resolver-valor') as HTMLInputElement | null)?.focus())
@@ -953,6 +1033,10 @@ async function confirmarResolver() {
   const valor = resolverValor.value
   if (valor === null) {
     resolver.erro = ERROS.chamado_valor_obrigatorio
+    return
+  }
+  if (!resolverSituacaoOk.value) {
+    resolver.erro = ERROS.chamado_situacao_obrigatoria
     return
   }
   resolver.saving = true
@@ -973,6 +1057,9 @@ async function confirmarResolver() {
       [resultadoTexto(valor), resolver.situacao ? `Bling → ${resolver.situacao}` : ''].filter(Boolean).join(' · '),
     )
     closeResolver()
+    // 19/09: resolvido de dentro do histórico → o histórico fecha junto (a linha já
+    // saiu da lista de abertos; não faz sentido continuar olhando um chamado concluído).
+    if (hist.open && hist.row?.id === row.id) closeHistorico()
   } catch (e: any) {
     resolver.erro = apiError(e)
   } finally {
@@ -1122,7 +1209,7 @@ async function reabrir(row: ChamadoRow) {
     </div>
 
     <!-- resumo (18/09): total do servidor + grupos da coluna Status na página carregada; clicar filtra -->
-    <div v-if="tab === 'chamados'" class="grid grid-cols-2 lg:grid-cols-5 gap-2">
+    <div v-if="tab === 'chamados'" class="grid grid-cols-2 gap-2" :class="resumoGrupos.length > 4 ? 'lg:grid-cols-6' : 'lg:grid-cols-5'">
       <button type="button" class="rounded-lg text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-primary" title="mostrar todos os status" @click="statusFilter = 'all'">
         <StatCard :label="resumoTotalLabel" :value="total" :icon="MessagesSquare" :hint="resumoPorOrigem || undefined" compact />
       </button>
@@ -1131,8 +1218,8 @@ async function reabrir(row: ChamadoRow) {
         :key="g.key"
         type="button"
         class="rounded-lg text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-primary"
-        :class="statusFilter === `g:${g.key}` ? 'ring-2 ring-primary' : ''"
-        :title="statusFilter === `g:${g.key}` ? 'tirar o filtro' : `filtrar: ${g.label}`"
+        :class="statusFilter === g.key ? 'ring-2 ring-primary' : ''"
+        :title="statusFilter === g.key ? 'tirar o filtro' : `filtrar: ${g.label}`"
         @click="filtrarGrupo(g.key)"
       >
         <StatCard :label="g.label" :value="g.n" :icon="g.icon" :tone="g.tone" :hint="g.hint" compact />
@@ -1159,14 +1246,11 @@ async function reabrir(row: ChamadoRow) {
       </select>
       <select v-model="mostrar" class="h-9 rounded-md border bg-background px-2 text-sm">
         <option value="abertos">abertos</option>
-        <option value="resolvidos">encerrados</option>
+        <option value="resolvidos">concluídos</option>
         <option value="todos">todos</option>
       </select>
       <select v-model="statusFilter" class="h-9 rounded-md border bg-background px-2 text-sm" title="filtrar pela coluna Status">
         <option value="all">todos status</option>
-        <optgroup label="resumo">
-          <option v-for="g in RESUMO_GRUPOS" :key="g.key" :value="`g:${g.key}`">{{ g.label }}</option>
-        </optgroup>
         <optgroup label="status">
           <option v-for="s in STATUS_ABA" :key="s.value" :value="s.value">{{ s.label }}</option>
         </optgroup>
@@ -1197,7 +1281,7 @@ async function reabrir(row: ChamadoRow) {
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[100px] bg-amber-50 dark:bg-amber-900/20 border-l-[3px] border-gray-400 dark:border-gray-600">Origem</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[190px] bg-amber-50 dark:bg-amber-900/20">Chamado</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px] bg-amber-50 dark:bg-amber-900/20">Canal</th>
-            <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap w-[1%] bg-amber-50 dark:bg-amber-900/20" title="O que a plataforma diz do chamado (e desde quando) + quem falou por último">Status</th>
+            <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap w-[1%] bg-amber-50 dark:bg-amber-900/20" title="Quem está com a bola (o porquê fica no tooltip do chip) + quem falou por último">Status</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap w-[150px] min-w-[120px] max-w-[150px] bg-amber-50 dark:bg-amber-900/20">Observação</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[170px] bg-violet-50 dark:bg-violet-900/20 border-l-[3px] border-gray-400 dark:border-gray-600" title="Encaminhado ao jurídico: quando, por quem, observação e link do dossiê">Jurídico</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[210px] bg-emerald-50 dark:bg-emerald-900/20 border-l-[3px] border-gray-400 dark:border-gray-600">Alterar status Bling</th>
@@ -1261,16 +1345,15 @@ async function reabrir(row: ChamadoRow) {
               </select>
             </td>
             <!-- Status (17/09, Vinicius "status e últ. resposta não seria a mesma coisa?"):
-                 uma célula só — 1ª linha o status (com a data quando ela não é a da última
-                 fala: oficial da API, robô pediu gente); 2ª linha quem falou por último. -->
+                 uma célula só — 1ª linha o chip (data só em Encerrado/Concluído); 2ª linha
+                 quem falou por último. 19/09 (Vinicius: "tira esse do meio, painel bem
+                 limpo"): o porquê do status saiu daqui e ficou só no tooltip do chip. -->
             <td class="px-2 py-1 w-[1%] max-w-[210px] bg-amber-50/40 dark:bg-amber-900/10">
               <div class="space-y-0.5">
                 <div class="flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
-                  <span class="inline-block rounded px-1.5 py-0.5 text-[11px] font-medium whitespace-nowrap" :class="statusInfo(row).cls" :title="row.status_aba_motivo ? `${statusInfo(row).label}: ${row.status_aba_motivo}` : statusInfo(row).hint">{{ statusInfo(row).label }}</span>
+                  <span class="inline-block rounded px-1.5 py-0.5 text-[11px] font-medium whitespace-nowrap" :class="statusInfo(row).cls" :title="statusTitle(row)">{{ statusInfo(row).label }}</span>
                   <span v-if="mostraDataStatus(row)" class="text-[11px] text-muted-foreground whitespace-nowrap">{{ fmtCurto(row.status_aba_at) }}</span>
                 </div>
-                <!-- 18/09: o porquê do status (falta foto, quebra-cabeça, Shopee ainda não libera…) -->
-                <div v-if="row.status_aba_motivo" class="text-[11px] leading-tight text-muted-foreground truncate" :title="row.status_aba_motivo">{{ row.status_aba_motivo }}</div>
                 <div v-if="row.ultima_resposta_at" class="text-[11px] whitespace-nowrap" :class="row.ultima_resposta_direcao === 'recebida' ? 'text-orange-600 dark:text-orange-400' : 'text-emerald-700 dark:text-emerald-300'" :title="`última resposta: ${fmtDateTime(row.ultima_resposta_at)} · ${quemRespondeu(row)}`">
                   <span v-if="mostraDataStatus(row)" class="text-muted-foreground">últ. </span>{{ fmtCurto(row.ultima_resposta_at) }} · {{ quemRespondeu(row) }}
                 </div>
@@ -1430,7 +1513,7 @@ async function reabrir(row: ChamadoRow) {
         </div>
       </div>
     </div>
-    <InformarThreemaModal :open="juridicoCfgOpen" contexto="juridico" somente-cadastro @close="juridicoCfgOpen = false; if (juridico.open && juridico.row) openJuridico(juridico.row)" />
+    <InformarThreemaModal :open="juridicoCfgOpen" contexto="juridico" somente-cadastro descricao="Quem está marcado recebe no Threema o aviso do botão 'encaminhar ao jurídico' (dados do chamado + link do dossiê com o histórico e as fotos). A seleção fica salva." @close="juridicoCfgOpen = false; if (juridico.open && juridico.row) openJuridico(juridico.row)" />
 
     <!-- modal: histórico + réplica -->
     <div v-if="hist.open && hist.row" class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" @click.self="closeHistorico">
@@ -1464,7 +1547,7 @@ async function reabrir(row: ChamadoRow) {
             :key="b.chave"
             class="flex"
             :class="{
-              'justify-end': b.lado === 'nos',
+              'justify-end': b.lado === 'nos' || b.lado === 'instrucao',
               'justify-start': b.lado === 'eles',
               'justify-center': b.lado === 'sistema',
             }"
@@ -1474,6 +1557,19 @@ async function reabrir(row: ChamadoRow) {
               class="rounded-full bg-muted px-3 py-1 text-[11px] italic text-muted-foreground"
               :title="b.quando"
             >{{ b.texto }}</div>
+
+            <!-- 19/09: instrução pro robô — do nosso lado, mas em índigo pra não confundir
+                 com réplica (não foi pra plataforma). -->
+            <div
+              v-else-if="b.lado === 'instrucao'"
+              class="max-w-[78%] rounded-2xl rounded-br-sm px-3 py-2 shadow-sm bg-indigo-50 dark:bg-indigo-900/25 border border-indigo-200/70 dark:border-indigo-800/60"
+            >
+              <div class="flex flex-wrap items-center gap-x-2 text-[11px]">
+                <span class="font-medium text-indigo-700 dark:text-indigo-300 inline-flex items-center gap-1"><Bot class="size-3" /> Instrução pro robô · {{ b.autor }}</span>
+              </div>
+              <div class="mt-1 whitespace-pre-wrap break-words text-sm leading-relaxed">{{ b.texto }}</div>
+              <div class="mt-1 text-right text-[10px] text-muted-foreground">{{ b.quando }}</div>
+            </div>
 
             <div
               v-else
@@ -1512,37 +1608,86 @@ async function reabrir(row: ChamadoRow) {
               <button type="button" class="hover:text-red-500" @click="removeReplicaFile(i)"><X class="size-3" /></button>
             </span>
             <span v-if="hist.erro" class="text-xs text-red-500">{{ hist.erro }}</span>
-            <Button size="sm" class="ml-auto" :disabled="hist.sending || !hist.texto.trim()" @click="enviarReplica">
+            <!-- 19/09 (Vinicius): resolver sem sair do histórico — abre a MESMA janela de
+                 resolver por cima; ao confirmar, a linha sai dos abertos e este modal fecha. -->
+            <Button size="sm" variant="outline" class="ml-auto" :disabled="!canEdit || busy.has(hist.row.id)" title="marcar como resolvido (lucro/prejuízo + situação no Bling)" @click="openResolver(hist.row)">
+              <CheckCircle2 class="size-4 mr-1.5" />
+              resolver
+            </Button>
+            <Button size="sm" :disabled="hist.sending || !hist.texto.trim()" @click="enviarReplica">
               <Loader2 v-if="hist.sending" class="size-4 mr-1.5 animate-spin" />
               <Send v-else class="size-4 mr-1.5" />
               {{ hist.row.canal === 'manual' ? 'registrar' : hist.row.canal === 'robo' ? 'enfileirar pro robô' : 'enviar' }}
             </Button>
           </div>
         </div>
+
+        <!-- 19/09 (Chamados v2): instrução pro robô. Separada da réplica porque NÃO vai
+             pra plataforma: o robô lê na próxima passada (mesmo em Encerrado) e responde
+             aqui. Enviar põe a linha em Análise Robô. Em Concluído (fechado por pessoa) a
+             API devolve 422 chamado_concluido — o campo some e fica o aviso pra reabrir. -->
+        <div v-if="hist.row.resolvido" class="border-t px-4 py-2 text-xs text-muted-foreground inline-flex items-center gap-1.5">
+          <Bot class="size-3.5 text-indigo-600 dark:text-indigo-400" />
+          Chamado concluído — reabra o chamado pra instruir o robô.
+        </div>
+        <div v-else class="border-t px-4 py-3 space-y-2 bg-indigo-50/40 dark:bg-indigo-900/10">
+          <div class="text-xs font-medium inline-flex items-center gap-1.5">
+            <Bot class="size-3.5 text-indigo-600 dark:text-indigo-400" />
+            Instrução pro robô
+            <span class="text-muted-foreground font-normal">— não vai pra plataforma; o robô lê na próxima passada e responde aqui</span>
+          </div>
+          <div v-if="hist.row.instrucao_pendente" class="rounded border border-indigo-500/30 bg-indigo-500/5 px-2 py-1 text-xs" :title="hist.row.instrucao_pendente">
+            <span class="font-medium text-indigo-700 dark:text-indigo-300">Instrução pendente:</span> {{ hist.row.instrucao_pendente }}
+          </div>
+          <textarea v-model="hist.instrucao" rows="2" :disabled="!canEdit" class="w-full rounded-md border bg-background px-3 py-2 text-sm disabled:opacity-60" placeholder="ex.: contesta de novo citando a foto do pacote; se a plataforma negar, pede prorrogação" />
+          <div class="flex flex-wrap items-center gap-2">
+            <span v-if="hist.instrucaoErro" class="text-xs text-red-500">{{ hist.instrucaoErro }}</span>
+            <Button size="sm" variant="outline" class="ml-auto" :disabled="!canEdit || hist.instrucaoSending || !hist.instrucao.trim()" @click="enviarInstrucao">
+              <Loader2 v-if="hist.instrucaoSending" class="size-4 mr-1.5 animate-spin" />
+              <Bot v-else class="size-4 mr-1.5" />
+              Enviar instrução
+            </Button>
+          </div>
+        </div>
       </div>
     </div>
 
-    <!-- modal: resolver -->
-    <div v-if="resolver.open && resolver.row" class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" @click.self="closeResolver">
+    <!-- modal: resolver (z-[60]: 19/09 também abre por cima do histórico, que é z-50) -->
+    <div v-if="resolver.open && resolver.row" class="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 p-4" @click.self="closeResolver">
       <div class="w-full max-w-md rounded-lg border bg-background shadow-xl">
         <div class="flex items-start justify-between gap-3 border-b px-4 py-3">
-          <div class="text-sm font-semibold">Resolver chamado · pedido {{ resolver.row.pedido_bling || resolver.row.pedido_marketplace }}</div>
+          <div>
+            <div class="text-sm font-semibold">Resolver chamado · pedido {{ resolver.row.pedido_bling || resolver.row.pedido_marketplace }}</div>
+            <!-- 19/09: a plataforma já encerrou (ganhamos/perdemos/sem decisão) — a pessoa só confirma o resultado. -->
+            <div v-if="resolver.row.status_aba === 'encerrado'" class="text-xs text-amber-700 dark:text-amber-300">
+              Plataforma encerrou: {{ resolver.row.status_aba_motivo || 'sem decisão' }}
+            </div>
+          </div>
           <button type="button" class="rounded p-1 hover:bg-muted" @click="closeResolver"><X class="size-4" /></button>
         </div>
         <div class="space-y-3 px-4 py-3 text-sm">
           <p class="text-muted-foreground">O chamado sai da lista de abertos.</p>
-          <label class="block space-y-1">
-            <span class="text-xs font-medium">Situação no Bling ao fechar</span>
-            <select v-model="resolver.situacao" class="h-9 w-full rounded-md border bg-background px-2 text-sm">
-              <option value="">— não alterar</option>
-              <template v-if="opcoesFechamento(resolver.row).length">
-                <option v-for="s in opcoesFechamento(resolver.row)" :key="s" :value="s">{{ s }}</option>
-                <option disabled>──────</option>
-              </template>
-              <option v-for="s in situacoes.filter((x) => !opcoesFechamento(resolver.row!).includes(x))" :key="s" :value="s">{{ s }}</option>
-            </select>
-            <span class="text-[11px] text-muted-foreground">Logística → Resolvido ou Perdimento · Margem → não altera · Devolução → sem padrão</span>
-          </label>
+          <!-- 19/09 (Vinicius: "status atual do Bling e o que vai trocar, obrigatório"):
+               de onde está saindo e pra onde vai. Sem pedido Bling não há o que trocar. -->
+          <template v-if="resolverExigeSituacao">
+            <div class="text-xs">
+              <span class="text-muted-foreground">Situação atual no Bling:</span>
+              <b class="ml-1">{{ resolverSituacaoAtual }}</b>
+            </div>
+            <label class="block space-y-1">
+              <span class="text-xs font-medium">Nova situação no Bling <span class="text-red-500">*</span></span>
+              <select v-model="resolver.situacao" class="h-9 w-full rounded-md border bg-background px-2 text-sm" :class="resolverSituacaoOk ? '' : 'ring-1 ring-red-500/60'">
+                <option value="" disabled>escolha…</option>
+                <template v-if="opcoesFechamento(resolver.row).length">
+                  <option v-for="s in opcoesFechamento(resolver.row)" :key="s" :value="s">{{ s }}</option>
+                  <option disabled>──────</option>
+                </template>
+                <option v-for="s in situacoes.filter((x) => !opcoesFechamento(resolver.row!).includes(x))" :key="s" :value="s">{{ s }}</option>
+              </select>
+              <span class="text-[11px] text-muted-foreground">Obrigatório. Logística → Resolvido ou Perdimento; as demais situações vêm depois da linha.</span>
+            </label>
+          </template>
+          <div v-else class="text-[11px] text-muted-foreground">Sem pedido Bling — nada a trocar no Bling.</div>
           <!-- Valor obrigatório (Eduardo 15/09): "encerrou com prejuízo ou com lucro? ex. 100 reais ganhamos" -->
           <div class="space-y-1">
             <span class="block text-xs font-medium">
@@ -1583,12 +1728,20 @@ async function reabrir(row: ChamadoRow) {
             <span class="text-[11px] text-muted-foreground">
               Obrigatório. Ganhamos R$ 100 → <b>lucro</b> 100,00 · perdemos R$ 50 → <b>prejuízo</b> 50,00. Vai pra coluna Valor (prejuízo fica negativo).
             </span>
+            <!-- 19/09: nada fecha sozinho — o robô/plataforma só sugere; a pessoa confirma. -->
+            <div v-if="resolver.sugerido" class="text-[11px] text-indigo-700 dark:text-indigo-300 inline-flex items-center gap-1">
+              <Bot class="size-3" /> sugestão do robô/plataforma: {{ resultadoTexto(resolver.row.valor_sugerido) }}
+            </div>
+            <!-- 19/09: custo do produto (Bling), só pra ver — ajuda a decidir o tamanho do prejuízo. -->
+            <div v-if="resolver.row.custo_produto !== null && resolver.row.custo_produto !== undefined" class="text-[11px] text-muted-foreground" :title="resolver.row.custo_detalhe || ''">
+              Custo do produto: <b class="text-foreground">{{ fmtBRL(resolver.row.custo_produto) }}</b><template v-if="resolver.row.custo_detalhe"> · {{ resolver.row.custo_detalhe }}</template>
+            </div>
           </div>
           <div v-if="resolver.erro" class="text-xs text-red-500">{{ resolver.erro }}</div>
         </div>
         <div class="flex items-center justify-end gap-2 border-t px-4 py-3">
           <Button size="sm" variant="ghost" @click="closeResolver">cancelar</Button>
-          <Button size="sm" :disabled="!canEdit || resolver.saving || !resolverValorOk" @click="confirmarResolver">
+          <Button size="sm" :disabled="!canEdit || resolver.saving || !resolverValorOk || !resolverSituacaoOk" @click="confirmarResolver">
             <Loader2 v-if="resolver.saving" class="size-4 mr-1.5 animate-spin" />
             <CheckCircle2 v-else class="size-4 mr-1.5" />
             resolver

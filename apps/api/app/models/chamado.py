@@ -93,6 +93,11 @@ class Chamado(Base, TimestampMixin):
     # 03/09, migration 0240). Positivo = lucro ("100 reais ganhamos"), negativo
     # = prejuízo (Eduardo 15/09); obrigatório ao resolver pela aba. NULL = sem valor.
     valor_recuperado: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
+    # 19/09 (Vinicius, migration 0297): SUGESTÃO de resultado — do robô (ação
+    # `resolver` do cérebro) ou da plataforma (compensação paga lida pelo sync).
+    # Nada fecha sozinho: a pessoa confirma (ou corrige) ao concluir, e aí vira
+    # `valor_recuperado`. Mesmo sinal: positivo = lucro, negativo = prejuízo.
+    valor_sugerido: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
     created_by: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True),
         ForeignKey("users.id", ondelete="SET NULL"),
@@ -130,7 +135,13 @@ class ChamadoMensagem(Base, TimestampMixin):
     resposta recebida da plataforma e eventos do sistema — com quem e quando.
 
     `status`: registrada (canal manual, nada a enviar) | pendente (na fila do
-    robô) | enviada | falhou (`erro` explica).
+    robô) | enviada | falhou (`erro` explica). 19/09: `falhou` só fica quando o
+    robô esgotou as tentativas (`tentativas`, migration 0297) — antes disso a
+    mensagem volta pra `pendente` com o `erro` da última tentativa.
+
+    `tipo` `instrucao` (19/09): recado de uma pessoa PRO ROBÔ ("responde que o
+    pacote foi entregue dia 12"), `direcao=sistema` — não vai pra plataforma; o
+    cérebro lê no `/agent/analisar` e a análise dele consome a instrução.
     """
 
     __tablename__ = "chamado_mensagem"
@@ -144,7 +155,7 @@ class ChamadoMensagem(Base, TimestampMixin):
     )
     # enviada (nós → plataforma) | recebida (plataforma → nós) | sistema
     direcao: Mapped[str] = mapped_column(Text, nullable=False)
-    # replica | replica_auto | abertura | sistema
+    # replica | replica_auto | abertura | resposta | sistema | analise | historico | instrucao
     tipo: Mapped[str] = mapped_column(Text, nullable=False)
     texto: Mapped[str] = mapped_column(Text, nullable=False)
     canal: Mapped[str] = mapped_column(Text, nullable=False)
@@ -157,6 +168,10 @@ class ChamadoMensagem(Base, TimestampMixin):
         nullable=True,
     )
     enviada_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Quantas vezes o robô já tentou enviar e falhou (ver services.chamados.MAX_TENTATIVAS_ROBO).
+    tentativas: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
 
     chamado: Mapped["Chamado"] = relationship(back_populates="mensagens")
     anexos: Mapped[list["ChamadoAnexo"]] = relationship(

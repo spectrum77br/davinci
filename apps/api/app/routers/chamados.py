@@ -10,6 +10,7 @@ app.services.chamados; aqui é CRUD + histórico + anexos + os botões.
 
 import secrets
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import Annotated
 from uuid import UUID
 
@@ -27,7 +28,8 @@ from fastapi import (
     status,
 )
 from fastapi.responses import HTMLResponse
-from sqlalchemy import case, func, or_, select
+from sqlalchemy import Text, case, cast, func, literal, or_, select
+from sqlalchemy.dialects.postgresql import aggregate_order_by
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -35,6 +37,7 @@ from app.config import get_settings
 from app.db import get_session
 from app.deps.auth import require_permission
 from app.models import (
+    BlingOrder,
     Chamado,
     ChamadoAnexo,
     ChamadoMensagem,
@@ -49,12 +52,14 @@ from app.schemas.chamados import (
     AgentAnalisarOut,
     AgentAnaliseIn,
     AgentAnaliseOut,
+    AgentBloqueioOut,
     AgentChamadoAnaliseOut,
+    AgentHistoricoIn,
+    AgentHistoricoOut,
+    AgentInstrucaoOut,
     AgentLeaseIn,
     AgentLeaseOut,
     AgentMensagemOut,
-    AgentHistoricoIn,
-    AgentHistoricoOut,
     AgentPagamentoMlIn,
     AgentPagamentoMlItem,
     AgentPagamentoMlOut,
@@ -73,14 +78,15 @@ from app.schemas.chamados import (
     ChamadoOut,
     ChamadoPage,
     ChamadoPatch,
+    InstrucaoIn,
     JuridicoIn,
     JuridicoOut,
     ResolverIn,
     SituacoesOut,
 )
-from app.services.texto_html import limpar_html
 from app.services import chamados as svc
 from app.services import chamados_juridico
+from app.services.texto_html import limpar_html
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/api/chamados", tags=["chamados"])
@@ -121,16 +127,67 @@ def _mensagem_out(m: ChamadoMensagem) -> ChamadoMensagemOut:
     )
 
 
+async def _custo_produto_map(
+    session: AsyncSession, numeros: set[str]
+) -> dict[str, tuple[Decimal | None, str | None]]:
+    """19/09 (só mostrar): custo dos itens do pedido no espelho bling_orders, por
+    nº Bling — SUM(preco_custo × quantidade) (linhas sem custo não somam) e o
+    detalhe "sku × qtd; …" (todas as linhas, mesmo sem custo) — pra pessoa
+    decidir lucro/prejuízo ao concluir. Uma query pra página."""
+    limpos = {n for n in numeros if n}
+    if not limpos:
+        return {}
+    qtd = func.coalesce(BlingOrder.item_quantidade, 1)
+    custo_linha = case(
+        (func.coalesce(BlingOrder.preco_custo, 0) > 0, BlingOrder.preco_custo * qtd),
+        else_=0,
+    )
+    detalhe_linha = func.coalesce(BlingOrder.item_codigo, "?") + " × " + cast(qtd, Text)
+    rows = await session.execute(
+        select(
+            BlingOrder.numero,
+            func.sum(custo_linha),
+            func.string_agg(
+                detalhe_linha,
+                aggregate_order_by(literal("; "), BlingOrder.item_index, BlingOrder.item_codigo),
+            ),
+        )
+        .where(BlingOrder.numero.in_(list(limpos)))
+        .group_by(BlingOrder.numero)
+    )
+    out: dict[str, tuple[Decimal | None, str | None]] = {}
+    for numero, custo, detalhe in rows.all():
+        if not numero:
+            continue
+        valor = Decimal(str(custo)).quantize(Decimal("0.01")) if custo else None
+        out[str(numero)] = (valor if valor and valor > 0 else None, detalhe or None)
+    return out
+
+
+def _instrucao_pendente(msgs: list[ChamadoMensagem]) -> ChamadoMensagem | None:
+    """19/09: a última `instrucao` nossa que o robô ainda não leu (mais nova que
+    a última `analise`). A análise do cérebro é o que consome a instrução."""
+    instrucoes = [m for m in msgs if m.tipo == "instrucao"]
+    if not instrucoes:
+        return None
+    ultima = instrucoes[-1]
+    analises = [m for m in msgs if m.tipo == "analise"]
+    if analises and analises[-1].created_at >= ultima.created_at:
+        return None
+    return ultima
+
+
 async def _to_out(session: AsyncSession, rows: list[Chamado]) -> list[ChamadoOut]:
-    """Monta a saída em LOTE: status Bling vivo, histórico resumido (contagem,
-    última fala, status da aba — do CASO, juntando as linhas irmãs) e anexos da
-    réplica automática — 4 queries pra página inteira."""
+    """Monta a saída em LOTE: status Bling vivo, custo do produto, histórico
+    resumido (contagem, última fala, instrução pendente, status da aba — do
+    CASO, juntando as linhas irmãs) e anexos da réplica automática — 5 queries
+    pra página inteira."""
     if not rows:
         return []
     ids = [r.id for r in rows]
-    status_map = await svc.status_bling_atual_map(
-        session, {r.pedido_bling for r in rows if r.pedido_bling}
-    )
+    numeros = {r.pedido_bling for r in rows if r.pedido_bling}
+    status_map = await svc.status_bling_atual_map(session, numeros)
+    custo_map = await _custo_produto_map(session, numeros)
     # 17/09 (Vinicius): a linha mostra a última FALA (nossa ou da plataforma —
     # análise do robô e evento não contam) e o Status, que depende de quem falou
     # por último e do que o cérebro pediu. A conversa completa (`historico`)
@@ -190,6 +247,7 @@ async def _to_out(session: AsyncSession, rows: list[Chamado]) -> list[ChamadoOut
         msgs = mensagens_do_caso(r)
         o = ChamadoOut.model_validate(r)
         o.status_bling_atual = status_map.get(r.pedido_bling or "") or r.status_bling
+        o.custo_produto, o.custo_detalhe = custo_map.get(r.pedido_bling or "", (None, None))
         o.mensagens_total = len(msgs)
         o.ultima_mensagem_at = msgs[-1].created_at if msgs else None
         falas = [m for m in msgs if m.direcao in ("enviada", "recebida")]
@@ -201,6 +259,17 @@ async def _to_out(session: AsyncSession, rows: list[Chamado]) -> list[ChamadoOut
             o.ultima_resposta_autor = u.autor_nome
         analises = [m for m in msgs if m.tipo == "analise"]
         ultima_analise = analises[-1] if analises else None
+        instrucao = _instrucao_pendente(msgs)
+        o.instrucao_pendente = instrucao.texto if instrucao else None
+        # 19/09 (regra 5, prova): alguma fala NOSSA que saiu depois do status oficial?
+        # Olhar só a última fala fazia a prova já enviada voltar a "pedir humano"
+        # quando a Shopee respondia em seguida.
+        nossa_apos_status = any(
+            m.direcao == "enviada"
+            and m.status in ("enviada", "registrada")
+            and (r.status_plataforma_at is None or m.created_at > r.status_plataforma_at)
+            for m in falas
+        )
         o.status_aba, o.status_aba_at, o.status_aba_motivo = svc.status_e_motivo_da_aba(
             r,
             ultima_fala=falas[-1] if falas else None,
@@ -211,6 +280,8 @@ async def _to_out(session: AsyncSession, rows: list[Chamado]) -> list[ChamadoOut
             analise_pede_esperar=bool(
                 ultima_analise and ultima_analise.texto.endswith(_ACAO_TXT["esperar"])
             ),
+            instrucao_pendente=instrucao,
+            nossa_fala_apos_status=nossa_apos_status,
         )
         o.auto_proximo_envio_at = svc.auto_proximo_envio(r)
         o.anexos_auto = anexos_auto.get(r.id, [])
@@ -772,13 +843,18 @@ async def resolver(
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[User, Depends(require_permission("chamados", "edit"))],
 ) -> ChamadoOut:
-    """Marca resolvido (ou reabre). Com `situacao`, aplica junto a situação de
-    fechamento no Bling (Resolvido / Perdimento na origem Logística). Ao
-    resolver, `valor_recuperado` (lucro/prejuízo em R$) é OBRIGATÓRIO —
-    Eduardo 15/09: "deixar como campo obrigatório antes de aceitar o resolver"."""
+    """Marca resolvido (ou reabre). Ao resolver, `valor_recuperado` (lucro/prejuízo
+    em R$) é OBRIGATÓRIO — Eduardo 15/09: "deixar como campo obrigatório antes de
+    aceitar o resolver". `situacao` (nova situação do pedido no Bling, ex.
+    Resolvido / Perdimento) é OBRIGATÓRIA quando o chamado tem `pedido_bling` —
+    Vinicius 19/09: a janela mostra "status atual do Bling e o que vai trocar,
+    obrigatório" (422 `chamado_situacao_obrigatoria`); chamado sem pedido no
+    Bling não tem o que trocar, continua opcional. Reabrir não exige nada."""
     ch = await _get(session, chamado_id)
     if body.resolvido and body.valor_recuperado is None:
         raise HTTPException(422, detail={"code": "chamado_valor_obrigatorio"})
+    if body.resolvido and (ch.pedido_bling or "").strip() and not body.situacao:
+        raise HTTPException(422, detail={"code": "chamado_situacao_obrigatoria"})
     if body.situacao:
         try:
             await svc.aplicar_status_bling(session, ch, body.situacao)
@@ -799,6 +875,39 @@ async def resolver(
     )
     await session.commit()
     await session.refresh(ch)
+    return await _one_out(session, ch)
+
+
+@router.post("/{chamado_id}/instrucao", response_model=ChamadoOut)
+async def instruir_robo(
+    chamado_id: UUID,
+    body: InstrucaoIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("chamados", "edit"))],
+) -> ChamadoOut:
+    """19/09 (Vinicius): recado de uma pessoa PRO ROBÔ — "responde que o pacote foi
+    entregue dia 12", "desiste desse". Entra no histórico como `instrucao`
+    (direcao=sistema, não vai pra plataforma); a linha vira Análise Robô até o
+    cérebro ler no `/agent/analisar` e responder (a análise dele consome).
+    Vale em qualquer canal e em chamado Encerrado (é o jeito de o robô voltar num
+    caso que a plataforma fechou). Em Concluído (resolvido por pessoa) NÃO: a
+    pessoa reabre pela aba antes de instruir — 422 `chamado_concluido` (19/09)."""
+    ch = await _get(session, chamado_id)
+    if ch.resolvido:
+        raise HTTPException(422, detail={"code": "chamado_concluido"})
+    m = svc.nova_mensagem(
+        ch,
+        texto=body.texto,
+        tipo="instrucao",
+        direcao="sistema",
+        autor_nome=_autor(user),
+        autor_id=user.id,
+        status="registrada",
+    )
+    session.add(m)
+    await session.commit()
+    await session.refresh(ch)
+    logger.info("chamado_instrucao", chamado_id=str(ch.id), autor=_autor(user))
     return await _one_out(session, ch)
 
 
@@ -1070,8 +1179,11 @@ async def agent_resultado(
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> ChamadoMensagemOut:
     """Robô devolve o resultado de uma tarefa: enviada (+ protocolo/URL quando
-    foi abertura) ou falhou (+ erro). Falha volta a mensagem pra `pendente`?
-    Não — fica `falhou` visível no histórico; o operador reenvia se quiser."""
+    foi abertura) ou falhou (+ erro). 19/09 (Vinicius: "envio falhou → fila do
+    robô; se não conseguir, humano"): falha que não pede gente volta a mensagem
+    pra `pendente` (o lease reentrega) até `MAX_TENTATIVAS_ROBO`; na última, ou
+    quando o erro pede humano (foto, quebra-cabeça, login), fica `falhou` e a
+    linha vira Análise Humano."""
     m = (
         await session.execute(
             select(ChamadoMensagem)
@@ -1106,12 +1218,47 @@ async def agent_resultado(
         elif body.chamado_url and not ch.chamado_url:
             ch.chamado_url = body.chamado_url
     else:
-        m.status = "falhou"
-        m.erro = (body.erro or "falha no robô")[:300]
+        erro = (body.erro or "falha no robô")[:300]
+        tentativas = (m.tentativas or 0) + 1
+        if not svc._erro_pede_humano(erro) and tentativas < svc.MAX_TENTATIVAS_ROBO:
+            m.tentativas = tentativas
+            m.erro = erro
+            m.status = "pendente"
+            session.add(
+                svc.registrar_sistema(
+                    ch,
+                    f"Envio falhou (tentativa {tentativas} de {svc.MAX_TENTATIVAS_ROBO}): "
+                    f"{erro} — volta pra fila do robô",
+                )
+            )
+        else:
+            m.tentativas = tentativas
+            m.status = "falhou"
+            m.erro = erro
     await session.commit()
     await session.refresh(m)
-    logger.info("chamado_agent_resultado", mensagem_id=str(m.id), status=m.status)
+    logger.info(
+        "chamado_agent_resultado", mensagem_id=str(m.id), status=m.status, tentativas=m.tentativas
+    )
     return _mensagem_out(m)
+
+
+def _monitor_encerrou(session: AsyncSession, ch: Chamado) -> bool:
+    """Estado Encerrado pelo monitor (uma vez): status oficial `encerrado` + evento
+    + réplica automática desligada. Chamado já com decisão (ganhamos/perdemos lidos
+    da API, ou `encerrado` de antes) NÃO muda — `set_status_plataforma` aceita
+    trocar um final por outro, e "ganhamos" não pode virar "encerrado sem
+    decisão" só porque o monitor releu a caixa (19/09). O evento só entra quando
+    o status realmente mudou, senão a releitura duplicava."""
+    if ch.resolvido or ch.status_plataforma in svc.STATUS_FINAIS:
+        return False
+    if not svc.set_status_plataforma(ch, svc.STATUS_ENCERRADO):
+        return False
+    ch.auto_ligada = False
+    session.add(
+        svc.registrar_sistema(ch, "Monitor: plataforma encerrou o caso — aguardando fechamento")
+    )
+    return True
 
 
 @agent_router.post("/recebida", response_model=AgentRecebidaOut, dependencies=_agent_dep)
@@ -1120,7 +1267,10 @@ async def agent_recebida(
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> AgentRecebidaOut:
     """Monitor leu uma resposta da plataforma: entra no histórico como
-    `recebida` (autor monitor). Com `resolvido=true` fecha o chamado."""
+    `recebida` (autor monitor). Com `resolvido=true` o chamado vai pro estado
+    Encerrado (status oficial `encerrado` + evento) — 19/09 (Vinicius): não
+    fecha; uma pessoa conclui pela aba. `resolvido` na resposta continua
+    refletindo `ch.resolvido`."""
     ch: Chamado | None = None
     if body.chamado_id:
         ch = await _get(session, body.chamado_id)
@@ -1155,8 +1305,7 @@ async def agent_recebida(
         )
     ).scalar_one_or_none()
     if dup is not None:
-        if body.resolvido and not ch.resolvido:
-            session.add(svc.marcar_resolvido(ch, True, autor_nome=AUTOR_MONITOR))
+        if body.resolvido and _monitor_encerrou(session, ch):
             await session.commit()
         return AgentRecebidaOut(chamado_id=ch.id, mensagem_id=dup.id, resolvido=ch.resolvido)
     m = svc.nova_mensagem(
@@ -1170,7 +1319,7 @@ async def agent_recebida(
     m.canal = "robo"
     session.add(m)
     if body.resolvido:
-        session.add(svc.marcar_resolvido(ch, True, autor_nome=AUTOR_MONITOR))
+        _monitor_encerrou(session, ch)
     await session.commit()
     await session.refresh(m)
     return AgentRecebidaOut(chamado_id=ch.id, mensagem_id=m.id, resolvido=ch.resolvido)
@@ -1183,6 +1332,9 @@ AUTOR_CEREBRO = "cérebro"
 # 289899 GANHOS, 290920) — leu "Shopee PAGOU a compensação" como resposta nova e mandou
 # pra humano. Reabrir sozinho só vale pro que o monitor antigo fechou cedo demais (o
 # motivo original) ou o próprio cérebro fechou; decisão da plataforma e pessoa, não.
+# 19/09: monitor e cérebro não fecham mais nada (viram estado Encerrado) — isto
+# só vale pros chamados que eles fecharam ANTES de 19/09. Chamado fechado por
+# pessoa volta a abrir apenas com instrução (ver `agent_analise`).
 _FECHOU_REABRIVEL = (
     f"Chamado marcado como resolvido por {AUTOR_MONITOR}%",
     f"Chamado marcado como resolvido por {AUTOR_CEREBRO}%",
@@ -1224,7 +1376,7 @@ async def _cerebro_pode_reabrir(session: AsyncSession, ch: Chamado) -> bool:
 _ACAO_TXT = {
     "esperar": "aguardar a plataforma",
     "responder": "réplica enfileirada pro robô",
-    "resolver": "chamado resolvido",
+    "resolver": "robô sugere fechar",
     "humano": "precisa de humano",
 }
 _PLATAFORMA_ML = ("ml", "mercado livre", "mercadolivre", "meli")
@@ -1261,50 +1413,121 @@ async def _anexos_da_abertura(session: AsyncSession, ch: Chamado) -> list[Chamad
     )
 
 
+def _bloqueio_de(
+    msgs: list[ChamadoMensagem],
+) -> tuple[ChamadoMensagem | None, AgentBloqueioOut | None]:
+    """19/09: a última fala NOSSA está presa na API (pendente/enviando com erro em
+    ERROS_ESPERA_PLATAFORMA)? Devolve (a mensagem, o bloqueio pro robô)."""
+    nossas = [m for m in msgs if m.direcao == "enviada"]
+    if not nossas:
+        return None, None
+    m = nossas[-1]
+    erro = (m.erro or "").strip()
+    if m.status in ("pendente", "enviando") and erro in svc.ERROS_ESPERA_PLATAFORMA:
+        return m, AgentBloqueioOut(
+            erro=erro, motivo=svc.MOTIVO_DO_ERRO.get(erro), desde=m.enviada_at or m.created_at
+        )
+    return None, None
+
+
+def _ultima_fala_nossa(ch: Chamado):
+    return (
+        select(ChamadoMensagem)
+        .where(ChamadoMensagem.chamado_id == ch.id, ChamadoMensagem.direcao == "enviada")
+        .order_by(ChamadoMensagem.created_at.desc(), ChamadoMensagem.id.desc())
+        .limit(1)
+    )
+
+
 @agent_router.post("/analisar", response_model=AgentAnalisarOut, dependencies=_agent_dep)
 async def agent_analisar(
     body: AgentAnalisarIn,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> AgentAnalisarOut:
-    """Chamados de canal robô cuja ÚLTIMA resposta da plataforma ainda não
-    passou pelo cérebro (nenhuma mensagem `analise`, ou a última é mais velha
-    que a última `recebida`). Inclui chamados já marcados resolvidos: o
-    monitor antigo fechava na primeira resposta mesmo quando o ML pedia
-    medidas/fotos (479765445, 08/09)."""
-    rec = (
-        select(
-            ChamadoMensagem.chamado_id, func.max(ChamadoMensagem.created_at).label("ult")
+    """Chamados com trabalho pro cérebro:
+    - resposta da plataforma ainda não analisada (nenhuma `analise`, ou a última
+      é mais velha que a última `recebida`) — inclui chamados que o monitor
+      antigo fechou na primeira resposta (479765445, 08/09);
+    - 19/09 `bloqueio`: a última fala nossa está presa na API (plataforma não
+      libera) e nenhuma análise veio depois dela — Vinicius: o robô procura
+      outro caminho (`responder` vira tarefa no Seller Center);
+    - 19/09 `instrucao`: recado de pessoa mais novo que a última análise —
+      qualquer canal, mesmo Encerrado (em Concluído a aba nem aceita instrução);
+      a análise consome.
+    Fora isso, Encerrado (status final sem pessoa fechar) e resolvido pela
+    plataforma/pessoa não voltam pro cérebro (17/09).
+
+    Os filtros `canais` e `plataforma` valem SÓ pro ramo "resposta nova" (o robô
+    do Tuta pede canal robô/ML). Instrução e bloqueio saem pra quem chamar, em
+    qualquer canal e plataforma (19/09): a pessoa mandou, ou a API travou — se o
+    robô não atende aquela plataforma ele responde `humano` com o motivo, mas
+    tem que VER o chamado."""
+
+    def _ult(cond):
+        return (
+            select(
+                ChamadoMensagem.chamado_id, func.max(ChamadoMensagem.created_at).label("ult")
+            )
+            .where(cond)
+            .group_by(ChamadoMensagem.chamado_id)
+            .subquery()
         )
-        .where(ChamadoMensagem.direcao == "recebida")
-        .group_by(ChamadoMensagem.chamado_id)
-        .subquery()
-    )
-    ana = (
-        select(
-            ChamadoMensagem.chamado_id, func.max(ChamadoMensagem.created_at).label("ult")
-        )
-        .where(ChamadoMensagem.tipo == "analise")
-        .group_by(ChamadoMensagem.chamado_id)
-        .subquery()
+
+    rec = _ult(ChamadoMensagem.direcao == "recebida")
+    ana = _ult(ChamadoMensagem.tipo == "analise")
+    ins = _ult(ChamadoMensagem.tipo == "instrucao")
+    env = _ult(ChamadoMensagem.direcao == "enviada")
+    blq = _ult(
+        (ChamadoMensagem.direcao == "enviada")
+        & ChamadoMensagem.status.in_(("pendente", "enviando"))
+        & ChamadoMensagem.erro.in_(sorted(svc.ERROS_ESPERA_PLATAFORMA))
     )
     fechou = _ultimo_fechamento()
-    conds = [
-        Chamado.canal.in_(body.canais),
-        or_(ana.c.ult.is_(None), rec.c.ult > ana.c.ult),
-        # resolvido pela plataforma/pessoa não volta pro cérebro (17/09)
-        or_(Chamado.resolvido.is_(False), fechou.is_(None), *[fechou.like(p) for p in _FECHOU_REABRIVEL]),
-    ]
+    resposta_nova = rec.c.ult.is_not(None) & or_(ana.c.ult.is_(None), rec.c.ult > ana.c.ult)
+    bloqueio = (
+        blq.c.ult.is_not(None)
+        & (blq.c.ult == env.c.ult)
+        & or_(ana.c.ult.is_(None), ana.c.ult < blq.c.ult)
+    )
+    # Instrução pendente: qualquer canal/plataforma, inclusive Encerrado — mas
+    # não Concluído: a pessoa fechou, o robô não tem o que fazer (e a réplica
+    # ficaria presa, o lease só entrega de chamado aberto). Quem quiser o robô
+    # num Concluído reabre pela aba; a instrução volta a valer sozinha.
+    instrucao = (
+        ins.c.ult.is_not(None)
+        & or_(ana.c.ult.is_(None), ins.c.ult > ana.c.ult)
+        & Chamado.resolvido.is_(False)
+    )
+    encerrado = func.coalesce(Chamado.status_plataforma, "").in_(
+        sorted(svc.STATUS_FINAIS)
+    ) & Chamado.resolvido.is_(False)
+    # resolvido pela plataforma/pessoa não volta pro cérebro (17/09)
+    nao_fechado_por_gente = or_(
+        Chamado.resolvido.is_(False),
+        fechou.is_(None),
+        *[fechou.like(p) for p in _FECHOU_REABRIVEL],
+    )
+    ramo_resposta = (
+        Chamado.canal.in_(body.canais) & ~encerrado & nao_fechado_por_gente & resposta_nova
+    )
     if body.plataforma:
         plat = body.plataforma.strip().lower()
         aceitas = _PLATAFORMA_ML if plat == "ml" else (plat,)
-        conds.append(func.lower(func.coalesce(Chamado.plataforma, "")).in_(aceitas))
+        ramo_resposta = ramo_resposta & func.lower(
+            func.coalesce(Chamado.plataforma, "")
+        ).in_(aceitas)
+    # bloqueio: a fala presa é nossa e o caso está vivo — qualquer canal/plataforma
+    ramo_bloqueio = bloqueio & ~encerrado & Chamado.resolvido.is_(False)
     rows = (
         await session.execute(
             select(Chamado)
-            .join(rec, rec.c.chamado_id == Chamado.id)
+            .outerjoin(rec, rec.c.chamado_id == Chamado.id)
             .outerjoin(ana, ana.c.chamado_id == Chamado.id)
-            .where(*conds)
-            .order_by(rec.c.ult)
+            .outerjoin(ins, ins.c.chamado_id == Chamado.id)
+            .outerjoin(env, env.c.chamado_id == Chamado.id)
+            .outerjoin(blq, blq.c.chamado_id == Chamado.id)
+            .where(or_(instrucao, ramo_bloqueio, ramo_resposta))
+            .order_by(func.greatest(rec.c.ult, ins.c.ult, blq.c.ult), Chamado.created_at)
             .limit(body.limite)
         )
     ).scalars().all()
@@ -1312,6 +1535,8 @@ async def agent_analisar(
     for ch in rows:
         msgs = await _mensagens_do_caso(session, ch)
         anexos = await _anexos_da_abertura(session, ch)
+        pend = _instrucao_pendente(msgs)
+        _m, bloq = _bloqueio_de(msgs)
         out.append(
             AgentChamadoAnaliseOut(
                 chamado_id=ch.id,
@@ -1325,6 +1550,8 @@ async def agent_analisar(
                 origem=ch.origem,
                 resolvido=ch.resolvido,
                 valor_recuperado=ch.valor_recuperado,
+                valor_sugerido=ch.valor_sugerido,
+                status_plataforma=ch.status_plataforma,
                 observacao=ch.observacao,
                 created_at=ch.created_at,
                 mensagens=[
@@ -1344,6 +1571,14 @@ async def agent_analisar(
                     1 for m in msgs if m.direcao == "enviada" and m.autor_nome == AUTOR_CEREBRO
                 ),
                 analises=sum(1 for m in msgs if m.tipo == "analise"),
+                instrucao=(
+                    AgentInstrucaoOut(
+                        texto=pend.texto, autor=pend.autor_nome, quando=pend.created_at
+                    )
+                    if pend
+                    else None
+                ),
+                bloqueio=bloq,
             )
         )
     return AgentAnalisarOut(chamados=out)
@@ -1354,22 +1589,41 @@ async def agent_analise(
     body: AgentAnaliseIn,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> AgentAnaliseOut:
-    """Decisão do cérebro sobre a última resposta: grava a `analise` no
-    histórico (é o marcador de "já vi") e executa a ação. `responder` reabre
-    o chamado se preciso (o lease só entrega réplica de chamado aberto) e
-    enfileira a réplica (canal robô, pendente) — com os prints da abertura
-    copiados quando `reanexar_abertura`. `resolver` fecha e grava o valor
-    recuperado. `humano` só anota (e reabre se `reabrir`)."""
+    """Decisão do cérebro sobre a última resposta (ou instrução/bloqueio): grava
+    a `analise` no histórico (é o marcador de "já vi" — consome a instrução) e
+    executa a ação. `responder` reabre o chamado se preciso (o lease só entrega
+    réplica de chamado aberto) e enfileira a réplica (canal robô, pendente;
+    `abertura` se o chamado ainda não tem protocolo) — com os prints da
+    abertura copiados quando `reanexar_abertura`. 19/09: `responder` em canal
+    api COM bloqueio é aceito — o robô assume por outro caminho (Seller Center)
+    e a fala presa na API sai da fila. `resolver` NÃO fecha: põe o chamado em
+    Encerrado; `valor_recuperado` (qualquer ação) vira `valor_sugerido`.
+    `humano` só anota (e reabre se `reabrir`)."""
     ch = await _get(session, body.chamado_id)
+    # antes de gravar a análise (que consome a instrução)
+    com_instrucao = _instrucao_pendente(await _mensagens_do_caso(session, ch)) is not None
     assumido: ChamadoMensagem | None = None
     if body.acao == "responder" and ch.canal != "robo":
-        # Réplica de robô só sai pelo e-mail do Tuta (caso do ML). Chamado `api`
-        # (devolução) não tem por onde responder; manual de outra plataforma
-        # (Shopee/TikTok/Amazon = Seller Center) também não, até existir o
-        # robô de browser. Manual do ML: o robô ASSUME o chamado (Eduardo
+        # Réplica de robô só sai pelo robô de browser (Tuta no ML; Seller Center
+        # na Shopee/TikTok). Manual do ML: o robô ASSUME o chamado (Eduardo
         # 09/09: "para os manuais nós vamos tomar conta") — canal vira robô.
+        # Canal `api` (devolução) só quando a plataforma NÃO libera pela API
+        # (bloqueio) — Vinicius 19/09: o robô procura outro caminho; a fala
+        # presa sai da fila com `substituida_pelo_robo`. Manual de outra
+        # plataforma e api sem bloqueio: não tem por onde responder.
         e_ml = (ch.plataforma or "").strip().lower() in _PLATAFORMA_ML
-        if ch.canal != "manual" or not e_ml:
+        presa = (await session.execute(_ultima_fala_nossa(ch))).scalar_one_or_none()
+        presa, bloqueio = _bloqueio_de([presa] if presa is not None else [])
+        if ch.canal == "api" and presa is not None:
+            presa.status = "falhou"
+            presa.erro = "substituida_pelo_robo"
+            aviso = (
+                f"Chamado assumido pelo robô: a plataforma não libera pela API "
+                f"({bloqueio.motivo or bloqueio.erro}) — o robô abre/responde no Seller Center"
+            )
+        elif ch.canal == "manual" and e_ml:
+            aviso = "Chamado assumido pelo robô: as réplicas passam a sair pelo e-mail (Tuta)"
+        else:
             raise HTTPException(
                 422,
                 detail={"code": "canal_sem_robo", "canal": ch.canal, "plataforma": ch.plataforma},
@@ -1377,7 +1631,7 @@ async def agent_analise(
         ch.canal = "robo"
         assumido = svc.nova_mensagem(
             ch,
-            texto="Chamado assumido pelo robô: as réplicas passam a sair pelo e-mail (Tuta)",
+            texto=aviso,
             tipo="sistema",
             direcao="sistema",
             autor_nome=AUTOR_CEREBRO,
@@ -1399,14 +1653,32 @@ async def agent_analise(
     # `esperar`+`reabrir`: o monitor antigo fechava o chamado na 1ª leitura —
     # se o caso ainda está vivo no ML (só a abertura, ou fomos nós que falamos
     # por último), o cérebro reabre pra aba mostrar que está em andamento.
+    # 19/09 (ajuste): instrução NÃO reabre chamado Concluído por pessoa nem fechado
+    # pela plataforma — quem quer o robô de volta num Concluído reabre pela aba
+    # antes (o `/instrucao` recusa em resolvido, 422 `chamado_concluido`). Reabrir
+    # sozinho continua valendo só pro que monitor/cérebro fecharam antes de 19/09.
     reabrir = body.acao == "responder" or (body.acao in ("humano", "esperar") and body.reabrir)
     if reabrir and ch.resolvido and await _cerebro_pode_reabrir(session, ch):
         session.add(svc.marcar_resolvido(ch, False, autor_nome=AUTOR_CEREBRO))
+    if (
+        body.acao == "responder"
+        and com_instrucao
+        and not ch.resolvido
+        and ch.status_plataforma == svc.STATUS_ENCERRADO
+    ):
+        # Encerrado SEM decisão (monitor/robô disseram que a plataforma fechou) e a
+        # pessoa mandou responder: o caso segue — sai do Encerrado. Ganhamos/perdemos
+        # (decisão lida da API) ficam.
+        ch.status_plataforma = None
+        ch.status_plataforma_at = None
+        session.add(
+            svc.registrar_sistema(ch, "Chamado saiu de Encerrado: o robô vai responder por instrução")
+        )
     if body.acao == "responder":
         replica = svc.nova_mensagem(
             ch,
             texto=(body.texto_replica or "").strip(),
-            tipo="replica",
+            tipo="abertura" if not (ch.chamado or "").strip() else "replica",
             direcao="enviada",
             autor_nome=AUTOR_CEREBRO,
             status="pendente",
@@ -1428,12 +1700,51 @@ async def agent_analise(
                     )
                 )
     if body.valor_recuperado is not None:
-        ch.valor_recuperado = body.valor_recuperado
+        # 19/09: sugestão — a pessoa confirma ao concluir (nunca mais grava direto).
+        ch.valor_sugerido = body.valor_recuperado
     if body.observacao:
         atual = (ch.observacao or "").strip()
         ch.observacao = f"{atual}\n{body.observacao}" if atual else body.observacao
-    if body.acao == "resolver" and not ch.resolvido:
-        session.add(svc.marcar_resolvido(ch, True, autor_nome=AUTOR_CEREBRO))
+    if (
+        body.acao == "resolver"
+        and not ch.resolvido
+        # Já decidido (ganhamos/perdemos lidos da API, ou Encerrado de antes): o
+        # status fica como está e a sugestão de valor (acima) é tudo que o
+        # `resolver` grava — sem evento repetido (19/09).
+        and ch.status_plataforma not in svc.STATUS_FINAIS
+        and svc.set_status_plataforma(ch, svc.STATUS_ENCERRADO)
+    ):
+        ch.auto_ligada = False  # não há mais a quem cobrar
+        session.add(
+            svc.registrar_sistema(
+                ch, "Robô sugere fechar o chamado — aguardando fechamento por uma pessoa"
+            )
+        )
+        # Tarefa presa na fila (abertura/réplica `pendente`) não faz sentido num
+        # chamado que o próprio robô mandou fechar — sai da fila como `registrada`
+        # (mesmo tratamento do `encerrar_chamado_por_motivo`), senão o lease a
+        # entregava de novo e a coluna ficava "na fila do robô" pra sempre.
+        presas = (
+            await session.execute(
+                select(ChamadoMensagem).where(
+                    ChamadoMensagem.chamado_id == ch.id,
+                    ChamadoMensagem.direcao == "enviada",
+                    ChamadoMensagem.status == "pendente",
+                )
+            )
+        ).scalars().all()
+        for presa in presas:
+            presa.status = "registrada"
+            # abertura cancelada usa o código que a tela Devoluções já conhece
+            presa.erro = "contestacao_cancelada" if presa.tipo == "abertura" else None
+        if presas:
+            session.add(
+                svc.registrar_sistema(
+                    ch,
+                    f"{len(presas)} mensagem(ns) pendente(s) na fila cancelada(s) — o robô "
+                    "sugeriu fechar o chamado",
+                )
+            )
     await session.commit()
     await session.refresh(analise)
     logger.info(

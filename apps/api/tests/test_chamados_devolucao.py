@@ -341,6 +341,40 @@ async def test_ml_ainda_nao_liberou_revisao_fica_pendente_e_cron_retenta(
     assert msg2.status == "falhou" and msg2.erro == "devolucao_prazo_esgotado"
 
 
+async def test_abertura_pendente_de_chamado_encerrado_nao_e_reenviada(
+    client, make_user, auth_as, db, ml
+):
+    """19/09 (ajuste A3): a plataforma já decidiu (Encerrado, ex. ganhamos lido da
+    API) e a abertura ainda estava `pendente` na fila — o cron NÃO abre contestação
+    num caso decidido; a linha fica de fora como a resolvida."""
+    from app.services import chamados as chamados_svc
+
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+    ml.acao = False
+    await _seed_pedido(db, user, numero="293106", numeroloja="2000106")
+    r = await client.post(
+        "/api/devolutions",
+        json={"conta": "aguiar", "pedido_bling": "293106", "pedido_marketplace": "2000106",
+              "condicao_produto": "Usado", "motivo_devolucao": "Item faltando"},
+    )
+    assert r.status_code == 201 and r.json()["chamado_ml_status"] == "pendente", r.text
+    ch = (await db.execute(select(Chamado).where(Chamado.pedido_bling == "293106"))).scalar_one()
+    chamados_svc.set_status_plataforma(ch, chamados_svc.STATUS_GANHAMOS)
+    await db.commit()
+    ml.acao = True  # o ML até liberaria, mas o caso já acabou
+    summary = await svc.processar_pendentes(db)
+    assert summary == {"verificados": 0, "abertos": 0, "pendentes": 0, "falhas": 0}, summary
+    assert ml.reviews == []
+    msg = await _abertura(db, ch.id)
+    assert msg.status == "pendente"
+    # sem decisão, a mesma linha volta a ser tentada
+    ch.status_plataforma = None
+    ch.status_plataforma_at = None
+    await db.commit()
+    assert (await svc.processar_pendentes(db))["abertos"] == 1
+
+
 async def test_plataforma_sem_api_so_registra_na_aba(client, make_user, auth_as, db, ml):
     user = await make_user(permissions=_perms())
     auth_as(user)
@@ -948,9 +982,13 @@ async def test_sync_tiktok_resposta_no_historico_e_encerra(client, make_user, au
     s3 = await sync.sync_respostas(db)
     assert s3["novos"] == 2 and s3["encerrados"] == 1
     await db.refresh(ch)
-    assert ch.resolvido is True
+    # 19/09: Encerrado (a plataforma decidiu), não resolvido — a pessoa conclui
+    assert ch.resolvido is False and ch.resolvido_at is None
     assert ch.status_plataforma == "ganhamos"
-    # resolvido some da varredura
+    assert (await _status_aba(db, ch)) == ("encerrado", "ganhamos")
+    assert any("Plataforma encerrou o caso (tiktok:RETURN_OR_REFUND_REQUEST_CANCEL) — aguardando fechamento" in t
+               for t in await _sistema_txts(db, ch.id))
+    # Encerrado some da varredura
     assert (await sync.sync_respostas(db))["verificados"] == 0
 
 
@@ -1026,8 +1064,9 @@ async def test_sync_shopee_prova_extra_e_compensacao(client, make_user, auth_as,
     txts = await _recebidas(db, ch.id)
     assert any("APROVOU a compensação" in t and "786.71" in t for t in txts)
     await db.refresh(ch)
-    assert ch.resolvido is True
+    assert ch.resolvido is False
     assert ch.status_plataforma == "ganhamos"
+    assert any("Plataforma encerrou o caso (shopee:comp:APPROVED)" in t for t in await _sistema_txts(db, ch.id))
 
 
 async def test_sync_ml_mensagens_do_mediador_e_decisao(client, make_user, auth_as, db, ml, monkeypatch):
@@ -1070,8 +1109,10 @@ async def test_sync_ml_mensagens_do_mediador_e_decisao(client, make_user, auth_a
     txts = await _recebidas(db, ch.id)
     assert any("a favor do VENDEDOR" in t for t in txts)
     await db.refresh(ch)
-    assert ch.resolvido is True
+    assert ch.resolvido is False
     assert ch.status_plataforma == "ganhamos"
+    assert any("Plataforma encerrou o caso (ml:closed)" in t for t in await _sistema_txts(db, ch.id))
+    assert (await sync.sync_respostas(db))["verificados"] == 0
 
 
 async def _chamado_shopee_sync(client, make_user, auth_as, db, monkeypatch, *, numero, numeroloja, det, escrow):
@@ -1148,11 +1189,13 @@ async def test_sync_shopee_br_perde_pelo_escrow_com_carencia(client, make_user, 
     s = await sync.sync_respostas(db)
     assert s["encerrados"] == 1 and s["novos"] == 1
     await db.refresh(ch)
-    assert ch.status_plataforma == "perdemos" and ch.resolvido is True
+    assert ch.status_plataforma == "perdemos" and ch.resolvido is False
     assert ch.status_plataforma_at == desde
     assert any("sem compensação" in t for t in await _recebidas(db, ch.id))
-    lst = (await client.get("/api/chamados", params={"mostrar": "resolvidos"})).json()["items"]
-    assert next(i for i in lst if i["id"] == str(ch.id))["status_aba"] == "perdemos"
+    lst = (await client.get("/api/chamados", params={"mostrar": "abertos"})).json()["items"]
+    row = next(i for i in lst if i["id"] == str(ch.id))
+    assert row["status_aba"] == "encerrado" and row["status_aba_motivo"] == "perdemos"
+    assert row["valor_sugerido"] is None
 
 
 async def test_sync_shopee_reembolso_anterior_a_disputa_nao_e_perdemos(client, make_user, auth_as, db, ml, monkeypatch):
@@ -1202,7 +1245,7 @@ async def test_sync_shopee_reembolso_anterior_a_disputa_nao_e_perdemos(client, m
     s = await sync.sync_respostas(db)
     assert s["encerrados"] == 1
     await db.refresh(ch)
-    assert ch.resolvido is True and ch.status_plataforma == "ganhamos"
+    assert ch.resolvido is False and ch.status_plataforma == "ganhamos"
 
 
 async def test_sync_shopee_br_ganha_pelo_valor_ou_sem_reembolso(client, make_user, auth_as, db, ml, monkeypatch):
@@ -1228,7 +1271,10 @@ async def test_sync_shopee_br_ganha_pelo_valor_ou_sem_reembolso(client, make_use
     s = await sync.sync_respostas(db)
     assert s["encerrados"] == 1
     await db.refresh(ch)
-    assert ch.status_plataforma == "ganhamos" and ch.resolvido is True
+    assert ch.status_plataforma == "ganhamos" and ch.resolvido is False
+    # 19/09: o valor lido na API é SUGESTÃO — a pessoa confirma ao concluir
+    assert float(ch.valor_sugerido) == 728.22 and ch.valor_recuperado is None
+    assert (await _status_aba(db, ch)) == ("encerrado", "ganhamos · robô sugere lucro de R$ 728,22")
     assert any("APROVOU a compensação" in t and "728.22" in t for t in await _recebidas(db, ch.id))
 
     # outra devolução: fechou sem reembolso ao comprador → ganhamos
@@ -1242,7 +1288,7 @@ async def test_sync_shopee_br_ganha_pelo_valor_ou_sem_reembolso(client, make_use
     s = await sync.sync_respostas(db)
     assert s["encerrados"] == 1
     await db.refresh(ch2)
-    assert ch2.status_plataforma == "ganhamos" and ch2.resolvido is True
+    assert ch2.status_plataforma == "ganhamos" and ch2.resolvido is False
     assert any("SEM reembolso" in t for t in await _recebidas(db, ch2.id))
 
 
@@ -1513,11 +1559,32 @@ async def test_shopee_ja_contestada_a_mao_nao_e_prazo_vencido(client, make_user,
     s1 = await sync.sync_respostas(db)
     assert s1["encerrados"] == 1, s1
     await db.refresh(ch)
-    assert ch.resolvido is True and float(ch.valor_recuperado) == 728.22
+    # 19/09: não fecha; o valor pago vira sugestão pra pessoa confirmar
+    assert ch.resolvido is False and ch.valor_recuperado is None
+    assert float(ch.valor_sugerido) == 728.22 and ch.status_plataforma == "ganhamos"
     txts = await _recebidas(db, ch.id)
     assert any("PAGOU a compensação" in t and "R$ 728,22" in t and "28/08" in t for t in txts), txts
-    assert any("lucro de R$ 728,22" in t for t in await _sistema(db, ch.id))
+    assert any("Plataforma encerrou o caso (shopee:compensacao_paga) — aguardando fechamento" in t
+               for t in await _sistema(db, ch.id))
     assert (await sync.sync_respostas(db))["verificados"] == 0
+    # a pessoa conclui com a sugestão (a janela pré-preenche); 19/09: a nova situação
+    # do Bling é obrigatória — stub no lugar do Bling de verdade
+    from app.services import chamados as chamados_svc
+
+    async def _aplicar(session, ch_, nome):
+        ch_.status_bling = nome
+        return {"bling_order_id": 0, "situacao": nome, "situacao_id": 0}
+
+    monkeypatch.setattr(chamados_svc, "aplicar_status_bling", _aplicar)
+    sem = await client.post(f"/api/chamados/{ch.id}/resolver", json={"resolvido": True, "valor_recuperado": "728.22"})
+    assert sem.status_code == 422 and sem.json()["detail"]["code"] == "chamado_situacao_obrigatoria"
+    ok = await client.post(
+        f"/api/chamados/{ch.id}/resolver",
+        json={"resolvido": True, "valor_recuperado": "728.22", "situacao": "Resolvido"},
+    )
+    assert ok.status_code == 200, ok.text
+    assert ok.json()["status_aba"] == "concluido"
+    assert ok.json()["status_aba_motivo"] == "ganhamos — lucro de R$ 728,22"
 
 
 async def test_ml_claim_encerrado_e_texto_manual_no_chamado(client, make_user, auth_as, db, ml, monkeypatch):
@@ -1629,17 +1696,20 @@ async def test_motivo_limpo_encerra_chamado_e_avisa_da_contestacao(client, make_
     assert await _refunds_de(db, "293843") == []
     assert p.json()["chamado_resolvido"] is False
 
-    # 2) motivo limpo → chamado encerra, com o aviso da contestação já enviada
+    # 2) motivo limpo → chamado vai pra Encerrado (19/09: não fecha; a pessoa
+    #    conclui), com o aviso da contestação já enviada
     p = await client.patch(f"/api/devolutions/{did}", json={"motivo_devolucao": None})
     assert p.status_code == 200, p.text
-    assert p.json()["chamado_resolvido"] is True
+    assert p.json()["chamado_resolvido"] is False
     # a tela Devoluções passa a mostrar "retirar a contestação no painel"
     assert p.json()["chamado_ml_status"] == "enviada"
     assert p.json()["chamado_ml_erro"] == "retirar_contestacao"
     ch = await _chamado_de(db, "293843")
-    assert ch.resolvido is True and ch.auto_ligada is False and ch.valor_recuperado is None
+    assert ch.resolvido is False and ch.auto_ligada is False and ch.valor_recuperado is None
+    assert ch.status_plataforma == "encerrado" and ch.valor_sugerido is None
+    assert (await _status_aba(db, ch)) == ("encerrado", "plataforma encerrou sem decisão")
     hist = [m["texto"] for m in (await client.get(f"/api/chamados/{ch.id}/mensagens")).json()]
-    assert any('"Não recebido"' in t and '"—"' in t and "encerrado" in t for t in hist), hist
+    assert any('"Não recebido"' in t and '"—"' in t and "sem razão de existir" in t for t in hist), hist
     assert any("desista dela" in t and "Mercado Livre" in t for t in hist), hist
 
     # 3) salvar de novo sem mudar o motivo (o front manda o motivo em todo save) não repete nada
@@ -1669,16 +1739,16 @@ async def test_motivo_que_nao_abre_chamado_encerra_e_abertura_pendente_sai_da_fi
 
     p = await client.patch(f"/api/devolutions/{did}", json={"motivo_devolucao": "Item Incorreto"})
     assert p.status_code == 200, p.text
-    assert p.json()["chamado_resolvido"] is True
+    assert p.json()["chamado_resolvido"] is False
     ch = await _chamado_de(db, "293844")
-    assert ch.resolvido is True
+    assert ch.resolvido is False and ch.status_plataforma == "encerrado"
     msg = await _abertura(db, ch.id)
     await db.refresh(msg)
     assert msg.status == "registrada" and msg.erro == "contestacao_cancelada"
     assert p.json()["chamado_ml_status"] == "registrada"
     assert p.json()["chamado_ml_erro"] == "contestacao_cancelada"
     hist = [m["texto"] for m in (await client.get(f"/api/chamados/{ch.id}/mensagens")).json()]
-    assert any('"Item Incorreto"' in t and "encerrado" in t for t in hist), hist
+    assert any('"Item Incorreto"' in t and "aguardando fechamento" in t for t in hist), hist
     assert any("pendente na fila" in t for t in hist), hist
 
 
@@ -1722,10 +1792,10 @@ async def test_kit_parcial_mantem_chamado_e_encerra_com_a_ultima_linha(
         json={"condicao_produto": "Novo", "motivo_devolucao": None},
     )
     assert p.status_code == 200, p.text
-    assert p.json()["chamado_resolvido"] is True
+    assert p.json()["chamado_resolvido"] is False  # 19/09: Encerrado, a pessoa conclui
     assert await _refunds_de(db, "293845") == []
     ch = await _chamado_de(db, "293845")
-    assert ch.resolvido is True
+    assert ch.resolvido is False and ch.status_plataforma == "encerrado"
 
 
 async def test_reembolso_com_valor_lancado_fica_e_avisa(client, make_user, auth_as, db, ml):
@@ -2178,7 +2248,7 @@ async def test_sync_tiktok_recusa_do_reembolso_e_aguardando_ate_a_tiktok_decidir
     nota = (await db.execute(select(ChamadoMensagem).where(
         ChamadoMensagem.chamado_id == ch.id, ChamadoMensagem.direcao == "recebida"))).scalars().one()
     assert "caixa de sabonete" in nota.texto and nota.created_at == datetime.fromtimestamp(1789620000, UTC)
-    assert await _status_aba(db, ch) == ("aguardando", "nossa recusa registrada — o comprador ainda pode recorrer")
+    assert await _status_aba(db, ch) == ("aguard_plataforma", "nossa recusa registrada — o comprador ainda pode recorrer")
     # de novo: nada duplica, continua aguardando
     s2 = await sync.sync_respostas(db, agora=recusa + timedelta(hours=2))
     assert s2["novos"] == 0 and s2["encerrados"] == 0
@@ -2198,7 +2268,7 @@ async def test_sync_tiktok_recusa_do_reembolso_e_aguardando_ate_a_tiktok_decidir
     fake.update_time += 3600
     s4 = await sync.sync_respostas(db, agora=recusa + timedelta(days=2))
     await db.refresh(ch)
-    assert s4["encerrados"] == 1 and ch.resolvido is True and ch.status_plataforma == "ganhamos"
+    assert s4["encerrados"] == 1 and ch.resolvido is False and ch.status_plataforma == "ganhamos"
     assert any("A FAVOR DO VENDEDOR" in t for t in await _recebidas(db, ch.id))
 
 
@@ -2215,7 +2285,7 @@ async def test_sync_tiktok_recusa_sem_recurso_em_10_dias_e_ganhamos(client, make
 
     s2 = await sync.sync_respostas(db, agora=recusa + timedelta(days=10, minutes=1))
     await db.refresh(ch)
-    assert s2["encerrados"] == 1 and ch.resolvido is True and ch.status_plataforma == "ganhamos"
+    assert s2["encerrados"] == 1 and ch.resolvido is False and ch.status_plataforma == "ganhamos"
     assert any("10 dias sem recurso" in t and "ganhamos" in t for t in await _recebidas(db, ch.id))
 
 
@@ -2245,7 +2315,8 @@ async def test_sync_tiktok_pedido_refeito_pelo_comprador_nao_e_ganhamos(client, 
     txts = await _recebidas(db, ch.id)
     assert any("refez o pedido" in t and "4042163882929260440" in t and "aguardando a nossa resposta" in t for t in txts), txts
     assert not any("valor fica com o vendedor" in t for t in txts)
-    assert (await _status_aba(db, ch))[0] == "respondeu"
+    # canal api: a resposta é de gente (o robô não responde devolução pela API)
+    assert (await _status_aba(db, ch)) == ("analise_humano", "plataforma respondeu — responder no Seller Center")
 
 
 # ---------------------------------------------------------------- Shopee: só reembolso já aprovado → robô (18/09)
@@ -2325,7 +2396,7 @@ async def test_shopee_so_reembolso_ja_aprovado_vai_pro_robo_pedir_compensacao(cl
     hist = await _sistema_txts(db, ch.id)
     assert any("Shopee já aprovou o só reembolso" in t and "robô" in t for t in hist), hist
     # a coluna Status: na fila do robô (não "esperando liberar")
-    assert (await _status_aba(db, ch))[0] == "fila"
+    assert (await _status_aba(db, ch)) == ("analise_robo", "na fila do robô")
     # o robô da Shopee recebe como `abrir`
     token = "tok-shopee-1809"
     monkeypatch.setattr(get_settings(), "nf_agent_token", token)

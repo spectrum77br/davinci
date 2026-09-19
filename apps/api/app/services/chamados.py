@@ -14,9 +14,15 @@ uma Devolução. Este módulo concentra o que não é CRUD:
 - `aplicar_status_bling`: muda a situação do pedido no Bling (mesmo PATCH
   dedicado da Logística) e carimba o histórico.
 - `run_replica_automatica`: cron — reenvia a mensagem automática a cada N dias
-  enquanto ligada, e fecha sozinho TODO chamado de API do ML quando o ML
-  encerra o claim (Eduardo 15/09: "o robô precisa acompanhar todos os
-  chamados" — o antigo sim/não "monitoramento" saiu da aba e do banco).
+  enquanto ligada, e acompanha TODO chamado de API do ML: quando o ML encerra
+  o claim, o chamado vai pro estado Encerrado (Eduardo 15/09: "o robô precisa
+  acompanhar todos os chamados" — o antigo sim/não "monitoramento" saiu da aba
+  e do banco).
+
+19/09 (Vinicius): NENHUM caminho automático fecha chamado. "Encerrado" é um
+ESTADO (status oficial final + evento), não um fechamento — só uma pessoa
+conclui, pelo `POST /{id}/resolver`, dizendo lucro/prejuízo. O robô e as
+plataformas só SUGEREM o valor (`Chamado.valor_sugerido`).
 
 Regra combinada com o usuário (planilha, célula "alterar status bling"):
 Logística → "Problemas" ao abrir e "Resolvido"/"Perdimento" ao fechar; Margem
@@ -61,34 +67,69 @@ STATUS_FECHAMENTO_POR_ORIGEM: dict[str, tuple[str, ...]] = {
 AUTOR_SISTEMA = "sistema"
 AUTOR_AUTO = "réplica automática"
 
-# Coluna "Status" da aba (Vinicius 17/09: "o chamado está com status
-# finalizado, aberto, de todas as plataformas"). Os OFICIAIS vêm da API e ficam
-# em `Chamado.status_plataforma` (+ desde quando); os DERIVADOS a listagem
-# calcula do histórico na hora — quem falou por último, o que o cérebro pediu —
-# e não persistem. O painel traduz o código pro rótulo.
+# Coluna "Status" da aba. Dois níveis:
+#
+# 1. Status OFICIAL da plataforma (`Chamado.status_plataforma` + desde quando):
+#    lido pela API e gravado pelos syncs. Vinicius 17/09: "o chamado está com
+#    status finalizado, aberto, de todas as plataformas". Continua igual em 19/09
+#    — vira o "motivo" (tooltip) do status da aba e alimenta a derivação.
 STATUS_EM_ANALISE = "em_analise"  # plataforma julgando a disputa
 STATUS_PROVA = "prova"  # plataforma pediu prova extra
 STATUS_REEMBOLSO_PAGO = "reembolso_pago"  # Shopee reembolsou o comprador; compensação ainda não veio
 STATUS_GANHAMOS = "ganhamos"
 STATUS_PERDEMOS = "perdemos"
 STATUS_ENCERRADO = "encerrado"  # encerrou sem dizer quem ganhou
-STATUS_AGUARDANDO = "aguardando"  # nós falamos por último
-STATUS_RESPONDEU = "respondeu"  # plataforma falou por último
-STATUS_HUMANO = "humano"  # cérebro pediu gente
-STATUS_FILA = "fila"  # abertura/réplica ainda na fila do robô
-STATUS_FALHOU = "falhou"  # último envio falhou
-STATUS_SEM_ACOMPANHAMENTO = "sem_acompanhamento"  # registrado à mão, nada consulta a plataforma
-STATUS_ESPERANDO_LIBERAR = "esperando_liberar"  # a plataforma ainda não libera abrir/contestar
+STATUS_AGUARDANDO = "aguardando"  # nós falamos por último (recusa registrada)
+STATUS_FINAIS = frozenset({STATUS_GANHAMOS, STATUS_PERDEMOS, STATUS_ENCERRADO})
+# 19/09: chamado no estado Encerrado (status final, ninguém concluiu) já não tem
+# nada pra fazer sozinho — réplica automática, reenvio de abertura pendente e a
+# varredura da plataforma param nele. Filtro SQL compartilhado pelos crons
+# (`run_replica_automatica`, `sync_respostas`, `processar_pendentes`).
+NAO_ENCERRADO_SQL = or_(
+    Chamado.status_plataforma.is_(None),
+    Chamado.status_plataforma.not_in(sorted(STATUS_FINAIS)),
+)
+
+# 2. Status da ABA (`status_aba`, derivado na hora pela listagem, não persiste).
+#    Vinicius 19/09: os 13 códigos de antes viraram CINCO, e a regra é "primeiro o
+#    robô; gente só quando o robô desiste":
+#      Análise Humano   — o robô não conseguiu / precisa de gente;
+#      Análise Robô     — o robô (IA do Eduardo) tem trabalho aqui: responder,
+#                         reenviar, achar outro caminho, ou uma instrução nossa;
+#      Aguard. Plataforma — a bola está com a plataforma;
+#      Encerrado        — a plataforma encerrou o caso (ganhamos/perdemos/sem
+#                         decisão) e falta uma PESSOA fechar com lucro/prejuízo;
+#      Concluído        — fechado por pessoa (POST /{id}/resolver).
+#    Ver `status_e_motivo_da_aba`.
+ABA_ANALISE_HUMANO = "analise_humano"
+ABA_ANALISE_ROBO = "analise_robo"
+ABA_AGUARD_PLATAFORMA = "aguard_plataforma"
+ABA_ENCERRADO = "encerrado"
+ABA_CONCLUIDO = "concluido"
+
+# 19/09: o robô tenta de novo antes de desistir (Vinicius: "envio falhou → fila do
+# robô; se não conseguir, humano"). `/agent/resultado` com ok=false devolve a
+# mensagem pra fila até esta contagem; na última fica `falhou` e vira Análise Humano.
+MAX_TENTATIVAS_ROBO = 3
+
+# O que a coluna diz embaixo de "Aguard. Plataforma" pra cada status oficial.
 # 18/09 (Vinicius, 296936): a recusa que MANDAMOS não é "ganhamos" — a plataforma
-# registrou e o outro lado ainda pode recorrer. O sync grava `aguardando` como
-# status oficial; a coluna explica o porquê.
+# registrou e o outro lado ainda pode recorrer; o sync grava `aguardando`.
 MOTIVO_STATUS_OFICIAL = {
+    STATUS_EM_ANALISE: "em análise na plataforma",
+    STATUS_PROVA: "prova enviada — a Shopee analisa",
+    STATUS_REEMBOLSO_PAGO: "reembolso pago — 24 h de carência",
     STATUS_AGUARDANDO: "nossa recusa registrada — o comprador ainda pode recorrer",
 }
+# Motivo dos status finais (Encerrado / Concluído).
+MOTIVO_FINAL = {STATUS_GANHAMOS: "ganhamos", STATUS_PERDEMOS: "perdemos"}
 
 # 18/09 (Eduardo: "está uma zona, precisamos dos status verdadeiros"): o erro da
 # última mensagem nossa diz DE QUEM é a vez — e a coluna tem que dizer isso.
-# A plataforma ainda não liberou (o retry de hora em hora resolve sozinho):
+# A plataforma ainda não liberou pela API. 19/09 (Vinicius): nesses casos o robô
+# tem OUTRO caminho na plataforma (Seller Center) — é Análise Robô, não espera;
+# `/agent/analisar` entrega o chamado com `bloqueio` e `responder` é aceito em
+# canal api (o robô assume).
 ERROS_ESPERA_PLATAFORMA = frozenset({
     "shopee_motivo_indisponivel", "shopee_aguardando_pacote", "tiktok_aguardando_pacote",
     "tiktok_recusa_bloqueada", "tiktok_arbitragem", "return_review_indisponivel",
@@ -99,7 +140,7 @@ ERROS_PEDEM_HUMANO = frozenset({
     "devolucao_sem_claim", "devolucao_nao_encontrada", "shopee_captcha_humano",
     "plataforma_sem_api", "plataforma_sem_api_replica", "sem_perfil_adspower", "perfil_deslogado",
 })
-# Texto curto que a coluna mostra embaixo do status.
+# Texto curto que a coluna mostra (tooltip) junto do status.
 MOTIVO_DO_ERRO = {
     "shopee_motivo_indisponivel": "Shopee ainda não libera o motivo da contestação",
     "shopee_aguardando_pacote": "pacote da devolução ainda em trânsito",
@@ -117,13 +158,14 @@ MOTIVO_DO_ERRO = {
     "plataforma_sem_api_replica": "réplica sem API — responder no Seller Center",
     "sem_perfil_adspower": "conta sem perfil no AdsPower",
     "perfil_deslogado": "perfil do AdsPower deslogado",
+    "substituida_pelo_robo": "o robô assumiu por outro caminho",
 }
-# Falha que o acompanhamento já segue (contestada à mão, prazo, caso encerrado):
-# não é "envio falhou" pro operador.
+# Falha que o acompanhamento já segue (contestada à mão, prazo, caso encerrado)
+# ou que o robô substituiu por outro caminho (19/09): não é "envio falhou".
 ERROS_ACOMPANHADOS = frozenset({
     "shopee_ja_contestada", "shopee_prazo_contestacao_esgotado", "shopee_devolucao_encerrada",
     "tiktok_ja_recusada", "tiktok_devolucao_encerrada", "ml_claim_encerrada",
-    "ml_claim_encerrada_sem_prejuizo",
+    "ml_claim_encerrada_sem_prejuizo", "substituida_pelo_robo",
 })
 
 
@@ -131,7 +173,14 @@ def _erro_pede_humano(erro: str) -> bool:
     e = (erro or "").strip()
     # o robô da página do ML grava a frase inteira ("tem foto anexada: …")
     return e in ERROS_PEDEM_HUMANO or e.startswith("tem foto anexada")
-STATUS_FINAIS = frozenset({STATUS_GANHAMOS, STATUS_PERDEMOS, STATUS_ENCERRADO})
+
+
+def _robo_atende(ch: Chamado) -> bool:
+    """Tem robô que responde por este chamado? Canal `robo` sim; canal `manual`
+    do ML também (o cérebro assume os manuais do ML — Eduardo 09/09). Canal `api`
+    (devolução Shopee/TikTok/ML pela API) e manual de outra plataforma não têm robô
+    que responda: quando a plataforma fala neles, é gente (Seller Center)."""
+    return ch.canal == "robo" or (ch.canal == "manual" and _eh_ml(ch))
 
 
 class ChamadoError(Exception):
@@ -706,7 +755,9 @@ def marcar_resolvido(
 ) -> ChamadoMensagem:
     """Fecha (ou reabre) o chamado e devolve o evento do histórico. `valor` é
     o resultado do chamado (lucro/prejuízo em R$) — Eduardo 15/09: obrigatório
-    ao resolver pela aba; opcional pro robô e pro cron."""
+    ao resolver pela aba. 19/09 (Vinicius): fechar é só de PESSOA — o único
+    caminho que chama com `resolvido=True` é o endpoint `/resolver`; o cérebro
+    só reabre (`resolvido=False`) o que o monitor antigo fechou cedo demais."""
     agora = datetime.now(UTC)
     ch.resolvido = resolvido
     ch.resolvido_at = agora if resolvido else None
@@ -747,6 +798,8 @@ def status_da_aba(
     ultima_analise: ChamadoMensagem | None,
     analise_pede_humano: bool,
     analise_pede_esperar: bool = False,
+    instrucao_pendente: ChamadoMensagem | None = None,
+    nossa_fala_apos_status: bool = False,
 ) -> tuple[str, datetime | None]:
     """(código, desde quando) da coluna Status — ver `status_e_motivo_da_aba`."""
     codigo, quando, _motivo = status_e_motivo_da_aba(
@@ -755,8 +808,23 @@ def status_da_aba(
         ultima_analise=ultima_analise,
         analise_pede_humano=analise_pede_humano,
         analise_pede_esperar=analise_pede_esperar,
+        instrucao_pendente=instrucao_pendente,
+        nossa_fala_apos_status=nossa_fala_apos_status,
     )
     return codigo, quando
+
+
+def _texto_curto(texto: str | None, n: int) -> str:
+    t = " ".join((texto or "").split())
+    return t if len(t) <= n else t[: n - 1].rstrip() + "…"
+
+
+def _respondeu(ch: Chamado, quando: datetime | None) -> tuple[str, datetime | None, str]:
+    """A plataforma falou por último e ninguém tratou: é do robô, se há robô
+    pra este chamado; senão é gente (responder no Seller Center)."""
+    if _robo_atende(ch):
+        return ABA_ANALISE_ROBO, quando, "plataforma respondeu — o robô analisa"
+    return ABA_ANALISE_HUMANO, quando, "plataforma respondeu — responder no Seller Center"
 
 
 def status_e_motivo_da_aba(
@@ -766,47 +834,107 @@ def status_e_motivo_da_aba(
     ultima_analise: ChamadoMensagem | None,
     analise_pede_humano: bool,
     analise_pede_esperar: bool = False,
+    instrucao_pendente: ChamadoMensagem | None = None,
+    nossa_fala_apos_status: bool = False,
 ) -> tuple[str, datetime | None, str | None]:
-    """(código, desde quando, motivo curto) que a coluna Status mostra.
+    """(código ABA_*, desde quando, motivo curto) que a coluna Status mostra.
 
-    Ordem (18/09 — a coluna diz DE QUEM é a vez, de verdade):
-      1. resolvido → ganhamos / perdemos / encerrado;
-      2. o cérebro pediu gente e ninguém falou depois → precisa de humano;
-      3. a NOSSA última mensagem não saiu: o erro dela diz o porquê —
-         plataforma ainda não libera → esperando a plataforma liberar;
-         falta foto/quebra-cabeça/login/tarefa sem API → precisa de humano;
-         sem erro → na fila (robô ou API); falhou de verdade → envio falhou;
-      4. status oficial da API (resposta mais nova que ele → respondeu);
-      5. a plataforma falou por último → respondeu, a menos que o robô já leu
-         e decidiu aguardar (antes a linha ficava "respondeu" pra sempre);
-      6. nós falamos por último → aguardando plataforma."""
+    `nossa_fala_apos_status` (19/09): a listagem olha o histórico inteiro e diz se
+    existe ALGUMA fala nossa que saiu (`enviada`/`registrada`) depois do status
+    oficial — sem isso a prova que já mandamos voltava a pedir humano assim que a
+    Shopee respondia (a última fala passava a ser dela). Aqui, sem o kwarg, vale
+    só a última fala (chamadas antigas/unitárias).
+
+    Precedência (Vinicius 19/09 — cinco status; "primeiro o robô, gente só quando
+    o robô desiste"):
+      1. resolvido por pessoa → Concluído (motivo: ganhamos/perdemos/sem decisão
+         + lucro/prejuízo);
+      2. status oficial FINAL sem pessoa fechar → Encerrado (+ sugestão do robô);
+      3. instrução nossa mais nova que a última análise → Análise Robô;
+      4. o cérebro pediu gente e ninguém falou depois → Análise Humano;
+      5. Shopee pediu prova e ainda não mandamos NADA depois do pedido → Análise
+         Humano (prova é humano — decisão do Vinicius); mandamos → cai na 7;
+      6. a NOSSA última mensagem não saiu: o erro dela diz de quem é a vez —
+         plataforma não libera → Análise Robô (ele procura outro caminho; se já
+         leu e decidiu aguardar, Aguard. Plataforma); falta foto/quebra-cabeça/
+         login/tarefa sem API → Análise Humano; sem erro → Análise Robô (na fila);
+         falhou de vez (o retry do robô esgotou, §MAX_TENTATIVAS_ROBO) → Análise
+         Humano;
+      7. status oficial da API: resposta da plataforma mais nova que ele → quem
+         responde (robô ou gente); senão Aguard. Plataforma com o motivo oficial;
+      8. nenhuma fala no histórico → Análise Humano (registrado à mão);
+      9. a plataforma falou por último → robô/gente, a menos que o robô já leu e
+         decidiu aguardar;
+     10. nós falamos por último → Aguard. Plataforma."""
     if ch.resolvido:
-        if ch.status_plataforma in (STATUS_GANHAMOS, STATUS_PERDEMOS):
-            return ch.status_plataforma, ch.status_plataforma_at or ch.resolvido_at, None
-        return STATUS_ENCERRADO, ch.resolvido_at, None
+        motivo = MOTIVO_FINAL.get(ch.status_plataforma or "", "sem decisão da plataforma")
+        resultado = resultado_texto(ch.valor_recuperado)
+        if resultado:
+            motivo = f"{motivo} — {resultado}"
+        return ABA_CONCLUIDO, ch.resolvido_at, motivo
+    if ch.status_plataforma in STATUS_FINAIS:
+        motivo = MOTIVO_FINAL.get(ch.status_plataforma, "plataforma encerrou sem decisão")
+        if ch.valor_sugerido is not None:
+            motivo = f"{motivo} · robô sugere {resultado_texto(ch.valor_sugerido)}"
+        return ABA_ENCERRADO, ch.status_plataforma_at, motivo
+    if instrucao_pendente is not None:
+        return (
+            ABA_ANALISE_ROBO,
+            instrucao_pendente.created_at,
+            f"instrução pendente pro robô: {_texto_curto(instrucao_pendente.texto, 60)}",
+        )
     fala_em = _quando(ultima_fala)
     analise_depois = (
         ultima_analise is not None and (fala_em is None or ultima_analise.created_at >= fala_em)
     )
     if analise_pede_humano and analise_depois:
-        return STATUS_HUMANO, ultima_analise.created_at, "o robô pediu revisão humana"
+        return ABA_ANALISE_HUMANO, ultima_analise.created_at, "o robô pediu revisão humana"
+    nossa_fala_depois_do_status = nossa_fala_apos_status or (
+        ultima_fala is not None
+        and ultima_fala.direcao == "enviada"
+        and fala_em is not None
+        and (ch.status_plataforma_at is None or fala_em > ch.status_plataforma_at)
+    )
+    if ch.status_plataforma == STATUS_PROVA and not nossa_fala_depois_do_status:
+        return ABA_ANALISE_HUMANO, ch.status_plataforma_at, "Shopee pediu prova adicional"
     if ultima_fala is not None and ultima_fala.direcao == "enviada":
         erro = (ultima_fala.erro or "").strip()
         st = ultima_fala.status
         if st in ("pendente", "enviando"):
             if erro in ERROS_ESPERA_PLATAFORMA:
-                return STATUS_ESPERANDO_LIBERAR, fala_em, MOTIVO_DO_ERRO.get(erro)
+                if analise_pede_esperar and analise_depois:
+                    return (
+                        ABA_AGUARD_PLATAFORMA,
+                        ultima_analise.created_at,
+                        f"{MOTIVO_DO_ERRO[erro]} — o robô decidiu aguardar",
+                    )
+                return (
+                    ABA_ANALISE_ROBO,
+                    fala_em,
+                    f"plataforma não libera: {MOTIVO_DO_ERRO[erro]} — "
+                    "robô procura outro caminho",
+                )
             if _erro_pede_humano(erro):
-                return STATUS_HUMANO, fala_em, MOTIVO_DO_ERRO.get(erro, erro[:80])
+                return ABA_ANALISE_HUMANO, fala_em, MOTIVO_DO_ERRO.get(erro, erro[:80])
             quem = "na fila do robô" if (ultima_fala.canal or "") == "robo" else "saindo pela API"
-            return STATUS_FILA, fala_em, quem
+            tentativas = ultima_fala.tentativas or 0
+            if erro and tentativas:
+                quem = (
+                    f"{quem} — tentativa {tentativas} de {MAX_TENTATIVAS_ROBO} falhou: "
+                    f"{_texto_curto(erro, 60)}"
+                )
+            return ABA_ANALISE_ROBO, fala_em, quem
         if st == "falhou":
             if _erro_pede_humano(erro):
-                return STATUS_HUMANO, fala_em, MOTIVO_DO_ERRO.get(erro, erro[:80])
+                return ABA_ANALISE_HUMANO, fala_em, MOTIVO_DO_ERRO.get(erro, erro[:80])
             if erro not in ERROS_ACOMPANHADOS:
-                return STATUS_FALHOU, fala_em, erro[:80] or None
+                return (
+                    ABA_ANALISE_HUMANO,
+                    fala_em,
+                    f"envio falhou: {erro[:80]}" if erro else "envio falhou",
+                )
         if st == "registrada" and _erro_pede_humano(erro):
-            return STATUS_HUMANO, fala_em, MOTIVO_DO_ERRO.get(erro, erro[:80])
+            return ABA_ANALISE_HUMANO, fala_em, MOTIVO_DO_ERRO.get(erro, erro[:80])
     if ch.status_plataforma:
         if (
             ultima_fala is not None
@@ -815,19 +943,23 @@ def status_e_motivo_da_aba(
             and (ch.status_plataforma_at is None or fala_em > ch.status_plataforma_at)
             and not (analise_pede_esperar and analise_depois)
         ):
-            return STATUS_RESPONDEU, fala_em, None
+            return _respondeu(ch, fala_em)
         return (
-            ch.status_plataforma,
+            ABA_AGUARD_PLATAFORMA,
             ch.status_plataforma_at,
             MOTIVO_STATUS_OFICIAL.get(ch.status_plataforma),
         )
     if ultima_fala is None:
-        return STATUS_SEM_ACOMPANHAMENTO, None, None
+        return ABA_ANALISE_HUMANO, None, "registrado à mão — acompanhar no site"
     if ultima_fala.direcao == "recebida":
         if analise_pede_esperar and analise_depois:
-            return STATUS_AGUARDANDO, ultima_analise.created_at, "o robô leu a resposta e decidiu aguardar"
-        return STATUS_RESPONDEU, fala_em, None
-    return STATUS_AGUARDANDO, fala_em, None
+            return (
+                ABA_AGUARD_PLATAFORMA,
+                ultima_analise.created_at,
+                "o robô leu a resposta e decidiu aguardar",
+            )
+        return _respondeu(ch, fala_em)
+    return ABA_AGUARD_PLATAFORMA, fala_em, None
 
 
 def _quando(m: ChamadoMensagem | None) -> datetime | None:
@@ -866,8 +998,11 @@ def ml_quando(claim: dict) -> datetime | None:
 def auto_proximo_envio(ch: Chamado) -> datetime | None:
     """Quando a próxima réplica automática sai (ou None se desligada). Base =
     último envio automático; ao ligar, o PATCH carimba `auto_ultimo_envio_at`
-    pra primeira réplica só sair depois de N dias."""
+    pra primeira réplica só sair depois de N dias. 19/09: chamado Encerrado
+    (a plataforma já decidiu) também não tem próxima — não adianta cobrar."""
     if not ch.auto_ligada or not ch.auto_dias or ch.resolvido:
+        return None
+    if ch.status_plataforma in STATUS_FINAIS:
         return None
     base = ch.auto_ultimo_envio_at or ch.created_at
     if base is None:
@@ -881,8 +1016,11 @@ async def run_replica_automatica(session: AsyncSession, *, agora: datetime | Non
        despacha pelo canal; carimba `auto_ultimo_envio_at` (mesmo se falhou —
        a próxima tentativa é dali a N dias, sem spammar o histórico);
     2. TODO chamado aberto de canal API do ML (com nº do claim) → se o ML já
-       encerrou o claim, marca resolvido sozinho. Não depende de flag nenhuma
-       (Eduardo 15/09: o robô acompanha todos).
+       encerrou o claim, o chamado vai pro estado Encerrado (status oficial
+       ganhamos/perdemos/encerrado + evento) e fica esperando uma pessoa fechar
+       — 19/09 (Vinicius): nada fecha sozinho. Não depende de flag nenhuma
+       (Eduardo 15/09: o robô acompanha todos). Chamado já Encerrado não é
+       consultado de novo.
     Best-effort por linha: falha de uma não derruba as outras."""
     agora = agora or datetime.now(UTC)
     rows = list(
@@ -890,6 +1028,9 @@ async def run_replica_automatica(session: AsyncSession, *, agora: datetime | Non
             await session.execute(
                 select(Chamado).where(
                     Chamado.resolvido.is_(False),
+                    # 19/09: Encerrado (a plataforma decidiu) não recebe réplica
+                    # automática nem volta a ser consultado no ML.
+                    NAO_ENCERRADO_SQL,
                     or_(Chamado.auto_ligada.is_(True), Chamado.canal == "api"),
                 )
             )
@@ -897,7 +1038,7 @@ async def run_replica_automatica(session: AsyncSession, *, agora: datetime | Non
         .scalars()
         .all()
     )
-    enviados = resolvidos = falhas = 0
+    enviados = encerrados = falhas = 0
     for ch in rows:
         texto = (ch.auto_mensagem or "").strip()
         if ch.auto_ligada and ch.auto_dias and texto:
@@ -910,19 +1051,24 @@ async def run_replica_automatica(session: AsyncSession, *, agora: datetime | Non
                 enviados += 1
                 if msg.status == "falhou":
                     falhas += 1
-        if ch.canal == "api" and (ch.chamado or "").strip() and _eh_ml(ch):
+        if (
+            ch.canal == "api"
+            and (ch.chamado or "").strip()
+            and _eh_ml(ch)
+            and ch.status_plataforma not in STATUS_FINAIS
+        ):
             try:
                 client = await _ml_client_para(session, ch.conta)
                 claim = await client.get_claim(ch.chamado.strip())
                 if (claim.get("status") or "").lower() == "closed":
-                    ch.resolvido = True
-                    ch.resolvido_at = agora
                     ch.auto_ligada = False
                     set_status_plataforma(ch, ml_status_encerrado(claim), ml_quando(claim))
                     session.add(
-                        registrar_sistema(ch, "Chamado encerrado na plataforma (claim fechado)")
+                        registrar_sistema(
+                            ch, "Reclamação encerrada no Mercado Livre — aguardando fechamento"
+                        )
                     )
-                    resolvidos += 1
+                    encerrados += 1
                 elif (claim.get("stage") or "").lower() == "dispute":
                     set_status_plataforma(ch, STATUS_EM_ANALISE, ml_quando(claim))
             except Exception as e:  # noqa: BLE001
@@ -934,6 +1080,6 @@ async def run_replica_automatica(session: AsyncSession, *, agora: datetime | Non
     return {
         "verificados": len(rows),
         "enviados": enviados,
-        "resolvidos": resolvidos,
+        "encerrados": encerrados,
         "falhas": falhas,
     }
