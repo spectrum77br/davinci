@@ -22,6 +22,7 @@ import {
   UserRound,
   X,
 } from 'lucide-vue-next'
+import { PopoverContent, PopoverPortal, PopoverRoot, PopoverTrigger } from 'reka-ui'
 
 definePageMeta({ middleware: ['permission'], permission: { resource: 'chamados', action: 'view' } })
 
@@ -866,14 +867,17 @@ async function openHistorico(row: ChamadoRow, focoReplica = false) {
     hist.loading = false
   }
   if (focoReplica) {
+    // 19/09: a réplica agora vive num balão — "focar" é abrir o balão.
     await nextTick()
-    ;(document.getElementById('replica-texto') as HTMLTextAreaElement | null)?.focus()
+    replicaBalao.value = true
   }
 }
 
 function closeHistorico() {
   hist.open = false
   hist.row = null
+  replicaBalao.value = false
+  instrucaoBalao.value = false
 }
 
 function onReplicaFiles(ev: Event) {
@@ -956,6 +960,34 @@ async function enviarInstrucao() {
   } finally {
     hist.instrucaoSending = false
   }
+}
+
+// 19/09 (Vinicius): "réplica manual muito grande; campo pequeno que abre o balão,
+// igual às observações; histórico aproveita o espaço". O rodapé do histórico virou
+// uma faixa em duas colunas (réplica | instrução), cada uma com um campo de UMA
+// linha que só mostra o começo do rascunho; clicar abre um balão (mesmo padrão do
+// ObservacaoPopover) com a textarea grande. O rascunho é o mesmo hist.texto /
+// hist.instrucao — fechar o balão não apaga nada. Enter não envia: só os botões.
+const replicaBalao = ref(false)
+const instrucaoBalao = ref(false)
+const replicaCaixa = ref<HTMLTextAreaElement | null>(null)
+const instrucaoCaixa = ref<HTMLTextAreaElement | null>(null)
+// Foco na caixa com o cursor no fim (o padrão deixava no começo).
+function focarCaixa(e: Event, el: HTMLTextAreaElement | null) {
+  e.preventDefault()
+  if (!el) return
+  el.focus()
+  const fim = el.value.length
+  el.setSelectionRange(fim, fim)
+}
+// Enviar de dentro do balão: deu certo (rascunho limpo, sem erro) → o balão fecha.
+async function enviarReplicaDoBalao() {
+  await enviarReplica()
+  if (!hist.erro) replicaBalao.value = false
+}
+async function enviarInstrucaoDoBalao() {
+  await enviarInstrucao()
+  if (!hist.instrucaoErro) instrucaoBalao.value = false
 }
 
 function statusMensagemClass(s: Mensagem['status']) {
@@ -1518,7 +1550,7 @@ async function reabrir(row: ChamadoRow) {
     <!-- modal: histórico + réplica -->
     <div v-if="hist.open && hist.row" class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" @click.self="closeHistorico">
       <div class="w-full max-w-3xl max-h-[90vh] flex flex-col rounded-lg border bg-background shadow-xl">
-        <div class="flex items-start justify-between gap-3 border-b px-4 py-3">
+        <div class="shrink-0 flex items-start justify-between gap-3 border-b px-4 py-3">
           <div>
             <div class="text-sm font-semibold">
               Chamado {{ hist.row.chamado || '(sem nº)' }} · pedido {{ hist.row.pedido_bling || hist.row.pedido_marketplace }}
@@ -1537,7 +1569,8 @@ async function reabrir(row: ChamadoRow) {
           </div>
         </div>
 
-        <div class="flex-1 overflow-auto px-4 py-3 space-y-3">
+        <!-- 19/09: o histórico cresce até ocupar tudo acima do rodapé (flex-1 min-h-0). -->
+        <div class="flex-1 min-h-0 overflow-y-auto px-4 py-3 space-y-3">
           <div v-if="hist.loading" class="text-sm text-muted-foreground"><Loader2 class="size-4 inline animate-spin mr-1.5" />carregando histórico…</div>
           <div v-else-if="!hist.mensagens.length" class="text-sm text-muted-foreground">sem mensagens ainda</div>
           <!-- Conversa em balões (Eduardo 10/09: "como se fosse um whatsapp"):
@@ -1594,59 +1627,154 @@ async function reabrir(row: ChamadoRow) {
           </div>
         </div>
 
-        <div v-if="canEdit && !hist.row.resolvido" class="border-t px-4 py-3 space-y-2">
-          <div class="text-xs font-medium">Réplica manual <span class="text-muted-foreground font-normal">— resposta à plataforma pelo canal <b>{{ hist.row.canal }}</b></span></div>
-          <textarea id="replica-texto" v-model="hist.texto" rows="4" class="w-full rounded-md border bg-background px-3 py-2 text-sm" placeholder="digite a mensagem…" />
-          <div class="flex flex-wrap items-center gap-2">
-            <label class="inline-flex cursor-pointer items-center gap-1 rounded border px-2 py-1 text-xs hover:bg-muted">
-              <ImagePlus class="size-3.5" />
-              anexar foto
-              <input type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple class="hidden" @change="onReplicaFiles" />
-            </label>
-            <span v-for="(f, i) in hist.files" :key="`${f.name}-${i}`" class="inline-flex items-center gap-1 rounded bg-muted px-2 py-0.5 text-[11px]">
-              {{ f.name }}
-              <button type="button" class="hover:text-red-500" @click="removeReplicaFile(i)"><X class="size-3" /></button>
-            </span>
-            <span v-if="hist.erro" class="text-xs text-red-500">{{ hist.erro }}</span>
-            <!-- 19/09 (Vinicius): resolver sem sair do histórico — abre a MESMA janela de
-                 resolver por cima; ao confirmar, a linha sai dos abertos e este modal fecha. -->
-            <Button size="sm" variant="outline" class="ml-auto" :disabled="!canEdit || busy.has(hist.row.id)" title="marcar como resolvido (lucro/prejuízo + situação no Bling)" @click="openResolver(hist.row)">
-              <CheckCircle2 class="size-4 mr-1.5" />
-              resolver
-            </Button>
-            <Button size="sm" :disabled="hist.sending || !hist.texto.trim()" @click="enviarReplica">
-              <Loader2 v-if="hist.sending" class="size-4 mr-1.5 animate-spin" />
-              <Send v-else class="size-4 mr-1.5" />
-              {{ hist.row.canal === 'manual' ? 'registrar' : hist.row.canal === 'robo' ? 'enfileirar pro robô' : 'enviar' }}
-            </Button>
-          </div>
-        </div>
-
-        <!-- 19/09 (Chamados v2): instrução pro robô. Separada da réplica porque NÃO vai
-             pra plataforma: o robô lê na próxima passada (mesmo em Encerrado) e responde
-             aqui. Enviar põe a linha em Análise Robô. Em Concluído (fechado por pessoa) a
-             API devolve 422 chamado_concluido — o campo some e fica o aviso pra reabrir. -->
-        <div v-if="hist.row.resolvido" class="border-t px-4 py-2 text-xs text-muted-foreground inline-flex items-center gap-1.5">
-          <Bot class="size-3.5 text-indigo-600 dark:text-indigo-400" />
-          Chamado concluído — reabra o chamado pra instruir o robô.
-        </div>
-        <div v-else class="border-t px-4 py-3 space-y-2 bg-indigo-50/40 dark:bg-indigo-900/10">
-          <div class="text-xs font-medium inline-flex items-center gap-1.5">
+        <!-- 19/09 (Vinicius): "réplica manual muito grande; campo pequeno que abre o
+             balão, igual às observações; histórico aproveita o espaço". Rodapé em UMA
+             faixa de duas colunas: à esquerda a réplica manual (vai pra plataforma pelo
+             canal), à direita a instrução pro robô (NÃO vai pra plataforma: o robô lê na
+             próxima passada, mesmo em Encerrado, e responde aqui). Cada coluna tem um
+             campo de uma linha que mostra o começo do rascunho; clicar abre o balão com
+             a textarea grande — o rascunho é o mesmo hist.texto / hist.instrucao, fechar
+             o balão não apaga. Os dois botões de enviar são iguais (azul). Em Concluído
+             (fechado por pessoa) a API devolve 422 chamado_concluido — a réplica some e
+             fica só o aviso pra reabrir. -->
+        <div v-if="hist.row.resolvido" class="shrink-0 grid gap-4 border-t px-4 py-3 md:grid-cols-2">
+          <div class="md:col-start-2 text-xs text-muted-foreground inline-flex items-center gap-1.5">
             <Bot class="size-3.5 text-indigo-600 dark:text-indigo-400" />
-            Instrução pro robô
-            <span class="text-muted-foreground font-normal">— não vai pra plataforma; o robô lê na próxima passada e responde aqui</span>
+            Chamado concluído — reabra o chamado pra instruir o robô.
           </div>
-          <div v-if="hist.row.instrucao_pendente" class="rounded border border-indigo-500/30 bg-indigo-500/5 px-2 py-1 text-xs" :title="hist.row.instrucao_pendente">
-            <span class="font-medium text-indigo-700 dark:text-indigo-300">Instrução pendente:</span> {{ hist.row.instrucao_pendente }}
+        </div>
+        <div v-else class="shrink-0 grid gap-4 border-t px-4 py-3 md:grid-cols-2">
+          <!-- coluna esquerda: réplica manual -->
+          <div class="space-y-2 min-w-0">
+            <div class="text-xs font-medium truncate">Réplica manual <span class="text-muted-foreground font-normal">— resposta à plataforma pelo canal <b>{{ hist.row.canal }}</b></span></div>
+            <PopoverRoot :open="replicaBalao" @update:open="replicaBalao = $event">
+              <PopoverTrigger as-child>
+                <button
+                  id="replica-texto"
+                  type="button"
+                  :disabled="!canEdit"
+                  class="flex h-9 w-full items-center truncate rounded-md border bg-background px-3 text-left text-sm hover:bg-muted/40 focus:outline-none focus:ring-1 focus:ring-primary disabled:cursor-default disabled:opacity-60"
+                  :title="hist.texto || 'clique pra escrever a réplica'"
+                >
+                  <span v-if="hist.texto" class="truncate">{{ hist.texto }}</span>
+                  <span v-else class="text-muted-foreground/60">digite aqui…</span>
+                </button>
+              </PopoverTrigger>
+              <PopoverPortal>
+                <PopoverContent
+                  side="top"
+                  align="start"
+                  :side-offset="4"
+                  :collision-padding="8"
+                  class="z-[70] w-[440px] max-w-[calc(100vw-16px)] rounded-md border bg-background p-2 shadow-lg"
+                  @open-auto-focus="focarCaixa($event, replicaCaixa)"
+                >
+                  <div class="mb-1 text-[11px] font-medium text-muted-foreground">Réplica manual — canal {{ hist.row.canal }}</div>
+                  <textarea
+                    ref="replicaCaixa"
+                    v-model="hist.texto"
+                    rows="6"
+                    :disabled="!canEdit"
+                    class="w-full resize-y rounded-md border bg-background px-2 py-1.5 text-sm disabled:opacity-60"
+                    placeholder="digite a mensagem…"
+                  />
+                  <div class="mt-1 flex flex-wrap items-center gap-2">
+                    <span v-if="hist.files.length" class="text-[11px] text-muted-foreground">{{ hist.files.length }} foto{{ hist.files.length > 1 ? 's' : '' }} anexada{{ hist.files.length > 1 ? 's' : '' }}</span>
+                    <span v-if="hist.erro" class="text-[11px] text-red-500">{{ hist.erro }}</span>
+                    <Button size="sm" variant="outline" class="ml-auto" @click="replicaBalao = false">fechar</Button>
+                    <Button size="sm" :disabled="!canEdit || hist.sending || !hist.texto.trim()" @click="enviarReplicaDoBalao">
+                      <Loader2 v-if="hist.sending" class="size-4 mr-1.5 animate-spin" />
+                      <Send v-else class="size-4 mr-1.5" />
+                      {{ hist.row.canal === 'manual' ? 'registrar' : hist.row.canal === 'robo' ? 'enfileirar pro robô' : 'enviar' }}
+                    </Button>
+                  </div>
+                </PopoverContent>
+              </PopoverPortal>
+            </PopoverRoot>
+            <div class="flex flex-wrap items-center gap-2">
+              <label class="inline-flex items-center gap-1 rounded border px-2 py-1 text-xs" :class="canEdit ? 'cursor-pointer hover:bg-muted' : 'cursor-default opacity-60'">
+                <ImagePlus class="size-3.5" />
+                anexar foto
+                <input type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple class="hidden" :disabled="!canEdit" @change="onReplicaFiles" />
+              </label>
+              <span v-for="(f, i) in hist.files" :key="`${f.name}-${i}`" class="inline-flex max-w-[160px] items-center gap-1 rounded bg-muted px-2 py-0.5 text-[11px]" :title="f.name">
+                <span class="truncate">{{ f.name }}</span>
+                <button type="button" class="shrink-0 hover:text-red-500" @click="removeReplicaFile(i)"><X class="size-3" /></button>
+              </span>
+              <span v-if="hist.erro" class="text-xs text-red-500">{{ hist.erro }}</span>
+              <!-- 19/09 (Vinicius): resolver sem sair do histórico — abre a MESMA janela de
+                   resolver por cima; ao confirmar, a linha sai dos abertos e este modal fecha. -->
+              <Button size="sm" variant="outline" class="ml-auto" :disabled="!canEdit || busy.has(hist.row.id)" title="marcar como resolvido (lucro/prejuízo + situação no Bling)" @click="openResolver(hist.row)">
+                <CheckCircle2 class="size-4 mr-1.5" />
+                resolver
+              </Button>
+              <Button size="sm" :disabled="!canEdit || hist.sending || !hist.texto.trim()" @click="enviarReplica">
+                <Loader2 v-if="hist.sending" class="size-4 mr-1.5 animate-spin" />
+                <Send v-else class="size-4 mr-1.5" />
+                {{ hist.row.canal === 'manual' ? 'registrar' : hist.row.canal === 'robo' ? 'enfileirar pro robô' : 'enviar' }}
+              </Button>
+            </div>
           </div>
-          <textarea v-model="hist.instrucao" rows="2" :disabled="!canEdit" class="w-full rounded-md border bg-background px-3 py-2 text-sm disabled:opacity-60" placeholder="ex.: contesta de novo citando a foto do pacote; se a plataforma negar, pede prorrogação" />
-          <div class="flex flex-wrap items-center gap-2">
-            <span v-if="hist.instrucaoErro" class="text-xs text-red-500">{{ hist.instrucaoErro }}</span>
-            <Button size="sm" variant="outline" class="ml-auto" :disabled="!canEdit || hist.instrucaoSending || !hist.instrucao.trim()" @click="enviarInstrucao">
-              <Loader2 v-if="hist.instrucaoSending" class="size-4 mr-1.5 animate-spin" />
-              <Bot v-else class="size-4 mr-1.5" />
-              Enviar instrução
-            </Button>
+
+          <!-- coluna direita: instrução pro robô -->
+          <div class="space-y-2 min-w-0 rounded-md bg-indigo-50/40 dark:bg-indigo-900/10 px-2 py-2 -mx-2">
+            <div class="text-xs font-medium flex items-center gap-1.5 min-w-0">
+              <Bot class="size-3.5 shrink-0 text-indigo-600 dark:text-indigo-400" />
+              <span class="truncate">Instrução pro robô <span class="text-muted-foreground font-normal">— não vai pra plataforma; o robô lê na próxima passada e responde aqui</span></span>
+            </div>
+            <div v-if="hist.row.instrucao_pendente" class="truncate rounded border border-indigo-500/30 bg-indigo-500/5 px-2 py-1 text-xs" :title="hist.row.instrucao_pendente">
+              <span class="font-medium text-indigo-700 dark:text-indigo-300">Instrução pendente:</span> {{ hist.row.instrucao_pendente }}
+            </div>
+            <PopoverRoot :open="instrucaoBalao" @update:open="instrucaoBalao = $event">
+              <PopoverTrigger as-child>
+                <button
+                  type="button"
+                  :disabled="!canEdit"
+                  class="flex h-9 w-full items-center truncate rounded-md border bg-background px-3 text-left text-sm hover:bg-muted/40 focus:outline-none focus:ring-1 focus:ring-primary disabled:cursor-default disabled:opacity-60"
+                  :title="hist.instrucao || 'clique pra escrever a instrução'"
+                >
+                  <span v-if="hist.instrucao" class="truncate">{{ hist.instrucao }}</span>
+                  <span v-else class="text-muted-foreground/60">digite aqui…</span>
+                </button>
+              </PopoverTrigger>
+              <PopoverPortal>
+                <PopoverContent
+                  side="top"
+                  align="start"
+                  :side-offset="4"
+                  :collision-padding="8"
+                  class="z-[70] w-[440px] max-w-[calc(100vw-16px)] rounded-md border bg-background p-2 shadow-lg"
+                  @open-auto-focus="focarCaixa($event, instrucaoCaixa)"
+                >
+                  <div class="mb-1 text-[11px] font-medium text-muted-foreground inline-flex items-center gap-1"><Bot class="size-3 text-indigo-600 dark:text-indigo-400" /> Instrução pro robô — não vai pra plataforma</div>
+                  <textarea
+                    ref="instrucaoCaixa"
+                    v-model="hist.instrucao"
+                    rows="6"
+                    :disabled="!canEdit"
+                    class="w-full resize-y rounded-md border bg-background px-2 py-1.5 text-sm disabled:opacity-60"
+                    placeholder="ex.: contesta de novo citando a foto do pacote; se a plataforma negar, pede prorrogação"
+                  />
+                  <div class="mt-1 flex flex-wrap items-center gap-2">
+                    <span v-if="hist.instrucaoErro" class="text-[11px] text-red-500">{{ hist.instrucaoErro }}</span>
+                    <Button size="sm" variant="outline" class="ml-auto" @click="instrucaoBalao = false">fechar</Button>
+                    <Button size="sm" :disabled="!canEdit || hist.instrucaoSending || !hist.instrucao.trim()" @click="enviarInstrucaoDoBalao">
+                      <Loader2 v-if="hist.instrucaoSending" class="size-4 mr-1.5 animate-spin" />
+                      <Bot v-else class="size-4 mr-1.5" />
+                      enviar instrução
+                    </Button>
+                  </div>
+                </PopoverContent>
+              </PopoverPortal>
+            </PopoverRoot>
+            <div class="flex flex-wrap items-center gap-2">
+              <span v-if="hist.instrucaoErro" class="text-xs text-red-500">{{ hist.instrucaoErro }}</span>
+              <Button size="sm" class="ml-auto" :disabled="!canEdit || hist.instrucaoSending || !hist.instrucao.trim()" @click="enviarInstrucao">
+                <Loader2 v-if="hist.instrucaoSending" class="size-4 mr-1.5 animate-spin" />
+                <Bot v-else class="size-4 mr-1.5" />
+                enviar instrução
+              </Button>
+            </div>
           </div>
         </div>
       </div>
