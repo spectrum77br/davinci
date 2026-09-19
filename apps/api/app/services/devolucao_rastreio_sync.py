@@ -151,6 +151,8 @@ async def _linhas_logistica(
 # "Objeto entregue ao destinatário" no pacote de VOLTA = chegou em NÓS (numa
 # devolução, o destinatário é o vendedor). "Entregue ao remetente" fica de
 # fora de propósito: aí o pacote voltou pro comprador, não pra gente.
+# EXCETO no ML com revisão: o destinatário da perna atual é o galpão do ML
+# em Cajamar (`devolucao_destino_auto = warehouse`) — ver `_perna_do_galpao`.
 _TEXTO_ENTREGUE = "entregue ao destinat"
 
 
@@ -160,6 +162,69 @@ def _texto_diz_entregue(localizacao: str | None) -> bool:
     alvo = unicodedata.normalize("NFKD", _TEXTO_ENTREGUE)
     alvo = "".join(c for c in alvo if not unicodedata.combining(c))
     return alvo in txt
+
+
+def _perna_do_galpao(row: DevolucaoRastreio) -> bool:
+    """O `rastreio_auto` desta linha é o da perna comprador → GALPÃO do ML
+    (revisão em Cajamar): "entregue" nele — texto do 17track, pull dos
+    Correios ou push — é o pacote no Mercado Livre, não na loja, e NÃO
+    carimba `pacote_entregue_em`. A chegada de verdade vem da perna seguinte
+    (`seller_address`), pela API (`ReturnInfo.entregue_em`) ou pelo rastreio
+    novo dela. TikTok/Shopee não separam (destino None → False)."""
+    return (row.fonte_auto or "").strip().lower() == "ml" and logistica_rules.devolucao_no_galpao(
+        {logistica_rules.RETURN_DESTINO_KEY: row.devolucao_destino_auto or ""}
+    )
+
+
+def _carimbo_do_galpao(row: DevolucaoRastreio, info: ReturnInfo, *, codigo_novo: bool) -> bool:
+    """O `pacote_entregue_em` desta linha do ML foi deixado pelo rastreio da
+    perna do GALPÃO e precisa ser apagado (Vinicius 19/09: 295359/292659/
+    294679 mostravam "Chegou em" com o pacote em Cajamar). Chamado DEPOIS de
+    gravar status/destino/rastreio da rodada; só quando o ML ainda não deu a
+    perna da loja como entregue (`info.entregue_em`, que carimba a data real):
+
+      - perna atual indo pro galpão: "entregue" ali (17track/Correios) é o
+        Mercado Livre, não a loja;
+      - o ML abriu a perna da loja com OUTRO código: o carimbo era do código
+        anterior (o do galpão) — o rastreio novo começa do zero, como a
+        localização;
+      - perna da loja com código que NÃO é dos Correios (LF72…/K4VS…, da
+        rede do ML): 17track/pull/push só sabem de código Correios, então o
+        carimbo só pode ter vindo da perna anterior.
+
+    Devolução direta (perna única pra loja, código Correios) fica de fora: aí
+    o 17track/Correios é uma prova legítima. TikTok/Shopee: destino None →
+    nunca."""
+    if row.pacote_entregue_em is None or info.entregue_em is not None:
+        return False
+    if (info.fonte or "").strip().lower() != "ml":
+        return False
+    destino = (info.destino or "").strip().lower()
+    if destino == logistica_rules.RETURN_DESTINO_GALPAO:
+        return True
+    if destino == logistica_rules.RETURN_DESTINO_LOJA:
+        return codigo_novo or not logistica_track.is_correios(row.rastreio_auto or "")
+    return False
+
+
+def aplicar_push(dev: DevolucaoRastreio, loc: str, *, entregue: bool, agora: datetime) -> None:
+    """Evento do 17track (push) no código do pacote de VOLTA: localização
+    sempre; carimbo de chegada quando os Correios dizem ENTREGUE — a prova
+    mais direta pra qualquer plataforma cujo retorno vá pelos Correios (todo o
+    TikTok, parte da Shopee). Nunca apaga um carimbo já existente. Exceto a
+    perna comprador → galpão do ML (revisão): "entregue" ali é Cajamar."""
+    dev.localizacao_auto = loc
+    dev.localizacao_auto_data = agora
+    if entregue and dev.pacote_entregue_em is None and not _perna_do_galpao(dev):
+        dev.pacote_entregue_em = agora
+
+
+def _galpao_recebeu(row: DevolucaoRastreio) -> bool:
+    """O ML já deu a perna do galpão como entregue (status da devolução
+    `delivered`) ou o rastreio dela já disse "entregue": pacote em Cajamar."""
+    return (row.devolucao_status_auto or "").strip().lower() == "delivered" or _texto_diz_entregue(
+        row.localizacao_auto
+    )
 
 
 async def _puxar_correios(
@@ -207,7 +272,11 @@ async def _puxar_correios(
     # sobrou — e ela está em `localizacao_auto`. Foi o caso do 293437, que o
     # Eduardo apontou: entregue em 09/09, texto salvo, campo vazio.
     for row in linhas:
-        if _texto_diz_entregue(row.localizacao_auto) and row.pacote_entregue_em is None:
+        if (
+            _texto_diz_entregue(row.localizacao_auto)
+            and row.pacote_entregue_em is None
+            and not _perna_do_galpao(row)
+        ):
             row.pacote_entregue_em = row.localizacao_auto_data or datetime.now(UTC)
             resumo["entregues"] += 1
 
@@ -217,7 +286,12 @@ async def _puxar_correios(
     por_codigo = {
         _num(r.rastreio_auto): r
         for r in linhas
-        if r.pacote_entregue_em is None and logistica_track.is_correios(r.rastreio_auto or "")
+        if r.pacote_entregue_em is None
+        and logistica_track.is_correios(r.rastreio_auto or "")
+        # Perna do galpão do ML que o próprio ML já deu como entregue: não há
+        # mais o que perguntar aos Correios sobre esse código (a linha fica
+        # sem carimbo de propósito e voltaria aqui toda rodada).
+        and not (_perna_do_galpao(r) and _galpao_recebeu(r))
     }
     resumo["consultados"] = len(por_codigo)
 
@@ -242,7 +316,9 @@ async def _puxar_correios(
             row.localizacao_auto = loc
             row.localizacao_auto_data = dados.get("sync_at") or agora
             resumo["localizacoes"] += 1
-        if str(dados.get("status") or "").strip() == "Delivered":
+        # "Delivered" na perna do galpão do ML é Cajamar: a localização vale,
+        # o carimbo de chegada não.
+        if str(dados.get("status") or "").strip() == "Delivered" and not _perna_do_galpao(row):
             row.pacote_entregue_em = dados.get("sync_at") or agora
             resumo["entregues"] += 1
     vivos_set = {str(p) for p in vivos} if vivos is not None else None
@@ -457,7 +533,8 @@ async def run(session: AsyncSession, *, pedidos: Collection[str] | None = None) 
             _aplicar_reembolso(row, info, extratos.get(pedido))
             reembolsos += 1 if row.reembolso_auto else 0
             tracking = (info.tracking or "").strip() or None
-            if tracking and tracking != row.rastreio_auto:
+            codigo_novo = bool(tracking and tracking != row.rastreio_auto)
+            if codigo_novo:
                 # Código novo → localização anterior (de outro código) não vale mais.
                 row.localizacao_auto = None
                 row.localizacao_auto_data = None
@@ -467,6 +544,9 @@ async def run(session: AsyncSession, *, pedidos: Collection[str] | None = None) 
             row.transportadora_auto = (info.carrier or "").strip() or None
             row.devolucao_status_auto = (info.status or "").strip() or None
             row.devolucao_tipo_auto = (info.return_type or "").strip() or None
+            row.devolucao_destino_auto = (info.destino or "").strip().lower() or None
+            if _carimbo_do_galpao(row, info, codigo_novo=codigo_novo):
+                row.pacote_entregue_em = None
             # Prazo de resposta da loja (0286): reescrito sempre — quando a
             # plataforma para de pedir ação, o prazo some da tela. Exceto
             # quando o marketplace NÃO respondeu a consulta de onde o prazo sai

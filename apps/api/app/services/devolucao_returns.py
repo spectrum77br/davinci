@@ -41,6 +41,15 @@ class ReturnInfo(NamedTuple):
     # processamento" mesmo com o pacote já entregue — a Shopee sabia e ninguém
     # perguntava (o dado só existe no DETALHE da devolução, não na lista).
     entregue_em: datetime | None = None
+    # PRA ONDE vai a perna atual do pacote de volta, quando o marketplace
+    # separa (ML `shipments[].destination.name`): "warehouse" = galpão do ML
+    # (revisão em Cajamar — `intermediate_check`), "seller_address" = loja.
+    # "Entregue" com destino warehouse é o pacote NO MERCADO LIVRE, não aqui:
+    # o rastreio dessa perna não prova chegada na loja (19/09: 295359, 292659,
+    # 294679 e 292729 apareciam com "Chegou em" enquanto o ML dizia "vamos
+    # revisar o produto"). None = a plataforma não separa (TikTok/Shopee) ou
+    # payload antigo sem pernas — tratado como desconhecido, nunca como loja.
+    destino: str | None = None
     # Última localização FÍSICA do pacote de volta quando o próprio marketplace
     # a informa (Shopee: descrição do último evento da SPX quando a entrega
     # falhou e o pacote volta pelo rastreio da IDA). None = quem sabe é o

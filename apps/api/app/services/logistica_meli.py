@@ -296,6 +296,7 @@ async def build_enrichment(client: MercadoLivreClient, order_id: str) -> dict[st
     destino: str | None = None
     previsao: str | None = None
     loc_devolucao: str | None = None
+    dev_tipo: str | None = None
     order = await _fetch_order(client, str(order_id))
 
     cancel_detail = order.get("cancel_detail") or {}
@@ -424,6 +425,12 @@ async def build_enrichment(client: MercadoLivreClient, order_id: str) -> dict[st
     # Mantém só campos conhecidos (defesa contra tokens estranhos entrando).
     meli = {f: out[f] for f in logistica_rules.FIELD_ORDER if out.get(f)}
     datas = {f: datas[f] for f in meli if f in datas}
+    # Pra onde vai a perna da devolução — chave EXTRA, fora da assinatura (não
+    # entra em FIELD_ORDER: mudaria as chaves cadastradas na aba Status).
+    # `return_status = delivered` com destino "warehouse" é o pacote no galpão
+    # do ML, não na loja — quem deriva "chegou" precisa saber disso.
+    if meli.get("return_status") and dev_tipo:
+        meli[logistica_rules.RETURN_DESTINO_KEY] = dev_tipo
     # Localização = proxy do "último local" (substatus/status do envio em PT) +
     # destino (cidade/UF) + previsão de entrega; o ML não dá o local físico da
     # rede própria. Devolução em curso/finalizada sobrepõe tudo isso.
@@ -1339,6 +1346,11 @@ async def _return_info_for_pedido(client: MercadoLivreClient, pedido: str) -> Re
     tracking = str(sh.get("tracking_number") or "").strip() or None
     carrier = str(sh.get("tracking_method") or "").strip() or None
     entregue_em = _entregue_ao_vendedor(esc.raw, sh)
+    # A MESMA perna de onde saem status e rastreio: "warehouse" enquanto o
+    # pacote vai/está no galpão do ML (revisão), "seller_address" quando é a
+    # perna da loja. Quem grava/lê o rastreio precisa disso pra não confundir
+    # "entregue em Cajamar" com "chegou aqui".
+    destino = _destino_do_shipment(_return_shipment(esc.raw)) or None
     # Prazo de resposta da loja (Vinicius 16/09): as ações que o ML liberou
     # pro vendedor moram no claim — uma chamada a mais SÓ enquanto a janela de
     # revisão pode estar aberta (pacote chegou há poucos dias). Em trânsito
@@ -1363,6 +1375,7 @@ async def _return_info_for_pedido(client: MercadoLivreClient, pedido: str) -> Re
         updated_at=updated_at,
         return_id=esc.claim_id,
         entregue_em=entregue_em,
+        destino=destino,
         acao_pendente=acao,
         prazo_acao=prazo,
         prazo_desconhecido=prazo_desconhecido,

@@ -46,6 +46,12 @@ class DevolucaoRastreio(Base, TimestampMixin):
     # reembolso, o cliente fica com o produto e nenhum pacote volta. None
     # quando a plataforma não separa.
     devolucao_tipo_auto: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # DESTINO da perna atual do pacote de volta (migration 0296): ML
+    # "warehouse" (galpão do ML em Cajamar, revisão) ou "seller_address"
+    # (loja). Enquanto for "warehouse", nem o rastreio_auto nem o status
+    # "delivered" provam que o pacote chegou aqui — ver ReturnInfo.destino.
+    # None = a plataforma não separa (TikTok/Shopee) ou ainda não sincronizou.
+    devolucao_destino_auto: Mapped[str | None] = mapped_column(Text, nullable=True)
     # PRAZO DE RESPOSTA DA LOJA (migration 0286, Vinicius 16/09: "colocar no
     # painel o prazo pra não perder mais prazo"): o que o marketplace espera
     # da loja neste caso (TikTok `seller_next_action_response.action`) e até

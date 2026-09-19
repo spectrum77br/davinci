@@ -375,11 +375,12 @@ def _clean(v: str | None) -> str | None:
 
 def _clean_meli(m: dict[str, str] | None) -> dict[str, str]:
     """Mantém só os campos conhecidos com valor não-vazio: os 8 do Meli mais o
-    `return_type` que o sweep do TikTok grava (devolução × só reembolso) —
-    uma edição manual da assinatura não pode apagá-lo."""
+    `return_type` que o sweep do TikTok grava (devolução × só reembolso) e o
+    `return_destino` do ML (galpão × loja) — uma edição manual da assinatura
+    não pode apagá-los."""
     if not m:
         return {}
-    campos = [*logistica_rules.FIELD_ORDER, "return_type"]
+    campos = [*logistica_rules.FIELD_ORDER, "return_type", logistica_rules.RETURN_DESTINO_KEY]
     return {f: str(m[f]).strip() for f in campos if m.get(f) and str(m[f]).strip()}
 
 
@@ -1437,6 +1438,11 @@ async def patch_logistica(
         tipo_atual = (c.meli_status or {}).get("return_type")
         if tipo_atual and "return_type" not in (data["meli_status"] or {}):
             novo_status["return_type"] = str(tipo_atual)
+        # Idem pro destino da perna da devolução do ML (galpão × loja).
+        dest_key = logistica_rules.RETURN_DESTINO_KEY
+        dest_atual = (c.meli_status or {}).get(dest_key)
+        if dest_atual and dest_key not in (data["meli_status"] or {}):
+            novo_status[dest_key] = str(dest_atual)
         c.status_datas = logistica_datas.aplicar(c, novo_status)
         c.meli_status = novo_status
     if "rastreio" in data:

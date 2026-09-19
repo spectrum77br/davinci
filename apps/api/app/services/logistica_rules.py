@@ -21,6 +21,15 @@ FIELD_ORDER: list[str] = [
     "benefited",
 ]
 
+# Chave EXTRA do `meli_status` (fora da assinatura, como o `return_type` do
+# TikTok): pra onde vai a perna atual da devolução do ML —
+# `shipments[].destination.name`: "warehouse" (galpão do ML, revisão em
+# Cajamar) ou "seller_address" (loja). Com "warehouse", `return_status =
+# delivered` é o pacote NO MERCADO LIVRE, não na loja.
+RETURN_DESTINO_KEY = "return_destino"
+RETURN_DESTINO_GALPAO = "warehouse"
+RETURN_DESTINO_LOJA = "seller_address"
+
 FIELD_LABELS: dict[str, str] = {
     "order_status": "Status do pedido",
     "ship_status": "Status do envio",
@@ -497,6 +506,12 @@ _ML_RETURN_LABELS_PT = {
     "DELIVERED": "Devolução entregue ao vendedor",
     "NOT_DELIVERED": "Devolução não entregue — verificar com o Mercado Livre",
 }
+# Mesmos status quando a perna atual vai pro GALPÃO do ML (revisão): o pacote
+# a caminho/entregue ali ainda não é o pacote na loja.
+_ML_RETURN_LABELS_GALPAO_PT = {
+    "SHIPPED": "Devolução a caminho do galpão do ML (revisão)",
+    "DELIVERED": "Devolução no galpão do ML — em revisão, ainda não chegou na loja",
+}
 _ML_RETURN_ENCERRADO = {"CANCELLED", "CANCELED", "CLOSED", "EXPIRED", "REJECTED"}
 
 # `return_status` que significa "esse caso de devolução NÃO precisa mais de
@@ -590,10 +605,25 @@ def data_retorno_concluido(
             return _carimbo("ship_substatus")
     if chave == "tiktok" and _tiktok_so_reembolso(ms):
         return None
+    # ML com revisão (`intermediate_check`): a perna atual vai pro galpão do
+    # ML e "delivered" ali é o pacote em Cajamar — a loja só recebe na perna
+    # seguinte (`return_from_triage` → seller_address), que troca o
+    # `return_destino`. Sem a chave (linha antiga / payload sem pernas) segue
+    # valendo o status, como antes.
+    if chave == "ml" and devolucao_no_galpao(ms):
+        return None
     ret = str(ms.get("return_status") or "").strip().upper()
     if ret and ret in _RETURN_STATUS_CHEGOU[chave]:
         return _carimbo("return_status")
     return None
+
+
+def devolucao_no_galpao(status: dict[str, str] | None) -> bool:
+    """True quando a perna atual da devolução do ML vai pro GALPÃO do ML
+    (`return_destino = warehouse`): o que os Correios/17track/status
+    disserem sobre esse rastreio é sobre Cajamar, não sobre a loja."""
+    dest = str((status or {}).get(RETURN_DESTINO_KEY) or "").strip().lower()
+    return dest == RETURN_DESTINO_GALPAO
 
 
 def devolucao_status_pt(plataforma: str | None, status: dict[str, str] | None) -> str | None:
@@ -619,6 +649,8 @@ def devolucao_status_pt(plataforma: str | None, status: dict[str, str] | None) -
     if p in _ML_PLATAFORMAS:
         if ret in _ML_RETURN_ENCERRADO:
             return None
+        if devolucao_no_galpao(status) and ret in _ML_RETURN_LABELS_GALPAO_PT:
+            return _ML_RETURN_LABELS_GALPAO_PT[ret]
         return _ML_RETURN_LABELS_PT.get(ret, f"Devolução: {ret}")
     return None
 

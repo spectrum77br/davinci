@@ -618,6 +618,18 @@ _STATUS_AUTO_CHEGOU = {
 # aplica, e o pedido vai pro painel Fraude.
 _TIPO_AUTO_SEM_PACOTE = {"REFUND"}
 
+
+def _devolucao_no_galpao(fonte_auto: str | None, destino_auto: str | None) -> bool:
+    """Perna atual da devolução do ML indo pro GALPÃO do ML (revisão em
+    Cajamar): "entregue" nessa perna não é o pacote na loja. Só o ML separa
+    (TikTok/Shopee ficam com destino None → False)."""
+    from app.services import logistica_rules  # tardio: evita ciclo router↔services
+
+    return (fonte_auto or "").strip().lower() == "ml" and logistica_rules.devolucao_no_galpao(
+        {logistica_rules.RETURN_DESTINO_KEY: destino_auto or ""}
+    )
+
+
 _FILAS = ("acompanhamento", "fraude")
 
 
@@ -646,6 +658,7 @@ def _chegou_em(
     devolucao_atualizada_em: datetime | None,
     pacote_entregue_em: datetime | None = None,
     devolucao_tipo_auto: str | None = None,
+    devolucao_destino_auto: str | None = None,
 ) -> date | None:
     """Coluna "Chegou em" (Eduardo 10/09, escolha dele: manter "Em devolução
     desde" no INÍCIO e mostrar a chegada ao lado): dia em que o marketplace
@@ -655,20 +668,36 @@ def _chegou_em(
     A Shopee informa sim, mas só no DETALHE da devolução
     (`reverse_logistics_status = LOGISTICS_DELIVERY_DONE`): o sync grava esse
     instante em `pacote_entregue_em` e ele manda aqui, por ser a fonte mais
-    direta (Eduardo, 10/09, pedido 291516)."""
+    direta (Eduardo, 10/09, pedido 291516).
+
+    ML com revisão (Vinicius 19/09, 2000014922944893 e mais 3): a perna atual
+    vai pro GALPÃO do ML (`devolucao_destino_auto = warehouse`) — "entregue"
+    ali, venha do status, do 17track ou dos Correios, é Cajamar. Nenhum dos
+    caminhos abaixo carimba enquanto o destino for o galpão; a chegada de
+    verdade vem na perna seguinte (seller_address)."""
     from app.services import logistica_rules  # tardio: evita ciclo router↔services
     from app.services.devolucao_returns import iso_to_dt
 
-    if pacote_entregue_em is not None:
+    no_galpao = _devolucao_no_galpao(fonte_auto, devolucao_destino_auto)
+    if pacote_entregue_em is not None and not no_galpao:
         return pacote_entregue_em.astimezone(SAO_PAULO).date()
     # Caso SÓ reembolso (0285): não vem pacote, então nenhum dos dois caminhos
     # abaixo pode carimbar chegada — nem a Logística (linha antiga, gravada
     # antes do tipo existir, ainda diz só "COMPLETE") nem o sync do retorno.
     if (devolucao_tipo_auto or "").strip().upper() in _TIPO_AUTO_SEM_PACOTE:
         return None
-    iso = logistica_rules.data_retorno_concluido(plataforma, meli_status, status_datas)
+    ms = dict(meli_status or {})
+    destino = (devolucao_destino_auto or "").strip().lower()
+    if (fonte_auto or "").strip().lower() == "ml" and destino:
+        # A Logística pode estar VELHA (linha escondida não é re-enriquecida:
+        # sem a chave do destino e ainda com o `delivered` da perna do galpão
+        # mesmo depois de o ML abrir a perna da loja). O sync do retorno lê a
+        # mesma perna, mais fresca — status e destino dele mandam aqui.
+        ms["return_status"] = (devolucao_status_auto or "").strip() or ms.get("return_status", "")
+        ms[logistica_rules.RETURN_DESTINO_KEY] = destino
+    iso = logistica_rules.data_retorno_concluido(plataforma, ms, status_datas)
     dt = iso_to_dt(iso) if iso else None
-    if dt is None and devolucao_atualizada_em is not None:
+    if dt is None and devolucao_atualizada_em is not None and not no_galpao:
         chave = (fonte_auto or "").strip().lower()
         atual = (devolucao_status_auto or "").strip().upper()
         if atual and atual in _STATUS_AUTO_CHEGOU.get(chave, set()):
@@ -735,6 +764,7 @@ def _com_status_da_devolucao(
     localizacao_auto: str | None = None,
     pacote_entregue_em: datetime | None = None,
     tipo_auto: str | None = None,
+    destino_auto: str | None = None,
 ) -> dict:
     """Devolução VIVA → `localizacao` vira o status da devolução (+ o último
     evento do pacote de volta, quando o 17track já mandou) e a entrega original
@@ -750,18 +780,25 @@ def _com_status_da_devolucao(
         return d
     dev = None
     if status_auto and fonte_auto:
-        # `tipo_auto` separa devolução de SÓ reembolso no TikTok (0285).
+        # `tipo_auto` separa devolução de SÓ reembolso no TikTok (0285);
+        # `destino_auto` separa galpão do ML de loja (0296).
         dev = logistica_rules.devolucao_status_pt(
             _FONTE_PLATAFORMA.get(fonte_auto, fonte_auto),
-            {"return_status": status_auto, "return_type": tipo_auto or ""},
+            {
+                "return_status": status_auto,
+                "return_type": tipo_auto or "",
+                logistica_rules.RETURN_DESTINO_KEY: destino_auto or "",
+            },
         )
     if dev is None:
         dev = logistica_rules.devolucao_status_pt(lg_plataforma, lg_meli_status or {})
     if dev:
         d["entrega_localizacao"] = d.get("localizacao")
         # O pacote de volta CHEGOU: isso vale mais que o status do caso, que
-        # segue "em processamento" por dias depois da entrega.
-        if pacote_entregue_em is not None and not localizacao_auto:
+        # segue "em processamento" por dias depois da entrega. Carimbo da
+        # perna do galpão do ML não conta (é Cajamar, não a loja).
+        no_galpao = _devolucao_no_galpao(fonte_auto, destino_auto)
+        if pacote_entregue_em is not None and not localizacao_auto and not no_galpao:
             d["localizacao"] = f"Pacote entregue ao vendedor · {dev}"
         else:
             d["localizacao"] = f"{dev} · {localizacao_auto}" if localizacao_auto else dev
@@ -801,6 +838,7 @@ async def acompanhamento_rows(session: AsyncSession) -> list[dict]:
                     r.localizacao_auto_data,
                     r.devolucao_status_auto,
                     r.devolucao_tipo_auto,
+                    r.devolucao_destino_auto,
                     r.acao_auto,
                     r.prazo_acao_auto,
                     r.pacote_entregue_em,
@@ -888,6 +926,7 @@ async def acompanhamento_rows(session: AsyncSession) -> list[dict]:
         lg_status_datas = d.pop("lg_status_datas", None)
         status_auto = d.pop("devolucao_status_auto", None)
         tipo_auto = d.pop("devolucao_tipo_auto", None)
+        destino_auto = d.pop("devolucao_destino_auto", None)
         fonte_auto = d.pop("fonte_auto", None)
         d["fila"], d["fila_manual"] = _fila(d.pop("fila_manual", None), tipo_auto)
         d["video_status"] = _video_status(
@@ -926,6 +965,7 @@ async def acompanhamento_rows(session: AsyncSession) -> list[dict]:
             devolucao_atualizada_em=devolucao_atualizada_em,
             pacote_entregue_em=pacote_entregue_em,
             devolucao_tipo_auto=tipo_auto,
+            devolucao_destino_auto=destino_auto,
         )
         out.append(
             _com_status_da_devolucao(
@@ -938,6 +978,7 @@ async def acompanhamento_rows(session: AsyncSession) -> list[dict]:
                 localizacao_auto=d.pop("localizacao_auto", None),
                 pacote_entregue_em=pacote_entregue_em,
                 tipo_auto=tipo_auto,
+                destino_auto=destino_auto,
             )
         )
         d.pop("localizacao_auto_data", None)
@@ -1233,6 +1274,7 @@ async def patch_acompanhamento_rastreio(
                 devolucao_atualizada_em=row.devolucao_atualizada_em,
                 pacote_entregue_em=row.pacote_entregue_em,
                 devolucao_tipo_auto=row.devolucao_tipo_auto,
+                devolucao_destino_auto=row.devolucao_destino_auto,
             ),
         },
         localizacao_manual=row.localizacao,
@@ -1243,6 +1285,7 @@ async def patch_acompanhamento_rastreio(
         localizacao_auto=row.localizacao_auto,
         pacote_entregue_em=row.pacote_entregue_em,
         tipo_auto=row.devolucao_tipo_auto,
+        destino_auto=row.devolucao_destino_auto,
     )
     return AcompanhamentoRastreioOut(**d)
 

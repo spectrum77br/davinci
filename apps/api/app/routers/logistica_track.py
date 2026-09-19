@@ -32,7 +32,7 @@ from app.db import get_session
 from app.deps.auth import require_permission
 from app.models import DevolucaoRastreio, Logistica, User
 from app.redis_client import redis
-from app.services import logistica_track, logistica_track_sync
+from app.services import devolucao_rastreio_sync, logistica_track, logistica_track_sync
 
 logger = structlog.get_logger()
 router = APIRouter(tags=["logistica_track"])
@@ -106,14 +106,11 @@ async def receive_17track_push(
             )
         ).scalars().all()
         for dev in devs:
-            dev.localizacao_auto = loc
-            dev.localizacao_auto_data = datetime.now(UTC)
-            # Correios dizendo ENTREGUE é a prova mais direta de que o pacote
-            # de volta chegou — vale pra qualquer plataforma cujo retorno vá
-            # pelos Correios (todo o TikTok, parte da Shopee). Nunca apaga um
-            # carimbo já existente.
-            if number in entregues and dev.pacote_entregue_em is None:
-                dev.pacote_entregue_em = datetime.now(UTC)
+            # Localização + carimbo de chegada (Correios ENTREGUE), com a
+            # exceção da perna do galpão do ML — regra no sync do retorno.
+            devolucao_rastreio_sync.aplicar_push(
+                dev, loc, entregue=number in entregues, agora=datetime.now(UTC)
+            )
             applied += 1
     await session.commit()
     if graves:

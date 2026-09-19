@@ -152,7 +152,12 @@ def mensagem_aviso(
         transp = (row.transportadora_auto or "").strip()
         linhas.append(f"Pacote de volta: {rastreio}{f' ({transp})' if transp else ''}")
     situacao = logistica_rules.devolucao_status_pt(
-        plataforma, {"return_status": row.devolucao_status_auto or "", "return_type": row.devolucao_tipo_auto or ""}
+        plataforma,
+        {
+            "return_status": row.devolucao_status_auto or "",
+            "return_type": row.devolucao_tipo_auto or "",
+            logistica_rules.RETURN_DESTINO_KEY: row.devolucao_destino_auto or "",
+        },
     )
     if situacao:
         linhas.append(f"Situação: {situacao}")
