@@ -11,8 +11,8 @@ const props = defineProps<{
   sku: string
   // Condição efetiva — só pro rótulo (Novo/Usado).
   condicao?: string
-  // Correção de mala/eletro: modo "destino completo" — lista os bins regionais
-  // .mala/.pi/.sp pra escolher (Novo E Usado), gravando base.<suffix>.
+  // Correção de mala/eletro Novo: lista os bins regionais base.<suffix>.
+  // Em Usado, a condição prevalece e mantém a criação de avulso z000N.<tag>.
   fullDestino?: boolean
 }>()
 
@@ -100,6 +100,7 @@ const hasExisting = computed(() => existing.value.length > 0)
 // Usado sempre vira produto "z" (z000N.<tag>): só pode ir pra mala ou eletro;
 // os sufixos regionais não se aplicam a usado.
 const isUsado = computed(() => (props.condicao ?? '').trim().toLowerCase() === 'usado')
+const destinoCompleto = computed(() => !!props.fullDestino && !isUsado.value)
 
 // Tags candidatas pra criação do z000N.<tag>: sufixos regionais (exclui `sp`,
 // a origem "a redirecionar") + mala/eletro (usados que viram avulso).
@@ -220,10 +221,8 @@ function confirm() {
           </div>
         </div>
 
-        <!-- Destino completo (correção de mala): escolher o bin regional
-             .mala/.pi/.sp — grava base.<suffix> (cria no Bling se não existir),
-             tanto Novo quanto Usado. -->
-        <div v-if="fullDestino" class="space-y-1.5">
+        <!-- Correção de mala Novo: escolher base.<suffix>. Usado mantém o avulso z. -->
+        <div v-if="destinoCompleto" class="space-y-1.5">
           <p class="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Destino do estoque</p>
           <div class="grid grid-cols-2 sm:grid-cols-3 gap-2">
             <button
@@ -242,8 +241,8 @@ function confirm() {
 
         <!-- Bins já existentes: entrada direta de N unidades. Oculto para Usado,
              que sempre vira produto z (não entra em bin regional existente).
-             No destino completo (mala) mostra mesmo em Usado. -->
-        <div v-if="hasExisting && (!isUsado || fullDestino)" class="space-y-1.5">
+             A condição Usado prevalece sobre o modo de destino completo. -->
+        <div v-if="hasExisting && !isUsado" class="space-y-1.5">
           <p class="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Estoques existentes</p>
           <div class="grid grid-cols-2 sm:grid-cols-3 gap-2">
             <button
@@ -263,7 +262,7 @@ function confirm() {
         <!-- Manter o SKU usado base.us (ex.: dg020.us) — só pra Usado. Entra no
              bin se já existir, senão cria base.us (sem virar produto z).
              No destino completo (mala) some: a grade de destino já traz .us. -->
-        <div v-if="isUsado && !fullDestino" class="space-y-1.5">
+        <div v-if="isUsado && !destinoCompleto" class="space-y-1.5">
           <p class="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Manter SKU usado</p>
           <div class="grid grid-cols-2 sm:grid-cols-3 gap-2">
             <button
@@ -280,7 +279,7 @@ function confirm() {
 
         <!-- Criar produto novo z000N.<tag> — sempre disponível (mesmo com bins).
              No destino completo (mala) some: o destino é base.<suffix>, não z. -->
-        <div v-if="!fullDestino" class="space-y-1.5">
+        <div v-if="!destinoCompleto" class="space-y-1.5">
           <p class="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
             Criar novo (<span class="font-mono normal-case">zXXXX.&lt;tag&gt;</span>)
           </p>
