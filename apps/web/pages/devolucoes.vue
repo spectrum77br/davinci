@@ -2120,6 +2120,9 @@ async function backfillAddresses() {
               <!-- 19/09 (Vinicius): texto longo — a célula mostra só o começo; clicou,
                    abre o balão com o texto inteiro (ObservacaoPopover), editável. -->
               <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
+                <!-- Largura fixa (a do cabeçalho): o botão do balão não tem tamanho
+                     próprio como o input tinha, e a célula esticava até o texto. -->
+                <div class="w-[220px]">
                 <ObservacaoPopover
                   :model-value="draftOf(row, 'localizacao')"
                   :disabled="!canEdit || isSavingRastreio(row.pedido_bling, 'localizacao')"
@@ -2129,11 +2132,13 @@ async function backfillAddresses() {
                   @update:model-value="(v) => setDraft(row, 'localizacao', v)"
                   @save="saveDraft(row, 'localizacao')"
                 />
+                </div>
               </td>
               <td class="px-2 py-1 whitespace-nowrap text-muted-foreground bg-amber-50/40 dark:bg-amber-900/10" title="Preenchida sozinha quando a localização muda">
                 {{ fmtDateTime(row.localizacao_data) }}
               </td>
               <td class="px-1 py-0.5 bg-emerald-50/40 dark:bg-emerald-900/10 border-l-[3px] border-gray-400 dark:border-gray-600">
+                <div class="w-[240px]">
                 <ObservacaoPopover
                   :model-value="draftOf(row, 'observacao')"
                   :disabled="!canEdit || isSavingRastreio(row.pedido_bling, 'observacao')"
@@ -2142,6 +2147,7 @@ async function backfillAddresses() {
                   @update:model-value="(v) => setDraft(row, 'observacao', v)"
                   @save="saveDraft(row, 'observacao')"
                 />
+                </div>
               </td>
               <!-- Vídeo (17/09): solicitar → solicitado → link (apagar com
                    motivo devolve pra equipe) | sem vídeo (motivo + pedir de novo). -->
@@ -2856,7 +2862,8 @@ async function backfillAddresses() {
                 <option v-for="sit in situacoesBling" :key="sit.id" :value="sit.id">{{ sit.nome }}</option>
               </select>
             </td>
-            <td class="px-1 py-0.5 w-[150px] max-w-[150px] bg-emerald-50/40 dark:bg-emerald-900/10 border-l-[3px] border-gray-400 dark:border-gray-600">
+            <td class="px-1 py-0.5 bg-emerald-50/40 dark:bg-emerald-900/10 border-l-[3px] border-gray-400 dark:border-gray-600">
+              <div class="w-[240px]">
               <ObservacaoPopover
                 :model-value="row.observacao"
                 :disabled="!canEdit"
@@ -2864,6 +2871,7 @@ async function backfillAddresses() {
                 @update:model-value="(v) => setRowText(row, 'observacao', v)"
                 @save="saveRow(row)"
               />
+              </div>
             </td>
             <td v-if="isAdmin" class="px-2 py-1 whitespace-nowrap text-muted-foreground bg-slate-50/40 dark:bg-slate-800/20 border-l-[3px] border-gray-400 dark:border-gray-600" title="Última alteração feita neste registro">{{ fmtDateTime(row.updated_at) }}</td>
             <td v-if="canDelete" class="px-2 py-1 text-center">
