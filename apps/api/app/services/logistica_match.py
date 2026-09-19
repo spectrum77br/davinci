@@ -163,9 +163,29 @@ def deve_monitorar(
 ) -> bool:
     """True se alguma regra APLICÁVEL AO ESTADO ATUAL pede monitoramento (o pedido
     fica no painel pra acompanhar mesmo depois de resolvido). Uma regra de outro
-    estado (`status_atual` diferente do Bling atual) não monitora agora."""
-    aplicaveis = regras_aplicaveis(rules, status_bling) if status_bling is not None else rules
-    return any(bool(r.monitoramento) for r in aplicaveis)
+    estado (`status_atual` diferente do Bling atual) não monitora agora.
+
+    Sem NENHUMA regra pro estado atual, vale o Monitorar da regra que TROUXE o
+    pedido até aqui (`alterar_status_bling` = estado atual). Vinicius, 19/09:
+    o ML 290714 ("Cancelado | Não entregue | Retido na alfândega | Envio") foi
+    pra Problemas pela regra de "Em andamento", marcada Monitorar — e sumiu do
+    painel, porque pra (chave, Problemas) não há regra e o `estado_resolvido`
+    o dá como resolvido no alvo da cadeia. Marcar Monitorar na transição é
+    "quero acompanhar esse caso"; sem regra de destino, o pedido não pode
+    sumir em silêncio. Regra cadastrada pro estado (mesmo sem Monitorar)
+    continua mandando — decisão do operador, como desde 17/09."""
+    if status_bling is None:
+        return any(bool(r.monitoramento) for r in rules)
+    aplicaveis = regras_aplicaveis(rules, status_bling)
+    if aplicaveis:
+        return any(bool(r.monitoramento) for r in aplicaveis)
+    atual = _norm_situacao(status_bling)
+    if not atual:
+        return False
+    return any(
+        bool(r.monitoramento) and _norm_situacao(r.alterar_status_bling) == atual
+        for r in rules
+    )
 
 
 def estado_resolvido(

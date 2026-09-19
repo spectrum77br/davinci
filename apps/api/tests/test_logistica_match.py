@@ -137,6 +137,30 @@ def test_deve_monitorar_qualquer_regra_com_monitoramento():
     assert logistica_match.deve_monitorar([]) is False
 
 
+def test_monitorar_da_transicao_vale_no_destino_sem_regra_propria():
+    """ML 290714 (19/09): "Em andamento → Problemas" com Monitorar. Chegou em
+    Problemas, sem regra pra (chave, Problemas): resolvido no alvo da cadeia,
+    mas o Monitorar da transição segura a linha no painel. Regra cadastrada
+    pro destino (mesmo sem Monitorar) continua mandando."""
+    transicao = _rule(
+        status_atual="Em andamento", alterar_status_bling="Problemas",
+        monitoramento=True, abrir_chamado=True,
+    )
+    assert logistica_match.estado_resolvido([transicao], "Problemas") is True
+    assert logistica_match.deve_monitorar([transicao], "Problemas") is True
+    # Ainda em "Em andamento" a própria regra é a aplicável (como antes).
+    assert logistica_match.deve_monitorar([transicao], "Em andamento") is True
+    # Transição sem Monitorar não empresta nada; estado que não é alvo, idem.
+    sem = _rule(status_atual="Em andamento", alterar_status_bling="Problemas")
+    assert logistica_match.deve_monitorar([sem], "Problemas") is False
+    assert logistica_match.deve_monitorar([transicao], "Entregue") is False
+    # Regra própria do destino decide: sem Monitorar nela, esconde.
+    destino = _rule(status_atual="Problemas")
+    assert logistica_match.deve_monitorar([transicao, destino], "Problemas") is False
+    destino_mon = _rule(status_atual="Problemas", monitoramento=True)
+    assert logistica_match.deve_monitorar([sem, destino_mon], "Problemas") is True
+
+
 def test_estado_resolvido_abrir_chamado_conta_como_feito_com_numero():
     # Regra pede chamado: pendente enquanto a linha não tem o nº; com o nº
     # (motor abriu ou operador colou) deixa de segurar a linha no painel.
