@@ -4,7 +4,7 @@ rastreio dos Correios, previsão de entrega (objeto de postagem) e contato
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 from sqlalchemy import select
@@ -157,3 +157,49 @@ async def test_enrich_nao_apaga_rastreio_manual_nem_troca_por_codigo_estranho(db
     row = (await db.execute(select(Logistica))).scalars().one()
     # Código dos Correios de verdade substitui o manual.
     assert row.rastreio == "AD912266053BR"
+
+
+# ── gatilho por evento: reler o Bling agora ─────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_reler_agora_zera_so_amazon_sem_correios_e_nao_dba(db: AsyncSession):
+    """Situação mudada no Bling (webhook) = a etiqueta pode ter saído: só a
+    linha Amazon que ainda não tem o …BR (e não é DBA) volta pra fila do Bling."""
+    lido = datetime.now(UTC) - timedelta(minutes=10)
+    sem = _linha("298196", amazon_canal="proprio", bling_enriquecido_em=lido)
+    com_br = _linha(
+        "298281", amazon_canal="proprio", rastreio="AD912266053BR", bling_enriquecido_em=lido
+    )
+    dba = _linha("296709", amazon_canal="dba", bling_enriquecido_em=lido)
+    ml = _linha("111", plataforma="Mercado Livre", bling_enriquecido_em=lido)
+    db.add_all([sem, com_br, dba, ml])
+    await db.commit()
+
+    assert await svc.reler_agora(db, []) == 0
+    n = await svc.reler_agora(db, [sem.id, com_br.id, dba.id, ml.id])
+    assert n == 1
+    for r in (sem, com_br, dba, ml):
+        await db.refresh(r)
+    assert sem.bling_enriquecido_em is None
+    assert com_br.bling_enriquecido_em is not None
+    assert dba.bling_enriquecido_em is not None
+    assert ml.bling_enriquecido_em is not None
+
+
+@pytest.mark.asyncio
+async def test_alvo_prefere_carimbo_zerado_mesmo_sendo_mais_antiga(db: AsyncSession):
+    """No teto da rodada, quem nunca foi lido (ou foi zerado pelo gatilho)
+    entra antes das releituras de rotina — senão a etiqueta recém-gerada
+    perde a vaga numa rodada cheia."""
+    velha_zerada = _linha("100", data=date.today() - timedelta(days=5))
+    nova_relida = _linha(
+        "200", data=date.today(), bling_enriquecido_em=datetime.now(UTC) - timedelta(hours=2)
+    )
+    db.add_all([velha_zerada, nova_relida])
+    await db.commit()
+
+    rows = await svc._alvo(db, limit=1)
+    assert [r.pedido_bling for r in rows] == ["100"]
+    rows2 = await svc._alvo(db, limit=2)
+    assert [r.pedido_bling for r in rows2] == ["100", "200"]

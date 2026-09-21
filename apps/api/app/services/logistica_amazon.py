@@ -36,6 +36,7 @@ from app.services import (
     logistica_rules,
     logistica_track,
 )
+from app.services.amazon_shipment_status import AMAZON_SHIPPED
 from app.services.marketplaces.amazon import AmazonClient
 
 logger = structlog.get_logger()
@@ -229,6 +230,7 @@ async def enrich_row(
     enr = await build_enrichment(client, order_id)
     # Antes de trocar o status: o carimbo compara o valor velho com o novo.
     row.status_datas = logistica_datas.aplicar(row, enr["meli_status"], enr.get("datas"))
+    antes = ((row.meli_status or {}).get("order_status") or "").strip()
     row.meli_status = enr["meli_status"]
     row.status_lido_em = datetime.now(UTC)
     if enr.get("rastreio"):
@@ -249,6 +251,22 @@ async def enrich_row(
     canal = logistica_amazon_canal.classificar(row.meli_status, row.servico_envio)
     if canal:
         row.amazon_canal = canal
+    # Vinicius, 21/09/2026: no Envio próprio a etiqueta (Melhor Envio) nasce
+    # junto do "Shipped" — mas o código dos Correios só chega pelo Bling, que
+    # o motor relê de hora em hora por linha. Zerar o carimbo faz o
+    # `_amazon_bling_best_effort` da MESMA rodada (logistica_ingest roda o
+    # enrich da SP-API e logo depois o do Bling) copiar o código agora, em vez
+    # de a linha ficar até 1 h só com a cidade de destino na Localização.
+    # Zero chamada nova ao Bling: só antecipa a leitura que já aconteceria.
+    # DBA e FBA ficam de fora (a Amazon entrega; o Bling nunca terá `…BR`).
+    depois = (enr["meli_status"].get("order_status") or "").strip()
+    if (
+        depois in AMAZON_SHIPPED
+        and antes not in AMAZON_SHIPPED
+        and not logistica_track.is_correios(row.rastreio)
+        and canal in (logistica_amazon_canal.CANAL_PROPRIO, None)
+    ):
+        row.bling_enriquecido_em = None
     if enr.get("entregue") and row.entregue_em is None:
         row.entregue_em = datetime.now(UTC)
     return True

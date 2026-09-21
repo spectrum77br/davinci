@@ -232,3 +232,82 @@ async def test_sweep_pos_venda_re_olha_nao_finais_e_devolve_mudados(db, monkeypa
     assert (out["seen"], out["checked"], out["changed"], out["failed"]) == (3, 2, 1, 0)
     await db.refresh(r_mudou)
     assert (r_mudou.meli_status or {}).get("easyship_status") == "Delivered"
+
+
+# ── gatilho "Shipped" → reler o Bling agora ─────────────────────────────
+
+
+def _linha_enrich(**kw):
+    """Linha Amazon já lida no Bling (carimbo preenchido) — o enrich_row da
+    SP-API decide se zera o carimbo pra o Bling ser relido na mesma rodada."""
+    from datetime import UTC, date, datetime, timedelta
+
+    from app.models import Logistica
+
+    base = {
+        "plataforma": "Amazon",
+        "conta": "kfa",
+        "pedido_bling": "298196",
+        "pedido_marketplace": "702-0000009-0000009",
+        "meli_status": {"order_status": "Unshipped", "fulfillment_channel": "MFN"},
+        "status_bling": "Em andamento",
+        "data": date.today(),
+        "bling_enriquecido_em": datetime.now(UTC) - timedelta(minutes=5),
+    }
+    base.update(kw)
+    return Logistica(**base)
+
+
+async def _enrich_com(db, row, status: dict):
+    db.add(row)
+    await db.commit()
+    fake = FakeAmazon({row.pedido_marketplace: status})
+    await logistica_amazon.enrich_row(db, row, client_cache={"kfa": fake})
+    await db.commit()
+    return row
+
+
+@pytest.mark.asyncio
+async def test_unshipped_para_shipped_sem_rastreio_zera_carimbo_do_bling(db):
+    """Pedidos 298196/298281 (21/09): etiquetados juntos às 08:49, um ganhou o
+    rastreio às 08:57 e o outro só às 09:22 — o Bling é relido de hora em hora
+    por linha. Ao ver o "Shipped" chegar, o carimbo é zerado e o enrich do
+    Bling da MESMA rodada copia o código."""
+    row = await _enrich_com(
+        db, _linha_enrich(), {"order_status": "Shipped", "fulfillment_channel": "MFN"}
+    )
+    assert row.amazon_canal == "proprio"
+    assert row.bling_enriquecido_em is None
+
+
+@pytest.mark.asyncio
+async def test_shipped_para_shipped_mantem_carimbo(db):
+    row = await _enrich_com(
+        db,
+        _linha_enrich(meli_status={"order_status": "Shipped", "fulfillment_channel": "MFN"}),
+        {"order_status": "Shipped", "fulfillment_channel": "MFN"},
+    )
+    assert row.bling_enriquecido_em is not None
+
+
+@pytest.mark.asyncio
+async def test_shipped_com_rastreio_correios_mantem_carimbo(db):
+    # Já tem o …BR: não há o que buscar no Bling.
+    row = await _enrich_com(
+        db,
+        _linha_enrich(rastreio="AD912266053BR"),
+        {"order_status": "Shipped", "fulfillment_channel": "MFN"},
+    )
+    assert row.bling_enriquecido_em is not None
+
+
+@pytest.mark.asyncio
+async def test_shipped_dba_mantem_carimbo(db):
+    # DBA: a Amazon entrega; o rastreio nunca vem do Bling.
+    row = await _enrich_com(
+        db,
+        _linha_enrich(meli_status={"order_status": "Unshipped"}),
+        {"order_status": "Shipped", "easyship_status": "PendingPickUp"},
+    )
+    assert row.amazon_canal == "dba"
+    assert row.bling_enriquecido_em is not None

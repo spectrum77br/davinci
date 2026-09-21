@@ -18,6 +18,7 @@ from datetime import UTC, datetime
 from typing import Annotated
 from uuid import UUID
 
+import httpx
 import structlog
 from arq.jobs import Job, JobStatus
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile, status
@@ -77,6 +78,7 @@ from app.schemas.logistica import (
 )
 from app.services import (
     logistica_amazon,
+    logistica_amazon_bling,
     logistica_amazon_canal,
     logistica_bling,
     logistica_cliente_mensagens,
@@ -293,6 +295,7 @@ def _to_out(
         problema_correios=c.problema_correios,
         cliente_nome=c.cliente_nome,
         cliente_email=c.cliente_email,
+        bling_enriquecido_em=c.bling_enriquecido_em,
         aviso_previsao_correios_at=c.aviso_previsao_correios_at,
         aviso_prazo_amazon_3d_at=c.aviso_prazo_amazon_3d_at,
         aviso_prazo_amazon_vencido_at=c.aviso_prazo_amazon_vencido_at,
@@ -1151,12 +1154,69 @@ async def atualizar_rastreio(
     """Botão ⟳ da coluna Localização: consulta os Correios AGORA pelo 17track
     (registra o número se preciso, força a releitura e espera até ~40 s). Só
     vale pra rastreio dos Correios (`…BR`); pode gastar 1 crédito do 17track
-    quando o "retomar" gratuito daquele número já foi usado."""
+    quando o "retomar" gratuito daquele número já foi usado.
+
+    Linha Amazon ainda SEM `…BR` (Envio próprio recém-etiquetado): antes lê o
+    pedido no Bling na hora — é de lá que vem o código dos Correios, e o motor
+    só relê cada linha de hora em hora (Vinicius, 21/09/2026). Se o Bling já
+    tem o código, segue pro 17track como se a linha sempre o tivesse; senão
+    devolve `sem_rastreio_no_bling` (200) com a linha já com o que o Bling deu
+    (serviço, contato). Bling fora do ar → 502 `logistica_bling_erro`. Linha
+    de outra plataforma sem `…BR` continua 422."""
     c = (
         await session.execute(select(Logistica).where(Logistica.id == logistica_id))
     ).scalar_one_or_none()
     if c is None:
         raise HTTPException(404, detail={"code": "logistica_not_found"})
+    eh_amazon = (c.plataforma or "").strip().lower() in logistica_amazon._AMAZON_PLATAFORMAS
+    if eh_amazon and not logistica_track.is_correios(c.rastreio):
+        detalhe: str | None = None
+        try:
+            bid = await logistica_bling._bling_order_id_for_row(session, c)
+        except logistica_bling.BlingObsError:
+            bid = None
+            detalhe = "pedido sem espelho do Bling"
+        if bid is not None:
+            try:
+                bling = await logistica_bling._bling_client(session)
+            except logistica_bling.BlingObsError as e:
+                raise HTTPException(422, detail={"code": e.code}) from e
+            try:
+                await logistica_amazon_bling.enrich_row(c, bling, bid)
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code != 404:
+                    logger.warning(
+                        "logistica_atualizar_rastreio_bling_falhou",
+                        id=str(logistica_id),
+                        status=e.response.status_code,
+                    )
+                    raise HTTPException(502, detail={"code": "logistica_bling_erro"}) from e
+                # Pedido apagado no Bling (espelho ainda tem o id): o Bling
+                # respondeu — não é "fora do ar", é "não tem".
+                await session.rollback()
+                detalhe = "pedido não existe mais no Bling"
+            except Exception as e:  # noqa: BLE001
+                logger.warning(
+                    "logistica_atualizar_rastreio_bling_falhou",
+                    id=str(logistica_id),
+                    err=str(e)[:200],
+                )
+                raise HTTPException(502, detail={"code": "logistica_bling_erro"}) from e
+            else:
+                await session.commit()
+            await session.refresh(c)
+        if not logistica_track.is_correios(c.rastreio):
+            return AtualizarRastreioOut(
+                resultado="sem_rastreio_no_bling",
+                detalhe=detalhe,
+                linha=_to_out(
+                    c,
+                    await _match_rules(session, c),
+                    produtos=await _produtos_for(session, c),
+                    mensagens=await _mensagens_for(session, c),
+                    chamado_aba=await _chamado_aba_for(session, c),
+                ),
+            )
     if not logistica_track.is_correios(c.rastreio):
         raise HTTPException(422, detail={"code": "logistica_sem_rastreio_correios"})
     try:

@@ -119,6 +119,9 @@ type Logistica = {
   problema_correios?: string | null
   cliente_nome?: string | null
   cliente_email?: string | null
+  // Última leitura do pedido no Bling (serviço, rastreio, contato). No Envio
+  // próprio sem …BR é o "Bling lido há X" da Localização.
+  bling_enriquecido_em?: string | null
   aviso_previsao_correios_at?: string | null
   aviso_prazo_amazon_3d_at?: string | null
   aviso_prazo_amazon_vencido_at?: string | null
@@ -798,6 +801,31 @@ function isAmazon(c: Logistica): boolean {
   return (c.plataforma || '').trim().toLowerCase() === 'amazon'
 }
 
+// Envio próprio ainda SEM o código dos Correios: a etiqueta sai no Bling
+// (Melhor Envio) e o motor só relê cada linha de hora em hora, então logo
+// depois de etiquetar a Localização mostra só a cidade de destino que a
+// Amazon informou — que parece posição do pacote sem ser (Vinicius,
+// 21/09/2026: 298196 e 298281 etiquetados juntos, um ganhou o código 8 min
+// depois e o outro 33). Aqui a célula diz isso com todas as letras e o ⟳ lê
+// o Bling na hora.
+function proprioSemRastreio(c: Logistica): boolean {
+  return isAmazon(c) && c.amazon_canal === 'proprio' && !ehCorreios(c.rastreio)
+}
+const DESTINO_TITLE =
+  'A cidade é o endereço de entrega informado pela Amazon, não a posição do pacote: ' +
+  'o código dos Correios desta etiqueta (que vem do Bling) ainda não chegou aqui.'
+// Sem carimbo o DaVinci nunca leu o pedido no Bling (linha nova, ou fora da
+// janela de 60 dias do motor) — não dá pra afirmar que o Bling não tem a etiqueta.
+function blingLidoResumo(c: Logistica): string {
+  const desde = fmtDesde(c.bling_enriquecido_em)
+  return desde ? `sem etiqueta no Bling ainda · Bling lido ${desde}` : 'Bling ainda não lido'
+}
+function tituloAtualizarLocalizacao(c: Logistica): string {
+  return ehCorreios(c.rastreio)
+    ? 'Consultar os Correios agora pelo 17track (pode gastar 1 crédito)'
+    : 'Buscar o código dos Correios no Bling e consultar o 17track'
+}
+
 // Copia a "chave" (assinatura do Status Plataforma, ex. "Pago | Pendente | Programado").
 async function copiarChave(c: Logistica) {
   const chave = assinatura(c)
@@ -904,12 +932,22 @@ async function atualizarLocalizacao(c: Logistica) {
       case 'recusado':
         toasts.error('O 17track recusou este número', r.detalhe || 'Confira se o rastreio está certo.')
         break
+      case 'sem_rastreio_no_bling':
+        toasts.info(
+          'Bling ainda sem código',
+          'O Bling ainda não tem o código dos Correios deste pedido — confira a etiqueta no Melhor Envio.',
+        )
+        break
       default:
         toasts.error('17track fora do ar', r.detalhe || 'Tente de novo em instantes.')
     }
   } catch (e: any) {
     const code = e?.data?.detail?.code || e?.message || 'erro'
-    toasts.error('Não foi possível atualizar a localização', code)
+    if (code === 'logistica_bling_erro') {
+      toasts.error('Bling não respondeu', 'Não deu pra ler o pedido no Bling agora. Tente de novo em instantes.')
+    } else {
+      toasts.error('Não foi possível atualizar a localização', code)
+    }
   } finally {
     const s = new Set(refreshingRastreio.value)
     s.delete(c.id)
@@ -1969,17 +2007,32 @@ async function aplicarStatusBling(c: Logistica) {
               <td class="px-3 py-2 whitespace-nowrap">
                 <div class="leading-tight">
                   <div class="flex items-start gap-1.5">
-                    <span class="flex-1">{{ c.localizacao || '—' }}</span>
-                    <!-- Consulta os Correios agora (só rastreio …BR; pode gastar 1 crédito do 17track). -->
+                    <!-- Envio próprio sem …BR: a cidade é só o DESTINO (endereço da
+                         Amazon), não onde o pacote está — diz isso com todas as letras. -->
+                    <span
+                      v-if="proprioSemRastreio(c) && c.localizacao"
+                      class="flex-1"
+                      :title="DESTINO_TITLE"
+                    >Destino: {{ c.localizacao }}</span>
+                    <span v-else class="flex-1">{{ c.localizacao || '—' }}</span>
+                    <!-- Consulta os Correios agora (rastreio …BR; pode gastar 1 crédito do
+                         17track). No Envio próprio ainda sem …BR, antes busca o código no Bling. -->
                     <button
-                      v-if="canEdit && ehCorreios(c.rastreio)"
+                      v-if="canEdit && (ehCorreios(c.rastreio) || (isAmazon(c) && c.amazon_canal === 'proprio'))"
                       class="shrink-0 text-muted-foreground hover:text-foreground disabled:opacity-50"
-                      title="Consultar os Correios agora pelo 17track (pode gastar 1 crédito)"
+                      :title="tituloAtualizarLocalizacao(c)"
                       :disabled="refreshingRastreio.has(c.id)"
                       @click.stop="atualizarLocalizacao(c)"
                     >
                       <RefreshCw class="size-3.5" :class="refreshingRastreio.has(c.id) ? 'animate-spin' : ''" />
                     </button>
+                  </div>
+                  <div
+                    v-if="proprioSemRastreio(c)"
+                    class="text-[11px] text-muted-foreground"
+                    :title="DESTINO_TITLE"
+                  >
+                    {{ blingLidoResumo(c) }}
                   </div>
                   <!-- A segunda linha só aparece pra envio dos CORREIOS: nas
                        outras (Full, Flex, SPX…) nunca haverá leitura física, e o
@@ -2187,7 +2240,11 @@ async function aplicarStatusBling(c: Logistica) {
             <div><span class="text-muted-foreground">Data:</span> {{ fmtDate(c.data) }}</div>
             <div><span class="text-muted-foreground">Rastreio:</span> {{ c.rastreio || '—' }}</div>
             <div>
-              <span class="text-muted-foreground">Localização:</span> {{ c.localizacao || '—' }}
+              <span class="text-muted-foreground">Localização:</span>
+              <template v-if="proprioSemRastreio(c) && c.localizacao">
+                <span :title="DESTINO_TITLE">Destino: {{ c.localizacao }}</span>
+              </template>
+              <template v-else>{{ c.localizacao || '—' }}</template>
               <!-- Mesma informação de origem da tabela: no celular ela é ainda
                    mais necessária, porque não dá pra passar o mouse e ler o
                    balãozinho. -->
@@ -2199,16 +2256,19 @@ async function aplicarStatusBling(c: Logistica) {
                   · Correios, lido {{ fmtDesde(c.localizacao_at) }}
                 </span>
                 <span v-else class="text-muted-foreground">· sem leitura dos Correios ainda</span>
-                <button
-                  v-if="canEdit"
-                  class="ml-1 inline-flex align-middle text-muted-foreground hover:text-foreground disabled:opacity-50"
-                  title="Consultar os Correios agora pelo 17track (pode gastar 1 crédito)"
-                  :disabled="refreshingRastreio.has(c.id)"
-                  @click.stop="atualizarLocalizacao(c)"
-                >
-                  <RefreshCw class="size-3.5" :class="refreshingRastreio.has(c.id) ? 'animate-spin' : ''" />
-                </button>
               </template>
+              <button
+                v-if="canEdit && (ehCorreios(c.rastreio) || (isAmazon(c) && c.amazon_canal === 'proprio'))"
+                class="ml-1 inline-flex align-middle text-muted-foreground hover:text-foreground disabled:opacity-50"
+                :title="tituloAtualizarLocalizacao(c)"
+                :disabled="refreshingRastreio.has(c.id)"
+                @click.stop="atualizarLocalizacao(c)"
+              >
+                <RefreshCw class="size-3.5" :class="refreshingRastreio.has(c.id) ? 'animate-spin' : ''" />
+              </button>
+              <div v-if="proprioSemRastreio(c)" class="text-[11px] text-muted-foreground" :title="DESTINO_TITLE">
+                {{ blingLidoResumo(c) }}
+              </div>
             </div>
             <div><span class="text-muted-foreground">Chamado:</span> {{ c.chamado || chamadoAbaResumo(c)?.texto || '—' }}</div>
             <template v-if="tab === 'amazon' && amazonSub === 'proprio'">

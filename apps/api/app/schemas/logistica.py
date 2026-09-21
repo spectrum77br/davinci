@@ -149,6 +149,10 @@ class LogisticaOut(BaseModel):
     problema_correios: str | None = None
     cliente_nome: str | None = None
     cliente_email: str | None = None
+    # Última leitura do pedido no Bling (serviço, rastreio, contato). No Envio
+    # próprio sem `…BR` a tela mostra "Bling lido há X" pra deixar claro que a
+    # etiqueta ainda não chegou — a cidade na Localização é só o destino.
+    bling_enriquecido_em: datetime | None = None
     # Carimbos dos avisos Threema do robô (um por tipo).
     aviso_previsao_correios_at: datetime | None = None
     aviso_prazo_amazon_3d_at: datetime | None = None
@@ -207,8 +211,10 @@ class RoboResultadoIn(BaseModel):
 
 class AtualizarRastreioOut(BaseModel):
     """Botão ⟳ da Localização: `resultado` = atualizado | consultando |
-    encerrado | sem_quota | recusado | 17track_indisponivel; `linha` = a linha
-    já com o que o 17track devolveu."""
+    encerrado | sem_quota | recusado | 17track_indisponivel |
+    sem_rastreio_no_bling (linha Amazon ainda sem `…BR`: o Bling foi lido na
+    hora e também não tem o código); `linha` = a linha já com o que o
+    17track/Bling devolveu."""
 
     resultado: str
     detalhe: str | None = None

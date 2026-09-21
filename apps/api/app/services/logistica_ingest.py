@@ -675,6 +675,10 @@ async def recarregar_ml(session: AsyncSession) -> dict[str, int]:
     de marketplace, leve, em 1-3 min.
     """
     mudaram = await refresh_status_bling(session)
+    # Situação mudada no Bling = a etiqueta pode ter saído: a linha Amazon
+    # (Envio próprio, ainda sem …BR) é relida no Bling nesta rodada, sem
+    # esperar a hora do RELER_APOS (Vinicius, 21/09/2026).
+    reler = await logistica_amazon_bling.reler_agora(session, mudaram)
     # Chamado aberto em outra aba passa a constar na linha (coluna Chamado).
     com_chamado = await espelhar_chamados(session)
     # Quem acabou de virar Cancelado/Resolvido/Perdimento (ou Entregue velho)
@@ -685,6 +689,7 @@ async def recarregar_ml(session: AsyncSession) -> dict[str, int]:
     logger.info(
         "logistica_recarregar_inicio",
         status_refresh=len(mudaram),
+        bling_reler=reler,
         chamados_espelhados=len(com_chamado),
         cleanup=removed,
         **{f"alvo_{k}": len(v) for k, v in alvo.items()},
@@ -692,6 +697,7 @@ async def recarregar_ml(session: AsyncSession) -> dict[str, int]:
     resumo = await _enriquecer_e_aplicar(session, alvo, origem="recarregar")
     return {
         "status_refresh": len(mudaram),
+        "bling_reler": reler,
         "chamados_espelhados": len(com_chamado),
         "cleanup": removed,
         **resumo,

@@ -24,12 +24,13 @@ derruba o motor.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable
 from datetime import UTC, date, datetime, timedelta
+from uuid import UUID
 
 import httpx
 import structlog
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import BlingOrder, Logistica
@@ -44,7 +45,10 @@ JANELA_DIAS = 60
 # Teto por rodada: até 4 GETs por pedido. 20 pedidos por rodada de 5 min
 # (≈ 80 requisições) com uma pausa entre pedidos: o limite real do Bling é
 # 3 req/s e os outros jobs (ingest de pedidos, NF) já disputam essa cota —
-# com 40 por rodada a primeira passada choveu 429 (15/09).
+# com 40 por rodada a primeira passada choveu 429 (15/09). Dentro do teto,
+# quem nunca foi lido (ou teve o carimbo zerado por um gatilho — Shipped na
+# SP-API, situação mudada no Bling) entra primeiro: numa rodada cheia a
+# etiqueta recém-gerada não pode perder a vaga pra releituras de rotina.
 MAX_POR_RODADA = 20
 PAUSA_ENTRE_PEDIDOS_S = 0.5
 # Pedido já lido mas ainda incompleto (etiqueta gerada depois, contato sem
@@ -118,10 +122,48 @@ async def _alvo(session: AsyncSession, *, limit: int) -> list[Logistica]:
                 Logistica.bling_enriquecido_em < reler,
             ),
         )
-        .order_by(Logistica.data.desc().nulls_last(), Logistica.created_at.desc())
+        .order_by(
+            Logistica.bling_enriquecido_em.is_(None).desc(),
+            Logistica.data.desc().nulls_last(),
+            Logistica.created_at.desc(),
+        )
     )
     rows = (await session.execute(stmt)).scalars().all()
     return [r for r in rows if not _completa(r)][:limit]
+
+
+async def reler_agora(session: AsyncSession, ids: Collection[UUID]) -> int:
+    """Zera o carimbo `bling_enriquecido_em` das linhas Amazon dadas que ainda
+    não têm rastreio dos Correios (e não são DBA), pra próxima rodada relê-las
+    já, sem esperar o RELER_APOS. Retorna quantas.
+
+    Vinicius, 21/09/2026: a situação do pedido mudar no Bling (webhook) é outro
+    sinal de que a etiqueta saiu — cobre a SP-API fora do ar. O recarregar passa
+    os ids que o `refresh_status_bling` devolveu. Um UPDATE só; sem lista, sem
+    SQL."""
+    ids = list(ids)
+    if not ids:
+        return 0
+    stmt = (
+        update(Logistica)
+        .where(
+            Logistica.id.in_(ids),
+            func.lower(func.trim(Logistica.plataforma)).in_(tuple(_AMAZON_PLATAFORMAS)),
+            or_(
+                Logistica.rastreio.is_(None),
+                func.upper(func.trim(Logistica.rastreio)).not_like("%BR"),
+            ),
+            Logistica.amazon_canal.is_distinct_from(logistica_amazon_canal.CANAL_DBA),
+        )
+        .values(bling_enriquecido_em=None)
+        .execution_options(synchronize_session=False)
+    )
+    res = await session.execute(stmt)
+    await session.commit()
+    n = int(res.rowcount or 0)
+    if n:
+        logger.info("logistica_amazon_bling_reler_agora", zeradas=n)
+    return n
 
 
 async def enrich_row(row: Logistica, client: BlingClient, bling_id: int) -> bool:
