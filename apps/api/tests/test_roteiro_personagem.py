@@ -170,6 +170,122 @@ async def test_usuario_restrito_nao_ve_roteiro_de_outra_equipe(
     assert titulos == {"da alpha", "de todos"}, "sem destino é de todos; da beta não"
 
 
+async def test_restrito_nao_cria_roteiro_para_outra_equipe(
+    client: AsyncClient, db: AsyncSession, make_user, auth_as
+):
+    """O PATCH já barrava; o POST não — e o commit vinha ANTES do 403, então a
+    linha ficava gravada, visível pra agência errada, e a própria autora não
+    conseguia mais apagar (o `_get` passava a escondê-la dela)."""
+    restrito = await make_user(
+        role=UserRole.USER, permissions={"marketing_criativos": {"edit": True, "view": True}}
+    )
+    restrito.marketing_teams = ["Mindset"]
+    await db.commit()
+    auth_as(restrito)
+
+    r = await client.post(
+        R, json={"titulo": "Mala 20kg", "texto": "cena 1", "equipe_destino": "Bill Gates"}
+    )
+    assert r.status_code == 403
+    assert r.json()["detail"]["code"] == "fora_da_sua_equipe"
+    # E, o que mais importa: NÃO pode ter sobrado linha nenhuma no banco.
+    assert (await client.get(R)).json() == [], "403 não pode deixar o roteiro gravado"
+
+
+async def test_restrito_nao_solta_roteiro_para_as_duas(
+    client: AsyncClient, db: AsyncSession, make_user, auth_as
+):
+    """Destino vazio = as DUAS agências. Quem só enxerga uma não pode publicar
+    pra outra que ele nem vê — é a mesma decisão que o PATCH já tomava."""
+    restrito = await make_user(
+        role=UserRole.USER, permissions={"marketing_criativos": {"edit": True, "view": True}}
+    )
+    restrito.marketing_teams = ["Mindset"]
+    await db.commit()
+    auth_as(restrito)
+
+    r = await client.post(R, json={"titulo": "Livre", "texto": "cena 1"})
+    assert r.status_code == 403
+    assert (await client.get(R)).json() == []
+
+
+async def test_destinos_nao_conta_as_equipes_alheias(
+    client: AsyncClient, db: AsyncSession, make_user, auth_as, admin
+):
+    """O select não pode oferecer opção que responde 403 — nem contar pro
+    restrito o nome das agências que não são dele."""
+    await _novo(client, equipe_destino=None)  # admin cria, pra existir equipe
+    restrito = await make_user(
+        role=UserRole.USER, permissions={"marketing_criativos": {"edit": True, "view": True}}
+    )
+    restrito.marketing_teams = ["Mindset"]
+    await db.commit()
+    auth_as(restrito)
+
+    destinos = (await client.get(f"{R}/destinos")).json()
+    assert destinos == ["Mindset"]
+
+
+async def test_reenviar_arquivo_grande_demais_nao_destroi_o_que_ja_estava(
+    client: AsyncClient, admin
+):
+    """Abrir o destino em "wb" trunca antes de saber se o novo cabe: o
+    `print.png` bom era apagado pelo `print.png` grande demais, e a linha do
+    banco sobrevivia apontando pro vazio."""
+    rot = await _novo(client)
+    bom = await client.post(
+        f"{R}/{rot['id']}/referencia", files={"files": ("print.png", PNG, "image/png")}
+    )
+    assert bom.status_code == 200
+    ref = bom.json()["referencias"][0]
+
+    gigante = b"\x89PNG\r\n\x1a\n" + b"x" * (26 * 1024 * 1024)
+    estourou = await client.post(
+        f"{R}/{rot['id']}/referencia", files={"files": ("print.png", gigante, "image/png")}
+    )
+    assert estourou.status_code == 413
+
+    # O arquivo bom continua servindo, byte a byte.
+    baixa = await client.get(f"{R}/{rot['id']}/referencia/{ref['id']}")
+    assert baixa.status_code == 200, "o upload recusado apagou o arquivo que estava lá"
+    assert baixa.content == PNG
+
+
+async def test_nome_longo_demais_da_400_e_nao_500(client: AsyncClient, admin):
+    """Nome de 300 caracteres estourava no open() (OSError 63) ou no INSERT —
+    500 com stack trace em vez de um 400 dizendo o que houve."""
+    rot = await _novo(client)
+    r = await client.post(
+        f"{R}/{rot['id']}/referencia", files={"files": ("x" * 300 + ".png", PNG, "image/png")}
+    )
+    assert r.status_code == 400
+    assert r.json()["detail"]["code"] == "nome_longo_demais"
+
+
+# String vazia NÃO entra na lista: ela cai no default "arquivo" de propósito,
+# e aí morre um passo depois, no `mime_da_extensao` (sem extensão = 400).
+@pytest.mark.parametrize("nome", ["ok\x00.png", "a\tb.png", "..", "."])
+def test_nome_seguro_recusa_nome_torto(nome: str):
+    """Testado na função, não pela rota: o multipart do httpx/starlette já
+    normaliza byte nulo e tab antes de chegar no servidor, então pela rota
+    este teste passaria verde sem exercitar a guarda. Ela continua valendo
+    pra qualquer outro caminho que alimente `file_name` (import, script)."""
+    from fastapi import HTTPException
+
+    from app.services.marketing.anexos import nome_seguro
+
+    with pytest.raises(HTTPException) as exc:
+        nome_seguro(nome)
+    assert exc.value.status_code == 400
+
+
+def test_nome_seguro_tira_a_pasta():
+    from app.services.marketing.anexos import nome_seguro
+
+    assert nome_seguro("../../etc/passwd") == "passwd"
+    assert nome_seguro("print.png") == "print.png"
+
+
 # ─────────────── personagens ───────────────
 
 

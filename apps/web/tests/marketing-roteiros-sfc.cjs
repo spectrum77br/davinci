@@ -56,14 +56,15 @@ const tpl = descriptor.template.content
 // ---------------------------------------------------------------- script setup
 const pageScript = script.replace(/^import[\s\S]*?from\s+'[^']+'\s*$/gm, '')
 const exportsForTest = `return {
-  secao, roteiros, personagens, destinos, sel, selId, listaFiltrada, q,
+  secao, roteiros, personagens, destinos, sel, selId, listaFiltrada, q, textoLocal,
   disponiveis, linkNovo, personagemNovo, textoEl,
   carregar, abrir, criarRoteiro, salvar, ligarPersonagem, desligarPersonagem,
   inserirNoTexto, addLink, destinoLabel, pForm, salvarPersonagem, novoPersonagem,
+  alternarAtivo, editarPersonagem, pSel,
 }`
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor
 const factory = new AsyncFunction(
-  'computed', 'nextTick', 'onMounted', 'ref',
+  'computed', 'nextTick', 'onMounted', 'ref', 'watch',
   'useApi', 'useToasts', 'useCan',
   'defineProps', 'defineExpose', 'window',
   transpile(pageScript, ts.ModuleKind.ESNext) + '\n' + exportsForTest,
@@ -103,6 +104,9 @@ async function tela({ roteiro = ROTEIRO, personagens = [LIVIA], canEdit = true }
     }
     if (url === '/api/marketing/roteiros/destinos') return Promise.resolve(['Mindset', 'Bill Gates'])
     if (url === '/api/marcas?ativo=true') return Promise.resolve([{ nome: 'Uranyx', slug: 'uranyx' }])
+    if (opts?.method === 'PATCH' && url.startsWith('/api/marketing/personagens/')) {
+      return Promise.resolve({ ...LIVIA, ...opts.body })
+    }
     if (opts?.method === 'PATCH') return Promise.resolve({ ...roteiro, ...opts.body })
     if (opts?.method === 'POST' && url.endsWith('/personagem')) {
       return Promise.resolve({ ...roteiro, personagens: [LIVIA] })
@@ -117,7 +121,7 @@ async function tela({ roteiro = ROTEIRO, personagens = [LIVIA], canEdit = true }
     info: (...a) => toastLog.push(['info', ...a]),
   }
   const state = await factory(
-    Vue.computed, Vue.nextTick, (fn) => fn(), Vue.ref,
+    Vue.computed, Vue.nextTick, (fn) => fn(), Vue.ref, Vue.watch,
     () => ({ api }), () => toasts, () => Vue.ref(canEdit),
     () => ({ foco: null }), () => {},
     { confirm: () => true },
@@ -151,7 +155,10 @@ async function run() {
     s.sel.value.personagens = [LIVIA]
     // cursor logo antes de "AQUI"
     const pos = ROTEIRO.texto.indexOf('AQUI')
-    s.textoEl.value = { selectionStart: pos, selectionEnd: pos, focus() {}, setSelectionRange() {} }
+    s.textoEl.value = {
+      value: ROTEIRO.texto, selectionStart: pos, selectionEnd: pos,
+      focus() {}, setSelectionRange() {},
+    }
     await s.inserirNoTexto(LIVIA)
 
     const salvou = calls.find((c) => c.opts?.method === 'PATCH' && 'texto' in (c.opts.body || {}))
@@ -170,6 +177,7 @@ async function run() {
   {
     const { s, calls } = await tela()
     s.textoEl.value = null
+    s.textoLocal.value = ROTEIRO.texto
     await s.inserirNoTexto({ ...LIVIA, referencia: null })
     const salvou = calls.find((c) => c.opts?.method === 'PATCH' && 'texto' in (c.opts.body || {}))
     assert.ok(salvou.opts.body.texto.endsWith('Lívia'), 'sem etiqueta usa o nome, no fim')
@@ -184,6 +192,32 @@ async function run() {
     assert.deepEqual(post.opts.body, { personagem_id: 'p-1' }, 'manda só o id')
     assert.equal(s.personagemNovo.value, '', 'limpa o seletor depois de ligar')
     assert.deepEqual(s.disponiveis.value, [], 'quem já está no roteiro sai das opções')
+  }
+
+  // O interruptor do personagem tem que sair no corpo do PATCH. Antes ele
+  // virava só na tela e a resposta trazia o valor antigo de volta: personagem
+  // não desligava, e `ativo` é o que tira a foto e a etiqueta da agência.
+  {
+    const { s, calls } = await tela()
+    s.editarPersonagem(s.personagens.value[0])
+    await s.alternarAtivo()
+    const patch = calls.find(
+      (c) => c.opts?.method === 'PATCH' && c.url.startsWith('/api/marketing/personagens/'),
+    )
+    assert.ok(patch, 'manda o PATCH do personagem')
+    assert.equal(patch.opts.body.ativo, false, 'o `ativo` invertido vai no corpo')
+    assert.equal(s.pSel.value.ativo, false, 'e a ficha reflete o que voltou')
+  }
+
+  // Salvar sem tocar no interruptor NÃO pode mandar `ativo` de carona.
+  {
+    const { s, calls } = await tela()
+    s.editarPersonagem(s.personagens.value[0])
+    await s.salvarPersonagem()
+    const patch = calls.find(
+      (c) => c.opts?.method === 'PATCH' && c.url.startsWith('/api/marketing/personagens/'),
+    )
+    assert.ok(!('ativo' in patch.opts.body), 'salvar não mexe na visibilidade')
   }
 
   // Filtro bate em título, marca, SKU e no texto.

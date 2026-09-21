@@ -69,11 +69,23 @@ def mime_da_extensao(nome: str, *, tabela: dict[str, str]) -> str:
     return mime
 
 
+# O limite da coluna é 256; o do filesystem costuma ser 255 bytes por
+# componente. Sem teto, um nome de 4 KB estourava no `open()` (OSError 63) ou
+# no INSERT — 500 com stack trace em vez de um 400 dizendo o que houve.
+MAX_NOME = 200
+
+
 def nome_seguro(bruto: str | None) -> str:
-    """Só o nome do arquivo, sem pasta nenhuma. `..` e vazio são recusados."""
+    """Só o nome do arquivo, sem pasta nenhuma. `..`, vazio e byte nulo fora."""
     nome = Path(bruto or "arquivo").name
     if not nome or nome in {".", ".."}:
         raise HTTPException(400, detail={"code": "nome_invalido"})
+    # Byte nulo trunca o caminho no syscall: "ok.png\x00.html" vira "ok.png"
+    # pra validação e outra coisa pro sistema de arquivos.
+    if "\x00" in nome or any(ord(c) < 32 for c in nome):
+        raise HTTPException(400, detail={"code": "nome_invalido"})
+    if len(nome.encode("utf-8")) > MAX_NOME:
+        raise HTTPException(400, detail={"code": "nome_longo_demais", "max": MAX_NOME})
     return nome
 
 
@@ -134,23 +146,32 @@ def gravar_em_disco(up: UploadFile, destino: Path, *, teto: int, code: str) -> i
 
     Devolve o tamanho em bytes. Nunca carrega o arquivo inteiro na memória —
     é o mesmo fluxo do upload de entrega, que recebe vídeos de 40 MB.
+
+    Grava num `.parcial` e só então renomeia por cima. Abrir o destino direto
+    em "wb" TRUNCA o arquivo bom antes de saber se o novo cabe: reenviar
+    `print.png` grande demais apagava o `print.png` que já estava lá, e a
+    linha do banco sobrevivia apontando pro vazio. O rename é atômico no
+    mesmo sistema de arquivos, então ou entra inteiro ou não entra.
     """
     escrito = 0
-    with destino.open("wb") as fh:
-        while pedaco := up.file.read(1024 * 1024):
-            escrito += len(pedaco)
-            if escrito > teto:
-                fh.close()
-                destino.unlink(missing_ok=True)
-                raise HTTPException(
-                    413,
-                    detail={
-                        "code": code,
-                        "arquivo": destino.name,
-                        "max_mb": teto // (1024 * 1024),
-                    },
-                )
-            fh.write(pedaco)
+    parcial = destino.with_name(destino.name + ".parcial")
+    try:
+        with parcial.open("wb") as fh:
+            while pedaco := up.file.read(1024 * 1024):
+                escrito += len(pedaco)
+                if escrito > teto:
+                    raise HTTPException(
+                        413,
+                        detail={
+                            "code": code,
+                            "arquivo": destino.name,
+                            "max_mb": teto // (1024 * 1024),
+                        },
+                    )
+                fh.write(pedaco)
+        parcial.replace(destino)
+    finally:
+        parcial.unlink(missing_ok=True)
     return escrito
 
 

@@ -118,8 +118,12 @@ async def equipe_do_token(
         )
     # compare_digest contra CADA token cadastrado: comparar por `in` daria a
     # resposta em tempo variável e entregaria o token caractere a caractere.
+    # `compare_digest` com str exige ASCII puro e levanta TypeError fora
+    # disso — um token com acento derrubava a porta em 500 em vez de 401, e
+    # 500 numa rota de autenticação é informação de graça pra quem sonda.
+    enviado = x_portal_token.encode("utf-8", "surrogatepass")
     for token, equipe in mapa.items():
-        if secrets.compare_digest(x_portal_token, token):
+        if secrets.compare_digest(enviado, token.encode("utf-8", "surrogatepass")):
             return equipe
     raise HTTPException(
         status.HTTP_401_UNAUTHORIZED, detail={"code": "portal_nao_autorizado"}
@@ -136,7 +140,9 @@ def _arquivo_out(f: MarketingCreativeFile) -> dict[str, Any]:
     }
 
 
-def _linha_out(row: MarketingCreative) -> dict[str, Any]:
+def _linha_out(
+    row: MarketingCreative, visiveis: frozenset[UUID] = frozenset()
+) -> dict[str, Any]:
     """LISTA BRANCA. Campo novo no modelo não vaza sozinho por aqui."""
     return {
         "id": str(row.id),
@@ -152,8 +158,11 @@ def _linha_out(row: MarketingCreative) -> dict[str, Any]:
         "arquivos": [_arquivo_out(f) for f in row.files],
         # Qual briefing esta entrega cumpre. O texto, as imagens e os
         # personagens vêm por /api/portal/roteiros — aqui só o ponteiro, pra
-        # o site conseguir ligar uma tela na outra.
-        "roteiro_id": str(row.roteiro_id) if row.roteiro_id else None,
+        # o site conseguir ligar uma tela na outra. Vem NULL quando o roteiro
+        # não está visível pra esta agência (desligado, sem texto ou de
+        # outra): o link existir e cair em 404 é pior que não existir, e no
+        # dia do deploy TODO roteiro migrado está desligado.
+        "roteiro_id": str(row.roteiro_id) if row.roteiro_id in visiveis else None,
         # O recado da aprovação/recusa. Sem ele o "recusado" da tela é um
         # beco: regravar sem saber o quê é o que faz a agência entregar a
         # mesma coisa de novo.
@@ -161,6 +170,28 @@ def _linha_out(row: MarketingCreative) -> dict[str, Any]:
         "feedback_em": row.feedback_em.isoformat() if row.feedback_em else None,
         "criado_em": row.created_at.isoformat() if row.created_at else None,
     }
+
+
+async def _roteiros_visiveis(
+    session: AsyncSession, linhas: list[MarketingCreative], equipe: str
+) -> frozenset[UUID]:
+    """Dos roteiros apontados por estas entregas, quais esta agência VÊ.
+
+    Uma consulta só, com exatamente o mesmo WHERE da listagem de roteiros —
+    é o que garante que o link da tela de entregas e a tela de roteiros nunca
+    discordem sobre o que existe.
+    """
+    ids = {r.roteiro_id for r in linhas if r.roteiro_id}
+    if not ids:
+        return frozenset()
+    achados = (
+        await session.execute(
+            select(MarketingRoteiro.id).where(
+                MarketingRoteiro.id.in_(ids), *_visivel_pra_fora(equipe)
+            )
+        )
+    ).scalars().all()
+    return frozenset(achados)
 
 
 def _da_equipe(equipe: str):
@@ -207,7 +238,8 @@ async def listar_criativos(
         .scalars()
         .all()
     )
-    return {"equipe": equipe, "criativos": [_linha_out(r) for r in linhas]}
+    visiveis = await _roteiros_visiveis(session, linhas, equipe)
+    return {"equipe": equipe, "criativos": [_linha_out(r, visiveis) for r in linhas]}
 
 # ─── roteiros ──────────────────────────────────────────────────────────────
 
@@ -263,8 +295,15 @@ def _roteiro_out(row: MarketingRoteiro) -> dict[str, Any]:
             }
             for r in row.refs
         ],
+        # `ativo` é o interruptor, e ele tem que valer AQUI também: a
+        # listagem do catálogo e a rota de bytes já filtram por ele, então um
+        # personagem desligado ficava saindo só por dentro do roteiro — com a
+        # foto dando 404 e a etiqueta do gerador (que é a parte que importa)
+        # ainda na mão da agência.
         "personagens": [
-            _personagem_out(v.personagem) for v in row.personagens if v.personagem
+            _personagem_out(v.personagem)
+            for v in row.personagens
+            if v.personagem and v.personagem.ativo
         ],
         "criado_em": row.created_at.isoformat() if row.created_at else None,
     }
@@ -394,6 +433,30 @@ async def listar_personagens(
     return {"equipe": equipe, "personagens": [_personagem_out(p) for p in linhas]}
 
 
+@router.get("/personagens/{personagem_id}")
+async def ver_personagem(
+    personagem_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    equipe: Annotated[str, Depends(equipe_do_token)],
+) -> dict[str, Any]:
+    """Um personagem só — a tela de "abrir" do portal.
+
+    Mesmo WHERE da listagem (`ativo`): desligado responde 404 aqui também, e
+    não só some da grade.
+    """
+    row = (
+        await session.execute(
+            select(MarketingPersonagem).where(
+                MarketingPersonagem.id == personagem_id,
+                MarketingPersonagem.ativo.is_(True),
+            )
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(404, detail={"code": "nao_encontrado"})
+    return {"equipe": equipe, "personagem": _personagem_out(row)}
+
+
 @router.get("/personagens/{personagem_id}/imagem/{imagem_id}")
 async def baixar_imagem_personagem(
     personagem_id: UUID,
@@ -512,4 +575,7 @@ async def enviar_arquivo(
     row.aprovado = None
     await session.commit()
     logger.info("portal_upload", creative_id=str(row.id), equipe=equipe, arquivos=entraram)
+    # Sem o conjunto de visíveis, `roteiro_id` sai NULL — conservador de
+    # propósito: o site recarrega a lista logo depois do envio, e é lá que o
+    # link (se houver) aparece.
     return _linha_out(row)

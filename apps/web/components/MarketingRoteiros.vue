@@ -15,7 +15,7 @@
 // Destino VAZIO = as DUAS agências veem. É o oposto da coluna Equipe da aba
 // Criativos, onde vazio = ninguém de fora vê. A tela diz isso com todas as
 // letras no seletor, porque a diferença não é adivinhável.
-import { computed, nextTick, onMounted, ref } from 'vue'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import {
   Plus, Trash2, Loader2, Search, Upload, X, Link2, ExternalLink,
   Users, NotebookPen, Eye, EyeOff, CornerDownLeft, Image as ImageIcon,
@@ -59,6 +59,9 @@ type Roteiro = {
   titulo: string
   texto: string | null
   marca: string | null
+  // Resolvidos pelo servidor a partir do texto de marca/SKU — a tela só lê.
+  marca_id: string | null
+  product_id: string | null
   sku: string | null
   equipe_destino: string | null
   ativo: boolean
@@ -106,6 +109,14 @@ const selId = ref<string | null>(null)
 const q = ref('')
 
 const sel = computed(() => roteiros.value.find((r) => r.id === selId.value) ?? null)
+
+// O texto do roteiro tem modelo LOCAL, e não `:value="sel.texto"`.
+// Amarrado no estado do servidor, QUALQUER resposta que chegasse enquanto
+// alguém digita (anexar imagem, colar link, ligar personagem, um PATCH de
+// outro campo) reescrevia o textarea e jogava fora o que estava sendo
+// escrito — e roteiro é texto longo, ninguém redigita.
+const textoLocal = ref('')
+watch(sel, (r) => { textoLocal.value = r?.texto ?? '' }, { immediate: true })
 
 const listaFiltrada = computed(() => {
   const t = q.value.trim().toLowerCase()
@@ -178,21 +189,42 @@ async function criarRoteiro() {
 // Salvamento por campo, no molde da planilha de Criativos: sai do campo,
 // salva. Sem botão de salvar pra ninguém perder texto ao trocar de roteiro.
 const salvando = ref(false)
+
+// Cada PATCH leva um número; só o último manda. Dois salvamentos em voo (sai
+// do título, sai do SKU) voltavam fora de ordem e a tela ficava com o estado
+// mais VELHO por cima do mais novo.
+let salvarSeq = 0
+
 async function salvar(campo: string, valor: unknown) {
   const r = sel.value
   if (!r) return
+  const seq = ++salvarSeq
+  ;(r as any)[campo] = valor // otimista: a tela não pisca enquanto salva
   salvando.value = true
   try {
-    Object.assign(r, await api<Roteiro>(`/api/marketing/roteiros/${r.id}`, {
+    const resp = await api<Roteiro>(`/api/marketing/roteiros/${r.id}`, {
       method: 'PATCH',
       body: { [campo]: valor },
-    }))
+    })
+    if (seq !== salvarSeq || sel.value !== r) return
+    aplicaResposta(r, resp)
   } catch (e: any) {
     toasts.error('Erro ao salvar', errMsg(e))
     await carregar()
   } finally {
-    salvando.value = false
+    if (seq === salvarSeq) salvando.value = false
   }
+}
+
+// Copia do servidor só o que ELE resolve — vínculos e listas. Os campos de
+// texto ficam como estão na tela: reescrevê-los é exatamente o que apagava o
+// que a pessoa estava digitando.
+function aplicaResposta(r: Roteiro, resp: Roteiro) {
+  r.marca_id = resp.marca_id
+  r.product_id = resp.product_id
+  r.referencias = resp.referencias
+  r.personagens = resp.personagens
+  r.ativo = resp.ativo
 }
 
 async function apagarRoteiro(r: Roteiro) {
@@ -225,7 +257,7 @@ async function onRefEscolhida(ev: Event) {
   try {
     const fd = new FormData()
     for (const f of arquivos) fd.append('files', f)
-    Object.assign(r, await api<Roteiro>(`/api/marketing/roteiros/${r.id}/referencia`, {
+    aplicaResposta(r, await api<Roteiro>(`/api/marketing/roteiros/${r.id}/referencia`, {
       method: 'POST',
       body: fd,
     }))
@@ -242,7 +274,7 @@ async function addLink() {
   if (!r || !url) return
   enviando.value = true
   try {
-    Object.assign(r, await api<Roteiro>(`/api/marketing/roteiros/${r.id}/referencia/link`, {
+    aplicaResposta(r, await api<Roteiro>(`/api/marketing/roteiros/${r.id}/referencia/link`, {
       method: 'POST',
       body: { url },
     }))
@@ -257,7 +289,7 @@ async function addLink() {
 async function tirarRef(r: Roteiro, x: Ref_) {
   if (!window.confirm('Tirar essa referência?')) return
   try {
-    Object.assign(r, await api<Roteiro>(`/api/marketing/roteiros/${r.id}/referencia/${x.id}`, {
+    aplicaResposta(r, await api<Roteiro>(`/api/marketing/roteiros/${r.id}/referencia/${x.id}`, {
       method: 'DELETE',
     }))
   } catch (e: any) {
@@ -279,7 +311,7 @@ async function ligarPersonagem() {
   const id = personagemNovo.value
   if (!r || !id) return
   try {
-    Object.assign(r, await api<Roteiro>(`/api/marketing/roteiros/${r.id}/personagem`, {
+    aplicaResposta(r, await api<Roteiro>(`/api/marketing/roteiros/${r.id}/personagem`, {
       method: 'POST',
       body: { personagem_id: id },
     }))
@@ -291,7 +323,7 @@ async function ligarPersonagem() {
 
 async function desligarPersonagem(r: Roteiro, p: Personagem) {
   try {
-    Object.assign(r, await api<Roteiro>(`/api/marketing/roteiros/${r.id}/personagem/${p.id}`, {
+    aplicaResposta(r, await api<Roteiro>(`/api/marketing/roteiros/${r.id}/personagem/${p.id}`, {
       method: 'DELETE',
     }))
   } catch (e: any) {
@@ -308,16 +340,22 @@ async function inserirNoTexto(p: Personagem) {
   const etiqueta = (p.referencia || p.nome).trim()
   if (!r || !etiqueta) return
   const el = textoEl.value
-  const atual = r.texto ?? ''
-  const pos = el ? (el.selectionStart ?? atual.length) : atual.length
-  const novo = atual.slice(0, pos) + etiqueta + atual.slice(el ? (el.selectionEnd ?? pos) : pos)
-  r.texto = novo
-  await salvar('texto', novo)
+  // O valor VIVO do campo, não o que o servidor devolveu da última vez:
+  // quem digitou sem sair do textarea perdia tudo ao clicar em inserir.
+  const atual = el ? el.value : textoLocal.value
+  const fim = atual.length
+  // selectionStart/End podem vir invertidos (seleção feita da direita pra
+  // esquerda) — sem ordenar, o slice come um pedaço do texto.
+  const a0 = el ? Math.min(el.selectionStart ?? fim, el.selectionEnd ?? fim) : fim
+  const a1 = el ? Math.max(el.selectionStart ?? fim, el.selectionEnd ?? fim) : fim
+  const novo = atual.slice(0, a0) + etiqueta + atual.slice(a1)
+  textoLocal.value = novo
   await nextTick()
   if (el) {
     el.focus()
-    el.setSelectionRange(pos + etiqueta.length, pos + etiqueta.length)
+    el.setSelectionRange(a0 + etiqueta.length, a0 + etiqueta.length)
   }
+  await salvar('texto', novo)
 }
 
 // ---- cadastro de personagens ---------------------------------------------
@@ -340,11 +378,12 @@ function editarPersonagem(p: Personagem) {
   }
 }
 
-async function salvarPersonagem() {
+async function salvarPersonagem(extra: Record<string, unknown> = {}) {
   const corpo = {
     nome: pForm.value.nome,
     descricao: pForm.value.descricao,
     referencia: pForm.value.referencia,
+    ...extra,
   }
   if (!corpo.nome.trim()) {
     toasts.warning('Dê um nome ao personagem')
@@ -358,6 +397,10 @@ async function salvarPersonagem() {
         body: corpo,
       })
       Object.assign(pSel.value, at)
+      // O card na grade é outro objeto quando a lista foi recarregada: sem
+      // isto o olho muda na ficha e a grade continua mostrando o estado velho.
+      const naLista = personagens.value.find((x) => x.id === at.id)
+      if (naLista && naLista !== pSel.value) Object.assign(naLista, at)
     } else {
       const novo = await api<Personagem>('/api/marketing/personagens', {
         method: 'POST',
@@ -371,6 +414,17 @@ async function salvarPersonagem() {
   } finally {
     pSalvando.value = false
   }
+}
+
+// O botão do olho mandava `salvarPersonagem()` e virava `pSel.ativo` na mão,
+// LOCALMENTE — e o `Object.assign` da resposta trazia o `ativo` antigo de
+// volta por cima. Ou seja: personagem não desligava. E é `ativo` que tira a
+// foto e a etiqueta da mão da agência, então o interruptor precisa chegar
+// mesmo ao servidor.
+async function alternarAtivo() {
+  const p = pSel.value
+  if (!p) return
+  await salvarPersonagem({ ativo: !p.ativo })
 }
 
 async function onImagemEscolhida(ev: Event) {
@@ -584,12 +638,12 @@ function destinoLabel(d: string | null): string {
           <label class="mb-1 block text-[11px] font-medium text-muted-foreground">Roteiro</label>
           <textarea
             ref="textoEl"
-            :value="sel.texto ?? ''"
+            v-model="textoLocal"
             rows="14"
             :readonly="!canEdit"
             class="w-full resize-y rounded-md border bg-background px-2.5 py-2 text-xs leading-relaxed outline-none focus:ring-2 focus:ring-ring"
             placeholder="Cena, fala, texto na tela. Use os personagens abaixo pra inserir a etiqueta do gerador no lugar certo."
-            @change="salvar('texto', ($event.target as HTMLTextAreaElement).value)"
+            @change="salvar('texto', textoLocal)"
           />
           <p class="mt-1 text-[11px] text-muted-foreground">
             A agência vê este texto assim que ele deixa de estar vazio. Roteiro em
@@ -799,12 +853,21 @@ function destinoLabel(d: string | null): string {
           </p>
         </div>
         <div class="flex items-center gap-1.5">
-          <button class="btn btn-sm btn-primary gap-1" :disabled="pSalvando" @click="salvarPersonagem">
+          <button class="btn btn-sm btn-primary gap-1" :disabled="pSalvando" @click="salvarPersonagem()">
             <Loader2 v-if="pSalvando" class="size-3.5 animate-spin" /> salvar
           </button>
-          <button v-if="pSel" class="btn btn-sm gap-1" @click="salvarPersonagem(); pSel && (pSel.ativo = !pSel.ativo)" :title="pSel.ativo ? 'Desligar' : 'Ligar'">
+          <button
+            v-if="pSel"
+            class="btn btn-sm gap-1"
+            :disabled="pSalvando"
+            :title="pSel.ativo
+              ? 'Desligar: some do catálogo da agência, sai dos roteiros e para de servir as fotos'
+              : 'Ligar: volta a aparecer pras agências'"
+            @click="alternarAtivo"
+          >
             <Eye v-if="pSel.ativo" class="size-3.5" />
             <EyeOff v-else class="size-3.5" />
+            {{ pSel.ativo ? 'visível' : 'desligado' }}
           </button>
           <button v-if="pSel" class="btn btn-sm ml-auto px-1.5 text-muted-foreground hover:text-destructive" title="Apagar" @click="apagarPersonagem(pSel)">
             <Trash2 class="size-3.5" />

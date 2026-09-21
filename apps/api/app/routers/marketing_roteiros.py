@@ -182,7 +182,14 @@ async def destinos(
     """
     from app.routers.marketing_creatives import list_equipes
 
-    return await list_equipes(session, user)
+    todas = await list_equipes(session, user)
+    # Usuário restrito só enxerga (e só consegue gravar) as próprias equipes.
+    # Oferecer as outras no select seria mostrar uma opção que responde 403 —
+    # e contar pra ele o nome das agências que não são dele.
+    permitidas = _user_equipes(user)
+    if permitidas is None:
+        return todas
+    return [e for e in todas if e.strip().lower() in permitidas]
 
 
 class RoteiroIn(BaseModel):
@@ -218,6 +225,15 @@ async def criar(
     titulo = payload.titulo.strip()[:TITULO_MAX]
     if not titulo:
         raise HTTPException(400, detail={"code": "titulo_obrigatorio"})
+    # MESMA regra do PATCH (`editar`), e ANTES de gravar qualquer coisa.
+    # Faltando aqui, um usuário restrito endereçava briefing pra uma agência
+    # que ele nem enxerga — e pior: o `session.commit()` acontecia antes de o
+    # `_get` estourar o 403, então a linha FICAVA no banco, visível pra
+    # agência errada, e a própria autora não conseguia mais apagar.
+    destino = _destino_limpo(payload.equipe_destino)
+    permitidas = _user_equipes(user)
+    if permitidas is not None and (destino is None or destino.lower() not in permitidas):
+        raise HTTPException(403, detail={"code": "fora_da_sua_equipe"})
     marca = (payload.marca or "").strip() or None
     sku = (payload.sku or "").strip() or None
     row = MarketingRoteiro(
@@ -228,7 +244,7 @@ async def criar(
         marca_id=await _marca_id_do_texto(session, marca),
         sku=sku,
         product_id=await _product_id_do_sku(session, sku),
-        equipe_destino=_destino_limpo(payload.equipe_destino),
+        equipe_destino=destino,
         created_by=user.id,
     )
     session.add(row)
