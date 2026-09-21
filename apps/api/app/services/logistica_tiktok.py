@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Collection, Iterable
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from uuid import UUID
 
@@ -157,9 +157,18 @@ async def enrich_row(
     row: Logistica,
     *,
     client_cache: dict[str, TikTokClient] | None = None,
+    reler_devolucao: bool = False,
 ) -> bool:
     """Preenche `row.meli_status`/rastreio/localizacao puxando do TikTok. Retorna
     True se atualizou.
+
+    `reler_devolucao=True` (botão ⟳ do painel): se a assinatura diz que há
+    devolução VIVA, consulta também o returns/search desse pedido e atualiza
+    `return_status`/`return_type` — senão o recarregar manual re-lia o pedido
+    e mantinha a devolução velha ("lido há 2 min" e ainda "Devolução
+    solicitada" com o caso já encerrado no TikTok; 585358874025494337, 21/09).
+    Fica desligado nos lotes automáticos de propósito: uma chamada a mais por
+    linha viraria rajada (429) — lá quem re-lê é o `sweep_pos_venda`.
 
     Levanta `TikTokEnrichError` com código quando não dá pra prosseguir (linha
     não-TikTok, sem pedido de marketplace, conta sem integração TikTok)."""
@@ -190,8 +199,18 @@ async def enrich_row(
         val = (row.meli_status or {}).get(campo)
         if val:
             meli = {**meli, campo: val}
+    datas = enr.get("datas")
+    if reler_devolucao and _devolucao_viva(row.meli_status):
+        d = await _caso_do_pedido(client, order_id)
+        if d is not None:
+            meli = {**meli, **{k: v for k, v in _sinal_do_caso(d).items() if v}}
+            datas = dict(datas or {})
+            logistica_datas.propor(
+                datas, "return_status", d.get("update_time"),
+                logistica_datas.FONTE_PLATAFORMA,
+            )
     # Antes de trocar o status: o carimbo compara o valor velho com o novo.
-    row.status_datas = logistica_datas.aplicar(row, meli, enr.get("datas"))
+    row.status_datas = logistica_datas.aplicar(row, meli, datas)
     row.meli_status = meli
     row.status_lido_em = datetime.now(UTC)
     if enr.get("rastreio"):
@@ -236,6 +255,20 @@ async def sweep_pos_venda(session: AsyncSession) -> dict:
       solicitada" / "Reembolso solicitado" / etc. Havendo mais de um caso pro
       mesmo pedido, vale o VIVO mais recente (`_melhor_devolucao_por_pedido`).
 
+    Fora da janela de 45 dias (mesmo furo da Shopee, fechado em 19/09):
+    - linha velha cuja assinatura ainda diz devolução VIVA entra na varredura
+      de qualquer jeito e o caso é re-lido POR PEDIDO (sem filtro de data) —
+      senão o encerramento que a TikTok fizer depois dos 45 dias nunca chega
+      (real 21/09: 585358874025494337 / 288403, venda de 03/08, 3ª devolução
+      cancelada em 19/09 por atraso do cliente; o painel seguiu "Devolução
+      solicitada" e o Bling em Aguardando Devolução — e a faxina segura a
+      linha pra sempre por causa disso);
+    - a lista da loja casa com linha de QUALQUER idade, e venda viva sem linha
+      nenhuma (saiu da aba por Entregue > 90 dias, ou nunca entrou) é recriada
+      do espelho do Bling (`logistica_ingest.recriar_linhas_do_bling`). Só
+      caso VIVO recria linha: devolução cancelada de venda velha não tem o
+      que acompanhar.
+
     Retorna {"ids": [UUID...], **contadores}. O recarregar passa os ids como
     `extras` do `_ids_pendentes` — extras furam o escondimento — e o fluxo
     normal re-enriquece a linha e aplica a regra de status no Bling."""
@@ -251,23 +284,31 @@ async def sweep_pos_venda(session: AsyncSession) -> dict:
             )
         )
     ).scalars().all()
+    velhas_vivas = await _linhas_velhas_com_devolucao_viva(session, corte)
 
     por_conta: dict[str, list[Logistica]] = {}
     for r in rows:
         por_conta.setdefault((r.conta or "").strip(), []).append(r)
+    velhas_por_conta: dict[str, list[Logistica]] = {}
+    for r in velhas_vivas:
+        velhas_por_conta.setdefault((r.conta or "").strip(), []).append(r)
 
     mudados: set[UUID] = set()
-    n_status = n_returns = contas_ok = 0
+    n_status = n_returns = contas_ok = n_recriadas = n_velhas = 0
     agora = int(datetime.now(UTC).timestamp())
     ret_from = agora - _RETURNS_JANELA_DIAS * 24 * 3600 + 300
-    for conta, linhas in por_conta.items():
+    for conta in list(dict.fromkeys([*por_conta, *velhas_por_conta])):
+        linhas = por_conta.get(conta, [])
+        velhas = velhas_por_conta.get(conta, [])
         integ = await _tiktok_integration_for_conta(session, conta)
         if integ is None:
             continue
         client = _build_tiktok_client(session, integ)
         contas_ok += 1
 
-        # 1) status vivo do pedido, em lotes de 50.
+        # 1) status vivo do pedido, em lotes de 50 — as velhas com devolução
+        # viva vão no mesmo lote (poucas; sai de graça).
+        linhas = [*linhas, *velhas]
         oids = [(r.pedido_marketplace or "").strip() for r in linhas]
         smap = await client.get_order_status_map(oids)
         for r in linhas:
@@ -299,8 +340,42 @@ async def sweep_pos_venda(session: AsyncSession) -> dict:
                 conta=conta, err=str(e)[:200],
             )
             devolucoes = []
+        # 2b) as velhas com devolução viva: o caso inteiro POR PEDIDO, sem
+        # filtro de data — encerramento de semanas atrás não cai na janela.
+        if velhas:
+            n_velhas += len(velhas)
+            try:
+                devolucoes = [
+                    *devolucoes,
+                    *await client.get_return_list(
+                        order_ids=[(r.pedido_marketplace or "").strip() for r in velhas]
+                    ),
+                ]
+            except Exception as e:  # noqa: BLE001 — best-effort por conta
+                logger.warning(
+                    "logistica_tiktok_sweep_returns_velhas_falhou",
+                    conta=conta, pedidos=len(velhas), err=str(e)[:200],
+                )
         melhor = _melhor_devolucao_por_pedido(devolucoes)
-        for r in linhas:
+        # 2c) caso da lista da loja sem linha carregada: casa com a linha velha
+        # que ainda existir (qualquer idade) e recria, do espelho do Bling, a
+        # de venda viva que já saiu da aba.
+        alvo_ret = list(linhas)
+        faltam = set(melhor) - {(r.pedido_marketplace or "").strip() for r in linhas}
+        if faltam:
+            outras = await _linhas_tiktok_por_venda(session, faltam)
+            alvo_ret.extend(outras)
+            faltam -= {(r.pedido_marketplace or "").strip() for r in outras}
+        vivas_sem_linha = [oid for oid in faltam if _caso_vivo(melhor[oid])]
+        if vivas_sem_linha:
+            from app.services import logistica_ingest  # lazy: evita ciclo de import
+
+            novas = await logistica_ingest.recriar_linhas_do_bling(
+                session, "tiktok", vivas_sem_linha
+            )
+            alvo_ret.extend(novas)
+            n_recriadas += len(novas)
+        for r in alvo_ret:
             d = melhor.get((r.pedido_marketplace or "").strip())
             if d is None:
                 continue
@@ -315,6 +390,15 @@ async def sweep_pos_venda(session: AsyncSession) -> dict:
             if novo != atual:
                 meli = {k: v for k, v in meli_atual.items() if k not in _CAMPOS_DO_SWEEP}
                 meli.update({k: v for k, v in novo.items() if v})
+                # Carimba a data do caso (update_time do TikTok) — é a "última
+                # movimentação"; sem isso o carimbo ficava no dia em que o
+                # sweep viu a 1ª devolução.
+                datas_ret: dict[str, dict[str, str]] = {}
+                logistica_datas.propor(
+                    datas_ret, "return_status", d.get("update_time"),
+                    logistica_datas.FONTE_PLATAFORMA,
+                )
+                r.status_datas = logistica_datas.aplicar(r, meli, datas_ret)
                 r.meli_status = meli
                 r.status_lido_em = datetime.now(UTC)
                 mudados.add(r.id)
@@ -328,9 +412,85 @@ async def sweep_pos_venda(session: AsyncSession) -> dict:
     summary = {
         "seen": len(rows), "contas": contas_ok,
         "order_status": n_status, "returns": n_returns,
+        "velhas_vivas": n_velhas, "recriadas": n_recriadas,
     }
     logger.info("logistica_tiktok_sweep_pos_venda", **summary)
     return {"ids": list(mudados), **summary}
+
+
+def _devolucao_viva(meli_status: dict | None) -> bool:
+    """A assinatura da linha diz que há caso de devolução ainda aberto (nem
+    cancelado/recusado, nem concluído)? É o que ainda pode mudar no TikTok e
+    o que a faxina da Logística segura."""
+    st = ((meli_status or {}).get("return_status") or "").strip().upper()
+    return bool(st) and st not in logistica_rules.RETURN_ENCERRADO
+
+
+def _caso_vivo(d: dict) -> bool:
+    """Caso do returns/search ainda em aberto (mesmo critério de "vivo" do
+    `_melhor_devolucao_por_pedido`)."""
+    st = str(d.get("return_status") or "").strip().upper()
+    return bool(st) and st not in logistica_rules._TIKTOK_RETURN_ENCERRADO
+
+
+async def _caso_do_pedido(client: TikTokClient, order_id: str) -> dict | None:
+    """O caso de devolução que vale pro pedido (vivo mais recente; sem vivo, o
+    mais recente) direto do returns/search por pedido. None sem caso ou com a
+    API fora (best-effort: loga e segue)."""
+    try:
+        devolucoes = await client.get_return_list(order_ids=[order_id])
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "logistica_tiktok_caso_do_pedido_falhou", pedido=order_id, err=str(e)[:200]
+        )
+        return None
+    return _melhor_devolucao_por_pedido(devolucoes).get(order_id)
+
+
+async def _linhas_velhas_com_devolucao_viva(
+    session: AsyncSession, corte: date
+) -> list[Logistica]:
+    """Linhas TikTok com data de venda ANTES do corte do sweep cuja assinatura
+    ainda diz devolução viva — as que o sweep deixou de olhar e que só o
+    TikTok pode encerrar."""
+    ret = func.upper(func.coalesce(Logistica.meli_status["return_status"].astext, ""))
+    return list(
+        (
+            await session.execute(
+                select(Logistica).where(
+                    func.lower(func.trim(Logistica.plataforma)).in_(
+                        tuple(_TIKTOK_PLATAFORMAS)
+                    ),
+                    func.coalesce(Logistica.pedido_marketplace, "") != "",
+                    Logistica.data < corte,
+                    ret != "",
+                    ret.notin_(sorted(logistica_rules.RETURN_ENCERRADO)),
+                )
+            )
+        ).scalars().all()
+    )
+
+
+async def _linhas_tiktok_por_venda(
+    session: AsyncSession, vendas: Collection[str]
+) -> list[Logistica]:
+    """Linhas TikTok (qualquer idade) das vendas dadas — número do pedido no
+    marketplace. Casa a devolução da lista da loja com a linha que o sweep não
+    carregou por estar fora da janela de 45 dias."""
+    if not vendas:
+        return []
+    return list(
+        (
+            await session.execute(
+                select(Logistica).where(
+                    func.lower(func.trim(Logistica.plataforma)).in_(
+                        tuple(_TIKTOK_PLATAFORMAS)
+                    ),
+                    Logistica.pedido_marketplace.in_(sorted(vendas)),
+                )
+            )
+        ).scalars().all()
+    )
 
 
 # ---- devolução: o pacote que VOLTA (aba Acompanhamento de Devoluções) --------

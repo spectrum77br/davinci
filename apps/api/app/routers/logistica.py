@@ -1088,7 +1088,7 @@ async def atualizar_tiktok(
     if c is None:
         raise HTTPException(404, detail={"code": "logistica_not_found"})
     try:
-        await logistica_tiktok.enrich_row(session, c)
+        await logistica_tiktok.enrich_row(session, c, reler_devolucao=True)
     except logistica_tiktok.TikTokEnrichError as e:
         raise HTTPException(422, detail={"code": e.code}) from e
     except Exception as e:  # noqa: BLE001
