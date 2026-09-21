@@ -1718,9 +1718,11 @@ async function reabrir(row: ChamadoRow) {
 
           <!-- coluna direita: instrução pro robô -->
           <div class="space-y-2 min-w-0 rounded-md bg-indigo-50/40 dark:bg-indigo-900/10 px-2 py-2 -mx-2">
-            <div class="text-xs font-medium flex items-center gap-1.5 min-w-0">
-              <Bot class="size-3.5 shrink-0 text-indigo-600 dark:text-indigo-400" />
-              <span class="truncate">Instrução pro robô <span class="text-muted-foreground font-normal">— não vai pra plataforma; o robô lê na próxima passada e responde aqui</span></span>
+            <!-- 21/09 (Vinicius): a explicação cortava com "…" e não dava pra ler —
+                 agora quebra linha. -->
+            <div class="text-xs font-medium flex items-start gap-1.5 min-w-0">
+              <Bot class="size-3.5 shrink-0 mt-0.5 text-indigo-600 dark:text-indigo-400" />
+              <span class="min-w-0">Instrução pro robô <span class="text-muted-foreground font-normal">— não vai pra plataforma; o robô lê na próxima passada e responde aqui</span></span>
             </div>
             <div v-if="hist.row.instrucao_pendente" class="truncate rounded border border-indigo-500/30 bg-indigo-500/5 px-2 py-1 text-xs" :title="hist.row.instrucao_pendente">
               <span class="font-medium text-indigo-700 dark:text-indigo-300">Instrução pendente:</span> {{ hist.row.instrucao_pendente }}

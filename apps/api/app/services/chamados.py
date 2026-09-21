@@ -857,8 +857,11 @@ def status_e_motivo_da_aba(
     o robô desiste"):
       1. resolvido por pessoa → Concluído (motivo: ganhamos/perdemos/sem decisão
          + lucro/prejuízo);
-      2. status oficial FINAL sem pessoa fechar → Encerrado (+ sugestão do robô);
-      3. instrução nossa mais nova que a última análise → Análise Robô;
+      2. instrução nossa mais nova que a última análise → Análise Robô — de
+         QUALQUER estado, inclusive Encerrado (Vinicius 21/09: "qualquer status
+         que esteja, se eu mandar pro robô tem que ir pra análise dele"; até
+         19/09 o Encerrado vinha antes e a linha não saía de lá);
+      3. status oficial FINAL sem pessoa fechar → Encerrado (+ sugestão do robô);
       4. o cérebro pediu gente e ninguém falou depois → Análise Humano;
       5. Shopee pediu prova e ainda não mandamos NADA depois do pedido → Análise
          Humano (prova é humano — decisão do Vinicius); mandamos → cai na 7;
@@ -880,17 +883,17 @@ def status_e_motivo_da_aba(
         if resultado:
             motivo = f"{motivo} — {resultado}"
         return ABA_CONCLUIDO, ch.resolvido_at, motivo
-    if ch.status_plataforma in STATUS_FINAIS:
-        motivo = MOTIVO_FINAL.get(ch.status_plataforma, "plataforma encerrou sem decisão")
-        if ch.valor_sugerido is not None:
-            motivo = f"{motivo} · robô sugere {resultado_texto(ch.valor_sugerido)}"
-        return ABA_ENCERRADO, ch.status_plataforma_at, motivo
     if instrucao_pendente is not None:
         return (
             ABA_ANALISE_ROBO,
             instrucao_pendente.created_at,
             f"instrução pendente pro robô: {_texto_curto(instrucao_pendente.texto, 60)}",
         )
+    if ch.status_plataforma in STATUS_FINAIS:
+        motivo = MOTIVO_FINAL.get(ch.status_plataforma, "plataforma encerrou sem decisão")
+        if ch.valor_sugerido is not None:
+            motivo = f"{motivo} · robô sugere {resultado_texto(ch.valor_sugerido)}"
+        return ABA_ENCERRADO, ch.status_plataforma_at, motivo
     fala_em = _quando(ultima_fala)
     analise_depois = (
         ultima_analise is not None and (fala_em is None or ultima_analise.created_at >= fala_em)

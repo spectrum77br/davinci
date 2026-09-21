@@ -1030,7 +1030,8 @@ async def test_agent_analisar_e_analise_do_cerebro(client, make_user, auth_as, d
         json={"texto": "  Responde que o crédito não caiu na conta ainda.  "},
     )
     assert ins.status_code == 200, ins.text
-    assert ins.json()["status_aba"] == "encerrado"  # Encerrado manda; a instrução fica pendente
+    # 21/09 (Vinicius): a instrução tira do Encerrado até o cérebro consumir
+    assert ins.json()["status_aba"] == "analise_robo"
     assert ins.json()["instrucao_pendente"] == "Responde que o crédito não caiu na conta ainda."
     vazia = await client.post(f"/api/chamados/{cid}/instrucao", json={"texto": "  "})
     assert vazia.status_code == 422
@@ -1369,9 +1370,16 @@ async def test_lista_status_da_aba_e_ultima_resposta(
     assert i["direcao"] == "sistema" and i["status"] == "registrada"
     assert i["autor_nome"] == rep.json()["autor_nome"]
 
-    # a plataforma decidiu (status final) e ninguém fechou → Encerrado
+    # a plataforma decidiu (status final) e ninguém fechou → Encerrado. 21/09
+    # (Vinicius): enquanto a instrução estiver pendente, a linha fica em Análise
+    # Robô mesmo assim — só depois que o cérebro consome (análise) é Encerrado.
     ch.status_plataforma = svc.STATUS_GANHAMOS
     ch.status_plataforma_at = datetime.now(UTC)
+    await db.commit()
+    row = await linha()
+    assert row["status_aba"] == "analise_robo"
+    assert row["status_aba_motivo"] == "instrução pendente pro robô: Cobra a Shopee de novo"
+    db.add(fala(ch, texto="lido", tipo="analise", direcao="sistema"))
     await db.commit()
     row = await linha()
     assert row["status_aba"] == "encerrado" and row["status_aba_motivo"] == "ganhamos"
@@ -1762,7 +1770,8 @@ async def test_instrucao_em_encerrado_ganhamos_mantem_decisao_e_enfileira(
         f"/api/chamados/{cid}/instrucao", json={"texto": "Pede a compensação do frete também."}
     )
     assert ins.status_code == 200, ins.text
-    assert ins.json()["status_aba"] == "encerrado"
+    # 21/09 (Vinicius): a instrução tira a linha do Encerrado — vai pra Análise Robô
+    assert ins.json()["status_aba"] == "analise_robo"
     # …e com ela o chamado Shopee/api aparece mesmo sem `canais`/`plataforma`
     padrao = (await client.post("/api/chamados/agent/analisar", headers=hdr, json={})).json()
     assert [x["chamado_id"] for x in padrao["chamados"]] == [cid]

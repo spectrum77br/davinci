@@ -219,9 +219,14 @@ def test_encerrado_e_concluido():
     assert _status(ch, None)[2] == "ganhamos · robô sugere lucro de R$ 728,22"
     ch.status_plataforma = svc.STATUS_ENCERRADO
     assert _status(ch, None)[2].startswith("plataforma encerrou sem decisão")
-    # instrução pendente NÃO tira do Encerrado (só o cérebro consome; a linha fica lá)
+    # 21/09 (Vinicius): instrução pendente TIRA do Encerrado — "qualquer status que
+    # esteja, se eu mandar pro robô tem que ir pra análise dele". Quando o cérebro
+    # consome (análise mais nova), a linha volta pro Encerrado.
     instrucao = _msg("sistema", tipo="instrucao", minutos=3, texto="olha de novo")
-    assert _status(ch, None, instrucao=instrucao)[0] == svc.ABA_ENCERRADO
+    cod, quando, motivo = _status(ch, None, instrucao=instrucao)
+    assert (cod, quando) == (svc.ABA_ANALISE_ROBO, instrucao.created_at)
+    assert motivo == "instrução pendente pro robô: olha de novo"
+    assert _status(ch, None, instrucao=None)[0] == svc.ABA_ENCERRADO
     # pessoa fechou
     ch.resolvido = True
     ch.resolvido_at = T0 + timedelta(days=1)
