@@ -719,13 +719,21 @@ async def aplicar_status_bling(session: AsyncSession, ch: Chamado, nome: str) ->
         client = await logistica_bling._bling_client(session)
     except logistica_bling.BlingObsError as e:
         raise ChamadoError("chamado_sem_integracao_bling") from e
-    await client.update_order_situacao(bling_id, sid)
+    # False = o pedido JÁ estava nessa situação (o Bling recusa repetir com 400
+    # "mesma situação"; o cliente engole). Pro chamado é o mesmo desfecho —
+    # Vinicius, 21/09/2026: resolver o 295680 já Resolvido travava na tela.
+    mudou = await client.update_order_situacao(bling_id, sid) is not False
     # Nome do catálogo pro id realmente aplicado: regra escrita com o apelido
     # legado "Enviado Etiqueta" move pra 21 → snapshot/histórico dizem
     # "Em digitação" (mesmo ajuste de logistica_bling.apply_alterar_status_bling).
     nome_aplicado = await logistica_bling._situacao_nome_por_id(session, sid) or nome
     ch.status_bling = nome_aplicado
-    session.add(registrar_sistema(ch, f"Status Bling alterado para {nome_aplicado}"))
+    texto = (
+        f"Status Bling alterado para {nome_aplicado}"
+        if mudou
+        else f"Status Bling já era {nome_aplicado} (mantido)"
+    )
+    session.add(registrar_sistema(ch, texto))
     return {"bling_order_id": bling_id, "situacao": nome_aplicado, "situacao_id": sid}
 
 

@@ -210,3 +210,80 @@ async def test_link_supplier_non_duplicate_400_raises():
             await client.link_supplier_to_product(
                 product_id=12345, supplier_id=16980149177, cost_price=49.0,
             )
+
+
+_MESMA_SITUACAO = {
+    "error": {
+        "type": "VALIDATION_ERROR",
+        "message": "Não foi possível alterar a situação da venda",
+        "description": "A venda não pôde ser atualizada, pois houveram erros de validação.",
+        "fields": [{"code": 50, "msg": "A venda possui a mesma situação", "element": "",
+                    "namespace": "VENDAS"}],
+    }
+}
+
+
+class _RedisSemNada:
+    """Redis falso pro `_request`: sem cooldown do Cloudflare e sem limiter."""
+
+    async def get(self, key):
+        return None
+
+    async def set(self, *a, **kw):
+        return True
+
+    async def incr(self, key):
+        return 1
+
+    async def expire(self, key, ttl):
+        return True
+
+
+@pytest.fixture
+def sem_redis(monkeypatch):
+    import app.redis_client as rc
+    from app.services.marketplaces import bling as bling_mod
+
+    monkeypatch.setattr(rc, "redis", _RedisSemNada())
+
+    async def _slot():
+        return None
+
+    monkeypatch.setattr(bling_mod, "_acquire_bling_rate_slot", _slot)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("sem_redis")
+async def test_update_order_situacao_engole_mesma_situacao():
+    """Body real do Bling em 21/09/2026 (pedido 26820920831 já Resolvido): 400
+    com fields[].code 50. Pro chamador é sucesso — devolve False (nada mudou)."""
+    client = _make_client()
+    with respx.mock(assert_all_called=True) as mock:
+        mock.patch(f"{BLING_API_BASE}/pedidos/vendas/1/situacoes/545902").mock(
+            return_value=httpx.Response(400, json=_MESMA_SITUACAO),
+        )
+        assert await client.update_order_situacao(1, 545902) is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("sem_redis")
+async def test_update_order_situacao_outro_400_ainda_levanta():
+    client = _make_client()
+    body = {"error": {"type": "VALIDATION_ERROR", "fields": [{"code": 12, "msg": "outra"}]}}
+    with respx.mock(assert_all_called=True) as mock:
+        mock.patch(f"{BLING_API_BASE}/pedidos/vendas/1/situacoes/545902").mock(
+            return_value=httpx.Response(400, json=body),
+        )
+        with pytest.raises(httpx.HTTPStatusError):
+            await client.update_order_situacao(1, 545902)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("sem_redis")
+async def test_update_order_situacao_204_devolve_true():
+    client = _make_client()
+    with respx.mock(assert_all_called=True) as mock:
+        mock.patch(f"{BLING_API_BASE}/pedidos/vendas/1/situacoes/545902").mock(
+            return_value=httpx.Response(204),
+        )
+        assert await client.update_order_situacao(1, 545902) is True

@@ -1790,6 +1790,11 @@ async function reabrir(row: ChamadoRow) {
             <div v-if="resolver.row.status_aba === 'encerrado'" class="text-xs text-amber-700 dark:text-amber-300">
               Plataforma encerrou: {{ resolver.row.status_aba_motivo || 'sem decisão' }}
             </div>
+            <!-- 21/09 (Vinicius): a sugestão do robô fica só aqui em cima (o valor já
+                 vem preenchido no campo); sem a linha repetida embaixo do Valor. -->
+            <div v-else-if="resolver.sugerido" class="text-xs text-indigo-700 dark:text-indigo-300 inline-flex items-center gap-1">
+              <Bot class="size-3" /> robô sugere {{ resultadoTexto(resolver.row.valor_sugerido) }}
+            </div>
           </div>
           <button type="button" class="rounded p-1 hover:bg-muted" @click="closeResolver"><X class="size-4" /></button>
         </div>
@@ -1812,7 +1817,6 @@ async function reabrir(row: ChamadoRow) {
                 </template>
                 <option v-for="s in situacoes.filter((x) => !opcoesFechamento(resolver.row!).includes(x))" :key="s" :value="s">{{ s }}</option>
               </select>
-              <span class="text-[11px] text-muted-foreground">Obrigatório. Logística → Resolvido ou Perdimento; as demais situações vêm depois da linha.</span>
             </label>
           </template>
           <div v-else class="text-[11px] text-muted-foreground">Sem pedido Bling — nada a trocar no Bling.</div>
@@ -1853,13 +1857,8 @@ async function reabrir(row: ChamadoRow) {
                 />
               </div>
             </div>
-            <span class="text-[11px] text-muted-foreground">
-              Obrigatório. Ganhamos R$ 100 → <b>lucro</b> 100,00 · perdemos R$ 50 → <b>prejuízo</b> 50,00. Vai pra coluna Valor (prejuízo fica negativo).
-            </span>
-            <!-- 19/09: nada fecha sozinho — o robô/plataforma só sugere; a pessoa confirma. -->
-            <div v-if="resolver.sugerido" class="text-[11px] text-indigo-700 dark:text-indigo-300 inline-flex items-center gap-1">
-              <Bot class="size-3" /> sugestão do robô/plataforma: {{ resultadoTexto(resolver.row.valor_sugerido) }}
-            </div>
+            <!-- 21/09 (Vinicius): sem os textos de ajuda — obrigatório continua
+                 obrigatório (asterisco + borda vermelha + botão travado), só sem a frase. -->
             <!-- 19/09: custo do produto (Bling), só pra ver — ajuda a decidir o tamanho do prejuízo. -->
             <div v-if="resolver.row.custo_produto !== null && resolver.row.custo_produto !== undefined" class="text-[11px] text-muted-foreground" :title="resolver.row.custo_detalhe || ''">
               Custo do produto: <b class="text-foreground">{{ fmtBRL(resolver.row.custo_produto) }}</b><template v-if="resolver.row.custo_detalhe"> · {{ resolver.row.custo_detalhe }}</template>

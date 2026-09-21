@@ -71,6 +71,27 @@ def _looks_like_cf_html(resp: httpx.Response) -> bool:
     return "<html" in head or "cloudflare" in head or "just a moment" in head
 
 
+# PATCH /situacoes num pedido que JÁ está nela: 400 VALIDATION_ERROR com
+# `fields[].code = 50` ("A venda possui a mesma situação"), visto em 21/09/2026.
+_BLING_MESMA_SITUACAO_CODE = 50
+
+
+def _bling_mesma_situacao(resp: httpx.Response) -> bool:
+    try:
+        err = resp.json().get("error") or {}
+    except ValueError:
+        return False
+    fields = err.get("fields") if isinstance(err.get("fields"), list) else []
+    for f in fields:
+        if not isinstance(f, dict):
+            continue
+        if f.get("code") == _BLING_MESMA_SITUACAO_CODE:
+            return True
+        if "mesma situa" in str(f.get("msg") or "").lower():
+            return True
+    return False
+
+
 # Cache do depósito padrão por integração (id estável; raramente muda). O Bling
 # exige idDeposito no POST /estoques, então resolvemos uma vez e reusamos.
 _DEFAULT_DEPOSIT_CACHE: dict[Any, int] = {}
@@ -428,19 +449,27 @@ class BlingClient:
                 return
             page += 1
 
-    async def update_order_situacao(
-        self, bling_order_id: int, situacao_id: int
-    ) -> None:
+    async def update_order_situacao(self, bling_order_id: int, situacao_id: int) -> bool:
         """Move a Bling pedido to a target situacao.
 
         Endpoint: PATCH /pedidos/vendas/{idPedido}/situacoes/{idSituacao}
-        Bling returns 204 on success.
+        Bling returns 204 on success. Returns False when the order was ALREADY
+        in that situacao (Bling answers 400 "A venda possui a mesma situação",
+        VALIDATION_ERROR field code 50) — for every caller that is success:
+        the order is where it had to be. Vinicius, 21/09/2026: resolver o
+        chamado do 295680, já Resolvido no Bling, estourava esse 400 na tela.
         """
         r = await self._request(
             "PATCH",
             f"/pedidos/vendas/{bling_order_id}/situacoes/{situacao_id}",
         )
+        if r.status_code == 400 and _bling_mesma_situacao(r):
+            logger.info(
+                "bling_situacao_ja_aplicada", order=bling_order_id, situacao=situacao_id
+            )
+            return False
         r.raise_for_status()
+        return True
 
     async def create_conta_pagar(
         self,

@@ -103,11 +103,15 @@ class _FakeML:
 
 
 class _FakeBling:
-    def __init__(self):
+    def __init__(self, ja_na_situacao: int | None = None):
         self.situacao_set: list[tuple[int, int]] = []
+        # Situação em que o pedido JÁ está: o cliente real devolve False
+        # (o Bling responde 400 "mesma situação" e ele engole).
+        self.ja_na_situacao = ja_na_situacao
 
-    async def update_order_situacao(self, bling_order_id: int, situacao_id: int) -> None:
+    async def update_order_situacao(self, bling_order_id: int, situacao_id: int) -> bool:
         self.situacao_set.append((bling_order_id, situacao_id))
+        return situacao_id != self.ja_na_situacao
 
 
 def _sem_bling_ao_resolver(monkeypatch) -> list[str]:
@@ -348,6 +352,43 @@ async def test_alterar_status_bling_e_resolver(client, make_user, auth_as, db, m
     assert re.json()["resolvido"] is False
     assert (await client.delete(f"/api/chamados/{cid}")).status_code == 204
     assert (await client.get("/api/chamados", params={"mostrar": "todos"})).json()["total"] == 0
+
+
+async def test_resolver_com_pedido_ja_na_situacao_nao_trava(
+    client, make_user, auth_as, db, monkeypatch
+):
+    """Vinicius, 21/09/2026: pedido 295680 já estava Resolvido no Bling e o
+    resolver escolhendo "Resolvido" de novo travava a janela com o 400 "A venda
+    possui a mesma situação". Mesma situação = nada a mudar: o chamado fecha e o
+    histórico diz que o status foi mantido, não "alterado"."""
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+    await _seed_pedido(db, user)
+    fake = _FakeBling(ja_na_situacao=545902)
+
+    async def _fake_bling(session):
+        return fake
+
+    monkeypatch.setattr(logistica_bling, "_bling_client", _fake_bling)
+    cid = (
+        await client.post("/api/chamados", json={"origem": "logistica", "pedido_bling": "293000"})
+    ).json()["id"]
+
+    res = await client.post(
+        f"/api/chamados/{cid}/resolver",
+        json={"resolvido": True, "situacao": "Resolvido", "valor_recuperado": 16},
+    )
+    assert res.status_code == 200, res.text
+    assert res.json()["resolvido"] is True
+    assert res.json()["status_bling"] == "Resolvido"
+    assert fake.situacao_set == [(123456, 545902)]
+    textos = [
+        h["texto"]
+        for h in (await client.get(f"/api/chamados/{cid}/mensagens")).json()
+        if h["tipo"] == "sistema"
+    ]
+    assert any("Status Bling já era Resolvido (mantido)" in t for t in textos)
+    assert not any("alterado para Resolvido" in t for t in textos)
 
 
 async def test_valor_recuperado_grava_e_valida(client, make_user, auth_as):
