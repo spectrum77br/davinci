@@ -34,8 +34,15 @@ async def test_build_enrichment_completo():
             "584947077397251291": {
                 "tracking": [
                     # fora de ordem de propósito: escolhe pelo maior update_time_millis.
-                    {"update_time_millis": 100, "description": "Processed at the carrier's facility."},
-                    {"update_time_millis": 200, "description": "Package dropped off with carrier."},
+                    {
+                        "update_time_millis": 100,
+                        "description": "Processed at the carrier's facility.",
+                    },
+                    {
+                        "action_code": 36201,
+                        "update_time_millis": 200,
+                        "description": "Package dropped off with carrier.",
+                    },
                 ]
             }
         },
@@ -44,7 +51,8 @@ async def test_build_enrichment_completo():
     assert enr == {
         "meli_status": {"order_status": "IN_TRANSIT"},
         "rastreio": "TT123BR",
-        "localizacao": "Package dropped off with carrier.",
+        # A API só fala inglês; a coluna sai traduzida (Vinicius, 21/09/2026).
+        "localizacao": "Postado na transportadora",
         # Pedido sem update_time no payload => sem data proposta (quem carimba
         # nesse caso é o merge). Ver test_logistica_status_datas.
         "datas": {},
@@ -141,17 +149,13 @@ def test_assinatura_para_despacha_tiktok():
 
 
 def test_divergencia_tiktok_entregue_mas_cancelado():
-    d = logistica_rules.detectar_divergencia_tiktok(
-        {"order_status": "CANCELLED"}, "Package delivered to recipient"
-    )
+    d = logistica_rules.detectar_divergencia_tiktok({"order_status": "CANCELLED"}, "Entregue")
     assert d is not None
     assert "Cliente recebeu" in d
 
 
 def test_divergencia_tiktok_concluido_mas_problema():
-    d = logistica_rules.detectar_divergencia_tiktok(
-        {"order_status": "COMPLETED"}, "Package returned to sender"
-    )
+    d = logistica_rules.detectar_divergencia_tiktok({"order_status": "COMPLETED"}, "Devolvido")
     assert d is not None
     assert "físico mostra problema" in d
 
@@ -162,7 +166,7 @@ def test_divergencia_tiktok_sem_sinal():
     # Em trânsito normal => None.
     assert (
         logistica_rules.detectar_divergencia_tiktok(
-            {"order_status": "IN_TRANSIT"}, "In transit"
+            {"order_status": "IN_TRANSIT"}, "Chegou no hub de Manaus"
         )
         is None
     )

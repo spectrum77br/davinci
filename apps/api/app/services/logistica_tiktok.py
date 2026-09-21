@@ -9,7 +9,8 @@ sinal de pós-venda que importa pro fluxo já vem no `status` do pedido (Order A
 
 renderizado em PT por `logistica_rules.assinatura_tiktok`. O rastreio vem do
 `tracking_number` do pedido e a localização física dos eventos de tracking
-(Fulfillment API — a `description` em inglês do último evento).
+(Fulfillment API — a `description` do último evento, que a API só dá em inglês
+e `logistica_rules.tiktok_localizacao_pt` traduz; Vinicius, 21/09/2026).
 
 Só se aplica a pedidos TikTok. Best-effort: pedido que o TikTok não devolve fica
 sem status (não derruba o lote).
@@ -42,14 +43,18 @@ _CAMPOS_DO_SWEEP = ("return_status", "return_type")
 
 
 def _tiktok_localizacao(track: dict) -> str | None:
-    """Descrição (inglês) do evento de tracking de maior `update_time_millis` —
-    o local/estágio físico mais recente que o TikTok expõe."""
+    """Evento de tracking de maior `update_time_millis` — o local/estágio
+    físico mais recente que o TikTok expõe — traduzido pra PT. O `action_code`
+    vai junto como fallback de família pra texto que a tabela não conhece."""
     eventos = track.get("tracking") or []
     if not eventos:
         return None
-    top = max(eventos, key=lambda e: (e or {}).get("update_time_millis") or 0)
-    desc = ((top or {}).get("description") or "").strip()
-    return desc or None
+    top = max(eventos, key=lambda e: (e or {}).get("update_time_millis") or 0) or {}
+    try:
+        code: int | None = int(top.get("action_code"))
+    except (TypeError, ValueError):
+        code = None
+    return logistica_rules.tiktok_localizacao_pt(top.get("description"), code)
 
 
 def _tiktok_destino(order: dict) -> str | None:

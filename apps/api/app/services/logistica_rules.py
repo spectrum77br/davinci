@@ -9,6 +9,12 @@ operador, nunca decide sozinho.
 
 from __future__ import annotations
 
+import re
+
+import structlog
+
+logger = structlog.get_logger()
+
 # Ordem dos 8 campos de status do Meli que compõem a assinatura.
 FIELD_ORDER: list[str] = [
     "order_status",
@@ -308,7 +314,8 @@ def assinatura_shopee(status: dict[str, str] | None) -> str:
 # --- TikTok ---------------------------------------------------------------
 # A assinatura do TikTok é o `status` do pedido (Order API 202309): um único
 # campo com vocabulário PRÓPRIO. O rastreio físico vem dos eventos de tracking
-# (descrição em inglês) e alimenta a localização — não entra na assinatura.
+# (descrição em inglês, traduzida por `tiktok_localizacao_pt`) e alimenta a
+# localização — não entra na assinatura.
 TIKTOK_STATUS_LABELS_PT: dict[str, str] = {
     "UNPAID": "Não pago",
     "ON_HOLD": "Em espera",
@@ -320,6 +327,162 @@ TIKTOK_STATUS_LABELS_PT: dict[str, str] = {
     "COMPLETED": "Concluído",
     "CANCELLED": "Cancelado",
 }
+
+# Localização das linhas TikTok = `description` do último evento de tracking
+# (Fulfillment API 202309). A API só fala inglês — testado com locale e
+# Accept-Language, não existe versão em PT — e o painel mostrava "Package has
+# been delivered!" pra 95% das linhas. Vinicius, 21/09/2026: sempre em
+# português. Levantamento em produção (2000 linhas, 30 textos distintos): os
+# textos são frases fixas com cidade/destino variáveis, então a tradução é por
+# regex; os específicos vêm ANTES dos genéricos (fullmatch sobre o texto com
+# espaços colapsados e sem pontuação final). Vocabulário alinhado ao da Shopee
+# (`SHOPEE_LOG_LABELS_PT`): "Entregue", "Falha na entrega", "Falha na coleta".
+# `{cidade}`/`{destino}` saem como a TikTok escreveu; `{motivo}` fica em inglês
+# (só cai aí um motivo de falha que ainda não vimos).
+_CARRIER = r"carrier['’]s facility"
+_HUB = r"shipping partner['’]s facility"
+TIKTOK_TRACKING_PT: tuple[tuple[re.Pattern[str], str], ...] = tuple(
+    (re.compile(padrao, re.IGNORECASE), pt)
+    for padrao, pt in (
+        (r"order placed", "Pedido realizado"),
+        (r"order packed and ready for pickup", "Embalado, aguardando coleta"),
+        (
+            rf"order packed and ready for dropoff at {_CARRIER}",
+            "Embalado, aguardando postagem",
+        ),
+        (r"package dropped off with carrier", "Postado na transportadora"),
+        (r"package dropped off at (?P<cidade>.+)", "Postado em {cidade}"),
+        (r"package picked up and currently at (?P<cidade>.+)", "Coletado em {cidade}"),
+        (rf"arrived at the {_CARRIER}", "Chegou na transportadora"),
+        (rf"arrived at the (?P<cidade>.+) {_CARRIER}", "Chegou na transportadora em {cidade}"),
+        (rf"departed the {_CARRIER}", "Saiu da transportadora"),
+        (
+            rf"departed the (?P<cidade>.+) {_CARRIER} and in transit to (?P<destino>.+)",
+            "Saiu de {cidade}, a caminho de {destino}",
+        ),
+        (rf"departed the (?P<cidade>.+) {_CARRIER}", "Saiu da transportadora em {cidade}"),
+        (rf"arrived at the (?P<cidade>.+) {_HUB}", "Chegou no hub de {cidade}"),
+        (
+            rf"departed the (?P<cidade>.+) {_HUB} and in transit to (?P<destino>.+)",
+            "Saiu do hub de {cidade}, a caminho de {destino}",
+        ),
+        (rf"departed the (?P<cidade>.+) {_HUB}", "Saiu do hub de {cidade}"),
+        (rf"processed at the {_CARRIER}", "Processado na transportadora"),
+        (
+            r"arrived at the (?P<cidade>.+) destination facility",
+            "Chegou na base de entrega de {cidade}",
+        ),
+        (
+            r"departed the (?P<cidade>.+) destination facility and in transit to (?P<destino>.+)",
+            "Saiu da base de entrega de {cidade}, a caminho de {destino}",
+        ),
+        (r"out for delivery", "Saiu para entrega"),
+        (r"out for redelivery", "Saiu para nova tentativa de entrega"),
+        (r"out for final redelivery", "Saiu para última tentativa de entrega"),
+        (r"package has been delivered", "Entregue"),
+        (r"your package has been delayed while in transit.*", "Atrasado em trânsito"),
+        (
+            r"package was unable to be delivered due to unavailable recipient\."
+            r" delivery will be rescheduled.*",
+            "Falha na entrega: destinatário ausente — nova tentativa",
+        ),
+        (
+            r"package was unable to be delivered due to it has an invalid shipping address\."
+            r" delivery will be rescheduled.*",
+            "Falha na entrega: endereço inválido — nova tentativa",
+        ),
+        (
+            r"package was unable to be delivered due to (?P<motivo>.+?)\."
+            r" delivery will be rescheduled.*",
+            "Falha na entrega: {motivo} — nova tentativa",
+        ),
+        # action 60101: a mesma frase SEM a cauda de reagendamento.
+        (
+            r"package was unable to be delivered due to unavailable recipient",
+            "Falha na entrega: destinatário ausente",
+        ),
+        (
+            r"package was unable to be delivered due to (?P<motivo>[^.]+)",
+            "Falha na entrega: {motivo}",
+        ),
+        (
+            r"package was unable to be delivered\. delivery will be rescheduled.*",
+            "Falha na entrega — nova tentativa",
+        ),
+        (r"package was unable to be delivered", "Falha na entrega"),
+        (
+            r"package was unable to be picked up\. a redelivery will be scheduled.*",
+            "Falha na coleta — será reagendada",
+        ),
+        (
+            r"package was unable (?:to )?be picked up because it is still being prepared.*",
+            "Falha na coleta: pacote ainda em preparação",
+        ),
+        (r"package lost in transit", "Extraviado em trânsito"),
+        (r"package damaged in transit", "Danificado em trânsito"),
+    )
+)
+# Fallback quando o texto não casa com nada acima: o rótulo GENÉRICO da
+# família do `action_code`. O código NÃO é unívoco (20101 sai como "ready for
+# pickup" e como "ready for dropoff"; 31301 com e sem cidade), por isso é só
+# rede de segurança, sem a parte variável.
+TIKTOK_ACTION_CODE_PT: dict[int, str] = {
+    10101: "Pedido realizado",
+    20101: "Embalado, aguardando coleta",
+    20201: "Embalado, aguardando coleta",
+    20301: "Falha na coleta",
+    40801: "Falha na coleta",
+    30901: "Coletado",
+    36201: "Postado",
+    31001: "Chegou no hub",
+    32601: "Chegou no hub",
+    31101: "Saiu do hub",
+    32401: "Saiu do hub",
+    31301: "Chegou na transportadora",
+    39901: "Chegou na transportadora",
+    31401: "Saiu da transportadora",
+    3010001: "Saiu da transportadora",
+    32701: "Processado na transportadora",
+    32101: "Atrasado em trânsito",
+    40101: "Chegou na base de entrega",
+    40201: "Saiu da base de entrega",
+    40501: "Saiu para entrega",
+    41001: "Saiu para nova tentativa de entrega",
+    41101: "Saiu para nova tentativa de entrega",
+    40601: "Falha na entrega",
+    60101: "Falha na entrega",
+    50101: "Entregue",
+    50102: "Entregue",
+    90101: "Danificado em trânsito",
+    100101: "Extraviado em trânsito",
+}
+
+
+def _normaliza_tracking(description: str) -> str:
+    """Espaços colapsados (a TikTok manda ".  Delivery" com dois espaços) e sem
+    pontuação final — o que os regex de `TIKTOK_TRACKING_PT` esperam."""
+    return re.sub(r"[\s.!]+$", "", re.sub(r"\s+", " ", description)).strip()
+
+
+def tiktok_localizacao_pt(description: str | None, action_code: int | None = None) -> str | None:
+    """Texto em PT pra coluna Localização a partir do evento de tracking do
+    TikTok. Ordem: regex de `TIKTOK_TRACKING_PT` (com cidade/destino) → rótulo
+    da família do `action_code` → o próprio texto (strip), com aviso no log
+    pra entrar na tabela. Sem texto: rótulo do código se houver, senão None."""
+    texto = (description or "").strip()
+    generico = TIKTOK_ACTION_CODE_PT.get(action_code) if action_code is not None else None
+    if not texto:
+        return generico
+    norm = _normaliza_tracking(texto)
+    for padrao, pt in TIKTOK_TRACKING_PT:
+        m = padrao.fullmatch(norm)
+        if m:
+            return pt.format_map({k: (v or "").strip() for k, v in m.groupdict().items()})
+    logger.warning(
+        "tiktok_localizacao_sem_traducao",
+        action_code=action_code, description=texto[:200], fallback=generico,
+    )
+    return generico or texto
 
 
 # Situações da returns API do TikTok em que o caso de devolução está ENCERRADO
@@ -1059,10 +1222,25 @@ def detectar_divergencia_shopee(
 
 
 # --- TikTok divergência ---------------------------------------------------
-# order_status COMERCIAL × último evento de rastreio FÍSICO (descrição em
-# inglês). Conservador — só os dois sentidos de entrega.
+# order_status COMERCIAL × último evento de rastreio FÍSICO (`localizacao`, o
+# texto PT de `tiktok_localizacao_pt`). Conservador — só os dois sentidos de
+# entrega.
 _TIKTOK_ORDER_ABERTO = {"CANCELLED"}
-_TIKTOK_FISICO_ENTREGUE = ("delivered", "entregue")
+# Entregue = IGUALDADE com o rótulo (não substring: "Falha na entrega",
+# "Devolução não entregue" e "Pacote entregue ao vendedor" contêm a palavra e
+# não são entrega ao cliente). O inglês fica só até a migração 0298 reescrever
+# o legado; `_CORREIOS_ENTREGUE` é o texto dos Correios (envio TikTok por
+# Correios com evento real do 17track).
+_TIKTOK_FISICO_ENTREGUE = ("entregue", "package has been delivered")
+# Problema = PREFIXO do rótulo PT. As palavras em inglês são compatibilidade
+# com linhas ainda não migradas.
+_TIKTOK_FISICO_PROBLEMA_PREFIXO = (
+    "extraviado",
+    "danificado",
+    "falha na entrega",
+    "devolvido",
+    "devolução",
+)
 _TIKTOK_FISICO_PROBLEMA = (
     "returned",
     "return to",
@@ -1077,16 +1255,20 @@ def detectar_divergencia_tiktok(
     meli_status: dict[str, str] | None, localizacao: str | None = None
 ) -> str | None:
     """Divergência do TikTok: cruza o `order_status` COMERCIAL com o último
-    evento de rastreio FÍSICO (descrição em inglês, em `localizacao`).
-    Conservador — só os dois sentidos de entrega; None se não há sinal físico."""
+    evento de rastreio FÍSICO (texto PT em `localizacao`). Conservador — só os
+    dois sentidos de entrega; None se não há sinal físico."""
     loc = (localizacao or "").strip()
     if not loc:
         return None
-    low = loc.lower()
+    low = _normaliza_tracking(loc).lower()
     m = meli_status or {}
     order = (m.get("order_status") or "").strip().upper()
-    fisico_entregue = any(k in low for k in _TIKTOK_FISICO_ENTREGUE)
-    fisico_problema = any(k in low for k in _TIKTOK_FISICO_PROBLEMA)
+    fisico_entregue = low in _TIKTOK_FISICO_ENTREGUE or any(
+        k in low for k in _CORREIOS_ENTREGUE
+    )
+    fisico_problema = low.startswith(_TIKTOK_FISICO_PROBLEMA_PREFIXO) or any(
+        k in low for k in _TIKTOK_FISICO_PROBLEMA
+    )
     if fisico_entregue and order in _TIKTOK_ORDER_ABERTO:
         return (
             f"Rastreio: entregue ao destinatário. Pedido: {assinatura_tiktok(m)}. "

@@ -584,7 +584,7 @@ async def test_acompanhamento_usa_rastreio_do_pacote_que_volta(
             pedido_bling=p2,
             plataforma="TikTok",
             rastreio="999881795110423",  # entrega original
-            localizacao="Package has been delivered!",
+            localizacao="Entregue",
             meli_status={"order_status": "DELIVERED", "return_status": "BUYER_SHIPPED_ITEM"},
         )
     )
@@ -610,7 +610,7 @@ async def test_acompanhamento_usa_rastreio_do_pacote_que_volta(
         assert item["localizacao"] == (
             "Cliente enviou o item de volta · Piracicaba/SP — Saiu para entrega"
         )
-        assert item["entrega_localizacao"] == "Package has been delivered!"
+        assert item["entrega_localizacao"] == "Entregue"
         assert item["localizacao_data"].startswith("2026-09-03T13:57")
         assert item["aguardando_devolucao_data"] == "2026-08-24"
         esperado = (datetime.now(UTC).date() - datetime(2026, 8, 24).date()).days

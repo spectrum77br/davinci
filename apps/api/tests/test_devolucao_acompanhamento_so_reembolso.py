@@ -56,7 +56,7 @@ def test_devolucao_com_pacote_continua_carimbando():
 
 def test_localizacao_fala_de_reembolso_e_nao_de_devolucao():
     d = _com_status_da_devolucao(
-        {"localizacao": "Package has been delivered!"},
+        {"localizacao": "Entregue"},
         localizacao_manual=None,
         lg_plataforma="TikTok",
         lg_meli_status={"order_status": "DELIVERED", "return_status": "RETURN_OR_REFUND_REQUEST_PENDING"},
@@ -67,12 +67,12 @@ def test_localizacao_fala_de_reembolso_e_nao_de_devolucao():
         tipo_auto="REFUND",
     )
     assert d["localizacao"] == "Reembolso solicitado — responder no TikTok"
-    assert d["entrega_localizacao"] == "Package has been delivered!"
+    assert d["entrega_localizacao"] == "Entregue"
 
 
 def test_sem_tipo_no_sync_cai_no_texto_de_devolucao():
     d = _com_status_da_devolucao(
-        {"localizacao": "Package has been delivered!"},
+        {"localizacao": "Entregue"},
         localizacao_manual=None,
         lg_plataforma="TikTok",
         lg_meli_status={"order_status": "DELIVERED"},
