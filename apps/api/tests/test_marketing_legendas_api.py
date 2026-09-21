@@ -33,6 +33,7 @@ from app.models import (
     MarketingCreative,
     MarketingCreativeFile,
     MarketingLegendaModelo,
+    MarketingRoteiro,
     Product,
     ProductLink,
     RedeSocial,
@@ -150,13 +151,21 @@ async def _criativo(
     produto: Product | None = None,
     legenda: str | None = None,
 ) -> tuple[MarketingCreative, MarketingCreativeFile]:
+    # O briefing mora em `marketing_roteiros` desde a 0299. Ele é ligado aqui
+    # de propósito: é o que mantém o dente do
+    # `test_resolvida_sem_biblioteca_recusa_em_vez_de_usar_o_roteiro` — sem o
+    # roteiro EXISTIR e estar VINCULADO, aquele teste passaria por não haver
+    # texto nenhum pra cascata alcançar, em vez de por ela se recusar a olhar.
+    rot = MarketingRoteiro(titulo="Cafeteira 500ml", texto=ROTEIRO, marca=marca.slug)
+    db.add(rot)
+    await db.flush()
     c = MarketingCreative(
         modelo="Cafeteira 500ml",
         marca=marca.slug,
         marca_id=marca.id,
         product_id=produto.id if produto else None,
         aprovado=True,
-        roteiro=ROTEIRO,
+        roteiro_id=rot.id,
         legenda=legenda,
     )
     db.add(c)
@@ -472,7 +481,7 @@ async def test_product_id_resolvido_pelo_sufixo_de_variante(client, db, make_use
 
     r = await client.post(
         API_CRIATIVOS,
-        json={"modelo": "Cafeteira 500ml", "sku": "dg017.pi", "roteiro": ROTEIRO},
+        json={"modelo": "Cafeteira 500ml", "sku": "dg017.pi"},
     )
     assert r.status_code == 200, r.text
     assert r.json()["product_id"] == str(produto.id)
@@ -535,7 +544,6 @@ async def test_legenda_do_criativo_ganha_da_biblioteca(client, db, make_user, au
             json={
                 "modelo": "Cafeteira",
                 "marca": marca.slug,
-                "roteiro": ROTEIRO,
                 "legenda": "Só hoje: {{ marca }} com frete combinado no direct",
             },
         )

@@ -469,13 +469,16 @@ const exportsForTest = `return {
   pubLegendaOrigem, pubLegendaTotal, pubLegendaIndice, pubLegendaErro, pubLegendaRotulo,
   pubSemLegenda, onLegendaInput,
   openPublicar, closePublicar, toggleConta, salvarPostagem, cancelarPostagem, loadPostagens,
-  motivoPublicar, pickFile,
+  motivoPublicar, pickFile, criarRoteiroDaLinha, criandoRoteiro,
 }`
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor
 const factory = new AsyncFunction(
   'ref', 'computed', 'nextTick', 'onMounted', 'onBeforeUnmount', 'reactive',
   'useApi', 'useToasts', 'useAuthStore', 'useCan',
   'apiErrMsg', 'MARCAS_ERROS', 'isoToday', 'PLATAFORMA_LABELS', 'window', 'setTimeout',
+  // Macro do <script setup>: o compilador do Vue resolve, o `new Function`
+  // não. A célula do Roteiro emite pra página trocar de aba (migration 0299).
+  'defineEmits',
   transpile(pageScript, ts.ModuleKind.ESNext) + '\n' + exportsForTest,
 )
 
@@ -541,6 +544,16 @@ async function tela({
     if (opts?.method === 'POST' && url === '/api/marketing/postagens') {
       return postError ? Promise.reject(postError) : Promise.resolve({})
     }
+    // Roteiro criado a partir da linha (migration 0299): o POST devolve o id,
+    // e o PATCH seguinte devolve a linha já com o ponteiro.
+    if (opts?.method === 'POST' && url === '/api/marketing/roteiros') {
+      return Promise.resolve({ id: 'rot-1' })
+    }
+    if (opts?.method === 'PATCH' && url.startsWith('/api/marketing/creatives/')) {
+      return Promise.resolve({
+        ...linhas[0], roteiro_id: opts.body.roteiro_id, roteiro_titulo: 'video 30s',
+      })
+    }
     if (opts?.method === 'DELETE') return Promise.resolve(null)
     return Promise.reject(new Error(`api falso não conhece ${url}`))
   }
@@ -552,6 +565,7 @@ async function tela({
     push: () => 1,
     dismiss: () => {},
   }
+  const emitidos = []
   const state = await factory(
     Vue.ref, Vue.computed, Vue.nextTick,
     // onMounted roda na hora aqui — por isso a carga da agenda tem o hook
@@ -562,14 +576,38 @@ async function tela({
     apiError.apiErrMsg, apiError.MARCAS_ERROS, dateLib.isoToday, redes.PLATAFORMA_LABELS,
     { confirm: (m) => { confirms.push(m); return confirmAnswer }, addEventListener: () => {}, removeEventListener: () => {} },
     (fn) => fn,
+    // defineEmits: devolve o `emit`, que aqui só anota o que foi emitido.
+    () => (nome, ...args) => emitidos.push([nome, ...args]),
   )
   await new Promise(setImmediate)
-  return { s: state, calls, toastLog, confirms }
+  return { s: state, calls, toastLog, confirms, emitidos }
 }
 
 const posts = (calls) => calls.filter((c) => c.opts?.method === 'POST')
 
 async function run() {
+  // O roteiro saiu da célula (migration 0299), mas a PORTA DE ENTRADA ficou:
+  // "escrever roteiro" cria o briefing já com modelo/marca/SKU da linha,
+  // vincula e manda a página abrir a aba Roteiros. Sem isto, escrever roteiro
+  // pra um item passaria de um clique pra cinco passos.
+  {
+    const { s, calls, emitidos } = await tela()
+    const linha = s.rows.value[0]
+    await s.criarRoteiroDaLinha(linha)
+
+    const criou = posts(calls).find((c) => c.url === '/api/marketing/roteiros')
+    assert.ok(criou, 'cria o roteiro a partir da linha')
+    assert.equal(criou.opts.body.titulo, linha.modelo, 'título vem do modelo da linha')
+    assert.equal(criou.opts.body.marca, linha.marca, 'marca vem da linha')
+    assert.equal(criou.opts.body.sku, linha.sku, 'SKU vem da linha — ninguém redigita')
+
+    const vinculou = calls.find(
+      (c) => c.opts?.method === 'PATCH' && c.url === `/api/marketing/creatives/${linha.id}`,
+    )
+    assert.ok(vinculou?.opts.body.roteiro_id, 'vincula o roteiro novo na linha')
+    assert.deepEqual(emitidos[0]?.[0], 'abrir-roteiro', 'pede pra página abrir a aba Roteiros')
+  }
+
   // Carga inicial: criativos, equipes, marcas e a agenda de postagens.
   {
     const { s, calls } = await tela()

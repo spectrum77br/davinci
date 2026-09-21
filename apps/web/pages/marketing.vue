@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
   AlertCircle, BarChart3, Bell, Bot, Clapperboard, Clock,
-  Pause, Play, RefreshCw, Sparkles,
+  NotebookPen, Pause, Play, RefreshCw, Sparkles,
 } from 'lucide-vue-next'
 
 const { api } = useApi()
@@ -12,7 +12,10 @@ const { success: toastOk, error: toastErr } = useToasts()
 // Criativos. Quem só tem criativos não carrega (nem enxerga) nada de Ads.
 const canAds = useCan('marketing', 'view')
 const canCriativos = useCan('marketing_criativos', 'view')
-
+// A aba Roteiros pendura no MESMO recurso de Criativos (migration 0299):
+// recurso novo nasceria False pra todo mundo menos admin, e não existe
+// migration de backfill de permissão neste repositório — a aba subiria
+// impossível de usar até alguém liberar usuário por usuário.
 // ── Types ────────────────────────────────────────────────────────────
 type Account = {
   id: string
@@ -177,8 +180,24 @@ type AgentPresence = {
 // ── State ────────────────────────────────────────────────────────────
 // The page is organised by marketplace — only Mercado Livre + Shopee are
 // surfaced. The platform tab replaces the old mode + department tabs.
-type Platform = 'ml' | 'shopee' | 'criativos'
+type Platform = 'ml' | 'shopee' | 'criativos' | 'roteiros'
 const platform = ref<Platform>('ml')
+
+const focoRoteiro = ref<string | null>(null)
+
+function abrirRoteiro(id: string) {
+  focoRoteiro.value = id
+  platform.value = 'roteiros'
+  // Se a aba já estiver montada, o componente não remonta: fala com ele.
+  void nextTick(() => roteirosEl.value?.abrir(id))
+}
+
+const roteirosEl = ref<{ abrir: (id: string) => void } | null>(null)
+
+// As abas que não são de Ads, num lugar só: os v-if do painel de Ads
+// consultam isto, senão a próxima aba nasce mostrando o dashboard por baixo.
+const emOutraAba = computed(() => platform.value === 'criativos' || platform.value === 'roteiros')
+
 
 const summary = ref<Summary | null>(null)
 const agentPresence = ref<AgentPresence | null>(null)
@@ -733,7 +752,7 @@ onBeforeUnmount(() => {
 })
 
 watch(platform, async () => {
-  if (platform.value === 'criativos' || !canAds.value) return
+  if (platform.value === 'criativos' || platform.value === 'roteiros' || !canAds.value) return
   await Promise.all([
     loadSummary(), loadCreditAlerts(), loadTimeseries(),
   ])
@@ -759,7 +778,7 @@ definePageMeta({ middleware: [] })
         <BarChart3 class="h-6 w-6 text-primary" />
         <h1 class="text-2xl font-semibold">Marketing</h1>
       </div>
-      <button v-if="canAds && platform !== 'criativos'"
+      <button v-if="canAds && !emOutraAba"
         class="rounded-md border px-2 py-1 text-sm hover:bg-muted disabled:opacity-50 inline-flex items-center gap-1"
         :disabled="loading" @click="refresh">
         <RefreshCw class="size-4" :class="{ 'animate-spin': loading }" /> recarregar
@@ -784,11 +803,11 @@ definePageMeta({ middleware: [] })
       </div>
     </div>
 
-    <div v-if="errorText && platform !== 'criativos'" class="rounded border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive flex items-center gap-2">
+    <div v-if="errorText && !emOutraAba" class="rounded border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive flex items-center gap-2">
       <AlertCircle class="size-4" /> {{ errorText }}
     </div>
 
-    <div v-if="canAds && platform !== 'criativos' && (summary?.accounts.length ?? 0) === 0 && !loading"
+    <div v-if="canAds && !emOutraAba && (summary?.accounts.length ?? 0) === 0 && !loading"
       class="rounded-md border bg-muted/30 px-6 py-10 text-center text-sm text-muted-foreground">
       Nenhuma conta sincronizada ainda. As integrações Shopee/ML/Amazon com <code>ads_enabled</code> são populadas automaticamente pelo cron.
     </div>
@@ -813,14 +832,29 @@ definePageMeta({ middleware: [] })
           <Clapperboard class="size-3.5" />
           Criativos
         </button>
-      </div>
+              <button v-if="canCriativos"
+          class="px-3 py-1.5 rounded-md transition-colors inline-flex items-center gap-1.5"
+          :class="platform === 'roteiros' ? 'bg-background shadow-sm font-medium' : 'hover:bg-background/60 text-muted-foreground'"
+          @click="platform = 'roteiros'">
+          <NotebookPen class="size-3.5" />
+          Roteiros
+        </button>
+</div>
     </div>
 
     <!-- ═══════════════════════════════ CRIATIVOS ══════════════════════ -->
-    <MarketingCriativos v-if="platform === 'criativos' && canCriativos" />
+    <MarketingCriativos
+      v-if="platform === 'criativos' && canCriativos"
+      @abrir-roteiro="abrirRoteiro"
+    />
+    <MarketingRoteiros
+      v-else-if="platform === 'roteiros' && canCriativos"
+      ref="roteirosEl"
+      :foco="focoRoteiro"
+    />
 
     <!-- ═══════════════════════════════ MÉTRICAS ═══════════════════════ -->
-    <template v-if="platform !== 'criativos' && summary">
+    <template v-if="!emOutraAba && summary">
       <div class="grid grid-cols-1 xl:grid-cols-2 gap-4">
         <template v-for="(period, idx) in [{ key: 'period_1', days: period1Days }, { key: 'period_2', days: period2Days }] as const" :key="period.key">
           <div class="rounded-md border overflow-hidden">

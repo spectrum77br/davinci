@@ -9,6 +9,7 @@ vertical instead of treating the whole shop as one bucket.
 from __future__ import annotations
 
 from datetime import datetime
+from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
 from sqlalchemy import (
@@ -27,6 +28,9 @@ from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, TimestampMixin
+
+if TYPE_CHECKING:
+    from app.models.marketing_roteiro import MarketingRoteiro
 
 
 class MarketingAccount(Base, TimestampMixin):
@@ -319,13 +323,33 @@ class MarketingCreative(Base, TimestampMixin):
     # Equipe de marketing dona da linha (nome livre; casa com
     # users.marketing_teams). NULL = sem equipe (só admin/sem-equipe vê).
     equipe: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # DEPRECADA (migration 0299): o briefing virou `marketing_roteiros.texto`.
+    # A coluna continua no banco por uma versão porque o downgrade a recriaria
+    # VAZIA e os textos de produção não voltariam. Ninguém lê daqui além do
+    # backfill — não está no serializador, no schema de entrada nem na tela.
     roteiro: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # O briefing que esta linha cumpre. SET NULL e não CASCADE: apagar um
+    # roteiro não pode apagar a linha de produção nem a entrega que a agência
+    # já mandou.
+    roteiro_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("marketing_roteiros.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     # Override de legenda DESTE vídeo: ganha da biblioteca de modelos e é o
     # degrau mais alto da cascata depois da própria postagem. Não confundir
     # com `roteiro` — aquilo é briefing de produção ("cena, fala, texto na
     # tela"), em inglês, e publicá-lo põe instrução de gravação no Instagram.
     legenda: Mapped[str | None] = mapped_column(Text, nullable=True)
     aprovado: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # Recado da equipe interna pra quem produziu — escrito na hora de aprovar
+    # ou reprovar e lido no portal das agências (migration 0299). É o único
+    # texto daqui que SAI pra fora, então nunca recebe dado de outra linha.
+    feedback: Mapped[str | None] = mapped_column(Text, nullable=True)
+    feedback_em: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     pushed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     pushed_dest: Mapped[str | None] = mapped_column(String(512), nullable=True)
     created_by: Mapped[UUID | None] = mapped_column(
@@ -340,6 +364,12 @@ class MarketingCreative(Base, TimestampMixin):
         lazy="selectin",
         order_by="MarketingCreativeFile.created_at",
     )
+
+    # `lazy="selectin"` é obrigatório, não preferência: `list_creatives` e
+    # `_get_row` fazem `select(MarketingCreative)` sem selectinload nenhum, e
+    # um relacionamento com lazy padrão estoura MissingGreenlet em contexto
+    # async — derrubando POST, PATCH, listagem e delete de uma vez.
+    roteiro_ref: Mapped[MarketingRoteiro | None] = relationship(lazy="selectin")
 
 
 class MarketingCreativeFile(Base, TimestampMixin):

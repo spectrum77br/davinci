@@ -4,6 +4,7 @@ import {
   Check, X, Trash2, Upload, Loader2, Plus, Download, CloudUpload, Search,
   Film, Image as ImageIcon, File as FileIcon,
   Send, CalendarClock, ExternalLink, AlertTriangle,
+  MessageSquare, NotebookPen,
 } from 'lucide-vue-next'
 import { apiErrMsg, MARCAS_ERROS } from '~/lib/apiError'
 import { isoToday } from '~/lib/date'
@@ -26,15 +27,28 @@ type Creative = {
   marca_id?: string | null
   sku: string | null
   equipe: string | null
-  roteiro: string | null
   files: CreativeFile[]
+  // O briefing virou entidade própria (migration 0299) e mora na aba
+  // Roteiros. Aqui fica só o ponteiro — `roteiro_titulo` vem junto pra
+  // célula ter o que mostrar sem uma segunda chamada. Opcionais porque uma
+  // listagem de backend antigo tem que continuar abrindo a tela.
+  roteiro_id?: string | null
+  roteiro_titulo?: string | null
   aprovado: boolean | null
+  // Recado da recusa/aprovação — o mesmo texto que a agência lê no portal.
+  // Fica na ENTREGA ("por que este vídeo voltou"), não no briefing.
+  feedback?: string | null
+  feedback_em?: string | null
   pushed_at: string | null
   pushed_dest: string | null
   created_at: string | null
 }
 
-type Field = 'modelo' | 'marca' | 'sku' | 'equipe' | 'roteiro'
+type Field = 'modelo' | 'marca' | 'sku' | 'equipe'
+
+// A célula do Roteiro leva pra aba Roteiros — quem troca de aba é a página
+// (`pages/marketing.vue`), dona do estado `platform`.
+const emit = defineEmits<{ (e: 'abrir-roteiro', id: string): void }>()
 
 const { api } = useApi()
 const toasts = useToasts()
@@ -104,6 +118,9 @@ const ERR_PT: Record<string, string> = {
   muitos_arquivos: 'Limite de 20 arquivos por linha.',
   nome_invalido: 'Nome de arquivo inválido.',
   forbidden: 'Você não tem permissão pra isso.',
+  roteiro_nao_encontrado: 'Esse roteiro não existe mais.',
+  titulo_obrigatorio: 'O roteiro precisa de um título.',
+  roteiro_mudou_de_lugar: 'O roteiro agora é escrito na aba Roteiros.',
 }
 
 function errMsg(e: any): string {
@@ -138,7 +155,7 @@ const filteredRows = computed(() => {
     if (statusFilter.value === 'aprovado' && r.aprovado !== true) return false
     if (statusFilter.value === 'reprovado' && r.aprovado !== false) return false
     if (!term) return true
-    const hay = [r.modelo, r.marca, r.sku, r.equipe, r.roteiro, ...r.files.map((f) => f.file_name)]
+    const hay = [r.modelo, r.marca, r.sku, r.equipe, r.roteiro_titulo, ...r.files.map((f) => f.file_name)]
       .filter(Boolean)
       .join(' ')
       .toLowerCase()
@@ -332,13 +349,68 @@ function onKeydown(e: KeyboardEvent) {
   // confere o vídeo antes de agendar), então Esc fecha o de cima.
   if (e.key !== 'Escape') return
   if (preview.value) closePreview()
+  else if (recusa.value) closeRecusa()
   else if (pub.value) closePublicar()
 }
 onMounted(() => window.addEventListener('keydown', onKeydown))
 onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
 
+// ---- roteiro da linha -----------------------------------------------------
+//
+// O briefing saiu daqui (migration 0299) e virou a aba Roteiros. O que ficou
+// nesta tela é o ponteiro — MAIS o atalho de criar: o pedido era desacoplar o
+// armazenamento, não tirar a porta de entrada. Sem este botão, escrever
+// roteiro pra um item passaria de um clique para "troca de aba, cria, redigita
+// marca e SKU, volta, vincula".
+
+const criandoRoteiro = ref<string | null>(null)
+
+async function criarRoteiroDaLinha(r: Creative) {
+  criandoRoteiro.value = r.id
+  try {
+    // Nasce já com o que a linha sabe: título, marca e SKU. O backend
+    // resolve marca_id/product_id a partir desses textos, igual ao criativo.
+    const rot = await api<{ id: string }>('/api/marketing/roteiros', {
+      method: 'POST',
+      body: { titulo: r.modelo, marca: r.marca, sku: r.sku },
+    })
+    Object.assign(r, await api<Creative>(`/api/marketing/creatives/${r.id}`, {
+      method: 'PATCH',
+      body: { roteiro_id: rot.id },
+    }))
+    emit('abrir-roteiro', rot.id)
+  } catch (e: any) {
+    toasts.error('Erro ao criar o roteiro', errMsg(e))
+  } finally {
+    criandoRoteiro.value = null
+  }
+}
+
+// ---- recusa com recado ----------------------------------------------------
+//
+// O X sozinho deixava a agência no escuro: ela vê "recusado" no portal e
+// regrava adivinhando. Aqui o motivo entra junto da decisão, num POST só —
+// não dá pra reprovar e "escrever depois" e esquecer.
+
+const recusa = ref<Creative | null>(null)
+const recusaTexto = ref('')
+
+function openRecusa(r: Creative) {
+  recusa.value = r
+  recusaTexto.value = r.feedback ?? ''
+}
+function closeRecusa() {
+  recusa.value = null
+}
+async function confirmarRecusa() {
+  const r = recusa.value
+  if (!r) return
+  closeRecusa()
+  await aprovar(r, false, recusaTexto.value)
+}
+
 // ---- aprovação (admin) ----------------------------------------------------
-async function aprovar(r: Creative, ok: boolean) {
+async function aprovar(r: Creative, ok: boolean, feedback?: string) {
   approvingId.value = r.id
   const t = ok && !r.pushed_at
     ? toasts.push({ kind: 'info', title: 'Aprovando…', lines: 'Enviando os arquivos pra pasta do produto no MEGA.' }, 0)
@@ -346,7 +418,9 @@ async function aprovar(r: Creative, ok: boolean) {
   try {
     const updated = await api<Creative & { enviados?: number; fotos_count?: number | null }>(
       `/api/marketing/creatives/${r.id}/aprovar`,
-      { method: 'POST', body: { aprovado: ok } },
+      // `feedback` ausente mantém o recado anterior no backend; string vazia
+      // apaga. Por isso só entra no corpo quando o operador abriu a caixa.
+      { method: 'POST', body: feedback === undefined ? { aprovado: ok } : { aprovado: ok, feedback } },
     )
     Object.assign(r, updated)
     if (ok && updated.pushed_dest) {
@@ -356,7 +430,10 @@ async function aprovar(r: Creative, ok: boolean) {
         `Pasta: ${updated.pushed_dest}`,
       )
     } else if (!ok) {
-      toasts.info('Marcado como não aprovado')
+      toasts.info(
+        'Marcado como não aprovado',
+        updated.feedback ? 'O recado já aparece no portal do time de criação.' : undefined,
+      )
     }
   } catch (e: any) {
     toasts.error('Erro na aprovação', errMsg(e))
@@ -1082,7 +1159,7 @@ async function cancelarPostagem(p: Postagem) {
         <input
           v-model="q"
           type="text"
-          placeholder="filtrar por modelo, marca, SKU, roteiro…"
+          placeholder="filtrar por modelo, marca, SKU, arquivo…"
           class="h-8 w-72 max-w-full rounded-md border bg-background pl-7 pr-2 text-xs outline-none focus:ring-2 focus:ring-ring"
         />
       </div>
@@ -1108,7 +1185,7 @@ async function cancelarPostagem(p: Postagem) {
             <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[95px]">Marca</th>
             <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[90px]">Equipe</th>
             <th class="text-left px-2 py-2 font-medium border-b border-border w-28 min-w-[80px]">SKU</th>
-            <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[340px]">Roteiro</th>
+            <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[150px]">Roteiro</th>
             <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[200px]">Arquivos</th>
             <th class="text-center px-2 py-2 font-medium border-b border-border w-24">Aprovado</th>
             <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[190px]">Publicação</th>
@@ -1230,27 +1307,40 @@ async function cancelarPostagem(p: Postagem) {
               />
               <span v-else class="break-all">{{ r.sku || '—' }}</span>
             </td>
-            <!-- roteiro (célula grande — textarea ao editar) -->
-            <td
-              class="border border-border px-2 py-1.5 text-xs"
-              :class="{
-                'cursor-pointer': canEdit,
-                'ring-2 ring-blue-500 ring-inset bg-background': isEditing(r.id, 'roteiro'),
-                'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(r.id, 'roteiro'),
-              }"
-              @click="!isEditing(r.id, 'roteiro') && startEdit(r, 'roteiro')"
-            >
-              <textarea
-                v-if="isEditing(r.id, 'roteiro')"
-                :ref="setEditInputRef"
-                v-model="editValue"
-                rows="6"
-                class="w-full text-xs bg-transparent outline-none resize-y min-h-[120px] leading-snug"
-                placeholder="Escreva o roteiro — cena, fala, texto na tela…"
-                @blur="commitEdit" @keydown.escape.prevent="cancelEdit"
-              />
-              <span v-else-if="r.roteiro" class="block whitespace-pre-wrap leading-snug">{{ r.roteiro }}</span>
-              <span v-else class="text-muted-foreground italic">clique pra escrever o roteiro…</span>
+            <!-- roteiro: ponteiro pra aba Roteiros (o texto saiu daqui) -->
+            <td class="border border-border px-2 py-1.5 text-xs">
+              <div class="flex flex-col items-start gap-1">
+                <button
+                  v-if="r.roteiro_id"
+                  type="button"
+                  class="inline-flex max-w-full items-center gap-1 text-primary hover:underline"
+                  :title="`Abrir o briefing na aba Roteiros: ${r.roteiro_titulo || 'sem título'}`"
+                  @click.stop="emit('abrir-roteiro', r.roteiro_id)"
+                >
+                  <NotebookPen class="size-3.5 shrink-0" />
+                  <span class="truncate">{{ r.roteiro_titulo || 'sem título' }}</span>
+                </button>
+                <button
+                  v-else-if="canEdit"
+                  type="button"
+                  class="inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[11px] bg-background hover:bg-muted disabled:opacity-50"
+                  title="Cria o roteiro já com o modelo, a marca e o SKU desta linha, e abre pra escrever"
+                  :disabled="criandoRoteiro === r.id"
+                  @click.stop="criarRoteiroDaLinha(r)"
+                >
+                  <Loader2 v-if="criandoRoteiro === r.id" class="size-3 animate-spin" />
+                  <Plus v-else class="size-3" />
+                  escrever roteiro
+                </button>
+                <span v-else class="text-muted-foreground italic">sem roteiro</span>
+                <span
+                  v-if="r.feedback"
+                  class="pill-warning"
+                  :title="`Recado no portal do time de criação: ${r.feedback}`"
+                >
+                  <MessageSquare class="size-3" /> recado
+                </span>
+              </div>
             </td>
             <!-- arquivos -->
             <td class="border border-border px-2 py-1.5 text-xs">
@@ -1319,8 +1409,8 @@ async function cancelarPostagem(p: Postagem) {
                     ? 'bg-red-500 text-white border-red-500'
                     : 'text-red-600 bg-background hover:bg-red-500/10'"
                   :disabled="approvingId === r.id"
-                  title="Não aprovar"
-                  @click.stop="aprovar(r, false)"
+                  title="Não aprovar — abre a caixa do motivo, que a agência lê no portal"
+                  @click.stop="openRecusa(r)"
                 >
                   <X class="size-3.5" />
                 </button>
@@ -1443,7 +1533,7 @@ async function cancelarPostagem(p: Postagem) {
               />
             </td>
             <td colspan="4" class="border border-border px-2 py-1 text-[11px] text-muted-foreground align-middle">
-              Roteiro e arquivos você preenche clicando na célula depois de adicionar.
+              Arquivos e roteiro você preenche na linha, depois de adicionar.
             </td>
             <td class="border border-border px-1 py-1 text-center">
               <button
@@ -1462,7 +1552,9 @@ async function cancelarPostagem(p: Postagem) {
     </div>
 
     <p class="text-xs text-muted-foreground">
-      Clique numa célula pra editar (Enter salva, Esc cancela). Dá pra anexar vários
+      Clique numa célula pra editar (Enter salva, Esc cancela). O roteiro é escrito
+      na aba Roteiros — "escrever roteiro" cria um já com a marca e o SKU da linha.
+      Dá pra anexar vários
       arquivos por linha; clique no nome pra visualizar a imagem ou o vídeo (com opção
       de baixar). Ao aprovar (<Check class="size-3 inline text-emerald-600" />), todos os
       arquivos sobem pra pasta do produto no MEGA — o produto é achado pelo SKU na
@@ -1471,6 +1563,46 @@ async function cancelarPostagem(p: Postagem) {
       contas da marca em Cadastros › Redes Sociais — quem publica é o robô no
       servidor, na hora marcada (BRT).
     </p>
+
+    <!-- recusa com motivo -->
+    <div
+      v-if="recusa"
+      class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+      @click.self="closeRecusa"
+    >
+      <div class="w-full max-w-md rounded-lg border border-border bg-card shadow-xl">
+        <div class="flex items-center gap-2 border-b px-4 py-3">
+          <MessageSquare class="size-4 shrink-0 text-red-600" />
+          <span class="text-sm font-medium">Não aprovar</span>
+          <button class="btn btn-sm btn-ghost ml-auto px-1.5" title="Fechar (Esc)" @click="closeRecusa">
+            <X class="size-4" />
+          </button>
+        </div>
+        <div class="space-y-2 px-4 py-4">
+          <p class="text-xs text-muted-foreground">
+            <b class="text-foreground">{{ recusa.modelo }}</b>
+            <span v-if="recusa.sku" class="font-mono"> · {{ recusa.sku }}</span>
+          </p>
+          <textarea
+            v-model="recusaTexto"
+            rows="4"
+            autofocus
+            class="w-full resize-y rounded-md border bg-background px-2.5 py-2 text-xs leading-relaxed outline-none focus:ring-2 focus:ring-ring"
+            placeholder="Por que voltou? Ex.: áudio estourado nos 3s finais; falta o SKU na tela."
+          />
+          <p class="text-[11px] text-muted-foreground">
+            Esse texto aparece no portal do time de criação, junto do criativo. Sem
+            ele a agência regrava adivinhando.
+          </p>
+        </div>
+        <div class="flex items-center justify-end gap-2 border-t px-4 py-3">
+          <button class="btn btn-sm btn-ghost" @click="closeRecusa">cancelar</button>
+          <button class="btn btn-sm btn-destructive gap-1" @click="confirmarRecusa">
+            <X class="size-3.5" /> não aprovar
+          </button>
+        </div>
+      </div>
+    </div>
 
     <!-- preview modal -->
     <div

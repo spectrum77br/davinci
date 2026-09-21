@@ -106,10 +106,19 @@ from app.models.marketing import (
     MarketingSchedule,
 )
 from app.models.marketing_legenda import MarketingLegendaModelo
+from app.models.marketing_personagem import (
+    MarketingPersonagem,
+    MarketingPersonagemImagem,
+)
 from app.models.marketing_postagem import (
     STATUS_EM_VOO,
     MarketingPostagem,
     RedeSocialToken,
+)
+from app.models.marketing_roteiro import (
+    MarketingRoteiro,
+    MarketingRoteiroPersonagem,
+    MarketingRoteiroRef,
 )
 from app.models.marketplace_financial import (
     MarketplaceFinancialEvent,
@@ -241,6 +250,11 @@ __all__ = [
     "MarketingLegendaModelo",
     "MarketingMetric",
     "MarketingPattern",
+    "MarketingPersonagem",
+    "MarketingPersonagemImagem",
+    "MarketingRoteiro",
+    "MarketingRoteiroPersonagem",
+    "MarketingRoteiroRef",
     "MarketingPostagem",
     "MarketingSchedule",
     "BlingKitComponent",

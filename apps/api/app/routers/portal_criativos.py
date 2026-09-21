@@ -15,7 +15,9 @@ O `marketing_creatives` também permite PATCH da linha, DELETE do arquivo,
 DELETE da linha e o `aprovar` que empurra pro MEGA. Pendurar "mas só se for
 agência" em cada um deles é o tipo de guarda que alguém esquece de repetir na
 próxima rota. Aqui a superfície é a lista de rotas deste arquivo, e é curta:
-ler as linhas da própria equipe, ler os roteiros, anexar arquivo. Nada mais.
+ler as entregas da própria equipe, ler os roteiros endereçados a ela, ler o
+catálogo de personagens, baixar os bytes desses dois, anexar arquivo.
+Nada mais.
 
 ## As quatro travas
 
@@ -31,6 +33,20 @@ ler as linhas da própria equipe, ler os roteiros, anexar arquivo. Nada mais.
 4. **Serializador com lista branca.** O `_row_out` de lá entrega `legenda`,
    `product_id` e `pushed_dest` (o caminho da pasta no MEGA). Nada disso é da
    conta de terceiro.
+5. **Rota de bytes nunca busca a filha pelo id.** Ela resolve o PAI com
+   exatamente o mesmo WHERE da listagem e só então procura o arquivo dentro
+   dele. Sem isso, desligar um roteiro tira o card da tela mas continua
+   entregando a imagem pra sempre a quem anotou o id.
+
+## As DUAS regras de NULL, que são opostas
+
+`MarketingCreative.equipe` NULL = **ninguém de fora vê** (linha sem dono).
+`MarketingRoteiro.equipe_destino` NULL = **as duas agências veem** (briefing
+sem destinatário específico — a regra que o Eduardo pediu em 21/09/2026).
+
+Cada uma tem um helper só, com nome diferente: `_da_equipe` e
+`_enderecado_a`. Usar o errado não compila numa query plausível, porque as
+colunas estão em tabelas diferentes.
 
 ## O que este portal NÃO faz
 
@@ -48,17 +64,26 @@ from uuid import UUID, uuid4
 
 import structlog
 from fastapi import APIRouter, Depends, File, Header, HTTPException, UploadFile, status
-from sqlalchemy import func, select
+from fastapi.responses import FileResponse
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.config import get_settings
 from app.db import get_session
 from app.models.marketing import MarketingCreative, MarketingCreativeFile
+from app.models.marketing_personagem import MarketingPersonagem, MarketingPersonagemImagem
+from app.models.marketing_roteiro import MarketingRoteiro, MarketingRoteiroRef
 from app.routers.marketing_creatives import (
     MAX_BYTES_ARQUIVO,
     MAX_FILES_PER_ROW,
     _file_dir,
+)
+from app.services.marketing.anexos import (
+    MIMES_IMAGEM,
+    MIMES_REFERENCIA,
+    caminho_confinado,
+    mime_seguro,
 )
 
 logger = structlog.get_logger()
@@ -125,6 +150,15 @@ def _linha_out(row: MarketingCreative) -> dict[str, Any]:
         # foi entregue, não onde o arquivo mora.
         "entregue": row.pushed_at is not None,
         "arquivos": [_arquivo_out(f) for f in row.files],
+        # Qual briefing esta entrega cumpre. O texto, as imagens e os
+        # personagens vêm por /api/portal/roteiros — aqui só o ponteiro, pra
+        # o site conseguir ligar uma tela na outra.
+        "roteiro_id": str(row.roteiro_id) if row.roteiro_id else None,
+        # O recado da aprovação/recusa. Sem ele o "recusado" da tela é um
+        # beco: regravar sem saber o quê é o que faz a agência entregar a
+        # mesma coisa de novo.
+        "feedback": row.feedback,
+        "feedback_em": row.feedback_em.isoformat() if row.feedback_em else None,
         "criado_em": row.created_at.isoformat() if row.created_at else None,
     }
 
@@ -175,35 +209,235 @@ async def listar_criativos(
     )
     return {"equipe": equipe, "criativos": [_linha_out(r) for r in linhas]}
 
+# ─── roteiros ──────────────────────────────────────────────────────────────
+
+
+def _enderecado_a(equipe: str):
+    """O filtro do BRIEFING — e aqui NULL significa o contrário do de cima.
+
+    `equipe_destino` vazio = o roteiro é para as duas agências. É a regra que
+    o Eduardo pediu ("uma regra também de que se não preenchido vai para os
+    2"). Não confundir com `_da_equipe`, que trata NULL como "de ninguém".
+    """
+    return or_(
+        MarketingRoteiro.equipe_destino.is_(None),
+        func.lower(func.btrim(MarketingRoteiro.equipe_destino)) == equipe.lower(),
+    )
+
+
+def _visivel_pra_fora(equipe: str):
+    """TODAS as condições pra um roteiro existir do lado de fora, num lugar só.
+
+    A listagem e a rota de BYTES usam esta mesma tupla. Se a rota de bytes
+    tivesse um WHERE próprio, desligar um roteiro tiraria o card da tela e
+    continuaria servindo as imagens pra sempre a quem tivesse anotado o id.
+    """
+    return (
+        MarketingRoteiro.ativo.is_(True),
+        # Roteiro sem texto é linha recém-criada, ainda sendo escrita. É este
+        # filtro que permite o roteiro nascer visível sem um passo de
+        # "publicar": ele só aparece quando tem o que ler.
+        MarketingRoteiro.texto.is_not(None),
+        func.length(func.btrim(MarketingRoteiro.texto)) > 0,
+        _enderecado_a(equipe),
+    )
+
+
+def _roteiro_out(row: MarketingRoteiro) -> dict[str, Any]:
+    """LISTA BRANCA. `created_by` e `file_rel` não são da conta de terceiro."""
+    return {
+        "id": str(row.id),
+        "titulo": row.titulo,
+        "texto": row.texto,
+        "marca": row.marca,
+        "sku": row.sku,
+        "referencias": [
+            {
+                "id": str(r.id),
+                "tipo": r.tipo,
+                "titulo": r.titulo,
+                "url": r.url,
+                "nome": r.file_name,
+                "mime": r.file_mime,
+                "tamanho": r.file_size,
+            }
+            for r in row.refs
+        ],
+        "personagens": [
+            _personagem_out(v.personagem) for v in row.personagens if v.personagem
+        ],
+        "criado_em": row.created_at.isoformat() if row.created_at else None,
+    }
+
+
+async def _roteiro_visivel(
+    session: AsyncSession, roteiro_id: UUID, equipe: str
+) -> MarketingRoteiro:
+    """404 (não 403) pra roteiro de outra agência, desligado ou sem texto."""
+    row = (
+        await session.execute(
+            select(MarketingRoteiro)
+            .where(MarketingRoteiro.id == roteiro_id, *_visivel_pra_fora(equipe))
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(404, detail={"code": "nao_encontrado"})
+    return row
+
 
 @router.get("/roteiros")
 async def listar_roteiros(
     session: Annotated[AsyncSession, Depends(get_session)],
     equipe: Annotated[str, Depends(equipe_do_token)],
 ) -> dict[str, Any]:
-    """A tela de roteiros: só as linhas que têm briefing escrito.
+    """A tela de roteiros: o briefing endereçado a esta agência — mais os que
+    não têm destinatário, que são de todas.
 
-    Quem escreve é a equipe interna, no DaVinci. Aqui é leitura — não existe
+    Quem escreve é a equipe interna, no DaVinci. Aqui é leitura: não existe
     rota de escrita de roteiro neste arquivo, de propósito.
     """
     linhas = (
         (
             await session.execute(
-                select(MarketingCreative)
-                .options(selectinload(MarketingCreative.files))
-                .where(
-                    _da_equipe(equipe),
-                    MarketingCreative.roteiro.is_not(None),
-                    func.length(func.trim(MarketingCreative.roteiro)) > 0,
-                )
-                .order_by(MarketingCreative.created_at.desc())
+                select(MarketingRoteiro)
+                .where(*_visivel_pra_fora(equipe))
+                .order_by(MarketingRoteiro.created_at.desc())
                 .limit(LIMITE_PADRAO)
             )
         )
         .scalars()
         .all()
     )
-    return {"equipe": equipe, "roteiros": [_linha_out(r) for r in linhas]}
+    return {"equipe": equipe, "roteiros": [_roteiro_out(r) for r in linhas]}
+
+
+@router.get("/roteiros/{roteiro_id}")
+async def ver_roteiro(
+    roteiro_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    equipe: Annotated[str, Depends(equipe_do_token)],
+) -> dict[str, Any]:
+    """Um roteiro só — a tela de "abrir" do portal, e o link colável.
+
+    Existe porque a listagem tem teto de 200: procurar dentro da lista faria
+    a tela de detalhe sumir pra quem já tem histórico.
+    """
+    return {
+        "equipe": equipe,
+        "roteiro": _roteiro_out(await _roteiro_visivel(session, roteiro_id, equipe)),
+    }
+
+
+@router.get("/roteiros/{roteiro_id}/referencia/{ref_id}")
+async def baixar_referencia(
+    roteiro_id: UUID,
+    ref_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    equipe: Annotated[str, Depends(equipe_do_token)],
+) -> FileResponse:
+    """Imagem de referência do briefing, pro site da agência mostrar.
+
+    Quem chama é o SERVIDOR PHP (com o token no header), que repassa os bytes
+    pro navegador do criativo — o token continua sem sair do servidor.
+
+    Repare que a busca começa pelo ROTEIRO, com `_roteiro_visivel`, e só
+    depois procura a referência dentro dele. Resolver a referência pelo id
+    direto pareceria igual e serviria arquivo de roteiro desligado.
+    """
+    row = await _roteiro_visivel(session, roteiro_id, equipe)
+    rec = next((r for r in row.refs if r.id == ref_id and r.tipo == "imagem"), None)
+    if rec is None:
+        raise HTTPException(404, detail={"code": "nao_encontrado"})
+    return _entrega(rec, permitidos=MIMES_REFERENCIA)
+
+
+# ─── personagens ───────────────────────────────────────────────────────────
+
+
+def _personagem_out(p: MarketingPersonagem) -> dict[str, Any]:
+    return {
+        "id": str(p.id),
+        "nome": p.nome,
+        "descricao": p.descricao,
+        # A etiqueta que o gerador de vídeo entende — é o que a agência cola
+        # dentro do prompt. Sem ela o roteiro descreve uma pessoa genérica e
+        # cada geração inventa outro rosto.
+        "referencia": p.referencia,
+        "imagens": [
+            {"id": str(i.id), "nome": i.file_name, "mime": i.file_mime, "tamanho": i.file_size}
+            for i in p.imagens
+        ],
+    }
+
+
+@router.get("/personagens")
+async def listar_personagens(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    equipe: Annotated[str, Depends(equipe_do_token)],
+) -> dict[str, Any]:
+    """O elenco da casa. Catálogo GLOBAL — a única rota daqui sem recorte por
+    agência, porque personagem não tem dono de equipe. É decisão, não
+    esquecimento: o dia em que personagem precisar de destinatário, ele ganha
+    `equipe_destino` e entra no molde do roteiro."""
+    linhas = (
+        (
+            await session.execute(
+                select(MarketingPersonagem)
+                .where(MarketingPersonagem.ativo.is_(True))
+                .order_by(func.lower(MarketingPersonagem.nome))
+                .limit(LIMITE_PADRAO)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return {"equipe": equipe, "personagens": [_personagem_out(p) for p in linhas]}
+
+
+@router.get("/personagens/{personagem_id}/imagem/{imagem_id}")
+async def baixar_imagem_personagem(
+    personagem_id: UUID,
+    imagem_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    equipe: Annotated[str, Depends(equipe_do_token)],
+) -> FileResponse:
+    """Mesma regra da referência: resolve o PAI com o WHERE da listagem
+    (`ativo`) e só então procura a imagem dentro dele. Personagem desligado
+    para de servir foto, não só de aparecer na lista."""
+    pai = (
+        await session.execute(
+            select(MarketingPersonagem).where(
+                MarketingPersonagem.id == personagem_id,
+                MarketingPersonagem.ativo.is_(True),
+            )
+        )
+    ).scalar_one_or_none()
+    if pai is None:
+        raise HTTPException(404, detail={"code": "nao_encontrado"})
+    rec = next((i for i in pai.imagens if i.id == imagem_id), None)
+    if rec is None:
+        raise HTTPException(404, detail={"code": "nao_encontrado"})
+    return _entrega(rec, permitidos=MIMES_IMAGEM)
+
+
+def _entrega(
+    rec: MarketingRoteiroRef | MarketingPersonagemImagem, *, permitidos: frozenset[str]
+) -> FileResponse:
+    """Os bytes, com as duas travas que valem pra qualquer arquivo daqui."""
+    caminho = caminho_confinado(rec.file_rel)
+    if caminho is None or not caminho.is_file():
+        raise HTTPException(404, detail={"code": "nao_encontrado"})
+    media_type, disposicao = mime_seguro(rec.file_mime, permitidos=permitidos)
+    return FileResponse(
+        caminho,
+        filename=rec.file_name or "arquivo",
+        media_type=media_type,
+        content_disposition_type=disposicao,
+        headers={
+            "X-Content-Type-Options": "nosniff",
+            "Cache-Control": "private, max-age=300",
+        },
+    )
 
 
 @router.post("/criativos/{creative_id}/arquivo")

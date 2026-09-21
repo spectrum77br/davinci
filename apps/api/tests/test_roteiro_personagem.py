@@ -1,0 +1,344 @@
+"""Aba Roteiros e Personagens — o que entra, e o que nunca vira href.
+
+Eduardo, 21/09/2026: o briefing saiu da linha de produção, ganhou destino por
+agência e passou a carregar personagens. As três coisas ATRAVESSAM pro portal
+— um site PHP que não é nosso — então o que entra aqui é o que sai lá.
+
+Daí o foco: a lista branca da extensão (nada de SVG nem HTML), o MIME vindo
+da extensão e não do uploader, o esquema do link, e a lápide do campo antigo.
+"""
+
+from __future__ import annotations
+
+import pytest
+from httpx import AsyncClient
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models import MarketingCreative, UserRole
+
+PNG = b"\x89PNG\r\n\x1a\n" + b"x" * 200
+R = "/api/marketing/roteiros"
+P = "/api/marketing/personagens"
+
+
+@pytest.fixture
+async def admin(make_user, auth_as):
+    u = await make_user(role=UserRole.ADMIN)
+    auth_as(u)
+    return u
+
+
+async def _novo(client: AsyncClient, **extra) -> dict:
+    corpo = {"titulo": "video 30s — mala de bordo", "texto": "cena 1", **extra}
+    r = await client.post(R, json=corpo)
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+# ─────────────── links de produto ───────────────
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "javascript:alert(1)",
+        "JaVaScRiPt:alert(1)",
+        "  javascript:alert(1)  ",  # o strip não pode liberar o esquema
+        "data:text/html,<script>alert(1)</script>",
+        "vbscript:msgbox(1)",
+        "//evil.example.com/pagina",  # protocol-relative também é navegável
+        "/produtos/dgd23",  # relativo: o portal é outro domínio
+        "",
+        "   ",
+    ],
+)
+async def test_link_fora_de_http_e_recusado(client: AsyncClient, admin, url: str):
+    """LISTA BRANCA. O campo vira `href` num site que não é nosso."""
+    rot = await _novo(client)
+    r = await client.post(f"{R}/{rot['id']}/referencia/link", json={"url": url})
+    assert r.status_code == 400, f"{url!r} passou"
+    assert r.json()["detail"]["code"] in {"link_invalido", "link_vazio"}
+
+
+async def test_link_http_entra_com_titulo(client: AsyncClient, admin):
+    rot = await _novo(client)
+    r = await client.post(
+        f"{R}/{rot['id']}/referencia/link",
+        json={"url": "https://uranyx.com.br/p/dgd23", "titulo": "página do produto"},
+    )
+    assert r.status_code == 200, r.text
+    ref = r.json()["referencias"][0]
+    assert (ref["tipo"], ref["url"], ref["titulo"]) == (
+        "link", "https://uranyx.com.br/p/dgd23", "página do produto",
+    )
+
+
+# ─────────────── imagens de referência ───────────────
+
+
+@pytest.mark.parametrize(
+    "nome",
+    ["golpe.html", "vetor.svg", "macro.svgz", "filme.mp4", "sem_extensao"],
+)
+async def test_extensao_fora_da_lista_e_recusada(client: AsyncClient, admin, nome: str):
+    """SVG entra aqui junto com HTML: é XML, carrega <script> e roda no
+    domínio de quem abrir. MP4 é recusado por outro motivo — vídeo é ENTREGA,
+    e entrega mora na tabela do criativo."""
+    rot = await _novo(client)
+    r = await client.post(
+        f"{R}/{rot['id']}/referencia", files={"files": (nome, PNG, "image/png")}
+    )
+    assert r.status_code == 400, f"{nome!r} passou"
+    assert r.json()["detail"]["code"] == "extensao_nao_aceita"
+
+
+async def test_mime_vem_da_extensao_e_nao_do_uploader(client: AsyncClient, admin):
+    """Quem sobe o arquivo escolhe o `Content-Type`. Se o banco guardasse esse
+    valor, a rota que serve a imagem estaria servindo o tipo que um terceiro
+    escolheu."""
+    rot = await _novo(client)
+    r = await client.post(
+        f"{R}/{rot['id']}/referencia", files={"files": ("print.png", PNG, "text/html")}
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["referencias"][0]["file_mime"] == "image/png"
+
+
+async def test_baixar_e_apagar_referencia(client: AsyncClient, admin):
+    rot = await _novo(client)
+    ref = (
+        await client.post(
+            f"{R}/{rot['id']}/referencia", files={"files": ("print.png", PNG, "image/png")}
+        )
+    ).json()["referencias"][0]
+
+    baixa = await client.get(f"{R}/{rot['id']}/referencia/{ref['id']}")
+    assert baixa.status_code == 200
+    assert baixa.headers["content-type"] == "image/png"
+    assert baixa.headers["x-content-type-options"] == "nosniff"
+    assert baixa.content == PNG
+
+    apaga = await client.delete(f"{R}/{rot['id']}/referencia/{ref['id']}")
+    assert apaga.status_code == 200
+    assert apaga.json()["referencias"] == []
+
+
+async def test_link_nao_e_baixavel(client: AsyncClient, admin):
+    """`tipo='link'` não tem arquivo no disco — a rota de download não pode
+    cair num `None` e virar leitura de caminho vazio."""
+    rot = await _novo(client)
+    ref = (
+        await client.post(
+            f"{R}/{rot['id']}/referencia/link", json={"url": "https://exemplo.com"}
+        )
+    ).json()["referencias"][0]
+    assert (await client.get(f"{R}/{rot['id']}/referencia/{ref['id']}")).status_code == 404
+
+
+# ─────────────── destino (a regra invertida) ───────────────
+
+
+async def test_destino_vazio_vira_null(client: AsyncClient, admin):
+    """"Se não preenchido vai para os 2" — e `"  "` tem que virar NULL, senão
+    o destino passa a ser um nome feito de espaço, que não casa com token
+    nenhum e o roteiro some sem erro."""
+    for vazio in ("", "   ", None):
+        rot = await _novo(client, equipe_destino=vazio)
+        assert rot["equipe_destino"] is None
+
+
+async def test_usuario_restrito_nao_ve_roteiro_de_outra_equipe(
+    client: AsyncClient, db: AsyncSession, make_user, auth_as
+):
+    """Hoje o texto mora na linha do criativo, e a linha JÁ é filtrada por
+    equipe. Sem este recorte, tirar o roteiro de lá abriria o briefing de
+    todas as equipes pra todo usuário restrito no dia do deploy."""
+    dono = await make_user(role=UserRole.ADMIN)
+    auth_as(dono)
+    await _novo(client, titulo="da alpha", equipe_destino="alpha")
+    await _novo(client, titulo="da beta", equipe_destino="beta")
+    await _novo(client, titulo="de todos")
+
+    restrito = await make_user(
+        role=UserRole.USER, permissions={"marketing_criativos": {"view": True}}
+    )
+    restrito.marketing_teams = ["alpha"]
+    await db.commit()
+    auth_as(restrito)
+
+    titulos = {x["titulo"] for x in (await client.get(R)).json()}
+    assert titulos == {"da alpha", "de todos"}, "sem destino é de todos; da beta não"
+
+
+# ─────────────── personagens ───────────────
+
+
+async def test_personagem_guarda_a_referencia_do_gerador(client: AsyncClient, admin):
+    """As três partes: quem é, como chamamos, e a etiqueta que o gerador
+    entende — era o que os roteiros de produção colavam à mão no prompt."""
+    r = await client.post(
+        P,
+        json={
+            "nome": "Lívia",
+            "descricao": "estudante brasileira de 22 anos",
+            "referencia": "<<<48dbb6ed-155f-485d-90c0-1730bf39529d>>>",
+        },
+    )
+    assert r.status_code == 200, r.text
+    d = r.json()
+    assert d["referencia"] == "<<<48dbb6ed-155f-485d-90c0-1730bf39529d>>>"
+    assert d["ativo"] is True
+
+
+async def test_personagem_repetido_da_409(client: AsyncClient, admin):
+    """Dois "Lívia" no select do roteiro e ninguém sabe qual é qual."""
+    assert (await client.post(P, json={"nome": "Lívia"})).status_code == 200
+    r = await client.post(P, json={"nome": "lívia"})  # maiúscula não é outro
+    assert r.status_code == 409
+    assert r.json()["detail"]["code"] == "personagem_repetido"
+
+
+async def test_foto_do_personagem_nao_aceita_pdf(client: AsyncClient, admin):
+    """A referência do briefing aceita PDF; o personagem não — aqui é rosto,
+    e cada tipo a menos é superfície a menos."""
+    p = (await client.post(P, json={"nome": "Lívia"})).json()
+    r = await client.post(
+        f"{P}/{p['id']}/imagem", files={"files": ("ficha.pdf", PNG, "application/pdf")}
+    )
+    assert r.status_code == 400
+    assert r.json()["detail"]["code"] == "extensao_nao_aceita"
+
+
+async def test_ligar_e_desligar_personagem_do_roteiro(client: AsyncClient, admin):
+    rot = await _novo(client)
+    p = (await client.post(P, json={"nome": "Lívia", "referencia": "@Lívia"})).json()
+
+    liga = await client.post(f"{R}/{rot['id']}/personagem", json={"personagem_id": p["id"]})
+    assert liga.status_code == 200, liga.text
+    assert [x["nome"] for x in liga.json()["personagens"]] == ["Lívia"]
+    assert liga.json()["personagens"][0]["referencia"] == "@Lívia"
+
+    # Clicar duas vezes é clique repetido, não erro.
+    de_novo = await client.post(f"{R}/{rot['id']}/personagem", json={"personagem_id": p["id"]})
+    assert de_novo.status_code == 200
+    assert len(de_novo.json()["personagens"]) == 1
+
+    desliga = await client.delete(f"{R}/{rot['id']}/personagem/{p['id']}")
+    assert desliga.json()["personagens"] == []
+
+
+async def test_apagar_personagem_nao_leva_o_roteiro(client: AsyncClient, admin):
+    rot = await _novo(client)
+    p = (await client.post(P, json={"nome": "Lívia"})).json()
+    await client.post(f"{R}/{rot['id']}/personagem", json={"personagem_id": p["id"]})
+
+    assert (await client.delete(f"{P}/{p['id']}")).status_code == 200
+    sobrou = await client.get(R)
+    assert len(sobrou.json()) == 1
+    assert sobrou.json()[0]["personagens"] == []
+
+
+# ─────────────── a lápide do campo antigo ───────────────
+
+
+async def test_criativo_recusa_roteiro_em_vez_de_engolir(client: AsyncClient, admin):
+    """`CreativeIn` é BaseModel puro e o default do Pydantic v2 é
+    `extra="ignore"` — sem a lápide, um POST antigo mandando `roteiro`
+    responderia 200 e jogaria o texto fora em silêncio."""
+    r = await client.post(
+        "/api/marketing/creatives",
+        json={"modelo": "video 30s", "roteiro": "cena 1: abre a mala"},
+    )
+    assert r.status_code == 400
+    assert r.json()["detail"]["code"] == "roteiro_mudou_de_lugar"
+    assert r.json()["detail"]["onde"] == "/api/marketing/roteiros"
+
+
+async def test_criativo_aponta_pro_roteiro(client: AsyncClient, db: AsyncSession, admin):
+    rot = await _novo(client)
+    criativo = (
+        await client.post("/api/marketing/creatives", json={"modelo": "video 30s"})
+    ).json()
+
+    r = await client.patch(
+        f"/api/marketing/creatives/{criativo['id']}", json={"roteiro_id": rot["id"]}
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["roteiro_id"] == rot["id"]
+    assert r.json()["roteiro_titulo"] == "video 30s — mala de bordo"
+
+    # desvincular
+    solto = await client.patch(
+        f"/api/marketing/creatives/{criativo['id']}", json={"roteiro_id": None}
+    )
+    assert solto.json()["roteiro_id"] is None
+
+
+async def test_roteiro_inexistente_da_404_e_nao_500(client: AsyncClient, admin):
+    """Sem a conferência, o vínculo errado só aparece como IntegrityError no
+    commit, com a mensagem crua da FK na cara do operador."""
+    criativo = (
+        await client.post("/api/marketing/creatives", json={"modelo": "video 30s"})
+    ).json()
+    r = await client.patch(
+        f"/api/marketing/creatives/{criativo['id']}",
+        json={"roteiro_id": "00000000-0000-0000-0000-000000000000"},
+    )
+    assert r.status_code == 404
+    assert r.json()["detail"]["code"] == "roteiro_nao_encontrado"
+
+
+async def test_apagar_roteiro_nao_apaga_o_criativo(
+    client: AsyncClient, db: AsyncSession, admin
+):
+    """O motivo de a FK ser SET NULL: apagar um briefing não pode levar a
+    entrega que a agência já mandou."""
+    rot = await _novo(client)
+    criativo = (
+        await client.post("/api/marketing/creatives", json={"modelo": "video 30s"})
+    ).json()
+    await client.patch(
+        f"/api/marketing/creatives/{criativo['id']}", json={"roteiro_id": rot["id"]}
+    )
+
+    assert (await client.delete(f"{R}/{rot['id']}")).status_code == 200
+    linhas = (await client.get("/api/marketing/creatives")).json()
+    assert len(linhas) == 1
+    assert linhas[0]["roteiro_id"] is None
+
+
+# ─────────────── o recado da recusa (continua na ENTREGA) ───────────────
+
+
+async def test_recusar_com_comentario_carimba_a_data(client: AsyncClient, db: AsyncSession, admin):
+    c = MarketingCreative(modelo="video 30s", equipe="alpha")
+    db.add(c)
+    await db.commit()
+    r = await client.post(
+        f"/api/marketing/creatives/{c.id}/aprovar",
+        json={"aprovado": False, "feedback": "áudio estourado nos 3s finais"},
+    )
+    assert r.status_code == 200, r.text
+    d = r.json()
+    assert d["aprovado"] is False
+    assert d["feedback"] == "áudio estourado nos 3s finais"
+    assert d["feedback_em"], "sem data a agência não sabe de que versão é o recado"
+
+
+async def test_recusar_sem_escrever_nada_preserva_o_recado(
+    client: AsyncClient, db: AsyncSession, admin
+):
+    """Campo AUSENTE mantém; string vazia apaga. Um botão que não manda nada
+    não pode apagar o que alguém escreveu."""
+    c = MarketingCreative(modelo="video 30s", equipe="alpha")
+    db.add(c)
+    await db.commit()
+    await client.patch(f"/api/marketing/creatives/{c.id}", json={"feedback": "refazer a abertura"})
+    mantido = await client.post(
+        f"/api/marketing/creatives/{c.id}/aprovar", json={"aprovado": False}
+    )
+    assert mantido.json()["feedback"] == "refazer a abertura"
+
+    apagado = await client.patch(f"/api/marketing/creatives/{c.id}", json={"feedback": "   "})
+    assert apagado.json()["feedback"] is None
+    assert apagado.json()["feedback_em"] is None

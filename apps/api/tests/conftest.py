@@ -324,7 +324,15 @@ _CLEANUP_TABLES = (
     "claude_conectores",  # FK -> users: antes de users
     "marketing_postagens",  # FK -> criativos/redes_sociais: antes dos dois
     "marketing_creative_files",
+    # marketing_creatives tem FK -> marketing_roteiros (SET NULL), então a
+    # ordem entre os dois não trava o DELETE; os filhos do roteiro vêm antes
+    # por clareza, já que a FK deles é CASCADE.
     "marketing_creatives",
+    "marketing_roteiro_personagens",
+    "marketing_roteiro_refs",
+    "marketing_roteiros",
+    "marketing_personagem_imagens",
+    "marketing_personagens",
     "dm_mensagens",  # FK -> dm_conversas: antes dela
     "dm_contas",  # FK -> redes_sociais
     "dm_conversas",  # FK -> redes_sociais/users: antes dos dois

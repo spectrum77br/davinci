@@ -36,6 +36,7 @@ from app.models import (
     Marca,
     MarketingCreative,
     MarketingCreativeFile,
+    MarketingRoteiro,
     PricingProduct,
     ProductLink,
     User,
@@ -43,6 +44,10 @@ from app.models import (
 )
 from app.schemas.marketing_legendas import legenda_opcional
 from app.services.marketing import link_criativo
+from app.services.marketing.anexos import (
+    caminho_confinado,
+    mime_seguro,
+)
 from app.services.mega_fotos import MegaError, sidecar_request
 
 logger = structlog.get_logger()
@@ -78,7 +83,16 @@ def _row_out(row: MarketingCreative) -> dict[str, Any]:
         # que denuncia o SKU digitado errado.
         "product_id": str(row.product_id) if row.product_id else None,
         "files": [_file_out(f) for f in row.files],
+        # O briefing virou entidade própria (migration 0299): aqui só o
+        # ponteiro e o título, pra célula da planilha ter o que mostrar sem
+        # uma segunda chamada. O texto, as imagens de referência e os
+        # personagens moram em /api/marketing/roteiros.
+        "roteiro_id": str(row.roteiro_id) if row.roteiro_id else None,
+        "roteiro_titulo": row.roteiro_ref.titulo if row.roteiro_ref else None,
         "aprovado": row.aprovado,
+        # O recado escrito na aprovação/recusa. É o que a agência lê no portal.
+        "feedback": row.feedback,
+        "feedback_em": row.feedback_em.isoformat() if row.feedback_em else None,
         "pushed_at": row.pushed_at.isoformat() if row.pushed_at else None,
         "pushed_dest": row.pushed_dest,
         "created_at": row.created_at.isoformat() if row.created_at else None,
@@ -165,6 +179,11 @@ class CreativeIn(BaseModel):
     marca: str | None = None
     sku: str | None = None
     equipe: str | None = None
+    # LÁPIDE, por uma versão (migration 0299). O briefing virou
+    # /api/marketing/roteiros. O campo continua declarado só pra poder ser
+    # RECUSADO: `CreativeIn` é BaseModel puro, e o default do Pydantic v2 é
+    # `extra="ignore"` — sem esta linha, um POST antigo mandando `roteiro`
+    # continuaria respondendo 200 e jogando o texto fora em silêncio.
     roteiro: str | None = None
     # Legenda escrita à mão pra ESTE vídeo. Vazio vira NULL de propósito: é
     # o NULL que faz a cascata seguir pra biblioteca da marca/produto.
@@ -173,12 +192,30 @@ class CreativeIn(BaseModel):
     _v_legenda = field_validator("legenda", mode="before")(legenda_opcional)
 
 
+def _recusa_roteiro(texto: str | None) -> None:
+    """400 explícito, não descarte silencioso.
+
+    Quem ainda manda `roteiro` no criativo está escrevendo briefing no lugar
+    errado desde a 0299. Aceitar e ignorar faria o texto evaporar sem erro —
+    e faria os testes antigos passarem sem provar nada.
+    """
+    if texto is not None:
+        raise HTTPException(
+            400,
+            detail={
+                "code": "roteiro_mudou_de_lugar",
+                "onde": "/api/marketing/roteiros",
+            },
+        )
+
+
 @router.post("")
 async def create_creative(
     payload: CreativeIn,
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[User, Depends(require_permission("marketing_criativos", "edit"))],
 ) -> dict[str, Any]:
+    _recusa_roteiro(payload.roteiro)
     modelo = payload.modelo.strip()
     if not modelo:
         raise HTTPException(400, detail={"code": "modelo_obrigatorio"})
@@ -197,7 +234,6 @@ async def create_creative(
         sku=(payload.sku or "").strip() or None,
         product_id=await _product_id_do_sku(session, payload.sku),
         equipe=equipe,
-        roteiro=payload.roteiro,
         legenda=payload.legenda,
         created_by=user.id,
     )
@@ -261,13 +297,35 @@ async def _product_id_do_sku(session: AsyncSession, sku: str | None) -> UUID | N
     )
 
 
+async def _roteiro_valido(session: AsyncSession, roteiro_id: UUID | None) -> UUID | None:
+    """404 quando o roteiro não existe — não 500 do banco no commit.
+
+    Sem esta conferência o vínculo errado só aparece como IntegrityError lá na
+    frente, com a mensagem crua da FK na cara do operador.
+    """
+    if roteiro_id is None:
+        return None
+    existe = await session.scalar(
+        select(MarketingRoteiro.id).where(MarketingRoteiro.id == roteiro_id)
+    )
+    if existe is None:
+        raise HTTPException(404, detail={"code": "roteiro_nao_encontrado"})
+    return existe
+
+
 class CreativePatch(BaseModel):
     modelo: str | None = None
     marca: str | None = None
     sku: str | None = None
     equipe: str | None = None
-    roteiro: str | None = None
+    roteiro: str | None = None  # LÁPIDE — ver `_recusa_roteiro`
+    # Qual briefing esta linha cumpre. `null` desvincula.
+    roteiro_id: UUID | None = None
     legenda: str | None = None
+    # Recado pro time de criação. Sai do DaVinci e aparece no portal deles —
+    # dá pra escrever sem recusar nada (um ajuste fino, um "faltou o SKU na
+    # tela"), e o `aprovar` também carimba este campo.
+    feedback: str | None = None
 
     _v_legenda = field_validator("legenda", mode="before")(legenda_opcional)
 
@@ -282,6 +340,10 @@ async def patch_creative(
     row = await _get_row(session, creative_id)
     _ensure_equipe(user, row)
     data = payload.model_dump(exclude_unset=True)
+    _recusa_roteiro(data.get("roteiro"))
+    trocou_roteiro = "roteiro_id" in data
+    if trocou_roteiro:
+        row.roteiro_id = await _roteiro_valido(session, data["roteiro_id"])
     if "modelo" in data:
         modelo = (data["modelo"] or "").strip()
         if not modelo:
@@ -306,20 +368,44 @@ async def patch_creative(
         if allowed is not None and (nova is None or nova.lower() not in allowed):
             raise HTTPException(403, detail={"code": "fora_da_sua_equipe"})
         row.equipe = nova
-    if "roteiro" in data:
-        row.roteiro = data["roteiro"]
     if "legenda" in data:
         row.legenda = data["legenda"]
+    if "feedback" in data:
+        texto = (data["feedback"] or "").strip()
+        row.feedback = texto or None
+        # Carimbo junto: sem a data, a agência não sabe se o recado é deste
+        # vídeo que ela acabou de mandar ou da versão de duas semanas atrás.
+        row.feedback_em = datetime.now(timezone.utc) if texto else None
     await session.commit()
+    if trocou_roteiro:
+        # `roteiro_ref` foi resolvido no carregamento, ANTES de o ponteiro
+        # mudar. Sem recarregar, a resposta do PATCH volta com o título do
+        # roteiro antigo (ou None) e a célula da planilha pisca errado.
+        await session.refresh(row)
     return _row_out(row)
 
 
+async def _tem_postagem(session: AsyncSession, file_id: UUID) -> bool:
+    """Existe postagem (de qualquer estado) presa a este arquivo?"""
+    from app.models.marketing_postagem import MarketingPostagem
+
+    return bool(
+        (
+            await session.execute(
+                select(func.count())
+                .select_from(MarketingPostagem)
+                .where(MarketingPostagem.file_id == file_id)
+            )
+        ).scalar_one()
+    )
+
+
 # MIME que pode ser servido INLINE, no mesmo origin do app. Qualquer outro
-# desce como anexo octet-stream: `file_mime` vem do `Content-Type` que o
-# NAVEGADOR DO UPLOADER mandou — quem sobe o arquivo escolhe o valor. Servir
-# isso inline deixa alguém com permissão de editar criativo publicar um
-# `text/html` e rodar script na sessão de quem abrir o "vídeo", no mesmo
-# domínio do DaVinci (cookie de sessão junto).
+# desce como anexo octet-stream (`mime_seguro`, em services/marketing/
+# anexos.py): `file_mime` vem do `Content-Type` que o NAVEGADOR DO UPLOADER
+# mandou — quem sobe o arquivo escolhe o valor. Servir isso inline deixa
+# alguém com permissão de editar criativo publicar um `text/html` e rodar
+# script na sessão de quem abrir o "vídeo", no mesmo domínio do DaVinci.
 # Teto por arquivo. O criativo real tem 26-41 MB; 200 MB dá folga larga e
 # ainda impede que um upload sozinho encha o disco do servidor (não há cota
 # por equipe, e o disco é o mesmo da API e do Postgres).
@@ -338,52 +424,6 @@ _MIME_INLINE_OK = frozenset({
 # O endpoint PÚBLICO só existe pra Meta baixar Reel. Ali a lista é menor
 # ainda: só vídeo.
 _MIME_VIDEO_OK = frozenset({"video/mp4", "video/quicktime", "video/webm"})
-
-
-def _mime_seguro(mime: str | None, *, permitidos: frozenset[str]) -> tuple[str, str]:
-    """(media_type, content_disposition) — nunca devolve o MIME cru do uploader.
-
-    Fora da allowlist o arquivo continua servido (o operador precisa baixar o
-    que subiu), mas como `application/octet-stream` + `attachment`, que o
-    navegador não executa.
-    """
-    limpo = (mime or "").split(";")[0].strip().lower()
-    if limpo in permitidos:
-        return limpo, "inline"
-    return "application/octet-stream", "attachment"
-
-
-def _caminho_confinado(file_rel: str | None) -> Path | None:
-    """Resolve `uploads_dir/file_rel` e prova que não escapou do diretório.
-
-    `file_rel` vem do BANCO, e o banco é alimentado pelo upload — que já
-    sanitiza o nome. Isto é a segunda tranca: uma linha antiga, um import ou
-    um bug futuro que grave "../../etc/passwd" não vira leitura arbitrária.
-    """
-    if not (file_rel or "").strip():
-        return None
-    raiz = Path(get_settings().uploads_dir).resolve()
-    try:
-        alvo = (raiz / file_rel).resolve()
-        alvo.relative_to(raiz)
-    except (ValueError, OSError):
-        return None
-    return alvo
-
-
-async def _tem_postagem(session: AsyncSession, file_id: UUID) -> bool:
-    """Existe postagem (de qualquer estado) presa a este arquivo?"""
-    from app.models.marketing_postagem import MarketingPostagem
-
-    return bool(
-        (
-            await session.execute(
-                select(func.count())
-                .select_from(MarketingPostagem)
-                .where(MarketingPostagem.file_id == file_id)
-            )
-        ).scalar_one()
-    )
 
 
 @router.post("/{creative_id}/arquivo")
@@ -511,12 +551,12 @@ async def video_publico(
     ).scalar_one_or_none()
     if rec is None:
         raise HTTPException(404, detail={"code": "arquivo_nao_encontrado"})
-    abs_path = _caminho_confinado(rec.file_rel)
+    abs_path = caminho_confinado(rec.file_rel)
     if abs_path is None or not abs_path.is_file():
         raise HTTPException(404, detail={"code": "arquivo_sumiu"})
     # Esta porta é aberta: quem tiver o link de 15 min baixa sem sessão. Então
     # ela serve VÍDEO e nada mais — nunca o MIME que o uploader escolheu.
-    media_type, _ = _mime_seguro(rec.file_mime, permitidos=_MIME_VIDEO_OK)
+    media_type, _ = mime_seguro(rec.file_mime, permitidos=_MIME_VIDEO_OK)
     if media_type == "application/octet-stream":
         raise HTTPException(404, detail={"code": "arquivo_nao_e_video"})
     logger.info(
@@ -546,14 +586,14 @@ async def download_arquivo(
     rec = next((f for f in row.files if f.id == file_id), None)
     if rec is None:
         raise HTTPException(404, detail={"code": "sem_arquivo"})
-    abs_path = _caminho_confinado(rec.file_rel)
+    abs_path = caminho_confinado(rec.file_rel)
     if abs_path is None or not abs_path.is_file():
         raise HTTPException(404, detail={"code": "arquivo_sumiu"})
     # inline = abre no navegador (preview de imagem/vídeo); ?download=1 força
     # baixar. O MIME NUNCA é o do uploader: fora da allowlist vira anexo
     # octet-stream, senão um `text/html` subido como "criativo" rodaria script
     # em app.hadken.com com o cookie de sessão de quem clicasse.
-    media_type, disposicao = _mime_seguro(rec.file_mime, permitidos=_MIME_INLINE_OK)
+    media_type, disposicao = mime_seguro(rec.file_mime, permitidos=_MIME_INLINE_OK)
     return FileResponse(
         abs_path,
         filename=rec.file_name,
@@ -625,6 +665,19 @@ def _match_product_by_sku(
 
 class AprovarIn(BaseModel):
     aprovado: bool
+    # Recado que vai junto da decisão. Na RECUSA é o que evita a agência
+    # regravar no escuro; na aprovação serve de elogio/ajuste fino. Ausente
+    # (campo não enviado) mantém o recado anterior; string vazia apaga.
+    feedback: str | None = None
+
+
+def _aplica_feedback(row: MarketingCreative, texto: str | None) -> None:
+    """None = não mexe (quem aprovou não escreveu nada); "" = apaga o recado."""
+    if texto is None:
+        return
+    limpo = texto.strip()
+    row.feedback = limpo or None
+    row.feedback_em = datetime.now(timezone.utc) if limpo else None
 
 
 @router.post("/{creative_id}/aprovar")
@@ -635,6 +688,7 @@ async def aprovar_creative(
     user: Annotated[User, Depends(require_admin)],
 ) -> dict[str, Any]:
     row = await _get_row(session, creative_id)
+    _aplica_feedback(row, payload.feedback)
 
     if payload.aprovado is False:
         row.aprovado = False
