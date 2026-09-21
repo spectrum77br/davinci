@@ -270,6 +270,21 @@ class Settings(BaseSettings):
     # existe dry-run que prove upload sem gastar um vídeo real.
     youtube_privacidade: str = "public"
 
+    # ─── Portal do time de criação ───────────────────────────────────────
+    # As agências não têm conta no DaVinci e não vão ter: quem autentica
+    # PESSOA é o site delas (PHP, na Hostinger). O que atravessa a internet é
+    # uma chamada servidor-a-servidor, com este token no header — o navegador
+    # do criativo nunca o vê.
+    #
+    # Formato: "token:equipe,token:equipe". Uma linha por agência, e o token
+    # carrega a equipe: é ela que vira WHERE no SELECT, nunca filtro em
+    # memória. Revogar uma agência é apagar a linha e subir a api.
+    #
+    # VAZIO = PORTAL FECHADO (401), nunca aberto. É o mesmo desenho do
+    # `marketing_agent_token` (routers/marketing.py:975) e o oposto do
+    # webhook do Bling, que não rejeita nunca.
+    portal_tokens: str = ""
+
     # ─── Robô de resposta das DMs do Instagram ───────────────────────────
     # A CHAVE SECRETA DO APP da Meta. Ela valida o `X-Hub-Signature-256` de
     # todo webhook de mensagem — e é a MESMA que hoje falta para renovar o

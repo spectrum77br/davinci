@@ -215,8 +215,12 @@ if settings.enable_marketing:
     from app.routers import marketing_creatives as marketing_creatives_router
     from app.routers import marketing_legendas as marketing_legendas_router
     from app.routers import marketing_postagens as marketing_postagens_router
+    from app.routers import portal_criativos as portal_criativos_router
     app.include_router(marketing_router.router)
     app.include_router(marketing_creatives_router.router)
+    # Porta estreita pro site das agências. Fecha sozinha se PORTAL_TOKENS
+    # estiver vazio — não depende de ninguém lembrar de configurar.
+    app.include_router(portal_criativos_router.router)
     # O link assinado do vídeo vai no PATH; fora do access log.
     marketing_creatives_router.mascarar_link_no_access_log()
     app.include_router(marketing_postagens_router.router)
