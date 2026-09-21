@@ -599,8 +599,21 @@ function isMalaOuEletro(sku: string | null | undefined) {
   })
 }
 // Trava (Eduardo 04/09): "mala e eletro é obrigatória, desde que esteja nos motivos que abrem chamado".
+// Vinicius 21/09: "não recebido" fica de fora — o pacote de VOLTA não chegou, então o vídeo
+// da ida não prova nada; o robô abre no Seller Center com os fatos da SPX (espelho de
+// services/chamados_devolucao.link_envio_obrigatorio).
 function linkEnvioRequired(sku: string | null | undefined, motivo: string | null | undefined) {
-  return MOTIVOS_ABREM_CHAMADO.includes((motivo || '').trim().toLowerCase()) && isMalaOuEletro(sku)
+  const m = (motivo || '').trim().toLowerCase()
+  if (m === 'não recebido') return false
+  return MOTIVOS_ABREM_CHAMADO.includes(m) && isMalaOuEletro(sku)
+}
+// Vinicius 21/09: Link envio, quando preenchido, tem que ser URL http(s) — a operadora
+// digitava "nao ha, nao recebido" só pra passar na trava e o texto ia parar no QR do cartão
+// da disputa. Espelho do validator do backend (422 link_envio_invalido).
+const MSG_LINK_ENVIO_INVALIDO = 'Link de envio precisa ser um endereço http(s) — não digite texto aqui'
+function linkEnvioInvalido(link: string | null | undefined) {
+  const v = (link || '').trim()
+  return !!v && !/^https?:\/\//i.test(v)
 }
 // Trava (Vinicius 18/09): pedido na aba Fraude (só reembolso — o lançamento responde a
 // TikTok com o vídeo) só lança com o vídeo: o link da coluna Vídeo entra sozinho no
@@ -615,6 +628,14 @@ function videoFraudeRequired(pedido: string | null | undefined, motivo: string |
 
 function apiError(e: any) {
   const detail = e?.data?.detail
+  // 422 de validator do Pydantic (ex.: link_envio_invalido no schema) vem como lista
+  // [{msg, loc}] — mostra a msg em vez do "422 Unprocessable Entity" genérico do fetch.
+  if (Array.isArray(detail)) {
+    const msgs = detail
+      .map((d: any) => String(d?.msg || d?.message || '').replace(/^Value error, /, ''))
+      .filter(Boolean)
+    if (msgs.length) return msgs.join('; ')
+  }
   if (detail && typeof detail === 'object') return detail.message || detail.code || e?.message || 'erro'
   return detail || e?.message || 'erro'
 }
@@ -1448,6 +1469,10 @@ async function createAllDevolutions() {
       lookupError.value = 'Link de envio obrigatório: mala/eletro com motivo que abre chamado'
       return
     }
+    if (linkEnvioInvalido(d.link_envio)) {
+      lookupError.value = MSG_LINK_ENVIO_INVALIDO
+      return
+    }
     if (videoFraudeRequired(d.pedido_bling, d.motivo_devolucao) && !d.link_envio) {
       lookupError.value = MSG_VIDEO_OBRIGATORIO
       return
@@ -1671,6 +1696,10 @@ async function saveRow(row: DevolutionRow) {
   }
   if (linkEnvioRequired(row.sku, row.motivo_devolucao) && !row.link_envio) {
     error.value = 'Link de envio obrigatório: mala/eletro com motivo que abre chamado'
+    return
+  }
+  if (linkEnvioInvalido(row.link_envio)) {
+    error.value = MSG_LINK_ENVIO_INVALIDO
     return
   }
   if (videoFraudeRequired(row.pedido_bling, row.motivo_devolucao) && !row.link_envio) {
@@ -2429,8 +2458,9 @@ async function backfillAddresses() {
               <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
                 <input
                   v-model="d.link_envio"
-                  :class="linkEnvioRequired(d.sku, d.motivo_devolucao) && !d.link_envio ? sheetInputRequiredClass : sheetInputClass"
+                  :class="(linkEnvioRequired(d.sku, d.motivo_devolucao) && !d.link_envio) || linkEnvioInvalido(d.link_envio) ? sheetInputRequiredClass : sheetInputClass"
                   :placeholder="linkEnvioRequired(d.sku, d.motivo_devolucao) ? 'obrigatório (mala/eletro)' : 'link do envio'"
+                  :title="linkEnvioInvalido(d.link_envio) ? MSG_LINK_ENVIO_INVALIDO : undefined"
                 />
               </td>
               <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
@@ -2677,8 +2707,9 @@ async function backfillAddresses() {
                 <input
                   :value="row.link_envio || ''"
                   :disabled="!canEdit"
-                  :class="linkEnvioRequired(row.sku, row.motivo_devolucao) && !row.link_envio ? sheetInputRequiredClass : sheetInputClass"
+                  :class="(linkEnvioRequired(row.sku, row.motivo_devolucao) && !row.link_envio) || linkEnvioInvalido(row.link_envio) ? sheetInputRequiredClass : sheetInputClass"
                   :placeholder="linkEnvioRequired(row.sku, row.motivo_devolucao) ? 'obrigatório (mala/eletro)' : 'link do envio'"
+                  :title="linkEnvioInvalido(row.link_envio) ? MSG_LINK_ENVIO_INVALIDO : undefined"
                   @input="(e) => setRowText(row, 'link_envio', (e.target as HTMLInputElement).value)"
                   @blur="saveRow(row)"
                 />

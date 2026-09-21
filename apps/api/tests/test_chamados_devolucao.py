@@ -492,14 +492,29 @@ class _FakeTikTok:
 
 
 class _FakeShopee:
-    def __init__(self, *, status: str = "ACCEPTED"):
+    """`entregue` = a SPX já deu o pacote de VOLTA como entregue (reverse_logistics_status
+    LOGISTICS_DELIVERY_DONE). Padrão True: desde 21/09 "Não recebido" com o pacote ainda
+    em trânsito NÃO abre disputa pela API (vai pro robô) — os testes antigos, que
+    esperam a disputa, representam o pacote já entregue."""
+
+    ENTREGUE_EM = 1789567860  # 16/09/2026 11:11 BRT
+
+    def __init__(self, *, status: str = "ACCEPTED", entregue: bool = True):
         self.status = status
+        self.entregue = entregue
         self.converted: list[tuple[str, str]] = []
         self.disputes: list[dict] = []
 
     async def get_return_detail(self, return_sn):
-        return {"return_sn": return_sn, "status": self.status,
-                "seller_compensation": {"seller_compensation_status": "COMPENSATION_PENDING_REQUEST"}}
+        det = {"return_sn": return_sn, "status": self.status, "tracking_number": "BR2609RSN",
+               "seller_compensation": {"seller_compensation_status": "COMPENSATION_PENDING_REQUEST"}}
+        if self.entregue:
+            det["reverse_logistics_status"] = "LOGISTICS_DELIVERY_DONE"
+            det["update_time"] = self.ENTREGUE_EM
+        else:
+            det["reverse_logistics_status"] = "LOGISTICS_PICKUP_DONE"
+            det["update_time"] = self.ENTREGUE_EM - 2 * 86400
+        return det
 
     async def get_return_dispute_reason(self, return_sn):
         return [
@@ -1002,8 +1017,10 @@ async def test_sync_shopee_prova_extra_e_compensacao(client, make_user, auth_as,
     estado = {"status": "SELLER_DISPUTE", "proof": "PENDING", "comp": "PENDING_REQUEST"}
 
     async def _det(return_sn):
+        # 21/09: "Não recebido" só abre a disputa pela API com o pacote de volta ENTREGUE
         return {"return_sn": return_sn, "status": estado["status"], "return_solution": 0,
-                "needs_logistics": True,
+                "needs_logistics": True, "reverse_logistics_status": "LOGISTICS_DELIVERY_DONE",
+                "update_time": _FakeShopee.ENTREGUE_EM,
                 "seller_proof": {"seller_proof_status": estado["proof"], "seller_evidence_deadline": 1788600000},
                 "seller_compensation": {"seller_compensation_status": estado["comp"], "compensation_amount": 786.71}}
 
@@ -1125,8 +1142,11 @@ async def _chamado_shopee_sync(client, make_user, auth_as, db, monkeypatch, *, n
     fake = _FakeShopee()
 
     async def _det(return_sn):
+        # 21/09: o lançamento é "Não recebido" — a disputa pela API só sai com o pacote
+        # de volta ENTREGUE pela SPX (o `det` do teste pode sobrescrever)
         return {"return_sn": return_sn, "return_solution": 0, "needs_logistics": True,
-                "order_sn": numeroloja, "seller_proof": {"seller_proof_status": ""}, **det}
+                "order_sn": numeroloja, "seller_proof": {"seller_proof_status": ""},
+                "reverse_logistics_status": "LOGISTICS_DELIVERY_DONE", **det}
 
     async def _escrow(order_sn):
         assert order_sn == numeroloja
@@ -1425,10 +1445,14 @@ async def test_shopee_replica_manual_reabre_e_depois_so_registra(client, make_us
     )
     assert rep.status_code == 201, rep.text
     assert rep.json()["status"] == "enviada", rep.json()
-    assert fake.disputes[-1]["text"] == "Pacote não chegou até hoje, segue rastreio."
+    # 21/09: em "Não recebido" o texto da disputa é o FACTUAL da SPX (entrega + rastreio);
+    # o que o operador digitou entra como observação, não substitui
+    enviado = fake.disputes[-1]["text"]
+    assert enviado.startswith("A SPX registra a entrega do pacote de devolução (rastreio BR2609RSN) em 16/09/2026 11:11"), enviado
+    assert "Observação: Pacote não chegou até hoje, segue rastreio." in enviado
     ab = await _abertura(db, ch.id)
     await db.refresh(ab)
-    assert ab.status == "enviada" and ab.texto == "Pacote não chegou até hoje, segue rastreio."
+    assert ab.status == "enviada" and ab.texto == enviado
     # abertura já saiu: réplica seguinte só fica no histórico (sem API de resposta)
     rep2 = await client.post(f"/api/chamados/{ch.id}/mensagens", data={"texto": "mais uma"})
     assert rep2.status_code == 201, rep2.text

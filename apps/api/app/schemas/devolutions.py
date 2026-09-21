@@ -1,9 +1,9 @@
 from datetime import date, datetime
+from typing import Literal
 from uuid import UUID
 
-from typing import Literal
-
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic_core import PydanticCustomError
 
 
 def _clean_optional_text(value: str | None) -> str | None:
@@ -11,6 +11,21 @@ def _clean_optional_text(value: str | None) -> str | None:
         return None
     value = value.strip()
     return value or None
+
+
+LINK_ENVIO_INVALIDO_MSG = "Link de envio precisa ser um endereço http(s)"
+
+
+def _link_envio_http(value: str | None) -> str | None:
+    """Vinicius 21/09: o "Link envio", quando informado, tem que ser URL http(s).
+    A operadora digitava "nao ha, nao recebido" só pra passar na trava da mala/
+    eletro e o texto ia parar no QR do cartão da disputa da Shopee. Vazio vira
+    None (o create/patch já limpam antes); 422 `link_envio_invalido` no resto."""
+    if value is None:
+        return None
+    if not value.lower().startswith(("http://", "https://")):
+        raise PydanticCustomError("link_envio_invalido", LINK_ENVIO_INVALIDO_MSG)
+    return value
 
 
 class BlingStockResultOut(BaseModel):
@@ -147,6 +162,11 @@ class DevolutionCreate(BaseModel):
     def clean_optional_text(cls, value: str | None) -> str | None:
         return _clean_optional_text(value)
 
+    @field_validator("link_envio")
+    @classmethod
+    def link_envio_http(cls, value: str | None) -> str | None:
+        return _link_envio_http(value)
+
     @field_validator("conta")
     @classmethod
     def clean_conta(cls, value: str) -> str:
@@ -211,6 +231,11 @@ class DevolutionPatch(BaseModel):
     @classmethod
     def clean_optional_text(cls, value: str | None) -> str | None:
         return _clean_optional_text(value)
+
+    @field_validator("link_envio")
+    @classmethod
+    def link_envio_http(cls, value: str | None) -> str | None:
+        return _link_envio_http(value)
 
 
 class StockCorrectionIn(BaseModel):

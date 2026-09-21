@@ -21,6 +21,15 @@ da devolução recebida com problema:
 - **Shopee**: disputa (`POST /api/v2/returns/dispute` com motivo de
   `get_return_dispute_reason` + fotos por módulo de evidência); a partir do
   pacote entregue/aceito (status ACCEPTED, compensação pendente).
+  Motivo "Não recebido" (o pacote de VOLTA não chegou — Vinicius 21/09,
+  medido em produção: 0 ganhas em 2 disputas abertas com o pacote ainda em
+  trânsito) se decide pela SPX: perna reversa NÃO entregue → sem disputa pela
+  API, o chamado vai direto pro robô abrir a requisição no Seller Center;
+  entregue → disputa "não recebi" com texto FACTUAL (`_texto_nao_recebido`:
+  data da entrega, rastreio, pedido; sem cartão do vídeo, sem "comprovante da
+  expedição"). Módulo de evidência quebrado (série 81, module_index 0) → robô.
+  Só reembolso (pelo DETALHE do caso, não pela linha do Acompanhamento) não
+  tem pacote de volta e segue como sempre, com o cartão do vídeo como prova.
 - **Amazon** (e demais): NÃO tem API — SAFE-T só no Seller Central. Fica
   registrado na aba com aviso de abrir na mão.
 
@@ -133,6 +142,8 @@ MOTIVO_SHOPEE: dict[str, tuple[str, ...]] = {
 }
 REASONS_EXIGEM_FOTO = frozenset({"SRF2", "SRF4"})
 REASONS_DO_PACOTE = frozenset({"SRF7"})
+# Motivo da tela "o pacote de VOLTA não chegou" (minúsculo, como `_motivo`).
+MOTIVO_NAO_RECEBIDO = "não recebido"
 REASON_NOME: dict[str, str] = {
     "SRF2": "produto chegou danificado",
     "SRF3": "devolução incompleta",
@@ -268,8 +279,15 @@ def produto_mala_ou_eletro(sku: str | None) -> bool:
 
 def link_envio_obrigatorio(dev: Devolution) -> bool:
     """Trava do Eduardo (04/09): "mala e eletro é obrigatória, desde que esteja
-    nos motivos que abrem chamado"."""
-    return chamados_svc.motivo_pede_chamado(dev) and produto_mala_ou_eletro(dev.sku)
+    nos motivos que abrem chamado". Vinicius 21/09: "Não recebido" fica de fora
+    — o pacote de VOLTA não chegou, o vídeo da ida não prova nada; a operadora
+    digitava "nao ha, nao recebido" só pra passar na trava e o texto ia parar
+    no QR do cartão da disputa (a tela espelha em linkEnvioRequired)."""
+    return (
+        chamados_svc.motivo_pede_chamado(dev)
+        and _motivo(dev) != MOTIVO_NAO_RECEBIDO
+        and produto_mala_ou_eletro(dev.sku)
+    )
 
 
 # ---------------------------------------------------------------- texto
@@ -805,9 +823,9 @@ async def encerrar_chamado_por_motivo(
     return "encerrado"
 
 
-def _fmt_brt(v: object) -> str:
+def _fmt_brt(v: object, fmt: str = "%d/%m %H:%M") -> str:
     """dd/mm HH:MM em São Paulo a partir de epoch (int/str) ou ISO 8601; "" se
-    não der pra ler."""
+    não der pra ler. `fmt` troca o formato (ex. com ano)."""
     dt: datetime | None = None
     if isinstance(v, datetime):
         dt = v
@@ -822,7 +840,7 @@ def _fmt_brt(v: object) -> str:
         return ""
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=UTC)
-    return dt.astimezone(chamados_svc.SAO_PAULO).strftime("%d/%m %H:%M")
+    return dt.astimezone(chamados_svc.SAO_PAULO).strftime(fmt)
 
 
 _ML_BENEFICIADO = {"complainant": "COMPRADOR", "respondent": "VENDEDOR"}
@@ -1606,6 +1624,190 @@ async def _texto_robo_shopee_reembolso(
     return "\n".join(linhas)
 
 
+# ---- Shopee, motivo "Não recebido" (o pacote de VOLTA não chegou) — Vinicius 21/09
+
+# Situação da perna REVERSA (`reverse_logistics_status` do detalhe) em português
+# pro texto do chamado; fora da tabela vai o código cru. LOGISTICS_NOT_STARTED é
+# o que a Shopee manda enquanto a devolução aceita ainda não teve coleta
+# (medido 16/09, logistica_shopee).
+_SHOPEE_REVERSA_PT: dict[str, str] = {
+    "LOGISTICS_NOT_STARTED": "não iniciado",
+    "LOGISTICS_REQUEST_CREATED": "aguardando postagem",
+    "LOGISTICS_PENDING_ARRANGE": "aguardando postagem",
+    "LOGISTICS_READY": "aguardando postagem",
+    "LOGISTICS_PICKUP_DONE": "coletado",
+    "LOGISTICS_PICKUP_RETRY": "em trânsito",
+    "LOGISTICS_PICKUP_FAILED": "falha na coleta",
+    "LOGISTICS_DELIVERY_FAILED": "falha na entrega",
+    "LOGISTICS_DELIVERY_DONE": "entregue",
+    "LOGISTICS_LOST": "extraviado",
+    "LOGISTICS_RETURNED": "devolvido ao remetente",
+}
+_MODULO_QUEBRADO_MSG = "mandatory module index"
+
+
+def _fmt_brt_ano(v: object) -> str:
+    """dd/mm/aaaa HH:MM em São Paulo — no texto que vai pra Shopee a data é completa."""
+    return _fmt_brt(v, "%d/%m/%Y %H:%M")
+
+
+def _reversa_status_shopee(det: dict) -> str:
+    return str(
+        det.get("reverse_logistics_status") or det.get("logistics_status") or ""
+    ).strip().upper()
+
+
+def _reversa_legivel(det: dict) -> str:
+    cod = _reversa_status_shopee(det)
+    if not cod:
+        return "sem movimentação registrada"
+    return _SHOPEE_REVERSA_PT.get(cod, cod)
+
+
+async def _rastreio_reversa_shopee(session: AsyncSession, dev: Devolution, det: dict) -> str:
+    """Código de rastreio do pacote de volta: o `tracking_number` do detalhe da
+    Shopee ou, sem ele, o que o Acompanhamento tem (automático, senão manual)."""
+    tn = det.get("tracking_number")
+    if isinstance(tn, str) and tn.strip():
+        return tn.strip()
+    pb = (dev.pedido_bling or "").strip()
+    if not pb:
+        return ""
+    row = await session.get(DevolucaoRastreio, pb)
+    if row is None:
+        return ""
+    return (row.rastreio_auto or "").strip() or (row.rastreio or "").strip()
+
+
+def _texto_nao_recebido(
+    dev: Devolution,
+    det: dict,
+    rastreio: str,
+    entregue_em: datetime | None,
+    *,
+    observacao_extra: str | None = None,
+    agora: datetime | None = None,
+) -> str:
+    """Texto FACTUAL da contestação "não recebi o pacote de volta" (Vinicius
+    21/09): só o que a SPX registra + identificação do pedido + observação. Vale
+    tanto pra disputa pela API (pacote dado como entregue) quanto pro robô no
+    Seller Center (ainda em trânsito). Nunca a frase do cartão/QR nem o
+    "comprovante da expedição" — o vídeo da ida não prova nada aqui. O que o
+    operador digitar na réplica manual entra só como observação."""
+    hoje = (agora or datetime.now(UTC)).astimezone(chamados_svc.SAO_PAULO).strftime("%d/%m/%Y")
+    cod = f"rastreio {rastreio}" if rastreio else "sem código de rastreio"
+    if entregue_em is not None:
+        linhas = [
+            f"A SPX registra a entrega do pacote de devolução ({cod}) em "
+            f"{_fmt_brt_ano(entregue_em)}, mas ele não foi recebido no nosso endereço "
+            f"até {hoje}."
+        ]
+    else:
+        desde = _fmt_brt(det.get("update_time"), "%d/%m/%Y")
+        linhas = [
+            f"O pacote da devolução ({cod}) ainda não chegou até nós — situação na SPX: "
+            f"{_reversa_legivel(det)}"
+            + (f" desde {desde}" if desde else "")
+            + "."
+        ]
+    ident = []
+    if (dev.pedido_marketplace or "").strip():
+        ident.append(f"Pedido {dev.pedido_marketplace.strip()}")
+    if (dev.sku or "").strip():
+        ident.append(f"SKU {dev.sku.strip()}")
+    if (dev.produtos or "").strip():
+        ident.append(dev.produtos.strip())
+    if ident:
+        linhas.append(" · ".join(ident) + ".")
+    obs = " ".join(
+        t for t in ((observacao_extra or "").strip(), (dev.observacao or "").strip()) if t
+    )
+    if obs:
+        linhas.append(f"Observação: {obs}")
+    if entregue_em is not None:
+        linhas.append(
+            "Solicitamos o comprovante de entrega (foto/assinatura), a apuração junto à "
+            "transportadora e que o reembolso não seja liberado até a conclusão."
+        )
+    else:
+        linhas.append(
+            "Solicitamos a localização do pacote junto à transportadora e que o reembolso "
+            "não seja liberado até a conclusão."
+        )
+    return "\n".join(linhas)
+
+
+def _nota_robo_nao_recebido_sem_entrega(det: dict, return_sn: str) -> str:
+    """Nota do histórico quando a SPX ainda não deu o pacote de volta como entregue —
+    "sem entrega registrada" e não "em trânsito", porque o status pode ser
+    extraviado / falha na coleta / não iniciado."""
+    return (
+        f"Pacote da devolução {return_sn} sem entrega registrada pela SPX "
+        f"({_reversa_legivel(det)}): sem disputa pela API — o robô abre a requisição no "
+        "Seller Center (Minhas Requisições → Solicitação de Análise de Pedido); o protocolo "
+        "aparece aqui quando ele abrir."
+    )
+
+
+def _nota_robo_modulo_quebrado(det: dict, return_sn: str) -> str:
+    prazo = _fmt_brt(det.get("return_seller_due_date"))
+    return (
+        f"A Shopee exige evidência num módulo que a API não aceita (devolução {return_sn}) "
+        "— contestar pelo Seller Center"
+        + (f" antes de {prazo}" if prazo else "")
+        + ". Enviado pro robô; o protocolo aparece aqui quando ele abrir."
+    )
+
+
+def _modulo_quebrado(modulos: list[dict]) -> bool:
+    """Série 81 "não recebi" (medido 21/09): `evidence_module_list` vem
+    `[{module_index 0, requirement "live test", is_required true}]` e o POST
+    responde "Unable to raise dispute as mandatory module index is missing" —
+    não há como satisfazer pela API."""
+    for m in modulos:
+        if not m.get("is_required", True):
+            continue
+        try:
+            idx = int(m.get("module_index"))  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return True
+        if idx <= 0:
+            return True
+    return False
+
+
+async def _cartao_nao_recebido_shopee(
+    session: AsyncSession,
+    dev: Devolution,
+    fotos: list[DevolucaoAnexo],
+    anexos: list[DevolucaoAnexo],
+    *,
+    so_reembolso: bool,
+    cartao_link: str,
+) -> bool:
+    """Decide o cartão do vídeo no motivo "Não recebido" da Shopee pelo DETALHE do
+    caso (única fonte de verdade — a linha do Acompanhamento pode estar sem tipo
+    ou desatualizada, e um caso movido na mão pra Fraude não muda o que a Shopee
+    tem). Ajusta `fotos` NO LUGAR (o chamador grava no chamado o que sobrar):
+
+    - só reembolso: não há pacote de volta — "Não recebido" é a alegação do
+      COMPRADOR sobre a ida e o vídeo da expedição (cartão) é a prova, como
+      sempre foi. Sem foto real e com link, gera o cartão aqui. Devolve True se
+      o cartão entrou (o texto ganha a frase do QR);
+    - pacote de VOLTA: o cartão NUNCA vai (nem o persistido de rodada/motivo
+      anterior, mesmo com foto real junto) e some da linha."""
+    if so_reembolso:
+        if fotos or not cartao_link:
+            return False
+        fotos.append(await _cartao_do_video(session, dev, anexos, cartao_link))
+        return True
+    for a in anexos:
+        if _e_cartao_video(a):
+            await session.delete(a)
+    fotos[:] = [a for a in fotos if not _e_cartao_video(a)]
+    return False
+
+
 def _encaminhar_robo(
     session: AsyncSession,
     ch: Chamado,
@@ -1658,8 +1860,24 @@ async def _subir_foto_shopee(client: ShopeeClient, return_sn: str, a: DevolucaoA
 
 
 async def _disparar_shopee(
-    session: AsyncSession, ch: Chamado, dev: Devolution, fotos: list[DevolucaoAnexo], texto: str
+    session: AsyncSession,
+    ch: Chamado,
+    dev: Devolution,
+    fotos: list[DevolucaoAnexo],
+    texto: str,
+    *,
+    msg: ChamadoMensagem | None = None,
+    texto_operador: str | None = None,
+    cartao_link: str = "",
+    anexos: list[DevolucaoAnexo] | None = None,
 ) -> tuple[str, str]:
+    """`msg`/`texto_operador`/`cartao_link`/`anexos` só importam no motivo "Não
+    recebido", que se decide pelo detalhe do caso (`_cartao_nao_recebido_shopee`):
+    com pacote de volta o texto é montado sozinho dos fatos da SPX
+    (`_texto_nao_recebido`) e gravado em `msg.texto` — o que o operador digitou
+    vira observação — e `fotos` é ajustada NO LUGAR (sem cartão); só reembolso
+    ganha o cartão do vídeo gerado aqui (`cartao_link` = link do vídeo, `anexos`
+    = os da linha, pra reusar/trocar o cartão)."""
     motivo = _motivo(dev)
     if motivo not in MOTIVO_SHOPEE:
         raise _PendenteError("devolucao_motivo_sem_chamado")
@@ -1711,6 +1929,34 @@ async def _disparar_shopee(
     # medido ao vivo: vem "PENDING_REQUEST" (sem o prefixo COMPENSATION_ da doc)
     if comp_status.replace("COMPENSATION_", "") in ("REQUESTED", "APPROVED", "REJECTED"):
         raise chamados_svc.ChamadoError("shopee_ja_contestada")
+    # Vinicius 21/09 (medido em produção: 0 ganhas em 2 disputas abertas com o pacote
+    # ainda em trânsito): "Não recebido" com pacote de VOLTA se decide pela SPX. Perna
+    # reversa NÃO entregue → não abre a disputa nem espera: o robô abre a requisição
+    # no Seller Center com os fatos. Entregue → disputa "não recebi" pela API, mas com
+    # o texto factual (data da entrega + rastreio), sem cartão do vídeo e sem a
+    # observação interna colada. Só reembolso não tem pacote de volta: segue como
+    # sempre (cartão do vídeo como prova da ida) — e é o DETALHE que diz qual é o
+    # caso, não a linha do Acompanhamento.
+    nao_recebido = motivo == MOTIVO_NAO_RECEBIDO and not so_reembolso
+    if motivo == MOTIVO_NAO_RECEBIDO:
+        com_cartao = await _cartao_nao_recebido_shopee(
+            session, dev, fotos, anexos or [],
+            so_reembolso=so_reembolso, cartao_link=cartao_link,
+        )
+        if com_cartao and not texto_operador:
+            texto = texto_padrao(dev, reason_para(dev), link_envio=cartao_link, cartao_video=True)
+            if msg is not None:
+                msg.texto = texto
+    if nao_recebido:
+        entregue_em = logistica_shopee._entregue_em_do_detalhe(det)
+        texto = _texto_nao_recebido(
+            dev, det, await _rastreio_reversa_shopee(session, dev, det), entregue_em,
+            observacao_extra=texto_operador,
+        )
+        if msg is not None:
+            msg.texto = texto
+        if entregue_em is None:
+            raise _RoboError(texto, _nota_robo_nao_recebido_sem_entrega(det, return_sn))
     reasons = await client.get_return_dispute_reason(return_sn)
     if not reasons:
         if so_reembolso and status in ("ACCEPTED", "REFUND_PAID"):
@@ -1738,11 +1984,17 @@ async def _disparar_shopee(
     modulos = [
         m for m in (escolhido.get("evidence_module_list") or []) if isinstance(m, dict)
     ]
+    # Módulo obrigatório de índice 0 (série 81 "não recebi", 21/09): a API nunca vai
+    # aceitar — esperar foto seria mentira. Vai pro robô contestar pelo Seller Center.
+    if nao_recebido and _modulo_quebrado(modulos):
+        raise _RoboError(texto, _nota_robo_modulo_quebrado(det, return_sn))
     # A Shopee exige foto em todo motivo "recebi com problema"; e disputa sem
     # `image_list` num motivo com módulo obrigatório é recusada ("Unable to
     # raise dispute as mandatory module index is missing", 289462 em 07/09).
     # Sem foto, fica pendente esperando o operador anexar.
-    exige_foto = motivo != "não recebido" or any(m.get("is_required", True) for m in modulos)
+    exige_foto = motivo != MOTIVO_NAO_RECEBIDO or any(
+        m.get("is_required", True) for m in modulos
+    )
     if not fotos and exige_foto:
         raise _PendenteError("devolucao_sem_foto")
     urls: list[str] = []
@@ -1770,13 +2022,20 @@ async def _disparar_shopee(
     email = await _email_operador(session)
     if not email:
         raise chamados_svc.ChamadoError("shopee_sem_email")
-    await client.dispute(
-        return_sn,
-        email=email,
-        dispute_reason_id=rid,
-        image_list=image_list or None,
-        text=texto,
-    )
+    try:
+        await client.dispute(
+            return_sn,
+            email=email,
+            dispute_reason_id=rid,
+            image_list=image_list or None,
+            text=texto,
+        )
+    except Exception as e:  # noqa: BLE001 — erro cru da API da Shopee
+        # O módulo quebrado pode escapar da checagem (lista sem `is_required`, índice
+        # que a Shopee mudou): o erro cru vira a mesma tarefa do robô, não `falhou`.
+        if nao_recebido and _MODULO_QUEBRADO_MSG in str(e).lower():
+            raise _RoboError(texto, _nota_robo_modulo_quebrado(det, return_sn)) from e
+        raise
     nome_motivo = str(
         escolhido.get("dispute_reason_text")
         or escolhido.get("reason_text")
@@ -1826,11 +2085,19 @@ async def disparar(
     # do ML (sem anexo).
     fotos_reais = [a for a in fotos if not _e_cartao_video(a)]
     cartao = None
+    # Vinicius 21/09: "Não recebido" na Shopee só sabe se o cartão cabe DEPOIS de ler o
+    # caso — só reembolso (alegação do comprador sobre a IDA) = o vídeo é a prova;
+    # pacote de VOLTA = o vídeo não prova nada e o cartão (QR pro "Link envio") ia
+    # parar na disputa. Fica pro `_disparar_shopee` gerar (ou apagar) o cartão pelo
+    # detalhe; aqui só vai o link.
+    cartao_shopee = ""
     if not fotos_reais:
         cabe_cartao = bool(link) and not exige_foto(dev) and not (
             plat == PLAT_ML and reason in REASONS_DO_PACOTE
         )
-        if cabe_cartao:
+        if cabe_cartao and plat == PLAT_SHOPEE and _motivo(dev) == MOTIVO_NAO_RECEBIDO:
+            cartao_shopee, fotos = link, []  # cartão persistido fica pra reusar/apagar lá
+        elif cabe_cartao:
             cartao = await _cartao_do_video(session, dev, anexos, link)
             fotos = [cartao]
         else:
@@ -1851,7 +2118,11 @@ async def disparar(
                 texto_operador=(texto_override or "").strip() or None,
             )
         elif plat == PLAT_SHOPEE:
-            referencia, detalhe = await _disparar_shopee(session, ch, dev, fotos, msg.texto)
+            referencia, detalhe = await _disparar_shopee(
+                session, ch, dev, fotos, msg.texto, msg=msg,
+                texto_operador=(texto_override or "").strip() or None,
+                cartao_link=cartao_shopee, anexos=anexos,
+            )
         else:
             raise chamados_svc.ChamadoError("plataforma_sem_api")
     except _PendenteError as p:

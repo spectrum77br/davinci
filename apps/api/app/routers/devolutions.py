@@ -2267,7 +2267,9 @@ async def _exigir_video_fraude(session: AsyncSession, row: Devolution) -> None:
 def _exigir_link_envio(row: Devolution) -> None:
     """Trava (Eduardo 04/09): mala e eletro com motivo que abre chamado
     precisam do "Link de envio" (prova da expedição — o que Shopee/TikTok
-    pedem pra contestar pacote vazio/item errado)."""
+    pedem pra contestar pacote vazio/item errado). "Não recebido" fica de fora
+    (Vinicius 21/09 — regra em chamados_devolucao.link_envio_obrigatorio); e o
+    link, quando vem, já chegou validado como URL http(s) pelo schema."""
     if chamados_devolucao.link_envio_obrigatorio(row) and not (row.link_envio or "").strip():
         raise HTTPException(
             422,
