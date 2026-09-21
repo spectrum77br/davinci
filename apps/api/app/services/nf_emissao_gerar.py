@@ -122,6 +122,21 @@ def _clean(v: object) -> str | None:
     return s or None
 
 
+# A SEFAZ exige bairro (xBairro) com 2 a 60 caracteres — Upseller e Bling recusam a NF fora
+# disso. A própria base dos Correios tem CEP com bairro "X": 14870690 (Av. Prudêncio Ortiz,
+# Jaboticabal/SP), pedido 298351 em 21/09 — o Upseller devolveu "O comprimento do conteúdo de
+# [Bairro] não atende aos requisitos da SEFAZ, precisa estar dentro de 2 e 60 caracteres".
+BAIRRO_SEM_NOME = "Nao Informado"
+
+
+def _bairro_sefaz(v: object) -> str:
+    """Bairro que a SEFAZ aceita: vazio ou 1 letra vira "Nao Informado"; acima de 60, corta."""
+    s = _clean(v) or ""
+    if len(s) < 2:
+        return BAIRRO_SEM_NOME
+    return s[:60].rstrip()
+
+
 async def _bling_client_opt(session: AsyncSession) -> BlingClient | None:
     """Cliente Bling BEST-EFFORT pra enriquecer o destinatário do pedido.
     Devolve None quando não há integração Bling (ou em qualquer erro) — a
@@ -567,7 +582,7 @@ async def _montar_pedidos(
             "endereco_destino": cab["endereco_destino"],
             "numero_destino": cab["numero_destino"],
             "complemento_destino": cab["complemento_destino"],
-            "bairro_destino": cab["bairro_destino"],
+            "bairro_destino": _bairro_sefaz(cab["bairro_destino"]),
             "cidade_destino": cab["cidade_destino"],
             "uf_destino": cab["uf_destino"],
             "documento": cab["documento"],

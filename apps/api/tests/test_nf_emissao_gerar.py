@@ -59,6 +59,7 @@ async def _seed_pedido(
     total: float | None = None,
     custofrete: float | None = None,
     categoria: str | None = None,
+    bairro: str | None = "Cinquentenário",
 ) -> None:
     for i, it in enumerate(itens):
         db.add(
@@ -79,7 +80,7 @@ async def _seed_pedido(
                 cep_destino="30570050",
                 endereco_destino="Rua Emídio Beruto",
                 numero_destino="30",
-                bairro_destino="Cinquentenário",
+                bairro_destino=bairro,
                 cidade_destino="Belo Horizonte",
                 uf_destino="MG",
             )
@@ -539,3 +540,74 @@ def test_extrair_destinatario_cai_na_etiqueta_sem_contato_nome():
     }
     d = g._extrair_destinatario(order)
     assert d["nome_destinatario"] == "Sheila Alves"
+
+
+
+# --- bairro que a SEFAZ aceita (2 a 60 caracteres) ---------------------------------
+# 21/09: o Upseller recusou o 298351 — "O comprimento do conteúdo de [Bairro] não atende
+# aos requisitos da SEFAZ, precisa estar dentro de 2 e 60 caracteres". O bairro era "X",
+# e é assim na própria base dos Correios (CEP 14870690, Jaboticabal/SP).
+
+
+def test_bairro_sefaz_regra():
+    from app.services.nf_emissao_gerar import BAIRRO_SEM_NOME, _bairro_sefaz
+
+    assert _bairro_sefaz("X") == BAIRRO_SEM_NOME          # o caso real: 1 letra
+    assert _bairro_sefaz(" X ") == BAIRRO_SEM_NOME
+    assert _bairro_sefaz("") == BAIRRO_SEM_NOME
+    assert _bairro_sefaz(None) == BAIRRO_SEM_NOME
+    assert _bairro_sefaz("Centro") == "Centro"            # bairro normal não muda
+    assert _bairro_sefaz("AB") == "AB"                    # 2 letras já vale
+    longo = "Jardim " + "Muito Comprido " * 6             # > 60
+    assert len(_bairro_sefaz(longo)) <= 60
+    assert _bairro_sefaz(longo) == longo[:60].rstrip()
+    assert 2 <= len(BAIRRO_SEM_NOME) <= 60
+
+
+@pytest.mark.asyncio
+async def test_bairro_de_uma_letra_sai_valido_na_planilha_upseller(db: AsyncSession, admin: User):
+    """Caminho do 298351: faturador Upseller, bairro "X" → a planilha sai com "Nao Informado"."""
+    from app.services import nf_emissao_gerar as g
+
+    fat = NfFaturador(nome="upseller 1%", modo="upseller", nf_cheia=False,
+                      percentual="1", sku_fonte="principal", nome_fonte="produto")
+    db.add(fat)
+    await db.flush()
+    db.add(StoreInfo(user_id=admin.id, platform="ml", account_name="jlas",
+                     bling_store_id="940101", nf_faturador_id=fat.id))
+    await db.flush()
+    await _seed_pedido(db, admin, fat, numero="84101", loja="940101", bairro="X",
+                       itens=[{"sku": "e3", "nome": "Embalagem", "qtd": 1, "unit": 19.7}])
+    await db.commit()
+
+    res = await g.gerar_por_faturador(db, ["84101"])
+    ws = load_workbook(io.BytesIO(res.blocos[0].planilha)).active
+    col = nf_upseller._HEADERS.index("Bairro (Obrigatório para NF-e)") + 1
+    assert ws.cell(row=4, column=col).value == "Nao Informado"
+
+
+@pytest.mark.asyncio
+async def test_bairro_de_uma_letra_sai_valido_no_csv_do_bling(
+    db: AsyncSession, client: AsyncClient, admin: User, auth_as: Callable[[User | None], None]
+):
+    """O mesmo bairro "X" no caminho do Bling: as duas colunas de bairro do CSV saem válidas."""
+    auth_as(admin)
+    fat = NfFaturador(nome="bling exclusivo", modo="bling", nf_cheia=False,
+                      percentual="1", sku_fonte="a001", nome_fonte="embalagem")
+    db.add(fat)
+    await db.flush()
+    db.add(StoreInfo(user_id=admin.id, platform="ml", account_name="l9",
+                     bling_store_id="900109", nf_faturador_id=fat.id))
+    await db.flush()
+    await _seed_pedido(db, admin, fat, numero="800109", loja="900109", bairro="X",
+                       itens=[{"sku": "x1", "nome": "Produto X", "qtd": 1, "unit": 100}])
+    await db.commit()
+
+    r = await client.post(
+        "/api/nf-cadastro/faturamento/gerar-planilha", json={"numeros": ["800109"]}
+    )
+    assert r.status_code == 200, r.text
+    reader = list(csv.reader(io.StringIO(r.content.decode("utf-8-sig")), delimiter=";"))
+    linha = reader[1]
+    assert _col(linha, "Bairro Comprador") == "Nao Informado"
+    assert _col(linha, "Bairro Entrega") == "Nao Informado"
