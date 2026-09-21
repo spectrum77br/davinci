@@ -45,6 +45,7 @@ from app.models import (
     Devolution,
     Logistica,
     User,
+    UserRole,
 )
 from app.models.chamado import CANAIS, ORIGENS
 from app.schemas.chamados import (
@@ -78,6 +79,11 @@ from app.schemas.chamados import (
     ChamadoOut,
     ChamadoPage,
     ChamadoPatch,
+    ExcluirEstornoOut,
+    ExcluirIn,
+    ExcluirOut,
+    ExclusaoLancamentoOut,
+    ExclusaoPreviewOut,
     InstrucaoIn,
     JuridicoIn,
     JuridicoOut,
@@ -86,6 +92,7 @@ from app.schemas.chamados import (
 )
 from app.services import chamados as svc
 from app.services import chamados_juridico
+from app.services.devolution_delete import EstornoFalhouError, excluir_lancamento
 from app.services.texto_html import limpar_html
 
 logger = structlog.get_logger()
@@ -97,6 +104,15 @@ _ANEXO_MAX_BYTES = 8 * 1024 * 1024  # 8 MB
 
 def _autor(user: User) -> str:
     return (user.name or user.email or "").strip() or "usuário"
+
+
+def _pode(user: User, resource: str, action: str) -> bool:
+    """Mesma regra do `require_permission`, em bool (sem levantar 403) — pra
+    rota que faz MAIS quando o usuário tem outra permissão (lixeira do chamado
+    + devolucoes.delete)."""
+    if user.role == UserRole.ADMIN:
+        return True
+    return bool(((user.permissions or {}).get(resource) or {}).get(action, False))
 
 
 def _anexo_out(a: ChamadoAnexo) -> ChamadoAnexoOut:
@@ -876,6 +892,181 @@ async def resolver(
     await session.commit()
     await session.refresh(ch)
     return await _one_out(session, ch)
+
+
+# ------------------------------------------------------------- lixeira
+# Vinicius, 21/09/2026 (caso 294263: a operadora lançou "Não recebido" nos 2
+# itens e o pacote chegou): a lixeira do histórico apaga o chamado E os
+# lançamentos de devolução do mesmo pedido que a pessoa escolher, com a nova
+# situação do Bling obrigatória igual ao resolver. A escolha é POR LINHA porque
+# num pedido com 2 linhas uma pode ter voltado pro estoque e a outra não — a
+# que voltou é estornada no Bling ao excluir (services/devolution_delete, a
+# mesma regra do DELETE /api/devolutions/{id}). O DELETE /{chamado_id} antigo
+# continua: só o chamado.
+
+
+async def _lancamentos_do_chamado(session: AsyncSession, ch: Chamado) -> list[Devolution]:
+    """Linhas de devolução que a lixeira pode levar junto: TODAS as do pedido
+    Bling do chamado (kit = várias linhas, 1 chamado); sem pedido, só a linha
+    que abriu o chamado (`origem_ref`), se ainda existir."""
+    numero = (ch.pedido_bling or "").strip()
+    if numero:
+        rows = await session.execute(
+            select(Devolution)
+            .where(func.trim(Devolution.pedido_bling) == numero)
+            .order_by(Devolution.created_at, Devolution.id)
+        )
+        return list(rows.scalars().all())
+    try:
+        ref = UUID(ch.origem_ref or "")
+    except ValueError:
+        return []
+    dev = (
+        await session.execute(select(Devolution).where(Devolution.id == ref))
+    ).scalar_one_or_none()
+    return [dev] if dev is not None else []
+
+
+def _estornavel(dev: Devolution) -> bool:
+    return bool(dev.estoque_mov_bling_id) and dev.estoque_mov_revertido_at is None
+
+
+@router.get("/{chamado_id}/exclusao", response_model=ExclusaoPreviewOut)
+async def exclusao_preview(
+    chamado_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("chamados", "delete"))],
+) -> ExclusaoPreviewOut:
+    """O que a janela da lixeira mostra antes de apagar: situação viva do pedido
+    no Bling, se a nova situação é obrigatória, se a disputa já foi aberta na
+    plataforma e os lançamentos de devolução do pedido (marcados por padrão os
+    de motivo que abre chamado)."""
+    ch = await _get(session, chamado_id)
+    numero = (ch.pedido_bling or "").strip()
+    status_map = await svc.status_bling_atual_map(session, {numero}) if numero else {}
+    abertura_enviada = (
+        await session.execute(
+            select(ChamadoMensagem.id)
+            .where(
+                ChamadoMensagem.chamado_id == ch.id,
+                ChamadoMensagem.tipo == "abertura",
+                ChamadoMensagem.status == "enviada",
+            )
+            .limit(1)
+        )
+    ).scalar_one_or_none() is not None
+    lancamentos = [
+        ExclusaoLancamentoOut(
+            id=dev.id,
+            sku=dev.sku,
+            produtos=dev.produtos,
+            condicao_produto=dev.condicao_produto,
+            motivo_devolucao=dev.motivo_devolucao,
+            data_devolvido_estoque=dev.data_devolvido_estoque,
+            estoque_estornavel=_estornavel(dev),
+            estoque_mov_sku=dev.estoque_mov_sku,
+            estoque_mov_qty=dev.estoque_mov_qty,
+            marcado_padrao=svc.motivo_pede_chamado(dev),
+        )
+        for dev in await _lancamentos_do_chamado(session, ch)
+    ]
+    return ExclusaoPreviewOut(
+        chamado_id=ch.id,
+        pedido_bling=ch.pedido_bling,
+        plataforma=ch.plataforma,
+        status_bling_atual=status_map.get(numero) or ch.status_bling,
+        exige_situacao=bool(numero),
+        abertura_enviada=abertura_enviada,
+        pode_excluir_lancamentos=_pode(user, "devolucoes", "delete"),
+        lancamentos=lancamentos,
+    )
+
+
+@router.post("/{chamado_id}/excluir", response_model=ExcluirOut)
+async def excluir_chamado(
+    chamado_id: UUID,
+    body: ExcluirIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("chamados", "delete"))],
+) -> ExcluirOut:
+    """Apaga o chamado e os lançamentos escolhidos. Ordem: valida tudo, troca a
+    situação no Bling (se o Bling recusar, nada é apagado), exclui as linhas uma
+    a uma com commit por linha (o estorno feito no Bling nunca fica sem a
+    exclusão correspondente; se um estorno falhar, para ali e o chamado FICA),
+    e só então apaga o chamado."""
+    ch = await _get(session, chamado_id)
+    if (ch.pedido_bling or "").strip() and not body.situacao:
+        raise HTTPException(422, detail={"code": "chamado_situacao_obrigatoria"})
+    if body.devolucoes and not _pode(user, "devolucoes", "delete"):
+        raise HTTPException(403, detail={"code": "devolucoes_delete_forbidden"})
+    por_id = {dev.id: dev for dev in await _lancamentos_do_chamado(session, ch)}
+    escolhidas: list[Devolution] = []
+    for did in dict.fromkeys(body.devolucoes):
+        dev = por_id.get(did)
+        if dev is None:
+            raise HTTPException(422, detail={"code": "devolucao_fora_do_pedido"})
+        escolhidas.append(dev)
+
+    situacao_aplicada: str | None = None
+    if body.situacao:
+        try:
+            res = await svc.aplicar_status_bling(session, ch, body.situacao)
+        except svc.ChamadoError as e:
+            raise HTTPException(422, detail={"code": e.code}) from e
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(
+                502, detail={"code": "chamado_status_bling_erro", "erro": str(e)[:300]}
+            ) from e
+        ch.alterar_status_bling = body.situacao
+        situacao_aplicada = res["situacao"]
+        # Commit antes das exclusões: o Bling já mudou, então o snapshot e o
+        # histórico ficam certos mesmo que um estorno falhe e o chamado sobreviva.
+        await session.commit()
+
+    excluidos = 0
+    estornos: list[ExcluirEstornoOut] = []
+    for dev in escolhidas:
+        # Guardados antes: o rollback do estorno que falha expira o objeto.
+        dev_id, sku, qty = dev.id, dev.estoque_mov_sku, dev.estoque_mov_qty
+        try:
+            r = await excluir_lancamento(session, dev)
+        except EstornoFalhouError as e:
+            logger.warning(
+                "chamado_excluir_estorno_falhou",
+                chamado_id=str(chamado_id),
+                devolution_id=str(dev_id),
+                excluidos=excluidos,
+            )
+            raise HTTPException(
+                502,
+                detail={
+                    "code": "estoque_estorno_falhou",
+                    "message": e.message,
+                    "lancamentos_excluidos": excluidos,
+                },
+            ) from e
+        excluidos += 1
+        if r.get("estoque_estornado"):
+            estornos.append(ExcluirEstornoOut(sku=sku, qty=qty, mensagem=r.get("mensagem")))
+
+    pedido_bling = ch.pedido_bling
+    await session.delete(ch)
+    await session.commit()
+    logger.info(
+        "chamado_excluido",
+        id=str(chamado_id),
+        pedido_bling=pedido_bling,
+        lancamentos_excluidos=excluidos,
+        estornos=len(estornos),
+        situacao=situacao_aplicada,
+        autor=_autor(user),
+    )
+    return ExcluirOut(
+        ok=True,
+        lancamentos_excluidos=excluidos,
+        estornos=estornos,
+        situacao=situacao_aplicada,
+    )
 
 
 @router.post("/{chamado_id}/instrucao", response_model=ChamadoOut)

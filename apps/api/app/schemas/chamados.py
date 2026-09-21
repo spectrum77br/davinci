@@ -262,6 +262,71 @@ class ResolverIn(BaseModel):
     _clean = field_validator("situacao", mode="before")(_clean_optional_text)
 
 
+# ------------------------------------------------------------------ lixeira
+# Vinicius, 21/09/2026 (caso 294263): a lixeira do histórico apaga o chamado E
+# os lançamentos de devolução do mesmo pedido que a pessoa escolher, com a nova
+# situação do Bling obrigatória igual ao resolver. A escolha é por linha porque
+# num pedido com 2 linhas uma pode ter voltado pro estoque e a outra não.
+
+
+class ExclusaoLancamentoOut(BaseModel):
+    id: UUID
+    sku: str | None = None
+    produtos: str | None = None
+    condicao_produto: str | None = None
+    motivo_devolucao: str | None = None
+    data_devolvido_estoque: datetime | None = None
+    # Movimento de estoque registrado e ainda não estornado: ao excluir, o back
+    # dá baixa no Bling sozinho (mesma regra do DELETE /api/devolutions/{id}).
+    estoque_estornavel: bool = False
+    estoque_mov_sku: str | None = None
+    estoque_mov_qty: int | None = None
+    # O motivo é dos que abrem chamado (Não recebido, Extraviado…): vem marcado.
+    marcado_padrao: bool = False
+
+
+class ExclusaoPreviewOut(BaseModel):
+    chamado_id: UUID
+    pedido_bling: str | None = None
+    plataforma: str | None = None
+    status_bling_atual: str | None = None
+    # Mesma regra do resolver: com pedido no Bling, a nova situação é obrigatória.
+    exige_situacao: bool = False
+    # A disputa/revisão JÁ foi aberta na plataforma (abertura enviada) — apagar
+    # aqui não fecha lá; o front avisa.
+    abertura_enviada: bool = False
+    # Quem só tem chamados.delete apaga o chamado, não os lançamentos.
+    pode_excluir_lancamentos: bool = False
+    lancamentos: list[ExclusaoLancamentoOut] = Field(default_factory=list)
+
+
+class ExcluirIn(BaseModel):
+    devolucoes: list[UUID] = Field(default_factory=list)
+    situacao: str | None = None
+
+    _clean = field_validator("situacao", mode="before")(_clean_optional_text)
+
+    @field_validator("devolucoes", mode="before")
+    @classmethod
+    def _sem_null(cls, v: object) -> object:
+        # `null` explícito vale como "nenhum lançamento".
+        return [] if v is None else v
+
+
+class ExcluirEstornoOut(BaseModel):
+    sku: str | None = None
+    qty: int | None = None
+    mensagem: str | None = None
+
+
+class ExcluirOut(BaseModel):
+    ok: bool = True
+    lancamentos_excluidos: int = 0
+    # Só as linhas que deram baixa no Bling ao serem excluídas.
+    estornos: list[ExcluirEstornoOut] = Field(default_factory=list)
+    situacao: str | None = None
+
+
 # ------------------------------------------------------------------ robô (agent)
 # Contrato do robô de chamados (runner de frete / monitor), autenticado por
 # X-Agent-Token — mesmo token do executor de NF.

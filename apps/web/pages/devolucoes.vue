@@ -2878,7 +2878,7 @@ async function backfillAddresses() {
               <button
                 type="button"
                 :disabled="isDeleting(row.id)"
-                title="Remover lançamento (não estorna o estoque no Bling)"
+                title="Remover lançamento (estoque devolvido ao Bling é estornado automaticamente quando o movimento está registrado)"
                 class="inline-flex h-6 w-6 items-center justify-center rounded text-muted-foreground hover:bg-red-100 hover:text-red-600 disabled:cursor-default disabled:opacity-50 dark:hover:bg-red-900/30 dark:hover:text-red-400"
                 @click="removeRow(row)"
               >

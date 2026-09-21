@@ -183,6 +183,40 @@ type Lookup = {
 }
 type Draft = Lookup & { origem: Origem | ''; canal: Canal; chamado: string; chamado_url: string; observacao: string }
 
+// 21/09 (Vinicius): janela "Excluir chamado" — a prévia do que vai junto
+// (GET /api/chamados/{id}/exclusao) e a resposta do POST /excluir.
+type ExclusaoLancamento = {
+  id: string
+  sku: string | null
+  produtos: string | null
+  condicao_produto: string | null
+  motivo_devolucao: string | null
+  data_devolvido_estoque: string | null
+  // estoque_mov_sku preenchido e não revertido → ao excluir o back dá a saída no Bling sozinho.
+  estoque_estornavel: boolean
+  estoque_mov_sku: string | null
+  estoque_mov_qty: number | null
+  // motivo dos que abrem chamado (Não recebido, Extraviado…) → já vem marcado.
+  marcado_padrao: boolean
+}
+type ExclusaoPreview = {
+  chamado_id: string
+  pedido_bling: string | null
+  plataforma: string | null
+  status_bling_atual: string | null
+  exige_situacao: boolean
+  // a disputa/revisão JÁ foi aberta na plataforma — excluir aqui não cancela lá.
+  abertura_enviada: boolean
+  pode_excluir_lancamentos: boolean
+  lancamentos: ExclusaoLancamento[]
+}
+type ExcluirOut = {
+  ok: boolean
+  lancamentos_excluidos: number
+  estornos: { sku: string | null; qty: number | null; mensagem: string | null }[]
+  situacao: string | null
+}
+
 const PAGE_SIZE = 100
 
 const { api } = useApi()
@@ -302,6 +336,9 @@ const ERROS: Record<string, string> = {
   chamado_situacao_obrigatoria: 'escolha a nova situação no Bling',
   // 19/09: instrução não entra em chamado Concluído — a pessoa reabre pela aba antes.
   chamado_concluido: 'chamado concluído — reabra pela aba pra instruir o robô',
+  // 21/09 (Vinicius): janela "Excluir chamado" (chamado + lançamentos de devolução).
+  devolucoes_delete_forbidden: 'sem permissão pra excluir lançamentos de devolução',
+  devolucao_fora_do_pedido: 'lançamento escolhido não é deste pedido — feche e abra a janela de novo',
   sem_destinatarios: 'cadastre os destinatários do jurídico (botão destinatários)',
   threema_nao_configurado: 'Threema não configurado no servidor',
   threema_envio_falhou: 'o Threema não entregou pra nenhum destinatário',
@@ -705,20 +742,6 @@ async function aplicarStatusBling(row: ChamadoRow) {
   }
 }
 
-async function removerChamado(row: ChamadoRow) {
-  if (!confirm(`Apagar o chamado do pedido ${row.pedido_bling || row.pedido_marketplace}? O histórico vai junto.`)) return
-  setBusy(row.id, true)
-  try {
-    await api(`/api/chamados/${row.id}`, { method: 'DELETE' })
-    items.value = items.value.filter((r) => r.id !== row.id)
-    total.value = Math.max(0, total.value - 1)
-  } catch (e: any) {
-    toasts.error('Erro ao apagar', apiError(e))
-  } finally {
-    setBusy(row.id, false)
-  }
-}
-
 // ----------------------------------------------------------------- histórico + réplica
 
 const hist = reactive({
@@ -1116,6 +1139,163 @@ async function reabrir(row: ChamadoRow) {
     setBusy(row.id, false)
   }
 }
+
+// ----------------------------------------------------------------- excluir
+
+// 21/09 (Vinicius): a lixeira (lista e histórico) abre esta janela no lugar do
+// confirm(): junto com o chamado vão os lançamentos de devolução do mesmo pedido
+// que a pessoa marcar, e a nova situação no Bling é obrigatória igual ao resolver.
+// O back troca o Bling ANTES de apagar — se o Bling recusar, nada some. O que
+// pode ou não (permissão de devoluções, estoque estornável, o que já vem marcado)
+// é a prévia do back que diz, não a tela.
+const excluir = reactive({
+  open: false,
+  row: null as ChamadoRow | null,
+  loading: false,
+  preview: null as ExclusaoPreview | null,
+  situacao: '' as string,
+  selecionados: new Set<string>(),
+  saving: false,
+  erro: null as string | null,
+})
+
+// Antes da prévia chegar vale a regra do resolver (tem pedido Bling → exige).
+const excluirExigeSituacao = computed(() => (excluir.preview ? excluir.preview.exige_situacao : !!excluir.row?.pedido_bling))
+const excluirSituacaoOk = computed(() => !excluirExigeSituacao.value || !!excluir.situacao)
+const excluirSituacaoAtual = computed(
+  () => excluir.preview?.status_bling_atual || excluir.row?.status_bling_atual || excluir.row?.status_bling || '—',
+)
+const excluirPodeLancamentos = computed(() => excluir.preview?.pode_excluir_lancamentos === true)
+
+// Não limpa `erro`: depois de um estorno recusado a prévia recarrega e o aviso fica.
+async function carregarExclusao(row: ChamadoRow) {
+  excluir.loading = true
+  try {
+    const p = await api<ExclusaoPreview>(`/api/chamados/${row.id}/exclusao`)
+    // fechou ou trocou de chamado no meio → resposta velha não entra
+    if (excluir.row?.id !== row.id) return
+    excluir.preview = p
+    excluir.selecionados = new Set(
+      p.pode_excluir_lancamentos ? p.lancamentos.filter((l) => l.marcado_padrao).map((l) => l.id) : [],
+    )
+  } catch (e: any) {
+    if (excluir.row?.id === row.id) excluir.erro = apiError(e)
+  } finally {
+    if (excluir.row?.id === row.id) excluir.loading = false
+  }
+}
+
+function openExcluir(row: ChamadoRow) {
+  excluir.open = true
+  excluir.row = row
+  excluir.preview = null
+  excluir.situacao = ''
+  excluir.selecionados = new Set()
+  excluir.erro = null
+  void carregarExclusao(row)
+}
+
+function closeExcluir() {
+  // No meio do POST não fecha: no 502 de estorno a situação no Bling já mudou e
+  // parte dos lançamentos já saiu — a pessoa precisa ver isso na própria janela.
+  if (excluir.saving) return
+  excluir.open = false
+  excluir.row = null
+  excluir.preview = null
+}
+
+// Nome da plataforma pro aviso ("na Shopee", não "na SHOPEE").
+const PLATAFORMA_NA: Record<string, string> = {
+  ml: 'no Mercado Livre',
+  shopee: 'na Shopee',
+  tiktok: 'na TikTok',
+  amazon: 'na Amazon',
+}
+function plataformaNa(p: string | null | undefined): string {
+  return PLATAFORMA_NA[(p || '').trim().toLowerCase()] || 'na plataforma'
+}
+
+function toggleLancamento(id: string) {
+  if (excluir.selecionados.has(id)) excluir.selecionados.delete(id)
+  else excluir.selecionados.add(id)
+}
+
+function lancamentoTexto(l: ExclusaoLancamento) {
+  const produto = [l.sku, l.produtos].filter(Boolean).join(' · ')
+  const estado = [l.condicao_produto, l.motivo_devolucao].filter(Boolean).join(' / ')
+  return [produto, estado].filter(Boolean).join(' · ') || '(lançamento sem produto)'
+}
+
+// Linha embaixo da caixinha: o que acontece com o estoque desse lançamento ao excluir.
+function estoqueTexto(l: ExclusaoLancamento): { texto: string; alerta: boolean } {
+  if (!l.data_devolvido_estoque) return { texto: 'estoque não devolvido', alerta: false }
+  const quando = fmtDateTime(l.data_devolvido_estoque)
+  if (l.estoque_estornavel) {
+    const qty = l.estoque_mov_qty ?? '?'
+    const sku = l.estoque_mov_sku || l.sku || '?'
+    return {
+      texto: `estoque devolvido em ${quando} — ao excluir, o Bling recebe a saída de ${qty} un. de ${sku} automaticamente`,
+      alerta: true,
+    }
+  }
+  if (l.estoque_mov_sku) {
+    // Movimento registrado e já estornado (a pessoa desligou "devolver estoque" antes).
+    return { texto: `estoque devolvido em ${quando} e já estornado no Bling — nada a fazer`, alerta: false }
+  }
+  return { texto: `estoque devolvido em ${quando}, sem registro do movimento — não dá pra estornar daqui`, alerta: true }
+}
+
+async function confirmarExcluir() {
+  const row = excluir.row
+  if (!row || !canDelete.value) return
+  if (!excluirSituacaoOk.value) {
+    excluir.erro = ERROS.chamado_situacao_obrigatoria
+    return
+  }
+  excluir.saving = true
+  excluir.erro = null
+  try {
+    const res = await api<ExcluirOut>(`/api/chamados/${row.id}/excluir`, {
+      method: 'POST',
+      body: { devolucoes: [...excluir.selecionados], situacao: excluir.situacao || null },
+    })
+    items.value = items.value.filter((r) => r.id !== row.id)
+    total.value = Math.max(0, total.value - 1)
+    const n = res.lancamentos_excluidos
+    const estornos = res.estornos.map((x) => `${x.sku || '?'} ×${x.qty ?? '?'}`).join(', ')
+    toasts.success(
+      'Chamado excluído',
+      [
+        n ? `${n} lançamento${n > 1 ? 's' : ''} removido${n > 1 ? 's' : ''}` : '',
+        estornos ? `estoque estornado: ${estornos}` : '',
+        res.situacao ? `Bling → ${res.situacao}` : '',
+      ].filter(Boolean).join(' · '),
+    )
+    closeExcluir()
+    // Excluído de dentro do histórico → o histórico fecha junto (o chamado não existe mais).
+    if (hist.open && hist.row?.id === row.id) closeHistorico()
+  } catch (e: any) {
+    const detail = e?.data?.detail
+    if (detail?.code === 'estoque_estorno_falhou') {
+      // O Bling recusou o estorno de um lançamento: os anteriores já saíram, o chamado
+      // ficou e a situação no Bling JÁ foi trocada (vem antes das exclusões). A prévia
+      // recarrega pra mostrar só o que sobrou.
+      const n = Number(detail.lancamentos_excluidos || 0)
+      const ja = `${n} lançamento${n === 1 ? '' : 's'} já excluído${n === 1 ? '' : 's'}`
+      excluir.erro = `${detail.message || 'o Bling recusou o estorno do estoque'} · ${ja}; o chamado ficou`
+      if (excluir.situacao) {
+        row.status_bling = excluir.situacao
+        row.status_bling_atual = excluir.situacao
+      }
+      excluir.saving = false
+      await carregarExclusao(row)
+      return
+    }
+    excluir.erro = apiError(e)
+  } finally {
+    excluir.saving = false
+  }
+}
 </script>
 
 <template>
@@ -1482,8 +1662,8 @@ async function reabrir(row: ChamadoRow) {
                   type="button"
                   class="inline-flex items-center rounded border p-1 text-red-500 hover:bg-red-500/10 disabled:opacity-40"
                   :disabled="busy.has(row.id)"
-                  title="apagar chamado"
-                  @click="removerChamado(row)"
+                  title="excluir chamado e lançamentos"
+                  @click="openExcluir(row)"
                 >
                   <Trash2 class="size-3.5" />
                 </button>
@@ -1552,8 +1732,10 @@ async function reabrir(row: ChamadoRow) {
       <div class="w-full max-w-3xl max-h-[90vh] flex flex-col rounded-lg border bg-background shadow-xl">
         <div class="shrink-0 flex items-start justify-between gap-3 border-b px-4 py-3">
           <div>
+            <!-- 21/09 (Vinicius): o pedido do marketplace junto do Bling — é o número
+                 que a pessoa procura na plataforma. -->
             <div class="text-sm font-semibold">
-              Chamado {{ hist.row.chamado || '(sem nº)' }} · pedido {{ hist.row.pedido_bling || hist.row.pedido_marketplace }}
+              Chamado {{ hist.row.chamado || '(sem nº)' }} · pedido {{ hist.row.pedido_bling || hist.row.pedido_marketplace }}<template v-if="hist.row.pedido_bling && hist.row.pedido_marketplace"> · {{ (hist.row.plataforma || 'marketplace').toUpperCase() }} {{ hist.row.pedido_marketplace }}</template>
             </div>
             <div class="text-xs text-muted-foreground">
               {{ origemLabel(hist.row.origem) }} · {{ (hist.row.plataforma || '').toUpperCase() }} {{ hist.row.conta || '' }} · canal {{ hist.row.canal }}
@@ -1707,6 +1889,11 @@ async function reabrir(row: ChamadoRow) {
               <Button size="sm" variant="outline" class="ml-auto" :disabled="!canEdit || busy.has(hist.row.id)" title="marcar como resolvido (lucro/prejuízo + situação no Bling)" @click="openResolver(hist.row)">
                 <CheckCircle2 class="size-4 mr-1.5" />
                 resolver
+              </Button>
+              <!-- 21/09 (Vinicius): lixeira ao lado do resolver — abre a janela de exclusão
+                   (chamado + lançamentos de devolução do pedido + nova situação no Bling). -->
+              <Button v-if="canDelete" size="sm" variant="outline" class="px-2 text-red-500 hover:bg-red-500/10 hover:text-red-600" :disabled="busy.has(hist.row.id)" title="excluir chamado e lançamentos" @click="openExcluir(hist.row)">
+                <Trash2 class="size-4" />
               </Button>
               <Button size="sm" :disabled="!canEdit || hist.sending || !hist.texto.trim()" @click="enviarReplica">
                 <Loader2 v-if="hist.sending" class="size-4 mr-1.5 animate-spin" />
@@ -1874,6 +2061,91 @@ async function reabrir(row: ChamadoRow) {
             <Loader2 v-if="resolver.saving" class="size-4 mr-1.5 animate-spin" />
             <CheckCircle2 v-else class="size-4 mr-1.5" />
             resolver
+          </Button>
+        </div>
+      </div>
+    </div>
+
+    <!-- modal: excluir chamado (21/09, Vinicius): a lixeira da lista e a do histórico
+         abrem esta janela (z-[60], por cima do histórico). Mesmo visual e mesma
+         validação de situação do resolver; os lançamentos de devolução do pedido
+         entram por caixinha, e o texto embaixo diz o que acontece com o estoque. -->
+    <div v-if="excluir.open && excluir.row" class="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 p-4" @click.self="closeExcluir">
+      <div class="w-full max-w-lg rounded-lg border bg-background shadow-xl">
+        <div class="flex items-start justify-between gap-3 border-b px-4 py-3">
+          <div>
+            <div class="text-sm font-semibold inline-flex items-center gap-1.5">
+              <Trash2 class="size-4 text-red-500" />
+              Excluir chamado · pedido {{ excluir.row.pedido_bling || excluir.row.pedido_marketplace }}
+            </div>
+            <div class="text-xs text-muted-foreground">
+              Chamado {{ excluir.row.chamado || '(sem nº)' }} · {{ (excluir.row.plataforma || '').toUpperCase() }} {{ excluir.row.conta || '' }}
+            </div>
+          </div>
+          <button type="button" class="rounded p-1 hover:bg-muted" @click="closeExcluir"><X class="size-4" /></button>
+        </div>
+        <div class="space-y-3 px-4 py-3 text-sm">
+          <p class="text-muted-foreground">O chamado e o histórico dele somem da aba. Esta ação não pode ser desfeita.</p>
+          <div v-if="excluir.preview?.abertura_enviada" class="rounded border border-amber-500/40 bg-amber-500/10 px-2 py-1 text-xs text-amber-700 dark:text-amber-300">
+            A disputa/revisão já foi aberta {{ plataformaNa(excluir.preview.plataforma || excluir.row.plataforma) }} — excluir aqui não cancela lá; feche na plataforma também.
+          </div>
+          <template v-if="excluirExigeSituacao">
+            <div class="text-xs">
+              <span class="text-muted-foreground">Situação atual no Bling:</span>
+              <b class="ml-1">{{ excluirSituacaoAtual }}</b>
+            </div>
+            <label class="block space-y-1">
+              <span class="text-xs font-medium">Nova situação no Bling <span class="text-red-500">*</span></span>
+              <select v-model="excluir.situacao" class="h-9 w-full rounded-md border bg-background px-2 text-sm" :class="excluirSituacaoOk ? '' : 'ring-1 ring-red-500/60'">
+                <option value="" disabled>escolha…</option>
+                <template v-if="opcoesFechamento(excluir.row).length">
+                  <option v-for="s in opcoesFechamento(excluir.row)" :key="s" :value="s">{{ s }}</option>
+                  <option disabled>──────</option>
+                </template>
+                <option v-for="s in situacoes.filter((x) => !opcoesFechamento(excluir.row!).includes(x))" :key="s" :value="s">{{ s }}</option>
+              </select>
+            </label>
+          </template>
+          <div v-else class="text-[11px] text-muted-foreground">Sem pedido Bling — nada a trocar no Bling.</div>
+          <div class="space-y-1.5">
+            <div class="text-xs font-medium">
+              Lançamentos de devolução deste pedido
+              <span v-if="excluir.preview && !excluirPodeLancamentos" class="font-normal text-amber-700 dark:text-amber-300">— sem permissão pra excluir lançamentos</span>
+            </div>
+            <div v-if="excluir.loading" class="inline-flex items-center gap-1.5 text-[11px] text-muted-foreground">
+              <Loader2 class="size-3.5 animate-spin" /> carregando…
+            </div>
+            <div v-else-if="!excluir.preview" class="text-[11px] text-muted-foreground">não deu pra carregar os lançamentos deste pedido</div>
+            <div v-else-if="!excluir.preview.lancamentos.length" class="text-[11px] text-muted-foreground">nenhum lançamento de devolução neste pedido</div>
+            <div v-else class="max-h-60 space-y-1 overflow-auto">
+              <label
+                v-for="l in excluir.preview.lancamentos"
+                :key="l.id"
+                class="flex items-start gap-2 rounded border px-2 py-1.5"
+                :class="excluirPodeLancamentos && !excluir.saving ? 'cursor-pointer hover:bg-muted/40' : 'cursor-default opacity-60'"
+              >
+                <input
+                  type="checkbox"
+                  class="mt-0.5 size-3.5 shrink-0 accent-primary"
+                  :checked="excluir.selecionados.has(l.id)"
+                  :disabled="!excluirPodeLancamentos || excluir.saving"
+                  @change="toggleLancamento(l.id)"
+                />
+                <div class="min-w-0 space-y-0.5">
+                  <div class="text-xs">{{ lancamentoTexto(l) }}</div>
+                  <div class="text-[11px]" :class="estoqueTexto(l).alerta ? 'text-amber-700 dark:text-amber-300' : 'text-muted-foreground'">{{ estoqueTexto(l).texto }}</div>
+                </div>
+              </label>
+            </div>
+          </div>
+          <div v-if="excluir.erro" class="text-xs text-red-500">{{ excluir.erro }}</div>
+        </div>
+        <div class="flex items-center justify-end gap-2 border-t px-4 py-3">
+          <Button size="sm" variant="ghost" @click="closeExcluir">cancelar</Button>
+          <Button size="sm" variant="destructive" :disabled="!canDelete || excluir.loading || excluir.saving || !excluirSituacaoOk" @click="confirmarExcluir">
+            <Loader2 v-if="excluir.saving" class="size-4 mr-1.5 animate-spin" />
+            <Trash2 v-else class="size-4 mr-1.5" />
+            excluir
           </Button>
         </div>
       </div>
