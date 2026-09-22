@@ -2570,7 +2570,10 @@ async def vigia_chamados_tick(ctx: dict) -> None:
             summary.get(k)
             for k in (
                 "novas", "sumiram", "encerrados", "envios_falhos",
-                "consultas_falhando", "avisadas",
+                # 22/09: sem isto a rodada ficaria MUDA justamente quando há caso
+                # de tela sem ninguém lendo e nada mais acontecendo — o sinal do
+                # silêncio some no debug. O painel mostra, o log também precisa.
+                "consultas_falhando", "leitura_parada", "avisadas",
             )
         ):
             logger.info("vigia_chamados_done", **summary)
