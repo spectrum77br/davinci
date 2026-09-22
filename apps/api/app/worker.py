@@ -38,6 +38,7 @@ from app.services import (
     chamados_devolucao_sync,
     chamados_pendencias,
     devolucao_mensagem_comprador,
+    estoque_familia,
     threema,
 )
 from app.services.advisory_lock import release_stale_sync_locks, try_user_sync_lock
@@ -84,9 +85,9 @@ from app.services.ouvidoria import modo as ouvidoria_modo
 from app.services.ouvidoria import sincronizar_catalogo as ouvidoria_sincronizar_catalogo
 from app.services.pos_vendas import sync_notas_emitidas as run_pos_vendas_sync
 from app.services.pricing.batch import run_push_prices_batch
+from app.services.pricing.cost_sync import run_sync_bling_costs
 from app.services.prioridade_estoque import prioridade_estoque_sweep
 from app.services.prioridade_estoque_movimentos import manutencao_movimentos_sweep
-from app.services.pricing.cost_sync import run_sync_bling_costs
 from app.services.product_cost_sync import (
     run_restamp_order_costs,
     run_sync_import_bling_costs,
@@ -121,6 +122,22 @@ SP_TZ = ZoneInfo("America/Sao_Paulo")
 # Hora em que a varredura diária roda para quem ligou e não escolheu hora.
 DAILY_SYNC_HORA_PADRAO = time(3, 0)
 SYNC_ALL_LOW_STOCK_THRESHOLD = 10
+
+
+def _prefixos_familia() -> list[str]:
+    """Linhas em que a soma por família está ligada, ou lista vazia.
+
+    Vazio tem dois significados diferentes: a soma desligada (não isenta
+    ninguém da varredura) e a soma ligada para TODAS as linhas (aí ninguém pode
+    ser pulado, e é isso que o `not prefixos` trata em quem chama)."""
+    s = get_settings()
+    if not getattr(s, "estoque_familia_ativo", False):
+        return []
+    return [
+        p.strip().lower()
+        for p in (getattr(s, "estoque_familia_prefixos", "") or "").split(",")
+        if p.strip()
+    ]
 
 
 async def send_otp_email(ctx: dict, *, email: str, prefix: str, code: str, ttl_minutes: int) -> None:
@@ -227,7 +244,22 @@ async def sync_all_run(
                 # Bling and marketplaces; skipping them keeps the per-day
                 # call volume well under Bling's CF rate gate. Manual full
                 # sync (UI button) sets include_all_stock=True to bypass.
-                where.append(Product.stock < SYNC_ALL_LOW_STOCK_THRESHOLD)
+                # Estoque alto costuma ser mantido fresco pelos webhooks, por
+                # isso a varredura pula esses. Mas com a soma por família o
+                # número publicado depende do IRMÃO, e o webhook do irmão não
+                # avisa este produto — então quem está numa linha com a soma
+                # ligada entra na varredura mesmo com estoque alto.
+                baixo = Product.stock < SYNC_ALL_LOW_STOCK_THRESHOLD
+                prefixos_familia = _prefixos_familia()
+                if prefixos_familia:
+                    where.append(
+                        or_(
+                            baixo,
+                            *[Product.sku.ilike(f"{p}%") for p in prefixos_familia],
+                        )
+                    )
+                else:
+                    where.append(baixo)
             stmt = select(Product)
             if where:
                 stmt = stmt.where(and_(*where))
@@ -393,6 +425,40 @@ async def sync_product_run(
             s, user_id=uid, job=job, force=True, force_bling_refresh=True
         )
         await orch.run([product], only_link_ids=link_uuids)
+
+        # A soma por família publica o TOTAL de todos os lotes. Se a venda mexeu
+        # só neste lote, o anúncio do irmão continuaria mostrando o total velho:
+        # o webhook do Bling só avisa do produto que mudou, e a varredura diária
+        # pula quem tem estoque próprio alto. Sem isto, dg053.ci ficaria preso no
+        # número antigo até ele mesmo vender alguma coisa.
+        if estoque_familia.familia_ligada(product.sku):
+            nomes = [
+                n
+                for n in estoque_familia.irmaos(product.sku or "")
+                if n != (product.sku or "").strip().lower()
+            ]
+            irmaos_prod = (
+                (
+                    await s.execute(
+                        select(Product).where(
+                            sa_func.lower(Product.sku).in_(nomes),
+                            Product.situacao == "A",
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+                if nomes
+                else []
+            )
+            if irmaos_prod:
+                logger.info(
+                    "sync_product_irmaos_da_familia",
+                    product_id=product_id,
+                    sku=product.sku,
+                    irmaos=[p.sku for p in irmaos_prod],
+                )
+                await orch.run(irmaos_prod)
 
 
 async def ml_backfill_run(
