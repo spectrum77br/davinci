@@ -527,6 +527,39 @@ async def test_enviar_agora_vai_pro_comprador_com_o_cartao(
 
 
 @pytest.mark.asyncio
+async def test_reenvio_do_painel_nao_gasta_o_teto_do_robo(
+    db: AsyncSession, ligado, monkeypatch
+):
+    """O ⟳ da linha fica ao lado do "(falhou)" — é lá que a pessoa clica quando
+    o Mailjet está fora. Se o clique gastasse uma tentativa do robô, ele
+    desistiria daquele aviso pra sempre (nada zera o contador)."""
+    _patch_eventos(monkeypatch, {})  # sem cartão: o que está em teste é o contador
+    db.add(_linha())
+    await db.commit()
+    ruim = FakeSender(falha=True)
+    await msgs.run(db, sender=ruim, hoje=HOJE)
+    await msgs.run(db, sender=ruim, hoje=HOJE)  # robô já queimou 2 das 3
+
+    for _ in range(2):  # a pessoa aperta o ⟳ com o Mailjet ainda fora
+        with pytest.raises(RuntimeError):
+            await msgs.enviar_agora(
+                db, pedido_bling="296762", evento="rastreio", sender=ruim
+            )
+
+    bom = FakeSender()
+    out = await msgs.run(db, sender=bom, hoje=HOJE)  # Mailjet voltou
+    assert out["enviadas"] >= 1
+    m = (
+        await db.execute(
+            select(LogisticaMensagemCliente).where(
+                LogisticaMensagemCliente.evento == "rastreio"
+            )
+        )
+    ).scalar_one()
+    assert m.enviado_em is not None and m.erro is None
+
+
+@pytest.mark.asyncio
 async def test_enviar_agora_recusa_o_que_nao_e_mensagem_ao_comprador(
     db: AsyncSession, ligado, monkeypatch
 ):

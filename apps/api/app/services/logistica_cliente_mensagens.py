@@ -523,7 +523,12 @@ async def enviar_agora(
         m = LogisticaMensagemCliente(logistica_id=row.id, evento=evento, destinatario=destino)
         session.add(m)
     m.assunto, m.corpo, m.destinatario = assunto, corpo, destino
-    m.tentativas = (m.tentativas or 0) + 1
+    # `tentativas` é o orçamento de retentativa do ROBÔ: o run() desiste do
+    # evento em MAX_TENTATIVAS e nada no sistema zera esse contador. O disparo
+    # humano não gasta esse orçamento — devolve. O ⟳ do painel fica justamente
+    # ao lado do "(falhou)", então, sem isso, dois cliques durante uma queda do
+    # Mailjet faziam o robô desistir daquele aviso pra sempre.
+    m.tentativas = 0
     try:
         await sender.send(
             to=destino, subject=assunto, html="", text=corpo,
