@@ -535,14 +535,20 @@ function tituloDaOrigem(id: string): string {
 const requisicoes = ref<Requisicao[]>([])
 const reqOcupada = ref<string | null>(null)
 
+const pedidosErro = ref<string | null>(null)
+
 async function carregarPedidos() {
   try {
     const r = await api<{ requisicoes: Requisicao[] }>('/api/marketing/personagens/requisicoes')
     requisicoes.value = r.requisicoes
-  } catch {
+    pedidosErro.value = null
+  } catch (e: any) {
     // A fila é um extra da tela: se ela falhar, roteiros e personagens
-    // continuam funcionando. Barulho aqui só atrapalharia quem veio escrever.
+    // continuam funcionando — por isso não é toast. Mas zerar em silêncio
+    // fazia fila quebrada e fila vazia ficarem idênticas, e a tela AFIRMAVA
+    // "Nenhum pedido esperando" para uma agência que tinha pedido esperando.
     requisicoes.value = []
+    pedidosErro.value = errMsg(e)
   }
 }
 
@@ -569,7 +575,14 @@ async function recusarPedido(r: Requisicao) {
   // Recusa sem motivo é a que volta igual na semana seguinte, e aí alguém
   // gasta o mesmo tempo de novo — por isso o prompt, e não um botão seco.
   const motivo = window.prompt(`Recusar "${r.nome}". Por quê? (a agência lê isto)`)
-  if (motivo === null) return
+  if (motivo === null) return // cancelou
+  // Vazio não é cancelar: é recusar sem dizer por quê. A recusa é irreversível
+  // e chega do outro lado como "Sem motivo registrado" — que é exatamente o
+  // pedido que volta igual na semana seguinte.
+  if (!motivo.trim()) {
+    toasts.warning('Escreva o motivo', 'A agência lê este texto — recusa sem motivo volta igual.')
+    return
+  }
   reqOcupada.value = r.id
   try {
     await api(`/api/marketing/personagens/requisicoes/${r.id}/recusar`, {
@@ -920,7 +933,11 @@ async function recusarPedido(r: Requisicao) {
     </div>
 
     <!-- ══════════════ personagens ══════════════ -->
-    <div v-else class="grid gap-3 lg:grid-cols-[1fr_320px]">
+    <!-- `v-else-if`, e não `v-else`: enquanto eram duas seções o else bastava,
+         mas com a terceira ele passou a renderizar esta tela inteira embaixo da
+         aba Pedidos, porque "não é roteiros" deixou de significar "é
+         personagens". Seção nova aqui exige condição própria. -->
+    <div v-else-if="secao === 'personagens'" class="grid gap-3 lg:grid-cols-[1fr_320px]">
       <div>
         <p class="mb-2 text-xs text-muted-foreground">
           Ideias de personagem que as agências podem usar nos vídeos. Além do nome e
@@ -1069,7 +1086,12 @@ async function recusarPedido(r: Requisicao) {
         com nome e descrição — a imagem e o MP3 sobem aqui depois, junto com a cessão.
       </p>
 
-      <div v-if="!requisicoes.length" class="rounded-lg border border-dashed p-6 text-center">
+      <div v-if="pedidosErro" class="rounded-lg border border-destructive/40 bg-destructive/5 p-4">
+        <p class="text-xs font-medium text-destructive">Não deu para ler a fila.</p>
+        <p class="mt-1 text-[11px] text-muted-foreground">{{ pedidosErro }}</p>
+        <button class="btn btn-xs mt-2" @click="carregarPedidos()">Tentar de novo</button>
+      </div>
+      <div v-else-if="!requisicoes.length" class="rounded-lg border border-dashed p-6 text-center">
         <Inbox class="mx-auto size-5 text-muted-foreground" />
         <p class="mt-1.5 text-xs text-muted-foreground">Nenhum pedido esperando.</p>
       </div>
