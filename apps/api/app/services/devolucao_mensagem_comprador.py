@@ -173,9 +173,17 @@ async def por_pedidos(
 
 
 async def _plataforma_de(session: AsyncSession, dev: Devolution, ch: Chamado | None) -> str | None:
-    bruta = (ch.plataforma if ch is not None else None) or await (
-        chamados_devolucao._plataforma_da_conta(session, dev.conta)
-    )
+    """Plataforma do pedido, na ordem em que se pode confiar: o chamado (que já
+    veio do espelho do pedido em `preencher_do_pedido`), depois o próprio
+    espelho, e só então o cadastro de contas. A `conta` da devolução é o nome da
+    loja no Bling ("Shopee ATV") e o cadastro guarda outro ("ATV"), então casar
+    por ela sozinha marcaria pedido da Shopee como "sem canal"."""
+    bruta = ch.plataforma if ch is not None else None
+    if not (bruta or "").strip():
+        info = await chamados_svc.lookup_pedido(session, dev.pedido_bling or "")
+        bruta = (info or {}).get("plataforma")
+    if not (bruta or "").strip():
+        bruta = await chamados_devolucao._plataforma_da_conta(session, dev.conta)
     return chamados_devolucao.plataforma_de(bruta)
 
 
@@ -402,29 +410,6 @@ async def _registrar_no_chamado(
     )
 
 
-async def reabrir(
-    session: AsyncSession, dev: Devolution, *, created_by: UUID | None = None
-) -> DevolucaoMensagemComprador | None:
-    """Botão "pedir senha" da tela: volta a linha pra `pendente` mesmo quando já
-    tinha saído, falhado ou sido cancelada. Serve pro reenvio (o comprador não
-    respondeu) e pros lançamentos anteriores a 22/09, que nunca tiveram pedido.
-    Devolve a linha a enviar, ou None quando não há canal."""
-    linha = await garantir(session, dev, created_by=created_by)
-    if linha is not None:
-        return linha
-    atual = await linha_do_pedido(session, dev)
-    if atual is None or not motivo_pede_senha(dev):
-        return None
-    if atual.status == STATUS_SEM_CANAL:
-        return None  # ML/TikTok/Amazon: insistir não cria canal
-    atual.status = STATUS_PENDENTE
-    atual.erro = None
-    atual.tentativas = 0
-    if dev.id is not None:
-        atual.devolution_id = dev.id
-    return atual
-
-
 async def candidatos_pendentes(
     session: AsyncSession, *, dias: int = 30, limite: int = 50
 ) -> list[Devolution]:
@@ -438,7 +423,9 @@ async def candidatos_pendentes(
         select(DevolucaoMensagemComprador.pedido_bling)
         .where(
             DevolucaoMensagemComprador.evento == EVENTO_SENHA,
-            DevolucaoMensagemComprador.status.in_([STATUS_ENVIADA, STATUS_PENDENTE]),
+            DevolucaoMensagemComprador.status.in_(
+                [STATUS_ENVIADA, STATUS_PENDENTE, STATUS_FALHOU, STATUS_SEM_CANAL]
+            ),
         )
         .scalar_subquery()
     )
@@ -447,7 +434,6 @@ async def candidatos_pendentes(
             select(Devolution)
             .where(
                 func.lower(func.btrim(Devolution.motivo_devolucao)).in_(sorted(MOTIVOS_SENHA)),
-                Devolution.conta.ilike("Shopee%"),
                 Devolution.created_at > recorte,
                 func.btrim(func.coalesce(Devolution.pedido_bling, "")) != "",
                 Devolution.pedido_bling.not_in(ja_tem),
@@ -477,6 +463,39 @@ async def enviar_por_id(session: AsyncSession, linha_id: str) -> DevolucaoMensag
     if linha is None:
         return None
     return await enviar(session, linha)
+
+
+async def varrer_sem_mensagem(
+    session: AsyncSession, *, dias: int = 30, limite: int = 20
+) -> dict:
+    """Rede de proteção do cron: lançamento de Bloqueado na Shopee que está
+    dentro da janela e nunca teve mensagem — pede a senha agora.
+
+    Serve pra duas coisas: os lançamentos ANTERIORES a 22/09 (a funcionalidade
+    não existia; eram ~40 pedidos nos últimos 30 dias) e qualquer caso em que o
+    gancho do lançamento não rodou (fila fora do ar, erro no meio do save).
+    Teto por rodada pra a primeira passada não virar enxurrada de mensagem —
+    o resto sai na hora seguinte. Best-effort por linha; commita no fim."""
+    candidatos = await candidatos_pendentes(session, dias=dias, limite=limite)
+    criadas = enviadas = 0
+    for dev in candidatos:
+        try:
+            linha = await garantir(session, dev)
+            if linha is None:
+                continue
+            criadas += 1
+            r = await enviar(session, linha)
+            if r.status == STATUS_ENVIADA:
+                enviadas += 1
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "devolucao_mensagem_comprador_varredura_erro",
+                pedido=dev.pedido_bling,
+                err=str(e)[:200],
+            )
+            continue
+    await session.commit()
+    return {"candidatos": len(candidatos), "criadas": criadas, "enviadas": enviadas}
 
 
 async def processar_pendentes(session: AsyncSession) -> dict:

@@ -282,63 +282,6 @@ function senhaLabel(row: DevolutionRow): string {
   }
   return ''
 }
-const senhaSaving = ref<Set<string>>(new Set())
-const senhaLote = ref<{ candidatos: number; pedidos: any[] } | null>(null)
-const senhaLoteDias = ref(30)
-// Motivo que pede senha = "Bloqueado" (o legado "mudou de ideia" é o mesmo).
-function motivoPedeSenha(motivo?: string | null) {
-  return ['bloqueado', 'mudou de ideia'].includes((motivo || '').trim().toLowerCase())
-}
-async function pedirSenha(row: DevolutionRow) {
-  if (!canEdit.value || senhaSaving.value.has(row.id)) return
-  senhaSaving.value = new Set([...senhaSaving.value, row.id])
-  try {
-    const res = await api<DevolutionRow>(`/api/devolutions/${row.id}/senha`, { method: 'POST' })
-    Object.assign(row, {
-      senha_status: res.senha_status,
-      senha_enviada_at: res.senha_enviada_at,
-      senha_erro: res.senha_erro,
-    })
-    pushToast({
-      kind: res.senha_status === 'sem_canal' ? 'error' : 'success',
-      title: res.senha_status === 'sem_canal' ? 'Sem canal com o comprador' : 'Pedido de senha na fila',
-      lines: [senhaLabel(row) || `Pedido ${row.pedido_bling || ''}`],
-    })
-  } catch (e: any) {
-    pushToast({ kind: 'error', title: 'Erro ao pedir a senha', lines: [apiError(e)] })
-  } finally {
-    const next = new Set(senhaSaving.value)
-    next.delete(row.id)
-    senhaSaving.value = next
-  }
-}
-// Lote: SEMPRE simula primeiro — cada linha da lista é uma mensagem a um
-// cliente de verdade, então a pessoa vê a conta antes de mandar.
-async function simularSenhaLote() {
-  try {
-    senhaLote.value = await api(`/api/devolutions/senha/enfileirar?dias=${senhaLoteDias.value}&simular=true`, { method: 'POST' })
-  } catch (e: any) {
-    pushToast({ kind: 'error', title: 'Erro ao listar os pendentes', lines: [apiError(e)] })
-  }
-}
-async function enviarSenhaLote() {
-  if (!senhaLote.value) return
-  try {
-    const res = await api<{ enfileirados: number }>(
-      `/api/devolutions/senha/enfileirar?dias=${senhaLoteDias.value}&simular=false`,
-      { method: 'POST' },
-    )
-    senhaLote.value = null
-    pushToast({
-      kind: 'success',
-      title: `${res.enfileirados} pedido(s) de senha na fila`,
-      lines: ['As mensagens saem em alguns instantes; a coluna Chamado mostra o resultado.'],
-    })
-    await load()
-  } catch (e: any) {
-    pushToast({ kind: 'error', title: 'Erro ao enviar em lote', lines: [apiError(e)] })
-  }
-}
 function senhaClass(row: DevolutionRow): string {
   const st = row.senha_status
   if (st === 'enviada') return 'text-emerald-700 dark:text-emerald-300'
@@ -2752,61 +2695,9 @@ async function backfillAddresses() {
         <Download class="size-4 mr-1.5" :class="{ 'animate-pulse': exporting }" />
         exportar xlsx
       </Button>
-      <Button v-if="canEdit" size="sm" variant="outline" title="Pedir a senha ao comprador nos lançamentos de Bloqueado que ainda não receberam a mensagem (só Shopee)" @click="simularSenhaLote">
-        pedir senha em lote
-      </Button>
       <span class="ml-auto text-xs text-muted-foreground">
         {{ rangeStart }}–{{ rangeEnd }} de {{ total }} · enviada p/ reembolso {{ reembolsoItens }} · manutenção {{ brl(totalCustoManutencao) }}
       </span>
-    </div>
-
-    <!-- Pedido de senha em LOTE: mostra a conta antes de mandar, porque cada
-         linha aqui é uma mensagem a um cliente de verdade. -->
-    <div v-if="senhaLote" class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" @click.self="senhaLote = null">
-      <div class="w-full max-w-2xl rounded-lg border bg-background p-4 shadow-lg">
-        <div class="flex items-center justify-between gap-2">
-          <h3 class="text-sm font-semibold">Pedir senha ao comprador — {{ senhaLote.candidatos }} pedido(s)</h3>
-          <select v-model.number="senhaLoteDias" class="h-8 rounded-md border bg-background px-2 text-xs" @change="simularSenhaLote">
-            <option :value="15">lançados nos últimos 15 dias</option>
-            <option :value="30">lançados nos últimos 30 dias</option>
-            <option :value="60">lançados nos últimos 60 dias</option>
-            <option :value="90">lançados nos últimos 90 dias</option>
-          </select>
-        </div>
-        <p class="mt-1 text-xs text-muted-foreground">
-          Só Shopee: no Mercado Livre a devolução cancela o pedido e o chat fecha; na TikTok falta liberar o escopo de atendimento.
-          Uma mensagem por pedido, com a foto do produto quando houver.
-        </p>
-        <div class="mt-2 max-h-[45vh] overflow-auto rounded border">
-          <table class="w-full text-[11px]">
-            <thead class="sticky top-0 bg-muted/60">
-              <tr>
-                <th class="px-2 py-1 text-left font-semibold">Pedido</th>
-                <th class="px-2 py-1 text-left font-semibold">Conta</th>
-                <th class="px-2 py-1 text-left font-semibold">SKU</th>
-                <th class="px-2 py-1 text-left font-semibold">Mensagem</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr v-for="p in senhaLote.pedidos" :key="p.pedido_bling" class="border-t align-top">
-                <td class="px-2 py-1 whitespace-nowrap">{{ p.pedido_bling }}</td>
-                <td class="px-2 py-1 whitespace-nowrap">{{ p.conta }}</td>
-                <td class="px-2 py-1 whitespace-nowrap">{{ p.sku }}</td>
-                <td class="px-2 py-1 text-muted-foreground">{{ p.texto }}</td>
-              </tr>
-              <tr v-if="!senhaLote.pedidos.length">
-                <td colspan="4" class="px-2 py-3 text-center text-muted-foreground">Nenhum pendente nessa janela.</td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-        <div class="mt-3 flex items-center justify-end gap-2">
-          <Button size="sm" variant="ghost" @click="senhaLote = null">cancelar</Button>
-          <Button size="sm" :disabled="!senhaLote.pedidos.length" @click="enviarSenhaLote">
-            enviar {{ senhaLote.pedidos.length }} mensagem(ns)
-          </Button>
-        </div>
-      </div>
     </div>
 
     <div v-show="tab === 'lancamentos'" class="overflow-auto rounded border max-h-[75vh] focus:outline-none" tabindex="0">
@@ -2994,14 +2885,6 @@ async function backfillAddresses() {
                 :class="senhaClass(row)"
                 :title="senhaLabel(row)"
               >{{ senhaLabel(row) }}</div>
-              <button
-                v-if="canEdit && motivoPedeSenha(row.motivo_devolucao) && row.senha_status !== 'sem_canal'"
-                type="button"
-                class="mt-0.5 text-[10px] underline text-muted-foreground hover:text-foreground disabled:opacity-50"
-                :disabled="senhaSaving.has(row.id)"
-                :title="row.senha_status === 'enviada' ? 'Mandar de novo o pedido da senha no chat' : 'Pedir a senha ao comprador pelo chat'"
-                @click="pedirSenha(row)"
-              >{{ senhaSaving.has(row.id) ? 'enviando…' : (row.senha_status === 'enviada' ? 'pedir de novo' : 'pedir senha') }}</button>
             </td>
             <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
               <input

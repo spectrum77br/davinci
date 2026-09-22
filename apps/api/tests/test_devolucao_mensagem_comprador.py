@@ -658,3 +658,64 @@ async def test_mensagem_ao_comprador_nao_mexe_na_coluna_status_da_aba_chamados(
     ch = await _chamado(db, "295015")
     ev = (await _eventos_comprador(db, ch.id))[0]
     assert ev.direcao == "sistema" and ev.status != "enviada"
+
+
+# ---------------------------------------------------------------- 11. varredura dos atrasados
+
+
+async def test_varredura_pega_lancamento_antigo_que_nunca_teve_pedido_de_senha(
+    client, make_user, auth_as, db, shopee
+):
+    """A funcionalidade nasceu em 22/09; o que foi lançado antes (eram ~40
+    pedidos de Bloqueado da Shopee nos últimos 30 dias) nunca teve mensagem. A
+    varredura do cron :25 é quem alcança esses — e é ela que substituiu o botão
+    que existiu por algumas horas em 22/09."""
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+    await _lancar(client, db, user, pedido="295101", order_sn="260904ANTIGO1")
+    # Apaga a linha da mensagem: é o estado de um lançamento anterior à entrega.
+    await db.execute(delete(DevolucaoMensagemComprador))
+    await db.commit()
+    shopee.enviadas.clear()
+    shopee.buyers.clear()
+
+    r = await svc.varrer_sem_mensagem(db, dias=30, limite=20)
+    assert r == {"candidatos": 1, "criadas": 1, "enviadas": 1}
+    assert len(shopee.textos) == 1
+    linha = await _linha(db, "295101")
+    assert linha is not None and linha.status == "enviada"
+
+    # a segunda rodada não manda de novo (é o que impede a enxurrada diária)
+    shopee.enviadas.clear()
+    r2 = await svc.varrer_sem_mensagem(db, dias=30, limite=20)
+    assert r2 == {"candidatos": 0, "criadas": 0, "enviadas": 0}
+    assert shopee.textos == []
+
+
+async def test_varredura_respeita_o_teto_a_janela_e_quem_ja_falhou(
+    client, make_user, auth_as, db, shopee
+):
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+    for i, pedido in enumerate(("295201", "295202", "295203")):
+        await _lancar(client, db, user, pedido=pedido, order_sn=f"26090{i}TETO{i}")
+    # Estado de partida: nenhuma mensagem, como nos lançamentos antigos.
+    await db.execute(delete(DevolucaoMensagemComprador))
+    await db.commit()
+    shopee.enviadas.clear()
+
+    # teto por rodada: manda 2 agora, o resto na hora seguinte
+    r = await svc.varrer_sem_mensagem(db, dias=30, limite=2)
+    assert (r["candidatos"], r["enviadas"]) == (2, 2)
+    assert len(shopee.textos) == 2
+    r2 = await svc.varrer_sem_mensagem(db, dias=30, limite=2)
+    assert (r2["candidatos"], r2["enviadas"]) == (1, 1)
+
+    # quem já esgotou as tentativas não é ressuscitado pela varredura
+    linha = await _linha(db, "295201")
+    linha.status, linha.tentativas, linha.erro = "falhou", 3, "shopee fora do ar"
+    await db.commit()
+    shopee.enviadas.clear()
+    r3 = await svc.varrer_sem_mensagem(db, dias=30, limite=10)
+    assert r3 == {"candidatos": 0, "criadas": 0, "enviadas": 0}
+    assert shopee.textos == []

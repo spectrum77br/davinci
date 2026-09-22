@@ -1437,10 +1437,15 @@ async def chamados_replica_automatica(ctx: dict) -> None:
     async with session_scope() as s:
         pend = await chamados_devolucao.processar_pendentes(s)
     logger.info("chamados_devolucao_pendentes_done", **pend)
-    # Mensagem ao comprador (senha do produto travado) que não saiu na hora.
+    # Mensagem ao comprador (senha do produto travado): o que não saiu na hora,
+    # e a varredura dos lançamentos que nunca tiveram pedido de senha (os
+    # anteriores a 22/09 e os que o gancho do save não pegou).
     async with session_scope() as s:
         msgs = await devolucao_mensagem_comprador.processar_pendentes(s)
     logger.info("devolucao_mensagem_comprador_pendentes_done", **msgs)
+    async with session_scope() as s:
+        varridas = await devolucao_mensagem_comprador.varrer_sem_mensagem(s)
+    logger.info("devolucao_mensagem_comprador_varredura_done", **varridas)
     # Resposta da plataforma (TikTok/Shopee/ML) cai no histórico e fecha o chamado.
     async with session_scope() as s:
         resp = await chamados_devolucao_sync.sync_respostas(s)
