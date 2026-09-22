@@ -107,6 +107,21 @@ def _mapa_tokens() -> dict[str, str]:
     return mapa
 
 
+def equipes_dos_tokens() -> list[str]:
+    """As agências que TÊM porta — o vocabulário de equipe do lado de fora.
+
+    O `PORTAL_TOKENS` é a única fonte que sabe de uma agência ANTES de ela
+    ter a primeira linha ou o primeiro usuário interno. Enquanto o nome só
+    morava aqui, o select "Vai para" do roteiro não oferecia a agência
+    recém-cadastrada e o briefing não tinha como ser endereçado a ela.
+    Devolve só os NOMES; o token não sai desta função.
+    """
+    vistos: dict[str, str] = {}
+    for equipe in _mapa_tokens().values():
+        vistos.setdefault(equipe.strip().lower(), equipe.strip())
+    return sorted(vistos.values(), key=str.lower)
+
+
 async def equipe_do_token(
     x_portal_token: Annotated[str | None, Header(alias="X-Portal-Token")] = None,
 ) -> str:

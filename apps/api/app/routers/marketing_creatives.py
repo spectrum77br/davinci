@@ -141,9 +141,23 @@ async def list_equipes(
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[User, Depends(require_permission("marketing_criativos", "view"))],
 ) -> list[str]:
-    """Opções de equipe pros selects: união das equipes de marketing dos
-    usuários + valores já usados nas linhas (pra nada órfão sumir)."""
+    """Opções de equipe pros selects: união das agências com token de portal
+    + equipes de marketing dos usuários + valores já usados nas linhas (pra
+    nada órfão sumir).
+
+    O `PORTAL_TOKENS` entra PRIMEIRO e é o dono da grafia: é o nome com que a
+    agência entra no portal, e é contra ele que o portal compara. Sem esta
+    primeira volta, uma agência só aparecia no select depois de alguém
+    escrever o nome dela à mão em algum usuário — e até lá o roteiro não
+    tinha como ser endereçado a ela nem a entrega como ser marcada como dela.
+    """
+    # Import local: `portal_criativos` já importa deste módulo, e um import
+    # no topo fecharia o ciclo. Mesmo padrão do `/destinos`.
+    from app.routers.portal_criativos import equipes_dos_tokens
+
     out: dict[str, str] = {}
+    for t in equipes_dos_tokens():
+        out.setdefault(t.lower(), t)
     for lst in (await session.execute(select(User.marketing_teams))).scalars().all():
         for t in lst or []:
             if isinstance(t, str) and t.strip():

@@ -491,8 +491,11 @@ async def test_apagar_roteiro_nao_apaga_o_criativo(
 
     assert (await client.delete(f"{R}/{rot['id']}")).status_code == 200
     linhas = (await client.get("/api/marketing/creatives")).json()
-    assert len(linhas) == 1
-    assert linhas[0]["roteiro_id"] is None
+    # Afirma sobre ESTA entrega, não sobre a contagem: criar o roteiro agora
+    # abre uma linha por agência endereçada, então o total não é mais 1 — e
+    # contar escondia que o assert antigo dependia da ordem do SELECT.
+    minha = next(l for l in linhas if l["id"] == criativo["id"])
+    assert minha["roteiro_id"] is None, "SET NULL: o briefing some, a entrega fica"
 
 
 # ─────────────── o recado da recusa (continua na ENTREGA) ───────────────

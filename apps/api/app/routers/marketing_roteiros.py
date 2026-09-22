@@ -51,6 +51,7 @@ from app.config import get_settings
 from app.db import get_session
 from app.deps.auth import require_permission
 from app.models import (
+    MarketingCreative,
     MarketingPersonagem,
     MarketingRoteiro,
     MarketingRoteiroPersonagem,
@@ -218,6 +219,125 @@ def _destino_limpo(bruto: str | None) -> str | None:
     return (bruto or "").strip() or None
 
 
+def _agencias_do_portal() -> list[str]:
+    """As agências que TÊM portal — a lista do `PORTAL_TOKENS`, não a do
+    `/destinos`.
+
+    `/destinos` sai da união `users.marketing_teams` + equipes já gravadas nos
+    criativos: ela serve pra OFERECER opção na tela. Aqui a pergunta é outra
+    — "pra quem dá pra abrir uma entrega?" — e a única resposta honesta é
+    quem consegue entrar no portal. Abrir entrega pra uma equipe sem token é
+    criar uma linha que ninguém de fora jamais vai ver.
+    """
+    from app.routers.portal_criativos import _mapa_tokens
+
+    vistas: dict[str, str] = {}
+    for equipe in _mapa_tokens().values():
+        vistas.setdefault(equipe.strip().lower(), equipe.strip())
+    return sorted(vistas.values(), key=str.lower)
+
+
+async def _sincronizar_entregas(session: AsyncSession, row: MarketingRoteiro) -> None:
+    """Abre (e fecha) a linha de entrega das agências endereçadas pelo roteiro.
+
+    Era o elo que faltava. O roteiro nascia sem par: a agência lia o briefing
+    na aba Roteiros do portal e não tinha ONDE subir o vídeo, porque a aba
+    Entregas lista `marketing_creatives` filtrado por equipe e nada criava
+    essa linha. Em produção (22/09/2026) dava pra ver: o roteiro 39ff92b2
+    estava no ar pras duas agências e `GET /api/portal/criativos` da Mindset
+    respondia `"criativos":[]`.
+
+    Três regras, nesta ordem:
+
+    1. **Só sincroniza o que o portal MOSTRA.** O alvo é vazio enquanto o
+       roteiro estiver desligado ou sem texto — as mesmas condições de
+       `portal_criativos._visivel_pra_fora`. Sem isso o "Novo roteiro" (que
+       nasce "Roteiro sem título", sem texto) abriria uma entrega em branco na
+       tela da agência antes de alguém escrever o briefing.
+    2. **`equipe_destino` NULL = as DUAS.** É a regra invertida do módulo, e
+       aqui ela vira DUAS entregas, uma por agência: `marketing_creatives.equipe`
+       não comporta "ambas" — lá NULL significa o oposto, ninguém de fora vê.
+    3. **Abre sem duplicar, fecha sem destruir.** Criar casa por
+       `roteiro_id` + `equipe`, então rodar de novo não gera linha repetida.
+       Apagar alcança SÓ a linha que este helper poderia ter aberto: com
+       equipe, sem arquivo, sem aprovação, sem envio pro MEGA e sem legenda
+       nem feedback escritos à mão. Reendereçar um roteiro (ou desligá-lo)
+       nunca pode evaporar o vídeo que a agência mandou — nem a linha interna
+       que alguém montou na mão e ligou neste briefing.
+
+    NÃO faz backfill: quem sincroniza é o POST e o PATCH. Roteiro que já
+    estava no banco antes deste deploy só ganha entrega quando for salvo de
+    novo.
+    """
+    destino = (row.equipe_destino or "").strip()
+    visivel = row.ativo and bool((row.texto or "").strip())
+    alvos = ([destino] if destino else _agencias_do_portal()) if visivel else []
+    por_equipe = {e.strip().lower(): e.strip() for e in alvos if e.strip()}
+
+    # `files` tem lazy="selectin" no modelo, então vem junto e o `.files` lá
+    # embaixo não estoura MissingGreenlet em contexto async.
+    atuais = (
+        (
+            await session.execute(
+                select(MarketingCreative).where(MarketingCreative.roteiro_id == row.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    mudou = False
+    vistas: set[str] = set()
+    for linha in atuais:
+        chave = (linha.equipe or "").strip().lower()
+        vistas.add(chave)
+        if chave in por_equipe:
+            continue
+        # Só apaga o que ESTE helper poderia ter criado. Linha sem equipe é
+        # linha INTERNA — `create_creative` deixa `equipe` NULL pra admin — e
+        # nunca foi entrega de agência nenhuma. Apagá-la porque alguém
+        # corrigiu um typo no título do roteiro é jogar fora trabalho alheio.
+        if not chave:
+            continue
+        if linha.files or linha.aprovado is not None or linha.pushed_at is not None:
+            continue  # alguém já encostou: fica.
+        # `legenda` e `feedback` são texto DIGITADO à mão nesta linha. Pro
+        # portal ela continua virgem (sem vídeo, sem V), mas tem conteúdo que
+        # não volta — então ela também fica, e o pior caso vira lixo visível
+        # na grade, não perda silenciosa.
+        if linha.legenda or linha.feedback:
+            continue
+        await session.delete(linha)
+        mudou = True
+
+    for chave, equipe in por_equipe.items():
+        if chave in vistas:
+            continue
+        session.add(
+            MarketingCreative(
+                id=uuid4(),
+                modelo=row.titulo,
+                marca=row.marca,
+                marca_id=row.marca_id,
+                sku=row.sku,
+                product_id=row.product_id,
+                equipe=equipe,
+                roteiro_id=row.id,
+                created_by=row.created_by,
+            )
+        )
+        mudou = True
+
+    if not mudou:
+        return
+    await session.commit()
+    logger.info(
+        "roteiro_entregas_sincronizadas",
+        roteiro_id=str(row.id),
+        equipes=sorted(por_equipe.values()),
+    )
+
+
 @router.post("")
 async def criar(
     payload: RoteiroIn,
@@ -252,6 +372,10 @@ async def criar(
     session.add(row)
     await session.commit()
     row = await _get(session, row.id, user)
+    # Roteiro criado JÁ com texto (o import, a cópia) abre a entrega na hora.
+    # O "Novo roteiro" da tela nasce sem texto: nada acontece aqui, e a
+    # entrega abre no PATCH em que o briefing for escrito.
+    await _sincronizar_entregas(session, row)
     logger.info("roteiro_criado", roteiro_id=str(row.id), user_id=str(user.id))
     return _roteiro_out(row)
 
@@ -293,6 +417,9 @@ async def editar(
     if "ativo" in data:
         row.ativo = bool(data["ativo"])
     await session.commit()
+    # Depois do commit: escrever o texto, ligar o `ativo` ou trocar o destino
+    # são exatamente os três eventos que mudam PRA QUEM este briefing existe.
+    await _sincronizar_entregas(session, row)
     return _roteiro_out(row)
 
 
