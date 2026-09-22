@@ -163,7 +163,7 @@ async def test_sincronizar_catalogo_cria_e_nao_mexe_no_que_a_pessoa_salvou(db):
     await db.commit()
     robo = await db.get(OuvidoriaRobo, ROBO)
     assert robo.modo == "ligado"
-    assert robo.nome == "Vigia de importação"
+    assert robo.nome == svc.ROBOS[ROBO].nome  # o catálogo é quem nomeia
     assert robo.config["tolerancia_min"] == 90
     assert robo.plataformas == ["ml", "shopee", "tiktok", "amazon"]
 
@@ -502,7 +502,7 @@ async def test_avisar_pendentes_uma_mensagem_por_robo_e_carimba(db, monkeypatch)
     assert len(enviados) == 1
     texto, alvos = enviados[0]
     assert alvos == ["ABCDEFGH", "IJKLMNOP"]
-    assert texto.startswith("Vigia de importação — 2 ocorrências:")
+    assert texto.startswith(f"{svc.ROBOS[ROBO].nome} — 2 ocorrências:")
     assert "TikTok injox · 1 · Pago 14:08 (R$ 739,19) e não caiu no Bling" in texto
     assert "→ Importar manualmente" in texto
     assert "Mercado Livre lucas · Conta sem acesso à API" in texto
@@ -1139,13 +1139,13 @@ async def test_router_ocorrencias_resumo_por_robo_e_botoes(client, make_user, au
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["total"] == 2 and {i["chave"] for i in body["itens"]} == {"tiktok:1", "shopee:2"}
-    assert body["itens"][0]["robo_nome"] == "Vigia de importação"
+    assert body["itens"][0]["robo_nome"] == svc.ROBOS[ROBO].nome
     assert body["resumo"]["abertas"] == 2 and body["resumo"]["sumiram_7d"] == 1
     # Os chips da tela trazem TODOS os robôs (inclusive os que não acharam
     # nada), em ordem de nome; as abertas são as do vigia.
     por_robo = {p["chave"]: p for p in body["por_robo"]}
     assert set(por_robo) == set(svc.ROBOS)
-    assert por_robo[ROBO] == {"chave": ROBO, "nome": "Vigia de importação", "abertas": 2}
+    assert por_robo[ROBO] == {"chave": ROBO, "nome": svc.ROBOS[ROBO].nome, "abertas": 2}
     assert por_robo["vigia_correios"]["abertas"] == 0
 
     r = await client.get("/api/ouvidoria/ocorrencias", params={"status": "fechadas"})

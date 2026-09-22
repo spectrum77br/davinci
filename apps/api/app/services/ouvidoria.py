@@ -129,14 +129,20 @@ class RoboDef:
     modo_padrao: str = "ligado"
 
 
+# Os NOMES são os que o Vinicius escolheu pra tela (22/09/2026: ele agrupou os
+# robôs como "Vigia …"). Quem manda no código é a `chave`, que não muda nunca —
+# renomear aqui basta: o `sincronizar_catalogo` reescreve o nome na próxima
+# leitura da tela, e o aviso do Threema sai com o nome novo. Comentário de
+# código que cite "Vigia de importação"/"Vigia de credenciais" está falando do
+# módulo (`vigia_importacao`, `vigia_credenciais`), não do rótulo da tela.
 ROBOS: dict[str, RoboDef] = {
     "vigia_importacao": RoboDef(
         chave="vigia_importacao",
-        nome="Vigia de importação",
+        nome="Vigia de Importação Pedidos Bling",
         descricao=(
             "Pedido pago no marketplace que não caiu no Bling. Confere no Bling ao "
             "vivo antes de abrir ocorrência; conta cuja API falhou fica de fora da "
-            "rodada (quem cobra a credencial é o Vigia de credenciais)."
+            "rodada (quem cobra a credencial é o Vigia de API x Contas)."
         ),
         area="pedidos",
         cadencia_texto="a cada 1 h (:09)",
@@ -162,7 +168,7 @@ ROBOS: dict[str, RoboDef] = {
     # dezena na primeira semana, enquanto a operação limpa o passivo).
     "vigia_credenciais": RoboDef(
         chave="vigia_credenciais",
-        nome="Vigia de credenciais",
+        nome="Vigia de API x Contas",
         descricao=(
             "Conta de marketplace ou do Bling que perdeu o acesso à API (token "
             "vencido, chave do app expirada, 403 de escopo) — enquanto isso nenhum "
@@ -182,7 +188,7 @@ ROBOS: dict[str, RoboDef] = {
     ),
     "vigia_ingest_bling": RoboDef(
         chave="vigia_ingest_bling",
-        nome="Pedido do Bling que não entra",
+        nome="Vigia de Importação Pedido DaVinci",
         descricao=(
             "Pedido cujo webhook do Bling falhou em todas as tentativas e que "
             "continua fora do DaVinci — ninguém vê na Margem, na NF nem na "
@@ -201,7 +207,7 @@ ROBOS: dict[str, RoboDef] = {
     ),
     "vigia_correios": RoboDef(
         chave="vigia_correios",
-        nome="Ocorrência grave nos Correios",
+        nome="Vigia Ocorrências Correio",
         descricao=(
             "Apreensão fiscal, extravio, roubo, avaria ou devolução ao remetente "
             "que o rastreio da Logística leu; 17track sem saldo (nada mais "
@@ -259,7 +265,7 @@ ROBOS: dict[str, RoboDef] = {
     ),
     "vigia_chamados": RoboDef(
         chave="vigia_chamados",
-        nome="Chamados: réplica e monitoramento",
+        nome="Vigia Chamados",
         descricao=(
             "Réplica ou abertura de chamado que não foi pra plataforma, caso que a "
             "consulta não consegue mais ler (o status da aba fica defasado) e "

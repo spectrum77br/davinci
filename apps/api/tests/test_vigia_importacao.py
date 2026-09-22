@@ -846,7 +846,7 @@ async def test_rodada_avisa_no_threema_quando_ligado_e_cala_em_silencioso(
     assert r["avisadas"] == 1 and len(_sem_threema) == 1
     texto, quem = _sem_threema[0]
     assert quem == ["ABCDEFGH"]
-    assert texto.startswith("Vigia de importação — 1 ocorrência:")
+    assert texto.startswith(f"{svc.ROBOS[ROBO].nome} — 1 ocorrência:")
     assert "Mercado Livre marquezini · 111 · Pago" in texto and vigia.ACAO_IMPORTAR in texto
 
 
@@ -923,4 +923,4 @@ async def test_startup_do_worker_sincroniza_o_catalogo(db, monkeypatch):
     await worker.startup({})
     db.expire_all()
     robo = await db.get(OuvidoriaRobo, ROBO)
-    assert robo is not None and robo.nome == "Vigia de importação"
+    assert robo is not None and robo.nome == svc.ROBOS[ROBO].nome
