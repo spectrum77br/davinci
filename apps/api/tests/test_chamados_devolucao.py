@@ -493,9 +493,10 @@ class _FakeTikTok:
 
 class _FakeShopee:
     """`entregue` = a SPX já deu o pacote de VOLTA como entregue (reverse_logistics_status
-    LOGISTICS_DELIVERY_DONE). Padrão True: desde 21/09 "Não recebido" com o pacote ainda
-    em trânsito NÃO abre disputa pela API (vai pro robô) — os testes antigos, que
-    esperam a disputa, representam o pacote já entregue."""
+    LOGISTICS_DELIVERY_DONE). Desde 22/09 "Não recebido" COM pacote de volta não abre
+    disputa pela API em estado nenhum (vai sempre pro robô do Seller Center), e o que
+    `entregue` muda é só o texto da tarefa e a nota do histórico — os testes de disputa
+    usam outro motivo. Ver tests/test_chamados_nao_recebido_shopee.py."""
 
     ENTREGUE_EM = 1789567860  # 16/09/2026 11:11 BRT
 
@@ -698,7 +699,8 @@ async def test_shopee_disputa_com_modulos_de_foto(client, make_user, auth_as, db
     assert [m["module_index"] for m in d["image_list"]] == [1, 2]
     assert d["image_list"][0]["image_url"] == ["https://fileproxy/dano.jpg"]
     assert d["image_list"][0]["requirement"] == "Unboxing photo with AWB"
-    # não recebido: sem foto obrigatória, motivo "did not receive" (81)
+    # 22/09: "não recebido" com pacote de volta não abre disputa nenhuma — nem o
+    # motivo 81 é consultado; a abertura vira tarefa do robô do Seller Center
     await _seed_pedido(db, user, numero="294261", numeroloja="2609045AM9GKAR",
                        platform="shopee", conta="atv", loja="88")
     db.add(DevolucaoRastreio(pedido_bling="294261", devolucao_id_auto="2609RSN002", fonte_auto="shopee"))
@@ -708,8 +710,10 @@ async def test_shopee_disputa_com_modulos_de_foto(client, make_user, auth_as, db
         json={"conta": "atv", "pedido_bling": "294261", "pedido_marketplace": "2609045AM9GKAR",
               "condicao_produto": "Não devolvido", "motivo_devolucao": "Não recebido"},
     )
-    assert r2.json()["chamado_ml_status"] == "enviada", r2.json()
-    assert fake.disputes[-1]["reason"] == 81 and fake.disputes[-1]["image_list"] is None
+    assert r2.json()["chamado_ml_status"] == "pendente" and r2.json()["chamado_ml_erro"] is None, r2.json()
+    assert len(fake.disputes) == 1  # só a do dano
+    ch2 = (await db.execute(select(Chamado).where(Chamado.pedido_bling == "294261"))).scalar_one()
+    assert ch2.canal == "robo"
 
 
 async def test_amazon_sem_api_fica_registrado(client, make_user, auth_as, db, ml):
@@ -892,8 +896,13 @@ async def test_shopee_acha_return_sn_varrendo_a_api(client, make_user, auth_as, 
               "condicao_produto": "Não devolvido", "motivo_devolucao": "Não recebido"},
     )
     assert r.status_code == 201, r.text
-    assert r.json()["chamado_ml_status"] == "enviada", r.json()
-    assert fake.disputes[-1]["return_sn"] == "2608310QMDCH65V"
+    # "Não recebido" vai pro robô (22/09) — o return_sn achado na varredura aparece
+    # na nota do histórico, já que `_encaminhar_robo` limpa o nº do chamado
+    assert r.json()["chamado_ml_status"] == "pendente" and r.json()["chamado_ml_erro"] is None, r.json()
+    assert fake.disputes == []
+    ch = (await db.execute(select(Chamado).where(Chamado.pedido_bling == "292618"))).scalar_one()
+    assert ch.canal == "robo" and ch.chamado is None
+    assert any("Pacote da devolução 2608310QMDCH65V" in t for t in await _sistema_txts(db, ch.id))
     assert chamadas and all(b - a <= 15 * 86400 for a, b in chamadas)
 
 
@@ -1017,7 +1026,6 @@ async def test_sync_shopee_prova_extra_e_compensacao(client, make_user, auth_as,
     estado = {"status": "SELLER_DISPUTE", "proof": "PENDING", "comp": "PENDING_REQUEST"}
 
     async def _det(return_sn):
-        # 21/09: "Não recebido" só abre a disputa pela API com o pacote de volta ENTREGUE
         return {"return_sn": return_sn, "status": estado["status"], "return_solution": 0,
                 "needs_logistics": True, "reverse_logistics_status": "LOGISTICS_DELIVERY_DONE",
                 "update_time": _FakeShopee.ENTREGUE_EM,
@@ -1036,16 +1044,26 @@ async def test_sync_shopee_prova_extra_e_compensacao(client, make_user, auth_as,
     await db.commit()
     estado["status"] = "ACCEPTED"
     estado["proof"] = ""
+    # 22/09: a disputa pela API precisa de foto (e "Não recebido" com pacote de volta
+    # nem disputa mais) — o caso aqui é um dano, aberto com a foto do dano
     r = await client.post(
         "/api/devolutions",
         json={"conta": "mega", "pedido_bling": "292620", "pedido_marketplace": "260827SYNC01",
-              "condicao_produto": "Não devolvido", "motivo_devolucao": "Não recebido"},
+              "condicao_produto": "Não devolvido", "motivo_devolucao": "Danificado (Outros)"},
     )
-    assert r.json()["chamado_ml_status"] == "enviada", r.json()
+    assert r.json()["chamado_ml_erro"] == "devolucao_sem_foto", r.json()
+    up0 = await client.post(
+        f"/api/devolutions/{r.json()['id']}/anexos",
+        files={"file": ("dano.jpg", PNG_1PX, "image/jpeg")},
+    )
+    assert up0.json()["chamado_ml_status"] == "enviada", up0.json()
     ch = (await db.execute(select(Chamado).where(Chamado.pedido_bling == "292620"))).scalar_one()
     estado["status"] = "SELLER_DISPUTE"
     estado["proof"] = "PENDING"
-    # sem foto na devolução: registra o pedido de prova e avisa que falta foto
+    # a operadora apaga a foto da linha (subiu errada) → a devolução fica sem foto:
+    # o pedido de prova é registrado e o histórico avisa que não há o que subir
+    rm = await client.delete(f"/api/devolutions/anexos/{up0.json()['anexos'][0]['id']}")
+    assert rm.status_code == 204, rm.text
     s1 = await sync.sync_respostas(db)
     assert s1["novos"] == 2
     txts = await _recebidas(db, ch.id)
@@ -1142,8 +1160,6 @@ async def _chamado_shopee_sync(client, make_user, auth_as, db, monkeypatch, *, n
     fake = _FakeShopee()
 
     async def _det(return_sn):
-        # 21/09: o lançamento é "Não recebido" — a disputa pela API só sai com o pacote
-        # de volta ENTREGUE pela SPX (o `det` do teste pode sobrescrever)
         return {"return_sn": return_sn, "return_solution": 0, "needs_logistics": True,
                 "order_sn": numeroloja, "seller_proof": {"seller_proof_status": ""},
                 "reverse_logistics_status": "LOGISTICS_DELIVERY_DONE", **det}
@@ -1163,12 +1179,19 @@ async def _chamado_shopee_sync(client, make_user, auth_as, db, monkeypatch, *, n
                        platform="shopee", conta="mega", loja="90")
     db.add(DevolucaoRastreio(pedido_bling=numero, devolucao_id_auto=f"2608{numero}", fonte_auto="shopee"))
     await db.commit()
+    # 22/09: só um motivo que ainda disputa pela API serve de cenário aqui — o
+    # "Não recebido" com pacote de volta sai pelo robô e nunca fica canal `api`
     r = await client.post(
         "/api/devolutions",
         json={"conta": "mega", "pedido_bling": numero, "pedido_marketplace": numeroloja,
-              "condicao_produto": "Não devolvido", "motivo_devolucao": "Não recebido"},
+              "condicao_produto": "Não devolvido", "motivo_devolucao": "Danificado (Outros)"},
     )
-    assert r.json()["chamado_ml_status"] == "enviada", r.json()
+    assert r.json()["chamado_ml_erro"] == "devolucao_sem_foto", r.json()
+    up = await client.post(
+        f"/api/devolutions/{r.json()['id']}/anexos",
+        files={"file": ("dano.jpg", PNG_1PX, "image/jpeg")},
+    )
+    assert up.json()["chamado_ml_status"] == "enviada", up.json()
     return (await db.execute(select(Chamado).where(Chamado.pedido_bling == numero))).scalar_one()
 
 
@@ -1189,7 +1212,7 @@ async def test_sync_shopee_br_perde_pelo_escrow_com_carencia(client, make_user, 
     ch = await _chamado_shopee_sync(client, make_user, auth_as, db, monkeypatch,
                                     numero="292630", numeroloja="260827SYNC30", det=det, escrow=escrow)
     # disputa registrada, comprador ainda não reembolsado → nada decidido
-    det["dispute_reason"] = ["Did not receive the return product"]
+    det["dispute_reason"] = ["Received return products with physical damage"]
     s = await sync.sync_respostas(db)
     assert s["verificados"] == 1 and s["encerrados"] == 0
     await db.refresh(ch)
@@ -1353,10 +1376,12 @@ async def test_shopee_prazo_vencido_falha_com_codigo_claro(client, make_user, au
                        platform="shopee", conta="barbosa", loja="88")
     db.add(DevolucaoRastreio(pedido_bling="291145", devolucao_id_auto="2608280G472BFQH", fonte_auto="shopee"))
     await db.commit()
+    # 22/09: o lançamento aqui é um dano — "Não recebido" com pacote de volta nem
+    # consulta os motivos da Shopee, então não é por ele que se vê o prazo vencido
     r = await client.post(
         "/api/devolutions",
         json={"conta": "barbosa", "pedido_bling": "291145", "pedido_marketplace": "260819PCCEKKV5",
-              "condicao_produto": "Não devolvido", "motivo_devolucao": "Não recebido"},
+              "condicao_produto": "Não devolvido", "motivo_devolucao": "Danificado (Outros)"},
     )
     assert r.status_code == 201, r.text
     assert r.json()["chamado_ml_status"] == "falhou"
@@ -1371,17 +1396,33 @@ async def test_shopee_prazo_vencido_falha_com_codigo_claro(client, make_user, au
     r2 = await client.post(
         "/api/devolutions",
         json={"conta": "barbosa", "pedido_bling": "291146", "pedido_marketplace": "260819PCCEKKV6",
-              "condicao_produto": "Não devolvido", "motivo_devolucao": "Não recebido"},
+              "condicao_produto": "Não devolvido", "motivo_devolucao": "Danificado (Outros)"},
     )
     assert r2.status_code == 201, r2.text
     assert r2.json()["chamado_ml_status"] == "pendente"
     assert r2.json()["chamado_ml_erro"] == "shopee_motivo_indisponivel"
+    # e o mesmo caso em "Não recebido" nem chega no prazo: sai pro robô na hora
+    fake.due_passado = True
+    await _seed_pedido(db, user, numero="291147", numeroloja="260819PCCEKKV7",
+                       platform="shopee", conta="barbosa", loja="88")
+    db.add(DevolucaoRastreio(pedido_bling="291147", devolucao_id_auto="2608280G472BFR0", fonte_auto="shopee"))
+    await db.commit()
+    r3 = await client.post(
+        "/api/devolutions",
+        json={"conta": "barbosa", "pedido_bling": "291147", "pedido_marketplace": "260819PCCEKKV7",
+              "condicao_produto": "Não devolvido", "motivo_devolucao": "Não recebido"},
+    )
+    assert r3.status_code == 201, r3.text
+    assert r3.json()["chamado_ml_status"] == "pendente" and r3.json()["chamado_ml_erro"] is None, r3.json()
+    ch3 = (await db.execute(select(Chamado).where(Chamado.pedido_bling == "291147"))).scalar_one()
+    assert ch3.canal == "robo" and fake.disputes == []
 
 
-async def test_shopee_modulo_obrigatorio_sem_foto_fica_pendente(client, make_user, auth_as, db, ml, monkeypatch):
-    """Motivo 'Não recebido' não exige foto na tela, mas se o motivo da Shopee
-    tem módulo obrigatório a disputa sem image_list é recusada ("mandatory
-    module index is missing") — melhor esperar a foto."""
+async def test_shopee_nao_recebido_com_modulo_obrigatorio_vai_pro_robo(client, make_user, auth_as, db, ml, monkeypatch):
+    """289462 (07/09): o motivo 81 da Shopee vinha com módulo de evidência
+    obrigatório e a disputa sem `image_list` era recusada ("mandatory module index
+    is missing"); o disparo ficava "esperando foto" pra sempre. Desde 22/09 o
+    "Não recebido" com pacote de volta nem consulta os motivos — vai pro robô."""
     from app.models import DevolucaoRastreio
 
     user = await make_user(permissions=_perms())
@@ -1389,8 +1430,7 @@ async def test_shopee_modulo_obrigatorio_sem_foto_fica_pendente(client, make_use
     fake = _FakeShopee()
 
     async def _reasons(return_sn):
-        return [{"dispute_reason": 81, "dispute_reason_text": "Did not receive the return product",
-                 "evidence_module_list": [{"module_index": 1, "requirement": "Proof", "is_required": True}]}]
+        raise AssertionError("get_return_dispute_reason não pode ser chamado em 'Não recebido'")
 
     fake.get_return_dispute_reason = _reasons
 
@@ -1409,8 +1449,11 @@ async def test_shopee_modulo_obrigatorio_sem_foto_fica_pendente(client, make_use
     )
     assert r.status_code == 201, r.text
     assert r.json()["chamado_ml_status"] == "pendente"
-    assert r.json()["chamado_ml_erro"] == "devolucao_sem_foto"
+    assert r.json()["chamado_ml_erro"] is None, r.json()
     assert fake.disputes == []
+    ch = (await db.execute(select(Chamado).where(Chamado.pedido_bling == "289462"))).scalar_one()
+    ab = await _abertura(db, ch.id)
+    assert ch.canal == "robo" and ab.canal == "robo" and ab.status == "pendente"
 
 
 async def test_shopee_replica_manual_reabre_e_depois_so_registra(client, make_user, auth_as, db, ml, monkeypatch):
@@ -1428,28 +1471,32 @@ async def test_shopee_replica_manual_reabre_e_depois_so_registra(client, make_us
                        platform="shopee", conta="barbosa", loja="88")
     db.add(DevolucaoRastreio(pedido_bling="291835", devolucao_id_auto="2608290KE9Y7XMX", fonte_auto="shopee"))
     await db.commit()
+    # dano (22/09: "Não recebido" com pacote de volta não disputa mais pela API — esse
+    # caminho está em test_chamados_nao_recebido_shopee.py)
     r = await client.post(
         "/api/devolutions",
         json={"conta": "barbosa", "pedido_bling": "291835", "pedido_marketplace": "2608221NWJUKS0",
-              "condicao_produto": "Não devolvido", "motivo_devolucao": "Não recebido"},
+              "condicao_produto": "Não devolvido", "motivo_devolucao": "Danificado (Outros)"},
     )
     assert r.json()["chamado_ml_status"] == "pendente", r.json()
     assert r.json()["chamado_ml_erro"] == "shopee_aguardando_pacote"
+    up = await client.post(
+        f"/api/devolutions/{r.json()['id']}/anexos",
+        files={"file": ("dano.jpg", PNG_1PX, "image/jpeg")},
+    )
+    assert up.json()["chamado_ml_erro"] == "shopee_aguardando_pacote", up.json()
     ch = (await db.execute(select(Chamado).where(Chamado.pedido_bling == "291835"))).scalar_one()
     # a Shopee liberou; o operador responde à mão → reabre com o texto dele
     fake.status = "ACCEPTED"
     fake.get_return_detail = _FakeShopee(status="ACCEPTED").get_return_detail
     rep = await client.post(
         f"/api/chamados/{ch.id}/mensagens",
-        data={"texto": "Pacote não chegou até hoje, segue rastreio."},
+        data={"texto": "Produto voltou com a tampa quebrada, segue foto."},
     )
     assert rep.status_code == 201, rep.text
     assert rep.json()["status"] == "enviada", rep.json()
-    # 21/09: em "Não recebido" o texto da disputa é o FACTUAL da SPX (entrega + rastreio);
-    # o que o operador digitou entra como observação, não substitui
     enviado = fake.disputes[-1]["text"]
-    assert enviado.startswith("A SPX registra a entrega do pacote de devolução (rastreio BR2609RSN) em 16/09/2026 11:11"), enviado
-    assert "Observação: Pacote não chegou até hoje, segue rastreio." in enviado
+    assert enviado == "Produto voltou com a tampa quebrada, segue foto.", enviado
     ab = await _abertura(db, ch.id)
     await db.refresh(ab)
     assert ab.status == "enviada" and ab.texto == enviado

@@ -21,15 +21,16 @@ da devolução recebida com problema:
 - **Shopee**: disputa (`POST /api/v2/returns/dispute` com motivo de
   `get_return_dispute_reason` + fotos por módulo de evidência); a partir do
   pacote entregue/aceito (status ACCEPTED, compensação pendente).
-  Motivo "Não recebido" (o pacote de VOLTA não chegou — Vinicius 21/09,
-  medido em produção: 0 ganhas em 2 disputas abertas com o pacote ainda em
-  trânsito) se decide pela SPX: perna reversa NÃO entregue → sem disputa pela
-  API, o chamado vai direto pro robô abrir a requisição no Seller Center;
-  entregue → disputa "não recebi" com texto FACTUAL (`_texto_nao_recebido`:
-  data da entrega, rastreio, pedido; sem cartão do vídeo, sem "comprovante da
-  expedição"). Módulo de evidência quebrado (série 81, module_index 0) → robô.
-  Só reembolso (pelo DETALHE do caso, não pela linha do Acompanhamento) não
-  tem pacote de volta e segue como sempre, com o cartão do vídeo como prova.
+  Motivo "Não recebido" com pacote de VOLTA NUNCA vai pela disputa (Vinicius
+  22/09; medido: 4 disputas "não recebi" pela API, 0 ganhas, R$ 406,10 pro
+  comprador — e a disputa é tiro único por devolução, então a errada queima a
+  certa, como no 293460): a abertura vira tarefa do robô no Assistente do
+  Vendedor, entregue ou não pela SPX, com o texto FACTUAL
+  (`_texto_nao_recebido`: data da entrega, rastreio, pedido; sem cartão do
+  vídeo, sem "comprovante da expedição"). Só reembolso (pelo DETALHE do caso,
+  não pela linha do Acompanhamento) não tem pacote de volta — ali "não recebi"
+  é a alegação do COMPRADOR sobre a ida e a disputa segue pela API, com o
+  cartão do vídeo como prova.
 - **Amazon** (e demais): NÃO tem API — SAFE-T só no Seller Central. Fica
   registrado na aba com aviso de abrir na mão.
 
@@ -1795,7 +1796,6 @@ _SHOPEE_REVERSA_PT: dict[str, str] = {
     "LOGISTICS_LOST": "extraviado",
     "LOGISTICS_RETURNED": "devolvido ao remetente",
 }
-_MODULO_QUEBRADO_MSG = "mandatory module index"
 
 
 def _fmt_brt_ano(v: object) -> str:
@@ -1889,43 +1889,28 @@ def _texto_nao_recebido(
     return "\n".join(linhas)
 
 
-def _nota_robo_nao_recebido_sem_entrega(det: dict, return_sn: str) -> str:
-    """Nota do histórico quando a SPX ainda não deu o pacote de volta como entregue —
-    "sem entrega registrada" e não "em trânsito", porque o status pode ser
-    extraviado / falha na coleta / não iniciado."""
-    return (
-        f"Pacote da devolução {return_sn} sem entrega registrada pela SPX "
-        f"({_reversa_legivel(det)}): sem disputa pela API — o robô abre a requisição no "
-        "Seller Center (Minhas Requisições → Solicitação de Análise de Pedido); o protocolo "
-        "aparece aqui quando ele abrir."
-    )
-
-
-def _nota_robo_modulo_quebrado(det: dict, return_sn: str) -> str:
+def _nota_robo_nao_recebido(
+    det: dict, return_sn: str, entregue_em: datetime | None
+) -> str:
+    """Nota do histórico do "não recebi" com pacote de volta — que desde 22/09 NUNCA
+    vai pela disputa da API (0 ganhas em 4). Conta o que a SPX diz: entregue (e mesmo
+    assim não chegou) ou sem entrega registrada — "sem entrega registrada" e não "em
+    trânsito", porque o status pode ser extraviado / falha na coleta / não iniciado."""
+    if entregue_em is not None:
+        situacao = (
+            f"SPX deu como entregue em {_fmt_brt_ano(entregue_em)}, mas o pacote não "
+            "chegou até nós"
+        )
+    else:
+        situacao = f"sem entrega registrada pela SPX ({_reversa_legivel(det)})"
     prazo = _fmt_brt(det.get("return_seller_due_date"))
     return (
-        f"A Shopee exige evidência num módulo que a API não aceita (devolução {return_sn}) "
-        "— contestar pelo Seller Center"
-        + (f" antes de {prazo}" if prazo else "")
-        + ". Enviado pro robô; o protocolo aparece aqui quando ele abrir."
+        f"Pacote da devolução {return_sn}: {situacao}. Sem disputa pela API — "
+        "\"não recebi\" só pelo Assistente do Vendedor no Seller Center (a disputa é "
+        "tiro único e perde sempre nesse motivo). O robô abre a solicitação"
+        + (f"; prazo da Shopee: {prazo}" if prazo else "")
+        + "; o protocolo aparece aqui quando ele abrir."
     )
-
-
-def _modulo_quebrado(modulos: list[dict]) -> bool:
-    """Série 81 "não recebi" (medido 21/09): `evidence_module_list` vem
-    `[{module_index 0, requirement "live test", is_required true}]` e o POST
-    responde "Unable to raise dispute as mandatory module index is missing" —
-    não há como satisfazer pela API."""
-    for m in modulos:
-        if not m.get("is_required", True):
-            continue
-        try:
-            idx = int(m.get("module_index"))  # type: ignore[arg-type]
-        except (TypeError, ValueError):
-            return True
-        if idx <= 0:
-            return True
-    return False
 
 
 async def _cartao_nao_recebido_shopee(
@@ -2046,12 +2031,18 @@ async def _disparar_shopee(
     # return_solution 1 / needs_logistics false = só reembolso: não há pacote
     # voltando — a disputa é contra a alegação do comprador (fotos da expedição).
     so_reembolso = str(det.get("return_solution")) == "1" or det.get("needs_logistics") is False
+    # "Não recebido" COM pacote de volta nunca vira disputa (ver o bloco adiante):
+    # ele sai pelo robô, então também não espera o caso entrar nos estados em que a
+    # disputa caberia — a janela de contestação é de horas (293460: 6h28).
+    nao_recebido = motivo == MOTIVO_NAO_RECEBIDO and not so_reembolso
     if status in ("SELLER_DISPUTE", "JUDGING"):
         raise chamados_svc.ChamadoError("shopee_ja_contestada")
     if status in ("CLOSED", "CANCELLED"):
         raise chamados_svc.ChamadoError("shopee_devolucao_encerrada")
-    if status not in ("REQUESTED", "PROCESSING", "ACCEPTED") and not (
-        so_reembolso and status == "REFUND_PAID"
+    if (
+        status not in ("REQUESTED", "PROCESSING", "ACCEPTED")
+        and not (so_reembolso and status == "REFUND_PAID")
+        and not nao_recebido
     ):
         raise _PendenteError("shopee_aguardando_pacote")
     contestacao = det.get("dispute_reason") or []
@@ -2081,15 +2072,17 @@ async def _disparar_shopee(
     # medido ao vivo: vem "PENDING_REQUEST" (sem o prefixo COMPENSATION_ da doc)
     if comp_status.replace("COMPENSATION_", "") in ("REQUESTED", "APPROVED", "REJECTED"):
         raise chamados_svc.ChamadoError("shopee_ja_contestada")
-    # Vinicius 21/09 (medido em produção: 0 ganhas em 2 disputas abertas com o pacote
-    # ainda em trânsito): "Não recebido" com pacote de VOLTA se decide pela SPX. Perna
-    # reversa NÃO entregue → não abre a disputa nem espera: o robô abre a requisição
-    # no Seller Center com os fatos. Entregue → disputa "não recebi" pela API, mas com
-    # o texto factual (data da entrega + rastreio), sem cartão do vídeo e sem a
-    # observação interna colada. Só reembolso não tem pacote de volta: segue como
-    # sempre (cartão do vídeo como prova da ida) — e é o DETALHE que diz qual é o
-    # caso, não a linha do Acompanhamento.
-    nao_recebido = motivo == MOTIVO_NAO_RECEBIDO and not so_reembolso
+    # Vinicius 22/09: "quando o item é 'não recebi' não vai poder abrir pela disputa,
+    # somente por assistente do vendedor — estamos perdendo tudo". Medido em produção
+    # no dia: 4 disputas "não recebi" (id 46) abertas pela API, 0 ganhas, R$ 406,10
+    # reembolsados ao comprador; e em 3 delas a SPX JÁ dava a reversa como entregue —
+    # ou seja, o critério de 21/09 (entregue → disputa) teria evitado só 1 das 4. Pior:
+    # a disputa é TIRO ÚNICO por devolução (guardas de `shopee_ja_contestada` acima), e
+    # no 293460 a "não recebi" queimou a contestação de dano que valia R$ 148.
+    # Agora, com pacote de VOLTA, o motivo nunca chega no `client.dispute`: vira tarefa
+    # do robô no Seller Center, entregue ou não pela SPX. Só reembolso é outro caso —
+    # ali "não recebi" é a alegação do COMPRADOR sobre a IDA, a prova é o vídeo da
+    # expedição (cartão com QR) e a disputa continua pela API (motivos 1/41/53).
     if motivo == MOTIVO_NAO_RECEBIDO:
         com_cartao = await _cartao_nao_recebido_shopee(
             session, dev, fotos, anexos or [],
@@ -2107,8 +2100,7 @@ async def _disparar_shopee(
         )
         if msg is not None:
             msg.texto = texto
-        if entregue_em is None:
-            raise _RoboError(texto, _nota_robo_nao_recebido_sem_entrega(det, return_sn))
+        raise _RoboError(texto, _nota_robo_nao_recebido(det, return_sn, entregue_em))
     reasons = await client.get_return_dispute_reason(return_sn)
     if not reasons:
         if so_reembolso and status in ("ACCEPTED", "REFUND_PAID"):
@@ -2136,14 +2128,14 @@ async def _disparar_shopee(
     modulos = [
         m for m in (escolhido.get("evidence_module_list") or []) if isinstance(m, dict)
     ]
-    # Módulo obrigatório de índice 0 (série 81 "não recebi", 21/09): a API nunca vai
-    # aceitar — esperar foto seria mentira. Vai pro robô contestar pelo Seller Center.
-    if nao_recebido and _modulo_quebrado(modulos):
-        raise _RoboError(texto, _nota_robo_modulo_quebrado(det, return_sn))
     # A Shopee exige foto em todo motivo "recebi com problema"; e disputa sem
     # `image_list` num motivo com módulo obrigatório é recusada ("Unable to
     # raise dispute as mandatory module index is missing", 289462 em 07/09).
-    # Sem foto, fica pendente esperando o operador anexar.
+    # Sem foto, fica pendente esperando o operador anexar. (O "não recebi" com pacote
+    # de volta não passa mais por aqui — sai pelo robô lá em cima; o que sobra do
+    # motivo é o só-reembolso, que prova a IDA com o cartão do vídeo. Ele continua
+    # podendo disputar sem imagem quando a Shopee não exige módulo: ficar `pendente`
+    # esperando uma foto que ninguém vai anexar seria mentira.)
     exige_foto = motivo != MOTIVO_NAO_RECEBIDO or any(
         m.get("is_required", True) for m in modulos
     )
@@ -2174,20 +2166,13 @@ async def _disparar_shopee(
     email = await _email_operador(session)
     if not email:
         raise chamados_svc.ChamadoError("shopee_sem_email")
-    try:
-        await client.dispute(
-            return_sn,
-            email=email,
-            dispute_reason_id=rid,
-            image_list=image_list or None,
-            text=texto,
-        )
-    except Exception as e:  # noqa: BLE001 — erro cru da API da Shopee
-        # O módulo quebrado pode escapar da checagem (lista sem `is_required`, índice
-        # que a Shopee mudou): o erro cru vira a mesma tarefa do robô, não `falhou`.
-        if nao_recebido and _MODULO_QUEBRADO_MSG in str(e).lower():
-            raise _RoboError(texto, _nota_robo_modulo_quebrado(det, return_sn)) from e
-        raise
+    await client.dispute(
+        return_sn,
+        email=email,
+        dispute_reason_id=rid,
+        image_list=image_list or None,
+        text=texto,
+    )
     nome_motivo = str(
         escolhido.get("dispute_reason_text")
         or escolhido.get("reason_text")

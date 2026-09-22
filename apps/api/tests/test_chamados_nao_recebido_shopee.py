@@ -1,16 +1,23 @@
 # ruff: noqa: E501
-"""Shopee, motivo "Não recebido" (o pacote de VOLTA não chegou) — Vinicius 21/09.
+"""Shopee, motivo "Não recebido" (o pacote de VOLTA não chegou) — Vinicius 21 e 22/09.
 
-Medido em produção: o disparo abria a disputa "não recebi" pela API com o pacote
-ainda em trânsito na SPX (0 ganhas em 2), colando a observação interna, prometendo
-"vídeo da expedição" e anexando o cartão com QR pro texto que a operadora digitou
-no Link envio só pra passar na trava. Decisão: diferenciar pela SPX —
-  - perna reversa NÃO entregue → sem disputa pela API: o robô abre a requisição no
-    Seller Center (mesmo mecanismo de `_RoboError` → `_encaminhar_robo`);
-  - entregue → disputa pela API com texto FACTUAL (data da entrega + rastreio), sem
-    cartão, sem "comprovante da expedição", sem imagem quando não há foto real;
-  - módulo de evidência quebrado (série 81, module_index 0) → robô;
+Em 21/09 o critério era a SPX: reversa entregue → disputa pela API; em trânsito →
+robô. Em 22/09 o dono fechou a porta de vez ("quando o item é 'não recebi' não vai
+poder abrir pela disputa, somente por assistente do vendedor — estamos perdendo
+tudo"): 4 disputas abertas pela API, 0 ganhas, e em 3 delas a SPX JÁ dava a reversa
+como entregue; e como a disputa é TIRO ÚNICO por devolução, a errada queima a certa
+(293460). Então, com pacote de VOLTA:
+  - entregue ou não, NUNCA sai `client.dispute`: a abertura vira tarefa do robô no
+    Seller Center (`_RoboError` → `_encaminhar_robo`, canal `robo`, `pendente`);
+  - o texto é o FACTUAL (`_texto_nao_recebido`: SPX + rastreio + pedido), sem cartão
+    do vídeo, sem "comprovante da expedição", com o que o operador digitou virando
+    observação; a nota do histórico conta se a SPX deu entrega ou não;
+  - nem o estado do return segura mais o caso (não espera "pacote chegar"), porque a
+    janela de contestação some em horas;
   - Link envio deixa de ser obrigatório nesse motivo e, quando vem, tem que ser URL.
+Só reembolso (return_solution 1 / needs_logistics false) é outro caso: ali "não
+recebi" é a alegação do COMPRADOR sobre a IDA e a disputa segue pela API com o
+cartão do vídeo como prova.
 """
 
 from __future__ import annotations
@@ -117,28 +124,39 @@ async def test_nao_recebido_em_transito_vai_direto_pro_robo_sem_disputa(client, 
     assert (await svc.processar_pendentes(db))["verificados"] == 0
 
 
-async def test_nao_recebido_entregue_abre_disputa_com_texto_factual_sem_imagem(client, make_user, auth_as, db, inline, monkeypatch):
+async def test_nao_recebido_entregue_tambem_vai_pro_robo_sem_disputa(client, make_user, auth_as, db, inline, monkeypatch):
+    """22/09: a SPX ter dado a reversa como ENTREGUE não muda mais nada — 3 das 4
+    disputas perdidas estavam assim. O texto factual vira a tarefa do robô, e a API
+    de motivos nem é consultada."""
     fake = _FakeShopee()  # entregue: LOGISTICS_DELIVERY_DONE em 16/09 11:11
+    chamadas = {"reasons": 0}
+    original = fake.get_return_dispute_reason
+
+    async def _reasons(return_sn):
+        chamadas["reasons"] += 1
+        return await original(return_sn)
+
+    fake.get_return_dispute_reason = _reasons
     r, _user = await _lancar(
         client, db, make_user, auth_as, monkeypatch, fake, numero="296002", sn="2609ATVNR002",
         link_envio="https://drive.x/video-296002", observacao="Portaria não recebeu nada.",
     )
-    assert r.json()["chamado_ml_status"] == "enviada", r.json()
-    assert len(fake.disputes) == 1
-    d = fake.disputes[0]
-    assert d["reason"] == 81 and d["image_list"] is None  # sem foto real → sem image_list
-    txt = d["text"]
+    assert r.json()["chamado_ml_status"] == "pendente" and r.json()["chamado_ml_erro"] is None, r.json()
+    assert fake.disputes == [] and chamadas["reasons"] == 0
+    ch = await _chamado_de(db, "296002")
+    ab = await _abertura(db, ch.id)
+    assert ch.canal == "robo" and ab.canal == "robo" and ab.status == "pendente" and ch.chamado is None
+    txt = ab.texto
     assert txt.startswith(ENTREGUE_TXT + HOJE + "."), txt
     assert "Pedido 2609ATVNR002 · SKU b001.26 · Mala Listrada tamanho 26." in txt
     assert "Observação: Portaria não recebeu nada." in txt
     assert txt.endswith("Solicitamos o comprovante de entrega (foto/assinatura), a apuração junto à transportadora e que o reembolso não seja liberado até a conclusão.")
     for proibido in ("QR code", "Comprovante da expedição", "vídeo", "foto(s) em anexo", "Solicitamos a análise do caso"):
         assert proibido not in txt, (proibido, txt)
-    # o histórico guarda o que foi enviado; chamado segue pela API
-    ch = await _chamado_de(db, "296002")
-    ab = await _abertura(db, ch.id)
-    assert ab.status == "enviada" and ab.canal == "api" and ab.texto == txt
-    assert ch.canal == "api" and ch.chamado == "2609296002RSN"
+    # a nota do histórico conta que a SPX deu entrega (e o pacote não chegou assim mesmo)
+    hist = await _sistema_txts(db, ch.id)
+    assert any("SPX deu como entregue em 16/09/2026 11:11, mas o pacote não chegou até nós" in t
+               and "Assistente do Vendedor" in t for t in hist), hist
     await _sem_cartao(db, ch.id)
     assert fake.converted == []
 
@@ -146,14 +164,17 @@ async def test_nao_recebido_entregue_abre_disputa_com_texto_factual_sem_imagem(c
 async def test_nao_recebido_entregue_sem_observacao_nao_tem_linha_vazia(client, make_user, auth_as, db, inline, monkeypatch):
     fake = _FakeShopee()
     r, _user = await _lancar(client, db, make_user, auth_as, monkeypatch, fake, numero="296003", sn="2609ATVNR003")
-    assert r.json()["chamado_ml_status"] == "enviada", r.json()
-    linhas = fake.disputes[0]["text"].split("\n")
+    assert r.json()["chamado_ml_status"] == "pendente" and r.json()["chamado_ml_erro"] is None, r.json()
+    ch = await _chamado_de(db, "296003")
+    linhas = (await _abertura(db, ch.id)).texto.split("\n")
     assert len(linhas) == 3 and not any(ln.startswith("Observação") for ln in linhas), linhas
 
 
-async def test_nao_recebido_modulo_zero_obrigatorio_vai_pro_robo_sem_post(client, make_user, auth_as, db, inline, monkeypatch):
-    """Série 81 medida 21/09: evidence_module_list [{module_index 0, "live test",
-    is_required}] — a API nunca aceita. Nada de POST nem de "esperando foto"."""
+async def test_nao_recebido_nota_do_historico_traz_o_prazo_da_shopee(client, make_user, auth_as, db, inline, monkeypatch):
+    """O `return_seller_due_date` entra na nota: o robô precisa saber até quando dá
+    pra abrir a solicitação no Seller Center. Módulo de evidência obrigatório (a
+    série 81 vinha com module_index 0, que a API nunca aceitava) não muda nada —
+    ninguém mais consulta os motivos nesse caso."""
     fake = _FakeShopee()
     due = 1789700000  # 17/09/2026 23:53 BRT
 
@@ -163,8 +184,7 @@ async def test_nao_recebido_modulo_zero_obrigatorio_vai_pro_robo_sem_post(client
         return det
 
     async def _reasons(return_sn):
-        return [{"dispute_reason": 81, "dispute_reason_text": "Did not receive the return product",
-                 "evidence_module_list": [{"module_index": 0, "requirement": "live test", "is_required": True}]}]
+        raise AssertionError("get_return_dispute_reason não pode ser chamado em 'Não recebido'")
 
     fake.get_return_detail = _det
     fake.get_return_dispute_reason = _reasons
@@ -176,14 +196,16 @@ async def test_nao_recebido_modulo_zero_obrigatorio_vai_pro_robo_sem_post(client
     assert ch.canal == "robo" and ab.canal == "robo" and ab.status == "pendente"
     assert ab.texto.startswith(ENTREGUE_TXT), ab.texto  # o mesmo texto factual
     hist = await _sistema_txts(db, ch.id)
-    assert any("exige evidência num módulo que a API não aceita" in t and "antes de 17/09 23:53" in t for t in hist), hist
+    assert any("prazo da Shopee: 17/09 23:53" in t and "tiro único" in t for t in hist), hist
 
 
-async def test_nao_recebido_erro_cru_do_modulo_vai_pro_robo_nao_falha(client, make_user, auth_as, db, inline, monkeypatch):
+async def test_nao_recebido_nunca_chama_dispute_e_outro_motivo_ainda_falha(client, make_user, auth_as, db, inline, monkeypatch):
+    """O `dispute` explodiria se fosse chamado: em "Não recebido" ele não é. Em outro
+    motivo o erro cru da Shopee continua virando `falhou` com o erro."""
     fake = _FakeShopee()
 
     async def _dispute(return_sn, **kw):
-        raise RuntimeError("shopee_dispute error=error_param msg=Unable to raise dispute as mandatory module index is missing")
+        raise AssertionError("dispute não pode ser chamado em 'Não recebido'")
 
     fake.dispute = _dispute
     r, _user = await _lancar(client, db, make_user, auth_as, monkeypatch, fake, numero="296005", sn="2609ATVNR005")
@@ -191,15 +213,15 @@ async def test_nao_recebido_erro_cru_do_modulo_vai_pro_robo_nao_falha(client, ma
     ch = await _chamado_de(db, "296005")
     ab = await _abertura(db, ch.id)
     assert ch.canal == "robo" and ab.status == "pendente" and ab.texto.startswith(ENTREGUE_TXT)
-    assert any("módulo que a API não aceita" in t for t in await _sistema_txts(db, ch.id))
-    # outro erro cru continua `falhou` com o erro
+    # outro motivo (Golpe, com o cartão do vídeo como foto): erro cru continua `falhou`
     fake2 = _FakeShopee()
 
     async def _dispute2(return_sn, **kw):
         raise RuntimeError("shopee_dispute error=returnsn.illegal")
 
     fake2.dispute = _dispute2
-    r2, _u = await _lancar(client, db, make_user, auth_as, monkeypatch, fake2, numero="296006", sn="2609ATVNR006")
+    r2, _u = await _lancar(client, db, make_user, auth_as, monkeypatch, fake2, numero="296006", sn="2609ATVNR006",
+                           motivo="Golpe", link_envio="https://drive.x/video-296006")
     assert r2.json()["chamado_ml_status"] == "falhou" and "returnsn.illegal" in r2.json()["chamado_ml_erro"]
 
 
@@ -257,7 +279,8 @@ async def test_link_envio_obrigatorio_exclui_nao_recebido(client, make_user, aut
     # pela rota: mala + Não recebido sem link → 201 (antes: 422 link_envio_obrigatorio)
     fake = _FakeShopee()
     r, _user = await _lancar(client, db, make_user, auth_as, monkeypatch, fake, numero="296009", sn="2609ATVNR009")
-    assert r.json()["link_envio"] is None and r.json()["chamado_ml_status"] == "enviada"
+    assert r.json()["link_envio"] is None and r.json()["chamado_ml_status"] == "pendente"
+    assert r.json()["chamado_ml_erro"] is None and fake.disputes == []  # tarefa do robô
     # golpe + mala sem link segue travado
     r2 = await client.post(
         "/api/devolutions",
@@ -297,14 +320,11 @@ def test_texto_nao_recebido_sem_rastreio_e_status_desconhecido():
     assert txt.split("\n")[0] == "O pacote da devolução (sem código de rastreio) ainda não chegou até nós — situação na SPX: LOGISTICS_FOO."
     assert svc._reversa_legivel({}) == "sem movimentação registrada"
     assert svc._reversa_legivel({"reverse_logistics_status": "LOGISTICS_REQUEST_CREATED"}) == "aguardando postagem"
-    assert svc._modulo_quebrado([{"module_index": 1, "is_required": True}]) is False
-    assert svc._modulo_quebrado([{"module_index": 0, "is_required": True}]) is True
-    assert svc._modulo_quebrado([{"module_index": None}]) is True
-    assert svc._modulo_quebrado([{"module_index": 0, "is_required": False}]) is False
 
 
-async def test_nao_recebido_entregue_com_foto_real_manda_a_foto(client, make_user, auth_as, db, inline, monkeypatch):
-    """Foto REAL na linha (ex. print do rastreio) vai como imagem; o texto factual não muda."""
+async def test_nao_recebido_entregue_com_foto_real_leva_a_foto_pro_robo(client, make_user, auth_as, db, inline, monkeypatch):
+    """Foto REAL na linha (ex. print do rastreio) vai junto na tarefa do robô — nada
+    de `convert_image`, que só serve pra disputa da API. O texto factual não muda."""
     fake = _FakeShopee()
     # lança sem motivo de chamado, anexa a foto e só então marca "Não recebido"
     r, _user = await _lancar(client, db, make_user, auth_as, monkeypatch, fake, numero="296011", sn="2609ATVNR011",
@@ -314,11 +334,15 @@ async def test_nao_recebido_entregue_com_foto_real_manda_a_foto(client, make_use
                            files={"file": ("rastreio.png", PNG_1PX, "image/png")})
     assert up.status_code == 201, up.text
     p = await client.patch(f"/api/devolutions/{r.json()['id']}", json={"motivo_devolucao": "Não recebido"})
-    assert p.status_code == 200 and p.json()["chamado_ml_status"] == "enviada", p.text
-    d = fake.disputes[0]
-    assert fake.converted == [("2609296011RSN", "rastreio.png")]
-    assert d["image_list"] == [{"module_index": 1, "requirement": "", "image_url": ["https://fileproxy/rastreio.png"]}]
-    assert d["text"].startswith(ENTREGUE_TXT) and "foto(s) em anexo" not in d["text"]
+    assert p.status_code == 200 and p.json()["chamado_ml_status"] == "pendente", p.text
+    assert p.json()["chamado_ml_erro"] is None, p.json()
+    assert fake.disputes == [] and fake.converted == []
+    ch = await _chamado_de(db, "296011")
+    ab = await _abertura(db, ch.id)
+    assert ch.canal == "robo" and ab.canal == "robo"
+    assert ab.texto.startswith(ENTREGUE_TXT) and "foto(s) em anexo" not in ab.texto
+    robo = (await db.execute(select(ChamadoAnexo).where(ChamadoAnexo.chamado_id == ch.id))).scalars().all()
+    assert [a.filename for a in robo] == ["rastreio.png"]
 
 
 # ---- Revisão 21/09: o cartão do vídeo é barrado DENTRO de `_disparar_shopee`, pelo
@@ -343,24 +367,24 @@ async def _cartao_persistido_com_golpe(client, db, make_user, auth_as, monkeypat
     return r.json()["id"]
 
 
-async def test_cartao_persistido_com_foto_real_nao_sobe_na_disputa_nao_recebi(client, make_user, auth_as, db, inline, monkeypatch):
+async def test_cartao_persistido_com_foto_real_entregue_vai_pro_robo_sem_cartao(client, make_user, auth_as, db, inline, monkeypatch):
     fake = _FakeShopee(status="")  # entregue por padrão; status vazio segura a abertura
     dev_id = await _cartao_persistido_com_golpe(client, db, make_user, auth_as, monkeypatch, fake,
                                                 numero="296012", sn="2609ATVNR012")
     fake.status = "ACCEPTED"
     p = await client.patch(f"/api/devolutions/{dev_id}", json={"motivo_devolucao": "Não recebido"})
-    assert p.status_code == 200 and p.json()["chamado_ml_status"] == "enviada", p.text
-    # só a foto real sobe; o cartão (QR pro Link envio) não vai nem fica na linha
-    assert fake.converted == [("2609296012RSN", "rastreio.png")]
-    d = fake.disputes[0]
-    assert d["reason"] == 81 and d["image_list"] == [{"module_index": 1, "requirement": "", "image_url": ["https://fileproxy/rastreio.png"]}]
-    assert d["text"].startswith(ENTREGUE_TXT) and "QR code" not in d["text"]
+    assert p.status_code == 200 and p.json()["chamado_ml_status"] == "pendente", p.text
+    assert p.json()["chamado_ml_erro"] is None, p.json()
+    # nada sobe pela API; o cartão (QR pro Link envio) não vai nem fica na linha
+    assert fake.disputes == [] and fake.converted == []
     ch = await _chamado_de(db, "296012")
+    ab = await _abertura(db, ch.id)
+    assert ch.canal == "robo" and ab.canal == "robo"
+    assert ab.texto.startswith(ENTREGUE_TXT) and "QR code" not in ab.texto
     await _sem_cartao(db, ch.id)
     assert [a.filename for a in (await db.execute(select(DevolucaoAnexo))).scalars().all()] == ["rastreio.png"]
     robo = (await db.execute(select(ChamadoAnexo).where(ChamadoAnexo.chamado_id == ch.id))).scalars().all()
     assert [a.filename for a in robo] == ["rastreio.png"]
-    assert any("(1 foto(s))" in t for t in await _sistema_txts(db, ch.id))
 
 
 async def test_cartao_persistido_com_foto_real_em_transito_nao_vai_pro_robo(client, make_user, auth_as, db, inline, monkeypatch):
@@ -396,11 +420,12 @@ async def test_linha_fraude_mas_shopee_com_pacote_de_volta_nao_manda_cartao(clie
         rastreio={"devolucao_tipo_auto": "REFUND", "fila_manual": "fraude"},
         link_envio="https://drive.x/video-296014",
     )
-    assert r.json()["chamado_ml_status"] == "enviada", r.json()
-    d = fake.disputes[0]
-    assert d["reason"] == 81 and d["image_list"] is None and d["text"].startswith(ENTREGUE_TXT)
-    assert "QR code" not in d["text"] and fake.converted == []
-    await _sem_cartao(db, (await _chamado_de(db, "296014")).id)
+    assert r.json()["chamado_ml_status"] == "pendente" and r.json()["chamado_ml_erro"] is None, r.json()
+    ch = await _chamado_de(db, "296014")
+    ab = await _abertura(db, ch.id)
+    assert ch.canal == "robo" and fake.disputes == [] and fake.converted == []
+    assert ab.texto.startswith(ENTREGUE_TXT) and "QR code" not in ab.texto
+    await _sem_cartao(db, ch.id)
     # em trânsito: a tarefa do robô também sai sem cartão
     fake2 = _FakeShopee(entregue=False)
 
@@ -454,19 +479,30 @@ async def test_so_reembolso_sem_tipo_na_linha_manda_o_cartao_na_hora(client, mak
     assert len(fake.disputes) == 2
 
 
-def test_reversa_legivel_cobre_nao_iniciado_e_entregue():
+def test_reversa_legivel_e_nota_do_robo_com_e_sem_entrega():
+    """A nota do histórico conta histórias diferentes: com entrega registrada pela SPX
+    (e o pacote sem chegar assim mesmo) e sem entrega registrada — "sem entrega
+    registrada" e não "em trânsito", que o status pode ser extravio/falha na coleta."""
     assert svc._reversa_legivel({"reverse_logistics_status": "LOGISTICS_NOT_STARTED"}) == "não iniciado"
     assert svc._reversa_legivel({"reverse_logistics_status": "LOGISTICS_DELIVERY_DONE"}) == "entregue"
     det = {"reverse_logistics_status": "LOGISTICS_LOST"}
-    nota = svc._nota_robo_nao_recebido_sem_entrega(det, "2609X")
-    assert nota.startswith("Pacote da devolução 2609X sem entrega registrada pela SPX (extraviado):")
-    assert "em trânsito" not in nota
+    nota = svc._nota_robo_nao_recebido(det, "2609X", None)
+    assert nota.startswith("Pacote da devolução 2609X: sem entrega registrada pela SPX (extraviado).")
+    assert "em trânsito" not in nota and "Assistente do Vendedor" in nota
+    assert "prazo da Shopee" not in nota  # sem return_seller_due_date, sem prazo na nota
+    entregue_em = datetime(2026, 9, 16, 14, 11, tzinfo=UTC)  # 11:11 BRT
+    nota2 = svc._nota_robo_nao_recebido({**det, "return_seller_due_date": 1789700000}, "2609X", entregue_em)
+    assert nota2.startswith(
+        "Pacote da devolução 2609X: SPX deu como entregue em 16/09/2026 11:11, mas o pacote não chegou até nós."
+    ), nota2
+    assert "sem entrega registrada" not in nota2 and "prazo da Shopee: 17/09 23:53" in nota2
+    assert "Assistente do Vendedor" in nota2 and "tiro único" in nota2
 
 
-async def test_cartao_persistido_com_link_apagado_some_e_a_disputa_sai_sem_imagem(client, make_user, auth_as, db, inline, monkeypatch):
+async def test_cartao_persistido_com_link_apagado_some_e_a_tarefa_do_robo_sai_sem_foto(client, make_user, auth_as, db, inline, monkeypatch):
     """Cartão de rodada anterior e a operadora apagou o Link envio ao trocar o motivo:
     o cartão órfão some (apagado duas vezes na mesma sessão — `disparar` e
-    `_cartao_nao_recebido_shopee` — sem erro) e a disputa "não recebi" vai sem imagem."""
+    `_cartao_nao_recebido_shopee` — sem erro) e a tarefa do robô sai sem foto."""
     fake = _FakeShopee(status="")
     r, _user = await _lancar(
         client, db, make_user, auth_as, monkeypatch, fake, numero="296018", sn="2609ATVNR018",
@@ -476,9 +512,140 @@ async def test_cartao_persistido_com_link_apagado_some_e_a_disputa_sai_sem_image
     assert [a.filename for a in (await db.execute(select(DevolucaoAnexo))).scalars().all()] == [cartao.CARTAO_VIDEO_NOME]
     fake.status = "ACCEPTED"
     p = await client.patch(f"/api/devolutions/{r.json()['id']}", json={"motivo_devolucao": "Não recebido", "link_envio": ""})
-    assert p.status_code == 200 and p.json()["chamado_ml_status"] == "enviada", p.text
-    d = fake.disputes[0]
-    assert d["reason"] == 81 and d["image_list"] is None and d["text"].startswith(ENTREGUE_TXT)
-    assert fake.converted == []
+    assert p.status_code == 200 and p.json()["chamado_ml_status"] == "pendente", p.text
+    assert p.json()["chamado_ml_erro"] is None, p.json()
+    ch = await _chamado_de(db, "296018")
+    ab = await _abertura(db, ch.id)
+    assert ch.canal == "robo" and ab.texto.startswith(ENTREGUE_TXT)
+    assert fake.disputes == [] and fake.converted == []
     assert (await db.execute(select(DevolucaoAnexo))).scalars().all() == []
-    await _sem_cartao(db, (await _chamado_de(db, "296018")).id)
+    assert (await db.execute(select(ChamadoAnexo).where(ChamadoAnexo.chamado_id == ch.id))).scalars().all() == []
+    await _sem_cartao(db, ch.id)
+
+
+# ---- Buracos apontados na auditoria de 22/09: os caminhos que NÃO passam pelo
+# primeiro disparo da linha (réplica manual, reabertura de uma abertura `falhou`) e
+# os estados do return que antes ficavam presos em `shopee_aguardando_pacote`.
+
+
+async def test_replica_manual_no_chamado_do_robo_nao_abre_disputa(client, make_user, auth_as, db, inline, monkeypatch):
+    """A operadora responde pela aba num chamado "Não recebido" que já está com o
+    robô: a réplica entra na fila do robô e o `dispute` não é chamado."""
+    fake = _FakeShopee()
+    r, _user = await _lancar(client, db, make_user, auth_as, monkeypatch, fake, numero="296020", sn="2609ATVNR020")
+    assert r.json()["chamado_ml_status"] == "pendente" and r.json()["chamado_ml_erro"] is None, r.json()
+    ch = await _chamado_de(db, "296020")
+    assert ch.canal == "robo"
+    rep = await client.post(f"/api/chamados/{ch.id}/mensagens",
+                            data={"texto": "Cliente mandou o print do rastreio."})
+    assert rep.status_code == 201, rep.text
+    assert rep.json()["status"] == "pendente" and rep.json()["erro"] is None, rep.json()
+    assert fake.disputes == []
+    ch = await _chamado_de(db, "296020")
+    ab = await _abertura(db, ch.id)
+    assert ch.canal == "robo" and ab.canal == "robo" and ab.status == "pendente"
+
+
+async def test_replica_manual_com_abertura_pendente_em_api_devolve_pro_robo(client, make_user, auth_as, db, inline, monkeypatch):
+    """Abertura ainda pendente no canal `api` (a Shopee não tinha o return da primeira
+    vez): a réplica manual reabre o disparo — e o disparo devolve pro robô em vez de
+    queimar a disputa com o texto do operador (era por aqui que ela escapava)."""
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+    fake = _FakeShopee()
+
+    async def _sem_return(*a, **kw):
+        return []
+
+    fake.get_return_list = _sem_return
+
+    async def _c(session, *a):
+        return fake
+
+    monkeypatch.setattr(svc, "_shopee_client_para", _c)
+    await _seed_pedido(db, user, numero="296021", numeroloja="2609ATVNR021", platform="shopee", conta="atv", loja="88")
+    await db.commit()
+    r = await client.post(
+        "/api/devolutions",
+        json={"conta": "atv", "pedido_bling": "296021", "pedido_marketplace": "2609ATVNR021",
+              "sku": "b001.26", "produtos": "Mala Listrada tamanho 26",
+              "condicao_produto": "Não devolvido", "motivo_devolucao": "Não recebido"},
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["chamado_ml_status"] == "pendente" and r.json()["chamado_ml_erro"] == "devolucao_sem_return", r.json()
+    ch = await _chamado_de(db, "296021")
+    assert ch.canal == "api"
+    # o sync acha a devolução e a operadora responde à mão no mesmo minuto
+    db.add(DevolucaoRastreio(pedido_bling="296021", devolucao_id_auto="2609296021RSN", fonte_auto="shopee"))
+    await db.commit()
+    rep = await client.post(f"/api/chamados/{ch.id}/mensagens",
+                            data={"texto": "Pacote não chegou até hoje, segue rastreio."})
+    assert rep.status_code == 201, rep.text
+    assert rep.json()["status"] == "pendente" and rep.json()["erro"] is None, rep.json()
+    assert fake.disputes == []
+    ch = await _chamado_de(db, "296021")
+    ab = await _abertura(db, ch.id)
+    assert ch.canal == "robo" and ab.canal == "robo" and ab.status == "pendente"
+    # o que ela digitou vira observação do texto factual, não o texto da contestação
+    assert ab.texto.startswith(ENTREGUE_TXT), ab.texto
+    assert "Observação: Pacote não chegou até hoje, segue rastreio." in ab.texto
+
+
+async def test_abertura_falhou_reaberta_nao_cai_na_disputa(client, make_user, auth_as, db, inline, monkeypatch):
+    """`garantir_chamado` devolve uma abertura `falhou` pra `pendente` com
+    `canal="api"`. O disparo seguinte não pode ler isso como "pode disputar": o
+    "Não recebido" volta pro robô."""
+    fake = _FakeShopee(status="CLOSED")
+    r, _user = await _lancar(client, db, make_user, auth_as, monkeypatch, fake, numero="296022", sn="2609ATVNR022")
+    assert r.json()["chamado_ml_status"] == "falhou", r.json()
+    assert r.json()["chamado_ml_erro"] == "shopee_devolucao_encerrada", r.json()
+    ch = await _chamado_de(db, "296022")
+    ab = await _abertura(db, ch.id)
+    assert ch.canal == "api" and ab.canal == "api" and ab.status == "falhou"
+    # a Shopee reabriu o caso e a operadora mexe na linha → a abertura volta pra fila
+    fake.status = "ACCEPTED"
+    p = await client.patch(f"/api/devolutions/{r.json()['id']}",
+                           json={"motivo_devolucao": "Não recebido", "observacao": "Shopee reabriu o caso."})
+    assert p.status_code == 200, p.text
+    assert p.json()["chamado_ml_status"] == "pendente" and p.json()["chamado_ml_erro"] is None, p.json()
+    assert fake.disputes == []
+    ch = await _chamado_de(db, "296022")
+    ab = await _abertura(db, ch.id)
+    await db.refresh(ab)
+    assert ch.canal == "robo" and ab.canal == "robo" and ab.status == "pendente"
+    assert ab.texto.startswith(ENTREGUE_TXT), ab.texto
+
+
+async def test_nao_recebido_em_estado_que_esperava_pacote_vai_pro_robo(client, make_user, auth_as, db, inline, monkeypatch):
+    """REFUND_PAID com `needs_logistics` caía no `shopee_aguardando_pacote` e ficava
+    pendente de hora em hora — mas a janela de contestação some em horas (293460:
+    6h28). Agora o caso sai na hora pro robô; nos outros motivos a guarda fica."""
+    fake = _FakeShopee(status="REFUND_PAID", entregue=False)
+
+    async def _det(return_sn):
+        det = await _FakeShopee.get_return_detail(fake, return_sn)
+        det.update({"return_solution": 0, "needs_logistics": True})
+        return det
+
+    fake.get_return_detail = _det
+    r, _user = await _lancar(client, db, make_user, auth_as, monkeypatch, fake, numero="296023", sn="2609ATVNR023")
+    assert r.json()["chamado_ml_status"] == "pendente" and r.json()["chamado_ml_erro"] is None, r.json()
+    assert fake.disputes == []
+    ch = await _chamado_de(db, "296023")
+    ab = await _abertura(db, ch.id)
+    assert ch.canal == "robo" and ab.canal == "robo" and ab.texto.split("\n")[0] == TRANSITO_TXT
+    assert any("sem entrega registrada pela SPX (coletado)" in t for t in await _sistema_txts(db, ch.id))
+    # Golpe no mesmo estado continua esperando o pacote (a disputa desse motivo vale)
+    fake2 = _FakeShopee(status="REFUND_PAID", entregue=False)
+
+    async def _det2(return_sn):
+        det = await _FakeShopee.get_return_detail(fake2, return_sn)
+        det.update({"return_solution": 0, "needs_logistics": True})
+        return det
+
+    fake2.get_return_detail = _det2
+    r2, _u = await _lancar(client, db, make_user, auth_as, monkeypatch, fake2, numero="296024", sn="2609ATVNR024",
+                           motivo="Golpe", link_envio="https://drive.x/video-296024")
+    assert r2.json()["chamado_ml_status"] == "pendente", r2.json()
+    assert r2.json()["chamado_ml_erro"] == "shopee_aguardando_pacote", r2.json()
+    assert fake2.disputes == []
