@@ -385,6 +385,7 @@ class BlingClient:
         id_loja: int | None = None,
         pagina: int = 1,
         limite: int = 100,
+        numeros_lojas: list[str] | None = None,
     ) -> list[dict]:
         """Single page of `/pedidos/vendas` with the marketing module's
         filter set. Bling v3 expects YYYY-MM-DD for dates and integer ids
@@ -394,6 +395,14 @@ class BlingClient:
         de ÚLTIMA ALTERAÇÃO do pedido e exigem timestamp completo
         (`YYYY-MM-DD HH:MM:SS`, horário de Brasília) — usado pela varredura
         horária que recupera webhooks perdidos.
+
+        `numeros_lojas` filtra pelo NÚMERO DO PEDIDO NA LOJA (o `numeroLoja`
+        do pedido = order id/pack_id do ML, order_sn da Shopee, id da TikTok,
+        AmazonOrderId) — vai como `numerosLojas[]` repetido na query, sem
+        precisar de data. Validado ao vivo em 21/09/2026
+        (`GET /pedidos/vendas?numerosLojas[]=586175317994276425` devolve o
+        pedido). É a conferência "está no Bling AGORA?" do vigia de
+        importação, que não pode confiar só no espelho bling_orders.
 
         situação 9 = "Atendido" (NF emitida) — the canonical "faturado"
         signal the aggregator uses as authoritative revenue. Other useful
@@ -413,9 +422,46 @@ class BlingClient:
             params["idSituacao"] = id_situacao
         if id_loja is not None:
             params["idLoja"] = id_loja
+        if numeros_lojas:
+            # httpx repete a chave pra cada item da lista: numerosLojas[]=a&numerosLojas[]=b
+            params["numerosLojas[]"] = [str(n) for n in numeros_lojas]
         r = await self._request("GET", "/pedidos/vendas", params=params)
         r.raise_for_status()
         return r.json().get("data") or []
+
+    # Quantos `numerosLojas[]` por chamada do /pedidos/vendas: 20 mantém a URL
+    # curta (ids da TikTok têm 19 dígitos) e cabe numa página de 100 mesmo
+    # que o Bling tenha o mesmo número em mais de uma loja.
+    _PEDIDOS_POR_NUMERO_LOJA_LOTE = 20
+
+    async def pedidos_por_numero_loja(self, numeros: list[str]) -> dict[str, dict]:
+        """Conferência AO VIVO no Bling: quais desses números de pedido da loja
+        já existem como pedido de venda. Chama `list_pedidos_vendas`
+        (`GET /pedidos/vendas?numerosLojas[]=…`) em lotes de 20 e devolve
+        `{numeroLoja: pedido}` — cada pedido no formato da listagem do Bling
+        (`id`, `numero` = número do pedido no Bling, `numeroLoja`, `data`,
+        `loja.id`, `situacao.id`, `total`…). Número que não está no Bling
+        simplesmente fica fora do dicionário. Vazios e repetidos são
+        descartados antes de chamar.
+
+        Erro HTTP levanta (raise_for_status): o vigia trata "não consegui
+        conferir" diferente de "não está no Bling" — na dúvida ele NÃO abre
+        ocorrência."""
+        limpos = list(dict.fromkeys(str(n or "").strip() for n in numeros))
+        limpos = [n for n in limpos if n]
+        out: dict[str, dict] = {}
+        lote = self._PEDIDOS_POR_NUMERO_LOJA_LOTE
+        for i in range(0, len(limpos), lote):
+            pedidos = await self.list_pedidos_vendas(
+                numeros_lojas=limpos[i : i + lote], limite=100,
+            )
+            for p in pedidos:
+                if not isinstance(p, dict):
+                    continue
+                numero_loja = str(p.get("numeroLoja") or "").strip()
+                if numero_loja:
+                    out[numero_loja] = p
+        return out
 
     async def iter_pedidos_vendas(
         self,

@@ -41,6 +41,7 @@ from app.routers import nf as nf_router
 from app.routers import nf_upload as nf_upload_router
 from app.routers import notas_fiscais as notas_fiscais_router
 from app.routers import oauth as oauth_router
+from app.routers import ouvidoria as ouvidoria_router
 from app.routers import pricing as pricing_router
 from app.routers import pricing_mega as pricing_mega_router
 from app.routers import products as products_router
@@ -206,6 +207,8 @@ app.include_router(importacao_router.router)
 app.include_router(nf_router.router)
 app.include_router(nf_upload_router.router)
 app.include_router(notas_fiscais_router.router)
+# Ouvidoria › Robôs (21/09/2026): catálogo dos robôs + ocorrências.
+app.include_router(ouvidoria_router.router)
 app.include_router(dev_router.router)
 
 if settings.enable_marketing:

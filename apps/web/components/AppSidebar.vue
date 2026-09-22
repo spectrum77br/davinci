@@ -6,7 +6,7 @@ import {
   Receipt, TrendingUp, Settings, BarChart3,
   ClipboardList, ChevronDown, ChevronLeft, ChevronRight, Warehouse,
   Coins, FileText, Calculator, FlaskConical, Ship, Landmark, Headset,
-  ReceiptText, MessagesSquare,
+  ReceiptText, MessagesSquare, Radar,
 } from 'lucide-vue-next'
 import { allowedTabs, TABS_CADASTROS, TABS_NF, TABS_SISTEMA } from '~/lib/navGroups'
 
@@ -173,6 +173,15 @@ const sections = computed<Section[]>(() => [
       // NF (Faturador) + Faturamento NF idem.
       groupItem(TABS_NF, { label: 'NF Faturador', icon: ReceiptText }),
     ].filter((x): x is Item => x !== null),
+  },
+  {
+    // Ouvidoria (21/09/2026): os robôs que vigiam a operação (Vigia de
+    // importação…) e as ocorrências que eles abrem. Vinicius: por último,
+    // logo acima de Admin. Mesma ordem em composables/useCan.ts.
+    label: 'Ouvidoria',
+    items: [
+      { to: '/ouvidoria/robos', label: 'Robôs', icon: Radar, resource: 'ouvidoria' },
+    ],
   },
   {
     label: 'Admin',

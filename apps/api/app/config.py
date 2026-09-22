@@ -392,6 +392,12 @@ class Settings(BaseSettings):
     # Vazio = vigia inteiro desligado (o cron vira no-op). Set via
     # VIGIA_IMPORTACAO_THREEMA_RECIPIENTS no .env.
     vigia_importacao_threema_recipients: str = ""
+    # Fallback GENÉRICO da Ouvidoria (services/ouvidoria.py): quem recebe o
+    # aviso de um robô que não tem override na tela (ouvidoria_robos.
+    # threema_recipients) nem env próprio (ex.: o vigia acima). Vazio = o
+    # robô roda e registra, mas ninguém é avisado. Set via
+    # OUVIDORIA_THREEMA_RECIPIENTS no .env.
+    ouvidoria_threema_recipients: str = ""
 
     # Auto-hold da Margem (pedido do dono, 21/08): pedido que CAI na aba
     # Pendentes da Margem (margem baixa / saldo divergente) e ainda está

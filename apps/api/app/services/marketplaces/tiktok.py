@@ -598,6 +598,93 @@ class TikTokClient:
                 }
         return out
 
+    # ---- listagem de pedidos por período (Ouvidoria › Vigia de importação) --
+
+    async def search_orders(
+        self,
+        *,
+        create_time_ge: int,
+        create_time_lt: int,
+        page_size: int = 100,
+        page_token: str | None = None,
+        order_status: str | None = None,
+    ) -> dict:
+        """UMA página dos pedidos CRIADOS na janela (epoch UTC, `ge` inclusivo
+        e `lt` exclusivo).
+
+            POST /order/202309/orders/search
+
+        Filtros vão no body (`create_time_ge`/`create_time_lt` [+
+        `order_status`]); paginação e ordem na query (`page_size`,
+        `page_token`, `sort_field=create_time`, `sort_order=DESC` — mais
+        novo primeiro). `_post` injeta shop_cipher + assinatura + access_token.
+
+        Formato validado em produção (21/09): devolve o `data` cru —
+
+          * `orders[]` — cada um com `id` (número do pedido na TikTok, o
+            `numeroLoja` do Bling), `status` (UNPAID = não pago; ON_HOLD =
+            retenção de 24 h da TikTok, o Bling só importa quando sai;
+            AWAITING_SHIPMENT/AWAITING_COLLECTION/IN_TRANSIT/DELIVERED/
+            COMPLETED = pago e seguindo; CANCELLED), `create_time` e
+            `paid_time` (epoch UTC — `paid_time` é a hora que conta pra
+            tolerância do vigia), além dos demais campos do pedido;
+          * `next_page_token` — vazio na última página.
+
+        Erro de API (code != 0) ou HTTP fora do 200 LEVANTA RuntimeError em
+        vez do best-effort do `_search_returns`: o vigia precisa saber que a
+        conta está sem acesso, senão trataria "erro" como "zero pedidos" e
+        fecharia as ocorrências da conta como se tivessem sumido.
+        """
+        body: dict[str, Any] = {
+            "create_time_ge": int(create_time_ge),
+            "create_time_lt": int(create_time_lt),
+        }
+        if order_status:
+            body["order_status"] = order_status
+        extra = {
+            "page_size": str(page_size),
+            "sort_field": "create_time",
+            "sort_order": "DESC",
+        }
+        if page_token:
+            extra["page_token"] = page_token
+        resp = await self._post("/order/202309/orders/search", body, extra)
+        if resp.get("code") not in (0, None):
+            raise RuntimeError(
+                f"tiktok_search_orders {resp.get('code')}: {str(resp.get('message'))[:200]}"
+            )
+        data = resp.get("data")
+        return data if isinstance(data, dict) else {}
+
+    async def iter_orders(
+        self,
+        *,
+        create_time_ge: int,
+        create_time_lt: int,
+        page_size: int = 100,
+        order_status: str | None = None,
+    ) -> AsyncIterator[dict]:
+        """Todos os pedidos criados na janela, um por vez, seguindo o
+        `next_page_token` até vir vazio (teto de 50 páginas, como o
+        `_search_returns`). Erro levanta — ver `search_orders`."""
+        token: str | None = None
+        paginas = 0
+        while True:
+            data = await self.search_orders(
+                create_time_ge=create_time_ge,
+                create_time_lt=create_time_lt,
+                page_size=page_size,
+                page_token=token,
+                order_status=order_status,
+            )
+            for o in data.get("orders") or []:
+                if isinstance(o, dict):
+                    yield o
+            token = data.get("next_page_token") or None
+            paginas += 1
+            if not token or paginas >= 50:
+                break
+
     # Máximo de `order_ids` por chamada do returns/search (mesmo teto de 50 do
     # `ids` do Order API — a doc do returns/search não fixa outro).
     _RETURNS_ORDER_IDS_LOTE = 50

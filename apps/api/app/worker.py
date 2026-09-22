@@ -76,6 +76,9 @@ from app.services.ml_backfill import run_backfill_ml_stock
 from app.services.nf_auto_enfileirar import run_auto_enfileirar_nf
 from app.services.nf_recuperar import run_recuperar_nf
 from app.services.notas_fiscais_export import run_export_notas
+from app.services.ouvidoria import gc_rodadas as ouvidoria_gc_rodadas
+from app.services.ouvidoria import modo as ouvidoria_modo
+from app.services.ouvidoria import sincronizar_catalogo as ouvidoria_sincronizar_catalogo
 from app.services.pos_vendas import sync_notas_emitidas as run_pos_vendas_sync
 from app.services.pricing.batch import run_push_prices_batch
 from app.services.prioridade_estoque import prioridade_estoque_sweep
@@ -2129,11 +2132,19 @@ async def sync_logs_partition_gc(ctx: dict) -> None:
 
 
 async def alerts_cleanup(ctx: dict) -> None:
-    """Delete alerts older than 60 days (B10)."""
+    """Delete alerts older than 60 days (B10). Carona diária: rodadas da
+    Ouvidoria com mais de 30 dias (ouvidoria_rodadas cresce 48 linhas/dia só
+    com o vigia de importação)."""
     cutoff = datetime.now(UTC) - timedelta(days=60)
     async with session_scope() as s:
         result = await s.execute(delete(Alert).where(Alert.created_at < cutoff))
         logger.info("alerts_cleanup_done", deleted=result.rowcount or 0)
+    try:
+        async with session_scope() as s:
+            n = await ouvidoria_gc_rodadas(s, dias=30)
+        logger.info("ouvidoria_gc_rodadas_done", deleted=n)
+    except Exception:  # noqa: BLE001 — limpeza não pode derrubar o tick
+        logger.exception("ouvidoria_gc_rodadas_unhandled")
 
 
 async def condicao_especial_gc(ctx: dict) -> None:
@@ -2297,16 +2308,24 @@ async def prioridade_estoque_estorno_tick(ctx: dict) -> None:
 
 
 async def vigia_importacao_tick(ctx: dict) -> None:
-    """Vigia de importação: pedido PAGO no marketplace (fase 1: ML) que não
-    caiu no Bling → aviso Threema pra importar manualmente no canal multi
-    loja (Eduardo, 2026-08-27 — a API pública do Bling não expõe essa tela).
-    Desligado enquanto VIGIA_IMPORTACAO_THREEMA_RECIPIENTS estiver vazio.
+    """Vigia de importação (robô da Ouvidoria): pedido PAGO no ML / Shopee /
+    TikTok / Amazon que não caiu no Bling → ocorrência + aviso Threema pra
+    importar manualmente no canal multi loja (Eduardo, 2026-08-27 — a API
+    pública do Bling não expõe essa tela). O modo vem da tela Ouvidoria ›
+    Robôs: `desligado` sai sem rodar nem gravar rodada; `silencioso` roda e
+    registra sem avisar (decidido dentro do sweep). O botão "Rodar agora"
+    não passa por aqui, por isso o gate fica no tick e não no sweep.
     """
     try:
+        async with session_scope() as s:
+            modo = await ouvidoria_modo(s, "vigia_importacao")
+        if modo == "desligado":
+            logger.debug("vigia_importacao_desligado")
+            return
         summary = await vigia_importacao_sweep()
-        if summary.get("faltantes") or summary.get("avisados") or summary.get(
+        if summary.get("novas") or summary.get("avisadas") or summary.get(
             "contas_falha"
-        ):
+        ) or summary.get("sumiram"):
             logger.info("vigia_importacao_done", **summary)
         else:
             logger.debug("vigia_importacao_noop", **summary)
@@ -2935,6 +2954,14 @@ async def certificacoes_inmetro_sync(ctx: dict) -> dict:
 async def startup(ctx: dict) -> None:
     from app.services.sentry import init_sentry
     init_sentry(component="worker")
+    # Catálogo da Ouvidoria (ouvidoria_robos): robô novo no código ganha a
+    # linha antes do 1º tick — rodada e ocorrência têm FK pro robô. Dois
+    # workers subindo juntos podem colidir no INSERT; é só log, o outro fez.
+    try:
+        async with session_scope() as s:
+            await ouvidoria_sincronizar_catalogo(s)
+    except Exception as e:  # noqa: BLE001 — sem catálogo o worker sobe do mesmo jeito
+        logger.warning("ouvidoria_catalogo_startup_falhou", error=str(e)[:200])
     logger.info("worker_startup")
 
 
@@ -3302,9 +3329,9 @@ class WorkerSettings:
         # Manutenção das compensações de kit (retry, estorno de cancelado,
         # aviso): 2×/hora em :16/:46, minutos livres. Sem pendência = SELECTs.
         cron(prioridade_estoque_estorno_tick, minute={16, 46}, run_at_startup=False),
-        # Vigia de importação (pedido pago no ML que não caiu no Bling →
-        # aviso Threema). 2×/hora em :9/:39 (minutos livres); no-op barato
-        # enquanto VIGIA_IMPORTACAO_THREEMA_RECIPIENTS estiver vazio.
+        # Vigia de importação (robô da Ouvidoria: pedido pago no ML/Shopee/
+        # TikTok/Amazon que não caiu no Bling → ocorrência + Threema). 2×/hora
+        # em :9/:39 (minutos livres); `cadencia_texto` do robô descreve isto.
         cron(vigia_importacao_tick, minute={9, 39}, run_at_startup=False),
         # Espelho das NF-e das contas de emissão (página Pós Vendas). As
         # contas bling_notas são apps OAuth próprios — rate independente do

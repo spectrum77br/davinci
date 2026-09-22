@@ -36,6 +36,7 @@ export type Resource =
   | 'marcas'
   | 'redes_sociais'
   | 'email_padroes'
+  | 'ouvidoria'
   | 'usuarios'
   | 'permissoes'
   | 'configuracoes'
@@ -49,7 +50,8 @@ export type ResourceGroup = {
 
 // Ordem e agrupamento ESPELHAM a barra lateral (components/AppSidebar.vue):
 // Operação → Pós-venda → Financeiro → Suprimentos → Sistema → Cadastros →
-// Admin. Manter os dois em sincronia pra a tela de Permissões refletir o menu.
+// Ouvidoria → Admin. Manter os dois em sincronia pra a tela de Permissões
+// refletir o menu.
 export const RESOURCE_GROUPS: ResourceGroup[] = [
   {
     label: 'Operação',
@@ -103,6 +105,14 @@ export const RESOURCE_GROUPS: ResourceGroup[] = [
     ],
   },
   {
+    // Ouvidoria (21/09/2026) = os robôs de vigilância (Vigia de importação…)
+    // e o que eles encontraram. Vinicius: por último no menu, logo acima de
+    // Admin. Um recurso só cobre a página inteira (Robôs + Ocorrências):
+    // view = olhar; edit = ligar/desligar robô, rodar agora, tratar/ignorar.
+    label: 'Ouvidoria',
+    resources: ['ouvidoria'],
+  },
+  {
     label: 'Admin',
     resources: ['usuarios', 'permissoes', 'configuracoes'],
   },
@@ -148,6 +158,7 @@ export const RESOURCE_LABELS: Record<Resource, string> = {
   marcas: 'Marcas',
   redes_sociais: 'Redes Sociais',
   email_padroes: 'E-mails (padrões)',
+  ouvidoria: 'Robôs (Ouvidoria)',
   usuarios: 'Usuários',
   permissoes: 'Permissões',
   configuracoes: 'Configurações',

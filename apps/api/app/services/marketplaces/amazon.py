@@ -257,6 +257,97 @@ class AmazonClient:
         tracking = str(tracking).strip() if tracking else ""
         return tracking or None
 
+    # ---- listagem de pedidos por período (Ouvidoria › Vigia de importação) --
+
+    # A cota do getOrders é apertada (0,0167 req/s, rajada de 20 na doc da
+    # SP-API): pausa entre páginas e 1 retentativa em 429 são o mínimo pra
+    # uma rodada do vigia não cair em "QuotaExceeded".
+    _ORDERS_PAUSA_ENTRE_PAGINAS_S = 1.0
+    _ORDERS_ESPERA_429_S = 2.0
+
+    async def get_orders(
+        self,
+        *,
+        created_after: str,
+        order_statuses: list[str] | None = None,
+        next_token: str | None = None,
+        max_results: int = 100,
+    ) -> dict:
+        """UMA página dos pedidos da conta criados a partir de `created_after`
+        (ISO 8601, ex.: "2026-09-18T12:00:00Z").
+
+            GET /orders/v0/orders
+
+        Query: `MarketplaceIds` (o marketplace da credencial), `CreatedAfter`,
+        `OrderStatuses` (lista separada por vírgula, opcional) e
+        `MaxResultsPerPage` (máx. 100). Nas páginas seguintes vai só
+        `NextToken` + `MarketplaceIds` — a Amazon ignora os outros filtros
+        quando há token, e `MarketplaceIds` é obrigatório em toda chamada.
+
+        Formato validado em produção (21/09): devolve o `payload` cru —
+
+          * `Orders[]` — cada um com `AmazonOrderId` (número do pedido, o
+            `numeroLoja` do Bling), `OrderStatus` (Pending = ainda não pago
+            ou em verificação; Unshipped/PartiallyShipped/Shipped = pago e
+            seguindo — é o que o Bling importa; Canceled; Unfulfillable) e
+            `PurchaseDate` (ISO, hora da compra), além dos demais campos;
+          * `NextToken` — presente enquanto houver outra página.
+
+        429 (QuotaExceeded) espera 2 s e tenta UMA vez mais; qualquer outra
+        resposta fora do 200 LEVANTA RuntimeError — o vigia precisa saber que
+        a conta está sem acesso, e não confundir isso com "zero pedidos".
+        """
+        if not self.marketplace_id:
+            raise RuntimeError("amazon_missing_creds: marketplace_id")
+        params: dict[str, Any] = {"MarketplaceIds": self.marketplace_id}
+        if next_token:
+            params["NextToken"] = next_token
+        else:
+            params["CreatedAfter"] = created_after
+            params["MaxResultsPerPage"] = int(max_results)
+            if order_statuses:
+                params["OrderStatuses"] = ",".join(str(s) for s in order_statuses)
+        r = await self._request("GET", "/orders/v0/orders", params=params)
+        if r.status_code == 429:
+            logger.warning("amazon_get_orders_429", created_after=created_after)
+            await asyncio.sleep(self._ORDERS_ESPERA_429_S)
+            r = await self._request("GET", "/orders/v0/orders", params=params)
+        if r.status_code != 200:
+            raise RuntimeError(
+                f"amazon_get_orders_failed status={r.status_code} body={r.text[:300]}"
+            )
+        body = r.json() or {}
+        payload = body.get("payload")
+        return payload if isinstance(payload, dict) else {}
+
+    async def iter_orders(
+        self,
+        *,
+        created_after: str,
+        order_statuses: list[str] | None = None,
+        max_results: int = 100,
+    ) -> AsyncIterator[dict]:
+        """Todos os pedidos criados a partir de `created_after`, um por vez,
+        seguindo o `NextToken` com 1 s de pausa entre páginas (cota). Teto de
+        50 páginas. Erro levanta — ver `get_orders`."""
+        token: str | None = None
+        paginas = 0
+        while True:
+            payload = await self.get_orders(
+                created_after=created_after,
+                order_statuses=order_statuses,
+                next_token=token,
+                max_results=max_results,
+            )
+            for o in payload.get("Orders") or []:
+                if isinstance(o, dict):
+                    yield o
+            token = payload.get("NextToken") or None
+            paginas += 1
+            if not token or paginas >= 50:
+                break
+            await asyncio.sleep(self._ORDERS_PAUSA_ENTRE_PAGINAS_S)
+
     async def list_listings(
         self,
         *,

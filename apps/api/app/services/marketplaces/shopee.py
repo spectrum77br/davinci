@@ -358,6 +358,104 @@ class ShopeeClient:
                     }
         return out
 
+    # ---- listagem de pedidos por período (Ouvidoria › Vigia de importação) --
+
+    # Teto da Shopee pra janela do get_order_list (time_to - time_from): acima
+    # disso a API recusa com erro de parâmetro, igual ao get_return_list.
+    _ORDER_LIST_JANELA_MAX = 15 * 24 * 3600
+
+    async def get_order_list(
+        self,
+        *,
+        time_from: int,
+        time_to: int,
+        time_range_field: str = "create_time",
+        page_size: int = 100,
+        cursor: str = "",
+        order_status: str | None = None,
+    ) -> dict:
+        """UMA página dos pedidos da loja numa janela (epoch UTC).
+
+        Endpoint: GET /api/v2/order/get_order_list, com
+        `response_optional_fields=order_status` pra situação vir junto sem
+        precisar do get_order_detail. Formato validado em produção (21/09):
+        devolve o `response` cru —
+
+          * `order_list[]` — cada item com `order_sn` (número do pedido na
+            Shopee, o mesmo `numeroLoja` do Bling) e `order_status`
+            (UNPAID = ainda não pago; READY_TO_SHIP/PROCESSED/SHIPPED/
+            COMPLETED = pago e seguindo; IN_CANCEL/CANCELLED = cancelando ou
+            cancelado; INVOICE_PENDING = aguardando NF);
+          * `more` — True quando há outra página;
+          * `next_cursor` — o `cursor` da próxima chamada (a 1ª manda "").
+
+        `time_range_field` escolhe se a janela é por criação (`create_time`,
+        "pedidos feitos entre") ou por alteração (`update_time`, "pedidos que
+        mudaram entre"). A janela não pode passar de 15 dias; `page_size`
+        máximo 100; `order_status` filtra por UMA situação (opcional).
+
+        Ao contrário do get_return_list (best-effort), erro de API LEVANTA
+        RuntimeError: quem chama (o vigia) precisa distinguir "conta sem
+        pedidos" de "conta sem acesso à API" — engolir o erro faria o robô
+        fechar as ocorrências da conta como se tivessem sumido.
+        """
+        if int(time_to) - int(time_from) > self._ORDER_LIST_JANELA_MAX:
+            raise ValueError("get_order_list: janela maior que 15 dias")
+        params: dict[str, Any] = {
+            "time_range_field": time_range_field,
+            "time_from": int(time_from),
+            "time_to": int(time_to),
+            "page_size": int(page_size),
+            "cursor": cursor or "",
+            "response_optional_fields": "order_status",
+        }
+        if order_status:
+            params["order_status"] = order_status
+        return await self._call(
+            "GET", "/api/v2/order/get_order_list", params=params, what="shopee_order_list"
+        )
+
+    async def iter_orders(
+        self,
+        *,
+        time_from: int,
+        time_to: int,
+        time_range_field: str = "create_time",
+        page_size: int = 100,
+        order_status: str | None = None,
+    ) -> AsyncIterator[dict]:
+        """Todos os pedidos da janela, um por vez (`{order_sn, order_status}`),
+        seguindo `next_cursor` enquanto `more` for True. Janela maior que 15
+        dias é fatiada em pedaços encostados que a Shopee aceita — quem chama
+        não precisa saber do teto. Teto de 100 páginas por fatia (10 mil
+        pedidos) pra um cursor que nunca acaba não travar a rodada."""
+        ini = int(time_from)
+        fim = int(time_to)
+        # Fatia um pouco menor que o teto (mesma folga de 5 min do
+        # logistica_shopee.returns_por_pedido) pra não bater na borda.
+        passo = self._ORDER_LIST_JANELA_MAX - 300
+        while ini <= fim:
+            sub_fim = min(fim, ini + passo)
+            cursor = ""
+            paginas = 0
+            while True:
+                resp = await self.get_order_list(
+                    time_from=ini,
+                    time_to=sub_fim,
+                    time_range_field=time_range_field,
+                    page_size=page_size,
+                    cursor=cursor,
+                    order_status=order_status,
+                )
+                for o in resp.get("order_list") or []:
+                    if isinstance(o, dict):
+                        yield o
+                cursor = str(resp.get("next_cursor") or "")
+                paginas += 1
+                if not resp.get("more") or not cursor or paginas >= 100:
+                    break
+            ini = sub_fim + 1
+
     async def get_return_list(
         self,
         *,

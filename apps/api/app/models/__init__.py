@@ -135,6 +135,15 @@ from app.models.nf import (
     NfImpressao,
     NfNota,
 )
+from app.models.ouvidoria import (
+    FECHADA_PELO_ROBO,
+    FECHAMENTOS,
+    MODOS,
+    SEVERIDADES,
+    OuvidoriaOcorrencia,
+    OuvidoriaRobo,
+    OuvidoriaRodada,
+)
 from app.models.pricing import (
     AuditDismissedSku,
     PricingAccount,
@@ -161,7 +170,6 @@ from app.models.sync_log import SyncLog
 from app.models.tarefa import Tarefa
 from app.models.user import User
 from app.models.user_settings import UserSettings
-from app.models.vigia_importacao import VigiaImportacao
 
 __all__ = [
     "Alert",
@@ -272,6 +280,13 @@ __all__ = [
     "NfImpressao",
     "NfNota",
     "OAuthState",
+    "FECHADA_PELO_ROBO",
+    "FECHAMENTOS",
+    "MODOS",
+    "SEVERIDADES",
+    "OuvidoriaOcorrencia",
+    "OuvidoriaRobo",
+    "OuvidoriaRodada",
     "PLATFORMS",
     "REDES_SOCIAIS_PLATAFORMAS",
     "RedeSocial",
@@ -311,5 +326,4 @@ __all__ = [
     "UserStatus",
     "VERIFICACAO_STATUS",
     "VerificacaoStatus",
-    "VigiaImportacao",
 ]

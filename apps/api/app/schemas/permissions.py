@@ -70,6 +70,10 @@ Resource = Literal[
     # Cadastros › E-mails: padrões de e-mail por marca e canal (logo,
     # assinatura, prévia e envio de teste).
     "email_padroes",
+    # Ouvidoria › Robôs (21/09/2026): catálogo dos robôs (modo, última
+    # rodada, quem avisa) + ocorrências que eles abriram. Grupo próprio no
+    # menu, entre Cadastros e Admin — mesmo nome no useCan.ts.
+    "ouvidoria",
     "usuarios",
     "permissoes",
     "configuracoes",
