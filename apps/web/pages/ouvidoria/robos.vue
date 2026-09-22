@@ -412,11 +412,24 @@ const areas = computed(() =>
 const temProblema = (r: Robo) => r.saude === 'falhando' || r.saude === 'parado'
 
 const arquivado = (r: Robo) => !!r.arquivado_em
+// Trouxe todos de volta → o atalho "N fora do painel" some da tela; sem
+// desmarcar aqui, a marca ficaria presa em true e o PRÓXIMO robô arquivado
+// continuaria aparecendo, como se a lixeira não tivesse feito nada.
+watch(
+  () => robos.value.some(arquivado),
+  (tem) => {
+    if (!tem) mostrarArquivados.value = false
+  },
+)
 
 const robosFiltrados = computed(() => {
   const q = robosBusca.value.trim().toLowerCase()
   return robos.value.filter((r) => {
-    if (arquivado(r) && !mostrarArquivados.value) return false
+    // Arquivado sai da lista — MENOS quando a pessoa pediu "só com problema"
+    // e ele está falhando/parado: o filtro que existe pra achar problema não
+    // pode ser o que esconde um.
+    if (arquivado(r) && !mostrarArquivados.value && !(robosSoProblema.value && temProblema(r)))
+      return false
     if (q && !`${r.nome} ${r.descricao || ''} ${r.chave}`.toLowerCase().includes(q)) return false
     if (robosArea.value && (r.area || '') !== robosArea.value) return false
     if (robosEstado.value && r.modo !== robosEstado.value) return false
@@ -425,10 +438,17 @@ const robosFiltrados = computed(() => {
   })
 })
 
+// Quantos robôs a tela diz ter: os do painel, mais os arquivados quando a
+// pessoa abriu o atalho pra mexer neles.
+const robosNoPainel = computed(
+  () => robos.value.filter((r) => mostrarArquivados.value || !arquivado(r)).length,
+)
+
 const stRobos = computed(() => {
-  // Os cartões contam o painel que está à vista; arquivado sai da conta (mas
-  // se um deles estiver falhando o atalho avisa — some da vista, não do
-  // trabalho).
+  // Regra dos cartões: o que é ESTADO do painel (ligados, silenciosos,
+  // desligados, "de N") conta só o que está à vista; o que é TRABALHO ou
+  // ALARME (com problema, rodadas hoje, ocorrências abertas) conta todo mundo,
+  // arquivado inclusive — arquivar tira da vista, não do trabalho.
   const lista = robos.value.filter((r) => !arquivado(r))
   const fora = robos.value.filter(arquivado)
   return {
@@ -438,10 +458,17 @@ const stRobos = computed(() => {
     ligados: lista.filter((r) => r.modo === 'ligado').length,
     silenciosos: lista.filter((r) => r.modo === 'silencioso').length,
     desligados: lista.filter((r) => r.modo === 'desligado').length,
-    comProblema: lista.filter(temProblema).length,
-    rodadasHoje: lista.reduce((acc, r) => acc + (r.rodadas_hoje || 0), 0),
-    rodadasHojeOk: lista.reduce((acc, r) => acc + (r.rodadas_hoje_ok || 0), 0),
-    abertas: lista.reduce((acc, r) => acc + (r.abertas || 0), 0),
+    // Alarme conta TODO MUNDO, inclusive arquivado: robô fora do painel que
+    // quebrou não pode ficar sem ninguém para avisar (o "Só com problema"
+    // também o traz de volta pra lista).
+    comProblema: robos.value.filter(temProblema).length,
+    // Trabalho que ACONTECE conta todo mundo, arquivado inclusive: o robô fora
+    // do painel continua rodando e abrindo ocorrência, e o badge da aba
+    // Ocorrências (que vem do backend, global) tem que bater com o cartão —
+    // dois números diferentes lado a lado derrubam a confiança na tela.
+    rodadasHoje: robos.value.reduce((acc, r) => acc + (r.rodadas_hoje || 0), 0),
+    rodadasHojeOk: robos.value.reduce((acc, r) => acc + (r.rodadas_hoje_ok || 0), 0),
+    abertas: robos.value.reduce((acc, r) => acc + (r.abertas || 0), 0),
   }
 })
 // "99,3% ok" embaixo de Rodadas hoje; sem rodada ainda, só o texto.
@@ -734,7 +761,7 @@ async function arquivarRobo(r: Robo, arquivar: boolean) {
   if (arquivar && !confirm(
     `Tirar "${r.nome}" do painel?\n\n` +
       'Ele NÃO é excluído e continua rodando e avisando igual — só some desta lista. ' +
-      'Para trazer de volta, use o atalho "arquivados" em cima da tabela.',
+      'Para trazer de volta, use o atalho "fora do painel" em cima da tabela.',
   )) return
   setEmVoo(arquivando, r.chave, true)
   try {
@@ -744,7 +771,7 @@ async function arquivarRobo(r: Robo, arquivar: boolean) {
     })
     toasts.success(
       arquivar ? `${r.nome} saiu do painel` : `${r.nome} voltou pro painel`,
-      arquivar ? 'continua rodando igual; volta pelo atalho "arquivados"' : '',
+      arquivar ? 'continua rodando igual; volta pelo atalho "fora do painel"' : '',
     )
     await loadRobos()
   } catch (e: any) {
@@ -933,7 +960,7 @@ const carregandoAba = computed(() => (tab.value === 'robos' ? robosLoading.value
         @click="tab = 'robos'"
       >
         Robôs
-        <span class="text-[11px] font-medium text-muted-foreground tabular-nums">{{ robos.length }}</span>
+        <span class="text-[11px] font-medium text-muted-foreground tabular-nums">{{ robosNoPainel }}</span>
       </button>
       <button
         class="px-3 h-9 text-sm font-medium border-b-2 -mb-px transition-colors inline-flex items-center gap-1.5"
@@ -961,7 +988,14 @@ const carregandoAba = computed(() => (tab.value === 'robos' ? robosLoading.value
         <StatCard label="Ligados" :value="stRobos.ligados" :hint="`de ${stRobos.total}`" :icon="Radar" tone="success" compact />
         <StatCard label="Silenciosos" :value="stRobos.silenciosos" hint="registram, não avisam" :icon="Bot" tone="warning" compact />
         <StatCard label="Desligados" :value="stRobos.desligados" hint="só rodam pelo Rodar agora" :icon="ShieldOff" compact />
-        <StatCard label="Com problema" :value="stRobos.comProblema" hint="falhando ou parado" :icon="AlertTriangle" tone="danger" compact />
+        <StatCard
+          label="Com problema"
+          :value="stRobos.comProblema"
+          :hint="stRobos.arquivadosComProblema ? `falhando ou parado · ${stRobos.arquivadosComProblema} fora do painel` : 'falhando ou parado'"
+          :icon="AlertTriangle"
+          tone="danger"
+          compact
+        />
         <StatCard label="Rodadas hoje" :value="fmtNum(stRobos.rodadasHoje)" :hint="rodadasHojeHint" :icon="Play" compact />
         <StatCard label="Ocorrências abertas" :value="stRobos.abertas" hint="ver aba Ocorrências" :icon="AlertCircle" tone="danger" compact />
       </div>
@@ -1007,7 +1041,7 @@ const carregandoAba = computed(() => (tab.value === 'robos' ? robosLoading.value
           <AlertTriangle v-if="stRobos.arquivadosComProblema" class="size-3.5" />
         </button>
         <span class="ml-auto text-xs text-muted-foreground">
-          {{ stRobos.total }} {{ stRobos.total === 1 ? 'robô' : 'robôs' }} · {{ robosFiltrados.length }} {{ robosFiltrados.length === 1 ? 'mostrado' : 'mostrados' }}
+          {{ robosNoPainel }} {{ robosNoPainel === 1 ? 'robô' : 'robôs' }} · {{ robosFiltrados.length }} {{ robosFiltrados.length === 1 ? 'mostrado' : 'mostrados' }}
         </span>
       </div>
 
@@ -1036,6 +1070,9 @@ const carregandoAba = computed(() => (tab.value === 'robos' ? robosLoading.value
             <tr v-else-if="!robosFiltrados.length">
               <td colspan="9" class="py-8 text-center text-muted-foreground">
                 <template v-if="!robos.length && robosCarregou">Nenhum robô cadastrado ainda — o worker cadastra o catálogo ao subir.</template>
+                <template v-else-if="robos.length && stRobos.arquivados && !mostrarArquivados">
+                  Nenhum robô com esses filtros — {{ stRobos.arquivados }} está(ão) fora do painel (veja o atalho acima).
+                </template>
                 <template v-else-if="robos.length">Nenhum robô com esses filtros.</template>
               </td>
             </tr>
