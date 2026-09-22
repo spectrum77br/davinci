@@ -23,21 +23,21 @@ from datetime import UTC, datetime
 from typing import Any
 
 import structlog
-from sqlalchemy import and_, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db import get_session_ctx
+from app.config import get_settings
+from app.db import session_scope
 from app.models import (
     Integration,
     IntegrationPlatform,
     Product,
     ProductLink,
-    SyncLog,
 )
 from app.security.cipher import decrypt_json, encrypt_json
+from app.services.marketplaces.base import SyncStatus
 from app.services.marketplaces.factory import client_for
 from app.services.marketplaces.shopee import ShopeeClient
-from app.services.marketplaces.base import SyncStatus
 
 logger = structlog.get_logger()
 
@@ -52,15 +52,15 @@ async def run_shopee_discrepancy_check() -> dict[str, Any]:
 
     Returns a summary dict with counts of checked/fixed/errors.
     """
-    stats = {"checked": 0, "fixed": 0, "errors": 0, "skipped": 0}
+    stats = {"checked": 0, "fixed": 0, "would_fix": 0, "errors": 0, "skipped": 0}
 
-    async with get_session_ctx() as session:
+    async with session_scope() as session:
         # Get all active Shopee integrations
         integrations = (
             await session.execute(
                 select(Integration).where(
                     Integration.platform == IntegrationPlatform.SHOPEE,
-                    Integration.is_active == True,  # noqa: E712
+                    Integration.status == "active",
                 )
             )
         ).scalars().all()
@@ -72,6 +72,7 @@ async def run_shopee_discrepancy_check() -> dict[str, Any]:
                 )
                 stats["checked"] += integration_stats["checked"]
                 stats["fixed"] += integration_stats["fixed"]
+                stats["would_fix"] += integration_stats.get("would_fix", 0)
                 stats["errors"] += integration_stats["errors"]
                 stats["skipped"] += integration_stats["skipped"]
             except Exception as e:  # noqa: BLE001
@@ -91,7 +92,7 @@ async def _check_integration(
     integration: Integration,
 ) -> dict[str, int]:
     """Check all links for a single Shopee integration."""
-    stats = {"checked": 0, "fixed": 0, "errors": 0, "skipped": 0}
+    stats = {"checked": 0, "fixed": 0, "would_fix": 0, "errors": 0, "skipped": 0}
 
     # "Modo férias": não corrige/empurra estoque pra contas pausadas — senão o
     # discrepancy-check reverteria o freeze empurrando o estoque local de volta.
@@ -160,6 +161,15 @@ async def _check_integration(
                     expected=expected_stock,
                     actual=actual_stock,
                 )
+
+                # Modo só relatório (padrão): conta a divergência e NÃO
+                # escreve no anúncio. Esta conferência nunca rodou de
+                # verdade (quebrada desde que nasceu), então ligar a
+                # escrita de uma vez empurraria estoque para centenas de
+                # anúncios dessincronizados há meses — primeiro medir.
+                if not get_settings().discrepancy_check_commit:
+                    stats["would_fix"] = stats.get("would_fix", 0) + 1
+                    continue
 
                 # Fix: push correct stock to Shopee
                 result = await client.update_stock(link, expected_stock)

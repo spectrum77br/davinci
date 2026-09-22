@@ -1,6 +1,6 @@
 import asyncio
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, time, timedelta
 from typing import Any
 from uuid import UUID
 from zoneinfo import ZoneInfo
@@ -10,6 +10,7 @@ from arq import cron
 from arq.connections import RedisSettings
 from arq.worker import func
 from sqlalchemy import and_, delete, or_, select, text, update
+from sqlalchemy import func as sa_func  # `func` aqui já é o registrador de jobs do arq
 
 from app.config import get_settings
 from app.db import session_scope
@@ -117,6 +118,8 @@ SP_TZ = ZoneInfo("America/Sao_Paulo")
 # Daily `sync_all_run` only processes products at risk of stockout. Items
 # with `products.stock >= 10` are skipped — webhooks keep their stock fresh
 # inline anyway, and high-stock items rarely cause real-world divergence.
+# Hora em que a varredura diária roda para quem ligou e não escolheu hora.
+DAILY_SYNC_HORA_PADRAO = time(3, 0)
 SYNC_ALL_LOW_STOCK_THRESHOLD = 10
 
 
@@ -1235,12 +1238,17 @@ async def daily_sync_scheduler(ctx: dict) -> None:
     today_cutoff_utc = sp_midnight.astimezone(UTC)
 
     async with session_scope() as s:
+        # Sem horário escolhido, vale o padrão. Antes a varredura exigia
+        # `daily_sync_time` preenchido e ficava em silêncio: em 22/09/2026 os
+        # dois usuários com a varredura LIGADA estavam sem horário e ela não
+        # rodava para ninguém havia meses — o dono de 1.809 produtos nem sequer
+        # tinha ligado. Ligar sem escolher hora agora faz o que a pessoa espera.
+        hora = sa_func.coalesce(UserSettings.daily_sync_time, DAILY_SYNC_HORA_PADRAO)
         rows = await s.execute(
             select(UserSettings).where(
                 UserSettings.daily_sync_enabled.is_(True),
-                UserSettings.daily_sync_time.is_not(None),
-                UserSettings.daily_sync_time >= window_start,
-                UserSettings.daily_sync_time <= window_end,
+                hora >= window_start,
+                hora <= window_end,
             )
         )
         for us in rows.scalars():

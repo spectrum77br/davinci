@@ -49,6 +49,7 @@ from app.models import (
     SyncLogAction,
 )
 from app.security.cipher import decrypt_json, encrypt_json
+from app.services import estoque_familia
 from app.services.alerts import emit_alert
 from app.services.job_details import append_job_detail
 from app.services.marketplaces.base import SyncResult, SyncStatus
@@ -117,6 +118,10 @@ class SyncOrchestrator:
         self.force = force
         self.report = OrchestratorReport()
         self._client_cache: dict[UUID, object] = {}
+        # Total da familia por chave, so DENTRO de uma passada: evita repetir a
+        # consulta para os 5 lotes do mesmo produto. Zerado no inicio de cada
+        # `run` para nao carregar saldo velho de uma passada anterior.
+        self._familia_cache: dict[str, int] = {}
         self._integration_cache: dict[UUID, Integration] = {}
         self._store_cache: dict[UUID, Store] = {}
         # SSH delta #1 — populated by run_parallel after each pass so
@@ -317,7 +322,13 @@ class SyncOrchestrator:
                         # or older imports — guard at the push site too so the
                         # clamp is enforced even if `_refresh_bling` didn't run
                         # this pass (e.g. webhook-fed stock).
-                        qty = max(0, product.stock)
+                        # O numero PUBLICADO pode ser o total da familia (mesmo
+                        # produto nos outros lotes de venda) quando a soma esta
+                        # ligada; desligada, e o saldo do proprio produto, igual
+                        # a sempre. De onde a peca sai na venda nao muda aqui.
+                        qty = await estoque_familia.saldo_publicavel(
+                            self.session, product, cache=self._familia_cache
+                        )
                         # Always push to the marketplace — SSH parity. The earlier
                         # "verify-before-send" optimization (skip when link.stock
                         # equals qty + last_sync_status=OK) was removed because
@@ -522,6 +533,7 @@ class SyncOrchestrator:
             self.job.started_at = datetime.now(UTC)
             await self.session.commit()
 
+        self._familia_cache.clear()
         link_filter = set(only_link_ids) if only_link_ids else None
 
         processed = 0

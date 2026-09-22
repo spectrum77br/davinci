@@ -396,6 +396,28 @@ class Settings(BaseSettings):
     # do horário da tela Lojas (agência); correios é contínuo.
     nf_auto_ml: bool = False
 
+    # Conferência de estoque nos marketplaces (ML e Shopee): compara o que o
+    # anúncio mostra com o que o DaVinci acha que devia mostrar. Ficou QUEBRADA
+    # desde que nasceu (ImportError) — 12 rodadas por dia sem tocar em nada.
+    # Consertada em 22/09/2026 e religada em modo SÓ RELATÓRIO: ligar a escrita
+    # sem antes ver o tamanho do estrago empurraria estoque para centenas de
+    # anúncios dessincronizados há meses. Set via DISCREPANCY_CHECK_COMMIT.
+    discrepancy_check_commit: bool = False
+
+    # Estoque somado por familia (Eduardo, 22/09/2026): o anuncio mostra o total
+    # do MESMO produto em todos os lotes de venda, para nao zerar enquanto houver
+    # peca em outro lote. Nao muda de onde a peca sai na venda — isso continua
+    # sendo o lote do anuncio ou a prioridade.
+    #   ativo     desligado por padrao; ligar so depois de conferir o ensaio.
+    #   prefixos  limita a soma a certas linhas ("dg052,dg053,..." = so o A17);
+    #             vazio = todas as familias.
+    #   minimo    piso de seguranca: somar faz TODOS os anuncios da familia
+    #             mostrarem o mesmo numero, entao 1 peca em 14 anuncios vira a
+    #             mesma peca oferecida 14 vezes. Abaixo do piso nao soma.
+    estoque_familia_ativo: bool = False
+    estoque_familia_prefixos: str = ""
+    estoque_familia_minimo: int = 5
+
     # Prioridade de estoque: como o robô troca o SKU do pedido no Bling.
     # False (hoje) = EDITA o item; o Bling guarda a composição antiga colada
     # nesse item e baixa o kit velho, por isso o robô compensa com POST
