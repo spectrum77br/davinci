@@ -61,6 +61,7 @@ from app.models.financeiro import (
     FinanceiroSuprimentos,
     NCMCache,
 )
+from app.models.imagem_publica import ImagemPublica
 from app.models.importacao import (
     CotacaoFabricante,
     CotacaoProduto,
@@ -214,6 +215,7 @@ __all__ = [
     "DevolucaoAnexo",
     "DevolucaoMensagemComprador",
     "Devolution",
+    "ImagemPublica",
     "EstoqueDiaFinalizado",
     "EstoquePedidoVideo",
     "FinanceiroConsorcio",

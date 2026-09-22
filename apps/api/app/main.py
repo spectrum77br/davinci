@@ -26,6 +26,7 @@ from app.routers import estoque as estoque_router
 from app.routers import faturamento as faturamento_router
 from app.routers import faturas as faturas_router
 from app.routers import financeiro as financeiro_router
+from app.routers import imagens as imagens_router
 from app.routers import importacao as importacao_router
 from app.routers import informar as informar_router
 from app.routers import integrations as integrations_router
@@ -164,6 +165,7 @@ app.include_router(companies_router.router)
 app.include_router(company_certificates_router.router)
 app.include_router(stores_router.router)
 app.include_router(cadastros_router.router)
+app.include_router(imagens_router.router)
 app.include_router(integrations_router.router)
 app.include_router(oauth_router.router)
 app.include_router(products_router.router)
