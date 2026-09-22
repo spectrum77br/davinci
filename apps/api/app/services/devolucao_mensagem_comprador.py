@@ -453,8 +453,14 @@ async def candidatos_pendentes(
         select(DevolucaoMensagemComprador.pedido_bling)
         .where(
             DevolucaoMensagemComprador.evento == EVENTO_SENHA,
+            # `sem_canal` NÃO entra aqui de propósito: a linha pode ter nascido
+            # assim por falha NOSSA de resolver a plataforma (foi o que
+            # aconteceu nas rodadas de 14h25 e 15h25 de 22/09, antes de o nome
+            # da conta virar último recurso) e ficaria presa pra sempre. Toda
+            # rodada ela é reavaliada — sem canal de verdade custa uma consulta
+            # ao banco e nenhuma chamada de API.
             DevolucaoMensagemComprador.status.in_(
-                [STATUS_ENVIADA, STATUS_PENDENTE, STATUS_FALHOU, STATUS_SEM_CANAL]
+                [STATUS_ENVIADA, STATUS_PENDENTE, STATUS_FALHOU]
             ),
         )
         .scalar_subquery()

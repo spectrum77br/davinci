@@ -754,3 +754,28 @@ async def test_plataforma_sai_do_nome_da_conta_quando_o_resto_esta_calado(
     linha = await svc.garantir(db, dev)
     assert linha is not None and linha.status == "pendente"
     assert linha.plataforma == "shopee"
+
+
+async def test_linha_sem_canal_volta_a_ser_avaliada_quando_a_plataforma_aparece(
+    client, make_user, auth_as, db, shopee
+):
+    """Rodadas de 14h25 e 15h25 de 22/09: antes de o nome da conta virar último
+    recurso, lançamento sem chamado e sem espelho do pedido nascia `sem_canal`.
+    Se a varredura pulasse essas linhas pra sempre, aqueles pedidos nunca mais
+    receberiam mensagem — mesmo depois do conserto."""
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+    await _lancar(client, db, user, pedido="295401", order_sn="260904SEMCANAL")
+    linha = await _linha(db, "295401")
+    assert linha is not None
+    # estado em que aquelas linhas ficaram: marcadas como sem canal
+    linha.status, linha.erro, linha.plataforma = "sem_canal", "sem_canal_plataforma", None
+    await db.commit()
+    shopee.enviadas.clear()
+
+    r = await svc.varrer_sem_mensagem(db, dias=30, limite=10)
+
+    assert (r["candidatos"], r["enviadas"]) == (1, 1)
+    linha = await _linha(db, "295401")
+    assert linha is not None and (linha.status, linha.plataforma) == ("enviada", "shopee")
+    assert len(shopee.textos) == 1
