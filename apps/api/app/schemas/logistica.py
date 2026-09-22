@@ -87,6 +87,25 @@ class MensagemTesteOut(BaseModel):
     assunto: str
     corpo: str
     pedido: str = ""
+    # O teste levou o cartão de rastreio anexado? (o exemplo não tem rastreio
+    # que o 17track conheça, então sai sem imagem)
+    cartao: bool = False
+
+
+class MensagemAgoraIn(BaseModel):
+    """Disparo controlado: manda a mensagem de um evento pro COMPRADOR de um
+    pedido escolhido, agora. Diferente do teste, esta chega no cliente."""
+
+    pedido_bling: str
+
+
+class MensagemAgoraOut(BaseModel):
+    ok: bool = True
+    assunto: str
+    corpo: str
+    pedido: str = ""
+    destinatario: str = ""
+    cartao: bool = False
 
 
 class MensagensClienteConfigOut(BaseModel):

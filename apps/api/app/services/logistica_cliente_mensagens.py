@@ -45,7 +45,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.models import Logistica, LogisticaMensagemCliente, LogisticaMensagemTemplate
-from app.services import logistica_amazon_canal, logistica_rules, logistica_track
+from app.services import (
+    logistica_amazon_canal,
+    logistica_cartao_rastreio,
+    logistica_rules,
+    logistica_track,
+)
 
 logger = structlog.get_logger()
 
@@ -295,7 +300,69 @@ def eventos_devidos(row: Logistica, hoje: date | None = None) -> list[str]:
 
 
 class Sender(Protocol):
-    async def send(self, *, to: str, subject: str, html: str, text: str) -> None: ...
+    async def send(
+        self,
+        *,
+        to: str,
+        subject: str,
+        html: str,
+        text: str,
+        attachments: list[tuple[str, str, bytes]] | None = None,
+    ) -> None: ...
+
+
+async def montar_cartao(row: Logistica) -> tuple[str, str, bytes] | None:
+    """Cartão de rastreio pra anexar (nome, mime, png), ou None quando não faz
+    sentido mandar imagem.
+
+    Sai None — e a mensagem vai sem anexo, nunca deixa de ir — só quando:
+    - o rastreio não é dos Correios (o 17track só lê `...BR`);
+    - o 17track não respondeu ou não conhece o número;
+    - o número não tem evento nenhum (não há o que desenhar).
+
+    Pedido com só "Etiqueta emitida" LEVA o cartão (Vinicius, 22/09).
+    """
+    rastreio = (row.rastreio or "").strip()
+    if not logistica_track.is_correios(rastreio):
+        return None
+    try:
+        por_numero = await logistica_track.eventos([rastreio])
+    except Exception as e:  # noqa: BLE001 — imagem é extra, mensagem é o que importa
+        logger.warning(
+            "logistica_cartao_rastreio_sem_eventos", pedido=row.pedido_bling, err=str(e)[:200]
+        )
+        return None
+    brutos = por_numero.get(rastreio) or []
+    if not brutos:
+        return None
+    eventos = [
+        logistica_cartao_rastreio.Evento(
+            quando=e.quando,
+            titulo=e.descricao,
+            local=e.local,
+            entregue=any(p in e.descricao.lower() for p in logistica_rules._CORREIOS_ENTREGUE),
+        )
+        for e in brutos
+    ]
+    try:
+        png = logistica_cartao_rastreio.gerar(
+            codigo=rastreio,
+            pedido=(row.pedido_marketplace or row.pedido_bling or "").strip(),
+            servico=(row.servico_envio or "").strip(),
+            previsao=row.previsao_correios,
+            eventos=eventos,
+            consultado_em=datetime.now(UTC),
+        )
+    except ValueError as e:
+        logger.warning(
+            "logistica_cartao_rastreio_falhou", pedido=row.pedido_bling, err=str(e)[:200]
+        )
+        return None
+    return (
+        logistica_cartao_rastreio.CARTAO_NOME,
+        logistica_cartao_rastreio.CARTAO_MIME,
+        png,
+    )
 
 
 def _linha_exemplo() -> Logistica:
@@ -326,7 +393,7 @@ async def enviar_teste(
     email: str,
     pedido_bling: str | None = None,
     sender: Sender | None = None,
-) -> dict[str, str]:
+) -> dict[str, Any]:
     """Manda o texto de um evento, montado com os dados de um pedido real (ou
     do exemplo), pra um e-mail SEU — pra ver na caixa de entrada o que o
     cliente receberia. Nunca pra endereço de retransmissão da Amazon (isso
@@ -367,11 +434,118 @@ async def enviar_teste(
         from app.services.email import get_email_sender
 
         sender = get_email_sender()
-    await sender.send(to=email, subject=assunto, html="", text=corpo)
-    logger.info(
-        "logistica_cliente_mensagem_teste", evento=evento, para=email, pedido=row.pedido_bling
+    # Pedido de verdade leva o cartão; o exemplo não tem rastreio que o
+    # 17track conheça, então o teste sai sem imagem (e o retorno avisa).
+    cartao = await montar_cartao(row) if row.id is not None else None
+    await sender.send(
+        to=email, subject=assunto, html="", text=corpo,
+        attachments=[cartao] if cartao else None,
     )
-    return {"assunto": assunto, "corpo": corpo, "pedido": row.pedido_bling or ""}
+    logger.info(
+        "logistica_cliente_mensagem_teste",
+        evento=evento,
+        para=email,
+        pedido=row.pedido_bling,
+        com_cartao=bool(cartao),
+    )
+    return {
+        "assunto": assunto,
+        "corpo": corpo,
+        "pedido": row.pedido_bling or "",
+        "cartao": bool(cartao),
+    }
+
+
+async def enviar_agora(
+    session: AsyncSession,
+    *,
+    pedido_bling: str,
+    evento: str,
+    sender: Sender | None = None,
+) -> dict[str, Any]:
+    """Manda AGORA, pro comprador de verdade, a mensagem de um evento de um
+    pedido escolhido.
+
+    Vinicius, 22/09: é o disparo controlado pra descobrir se a Amazon repassa
+    o anexo — dispara em um pedido, confere no Seller Central, e só então o
+    robô solta pra todo mundo. Diferente do `enviar_teste` (que vai pro
+    e-mail do operador), esta chega no comprador: só admin, um pedido por vez,
+    e reenvia mesmo que o evento já tenha ido — senão não dava pra testar.
+    """
+    if evento not in EVENTOS:
+        raise TemplateInvalidoError("evento_desconhecido")
+    if not get_settings().amazon_mensagens_cliente:
+        # Sem a chave ligada o remetente não está aprovado no Seller Central e
+        # a Amazon descarta: o teste não provaria nada.
+        raise TemplateInvalidoError("envio_desligado")
+    pedido = (pedido_bling or "").strip()
+    row = (
+        await session.execute(
+            select(Logistica).where(
+                func.lower(func.trim(Logistica.plataforma)).in_(
+                    tuple(logistica_rules._AMAZON_PLATAFORMAS)
+                ),
+                Logistica.pedido_bling == pedido,
+            )
+        )
+    ).scalars().first()
+    if row is None:
+        raise TemplateInvalidoError("pedido_nao_encontrado")
+    if (row.amazon_canal or "") != logistica_amazon_canal.CANAL_PROPRIO:
+        raise TemplateInvalidoError("pedido_nao_e_envio_proprio")
+    destino = (row.cliente_email or "").strip()
+    if not logistica_amazon_canal.eh_email_relay_amazon(destino):
+        raise TemplateInvalidoError("pedido_sem_email_do_comprador")
+
+    templates = await carregar_templates(session)
+    assunto, corpo = renderizar(templates[evento], row)
+    cartao = await montar_cartao(row)
+    if sender is None:
+        from app.services.email import get_email_sender
+
+        sender = get_email_sender()
+    m = (
+        await session.execute(
+            select(LogisticaMensagemCliente).where(
+                LogisticaMensagemCliente.logistica_id == row.id,
+                LogisticaMensagemCliente.evento == evento,
+            )
+        )
+    ).scalar_one_or_none()
+    if m is None:
+        m = LogisticaMensagemCliente(logistica_id=row.id, evento=evento, destinatario=destino)
+        session.add(m)
+    m.assunto, m.corpo, m.destinatario = assunto, corpo, destino
+    m.tentativas = (m.tentativas or 0) + 1
+    try:
+        await sender.send(
+            to=destino, subject=assunto, html="", text=corpo,
+            attachments=[cartao] if cartao else None,
+        )
+    except Exception as e:  # noqa: BLE001 — o painel mostra o erro
+        m.erro = str(e)[:300]
+        await session.commit()
+        logger.warning(
+            "logistica_cliente_mensagem_agora_falhou", pedido=pedido, evento=evento, err=m.erro
+        )
+        raise
+    m.enviado_em = datetime.now(UTC)
+    m.erro = None
+    await session.commit()
+    logger.info(
+        "logistica_cliente_mensagem_agora",
+        pedido=pedido,
+        evento=evento,
+        destinatario=destino,
+        com_cartao=bool(cartao),
+    )
+    return {
+        "assunto": assunto,
+        "corpo": corpo,
+        "pedido": row.pedido_bling or "",
+        "destinatario": destino,
+        "cartao": bool(cartao),
+    }
 
 
 async def _historico(
@@ -444,8 +618,14 @@ async def run(
 
         sender = get_email_sender()
     agora = datetime.now(UTC)
+    # Um cartão por PEDIDO: dois eventos do mesmo pedido na mesma rodada
+    # (previsão vencida + entregue, por exemplo) reaproveitam a leitura.
+    cartoes: dict[Any, tuple[str, str, bytes] | None] = {}
     for r, ev in fila[:limit]:
         assunto, corpo = renderizar(templates[ev], r)
+        if r.id not in cartoes:
+            cartoes[r.id] = await montar_cartao(r)
+        cartao = cartoes[r.id]
         m = hist.get((r.id, ev))
         if m is None:
             m = LogisticaMensagemCliente(
@@ -456,7 +636,13 @@ async def run(
         m.assunto, m.corpo = assunto, corpo
         m.tentativas = (m.tentativas or 0) + 1
         try:
-            await sender.send(to=r.cliente_email or "", subject=assunto, html="", text=corpo)
+            await sender.send(
+                to=r.cliente_email or "",
+                subject=assunto,
+                html="",
+                text=corpo,
+                attachments=[cartao] if cartao else None,
+            )
         except Exception as e:  # noqa: BLE001 — registra e retenta na próxima rodada
             m.erro = str(e)[:300]
             resumo["falhas"] += 1
@@ -472,6 +658,7 @@ async def run(
             pedido=r.pedido_bling,
             evento=ev,
             destinatario=r.cliente_email,
+            com_cartao=bool(cartao),
         )
     await session.commit()
     return resumo

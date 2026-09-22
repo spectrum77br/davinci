@@ -22,6 +22,7 @@ com `address.city`) OU no v2.4 (`track_info.providers[].events[]` +
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
@@ -673,4 +674,97 @@ def parse_push(payload: dict) -> list[tuple[str, str]]:
         loc = _fmt_from_track_info(it.get("track_info") or {})
         if loc:
             out.append((number, loc))
+    return out
+
+
+# ── Histórico de eventos (cartão de rastreio ao comprador) ────────────────
+# A Localização da tela guarda só a ÚLTIMA posição; o cartão que vai anexado
+# na mensagem ao comprador da Amazon precisa da lista inteira. É a mesma
+# resposta do `gettrackinfo` — leitura pura, não registra número nem gasta
+# quota. O 17track entrega a unidade só como UF ("MG", "SP"): o "de Unidade de
+# Tratamento, Belo Horizonte - MG" que o site dos Correios mostra NÃO vem na
+# API. Sem contrato com os Correios, é o que temos.
+
+
+@dataclass(frozen=True)
+class EventoRastreio:
+    quando: datetime  # com fuso
+    descricao: str
+    local: str  # "MG", "SP" — o que o 17track dá
+
+
+def _providers(track_info: dict) -> list[dict]:
+    """Os `providers` aparecem em `tracking.providers` (v2.2) e soltos na raiz
+    (v2.4). Aceita os dois, como `_fmt_from_track_info` e `_sync_at` fazem."""
+    ti = track_info or {}
+    saida: list[dict] = []
+    for fonte in ((ti.get("tracking") or {}).get("providers"), ti.get("providers")):
+        if isinstance(fonte, list):
+            saida += [p for p in fonte if isinstance(p, dict)]
+    return saida
+
+
+def _quando(ev: dict) -> datetime | None:
+    for chave in ("time_iso", "time_utc", "time_raw"):
+        raw = ev.get(chave)
+        if isinstance(raw, dict):  # time_raw vem como {date, time, timezone}
+            raw = f"{raw.get('date') or ''} {raw.get('time') or ''}".strip()
+        if not raw:
+            continue
+        try:
+            dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
+    return None
+
+
+def eventos_de_track_info(track_info: dict) -> list[EventoRastreio]:
+    """Eventos do mais novo pro mais antigo. Evento sem data ou sem descrição
+    é descartado (não dá pra mostrar ao comprador)."""
+    vistos: set[tuple[str, str]] = set()
+    out: list[EventoRastreio] = []
+    for p in _providers(track_info):
+        for ev in p.get("events") or []:
+            if not isinstance(ev, dict):
+                continue
+            quando = _quando(ev)
+            descr = (ev.get("description") or "").strip()
+            if quando is None or not descr:
+                continue
+            addr = ev.get("address") or {}
+            local = (ev.get("location") or "").strip() or _compose(
+                (addr.get("city") or "").strip(), (addr.get("state") or "").strip(), ""
+            ) or ""
+            chave = (quando.isoformat(), descr.lower())
+            if chave in vistos:  # o mesmo evento pode vir em dois providers
+                continue
+            vistos.add(chave)
+            out.append(EventoRastreio(quando=quando, descricao=descr, local=local))
+    return sorted(out, key=lambda e: e.quando, reverse=True)
+
+
+async def eventos(numbers: list[str]) -> dict[str, list[EventoRastreio]]:
+    """{número: eventos} pros números que o 17track conhece. Leitura pura.
+    Levanta `Track17Error` se a resposta não for confiável — quem chama decide
+    (no cartão, seguir sem imagem é melhor do que não mandar a mensagem)."""
+    nums = sorted({(n or "").strip() for n in numbers if (n or "").strip()})
+    out: dict[str, list[EventoRastreio]] = {}
+    if not nums:
+        return out
+    async with httpx.AsyncClient(timeout=40.0) as c:
+        for i in range(0, len(nums), _FETCH_BATCH):
+            chunk = nums[i : i + _FETCH_BATCH]
+            if i:
+                await asyncio.sleep(_PAUSA_ENTRE_LOTES)
+            body = await _chamar(
+                c, "gettrackinfo", [{"number": n, "carrier": CORREIOS_CARRIER} for n in chunk]
+            )
+            for it in (body.get("data") or {}).get("accepted") or []:
+                if not isinstance(it, dict) or not it.get("number"):
+                    continue
+                evs = eventos_de_track_info(it.get("track_info") or {})
+                if evs:
+                    out[str(it["number"]).strip()] = evs
+    logger.info("logistica_17track_eventos", pedidos=len(nums), com_evento=len(out))
     return out

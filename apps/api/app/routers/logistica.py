@@ -60,6 +60,8 @@ from app.schemas.logistica import (
     MensagemClienteOut,
     MensagemTemplateIn,
     MensagemTemplateOut,
+    MensagemAgoraIn,
+    MensagemAgoraOut,
     MensagemTesteIn,
     MensagemTesteOut,
     MensagensClienteConfigOut,
@@ -751,6 +753,33 @@ async def list_logistica(
             )
         )
     return out
+
+
+@router.post("/mensagens-cliente/{evento}/enviar-agora", response_model=MensagemAgoraOut)
+async def enviar_mensagem_cliente_agora(
+    evento: str,
+    body: MensagemAgoraIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("logistica", "edit"))],
+) -> MensagemAgoraOut:
+    """Manda AGORA a mensagem de um evento pro COMPRADOR do pedido escolhido —
+    com o cartão de rastreio anexado. Chega no cliente de verdade: é o disparo
+    controlado pra conferir no Seller Central se a Amazon repassou o anexo,
+    antes de deixar o robô mandar pra todo mundo."""
+    if not _pode_editar_mensagens(user):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail={"code": "admin_only"})
+    try:
+        res = await logistica_cliente_mensagens.enviar_agora(
+            session, pedido_bling=body.pedido_bling, evento=evento
+        )
+    except logistica_cliente_mensagens.TemplateInvalidoError as e:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY, detail={"code": e.code}
+        ) from e
+    except Exception as e:  # noqa: BLE001 — Mailjet fora do ar
+        logger.warning("logistica_cliente_mensagem_agora_erro", err=str(e)[:200])
+        raise HTTPException(502, detail={"code": "email_falhou"}) from e
+    return MensagemAgoraOut(**res)
 
 
 @router.post("/mensagens-cliente/{evento}/teste", response_model=MensagemTesteOut)

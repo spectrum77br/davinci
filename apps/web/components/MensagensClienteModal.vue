@@ -43,6 +43,9 @@ const testeEmail = ref('')
 const testePedido = ref('')
 const testando = ref(false)
 const testeResultado = ref<string | null>(null)
+// O teste levou o cartão de rastreio anexado? Só vai com pedido real que já
+// andou nos Correios — o exemplo e o pedido parado saem sem imagem.
+type TesteOut = { assunto: string; corpo: string; pedido: string; cartao: boolean }
 
 const ERROS: Record<string, string> = {
   email_invalido: 'Digite um e-mail válido para receber o teste.',
@@ -55,6 +58,10 @@ const ERROS: Record<string, string> = {
   mensagem_sem_pedido: 'O corpo precisa conter {pedido_amazon}: a Amazon exige o número do pedido em toda mensagem.',
   mensagem_chaves_invalidas: 'Há uma chave mal fechada. Use os campos entre chaves, ex.: {cliente}.',
   admin_only: 'Só administradores editam os textos.',
+  envio_desligado: 'O envio está desligado no servidor: a Amazon descartaria a mensagem.',
+  pedido_nao_e_envio_proprio: 'Esse pedido não é de Envio próprio — só eles recebem mensagem nossa.',
+  pedido_sem_email_do_comprador: 'Esse pedido não tem o endereço de retransmissão da Amazon.',
+  evento_desconhecido: 'Evento inválido.',
 }
 
 watch(
@@ -81,20 +88,59 @@ async function enviarTeste() {
   testeResultado.value = null
   const enviados: string[] = []
   try {
+    let comCartao = 0
     for (const t of cfg.value.templates) {
-      await api(`/api/logistica/mensagens-cliente/${t.evento}/teste`, {
+      const r = await api<TesteOut>(`/api/logistica/mensagens-cliente/${t.evento}/teste`, {
         method: 'POST',
         body: { email: testeEmail.value.trim(), pedido_bling: testePedido.value.trim() || null },
       })
+      if (r?.cartao) comCartao++
       enviados.push(t.label)
     }
-    testeResultado.value = `Enviado para ${testeEmail.value.trim()}: ${enviados.join(', ')}. Confira a caixa de entrada (e o spam).`
+    const imagem = comCartao
+      ? ` Com o cartão de rastreio anexado em ${comCartao} de ${enviados.length}.`
+      : ' Sem o cartão de rastreio: use um pedido que já andou nos Correios para ver a imagem.'
+    testeResultado.value = `Enviado para ${testeEmail.value.trim()}: ${enviados.join(', ')}. Confira a caixa de entrada (e o spam).${imagem}`
   } catch (e: any) {
     const code = e?.data?.detail?.code || ''
     erro.value = ERROS[code] || 'Não consegui enviar o teste. Tente de novo.'
     if (enviados.length) testeResultado.value = `Foram enviados antes do erro: ${enviados.join(', ')}.`
   } finally {
     testando.value = false
+  }
+}
+
+// Disparo controlado: manda a mensagem de um evento pro COMPRADOR de um
+// pedido escolhido. Diferente do teste, esta chega no cliente — por isso pede
+// confirmação e mostra pra quem foi.
+const agoraPedido = ref('')
+const agoraEvento = ref('')
+const agoraConfirmar = ref(false)
+const agoraEnviando = ref(false)
+const agoraResultado = ref<string | null>(null)
+type AgoraOut = { pedido: string; destinatario: string; cartao: boolean }
+
+async function enviarAgora() {
+  if (!agoraPedido.value.trim() || !agoraEvento.value) return
+  agoraEnviando.value = true
+  erro.value = null
+  agoraResultado.value = null
+  try {
+    const r = await api<AgoraOut>(
+      `/api/logistica/mensagens-cliente/${agoraEvento.value}/enviar-agora`,
+      { method: 'POST', body: { pedido_bling: agoraPedido.value.trim() } },
+    )
+    const label = cfg.value?.templates.find((t) => t.evento === agoraEvento.value)?.label || ''
+    agoraResultado.value =
+      `"${label}" enviada ao comprador do pedido ${r.pedido} (${r.destinatario})` +
+      (r.cartao ? ', com o cartão de rastreio anexado.' : ', SEM o cartão (o 17track não tem evento desse rastreio).') +
+      ' Confira no Seller Central se o anexo chegou.'
+    agoraConfirmar.value = false
+  } catch (e: any) {
+    const code = e?.data?.detail?.code || ''
+    erro.value = ERROS[code] || 'Não consegui enviar. Tente de novo.'
+  } finally {
+    agoraEnviando.value = false
   }
 }
 
@@ -135,6 +181,12 @@ async function salvar(t: Template) {
         uma vez por pedido e por evento, só nos pedidos de Envio próprio. Sem links, sem
         e-mail e sem HTML: a Amazon bloqueia. O aviso de postagem com o rastreio quem manda
         é a própria Amazon, ao confirmar o envio.
+      </p>
+      <p class="text-sm text-muted-foreground">
+        Todas as mensagens levam anexado o <strong>cartão de rastreio</strong>: uma imagem com
+        as passagens do pacote nos Correios, que é como o comprador enxerga o caminho sem
+        link. Sai em todo pedido que o 17track já conhece, mesmo o que só tem "Etiqueta
+        emitida". Sem evento nenhum não há o que desenhar, e a mensagem vai sem a imagem.
       </p>
 
       <div v-if="loading" class="flex items-center gap-2 text-sm text-muted-foreground">
@@ -228,6 +280,55 @@ async function salvar(t: Template) {
           </Button>
         </div>
         <p v-if="testeResultado" class="text-sm text-emerald-600">{{ testeResultado }}</p>
+      </div>
+
+      <div
+        v-if="cfg && podeEditar"
+        class="rounded-md border border-amber-300 bg-amber-50 p-3 space-y-2
+               dark:border-amber-700 dark:bg-amber-950/40"
+      >
+        <div class="font-medium text-sm">Mandar para o comprador de um pedido</div>
+        <p class="text-xs text-muted-foreground">
+          Esta <strong>chega no cliente de verdade</strong>, com o cartão de rastreio anexado.
+          Serve para disparar em um pedido só e conferir no Seller Central se a Amazon
+          repassou o anexo, antes de o robô mandar para todo mundo. Reenvia mesmo que o
+          evento já tenha ido.
+        </p>
+        <div class="flex flex-wrap gap-2">
+          <input
+            v-model="agoraPedido"
+            class="h-9 w-40 rounded-md border bg-background px-2 text-sm"
+            placeholder="pedido Bling"
+          />
+          <select
+            v-model="agoraEvento"
+            class="h-9 flex-1 min-w-[200px] rounded-md border bg-background px-2 text-sm"
+          >
+            <option value="">escolha a mensagem…</option>
+            <option v-for="t in cfg.templates" :key="t.evento" :value="t.evento">
+              {{ t.label }}
+            </option>
+          </select>
+          <Button
+            v-if="!agoraConfirmar"
+            size="sm"
+            variant="outline"
+            :disabled="!agoraPedido.trim() || !agoraEvento"
+            @click="agoraConfirmar = true"
+          >
+            Enviar ao comprador
+          </Button>
+          <template v-else>
+            <Button size="sm" variant="destructive" :disabled="agoraEnviando" @click="enviarAgora">
+              <Loader2 v-if="agoraEnviando" class="size-4 mr-1 animate-spin" />
+              Confirmar envio ao cliente
+            </Button>
+            <Button size="sm" variant="ghost" @click="agoraConfirmar = false">Cancelar</Button>
+          </template>
+        </div>
+        <p v-if="agoraResultado" class="text-sm text-emerald-700 dark:text-emerald-400">
+          {{ agoraResultado }}
+        </p>
       </div>
 
       <p v-if="ok" class="text-sm text-emerald-600">{{ ok }}</p>

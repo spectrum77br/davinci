@@ -29,6 +29,11 @@ def render_otp_html(*, prefix: str, code: str, ttl_minutes: int) -> str:
 # HTML referencia-se `cid:<content_id>`. Vazio/None = e-mail sem imagem.
 InlineImages = dict[str, tuple[str, bytes]]
 
+# Anexos de verdade: [(nome do arquivo, mime, bytes)]. Diferente do inline, o
+# arquivo aparece como anexo e NÃO precisa de HTML — é o único jeito de mandar
+# imagem na mensagem ao comprador da Amazon, que sai em texto puro.
+Attachments = list[tuple[str, str, bytes]]
+
 
 class EmailSender(Protocol):
     async def send(
@@ -42,6 +47,7 @@ class EmailSender(Protocol):
         from_name: str | None = None,
         reply_to: tuple[str, str] | None = None,
         inline_images: InlineImages | None = None,
+        attachments: Attachments | None = None,
     ) -> None: ...
 
 
@@ -62,6 +68,7 @@ class ConsoleEmailSender:
         from_name: str | None = None,
         reply_to: tuple[str, str] | None = None,
         inline_images: InlineImages | None = None,
+        attachments: Attachments | None = None,
     ) -> None:
         logger.info(
             "email_console_send",
@@ -72,6 +79,7 @@ class ConsoleEmailSender:
             from_name=from_name,
             reply_to=reply_to,
             inline_images=sorted((inline_images or {}).keys()),
+            attachments=[nome for nome, _mime, _raw in (attachments or [])],
             note="Mailjet keys missing — printing instead.",
         )
 
@@ -91,6 +99,7 @@ class MailjetEmailSender:
         from_name: str | None = None,
         reply_to: tuple[str, str] | None = None,
         inline_images: InlineImages | None = None,
+        attachments: Attachments | None = None,
     ) -> None:
         default_addr, default_name = _parse_from(_settings.email_from, _settings.email_from_name)
         # Remetente explícito por marca (sac@marca): o endereço/domínio precisa
@@ -120,6 +129,15 @@ class MailjetEmailSender:
                     "Base64Content": b64encode(data).decode(),
                 }
                 for cid, (mime, data) in inline_images.items()
+            ]
+        if attachments:
+            message["Attachments"] = [
+                {
+                    "ContentType": mime,
+                    "Filename": nome,
+                    "Base64Content": b64encode(raw).decode(),
+                }
+                for nome, mime, raw in attachments
             ]
         payload = {"Messages": [message]}
         auth_raw = f"{_settings.mailjet_api_key}:{_settings.mailjet_secret_key}".encode()

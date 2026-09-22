@@ -21,10 +21,18 @@ class FakeSender:
         self.enviados: list[dict] = []
         self.falha = falha
 
-    async def send(self, *, to, subject, html, text):
+    async def send(self, *, to, subject, html, text, attachments=None):
         if self.falha:
             raise RuntimeError("mailjet 500")
-        self.enviados.append({"to": to, "subject": subject, "html": html, "text": text})
+        self.enviados.append(
+            {
+                "to": to,
+                "subject": subject,
+                "html": html,
+                "text": text,
+                "attachments": attachments,
+            }
+        )
 
 
 @pytest.fixture
@@ -224,3 +232,273 @@ async def test_enviar_teste_vai_para_meu_email_nunca_para_o_cliente(db: AsyncSes
         await msgs.enviar_teste(
             db, "entregue", email="eu@empresa.com.br", pedido_bling="999", sender=sender
         )
+
+
+# ---- cartão de rastreio anexado (22/09/2026) ----
+#
+# A Amazon não aceita link na mensagem, então o histórico dos Correios vai
+# como IMAGEM anexada. O 17track é a fonte dos eventos.
+
+
+def _track_info(eventos: list[dict], *, aninhado: bool = True) -> dict:
+    """Resposta do 17track: `tracking.providers[]` (v2.2) ou solto (v2.4)."""
+    providers = [{"events": eventos}]
+    return {"tracking": {"providers": providers}} if aninhado else {"providers": providers}
+
+
+_EV_POSTADO = {
+    "time_iso": "2026-09-21T16:18:00-03:00",
+    "description": "Objeto postado",
+    "location": "SP",
+}
+_EV_TRANSFERENCIA = {
+    "time_iso": "2026-09-22T07:08:00-03:00",
+    "description": "Objeto em transferência - por favor aguarde",
+    "location": "MG",
+}
+_EV_ETIQUETA = {
+    "time_iso": "2026-09-21T08:49:00-03:00",
+    "description": "Etiqueta emitida",
+    "location": "BR",
+}
+
+
+@pytest.mark.parametrize("aninhado", [True, False])
+def test_eventos_do_17track_vem_do_mais_novo_pro_mais_antigo(aninhado):
+    from app.services import logistica_track
+
+    evs = logistica_track.eventos_de_track_info(
+        _track_info([_EV_POSTADO, _EV_TRANSFERENCIA, _EV_ETIQUETA], aninhado=aninhado)
+    )
+    assert [e.descricao for e in evs] == [
+        "Objeto em transferência - por favor aguarde",
+        "Objeto postado",
+        "Etiqueta emitida",
+    ]
+    assert evs[0].local == "MG"
+    # Evento sem data ou sem descrição não tem como ser mostrado ao comprador.
+    assert logistica_track.eventos_de_track_info(
+        _track_info([{"description": "sem data"}, {"time_iso": "2026-09-21T10:00:00-03:00"}])
+    ) == []
+
+
+def test_eventos_repetidos_em_dois_providers_contam_uma_vez():
+    from app.services import logistica_track
+
+    ti = {"tracking": {"providers": [{"events": [_EV_POSTADO]}, {"events": [_EV_POSTADO]}]}}
+    assert len(logistica_track.eventos_de_track_info(ti)) == 1
+
+
+def test_cartao_sai_mesmo_so_com_etiqueta_emitida():
+    """Vinicius, 22/09: pedido que ainda não andou também leva a imagem."""
+    from app.services import logistica_cartao_rastreio as cartao
+
+    png = cartao.gerar(
+        codigo="AD942982423BR",
+        pedido="702-8932109-4506652",
+        servico="SEDEX",
+        previsao=date(2026, 9, 23),
+        eventos=[
+            cartao.Evento(
+                quando=datetime(2026, 9, 21, 11, 49, tzinfo=UTC),
+                titulo="Etiqueta emitida",
+                local="BR",
+            )
+        ],
+        consultado_em=datetime(2026, 9, 21, 12, 0, tzinfo=UTC),
+    )
+    assert png.startswith(b"\x89PNG\r\n")
+
+
+def test_cartao_desenha_png_com_o_historico():
+    from app.services import logistica_cartao_rastreio as cartao
+
+    png = cartao.gerar(
+        codigo="AD942982423BR",
+        pedido="702-8932109-4506652",
+        servico="SEDEX",
+        previsao=date(2026, 9, 23),
+        eventos=[
+            cartao.Evento(
+                quando=datetime(2026, 9, 23, 14, 32, tzinfo=UTC),
+                titulo="Objeto entregue ao destinatário",
+                local="MG",
+                entregue=True,
+            ),
+            cartao.Evento(
+                quando=datetime(2026, 9, 21, 19, 18, tzinfo=UTC),
+                titulo="Objeto postado",
+                local="SP",
+            ),
+        ],
+        consultado_em=datetime(2026, 9, 23, 15, 10, tzinfo=UTC),
+    )
+    assert png.startswith(b"\x89PNG\r\n")
+    assert 5_000 < len(png) < 2_000_000
+    with pytest.raises(ValueError):
+        cartao.gerar(
+            codigo="AD942982423BR", pedido="1", servico="", previsao=None,
+            eventos=[], consultado_em=datetime(2026, 9, 23, tzinfo=UTC),
+        )
+
+
+def _patch_eventos(monkeypatch, retorno=None, erro: Exception | None = None):
+    from app.services import logistica_track
+
+    async def fake(numbers):
+        if erro:
+            raise erro
+        return retorno or {}
+
+    monkeypatch.setattr(logistica_track, "eventos", fake)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "eventos", [[_EV_ETIQUETA], [_EV_TRANSFERENCIA, _EV_POSTADO, _EV_ETIQUETA]]
+)
+async def test_montar_cartao_com_qualquer_evento(monkeypatch, eventos):
+    """Basta o 17track ter UM evento — inclusive só a etiqueta emitida."""
+    from app.services import logistica_track
+
+    row = _linha()
+    _patch_eventos(
+        monkeypatch,
+        {row.rastreio: logistica_track.eventos_de_track_info(_track_info(eventos))},
+    )
+    cartao = await msgs.montar_cartao(row)
+    assert cartao is not None
+    nome, mime, png = cartao
+    assert (nome, mime) == ("rastreio.png", "image/png") and png.startswith(b"\x89PNG")
+
+
+@pytest.mark.asyncio
+async def test_montar_cartao_nao_derruba_a_mensagem(monkeypatch):
+    """17track fora do ar, número desconhecido ou rastreio que não é dos
+    Correios: a mensagem vai, só que sem imagem."""
+    row = _linha()
+    _patch_eventos(monkeypatch, erro=RuntimeError("17track 500"))
+    assert await msgs.montar_cartao(row) is None
+    _patch_eventos(monkeypatch, {})
+    assert await msgs.montar_cartao(row) is None
+    _patch_eventos(monkeypatch, erro=AssertionError("não devia nem consultar"))
+    assert await msgs.montar_cartao(_linha(rastreio="TIKTOK123")) is None
+
+
+@pytest.mark.asyncio
+async def test_robo_anexa_o_cartao_na_mensagem(db: AsyncSession, ligado, monkeypatch):
+    from app.services import logistica_track
+
+    db.add(_linha(entregue_em=datetime(2026, 9, 22, 12, 0, tzinfo=UTC)))
+    await db.commit()
+    _patch_eventos(
+        monkeypatch,
+        {
+            "AD912266053BR": logistica_track.eventos_de_track_info(
+                _track_info([_EV_TRANSFERENCIA, _EV_POSTADO])
+            )
+        },
+    )
+    sender = FakeSender()
+    out = await msgs.run(db, sender=sender, hoje=HOJE)
+    assert out["enviadas"] >= 1
+    for enviado in sender.enviados:
+        anexos = enviado["attachments"]
+        assert anexos and anexos[0][0] == "rastreio.png"
+        assert anexos[0][2].startswith(b"\x89PNG")
+
+
+@pytest.mark.asyncio
+async def test_numero_que_o_17track_nao_conhece_manda_mensagem_sem_anexo(
+    db: AsyncSession, ligado, monkeypatch
+):
+    """Sem evento nenhum não há o que desenhar — mas a mensagem vai."""
+    db.add(_linha())
+    await db.commit()
+    _patch_eventos(monkeypatch, {})
+    sender = FakeSender()
+    out = await msgs.run(db, sender=sender, hoje=HOJE)
+    assert out["enviadas"] >= 1
+    assert all(e["attachments"] is None for e in sender.enviados)
+
+
+# ---- disparo controlado (vai pro comprador de verdade) ----
+
+
+@pytest.mark.asyncio
+async def test_enviar_agora_vai_pro_comprador_com_o_cartao(
+    db: AsyncSession, ligado, monkeypatch
+):
+    from app.services import logistica_track
+
+    db.add(_linha())
+    await db.commit()
+    _patch_eventos(
+        monkeypatch,
+        {
+            "AD912266053BR": logistica_track.eventos_de_track_info(
+                _track_info([_EV_TRANSFERENCIA, _EV_POSTADO])
+            )
+        },
+    )
+    sender = FakeSender()
+    res = await msgs.enviar_agora(
+        db, pedido_bling="296762", evento="rastreio", sender=sender
+    )
+    assert res["destinatario"] == "n340cj40yxfjsq4@marketplace.amazon.com.br"
+    assert res["cartao"] is True
+    enviado = sender.enviados[0]
+    assert enviado["to"] == res["destinatario"] and enviado["html"] == ""
+    assert enviado["attachments"][0][0] == "rastreio.png"
+    # Fica no histórico do pedido, como qualquer mensagem do robô.
+    m = (
+        await db.execute(
+            select(LogisticaMensagemCliente).where(
+                LogisticaMensagemCliente.evento == "rastreio"
+            )
+        )
+    ).scalar_one()
+    assert m.enviado_em is not None and m.erro is None
+
+    # Reenvia de propósito: sem isso não dava pra testar duas vezes.
+    await msgs.enviar_agora(db, pedido_bling="296762", evento="rastreio", sender=sender)
+    assert len(sender.enviados) == 2
+
+
+@pytest.mark.asyncio
+async def test_enviar_agora_recusa_o_que_nao_e_mensagem_ao_comprador(
+    db: AsyncSession, ligado, monkeypatch
+):
+    _patch_eventos(monkeypatch, {})
+    db.add(_linha(pedido_bling="296763", amazon_canal="dba"))
+    db.add(_linha(pedido_bling="296764", cliente_email="pessoa@gmail.com"))
+    await db.commit()
+    sender = FakeSender()
+    for pedido, code in (
+        ("999999", "pedido_nao_encontrado"),
+        ("296763", "pedido_nao_e_envio_proprio"),
+        ("296764", "pedido_sem_email_do_comprador"),
+    ):
+        with pytest.raises(msgs.TemplateInvalidoError) as e:
+            await msgs.enviar_agora(db, pedido_bling=pedido, evento="rastreio", sender=sender)
+        assert e.value.code == code
+    with pytest.raises(msgs.TemplateInvalidoError) as e:
+        await msgs.enviar_agora(db, pedido_bling="296762", evento="xpto", sender=sender)
+    assert e.value.code == "evento_desconhecido"
+    assert sender.enviados == []
+
+
+@pytest.mark.asyncio
+async def test_enviar_agora_exige_a_chave_do_servidor_ligada(db: AsyncSession, monkeypatch):
+    """Chave desligada = remetente não aprovado no Seller Central: a Amazon
+    descartaria e o teste não provaria nada."""
+    monkeypatch.setattr(
+        msgs, "get_settings", lambda: SimpleNamespace(amazon_mensagens_cliente=False)
+    )
+    db.add(_linha())
+    await db.commit()
+    sender = FakeSender()
+    with pytest.raises(msgs.TemplateInvalidoError) as e:
+        await msgs.enviar_agora(db, pedido_bling="296762", evento="rastreio", sender=sender)
+    assert e.value.code == "envio_desligado"
+    assert sender.enviados == []
