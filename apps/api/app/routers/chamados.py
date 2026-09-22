@@ -91,7 +91,12 @@ from app.schemas.chamados import (
     SituacoesOut,
 )
 from app.services import chamados as svc
-from app.services import chamados_devolucao, chamados_juridico, vigia_chamados
+from app.services import (
+    chamados_devolucao,
+    chamados_devolucao_sync,
+    chamados_juridico,
+    vigia_chamados,
+)
 from app.services.devolution_delete import EstornoFalhouError, excluir_lancamento
 from app.services.texto_html import limpar_html
 
@@ -1088,6 +1093,27 @@ async def excluir_chamado(
         estornos=estornos,
         situacao=situacao_aplicada,
     )
+
+
+@router.post("/{chamado_id}/reler", response_model=ChamadoOut)
+async def reler_na_plataforma(
+    chamado_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("chamados", "edit"))],
+) -> ChamadoOut:
+    """Relê o caso na plataforma AGORA (o cron faz isso de hora em hora, no
+    minuto :25). Vinicius 22/09: quando a TikTok está com um prazo correndo —
+    "sem resposta, a plataforma aprova o reembolso sozinha" — esperar a próxima
+    janela é caro. Traz status, arbitragem, o que o comprador escreveu e anexou
+    e o que a plataforma espera de nós. Plataforma sem API responde 422."""
+    ch = await _get(session, chamado_id)
+    r = await chamados_devolucao_sync.sync_um(session, ch)
+    if not r.get("lido"):
+        raise HTTPException(
+            422, detail={"code": r.get("erro") or "chamado_sem_api", "plataforma": r.get("plataforma")}
+        )
+    await session.refresh(ch)
+    return await _one_out(session, ch)
 
 
 @router.post("/{chamado_id}/instrucao", response_model=ChamadoOut)

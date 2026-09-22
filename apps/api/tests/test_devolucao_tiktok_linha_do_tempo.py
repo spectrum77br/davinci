@@ -579,3 +579,32 @@ async def test_acao_ou_situacao_que_a_tiktok_inventar_nao_quebra_a_linha(
     assert _estado(
         "Aberto — aguardando resposta da loja", "Responder na plataforma", prazo2
     ) in await _recebidas(db, ch.id)
+
+
+async def test_botao_reler_agora_traz_o_caso_sem_esperar_o_cron(
+    client, make_user, auth_as, db, ml, monkeypatch
+):
+    """Vinicius 22/09: "não consegue subir e dar um rodar agora? pra já testar
+    novamente?" — e vale além do teste: com prazo correndo na TikTok, esperar a
+    passada das :25 pode custar o reembolso. O botão relê o caso na hora."""
+    fake = _TikTokCasos()
+    ch, _ = await _abrir(client, db, make_user, auth_as, monkeypatch, fake)
+    prazo = int((datetime.now(UTC) + timedelta(hours=19)).timestamp())
+    fake.acoes = [{"action": "SELLER_RESPOND_REFUND", "deadline": prazo}]
+    fake.linhas[RID_REEMB] = [
+        {"role": "BUYER", "create_time": ESCREVEU, "note": "quero meu dinheiro de volta"},
+    ]
+
+    r = await client.post(f"/api/chamados/{ch.id}/reler")
+    assert r.status_code == 200, r.text
+    assert r.json()["chamado"] == RID_REEMB
+
+    txts = await _recebidas(db, ch.id)
+    assert any("quero meu dinheiro de volta" in t for t in txts), txts
+    assert any("esperando a NOSSA resposta" in t and "Prazo até" in t for t in txts), txts
+
+    # plataforma sem API responde 422 em vez de fingir que leu
+    ch.plataforma = "amazon"
+    await db.commit()
+    r2 = await client.post(f"/api/chamados/{ch.id}/reler")
+    assert r2.status_code == 422, r2.text

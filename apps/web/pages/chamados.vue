@@ -961,6 +961,27 @@ async function enviarReplica() {
 
 // 19/09: instrução pro robô. Não vai pra plataforma — vira mensagem tipo `instrucao`
 // no histórico e o chamado cai em Análise Robô até o robô passar e responder aqui.
+const relendo = ref(false)
+// "Reler agora" (22/09): o cron relê a plataforma de hora em hora, no minuto 25.
+// Quando a TikTok está com prazo correndo ("sem resposta, aprova o reembolso
+// sozinha"), esperar a próxima janela é caro — este botão lê na hora.
+async function relerAgora() {
+  const row = hist.row
+  if (!row || !canEdit.value || relendo.value) return
+  relendo.value = true
+  try {
+    const updated = await api<ChamadoRow>(`/api/chamados/${row.id}/reler`, { method: 'POST' })
+    replaceRow(updated)
+    hist.row = updated
+    hist.mensagens = await api<Mensagem[]>(`/api/chamados/${updated.id}/mensagens`)
+    toasts.success('Caso relido na plataforma', 'O que chegou de novo está no histórico abaixo.')
+  } catch (e: any) {
+    toasts.error('Não consegui reler o caso', apiError(e))
+  } finally {
+    relendo.value = false
+  }
+}
+
 async function enviarInstrucao() {
   const row = hist.row
   if (!row || !canEdit.value) return
@@ -1762,6 +1783,18 @@ async function confirmarExcluir() {
             </div>
           </div>
           <div class="flex items-center gap-2">
+            <Button
+              v-if="hist.row.canal === 'api'"
+              size="sm"
+              variant="outline"
+              class="h-7 px-2"
+              :disabled="!canEdit || relendo"
+              title="Ler o caso na plataforma agora (o robô faz isso de hora em hora, no minuto 25)"
+              @click="relerAgora"
+            >
+              <Loader2 v-if="relendo" class="size-3.5 mr-1 animate-spin" />
+              {{ relendo ? 'lendo…' : 'reler agora' }}
+            </Button>
             <Button size="sm" variant="outline" class="h-7 px-2" :disabled="!canEdit" title="Encaminhar ao jurídico (Threema + dossiê com fotos)" @click="openJuridico(hist.row)">
               <Scale class="size-3.5 mr-1" />
               {{ hist.row.juridico_enviado_at ? 'reenviar ao jurídico' : 'encaminhar ao jurídico' }}

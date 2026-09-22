@@ -912,6 +912,40 @@ async def _sync_ml(session: AsyncSession, ch: Chamado, dev: Devolution | None) -
 _nao_encerrado = chamados_svc.NAO_ENCERRADO_SQL
 
 
+async def sync_um(
+    session: AsyncSession, ch: Chamado, *, agora: datetime | None = None
+) -> dict:
+    """Relê ESTE chamado na plataforma agora, sem esperar o cron das :25.
+
+    Vinicius 22/09: "não consegue subir e dar um rodar agora? pra já testar
+    novamente?" — e vale muito além do teste: caso com prazo correndo (a TikTok
+    aprova o reembolso sozinha) não pode depender de uma janela de uma hora.
+    Mesmas funções do cron, um chamado só; não mexe em quem não tem plataforma
+    com API. Commita."""
+    plat = cd.plataforma_de(ch.plataforma)
+    fn = {cd.PLAT_TIKTOK: _sync_tiktok, cd.PLAT_SHOPEE: _sync_shopee, cd.PLAT_ML: _sync_ml}.get(
+        plat
+    )
+    if fn is None:
+        return {"plataforma": plat, "novos": 0, "lido": False, "erro": "plataforma_sem_api"}
+    try:
+        dev = await _dev_de(session, ch)
+        if fn is _sync_tiktok:
+            novos = await _sync_tiktok(session, ch, dev, agora=agora)
+        else:
+            novos = await fn(session, ch, dev)
+    except Exception as e:  # noqa: BLE001 — o erro da plataforma vira resposta da tela
+        await session.rollback()
+        logger.warning(
+            "chamado_devolucao_sync_um_falhou",
+            chamado_id=str(ch.id), plataforma=plat, err=str(e)[:200],
+        )
+        return {"plataforma": plat, "novos": 0, "lido": False, "erro": str(e)[:200]}
+    await session.commit()
+    logger.info("chamado_devolucao_sync_um", chamado_id=str(ch.id), plataforma=plat, novos=novos)
+    return {"plataforma": plat, "novos": novos, "lido": True, "erro": None}
+
+
 async def sync_respostas(session: AsyncSession, *, agora: datetime | None = None) -> dict:
     """Passada do cron: chamados de devolução ABERTOS via API (abertura enviada)
     e ainda sem decisão da plataforma → consulta a plataforma, grava respostas
