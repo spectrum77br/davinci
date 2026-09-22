@@ -473,6 +473,12 @@ const addedThisSession = ref<Set<string>>(new Set())
 
 const dirtyRows = ref<Set<string>>(new Set())
 const savingRows = ref<Set<string>>(new Set())
+// Linhas em que o operador REALMENTE mexeu no "Link envio" nesta sessão.
+// Sem isso, um texto gravado antes da trava de formato (8426c57, 21/09)
+// congelava a linha inteira: `rowPatchPayload` reenvia o campo em todo save e a
+// guarda barrava antes do PATCH. Caso 292128 (22/09): o pedido não lançava de
+// jeito nenhum por causa de um "nao ha" digitado no campo antes da trava.
+const linkEnvioTocado = ref<Set<string>>(new Set())
 
 // ── Correção de estoque (entrada manual, sem criar devolução) ────────────
 // Reaproveita os modais de destino (resolveStockModals) e a lógica Novo/Usado.
@@ -705,9 +711,29 @@ function linkEnvioRequired(sku: string | null | undefined, motivo: string | null
 // digitava "nao ha, nao recebido" só pra passar na trava e o texto ia parar no QR do cartão
 // da disputa. Espelho do validator do backend (422 link_envio_invalido).
 const MSG_LINK_ENVIO_INVALIDO = 'Link de envio precisa ser um endereço http(s) — não digite texto aqui'
+// Texto antigo, de antes da trava: não barra mais o salvamento da linha, mas
+// continua marcado em vermelho pra alguém apagar ou trocar pelo link de verdade.
+const MSG_LINK_ENVIO_LEGADO =
+  'Texto antigo neste campo (de antes da regra do link). Não atrapalha o salvamento, mas apague ou troque pelo endereço http(s) do envio.'
 function linkEnvioInvalido(link: string | null | undefined) {
   const v = (link || '').trim()
   return !!v && !/^https?:\/\//i.test(v)
+}
+// A trava de formato vale pro que o operador digita AGORA. Texto gravado ANTES
+// dela (o "nao ha, nao recebido" que a operadora usava pra passar na trava de
+// mala/eletro) não pode barrar o save: fica de fora do payload e a linha volta a
+// ser editável. Senão condição, custo, técnico e observação ficam todos reféns
+// de um texto digitado meses atrás — e o produto nunca volta ao estoque.
+function linkEnvioLegado(row: DevolutionRow) {
+  return linkEnvioInvalido(row.link_envio) && !linkEnvioTocado.value.has(row.id)
+}
+// Guarda que barra o save: o banner no topo passa despercebido pra quem está no
+// meio da tabela (caso 292128 — a operadora marcou "Novo" e saiu achando que
+// tinha lançado). O toast aparece onde ela está olhando; a marca "não salvo" na
+// linha é o que sobra depois que o toast some.
+function bloqueiaSave(msg: string) {
+  error.value = msg
+  pushToast({ kind: 'error', title: 'Linha não salva', lines: [msg] })
 }
 // Trava (Vinicius 18/09): pedido na aba Fraude (só reembolso — o lançamento responde a
 // TikTok com o vídeo) só lança com o vídeo: o link da coluna Vídeo entra sozinho no
@@ -826,6 +852,9 @@ function clearDirty(id: string) {
   const next = new Set(dirtyRows.value)
   next.delete(id)
   dirtyRows.value = next
+  const tocado = new Set(linkEnvioTocado.value)
+  tocado.delete(id)
+  linkEnvioTocado.value = tocado
 }
 function hasDirty(id: string) { return dirtyRows.value.has(id) }
 function setSaving(id: string, v: boolean) {
@@ -851,6 +880,11 @@ function setRowText(
   value: string,
 ) {
   row[field] = value || null
+  if (field === 'link_envio') {
+    const next = new Set(linkEnvioTocado.value)
+    next.add(row.id)
+    linkEnvioTocado.value = next
+  }
   markDirty(row.id)
 }
 
@@ -898,6 +932,7 @@ async function load() {
     items.value = res.items
     applyTotals(res)
     dirtyRows.value = new Set()
+    linkEnvioTocado.value = new Set()
   } catch (e: any) {
     error.value = apiError(e)
   } finally {
@@ -1710,7 +1745,9 @@ function rowPatchPayload(row: DevolutionRow) {
     link_abertura: row.link_abertura || null,
     reembolso: row.reembolso,
     motivo_devolucao: row.motivo_devolucao || null,
-    link_envio: row.link_envio || null,
+    // Texto legado que o operador não tocou: não reenvia — o schema recusaria
+    // com 422 `link_envio_invalido` e a linha nunca mais salvaria nada.
+    ...(linkEnvioLegado(row) ? {} : { link_envio: row.link_envio || null }),
     custo_manutencao: row.custo_manutencao,
     tecnico: row.tecnico || null,
     devolver_estoque: row.devolver_estoque,
@@ -1785,19 +1822,19 @@ async function changeRowCondicao(row: DevolutionRow, value: string) {
 async function saveRow(row: DevolutionRow) {
   if (!canEdit.value || !hasDirty(row.id) || isSaving(row.id)) return
   if (linkRequired(row.condicao_produto) && !row.link_abertura) {
-    error.value = 'Link de abertura obrigatório para Extraviado / Sucata / Manutenção'
+    bloqueiaSave('Link de abertura obrigatório para Extraviado / Sucata / Manutenção')
     return
   }
   if (linkEnvioRequired(row.sku, row.motivo_devolucao) && !row.link_envio) {
-    error.value = 'Link de envio obrigatório: mala/eletro com motivo que abre chamado'
+    bloqueiaSave('Link de envio obrigatório: mala/eletro com motivo que abre chamado')
     return
   }
-  if (linkEnvioInvalido(row.link_envio)) {
-    error.value = MSG_LINK_ENVIO_INVALIDO
+  if (linkEnvioInvalido(row.link_envio) && !linkEnvioLegado(row)) {
+    bloqueiaSave(MSG_LINK_ENVIO_INVALIDO)
     return
   }
   if (videoFraudeRequired(row.pedido_bling, row.motivo_devolucao) && !row.link_envio) {
-    error.value = MSG_VIDEO_OBRIGATORIO
+    bloqueiaSave(MSG_VIDEO_OBRIGATORIO)
     return
   }
   setSaving(row.id, true)
@@ -1818,7 +1855,7 @@ async function saveRow(row: DevolutionRow) {
     void refreshTotals()
     if (updated.bling_stock_result) showStockToast(updated.bling_stock_result)
   } catch (e: any) {
-    error.value = apiError(e)
+    bloqueiaSave(apiError(e))
   } finally {
     setSaving(row.id, false)
   }
@@ -2750,8 +2787,24 @@ async function backfillAddresses() {
           <tr v-else-if="!items.length">
             <td :colspan="(isAdmin ? 25 : 23) + (canDelete ? 1 : 0)" class="py-8 text-center text-muted-foreground">sem registros</td>
           </tr>
-          <tr v-for="row in items" :key="row.id" class="border-t hover:brightness-95 dark:hover:brightness-110">
-            <td class="px-2 py-1 whitespace-nowrap text-muted-foreground">{{ fmtDateTime(row.data) }}</td>
+          <tr
+            v-for="row in items"
+            :key="row.id"
+            class="border-t hover:brightness-95 dark:hover:brightness-110"
+            :class="hasDirty(row.id) ? 'border-l-4 border-l-amber-400' : ''"
+          >
+            <td class="px-2 py-1 whitespace-nowrap text-muted-foreground">
+              <!-- Marca de linha não salva (22/09): antes, quando uma guarda
+                   barrava o save, o único sinal era o banner lá no topo da
+                   página — a operadora marcava "Novo", via o select mudar e saía
+                   achando que tinha lançado (caso 292128). -->
+              <span
+                v-if="hasDirty(row.id)"
+                class="mr-1 rounded bg-amber-100 px-1 text-[10px] font-semibold text-amber-800 dark:bg-amber-900/40 dark:text-amber-200"
+                title="Alterações não salvas nesta linha — o salvamento foi barrado ou ainda não aconteceu"
+              >não salvo</span>
+              {{ fmtDateTime(row.data) }}
+            </td>
             <td class="px-2 py-1 whitespace-nowrap text-muted-foreground">{{ fmtDateTime(row.created_at) }}</td>
             <td class="px-2 py-1 font-mono whitespace-nowrap">{{ row.pedido_bling || '—' }}</td>
             <td class="px-2 py-1 font-mono text-muted-foreground whitespace-nowrap">{{ row.pedido_marketplace || '—' }}</td>
@@ -2793,7 +2846,7 @@ async function backfillAddresses() {
                   :disabled="!canEdit"
                   :class="(linkEnvioRequired(row.sku, row.motivo_devolucao) && !row.link_envio) || linkEnvioInvalido(row.link_envio) ? sheetInputRequiredClass : sheetInputClass"
                   :placeholder="linkEnvioRequired(row.sku, row.motivo_devolucao) ? 'obrigatório (mala/eletro)' : 'link do envio'"
-                  :title="linkEnvioInvalido(row.link_envio) ? MSG_LINK_ENVIO_INVALIDO : undefined"
+                  :title="linkEnvioLegado(row) ? MSG_LINK_ENVIO_LEGADO : (linkEnvioInvalido(row.link_envio) ? MSG_LINK_ENVIO_INVALIDO : undefined)"
                   @input="(e) => setRowText(row, 'link_envio', (e.target as HTMLInputElement).value)"
                   @blur="saveRow(row)"
                 />
