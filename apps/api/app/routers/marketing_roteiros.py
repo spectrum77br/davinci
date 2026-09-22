@@ -110,7 +110,9 @@ def _personagem_curto(p: MarketingPersonagem) -> dict[str, Any]:
         "nome": p.nome,
         "descricao": p.descricao,
         "referencia": p.referencia,
-        "imagens": [anexo_out(i) for i in p.imagens],
+        "video_url": p.video_url,
+        "imagens": [anexo_out(a) for a in p.arquivos if a.tipo == "imagem"],
+        "vozes": [anexo_out(a) for a in p.arquivos if a.tipo == "voz"],
     }
 
 

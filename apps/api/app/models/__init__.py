@@ -108,7 +108,7 @@ from app.models.marketing import (
 from app.models.marketing_legenda import MarketingLegendaModelo
 from app.models.marketing_personagem import (
     MarketingPersonagem,
-    MarketingPersonagemImagem,
+    MarketingPersonagemArquivo,
 )
 from app.models.marketing_postagem import (
     STATUS_EM_VOO,
@@ -259,7 +259,7 @@ __all__ = [
     "MarketingMetric",
     "MarketingPattern",
     "MarketingPersonagem",
-    "MarketingPersonagemImagem",
+    "MarketingPersonagemArquivo",
     "MarketingRoteiro",
     "MarketingRoteiroPersonagem",
     "MarketingRoteiroRef",

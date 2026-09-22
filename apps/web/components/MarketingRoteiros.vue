@@ -47,12 +47,15 @@ type Personagem = {
   id: string
   nome: string
   descricao: string | null
-  // A etiqueta que o GERADOR de vídeo entende (`<<<uuid>>>`, `@apelido`) — é
-  // ela que faz o rosto sair o mesmo em todo vídeo, e é o que vai DENTRO do
-  // texto do roteiro.
+  // Atalho pra quem usa a MESMA ferramenta que gerou o rosto: `<<<uuid>>>` e
+  // `hf_2026…` são ids DENTRO dela e somem se o asset for apagado, se trocar
+  // de conta ou se a agência usar outro gerador. Quem DURA é o arquivo.
   referencia: string | null
+  // Como a persona se move e fala (um Shorts, normalmente).
+  video_url: string | null
   ativo: boolean
   imagens: Anexo[]
+  vozes: Anexo[]
 }
 type Roteiro = {
   id: string
@@ -360,13 +363,17 @@ async function inserirNoTexto(p: Personagem) {
 
 // ---- cadastro de personagens ---------------------------------------------
 const pSel = ref<Personagem | null>(null)
-const pForm = ref({ nome: '', descricao: '', referencia: '' })
+const pForm = ref({ nome: '', descricao: '', referencia: '', video_url: '' })
 const pSalvando = ref(false)
 const pImgInput = ref<HTMLInputElement | null>(null)
+const pVozInput = ref<HTMLInputElement | null>(null)
+// Qual botão abriu o seletor: a mesma rota recebe foto e voz, e o `tipo`
+// decide a lista branca de extensão do lado do servidor.
+const tipoDoUpload = ref<'imagem' | 'voz'>('imagem')
 
 function novoPersonagem() {
   pSel.value = null
-  pForm.value = { nome: '', descricao: '', referencia: '' }
+  pForm.value = { nome: '', descricao: '', referencia: '', video_url: '' }
 }
 
 function editarPersonagem(p: Personagem) {
@@ -375,6 +382,7 @@ function editarPersonagem(p: Personagem) {
     nome: p.nome,
     descricao: p.descricao ?? '',
     referencia: p.referencia ?? '',
+    video_url: p.video_url ?? '',
   }
 }
 
@@ -383,6 +391,7 @@ async function salvarPersonagem(extra: Record<string, unknown> = {}) {
     nome: pForm.value.nome,
     descricao: pForm.value.descricao,
     referencia: pForm.value.referencia,
+    video_url: pForm.value.video_url,
     ...extra,
   }
   if (!corpo.nome.trim()) {
@@ -427,7 +436,12 @@ async function alternarAtivo() {
   await salvarPersonagem({ ativo: !p.ativo })
 }
 
-async function onImagemEscolhida(ev: Event) {
+function pedirArquivo(tipo: 'imagem' | 'voz') {
+  tipoDoUpload.value = tipo
+  ;(tipo === 'voz' ? pVozInput : pImgInput).value?.click()
+}
+
+async function onArquivoEscolhido(ev: Event) {
   const input = ev.target as HTMLInputElement
   const arquivos = Array.from(input.files ?? [])
   const p = pSel.value
@@ -437,26 +451,29 @@ async function onImagemEscolhida(ev: Event) {
   try {
     const fd = new FormData()
     for (const f of arquivos) fd.append('files', f)
-    Object.assign(p, await api<Personagem>(`/api/marketing/personagens/${p.id}/imagem`, {
-      method: 'POST',
-      body: fd,
-    }))
+    const at = await api<Personagem>(
+      `/api/marketing/personagens/${p.id}/arquivo?tipo=${tipoDoUpload.value}`,
+      { method: 'POST', body: fd },
+    )
+    Object.assign(p, at)
+    const naLista = personagens.value.find((x) => x.id === at.id)
+    if (naLista && naLista !== p) Object.assign(naLista, at)
   } catch (e: any) {
-    toasts.error('Erro ao subir a imagem', errMsg(e))
+    toasts.error('Erro ao subir o arquivo', errMsg(e))
   } finally {
     pSalvando.value = false
   }
 }
 
-function imgUrl(p: Personagem, img: Anexo) {
-  return `/api/marketing/personagens/${p.id}/imagem/${img.id}`
+function arqUrl(p: Personagem, a: Anexo, baixar = false) {
+  return `/api/marketing/personagens/${p.id}/arquivo/${a.id}${baixar ? '?download=1' : ''}`
 }
 
-async function tirarImagem(p: Personagem, img: Anexo) {
-  if (!window.confirm(`Apagar "${img.file_name}"?`)) return
+async function tirarArquivo(p: Personagem, a: Anexo) {
+  if (!window.confirm(`Apagar "${a.file_name}"?`)) return
   try {
     Object.assign(p, await api<Personagem>(
-      `/api/marketing/personagens/${p.id}/imagem/${img.id}`, { method: 'DELETE' },
+      `/api/marketing/personagens/${p.id}/arquivo/${a.id}`, { method: 'DELETE' },
     ))
   } catch (e: any) {
     toasts.error('Erro ao apagar', errMsg(e))
@@ -483,7 +500,8 @@ function destinoLabel(d: string | null): string {
 <template>
   <div class="space-y-3">
     <input ref="refInput" type="file" accept=".jpg,.jpeg,.png,.webp,.gif,.pdf" multiple class="hidden" @change="onRefEscolhida">
-    <input ref="pImgInput" type="file" accept=".jpg,.jpeg,.png,.webp,.gif" multiple class="hidden" @change="onImagemEscolhida">
+    <input ref="pImgInput" type="file" accept=".jpg,.jpeg,.png,.webp,.gif" multiple class="hidden" @change="onArquivoEscolhido">
+    <input ref="pVozInput" type="file" accept=".mp3,.m4a,.wav,.aac,.ogg" class="hidden" @change="onArquivoEscolhido">
 
     <!-- seções -->
     <div class="flex flex-wrap items-center gap-2">
@@ -673,7 +691,7 @@ function destinoLabel(d: string | null): string {
             >
               <img
                 v-if="p.imagens.length"
-                :src="imgUrl(p, p.imagens[0])"
+                :src="arqUrl(p, p.imagens[0])"
                 :alt="p.nome"
                 class="size-5 rounded-full object-cover"
               />
@@ -811,7 +829,7 @@ function destinoLabel(d: string | null): string {
             @click="editarPersonagem(p)"
           >
             <div class="flex h-28 items-center justify-center bg-muted">
-              <img v-if="p.imagens.length" :src="imgUrl(p, p.imagens[0])" :alt="p.nome" class="h-full w-full object-cover" loading="lazy" />
+              <img v-if="p.imagens.length" :src="arqUrl(p, p.imagens[0])" :alt="p.nome" class="h-full w-full object-cover" loading="lazy" />
               <ImageIcon v-else class="size-6 text-muted-foreground" />
             </div>
             <div class="space-y-0.5 p-2">
@@ -820,7 +838,11 @@ function destinoLabel(d: string | null): string {
                 <EyeOff v-if="!p.ativo" class="ml-auto size-3 shrink-0 text-muted-foreground" />
               </div>
               <p v-if="p.descricao" class="line-clamp-2 text-[11px] text-muted-foreground">{{ p.descricao }}</p>
-              <code v-if="p.referencia" class="block truncate rounded bg-muted px-1 text-[10px]">{{ p.referencia }}</code>
+              <div class="flex flex-wrap items-center gap-1 text-[10px] text-muted-foreground">
+                <span v-if="p.imagens.length">{{ p.imagens.length }} foto{{ p.imagens.length > 1 ? 's' : '' }}</span>
+                <span v-if="p.vozes.length" class="pill-muted">voz</span>
+                <span v-if="p.video_url" class="pill-muted">vídeo</span>
+              </div>
             </div>
           </button>
           <button
@@ -845,11 +867,19 @@ function destinoLabel(d: string | null): string {
           <textarea v-model="pForm.descricao" rows="3" class="w-full resize-y rounded-md border bg-background px-2 py-1.5 text-xs outline-none focus:ring-2 focus:ring-ring" placeholder="estudante brasileira de 22 anos, cabelo loiro…" />
         </div>
         <div>
-          <label class="mb-1 block text-[11px] font-medium text-muted-foreground">Etiqueta do gerador</label>
+          <label class="mb-1 block text-[11px] font-medium text-muted-foreground">Referência em vídeo</label>
+          <input v-model="pForm.video_url" type="url" class="h-8 w-full rounded-md border bg-background px-2 text-xs outline-none focus:ring-2 focus:ring-ring" placeholder="https://youtube.com/shorts/…" />
+          <p class="mt-1 text-[11px] text-muted-foreground">Como a persona se move e fala.</p>
+        </div>
+        <div>
+          <label class="mb-1 block text-[11px] font-medium text-muted-foreground">
+            Etiqueta do gerador <span class="font-normal">(opcional)</span>
+          </label>
           <input v-model="pForm.referencia" type="text" class="h-8 w-full rounded-md border bg-background px-2 font-mono text-[11px] outline-none focus:ring-2 focus:ring-ring" placeholder="<<<48dbb6ed-…>>> ou @Lívia" />
           <p class="mt-1 text-[11px] text-muted-foreground">
-            O que vai dentro do prompt pra preservar o rosto. Sem isso, cada geração
-            inventa outra pessoa.
+            Atalho pra quem usa a MESMA ferramenta que gerou o rosto — ela some se o
+            asset for apagado lá ou se a agência usar outro gerador. Quem garante o
+            rosto de verdade é a foto abaixo, que eles baixam.
           </p>
         </div>
         <div class="flex items-center gap-1.5">
@@ -876,22 +906,48 @@ function destinoLabel(d: string | null): string {
 
         <div v-if="pSel">
           <div class="mb-1 flex items-center gap-2">
-            <label class="text-[11px] font-medium text-muted-foreground">Fotos</label>
-            <button class="btn btn-xs ml-auto gap-1" :disabled="pSalvando" @click="pImgInput?.click()">
+            <label class="text-[11px] font-medium text-muted-foreground">Fotos do rosto</label>
+            <button class="btn btn-xs ml-auto gap-1" :disabled="pSalvando" @click="pedirArquivo('imagem')">
               <Upload class="size-3" /> subir
             </button>
           </div>
-          <div class="grid grid-cols-3 gap-1.5">
+          <div v-if="pSel.imagens.length" class="grid grid-cols-3 gap-1.5">
             <div v-for="img in pSel.imagens" :key="img.id" class="group relative overflow-hidden rounded border bg-muted">
-              <img :src="imgUrl(pSel, img)" :alt="img.file_name ?? ''" class="h-16 w-full object-cover" loading="lazy" />
+              <a :href="arqUrl(pSel, img)" target="_blank" rel="noopener">
+                <img :src="arqUrl(pSel, img)" :alt="img.file_name ?? ''" class="h-16 w-full object-cover" loading="lazy" />
+              </a>
               <button
                 class="absolute right-0.5 top-0.5 rounded bg-background/90 p-0.5 text-muted-foreground opacity-0 hover:text-destructive group-hover:opacity-100"
-                @click="tirarImagem(pSel, img)"
+                title="Apagar"
+                @click="tirarArquivo(pSel, img)"
               >
                 <X class="size-3" />
               </button>
             </div>
           </div>
+          <p v-else class="text-[11px] text-muted-foreground">
+            Nenhuma. É a foto que a agência baixa — sem ela, sobra só a descrição.
+          </p>
+
+          <div class="mb-1 mt-3 flex items-center gap-2">
+            <label class="text-[11px] font-medium text-muted-foreground">Voz</label>
+            <button class="btn btn-xs ml-auto gap-1" :disabled="pSalvando" @click="pedirArquivo('voz')">
+              <Upload class="size-3" /> subir MP3
+            </button>
+          </div>
+          <div v-for="v in pSel.vozes" :key="v.id" class="mb-1 flex items-center gap-1.5">
+            <audio :src="arqUrl(pSel, v)" controls preload="none" class="h-7 min-w-0 flex-1" />
+            <button
+              class="shrink-0 rounded p-0.5 text-muted-foreground hover:text-destructive"
+              :title="`Apagar ${v.file_name}`"
+              @click="tirarArquivo(pSel, v)"
+            >
+              <X class="size-3" />
+            </button>
+          </div>
+          <p v-if="!pSel.vozes.length" class="text-[11px] text-muted-foreground">
+            Nenhuma. As personas que vocês já usam têm todas um MP3 de voz.
+          </p>
         </div>
       </div>
     </div>

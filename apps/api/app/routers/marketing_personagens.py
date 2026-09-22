@@ -43,18 +43,20 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.db import get_session
 from app.deps.auth import require_permission
-from app.models import MarketingPersonagem, MarketingPersonagemImagem, User
+from app.models import MarketingPersonagem, MarketingPersonagemArquivo, User
 from app.services.marketing.anexos import (
+    _EXT_AUDIO,
     _EXT_IMAGEM,
     MAX_ANEXOS_POR_LINHA,
     MAX_BYTES_APOIO,
-    MIMES_IMAGEM,
+    MIMES_PERSONAGEM,
     anexo_out,
     caminho_confinado,
     gravar_em_disco,
     mime_da_extensao,
     mime_seguro,
     nome_seguro,
+    url_de_produto,
 )
 
 logger = structlog.get_logger()
@@ -73,11 +75,17 @@ def _out(row: MarketingPersonagem) -> dict[str, Any]:
         "id": str(row.id),
         "nome": row.nome,
         "descricao": row.descricao,
-        # A etiqueta do gerador (`<<<uuid>>>`, `@apelido`) — é o que vai
-        # DENTRO do texto do roteiro.
+        # Atalho pra quem usa a mesma ferramenta que gerou o rosto. Pode
+        # quebrar; o arquivo, não.
         "referencia": row.referencia,
+        # Como a persona se move e fala (um Shorts, normalmente).
+        "video_url": row.video_url,
         "ativo": row.ativo,
-        "imagens": [anexo_out(i) for i in row.imagens],
+        # Separados na saída porque a tela trata cada um de um jeito: foto vira
+        # miniatura, voz vira player. Guardados na mesma tabela porque seguem
+        # o mesmo caminho até o disco.
+        "imagens": [anexo_out(a) for a in row.arquivos if a.tipo == "imagem"],
+        "vozes": [anexo_out(a) for a in row.arquivos if a.tipo == "voz"],
         "created_at": row.created_at.isoformat() if row.created_at else None,
     }
 
@@ -114,13 +122,21 @@ class PersonagemIn(BaseModel):
     nome: str
     descricao: str | None = None
     referencia: str | None = None
+    video_url: str | None = None
 
 
 class PersonagemPatch(BaseModel):
     nome: str | None = None
     descricao: str | None = None
     referencia: str | None = None
+    video_url: str | None = None
     ativo: bool | None = None
+
+
+def _video_limpo(bruto: str | None) -> str | None:
+    """Vazio apaga; preenchido passa pela mesma lista branca do link de
+    produto (http/https) — este campo vira href no site das agências."""
+    return url_de_produto(bruto) if (bruto or "").strip() else None
 
 
 @router.post("")
@@ -137,6 +153,7 @@ async def criar(
         nome=nome,
         descricao=(payload.descricao or "").strip() or None,
         referencia=(payload.referencia or "").strip()[:200] or None,
+        video_url=_video_limpo(payload.video_url),
         created_by=user.id,
     )
     session.add(row)
@@ -170,6 +187,8 @@ async def editar(
         row.descricao = (data["descricao"] or "").strip() or None
     if "referencia" in data:
         row.referencia = (data["referencia"] or "").strip()[:200] or None
+    if "video_url" in data:
+        row.video_url = _video_limpo(data["video_url"])
     if "ativo" in data:
         row.ativo = bool(data["ativo"])
     try:
@@ -197,36 +216,50 @@ async def apagar(
     return {"status": "deleted"}
 
 
-@router.post("/{personagem_id}/imagem")
-async def subir_imagem(
+# Foto e voz seguem a MESMA rota, separadas por `tipo`. O que muda é só a
+# lista branca de extensão — e é ela que impede subir um HTML como "voz".
+_TABELA_POR_TIPO = {"imagem": _EXT_IMAGEM, "voz": _EXT_AUDIO}
+
+
+@router.post("/{personagem_id}/arquivo")
+async def subir_arquivo(
     personagem_id: UUID,
     files: Annotated[list[UploadFile], File(...)],
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[User, Depends(_editar)],
+    tipo: str = "imagem",
 ) -> dict[str, Any]:
-    """Só imagem — sem PDF e sem vídeo. Aqui é rosto de referência, e cada
-    tipo a menos é superfície a menos."""
+    """Sobe foto(s) do rosto ou o MP3 da voz.
+
+    É ESTE arquivo que a agência baixa e leva pro gerador dela. A etiqueta
+    (`referencia`) é atalho pra quem usa a mesma ferramenta e pode quebrar;
+    o arquivo funciona em qualquer uma.
+    """
+    tabela = _TABELA_POR_TIPO.get(tipo)
+    if tabela is None:
+        raise HTTPException(400, detail={"code": "tipo_invalido", "aceitos": ["imagem", "voz"]})
     row = await _get(session, personagem_id)
     if not files:
         raise HTTPException(400, detail={"code": "sem_arquivo"})
-    if len(row.imagens) + len(files) > MAX_ANEXOS_POR_LINHA:
-        raise HTTPException(400, detail={"code": "muitas_imagens"})
+    if len(row.arquivos) + len(files) > MAX_ANEXOS_POR_LINHA:
+        raise HTTPException(400, detail={"code": "muitos_arquivos"})
 
     base = _dir(row.id)
     base.mkdir(parents=True, exist_ok=True)
     for up in files:
         nome = nome_seguro(up.filename)
-        mime = mime_da_extensao(nome, tabela=_EXT_IMAGEM)
+        mime = mime_da_extensao(nome, tabela=tabela)
         caminho = base / nome
         tamanho = gravar_em_disco(
-            up, caminho, teto=MAX_BYTES_APOIO, code="imagem_grande_demais"
+            up, caminho, teto=MAX_BYTES_APOIO, code="arquivo_grande_demais"
         )
-        antiga = next((i for i in row.imagens if i.file_name == nome), None)
-        if antiga is not None:
-            row.imagens.remove(antiga)
-        row.imagens.append(
-            MarketingPersonagemImagem(
+        antigo = next((a for a in row.arquivos if a.file_name == nome), None)
+        if antigo is not None:  # mesmo nome substitui
+            row.arquivos.remove(antigo)
+        row.arquivos.append(
+            MarketingPersonagemArquivo(
                 id=uuid4(),
+                tipo=tipo,
                 file_name=nome,
                 file_mime=mime,
                 file_size=tamanho,
@@ -238,45 +271,46 @@ async def subir_imagem(
     return _out(row)
 
 
-@router.get("/{personagem_id}/imagem/{imagem_id}")
-async def baixar_imagem(
+@router.get("/{personagem_id}/arquivo/{arquivo_id}")
+async def baixar_arquivo(
     personagem_id: UUID,
-    imagem_id: UUID,
+    arquivo_id: UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[User, Depends(_ver)],
+    download: bool = False,
 ) -> FileResponse:
     row = await _get(session, personagem_id)
-    rec = next((i for i in row.imagens if i.id == imagem_id), None)
+    rec = next((a for a in row.arquivos if a.id == arquivo_id), None)
     if rec is None:
-        raise HTTPException(404, detail={"code": "imagem_nao_encontrada"})
+        raise HTTPException(404, detail={"code": "arquivo_nao_encontrado"})
     caminho = caminho_confinado(rec.file_rel)
     if caminho is None or not caminho.is_file():
         raise HTTPException(404, detail={"code": "arquivo_sumiu"})
-    media_type, disposicao = mime_seguro(rec.file_mime, permitidos=MIMES_IMAGEM)
+    media_type, disposicao = mime_seguro(rec.file_mime, permitidos=MIMES_PERSONAGEM)
     return FileResponse(
         caminho,
         filename=rec.file_name,
         media_type=media_type,
-        content_disposition_type=disposicao,
+        content_disposition_type="attachment" if download else disposicao,
         headers={"X-Content-Type-Options": "nosniff"},
     )
 
 
-@router.delete("/{personagem_id}/imagem/{imagem_id}")
-async def apagar_imagem(
+@router.delete("/{personagem_id}/arquivo/{arquivo_id}")
+async def apagar_arquivo(
     personagem_id: UUID,
-    imagem_id: UUID,
+    arquivo_id: UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[User, Depends(_editar)],
 ) -> dict[str, Any]:
     row = await _get(session, personagem_id)
-    rec = next((i for i in row.imagens if i.id == imagem_id), None)
+    rec = next((a for a in row.arquivos if a.id == arquivo_id), None)
     if rec is None:
-        raise HTTPException(404, detail={"code": "imagem_nao_encontrada"})
+        raise HTTPException(404, detail={"code": "arquivo_nao_encontrado"})
     alvo = caminho_confinado(rec.file_rel)
     if alvo is not None:
         with contextlib.suppress(OSError):
             alvo.unlink(missing_ok=True)
-    row.imagens.remove(rec)
+    row.arquivos.remove(rec)
     await session.commit()
     return _out(row)

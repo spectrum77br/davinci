@@ -72,7 +72,7 @@ from sqlalchemy.orm import selectinload
 from app.config import get_settings
 from app.db import get_session
 from app.models.marketing import MarketingCreative, MarketingCreativeFile
-from app.models.marketing_personagem import MarketingPersonagem, MarketingPersonagemImagem
+from app.models.marketing_personagem import MarketingPersonagem, MarketingPersonagemArquivo
 from app.models.marketing_roteiro import MarketingRoteiro, MarketingRoteiroRef
 from app.routers.marketing_creatives import (
     MAX_BYTES_ARQUIVO,
@@ -80,7 +80,7 @@ from app.routers.marketing_creatives import (
     _file_dir,
 )
 from app.services.marketing.anexos import (
-    MIMES_IMAGEM,
+    MIMES_PERSONAGEM,
     MIMES_REFERENCIA,
     caminho_confinado,
     mime_seguro,
@@ -402,11 +402,18 @@ def _personagem_out(p: MarketingPersonagem) -> dict[str, Any]:
         # dentro do prompt. Sem ela o roteiro descreve uma pessoa genérica e
         # cada geração inventa outro rosto.
         "referencia": p.referencia,
-        "imagens": [
-            {"id": str(i.id), "nome": i.file_name, "mime": i.file_mime, "tamanho": i.file_size}
-            for i in p.imagens
-        ],
+        # O vídeo de referência: como a persona se move e fala.
+        "video_url": p.video_url,
+        # É o ARQUIVO que a agência baixa e leva pro gerador dela — a etiqueta
+        # acima é atalho e pode quebrar (ela é um id interno da ferramenta que
+        # criou o rosto). Por isso foto e voz saem separadas e completas.
+        "imagens": [_arq_out(a) for a in p.arquivos if a.tipo == "imagem"],
+        "vozes": [_arq_out(a) for a in p.arquivos if a.tipo == "voz"],
     }
+
+
+def _arq_out(a: MarketingPersonagemArquivo) -> dict[str, Any]:
+    return {"id": str(a.id), "nome": a.file_name, "mime": a.file_mime, "tamanho": a.file_size}
 
 
 @router.get("/personagens")
@@ -457,16 +464,20 @@ async def ver_personagem(
     return {"equipe": equipe, "personagem": _personagem_out(row)}
 
 
-@router.get("/personagens/{personagem_id}/imagem/{imagem_id}")
-async def baixar_imagem_personagem(
+@router.get("/personagens/{personagem_id}/arquivo/{arquivo_id}")
+async def baixar_arquivo_personagem(
     personagem_id: UUID,
-    imagem_id: UUID,
+    arquivo_id: UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
     equipe: Annotated[str, Depends(equipe_do_token)],
+    download: bool = False,
 ) -> FileResponse:
-    """Mesma regra da referência: resolve o PAI com o WHERE da listagem
-    (`ativo`) e só então procura a imagem dentro dele. Personagem desligado
-    para de servir foto, não só de aparecer na lista."""
+    """A foto do rosto ou o MP3 da voz — e é isto que a agência LEVA.
+
+    Mesma regra da referência: resolve o PAI com o WHERE da listagem
+    (`ativo`) e só então procura o arquivo dentro dele. Personagem desligado
+    para de servir arquivo, não só de aparecer na lista.
+    """
     pai = (
         await session.execute(
             select(MarketingPersonagem).where(
@@ -477,16 +488,23 @@ async def baixar_imagem_personagem(
     ).scalar_one_or_none()
     if pai is None:
         raise HTTPException(404, detail={"code": "nao_encontrado"})
-    rec = next((i for i in pai.imagens if i.id == imagem_id), None)
+    rec = next((a for a in pai.arquivos if a.id == arquivo_id), None)
     if rec is None:
         raise HTTPException(404, detail={"code": "nao_encontrado"})
-    return _entrega(rec, permitidos=MIMES_IMAGEM)
+    return _entrega(rec, permitidos=MIMES_PERSONAGEM, baixar=download)
 
 
 def _entrega(
-    rec: MarketingRoteiroRef | MarketingPersonagemImagem, *, permitidos: frozenset[str]
+    rec: MarketingRoteiroRef | MarketingPersonagemArquivo,
+    *,
+    permitidos: frozenset[str],
+    baixar: bool = False,
 ) -> FileResponse:
-    """Os bytes, com as duas travas que valem pra qualquer arquivo daqui."""
+    """Os bytes, com as duas travas que valem pra qualquer arquivo daqui.
+
+    `baixar` força `attachment`: a agência precisa do arquivo NA MÃO dela, não
+    só na tela — é ele que funciona em qualquer gerador.
+    """
     caminho = caminho_confinado(rec.file_rel)
     if caminho is None or not caminho.is_file():
         raise HTTPException(404, detail={"code": "nao_encontrado"})
@@ -495,7 +513,7 @@ def _entrega(
         caminho,
         filename=rec.file_name or "arquivo",
         media_type=media_type,
-        content_disposition_type=disposicao,
+        content_disposition_type="attachment" if baixar else disposicao,
         headers={
             "X-Content-Type-Options": "nosniff",
             "Cache-Control": "private, max-age=300",

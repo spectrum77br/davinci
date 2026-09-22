@@ -331,7 +331,7 @@ _CLEANUP_TABLES = (
     "marketing_roteiro_personagens",
     "marketing_roteiro_refs",
     "marketing_roteiros",
-    "marketing_personagem_imagens",
+    "marketing_personagem_arquivos",
     "marketing_personagens",
     "dm_mensagens",  # FK -> dm_conversas: antes dela
     "dm_contas",  # FK -> redes_sociais

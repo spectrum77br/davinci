@@ -45,12 +45,29 @@ _EXT_IMAGEM: dict[str, str] = {
 # foto de identidade e nada mais, e cada tipo a menos é superfície a menos.
 _EXT_REFERENCIA: dict[str, str] = {**_EXT_IMAGEM, ".pdf": "application/pdf"}
 
+# A VOZ da persona. As 8 pastas reais usam .mp3 (algumas .MP3 maiúsculo — a
+# tabela é consultada em minúsculas). Áudio não executa script; a trava aqui é
+# contra subir vídeo ou HTML disfarçado de voz.
+_EXT_AUDIO: dict[str, str] = {
+    ".mp3": "audio/mpeg",
+    ".m4a": "audio/mp4",
+    ".wav": "audio/wav",
+    ".aac": "audio/aac",
+    ".ogg": "audio/ogg",
+}
+
 MIMES_IMAGEM = frozenset(_EXT_IMAGEM.values())
+MIMES_AUDIO = frozenset(_EXT_AUDIO.values())
+# O que a rota de bytes do personagem pode servir: foto OU voz.
+MIMES_PERSONAGEM = MIMES_IMAGEM | MIMES_AUDIO
 MIMES_REFERENCIA = frozenset(_EXT_REFERENCIA.values())
 
 # Print de tela não passa de uns poucos MB; 25 é folga e mantém a pasta de
 # apoio longe do teto de 200 MB da entrega (routers/marketing_creatives.py).
 MAX_BYTES_APOIO = 25 * 1024 * 1024
+# A voz é curta (as reais têm de 300 KB a 1 MB); 25 MB é o mesmo teto do
+# apoio e sobra de qualquer jeito.
+MAX_BYTES_VOZ = MAX_BYTES_APOIO
 MAX_ANEXOS_POR_LINHA = 30
 
 

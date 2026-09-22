@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.models.marketing import MarketingCreative, MarketingCreativeFile
-from app.models.marketing_personagem import MarketingPersonagem, MarketingPersonagemImagem
+from app.models.marketing_personagem import MarketingPersonagem, MarketingPersonagemArquivo
 from app.models.marketing_roteiro import (
     MarketingRoteiro,
     MarketingRoteiroPersonagem,
@@ -356,9 +356,9 @@ async def _personagem(db: AsyncSession, *, nome="Lívia", ativo=True, com_imagem
         caminho.parent.mkdir(parents=True, exist_ok=True)
         caminho.write_bytes(PNG)
         db.add(
-            MarketingPersonagemImagem(
-                personagem_id=p.id, file_name="rosto.png", file_mime="image/png",
-                file_size=len(PNG), file_rel=rel,
+            MarketingPersonagemArquivo(
+                personagem_id=p.id, tipo="imagem", file_name="rosto.png",
+                file_mime="image/png", file_size=len(PNG), file_rel=rel,
             )
         )
     await db.commit()
@@ -392,8 +392,8 @@ async def test_personagem_desligado_some_e_para_de_servir_foto(
     client: AsyncClient, db: AsyncSession
 ):
     p = await _personagem(db)
-    img = p.imagens[0]
-    url = f"/api/portal/personagens/{p.id}/imagem/{img.id}"
+    img = p.arquivos[0]
+    url = f"/api/portal/personagens/{p.id}/arquivo/{img.id}"
     assert (await client.get(url, headers={"X-Portal-Token": TOK_A})).status_code == 200
 
     p.ativo = False

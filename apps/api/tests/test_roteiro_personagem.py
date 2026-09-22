@@ -315,14 +315,86 @@ async def test_personagem_repetido_da_409(client: AsyncClient, admin):
 
 
 async def test_foto_do_personagem_nao_aceita_pdf(client: AsyncClient, admin):
-    """A referência do briefing aceita PDF; o personagem não — aqui é rosto,
-    e cada tipo a menos é superfície a menos."""
+    """A referência do briefing aceita PDF; a FOTO do personagem não — aqui é
+    rosto, e cada tipo a menos é superfície a menos."""
     p = (await client.post(P, json={"nome": "Lívia"})).json()
     r = await client.post(
-        f"{P}/{p['id']}/imagem", files={"files": ("ficha.pdf", PNG, "application/pdf")}
+        f"{P}/{p['id']}/arquivo", files={"files": ("ficha.pdf", PNG, "application/pdf")}
     )
     assert r.status_code == 400
     assert r.json()["detail"]["code"] == "extensao_nao_aceita"
+
+
+MP3 = b"ID3\x03\x00\x00\x00" + b"\x00" * 400
+
+
+async def test_personagem_guarda_voz_e_video_de_referencia(client: AsyncClient, admin):
+    """As 8 personas reais têm as duas coisas: um MP3 de voz e um link de
+    Shorts. Sem isso, o cadastro descreve o rosto e some com o resto."""
+    p = (
+        await client.post(
+            P,
+            json={
+                "nome": "Elias",
+                "descricao": "pedreiro autônomo brasileiro, 38 anos",
+                "video_url": "https://www.youtube.com/shorts/UW33EHPAjaY",
+            },
+        )
+    ).json()
+    assert p["video_url"] == "https://www.youtube.com/shorts/UW33EHPAjaY"
+
+    voz = await client.post(
+        f"{P}/{p['id']}/arquivo?tipo=voz",
+        files={"files": ("Elias-Pedreiro.mp3", MP3, "audio/mpeg")},
+    )
+    assert voz.status_code == 200, voz.text
+    d = voz.json()
+    assert [v["file_name"] for v in d["vozes"]] == ["Elias-Pedreiro.mp3"]
+    assert d["vozes"][0]["file_mime"] == "audio/mpeg"
+    assert d["imagens"] == [], "voz não pode entrar como foto"
+
+
+@pytest.mark.parametrize("url", ["javascript:alert(1)", "//evil.example.com", "data:text/html,x"])
+async def test_video_de_referencia_fora_de_http_e_recusado(
+    client: AsyncClient, admin, url: str
+):
+    """Esse campo vira href no site das agências, igual ao link de produto."""
+    r = await client.post(P, json={"nome": "Elias", "video_url": url})
+    assert r.status_code == 400
+    assert r.json()["detail"]["code"] == "link_invalido"
+
+
+async def test_voz_nao_aceita_imagem_nem_o_contrario(client: AsyncClient, admin):
+    """A lista branca é escolhida pelo `tipo`: é ela que impede subir um HTML
+    disfarçado de voz, ou um MP3 que a tela tentaria desenhar."""
+    p = (await client.post(P, json={"nome": "Elias"})).json()
+    como_voz = await client.post(
+        f"{P}/{p['id']}/arquivo?tipo=voz", files={"files": ("rosto.png", PNG, "image/png")}
+    )
+    assert como_voz.status_code == 400
+    como_foto = await client.post(
+        f"{P}/{p['id']}/arquivo?tipo=imagem", files={"files": ("voz.mp3", MP3, "audio/mpeg")}
+    )
+    assert como_foto.status_code == 400
+
+
+async def test_arquivo_do_personagem_pode_ser_baixado(client: AsyncClient, admin):
+    """O ponto do pedido do Eduardo: a etiqueta pode quebrar, o arquivo não —
+    então a agência tem que conseguir levar o arquivo, não só ver."""
+    p = (await client.post(P, json={"nome": "Elias"})).json()
+    arq = (
+        await client.post(
+            f"{P}/{p['id']}/arquivo", files={"files": ("rosto.png", PNG, "image/png")}
+        )
+    ).json()["imagens"][0]
+
+    ver = await client.get(f"{P}/{p['id']}/arquivo/{arq['id']}")
+    assert ver.headers["content-disposition"].startswith("inline")
+
+    baixar = await client.get(f"{P}/{p['id']}/arquivo/{arq['id']}?download=1")
+    assert baixar.status_code == 200
+    assert baixar.headers["content-disposition"].startswith("attachment")
+    assert baixar.content == PNG
 
 
 async def test_ligar_e_desligar_personagem_do_roteiro(client: AsyncClient, admin):
