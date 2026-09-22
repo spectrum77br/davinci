@@ -22,7 +22,9 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from sqlalchemy import select
 
+from app.models import ChamadoMensagem
 from app.services import chamados as chamados_svc
 from app.services import chamados_devolucao as svc
 from app.services import chamados_devolucao_sync as sync
@@ -73,11 +75,16 @@ class _TikTokCasos(_FakeTikTokRecusa):
         self.next_return_id = ""
         self.linhas: dict[str, list[dict]] = {}
         self.records_pedidos: list[str] = []
+        # `seller_next_action_response` do caso ATUAL: None = o que o fake de
+        # origem manda (só no caso pendente); lista = o teste é que manda.
+        self.acoes: list[dict] | None = None
 
     async def get_return_list(self, *, order_ids=None, **kw):
         casos = await super().get_return_list(order_ids=order_ids, **kw)
         if self.next_return_id:
             casos[0]["next_return_id"] = self.next_return_id
+        if self.acoes is not None:
+            casos[0]["seller_next_action_response"] = [dict(a) for a in self.acoes]
         return casos + [dict(c) for c in self.outros]
 
     async def get_return_records(self, return_id, *, locale="pt-BR"):
@@ -241,7 +248,11 @@ async def test_caso_morto_com_sucessor_tambem_morto_nao_troca(
     txts = await _recebidas(db, ch.id)
     assert not any("ABRIU OUTRO" in t or "refez o pedido" in t for t in txts)
     assert any("cadê meu dinheiro" in t for t in txts), txts
-    assert fake.records_pedidos == [RID_REEMB]
+    # 22/09 (Vinicius: "vai pegar tudo o que a mulher falou? é isso que preciso"):
+    # a conversa de TODOS os casos do pedido é lida, não só a do caso acompanhado —
+    # o que ele escreveu no caso anterior também precisa aparecer no chamado.
+    assert fake.records_pedidos[0] == RID_REEMB
+    assert set(fake.records_pedidos) == {RID_REEMB, RID_NOVO}
 
 
 async def test_next_return_id_da_tiktok_manda_mesmo_com_caso_mais_novo_na_lista(
@@ -263,7 +274,9 @@ async def test_next_return_id_da_tiktok_manda_mesmo_com_caso_mais_novo_na_lista(
 
     assert ch.chamado == RID_NOVO
     assert any(RID_NOVO in t and "ABRIU OUTRO caso" in t for t in await _recebidas(db, ch.id))
-    assert RID_TARDE not in fake.records_pedidos
+    # a conversa dos outros casos do pedido também é lida (inclusive a do
+    # RID_TARDE), mas quem o chamado ACOMPANHA é o sucessor apontado pela TikTok
+    assert fake.records_pedidos[0] == RID_NOVO
     # a função pura: o sucessor apontado ganha até de quem é MAIS VELHO que o caso atual
     atual = {"return_id": "A", "create_time": 500, "next_return_id": "B"}
     casos = [atual, {"return_id": "B", "create_time": 100,
@@ -301,3 +314,268 @@ async def test_arbitragem_ganha_por_nos_nao_cede_a_vez(
     assert not any("ABRIU OUTRO" in t or "refez o pedido" in t for t in txts)
     assert any("A FAVOR DO VENDEDOR" in t for t in txts)
     assert any("Plataforma encerrou o caso" in t for t in await _sistema_txts(db, ch.id))
+
+
+# -------------------------------------------- o que a TikTok espera de nós AGORA
+
+
+"""Vinicius 22/09, o mesmo 293798 (R$ 640,54, loja TikTok Mini): no painel o
+histórico terminava em "Arbitragem encerrada na TikTok." + a análise do robô
+pedindo humano, e a equipe leu como caso ENCERRADO. No Seller Center, no mesmo
+minuto, o caso estava "Aguardando emissão de…", com **19h56m para aprovação
+automática** e um botão Responder — "veja tá diferente, aqui tá para responder,
+não encerrado". Arbitragem encerrada não é caso encerrado: ele volta pro fluxo
+normal e o relógio do reembolso corre contra a loja.
+
+A TikTok entrega isso em `seller_next_action_response[].action/deadline` (o
+mesmo campo do "Prazo p/ responder" da Logística). Agora a última linha do
+histórico diz, em português, a situação, a ação e o prazo — e entra como FALA
+DA PLATAFORMA, então a aba Chamados tira o chamado de "parado" e põe em Análise
+Humano."""
+
+ESPERA = "A TikTok está esperando a NOSSA resposta neste caso"
+ACAO_REEMBOLSO = "Responder ao pedido de reembolso no TikTok"
+ACAO_DEVOLUCAO = "Responder à solicitação de devolução no TikTok"
+
+
+def _prazo_txt(epoch: int) -> str:
+    """O prazo como a linha grava: data inteira, no fuso de São Paulo."""
+    return (
+        datetime.fromtimestamp(epoch, UTC)
+        .astimezone(chamados_svc.SAO_PAULO)
+        .strftime("%d/%m/%Y %H:%M")
+    )
+
+
+def _estado(situacao: str, acao: str, epoch: int | None) -> str:
+    fecho = (
+        f" Prazo até {_prazo_txt(epoch)} — sem resposta, a TikTok aprova o reembolso ao "
+        "comprador automaticamente."
+        if epoch is not None
+        else " A plataforma não informou prazo."
+    )
+    return f"{ESPERA} — {situacao}. O que fazer: {acao}.{fecho}"
+
+
+def _estados(txts: list[str]) -> list[str]:
+    return [t for t in txts if t.startswith(ESPERA)]
+
+
+def _relogio_real(fake) -> datetime:
+    """A passada acontece AGORA — é o que a produção faz (`agora` default =
+    `datetime.now`). Só com o relógio real a linha de estado cai DEPOIS das que
+    a mesma passada grava sem hora própria (essas nascem com o `now()` do
+    banco): é essa ordem que a equipe lê no painel."""
+    agora = datetime.now(UTC)
+    fake.create_time = int((agora - timedelta(days=2)).timestamp())
+    fake.update_time = int((agora - timedelta(hours=6)).timestamp())
+    return agora
+
+
+async def test_arbitragem_encerrada_mas_a_tiktok_ainda_espera_a_nossa_resposta(
+    client, make_user, auth_as, db, ml, monkeypatch
+):
+    """(1) A reprodução do 293798: caso com `arbitration_status=CLOSED` E uma
+    ação pendente com prazo. O histórico continua dizendo que a arbitragem
+    acabou — e ganha, DEPOIS dela, a linha que faltava."""
+    fake = _TikTokCasos()
+    ch, _ = await _abrir(client, db, make_user, auth_as, monkeypatch, fake)
+    agora = _relogio_real(fake)
+    fake.arb = "CLOSED"
+    prazo = int((agora + timedelta(hours=19, minutes=56)).timestamp())
+    fake.acoes = [{"action": "SELLER_RESPOND_REFUND", "deadline": prazo}]
+
+    s1 = await sync.sync_respostas(db, agora=agora)
+    await db.refresh(ch)
+
+    assert s1["verificados"] == 1 and s1["encerrados"] == 0, s1
+    assert ch.resolvido is False
+    txts = await _recebidas(db, ch.id)
+    estado = _estado("Recusado pela loja", ACAO_REEMBOLSO, prazo)
+    assert estado in txts, txts
+    # o texto inteiro, como a equipe lê: situação e ação em português e o prazo
+    # no fuso da loja (a API manda epoch UTC)
+    assert estado == (
+        "A TikTok está esperando a NOSSA resposta neste caso — Recusado pela loja. "
+        f"O que fazer: Responder ao pedido de reembolso no TikTok. Prazo até {_prazo_txt(prazo)}"
+        " — sem resposta, a TikTok aprova o reembolso ao comprador automaticamente."
+    )
+    # e vem DEPOIS do "acabou", que era onde o painel parava
+    assert txts.index("Arbitragem encerrada na TikTok.") < txts.index(estado), txts
+    # a ordem não é sorte: a linha do estado nasce com a HORA DA PASSADA e as
+    # outras da mesma passada com o `now()` do banco, de quando ela começou
+    quando = {
+        m.texto: m.created_at
+        for m in (
+            await db.execute(
+                select(ChamadoMensagem).where(ChamadoMensagem.chamado_id == ch.id)
+            )
+        ).scalars()
+    }
+    assert quando[estado] == agora
+    assert quando["Arbitragem encerrada na TikTok."] < agora
+
+
+async def test_o_estado_e_fala_da_plataforma_e_a_aba_pede_humano(
+    client, make_user, auth_as, db, ml, monkeypatch
+):
+    """(2) A linha é `recebida` — fala da PLATAFORMA, não evento de sistema. É
+    isso que tira o chamado de "Aguard. Plataforma" (onde ele dormia enquanto o
+    prazo corria) e põe em Análise Humano, "responder no Seller Center"."""
+    from tests.test_chamados_devolucao import _status_aba
+
+    fake = _TikTokCasos()
+    ch, _ = await _abrir(client, db, make_user, auth_as, monkeypatch, fake)
+    agora = _relogio_real(fake)
+    prazo = int((agora + timedelta(days=1)).timestamp())
+    fake.acoes = [{"action": "SELLER_RESPOND_REFUND", "deadline": prazo}]
+
+    await sync.sync_respostas(db, agora=agora)
+    await db.refresh(ch)
+
+    estado = _estado("Recusado pela loja", ACAO_REEMBOLSO, prazo)
+    # sem arbitragem a passada não grava mais nada: a linha do estado é a ÚNICA
+    # fala da plataforma, então é ela que decide a coluna Status
+    assert await _recebidas(db, ch.id) == [estado]
+    msg = (
+        await db.execute(
+            select(ChamadoMensagem).where(
+                ChamadoMensagem.chamado_id == ch.id, ChamadoMensagem.texto == estado
+            )
+        )
+    ).scalars().one()
+    assert (msg.direcao, msg.tipo, msg.canal) == ("recebida", "resposta", "api")
+    assert msg.autor_nome == "TikTok Shop" and msg.created_at == agora
+    # o chamado seguia "aguardando" pela nossa recusa; a fala nova é mais recente
+    assert ch.status_plataforma == "aguardando"
+    assert await _status_aba(db, ch) == (
+        "analise_humano", "plataforma respondeu — responder no Seller Center"
+    )
+
+
+async def test_mesmo_prazo_nao_repete_a_linha_prazo_novo_entra(
+    client, make_user, auth_as, db, ml, monkeypatch
+):
+    """(3) O cron passa de hora em hora: o mesmo prazo não pode encher o
+    histórico. Quando a TikTok MUDA o prazo (prorrogou, ou é outra ação), aí
+    sim entra linha nova — é informação nova pra equipe."""
+    fake = _TikTokCasos()
+    ch, recusa = await _abrir(client, db, make_user, auth_as, monkeypatch, fake)
+    prazo = int((recusa + timedelta(days=2)).timestamp())
+    fake.acoes = [{"action": "SELLER_RESPOND_REFUND", "deadline": prazo}]
+
+    # 2 novos na 1ª passada: o evento da nossa recusa + a linha do estado
+    s1 = await sync.sync_respostas(db, agora=recusa + timedelta(hours=3))
+    assert s1["novos"] == 2, s1
+    txts = await _recebidas(db, ch.id)
+    assert _estados(txts) == [_estado("Recusado pela loja", ACAO_REEMBOLSO, prazo)]
+
+    s2 = await sync.sync_respostas(db, agora=recusa + timedelta(hours=4))
+    assert s2["novos"] == 0 and await _recebidas(db, ch.id) == txts
+
+    prazo2 = int((recusa + timedelta(days=4)).timestamp())
+    fake.acoes = [{"action": "SELLER_RESPOND_REFUND", "deadline": prazo2}]
+    s3 = await sync.sync_respostas(db, agora=recusa + timedelta(hours=5))
+    assert s3["novos"] == 1, s3
+    assert _estados(await _recebidas(db, ch.id)) == [
+        _estado("Recusado pela loja", ACAO_REEMBOLSO, prazo),
+        _estado("Recusado pela loja", ACAO_REEMBOLSO, prazo2),
+    ]
+
+
+async def test_sem_acao_pendente_nenhuma_linha_de_estado(
+    client, make_user, auth_as, db, ml, monkeypatch
+):
+    """(4) Caso sem `seller_next_action_response` (ou com ação SEM prazo): a
+    TikTok não está cobrando nada — não inventa prazo nem linha."""
+    fake = _TikTokCasos()
+    ch, recusa = await _abrir(client, db, make_user, auth_as, monkeypatch, fake)
+    fake.linhas[RID_REEMB] = [{"role": "BUYER", "create_time": ESCREVEU, "note": "cadê meu dinheiro"}]
+
+    await sync.sync_respostas(db, agora=recusa + timedelta(hours=3))
+    txts = await _recebidas(db, ch.id)
+    assert _estados(txts) == [] and any("cadê meu dinheiro" in t for t in txts), txts
+
+    # ação anunciada sem `deadline`: a TikTok não deu prazo → continua sem linha
+    fake.acoes = [{"action": "SELLER_RESPOND_REFUND"}]
+    s2 = await sync.sync_respostas(db, agora=recusa + timedelta(hours=4))
+    assert s2["novos"] == 0 and _estados(await _recebidas(db, ch.id)) == []
+
+
+async def test_entre_varias_acoes_vale_a_de_prazo_mais_curto(
+    client, make_user, auth_as, db, ml, monkeypatch
+):
+    """(5) A TikTok pode listar mais de uma ação pendente no mesmo caso. Quem
+    manda é a que vence primeiro — é a que faz o dinheiro ir embora antes."""
+    fake = _TikTokCasos()
+    ch, recusa = await _abrir(client, db, make_user, auth_as, monkeypatch, fake)
+    perto = int((recusa + timedelta(hours=20)).timestamp())
+    longe = int((recusa + timedelta(days=5)).timestamp())
+    fake.acoes = [
+        {"action": "SELLER_RESPOND_RETURN", "deadline": longe},
+        {"action": "SELLER_RESPOND_REFUND", "deadline": perto},
+        {"action": "SELLER_RESPOND_RECEIVE_PACKAGE", "deadline": longe + 86400},
+    ]
+
+    await sync.sync_respostas(db, agora=recusa + timedelta(hours=3))
+
+    assert _estados(await _recebidas(db, ch.id)) == [
+        _estado("Recusado pela loja", ACAO_REEMBOLSO, perto)
+    ]
+
+
+async def test_depois_da_troca_o_estado_e_o_do_caso_novo(
+    client, make_user, auth_as, db, ml, monkeypatch
+):
+    """(6) 293798 inteiro: o caso velho morreu, a compradora abriu outro e é o
+    NOVO que tem prazo correndo. A linha de estado tem que ser a dele — a do
+    caso morto mandaria a equipe responder onde não dá mais."""
+    fake = _TikTokCasos()
+    ch, recusa = await _abrir(client, db, make_user, auth_as, monkeypatch, fake)
+    novo_em = fake.update_time + 7200
+    prazo_novo = novo_em + 2 * 86400
+    fake.acoes = [  # o caso VELHO também traz ação pendente (a TikTok não limpa)
+        {"action": "SELLER_RESPOND_RETURN", "deadline": int((recusa + timedelta(hours=8)).timestamp())}
+    ]
+    fake.outros = [
+        _caso(RID_NOVO, "RETURN_OR_REFUND_REQUEST_PENDING", criado=novo_em)
+        | {"seller_next_action_response": [{"action": "SELLER_RESPOND_REFUND", "deadline": prazo_novo}]}
+    ]
+
+    await sync.sync_respostas(db, agora=recusa + timedelta(hours=3))
+    await db.refresh(ch)
+
+    assert ch.chamado == RID_NOVO
+    assert _estados(await _recebidas(db, ch.id)) == [
+        _estado("Aberto — aguardando resposta da loja", ACAO_REEMBOLSO, prazo_novo)
+    ]
+
+
+async def test_acao_ou_situacao_que_a_tiktok_inventar_nao_quebra_a_linha(
+    client, make_user, auth_as, db, ml, monkeypatch
+):
+    """(7) Código de ação fora do dicionário (a TikTok cria): o prazo NUNCA pode
+    sumir por falta de tradução — vai o rótulo genérico com o código cru. Idem
+    pro `return_status` desconhecido, e pro prazo que vem sem ação nenhuma."""
+    fake = _TikTokCasos()
+    ch, recusa = await _abrir(client, db, make_user, auth_as, monkeypatch, fake)
+    fake.status_reembolso = "AWAITING_SELLER_EVIDENCE"  # status que ninguém traduziu
+    prazo = int((recusa + timedelta(days=1)).timestamp())
+    fake.acoes = [{"action": "SELLER_UPLOAD_ARBITRATION_EVIDENCE", "deadline": prazo}]
+
+    await sync.sync_respostas(db, agora=recusa + timedelta(hours=3))
+    txts = await _recebidas(db, ch.id)
+    assert _estados(txts) == [
+        _estado(
+            "awaiting_seller_evidence", "Ação pendente: SELLER_UPLOAD_ARBITRATION_EVIDENCE", prazo
+        )
+    ], txts
+
+    # prazo sem ação nomeada: ainda assim a equipe precisa saber que corre relógio
+    prazo2 = int((recusa + timedelta(days=3)).timestamp())
+    fake.acoes = [{"action": "", "deadline": prazo2}]
+    fake.status_reembolso = "RETURN_OR_REFUND_REQUEST_PENDING"
+    await sync.sync_respostas(db, agora=recusa + timedelta(hours=4))
+    assert _estado(
+        "Aberto — aguardando resposta da loja", "Responder na plataforma", prazo2
+    ) in await _recebidas(db, ch.id)

@@ -50,7 +50,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models import Chamado, ChamadoMensagem, Devolution
 from app.services import chamados as chamados_svc
 from app.services import chamados_devolucao as cd
-from app.services import vigia_chamados
+from app.services import logistica_rules, logistica_tiktok, vigia_chamados
 from app.services.devolucao_returns import epoch_to_dt, iso_to_dt
 from app.services.texto_html import limpar_html
 
@@ -126,6 +126,15 @@ _TT_TIPO = {"REFUND": "só reembolso", "RETURN_AND_REFUND": "devolução"}
 # um caso novo depois que o anterior terminou e o painel não mostrou nada — a
 # troca pelo caso novo só acontecia quando o anterior estava CANCELADO. Agora
 # qualquer caso morto cede a vez pro caso vivo do mesmo pedido.
+# Acabou MESMO (reembolso pago, concluído, cancelado) — diferente de `_TT_MORTOS`,
+# que inclui a NOSSA recusa: ali o caso segue vivo, o comprador ainda recorre.
+_TT_FINALIZADOS = frozenset(
+    {
+        "RETURN_OR_REFUND_REQUEST_SUCCESS",
+        "RETURN_OR_REFUND_REQUEST_COMPLETE",
+        "RETURN_OR_REFUND_REQUEST_CANCEL",
+    }
+)
 _TT_MORTOS = frozenset(
     {
         "RETURN_OR_REFUND_REQUEST_CANCEL",
@@ -322,6 +331,44 @@ def _tiktok_caso_novo(casos: list[dict], caso: dict) -> dict | None:
     return max(vivos or novos, key=lambda x: x[0])[1]
 
 
+async def _tt_estado_do_caso(
+    session: AsyncSession, ch: Chamado, caso: dict, *, agora: datetime | None = None
+) -> int:
+    """Diz, na última linha do histórico, o que a TikTok está esperando AGORA.
+
+    Vinicius 22/09 (293798): o painel parou em "Arbitragem encerrada na TikTok"
+    e a equipe leu como caso acabado — enquanto no Seller Center o caso estava
+    "Aguardando emissão de…", com 19h56 para APROVAÇÃO AUTOMÁTICA e um botão
+    Responder. Arbitragem encerrada não é caso encerrado: ele volta pro fluxo
+    normal e o relógio do reembolso volta a correr contra a loja.
+
+    A TikTok entrega isso em `seller_next_action_response[].action/deadline` —
+    o mesmo campo que a Logística já usa na coluna de prazo. Aqui vira fala da
+    plataforma, então a aba manda o chamado pra Análise Humano em vez de
+    deixá-lo parecendo resolvido. O prazo no texto é o que faz o dedupe: prazo
+    novo, linha nova; mesmo prazo, nada se repete."""
+    # Caso já encerrado não espera resposta de ninguém: se a TikTok deixar um
+    # prazo velho no payload, ignoramos — dizer "esperando a nossa resposta —
+    # concluído, reembolso pago" seria pior do que não dizer nada.
+    if str(caso.get("return_status") or "").strip().upper() in _TT_FINALIZADOS:
+        return 0
+    acao, prazo = logistica_tiktok._acao_pendente(caso)
+    if prazo is None:
+        return 0
+    status = str(caso.get("return_status") or "").strip().upper()
+    situacao = logistica_rules.TIKTOK_RETURN_STATUS_LABELS_PT.get(
+        status, _TT_STATUS_NOME.get(status, status.lower() or "situação desconhecida")
+    )
+    acao_pt = logistica_rules.acao_plataforma_pt("tiktok", acao) or "Responder na plataforma"
+    prazo_txt = prazo.astimezone(chamados_svc.SAO_PAULO).strftime("%d/%m/%Y %H:%M")
+    texto = (
+        f"A TikTok está esperando a NOSSA resposta neste caso — {situacao}. "
+        f"O que fazer: {acao_pt}. Prazo até {prazo_txt} — sem resposta, a TikTok "
+        "aprova o reembolso ao comprador automaticamente."
+    )
+    return 1 if await registrar_recebida(session, ch, cd.PLAT_TIKTOK, texto, quando=agora) else 0
+
+
 async def _sync_tiktok(
     session: AsyncSession, ch: Chamado, dev: Devolution | None, *, agora: datetime | None = None
 ) -> int:
@@ -397,6 +444,8 @@ async def _sync_tiktok(
         # O caso novo entra JÁ nesta passada (antes a linha do tempo dele só
         # aparecia uma hora depois, e a do caso velho nunca mais era lida).
         novos += await _tiktok_linha_do_tempo(session, ch, client, novo_id)
+        novos += await _tiktok_conversa_do_pedido(session, ch, client, casos, novo_id)
+        novos += await _tt_estado_do_caso(session, ch, novo, agora=agora)
         return novos
     if status in _TT_STATUS_TXT:
         txt, fim = _TT_STATUS_TXT[status]
@@ -406,6 +455,10 @@ async def _sync_tiktok(
         if fim:
             await _encerrado_na_plataforma(session, ch, f"tiktok:{status}")
     novos += await _tiktok_linha_do_tempo(session, ch, client, rid)
+    novos += await _tiktok_conversa_do_pedido(session, ch, client, casos, rid)
+    # Por último, o que a plataforma espera AGORA: é a linha que a equipe lê
+    # primeiro e a que decide se o chamado está mesmo parado ou correndo prazo.
+    novos += await _tt_estado_do_caso(session, ch, caso, agora=agora)
     return novos
 
 
@@ -453,7 +506,7 @@ def _tt_midia_do_registro(r: dict) -> str:
 
 
 async def _tiktok_linha_do_tempo(
-    session: AsyncSession, ch: Chamado, client, rid: str
+    session: AsyncSession, ch: Chamado, client, rid: str, *, etiqueta: str = ""
 ) -> int:
     """Linha do tempo de UM caso: o que o comprador e a TikTok escreveram, com
     os anexos. Best-effort — o acompanhamento não pode cair por causa dela."""
@@ -484,8 +537,37 @@ async def _tiktok_linha_do_tempo(
         quando = _fmt_dt(r.get("create_time"))
         corpo = " ".join(t for t in (nota, midia) if t)
         novos += await registrar_recebida(
-            session, ch, cd.PLAT_TIKTOK, f"{quem}{(' ' + quando) if quando else ''}: {corpo}",
+            session, ch, cd.PLAT_TIKTOK,
+            f"{quem}{etiqueta}{(' ' + quando) if quando else ''}: {corpo}",
             quando=epoch_to_dt(r.get("create_time")),
+        )
+    return novos
+
+
+# Quantos casos ANTERIORES do mesmo pedido têm a conversa relida por passada.
+TT_CASOS_ANTERIORES = 4
+
+
+async def _tiktok_conversa_do_pedido(
+    session: AsyncSession, ch: Chamado, client, casos: list[dict], rid: str
+) -> int:
+    """A conversa de TODOS os casos do pedido, não só a do que o chamado
+    acompanha. Vinicius 22/09: "vai pegar tudo o que a mulher falou? é isso que
+    preciso". Quando o comprador refaz o pedido, a TikTok cria outro caso e o
+    que ele escreveu no anterior fica num `return_id` que ninguém relê — pior
+    ainda porque até hoje o código lia só o primeiro campo de texto de cada
+    evento, então o que ficou gravado antes está incompleto. As falas dos casos
+    anteriores entram com o número do caso no rótulo, pra ninguém confundir com
+    a conversa atual, e o dedupe por texto evita repetição."""
+    novos = 0
+    outros = [
+        str(c.get("return_id") or "")
+        for c in casos
+        if str(c.get("return_id") or "") and str(c.get("return_id") or "") != rid
+    ]
+    for outro in outros[:TT_CASOS_ANTERIORES]:
+        novos += await _tiktok_linha_do_tempo(
+            session, ch, client, outro, etiqueta=f" (caso {outro})"
         )
     return novos
 
