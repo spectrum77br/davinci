@@ -96,6 +96,9 @@ type DevolutionRow = {
   chamado_ml_status?: string | null
   chamado_ml_erro?: string | null
   chamado_plataforma?: string | null
+  // Só na resposta do PATCH que trocou o motivo com chamado aberto (21/09):
+  // atualizado | atualizado_sem_api | substituido | ja_enviada | encerrado | kit_parcial.
+  chamado_troca_motivo?: string | null
   anexos?: DevolucaoAnexo[]
 }
 
@@ -263,6 +266,62 @@ function mlStatusClass(row: DevolutionRow): string {
   if (st === 'registrada' && erro === 'contestacao_cancelada') return 'text-muted-foreground'
   if (st === 'registrada') return 'text-sky-700 dark:text-sky-300'
   return 'text-amber-700 dark:text-amber-300'
+}
+
+// Aviso da troca de motivo com chamado aberto (Vinicius 21/09). `encerrado` é o
+// caso de 15/09 (motivo deixou de pedir chamado); os outros três são a troca
+// entre dois motivos que abrem chamado — o que aconteceu depende de onde a
+// contestação antiga estava (ver services/chamados_devolucao.trocar_motivo_chamado).
+function showTrocaMotivoToast(desfecho: string | null | undefined, plat: string) {
+  if (!desfecho) return
+  if (desfecho === 'encerrado') {
+    pushToast({
+      kind: 'warning',
+      title: 'Chamado encerrado',
+      lines: [
+        'O motivo não pede mais chamado, então o chamado da devolução ficou Encerrado — conclua pela aba Chamados.',
+        'Se a contestação já tinha sido enviada na plataforma, desista dela no painel da plataforma.',
+      ],
+    }, 9000)
+  } else if (desfecho === 'atualizado') {
+    pushToast({
+      kind: 'success',
+      title: 'Motivo trocado — mesmo chamado',
+      lines: [
+        'A contestação ainda não tinha saído: ela sai com o motivo novo (anexe as fotos, se o motivo pedir).',
+        'A troca ficou registrada no histórico do chamado.',
+      ],
+    }, 9000)
+  } else if (desfecho === 'atualizado_sem_api') {
+    pushToast({
+      kind: 'warning',
+      title: 'Motivo trocado — plataforma sem API',
+      lines: [
+        `O ${plat} não tem API pra contestar: abra na mão no painel da plataforma já com o motivo novo.`,
+        'A troca ficou registrada no histórico do chamado.',
+      ],
+    }, 9000)
+  } else if (desfecho === 'substituido') {
+    pushToast({
+      kind: 'warning',
+      title: 'Chamado anterior encerrado, outro aberto',
+      lines: [
+        'O chamado antigo ficou Encerrado (conclua pela aba Chamados) e um novo foi aberto com o motivo novo.',
+        `Se o robô já tinha aberto a solicitação no ${plat}, desista dela lá — a plataforma não deixa cancelar pela API.`,
+      ],
+    }, 12000)
+  } else if (desfecho === 'ja_enviada') {
+    pushToast({
+      kind: 'warning',
+      title: 'Contestação anterior já está na plataforma',
+      lines: [
+        `O ${plat} não aceita uma segunda contestação pela API: o chamado é o mesmo, com o relato novo registrado no histórico.`,
+        plat === 'ML'
+          ? 'Responda na mediação com o relato novo — pela réplica da aba Chamados ou no painel do ML.'
+          : 'Responda você no caso aberto no Seller Center com o relato novo e as fotos.',
+      ],
+    }, 12000)
+  }
 }
 
 const CONDICOES_PRODUTO = [
@@ -599,12 +658,14 @@ function isMalaOuEletro(sku: string | null | undefined) {
   })
 }
 // Trava (Eduardo 04/09): "mala e eletro é obrigatória, desde que esteja nos motivos que abrem chamado".
-// Vinicius 21/09: "não recebido" fica de fora — o pacote de VOLTA não chegou, então o vídeo
-// da ida não prova nada; o robô abre no Seller Center com os fatos da SPX (espelho de
-// services/chamados_devolucao.link_envio_obrigatorio).
+// Vinicius 21/09: "não recebido" (o pacote de VOLTA não chegou, o vídeo da ida não prova nada)
+// e "bloqueado" (nome antigo "mudou de ideia": o aparelho voltou com a senha do cliente, a
+// contestação é "item usado") ficam de fora — espelho de MOTIVOS_SEM_LINK_ENVIO em
+// services/chamados_devolucao.link_envio_obrigatorio.
+const MOTIVOS_SEM_LINK_ENVIO = ['não recebido', 'bloqueado', 'mudou de ideia']
 function linkEnvioRequired(sku: string | null | undefined, motivo: string | null | undefined) {
   const m = (motivo || '').trim().toLowerCase()
-  if (m === 'não recebido') return false
+  if (MOTIVOS_SEM_LINK_ENVIO.includes(m)) return false
   return MOTIVOS_ABREM_CHAMADO.includes(m) && isMalaOuEletro(sku)
 }
 // Vinicius 21/09: Link envio, quando preenchido, tem que ser URL http(s) — a operadora
@@ -1716,19 +1777,9 @@ async function saveRow(row: DevolutionRow) {
     const idx = items.value.findIndex((i) => i.id === row.id)
     // PATCH não devolve `cliente` (só a listagem preenche) — preserva o da linha.
     if (idx >= 0) items.value[idx] = { ...updated, cliente: updated.cliente ?? row.cliente }
-    // Motivo limpo/trocado por um que não abre chamado encerrou o chamado da
-    // devolução (15/09): a contestação já enviada na plataforma não é
-    // cancelável pela API — lembra de retirar na mão.
-    if (row.tem_chamado && !row.chamado_resolvido && updated.chamado_resolvido) {
-      pushToast({
-        kind: 'warning',
-        title: 'Chamado encerrado',
-        lines: [
-          'O motivo não pede mais chamado, então o chamado da devolução foi encerrado.',
-          'Se a contestação já tinha sido enviada na plataforma, desista dela no painel da plataforma.',
-        ],
-      }, 9000)
-    }
+    // Troca de motivo com chamado aberto (21/09): o backend diz o que fez com o
+    // chamado e a operadora vê na hora — o detalhe fica no histórico do chamado.
+    showTrocaMotivoToast(updated.chamado_troca_motivo, platNome(updated))
     clearDirty(row.id)
     // Reembolso/condição podem mudar quais linhas entram nos filtros e cards.
     void refreshTotals()

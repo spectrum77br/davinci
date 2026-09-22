@@ -105,6 +105,13 @@ class DevolutionOut(BaseModel):
     chamado_ml_erro: str | None = None
     # Plataforma do chamado (ml | tiktok | shopee | amazon…) — rotula o status.
     chamado_plataforma: str | None = None
+    # Só na resposta do PATCH que trocou o motivo com chamado aberto (21/09):
+    # atualizado (mesmo chamado, contestação ainda não saiu) | atualizado_sem_api
+    # (idem, plataforma sem API: abrir na mão) | substituido (antigo Encerrado +
+    # novo aberto) | ja_enviada (plataforma já está com a contestação antiga) |
+    # encerrado / kit_parcial (motivo deixou de pedir chamado). O front mostra o
+    # aviso correspondente.
+    chamado_troca_motivo: str | None = None
     # Situação ATUAL do pedido no Bling (espelho bling_orders, via número do
     # pedido) — coluna "Status Bling" da aba Lançamentos (Vinicius 17/09).
     # Preenchidos pela listagem/create/patch; devolutions não guarda.

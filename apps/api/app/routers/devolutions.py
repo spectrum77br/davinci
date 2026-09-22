@@ -2141,21 +2141,44 @@ async def patch_devolution(
     await session.commit()
     await session.refresh(row)
 
+    # Só na TRANSIÇÃO do motivo (o front manda o motivo em todo save).
+    motivo_anterior_pedia = (
+        (prev_motivo or "").strip().lower() in chamados_devolucao.chamados_svc.MOTIVOS_ABREM_CHAMADO
+    )
+    motivo_mudou = "motivo_devolucao" in data and (
+        (prev_motivo or "").strip().lower() != (row.motivo_devolucao or "").strip().lower()
+    )
+    autor_chamado = f"Devoluções ({(user.name or user.email or '').strip() or 'usuário'})"
+    troca_motivo: str | None = None
+    # De um motivo que abre chamado pra OUTRO que abre (Vinicius 21/09: "Não
+    # recebido" → o pacote chegou danificado → "Danificado"): o chamado antigo
+    # não pode ficar contando a história velha. O helper decide, pelo estado da
+    # contestação, entre atualizar o mesmo chamado, encerrar + abrir outro ou
+    # avisar que a plataforma já está com a contestação antiga.
+    if (
+        motivo_mudou
+        and motivo_anterior_pedia
+        and chamados_devolucao.chamados_svc.motivo_pede_chamado(row)
+    ):
+        troca_motivo = await chamados_devolucao.trocar_motivo_chamado(
+            session, row, motivo_anterior=prev_motivo, autor_nome=autor_chamado
+        )
+        if troca_motivo is not None:
+            await session.commit()
+            await session.refresh(row)
+
     # Motivo trocado pra um que pede chamado (ou link do vídeo informado) →
     # registra o chamado sozinho e abre no ML (dedupe por pedido dentro do
-    # helper — repetir o PATCH não duplica).
+    # helper — repetir o PATCH não duplica). Depois da substituição acima, é o
+    # chamado NOVO (o mais recente do pedido) que ganha a abertura.
     if "motivo_devolucao" in data or "link_envio" in data:
         await _chamado_devolucao_apos_commit(session, row)
     # Motivo limpo ou trocado por um que NÃO abre chamado → encerra o chamado
     # da devolução (Eduardo 15/09: "hoje o sistema verifica o motivo para
     # abrir; encerrar do mesmo jeito"). Caso 293843: o pacote chegou depois.
-    # Só na TRANSIÇÃO (o front manda o motivo em todo save): antes pedia
-    # chamado, agora não.
-    motivo_anterior_pedia = (
-        (prev_motivo or "").strip().lower() in chamados_devolucao.chamados_svc.MOTIVOS_ABREM_CHAMADO
-    )
+    # Antes pedia chamado, agora não.
     if (
-        "motivo_devolucao" in data
+        motivo_mudou
         and motivo_anterior_pedia
         and not chamados_devolucao.chamados_svc.motivo_pede_chamado(row)
     ):
@@ -2163,9 +2186,10 @@ async def patch_devolution(
             session,
             row,
             motivo_anterior=prev_motivo,
-            autor_nome=f"Devoluções ({(user.name or user.email or '').strip() or 'usuário'})",
+            autor_nome=autor_chamado,
         )
         if desfecho is not None:
+            troca_motivo = desfecho
             await session.commit()
             await session.refresh(row)
 
@@ -2230,6 +2254,7 @@ async def patch_devolution(
     out = DevolutionOut.model_validate(row)
     if final_sr is not None:
         out.bling_stock_result = BlingStockResultOut(**final_sr)
+    out.chamado_troca_motivo = troca_motivo
     return await _completar_out(session, row, out)
 
 

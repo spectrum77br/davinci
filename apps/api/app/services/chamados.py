@@ -366,6 +366,33 @@ def motivo_pede_chamado(dev: Devolution) -> bool:
     return (dev.motivo_devolucao or "").strip().lower() in MOTIVOS_ABREM_CHAMADO
 
 
+# Observação gravada na abertura automática. Quem troca o motivo depois
+# (`atualizar_observacao_motivo`) só reescreve se a observação ainda for essa —
+# texto editado por pessoa na aba fica como está.
+OBS_AUTO_PREFIXO = "Aberto automaticamente pela devolução — motivo: "
+
+
+def atualizar_observacao_motivo(ch: Chamado, de: str, para: str) -> bool:
+    """Reflete o motivo novo da devolução na observação do chamado quando ela
+    ainda é a automática (Vinicius 21/09: a observação ficava congelada em
+    "Não recebido" depois da troca pra "Danificado"). Troca SÓ o trecho do
+    motivo anterior (`de`), preservando o que vier depois — " (substitui o
+    chamado …)" ou uma linha anexada por pessoa/robô; se a observação não começa
+    pelo texto automático + motivo anterior, não mexe."""
+    obs = ch.observacao or ""
+    if not obs.startswith(OBS_AUTO_PREFIXO):
+        return False
+    resto = obs[len(OBS_AUTO_PREFIXO):]
+    de = (de or "").strip()
+    if not de or not resto.lower().startswith(de.lower()):
+        return False
+    novo = f"{OBS_AUTO_PREFIXO}{para}{resto[len(de):]}"
+    if novo == obs:
+        return False
+    ch.observacao = novo
+    return True
+
+
 async def chamado_da_devolucao(session: AsyncSession, dev: Devolution) -> Chamado | None:
     """Chamado de origem `devolucao` já registrado pra essa linha: por pedido
     Bling (kit com 3 linhas = 1 chamado) ou, sem pedido, pelo id da linha
@@ -382,7 +409,13 @@ async def chamado_da_devolucao(session: AsyncSession, dev: Devolution) -> Chamad
     ).scalar_one_or_none()
 
 
-async def abrir_chamado_devolucao(session: AsyncSession, dev: Devolution) -> Chamado | None:
+async def abrir_chamado_devolucao(
+    session: AsyncSession,
+    dev: Devolution,
+    *,
+    substituindo: Chamado | None = None,
+    motivo_anterior: str | None = None,
+) -> Chamado | None:
     """Abre (registra) automaticamente um chamado de origem `devolucao` quando
     o motivo da devolução pede chamado. Aqui só REGISTRA na aba Chamados (canal
     `manual`); quem leva pro Mercado Livre — revisão da devolução com problema,
@@ -391,12 +424,14 @@ async def abrir_chamado_devolucao(session: AsyncSession, dev: Devolution) -> Cha
 
     Dedupe: UM chamado de devolução por pedido Bling (kit com 3 linhas de
     devolução não vira 3 chamados); sem pedido Bling, cai pro id da linha
-    (`origem_ref`). NÃO commita — o caller controla a transação. Devolve o
-    chamado criado, ou None quando o motivo não pede/já existe."""
+    (`origem_ref`). `substituindo` (Vinicius 21/09, troca de motivo): o caller
+    acabou de pôr aquele chamado em Encerrado e quer OUTRO no lugar — pula o
+    dedupe e anota a substituição. NÃO commita — o caller controla a transação.
+    Devolve o chamado criado, ou None quando o motivo não pede/já existe."""
     motivo = (dev.motivo_devolucao or "").strip()
     if motivo.lower() not in MOTIVOS_ABREM_CHAMADO:
         return None
-    if await chamado_da_devolucao(session, dev) is not None:
+    if substituindo is None and await chamado_da_devolucao(session, dev) is not None:
         return None
     ch = Chamado(
         data=datetime.now(SAO_PAULO).date(),
@@ -408,22 +443,26 @@ async def abrir_chamado_devolucao(session: AsyncSession, dev: Devolution) -> Cha
         origem="devolucao",
         origem_ref=str(dev.id),
         canal="manual",
-        observacao=f"Aberto automaticamente pela devolução — motivo: {motivo}",
+        observacao=f"{OBS_AUTO_PREFIXO}{motivo}",
     )
     # Espelho do pedido completa o que a devolução não tem (plataforma/status
     # Bling/data) sem sobrescrever o que veio dela.
     await preencher_do_pedido(session, ch)
     session.add(ch)
     await session.flush()
-    session.add(
-        registrar_sistema(ch, f"Chamado aberto automaticamente pela devolução (motivo: {motivo})")
-    )
+    evento = f"Chamado aberto automaticamente pela devolução (motivo: {motivo})"
+    if substituindo is not None:
+        de = (motivo_anterior or "").strip() or "—"
+        ch.observacao = f"{ch.observacao} (substitui o chamado anterior, motivo \"{de}\")"
+        evento += f' — substitui o chamado anterior (motivo "{de}"), que ficou Encerrado'
+    session.add(registrar_sistema(ch, evento))
     logger.info(
         "chamado_auto_devolucao",
         chamado_id=str(ch.id),
         devolution_id=str(dev.id),
         pedido_bling=ch.pedido_bling,
         motivo=motivo,
+        substitui=str(substituindo.id) if substituindo is not None else None,
     )
     return ch
 

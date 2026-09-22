@@ -144,6 +144,12 @@ REASONS_EXIGEM_FOTO = frozenset({"SRF2", "SRF4"})
 REASONS_DO_PACOTE = frozenset({"SRF7"})
 # Motivo da tela "o pacote de VOLTA não chegou" (minúsculo, como `_motivo`).
 MOTIVO_NAO_RECEBIDO = "não recebido"
+# Motivos que abrem chamado mas NÃO exigem o Link de envio em mala/eletro
+# (Vinicius 21/09): "Não recebido" — o pacote de volta não chegou, o vídeo da
+# ida não prova nada; "Bloqueado" (nome antigo "Mudou de ideia") — o aparelho
+# voltou com a senha do cliente, a contestação é "item usado", não expedição
+# (caso 294554: a operadora digitava "nao ha, senha" pra passar na trava).
+MOTIVOS_SEM_LINK_ENVIO = frozenset({MOTIVO_NAO_RECEBIDO, "bloqueado", "mudou de ideia"})
 REASON_NOME: dict[str, str] = {
     "SRF2": "produto chegou danificado",
     "SRF3": "devolução incompleta",
@@ -279,13 +285,14 @@ def produto_mala_ou_eletro(sku: str | None) -> bool:
 
 def link_envio_obrigatorio(dev: Devolution) -> bool:
     """Trava do Eduardo (04/09): "mala e eletro é obrigatória, desde que esteja
-    nos motivos que abrem chamado". Vinicius 21/09: "Não recebido" fica de fora
-    — o pacote de VOLTA não chegou, o vídeo da ida não prova nada; a operadora
-    digitava "nao ha, nao recebido" só pra passar na trava e o texto ia parar
-    no QR do cartão da disputa (a tela espelha em linkEnvioRequired)."""
+    nos motivos que abrem chamado". Vinicius 21/09: "Não recebido" e "Bloqueado"
+    ficam de fora (`MOTIVOS_SEM_LINK_ENVIO`) — o vídeo da expedição não prova
+    nada nesses dois; a operadora digitava "nao ha, …" só pra passar na trava e
+    o texto ia parar no QR do cartão da disputa (a tela espelha em
+    linkEnvioRequired)."""
     return (
         chamados_svc.motivo_pede_chamado(dev)
-        and _motivo(dev) != MOTIVO_NAO_RECEBIDO
+        and _motivo(dev) not in MOTIVOS_SEM_LINK_ENVIO
         and produto_mala_ou_eletro(dev.sku)
     )
 
@@ -780,38 +787,14 @@ async def encerrar_chamado_por_motivo(
         )
         return "kit_parcial"
     quem = autor_nome or chamados_svc.AUTOR_SISTEMA
-    chamados_svc.set_status_plataforma(ch, chamados_svc.STATUS_ENCERRADO)
-    ch.auto_ligada = False  # réplica automática não faz sentido sem razão de existir
-    session.add(
-        chamados_svc.registrar_sistema(
-            ch,
+    await _encerrar_chamado(
+        session,
+        ch,
+        evento=(
             f"Motivo da devolução retirado (de \"{de}\" para \"{para}\", por {quem}) — "
-            "chamado sem razão de existir, aguardando fechamento",
-        )
+            "chamado sem razão de existir, aguardando fechamento"
+        ),
     )
-    abertura = await mensagem_abertura(session, ch)
-    nome = _NOME_PLATAFORMA.get(
-        plataforma_de(ch.plataforma) or "", (ch.plataforma or "a plataforma").strip()
-    )
-    if abertura is not None and abertura.status == "enviada":
-        abertura.erro = ERRO_RETIRAR_CONTESTACAO  # a tela Devoluções mostra o aviso
-        session.add(
-            chamados_svc.registrar_sistema(
-                ch,
-                f"Atenção: a contestação já tinha sido enviada na plataforma ({nome}"
-                f"{', ' + _fmt_brt(abertura.enviada_at) if abertura.enviada_at else ''}). "
-                "Se ela ainda estiver aberta lá, desista dela no painel da plataforma — "
-                "o DaVinci não tem como cancelar pela API.",
-            )
-        )
-    elif abertura is not None and abertura.status == "pendente":
-        abertura.status = "registrada"
-        abertura.erro = ERRO_CONTESTACAO_CANCELADA
-        session.add(
-            chamados_svc.registrar_sistema(
-                ch, "A contestação ainda não tinha saído (estava pendente na fila) — cancelada."
-            )
-        )
     logger.info(
         "chamado_devolucao_encerrado_por_motivo",
         chamado_id=str(ch.id),
@@ -821,6 +804,175 @@ async def encerrar_chamado_por_motivo(
         para=para,
     )
     return "encerrado"
+
+
+def _nome_plataforma(ch: Chamado) -> str:
+    return _NOME_PLATAFORMA.get(
+        plataforma_de(ch.plataforma) or "", (ch.plataforma or "a plataforma").strip()
+    )
+
+
+async def _encerrar_chamado(session: AsyncSession, ch: Chamado, *, evento: str) -> None:
+    """Põe o chamado no estado Encerrado (status oficial `encerrado`, a pessoa
+    conclui pela aba) com o `evento` no histórico e trata a abertura: já ENVIADA
+    (pela API ou pelo robô na tela) → aviso pra desistir dela no painel, porque
+    nenhuma API cancela; `pendente` na fila (API ou robô) → sai da fila
+    (`registrada`); `enviando` (o robô está com a tarefa em mãos) → aviso de que
+    ela pode ser aberta mesmo assim. Não mexe no Valor. NÃO commita."""
+    chamados_svc.set_status_plataforma(ch, chamados_svc.STATUS_ENCERRADO)
+    ch.auto_ligada = False  # réplica automática não faz sentido sem razão de existir
+    session.add(chamados_svc.registrar_sistema(ch, evento))
+    abertura = await mensagem_abertura(session, ch)
+    nome = _nome_plataforma(ch)
+    if abertura is not None and abertura.status == "enviada":
+        abertura.erro = ERRO_RETIRAR_CONTESTACAO  # a tela Devoluções mostra o aviso
+        quando = f", {_fmt_brt(abertura.enviada_at)}" if abertura.enviada_at else ""
+        if abertura.canal == "robo":
+            onde = (
+                f"a solicitação já tinha sido aberta pelo robô na tela da plataforma ({nome}"
+                f"{quando}{', protocolo ' + ch.chamado if (ch.chamado or '').strip() else ''})"
+            )
+        else:
+            onde = f"a contestação já tinha sido enviada na plataforma ({nome}{quando})"
+        session.add(
+            chamados_svc.registrar_sistema(
+                ch,
+                f"Atenção: {onde}. Se ela ainda estiver aberta lá, desista dela no painel "
+                "da plataforma — o DaVinci não tem como cancelar pela API.",
+            )
+        )
+    elif abertura is not None and abertura.status == "pendente":
+        abertura.status = "registrada"
+        abertura.erro = ERRO_CONTESTACAO_CANCELADA
+        fila = "na fila do robô" if abertura.canal == "robo" else "na fila"
+        session.add(
+            chamados_svc.registrar_sistema(
+                ch, f"A contestação ainda não tinha saído (estava pendente {fila}) — cancelada."
+            )
+        )
+    elif abertura is not None and abertura.status == "enviando":
+        # O robô está com a tarefa: o resultado dele ainda cai aqui, mas a marca
+        # impede que uma falha (ou lease vencido) devolva a tarefa antiga pra fila
+        # (`agent_resultado` / `agent_lease` olham o chamado Encerrado).
+        abertura.erro = ERRO_CONTESTACAO_CANCELADA
+        session.add(
+            chamados_svc.registrar_sistema(
+                ch,
+                "Atenção: o robô está com a tarefa de abertura em mãos neste momento — se ele "
+                f"abrir na tela da plataforma ({nome}), desista dela lá; o DaVinci não tem "
+                "como cancelar pela API. Se a tarefa falhar, ela não volta pra fila.",
+            )
+        )
+
+
+async def trocar_motivo_chamado(
+    session: AsyncSession,
+    dev: Devolution,
+    *,
+    motivo_anterior: str | None,
+    autor_nome: str | None = None,
+) -> str | None:
+    """Vinicius 21/09 (caso 260901SXJCU6EG): a operadora lançou "Não recebido",
+    o chamado abriu, o pacote chegou dias depois danificado e ela troca o motivo
+    pra "Danificado (Outros)". Até aqui NADA acontecia (o dedupe achava o chamado
+    e a abertura enviada fazia `garantir_chamado` sair calado) e ele excluía o
+    lançamento e refazia — o que também não abria chamado novo.
+
+    Só na TRANSIÇÃO entre dois motivos que abrem chamado (o caller confere).
+    O que fazer depende de onde a contestação antiga estava:
+      - com o ROBÔ (canal `robo`: Shopee "não recebido" em trânsito abre uma
+        solicitação no Seller Center, formulário do ML sem claim) — a devolução
+        ainda não tem contestação pela API: encerra o chamado antigo (evento
+        "usuário trocou o motivo…", como o Vinicius pediu) e abre OUTRO, que sai
+        pela API com o motivo novo. → "substituido"
+      - já ENVIADA pela API — nenhuma das três plataformas aceita uma segunda
+        contestação nem tem "cancelar": fica o MESMO chamado, com o evento no
+        histórico (relato novo incluso) e a pessoa responde no painel da
+        plataforma — o robô não fala em canal `api`. → "ja_enviada"
+      - ainda NÃO saiu (sem abertura / pendente / falhou / registrada): mesmo
+        chamado; o próximo disparo já relê o motivo da linha (código e texto
+        novos), então só o evento e a observação. → "atualizado" (plataforma sem
+        API, ex. Amazon: "atualizado_sem_api" — abrir na mão com o motivo novo)
+    Devolve None quando não há chamado vivo (o `garantir_chamado` de sempre
+    cuida). NÃO commita."""
+    if not chamados_svc.motivo_pede_chamado(dev):
+        return None
+    ch = await chamados_svc.chamado_da_devolucao(session, dev)
+    if ch is None or ch.resolvido or ch.status_plataforma in chamados_svc.STATUS_FINAIS:
+        return None
+    de = (motivo_anterior or "").strip() or "—"
+    para = (dev.motivo_devolucao or "").strip()
+    quem = autor_nome or chamados_svc.AUTOR_SISTEMA
+    abertura = await mensagem_abertura(session, ch)
+    nome = _nome_plataforma(ch)
+    plat = plataforma_de(ch.plataforma)
+    base = {
+        "chamado_id": str(ch.id),
+        "devolution_id": str(dev.id),
+        "pedido_bling": dev.pedido_bling,
+        "de": de,
+        "para": para,
+    }
+
+    if abertura is not None and abertura.canal == "robo":
+        await _encerrar_chamado(
+            session,
+            ch,
+            evento=(
+                f"{quem} trocou o motivo da devolução de \"{de}\" para \"{para}\" — "
+                "chamado encerrado; outro chamado foi aberto com o motivo novo"
+            ),
+        )
+        novo = await chamados_svc.abrir_chamado_devolucao(
+            session, dev, substituindo=ch, motivo_anterior=de
+        )
+        logger.info(
+            "chamado_devolucao_motivo_substituido",
+            novo_id=str(novo.id) if novo else None,
+            **base,
+        )
+        return "substituido"
+
+    chamados_svc.atualizar_observacao_motivo(ch, de, para)
+    if abertura is not None and abertura.status == "enviada":
+        # Já está na plataforma pela API: nenhuma das três aceita uma segunda
+        # contestação. O robô não responde em canal `api` sem bloqueio
+        # (`agent_analise` → canal_sem_robo), então aqui é gente: o relato novo
+        # fica no histórico e a operadora responde no painel (no ML, a réplica
+        # da aba Chamados manda na mediação pela API).
+        quando = f", {_fmt_brt(abertura.enviada_at)}" if abertura.enviada_at else ""
+        onde = (
+            "na mediação do Mercado Livre (réplica pela aba Chamados ou no painel do ML)"
+            if plat == PLAT_ML
+            else f"no caso aberto no Seller Center ({nome})"
+        )
+        relato = texto_padrao(dev, reason_para(dev))
+        session.add(
+            chamados_svc.registrar_sistema(
+                ch,
+                f"{quem} trocou o motivo da devolução de \"{de}\" para \"{para}\". A "
+                f"contestação de \"{de}\" já foi enviada ({nome}{quando}) e a plataforma não "
+                f"aceita uma segunda pela API — responder {onde} com o relato novo e as fotos "
+                f"da linha. Relato: {relato}",
+            )
+        )
+        logger.info("chamado_devolucao_motivo_ja_enviada", **base)
+        return "ja_enviada"
+
+    if plat in COM_API:
+        detalhe = "a contestação ainda não tinha saído; ela sai com o motivo novo"
+        desfecho = "atualizado"
+    else:
+        detalhe = f"{nome} não tem API — abrir na mão já com o motivo novo"
+        desfecho = "atualizado_sem_api"
+    session.add(
+        chamados_svc.registrar_sistema(
+            ch,
+            f"{quem} trocou o motivo da devolução de \"{de}\" para \"{para}\" — {detalhe}",
+        )
+    )
+    logger.info("chamado_devolucao_motivo_atualizado", desfecho=desfecho, **base)
+    return desfecho
 
 
 def _fmt_brt(v: object, fmt: str = "%d/%m %H:%M") -> str:

@@ -91,7 +91,7 @@ from app.schemas.chamados import (
     SituacoesOut,
 )
 from app.services import chamados as svc
-from app.services import chamados_juridico
+from app.services import chamados_devolucao, chamados_juridico
 from app.services.devolution_delete import EstornoFalhouError, excluir_lancamento
 from app.services.texto_html import limpar_html
 
@@ -955,6 +955,27 @@ async def exclusao_preview(
             .limit(1)
         )
     ).scalar_one_or_none() is not None
+    # 21/09: chamado de devolução SUBSTITUÍDO por outro mais novo do mesmo pedido
+    # (troca de motivo) — as linhas agora alimentam o chamado novo; a lixeira
+    # deste não as pré-marca, senão apagar o Encerrado levaria a linha viva junto.
+    substituido = False
+    if ch.origem == "devolucao" and (numero or (ch.origem_ref or "").strip()):
+        mesmo_caso = (
+            Chamado.pedido_bling == numero
+            if numero
+            else Chamado.origem_ref == (ch.origem_ref or "").strip()
+        )
+        substituido = (
+            await session.execute(
+                select(Chamado.id)
+                .where(
+                    Chamado.origem == "devolucao",
+                    mesmo_caso,
+                    Chamado.created_at > ch.created_at,
+                )
+                .limit(1)
+            )
+        ).scalar_one_or_none() is not None
     lancamentos = [
         ExclusaoLancamentoOut(
             id=dev.id,
@@ -966,7 +987,7 @@ async def exclusao_preview(
             estoque_estornavel=_estornavel(dev),
             estoque_mov_sku=dev.estoque_mov_sku,
             estoque_mov_qty=dev.estoque_mov_qty,
-            marcado_padrao=svc.motivo_pede_chamado(dev),
+            marcado_padrao=svc.motivo_pede_chamado(dev) and not substituido,
         )
         for dev in await _lancamentos_do_chamado(session, ch)
     ]
@@ -1300,6 +1321,10 @@ async def agent_lease(
             (ChamadoMensagem.status == "enviando") & (ChamadoMensagem.updated_at < limite_stale),
         ),
     ]
+    # 21/09: ABERTURA de chamado já Encerrado (ex. motivo trocado e outro chamado
+    # aberto no lugar) não volta pro robô — nem presa em `enviando`. Réplica e
+    # instrução em Encerrado continuam saindo (é o jeito de o robô voltar num caso).
+    conds.append(or_(ChamadoMensagem.tipo != "abertura", svc.NAO_ENCERRADO_SQL))
     if body.tipo == "abrir":
         conds.append(sem_protocolo)
     elif body.tipo == "responder":
@@ -1385,10 +1410,25 @@ async def agent_resultado(
     if m is None:
         raise HTTPException(404, detail={"code": "chamado_mensagem_not_found"})
     ch = await _get(session, m.chamado_id)
+    encerrado = ch.resolvido or ch.status_plataforma in svc.STATUS_FINAIS
     if body.ok:
         m.status = "enviada"
         m.enviada_at = datetime.now(UTC)
         m.erro = None
+        if m.tipo == "abertura" and encerrado:
+            # 21/09: o robô abriu DEPOIS de o chamado ficar Encerrado (motivo
+            # trocado/retirado enquanto a tarefa estava com ele): a marca faz a
+            # tela Devoluções mostrar "retire a contestação no painel".
+            m.erro = chamados_devolucao.ERRO_RETIRAR_CONTESTACAO
+            session.add(
+                svc.registrar_sistema(
+                    ch,
+                    "Atenção: o robô abriu na tela da plataforma"
+                    f"{' (protocolo ' + body.chamado + ')' if body.chamado else ''} depois de o "
+                    "chamado ficar Encerrado — desista dela no painel da plataforma; o DaVinci "
+                    "não tem como cancelar pela API.",
+                )
+            )
         if body.chamado and not (ch.chamado or "").strip():
             ch.chamado = body.chamado
             ch.chamado_url = body.chamado_url or ch.chamado_url
@@ -1411,7 +1451,19 @@ async def agent_resultado(
     else:
         erro = (body.erro or "falha no robô")[:300]
         tentativas = (m.tentativas or 0) + 1
-        if not svc._erro_pede_humano(erro) and tentativas < svc.MAX_TENTATIVAS_ROBO:
+        if m.tipo == "abertura" and encerrado:
+            # 21/09: o chamado foi Encerrado enquanto o robô estava com a tarefa
+            # (motivo trocado, outro chamado no lugar): a abertura antiga não
+            # volta pra fila.
+            m.tentativas = tentativas
+            m.status = "registrada"
+            m.erro = chamados_devolucao.ERRO_CONTESTACAO_CANCELADA
+            session.add(
+                svc.registrar_sistema(
+                    ch, f"Tarefa do robô falhou ({erro}) e o chamado já está Encerrado — cancelada."
+                )
+            )
+        elif not svc._erro_pede_humano(erro) and tentativas < svc.MAX_TENTATIVAS_ROBO:
             m.tentativas = tentativas
             m.erro = erro
             m.status = "pendente"

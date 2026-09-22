@@ -247,6 +247,10 @@ async def test_so_reembolso_nao_recebido_continua_com_cartao(client, make_user, 
 
 async def test_link_envio_obrigatorio_exclui_nao_recebido(client, make_user, auth_as, db, inline, monkeypatch):
     assert svc.link_envio_obrigatorio(Devolution(sku="b001.26", motivo_devolucao="Não recebido")) is False
+    # Vinicius 21/09 (caso 294554, Oukitel voltou com senha): Bloqueado não pede o link.
+    assert svc.link_envio_obrigatorio(Devolution(sku="dg091.sp", motivo_devolucao="Bloqueado")) is False
+    assert svc.link_envio_obrigatorio(Devolution(sku="dg091.sp", motivo_devolucao="Mudou de ideia")) is False
+    assert svc.link_envio_obrigatorio(Devolution(sku="dg091.sp", motivo_devolucao="Danificado (Outros)")) is True
     assert svc.link_envio_obrigatorio(Devolution(sku="b001.26", motivo_devolucao="Golpe")) is True
     assert svc.link_envio_obrigatorio(Devolution(sku="dg048.ra", motivo_devolucao="Item faltando")) is True
     assert svc.link_envio_obrigatorio(Devolution(sku="a003.ra", motivo_devolucao="Golpe")) is False
