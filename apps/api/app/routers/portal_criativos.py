@@ -536,28 +536,15 @@ def _entrega(
     )
 
 
-@router.post("/criativos/{creative_id}/arquivo")
-async def enviar_arquivo(
-    creative_id: UUID,
-    files: Annotated[list[UploadFile], File(...)],
-    session: Annotated[AsyncSession, Depends(get_session)],
-    equipe: Annotated[str, Depends(equipe_do_token)],
-) -> dict[str, Any]:
-    """Anexa vídeo numa linha da PRÓPRIA equipe.
+def _gravar_arquivos(row: MarketingCreative, files: list[UploadFile]) -> list[str]:
+    """Grava os anexos de uma linha e devolve os nomes que entraram.
 
-    Mesmas guardas do caminho interno, e os mesmos tetos importados de lá pra
-    não divergirem com o tempo: grava em streaming (nunca o arquivo inteiro na
-    memória), aborta e apaga ao passar do teto, e o sha256 sai do mesmo fluxo
-    de bytes — é ele que denuncia o mesmo vídeo publicado em duas marcas.
+    Está fora do endpoint porque agora há DOIS caminhos de entrega — a linha
+    que a equipe interna abriu e a entrega que nasce do roteiro — e os tetos
+    de tamanho, a contagem de arquivos e o sha256 têm que ser os mesmos nos
+    dois. Duplicar esse laço é como as duas portas passariam a aceitar coisas
+    diferentes sem ninguém perceber.
     """
-    row = await _linha_da_equipe(session, creative_id, equipe)
-    if row.pushed_at is not None:
-        raise HTTPException(409, detail={"code": "ja_enviado_pro_mega"})
-    if not files:
-        raise HTTPException(400, detail={"code": "sem_arquivo"})
-    if len(row.files) + len(files) > MAX_FILES_PER_ROW:
-        raise HTTPException(400, detail={"code": "muitos_arquivos"})
-
     base = _file_dir(row)
     base.mkdir(parents=True, exist_ok=True)
     existentes = {f.file_name: f for f in row.files}
@@ -601,6 +588,32 @@ async def enviar_arquivo(
         row.files.append(rec)
         existentes[nome] = rec
         entraram.append(nome)
+    return entraram
+
+
+@router.post("/criativos/{creative_id}/arquivo")
+async def enviar_arquivo(
+    creative_id: UUID,
+    files: Annotated[list[UploadFile], File(...)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+    equipe: Annotated[str, Depends(equipe_do_token)],
+) -> dict[str, Any]:
+    """Anexa vídeo numa linha da PRÓPRIA equipe.
+
+    Mesmas guardas do caminho interno, e os mesmos tetos importados de lá pra
+    não divergirem com o tempo: grava em streaming (nunca o arquivo inteiro na
+    memória), aborta e apaga ao passar do teto, e o sha256 sai do mesmo fluxo
+    de bytes — é ele que denuncia o mesmo vídeo publicado em duas marcas.
+    """
+    row = await _linha_da_equipe(session, creative_id, equipe)
+    if row.pushed_at is not None:
+        raise HTTPException(409, detail={"code": "ja_enviado_pro_mega"})
+    if not files:
+        raise HTTPException(400, detail={"code": "sem_arquivo"})
+    if len(row.files) + len(files) > MAX_FILES_PER_ROW:
+        raise HTTPException(400, detail={"code": "muitos_arquivos"})
+
+    entraram = _gravar_arquivos(row, files)
 
     # Arquivo novo volta a linha pra "pendente" — mesmo comportamento do
     # caminho interno. A agência precisa ver isso na tela dela, senão parece
@@ -611,4 +624,72 @@ async def enviar_arquivo(
     # Sem o conjunto de visíveis, `roteiro_id` sai NULL — conservador de
     # propósito: o site recarrega a lista logo depois do envio, e é lá que o
     # link (se houver) aparece.
+    return _linha_out(row)
+
+@router.post("/roteiros/{roteiro_id}/entrega")
+async def entregar_do_roteiro(
+    roteiro_id: UUID,
+    files: Annotated[list[UploadFile], File(...)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+    equipe: Annotated[str, Depends(equipe_do_token)],
+) -> dict[str, Any]:
+    """A agência entrega o vídeo A PARTIR do roteiro, e o vínculo nasce junto.
+
+    Por que esta rota existe, e não só a de anexar numa linha já aberta: em
+    22/09/2026, 5 dos 49 criativos aprovados tinham `roteiro_id` preenchido.
+    O elo entre o briefing e a peça que saiu dele é o dado mais valioso da
+    operação — é ele que diz qual roteiro virou criativo aprovado — e ele
+    dependia de alguém lembrar de escolher a linha certa. Aqui não depende:
+    quem entrega já está dentro do roteiro, então o vínculo é consequência.
+
+    A linha nasce PENDENTE (`aprovado=None`), igual ao caminho de cima. Quem
+    aprova continua sendo a equipe interna; entregar não é aprovar.
+    """
+    roteiro = (
+        await session.execute(
+            select(MarketingRoteiro).where(
+                MarketingRoteiro.id == roteiro_id, *_visivel_pra_fora(equipe)
+            )
+        )
+    ).scalar_one_or_none()
+    # Mesmo filtro da listagem e da rota de bytes: roteiro desligado, sem texto
+    # ou endereçado a outra agência não existe pra quem está do lado de fora —
+    # e não existir tem que significar a mesma coisa nas três portas.
+    if roteiro is None:
+        raise HTTPException(404, detail={"code": "roteiro_nao_encontrado"})
+    if not files:
+        raise HTTPException(400, detail={"code": "sem_arquivo"})
+    if len(files) > MAX_FILES_PER_ROW:
+        raise HTTPException(400, detail={"code": "muitos_arquivos"})
+
+    # `marca` e `sku` descem do roteiro em vez de virem do formulário: o
+    # briefing já sabe de que produto está falando, e deixar a agência digitar
+    # isso de novo é criar divergência entre a linha e o roteiro que a gerou.
+    row = MarketingCreative(
+        id=uuid4(),
+        modelo=roteiro.titulo[:190],
+        marca=roteiro.marca,
+        marca_id=roteiro.marca_id,
+        sku=roteiro.sku,
+        product_id=roteiro.product_id,
+        equipe=equipe,
+        roteiro_id=roteiro.id,
+        aprovado=None,
+        # A coleção nasce explícita: sem isto, o primeiro acesso depois do
+        # flush trata `files` como relação ainda não carregada e tenta ir ao
+        # banco de dentro do laço síncrono de gravação — MissingGreenlet.
+        files=[],
+    )
+    session.add(row)
+    await session.flush()
+
+    entraram = _gravar_arquivos(row, files)
+    await session.commit()
+    logger.info(
+        "portal_entrega_do_roteiro",
+        creative_id=str(row.id),
+        roteiro_id=str(roteiro.id),
+        equipe=equipe,
+        arquivos=entraram,
+    )
     return _linha_out(row)

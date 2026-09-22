@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 from httpx import AsyncClient
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
@@ -459,3 +460,84 @@ async def test_linha_de_outra_equipe_da_404_e_nao_403(client: AsyncClient, db: A
     )
     assert r.status_code == 404
     assert "fora_da_sua_equipe" not in r.text, "não conte que a linha existe"
+
+
+# ─────────────── entrega a partir do roteiro ───────────────
+# O vínculo roteiro→criativo era o dado mais valioso e o menos preenchido: 5 de
+# 49 em 22/09/2026. Estes testes existem para que ele deixe de depender de
+# alguém lembrar de escolher a linha certa.
+
+
+async def test_entrega_do_roteiro_cria_a_linha_ja_vinculada(
+    client: AsyncClient, db: AsyncSession
+):
+    r0 = await _roteiro(db, destino="alpha")
+    r = await client.post(
+        f"/api/portal/roteiros/{r0.id}/entrega",
+        headers={"X-Portal-Token": TOK_A},
+        files={"files": ("peca.mp4", b"bytes de video", "video/mp4")},
+    )
+    assert r.status_code == 200
+    linha = r.json()
+    # Herda do briefing em vez de pedir de novo à agência: linha e roteiro não
+    # podem discordar sobre de que produto estão falando.
+    assert linha["marca"] == "poofy"
+    assert linha["sku"] == "dgd23"
+
+    row = (
+        await db.execute(
+            select(MarketingCreative).where(MarketingCreative.roteiro_id == r0.id)
+        )
+    ).scalar_one()
+    assert row.equipe == "alpha"
+    assert row.aprovado is None  # entregar não é aprovar
+    assert len(row.files) == 1
+
+
+async def test_entrega_em_roteiro_de_outra_agencia_nao_existe(
+    client: AsyncClient, db: AsyncSession
+):
+    """404, não 403: quem não pode ver também não aprende que aquilo existe."""
+    r0 = await _roteiro(db, destino="beta")
+    r = await client.post(
+        f"/api/portal/roteiros/{r0.id}/entrega",
+        headers={"X-Portal-Token": TOK_A},
+        files={"files": ("peca.mp4", b"x", "video/mp4")},
+    )
+    assert r.status_code == 404
+
+
+async def test_entrega_em_roteiro_desligado_nao_existe(
+    client: AsyncClient, db: AsyncSession
+):
+    """`ativo` é o interruptor, e ele vale nas TRÊS portas: lista, bytes e agora
+    entrega. Senão despublicar continuaria aceitando arquivo de quem anotou o id."""
+    r0 = await _roteiro(db, destino="alpha", ativo=False)
+    r = await client.post(
+        f"/api/portal/roteiros/{r0.id}/entrega",
+        headers={"X-Portal-Token": TOK_A},
+        files={"files": ("peca.mp4", b"x", "video/mp4")},
+    )
+    assert r.status_code == 404
+
+
+async def test_entrega_em_roteiro_sem_texto_nao_existe(
+    client: AsyncClient, db: AsyncSession
+):
+    """Roteiro sem texto é rascunho sendo escrito — não pode receber entrega."""
+    r0 = await _roteiro(db, destino=None, texto=None)
+    r = await client.post(
+        f"/api/portal/roteiros/{r0.id}/entrega",
+        headers={"X-Portal-Token": TOK_A},
+        files={"files": ("peca.mp4", b"x", "video/mp4")},
+    )
+    assert r.status_code == 404
+
+
+async def test_entrega_sem_token_401(client: AsyncClient, db: AsyncSession):
+    r0 = await _roteiro(db, destino=None)
+    r = await client.post(
+        f"/api/portal/roteiros/{r0.id}/entrega",
+        files={"files": ("peca.mp4", b"x", "video/mp4")},
+    )
+    assert r.status_code == 401
