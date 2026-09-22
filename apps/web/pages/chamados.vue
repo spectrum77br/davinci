@@ -1793,11 +1793,11 @@ async function confirmarExcluir() {
               @click="relerAgora"
             >
               <Loader2 v-if="relendo" class="size-3.5 mr-1 animate-spin" />
-              {{ relendo ? 'lendo…' : 'reler agora' }}
+              {{ relendo ? 'Atualizando…' : 'Atualizar' }}
             </Button>
             <Button size="sm" variant="outline" class="h-7 px-2" :disabled="!canEdit" title="Encaminhar ao jurídico (Threema + dossiê com fotos)" @click="openJuridico(hist.row)">
               <Scale class="size-3.5 mr-1" />
-              {{ hist.row.juridico_enviado_at ? 'reenviar ao jurídico' : 'encaminhar ao jurídico' }}
+              {{ hist.row.juridico_enviado_at ? 'Reenviar ao jurídico' : 'Encaminhar ao jurídico' }}
             </Button>
             <button type="button" class="rounded p-1 hover:bg-muted" @click="closeHistorico"><X class="size-4" /></button>
           </div>
@@ -1915,11 +1915,11 @@ async function confirmarExcluir() {
                   <div class="mt-1 flex flex-wrap items-center gap-2">
                     <span v-if="hist.files.length" class="text-[11px] text-muted-foreground">{{ hist.files.length }} foto{{ hist.files.length > 1 ? 's' : '' }} anexada{{ hist.files.length > 1 ? 's' : '' }}</span>
                     <span v-if="hist.erro" class="text-[11px] text-red-500">{{ hist.erro }}</span>
-                    <Button size="sm" variant="outline" class="ml-auto" @click="replicaBalao = false">fechar</Button>
+                    <Button size="sm" variant="outline" class="ml-auto" @click="replicaBalao = false">Fechar</Button>
                     <Button size="sm" :disabled="!canEdit || hist.sending || !hist.texto.trim()" @click="enviarReplicaDoBalao">
                       <Loader2 v-if="hist.sending" class="size-4 mr-1.5 animate-spin" />
                       <Send v-else class="size-4 mr-1.5" />
-                      {{ hist.row.canal === 'manual' ? 'registrar' : hist.row.canal === 'robo' ? 'enfileirar pro robô' : 'enviar' }}
+                      {{ hist.row.canal === 'manual' ? 'Registrar' : hist.row.canal === 'robo' ? 'Enfileirar pro robô' : 'Enviar' }}
                     </Button>
                   </div>
                 </PopoverContent>
@@ -1928,7 +1928,7 @@ async function confirmarExcluir() {
             <div class="flex flex-wrap items-center gap-2">
               <label class="inline-flex items-center gap-1 rounded border px-2 py-1 text-xs" :class="canEdit ? 'cursor-pointer hover:bg-muted' : 'cursor-default opacity-60'">
                 <ImagePlus class="size-3.5" />
-                anexar foto
+                Anexar foto
                 <input type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple class="hidden" :disabled="!canEdit" @change="onReplicaFiles" />
               </label>
               <span v-for="(f, i) in hist.files" :key="`${f.name}-${i}`" class="inline-flex max-w-[160px] items-center gap-1 rounded bg-muted px-2 py-0.5 text-[11px]" :title="f.name">
@@ -1940,7 +1940,7 @@ async function confirmarExcluir() {
                    resolver por cima; ao confirmar, a linha sai dos abertos e este modal fecha. -->
               <Button size="sm" variant="outline" class="ml-auto" :disabled="!canEdit || busy.has(hist.row.id)" title="marcar como resolvido (lucro/prejuízo + situação no Bling)" @click="openResolver(hist.row)">
                 <CheckCircle2 class="size-4 mr-1.5" />
-                resolver
+                Resolver
               </Button>
               <!-- 21/09 (Vinicius): lixeira ao lado do resolver — abre a janela de exclusão
                    (chamado + lançamentos de devolução do pedido + nova situação no Bling). -->
@@ -1950,7 +1950,7 @@ async function confirmarExcluir() {
               <Button size="sm" :disabled="!canEdit || hist.sending || !hist.texto.trim()" @click="enviarReplica">
                 <Loader2 v-if="hist.sending" class="size-4 mr-1.5 animate-spin" />
                 <Send v-else class="size-4 mr-1.5" />
-                {{ hist.row.canal === 'manual' ? 'registrar' : hist.row.canal === 'robo' ? 'enfileirar pro robô' : 'enviar' }}
+                {{ hist.row.canal === 'manual' ? 'Registrar' : hist.row.canal === 'robo' ? 'Enfileirar pro robô' : 'Enviar' }}
               </Button>
             </div>
           </div>
@@ -1998,11 +1998,11 @@ async function confirmarExcluir() {
                   />
                   <div class="mt-1 flex flex-wrap items-center gap-2">
                     <span v-if="hist.instrucaoErro" class="text-[11px] text-red-500">{{ hist.instrucaoErro }}</span>
-                    <Button size="sm" variant="outline" class="ml-auto" @click="instrucaoBalao = false">fechar</Button>
+                    <Button size="sm" variant="outline" class="ml-auto" @click="instrucaoBalao = false">Fechar</Button>
                     <Button size="sm" :disabled="!canEdit || hist.instrucaoSending || !hist.instrucao.trim()" @click="enviarInstrucaoDoBalao">
                       <Loader2 v-if="hist.instrucaoSending" class="size-4 mr-1.5 animate-spin" />
                       <Bot v-else class="size-4 mr-1.5" />
-                      enviar instrução
+                      Enviar instrução
                     </Button>
                   </div>
                 </PopoverContent>
@@ -2013,7 +2013,7 @@ async function confirmarExcluir() {
               <Button size="sm" class="ml-auto" :disabled="!canEdit || hist.instrucaoSending || !hist.instrucao.trim()" @click="enviarInstrucao">
                 <Loader2 v-if="hist.instrucaoSending" class="size-4 mr-1.5 animate-spin" />
                 <Bot v-else class="size-4 mr-1.5" />
-                enviar instrução
+                Enviar instrução
               </Button>
             </div>
           </div>
@@ -2108,11 +2108,11 @@ async function confirmarExcluir() {
           <div v-if="resolver.erro" class="text-xs text-red-500">{{ resolver.erro }}</div>
         </div>
         <div class="flex items-center justify-end gap-2 border-t px-4 py-3">
-          <Button size="sm" variant="ghost" @click="closeResolver">cancelar</Button>
+          <Button size="sm" variant="ghost" @click="closeResolver">Cancelar</Button>
           <Button size="sm" :disabled="!canEdit || resolver.saving || !resolverValorOk || !resolverSituacaoOk" @click="confirmarResolver">
             <Loader2 v-if="resolver.saving" class="size-4 mr-1.5 animate-spin" />
             <CheckCircle2 v-else class="size-4 mr-1.5" />
-            resolver
+            Resolver
           </Button>
         </div>
       </div>
@@ -2193,11 +2193,11 @@ async function confirmarExcluir() {
           <div v-if="excluir.erro" class="text-xs text-red-500">{{ excluir.erro }}</div>
         </div>
         <div class="flex items-center justify-end gap-2 border-t px-4 py-3">
-          <Button size="sm" variant="ghost" @click="closeExcluir">cancelar</Button>
+          <Button size="sm" variant="ghost" @click="closeExcluir">Cancelar</Button>
           <Button size="sm" variant="destructive" :disabled="!canDelete || excluir.loading || excluir.saving || !excluirSituacaoOk" @click="confirmarExcluir">
             <Loader2 v-if="excluir.saving" class="size-4 mr-1.5 animate-spin" />
             <Trash2 v-else class="size-4 mr-1.5" />
-            excluir
+            Excluir
           </Button>
         </div>
       </div>

@@ -253,7 +253,9 @@ def upgrade() -> None:
     op.execute(
         sa.text(
             f"INSERT INTO {SCHEMA}.imagem_publica (id, nome, content_type, size_bytes, blob) "
-            "VALUES (:id, :nome, :ct, :tam, decode(:b64, 'base64'))"
+            # CAST explícito: o asyncpg manda o parâmetro como varchar e o
+            # Postgres não converte sozinho pra uuid (falhou assim em 22/09).
+            "VALUES (CAST(:id AS uuid), :nome, :ct, :tam, decode(:b64, 'base64'))"
         ).bindparams(
             id=CORREIOS_ID,
             nome="correios.png",
