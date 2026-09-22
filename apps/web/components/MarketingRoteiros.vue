@@ -906,7 +906,7 @@ function destinoLabel(d: string | null): string {
 
         <div v-if="pSel">
           <div class="mb-1 flex items-center gap-2">
-            <label class="text-[11px] font-medium text-muted-foreground">Fotos do rosto</label>
+            <label class="text-[11px] font-medium text-muted-foreground">Fotos de referência</label>
             <button class="btn btn-xs ml-auto gap-1" :disabled="pSalvando" @click="pedirArquivo('imagem')">
               <Upload class="size-3" /> subir
             </button>
@@ -926,7 +926,8 @@ function destinoLabel(d: string | null): string {
             </div>
           </div>
           <p v-else class="text-[11px] text-muted-foreground">
-            Nenhuma. É a foto que a agência baixa — sem ela, sobra só a descrição.
+            Nenhuma. É o que a agência baixa — rosto, roupa, acessórios. Sem isso
+            sobra só a descrição.
           </p>
 
           <div class="mb-1 mt-3 flex items-center gap-2">
