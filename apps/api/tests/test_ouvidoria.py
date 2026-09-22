@@ -188,8 +188,14 @@ SEIS_ROBOS = {
     "vigia_credenciais": ("contas", ["ml", "shopee", "tiktok", "amazon", "magalu", "bling"],
                           {"cadencia_min": 60, "vencimento_dias": 7}),
     "vigia_ingest_bling": ("pedidos", ["bling"], {"cadencia_min": 15, "idade_min": 30}),
+    # As caixinhas "Olhar …" do Correio nascem com o que o Vinicius pediu em
+    # 22/09/2026: apreensão, extravio, roubo/furto e avaria, e mais nada.
     "vigia_correios": ("logistica", ["ml", "shopee", "tiktok", "amazon"],
-                       {"cadencia_min": 15}),
+                       {"cadencia_min": 15, "olhar_apreensao": True,
+                        "olhar_extravio": True, "olhar_roubo_furto": True,
+                        "olhar_avaria": True, "olhar_devolvido_ao_remetente": False,
+                        "olhar_nova_tentativa": False,
+                        "olhar_ocorrencia_desconhecida": False}),
     "vigia_marketing_comandos": ("marketing", ["shopee", "ml"],
                                  {"cadencia_min": 10, "pendente_min": 30,
                                   "executor_offline_min": 10}),
@@ -229,9 +235,14 @@ async def test_catalogo_dos_seis_robos_novos_nasce_silencioso(db):
 
 async def test_todo_robo_tem_limite_pra_cada_chave_de_config():
     """Chave de config sem `Parametro` passaria pelo PATCH sem limite e
-    apareceria crua na tela — os dois defeitos de uma vez."""
+    apareceria crua na tela — os dois defeitos de uma vez. Chave que não é
+    número (as caixinhas "Olhar …") não tem limite pra checar, mas precisa do
+    rótulo em `rotulos_extras`, senão aparece crua do mesmo jeito."""
     for d in svc.ROBOS.values():
-        assert set(d.config_padrao) == set(d.parametros), d.chave
+        assert set(d.config_padrao) == set(d.parametros) | set(d.rotulos_extras), d.chave
+        assert not (set(d.parametros) & set(d.rotulos_extras)), d.chave
+        for chave in d.rotulos_extras:
+            assert isinstance(d.config_padrao[chave], bool), (d.chave, chave)
         for chave, p in d.parametros.items():
             assert p.minimo <= int(d.config_padrao[chave]) <= p.maximo, (d.chave, chave)
         assert d.modo_padrao in ("ligado", "silencioso", "desligado"), d.chave
@@ -245,6 +256,11 @@ async def test_rotulos_config_traz_rotulo_com_unidade():
     }
     # Parâmetro sem unidade sai só com o rótulo; robô fora do catálogo, vazio.
     assert svc.rotulos_config(ROBO)["amazon_a_cada_rodadas"] == "Amazon a cada N rodadas"
+    # Caixinha (não é número): o rótulo vem de `rotulos_extras`.
+    assert (
+        svc.rotulos_config("vigia_correios")["olhar_apreensao"]
+        == "Olhar apreensão / retenção fiscal"
+    )
     assert svc.rotulos_config("robo_que_nao_existe") == {}
 
 

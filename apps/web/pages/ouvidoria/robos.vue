@@ -633,7 +633,11 @@ function configLinhas(r: Robo): { chave: string; label: string; valor: string }[
   return Object.entries(r.config || {}).map(([k, v]) => ({
     chave: k,
     label: configLabel(r, k),
-    valor: v !== null && typeof v === 'object' ? JSON.stringify(v) : String(v ?? '—'),
+    // Caixinha (as do "Olhar …") lê melhor como sim/não que como true/false.
+    valor:
+      typeof v === 'boolean'
+        ? v ? 'sim' : 'não'
+        : v !== null && typeof v === 'object' ? JSON.stringify(v) : String(v ?? '—'),
   }))
 }
 

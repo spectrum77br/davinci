@@ -132,6 +132,19 @@ def _grave(**campos) -> dict:
     return base
 
 
+async def _olhar(db: AsyncSession, **caixinhas: bool) -> None:
+    """Marca/desmarca as caixinhas "Olhar …" do robô (Editar, em Ouvidoria ›
+    Robôs). Sem argumento, liga TODAS — é o que os testes de família usam, já
+    que o padrão da tela deixa só apreensão/extravio/roubo/avaria marcadas."""
+    await svc.sincronizar_catalogo(db)
+    robo = await db.get(OuvidoriaRobo, ROBO)
+    padrao = {
+        k: True for k in svc.ROBOS[ROBO].config_padrao if k.startswith("olhar_")
+    }
+    robo.config = {**(robo.config or {}), **padrao, **caixinhas}
+    await db.commit()
+
+
 async def _abertas(db: AsyncSession) -> dict[str, OuvidoriaOcorrencia]:
     rows = (
         (
@@ -253,6 +266,7 @@ async def test_abre_pelo_problema_e_ignora_o_que_ja_terminou(db):
     ],
 )
 async def test_rotulo_e_acao_saem_da_palavra_do_evento(db, texto, rotulo, acao):
+    await _olhar(db)
     await _linha(db, pedido_bling="300001", rastreio="AD9BR", **_grave(texto=texto))
 
     await vigia.vigia_correios_run(db)
@@ -278,6 +292,7 @@ async def test_nova_tentativa_fica_so_no_painel(db, texto, pessoa):
     nunca é limpo, cobrar pessoa nesses viraria Threema permanente até o pedido
     chegar a situação final — `pessoa` fica pra apreensão, extravio, roubo,
     avaria e devolvido ao remetente."""
+    await _olhar(db)
     await _linha(db, pedido_bling="300010", rastreio="AD9BR", **_grave(texto=texto))
 
     await vigia.vigia_correios_run(db)
@@ -289,9 +304,67 @@ async def test_nova_tentativa_fica_so_no_painel(db, texto, pessoa):
     assert o.acao
 
 
+async def test_caixinha_manda_no_que_a_rodada_olha(db):
+    """Vinicius, 22/09/2026: "eu quero só apreensão/retenção, extravio, roubo,
+    furto e avaria; o resto não queria mais que ele olhasse por enquanto". As
+    caixinhas "Olhar …" do Editar mandam na rodada, e desmarcar uma fecha
+    sozinha a ocorrência que já estava aberta daquela família."""
+    await _olhar(db)  # tudo ligado: as duas abrem
+    await _linha(db, pedido_bling="310001", rastreio="AD1BR", **_grave())
+    await _linha(
+        db, pedido_bling="310002", rastreio="AD2BR",
+        **_grave(texto="Objeto não entregue — carteiro não atendido"),
+    )
+
+    await vigia.vigia_correios_run(db)
+    assert set(await _abertas(db)) == {"pedido:310001", "pedido:310002"}
+
+    # A pessoa desmarca "não entregue / endereço / recusado" na tela.
+    await _olhar(db, olhar_nova_tentativa=False)
+    out = await vigia.vigia_correios_run(db)
+
+    assert set(await _abertas(db)) == {"pedido:310001"}  # a apreensão fica
+    fechada = (await _todas(db))["pedido:310002"]
+    assert fechada.fechada_em is not None and fechada.fechamento == "sumiu"
+    assert out["linhas_graves"] == 1 and out["fora_do_filtro"] == 1
+    assert "1 fora do filtro" in (await _rodadas(db))[-1].resumo
+
+
+async def test_padrao_da_tela_olha_so_o_que_ele_pediu(db):
+    """Sem ninguém mexer nas caixinhas: apreensão/extravio/roubo/avaria abrem;
+    devolvido ao remetente, nova tentativa e ocorrência não reconhecida, não."""
+    await svc.sincronizar_catalogo(db)
+    await db.commit()
+    for i, texto in enumerate(
+        [
+            "Objeto apreendido pela SEFAZ",
+            "Objeto extraviado",
+            "Objeto roubado em trânsito",
+            "Objeto danificado",
+        ]
+    ):
+        await _linha(db, pedido_bling=f"32000{i}", rastreio=f"AD{i}BR", **_grave(texto=texto))
+    for i, texto in enumerate(
+        [
+            "Objeto devolvido ao remetente",
+            "Endereço incorreto",
+            "Objeto retido — situação inusitada",
+        ]
+    ):
+        await _linha(db, pedido_bling=f"33000{i}", rastreio=f"AE{i}BR", **_grave(texto=texto))
+
+    out = await vigia.vigia_correios_run(db)
+
+    assert set(await _abertas(db)) == {
+        "pedido:320000", "pedido:320001", "pedido:320002", "pedido:320003",
+    }
+    assert out["linhas_graves"] == 4 and out["fora_do_filtro"] == 3
+
+
 async def test_evento_sem_palavra_conhecida_ainda_abre(db):
     """Redação nova dos Correios (ou proxy do marketplace): o carimbo de
     `problema_correios_em` é o que manda, não a palavra."""
+    await _olhar(db)
     await _linha(
         db, pedido_bling="300002", **_grave(texto="Objeto retido — situação inusitada")
     )

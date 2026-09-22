@@ -122,6 +122,10 @@ class RoboDef:
     contexto: str = ""
     # Limites das chaves numéricas da config (chave → Parametro).
     parametros: dict[str, Parametro] = field(default_factory=dict)
+    # Rótulo das chaves de config que NÃO são número (chave → texto da tela).
+    # O `validar_config` deixa essas passarem como vieram, e a tela já desenha
+    # caixinha pra valor booleano — só faltava o nome em linguagem de operação.
+    rotulos_extras: dict[str, str] = field(default_factory=dict)
     # Modo com que a linha NASCE em ouvidoria_robos (só no INSERT: o
     # `sincronizar_catalogo` nunca mexe no modo de quem já existe). Robô novo
     # entra `silencioso` — registra no painel e não manda Threema — até o
@@ -209,17 +213,41 @@ ROBOS: dict[str, RoboDef] = {
         chave="vigia_correios",
         nome="Vigia Ocorrências Correio",
         descricao=(
-            "Apreensão fiscal, extravio, roubo, avaria ou devolução ao remetente "
-            "que o rastreio da Logística leu; 17track sem saldo (nada mais "
-            "atualiza); rastreio recusado. Fecha sozinho quando o pedido chega a "
+            "Ocorrência grave que o rastreio da Logística leu — quais tipos ele "
+            "olha você escolhe no Editar (apreensão, extravio, roubo/furto e "
+            "avaria vêm marcados); 17track sem saldo (nada mais atualiza); "
+            "rastreio recusado. Fecha sozinho quando o pedido chega a "
             "Entregue/Resolvido/Cancelado/Perdimento."
         ),
         area="logistica",
         cadencia_texto="a cada 15 min (:07/:22/:37/:52)",
         plataformas=("ml", "shopee", "tiktok", "amazon"),
-        config_padrao={"cadencia_min": 15},
+        # Vinicius, 22/09/2026: "eu quero só apreensão/retenção, extravio,
+        # roubo, furto e avaria; o resto não queria mais que ele olhasse por
+        # enquanto". Cada família virou caixinha no Editar do robô — desligar
+        # aqui faz a rodada parar de olhar aquilo, e as ocorrências que já
+        # estavam abertas daquela família fecham sozinhas como "sumiu".
+        config_padrao={
+            "cadencia_min": 15,
+            "olhar_apreensao": True,
+            "olhar_extravio": True,
+            "olhar_roubo_furto": True,
+            "olhar_avaria": True,
+            "olhar_devolvido_ao_remetente": False,
+            "olhar_nova_tentativa": False,
+            "olhar_ocorrencia_desconhecida": False,
+        },
         env_threema_recipients=None,
         parametros={"cadencia_min": Parametro("Cadência esperada", 1, 24 * 60, "min")},
+        rotulos_extras={
+            "olhar_apreensao": "Olhar apreensão / retenção fiscal",
+            "olhar_extravio": "Olhar extravio",
+            "olhar_roubo_furto": "Olhar roubo / furto",
+            "olhar_avaria": "Olhar avaria / danificado",
+            "olhar_devolvido_ao_remetente": "Olhar devolvido ao remetente",
+            "olhar_nova_tentativa": "Olhar não entregue / endereço / recusado",
+            "olhar_ocorrencia_desconhecida": "Olhar ocorrência grave não reconhecida",
+        },
         modo_padrao="silencioso",
     ),
     "vigia_marketing_comandos": RoboDef(
@@ -473,9 +501,14 @@ def rotulos_config(chave: str) -> dict[str, str]:
     mesmos `Parametro` que já governam os limites. Chave sem `Parametro` fica
     fora e a tela mostra a chave crua — nada some por falta de rótulo."""
     d = ROBOS.get(chave)
+    if d is None:
+        return {}
     return {
-        k: f"{p.rotulo} ({p.unidade})" if p.unidade else p.rotulo
-        for k, p in (d.parametros if d else {}).items()
+        **{
+            k: f"{p.rotulo} ({p.unidade})" if p.unidade else p.rotulo
+            for k, p in d.parametros.items()
+        },
+        **d.rotulos_extras,
     }
 
 

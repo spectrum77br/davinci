@@ -71,7 +71,7 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import session_scope
-from app.models import Logistica, OuvidoriaOcorrencia
+from app.models import Logistica, OuvidoriaOcorrencia, OuvidoriaRobo
 from app.redis_client import redis
 from app.services import logistica_rules, logistica_track, ouvidoria
 from app.services.advisory_lock import SYNC_NAMESPACE
@@ -151,15 +151,49 @@ _EVENTO_DESCONHECIDO = ("Ocorrência grave", ACAO_CHAMADO)
 # avaria e devolvido ao remetente.
 _EVENTOS_NOVA_TENTATIVA = frozenset({"nao entregue", "endereco incorreto", "recusad"})
 
+# Cada evento cai numa família, e cada família é uma caixinha na config do robô
+# (Editar, em Ouvidoria › Robôs). Desmarcada, a rodada nem olha as linhas
+# daquele tipo — e o `fechar_nao_vistas` fecha como "sumiu" as ocorrências que
+# já estavam abertas ali, sem ninguém precisar limpar na mão. Vinicius,
+# 22/09/2026: "eu quero só apreensão/retenção, extravio, roubo, furto e avaria;
+# o resto não queria mais que ele olhasse por enquanto".
+_CONFIG_DA_FAMILIA: dict[str, str] = {
+    "apreendid": "olhar_apreensao",
+    "extraviad": "olhar_extravio",
+    "roubo": "olhar_roubo_furto",
+    "roubad": "olhar_roubo_furto",
+    "furtad": "olhar_roubo_furto",
+    "sinistro": "olhar_roubo_furto",
+    "avaria": "olhar_avaria",
+    "danificad": "olhar_avaria",
+    "devolvido ao remetente": "olhar_devolvido_ao_remetente",
+    "devolucao ao remetente": "olhar_devolvido_ao_remetente",
+    "nao entregue": "olhar_nova_tentativa",
+    "endereco incorreto": "olhar_nova_tentativa",
+    "recusad": "olhar_nova_tentativa",
+}
+# Texto com `problema_correios_em` cuja palavra não casa com nenhuma família
+# (redação nova dos Correios, ou veio do proxy do marketplace). Caixinha
+# própria porque é justamente o que pode esconder uma apreensão rebatizada.
+_CONFIG_DESCONHECIDO = "olhar_ocorrencia_desconhecida"
+
+
+def _olha(cfg: dict, evento: str | None) -> bool:
+    """A caixinha dessa família está marcada? Chave ausente = olha (robô que
+    ainda não recebeu a config nova não pode parar de vigiar sozinho)."""
+    chave = _CONFIG_DA_FAMILIA.get(evento or "", _CONFIG_DESCONHECIDO)
+    return bool(cfg.get(chave, True))
+
 # Contadores de uma rodada (ouvidoria_rodadas.contadores), em linguagem de
 # operação: linhas_graves = pedidos com ocorrência viva; finais_ignoradas =
 # já Entregue/entregue_em (o problema acabou); novas/persistem = ocorrências;
 # sumiram = fechadas nesta rodada; quarentena = rastreios recusados;
+# fora_do_filtro = tipo que as caixinhas do Editar mandaram não olhar;
 # sem_saldo = 1 quando o 17track está sem crédito; redis_falhou = 1 quando o
 # Redis não respondeu (a rodada não julgou saldo nem quarentena).
 _CONTADORES = (
-    "linhas_graves", "finais_ignoradas", "novas", "persistem", "sumiram",
-    "quarentena", "sem_saldo", "redis_falhou",
+    "linhas_graves", "finais_ignoradas", "fora_do_filtro", "novas", "persistem",
+    "sumiram", "quarentena", "sem_saldo", "redis_falhou",
 )
 
 
@@ -352,7 +386,7 @@ def _contar(r: ouvidoria.Rodada, oco: OuvidoriaOcorrencia, agora: datetime) -> N
 # ─── os três olhares da rodada ─────────────────────────────────────────────
 
 
-async def _graves(r: ouvidoria.Rodada, agora: datetime) -> None:
+async def _graves(r: ouvidoria.Rodada, agora: datetime, cfg: dict) -> None:
     """Pedido com ocorrência grave viva. Sem janela de data: o `cleanup` da
     ingestão já tira Cancelado/Resolvido/Perdimento da tabela, e uma apreensão
     de 3 meses continua sendo uma apreensão — uma janela aqui faria a linha
@@ -383,10 +417,15 @@ async def _graves(r: ouvidoria.Rodada, agora: datetime) -> None:
             # fechar_nao_vistas fecha a ocorrência como "sumiu".
             r.contadores["finais_ignoradas"] += 1
             continue
-        r.contadores["linhas_graves"] += 1
         evento = logistica_track.evento_grave(row.problema_correios) or (
             logistica_track.evento_grave(row.localizacao)
         )
+        if not _olha(cfg, evento):
+            # Caixinha desmarcada no Editar: não é vista, então o
+            # `fechar_nao_vistas` fecha como "sumiu" o que estava aberto.
+            r.contadores["fora_do_filtro"] += 1
+            continue
+        r.contadores["linhas_graves"] += 1
         rotulo, acao = _EVENTOS.get(evento or "", _EVENTO_DESCONHECIDO)
         chamado = (row.chamado or "").strip()
         codigo = _plataforma_codigo(row.plataforma)
@@ -552,12 +591,15 @@ def _resumo(contadores: dict) -> str:
     graves = contadores.get("linhas_graves", 0)
     sumiram = contadores.get("sumiram", 0)
     quarentena = contadores.get("quarentena", 0)
+    fora = contadores.get("fora_do_filtro", 0)
     partes = [
         f"{graves} grave{'s' if graves != 1 else ''}",
         f"{sumiram} fechou" if sumiram == 1 else f"{sumiram} fecharam",
         f"{quarentena} em quarentena",
         f"17track {'SEM SALDO' if contadores.get('sem_saldo') else 'ok'}",
     ]
+    if fora:
+        partes.insert(1, f"{fora} fora do filtro")
     if contadores.get("redis_falhou"):
         partes.append("Redis não respondeu")
     return " · ".join(partes)
@@ -570,18 +612,20 @@ async def vigia_correios_run(session: AsyncSession) -> dict:
     """Uma rodada completa. A Rodada commita ao sair; quem chama só garante
     que não há outra rodada junto (advisory lock no `vigia_correios_sweep`).
 
-    A config do robô não é lida aqui de propósito: a única chave dele
-    (`cadencia_min`) é do PAINEL — é com ela que a coluna Saúde sabe dizer
-    "parado". A rodada não tem janela nem teto pra ajustar: ela relê o estado
-    inteiro (são dezenas de linhas, não milhares) toda vez."""
+    Da config o que a rodada usa são as caixinhas "Olhar …" (quais tipos de
+    ocorrência vigiar); a `cadencia_min` é do PAINEL — é com ela que a coluna
+    Saúde sabe dizer "parado". Não há janela nem teto pra ajustar: a rodada
+    relê o estado inteiro (são dezenas de linhas, não milhares) toda vez."""
     async with ouvidoria.Rodada(session, ROBO) as r:
         # Todos os contadores nascem em 0: a rodada gravada tem sempre as
         # mesmas chaves (a tela lê direto) e o dict devolvido também.
         for k in _CONTADORES:
             r.contadores[k] = 0
         agora = datetime.now(UTC)
+        robo = await session.get(OuvidoriaRobo, ROBO)
+        cfg = ouvidoria.config_do_robo(robo, ROBO)
 
-        await _graves(r, agora)
+        await _graves(r, agora, cfg)
         redis_falhou = await _saldo(r, agora)
         # O `or` vem DEPOIS da chamada de propósito: a quarentena é lida
         # mesmo que o saldo tenha falhado (pode ter sido um soluço).
