@@ -1464,6 +1464,62 @@ async function enviarThreemaPedido(c: Logistica) {
   }
 }
 
+// Botãozinho ⟳ ao lado de "✉ cliente: …" (coluna Entregar até): manda DE NOVO
+// a mesma mensagem pro comprador daquele pedido — Vinicius, 22/09/2026: "vai
+// que não enviou, eu aperto o botão". É o mesmo caminho do "Mandar para o
+// comprador de um pedido" do modal Mensagens ao cliente: chega no cliente de
+// verdade, por isso pergunta antes. O cartão de rastreio vai junto, remontado
+// na hora (o histórico dos Correios pode ter andado desde a primeira vez).
+const ERRO_MENSAGEM_CLIENTE: Record<string, string> = {
+  admin_only: 'Só administradores mandam mensagem ao comprador.',
+  envio_desligado: 'O envio está desligado no servidor: a Amazon descartaria a mensagem.',
+  pedido_nao_encontrado: 'Não achei esse pedido Bling na aba Amazon.',
+  pedido_nao_e_envio_proprio: 'Esse pedido não é de Envio próprio — só eles recebem mensagem nossa.',
+  pedido_sem_email_do_comprador: 'Esse pedido não tem o endereço de retransmissão da Amazon.',
+  email_falhou: 'O servidor de e-mail não respondeu. Tente de novo em instantes.',
+  evento_desconhecido: 'Evento inválido.',
+}
+const reenviandoMensagem = ref<Set<string>>(new Set())
+function chaveMensagem(c: Logistica, evento: string) {
+  return `${c.id}:${evento}`
+}
+async function reenviarMensagemCliente(c: Logistica, m: { evento: string; evento_label: string }) {
+  const pedido = (c.pedido_bling || '').trim()
+  if (!pedido) {
+    toasts.error('Sem número do pedido Bling', 'não dá pra reenviar por aqui')
+    return
+  }
+  const ok = window.confirm(
+    `Enviar de novo "${m.evento_label}" ao comprador do pedido ${c.pedido_marketplace || pedido}?\n\n` +
+      'A mensagem chega no cliente de verdade, com o cartão de rastreio — não é teste. ' +
+      'Para só conferir o texto, use "Enviar teste" no modal Mensagens ao cliente.',
+  )
+  if (!ok) return
+  const chave = chaveMensagem(c, m.evento)
+  reenviandoMensagem.value = new Set(reenviandoMensagem.value).add(chave)
+  try {
+    const r = await api<{ destinatario: string; cartao: boolean }>(
+      `/api/logistica/mensagens-cliente/${m.evento}/enviar-agora`,
+      { method: 'POST', body: { pedido_bling: pedido } },
+    )
+    toasts.success(
+      'Mensagem enviada de novo',
+      `${r.destinatario}${r.cartao ? ' · com o cartão de rastreio' : ' · sem o cartão (o 17track não tem evento desse rastreio)'}`,
+    )
+    await refresh()
+  } catch (e: any) {
+    const code = e?.data?.detail?.code || ''
+    toasts.error(
+      'Não foi possível enviar',
+      ERRO_MENSAGEM_CLIENTE[code] || 'Não consegui enviar. Recarregue a página e tente de novo.',
+    )
+  } finally {
+    const s = new Set(reenviandoMensagem.value)
+    s.delete(chave)
+    reenviandoMensagem.value = s
+  }
+}
+
 // ---- Anexos de imagem na "Mensagem do Chamado" ----
 function anexoUrl(id: string) {
   // Relativo → o cookie de sessão vai junto no <img src>/<a href>.
@@ -2094,7 +2150,30 @@ async function aplicarStatusBling(c: Logistica) {
                   </template>
                   <span v-else class="text-muted-foreground">—</span>
                   <div v-if="avisosResumo(c)" class="text-[11px] text-muted-foreground whitespace-normal max-w-[220px]" :title="avisosResumo(c)">{{ avisosResumo(c) }}</div>
-                  <div v-if="mensagensResumo(c)" class="text-[11px] text-sky-700 dark:text-sky-400 whitespace-normal max-w-[220px]" :title="mensagensResumo(c)">✉ cliente: {{ mensagensResumo(c) }}</div>
+                  <div
+                    v-if="(c.mensagens_cliente || []).length"
+                    class="text-[11px] text-sky-700 dark:text-sky-400 whitespace-normal max-w-[220px]"
+                    :title="mensagensResumo(c)"
+                  >
+                    ✉ cliente:
+                    <span v-for="(m, i) in c.mensagens_cliente || []" :key="m.evento">
+                      <span v-if="i" aria-hidden="true">· </span>{{ m.evento_label }}
+                      <span class="whitespace-nowrap">{{ m.enviado_em ? fmtQuando(m.enviado_em) : '(falhou)' }}
+                        <!-- Reenvia essa mesma mensagem ao comprador (pergunta antes). -->
+                        <button
+                          v-if="canEdit && canInformarAmazon"
+                          type="button"
+                          class="align-text-bottom px-0.5 text-sky-700/70 hover:text-sky-900 dark:text-sky-400/70 dark:hover:text-sky-200 disabled:opacity-50"
+                          :title="`Enviar de novo ao comprador: ${m.evento_label}`"
+                          :aria-label="`Enviar de novo ao comprador: ${m.evento_label}`"
+                          :disabled="reenviandoMensagem.has(chaveMensagem(c, m.evento))"
+                          @click.stop="reenviarMensagemCliente(c, m)"
+                        >
+                          <RefreshCw class="size-3.5 inline" :class="reenviandoMensagem.has(chaveMensagem(c, m.evento)) ? 'animate-spin' : ''" />
+                        </button>
+                      </span>
+                    </span>
+                  </div>
                 </td>
               </template>
               <td class="px-3 py-2 text-xs max-w-[280px] break-words">
@@ -2293,7 +2372,25 @@ async function aplicarStatusBling(c: Logistica) {
                 <span :class="prazoVencido(c) ? 'text-rose-700 dark:text-rose-400 font-medium' : ''">{{ fmtDia(c.prazo_entrega_amazon) || '—' }}</span>
                 <span v-if="c.prazo_entrega_amazon && !c.entregue_em" class="text-muted-foreground"> · {{ prazoResumo(c) }}</span>
               </div>
-              <div v-if="mensagensResumo(c)" class="col-span-2 text-sky-700 dark:text-sky-400">✉ cliente: {{ mensagensResumo(c) }}</div>
+              <div v-if="(c.mensagens_cliente || []).length" class="col-span-2 text-sky-700 dark:text-sky-400">
+                ✉ cliente:
+                <span v-for="(m, i) in c.mensagens_cliente || []" :key="m.evento">
+                  <span v-if="i" aria-hidden="true">· </span>{{ m.evento_label }}
+                  <span class="whitespace-nowrap">{{ m.enviado_em ? fmtQuando(m.enviado_em) : '(falhou)' }}
+                    <button
+                      v-if="canEdit && canInformarAmazon"
+                      type="button"
+                      class="align-text-bottom px-1 py-0.5 text-sky-700/70 hover:text-sky-900 dark:text-sky-400/70 dark:hover:text-sky-200 disabled:opacity-50"
+                      :title="`Enviar de novo ao comprador: ${m.evento_label}`"
+                      :aria-label="`Enviar de novo ao comprador: ${m.evento_label}`"
+                      :disabled="reenviandoMensagem.has(chaveMensagem(c, m.evento))"
+                      @click.stop="reenviarMensagemCliente(c, m)"
+                    >
+                      <RefreshCw class="size-3.5 inline" :class="reenviandoMensagem.has(chaveMensagem(c, m.evento)) ? 'animate-spin' : ''" />
+                    </button>
+                  </span>
+                </span>
+              </div>
               <div v-if="suspensaoResumo(c)" class="col-span-2" :class="c.suspensao_status === 'solicitada' ? 'text-emerald-700 dark:text-emerald-400' : c.suspensao_status === 'falhou' ? 'text-rose-700 dark:text-rose-400' : 'text-muted-foreground'">{{ suspensaoResumo(c) }}</div>
             </template>
           </div>
