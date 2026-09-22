@@ -614,7 +614,9 @@ async def test_resumo_da_rodada(db, monkeypatch):
     await _replicar(db, ch)
 
     out = await vigia.vigia_chamados_run(db)
-    assert out["resumo"] == "1 encerrado parado · 1 envio falho · 0 consultas falhando"
+    assert out["resumo"] == (
+        "1 encerrado parado · 1 envio falho · 0 consultas falhando · 0 casos de tela sem leitura"
+    )
     rodadas = list((await db.execute(select(OuvidoriaRodada))).scalars())
     assert len(rodadas) == 1 and rodadas[0].ok is True
     assert rodadas[0].resumo == out["resumo"]

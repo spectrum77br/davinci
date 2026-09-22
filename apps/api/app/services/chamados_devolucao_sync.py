@@ -910,6 +910,9 @@ async def _sync_ml(session: AsyncSession, ch: Chamado, dev: Devolution | None) -
 # O mesmo filtro vale pra réplica automática e pro reenvio de abertura pendente —
 # mora em `chamados_svc` pra todo cron usar o mesmo.
 _nao_encerrado = chamados_svc.NAO_ENCERRADO_SQL
+# 22/09: o número em `chamados.chamado` foi capturado pelo robô na TELA — nenhuma
+# API sabe responder por ele. Quem lê esses casos é o `chamados_leitura`.
+_aberto_na_tela = chamados_svc.CASO_DE_TELA_SQL
 
 
 async def sync_um(
@@ -935,10 +938,15 @@ async def sync_um(
         else:
             novos = await fn(session, ch, dev)
     except Exception as e:  # noqa: BLE001 — o erro da plataforma vira resposta da tela
+        # 22/09: o `str(ch.id)` do log tem que ser lido ANTES do rollback — ele
+        # expira os atributos da linha e reler `ch.id` aqui dispara IO fora do
+        # greenlet (MissingGreenlet). O tratamento do erro quebrava, e o que
+        # chegava na tela era 500 em vez do motivo da plataforma.
+        cid = str(ch.id)
         await session.rollback()
         logger.warning(
             "chamado_devolucao_sync_um_falhou",
-            chamado_id=str(ch.id), plataforma=plat, err=str(e)[:200],
+            chamado_id=cid, plataforma=plat, err=str(e)[:200],
         )
         return {"plataforma": plat, "novos": 0, "lido": False, "erro": str(e)[:200]}
     await session.commit()
@@ -965,6 +973,11 @@ async def sync_respostas(session: AsyncSession, *, agora: datetime | None = None
                 Chamado.resolvido.is_(False),
                 _nao_encerrado,
                 Chamado.chamado.is_not(None),
+                # 22/09 (292592): caso ABERTO NA TELA não tem o que ser lido aqui —
+                # o número guardado é protocolo de tela e a API responde "essa
+                # devolução não existe" de hora em hora, o que virava falha falsa
+                # na Ouvidoria. Quem lê esses é o robô (`chamados_leitura`).
+                ~_aberto_na_tela,
                 ChamadoMensagem.tipo == cd.TIPO_ABERTURA,
                 or_(
                     ChamadoMensagem.status == "enviada",
@@ -988,6 +1001,7 @@ async def sync_respostas(session: AsyncSession, *, agora: datetime | None = None
                 Chamado.canal == "api",
                 Chamado.resolvido.is_(False),
                 _nao_encerrado,
+                ~_aberto_na_tela,  # idem: TikTok/ML abertos na tela saem daqui
                 Chamado.origem != "devolucao",
                 or_(
                     and_(

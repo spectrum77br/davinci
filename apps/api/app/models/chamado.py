@@ -88,6 +88,28 @@ class Chamado(Base, TimestampMixin):
     status_plataforma_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # 22/09 (migration 0308): o número em `chamado` foi capturado pelo robô NA TELA
+    # da plataforma (Seller Center / Portal de Atendimento), não veio de API. É um
+    # FATO gravado por quem o escreveu (`/agent/resultado` e `/agent/registrar`), e
+    # não um palpite: deduzir "é de tela" pela mensagem de abertura erra feio quando
+    # a varredura de aberturas presas reencaminha ao robô uma abertura que já tinha
+    # um nº de API válido (claim do ML, return_sn da Shopee) — o número continua
+    # bom, e o caso continua tendo acompanhamento por API.
+    chamado_de_tela: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+    # 22/09 (Vinicius, 292592, migration 0308): caso ABERTO NA TELA não tem API
+    # que o leia — quem lê é o robô, abrindo `chamado_url`. `leitura_robo_at` é a
+    # última leitura CONFIRMADA (responde "esse caso está sendo acompanhado?") e
+    # `leitura_robo_claim_at` é a entrega em curso (esconde o caso de outro poll e
+    # vence sozinha se o robô morrer no meio). São duas perguntas diferentes: juntar
+    # num campo só apaga quando o robô de fato leu.
+    leitura_robo_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    leitura_robo_claim_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     observacao: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Resultado do chamado em R$ — coluna "Valor" do grupo Controle (Eduardo
     # 03/09, migration 0240). Positivo = lucro ("100 reais ganhamos"), negativo

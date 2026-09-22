@@ -130,6 +130,10 @@ type ChamadoRow = {
   chamado: string | null
   chamado_url: string | null
   canal: Canal
+  // 22/09: o protocolo veio da TELA (o robô abriu no Seller Center) — nenhuma API
+  // responde por ele; quem lê é o robô de leitura.
+  chamado_de_tela: boolean
+  leitura_robo_at: string | null
   alterar_status_bling: string | null
   // Resultado do chamado em R$ — coluna "Valor" do Controle: positivo = lucro,
   // negativo = prejuízo (Eduardo 15/09). Obrigatório ao resolver.
@@ -974,7 +978,13 @@ async function relerAgora() {
     replaceRow(updated)
     hist.row = updated
     hist.mensagens = await api<Mensagem[]>(`/api/chamados/${updated.id}/mensagens`)
-    toasts.success('Caso relido na plataforma', 'O que chegou de novo está no histórico abaixo.')
+    // Caso aberto na tela não tem API pra consultar: aqui o botão só fura a fila
+    // do robô de leitura. Dizer "relido" seria mentira — nada foi lido ainda.
+    if (updated.chamado_de_tela) {
+      toasts.success('Pus este caso na frente da fila', 'O robô lê a tela da plataforma na próxima passada e o que ele achar aparece aqui.')
+    } else {
+      toasts.success('Caso relido na plataforma', 'O que chegou de novo está no histórico abaixo.')
+    }
   } catch (e: any) {
     toasts.error('Não consegui reler o caso', apiError(e))
   } finally {
@@ -1784,12 +1794,14 @@ async function confirmarExcluir() {
           </div>
           <div class="flex items-center gap-2">
             <Button
-              v-if="hist.row.canal === 'api'"
+              v-if="hist.row.canal === 'api' || hist.row.chamado_de_tela"
               size="sm"
               variant="outline"
               class="h-7 px-2"
               :disabled="!canEdit || relendo"
-              title="Ler o caso na plataforma agora (o robô faz isso de hora em hora, no minuto 25)"
+              :title="hist.row.chamado_de_tela
+                ? 'Pôr este caso na frente da fila do robô de leitura (ele abre a tela da plataforma)'
+                : 'Ler o caso na plataforma agora (o robô faz isso de hora em hora, no minuto 25)'"
               @click="relerAgora"
             >
               <Loader2 v-if="relendo" class="size-3.5 mr-1 animate-spin" />

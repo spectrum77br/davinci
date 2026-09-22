@@ -54,12 +54,17 @@ from app.schemas.chamados import (
     AgentAnaliseIn,
     AgentAnaliseOut,
     AgentBloqueioOut,
+    AgentCasoLeituraOut,
     AgentChamadoAnaliseOut,
     AgentHistoricoIn,
     AgentHistoricoOut,
     AgentInstrucaoOut,
     AgentLeaseIn,
     AgentLeaseOut,
+    AgentLeituraIn,
+    AgentLeituraOut,
+    AgentLeituraResultadoIn,
+    AgentLeituraResultadoOut,
     AgentMensagemOut,
     AgentPagamentoMlIn,
     AgentPagamentoMlItem,
@@ -95,6 +100,7 @@ from app.services import (
     chamados_devolucao,
     chamados_devolucao_sync,
     chamados_juridico,
+    chamados_leitura,
     vigia_chamados,
 )
 from app.services.devolution_delete import EstornoFalhouError, excluir_lancamento
@@ -1105,8 +1111,19 @@ async def reler_na_plataforma(
     minuto :25). Vinicius 22/09: quando a TikTok está com um prazo correndo —
     "sem resposta, a plataforma aprova o reembolso sozinha" — esperar a próxima
     janela é caro. Traz status, arbitragem, o que o comprador escreveu e anexou
-    e o que a plataforma espera de nós. Plataforma sem API responde 422."""
+    e o que a plataforma espera de nós. Plataforma sem API responde 422.
+
+    Caso aberto NA TELA (22/09, 292592) não tem API pra consultar: o protocolo é
+    de tela e a Shopee responde "The return you queried doesn't exist". Aqui
+    "Atualizar" passa a significar FURAR A FILA da leitura — o caso vai pro topo
+    e o robô o lê no próximo poll, em vez de bater numa porta que não existe."""
     ch = await _get(session, chamado_id)
+    if await chamados_leitura.e_caso_de_tela(session, ch):
+        cid = ch.id  # antes do commit: ele expira a linha (ver `sync_um`)
+        await chamados_leitura.furar_a_fila(session, ch)
+        await session.refresh(ch)
+        logger.info("chamado_reler_fila_leitura", chamado_id=str(cid), autor=_autor(user))
+        return await _one_out(session, ch)
     r = await chamados_devolucao_sync.sync_um(session, ch)
     if not r.get("lido"):
         raise HTTPException(
@@ -1231,6 +1248,8 @@ async def agent_registrar(
         )
     if body.chamado:
         ch.chamado = body.chamado
+        # Quem registra aqui é o robô, e ele só tem protocolo porque abriu na tela.
+        ch.chamado_de_tela = True
     if body.chamado_url:
         ch.chamado_url = body.chamado_url
     if body.observacao and not criado:
@@ -1415,6 +1434,84 @@ async def agent_lease(
     return AgentLeaseOut(tarefas=tarefas)
 
 
+@agent_router.post("/leitura", response_model=AgentLeituraOut, dependencies=_agent_dep)
+async def agent_leitura(
+    body: AgentLeituraIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> AgentLeituraOut:
+    """Casos que o robô deve RELER na tela da plataforma (Vinicius 22/09, 292592).
+
+    Fila separada do `/lease` de propósito: no lease vale o invariante "tudo que
+    ele te dá, você POSTA" (toda tarefa carrega uma fala nossa). Leitura não posta
+    nada, e misturar as duas obrigaria a afrouxar `mensagem_id`/`texto` — um robô
+    que implementasse errado escreveria um texto vazio na conversa com o cliente.
+    Aqui não existe `texto` pra postar por engano.
+
+    O caso sai da fila por 3 h (24 h se está frio) assim que é entregue; robô que
+    morre no meio não trava nada — o claim vence em 30 min. Depois de ler, o robô
+    é OBRIGADO a chamar `/leitura/resultado`, mesmo sem novidade."""
+    casos = await chamados_leitura.fila(
+        session,
+        plataformas=body.plataformas,
+        limite=body.limite,
+        conta=body.conta,
+    )
+    return AgentLeituraOut(
+        casos=[
+            AgentCasoLeituraOut(
+                chamado_id=c.id,
+                chamado=(c.chamado or "").strip(),
+                chamado_url=(c.chamado_url or "").strip() or None,
+                pedido_bling=c.pedido_bling,
+                pedido_marketplace=c.pedido_marketplace,
+                conta=c.conta,
+                plataforma=c.plataforma,
+                leitura_robo_at=c.leitura_robo_at,
+            )
+            for c in casos
+        ]
+    )
+
+
+@agent_router.post(
+    "/leitura/resultado", response_model=AgentLeituraResultadoOut, dependencies=_agent_dep
+)
+async def agent_leitura_resultado(
+    body: AgentLeituraResultadoIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> AgentLeituraResultadoOut:
+    """O que o robô leu na página do caso.
+
+    `falas[]` CONTA como resposta da plataforma (mexe na coluna "Últ. resposta" e
+    no Status da aba, com a hora que a TELA mostra); `historico` é só contexto.
+    Duas travas no servidor deixam a regra do robô ser "na dúvida, mande": fala
+    igual a uma NOSSA é descartada como eco, e fala repetida não entra de novo.
+    `ok: false` não grava nada e abre ocorrência na Ouvidoria — leitura que parou
+    de funcionar tem que ser vista."""
+    ch = await _get(session, body.chamado_id)
+    r = await chamados_leitura.registrar(
+        session,
+        ch,
+        ok=body.ok,
+        erro=body.erro,
+        falas=[
+            chamados_leitura.FalaLida(texto=f.texto, quando=f.quando, autor=f.autor)
+            for f in body.falas
+        ],
+        historico=body.historico,
+        encerrado=body.encerrado,
+    )
+    return AgentLeituraResultadoOut(
+        chamado_id=ch.id,
+        falas_novas=r.falas_novas,
+        ecos=r.ecos,
+        duplicadas=r.duplicadas,
+        historico_alterado=r.historico_alterado,
+        encerrado=r.encerrado,
+        proxima_leitura_at=await chamados_leitura.proxima_leitura(session, ch, ok=body.ok),
+    )
+
+
 @agent_router.post("/resultado", response_model=ChamadoMensagemOut, dependencies=_agent_dep)
 async def agent_resultado(
     body: AgentResultadoIn,
@@ -1458,6 +1555,10 @@ async def agent_resultado(
         if body.chamado and not (ch.chamado or "").strip():
             ch.chamado = body.chamado
             ch.chamado_url = body.chamado_url or ch.chamado_url
+            # 22/09: este número veio DA TELA. É o que tira o caso da varredura por
+            # API (que não conhece protocolo de tela) e o põe na fila de leitura do
+            # robô — ver `chamados.CASO_DE_TELA_SQL`.
+            ch.chamado_de_tela = True
             session.add(
                 svc.registrar_sistema(ch, f"Protocolo {body.chamado} capturado pelo {AUTOR_ROBO}")
             )
@@ -1520,22 +1621,10 @@ async def agent_resultado(
     return _mensagem_out(m)
 
 
-def _monitor_encerrou(session: AsyncSession, ch: Chamado) -> bool:
-    """Estado Encerrado pelo monitor (uma vez): status oficial `encerrado` + evento
-    + réplica automática desligada. Chamado já com decisão (ganhamos/perdemos lidos
-    da API, ou `encerrado` de antes) NÃO muda — `set_status_plataforma` aceita
-    trocar um final por outro, e "ganhamos" não pode virar "encerrado sem
-    decisão" só porque o monitor releu a caixa (19/09). O evento só entra quando
-    o status realmente mudou, senão a releitura duplicava."""
-    if ch.resolvido or ch.status_plataforma in svc.STATUS_FINAIS:
-        return False
-    if not svc.set_status_plataforma(ch, svc.STATUS_ENCERRADO):
-        return False
-    ch.auto_ligada = False
-    session.add(
-        svc.registrar_sistema(ch, "Monitor: plataforma encerrou o caso — aguardando fechamento")
-    )
-    return True
+# Estado Encerrado porque o robô viu o caso fechado na plataforma. Mora em
+# `services.chamados` desde 22/09: o monitor (`/agent/recebida`) e a leitura da
+# tela (`/agent/leitura/resultado`) precisam exatamente do mesmo comportamento.
+_monitor_encerrou = svc.encerrado_pelo_robo
 
 
 @agent_router.post("/recebida", response_model=AgentRecebidaOut, dependencies=_agent_dep)
@@ -1594,6 +1683,16 @@ async def agent_recebida(
         status="registrada",
     )
     m.canal = "robo"
+    # 22/09: a hora que a PLATAFORMA mostra, quando o monitor souber informar —
+    # sem ela a fala entra com a hora do POST e a coluna "Últ. resposta" mente.
+    # Data no futuro (relógio torto, parse errado) fica com a hora de agora.
+    if body.quando is not None:
+        quando = body.quando
+        if quando.tzinfo is None:
+            quando = quando.replace(tzinfo=svc.SAO_PAULO)
+        if quando <= datetime.now(UTC) + chamados_leitura.FUTURO_TOLERADO:
+            m.created_at = quando
+            m.enviada_at = quando
     session.add(m)
     if body.resolvido:
         _monitor_encerrou(session, ch)

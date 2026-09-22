@@ -1,0 +1,441 @@
+"""Leitura do caso na TELA da plataforma pelo robô (Vinicius, 22/09/2026).
+
+O buraco: quando não há caminho pela API, o robô abre o chamado no Seller Center
+(ou no Portal de Atendimento ao Vendedor da Shopee) e devolve o protocolo. A
+partir dali o caso fica órfão — a plataforma responde na tela e nada traz essa
+fala pro painel. Medido no 292592: o Agente Shopee respondeu em 19/09 às 21:42 e
+três dias depois a aba Chamados não sabia. O contrato do robô só tinha metade:
+`POST /agent/lease` entrega o que TEMOS A DIZER (sempre com um texto pra postar),
+e nada nunca disse ao robô QUAIS casos reler.
+
+Este módulo é a metade que faltava, em duas funções:
+
+  `fila`      — quais casos reler agora (e marca a entrega, pra não repetir);
+  `registrar` — o que o robô leu: falas da plataforma, a página inteira, e se o
+                caso fechou.
+
+## Por que fila própria, e não um tipo novo no `/agent/lease`
+
+Hoje vale um invariante simples do lado do robô: *tudo que o lease te dá, você
+POSTA* — `AgentTarefaOut` exige `mensagem_id` e `texto`, e o texto sai de uma
+mensagem nossa pendente. Enfiar leitura ali obrigaria a afrouxar os dois campos,
+e um robô que implementasse errado postaria um texto vazio na conversa com o
+cliente. Fila separada mantém o invariante e não pede nenhuma linha de mudança no
+robô que já consome o lease.
+
+## A diferença que o robô precisa entender (é a única)
+
+`falas[]` CONTA como resposta da plataforma: vira mensagem `recebida`, mexe na
+coluna "Últ. resposta" e no Status da aba. `historico` é SÓ CONTEXTO: uma
+mensagem `historico` por chamado, atualizada quando muda, fora do cálculo de
+status. Na dúvida sobre o que é fala deles, o robô manda — o guarda de eco daqui
+descarta a nossa própria fala voltando da página, e o dedupe por texto deixa
+reler a mesma página de 3 em 3 h sem sujar o histórico.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+
+import structlog
+from sqlalchemy import and_, func, or_, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models import Chamado, ChamadoMensagem
+from app.services import chamados as chamados_svc
+from app.services import vigia_chamados
+from app.services.texto_html import limpar_html
+
+logger = structlog.get_logger()
+
+# Cadência. Caso com fala recente merece browser de 3 em 3 h; caso frio (ninguém
+# falou há mais de duas semanas) uma vez por dia — cada leitura é uma sessão de
+# navegador logada no Seller Center, e acesso demais é risco de bloqueio da conta.
+INTERVALO = timedelta(hours=3)
+INTERVALO_FRIO = timedelta(hours=24)
+FRIO = timedelta(days=15)
+# Entrega em curso: mesmo número do `_LEASE_STALE` das tarefas de envio.
+CLAIM_STALE = timedelta(minutes=30)
+
+AUTOR_ROBO_LEITURA = "página do caso"
+TIPO_HISTORICO = "historico"
+# Data de tela ilegível (parse errado, relógio do robô torto) não derruba a
+# leitura inteira — é clampada e deixa rastro no histórico.
+FUTURO_TOLERADO = timedelta(days=1)
+PASSADO_TOLERADO = timedelta(days=90)
+
+
+@dataclass(slots=True)
+class FalaLida:
+    """Uma fala da plataforma lida na tela. `quando` é a hora que a TELA mostra —
+    é ela que vai pro histórico, não a hora do POST: era isso que se perdia."""
+
+    texto: str
+    quando: datetime
+    autor: str | None = None
+
+
+@dataclass(slots=True)
+class Resultado:
+    falas_novas: int = 0
+    ecos: int = 0
+    duplicadas: int = 0
+    historico_alterado: bool = False
+    encerrado: bool = False
+
+
+# ------------------------------------------------------------------ a fila
+
+
+def _ultima_fala_at():
+    """Quando alguém (nós ou a plataforma) falou por último neste chamado."""
+    return (
+        select(func.max(func.coalesce(ChamadoMensagem.enviada_at, ChamadoMensagem.created_at)))
+        .where(
+            ChamadoMensagem.chamado_id == Chamado.id,
+            ChamadoMensagem.direcao.in_(("enviada", "recebida")),
+        )
+        .correlate(Chamado)
+        .scalar_subquery()
+    )
+
+
+async def fila(
+    session: AsyncSession,
+    *,
+    plataformas: list[str],
+    limite: int = 10,
+    conta: str | None = None,
+    agora: datetime | None = None,
+) -> list[Chamado]:
+    """Casos que o robô deve reler AGORA, e marca a entrega na mesma transação.
+
+    Entra: caso aberto na TELA (`CASO_DE_TELA_SQL`), vivo, sem decisão final, com
+    protocolo, da plataforma que o robô declarou atender, fora do claim e fora da
+    cadência.
+
+    NÃO exige `chamado_url`. A primeira versão exigia, e isso abria um buraco:
+    `chamado_url` é opcional no `/agent/resultado`, e o caso sem URL tinha saído da
+    varredura por API e era recusado pela fila — ficava sem ninguém lendo, em
+    silêncio. O protocolo basta: o robô sabe em que plataforma está e acha a página
+    por ele.
+
+    Não entra: caso aberto pela API (esse o `sync_respostas` lê de hora em hora),
+    Encerrado (a plataforma já decidiu — falta pessoa), Concluído.
+
+    `ORDER BY leitura_robo_at NULLS FIRST` drena do mais atrasado: o caso que
+    nunca foi lido vem primeiro e nenhum morre de fome. `SKIP LOCKED` cobre dois
+    polls simultâneos do mesmo robô."""
+    agora = agora or datetime.now(UTC)
+    aceitas: set[str] = set()
+    for p in plataformas:
+        aceitas.update(chamados_svc.apelidos_da_plataforma(p))
+    if not aceitas:
+        return []
+    ultima_fala = _ultima_fala_at()
+    conds = [
+        Chamado.resolvido.is_(False),
+        chamados_svc.NAO_ENCERRADO_SQL,
+        chamados_svc.CASO_DE_TELA_SQL,
+        func.coalesce(func.trim(Chamado.chamado), "") != "",
+        func.lower(func.trim(func.coalesce(Chamado.plataforma, ""))).in_(sorted(aceitas)),
+        or_(
+            Chamado.leitura_robo_claim_at.is_(None),
+            Chamado.leitura_robo_claim_at < agora - CLAIM_STALE,
+        ),
+        or_(
+            Chamado.leitura_robo_at.is_(None),
+            and_(
+                ultima_fala >= agora - FRIO,
+                Chamado.leitura_robo_at < agora - INTERVALO,
+            ),
+            and_(
+                or_(ultima_fala.is_(None), ultima_fala < agora - FRIO),
+                Chamado.leitura_robo_at < agora - INTERVALO_FRIO,
+            ),
+        ),
+    ]
+    if conta and conta.strip():
+        conds.append(
+            func.lower(func.trim(func.coalesce(Chamado.conta, ""))) == conta.strip().lower()
+        )
+    rows = (
+        (
+            await session.execute(
+                select(Chamado)
+                .where(*conds)
+                .order_by(Chamado.leitura_robo_at.asc().nulls_first(), Chamado.created_at)
+                .limit(limite)
+                .with_for_update(skip_locked=True)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    for ch in rows:
+        ch.leitura_robo_claim_at = agora
+    await session.commit()
+    logger.info(
+        "chamados_leitura_fila",
+        casos=len(rows),
+        plataformas=sorted(aceitas),
+        conta=conta or None,
+    )
+    return list(rows)
+
+
+async def proxima_leitura(
+    session: AsyncSession, ch: Chamado, *, ok: bool, agora: datetime | None = None
+) -> datetime:
+    """Quando a fila devolve este caso — pelos MESMOS três ramos que a `fila` usa.
+
+    Antes isto era sempre "+3 h", e mentia em dois dos três casos documentados: o
+    caso frio volta em 24 h, e a leitura que falhou volta pelo vencimento do claim,
+    em 30 min. Campo informativo que mente é pior que campo ausente: o robô se
+    organiza por ele."""
+    agora = agora or datetime.now(UTC)
+    if not ok:
+        return agora + CLAIM_STALE
+    ultima = (
+        await session.execute(
+            select(func.max(func.coalesce(ChamadoMensagem.enviada_at, ChamadoMensagem.created_at)))
+            .where(
+                ChamadoMensagem.chamado_id == ch.id,
+                ChamadoMensagem.direcao.in_(("enviada", "recebida")),
+            )
+        )
+    ).scalar_one_or_none()
+    if ultima is not None and ultima.tzinfo is None:
+        ultima = ultima.replace(tzinfo=UTC)
+    frio = ultima is None or ultima < agora - FRIO
+    return agora + (INTERVALO_FRIO if frio else INTERVALO)
+
+
+# ------------------------------------------------- o que o robô leu de volta
+
+
+async def _nossas_falas(session: AsyncSession, ch: Chamado) -> set[str]:
+    """Textos que NÓS mandamos neste chamado — o guarda de eco compara com eles."""
+    textos = (
+        (
+            await session.execute(
+                select(ChamadoMensagem.texto).where(
+                    ChamadoMensagem.chamado_id == ch.id,
+                    ChamadoMensagem.direcao == "enviada",
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return {_chave(t) for t in textos if (t or "").strip()}
+
+
+async def _ja_recebidas(session: AsyncSession, ch: Chamado) -> set[tuple[str, datetime | None]]:
+    """(texto, quando) das falas da plataforma que já estão no histórico.
+
+    A chave inclui a HORA de propósito. Só pelo texto, uma fala NOVA com texto
+    idêntico a uma antiga sumia em silêncio — e as plataformas respondem com frase
+    padronizada o tempo todo ("Estamos analisando sua solicitação"). Como reler a
+    mesma página devolve o mesmo `quando`, a proteção contra o texto refluído
+    continua valendo."""
+    linhas = (
+        await session.execute(
+            select(ChamadoMensagem.texto, ChamadoMensagem.enviada_at, ChamadoMensagem.created_at)
+            .where(
+                ChamadoMensagem.chamado_id == ch.id,
+                ChamadoMensagem.direcao == "recebida",
+            )
+        )
+    ).all()
+    return {
+        (_chave(t), (enviada or criada))
+        for t, enviada, criada in linhas
+        if (t or "").strip()
+    }
+
+
+def _chave(texto: str | None) -> str:
+    """Chave de comparação: sem HTML e com os espaços normalizados. A página do
+    Seller Center reflui o texto entre uma leitura e outra — comparar cru faria a
+    MESMA resposta entrar de novo a cada 3 h e o caso ficaria preso em
+    "plataforma respondeu"."""
+    return " ".join(limpar_html(texto or "").split()).strip().lower()
+
+
+def _quando_valido(ch: Chamado, quando: datetime, agora: datetime) -> tuple[datetime, bool]:
+    """A hora da tela, com tolerância dos DOIS lados. Data ingênua é lida como
+    horário de São Paulo (é o fuso das telas que o robô abre).
+
+    O futuro é óbvio (relógio torto). O passado é o perigoso: "19/09" lido com o ano
+    errado enterra a fala no fundo do histórico, a linha não reage, e como o dedupe
+    guarda (texto, hora) a releitura seguinte não conserta — o erro fica. Por isso
+    qualquer data absurdamente anterior ao nascimento do chamado também é clampada,
+    com o mesmo aviso. A folga é generosa (`PASSADO_TOLERADO`): caso da plataforma
+    pode ser legitimamente mais velho que a linha do DaVinci."""
+    if quando.tzinfo is None:
+        quando = quando.replace(tzinfo=chamados_svc.SAO_PAULO)
+    if quando > agora + FUTURO_TOLERADO:
+        return agora, True
+    nascimento = ch.created_at
+    if nascimento is not None:
+        if nascimento.tzinfo is None:
+            nascimento = nascimento.replace(tzinfo=UTC)
+        if quando < nascimento - PASSADO_TOLERADO:
+            return nascimento, True
+    return quando, False
+
+
+async def gravar_historico(session: AsyncSession, ch: Chamado, texto: str) -> bool:
+    """A conversa COMPLETA da página numa mensagem só por chamado, atualizada
+    quando muda. `direcao=sistema`: é contexto pra quem analisa, não resposta —
+    o cérebro, a fila de envio e o cálculo do Status não a enxergam."""
+    texto = limpar_html(texto or "").strip()
+    if not texto:
+        return False
+    m = (
+        await session.execute(
+            select(ChamadoMensagem)
+            .where(
+                ChamadoMensagem.chamado_id == ch.id,
+                ChamadoMensagem.tipo == TIPO_HISTORICO,
+            )
+            .order_by(ChamadoMensagem.created_at)
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if m is not None:
+        if (m.texto or "").strip() == texto:
+            return False
+        m.texto = texto
+        return True
+    session.add(
+        chamados_svc.nova_mensagem(
+            ch,
+            texto=texto,
+            tipo=TIPO_HISTORICO,
+            direcao="sistema",
+            autor_nome=AUTOR_ROBO_LEITURA,
+            status="registrada",
+        )
+    )
+    return True
+
+
+async def registrar(
+    session: AsyncSession,
+    ch: Chamado,
+    *,
+    ok: bool = True,
+    erro: str | None = None,
+    falas: list[FalaLida] | None = None,
+    historico: str | None = None,
+    encerrado: bool = False,
+    agora: datetime | None = None,
+) -> Resultado:
+    """O robô voltou da tela. Commita.
+
+    `ok=False`: nada é gravado e `leitura_robo_at` NÃO avança (o caso continua
+    "não lido"); o claim de 30 min vira o backoff natural e a Ouvidoria recebe a
+    falha — leitura que para de funcionar tem que ser vista, foi o silêncio que
+    criou este problema."""
+    agora = agora or datetime.now(UTC)
+    plat = (ch.plataforma or "").strip().lower() or None
+    if not ok:
+        ch.leitura_robo_claim_at = agora
+        await vigia_chamados.registrar_falha_consulta(
+            session, ch, plat=plat, erro=(erro or "leitura_falhou")[:300], varredura="leitura_robo"
+        )
+        await session.commit()
+        logger.warning(
+            "chamados_leitura_falhou", chamado_id=str(ch.id), plat=plat, err=(erro or "")[:200]
+        )
+        return Resultado()
+
+    out = Resultado()
+    nossas = await _nossas_falas(session, ch)
+    vistas = await _ja_recebidas(session, ch)
+    for fala in falas or []:
+        texto = limpar_html(fala.texto or "").strip()
+        if not texto:
+            continue
+        chave = _chave(texto)
+        if chave in nossas:
+            # A nossa própria fala voltando da página. Deixá-la entrar como
+            # `recebida` jogaria a coluna "Últ. resposta" pro lado errado e a
+            # linha pediria gente à toa.
+            out.ecos += 1
+            continue
+        quando, clampada = _quando_valido(ch, fala.quando, agora)
+        if (chave, quando) in vistas:
+            out.duplicadas += 1
+            continue
+        m = chamados_svc.nova_mensagem(
+            ch,
+            texto=texto,
+            tipo="resposta",
+            direcao="recebida",
+            autor_nome=(fala.autor or "").strip() or AUTOR_ROBO_LEITURA,
+            status="registrada",
+        )
+        m.canal = "robo"
+        m.created_at = quando
+        m.enviada_at = quando
+        session.add(m)
+        vistas.add((chave, quando))
+        out.falas_novas += 1
+        if clampada:
+            session.add(
+                chamados_svc.registrar_sistema(
+                    ch,
+                    "Hora da fala ilegível na tela da plataforma — gravada com a hora da leitura.",
+                )
+            )
+    if historico:
+        out.historico_alterado = await gravar_historico(session, ch, historico)
+    if encerrado:
+        chamados_svc.encerrado_pelo_robo(session, ch)
+    out.encerrado = bool(ch.resolvido or ch.status_plataforma in chamados_svc.STATUS_FINAIS)
+    ch.leitura_robo_at = agora
+    ch.leitura_robo_claim_at = None
+    await vigia_chamados.consulta_ok(session, ch)
+    await session.commit()
+    logger.info(
+        "chamados_leitura_registrada",
+        chamado_id=str(ch.id),
+        plat=plat,
+        falas_novas=out.falas_novas,
+        ecos=out.ecos,
+        duplicadas=out.duplicadas,
+        historico=out.historico_alterado,
+        encerrado=out.encerrado,
+    )
+    return out
+
+
+async def furar_a_fila(session: AsyncSession, ch: Chamado) -> None:
+    """Botão Atualizar num caso de tela: não há API pra consultar, então o que
+    "atualizar" pode significar é "lê este antes dos outros" — zera a âncora e o
+    caso vai pro topo da fila (NULLS FIRST) no próximo poll do robô."""
+    ch.leitura_robo_at = None
+    ch.leitura_robo_claim_at = None
+    await session.commit()
+
+
+async def e_caso_de_tela(session: AsyncSession, ch: Chamado) -> bool:
+    """Este chamado foi aberto na TELA? (a abertura saiu pelo robô, o número em
+    `chamado` é protocolo de tela e nenhuma API sabe responder por ele)"""
+    achou = (
+        await session.execute(
+            select(ChamadoMensagem.id)
+            .where(
+                ChamadoMensagem.chamado_id == ch.id,
+                ChamadoMensagem.tipo == "abertura",
+                ChamadoMensagem.canal == "robo",
+                ChamadoMensagem.status == "enviada",
+            )
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    return achou is not None

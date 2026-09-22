@@ -90,6 +90,44 @@ NAO_ENCERRADO_SQL = or_(
     Chamado.status_plataforma.not_in(sorted(STATUS_FINAIS)),
 )
 
+# 22/09 (Vinicius, 292592): o número em `chamados.chamado` foi capturado pelo robô
+# NA TELA (Seller Center / Portal de Atendimento), porque não havia caminho pela
+# API. Pedir `get_return_detail` com um protocolo de tela leva "The return you
+# queried doesn't exist" de hora em hora. Este é o predicado que separa os dois
+# mundos: a varredura por API exclui estes casos e a fila de leitura do robô
+# (`chamados_leitura`) serve exatamente eles.
+#
+# É uma COLUNA, não um EXISTS sobre a mensagem de abertura. Deduzir pela abertura
+# ("canal robô e enviada") erra num caso real: `chamados_pendencias.varrer`
+# reaproveita a abertura que já existia e só troca o canal dela, sem tocar no
+# número — então chamado com claim do ML ou `return_sn` válido seria lido como de
+# tela e perderia a varredura por API que funcionava. Quem grava o número é quem
+# sabe de onde ele veio (`/agent/resultado`, `/agent/registrar`).
+CASO_DE_TELA_SQL = Chamado.chamado_de_tela.is_(True)
+
+# Apelidos de plataforma usados pelos filtros do robô (lease e fila de leitura).
+# Moraram no router até 22/09; vieram pra cá porque a fila de leitura é serviço e
+# importar o router de dentro dele fecharia um ciclo.
+PLATAFORMA_ML = ("ml", "mercado livre", "mercadolivre", "meli")
+# Plataformas sem API de reclamação: o chamado vai pro robô abrir no Seller
+# Center, e só o robô que PEDE por elas as recebe.
+PLATAFORMAS_SELLER_CENTER: dict[str, tuple[str, ...]] = {
+    "tiktok": ("tiktok", "tik tok", "tiktok shop"),
+    "shopee": ("shopee",),
+}
+PLATAFORMAS_SO_COM_PEDIDO: tuple[str, ...] = tuple(
+    p for aceitas in PLATAFORMAS_SELLER_CENTER.values() for p in aceitas
+)
+
+
+def apelidos_da_plataforma(plat: str) -> tuple[str, ...]:
+    """Como a plataforma pedida pelo robô aparece na coluna `chamados.plataforma`."""
+    plat = (plat or "").strip().lower()
+    if plat in PLATAFORMA_ML:
+        return PLATAFORMA_ML
+    return PLATAFORMAS_SELLER_CENTER.get(plat, (plat,))
+
+
 # 2. Status da ABA (`status_aba`, derivado na hora pela listagem, não persiste).
 #    Vinicius 19/09: os 13 códigos de antes viraram CINCO, e a regra é "primeiro o
 #    robô; gente só quando o robô desiste":
@@ -179,7 +217,14 @@ def _robo_atende(ch: Chamado) -> bool:
     """Tem robô que responde por este chamado? Canal `robo` sim; canal `manual`
     do ML também (o cérebro assume os manuais do ML — Eduardo 09/09). Canal `api`
     (devolução Shopee/TikTok/ML pela API) e manual de outra plataforma não têm robô
-    que responda: quando a plataforma fala neles, é gente (Seller Center)."""
+    que responda: quando a plataforma fala neles, é gente (Seller Center).
+
+    22/09, ponto em aberto: em canal `robo` de Shopee/TikTok isto manda a linha pra
+    "Análise Robô", mas o cérebro (`/agent/analisar`) sai com `plataforma="ml"` por
+    padrão — se o robô não pedir aquela plataforma, a resposta fica parada com cara
+    de atendida. A regra de 19/09 é deliberada (ver test_chamados_status_aba) e não
+    foi mexida aqui; o `vigia_chamados` passou a enxergar o caso de tela sem leitura,
+    e a decisão de mudar a rota é do Vinicius."""
     return ch.canal == "robo" or (ch.canal == "manual" and _eh_ml(ch))
 
 
@@ -854,6 +899,24 @@ def set_status_plataforma(ch: Chamado, codigo: str, quando: datetime | None = No
         return False
     ch.status_plataforma = codigo
     ch.status_plataforma_at = quando or datetime.now(UTC)
+    return True
+
+
+def encerrado_pelo_robo(session: AsyncSession, ch: Chamado) -> bool:
+    """Estado Encerrado porque o robô viu o caso fechado na plataforma (uma vez):
+    status oficial `encerrado` + evento + réplica automática desligada. Chamado já
+    com decisão (ganhamos/perdemos lidos da API, ou `encerrado` de antes) NÃO muda —
+    "ganhamos" não pode virar "encerrado sem decisão" só porque o robô releu a
+    página. O evento só entra quando o status realmente mudou, senão a releitura de
+    3 em 3 h duplicava. Nada fecha o chamado: `resolvido` continua de gente."""
+    if ch.resolvido or ch.status_plataforma in STATUS_FINAIS:
+        return False
+    if not set_status_plataforma(ch, STATUS_ENCERRADO):
+        return False
+    ch.auto_ligada = False
+    session.add(
+        registrar_sistema(ch, "Monitor: plataforma encerrou o caso — aguardando fechamento")
+    )
     return True
 
 

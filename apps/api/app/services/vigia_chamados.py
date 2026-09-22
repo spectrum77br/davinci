@@ -62,7 +62,7 @@ from uuid import UUID
 from zoneinfo import ZoneInfo
 
 import structlog
-from sqlalchemy import func, select, text
+from sqlalchemy import func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import session_scope
@@ -91,10 +91,19 @@ _TZ_BR = ZoneInfo("America/Sao_Paulo")
 PREFIXO_ENVIO = "envio:"
 PREFIXO_CONSULTA = "consulta:"
 PREFIXO_ENCERRADO = "encerrado:"
+# 22/09: caso aberto na TELA que ninguém está lendo. Também de ESTADO — e existe
+# justamente porque o silêncio não dispara hook nenhum: se o robô simplesmente
+# NÃO pedir a fila de leitura, nenhuma falha acontece pra ser registrada. Era esse
+# o buraco original (o caso do 292592 ficou 3 dias sem ninguém notar).
+PREFIXO_LEITURA = "leitura:"
 
 # Padrões quando a config do robô não tem a chave (a linha de ouvidoria_robos
 # nasce com estes mesmos valores — services/ouvidoria.ROBOS).
 _ENCERRADO_DIAS = 3
+# Caso de tela sem leitura confirmada há mais que isto vira ocorrência. Folga
+# generosa em cima da cadência de 24 h do caso frio: o alvo é "ninguém está
+# lendo", não "atrasou uma rodada".
+_LEITURA_PARADA_HORAS = 36
 _CONSULTAS_FALHAS_SEGUIDAS = 3
 # Depois de mais TANTAS falhas além do limite a ocorrência da consulta sobe de
 # `baixa` pra `pessoa`: 3 h não é problema de credencial, 6 h já é.
@@ -110,6 +119,10 @@ ACAO_CONSULTA = (
     "consultar à mão na plataforma"
 )
 ACAO_ENCERRADO = "Concluir pelo botão Resolver (custo + situação)"
+ACAO_LEITURA = (
+    "Abrir o caso na plataforma e ver se respondeu — e conferir se o robô de leitura "
+    "está pedindo a fila (POST /api/chamados/agent/leitura)"
+)
 
 # Rótulo da fala que não saiu, pelo `tipo` da mensagem.
 _ROTULO_TIPO = {
@@ -419,8 +432,13 @@ async def registrar_falha_consulta(
                 conta=(ch.conta or "")[:120] or None,
                 pedido=(ch.pedido_bling or "")[:80] or None,
                 detalhe=(
-                    f"{(erro or '').strip()[:300]} · a varredura de :25 não consegue ler o "
-                    "caso; o status da aba pode estar defasado"
+                    f"{(erro or '').strip()[:300]} · "
+                    + (
+                        "o robô não conseguiu ler o caso na tela da plataforma"
+                        if varredura == "leitura_robo"
+                        else "a varredura de :25 não consegue ler o caso"
+                    )
+                    + "; o status da aba pode estar defasado"
                 ),
                 acao=ACAO_CONSULTA,
                 link=_link(ch),
@@ -492,6 +510,41 @@ async def _encerrados_parados(
                     func.coalesce(Chamado.status_plataforma_at, Chamado.updated_at) <= corte,
                 )
                 .order_by(Chamado.status_plataforma_at)
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+
+async def _leitura_parada(
+    session: AsyncSession, *, corte: datetime
+) -> list[Chamado]:
+    """Casos abertos na TELA, vivos, que ninguém confirmou ler desde `corte`
+    (inclusive os que NUNCA foram lidos: `leitura_robo_at IS NULL`).
+
+    Esta é a rede que enxerga o silêncio. As ocorrências de `consulta:` nascem de
+    hook — alguém tentou e falhou. Aqui não há tentativa nenhuma pra falhar: se o
+    robô de leitura não existir, não for ligado ou parar de pedir a fila, os casos
+    simplesmente ficam parados. Sem isto, o buraco que originou tudo (resposta da
+    Shopee de 19/09 invisível até 22/09) voltaria calado."""
+    return list(
+        (
+            await session.execute(
+                select(Chamado)
+                .where(
+                    chamados_svc.CASO_DE_TELA_SQL,
+                    Chamado.resolvido.is_(False),
+                    chamados_svc.NAO_ENCERRADO_SQL,
+                    func.coalesce(func.trim(Chamado.chamado), "") != "",
+                    or_(
+                        Chamado.leitura_robo_at.is_(None),
+                        Chamado.leitura_robo_at < corte,
+                    ),
+                    # Caso recém-aberto ainda não teve chance de ser lido.
+                    Chamado.created_at < corte,
+                )
+                .order_by(Chamado.created_at)
             )
         )
         .scalars()
@@ -602,12 +655,18 @@ def _envio_sumiu(ch: Chamado | None, ultima: ChamadoMensagem | None) -> bool:
 
 def _consulta_sumiu(ch: Chamado | None) -> bool:
     """A `consulta:` some quando o chamado sai do escopo das varreduras:
-    excluído, concluído, ou com status final (19/09: a plataforma já decidiu e
-    ninguém consulta mais)."""
+    excluído, concluído, com status final (19/09: a plataforma já decidiu e
+    ninguém consulta mais) — ou, desde 22/09, quando ele passa a ser caso de TELA.
+
+    O último caso importa: os casos de tela tinham `consulta:` aberta justamente
+    pelas falhas horárias contra a API que a marca `chamado_de_tela` veio calar.
+    Sem isto a ocorrência ficaria aberta pra sempre, cobrando com `precisa_pessoa`
+    uma varredura que não existe mais pra aquele chamado."""
     return (
         ch is None
         or ch.resolvido
         or ch.status_plataforma in chamados_svc.STATUS_FINAIS
+        or bool(ch.chamado_de_tela)
     )
 
 
@@ -696,7 +755,7 @@ async def vigia_chamados_run(session: AsyncSession, *, agora: datetime | None = 
         # painel com os números (e não com o contador ausente).
         for k in (
             "encerrados", "novas", "persistem", "sumiram", "envios_falhos",
-            "consultas_falhando", "reconciliadas", "com_instrucao",
+            "consultas_falhando", "reconciliadas", "com_instrucao", "leitura_parada",
         ):
             r.contadores[k] = 0
         cfg = _config(await session.get(OuvidoriaRobo, ROBO))
@@ -743,9 +802,54 @@ async def vigia_chamados_run(session: AsyncSession, *, agora: datetime | None = 
             else:
                 r.contadores["persistem"] += 1
 
-        # Só o prefixo `encerrado:` é julgado pela rodada: as de hook (envio:,
+        # 22/09: caso de tela que ninguém leu. Ocorrência de ESTADO, como a de
+        # Encerrado — e a única que enxerga o robô de leitura ausente.
+        corte_leitura = agora - timedelta(hours=_LEITURA_PARADA_HORAS)
+        for ch in await _leitura_parada(session, corte=corte_leitura):
+            desde = ch.leitura_robo_at or ch.created_at
+            horas = max(1, int((agora - desde).total_seconds() // 3600)) if desde else 0
+            r.contadores["leitura_parada"] += 1
+            nunca = ch.leitura_robo_at is None
+            linha = await r.registrar(
+                chave=f"{PREFIXO_LEITURA}{ch.id}",
+                titulo=(
+                    "Caso aberto na tela sem NENHUMA leitura"
+                    if nunca
+                    else f"Caso aberto na tela sem leitura há {_plural(horas, 'hora', 'horas')}"
+                ),
+                plataforma=_plat(ch),
+                conta=(ch.conta or "")[:120] or None,
+                pedido=(ch.pedido_bling or "")[:80] or None,
+                detalhe=(
+                    f"Protocolo {(ch.chamado or '').strip()} — a plataforma pode ter respondido "
+                    "na tela e o painel não saberia. Nenhuma API lê este caso: quem lê é o robô "
+                    "de leitura."
+                ),
+                acao=ACAO_LEITURA,
+                link=_link(ch),
+                severidade="baixa" if nunca else "info",
+                precisa_pessoa=nunca,
+                dados={
+                    "protocolo": (ch.chamado or "").strip() or None,
+                    "chamado_url": (ch.chamado_url or "").strip() or None,
+                    "leitura_robo_at": (
+                        ch.leitura_robo_at.isoformat() if ch.leitura_robo_at else None
+                    ),
+                    "horas_sem_leitura": horas,
+                    "canal": ch.canal,
+                    "origem": ch.origem,
+                },
+                agora=agora,
+            )
+            if linha.fechada_em is None and linha.aberta_em == agora:
+                r.contadores["novas"] += 1
+            else:
+                r.contadores["persistem"] += 1
+
+        # Só os prefixos de ESTADO são julgados pela rodada: as de hook (envio:,
         # consulta:) morreriam como "sumiu" a cada 30 min.
         r.contadores["sumiram"] = await r.fechar_nao_vistas(prefixo=PREFIXO_ENCERRADO)
+        r.contadores["sumiram"] += await r.fechar_nao_vistas(prefixo=PREFIXO_LEITURA)
         r.contadores["reconciliadas"] = await _reconciliar(session, agora)
         r.contadores["envios_falhos"] = await _contar_abertas(session, PREFIXO_ENVIO)
         r.contadores["consultas_falhando"] = await _contar_abertas(session, PREFIXO_CONSULTA)
@@ -755,6 +859,8 @@ async def vigia_chamados_run(session: AsyncSession, *, agora: datetime | None = 
                 _plural(r.contadores["encerrados"], "encerrado parado", "encerrados parados"),
                 _plural(r.contadores["envios_falhos"], "envio falho", "envios falhos"),
                 _plural(r.contadores["consultas_falhando"], "consulta", "consultas") + " falhando",
+                _plural(r.contadores["leitura_parada"], "caso de tela", "casos de tela")
+                + " sem leitura",
             ]
         )
 

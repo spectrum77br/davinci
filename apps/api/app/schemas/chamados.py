@@ -62,6 +62,12 @@ class ChamadoOut(BaseModel):
     chamado: str | None = None
     chamado_url: str | None = None
     canal: str
+    # 22/09: o número acima foi capturado pelo robô NA TELA — nenhuma API responde
+    # por ele. A tela usa isto pra dizer a verdade no botão Atualizar ("pus na
+    # frente da fila do robô", não "li a plataforma") e pra mostrar o botão também
+    # nos casos de canal robô.
+    chamado_de_tela: bool = False
+    leitura_robo_at: datetime | None = None
     alterar_status_bling: str | None = None
     auto_ligada: bool = False
     auto_dias: int | None = None
@@ -427,6 +433,10 @@ class AgentRecebidaIn(BaseModel):
     texto: str = Field(min_length=1)
     resumo: str | None = None
     resolvido: bool = False
+    # 22/09: a hora que a PLATAFORMA mostra, não a do POST. Sem isto a resposta do
+    # Agente Shopee de 19/09 21:42 entrava no histórico com a hora da leitura, e a
+    # coluna "Últ. resposta" mentia. Opcional: o monitor antigo não muda.
+    quando: datetime | None = None
 
     _clean = field_validator("pedido_bling", "chamado", "resumo", mode="before")(
         _clean_optional_text
@@ -437,6 +447,87 @@ class AgentRecebidaOut(BaseModel):
     chamado_id: UUID
     mensagem_id: UUID
     resolvido: bool
+
+
+class AgentLeituraIn(BaseModel):
+    """Quais casos o robô deve RELER na tela da plataforma agora.
+
+    `plataformas` é OBRIGATÓRIO e não tem default de propósito: no `/agent/lease`,
+    plataforma vazia significa "tudo menos TikTok/Shopee", e repetir essa regra
+    aqui seria a pior armadilha possível — o caso que motivou esta fila (Shopee)
+    ficaria invisível pra quem chamasse sem parâmetro. O robô DECLARA em que
+    Seller Center ele está logado."""
+
+    limite: int = Field(default=10, ge=1, le=50)
+    plataformas: list[str] = Field(min_length=1)
+    # Só os casos desta loja (um perfil de navegador por conta evita captcha).
+    conta: str | None = None
+
+    _clean = field_validator("conta", mode="before")(_clean_optional_text)
+
+
+class AgentCasoLeituraOut(BaseModel):
+    """Um caso pra reler. NÃO tem `texto`: leitura nunca posta nada.
+
+    `chamado_url` pode vir vazio (nem todo robô devolveu a URL ao abrir). Nesse caso
+    o robô acha a página pelo `chamado` — que é o protocolo na tela daquela
+    plataforma. Exigir a URL deixava esses casos sem ninguém lendo."""
+
+    chamado_id: UUID
+    chamado: str
+    chamado_url: str | None = None
+    pedido_bling: str | None = None
+    pedido_marketplace: str | None = None
+    conta: str | None = None
+    plataforma: str | None = None
+    # Última leitura confirmada — `null` = nunca foi lido.
+    leitura_robo_at: datetime | None = None
+
+
+class AgentLeituraOut(BaseModel):
+    casos: list[AgentCasoLeituraOut]
+
+
+class AgentFalaLidaIn(BaseModel):
+    """Uma fala DELES lida na tela. `quando` é obrigatório: sem a hora da
+    plataforma a fala entra com a hora do POST e a coluna "Últ. resposta" mente
+    (foi o que aconteceu com a resposta de 19/09 21:42 no 292592)."""
+
+    texto: str = Field(min_length=1)
+    quando: datetime
+    # O nome que a tela mostra ("Agente Shopee"); vazio = "página do caso".
+    autor: str | None = None
+
+    _clean = field_validator("autor", mode="before")(_clean_optional_text)
+
+
+class AgentLeituraResultadoIn(BaseModel):
+    """O que o robô viu na página. UMA chamada por caso, obrigatória mesmo quando
+    não há nada novo — é ela que diz "continuo lendo". Sem ela o robô some em
+    silêncio e ninguém descobre, que é o bug original."""
+
+    chamado_id: UUID
+    ok: bool = True
+    erro: str | None = None
+    # A conversa COMPLETA da página: contexto, não resposta.
+    historico: str | None = None
+    # Só o que NÃO foi escrito por nós. Na dúvida, mande: o servidor descarta o
+    # eco da nossa própria fala e a repetida.
+    falas: list[AgentFalaLidaIn] = []
+    # A tela mostra o caso fechado pela plataforma.
+    encerrado: bool = False
+
+    _clean = field_validator("erro", "historico", mode="before")(_clean_optional_text)
+
+
+class AgentLeituraResultadoOut(BaseModel):
+    chamado_id: UUID
+    falas_novas: int
+    ecos: int
+    duplicadas: int
+    historico_alterado: bool
+    encerrado: bool
+    proxima_leitura_at: datetime
 
 
 class AgentAnalisarIn(BaseModel):

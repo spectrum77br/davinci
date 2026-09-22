@@ -13,6 +13,10 @@ quatro coisas, decididas pelo Vinicius em 19/09/2026:
 3. Envio que falhou volta pra fila sozinho, até 3 tentativas.
 4. Chamado Encerrado/Concluído só volta pro robô com instrução.
 
+**Adendo de 22/09/2026 (§6): DOIS ENDPOINTS NOVOS** — `POST .../leitura` e
+`POST .../leitura/resultado`. É trabalho novo pro robô, não mudança de contrato:
+nada do que já existe muda de comportamento.
+
 Por quê: a aba Chamados passou a ter cinco status (Análise Humano, Análise Robô,
 Aguard. Plataforma, Encerrado, Concluído). "Encerrado" é a plataforma ter
 terminado o caso; "Concluído" é uma PESSOA ter fechado com lucro/prejuízo. O
@@ -314,3 +318,198 @@ A resposta de `/agent/resultado` continua sendo a mensagem
 | `/agent/resultado` `ok: false` | `falhou` terminal | volta pra `pendente` até 3 tentativas (salvo erro que pede humano) |
 | mesma `mensagem_id` em dois leases | não acontecia | acontece após falha; executar de novo |
 | Encerrado/Concluído em `/agent/analisar` | resolvidos por monitor/cérebro vinham | Encerrado só com instrução; Concluído nunca (instrução dá 422) |
+
+---
+
+## 6. Ler o caso na TELA (novo, 22/09/2026)
+
+> Esta seção é trabalho NOVO pro robô. Nada do que já existe muda: o
+> `POST /agent/lease` continua entregando só `abrir` e `responder`, com os mesmos
+> campos. Se você não implementar nada daqui, o robô segue funcionando como hoje.
+
+### O buraco
+
+Chamado 441aa837 (pedido 292592, Shopee Marquezini, MacBook de R$ 4.975): a
+abertura não tinha caminho pela API (`devolucao_sem_return`), então a varredura
+mandou pro robô, que abriu no Portal de Atendimento ao Vendedor e devolveu o
+protocolo `2101308949814067207` pelo `/agent/resultado`. **Em 19/09 às 21:42 o
+Agente Shopee respondeu na tela. Em 22/09 o painel ainda não sabia.**
+
+Não era bug: o contrato só tinha metade. O `lease` diz ao robô *o que temos a
+dizer*; nada nunca disse *quais casos reler*. Caso aberto na tela fica órfão no
+minuto seguinte à abertura — e é justamente o caso que nenhuma API alcança.
+
+### O desenho, em uma frase
+
+`POST /agent/leitura` te diz **quais páginas abrir**; você abre, lê, e devolve o
+que viu em `POST /agent/leitura/resultado`. Uma chamada de resultado por caso,
+**obrigatória mesmo quando não há nada novo** — é ela que diz "continuo lendo".
+
+### Por que fila separada, e não um `tipo` novo no lease
+
+Hoje vale um invariante do seu lado: *tudo que o lease te dá, você POSTA*
+(`mensagem_id` e `texto` são obrigatórios em toda tarefa). Enfiar leitura ali
+obrigaria a afrouxar os dois, e um erro de implementação viraria um texto vazio
+postado na conversa com o cliente. Aqui não existe `texto` pra postar por engano.
+
+### 6.1 Pedir a fila
+
+```json
+POST /api/chamados/agent/leitura
+{ "limite": 10, "plataformas": ["shopee"], "conta": "Shopee Marquezini" }
+```
+
+`plataformas` é **obrigatório** e não tem default. No `lease`, plataforma vazia
+significa "tudo menos TikTok/Shopee"; herdar isso aqui esconderia exatamente o
+caso que motivou a fila. Declare em que Seller Center você está logado.
+`conta` é opcional e filtra por loja — use quando cada perfil de navegador
+atende uma conta só (dois perfis na mesma conta abrindo a mesma página é pedido
+de captcha).
+
+```json
+{
+  "casos": [
+    {
+      "chamado_id": "441aa837-998d-40a5-bb3d-5e9f9139b0a6",
+      "chamado": "2101308949814067207",
+      "chamado_url": "https://seller-service.cs.shopee.com.br/detail/2101308949814067207",
+      "pedido_bling": "292592",
+      "pedido_marketplace": "260826D2E44FBF",
+      "conta": "Shopee Marquezini",
+      "plataforma": "shopee",
+      "leitura_robo_at": null
+    }
+  ]
+}
+```
+
+`leitura_robo_at` é a última leitura confirmada — `null` = nunca foi lido.
+`chamado_url` pode vir `null`: nem todo caso teve a URL gravada. Quando vier,
+abra por ela; quando não vier, ache a página pelo `chamado` (o protocolo).
+
+Quem sai na fila: caso **aberto na tela** (a abertura saiu pelo robô), vivo, sem
+decisão final, com protocolo E `chamado_url`. Caso aberto pela API não sai — esse
+o DaVinci lê sozinho de hora em hora.
+
+**Cadência e claim, pra você não precisar guardar estado nenhum:** pedir a fila
+já marca a entrega. O mesmo caso não volta por 3 h (24 h se ninguém fala nele há
+mais de 15 dias). Se o robô morrer no meio, a entrega vence em 30 min e o caso
+volta sozinho. Pode chamar a fila quantas vezes quiser — chamar mais não traz
+mais.
+
+### 6.2 Devolver o que leu
+
+```json
+POST /api/chamados/agent/leitura/resultado
+{
+  "chamado_id": "441aa837-998d-40a5-bb3d-5e9f9139b0a6",
+  "ok": true,
+  "falas": [
+    {
+      "texto": "Olá,\n\nEstamos analisando sua solicitação. Retornaremos em breve!",
+      "quando": "2026-09-19T21:42:00-03:00",
+      "autor": "Agente Shopee"
+    }
+  ],
+  "historico": "Vendedor: Recebemos o pacote sem o produto…\nAgente Shopee: Estamos analisando…",
+  "encerrado": false
+}
+```
+
+**A única distinção que importa:**
+
+| campo | o que faz |
+|---|---|
+| `falas[]` | CONTA como resposta da plataforma: muda a coluna "Últ. resposta", muda o Status da aba e acorda o cérebro. Mande **só o que não foi escrito por nós**. |
+| `historico` | SÓ CONTEXTO: a página inteira, numa mensagem só por chamado, atualizada quando muda. Não mexe em status nem em "Últ. resposta". |
+| `encerrado` | A tela mostra o caso fechado pela plataforma → o chamado vai pro estado Encerrado. Não fecha nada: uma PESSOA conclui com lucro/prejuízo. |
+
+`proxima_leitura_at` diz quando a fila devolve este caso, e segue os mesmos três
+ramos: **+3 h** no caso normal, **+24 h** se o caso está frio (ninguém fala nele
+há mais de 15 dias), e **+30 min** quando você mandou `ok: false`. Use esse campo
+em vez de contar as horas você mesmo — ele é calculado pela mesma regra da fila.
+
+Dedupe: uma fala é considerada repetida quando **texto E `quando`** batem com uma
+que já está no histórico. Por isso a mesma mensagem padronizada ("Estamos
+analisando sua solicitação") em dias diferentes entra como duas falas, que é o
+certo — e reler a mesma página não duplica nada.
+
+**`quando` é obrigatório em cada fala.** É a hora que a TELA mostra, não a hora
+em que você leu — sem ela a coluna "Últ. resposta" mente (foi o que aconteceu no
+292592). Regras fechadas, pra não sobrar decisão pra você:
+
+- mande ISO-8601 **com offset** (`2026-09-19T21:42:00-03:00`); data sem fuso é
+  lida como horário de São Paulo;
+- tela que mostra só a data, sem hora → mande `00:00` daquele dia;
+- data mais de 1 dia no futuro (relógio torto, parse errado) → o servidor usa a
+  hora da leitura e deixa um aviso no histórico. Não derruba a leitura.
+
+**Na dúvida sobre o que é fala deles, MANDE.** Duas travas do lado do servidor
+existem justamente pra isso:
+
+- **eco** — fala cujo texto bate com uma mensagem NOSSA do mesmo chamado é
+  descartada (é a nossa própria abertura voltando da página). Vem contada em
+  `ecos`;
+- **repetida** — fala que já está no histórico não entra de novo, mesmo que a
+  página tenha refluído o texto. É o que deixa reler a mesma página de 3 em 3 h.
+
+Falso positivo o servidor come; falso negativo deixa o caso órfão de novo, que é
+o bug que estamos consertando.
+
+Resposta:
+
+```json
+{
+  "chamado_id": "441aa837-…",
+  "falas_novas": 1,
+  "ecos": 0,
+  "duplicadas": 0,
+  "historico_alterado": true,
+  "encerrado": false,
+  "proxima_leitura_at": "2026-09-22T20:15:00Z"
+}
+```
+
+### 6.3 Quando não deu pra ler
+
+```json
+{ "chamado_id": "…", "ok": false, "erro": "login do Seller Center caiu" }
+```
+
+Nada é gravado, o caso **continua marcado como não lido** e entra uma ocorrência
+em Ouvidoria › Robôs (varredura `leitura_robo`). O caso volta pra fila em 30 min.
+Mande `ok: false` de verdade quando falhar — leitura que parou de funcionar
+precisa aparecer; foi o silêncio que criou este problema.
+
+### 6.4 Onde a resposta lida cai — e o que ainda precisa de você
+
+Depende do **canal do chamado**, e isso importa pra você:
+
+| canal do chamado | onde a linha vai | quem trata |
+|---|---|---|
+| `api` (o caso do 292592) | Análise Humano — "plataforma respondeu, responder no Seller Center" | gente, no Seller Center |
+| `robo` (ex.: "Não recebido" da Shopee, que o DaVinci encaminha ao robô) | **Análise Robô** | o seu cérebro |
+
+**Atenção ao segundo caso.** Em canal `robo` a linha vai pra Análise Robô — ou
+seja, o `/agent/analisar` precisa estar sendo chamado **com aquela plataforma**
+(`{"plataforma": "shopee", "canais": ["robo"]}`). O padrão do endpoint é
+`plataforma: "ml"`: se você só chamar com o padrão, a resposta que acabamos de
+resgatar da tela fica parada numa aba que ninguém tria, parecendo atendida —
+o que é pior que ficar parada parecendo parada.
+
+Enquanto o seu cérebro não cobrir Shopee/TikTok, avise o Vinicius: a alternativa
+é o DaVinci mandar esses casos pra Análise Humano. A Ouvidoria › Robôs já avisa
+quando um caso de tela fica sem leitura, mas ela não sabe dizer se o cérebro
+olhou a linha depois.
+
+### 6.5 Resumo
+
+| Situação | Antes | Agora |
+|---|---|---|
+| caso aberto na TELA | ninguém relia; a resposta da plataforma sumia | `POST /agent/leitura` diz quais reler |
+| o que você devolve | — | `POST /agent/leitura/resultado`, uma por caso, sempre |
+| hora da fala | a do POST | a da TELA (`quando`, obrigatório) |
+| `/agent/recebida` | sem data | aceita `quando` opcional (mesma regra) |
+| `/agent/lease` | `abrir` / `responder` | **igual** — nenhuma mudança |
+| classificar fala deles | — | na dúvida mande: eco e repetida o servidor descarta |
+| leitura que falhou | — | `ok: false` → ocorrência na Ouvidoria |
