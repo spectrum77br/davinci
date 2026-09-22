@@ -636,3 +636,56 @@ async def test_a_versao_da_agencia_chega_marcada_na_tela_de_dentro(
     porid = {x["id"]: x for x in lista}
     assert porid[ideia["id"]]["origem_id"] is None
     assert porid[versao["id"]]["origem_id"] == ideia["id"]
+
+
+# ─────────── o que a auditoria de 22/09/2026 pegou, e não pode voltar ───────────
+
+
+async def test_fila_de_pedidos_respeita_a_equipe_de_quem_olha(
+    client: AsyncClient, db: AsyncSession, make_user, auth_as
+):
+    """Era o único lugar do módulo sem recorte por equipe — e nele se DECIDE."""
+    await _requisicao(db, nome="Pedido da Alpha")
+    outra = await _requisicao(db, nome="Pedido da Bravo")
+    outra.equipe = "bravo"
+    await db.commit()
+
+    u = await make_user(permissions={"marketing_criativos": {"view": True, "edit": True}})
+    u.marketing_teams = ["alpha"]
+    await db.commit()
+    auth_as(u)
+
+    r = await client.get("/api/marketing/personagens/requisicoes")
+    assert r.status_code == 200
+    nomes = [x["nome"] for x in r.json()["requisicoes"]]
+    assert "Pedido da Alpha" in nomes
+    assert "Pedido da Bravo" not in nomes
+
+    # Ler é metade: decidir o da outra equipe tem que ser 404, não 200.
+    for acao in ("aprovar", "recusar"):
+        d = await client.post(
+            f"/api/marketing/personagens/requisicoes/{outra.id}/{acao}", json={}
+        )
+        assert d.status_code == 404, f"{acao} da outra equipe passou"
+
+
+async def test_apagar_ideia_com_versao_da_agencia_e_barrado(
+    client: AsyncClient, db: AsyncSession, admin
+):
+    """SET NULL apagava o SENTIDO da versão: ela virava ideia da casa, com o
+    mesmo título e o texto da agência."""
+    from app.models import MarketingRoteiro
+
+    ideia = (await client.post(R, json={"titulo": "Ideia da casa"})).json()
+    versao = (await client.post(R, json={"titulo": "Ideia da casa"})).json()
+    linha = await db.get(MarketingRoteiro, UUID(versao["id"]))
+    linha.origem_id = UUID(ideia["id"])
+    await db.commit()
+
+    r = await client.delete(f"{R}/{ideia['id']}")
+    assert r.status_code == 409
+    assert r.json()["detail"]["code"] == "tem_versoes"
+
+    # A versão sai do caminho e aí a ideia pode ser apagada.
+    assert (await client.delete(f"{R}/{versao['id']}")).status_code == 200
+    assert (await client.delete(f"{R}/{ideia['id']}")).status_code == 200

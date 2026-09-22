@@ -705,3 +705,60 @@ async def test_uma_agencia_nao_ve_o_pedido_da_outra(client: AsyncClient):
     )
     assert r.status_code == 200
     assert "So Da A" not in [x["nome"] for x in r.json()["requisicoes"]]
+
+
+async def test_entrega_pela_versao_aponta_pro_briefing_da_casa(
+    client: AsyncClient, db: AsyncSession
+):
+    """A rota existe pra responder "qual IDEIA virou criativo aprovado". Se a
+    entrega feita a partir da versão apontasse pra versão, a resposta seria o
+    texto da própria agência."""
+    r0 = MarketingRoteiro(titulo="Ideia da casa", texto="briefing", ativo=True)
+    db.add(r0)
+    await db.commit()
+
+    v = await client.post(
+        f"/api/portal/roteiros/{r0.id}/versao",
+        headers={"X-Portal-Token": TOK_A},
+        json={"texto": "a leitura da agência"},
+    )
+    assert v.status_code == 200
+    versao_id = v.json()["id"]
+
+    e = await client.post(
+        f"/api/portal/roteiros/{versao_id}/entrega",
+        headers={"X-Portal-Token": TOK_A},
+        files={"files": ("v.mp4", b"x" * 100, "video/mp4")},
+    )
+    assert e.status_code == 200
+    assert e.json()["roteiro_id"] == str(r0.id), "o vínculo tem que ser com a ideia"
+
+
+async def test_entrega_reaproveita_a_linha_vazia_em_vez_de_duplicar(
+    client: AsyncClient, db: AsyncSession
+):
+    """`_sincronizar_entregas` já abre uma linha vazia por agência endereçada.
+    Criar outra deixava duas linhas da mesma agência pro mesmo roteiro."""
+    r0 = MarketingRoteiro(titulo="Com entrega aberta", texto="briefing", ativo=True)
+    db.add(r0)
+    await db.flush()
+    vazia = MarketingCreative(
+        modelo="Com entrega aberta", equipe="alpha", roteiro_id=r0.id, aprovado=None, files=[]
+    )
+    db.add(vazia)
+    await db.commit()
+
+    e = await client.post(
+        f"/api/portal/roteiros/{r0.id}/entrega",
+        headers={"X-Portal-Token": TOK_A},
+        files={"files": ("v.mp4", b"x" * 100, "video/mp4")},
+    )
+    assert e.status_code == 200
+    assert e.json()["id"] == str(vazia.id), "devia ter usado a linha que já existia"
+
+    linhas = (
+        await db.execute(
+            select(MarketingCreative).where(MarketingCreative.roteiro_id == r0.id)
+        )
+    ).scalars().all()
+    assert len(linhas) == 1, f"duplicou: {len(linhas)} linhas pro mesmo roteiro"

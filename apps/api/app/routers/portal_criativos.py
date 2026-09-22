@@ -299,6 +299,11 @@ def _roteiro_out(row: MarketingRoteiro) -> dict[str, Any]:
     """LISTA BRANCA. `created_by` e `file_rel` não são da conta de terceiro."""
     return {
         "id": str(row.id),
+        # Sai daqui porque a versão herda o título do original quando a agência
+        # não escreve um: sem este campo, a aba Roteiros do portal mostrava dois
+        # cards com título, marca e SKU idênticos e nada dizendo qual é qual.
+        # Não vaza nada: só quem enxerga a ideia consegue criar versão dela.
+        "origem_id": str(row.origem_id) if row.origem_id else None,
         "titulo": row.titulo,
         "texto": row.texto,
         "marca": row.marca,
@@ -712,25 +717,55 @@ async def entregar_do_roteiro(
     if len(files) > MAX_FILES_PER_ROW:
         raise HTTPException(400, detail={"code": "muitos_arquivos"})
 
-    # `marca` e `sku` descem do roteiro em vez de virem do formulário: o
-    # briefing já sabe de que produto está falando, e deixar a agência digitar
-    # isso de novo é criar divergência entre a linha e o roteiro que a gerou.
-    row = MarketingCreative(
-        id=uuid4(),
-        modelo=roteiro.titulo[:190],
-        marca=roteiro.marca,
-        marca_id=roteiro.marca_id,
-        sku=roteiro.sku,
-        product_id=roteiro.product_id,
-        equipe=equipe,
-        roteiro_id=roteiro.id,
-        aprovado=None,
-        # A coleção nasce explícita: sem isto, o primeiro acesso depois do
-        # flush trata `files` como relação ainda não carregada e tenta ir ao
-        # banco de dentro do laço síncrono de gravação — MissingGreenlet.
-        files=[],
-    )
-    session.add(row)
+    # O vínculo aponta pro BRIEFING DA CASA, não pro texto que a agência
+    # escreveu em cima dele. A rota existe para responder "qual ideia virou
+    # criativo aprovado"; se a entrega feita a partir de uma versão apontasse
+    # pra versão, a resposta seria o texto da própria agência e a pergunta
+    # ficaria sem dono. Entregando pela ideia direto, `origem_id` é None e isto
+    # é o mesmo `roteiro.id` de sempre.
+    raiz_id = roteiro.origem_id or roteiro.id
+
+    # `_sincronizar_entregas` (marketing_roteiros.py) já abre uma linha VAZIA
+    # por agência endereçada assim que o briefing fica visível. Criar outra
+    # aqui deixava duas linhas da mesma agência pro mesmo roteiro — uma com o
+    # vídeo e uma vazia que nunca some, as duas contadas em "em análise".
+    # Reaproveitar a vazia é o que faz os dois caminhos de entrega
+    # concordarem. Linha que já tem arquivo NÃO é reaproveitada: a segunda
+    # entrega é entrega de verdade, não engano.
+    row = (
+        await session.execute(
+            select(MarketingCreative)
+            .where(
+                MarketingCreative.roteiro_id == raiz_id,
+                func.lower(func.coalesce(MarketingCreative.equipe, "")) == equipe.lower(),
+                MarketingCreative.aprovado.is_(None),
+            )
+            .order_by(MarketingCreative.created_at)
+        )
+    ).scalars().first()
+    if row is not None and row.files:
+        row = None
+
+    if row is None:
+        # `marca` e `sku` descem do roteiro em vez de virem do formulário: o
+        # briefing já sabe de que produto está falando, e deixar a agência
+        # digitar isso de novo cria divergência entre a linha e o roteiro.
+        row = MarketingCreative(
+            id=uuid4(),
+            modelo=roteiro.titulo[:190],
+            marca=roteiro.marca,
+            marca_id=roteiro.marca_id,
+            sku=roteiro.sku,
+            product_id=roteiro.product_id,
+            equipe=equipe,
+            roteiro_id=raiz_id,
+            aprovado=None,
+            # A coleção nasce explícita: sem isto, o primeiro acesso depois do
+            # flush trata `files` como relação ainda não carregada e tenta ir
+            # ao banco de dentro do laço síncrono de gravação — MissingGreenlet.
+            files=[],
+        )
+        session.add(row)
     await session.flush()
 
     entraram = _gravar_arquivos(row, files)
@@ -738,11 +773,16 @@ async def entregar_do_roteiro(
     logger.info(
         "portal_entrega_do_roteiro",
         creative_id=str(row.id),
-        roteiro_id=str(roteiro.id),
+        roteiro_id=str(raiz_id),
+        veio_da_versao=str(roteiro.id) if roteiro.origem_id else None,
         equipe=equipe,
         arquivos=entraram,
     )
-    return _linha_out(row)
+    # Sem os visíveis, `_linha_out` devolvia `roteiro_id: null` — a resposta
+    # escondia justamente o vínculo que esta rota existe para criar. O mesmo
+    # WHERE da listagem decide, então um briefing desligado no meio do caminho
+    # continua vindo nulo, como em toda outra tela.
+    return _linha_out(row, await _roteiros_visiveis(session, [row], equipe))
 
 
 class VersaoIn(BaseModel):

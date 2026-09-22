@@ -436,6 +436,31 @@ async def apagar(
     """`edit` e não `delete`: é a norma do módulo (Criativos apaga com edit), e
     mudar a régua só aqui faria quem apaga criativo não apagar roteiro."""
     row = await _get(session, roteiro_id, user)
+
+    # Apagar a ideia de partida apagava o SENTIDO da versão, não a versão: a FK
+    # é SET NULL, então a linha da agência ficava na lista com o mesmo título,
+    # `origem_id` nulo e o texto dela — indistinguível de uma ideia da casa. A
+    # etiqueta "versão da agência" some justamente quando mais faz falta, e quem
+    # editasse acharia que estava mexendo no briefing.
+    versoes = (
+        await session.execute(
+            select(func.count())
+            .select_from(MarketingRoteiro)
+            .where(MarketingRoteiro.origem_id == row.id)
+        )
+    ).scalar_one()
+    if versoes:
+        raise HTTPException(
+            409,
+            detail={
+                "code": "tem_versoes",
+                "message": (
+                    f"{versoes} versão(ões) de agência saíram deste roteiro. "
+                    "Apague as versões primeiro, ou deixe a ideia no lugar."
+                ),
+            },
+        )
+
     base = _ref_dir(row.id)
     if base.exists():
         shutil.rmtree(base, ignore_errors=True)

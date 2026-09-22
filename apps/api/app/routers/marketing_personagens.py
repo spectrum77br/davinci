@@ -51,6 +51,7 @@ from app.models.marketing_personagem_requisicao import (
     STATUS_RECUSADA,
     MarketingPersonagemRequisicao,
 )
+from app.routers.marketing_creatives import _user_equipes
 from app.services.marketing.anexos import (
     _EXT_AUDIO,
     _EXT_IMAGEM,
@@ -347,6 +348,20 @@ def _requisicao_out(r: MarketingPersonagemRequisicao) -> dict[str, Any]:
     }
 
 
+def _fora_da_equipe(user: User, req: MarketingPersonagemRequisicao) -> bool:
+    """O mesmo recorte por equipe que Criativos e Roteiros já aplicam.
+
+    Sem isto, um usuário interno preso à Mindset lia — e DECIDIA — os pedidos
+    da Bill Gates. Aprovar cria personagem e recusar é irreversível, então a
+    fila não podia ser o único lugar do módulo sem recorte. Admin e usuário
+    sem equipe continuam vendo tudo (`_user_equipes` devolve None).
+    """
+    permitidas = _user_equipes(user)
+    if permitidas is None:
+        return False
+    return (req.equipe or "").strip().lower() not in permitidas
+
+
 @router.get("/requisicoes")
 async def listar_requisicoes(
     session: Annotated[AsyncSession, Depends(get_session)],
@@ -358,6 +373,9 @@ async def listar_requisicoes(
         MarketingPersonagemRequisicao.created_at.desc()
     )
     q = q.where(MarketingPersonagemRequisicao.status == (status or STATUS_PENDENTE))
+    permitidas = _user_equipes(user)
+    if permitidas is not None:
+        q = q.where(func.lower(MarketingPersonagemRequisicao.equipe).in_(permitidas))
     linhas = (await session.execute(q)).scalars().all()
     return {"requisicoes": [_requisicao_out(r) for r in linhas]}
 
@@ -380,7 +398,9 @@ async def aprovar_requisicao(
     veio aquele rosto.
     """
     req = await session.get(MarketingPersonagemRequisicao, requisicao_id)
-    if req is None:
+    if req is None or _fora_da_equipe(user, req):
+        # 404, não 403: para quem não é da equipe, o pedido não existe — é a
+        # mesma régua que o portal usa do lado de fora.
         raise HTTPException(404, detail={"code": "requisicao_nao_encontrada"})
     if req.status != STATUS_PENDENTE:
         raise HTTPException(409, detail={"code": "ja_decidida", "status": req.status})
@@ -425,7 +445,9 @@ async def recusar_requisicao(
     """Recusar guarda o motivo. Recusa sem motivo é a que volta igual na semana
     seguinte, e aí alguém gasta o mesmo tempo de novo."""
     req = await session.get(MarketingPersonagemRequisicao, requisicao_id)
-    if req is None:
+    if req is None or _fora_da_equipe(user, req):
+        # 404, não 403: para quem não é da equipe, o pedido não existe — é a
+        # mesma régua que o portal usa do lado de fora.
         raise HTTPException(404, detail={"code": "requisicao_nao_encontrada"})
     if req.status != STATUS_PENDENTE:
         raise HTTPException(409, detail={"code": "ja_decidida", "status": req.status})
