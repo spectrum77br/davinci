@@ -13,6 +13,7 @@ from app.models.claude_conector import ClaudeConector
 from app.models.company import Cadastro, CadastroStore, Company, Store
 from app.models.company_certificate import CompanyCertificate
 from app.models.devolucao_anexo import DevolucaoAnexo
+from app.models.devolucao_mensagem_comprador import DevolucaoMensagemComprador
 from app.models.devolucao_rastreio import DevolucaoRastreio
 from app.models.devolution import Devolution
 from app.models.enums import (
@@ -211,6 +212,7 @@ __all__ = [
     "EMAIL_CONTEXTOS",
     "EmailContexto",
     "DevolucaoAnexo",
+    "DevolucaoMensagemComprador",
     "Devolution",
     "EstoqueDiaFinalizado",
     "EstoquePedidoVideo",

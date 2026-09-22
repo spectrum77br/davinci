@@ -99,6 +99,11 @@ type DevolutionRow = {
   // Só na resposta do PATCH que trocou o motivo com chamado aberto (21/09):
   // atualizado | atualizado_sem_api | substituido | ja_enviada | encerrado | kit_parcial.
   chamado_troca_motivo?: string | null
+  // Mensagem ao comprador pedindo a senha (motivo Bloqueado; só a Shopee tem
+  // canal): pendente | enviada | falhou | cancelada | sem_canal.
+  senha_status?: string | null
+  senha_enviada_at?: string | null
+  senha_erro?: string | null
   anexos?: DevolucaoAnexo[]
 }
 
@@ -256,6 +261,34 @@ function mlStatusLabel(row: DevolutionRow): string {
     return plat === 'Amazon' ? 'Amazon: SAFE-T só no Seller Central (sem API) — abrir na mão' : `${plat}: sem API — abrir na mão`
   }
   return ''
+}
+// Mensagem ao comprador pedindo a senha (Vinicius 22/09). Só a Shopee tem
+// canal: no ML a devolução cancela o pedido e o chat fecha; na TikTok falta o
+// escopo de atendimento. Por isso `sem_canal` é um estado legítimo, e não erro.
+function senhaLabel(row: DevolutionRow): string {
+  const st = row.senha_status
+  if (!st) return ''
+  if (st === 'enviada') {
+    const d = row.senha_enviada_at ? new Date(row.senha_enviada_at) : null
+    const quando = d ? ` ${d.toLocaleDateString('pt-BR')} ${d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}` : ''
+    return `Senha pedida ao cliente${quando}`
+  }
+  if (st === 'pendente') return 'Senha: pedido na fila'
+  if (st === 'falhou') return `Senha: não saiu — ${row.senha_erro || 'erro'}`
+  if (st === 'cancelada') return 'Senha: pedido cancelado (motivo mudou)'
+  if (st === 'sem_canal') {
+    const plat = platNome(row)
+    return `Senha: ${plat} não deixa falar com o comprador — pedir na mão`
+  }
+  return ''
+}
+function senhaClass(row: DevolutionRow): string {
+  const st = row.senha_status
+  if (st === 'enviada') return 'text-emerald-700 dark:text-emerald-300'
+  if (st === 'falhou') return 'text-red-600 dark:text-red-400'
+  if (st === 'sem_canal') return 'text-sky-700 dark:text-sky-300'
+  if (st === 'cancelada') return 'text-muted-foreground'
+  return 'text-amber-700 dark:text-amber-300'
 }
 function mlStatusClass(row: DevolutionRow): string {
   const st = row.chamado_ml_status
@@ -2846,6 +2879,12 @@ async function backfillAddresses() {
                 :class="mlStatusClass(row)"
                 :title="mlStatusLabel(row)"
               >{{ mlStatusLabel(row) }}</div>
+              <div
+                v-if="row.senha_status"
+                class="mt-0.5 max-w-[140px] whitespace-normal text-[10px] leading-tight"
+                :class="senhaClass(row)"
+                :title="senhaLabel(row)"
+              >{{ senhaLabel(row) }}</div>
             </td>
             <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
               <input

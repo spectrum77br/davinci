@@ -621,6 +621,94 @@ class ShopeeClient:
             raise RuntimeError(f"shopee_convert_image sem url: {str(body)[:300]}")
         return url
 
+    # ---- chat com o comprador (sellerchat) ---------------------------------
+    #
+    # Medido 22/09/2026 nas 14 lojas: `get_conversation_list` responde 200 e
+    # `send_message`/`upload_image` com corpo vazio respondem `param_error`
+    # (e não `api_suspended`), ou seja, o módulo Chat está concedido — é o que
+    # a doc da Shopee promete pro tipo de app "Seller In-house System".
+    # Teto oficial no BR: 6.000 mensagens/dia por loja.
+
+    async def get_order_buyer(self, order_sn: str) -> dict:
+        """Comprador do pedido: `{"buyer_user_id": int, "buyer_username": str}`.
+        É de onde sai o `to_id` do chat — a devolução não traz o id numérico, só
+        o username mascarado. Funciona com o pedido já COMPLETED/CANCELLED
+        (medido). `{}` quando a Shopee não devolve o pedido."""
+        resp = await self._call(
+            "GET",
+            "/api/v2/order/get_order_detail",
+            params={
+                "order_sn_list": order_sn,
+                "response_optional_fields": "buyer_user_id,buyer_username,order_status",
+            },
+            what="shopee_order_buyer",
+        )
+        lista = resp.get("order_list") or []
+        for o in lista:
+            if isinstance(o, dict):
+                return o
+        return {}
+
+    async def chat_send_message(
+        self, to_id: int | str, *, text: str = "", image_url: str = ""
+    ) -> dict:
+        """Manda UMA mensagem pro comprador no chat da loja
+        (POST /api/v2/sellerchat/send_message). `text` → `message_type=text`;
+        `image_url` (vindo do `chat_upload_image`) → `message_type=image`.
+        Devolve o corpo da Shopee, que traz `message_id` e `conversation_id` —
+        o `conversation_id` é a ÚNICA forma de reler a conversa depois (a API
+        não busca conversa por comprador)."""
+        if bool(text) == bool(image_url):
+            raise ValueError("chat_send_message: mande texto OU imagem")
+        if image_url:
+            corpo = {"message_type": "image", "content": {"image_url": image_url}}
+        else:
+            corpo = {"message_type": "text", "content": {"text": text}}
+        return await self._call(
+            "POST",
+            "/api/v2/sellerchat/send_message",
+            json={"to_id": int(to_id), **corpo},
+            what="shopee_chat_send",
+        )
+
+    async def chat_upload_image(
+        self, filename: str, content: bytes, mime: str = "image/jpeg"
+    ) -> str:
+        """Sobe a imagem do chat (POST multipart /api/v2/sellerchat/upload_image)
+        e devolve a `url` que entra no `chat_send_message(image_url=...)`.
+        O nome do campo multipart é `file` (o que o SDK oficial usa); a Shopee
+        não publica o teto de tamanho do chat, então quem chama reduz antes."""
+        path = "/api/v2/sellerchat/upload_image"
+        r = await self._request_multipart(path, files={"file": (filename, content, mime)})
+        body = _corpo_json(r, "shopee_chat_upload")
+        if body.get("error") in _AUTH_CODES:
+            await self.refresh()
+            r = await self._request_multipart(path, files={"file": (filename, content, mime)})
+            body = _corpo_json(r, "shopee_chat_upload")
+        if body.get("error"):
+            raise RuntimeError(f"shopee_chat_upload {body.get('error')}: {body.get('message')}")
+        resp = body.get("response") or {}
+        url = str(resp.get("url") or "").strip()
+        if not url:
+            raise RuntimeError(f"shopee_chat_upload sem url: {str(body)[:300]}")
+        return url
+
+    async def chat_messages(self, conversation_id: str, *, page_size: int = 20) -> list[dict]:
+        """Mensagens de UMA conversa (GET /api/v2/sellerchat/get_message), das
+        mais novas pras mais antigas. NUNCA chamar `read_conversation` junto: a
+        conversa ficaria marcada como lida e a equipe perderia o sinal no
+        Duoke/Seller Center. Quem mandou se decide por
+        `from_shop_id == shop_id` — `from_shop_id != 0` NÃO serve, o comprador
+        também vem com um (medido 22/09)."""
+        resp = await self._call(
+            "GET",
+            "/api/v2/sellerchat/get_message",
+            params={"conversation_id": str(conversation_id), "page_size": min(page_size, 50)},
+            what="shopee_chat_mensagens",
+        )
+        msgs = resp.get("messages") or []
+        return [m for m in msgs if isinstance(m, dict)]
+
     async def dispute(
         self,
         return_sn: str,

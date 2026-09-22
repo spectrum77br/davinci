@@ -380,6 +380,7 @@ _CLEANUP_TABLES = (
     "chamado_mensagem",
     "chamados",
     "refunds",
+    "devolucao_mensagem_comprador",
     "devolutions",
     "bling_envio_correcao",
     "bling_envio_evento",

@@ -36,6 +36,7 @@ from app.services import (
     chamados_devolucao,
     chamados_devolucao_sync,
     chamados_pendencias,
+    devolucao_mensagem_comprador,
     threema,
 )
 from app.services.advisory_lock import release_stale_sync_locks, try_user_sync_lock
@@ -1436,6 +1437,10 @@ async def chamados_replica_automatica(ctx: dict) -> None:
     async with session_scope() as s:
         pend = await chamados_devolucao.processar_pendentes(s)
     logger.info("chamados_devolucao_pendentes_done", **pend)
+    # Mensagem ao comprador (senha do produto travado) que não saiu na hora.
+    async with session_scope() as s:
+        msgs = await devolucao_mensagem_comprador.processar_pendentes(s)
+    logger.info("devolucao_mensagem_comprador_pendentes_done", **msgs)
     # Resposta da plataforma (TikTok/Shopee/ML) cai no histórico e fecha o chamado.
     async with session_scope() as s:
         resp = await chamados_devolucao_sync.sync_respostas(s)
@@ -1501,6 +1506,28 @@ async def chamado_devolucao_disparar(ctx: dict, chamado_id: str) -> None:
         chamado_id=chamado_id,
         status=(msg.status if msg is not None else None),
         erro=(msg.erro if msg is not None else None),
+    )
+
+
+async def devolucao_mensagem_comprador_enviar(ctx: dict, linha_id: str) -> None:
+    """Manda ao comprador, no chat da Shopee, o pedido da senha do produto que
+    voltou travado (motivo "Bloqueado"). Enfileirado pelo router de devoluções
+    ao marcar o motivo / anexar foto; o cron :25 retenta o que ficar pendente."""
+    async with session_scope() as s:
+        # Mesmo motivo do disparo da contestação: create + upload de foto podem
+        # gerar dois jobs do mesmo pedido — um de cada vez, e o segundo vê a
+        # linha já `enviada` e não manda nada.
+        await s.execute(
+            text("SELECT pg_advisory_xact_lock(hashtext(:k))"),
+            {"k": f"devolucao_mensagem_comprador:{linha_id}"},
+        )
+        linha = await devolucao_mensagem_comprador.enviar_por_id(s, linha_id)
+        await s.commit()
+    logger.info(
+        "devolucao_mensagem_comprador_done",
+        linha_id=linha_id,
+        status=(linha.status if linha is not None else None),
+        erro=(linha.erro if linha is not None else None),
     )
 
 
@@ -3190,6 +3217,7 @@ class WorkerSettings:
         auth_codes_cleanup,
         auto_link_run,
         chamado_devolucao_disparar,
+        devolucao_mensagem_comprador_enviar,
         bling_situacoes_sync,
         # O "Sincronizar Todos" completo (include_all_stock, ~30k links) leva
         # ~25-30 min só de chamadas externas — o job_timeout global de 1800s

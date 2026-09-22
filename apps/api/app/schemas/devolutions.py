@@ -105,6 +105,12 @@ class DevolutionOut(BaseModel):
     chamado_ml_erro: str | None = None
     # Plataforma do chamado (ml | tiktok | shopee | amazon…) — rotula o status.
     chamado_plataforma: str | None = None
+    # Mensagem ao comprador pedindo a senha (motivo "Bloqueado"; só Shopee tem
+    # canal): pendente | enviada | falhou | cancelada | sem_canal, com a data do
+    # envio e o erro quando não saiu. Preenchido só pela listagem.
+    senha_status: str | None = None
+    senha_enviada_at: datetime | None = None
+    senha_erro: str | None = None
     # Só na resposta do PATCH que trocou o motivo com chamado aberto (21/09):
     # atualizado (mesmo chamado, contestação ainda não saiu) | atualizado_sem_api
     # (idem, plataforma sem API: abrir na mão) | substituido (antigo Encerrado +

@@ -52,7 +52,7 @@ from app.schemas.devolutions import (
     StockCorrectionIn,
 )
 from app.models.enums import AlertSeverity, AlertType
-from app.services import chamados_devolucao
+from app.services import chamados_devolucao, devolucao_mensagem_comprador
 from app.services.alerts import emit_alert
 from app.services.devolution_delete import EstornoFalhouError, excluir_lancamento
 from app.services.devolution_stock_return import (
@@ -439,6 +439,15 @@ def _aplica_chamado(
     return out
 
 
+def _aplica_senha(out: DevolutionOut, linha) -> None:
+    """Estado da mensagem ao comprador (pedido da senha) na linha da tela."""
+    if linha is None:
+        return
+    out.senha_status = linha.status
+    out.senha_enviada_at = linha.enviada_at
+    out.senha_erro = linha.erro
+
+
 async def _completar_out(
     session: AsyncSession, row: Devolution, out: DevolutionOut
 ) -> DevolutionOut:
@@ -456,6 +465,12 @@ async def _completar_out(
     _aplica_situacao(
         out, (await _situacoes_por_pedido(session, {row.pedido_bling})).get((row.pedido_bling or "").strip())
     )
+    _aplica_senha(
+        out,
+        (await devolucao_mensagem_comprador.por_pedidos(session, {row.pedido_bling})).get(
+            ((row.pedido_bling or "").strip(), row.conta or "")
+        ),
+    )
     return out
 
 
@@ -463,16 +478,21 @@ async def _chamado_devolucao_apos_commit(
     session: AsyncSession, row: Devolution
 ) -> None:
     """Motivo que pede chamado → registra na aba e, se for ML, dispara a
-    abertura (worker; inline sem fila). Chamado por create/patch/anexo DEPOIS
-    do commit da linha."""
+    abertura (worker; inline sem fila). Motivo "Bloqueado" na Shopee → também
+    a mensagem ao comprador pedindo a senha (22/09). Chamado por
+    create/patch/anexo DEPOIS do commit da linha."""
     ch = await chamados_devolucao.garantir_chamado(session, row)
+    # A mensagem ao comprador é independente do chamado: `garantir_chamado`
+    # devolve None em vários casos legítimos (abertura já enviada, plataforma
+    # sem API) e a senha continua tendo que ser pedida.
+    msg_comprador = await devolucao_mensagem_comprador.garantir(session, row)
     # Commita SEMPRE: o registro na aba vale pra qualquer plataforma, mesmo
     # quando não há disparo pro ML (Shopee/TikTok ficam canal manual).
     await session.commit()
     await session.refresh(row)
-    if ch is None:
-        return
-    await chamados_devolucao.agendar_disparo(session, ch, row)
+    if ch is not None:
+        await chamados_devolucao.agendar_disparo(session, ch, row)
+    await devolucao_mensagem_comprador.agendar(session, msg_comprador)
 
 
 @router.get("", response_model=DevolutionPage)
@@ -533,6 +553,9 @@ async def list_devolutions(
     aberturas = await _aberturas_por_chamado(session, chamados)
     anexos = await _anexos_por_devolucao(session, [dev.id for dev, _ in rows])
     situacoes = await _situacoes_por_pedido(session, {dev.pedido_bling for dev, _ in rows})
+    senhas = await devolucao_mensagem_comprador.por_pedidos(
+        session, {dev.pedido_bling for dev, _ in rows}
+    )
     items: list[DevolutionOut] = []
     for dev, cliente in rows:
         out = DevolutionOut.model_validate(dev)
@@ -541,6 +564,7 @@ async def list_devolutions(
         _aplica_chamado(out, ch, aberturas.get(ch.id) if ch is not None else None)
         out.anexos = anexos.get(dev.id, [])
         _aplica_situacao(out, situacoes.get((dev.pedido_bling or "").strip()))
+        _aplica_senha(out, senhas.get(((dev.pedido_bling or "").strip(), dev.conta or "")))
         items.append(out)
 
     return DevolutionPage(

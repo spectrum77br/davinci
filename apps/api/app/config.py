@@ -99,6 +99,14 @@ class Settings(BaseSettings):
     # Amazon descarta o e-mail). Ver services/logistica_cliente_mensagens.
     amazon_mensagens_cliente: bool = False
 
+    # Mensagem ao COMPRADOR pelo chat da Shopee quando a devolução volta
+    # travada (motivo "Bloqueado"): pede a senha da tela / o segredo do
+    # cadeado. Ver services/devolucao_mensagem_comprador. Ligado — foi pedido
+    # explicitamente em 22/09; desligar aqui é o freio de mão se a Shopee
+    # reclamar do envio automático (a FAQ do Chat API proíbe "proactive order
+    # updates" e a conta é da casa).
+    shopee_mensagens_comprador: bool = True
+
     # Melhor Envio — confere o frete da impressão tipo "próprio" (só Amazon).
     # `melhor_envio_token`: Bearer token OAuth2 da conta ME (calcula frete).
     # `melhor_envio_sandbox`: usa o ambiente de testes do ME quando True.
