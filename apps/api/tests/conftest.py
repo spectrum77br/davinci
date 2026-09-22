@@ -332,6 +332,9 @@ _CLEANUP_TABLES = (
     "marketing_roteiro_refs",
     "marketing_roteiros",
     "marketing_personagem_arquivos",
+    # Requisição referencia personagem (SET NULL) e sobrevive à decisão: sem
+    # limpar aqui, a fila de um teste aparece no de outro arquivo.
+    "marketing_personagem_requisicoes",
     "marketing_personagens",
     "dm_mensagens",  # FK -> dm_conversas: antes dela
     "dm_contas",  # FK -> redes_sociais

@@ -65,6 +65,7 @@ from uuid import UUID, uuid4
 import structlog
 from fastapi import APIRouter, Depends, File, Header, HTTPException, UploadFile, status
 from fastapi.responses import FileResponse
+from pydantic import BaseModel
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -73,6 +74,10 @@ from app.config import get_settings
 from app.db import get_session
 from app.models.marketing import MarketingCreative, MarketingCreativeFile
 from app.models.marketing_personagem import MarketingPersonagem, MarketingPersonagemArquivo
+from app.models.marketing_personagem_requisicao import (
+    STATUS_PENDENTE,
+    MarketingPersonagemRequisicao,
+)
 from app.models.marketing_roteiro import MarketingRoteiro, MarketingRoteiroRef
 from app.routers.marketing_creatives import (
     MAX_BYTES_ARQUIVO,
@@ -455,6 +460,51 @@ async def listar_personagens(
     return {"equipe": equipe, "personagens": [_personagem_out(p) for p in linhas]}
 
 
+@router.get("/personagens/requisicoes")
+async def listar_minhas_requisicoes(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    equipe: Annotated[str, Depends(equipe_do_token)],
+) -> dict[str, Any]:
+    """Os pedidos DESTA agência, com o veredito e o motivo da recusa.
+
+    Sem esta rota a recusa era um buraco: o motivo ficava guardado no banco e
+    quem pediu nunca lia — então o mesmo personagem voltava na semana seguinte,
+    igual, e alguém gastava o mesmo tempo de novo. Guardar o porquê só vale se
+    o porquê chegar de volta.
+
+    Declarada ANTES de `/personagens/{personagem_id}` de propósito: o FastAPI
+    casa na ordem, e depois dela "requisicoes" viraria um UUID inválido — 422
+    em vez da fila.
+    """
+    linhas = (
+        (
+            await session.execute(
+                select(MarketingPersonagemRequisicao)
+                .where(MarketingPersonagemRequisicao.equipe == equipe)
+                .order_by(MarketingPersonagemRequisicao.created_at.desc())
+                .limit(LIMITE_PADRAO)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return {
+        "equipe": equipe,
+        "requisicoes": [
+            {
+                "id": str(r.id),
+                "nome": r.nome,
+                "descricao": r.descricao,
+                "status": r.status,
+                "motivo": r.motivo,
+                "criado_em": r.created_at.isoformat() if r.created_at else None,
+                "decidido_em": r.decidido_em.isoformat() if r.decidido_em else None,
+            }
+            for r in linhas
+        ],
+    }
+
+
 @router.get("/personagens/{personagem_id}")
 async def ver_personagem(
     personagem_id: UUID,
@@ -693,3 +743,140 @@ async def entregar_do_roteiro(
         arquivos=entraram,
     )
     return _linha_out(row)
+
+
+class VersaoIn(BaseModel):
+    """O texto da agência. Título é opcional: sem ele, herda o do original."""
+
+    texto: str
+    titulo: str | None = None
+
+
+@router.post("/roteiros/{roteiro_id}/versao")
+async def criar_versao(
+    roteiro_id: UUID,
+    payload: VersaoIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    equipe: Annotated[str, Depends(equipe_do_token)],
+) -> dict[str, Any]:
+    """A agência escreve a versão dela. O original não é tocado.
+
+    Roteiro virou ideia, e ideia se discute — mas deixar a agência reescrever o
+    campo apagaria o "antes". Sem o par original/versão, some a forma de saber
+    se a ideia que a casa propôs prestava, que é a mesma comparação que o
+    `aprovado` do criativo existe para permitir. Some também qualquer defesa
+    contra dois lados salvando o mesmo `texto`: a tabela não tem versionamento,
+    e último a salvar ganharia em silêncio.
+
+    A versão nasce endereçada SÓ à agência que a escreveu. A ideia da casa
+    continua valendo para as duas; a leitura que uma delas fez é dela.
+    """
+    original = (
+        await session.execute(
+            select(MarketingRoteiro).where(
+                MarketingRoteiro.id == roteiro_id, *_visivel_pra_fora(equipe)
+            )
+        )
+    ).scalar_one_or_none()
+    if original is None:
+        raise HTTPException(404, detail={"code": "roteiro_nao_encontrado"})
+
+    texto = (payload.texto or "").strip()
+    if not texto:
+        raise HTTPException(400, detail={"code": "texto_obrigatorio"})
+    # Versão de versão vira corrente sem fim e ninguém acha mais o começo: a
+    # origem aponta sempre para a ideia de partida.
+    raiz = original.origem_id or original.id
+
+    row = MarketingRoteiro(
+        id=uuid4(),
+        titulo=(payload.titulo or original.titulo)[:160],
+        texto=texto,
+        marca=original.marca,
+        marca_id=original.marca_id,
+        sku=original.sku,
+        product_id=original.product_id,
+        equipe_destino=equipe,
+        origem_id=raiz,
+        ativo=True,
+    )
+    session.add(row)
+    await session.commit()
+    logger.info(
+        "portal_versao_de_roteiro",
+        roteiro_id=str(row.id),
+        origem_id=str(raiz),
+        equipe=equipe,
+    )
+    return {"id": str(row.id), "origem_id": str(raiz), "titulo": row.titulo}
+
+
+class RequisicaoIn(BaseModel):
+    """Proposta de personagem vinda da agência.
+
+    Os dois campos de origem são obrigatórios no schema, e não só no banco, para
+    o erro chegar como 422 explicando o que falta — e não como 500 de constraint.
+    """
+
+    nome: str
+    descricao: str | None = None
+    justificativa: str | None = None
+    origem_imagem: str
+    origem_voz: str
+    cessao: bool = False
+    cessao_obs: str | None = None
+
+
+@router.post("/personagens/requisicao", status_code=201)
+async def requisitar_personagem(
+    payload: RequisicaoIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    equipe: Annotated[str, Depends(equipe_do_token)],
+) -> dict[str, Any]:
+    """A agência PROPÕE um personagem. Ninguém é criado aqui.
+
+    O personagem só nasce quando alguém de dentro aprova — e a requisição existe
+    justamente para que esse alguém veja a procedência antes de dizer sim.
+    Súmula 403 do STJ: uso comercial de imagem de pessoa basta para indenizar,
+    sem prova de prejuízo. Rosto sem origem declarada não deveria nem chegar à
+    mesa de quem decide.
+
+    O ARQUIVO não sobe por aqui de propósito: quem guarda a foto e o MP3 é quem
+    responde por eles. A casa carrega os arquivos depois de aprovar, junto com o
+    papel da cessão.
+    """
+    nome = payload.nome.strip()
+    if not nome:
+        raise HTTPException(400, detail={"code": "nome_obrigatorio"})
+    for campo in ("origem_imagem", "origem_voz"):
+        if not (getattr(payload, campo) or "").strip():
+            raise HTTPException(400, detail={"code": f"{campo}_obrigatorio"})
+
+    # Nome repetido em personagem já é erro no cadastro interno; aqui a conferência
+    # é para a agência saber na hora, em vez de esperar a recusa de alguém.
+    existe = (
+        await session.execute(
+            select(MarketingPersonagem.id).where(
+                func.lower(MarketingPersonagem.nome) == nome.lower()
+            )
+        )
+    ).first()
+    if existe is not None:
+        raise HTTPException(409, detail={"code": "personagem_ja_existe"})
+
+    row = MarketingPersonagemRequisicao(
+        id=uuid4(),
+        nome=nome,
+        descricao=(payload.descricao or "").strip() or None,
+        justificativa=(payload.justificativa or "").strip() or None,
+        origem_imagem=payload.origem_imagem.strip(),
+        origem_voz=payload.origem_voz.strip(),
+        cessao=bool(payload.cessao),
+        cessao_obs=(payload.cessao_obs or "").strip() or None,
+        equipe=equipe,
+        status=STATUS_PENDENTE,
+    )
+    session.add(row)
+    await session.commit()
+    logger.info("portal_requisicao_personagem", requisicao_id=str(row.id), equipe=equipe)
+    return {"id": str(row.id), "status": row.status}

@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import contextlib
 import shutil
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any
 from uuid import UUID, uuid4
@@ -44,6 +45,12 @@ from app.config import get_settings
 from app.db import get_session
 from app.deps.auth import require_permission
 from app.models import MarketingPersonagem, MarketingPersonagemArquivo, User
+from app.models.marketing_personagem_requisicao import (
+    STATUS_APROVADA,
+    STATUS_PENDENTE,
+    STATUS_RECUSADA,
+    MarketingPersonagemRequisicao,
+)
 from app.services.marketing.anexos import (
     _EXT_AUDIO,
     _EXT_IMAGEM,
@@ -314,3 +321,119 @@ async def apagar_arquivo(
     row.arquivos.remove(rec)
     await session.commit()
     return _out(row)
+
+# ─────────────────────── requisições vindas das agências ───────────────────────
+# O canal externo PROPÕE; aqui é onde a casa decide. O personagem só existe
+# depois de alguém olhar a procedência e dizer sim — é esse passo que a Súmula
+# 403 do STJ torna caro de pular.
+
+
+def _requisicao_out(r: MarketingPersonagemRequisicao) -> dict[str, Any]:
+    return {
+        "id": str(r.id),
+        "nome": r.nome,
+        "descricao": r.descricao,
+        "justificativa": r.justificativa,
+        "origem_imagem": r.origem_imagem,
+        "origem_voz": r.origem_voz,
+        "cessao": r.cessao,
+        "cessao_obs": r.cessao_obs,
+        "equipe": r.equipe,
+        "status": r.status,
+        "motivo": r.motivo,
+        "personagem_id": str(r.personagem_id) if r.personagem_id else None,
+        "criado_em": r.created_at.isoformat() if r.created_at else None,
+        "decidido_em": r.decidido_em.isoformat() if r.decidido_em else None,
+    }
+
+
+@router.get("/requisicoes")
+async def listar_requisicoes(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(_ver)],
+    status: str | None = None,
+) -> dict[str, Any]:
+    """A fila. Sem filtro, vêm só as pendentes — que é o que exige ação."""
+    q = select(MarketingPersonagemRequisicao).order_by(
+        MarketingPersonagemRequisicao.created_at.desc()
+    )
+    q = q.where(MarketingPersonagemRequisicao.status == (status or STATUS_PENDENTE))
+    linhas = (await session.execute(q)).scalars().all()
+    return {"requisicoes": [_requisicao_out(r) for r in linhas]}
+
+
+class DecisaoIn(BaseModel):
+    motivo: str | None = None
+
+
+@router.post("/requisicoes/{requisicao_id}/aprovar")
+async def aprovar_requisicao(
+    requisicao_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(_editar)],
+) -> dict[str, Any]:
+    """Aprovar CRIA o personagem — com nome e descrição, sem arquivo.
+
+    A foto e o MP3 sobem depois, pelo caminho normal, porque quem carrega o
+    arquivo é quem responde por ele. A requisição fica apontando para o
+    personagem criado: é por esse rastro que se audita, meses depois, de onde
+    veio aquele rosto.
+    """
+    req = await session.get(MarketingPersonagemRequisicao, requisicao_id)
+    if req is None:
+        raise HTTPException(404, detail={"code": "requisicao_nao_encontrada"})
+    if req.status != STATUS_PENDENTE:
+        raise HTTPException(409, detail={"code": "ja_decidida", "status": req.status})
+
+    # O índice de nome único é do banco; conferir aqui é o que transforma a
+    # corrida em 409 legível em vez de 500 de constraint.
+    existe = (
+        await session.execute(
+            select(MarketingPersonagem.id).where(
+                func.lower(MarketingPersonagem.nome) == req.nome.lower()
+            )
+        )
+    ).first()
+    if existe is not None:
+        raise HTTPException(409, detail={"code": "personagem_ja_existe"})
+
+    p = MarketingPersonagem(id=uuid4(), nome=req.nome, descricao=req.descricao)
+    session.add(p)
+    await session.flush()
+
+    req.status = STATUS_APROVADA
+    req.personagem_id = p.id
+    req.decidido_por = user.id
+    req.decidido_em = datetime.now(UTC)
+    await session.commit()
+    logger.info(
+        "requisicao_personagem_aprovada",
+        requisicao_id=str(req.id),
+        personagem_id=str(p.id),
+        user_id=str(user.id),
+    )
+    return {"requisicao": _requisicao_out(req), "personagem_id": str(p.id)}
+
+
+@router.post("/requisicoes/{requisicao_id}/recusar")
+async def recusar_requisicao(
+    requisicao_id: UUID,
+    payload: DecisaoIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(_editar)],
+) -> dict[str, Any]:
+    """Recusar guarda o motivo. Recusa sem motivo é a que volta igual na semana
+    seguinte, e aí alguém gasta o mesmo tempo de novo."""
+    req = await session.get(MarketingPersonagemRequisicao, requisicao_id)
+    if req is None:
+        raise HTTPException(404, detail={"code": "requisicao_nao_encontrada"})
+    if req.status != STATUS_PENDENTE:
+        raise HTTPException(409, detail={"code": "ja_decidida", "status": req.status})
+
+    req.status = STATUS_RECUSADA
+    req.motivo = (payload.motivo or "").strip() or None
+    req.decidido_por = user.id
+    req.decidido_em = datetime.now(UTC)
+    await session.commit()
+    logger.info("requisicao_personagem_recusada", requisicao_id=str(req.id), user_id=str(user.id))
+    return _requisicao_out(req)

@@ -112,6 +112,9 @@ from app.models.marketing_personagem import (
     MarketingPersonagem,
     MarketingPersonagemArquivo,
 )
+from app.models.marketing_personagem_requisicao import (  # noqa: F401
+    MarketingPersonagemRequisicao,
+)
 from app.models.marketing_postagem import (
     STATUS_EM_VOO,
     MarketingPostagem,

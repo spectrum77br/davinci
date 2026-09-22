@@ -87,6 +87,17 @@ class MarketingRoteiro(Base, TimestampMixin):
     # NULL = as DUAS agências. Releia o docstring do módulo antes de usar.
     equipe_destino: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
 
+    # De onde esta versão saiu. A agência não reescreve o roteiro da casa: ela
+    # cria a versão dela e as duas ficam lado a lado. Sem o par, some a forma de
+    # saber se a ideia de partida prestava — que é o mesmo motivo de existir o
+    # `aprovado` no criativo.
+    origem_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("marketing_roteiros.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
     # Único interruptor de visibilidade. Desligar tira da lista da agência E
     # das rotas de bytes — a imagem de referência para de ser servida junto,
     # senão despublicar não despublicaria nada pra quem já anotou o id.

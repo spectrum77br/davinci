@@ -11,6 +11,7 @@ Depois vem o que separa uma agência da outra, e o que a lista branca esconde.
 from __future__ import annotations
 
 from pathlib import Path
+from uuid import UUID
 
 import pytest
 from httpx import AsyncClient
@@ -541,3 +542,166 @@ async def test_entrega_sem_token_401(client: AsyncClient, db: AsyncSession):
         files={"files": ("peca.mp4", b"x", "video/mp4")},
     )
     assert r.status_code == 401
+
+
+# ─────────────── versão do roteiro, e não edição por cima ───────────────
+
+
+async def test_versao_cria_nova_linha_e_nao_toca_no_original(
+    client: AsyncClient, db: AsyncSession
+):
+    r0 = await _roteiro(db, destino=None, texto="ideia da casa")
+    r = await client.post(
+        f"/api/portal/roteiros/{r0.id}/versao",
+        headers={"X-Portal-Token": TOK_A},
+        json={"texto": "a leitura que a agência fez"},
+    )
+    assert r.status_code == 200
+    novo = r.json()
+    assert novo["origem_id"] == str(r0.id)
+
+    await db.refresh(r0)
+    assert r0.texto == "ideia da casa"  # o "antes" sobrevive
+
+    versao = (
+        await db.execute(
+            select(MarketingRoteiro).where(MarketingRoteiro.id == UUID(novo["id"]))
+        )
+    ).scalar_one()
+    # Endereçada só a quem escreveu: a ideia da casa continua valendo pras duas,
+    # a leitura de uma delas é dela.
+    assert versao.equipe_destino == "alpha"
+    assert versao.marca == r0.marca and versao.sku == r0.sku
+
+
+async def test_versao_de_versao_aponta_pra_raiz(client: AsyncClient, db: AsyncSession):
+    """Senão vira corrente e ninguém acha mais a ideia de partida."""
+    r0 = await _roteiro(db, destino=None)
+    p = await client.post(
+        f"/api/portal/roteiros/{r0.id}/versao",
+        headers={"X-Portal-Token": TOK_A},
+        json={"texto": "primeira versão"},
+    )
+    filha = p.json()["id"]
+    n = await client.post(
+        f"/api/portal/roteiros/{filha}/versao",
+        headers={"X-Portal-Token": TOK_A},
+        json={"texto": "segunda versão"},
+    )
+    assert n.status_code == 200
+    assert n.json()["origem_id"] == str(r0.id)
+
+
+async def test_versao_sem_texto_recusada(client: AsyncClient, db: AsyncSession):
+    r0 = await _roteiro(db, destino=None)
+    r = await client.post(
+        f"/api/portal/roteiros/{r0.id}/versao",
+        headers={"X-Portal-Token": TOK_A},
+        json={"texto": "   "},
+    )
+    assert r.status_code == 400
+
+
+async def test_versao_de_roteiro_de_outra_agencia_404(client: AsyncClient, db: AsyncSession):
+    r0 = await _roteiro(db, destino="beta")
+    r = await client.post(
+        f"/api/portal/roteiros/{r0.id}/versao",
+        headers={"X-Portal-Token": TOK_A},
+        json={"texto": "x"},
+    )
+    assert r.status_code == 404
+
+
+# ─────────────── requisição de personagem ───────────────
+
+
+async def test_requisicao_nasce_pendente_e_nao_cria_personagem(
+    client: AsyncClient, db: AsyncSession
+):
+    r = await client.post(
+        "/api/portal/personagens/requisicao",
+        headers={"X-Portal-Token": TOK_A},
+        json={
+            "nome": "Joana Enfermeira",
+            "descricao": "plantonista, 35 anos",
+            "origem_imagem": "gerada no Higgsfield, prompt e seed guardados",
+            "origem_voz": "banco de vozes licenciado da própria ferramenta",
+            "cessao": False,
+        },
+    )
+    assert r.status_code == 201
+    assert r.json()["status"] == "pendente"
+
+    # Ninguém vira personagem sem alguém de dentro aprovar.
+    achou = (
+        await db.execute(
+            select(MarketingPersonagem).where(MarketingPersonagem.nome == "Joana Enfermeira")
+        )
+    ).first()
+    assert achou is None
+
+
+async def test_requisicao_sem_procedencia_recusada(client: AsyncClient):
+    """Rosto sem origem declarada não chega à mesa de quem decide — Súmula 403."""
+    r = await client.post(
+        "/api/portal/personagens/requisicao",
+        headers={"X-Portal-Token": TOK_A},
+        json={"nome": "Sem Origem", "origem_imagem": "  ", "origem_voz": "  "},
+    )
+    assert r.status_code == 400
+
+
+async def test_requisicao_sem_campo_de_origem_e_422(client: AsyncClient):
+    r = await client.post(
+        "/api/portal/personagens/requisicao",
+        headers={"X-Portal-Token": TOK_A},
+        json={"nome": "Faltando"},
+    )
+    assert r.status_code == 422
+
+
+async def test_requisicao_de_nome_que_ja_existe_409(client: AsyncClient, db: AsyncSession):
+    db.add(MarketingPersonagem(nome="Lívia"))
+    await db.commit()
+    r = await client.post(
+        "/api/portal/personagens/requisicao",
+        headers={"X-Portal-Token": TOK_A},
+        json={"nome": "lívia", "origem_imagem": "x", "origem_voz": "y"},
+    )
+    assert r.status_code == 409
+
+
+async def test_requisicao_sem_token_401(client: AsyncClient):
+    r = await client.post(
+        "/api/portal/personagens/requisicao",
+        json={"nome": "X", "origem_imagem": "a", "origem_voz": "b"},
+    )
+    assert r.status_code == 401
+
+
+async def test_a_agencia_le_o_veredito_do_proprio_pedido(client: AsyncClient):
+    """A recusa volta COM o motivo — senão o mesmo pedido volta igual depois."""
+    await client.post(
+        "/api/portal/personagens/requisicao",
+        headers={"X-Portal-Token": TOK_A},
+        json={"nome": "Meu Pedido", "origem_imagem": "a", "origem_voz": "b"},
+    )
+    r = await client.get(
+        "/api/portal/personagens/requisicoes", headers={"X-Portal-Token": TOK_A}
+    )
+    assert r.status_code == 200, "a rota precisa vir ANTES de /personagens/{id}"
+    nomes = [x["nome"] for x in r.json()["requisicoes"]]
+    assert "Meu Pedido" in nomes
+
+
+async def test_uma_agencia_nao_ve_o_pedido_da_outra(client: AsyncClient):
+    await client.post(
+        "/api/portal/personagens/requisicao",
+        headers={"X-Portal-Token": TOK_A},
+        json={"nome": "So Da A", "origem_imagem": "a", "origem_voz": "b"},
+    )
+    r = await client.get(
+        "/api/portal/personagens/requisicoes", headers={"X-Portal-Token": TOK_B}
+    )
+    assert r.status_code == 200
+    assert "So Da A" not in [x["nome"] for x in r.json()["requisicoes"]]

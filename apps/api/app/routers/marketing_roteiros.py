@@ -128,6 +128,10 @@ def _roteiro_out(row: MarketingRoteiro) -> dict[str, Any]:
         "product_id": str(row.product_id) if row.product_id else None,
         # None = as DUAS agências. Ver o docstring do módulo.
         "equipe_destino": row.equipe_destino,
+        # Preenchido quando a linha é a VERSÃO que uma agência escreveu em cima
+        # de uma ideia da casa. Sem isto na resposta, a versão chega na tela
+        # parecendo uma ideia duplicada e ninguém sabe de onde saiu.
+        "origem_id": str(row.origem_id) if row.origem_id else None,
         "ativo": row.ativo,
         "referencias": [_ref_out(r) for r in row.refs],
         "personagens": [

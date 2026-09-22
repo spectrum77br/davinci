@@ -10,6 +10,8 @@ da extensão e não do uploader, o esquema do link, e a lápide do campo antigo.
 
 from __future__ import annotations
 
+from uuid import UUID
+
 import pytest
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -494,7 +496,7 @@ async def test_apagar_roteiro_nao_apaga_o_criativo(
     # Afirma sobre ESTA entrega, não sobre a contagem: criar o roteiro agora
     # abre uma linha por agência endereçada, então o total não é mais 1 — e
     # contar escondia que o assert antigo dependia da ordem do SELECT.
-    minha = next(l for l in linhas if l["id"] == criativo["id"])
+    minha = next(x for x in linhas if x["id"] == criativo["id"])
     assert minha["roteiro_id"] is None, "SET NULL: o briefing some, a entrega fica"
 
 
@@ -533,3 +535,104 @@ async def test_recusar_sem_escrever_nada_preserva_o_recado(
     apagado = await client.patch(f"/api/marketing/creatives/{c.id}", json={"feedback": "   "})
     assert apagado.json()["feedback"] is None
     assert apagado.json()["feedback_em"] is None
+
+
+# ─────────────── aprovação de requisição vinda da agência ───────────────
+# O caminho externo (portal) propõe; estes testes cobrem o lado de dentro, que é
+# onde o personagem realmente nasce.
+
+
+async def _requisicao(db, *, nome="Joana Enfermeira", status="pendente"):
+    from app.models.marketing_personagem_requisicao import MarketingPersonagemRequisicao
+
+    r = MarketingPersonagemRequisicao(
+        nome=nome,
+        descricao="plantonista, 35 anos",
+        origem_imagem="gerada no Higgsfield, prompt e seed guardados",
+        origem_voz="banco de vozes licenciado da ferramenta",
+        equipe="alpha",
+        status=status,
+    )
+    db.add(r)
+    await db.commit()
+    await db.refresh(r)
+    return r
+
+
+async def test_aprovar_cria_o_personagem_e_deixa_o_rastro(client, db, admin):
+    req = await _requisicao(db)
+    r = await client.post(
+        f"/api/marketing/personagens/requisicoes/{req.id}/aprovar"
+    )
+    assert r.status_code == 200
+    pid = r.json()["personagem_id"]
+
+    from app.models import MarketingPersonagem
+
+    p = await db.get(MarketingPersonagem, UUID(pid))
+    assert p is not None and p.nome == "Joana Enfermeira"
+
+    await db.refresh(req)
+    assert req.status == "aprovada"
+    # O rastro é o que permite auditar a procedência do rosto meses depois.
+    assert str(req.personagem_id) == pid
+    assert req.decidido_em is not None
+
+
+async def test_aprovar_duas_vezes_da_409(client, db, admin):
+    req = await _requisicao(db)
+    await client.post(
+        f"/api/marketing/personagens/requisicoes/{req.id}/aprovar"
+    )
+    r = await client.post(
+        f"/api/marketing/personagens/requisicoes/{req.id}/aprovar"
+    )
+    assert r.status_code == 409
+
+
+async def test_recusar_guarda_o_motivo(client, db, admin):
+    req = await _requisicao(db, nome="Outro Nome")
+    r = await client.post(
+        f"/api/marketing/personagens/requisicoes/{req.id}/recusar",
+        json={"motivo": "sem cessão escrita da voz"},
+    )
+    assert r.status_code == 200
+    await db.refresh(req)
+    assert req.status == "recusada"
+    assert req.motivo == "sem cessão escrita da voz"
+
+
+async def test_fila_traz_so_as_pendentes(client, db, admin):
+    await _requisicao(db, nome="Pendente Uma")
+    await _requisicao(db, nome="Já Decidida", status="aprovada")
+    r = await client.get("/api/marketing/personagens/requisicoes")
+    assert r.status_code == 200
+    nomes = [x["nome"] for x in r.json()["requisicoes"]]
+    # Afirmar a lista inteira tornaria o teste refém da ordem dos arquivos: outro
+    # teste que deixe uma pendente entra na fila e derruba este sem haver defeito.
+    assert "Pendente Uma" in nomes
+    assert "Já Decidida" not in nomes
+
+
+async def test_a_versao_da_agencia_chega_marcada_na_tela_de_dentro(
+    client: AsyncClient, db: AsyncSession, admin
+):
+    """`origem_id` tem que sair na resposta da tela de dentro.
+
+    Sem ele a versão que a agência escreveu entra na lista com o mesmo título
+    da ideia e vira duplicata sem explicação — e é justamente o par
+    ideia/versão que a rota do portal existe para preservar.
+    """
+    from app.models import MarketingRoteiro
+
+    ideia = (await client.post(R, json={"titulo": "Ideia da casa"})).json()
+    versao = (await client.post(R, json={"titulo": "Ideia da casa"})).json()
+
+    linha = await db.get(MarketingRoteiro, UUID(versao["id"]))
+    linha.origem_id = UUID(ideia["id"])
+    await db.commit()
+
+    lista = (await client.get(R)).json()
+    porid = {x["id"]: x for x in lista}
+    assert porid[ideia["id"]]["origem_id"] is None
+    assert porid[versao["id"]]["origem_id"] == ideia["id"]
