@@ -7,10 +7,17 @@ código. O cartão resolve isso: a mesma lista de passagens que ele veria no
 site dos Correios, desenhada numa imagem, indo anexada.
 
 Desenho no formato da página de rastreamento dos Correios (trilha amarela,
-título azul, data embaixo), SEM o logo deles: a peça é da loja, não um
-documento da transportadora — ela nasce aqui e acaba em contestação de
-marketplace, onde um documento com logo de terceiro é documento falso. O
-campo `logo` é pro logo da LOJA (o mesmo `marca.logo` das assinaturas).
+título azul, data embaixo), com o logo dos Correios no canto superior
+direito — Vinicius, 22/09/2026, olhando o cartão pronto: é o que faz o
+comprador reconhecer de quem é a informação antes de ler a primeira linha. O
+PNG vem do banco (`imagem_publica`, migração 0305), lido por
+`services/imagem_publica.py`; o cartão só desenha o que recebe em `logo`.
+
+Ressalva registrada junto com a decisão: a peça nasce aqui e às vezes termina
+em contestação de marketplace, onde uma imagem com o logo da transportadora
+pode ser lida como documento dela. O que está escrito é verdade — é o
+histórico que o 17track leu, e o rodapé diz que as movimentações são dos
+Correios e quando foram consultadas.
 
 Vinicius, 22/09: o cartão vai em TODOS os eventos, mesmo quando o 17track só
 tem "Etiqueta emitida" (pré-postagem) — mostrar que a etiqueta saiu já é
@@ -27,6 +34,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime
+from functools import lru_cache
 from zoneinfo import ZoneInfo
 
 import pymupdf
@@ -48,6 +56,13 @@ _CINZA_ICONE = (0.87, 0.89, 0.91)
 _BORDA = (0.85, 0.85, 0.88)
 _BRANCO = (1, 1, 1)
 _VERDE = (0.09, 0.55, 0.33)
+
+# Espaço do logo: da faixa amarela até um pouco antes da linha do cabeçalho
+# (y=82), à direita do código do objeto.
+_LOGO_CAIXA = pymupdf.Rect(_LARGURA - _MARGEM - 170, 16, _LARGURA - _MARGEM, 78)
+# A partir deste valor o pixel do logo conta como fundo e some (ver _logo_pronto).
+_FUNDO_CLARO = 240
+
 
 @dataclass(frozen=True)
 class Evento:
@@ -140,6 +155,50 @@ def _icone(page: pymupdf.Page, cx: float, cy: float, *, entregue: bool) -> None:
     shape.commit()
 
 
+@lru_cache(maxsize=4)
+def _logo_pronto(logo: bytes) -> tuple[bytes, float, float]:
+    """PNG do logo pronto pra desenhar, mais a largura e a altura dele.
+
+    Tira o fundo chapado claro: o PNG dos Correios que está no banco veio de
+    um recorte de tela, com fundo #F7F7F7 OPACO — desenhado no cartão branco,
+    viraria um quadradinho cinza em volta do logo. Aqui pixel quase branco
+    fica transparente; num logo que tenha letra branca o resultado é o mesmo
+    de antes (branco em cima de branco).
+
+    Guardado em cache porque uma rodada do robô desenha dezenas de cartões com
+    o mesmo logo — a varredura dos pixels roda uma vez. Imagem ilegível estoura
+    aqui, e o `gerar` segue sem ela.
+    """
+    pix = pymupdf.Pixmap(logo)
+    if pix.colorspace is None or pix.colorspace.n != 3:
+        pix = pymupdf.Pixmap(pymupdf.csRGB, pix)  # cinza/CMYK → RGB
+    if not pix.alpha:
+        pix = pymupdf.Pixmap(pix, 1)
+    if not pix.width or not pix.height:
+        raise ValueError("logo sem dimensão")
+    amostras = bytearray(pix.samples)
+    for i in range(0, len(amostras), pix.n):
+        if all(amostras[i + c] >= _FUNDO_CLARO for c in (0, 1, 2)):
+            amostras[i + 3] = 0
+    limpo = pymupdf.Pixmap(pix.colorspace, pix.width, pix.height, bytes(amostras), True)
+    return limpo.tobytes("png"), float(pix.width), float(pix.height)
+
+
+def _caixa_logo(larg: float, alt: float) -> pymupdf.Rect:
+    """Onde o logo entra: dentro de `_LOGO_CAIXA`, sem distorcer e encostado na
+    margem direita.
+
+    O `keep_proportion` do PyMuPDF centraliza a imagem no retângulo que recebe
+    — um logo mais alto que largo (o dos Correios é 205x161) ficaria boiando no
+    meio da caixa, longe da margem, parecendo desalinhado com o resto. Então a
+    caixa sai do tamanho exato do logo.
+    """
+    escala = min(_LOGO_CAIXA.width / larg, _LOGO_CAIXA.height / alt)
+    larg, alt = larg * escala, alt * escala
+    topo = _LOGO_CAIXA.y0 + (_LOGO_CAIXA.height - alt) / 2
+    return pymupdf.Rect(_LOGO_CAIXA.x1 - larg, topo, _LOGO_CAIXA.x1, topo + alt)
+
+
 def codigo_formatado(codigo: str) -> str:
     c = (codigo or "").strip().upper()
     return f"{c[:2]} {c[2:5]} {c[5:8]} {c[8:11]} {c[11:]}" if len(c) == 13 else c
@@ -155,7 +214,9 @@ def gerar(
     consultado_em: datetime,
     logo: bytes | None = None,
 ) -> bytes:
-    """PNG do cartão. `eventos` do mais novo pro mais antigo."""
+    """PNG do cartão. `eventos` do mais novo pro mais antigo; `logo` é o PNG do
+    canto superior direito (hoje o dos Correios) — sem ele o cartão sai igual,
+    só sem a figura."""
     if not eventos:
         raise ValueError("cartão de rastreio sem eventos")
     x_icone = _MARGEM + 22
@@ -178,14 +239,17 @@ def gerar(
     _texto(page, _MARGEM, 26, codigo_formatado(codigo), tamanho=21, fonte="hebo", cor=_AZUL)
     _texto(page, _MARGEM, 62, f"Pedido {pedido}", tamanho=10, cor=_CINZA)
 
-    # Logo da LOJA, canto superior direito, proporção mantida.
+    # Logo (o dos Correios), canto superior direito.
     if logo:
         try:
+            png_logo, larg_logo, alt_logo = _logo_pronto(logo)
             page.insert_image(
-                pymupdf.Rect(_LARGURA - _MARGEM - 170, 22, _LARGURA - _MARGEM, 74),
-                stream=logo, keep_proportion=True,
+                _caixa_logo(larg_logo, alt_logo), stream=png_logo, keep_proportion=True
             )
-        except (RuntimeError, ValueError):
+        # FzErrorBase entra na lista porque o erro que o PyMuPDF 1.27 levanta
+        # em imagem corrompida NÃO herda de RuntimeError (o `except` antigo
+        # deixaria passar e derrubaria o cartão inteiro).
+        except (RuntimeError, ValueError, pymupdf.mupdf.FzErrorBase):
             pass  # logo ilegível não derruba o cartão
 
     y = 90.0

@@ -289,6 +289,27 @@ def test_eventos_repetidos_em_dois_providers_contam_uma_vez():
     assert len(logistica_track.eventos_de_track_info(ti)) == 1
 
 
+_LOGO_COR = (214, 32, 39)
+
+
+def _logo_fake() -> bytes:
+    """PNG chapado, do tamanho do logo dos Correios (205x161)."""
+    import pymupdf
+
+    pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 205, 161), False)
+    pix.set_rect(pix.irect, _LOGO_COR)
+    return pix.tobytes("png")
+
+
+def _canto_superior_direito(png: bytes) -> tuple[int, int, int]:
+    """Cor de um ponto dentro da caixa do logo do cartão já renderizado."""
+    import pymupdf
+
+    pix = pymupdf.Pixmap(png)
+    # A caixa do logo vai de ~1014 a 1172 px (escala 2); 1140 cai dentro dela.
+    return pix.pixel(pix.width - 100, 90)
+
+
 def test_cartao_sai_mesmo_so_com_etiqueta_emitida():
     """Vinicius, 22/09: pedido que ainda não andou também leva a imagem."""
     from app.services import logistica_cartao_rastreio as cartao
@@ -357,7 +378,7 @@ def _patch_eventos(monkeypatch, retorno=None, erro: Exception | None = None):
 @pytest.mark.parametrize(
     "eventos", [[_EV_ETIQUETA], [_EV_TRANSFERENCIA, _EV_POSTADO, _EV_ETIQUETA]]
 )
-async def test_montar_cartao_com_qualquer_evento(monkeypatch, eventos):
+async def test_montar_cartao_com_qualquer_evento(db: AsyncSession, monkeypatch, eventos):
     """Basta o 17track ter UM evento — inclusive só a etiqueta emitida."""
     from app.services import logistica_track
 
@@ -366,23 +387,63 @@ async def test_montar_cartao_com_qualquer_evento(monkeypatch, eventos):
         monkeypatch,
         {row.rastreio: logistica_track.eventos_de_track_info(_track_info(eventos))},
     )
-    cartao = await msgs.montar_cartao(row)
+    cartao = await msgs.montar_cartao(db, row)
     assert cartao is not None
     nome, mime, png = cartao
     assert (nome, mime) == ("rastreio.png", "image/png") and png.startswith(b"\x89PNG")
 
 
 @pytest.mark.asyncio
-async def test_montar_cartao_nao_derruba_a_mensagem(monkeypatch):
+async def test_montar_cartao_nao_derruba_a_mensagem(db: AsyncSession, monkeypatch):
     """17track fora do ar, número desconhecido ou rastreio que não é dos
     Correios: a mensagem vai, só que sem imagem."""
     row = _linha()
     _patch_eventos(monkeypatch, erro=RuntimeError("17track 500"))
-    assert await msgs.montar_cartao(row) is None
+    assert await msgs.montar_cartao(db, row) is None
     _patch_eventos(monkeypatch, {})
-    assert await msgs.montar_cartao(row) is None
+    assert await msgs.montar_cartao(db, row) is None
     _patch_eventos(monkeypatch, erro=AssertionError("não devia nem consultar"))
-    assert await msgs.montar_cartao(_linha(rastreio="TIKTOK123")) is None
+    assert await msgs.montar_cartao(db, _linha(rastreio="TIKTOK123")) is None
+
+
+@pytest.mark.asyncio
+async def test_cartao_leva_o_logo_guardado_no_banco(db: AsyncSession, monkeypatch):
+    """Vinicius, 22/09: a figura do canto sai da linha de `imagem_publica` (o
+    mesmo id que o link /api/imagens/… abre). Sem a linha — e com uma imagem
+    ilegível — o cartão continua saindo, só que sem o logo."""
+    from app.models import ImagemPublica
+    from app.services import imagem_publica, logistica_track
+
+    monkeypatch.setattr(imagem_publica, "_cache", {})
+    row = _linha()
+    _patch_eventos(
+        monkeypatch,
+        {row.rastreio: logistica_track.eventos_de_track_info(_track_info([_EV_ETIQUETA]))},
+    )
+    sem_logo = await msgs.montar_cartao(db, row)
+    assert sem_logo is not None  # tabela vazia: cartão sai sem a figura
+
+    logo = _logo_fake()
+    db.add(
+        ImagemPublica(
+            id=imagem_publica.LOGO_CORREIOS,
+            nome="correios.png",
+            content_type="image/png",
+            size_bytes=len(logo),
+            blob=logo,
+        )
+    )
+    await db.commit()
+    com_logo = await msgs.montar_cartao(db, row)
+    assert com_logo is not None
+    assert _canto_superior_direito(com_logo[2]) == _LOGO_COR
+    assert _canto_superior_direito(sem_logo[2]) == (255, 255, 255)
+
+    # Lixo no lugar da imagem: a mensagem é o que importa, o cartão vai sem ela.
+    monkeypatch.setattr(imagem_publica, "_cache", {imagem_publica.LOGO_CORREIOS: b"nao e png"})
+    quebrado = await msgs.montar_cartao(db, row)
+    assert quebrado is not None
+    assert _canto_superior_direito(quebrado[2]) == (255, 255, 255)
 
 
 @pytest.mark.asyncio

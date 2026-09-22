@@ -46,6 +46,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.models import Logistica, LogisticaMensagemCliente, LogisticaMensagemTemplate
 from app.services import (
+    imagem_publica,
     logistica_amazon_canal,
     logistica_cartao_rastreio,
     logistica_rules,
@@ -311,7 +312,9 @@ class Sender(Protocol):
     ) -> None: ...
 
 
-async def montar_cartao(row: Logistica) -> tuple[str, str, bytes] | None:
+async def montar_cartao(
+    session: AsyncSession, row: Logistica
+) -> tuple[str, str, bytes] | None:
     """Cartão de rastreio pra anexar (nome, mime, png), ou None quando não faz
     sentido mandar imagem.
 
@@ -344,6 +347,9 @@ async def montar_cartao(row: Logistica) -> tuple[str, str, bytes] | None:
         )
         for e in brutos
     ]
+    # Logo dos Correios no canto (Vinicius, 22/09): sai do banco, não de pasta
+    # no servidor. Se a linha não estiver lá, o cartão vai sem a figura.
+    logo = await imagem_publica.carregar(session, imagem_publica.LOGO_CORREIOS)
     try:
         png = logistica_cartao_rastreio.gerar(
             codigo=rastreio,
@@ -352,6 +358,7 @@ async def montar_cartao(row: Logistica) -> tuple[str, str, bytes] | None:
             previsao=row.previsao_correios,
             eventos=eventos,
             consultado_em=datetime.now(UTC),
+            logo=logo,
         )
     except ValueError as e:
         logger.warning(
@@ -436,7 +443,7 @@ async def enviar_teste(
         sender = get_email_sender()
     # Pedido de verdade leva o cartão; o exemplo não tem rastreio que o
     # 17track conheça, então o teste sai sem imagem (e o retorno avisa).
-    cartao = await montar_cartao(row) if row.id is not None else None
+    cartao = await montar_cartao(session, row) if row.id is not None else None
     await sender.send(
         to=email, subject=assunto, html="", text=corpo,
         attachments=[cartao] if cartao else None,
@@ -499,7 +506,7 @@ async def enviar_agora(
 
     templates = await carregar_templates(session)
     assunto, corpo = renderizar(templates[evento], row)
-    cartao = await montar_cartao(row)
+    cartao = await montar_cartao(session, row)
     if sender is None:
         from app.services.email import get_email_sender
 
@@ -624,7 +631,7 @@ async def run(
     for r, ev in fila[:limit]:
         assunto, corpo = renderizar(templates[ev], r)
         if r.id not in cartoes:
-            cartoes[r.id] = await montar_cartao(r)
+            cartoes[r.id] = await montar_cartao(session, r)
         cartao = cartoes[r.id]
         m = hist.get((r.id, ev))
         if m is None:
