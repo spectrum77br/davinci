@@ -201,7 +201,7 @@ async def _avisar_threema(texto: str) -> None:
 
         destinos = _destinos_do_aviso()
         if destinos:
-            await threema.ThreemaClient().send_to_all(texto, destinos)
+            await threema.ThreemaClient(contexto="logistica").send_to_all(texto, destinos)
     except Exception as e:  # noqa: BLE001
         logger.warning("shipment_check_aviso_falhou", err=str(e)[:200])
 

@@ -555,7 +555,7 @@ async def enviar_threema(
         recipients = threema.parse_recipients(s.threema_recipients) or None
     texto = threema.compose_texto(texto, pedido=payload.pedido, loja=payload.loja)
     try:
-        result = await threema.ThreemaClient().send_to_all(
+        result = await threema.ThreemaClient(contexto="logistica").send_to_all(
             texto, recipients=recipients or None
         )
     except threema.ThreemaConfigError as e:
@@ -1283,7 +1283,9 @@ async def enviar_threema_pedido(
         loja=c.plataforma,
     )
     try:
-        result = await threema.ThreemaClient().send_to_all(texto, recipients=recipients or None)
+        result = await threema.ThreemaClient(contexto="logistica").send_to_all(
+            texto, recipients=recipients or None
+        )
     except threema.ThreemaConfigError as e:
         raise HTTPException(422, detail={"code": str(e)}) from e
     # Enviou pra ao menos um → o aviso foi feito: carimba e o pedido resolve

@@ -341,6 +341,7 @@ const ERROS: Record<string, string> = {
   devolucao_fora_do_pedido: 'lançamento escolhido não é deste pedido — feche e abra a janela de novo',
   sem_destinatarios: 'cadastre os destinatários do jurídico (botão destinatários)',
   threema_nao_configurado: 'Threema não configurado no servidor',
+  threema_juridico_desativado: 'Os avisos do Jurídico pelo Threema estão desativados.',
   threema_envio_falhou: 'o Threema não entregou pra nenhum destinatário',
   // abertura automática de devolução no ML (services/chamados_devolucao)
   devolucao_sem_foto: 'aguardando foto na tela Devoluções',

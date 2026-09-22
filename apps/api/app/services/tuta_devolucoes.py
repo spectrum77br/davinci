@@ -149,7 +149,7 @@ async def entregar_resultado(session: AsyncSession, result: str | None) -> dict[
 
     texto = montar_mensagem(result)
     try:
-        res = await threema.ThreemaClient().send_to_all(texto, destinos)
+        res = await threema.ThreemaClient(contexto="devolucoes").send_to_all(texto, destinos)
     except Exception as e:  # noqa: BLE001 — Threema fora não pode quebrar o ciclo
         logger.warning("tuta_devolucoes_threema_falhou", err=str(e)[:200])
         return {"enviado": False, "motivo": str(e)[:200]}

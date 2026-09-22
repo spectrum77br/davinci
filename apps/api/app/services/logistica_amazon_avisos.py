@@ -242,7 +242,7 @@ async def run(
         resumo["sem_destinatarios"] = 1
         logger.warning("logistica_amazon_avisos_sem_destinatarios", pendentes=len(pendentes))
         return resumo
-    client = client or threema.ThreemaClient()
+    client = client or threema.ThreemaClient(contexto="logistica")
     agora = datetime.now(UTC)
     for row, tipo in pendentes:
         texto = mensagem_aviso(row, tipo, hoje)

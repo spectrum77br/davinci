@@ -513,7 +513,7 @@ async def avisar_falhas(session: AsyncSession) -> int:
             for r in lote
         )
         try:
-            res = await threema.ThreemaClient().send_to_all(texto, destinos)
+            res = await threema.ThreemaClient(contexto="estoque").send_to_all(texto, destinos)
         except Exception as exc:  # noqa: BLE001
             logger.warning("prioridade_estoque_threema_falhou", erro=str(exc)[:200])
             return avisados

@@ -1,10 +1,17 @@
-"""Threema Gateway (Basic mode) — envia notificação de um caso de logística.
+"""Threema Gateway (Basic mode) — notificações privadas por assunto.
 
 Basic mode: o servidor do Threema criptografa a mensagem pro destinatário; a
 gente só faz um POST com `from`/`to`/`text`/`secret`. Uma chamada por
 destinatário (Basic não faz broadcast). Config vem do `.env`
 (`threema_gateway_id`/`threema_gateway_secret`/`threema_recipients`); sem isso
 `send_to_all` levanta ThreemaConfigError.
+
+`contexto` seleciona o ID Gateway do assunto, mantendo os destinatários.
+IDs distintos geram conversas privadas distintas no Threema. O par global
+é usado por contextos explicitamente destinados ao canal Geral no mapa
+`threema_context_channels` e por canais ainda não configurados na transição
+(`threema_separate_chats=False`). Nenhuma mensagem muda de assunto pelo texto.
+O destino `desativado` bloqueia os envios do contexto, inclusive na transição.
 
 Doc: https://gateway.threema.ch/en/developer/api — `POST /send_simple`
 (form-urlencoded). Sucesso = 200 com o message id no corpo. Erros mapeados:
@@ -23,6 +30,19 @@ logger = structlog.get_logger()
 THREEMA_API_BASE = "https://msgapi.threema.ch"
 # Basic mode aceita até 3500 bytes de texto por mensagem.
 _MAX_TEXT_BYTES = 3500
+
+_CONTEXTOS = frozenset(
+    {
+        "logistica",
+        "margem",
+        "estoque",
+        "devolucoes",
+        "juridico",
+        "importacao",
+        "flex",
+    }
+)
+_CONTEXTOS_ALIASES = {"controle_estoque": "estoque", "margem_auto": "margem"}
 
 
 class ThreemaConfigError(RuntimeError):
@@ -50,9 +70,7 @@ def parse_recipients(raw: str | None) -> list[str]:
     return out
 
 
-def parse_recipient_directory(
-    names_raw: str | None, ids_raw: str | None
-) -> list[dict[str, str]]:
+def parse_recipient_directory(names_raw: str | None, ids_raw: str | None) -> list[dict[str, str]]:
     """Diretório `[{id, nome}]` dos destinatários pro seletor do front.
 
     Nomes vêm de `names_raw` (`ID:Nome` separados por vírgula/;); IDs sem nome
@@ -141,12 +159,81 @@ class ThreemaClient:
         self,
         gateway_id: str | None = None,
         secret: str | None = None,
+        *,
+        contexto: str | None = None,
     ) -> None:
         s = get_settings()
-        self.gateway_id = (gateway_id or s.threema_gateway_id or "").strip()
-        self.secret = (secret or s.threema_gateway_secret or "").strip()
+        contexto = (contexto or "").strip().lower()
+        self.contexto = _CONTEXTOS_ALIASES.get(contexto, contexto)
+        self.canal = self.contexto or "geral"
+        self._config_error: str | None = None
+        context_channels: dict[str, str] = {}
+        for source, target in s.threema_context_channels.items():
+            source, target = source.strip().lower(), target.strip().lower()
+            source = _CONTEXTOS_ALIASES.get(source, source)
+            if (
+                source not in _CONTEXTOS
+                or target not in _CONTEXTOS | {"geral", "desativado"}
+                or (source in context_channels and context_channels[source] != target)
+            ):
+                self._config_error = "threema_context_channels_invalid"
+            else:
+                context_channels[source] = target
+        separado = s.threema_separate_chats
+        selected_id = s.threema_gateway_id
+        selected_secret = s.threema_gateway_secret
+        if self.contexto:
+            if self.contexto not in _CONTEXTOS:
+                self._config_error = "threema_contexto_desconhecido"
+            else:
+                self.canal = context_channels.get(self.contexto, self.contexto)
+                if self.disabled:
+                    self._config_error = "threema_contexto_desativado"
+                    selected_id, selected_secret = "", ""
+                elif self.canal != "geral":
+                    channel_id = getattr(s, f"threema_{self.canal}_gateway_id").strip()
+                    channel_secret = getattr(s, f"threema_{self.canal}_gateway_secret").strip()
+                    # Um par incompleto nunca é combinado com credenciais globais.
+                    if (
+                        channel_id
+                        or channel_secret
+                        or separado
+                        or self.contexto in context_channels
+                    ):
+                        selected_id, selected_secret = channel_id, channel_secret
+                    else:
+                        self.canal = "geral"
+        elif separado:
+            self._config_error = "threema_contexto_missing"
+        self.gateway_id = (gateway_id or selected_id or "").strip()
+        self.secret = (secret or selected_secret or "").strip()
+        if separado and not self._config_error and self.gateway_id:
+            # Contextos agrupados são um único canal efetivo. A resolução é
+            # direta: valores do mapa identificam credenciais, não outro contexto.
+            effective_channels = {
+                context_channels.get(context, context) for context in _CONTEXTOS
+            } - {"desativado"}
+            channel_ids = {
+                channel: (
+                    s.threema_gateway_id
+                    if channel == "geral"
+                    else getattr(s, f"threema_{channel}_gateway_id")
+                ).strip()
+                for channel in effective_channels
+            }
+            for other, other_id in channel_ids.items():
+                if other != self.canal and other_id and other_id.upper() == self.gateway_id.upper():
+                    self._config_error = "threema_contexto_gateway_id_repetido"
+                    break
+
+    @property
+    def disabled(self) -> bool:
+        return self.canal == "desativado"
 
     def _require_config(self) -> None:
+        # Valida no envio, dentro dos try/except já usados pelos notificadores.
+        if self._config_error:
+            raise ThreemaConfigError(self._config_error)
         if not self.gateway_id:
             raise ThreemaConfigError("threema_gateway_id_missing")
         if not self.secret:
@@ -165,9 +252,7 @@ class ThreemaClient:
         async with httpx.AsyncClient(timeout=15) as cli:
             resp = await cli.post(f"{THREEMA_API_BASE}/send_simple", data=payload)
         if resp.status_code != 200:
-            logger.warning(
-                "threema_send_failed", status=resp.status_code, body=resp.text[:200]
-            )
+            logger.warning("threema_send_failed", status=resp.status_code, body=resp.text[:200])
             raise ThreemaSendError(resp.status_code, resp.text)
         return resp.text.strip()
 
@@ -189,7 +274,13 @@ class ThreemaClient:
             try:
                 mid = await self.send_simple(rid, text)
                 sent.append(rid)
-                logger.info("threema_sent", to=rid, message_id=mid)
+                logger.info(
+                    "threema_sent",
+                    to=rid,
+                    message_id=mid,
+                    contexto=self.contexto,
+                    canal=self.canal,
+                )
             except ThreemaSendError as e:
                 failed.append(rid)
                 logger.warning("threema_recipient_failed", to=rid, status=e.status)

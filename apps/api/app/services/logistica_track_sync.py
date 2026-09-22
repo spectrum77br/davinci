@@ -355,7 +355,7 @@ async def avisar_graves(graves: list[tuple[str, str, str]]) -> None:
 
         destinos = threema.parse_recipients(get_settings().threema_recipients)
         if destinos:
-            await threema.ThreemaClient().send_to_all(texto, destinos)
+            await threema.ThreemaClient(contexto="logistica").send_to_all(texto, destinos)
     except Exception as e:  # noqa: BLE001
         logger.warning("logistica_track_aviso_grave_falhou", err=str(e)[:200])
 

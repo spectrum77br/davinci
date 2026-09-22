@@ -1374,6 +1374,9 @@ async def test_vigia_avisa_so_quando_passa_do_limite(db: AsyncSession, make_user
     enviados: list[str] = []
 
     class _Th:
+        def __init__(self, *args, **kwargs) -> None:
+            """Aceita `contexto=` como o cliente de verdade (conversas separadas)."""
+
         async def send_to_all(self, texto, destinos):
             enviados.append(texto)
             return {"sent": destinos, "failed": []}

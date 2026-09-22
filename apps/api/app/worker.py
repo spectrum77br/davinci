@@ -1705,7 +1705,7 @@ async def logistica_vigia(ctx: dict) -> dict[str, int]:
     destinos = threema.parse_recipients(get_settings().nf_sem_estoque_threema_recipients)
     if destinos:
         try:
-            await threema.ThreemaClient().send_to_all(texto, destinos)
+            await threema.ThreemaClient(contexto="logistica").send_to_all(texto, destinos)
         except Exception as exc:  # noqa: BLE001 — aviso é best-effort
             logger.warning("logistica_vigia_threema_falhou", erro=str(exc)[:200])
     async with session_scope() as s:

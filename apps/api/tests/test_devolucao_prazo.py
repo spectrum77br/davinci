@@ -144,6 +144,9 @@ class _FakeThreema:
     enviados: list[tuple[str, list[str]]] = []
     falhar = False
 
+    def __init__(self, *, contexto: str | None = None) -> None:
+        pass
+
     async def send_to_all(self, text, recipients=None):
         if self.falhar:
             raise RuntimeError("gateway 503")

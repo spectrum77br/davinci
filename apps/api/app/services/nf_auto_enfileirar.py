@@ -472,7 +472,7 @@ async def _notificar_sem_estoque(
                 + "\n".join(linhas)
             )
 
-        client = threema.ThreemaClient()
+        client = threema.ThreemaClient(contexto="estoque")
         result = await client.send_to_all(_texto(sem_estoque), gerais)
         logger.info(
             "nf_auto_enfileirar_threema",

@@ -22,6 +22,9 @@ class _Threema:
 
     enviados: list[str] = []
 
+    def __init__(self, *args, **kwargs) -> None:
+        """Aceita `contexto=` como o cliente de verdade (conversas separadas)."""
+
     async def send_to_all(self, texto: str, recipients=None) -> None:
         self.enviados.append(texto)
 

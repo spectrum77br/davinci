@@ -689,7 +689,7 @@ async def enviar_threema_em_lote(
         )
         recipients = threema.parse_recipients(rule.threema_recipients) or None
         if client is None:
-            client = threema.ThreemaClient()
+            client = threema.ThreemaClient(contexto="logistica")
         try:
             result = await client.send_to_all(texto, recipients=recipients)
         except threema.ThreemaConfigError as e:

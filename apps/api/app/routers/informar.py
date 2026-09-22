@@ -474,7 +474,7 @@ async def enviar(
         )
     total, mensagens = await _montar_envio(contexto, session)
     mensagens = mensagens or [_VAZIO[contexto]]
-    client = threema.ThreemaClient()
+    client = threema.ThreemaClient(contexto=contexto)
     sent_ok: set[str] = set()
     failed: set[str] = set()
     try:

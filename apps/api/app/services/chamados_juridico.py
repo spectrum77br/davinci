@@ -263,7 +263,10 @@ async def encaminhar(
 ) -> dict:
     """Manda o aviso no Threema (destinatários do contexto `juridico`), carimba
     o chamado e registra no histórico. Levanta ChamadoError sem destinatário /
-    sem Threema configurado. NÃO commita."""
+    sem Threema configurado ou com avisos jurídicos desativados. NÃO commita."""
+    client = threema.ThreemaClient(contexto="juridico")
+    if client.disabled:
+        raise chamados_svc.ChamadoError("threema_juridico_desativado")
     recipients = await recipients_juridico(session)
     if not recipients:
         raise chamados_svc.ChamadoError("sem_destinatarios")
@@ -276,7 +279,7 @@ async def encaminhar(
         ch, link=link, n_msgs=len(d["mensagens"]), n_fotos=d["n_fotos"], quem=quem, obs=obs
     )
     try:
-        result = await threema.ThreemaClient().send_to_all(texto, recipients)
+        result = await client.send_to_all(texto, recipients)
     except threema.ThreemaConfigError as e:
         raise chamados_svc.ChamadoError("threema_nao_configurado") from e
     sent = [r for r in result.get("sent", []) if r not in result.get("failed", [])]

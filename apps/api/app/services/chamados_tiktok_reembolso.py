@@ -289,7 +289,7 @@ async def _avisar(texto: str) -> None:
     if not alvos:
         return
     try:
-        await threema.ThreemaClient().send_to_all(texto, recipients=alvos)
+        await threema.ThreemaClient(contexto="devolucoes").send_to_all(texto, recipients=alvos)
     except Exception as e:  # noqa: BLE001 — aviso é best-effort
         logger.warning("tiktok_reembolso_threema_falhou", err=str(e)[:200])
 

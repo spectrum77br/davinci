@@ -223,7 +223,7 @@ async def run(
             await session.execute(select(Logistica).where(Logistica.pedido_bling.in_(faltando)))
         ).scalars():
             ctx.setdefault(lg.pedido_bling or "", lg)
-    client = client or threema.ThreemaClient()
+    client = client or threema.ThreemaClient(contexto="devolucoes")
     for row in devidos:
         texto = mensagem_aviso(row, ctx.get(row.pedido_bling), agora)
         try:

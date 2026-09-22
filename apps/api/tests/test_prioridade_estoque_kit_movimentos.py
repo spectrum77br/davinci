@@ -388,6 +388,10 @@ async def test_aviso_threema_so_quando_alguem_recebe(db: AsyncSession, monkeypat
     resultado = {"sent": [], "failed": ["ABCDEFGH"]}
 
     class _Th:
+        def __init__(self, *args, **kwargs) -> None:
+            """Aceita `contexto=` como o cliente de verdade (conversas separadas)."""
+
+
         async def send_to_all(self, texto, destinos):
             enviados.append(texto)
             return resultado

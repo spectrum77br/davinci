@@ -88,6 +88,9 @@ class _Threema:
     falhar = False
     ninguem = False
 
+    def __init__(self, *args, **kwargs) -> None:
+        """Aceita `contexto=` como o cliente de verdade (conversas separadas)."""
+
     async def send_to_all(self, texto: str, recipients=None) -> dict:
         if self.falhar:
             raise RuntimeError("gateway fora")

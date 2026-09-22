@@ -606,6 +606,9 @@ class _FakeThreema:
 
     enviados: list[tuple[str, list[str] | None]] = []
 
+    def __init__(self, *, contexto: str | None = None) -> None:
+        pass
+
     async def send_to_all(
         self, text: str, recipients: list[str] | None = None
     ) -> dict[str, list[str]]:

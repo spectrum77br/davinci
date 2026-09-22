@@ -203,7 +203,9 @@ async def varrer(
             )
             if alvos:
                 try:
-                    await threema.ThreemaClient().send_to_all(texto, recipients=alvos)
+                    await threema.ThreemaClient(contexto="logistica").send_to_all(
+                        texto, recipients=alvos
+                    )
                 except Exception as e:  # noqa: BLE001 — aviso é best-effort
                     logger.warning("chamados_pendencias_threema_falhou", err=str(e)[:200])
     resumo["avisos"] = avisos

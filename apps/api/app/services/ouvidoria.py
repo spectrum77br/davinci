@@ -115,6 +115,11 @@ class RoboDef:
     # Nome do campo em Settings com os Threema IDs do robô (fallback quando a
     # tela não tem override). None = só o OUVIDORIA_THREEMA_RECIPIENTS geral.
     env_threema_recipients: str | None
+    # Assunto do robô, pra o aviso sair pelo REMETENTE certo quando as
+    # conversas estão separadas (services/threema.py). A Ouvidoria é o lugar
+    # central dos avisos dos robôs: cada robô novo declara o seu aqui e não
+    # precisa mexer em mais nada. Vazio = remetente geral.
+    contexto: str = ""
     # Limites das chaves numéricas da config (chave → Parametro).
     parametros: dict[str, Parametro] = field(default_factory=dict)
     # Modo com que a linha NASCE em ouvidoria_robos (só no INSERT: o
@@ -143,6 +148,7 @@ ROBOS: dict[str, RoboDef] = {
             "amazon_a_cada_rodadas": 3,
         },
         env_threema_recipients="vigia_importacao_threema_recipients",
+        contexto="importacao",
         parametros={
             "tolerancia_min": Parametro("Tolerância", 5, 24 * 60, "min"),
             "janela_horas": Parametro("Janela", 1, 7 * 24, "h"),
@@ -937,7 +943,12 @@ async def avisar_pendentes(
         return {"avisadas": 0}
     texto = texto_aviso(robo.nome, pendentes, link=link_painel(robo_chave))
     try:
-        resultado = await threema.ThreemaClient().send_to_all(texto, recipients=alvos)
+        # O assunto vem do CATÁLOGO (RoboDef), não da linha do banco: é
+        # ele que sabe de qual conversa do Threema o robô faz parte.
+        contexto = (ROBOS[robo_chave].contexto if robo_chave in ROBOS else "") or None
+        resultado = await threema.ThreemaClient(contexto=contexto).send_to_all(
+            texto, recipients=alvos
+        )
     except Exception as e:  # noqa: BLE001 — aviso é best-effort; sem carimbo retenta
         logger.warning("ouvidoria_threema_falhou", robo=robo_chave, err=str(e)[:200])
         return {"avisadas": 0, "motivo": "threema_falhou", "erro": str(e)[:200]}

@@ -201,7 +201,9 @@ async def avisar_prazos(session: AsyncSession) -> int:
         logger.warning("devolucao_prazo_aviso_sem_threema", devolucoes=len(devs))
         return 0
     try:
-        res = await threema.ThreemaClient().send_to_all(_texto_aviso(devs), destinos)
+        res = await threema.ThreemaClient(contexto="devolucoes").send_to_all(
+            _texto_aviso(devs), destinos
+        )
     except Exception as e:  # noqa: BLE001 — Threema fora do ar: tenta na próxima rodada
         logger.warning("devolucao_prazo_aviso_falhou", err=str(e)[:200])
         return 0

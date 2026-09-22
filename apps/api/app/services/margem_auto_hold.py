@@ -411,7 +411,7 @@ async def _avisar_threema(
         ),
     )
     try:
-        result = await threema.ThreemaClient().send_to_all(msg, recipients)
+        result = await threema.ThreemaClient(contexto="margem").send_to_all(msg, recipients)
         logger.info(
             "margem_auto_hold_threema",
             pedido_bling=str(r["pedido_bling"]),
@@ -598,7 +598,7 @@ async def _alertar_margem_alta(session: AsyncSession) -> int:
             ),
         )
         try:
-            result = await threema.ThreemaClient().send_to_all(msg, recipients)
+            result = await threema.ThreemaClient(contexto="margem").send_to_all(msg, recipients)
         except Exception as e:  # noqa: BLE001 — um pedido não derruba os demais
             logger.warning(
                 "margem_alerta_alta_falhou",
@@ -996,7 +996,7 @@ async def _avisar_threema_reavaliacao(
         rodape=rodape + f"Ver no DaVinci: {aprovar_link.url_margem(pedido_bling)}",
     )
     try:
-        result = await threema.ThreemaClient().send_to_all(msg, recipients)
+        result = await threema.ThreemaClient(contexto="margem").send_to_all(msg, recipients)
         logger.info(
             "margem_reavaliar_threema",
             pedido_bling=pedido_bling,

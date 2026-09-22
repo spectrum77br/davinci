@@ -192,6 +192,29 @@ class Settings(BaseSettings):
     # vazio — sem config o envio levanta threema_nao_configurado.
     threema_gateway_id: str = ""
     threema_gateway_secret: str = ""
+    # Conversas privadas por assunto: cada canal precisa de um ID Gateway
+    # próprio. Durante a configuração, canais vazios ainda usam o remetente
+    # legado. Ative separate_chats após cadastrar os canais em uso para
+    # impedir fallback e IDs repetidos. Ver docs/THREEMA_CHATS.md.
+    threema_separate_chats: bool = False
+    # JSON contexto -> canal de credenciais (ou "geral" para o par global).
+    # O destino "desativado" bloqueia os avisos daquele contexto.
+    # Mapeamento vazio não agrupa nenhum assunto; valores não são encadeados.
+    threema_context_channels: dict[str, str] = {}
+    threema_logistica_gateway_id: str = ""
+    threema_logistica_gateway_secret: str = ""
+    threema_margem_gateway_id: str = ""
+    threema_margem_gateway_secret: str = ""
+    threema_estoque_gateway_id: str = ""
+    threema_estoque_gateway_secret: str = ""
+    threema_devolucoes_gateway_id: str = ""
+    threema_devolucoes_gateway_secret: str = ""
+    threema_juridico_gateway_id: str = ""
+    threema_juridico_gateway_secret: str = ""
+    threema_importacao_gateway_id: str = ""
+    threema_importacao_gateway_secret: str = ""
+    threema_flex_gateway_id: str = ""
+    threema_flex_gateway_secret: str = ""
     threema_recipients: str = ""
     # Nomes dos destinatários pro seletor (`ID:Nome` separados por vírgula, ex.
     # "7KMPCBS5:Londres,M5TT27JA:Cairo,444UXUXN:Churchill"). ID sem nome cai no
