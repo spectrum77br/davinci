@@ -451,6 +451,11 @@ class Settings(BaseSettings):
     # Vazio = vigia inteiro desligado (o cron vira no-op). Set via
     # VIGIA_IMPORTACAO_THREEMA_RECIPIENTS no .env.
     vigia_importacao_threema_recipients: str = ""
+
+    # Vigia da soma por familia: avisa quando um anuncio fica com o numero
+    # antigo por mais de algumas horas. Vazio = vigia mede e loga, mas nao
+    # manda mensagem (bom para acompanhar o numero antes de acordar alguem).
+    vigia_estoque_familia_threema_recipients: str = ""
     # Fallback GENÉRICO da Ouvidoria (services/ouvidoria.py): quem recebe o
     # aviso de um robô que não tem override na tela (ouvidoria_robos.
     # threema_recipients) nem env próprio (ex.: o vigia acima). Vazio = o

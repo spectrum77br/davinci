@@ -100,6 +100,7 @@ from app.services.valuation_estoque_snapshot import (
     repor_snapshot_se_faltar,
     run_valuation_estoque_snapshot,
 )
+from app.services.vigia_estoque_familia import vigia_estoque_familia_sweep
 from app.services.vigia_importacao import vigia_importacao_sweep
 from app.worker_pool import (
     ARQ_FINANCIALS_QUEUE,
@@ -2422,6 +2423,24 @@ async def prioridade_estoque_estorno_tick(ctx: dict) -> None:
         logger.exception("prioridade_estoque_manutencao_unhandled")
 
 
+async def vigia_estoque_familia_tick(ctx: dict) -> None:
+    """Confere se os anúncios estão mesmo publicando o total da família.
+
+    Roda 2x por dia. Mede sempre; só manda mensagem quando existe anúncio
+    parado no número antigo há mais de algumas horas E há destinatário
+    configurado.
+    """
+    try:
+        summary = await vigia_estoque_familia_sweep()
+    except Exception:
+        logger.exception("vigia_estoque_familia_unhandled")
+        return
+    if summary.get("atrasados"):
+        logger.warning("vigia_estoque_familia_atrasados", **summary)
+    else:
+        logger.info("vigia_estoque_familia_ok", **summary)
+
+
 async def vigia_importacao_tick(ctx: dict) -> None:
     """Vigia de importação (robô da Ouvidoria): pedido PAGO no ML / Shopee /
     TikTok / Amazon que não caiu no Bling → ocorrência + aviso Threema pra
@@ -3354,6 +3373,7 @@ class WorkerSettings:
         prioridade_estoque_tick,
         prioridade_estoque_estorno_tick,
         vigia_importacao_tick,
+        vigia_estoque_familia_tick,
         # Os 6 robôs da Ouvidoria de 22/09 (cada um sai na hora se o modo da
         # tela estiver `desligado`).
         vigia_credenciais_tick,
