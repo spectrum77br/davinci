@@ -72,6 +72,13 @@ ENFILEIRAR = True
 # então vale o mesmo teto medido no upload de evidência da disputa.
 FOTO_MAX_BYTES = chamados_devolucao.SHOPEE_FOTO_MAX_BYTES
 
+# A Shopee só deixa a LOJA puxar conversa em três casos (medido 22/09 na
+# primeira rodada, 8 recusas seguidas): o comprador falou com a loja nos últimos
+# 7 dias, fez um pedido nos últimos 30 dias, ou tem devolução/reembolso EM
+# ABERTO. Fora disso o envio é recusado pra sempre — insistir não muda nada.
+ERRO_FORA_DA_JANELA = "fora_da_janela_shopee"
+_MARCAS_FORA_DA_JANELA = ("user_is_forbidden", "only message the buyer")
+
 STATUS_PENDENTE = "pendente"
 STATUS_ENVIADA = "enviada"
 STATUS_FALHOU = "falhou"
@@ -356,9 +363,15 @@ async def enviar(
         linha.enviada_at = datetime.now(UTC)
     except Exception as e:  # noqa: BLE001 — erro cru da Shopee vira estado da linha
         linha.tentativas += 1
-        linha.erro = str(e)[:300]
-        if linha.tentativas >= MAX_TENTATIVAS:
+        cru = str(e)
+        if any(m in cru.lower() for m in _MARCAS_FORA_DA_JANELA):
+            # Janela fechada: não é erro passageiro, é regra da Shopee.
             linha.status = STATUS_FALHOU
+            linha.erro = ERRO_FORA_DA_JANELA
+        else:
+            linha.erro = cru[:300]
+            if linha.tentativas >= MAX_TENTATIVAS:
+                linha.status = STATUS_FALHOU
         logger.warning(
             "devolucao_mensagem_comprador_falhou",
             linha_id=str(linha.id),

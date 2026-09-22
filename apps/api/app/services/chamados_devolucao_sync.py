@@ -122,6 +122,19 @@ _TT_ARB_STATUS: dict[str, str] = {
     "SUPPORT_BUYER": chamados_svc.STATUS_PERDEMOS,
 }
 _TT_TIPO = {"REFUND": "só reembolso", "RETURN_AND_REFUND": "devolução"}
+# Estados em que aquele caso ACABOU. Vinicius 22/09 (293798): a compradora abriu
+# um caso novo depois que o anterior terminou e o painel não mostrou nada — a
+# troca pelo caso novo só acontecia quando o anterior estava CANCELADO. Agora
+# qualquer caso morto cede a vez pro caso vivo do mesmo pedido.
+_TT_MORTOS = frozenset(
+    {
+        "RETURN_OR_REFUND_REQUEST_CANCEL",
+        "RETURN_OR_REFUND_REQUEST_SUCCESS",
+        "RETURN_OR_REFUND_REQUEST_COMPLETE",
+        "REFUND_OR_RETURN_REQUEST_REJECT",
+        "REJECT_RECEIVE_PACKAGE",
+    }
+)
 _TT_STATUS_NOME = {
     "RETURN_OR_REFUND_REQUEST_PENDING": "aguardando a nossa resposta",
     "REFUND_OR_RETURN_REQUEST_REJECT": "já recusado",
@@ -272,14 +285,27 @@ async def _dev_de(session: AsyncSession, ch: Chamado) -> Devolution | None:
 # ---------------------------------------------------------------- TikTok
 
 
+def _tt_vivo(caso: dict) -> bool:
+    return str(caso.get("return_status") or "").strip().upper() not in _TT_MORTOS
+
+
 def _tiktok_caso_novo(casos: list[dict], caso: dict) -> dict | None:
-    """Solicitação mais nova do MESMO pedido, aberta depois desta (o comprador
-    refez o pedido). None se não há."""
+    """O caso do MESMO pedido que o chamado deve passar a acompanhar: o mais
+    novo entre os abertos depois deste, preferindo os que ainda estão VIVOS.
+
+    A TikTok diz explicitamente qual é o sucessor quando o comprador edita o
+    pedido (`next_return_id`); quando vier, ele manda. Senão vale a data de
+    abertura — um caso vivo sempre ganha de um morto, porque é nele que a briga
+    (e a nossa resposta) continua."""
+    rid = str(caso.get("return_id") or "")
+    por_id = {str(c.get("return_id") or ""): c for c in casos}
+    seguinte = str(caso.get("next_return_id") or "").strip()
+    if seguinte and seguinte != rid and seguinte in por_id:
+        return por_id[seguinte]
     try:
         base = int(caso.get("create_time") or 0)
     except (TypeError, ValueError):
         base = 0
-    rid = str(caso.get("return_id") or "")
     novos = []
     for c in casos:
         if str(c.get("return_id") or "") == rid:
@@ -290,7 +316,10 @@ def _tiktok_caso_novo(casos: list[dict], caso: dict) -> dict | None:
             continue
         if criado > base:
             novos.append((criado, c))
-    return max(novos, key=lambda x: x[0])[1] if novos else None
+    if not novos:
+        return None
+    vivos = [x for x in novos if _tt_vivo(x[1])]
+    return max(vivos or novos, key=lambda x: x[0])[1]
 
 
 async def _sync_tiktok(
@@ -327,11 +356,17 @@ async def _sync_tiktok(
                 await _encerrado_na_plataforma(session, ch, f"tiktok:{status}:sem_recurso")
             else:
                 chamados_svc.set_status_plataforma(ch, chamados_svc.STATUS_AGUARDANDO, quando)
-    novo = (
-        _tiktok_caso_novo(casos, caso)
-        if status == "RETURN_OR_REFUND_REQUEST_CANCEL" and arb != "SUPPORT_SELLER"
-        else None
-    )
+    # 22/09 (293798): antes só um caso CANCELADO cedia a vez. Agora qualquer caso
+    # morto cede — recusado, concluído, reembolsado — desde que exista um caso
+    # VIVO mais novo do mesmo pedido. Arbitragem ganha por nós (SUPPORT_SELLER)
+    # continua fora: ali o caso acabou a nosso favor e caso novo é briga nova.
+    novo = None
+    if status in _TT_MORTOS and arb != "SUPPORT_SELLER":
+        candidato = _tiktok_caso_novo(casos, caso)
+        if candidato is not None and (
+            status == "RETURN_OR_REFUND_REQUEST_CANCEL" or _tt_vivo(candidato)
+        ):
+            novo = candidato
     if novo is not None:
         # Medido 18/09 (jlas 585710261573748632): o comprador EDITOU o pedido — a
         # TikTok cancela a solicitação antiga e cria outra. Não é ganhamos: a
@@ -341,14 +376,27 @@ async def _sync_tiktok(
         st_novo = str(novo.get("return_status") or "").upper()
         tipo = _TT_TIPO.get(str(novo.get("return_type") or "").upper(), "solicitação")
         situacao = _TT_STATUS_NOME.get(st_novo, st_novo.lower() or "situação desconhecida")
+        if status == "RETURN_OR_REFUND_REQUEST_CANCEL":
+            aviso = (
+                f"O comprador refez o pedido na TikTok: {tipo} {novo_id} ({situacao}) — a "
+                f"solicitação {rid} foi cancelada por isso. O chamado passa a acompanhar o "
+                "caso novo."
+            )
+        else:
+            aviso = (
+                f"O comprador ABRIU OUTRO caso na TikTok depois que o anterior terminou: "
+                f"{tipo} {novo_id} ({situacao}). A solicitação {rid} está "
+                f"{_TT_STATUS_NOME.get(status, status.lower())}. O chamado passa a "
+                "acompanhar o caso novo — confira se ainda dá pra responder."
+            )
         novos += await registrar_recebida(
-            session, ch, cd.PLAT_TIKTOK,
-            f"O comprador refez o pedido na TikTok: {tipo} {novo_id} ({situacao}) — a "
-            f"solicitação {rid} foi cancelada por isso. O chamado passa a acompanhar o "
-            "caso novo.",
+            session, ch, cd.PLAT_TIKTOK, aviso,
             quando=epoch_to_dt(novo.get("create_time")),
         )
         ch.chamado = novo_id
+        # O caso novo entra JÁ nesta passada (antes a linha do tempo dele só
+        # aparecia uma hora depois, e a do caso velho nunca mais era lida).
+        novos += await _tiktok_linha_do_tempo(session, ch, client, novo_id)
         return novos
     if status in _TT_STATUS_TXT:
         txt, fim = _TT_STATUS_TXT[status]
@@ -357,29 +405,86 @@ async def _sync_tiktok(
             chamados_svc.set_status_plataforma(ch, _TT_STATUS_STATUS[status], quando)
         if fim:
             await _encerrado_na_plataforma(session, ch, f"tiktok:{status}")
-    # linha do tempo: notas do comprador / da plataforma (best-effort)
+    novos += await _tiktok_linha_do_tempo(session, ch, client, rid)
+    return novos
+
+
+def _tt_texto_do_registro(r: dict) -> str:
+    """TUDO que veio escrito naquele evento, sem repetir. Vinicius 22/09: "na
+    tela do TikTok a mulher escreve, não veio a escrita" — a API manda até três
+    campos de texto por evento (`note` livre, `description` do evento e
+    `reason_text` do motivo escolhido) e o código lia só o primeiro que
+    estivesse preenchido, então o que ela digitou sumia atrás do rótulo."""
+    partes: list[str] = []
+    for campo in ("note", "comment", "description", "reason_text"):
+        t = str(r.get(campo) or "").strip()
+        if t and not any(t.lower() == p.lower() for p in partes):
+            partes.append(t)
+    return " — ".join(partes)
+
+
+def _tt_midia_do_registro(r: dict) -> str:
+    """Fotos e vídeo que o COMPRADOR anexou (a TikTok só deixa comprador enviar
+    vídeo). Vinicius 22/09: "a mulher mandou vídeo, não veio o vídeo" — vinha no
+    mesmo pacote e era descartado. Vai o link: o arquivo fica na TikTok."""
+    def _urls(chaves: tuple[str, ...]) -> list[str]:
+        out: list[str] = []
+        for chave in chaves:
+            for item in r.get(chave) or []:
+                url = ""
+                if isinstance(item, dict):
+                    url = str(item.get("url") or item.get("image_url") or "").strip()
+                elif isinstance(item, str):
+                    url = item.strip()
+                if url and url not in out:
+                    out.append(url)
+        return out
+
+    fotos = _urls(("images", "image_list"))
+    videos = _urls(("videos", "video_list"))
+    if not fotos and not videos:
+        return ""
+    contagem = []
+    if videos:
+        contagem.append(f"{len(videos)} vídeo" + ("s" if len(videos) > 1 else ""))
+    if fotos:
+        contagem.append(f"{len(fotos)} foto" + ("s" if len(fotos) > 1 else ""))
+    return "Anexou " + " e ".join(contagem) + ": " + " | ".join(videos + fotos)
+
+
+async def _tiktok_linha_do_tempo(
+    session: AsyncSession, ch: Chamado, client, rid: str
+) -> int:
+    """Linha do tempo de UM caso: o que o comprador e a TikTok escreveram, com
+    os anexos. Best-effort — o acompanhamento não pode cair por causa dela."""
+    rid = (rid or "").strip()
+    if not rid:
+        return 0
     try:
         registros = await client.get_return_records(rid)
     except Exception as e:  # noqa: BLE001
         logger.info(
             "chamado_devolucao_tiktok_records_falhou", chamado_id=str(ch.id), err=str(e)[:120]
         )
-        registros = []
+        return 0
+    novos = 0
     for r in registros:
         if not isinstance(r, dict):
             continue
         papel = str(r.get("role") or "").upper()
         if papel == "SELLER":
             continue
-        nota = str(r.get("note") or r.get("comment") or r.get("description") or "").strip()
-        if not nota:
+        nota = _tt_texto_do_registro(r)
+        midia = _tt_midia_do_registro(r)
+        if not nota and not midia:
             continue
         quem = {"BUYER": "Comprador", "OPERATOR": "TikTok (operador)", "SYSTEM": "TikTok"}.get(
             papel, papel or "TikTok"
         )
         quando = _fmt_dt(r.get("create_time"))
+        corpo = " ".join(t for t in (nota, midia) if t)
         novos += await registrar_recebida(
-            session, ch, cd.PLAT_TIKTOK, f"{quem}{(' ' + quando) if quando else ''}: {nota}",
+            session, ch, cd.PLAT_TIKTOK, f"{quem}{(' ' + quando) if quando else ''}: {corpo}",
             quando=epoch_to_dt(r.get("create_time")),
         )
     return novos

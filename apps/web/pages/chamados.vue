@@ -1014,6 +1014,24 @@ async function enviarInstrucaoDoBalao() {
   if (!hist.instrucaoErro) instrucaoBalao.value = false
 }
 
+// Links dentro da fala viram clicáveis (22/09): a TikTok manda o vídeo e as
+// fotos do comprador como URL no meio do texto, e copiar e colar à mão numa
+// tela de atendimento é pedir pra ninguém abrir. Nada de v-html — o texto vem
+// da plataforma, então ele é sempre renderizado como texto; só a URL vira <a>.
+const RE_URL = /(https?:\/\/[^\s|]+)/g
+function partesComLink(texto: string): { t: 'txt' | 'url'; v: string }[] {
+  const out: { t: 'txt' | 'url'; v: string }[] = []
+  let ultimo = 0
+  for (const m of (texto || '').matchAll(RE_URL)) {
+    const i = m.index ?? 0
+    if (i > ultimo) out.push({ t: 'txt', v: texto.slice(ultimo, i) })
+    out.push({ t: 'url', v: m[0] })
+    ultimo = i + m[0].length
+  }
+  if (ultimo < (texto || '').length) out.push({ t: 'txt', v: texto.slice(ultimo) })
+  return out
+}
+
 function statusMensagemClass(s: Mensagem['status']) {
   return {
     registrada: 'bg-muted text-muted-foreground',
@@ -1799,7 +1817,7 @@ async function confirmarExcluir() {
                 <span v-if="b.meta" class="text-muted-foreground">· {{ b.meta }}</span>
                 <span v-if="b.status" class="rounded px-1.5 py-0.5" :class="statusMensagemClass(b.status)">{{ b.status }}<template v-if="b.erro"> — {{ ERROS[b.erro] || b.erro }}</template></span>
               </div>
-              <div class="mt-1 whitespace-pre-wrap break-words text-sm leading-relaxed">{{ b.texto }}</div>
+              <div class="mt-1 whitespace-pre-wrap break-words text-sm leading-relaxed"><template v-for="(p, i) in partesComLink(b.texto)" :key="i"><a v-if="p.t === 'url'" :href="p.v" target="_blank" rel="noopener" class="underline break-all">{{ p.v }}</a><template v-else>{{ p.v }}</template></template></div>
               <div v-if="b.anexos.length" class="mt-2 flex flex-wrap gap-2">
                 <a v-for="a in b.anexos" :key="a.id" :href="anexoUrl(a.id)" target="_blank" rel="noopener" :title="a.filename">
                   <img :src="anexoUrl(a.id)" :alt="a.filename" class="h-20 w-20 rounded border object-cover" />

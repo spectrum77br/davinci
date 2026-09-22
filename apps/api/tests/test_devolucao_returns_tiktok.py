@@ -281,7 +281,8 @@ async def test_client_order_ids_em_lotes_de_50_sem_filtro_de_tempo(monkeypatch):
     assert [b["order_ids"] for _, b, _ in chamadas] == [ids[:50], ids[50:100], ids[100:]]
     assert all(set(b) == {"order_ids"} for _, b, _ in chamadas)  # sem update_time_*
     assert all(p == "/return_refund/202309/returns/search" for p, _, _ in chamadas)
-    assert all(x == {"page_size": "50"} for _, _, x in chamadas)
+    # 22/09: `locale` pt-BR junto — sem ele o `return_reason_text` do caso vem em inglês
+    assert all(x == {"page_size": "50", "locale": "pt-BR"} for _, _, x in chamadas)
     assert [r["order_id"] for r in out] == [ids[0], ids[50], ids[100]]
 
 

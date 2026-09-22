@@ -2363,7 +2363,11 @@ async def test_sync_tiktok_recusa_sem_recurso_em_10_dias_e_ganhamos(client, make
 async def test_sync_tiktok_pedido_refeito_pelo_comprador_nao_e_ganhamos(client, make_user, auth_as, db, ml, monkeypatch):
     """jlas 585710261573748632 (medido 18/09): o comprador EDITOU o pedido depois da
     recusa — a TikTok cancela o antigo e cria outro. Não é ganhamos: o chamado passa a
-    acompanhar o caso novo, e é a nossa vez de responder."""
+    acompanhar o caso novo, e é a nossa vez de responder.
+
+    22/09 (293798): o texto do CANCELADO continua sendo "refez o pedido" (caso novo por
+    outro motivo tem texto próprio, em tests/test_devolucao_tiktok_linha_do_tempo.py) e
+    a linha do tempo do caso novo passou a entrar na MESMA passada."""
     from app.services import chamados_devolucao_sync as sync
 
     fake = _FakeTikTokRecusa()
@@ -2386,6 +2390,12 @@ async def test_sync_tiktok_pedido_refeito_pelo_comprador_nao_e_ganhamos(client, 
     txts = await _recebidas(db, ch.id)
     assert any("refez o pedido" in t and "4042163882929260440" in t and "aguardando a nossa resposta" in t for t in txts), txts
     assert not any("valor fica com o vendedor" in t for t in txts)
+    # a linha do tempo do caso NOVO veio junto (antes só na passada seguinte), e a fala
+    # do comprador entra inteira: o que ele digitou MAIS o motivo que ele escolheu
+    assert any(
+        "caixa de sabonete ao invés do celular! — Pacote recebido, mas faltam alguns itens" in t
+        for t in txts
+    ), txts
     # canal api: a resposta é de gente (o robô não responde devolução pela API)
     assert (await _status_aba(db, ch)) == ("analise_humano", "plataforma respondeu — responder no Seller Center")
 

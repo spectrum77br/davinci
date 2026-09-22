@@ -746,7 +746,10 @@ class TikTokClient:
         token: str | None = None
         pages = 0
         while True:
-            extra = {"page_size": str(page_size)}
+            # `locale` pt-BR: sem ele a TikTok devolve os textos do caso
+            # (`return_reason_text`) em inglês — o mesmo motivo pelo qual o
+            # get_return_records já pede pt-BR.
+            extra = {"page_size": str(page_size), "locale": "pt-BR"}
             if token:
                 extra["page_token"] = token
             try:

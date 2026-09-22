@@ -274,7 +274,12 @@ function senhaLabel(row: DevolutionRow): string {
     return `Senha pedida ao cliente${quando}`
   }
   if (st === 'pendente') return 'Senha: pedido na fila'
-  if (st === 'falhou') return `Senha: não saiu — ${row.senha_erro || 'erro'}`
+  if (st === 'falhou') {
+    // A Shopee só deixa a loja puxar conversa se o comprador falou com ela nos
+    // últimos 7 dias, comprou nos últimos 30, ou tem devolução em aberto.
+    if (row.senha_erro === 'fora_da_janela_shopee') return 'Senha: a Shopee fechou o chat com esse comprador — pedir por fora'
+    return `Senha: não saiu — ${row.senha_erro || 'erro'}`
+  }
   if (st === 'cancelada') return 'Senha: pedido cancelado (motivo mudou)'
   if (st === 'sem_canal') {
     const plat = platNome(row)
