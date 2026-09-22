@@ -1336,6 +1336,10 @@ _EXPORT_COLUMNS: list[tuple[str, str]] = [
     ("Produtos", "produtos"),
     ("Custo produto", "custo_produto"),
     ("Condição", "condicao_produto"),
+    # Link envio entrou na exportação em 22/09: é por aqui que a operação
+    # enxerga as linhas antigas com TEXTO no campo (de antes da trava de
+    # formato) pra limpar — filtrar a coluna pelo que não começa com "http".
+    ("Link envio", "link_envio"),
     ("Link abertura", "link_abertura"),
     ("Reembolso", "reembolso"),
     ("Motivo", "motivo_devolucao"),
