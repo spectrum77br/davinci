@@ -19,7 +19,7 @@ import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import {
   Plus, Trash2, Loader2, Search, Upload, X, Link2, ExternalLink,
   Users, NotebookPen, Eye, EyeOff, CornerDownLeft, Image as ImageIcon,
-  File as FileIcon,
+  File as FileIcon, Inbox, Check,
 } from 'lucide-vue-next'
 
 const props = defineProps<{ foco?: string | null }>()
@@ -67,10 +67,33 @@ type Roteiro = {
   product_id: string | null
   sku: string | null
   equipe_destino: string | null
+  // Preenchido quando a linha é a VERSÃO que a agência escreveu em cima de uma
+  // ideia da casa — o original continua intacto, e os dois ficam lado a lado.
+  origem_id: string | null
   ativo: boolean
   referencias: Ref_[]
   personagens: Personagem[]
   created_at: string | null
+}
+
+// A proposta que vem de fora. Carrega o que um personagem NÃO carrega — de
+// onde veio o rosto, de onde veio a voz, se existe cessão escrita —, que é
+// justamente o que alguém precisa ver antes de dizer sim.
+type Requisicao = {
+  id: string
+  nome: string
+  descricao: string | null
+  justificativa: string | null
+  origem_imagem: string
+  origem_voz: string
+  cessao: boolean
+  cessao_obs: string | null
+  equipe: string
+  status: string
+  motivo: string | null
+  personagem_id: string | null
+  criado_em: string | null
+  decidido_em: string | null
 }
 
 const ERR_PT: Record<string, string> = {
@@ -91,6 +114,9 @@ const ERR_PT: Record<string, string> = {
   link_invalido: 'O link precisa começar com http:// ou https://.',
   link_vazio: 'Escreva o link.',
   link_longo_demais: 'Link longo demais.',
+  requisicao_nao_encontrada: 'Esse pedido não existe mais.',
+  ja_decidida: 'Alguém já decidiu esse pedido.',
+  personagem_ja_existe: 'Já existe um personagem com esse nome.',
   forbidden: 'Você não tem permissão pra isso.',
 }
 
@@ -100,7 +126,7 @@ function errMsg(e: any): string {
   return e?.data?.detail?.message ?? e?.message ?? 'Erro inesperado'
 }
 
-const secao = ref<'roteiros' | 'personagens'>('roteiros')
+const secao = ref<'roteiros' | 'personagens' | 'pedidos'>('roteiros')
 
 // ---- roteiros -------------------------------------------------------------
 const roteiros = ref<Roteiro[]>([])
@@ -161,7 +187,7 @@ async function carregarMarcas() {
 }
 
 onMounted(async () => {
-  await Promise.all([carregar(), carregarMarcas()])
+  await Promise.all([carregar(), carregarMarcas(), carregarPedidos()])
   // Vindo da aba Criativos ("escrever roteiro"): abre logo o que foi criado.
   if (props.foco) abrir(props.foco)
 })
@@ -495,6 +521,69 @@ async function apagarPersonagem(p: Personagem) {
 function destinoLabel(d: string | null): string {
   return d || 'as duas agências'
 }
+
+function tituloDaOrigem(id: string): string {
+  // A ideia de partida pode estar desligada ou fora do filtro; nesse caso o
+  // título não aparece, mas a marca de "versão" continua valendo.
+  return roteiros.value.find((x) => x.id === id)?.titulo ?? 'a ideia original'
+}
+
+// ---- pedidos de personagem vindos das agências ----------------------------
+// A agência PROPÕE, aqui é onde a casa decide. O personagem só nasce no
+// "aprovar" — e nasce sem arquivo: quem guarda a foto e o MP3 é quem responde
+// por eles, então a casa carrega depois, junto com o papel da cessão.
+const requisicoes = ref<Requisicao[]>([])
+const reqOcupada = ref<string | null>(null)
+
+async function carregarPedidos() {
+  try {
+    const r = await api<{ requisicoes: Requisicao[] }>('/api/marketing/personagens/requisicoes')
+    requisicoes.value = r.requisicoes
+  } catch {
+    // A fila é um extra da tela: se ela falhar, roteiros e personagens
+    // continuam funcionando. Barulho aqui só atrapalharia quem veio escrever.
+    requisicoes.value = []
+  }
+}
+
+async function aprovarPedido(r: Requisicao) {
+  if (!window.confirm(
+    `Aprovar "${r.nome}"? O personagem é criado agora, sem foto e sem voz — ` +
+    'os arquivos sobem depois, por aqui.',
+  )) return
+  reqOcupada.value = r.id
+  try {
+    await api(`/api/marketing/personagens/requisicoes/${r.id}/aprovar`, { method: 'POST' })
+    requisicoes.value = requisicoes.value.filter((x) => x.id !== r.id)
+    toasts.success('Personagem criado', `Agora é subir a imagem e o MP3 de ${r.nome}.`)
+    await carregar()
+    secao.value = 'personagens'
+  } catch (e: any) {
+    toasts.error('Erro ao aprovar', errMsg(e))
+  } finally {
+    reqOcupada.value = null
+  }
+}
+
+async function recusarPedido(r: Requisicao) {
+  // Recusa sem motivo é a que volta igual na semana seguinte, e aí alguém
+  // gasta o mesmo tempo de novo — por isso o prompt, e não um botão seco.
+  const motivo = window.prompt(`Recusar "${r.nome}". Por quê? (a agência lê isto)`)
+  if (motivo === null) return
+  reqOcupada.value = r.id
+  try {
+    await api(`/api/marketing/personagens/requisicoes/${r.id}/recusar`, {
+      method: 'POST',
+      body: { motivo },
+    })
+    requisicoes.value = requisicoes.value.filter((x) => x.id !== r.id)
+    toasts.success('Pedido recusado')
+  } catch (e: any) {
+    toasts.error('Erro ao recusar', errMsg(e))
+  } finally {
+    reqOcupada.value = null
+  }
+}
 </script>
 
 <template>
@@ -519,6 +608,17 @@ function destinoLabel(d: string | null): string {
           @click="secao = 'personagens'"
         >
           <Users class="mr-1 inline size-3.5" /> Personagens
+        </button>
+        <button
+          class="rounded-md px-3 py-1 text-xs transition-colors"
+          :class="secao === 'pedidos' ? 'bg-background shadow-sm font-medium' : 'text-muted-foreground hover:bg-background/60'"
+          @click="secao = 'pedidos'"
+        >
+          <Inbox class="mr-1 inline size-3.5" /> Pedidos
+          <span
+            v-if="requisicoes.length"
+            class="ml-1 rounded-full bg-primary px-1.5 py-px text-[10px] font-medium text-primary-foreground"
+          >{{ requisicoes.length }}</span>
         </button>
       </div>
       <Loader2 v-if="carregando || salvando" class="size-3.5 animate-spin text-muted-foreground" />
@@ -570,6 +670,13 @@ function destinoLabel(d: string | null): string {
               <span v-if="r.marca">{{ r.marca }}</span>
               <span v-if="r.sku" class="font-mono">{{ r.sku }}</span>
               <span class="pill-muted">{{ destinoLabel(r.equipe_destino) }}</span>
+              <!-- Sem esta marca, a versão da agência entra na lista com o
+                   mesmo título da ideia e parece duplicata. -->
+              <span
+                v-if="r.origem_id"
+                class="rounded bg-primary/10 px-1 py-px text-primary"
+                :title="`Versão escrita pela agência sobre «${tituloDaOrigem(r.origem_id)}»`"
+              >versão da agência</span>
             </div>
           </button>
         </div>
@@ -950,6 +1057,81 @@ function destinoLabel(d: string | null): string {
             Nenhuma. As personas que vocês já usam têm todas um MP3 de voz.
           </p>
         </div>
+      </div>
+    </div>
+
+    <!-- ══════════════ pedidos ══════════════ -->
+    <!-- A agência propõe a PESSOA; não empurra o ativo. Por isso a ficha aqui é
+         quase toda procedência: é o que alguém precisa ler antes do sim. -->
+    <div v-if="secao === 'pedidos'" class="space-y-2">
+      <p class="text-[11px] text-muted-foreground">
+        Pedidos de personagem feitos pelas agências no portal. Aprovar cria o personagem
+        com nome e descrição — a imagem e o MP3 sobem aqui depois, junto com a cessão.
+      </p>
+
+      <div v-if="!requisicoes.length" class="rounded-lg border border-dashed p-6 text-center">
+        <Inbox class="mx-auto size-5 text-muted-foreground" />
+        <p class="mt-1.5 text-xs text-muted-foreground">Nenhum pedido esperando.</p>
+      </div>
+
+      <div
+        v-for="r in requisicoes"
+        :key="r.id"
+        class="rounded-lg border p-3"
+      >
+        <div class="flex flex-wrap items-center gap-2">
+          <span class="text-sm font-medium">{{ r.nome }}</span>
+          <span class="rounded bg-muted px-1.5 py-px text-[10px] text-muted-foreground">
+            {{ r.equipe }}
+          </span>
+          <span
+            class="rounded px-1.5 py-px text-[10px]"
+            :class="r.cessao ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-400' : 'bg-amber-500/15 text-amber-700 dark:text-amber-500'"
+          >
+            {{ r.cessao ? 'com cessão escrita' : 'sem cessão escrita' }}
+          </span>
+          <span v-if="r.criado_em" class="text-[10px] text-muted-foreground">
+            {{ new Date(r.criado_em).toLocaleDateString('pt-BR') }}
+          </span>
+
+          <div v-if="canEdit" class="ml-auto flex gap-1.5">
+            <button
+              class="btn btn-xs gap-1"
+              :disabled="reqOcupada === r.id"
+              @click="aprovarPedido(r)"
+            >
+              <Loader2 v-if="reqOcupada === r.id" class="size-3 animate-spin" />
+              <Check v-else class="size-3" /> Aprovar
+            </button>
+            <button
+              class="btn btn-xs gap-1"
+              :disabled="reqOcupada === r.id"
+              @click="recusarPedido(r)"
+            >
+              <X class="size-3" /> Recusar
+            </button>
+          </div>
+        </div>
+
+        <p v-if="r.descricao" class="mt-1.5 whitespace-pre-wrap text-xs">{{ r.descricao }}</p>
+        <p v-if="r.justificativa" class="mt-1 text-xs text-muted-foreground">
+          <span class="font-medium">Por que precisam:</span> {{ r.justificativa }}
+        </p>
+
+        <dl class="mt-2 grid gap-1 text-[11px] sm:grid-cols-2">
+          <div>
+            <dt class="font-medium text-muted-foreground">De onde vem a imagem</dt>
+            <dd class="whitespace-pre-wrap">{{ r.origem_imagem }}</dd>
+          </div>
+          <div>
+            <dt class="font-medium text-muted-foreground">De onde vem a voz</dt>
+            <dd class="whitespace-pre-wrap">{{ r.origem_voz }}</dd>
+          </div>
+          <div v-if="r.cessao_obs" class="sm:col-span-2">
+            <dt class="font-medium text-muted-foreground">Sobre a cessão</dt>
+            <dd class="whitespace-pre-wrap">{{ r.cessao_obs }}</dd>
+          </div>
+        </dl>
       </div>
     </div>
   </div>
