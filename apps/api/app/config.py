@@ -417,6 +417,12 @@ class Settings(BaseSettings):
     estoque_familia_ativo: bool = False
     estoque_familia_prefixos: str = ""
     estoque_familia_minimo: int = 5
+    # O outro lado da soma: se o anuncio promete o total de todos os lotes, a
+    # venda precisa saber sair de qualquer um deles. Com isto ligado, o robo de
+    # prioridade procura um lote irmao com peca quando o lote da prioridade (ou
+    # o proprio lote do anuncio) esta vazio. So vale nas linhas em que a soma
+    # esta ligada.
+    estoque_familia_redireciona: bool = False
 
     # Prioridade de estoque: como o robô troca o SKU do pedido no Bling.
     # False (hoje) = EDITA o item; o Bling guarda a composição antiga colada

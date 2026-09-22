@@ -44,6 +44,28 @@ def lote_de(pedaco: str) -> str | None:
     return tail if tail in SUFFIX_TAGS else None
 
 
+def familia_ligada(sku: str | None) -> bool:
+    """A soma por família está valendo para ESTA linha de produto?
+
+    Usada tanto para decidir o número publicado quanto para decidir se o robô de
+    prioridade pode redirecionar a venda para um lote irmão — as duas coisas têm
+    que andar juntas: prometer no anúncio o estoque que está em outro lote só é
+    seguro se a venda souber sair de lá.
+    """
+    s = get_settings()
+    if not getattr(s, "estoque_familia_ativo", False):
+        return False
+    base = chave_familia(sku)
+    if base is None:
+        return False
+    prefixos = tuple(
+        p.strip().lower()
+        for p in (getattr(s, "estoque_familia_prefixos", "") or "").split(",")
+        if p.strip()
+    )
+    return not prefixos or base.split("+")[0].startswith(prefixos)
+
+
 def chave_familia(sku: str | None) -> str | None:
     """Chave da família: o SKU inteiro sem os lotes, ou None se não formar.
 
@@ -116,17 +138,9 @@ async def saldo_publicavel(
     if not getattr(s, "estoque_familia_ativo", False):
         return proprio
 
+    if not familia_ligada(product.sku):
+        return proprio
     base = chave_familia(product.sku)
-    if base is None:
-        return proprio
-
-    prefixos = tuple(
-        p.strip().lower()
-        for p in (getattr(s, "estoque_familia_prefixos", "") or "").split(",")
-        if p.strip()
-    )
-    if prefixos and not base.split("+")[0].startswith(prefixos):
-        return proprio
 
     if cache is not None and base in cache:
         total = cache[base]

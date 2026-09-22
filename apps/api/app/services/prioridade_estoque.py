@@ -57,7 +57,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.db import session_scope
 from app.models import BlingOrder, PricingProduct
-from app.services import nf_emissao_gerar
+from app.services import estoque_familia, nf_emissao_gerar
 from app.services.advisory_lock import SYNC_NAMESPACE
 from app.services.logistica_bling import build_observacoes_put_body, compose_observacoes
 from app.services.margem_audit import record_margem_audit
@@ -125,6 +125,54 @@ def sku_alvo(codigo: str, tag_atual: str, prioridade: str) -> str:
         else:
             out.append(raw)
     return "+".join(out)
+
+
+async def _lote_com_saldo(
+    client,
+    cache: dict,
+    *,
+    codigo: str,
+    tag_atual: str,
+    prioridade: str | None,
+    qtd: int,
+    redirecionar: bool,
+) -> tuple[str | None, dict | None]:
+    """De qual lote a peça vai sair, de verdade.
+
+    Ordem de preferência, e é a regra que o Eduardo descreveu: primeiro o lote da
+    prioridade; se lá não tiver peça, o próprio lote do anúncio; e só então os
+    lotes irmãos. Devolve o SKU escolhido e o produto do Bling, ou (None, None)
+    se nenhum lote cobre a quantidade.
+
+    O terceiro passo só existe quando a soma por família está ligada para esta
+    linha: o anúncio promete o total de todos os lotes, então a venda precisa
+    saber sair de qualquer um deles. Sem isso, um anúncio que mostra 36 peças com
+    o lote dele em zero derruba o saldo para negativo — foi o que aconteceu com o
+    dg057.ci.
+    """
+    atual = (codigo or "").strip().lower()
+    candidatos: list[str] = []
+    if prioridade and prioridade != tag_atual:
+        candidatos.append(sku_alvo(codigo, tag_atual, prioridade))
+    candidatos.append(atual)
+    if redirecionar:
+        for irmao in estoque_familia.irmaos(codigo):
+            if irmao not in candidatos:
+                candidatos.append(irmao)
+
+    for alvo in candidatos:
+        if alvo not in cache:
+            cache[alvo] = await client.find_active_product_by_sku(alvo)
+        prod = cache[alvo]
+        if not prod or not prod.get("id"):
+            continue
+        if (prod.get("sku") or "").strip().lower() != alvo.strip().lower():
+            continue
+        saldo = prod.get("stock")
+        if saldo is None or float(saldo) < qtd:
+            continue
+        return alvo, prod
+    return None, None
 
 
 async def _mapa_prioridades(session: AsyncSession) -> dict[str, str]:
@@ -276,39 +324,52 @@ async def aplicar_prioridade_estoque(
                 continue
             base, tag_atual = info
             prio = mapa.get(base)
-            if not prio or prio == tag_atual:
+            # Com a soma por família ligada nesta linha, o robô também pode
+            # redirecionar a venda para um lote irmão — inclusive quando o item
+            # JÁ está no lote da prioridade, mas esse lote está vazio.
+            redirecionar = bool(
+                get_settings().estoque_familia_redireciona
+            ) and estoque_familia.familia_ligada(cod)
+            if not redirecionar and (not prio or prio == tag_atual):
                 continue
             summary["avaliados"] += 1
-            alvo = sku_alvo(cod, tag_atual, prio)
-            if alvo not in alvo_cache:
-                alvo_cache[alvo] = await client.find_active_product_by_sku(alvo)
-            prod = alvo_cache[alvo]
-            if (
-                not prod
-                or not prod.get("id")
-                or (prod.get("sku") or "").strip().lower() != alvo.strip().lower()
-            ):
-                summary["sem_produto_alvo"] += 1
-                logger.info(
-                    "prioridade_estoque_sem_produto_alvo",
-                    pedido=numero,
-                    de=cod,
-                    para=alvo,
-                )
-                continue
-            saldo = prod.get("stock")
-            if saldo is None or float(saldo) < qtd:
+            alvo, prod = await _lote_com_saldo(
+                client,
+                alvo_cache,
+                codigo=cod,
+                tag_atual=tag_atual,
+                prioridade=prio,
+                qtd=qtd,
+                redirecionar=redirecionar,
+            )
+            if alvo is None:
                 summary["sem_saldo_alvo"] += 1
                 logger.info(
                     "prioridade_estoque_sem_saldo_alvo",
                     pedido=numero,
                     de=cod,
-                    para=alvo,
-                    saldo=saldo,
+                    prioridade=prio,
                     qtd=qtd,
+                    redirecionar=redirecionar,
                 )
                 continue
-            prod["stock"] = float(saldo) - qtd
+            if alvo.strip().lower() == (cod or "").strip().lower():
+                # Já está no lote que tem a peça: nada a fazer.
+                summary["ja_no_lote_certo"] = summary.get("ja_no_lote_certo", 0) + 1
+                continue
+            if prio and alvo.strip().lower() != sku_alvo(
+                cod, tag_atual, prio
+            ).strip().lower():
+                summary["redirecionados"] = summary.get("redirecionados", 0) + 1
+                logger.info(
+                    "prioridade_estoque_redirecionado",
+                    pedido=numero,
+                    de=cod,
+                    para=alvo,
+                    prioridade=prio,
+                    motivo="lote da prioridade sem saldo",
+                )
+            prod["stock"] = float(prod["stock"]) - qtd
             trocas.append(
                 {
                     "antigo": cod,
