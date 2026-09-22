@@ -314,16 +314,27 @@ const robosSoProblema = ref(false)
 // Arquivados ficam fora da lista até alguém pedir pra ver (atalho "N arquivados").
 const mostrarArquivados = ref(false)
 
+// Trava de sequência, igual o `loadOcorrencias` já tinha: duas cargas podem
+// estar no ar (o auto-refresh de 60 s e a que vem depois de uma ação), e sem
+// isso vence a que responder por último. A do refresh é a mais lenta — sai
+// junto com as ocorrências e os detalhes abertos —, então ela chegava DEPOIS
+// carregando a foto de antes: a linha que a pessoa acabou de arquivar voltava
+// pra tabela logo após o aviso "saiu do painel".
+let robosSeq = 0
 async function loadRobos() {
+  const seq = ++robosSeq
   robosLoading.value = true
   robosError.value = null
   try {
-    robos.value = await api<Robo[]>('/api/ouvidoria/robos')
+    const lista = await api<Robo[]>('/api/ouvidoria/robos')
+    if (seq !== robosSeq) return
+    robos.value = lista
     robosCarregou.value = true
   } catch (e: any) {
+    if (seq !== robosSeq) return
     robosError.value = apiError(e)
   } finally {
-    robosLoading.value = false
+    if (seq === robosSeq) robosLoading.value = false
   }
 }
 
@@ -389,7 +400,8 @@ let autoRefreshTimer: ReturnType<typeof setInterval> | null = null
 function autoRefreshTick() {
   if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return
   if (editando.value) return
-  if (acoesEmVoo.value.size || mudandoModo.value.size || rodando.value.size) return
+  if (acoesEmVoo.value.size || mudandoModo.value.size || rodando.value.size || arquivando.value.size)
+    return
   void refreshTudo()
 }
 onMounted(() => {
