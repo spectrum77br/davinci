@@ -1,9 +1,16 @@
 """Cadastro dos destinatários Threema dos botões INFORMAR (admin-only).
 
 Uma linha por contexto ('logistica' | 'controle_estoque'); `recipients` guarda
-os IDs Threema escolhidos (mesmo formato CSV do `.env`). O diretório de
-nomes continua vindo do `.env` (threema_recipient_names/threema_recipients) —
-aqui só persiste QUEM recebe cada relatório.
+os IDs Threema escolhidos (mesmo formato CSV do `.env`) — aqui persiste QUEM
+recebe cada relatório.
+
+A linha de contexto `diretorio` (services/threema.CONTEXTO_CONTATOS) é a
+exceção e guarda outra coisa: os CONTATOS AVULSOS, no formato `ID:Nome` do
+`threema_recipient_names` do `.env`. Vinicius, 22/09/2026: precisava mandar
+aviso pro "roma", que não tem login no DaVinci, e a única porta era editar o
+`.env` do servidor. Fica aqui, e não em tabela nova, porque é o mesmo dado
+que esta tabela já tirou do arquivo — quem lê é o mesmo
+`parse_recipient_directory`.
 """
 from __future__ import annotations
 

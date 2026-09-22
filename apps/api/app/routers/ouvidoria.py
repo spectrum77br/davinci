@@ -33,6 +33,7 @@ from app.deps.auth import require_permission
 from app.models import OuvidoriaOcorrencia, OuvidoriaRobo, OuvidoriaRodada, User
 from app.schemas.ouvidoria import (
     ContaOut,
+    ContatoThreemaIn,
     DestinatarioOut,
     OcorrenciaOut,
     OcorrenciasPage,
@@ -261,8 +262,54 @@ async def threema_destinatarios(
     session: Annotated[AsyncSession, Depends(get_session)],
     _user: Annotated[User, Depends(require_permission("ouvidoria", "view"))],
 ) -> list[DestinatarioOut]:
-    """Quem pode receber os avisos: `[{id, nome}]` pro seletor da tela
-    (usuários ativos com Threema em Admin › Usuários + apelidos do `.env`)."""
+    """Quem pode receber os avisos: `[{id, nome, origem}]` pro seletor da tela
+    (usuários ativos com Threema em Admin › Usuários + contatos avulsos
+    cadastrados aqui + apelidos do `.env`)."""
+    return [DestinatarioOut(**d) for d in await threema.diretorio(session)]
+
+
+@router.post("/threema/destinatarios", response_model=list[DestinatarioOut])
+async def criar_contato_threema(
+    body: ContatoThreemaIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("ouvidoria", "edit"))],
+) -> list[DestinatarioOut]:
+    """Cadastra um contato avulso do Threema (nome + ID) e devolve a lista
+    inteira já com ele.
+
+    Vinicius, 22/09/2026: o "roma" (VBS64V3S) precisa receber aviso e não tem
+    login no DaVinci — sem isto a única porta era a lista do `.env`, que exige
+    mexer no servidor e subir de novo. Quem TEM login continua vindo de
+    Admin › Usuários: lá o nome é o do cadastro e manda neste."""
+    try:
+        await threema.salvar_contato(session, threema_id=body.id, nome=body.nome)
+    except threema.ContatoInvalidoError as e:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"code": "contato_invalido", "message": str(e)},
+        ) from e
+    await session.commit()
+    logger.info(
+        "ouvidoria_threema_contato", contato=body.id.strip().upper(), por=_autor(user)
+    )
+    return [DestinatarioOut(**d) for d in await threema.diretorio(session)]
+
+
+@router.delete("/threema/destinatarios/{threema_id}", response_model=list[DestinatarioOut])
+async def remover_contato_threema(
+    threema_id: str,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("ouvidoria", "edit"))],
+) -> list[DestinatarioOut]:
+    """Tira da lista um contato avulso. Quem veio de Admin › Usuários ou do
+    `.env` não sai por aqui — some quando o cadastro dele mudar lá."""
+    await threema.remover_contato(session, threema_id)
+    await session.commit()
+    logger.info(
+        "ouvidoria_threema_contato_removido",
+        contato=threema_id.strip().upper(),
+        por=_autor(user),
+    )
     return [DestinatarioOut(**d) for d in await threema.diretorio(session)]
 
 

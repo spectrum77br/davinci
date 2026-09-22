@@ -11,6 +11,7 @@ import {
   ExternalLink,
   Loader2,
   Play,
+  Plus,
   Radar,
   RotateCcw,
   Search,
@@ -19,6 +20,7 @@ import {
   Trash2,
   UserRound,
   Wrench,
+  X,
 } from 'lucide-vue-next'
 import { isoDateBrt, isoDaysAgo, isoToday } from '~/lib/date'
 import { PLATAFORMAS, plataformaInfo } from '~/components/OuvidoriaPlataforma.vue'
@@ -658,7 +660,10 @@ const salvandoEdicao = ref(false)
 // apelidos do .env). Carregado ao abrir a edição — é o mesmo seletor do
 // botão Informar: caixinha por pessoa, nunca ID digitado à mão (21/09:
 // Vinicius digitou "cairo sa" no campo de texto e a API recusou).
-type Destinatario = { id: string; nome: string }
+// `origem` diz de onde a pessoa veio: usuario (cadastro em Usuários), contato
+// (avulso, cadastrado aqui) ou env (lista antiga do servidor). Só o avulso a
+// tela deixa remover — os outros somem mudando a origem deles.
+type Destinatario = { id: string; nome: string; origem?: 'usuario' | 'contato' | 'env' | null }
 const diretorio = ref<Destinatario[]>([])
 const diretorioCarregado = ref(false)
 const seletorAberto = ref(false)
@@ -676,6 +681,56 @@ function nomeDe(id: string): string {
 function pessoaMarcada(id: string): boolean {
   return editForm.value.threema_ids.includes(id)
 }
+// Contato avulso do Threema: quem recebe aviso e não tem login no DaVinci
+// (Vinicius, 22/09/2026: o "roma", VBS64V3S). Cadastrado aqui mesmo, no
+// seletor, porque é onde a falta aparece.
+const novoContatoNome = ref('')
+const novoContatoId = ref('')
+const salvandoContato = ref(false)
+
+async function adicionarContato() {
+  const nome = novoContatoNome.value.trim()
+  const id = novoContatoId.value.trim().toUpperCase()
+  if (!nome || !id) {
+    toasts.warning('Preencha o nome e o ID do Threema')
+    return
+  }
+  salvandoContato.value = true
+  try {
+    diretorio.value = await api<Destinatario[]>('/api/ouvidoria/threema/destinatarios', {
+      method: 'POST',
+      body: { id, nome },
+    })
+    diretorioCarregado.value = true
+    // Já marca: quem cadastrou está justamente escolhendo essa pessoa.
+    if (!editForm.value.threema_ids.includes(id)) alternarPessoa(id)
+    novoContatoNome.value = ''
+    novoContatoId.value = ''
+    toasts.success(`${nome} entrou na lista`, 'falta salvar o robô pra ele passar a receber')
+  } catch (e: any) {
+    toasts.error('Não deu pra cadastrar o contato', apiError(e))
+  } finally {
+    salvandoContato.value = false
+  }
+}
+
+async function removerContato(d: Destinatario) {
+  if (!confirm(`Tirar "${d.nome}" da lista de quem pode receber aviso?`)) return
+  salvandoContato.value = true
+  try {
+    diretorio.value = await api<Destinatario[]>(
+      `/api/ouvidoria/threema/destinatarios/${encodeURIComponent(d.id)}`,
+      { method: 'DELETE' },
+    )
+    if (editForm.value.threema_ids.includes(d.id)) alternarPessoa(d.id)
+    toasts.success(`${d.nome} saiu da lista`)
+  } catch (e: any) {
+    toasts.error('Não deu pra remover o contato', apiError(e))
+  } finally {
+    salvandoContato.value = false
+  }
+}
+
 function alternarPessoa(id: string) {
   const ids = editForm.value.threema_ids
   editForm.value = {
@@ -1311,10 +1366,10 @@ const carregandoAba = computed(() => (tab.value === 'robos' ? robosLoading.value
                               class="absolute left-0 top-full z-30 mt-1 w-full rounded-md border bg-card p-1 shadow-lg"
                             >
                               <div v-if="!diretorioCarregado" class="px-2 py-1.5 text-xs text-muted-foreground">carregando…</div>
-                              <div v-else-if="!diretorio.length" class="px-2 py-1.5 text-xs text-muted-foreground">
-                                Ninguém com Threema cadastrado — preencha o campo Threema em Admin › Usuários.
-                              </div>
                               <template v-else>
+                                <div v-if="!diretorio.length" class="px-2 py-1.5 text-xs text-muted-foreground">
+                                  Ninguém com Threema ainda — cadastre abaixo, ou preencha o campo Threema da pessoa em Usuários.
+                                </div>
                                 <label
                                   v-for="d in diretorio"
                                   :key="d.id"
@@ -1323,7 +1378,50 @@ const carregandoAba = computed(() => (tab.value === 'robos' ? robosLoading.value
                                   <input type="checkbox" class="size-3.5" :checked="pessoaMarcada(d.id)" @change="alternarPessoa(d.id)" />
                                   <span>{{ d.nome }}</span>
                                   <span class="ml-auto font-mono text-[10px] text-muted-foreground">{{ d.id }}</span>
+                                  <!-- Só o contato avulso sai por aqui; usuário e .env vêm de outro lugar. -->
+                                  <button
+                                    v-if="d.origem === 'contato'"
+                                    type="button"
+                                    class="shrink-0 text-muted-foreground hover:text-destructive disabled:opacity-50"
+                                    :disabled="salvandoContato"
+                                    title="Tirar este contato da lista"
+                                    @click.prevent.stop="removerContato(d)"
+                                  >
+                                    <X class="size-3" />
+                                  </button>
                                 </label>
+                                <!-- Contato de quem não tem login no DaVinci: nome + ID, sem deploy. -->
+                                <div class="mt-1 border-t px-2 pt-1.5">
+                                  <div class="mb-1 text-[10px] uppercase tracking-wider text-muted-foreground">Não está na lista?</div>
+                                  <div class="flex items-center gap-1">
+                                    <input
+                                      v-model="novoContatoNome"
+                                      class="h-7 min-w-0 flex-1 rounded border bg-background px-1.5 text-xs"
+                                      placeholder="nome (ex. roma)"
+                                      @keydown.enter.prevent="adicionarContato"
+                                    />
+                                    <input
+                                      v-model="novoContatoId"
+                                      class="h-7 w-24 rounded border bg-background px-1.5 font-mono text-xs uppercase"
+                                      placeholder="VBS64V3S"
+                                      maxlength="8"
+                                      @keydown.enter.prevent="adicionarContato"
+                                    />
+                                    <button
+                                      type="button"
+                                      class="inline-flex h-7 shrink-0 items-center gap-1 rounded-md border px-2 text-[11px] hover:bg-muted disabled:opacity-50"
+                                      :disabled="salvandoContato"
+                                      @click="adicionarContato"
+                                    >
+                                      <Loader2 v-if="salvandoContato" class="size-3 animate-spin" />
+                                      <Plus v-else class="size-3" />
+                                      cadastrar
+                                    </button>
+                                  </div>
+                                  <div class="mt-1 text-[10px] text-muted-foreground">
+                                    O ID do Threema tem 8 letras/números. Quem tem login no DaVinci aparece sozinho ao preencher o campo Threema em Usuários.
+                                  </div>
+                                </div>
                                 <div class="mt-1 flex items-center justify-between border-t px-2 pt-1.5 text-[11px] text-muted-foreground">
                                   <span>{{ editForm.threema_ids.length }} {{ editForm.threema_ids.length === 1 ? 'pessoa' : 'pessoas' }}</span>
                                   <button type="button" class="hover:text-foreground" @click="editForm = { ...editForm, threema_ids: idsPadrao(r) }; seletorAberto = false">

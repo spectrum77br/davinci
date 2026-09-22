@@ -20,6 +20,8 @@ Doc: https://gateway.threema.ch/en/developer/api — `POST /send_simple`
 
 from __future__ import annotations
 
+import re
+
 import httpx
 import structlog
 
@@ -96,6 +98,82 @@ def parse_recipient_directory(names_raw: str | None, ids_raw: str | None) -> lis
     return [{"id": rid, "nome": names[rid]} for rid in order]
 
 
+# Contato avulso: quem recebe aviso mas não tem login no DaVinci (ou tem e
+# está desativado). Vinicius, 22/09/2026: precisava mandar pro "roma" e não
+# havia onde — a única porta era a lista do `.env`, que exige mexer no
+# servidor. Mora na MESMA tabela do Informar, numa linha de contexto próprio,
+# e no MESMO formato do `.env` (`ID:Nome`, separados por vírgula), então quem
+# lê continua sendo o `parse_recipient_directory`.
+CONTEXTO_CONTATOS = "diretorio"
+_THREEMA_ID = re.compile(r"^(?:[A-Z0-9]{8}|\*[A-Z0-9]{7})$")
+
+
+class ContatoInvalidoError(ValueError):
+    """Frase pronta pra tela (o router devolve 422 com ela)."""
+
+
+async def _linha_contatos(session):
+    """A linha de `threema_informar_config` que guarda os contatos avulsos.
+    Import tardio dos modelos, como no `diretorio` (o worker importa este
+    módulo antes do registry do SQLAlchemy fechar)."""
+    from sqlalchemy import select
+
+    from app.models import ThreemaInformarConfig
+
+    return (
+        await session.execute(
+            select(ThreemaInformarConfig).where(
+                ThreemaInformarConfig.contexto == CONTEXTO_CONTATOS
+            )
+        )
+    ).scalar_one_or_none()
+
+
+async def contatos(session) -> list[dict[str, str]]:
+    """Contatos avulsos cadastrados na tela, `[{id, nome}]`."""
+    row = await _linha_contatos(session)
+    return parse_recipient_directory(row.recipients if row else "", None)
+
+
+async def salvar_contato(session, *, threema_id: str, nome: str) -> list[dict[str, str]]:
+    """Cadastra (ou renomeia) um contato avulso. Commit fica com o caller."""
+    from app.models import ThreemaInformarConfig
+
+    rid = (threema_id or "").strip().upper()
+    nome = " ".join((nome or "").split())
+    if not _THREEMA_ID.match(rid):
+        raise ContatoInvalidoError(
+            "O ID do Threema tem 8 letras/números (ex.: VBS64V3S) — confira e tente de novo."
+        )
+    if not nome:
+        raise ContatoInvalidoError("Dê um nome ao contato: é ele que aparece na lista.")
+    if ":" in nome or "," in nome or ";" in nome:
+        raise ContatoInvalidoError("O nome não pode ter ':' , ',' nem ';'.")
+    row = await _linha_contatos(session)
+    if row is None:
+        row = ThreemaInformarConfig(contexto=CONTEXTO_CONTATOS, recipients="")
+        session.add(row)
+    atuais = {d["id"]: d["nome"] for d in parse_recipient_directory(row.recipients, None)}
+    atuais[rid] = nome
+    row.recipients = ",".join(
+        f"{k}:{v}" for k, v in sorted(atuais.items(), key=lambda x: x[1].lower())
+    )
+    await session.flush()
+    return [{"id": k, "nome": v} for k, v in atuais.items()]
+
+
+async def remover_contato(session, threema_id: str) -> None:
+    """Tira o contato avulso da lista. Quem veio de Admin › Usuários ou do
+    `.env` não sai por aqui (não é daqui que ele vem)."""
+    row = await _linha_contatos(session)
+    if row is None:
+        return
+    rid = (threema_id or "").strip().upper()
+    atuais = [d for d in parse_recipient_directory(row.recipients, None) if d["id"] != rid]
+    row.recipients = ",".join(f"{d['id']}:{d['nome']}" for d in atuais)
+    await session.flush()
+
+
 async def diretorio(session) -> list[dict[str, str]]:
     """Quem pode receber aviso: `[{id, nome}]` pro seletor das telas
     (Informar, Ouvidoria › Robôs).
@@ -105,8 +183,12 @@ async def diretorio(session) -> list[dict[str, str]]:
     aparece é o do cadastro. Completa com as entradas legadas do `.env`
     (THREEMA_RECIPIENT_NAMES/THREEMA_RECIPIENTS) cujo ID ninguém tem no
     cadastro; quando o dono do código ganhar cadastro, o apelido do `.env`
-    dá lugar ao nome real. Ordem alfabética. Import tardio dos modelos: este
-    módulo é importado pelo worker antes do registry do SQLAlchemy fechar.
+    dá lugar ao nome real. No meio dos dois entram os CONTATOS AVULSOS
+    cadastrados na tela (`contatos`), pra quem recebe aviso e não tem login.
+    Cada linha diz de onde veio em `origem` (usuario | contato | env) — é o
+    que deixa a tela oferecer o "remover" só no que ela mesma cadastrou.
+    Ordem alfabética. Import tardio dos modelos: este módulo é importado pelo
+    worker antes do registry do SQLAlchemy fechar.
     """
     from sqlalchemy import func, select
 
@@ -134,9 +216,20 @@ async def diretorio(session) -> list[dict[str, str]]:
         for rid in parse_recipients(u.threema):
             por_id.setdefault(rid, u.name or u.email)
     s = get_settings()
+    avulsos = await contatos(session)
     env = parse_recipient_directory(s.threema_recipient_names, s.threema_recipients)
-    out = [{"id": rid, "nome": nome} for rid, nome in por_id.items()]
-    out += [d for d in env if d["id"] not in por_id]
+    out = [{"id": rid, "nome": nome, "origem": "usuario"} for rid, nome in por_id.items()]
+    # Cadastro de usuário manda no nome: quem ganhar login depois aparece com
+    # o nome real, e o contato avulso do mesmo ID some sozinho da lista.
+    vistos = set(por_id)
+    for d in avulsos:
+        if d["id"] not in vistos:
+            out.append({**d, "origem": "contato"})
+            vistos.add(d["id"])
+    for d in env:
+        if d["id"] not in vistos:
+            out.append({**d, "origem": "env"})
+            vistos.add(d["id"])
     out.sort(key=lambda d: (d["nome"] or "").lower())
     return out
 

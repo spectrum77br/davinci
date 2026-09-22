@@ -967,7 +967,11 @@ async def test_router_robos_lista_e_patch(client, make_user, auth_as, db):
     assert robo["rodadas_hoje"] == 1 and robo["rodadas_hoje_ok"] == 1
     assert robo["saude"] == "ok"
     assert robo["ultima_rodada_resumo"].startswith("10 pedidos")
-    assert robo["threema_destinatarios"] == [{"id": "ABCDEFGH", "nome": "ABCDEFGH"}]
+    # `origem` só vem preenchida na LISTA do seletor (/threema/destinatarios);
+    # aqui é quem o robô já avisa, não de onde a pessoa saiu.
+    assert robo["threema_destinatarios"] == [
+        {"id": "ABCDEFGH", "nome": "ABCDEFGH", "origem": None}
+    ]
     assert robo["threema_origem"] == "robo"
     assert robo["config"]["cadencia_min"] == 60
 
@@ -1017,6 +1021,64 @@ async def test_router_robos_lista_e_patch(client, make_user, auth_as, db):
     det = r.json()
     assert len(det["rodadas"]) == 1 and det["rodadas"][0]["ok"] is True
     assert det["contas"] == []
+
+
+async def test_router_cadastra_contato_avulso_do_threema(client, make_user, auth_as, db):
+    """Vinicius, 22/09/2026: o "roma" (VBS64V3S) precisa receber aviso e não
+    tem login no DaVinci. Cadastrado na própria tela, ele entra no seletor,
+    dá pra escolher pelo NOME no campo do robô, e sai por ali mesmo."""
+    await _robo(db)
+    await db.commit()
+    editor = await make_user(email="eduardo@davinci-test.com", permissions=_perms(edit=True))
+    auth_as(editor)
+
+    r = await client.post(
+        "/api/ouvidoria/threema/destinatarios", json={"id": "vbs64v3s", "nome": "roma"}
+    )
+    assert r.status_code == 200, r.text
+    por_id = {d["id"]: d for d in r.json()}
+    assert por_id["VBS64V3S"]["nome"] == "roma"  # ID normalizado pra maiúsculo
+    assert por_id["VBS64V3S"]["origem"] == "contato"
+
+    # Entrou no diretório que a tela lê.
+    lista = (await client.get("/api/ouvidoria/threema/destinatarios")).json()
+    assert {"id": "VBS64V3S", "nome": "roma", "origem": "contato"} in lista
+
+    # E o campo do robô aceita pelo nome, como com qualquer pessoa da lista.
+    r = await client.patch(
+        f"/api/ouvidoria/robos/{ROBO}", json={"threema_recipients": "roma"}
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["threema_recipients"] == "VBS64V3S"
+
+    # ID torto não entra (e a frase explica o formato).
+    r = await client.post(
+        "/api/ouvidoria/threema/destinatarios", json={"id": "roma", "nome": "roma"}
+    )
+    assert r.status_code == 422
+    assert "8 letras" in r.json()["detail"]["message"]
+
+    r = await client.delete("/api/ouvidoria/threema/destinatarios/vbs64v3s")
+    assert r.status_code == 200, r.text
+    assert all(d["id"] != "VBS64V3S" for d in r.json())
+
+
+async def test_contato_avulso_perde_pro_cadastro_do_usuario(client, make_user, auth_as, db):
+    """Mesmo ID cadastrado nos dois lugares: quem manda no nome é Usuários —
+    senão o apelido digitado aqui esconderia o nome real da pessoa."""
+    editor = await make_user(email="eduardo@davinci-test.com", permissions=_perms(edit=True))
+    editor.name = "Eduardo"
+    editor.threema = "VBS64V3S"
+    await db.commit()
+    auth_as(editor)
+
+    r = await client.post(
+        "/api/ouvidoria/threema/destinatarios", json={"id": "VBS64V3S", "nome": "roma"}
+    )
+    assert r.status_code == 200, r.text
+    linhas = [d for d in r.json() if d["id"] == "VBS64V3S"]
+    assert len(linhas) == 1
+    assert linhas[0]["origem"] == "usuario" and linhas[0]["nome"] == "Eduardo"
 
 
 async def test_router_arquivar_tira_da_lista_sem_mexer_no_robo(
