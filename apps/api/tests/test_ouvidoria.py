@@ -1003,6 +1003,44 @@ async def test_router_robos_lista_e_patch(client, make_user, auth_as, db):
     assert det["contas"] == []
 
 
+async def test_router_arquivar_tira_da_lista_sem_mexer_no_robo(
+    client, make_user, auth_as, db
+):
+    """A lixeira do painel (Vinicius, 22/09): some da lista e NADA mais — o
+    robô não é excluído, o modo fica como está e ele continua rodando e
+    avisando. A listagem devolve todos (a tela é quem esconde), e a sincronia
+    do catálogo não pode desarquivar sozinha."""
+    await _robo(db, modo="ligado")
+    await db.commit()
+    editor = await make_user(email="eduardo@davinci-test.com", permissions=_perms(edit=True))
+    auth_as(editor)
+
+    r = await client.patch(f"/api/ouvidoria/robos/{ROBO}", json={"arquivado": True})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["arquivado_em"] is not None
+    assert body["arquivado_por"] == "eduardo@davinci-test.com"
+    assert body["modo"] == "ligado"  # arquivar não desliga
+
+    # A linha continua no banco e na listagem (quem esconde é a tela), e o
+    # GET /robos roda o sincronizar_catalogo antes de listar.
+    lista = (await client.get("/api/ouvidoria/robos")).json()
+    arquivado = {b["chave"]: b for b in lista}[ROBO]
+    assert arquivado["arquivado_em"] is not None and arquivado["modo"] == "ligado"
+
+    # O robô arquivado continua rodando: uma rodada grava normalmente.
+    async with svc.Rodada(db, ROBO) as rod:
+        rod.resumo = "rodou arquivado"
+    await db.commit()
+    robo = await db.get(OuvidoriaRobo, ROBO)
+    await db.refresh(robo)
+    assert robo.ultima_rodada_resumo == "rodou arquivado" and robo.arquivado_em is not None
+
+    r = await client.patch(f"/api/ouvidoria/robos/{ROBO}", json={"arquivado": False})
+    assert r.status_code == 200, r.text
+    assert r.json()["arquivado_em"] is None and r.json()["arquivado_por"] is None
+
+
 async def test_router_rodar_agora_agenda_o_runner(client, make_user, auth_as, db, monkeypatch):
     await _robo(db)
     chamadas: list[str] = []

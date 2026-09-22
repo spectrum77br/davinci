@@ -131,6 +131,8 @@ def _robo_out(
         "modo": robo.modo,
         "modo_alterado_por": robo.modo_alterado_por,
         "modo_alterado_em": robo.modo_alterado_em,
+        "arquivado_em": robo.arquivado_em,
+        "arquivado_por": robo.arquivado_por,
         "threema_recipients": robo.threema_recipients,
         "threema_destinatarios": [
             DestinatarioOut(id=i, nome=nomes.get(i, i)) for i in ids
@@ -271,8 +273,9 @@ async def editar_robo(
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[User, Depends(require_permission("ouvidoria", "edit"))],
 ) -> RoboOut:
-    """Modo, destinatários, re-aviso e config. Mudança de modo carimba quem
-    e quando (a tela mostra "desligado por Fulano em 21/09 16:10")."""
+    """Modo, destinatários, re-aviso, config e a lixeira do painel. Mudança de
+    modo carimba quem e quando (a tela mostra "desligado por Fulano em 21/09
+    16:10"); `arquivado` idem."""
     robo = await _get_robo(session, chave)
     # Valida tudo antes de gravar qualquer coisa: a tela manda o objeto
     # inteiro, e uma tolerância de 100000 min (dedo a mais) ou um texto no
@@ -294,6 +297,16 @@ async def editar_robo(
         robo.modo_alterado_por = _autor(user)
         robo.modo_alterado_em = datetime.now(UTC)
         logger.info("ouvidoria_modo", robo=chave, modo=body.modo, por=_autor(user))
+    if body.arquivado is not None and body.arquivado != (robo.arquivado_em is not None):
+        # Lixeira do painel: tira da LISTA e mais nada. O modo fica como está
+        # — robô arquivado que está ligado continua rodando e avisando (foi a
+        # escolha do Vinicius em 22/09). Some da vista, não do trabalho.
+        agora = datetime.now(UTC)
+        robo.arquivado_em = agora if body.arquivado else None
+        robo.arquivado_por = _autor(user) if body.arquivado else None
+        logger.info(
+            "ouvidoria_arquivado", robo=chave, arquivado=body.arquivado, por=_autor(user)
+        )
     if body.threema_recipients is not None:
         robo.threema_recipients = destinatarios
     if body.reaviso_horas is not None:

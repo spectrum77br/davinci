@@ -39,6 +39,9 @@ class RoboOut(BaseModel):
     modo: Modo
     modo_alterado_por: str | None = None
     modo_alterado_em: datetime | None = None
+    # Arquivado: a tela esconde a linha da lista (o robô continua rodando).
+    arquivado_em: datetime | None = None
+    arquivado_por: str | None = None
     # Override salvo na tela (texto cru); os IDs efetivos vêm resolvidos em
     # `threema_destinatarios` + `threema_origem` (robo | env | geral | None).
     threema_recipients: str | None = None
@@ -82,6 +85,9 @@ class RoboDetalheOut(RoboOut):
 
 class RoboPatch(BaseModel):
     modo: Modo | None = None
+    # True tira o robô da lista do painel, False traz de volta; None não mexe.
+    # Não toca no modo: arquivado continua rodando e avisando igual.
+    arquivado: bool | None = None
     # "" limpa o override (volta pro env). None = não mexe.
     threema_recipients: str | None = None
     reaviso_horas: int | None = Field(default=None, ge=1, le=24 * 30)

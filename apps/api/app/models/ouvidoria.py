@@ -74,6 +74,16 @@ class OuvidoriaRobo(Base, TimestampMixin):
     modo_alterado_em: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # Arquivado = sai da LISTA do painel e nada mais. Vinicius, 22/09/2026:
+    # "uma lixeira pra tirar o robô daqui, não pra excluir o robô". Ele decidiu
+    # que arquivar não mexe no modo: robô arquivado que está ligado continua
+    # rodando, registrando ocorrência e avisando no Threema igual. Por isso o
+    # painel guarda quem arquivou e mostra um atalho "N arquivados" pra trazer
+    # de volta — some da vista, não do trabalho.
+    arquivado_em: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    arquivado_por: Mapped[str | None] = mapped_column(String(120), nullable=True)
     # Override dos destinatários Threema (IDs separados por vírgula). Vazio =
     # cai no env do robô (RoboDef.env_threema_recipients) e depois no
     # OUVIDORIA_THREEMA_RECIPIENTS genérico.

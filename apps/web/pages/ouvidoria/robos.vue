@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
   AlertCircle,
   AlertTriangle,
+  ArchiveRestore,
   Bot,
   CheckCircle2,
   ChevronDown,
@@ -15,6 +16,7 @@ import {
   Search,
   ShieldOff,
   Sparkles,
+  Trash2,
   UserRound,
   Wrench,
 } from 'lucide-vue-next'
@@ -51,6 +53,10 @@ type Robo = {
   modo: ModoRobo
   modo_alterado_por: string | null
   modo_alterado_em: string | null
+  // Lixeira do painel: com data, a linha some da lista (o robô continua
+  // rodando e avisando igual — arquivar é só sobre a vista).
+  arquivado_em: string | null
+  arquivado_por: string | null
   // Override dos destinatários do Threema (texto cru salvo na tela); vazio =
   // padrão do .env. Os IDs efetivos, já com nome, vêm resolvidos em
   // `threema_destinatarios`, e `threema_origem` diz de onde saíram
@@ -305,6 +311,8 @@ const robosBusca = ref('')
 const robosArea = ref('')
 const robosEstado = ref<'' | ModoRobo>('')
 const robosSoProblema = ref(false)
+// Arquivados ficam fora da lista até alguém pedir pra ver (atalho "N arquivados").
+const mostrarArquivados = ref(false)
 
 async function loadRobos() {
   robosLoading.value = true
@@ -403,9 +411,12 @@ const areas = computed(() =>
 )
 const temProblema = (r: Robo) => r.saude === 'falhando' || r.saude === 'parado'
 
+const arquivado = (r: Robo) => !!r.arquivado_em
+
 const robosFiltrados = computed(() => {
   const q = robosBusca.value.trim().toLowerCase()
   return robos.value.filter((r) => {
+    if (arquivado(r) && !mostrarArquivados.value) return false
     if (q && !`${r.nome} ${r.descricao || ''} ${r.chave}`.toLowerCase().includes(q)) return false
     if (robosArea.value && (r.area || '') !== robosArea.value) return false
     if (robosEstado.value && r.modo !== robosEstado.value) return false
@@ -415,8 +426,14 @@ const robosFiltrados = computed(() => {
 })
 
 const stRobos = computed(() => {
-  const lista = robos.value
+  // Os cartões contam o painel que está à vista; arquivado sai da conta (mas
+  // se um deles estiver falhando o atalho avisa — some da vista, não do
+  // trabalho).
+  const lista = robos.value.filter((r) => !arquivado(r))
+  const fora = robos.value.filter(arquivado)
   return {
+    arquivados: fora.length,
+    arquivadosComProblema: fora.filter(temProblema).length,
     total: lista.length,
     ligados: lista.filter((r) => r.modo === 'ligado').length,
     silenciosos: lista.filter((r) => r.modo === 'silencioso').length,
@@ -707,6 +724,36 @@ async function mudarModo(r: Robo, modo: ModoRobo) {
   }
 }
 
+// Lixeira da linha: tira o robô da LISTA do painel. Vinicius, 22/09/2026:
+// "não para excluir o robô definitivamente" — a linha continua no banco, o
+// modo não muda e o robô segue rodando e avisando igual. Volta pelo atalho
+// "N arquivados" em cima da tabela.
+const arquivando = ref<Set<string>>(new Set())
+
+async function arquivarRobo(r: Robo, arquivar: boolean) {
+  if (arquivar && !confirm(
+    `Tirar "${r.nome}" do painel?\n\n` +
+      'Ele NÃO é excluído e continua rodando e avisando igual — só some desta lista. ' +
+      'Para trazer de volta, use o atalho "arquivados" em cima da tabela.',
+  )) return
+  setEmVoo(arquivando, r.chave, true)
+  try {
+    await api(`/api/ouvidoria/robos/${encodeURIComponent(r.chave)}`, {
+      method: 'PATCH',
+      body: { arquivado: arquivar },
+    })
+    toasts.success(
+      arquivar ? `${r.nome} saiu do painel` : `${r.nome} voltou pro painel`,
+      arquivar ? 'continua rodando igual; volta pelo atalho "arquivados"' : '',
+    )
+    await loadRobos()
+  } catch (e: any) {
+    toasts.error(arquivar ? 'Não deu pra tirar do painel' : 'Não deu pra trazer de volta', apiError(e))
+  } finally {
+    setEmVoo(arquivando, r.chave, false)
+  }
+}
+
 async function rodarAgora(r: Robo) {
   setEmVoo(rodando, r.chave, true)
   try {
@@ -942,8 +989,25 @@ const carregandoAba = computed(() => (tab.value === 'robos' ? robosLoading.value
           <input v-model="robosSoProblema" type="checkbox" class="size-3.5" />
           Só com problema
         </label>
+        <button
+          v-if="stRobos.arquivados"
+          type="button"
+          class="inline-flex items-center gap-1.5 h-9 rounded-md border px-2 text-sm"
+          :class="[
+            mostrarArquivados ? 'bg-muted' : 'bg-background hover:bg-muted/60',
+            stRobos.arquivadosComProblema ? 'border-red-500/50 text-red-500' : 'text-muted-foreground',
+          ]"
+          :title="stRobos.arquivadosComProblema
+            ? `${stRobos.arquivadosComProblema} robô(s) fora do painel estão falhando ou parados — arquivar não desliga`
+            : 'Robôs tirados do painel. Eles continuam rodando; clique para ver e trazer de volta'"
+          @click="mostrarArquivados = !mostrarArquivados"
+        >
+          <Trash2 class="size-3.5" />
+          {{ stRobos.arquivados }} fora do painel
+          <AlertTriangle v-if="stRobos.arquivadosComProblema" class="size-3.5" />
+        </button>
         <span class="ml-auto text-xs text-muted-foreground">
-          {{ robos.length }} {{ robos.length === 1 ? 'robô' : 'robôs' }} · {{ robosFiltrados.length }} {{ robosFiltrados.length === 1 ? 'mostrado' : 'mostrados' }}
+          {{ stRobos.total }} {{ stRobos.total === 1 ? 'robô' : 'robôs' }} · {{ robosFiltrados.length }} {{ robosFiltrados.length === 1 ? 'mostrado' : 'mostrados' }}
         </span>
       </div>
 
@@ -994,7 +1058,17 @@ const carregandoAba = computed(() => (tab.value === 'robos' ? robosLoading.value
                   <span v-else class="text-[11px] text-muted-foreground">{{ r.modo }}</span>
                 </td>
                 <td class="px-2 py-1.5">
-                  <div class="font-semibold" :class="r.modo === 'desligado' ? 'text-muted-foreground' : ''">{{ r.nome }}</div>
+                  <div class="font-semibold flex items-center gap-1.5" :class="r.modo === 'desligado' ? 'text-muted-foreground' : ''">
+                    {{ r.nome }}
+                    <span
+                      v-if="arquivado(r)"
+                      class="inline-flex items-center gap-1 rounded border px-1 py-px text-[10px] font-normal text-muted-foreground"
+                      :title="`Fora do painel desde ${fmtRel(r.arquivado_em)}${r.arquivado_por ? ', por ' + r.arquivado_por : ''} — continua rodando`"
+                    >
+                      <Trash2 class="size-2.5" />
+                      fora do painel
+                    </span>
+                  </div>
                   <div v-if="r.cadencia_texto" class="text-[11px] text-muted-foreground">{{ r.cadencia_texto }}</div>
                   <div v-if="r.descricao" class="text-[11.5px] leading-snug text-muted-foreground mt-0.5">{{ r.descricao }}</div>
                 </td>
@@ -1052,6 +1126,22 @@ const carregandoAba = computed(() => (tab.value === 'robos' ? robosLoading.value
                       <Loader2 v-if="rodando.has(r.chave)" class="size-3 animate-spin" />
                       <Play v-else class="size-3" />
                       Rodar agora
+                    </button>
+                    <!-- Lixeira: tira da lista do painel. Não exclui o robô e
+                         não mexe no modo — ele continua rodando e avisando. -->
+                    <button
+                      v-if="canEdit"
+                      type="button"
+                      class="size-7 grid place-items-center rounded-md hover:bg-muted text-muted-foreground disabled:opacity-50"
+                      :disabled="arquivando.has(r.chave)"
+                      :title="arquivado(r)
+                        ? `Trazer de volta pro painel (fora desde ${fmtRel(r.arquivado_em)}${r.arquivado_por ? ', por ' + r.arquivado_por : ''})`
+                        : 'Tirar do painel — não exclui o robô nem desliga; ele continua rodando'"
+                      @click="arquivarRobo(r, !arquivado(r))"
+                    >
+                      <Loader2 v-if="arquivando.has(r.chave)" class="size-3.5 animate-spin" />
+                      <ArchiveRestore v-else-if="arquivado(r)" class="size-3.5" />
+                      <Trash2 v-else class="size-3.5" />
                     </button>
                     <button
                       type="button"
