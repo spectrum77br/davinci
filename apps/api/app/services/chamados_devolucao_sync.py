@@ -50,6 +50,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models import Chamado, ChamadoMensagem, Devolution
 from app.services import chamados as chamados_svc
 from app.services import chamados_devolucao as cd
+from app.services import vigia_chamados
 from app.services.devolucao_returns import epoch_to_dt, iso_to_dt
 from app.services.texto_html import limpar_html
 
@@ -457,9 +458,13 @@ async def _enviar_prova_shopee(
         logger.warning(
             "chamado_devolucao_shopee_prova_falhou", chamado_id=str(ch.id), err=str(e)[:200]
         )
+        # Ouvidoria: a prova que a Shopee pediu e não subiu é uma fala nossa
+        # que não saiu — "Prova não enviada" no painel do `vigia_chamados`.
+        await vigia_chamados.registrar_resultado_envio(session, ch, msg)
         return False
     msg.status = "enviada"
     msg.enviada_at = datetime.now(UTC)
+    await vigia_chamados.registrar_resultado_envio(session, ch, msg)
     logger.info("chamado_devolucao_shopee_prova_enviada", chamado_id=str(ch.id), fotos=len(urls))
     return True
 
@@ -725,6 +730,10 @@ async def sync_respostas(session: AsyncSession, *, agora: datetime | None = None
     e ainda sem decisão da plataforma → consulta a plataforma, grava respostas
     novas e põe os decididos no estado Encerrado (`encerrados` conta os que
     mudaram nesta passada). Best-effort por chamado; commita no fim."""
+    # Ouvidoria: o robô e as `consulta:` abertas resolvidos UMA vez pra passada
+    # inteira — os hooks abaixo rodam pra CADA chamado, inclusive no caminho
+    # feliz (ver vigia_chamados.Passada).
+    passada = await vigia_chamados.abrir_passada(session)
     rows = (
         await session.execute(
             select(Chamado, ChamadoMensagem)
@@ -810,6 +819,15 @@ async def sync_respostas(session: AsyncSession, *, agora: datetime | None = None
                 plataforma=plat,
                 err=str(e)[:200],
             )
+            # Ouvidoria (22/09): caso que a varredura não lê mais deixa o
+            # status da aba defasado em silêncio — o `vigia_chamados` conta as
+            # passadas seguidas e abre ocorrência quando vira padrão.
+            await vigia_chamados.registrar_falha_consulta(
+                session, ch, plat=plat, erro=str(e)[:300], varredura="sync_respostas",
+                passada=passada,
+            )
+        else:
+            await vigia_chamados.consulta_ok(session, ch, passada=passada)
     await session.commit()
     out = {"verificados": verificados, "novos": novos, "encerrados": encerrados, "falhas": falhas}
     logger.info("chamado_devolucao_sync_done", **out, agora=datetime.now(UTC).isoformat())

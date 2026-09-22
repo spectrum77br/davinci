@@ -47,6 +47,10 @@ class RoboOut(BaseModel):
     reaviso_horas: int
     # Config efetiva (padrão do catálogo por baixo do que está salvo).
     config: dict = {}
+    # chave da config → rótulo com a unidade ("Cadência esperada (min)"), dos
+    # `Parametro` do catálogo: a tela mostra isso em vez do nome cru da chave,
+    # sem ter que conhecer robô por robô. Chave sem rótulo aparece crua.
+    config_rotulos: dict[str, str] = {}
     ultima_rodada_em: datetime | None = None
     ultima_rodada_ok: bool | None = None
     ultima_rodada_resumo: str | None = None

@@ -1161,6 +1161,17 @@ function autoRefreshTick() {
 // Pré-carrega a aba Status pra ela abrir instantânea (o vermelho do painel
 // NÃO depende mais dela: vem pronto do backend em acao_match).
 onMounted(() => {
+  // `?tab=…&q=…` na URL: é assim que a ocorrência do robô "Ocorrência grave
+  // nos Correios" (Ouvidoria › Robôs) abre a aba do pedido já filtrada, em vez
+  // de largar a pessoa na aba ML sem filtro. Aba desconhecida (uma plataforma
+  // que ainda não tem aba aqui) é ignorada — a busca vale do mesmo jeito.
+  const query = useRoute().query
+  const tabQuery = typeof query.tab === 'string' ? query.tab : ''
+  const buscaQuery = typeof query.q === 'string' ? query.q : ''
+  if (tabQuery === 'status' || PLATAFORMA_TABS.some((t) => t.key === tabQuery)) {
+    tab.value = tabQuery as PlataformaTab | 'status'
+  }
+  if (buscaQuery) search.value = buscaQuery
   if (!statusLoaded) refreshStatus()
   carregarStatusCorreios()
   autoRefreshTimer = setInterval(autoRefreshTick, AUTO_REFRESH_MS)

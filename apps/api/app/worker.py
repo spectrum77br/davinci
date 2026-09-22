@@ -76,6 +76,7 @@ from app.services.ml_backfill import run_backfill_ml_stock
 from app.services.nf_auto_enfileirar import run_auto_enfileirar_nf
 from app.services.nf_recuperar import run_recuperar_nf
 from app.services.notas_fiscais_export import run_export_notas
+from app.services.ouvidoria import gc_ocorrencias as ouvidoria_gc_ocorrencias
 from app.services.ouvidoria import gc_rodadas as ouvidoria_gc_rodadas
 from app.services.ouvidoria import modo as ouvidoria_modo
 from app.services.ouvidoria import sincronizar_catalogo as ouvidoria_sincronizar_catalogo
@@ -2132,9 +2133,11 @@ async def sync_logs_partition_gc(ctx: dict) -> None:
 
 
 async def alerts_cleanup(ctx: dict) -> None:
-    """Delete alerts older than 60 days (B10). Carona diária: rodadas da
-    Ouvidoria com mais de 30 dias (ouvidoria_rodadas cresce 48 linhas/dia só
-    com o vigia de importação)."""
+    """Delete alerts older than 60 days (B10). Carona diária da Ouvidoria:
+    rodadas com mais de 30 dias (`ouvidoria_rodadas` cresce centenas de linhas
+    por dia com os 7 robôs) e ocorrências FECHADAS há mais de 180 dias — menos
+    as `ignorada`, que são a memória de "não cobre mais isto" e, apagadas,
+    fariam o robô reabrir a linha."""
     cutoff = datetime.now(UTC) - timedelta(days=60)
     async with session_scope() as s:
         result = await s.execute(delete(Alert).where(Alert.created_at < cutoff))
@@ -2145,6 +2148,12 @@ async def alerts_cleanup(ctx: dict) -> None:
         logger.info("ouvidoria_gc_rodadas_done", deleted=n)
     except Exception:  # noqa: BLE001 — limpeza não pode derrubar o tick
         logger.exception("ouvidoria_gc_rodadas_unhandled")
+    try:
+        async with session_scope() as s:
+            n = await ouvidoria_gc_ocorrencias(s)
+        logger.info("ouvidoria_gc_ocorrencias_done", deleted=n)
+    except Exception:  # noqa: BLE001 — limpeza não pode derrubar o tick
+        logger.exception("ouvidoria_gc_ocorrencias_unhandled")
 
 
 async def condicao_especial_gc(ctx: dict) -> None:
@@ -2331,6 +2340,204 @@ async def vigia_importacao_tick(ctx: dict) -> None:
             logger.debug("vigia_importacao_noop", **summary)
     except Exception:  # noqa: BLE001
         logger.exception("vigia_importacao_unhandled")
+
+
+# ─── Ouvidoria: os 6 robôs de 22/09/2026 ───────────────────────────────────
+# Todos no molde do `vigia_importacao_tick` acima: gate pelo modo da tela
+# (`desligado` sai sem rodar nem gravar rodada; `silencioso` roda e registra
+# sem Threema, decidido dentro do sweep), serialização por advisory lock
+# dentro do serviço, log em info só quando a rodada mexeu em algo.
+#
+# O `import` do serviço é TARDIO (dentro do tick) e tolera ausência: o worker
+# tem que subir mesmo se um dos módulos não veio no deploy — sem isso um robô
+# faltando derrubaria o import do worker e com ele TODOS os crons da casa.
+
+
+async def vigia_credenciais_tick(ctx: dict) -> None:
+    """Vigia de credenciais (robô da Ouvidoria): conta de marketplace/Bling
+    que perdeu o acesso à API (token vencido, chave do app expirada, 403 de
+    escopo) → ocorrência `conta:<id>`, e autorização perto de vencer →
+    `vence:<id>`. Enquanto uma conta está sem acesso, NENHUM robô da casa
+    enxerga aquela loja — por isso é o primeiro da hora.
+    """
+    try:
+        async with session_scope() as s:
+            modo = await ouvidoria_modo(s, "vigia_credenciais")
+        if modo == "desligado":
+            logger.debug("vigia_credenciais_desligado")
+            return
+        try:
+            from app.services.vigia_credenciais import vigia_credenciais_sweep
+        except ImportError:
+            logger.warning("vigia_credenciais_sem_servico")
+            return
+        summary = await vigia_credenciais_sweep() or {}
+        if any(
+            summary.get(k)
+            for k in ("novas", "sumiram", "sem_acesso", "vencendo", "avisadas")
+        ):
+            logger.info("vigia_credenciais_done", **summary)
+        else:
+            logger.debug("vigia_credenciais_noop", **summary)
+    except Exception:  # noqa: BLE001
+        logger.exception("vigia_credenciais_unhandled")
+
+
+async def vigia_ingest_bling_tick(ctx: dict) -> None:
+    """Pedido do Bling que não entra (robô da Ouvidoria): webhook de pedido
+    que falhou em TODAS as tentativas (3 do arq + as do sweep de 5 min) e cujo
+    pedido continua fora de `bling_orders` — ninguém o vê na Margem, na NF nem
+    na Logística. Fecha sozinho quando o pedido entra.
+    """
+    try:
+        async with session_scope() as s:
+            modo = await ouvidoria_modo(s, "vigia_ingest_bling")
+        if modo == "desligado":
+            logger.debug("vigia_ingest_bling_desligado")
+            return
+        try:
+            from app.services.vigia_ingest_bling import vigia_ingest_bling_sweep
+        except ImportError:
+            logger.warning("vigia_ingest_bling_sem_servico")
+            return
+        summary = await vigia_ingest_bling_sweep() or {}
+        if any(
+            summary.get(k) for k in ("novas", "sumiram", "esgotados", "avisadas")
+        ):
+            logger.info("vigia_ingest_bling_done", **summary)
+        else:
+            logger.debug("vigia_ingest_bling_noop", **summary)
+    except Exception:  # noqa: BLE001
+        logger.exception("vigia_ingest_bling_unhandled")
+
+
+async def vigia_correios_tick(ctx: dict) -> None:
+    """Ocorrência grave nos Correios (robô da Ouvidoria): apreensão fiscal,
+    extravio, roubo, avaria ou devolução ao remetente que o rastreio da
+    Logística já leu, 17track sem saldo e rastreio recusado. Só banco e Redis
+    (o robô não fala com o 17track), 2 min depois do sync de rastreio.
+    """
+    try:
+        async with session_scope() as s:
+            modo = await ouvidoria_modo(s, "vigia_correios")
+        if modo == "desligado":
+            logger.debug("vigia_correios_desligado")
+            return
+        try:
+            from app.services.vigia_correios import vigia_correios_sweep
+        except ImportError:
+            logger.warning("vigia_correios_sem_servico")
+            return
+        summary = await vigia_correios_sweep() or {}
+        if any(
+            summary.get(k)
+            for k in ("novas", "sumiram", "sem_saldo", "quarentena", "avisadas")
+        ):
+            logger.info("vigia_correios_done", **summary)
+        else:
+            logger.debug("vigia_correios_noop", **summary)
+    except Exception:  # noqa: BLE001
+        logger.exception("vigia_correios_unhandled")
+
+
+async def vigia_marketing_comandos_tick(ctx: dict) -> None:
+    """Comandos de Ads não aplicados (robô da Ouvidoria): pausar/retomar,
+    orçamento ou Oferta Relâmpago que o executor do Mac não aplicou (falhou,
+    ficou pendente ou travou em `claimed`) e executor sem sinal — enquanto
+    isso a agenda da Shopee simplesmente não acontece.
+    """
+    try:
+        async with session_scope() as s:
+            modo = await ouvidoria_modo(s, "vigia_marketing_comandos")
+        if modo == "desligado":
+            logger.debug("vigia_marketing_comandos_desligado")
+            return
+        try:
+            from app.services.vigia_marketing_comandos import (
+                vigia_marketing_comandos_sweep,
+            )
+        except ImportError:
+            logger.warning("vigia_marketing_comandos_sem_servico")
+            return
+        summary = await vigia_marketing_comandos_sweep() or {}
+        if any(
+            summary.get(k)
+            for k in (
+                "novas", "sumiram", "comandos_falhos", "agendas_falhas",
+                "comandos_presos", "avisadas",
+            )
+        ):
+            logger.info("vigia_marketing_comandos_done", **summary)
+        else:
+            logger.debug("vigia_marketing_comandos_noop", **summary)
+    except Exception:  # noqa: BLE001
+        logger.exception("vigia_marketing_comandos_unhandled")
+
+
+async def vigia_margem_tick(ctx: dict) -> None:
+    """Robô da Margem (robô da Ouvidoria): pedido que o robô segurou no Bling
+    e ninguém decidiu, falha do robô ao segurar/liberar (aberta por hook no
+    próprio margem_auto_hold) e margem fora do normal. Roda em :17/:47, 2 min
+    DEPOIS do ciclo das :15/:45 (`verificar_margem_snapshot`: rebuild do
+    snapshot + `margem_auto_hold.run`) — é o snapshot daquele ciclo que a
+    rodada lê, e é o hold dele que abre a `falha:` que ela confere.
+    """
+    try:
+        async with session_scope() as s:
+            modo = await ouvidoria_modo(s, "vigia_margem")
+        if modo == "desligado":
+            logger.debug("vigia_margem_desligado")
+            return
+        try:
+            from app.services.vigia_margem import vigia_margem_sweep
+        except ImportError:
+            logger.warning("vigia_margem_sem_servico")
+            return
+        summary = await vigia_margem_sweep() or {}
+        if any(
+            summary.get(k)
+            for k in (
+                "novas", "sumiram", "segurados_novos", "margem_alta_novas",
+                "falhas_abertas", "avisadas",
+            )
+        ):
+            logger.info("vigia_margem_done", **summary)
+        else:
+            logger.debug("vigia_margem_noop", **summary)
+    except Exception:  # noqa: BLE001
+        logger.exception("vigia_margem_unhandled")
+
+
+async def vigia_chamados_tick(ctx: dict) -> None:
+    """Chamados: réplica e monitoramento (robô da Ouvidoria): réplica/abertura
+    que não foi pra plataforma (aberta por hook no ponto do envio), caso que a
+    consulta não consegue mais ler e chamado Encerrado esperando alguém
+    concluir pelo Resolver.
+    """
+    try:
+        async with session_scope() as s:
+            modo = await ouvidoria_modo(s, "vigia_chamados")
+        if modo == "desligado":
+            logger.debug("vigia_chamados_desligado")
+            return
+        try:
+            from app.services.vigia_chamados import vigia_chamados_sweep
+        except ImportError:
+            logger.warning("vigia_chamados_sem_servico")
+            return
+        summary = await vigia_chamados_sweep() or {}
+        if any(
+            summary.get(k)
+            for k in (
+                "novas", "sumiram", "encerrados", "envios_falhos",
+                "consultas_falhando", "avisadas",
+            )
+        ):
+            logger.info("vigia_chamados_done", **summary)
+        else:
+            logger.debug("vigia_chamados_noop", **summary)
+    except Exception:  # noqa: BLE001
+        logger.exception("vigia_chamados_unhandled")
 
 
 async def nf_recuperar_tick(ctx: dict) -> None:
@@ -3037,6 +3244,14 @@ class WorkerSettings:
         prioridade_estoque_tick,
         prioridade_estoque_estorno_tick,
         vigia_importacao_tick,
+        # Os 6 robôs da Ouvidoria de 22/09 (cada um sai na hora se o modo da
+        # tela estiver `desligado`).
+        vigia_credenciais_tick,
+        vigia_ingest_bling_tick,
+        vigia_correios_tick,
+        vigia_marketing_comandos_tick,
+        vigia_margem_tick,
+        vigia_chamados_tick,
     ]
     cron_jobs = [
         # A consulta bem-sucedida agenda a próxima em 24h; falhas tentam de novo em 1h.
@@ -3334,6 +3549,28 @@ class WorkerSettings:
         # em :09 (minuto livre) — Vinicius, 22/09: de 30 em 30 min era mais
         # do que a operação precisa; `cadencia_texto` do robô descreve isto.
         cron(vigia_importacao_tick, minute=9, run_at_startup=False),
+        # Os outros 6 robôs da Ouvidoria (aprovados em 22/09). Minutos fora de
+        # fase dos crons pesados e, quando o robô lê o que outro job acabou de
+        # gravar, DEPOIS dele: credenciais 1×/h em :21 (uma chamada barata por
+        # conta); pedido do Bling que não entra a cada 15 min; Correios 2 min
+        # depois do logistica_track_sync (:05/:20/:35/:50); comandos de Ads a
+        # cada 10 min em :06… (só banco, e fora dos minutos do espelho de NF-e
+        # abaixo, que é :04…); Margem em :17/:47, 2 min DEPOIS do ciclo das
+        # :15/:45 que reconstrói o snapshot e aplica o hold (é esse snapshot
+        # que a rodada lê, e o hold é quem abre a `falha:`); Chamados em
+        # :27/:57, 2 min depois da réplica automática (:25). `cadencia_texto`
+        # de cada RoboDef descreve estes minutos pra tela — mexer aqui é
+        # mexer lá.
+        cron(vigia_credenciais_tick, minute=21, run_at_startup=False),
+        cron(vigia_ingest_bling_tick, minute={3, 18, 33, 48}, run_at_startup=False),
+        cron(vigia_correios_tick, minute={7, 22, 37, 52}, run_at_startup=False),
+        cron(
+            vigia_marketing_comandos_tick,
+            minute={6, 16, 26, 36, 46, 56},
+            run_at_startup=False,
+        ),
+        cron(vigia_margem_tick, minute={17, 47}, run_at_startup=False),
+        cron(vigia_chamados_tick, minute={27, 57}, run_at_startup=False),
         # Espelho das NF-e das contas de emissão (página Pós Vendas). As
         # contas bling_notas são apps OAuth próprios — rate independente do
         # app principal; o custo por rodada é 1-2 páginas de lista por conta
@@ -3351,6 +3588,12 @@ class WorkerSettings:
     # max_jobs só empilharia conexões esperando o lock. O financeiro real saiu
     # pra fila/worker dedicados (WorkerSettingsFinancials), então estes 10 slots
     # ficam só com ingest + crons + sync_product_run.
+    # 22/09: os 6 robôs da Ouvidoria entraram aqui. Cada sweep deles segura
+    # DUAS conexões enquanto roda (uma sessão só pro advisory lock, porque a de
+    # trabalho commita, + a de trabalho), e os minutos acima foram escolhidos
+    # pra no máximo um deles cair em cada minuto. Se mais robôs entrarem, é
+    # este par de conexões por sweep que tem que ser contado antes de mexer no
+    # max_jobs.
     max_jobs = 10
     job_timeout = 1800
     keep_result = 3600

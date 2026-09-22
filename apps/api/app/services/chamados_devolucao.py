@@ -2204,6 +2204,27 @@ async def disparar(
     agora: datetime | None = None,
     texto_override: str | None = None,
 ) -> ChamadoMensagem | None:
+    """`_disparar` + a Ouvidoria (22/09): o desfecho do disparo abre (ou
+    fecha) a ocorrência `envio:` do `vigia_chamados`, sem mudar nada do que o
+    disparo faz. O wrapper existe pra TODOS os caminhos passarem pelo mesmo
+    ponto — réplica manual, reenvio do cron, fila do worker e o disparo inline
+    quando a fila está fora. Best-effort: o vigia nunca derruba o disparo."""
+    msg = await _disparar(session, ch, dev, agora=agora, texto_override=texto_override)
+    if msg is not None:
+        from app.services import vigia_chamados  # lazy: o vigia importa este módulo
+
+        await vigia_chamados.registrar_resultado_envio(session, ch, msg)
+    return msg
+
+
+async def _disparar(
+    session: AsyncSession,
+    ch: Chamado,
+    dev: Devolution,
+    *,
+    agora: datetime | None = None,
+    texto_override: str | None = None,
+) -> ChamadoMensagem | None:
     """Tenta abrir na plataforma agora. Atualiza a mensagem `abertura` do
     chamado: `enviada` (abriu), `pendente` + código (ainda não dá — repete no
     cron) ou `falhou` + erro (a plataforma recusou / conta sem integração).

@@ -147,6 +147,17 @@ class OuvidoriaOcorrencia(Base, TimestampMixin):
         ),
         Index("ix_ouvidoria_ocorrencias_robo_chave_fechada_em", "robo_chave", "fechada_em"),
         Index("ix_ouvidoria_ocorrencias_aberta_em", "aberta_em"),
+        # A última FECHADA de uma (robô, chave) é consultada em TODO `registrar`
+        # que não achou aberta (é ela que decide se a linha reabre: `ignorada`
+        # nunca, `tratada` só depois de 24 h). Com 7 robôs o histórico só
+        # cresce, e sem a `chave` no índice essa leitura varria todas as
+        # fechadas do robô. Migração 0301.
+        Index(
+            "ix_ouvidoria_ocorrencias_ultima_fechada",
+            "robo_chave",
+            "chave",
+            text("fechada_em DESC"),
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)

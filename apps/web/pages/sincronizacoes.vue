@@ -34,6 +34,10 @@ const TYPE_LABELS: Record<string, string> = {
   push_prices_batch: 'push preços',
   backfill_ml_stock: 'backfill estoque ML',
   refresh_bling_stock: 'estoque Bling',
+  // Ingest de pedido disparado pelo webhook do Bling. Sem o rótulo o tipo
+  // aparecia cru e nem dava pra filtrar (TYPE_OPTIONS sai daqui) — é o que a
+  // ocorrência "Pedido do Bling que não entra" (Ouvidoria › Robôs) aponta.
+  ingest_bling_order: 'pedido Bling (webhook)',
 }
 
 const { api } = useApi()
@@ -78,6 +82,14 @@ async function refresh() {
 
 let pollHandle: number | null = null
 onMounted(() => {
+  // `?type=…&status=…` na URL já entra nos filtros: é assim que a ocorrência
+  // do robô da Ouvidoria abre a lista no job certo em vez de largar a pessoa
+  // em centenas de sync_product.
+  const q = useRoute().query
+  const t = typeof q.type === 'string' ? q.type : ''
+  const s = typeof q.status === 'string' ? q.status : ''
+  if (t && TYPE_OPTIONS.includes(t)) filterType.value = t
+  if (s && STATUS_OPTIONS.includes(s)) filterStatus.value = s
   refresh()
   pollHandle = window.setInterval(refresh, 5000)
 })

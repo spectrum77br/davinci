@@ -23,7 +23,9 @@ dele (ex.: `vigia_importacao.py`), que só faz:
 2. **Gente manda mais que robô.** `ignorada` por uma pessoa não reabre nunca;
    `tratada` há menos de 24 h também não (dá tempo do Bling/plataforma
    refletir o que a pessoa fez). Passou disso e o problema voltou → linha
-   nova, o histórico fica.
+   nova, o histórico fica. Ocorrência que a rodada NÃO re-vê (a que um hook
+   abre no ponto da falha) é fechada pelo ponto de sucesso, com
+   `fechar_por_chave`, e fica de fora do `fechar_nao_vistas` pelo `prefixo`.
 3. **Aviso é por robô, não por ocorrência.** Uma mensagem no Threema com
    tudo que está pendente daquele robô; re-aviso a cada `reaviso_horas`
    enquanto persistir. Falha no envio não carimba — retenta no próximo tick.
@@ -115,6 +117,11 @@ class RoboDef:
     env_threema_recipients: str | None
     # Limites das chaves numéricas da config (chave → Parametro).
     parametros: dict[str, Parametro] = field(default_factory=dict)
+    # Modo com que a linha NASCE em ouvidoria_robos (só no INSERT: o
+    # `sincronizar_catalogo` nunca mexe no modo de quem já existe). Robô novo
+    # entra `silencioso` — registra no painel e não manda Threema — até o
+    # Vinicius ligar na tela; quem já era da casa continua `ligado`.
+    modo_padrao: str = "ligado"
 
 
 ROBOS: dict[str, RoboDef] = {
@@ -123,8 +130,8 @@ ROBOS: dict[str, RoboDef] = {
         nome="Vigia de importação",
         descricao=(
             "Pedido pago no marketplace que não caiu no Bling. Confere no Bling ao "
-            "vivo antes de abrir ocorrência; conta cuja API falhou também vira "
-            "ocorrência."
+            "vivo antes de abrir ocorrência; conta cuja API falhou fica de fora da "
+            "rodada (quem cobra a credencial é o Vigia de credenciais)."
         ),
         area="pedidos",
         cadencia_texto="a cada 1 h (:09)",
@@ -142,6 +149,131 @@ ROBOS: dict[str, RoboDef] = {
             "cadencia_min": Parametro("Cadência esperada", 1, 24 * 60, "min"),
             "amazon_a_cada_rodadas": Parametro("Amazon a cada N rodadas", 1, 48),
         },
+    ),
+    # ── Os 6 robôs aprovados em 22/09/2026 ────────────────────────────────
+    # Todos nascem `silencioso`: registram no painel e não mandam Threema até
+    # o Vinicius ligar cada um (o aviso de um robô novo costuma chegar em
+    # dezena na primeira semana, enquanto a operação limpa o passivo).
+    "vigia_credenciais": RoboDef(
+        chave="vigia_credenciais",
+        nome="Vigia de credenciais",
+        descricao=(
+            "Conta de marketplace ou do Bling que perdeu o acesso à API (token "
+            "vencido, chave do app expirada, 403 de escopo) — enquanto isso nenhum "
+            "robô enxerga aquela loja. Avisa também quando a autorização está perto "
+            "de vencer."
+        ),
+        area="contas",
+        cadencia_texto="a cada 1 h (:21)",
+        plataformas=("ml", "shopee", "tiktok", "amazon", "magalu", "bling"),
+        config_padrao={"cadencia_min": 60, "vencimento_dias": 7},
+        env_threema_recipients=None,
+        parametros={
+            "cadencia_min": Parametro("Cadência esperada", 1, 24 * 60, "min"),
+            "vencimento_dias": Parametro("Aviso de vencimento", 1, 60, "dias"),
+        },
+        modo_padrao="silencioso",
+    ),
+    "vigia_ingest_bling": RoboDef(
+        chave="vigia_ingest_bling",
+        nome="Pedido do Bling que não entra",
+        descricao=(
+            "Pedido cujo webhook do Bling falhou em todas as tentativas e que "
+            "continua fora do DaVinci — ninguém vê na Margem, na NF nem na "
+            "Logística. Fecha sozinho quando o pedido entra."
+        ),
+        area="pedidos",
+        cadencia_texto="a cada 15 min (:03/:18/:33/:48)",
+        plataformas=("bling",),
+        config_padrao={"cadencia_min": 15, "idade_min": 30},
+        env_threema_recipients=None,
+        parametros={
+            "cadencia_min": Parametro("Cadência esperada", 1, 24 * 60, "min"),
+            "idade_min": Parametro("Idade mínima", 5, 24 * 60, "min"),
+        },
+        modo_padrao="silencioso",
+    ),
+    "vigia_correios": RoboDef(
+        chave="vigia_correios",
+        nome="Ocorrência grave nos Correios",
+        descricao=(
+            "Apreensão fiscal, extravio, roubo, avaria ou devolução ao remetente "
+            "que o rastreio da Logística leu; 17track sem saldo (nada mais "
+            "atualiza); rastreio recusado. Fecha sozinho quando o pedido chega a "
+            "Entregue/Resolvido/Cancelado/Perdimento."
+        ),
+        area="logistica",
+        cadencia_texto="a cada 15 min (:07/:22/:37/:52)",
+        plataformas=("ml", "shopee", "tiktok", "amazon"),
+        config_padrao={"cadencia_min": 15},
+        env_threema_recipients=None,
+        parametros={"cadencia_min": Parametro("Cadência esperada", 1, 24 * 60, "min")},
+        modo_padrao="silencioso",
+    ),
+    "vigia_marketing_comandos": RoboDef(
+        chave="vigia_marketing_comandos",
+        nome="Comandos de Ads não aplicados",
+        descricao=(
+            "Pausar/retomar anúncios, orçamento ou Oferta Relâmpago que não foi "
+            "aplicado (o executor do Mac falhou, ficou pendente ou está sem "
+            "sinal) — enquanto isso a agenda da Shopee não acontece."
+        ),
+        area="marketing",
+        cadencia_texto="a cada 10 min (:06/:16/:26/:36/:46/:56)",
+        # A fila tem comando de Ads do ML também (executor "api", drenado pelo
+        # worker do agente), e a ocorrência dele nasce com plataforma "ml".
+        plataformas=("shopee", "ml"),
+        config_padrao={"cadencia_min": 10, "pendente_min": 30, "executor_offline_min": 10},
+        env_threema_recipients=None,
+        parametros={
+            "cadencia_min": Parametro("Cadência esperada", 1, 24 * 60, "min"),
+            "pendente_min": Parametro("Pendente há mais de", 5, 24 * 60, "min"),
+            "executor_offline_min": Parametro("Executor sem sinal há", 2, 240, "min"),
+        },
+        modo_padrao="silencioso",
+    ),
+    "vigia_margem": RoboDef(
+        chave="vigia_margem",
+        nome="Robô da Margem",
+        descricao=(
+            "Pedido que o robô segurou no Bling e ninguém decidiu, falha do robô "
+            "ao segurar/liberar e margem fora do normal (custo suspeito no "
+            "cadastro do produto)."
+        ),
+        area="margem",
+        cadencia_texto="a cada 30 min (:17/:47)",
+        plataformas=("ml", "shopee", "tiktok", "amazon"),
+        config_padrao={"cadencia_min": 30, "segurado_horas": 24},
+        env_threema_recipients=None,
+        parametros={
+            "cadencia_min": Parametro("Cadência esperada", 1, 24 * 60, "min"),
+            "segurado_horas": Parametro("Segurado sem decisão", 1, 720, "h"),
+        },
+        modo_padrao="silencioso",
+    ),
+    "vigia_chamados": RoboDef(
+        chave="vigia_chamados",
+        nome="Chamados: réplica e monitoramento",
+        descricao=(
+            "Réplica ou abertura de chamado que não foi pra plataforma, caso que a "
+            "consulta não consegue mais ler (o status da aba fica defasado) e "
+            "chamado Encerrado esperando alguém concluir pelo Resolver."
+        ),
+        area="chamados",
+        cadencia_texto="a cada 30 min (:27/:57)",
+        plataformas=("ml", "shopee", "tiktok"),
+        config_padrao={
+            "cadencia_min": 30,
+            "encerrado_dias": 3,
+            "consultas_falhas_seguidas": 3,
+        },
+        env_threema_recipients=None,
+        parametros={
+            "cadencia_min": Parametro("Cadência esperada", 1, 24 * 60, "min"),
+            "encerrado_dias": Parametro("Encerrado há mais de", 1, 60, "dias"),
+            "consultas_falhas_seguidas": Parametro("Consultas falhas seguidas", 1, 20),
+        },
+        modo_padrao="silencioso",
     ),
 }
 
@@ -254,7 +386,9 @@ async def sincronizar_catalogo(session: AsyncSession) -> None:
     descrição, área, cadência, plataformas); NÃO mexe em modo, destinatários
     nem config já salvos — só completa chaves de config que o código ganhou
     depois (um robô que passa a ter `amazon_a_cada_rodadas` não pode quebrar
-    porque a linha antiga não tinha a chave). Commit fica com o caller."""
+    porque a linha antiga não tinha a chave). O `modo_padrao` do catálogo vale
+    só no INSERT: robô novo nasce silencioso, e quem a pessoa já ligou (ou
+    desligou) na tela fica como está. Commit fica com o caller."""
     existentes = {
         r.chave: r
         for r in (await session.execute(select(OuvidoriaRobo))).scalars().all()
@@ -270,7 +404,7 @@ async def sincronizar_catalogo(session: AsyncSession) -> None:
                     area=d.area,
                     cadencia_texto=d.cadencia_texto,
                     plataformas=list(d.plataformas),
-                    modo="ligado",
+                    modo=d.modo_padrao if d.modo_padrao in MODOS else "ligado",
                     config=dict(d.config_padrao),
                 )
             )
@@ -295,6 +429,14 @@ async def modo(session: AsyncSession, chave: str) -> str:
     return m if m in MODOS else "ligado"
 
 
+async def ativo(session: AsyncSession, chave: str) -> bool:
+    """O robô pode registrar agora? (modo != `desligado`). É o que os HOOKS
+    olham antes de abrir ocorrência no meio de outra operação (o envio da
+    réplica, o hold da Margem): `silencioso` registra e cala — o aviso é
+    decidido no `avisar_pendentes` —, `desligado` não grava nada."""
+    return await modo(session, chave) != "desligado"
+
+
 def config_do_robo(robo: OuvidoriaRobo | None, chave: str) -> dict:
     """Config efetiva: o que está salvo por cima do padrão do catálogo. As
     chaves com `Parametro` saem SEMPRE como int dentro dos limites — valor
@@ -311,6 +453,18 @@ def config_do_robo(robo: OuvidoriaRobo | None, chave: str) -> dict:
             v = int(padrao.get(k, p.minimo))
         out[k] = min(max(v, p.minimo), p.maximo)
     return out
+
+
+def rotulos_config(chave: str) -> dict[str, str]:
+    """chave da config → rótulo com a unidade ("cadencia_min" → "Cadência
+    esperada (min)"), pra tela não ter que conhecer robô por robô: são os
+    mesmos `Parametro` que já governam os limites. Chave sem `Parametro` fica
+    fora e a tela mostra a chave crua — nada some por falta de rótulo."""
+    d = ROBOS.get(chave)
+    return {
+        k: f"{p.rotulo} ({p.unidade})" if p.unidade else p.rotulo
+        for k, p in (d.parametros if d else {}).items()
+    }
 
 
 # ─── ocorrências ───────────────────────────────────────────────────────────
@@ -430,18 +584,48 @@ async def registrar(
     return row
 
 
+async def fechar_por_chave(
+    session: AsyncSession,
+    robo_chave: str,
+    chave: str,
+    *,
+    fechamento: str = "sumiu",
+    por: str = FECHADA_PELO_ROBO,
+    agora: datetime | None = None,
+) -> bool:
+    """Fecha a aberta desta (robô, chave). É o par do `registrar` standalone
+    pras ocorrências de EVENTO — as que um HOOK abre no meio de outra
+    operação e que a rodada não re-vê: quem fecha é o ponto de SUCESSO da
+    mesma operação (a réplica foi, o hold deu certo), não a passagem do
+    tempo. Sem aberta devolve False (nada a fazer). Flush, sem commit."""
+    row = await _aberta(session, robo_chave, chave)
+    if row is None:
+        return False
+    row.fechada_em = _agora(agora)
+    row.fechamento = fechamento
+    row.fechada_por = ((por or "").strip() or FECHADA_PELO_ROBO)[:120]
+    await session.flush()
+    return True
+
+
 async def fechar_nao_vistas(
     session: AsyncSession,
     robo_chave: str,
     vistas: Iterable[str],
     *,
     excluir_contas: Iterable[str] = (),
+    prefixo: str | None = None,
     agora: datetime | None = None,
 ) -> int:
     """Fecha como `sumiu` toda aberta do robô cuja chave NÃO foi vista nesta
     rodada. Ocorrência de conta que falhou (em `excluir_contas`) fica: o robô
     não conseguiu olhar aquela conta, então "não vi" não quer dizer "sumiu".
-    Devolve quantas fechou."""
+
+    `prefixo` limita o julgamento às chaves que começam com ele (ex.:
+    `segurado:`): robô que mistura ocorrência de ESTADO (a rodada re-vê) com
+    ocorrência de EVENTO (hook abre, `fechar_por_chave` fecha) chamaria o
+    fechamento em cima das de evento e mataria como "sumiu" justamente a
+    falha que ninguém tratou ainda. Devolve quantas fechou."""
     agora = _agora(agora)
     vistas = set(vistas)
     excluir = {c for c in excluir_contas if c}
@@ -459,6 +643,8 @@ async def fechar_nao_vistas(
     )
     n = 0
     for o in abertas:
+        if prefixo is not None and not o.chave.startswith(prefixo):
+            continue
         if o.chave in vistas or (o.conta and o.conta in excluir):
             continue
         o.fechada_em = agora
@@ -614,9 +800,15 @@ class Rodada:
         row.ultima_vista_em = _agora(agora)
         self.vistas.add(row.chave)
 
-    async def fechar_nao_vistas(self, *, excluir_contas: Iterable[str] = ()) -> int:
+    async def fechar_nao_vistas(
+        self, *, excluir_contas: Iterable[str] = (), prefixo: str | None = None
+    ) -> int:
         return await fechar_nao_vistas(
-            self.session, self.robo_chave, self.vistas, excluir_contas=excluir_contas
+            self.session,
+            self.robo_chave,
+            self.vistas,
+            excluir_contas=excluir_contas,
+            prefixo=prefixo,
         )
 
 
@@ -873,6 +1065,32 @@ async def gc_rodadas(session: AsyncSession, dias: int = 30) -> int:
     corte = datetime.now(UTC) - timedelta(days=dias)
     res = await session.execute(
         delete(OuvidoriaRodada).where(OuvidoriaRodada.iniciada_em < corte)
+    )
+    await session.flush()
+    return int(res.rowcount or 0)
+
+
+# Retenção das ocorrências FECHADAS. Com 7 robôs a rotatividade mudou de
+# patamar (conta instável abre e fecha de hora em hora, `rastreio:` por dia,
+# `margem_alta:` por pedido), e o histórico só crescia — inclusive por baixo do
+# `_ultima_fechada`, consultado em todo `registrar`.
+RETENCAO_OCORRENCIAS_DIAS = 180
+
+
+async def gc_ocorrencias(session: AsyncSession, dias: int = RETENCAO_OCORRENCIAS_DIAS) -> int:
+    """Apaga ocorrências FECHADAS há mais de `dias`. Devolve quantas.
+
+    As `ignorada` NUNCA são apagadas: é a memória de "uma pessoa disse pra não
+    cobrar mais isto" e é o `_ultima_fechada` que a lê — apagar faria o robô
+    reabrir a linha na rodada seguinte, desfazendo a decisão de quem mandou.
+    Aberta também nunca sai (só fecha quem o robô ou a pessoa fecharam)."""
+    corte = datetime.now(UTC) - timedelta(days=max(1, int(dias)))
+    res = await session.execute(
+        delete(OuvidoriaOcorrencia).where(
+            OuvidoriaOcorrencia.fechada_em.is_not(None),
+            OuvidoriaOcorrencia.fechada_em < corte,
+            func.coalesce(OuvidoriaOcorrencia.fechamento, "") != "ignorada",
+        )
     )
     await session.flush()
     return int(res.rowcount or 0)

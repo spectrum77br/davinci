@@ -639,22 +639,24 @@ async def _ml_client_para(session: AsyncSession, conta: str | None) -> MercadoLi
     return logistica_meli._build_ml_client(session, integ)
 
 
-async def _enviar_api_ml(session: AsyncSession, ch: Chamado, texto: str) -> None:
-    """Manda `texto` na reclamação (claim) do pedido via API do ML. Fala com o
-    mediador quando a mediação está aberta; senão com o comprador."""
-    if not (ch.chamado or "").strip():
-        raise ChamadoError("chamado_sem_numero")
-    if not _eh_ml(ch):
-        raise ChamadoError("chamado_nao_ml")
-    try:
-        client = await _ml_client_para(session, ch.conta)
-    except ChamadoError:
-        # 15/09: chamado de devolução guarda a conta como NOME DA LOJA ("ML Aguiar"),
-        # que não é o nome da integração ("aguiar") — a réplica manual falhava com
-        # chamado_sem_integracao_ml. Mesmo resolvedor do sync (contas candidatas).
-        from uuid import UUID
+async def _ml_client_do_chamado(session: AsyncSession, ch: Chamado) -> MercadoLivreClient:
+    """Client do ML deste chamado, com os DOIS resolvedores de conta.
 
-        from app.models import Devolution
+    15/09: chamado de devolução guarda a conta como NOME DA LOJA ("ML Aguiar"),
+    que não é o nome da integração ("aguiar") — a réplica manual falhava com
+    chamado_sem_integracao_ml. Quando o nome da integração não casa, cai no
+    resolvedor do sync (contas candidatas a partir da devolução).
+
+    Quem usa é o ENVIO (`_enviar_api_ml`: réplica manual e automática). O
+    monitor do `run_replica_automatica` continua com o `_ml_client_para` de
+    sempre: trocar o resolvedor dele faria o monitor passar a LER — e a
+    encerrar sozinho, mexendo em `auto_ligada` e no status oficial — chamados
+    de devolução do ML que ele nunca tocou. Isso é mudança de comportamento da
+    aba Chamados, não instrumentação da Ouvidoria, e está anotada como
+    proposta pro Vinicius decidir à parte."""
+    try:
+        return await _ml_client_para(session, ch.conta)
+    except ChamadoError:
         from app.services import chamados_devolucao as cd  # lazy: cd importa este módulo
 
         dev = None
@@ -667,7 +669,17 @@ async def _enviar_api_ml(session: AsyncSession, ch: Chamado, texto: str) -> None
             conta=ch.conta or "", pedido_bling=ch.pedido_bling,
             pedido_marketplace=ch.pedido_marketplace,
         )
-        client = await cd._ml_client_para(session, ch, dev)
+        return await cd._ml_client_para(session, ch, dev)
+
+
+async def _enviar_api_ml(session: AsyncSession, ch: Chamado, texto: str) -> None:
+    """Manda `texto` na reclamação (claim) do pedido via API do ML. Fala com o
+    mediador quando a mediação está aberta; senão com o comprador."""
+    if not (ch.chamado or "").strip():
+        raise ChamadoError("chamado_sem_numero")
+    if not _eh_ml(ch):
+        raise ChamadoError("chamado_nao_ml")
+    client = await _ml_client_do_chamado(session, ch)
     claim = await client.get_claim(ch.chamado.strip())
     if (claim.get("status") or "").lower() == "closed":
         raise ChamadoError("chamado_encerrado")
@@ -722,6 +734,13 @@ async def enviar_mensagem(
             msg.status = "falhou"
             msg.erro = str(e)[:300]
             logger.warning("chamado_envio_api_falhou", chamado_id=str(ch.id), err=msg.erro)
+    # Ouvidoria (22/09): a fala nossa que NÃO saiu vira ocorrência do
+    # `vigia_chamados` aqui, no ponto em que o erro ainda se conhece; a que sai
+    # fecha a anterior. Best-effort e dentro de savepoint — nunca derruba o
+    # envio. Import tardio: o vigia importa este módulo.
+    from app.services import vigia_chamados
+
+    await vigia_chamados.registrar_resultado_envio(session, ch, msg)
     return msg
 
 
@@ -1072,7 +1091,13 @@ async def run_replica_automatica(session: AsyncSession, *, agora: datetime | Non
        (Eduardo 15/09: o robô acompanha todos). Chamado já Encerrado não é
        consultado de novo.
     Best-effort por linha: falha de uma não derruba as outras."""
+    from app.services import vigia_chamados  # lazy: o vigia importa este módulo
+
     agora = agora or datetime.now(UTC)
+    # Ouvidoria: o robô e as `consulta:` abertas resolvidos UMA vez pra passada
+    # inteira — os hooks abaixo rodam pra cada chamado, inclusive no caminho
+    # feliz (ver vigia_chamados.Passada).
+    passada = await vigia_chamados.abrir_passada(session)
     rows = list(
         (
             await session.execute(
@@ -1107,9 +1132,13 @@ async def run_replica_automatica(session: AsyncSession, *, agora: datetime | Non
             and _eh_ml(ch)
             and ch.status_plataforma not in STATUS_FINAIS
         ):
+            leu = False
+            erro_consulta = ""
+            sem_integracao = False
             try:
                 client = await _ml_client_para(session, ch.conta)
                 claim = await client.get_claim(ch.chamado.strip())
+                leu = True
                 if (claim.get("status") or "").lower() == "closed":
                     ch.auto_ligada = False
                     set_status_plataforma(ch, ml_status_encerrado(claim), ml_quando(claim))
@@ -1123,8 +1152,32 @@ async def run_replica_automatica(session: AsyncSession, *, agora: datetime | Non
                     set_status_plataforma(ch, STATUS_EM_ANALISE, ml_quando(claim))
             except Exception as e:  # noqa: BLE001
                 falhas += 1
+                erro_consulta = str(e)[:300]
+                sem_integracao = (
+                    isinstance(e, ChamadoError) and e.code == "chamado_sem_integracao_ml"
+                )
                 logger.warning(
-                    "chamado_monitoramento_falhou", chamado_id=str(ch.id), err=str(e)[:300]
+                    "chamado_monitoramento_falhou", chamado_id=str(ch.id), err=erro_consulta
+                )
+            # Ouvidoria (22/09): consulta que não lê o caso deixa o status da
+            # aba defasado sem ninguém saber — vira ocorrência `consulta:` do
+            # `vigia_chamados` depois de N passadas seguidas, e a leitura que
+            # volta a funcionar fecha a anterior.
+            #
+            # `chamado_sem_integracao_ml` NÃO conta: é o chamado de devolução
+            # cuja conta está gravada como nome da loja ("ML Aguiar"), que
+            # ESTE monitor nunca leu e quem acompanha é o `_sync_ml` das
+            # devoluções (com o resolvedor completo). Registrar aqui abriria
+            # uma linha que o sync fecharia minutos depois — a mesma
+            # ocorrência piscando no painel a cada passada.
+            if leu:
+                await vigia_chamados.consulta_ok(session, ch, passada=passada)
+            elif not sem_integracao:
+                await vigia_chamados.registrar_falha_consulta(
+                    session, ch, plat="ml",
+                    erro=erro_consulta or "falha ao ler o caso",
+                    varredura="monitor_ml",
+                    passada=passada,
                 )
     await session.commit()
     return {

@@ -62,6 +62,9 @@ type Robo = {
   // Parâmetros efetivos do robô (padrão do catálogo por baixo do que está
   // salvo) — mostrados na linha expandida.
   config: Record<string, unknown>
+  // chave da config → rótulo com a unidade ("Cadência esperada (min)"), do
+  // catálogo do backend. Chave que não vier aqui é mostrada crua.
+  config_rotulos: Record<string, string>
   ultima_rodada_em: string | null
   ultima_rodada_ok: boolean | null
   ultima_rodada_resumo: string | null
@@ -563,22 +566,19 @@ function contadoresTexto(c: Record<string, unknown> | null | undefined): string 
     .join(' · ')
 }
 
-// Configuração em linguagem de operação. Chaves conhecidas ganham rótulo e
-// unidade; o resto aparece cru (chave → valor) pra nada ficar escondido.
-const CONFIG_LABELS: Record<string, { label: string; fmt: (v: unknown) => string }> = {
-  tolerancia_min: { label: 'Tolerância', fmt: (v) => `${v} min depois do pagamento` },
-  janela_horas: { label: 'Janela', fmt: (v) => `${v} h` },
-  cadencia_min: { label: 'Cadência esperada', fmt: (v) => `a cada ${v} min` },
-  amazon_a_cada_rodadas: { label: 'Amazon', fmt: (v) => `a cada ${v}ª rodada (cota apertada)` },
+// Configuração em linguagem de operação. O rótulo (com a unidade) vem do
+// backend em `config_rotulos` — são os mesmos `Parametro` que já governam os
+// limites do PATCH —, então robô novo aparece rotulado sem mexer na tela.
+// Chave sem rótulo aparece crua, pra nada ficar escondido.
+function configLabel(r: Robo, k: string): string {
+  return (r.config_rotulos || {})[k] ?? k.replace(/_/g, ' ')
 }
 function configLinhas(r: Robo): { chave: string; label: string; valor: string }[] {
-  return Object.entries(r.config || {}).map(([k, v]) => {
-    const conhecida = CONFIG_LABELS[k]
-    const valor = conhecida
-      ? conhecida.fmt(v)
-      : (v !== null && typeof v === 'object' ? JSON.stringify(v) : String(v ?? '—'))
-    return { chave: k, label: conhecida?.label ?? k.replace(/_/g, ' '), valor }
-  })
+  return Object.entries(r.config || {}).map(([k, v]) => ({
+    chave: k,
+    label: configLabel(r, k),
+    valor: v !== null && typeof v === 'object' ? JSON.stringify(v) : String(v ?? '—'),
+  }))
 }
 
 // ── Editar configuração (PATCH /robos/{chave}) ──────────────────────────────
@@ -1118,7 +1118,7 @@ const carregandoAba = computed(() => (tab.value === 'robos' ? robosLoading.value
                       <form v-else class="space-y-2" @submit.prevent="salvarEdicao(r)">
                         <div class="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1.5 items-center">
                           <template v-for="(v, k) in editForm.config" :key="k">
-                            <label class="text-muted-foreground" :for="`cfg-${r.chave}-${k}`">{{ CONFIG_LABELS[String(k)]?.label ?? String(k).replace(/_/g, ' ') }}</label>
+                            <label class="text-muted-foreground" :for="`cfg-${r.chave}-${k}`">{{ configLabel(r, String(k)) }}</label>
                             <input
                               v-if="tipoCampo(v) === 'checkbox'"
                               :id="`cfg-${r.chave}-${k}`"

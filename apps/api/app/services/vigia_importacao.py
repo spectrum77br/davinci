@@ -51,12 +51,17 @@ mudou de situação dentro da janela (cancelou) — se ele só ENVELHECEU (saiu
 da janela de 72 h sem ninguém importar, o pior caso do robô), a rodada o
 confere no Bling e mantém aberta enquanto não achar.
 
-Conta cuja API falhou vira a ocorrência `conta:<integration_id>` e entra em
+Conta cuja API falhou conta no resumo ("1 conta falhou") e entra em
 `excluir_contas` do fechamento: o robô não olhou aquela loja, então "não
-vi" não quer dizer "resolveu". Erro de credencial (401/403/refresh) já
-nasce "Conta sem acesso à API" e avisa; soluço de rede/cota (429, 5xx,
-timeout) só registra como `info` e vira "sem acesso" se repetir na rodada
-seguinte. Quando a conta volta, a ocorrência dela some sozinha.
+vi" não quer dizer "resolveu" — as ocorrências dela ficam abertas até uma
+rodada conseguir olhar. Quem abre a ocorrência da CONTA é o **Vigia de
+credenciais** desde 22/09/2026 (uma prova de vida por conta a cada hora,
+que sabe separar token vencido de instabilidade e avisa o vencimento antes
+de a conta cair); duas ocorrências pelo mesmo fato só confundiriam quem
+recebe o Threema. As `conta:` que ESTE robô já tinha abertas em produção
+foram fechadas de uma vez pela migração 0301 — elas nunca mais seriam
+re-registradas e o `excluir_contas` as protegia do fechamento justamente
+enquanto a conta continuasse caindo, que é quando o outro robô abre a dele.
 
 BEST-EFFORT por conta: falha numa conta não derruba a rodada. O sweep é
 serializado por advisory lock transacional numa sessão SÓ pra isso — a
@@ -130,6 +135,8 @@ ACAO_IMPORTAR = (
     "Importar manualmente: Bling › Vendas › Pedidos de lojas virtuais "
     "(importar pedidos manualmente)"
 )
+# Ação da ocorrência de conta sem acesso. Mora aqui por histórico (era o
+# vigia que a abria); quem usa agora é o Vigia de credenciais.
 ACAO_REAUTORIZAR = "Reautorizar em Sistema › Integrações"
 
 # Rótulo da plataforma NA FRENTE do nome da conta — pedido do Eduardo
@@ -208,11 +215,24 @@ def _parse_dt(raw: str | None) -> datetime | None:
 
 
 def _epoch(raw: object) -> datetime | None:
+    """Epoch em SEGUNDOS → datetime UTC; None quando não dá pra ler.
+
+    O valor vem da plataforma (Shopee `expire_time`, TikTok
+    `refresh_token_expires_at`) e já chegou em milissegundos: aí
+    `fromtimestamp` levanta OverflowError/OSError/ValueError, e quem chama —
+    hoje o Vigia de credenciais, dentro da prova de vida de uma conta — não
+    tem como se defender de um erro no meio da leitura. Valor torto vira
+    "a plataforma não informou validade", que é o comportamento certo."""
     try:
         v = int(raw)  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return None
-    return datetime.fromtimestamp(v, tz=UTC) if v > 0 else None
+    if v <= 0:
+        return None
+    try:
+        return datetime.fromtimestamp(v, tz=UTC)
+    except (OverflowError, OSError, ValueError):
+        return None
 
 
 def _numero(raw: object) -> float | None:
@@ -592,17 +612,17 @@ async def _amazon_nesta_rodada(session: AsyncSession, a_cada: int) -> bool:
     return not any((c or {}).get("amazon_rodou") for c in ultimas)
 
 
-# Trechos que denunciam token vencido / permissão negada — aí esperar não
-# resolve e a pessoa precisa reautorizar. Qualquer outro erro (timeout, 429,
-# 5xx…) é tratado como soluço de rede/cota: só vira "sem acesso" se repetir.
+# Trechos que denunciam token vencido / permissão negada — o oposto de um
+# soluço de rede/cota (timeout, 429, 5xx). Desde 22/09 o vigia não abre mais
+# ocorrência de conta (isso é do Vigia de credenciais, que faz uma prova de
+# vida por conta a cada hora); a classificação continua aqui porque o LOG da
+# conta que falhou diz qual dos dois foi — é o que se olha quando a rodada
+# conferiu menos pedidos do que o normal.
 _MARCAS_SEM_ACESSO = (
     "401", "403", "unauthorized", "forbidden", "invalid_grant", "invalid_token",
     "access_denied", "error_auth", "error_permission", "refresh", "token", "credencial",
     "missing_creds", "sem user_id",
 )
-# Quantas rodadas seguidas uma conta precisa falhar (sem ser de acesso) pra
-# virar "Conta sem acesso à API" e ir pro Threema — 2 rodadas ≈ 1 h.
-_FALHAS_ATE_AVISAR = 2
 
 
 def _erro_de_acesso(e: Exception) -> bool:
@@ -618,60 +638,6 @@ def _erro_de_acesso(e: Exception) -> bool:
     if any(m in texto for m in ("status=429", " 429", "status=5", "timeout", "timed out")):
         return False
     return any(m in texto for m in _MARCAS_SEM_ACESSO)
-
-
-async def _registrar_conta_falhou(
-    r: ouvidoria.Rodada,
-    integration: Integration,
-    platform: IntegrationPlatform,
-    conta: str,
-    e: Exception,
-    erro: str,
-    *,
-    agora: datetime,
-) -> None:
-    """A conta não respondeu à listagem. Erro de credencial vira "Conta sem
-    acesso à API" (pessoa + reautorizar) na hora — esperar não resolve. Outro
-    erro (429, 5xx, timeout) é soluço de rede/cota: na 1ª rodada só registra
-    como `info` (não avisa ninguém; a ocorrência fecha sozinha quando a conta
-    volta) e só promove pra pessoa quando repete _FALHAS_ATE_AVISAR rodadas
-    seguidas — senão cada 503 do ML mandaria REAUTORIZAR uma conta saudável,
-    e reautorizar ML à toa gasta refresh token de uso único."""
-    chave = f"conta:{integration.id}"
-    aberta = await ouvidoria._aberta(r.session, r.robo_chave, chave)  # noqa: SLF001
-    seguidas = int(((aberta.dados if aberta else None) or {}).get("falhas_seguidas") or 0) + 1
-    acesso = _erro_de_acesso(e)
-    pessoa = acesso or seguidas >= _FALHAS_ATE_AVISAR
-    if pessoa:
-        titulo = "Conta sem acesso à API"
-        detalhe = (
-            f"O vigia não conseguiu listar os pedidos de {conta}"
-            f"{'' if acesso else f' em {seguidas} rodadas seguidas'}: {erro}. "
-            "Enquanto isso nenhum pedido dessa conta é conferido."
-        )
-    else:
-        titulo = "Conta não respondeu (cota ou rede) — tentando de novo"
-        detalhe = (
-            f"A API de {conta} falhou nesta rodada: {erro}. Pode ser instabilidade "
-            f"ou cota; se repetir na próxima rodada vira 'sem acesso' e avisa."
-        )
-    await r.registrar(
-        chave=chave,
-        plataforma=platform.value,
-        conta=conta,
-        titulo=titulo,
-        detalhe=detalhe,
-        acao=ACAO_REAUTORIZAR if pessoa else None,
-        severidade="pessoa" if pessoa else "info",
-        precisa_pessoa=pessoa,
-        dados={
-            "erro": erro,
-            "erro_tipo": "acesso" if acesso else "instavel",
-            "falhas_seguidas": seguidas,
-            "integration_id": str(integration.id),
-        },
-        agora=agora,
-    )
 
 
 # Folga na hora de decidir se uma aberta "saiu da janela": a listagem filtra
@@ -822,17 +788,21 @@ async def vigia_importacao_run(session: AsyncSession) -> dict:
                         tolerancia=tolerancia,
                     )
                 except Exception as e:  # noqa: BLE001 — best-effort por conta
+                    # Desde 22/09 a conta que falhou NÃO vira ocorrência aqui:
+                    # quem cuida de credencial é o Vigia de credenciais (uma
+                    # prova de vida por conta a cada hora, e ele sabe
+                    # distinguir vencimento de instabilidade). O que o vigia
+                    # de importação faz é o que só ele sabe: contar a falha no
+                    # resumo e NÃO julgar os pedidos dessa conta nesta rodada
+                    # (não olhou ≠ sumiu) — as ocorrências dela ficam de pé.
                     erro = str(e)[:300]
                     logger.warning(
                         "vigia_importacao_conta_falhou",
                         integration=str(integration.id), conta=conta, error=erro,
+                        acesso=_erro_de_acesso(e),
                     )
                     r.contadores["contas_falha"] += 1
                     excluir_contas.add(conta)
-                    await _registrar_conta_falhou(
-                        r, integration, platform, conta, e, erro, agora=agora
-                    )
-                    await session.commit()
                     continue
                 for c in pedidos:
                     candidatos[c.chave] = c

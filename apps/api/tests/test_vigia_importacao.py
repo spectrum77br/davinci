@@ -10,8 +10,9 @@ O que este arquivo trava (21/09/2026):
 - as três peneiras da rodada: tolerância (pago há < 90 min não acusa),
   espelho `bling_orders` e Bling AO VIVO — pedido que o Bling já tem mas o
   espelho ainda não viu NÃO vira ocorrência;
-- conta cuja API falhou vira `conta:<integration_id>` e as ocorrências dela
-  NÃO fecham como "sumiu"; quando a conta volta, a de conta fecha sozinha;
+- conta cuja API falhou conta no resumo e as ocorrências dela NÃO fecham como
+  "sumiu" (o robô não olhou aquela loja) — a ocorrência de CONTA em si é do
+  Vigia de credenciais desde 22/09, o vigia de importação não abre mais;
 - pedido que saiu da listagem (ou apareceu no Bling) fecha como "sumiu";
 - Bling fora do ar: não abre nem fecha nada; teto de 40 conferências por
   rodada: o resto é marcado como visto e fica pra próxima;
@@ -23,8 +24,6 @@ O que este arquivo trava (21/09/2026):
   ON_HOLD, não do pagamento;
 - aberta que a listagem não trouxe: cancelou dentro da janela → sumiu;
   envelheceu (saiu da janela) → confere no Bling e só fecha se achou;
-- conta com soluço de rede/cota vira `info` na 1ª rodada e só "sem acesso"
-  (pessoa + Threema) na 2ª seguida; erro de credencial avisa na hora;
 - Shopee sem detalhe (get_order_detail falhou) não abre nem fecha;
 - o tick do worker sai sem rodar quando o robô está `desligado`.
 
@@ -552,9 +551,14 @@ async def test_pedido_que_saiu_da_listagem_fecha_como_sumiu(db, user, cenario):
     assert (await _todas(db, "shopee:SN1"))[0].fechamento == "sumiu"
 
 
-async def test_conta_que_falha_abre_ocorrencia_de_conta_e_nao_fecha_as_dela(db, user, cenario):
+async def test_conta_que_falha_nao_abre_ocorrencia_mas_protege_as_dela(db, user, cenario):
+    """22/09/2026: a ocorrência de conta passou a ser do Vigia de credenciais
+    (uma prova de vida por hora, que separa token vencido de instabilidade) —
+    duas ocorrências pelo mesmo fato só confundiriam quem recebe o Threema. O
+    vigia de importação faz o que só ele sabe: conta a falha no resumo e não
+    julga os pedidos daquela conta (não olhou ≠ sumiu)."""
     listagem, _bling = cenario
-    ml = await _integ(db, user, IntegrationPlatform.ML, "marquezini")
+    await _integ(db, user, IntegrationPlatform.ML, "marquezini")
     await _integ(db, user, IntegrationPlatform.ML, "duoker")
     conta_ml, conta_ok = "Mercado Livre marquezini", "Mercado Livre duoker"
     listagem.por_conta[conta_ml] = [_cand("ml", "111", pago_ha=timedelta(hours=3))]
@@ -562,25 +566,20 @@ async def test_conta_que_falha_abre_ocorrencia_de_conta_e_nao_fecha_as_dela(db, 
     await vigia.vigia_importacao_run(db)
     assert set(await _abertas(db)) == {"ml:111", "ml:222"}
 
-    # Token da marquezini venceu: a conta vira ocorrência; o 111 dela FICA.
+    # Token da marquezini venceu: nenhuma ocorrência de conta, e o 111 dela FICA.
     listagem.falhas.add(conta_ml)
     r = await vigia.vigia_importacao_run(db)
-    abertas = await _abertas(db)
-    assert set(abertas) == {"ml:111", "ml:222", f"conta:{ml.id}"}
-    conta_oc = abertas[f"conta:{ml.id}"]
-    assert conta_oc.titulo == "Conta sem acesso à API" and conta_oc.conta == conta_ml
-    assert conta_oc.plataforma == "ml" and conta_oc.acao == vigia.ACAO_REAUTORIZAR
-    assert "token vencido" in conta_oc.dados["erro"] and conta_oc.precisa_pessoa
+    assert set(await _abertas(db)) == {"ml:111", "ml:222"}
     assert r["contas_falha"] == 1 and r["sumiram"] == 0
     assert "· 1 conta falhou" in r["resumo"]
     rodada = (await _rodadas(db))[-1]
     assert rodada.ok is True  # falha de conta é best-effort, a rodada é ok
 
-    # Conta voltou e o 111 sumiu da listagem: fecha a de conta E o 111.
+    # Conta voltou e o 111 sumiu da listagem: aí sim fecha o 111.
     listagem.falhas.clear()
     listagem.por_conta[conta_ml] = []
     r = await vigia.vigia_importacao_run(db)
-    assert set(await _abertas(db)) == {"ml:222"} and r["sumiram"] == 2
+    assert set(await _abertas(db)) == {"ml:222"} and r["sumiram"] == 1
 
 
 async def test_bling_fora_do_ar_nao_abre_nem_fecha(db, user, cenario, monkeypatch):
@@ -731,52 +730,10 @@ async def test_aberta_que_envelheceu_confere_no_bling_e_so_fecha_se_achou(db, us
     assert bling.consultados == [] and r["sumiram"] == 1 and await _abertas(db) == {}
 
 
-async def test_conta_instavel_so_vira_sem_acesso_na_segunda_rodada_seguida(
-    db, user, cenario, _sem_threema, monkeypatch
-):
-    listagem, _bling = cenario
-    ml = await _integ(db, user, IntegrationPlatform.ML, "marquezini")
-    conta = "Mercado Livre marquezini"
-    await svc.sincronizar_catalogo(db)
-    robo = await db.get(OuvidoriaRobo, ROBO)
-    robo.threema_recipients = "ABCDEFGH"
-    await db.commit()
-    chave = f"conta:{ml.id}"
-
-    # 1ª rodada: 503 → só registro (info), ninguém avisado.
-    async def _instavel(client, creds, *, conta, desde, ate, tolerancia):
-        raise RuntimeError("ml_search_orders status=503 body=upstream")
-
-    monkeypatch.setattr(vigia, "_pedidos_ml_por_conta", _instavel)
-    r = await vigia.vigia_importacao_run(db)
-    oc = (await _abertas(db))[chave]
-    assert r["contas_falha"] == 1 and r["avisadas"] == 0 and _sem_threema == []
-    assert oc.severidade == "info" and oc.precisa_pessoa is False and oc.acao is None
-    assert oc.titulo.startswith("Conta não respondeu")
-    assert oc.dados["falhas_seguidas"] == 1 and oc.dados["erro_tipo"] == "instavel"
-
-    # 2ª rodada seguida falhando: promove pra pessoa e avisa.
-    r = await vigia.vigia_importacao_run(db)
-    await db.refresh(oc)
-    assert oc.titulo == "Conta sem acesso à API" and oc.precisa_pessoa is True
-    assert oc.acao == vigia.ACAO_REAUTORIZAR and oc.dados["falhas_seguidas"] == 2
-    assert r["avisadas"] == 1 and len(_sem_threema) == 1
-    assert len(await _todas(db, chave)) == 1  # mesma linha, promovida
-
-    # Conta voltou: fecha sozinha.
-    monkeypatch.setattr(vigia, "_pedidos_ml_por_conta", listagem.lister())
-    r = await vigia.vigia_importacao_run(db)
-    assert r["sumiram"] == 1 and await _abertas(db) == {}
-
-    # Erro de credencial não espera: pessoa na 1ª rodada.
-    listagem.falhas.add(conta)
-    r = await vigia.vigia_importacao_run(db)
-    oc = (await _abertas(db))[chave]
-    assert oc.precisa_pessoa is True and oc.dados["erro_tipo"] == "acesso"
-    assert oc.dados["falhas_seguidas"] == 1
-
-
 async def test_erro_de_acesso_classifica_credencial_vs_instabilidade():
+    """O vigia não abre mais ocorrência de conta, mas continua classificando o
+    erro pro LOG (`acesso=True/False`): é o que se olha quando a rodada
+    conferiu menos pedidos do que o normal."""
     import httpx
 
     def _http(status: int) -> httpx.HTTPStatusError:

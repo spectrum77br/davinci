@@ -530,6 +530,51 @@ async def test_margem_passou_mas_saldo_divergente_volta_pra_pendente(db: AsyncSe
     assert "saldo continua divergente" in enviados[0][0]
 
 
+async def test_falha_ao_voltar_pra_pendente_abre_a_ocorrencia_da_operacao_certa(
+    db: AsyncSession, monkeypatch
+):
+    """Ouvidoria (22/09): o `except` da reavaliação cobre DOIS desfechos. Se o
+    que falhou foi devolver o pedido pra aba Pendentes, a ocorrência tem que
+    dizer isso — como "liberar" o título ficava errado E a rede de segurança do
+    vigia (que confere situação + pino) nunca fecharia a linha, porque ela
+    espera Em aberto + 'Aprovado' num pedido que está em 83955 + 'Pendente'."""
+    from sqlalchemy import select
+
+    from app.models import OuvidoriaOcorrencia
+    from app.services import ouvidoria, vigia_margem
+
+    await ouvidoria.sincronizar_catalogo(db)
+    await db.commit()
+    await _seed_reprovado(
+        db, pedido="297415", bling_id=715, margem=0.19, plataforma="amazon", saldo_gap=True
+    )
+
+    async def _explode(session, *, pedido_bling, bling_id):
+        raise RuntimeError("bling fora do ar")
+
+    monkeypatch.setattr(margem_auto_hold, "_voltar_pendente_one", _explode)
+
+    res = await margem_auto_hold.reavaliar_reprovados(
+        db, client=FakeBlingComSituacao(), hoje=HOJE, agora=AGORA
+    )
+
+    assert res["failed"] == 1 and res["pendentes"] == 0 and res["liberados"] == 0
+    o = (
+        await db.execute(
+            select(OuvidoriaOcorrencia).where(OuvidoriaOcorrencia.chave == "falha:297415")
+        )
+    ).scalar_one()
+    assert o.titulo == "Não consegui devolver o pedido 297415 para a aba Pendentes"
+    assert o.dados["operacao"] == "voltar_pendente"
+    # E é essa operação que a rodada do vigia sabe conferir pra fechar sozinha.
+    assert vigia_margem.operacao_concluida("voltar_pendente", "83955", "Pendente")
+    # As tabelas da Ouvidoria não estão no cleanup do conftest (quem limpa são
+    # os arquivos dos robôs) — este teste tira o que semeou.
+    await db.execute(text("DELETE FROM ouvidoria_ocorrencias"))
+    await db.execute(text("DELETE FROM ouvidoria_robos"))
+    await db.commit()
+
+
 async def test_falha_num_pedido_nao_derruba_os_demais(db: AsyncSession):
     await _seed_reprovado(db, pedido="297413", bling_id=713, margem=0.19)
     await _seed_reprovado(db, pedido="297414", bling_id=714, margem=0.19)

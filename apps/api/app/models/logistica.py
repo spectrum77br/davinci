@@ -7,10 +7,12 @@ from sqlalchemy import (
     Date,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     LargeBinary,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
@@ -33,6 +35,18 @@ class Logistica(Base, TimestampMixin):
     """
 
     __tablename__ = "logistica"
+    __table_args__ = (
+        # Índice PARCIAL: a esmagadora maioria das linhas tem
+        # `problema_correios_em` NULL, então o índice fica minúsculo e o robô
+        # "Ocorrência grave nos Correios" (services/vigia_correios), que lê
+        # essas linhas a cada 15 min, faz index scan em vez de varrer a tabela
+        # inteira. Migração 0301.
+        Index(
+            "ix_logistica_problema_correios_em",
+            "problema_correios_em",
+            postgresql_where=text("problema_correios_em IS NOT NULL"),
+        ),
+    )
 
     id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
     data: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)

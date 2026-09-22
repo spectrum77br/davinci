@@ -52,27 +52,52 @@ logger = structlog.get_logger()
 router = APIRouter(prefix="/api/ouvidoria", tags=["ouvidoria"])
 
 
-def _runner_vigia_importacao() -> Callable[[], Awaitable[dict]]:
-    from app.services.vigia_importacao import vigia_importacao_sweep
+def _runner(chave: str) -> Callable[[], Callable[[], Awaitable[dict]]]:
+    """Fábrica do "Rodar agora" de um robô cujo serviço se chama
+    `app.services.<chave>` e expõe `<chave>_sweep` — é a convenção dos 6
+    robôs de 22/09. Import tardio: o serviço puxa clients de marketplace e
+    Bling, e o boot da API não paga isso."""
 
-    return vigia_importacao_sweep
+    def _fabrica() -> Callable[[], Awaitable[dict]]:
+        import importlib
+
+        mod = importlib.import_module(f"app.services.{chave}")
+        return getattr(mod, f"{chave}_sweep")
+
+    return _fabrica
 
 
-def _lock_vigia_importacao() -> tuple[int, int]:
-    from app.services.advisory_lock import SYNC_NAMESPACE
-    from app.services.vigia_importacao import _SWEEP_LOCK_KEY
+def _lock(chave: str) -> Callable[[], tuple[int, int]]:
+    """(namespace, chave) do advisory lock do sweep, também por import tardio."""
 
-    return SYNC_NAMESPACE, _SWEEP_LOCK_KEY
+    def _fabrica() -> tuple[int, int]:
+        import importlib
+
+        from app.services.advisory_lock import SYNC_NAMESPACE
+
+        mod = importlib.import_module(f"app.services.{chave}")
+        return SYNC_NAMESPACE, mod._SWEEP_LOCK_KEY  # noqa: SLF001
+
+    return _fabrica
 
 
+_ROBOS_COM_SWEEP = (
+    "vigia_importacao",
+    "vigia_credenciais",
+    "vigia_ingest_bling",
+    "vigia_correios",
+    "vigia_marketing_comandos",
+    "vigia_margem",
+    "vigia_chamados",
+)
 # chave do robô → fábrica que devolve a coroutine da varredura (import tardio).
 RUNNERS: dict[str, Callable[[], Callable[[], Awaitable[dict]]]] = {
-    "vigia_importacao": _runner_vigia_importacao,
+    chave: _runner(chave) for chave in _ROBOS_COM_SWEEP
 }
 # chave do robô → (namespace, chave) do advisory lock do sweep, pra "Rodar
 # agora" enxergar uma rodada do cron em andamento.
 LOCKS: dict[str, Callable[[], tuple[int, int]]] = {
-    "vigia_importacao": _lock_vigia_importacao,
+    chave: _lock(chave) for chave in _ROBOS_COM_SWEEP
 }
 # Robôs que ESTE processo está rodando por "Rodar agora" (o lock do banco
 # cobre rodadas em paralelo; isto cobre o clique repetido antes de o lock
@@ -113,6 +138,7 @@ def _robo_out(
         "threema_origem": origem,
         "reaviso_horas": robo.reaviso_horas,
         "config": svc.config_do_robo(robo, robo.chave),
+        "config_rotulos": svc.rotulos_config(robo.chave),
         "ultima_rodada_em": robo.ultima_rodada_em,
         "ultima_rodada_ok": robo.ultima_rodada_ok,
         "ultima_rodada_resumo": robo.ultima_rodada_resumo,
@@ -290,7 +316,13 @@ async def _rodada_em_andamento(session: AsyncSession, chave: str) -> bool:
     trava = LOCKS.get(chave)
     if trava is None:
         return False
-    ns, key = trava()
+    try:
+        ns, key = trava()
+    except ImportError:
+        # Serviço do robô ainda não está neste deploy: sem lock pra olhar, o
+        # cooldown de COOLDOWN_S continua segurando o clique repetido.
+        logger.warning("ouvidoria_lock_sem_servico", robo=chave)
+        return False
     got = (
         await session.execute(
             text(
@@ -330,7 +362,15 @@ async def rodar_robo(
     agora = datetime.now(UTC)
     if robo.ultima_rodada_em and agora - robo.ultima_rodada_em < timedelta(seconds=COOLDOWN_S):
         raise HTTPException(status.HTTP_409_CONFLICT, detail={"code": "rodada_recente"})
-    runner = fabrica()
+    try:
+        runner = fabrica()
+    except ImportError as e:
+        # Robô no catálogo cujo serviço não veio neste deploy: a tela diz o
+        # mesmo que diria pra um robô sem runner, em vez de 500.
+        logger.warning("ouvidoria_runner_sem_servico", robo=chave, error=str(e)[:200])
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, detail={"code": "robo_sem_runner"}
+        ) from e
     _EM_EXECUCAO.add(chave)
 
     async def _rodar() -> None:

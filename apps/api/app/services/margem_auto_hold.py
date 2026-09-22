@@ -104,6 +104,15 @@ avisa. Reprovação/aprovação feita por PESSOA nunca é reavaliada
 (bling_orders.aprovado_por preenchido ou auditoria humana posterior), e o
 robô nunca aprova só localmente: se o Bling recusar a situação, o pedido fica
 como está e a próxima hora tenta de novo.
+
+FALHA DO ROBÔ VIRA OCORRÊNCIA (22/09/2026): quando um pedido não consegue ser
+segurado/reprovado/liberado, o `logger.warning` continua, mas agora o ponto da
+falha também abre `falha:<pedido>` no Robô da Margem da Ouvidoria
+(`services/vigia_margem.py`) — o pedido ficava no limbo (a Margem achando que
+está segurado, o Bling achando que não) e ninguém lia o log. O ponto de
+SUCESSO da mesma operação fecha a ocorrência. Nenhuma regra de hold, reprovo
+ou reavaliação muda por causa disso: os helpers são best-effort e engolem o
+próprio erro.
 """
 
 from __future__ import annotations
@@ -121,6 +130,7 @@ from app.models import (
     BlingOrder,
     Integration,
     IntegrationPlatform,
+    OuvidoriaOcorrencia,
     ThreemaInformarConfig,
 )
 from app.security.cipher import decrypt_json
@@ -416,6 +426,117 @@ async def _avisar_threema(
         )
 
 
+# --- Ouvidoria: a falha do robô vira ocorrência (ver docstring do módulo) --
+
+_OUVIDORIA_ROBO = "vigia_margem"
+
+
+async def _ouvidoria_falha(
+    session: AsyncSession,
+    *,
+    pedido_bling: str,
+    bling_id: int | None,
+    operacao: str,
+    erro: str,
+    plataforma: str | None = None,
+    conta: str | None = None,
+) -> None:
+    """Abre/carimba `falha:<pedido>` no Robô da Margem da Ouvidoria.
+
+    `operacao` ('segurar' | 'reprovar' | 'liberar' | 'voltar_pendente') vai em
+    `dados`: é por ela que a rodada do robô sabe qual situação do pedido
+    significa "já resolveu" (a chave é UMA por pedido, e o mesmo pedido pode
+    falhar ao segurar hoje e ao liberar semanas depois). `tentativas` conta
+    quantas vezes a mesma operação falhou.
+
+    Três cuidados, todos porque este helper roda DENTRO do tratamento de erro
+    do loop: (a) import tardio de `ouvidoria`/`vigia_margem`, como os outros
+    imports tardios deste módulo; (b) try/except amplo com rollback — o
+    índice único parcial de ocorrências pode levantar IntegrityError se dois
+    caminhos (cron do snapshot e botão "atualizar" da tela) tratarem o mesmo
+    pedido ao mesmo tempo, e uma segunda exceção aqui envenenaria a sessão e
+    levaria junto o resto do lote; (c) commit próprio, porque `registrar` só
+    dá flush e a última volta do loop pode não ter mais nenhum commit depois.
+    """
+    from app.services import ouvidoria
+    from app.services.vigia_margem import (
+        ACAO_CONFERIR_BLING,
+        PREFIXO_FALHA,
+        link_margem,
+        titulo_falha,
+    )
+
+    chave = f"{PREFIXO_FALHA}{pedido_bling}"
+    try:
+        if not await ouvidoria.ativo(session, _OUVIDORIA_ROBO):
+            return
+        aberta = (
+            await session.execute(
+                select(OuvidoriaOcorrencia).where(
+                    OuvidoriaOcorrencia.robo_chave == _OUVIDORIA_ROBO,
+                    OuvidoriaOcorrencia.chave == chave,
+                    OuvidoriaOcorrencia.fechada_em.is_(None),
+                )
+            )
+        ).scalar_one_or_none()
+        tentativas = int((aberta.dados or {}).get("tentativas") or 0) + 1 if aberta else 1
+        await ouvidoria.registrar(
+            session,
+            _OUVIDORIA_ROBO,
+            chave,
+            plataforma=(str(plataforma).strip()[:20] or None) if plataforma else None,
+            conta=(str(conta).strip()[:120] or None) if conta else None,
+            pedido=pedido_bling[:80],
+            titulo=titulo_falha(operacao, pedido_bling),
+            detalhe=erro,
+            acao=ACAO_CONFERIR_BLING,
+            link=link_margem(pedido_bling),
+            severidade="pessoa",
+            precisa_pessoa=True,
+            dados={
+                "bling_id": bling_id,
+                "operacao": operacao,
+                "erro": erro,
+                "tentativas": tentativas,
+            },
+        )
+        await session.commit()
+    except Exception as e:  # noqa: BLE001 — ocorrência nunca derruba o robô
+        await session.rollback()
+        logger.warning(
+            "margem_ouvidoria_falha_nao_registrada",
+            pedido_bling=pedido_bling,
+            operacao=operacao,
+            erro=str(e)[:200],
+        )
+
+
+async def _ouvidoria_falha_resolvida(session: AsyncSession, pedido_bling: str) -> None:
+    """A operação que vinha falhando deu certo → fecha `falha:<pedido>`.
+
+    É o par do `_ouvidoria_falha`: ocorrência de EVENTO não fecha por tempo
+    nem pelo `fechar_nao_vistas` da rodada (que só julga as chaves de estado),
+    quem fecha é o ponto de sucesso. Best-effort pelos mesmos motivos — um
+    erro aqui não pode desfazer um hold que já foi ao Bling."""
+    from app.services import ouvidoria
+    from app.services.vigia_margem import PREFIXO_FALHA
+
+    try:
+        if not await ouvidoria.ativo(session, _OUVIDORIA_ROBO):
+            return
+        if await ouvidoria.fechar_por_chave(
+            session, _OUVIDORIA_ROBO, f"{PREFIXO_FALHA}{pedido_bling}"
+        ):
+            await session.commit()
+    except Exception as e:  # noqa: BLE001 — ocorrência nunca derruba o robô
+        await session.rollback()
+        logger.warning(
+            "margem_ouvidoria_falha_nao_fechada",
+            pedido_bling=pedido_bling,
+            erro=str(e)[:200],
+        )
+
+
 def _alerta_margem_alta_sql() -> str:
     # Situação 6 = janela de triagem (mesma do hold): pedido novo, cadastro
     # ainda corrigível antes de faturar. MAX = a MAIOR margem entre os itens.
@@ -561,6 +682,9 @@ async def run(
                 motivo=motivo,
                 reprovado=reprovar,
             )
+            # Deu certo agora: se este pedido tinha uma falha aberta na
+            # Ouvidoria (tick anterior), ela fecha aqui.
+            await _ouvidoria_falha_resolvida(session, str(r["pedido_bling"]))
             await _avisar_threema(session, r, motivo, reprovado=reprovar)
         except Exception as e:  # noqa: BLE001 — um pedido não derruba os demais
             failed += 1
@@ -573,6 +697,17 @@ async def run(
                 "margem_auto_hold_falhou",
                 pedido_bling=str(r["pedido_bling"]),
                 erro=erro,
+            )
+            # Depois do rollback (a transação está suja) e do log: o pedido
+            # ficou no limbo — a Margem acha que está segurado, o Bling não.
+            await _ouvidoria_falha(
+                session,
+                pedido_bling=str(r["pedido_bling"]),
+                bling_id=int(r["bling_id"]),
+                operacao="reprovar" if reprovar else "segurar",
+                erro=erro,
+                plataforma=r["plataforma"],
+                conta=r["conta"],
             )
     # Alerta de margem fora do normal (> 60%): independe do Bling (não toca
     # no pedido) — roda mesmo sem candidatos de hold ou sem integração.
@@ -934,6 +1069,13 @@ async def reavaliar_reprovados(
     for cand in rows:
         pedido_bling = str(cand["pedido_bling"])
         bling_id = int(cand["bling_id"])
+        # Qual operação está em curso quando o `except` pegar. A reavaliação
+        # tem dois desfechos — devolver pra aba Pendentes (saldo divergente) e
+        # liberar — e a ocorrência precisa dizer qual NÃO deu: é por
+        # `dados['operacao']` que a rodada do vigia sabe qual situação/pino
+        # significa "já resolveu" (vigia_margem._OPERACOES). Registrar tudo
+        # como "liberar" dava título errado e ocorrência que nunca fecha.
+        operacao = "liberar"
         try:
             await _atualizar_financeiro(session, bling_id)
             if not await _ainda_reprovado_pelo_robo(session, bling_id):
@@ -957,9 +1099,13 @@ async def reavaliar_reprovados(
                 else "margem passou a atender o mínimo"
             )
             if r["saldo_divergente"]:
+                operacao = "voltar_pendente"
                 await _voltar_pendente_one(session, pedido_bling=pedido_bling, bling_id=bling_id)
                 out["pendentes"] += 1
                 logger.info("margem_reavaliar_pendente", pedido_bling=pedido_bling, motivo=motivo)
+                # A reavaliação terminou (o pedido voltou pra aba): uma falha
+                # aberta deste pedido não tem mais o que cobrar.
+                await _ouvidoria_falha_resolvida(session, pedido_bling)
                 await _avisar_threema_reavaliacao(
                     session, r, pedido_bling=pedido_bling, motivo=motivo, liberado=False
                 )
@@ -990,6 +1136,7 @@ async def reavaliar_reprovados(
                 margem=None if r["margem"] is None else float(r["margem"]),
                 minima=None if r["minima"] is None else float(r["minima"]),
             )
+            await _ouvidoria_falha_resolvida(session, pedido_bling)
             await _avisar_threema_reavaliacao(
                 session, r, pedido_bling=pedido_bling, motivo=motivo, liberado=True
             )
@@ -1000,4 +1147,13 @@ async def reavaliar_reprovados(
             if isinstance(e, httpx.HTTPStatusError):
                 erro = f"{erro} | bling: {e.response.text[:300]}"
             logger.warning("margem_reavaliar_falhou", pedido_bling=pedido_bling, erro=erro)
+            # `cand` só traz pedido/bling_id/reprovado_em: plataforma e conta
+            # vão vazias e o `registrar` não sobrescreve o que já houver.
+            await _ouvidoria_falha(
+                session,
+                pedido_bling=pedido_bling,
+                bling_id=bling_id,
+                operacao=operacao,
+                erro=erro,
+            )
     return out

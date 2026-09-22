@@ -16,6 +16,16 @@ Admin". O que este arquivo trava:
 - tratar / ignorar / reabrir e o 409 da chave duplicada;
 - o SQL da 0300 copia `vigia_importacao` pra `ouvidoria_ocorrencias` do jeito
   descrito no cabeçalho da migração (rodado DE VERDADE, importado dela);
+- o catálogo dos 6 robôs de 22/09/2026: nascem `silencioso` (registram no
+  painel e não mandam Threema) e o `sincronizar_catalogo` não desliga de volta
+  o que a pessoa ligou; toda chave de config tem `Parametro` (limite + rótulo);
+- `fechar_por_chave` e o `prefixo` do `fechar_nao_vistas`: ocorrência de
+  EVENTO (aberta por hook) não morre como "sumiu" na rodada; `ativo` é o que
+  os hooks olham antes de registrar;
+- a poda: `gc_rodadas` (30 dias) e `gc_ocorrencias` (fechadas há 180 dias),
+  que NUNCA apaga uma `ignorada` — apagá-la faria o robô reabrir a linha;
+- `cadencia_texto` de cada robô bate, minuto a minuto, com o cron do worker
+  (é o texto que a coluna Cadência do painel mostra);
 - o router: permissões, resumo/por_robo, PATCH de modo, "Rodar agora";
 - config com limites (`Parametro`): PATCH recusa com 422 e frase pra tela,
   a leitura aperta valor absurdo pra dentro e a Saúde não cai com texto;
@@ -168,6 +178,91 @@ async def test_sincronizar_catalogo_cria_e_nao_mexe_no_que_a_pessoa_salvou(db):
     assert await svc.modo(db, "robo_que_nao_existe") == "ligado"
 
 
+# Os 6 robôs aprovados em 22/09: chave → (área, plataformas, config padrão).
+# O teste existe pra uma mudança de tabela não passar calada: a cadência que
+# está aqui é a mesma do cron no worker e a que a tela mostra.
+SEIS_ROBOS = {
+    "vigia_credenciais": ("contas", ["ml", "shopee", "tiktok", "amazon", "magalu", "bling"],
+                          {"cadencia_min": 60, "vencimento_dias": 7}),
+    "vigia_ingest_bling": ("pedidos", ["bling"], {"cadencia_min": 15, "idade_min": 30}),
+    "vigia_correios": ("logistica", ["ml", "shopee", "tiktok", "amazon"],
+                       {"cadencia_min": 15}),
+    "vigia_marketing_comandos": ("marketing", ["shopee", "ml"],
+                                 {"cadencia_min": 10, "pendente_min": 30,
+                                  "executor_offline_min": 10}),
+    "vigia_margem": ("margem", ["ml", "shopee", "tiktok", "amazon"],
+                     {"cadencia_min": 30, "segurado_horas": 24}),
+    "vigia_chamados": ("chamados", ["ml", "shopee", "tiktok"],
+                       {"cadencia_min": 30, "encerrado_dias": 3,
+                        "consultas_falhas_seguidas": 3}),
+}
+
+
+async def test_catalogo_dos_seis_robos_novos_nasce_silencioso(db):
+    """Robô novo NÃO pode começar mandando Threema: nasce `silencioso`
+    (registra no painel e cala) e o Vinicius liga um a um na tela. O vigia de
+    importação, que já era da casa, continua `ligado`."""
+    await svc.sincronizar_catalogo(db)
+    await db.commit()
+    for chave, (area, plataformas, config) in SEIS_ROBOS.items():
+        robo = await db.get(OuvidoriaRobo, chave)
+        assert robo is not None, chave
+        assert robo.modo == "silencioso", chave
+        assert robo.area == area and robo.plataformas == plataformas
+        assert robo.config == config
+        assert robo.cadencia_texto and robo.descricao
+    assert (await db.get(OuvidoriaRobo, ROBO)).modo == "ligado"
+
+    # A pessoa ligou um deles: a sincronização seguinte NÃO desliga de volta.
+    margem = await db.get(OuvidoriaRobo, "vigia_margem")
+    margem.modo = "ligado"
+    await db.commit()
+    await svc.sincronizar_catalogo(db)
+    await db.commit()
+    await db.refresh(margem)
+    assert margem.modo == "ligado"
+    assert await svc.modo(db, "vigia_margem") == "ligado"
+
+
+async def test_todo_robo_tem_limite_pra_cada_chave_de_config():
+    """Chave de config sem `Parametro` passaria pelo PATCH sem limite e
+    apareceria crua na tela — os dois defeitos de uma vez."""
+    for d in svc.ROBOS.values():
+        assert set(d.config_padrao) == set(d.parametros), d.chave
+        for chave, p in d.parametros.items():
+            assert p.minimo <= int(d.config_padrao[chave]) <= p.maximo, (d.chave, chave)
+        assert d.modo_padrao in ("ligado", "silencioso", "desligado"), d.chave
+
+
+async def test_rotulos_config_traz_rotulo_com_unidade():
+    # A tela não conhece robô por robô: o rótulo (e a unidade) vem daqui.
+    assert svc.rotulos_config("vigia_margem") == {
+        "cadencia_min": "Cadência esperada (min)",
+        "segurado_horas": "Segurado sem decisão (h)",
+    }
+    # Parâmetro sem unidade sai só com o rótulo; robô fora do catálogo, vazio.
+    assert svc.rotulos_config(ROBO)["amazon_a_cada_rodadas"] == "Amazon a cada N rodadas"
+    assert svc.rotulos_config("robo_que_nao_existe") == {}
+
+
+async def test_ativo_e_falso_so_no_desligado(db):
+    """O que os HOOKS olham antes de abrir ocorrência no meio de outra
+    operação: `silencioso` registra (o aviso é que não sai), `desligado` não
+    grava nada. Robô que ainda não existe no banco conta como ativo — é o
+    comportamento de sempre do `modo`."""
+    await svc.sincronizar_catalogo(db)
+    await db.commit()
+    robo = await db.get(OuvidoriaRobo, "vigia_chamados")
+    assert await svc.ativo(db, "vigia_chamados") is True  # nasce silencioso
+    robo.modo = "ligado"
+    await db.commit()
+    assert await svc.ativo(db, "vigia_chamados") is True
+    robo.modo = "desligado"
+    await db.commit()
+    assert await svc.ativo(db, "vigia_chamados") is False
+    assert await svc.ativo(db, "robo_que_nao_existe") is True
+
+
 # ─── registrar ─────────────────────────────────────────────────────────────
 
 
@@ -239,6 +334,45 @@ async def test_fechar_nao_vistas_respeita_excluir_contas(db):
     assert abertas == {"tiktok:10", "conta:ml-1", "ml:30"}
     fechada = (await _todas(db, "tiktok:11"))[0]
     assert (fechada.fechamento, fechada.fechada_por) == ("sumiu", "robô")
+
+
+async def test_fechar_por_chave_e_o_par_das_ocorrencias_de_evento(db):
+    """Ocorrência que um hook abriu no ponto da falha (a réplica não foi, o
+    hold não pegou) não é re-vista por rodada nenhuma: quem fecha é o ponto de
+    SUCESSO da mesma operação."""
+    await _robo(db)
+    await _reg(db, "falha:295070", titulo="Não consegui segurar o pedido no Bling")
+    assert await svc.fechar_por_chave(db, ROBO, "falha:295070") is True
+    fechada = (await _todas(db, "falha:295070"))[0]
+    assert (fechada.fechamento, fechada.fechada_por) == ("sumiu", "robô")
+    # Sem aberta não há o que fechar (o robô pode acertar duas vezes seguidas).
+    assert await svc.fechar_por_chave(db, ROBO, "falha:295070") is False
+    assert await svc.fechar_por_chave(db, ROBO, "falha:nunca-vista") is False
+
+
+async def test_fechar_nao_vistas_com_prefixo_nao_mata_as_de_evento(db):
+    """Robô que mistura ESTADO (a rodada re-vê) com EVENTO (hook abre): sem o
+    prefixo, o fechamento da rodada mataria como "sumiu" justamente a falha
+    que ninguém tratou ainda."""
+    await _robo(db)
+    async with svc.Rodada(db, ROBO) as r:
+        await r.registrar("segurado:295070", titulo="Pedido segurado há 26 h sem decisão")
+        await r.registrar("segurado:295071", titulo="Pedido segurado há 30 h sem decisão")
+        await r.registrar("falha:295072", titulo="Não consegui liberar o pedido no Bling")
+
+    async with svc.Rodada(db, ROBO) as r:
+        # Nesta rodada só o 295070 continua segurado; a `falha:` não é re-vista.
+        await r.registrar("segurado:295070", titulo="Pedido segurado há 26 h sem decisão")
+        n = await r.fechar_nao_vistas(prefixo="segurado:")
+
+    assert n == 1
+    assert {o.chave for o in await _abertas(db)} == {"segurado:295070", "falha:295072"}
+
+    # Sem prefixo, a mesma rodada teria levado a `falha:` junto.
+    async with svc.Rodada(db, ROBO) as r:
+        await r.registrar("segurado:295070", titulo="Pedido segurado há 26 h sem decisão")
+        assert await r.fechar_nao_vistas() == 1
+    assert {o.chave for o in await _abertas(db)} == {"segurado:295070"}
 
 
 # ─── rodada ────────────────────────────────────────────────────────────────
@@ -316,6 +450,35 @@ async def test_gc_rodadas(db):
     assert await svc.gc_rodadas(db, dias=30) == 1
     await db.commit()
     assert len((await db.execute(select(OuvidoriaRodada))).scalars().all()) == 1
+
+
+async def test_gc_ocorrencias_poda_as_fechadas_velhas_e_nunca_as_ignoradas(db):
+    """As fechadas antigas saem (com 7 robôs a rotatividade é diária), menos as
+    `ignorada`: elas são a memória de "não cobre mais isto" que o `registrar`
+    lê — apagar faria o robô reabrir a linha na rodada seguinte."""
+    await _robo(db)
+    velha = await _reg(db, "tiktok:1")
+    ignorada = await _reg(db, "tiktok:2")
+    recente = await _reg(db, "tiktok:3")
+    aberta = await _reg(db, "tiktok:4")
+    for row, quando, fechamento in (
+        (velha, _t(days=200), "sumiu"),
+        (ignorada, _t(days=200), "ignorada"),
+        (recente, _t(days=10), "tratada"),
+    ):
+        row.fechada_em = quando
+        row.fechamento = fechamento
+    await db.commit()
+
+    assert await svc.gc_ocorrencias(db) == 1
+    await db.commit()
+
+    restantes = {
+        o.chave
+        for o in (await db.execute(select(OuvidoriaOcorrencia))).scalars().all()
+    }
+    assert restantes == {"tiktok:2", "tiktok:3", "tiktok:4"}
+    assert aberta.fechada_em is None
 
 
 # ─── aviso ─────────────────────────────────────────────────────────────────
@@ -572,6 +735,80 @@ async def test_resumo_ocorrencias(db):
     assert c[ROBO]["abertas"] == 3 and c[ROBO]["abertas_pessoa"] == 2
 
 
+# ─── ticks do worker (os 6 robôs de 22/09) ─────────────────────────────────
+
+
+@pytest.mark.parametrize("chave", sorted(SEIS_ROBOS))
+async def test_tick_respeita_o_modo_e_aguenta_servico_faltando(chave, db, monkeypatch):
+    """O gate mora no tick (o botão "Rodar agora" não passa por aqui), e o
+    import do serviço é tardio e tolerante: um robô que não veio no deploy
+    derrubaria o import do worker e com ele TODOS os crons da casa."""
+    import sys
+    import types
+
+    from app import worker
+
+    tick = getattr(worker, f"{chave}_tick")
+    chamadas: list[str] = []
+    falso = types.ModuleType(f"app.services.{chave}")
+
+    async def _sweep() -> dict:
+        chamadas.append(chave)
+        return {"novas": 0}
+
+    setattr(falso, f"{chave}_sweep", _sweep)
+    monkeypatch.setitem(sys.modules, f"app.services.{chave}", falso)
+
+    await svc.sincronizar_catalogo(db)
+    await db.commit()
+    robo = await db.get(OuvidoriaRobo, chave)
+    # Nasce silencioso: RODA (registra no painel), só não avisa.
+    await tick({})
+    assert chamadas == [chave]
+
+    robo.modo = "desligado"
+    await db.commit()
+    await tick({})
+    assert chamadas == [chave]  # nem rodou nem gravou rodada
+    assert (await db.execute(select(OuvidoriaRodada))).scalars().all() == []
+
+    # Serviço fora do deploy: o tick avisa no log e sai inteiro.
+    robo.modo = "ligado"
+    await db.commit()
+    monkeypatch.setitem(sys.modules, f"app.services.{chave}", None)
+    await tick({})
+    assert chamadas == [chave]
+
+
+async def test_todo_robo_do_catalogo_tem_tick_e_runner():
+    """Robô no catálogo sem tick no worker nasce "parado" na coluna Saúde e
+    ninguém entende por quê; sem runner, o botão "Rodar agora" some."""
+    from app import worker
+
+    for chave in svc.ROBOS:
+        assert hasattr(worker, f"{chave}_tick"), chave
+        assert chave in router_mod.RUNNERS and chave in router_mod.LOCKS, chave
+
+
+async def test_cadencia_texto_bate_com_os_minutos_do_cron():
+    """`cadencia_texto` é o que a coluna Cadência do painel mostra ("a cada 30
+    min (:17/:47)"). Se alguém mexer no minuto do cron e esquecer o catálogo, a
+    tela passa a mentir — e a diferença só aparece meses depois, quando alguém
+    for entender por que um robô parece atrasado."""
+    import re
+
+    from app import worker
+
+    por_funcao = {c.coroutine.__name__: c for c in worker.WorkerSettings.cron_jobs}
+    for chave, d in svc.ROBOS.items():
+        job = por_funcao.get(f"{chave}_tick")
+        assert job is not None, chave
+        minuto = job.minute
+        do_cron = sorted(minuto) if isinstance(minuto, (set, frozenset, list, tuple)) else [minuto]
+        do_texto = sorted(int(m) for m in re.findall(r":(\d{2})", d.cadencia_texto))
+        assert do_cron == do_texto, f"{chave}: cron {do_cron} × tela {do_texto}"
+
+
 # ─── migration 0300: o vigia muda de casa ──────────────────────────────────
 
 
@@ -700,8 +937,13 @@ async def test_router_robos_lista_e_patch(client, make_user, auth_as, db):
 
     r = await client.get("/api/ouvidoria/robos")
     assert r.status_code == 200, r.text
-    [robo] = r.json()
-    assert robo["chave"] == ROBO and robo["modo"] == "ligado"
+    # O catálogo tem os 7 robôs; este teste é sobre o vigia.
+    por_chave = {b["chave"]: b for b in r.json()}
+    assert set(por_chave) == set(svc.ROBOS)
+    robo = por_chave[ROBO]
+    assert robo["modo"] == "ligado"
+    assert por_chave["vigia_margem"]["modo"] == "silencioso"  # robô novo nasce calado
+    assert robo["config_rotulos"]["cadencia_min"] == "Cadência esperada (min)"
     assert robo["abertas"] == 1 and robo["abertas_pessoa"] == 1
     assert robo["rodadas_hoje"] == 1 and robo["rodadas_hoje_ok"] == 1
     assert robo["saude"] == "ok"
@@ -858,7 +1100,12 @@ async def test_router_ocorrencias_resumo_por_robo_e_botoes(client, make_user, au
     assert body["total"] == 2 and {i["chave"] for i in body["itens"]} == {"tiktok:1", "shopee:2"}
     assert body["itens"][0]["robo_nome"] == "Vigia de importação"
     assert body["resumo"]["abertas"] == 2 and body["resumo"]["sumiram_7d"] == 1
-    assert body["por_robo"] == [{"chave": ROBO, "nome": "Vigia de importação", "abertas": 2}]
+    # Os chips da tela trazem TODOS os robôs (inclusive os que não acharam
+    # nada), em ordem de nome; as abertas são as do vigia.
+    por_robo = {p["chave"]: p for p in body["por_robo"]}
+    assert set(por_robo) == set(svc.ROBOS)
+    assert por_robo[ROBO] == {"chave": ROBO, "nome": "Vigia de importação", "abertas": 2}
+    assert por_robo["vigia_correios"]["abertas"] == 0
 
     r = await client.get("/api/ouvidoria/ocorrencias", params={"status": "fechadas"})
     assert [i["id"] for i in r.json()["itens"]] == [str(s.id)]
