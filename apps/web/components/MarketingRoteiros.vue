@@ -860,22 +860,22 @@ function destinoLabel(d: string | null): string {
         <h3 class="text-sm font-medium">{{ pSel ? pSel.nome : 'Novo personagem' }}</h3>
         <div>
           <label class="mb-1 block text-[11px] font-medium text-muted-foreground">Nome</label>
-          <input v-model="pForm.nome" type="text" class="h-8 w-full rounded-md border bg-background px-2 text-xs outline-none focus:ring-2 focus:ring-ring" placeholder="Lívia" />
+          <input v-model="pForm.nome" type="text" class="h-8 w-full rounded-md border bg-background px-2 text-xs outline-none focus:ring-2 focus:ring-ring" placeholder="ex.: Lívia" />
         </div>
         <div>
           <label class="mb-1 block text-[11px] font-medium text-muted-foreground">Descrição</label>
-          <textarea v-model="pForm.descricao" rows="3" class="w-full resize-y rounded-md border bg-background px-2 py-1.5 text-xs outline-none focus:ring-2 focus:ring-ring" placeholder="estudante brasileira de 22 anos, cabelo loiro…" />
+          <textarea v-model="pForm.descricao" rows="3" class="w-full resize-y rounded-md border bg-background px-2 py-1.5 text-xs outline-none focus:ring-2 focus:ring-ring" placeholder="ex.: estudante brasileira de 22 anos, cabelo loiro…" />
         </div>
         <div>
           <label class="mb-1 block text-[11px] font-medium text-muted-foreground">Referência em vídeo</label>
-          <input v-model="pForm.video_url" type="url" class="h-8 w-full rounded-md border bg-background px-2 text-xs outline-none focus:ring-2 focus:ring-ring" placeholder="https://youtube.com/shorts/…" />
+          <input v-model="pForm.video_url" type="url" class="h-8 w-full rounded-md border bg-background px-2 text-xs outline-none focus:ring-2 focus:ring-ring" placeholder="ex.: https://youtube.com/shorts/…" />
           <p class="mt-1 text-[11px] text-muted-foreground">Como a persona se move e fala.</p>
         </div>
         <div>
           <label class="mb-1 block text-[11px] font-medium text-muted-foreground">
             Etiqueta do gerador <span class="font-normal">(opcional)</span>
           </label>
-          <input v-model="pForm.referencia" type="text" class="h-8 w-full rounded-md border bg-background px-2 font-mono text-[11px] outline-none focus:ring-2 focus:ring-ring" placeholder="<<<48dbb6ed-…>>> ou @Lívia" />
+          <input v-model="pForm.referencia" type="text" class="h-8 w-full rounded-md border bg-background px-2 font-mono text-[11px] outline-none focus:ring-2 focus:ring-ring" placeholder="ex.: <<<48dbb6ed-…>>> ou @Lívia" />
           <p class="mt-1 text-[11px] text-muted-foreground">
             Atalho pra quem usa a MESMA ferramenta que gerou o rosto — ela some se o
             asset for apagado lá ou se a agência usar outro gerador. Quem garante o
