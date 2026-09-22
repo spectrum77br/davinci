@@ -2417,6 +2417,75 @@ async def delete_anexo(
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
+@router.post("/{devolution_id}/senha", response_model=DevolutionOut)
+async def pedir_senha(
+    devolution_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("devolucoes", "edit"))],
+) -> DevolutionOut:
+    """Botão "pedir senha ao cliente" da linha: manda (ou reenvia) a mensagem
+    no chat da Shopee pedindo a senha do produto que voltou travado. Só faz
+    sentido no motivo Bloqueado e em conta com canal — nas outras a linha
+    fica `sem_canal` e a tela diz pra pedir na mão."""
+    row = (
+        await session.execute(select(Devolution).where(Devolution.id == devolution_id))
+    ).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(404, detail={"code": "devolution_not_found"})
+    if not devolucao_mensagem_comprador.motivo_pede_senha(row):
+        raise HTTPException(422, detail={"code": "motivo_nao_pede_senha"})
+    linha = await devolucao_mensagem_comprador.reabrir(session, row, created_by=user.id)
+    await session.commit()
+    await devolucao_mensagem_comprador.agendar(session, linha)
+    await session.refresh(row)
+    return await _completar_out(session, row, DevolutionOut.model_validate(row))
+
+
+@router.post("/senha/enfileirar", status_code=status.HTTP_200_OK)
+async def enfileirar_senhas(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("devolucoes", "edit"))],
+    dias: int = Query(30, ge=1, le=365),
+    limite: int = Query(50, ge=1, le=200),
+    simular: bool = Query(True),
+) -> dict:
+    """Disparo em LOTE do pedido de senha pros lançamentos de Bloqueado que
+    ficaram para trás (a funcionalidade nasceu em 22/09; tudo que é anterior
+    nunca teve pedido). `simular=true` só lista — é o padrão de propósito,
+    porque cada linha da lista é uma mensagem a um cliente de verdade."""
+    candidatos = await devolucao_mensagem_comprador.candidatos_pendentes(
+        session, dias=dias, limite=limite
+    )
+    lista = [
+        {
+            "pedido_bling": d.pedido_bling,
+            "pedido_marketplace": d.pedido_marketplace,
+            "conta": d.conta,
+            "sku": d.sku,
+            "texto": devolucao_mensagem_comprador.texto_para(d),
+        }
+        for d in candidatos
+    ]
+    if simular:
+        return {"simulacao": True, "candidatos": len(lista), "pedidos": lista}
+    enfileirados = 0
+    linhas = []
+    for dev in candidatos:
+        linha = await devolucao_mensagem_comprador.reabrir(session, dev, created_by=user.id)
+        if linha is not None:
+            linhas.append(linha)
+    await session.commit()
+    for linha in linhas:
+        await devolucao_mensagem_comprador.agendar(session, linha)
+        enfileirados += 1
+    return {
+        "simulacao": False,
+        "candidatos": len(lista),
+        "enfileirados": enfileirados,
+        "pedidos": lista,
+    }
+
+
 @router.post("/backfill-addresses", status_code=status.HTTP_200_OK)
 async def backfill_addresses(
     session: Annotated[AsyncSession, Depends(get_session)],

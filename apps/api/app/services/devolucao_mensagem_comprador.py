@@ -34,7 +34,7 @@ não busca conversa por comprador).
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 import structlog
@@ -400,6 +400,72 @@ async def _registrar_no_chamado(
             "A resposta cai no chat da loja (Duoke/Seller Center).",
         )
     )
+
+
+async def reabrir(
+    session: AsyncSession, dev: Devolution, *, created_by: UUID | None = None
+) -> DevolucaoMensagemComprador | None:
+    """Botão "pedir senha" da tela: volta a linha pra `pendente` mesmo quando já
+    tinha saído, falhado ou sido cancelada. Serve pro reenvio (o comprador não
+    respondeu) e pros lançamentos anteriores a 22/09, que nunca tiveram pedido.
+    Devolve a linha a enviar, ou None quando não há canal."""
+    linha = await garantir(session, dev, created_by=created_by)
+    if linha is not None:
+        return linha
+    atual = await linha_do_pedido(session, dev)
+    if atual is None or not motivo_pede_senha(dev):
+        return None
+    if atual.status == STATUS_SEM_CANAL:
+        return None  # ML/TikTok/Amazon: insistir não cria canal
+    atual.status = STATUS_PENDENTE
+    atual.erro = None
+    atual.tentativas = 0
+    if dev.id is not None:
+        atual.devolution_id = dev.id
+    return atual
+
+
+async def candidatos_pendentes(
+    session: AsyncSession, *, dias: int = 30, limite: int = 50
+) -> list[Devolution]:
+    """Lançamentos de Bloqueado na Shopee, dentro da janela, que ainda não
+    tiveram mensagem enviada — a lista do disparo em lote. Uma linha por
+    PEDIDO (a mais recente), porque a mensagem é por pedido."""
+    from sqlalchemy import func
+
+    recorte = datetime.now(UTC) - timedelta(days=max(1, dias))
+    ja_tem = (
+        select(DevolucaoMensagemComprador.pedido_bling)
+        .where(
+            DevolucaoMensagemComprador.evento == EVENTO_SENHA,
+            DevolucaoMensagemComprador.status.in_([STATUS_ENVIADA, STATUS_PENDENTE]),
+        )
+        .scalar_subquery()
+    )
+    rows = (
+        await session.execute(
+            select(Devolution)
+            .where(
+                func.lower(func.btrim(Devolution.motivo_devolucao)).in_(sorted(MOTIVOS_SENHA)),
+                Devolution.conta.ilike("Shopee%"),
+                Devolution.created_at > recorte,
+                func.btrim(func.coalesce(Devolution.pedido_bling, "")) != "",
+                Devolution.pedido_bling.not_in(ja_tem),
+            )
+            .order_by(Devolution.created_at.desc())
+        )
+    ).scalars().all()
+    vistos: set[str] = set()
+    out: list[Devolution] = []
+    for dev in rows:
+        pedido = (dev.pedido_bling or "").strip()
+        if pedido in vistos:
+            continue
+        vistos.add(pedido)
+        out.append(dev)
+        if len(out) >= max(1, limite):
+            break
+    return out
 
 
 async def enviar_por_id(session: AsyncSession, linha_id: str) -> DevolucaoMensagemComprador | None:
