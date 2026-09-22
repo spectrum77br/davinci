@@ -680,7 +680,7 @@ async def test_varredura_pega_lancamento_antigo_que_nunca_teve_pedido_de_senha(
     shopee.buyers.clear()
 
     r = await svc.varrer_sem_mensagem(db, dias=30, limite=20)
-    assert r == {"candidatos": 1, "criadas": 1, "enviadas": 1}
+    assert r == {"candidatos": 1, "criadas": 1, "enviadas": 1, "sem_envio": {}}
     assert len(shopee.textos) == 1
     linha = await _linha(db, "295101")
     assert linha is not None and linha.status == "enviada"
@@ -688,7 +688,7 @@ async def test_varredura_pega_lancamento_antigo_que_nunca_teve_pedido_de_senha(
     # a segunda rodada não manda de novo (é o que impede a enxurrada diária)
     shopee.enviadas.clear()
     r2 = await svc.varrer_sem_mensagem(db, dias=30, limite=20)
-    assert r2 == {"candidatos": 0, "criadas": 0, "enviadas": 0}
+    assert r2 == {"candidatos": 0, "criadas": 0, "enviadas": 0, "sem_envio": {}}
     assert shopee.textos == []
 
 
@@ -717,5 +717,40 @@ async def test_varredura_respeita_o_teto_a_janela_e_quem_ja_falhou(
     await db.commit()
     shopee.enviadas.clear()
     r3 = await svc.varrer_sem_mensagem(db, dias=30, limite=10)
-    assert r3 == {"candidatos": 0, "criadas": 0, "enviadas": 0}
+    assert r3 == {"candidatos": 0, "criadas": 0, "enviadas": 0, "sem_envio": {}}
     assert shopee.textos == []
+
+
+async def test_plataforma_sai_do_nome_da_conta_quando_o_resto_esta_calado(
+    client, make_user, auth_as, db, shopee
+):
+    """Duas rodadas da varredura em produção (22/09) voltaram "candidatos=20,
+    criadas=0": lançamento antigo, sem chamado e sem espelho do pedido, ficava
+    sem plataforma e era marcado "sem canal" — sendo que a conta se chama
+    "Shopee ATV" e diz de qual plataforma é. O nome da conta é o último recurso."""
+    assert svc._plataforma_pelo_nome_da_conta("Shopee ATV") == "shopee"
+    assert svc._plataforma_pelo_nome_da_conta("shopee marquezini") == "shopee"
+    assert svc._plataforma_pelo_nome_da_conta("TikTok Mini") == "tiktok"
+    assert svc._plataforma_pelo_nome_da_conta("ML Injox") == "ml"
+    assert svc._plataforma_pelo_nome_da_conta("Mercado Livre Kia") == "ml"
+    assert svc._plataforma_pelo_nome_da_conta("Amazon KFA") == "amazon"
+    # não inventa plataforma pra loja que não diz (ex.: "Loja 206081922")
+    assert svc._plataforma_pelo_nome_da_conta("Loja 206081922") is None
+    assert svc._plataforma_pelo_nome_da_conta("") is None
+
+    # e ponta a ponta: devolução SEM chamado e SEM espelho do pedido continua
+    # alcançando o comprador porque a conta diz "Shopee".
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+    dev = Devolution(
+        conta="Shopee Marquezini",
+        pedido_bling="295301",
+        pedido_marketplace="260904SEMESPELHO",
+        sku="dg050.sa",
+        motivo_devolucao="Bloqueado",
+    )
+    db.add(dev)
+    await db.commit()
+    linha = await svc.garantir(db, dev)
+    assert linha is not None and linha.status == "pendente"
+    assert linha.plataforma == "shopee"

@@ -191,7 +191,24 @@ async def _plataforma_de(session: AsyncSession, dev: Devolution, ch: Chamado | N
         bruta = (info or {}).get("plataforma")
     if not (bruta or "").strip():
         bruta = await chamados_devolucao._plataforma_da_conta(session, dev.conta)
+    if not (bruta or "").strip():
+        bruta = _plataforma_pelo_nome_da_conta(dev.conta)
     return chamados_devolucao.plataforma_de(bruta)
+
+
+# A `conta` é o nome da loja no Bling e começa pela plataforma ("Shopee ATV",
+# "TikTok Mini", "ML Injox", "Amazon KFA"). É palpite, então só vale depois que
+# o chamado, o espelho do pedido e o cadastro de contas ficaram todos calados.
+_PREFIXO_PLATAFORMA = (("shopee", "shopee"), ("tiktok", "tiktok"), ("amazon", "amazon"),
+                       ("mercado", "ml"), ("ml ", "ml"))
+
+
+def _plataforma_pelo_nome_da_conta(conta: str | None) -> str | None:
+    nome = f"{(conta or '').strip().lower()} "
+    for marca, plat in _PREFIXO_PLATAFORMA:
+        if nome.startswith(marca):
+            return plat
+    return None
 
 
 # ---------------------------------------------------------------- fluxo
@@ -491,10 +508,16 @@ async def varrer_sem_mensagem(
     o resto sai na hora seguinte. Best-effort por linha; commita no fim."""
     candidatos = await candidatos_pendentes(session, dias=dias, limite=limite)
     criadas = enviadas = 0
+    por_plataforma: dict[str, int] = {}
     for dev in candidatos:
         try:
             linha = await garantir(session, dev)
             if linha is None:
+                atual = await linha_do_pedido(session, dev)
+                chave = (
+                    f"{atual.status}:{atual.plataforma or '?'}" if atual is not None else "sem_linha"
+                )
+                por_plataforma[chave] = por_plataforma.get(chave, 0) + 1
                 continue
             criadas += 1
             r = await enviar(session, linha)
@@ -508,7 +531,12 @@ async def varrer_sem_mensagem(
             )
             continue
     await session.commit()
-    return {"candidatos": len(candidatos), "criadas": criadas, "enviadas": enviadas}
+    return {
+        "candidatos": len(candidatos),
+        "criadas": criadas,
+        "enviadas": enviadas,
+        "sem_envio": por_plataforma,
+    }
 
 
 async def processar_pendentes(session: AsyncSession) -> dict:
