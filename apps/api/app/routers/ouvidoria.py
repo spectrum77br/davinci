@@ -28,7 +28,6 @@ from sqlalchemy import func, or_, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import get_settings
 from app.db import get_session, is_unique_violation
 from app.deps.auth import require_permission
 from app.models import OuvidoriaOcorrencia, OuvidoriaRobo, OuvidoriaRodada, User
@@ -86,14 +85,10 @@ def _autor(user: User) -> str:
     return (user.name or user.email or "").strip() or "usuário"
 
 
-def _nomes_threema() -> dict[str, str]:
-    s = get_settings()
-    return {
-        d["id"]: d["nome"]
-        for d in threema.parse_recipient_directory(
-            s.threema_recipient_names, s.threema_recipients
-        )
-    }
+async def _nomes_threema(session: AsyncSession) -> dict[str, str]:
+    """ID → nome pra coluna "Avisa": o mesmo diretório do seletor (usuários
+    ativos com Threema no cadastro + apelidos legados do `.env`)."""
+    return {d["id"]: d["nome"] for d in await threema.diretorio(session)}
 
 
 def _robo_out(
@@ -159,7 +154,7 @@ async def listar_robos(
         .all()
     )
     contagens = await svc.contagens_por_robo(session, agora)
-    nomes = _nomes_threema()
+    nomes = await _nomes_threema(session)
     return [RoboOut(**_robo_out(r, contagens, agora, nomes)) for r in robos]
 
 
@@ -202,7 +197,7 @@ async def detalhe_robo(
         .all()
     )
     return RoboDetalheOut(
-        **_robo_out(robo, contagens, agora, _nomes_threema()),
+        **_robo_out(robo, contagens, agora, await _nomes_threema(session)),
         rodadas=[
             RodadaOut(
                 id=r.id,
@@ -233,6 +228,16 @@ async def detalhe_robo(
     )
 
 
+@router.get("/threema/destinatarios", response_model=list[DestinatarioOut])
+async def threema_destinatarios(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[User, Depends(require_permission("ouvidoria", "view"))],
+) -> list[DestinatarioOut]:
+    """Quem pode receber os avisos: `[{id, nome}]` pro seletor da tela
+    (usuários ativos com Threema em Admin › Usuários + apelidos do `.env`)."""
+    return [DestinatarioOut(**d) for d in await threema.diretorio(session)]
+
+
 @router.patch("/robos/{chave}", response_model=RoboOut)
 async def editar_robo(
     chave: str,
@@ -248,8 +253,11 @@ async def editar_robo(
     # lugar do número mudaria o robô calado — ver `Parametro` no serviço.
     try:
         config = svc.validar_config(chave, body.config) if body.config is not None else None
+        # A tela manda pessoas (nome ou ID); nome vira ID pelo diretório.
         destinatarios = (
-            svc.validar_destinatarios(body.threema_recipients)
+            svc.resolver_destinatarios(
+                body.threema_recipients, await threema.diretorio(session)
+            )
             if body.threema_recipients is not None
             else None
         )
@@ -272,7 +280,7 @@ async def editar_robo(
     await session.refresh(robo)
     agora = datetime.now(UTC)
     contagens = await svc.contagens_por_robo(session, agora)
-    return RoboOut(**_robo_out(robo, contagens, agora, _nomes_threema()))
+    return RoboOut(**_robo_out(robo, contagens, agora, await _nomes_threema(session)))
 
 
 async def _rodada_em_andamento(session: AsyncSession, chave: str) -> bool:

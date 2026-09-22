@@ -37,6 +37,7 @@ rollback do `session_scope`.
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections import Counter
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -126,12 +127,12 @@ ROBOS: dict[str, RoboDef] = {
             "ocorrência."
         ),
         area="pedidos",
-        cadencia_texto="a cada 30 min (:09 e :39)",
+        cadencia_texto="a cada 1 h (:09)",
         plataformas=("ml", "shopee", "tiktok", "amazon"),
         config_padrao={
             "tolerancia_min": 90,
             "janela_horas": 72,
-            "cadencia_min": 30,
+            "cadencia_min": 60,
             "amazon_a_cada_rodadas": 3,
         },
         env_threema_recipients="vigia_importacao_threema_recipients",
@@ -176,6 +177,52 @@ def validar_config(chave: str, config: dict) -> dict:
             )
         out[k] = v
     return out
+
+
+def resolver_destinatarios(
+    raw: str | None, diretorio: list[dict[str, str]]
+) -> str | None:
+    """Campo Threema da tela → texto limpo de IDs, aceitando NOME ou ID.
+
+    A tela mostra pessoas pelo nome (Admin › Usuários / `.env`), então quem
+    digita "cairo sa" está apontando pra uma pessoa, não pra um código —
+    casamos pelo nome (sem acento/maiúsculas, espaços colapsados) contra o
+    diretório de `threema.diretorio`. O que não é ID nem nome conhecido vira
+    erro com a frase que explica onde cadastrar. Depois passa pela validação
+    de formato/teto de `validar_destinatarios`."""
+    if raw is None:
+        return None
+    por_nome = {_chave_nome(d["nome"]): d["id"] for d in diretorio if d.get("nome")}
+    ids: list[str] = []
+    for parte in raw.replace(";", ",").split(","):
+        parte = parte.strip()
+        if not parte:
+            continue
+        if _THREEMA_ID.match(parte.upper()):
+            ids.append(parte.upper())
+            continue
+        rid = por_nome.get(_chave_nome(parte))
+        if rid is None:
+            # "ABCDEFGH IJKLMNOP" (IDs separados por espaço, formato antigo do
+            # campo) — só quando TODOS os pedaços são IDs; senão é nome.
+            pedacos = [t.upper() for t in parte.split()]
+            if len(pedacos) > 1 and all(_THREEMA_ID.match(t) for t in pedacos):
+                ids.extend(pedacos)
+                continue
+            raise OuvidoriaError(
+                "destinatarios_invalidos",
+                f"Não conheço \"{parte}\" — cadastre o Threema dessa pessoa em "
+                "Admin › Usuários (ou informe o ID de 8 letras/números)",
+            )
+        ids.append(rid)
+    return validar_destinatarios(", ".join(ids))
+
+
+def _chave_nome(nome: str) -> str:
+    """Nome normalizado pra casar o que a pessoa digitou com o cadastro."""
+    base = unicodedata.normalize("NFKD", nome or "")
+    sem_acento = "".join(ch for ch in base if not unicodedata.combining(ch))
+    return " ".join(sem_acento.lower().split())
 
 
 def validar_destinatarios(raw: str | None) -> str | None:

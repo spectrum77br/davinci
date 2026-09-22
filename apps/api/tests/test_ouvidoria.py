@@ -296,9 +296,11 @@ async def test_saude():
     assert svc.saude(robo) == "ok"
     robo.ultima_rodada_ok = False
     assert svc.saude(robo) == "falhando"
-    # cadencia_min = 30 no catálogo → parado depois de 90 min sem rodar.
+    # cadencia_min = 60 no catálogo → parado depois de 180 min sem rodar.
     robo.ultima_rodada_ok = True
     robo.ultima_rodada_em = _t(minutes=100)
+    assert svc.saude(robo) == "ok"
+    robo.ultima_rodada_em = _t(minutes=190)
     assert svc.saude(robo) == "parado"
     robo.modo = "desligado"
     assert svc.saude(robo) == "desligado"
@@ -490,7 +492,7 @@ async def test_config_do_robo_le_tolerante_e_a_saude_nao_cai():
         ultima_rodada_em=_t(minutes=5), ultima_rodada_ok=True,
     )
     cfg = svc.config_do_robo(robo, ROBO)
-    assert cfg["cadencia_min"] == 30  # não converteu → padrão do catálogo
+    assert cfg["cadencia_min"] == 60  # não converteu → padrão do catálogo
     assert cfg["tolerancia_min"] == 1440 and cfg["janela_horas"] == 1  # apertados
     assert cfg["amazon_a_cada_rodadas"] == 3
     assert svc.saude(robo) == "ok"
@@ -706,7 +708,7 @@ async def test_router_robos_lista_e_patch(client, make_user, auth_as, db):
     assert robo["ultima_rodada_resumo"].startswith("10 pedidos")
     assert robo["threema_destinatarios"] == [{"id": "ABCDEFGH", "nome": "ABCDEFGH"}]
     assert robo["threema_origem"] == "robo"
-    assert robo["config"]["cadencia_min"] == 30
+    assert robo["config"]["cadencia_min"] == 60
 
     r = await client.patch(
         f"/api/ouvidoria/robos/{ROBO}",
@@ -740,7 +742,7 @@ async def test_router_robos_lista_e_patch(client, make_user, auth_as, db):
     )
     assert r.status_code == 200, r.text
     assert r.json()["config"] == {
-        "tolerancia_min": 120, "janela_horas": 72, "cadencia_min": 30, "amazon_a_cada_rodadas": 3,
+        "tolerancia_min": 120, "janela_horas": 72, "cadencia_min": 60, "amazon_a_cada_rodadas": 3,
     }
     r = await client.patch(f"/api/ouvidoria/robos/{ROBO}", json={"threema_recipients": "ABC"})
     assert r.status_code == 422 and r.json()["detail"]["code"] == "destinatarios_invalidos"

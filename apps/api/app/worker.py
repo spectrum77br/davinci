@@ -3330,9 +3330,10 @@ class WorkerSettings:
         # aviso): 2×/hora em :16/:46, minutos livres. Sem pendência = SELECTs.
         cron(prioridade_estoque_estorno_tick, minute={16, 46}, run_at_startup=False),
         # Vigia de importação (robô da Ouvidoria: pedido pago no ML/Shopee/
-        # TikTok/Amazon que não caiu no Bling → ocorrência + Threema). 2×/hora
-        # em :9/:39 (minutos livres); `cadencia_texto` do robô descreve isto.
-        cron(vigia_importacao_tick, minute={9, 39}, run_at_startup=False),
+        # TikTok/Amazon que não caiu no Bling → ocorrência + Threema). 1×/hora
+        # em :09 (minuto livre) — Vinicius, 22/09: de 30 em 30 min era mais
+        # do que a operação precisa; `cadencia_texto` do robô descreve isto.
+        cron(vigia_importacao_tick, minute=9, run_at_startup=False),
         # Espelho das NF-e das contas de emissão (página Pós Vendas). As
         # contas bling_notas são apps OAuth próprios — rate independente do
         # app principal; o custo por rodada é 1-2 páginas de lista por conta

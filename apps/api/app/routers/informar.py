@@ -56,7 +56,6 @@ from app.models import (
     ThreemaInformarConfig,
     User,
     UserRole,
-    UserStatus,
 )
 from app.routers.nf import _SITUACAO_AGUARDANDO_CANCELAMENTO
 from app.schemas.informar import InformarConfigIn, InformarConfigOut, InformarEnviarOut
@@ -132,42 +131,10 @@ def _exige_acesso(user: User, contexto: str) -> None:
 
 
 async def _diretorio(session: AsyncSession) -> list[dict[str, str]]:
-    """Opções de destinatário `[{id, nome}]` pro seletor do modal.
-
-    Fonte principal: usuários ATIVOS com o campo Threema preenchido na tela
-    Usuários (sem desativados nem usuários-sistema). Completa com as entradas
-    legadas do `.env` cujo ID ninguém tem no cadastro — assim nada some
-    enquanto o Eduardo alimenta os códigos; quando o dono do código ganhar
-    cadastro, a entrada do `.env` dá lugar ao nome real. Ordem alfabética."""
-    rows = (
-        (
-            await session.execute(
-                select(User).where(
-                    User.threema.is_not(None),
-                    func.trim(User.threema) != "",
-                    User.status == UserStatus.ACTIVE,
-                    User.disabled_at.is_(None),
-                    User.open_id.notlike("system:%"),
-                )
-            )
-        )
-        .scalars()
-        .all()
-    )
-    por_id: dict[str, str] = {}
-    for u in rows:
-        # parse_recipients normaliza (maiúsculas, separadores) — aceita o
-        # campo como for digitado.
-        for rid in threema.parse_recipients(u.threema):
-            por_id.setdefault(rid, u.name or u.email)
-    s = get_settings()
-    env = threema.parse_recipient_directory(
-        s.threema_recipient_names, s.threema_recipients
-    )
-    out = [{"id": rid, "nome": nome} for rid, nome in por_id.items()]
-    out += [d for d in env if d["id"] not in por_id]
-    out.sort(key=lambda d: (d["nome"] or "").lower())
-    return out
+    """Opções de destinatário `[{id, nome}]` pro seletor do modal — a lista
+    mora em `threema.diretorio` (usuários ativos com Threema + `.env`), a
+    mesma que a Ouvidoria › Robôs usa."""
+    return await threema.diretorio(session)
 
 
 async def _config_row(

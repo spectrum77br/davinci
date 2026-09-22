@@ -78,6 +78,51 @@ def parse_recipient_directory(
     return [{"id": rid, "nome": names[rid]} for rid in order]
 
 
+async def diretorio(session) -> list[dict[str, str]]:
+    """Quem pode receber aviso: `[{id, nome}]` pro seletor das telas
+    (Informar, Ouvidoria › Robôs).
+
+    Fonte principal: usuários ATIVOS com o campo Threema preenchido em
+    Admin › Usuários (sem desativados nem usuários-sistema) — o nome que
+    aparece é o do cadastro. Completa com as entradas legadas do `.env`
+    (THREEMA_RECIPIENT_NAMES/THREEMA_RECIPIENTS) cujo ID ninguém tem no
+    cadastro; quando o dono do código ganhar cadastro, o apelido do `.env`
+    dá lugar ao nome real. Ordem alfabética. Import tardio dos modelos: este
+    módulo é importado pelo worker antes do registry do SQLAlchemy fechar.
+    """
+    from sqlalchemy import func, select
+
+    from app.models import User, UserStatus
+
+    rows = (
+        (
+            await session.execute(
+                select(User).where(
+                    User.threema.is_not(None),
+                    func.trim(User.threema) != "",
+                    User.status == UserStatus.ACTIVE,
+                    User.disabled_at.is_(None),
+                    User.open_id.notlike("system:%"),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    por_id: dict[str, str] = {}
+    for u in rows:
+        # parse_recipients normaliza (maiúsculas, separadores) — aceita o
+        # campo como for digitado.
+        for rid in parse_recipients(u.threema):
+            por_id.setdefault(rid, u.name or u.email)
+    s = get_settings()
+    env = parse_recipient_directory(s.threema_recipient_names, s.threema_recipients)
+    out = [{"id": rid, "nome": nome} for rid, nome in por_id.items()]
+    out += [d for d in env if d["id"] not in por_id]
+    out.sort(key=lambda d: (d["nome"] or "").lower())
+    return out
+
+
 def compose_texto(texto: str, *, pedido: str | None = None, loja: str | None = None) -> str:
     """Prefixa `Pedido X | Loja Y` no topo da mensagem quando houver (pra o
     destinatário saber a qual pedido/loja o aviso se refere)."""

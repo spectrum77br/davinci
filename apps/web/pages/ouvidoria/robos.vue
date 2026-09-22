@@ -586,20 +586,66 @@ function configLinhas(r: Robo): { chave: string; label: string; valor: string }[
 // dentro do config ficam como estão (mandados de volta sem mexer).
 type EditForm = {
   reaviso_horas: number
-  threema_recipients: string
+  // IDs marcados no seletor de pessoas (a tela mostra o nome; o ID vai por baixo).
+  threema_ids: string[]
   config: Record<string, string | number | boolean>
 }
 const editando = ref<string | null>(null)
-const editForm = ref<EditForm>({ reaviso_horas: 24, threema_recipients: '', config: {} })
+const editForm = ref<EditForm>({ reaviso_horas: 24, threema_ids: [], config: {} })
 const salvandoEdicao = ref(false)
+
+// Quem pode receber aviso (usuários ativos com Threema em Admin › Usuários +
+// apelidos do .env). Carregado ao abrir a edição — é o mesmo seletor do
+// botão Informar: caixinha por pessoa, nunca ID digitado à mão (21/09:
+// Vinicius digitou "cairo sa" no campo de texto e a API recusou).
+type Destinatario = { id: string; nome: string }
+const diretorio = ref<Destinatario[]>([])
+const diretorioCarregado = ref(false)
+const seletorAberto = ref(false)
+async function loadDiretorio() {
+  try {
+    diretorio.value = await api<Destinatario[]>('/api/ouvidoria/threema/destinatarios')
+    diretorioCarregado.value = true
+  } catch (e: any) {
+    toasts.error('Não deu pra carregar as pessoas do Threema', apiError(e))
+  }
+}
+function nomeDe(id: string): string {
+  return diretorio.value.find((d) => d.id === id)?.nome || id
+}
+function pessoaMarcada(id: string): boolean {
+  return editForm.value.threema_ids.includes(id)
+}
+function alternarPessoa(id: string) {
+  const ids = editForm.value.threema_ids
+  editForm.value = {
+    ...editForm.value,
+    threema_ids: ids.includes(id) ? ids.filter((x) => x !== id) : [...ids, id],
+  }
+}
+// Quem o robô avisa HOJE sem override (variável do robô / padrão geral):
+// pré-marcados ao abrir, pra "adicionar o cairo" ser marcar uma caixinha, não
+// remontar a lista. Salvar sem mudar nada mantém o fallback (manda "").
+function idsPadrao(r: Robo): string[] {
+  return r.threema_origem === 'robo' ? [] : (r.threema_destinatarios || []).map((d) => d.id)
+}
+function mesmaLista(a: string[], b: string[]): boolean {
+  return a.length === b.length && [...a].sort().every((v, i) => v === [...b].sort()[i])
+}
 
 function abrirEdicao(r: Robo) {
   const config: EditForm['config'] = {}
   for (const [k, v] of Object.entries(r.config || {})) {
     if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') config[k] = v
   }
-  editForm.value = { reaviso_horas: r.reaviso_horas, threema_recipients: r.threema_recipients || '', config }
+  editForm.value = {
+    reaviso_horas: r.reaviso_horas,
+    threema_ids: (r.threema_destinatarios || []).map((d) => d.id),
+    config,
+  }
+  seletorAberto.value = false
   editando.value = r.chave
+  if (!diretorioCarregado.value) void loadDiretorio()
 }
 function tipoCampo(v: string | number | boolean): 'number' | 'checkbox' | 'text' {
   if (typeof v === 'number') return 'number'
@@ -621,8 +667,11 @@ async function salvarEdicao(r: Robo) {
       method: 'PATCH',
       body: {
         reaviso_horas: reaviso,
-        // "" limpa o override (volta pro .env); null seria "não mexe".
-        threema_recipients: editForm.value.threema_recipients.trim(),
+        // Lista igual ao fallback (.env) → manda "" e o robô continua seguindo
+        // o padrão do sistema; diferente → vira override deste robô.
+        threema_recipients: mesmaLista(editForm.value.threema_ids, idsPadrao(r))
+          ? ''
+          : editForm.value.threema_ids.join(', '),
         // A API substitui a config inteira — manda a efetiva com as
         // alterações por cima (objetos/listas seguem intactos).
         config: { ...(r.config || {}), ...editForm.value.config },
@@ -1095,14 +1144,52 @@ const carregandoAba = computed(() => (tab.value === 'robos' ? robosLoading.value
                             min="1"
                             class="h-7 w-24 rounded border bg-background px-2 text-xs"
                           />
-                          <label class="text-muted-foreground" :for="`threema-${r.chave}`">Threema</label>
-                          <input
-                            :id="`threema-${r.chave}`"
-                            v-model="editForm.threema_recipients"
-                            type="text"
-                            class="h-7 w-full max-w-[320px] rounded border bg-background px-2 text-xs"
-                            placeholder="IDs separados por vírgula — vazio = padrão do sistema"
-                          />
+                          <label class="text-muted-foreground">Threema</label>
+                          <div class="relative w-full max-w-[420px]">
+                            <button
+                              type="button"
+                              class="flex min-h-7 w-full flex-wrap items-center gap-1 rounded border bg-background px-2 py-1 text-left text-xs hover:bg-muted/50"
+                              :title="seletorAberto ? 'Fechar' : 'Escolher quem recebe os avisos'"
+                              @click="seletorAberto = !seletorAberto"
+                            >
+                              <template v-if="editForm.threema_ids.length">
+                                <span
+                                  v-for="id in editForm.threema_ids"
+                                  :key="id"
+                                  class="inline-flex items-center rounded-full border bg-card px-2 py-0.5 text-[11px]"
+                                  :title="id"
+                                >{{ nomeDe(id) }}</span>
+                              </template>
+                              <span v-else class="text-muted-foreground">ninguém — clique pra escolher</span>
+                              <ChevronDown class="ml-auto size-3.5 shrink-0 text-muted-foreground" :class="seletorAberto ? 'rotate-180' : ''" />
+                            </button>
+                            <div
+                              v-if="seletorAberto"
+                              class="absolute left-0 top-full z-30 mt-1 w-full rounded-md border bg-card p-1 shadow-lg"
+                            >
+                              <div v-if="!diretorioCarregado" class="px-2 py-1.5 text-xs text-muted-foreground">carregando…</div>
+                              <div v-else-if="!diretorio.length" class="px-2 py-1.5 text-xs text-muted-foreground">
+                                Ninguém com Threema cadastrado — preencha o campo Threema em Admin › Usuários.
+                              </div>
+                              <template v-else>
+                                <label
+                                  v-for="d in diretorio"
+                                  :key="d.id"
+                                  class="flex cursor-pointer items-center gap-2 rounded px-2 py-1 text-xs hover:bg-muted"
+                                >
+                                  <input type="checkbox" class="size-3.5" :checked="pessoaMarcada(d.id)" @change="alternarPessoa(d.id)" />
+                                  <span>{{ d.nome }}</span>
+                                  <span class="ml-auto font-mono text-[10px] text-muted-foreground">{{ d.id }}</span>
+                                </label>
+                                <div class="mt-1 flex items-center justify-between border-t px-2 pt-1.5 text-[11px] text-muted-foreground">
+                                  <span>{{ editForm.threema_ids.length }} {{ editForm.threema_ids.length === 1 ? 'pessoa' : 'pessoas' }}</span>
+                                  <button type="button" class="hover:text-foreground" @click="editForm = { ...editForm, threema_ids: idsPadrao(r) }; seletorAberto = false">
+                                    voltar ao padrão do sistema
+                                  </button>
+                                </div>
+                              </template>
+                            </div>
+                          </div>
                         </div>
                         <div class="flex items-center gap-1.5">
                           <button
