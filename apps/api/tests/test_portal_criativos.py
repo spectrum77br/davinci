@@ -852,6 +852,12 @@ async def test_video_autoral_cai_na_revisao_com_o_conceito_junto(
     briefing = await db.get(MarketingRoteiro, linha.roteiro_id)
     assert briefing.texto == "0-3s: a mala abre."
     assert briefing.equipe_destino == "alpha", "a ideia é dela, não das duas"
+    # O vídeo ainda não foi revisado: o conceito não pode valer como briefing.
+    assert briefing.ativo is False
+
+    # E, desligado, ele NÃO aparece na aba Ideias da agência.
+    lista = await client.get("/api/portal/roteiros", headers={"X-Portal-Token": TOK_A})
+    assert "Mala no aeroporto" not in [x["titulo"] for x in lista.json()["roteiros"]]
     # A coluna deprecada continua fora do caminho.
     assert linha.roteiro is None
 

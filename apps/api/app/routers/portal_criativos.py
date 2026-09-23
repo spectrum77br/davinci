@@ -1062,8 +1062,16 @@ async def propor_video(
 
     briefing = None
     if conceito:
-        # `ativo=True` e endereçado a quem escreveu: a ideia é dela, e ela
-        # precisa conseguir reler o próprio conceito na aba Ideias.
+        # `ativo=False`, e este é o ponto: o vídeo ainda não foi revisado, então
+        # o conceito dele não pode entrar na lista como briefing valendo. Nascia
+        # ligado e aparecia na aba Ideias da própria agência no mesmo instante,
+        # ao lado do que a casa escreveu — como se já tivesse sido aceito.
+        #
+        # Desligado, ele existe para quem revisa (a linha do criativo aponta
+        # para cá e a tela mostra o texto ao lado do vídeo) e para o registro.
+        # Se a casa quiser adotar o conceito como briefing de verdade, liga o
+        # olho — um clique, deliberado. Aprovar um VÍDEO não é a mesma decisão
+        # que adotar a IDEIA dele para os próximos.
         briefing = MarketingRoteiro(
             id=uuid4(),
             titulo=titulo[:160],
@@ -1071,7 +1079,7 @@ async def propor_video(
             marca=marca_txt,
             sku=sku_txt,
             equipe_destino=equipe,
-            ativo=True,
+            ativo=False,
         )
         session.add(briefing)
         await session.flush()
