@@ -254,36 +254,32 @@ def _agencias_do_portal() -> list[str]:
 
 
 async def _sincronizar_entregas(session: AsyncSession, row: MarketingRoteiro) -> None:
-    """Abre (e fecha) a linha de entrega das agências endereçadas pelo roteiro.
+    """Fecha a linha de entrega vazia quando o roteiro deixa de valer pra agência.
 
-    Era o elo que faltava. O roteiro nascia sem par: a agência lia o briefing
-    na aba Roteiros do portal e não tinha ONDE subir o vídeo, porque a aba
-    Entregas lista `marketing_creatives` filtrado por equipe e nada criava
-    essa linha. Em produção (22/09/2026) dava pra ver: o roteiro 39ff92b2
-    estava no ar pras duas agências e `GET /api/portal/criativos` da Mindset
-    respondia `"criativos":[]`.
+    ## O que ela NÃO faz mais
 
-    Três regras, nesta ordem:
+    Abrir a linha. Ela nasceu em 22/09/2026 abrindo uma entrega vazia por
+    agência endereçada, porque o roteiro ficava sem par: a agência lia o
+    briefing e não tinha ONDE subir o vídeo.
 
-    1. **Só sincroniza o que o portal MOSTRA.** O alvo é vazio enquanto o
-       roteiro estiver desligado ou sem texto — as mesmas condições de
-       `portal_criativos._visivel_pra_fora`. Sem isso o "Novo roteiro" (que
-       nasce "Roteiro sem título", sem texto) abriria uma entrega em branco na
-       tela da agência antes de alguém escrever o briefing.
-    2. **`equipe_destino` NULL = as DUAS.** É a regra invertida do módulo, e
-       aqui ela vira DUAS entregas, uma por agência: `marketing_creatives.equipe`
-       não comporta "ambas" — lá NULL significa o oposto, ninguém de fora vê.
-    3. **Abre sem duplicar, fecha sem destruir.** Criar casa por
-       `roteiro_id` + `equipe`, então rodar de novo não gera linha repetida.
-       Apagar alcança SÓ a linha que este helper poderia ter aberto: com
-       equipe, sem arquivo, sem aprovação, sem envio pro MEGA e sem legenda
-       nem feedback escritos à mão. Reendereçar um roteiro (ou desligá-lo)
-       nunca pode evaporar o vídeo que a agência mandou — nem a linha interna
-       que alguém montou na mão e ligou neste briefing.
+    Isso deixou de ser verdade no mesmo dia, quando a tela da ideia ganhou
+    "Entregar para este roteiro" — a linha passa a nascer no ato do envio, já
+    ligada ao briefing. E o preço de continuar abrindo antes era visível dos
+    dois lados: ideia endereçada às DUAS agências abria DUAS linhas vazias no
+    instante em que era ligada. Ligar 10 ideias em 23/09 encheu a aba Criativos
+    com 20 pendentes que ninguém enviou, e a aba Entregas do portal listava as
+    ideias do dia como entrega "em análise", com "nada enviado" ao lado.
 
-    NÃO faz backfill: quem sincroniza é o POST e o PATCH. Roteiro que já
-    estava no banco antes deste deploy só ganha entrega quando for salvo de
-    novo.
+    A separação que vale: IDEIAS é o que produzir, ENTREGAS é o que chegou.
+
+    ## O que ela ainda faz
+
+    Tira da frente a linha vazia que a versão anterior criou, quando o roteiro
+    é desligado, fica sem texto ou muda de destinatário. Só apaga o que aquela
+    versão poderia ter criado — com equipe, sem arquivo, sem veredito, sem
+    envio ao MEGA e sem legenda ou feedback escritos à mão. Reendereçar um
+    roteiro nunca pode evaporar o vídeo que a agência mandou, nem a linha que
+    alguém montou na mão.
     """
     destino = (row.equipe_destino or "").strip()
     visivel = row.ativo and bool((row.texto or "").strip())
@@ -326,23 +322,18 @@ async def _sincronizar_entregas(session: AsyncSession, row: MarketingRoteiro) ->
         await session.delete(linha)
         mudou = True
 
-    for chave, equipe in por_equipe.items():
-        if chave in vistas:
-            continue
-        session.add(
-            MarketingCreative(
-                id=uuid4(),
-                modelo=row.titulo,
-                marca=row.marca,
-                marca_id=row.marca_id,
-                sku=row.sku,
-                product_id=row.product_id,
-                equipe=equipe,
-                roteiro_id=row.id,
-                created_by=row.created_by,
-            )
-        )
-        mudou = True
+    # NÃO abre mais linha vazia. Ela existia porque a agência não tinha ONDE
+    # subir o vídeo — mas isso deixou de ser verdade em 22/09, quando a tela da
+    # ideia ganhou "Entregar para este roteiro" (POST /roteiros/{id}/entrega),
+    # que cria a linha no ato do envio.
+    #
+    # O preço de manter era alto e visível: ideia endereçada às DUAS agências
+    # abria DUAS linhas vazias no instante em que era ligada. Eduardo ligou 10
+    # ideias em 23/09 e a aba Criativos ganhou 20 pendentes que ninguém enviou
+    # — "fiz 1 envio de 1 conta só e preencheu várias automaticamente".
+    #
+    # A limpeza acima FICA: desligar ou reendereçar um roteiro continua tirando
+    # da frente a linha vazia que esta função criou antes desta mudança.
 
     if not mudou:
         return

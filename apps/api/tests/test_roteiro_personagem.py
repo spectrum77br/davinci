@@ -786,3 +786,25 @@ async def test_fila_de_conceitos_respeita_a_equipe(
     for acao in ("aprovar", "recusar"):
         d = await client.post(f"{R}/requisicoes/{alheia.id}/{acao}", json={})
         assert d.status_code == 404, f"{acao} da outra equipe passou"
+
+
+async def test_ligar_roteiro_nao_abre_entrega_vazia(client: AsyncClient, db: AsyncSession, admin):
+    """Ideia ligada NÃO vira entrega. Era isso que enchia a aba Criativos de
+    pendentes que ninguém enviou — duas por ideia, porque vão pras duas."""
+    from sqlalchemy import select
+
+    from app.models import MarketingCreative
+
+    novo = (await client.post(R, json={"titulo": "Ideia pras duas"})).json()
+    r = await client.patch(
+        f"{R}/{novo['id']}", json={"texto": "briefing completo", "ativo": True}
+    )
+    assert r.status_code == 200
+    assert r.json()["ativo"] is True
+
+    linhas = (
+        await db.execute(
+            select(MarketingCreative).where(MarketingCreative.roteiro_id == UUID(novo["id"]))
+        )
+    ).scalars().all()
+    assert linhas == [], f"abriu {len(linhas)} entrega(s) sem ninguém enviar nada"
