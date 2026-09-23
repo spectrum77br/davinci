@@ -385,17 +385,58 @@ async def test_token_revogado_barra_mas_expirado_passa(db):
     assert svc.pode_publicar_local(c, f, expirada, await _token(db, expirada)) is None
 
 
-async def test_plataforma_nao_suportada_tiktok(client, db, make_user, auth_as):
-    """TikTok está fora de escopo (as Content Sharing Guidelines exigem
-    consentimento humano por upload): a conta aparece, mas com o motivo."""
+async def test_tiktok_sem_perfil_adspower_e_recusado(client, db, make_user, auth_as):
+    """TikTok publica pelo NAVEGADOR (o app foi recusado nas duas auditorias),
+    e sem o perfil do AdsPower o executor não sabe qual janela abrir — abrir a
+    errada publica na conta de outra marca."""
     await _user_edit(make_user, auth_as, role=UserRole.ADMIN)
     marca = await _marca(db)
     c, f = await _criativo(db, marca=marca)
-    rede = await _conta(db, marca, plataforma="tiktok", conta="poofy.tk")
+    rede = await _conta(db, marca, plataforma="tiktok", conta="poofy_brasil")
 
     r = await client.post(API, json=_body(c, f, [rede]))
     assert r.status_code == 422
-    assert _code(r) == "plataforma_nao_suportada"
+    assert _code(r) == "conta_sem_perfil_adspower"
+
+
+async def test_tiktok_com_perfil_agenda_sem_exigir_token(
+    client, db, make_user, auth_as
+):
+    """Com o perfil preenchido a postagem ENTRA na fila, e sem token nenhum:
+    no TikTok quem autentica é a sessão do navegador, não uma chave."""
+    await _user_edit(make_user, auth_as, role=UserRole.ADMIN)
+    marca = await _marca(db)
+    c, f = await _criativo(db, marca=marca)
+    rede = await _conta(db, marca, plataforma="tiktok", conta="poofy_brasil")
+    rede.adspower_user_id = "k1dohvrh"
+    await db.commit()
+
+    r = await client.post(API, json=_body(c, f, [rede]))
+    assert r.status_code == 201, r.text
+    assert r.json()[0]["plataforma"] == "tiktok"
+
+
+async def test_worker_nao_leva_postagem_de_tiktok(client, db, make_user, auth_as):
+    """A trava que protege o que já funciona: o servidor NUNCA pode levar uma
+    postagem de TikTok — ela iria pro branch da Meta e quebraria, depois de já
+    ter sido marcada como `publicando`."""
+    from app.services.marketing.postagens import proximas_para_publicar
+
+    await _user_edit(make_user, auth_as, role=UserRole.ADMIN)
+    marca = await _marca(db)
+    c, f = await _criativo(db, marca=marca)
+    tk = await _conta(db, marca, plataforma="tiktok", conta="poofy_brasil")
+    tk.adspower_user_id = "k1dohvrh"
+    ig = await _conta(db, marca)
+    await db.commit()
+
+    await _postagem(db, c, f, tk, status="pendente", agendado_para=None)
+    await _postagem(db, c, f, ig, status="pendente", agendado_para=None)
+
+    levadas = await proximas_para_publicar(db, limit=10)
+    plataformas = {p.plataforma for p in levadas}
+    assert "tiktok" not in plataformas, "o worker do servidor pegou uma de TikTok"
+    assert "instagram" in plataformas, "e continua levando as que ele sabe publicar"
 
 
 async def test_postagem_em_voo_devolve_409(client, db, make_user, auth_as):
@@ -845,7 +886,8 @@ async def test_get_contas_traz_pode_postar_e_motivo(client, db, make_user, auth_
         "has_token": False,
     }
     assert por_id[str(inativa.id)]["motivo"] == "conta_inativa"
-    assert por_id[str(tiktok.id)]["motivo"] == "plataforma_nao_suportada"
+    # TikTok agora é suportado, mas exige o perfil do AdsPower preenchido.
+    assert por_id[str(tiktok.id)]["motivo"] == "conta_sem_perfil_adspower"
 
 
 async def test_post_cria_uma_linha_por_conta(client, db, make_user, auth_as):

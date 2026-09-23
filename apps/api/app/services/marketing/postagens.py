@@ -70,7 +70,17 @@ BRT = ZoneInfo("America/Sao_Paulo")
 # documentadas como fora de escopo e a conta aparece na tela com o motivo.
 # `youtube` entrou em 18/09/2026: o upload é resumável e sai PÚBLICO mesmo
 # com projeto não auditado — provado por teste, contra o que a doc diz.
-PLATAFORMAS_SUPORTADAS = ("instagram", "facebook", "youtube")
+# Plataformas publicadas pelo EXECUTOR LOCAL (o Mac com AdsPower), e nao pelo
+# servidor. O TikTok recusou a auditoria DUAS vezes (Content Posting API e
+# Business API) e a rota de rascunho exige o mesmo formulario — conferido no
+# portal em 23/09/2026. Sem API, a publicacao passa pelo navegador logado, que
+# so existe na maquina do Eduardo. Duas consequencias carregadas daqui:
+#   1. NAO exigem token: a credencial e a sessao do navegador;
+#   2. NAO entram na fila do worker — se entrassem, o servidor tentaria
+#      publicar pela Graph API da Meta e quebraria o que hoje funciona.
+PLATAFORMAS_EXECUTOR_LOCAL = ("tiktok",)
+
+PLATAFORMAS_SUPORTADAS = ("instagram", "facebook", "youtube", *PLATAFORMAS_EXECUTOR_LOCAL)
 
 # Limite da legenda na Meta (mesmo número no schema, que barra antes de
 # chegar aqui — a constante fica nos dois lados por clareza).
@@ -173,13 +183,47 @@ def pode_publicar_local(
         return "arquivo_sumiu"
     if rede is None or not rede.ativo:
         return "conta_inativa"
+    return motivo_da_conta(rede, token, automatico=automatico)
+
+
+def motivo_da_conta(
+    rede: RedeSocial, token: RedeSocialToken | None, *, automatico: bool = False
+) -> str | None:
+    """A cauda da regra: o que impede ESTA CONTA de publicar, sem olhar vídeo.
+
+    Vive aqui, e não no router, porque o modal e o publicador precisam dizer a
+    MESMA coisa. Quando eram duas cópias, acrescentar o TikTok consertou o
+    publicador e deixou o modal mostrando "plataforma não suportada" numa conta
+    que já publica.
+
+    `automatico` só o PUBLICADOR passa: o modal não sabe se o clique vai ser
+    manual ou da agenda, e o interruptor `postagem_auto` vale só pro robô.
+
+    Autossuficiente de propósito: repete a checagem de `ativo` que o chamador
+    de cima também faz. Sem ela, quem chama só esta função (o modal) deixava
+    de ver "conta inativa".
+    """
+    if not rede.ativo:
+        return "conta_inativa"
+    plataforma = (rede.plataforma or "").strip().lower()
+    if plataforma not in PLATAFORMAS_SUPORTADAS:
+        return "plataforma_nao_suportada"
+    # A checagem de token vem DEPOIS da de plataforma, e pula as do executor
+    # local: ali nao existe token nenhum — quem autentica e o navegador ja
+    # logado no perfil do AdsPower. Exigir token aqui deixaria a conta do
+    # TikTok eternamente com "conta_sem_token" na tela, que e o que acontece
+    # hoje.
     # `revogado` é definitivo (alguém tirou o app da conta) — sem token novo
     # não há o que tentar. `expirado` NÃO entra: o cron de refresh renova
     # sozinho antes do tick.
-    if token is None or not token.token_enc or token.status == "revogado":
+    if plataforma not in PLATAFORMAS_EXECUTOR_LOCAL and (
+        token is None or not token.token_enc or token.status == "revogado"
+    ):
         return "conta_sem_token"
-    if (rede.plataforma or "") not in PLATAFORMAS_SUPORTADAS:
-        return "plataforma_nao_suportada"
+    # Sem perfil do AdsPower o executor nao sabe QUAL navegador abrir — e
+    # abrir o errado publica na conta de outra marca.
+    if plataforma in PLATAFORMAS_EXECUTOR_LOCAL and not (rede.adspower_user_id or "").strip():
+        return "conta_sem_perfil_adspower"
     # Interruptor por conta (`redes_sociais.postagem_auto`): vale pro que o
     # ROBÔ faz sozinho (agendamento). O clique manual do operador passa —
     # quem decidiu foi uma pessoa olhando o vídeo.
@@ -544,7 +588,13 @@ def _query_do_lease(limit: int):
     """
     candidatas = (
         select(MarketingPostagem.id)
-        .where(MarketingPostagem.status == STATUS_PENDENTE)
+        .where(
+            MarketingPostagem.status == STATUS_PENDENTE,
+            # O servidor NUNCA publica as do executor local. Sem esta linha o
+            # worker levaria a postagem de TikTok pro branch da Meta e
+            # quebraria — e pior, quebraria depois de marcar `publicando`.
+            MarketingPostagem.plataforma.notin_(PLATAFORMAS_EXECUTOR_LOCAL),
+        )
         .order_by(MarketingPostagem.rede_social_id, _MOMENTO.asc())
         .distinct(MarketingPostagem.rede_social_id)
     )
@@ -560,6 +610,7 @@ def _query_do_lease(limit: int):
             # repetição os dois workers levam a MESMA linha — e o Reel sai
             # duas vezes no perfil da marca.
             MarketingPostagem.status == STATUS_PENDENTE,
+            MarketingPostagem.plataforma.notin_(PLATAFORMAS_EXECUTOR_LOCAL),
         )
         .order_by(_MOMENTO.asc())
         .limit(limit)

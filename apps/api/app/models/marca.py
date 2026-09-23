@@ -183,6 +183,12 @@ class RedeSocial(Base, TimestampMixin):
     )
     postagem_max_dia: Mapped[int | None] = mapped_column(Integer, nullable=True)
     postagem_intervalo_min: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Perfil do AdsPower que o executor LOCAL abre pra publicar nesta conta
+    # (migration 0308). Só as plataformas sem API — hoje o TikTok, que recusou
+    # a auditoria duas vezes. Uma conta por perfil, SEMPRE: duas contas no
+    # mesmo navegador é exatamente o que o AdsPower existe pra evitar.
+    # NULL nas contas publicadas por API (Instagram, Facebook, YouTube).
+    adspower_user_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     # ---- resposta automática de DM (migration 0288). Mesmo interruptor por
     # conta que o `postagem_auto`, e pelo mesmo motivo: ligar uma marca de
     # cada vez é toggle de linha, não deploy. Nasce DESLIGADO — responder

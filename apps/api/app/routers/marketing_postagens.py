@@ -24,11 +24,12 @@ da senha da marca (routers/marcas.py), que é senha de gente; esta é credencial
 de máquina, publica sozinha.
 """
 
-from typing import Annotated
+from typing import Annotated, Any
 from uuid import UUID
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -44,6 +45,7 @@ from app.models import (
     User,
 )
 from app.models.marketing_postagem import STATUS_AGENDADO, STATUS_PENDENTE
+from app.routers.marketing import _require_agent_token
 from app.routers.marketing_creatives import _ensure_equipe, _user_equipes
 from app.schemas.marketing_postagens import (
     ContaParaPostarOut,
@@ -51,6 +53,7 @@ from app.schemas.marketing_postagens import (
     PostagemOut,
     PostagemPatch,
 )
+from app.services.marketing import link_criativo
 from app.services.marketing import postagens as svc
 
 logger = structlog.get_logger()
@@ -90,17 +93,12 @@ def _motivo_da_conta(rede: RedeSocial, token: RedeSocialToken | None) -> str | N
 
     É a cauda de `postagens.pode_publicar_local` — aquela começa pelo criativo
     e pelo arquivo, então sem eles devolveria "criativo_nao_aprovado" pra toda
-    conta. Os códigos são os mesmos de propósito (o front tem uma tradução só).
-    Quando a chamada traz `creative_id`+`file_id`, este atalho nem roda: vale o
-    veredito do serviço, o MESMO que o publicador aplica.
+    conta. A REGRA em si mora no serviço (`svc.motivo_da_conta`): era copiada
+    aqui, e a cópia ficou pra trás quando o TikTok entrou — o publicador
+    aceitava a conta e o modal continuava dizendo que a plataforma não era
+    suportada.
     """
-    if not rede.ativo:
-        return "conta_inativa"
-    if token is None or not token.token_enc or token.status == "revogado":
-        return "conta_sem_token"
-    if (rede.plataforma or "") not in svc.PLATAFORMAS_SUPORTADAS:
-        return "plataforma_nao_suportada"
-    return None
+    return svc.motivo_da_conta(rede, token)
 
 
 def _out(
@@ -458,3 +456,117 @@ async def retentar_postagem(
     await session.refresh(p)
     logger.info("marketing_postagem_retentada", postagem_id=str(p.id), user_id=str(user.id))
     return await _out_uma(session, p, creative)
+
+
+# ─── EXECUTOR LOCAL (TikTok via AdsPower) ──────────────────────────────
+#
+# O TikTok não tem API pra nós: o app foi recusado nas DUAS auditorias
+# (Content Posting e Business), e a rota de rascunho exige o mesmo formulário.
+# Então quem publica é o navegador logado no AdsPower, que roda no Mac do
+# Eduardo — não no servidor.
+#
+# O desenho é o mesmo do /marketing/agent/lease que já serve a Shopee: o
+# DaVinci é o plano de controle (tela, agenda, fila) e a máquina de fora faz o
+# clique. O executor PUXA (nunca recebe conexão), o que dispensa expor porta
+# no Mac e faz o servidor continuar sendo a única fonte da verdade.
+
+
+class ExecutorLeaseIn(BaseModel):
+    limit: int = Field(default=3, ge=1, le=10)
+
+
+class ExecutorResultadoIn(BaseModel):
+    status: str  # "publicado" | "falhou"
+    post_url: str | None = None
+    result: str | None = None
+
+
+@router.post("/executor/lease", dependencies=[Depends(_require_agent_token)])
+async def executor_lease(
+    body: ExecutorLeaseIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> list[dict[str, Any]]:
+    """Entrega ao executor local as postagens que SÓ ele sabe publicar.
+
+    `FOR UPDATE SKIP LOCKED` + flip pra `publicando` na mesma transação: dois
+    executores rodando (ou um rodando duas vezes) nunca levam a mesma linha —
+    é o que impede o vídeo de sair duas vezes no perfil da marca.
+
+    O link do vídeo é ASSINADO e vale 15 minutos, gerado agora e nunca
+    guardado: é a mesma porta que a Meta usa pra baixar o Reel. O executor não
+    recebe token de conta nenhum, porque não existe — quem autentica lá é a
+    sessão do navegador.
+    """
+    linhas = (
+        (
+            await session.execute(
+                select(MarketingPostagem)
+                .where(
+                    MarketingPostagem.status == svc.STATUS_PENDENTE,
+                    MarketingPostagem.plataforma.in_(svc.PLATAFORMAS_EXECUTOR_LOCAL),
+                )
+                .order_by(MarketingPostagem.created_at.asc())
+                .limit(body.limit)
+                .with_for_update(skip_locked=True)
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    saida: list[dict[str, Any]] = []
+    for p in linhas:
+        rede = await session.get(RedeSocial, p.rede_social_id) if p.rede_social_id else None
+        perfil = (rede.adspower_user_id or "").strip() if rede else ""
+        if not perfil:
+            # Cadastro incompleto: não adianta entregar — o executor não
+            # saberia qual janela abrir. Vai pra revisão com o motivo na tela.
+            p.status = svc.STATUS_REVISAR
+            p.result = (
+                "a conta não tem perfil do AdsPower preenchido em Cadastros › "
+                "Redes Sociais — sem ele o executor não sabe qual navegador abrir"
+            )
+            continue
+        p.status = svc.STATUS_PUBLICANDO
+        p.attempts = (p.attempts or 0) + 1
+        saida.append(
+            {
+                "id": str(p.id),
+                "conta": p.conta,
+                "plataforma": p.plataforma,
+                "adspower_user_id": perfil,
+                "legenda": p.legenda or "",
+                # 15 minutos, gerado agora. O executor baixa e publica.
+                "video_url": link_criativo.url_video(p.file_id) if p.file_id else None,
+            }
+        )
+    await session.commit()
+    if saida:
+        logger.info("executor_lease", quantidade=len(saida))
+    return saida
+
+
+@router.post("/executor/{postagem_id}/resultado", dependencies=[Depends(_require_agent_token)])
+async def executor_resultado(
+    postagem_id: UUID,
+    body: ExecutorResultadoIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> dict[str, str]:
+    """O executor conta o que aconteceu. Só aceita o que ele mesmo pegou."""
+    if body.status not in (svc.STATUS_PUBLICADO, svc.STATUS_FALHOU):
+        raise HTTPException(400, detail={"code": "status_invalido"})
+    linha = await session.get(MarketingPostagem, postagem_id)
+    if linha is None:
+        raise HTTPException(404, detail={"code": "postagem_nao_encontrada"})
+    if linha.status != svc.STATUS_PUBLICANDO:
+        # Alguém cancelou no meio, ou é relatório repetido. Não sobrescreve.
+        raise HTTPException(409, detail={"code": "postagem_nao_esta_publicando"})
+    await svc.registrar_resultado(
+        session,
+        linha.id,
+        status=body.status,
+        result=(body.result or "")[:2000] or None,
+        post_url=body.post_url,
+    )
+    logger.info("executor_resultado", postagem_id=str(postagem_id), status=body.status)
+    return {"status": "ok"}
