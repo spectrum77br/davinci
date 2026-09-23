@@ -691,3 +691,98 @@ async def test_apagar_ideia_com_versao_da_agencia_e_barrado(
     assert (await client.delete(f"{R}/{ideia['id']}")).status_code == 200
 
 
+
+
+async def test_conceito_so_vira_roteiro_no_sim(client: AsyncClient, db: AsyncSession, admin):
+    """A lista da casa é o que a casa escreveu. O texto da agência entra nela
+    quando alguém decide, não quando chega."""
+    from app.models import MarketingCreative, MarketingIdeiaRequisicao, MarketingRoteiro
+
+    criativo = MarketingCreative(modelo="Mala no aeroporto", equipe="alpha", files=[])
+    db.add(criativo)
+    await db.flush()
+    req = MarketingIdeiaRequisicao(
+        titulo="Mala no aeroporto",
+        descricao="0-3s: a mala abre.",
+        equipe="alpha",
+        creative_id=criativo.id,
+    )
+    db.add(req)
+    await db.commit()
+    await db.refresh(req)
+
+    # Antes da decisão, nada na lista.
+    antes = (await client.get(R)).json()
+    assert "Mala no aeroporto" not in [x["titulo"] for x in antes]
+
+    r = await client.post(f"{R}/requisicoes/{req.id}/aprovar")
+    assert r.status_code == 200
+    novo = await db.get(MarketingRoteiro, UUID(r.json()["roteiro_id"]))
+    assert novo.ativo is True
+    assert novo.equipe_destino == "alpha", "NULL mandaria a ideia de uma para as duas"
+
+    # E a entrega que trouxe o conceito passa a apontar para o briefing.
+    await db.refresh(criativo)
+    assert criativo.roteiro_id == novo.id
+
+    await db.refresh(req)
+    assert req.status == "aprovada"
+    assert (await client.post(f"{R}/requisicoes/{req.id}/aprovar")).status_code == 409
+
+
+async def test_recusar_conceito_nao_mexe_no_video(client: AsyncClient, db: AsyncSession, admin):
+    """São duas perguntas: a ideia pode ser recusada e o vídeo seguir em análise."""
+    from sqlalchemy import select
+
+    from app.models import MarketingCreative, MarketingIdeiaRequisicao, MarketingRoteiro
+
+    criativo = MarketingCreative(modelo="Não vai rolar", equipe="alpha", files=[])
+    db.add(criativo)
+    await db.flush()
+    req = MarketingIdeiaRequisicao(
+        titulo="Não vai rolar", descricao="x", equipe="alpha", creative_id=criativo.id
+    )
+    db.add(req)
+    await db.commit()
+    await db.refresh(req)
+
+    r = await client.post(
+        f"{R}/requisicoes/{req.id}/recusar", json={"motivo": "prova física gerada por IA"}
+    )
+    assert r.status_code == 200
+    await db.refresh(req)
+    assert req.status == "recusada" and req.motivo == "prova física gerada por IA"
+    assert req.roteiro_id is None
+
+    achou = (
+        await db.execute(
+            select(MarketingRoteiro).where(MarketingRoteiro.titulo == "Não vai rolar")
+        )
+    ).first()
+    assert achou is None
+
+    await db.refresh(criativo)
+    assert criativo.aprovado is None, "o vídeo segue em análise, por conta própria"
+
+
+async def test_fila_de_conceitos_respeita_a_equipe(
+    client: AsyncClient, db: AsyncSession, make_user, auth_as
+):
+    from app.models import MarketingIdeiaRequisicao
+
+    db.add(MarketingIdeiaRequisicao(titulo="Da Alpha", descricao="x", equipe="alpha"))
+    alheia = MarketingIdeiaRequisicao(titulo="Da Bravo", descricao="x", equipe="bravo")
+    db.add(alheia)
+    await db.commit()
+    await db.refresh(alheia)
+
+    u = await make_user(permissions={"marketing_criativos": {"view": True, "edit": True}})
+    u.marketing_teams = ["alpha"]
+    await db.commit()
+    auth_as(u)
+
+    nomes = [x["titulo"] for x in (await client.get(f"{R}/requisicoes")).json()["requisicoes"]]
+    assert "Da Alpha" in nomes and "Da Bravo" not in nomes
+    for acao in ("aprovar", "recusar"):
+        d = await client.post(f"{R}/requisicoes/{alheia.id}/{acao}", json={})
+        assert d.status_code == 404, f"{acao} da outra equipe passou"

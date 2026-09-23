@@ -848,23 +848,36 @@ async def test_video_autoral_cai_na_revisao_com_o_conceito_junto(
 
     linha = await db.get(MarketingCreative, UUID(saida["id"]))
     assert linha.equipe == "alpha"
-    assert linha.roteiro_id is not None, "o conceito vira o briefing que a linha cumpre"
-    briefing = await db.get(MarketingRoteiro, linha.roteiro_id)
-    assert briefing.texto == "0-3s: a mala abre."
-    assert briefing.equipe_destino == "alpha", "a ideia é dela, não das duas"
-    # O vídeo ainda não foi revisado: o conceito não pode valer como briefing.
-    assert briefing.ativo is False
+    # NENHUM roteiro nasce aqui: a lista da casa é o que a casa escreveu.
+    assert linha.roteiro_id is None
+    achou = (
+        await db.execute(
+            select(MarketingRoteiro).where(MarketingRoteiro.titulo == "Mala no aeroporto")
+        )
+    ).first()
+    assert achou is None, "o conceito não pode virar roteiro antes de alguém decidir"
 
-    # E, desligado, ele NÃO aparece na aba Ideias da agência.
-    lista = await client.get("/api/portal/roteiros", headers={"X-Portal-Token": TOK_A})
-    assert "Mala no aeroporto" not in [x["titulo"] for x in lista.json()["roteiros"]]
+    # Ele espera na fila de pedidos, com o vídeo junto.
+    from app.models import MarketingIdeiaRequisicao
+
+    req = (
+        await db.execute(
+            select(MarketingIdeiaRequisicao).where(
+                MarketingIdeiaRequisicao.titulo == "Mala no aeroporto"
+            )
+        )
+    ).scalar_one()
+    assert req.status == "pendente"
+    assert req.descricao == "0-3s: a mala abre."
+    assert req.equipe == "alpha"
+    assert req.creative_id == linha.id, "quem decide precisa poder assistir ao vídeo"
     # A coluna deprecada continua fora do caminho.
     assert linha.roteiro is None
 
 
 async def test_video_autoral_sem_conceito_ainda_entra(client: AsyncClient, db: AsyncSession):
     """Conceito é opcional: exigir texto para receber um vídeo pronto seria
-    transformar uma entrega em formulário."""
+    transformar uma entrega em formulário. Sem conceito, sem pedido."""
     r = await client.post(
         "/api/portal/criativos/proposta",
         headers={"X-Portal-Token": TOK_A},
@@ -874,6 +887,10 @@ async def test_video_autoral_sem_conceito_ainda_entra(client: AsyncClient, db: A
     assert r.status_code == 200
     linha = await db.get(MarketingCreative, UUID(r.json()["id"]))
     assert linha.roteiro_id is None
+    from app.models import MarketingIdeiaRequisicao
+
+    fila = (await db.execute(select(MarketingIdeiaRequisicao))).scalars().all()
+    assert fila == [], "sem conceito não há o que decidir"
 
 
 async def test_video_autoral_sem_titulo_e_recusado(client: AsyncClient):

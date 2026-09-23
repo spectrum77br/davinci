@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import contextlib
 import shutil
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any
 from uuid import UUID, uuid4
@@ -52,11 +53,21 @@ from app.db import get_session
 from app.deps.auth import require_permission
 from app.models import (
     MarketingCreative,
+    MarketingIdeiaRequisicao,
     MarketingPersonagem,
     MarketingRoteiro,
     MarketingRoteiroPersonagem,
     MarketingRoteiroRef,
     User,
+)
+from app.models.marketing_ideia_requisicao import (
+    STATUS_APROVADA as IDEIA_APROVADA,
+)
+from app.models.marketing_ideia_requisicao import (
+    STATUS_PENDENTE as IDEIA_PENDENTE,
+)
+from app.models.marketing_ideia_requisicao import (
+    STATUS_RECUSADA as IDEIA_RECUSADA,
 )
 from app.routers.marketing_creatives import (
     _marca_id_do_texto,
@@ -653,3 +664,138 @@ async def desligar_personagem(
     row.personagens.remove(elo)
     await session.commit()
     return _roteiro_out(row)
+
+
+# ──────────── conceitos de vídeo autoral, esperando decisão ────────────
+# A agência mandou o vídeo e escreveu o conceito. O vídeo já está na revisão de
+# Criativos; aqui decide-se a outra pergunta: essa ideia vira briefing da casa?
+
+
+def _req_ideia_out(r: MarketingIdeiaRequisicao) -> dict[str, Any]:
+    return {
+        "id": str(r.id),
+        "titulo": r.titulo,
+        "descricao": r.descricao,
+        "marca": r.marca,
+        "sku": r.sku,
+        "equipe": r.equipe,
+        "status": r.status,
+        "motivo": r.motivo,
+        # O vídeo que trouxe o conceito: é por ele que quem decide ASSISTE à
+        # peça em vez de julgar uma descrição.
+        "creative_id": str(r.creative_id) if r.creative_id else None,
+        "roteiro_id": str(r.roteiro_id) if r.roteiro_id else None,
+        "criado_em": r.created_at.isoformat() if r.created_at else None,
+        "decidido_em": r.decidido_em.isoformat() if r.decidido_em else None,
+    }
+
+
+def _ideia_fora_da_equipe(user: User, req: MarketingIdeiaRequisicao) -> bool:
+    """O mesmo recorte de Criativos, Roteiros e da fila de personagem."""
+    permitidas = _user_equipes(user)
+    if permitidas is None:
+        return False
+    return (req.equipe or "").strip().lower() not in permitidas
+
+
+@router.get("/requisicoes")
+async def listar_conceitos(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(_ver)],
+    status: str | None = None,
+) -> dict[str, Any]:
+    """A fila. Sem filtro, só as pendentes — que é o que exige ação."""
+    q = select(MarketingIdeiaRequisicao).order_by(MarketingIdeiaRequisicao.created_at.desc())
+    q = q.where(MarketingIdeiaRequisicao.status == (status or IDEIA_PENDENTE))
+    permitidas = _user_equipes(user)
+    if permitidas is not None:
+        q = q.where(func.lower(MarketingIdeiaRequisicao.equipe).in_(permitidas))
+    linhas = (await session.execute(q)).scalars().all()
+    return {"requisicoes": [_req_ideia_out(r) for r in linhas]}
+
+
+class DecisaoIdeiaIn(BaseModel):
+    motivo: str | None = None
+
+
+@router.post("/requisicoes/{requisicao_id}/aprovar")
+async def aprovar_conceito(
+    requisicao_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(_editar)],
+) -> dict[str, Any]:
+    """O sim CRIA o briefing — e é só aqui que ele entra na lista da casa.
+
+    Endereçado a quem propôs, nunca NULL: a regra invertida do módulo (vazio =
+    as duas agências) vale para o que a CASA escreve, e mandar a ideia de uma
+    para a outra entregaria o trabalho de ter pensado.
+
+    Aprovar o conceito NÃO aprova o vídeo. O `aprovado` do criativo continua
+    sendo decidido em Criativos — são duas perguntas, e podem ter respostas
+    diferentes: um vídeo fraco de uma ideia boa, ou o contrário.
+    """
+    req = await session.get(MarketingIdeiaRequisicao, requisicao_id)
+    if req is None or _ideia_fora_da_equipe(user, req):
+        raise HTTPException(404, detail={"code": "requisicao_nao_encontrada"})
+    if req.status != IDEIA_PENDENTE:
+        raise HTTPException(409, detail={"code": "ja_decidida", "status": req.status})
+
+    row = MarketingRoteiro(
+        id=uuid4(),
+        titulo=req.titulo[:160],
+        texto=req.descricao,
+        marca=req.marca,
+        marca_id=await _marca_id_do_texto(session, req.marca),
+        sku=req.sku,
+        product_id=await _product_id_do_sku(session, req.sku),
+        equipe_destino=req.equipe,
+        ativo=True,
+        created_by=user.id,
+    )
+    session.add(row)
+    await session.flush()
+
+    # A entrega que trouxe o conceito passa a apontar para o briefing: é o elo
+    # roteiro→criativo (5 de 49 em 22/09) nascendo também no caminho autoral.
+    if req.creative_id:
+        criativo = await session.get(MarketingCreative, req.creative_id)
+        if criativo is not None and criativo.roteiro_id is None:
+            criativo.roteiro_id = row.id
+    await _sincronizar_entregas(session, row)
+
+    req.status = IDEIA_APROVADA
+    req.roteiro_id = row.id
+    req.decidido_por = user.id
+    req.decidido_em = datetime.now(UTC)
+    await session.commit()
+    logger.info(
+        "conceito_aprovado",
+        requisicao_id=str(req.id),
+        roteiro_id=str(row.id),
+        equipe=req.equipe,
+        user_id=str(user.id),
+    )
+    return {"requisicao": _req_ideia_out(req), "roteiro_id": str(row.id)}
+
+
+@router.post("/requisicoes/{requisicao_id}/recusar")
+async def recusar_conceito(
+    requisicao_id: UUID,
+    payload: DecisaoIdeiaIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(_editar)],
+) -> dict[str, Any]:
+    """Recusar o conceito não recusa o vídeo — a peça segue em Criativos."""
+    req = await session.get(MarketingIdeiaRequisicao, requisicao_id)
+    if req is None or _ideia_fora_da_equipe(user, req):
+        raise HTTPException(404, detail={"code": "requisicao_nao_encontrada"})
+    if req.status != IDEIA_PENDENTE:
+        raise HTTPException(409, detail={"code": "ja_decidida", "status": req.status})
+
+    req.status = IDEIA_RECUSADA
+    req.motivo = (payload.motivo or "").strip() or None
+    req.decidido_por = user.id
+    req.decidido_em = datetime.now(UTC)
+    await session.commit()
+    logger.info("conceito_recusado", requisicao_id=str(req.id), user_id=str(user.id))
+    return _req_ideia_out(req)

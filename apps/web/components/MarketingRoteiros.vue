@@ -79,6 +79,22 @@ type Roteiro = {
 // A proposta que vem de fora. Carrega o que um personagem NÃO carrega — de
 // onde veio o rosto, de onde veio a voz, se existe cessão escrita —, que é
 // justamente o que alguém precisa ver antes de dizer sim.
+// O conceito de um vídeo autoral, esperando decisão. `creative_id` é o que
+// permite ASSISTIR à peça antes de decidir, em vez de julgar uma descrição.
+type Conceito = {
+  id: string
+  titulo: string
+  descricao: string
+  marca: string | null
+  sku: string | null
+  equipe: string
+  status: string
+  motivo: string | null
+  creative_id: string | null
+  roteiro_id: string | null
+  criado_em: string | null
+}
+
 type Requisicao = {
   id: string
   nome: string
@@ -187,7 +203,7 @@ async function carregarMarcas() {
 }
 
 onMounted(async () => {
-  await Promise.all([carregar(), carregarMarcas(), carregarPedidos()])
+  await Promise.all([carregar(), carregarMarcas(), carregarPedidos(), carregarConceitos()])
   // Vindo da aba Criativos ("escrever roteiro"): abre logo o que foi criado.
   if (props.foco) abrir(props.foco)
 })
@@ -537,6 +553,83 @@ const reqOcupada = ref<string | null>(null)
 
 const pedidosErro = ref<string | null>(null)
 
+// ---- conceitos de vídeo autoral ------------------------------------------
+const conceitos = ref<Conceito[]>([])
+const conceitosErro = ref<string | null>(null)
+const conceitoOcupado = ref<string | null>(null)
+
+function videoDoConceito(c: Conceito): string {
+  return `/api/marketing/creatives/${c.creative_id}/arquivo`
+}
+
+async function carregarConceitos() {
+  try {
+    const r = await api<{ requisicoes: Conceito[] }>('/api/marketing/roteiros/requisicoes')
+    conceitos.value = r.requisicoes
+    conceitosErro.value = null
+  } catch (e: any) {
+    conceitos.value = []
+    conceitosErro.value = errMsg(e)
+  }
+}
+
+async function aprovarConceito(c: Conceito) {
+  if (!window.confirm(
+    `Aprovar a ideia "${c.titulo}"? Ela vira briefing da ${c.equipe} e passa a valer.\n\n` +
+    'Isto NÃO aprova o vídeo — a peça continua sendo julgada em Criativos.',
+  )) return
+  conceitoOcupado.value = c.id
+  try {
+    const resp = await api<{ roteiro_id: string }>(
+      `/api/marketing/roteiros/requisicoes/${c.id}/aprovar`, { method: 'POST' },
+    )
+    conceitos.value = conceitos.value.filter((x) => x.id !== c.id)
+    toasts.success('Briefing criado', `${c.titulo} entrou na lista da ${c.equipe}.`)
+    await carregar()
+    abrir(resp.roteiro_id)
+  } catch (e: any) {
+    toasts.error('Erro ao aprovar', errMsg(e))
+  } finally {
+    conceitoOcupado.value = null
+  }
+}
+
+async function recusarConceito(c: Conceito) {
+  const motivo = window.prompt(`Recusar a ideia "${c.titulo}". Por quê? (a agência lê isto)`)
+  if (motivo === null) return
+  if (!motivo.trim()) {
+    toasts.warning('Escreva o motivo', 'A agência lê este texto — recusa sem motivo volta igual.')
+    return
+  }
+  conceitoOcupado.value = c.id
+  try {
+    await api(`/api/marketing/roteiros/requisicoes/${c.id}/recusar`, {
+      method: 'POST', body: { motivo },
+    })
+    conceitos.value = conceitos.value.filter((x) => x.id !== c.id)
+    toasts.success('Ideia recusada', 'O vídeo continua em análise em Criativos.')
+  } catch (e: any) {
+    toasts.error('Erro ao recusar', errMsg(e))
+  } finally {
+    conceitoOcupado.value = null
+  }
+}
+
+async function carregarPedidos() {
+  try {
+    const r = await api<{ requisicoes: Requisicao[] }>('/api/marketing/personagens/requisicoes')
+    requisicoes.value = r.requisicoes
+    pedidosErro.value = null
+  } catch (e: any) {
+    // A fila é um extra da tela: se falhar, roteiros e personagens continuam
+    // funcionando — por isso não é toast. Mas zerar em silêncio fazia fila
+    // quebrada e fila vazia ficarem idênticas, e a tela AFIRMAVA "nenhum
+    // pedido esperando" para uma agência que tinha pedido esperando.
+    requisicoes.value = []
+    pedidosErro.value = errMsg(e)
+  }
+}
+
 async function aprovarPedido(r: Requisicao) {
   if (!window.confirm(
     `Aprovar "${r.nome}"? O personagem é criado agora, sem foto e sem voz — ` +
@@ -614,9 +707,9 @@ async function recusarPedido(r: Requisicao) {
         >
           <Inbox class="mr-1 inline size-3.5" /> Pedidos
           <span
-            v-if="requisicoes.length"
+            v-if="requisicoes.length + conceitos.length"
             class="ml-1 rounded-full bg-primary px-1.5 py-px text-[10px] font-medium text-primary-foreground"
-          >{{ requisicoes.length }}</span>
+          >{{ requisicoes.length + conceitos.length }}</span>
         </button>
       </div>
       <Loader2 v-if="carregando || salvando" class="size-3.5 animate-spin text-muted-foreground" />
@@ -1065,10 +1158,70 @@ async function recusarPedido(r: Requisicao) {
     <!-- ══════════════ pedidos ══════════════ -->
     <!-- A agência propõe a PESSOA; não empurra o ativo. Por isso a ficha aqui é
          quase toda procedência: é o que alguém precisa ler antes do sim. -->
-    <div v-if="secao === 'pedidos'" class="space-y-2">
+    <div v-if="secao === 'pedidos'" class="space-y-4">
+      <!-- ── conceitos de vídeo autoral ── -->
+      <div class="space-y-2">
+        <h3 class="text-xs font-medium">Ideias que vieram com vídeo</h3>
+        <p class="text-[11px] text-muted-foreground">
+          A agência produziu por conta própria e mandou o conceito junto. Aqui se decide
+          se a IDEIA vira briefing nosso — o vídeo continua sendo julgado em Criativos,
+          e as duas respostas podem ser diferentes.
+        </p>
+
+        <div v-if="conceitosErro" class="rounded-lg border border-destructive/40 bg-destructive/5 p-4">
+          <p class="text-xs font-medium text-destructive">Não deu para ler a fila de ideias.</p>
+          <p class="mt-1 text-[11px] text-muted-foreground">{{ conceitosErro }}</p>
+          <button class="btn btn-xs mt-2" @click="carregarConceitos()">Tentar de novo</button>
+        </div>
+        <div v-else-if="!conceitos.length" class="rounded-lg border border-dashed p-4 text-center">
+          <p class="text-[11px] text-muted-foreground">Nenhuma ideia esperando.</p>
+        </div>
+
+        <div v-for="c in conceitos" :key="c.id" class="rounded-lg border p-3">
+          <div class="flex flex-wrap items-center gap-2">
+            <span class="text-sm font-medium">{{ c.titulo }}</span>
+            <span class="rounded bg-muted px-1.5 py-px text-[10px] text-muted-foreground">
+              {{ c.equipe }}
+            </span>
+            <span v-if="c.marca" class="text-[10px] text-muted-foreground">{{ c.marca }}</span>
+            <span v-if="c.sku" class="font-mono text-[10px] text-muted-foreground">{{ c.sku }}</span>
+            <span v-if="c.criado_em" class="text-[10px] text-muted-foreground">
+              {{ new Date(c.criado_em).toLocaleDateString('pt-BR') }}
+            </span>
+            <div v-if="canEdit" class="ml-auto flex gap-1.5">
+              <button class="btn btn-xs gap-1" :disabled="conceitoOcupado === c.id" @click="aprovarConceito(c)">
+                <Loader2 v-if="conceitoOcupado === c.id" class="size-3 animate-spin" />
+                <Check v-else class="size-3" /> Virar briefing
+              </button>
+              <button class="btn btn-xs gap-1" :disabled="conceitoOcupado === c.id" @click="recusarConceito(c)">
+                <X class="size-3" /> Recusar
+              </button>
+            </div>
+          </div>
+
+          <div class="mt-2 grid gap-3 sm:grid-cols-[160px_1fr]">
+            <!-- O vídeo ao lado do texto: decidir sobre a peça olhando só a
+                 descrição é decidir no escuro. `preload="none"` porque a fila
+                 pode ter vários e nenhum deve baixar antes do play. -->
+            <video
+              v-if="c.creative_id"
+              class="w-full rounded-md bg-black"
+              style="aspect-ratio: 9/16"
+              controls
+              playsinline
+              preload="none"
+              :src="videoDoConceito(c)"
+            />
+            <p class="max-h-56 overflow-auto whitespace-pre-wrap text-xs">{{ c.descricao }}</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── personagens propostos ── -->
+      <h3 class="border-t pt-3 text-xs font-medium">Personagens propostos</h3>
       <p class="text-[11px] text-muted-foreground">
-        Pedidos de personagem feitos pelas agências no portal. Aprovar cria o personagem
-        com nome e descrição — a imagem e o MP3 sobem aqui depois, junto com a cessão.
+        Aprovar cria o personagem com nome e descrição — a imagem e o MP3 sobem aqui depois,
+        junto com a cessão.
       </p>
 
       <div v-if="pedidosErro" class="rounded-lg border border-destructive/40 bg-destructive/5 p-4">

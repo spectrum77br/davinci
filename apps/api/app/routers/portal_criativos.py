@@ -73,6 +73,7 @@ from sqlalchemy.orm import selectinload
 from app.config import get_settings
 from app.db import get_session
 from app.models.marketing import MarketingCreative, MarketingCreativeFile
+from app.models.marketing_ideia_requisicao import MarketingIdeiaRequisicao
 from app.models.marketing_personagem import MarketingPersonagem, MarketingPersonagemArquivo
 from app.models.marketing_personagem_requisicao import (
     STATUS_PENDENTE,
@@ -1041,12 +1042,11 @@ async def propor_video(
     prontos. Inventar uma segunda fila para a mesma pergunta ("este vídeo
     presta?") seria dois lugares para alguém esquecer de olhar.
 
-    O CONCEITO vira um roteiro ligado por `roteiro_id`. É o que o modelo diz
-    que esse campo é — "o briefing que esta linha cumpre" — e resolve de uma
-    vez duas coisas: quem revisa lê a intenção ao lado do vídeo, e o elo
-    roteiro→criativo (5 de 49 em 22/09) passa a nascer preenchido também no
-    caminho autoral. `marketing_creatives.roteiro` NÃO é usada: está deprecada
-    desde a 0299 e ninguém lê dela.
+    O CONCEITO, quando vem, abre um PEDIDO — não um roteiro. São duas perguntas
+    diferentes sobre a mesma entrega: "este vídeo presta?" é o `aprovado` do
+    criativo, e "esta ideia vira briefing nosso?" é a fila de pedidos. Fazer o
+    conceito nascer roteiro punha texto de terceiro na lista do que a casa
+    escreveu, sem ninguém ter decidido nada.
     """
     titulo = (titulo or "").strip()
     if not titulo:
@@ -1060,37 +1060,12 @@ async def propor_video(
     marca_txt = (marca or "").strip() or None
     sku_txt = (sku or "").strip() or None
 
-    briefing = None
-    if conceito:
-        # `ativo=False`, e este é o ponto: o vídeo ainda não foi revisado, então
-        # o conceito dele não pode entrar na lista como briefing valendo. Nascia
-        # ligado e aparecia na aba Ideias da própria agência no mesmo instante,
-        # ao lado do que a casa escreveu — como se já tivesse sido aceito.
-        #
-        # Desligado, ele existe para quem revisa (a linha do criativo aponta
-        # para cá e a tela mostra o texto ao lado do vídeo) e para o registro.
-        # Se a casa quiser adotar o conceito como briefing de verdade, liga o
-        # olho — um clique, deliberado. Aprovar um VÍDEO não é a mesma decisão
-        # que adotar a IDEIA dele para os próximos.
-        briefing = MarketingRoteiro(
-            id=uuid4(),
-            titulo=titulo[:160],
-            texto=conceito,
-            marca=marca_txt,
-            sku=sku_txt,
-            equipe_destino=equipe,
-            ativo=False,
-        )
-        session.add(briefing)
-        await session.flush()
-
     row = MarketingCreative(
         id=uuid4(),
         modelo=titulo[:190],
         marca=marca_txt,
         sku=sku_txt,
         equipe=equipe,
-        roteiro_id=briefing.id if briefing else None,
         aprovado=None,
         files=[],
     )
@@ -1098,11 +1073,29 @@ async def propor_video(
     await session.flush()
 
     entraram = _gravar_arquivos(row, files)
+
+    # O conceito NÃO vira roteiro aqui. A lista de roteiros é o que a casa
+    # escreveu; texto que chega de fora não entra nela por chegada — nem
+    # desligado, porque desligado ele ainda aparece na lista de quem escreve.
+    # Vira pedido, e o roteiro nasce no sim.
+    if conceito:
+        session.add(
+            MarketingIdeiaRequisicao(
+                id=uuid4(),
+                titulo=titulo[:160],
+                descricao=conceito,
+                marca=marca_txt,
+                sku=sku_txt,
+                equipe=equipe,
+                creative_id=row.id,
+            )
+        )
+
     await session.commit()
     logger.info(
         "portal_video_autoral",
         creative_id=str(row.id),
-        roteiro_id=str(briefing.id) if briefing else None,
+        com_conceito=bool(conceito),
         equipe=equipe,
         arquivos=entraram,
     )
