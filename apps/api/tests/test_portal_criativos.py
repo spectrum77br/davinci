@@ -954,6 +954,12 @@ async def test_catalogo_so_traz_as_familias_do_portal(
     f117 = next(p for p in r.json()["produtos"] if p["nome"] == "uranyx F117")
     assert f117["skus"] == ["dg048", "dg049"]
 
+    # A marca sai da RAIZ da pasta: não existe coluna de marca na tabela de
+    # preços, e é por ela que a tela separa as duas linhas.
+    assert f117["marca"] == "uranyx"
+    abs18 = next(p for p in r.json()["produtos"] if p["nome"] == "ABS 18")
+    assert abs18["marca"] == "charlots-park"
+
 
 async def test_produto_de_pasta_proibida_e_404(
     client: AsyncClient, db: AsyncSession, make_user
@@ -976,10 +982,11 @@ async def test_nome_de_foto_com_barra_e_recusado(
     p = await _produto(db, dono, sku="dg048", nome="F117", pasta="/Celular/Fossibot F117")
     await db.commit()
 
-    for ruim in ("../../segredo.jpg", "sub/foto.jpg"):
+    # Subpasta É legítima (`/Malas/<linha>` tem uma por modelo); escapar não.
+    for ruim in ("../../segredo.jpg", "/etc/passwd", "..\\x.jpg", "   "):
         r = await client.get(
             f"/api/portal/produtos/{p.id}/foto",
             params={"nome": ruim},
             headers={"X-Portal-Token": TOK_A},
         )
-        assert r.status_code == 400, f"passou: {ruim}"
+        assert r.status_code == 400, f"passou: {ruim!r}"

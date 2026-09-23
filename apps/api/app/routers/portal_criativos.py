@@ -1181,6 +1181,14 @@ def _raiz_permitida(caminho: str) -> bool:
     return any(limpo == r or limpo.startswith(r + "/") for r in _RAIZES_DO_PORTAL)
 
 
+def _marca_da_pasta(caminho: str) -> str:
+    """A marca sai da RAIZ da pasta, não de um campo: é ela que a operação usa
+    pra separar as duas linhas, e não existe coluna de marca na tabela de
+    preços. `/Malas` é Charlot's (e Poofy, a marca antiga); o resto é Uranyx."""
+    limpo = "/" + (caminho or "").strip().strip("/")
+    return "charlots-park" if limpo.startswith("/Malas") else "uranyx"
+
+
 @router.get("/produtos")
 async def listar_produtos(
     session: Annotated[AsyncSession, Depends(get_session)],
@@ -1212,6 +1220,7 @@ async def listar_produtos(
             "nome": p.name,
             "skus": [s.strip() for s in (p.sku or "").split(",") if s.strip()],
             "pasta": p.fotos_path,
+            "marca": _marca_da_pasta(p.fotos_path or ""),
             "fotos": p.fotos_count or 0,
         }
         for p in linhas
@@ -1246,8 +1255,20 @@ async def listar_fotos_do_produto(
         resp = await sidecar_request("GET", "/files", params={"path": row.fotos_path})
     except MegaError as e:
         raise HTTPException(503, detail={"code": "mega_indisponivel", "message": str(e)}) from e
-    fotos = [a for a in (resp.get("arquivos") or []) if a.get("imagem")]
-    return {"produto": row.name, "pasta": row.fotos_path, "fotos": fotos}
+    # O sidecar conta heic, tiff e bmp como imagem (é o mesmo conjunto da
+    # contagem antiga). Aqui só passa o que o navegador DESENHA — listar um
+    # .heic que a tela não abre é prometer foto que não aparece.
+    fotos = [
+        a
+        for a in (resp.get("arquivos") or [])
+        if a.get("imagem") and Path(str(a.get("nome", ""))).suffix.lower() in _EXT_IMAGEM
+    ]
+    return {
+        "produto": row.name,
+        "pasta": row.fotos_path,
+        "marca": _marca_da_pasta(row.fotos_path or ""),
+        "fotos": fotos,
+    }
 
 
 @router.get("/produtos/{produto_id}/foto")
@@ -1263,7 +1284,9 @@ async def baixar_foto_do_produto(
     isso, um `..` no parâmetro viraria leitura de outra pasta da conta MEGA.
     """
     row = await _produto_do_portal(session, produto_id)
-    if "/" in nome or ".." in nome or not nome.strip():
+    # Subpasta é legítima — `/Malas/<linha>` guarda uma por modelo. Subir de
+    # nível não é, e barra no começo viraria caminho absoluto lá do outro lado.
+    if ".." in nome or not nome.strip() or nome.startswith("/"):
         raise HTTPException(400, detail={"code": "nome_invalido"})
     try:
         listagem = await sidecar_request("GET", "/files", params={"path": row.fotos_path})

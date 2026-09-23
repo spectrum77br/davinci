@@ -215,35 +215,39 @@ _EXT_IMAGEM = (".jpg", ".jpeg", ".png", ".webp", ".gif")
 
 @app.get("/files")
 def files(path: str, _: None = Depends(check_token)) -> dict:
-    """Lista os ARQUIVOS de uma pasta, já separando imagem do resto.
+    """Lista as IMAGENS de uma pasta, RECURSIVO, já separando de vídeo.
 
-    A pasta do produto mistura foto de catálogo com o vídeo que a agência
-    entregou (a aprovação empurra o MP4 pra cá). Quem pede foto quer foto.
+    Recursivo porque as pastas não têm o mesmo formato: `/Celular/<modelo>`
+    guarda as fotos soltas, e `/Malas/<linha>` guarda uma subpasta por modelo
+    (`M1 listrada`, `M2 lisa`…). Lendo só o primeiro nível, as 791 fotos de
+    malas — a maior parte do acervo — apareciam como zero.
+
+    Usa `mega-find`, que é o mesmo caminho da contagem que alimenta
+    `fotos_count`; assim a lista e o número não divergem.
+
+    `nome` vem RELATIVO à pasta pedida, com a subpasta junto quando houver —
+    é ele que volta na hora de baixar.
     """
-    rc, out = run(["mega-ls", "-l", path], timeout=300)
+    raiz = "/" + path.strip().strip("/")
+    rc, out = run(["mega-find", raiz], timeout=300)
     if rc != 0:
         return {"rc": rc, "out": out[-2000:], "arquivos": []}
+
     arquivos = []
     for linha in out.splitlines():
-        # FLAGS VERS SIZE DATE NAME — o nome pode ter espaço, então o corte é
-        # por posição de campo, não por split simples.
-        partes = linha.split(None, 5)
-        if len(partes) < 6 or not partes[0].startswith("-"):
+        caminho = linha.strip().rstrip("/")
+        if not caminho or caminho == raiz:
             continue
-        try:
-            tamanho = int(partes[2])
-        except ValueError:
-            continue
-        nome = partes[5].strip()
-        if not nome:
-            continue
-        arquivos.append(
-            {
-                "nome": nome,
-                "tamanho": tamanho,
-                "imagem": nome.lower().endswith(_EXT_IMAGEM),
-            }
-        )
+        folha = caminho.rsplit("/", 1)[-1]
+        if "." not in folha:
+            continue  # pasta
+        ext = folha.rsplit(".", 1)[-1].lower()
+        if ext not in _IMG_EXT:
+            continue  # vídeo entregue e afins ficam de fora
+        relativo = caminho[len(raiz) :].lstrip("/") if caminho.startswith(raiz) else folha
+        arquivos.append({"nome": relativo, "imagem": True})
+
+    arquivos.sort(key=lambda a: a["nome"])
     return {"rc": 0, "arquivos": arquivos}
 
 
@@ -256,6 +260,8 @@ def file(path: str, _: None = Depends(check_token)):
     do acervo.
     """
     nome = path.rsplit("/", 1)[-1]
+    # `..` fora: o nome vem da listagem, mas chega por parâmetro. Subpasta é
+    # legítima (as malas têm uma por modelo), subir de nível não é.
     if not nome or ".." in path:
         raise HTTPException(400, "caminho inválido")
     tmp = tempfile.mkdtemp(prefix="megafile")
