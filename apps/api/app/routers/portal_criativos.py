@@ -73,6 +73,7 @@ from sqlalchemy.orm import selectinload
 from app.config import get_settings
 from app.db import get_session
 from app.models.marketing import MarketingCreative, MarketingCreativeFile
+from app.models.marketing_ideia_requisicao import MarketingIdeiaRequisicao
 from app.models.marketing_personagem import MarketingPersonagem, MarketingPersonagemArquivo
 from app.models.marketing_personagem_requisicao import (
     STATUS_PENDENTE,
@@ -87,6 +88,7 @@ from app.routers.marketing_creatives import (
 from app.services.marketing.anexos import (
     MIMES_PERSONAGEM,
     MIMES_REFERENCIA,
+    MIMES_VIDEO,
     caminho_confinado,
     mime_seguro,
 )
@@ -565,7 +567,7 @@ async def baixar_arquivo_personagem(
 
 
 def _entrega(
-    rec: MarketingRoteiroRef | MarketingPersonagemArquivo,
+    rec: MarketingRoteiroRef | MarketingPersonagemArquivo | MarketingCreativeFile,
     *,
     permitidos: frozenset[str],
     baixar: bool = False,
@@ -920,3 +922,196 @@ async def requisitar_personagem(
     await session.commit()
     logger.info("portal_requisicao_personagem", requisicao_id=str(row.id), equipe=equipe)
     return {"id": str(row.id), "status": row.status}
+
+
+# ───────────────────── a ideia que nasce na agência ─────────────────────
+
+
+class IdeiaIn(BaseModel):
+    """Proposta de vídeo inteiramente da agência.
+
+    `descricao` é obrigatória e é o que vira o texto do briefing. Título sem
+    descrição seria um pedido que ninguém consegue avaliar — e avaliar é o
+    único motivo desta fila existir.
+    """
+
+    titulo: str
+    descricao: str
+    justificativa: str | None = None
+    marca: str | None = None
+    sku: str | None = None
+
+
+@router.post("/ideias/requisicao", status_code=201)
+async def propor_ideia(
+    payload: IdeiaIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    equipe: Annotated[str, Depends(equipe_do_token)],
+) -> dict[str, Any]:
+    """A agência PROPÕE um vídeo dela. Nada é liberado aqui.
+
+    Eduardo, 23/09/2026: "caso eles queiram essa liberdade (...) vira pedidos no
+    DaVinci que deve a nossa aprovação pra eles poderem gerar o que quiserem".
+
+    O sim de dentro é que cria o briefing — e é ele que autoriza produzir. Sem
+    este passo, "liberdade" viraria a agência escrevendo o próprio briefing e
+    produzindo em cima dele sem ninguém olhar, que é justamente o contrário do
+    que a casa pediu.
+    """
+    titulo = (payload.titulo or "").strip()
+    descricao = (payload.descricao or "").strip()
+    if not titulo:
+        raise HTTPException(400, detail={"code": "titulo_obrigatorio"})
+    if not descricao:
+        raise HTTPException(400, detail={"code": "descricao_obrigatoria"})
+
+    row = MarketingIdeiaRequisicao(
+        id=uuid4(),
+        titulo=titulo[:160],
+        descricao=descricao,
+        justificativa=(payload.justificativa or "").strip() or None,
+        marca=(payload.marca or "").strip() or None,
+        sku=(payload.sku or "").strip() or None,
+        equipe=equipe,
+    )
+    session.add(row)
+    await session.commit()
+    logger.info("portal_ideia_proposta", requisicao_id=str(row.id), equipe=equipe)
+    return {"id": str(row.id), "status": row.status}
+
+
+@router.get("/ideias/requisicoes")
+async def listar_minhas_ideias(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    equipe: Annotated[str, Depends(equipe_do_token)],
+) -> dict[str, Any]:
+    """Os pedidos DESTA agência, com o veredito e o motivo da recusa.
+
+    Mesma razão da fila de personagem: guardar o porquê só vale se o porquê
+    chegar de volta a quem pediu.
+    """
+    linhas = (
+        (
+            await session.execute(
+                select(MarketingIdeiaRequisicao)
+                .where(MarketingIdeiaRequisicao.equipe == equipe)
+                .order_by(MarketingIdeiaRequisicao.created_at.desc())
+                .limit(LIMITE_PADRAO)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return {
+        "equipe": equipe,
+        "requisicoes": [
+            {
+                "id": str(r.id),
+                "titulo": r.titulo,
+                "descricao": r.descricao,
+                "marca": r.marca,
+                "sku": r.sku,
+                "status": r.status,
+                "motivo": r.motivo,
+                # Aprovado vira briefing: o link leva direto pra tela dele.
+                "roteiro_id": str(r.roteiro_id) if r.roteiro_id else None,
+                "criado_em": r.created_at.isoformat() if r.created_at else None,
+                "decidido_em": r.decidido_em.isoformat() if r.decidido_em else None,
+            }
+            for r in linhas
+        ],
+    }
+
+
+# ───────────────────── vídeos de referência ─────────────────────
+
+
+@router.get("/referencias")
+async def listar_referencias(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    equipe: Annotated[str, Depends(equipe_do_token)],
+) -> dict[str, Any]:
+    """Os vídeos JÁ APROVADOS, das duas agências, como material de referência.
+
+    Eduardo, 23/09/2026: "uma aba de referências e taca alguns vídeos do DaVinci
+    lá também pra eles terem referências (...) pode ser dos aprovados, por
+    enquanto só de todos".
+
+    É a única rota daqui que atravessa a fronteira de equipe de propósito — e
+    ela só atravessa o que a casa JÁ APROVOU. Aprovado é o que a casa assinou
+    embaixo, então é exatamente o que serve de exemplo; pendente e reprovado
+    continuam invisíveis do lado de fora.
+
+    `equipe` NÃO sai na resposta. Quem fez não ajuda a aprender com a peça, e
+    nomear o autor transformaria a aba em placar entre duas agências que
+    competem. O dia em que a casa quiser dar crédito, o campo entra aqui.
+    """
+    linhas = (
+        (
+            await session.execute(
+                select(MarketingCreative)
+                .options(selectinload(MarketingCreative.files))
+                .where(MarketingCreative.aprovado.is_(True))
+                .order_by(MarketingCreative.created_at.desc())
+                .limit(LIMITE_PADRAO)
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    saida = []
+    for row in linhas:
+        videos = [f for f in row.files if (f.file_mime or "").lower() in MIMES_VIDEO]
+        # Linha aprovada sem vídeo tocável não é referência, é ruído na grade.
+        if not videos:
+            continue
+        saida.append(
+            {
+                "id": str(row.id),
+                "modelo": row.modelo,
+                "marca": row.marca,
+                "sku": row.sku,
+                "criado_em": row.created_at.isoformat() if row.created_at else None,
+                "arquivos": [
+                    {
+                        "id": str(f.id),
+                        "nome": f.file_name,
+                        "mime": f.file_mime,
+                        "tamanho": f.file_size,
+                    }
+                    for f in videos
+                ],
+            }
+        )
+    return {"equipe": equipe, "referencias": saida}
+
+
+@router.get("/referencias/{creative_id}/arquivo/{file_id}")
+async def baixar_referencia_video(
+    creative_id: UUID,
+    file_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    equipe: Annotated[str, Depends(equipe_do_token)],
+    download: bool = False,
+) -> FileResponse:
+    """Os bytes do vídeo de referência.
+
+    A trava é a MESMA da listagem — só criativo aprovado — e está repetida aqui
+    de propósito: se esta rota tivesse um WHERE próprio, tirar a aprovação de um
+    vídeo sumiria com o card e continuaria servindo os bytes para sempre a quem
+    tivesse anotado o id. É o mesmo raciocínio do `_visivel_pra_fora`.
+    """
+    row = (
+        await session.execute(
+            select(MarketingCreative)
+            .options(selectinload(MarketingCreative.files))
+            .where(MarketingCreative.id == creative_id, MarketingCreative.aprovado.is_(True))
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(404, detail={"code": "nao_encontrado"})
+    rec = next((f for f in row.files if f.id == file_id), None)
+    if rec is None or (rec.file_mime or "").lower() not in MIMES_VIDEO:
+        raise HTTPException(404, detail={"code": "nao_encontrado"})
+    return _entrega(rec, permitidos=MIMES_VIDEO, baixar=download)

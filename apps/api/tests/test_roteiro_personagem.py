@@ -689,3 +689,90 @@ async def test_apagar_ideia_com_versao_da_agencia_e_barrado(
     # A versão sai do caminho e aí a ideia pode ser apagada.
     assert (await client.delete(f"{R}/{versao['id']}")).status_code == 200
     assert (await client.delete(f"{R}/{ideia['id']}")).status_code == 200
+
+
+async def test_aprovar_ideia_cria_briefing_endereçado_a_quem_pediu(
+    client: AsyncClient, db: AsyncSession, admin
+):
+    """O sim é o que autoriza produzir — e a ideia é DELA, não das duas."""
+    from app.models import MarketingIdeiaRequisicao, MarketingRoteiro
+
+    req = MarketingIdeiaRequisicao(
+        titulo="Mala no aeroporto",
+        descricao="0-3s: cena tal. 3-9s: cena tal.",
+        equipe="alpha",
+    )
+    db.add(req)
+    await db.commit()
+    await db.refresh(req)
+
+    r = await client.post(f"{R}/requisicoes/{req.id}/aprovar")
+    assert r.status_code == 200
+    rid = r.json()["roteiro_id"]
+
+    novo = await db.get(MarketingRoteiro, UUID(rid))
+    assert novo.titulo == "Mala no aeroporto"
+    assert novo.texto == "0-3s: cena tal. 3-9s: cena tal."
+    assert novo.ativo is True, "aprovar já é a liberação"
+    assert novo.equipe_destino == "alpha", "NULL mandaria a ideia de uma para as duas"
+
+    await db.refresh(req)
+    assert req.status == "aprovada"
+    assert req.roteiro_id == novo.id
+
+    # Segunda decisão sobre o mesmo pedido é conflito, não duplicata.
+    assert (await client.post(f"{R}/requisicoes/{req.id}/aprovar")).status_code == 409
+
+
+async def test_recusar_ideia_guarda_o_motivo_e_nao_cria_nada(
+    client: AsyncClient, db: AsyncSession, admin
+):
+    from sqlalchemy import select
+
+    from app.models import MarketingIdeiaRequisicao, MarketingRoteiro
+
+    req = MarketingIdeiaRequisicao(titulo="Não vai rolar", descricao="x", equipe="alpha")
+    db.add(req)
+    await db.commit()
+    await db.refresh(req)
+
+    r = await client.post(
+        f"{R}/requisicoes/{req.id}/recusar", json={"motivo": "prova física gerada por IA"}
+    )
+    assert r.status_code == 200
+    await db.refresh(req)
+    assert req.status == "recusada"
+    assert req.motivo == "prova física gerada por IA"
+    assert req.roteiro_id is None
+
+    achou = (
+        await db.execute(
+            select(MarketingRoteiro).where(MarketingRoteiro.titulo == "Não vai rolar")
+        )
+    ).first()
+    assert achou is None
+
+
+async def test_fila_de_ideias_respeita_a_equipe(
+    client: AsyncClient, db: AsyncSession, make_user, auth_as
+):
+    from app.models import MarketingIdeiaRequisicao
+
+    minha = MarketingIdeiaRequisicao(titulo="Da Alpha", descricao="x", equipe="alpha")
+    alheia = MarketingIdeiaRequisicao(titulo="Da Bravo", descricao="x", equipe="bravo")
+    db.add_all([minha, alheia])
+    await db.commit()
+    await db.refresh(alheia)
+
+    u = await make_user(permissions={"marketing_criativos": {"view": True, "edit": True}})
+    u.marketing_teams = ["alpha"]
+    await db.commit()
+    auth_as(u)
+
+    r = await client.get(f"{R}/requisicoes")
+    assert r.status_code == 200
+    nomes = [x["titulo"] for x in r.json()["requisicoes"]]
+    assert "Da Alpha" in nomes and "Da Bravo" not in nomes
+    for acao in ("aprovar", "recusar"):
+        d = await client.post(f"{R}/requisicoes/{alheia.id}/{acao}", json={})
+        assert d.status_code == 404, f"{acao} da outra equipe passou"

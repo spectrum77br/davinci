@@ -56,6 +56,19 @@ _EXT_AUDIO: dict[str, str] = {
     ".ogg": "audio/ogg",
 }
 
+# O VÍDEO entregue pela agência, servido na aba de referências do portal. Só
+# contêineres que o navegador toca nativamente: a aba existe para ASSISTIR, e
+# tudo que cai fora da lista vira `octet-stream` + `attachment`, ou seja,
+# download em vez de player. Sem container de legenda e sem HLS de propósito —
+# cada tipo a menos é superfície a menos.
+_EXT_VIDEO: dict[str, str] = {
+    ".mp4": "video/mp4",
+    ".m4v": "video/x-m4v",
+    ".mov": "video/quicktime",
+    ".webm": "video/webm",
+}
+
+MIMES_VIDEO = frozenset(_EXT_VIDEO.values())
 MIMES_IMAGEM = frozenset(_EXT_IMAGEM.values())
 MIMES_AUDIO = frozenset(_EXT_AUDIO.values())
 # O que a rota de bytes do personagem pode servir: foto OU voz.

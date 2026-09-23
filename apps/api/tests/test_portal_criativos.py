@@ -762,3 +762,110 @@ async def test_entrega_reaproveita_a_linha_vazia_em_vez_de_duplicar(
         )
     ).scalars().all()
     assert len(linhas) == 1, f"duplicou: {len(linhas)} linhas pro mesmo roteiro"
+
+
+# ─────────── ideia proposta pela agência, e vídeos de referência ───────────
+
+
+async def test_ideia_proposta_nasce_pendente_e_nao_vira_briefing(
+    client: AsyncClient, db: AsyncSession
+):
+    """Aprovar é o que cria o roteiro. Propor não libera nada."""
+    r = await client.post(
+        "/api/portal/ideias/requisicao",
+        headers={"X-Portal-Token": TOK_A},
+        json={"titulo": "Mala no aeroporto", "descricao": "cena inteira aqui", "marca": "uranyx"},
+    )
+    assert r.status_code == 201
+    assert r.json()["status"] == "pendente"
+
+    achou = (
+        await db.execute(
+            select(MarketingRoteiro).where(MarketingRoteiro.titulo == "Mala no aeroporto")
+        )
+    ).first()
+    assert achou is None, "não pode virar briefing antes de alguém aprovar"
+
+
+async def test_ideia_sem_descricao_e_recusada(client: AsyncClient):
+    r = await client.post(
+        "/api/portal/ideias/requisicao",
+        headers={"X-Portal-Token": TOK_A},
+        json={"titulo": "Só o título", "descricao": "   "},
+    )
+    assert r.status_code == 400
+    assert r.json()["detail"]["code"] == "descricao_obrigatoria"
+
+
+async def test_uma_agencia_nao_ve_a_ideia_da_outra(client: AsyncClient):
+    await client.post(
+        "/api/portal/ideias/requisicao",
+        headers={"X-Portal-Token": TOK_A},
+        json={"titulo": "Ideia da Alpha", "descricao": "x"},
+    )
+    r = await client.get("/api/portal/ideias/requisicoes", headers={"X-Portal-Token": TOK_B})
+    assert r.status_code == 200
+    assert "Ideia da Alpha" not in [x["titulo"] for x in r.json()["requisicoes"]]
+
+
+async def test_referencias_so_trazem_aprovado_e_atravessam_a_equipe(
+    client: AsyncClient, db: AsyncSession
+):
+    """A única rota que cruza a fronteira de equipe — e só com o que a casa
+    já assinou embaixo."""
+    aprovado = MarketingCreative(modelo="Bom exemplo", equipe="beta", aprovado=True, files=[])
+    pendente = MarketingCreative(modelo="Ainda em análise", equipe="beta", aprovado=None, files=[])
+    db.add_all([aprovado, pendente])
+    await db.flush()
+    db.add_all(
+        [
+            MarketingCreativeFile(
+                creative_id=aprovado.id,
+                file_name="bom.mp4",
+                file_mime="video/mp4",
+                file_rel=f"creatives/{aprovado.id}/bom.mp4",
+                file_size=10,
+            ),
+            MarketingCreativeFile(
+                creative_id=pendente.id,
+                file_name="p.mp4",
+                file_mime="video/mp4",
+                file_rel=f"creatives/{pendente.id}/p.mp4",
+                file_size=10,
+            ),
+        ]
+    )
+    await db.commit()
+
+    # A agência ALPHA vê o vídeo aprovado da BETA — é o ponto da aba.
+    r = await client.get("/api/portal/referencias", headers={"X-Portal-Token": TOK_A})
+    assert r.status_code == 200
+    titulos = [x["modelo"] for x in r.json()["referencias"]]
+    assert "Bom exemplo" in titulos
+    assert "Ainda em análise" not in titulos, "pendente não é referência"
+    # Quem fez não sai: a aba não é placar entre as duas agências.
+    assert all("equipe" not in x for x in r.json()["referencias"])
+
+
+async def test_bytes_de_referencia_de_criativo_nao_aprovado_sao_404(
+    client: AsyncClient, db: AsyncSession
+):
+    """Se a rota de bytes tivesse WHERE próprio, tirar a aprovação sumiria com
+    o card e continuaria servindo o vídeo pra sempre."""
+    row = MarketingCreative(modelo="Reprovado", equipe="beta", aprovado=False, files=[])
+    db.add(row)
+    await db.flush()
+    arq = MarketingCreativeFile(
+        creative_id=row.id,
+        file_name="x.mp4",
+        file_mime="video/mp4",
+        file_rel=f"creatives/{row.id}/x.mp4",
+        file_size=10,
+    )
+    db.add(arq)
+    await db.commit()
+
+    r = await client.get(
+        f"/api/portal/referencias/{row.id}/arquivo/{arq.id}", headers={"X-Portal-Token": TOK_A}
+    )
+    assert r.status_code == 404
