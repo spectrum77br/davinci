@@ -53,6 +53,7 @@ from app.db import get_session
 from app.deps.auth import require_permission
 from app.models import (
     MarketingCreative,
+    MarketingCreativeFile,
     MarketingIdeiaRequisicao,
     MarketingPersonagem,
     MarketingRoteiro,
@@ -671,7 +672,13 @@ async def desligar_personagem(
 # Criativos; aqui decide-se a outra pergunta: essa ideia vira briefing da casa?
 
 
-def _req_ideia_out(r: MarketingIdeiaRequisicao) -> dict[str, Any]:
+def _req_ideia_out(
+    r: MarketingIdeiaRequisicao, arquivos: dict[UUID, list[MarketingCreativeFile]] | None = None
+) -> dict[str, Any]:
+    # O id do ARQUIVO, não só o do criativo: a rota de bytes é
+    # /creatives/{id}/arquivo/{file_id} — só `/arquivo` é o POST de upload, e
+    # apontar o player pra lá dava um quadro preto.
+    do_criativo = (arquivos or {}).get(r.creative_id) or [] if r.creative_id else []
     return {
         "id": str(r.id),
         "titulo": r.titulo,
@@ -684,6 +691,10 @@ def _req_ideia_out(r: MarketingIdeiaRequisicao) -> dict[str, Any]:
         # O vídeo que trouxe o conceito: é por ele que quem decide ASSISTE à
         # peça em vez de julgar uma descrição.
         "creative_id": str(r.creative_id) if r.creative_id else None,
+        "arquivos": [
+            {"id": str(f.id), "nome": f.file_name, "mime": f.file_mime}
+            for f in do_criativo
+        ],
         "roteiro_id": str(r.roteiro_id) if r.roteiro_id else None,
         "criado_em": r.created_at.isoformat() if r.created_at else None,
         "decidido_em": r.decidido_em.isoformat() if r.decidido_em else None,
@@ -711,7 +722,26 @@ async def listar_conceitos(
     if permitidas is not None:
         q = q.where(func.lower(MarketingIdeiaRequisicao.equipe).in_(permitidas))
     linhas = (await session.execute(q)).scalars().all()
-    return {"requisicoes": [_req_ideia_out(r) for r in linhas]}
+
+    # Uma consulta só para todos os arquivos da página, em vez de uma por
+    # pedido: a fila é curta hoje, mas N+1 numa listagem envelhece mal.
+    ids = [r.creative_id for r in linhas if r.creative_id]
+    arquivos: dict[UUID, list[MarketingCreativeFile]] = {}
+    if ids:
+        for f in (
+            (
+                await session.execute(
+                    select(MarketingCreativeFile)
+                    .where(MarketingCreativeFile.creative_id.in_(ids))
+                    .order_by(MarketingCreativeFile.created_at)
+                )
+            )
+            .scalars()
+            .all()
+        ):
+            arquivos.setdefault(f.creative_id, []).append(f)
+
+    return {"requisicoes": [_req_ideia_out(r, arquivos) for r in linhas]}
 
 
 class DecisaoIdeiaIn(BaseModel):

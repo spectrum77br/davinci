@@ -91,6 +91,7 @@ type Conceito = {
   status: string
   motivo: string | null
   creative_id: string | null
+  arquivos: { id: string; nome: string | null; mime: string | null }[]
   roteiro_id: string | null
   criado_em: string | null
 }
@@ -558,8 +559,11 @@ const conceitos = ref<Conceito[]>([])
 const conceitosErro = ref<string | null>(null)
 const conceitoOcupado = ref<string | null>(null)
 
-function videoDoConceito(c: Conceito): string {
-  return `/api/marketing/creatives/${c.creative_id}/arquivo`
+function videoDoConceito(c: Conceito): string | null {
+  // Precisa do id do ARQUIVO: `/arquivo` sem ele é a rota de UPLOAD, e o
+  // player apontado pra lá mostrava um quadro preto.
+  const v = c.arquivos.find((f) => (f.mime || '').startsWith('video/')) ?? c.arquivos[0]
+  return v ? `/api/marketing/creatives/${c.creative_id}/arquivo/${v.id}` : null
 }
 
 async function carregarConceitos() {
@@ -1204,14 +1208,17 @@ async function recusarPedido(r: Requisicao) {
                  descrição é decidir no escuro. `preload="none"` porque a fila
                  pode ter vários e nenhum deve baixar antes do play. -->
             <video
-              v-if="c.creative_id"
+              v-if="videoDoConceito(c)"
               class="w-full rounded-md bg-black"
               style="aspect-ratio: 9/16"
               controls
               playsinline
-              preload="none"
-              :src="videoDoConceito(c)"
+              preload="metadata"
+              :src="videoDoConceito(c)!"
             />
+            <p v-else-if="c.creative_id" class="text-[11px] text-muted-foreground">
+              A entrega não trouxe arquivo de vídeo.
+            </p>
             <p class="max-h-56 overflow-auto whitespace-pre-wrap text-xs">{{ c.descricao }}</p>
           </div>
         </div>
