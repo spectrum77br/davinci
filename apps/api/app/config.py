@@ -431,6 +431,12 @@ class Settings(BaseSettings):
     # pra o Bling refazer a composição e baixar o kit certo sozinho — aí a
     # compensação é desligada. Set via PRIORIDADE_SUBSTITUI_ITEM no .env.
     prioridade_substitui_item: bool = False
+    # Pedido num estoque só (Vinicius, 23/09/2026): pedido com itens em
+    # estoques diferentes (dg054.ci + dg052.sp) vai todo pro estoque que tem
+    # tudo — prioridade primeiro, senão o que tem mais estoque; se nenhum tem
+    # tudo, fica a regra item a item. Ligado por padrão; desliga com
+    # PRIORIDADE_PEDIDO_ESTOQUE_UNICO=false no .env.
+    prioridade_pedido_estoque_unico: bool = True
 
     # Threema IDs (vírgula) avisados quando o sweep move um pedido pra
     # Aguardando Cancelamento por estoque negativo. Vazio = aviso desligado
