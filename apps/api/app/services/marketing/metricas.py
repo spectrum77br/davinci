@@ -250,7 +250,15 @@ async def do_instagram(media_id: str, access_token: str) -> dict[str, Any]:
         # tokens de produção foram parar no banco em 23/09.
         cab = {"Authorization": f"Bearer {access_token}"}
         r = await c.get(f"{base}/{media_id}", params={"fields": "like_count,comments_count"}, headers=cab)
-        r.raise_for_status()
+        if r.status_code != 200:
+            e = (r.json().get("error") or {}) if r.headers.get("content-type", "").startswith("application/json") else {}
+            # code 100 / subcode 33 = "Object with ID ... does not exist". É como
+            # a Meta diz que o post foi APAGADO. Descoberto em 23/09/2026: com o
+            # token antigo essa resposta vinha mascarada de erro de permissão
+            # (code 10), e os posts apagados apareciam como falha de leitura.
+            if e.get("code") == 100 and e.get("error_subcode") == 33:
+                raise RuntimeError(f"{REMOVIDO} o post não está mais no Instagram")
+            r.raise_for_status()
         d = r.json()
         out["curtidas"] = d.get("like_count")
         out["comentarios"] = d.get("comments_count")

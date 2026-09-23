@@ -507,3 +507,34 @@ async def test_falha_de_verdade_continua_alertando(
     plat = (await client.get(API_M)).json()["marcas"][0]["plataformas"][0]
     assert plat["erro"] is not None, "problema de verdade tem que alertar"
     assert plat["videos"][0]["removido"] is False
+
+
+async def test_instagram_post_apagado_e_reconhecido_como_removido():
+    """A Meta diz "apagado" com code=100/subcode=33 ("Object with ID does not
+    exist"). Descoberto em 23/09/2026: com o token velho essa resposta vinha
+    MASCARADA de erro de permissão (code 10), então post apagado e permissão
+    faltando eram indistinguíveis — e os dois viravam alerta na tela."""
+    import httpx
+
+    class _R:
+        status_code = 400
+        headers = {"content-type": "application/json"}
+
+        def json(self):
+            return {"error": {"code": 100, "error_subcode": 33,
+                              "message": "Unsupported get request. Object with ID does not exist"}}
+
+    class _C:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def get(self, *a, **kw): return _R()
+
+    import app.services.marketing.metricas as m
+    orig = httpx.AsyncClient
+    httpx.AsyncClient = lambda *a, **kw: _C()
+    try:
+        with pytest.raises(RuntimeError) as e:
+            await m.do_instagram("123", "token-falso")
+        assert m.foi_removido(str(e.value)), "apagado tem que ser reconhecível pela tela"
+    finally:
+        httpx.AsyncClient = orig
