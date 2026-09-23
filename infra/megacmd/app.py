@@ -17,6 +17,8 @@ import subprocess
 import tempfile
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
+from fastapi.responses import FileResponse
+from starlette.background import BackgroundTask
 from pydantic import BaseModel
 
 app = FastAPI(title="megacmd-sidecar")
@@ -199,6 +201,74 @@ def debug_ls(path: str = "/", long: bool = True, _: None = Depends(check_token))
     cmd = ["mega-ls"] + (["-l"] if long else []) + [path]
     rc, out = run(cmd, timeout=300)
     return {"rc": rc, "out": out[-8000:]}
+
+
+# ── leitura de arquivo, pro portal das agências mostrar foto de produto ──
+#
+# O sidecar só sabia exportar link e subir. Mostrar foto no portal por LINK
+# PÚBLICO do MEGA seria publicar a pasta inteira da linha, sem revogação e com
+# o material do fornecedor junto. Com estes dois, os bytes passam pelo DaVinci
+# e pela mesma trava de equipe das outras rotas.
+
+_EXT_IMAGEM = (".jpg", ".jpeg", ".png", ".webp", ".gif")
+
+
+@app.get("/files")
+def files(path: str, _: None = Depends(check_token)) -> dict:
+    """Lista os ARQUIVOS de uma pasta, já separando imagem do resto.
+
+    A pasta do produto mistura foto de catálogo com o vídeo que a agência
+    entregou (a aprovação empurra o MP4 pra cá). Quem pede foto quer foto.
+    """
+    rc, out = run(["mega-ls", "-l", path], timeout=300)
+    if rc != 0:
+        return {"rc": rc, "out": out[-2000:], "arquivos": []}
+    arquivos = []
+    for linha in out.splitlines():
+        # FLAGS VERS SIZE DATE NAME — o nome pode ter espaço, então o corte é
+        # por posição de campo, não por split simples.
+        partes = linha.split(None, 5)
+        if len(partes) < 6 or not partes[0].startswith("-"):
+            continue
+        try:
+            tamanho = int(partes[2])
+        except ValueError:
+            continue
+        nome = partes[5].strip()
+        if not nome:
+            continue
+        arquivos.append(
+            {
+                "nome": nome,
+                "tamanho": tamanho,
+                "imagem": nome.lower().endswith(_EXT_IMAGEM),
+            }
+        )
+    return {"rc": 0, "arquivos": arquivos}
+
+
+@app.get("/file")
+def file(path: str, _: None = Depends(check_token)):
+    """Baixa UM arquivo e devolve os bytes.
+
+    `mega-get` não escreve em stdout, então o arquivo desce para um diretório
+    temporário e é removido depois de servido — o container não acumula cópia
+    do acervo.
+    """
+    nome = path.rsplit("/", 1)[-1]
+    if not nome or ".." in path:
+        raise HTTPException(400, "caminho inválido")
+    tmp = tempfile.mkdtemp(prefix="megafile")
+    rc, out = run(["mega-get", path, tmp], timeout=600)
+    destino = os.path.join(tmp, nome)
+    if rc != 0 or not os.path.isfile(destino):
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise HTTPException(404, f"não baixou: {out[-300:]}")
+    return FileResponse(
+        destino,
+        filename=nome,
+        background=BackgroundTask(shutil.rmtree, tmp, ignore_errors=True),
+    )
 
 
 class ExportIn(BaseModel):

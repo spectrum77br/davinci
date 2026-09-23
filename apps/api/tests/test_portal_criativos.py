@@ -11,7 +11,7 @@ Depois vem o que separa uma agência da outra, e o que a lista branca esconde.
 from __future__ import annotations
 
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from httpx import AsyncClient
@@ -905,3 +905,81 @@ async def test_video_autoral_sem_titulo_e_recusado(client: AsyncClient):
     )
     assert r.status_code == 400
     assert r.json()["detail"]["code"] == "titulo_obrigatorio"
+
+
+# ─────────── catálogo: foto de produto ───────────
+
+
+async def _produto(db: AsyncSession, dono, *, sku: str, nome: str, pasta: str | None,
+                   fotos: int | None = None):
+    """Linha da tabela de preços. `user_id` e `segment_id` são NOT NULL, então
+    o segmento vem junto — é esqueleto de teste, não parte do que se afirma."""
+    from app.models.pricing import PricingProduct
+    from app.models.segment import Segment
+
+    seg = Segment(user_id=dono.id, name="teste", slug=f"teste-{uuid4().hex[:8]}")
+    db.add(seg)
+    await db.flush()
+    row = PricingProduct(
+        user_id=dono.id, segment_id=seg.id, sku=sku, name=nome,
+        fotos_path=pasta, fotos_count=fotos,
+    )
+    db.add(row)
+    await db.flush()
+    return row
+
+
+async def test_catalogo_so_traz_as_familias_do_portal(
+    client: AsyncClient, db: AsyncSession, make_user
+):
+    """Só /Malas, /Celular e /uranyx. O resto do catálogo da casa não é assunto
+    de quem produz vídeo, e a pasta de fotos é a conta MEGA inteira."""
+    dono = await make_user()
+    await _produto(db, dono, sku="dg048,dg049", nome="uranyx F117",
+                   pasta="/Celular/Fossibot F117", fotos=32)
+    await _produto(db, dono, sku="b005.18", nome="ABS 18", pasta="/Malas/ABS 18", fotos=46)
+    await _produto(db, dono, sku="xx001", nome="Coisa interna", pasta="/Financeiro/Notas")
+    await _produto(db, dono, sku="xx002", nome="Sem pasta", pasta=None)
+    await db.commit()
+
+    r = await client.get("/api/portal/produtos", headers={"X-Portal-Token": TOK_A})
+    assert r.status_code == 200
+    nomes = [p["nome"] for p in r.json()["produtos"]]
+    assert "uranyx F117" in nomes and "ABS 18" in nomes
+    assert "Coisa interna" not in nomes, "pasta fora das famílias não pode vazar"
+    assert "Sem pasta" not in nomes
+
+    # O SKU sai como lista: uma pasta serve a linha inteira, e é por esse
+    # código que a agência liga a foto à ideia.
+    f117 = next(p for p in r.json()["produtos"] if p["nome"] == "uranyx F117")
+    assert f117["skus"] == ["dg048", "dg049"]
+
+
+async def test_produto_de_pasta_proibida_e_404(
+    client: AsyncClient, db: AsyncSession, make_user
+):
+    dono = await make_user()
+    p = await _produto(db, dono, sku="xx003", nome="Interno", pasta="/Financeiro/Notas")
+    await db.commit()
+
+    r = await client.get(
+        f"/api/portal/produtos/{p.id}/fotos", headers={"X-Portal-Token": TOK_A}
+    )
+    assert r.status_code == 404
+
+
+async def test_nome_de_foto_com_barra_e_recusado(
+    client: AsyncClient, db: AsyncSession, make_user
+):
+    """Sem esta trava, `..` no nome viraria leitura de outra pasta da conta."""
+    dono = await make_user()
+    p = await _produto(db, dono, sku="dg048", nome="F117", pasta="/Celular/Fossibot F117")
+    await db.commit()
+
+    for ruim in ("../../segredo.jpg", "sub/foto.jpg"):
+        r = await client.get(
+            f"/api/portal/produtos/{p.id}/foto",
+            params={"nome": ruim},
+            headers={"X-Portal-Token": TOK_A},
+        )
+        assert r.status_code == 400, f"passou: {ruim}"

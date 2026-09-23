@@ -65,6 +65,29 @@ async def sidecar_request(
     return resp.json()
 
 
+async def sidecar_bytes(path: str, *, params: dict[str, Any], timeout: float = 600.0) -> bytes:
+    """Como `sidecar_request`, mas devolve os BYTES.
+
+    Existe porque a foto do produto não é JSON: ela desce do MEGA pelo sidecar
+    e atravessa o DaVinci até o portal. Link público do MEGA resolveria sem
+    código nenhum — e publicaria a pasta inteira da linha, sem revogação e com
+    o material do fornecedor junto.
+    """
+    settings = get_settings()
+    try:
+        async with httpx.AsyncClient(
+            base_url=settings.mega_sidecar_url,
+            headers=_headers(),
+            timeout=httpx.Timeout(timeout, connect=10.0),
+        ) as client:
+            resp = await client.get(path, params=params)
+    except httpx.HTTPError as exc:
+        raise MegaError(f"sidecar MEGA inacessível: {exc}", 503) from exc
+    if resp.status_code >= 400:
+        raise MegaError(f"sidecar HTTP {resp.status_code}", resp.status_code)
+    return resp.content
+
+
 _NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
 
 

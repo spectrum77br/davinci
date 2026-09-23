@@ -63,7 +63,17 @@ from typing import Annotated, Any
 from uuid import UUID, uuid4
 
 import structlog
-from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, UploadFile, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    Header,
+    HTTPException,
+    Response,
+    UploadFile,
+    status,
+)
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sqlalchemy import func, or_, select
@@ -80,18 +90,23 @@ from app.models.marketing_personagem_requisicao import (
     MarketingPersonagemRequisicao,
 )
 from app.models.marketing_roteiro import MarketingRoteiro, MarketingRoteiroRef
+from app.models.pricing import PricingProduct
 from app.routers.marketing_creatives import (
     MAX_BYTES_ARQUIVO,
     MAX_FILES_PER_ROW,
     _file_dir,
 )
 from app.services.marketing.anexos import (
+    _EXT_IMAGEM,
+    MIMES_IMAGEM,
     MIMES_PERSONAGEM,
     MIMES_REFERENCIA,
     MIMES_VIDEO,
     caminho_confinado,
+    mime_da_extensao,
     mime_seguro,
 )
+from app.services.mega_fotos import MegaError, sidecar_bytes, sidecar_request
 
 logger = structlog.get_logger()
 
@@ -1148,3 +1163,131 @@ async def baixar_entrega(
     if rec is None:
         raise HTTPException(404, detail={"code": "nao_encontrado"})
     return _entrega(rec, permitidos=MIMES_VIDEO, baixar=download)
+
+
+# ──────────────── o catálogo: foto do produto para a agência ────────────────
+#
+# As fotos moram no MEGA, em pasta por LINHA de produto. Elas chegam aqui pelo
+# sidecar, e não por link público: um link do MEGA publica a pasta inteira, sem
+# revogação e com o material do fornecedor junto.
+#
+# Só as duas famílias que a operação usa hoje — /Malas (Charlot's e Poofy) e
+# /Celular + /uranyx. O resto do catálogo não é assunto de quem produz vídeo.
+_RAIZES_DO_PORTAL = ("/Malas", "/Celular", "/uranyx")
+
+
+def _raiz_permitida(caminho: str) -> bool:
+    limpo = "/" + (caminho or "").strip().strip("/")
+    return any(limpo == r or limpo.startswith(r + "/") for r in _RAIZES_DO_PORTAL)
+
+
+@router.get("/produtos")
+async def listar_produtos(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    equipe: Annotated[str, Depends(equipe_do_token)],
+) -> dict[str, Any]:
+    """Os produtos com pasta de fotos, para a agência saber como a peça É.
+
+    `sku` da tabela de preços guarda a LINHA inteira separada por vírgula (uma
+    pasta serve todas as cores), então sai a lista — é assim que a agência acha
+    o código que está escrito na ideia.
+    """
+    linhas = (
+        (
+            await session.execute(
+                select(PricingProduct)
+                .where(
+                    PricingProduct.fotos_path.is_not(None),
+                    PricingProduct.fotos_path != "",
+                )
+                .order_by(PricingProduct.name)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    saida = [
+        {
+            "id": str(p.id),
+            "nome": p.name,
+            "skus": [s.strip() for s in (p.sku or "").split(",") if s.strip()],
+            "pasta": p.fotos_path,
+            "fotos": p.fotos_count or 0,
+        }
+        for p in linhas
+        if _raiz_permitida(p.fotos_path or "")
+    ]
+    return {"equipe": equipe, "produtos": saida}
+
+
+async def _produto_do_portal(session: AsyncSession, produto_id: UUID) -> PricingProduct:
+    row = await session.get(PricingProduct, produto_id)
+    if row is None or not _raiz_permitida(row.fotos_path or ""):
+        # 404 e não 403: produto fora das famílias do portal não existe pra
+        # quem está do lado de fora.
+        raise HTTPException(404, detail={"code": "nao_encontrado"})
+    return row
+
+
+@router.get("/produtos/{produto_id}/fotos")
+async def listar_fotos_do_produto(
+    produto_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    equipe: Annotated[str, Depends(equipe_do_token)],
+) -> dict[str, Any]:
+    """Os nomes das IMAGENS da pasta. Vídeo fica de fora de propósito.
+
+    A pasta do produto acumula os criativos aprovados (a aprovação empurra o
+    MP4 pra cá), e quem vem ver o produto quer o produto — o vídeo dos outros
+    tem lugar próprio, na aba de referência.
+    """
+    row = await _produto_do_portal(session, produto_id)
+    try:
+        resp = await sidecar_request("GET", "/files", params={"path": row.fotos_path})
+    except MegaError as e:
+        raise HTTPException(503, detail={"code": "mega_indisponivel", "message": str(e)}) from e
+    fotos = [a for a in (resp.get("arquivos") or []) if a.get("imagem")]
+    return {"produto": row.name, "pasta": row.fotos_path, "fotos": fotos}
+
+
+@router.get("/produtos/{produto_id}/foto")
+async def baixar_foto_do_produto(
+    produto_id: UUID,
+    nome: str,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    equipe: Annotated[str, Depends(equipe_do_token)],
+) -> Response:
+    """Os bytes de UMA foto.
+
+    `nome` é conferido contra a listagem da pasta antes de virar caminho: sem
+    isso, um `..` no parâmetro viraria leitura de outra pasta da conta MEGA.
+    """
+    row = await _produto_do_portal(session, produto_id)
+    if "/" in nome or ".." in nome or not nome.strip():
+        raise HTTPException(400, detail={"code": "nome_invalido"})
+    try:
+        listagem = await sidecar_request("GET", "/files", params={"path": row.fotos_path})
+        existe = any(
+            a.get("nome") == nome and a.get("imagem") for a in (listagem.get("arquivos") or [])
+        )
+        if not existe:
+            raise HTTPException(404, detail={"code": "nao_encontrado"})
+        bruto = await sidecar_bytes("/file", params={"path": f"{row.fotos_path}/{nome}"})
+    except MegaError as e:
+        raise HTTPException(503, detail={"code": "mega_indisponivel", "message": str(e)}) from e
+
+    # O MIME sai da EXTENSÃO, nunca do que o MEGA disser: é a mesma regra das
+    # outras rotas de bytes daqui, e é ela que impede servir HTML como imagem.
+    media, disposicao = mime_seguro(
+        mime_da_extensao(nome, tabela=_EXT_IMAGEM), permitidos=MIMES_IMAGEM
+    )
+    return Response(
+        content=bruto,
+        media_type=media,
+        headers={
+            "Content-Disposition": f"{disposicao}; filename=\"{nome}\"",
+            "X-Content-Type-Options": "nosniff",
+            # Conteúdo de catálogo muda pouco e a volta ao MEGA é cara.
+            "Cache-Control": "private, max-age=86400",
+        },
+    )
