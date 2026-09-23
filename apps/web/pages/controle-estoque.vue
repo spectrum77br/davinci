@@ -2223,6 +2223,7 @@ async function conferirTodos() {
           <col style="width: 50px" />   <!-- Saída Qtd -->
           <col style="width: 60px" />   <!-- Saldo Atual -->
           <col style="width: 55px" />   <!-- Saldo Reserva -->
+          <col style="width: 60px" />   <!-- Saldo Final -->
           <col style="width: 40px" />   <!-- Conf -->
         </colgroup>
         <thead>
@@ -2230,7 +2231,7 @@ async function conferirTodos() {
             <th class="text-left text-[11px] font-semibold" colspan="2">Identificação</th>
             <th class="text-center text-[11px] font-semibold bg-amber-50 dark:bg-amber-900/20">Entrada</th>
             <th class="text-center text-[11px] font-semibold bg-amber-50 dark:bg-amber-900/20">Saída</th>
-            <th class="text-center text-[11px] font-semibold bg-emerald-50 dark:bg-emerald-900/20" colspan="2">Saldo</th>
+            <th class="text-center text-[11px] font-semibold bg-emerald-50 dark:bg-emerald-900/20" colspan="3">Saldo</th>
             <th class="text-center text-[11px] font-semibold bg-gray-100 dark:bg-gray-800/40">Conf.</th>
           </tr>
           <tr class="bg-muted/30 text-[10px] uppercase tracking-wide">
@@ -2238,14 +2239,15 @@ async function conferirTodos() {
             <th class="text-left">Produto</th>
             <th class="text-right bg-amber-50/60 dark:bg-amber-900/10">Qtd</th>
             <th class="text-right bg-amber-50/60 dark:bg-amber-900/10">Qtd</th>
-            <th class="text-right bg-emerald-50/60 dark:bg-emerald-900/10" title="Disponível para vender = prateleira − reserva">Atual</th>
-            <th class="text-right bg-emerald-50/60 dark:bg-emerald-900/10">Reserva</th>
+            <th class="text-right bg-emerald-50/60 dark:bg-emerald-900/10" title="Saldo atual do Bling (físico), sem descontar a reserva">Atual</th>
+            <th class="text-right bg-emerald-50/60 dark:bg-emerald-900/10" title="Separado para pedidos em aberto no Bling">Reserva</th>
+            <th class="text-right bg-emerald-50/60 dark:bg-emerald-900/10" title="Disponível para vender = Atual − Reserva">Final</th>
             <th class="text-center bg-gray-100/60 dark:bg-gray-800/30">✓</th>
           </tr>
         </thead>
         <tbody>
           <tr v-if="produtosFiltered.length === 0">
-            <td colspan="7" class="py-6 text-center text-muted-foreground">
+            <td colspan="8" class="py-6 text-center text-muted-foreground">
               Nenhum produto para esse filtro.
             </td>
           </tr>
@@ -2276,19 +2278,24 @@ async function conferirTodos() {
             </td>
             <td
               class="text-right bg-emerald-50/40 dark:bg-emerald-900/5 font-semibold"
-              :class="row.saldo_virtual <= 0 ? 'text-red-600' : 'text-emerald-700'"
-              :title="`Na prateleira: ${row.saldo_fisico}`"
+              :class="row.saldo_fisico <= 0 ? 'text-red-600' : 'text-emerald-700'"
             >
-              {{ row.saldo_virtual }}
+              {{ row.saldo_fisico }}
             </td>
             <td
               class="text-right bg-emerald-50/40 dark:bg-emerald-900/5"
               :class="row.reserva < 0 ? 'font-semibold text-amber-700 dark:text-amber-300 cursor-help' : 'text-muted-foreground'"
               :title="row.reserva < 0
-                ? `Pedido em aberto no Bling com quantidade negativa (entrada, ex. transferência de lote). O Atual já conta essa entrada; na prateleira há ${row.saldo_fisico}.`
+                ? 'Pedido em aberto no Bling com quantidade negativa (entrada, ex. transferência de lote). O Final já conta essa entrada.'
                 : undefined"
             >
               {{ row.reserva || '—' }}
+            </td>
+            <td
+              class="text-right bg-emerald-50/40 dark:bg-emerald-900/5 font-semibold"
+              :class="row.saldo_virtual <= 0 ? 'text-red-600' : 'text-emerald-700'"
+            >
+              {{ row.saldo_virtual }}
             </td>
             <td class="text-center bg-gray-100/40 dark:bg-gray-800/20">
               <input
