@@ -80,6 +80,26 @@ _RE_TIKTOK = re.compile(
 )
 
 
+_SEGREDO = re.compile(
+    r"(access_token|refresh_token|client_secret|token)=[^&\s\"']+", re.IGNORECASE
+)
+
+
+def sem_segredo(texto: str) -> str:
+    """Tira credencial de mensagem de erro ANTES de ela ser gravada.
+
+    Existe por um vazamento real de 23/09/2026: a Meta recebe o token na QUERY
+    STRING, e o `HTTPStatusError` do httpx traz a URL inteira na mensagem. A
+    primeira coleta gravou quatro tokens de produção em texto puro na coluna
+    `erro` — que a tela mostra no tooltip.
+
+    Duas camadas, porque uma só não basta: o token saiu da URL (vai no cabeçalho
+    agora) E toda mensagem passa por aqui. A segunda cobre o erro que vier de
+    biblioteca que a gente não controla.
+    """
+    return _SEGREDO.sub(r"\1=(removido)", texto or "")
+
+
 def _dia(agora: datetime | None = None) -> datetime:
     """A data de hoje em BRT, à meia-noite.
 
@@ -199,10 +219,11 @@ async def do_instagram(media_id: str, access_token: str) -> dict[str, Any]:
     base = f"{meta_client.GRAPH_HOST}/{meta_client.graph_version()}"
     out: dict[str, Any] = {"bruto": {}}
     async with httpx.AsyncClient(timeout=30) as c:
-        r = await c.get(
-            f"{base}/{media_id}",
-            params={"fields": "like_count,comments_count", "access_token": access_token},
-        )
+        # Cabeçalho, NÃO query string: a Graph aceita os dois, e na query o
+        # token entra na mensagem de erro do httpx — foi assim que quatro
+        # tokens de produção foram parar no banco em 23/09.
+        cab = {"Authorization": f"Bearer {access_token}"}
+        r = await c.get(f"{base}/{media_id}", params={"fields": "like_count,comments_count"}, headers=cab)
         r.raise_for_status()
         d = r.json()
         out["curtidas"] = d.get("like_count")
@@ -212,10 +233,8 @@ async def do_instagram(media_id: str, access_token: str) -> dict[str, Any]:
         try:
             r = await c.get(
                 f"{base}/{media_id}/insights",
-                params={
-                    "metric": "views,reach,shares,saved",
-                    "access_token": access_token,
-                },
+                params={"metric": "views,reach,shares,saved"},
+                headers=cab,
             )
             r.raise_for_status()
             mapa = {
@@ -230,7 +249,7 @@ async def do_instagram(media_id: str, access_token: str) -> dict[str, Any]:
         except httpx.HTTPStatusError as e:
             # Não é falha da coleta: é permissão que falta. Fica anotado no
             # bruto pra quem for investigar, e os outros números seguem.
-            out["bruto"]["insights_erro"] = str(e.response.text)[:300]
+            out["bruto"]["insights_erro"] = sem_segredo(str(e.response.text))[:300]
     return out
 
 
@@ -349,7 +368,7 @@ async def coletar(session: AsyncSession, *, agora: datetime | None = None) -> di
                 )
         except Exception as e:  # noqa: BLE001 — a falha de uma conta não derruba as outras
             for a in doGrupo:
-                prontos[a["p"].id] = {"erro": f"{type(e).__name__}: {e}"[:400]}
+                prontos[a["p"].id] = {"erro": sem_segredo(f"{type(e).__name__}: {e}")[:400]}
 
     async with httpx.AsyncClient(timeout=30, follow_redirects=True) as cliente:
         for a in alvos:
@@ -372,7 +391,7 @@ async def coletar(session: AsyncSession, *, agora: datetime | None = None) -> di
                 else:
                     dados = {"erro": f"não sei ler métrica de {p.plataforma}"}
             except Exception as e:  # noqa: BLE001 — um post ruim não derruba a rodada
-                dados = {"erro": f"{type(e).__name__}: {e}"[:400]}
+                dados = {"erro": sem_segredo(f"{type(e).__name__}: {e}")[:400]}
 
             await _gravar(session, a, dia, dados)
             r["falhou" if dados.get("erro") else "ok"] += 1

@@ -53,6 +53,36 @@ async def test_dia_e_o_dia_de_brasilia_nao_o_de_utc():
     assert svc._dia(manha).date().isoformat() == "2026-09-23"
 
 
+# ---------- credencial NUNCA entra em mensagem de erro ----------
+
+
+def test_erro_nao_pode_carregar_token():
+    """Vazamento real de 23/09/2026: a Graph recebe o token na QUERY STRING, e
+    o HTTPStatusError do httpx traz a URL inteira na mensagem. A primeira
+    coleta gravou quatro tokens de produção em texto puro na coluna `erro` —
+    que a tela mostra no tooltip.
+
+    O token saiu da URL (vai no cabeçalho agora), mas isto aqui é a segunda
+    camada: erro de biblioteca que a gente não controla também passa por aqui.
+    """
+    sujo = (
+        "HTTPStatusError: Client error '400 Bad Request' for url "
+        "'https://graph.facebook.com/v26.0/181043?fields=like_count"
+        "&access_token=EAAO66XJZBvlQBSRIxtUqsEhAZBcrhmztNAV67Hs5AE'"
+    )
+    limpo = svc.sem_segredo(sujo)
+    assert "EAAO66XJZBvlQBSRIxtUqsEh" not in limpo, "o token não pode sobreviver"
+    assert "access_token=(removido)" in limpo
+    assert "400 Bad Request" in limpo, "o que interessa do erro continua legível"
+    assert "like_count" in limpo, "o resto da URL ajuda a diagnosticar e fica"
+
+    # As outras credenciais que podem aparecer numa mensagem da Meta/Google.
+    for chave in ("refresh_token", "client_secret", "token"):
+        assert "sup3r-s3cr3t" not in svc.sem_segredo(f"erro: {chave}=sup3r-s3cr3t&x=1")
+    assert svc.sem_segredo("") == ""
+    assert svc.sem_segredo(None) == ""
+
+
 # ---------- leitura do TikTok (sem API, da página pública) ----------
 
 
