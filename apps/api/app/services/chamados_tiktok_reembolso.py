@@ -32,9 +32,17 @@ O vigia (cron :10/:40) então só:
     daí em diante quem acompanha é o sync dos chamados, até a TikTok decidir.
 Ele NÃO abre chamado e NÃO contesta sozinho. A réplica manual num chamado antigo continua
 sendo a recusa (`contestar`).
+
+23/09 (293798, Vinicius): o caso REABERTO — suporte da TikTok depois da disputa, ou o
+comprador refez — é respondido sozinho pelo sync dos chamados com a mesma contestação do
+lançamento (`chamados_devolucao_sync._tt_responder_caso_reaberto`), e a réplica num
+chamado de devolução TikTok recusa o caso que espera a nossa resposta
+(`chamados_devolucao._replica_tiktok_reembolso`). Texto longo recusado pela TikTok →
+sai de novo curto (`recusar_reembolso`).
 """
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime, timedelta
 from uuid import NAMESPACE_URL, uuid5
 
@@ -76,6 +84,12 @@ MAX_FOTOS = 6
 # voltaram "98001004 Invalid parameters — the length of seller words is over limit".
 # Contado em BYTES UTF-8 pra valer nas duas leituras possíveis (caractere ou byte).
 COMENTARIO_MAX_BYTES = 500
+# 23/09 (293798, caso reaberto pelo suporte da TikTok): no Seller Center o campo da
+# recusa aceitava só 150 caracteres. A API não informa o limite de cada caso — os 500
+# acima foram medidos pelo erro. Então: sai o texto de 500; se a TikTok devolver
+# "over limit" (98001004), sai de novo o texto curto, com o link do vídeo inteiro.
+COMENTARIO_CURTO_BYTES = 150
+ERRO_TEXTO_LONGO = "98001004"
 _NS = uuid5(NAMESPACE_URL, "davinci:tiktok_reembolso")
 _BRT = timedelta(hours=-3)
 
@@ -265,6 +279,123 @@ def texto_contestacao(
     partes.append(f"{alegacao}{quando}{depois}{prova}.")
     partes.append("Pedimos que o reembolso seja negado.")
     return caber(partes)
+
+
+_RE_URL = re.compile(r"https?://\S+")
+_RE_ID_LINK = re.compile(r"[-\w]{20,}")  # id do arquivo no Drive (o mesmo em /file/d/ e ?id=)
+
+
+def _link_no_texto(texto: str, link: str) -> str | None:
+    """O link do vídeo como ele aparece no texto (a pessoa pode ter colado a outra forma
+    do mesmo link do Drive), ou None se o texto não tem o vídeo."""
+    if link in texto:
+        return link
+    ids = set(_RE_ID_LINK.findall(link))
+    if not ids:
+        return None
+    for url in _RE_URL.findall(texto):
+        if ids & set(_RE_ID_LINK.findall(url)):
+            return url
+    return None
+
+
+def caber_com_link(texto: str, link: str | None, limite: int = COMENTARIO_MAX_BYTES) -> str:
+    """O texto dentro do limite SEM partir o link do vídeo — a API não aceita vídeo, o
+    link é a prova. Texto sem o link ganha "Vídeo da expedição: <link>" no fim; o que
+    não cabe corta primeiro depois do link, depois antes dele."""
+    texto = " ".join((texto or "").split())
+    link = (link or "").strip()
+    if link:
+        achado = _link_no_texto(texto, link)
+        if achado is None:
+            texto = f"{texto} Vídeo da expedição: {link}".strip()
+        else:
+            link = achado
+    if _bytes(texto) <= limite:
+        return texto
+    if not link or _bytes(link) > limite:
+        return caber([texto], limite)
+    antes, _, depois = texto.partition(link)
+    antes, depois = antes.strip(), depois.strip()
+    resto = limite - _bytes(link)
+    if antes and _bytes(antes) + 1 <= resto:
+        resto -= _bytes(antes) + 1
+    elif antes:
+        cortado = _cortar(antes, resto - 4) if resto > 4 else ""  # espaço + "…"
+        antes = f"{cortado}…" if cortado else ""
+        resto = 0
+    depois = caber([depois], resto - 1) if depois and resto > 1 else ""
+    return " ".join(p for p in (antes, link, depois) if p)
+
+
+def texto_curto(entrega: dict, video: str | None, limite: int = COMENTARIO_CURTO_BYTES) -> str:
+    """A recusa no tamanho mínimo que a TikTok já pediu: a entrega e o link do vídeo."""
+    dia = _fmt((entrega or {}).get("quando"))[:5]
+    frase = f"Contestamos: entregue em {dia} sem avaria." if dia else "Contestamos o reembolso."
+    if not video:
+        return caber([frase, "Pedimos que o reembolso seja negado."], limite)
+    return caber_com_link(f"{frase} Vídeo: {video}", video, limite)
+
+
+def espera_nossa_recusa(caso: dict) -> bool:
+    """A TikTok espera a NOSSA resposta a este só reembolso (ação SELLER_RESPOND_REFUND
+    com prazo) — inclusive quando o caso não está mais "pendente" (arbitragem encerrada
+    devolve o relógio pra loja, 22/09). É a mesma condição da linha "A TikTok está
+    esperando a NOSSA resposta" do chamado."""
+    status = str(caso.get("return_status") or "").upper()
+    return (
+        e_so_reembolso(caso)
+        and prazo_resposta(caso) is not None
+        and status not in _DESFECHOS
+    )
+
+
+async def recusar_reembolso(
+    client: TikTokClient,
+    rid: str,
+    *,
+    motivo: str,
+    texto: str,
+    curto: str,
+    images: list[dict] | None,
+    chave: str,
+) -> str:
+    """REJECT_REFUND com `texto`; se a TikTok recusar o tamanho (98001004), sai `curto`.
+    Devolve o texto que a TikTok aceitou. Levanta com o erro da API."""
+    try:
+        await client.reject_return(
+            rid, decision="REJECT_REFUND", reject_reason=motivo, comment=texto,
+            images=images or None, idempotency_key=chave,
+        )
+        return texto
+    except RuntimeError as e:
+        if ERRO_TEXTO_LONGO not in str(e) or not curto or curto == texto:
+            raise
+        logger.info(
+            "tiktok_reembolso_texto_curto", return_id=rid, bytes=_bytes(texto), curto=_bytes(curto)
+        )
+    await client.reject_return(
+        rid, decision="REJECT_REFUND", reject_reason=motivo, comment=curto,
+        images=images or None, idempotency_key=str(uuid5(_NS, f"{chave}:curto")),
+    )
+    return curto
+
+
+async def subir_fotos_chamado(client: TikTokClient, anexos: list) -> list[dict]:
+    """Fotos anexadas no chamado (réplica) → lista `images` do reject."""
+    from app.services.chamados_devolucao import preparar_foto
+
+    images: list[dict] = []
+    for a in [x for x in anexos if (x.content_type or "").startswith("image/")][:MAX_FOTOS]:
+        nome, dados, ctype = preparar_foto(a)  # mesmos campos do DevolucaoAnexo
+        d = await client.upload_image(nome, dados, ctype)
+        img: dict = {"image_id": d.get("uri"), "mime_type": ctype}
+        if d.get("width"):
+            img["width"] = int(d["width"])
+        if d.get("height"):
+            img["height"] = int(d["height"])
+        images.append(img)
+    return images
 
 
 def _pedido_do_comprador(eventos: list[dict]) -> tuple[object, bool]:
@@ -599,8 +730,6 @@ async def contestar(
     do reembolso na TikTok com as fotos da própria réplica. Nunca levanta: falha vira
     `status='falhou'` + `erro`. (O caminho normal desde 18/09 é o lançamento —
     chamados_devolucao — que monta o texto sozinho.)"""
-    from app.services.chamados_devolucao import preparar_foto
-
     rid = (ch.origem_ref or "")[len(PREFIXO_REF):] or (ch.chamado or "")
     try:
         client, caso = await _client_e_caso(session, ch, rid)
@@ -627,23 +756,12 @@ async def contestar(
                     .order_by(ChamadoAnexo.created_at)
                 )
             ).scalars().all()
-        images: list[dict] = []
-        for a in [x for x in anexos if (x.content_type or "").startswith("image/")][:MAX_FOTOS]:
-            nome, dados, ctype = preparar_foto(a)  # type: ignore[arg-type] — mesmos campos do DevolucaoAnexo
-            d = await client.upload_image(nome, dados, ctype)
-            img: dict = {"image_id": d.get("uri"), "mime_type": ctype}
-            if d.get("width"):
-                img["width"] = int(d["width"])
-            if d.get("height"):
-                img["height"] = int(d["height"])
-            images.append(img)
-        await client.reject_return(
-            rid,
-            decision="REJECT_REFUND",
-            reject_reason=motivo,
-            comment=caber([msg.texto or ""]),
-            images=images or None,
-            idempotency_key=str(uuid5(_NS, f"{ch.id}:{msg.id}")),
+        images = await subir_fotos_chamado(client, list(anexos))
+        await recusar_reembolso(
+            client, rid, motivo=motivo,
+            texto=caber([msg.texto or ""]),
+            curto=caber([msg.texto or ""], COMENTARIO_CURTO_BYTES),
+            images=images, chave=str(uuid5(_NS, f"{ch.id}:{msg.id}")),
         )
         msg.status = "enviada"
         msg.erro = None

@@ -1363,6 +1363,9 @@ async def _subir_fotos_tiktok(
     return images
 
 
+_TEXTO_CURTO = ", texto curto — a TikTok recusou o tamanho do longo"
+
+
 async def _recusar_reembolso(
     session: AsyncSession,
     ch: Chamado,
@@ -1373,12 +1376,19 @@ async def _recusar_reembolso(
     rastreio: DevolucaoRastreio | None,
     msg: ChamadoMensagem | None,
     texto_operador: str | None,
+    *,
+    rodada: str = "",
+    como: str = "pelo lançamento",
 ) -> tuple[str, str]:
     """Lançamento → recusa do SÓ REEMBOLSO no caso que o vigia achou. O texto é montado
     sozinho (fatos da entrega + alegação do comprador + link do vídeo + fotos); o que o
     operador digitou entra só como observação. Vídeo obrigatório: sem link de vídeo
     (coluna Vídeo / "Link envio") e sem foto, fica `pendente` — "não adianta responder sem
-    as informações corretas" (Vinicius 18/09)."""
+    as informações corretas" (Vinicius 18/09).
+
+    `rodada`/`como` (23/09): o mesmo texto responde sozinho o caso REABERTO
+    (`chamados_devolucao_sync`) — `rodada` separa a chave de idempotência de cada prazo,
+    senão a TikTok devolveria a resposta antiga como se fosse a nova."""
     rid = str(caso.get("return_id") or "").strip()
     if not rid:
         raise _PendenteError("devolucao_sem_return")
@@ -1423,19 +1433,21 @@ async def _recusar_reembolso(
     if msg is not None:
         msg.texto = texto
     images = await _subir_fotos_tiktok(session, client, fotos)
-    await client.reject_return(
-        rid,
-        decision="REJECT_REFUND",
-        reject_reason=motivo,
-        comment=texto,  # texto_contestacao já cabe em COMENTARIO_MAX_BYTES
-        images=images or None,
-        idempotency_key=str(uuid5(_NS_TIKTOK, f"{ch.id}:{rid}")),
+    enviado = await tiktok_reembolso.recusar_reembolso(
+        client, rid, motivo=motivo,
+        texto=texto,  # texto_contestacao já cabe em COMENTARIO_MAX_BYTES
+        curto=tiktok_reembolso.texto_curto(entrega, video or None),
+        images=images,
+        chave=str(uuid5(_NS_TIKTOK, f"{ch.id}:{rid}" + (f":{rodada}" if rodada else ""))),
     )
+    if msg is not None:
+        msg.texto = enviado
     session.add(
         chamados_svc.registrar_sistema(
             ch,
-            f"{tiktok_reembolso.MARCA_AUTO} pelo lançamento (motivo {motivo},"
-            f" {len(images)} foto(s){', vídeo no texto' if video else ''}).",
+            f"{tiktok_reembolso.MARCA_AUTO} {como} (motivo {motivo},"
+            f" {len(images)} foto(s){', vídeo no texto' if video else ''}"
+            f"{_TEXTO_CURTO if enviado != texto else ''}).",
         )
     )
     return rid, "recusa do SÓ REEMBOLSO — " + REASON_NOME.get(motivo, motivo)
@@ -2385,6 +2397,92 @@ async def _disparar(
     return msg
 
 
+async def _replica_tiktok_reembolso(
+    session: AsyncSession, ch: Chamado, msg: ChamadoMensagem
+) -> bool:
+    """Réplica num chamado TikTok cujo SÓ REEMBOLSO espera a nossa resposta → recusa na
+    TikTok com o texto digitado (+ link do vídeo, se faltou) e as fotos da réplica — sem
+    foto na réplica, vão as do lançamento. False = nenhum caso esperando a nossa resposta
+    (a réplica fica só no histórico, como antes).
+
+    Vinicius 23/09 (293798): o suporte da TikTok reabriu o caso depois da nossa recusa e a
+    réplica do Cairo ficou "registrada — sem API"; a resposta só saiu porque ele entrou
+    no Seller Center 25 min antes do prazo. Na disputa não há API, mas no pedido de
+    reembolso esperando a loja há — é a mesma recusa que o lançamento faz."""
+    dev = await _dev_de_chamado(session, ch)
+    if dev is None:
+        return False
+    client = await _tiktok_client_para(session, ch, dev)
+    casos = await _casos_tiktok(client, dev)
+    esperando = [c for c in casos if tiktok_reembolso.espera_nossa_recusa(c)]
+    if not esperando:
+        return False
+    atual = (ch.chamado or "").strip()
+    caso = next((c for c in esperando if str(c.get("return_id") or "") == atual), None) or max(
+        esperando, key=lambda c: int(c.get("update_time") or 0)
+    )
+    rid = str(caso.get("return_id") or "").strip()
+    motivo = tiktok_reembolso._motivo_recusa(await client.get_reject_reasons(rid))
+    if not motivo:
+        raise chamados_svc.ChamadoError("tiktok_motivo_indisponivel")
+    linhas = await _linhas_do_pedido(session, dev)
+    video = await _link_video(session, dev, linhas)
+    anexos_replica = (
+        await session.execute(
+            select(ChamadoAnexo)
+            .where(ChamadoAnexo.mensagem_id == msg.id)
+            .order_by(ChamadoAnexo.created_at)
+        )
+    ).scalars().all()
+    if anexos_replica:
+        images = await tiktok_reembolso.subir_fotos_chamado(client, list(anexos_replica))
+    else:
+        fotos = [
+            a for a in await anexos_de(session, [d.id for d in linhas])
+            if (a.content_type or "").lower() in FOTO_TIPOS_IMAGEM
+        ]
+        images = await _subir_fotos_tiktok(session, client, fotos)
+    digitado = msg.texto or ""
+    enviado = await tiktok_reembolso.recusar_reembolso(
+        client, rid, motivo=motivo,
+        texto=tiktok_reembolso.caber_com_link(digitado, video or None),
+        curto=tiktok_reembolso.caber_com_link(
+            digitado, video or None, tiktok_reembolso.COMENTARIO_CURTO_BYTES
+        ),
+        images=images,
+        chave=str(uuid5(_NS_TIKTOK, f"{ch.id}:{rid}:{msg.id}")),
+    )
+    ch.chamado = rid
+    msg.texto = enviado  # o histórico mostra o que a TikTok recebeu
+    msg.status = "enviada"
+    msg.erro = None
+    msg.enviada_at = datetime.now(UTC)
+    ajuste = ""
+    if enviado != " ".join(digitado.split()):
+        ajuste = (
+            _TEXTO_CURTO
+            if tiktok_reembolso._bytes(enviado) <= tiktok_reembolso.COMENTARIO_CURTO_BYTES
+            else ", texto ajustado ao limite da TikTok / link do vídeo incluído"
+        )
+    session.add(
+        chamados_svc.registrar_sistema(
+            ch,
+            f"{tiktok_reembolso.MARCA_AUTO} pela réplica de {msg.autor_nome or 'operador'}"
+            f" (caso {rid}, motivo {motivo}, {len(images)} foto(s){ajuste}).",
+        )
+    )
+    return True
+
+
+async def _dev_de_chamado(session: AsyncSession, ch: Chamado) -> Devolution | None:
+    if not ch.origem_ref:
+        return None
+    try:
+        return await session.get(Devolution, UUID(str(ch.origem_ref)))
+    except ValueError:
+        return None
+
+
 async def replicar_devolucao(
     session: AsyncSession, ch: Chamado, msg: ChamadoMensagem
 ) -> ChamadoMensagem:
@@ -2397,6 +2495,19 @@ async def replicar_devolucao(
     pelo Seller Center. Antes (06/09) tudo virava `falhou — chamado_nao_ml`."""
     abertura = await mensagem_abertura(session, ch)
     if abertura is not None and abertura.status == "enviada":
+        if plataforma_de(ch.plataforma) == PLAT_TIKTOK:
+            try:
+                if await _replica_tiktok_reembolso(session, ch, msg):
+                    return msg
+            except chamados_svc.ChamadoError as e:
+                msg.status = "falhou"
+                msg.erro = e.code
+                return msg
+            except Exception as e:  # noqa: BLE001 — erro cru da API da TikTok
+                msg.status = "falhou"
+                msg.erro = str(e)[:300]
+                logger.warning("chamado_replica_tiktok_falhou", chamado_id=str(ch.id), err=msg.erro)
+                return msg
         msg.status = "registrada"
         msg.erro = "plataforma_sem_api_replica"
         return msg

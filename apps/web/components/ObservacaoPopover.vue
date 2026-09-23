@@ -61,7 +61,7 @@ function focarCaixa(e: Event) {
         align="start"
         :side-offset="4"
         :collision-padding="8"
-        class="z-50 w-[380px] max-w-[calc(100vw-16px)] rounded-md border bg-background p-2 shadow-lg"
+        class="z-[70] w-[380px] max-w-[calc(100vw-16px)] rounded-md border bg-background p-2 shadow-lg"
         @open-auto-focus="focarCaixa"
       >
         <div class="mb-1 text-[11px] font-medium text-muted-foreground">{{ titulo }}</div>

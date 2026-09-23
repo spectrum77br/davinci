@@ -50,6 +50,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models import Chamado, ChamadoMensagem, Devolution
 from app.services import chamados as chamados_svc
 from app.services import chamados_devolucao as cd
+from app.services import chamados_tiktok_reembolso as tiktok_reembolso
 from app.services import logistica_rules, logistica_tiktok, vigia_chamados
 from app.services.devolucao_returns import epoch_to_dt, iso_to_dt
 from app.services.texto_html import limpar_html
@@ -369,9 +370,117 @@ async def _tt_estado_do_caso(
     return 1 if await registrar_recebida(session, ch, cd.PLAT_TIKTOK, texto, quando=agora) else 0
 
 
+# O que a resposta automática do caso reaberto diz quando não sai (o código cru
+# vai pro log).
+_REABERTO_FALHA = {
+    "devolucao_sem_video": "o lançamento não tem vídeo nem foto",
+    "tiktok_motivo_indisponivel": "a TikTok não ofereceu o motivo de recusa",
+}
+
+
+async def _tt_responder_caso_reaberto(
+    session: AsyncSession,
+    ch: Chamado,
+    dev: Devolution | None,
+    client,
+    caso: dict,
+    *,
+    agora: datetime,
+    exigir_novidade: bool = False,
+) -> int:
+    """Responde SOZINHO o caso que a TikTok reabriu, com a mesma contestação do
+    lançamento (mesmo vídeo, mesmas fotos, texto montado dos fatos da entrega).
+
+    Vinicius 23/09 (293798, R$ 640,54): o lançamento recusou o primeiro caso em
+    18/09, a compradora abriu disputa e o suporte da TikTok criou um caso novo
+    esperando a nossa resposta até 23/09 08:24. O painel mostrou o prazo, mas
+    ninguém respondeu — ele respondeu à mão 25 min antes. "3 pode fazer."
+
+    Só quando: o lançamento já contestou um só reembolso neste chamado (a marca
+    no histórico — devolução com pacote não entra, o texto seria outro); o caso
+    está pendente da nossa resposta; e é a primeira vez pra esse (caso, prazo).
+    Uma tentativa só: se não sair, o histórico diz por quê e a réplica do chamado
+    responde (mesma recusa, com o texto digitado).
+
+    `exigir_novidade`: o caso é o MESMO que o chamado já acompanhava — só conta
+    como reaberto se a TikTok mexeu nele depois da nossa última resposta (senão é
+    a lista da TikTok ainda atrasada, logo depois da recusa do lançamento)."""
+    if dev is None or dev.id is None or not tiktok_reembolso.e_pendente_de_resposta(caso):
+        return 0
+    rid = str(caso.get("return_id") or "").strip()
+    prazo = tiktok_reembolso.prazo_resposta(caso)
+    if not rid or prazo is None:
+        return 0
+    abertura = await cd.mensagem_abertura(session, ch)
+    if abertura is None or abertura.status != "enviada":
+        return 0  # o lançamento ainda não respondeu: quem tenta é ele (cron de hora em hora)
+    sistema = list(
+        (
+            await session.execute(
+                select(ChamadoMensagem.texto).where(
+                    ChamadoMensagem.chamado_id == ch.id, ChamadoMensagem.tipo == "sistema"
+                )
+            )
+        ).scalars()
+    )
+    if not any((t or "").startswith(tiktok_reembolso.MARCA_AUTO) for t in sistema):
+        return 0
+    if exigir_novidade:
+        ultima = await tiktok_reembolso.resposta_enviada(session, ch)
+        feita = (ultima.enviada_at or ultima.created_at) if ultima is not None else None
+        if feita is not None and feita.tzinfo is None:
+            feita = feita.replace(tzinfo=UTC)
+        mexeu = epoch_to_dt(caso.get("update_time"))
+        if feita is not None and (mexeu is None or mexeu <= feita):
+            return 0
+    prazo_txt = (
+        datetime.fromtimestamp(prazo, UTC)
+        .astimezone(chamados_svc.SAO_PAULO)
+        .strftime("%d/%m/%Y %H:%M")
+    )
+    marca = f"caso reaberto {rid} (prazo {prazo_txt})"
+    if any(marca in (t or "") for t in sistema):
+        return 0
+    linhas = await cd._linhas_do_pedido(session, dev)
+    fotos = [
+        a for a in await cd.anexos_de(session, [d.id for d in linhas])
+        if (a.content_type or "").lower() in cd.FOTO_TIPOS_IMAGEM
+    ]
+    rastreio = await cd._rastreio_devolucao(session, dev, cd.PLAT_TIKTOK)
+    msg = chamados_svc.nova_mensagem(
+        ch, texto="", tipo="replica", autor_nome=tiktok_reembolso.AUTOR_ROBO, status="enviada"
+    )
+    msg.canal = "api"
+    try:
+        await cd._recusar_reembolso(
+            session, ch, dev, client, caso, fotos, rastreio, msg, None,
+            rodada=str(prazo), como=f"sozinho no {marca}",
+        )
+    except Exception as e:  # noqa: BLE001 — erro da TikTok vira aviso no histórico
+        code = str(getattr(e, "code", "") or e)[:200]
+        logger.warning(
+            "chamado_tiktok_caso_reaberto_falhou", chamado_id=str(ch.id), return_id=rid, err=code
+        )
+        session.add(
+            chamados_svc.registrar_sistema(
+                ch,
+                f"A resposta automática do {marca} NÃO saiu ({_REABERTO_FALHA.get(code, code)})"
+                " — responda pela réplica do chamado antes do prazo.",
+            )
+        )
+        return 1
+    # Depois da linha "A TikTok está esperando a NOSSA resposta" desta passada
+    # (gravada com `agora`) — é a nossa resposta que fica por último.
+    msg.created_at = msg.enviada_at = max(datetime.now(UTC), agora + timedelta(seconds=1))
+    session.add(msg)
+    logger.info("chamado_tiktok_caso_reaberto_respondido", chamado_id=str(ch.id), return_id=rid)
+    return 1
+
+
 async def _sync_tiktok(
     session: AsyncSession, ch: Chamado, dev: Devolution | None, *, agora: datetime | None = None
 ) -> int:
+    dev_real = dev  # o sintético abaixo não tem linhas, fotos nem vídeo
     dev = dev or Devolution(conta=ch.conta or "", pedido_bling=ch.pedido_bling,
                             pedido_marketplace=ch.pedido_marketplace)
     client = await cd._tiktok_client_para(session, ch, dev)
@@ -446,6 +555,7 @@ async def _sync_tiktok(
         novos += await _tiktok_linha_do_tempo(session, ch, client, novo_id)
         novos += await _tiktok_conversa_do_pedido(session, ch, client, casos, novo_id)
         novos += await _tt_estado_do_caso(session, ch, novo, agora=agora)
+        novos += await _tt_responder_caso_reaberto(session, ch, dev_real, client, novo, agora=agora)
         return novos
     if status in _TT_STATUS_TXT:
         txt, fim = _TT_STATUS_TXT[status]
@@ -459,6 +569,9 @@ async def _sync_tiktok(
     # Por último, o que a plataforma espera AGORA: é a linha que a equipe lê
     # primeiro e a que decide se o chamado está mesmo parado ou correndo prazo.
     novos += await _tt_estado_do_caso(session, ch, caso, agora=agora)
+    novos += await _tt_responder_caso_reaberto(
+        session, ch, dev_real, client, caso, agora=agora, exigir_novidade=True
+    )
     return novos
 
 

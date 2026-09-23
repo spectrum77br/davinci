@@ -2396,8 +2396,12 @@ async def test_sync_tiktok_pedido_refeito_pelo_comprador_nao_e_ganhamos(client, 
         "caixa de sabonete ao invés do celular! — Pacote recebido, mas faltam alguns itens" in t
         for t in txts
     ), txts
-    # canal api: a resposta é de gente (o robô não responde devolução pela API)
-    assert (await _status_aba(db, ch)) == ("analise_humano", "plataforma respondeu — responder no Seller Center")
+    # 23/09 (293798, Vinicius "3 pode fazer"): o caso refeito é respondido SOZINHO com
+    # a mesma contestação do lançamento — antes ficava "plataforma respondeu — responder
+    # no Seller Center" e dependia de alguém entrar lá antes do prazo.
+    assert len(fake.rejects) == 2
+    assert (fake.rejects[1]["return_id"], fake.rejects[1]["decision"]) == ("4042163882929260440", "REJECT_REFUND")
+    assert (await _status_aba(db, ch))[0] == "aguard_plataforma"
 
 
 # ---------------------------------------------------------------- Shopee: só reembolso já aprovado → robô (18/09)

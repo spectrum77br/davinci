@@ -373,7 +373,7 @@ const ERROS: Record<string, string> = {
   shopee_sem_email: 'sem e-mail do operador pra Shopee (DEVOLUCAO_DISPUTE_EMAIL)',
   shopee_prazo_contestacao_esgotado: 'prazo da Shopee pra contestar venceu (validação do vendedor, ~3 dias após receber o pacote)',
   devolucao_motivo_sem_chamado: 'esse motivo de devolução não abre chamado (Item Incorreto saiu da lista em 07/09)',
-  plataforma_sem_api_replica: 'Shopee/TikTok não têm API de resposta na disputa — ficou só no histórico; responda pelo Seller Center',
+  plataforma_sem_api_replica: 'nenhum caso esperando a nossa resposta pela API (disputa não tem API) — ficou só no histórico; responda pelo Seller Center',
   plataforma_sem_api: 'plataforma sem API — abrir na mão',
   chamado_sem_integracao_tiktok: 'conta sem integração TikTok no DaVinci',
   chamado_sem_integracao_shopee: 'conta sem integração Shopee no DaVinci',
@@ -899,6 +899,18 @@ async function openHistorico(row: ChamadoRow, focoReplica = false) {
     await nextTick()
     replicaBalao.value = true
   }
+}
+
+// 23/09 (Vinicius): a Observação da coluna também dentro do histórico — mesmo
+// campo, mesmo balão (ObservacaoPopover) e mesmo PATCH da linha. Depois de salvar,
+// o histórico passa a apontar pra linha nova da tabela (o replaceRow troca o
+// objeto), senão a próxima edição sairia de uma cópia velha.
+async function salvarObservacaoHist() {
+  const row = hist.row
+  if (!row) return
+  await saveRow(row)
+  const atual = items.value.find(r => r.id === row.id)
+  if (atual && hist.row?.id === row.id) hist.row = atual
 }
 
 function closeHistorico() {
@@ -1893,7 +1905,23 @@ async function confirmarExcluir() {
              (fechado por pessoa) a API devolve 422 chamado_concluido — a réplica some e
              fica só o aviso pra reabrir. -->
         <div v-if="hist.row.resolvido" class="shrink-0 grid gap-4 border-t px-4 py-3 md:grid-cols-2">
-          <div class="md:col-start-2 text-xs text-muted-foreground inline-flex items-center gap-1.5">
+          <div class="min-w-0">
+            <!-- 23/09 (Vinicius): a Observação da coluna, aqui também. -->
+            <div class="flex items-center gap-2 min-w-0">
+              <span class="shrink-0 text-xs font-medium">Observação</span>
+              <div class="min-w-0 flex-1 rounded-md border bg-amber-50/40 dark:bg-amber-900/10">
+                <ObservacaoPopover
+                  :model-value="hist.row.observacao"
+                  :disabled="!canEdit"
+                  placeholder="clique pra escrever"
+                  :titulo="`Observação · ${hist.row.pedido_bling || hist.row.pedido_marketplace || 'chamado'}`"
+                  @update:model-value="(v) => { if (hist.row) setRowText(hist.row, 'observacao', v) }"
+                  @save="salvarObservacaoHist"
+                />
+              </div>
+            </div>
+          </div>
+          <div class="text-xs text-muted-foreground inline-flex items-center gap-1.5">
             <Bot class="size-3.5 text-indigo-600 dark:text-indigo-400" />
             Chamado concluído — reabra o chamado pra instruir o robô.
           </div>
@@ -1973,6 +2001,20 @@ async function confirmarExcluir() {
                 <Send v-else class="size-4 mr-1.5" />
                 {{ hist.row.canal === 'manual' ? 'Registrar' : hist.row.canal === 'robo' ? 'Enfileirar pro robô' : 'Enviar' }}
               </Button>
+            </div>
+            <!-- 23/09 (Vinicius): a Observação da coluna, aqui também. -->
+            <div class="flex items-center gap-2 min-w-0">
+              <span class="shrink-0 text-xs font-medium">Observação</span>
+              <div class="min-w-0 flex-1 rounded-md border bg-amber-50/40 dark:bg-amber-900/10">
+                <ObservacaoPopover
+                  :model-value="hist.row.observacao"
+                  :disabled="!canEdit"
+                  placeholder="clique pra escrever"
+                  :titulo="`Observação · ${hist.row.pedido_bling || hist.row.pedido_marketplace || 'chamado'}`"
+                  @update:model-value="(v) => { if (hist.row) setRowText(hist.row, 'observacao', v) }"
+                  @save="salvarObservacaoHist"
+                />
+              </div>
             </div>
           </div>
 
