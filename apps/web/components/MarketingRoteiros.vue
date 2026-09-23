@@ -79,6 +79,21 @@ type Roteiro = {
 // A proposta que vem de fora. Carrega o que um personagem NÃO carrega — de
 // onde veio o rosto, de onde veio a voz, se existe cessão escrita —, que é
 // justamente o que alguém precisa ver antes de dizer sim.
+// A ideia que a agência propôs. Aprovar CRIA o briefing endereçado a ela.
+type IdeiaReq = {
+  id: string
+  titulo: string
+  descricao: string
+  justificativa: string | null
+  marca: string | null
+  sku: string | null
+  equipe: string
+  status: string
+  motivo: string | null
+  roteiro_id: string | null
+  criado_em: string | null
+}
+
 type Requisicao = {
   id: string
   nome: string
@@ -187,7 +202,7 @@ async function carregarMarcas() {
 }
 
 onMounted(async () => {
-  await Promise.all([carregar(), carregarMarcas(), carregarPedidos()])
+  await Promise.all([carregar(), carregarMarcas(), carregarPedidos(), carregarIdeias()])
   // Vindo da aba Criativos ("escrever roteiro"): abre logo o que foi criado.
   if (props.foco) abrir(props.foco)
 })
@@ -537,6 +552,65 @@ const reqOcupada = ref<string | null>(null)
 
 const pedidosErro = ref<string | null>(null)
 
+// ---- ideias propostas pelas agências ---------------------------------------
+const ideias = ref<IdeiaReq[]>([])
+const ideiasErro = ref<string | null>(null)
+const ideiaOcupada = ref<string | null>(null)
+
+async function carregarIdeias() {
+  try {
+    const r = await api<{ requisicoes: IdeiaReq[] }>('/api/marketing/roteiros/requisicoes')
+    ideias.value = r.requisicoes
+    ideiasErro.value = null
+  } catch (e: any) {
+    ideias.value = []
+    ideiasErro.value = errMsg(e)
+  }
+}
+
+async function aprovarIdeia(r: IdeiaReq) {
+  if (!window.confirm(
+    `Aprovar "${r.titulo}"? Isso CRIA o briefing endereçado à ${r.equipe} e libera ` +
+    'a produção — ela passa a ver a ideia como roteiro dela.',
+  )) return
+  ideiaOcupada.value = r.id
+  try {
+    const resp = await api<{ roteiro_id: string }>(
+      `/api/marketing/roteiros/requisicoes/${r.id}/aprovar`, { method: 'POST' },
+    )
+    ideias.value = ideias.value.filter((x) => x.id !== r.id)
+    toasts.success('Briefing criado', `${r.titulo} já está na lista de ${r.equipe}.`)
+    await carregar()
+    // Abre o que acabou de nascer: quem aprovou costuma querer revisar o texto.
+    abrir(resp.roteiro_id)
+  } catch (e: any) {
+    toasts.error('Erro ao aprovar', errMsg(e))
+  } finally {
+    ideiaOcupada.value = null
+  }
+}
+
+async function recusarIdeia(r: IdeiaReq) {
+  const motivo = window.prompt(`Recusar "${r.titulo}". Por quê? (a agência lê isto)`)
+  if (motivo === null) return
+  if (!motivo.trim()) {
+    toasts.warning('Escreva o motivo', 'A agência lê este texto — recusa sem motivo volta igual.')
+    return
+  }
+  ideiaOcupada.value = r.id
+  try {
+    await api(`/api/marketing/roteiros/requisicoes/${r.id}/recusar`, {
+      method: 'POST', body: { motivo },
+    })
+    ideias.value = ideias.value.filter((x) => x.id !== r.id)
+    toasts.success('Pedido recusado')
+  } catch (e: any) {
+    toasts.error('Erro ao recusar', errMsg(e))
+  } finally {
+    ideiaOcupada.value = null
+  }
+}
+
 async function carregarPedidos() {
   try {
     const r = await api<{ requisicoes: Requisicao[] }>('/api/marketing/personagens/requisicoes')
@@ -629,9 +703,9 @@ async function recusarPedido(r: Requisicao) {
         >
           <Inbox class="mr-1 inline size-3.5" /> Pedidos
           <span
-            v-if="requisicoes.length"
+            v-if="requisicoes.length + ideias.length"
             class="ml-1 rounded-full bg-primary px-1.5 py-px text-[10px] font-medium text-primary-foreground"
-          >{{ requisicoes.length }}</span>
+          >{{ requisicoes.length + ideias.length }}</span>
         </button>
       </div>
       <Loader2 v-if="carregando || salvando" class="size-3.5 animate-spin text-muted-foreground" />
@@ -1080,10 +1154,57 @@ async function recusarPedido(r: Requisicao) {
     <!-- ══════════════ pedidos ══════════════ -->
     <!-- A agência propõe a PESSOA; não empurra o ativo. Por isso a ficha aqui é
          quase toda procedência: é o que alguém precisa ler antes do sim. -->
-    <div v-if="secao === 'pedidos'" class="space-y-2">
+    <div v-if="secao === 'pedidos'" class="space-y-4">
+      <!-- ── ideias propostas pelas agências ── -->
+      <div class="space-y-2">
+        <h3 class="text-xs font-medium">Ideias propostas pelas agências</h3>
+        <p class="text-[11px] text-muted-foreground">
+          Vídeo pensado por elas, do conceito à execução. Aprovar CRIA o briefing endereçado
+          a quem pediu e é o que libera a produção — recusar guarda o motivo, que a agência lê.
+        </p>
+
+        <div v-if="ideiasErro" class="rounded-lg border border-destructive/40 bg-destructive/5 p-4">
+          <p class="text-xs font-medium text-destructive">Não deu para ler a fila de ideias.</p>
+          <p class="mt-1 text-[11px] text-muted-foreground">{{ ideiasErro }}</p>
+          <button class="btn btn-xs mt-2" @click="carregarIdeias()">Tentar de novo</button>
+        </div>
+        <div v-else-if="!ideias.length" class="rounded-lg border border-dashed p-4 text-center">
+          <p class="text-[11px] text-muted-foreground">Nenhuma ideia esperando.</p>
+        </div>
+
+        <div v-for="r in ideias" :key="r.id" class="rounded-lg border p-3">
+          <div class="flex flex-wrap items-center gap-2">
+            <span class="text-sm font-medium">{{ r.titulo }}</span>
+            <span class="rounded bg-muted px-1.5 py-px text-[10px] text-muted-foreground">
+              {{ r.equipe }}
+            </span>
+            <span v-if="r.marca" class="text-[10px] text-muted-foreground">{{ r.marca }}</span>
+            <span v-if="r.sku" class="font-mono text-[10px] text-muted-foreground">{{ r.sku }}</span>
+            <span v-if="r.criado_em" class="text-[10px] text-muted-foreground">
+              {{ new Date(r.criado_em).toLocaleDateString('pt-BR') }}
+            </span>
+            <div v-if="canEdit" class="ml-auto flex gap-1.5">
+              <button class="btn btn-xs gap-1" :disabled="ideiaOcupada === r.id" @click="aprovarIdeia(r)">
+                <Loader2 v-if="ideiaOcupada === r.id" class="size-3 animate-spin" />
+                <Check v-else class="size-3" /> Aprovar
+              </button>
+              <button class="btn btn-xs gap-1" :disabled="ideiaOcupada === r.id" @click="recusarIdeia(r)">
+                <X class="size-3" /> Recusar
+              </button>
+            </div>
+          </div>
+          <p class="mt-1.5 max-h-40 overflow-auto whitespace-pre-wrap text-xs">{{ r.descricao }}</p>
+          <p v-if="r.justificativa" class="mt-1 text-[11px] text-muted-foreground">
+            <span class="font-medium">Por que vale:</span> {{ r.justificativa }}
+          </p>
+        </div>
+      </div>
+
+      <!-- ── personagens propostos ── -->
+      <h3 class="border-t pt-3 text-xs font-medium">Personagens propostos</h3>
       <p class="text-[11px] text-muted-foreground">
-        Pedidos de personagem feitos pelas agências no portal. Aprovar cria o personagem
-        com nome e descrição — a imagem e o MP3 sobem aqui depois, junto com a cessão.
+        Aprovar cria o personagem com nome e descrição — a imagem e o MP3 sobem aqui depois,
+        junto com a cessão.
       </p>
 
       <div v-if="pedidosErro" class="rounded-lg border border-destructive/40 bg-destructive/5 p-4">
