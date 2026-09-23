@@ -292,7 +292,7 @@ function pollBlingJob(jobId: string) {
         // preso (reserva de um pedido que já saiu no Bling), inflando o
         // "saldo atual" da grade. Encadeia o reconcile de reserva
         // (/sync-stocks: puxa saldoFisico/Virtual do Bling e recalcula
-        // reserved_stock = max(0, físico - virtual)); ele recarrega a
+        // reserved_stock = físico - virtual); ele recarrega a
         // grade já corrigida ao terminar.
         void syncFromBling()
       } else {
@@ -2266,7 +2266,13 @@ async function conferirTodos() {
             >
               {{ row.saldo_fisico }}
             </td>
-            <td class="text-right bg-emerald-50/40 dark:bg-emerald-900/5 text-muted-foreground">
+            <td
+              class="text-right bg-emerald-50/40 dark:bg-emerald-900/5"
+              :class="row.reserva < 0 ? 'font-semibold text-amber-700 dark:text-amber-300 cursor-help' : 'text-muted-foreground'"
+              :title="row.reserva < 0
+                ? `Pedido em aberto no Bling com quantidade negativa (entrada, ex. transferência de lote). O Bling já soma essa entrada no disponível para venda: ${row.saldo_virtual}.`
+                : undefined"
+            >
               {{ row.reserva || '—' }}
             </td>
             <td class="text-center bg-gray-100/40 dark:bg-gray-800/20">

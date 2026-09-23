@@ -68,7 +68,8 @@ class Product(Base, TimestampMixin):
     # Units held by ongoing sales — `saldoFisicoTotal - saldoVirtualTotal`
     # from the Bling estoque webhook. Updated by the webhook handler
     # whenever a payload carries both totals. Default 0 until the first
-    # estoque event arrives.
+    # estoque event arrives. Negative when an open order carries a negative
+    # quantity (lot transfer): Bling adds it to the virtual balance.
     reserved_stock: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     # saldoFisicoTotal / saldoVirtualTotal — populated by the explicit
     # Bling refresh (POST /api/estoque/atualizar-bling). Distinct from

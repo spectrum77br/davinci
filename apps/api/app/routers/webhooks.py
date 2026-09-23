@@ -488,7 +488,12 @@ async def receive_bling_webhook(
                 )
             )
         if saldo_fisico_e is not None:
-            product.reserved_stock = max(0, int(saldo_fisico_e - stock))
+            # Sem piso em zero: pedido em aberto com quantidade NEGATIVA
+            # (transferência de lote, ex. 298725 com -500 de a001.sp) faz o
+            # Bling somar no virtual, e a reserva fica negativa. Zerar aqui
+            # fazia o "Saldo atual" (virtual + reserva) mostrar 661 com 163
+            # na prateleira.
+            product.reserved_stock = int(saldo_fisico_e - stock)
 
         if is_sale and stock > WEBHOOK_LOW_STOCK_LIMIT:
             # Sale but stock still high — defer to daily sync

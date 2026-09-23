@@ -1959,7 +1959,9 @@ async def sync_stocks(
                 missing += 1
                 continue
             p.stock = v
-            p.reserved_stock = max(0, f - v)
+            # Pode ser negativa (pedido em aberto com quantidade negativa);
+            # ver o webhook do Bling — virtual + reserva tem que dar o físico.
+            p.reserved_stock = f - v
             updated += 1
         # Polite pacing between chunks — Bling's documented ceiling is
         # 3 req/s but bursts close to that have tripped us before.
