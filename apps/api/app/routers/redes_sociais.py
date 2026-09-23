@@ -393,6 +393,18 @@ async def patch_rede_social(
                 de=f"{r.plataforma}:{r.conta}",
                 para=f"{nova_plataforma}:{nova_conta}",
             )
+        # Pelo MESMO motivo, o perfil do AdsPower cai junto: ele é o
+        # navegador logado na conta ANTIGA. Mantê-lo faria o executor abrir o
+        # perfil de uma marca pra publicar o vídeo de outra — só que aqui nem
+        # dá erro, o vídeo simplesmente sai no lugar errado.
+        if r.adspower_user_id and "adspower_user_id" not in data:
+            logger.info(
+                "rede_social_adspower_descartado_por_troca",
+                rede_id=str(r.id),
+                de=f"{r.plataforma}:{r.conta}",
+                para=f"{nova_plataforma}:{nova_conta}",
+            )
+            r.adspower_user_id = None
     for k, v in data.items():
         setattr(r, k, v)
     try:

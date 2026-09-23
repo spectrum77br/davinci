@@ -1193,3 +1193,70 @@ async def test_grid_plataformas_sao_as_5_da_planilha_e_marca_ref_completo(
         r = await client.post("/api/redes-sociais", json=_body(poofy, plat, "poofy"))
         assert r.status_code == 422, (plat, r.text)
     assert (await client.get("/api/redes-sociais")).json() == []
+
+
+# ─── perfil do AdsPower (migration 0309) ───────────────────────────────
+#
+# O TikTok não tem API pra nós (o app foi recusado nas duas auditorias), então
+# quem publica é o navegador logado no AdsPower, na máquina do Eduardo. A
+# conta guarda QUAL perfil abrir. É o campo mais perigoso desta aba: apontar
+# pro perfil errado não dá erro nenhum — o vídeo só sai na conta de outra marca.
+
+
+async def test_adspower_grava_com_trim_e_vazio_limpa(client, db, make_user, auth_as):
+    await _admin(make_user, auth_as)
+    poofy = await _seed_marca(db, "Poofy")
+    criado = await client.post("/api/redes-sociais", json=_body(poofy, plataforma="tiktok"))
+    rede_id = criado.json()["id"]
+    # Conta nova nasce sem perfil: o executor não publica sozinho até alguém
+    # preencher conscientemente.
+    assert criado.json()["adspower_user_id"] is None
+
+    salvo = await client.patch(
+        f"/api/redes-sociais/{rede_id}", json={"adspower_user_id": "  k1dohvrh  "}
+    )
+    assert salvo.status_code == 200, salvo.text
+    assert salvo.json()["adspower_user_id"] == "k1dohvrh"
+
+    # Vazio LIMPA — é como se desliga o executor numa conta sem apagá-la.
+    limpo = await client.patch(f"/api/redes-sociais/{rede_id}", json={"adspower_user_id": "  "})
+    assert limpo.json()["adspower_user_id"] is None
+
+
+async def test_adspower_cai_quando_a_linha_muda_de_conta(client, db, make_user, auth_as):
+    """Trocar o @ (ou a marca) faz a linha apontar pra OUTRA conta — e o perfil
+    do AdsPower continua sendo o navegador logado na anterior. Mantê-lo é o
+    caminho direto pro vídeo de uma marca sair no perfil de outra, sem nenhum
+    erro no meio. Mesma regra que já derruba o token."""
+    await _admin(make_user, auth_as)
+    poofy = await _seed_marca(db, "Poofy")
+    criado = await client.post(
+        "/api/redes-sociais", json=_body(poofy, plataforma="tiktok", conta="poofy_brasil")
+    )
+    rede_id = criado.json()["id"]
+    await client.patch(f"/api/redes-sociais/{rede_id}", json={"adspower_user_id": "k1dohvrh"})
+
+    trocada = await client.patch(f"/api/redes-sociais/{rede_id}", json={"conta": "outra_conta"})
+
+    assert trocada.status_code == 200, trocada.text
+    assert trocada.json()["conta"] == "outra_conta"
+    assert trocada.json()["adspower_user_id"] is None, "o perfil da conta antiga ficou pra trás"
+
+
+async def test_adspower_novo_no_mesmo_patch_da_troca_vale(client, db, make_user, auth_as):
+    """Quem troca o @ E manda o perfil novo na mesma chamada sabe o que está
+    fazendo: o valor enviado ganha da limpeza automática."""
+    await _admin(make_user, auth_as)
+    poofy = await _seed_marca(db, "Poofy")
+    criado = await client.post(
+        "/api/redes-sociais", json=_body(poofy, plataforma="tiktok", conta="poofy_brasil")
+    )
+    rede_id = criado.json()["id"]
+    await client.patch(f"/api/redes-sociais/{rede_id}", json={"adspower_user_id": "antigo01"})
+
+    trocada = await client.patch(
+        f"/api/redes-sociais/{rede_id}",
+        json={"conta": "uranyx_oficial", "adspower_user_id": "novo02"},
+    )
+
+    assert trocada.json()["adspower_user_id"] == "novo02"

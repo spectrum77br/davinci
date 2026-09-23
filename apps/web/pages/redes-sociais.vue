@@ -100,6 +100,9 @@ type RedeSocialOut = {
   postagem_auto: boolean
   postagem_max_dia: number | null
   postagem_intervalo_min: number | null
+  // Perfil do AdsPower — só nas plataformas sem API (hoje o TikTok). É o
+  // navegador logado que o executor local abre pra publicar.
+  adspower_user_id: string | null
   // Estado da credencial de publicação (redes_sociais_tokens) — NUNCA o
   // token em si; `token_conta_externa` é o @/nome que ele autoriza.
   has_token: boolean
@@ -153,6 +156,7 @@ type Form = {
   postagem_auto: boolean
   postagem_max_dia: Teto
   postagem_intervalo_min: Teto
+  adspower_user_id: string
 }
 type Modo = 'create' | 'edit'
 
@@ -194,6 +198,7 @@ function montaBody(f: Form, modo: Modo, senhaSalva: string | null): Record<strin
     body.postagem_auto = f.postagem_auto
     body.postagem_max_dia = tetoOuNull(f.postagem_max_dia)
     body.postagem_intervalo_min = tetoOuNull(f.postagem_intervalo_min)
+    body.adspower_user_id = (f.adspower_user_id || '').trim() || null
   }
   // Sem trim: espaço pode ser parte da senha (schemas/marcas.py::_senha).
   if (f.senha && f.senha !== senhaSalva) body.senha = f.senha
@@ -725,6 +730,13 @@ async function limparSenhaMarca() {
 
 const modal = ref<{ rede: RedeSocialOut | null } | null>(null)
 const form = ref<Form>(emptyForm())
+
+// Plataformas que o SERVIDOR não publica: não temos API nelas, então quem
+// posta é o executor local (o Mac, pelo navegador do AdsPower). Espelha
+// PLATAFORMAS_EXECUTOR_LOCAL em services/marketing/postagens.py — se um dia o
+// TikTok aprovar nosso app, some dos dois lugares.
+const PLATAFORMAS_EXECUTOR_LOCAL = ['tiktok']
+const usaExecutorLocal = computed(() => PLATAFORMAS_EXECUTOR_LOCAL.includes(form.value.plataforma))
 const saving = ref(false)
 const modalErr = ref<string | null>(null)
 
@@ -747,6 +759,7 @@ function emptyForm(marcaId = '', plataforma: Plataforma = PLATAFORMAS[0]): Form 
     postagem_auto: false,
     postagem_max_dia: '',
     postagem_intervalo_min: '',
+    adspower_user_id: '',
   }
 }
 
@@ -799,6 +812,7 @@ function openEdit(r: RedeSocialOut) {
     // null = herda o padrão do servidor → campo vazio (o placeholder diz qual é).
     postagem_max_dia: r.postagem_max_dia == null ? '' : r.postagem_max_dia,
     postagem_intervalo_min: r.postagem_intervalo_min == null ? '' : r.postagem_intervalo_min,
+    adspower_user_id: r.adspower_user_id || '',
   }
   modalErr.value = null
   modal.value = { rede: r }
@@ -1668,6 +1682,27 @@ await load()
             <p class="text-[11px] text-muted-foreground">
               em branco usa o padrão do servidor (2 posts/dia, 90 min entre um post e outro nesta conta)
             </p>
+
+            <div v-if="usaExecutorLocal">
+              <Label>perfil do AdsPower</Label>
+              <Input
+                v-model="form.adspower_user_id"
+                :disabled="!canEdit"
+                placeholder="ex.: k1dohvrh"
+                autocomplete="off"
+              />
+              <p class="text-[11px] text-muted-foreground mt-1">
+                o TikTok não tem API pra nós, então quem publica é o navegador já logado nesta
+                conta. Cole aqui o id do perfil no AdsPower (coluna «ID do usuário»). Sem ele a
+                postagem fica em revisão, porque o executor não sabe qual janela abrir.
+              </p>
+              <p
+                v-if="!(form.adspower_user_id || '').trim()"
+                class="text-[11px] text-amber-600 dark:text-amber-400 mt-1"
+              >
+                sem perfil — esta conta não publica sozinha.
+              </p>
+            </div>
           </div>
           <p v-else class="col-span-2 text-[11px] text-muted-foreground">
             publicação automática (token e limites): configure depois de salvar a conta.

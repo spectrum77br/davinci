@@ -196,6 +196,12 @@ function form(over = {}) {
   assert.equal(b2.postagem_auto, true)
   assert.equal(b2.postagem_max_dia, 4)
   assert.equal(b2.postagem_intervalo_min, 30)
+  // Perfil do AdsPower: vai com trim, e vazio vira null EXPLÍCITO — é assim
+  // que dá pra DESLIGAR o executor numa conta sem apagar a conta.
+  assert.equal(H.montaBody(form({ adspower_user_id: '  k1dohvrh ' }), 'edit', null).adspower_user_id, 'k1dohvrh')
+  assert.equal(H.montaBody(form({ adspower_user_id: '   ' }), 'edit', null).adspower_user_id, null)
+  // Na criação o bloco de publicação nem aparece: não pode vazar campo.
+  assert.ok(!('adspower_user_id' in H.montaBody(form({ adspower_user_id: 'x' }), 'create', null)))
   // O token NUNCA passa pelo corpo da conta (vai só no /conectar).
   assert.ok(!JSON.stringify(b2).includes(TOKEN_FALSO) && !('access_token' in b2))
 }

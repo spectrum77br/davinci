@@ -40,7 +40,7 @@ _TEXTO_MARCA = (
     "tipo",
     "obs",
 )
-_TEXTO_REDE = ("usuario", "email", "obs", "verificacao_obs")
+_TEXTO_REDE = ("usuario", "email", "obs", "verificacao_obs", "adspower_user_id")
 
 
 def _texto(v: Any) -> str | None:
@@ -331,6 +331,9 @@ class RedeSocialCreate(BaseModel):
     verificacao_status: VerificacaoStatus = "nao_solicitado"
     verificacao_obs: str | None = None
     obs: str | None = None
+    # Perfil do AdsPower que o executor local abre pra publicar nesta conta.
+    # Só nas plataformas sem API (hoje o TikTok). Vazio vira NULL.
+    adspower_user_id: str | None = None
     ativo: bool = True
 
     _v_conta = field_validator("conta", mode="before")(_handle)
@@ -360,6 +363,9 @@ class RedeSocialPatch(BaseModel):
     postagem_auto: bool | None = None
     postagem_max_dia: int | None = None
     postagem_intervalo_min: int | None = None
+    # Perfil do AdsPower que o executor local abre pra publicar nesta conta.
+    # Só nas plataformas sem API (hoje o TikTok). Vazio vira NULL.
+    adspower_user_id: str | None = None
 
     _v_conta = field_validator("conta", mode="before")(_handle)
     _v_texto = field_validator(*_TEXTO_REDE, mode="before")(_texto)
@@ -395,6 +401,8 @@ class RedeSocialOut(BaseModel):
     postagem_auto: bool = False
     postagem_max_dia: int | None = None
     postagem_intervalo_min: int | None = None
+    # Perfil do AdsPower (só TikTok). A tela usa pra avisar que falta.
+    adspower_user_id: str | None = None
     # Credencial de publicação (redes_sociais_tokens): NUNCA o token, só o
     # que a tela precisa mostrar.
     has_token: bool = False
