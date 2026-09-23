@@ -20,6 +20,7 @@ import {
   ArrowUp, ArrowDown, Megaphone, Check, LifeBuoy, Send, Video,
 } from 'lucide-vue-next'
 import { isoDateBrt, isoDaysAgo, isoToday } from '~/lib/date'
+import { erroLinkMega } from '~/lib/linkMega'
 
 definePageMeta({
   middleware: ['permission'],
@@ -96,7 +97,7 @@ type PedidoRow = {
   previsao_impressa_em: string | null
   // Vídeo da embalagem (Vinicius, 18/09): pede quando o pedido tem mais de
   // 1 unidade (soma dos itens do pedido inteiro — 2 do mesmo SKU ou 2
-  // produtos diferentes). `video` = link do Google Drive salvo pelo botão
+  // produtos diferentes). `video` = link da MEGA salvo pelo botão
   // antes de Obs (grão de pedido: as linhas do mesmo pedido mostram igual).
   pede_video: boolean
   video: PedidoVideo | null
@@ -417,6 +418,11 @@ async function responderVideo(p: VideoPendente, modo: 'link' | 'sem') {
   if (modo === 'link' && !link) return
   if (modo === 'sem' && motivo.length < 3) return
   if (videoEnviando.value.has(p.pedido_bling)) return
+  const invalido = modo === 'link' ? erroLinkMega(link) : null
+  if (invalido) {
+    videoErro.value = `Pedido ${p.pedido_bling}: ${invalido}`
+    return
+  }
   videoEnviando.value = new Set([...videoEnviando.value, p.pedido_bling])
   videoErro.value = null
   try {
@@ -431,8 +437,8 @@ async function responderVideo(p: VideoPendente, modo: 'link' | 'sem') {
     if (tab.value === 'pedidos' && !videosPendentes.value.length) void loadPedidos()
   } catch (e: any) {
     const code = e?.data?.detail?.code
-    videoErro.value = code === 'video_link_invalido'
-      ? `Pedido ${p.pedido_bling}: o link do vídeo não parece válido.`
+    videoErro.value = String(code || '').startsWith('video_link_')
+      ? `Pedido ${p.pedido_bling}: ${e?.data?.detail?.message || 'o link da MEGA não parece válido.'}`
       : code === 'video_nao_pendente'
         ? `Pedido ${p.pedido_bling}: essa solicitação já foi respondida ou cancelada.`
         : `Pedido ${p.pedido_bling}: não deu pra enviar (${e?.data?.detail?.message || code || e?.message || 'erro'}).`
@@ -708,10 +714,11 @@ async function patchPedidoObs(row: PedidoRow, newObs: string) {
 }
 
 // ── Vídeo da embalagem (botão antes de Obs, 18/09) ────────────────────
-// O empacotador filma a caixa, sobe no Google Drive e cola o link aqui.
-// Obrigatório quando o pedido tem mais de 1 unidade (`pede_video`); nos
-// outros o botão fica discreto, mas também salva. O modal traz o passo a
-// passo do Drive porque a equipe não é do ramo (Vinicius).
+// O empacotador filma a caixa, sobe na MEGA (só MEGA desde 23/09 — era
+// Google Drive) e cola o link aqui. Obrigatório quando o pedido tem mais de
+// 1 unidade (`pede_video`); nos outros o botão fica discreto, mas também
+// salva. O modal traz o passo a passo da MEGA porque a equipe não é do ramo
+// (Vinicius).
 const videoModal = ref<{
   pedido: string
   link: string
@@ -740,7 +747,14 @@ async function salvarVideo() {
   if (!m || m.salvando) return
   const link = m.link.trim()
   if (!link) {
-    m.erro = 'Cole o link do vídeo no Google Drive.'
+    m.erro = 'Cole o link do vídeo na MEGA.'
+    return
+  }
+  // Mesma regra do backend (services/link_mega): avisa na hora, sem ir ao servidor.
+  const invalido = erroLinkMega(link)
+  if (invalido) {
+    m.erro = invalido
+    m.ajuda = true
     return
   }
   m.salvando = true
@@ -754,8 +768,8 @@ async function salvarVideo() {
     videoModal.value = null
   } catch (e: any) {
     const code = e?.data?.detail?.code
-    m.erro = code === 'video_link_nao_drive'
-      ? 'Esse link não é do Google Drive. Abra o vídeo no Drive, toque em Compartilhar e copie o link (drive.google.com/...).'
+    m.erro = String(code || '').startsWith('video_link_')
+      ? e?.data?.detail?.message || 'Link da MEGA inválido.'
       : code === 'pedido_nao_encontrado'
         ? `Pedido ${m.pedido} não encontrado.`
         : `Não deu pra salvar (${e?.data?.detail?.message || code || e?.message || 'erro'}).`
@@ -784,7 +798,7 @@ function videoTitulo(row: PedidoRow) {
     return `Vídeo salvo ${fmtDataHoraBrt(row.video.salvo_em)}${quem} — clique pra abrir, ✎ pra trocar`
   }
   return row.pede_video
-    ? 'Pedido com mais de 1 unidade: filme a embalagem e salve o link do Google Drive'
+    ? 'Pedido com mais de 1 unidade: filme a embalagem e salve o link da MEGA'
     : 'Salvar o link do vídeo da embalagem (opcional neste pedido)'
 }
 // Etiqueta transformada (landing zone da NF automática). URL relativa → o
@@ -2387,7 +2401,7 @@ async function conferirTodos() {
                     <input
                       v-model="videoLinkDraft[p.pedido_bling]"
                       type="url"
-                      placeholder="cole o link do vídeo"
+                      placeholder="cole o link do vídeo na MEGA"
                       class="h-7 flex-1 border rounded px-2 bg-background text-[11px]"
                       :disabled="videoEnviando.has(p.pedido_bling)"
                       @keydown.enter.prevent="responderVideo(p, 'link')"
@@ -2587,7 +2601,7 @@ async function conferirTodos() {
                 <ArrowUp v-else-if="sortKey === col.key" class="size-3" />
               </button>
             </th>
-            <th class="text-center" title="Vídeo da embalagem: obrigatório quando o pedido tem mais de 1 unidade. Salva o link do Google Drive.">Vídeo</th>
+            <th class="text-center" title="Vídeo da embalagem: obrigatório quando o pedido tem mais de 1 unidade. Salva o link da MEGA.">Vídeo</th>
             <th class="text-left bg-emerald-50/40">Obs</th>
             <th class="text-center">Imprimir Etiqueta</th>
             <th class="text-center" title="Chamado do pedido: o de atraso na postagem (botão em lote, qualquer loja) ou o de pedido parado (só Mercado Livre, pelo formulário de ajuda).">Chamado</th>
@@ -3162,7 +3176,7 @@ async function conferirTodos() {
       </div>
     </div>
 
-    <!-- Vídeo da embalagem: cola o link do Google Drive + passo a passo -->
+    <!-- Vídeo da embalagem: cola o link da MEGA + passo a passo -->
     <div
       v-if="videoModal"
       class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
@@ -3173,7 +3187,7 @@ async function conferirTodos() {
           <Video class="size-6 shrink-0 text-rose-600" />
           <div>
             <div class="text-base font-semibold">Vídeo da embalagem — pedido {{ videoModal.pedido }}</div>
-            <div class="text-xs text-muted-foreground">Cole aqui o link do vídeo no Google Drive.</div>
+            <div class="text-xs text-muted-foreground">Cole aqui o link do vídeo na MEGA.</div>
           </div>
         </div>
         <div class="space-y-3 px-5 py-4 text-sm">
@@ -3181,7 +3195,7 @@ async function conferirTodos() {
             v-model="videoModal.link"
             type="url"
             autofocus
-            placeholder="https://drive.google.com/file/d/..."
+            placeholder="https://mega.nz/file/..."
             class="w-full rounded-md border bg-background px-3 py-2 text-sm"
             @keydown.enter.prevent="salvarVideo"
           />
@@ -3197,10 +3211,10 @@ async function conferirTodos() {
           </button>
           <ol v-if="videoModal.ajuda" class="list-decimal space-y-1.5 rounded-md border bg-muted/30 px-4 py-3 pl-8 text-xs leading-relaxed">
             <li><b>Filme a embalagem</b> com o celular: mostre a etiqueta com o nº do pedido e cada produto entrando na caixa, até fechar.</li>
-            <li>Abra o app <b>Google Drive</b> no celular, toque em <b>+</b> → <b>Enviar</b> e escolha o vídeo. Espere terminar de enviar (aparece 100%).</li>
-            <li>Toque nos <b>três pontinhos ⋮</b> ao lado do vídeo → <b>Gerenciar acesso</b> (ou <b>Compartilhar</b>).</li>
-            <li>Em <b>Acesso geral</b>, troque <b>Restrito</b> por <b>Qualquer pessoa com o link</b>. Sem isso ninguém consegue abrir o vídeo.</li>
-            <li>Toque em <b>Copiar link</b>, volte aqui, cole no campo acima e clique em <b>Salvar</b>.</li>
+            <li>Abra o app <b>MEGA</b> e vá em <b>Unidade</b>. Toque no <b>+</b> → <b>Fazer upload de arquivos</b> (Android) ou <b>Selecionar do Fotos</b> (iPhone) e escolha o vídeo. Espere terminar: o vídeo aparece em <b>Transferências → Concluídas</b>.</li>
+            <li>Toque nos <b>três pontinhos ⋮</b> ao lado do vídeo → <b>Compartilhar link</b> (se ele já tem link, aparece <b>Gerenciar link</b>). Na primeira vez a MEGA mostra um aviso de direitos autorais: toque em <b>Concordo</b>.</li>
+            <li>Deixe <b>desligada</b> a opção <b>Enviar a chave de decodificação separadamente</b> (em alguns Android: ⚙ → <b>Separar o link e a chave</b>). Ela já vem desligada. O link certo termina com <b>#</b> e uma sequência de letras — sem essa parte ninguém abre o vídeo.</li>
+            <li>Toque em <b>Copiar link</b> (a MEGA também copia sozinha quando cria o link), volte aqui, cole no campo acima e clique em <b>Salvar</b>.</li>
           </ol>
         </div>
         <div class="flex items-center justify-between gap-2 border-t bg-muted/30 px-5 py-3">

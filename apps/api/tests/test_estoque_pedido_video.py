@@ -1,11 +1,12 @@
 """Vídeo da embalagem por pedido (Controle de Estoque, 18/09/2026).
 
 Vinicius: "todo pedido que a quantidade for mais de 1 pede vídeo (ex.: 2 Apple
-Watch no mesmo pedido)". Botão antes de Obs salva o link (sempre Google
-Drive); a aba Envios mostra por dia Feito / Parcial / Não feito contando só os
-pedidos que pedem vídeo.
+Watch no mesmo pedido)". Botão antes de Obs salva o link (só MEGA desde
+23/09 — era Google Drive); a aba Envios mostra por dia Feito / Parcial / Não
+feito contando só os pedidos que pedem vídeo.
 
-  * PUT /pedidos/{n}/video: só link do Drive, normaliza https, troca; DELETE.
+  * PUT /pedidos/{n}/video: só link da MEGA com a chave, normaliza https,
+    troca; DELETE.
   * GET /pedidos: `pede_video` pela SOMA das unidades do pedido inteiro
     (2 do mesmo SKU ou 2 produtos diferentes) + `video` salvo.
   * GET /envios: `videos` por dia (necessários/feitos/pendentes/status).
@@ -27,7 +28,7 @@ pytestmark = pytest.mark.asyncio
 
 PERM_EDIT = {"controle_estoque": {"view": True, "edit": True, "delete": False}}
 _DIA = date(2026, 6, 2)
-_DRIVE = "https://drive.google.com/file/d/1AbC/view?usp=sharing"
+_MEGA = "https://mega.nz/file/oMV0HRyS#vK2VCD7kON8nv9zplMPFaPfWSzP5jxYrhprVtjQd3V8"
 
 
 @pytest_asyncio.fixture
@@ -89,30 +90,45 @@ async def _videos_do_dia(client: AsyncClient, dia: date = _DIA) -> dict:
     return next(i for i in r.json()["data"] if i["data"] == dia.isoformat())["videos"]
 
 
-async def test_salvar_video_so_aceita_drive_e_troca(
+async def test_salvar_video_so_aceita_mega_e_troca(
     db: AsyncSession, client: AsyncClient, auth_as: Callable[[User | None], None], admin_edit: User,
 ):
     auth_as(admin_edit)
     n = await _pedido(db, 960001, ("watch.sp", 2))
     url = f"/api/estoque/pedidos/{n}/video"
 
-    # "ok", link do WhatsApp, vazio: não é prova, não conta
-    for ruim in ("ok", "https://wa.me/5511999", "", "drive google"):
+    # "ok", link do WhatsApp, vazio, Google Drive (desde 23/09): não conta
+    for ruim in (
+        "ok", "https://wa.me/5511999", "", "mega google",
+        "https://drive.google.com/file/d/1AbC/view?usp=sharing",
+        "https://mega.nz/file/oMV0HRyS #vK2VCD7kON8nv9zplMPFaPfWSzP5jxYrhprVtjQd3V8",
+    ):
         r = await client.put(url, json={"link": ruim})
         assert r.status_code == 422, (ruim, r.text)
-        assert r.json()["detail"]["code"] == "video_link_nao_drive"
+        assert r.json()["detail"]["code"] == "video_link_nao_mega"
+    # MEGA sem a chave (a parte depois do #): ninguém abre o vídeo
+    for sem_chave in ("https://mega.nz/file/oMV0HRyS", "https://mega.nz/file/oMV0HRyS#"):
+        r = await client.put(url, json={"link": sem_chave})
+        assert r.status_code == 422, (sem_chave, r.text)
+        assert r.json()["detail"]["code"] == "video_link_sem_chave"
+    # pasta, não o vídeo
+    pasta = "https://mega.nz/folder/AbCdEfGh#Kk0123456789abcdefghij"
+    r = await client.put(url, json={"link": pasta})
+    assert r.status_code == 422, r.text
+    assert r.json()["detail"]["code"] == "video_link_pasta_mega"
     # pedido que não existe
-    assert (await client.put("/api/estoque/pedidos/000000/video", json={"link": _DRIVE})).status_code == 404
+    assert (await client.put("/api/estoque/pedidos/000000/video", json={"link": _MEGA})).status_code == 404
 
     # sem https → completa; quem salvou e quando voltam pra tela
-    r = await client.put(url, json={"link": "drive.google.com/file/d/1AbC/view"})
+    r = await client.put(url, json={"link": _MEGA.removeprefix("https://")})
     assert r.status_code == 200, r.text
-    assert r.json()["link"] == "https://drive.google.com/file/d/1AbC/view"
+    assert r.json()["link"] == _MEGA
     assert r.json()["salvo_por"] == "Empacotador" and r.json()["salvo_em"]
-    # trocar o link = mesmo pedido, sem duplicar
-    r = await client.put(url, json={"link": _DRIVE})
-    assert r.status_code == 200 and r.json()["link"] == _DRIVE
-    assert (await _pedidos(client))[n][0]["video"]["link"] == _DRIVE
+    # trocar o link = mesmo pedido, sem duplicar (formato antigo /#!id!chave vale)
+    antigo = "https://mega.nz/#!oMV0HRyS!vK2VCD7kON8nv9zplMPFaPfWSzP5jxYrhprVtjQd3V8"
+    r = await client.put(url, json={"link": antigo})
+    assert r.status_code == 200 and r.json()["link"] == antigo
+    assert (await _pedidos(client))[n][0]["video"]["link"] == antigo
 
     # remover (colado no pedido errado)
     assert (await client.delete(url)).status_code == 204
@@ -139,10 +155,10 @@ async def test_pedidos_pede_video_pela_soma_do_pedido(
 
     # o link salvo aparece em todas as linhas do pedido
     assert (
-        await client.put(f"/api/estoque/pedidos/{dois_produtos}/video", json={"link": _DRIVE})
+        await client.put(f"/api/estoque/pedidos/{dois_produtos}/video", json={"link": _MEGA})
     ).status_code == 200
     rows = await _pedidos(client)
-    assert [p["video"]["link"] for p in rows[dois_produtos]] == [_DRIVE, _DRIVE]
+    assert [p["video"]["link"] for p in rows[dois_produtos]] == [_MEGA, _MEGA]
     assert rows[duas_unidades][0]["video"] is None
 
 
@@ -165,11 +181,11 @@ async def test_envios_videos_do_dia(
     assert v == {"necessarios": 2, "feitos": 0, "pendentes": [a, b], "status": "nao_feito"}
     assert (await _videos_do_dia(client, outro))["status"] == "nenhum"
 
-    assert (await client.put(f"/api/estoque/pedidos/{a}/video", json={"link": _DRIVE})).status_code == 200
+    assert (await client.put(f"/api/estoque/pedidos/{a}/video", json={"link": _MEGA})).status_code == 200
     v = await _videos_do_dia(client)
     assert (v["feitos"], v["pendentes"], v["status"]) == (1, [b], "parcial")
 
-    assert (await client.put(f"/api/estoque/pedidos/{b}/video", json={"link": _DRIVE})).status_code == 200
+    assert (await client.put(f"/api/estoque/pedidos/{b}/video", json={"link": _MEGA})).status_code == 200
     v = await _videos_do_dia(client)
     assert (v["feitos"], v["pendentes"], v["status"]) == (2, [], "feito")
     # pedido de 1 unidade nunca entra na conta

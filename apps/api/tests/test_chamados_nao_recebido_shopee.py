@@ -28,7 +28,13 @@ import pytest
 from sqlalchemy import select
 
 from app.config import get_settings
-from app.models import ChamadoAnexo, DevolucaoAnexo, DevolucaoRastreio, Devolution
+from app.models import (
+    ChamadoAnexo,
+    DevolucaoAnexo,
+    DevolucaoRastreio,
+    Devolution,
+    EstoquePedidoVideo,
+)
 from app.services import chamados_devolucao as svc
 from app.services import devolucao_cartao_video as cartao
 from tests.test_chamados_devolucao import (
@@ -95,7 +101,7 @@ async def test_nao_recebido_em_transito_vai_direto_pro_robo_sem_disputa(client, 
     fake.get_return_dispute_reason = _reasons
     r, _user = await _lancar(
         client, db, make_user, auth_as, monkeypatch, fake, numero="296001", sn="2609ATVNR001",
-        link_envio="https://drive.x/video-296001", observacao="Cliente diz que postou dia 12.",
+        link_envio="https://mega.nz/file/video-296001#K3yDoVideoNaMega0123456789abcdefghij", observacao="Cliente diz que postou dia 12.",
     )
     # sem disputa, sem consultar motivo: tarefa do robô (canal robo, pendente sem erro)
     assert fake.disputes == [] and chamadas["reasons"] == 0
@@ -139,7 +145,7 @@ async def test_nao_recebido_entregue_tambem_vai_pro_robo_sem_disputa(client, mak
     fake.get_return_dispute_reason = _reasons
     r, _user = await _lancar(
         client, db, make_user, auth_as, monkeypatch, fake, numero="296002", sn="2609ATVNR002",
-        link_envio="https://drive.x/video-296002", observacao="Portaria não recebeu nada.",
+        link_envio="https://mega.nz/file/video-296002#K3yDoVideoNaMega0123456789abcdefghij", observacao="Portaria não recebeu nada.",
     )
     assert r.json()["chamado_ml_status"] == "pendente" and r.json()["chamado_ml_erro"] is None, r.json()
     assert fake.disputes == [] and chamadas["reasons"] == 0
@@ -221,7 +227,7 @@ async def test_nao_recebido_nunca_chama_dispute_e_outro_motivo_ainda_falha(clien
 
     fake2.dispute = _dispute2
     r2, _u = await _lancar(client, db, make_user, auth_as, monkeypatch, fake2, numero="296006", sn="2609ATVNR006",
-                           motivo="Golpe", link_envio="https://drive.x/video-296006")
+                           motivo="Golpe", link_envio="https://mega.nz/file/video-296006#K3yDoVideoNaMega0123456789abcdefghij")
     assert r2.json()["chamado_ml_status"] == "falhou" and "returnsn.illegal" in r2.json()["chamado_ml_erro"]
 
 
@@ -231,7 +237,7 @@ async def test_outro_motivo_continua_igual_com_cartao_e_texto_padrao(client, mak
     fake = _FakeShopee(entregue=False)
     r, _user = await _lancar(
         client, db, make_user, auth_as, monkeypatch, fake, numero="296007", sn="2609ATVNR007",
-        motivo="Golpe", link_envio="https://drive.x/video-296007",
+        motivo="Golpe", link_envio="https://mega.nz/file/video-296007#K3yDoVideoNaMega0123456789abcdefghij",
     )
     assert r.json()["chamado_ml_status"] == "enviada", r.json()
     d = fake.disputes[0]
@@ -239,7 +245,7 @@ async def test_outro_motivo_continua_igual_com_cartao_e_texto_padrao(client, mak
     assert d["image_list"] == [{"module_index": 1, "requirement": "Photos",
                                 "image_url": ["https://fileproxy/video-expedicao.png"]}]
     assert d["text"].startswith("Recebemos o pacote da devolução sem o produto dentro.")
-    assert "QR code" in d["text"] and "Comprovante da expedição (fotos/vídeo do envio): https://drive.x/video-296007" in d["text"]
+    assert "QR code" in d["text"] and "Comprovante da expedição (fotos/vídeo do envio): https://mega.nz/file/video-296007#K3yDoVideoNaMega0123456789abcdefghij" in d["text"]
 
 
 async def test_so_reembolso_nao_recebido_continua_com_cartao(client, make_user, auth_as, db, inline, monkeypatch):
@@ -259,12 +265,12 @@ async def test_so_reembolso_nao_recebido_continua_com_cartao(client, make_user, 
     fake.get_return_dispute_reason = _reasons
     r, _user = await _lancar(
         client, db, make_user, auth_as, monkeypatch, fake, numero="296008", sn="2609ATVNR008",
-        rastreio={"devolucao_tipo_auto": "REFUND"}, link_envio="https://drive.x/video-296008",
+        rastreio={"devolucao_tipo_auto": "REFUND"}, link_envio="https://mega.nz/file/video-296008#K3yDoVideoNaMega0123456789abcdefghij",
     )
     assert r.json()["chamado_ml_status"] == "enviada", r.json()
     d = fake.disputes[0]
     assert d["reason"] == 1 and d["image_list"][0]["image_url"] == ["https://fileproxy/video-expedicao.png"]
-    assert "QR code" in d["text"] and "https://drive.x/video-296008" in d["text"]
+    assert "QR code" in d["text"] and "https://mega.nz/file/video-296008#K3yDoVideoNaMega0123456789abcdefghij" in d["text"]
 
 
 async def test_link_envio_obrigatorio_exclui_nao_recebido(client, make_user, auth_as, db, inline, monkeypatch):
@@ -305,12 +311,54 @@ async def test_link_envio_precisa_ser_url_http(client, make_user, auth_as, db, i
     r = await client.post("/api/devolutions", json={**base, "link_envio": "  "})
     assert r.status_code == 201 and r.json()["link_envio"] is None, r.text
     dev_id = r.json()["id"]
-    p = await client.patch(f"/api/devolutions/{dev_id}", json={"link_envio": " https://drive.x/video-296010 "})
-    assert p.status_code == 200 and p.json()["link_envio"] == "https://drive.x/video-296010", p.text
+    p = await client.patch(f"/api/devolutions/{dev_id}", json={"link_envio": " https://mega.nz/file/video-296010#K3yDoVideoNaMega0123456789abcdefghij "})
+    assert p.status_code == 200 and p.json()["link_envio"] == "https://mega.nz/file/video-296010#K3yDoVideoNaMega0123456789abcdefghij", p.text
     p = await client.patch(f"/api/devolutions/{dev_id}", json={"link_envio": "drive.x/video"})
     assert p.status_code == 422 and p.json()["detail"][0]["type"] == "link_envio_invalido", p.text
     p = await client.patch(f"/api/devolutions/{dev_id}", json={"link_envio": ""})
     assert p.status_code == 200 and p.json()["link_envio"] is None, p.text
+
+
+async def test_link_envio_novo_so_mega_e_o_video_que_o_sistema_ja_tem_vale(
+    client, make_user, auth_as, db, inline, monkeypatch
+):
+    """Vinicius 23/09: o vídeo da expedição mora na MEGA. Link NOVO do Drive ou da
+    MEGA sem a chave (a parte depois do #) → 422. O link que o sistema já tem pro
+    pedido continua valendo: o do Controle de Estoque (pedido embalado antes da
+    troca tem o vídeo no Drive) e o que já estava gravado na linha."""
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+    await _seed_pedido(db, user, numero="296030", numeroloja="2609ATVNR030", platform="shopee", conta="atv", loja="88")
+    base = {"conta": "atv", "pedido_bling": "296030", "pedido_marketplace": "2609ATVNR030",
+            "sku": "a003.ra", "condicao_produto": "Novo"}
+    for ruim, code in (
+        ("https://drive.google.com/file/d/1Novo/view", "video_link_nao_mega"),
+        ("https://mega.nz/file/oMV0HRyS", "video_link_sem_chave"),
+        ("https://mega.nz/folder/AbCdEfGh#Kk0123456789abcdefghij", "video_link_pasta_mega"),
+    ):
+        r = await client.post("/api/devolutions", json={**base, "link_envio": ruim})
+        assert r.status_code == 422 and r.json()["detail"]["code"] == code, (ruim, r.text)
+
+    estoque = "https://drive.google.com/file/d/1DoControleDeEstoque/view"
+    db.add(EstoquePedidoVideo(pedido_bling="296030", link=estoque, salvo_por=user.id))
+    await db.commit()
+    r = await client.post("/api/devolutions", json={**base, "link_envio": estoque})
+    assert r.status_code == 201 and r.json()["link_envio"] == estoque, r.text
+    dev_id = r.json()["id"]
+
+    # linha com Drive de antes da regra: o resto dela continua salvando
+    legado = "https://drive.google.com/file/d/1DeAntesDaRegra/view"
+    row = await db.get(Devolution, dev_id)
+    row.link_envio = legado
+    await db.commit()
+    p = await client.patch(f"/api/devolutions/{dev_id}", json={"link_envio": legado, "observacao": "conferido"})
+    assert p.status_code == 200 and p.json()["link_envio"] == legado, p.text
+    # trocar por outro Drive não entra; pela MEGA sim
+    p = await client.patch(f"/api/devolutions/{dev_id}", json={"link_envio": "https://drive.google.com/file/d/1Outro/view"})
+    assert p.status_code == 422 and p.json()["detail"]["code"] == "video_link_nao_mega", p.text
+    mega = "https://mega.nz/file/oMV0HRyS#vK2VCD7kON8nv9zplMPFaPfWSzP5jxYrhprVtjQd3V8"
+    p = await client.patch(f"/api/devolutions/{dev_id}", json={"link_envio": mega})
+    assert p.status_code == 200 and p.json()["link_envio"] == mega, p.text
 
 
 def test_texto_nao_recebido_sem_rastreio_e_status_desconhecido():
@@ -355,7 +403,7 @@ async def _cartao_persistido_com_golpe(client, db, make_user, auth_as, monkeypat
     cartão do vídeo; depois a operadora anexa um print do rastreio."""
     r, user = await _lancar(
         client, db, make_user, auth_as, monkeypatch, fake, numero=numero, sn=sn,
-        motivo="Golpe", link_envio=f"https://drive.x/video-{numero}",
+        motivo="Golpe", link_envio=f"https://mega.nz/file/video-{numero}#K3yDoVideoNaMega0123456789abcdefghij",
     )
     assert r.json()["chamado_ml_erro"] == "shopee_aguardando_pacote", r.json()
     anexos = (await db.execute(select(DevolucaoAnexo))).scalars().all()
@@ -418,7 +466,7 @@ async def test_linha_fraude_mas_shopee_com_pacote_de_volta_nao_manda_cartao(clie
     r, _user = await _lancar(
         client, db, make_user, auth_as, monkeypatch, fake, numero="296014", sn="2609ATVNR014",
         rastreio={"devolucao_tipo_auto": "REFUND", "fila_manual": "fraude"},
-        link_envio="https://drive.x/video-296014",
+        link_envio="https://mega.nz/file/video-296014#K3yDoVideoNaMega0123456789abcdefghij",
     )
     assert r.json()["chamado_ml_status"] == "pendente" and r.json()["chamado_ml_erro"] is None, r.json()
     ch = await _chamado_de(db, "296014")
@@ -437,7 +485,7 @@ async def test_linha_fraude_mas_shopee_com_pacote_de_volta_nao_manda_cartao(clie
     fake2.get_return_detail = _det2
     r2, _u = await _lancar(
         client, db, make_user, auth_as, monkeypatch, fake2, numero="296015", sn="2609ATVNR015",
-        rastreio={"fila_manual": "fraude"}, link_envio="https://drive.x/video-296015",
+        rastreio={"fila_manual": "fraude"}, link_envio="https://mega.nz/file/video-296015#K3yDoVideoNaMega0123456789abcdefghij",
     )
     assert r2.json()["chamado_ml_status"] == "pendente" and r2.json()["chamado_ml_erro"] is None, r2.json()
     ch2 = await _chamado_de(db, "296015")
@@ -465,12 +513,12 @@ async def test_so_reembolso_sem_tipo_na_linha_manda_o_cartao_na_hora(client, mak
                                  ("296017", "2609ATVNR017", {"fila_manual": "acompanhamento"})):
         r, _user = await _lancar(
             client, db, make_user, auth_as, monkeypatch, fake, numero=numero, sn=sn,
-            rastreio=rastreio, link_envio=f"https://drive.x/video-{numero}",
+            rastreio=rastreio, link_envio=f"https://mega.nz/file/video-{numero}#K3yDoVideoNaMega0123456789abcdefghij",
         )
         assert r.json()["chamado_ml_status"] == "enviada", (numero, r.json())
         d = fake.disputes[-1]
         assert d["reason"] == 1 and d["image_list"][0]["image_url"] == ["https://fileproxy/video-expedicao.png"]
-        assert "QR code" in d["text"] and f"https://drive.x/video-{numero}" in d["text"]
+        assert "QR code" in d["text"] and f"https://mega.nz/file/video-{numero}#K3yDoVideoNaMega0123456789abcdefghij" in d["text"]
         ch = await _chamado_de(db, numero)
         ab = await _abertura(db, ch.id)
         assert ab.texto == d["text"]
@@ -506,7 +554,7 @@ async def test_cartao_persistido_com_link_apagado_some_e_a_tarefa_do_robo_sai_se
     fake = _FakeShopee(status="")
     r, _user = await _lancar(
         client, db, make_user, auth_as, monkeypatch, fake, numero="296018", sn="2609ATVNR018",
-        motivo="Golpe", link_envio="https://drive.x/video-296018",
+        motivo="Golpe", link_envio="https://mega.nz/file/video-296018#K3yDoVideoNaMega0123456789abcdefghij",
     )
     assert r.json()["chamado_ml_erro"] == "shopee_aguardando_pacote", r.json()
     assert [a.filename for a in (await db.execute(select(DevolucaoAnexo))).scalars().all()] == [cartao.CARTAO_VIDEO_NOME]
@@ -645,7 +693,7 @@ async def test_nao_recebido_em_estado_que_esperava_pacote_vai_pro_robo(client, m
 
     fake2.get_return_detail = _det2
     r2, _u = await _lancar(client, db, make_user, auth_as, monkeypatch, fake2, numero="296024", sn="2609ATVNR024",
-                           motivo="Golpe", link_envio="https://drive.x/video-296024")
+                           motivo="Golpe", link_envio="https://mega.nz/file/video-296024#K3yDoVideoNaMega0123456789abcdefghij")
     assert r2.json()["chamado_ml_status"] == "pendente", r2.json()
     assert r2.json()["chamado_ml_erro"] == "shopee_aguardando_pacote", r2.json()
     assert fake2.disputes == []

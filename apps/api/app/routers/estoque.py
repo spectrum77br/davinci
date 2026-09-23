@@ -29,7 +29,6 @@ from __future__ import annotations
 
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Annotated, Any
-from urllib.parse import urlparse
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
@@ -64,6 +63,7 @@ from app.services.bling_situacoes import (
     SITUACOES_ENVIADO_ETIQUETA_STR as _SITUACOES_ENVIADO_ETIQUETA,
 )
 from app.services.estoque_relatorio_pdf import relatorio_pedidos_pdf
+from app.services.link_mega import com_https, erro_link_mega
 from app.services.nf_etiqueta_juntar import (
     EtiquetaJuntarError,
     juntar_etiqueta_nf,
@@ -2537,12 +2537,7 @@ async def responder_video_pendente(
             },
         )
     if link:
-        if any(c.isspace() for c in link) or "." not in link or len(link) < 8:
-            raise HTTPException(
-                422, detail={"code": "video_link_invalido", "message": "Link do vídeo inválido"}
-            )
-        if not link.lower().startswith(("http://", "https://")):
-            link = "https://" + link
+        link = normalizar_link_mega(link)
     elif len(motivo) < 3:
         raise HTTPException(
             422, detail={"code": "motivo_curto", "message": "Explique por que não tem o vídeo"}
@@ -2581,7 +2576,7 @@ async def responder_video_pendente(
 #
 # "Todo pedido que a quantidade for mais de 1 pede vídeo (ex.: 2 Apple Watch
 # no mesmo pedido)". Botão "Vídeo" antes de Obs na aba Pedidos salva o link
-# (sempre Google Drive) em estoque_pedido_video; a aba Envios mostra por dia
+# (só MEGA desde 23/09 — era Google Drive) em estoque_pedido_video; a aba Envios mostra por dia
 # Feito / Parcial / Não feito contando só os pedidos que pedem vídeo. É a
 # prova pra disputa "chegou vazio / veio só um" — a mesma coisa que a
 # Devoluções pede depois pelo `videos-pendentes`.
@@ -2592,30 +2587,21 @@ VIDEO_MIN_UNIDADES = 2
 _VIDEOS_DIA_VAZIO: dict[str, Any] = {
     "necessarios": 0, "feitos": 0, "pendentes": [], "status": "nenhum",
 }
-# O vídeo mora sempre no Google Drive: qualquer outra coisa colada no campo
-# ("ok", "feito", link do WhatsApp) não é prova e não conta.
-_DRIVE_HOSTS = ("drive.google.com", "docs.google.com")
+# O vídeo mora na MEGA (services/link_mega): qualquer outra coisa colada no
+# campo ("ok", "feito", link do WhatsApp, link da MEGA sem a chave) não é
+# prova e não conta.
 
 
 def pede_video(unidades: int) -> bool:
     return unidades >= VIDEO_MIN_UNIDADES
 
 
-def normalizar_link_drive(link: str) -> str:
-    """Link do Google Drive com https; levanta 422 pra qualquer outra coisa."""
-    link = (link or "").strip()
-    if link and not link.lower().startswith(("http://", "https://")):
-        link = "https://" + link
-    host = urlparse(link).netloc.lower() if link else ""
-    if not link or any(c.isspace() for c in link) or host not in _DRIVE_HOSTS:
-        raise HTTPException(
-            422,
-            detail={
-                "code": "video_link_nao_drive",
-                "message": "Cole o link do vídeo no Google Drive (drive.google.com)",
-            },
-        )
-    return link
+def normalizar_link_mega(link: str) -> str:
+    """Link da MEGA (com a chave) com https; levanta 422 pra qualquer outra coisa."""
+    erro = erro_link_mega(link)
+    if erro is not None:
+        raise HTTPException(422, detail={"code": erro[0], "message": erro[1]})
+    return com_https(link)
 
 
 class PedidoVideoIn(BaseModel):
@@ -2700,7 +2686,7 @@ async def salvar_video_pedido(
 ) -> dict[str, Any]:
     """Salva (ou troca) o link do vídeo da embalagem do pedido."""
     pedido_bling = pedido_bling.strip()
-    link = normalizar_link_drive(body.link)
+    link = normalizar_link_mega(body.link)
     existe = (
         await session.execute(
             select(BlingOrder.numero).where(BlingOrder.numero == pedido_bling).limit(1)

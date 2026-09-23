@@ -26,6 +26,7 @@ import {
   AlertTriangle,
 } from 'lucide-vue-next'
 import { isoToday } from '~/lib/date'
+import { erroLinkMega } from '~/lib/linkMega'
 
 definePageMeta({ middleware: ['permission'], permission: { resource: 'devolucoes', action: 'view' } })
 
@@ -731,6 +732,20 @@ function linkEnvioInvalido(link: string | null | undefined) {
 // de um texto digitado meses atrás — e o produto nunca volta ao estoque.
 function linkEnvioLegado(row: DevolutionRow) {
   return linkEnvioInvalido(row.link_envio) && !linkEnvioTocado.value.has(row.id)
+}
+// Vinicius 23/09: o vídeo da expedição mora na MEGA — link NOVO no Link envio só
+// se for da MEGA com a chave (lib/linkMega). O link que o sistema já tinha continua
+// valendo: o da coluna Vídeo (entra sozinho no lançamento) e o que já estava salvo
+// na linha — pedido embalado antes da troca tem o vídeo no Google Drive. Espelho de
+// _exigir_link_envio_mega no backend. Mensagem do problema, ou null.
+function linkEnvioNaoMega(link: string | null | undefined, pedido: string | null | undefined) {
+  const v = (link || '').trim()
+  if (!v || linkEnvioInvalido(v)) return null
+  if (pedido && (videoLinkPorPedido.value.get(pedido) || '').trim() === v) return null
+  return erroLinkMega(v)
+}
+function linkEnvioNaoMegaRow(row: DevolutionRow) {
+  return linkEnvioTocado.value.has(row.id) ? linkEnvioNaoMega(row.link_envio, row.pedido_bling) : null
 }
 // Guarda que barra o save: o banner no topo passa despercebido pra quem está no
 // meio da tabela (caso 292128 — a operadora marcou "Novo" e saiu achando que
@@ -1607,6 +1622,11 @@ async function createAllDevolutions() {
       lookupError.value = MSG_LINK_ENVIO_INVALIDO
       return
     }
+    const naoMega = linkEnvioNaoMega(d.link_envio, d.pedido_bling)
+    if (naoMega) {
+      lookupError.value = `Link envio: ${naoMega}`
+      return
+    }
     if (videoFraudeRequired(d.pedido_bling, d.motivo_devolucao) && !d.link_envio) {
       lookupError.value = MSG_VIDEO_OBRIGATORIO
       return
@@ -1836,6 +1856,11 @@ async function saveRow(row: DevolutionRow) {
   }
   if (linkEnvioInvalido(row.link_envio) && !linkEnvioLegado(row)) {
     bloqueiaSave(MSG_LINK_ENVIO_INVALIDO)
+    return
+  }
+  const naoMega = linkEnvioNaoMegaRow(row)
+  if (naoMega) {
+    bloqueiaSave(`Link envio: ${naoMega}`)
     return
   }
   if (videoFraudeRequired(row.pedido_bling, row.motivo_devolucao) && !row.link_envio) {
@@ -2584,9 +2609,9 @@ async function backfillAddresses() {
               <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
                 <input
                   v-model="d.link_envio"
-                  :class="(linkEnvioRequired(d.sku, d.motivo_devolucao) && !d.link_envio) || linkEnvioInvalido(d.link_envio) ? sheetInputRequiredClass : sheetInputClass"
-                  :placeholder="linkEnvioRequired(d.sku, d.motivo_devolucao) ? 'obrigatório (mala/eletro)' : 'link do envio'"
-                  :title="linkEnvioInvalido(d.link_envio) ? MSG_LINK_ENVIO_INVALIDO : undefined"
+                  :class="(linkEnvioRequired(d.sku, d.motivo_devolucao) && !d.link_envio) || linkEnvioInvalido(d.link_envio) || linkEnvioNaoMega(d.link_envio, d.pedido_bling) ? sheetInputRequiredClass : sheetInputClass"
+                  :placeholder="linkEnvioRequired(d.sku, d.motivo_devolucao) ? 'obrigatório (mala/eletro)' : 'link da MEGA'"
+                  :title="linkEnvioInvalido(d.link_envio) ? MSG_LINK_ENVIO_INVALIDO : (linkEnvioNaoMega(d.link_envio, d.pedido_bling) || undefined)"
                 />
               </td>
               <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
@@ -2849,9 +2874,9 @@ async function backfillAddresses() {
                 <input
                   :value="row.link_envio || ''"
                   :disabled="!canEdit"
-                  :class="(linkEnvioRequired(row.sku, row.motivo_devolucao) && !row.link_envio) || linkEnvioInvalido(row.link_envio) ? sheetInputRequiredClass : sheetInputClass"
-                  :placeholder="linkEnvioRequired(row.sku, row.motivo_devolucao) ? 'obrigatório (mala/eletro)' : 'link do envio'"
-                  :title="linkEnvioLegado(row) ? MSG_LINK_ENVIO_LEGADO : (linkEnvioInvalido(row.link_envio) ? MSG_LINK_ENVIO_INVALIDO : undefined)"
+                  :class="(linkEnvioRequired(row.sku, row.motivo_devolucao) && !row.link_envio) || linkEnvioInvalido(row.link_envio) || linkEnvioNaoMegaRow(row) ? sheetInputRequiredClass : sheetInputClass"
+                  :placeholder="linkEnvioRequired(row.sku, row.motivo_devolucao) ? 'obrigatório (mala/eletro)' : 'link da MEGA'"
+                  :title="linkEnvioLegado(row) ? MSG_LINK_ENVIO_LEGADO : (linkEnvioInvalido(row.link_envio) ? MSG_LINK_ENVIO_INVALIDO : (linkEnvioNaoMegaRow(row) || undefined))"
                   @input="(e) => setRowText(row, 'link_envio', (e.target as HTMLInputElement).value)"
                   @blur="saveRow(row)"
                 />

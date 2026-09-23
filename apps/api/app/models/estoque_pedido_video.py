@@ -2,7 +2,7 @@
 
 Vinicius, 18/09/2026: "todo pedido que a quantidade for mais de 1 pede vídeo
 (ex.: 2 Apple Watch no mesmo pedido)". Na aba Pedidos, um botão antes de Obs
-salva o link do vídeo (sempre Google Drive); a aba Envios mostra por dia
+salva o link do vídeo (só MEGA desde 23/09 — antes era Google Drive); a aba Envios mostra por dia
 quantos pedidos com mais de 1 unidade já têm o vídeo (Feito / Parcial /
 Não feito). O link é a prova pra disputa "chegou vazio / veio só um".
 

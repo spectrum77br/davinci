@@ -23,6 +23,7 @@ from app.models import (
     DevolucaoAnexo,
     DevolucaoRastreio,
     Devolution,
+    EstoquePedidoVideo,
     Product,
     Refund,
     SituacaoBling,
@@ -68,6 +69,7 @@ from app.services.devolution_stock_return import (
     return_product_to_bling_stock,
     reverse_stock_movement,
 )
+from app.services.link_mega import erro_link_mega
 from app.services.margem_audit import record_margem_audit
 
 logger = structlog.get_logger()
@@ -2031,6 +2033,7 @@ async def create_devolution(
         row.reembolso = True
     await _exigir_video_fraude(session, row)
     _exigir_link_envio(row)
+    await _exigir_link_envio_mega(session, row, anterior=None)
     session.add(row)
     if body.condicao_produto in _REFUND_CONDICOES:
         _maybe_create_refund(session, row, body.condicao_produto)
@@ -2114,6 +2117,7 @@ async def patch_devolution(
     prev_motivo = row.motivo_devolucao
     prev_devolver_estoque = row.devolver_estoque
     prev_custo_manutencao = row.custo_manutencao
+    prev_link_envio = row.link_envio
     for key, value in data.items():
         setattr(row, key, value)
     if "sku" in data:
@@ -2121,6 +2125,7 @@ async def patch_devolution(
     if {"motivo_devolucao", "link_envio", "sku"} & set(data):
         await _exigir_video_fraude(session, row)
         _exigir_link_envio(row)
+        await _exigir_link_envio_mega(session, row, anterior=prev_link_envio)
 
     new_condicao = row.condicao_produto
     # Ao SAIR de Manutenção: custo de manutenção é obrigatório (registra o reparo)
@@ -2331,6 +2336,34 @@ def _exigir_link_envio(row: Devolution) -> None:
                 "message": "Link de envio obrigatório: mala/eletro com motivo que abre chamado",
             },
         )
+
+
+async def _exigir_link_envio_mega(
+    session: AsyncSession, row: Devolution, *, anterior: str | None
+) -> None:
+    """Vinicius 23/09: o vídeo da expedição mora na MEGA — Link envio NOVO só
+    entra se for link da MEGA com a chave (services/link_mega). Continua valendo
+    o link que o sistema já tem pra esse pedido: o que já estava na linha, o da
+    coluna Vídeo (resposta ao pedido de vídeo) e o do botão Vídeo do Controle de
+    Estoque — pedido embalado antes da troca tem o vídeo no Google Drive, e é
+    esse link que o lançamento preenche sozinho."""
+    link = (row.link_envio or "").strip()
+    if not link or link == (anterior or "").strip():
+        return
+    erro = erro_link_mega(link)
+    if erro is None:
+        return
+    pb = (row.pedido_bling or "").strip()
+    if pb:
+        rast = await session.get(DevolucaoRastreio, pb)
+        estoque = await session.get(EstoquePedidoVideo, pb)
+        conhecidos = {
+            (rast.video_link or "").strip() if rast else "",
+            (estoque.link or "").strip() if estoque else "",
+        }
+        if link in conhecidos:
+            return
+    raise HTTPException(422, detail={"code": erro[0], "message": f"Link envio: {erro[1]}"})
 
 
 # ------------------------------------------------------------ anexos (fotos/vídeo)

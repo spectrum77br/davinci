@@ -36,6 +36,7 @@ _SP = ZoneInfo("America/Sao_Paulo")
 _ITEM_A = UUID("bbbbbbbb-0000-0000-0000-000000000001")
 _ITEM_B = UUID("bbbbbbbb-0000-0000-0000-000000000002")
 _PEDIDO = "556001"
+_MEGA_SEM_HTTPS = "mega.nz/file/oMV0HRyS#vK2VCD7kON8nv9zplMPFaPfWSzP5jxYrhprVtjQd3V8"
 
 _PERM_DEV = {"devolucoes": {"view": True, "edit": True, "delete": False}}
 _PERM_CE = {"controle_estoque": {"view": True, "edit": True, "delete": False}}
@@ -193,14 +194,20 @@ async def test_fluxo_solicitar_responder_refazer_sem_video_cancelar(
         assert r.status_code == 200 and r.json()["total"] == 0
         # ...e não consegue responder por fora.
         r = await client.post(
-            f"/api/estoque/videos-pendentes/{_PEDIDO}", json={"link": "drive.google.com/abc"}
+            f"/api/estoque/videos-pendentes/{_PEDIDO}", json={"link": _MEGA_SEM_HTTPS}
         )
         assert r.status_code == 403, r.text
 
-        # 3) Equipe .ra cola o link (sem https → normaliza).
+        # 3) Equipe .ra cola o link — só MEGA com a chave (23/09); sem https → normaliza.
         auth_as(ra)
+        for ruim, code in (
+            ("drive.google.com/file/d/abc/view", "video_link_nao_mega"),
+            ("https://mega.nz/file/oMV0HRyS", "video_link_sem_chave"),
+        ):
+            r = await client.post(f"/api/estoque/videos-pendentes/{_PEDIDO}", json={"link": ruim})
+            assert r.status_code == 422 and r.json()["detail"]["code"] == code, r.text
         r = await client.post(
-            f"/api/estoque/videos-pendentes/{_PEDIDO}", json={"link": "drive.google.com/abc"}
+            f"/api/estoque/videos-pendentes/{_PEDIDO}", json={"link": _MEGA_SEM_HTTPS}
         )
         assert r.status_code == 200, r.text
         assert r.json()["video_status"] == "enviado"
@@ -210,7 +217,7 @@ async def test_fluxo_solicitar_responder_refazer_sem_video_cancelar(
         auth_as(vini)
         itens = await _acompanhamento(client)
         assert all(i["video_status"] == "enviado" for i in itens)
-        assert itens[0]["video_link"] == "https://drive.google.com/abc"
+        assert itens[0]["video_link"] == "https://" + _MEGA_SEM_HTTPS
         assert itens[0]["video_enviado_por"] == "azeroth"
         assert itens[0]["video_enviado_em"] is not None
 
@@ -263,7 +270,7 @@ async def test_resposta_invalida_e_nao_pendente(client, db: AsyncSession, auth_a
         # Sem solicitação: responder dá 404 (nada pendente).
         auth_as(ra)
         r = await client.post(
-            f"/api/estoque/videos-pendentes/{_PEDIDO}", json={"link": "https://x.com/v"}
+            f"/api/estoque/videos-pendentes/{_PEDIDO}", json={"link": _MEGA_SEM_HTTPS}
         )
         assert r.status_code == 404, r.text
 

@@ -163,11 +163,11 @@ async def test_danificado_espera_foto_e_abre_ao_anexar(client, make_user, auth_a
         json={"conta": "aguiar", "pedido_bling": "293100", "pedido_marketplace": "2000099",
               "sku": "b001.26", "produtos": "Mala Listrada tamanho 26",
               "condicao_produto": "Usado", "motivo_devolucao": "Danificado (Outros)",
-              "link_envio": "https://drive.google.com/expedicao"},
+              "link_envio": "https://mega.nz/file/expedicao#K3yDoVideoNaMega0123456789abcdefghij"},
     )
     assert r.status_code == 201, r.text
     body = r.json()
-    assert body["link_envio"] == "https://drive.google.com/expedicao"
+    assert body["link_envio"] == "https://mega.nz/file/expedicao#K3yDoVideoNaMega0123456789abcdefghij"
     # chamado registrado na aba, canal api, abertura PENDENTE esperando foto
     assert body["tem_chamado"] is True
     assert body["chamado_ml_status"] == "pendente"
@@ -193,7 +193,7 @@ async def test_danificado_espera_foto_e_abre_ao_anexar(client, make_user, auth_a
     ret_id, reason, texto, anexos = ml.reviews[0]
     assert (ret_id, reason, anexos) == ("ret-777", "SRF2", ["ml_1_mala.png"])
     assert "danificado" in texto and "2000099" in texto and "b001.26" in texto
-    assert "Comprovante da expedição (fotos/vídeo do envio): https://drive.google.com/expedicao" in texto
+    assert "Comprovante da expedição (fotos/vídeo do envio): https://mega.nz/file/expedicao#K3yDoVideoNaMega0123456789abcdefghij" in texto
     await db.refresh(ch)
     assert ch.chamado == "777" and ch.canal == "api"
     msg = await _abertura(db, ch.id)
@@ -852,10 +852,10 @@ async def test_link_envio_regra_mala_eletro_e_conta_fallback(client, make_user, 
     assert p.status_code == 422 and p.json()["detail"]["code"] == "link_envio_obrigatorio"
     p2 = await client.patch(
         f"/api/devolutions/{r.json()['id']}",
-        json={"motivo_devolucao": "Golpe", "link_envio": "https://x/envio"},
+        json={"motivo_devolucao": "Golpe", "link_envio": "https://mega.nz/file/envio#K3yDoVideoNaMega0123456789abcdefghij"},
     )
     assert p2.status_code == 200, p2.text
-    assert p2.json()["link_envio"] == "https://x/envio"
+    assert p2.json()["link_envio"] == "https://mega.nz/file/envio#K3yDoVideoNaMega0123456789abcdefghij"
     # conta da linha = nome da loja no Bling ("Loja 55") → cai pro store_info do pedido (aguiar)
     ch = (await db.execute(select(Chamado).where(Chamado.pedido_bling == "293110"))).scalar_one()
     dev = await db.get(Devolution, UUID(r.json()["id"]))
@@ -1834,7 +1834,7 @@ async def test_kit_parcial_mantem_chamado_e_encerra_com_a_ultima_linha(
     await _seed_pedido(db, user, numero="293845", numeroloja="2609020KA93B43")
     base = {"conta": "aguiar", "pedido_bling": "293845", "pedido_marketplace": "2609020KA93B43",
             "condicao_produto": "Extraviado", "link_abertura": "http://x",
-            "motivo_devolucao": "Não recebido", "link_envio": "http://envio"}  # mala exige link
+            "motivo_devolucao": "Não recebido", "link_envio": "https://mega.nz/file/envio#K3yDoVideoNaMega0123456789abcdefghij"}  # mala exige link
     r1 = await client.post("/api/devolutions", json={**base, "sku": "b001.26", "custo_produto": 10})
     r2 = await client.post("/api/devolutions", json={**base, "sku": "a001", "custo_produto": 20})
     assert r1.status_code == 201 and r2.status_code == 201, (r1.text, r2.text)
@@ -2141,7 +2141,8 @@ async def test_tiktok_so_reembolso_lancamento_responde_o_caso_do_vigia(client, m
     assert r.status_code == 201, r.text
     assert r.json()["chamado_plataforma"] == "tiktok"
     assert r.json()["chamado_ml_status"] == "enviada", r.json()
-    # o vídeo da coluna Vídeo entrou sozinho no Link envio
+    # o vídeo da coluna Vídeo entrou sozinho no Link envio — mesmo sendo do Drive
+    # (resposta de antes da troca pra MEGA): é o vídeo que o sistema já tinha
     assert r.json()["link_envio"] == "https://drive.x/video-296936"
     assert len(fake.rejects) == 1
     rj = fake.rejects[0]
@@ -2206,10 +2207,10 @@ async def test_tiktok_so_reembolso_em_fraude_exige_video_pra_lancar(client, make
         "/api/devolutions",
         json={"conta": "mini", "pedido_bling": "296936", "pedido_marketplace": OID_REEMB,
               "condicao_produto": "Não devolvido", "motivo_devolucao": "Não recebido",
-              "link_envio": "https://drive.x/manual"},
+              "link_envio": "https://mega.nz/file/manual#K3yDoVideoNaMega0123456789abcdefghij"},
     )
     assert r2.status_code == 201, r2.text
-    assert r2.json()["chamado_ml_status"] == "enviada" and "https://drive.x/manual" in fake.rejects[0]["comment"]
+    assert r2.json()["chamado_ml_status"] == "enviada" and "https://mega.nz/file/manual#K3yDoVideoNaMega0123456789abcdefghij" in fake.rejects[0]["comment"]
     # Item Incorreto não abre chamado nem exige vídeo (é erro nosso)
     r3 = await client.post(
         "/api/devolutions",
@@ -2448,7 +2449,7 @@ async def _lancar_shopee_reembolso(client, db, make_user, auth_as, monkeypatch, 
         "/api/devolutions",
         json={"conta": "minas", "pedido_bling": numero, "pedido_marketplace": sn,
               "condicao_produto": "Não devolvido", "motivo_devolucao": "Não recebido",
-              "link_envio": "https://drive.x/video-" + numero, "observacao": "Peso conferido na expedição."},
+              "link_envio": "https://mega.nz/file/video-" + numero + "#K3yDoVideoNaMega0123456789abcdefghij", "observacao": "Peso conferido na expedição."},
     )
     assert r.status_code == 201, r.text
     return r, user
@@ -2475,7 +2476,7 @@ async def test_shopee_so_reembolso_ja_aprovado_vai_pro_robo_pedir_compensacao(cl
     assert txt.startswith("O comprador pediu reembolso SEM devolução do produto alegando que não recebeu o pedido"), txt
     assert '"Estou aguardando desde o dia 31.08"' in txt and "R$ 1013.32" in txt
     assert "NÃO foi entregue ao comprador (última situação: Em breve o seu pedido" in txt, txt
-    assert "Pedido 2608258J2C6V3C" in txt and "Peso conferido" in txt and "https://drive.x/video-292270" in txt
+    assert "Pedido 2608258J2C6V3C" in txt and "Peso conferido" in txt and "https://mega.nz/file/video-292270#K3yDoVideoNaMega0123456789abcdefghij" in txt
     assert "Solicitamos a compensação pelo extravio" in txt and "Solicitamos a análise do caso" not in txt
     assert "O pacote da devolução ainda não chegou" not in txt
     hist = await _sistema_txts(db, ch.id)

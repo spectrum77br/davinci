@@ -282,12 +282,14 @@ def texto_contestacao(
 
 
 _RE_URL = re.compile(r"https?://\S+")
-_RE_ID_LINK = re.compile(r"[-\w]{20,}")  # id do arquivo no Drive (o mesmo em /file/d/ e ?id=)
+# id do arquivo no Drive (o mesmo em /file/d/ e ?id=) ou a chave da MEGA (a mesma
+# em /file/<id>#<chave> e no antigo /#!<id>!<chave>)
+_RE_ID_LINK = re.compile(r"[-\w]{20,}")
 
 
 def _link_no_texto(texto: str, link: str) -> str | None:
     """O link do vídeo como ele aparece no texto (a pessoa pode ter colado a outra forma
-    do mesmo link do Drive), ou None se o texto não tem o vídeo."""
+    do mesmo link do Drive/MEGA), ou None se o texto não tem o vídeo."""
     if link in texto:
         return link
     ids = set(_RE_ID_LINK.findall(link))

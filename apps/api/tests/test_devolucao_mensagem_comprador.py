@@ -312,7 +312,7 @@ async def test_motivo_trocado_antes_do_envio_cancela_a_linha(
     p = await client.patch(
         f"/api/devolutions/{body['id']}",
         json={"motivo_devolucao": "Danificado (Outros)",
-              "link_envio": "https://drive.google.com/expedicao"},
+              "link_envio": "https://mega.nz/file/expedicao#K3yDoVideoNaMega0123456789abcdefghij"},
     )
     assert p.status_code == 200, p.text
     assert p.json()["senha_status"] == "cancelada"
@@ -337,7 +337,7 @@ async def test_motivo_trocado_depois_do_envio_continua_enviada(
     p = await client.patch(
         f"/api/devolutions/{body['id']}",
         json={"motivo_devolucao": "Danificado (Outros)",
-              "link_envio": "https://drive.google.com/expedicao"},
+              "link_envio": "https://mega.nz/file/expedicao#K3yDoVideoNaMega0123456789abcdefghij"},
     )
     assert p.status_code == 200, p.text
     assert p.json()["senha_status"] == "enviada"

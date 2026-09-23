@@ -99,7 +99,7 @@ async def test_abertura_pendente_troca_no_mesmo_chamado_e_dispara_com_o_motivo_n
     (ch,) = await _chamados_de(db, "297001")
     assert ch.observacao == "Aberto automaticamente pela devolução — motivo: Não recebido"
 
-    p = await client.patch(f"/api/devolutions/{did}", json={"motivo_devolucao": "Danificado (Outros)", "link_envio": "https://drive.x/v"})
+    p = await client.patch(f"/api/devolutions/{did}", json={"motivo_devolucao": "Danificado (Outros)", "link_envio": "https://mega.nz/file/v#K3yDoVideoNaMega0123456789abcdefghij"})
     assert p.status_code == 200, p.text
     assert p.json()["chamado_troca_motivo"] == "atualizado"
     # continua UM chamado, agora pedindo a foto do dano (SRF2)
@@ -163,7 +163,7 @@ async def test_robo_shopee_pendente_encerra_o_antigo_e_abre_outro_pela_api(clien
     assert p.status_code == 422 and p.json()["detail"]["code"] == "link_envio_obrigatorio"
     assert len(await _chamados_de(db, "297002")) == 1
 
-    p = await client.patch(f"/api/devolutions/{did}", json={"motivo_devolucao": "Danificado (Outros)", "link_envio": "https://drive.x/v297002"})
+    p = await client.patch(f"/api/devolutions/{did}", json={"motivo_devolucao": "Danificado (Outros)", "link_envio": "https://mega.nz/file/v297002#K3yDoVideoNaMega0123456789abcdefghij"})
     assert p.status_code == 200, p.text
     assert p.json()["chamado_troca_motivo"] == "substituido"
     antigo, novo = await _chamados_de(db, "297002")
@@ -221,7 +221,7 @@ async def test_robo_ja_abriu_no_seller_center_avisa_pra_desistir(client, make_us
     antigo.chamado = "REQ-88123"
     await db.commit()
 
-    p = await client.patch(f"/api/devolutions/{did}", json={"motivo_devolucao": "Danificado (Outros)", "link_envio": "https://drive.x/v297003"})
+    p = await client.patch(f"/api/devolutions/{did}", json={"motivo_devolucao": "Danificado (Outros)", "link_envio": "https://mega.nz/file/v297003#K3yDoVideoNaMega0123456789abcdefghij"})
     assert p.status_code == 200 and p.json()["chamado_troca_motivo"] == "substituido", p.text
     antigo, novo = await _chamados_de(db, "297003")
     ab = await _abertura(db, antigo.id)
@@ -250,7 +250,7 @@ async def test_robo_com_a_tarefa_em_maos_nao_recebe_a_abertura_antiga_de_volta(c
     await db.refresh(ab)
     assert ab.status == "enviando"
 
-    p = await client.patch(f"/api/devolutions/{did}", json={"motivo_devolucao": "Danificado (Outros)", "link_envio": "https://drive.x/v297008"})
+    p = await client.patch(f"/api/devolutions/{did}", json={"motivo_devolucao": "Danificado (Outros)", "link_envio": "https://mega.nz/file/v297008#K3yDoVideoNaMega0123456789abcdefghij"})
     assert p.status_code == 200 and p.json()["chamado_troca_motivo"] == "substituido", p.text
     antigo, novo = await _chamados_de(db, "297008")
     await db.refresh(ab)
@@ -325,7 +325,7 @@ async def test_lixeira_do_substituido_sem_pedido_bling_nao_premarca_a_linha(clie
     db.add_all([antigo, novo])
     await db.commit()
     # a linha precisa de motivo que abre chamado pra ser pré-marcada por padrão
-    p = await client.patch(f"/api/devolutions/{did}", json={"motivo_devolucao": "Golpe", "link_envio": "https://drive.x/v"})
+    p = await client.patch(f"/api/devolutions/{did}", json={"motivo_devolucao": "Golpe", "link_envio": "https://mega.nz/file/v#K3yDoVideoNaMega0123456789abcdefghij"})
     assert p.status_code == 200, p.text
     prev = await client.get(f"/api/chamados/{antigo.id}/exclusao")
     assert prev.status_code == 200, prev.text
@@ -342,7 +342,7 @@ async def test_contestacao_ja_enviada_fica_no_mesmo_chamado_com_relato_no_histor
     assert r.json()["chamado_ml_status"] == "enviada" and len(ml.reviews) == 1 and ml.reviews[0][1] == "SRF7"
     did = r.json()["id"]
 
-    p = await client.patch(f"/api/devolutions/{did}", json={"motivo_devolucao": "Danificado (Outros)", "link_envio": "https://drive.x/v297004"})
+    p = await client.patch(f"/api/devolutions/{did}", json={"motivo_devolucao": "Danificado (Outros)", "link_envio": "https://mega.nz/file/v297004#K3yDoVideoNaMega0123456789abcdefghij"})
     assert p.status_code == 200, p.text
     assert p.json()["chamado_troca_motivo"] == "ja_enviada"
     (ch,) = await _chamados_de(db, "297004")
@@ -369,19 +369,19 @@ async def test_troca_a_partir_de_danificado_preserva_o_resto_da_observacao(clien
     """Revisão 21/09: o helper da observação cortava no " (" do próprio motivo
     ("Danificado (Outros)" → "Golpe (Outros)") e apagava linha anexada por pessoa."""
     ml.acao = False
-    r, _ = await _lancar_ml(client, db, make_user, auth_as, numero="297006", sn="2609020KA97006", motivo="Danificado (Outros)", link_envio="https://drive.x/v297006")
+    r, _ = await _lancar_ml(client, db, make_user, auth_as, numero="297006", sn="2609020KA97006", motivo="Danificado (Outros)", link_envio="https://mega.nz/file/v297006#K3yDoVideoNaMega0123456789abcdefghij")
     did = r.json()["id"]
     (ch,) = await _chamados_de(db, "297006")
     ch.observacao = ch.observacao + "\ncliente ligou 2x"
     await db.commit()
-    p = await client.patch(f"/api/devolutions/{did}", json={"motivo_devolucao": "Golpe", "link_envio": "https://drive.x/v297006"})
+    p = await client.patch(f"/api/devolutions/{did}", json={"motivo_devolucao": "Golpe", "link_envio": "https://mega.nz/file/v297006#K3yDoVideoNaMega0123456789abcdefghij"})
     assert p.status_code == 200 and p.json()["chamado_troca_motivo"] == "atualizado", p.text
     (ch,) = await _chamados_de(db, "297006")
     assert ch.observacao == "Aberto automaticamente pela devolução — motivo: Golpe\ncliente ligou 2x"
     # observação escrita à mão (não começa pelo texto automático + motivo anterior) fica como está
     ch.observacao = "texto meu"
     await db.commit()
-    p = await client.patch(f"/api/devolutions/{did}", json={"motivo_devolucao": "Item faltando", "link_envio": "https://drive.x/v297006"})
+    p = await client.patch(f"/api/devolutions/{did}", json={"motivo_devolucao": "Item faltando", "link_envio": "https://mega.nz/file/v297006#K3yDoVideoNaMega0123456789abcdefghij"})
     assert p.status_code == 200 and p.json()["chamado_troca_motivo"] == "atualizado", p.text
     (ch,) = await _chamados_de(db, "297006")
     assert ch.observacao == "texto meu"
@@ -399,7 +399,7 @@ async def test_plataforma_sem_api_devolve_atualizado_sem_api(client, make_user, 
     )
     assert r.status_code == 201 and r.json()["chamado_ml_status"] == "registrada", r.text
     did = r.json()["id"]
-    p = await client.patch(f"/api/devolutions/{did}", json={"motivo_devolucao": "Danificado (Outros)", "link_envio": "https://drive.x/v297007"})
+    p = await client.patch(f"/api/devolutions/{did}", json={"motivo_devolucao": "Danificado (Outros)", "link_envio": "https://mega.nz/file/v297007#K3yDoVideoNaMega0123456789abcdefghij"})
     assert p.status_code == 200 and p.json()["chamado_troca_motivo"] == "atualizado_sem_api", p.text
     (ch,) = await _chamados_de(db, "297007")
     hist = await _sistema_txts(db, ch.id)
@@ -417,6 +417,6 @@ async def test_motivo_que_deixa_de_pedir_chamado_devolve_encerrado_na_resposta(c
     (ch,) = await _chamados_de(db, "297005")
     assert ch.status_plataforma == "encerrado"
     # e voltar pra um motivo que pede chamado não mexe no Encerrado (fora do escopo de 21/09)
-    p = await client.patch(f"/api/devolutions/{did}", json={"motivo_devolucao": "Golpe", "link_envio": "https://drive.x/v"})
+    p = await client.patch(f"/api/devolutions/{did}", json={"motivo_devolucao": "Golpe", "link_envio": "https://mega.nz/file/v#K3yDoVideoNaMega0123456789abcdefghij"})
     assert p.status_code == 200 and p.json()["chamado_troca_motivo"] is None
     assert len(await _chamados_de(db, "297005")) == 1
