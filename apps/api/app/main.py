@@ -221,6 +221,7 @@ if settings.enable_marketing:
     from app.routers import marketing_legendas as marketing_legendas_router
     from app.routers import marketing_personagens as marketing_personagens_router
     from app.routers import marketing_postagens as marketing_postagens_router
+    from app.routers import marketing_metricas as marketing_metricas_router
     from app.routers import marketing_roteiros as marketing_roteiros_router
     from app.routers import portal_criativos as portal_criativos_router
     app.include_router(marketing_router.router)
@@ -231,6 +232,7 @@ if settings.enable_marketing:
     # O link assinado do vídeo vai no PATH; fora do access log.
     marketing_creatives_router.mascarar_link_no_access_log()
     app.include_router(marketing_postagens_router.router)
+    app.include_router(marketing_metricas_router.router)
     # Aba Roteiros + Personagens (migration 0299): o briefing saiu da linha
     # de produção e ganhou destino por agência.
     app.include_router(marketing_roteiros_router.router)

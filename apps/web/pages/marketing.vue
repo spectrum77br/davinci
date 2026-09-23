@@ -2,7 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
   AlertCircle, BarChart3, Bell, Bot, Clapperboard, Clock,
-  NotebookPen, Pause, Play, RefreshCw, Sparkles,
+  NotebookPen, Pause, Play, RefreshCw, Sparkles, TrendingUp,
 } from 'lucide-vue-next'
 
 const { api } = useApi()
@@ -180,7 +180,7 @@ type AgentPresence = {
 // ── State ────────────────────────────────────────────────────────────
 // The page is organised by marketplace — only Mercado Livre + Shopee are
 // surfaced. The platform tab replaces the old mode + department tabs.
-type Platform = 'ml' | 'shopee' | 'criativos' | 'roteiros'
+type Platform = 'ml' | 'shopee' | 'criativos' | 'roteiros' | 'desempenho'
 const platform = ref<Platform>('ml')
 
 const focoRoteiro = ref<string | null>(null)
@@ -196,7 +196,11 @@ const roteirosEl = ref<{ abrir: (id: string) => void } | null>(null)
 
 // As abas que não são de Ads, num lugar só: os v-if do painel de Ads
 // consultam isto, senão a próxima aba nasce mostrando o dashboard por baixo.
-const emOutraAba = computed(() => platform.value === 'criativos' || platform.value === 'roteiros')
+// Abas que NÃO são de Ads. Sem incluir a nova aqui, todo o painel de Ads
+// (gráficos, contas, erros) continuaria renderizando embaixo dela.
+const emOutraAba = computed(
+  () => platform.value === 'criativos' || platform.value === 'roteiros' || platform.value === 'desempenho',
+)
 
 
 const summary = ref<Summary | null>(null)
@@ -839,6 +843,16 @@ definePageMeta({ middleware: [] })
           <NotebookPen class="size-3.5" />
           Roteiros
         </button>
+        <!-- Desempenho: o que os vídeos JÁ PUBLICADOS renderam. Pendura na
+             mesma permissão de Criativos — quem vê o que foi publicado vê o
+             que rendeu. -->
+        <button v-if="canCriativos"
+          class="px-3 py-1.5 rounded-md transition-colors inline-flex items-center gap-1.5"
+          :class="platform === 'desempenho' ? 'bg-background shadow-sm font-medium' : 'hover:bg-background/60 text-muted-foreground'"
+          @click="platform = 'desempenho'">
+          <TrendingUp class="size-3.5" />
+          Desempenho
+        </button>
 </div>
     </div>
 
@@ -852,6 +866,7 @@ definePageMeta({ middleware: [] })
       ref="roteirosEl"
       :foco="focoRoteiro"
     />
+    <MarketingDesempenho v-else-if="platform === 'desempenho' && canCriativos" />
 
     <!-- ═══════════════════════════════ MÉTRICAS ═══════════════════════ -->
     <template v-if="!emOutraAba && summary">

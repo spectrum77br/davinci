@@ -121,6 +121,7 @@ from app.models.marketing_personagem_requisicao import (  # noqa: F401
 from app.models.marketing_postagem import (
     STATUS_EM_VOO,
     MarketingPostagem,
+    MarketingPostagemMetrica,
     RedeSocialToken,
 )
 from app.models.marketing_roteiro import (
@@ -274,6 +275,7 @@ __all__ = [
     "MarketingRoteiroPersonagem",
     "MarketingRoteiroRef",
     "MarketingPostagem",
+    "MarketingPostagemMetrica",
     "MarketingSchedule",
     "BlingKitComponent",
     "Marketplace",

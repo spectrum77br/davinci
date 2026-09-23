@@ -219,3 +219,91 @@ Index(
         "status IN ('agendado', 'pendente', 'containering', 'publicando')"
     ),
 )
+
+
+class MarketingPostagemMetrica(Base, TimestampMixin):
+    """Um RETRATO por dia dos números de UMA publicação (migration 0315).
+
+    Pedido do Eduardo (23/09/2026): ver as views e interações por marca, com o
+    total somado e o detalhe de cada rede. A linha é por VÍDEO publicado pelo
+    DaVinci, nunca o número geral do canal — é o que ele pediu explicitamente,
+    e é o que a tabela-mãe permite: `marketing_postagens` só contém o que saiu
+    por aqui.
+
+    RETRATO DATADO, não linha sobrescrita. Todas as três plataformas devolvem
+    número ACUMULADO ("este vídeo tem 400 views"), nunca o do dia. Guardando um
+    UPDATE por cima, "quanto rendeu esta semana" fica impossível de responder —
+    e essa é metade do valor da tela. Com um retrato por dia, a diferença entre
+    dois dias é uma subtração.
+
+    `plataforma` e `conta` repetem o que está na postagem de propósito, como a
+    própria postagem já repete da rede social: a conta pode ser apagada do
+    cadastro, e o histórico do que rendeu não pode sumir junto.
+
+    O que cada rede entrega HOJE (conferido em 23/09/2026):
+      youtube   — views, curtidas, comentários (Data API v3, escopo que os
+                  canais já têm; NÃO precisa reautorizar);
+      instagram — curtidas e comentários saem com o token atual; views, alcance,
+                  compartilhamentos e salvamentos exigem `instagram_manage_
+                  insights`, que o token ainda não carrega (provado por
+                  sondagem: erro 10 "Application does not have permission");
+      tiktok    — tudo pela página pública, que traz os números num JSON no
+                  HTML. Sem API, sem login, e do IP do servidor.
+
+    Por isso todo campo é NULÁVEL: nulo quer dizer "esta rede não me deu este
+    número", que é diferente de zero. Somar tratando nulo como zero é como a
+    tela mente sem ninguém perceber.
+    """
+
+    __tablename__ = "marketing_postagem_metricas"
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    postagem_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("marketing_postagens.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    # Dia da coleta em BRT (a tela é do Eduardo, o fuso é o dele). Um retrato
+    # por dia por postagem — o índice único embaixo garante.
+    dia: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    # Snapshot: sobrevive à conta sair do cadastro.
+    plataforma: Mapped[str] = mapped_column(String(32), nullable=False)
+    conta: Mapped[str | None] = mapped_column(Text, nullable=True)
+    marca_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("marcas.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
+    # Os números. NULO = a rede não deu; ZERO = deu e é zero.
+    views: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    curtidas: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    comentarios: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    compartilhamentos: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    salvamentos: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    alcance: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    # O que a rede respondeu, cru, pra quando um número parecer errado depois.
+    bruto: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    # Preenchido quando a coleta falhou. Coleta falha BAIXO — a tela mostraria
+    # número velho sem ninguém notar —, então o erro fica na linha e a tela
+    # mostra "coletado em" por plataforma.
+    erro: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+# Um retrato por dia por postagem. Recoletar no mesmo dia ATUALIZA a linha (o
+# número acumulado mudou); no dia seguinte nasce outra, e a diferença entre as
+# duas é o que rendeu no dia.
+UniqueConstraint(
+    MarketingPostagemMetrica.postagem_id,
+    MarketingPostagemMetrica.dia,
+    name="uq_metrica_postagem_dia",
+)
+Index(
+    "ix_metrica_marca_dia",
+    MarketingPostagemMetrica.marca_id,
+    MarketingPostagemMetrica.dia,
+)

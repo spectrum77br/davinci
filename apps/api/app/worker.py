@@ -1142,6 +1142,36 @@ async def marketing_postagens_publicar(ctx: dict) -> None:
         )
 
 
+async def marketing_postagens_metricas(ctx: dict) -> None:
+    """Quanto cada vídeo publicado rendeu (Eduardo, 23/09/2026) — 1x por dia.
+
+    Um RETRATO por dia por publicação. As três redes devolvem número acumulado
+    ("este vídeo tem 400 views"), nunca o do dia; é a diferença entre dois
+    retratos que responde "quanto rendeu esta semana", que é metade do que ele
+    pediu. Por isso roda diário e não de hora em hora: medir mais vezes não
+    traz informação nova, só gasta cota.
+
+    De madrugada (04:20 BRT ≈ 07:20 UTC) por dois motivos: o dia anterior já
+    fechou, e é o horário mais vazio do servidor — a coleta é lenta (uma ida na
+    rede por post do TikTok e do Instagram) e não tem pressa nenhuma.
+
+    Cada rede é isolada dentro do serviço: TikTok fora do ar não impede o
+    YouTube de ser lido, e a falha fica gravada NA LINHA — coleta falha baixo,
+    e número velho parecendo novo é pior que número faltando.
+    """
+    if not _settings.enable_marketing:
+        return
+    from app.services.marketing.metricas import coletar
+
+    async with session_scope() as s:
+        try:
+            r = await coletar(s)
+        except Exception as e:  # noqa: BLE001
+            logger.error("marketing_metricas_failed", err=str(e)[:300])
+            return
+    logger.info("marketing_metricas_tick", **r)
+
+
 async def marketing_postagens_reconciliar(ctx: dict) -> None:
     """A cada 10 min: postagem presa em `containering`/`publicando` há > 15 min.
 
@@ -3609,6 +3639,18 @@ class WorkerSettings:
             minute={5, 15, 25, 35, 45, 55},
             run_at_startup=False,
             timeout=300,
+        ),
+        # Métricas dos vídeos publicados: 1x por dia, 04:20 BRT (07:20 UTC).
+        # Diário porque o número é acumulado — medir de hora em hora não traz
+        # informação nova, só gasta cota da Meta e do Google. `timeout=900`
+        # com folga: são duas idas na rede por post (TikTok e Instagram) e o
+        # YouTube vai em lote de 50.
+        cron(
+            marketing_postagens_metricas,
+            hour={7},
+            minute={20},
+            run_at_startup=False,
+            timeout=900,
         ),
         # Marketing: Shopee round-robin MOVED to the agent-node block below —
         # only the dedicated machine (MARKETING_AGENT_NODE=1) talks to Shopee
