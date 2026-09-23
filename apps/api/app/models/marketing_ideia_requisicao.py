@@ -64,6 +64,13 @@ class MarketingIdeiaRequisicao(Base, TimestampMixin):
     )
     motivo: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    # Qual persona do elenco está na peça. NULL é resposta legítima, não
+    # ausência de dado: as peças de mão e produto não têm ninguém em quadro.
+    personagem_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("marketing_personagens.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     # A entrega que trouxe este conceito. SET NULL: apagar o vídeo não apaga o
     # registro de que a agência propôs e a casa decidiu.
     creative_id: Mapped[UUID | None] = mapped_column(

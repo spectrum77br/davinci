@@ -15,11 +15,11 @@
 // Destino VAZIO = as DUAS agências veem. É o oposto da coluna Equipe da aba
 // Criativos, onde vazio = ninguém de fora vê. A tela diz isso com todas as
 // letras no seletor, porque a diferença não é adivinhável.
-import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
   Plus, Trash2, Loader2, Search, Upload, X, Link2, ExternalLink,
   Users, NotebookPen, Eye, EyeOff, CornerDownLeft, Image as ImageIcon,
-  File as FileIcon, Inbox, Check,
+  File as FileIcon, Inbox, Check, Play, Download,
 } from 'lucide-vue-next'
 
 const props = defineProps<{ foco?: string | null }>()
@@ -559,10 +559,31 @@ const conceitos = ref<Conceito[]>([])
 const conceitosErro = ref<string | null>(null)
 const conceitoOcupado = ref<string | null>(null)
 
+// O vídeo abre em modal, e não inline na fila: um <video> 9:16 dentro do card
+// carrega enquanto a pessoa só queria ler a lista, e com vários pedidos a aba
+// inteira fica pesada. Mesmo molde do preview da aba Criativos, inclusive o Esc.
+const verVideo = ref<Conceito | null>(null)
+
+function fecharVideo() {
+  verVideo.value = null
+}
+
+function aoTeclar(e: KeyboardEvent) {
+  if (e.key === 'Escape' && verVideo.value) fecharVideo()
+}
+
+onMounted(() => window.addEventListener('keydown', aoTeclar))
+onBeforeUnmount(() => window.removeEventListener('keydown', aoTeclar))
+
 function videoDoConceito(c: Conceito): string | null {
   // Precisa do id do ARQUIVO: `/arquivo` sem ele é a rota de UPLOAD, e o
   // player apontado pra lá mostrava um quadro preto.
-  const v = c.arquivos.find((f) => (f.mime || '').startsWith('video/')) ?? c.arquivos[0]
+  //
+  // O ÚLTIMO, não o primeiro: reenviar depois de uma recusa ACRESCENTA o
+  // arquivo novo e mantém o antigo, e a lista vem em ordem de chegada. Pegar
+  // o primeiro faria quem revisa assistir justamente à versão recusada.
+  const videos = c.arquivos.filter((f) => (f.mime || '').startsWith('video/'))
+  const v = videos[videos.length - 1] ?? c.arquivos[c.arquivos.length - 1]
   return v ? `/api/marketing/creatives/${c.creative_id}/arquivo/${v.id}` : null
 }
 
@@ -1207,15 +1228,21 @@ async function recusarPedido(r: Requisicao) {
             <!-- O vídeo ao lado do texto: decidir sobre a peça olhando só a
                  descrição é decidir no escuro. `preload="none"` porque a fila
                  pode ter vários e nenhum deve baixar antes do play. -->
-            <video
+            <button
               v-if="videoDoConceito(c)"
-              class="w-full rounded-md bg-black"
+              type="button"
+              class="group relative w-full overflow-hidden rounded-md border bg-black/40"
               style="aspect-ratio: 9/16"
-              controls
-              playsinline
-              preload="metadata"
-              :src="videoDoConceito(c)!"
-            />
+              title="Assistir"
+              @click="verVideo = c"
+            >
+              <span class="absolute inset-0 grid place-items-center text-white/85 transition-colors group-hover:text-white">
+                <Play class="size-8" />
+              </span>
+              <span class="absolute inset-x-0 bottom-0 truncate bg-black/55 px-1.5 py-1 text-[10px] text-white/90">
+                {{ c.arquivos[0]?.nome }}
+              </span>
+            </button>
             <p v-else-if="c.creative_id" class="text-[11px] text-muted-foreground">
               A entrega não trouxe arquivo de vídeo.
             </p>
@@ -1299,6 +1326,31 @@ async function recusarPedido(r: Requisicao) {
             <dd class="whitespace-pre-wrap">{{ r.cessao_obs }}</dd>
           </div>
         </dl>
+      </div>
+    </div>
+
+    <!-- vídeo do pedido, em modal: mesmo desenho do preview da aba Criativos -->
+    <div
+      v-if="verVideo"
+      class="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4"
+      @click.self="fecharVideo"
+    >
+      <div class="flex max-h-full w-full max-w-3xl flex-col overflow-hidden rounded-lg border border-border bg-card shadow-xl">
+        <div class="flex items-center gap-2 border-b px-3 py-2">
+          <span class="truncate text-sm font-medium">{{ verVideo.titulo }}</span>
+          <span class="shrink-0 text-xs text-muted-foreground">{{ verVideo.equipe }}</span>
+          <div class="ml-auto flex shrink-0 items-center gap-1.5">
+            <a :href="`${videoDoConceito(verVideo)}?download=1`" class="btn btn-sm gap-1">
+              <Download class="size-3.5" /> baixar
+            </a>
+            <button class="btn btn-sm btn-ghost px-1.5" title="Fechar (Esc)" @click="fecharVideo">
+              <X class="size-4" />
+            </button>
+          </div>
+        </div>
+        <div class="flex min-h-[200px] flex-1 items-center justify-center overflow-auto bg-black/40 p-2">
+          <video :src="videoDoConceito(verVideo)!" controls autoplay class="max-h-[75vh] max-w-full" />
+        </div>
       </div>
     </div>
   </div>

@@ -691,6 +691,7 @@ def _req_ideia_out(
         # O vídeo que trouxe o conceito: é por ele que quem decide ASSISTE à
         # peça em vez de julgar uma descrição.
         "creative_id": str(r.creative_id) if r.creative_id else None,
+        "personagem_id": str(r.personagem_id) if r.personagem_id else None,
         "arquivos": [
             {"id": str(f.id), "nome": f.file_name, "mime": f.file_mime}
             for f in do_criativo
@@ -784,6 +785,15 @@ async def aprovar_conceito(
     )
     session.add(row)
     await session.flush()
+
+    # A persona que a agência usou vira elo do briefing: é ela que faz o mesmo
+    # rosto sair nos próximos vídeos que saírem desta ideia.
+    if req.personagem_id:
+        session.add(
+            MarketingRoteiroPersonagem(
+                id=uuid4(), roteiro_id=row.id, personagem_id=req.personagem_id
+            )
+        )
 
     # A entrega que trouxe o conceito passa a apontar para o briefing: é o elo
     # roteiro→criativo (5 de 49 em 22/09) nascendo também no caminho autoral.

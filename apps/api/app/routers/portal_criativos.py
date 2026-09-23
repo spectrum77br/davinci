@@ -157,6 +157,9 @@ def _arquivo_out(f: MarketingCreativeFile) -> dict[str, Any]:
     return {
         "id": str(f.id),
         "nome": f.file_name,
+        # Sai para a tela saber se dá pra TOCAR: sem isto o portal não
+        # consegue distinguir vídeo de qualquer outro anexo.
+        "mime": f.file_mime,
         "tamanho": f.file_size,
         "enviado_em": f.created_at.isoformat() if f.created_at else None,
     }
@@ -1030,6 +1033,7 @@ async def propor_video(
     conceito: Annotated[str, Form()] = "",
     marca: Annotated[str, Form()] = "",
     sku: Annotated[str, Form()] = "",
+    personagem_id: Annotated[str, Form()] = "",
 ) -> dict[str, Any]:
     """A agência publica um vídeo DELA, com o conceito junto, e cai na revisão.
 
@@ -1078,7 +1082,26 @@ async def propor_video(
     # escreveu; texto que chega de fora não entra nela por chegada — nem
     # desligado, porque desligado ele ainda aparece na lista de quem escreve.
     # Vira pedido, e o roteiro nasce no sim.
-    if conceito:
+    # Qual persona está na peça. Vem do elenco e é conferida contra ele: id
+    # inventado no formulário não pode virar ponteiro no banco.
+    persona = None
+    escolhido = (personagem_id or "").strip()
+    if escolhido:
+        try:
+            alvo = UUID(escolhido)
+        except ValueError:
+            raise HTTPException(400, detail={"code": "personagem_invalido"}) from None
+        persona = await session.scalar(
+            select(MarketingPersonagem.id).where(
+                MarketingPersonagem.id == alvo, MarketingPersonagem.ativo.is_(True)
+            )
+        )
+        if persona is None:
+            raise HTTPException(404, detail={"code": "personagem_nao_encontrado"})
+
+    # Pedido nasce se houver conceito OU persona: dizer "usei a Márcia" já é
+    # informação que quem decide precisa, mesmo sem texto junto.
+    if conceito or persona:
         session.add(
             MarketingIdeiaRequisicao(
                 id=uuid4(),
@@ -1087,6 +1110,7 @@ async def propor_video(
                 marca=marca_txt,
                 sku=sku_txt,
                 equipe=equipe,
+                personagem_id=persona,
                 creative_id=row.id,
             )
         )
@@ -1100,3 +1124,27 @@ async def propor_video(
         arquivos=entraram,
     )
     return _linha_out(row, await _roteiros_visiveis(session, [row], equipe))
+
+
+@router.get("/criativos/{creative_id}/arquivo/{file_id}")
+async def baixar_entrega(
+    creative_id: UUID,
+    file_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    equipe: Annotated[str, Depends(equipe_do_token)],
+    download: bool = False,
+) -> FileResponse:
+    """O vídeo que a PRÓPRIA agência entregou.
+
+    Faltava: o portal listava nome e tamanho e não tinha como tocar o arquivo —
+    quem entregou não conseguia rever o que mandou, nem conferir se subiu o
+    corte certo depois de uma recusa.
+
+    `_linha_da_equipe` decide quem vê: linha de outra agência responde 404, não
+    403, porque do lado de fora o que não é seu não existe.
+    """
+    row = await _linha_da_equipe(session, creative_id, equipe)
+    rec = next((f for f in row.files if f.id == file_id), None)
+    if rec is None:
+        raise HTTPException(404, detail={"code": "nao_encontrado"})
+    return _entrega(rec, permitidos=MIMES_VIDEO, baixar=download)
