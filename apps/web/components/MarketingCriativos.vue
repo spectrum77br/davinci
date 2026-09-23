@@ -478,6 +478,9 @@ type Postagem = {
   // tentar de novo. É booleano de propósito: o id do container é da Meta.
   tem_container?: boolean
   created_at: string | null
+  // Só da tela: quantas tentativas nesta conta falharam ANTES deste sucesso.
+  // Não vem da API — é montado por escondeFalhasSuperadas pro tooltip.
+  falhas_antes?: number
 }
 
 // Uma conta da marca no modal. `pode_postar=false` vem com `motivo` — o
@@ -707,6 +710,14 @@ function postagemTitle(p: Postagem): string {
       : 'o horário passou faz tempo e não publicou — decida se ainda vale')
   }
   if (p.result && p.status !== 'publicado') partes.push(p.result)
+  // As tentativas que falharam antes deste sucesso saem da linha (senão viram
+  // tarja vermelha permanente ao lado do post que deu certo), mas não podem
+  // sumir de vez: quem for entender por que o post demorou precisa saber.
+  if (p.falhas_antes) {
+    partes.push(p.falhas_antes === 1
+      ? '1 tentativa falhou antes desta'
+      : `${p.falhas_antes} tentativas falharam antes desta`)
+  }
   if (p.post_url) partes.push(p.post_url)
   return partes.join(' · ')
 }
@@ -717,6 +728,50 @@ function ordemStatus(st: string): number {
   if (emVoo(st)) return 0
   if (st === 'publicado') return 1
   return 2
+}
+
+// Conta+plataforma: duas tentativas na MESMA conta são a mesma história.
+function chaveConta(p: Postagem): string {
+  return `${p.plataforma}|${(p.conta || '').trim().toLowerCase()}`
+}
+
+// Esconde da linha as falhas que a conta já superou.
+//
+// Pedido do Eduardo (23/09/2026): cada tentativa virava uma pill vermelha
+// permanente, então um criativo que falhou duas vezes e publicou na terceira
+// ficava com duas tarjas de erro pra sempre ao lado do sucesso. O que importa
+// na linha é que o vídeo está no ar.
+//
+// Some da TELA, não do banco: o histórico continua inteiro, e o tooltip do
+// post que deu certo diz quantas tentativas vieram antes. E some só o que veio
+// ANTES do sucesso — falha posterior é notícia nova e continua aparecendo.
+function escondeFalhasSuperadas(list: Postagem[]): Postagem[] {
+  const publicou = new Map<string, string>()
+  for (const p of list) {
+    if (p.status !== 'publicado') continue
+    const k = chaveConta(p)
+    const quando = p.publicado_em || p.created_at || ''
+    if (quando > (publicou.get(k) ?? '')) publicou.set(k, quando)
+  }
+  if (!publicou.size) return list
+
+  const ocultas = new Map<string, number>()
+  const visiveis = list.filter((p) => {
+    if (p.status !== 'falhou') return true
+    const k = chaveConta(p)
+    const sucesso = publicou.get(k)
+    if (!sucesso || (p.created_at || '') > sucesso) return true
+    ocultas.set(k, (ocultas.get(k) ?? 0) + 1)
+    return false
+  })
+  if (!ocultas.size) return list
+  // Cópia: não mexo no objeto que veio da API — a mesma lista alimenta outras
+  // contas da tela.
+  return visiveis.map((p) =>
+    p.status === 'publicado' && ocultas.get(chaveConta(p))
+      ? { ...p, falhas_antes: ocultas.get(chaveConta(p)) }
+      : p,
+  )
 }
 
 function ordenaPostagens(list: Postagem[]): Postagem[] {
@@ -835,7 +890,7 @@ const postagensPorCriativo = computed(() => {
     if (atual) atual.push(p)
     else m.set(p.creative_id, [p])
   }
-  for (const [k, v] of m) m.set(k, ordenaPostagens(v))
+  for (const [k, v] of m) m.set(k, ordenaPostagens(escondeFalhasSuperadas(v)))
   return m
 })
 

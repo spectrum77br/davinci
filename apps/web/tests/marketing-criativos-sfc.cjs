@@ -171,6 +171,7 @@ return {
   LEGENDA_MAX, STATUS_EM_VOO, brtParaIso, proximaHoraBrt, fmtBrtCurto, fmtBrtLongo,
   contaLabel, plataformaLabel, motivoConta, motivoPublicar, montaBody, normalizaContas,
   statusLabel, statusPill, podeCancelar, emVoo, ordenaPostagens, postagemQuando, postagemTitle,
+  chaveConta, escondeFalhasSuperadas,
   POSTAGEM_ERR_MAP, legendaRotulo, normalizaLegenda, LEGENDA_ORIGEM_LABEL,
 };
 `)(dateLib.isoToday, redes.PLATAFORMA_LABELS, apiError.MARCAS_ERROS)
@@ -431,6 +432,44 @@ assert.deepEqual(H.STATUS_EM_VOO, ['agendado', 'pendente', 'containering', 'publ
     post({ id: 'agenda', status: 'agendado' }),
   ]
   assert.deepEqual(H.ordenaPostagens(lista).map((p) => p.id), ['agenda', 'ok', 'velho'])
+
+  // Falhas já superadas somem da linha (pedido do Eduardo, 23/09/2026): duas
+  // tentativas vermelhas ao lado do post que deu certo não ajudam ninguém.
+  {
+    const naConta = (o) => post({ plataforma: 'tiktok', conta: 'poofy_brasil', ...o })
+    const hist = [
+      naConta({ id: 'f1', status: 'falhou', created_at: '2026-09-23T11:12:00Z' }),
+      naConta({ id: 'f2', status: 'falhou', created_at: '2026-09-23T11:37:00Z' }),
+      naConta({ id: 'ok', status: 'publicado', publicado_em: '2026-09-23T11:50:00Z',
+                created_at: '2026-09-23T11:45:00Z' }),
+    ]
+    const vis = H.escondeFalhasSuperadas(hist)
+    assert.deepEqual(vis.map((p) => p.id), ['ok'], 'as duas falhas anteriores saem da tela')
+    assert.equal(vis[0].falhas_antes, 2, 'o sucesso carrega quantas falharam antes')
+    assert.match(H.postagemTitle(vis[0]), /2 tentativas falharam antes desta/)
+    // A lista original não pode ser mexida: alimenta o resto da tela.
+    assert.deepEqual(hist.map((p) => p.id), ['f1', 'f2', 'ok'])
+    assert.equal(hist[2].falhas_antes, undefined)
+
+    // Falha DEPOIS do sucesso é notícia nova e continua aparecendo.
+    const depois = H.escondeFalhasSuperadas([
+      ...hist,
+      naConta({ id: 'f3', status: 'falhou', created_at: '2026-09-23T12:10:00Z' }),
+    ])
+    assert.deepEqual(depois.map((p) => p.id).sort(), ['f3', 'ok'])
+
+    // Sucesso numa conta NÃO limpa a falha de outra.
+    const outra = H.escondeFalhasSuperadas([
+      ...hist,
+      post({ id: 'ig', plataforma: 'instagram', conta: 'charlots_br', status: 'falhou',
+             created_at: '2026-09-23T11:00:00Z' }),
+    ])
+    assert.ok(outra.some((p) => p.id === 'ig'), 'falha de outra conta fica')
+
+    // Sem nenhum sucesso, nada some.
+    const soFalhas = [naConta({ id: 'x', status: 'falhou' })]
+    assert.deepEqual(H.escondeFalhasSuperadas(soFalhas).map((p) => p.id), ['x'])
+  }
   assert.deepEqual(lista.map((p) => p.id), ['velho', 'ok', 'agenda'], 'ordena sem mexer no array original')
 }
 
