@@ -264,8 +264,13 @@ class ResolverIn(BaseModel):
     # OBRIGATÓRIO ao resolver (Eduardo 15/09) — o router devolve 422
     # `chamado_valor_obrigatorio` sem ele; ignorado ao reabrir.
     valor_recuperado: Decimal | None = None
+    # 23/09 (Vinicius, pedido 294554: "fizemos duas disputas e a Shopee recusou"):
+    # a MESMA observação da coluna — a janela vem com ela preenchida e grava de
+    # volta ao resolver, e o texto entra no evento do histórico. Omitida (cliente
+    # antigo) = não mexe; enviada vazia = limpa.
+    observacao: str | None = None
 
-    _clean = field_validator("situacao", mode="before")(_clean_optional_text)
+    _clean = field_validator("situacao", "observacao", mode="before")(_clean_optional_text)
 
 
 # ------------------------------------------------------------------ lixeira

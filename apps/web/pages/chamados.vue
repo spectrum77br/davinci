@@ -1081,6 +1081,9 @@ const resolver = reactive({
   // Valor OBRIGATÓRIO ao resolver (Eduardo 15/09): lucro ou prejuízo + quanto.
   tipo: 'lucro' as 'lucro' | 'prejuizo',
   valor: '' as string,
+  // 23/09 (Vinicius): a MESMA observação da coluna — vem preenchida e grava de volta;
+  // o texto também fica no evento "resolvido" do histórico, pra analisar depois.
+  observacao: '' as string,
   // 19/09: veio da sugestão do robô/plataforma (valor_sugerido), não da coluna Valor.
   sugerido: false,
   saving: false,
@@ -1113,6 +1116,7 @@ function openResolver(row: ChamadoRow) {
   resolver.open = true
   resolver.row = row
   resolver.situacao = ''
+  resolver.observacao = row.observacao || ''
   resolver.erro = null
   // Pré-preenche com o que já está na coluna Valor (negativo = prejuízo). Coluna vazia
   // e o robô/plataforma sugeriu um resultado (19/09) → entra a sugestão; a pessoa confirma.
@@ -1149,7 +1153,12 @@ async function confirmarResolver() {
   try {
     const updated = await api<ChamadoRow>(`/api/chamados/${row.id}/resolver`, {
       method: 'POST',
-      body: { resolvido: true, situacao: resolver.situacao || null, valor_recuperado: valor },
+      body: {
+        resolvido: true,
+        situacao: resolver.situacao || null,
+        valor_recuperado: valor,
+        observacao: resolver.observacao.trim() || null,
+      },
     })
     if (mostrar.value === 'abertos') {
       items.value = items.value.filter((r) => r.id !== row.id)
@@ -1833,7 +1842,7 @@ async function confirmarExcluir() {
           >
             <div
               v-if="b.lado === 'sistema'"
-              class="rounded-full bg-muted px-3 py-1 text-[11px] italic text-muted-foreground"
+              class="max-w-[85%] whitespace-pre-wrap break-words rounded-2xl bg-muted px-3 py-1 text-center text-[11px] italic text-muted-foreground"
               :title="b.quando"
             >{{ b.texto }}</div>
 
@@ -2117,6 +2126,18 @@ async function confirmarExcluir() {
               Custo do produto: <b class="text-foreground">{{ fmtBRL(resolver.row.custo_produto) }}</b><template v-if="resolver.row.custo_detalhe"> · {{ resolver.row.custo_detalhe }}</template>
             </div>
           </div>
+          <!-- 23/09 (Vinicius, pedido 294554): o que aconteceu, pra analisar depois. É a
+               mesma Observação da coluna (vem preenchida); o texto fica também no
+               evento "resolvido" do histórico. -->
+          <label class="block space-y-1">
+            <span class="block text-xs font-medium">Observação</span>
+            <textarea
+              v-model="resolver.observacao"
+              rows="3"
+              placeholder="o que aconteceu? ex.: abrimos 2 disputas e a Shopee recusou as duas"
+              class="w-full resize-y rounded-md border bg-background px-2 py-1.5 text-sm"
+            />
+          </label>
           <div v-if="resolver.erro" class="text-xs text-red-500">{{ resolver.erro }}</div>
         </div>
         <div class="flex items-center justify-end gap-2 border-t px-4 py-3">

@@ -892,12 +892,16 @@ async def resolver(
                 502, detail={"code": "chamado_status_bling_erro", "erro": str(e)[:300]}
             ) from e
         ch.alterar_status_bling = body.situacao
+    # 23/09: a observação da janela É a da coluna (vem preenchida com ela).
+    if body.resolvido and "observacao" in body.model_fields_set:
+        ch.observacao = body.observacao
     session.add(
         svc.marcar_resolvido(
             ch,
             body.resolvido,
             autor_nome=_autor(user),
             valor=body.valor_recuperado if body.resolvido else None,
+            observacao=ch.observacao if body.resolvido else None,
         )
     )
     await session.commit()

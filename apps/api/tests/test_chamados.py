@@ -391,6 +391,77 @@ async def test_resolver_com_pedido_ja_na_situacao_nao_trava(
     assert not any("alterado para Resolvido" in t for t in textos)
 
 
+async def test_resolver_grava_observacao_na_coluna_e_no_historico(
+    client, make_user, auth_as, db, monkeypatch
+):
+    """Vinicius, 23/09/2026 (pedido 294554): a janela Resolver tem a Observação —
+    a mesma da coluna — pra registrar o que aconteceu ("fizemos duas disputas e a
+    Shopee recusou"). Grava na coluna e fica no evento "resolvido" do histórico;
+    cliente que não manda o campo não apaga a observação que já estava lá."""
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+    await _seed_pedido(db, user)
+    fake = _FakeBling()
+
+    async def _fake_bling(session):
+        return fake
+
+    monkeypatch.setattr(logistica_bling, "_bling_client", _fake_bling)
+    cid = (
+        await client.post(
+            "/api/chamados",
+            json={"origem": "logistica", "pedido_bling": "293000", "observacao": "antiga"},
+        )
+    ).json()["id"]
+
+    obs = "fizemos duas disputas e a Shopee recusou as duas"
+    res = await client.post(
+        f"/api/chamados/{cid}/resolver",
+        json={
+            "resolvido": True,
+            "situacao": "Perdimento",
+            "valor_recuperado": -1704.5,
+            "observacao": f"  {obs}  ",
+        },
+    )
+    assert res.status_code == 200, res.text
+    assert res.json()["observacao"] == obs
+    textos = [
+        h["texto"]
+        for h in (await client.get(f"/api/chamados/{cid}/mensagens")).json()
+        if h["tipo"] == "sistema"
+    ]
+    assert any(
+        t.startswith("Chamado marcado como resolvido")
+        and "prejuízo de R$ 1.704,50" in t
+        and t.endswith(f"\nObs.: {obs}")
+        for t in textos
+    )
+
+    # reabre e resolve de novo SEM o campo (cliente antigo): a coluna fica como estava
+    await client.post(f"/api/chamados/{cid}/resolver", json={"resolvido": False})
+    de_novo = await client.post(
+        f"/api/chamados/{cid}/resolver",
+        json={"resolvido": True, "situacao": "Resolvido", "valor_recuperado": 0},
+    )
+    assert de_novo.status_code == 200, de_novo.text
+    assert de_novo.json()["observacao"] == obs
+
+    # mandou vazio = limpou
+    await client.post(f"/api/chamados/{cid}/resolver", json={"resolvido": False})
+    limpa = await client.post(
+        f"/api/chamados/{cid}/resolver",
+        json={
+            "resolvido": True,
+            "situacao": "Resolvido",
+            "valor_recuperado": 0,
+            "observacao": "   ",
+        },
+    )
+    assert limpa.status_code == 200, limpa.text
+    assert limpa.json()["observacao"] is None
+
+
 async def test_valor_recuperado_grava_e_valida(client, make_user, auth_as):
     """Coluna "Valor" do Controle (Eduardo 03/09): resultado do chamado em R$;
     negativo = prejuízo (Eduardo 15/09); vazio (null) limpa."""

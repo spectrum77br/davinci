@@ -863,12 +863,15 @@ def marcar_resolvido(
     *,
     autor_nome: str | None = None,
     valor: Decimal | None = None,
+    observacao: str | None = None,
 ) -> ChamadoMensagem:
     """Fecha (ou reabre) o chamado e devolve o evento do histórico. `valor` é
     o resultado do chamado (lucro/prejuízo em R$) — Eduardo 15/09: obrigatório
     ao resolver pela aba. 19/09 (Vinicius): fechar é só de PESSOA — o único
     caminho que chama com `resolvido=True` é o endpoint `/resolver`; o cérebro
-    só reabre (`resolvido=False`) o que o monitor antigo fechou cedo demais."""
+    só reabre (`resolvido=False`) o que o monitor antigo fechou cedo demais.
+    `observacao` (23/09) vai no evento: o porquê do fechamento fica no histórico
+    mesmo se a coluna Observação for editada depois."""
     agora = datetime.now(UTC)
     ch.resolvido = resolvido
     ch.resolvido_at = agora if resolvido else None
@@ -880,7 +883,8 @@ def marcar_resolvido(
         quem = f" por {autor_nome}" if autor_nome else ""
         resultado = resultado_texto(valor)
         sufixo = f" — {resultado}" if resultado else ""
-        return registrar_sistema(ch, f"Chamado marcado como resolvido{quem}{sufixo}")
+        obs = f"\nObs.: {observacao}" if observacao else ""
+        return registrar_sistema(ch, f"Chamado marcado como resolvido{quem}{sufixo}{obs}")
     return registrar_sistema(ch, f"Chamado reaberto{(' por ' + autor_nome) if autor_nome else ''}")
 
 
