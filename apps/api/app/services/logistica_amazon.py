@@ -90,7 +90,8 @@ async def build_enrichment(client: AmazonClient, order_id: str) -> dict:
     """Monta a assinatura da Amazon + rastreio (EasyShip, best-effort) +
     localização proxy.
 
-    Retorna `{"meli_status": {"order_status": ..., "easyship_status": ...} | {},
+    Retorna `{"meli_status": {"order_status": ..., "easyship_status": ...,
+    "buyer_cancel": ...} | {},
     "rastreio": str | None, "localizacao": str | None, "datas": {...},
     "prazo_entrega": date | None, "entregue": bool}`.
 
@@ -131,6 +132,20 @@ async def build_enrichment(client: AmazonClient, order_id: str) -> dict:
     if st.get("fulfillment_channel"):
         meli["fulfillment_channel"] = str(st["fulfillment_channel"])
 
+    # Pedido de cancelamento do cliente (Vinicius, 23/09/2026): só em pedido
+    # ainda vivo — depois de entregue, cancelado ou na mão da Amazon (FBA) não
+    # há o que fazer com ele, e cada leitura gasta cota da SP-API. Sem resposta
+    # da Amazon o `enrich_row` mantém o que a linha já sabia.
+    cancelamento_sem_resposta = False
+    if _pergunta_cancelamento(meli):
+        cancel = await client.get_buyer_cancel(order_id)
+        if cancel is None:
+            cancelamento_sem_resposta = True
+        elif cancel.get("pedido"):
+            meli["buyer_cancel"] = logistica_rules.AMAZON_CANCELAMENTO_PEDIDO
+            if cancel.get("motivo"):
+                meli["buyer_cancel_reason"] = str(cancel["motivo"])[:120]
+
     # Rastreio EasyShip (best-effort; 403 sem o papel de shipping → None).
     rastreio = await client.get_easyship_tracking(order_id)
 
@@ -148,7 +163,21 @@ async def build_enrichment(client: AmazonClient, order_id: str) -> dict:
         "datas": {f: datas[f] for f in meli if f in datas},
         "prazo_entrega": _iso_para_data_brt(st.get("latest_delivery_date")),
         "entregue": (meli.get("easyship_status") or "").strip().upper() == "DELIVERED",
+        "cancelamento_sem_resposta": cancelamento_sem_resposta,
     }
+
+
+# Onde o pedido de cancelamento do cliente ainda muda alguma coisa: antes de
+# sair (cancela sem afetar a métrica) e em trânsito (suspender a entrega).
+_ORDER_PERGUNTA_CANCELAMENTO = {"UNSHIPPED", "PARTIALLYSHIPPED", "SHIPPED"}
+_CAMPOS_CANCELAMENTO = ("buyer_cancel", "buyer_cancel_reason")
+
+
+def _pergunta_cancelamento(meli: dict[str, str]) -> bool:
+    ost = (meli.get("order_status") or "").strip().upper()
+    easy = (meli.get("easyship_status") or "").strip().upper()
+    afn = (meli.get("fulfillment_channel") or "").strip().upper() == "AFN"
+    return ost in _ORDER_PERGUNTA_CANCELAMENTO and easy not in _EASYSHIP_FINAIS and not afn
 
 
 async def _amazon_integration_for_conta(
@@ -228,6 +257,13 @@ async def enrich_row(
             client_cache[conta] = client
 
     enr = await build_enrichment(client, order_id)
+    # getOrderItems sem resposta (429 da cota, 403) não "desmarca" o pedido de
+    # cancelamento: a assinatura trocaria de volta e a regra rodaria à toa.
+    if enr.get("cancelamento_sem_resposta"):
+        velho = row.meli_status or {}
+        for campo in _CAMPOS_CANCELAMENTO:
+            if velho.get(campo) and campo not in enr["meli_status"]:
+                enr["meli_status"][campo] = velho[campo]
     # Antes de trocar o status: o carimbo compara o valor velho com o novo.
     row.status_datas = logistica_datas.aplicar(row, enr["meli_status"], enr.get("datas"))
     antes = ((row.meli_status or {}).get("order_status") or "").strip()

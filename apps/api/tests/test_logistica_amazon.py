@@ -14,12 +14,26 @@ class FakeAmazon:
     `status_by_id` = {order_id: {order_status, easyship_status, ship_city,
     ship_state}} (ausente => None)."""
 
-    def __init__(self, status_by_id: dict[str, dict], tracking_by_id: dict[str, str] | None = None):
+    def __init__(
+        self,
+        status_by_id: dict[str, dict],
+        tracking_by_id: dict[str, str] | None = None,
+        cancel_by_id: dict[str, dict | None] | None = None,
+    ):
         self._status = status_by_id
         self._tracking = tracking_by_id or {}
+        # Ausente = cliente não pediu; valor None = Amazon sem resposta.
+        self._cancel = cancel_by_id or {}
+        self.cancel_consultados: list[str] = []
 
     async def get_order_status(self, order_id):
         return self._status.get(str(order_id))
+
+    async def get_buyer_cancel(self, order_id):
+        self.cancel_consultados.append(str(order_id))
+        if str(order_id) in self._cancel:
+            return self._cancel[str(order_id)]
+        return {"pedido": False, "motivo": None}
 
     async def get_easyship_tracking(self, order_id):
         return self._tracking.get(str(order_id))
@@ -311,3 +325,128 @@ async def test_shipped_dba_mantem_carimbo(db):
     )
     assert row.amazon_canal == "dba"
     assert row.bling_enriquecido_em is not None
+
+
+# ── pedido de cancelamento do cliente (23/09/2026) ──────────────────────
+
+
+_PEDIU = {"pedido": True, "motivo": "Outro"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "assinatura"),
+    [
+        # Ainda sem nota: dá pra cancelar sem afetar a métrica.
+        ({"order_status": "Unshipped", "fulfillment_channel": "MFN"},
+         "Não enviado | Cliente pediu cancelamento"),
+        # Envio próprio já despachado — o 701-0809246-1772255 do print.
+        ({"order_status": "Shipped", "fulfillment_channel": "MFN"},
+         "Enviado | Cliente pediu cancelamento"),
+        # DBA com nota emitida, motorista ainda não buscou.
+        ({"order_status": "Shipped", "easyship_status": "PendingPickUp"},
+         "Enviado | Aguardando coleta | Cliente pediu cancelamento"),
+    ],
+)
+async def test_cliente_pediu_cancelamento_entra_na_assinatura(status, assinatura):
+    client = FakeAmazon({"X": status}, cancel_by_id={"X": _PEDIU})
+    enr = await logistica_amazon.build_enrichment(client, "X")
+    assert enr["meli_status"]["buyer_cancel"] == "Requested"
+    assert enr["meli_status"]["buyer_cancel_reason"] == "Outro"
+    assert logistica_rules.assinatura_amazon(enr["meli_status"]) == assinatura
+    detalhe = logistica_rules.detalhe_para("Amazon", enr["meli_status"])
+    assert {"campo": "buyer_cancel", "rotulo": "Cancelamento",
+            "valor": "Cliente pediu cancelamento"} in detalhe
+    assert {"campo": "buyer_cancel_reason", "rotulo": "Motivo do cliente",
+            "valor": "Outro"} in detalhe
+
+
+@pytest.mark.asyncio
+async def test_sem_pedido_de_cancelamento_assinatura_nao_muda():
+    client = FakeAmazon({"X": {"order_status": "Shipped", "fulfillment_channel": "MFN"}})
+    enr = await logistica_amazon.build_enrichment(client, "X")
+    assert "buyer_cancel" not in enr["meli_status"]
+    assert logistica_rules.assinatura_amazon(enr["meli_status"]) == "Enviado"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "status",
+    [
+        {"order_status": "Shipped", "easyship_status": "Delivered"},
+        {"order_status": "Canceled"},
+        {"order_status": "Pending"},
+        {"order_status": "Shipped", "fulfillment_channel": "AFN"},
+    ],
+)
+async def test_pedido_fora_de_jogo_nao_gasta_consulta_de_cancelamento(status):
+    """Entregue, cancelado, não pago ou FBA: não há o que fazer com o pedido de
+    cancelamento — e cada consulta gasta cota da SP-API."""
+    client = FakeAmazon({"X": status}, cancel_by_id={"X": _PEDIU})
+    enr = await logistica_amazon.build_enrichment(client, "X")
+    assert client.cancel_consultados == []
+    assert "buyer_cancel" not in enr["meli_status"]
+
+
+@pytest.mark.asyncio
+async def test_amazon_sem_resposta_mantem_o_pedido_de_cancelamento(db):
+    """429/403 no getOrderItems não "desmarca" a linha — senão a assinatura
+    trocava de volta e a regra da aba Status rodava à toa."""
+    row = _linha_enrich(
+        meli_status={
+            "order_status": "Unshipped", "fulfillment_channel": "MFN",
+            "buyer_cancel": "Requested", "buyer_cancel_reason": "Outro",
+        },
+    )
+    db.add(row)
+    await db.commit()
+    fake = FakeAmazon(
+        {row.pedido_marketplace: {"order_status": "Unshipped", "fulfillment_channel": "MFN"}},
+        cancel_by_id={row.pedido_marketplace: None},
+    )
+    await logistica_amazon.enrich_row(db, row, client_cache={"kfa": fake})
+    await db.commit()
+    assert row.meli_status["buyer_cancel"] == "Requested"
+    assert row.meli_status["buyer_cancel_reason"] == "Outro"
+
+    # Com resposta, vale a Amazon (cliente desistiu do pedido → sai).
+    fake._cancel = {}
+    await logistica_amazon.enrich_row(db, row, client_cache={"kfa": fake})
+    await db.commit()
+    assert "buyer_cancel" not in row.meli_status
+
+
+@pytest.mark.asyncio
+async def test_sweep_devolve_linha_quando_o_cliente_pede_cancelamento(db, monkeypatch):
+    """O pedido de cancelamento muda a assinatura → a linha volta do sweep de
+    hora em hora e passa pelas regras da aba Status."""
+    from datetime import date
+
+    from app.models import Logistica
+
+    row = Logistica(
+        plataforma="Amazon", conta="kia", pedido_bling="299001",
+        pedido_marketplace="701-0809246-1772255",
+        meli_status={"order_status": "Shipped", "fulfillment_channel": "MFN"},
+        status_bling="Em digitação", data=date.today(),
+    )
+    db.add(row)
+    await db.commit()
+    fake = FakeAmazon(
+        {"701-0809246-1772255": {"order_status": "Shipped", "fulfillment_channel": "MFN"}},
+        cancel_by_id={"701-0809246-1772255": _PEDIU},
+    )
+
+    async def _integ(session, conta):
+        return object()
+
+    monkeypatch.setattr(logistica_amazon, "_amazon_integration_for_conta", _integ)
+    monkeypatch.setattr(
+        logistica_amazon, "_build_amazon_client", lambda s, i, *, lock=None: fake
+    )
+    out = await logistica_amazon.sweep_pos_venda(db)
+    assert out["ids"] == [row.id]
+    await db.refresh(row)
+    assert logistica_rules.assinatura_para("Amazon", row.meli_status) == (
+        "Enviado | Cliente pediu cancelamento"
+    )
