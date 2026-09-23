@@ -911,13 +911,13 @@ async def test_video_autoral_sem_titulo_e_recusado(client: AsyncClient):
 
 
 async def _produto(db: AsyncSession, dono, *, sku: str, nome: str, pasta: str | None,
-                   fotos: int | None = None):
+                   fotos: int | None = None, segmento: str = "teste"):
     """Linha da tabela de preços. `user_id` e `segment_id` são NOT NULL, então
     o segmento vem junto — é esqueleto de teste, não parte do que se afirma."""
     from app.models.pricing import PricingProduct
     from app.models.segment import Segment
 
-    seg = Segment(user_id=dono.id, name="teste", slug=f"teste-{uuid4().hex[:8]}")
+    seg = Segment(user_id=dono.id, name=segmento, slug=f"seg-{uuid4().hex[:8]}")
     db.add(seg)
     await db.flush()
     row = PricingProduct(
@@ -938,8 +938,17 @@ async def test_catalogo_so_traz_as_familias_do_portal(
     await _produto(db, dono, sku="dg048,dg049", nome="uranyx F117",
                    pasta="/Celular/Fossibot F117", fotos=32)
     await _produto(db, dono, sku="b005.18", nome="ABS 18", pasta="/Malas/ABS 18", fotos=46)
-    await _produto(db, dono, sku="xx001", nome="Coisa interna", pasta="/Financeiro/Notas")
+    await _produto(db, dono, sku="xx001", nome="Coisa interna",
+                   pasta="/Financeiro/Notas", fotos=9)
     await _produto(db, dono, sku="xx002", nome="Sem pasta", pasta=None)
+    # Pasta vazia: card que a agência abre à toa, e ainda gasta uma ida ao MEGA
+    # pra descobrir que não tem nada. Dos 86 reais, 39 estavam assim.
+    await _produto(db, dono, sku="dg999", nome="Pasta vazia",
+                   pasta="/Celular/Nada", fotos=0)
+    # Revenda de Apple mora em /Celular junto com os robustos da Uranyx, e não
+    # é marca da casa. O segmento é o separador; o nome da pasta seria palpite.
+    await _produto(db, dono, sku="ap001", nome="apple iphone 17 pro",
+                   pasta="/Celular/apple iphone 17 pro", fotos=12, segmento="Apple")
     await db.commit()
 
     r = await client.get("/api/portal/produtos", headers={"X-Portal-Token": TOK_A})
@@ -948,6 +957,8 @@ async def test_catalogo_so_traz_as_familias_do_portal(
     assert "uranyx F117" in nomes and "ABS 18" in nomes
     assert "Coisa interna" not in nomes, "pasta fora das famílias não pode vazar"
     assert "Sem pasta" not in nomes
+    assert "Pasta vazia" not in nomes, "card sem foto é card aberto à toa"
+    assert "apple iphone 17 pro" not in nomes, "revenda não é marca da casa"
 
     # O SKU sai como lista: uma pasta serve a linha inteira, e é por esse
     # código que a agência liga a foto à ideia.
@@ -979,7 +990,8 @@ async def test_nome_de_foto_com_barra_e_recusado(
 ):
     """Sem esta trava, `..` no nome viraria leitura de outra pasta da conta."""
     dono = await make_user()
-    p = await _produto(db, dono, sku="dg048", nome="F117", pasta="/Celular/Fossibot F117")
+    p = await _produto(db, dono, sku="dg048", nome="F117",
+                       pasta="/Celular/Fossibot F117", fotos=32)
     await db.commit()
 
     # Subpasta É legítima (`/Malas/<linha>` tem uma por modelo); escapar não.

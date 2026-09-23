@@ -91,6 +91,7 @@ from app.models.marketing_personagem_requisicao import (
 )
 from app.models.marketing_roteiro import MarketingRoteiro, MarketingRoteiroRef
 from app.models.pricing import PricingProduct
+from app.models.segment import Segment
 from app.routers.marketing_creatives import (
     MAX_BYTES_ARQUIVO,
     MAX_FILES_PER_ROW,
@@ -1200,6 +1201,19 @@ async def listar_produtos(
     pasta serve todas as cores), então sai a lista — é assim que a agência acha
     o código que está escrito na ideia.
     """
+    # Duas travas, e as duas vieram de olhar o dado real em 23/09/2026:
+    #
+    # 1. `fotos_count > 0`. Dos 86 produtos com pasta, 39 têm a pasta VAZIA —
+    #    conferi por amostragem e estão vazias mesmo. Card sem foto é card que
+    #    a agência abre à toa, e ainda dispara uma ida ao MEGA pra descobrir
+    #    que não tem nada.
+    #
+    # 2. Fora o segmento Apple. `/Celular` mistura os robustos da Uranyx
+    #    (Fossibot, Oukitel, Oscal) com revenda de iPhone, MacBook e Watch —
+    #    11 produtos que não são marca da casa e não interessam a quem produz
+    #    vídeo. O segmento é o separador certo porque é campo curado; o nome da
+    #    pasta seria adivinhação.
+    apple = select(Segment.id).where(func.lower(Segment.name) == "apple").scalar_subquery()
     linhas = (
         (
             await session.execute(
@@ -1207,6 +1221,8 @@ async def listar_produtos(
                 .where(
                     PricingProduct.fotos_path.is_not(None),
                     PricingProduct.fotos_path != "",
+                    PricingProduct.fotos_count > 0,
+                    PricingProduct.segment_id.not_in(apple),
                 )
                 .order_by(PricingProduct.name)
             )
@@ -1288,22 +1304,24 @@ async def baixar_foto_do_produto(
     # nível não é, e barra no começo viraria caminho absoluto lá do outro lado.
     if ".." in nome or not nome.strip() or nome.startswith("/"):
         raise HTTPException(400, detail={"code": "nome_invalido"})
-    try:
-        listagem = await sidecar_request("GET", "/files", params={"path": row.fotos_path})
-        existe = any(
-            a.get("nome") == nome and a.get("imagem") for a in (listagem.get("arquivos") or [])
-        )
-        if not existe:
-            raise HTTPException(404, detail={"code": "nao_encontrado"})
-        bruto = await sidecar_bytes("/file", params={"path": f"{row.fotos_path}/{nome}"})
-    except MegaError as e:
-        raise HTTPException(503, detail={"code": "mega_indisponivel", "message": str(e)}) from e
-
     # O MIME sai da EXTENSÃO, nunca do que o MEGA disser: é a mesma regra das
     # outras rotas de bytes daqui, e é ela que impede servir HTML como imagem.
+    # Vem ANTES do download: extensão que a tela não desenha nem chega a gastar
+    # uma ida ao MEGA — e é isto que impede pedir por aqui o MP4 que a agência
+    # entregou, porque ele mora na mesma pasta.
     media, disposicao = mime_seguro(
         mime_da_extensao(nome, tabela=_EXT_IMAGEM), permitidos=MIMES_IMAGEM
     )
+
+    # SEM re-listar a pasta. A versão anterior conferia o nome contra a
+    # listagem a cada foto — uma ida extra ao MEGA por miniatura, e a grade
+    # pede 24 de uma vez. O nome já está preso: sem `..`, sem barra inicial e
+    # com extensão de imagem, o pior caso é ler outro arquivo DESTA pasta, que
+    # é exatamente o que a agência tem direito de ver.
+    try:
+        bruto = await sidecar_bytes("/file", params={"path": f"{row.fotos_path}/{nome}"})
+    except MegaError as e:
+        raise HTTPException(503, detail={"code": "mega_indisponivel", "message": str(e)}) from e
     return Response(
         content=bruto,
         media_type=media,
