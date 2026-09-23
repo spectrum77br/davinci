@@ -63,7 +63,7 @@ from typing import Annotated, Any
 from uuid import UUID, uuid4
 
 import structlog
-from fastapi import APIRouter, Depends, File, Header, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, UploadFile, status
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sqlalchemy import func, or_, select
@@ -73,7 +73,6 @@ from sqlalchemy.orm import selectinload
 from app.config import get_settings
 from app.db import get_session
 from app.models.marketing import MarketingCreative, MarketingCreativeFile
-from app.models.marketing_ideia_requisicao import MarketingIdeiaRequisicao
 from app.models.marketing_personagem import MarketingPersonagem, MarketingPersonagemArquivo
 from app.models.marketing_personagem_requisicao import (
     STATUS_PENDENTE,
@@ -924,105 +923,6 @@ async def requisitar_personagem(
     return {"id": str(row.id), "status": row.status}
 
 
-# ───────────────────── a ideia que nasce na agência ─────────────────────
-
-
-class IdeiaIn(BaseModel):
-    """Proposta de vídeo inteiramente da agência.
-
-    `descricao` é obrigatória e é o que vira o texto do briefing. Título sem
-    descrição seria um pedido que ninguém consegue avaliar — e avaliar é o
-    único motivo desta fila existir.
-    """
-
-    titulo: str
-    descricao: str
-    justificativa: str | None = None
-    marca: str | None = None
-    sku: str | None = None
-
-
-@router.post("/ideias/requisicao", status_code=201)
-async def propor_ideia(
-    payload: IdeiaIn,
-    session: Annotated[AsyncSession, Depends(get_session)],
-    equipe: Annotated[str, Depends(equipe_do_token)],
-) -> dict[str, Any]:
-    """A agência PROPÕE um vídeo dela. Nada é liberado aqui.
-
-    Eduardo, 23/09/2026: "caso eles queiram essa liberdade (...) vira pedidos no
-    DaVinci que deve a nossa aprovação pra eles poderem gerar o que quiserem".
-
-    O sim de dentro é que cria o briefing — e é ele que autoriza produzir. Sem
-    este passo, "liberdade" viraria a agência escrevendo o próprio briefing e
-    produzindo em cima dele sem ninguém olhar, que é justamente o contrário do
-    que a casa pediu.
-    """
-    titulo = (payload.titulo or "").strip()
-    descricao = (payload.descricao or "").strip()
-    if not titulo:
-        raise HTTPException(400, detail={"code": "titulo_obrigatorio"})
-    if not descricao:
-        raise HTTPException(400, detail={"code": "descricao_obrigatoria"})
-
-    row = MarketingIdeiaRequisicao(
-        id=uuid4(),
-        titulo=titulo[:160],
-        descricao=descricao,
-        justificativa=(payload.justificativa or "").strip() or None,
-        marca=(payload.marca or "").strip() or None,
-        sku=(payload.sku or "").strip() or None,
-        equipe=equipe,
-    )
-    session.add(row)
-    await session.commit()
-    logger.info("portal_ideia_proposta", requisicao_id=str(row.id), equipe=equipe)
-    return {"id": str(row.id), "status": row.status}
-
-
-@router.get("/ideias/requisicoes")
-async def listar_minhas_ideias(
-    session: Annotated[AsyncSession, Depends(get_session)],
-    equipe: Annotated[str, Depends(equipe_do_token)],
-) -> dict[str, Any]:
-    """Os pedidos DESTA agência, com o veredito e o motivo da recusa.
-
-    Mesma razão da fila de personagem: guardar o porquê só vale se o porquê
-    chegar de volta a quem pediu.
-    """
-    linhas = (
-        (
-            await session.execute(
-                select(MarketingIdeiaRequisicao)
-                .where(MarketingIdeiaRequisicao.equipe == equipe)
-                .order_by(MarketingIdeiaRequisicao.created_at.desc())
-                .limit(LIMITE_PADRAO)
-            )
-        )
-        .scalars()
-        .all()
-    )
-    return {
-        "equipe": equipe,
-        "requisicoes": [
-            {
-                "id": str(r.id),
-                "titulo": r.titulo,
-                "descricao": r.descricao,
-                "marca": r.marca,
-                "sku": r.sku,
-                "status": r.status,
-                "motivo": r.motivo,
-                # Aprovado vira briefing: o link leva direto pra tela dele.
-                "roteiro_id": str(r.roteiro_id) if r.roteiro_id else None,
-                "criado_em": r.created_at.isoformat() if r.created_at else None,
-                "decidido_em": r.decidido_em.isoformat() if r.decidido_em else None,
-            }
-            for r in linhas
-        ],
-    }
-
-
 # ───────────────────── vídeos de referência ─────────────────────
 
 
@@ -1115,3 +1015,87 @@ async def baixar_referencia_video(
     if rec is None or (rec.file_mime or "").lower() not in MIMES_VIDEO:
         raise HTTPException(404, detail={"code": "nao_encontrado"})
     return _entrega(rec, permitidos=MIMES_VIDEO, baixar=download)
+
+
+# ──────────────── vídeo autoral: nasce pronto e vai pra revisão ────────────────
+
+
+@router.post("/criativos/proposta")
+async def propor_video(
+    files: Annotated[list[UploadFile], File(...)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+    equipe: Annotated[str, Depends(equipe_do_token)],
+    titulo: Annotated[str, Form()],
+    conceito: Annotated[str, Form()] = "",
+    marca: Annotated[str, Form()] = "",
+    sku: Annotated[str, Form()] = "",
+) -> dict[str, Any]:
+    """A agência publica um vídeo DELA, com o conceito junto, e cai na revisão.
+
+    Eduardo, 23/09/2026: "era pra ser mais um publicar vídeo para análise, que
+    aí eles preenchiam e já poderiam enviar o vídeo, e esse iria para revisão
+    direto".
+
+    Não há fila nova: a linha nasce `aprovado=None`, que é exatamente a fila de
+    revisão que já existe na aba Criativos — com aprovar, recusar e feedback
+    prontos. Inventar uma segunda fila para a mesma pergunta ("este vídeo
+    presta?") seria dois lugares para alguém esquecer de olhar.
+
+    O CONCEITO vira um roteiro ligado por `roteiro_id`. É o que o modelo diz
+    que esse campo é — "o briefing que esta linha cumpre" — e resolve de uma
+    vez duas coisas: quem revisa lê a intenção ao lado do vídeo, e o elo
+    roteiro→criativo (5 de 49 em 22/09) passa a nascer preenchido também no
+    caminho autoral. `marketing_creatives.roteiro` NÃO é usada: está deprecada
+    desde a 0299 e ninguém lê dela.
+    """
+    titulo = (titulo or "").strip()
+    if not titulo:
+        raise HTTPException(400, detail={"code": "titulo_obrigatorio"})
+    if not files:
+        raise HTTPException(400, detail={"code": "sem_arquivo"})
+    if len(files) > MAX_FILES_PER_ROW:
+        raise HTTPException(400, detail={"code": "muitos_arquivos"})
+
+    conceito = (conceito or "").strip()
+    marca_txt = (marca or "").strip() or None
+    sku_txt = (sku or "").strip() or None
+
+    briefing = None
+    if conceito:
+        # `ativo=True` e endereçado a quem escreveu: a ideia é dela, e ela
+        # precisa conseguir reler o próprio conceito na aba Ideias.
+        briefing = MarketingRoteiro(
+            id=uuid4(),
+            titulo=titulo[:160],
+            texto=conceito,
+            marca=marca_txt,
+            sku=sku_txt,
+            equipe_destino=equipe,
+            ativo=True,
+        )
+        session.add(briefing)
+        await session.flush()
+
+    row = MarketingCreative(
+        id=uuid4(),
+        modelo=titulo[:190],
+        marca=marca_txt,
+        sku=sku_txt,
+        equipe=equipe,
+        roteiro_id=briefing.id if briefing else None,
+        aprovado=None,
+        files=[],
+    )
+    session.add(row)
+    await session.flush()
+
+    entraram = _gravar_arquivos(row, files)
+    await session.commit()
+    logger.info(
+        "portal_video_autoral",
+        creative_id=str(row.id),
+        roteiro_id=str(briefing.id) if briefing else None,
+        equipe=equipe,
+        arquivos=entraram,
+    )
+    return _linha_out(row, await _roteiros_visiveis(session, [row], equipe))

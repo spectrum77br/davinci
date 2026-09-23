@@ -107,9 +107,6 @@ from app.models.marketing import (
     MarketingPattern,
     MarketingSchedule,
 )
-from app.models.marketing_ideia_requisicao import (  # noqa: F401
-    MarketingIdeiaRequisicao,
-)
 from app.models.marketing_legenda import MarketingLegendaModelo
 from app.models.marketing_personagem import (
     MarketingPersonagem,

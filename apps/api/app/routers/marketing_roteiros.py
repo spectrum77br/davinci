@@ -35,7 +35,6 @@ from __future__ import annotations
 
 import contextlib
 import shutil
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any
 from uuid import UUID, uuid4
@@ -53,21 +52,11 @@ from app.db import get_session
 from app.deps.auth import require_permission
 from app.models import (
     MarketingCreative,
-    MarketingIdeiaRequisicao,
     MarketingPersonagem,
     MarketingRoteiro,
     MarketingRoteiroPersonagem,
     MarketingRoteiroRef,
     User,
-)
-from app.models.marketing_ideia_requisicao import (
-    STATUS_APROVADA as IDEIA_APROVADA,
-)
-from app.models.marketing_ideia_requisicao import (
-    STATUS_PENDENTE as IDEIA_PENDENTE,
-)
-from app.models.marketing_ideia_requisicao import (
-    STATUS_RECUSADA as IDEIA_RECUSADA,
 )
 from app.routers.marketing_creatives import (
     _marca_id_do_texto,
@@ -664,137 +653,3 @@ async def desligar_personagem(
     row.personagens.remove(elo)
     await session.commit()
     return _roteiro_out(row)
-
-
-# ──────────────── ideias propostas pelas agências ────────────────
-# A agência propõe; aqui é onde a casa libera. Aprovar CRIA o briefing
-# endereçado a quem pediu — é o sim que autoriza produzir.
-
-
-def _req_ideia_out(r: MarketingIdeiaRequisicao) -> dict[str, Any]:
-    return {
-        "id": str(r.id),
-        "titulo": r.titulo,
-        "descricao": r.descricao,
-        "justificativa": r.justificativa,
-        "marca": r.marca,
-        "sku": r.sku,
-        "equipe": r.equipe,
-        "status": r.status,
-        "motivo": r.motivo,
-        "roteiro_id": str(r.roteiro_id) if r.roteiro_id else None,
-        "criado_em": r.created_at.isoformat() if r.created_at else None,
-        "decidido_em": r.decidido_em.isoformat() if r.decidido_em else None,
-    }
-
-
-def _ideia_fora_da_equipe(user: User, req: MarketingIdeiaRequisicao) -> bool:
-    """O mesmo recorte de Criativos, Roteiros e da fila de personagem.
-
-    Aprovar cria briefing e recusar é irreversível: a fila não pode ser o único
-    lugar do módulo onde um usuário preso a uma agência decide pela outra.
-    """
-    permitidas = _user_equipes(user)
-    if permitidas is None:
-        return False
-    return (req.equipe or "").strip().lower() not in permitidas
-
-
-@router.get("/requisicoes")
-async def listar_requisicoes_de_ideia(
-    session: Annotated[AsyncSession, Depends(get_session)],
-    user: Annotated[User, Depends(_ver)],
-    status: str | None = None,
-) -> dict[str, Any]:
-    """A fila. Sem filtro, vêm só as pendentes — que é o que exige ação."""
-    q = select(MarketingIdeiaRequisicao).order_by(MarketingIdeiaRequisicao.created_at.desc())
-    q = q.where(MarketingIdeiaRequisicao.status == (status or IDEIA_PENDENTE))
-    permitidas = _user_equipes(user)
-    if permitidas is not None:
-        q = q.where(func.lower(MarketingIdeiaRequisicao.equipe).in_(permitidas))
-    linhas = (await session.execute(q)).scalars().all()
-    return {"requisicoes": [_req_ideia_out(r) for r in linhas]}
-
-
-class DecisaoIdeiaIn(BaseModel):
-    motivo: str | None = None
-
-
-@router.post("/requisicoes/{requisicao_id}/aprovar")
-async def aprovar_requisicao_de_ideia(
-    requisicao_id: UUID,
-    session: Annotated[AsyncSession, Depends(get_session)],
-    user: Annotated[User, Depends(_editar)],
-) -> dict[str, Any]:
-    """Aprovar CRIA o briefing, endereçado só a quem pediu.
-
-    `equipe_destino = equipe` e não NULL: a ideia é dela, e mandar a proposta de
-    uma agência para as duas entregaria o trabalho de pensar de uma à outra. A
-    regra invertida do módulo (NULL = as duas) vale para o que a CASA escreve.
-
-    Nasce `ativo=True` porque o sim já é a liberação — não faz sentido aprovar
-    e deixar desligado, que seria pedir duas permissões para a mesma coisa.
-    """
-    req = await session.get(MarketingIdeiaRequisicao, requisicao_id)
-    if req is None or _ideia_fora_da_equipe(user, req):
-        raise HTTPException(404, detail={"code": "requisicao_nao_encontrada"})
-    if req.status != IDEIA_PENDENTE:
-        raise HTTPException(409, detail={"code": "ja_decidida", "status": req.status})
-
-    # Mesmo caminho do roteiro escrito à mão: o texto de marca e SKU vira id
-    # aqui, no servidor, e não vem resolvido do formulário da agência.
-    row = MarketingRoteiro(
-        id=uuid4(),
-        titulo=req.titulo[:160],
-        texto=req.descricao,
-        marca=req.marca,
-        marca_id=await _marca_id_do_texto(session, req.marca),
-        sku=req.sku,
-        product_id=await _product_id_do_sku(session, req.sku),
-        equipe_destino=req.equipe,
-        ativo=True,
-        created_by=user.id,
-    )
-    session.add(row)
-    await session.flush()
-    # Abre a linha de entrega da agência endereçada, como em qualquer briefing
-    # que nasce visível — senão a ideia aprovada não teria onde receber o vídeo.
-    await _sincronizar_entregas(session, row)
-
-    req.status = IDEIA_APROVADA
-    req.roteiro_id = row.id
-    req.decidido_por = user.id
-    req.decidido_em = datetime.now(UTC)
-    await session.commit()
-    logger.info(
-        "requisicao_ideia_aprovada",
-        requisicao_id=str(req.id),
-        roteiro_id=str(row.id),
-        equipe=req.equipe,
-        user_id=str(user.id),
-    )
-    return {"requisicao": _req_ideia_out(req), "roteiro_id": str(row.id)}
-
-
-@router.post("/requisicoes/{requisicao_id}/recusar")
-async def recusar_requisicao_de_ideia(
-    requisicao_id: UUID,
-    payload: DecisaoIdeiaIn,
-    session: Annotated[AsyncSession, Depends(get_session)],
-    user: Annotated[User, Depends(_editar)],
-) -> dict[str, Any]:
-    """Recusar guarda o motivo, e a agência lê. Recusa sem porquê é a que volta
-    igual na semana seguinte."""
-    req = await session.get(MarketingIdeiaRequisicao, requisicao_id)
-    if req is None or _ideia_fora_da_equipe(user, req):
-        raise HTTPException(404, detail={"code": "requisicao_nao_encontrada"})
-    if req.status != IDEIA_PENDENTE:
-        raise HTTPException(409, detail={"code": "ja_decidida", "status": req.status})
-
-    req.status = IDEIA_RECUSADA
-    req.motivo = (payload.motivo or "").strip() or None
-    req.decidido_por = user.id
-    req.decidido_em = datetime.now(UTC)
-    await session.commit()
-    logger.info("requisicao_ideia_recusada", requisicao_id=str(req.id), user_id=str(user.id))
-    return _req_ideia_out(req)
