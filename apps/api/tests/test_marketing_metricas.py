@@ -86,12 +86,12 @@ def test_erro_nao_pode_carregar_token():
 # ---------- leitura do TikTok (sem API, da página pública) ----------
 
 
-def _pagina_tiktok(stats: dict | None, *, status: int = 0) -> str:
+def _pagina_tiktok(stats: dict | None, *, status: int | str = 0) -> str:
     corpo = {
         "__DEFAULT_SCOPE__": {
             "webapp.video-detail": {
-                "statusCode": status,
-                "statusMsg": "" if not status else "item_privacy_authorization",
+                "statusCode": 0 if not status else 10204,
+                "statusMsg": "" if not status else str(status),
                 "itemInfo": {"itemStruct": {"id": "123", "statsV2": stats}} if stats else {},
             }
         }
@@ -138,12 +138,31 @@ async def test_tiktok_le_os_numeros_da_pagina_publica():
     assert d["bruto"]["playCount"] == "1234", "o cru fica guardado pra conferência"
 
 
-async def test_tiktok_video_removido_vira_erro_e_nao_zero():
-    """Post apagado devolve statusCode != 0. Gravar zero aí seria dizer que o
-    vídeo está no ar sem render nada — e a média da marca desabaria calada."""
-    pagina = _pagina_tiktok(None, status=10204)
-    with pytest.raises(RuntimeError, match="recusou a página"):
+async def test_video_apagado_e_REMOVIDO_nao_falha_de_leitura():
+    """Post apagado devolve statusCode != 0. Duas coisas de uma vez:
+
+    Gravar ZERO aí diria que o vídeo está no ar sem render nada, e a média da
+    marca desabaria calada. Por isso vira erro, não número.
+
+    Mas também não é "a leitura falhou": a leitura funcionou e a resposta foi
+    "isto não está mais aqui". O Eduardo apaga vídeo de teste de propósito, e
+    pôr um triângulo de alerta em cima disso some com o alerta de verdade no
+    meio do ruído. Daí o prefixo canônico, que a tela lê pra separar os dois.
+    """
+    pagina = _pagina_tiktok(None, status="item_privacy_authorization&status_deleted")
+    with pytest.raises(RuntimeError) as e:
         await svc.do_tiktok("https://tiktok.com/@x/video/123", client=_ClienteFalso(pagina))
+    assert svc.foi_removido(str(e.value)), "apagado tem que ser reconhecível pela tela"
+
+
+async def test_recusa_que_NAO_e_exclusao_continua_sendo_falha():
+    """Bloqueio, captcha ou mudança de layout são problema de verdade e não
+    podem se disfarçar de 'vídeo apagado' — senão o alerta some pra sempre."""
+    pagina = _pagina_tiktok(None, status="rate_limit")
+    with pytest.raises(RuntimeError) as e:
+        await svc.do_tiktok("https://tiktok.com/@x/video/123", client=_ClienteFalso(pagina))
+    assert not svc.foi_removido(str(e.value))
+    assert "recusou a página" in str(e.value)
 
 
 async def test_tiktok_layout_mudou_vira_erro_explicito():
@@ -422,3 +441,69 @@ async def test_sem_permissao_nao_ve(client, db, make_user, auth_as):
     u = await make_user(permissions={})
     auth_as(u)
     assert (await client.get(API_M)).status_code == 403
+
+
+async def test_abrir_a_plataforma_mostra_cada_video_com_seus_numeros(
+    client, db, make_user, auth_as, monkeypatch
+):
+    """O nível que o Eduardo pediu: "a marca fez 9 views" não diz QUAL vídeo
+    fez, e é o qual que serve pra decidir o que produzir."""
+    await _ve(make_user, auth_as)
+    _, p = await _cenario(db)
+    p.legenda = "Tecnologia que aguenta o teu dia 🔋\nsegunda linha que não entra no título"
+    await db.commit()
+
+    async def falso(url, *, client):
+        return {"views": 42, "curtidas": 7, "bruto": {}}
+
+    monkeypatch.setattr(svc, "do_tiktok", falso)
+    await svc.coletar(db)
+
+    plat = (await client.get(API_M)).json()["marcas"][0]["plataformas"][0]
+    assert len(plat["videos"]) == 1
+    v = plat["videos"][0]
+    assert v["acumulado"]["views"] == 42
+    assert v["post_url"] == p.post_url, "o link abre o vídeo na plataforma"
+    assert v["titulo"] == "Tecnologia que aguenta o teu dia 🔋", "só a 1ª linha da legenda"
+    assert v["removido"] is False
+
+
+async def test_video_apagado_aparece_como_estado_nao_como_alerta(
+    client, db, make_user, auth_as, monkeypatch
+):
+    """Ele apaga vídeo de teste de propósito. Marcar isso como 'a leitura
+    falhou' põe alerta em cima do esperado — e some com o alerta de verdade no
+    meio do ruído. Some do erro da rede, mas a linha do vídeo fica: ele
+    existiu e rendeu o que rendeu."""
+    await _ve(make_user, auth_as)
+    await _cenario(db)
+
+    async def apagado(url, *, client):
+        raise RuntimeError(f"{svc.REMOVIDO} o vídeo não está mais no ar")
+
+    monkeypatch.setattr(svc, "do_tiktok", apagado)
+    await svc.coletar(db)
+
+    plat = (await client.get(API_M)).json()["marcas"][0]["plataformas"][0]
+    assert plat["erro"] is None, "vídeo apagado não é erro DA REDE"
+    v = plat["videos"][0]
+    assert v["removido"] is True
+    assert v["erro"] is None, "removido não se acumula com erro"
+
+
+async def test_falha_de_verdade_continua_alertando(
+    client, db, make_user, auth_as, monkeypatch
+):
+    """Bloqueio ou mudança de layout não podem se disfarçar de vídeo apagado."""
+    await _ve(make_user, auth_as)
+    await _cenario(db)
+
+    async def quebrou(url, *, client):
+        raise RuntimeError("o TikTok recusou a página: rate_limit")
+
+    monkeypatch.setattr(svc, "do_tiktok", quebrou)
+    await svc.coletar(db)
+
+    plat = (await client.get(API_M)).json()["marcas"][0]["plataformas"][0]
+    assert plat["erro"] is not None, "problema de verdade tem que alertar"
+    assert plat["videos"][0]["removido"] is False

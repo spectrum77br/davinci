@@ -25,11 +25,23 @@
  *    número velho parecendo novo, e ninguém notaria. Data velha fica em âmbar.
  */
 import { computed, onMounted, ref, watch } from 'vue'
-import { AlertTriangle, RefreshCw } from 'lucide-vue-next'
+import { AlertTriangle, ExternalLink, RefreshCw } from 'lucide-vue-next'
 
 type Numeros = Partial<Record<
   'views' | 'curtidas' | 'comentarios' | 'compartilhamentos' | 'salvamentos' | 'alcance', number
 >>
+type Video = {
+  postagem_id: string
+  post_url: string | null
+  publicado_em: string | null
+  titulo: string
+  acumulado: Numeros
+  no_periodo: Numeros
+  coletado_em: string | null
+  /** O vídeo não está mais no ar. NÃO é falha de leitura — ver comentário no topo. */
+  removido: boolean
+  erro: string | null
+}
 type Plataforma = {
   plataforma: string
   acumulado: Numeros
@@ -37,6 +49,7 @@ type Plataforma = {
   posts: number
   coletado_em: string | null
   erro: string | null
+  videos: Video[]
 }
 type LinhaMarca = {
   marca: string
@@ -64,6 +77,8 @@ const marcas = ref<LinhaMarca[]>([])
 const carregando = ref(false)
 const erro = ref<string | null>(null)
 const abertas = ref<Set<string>>(new Set())
+// Terceiro nível: qual plataforma de qual marca está mostrando os vídeos.
+const abertasPlat = ref<Set<string>>(new Set())
 
 async function carregar() {
   carregando.value = true
@@ -112,6 +127,17 @@ function alternar(marca: string) {
   const s = new Set(abertas.value)
   s.has(marca) ? s.delete(marca) : s.add(marca)
   abertas.value = s
+}
+
+function alternarPlat(chave: string) {
+  const s = new Set(abertasPlat.value)
+  s.has(chave) ? s.delete(chave) : s.add(chave)
+  abertasPlat.value = s
+}
+
+function dataCurta(iso: string | null): string {
+  if (!iso) return ''
+  return new Date(iso).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' })
 }
 
 const totalPosts = computed(() => marcas.value.reduce((a, m) => a + m.posts, 0))
@@ -176,9 +202,10 @@ const totalPosts = computed(() => marcas.value.reduce((a, m) => a + m.posts, 0))
       </button>
 
       <div v-if="abertas.has(m.marca)" class="border-t bg-muted/20 px-3 py-2 space-y-1">
-        <div
-          v-for="p in m.plataformas" :key="p.plataforma"
-          class="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm"
+        <div v-for="p in m.plataformas" :key="p.plataforma">
+        <button
+          class="w-full flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-left hover:bg-muted/40 rounded px-1 -mx-1 py-0.5 transition-colors"
+          @click="alternarPlat(m.marca + '|' + p.plataforma)"
         >
           <span class="w-24 shrink-0 text-muted-foreground">
             {{ PLATAFORMA_LABEL[p.plataforma] || p.plataforma }}
@@ -201,6 +228,58 @@ const totalPosts = computed(() => marcas.value.reduce((a, m) => a + m.posts, 0))
               </span>
             </span>
           </span>
+        </button>
+
+        <!-- Terceiro nível: o vídeo. É aqui que "a marca fez 9 views" vira
+             "QUAL vídeo fez" — que é o que serve pra decidir o que produzir. -->
+        <div
+          v-if="abertasPlat.has(m.marca + '|' + p.plataforma)"
+          class="mt-1 mb-2 ml-24 space-y-1 border-l pl-3"
+        >
+          <div
+            v-for="v in p.videos" :key="v.postagem_id"
+            class="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[13px]"
+            :class="v.removido && 'opacity-50'"
+          >
+            <a
+              v-if="v.post_url" :href="v.post_url" target="_blank" rel="noopener"
+              class="truncate max-w-[280px] hover:underline inline-flex items-center gap-1"
+              :title="v.titulo || v.post_url"
+            >
+              {{ v.titulo || 'vídeo sem legenda' }}
+              <ExternalLink class="size-3 shrink-0 opacity-60" />
+            </a>
+            <span v-else class="truncate max-w-[280px] text-muted-foreground">
+              {{ v.titulo || 'vídeo sem legenda' }}
+            </span>
+            <span class="text-[11px] text-muted-foreground shrink-0">
+              {{ dataCurta(v.publicado_em) }}
+            </span>
+            <!-- Removido é ESTADO, não alerta: o Eduardo apaga vídeo de teste
+                 de propósito, e o triângulo âmbar aqui someria com o alerta
+                 de verdade no meio do ruído. -->
+            <span v-if="v.removido" class="text-[11px] text-muted-foreground shrink-0">
+              não está mais no ar
+            </span>
+            <span
+              v-else-if="v.erro" :title="v.erro"
+              class="inline-flex items-center gap-1 text-[11px] text-amber-600 dark:text-amber-400 shrink-0"
+            >
+              <AlertTriangle class="size-3" /> não consegui ler
+            </span>
+            <span class="ml-auto flex items-center gap-4 tabular-nums">
+              <span v-for="c in COLUNAS" :key="c.chave" class="w-16 text-right">
+                {{ num(v.acumulado, c.chave) }}
+                <span v-if="ganho(v.no_periodo, c.chave)" class="text-[10px] text-emerald-600 dark:text-emerald-400">
+                  {{ ganho(v.no_periodo, c.chave) }}
+                </span>
+              </span>
+            </span>
+          </div>
+          <p v-if="!p.videos.length" class="text-[11px] text-muted-foreground">
+            nenhum vídeo com número ainda
+          </p>
+        </div>
         </div>
       </div>
     </div>

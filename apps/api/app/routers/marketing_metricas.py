@@ -29,8 +29,9 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
-from app.models import Marca, MarketingPostagemMetrica, User
+from app.models import Marca, MarketingPostagem, MarketingPostagemMetrica, User
 from app.deps.auth import require_permission
+from app.services.marketing.metricas import foi_removido
 
 router = APIRouter(prefix="/api/marketing/metricas", tags=["marketing_metricas"])
 
@@ -84,6 +85,17 @@ async def metricas(
         m.id: m.nome
         for m in (await session.execute(select(Marca))).scalars().all()
     }
+    # O link e a legenda vivem na postagem, não na métrica — a métrica guarda
+    # só o que muda a cada dia.
+    ids = [n.postagem_id for n in novos]
+    posts = {
+        p.id: p
+        for p in (
+            await session.execute(
+                select(MarketingPostagem).where(MarketingPostagem.id.in_(ids))
+            )
+        ).scalars().all()
+    } if ids else {}
 
     # marca -> plataforma -> números
     por_marca: dict[str, dict[str, Any]] = {}
@@ -96,27 +108,57 @@ async def metricas(
         plat = alvo["plataformas"].setdefault(
             n.plataforma,
             {"plataforma": n.plataforma, "acumulado": {}, "no_periodo": {},
-             "posts": 0, "coletado_em": None, "erro": None},
+             "posts": 0, "coletado_em": None, "erro": None, "videos": []},
         )
         alvo["posts"] += 1
         plat["posts"] += 1
         _soma(alvo["acumulado"], n)
         _soma(plat["acumulado"], n)
-        # Crescimento na janela: o novo menos o velho do MESMO post.
         v = velhos.get(n.postagem_id)
+        # Crescimento na janela: o novo menos o velho do MESMO post.
         if v is not None and v.dia != n.dia:
             _soma(alvo["no_periodo"], n)
             _soma(alvo["no_periodo"], v, sinal=-1)
             _soma(plat["no_periodo"], n)
             _soma(plat["no_periodo"], v, sinal=-1)
+        # O vídeo em si — é o nível que o Eduardo pediu pra poder abrir e ver
+        # de onde vem cada número. Sem isto, "a marca fez 9 views" não diz
+        # QUAL vídeo fez, que é o que serve pra decidir o que produzir.
+        post = posts.get(n.postagem_id)
+        ganho = {}
+        if v is not None and v.dia != n.dia:
+            _soma(ganho, n)
+            _soma(ganho, v, sinal=-1)
+        plat["videos"].append(
+            {
+                "postagem_id": str(n.postagem_id),
+                "post_url": getattr(post, "post_url", None),
+                "publicado_em": getattr(post, "publicado_em", None),
+                # Primeira linha da legenda: é como o Eduardo reconhece o vídeo
+                # na lista. A legenda inteira não cabe e não ajuda.
+                "titulo": ((getattr(post, "legenda", None) or "").strip().splitlines() or [""])[0][:80],
+                "acumulado": {k: getattr(n, k) for k in _NUMEROS if getattr(n, k) is not None},
+                "no_periodo": ganho,
+                "coletado_em": n.dia,
+                # Removido NÃO é falha de leitura: a leitura funcionou e a
+                # resposta foi "isto não está mais aqui". Misturar os dois põe
+                # alerta em cima de post apagado de propósito.
+                "removido": foi_removido(n.erro),
+                "erro": None if foi_removido(n.erro) else n.erro,
+            }
+        )
         # Quando esta rede foi lida pela última vez, e se deu erro. Coleta
         # falha baixo — sem esta data a tela mostra número velho como se
-        # fosse de hoje.
+        # fosse de hoje. Vídeo removido não conta como erro da rede.
         if plat["coletado_em"] is None or n.dia > plat["coletado_em"]:
             plat["coletado_em"] = n.dia
+        if n.erro and not foi_removido(n.erro):
             plat["erro"] = n.erro
 
     saida = sorted(por_marca.values(), key=lambda x: -(x["acumulado"].get("views") or 0))
     for m in saida:
         m["plataformas"] = sorted(m["plataformas"].values(), key=lambda x: x["plataforma"])
+        for plat in m["plataformas"]:
+            # Mais views primeiro: a pergunta é "o que rendeu", não "o que saiu".
+            plat["videos"].sort(key=lambda v: -(v["acumulado"].get("views") or 0))
     return {"dias": dias, "desde": desde, "marcas": saida}

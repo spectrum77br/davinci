@@ -85,6 +85,31 @@ _SEGREDO = re.compile(
 )
 
 
+# Prefixo canônico para "o vídeo não existe mais".
+#
+# Não é falha de leitura: a leitura funcionou e a resposta foi "isto não está
+# mais aqui". Tratar os dois como a mesma coisa põe um triângulo de alerta em
+# cima de um post que o Eduardo apagou de propósito — e some com o alerta de
+# verdade no meio do ruído. A tela lê este prefixo pra separar os dois.
+REMOVIDO = "removido:"
+
+
+def _msg(e: BaseException) -> str:
+    """Mensagem de erro pra gravar, sem perder o marcador de removido.
+
+    `f"{type(e).__name__}: {e}"` é bom pra diagnóstico — diz QUE tipo de coisa
+    quebrou. Mas empurra o prefixo `removido:` pra longe do começo, e aí a tela
+    deixa de reconhecer que o vídeo foi apagado e põe alerta em cima. Quando a
+    mensagem já se identifica, ela vai crua.
+    """
+    texto = str(e)
+    return sem_segredo(texto if texto.startswith(REMOVIDO) else f"{type(e).__name__}: {texto}")
+
+
+def foi_removido(erro: str | None) -> bool:
+    return bool(erro) and erro.startswith(REMOVIDO)
+
+
 def sem_segredo(texto: str) -> str:
     """Tira credencial de mensagem de erro ANTES de ela ser gravada.
 
@@ -138,9 +163,10 @@ async def do_tiktok(post_url: str, *, client: httpx.AsyncClient) -> dict[str, An
     detalhe = (dados.get("__DEFAULT_SCOPE__") or {}).get("webapp.video-detail") or {}
     if detalhe.get("statusCode"):
         # 10204/10231 = removido ou privado. É notícia, não falha de coleta.
-        raise RuntimeError(
-            f"o TikTok recusou a página: {detalhe.get('statusMsg') or detalhe.get('statusCode')}"
-        )
+        msg = str(detalhe.get("statusMsg") or detalhe.get("statusCode"))
+        if "delet" in msg or "privacy" in msg or "unavailable" in msg:
+            raise RuntimeError(f"{REMOVIDO} o vídeo não está mais no ar")
+        raise RuntimeError(f"o TikTok recusou a página: {msg}")
     item = (detalhe.get("itemInfo") or {}).get("itemStruct") or {}
     st = item.get("statsV2") or item.get("stats") or {}
     if not st:
@@ -364,11 +390,11 @@ async def coletar(session: AsyncSession, *, agora: datetime | None = None) -> di
                 prontos[a["p"].id] = (
                     achado
                     if achado
-                    else {"erro": "o vídeo não voltou na consulta — apagado, privado ou de outro canal"}
+                    else {"erro": f"{REMOVIDO} o vídeo não está mais no canal"}
                 )
         except Exception as e:  # noqa: BLE001 — a falha de uma conta não derruba as outras
             for a in doGrupo:
-                prontos[a["p"].id] = {"erro": sem_segredo(f"{type(e).__name__}: {e}")[:400]}
+                prontos[a["p"].id] = {"erro": _msg(e)[:400]}
 
     async with httpx.AsyncClient(timeout=30, follow_redirects=True) as cliente:
         for a in alvos:
@@ -391,7 +417,7 @@ async def coletar(session: AsyncSession, *, agora: datetime | None = None) -> di
                 else:
                     dados = {"erro": f"não sei ler métrica de {p.plataforma}"}
             except Exception as e:  # noqa: BLE001 — um post ruim não derruba a rodada
-                dados = {"erro": sem_segredo(f"{type(e).__name__}: {e}")[:400]}
+                dados = {"erro": _msg(e)[:400]}
 
             await _gravar(session, a, dia, dados)
             r["falhou" if dados.get("erro") else "ok"] += 1
