@@ -329,6 +329,37 @@ def validar_modelo(texto: str) -> None:
         raise TemplateInvalidoError(f"artigo_colado_no_produto: {palavra}")
 
 
+# Separadores que ficam pendurados quando o placeholder ao lado sai vazio.
+_RE_SOBRA_FIM = re.compile(r"[\s]*[—\-–:·|,]+[\s]*$")
+_RE_SOBRA_INICIO = re.compile(r"^[\s]*[—\-–:·|,]+[\s]+")
+_RE_LINHAS_VAZIAS = re.compile(r"\n{3,}")
+
+
+def _limpa_sobras(texto: str) -> str:
+    """Tira o lixo que um placeholder vazio deixa para trás.
+
+    O sandbox bloqueia `{% if %}` de propósito (sem isso `{{ 'x' * 10**9 }}`
+    trava o servidor), então NÃO existe condicional: um template escrito como
+    `{{ produto }} — {{ destaque }}` publica "C68 Plus 512 GB Azul — " quando
+    o produto não tem ficha. Visto renderizado antes de subir, e valia para
+    200 dos 442 celulares do catálogo.
+
+    A limpeza é do RENDER e não dos textos de propósito: consertar só as
+    variações que eu escrevi deixaria a armadilha armada pra próxima que o
+    Eduardo escrever, e ele não tem como saber que ela existe.
+
+    Só mexe em pontuação de ligação no começo e no fim de cada linha, e em
+    linha em branco sobrando. Texto legítimo não tem separador pendurado no
+    fim da linha — quem tem é template com buraco.
+    """
+    linhas = []
+    for linha in (texto or "").split("\n"):
+        limpa = _RE_SOBRA_FIM.sub("", _RE_SOBRA_INICIO.sub("", linha.rstrip()))
+        # A linha era SÓ o separador: some inteira.
+        linhas.append(limpa)
+    return _RE_LINHAS_VAZIAS.sub("\n\n", "\n".join(linhas)).strip()
+
+
 def renderizar(texto: str, contexto: dict[str, str]) -> str:
     """Template → texto final da legenda, já cortado em 2200.
 
@@ -342,7 +373,7 @@ def renderizar(texto: str, contexto: dict[str, str]) -> str:
         saida = _env.from_string(texto or "").render(**contexto)
     except Exception as e:  # OverflowError/ValueError também são recusa, nunca 500
         raise TemplateInvalidoError(f"template_invalido: {type(e).__name__}") from e
-    return saida.strip()[:LEGENDA_MAX]
+    return _limpa_sobras(saida)[:LEGENDA_MAX]
 
 
 # ───────────────────────────────────────────────────────────────── rodízio

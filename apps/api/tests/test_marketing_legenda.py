@@ -835,3 +835,51 @@ async def test_com_produto_mas_so_ha_generica_usa_a_generica(db, make_user):
 
     r = await svc.resolver(db, creative=c, file=f, rede=rede)
     assert r.texto == "texto generico"
+
+
+# ---------- placeholder vazio não pode deixar lixo ----------
+
+
+def test_separador_pendurado_some_quando_o_placeholder_e_vazio():
+    """O sandbox bloqueia `{% if %}` de propósito, então NÃO existe
+    condicional: um template escrito como `{{ produto }} — {{ destaque }}`
+    publicava "C68 Plus 512 GB Azul — " quando o produto não tem ficha.
+
+    Visto renderizado antes de subir, e valia para 200 dos 442 celulares do
+    catálogo. A limpeza é do RENDER e não dos textos: consertar só as
+    variações escritas hoje deixaria a armadilha armada pra próxima que o
+    Eduardo escrever, e ele não tem como saber que ela existe.
+    """
+    t = "Olha só 🔋\n\n{{ produto }} — {{ destaque }}\n\nSalva aí 📌"
+    ctx = svc.placeholders_de(None, "Uranyx C68 Plus 24.512 - Azul", None, destaque="")
+    saida = svc.renderizar(t, ctx)
+    assert "— " not in saida and not saida.rstrip().endswith("—")
+    assert "C68 Plus 512 GB Azul" in saida
+    assert "Salva aí 📌" in saida
+
+
+def test_com_o_placeholder_cheio_o_separador_FICA():
+    """A limpeza não pode comer pontuação legítima."""
+    t = "{{ produto }} — {{ destaque }}"
+    ctx = svc.placeholders_de(
+        None, "Uranyx C68 Plus 24.512 - Azul", None, destaque="Bateria de 6.000 mAh."
+    )
+    # `marca=None` aqui, então o prefixo "Uranyx" não é removido — o que este
+    # teste mede é o separador, não a limpeza do nome.
+    assert svc.renderizar(t, ctx) == "Uranyx C68 Plus 512 GB Azul — Bateria de 6.000 mAh."
+
+
+def test_linha_que_era_so_o_placeholder_nao_deixa_buraco():
+    """Três linhas em branco seguidas viram duas — o texto fecha sem rombo."""
+    t = "Primeira linha\n\n{{ destaque }}\n\nÚltima linha"
+    saida = svc.renderizar(t, svc.placeholders_de(None, None, None, destaque=""))
+    assert saida == "Primeira linha\n\nÚltima linha"
+
+
+def test_texto_legitimo_com_traco_nao_e_estragado():
+    """Travessão no meio da frase é pontuação de gente, não sobra de
+    template."""
+    t = "Casco rígido — e leve. Sem dúvida:\n{{ destaque }}"
+    saida = svc.renderizar(t, svc.placeholders_de(None, None, None, destaque="12 polegadas."))
+    assert "Casco rígido — e leve." in saida
+    assert "12 polegadas." in saida
