@@ -138,7 +138,7 @@ async function lerSituacao(page: Page): Promise<string> {
   const t =
     (await evalJS<string>(
       page,
-      `(function(){var t=document.body.innerText||'';var i=t.indexOf('Comprador solicitou');if(i<0)i=t.indexOf('Detalhes da Solicita');if(i<0)i=0;var fim=t.length;['Como você avalia','Informações da disputa','Histórico do chat','Solicitado pelo comprador','Detalhes do pedido'].forEach(function(k){var j=t.indexOf(k,i+1);if(j>i&&j<fim)fim=j;});return t.slice(i,fim);})()`
+      `(function(){var t=document.body.innerText||'';var i=t.indexOf('Comprador solicitou');if(i<0)i=t.indexOf('Detalhes da Solicita');if(i<0)i=0;var fim=t.length;['Como você avalia','Informações da disputa','Histórico do chat','Solicitado pelo comprador','Detalhes do pedido','Provas / Histórico de Arquivos','Conversa com a Shopee'].forEach(function(k){var j=t.indexOf(k,i+1);if(j>i&&j<fim)fim=j;});return t.slice(i,fim);})()`
     )) || "";
   return t
     .split("\n")
@@ -146,6 +146,35 @@ async function lerSituacao(page: Page): Promise<string> {
     .filter(Boolean)
     .join("\n")
     .slice(0, 2000);
+}
+
+/** Mensagens (`.chat_message-item`) de uma lista de elementos -> Item[]. Mesmo
+ *  formato na janela "Histórico da Solicitação" e no quadro "Conversa com a
+ *  Shopee" da página. */
+const JS_EXTRAIR = (lista: string) =>
+  `(function(){return ${lista}.map(function(i){var folhas=[...i.querySelectorAll('*')].filter(function(e){return e.children.length===0&&(e.innerText||'').trim()}).map(function(e){return (e.innerText||'').trim()});var tudo=(i.innerText||'').trim();var hs=tudo.match(/\\d{2}-\\d{2}-\\d{4}\\s+\\d{2}:\\d{2}/g);var quando=hs?hs[hs.length-1]:null;var autor=folhas[0]||'';var tc=i.querySelector('[class*="text-content"]');var texto=tc?(tc.innerText||'').trim():tudo.split('\\n').map(function(s){return s.trim()}).filter(function(s){return s&&s!==autor&&s!==quando}).join('\\n');return {chat:(i.className||'').toString().indexOf('chat-message-item')>=0,autor:autor,texto:texto,quando:quando};});})()`;
+
+// As mensagens do quadro da própria página (fora de qualquer janela).
+const JS_CHAT_PAGINA = `[...document.querySelectorAll('.chat_message-item')].filter(function(i){return !i.closest('.eds-modal__box')&&i.getBoundingClientRect().width>0})`;
+
+/** Disputa EM ANÁLISE (visto em 24/09 no 293970, Minas): não existe "Histórico
+ *  do chat › Ver detalhes" — a conversa fica num quadro "Chat › Conversa com a
+ *  Shopee" na própria página, com um campo "Enviar" embaixo. Mesmo formato de
+ *  mensagem; lemos daqui. O campo "Enviar" NUNCA é tocado. */
+async function lerChatDaPagina(page: Page): Promise<Item[] | null> {
+  let antes = -1;
+  for (let i = 0; i < 10; i++) {
+    const n =
+      (await evalJS<number>(
+        page,
+        `(function(){var its=${JS_CHAT_PAGINA};if(its.length){var e=its[0].parentElement;while(e&&e!==document.body&&!(e.scrollHeight>e.clientHeight+10))e=e.parentElement;if(e&&e!==document.body)e.scrollTop=(${i}%2===0)?0:e.scrollHeight;}return its.length;})()`
+      )) ?? 0;
+    if (!n) return null; // página sem conversa nenhuma
+    await sleep(800);
+    if (n === antes && i >= 2) break;
+    antes = n;
+  }
+  return (await evalJS<Item[]>(page, JS_EXTRAIR(JS_CHAT_PAGINA))) || [];
 }
 
 /** Abre "Histórico do chat › Ver detalhes", carrega tudo e lê as mensagens. */
@@ -180,7 +209,7 @@ async function lerJanela(page: Page): Promise<Item[] | null> {
   const itens =
     (await evalJS<Item[]>(
       page,
-      `(function(){var m=${JS_MODAL};if(!m)return [];return [...m.querySelectorAll('.chat_message-item')].map(function(i){var folhas=[...i.querySelectorAll('*')].filter(function(e){return e.children.length===0&&(e.innerText||'').trim()}).map(function(e){return (e.innerText||'').trim()});var tudo=(i.innerText||'').trim();var hs=tudo.match(/\\d{2}-\\d{2}-\\d{4}\\s+\\d{2}:\\d{2}/g);var quando=hs?hs[hs.length-1]:null;var autor=folhas[0]||'';var tc=i.querySelector('[class*="text-content"]');var texto=tc?(tc.innerText||'').trim():tudo.split('\\n').map(function(s){return s.trim()}).filter(function(s){return s&&s!==autor&&s!==quando}).join('\\n');return {chat:(i.className||'').toString().indexOf('chat-message-item')>=0,autor:autor,texto:texto,quando:quando};});})()`
+      JS_EXTRAIR(`(function(){var m=${JS_MODAL};return m?[...m.querySelectorAll('.chat_message-item')]:[];})()`)
     )) || [];
 
   // Fecha a janela (Esc; se não fechar, o X dela).
@@ -232,7 +261,8 @@ export async function ler(page: Page, caso: Caso): Promise<Leitura> {
     if (!confere) throw new Error(`a página aberta não mostra a solicitação ${solicitacao} (${url})`);
   }
   const situacao = await lerSituacao(page);
-  const itens = await lerJanela(page);
+  // Caso decidido: janela "Histórico da Solicitação". Em análise: quadro da página.
+  const itens = (await lerJanela(page)) ?? (await lerChatDaPagina(page));
   const falas: Fala[] = (itens || []).filter(eFalaDaShopee).map((i) => ({
     texto: i.texto,
     quando: isoDaTela(i.quando) as string,
