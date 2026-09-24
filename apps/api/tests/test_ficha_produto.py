@@ -15,6 +15,8 @@ publicaria "Bateria de  que aguenta o dia" na conta da marca. Carregando a
 frase inteira, produto sem ficha simplesmente não rende frase.
 """
 
+import pytest
+
 from app.services.marketing.ficha import atributos, destaque
 
 REAL = (
@@ -110,3 +112,36 @@ def test_o_que_diferencia_a_mala_vem_do_NOME():
 def test_nome_sem_diferenciador_nao_atrapalha():
     assert destaque(MALA, "Mala Bordo P").startswith("Casco rígido")
     assert destaque(REAL, "Uranyx F109S 24.256 - Preto").startswith("Bateria")
+
+
+# ---------- a guarda do vínculo errado ----------
+
+
+@pytest.mark.asyncio
+async def test_ficha_de_produto_de_OUTRA_marca_nao_entra_na_legenda(db, make_user):
+    """Criativo e produto são vinculados à mão, e o vínculo erra.
+
+    Em produção os criativos da charlots (malas) apontam para celulares da
+    Uranyx. Sem esta guarda, a legenda de mala sairia com "Bateria de 11.000
+    mAh, tela de 6.52” e câmera de 13 MP" — foi visto renderizado antes de
+    subir, e é o tipo de coisa que ninguém revisa numa publicação de robô.
+
+    Descasou, sai SEM a frase: legenda genérica é problema pequeno, ficha de
+    outro produto no ar é problema grande.
+    """
+    from app.models import Marca, MarketingCreative, Product
+    from app.services.marketing.legenda import _destaque_do_produto
+
+    u = await make_user()
+    m = Marca(nome="charlots", slug="charlots")
+    db.add(m)
+    await db.flush()
+    # Produto de OUTRA marca, com ficha de celular.
+    p = Product(name="Uranyx WP53 24.128 - Preto", sku="dg023.ra", user_id=u.id)
+    db.add(p)
+    await db.flush()
+    c = MarketingCreative(modelo="video", marca="charlots", marca_id=m.id, product_id=p.id)
+    db.add(c)
+    await db.commit()
+
+    assert await _destaque_do_produto(db, c) == "", "ficha de celular não entra em legenda de mala"

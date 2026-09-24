@@ -511,10 +511,26 @@ async def _destaque_do_produto(
             .limit(1)
         )
     ).scalar_one_or_none()
+    produto = await session.get(Product, product_id)
+    nome = (produto.name if produto else "") or ""
+
+    # A FICHA SÓ VALE SE O PRODUTO FOR DA MARCA DO CRIATIVO.
+    #
+    # Criativo e produto são vinculados à mão, e o vínculo erra: em produção,
+    # os criativos da charlots (malas) apontam para celulares da Uranyx. Sem
+    # esta guarda, a legenda de mala publicaria "Bateria de 11.000 mAh, tela
+    # de 6.52” e câmera de 13 MP" — visto renderizado antes de subir.
+    #
+    # Descasou, sai SEM a frase. Legenda mais genérica é um problema pequeno;
+    # ficha técnica de outro produto no ar é um problema grande, e ninguém
+    # revisa legenda de robô antes de publicar.
+    marca_do_criativo = (creative.marca if creative else "") or ""
+    if marca_do_criativo and not nome.lower().startswith(marca_do_criativo.lower()):
+        return ""
+
     # O nome vai junto: nas malas, a descrição é o mesmo texto padrão do
     # catálogo inteiro, e o que diferencia um kit do outro está no nome.
-    produto = await session.get(Product, product_id)
-    return _frase(texto, (produto.name if produto else "") or "")
+    return _frase(texto, nome)
 
 
 async def _da_biblioteca(
