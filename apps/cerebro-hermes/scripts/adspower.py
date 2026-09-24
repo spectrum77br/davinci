@@ -45,7 +45,11 @@ APELIDOS = {
 LOJA_NO_ADSPOWER = {"zorvex": "zortex"}  # "ML Zorvex" = perfil "zortex - Mercado Livre"
 # Loja + plataforma que usam um perfil de outro nome — pelo NÚMERO do perfil.
 # Vinicius 24/09: "shopee marquezini é o número 160, vai tá com nome de mega escrito".
-PERFIL_FIXO = {("marquezini", "shopee"): "160"}
+PERFIL_FIXO = {
+    ("marquezini", "shopee"): "160",
+    # "Loja 206081932" (TikTok) = JLAS — "esse que mandou é o 123 jlas tiktok"
+    ("206081932", "tiktok"): "123",
+}
 PALAVRAS_PLATAFORMA = {p for s in APELIDOS.values() for p in s} | {
     "mercadolivre", "loja", "tiktok shop",
 }
