@@ -272,7 +272,8 @@ async def avaliar(
     user: Annotated[User, Depends(require_permission("chamados", "edit"))],
 ) -> IaDecisaoOut:
     """✓/✗ numa decisão. No ✗, a correção vira instrução no chamado — a IA refaz
-    na próxima passada (salvo chamado Concluído: aí fica só o aprendizado)."""
+    na próxima passada — salvo `refazer: false` (avaliação dada ao fechar o
+    chamado) ou chamado Concluído: aí fica só o aprendizado."""
     ia, m, ch = await _decisao_da_ia(session, mensagem_id)
     av = (
         await session.execute(
@@ -286,7 +287,7 @@ async def avaliar(
     av.certo = body.certo
     av.correcao = None if body.certo else body.correcao
     av.updated_by = user.id
-    if mudou_correcao and not ch.resolvido:
+    if mudou_correcao and body.refazer and not ch.resolvido:
         session.add(
             svc.nova_mensagem(
                 ch,

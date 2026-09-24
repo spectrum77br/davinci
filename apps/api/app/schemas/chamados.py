@@ -25,6 +25,15 @@ class ChamadoAnexoOut(BaseModel):
     created_at: datetime
 
 
+class IaAvaliacaoOut(BaseModel):
+    """✓/✗ da pessoa numa decisão da IA de Chamado (24/09)."""
+
+    certo: bool
+    correcao: str | None = None
+    autor: str | None = None
+    quando: datetime
+
+
 class ChamadoMensagemOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -40,6 +49,9 @@ class ChamadoMensagemOut(BaseModel):
     enviada_at: datetime | None = None
     created_at: datetime
     anexos: list[ChamadoAnexoOut] = []
+    # 24/09: análise da IA de Chamado — pode receber ✓/✗ no próprio histórico.
+    da_ia: bool = False
+    avaliacao_ia: IaAvaliacaoOut | None = None
 
 
 class ChamadoOut(BaseModel):
@@ -837,6 +849,9 @@ class IaAvaliacaoIn(BaseModel):
 
     certo: bool
     correcao: str | None = Field(default=None, max_length=4000)
+    # ✗ com refazer: a correção vira instrução e a IA refaz o chamado. Ao FECHAR o
+    # chamado (janela Resolver) não há o que refazer — só fica o aprendizado.
+    refazer: bool = True
 
     _clean = field_validator("correcao", mode="before")(_clean_optional_text)
 
@@ -845,13 +860,6 @@ class IaAvaliacaoIn(BaseModel):
         if not self.certo and not self.correcao:
             raise ValueError("no ✗ (errou), diga o que era o certo")
         return self
-
-
-class IaAvaliacaoOut(BaseModel):
-    certo: bool
-    correcao: str | None = None
-    autor: str | None = None
-    quando: datetime
 
 
 class IaDecisaoOut(BaseModel):

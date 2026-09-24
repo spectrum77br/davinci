@@ -437,3 +437,30 @@ async def test_instrucao_fura_a_fila(client, db, cenario):
         json={"limite": 1, "plataforma": None, "canais": ["robo", "api", "manual"]},
     )
     assert [c["chamado_id"] for c in r.json()["chamados"]] == [novo]
+
+
+async def test_avaliacao_no_historico_e_ao_fechar(client, db, cenario):
+    """24/09: o histórico marca as decisões da IA (da_ia + avaliação) e o ✗ dado
+    ao FECHAR o chamado (refazer=false) não manda a IA refazer."""
+    hermes = {"X-Agent-Token": _HERMES}
+    await client.post(
+        "/api/chamados/agent/analise",
+        headers=hermes,
+        json={"chamado_id": cenario["cid"], "classe": "x", "resumo": "y", "acao": "esperar"},
+    )
+    msgs = (await client.get(f"/api/chamados/{cenario['cid']}/mensagens")).json()
+    da_ia = [m for m in msgs if m["da_ia"]]
+    assert len(da_ia) == 1 and da_ia[0]["avaliacao_ia"] is None
+    assert all(not m["da_ia"] for m in msgs if m["tipo"] != "analise")
+
+    r = await client.put(
+        f"/api/chamados/ia/decisoes/{da_ia[0]['id']}/avaliacao",
+        json={"certo": False, "correcao": "Era pra fechar como perdido", "refazer": False},
+    )
+    assert r.status_code == 200, r.text
+    # sem instrução nova: a IA não refaz
+    assert await _analisar(client, _HERMES) == []
+    msgs = (await client.get(f"/api/chamados/{cenario['cid']}/mensagens")).json()
+    av = next(m for m in msgs if m["da_ia"])["avaliacao_ia"]
+    assert av["certo"] is False and av["correcao"] == "Era pra fechar como perdido"
+    assert not [m for m in msgs if m["tipo"] == "instrucao"]

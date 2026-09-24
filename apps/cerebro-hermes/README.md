@@ -21,6 +21,8 @@ DaVinci (nuvem)                                   Hermes (Mac Santiago)
 | Onde (no Santiago) | O quê |
 |---|---|
 | `~/.hermes/scripts/davinci_chamados.py` | cópia de `scripts/davinci_chamados.py` — a única coisa que fala com o DaVinci; sem argumento = pré-rodada do agendador |
+| `~/.hermes/scripts/adspower.py` | cópia de `scripts/adspower.py` — acha o perfil do AdsPower da loja ("Loja - Plataforma"), abre e fecha pela Local API |
+| `~/.hermes/scripts/tela.py` | cópia de `scripts/tela.py` — a IA NA TELA: chamado → perfil → abre → `hermes -z -t browser` com `BROWSER_CDP_URL` do perfil → fecha. Padrão só leitura; `--pode-agir` libera |
 | `~/.hermes/skills/ia-de-chamado/SKILL.md` | cópia de `skills/ia-de-chamado/SKILL.md` — as instruções fixas (o manual do Vinicius vem do DaVinci a cada passada) |
 | `~/DaVinci/cerebro/.env` (chmod 600) | `DAVINCI_CEREBRO_TOKEN` e os filtros (`DAVINCI_CEREBRO_PLATAFORMA`, `_CANAIS`, `_LIMITE`) |
 | `~/DaVinci/cerebro/decisoes.jsonl` | toda decisão, com a resposta do DaVinci |

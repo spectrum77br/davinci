@@ -103,6 +103,7 @@ from app.schemas.chamados import (
     ExcluirOut,
     ExclusaoLancamentoOut,
     ExclusaoPreviewOut,
+    IaAvaliacaoOut,
     InstrucaoIn,
     JuridicoIn,
     JuridicoOut,
@@ -678,7 +679,38 @@ async def list_mensagens(
 ) -> list[ChamadoMensagemOut]:
     ch = await _get(session, chamado_id)
     rows = await _mensagens_do_caso(session, ch, com_anexos=True)
-    return [_mensagem_out(m) for m in rows]
+    out = [_mensagem_out(m) for m in rows]
+    # 24/09: as análises da IA de Chamado levam o ✓/✗ (a pessoa avalia no histórico)
+    nomes_ia = set(
+        (
+            await session.execute(
+                select(ChamadoCerebro.nome).where(ChamadoCerebro.revoked_at.is_(None))
+            )
+        ).scalars()
+    )
+    ids_ia = [m.id for m in rows if m.tipo == "analise" and m.autor_nome in nomes_ia]
+    if ids_ia:
+        avs = (
+            await session.execute(
+                select(ChamadoIaAvaliacao, User)
+                .outerjoin(User, User.id == ChamadoIaAvaliacao.updated_by)
+                .where(ChamadoIaAvaliacao.mensagem_id.in_(ids_ia))
+            )
+        ).all()
+        por_msg = {
+            av.mensagem_id: IaAvaliacaoOut(
+                certo=av.certo,
+                correcao=av.correcao,
+                autor=_autor(u) if u is not None else None,
+                quando=av.updated_at,
+            )
+            for av, u in avs
+        }
+        for o in out:
+            if o.id in ids_ia:
+                o.da_ia = True
+                o.avaliacao_ia = por_msg.get(o.id)
+    return out
 
 
 @router.post(

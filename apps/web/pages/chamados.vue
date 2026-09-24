@@ -3,6 +3,7 @@ import {
   AlertCircle,
   ArrowLeftRight,
   Bot,
+  Check,
   CheckCircle2,
   ChevronLeft,
   ChevronRight,
@@ -17,6 +18,8 @@ import {
   Scale,
   Search,
   Send,
+  ThumbsDown,
+  ThumbsUp,
   Trash2,
   Undo2,
   UserRound,
@@ -114,7 +117,11 @@ type Mensagem = {
   enviada_at: string | null
   created_at: string
   anexos: Anexo[]
+  // 24/09: decisão da IA de Chamado — recebe ✓/✗ no próprio histórico
+  da_ia?: boolean
+  avaliacao_ia?: AvaliacaoIa | null
 }
+type AvaliacaoIa = { certo: boolean; correcao: string | null; autor: string | null; quando: string }
 type ChamadoRow = {
   id: string
   data: string | null
@@ -427,7 +434,8 @@ function resultadoTexto(v: number | string | null | undefined) {
 type Bolha = {
   chave: string
   // 19/09: 'instrucao' = recado de uma pessoa pro robô (não foi pra plataforma).
-  lado: 'nos' | 'eles' | 'sistema' | 'instrucao'
+  // 24/09: 'ia' = decisão da IA de Chamado (com ✓/✗).
+  lado: 'nos' | 'eles' | 'sistema' | 'instrucao' | 'ia'
   autor: string
   quando: string
   texto: string
@@ -435,6 +443,8 @@ type Bolha = {
   status: Mensagem['status'] | null
   erro: string | null
   anexos: Anexo[]
+  mensagemId?: string
+  avaliacao?: AvaliacaoIa | null
 }
 
 // "Mercado Livre" / "Você" seguido da data, do jeito que o ML escreve na página
@@ -838,6 +848,18 @@ const bolhas = computed<Bolha[]>(() => {
       })
       continue
     }
+    if (m.da_ia) {
+      itens.push({
+        t, ord: ord++,
+        b: {
+          chave: m.id, lado: 'ia', autor: m.autor_nome || 'IA de Chamado',
+          quando: fmtDateTime(m.created_at), texto: m.texto, meta: 'decisão',
+          status: null, erro: null, anexos: m.anexos,
+          mensagemId: m.id, avaliacao: m.avaliacao_ia ?? null,
+        },
+      })
+      continue
+    }
     if (m.direcao === 'sistema') {
       itens.push({
         t, ord: ord++,
@@ -1103,6 +1125,11 @@ const resolver = reactive({
   sugerido: false,
   saving: false,
   erro: null as string | null,
+  // 24/09 (Vinicius: "vou fechar o chamado e quero colocar se a IA acertou ou errou"):
+  // a última decisão da IA neste chamado e a avaliação escolhida na janela.
+  ia: null as Mensagem | null,
+  iaAval: '' as '' | 'certo' | 'errado',
+  iaCorrecao: '',
 })
 
 // Valor assinado que vai pra API (negativo = prejuízo); null = inválido/vazio.
@@ -1143,7 +1170,70 @@ function openResolver(row: ChamadoRow) {
   }
   resolver.tipo = !Number.isNaN(atual) && atual < 0 ? 'prejuizo' : 'lucro'
   resolver.valor = Number.isNaN(atual) ? '' : String(Math.abs(atual))
+  resolver.ia = null
+  resolver.iaAval = ''
+  resolver.iaCorrecao = ''
+  carregarDecisaoDaIa(row)
   nextTick(() => (document.getElementById('resolver-valor') as HTMLInputElement | null)?.focus())
+}
+
+// 24/09: a última decisão da IA neste chamado (do histórico já aberto, ou busca).
+async function carregarDecisaoDaIa(row: ChamadoRow) {
+  try {
+    const msgs = hist.open && hist.row?.id === row.id
+      ? hist.mensagens
+      : await api<Mensagem[]>(`/api/chamados/${row.id}/mensagens`)
+    if (resolver.row?.id !== row.id) return
+    const ultima = [...msgs].reverse().find(m => m.da_ia) || null
+    resolver.ia = ultima
+    if (ultima?.avaliacao_ia) {
+      resolver.iaAval = ultima.avaliacao_ia.certo ? 'certo' : 'errado'
+      resolver.iaCorrecao = ultima.avaliacao_ia.correcao || ''
+    }
+  } catch { /* sem a decisão da IA a janela funciona igual */ }
+}
+
+// Texto curto da decisão: sem o "Análise da IA de Chamado [classe]:" do começo.
+function resumoDaIa(texto: string) {
+  return texto.replace(/^Análise d[aoe] [^[]*\[[^\]]*\]:\s*/, '')
+}
+
+// ✓/✗ numa decisão da IA. `refazer`: no histórico (chamado aberto) o ✗ manda a IA
+// refazer; ao fechar pela janela Resolver, fica só o aprendizado.
+async function avaliarIa(mensagemId: string, certo: boolean, correcao: string, refazer: boolean) {
+  await api(`/api/chamados/ia/decisoes/${mensagemId}/avaliacao`, {
+    method: 'PUT',
+    body: certo ? { certo: true } : { certo: false, correcao, refazer },
+  })
+}
+const histIa = reactive({ corrigindo: null as string | null, correcao: '', salvando: null as string | null, erro: null as string | null })
+async function avaliarNoHistorico(b: Bolha, certo: boolean) {
+  if (!b.mensagemId || !hist.row) return
+  if (!certo && !histIa.correcao.trim()) return
+  histIa.salvando = b.mensagemId
+  histIa.erro = null
+  try {
+    await avaliarIa(b.mensagemId, certo, histIa.correcao.trim(), true)
+    histIa.corrigindo = null
+    histIa.correcao = ''
+    hist.mensagens = await api<Mensagem[]>(`/api/chamados/${hist.row.id}/mensagens`)
+  } catch (e: any) {
+    histIa.erro = apiError(e)
+  } finally {
+    histIa.salvando = null
+  }
+}
+async function desfazerNoHistorico(b: Bolha) {
+  if (!b.mensagemId || !hist.row) return
+  histIa.salvando = b.mensagemId
+  try {
+    await api(`/api/chamados/ia/decisoes/${b.mensagemId}/avaliacao`, { method: 'DELETE' })
+    hist.mensagens = await api<Mensagem[]>(`/api/chamados/${hist.row.id}/mensagens`)
+  } catch (e: any) {
+    histIa.erro = apiError(e)
+  } finally {
+    histIa.salvando = null
+  }
 }
 
 function closeResolver() {
@@ -1163,8 +1253,15 @@ async function confirmarResolver() {
     resolver.erro = ERROS.chamado_situacao_obrigatoria
     return
   }
+  if (resolver.iaAval === 'errado' && !resolver.iaCorrecao.trim()) {
+    resolver.erro = 'Diga o que era o certo pra IA aprender (ou deixe sem avaliar).'
+    return
+  }
   resolver.saving = true
   resolver.erro = null
+  const ia = resolver.ia
+  const iaAval = resolver.iaAval
+  const iaCorrecao = resolver.iaCorrecao.trim()
   try {
     const updated = await api<ChamadoRow>(`/api/chamados/${row.id}/resolver`, {
       method: 'POST',
@@ -1185,6 +1282,14 @@ async function confirmarResolver() {
       'Chamado resolvido',
       [resultadoTexto(valor), resolver.situacao ? `Bling → ${resolver.situacao}` : ''].filter(Boolean).join(' · '),
     )
+    // 24/09: avaliação da IA dada ao fechar — só aprendizado (o chamado acabou de fechar)
+    const jaIgual = ia?.avaliacao_ia
+      && (ia.avaliacao_ia.certo ? 'certo' : 'errado') === iaAval
+      && (iaAval === 'certo' || (ia.avaliacao_ia.correcao || '') === iaCorrecao)
+    if (ia && iaAval && !jaIgual) {
+      avaliarIa(ia.id, iaAval === 'certo', iaCorrecao, false)
+        .catch(() => toasts.error('Avaliação da IA não foi salva', 'O chamado foi resolvido; marque acertou/errou pela aba IA de Chamado.'))
+    }
     closeResolver()
     // 19/09: resolvido de dentro do histórico → o histórico fecha junto (a linha já
     // saiu da lista de abertos; não faz sentido continuar olhando um chamado concluído).
@@ -1869,6 +1974,47 @@ async function confirmarExcluir() {
               :title="b.quando"
             >{{ b.texto }}</div>
 
+            <!-- 24/09: decisão da IA de Chamado, no meio da conversa, com ✓/✗ -->
+            <div
+              v-else-if="b.lado === 'ia'"
+              class="w-[88%] rounded-xl border border-violet-300/60 bg-violet-50/60 px-3 py-2 dark:border-violet-800/60 dark:bg-violet-900/15"
+            >
+              <div class="flex flex-wrap items-center gap-x-2 text-[11px]">
+                <span class="inline-flex items-center gap-1 font-medium text-violet-700 dark:text-violet-300"><Bot class="size-3" /> {{ b.autor }} · decisão</span>
+                <span class="text-muted-foreground">{{ b.quando }}</span>
+                <span
+                  v-if="b.avaliacao"
+                  class="ml-auto inline-flex items-center gap-1 rounded-full px-2 py-0.5 font-medium"
+                  :class="b.avaliacao.certo ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300' : 'bg-red-500/15 text-red-700 dark:text-red-300'"
+                >
+                  <component :is="b.avaliacao.certo ? ThumbsUp : ThumbsDown" class="size-3" />
+                  {{ b.avaliacao.certo ? 'acertou' : 'errou' }}<template v-if="b.avaliacao.autor"> · {{ b.avaliacao.autor }}</template>
+                  <button v-if="canEdit" type="button" class="ml-1 opacity-70 hover:opacity-100" title="desfazer a avaliação" :disabled="histIa.salvando === b.mensagemId" @click="desfazerNoHistorico(b)"><Undo2 class="size-3" /></button>
+                </span>
+              </div>
+              <div class="mt-1 whitespace-pre-wrap break-words text-sm leading-relaxed">{{ resumoDaIa(b.texto) }}</div>
+              <div v-if="b.avaliacao && !b.avaliacao.certo" class="mt-1.5 rounded border border-red-500/30 bg-red-500/5 px-2 py-1 text-xs">
+                <span class="font-semibold text-red-700 dark:text-red-300">O certo era:</span> {{ b.avaliacao.correcao }}
+              </div>
+              <template v-if="!b.avaliacao && canEdit">
+                <div v-if="histIa.corrigindo !== b.mensagemId" class="mt-1.5 flex items-center justify-end gap-1">
+                  <Loader2 v-if="histIa.salvando === b.mensagemId" class="size-4 animate-spin text-muted-foreground" />
+                  <template v-else>
+                    <Button size="sm" variant="outline" class="h-7 px-2 text-xs text-emerald-700 dark:text-emerald-300" @click="avaliarNoHistorico(b, true)"><ThumbsUp class="size-3.5 mr-1" /> acertou</Button>
+                    <Button size="sm" variant="outline" class="h-7 px-2 text-xs text-red-700 dark:text-red-300" @click="histIa.corrigindo = b.mensagemId || null; histIa.correcao = ''"><ThumbsDown class="size-3.5 mr-1" /> errou</Button>
+                  </template>
+                </div>
+                <div v-else class="mt-1.5 space-y-1">
+                  <textarea v-model="histIa.correcao" rows="3" class="w-full rounded-md border bg-background px-2 py-1.5 text-sm" placeholder="o que era o certo? — ela refaz este chamado na próxima passada (1 a 2 min) e guarda como aprendizado" />
+                  <div class="flex items-center justify-end gap-1">
+                    <span v-if="histIa.erro" class="mr-auto text-[11px] text-red-500">{{ histIa.erro }}</span>
+                    <Button size="sm" variant="ghost" class="h-7" @click="histIa.corrigindo = null"><X class="size-3.5" /></Button>
+                    <Button size="sm" class="h-7" :disabled="!histIa.correcao.trim() || histIa.salvando === b.mensagemId" @click="avaliarNoHistorico(b, false)"><Check class="size-3.5 mr-1" /> salvar correção</Button>
+                  </div>
+                </div>
+              </template>
+            </div>
+
             <!-- 19/09: instrução pro robô — do nosso lado, mas em índigo pra não confundir
                  com réplica (não foi pra plataforma). -->
             <div
@@ -2191,6 +2337,23 @@ async function confirmarExcluir() {
               class="w-full resize-y rounded-md border bg-background px-2 py-1.5 text-sm"
             />
           </label>
+          <!-- 24/09 (Vinicius): ao fechar, dizer se a IA acertou — vira aprendizado dela -->
+          <div v-if="resolver.ia" class="space-y-1.5 rounded-md border border-violet-300/60 bg-violet-50/50 px-3 py-2 dark:border-violet-800/60 dark:bg-violet-900/15">
+            <div class="flex items-center gap-1.5 text-xs font-medium text-violet-700 dark:text-violet-300"><Bot class="size-3.5" /> A IA de Chamado acertou?</div>
+            <div class="line-clamp-3 text-xs text-muted-foreground" :title="resumoDaIa(resolver.ia.texto)">{{ resumoDaIa(resolver.ia.texto) }}</div>
+            <div class="flex flex-wrap items-center gap-1.5">
+              <Button size="sm" :variant="resolver.iaAval === 'certo' ? 'default' : 'outline'" class="h-7 px-2 text-xs" @click="resolver.iaAval = resolver.iaAval === 'certo' ? '' : 'certo'"><ThumbsUp class="size-3.5 mr-1" /> acertou</Button>
+              <Button size="sm" :variant="resolver.iaAval === 'errado' ? 'destructive' : 'outline'" class="h-7 px-2 text-xs" @click="resolver.iaAval = resolver.iaAval === 'errado' ? '' : 'errado'"><ThumbsDown class="size-3.5 mr-1" /> errou</Button>
+              <span v-if="!resolver.iaAval" class="text-[11px] text-muted-foreground">(opcional)</span>
+            </div>
+            <textarea
+              v-if="resolver.iaAval === 'errado'"
+              v-model="resolver.iaCorrecao"
+              rows="2"
+              placeholder="o que era o certo? — fica de aprendizado pra IA (o chamado fecha, ela não refaz)"
+              class="w-full resize-y rounded-md border bg-background px-2 py-1.5 text-sm"
+            />
+          </div>
           <div v-if="resolver.erro" class="text-xs text-red-500">{{ resolver.erro }}</div>
         </div>
         <div class="flex items-center justify-end gap-2 border-t px-4 py-3">
