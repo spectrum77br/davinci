@@ -185,6 +185,112 @@ async def fila(
     return list(rows)
 
 
+async def fila_devolucao_shopee(
+    session: AsyncSession,
+    *,
+    limite: int = 10,
+    contas: list[str] | None = None,
+    espiar: bool = False,
+    agora: datetime | None = None,
+) -> list[Chamado]:
+    """Devoluções da Shopee contestadas PELA API que o executor de leitura deve
+    reler no Seller Center — a fila do `/agent/leitor/fila`.
+
+    Vinicius 24/09 (296012): a API da Shopee só dá códigos; a fala do agente
+    ("não será possível aprovar sua solicitação…") mora no "Histórico da
+    Solicitação" da tela. Às 16:09 a API ainda dizia "aguardando análise" de uma
+    recusa das 15:59, e a IA de Chamado mandou aguardar. A `fila` acima NÃO
+    serve: ela entrega só caso aberto NA TELA (protocolo de tela), e estes têm o
+    `return_sn` da API — o robô acha a devolução pelo número do PEDIDO.
+
+    Entra o mesmo conjunto que o `chamados_devolucao_sync` acompanha pela API
+    (abertura enviada, ou falhada porque a disputa já existia/fechou), só Shopee,
+    vivo e sem decisão final. Cadência e claim são os da `fila`.
+
+    `contas`: só as lojas que o robô tem perfil pra abrir — sem isso, caso de
+    loja sem perfil voltaria sempre primeiro (NULLS FIRST) e tomaria o lugar
+    dos outros. `espiar`: devolve sem marcar a entrega (modo seco do robô, e a
+    conferência de quais casos entrariam)."""
+    from app.services import chamados_devolucao_sync as acompanhamento
+
+    agora = agora or datetime.now(UTC)
+    ultima_fala = _ultima_fala_at()
+    abertura_acompanhada = (
+        select(ChamadoMensagem.id)
+        .where(
+            ChamadoMensagem.chamado_id == Chamado.id,
+            ChamadoMensagem.tipo == "abertura",
+            or_(
+                ChamadoMensagem.status == "enviada",
+                and_(
+                    ChamadoMensagem.status == "falhou",
+                    ChamadoMensagem.erro.in_(acompanhamento.ABERTURA_FALHOU_ACOMPANHA),
+                ),
+            ),
+        )
+        .correlate(Chamado)
+        .exists()
+    )
+    conds = [
+        Chamado.origem == "devolucao",
+        Chamado.canal == "api",
+        Chamado.resolvido.is_(False),
+        chamados_svc.NAO_ENCERRADO_SQL,
+        ~chamados_svc.CASO_DE_TELA_SQL,
+        func.coalesce(func.trim(Chamado.chamado), "") != "",
+        func.coalesce(func.trim(Chamado.pedido_marketplace), "") != "",
+        func.lower(func.trim(func.coalesce(Chamado.plataforma, ""))).in_(
+            sorted(chamados_svc.apelidos_da_plataforma("shopee"))
+        ),
+        abertura_acompanhada,
+        or_(
+            Chamado.leitura_robo_claim_at.is_(None),
+            Chamado.leitura_robo_claim_at < agora - CLAIM_STALE,
+        ),
+        or_(
+            Chamado.leitura_robo_at.is_(None),
+            and_(
+                ultima_fala >= agora - FRIO,
+                Chamado.leitura_robo_at < agora - INTERVALO,
+            ),
+            and_(
+                or_(ultima_fala.is_(None), ultima_fala < agora - FRIO),
+                Chamado.leitura_robo_at < agora - INTERVALO_FRIO,
+            ),
+        ),
+    ]
+    if contas is not None:
+        nomes = sorted({c.strip().lower() for c in contas if (c or "").strip()})
+        if not nomes:
+            return []
+        conds.append(func.lower(func.trim(func.coalesce(Chamado.conta, ""))).in_(nomes))
+    q = (
+        select(Chamado)
+        .where(*conds)
+        .order_by(Chamado.leitura_robo_at.asc().nulls_first(), Chamado.created_at)
+        .limit(limite)
+    )
+    if espiar:
+        return list((await session.execute(q)).scalars().all())
+    rows = (await session.execute(q.with_for_update(skip_locked=True))).scalars().all()
+    for ch in rows:
+        ch.leitura_robo_claim_at = agora
+    await session.commit()
+    logger.info("chamados_leitor_fila", casos=len(rows), contas=len(contas or []))
+    return list(rows)
+
+
+def e_devolucao_shopee_da_api(ch: Chamado) -> bool:
+    """O chamado é do tipo que o executor de leitura atende — o `/agent/leitor/
+    resultado` recusa o resto (a senha dele não escreve em qualquer chamado)."""
+    return (
+        (ch.origem or "") == "devolucao"
+        and (ch.canal or "") == "api"
+        and not bool(ch.chamado_de_tela)
+        and (ch.plataforma or "").strip().lower() in chamados_svc.apelidos_da_plataforma("shopee")
+    )
+
+
 async def proxima_leitura(
     session: AsyncSession, ch: Chamado, *, ok: bool, agora: datetime | None = None
 ) -> datetime:

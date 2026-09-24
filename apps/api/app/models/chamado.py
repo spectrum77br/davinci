@@ -308,6 +308,29 @@ class ChamadoCerebro(Base, TimestampMixin):
     )
 
 
+class ChamadoLeitor(Base, TimestampMixin):
+    """Um robô que LÊ o caso na tela e devolve o que viu — com senha própria.
+
+    Vinicius, 24/09/2026 (296012): a recusa escrita da Shopee ("Histórico da
+    Solicitação") só existe no Seller Center; a API diz só "aguardando análise",
+    e às 16:09 ainda dizia isso de uma recusa das 15:59. Quem lê é o
+    "executor de leitura de chamado" no Mac Santiago (AdsPower + Seller Center).
+
+    Senha própria, e não o `NF_AGENT_TOKEN`: esse é das mãos do Eduardo (lease,
+    resultado, recebida) — com ele o leitor poderia postar na conversa com o
+    cliente. Aqui só existem as rotas `/agent/leitor/*`, que não escrevem nada
+    pra plataforma. O token só aparece uma vez; aqui fica o sha256 (mesmo
+    esquema do `ChamadoCerebro`)."""
+
+    __tablename__ = "chamados_leitores"
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    nome: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    token_hash: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class ChamadoIaRegra(Base, TimestampMixin):
     """Uma regra do manual da IA de Chamado — "quando acontecer isso, faça isso".
 

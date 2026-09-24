@@ -1,0 +1,25 @@
+{
+  "name": "davinci-executor-leitura-chamado",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Executor de leitura de chamado: abre a devolução no Seller Center da Shopee pelo AdsPower, lê o 'Histórico da Solicitação' e devolve o texto pro chamado do DaVinci (/api/chamados/agent/leitor). Só lê. Roda no Mac Santiago.",
+  "type": "commonjs",
+  "main": "dist/index.js",
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "build": "tsc",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "puppeteer-core": "^23.11.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.5",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

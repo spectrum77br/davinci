@@ -388,6 +388,7 @@ _CLEANUP_TABLES = (
     "chamado_mensagem",
     "chamados",
     "chamados_cerebros",
+    "chamados_leitores",
     "refunds",
     "devolucao_mensagem_comprador",
     "devolutions",

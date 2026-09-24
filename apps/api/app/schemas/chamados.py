@@ -493,6 +493,21 @@ class AgentLeituraOut(BaseModel):
     casos: list[AgentCasoLeituraOut]
 
 
+class AgentLeitorFilaIn(BaseModel):
+    """Fila do executor de leitura (24/09, 296012): devoluções da Shopee
+    contestadas pela API, pra reler o "Histórico da Solicitação" no Seller
+    Center. `chamado` na resposta é o nº da solicitação; o robô busca pelo
+    `pedido_marketplace`.
+
+    `contas`: as lojas em que o robô tem perfil (nome como no chamado, ex.
+    "Shopee Vortan"); `null` = todas. `espiar`: lista sem marcar a entrega —
+    modo seco e conferência."""
+
+    limite: int = Field(default=10, ge=1, le=200)
+    contas: list[str] | None = None
+    espiar: bool = False
+
+
 class AgentFalaLidaIn(BaseModel):
     """Uma fala DELES lida na tela. `quando` é obrigatório: sem a hora da
     plataforma a fala entra com a hora do POST e a coluna "Últ. resposta" mente

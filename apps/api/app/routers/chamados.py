@@ -45,6 +45,7 @@ from app.models import (
     ChamadoCerebro,
     ChamadoIaAvaliacao,
     ChamadoIaRegra,
+    ChamadoLeitor,
     ChamadoMensagem,
     DevolucaoAnexo,
     Devolution,
@@ -72,6 +73,7 @@ from app.schemas.chamados import (
     AgentInstrucaoOut,
     AgentLeaseIn,
     AgentLeaseOut,
+    AgentLeitorFilaIn,
     AgentLeituraIn,
     AgentLeituraOut,
     AgentLeituraResultadoIn,
@@ -1570,6 +1572,102 @@ async def agent_leitura_resultado(
     `ok: false` não grava nada e abre ocorrência na Ouvidoria — leitura que parou
     de funcionar tem que ser vista."""
     ch = await _get(session, body.chamado_id)
+    r = await chamados_leitura.registrar(
+        session,
+        ch,
+        ok=body.ok,
+        erro=body.erro,
+        falas=[
+            chamados_leitura.FalaLida(texto=f.texto, quando=f.quando, autor=f.autor)
+            for f in body.falas
+        ],
+        historico=body.historico,
+        encerrado=body.encerrado,
+    )
+    return AgentLeituraResultadoOut(
+        chamado_id=ch.id,
+        falas_novas=r.falas_novas,
+        ecos=r.ecos,
+        duplicadas=r.duplicadas,
+        historico_alterado=r.historico_alterado,
+        encerrado=r.encerrado,
+        proxima_leitura_at=await chamados_leitura.proxima_leitura(session, ch, ok=body.ok),
+    )
+
+
+# ---- executor de leitura de chamado (24/09, 296012) --------------------------
+# A recusa escrita da Shopee só existe no Seller Center ("Histórico da
+# Solicitação"); a API diz só "aguardando análise". Um executor no Mac Santiago
+# abre a devolução pelo AdsPower e devolve o que leu. Senha PRÓPRIA
+# (`chamados_leitores`): com o NF_AGENT_TOKEN ele poderia postar na conversa com
+# o cliente; com esta, só pede a lista e devolve a leitura.
+
+
+async def _leitor(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    x_agent_token: Annotated[str | None, Header(alias="X-Agent-Token")] = None,
+) -> ChamadoLeitor:
+    token = (x_agent_token or "").strip()
+    row = None
+    if token:
+        row = (
+            await session.execute(
+                select(ChamadoLeitor).where(
+                    ChamadoLeitor.token_hash == hashlib.sha256(token.encode()).hexdigest(),
+                    ChamadoLeitor.revoked_at.is_(None),
+                )
+            )
+        ).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(401, detail={"code": "chamados_leitor_unauthorized"})
+    agora = datetime.now(UTC)
+    if row.last_used_at is None or row.last_used_at < agora - _CEREBRO_CARIMBO:
+        row.last_used_at = agora
+        await session.commit()
+    return row
+
+
+@agent_router.post("/leitor/fila", response_model=AgentLeituraOut)
+async def agent_leitor_fila(
+    body: AgentLeitorFilaIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _quem: Annotated[ChamadoLeitor, Depends(_leitor)],
+) -> AgentLeituraOut:
+    """Devoluções da Shopee contestadas pela API pra reler na tela. `chamado` = nº
+    da solicitação; o robô busca pelo `pedido_marketplace`. Mesma cadência e claim
+    do `/agent/leitura` (3 h / 24 h frio / claim 30 min); `espiar` não marca."""
+    casos = await chamados_leitura.fila_devolucao_shopee(
+        session, limite=body.limite, contas=body.contas, espiar=body.espiar
+    )
+    return AgentLeituraOut(
+        casos=[
+            AgentCasoLeituraOut(
+                chamado_id=c.id,
+                chamado=(c.chamado or "").strip(),
+                chamado_url=(c.chamado_url or "").strip() or None,
+                pedido_bling=c.pedido_bling,
+                pedido_marketplace=(c.pedido_marketplace or "").strip() or None,
+                conta=c.conta,
+                plataforma=c.plataforma,
+                leitura_robo_at=c.leitura_robo_at,
+            )
+            for c in casos
+        ]
+    )
+
+
+@agent_router.post("/leitor/resultado", response_model=AgentLeituraResultadoOut)
+async def agent_leitor_resultado(
+    body: AgentLeituraResultadoIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _quem: Annotated[ChamadoLeitor, Depends(_leitor)],
+) -> AgentLeituraResultadoOut:
+    """O que o executor leu — mesmas regras do `/agent/leitura/resultado` (falas
+    com a hora da tela, eco e repetida descartados, `ok: false` vira ocorrência).
+    Só aceita chamado do tipo que a fila dele entrega."""
+    ch = await _get(session, body.chamado_id)
+    if not chamados_leitura.e_devolucao_shopee_da_api(ch):
+        raise HTTPException(409, detail={"code": "chamado_fora_do_leitor"})
     r = await chamados_leitura.registrar(
         session,
         ch,
