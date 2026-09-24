@@ -923,8 +923,11 @@ async def robo_lease(
     _tok: Annotated[None, Depends(_require_agent_token_logistica())],
 ) -> RoboLeaseOut:
     """Executor puxa os comandos pendentes do robô da Logística (hoje:
-    `melhorenvio_suspender`) e eles viram `claimed`."""
-    return RoboLeaseOut(comandos=await logistica_robo.lease(session, limit=body.limit))
+    `melhorenvio_suspender` e a leitura do Tuta) e eles viram `claimed`. Cada
+    máquina recebe só as `acoes` que declarou."""
+    return RoboLeaseOut(
+        comandos=await logistica_robo.lease(session, limit=body.limit, acoes=body.acoes)
+    )
 
 
 @router.post("/agent/comandos/{comando_id}/resultado")

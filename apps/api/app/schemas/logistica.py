@@ -203,9 +203,12 @@ class LogisticaOut(BaseModel):
 
 
 class RoboLeaseIn(BaseModel):
-    """Executor local pedindo trabalho (X-Agent-Token)."""
+    """Executor local pedindo trabalho (X-Agent-Token). `acoes` = o que ESTA
+    máquina faz; sem ele é um executor antigo, que recebe tudo menos as ações
+    exclusivas (logistica_robo.ACOES_EXCLUSIVAS)."""
 
     limit: int = Field(default=5, ge=1, le=20)
+    acoes: list[str] | None = None
 
 
 class RoboComandoOut(BaseModel):

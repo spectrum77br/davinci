@@ -93,7 +93,7 @@ const DUMP_JS = `(function(){${H}
   return {url:location.href,title:document.title,buttons:out.slice(0,80),text:(document.body.innerText||'').replace(/\\s+/g,' ').slice(0,500)};
 })()`;
 
-// Bloco (linha da tabela) do envio que contém o rastreio; marca a linha
+// Linha da tabela do envio que contém o rastreio; marca a linha
 // (data-me-card) e o botão de menu de ações dela (data-me-menu).
 //
 // Não existe mais um helper de busca: a busca desta tela é por destinatário ou
@@ -110,32 +110,51 @@ const CLICAR_ABA_POSTADOS_JS = `(function(){${H}
   return {ok:true,texto:txt(el)};
 })()`;
 
+// A linha do envio é o PRIMEIRO ancestral do rastreio que tem um botão de menu
+// — e tem que ter exatamente um, e nenhum outro rastreio. Antes se usava
+// closest() com classes genéricas, que casava num contêiner da página inteira:
+// o "menu da linha" virava o primeiro menu da tabela, e pedir a suspensão do 5º
+// envio abria o menu do 1º (visto no modo seco em 24/09/2026 — no modo real
+// teria suspendido a entrega de outra pessoa).
 function findCardJS(rastreio: string): string {
   return `(function(){${H}
   var alvo=${JSON.stringify(rastreio.toUpperCase())};
   ['data-me-card','data-me-menu'].forEach(function(a){[].slice.call(document.querySelectorAll('['+a+']')).forEach(function(e){e.removeAttribute(a);});});
-  var leaf=[].slice.call(document.querySelectorAll('span,div,td,p,a,strong,b,small')).filter(function(e){return vis(e)&&e.children.length<=2&&txt(e).toUpperCase().indexOf(alvo)>=0;});
+  var ehMenu=function(e){var s=((e.getAttribute('aria-label')||'')+' '+(e.getAttribute('title')||'')).toLowerCase();return /menu de a[çc][õo]es|a[çc][õo]es do envio/.test(s);};
+  var rotulos=function(el){return [].slice.call(el.querySelectorAll('button,[role="button"]')).filter(vis).map(function(e){return (e.getAttribute('aria-label')||e.getAttribute('title')||txt(e)||'(sem rótulo)').slice(0,50);});};
+  // O elemento MAIS justo que mostra o rastreio (o link da célula), não um
+  // contêiner grande que por acaso também contém o texto.
+  var leaf=[].slice.call(document.querySelectorAll('a,span,div,td,p,strong,b,small')).filter(function(e){return vis(e)&&txt(e).toUpperCase().indexOf(alvo)>=0;});
   if(!leaf.length)return {found:false};
-  var el=leaf[0];
-  var card=el.closest('tr,li,article,[class*="card"],[class*="Card"],[class*="shipment"],[class*="envio"],[class*="item"]');
-  var n=0;while(!card&&el&&n<6){el=el.parentElement;n++;if(el&&el.querySelectorAll('button,a,[role="button"]').length>=1)card=el;}
-  if(!card)card=leaf[0].parentElement;
+  leaf.sort(function(x,y){return txt(x).length-txt(y).length;});
+  var el=leaf[0],card=null,men=[];
+  for(var n=0;el&&el!==document.body&&n<15;n++){
+    men=[].slice.call(el.querySelectorAll('button,a,[role="button"]')).filter(function(e){return vis(e)&&ehMenu(e);});
+    if(men.length){card=el;break;}
+    el=el.parentElement;
+  }
+  if(!card)return {found:true,hasMenu:false,cardText:txt(leaf[0].parentElement).slice(0,160),botoesDaLinha:[]};
+  var outros=(txt(card).toUpperCase().match(/[A-Z]{2}[0-9]{9}BR/g)||[]).filter(function(c){return c!==alvo;});
+  if(men.length!==1||outros.length){
+    return {found:true,hasMenu:false,ambiguo:true,cardText:txt(card).slice(0,160),botoesDaLinha:rotulos(card)};
+  }
   card.setAttribute('data-me-card','1');
-  // Os três pontinhos da linha. O Melhor Envio rotula os ícones com
-  // aria-label, e os três da linha são distintos: "Abrir novo ticket de
-  // atendimento", "Abrir menu de ações do envio" e "Visualizar detalhes do
-  // envio". Mirar no rótulo é preciso; procurar por TEXTO não funciona porque
-  // o botão não tem texto nenhum.
-  var men=[].slice.call(card.querySelectorAll('button,a,[role="button"]')).filter(function(e){
-    var s=((e.getAttribute('aria-label')||'')+' '+(e.getAttribute('title')||'')).toLowerCase();
-    return vis(e)&&/menu de a[çc][õo]es|a[çc][õo]es do envio/.test(s);
-  });
-  if(men.length){men[0].setAttribute('data-me-menu','1');}
-  return {found:true,cardText:txt(card).slice(0,160),hasMenu:men.length>0,
-          menuLabel:men.length?(men[0].getAttribute('aria-label')||''):'',
-          botoesDaLinha:[].slice.call(card.querySelectorAll('button,[role="button"]')).filter(vis).map(function(e){return (e.getAttribute('aria-label')||e.getAttribute('title')||txt(e)||'(sem rótulo)').slice(0,50);})};
+  men[0].setAttribute('data-me-menu','1');
+  return {found:true,hasMenu:true,cardText:txt(card).slice(0,160),
+          menuLabel:men[0].getAttribute('aria-label')||'',botoesDaLinha:rotulos(card)};
 })()`;
 }
+
+// O menu de ações é flutuante (fica fora da linha). Confere que o "Suspender
+// entrega" achado está colado no botão que abrimos — se estiver longe, é o
+// menu de outra linha e não se clica.
+const DISTANCIA_MENU_JS = `(function(){
+  var m=document.querySelector('[data-me-menu="1"]'),b=document.querySelector('[data-me-btn="1"]');
+  if(!m||!b)return null;
+  var r1=m.getBoundingClientRect(),r2=b.getBoundingClientRect();
+  return Math.round(Math.min(Math.abs(r2.top-r1.bottom),Math.abs(r1.top-r2.bottom)));
+})()`;
+const DISTANCIA_MAX_PX = 250;
 
 // Botão/menu por texto (regex), preferindo dentro de modal/dropdown aberto e
 // depois dentro do card; marca com data-me-btn.
@@ -263,9 +282,11 @@ export async function suspenderEntrega(
       found: true,
       requested: false,
       dry: true,
-      reason:
-        "achei o envio mas não achei o botão de ações na linha dele; botões vistos: "
-        + (card.botoesDaLinha || []).join(" | "),
+      reason: card.ambiguo
+        ? "achei o rastreio mas não consegui separar a linha dele das outras "
+          + "(mais de um menu ou mais de um rastreio no mesmo bloco) — não cliquei em nada"
+        : "achei o envio mas não achei o botão de ações na linha dele; botões vistos: "
+          + (card.botoesDaLinha || []).join(" | "),
       url: d?.url,
       buttons: d?.buttons,
       screenshot: shot,
@@ -293,6 +314,23 @@ export async function suspenderEntrega(
       screenshot: shot,
     };
   }
+  const distancia = await evalJS<number | null>(page, DISTANCIA_MENU_JS);
+  if (distancia == null || distancia > DISTANCIA_MAX_PX) {
+    const shot = await screenshot(page, `menu-longe-${rastreio}`);
+    await page.keyboard.press("Escape").catch(() => undefined);
+    return {
+      ok: false,
+      found: true,
+      requested: false,
+      dry: true,
+      reason:
+        `o "Suspender entrega" que apareceu não está junto do menu da linha deste envio `
+        + `(distância ${distancia ?? "?"} px) — pode ser de outra linha; não cliquei em nada`,
+      screenshot: shot,
+    };
+  }
+  log.info(`ME ${rastreio}: linha "${card.cardText}" — menu a ${distancia}px do botão`);
+
   // TRAVA — antes do clique, não depois.
   //
   // O modo seco clicava em "Suspender entrega" e só então checava a trava,

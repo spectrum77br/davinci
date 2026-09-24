@@ -15,6 +15,10 @@
  * do DaVinci reenfileira no próximo minuto se o desired ainda divergir.
  *
  * Substitui o antigo projeto standalone ~/marionete.
+ *
+ * Cada máquina liga só as filas dela (EXECUTOR_FILAS): desde 24/09/2026 o
+ * "Suspender entrega" do Melhor Envio roda no Mac Santiago, e a Shopee e o
+ * Tuta ficam no executor do Eduardo.
  */
 import "dotenv/config";
 
@@ -28,7 +32,7 @@ import * as tuta from "./tuta";
 import * as davinci from "./davinci";
 import type { LeasedCommand, LeasedLogisticaCommand } from "./davinci";
 
-const VERSION = "1.0.0";
+const VERSION = "1.1.0";
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 let ticking = false;
@@ -242,24 +246,36 @@ async function processLogisticaCommand(cmd: LeasedLogisticaCommand): Promise<voi
   }
 }
 
+/** Ações da fila da Logística que esta máquina faz (o servidor só entrega
+ *  essas). */
+function acoesLogistica(): string[] {
+  const acoes: string[] = [];
+  if (cfg.filas.has("melhorenvio")) acoes.push("melhorenvio_suspender");
+  if (cfg.filas.has("tuta")) acoes.push("tuta_devolucoes");
+  return acoes;
+}
+
 /** Um ciclo de trabalho: puxa as filas e drena SERIALMENTE (um perfil por vez). */
 async function tick(): Promise<void> {
   if (ticking) return; // sem reentrância — um AdsPower de cada vez
   ticking = true;
   try {
-    const commands = await davinci.lease(cfg.leaseLimit);
+    const commands = cfg.filas.has("shopee") ? await davinci.lease(cfg.leaseLimit) : [];
     if (commands.length) log.info(`lease: ${commands.length} comando(s) para executar`);
     for (let i = 0; i < commands.length; i++) {
       await processCommand(commands[i]);
       // Espaça os perfis (rate-limit ~1 req/s da Local API do AdsPower).
       if (i < commands.length - 1) await sleep(cfg.profileGapMs);
     }
-    // Fila do robô da Logística (Melhor Envio) — mesmo laço serial.
+    // Fila do robô da Logística (Melhor Envio / Tuta) — mesmo laço serial.
+    const acoes = acoesLogistica();
     let logistica: LeasedLogisticaCommand[] = [];
-    try {
-      logistica = await davinci.leaseLogistica(cfg.logisticaLeaseLimit);
-    } catch (err: any) {
-      log.warn(`lease logística falhou: ${String(err?.message || err)}`);
+    if (acoes.length) {
+      try {
+        logistica = await davinci.leaseLogistica(cfg.logisticaLeaseLimit, acoes);
+      } catch (err: any) {
+        log.warn(`lease logística falhou: ${String(err?.message || err)}`);
+      }
     }
     if (logistica.length) log.info(`lease logística: ${logistica.length} comando(s)`);
     for (let i = 0; i < logistica.length; i++) {
@@ -300,23 +316,40 @@ async function sendHeartbeat(): Promise<void> {
 async function main(): Promise<void> {
   log.info(
     `davinci-executor v${VERSION} — api=${cfg.davinciApiUrl} agent=${cfg.agentName} ` +
-      `calibrated=${cfg.calibrated} mode=${cfg.defaultMode}`
+      `filas=${[...cfg.filas].join(",") || "(nenhuma)"} calibrated=${cfg.calibrated} mode=${cfg.defaultMode}`
   );
+  if (!cfg.filas.size) {
+    log.error("EXECUTOR_FILAS sem nenhuma fila válida (shopee, melhorenvio, tuta) — nada a fazer.");
+  }
   if (!cfg.agentToken) {
     log.error("MARKETING_AGENT_TOKEN vazio — o DaVinci vai recusar com 401. Preencha o .env.");
   }
-  if (!cfg.calibrated) {
+  if (cfg.filas.has("melhorenvio")) {
+    if (!cfg.melhorEnvioAdspowerUserId) {
+      log.error("MELHORENVIO_ADSPOWER_USER_ID vazio — as suspensões vão voltar como falhou.");
+    }
+    log.info(
+      cfg.melhorEnvioCalibrated
+        ? "Melhor Envio: MELHORENVIO_CALIBRATED=true — o robô clica de verdade."
+        : "Melhor Envio: MODO SECO — acha o envio e para antes de clicar em Suspender entrega."
+    );
+  }
+  if (cfg.filas.has("shopee") && !cfg.calibrated) {
     log.warn(
       "SELECTORS_CALIBRATED != true — TRAVA ativa: os comandos vão FALHAR de " +
         "propósito (nada é alterado na Shopee). Vire para true quando quiser agir."
     );
   }
 
-  // Heartbeat imediato + periódico (o dashboard mostra ONLINE em < 120s).
-  await sendHeartbeat();
-  setInterval(() => {
-    void sendHeartbeat();
-  }, cfg.heartbeatIntervalMs);
+  // Heartbeat imediato + periódico (o dashboard mostra ONLINE em < 120s). É o
+  // badge do executor da SHOPEE: máquina sem `shopee` (o Mac Santiago, só
+  // Melhor Envio) não manda, senão o badge mentiria com a Shopee parada.
+  if (cfg.filas.has("shopee")) {
+    await sendHeartbeat();
+    setInterval(() => {
+      void sendHeartbeat();
+    }, cfg.heartbeatIntervalMs);
+  }
 
   // Primeiro ciclo já, depois no ritmo do poll.
   await tick();

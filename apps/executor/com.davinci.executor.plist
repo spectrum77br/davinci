@@ -17,8 +17,13 @@
     <key>Label</key>
     <string>com.davinci.executor</string>
 
+    <!-- caffeinate -i: o Mac não entra em repouso por inatividade enquanto o
+         executor roda (um Mac dormindo não puxa a fila). Com a tampa fechada
+         ele dorme mesmo assim. -->
     <key>ProgramArguments</key>
     <array>
+        <string>/usr/bin/caffeinate</string>
+        <string>-i</string>
         <string>__DIR__/node_modules/.bin/tsx</string>
         <string>__DIR__/src/index.ts</string>
     </array>

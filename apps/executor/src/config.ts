@@ -14,7 +14,14 @@ function int(name: string, def: number): number {
   return Number.isFinite(n) ? n : def;
 }
 
+/** Trabalhos que um executor pode fazer. Cada máquina liga só os seus
+ *  (EXECUTOR_FILAS): desde 24/09/2026 o Melhor Envio roda no Mac Santiago e a
+ *  Shopee/Tuta continuam no executor do Eduardo. */
+export type Fila = "shopee" | "melhorenvio" | "tuta";
+const FILAS: readonly Fila[] = ["shopee", "melhorenvio", "tuta"];
+
 export interface Config {
+  filas: Set<Fila>;
   davinciApiUrl: string;
   agentToken: string;
   agentName: string;
@@ -42,7 +49,17 @@ const scopeRaw = str("EXECUTOR_DEFAULT_SCOPE", "all");
 const defaultScope: "all" | "ids" | "names" =
   scopeRaw === "ids" || scopeRaw === "names" ? scopeRaw : "all";
 
+// Default = o que o executor antigo fazia, MENOS o Melhor Envio: quem só dá
+// `git pull` não volta a disputar a suspensão com o Mac Santiago.
+const filas = new Set<Fila>(
+  str("EXECUTOR_FILAS", "shopee,tuta")
+    .split(",")
+    .map((f) => f.trim().toLowerCase())
+    .filter((f): f is Fila => (FILAS as readonly string[]).includes(f))
+);
+
 export const cfg: Config = {
+  filas,
   // Barra final removida para montar as rotas com segurança.
   davinciApiUrl: str("DAVINCI_API_URL", "http://localhost:8000").replace(/\/$/, ""),
   agentToken: str("MARKETING_AGENT_TOKEN"),
@@ -55,7 +72,10 @@ export const cfg: Config = {
   defaultScope,
   calibrated: str("SELECTORS_CALIBRATED") === "true",
   melhorEnvioAdspowerUserId: str("MELHORENVIO_ADSPOWER_USER_ID"),
-  melhorEnvioUrl: str("MELHORENVIO_ENVIOS_URL", "https://app.melhorenvio.com.br/envios/postados"),
+  // "Envios › Liberados e postados". Em 24/09/2026 o painel já morava em
+  // melhorenvio.com.br/painel; o antigo app.melhorenvio.com.br/envios/postados
+  // dá 404. Sem "#…" aqui: o robô abre a sub-aba Postados clicando.
+  melhorEnvioUrl: str("MELHORENVIO_ENVIOS_URL", "https://melhorenvio.com.br/painel/meus-envios"),
   melhorEnvioCalibrated: str("MELHORENVIO_CALIBRATED") === "true",
   logisticaLeaseLimit: int("LOGISTICA_LEASE_LIMIT", 5),
   tutaAdspowerUserId: str("TUTA_ADSPOWER_USER_ID"),

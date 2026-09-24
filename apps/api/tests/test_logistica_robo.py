@@ -15,8 +15,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.models import Logistica, LogisticaRoboComando, User, UserRole, UserStatus
 from app.services import logistica_robo as robo
+from app.services import tuta_devolucoes
 
 TOKEN = "tok-teste-executor"  # noqa: S105 — token de teste, não é segredo
+ME = [robo.ACAO_SUSPENDER]  # o que o executor do Mac Santiago declara no lease
 
 
 @pytest_asyncio.fixture
@@ -75,11 +77,11 @@ async def test_fluxo_solicitar_lease_resultado(db: AsyncSession, admin: User):
         await robo.solicitar_suspensao(db, row, user_id=admin.id)
     assert e.value.code == "logistica_suspensao_ja_pedida"
 
-    leased = await robo.lease(db, limit=5)
+    leased = await robo.lease(db, limit=5, acoes=ME)
     assert [c["id"] for c in leased] == [str(cmd.id)]
     assert leased[0]["acao"] == "melhorenvio_suspender" and leased[0]["attempts"] == 1
     # Já reivindicado: não volta.
-    assert await robo.lease(db, limit=5) == []
+    assert await robo.lease(db, limit=5, acoes=ME) == []
 
     await robo.registrar_resultado(db, cmd.id, status="failed", result="modo seco")
     await db.refresh(row)
@@ -87,7 +89,7 @@ async def test_fluxo_solicitar_lease_resultado(db: AsyncSession, admin: User):
 
     # Falhou → pode pedir de novo; done → solicitada.
     cmd2 = await robo.solicitar_suspensao(db, row, user_id=admin.id)
-    await robo.lease(db, limit=5)
+    await robo.lease(db, limit=5, acoes=ME)
     await robo.registrar_resultado(db, cmd2.id, status="done", result='{"requested":true}')
     await db.refresh(row)
     assert row.suspensao_status == "solicitada"
@@ -104,7 +106,7 @@ async def test_lease_recupera_comando_preso(db: AsyncSession, admin: User):
     cmd.attempts = 1
     cmd.claimed_at = datetime.now(UTC) - timedelta(hours=1)
     await db.commit()
-    leased = await robo.lease(db, limit=5)
+    leased = await robo.lease(db, limit=5, acoes=ME)
     assert [c["id"] for c in leased] == [str(cmd.id)] and leased[0]["attempts"] == 2
 
 
@@ -129,7 +131,11 @@ async def test_endpoint_suspender_e_resultado(
     assert r.status_code == 200, r.text
     assert r.json()["suspensao_status"] == "pendente"
 
-    r = await client.post("/api/logistica/agent/lease", json={"limit": 5}, headers=agent_token)
+    r = await client.post(
+        "/api/logistica/agent/lease",
+        json={"limit": 5, "acoes": ["melhorenvio_suspender"]},
+        headers=agent_token,
+    )
     comandos = r.json()["comandos"]
     assert len(comandos) == 1 and comandos[0]["payload"]["rastreio"] == "AD912266053BR"
 
@@ -147,3 +153,27 @@ async def test_endpoint_suspender_e_resultado(
     # Segundo pedido enquanto já solicitada: 422.
     r = await client.post(f"/api/logistica/{row.id}/suspender-entrega")
     assert r.status_code == 422 and r.json()["detail"]["code"] == "logistica_suspensao_ja_pedida"
+
+
+@pytest.mark.asyncio
+async def test_lease_divide_por_maquina(db: AsyncSession, admin: User):
+    """24/09/2026: a suspensão foi pro executor do Mac Santiago. O executor
+    antigo (sem `acoes`) não pega mais a suspensão, mas continua com o resto
+    da fila (Tuta); o novo pega só o que declarou."""
+    row = _linha()
+    db.add(row)
+    await db.commit()
+    suspensao = await robo.solicitar_suspensao(db, row, user_id=admin.id)
+    tuta = LogisticaRoboComando(logistica_id=None, acao=tuta_devolucoes.ACAO, payload={})
+    db.add(tuta)
+    await db.commit()
+
+    antigo = await robo.lease(db, limit=5)
+    assert [c["id"] for c in antigo] == [str(tuta.id)]
+
+    santiago = await robo.lease(db, limit=5, acoes=ME)
+    assert [c["id"] for c in santiago] == [str(suspensao.id)]
+    assert await robo.lease(db, limit=5, acoes=ME) == []
+    # Declarar lista vazia = não quero nada.
+    assert await robo.lease(db, limit=5, acoes=[]) == []
+

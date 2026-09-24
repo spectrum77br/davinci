@@ -18,6 +18,12 @@ com um perfil logado no Melhor Envio). Aqui só a FILA:
 O comando leva `commit=True` (o clique do operador É a decisão); a trava
 final é do executor (`MELHORENVIO_CALIBRATED`), que sem ela roda em modo
 seco e devolve o que encontrou na tela, pra calibrar os seletores.
+
+Vinicius, 24/09/2026: o Melhor Envio sai do executor do Eduardo (quase sempre
+dormindo) e vai pra um executor só dele no Mac Santiago. Cada executor diz no
+lease o que faz (`acoes`); a suspensão é EXCLUSIVA — só vai pra quem pediu por
+ela, então o executor antigo (que não manda `acoes`) para de pegá-la sem
+ninguém mexer nele. O resto da fila (a leitura do Tuta) segue como estava.
 """
 
 from __future__ import annotations
@@ -43,6 +49,9 @@ STATUS_FALHOU = "falhou"
 
 # Comando preso em `claimed` (executor caiu no meio) volta pra fila depois disto.
 LEASE_STALE = timedelta(minutes=30)
+
+# Só vão pra executor que as pediu pelo nome no lease (ver docstring).
+ACOES_EXCLUSIVAS = frozenset({ACAO_SUSPENDER})
 
 
 class RoboError(Exception):
@@ -96,20 +105,29 @@ async def solicitar_suspensao(
     return cmd
 
 
-async def lease(session: AsyncSession, *, limit: int = 5) -> list[dict[str, Any]]:
+async def lease(
+    session: AsyncSession, *, limit: int = 5, acoes: list[str] | None = None
+) -> list[dict[str, Any]]:
     """Entrega ao executor os comandos pendentes (e os presos em `claimed` há
     mais de LEASE_STALE), marcando-os `claimed`. FOR UPDATE SKIP LOCKED: dois
-    executores nunca pegam o mesmo."""
+    executores nunca pegam o mesmo. `acoes` = só essas; None (executor antigo)
+    = tudo menos ACOES_EXCLUSIVAS."""
     limite_stale = datetime.now(UTC) - LEASE_STALE
+    da_maquina = (
+        LogisticaRoboComando.acao.in_(acoes)
+        if acoes is not None
+        else LogisticaRoboComando.acao.not_in(ACOES_EXCLUSIVAS)
+    )
     rows = (
         await session.execute(
             select(LogisticaRoboComando)
             .where(
+                da_maquina,
                 or_(
                     LogisticaRoboComando.status == "pending",
                     (LogisticaRoboComando.status == "claimed")
                     & (LogisticaRoboComando.claimed_at < limite_stale),
-                )
+                ),
             )
             .order_by(LogisticaRoboComando.created_at.asc())
             .limit(limit)
@@ -133,7 +151,7 @@ async def lease(session: AsyncSession, *, limit: int = 5) -> list[dict[str, Any]
         )
     if rows:
         await session.commit()
-    logger.info("logistica_robo_lease", leased=len(out))
+    logger.info("logistica_robo_lease", leased=len(out), acoes=acoes)
     return out
 
 

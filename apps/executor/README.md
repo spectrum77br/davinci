@@ -17,6 +17,20 @@ DaVinci (nuvem)                          Este app (seu Mac)
   badge ONLINE  ◄──/agent/heartbeat────   sinal de vida a cada 60s
 ```
 
+## Uma máquina, uma fila (`EXECUTOR_FILAS`)
+
+O mesmo código roda em mais de um Mac; cada um liga só o que faz:
+
+| Máquina | `EXECUTOR_FILAS` | O que faz |
+|---|---|---|
+| executor do Eduardo | `shopee,tuta` (default) | anúncios/Oferta Relâmpago da Shopee + caixa do Tuta |
+| Mac Santiago (desde 24/09/2026) | `melhorenvio` | "Suspender entrega" da Logística |
+
+O servidor só entrega a suspensão (`melhorenvio_suspender`) pra quem a declara
+no lease — executor sem `acoes` (versão antiga) não pega mais. Ligue
+`melhorenvio` em **uma** máquina só. Só quem faz `shopee` manda sinal de vida
+(o badge "Executor local" do Marketing); o Mac Santiago não acende esse badge.
+
 ## Por que roda no Mac (e não na nuvem)
 
 A API oficial de Ads da Shopee está bloqueada pela cota de partner → só dá para
@@ -62,7 +76,9 @@ antes de você decidir. Vire para `true` quando estiver pronto.
 
 ## Rodar como serviço (liga no login, reinicia em crash)
 
-Tem que ser **LaunchAgent** (sessão gráfica) para enxergar o AdsPower.
+Tem que ser **LaunchAgent** (sessão gráfica) para enxergar o AdsPower. O plist
+roda o executor dentro do `caffeinate -i`, que impede o repouso por
+inatividade enquanto ele estiver de pé (tampa fechada dorme mesmo assim).
 
 ```bash
 # 1) edite com.davinci.executor.plist: troque __DIR__ e __USER__
@@ -97,6 +113,7 @@ O diretório `~/marionete` pode ficar como backup; ele não é mais usado.
 
 | Variável | Default | Papel |
 |---|---|---|
+| `EXECUTOR_FILAS` | `shopee,tuta` | o que esta máquina faz: `shopee`, `melhorenvio`, `tuta` |
 | `DAVINCI_API_URL` | `http://localhost:8000` | base da API do DaVinci (sem barra no fim) |
 | `MARKETING_AGENT_TOKEN` | — | token M2M; **igual** ao do DaVinci (vazio → 401) |
 | `AGENT_NAME` | `marionete` | nome no badge do dashboard |

@@ -82,11 +82,15 @@ export async function reportResult(
   });
 }
 
-/** Comandos pendentes do robô da Logística (mesmo token M2M). */
-export async function leaseLogistica(limit: number): Promise<LeasedLogisticaCommand[]> {
+/** Comandos pendentes do robô da Logística (mesmo token M2M). `acoes` = só
+ *  as que esta máquina faz — o servidor não entrega as outras. */
+export async function leaseLogistica(
+  limit: number,
+  acoes: string[]
+): Promise<LeasedLogisticaCommand[]> {
   const data = await post<{ comandos: LeasedLogisticaCommand[] }>(
     "/api/logistica/agent/lease",
-    { limit }
+    { limit, acoes }
   );
   return data.comandos ?? [];
 }
