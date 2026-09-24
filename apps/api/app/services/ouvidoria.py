@@ -336,6 +336,28 @@ ROBOS: dict[str, RoboDef] = {
         },
         modo_padrao="silencioso",
     ),
+    "vigia_robo_leitura": RoboDef(
+        chave="vigia_robo_leitura",
+        nome="Vigia Robô Leitura de Chamados",
+        descricao=(
+            "O robô do Mac Santiago que lê no Seller Center o que a Shopee "
+            "escreveu nas devoluções (\"Histórico da Solicitação\") e traz pro "
+            "chamado: robô sem sinal (Mac desligado ou dormindo) e devolução que "
+            "ficou sem leitura (login caído, perfil em uso, loja sem perfil no "
+            "AdsPower, página mudada)."
+        ),
+        area="chamados",
+        cadencia_texto="a cada 10 min (:03/:13/:23/:33/:43/:53)",
+        plataformas=("shopee",),
+        config_padrao={"cadencia_min": 10, "sem_sinal_min": 30, "atraso_horas": 3},
+        env_threema_recipients=None,
+        parametros={
+            "cadencia_min": Parametro("Cadência esperada", 1, 24 * 60, "min"),
+            "sem_sinal_min": Parametro("Robô sem sinal há", 15, 24 * 60, "min"),
+            "atraso_horas": Parametro("Leitura atrasada além da cadência", 1, 72, "h"),
+        },
+        modo_padrao="silencioso",
+    ),
 }
 
 # Threema ID: 8 caracteres (A-Z, 0-9); ID de gateway começa com "*".

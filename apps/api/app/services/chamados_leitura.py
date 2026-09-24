@@ -185,6 +185,45 @@ async def fila(
     return list(rows)
 
 
+def condicoes_devolucao_shopee() -> list:
+    """Quem É da fila do executor de leitura, sem cadência nem claim: devolução
+    da Shopee contestada pela API (o mesmo conjunto que o
+    `chamados_devolucao_sync` acompanha), viva e sem decisão final. O Vigia
+    Robô Leitura de Chamados (Ouvidoria) usa a mesma régua pra cobrar caso
+    que ficou sem leitura."""
+    from app.services import chamados_devolucao_sync as acompanhamento
+
+    abertura_acompanhada = (
+        select(ChamadoMensagem.id)
+        .where(
+            ChamadoMensagem.chamado_id == Chamado.id,
+            ChamadoMensagem.tipo == "abertura",
+            or_(
+                ChamadoMensagem.status == "enviada",
+                and_(
+                    ChamadoMensagem.status == "falhou",
+                    ChamadoMensagem.erro.in_(acompanhamento.ABERTURA_FALHOU_ACOMPANHA),
+                ),
+            ),
+        )
+        .correlate(Chamado)
+        .exists()
+    )
+    return [
+        Chamado.origem == "devolucao",
+        Chamado.canal == "api",
+        Chamado.resolvido.is_(False),
+        chamados_svc.NAO_ENCERRADO_SQL,
+        ~chamados_svc.CASO_DE_TELA_SQL,
+        func.coalesce(func.trim(Chamado.chamado), "") != "",
+        func.coalesce(func.trim(Chamado.pedido_marketplace), "") != "",
+        func.lower(func.trim(func.coalesce(Chamado.plataforma, ""))).in_(
+            sorted(chamados_svc.apelidos_da_plataforma("shopee"))
+        ),
+        abertura_acompanhada,
+    ]
+
+
 async def fila_devolucao_shopee(
     session: AsyncSession,
     *,
@@ -211,38 +250,10 @@ async def fila_devolucao_shopee(
     loja sem perfil voltaria sempre primeiro (NULLS FIRST) e tomaria o lugar
     dos outros. `espiar`: devolve sem marcar a entrega (modo seco do robô, e a
     conferência de quais casos entrariam)."""
-    from app.services import chamados_devolucao_sync as acompanhamento
-
     agora = agora or datetime.now(UTC)
     ultima_fala = _ultima_fala_at()
-    abertura_acompanhada = (
-        select(ChamadoMensagem.id)
-        .where(
-            ChamadoMensagem.chamado_id == Chamado.id,
-            ChamadoMensagem.tipo == "abertura",
-            or_(
-                ChamadoMensagem.status == "enviada",
-                and_(
-                    ChamadoMensagem.status == "falhou",
-                    ChamadoMensagem.erro.in_(acompanhamento.ABERTURA_FALHOU_ACOMPANHA),
-                ),
-            ),
-        )
-        .correlate(Chamado)
-        .exists()
-    )
     conds = [
-        Chamado.origem == "devolucao",
-        Chamado.canal == "api",
-        Chamado.resolvido.is_(False),
-        chamados_svc.NAO_ENCERRADO_SQL,
-        ~chamados_svc.CASO_DE_TELA_SQL,
-        func.coalesce(func.trim(Chamado.chamado), "") != "",
-        func.coalesce(func.trim(Chamado.pedido_marketplace), "") != "",
-        func.lower(func.trim(func.coalesce(Chamado.plataforma, ""))).in_(
-            sorted(chamados_svc.apelidos_da_plataforma("shopee"))
-        ),
-        abertura_acompanhada,
+        *condicoes_devolucao_shopee(),
         or_(
             Chamado.leitura_robo_claim_at.is_(None),
             Chamado.leitura_robo_claim_at < agora - CLAIM_STALE,

@@ -2764,6 +2764,27 @@ async def vigia_robo_melhorenvio_tick(ctx: dict) -> None:
         logger.exception("vigia_robo_melhorenvio_unhandled")
 
 
+async def vigia_robo_leitura_tick(ctx: dict) -> None:
+    """Vigia Robô Leitura de Chamados (robô da Ouvidoria): o executor do Mac
+    Santiago que lê o "Histórico da Solicitação" da Shopee sem sinal, ou
+    devolução da fila dele que ficou sem leitura."""
+    try:
+        async with session_scope() as s:
+            modo = await ouvidoria_modo(s, "vigia_robo_leitura")
+        if modo == "desligado":
+            logger.debug("vigia_robo_leitura_desligado")
+            return
+        from app.services.vigia_robo_leitura import vigia_robo_leitura_sweep
+
+        summary = await vigia_robo_leitura_sweep() or {}
+        if any(summary.get(k) for k in ("novas", "sumiram", "casos_sem_leitura", "avisadas")):
+            logger.info("vigia_robo_leitura_done", **summary)
+        else:
+            logger.debug("vigia_robo_leitura_noop", **summary)
+    except Exception:  # noqa: BLE001
+        logger.exception("vigia_robo_leitura_unhandled")
+
+
 async def vigia_margem_tick(ctx: dict) -> None:
     """Robô da Margem (robô da Ouvidoria): pedido que o robô segurou no Bling
     e ninguém decidiu, falha do robô ao segurar/liberar (aberta por hook no
@@ -3548,6 +3569,7 @@ class WorkerSettings:
         vigia_margem_tick,
         vigia_chamados_tick,
         vigia_robo_melhorenvio_tick,
+        vigia_robo_leitura_tick,
     ]
     cron_jobs = [
         # A consulta bem-sucedida agenda a próxima em 24h; falhas tentam de novo em 1h.
@@ -3903,6 +3925,12 @@ class WorkerSettings:
         cron(
             vigia_robo_melhorenvio_tick,
             minute={9, 19, 29, 39, 49, 59},
+            run_at_startup=False,
+        ),
+        # Robô de leitura de chamados: a cada 10 min em :03… (só banco).
+        cron(
+            vigia_robo_leitura_tick,
+            minute={3, 13, 23, 33, 43, 53},
             run_at_startup=False,
         ),
         # Espelho das NF-e das contas de emissão (página Pós Vendas). As

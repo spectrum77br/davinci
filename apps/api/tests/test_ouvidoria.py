@@ -208,6 +208,9 @@ SEIS_ROBOS = {
     "vigia_robo_melhorenvio": ("logistica", ["amazon"],
                                {"cadencia_min": 10, "pendente_min": 30,
                                 "executor_offline_min": 10}),
+    # 24/09/2026: o executor de leitura de chamados (Mac Santiago).
+    "vigia_robo_leitura": ("chamados", ["shopee"],
+                           {"cadencia_min": 10, "sem_sinal_min": 30, "atraso_horas": 3}),
 }
 
 
