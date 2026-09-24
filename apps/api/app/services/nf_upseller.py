@@ -78,6 +78,12 @@ _CONTAS_CATALOGO_MALA = {("poofy", "shopee")}
 _LOJA_UPSELLER = {
     "victor mei": "rodrigues (victor mei)",
     "kia": "kia/fiore",
+    # 23/09 12:51 as contas Shopee foram renomeadas no DaVinci (jlas → atlas,
+    # kia → fiore) e o import passou a ser recusado. Eduardo 24/09: "arrume o
+    # nome na hora de importar, não é atlas, é jlas" — no Upseller elas seguem
+    # "jlas" e "kia/fiore".
+    "atlas": "jlas",
+    "fiore": "kia/fiore",
 }
 
 # Texto de observação da linha 1 do modelo (verbatim do "Baixar o Modelo").

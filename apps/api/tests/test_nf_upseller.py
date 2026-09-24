@@ -230,3 +230,14 @@ def test_estado_por_extenso():
     assert nf_upseller.estado_por_extenso("MG") == "Minas Gerais"
     # UF desconhecida devolve o valor cru
     assert nf_upseller.estado_por_extenso("ZZ") == "ZZ"
+
+
+def test_loja_upseller_contas_shopee_renomeadas_23_09():
+    """23/09: as contas Shopee viraram 'atlas'/'fiore' no DaVinci, mas no Upseller
+    as lojas continuam 'jlas' e 'kia/fiore' — o import recusava todo pedido."""
+    from app.services import nf_upseller
+    assert nf_upseller.loja_upseller("atlas") == "jlas"
+    assert nf_upseller.loja_upseller("Atlas") == "jlas"
+    assert nf_upseller.loja_upseller("fiore") == "kia/fiore"
+    assert nf_upseller.loja_upseller("kia") == "kia/fiore"
+    assert nf_upseller.loja_upseller("mega") == "mega"
