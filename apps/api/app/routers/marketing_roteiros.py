@@ -684,7 +684,14 @@ def _req_ideia_out(
         "creative_id": str(r.creative_id) if r.creative_id else None,
         "personagem_id": str(r.personagem_id) if r.personagem_id else None,
         "arquivos": [
-            {"id": str(f.id), "nome": f.file_name, "mime": f.file_mime}
+            {
+                "id": str(f.id),
+                "nome": f.file_name,
+                "mime": f.file_mime,
+                # QUANDO o vídeo chegou — a data da linha não serve, porque ela
+                # nasce na abertura da entrega e o vídeo pode chegar depois.
+                "enviado_em": f.created_at.isoformat() if f.created_at else None,
+            }
             for f in do_criativo
         ],
         "roteiro_id": str(r.roteiro_id) if r.roteiro_id else None,

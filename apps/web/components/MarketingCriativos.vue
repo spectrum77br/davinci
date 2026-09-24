@@ -15,6 +15,10 @@ type CreativeFile = {
   file_name: string
   file_mime: string | null
   file_size: number | null
+  // QUANDO o vídeo chegou. A data da LINHA não serve: ela nasce na abertura da
+  // entrega, e o vídeo pode chegar dias depois — ou de novo, depois de uma
+  // recusa, e aí é esta data que diz qual arquivo é o novo.
+  enviado_em?: string | null
 }
 
 type Creative = {
@@ -319,6 +323,18 @@ async function removeFile(r: Creative, f: CreativeFile) {
   } catch (e: any) {
     toasts.error('Erro ao apagar arquivo', errMsg(e))
   }
+}
+
+function fmtDataCurta(iso: string | null | undefined): string {
+  if (!iso) return ''
+  const d = new Date(iso)
+  const hoje = new Date()
+  const mesmoDia = d.toDateString() === hoje.toDateString()
+  // Hoje vira hora: numa fila que se olha várias vezes ao dia, "14:32" diz
+  // mais que a data de hoje repetida em toda linha.
+  return mesmoDia
+    ? d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
+    : d.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' })
 }
 
 function fmtSize(n: number | null): string {
@@ -1413,6 +1429,11 @@ async function cancelarPostagem(p: Postagem) {
                     <span class="truncate max-w-[140px]">{{ f.file_name }}</span>
                   </button>
                   <span class="text-muted-foreground shrink-0 text-[10px]">{{ fmtSize(f.file_size) }}</span>
+                  <span
+                    v-if="f.enviado_em"
+                    class="text-muted-foreground shrink-0 text-[10px]"
+                    :title="`Enviado em ${new Date(f.enviado_em).toLocaleString('pt-BR')}`"
+                  >{{ fmtDataCurta(f.enviado_em) }}</span>
                   <button
                     v-if="canEdit && !r.pushed_at"
                     class="shrink-0 rounded p-0.5 text-muted-foreground hover:text-destructive hover:bg-destructive/10"

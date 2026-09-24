@@ -91,7 +91,7 @@ type Conceito = {
   status: string
   motivo: string | null
   creative_id: string | null
-  arquivos: { id: string; nome: string | null; mime: string | null }[]
+  arquivos: { id: string; nome: string | null; mime: string | null; enviado_em?: string | null }[]
   roteiro_id: string | null
   criado_em: string | null
 }
@@ -574,6 +574,13 @@ function aoTeclar(e: KeyboardEvent) {
 
 onMounted(() => window.addEventListener('keydown', aoTeclar))
 onBeforeUnmount(() => window.removeEventListener('keydown', aoTeclar))
+
+function envioDoConceito(c: Conceito): string | null {
+  // O ÚLTIMO arquivo, pela mesma razão do player: reenvio depois de recusa
+  // acrescenta, e é a data do novo que interessa.
+  const v = c.arquivos[c.arquivos.length - 1]
+  return v?.enviado_em ?? null
+}
 
 function videoDoConceito(c: Conceito): string | null {
   // Precisa do id do ARQUIVO: `/arquivo` sem ele é a rota de UPLOAD, e o
@@ -1213,6 +1220,13 @@ async function recusarPedido(r: Requisicao) {
             <span v-if="c.criado_em" class="text-[10px] text-muted-foreground">
               {{ new Date(c.criado_em).toLocaleDateString('pt-BR') }}
             </span>
+            <!-- Quando o VÍDEO chegou. Separado da data do pedido de propósito:
+                 depois de uma recusa a agência reenvia, e é esta que muda. -->
+            <span
+              v-if="envioDoConceito(c)"
+              class="rounded bg-muted px-1.5 py-px text-[10px] text-muted-foreground"
+              :title="`Vídeo enviado em ${new Date(envioDoConceito(c)!).toLocaleString('pt-BR')}`"
+            >vídeo {{ new Date(envioDoConceito(c)!).toLocaleDateString('pt-BR') }}</span>
             <div v-if="canEdit" class="ml-auto flex gap-1.5">
               <button class="btn btn-xs gap-1" :disabled="conceitoOcupado === c.id" @click="aprovarConceito(c)">
                 <Loader2 v-if="conceitoOcupado === c.id" class="size-3 animate-spin" />
@@ -1240,7 +1254,7 @@ async function recusarPedido(r: Requisicao) {
                 <Play class="size-8" />
               </span>
               <span class="absolute inset-x-0 bottom-0 truncate bg-black/55 px-1.5 py-1 text-[10px] text-white/90">
-                {{ c.arquivos[0]?.nome }}
+                {{ c.arquivos[c.arquivos.length - 1]?.nome }}
               </span>
             </button>
             <p v-else-if="c.creative_id" class="text-[11px] text-muted-foreground">

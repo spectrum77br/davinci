@@ -62,6 +62,10 @@ def _file_out(f: MarketingCreativeFile) -> dict[str, Any]:
         "file_name": f.file_name,
         "file_mime": f.file_mime,
         "file_size": f.file_size,
+        # QUANDO o vídeo chegou. A data da LINHA não serve: ela nasce quando a
+        # entrega é aberta, e o vídeo pode chegar dias depois — ou de novo,
+        # depois de uma recusa, e aí é esta data que diz qual arquivo é o novo.
+        "enviado_em": f.created_at.isoformat() if f.created_at else None,
     }
 
 
