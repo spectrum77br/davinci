@@ -1285,6 +1285,11 @@ async def listar_fotos_do_produto(
         "produto": row.name,
         "pasta": row.fotos_path,
         "marca": _marca_da_pasta(row.fotos_path or ""),
+        # Os códigos, na ficha e não só na grade. É por ELE que a agência acha
+        # o produto: a ideia diz "usa o b039", não "usa a ABS 12". Sai aqui a
+        # lista INTEIRA — o card da grade mostra cinco e esconde o resto, e até
+        # hoje clicar no card perdia o código de vista.
+        "skus": [s.strip() for s in (row.sku or "").split(",") if s.strip()],
         "fotos": fotos,
     }
 
