@@ -30,7 +30,7 @@ from uuid import UUID
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
@@ -44,7 +44,11 @@ from app.models import (
     RedeSocialToken,
     User,
 )
-from app.models.marketing_postagem import STATUS_AGENDADO, STATUS_PENDENTE
+from app.models.marketing_postagem import (
+    STATUS_AGENDADO,
+    STATUS_CONTAINERING,
+    STATUS_PENDENTE,
+)
 from app.routers.marketing import _require_agent_token
 from app.routers.marketing_creatives import _ensure_equipe, _user_equipes
 from app.schemas.marketing_postagens import (
@@ -497,10 +501,13 @@ async def executor_lease(
     recebe token de conta nenhum, porque não existe — quem autentica lá é a
     sessão do navegador.
     """
-    linhas = (
+    # Só os IDs. `adiar` e `registrar_resultado` fazem commit por dentro, e
+    # depois de um commit os objetos da consulta original expiram — reler
+    # cada linha pelo id é o mesmo padrão do publicador do servidor.
+    ids = (
         (
             await session.execute(
-                select(MarketingPostagem)
+                select(MarketingPostagem.id)
                 .where(
                     MarketingPostagem.status == svc.STATUS_PENDENTE,
                     MarketingPostagem.plataforma.in_(svc.PLATAFORMAS_EXECUTOR_LOCAL),
@@ -515,7 +522,41 @@ async def executor_lease(
     )
 
     saida: list[dict[str, Any]] = []
-    for p in linhas:
+    # UMA por conta por rodada. Sem isto, o Mac que acorda depois de uma noite
+    # em repouso levava as duas postagens da noite de uma vez e publicava uma
+    # atrás da outra, colando dois vídeos na mesma conta.
+    contas_nesta_rodada: set[UUID] = set()
+    for pid in ids:
+        p = await session.get(MarketingPostagem, pid)
+        if p is None or p.status != svc.STATUS_PENDENTE:
+            continue
+        if p.rede_social_id in contas_nesta_rodada:
+            continue  # fica pendente; a próxima rodada reavalia
+
+        # Conta com vídeo EM VOO não recebe outro. O executor é assíncrono —
+        # pega agora e publica um ou dois minutos depois, no navegador —, e
+        # nesse intervalo a postagem em voo ainda não tem `publicado_em`. A
+        # checagem de espaçamento então usa a hora de CRIAÇÃO dela, que no
+        # caso do Mac acordando é de 15 horas atrás, e conclui que a conta está
+        # livre. Foi o teste do Mac-que-dormiu que pegou: a segunda rodada, 30
+        # segundos depois, entregava o segundo vídeo colado no primeiro.
+        #
+        # O publicador do servidor não sofre disso porque publica dentro da
+        # mesma rodada e grava `publicado_em` antes da próxima.
+        em_voo = (
+            await session.execute(
+                select(func.count())
+                .select_from(MarketingPostagem)
+                .where(
+                    MarketingPostagem.rede_social_id == p.rede_social_id,
+                    MarketingPostagem.status.in_(
+                        (svc.STATUS_PUBLICANDO, STATUS_CONTAINERING)
+                    ),
+                )
+            )
+        ).scalar_one()
+        if em_voo:
+            continue  # fica pendente; sai depois que a outra terminar
         rede = await session.get(RedeSocial, p.rede_social_id) if p.rede_social_id else None
         perfil = (rede.adspower_user_id or "").strip() if rede else ""
         if not perfil:
@@ -526,21 +567,44 @@ async def executor_lease(
                 "a conta não tem perfil do AdsPower preenchido em Cadastros › "
                 "Redes Sociais — sem ele o executor não sabe qual navegador abrir"
             )
+            await session.commit()
             continue
+
+        # AGENDAR NÃO É AUTORIZAR PRA SEMPRE — o mesmo crivo do publicador do
+        # servidor, que este lease não passava. Entre o agendamento e agora o
+        # criativo pode ter sido reprovado, o robô desligado, ou a conta pode
+        # ter recebido outro post. Sem isto, o Mac que dormiu das 17h às 9h
+        # publicaria os posts das 18h e das 19h30 colados, às 9h da manhã,
+        # ignorando o intervalo e sem reconferir nada.
+        motivo = await svc.revalidar(session, p)
+        if motivo in svc.MOTIVOS_ADIAVEIS:
+            # Só ainda não é hora: volta pra fila sem gastar tentativa.
+            await svc.adiar(session, p, motivo=motivo)
+            continue
+        if motivo:
+            await svc.registrar_resultado(
+                session, p.id, status=svc.STATUS_FALHOU,
+                result=f"não pôde publicar em {p.conta}: {motivo}",
+            )
+            continue
+
         p.status = svc.STATUS_PUBLICANDO
         p.attempts = (p.attempts or 0) + 1
-        saida.append(
-            {
-                "id": str(p.id),
-                "conta": p.conta,
-                "plataforma": p.plataforma,
-                "adspower_user_id": perfil,
-                "legenda": p.legenda or "",
-                # 15 minutos, gerado agora. O executor baixa e publica.
-                "video_url": link_criativo.url_video(p.file_id) if p.file_id else None,
-            }
-        )
-    await session.commit()
+        item = {
+            "id": str(p.id),
+            "conta": p.conta,
+            "plataforma": p.plataforma,
+            "adspower_user_id": perfil,
+            "legenda": p.legenda or "",
+            # 15 minutos, gerado agora. O executor baixa e publica.
+            "video_url": link_criativo.url_video(p.file_id) if p.file_id else None,
+        }
+        # Commit JÁ: é o que faz a próxima postagem desta conta, se houver,
+        # enxergar esta como ocupando a vaga na revalidação dela.
+        await session.commit()
+        contas_nesta_rodada.add(p.rede_social_id)
+        saida.append(item)
+
     if saida:
         logger.info("executor_lease", quantidade=len(saida))
     return saida

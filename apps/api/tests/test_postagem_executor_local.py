@@ -11,6 +11,9 @@ porta, e principalmente as três coisas que, se quebrarem, quebram calado:
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+
 import pytest
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -28,16 +31,27 @@ def _token(monkeypatch):
     monkeypatch.setattr(get_settings(), "marketing_agent_token", TOKEN)
 
 
+@pytest.fixture(autouse=True)
+def _uploads(tmp_path, monkeypatch):
+    """O lease agora REVALIDA cada postagem antes de entregar (24/09/2026), e
+    a revalidação confere o vídeo no disco. Sem apontar o diretório pra cá,
+    toda postagem seria recusada por `arquivo_sumiu`."""
+    monkeypatch.setattr(get_settings(), "uploads_dir", str(tmp_path))
+
+
 async def _cenario(db: AsyncSession, *, perfil: str | None = "k1dohvrh", plataforma="tiktok"):
     marca = Marca(nome="Poofy", slug="poofy")
     db.add(marca)
     await db.flush()
-    c = MarketingCreative(modelo="video 30s", marca="poofy", aprovado=True)
+    c = MarketingCreative(modelo="video 30s", marca="poofy", marca_id=marca.id, aprovado=True)
     db.add(c)
     await db.flush()
+    rel = f"creatives/{c.id}/v.mp4"
+    caminho = Path(get_settings().uploads_dir) / rel
+    caminho.parent.mkdir(parents=True, exist_ok=True)
+    caminho.write_bytes(b"\x00\x00\x00\x18ftypmp42-fake")
     f = MarketingCreativeFile(
-        creative_id=c.id, file_name="v.mp4", file_mime="video/mp4",
-        file_rel=f"creatives/{c.id}/v.mp4",
+        creative_id=c.id, file_name="v.mp4", file_mime="video/mp4", file_rel=rel,
     )
     rede = RedeSocial(
         marca_id=marca.id, plataforma=plataforma, conta="poofy_brasil",
@@ -134,3 +148,78 @@ async def test_resultado_repetido_da_409(client: AsyncClient, db: AsyncSession):
     url = f"/api/marketing/postagens/executor/{p.id}/resultado"
     assert (await client.post(url, json={"status": "publicado"}, headers=h)).status_code == 200
     assert (await client.post(url, json={"status": "publicado"}, headers=h)).status_code == 409
+
+
+async def test_mac_que_acordou_nao_publica_os_posts_da_noite_colados(
+    client: AsyncClient, db: AsyncSession
+):
+    """O Mac dormiu das 17h às 9h. Os dois posts do TikTok da noite (18:00 e
+    19:30) ficaram pendentes. Antes, o executor acordava e levava OS DOIS de
+    uma vez, publicando um atrás do outro — ignorando o intervalo de 90
+    minutos e sem reconferir nada.
+
+    O publicador do servidor sempre teve essa proteção ("é isto que segura a
+    rajada de catch-up depois de o worker ficar parado"); o lease do executor
+    não tinha. Agora: UMA por conta por rodada, e a segunda esbarra no
+    intervalo e volta pra fila sem gastar tentativa.
+    """
+    p1 = await _cenario(db)
+    # Um SEGUNDO vídeo: o banco proíbe dois pendentes do mesmo arquivo na
+    # mesma conta (uq_marketing_postagem_em_voo), então a noite real é isto —
+    # o post das 18h de um vídeo e o das 19h30 de outro.
+    c1 = await db.get(MarketingCreative, p1.creative_id)
+    c2 = MarketingCreative(modelo="video 30s", marca="poofy", marca_id=c1.marca_id, aprovado=True)
+    db.add(c2)
+    await db.flush()
+    rel = f"creatives/{c2.id}/v.mp4"
+    caminho = Path(get_settings().uploads_dir) / rel
+    caminho.parent.mkdir(parents=True, exist_ok=True)
+    caminho.write_bytes(b"\x00\x00\x00\x18ftypmp42-fake")
+    f2 = MarketingCreativeFile(creative_id=c2.id, file_name="v2.mp4", file_mime="video/mp4", file_rel=rel)
+    db.add(f2)
+    await db.flush()
+    p2 = MarketingPostagem(
+        creative_id=c2.id, file_id=f2.id, rede_social_id=p1.rede_social_id,
+        plataforma="tiktok", conta="poofy_brasil", status="pendente", legenda="Outra ✈️",
+    )
+    db.add(p2)
+    await db.flush()
+    # A noite real: o robô criou um às 18:02 e outro às 19:32 de ONTEM, e o
+    # Mac dormiu antes de publicar qualquer um. (Criados no mesmo instante, os
+    # dois se bloqueariam — mas isso o próprio agendar() impede na criação.)
+    agora = datetime.now(UTC)
+    p1.created_at = agora - timedelta(hours=15)
+    p2.created_at = agora - timedelta(hours=13, minutes=30)
+    await db.commit()
+
+    # O Mac acorda. Primeira rodada: sai UM.
+    r = await client.post(LEASE, json={"limit": 5}, headers={"X-Agent-Token": TOKEN})
+    assert r.status_code == 200, r.text
+    assert len(r.json()) == 1, "uma por conta por rodada — nunca as duas coladas"
+    assert r.json()[0]["id"] == str(p1.id), "o mais antigo primeiro"
+
+    # 30 segundos depois, a rodada seguinte: o segundo ESPERA o intervalo,
+    # porque o primeiro acabou de sair.
+    r2 = await client.post(LEASE, json={"limit": 5}, headers={"X-Agent-Token": TOKEN})
+    assert r2.json() == [], "o segundo espera os 90 minutos — não sai colado"
+    await db.refresh(p2)
+    assert p2.status == "pendente", "adiado, não perdido: volta pra fila sem gastar tentativa"
+
+
+async def test_robo_desligado_de_noite_nao_publica_de_manha(
+    client: AsyncClient, db: AsyncSession
+):
+    """Agendar não é autorizar pra sempre. Se o Eduardo desligou a publicação
+    automática enquanto o Mac dormia, o post que o robô tinha agendado NÃO
+    pode sair quando o Mac acorda."""
+    p = await _cenario(db)
+    p.origem = "robo"
+    rede = await db.get(RedeSocial, p.rede_social_id)
+    rede.postagem_auto = False  # desligou de noite
+    await db.commit()
+
+    r = await client.post(LEASE, json={}, headers={"X-Agent-Token": TOKEN})
+    assert r.json() == [], "o interruptor tem que valer na hora de publicar"
+    await db.refresh(p)
+    assert p.status == "falhou"
+    assert "postagem_auto" in (p.result or "")
