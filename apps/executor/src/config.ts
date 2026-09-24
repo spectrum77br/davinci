@@ -36,6 +36,7 @@ export interface Config {
   melhorEnvioAdspowerUserId: string;
   melhorEnvioUrl: string;
   melhorEnvioCalibrated: boolean;
+  melhorEnvioMotivo: string;
   logisticaLeaseLimit: number;
   // Tuta (leitura da caixa atrás dos códigos de devolução)
   tutaAdspowerUserId: string;
@@ -77,6 +78,9 @@ export const cfg: Config = {
   // dá 404. Sem "#…" aqui: o robô abre a sub-aba Postados clicando.
   melhorEnvioUrl: str("MELHORENVIO_ENVIOS_URL", "https://melhorenvio.com.br/painel/meus-envios"),
   melhorEnvioCalibrated: str("MELHORENVIO_CALIBRATED") === "true",
+  // Opção marcada na janela "Qual é o motivo para suspender a entrega?"
+  // (texto igual ao do Melhor Envio). O comando pode trazer outro no payload.
+  melhorEnvioMotivo: str("MELHORENVIO_MOTIVO", "Meu cliente desistiu da compra"),
   logisticaLeaseLimit: int("LOGISTICA_LEASE_LIMIT", 5),
   tutaAdspowerUserId: str("TUTA_ADSPOWER_USER_ID"),
   tutaCaixaUrl: str("TUTA_CAIXA_URL", "https://app.tuta.com"),

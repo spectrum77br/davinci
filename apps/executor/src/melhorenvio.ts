@@ -174,6 +174,72 @@ function findBtnJS(pattern: string, scope: "card" | "modal" | "any"): string {
 })()`;
 }
 
+const SUCESSO_RE = /suspens[ãa]o[^.]{0,80}(solicitad|recebid|registrad|enviad|realizad)|sucesso/i;
+
+// A janela do motivo: o menor bloco que tem o título "…motivo para suspender…"
+// e um botão CONTINUAR. Marca com data-me-modal.
+const JANELA_MOTIVO_JS = `(function(){${H}
+  [].slice.call(document.querySelectorAll('[data-me-modal]')).forEach(function(e){e.removeAttribute('data-me-modal');});
+  var tit=[].slice.call(document.querySelectorAll('h1,h2,h3,h4,h5,p,div,span')).filter(function(e){return vis(e)&&e.children.length<=1&&/motivo para suspender/i.test(txt(e));});
+  if(!tit.length)return {ok:false};
+  tit.sort(function(a,b){return txt(a).length-txt(b).length;});
+  var el=tit[0];
+  for(var n=0;el&&n<12;n++){
+    var tem=[].slice.call(el.querySelectorAll('button,a,[role="button"]')).some(function(b){return vis(b)&&/^continuar$/i.test(txt(b));});
+    if(tem){el.setAttribute('data-me-modal','1');return {ok:true};}
+    el=el.parentElement;
+  }
+  return {ok:false};
+})()`;
+
+// Dentro da janela: a opção do motivo (texto igual), o campo "Motivo" e os
+// botões Continuar/Cancelar.
+function marcarCamposJS(motivo: string): string {
+  return `(function(){${H}
+  var m=document.querySelector('[data-me-modal]');if(!m)return {ok:false};
+  ['data-me-opcao','data-me-campo','data-me-continuar','data-me-cancelar'].forEach(function(a){[].slice.call(document.querySelectorAll('['+a+']')).forEach(function(e){e.removeAttribute(a);});});
+  var alvo=${JSON.stringify(motivo.toLowerCase())};
+  var opcoes=[].slice.call(m.querySelectorAll('input[type="radio"]')).map(function(r){return txt(r.closest('label')||r.parentElement).slice(0,60);});
+  var botoes=[].slice.call(m.querySelectorAll('button,a,[role="button"]')).filter(vis);
+  var canc=botoes.filter(function(b){return /^cancelar$/i.test(txt(b));})[0];
+  if(canc)canc.setAttribute('data-me-cancelar','1');
+  var ops=[].slice.call(m.querySelectorAll('label,span,div,p')).filter(function(e){return vis(e)&&txt(e).toLowerCase()===alvo;});
+  if(!ops.length)return {ok:false,opcoes:opcoes};
+  ops.sort(function(a,b){return (a.tagName==='LABEL'?0:1)-(b.tagName==='LABEL'?0:1);});
+  ops[0].setAttribute('data-me-opcao','1');
+  var campo=[].slice.call(m.querySelectorAll('textarea,input[type="text"],input:not([type])')).filter(vis)[0];
+  if(campo)campo.setAttribute('data-me-campo','1');
+  var cont=botoes.filter(function(b){return /^continuar$/i.test(txt(b));})[0];
+  if(!cont)return {ok:false,opcoes:opcoes};
+  cont.setAttribute('data-me-continuar','1');
+  return {ok:true,opcoes:opcoes,temCampo:!!campo};
+})()`;
+}
+
+// O que ficou marcado de fato (rádio + texto) — confere antes do Continuar.
+const MOTIVO_MARCADO_JS = `(function(){${H}
+  var m=document.querySelector('[data-me-modal]');if(!m)return null;
+  var r=m.querySelector('input[type="radio"]:checked');
+  var c=m.querySelector('[data-me-campo]');
+  return {motivo:r?txt(r.closest('label')||r.parentElement):'',texto:c?(c.value||''):''};
+})()`;
+
+// Depois do Continuar: o botão "Solicitar" (e, se a tela tiver, a caixinha de
+// "li e estou ciente" desmarcada que o libera).
+const SOLICITAR_JS = `(function(){${H}
+  ['data-me-solicitar','data-me-caixa'].forEach(function(a){[].slice.call(document.querySelectorAll('['+a+']')).forEach(function(e){e.removeAttribute(a);});});
+  var re=/^solicitar( a)?( suspens[ãa]o)?( da| de)?( entrega)?$/i;
+  var bs=[].slice.call(document.querySelectorAll('button,a,[role="button"]')).filter(function(b){return vis(b)&&re.test(txt(b));});
+  if(!bs.length)return {ok:false};
+  var b=bs[bs.length-1];
+  b.setAttribute('data-me-solicitar','1');
+  var caixa=null,el=b;
+  for(var n=0;el&&n<8&&!caixa;n++){el=el.parentElement;if(!el)break;caixa=[].slice.call(el.querySelectorAll('input[type="checkbox"]')).filter(function(c){return !c.checked;})[0]||null;}
+  var rot='';
+  if(caixa){var l=caixa.closest('label')||caixa.parentElement;l.setAttribute('data-me-caixa','1');rot=txt(l).slice(0,80);}
+  return {ok:true,texto:txt(b),caixinha:rot};
+})()`;
+
 function classifyUrl(raw: string): "login" | "app" | "other" {
   try {
     const u = new URL(raw);
@@ -222,7 +288,13 @@ export async function disconnect(session: Session): Promise<void> {
 /** Fluxo completo. Só clica em SOLICITAR com commit=true E MELHORENVIO_CALIBRATED=true. */
 export async function suspenderEntrega(
   page: Page,
-  opts: { rastreio: string; commit: boolean }
+  opts: {
+    rastreio: string;
+    commit: boolean;
+    motivo?: string; // opção do Melhor Envio (default MELHORENVIO_MOTIVO)
+    texto?: string; // campo "Motivo" da janela
+    ensaio?: boolean; // teste: preenche o motivo e CANCELA antes do Continuar
+  }
 ): Promise<SuspensaoResult> {
   const rastreio = opts.rastreio.trim().toUpperCase();
   const dump0 = await evalJS<any>(page, DUMP_JS);
@@ -362,51 +434,137 @@ export async function suspenderEntrega(
   }
 
   await clickCenter(page, '[data-me-btn="1"]');
-  await sleep(1200);
+  await sleep(1500);
 
-  // 4) confirmação: SOLICITAR
+  // 4) janela "Qual é o motivo para suspender a entrega?"
   //
-  // O rótulo exato do botão de confirmação nunca foi visto por ninguém, então a
-  // regex aceita as variações plausíveis. Se mesmo assim nada aparecer, o
-  // recado NÃO pode ser um "falhou" seco: o clique em "Suspender entrega" já
-  // foi dado, e se essa tela não tiver confirmação o pedido já está suspenso.
-  // Dizer "falhou" aí levaria alguém a tentar de novo ou a tratar na mão um
-  // envio que já foi suspenso.
-  const sol = await evalJS<any>(
-    page,
-    findBtnJS("^solicitar|^confirmar|^sim[, ]|^suspender$|suspens[ãa]o$", "modal")
-  );
-  const dModal = await evalJS<any>(page, DUMP_JS);
-  if (!sol?.ok) {
-    const shot = await screenshot(page, `sem-solicitar-${rastreio}`);
+  // Vista pela primeira vez em 24/09/2026 (duas tentativas reais no pedido
+  // 298756): depois do "Suspender entrega" NÃO vem o "Solicitar", vem esta
+  // janela com 6 motivos (rádio), um campo "Motivo" e CANCELAR/CONTINUAR. Só
+  // o "Continuar" leva adiante — até aqui nada foi pedido ao Melhor Envio.
+  const motivo = (opts.motivo || cfg.melhorEnvioMotivo).trim();
+  const janela = await evalJS<any>(page, JANELA_MOTIVO_JS);
+  if (!janela?.ok) {
+    const shot = await screenshot(page, `sem-janela-motivo-${rastreio}`);
+    const d = await evalJS<any>(page, DUMP_JS);
     return {
       ok: false,
       found: true,
       requested: false,
       dry: false,
       reason:
-        'ATENÇÃO: cliquei em "Suspender entrega" e NENHUMA confirmação apareceu. '
-        + "Se esta tela não pede confirmação, a suspensão JÁ FOI FEITA. "
-        + "Confira no painel do Melhor Envio antes de tentar de novo ou tratar na mão.",
-      url: dModal?.url,
-      buttons: dModal?.buttons,
+        'cliquei em "Suspender entrega" e a janela do motivo não apareceu — '
+        + "confira no Melhor Envio antes de tentar de novo",
+      url: d?.url,
+      buttons: d?.buttons,
       screenshot: shot,
     };
   }
-  // Chegou aqui = commit && calibrado (a trava ficou lá atrás). Ponto de não
-  // retorno: o Melhor Envio não desfaz e o frete não volta.
-  await clickCenter(page, '[data-me-btn="1"]');
+  const campos = await evalJS<any>(page, marcarCamposJS(motivo));
+  if (!campos?.ok) {
+    const shot = await screenshot(page, `motivo-${rastreio}`);
+    await clickCenter(page, '[data-me-cancelar="1"]');
+    return {
+      ok: false,
+      found: true,
+      requested: false,
+      dry: true,
+      reason:
+        `não achei o motivo "${motivo}" na janela (opções: ${(campos?.opcoes || []).join(" | ")}) `
+        + "— cancelei, nada foi pedido",
+      screenshot: shot,
+    };
+  }
+  await clickCenter(page, '[data-me-opcao="1"]');
+  await sleep(400);
+  if (opts.texto && campos.temCampo) {
+    await clickCenter(page, '[data-me-campo="1"]');
+    await page.keyboard.type(opts.texto.slice(0, 200), { delay: 15 });
+    await sleep(300);
+  }
+  const marcado = await evalJS<any>(page, MOTIVO_MARCADO_JS);
+  log.info(
+    `ME ${rastreio}: motivo marcado "${marcado?.motivo || "?"}"`
+    + (marcado?.texto ? ` · texto "${marcado.texto}"` : "")
+  );
+  if (!marcado?.motivo || marcado.motivo.toLowerCase() !== motivo.toLowerCase()) {
+    const shot = await screenshot(page, `motivo-nao-marcou-${rastreio}`);
+    await clickCenter(page, '[data-me-cancelar="1"]');
+    return {
+      ok: false,
+      found: true,
+      requested: false,
+      dry: true,
+      reason: `cliquei no motivo "${motivo}" mas a janela ficou com "${marcado?.motivo || "nenhum"}" — cancelei, nada foi pedido`,
+      screenshot: shot,
+    };
+  }
+  if (opts.ensaio) {
+    const shot = await screenshot(page, `ensaio-${rastreio}`);
+    await clickCenter(page, '[data-me-cancelar="1"]');
+    return {
+      ok: true,
+      found: true,
+      requested: false,
+      dry: true,
+      reason: `ENSAIO: marquei "${motivo}" e cancelei antes do CONTINUAR`,
+      screenshot: shot,
+    };
+  }
+
+  // 5) CONTINUAR → tela com "Solicitar" (a ajuda do Melhor Envio: "após ler
+  // com atenção as informações sobre a solicitação, clique em Solicitar").
+  await clickCenter(page, '[data-me-continuar="1"]');
   await sleep(2500);
+  const shotInfo = await screenshot(page, `depois-continuar-${rastreio}`);
+  const sol = await evalJS<any>(page, SOLICITAR_JS);
+  if (sol?.caixinha) log.info(`ME ${rastreio}: marquei a caixinha "${sol.caixinha}"`);
+  if (!sol?.ok) {
+    const d = await evalJS<any>(page, DUMP_JS);
+    const texto = String(d?.text || "");
+    if (SUCESSO_RE.test(texto)) {
+      return {
+        ok: true,
+        found: true,
+        requested: true,
+        dry: false,
+        reason: `suspensão solicitada (motivo: ${motivo})`,
+        url: d?.url,
+        confirmation: texto.slice(0, 300),
+        screenshot: shotInfo,
+      };
+    }
+    return {
+      ok: false,
+      found: true,
+      requested: false,
+      dry: false,
+      reason:
+        `ATENÇÃO: marquei "${motivo}" e cliquei em CONTINUAR, mas a tela seguinte não tinha `
+        + '"Solicitar" — pode já ter sido enviado. Confira no Melhor Envio antes de tentar de novo.',
+      url: d?.url,
+      buttons: d?.buttons,
+      screenshot: shotInfo,
+    };
+  }
+  // Ponto de não retorno: o Melhor Envio não desfaz e o frete não volta.
+  if (sol.caixinha) {
+    await clickCenter(page, '[data-me-caixa="1"]');
+    await sleep(300);
+  }
+  await clickCenter(page, '[data-me-solicitar="1"]');
+  await sleep(3000);
   const d2 = await evalJS<any>(page, DUMP_JS);
   const shot = await screenshot(page, `solicitado-${rastreio}`);
   const conf = String(d2?.text || "");
-  const okText = /suspens[ãa]o[^.]{0,80}(solicitad|recebid|registrad|enviad)|sucesso/i.test(conf);
   return {
     ok: true,
     found: true,
     requested: true,
     dry: false,
-    reason: okText ? "suspensão solicitada" : 'cliquei em "Solicitar"; confirmação não lida na tela',
+    reason: SUCESSO_RE.test(conf)
+      ? `suspensão solicitada (motivo: ${motivo})`
+      : `cliquei em "${sol.texto}" (motivo: ${motivo}); a confirmação não apareceu escrita na tela`,
     url: d2?.url,
     confirmation: conf.slice(0, 300),
     screenshot: shot,

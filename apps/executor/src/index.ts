@@ -213,9 +213,16 @@ async function processLogisticaCommand(cmd: LeasedLogisticaCommand): Promise<voi
     await adspower.garantirAberto();
     const ws = await adspower.start(userId);
     session = await melhorenvio.connect(ws);
+    const p = (cmd.payload || {}) as Record<string, unknown>;
+    const pedidos = [
+      p.pedido_amazon ? `Pedido Amazon ${p.pedido_amazon}` : "",
+      p.pedido_bling ? `Bling ${p.pedido_bling}` : "",
+    ].filter(Boolean);
     const r = await melhorenvio.suspenderEntrega(session.page, {
       rastreio,
-      commit: (cmd.payload || {}).commit === true,
+      commit: p.commit === true,
+      motivo: typeof p.motivo === "string" ? p.motivo : undefined,
+      texto: `${pedidos.join(" / ") || `Rastreio ${rastreio}`} — suspensão pedida pelo DaVinci`,
     });
     await davinci.reportLogistica(cmd.id, r.ok && r.requested ? "done" : "failed", JSON.stringify(r));
     log.info(
