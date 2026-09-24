@@ -174,7 +174,13 @@ function findBtnJS(pattern: string, scope: "card" | "modal" | "any"): string {
 })()`;
 }
 
-const SUCESSO_RE = /suspens[ãa]o[^.]{0,80}(solicitad|recebid|registrad|enviad|realizad)|sucesso/i;
+// O aviso verde que o Melhor Envio mostra ao solicitar (visto em 24/09/2026 no
+// pedido 298756): "Solicitação enviada para transportadora".
+const SUCESSO_RE =
+  /solicita[çc][ãa]o enviada|suspens[ãa]o[^.]{0,80}(solicitad|recebid|registrad|enviad|realizad)|sucesso/i;
+// Texto da página INTEIRA (o DUMP_JS corta em 500 caracteres e o aviso fica
+// no rodapé).
+const TEXTO_PAGINA_JS = `(document.body.innerText||'').replace(/\\s+/g,' ')`;
 
 // A janela do motivo: o menor bloco que tem o título "…motivo para suspender…"
 // e um botão CONTINUAR. Marca com data-me-modal.
@@ -521,7 +527,7 @@ export async function suspenderEntrega(
   if (sol?.caixinha) log.info(`ME ${rastreio}: marquei a caixinha "${sol.caixinha}"`);
   if (!sol?.ok) {
     const d = await evalJS<any>(page, DUMP_JS);
-    const texto = String(d?.text || "");
+    const texto = String((await evalJS<string>(page, TEXTO_PAGINA_JS)) || "");
     if (SUCESSO_RE.test(texto)) {
       return {
         ok: true,
@@ -556,13 +562,17 @@ export async function suspenderEntrega(
   await sleep(3000);
   const d2 = await evalJS<any>(page, DUMP_JS);
   const shot = await screenshot(page, `solicitado-${rastreio}`);
-  const conf = String(d2?.text || "");
+  const pagina = String((await evalJS<string>(page, TEXTO_PAGINA_JS)) || "");
+  const achado = pagina.match(SUCESSO_RE);
+  const conf = achado
+    ? pagina.slice(Math.max(0, (achado.index || 0) - 20), (achado.index || 0) + 160)
+    : String(d2?.text || "");
   return {
     ok: true,
     found: true,
     requested: true,
     dry: false,
-    reason: SUCESSO_RE.test(conf)
+    reason: achado
       ? `suspensão solicitada (motivo: ${motivo})`
       : `cliquei em "${sol.texto}" (motivo: ${motivo}); a confirmação não apareceu escrita na tela`,
     url: d2?.url,
