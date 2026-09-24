@@ -639,6 +639,68 @@ async def test_status_regra_com_varios_status_atual(
 
 
 @pytest.mark.asyncio
+async def test_juntar_status_repetidas(
+    client: AsyncClient,
+    admin: User,
+    db: AsyncSession,
+    auth_as: Callable[[User | None], None],
+):
+    """Prévia lista só as iguais; juntar deixa uma linha com os dois estados e
+    não mexe no grupo que mudou depois da prévia."""
+    auth_as(admin)
+    chave = "Pago | Pronto p/ envio | Aguardando NF"
+
+    async def cria(**kw) -> str:
+        rs = await client.post("/api/logistica/status", json={"status_plataforma": chave, **kw})
+        assert rs.status_code == 201, rs.text
+        return rs.json()["id"]
+
+    a = await cria(plataforma="Mercado Livre", status_atual="Em aberto", monitoramento=True)
+    b = await cria(plataforma="Mercado Livre", status_atual="Em andamento", monitoramento=True)
+    # Faz outra coisa (troca status + chamado): fica de fora.
+    c = await cria(plataforma="Mercado Livre", status_atual="Entregue",
+                   alterar_status_bling="Aguardando Devolução", abrir_chamado=True)
+    # Outra chave, iguais entre si: segundo grupo.
+    d = await cria(plataforma="Shopee", status_plataforma="X", status_atual="Em aberto")
+    e = await cria(plataforma="Shopee", status_plataforma="X", status_atual="Cancelado")
+
+    rp = await client.get("/api/logistica/status/repetidas")
+    assert rp.status_code == 200, rp.text
+    prev = rp.json()
+    assert prev["conflitos"] == []
+    grupos = {g["status_plataforma"]: g for g in prev["grupos"]}
+    assert set(grupos) == {chave, "X"}
+    g1 = grupos[chave]
+    assert {g1["manter_id"], *g1["apagar_ids"]} == {a, b}
+    assert g1["status_atual_final"] == "Em aberto; Em andamento"
+    assert g1["acoes"] == ["Monitorar"]
+
+    # Alguém mexe no grupo "X" depois da prévia → esse não junta.
+    await client.patch(f"/api/logistica/status/{e}", json={"monitoramento": True})
+
+    rj = await client.post(
+        "/api/logistica/status/juntar",
+        json={"grupos": [
+            {"manter_id": g["manter_id"], "apagar_ids": g["apagar_ids"]} for g in prev["grupos"]
+        ]},
+    )
+    assert rj.status_code == 200, rj.text
+    assert rj.json() == {"juntados": 1, "linhas_apagadas": 1, "pulados": 1}
+
+    rows = {r["id"]: r for r in (await client.get("/api/logistica/status")).json()}
+    assert set(rows) == {a, c, d, e}
+    assert rows[a]["status_atual"] == "Em aberto; Em andamento"
+    assert rows[a]["monitoramento"] is True
+    assert rows[c]["status_atual"] == "Entregue"
+    # Repetir o mesmo pedido não faz nada (já não há grupo).
+    rj2 = await client.post(
+        "/api/logistica/status/juntar",
+        json={"grupos": [{"manter_id": g1["manter_id"], "apagar_ids": g1["apagar_ids"]}]},
+    )
+    assert rj2.json() == {"juntados": 0, "linhas_apagadas": 0, "pulados": 1}
+
+
+@pytest.mark.asyncio
 async def test_status_maquina_de_estados(
     client: AsyncClient,
     admin: User,

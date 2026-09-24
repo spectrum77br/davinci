@@ -13,6 +13,10 @@ pra saber o que executar, então o que a UI mostra bate com o que o sistema far�
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from uuid import UUID
+
 from app.models import LogisticaStatus
 from app.services import logistica_rules
 from app.services.bling_situacoes import NOME_ENVIADO_ETIQUETA, NOME_ENVIADO_ETIQUETA_LEGADO
@@ -301,3 +305,98 @@ def resumo_acoes(rule: LogisticaStatus | None) -> list[str]:
     if (rule.mensagem_threema or "").strip():
         out.append("Mensagem Threema")
     return out
+
+
+# ---- Juntar regras repetidas (Vinicius 24/09) ----
+# Antes do "Status Atual" com vários estados, a mesma chave com as MESMAS ações
+# em "Em aberto" e em "Em andamento" virava duas linhas. Juntar = ficar com uma
+# linha só, com os estados das duas. Só junta o que faz exatamente a mesma coisa:
+# qualquer diferença de ação (uma troca de status, um chamado, uma vírgula na
+# mensagem) mantém as linhas separadas.
+
+
+def _acoes_da_regra(r: LogisticaStatus, anexos: Sequence[str]) -> tuple:
+    """Tudo o que a regra FAZ, num formato comparável. Textos comparados letra por
+    letra (só sem espaço nas pontas); destinatários do Threema como conjunto;
+    imagens pelo conteúdo (hash)."""
+    destinatarios = sorted(
+        {d.strip() for d in (r.threema_recipients or "").split(",") if d.strip()}
+    )
+    return (
+        (r.alterar_status_bling or "").strip(),
+        bool(r.monitoramento),
+        bool(r.abrir_chamado),
+        bool(r.abrir_reembolso),
+        (r.mensagem_chamado or "").strip(),
+        (r.mensagem_bling or "").strip(),
+        (r.mensagem_threema or "").strip(),
+        tuple(destinatarios),
+        tuple(sorted(anexos)),
+    )
+
+
+def _estados(r: LogisticaStatus) -> set[str]:
+    return {_norm_situacao(s) for s in status_atuais(r.status_atual)}
+
+
+@dataclass
+class GrupoRepetido:
+    """Linhas que fazem a mesma coisa: `manter` (a mais antiga) fica com
+    `status_atual` = os estados de todas; `apagar` sai."""
+
+    manter: LogisticaStatus
+    apagar: list[LogisticaStatus]
+    status_atual: str
+
+
+def regras_repetidas(
+    rows: Sequence[LogisticaStatus],
+    *,
+    anexos: Mapping[UUID, Sequence[str]] | None = None,
+) -> tuple[list[GrupoRepetido], list[list[LogisticaStatus]]]:
+    """Acha as linhas da aba Status que dá pra juntar numa só.
+
+    Mesmo grupo = mesma plataforma + mesma chave (`status_plataforma`, como o
+    casador compara: sem maiúscula e sem espaço nas pontas) + as MESMAS ações
+    (`_acoes_da_regra`; `anexos` = hashes das imagens de cada regra). Só entram
+    linhas com Status Atual: a curinga (vale de qualquer estado) nunca se junta
+    — somar estados a ela mudaria o que ela cobre.
+
+    Devolve (grupos, conflitos). Conflito = o grupo divide algum Status Atual
+    com outra linha da mesma chave que faz OUTRA coisa: hoje o pedido nesse
+    estado cai nas duas e vale a primeira; juntar poderia trocar qual vale, então
+    o grupo fica de fora e aparece como conflito pro operador decidir."""
+    anexos = anexos or {}
+    por_chave: dict[tuple[str, str], list[LogisticaStatus]] = {}
+    for r in rows:
+        if _norm(r.status_plataforma):
+            por_chave.setdefault((_norm(r.plataforma), _norm(r.status_plataforma)), []).append(r)
+
+    grupos: list[GrupoRepetido] = []
+    conflitos: list[list[LogisticaStatus]] = []
+    for linhas in por_chave.values():
+        por_acoes: dict[tuple, list[LogisticaStatus]] = {}
+        for r in linhas:
+            if _estados(r):
+                por_acoes.setdefault(_acoes_da_regra(r, anexos.get(r.id, ())), []).append(r)
+        for iguais in por_acoes.values():
+            if len(iguais) < 2:
+                continue
+            ids = {id(r) for r in iguais}
+            estados = set().union(*(_estados(r) for r in iguais))
+            outras = [r for r in linhas if id(r) not in ids and _estados(r) & estados]
+            if outras:
+                conflitos.append([*iguais, *outras])
+                continue
+            iguais = sorted(
+                iguais,
+                key=lambda r: (
+                    r.created_at.timestamp() if r.created_at else float("inf"),
+                    str(r.id),
+                ),
+            )
+            juntado = juntar_status_atual(
+                [s for r in iguais for s in status_atuais(r.status_atual)]
+            )
+            grupos.append(GrupoRepetido(manter=iguais[0], apagar=iguais[1:], status_atual=juntado or ""))
+    return grupos, conflitos
