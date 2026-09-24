@@ -1002,3 +1002,37 @@ async def test_nome_de_foto_com_barra_e_recusado(
             headers={"X-Portal-Token": TOK_A},
         )
         assert r.status_code == 400, f"passou: {ruim!r}"
+
+
+@pytest.mark.parametrize(
+    "nome",
+    [
+        "s7-详情2_01.jpg",          # os dois nomes reais que derrubavam a rota
+        "画板 1.jpg",
+        "açaí.JPG",                 # acento: o caso comum, que já funcionava
+        "normal.png",
+        "M1 listrada/b005 M1 listrada preto/详情.webp",   # subpasta + chinês
+        'com "aspas".jpg',
+    ],
+)
+def test_disposicao_sobrevive_a_latin1(nome: str) -> None:
+    """O cabeçalho TEM de caber em latin-1, ou o Starlette derruba a resposta.
+
+    Em 23/09/2026, 178 dos 2467 arquivos do acervo (4 produtos por inteiro)
+    devolviam 500 por causa disto, e o portal os desenhava como um card que
+    carrega para sempre. O teste é sobre o encode, não sobre o texto: é o
+    encode que quebrava.
+    """
+    from app.routers.portal_criativos import _disposicao
+
+    cab = _disposicao("inline", nome)
+    cab.encode("latin-1")  # <- a linha que reproduzia o bug
+
+    # O nome de verdade viaja no `filename*`, e o ASCII é só o fallback.
+    assert "filename*=UTF-8''" in cab
+    assert cab.startswith("inline; filename=\"")
+    # Fallback nunca vazio: alguns navegadores recusam `filename=""`.
+    ascii_parte = cab.split('filename="', 1)[1].split('"', 1)[0]
+    assert ascii_parte.strip(), f"fallback vazio para {nome!r}"
+    # E nunca com barra: `filename=` é nome de arquivo, não caminho.
+    assert "/" not in ascii_parte

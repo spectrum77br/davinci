@@ -57,9 +57,11 @@ MEGA continua acontecendo só no clique do admin dentro do DaVinci.
 from __future__ import annotations
 
 import secrets
+import unicodedata
 from hashlib import sha256
 from pathlib import Path
 from typing import Annotated, Any
+from urllib.parse import quote
 from uuid import UUID, uuid4
 
 import structlog
@@ -1287,6 +1289,37 @@ async def listar_fotos_do_produto(
     }
 
 
+def _disposicao(tipo: str, nome: str) -> str:
+    """`Content-Disposition` que sobrevive a nome fora do latin-1.
+
+    O Starlette codifica cabeçalho em latin-1. Um nome em chinês
+    (`s7-详情2_01.jpg`, `画板 1.jpg`) estoura ali dentro com UnicodeEncodeError,
+    a rota devolve 500 e o portal traduz num card que carrega para sempre.
+    Medido em 23/09/2026: 178 dos 2467 arquivos do acervo (7,2%), 4 produtos
+    furados por inteiro — e como o cache só grava em caso de sucesso, cada um
+    desses custava de 0,25s a 1,4s de novo em TODA carga da página.
+
+    Vai o par que a RFC 6266 pede: `filename=` em ASCII para quem é velho e
+    `filename*=` em UTF-8 para quem não é. O portal já sabe LER o segundo
+    (app/davinci.php:73 tenta a RFC 5987 primeiro justamente por causa dos
+    nomes com acento que o FastAPI manda).
+    """
+    # Só o último trecho: `nome` pode vir com subpasta (`M1 listrada/b005/x.jpg`)
+    # e barra dentro de `filename=` confunde o navegador na hora de salvar.
+    base = nome.rsplit("/", 1)[-1]
+    # O fallback ASCII é o que resta depois de tirar acento; se não restar nada
+    # legível (nome inteiro em chinês), um nome genérico com a extensão certa —
+    # melhor que aspas vazias, que alguns navegadores recusam.
+    ascii_nome = (
+        unicodedata.normalize("NFKD", base).encode("ascii", "ignore").decode("ascii")
+    )
+    ascii_nome = ascii_nome.replace('"', "").replace("\\", "").strip()
+    if not ascii_nome or ascii_nome.startswith("."):
+        ext = base.rsplit(".", 1)[-1].lower() if "." in base else "bin"
+        ascii_nome = f"foto.{ext if ext.isalnum() else 'bin'}"
+    return f"{tipo}; filename=\"{ascii_nome}\"; filename*=UTF-8''{quote(base)}"
+
+
 @router.get("/produtos/{produto_id}/foto")
 async def baixar_foto_do_produto(
     produto_id: UUID,
@@ -1326,7 +1359,7 @@ async def baixar_foto_do_produto(
         content=bruto,
         media_type=media,
         headers={
-            "Content-Disposition": f"{disposicao}; filename=\"{nome}\"",
+            "Content-Disposition": _disposicao(disposicao, nome),
             "X-Content-Type-Options": "nosniff",
             # Conteúdo de catálogo muda pouco e a volta ao MEGA é cara.
             "Cache-Control": "private, max-age=86400",
