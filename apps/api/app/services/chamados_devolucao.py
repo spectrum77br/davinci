@@ -311,6 +311,70 @@ _INTRO: dict[str, str] = {
 }
 
 
+def linhas_com_problema(
+    dev: Devolution, linhas: list[Devolution] | None = None
+) -> list[Devolution]:
+    """Linhas do pedido que o chamado cita: as de motivo que abre chamado. Vinicius
+    24/09 (296012, pedido com 2 produtos e o texto só com 1): a tela grava uma linha
+    por produto e o texto saía só com a linha que abriu o chamado; "se apenas 1
+    produto tá com problema, coloca apenas 1". A linha do disparo vem sempre e
+    primeiro; as outras na ordem do SKU."""
+    outras = [
+        d
+        for d in (linhas or [])
+        if d is not dev
+        and not (d.id is not None and d.id == dev.id)
+        and chamados_svc.motivo_pede_chamado(d)
+    ]
+    outras.sort(key=lambda d: ((d.sku or "").strip().lower(), (d.produtos or "").strip().lower()))
+    return [dev, *outras]
+
+
+def _identificacao(dev: Devolution, linhas: list[Devolution] | None = None) -> str:
+    """"Pedido X · SKU a · Produto." — com mais de um produto com problema no
+    pedido, "Pedido X · Produtos: SKU a (Produto A); 2x SKU b (Produto B)." (mesmo
+    SKU em várias linhas = uma linha por unidade → soma). "" sem nada."""
+    itens: dict[tuple[str, str], list] = {}
+    for d in linhas_com_problema(dev, linhas):
+        sku = (d.sku or "").strip()
+        nome = (d.produtos or "").strip()
+        if not sku and not nome:
+            continue
+        item = itens.setdefault((sku.lower(), nome.lower()), [sku, nome, 0])
+        item[2] += max(1, d.quantidade or 1)
+    ident = []
+    if (dev.pedido_marketplace or "").strip():
+        ident.append(f"Pedido {dev.pedido_marketplace.strip()}")
+    if len(itens) == 1:
+        sku, nome, qtd = next(iter(itens.values()))
+        if sku:
+            ident.append(f"{qtd}x SKU {sku}" if qtd > 1 else f"SKU {sku}")
+        elif qtd > 1:
+            nome = f"{qtd}x {nome}"
+        if nome:
+            ident.append(nome)
+    elif itens:
+        partes = []
+        for sku, nome, qtd in itens.values():
+            p = f"SKU {sku} ({nome})" if sku and nome else (f"SKU {sku}" if sku else nome)
+            partes.append(f"{qtd}x {p}" if qtd > 1 else p)
+        ident.append("Produtos: " + "; ".join(partes))
+    return " · ".join(ident) + "." if ident else ""
+
+
+def _observacao(
+    dev: Devolution, linhas: list[Devolution] | None = None, extra: str | None = None
+) -> str:
+    """O que o operador digitou (`extra`, réplica manual) + a observação de cada
+    linha com problema do pedido, sem repetir."""
+    textos: list[str] = []
+    for t in (extra, *(d.observacao for d in linhas_com_problema(dev, linhas))):
+        t = (t or "").strip()
+        if t and t not in textos:
+            textos.append(t)
+    return " ".join(textos)
+
+
 def texto_padrao(
     dev: Devolution,
     reason: str | None,
@@ -318,11 +382,15 @@ def texto_padrao(
     fotos: int = 0,
     link_envio: str | None = None,
     cartao_video: bool = False,
+    linhas: list[Devolution] | None = None,
+    observacao_extra: str | None = None,
 ) -> str:
     """Mensagem que vai pra plataforma (o operador não digita nada — é
     automático). `reason` é o motivo do ML (SRF*) — nas outras plataformas o
     texto é o mesmo, só muda o código enviado. `cartao_video` = a imagem em
-    anexo é o cartão com QR code + link do vídeo (não há foto da linha)."""
+    anexo é o cartão com QR code + link do vídeo (não há foto da linha).
+    `linhas` = as linhas do pedido (`_linhas_do_pedido`): o texto cita todos os
+    produtos com problema, não só o de `dev`."""
     motivo = (dev.motivo_devolucao or "").strip()
     if motivo.lower() in ("bloqueado", "mudou de ideia"):
         intro = (
@@ -331,30 +399,25 @@ def texto_padrao(
         )
     else:
         intro = _INTRO.get(reason or "", f"Recebemos a devolução com problema ({motivo}).")
-    linhas = [intro]
-    ident = []
-    if (dev.pedido_marketplace or "").strip():
-        ident.append(f"Pedido {dev.pedido_marketplace.strip()}")
-    if (dev.sku or "").strip():
-        ident.append(f"SKU {dev.sku.strip()}")
-    if (dev.produtos or "").strip():
-        ident.append(dev.produtos.strip())
+    linhas_txt = [intro]
+    ident = _identificacao(dev, linhas)
     if ident:
-        linhas.append(" · ".join(ident) + ".")
-    if (dev.observacao or "").strip():
-        linhas.append(f"Observação: {dev.observacao.strip()}")
+        linhas_txt.append(ident)
+    obs = _observacao(dev, linhas, observacao_extra)
+    if obs:
+        linhas_txt.append(f"Observação: {obs}")
     if fotos:
-        linhas.append(f"Seguem {fotos} foto(s) em anexo como evidência.")
+        linhas_txt.append(f"Seguem {fotos} foto(s) em anexo como evidência.")
     if cartao_video:
-        linhas.append(
+        linhas_txt.append(
             "Em anexo, imagem com o QR code e o link do vídeo da expedição "
             "(a evidência é o vídeo, gravado no momento do envio)."
         )
     envio = (link_envio or dev.link_envio or "").strip()
     if envio:
-        linhas.append(f"Comprovante da expedição (fotos/vídeo do envio): {envio}")
-    linhas.append("Solicitamos a análise do caso.")
-    return "\n".join(linhas)
+        linhas_txt.append(f"Comprovante da expedição (fotos/vídeo do envio): {envio}")
+    linhas_txt.append("Solicitamos a análise do caso.")
+    return "\n".join(linhas_txt)
 
 
 # ---------------------------------------------------------------- consultas
@@ -711,7 +774,7 @@ async def garantir_chamado(session: AsyncSession, dev: Devolution) -> Chamado | 
     if msg is None:
         msg = chamados_svc.nova_mensagem(
             ch,
-            texto=texto_padrao(dev, reason_para(dev)),
+            texto=texto_padrao(dev, reason_para(dev), linhas=await _linhas_do_pedido(session, dev)),
             tipo=TIPO_ABERTURA,
             autor_nome=chamados_svc.AUTOR_SISTEMA,
             status="pendente",
@@ -947,7 +1010,7 @@ async def trocar_motivo_chamado(
             if plat == PLAT_ML
             else f"no caso aberto no Seller Center ({nome})"
         )
-        relato = texto_padrao(dev, reason_para(dev))
+        relato = texto_padrao(dev, reason_para(dev), linhas=await _linhas_do_pedido(session, dev))
         session.add(
             chamados_svc.registrar_sistema(
                 ch,
@@ -1424,8 +1487,15 @@ async def _recusar_reembolso(
         ) if t
     )
     fotos = fotos[:TIKTOK_MAX_FOTOS]
+    # Pedido com mais de um produto com problema (24/09): o texto cita todos.
+    com_problema = linhas_com_problema(dev, linhas)
+    produto = (
+        " + ".join(dict.fromkeys(n for d in com_problema if (n := (d.produtos or "").strip())))
+        if len(com_problema) > 1
+        else ""
+    ) or ch.produto or dev.produtos
     texto = tiktok_reembolso.texto_contestacao(
-        caso, oid=oid, produto=(ch.produto or dev.produtos), entrega=entrega, nota=nota,
+        caso, oid=oid, produto=produto, entrega=entrega, nota=nota,
         pedido_em=pedido_em, comprador_mandou_prova=prova,
         fotos=len([a for a in fotos if not _e_cartao_video(a)]),  # o cartão não é foto
         video=video or None, observacao=observacao or None,
@@ -1717,6 +1787,21 @@ async def _entrega_shopee(session: AsyncSession, dev: Devolution) -> dict:
     }
 
 
+def _nota_robo_so_reembolso_sem_prova(det: dict, return_sn: str) -> str:
+    """Nota do histórico: só reembolso + "Não recebido" sem foto e sem vídeo da
+    expedição (Vinicius 24/09, 296012) — a disputa da Shopee exige imagem e não
+    há o que anexar; ficava "aguardando foto" de um produto que nunca voltou."""
+    prazo = _fmt_brt(det.get("return_seller_due_date"))
+    return (
+        f"Só reembolso {return_sn}: o comprador ficou com o produto (não há pacote de "
+        "volta) e a devolução não tem foto nem vídeo da expedição — a disputa da Shopee "
+        "exige imagem, não há o que anexar. Enviado pro robô abrir no Assistente do "
+        "Vendedor (Seller Center)"
+        + (f"; prazo da Shopee: {prazo}" if prazo else "")
+        + "; o protocolo aparece aqui quando ele abrir."
+    )
+
+
 def _nota_robo_shopee_reembolso(det: dict, return_sn: str) -> str:
     valor = det.get("refund_amount")
     quando = _fmt_brt(det.get("update_time"))
@@ -1732,11 +1817,14 @@ def _nota_robo_shopee_reembolso(det: dict, return_sn: str) -> str:
 async def _texto_robo_shopee_reembolso(
     session: AsyncSession, dev: Devolution, det: dict, fotos: list[DevolucaoAnexo], texto: str
 ) -> str:
-    """O que o robô escreve no chamado do Seller Center pra um só reembolso já
-    aprovado: SPX não entregou → pedido de compensação pelo extravio; entregue e
-    o comprador alega (vazio/errado/danificado) → contestação com o vídeo e as
-    fotos da expedição. `texto` = o texto padrão da abertura, de onde vêm a
-    identificação do pedido, a observação e o link do vídeo."""
+    """Texto de um SÓ REEMBOLSO da Shopee (o comprador fica com o produto): SPX não
+    entregou → pedido de compensação pelo extravio; entregue e o comprador alega
+    (não recebeu/vazio/errado/danificado) → contestação com o vídeo e as fotos da
+    expedição. É o que o robô escreve no Seller Center e, desde 24/09, também o
+    texto da disputa pela API no motivo "Não recebido" (antes ia o "O pacote da
+    devolução ainda não chegou até nós" — não existe pacote de volta aqui).
+    `texto` = o texto padrão da abertura, de onde vêm a identificação do pedido,
+    a observação e o link do vídeo. "A Shopee aprovou" só com o caso aceito/pago."""
     reason = str(det.get("reason") or "").strip().upper()
     alegacao = _SHOPEE_REASON_PT.get(
         reason, reason.lower().replace("_", " ") or "motivo não informado"
@@ -1744,15 +1832,20 @@ async def _texto_robo_shopee_reembolso(
     nota = " ".join(str(det.get("text_reason") or "").split())
     valor = det.get("refund_amount")
     aprovado_em = _fmt_brt(det.get("update_time"))
+    aprovado = str(det.get("status") or "").strip().upper() in ("ACCEPTED", "REFUND_PAID")
     entrega = await _entrega_shopee(session, dev)
     situacao = entrega.get("situacao") or ""
     linhas = [
         f"O comprador pediu reembolso SEM devolução do produto alegando que {alegacao}"
         + (f' ("{nota[:200]}")' if nota else "")
-        + ". A Shopee aprovou o reembolso"
-        + (f" de R$ {valor}" if valor else "")
-        + (f" em {aprovado_em}" if aprovado_em else "")
-        + " e descontou o valor da loja."
+        + (
+            ". A Shopee aprovou o reembolso"
+            + (f" de R$ {valor}" if valor else "")
+            + (f" em {aprovado_em}" if aprovado_em else "")
+            + " e descontou o valor da loja."
+            if aprovado
+            else (f" (R$ {valor})." if valor else ".")
+        )
     ]
     # identificação, observação, fotos e vídeo vêm do texto padrão (linhas 2+)
     corpo = [
@@ -1851,13 +1944,15 @@ def _texto_nao_recebido(
     *,
     observacao_extra: str | None = None,
     agora: datetime | None = None,
+    linhas_pedido: list[Devolution] | None = None,
 ) -> str:
     """Texto FACTUAL da contestação "não recebi o pacote de volta" (Vinicius
     21/09): só o que a SPX registra + identificação do pedido + observação. Vale
     tanto pra disputa pela API (pacote dado como entregue) quanto pro robô no
     Seller Center (ainda em trânsito). Nunca a frase do cartão/QR nem o
     "comprovante da expedição" — o vídeo da ida não prova nada aqui. O que o
-    operador digitar na réplica manual entra só como observação."""
+    operador digitar na réplica manual entra só como observação. `linhas_pedido`
+    = as linhas do pedido: cita todos os produtos com problema (24/09)."""
     hoje = (agora or datetime.now(UTC)).astimezone(chamados_svc.SAO_PAULO).strftime("%d/%m/%Y")
     cod = f"rastreio {rastreio}" if rastreio else "sem código de rastreio"
     if entregue_em is not None:
@@ -1874,18 +1969,10 @@ def _texto_nao_recebido(
             + (f" desde {desde}" if desde else "")
             + "."
         ]
-    ident = []
-    if (dev.pedido_marketplace or "").strip():
-        ident.append(f"Pedido {dev.pedido_marketplace.strip()}")
-    if (dev.sku or "").strip():
-        ident.append(f"SKU {dev.sku.strip()}")
-    if (dev.produtos or "").strip():
-        ident.append(dev.produtos.strip())
+    ident = _identificacao(dev, linhas_pedido)
     if ident:
-        linhas.append(" · ".join(ident) + ".")
-    obs = " ".join(
-        t for t in ((observacao_extra or "").strip(), (dev.observacao or "").strip()) if t
-    )
+        linhas.append(ident)
+    obs = _observacao(dev, linhas_pedido, observacao_extra)
     if obs:
         linhas.append(f"Observação: {obs}")
     if entregue_em is not None:
@@ -2019,14 +2106,18 @@ async def _disparar_shopee(
     texto_operador: str | None = None,
     cartao_link: str = "",
     anexos: list[DevolucaoAnexo] | None = None,
+    linhas: list[Devolution] | None = None,
+    link_video: str = "",
 ) -> tuple[str, str]:
-    """`msg`/`texto_operador`/`cartao_link`/`anexos` só importam no motivo "Não
-    recebido", que se decide pelo detalhe do caso (`_cartao_nao_recebido_shopee`):
-    com pacote de volta o texto é montado sozinho dos fatos da SPX
-    (`_texto_nao_recebido`) e gravado em `msg.texto` — o que o operador digitou
-    vira observação — e `fotos` é ajustada NO LUGAR (sem cartão); só reembolso
-    ganha o cartão do vídeo gerado aqui (`cartao_link` = link do vídeo, `anexos`
-    = os da linha, pra reusar/trocar o cartão)."""
+    """`msg`/`texto_operador`/`cartao_link`/`anexos`/`linhas`/`link_video` só importam
+    no motivo "Não recebido", que se decide pelo detalhe do caso
+    (`_cartao_nao_recebido_shopee`): com pacote de volta o texto é montado sozinho dos
+    fatos da SPX (`_texto_nao_recebido`) e gravado em `msg.texto` — o que o operador
+    digitou vira observação — e `fotos` é ajustada NO LUGAR (sem cartão); só reembolso
+    ganha o cartão do vídeo gerado aqui (`cartao_link` = link do vídeo, `anexos` = os
+    da linha, pra reusar/trocar o cartão) e o texto do só reembolso; sem foto e sem
+    vídeo, vai pro robô (24/09). `linhas` = as linhas do pedido, `link_video` = o link
+    do vídeo que o texto padrão cita."""
     motivo = _motivo(dev)
     if motivo not in MOTIVO_SHOPEE:
         raise _PendenteError("devolucao_motivo_sem_chamado")
@@ -2095,20 +2186,38 @@ async def _disparar_shopee(
     # do robô no Seller Center, entregue ou não pela SPX. Só reembolso é outro caso —
     # ali "não recebi" é a alegação do COMPRADOR sobre a IDA, a prova é o vídeo da
     # expedição (cartão com QR) e a disputa continua pela API (motivos 1/41/53).
+    texto_so_reembolso = False
     if motivo == MOTIVO_NAO_RECEBIDO:
         com_cartao = await _cartao_nao_recebido_shopee(
             session, dev, fotos, anexos or [],
             so_reembolso=so_reembolso, cartao_link=cartao_link,
         )
-        if com_cartao and not texto_operador:
-            texto = texto_padrao(dev, reason_para(dev), link_envio=cartao_link, cartao_video=True)
+        if so_reembolso:
+            # Vinicius 24/09 (296012: "o cliente foi reembolsado e não devolveu o
+            # produto"): não existe pacote de volta — o texto padrão ("O pacote da
+            # devolução ainda não chegou até nós") contradizia o caso; vai o texto do
+            # só reembolso (alegação do comprador + a entrega da IDA pela SPX). E sem
+            # foto nem vídeo da expedição a disputa não tem imagem pra anexar (a
+            # Shopee exige): ficava "aguardando foto" de um produto que não voltou,
+            # até 45 dias, enquanto a janela da disputa fechava. Vai pro robô, no
+            # Assistente do Vendedor — o mesmo caminho do "Não recebido" com pacote.
+            base = texto_padrao(
+                dev, reason_para(dev),
+                fotos=len([a for a in fotos if not _e_cartao_video(a)]),
+                link_envio=link_video or cartao_link or None, cartao_video=com_cartao,
+                linhas=linhas, observacao_extra=texto_operador,
+            )
+            texto = await _texto_robo_shopee_reembolso(session, dev, det, fotos, base)
+            texto_so_reembolso = True
             if msg is not None:
                 msg.texto = texto
+            if not fotos:
+                raise _RoboError(texto, _nota_robo_so_reembolso_sem_prova(det, return_sn))
     if nao_recebido:
         entregue_em = logistica_shopee._entregue_em_do_detalhe(det)
         texto = _texto_nao_recebido(
             dev, det, await _rastreio_reversa_shopee(session, dev, det), entregue_em,
-            observacao_extra=texto_operador,
+            observacao_extra=texto_operador, linhas_pedido=linhas,
         )
         if msg is not None:
             msg.texto = texto
@@ -2123,7 +2232,9 @@ async def _disparar_shopee(
             # dá pra responder o caso, responde pela API; se não, abre CHAMADO pelo
             # robô do Seller Center, com os fatos, o vídeo e as fotos.
             raise _RoboError(
-                await _texto_robo_shopee_reembolso(session, dev, det, fotos, texto),
+                texto
+                if texto_so_reembolso
+                else await _texto_robo_shopee_reembolso(session, dev, det, fotos, texto),
                 _nota_robo_shopee_reembolso(det, return_sn),
             )
         # Medido 07/09: depois do `return_seller_due_date` (prazo de validação do
@@ -2143,15 +2254,10 @@ async def _disparar_shopee(
     # A Shopee exige foto em todo motivo "recebi com problema"; e disputa sem
     # `image_list` num motivo com módulo obrigatório é recusada ("Unable to
     # raise dispute as mandatory module index is missing", 289462 em 07/09).
-    # Sem foto, fica pendente esperando o operador anexar. (O "não recebi" com pacote
-    # de volta não passa mais por aqui — sai pelo robô lá em cima; o que sobra do
-    # motivo é o só-reembolso, que prova a IDA com o cartão do vídeo. Ele continua
-    # podendo disputar sem imagem quando a Shopee não exige módulo: ficar `pendente`
-    # esperando uma foto que ninguém vai anexar seria mentira.)
-    exige_foto = motivo != MOTIVO_NAO_RECEBIDO or any(
-        m.get("is_required", True) for m in modulos
-    )
-    if not fotos and exige_foto:
+    # Sem foto, fica pendente esperando o operador anexar. ("Não recebido" nunca chega
+    # aqui sem imagem: com pacote de volta sai pelo robô lá em cima e, desde 24/09, o
+    # só reembolso sem foto nem vídeo também — só passa com o cartão ou foto real.)
+    if not fotos:
         raise _PendenteError("devolucao_sem_foto")
     urls: list[str] = []
     for a in fotos:
@@ -2276,7 +2382,7 @@ async def _disparar(
             fotos = []
     msg.texto = (texto_override or "").strip() or texto_padrao(
         dev, reason, fotos=len(fotos_reais), link_envio=link or None,
-        cartao_video=cartao is not None,
+        cartao_video=cartao is not None, linhas=linhas,
     )
     referencia = detalhe = None
     try:
@@ -2291,7 +2397,7 @@ async def _disparar(
             referencia, detalhe = await _disparar_shopee(
                 session, ch, dev, fotos, msg.texto, msg=msg,
                 texto_operador=(texto_override or "").strip() or None,
-                cartao_link=cartao_shopee, anexos=anexos,
+                cartao_link=cartao_shopee, anexos=anexos, linhas=linhas, link_video=link,
             )
         else:
             raise chamados_svc.ChamadoError("plataforma_sem_api")

@@ -271,6 +271,10 @@ async def test_so_reembolso_nao_recebido_continua_com_cartao(client, make_user, 
     d = fake.disputes[0]
     assert d["reason"] == 1 and d["image_list"][0]["image_url"] == ["https://fileproxy/video-expedicao.png"]
     assert "QR code" in d["text"] and "https://mega.nz/file/video-296008#K3yDoVideoNaMega0123456789abcdefghij" in d["text"]
+    # 24/09: não há pacote de volta — o texto é o do só reembolso, não "o pacote não chegou"
+    assert d["text"].startswith("O comprador pediu reembolso SEM devolução do produto alegando que não recebeu o pedido. A Shopee aprovou"), d["text"]
+    assert "O pacote da devolução" not in d["text"] and "Solicitamos a análise do caso" not in d["text"]
+    assert "Pedido 2609ATVNR008 · SKU b001.26 · Mala Listrada tamanho 26." in d["text"]
 
 
 async def test_link_envio_obrigatorio_exclui_nao_recebido(client, make_user, auth_as, db, inline, monkeypatch):
@@ -697,3 +701,91 @@ async def test_nao_recebido_em_estado_que_esperava_pacote_vai_pro_robo(client, m
     assert r2.json()["chamado_ml_status"] == "pendente", r2.json()
     assert r2.json()["chamado_ml_erro"] == "shopee_aguardando_pacote", r2.json()
     assert fake2.disputes == []
+
+
+# ---- 24/09 (Vinicius, 296012): só reembolso sem prova + pedido com 2 produtos
+
+async def test_so_reembolso_sem_foto_nem_video_vai_pro_robo_com_os_produtos_com_problema(client, make_user, auth_as, db, inline, monkeypatch):
+    """Só reembolso ("o cliente foi reembolsado e não devolveu o produto") lançado como
+    "Não recebido", sem foto e sem vídeo: ficava `pendente` "aguardando foto" de um
+    produto que nunca voltou, com o texto "O pacote da devolução ainda não chegou". Agora
+    vai pro robô na hora, com o texto do só reembolso. E o pedido tinha 2 produtos com
+    problema e o texto citava 1: cita os 2 — e só eles (a linha de Item Incorreto fica
+    de fora: "se apenas 1 produto tá com problema coloca apenas 1")."""
+    fake = _FakeShopee(entregue=False)
+    chamadas = {"reasons": 0}
+
+    async def _det(return_sn):
+        return {"return_sn": return_sn, "status": "ACCEPTED", "return_solution": 1, "needs_logistics": False,
+                "reason": "NOT_RECEIPT", "refund_amount": 189.9,
+                "seller_compensation": {"seller_compensation_status": "PENDING_REQUEST"}}
+
+    async def _reasons(return_sn):
+        chamadas["reasons"] += 1
+        return [{"dispute_reason": 1, "dispute_requirement": "Prova de envio",
+                 "evidence_module_list": [{"module_index": 1, "requirement": "Comprovante", "is_required": True}]}]
+
+    fake.get_return_detail = _det
+    fake.get_return_dispute_reason = _reasons
+    # as outras linhas do pedido já estão na tela (a tela grava uma linha por produto)
+    db.add(Devolution(conta="atv", pedido_bling="296012", pedido_marketplace="260910MATESNVN",
+                      sku="a001.pi", produtos="Fone com fio Uranyx UFF001", condicao_produto="Não devolvido",
+                      motivo_devolucao="Não recebido"))
+    db.add(Devolution(conta="atv", pedido_bling="296012", pedido_marketplace="260910MATESNVN",
+                      sku="c777.az", produtos="Capa Azul", condicao_produto="Novo",
+                      motivo_devolucao="Item Incorreto"))
+    await db.commit()
+    r, _user = await _lancar(
+        client, db, make_user, auth_as, monkeypatch, fake, numero="296012", sn="260910MATESNVN",
+        observacao="o cliente foi reembolsado, e nao devolveu o produto",
+    )
+    assert r.json()["chamado_ml_status"] == "pendente" and r.json()["chamado_ml_erro"] is None, r.json()
+    assert fake.disputes == [] and chamadas["reasons"] == 0
+    ch = await _chamado_de(db, "296012")
+    ab = await _abertura(db, ch.id)
+    assert ch.canal == "robo" and ab.canal == "robo" and ab.status == "pendente", (ch.canal, ab.canal, ab.status)
+    txt = ab.texto
+    assert txt.startswith(
+        "O comprador pediu reembolso SEM devolução do produto alegando que não recebeu o pedido. "
+        "A Shopee aprovou o reembolso de R$ 189.9"
+    ), txt
+    assert ("Pedido 260910MATESNVN · Produtos: SKU b001.26 (Mala Listrada tamanho 26); "
+            "SKU a001.pi (Fone com fio Uranyx UFF001).") in txt, txt
+    assert "c777.az" not in txt and "Capa Azul" not in txt
+    assert "Observação: o cliente foi reembolsado, e nao devolveu o produto" in txt
+    assert "O pacote da devolução" not in txt and "QR code" not in txt
+    hist = await _sistema_txts(db, ch.id)
+    assert any("não tem foto nem vídeo da expedição" in t and "Assistente do Vendedor" in t for t in hist), hist
+    await _sem_cartao(db, ch.id)
+
+
+async def test_texto_so_reembolso_ainda_nao_aprovado_nao_diz_que_a_shopee_aprovou(db):
+    dev = Devolution(pedido_marketplace="2609X", sku="b001.26", produtos="Mala", motivo_devolucao="Não recebido")
+    det = {"status": "REQUESTED", "reason": "NOT_RECEIPT", "refund_amount": 89.9}
+    base = svc.texto_padrao(dev, svc.reason_para(dev))
+    txt = await svc._texto_robo_shopee_reembolso(db, dev, det, [], base)
+    assert txt.split("\n")[0] == (
+        "O comprador pediu reembolso SEM devolução do produto alegando que não recebeu o pedido (R$ 89.9)."
+    ), txt
+    assert "aprovou" not in txt and "Pedido 2609X · SKU b001.26 · Mala." in txt
+
+
+def test_texto_padrao_cita_so_os_produtos_com_problema_e_soma_unidades():
+    dev = Devolution(pedido_marketplace="2609X", sku="b001.26", produtos="Mala", motivo_devolucao="Golpe",
+                     observacao="caixa aberta")
+    outra_unidade = Devolution(pedido_marketplace="2609X", sku="b001.26", produtos="Mala", motivo_devolucao="Golpe",
+                               observacao="caixa aberta")
+    fone = Devolution(pedido_marketplace="2609X", sku="a001.pi", produtos="Fone", motivo_devolucao="Item faltando",
+                      observacao="sem o cabo")
+    sem_problema = Devolution(pedido_marketplace="2609X", sku="c777.az", produtos="Capa", motivo_devolucao=None)
+    # uma linha só: igual a antes
+    assert svc.texto_padrao(dev, "SRF5").split("\n")[1] == "Pedido 2609X · SKU b001.26 · Mala."
+    txt = svc.texto_padrao(dev, "SRF5", linhas=[dev, sem_problema, fone, outra_unidade])
+    linhas = txt.split("\n")
+    assert linhas[1] == "Pedido 2609X · Produtos: 2x SKU b001.26 (Mala); SKU a001.pi (Fone).", txt
+    assert linhas[2] == "Observação: caixa aberta sem o cabo", txt
+    assert "Capa" not in txt
+    # 2 unidades do mesmo produto e nada mais
+    assert svc.texto_padrao(dev, "SRF5", linhas=[dev, outra_unidade]).split("\n")[1] == (
+        "Pedido 2609X · 2x SKU b001.26 · Mala."
+    )
