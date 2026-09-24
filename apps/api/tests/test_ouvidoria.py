@@ -204,6 +204,10 @@ SEIS_ROBOS = {
     "vigia_chamados": ("chamados", ["ml", "shopee", "tiktok"],
                        {"cadencia_min": 30, "encerrado_dias": 3,
                         "consultas_falhas_seguidas": 3}),
+    # 24/09/2026: o executor do "Suspender entrega" (Mac Santiago).
+    "vigia_robo_melhorenvio": ("logistica", ["amazon"],
+                               {"cadencia_min": 10, "pendente_min": 30,
+                                "executor_offline_min": 10}),
 }
 
 

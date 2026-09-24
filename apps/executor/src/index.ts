@@ -289,7 +289,11 @@ async function tick(): Promise<void> {
   }
 }
 
-/** Sinal de vida + saúde do AdsPower (nº de perfis é uma prova de conexão). */
+/** Sinal de vida + saúde do AdsPower (nº de perfis é uma prova de conexão).
+ *  Cada fila tem o seu: o da Shopee acende o badge do Marketing; o do Melhor
+ *  Envio é o que a Ouvidoria ("Vigia Robô Melhor Envio") olha. Máquina que não
+ *  faz Shopee não manda o da Shopee, senão o badge mentiria com a Shopee
+ *  parada. */
 async function sendHeartbeat(): Promise<void> {
   let adspowerOk: boolean | null = null;
   let accountsOnline: number | null = null;
@@ -300,23 +304,42 @@ async function sendHeartbeat(): Promise<void> {
   } catch {
     adspowerOk = false;
   }
-  try {
-    await davinci.heartbeat({
-      agent_name: cfg.agentName,
-      version: VERSION,
-      adspower_ok: adspowerOk,
-      accounts_online: accountsOnline,
-      info: { calibrated: cfg.calibrated, default_mode: cfg.defaultMode },
-    });
-  } catch (err: any) {
-    log.error(`heartbeat falhou: ${String(err?.message || err)}`);
+  if (cfg.filas.has("shopee")) {
+    try {
+      await davinci.heartbeat({
+        agent_name: cfg.agentName,
+        version: VERSION,
+        adspower_ok: adspowerOk,
+        accounts_online: accountsOnline,
+        info: { calibrated: cfg.calibrated, default_mode: cfg.defaultMode },
+      });
+    } catch (err: any) {
+      log.error(`heartbeat falhou: ${String(err?.message || err)}`);
+    }
+  }
+  if (cfg.filas.has("melhorenvio")) {
+    try {
+      await davinci.heartbeatLogistica({
+        agent_name: cfg.agentName,
+        version: VERSION,
+        adspower_ok: adspowerOk,
+        info: {
+          filas: [...cfg.filas],
+          melhorenvio_calibrated: cfg.melhorEnvioCalibrated,
+          perfil_melhorenvio: Boolean(cfg.melhorEnvioAdspowerUserId),
+        },
+      });
+    } catch (err: any) {
+      log.error(`heartbeat logística falhou: ${String(err?.message || err)}`);
+    }
   }
 }
 
 async function main(): Promise<void> {
   log.info(
     `davinci-executor v${VERSION} — api=${cfg.davinciApiUrl} agent=${cfg.agentName} ` +
-      `filas=${[...cfg.filas].join(",") || "(nenhuma)"} calibrated=${cfg.calibrated} mode=${cfg.defaultMode}`
+      `filas=${[...cfg.filas].join(",") || "(nenhuma)"}` +
+      (cfg.filas.has("shopee") ? ` calibrated=${cfg.calibrated} mode=${cfg.defaultMode}` : "")
   );
   if (!cfg.filas.size) {
     log.error("EXECUTOR_FILAS sem nenhuma fila válida (shopee, melhorenvio, tuta) — nada a fazer.");
@@ -341,10 +364,8 @@ async function main(): Promise<void> {
     );
   }
 
-  // Heartbeat imediato + periódico (o dashboard mostra ONLINE em < 120s). É o
-  // badge do executor da SHOPEE: máquina sem `shopee` (o Mac Santiago, só
-  // Melhor Envio) não manda, senão o badge mentiria com a Shopee parada.
-  if (cfg.filas.has("shopee")) {
+  // Heartbeat imediato + periódico (o DaVinci considera ONLINE em < 120s).
+  if (cfg.filas.has("shopee") || cfg.filas.has("melhorenvio")) {
     await sendHeartbeat();
     setInterval(() => {
       void sendHeartbeat();

@@ -69,6 +69,7 @@ from app.schemas.logistica import (
     OpcoesOut,
     RecarregarOut,
     RecarregarStatusOut,
+    RoboHeartbeatIn,
     RoboLeaseIn,
     RoboLeaseOut,
     RoboResultadoIn,
@@ -928,6 +929,24 @@ async def robo_lease(
     return RoboLeaseOut(
         comandos=await logistica_robo.lease(session, limit=body.limit, acoes=body.acoes)
     )
+
+
+@router.post("/agent/heartbeat")
+async def robo_heartbeat(
+    body: RoboHeartbeatIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _tok: Annotated[None, Depends(_require_agent_token_logistica())],
+) -> dict:
+    """Sinal de vida do executor do Melhor Envio — a Ouvidoria avisa quando
+    ele some (vigia_robo_melhorenvio)."""
+    await logistica_robo.registrar_heartbeat(
+        session,
+        agent_name=body.agent_name,
+        version=body.version,
+        adspower_ok=body.adspower_ok,
+        info=body.info,
+    )
+    return {"ok": True}
 
 
 @router.post("/agent/comandos/{comando_id}/resultado")

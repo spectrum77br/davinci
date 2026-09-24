@@ -211,6 +211,16 @@ class RoboLeaseIn(BaseModel):
     acoes: list[str] | None = None
 
 
+class RoboHeartbeatIn(BaseModel):
+    """Sinal de vida do executor do Melhor Envio (a cada ~60 s). Quem lê é a
+    Ouvidoria (vigia_robo_melhorenvio)."""
+
+    agent_name: str = Field(default="executor", min_length=1, max_length=48)
+    version: str | None = None
+    adspower_ok: bool | None = None
+    info: dict = Field(default_factory=dict)
+
+
 class RoboComandoOut(BaseModel):
     id: UUID
     logistica_id: UUID

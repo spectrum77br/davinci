@@ -315,6 +315,27 @@ ROBOS: dict[str, RoboDef] = {
         },
         modo_padrao="silencioso",
     ),
+    "vigia_robo_melhorenvio": RoboDef(
+        chave="vigia_robo_melhorenvio",
+        nome="Vigia Robô Melhor Envio",
+        descricao=(
+            "O robô do Mac Santiago que faz o \"Suspender entrega\" no Melhor "
+            "Envio: robô sem sinal (Mac desligado ou dormindo, AdsPower fechado), "
+            "pedido de suspensão parado na fila e suspensão que falhou com o "
+            "pacote ainda a caminho."
+        ),
+        area="logistica",
+        cadencia_texto="a cada 10 min (:09/:19/:29/:39/:49/:59)",
+        plataformas=("amazon",),
+        config_padrao={"cadencia_min": 10, "pendente_min": 30, "executor_offline_min": 10},
+        env_threema_recipients=None,
+        parametros={
+            "cadencia_min": Parametro("Cadência esperada", 1, 24 * 60, "min"),
+            "pendente_min": Parametro("Suspensão na fila há mais de", 5, 24 * 60, "min"),
+            "executor_offline_min": Parametro("Robô sem sinal há", 2, 240, "min"),
+        },
+        modo_padrao="silencioso",
+    ),
 }
 
 # Threema ID: 8 caracteres (A-Z, 0-9); ID de gateway começa com "*".

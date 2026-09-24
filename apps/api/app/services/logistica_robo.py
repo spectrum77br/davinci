@@ -37,6 +37,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Logistica, LogisticaRoboComando
+from app.models.marketing import AGENTE_LOGISTICA_PREFIXO, MarketingAgentHeartbeat
 from app.services import logistica_amazon_canal, logistica_track, tuta_devolucoes
 
 logger = structlog.get_logger()
@@ -153,6 +154,47 @@ async def lease(
         await session.commit()
     logger.info("logistica_robo_lease", leased=len(out), acoes=acoes)
     return out
+
+
+async def registrar_heartbeat(
+    session: AsyncSession,
+    *,
+    agent_name: str,
+    version: str | None,
+    adspower_ok: bool | None,
+    info: dict[str, Any],
+) -> None:
+    """Carimba o sinal de vida do executor do Melhor Envio (uma linha por nome,
+    na tabela do executor da Shopee com o prefixo — ver AGENTE_LOGISTICA_PREFIXO)."""
+    nome = f"{AGENTE_LOGISTICA_PREFIXO}{agent_name}"
+    hb = (
+        await session.execute(
+            select(MarketingAgentHeartbeat).where(MarketingAgentHeartbeat.agent_name == nome)
+        )
+    ).scalar_one_or_none()
+    if hb is None:
+        hb = MarketingAgentHeartbeat(agent_name=nome)
+        session.add(hb)
+    dados = dict(info or {})
+    if version:
+        dados.setdefault("version", version)
+    hb.last_seen_at = datetime.now(UTC)
+    hb.adspower_ok = adspower_ok
+    hb.info = dados
+    await session.commit()
+
+
+async def ultimo_heartbeat(session: AsyncSession) -> MarketingAgentHeartbeat | None:
+    """O executor do Melhor Envio que deu sinal por último."""
+    return (
+        await session.execute(
+            select(MarketingAgentHeartbeat)
+            .where(MarketingAgentHeartbeat.agent_name.startswith(AGENTE_LOGISTICA_PREFIXO))
+            # DESC no Postgres põe NULL na frente.
+            .order_by(MarketingAgentHeartbeat.last_seen_at.desc().nulls_last())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
 
 
 async def registrar_resultado(

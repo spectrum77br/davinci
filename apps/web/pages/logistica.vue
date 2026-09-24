@@ -1201,6 +1201,9 @@ onMounted(() => {
     tab.value = tabQuery as PlataformaTab | 'status'
   }
   if (buscaQuery) search.value = buscaQuery
+  // `&sub=proprio`: a ocorrência do "Vigia Robô Melhor Envio" é de Envio
+  // próprio — sem isto a aba Amazon abriria no DBA e o pedido não apareceria.
+  if (query.sub === 'proprio' || query.sub === 'dba') amazonSub.value = query.sub
   if (!statusLoaded) refreshStatus()
   carregarStatusCorreios()
   autoRefreshTimer = setInterval(autoRefreshTick, AUTO_REFRESH_MS)

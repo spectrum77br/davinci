@@ -28,8 +28,10 @@ O mesmo código roda em mais de um Mac; cada um liga só o que faz:
 
 O servidor só entrega a suspensão (`melhorenvio_suspender`) pra quem a declara
 no lease — executor sem `acoes` (versão antiga) não pega mais. Ligue
-`melhorenvio` em **uma** máquina só. Só quem faz `shopee` manda sinal de vida
-(o badge "Executor local" do Marketing); o Mac Santiago não acende esse badge.
+`melhorenvio` em **uma** máquina só. O sinal de vida também é separado: o de
+quem faz `shopee` acende o badge "Executor local" do Marketing; o de quem faz
+`melhorenvio` vai pra Ouvidoria › Robôs ("Vigia Robô Melhor Envio"), que avisa
+quando o robô some, o AdsPower fecha ou uma suspensão fica parada/falha.
 
 ## Por que roda no Mac (e não na nuvem)
 

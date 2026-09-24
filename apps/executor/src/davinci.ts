@@ -111,3 +111,14 @@ export async function reportLogistica(
 export async function heartbeat(payload: HeartbeatPayload): Promise<void> {
   await post("/api/marketing/agent/heartbeat", payload);
 }
+
+/** Sinal de vida do robô do Melhor Envio — quem olha é a Ouvidoria (Vigia
+ *  Robô Melhor Envio), separado do badge do Marketing. */
+export async function heartbeatLogistica(payload: HeartbeatPayload): Promise<void> {
+  await post("/api/logistica/agent/heartbeat", {
+    agent_name: payload.agent_name,
+    version: payload.version,
+    adspower_ok: payload.adspower_ok,
+    info: payload.info ?? {},
+  });
+}

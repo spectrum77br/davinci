@@ -177,3 +177,28 @@ async def test_lease_divide_por_maquina(db: AsyncSession, admin: User):
     # Declarar lista vazia = não quero nada.
     assert await robo.lease(db, limit=5, acoes=[]) == []
 
+
+@pytest.mark.asyncio
+async def test_sinal_de_vida_do_robo_separado_do_marketing(
+    client: AsyncClient, agent_token, db: AsyncSession, admin: User
+):
+    """O executor do Melhor Envio carimba o próprio sinal (que a Ouvidoria lê)
+    e o badge do executor da Shopee não o enxerga."""
+    from app.models.marketing import MarketingAgentHeartbeat
+    from app.routers.marketing import agent_status
+
+    corpo = {"agent_name": "santiago", "version": "1.1.0", "adspower_ok": True,
+             "info": {"melhorenvio_calibrated": True}}
+    r = await client.post("/api/logistica/agent/heartbeat", json=corpo)
+    assert r.status_code == 401
+    r = await client.post("/api/logistica/agent/heartbeat", json=corpo, headers=agent_token)
+    assert r.status_code == 200
+
+    hb = await robo.ultimo_heartbeat(db)
+    assert hb is not None and hb.agent_name == "logistica:santiago"
+    assert hb.adspower_ok is True and hb.info["version"] == "1.1.0"
+    assert (await agent_status(session=db, _user=admin))["online"] is False
+
+    await db.execute(MarketingAgentHeartbeat.__table__.delete())
+    await db.commit()
+

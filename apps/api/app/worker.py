@@ -2658,6 +2658,38 @@ async def vigia_marketing_comandos_tick(ctx: dict) -> None:
         logger.exception("vigia_marketing_comandos_unhandled")
 
 
+async def vigia_robo_melhorenvio_tick(ctx: dict) -> None:
+    """Vigia Robô Melhor Envio (robô da Ouvidoria): o executor do Mac Santiago
+    que faz o "Suspender entrega" sem sinal, AdsPower fechado, suspensão parada
+    na fila ou que falhou com o pacote ainda a caminho."""
+    try:
+        async with session_scope() as s:
+            modo = await ouvidoria_modo(s, "vigia_robo_melhorenvio")
+        if modo == "desligado":
+            logger.debug("vigia_robo_melhorenvio_desligado")
+            return
+        try:
+            from app.services.vigia_robo_melhorenvio import (
+                vigia_robo_melhorenvio_sweep,
+            )
+        except ImportError:
+            logger.warning("vigia_robo_melhorenvio_sem_servico")
+            return
+        summary = await vigia_robo_melhorenvio_sweep() or {}
+        if any(
+            summary.get(k)
+            for k in (
+                "novas", "sumiram", "suspensoes_pendentes", "suspensoes_presas",
+                "suspensoes_falhas", "avisadas",
+            )
+        ):
+            logger.info("vigia_robo_melhorenvio_done", **summary)
+        else:
+            logger.debug("vigia_robo_melhorenvio_noop", **summary)
+    except Exception:  # noqa: BLE001
+        logger.exception("vigia_robo_melhorenvio_unhandled")
+
+
 async def vigia_margem_tick(ctx: dict) -> None:
     """Robô da Margem (robô da Ouvidoria): pedido que o robô segurou no Bling
     e ninguém decidiu, falha do robô ao segurar/liberar (aberta por hook no
@@ -3441,6 +3473,7 @@ class WorkerSettings:
         vigia_marketing_comandos_tick,
         vigia_margem_tick,
         vigia_chamados_tick,
+        vigia_robo_melhorenvio_tick,
     ]
     cron_jobs = [
         # A consulta bem-sucedida agenda a próxima em 24h; falhas tentam de novo em 1h.
@@ -3776,6 +3809,12 @@ class WorkerSettings:
         ),
         cron(vigia_margem_tick, minute={17, 47}, run_at_startup=False),
         cron(vigia_chamados_tick, minute={27, 57}, run_at_startup=False),
+        # Robô do Melhor Envio: a cada 10 min em :09… (só banco).
+        cron(
+            vigia_robo_melhorenvio_tick,
+            minute={9, 19, 29, 39, 49, 59},
+            run_at_startup=False,
+        ),
         # Espelho das NF-e das contas de emissão (página Pós Vendas). As
         # contas bling_notas são apps OAuth próprios — rate independente do
         # app principal; o custo por rodada é 1-2 páginas de lista por conta

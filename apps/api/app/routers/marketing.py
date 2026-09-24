@@ -29,6 +29,7 @@ from app.db import get_session
 from app.deps.auth import require_permission
 from app.models import User
 from app.models.marketing import (
+    AGENTE_LOGISTICA_PREFIXO,
     MarketingAccount,
     MarketingAgentHeartbeat,
     MarketingCampaign,
@@ -1150,6 +1151,7 @@ async def agent_status(
     hb = (
         await session.execute(
             select(MarketingAgentHeartbeat)
+            .where(~MarketingAgentHeartbeat.agent_name.startswith(AGENTE_LOGISTICA_PREFIXO))
             .order_by(MarketingAgentHeartbeat.last_seen_at.desc())
             .limit(1)
         )

@@ -66,6 +66,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import session_scope
 from app.models import OuvidoriaOcorrencia, OuvidoriaRobo
 from app.models.marketing import (
+    AGENTE_LOGISTICA_PREFIXO,
     MarketingAccount,
     MarketingAgentHeartbeat,
     MarketingCommand,
@@ -621,6 +622,7 @@ async def _executor(
     hb = (
         await session.execute(
             select(MarketingAgentHeartbeat)
+            .where(~MarketingAgentHeartbeat.agent_name.startswith(AGENTE_LOGISTICA_PREFIXO))
             # DESC no Postgres põe NULL na frente: sem o nulls_last uma linha
             # que nunca carimbou `last_seen_at` roubaria o lugar da boa.
             .order_by(MarketingAgentHeartbeat.last_seen_at.desc().nulls_last()).limit(1)

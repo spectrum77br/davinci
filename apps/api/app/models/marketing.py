@@ -269,10 +269,19 @@ class MarketingPattern(Base, TimestampMixin):
     discovered_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+# O executor do Melhor Envio (Mac Santiago, desde 24/09/2026) grava o sinal de
+# vida nesta mesma tabela com o nome prefixado — quem olha é a Ouvidoria
+# (vigia_robo_melhorenvio). Quem lê a presença do executor da SHOPEE tem que
+# pular essas linhas, senão o badge do Marketing fica "online" com o executor
+# da Shopee desligado.
+AGENTE_LOGISTICA_PREFIXO = "logistica:"
+
+
 class MarketingAgentHeartbeat(Base, TimestampMixin):
     """Presence of the external local executor (marionete). One row per
     `agent_name` (singleton in practice). The dashboard renders online/offline
-    from `last_seen_at` (online if seen within the last ~120s)."""
+    from `last_seen_at` (online if seen within the last ~120s). Rows named
+    `AGENTE_LOGISTICA_PREFIXO…` belong to the Melhor Envio executor."""
 
     __tablename__ = "marketing_agent_heartbeat"
 
