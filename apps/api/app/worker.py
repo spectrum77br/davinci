@@ -1,4 +1,5 @@
 import asyncio
+import json
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, time, timedelta
 from typing import Any
@@ -6,7 +7,7 @@ from uuid import UUID
 from zoneinfo import ZoneInfo
 
 import structlog
-from arq import cron
+from arq import Retry, cron
 from arq.connections import RedisSettings
 from arq.worker import func
 from sqlalchemy import and_, delete, or_, select, text, update
@@ -67,6 +68,7 @@ from app.services.logistica_ingest import (
     run_ingest_ml_daily,
     sweeps_pos_venda,
 )
+from app.services.marketing import metricas as _metricas
 from app.services.marketplace_financials import (
     run_due_marketplace_financial_retries,
     run_sync_marketplace_financials_for_bling_order,
@@ -1171,34 +1173,106 @@ async def marketing_autopostagem(ctx: dict) -> None:
         logger.info("marketing_autopostagem_tick", **r)
 
 
-async def marketing_postagens_metricas(ctx: dict) -> None:
-    """Quanto cada vídeo publicado rendeu (Eduardo, 23/09/2026) — 1x por dia.
+async def _rodar_metricas(modo: str) -> None:
+    """Uma rodada da leitura dos vídeos publicados, com uma rodada por vez.
 
-    Um RETRATO por dia por publicação. As três redes devolvem número acumulado
-    ("este vídeo tem 400 views"), nunca o do dia; é a diferença entre dois
-    retratos que responde "quanto rendeu esta semana", que é metade do que ele
-    pediu. Por isso roda diário e não de hora em hora: medir mais vezes não
-    traz informação nova, só gasta cota.
+    A trava no Redis existe porque agora são três portas pra mesma leitura (a
+    noite, o passe de hora em hora e o botão da tela) e duas rodadas juntas
+    leriam o mesmo post do TikTok duas vezes do mesmo IP. Travado: o passe de
+    hora em hora e o botão simplesmente não rodam (o próximo resolve); a da
+    noite tenta de novo em 5 min, porque é ela que fecha o retrato do dia.
 
-    De madrugada (04:20 BRT ≈ 07:20 UTC) por dois motivos: o dia anterior já
-    fechou, e é o horário mais vazio do servidor — a coleta é lenta (uma ida na
-    rede por post do TikTok e do Instagram) e não tem pressa nenhuma.
-
-    Cada rede é isolada dentro do serviço: TikTok fora do ar não impede o
-    YouTube de ser lido, e a falha fica gravada NA LINHA — coleta falha baixo,
-    e número velho parecendo novo é pior que número faltando.
+    Sem Redis, roda sem trava (falha aberta): leitura dobrada é menos ruim
+    que noite sem leitura. No fim grava a `ultima_rodada`, que é como a tela
+    sabe que o "Atualizar agora" terminou.
     """
     if not _settings.enable_marketing:
         return
     from app.services.marketing.metricas import coletar
 
-    async with session_scope() as s:
-        try:
-            r = await coletar(s)
-        except Exception as e:  # noqa: BLE001
-            logger.error("marketing_metricas_failed", err=str(e)[:300])
+    travou = False
+    try:
+        travou = bool(await redis.set(_metricas.CHAVE_RODANDO, modo, nx=True, ex=1800))
+        if not travou:
+            if modo == "completo":
+                raise Retry(defer=300)
+            logger.info("marketing_metricas_pulada", modo=modo, motivo="outra_rodada_em_andamento")
             return
-    logger.info("marketing_metricas_tick", **r)
+    except Retry:
+        raise
+    except Exception as e:  # noqa: BLE001 — Redis fora: roda sem trava
+        logger.warning("marketing_metricas_trava_indisponivel", modo=modo, err=str(e)[:200])
+
+    inicio = datetime.now(UTC)
+    r: dict[str, int] = {"total": 0, "ok": 0, "falhou": 0}
+    # A da noite grava no dia DA NOITE mesmo se começou depois da meia-noite
+    # (fila atrasada, ou o Retry de 5 min): é o retrato do fim daquele dia.
+    dia = _metricas.dia_da_noite(inicio) if modo == "completo" else None
+    try:
+        async with session_scope() as s:
+            try:
+                r = await coletar(s, modo=modo, dia=dia)
+            except Exception as e:  # noqa: BLE001
+                logger.error("marketing_metricas_failed", modo=modo, err=str(e)[:300])
+    finally:
+        try:
+            if travou:
+                await redis.delete(_metricas.CHAVE_RODANDO)
+            await redis.set(
+                _metricas.CHAVE_ULTIMA_RODADA,
+                json.dumps(
+                    {
+                        "modo": modo,
+                        "inicio": inicio.isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+                        "fim": datetime.now(UTC)
+                        .isoformat(timespec="milliseconds")
+                        .replace("+00:00", "Z"),
+                        **r,
+                    }
+                ),
+                ex=8 * 86400,
+            )
+        except Exception as e:  # noqa: BLE001 — o TTL solta a trava sozinho
+            logger.warning("marketing_metricas_fim_sem_redis", modo=modo, err=str(e)[:200])
+    logger.info("marketing_metricas_tick", modo=modo, **r)
+
+
+async def marketing_postagens_metricas(ctx: dict) -> None:
+    """Quanto cada vídeo publicado rendeu (Eduardo, 23/09/2026) — a leitura da noite.
+
+    Um RETRATO por dia por publicação. As três redes devolvem número acumulado
+    ("este vídeo tem 400 views"), nunca o do dia; é a diferença entre dois
+    retratos que responde "quanto rendeu esta semana".
+
+    Às 23:47 BRT (02:47 UTC) desde 24/09/2026 — era 04:20. Às 23:47 o dia D
+    quase fechou, então o retrato de D é o número do FIM de D, e "views
+    ganhas por dia" cai no dia certo. O das 04:20 de D era, na prática, o fim
+    de D-1: o ganho de cada dia aparecia no dia seguinte. E a comparação "na
+    mesma idade" (D+1, D+3, D+7) precisa de uma leitura perto do fim de cada
+    dia de vida do vídeo. Lê TUDO, o mais atrasado primeiro.
+    """
+    await _rodar_metricas("completo")
+
+
+async def marketing_postagens_metricas_recentes(ctx: dict) -> None:
+    """De hora em hora (menos na hora da noite): o vídeo novo e a falha recente.
+
+    Eduardo, 24/09/2026: "esses vídeos ainda não aparecem… será que demora?".
+    Demorava até 16 h — o vídeo só ganhava número na leitura da madrugada.
+    Este passe lê o que NUNCA foi lido (com 20 min de publicado), e tenta de
+    novo o que falhou nos últimos 14 dias. Não relê o resto: número acumulado
+    lido de hora em hora não traz informação nova, só gasta cota e IP.
+    """
+    await _rodar_metricas("recentes")
+
+
+async def marketing_postagens_metricas_agora(ctx: dict) -> None:
+    """O botão "Atualizar agora" da tela (fila UI, não cron).
+
+    Lê o nunca lido e a última semana que não foi lida nos últimos 10 min. A
+    trava de 10 min do botão fica no router; aqui é a mesma rodada de sempre.
+    """
+    await _rodar_metricas("agora")
 
 
 async def marketing_postagens_reconciliar(ctx: dict) -> None:
@@ -3702,17 +3776,33 @@ class WorkerSettings:
             run_at_startup=False,
             timeout=300,
         ),
-        # Métricas dos vídeos publicados: 1x por dia, 04:20 BRT (07:20 UTC).
-        # Diário porque o número é acumulado — medir de hora em hora não traz
-        # informação nova, só gasta cota da Meta e do Google. `timeout=900`
-        # com folga: são duas idas na rede por post (TikTok e Instagram) e o
-        # YouTube vai em lote de 50.
+        # Métricas dos vídeos publicados (24/09/2026). A da noite, às 23:47
+        # BRT (02:47 UTC), lê tudo: o retrato do dia D fica sendo o número do
+        # fim de D, e "views ganhas por dia" cai no dia certo. Nas outras 23
+        # horas, no mesmo :47, o passe curto lê o vídeo que ainda não tem
+        # número (vídeo novo ganha número em até 1 hora, não 16) e retenta a
+        # falha recente — reler o resto de hora em hora não traz informação.
+        # `timeout=1800` na da noite: uma pausa de 1 s entre páginas do TikTok
+        # e até 600 posts. A trava no Redis põe uma rodada por vez.
+        # `max_tries=7`: travada, a da noite levanta Retry(defer=300) — e o
+        # `cron()` do arq tem max_tries=1 por padrão (o 3 do WorkerSettings
+        # não vale pra cron), então o Retry morria sem rodar e o dia ficava
+        # sem o retrato do fim. 6 retentativas de 5 min = 30 min, o TTL da
+        # trava: nem trava órfã (worker morto no deploy) fica sem a noite.
         cron(
             marketing_postagens_metricas,
-            hour={7},
-            minute={20},
+            hour={_metricas.HORA_NOTURNA_UTC},
+            minute={_metricas.MINUTO_COLETA},
             run_at_startup=False,
-            timeout=900,
+            timeout=1800,
+            max_tries=7,
+        ),
+        cron(
+            marketing_postagens_metricas_recentes,
+            hour=set(range(24)) - {_metricas.HORA_NOTURNA_UTC},
+            minute={_metricas.MINUTO_COLETA},
+            run_at_startup=False,
+            timeout=600,
         ),
         # Publicação autônoma: de hora em hora, no minuto 2. A grade é horária
         # (18h, 19h…), então rodar mais vezes não adianta — e cada passada
@@ -3863,6 +3953,12 @@ class WorkerSettingsUI:
         # limit do Bling (~3 req/s) — o job_timeout global de 60s matou os
         # pushes dos lotes ML27/ML28 em 3/ago (TimeoutError aos 21 items).
         func(push_lote_stock_to_bling_job, timeout=1800),
+        # "Atualizar agora" da tela Desempenho (24/09/2026). Aqui e não na
+        # default porque a default pode estar horas atrás dos webhooks, e o
+        # clique espera a resposta em minutos. `timeout=600` porque o 60s da
+        # fila mataria a leitura: são até 120 posts, com 1 s entre páginas do
+        # TikTok.
+        func(marketing_postagens_metricas_agora, timeout=600),
     ]
     queue_name = ARQ_UI_QUEUE
     # Concorrência baixa — jobs UI são curtos (1-2 chamadas Bling) e

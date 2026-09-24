@@ -33,6 +33,7 @@ deu este número"; ZERO quer dizer "deu, e é zero". Somar tratando nulo como ze
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from datetime import UTC, datetime, timedelta
@@ -42,7 +43,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 import structlog
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -64,8 +65,35 @@ BRT = ZoneInfo("America/Sao_Paulo")
 # resíduo — e a Meta só guarda 90 dias de insight de qualquer forma.
 JANELA_DIAS = 90
 
-# Teto por rodada. Protege de o cron virar uma rajada quando o volume crescer.
-MAX_POR_RODADA = 300
+# A leitura da noite é às 23:47 BRT (02:47 UTC — o relógio do container é
+# UTC). Às 23:47 o dia já quase fechou, então o retrato do dia D é o número do
+# FIM de D, e "views ganhas por dia" cai no dia certo. Até 24/09/2026 era às
+# 04:20, e o retrato de D era na prática o fim de D-1: o ganho de cada dia
+# aparecia no dia seguinte. O worker e a tela importam daqui: horário escrito
+# em dois lugares diverge.
+HORA_NOTURNA_UTC = 2
+MINUTO_COLETA = 47
+
+# Respiro entre duas páginas do TikTok na mesma rodada. Sem API, a leitura é
+# da página pública — rajada do mesmo IP é o jeito mais rápido de virar
+# bloqueio, e aí o TikTok inteiro fica sem número.
+PAUSA_TIKTOK_S = 1.0
+
+# Teto de posts por rodada, por modo. `completo` é a noite (lê tudo, o mais
+# atrasado primeiro); `recentes` é o passe de hora em hora (só o que nunca foi
+# lido e falha recente); `agora` é o botão da tela. O teto protege de o cron
+# virar rajada quando o volume crescer — e como a ordem é "o mais atrasado
+# primeiro", o que não coube numa rodada é o primeiro da próxima.
+CAP = {"completo": 600, "recentes": 40, "agora": 120}
+
+# Chaves no Redis, lidas pelo worker E pela tela. `RODANDO` é a trava de uma
+# rodada por vez (a da noite e a de hora em hora não podem ler o mesmo post ao
+# mesmo tempo); `ULTIMA_RODADA` é o que a tela usa pra saber que o "Atualizar
+# agora" terminou; `AGORA` segura o botão por 10 min — é ela, e não um id fixo
+# de job, que evita a fila de leituras repetidas.
+CHAVE_RODANDO = "mkt:metricas:rodando"
+CHAVE_ULTIMA_RODADA = "mkt:metricas:ultima_rodada"
+CHAVE_AGORA = "mkt:metricas:agora"
 
 # O YouTube aceita vários ids na mesma chamada. 50 é o teto da API.
 LOTE_YOUTUBE = 50
@@ -137,6 +165,18 @@ def _dia(agora: datetime | None = None) -> datetime:
     return brt.replace(hour=0, minute=0, second=0, microsecond=0)
 
 
+def dia_da_noite(inicio: datetime) -> datetime:
+    """O dia do retrato da leitura da noite que começou em `inicio`.
+
+    A da noite é marcada pras 23:47, 13 min antes de o dia virar, e roda na
+    fila default — a que atrasa atrás dos webhooks, e que ainda tenta de novo
+    em 5 min quando outra rodada está lendo. Começando 00:05, o retrato do fim
+    de D ia pro dia D+1, D ficava sem o dele, e a leitura das 23:47 de D+1
+    sobrescrevia: o fim de D se perdia (24/09/2026). Até as 6h de Brasília,
+    rodada da noite ainda é a noite de ontem, atrasada.
+    """
+    return _dia(inicio - timedelta(hours=6))
+
 
 # ─── coleta por rede ───────────────────────────────────────────────────
 
@@ -179,14 +219,39 @@ async def do_tiktok(post_url: str, *, client: httpx.AsyncClient) -> dict[str, An
         except (TypeError, ValueError):
             return None
 
+    bruto: dict[str, Any] = dict(st)
+    autor = _autor_tiktok(item)
+    if autor:
+        bruto["autor"] = autor
     return {
         "views": n("playCount"),
         "curtidas": n("diggCount"),
         "comentarios": n("commentCount"),
         "compartilhamentos": n("shareCount"),
         "salvamentos": n("collectCount"),
-        "bruto": dict(st),
+        "bruto": bruto,
     }
+
+
+def _autor_tiktok(item: dict[str, Any]) -> dict[str, str | None] | None:
+    """De quem é o vídeo, segundo a própria página (24/09/2026).
+
+    Só uma PISTA pra tela ("este vídeo está em @x, não na conta atual") — nunca
+    tira nada do desempenho sozinha. Foi assim que os dois TikToks da conta
+    antiga da Uranyx passaram despercebidos: o post dizia uma conta, o link
+    dizia outra. O layout antigo da página traz `author` como texto e o id em
+    `authorId`; sem autor nenhum, a leitura continua valendo, só sem a pista.
+    """
+    autor = item.get("author")
+    if isinstance(autor, str):
+        autor = {"uniqueId": autor, "id": item.get("authorId")}
+    if not isinstance(autor, dict):
+        return None
+    handle = str(autor.get("uniqueId") or "").strip().lower() or None
+    ident = str(autor.get("id") or "").strip() or None
+    if handle is None and ident is None:
+        return None
+    return {"handle": handle, "id": ident}
 
 
 async def do_youtube(ids: list[str], refresh_token: str) -> dict[str, dict[str, Any]]:
@@ -290,27 +355,90 @@ async def do_instagram(media_id: str, access_token: str) -> dict[str, Any]:
 # ─── orquestração ──────────────────────────────────────────────────────
 
 
-async def _alvos(session: AsyncSession, *, agora: datetime | None = None) -> list[dict[str, Any]]:
-    """As publicações que valem coletar hoje.
+async def _alvos(
+    session: AsyncSession, *, agora: datetime, modo: str = "completo"
+) -> list[dict[str, Any]]:
+    """As publicações que valem ler nesta rodada.
 
-    Só `publicado` e só dentro da janela: postagem que falhou não tem número, e
-    vídeo de meses atrás só acumula resíduo. Traz a marca junto porque a tela
-    agrupa por ela — e a marca vai gravada na linha, em snapshot, pra que
+    Só `publicado`, só dentro da janela e nunca o que foi tirado do desempenho
+    (Eduardo, 24/09/2026: tirado não é mais lido). Traz a marca junto porque a
+    tela agrupa por ela — e a marca vai gravada na linha, em snapshot, pra que
     apagar a conta do cadastro não apague o histórico do que rendeu.
+
+    Cada modo responde uma pergunta diferente:
+
+      completo  a noite: tudo. É o retrato do fim do dia.
+      recentes  de hora em hora: (a) o que NUNCA foi tentado e já tem 20 min
+                de publicado — é o que faz vídeo novo ganhar número em até
+                1 hora, em vez de esperar a noite —; e (b) a falha recente,
+                de novo, 50 min depois. Removido não é falha: não volta.
+      agora     o botão da tela: o nunca tentado, e o da última semana que
+                não foi tentado nos últimos 10 min. Removido fica de fora.
+
+    A ordem é "o mais atrasado primeiro" (`tentado_em` mais velho, nunca
+    tentado antes de tudo). O `LIMIT 300` antigo, do mais NOVO pro mais velho,
+    deixaria o post antigo sem leitura pra sempre quando o volume crescesse.
     """
-    agora = agora or datetime.now(UTC)
     corte = agora - timedelta(days=JANELA_DIAS)
+    # A linha MAIS NOVA de cada postagem: quando foi a última tentativa e se
+    # ela deu erro. DISTINCT ON pega "a primeira de cada grupo" sem subquery
+    # correlacionada.
+    ultima = (
+        select(
+            MarketingPostagemMetrica.postagem_id.label("postagem_id"),
+            MarketingPostagemMetrica.updated_at.label("tentado_em"),
+            MarketingPostagemMetrica.erro.label("ultimo_erro"),
+        )
+        .order_by(MarketingPostagemMetrica.postagem_id, MarketingPostagemMetrica.dia.desc())
+        .distinct(MarketingPostagemMetrica.postagem_id)
+    ).subquery()
+    q = (
+        select(MarketingPostagem, MarketingCreative.marca_id)
+        .join(MarketingCreative, MarketingCreative.id == MarketingPostagem.creative_id)
+        .outerjoin(ultima, ultima.c.postagem_id == MarketingPostagem.id)
+        .where(
+            MarketingPostagem.status == STATUS_PUBLICADO,
+            MarketingPostagem.publicado_em.isnot(None),
+            MarketingPostagem.publicado_em >= corte,
+            MarketingPostagem.fora_do_desempenho_em.is_(None),
+        )
+    )
+    nunca_tentado = ultima.c.postagem_id.is_(None)
+    nao_removido = or_(
+        ultima.c.ultimo_erro.is_(None), ~ultima.c.ultimo_erro.startswith(REMOVIDO)
+    )
+    if modo == "recentes":
+        q = q.where(
+            or_(
+                and_(
+                    nunca_tentado,
+                    MarketingPostagem.publicado_em <= agora - timedelta(minutes=20),
+                ),
+                and_(
+                    ultima.c.ultimo_erro.isnot(None),
+                    ~ultima.c.ultimo_erro.startswith(REMOVIDO),
+                    MarketingPostagem.publicado_em >= agora - timedelta(days=14),
+                    ultima.c.tentado_em <= agora - timedelta(minutes=50),
+                ),
+            )
+        )
+    elif modo == "agora":
+        q = q.where(
+            or_(
+                nunca_tentado,
+                and_(
+                    MarketingPostagem.publicado_em >= agora - timedelta(days=7),
+                    ultima.c.tentado_em <= agora - timedelta(minutes=10),
+                ),
+            ),
+            nao_removido,
+        )
     linhas = (
         await session.execute(
-            select(MarketingPostagem, MarketingCreative.marca_id)
-            .join(MarketingCreative, MarketingCreative.id == MarketingPostagem.creative_id)
-            .where(
-                MarketingPostagem.status == STATUS_PUBLICADO,
-                MarketingPostagem.publicado_em.isnot(None),
-                MarketingPostagem.publicado_em >= corte,
-            )
-            .order_by(MarketingPostagem.publicado_em.desc())
-            .limit(MAX_POR_RODADA)
+            q.order_by(
+                ultima.c.tentado_em.asc().nulls_first(),
+                MarketingPostagem.publicado_em.desc(),
+            ).limit(CAP.get(modo, CAP["completo"]))
         )
     ).all()
     return [{"p": p, "marca_id": marca_id} for p, marca_id in linhas]
@@ -330,7 +458,12 @@ async def _token_de(session: AsyncSession, rede_social_id: UUID | None) -> dict[
 
 
 async def _gravar(
-    session: AsyncSession, alvo: dict[str, Any], dia: datetime, dados: dict[str, Any]
+    session: AsyncSession,
+    alvo: dict[str, Any],
+    dia: datetime,
+    dados: dict[str, Any],
+    *,
+    momento: datetime,
 ) -> None:
     """Um retrato por (postagem, dia). Recoletar no mesmo dia ATUALIZA.
 
@@ -338,42 +471,76 @@ async def _gravar(
     então duas coletas no mesmo dia são duas medições do MESMO ponto — a última
     é a boa. O que não pode é sobrescrever o dia ANTERIOR, e é isso que a chave
     (postagem, dia) garante.
+
+    Mas só a leitura BOA sobrescreve número (24/09/2026). Com leitura de hora
+    em hora, uma falha às 15h por cima de uma leitura boa às 13h apagava os
+    números do dia inteiro — e a tela mostrava o vídeo sem número por causa de
+    um soluço do TikTok. Agora o erro (falha ou `removido:`) só grava o erro e
+    a hora da tentativa; os números, o `bruto` e o `lido_em` da leitura boa
+    ficam. `updated_at` vai à mão porque o upsert não aplica o `onupdate` do
+    ORM — sem isso ele ficava congelado no primeiro insert do dia.
     """
     p = alvo["p"]
-    valores = {
+    base = {
         "postagem_id": p.id,
         "dia": dia,
         "plataforma": p.plataforma,
         "conta": p.conta,
         "marca_id": alvo["marca_id"],
-        "views": dados.get("views"),
-        "curtidas": dados.get("curtidas"),
-        "comentarios": dados.get("comentarios"),
-        "compartilhamentos": dados.get("compartilhamentos"),
-        "salvamentos": dados.get("salvamentos"),
-        "alcance": dados.get("alcance"),
-        "bruto": dados.get("bruto"),
-        "erro": dados.get("erro"),
     }
-    st = pg_insert(MarketingPostagemMetrica).values(**valores)
-    await session.execute(
-        st.on_conflict_do_update(
+    erro = dados.get("erro")
+    if erro:
+        st = pg_insert(MarketingPostagemMetrica).values(**base, erro=erro, updated_at=momento)
+        st = st.on_conflict_do_update(
+            constraint="uq_metrica_postagem_dia",
+            set_={"erro": erro, "updated_at": momento},
+        )
+    else:
+        valores = {
+            **base,
+            "views": dados.get("views"),
+            "curtidas": dados.get("curtidas"),
+            "comentarios": dados.get("comentarios"),
+            "compartilhamentos": dados.get("compartilhamentos"),
+            "salvamentos": dados.get("salvamentos"),
+            "alcance": dados.get("alcance"),
+            "bruto": dados.get("bruto"),
+            "erro": None,
+            "lido_em": momento,
+            "updated_at": momento,
+        }
+        st = pg_insert(MarketingPostagemMetrica).values(**valores)
+        st = st.on_conflict_do_update(
             constraint="uq_metrica_postagem_dia",
             set_={k: v for k, v in valores.items() if k not in ("postagem_id", "dia")},
         )
-    )
+    await session.execute(st)
 
 
-async def coletar(session: AsyncSession, *, agora: datetime | None = None) -> dict[str, int]:
+async def coletar(
+    session: AsyncSession,
+    *,
+    agora: datetime | None = None,
+    modo: str = "completo",
+    dia: datetime | None = None,
+) -> dict[str, int]:
     """Uma rodada: lê os números de cada publicação e grava o retrato do dia.
 
     Cada rede é isolada: se o TikTok mudar o layout ou a Meta recusar, as
     outras seguem e a que falhou grava o motivo NA LINHA. Coleta falha baixo —
     a tela mostraria número velho e ninguém notaria —, então o erro tem que
     ficar visível, e é daqui que a tela tira o "coletado em" por plataforma.
+
+    `modo` escolhe QUEM é lido (ver `_alvos`); o resto é igual nos três. O dia
+    do retrato sai do começo da rodada — a rodada da noite que atravessa a
+    meia-noite não pode partir o mesmo dia em dois —, mas a hora de cada
+    leitura (`lido_em`) é a do momento em que ela voltou: é ela que diz a idade
+    do vídeo na hora da leitura, e a comparação "na mesma idade" depende disso.
+    `dia` fixa o dia do retrato: o worker passa o da noite (`dia_da_noite`),
+    pra leitura da noite que atrasou e começou depois da meia-noite.
     """
-    dia = _dia(agora)
-    alvos = await _alvos(session, agora=agora)
+    dia = dia or _dia(agora)
+    alvos = await _alvos(session, agora=agora or datetime.now(UTC), modo=modo)
     r = {"total": len(alvos), "ok": 0, "falhou": 0}
     if not alvos:
         return r
@@ -404,6 +571,7 @@ async def coletar(session: AsyncSession, *, agora: datetime | None = None) -> di
             for a in doGrupo:
                 prontos[a["p"].id] = {"erro": _msg(e)[:400]}
 
+    primeira_do_tiktok = True
     async with httpx.AsyncClient(timeout=30, follow_redirects=True) as cliente:
         for a in alvos:
             p = a["p"]
@@ -413,6 +581,11 @@ async def coletar(session: AsyncSession, *, agora: datetime | None = None) -> di
                 elif p.plataforma == "tiktok":
                     if not p.post_url:
                         raise RuntimeError("a postagem não guardou o link do vídeo")
+                    # Sem API, é a página pública: rajada do mesmo IP vira
+                    # bloqueio. A primeira da rodada não espera.
+                    if not primeira_do_tiktok:
+                        await asyncio.sleep(PAUSA_TIKTOK_S)
+                    primeira_do_tiktok = False
                     dados = await do_tiktok(p.post_url, client=cliente)
                 elif p.plataforma in ("instagram", "facebook"):
                     if not p.post_external_id:
@@ -427,9 +600,9 @@ async def coletar(session: AsyncSession, *, agora: datetime | None = None) -> di
             except Exception as e:  # noqa: BLE001 — um post ruim não derruba a rodada
                 dados = {"erro": _msg(e)[:400]}
 
-            await _gravar(session, a, dia, dados)
+            await _gravar(session, a, dia, dados, momento=agora or datetime.now(UTC))
             r["falhou" if dados.get("erro") else "ok"] += 1
 
     await session.commit()
-    logger.info("marketing_metricas_coletadas", **r)
+    logger.info("marketing_metricas_coletadas", modo=modo, **r)
     return r

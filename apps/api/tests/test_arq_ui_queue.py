@@ -47,13 +47,16 @@ def test_filas_separadas():
 def test_worker_ui_so_tem_jobs_ui():
     """WorkerSettingsUI registra APENAS os jobs UI-triggered (curtos, disparados
     por click do operador). Webhooks/syncs/crons NÃO devem rodar nele pra não
-    bloquear. Hoje são 3: criar produto no Bling, criar kit e push de lote de
-    estoque."""
+    bloquear. Hoje são 4: criar produto no Bling, criar kit, push de lote de
+    estoque e — desde 24/09/2026 — o "Atualizar agora" da tela Desempenho
+    (Marketing), que é clique de operador e esperaria horas atrás dos webhooks
+    na fila default. Ele é o 4º de propósito, por isso a contagem subiu."""
     nomes = _nomes(WorkerSettingsUI.functions)
-    assert len(WorkerSettingsUI.functions) == 3
+    assert len(WorkerSettingsUI.functions) == 4
     assert sync_import_product_to_bling_job.__name__ in nomes
     assert create_bling_kit_for_mark_job.__name__ in nomes
     assert push_lote_stock_to_bling_job.__name__ in nomes
+    assert "marketing_postagens_metricas_agora" in nomes
 
 
 def test_worker_ui_consome_da_fila_correta():

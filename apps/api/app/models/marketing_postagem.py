@@ -153,6 +153,24 @@ class MarketingPostagem(Base, TimestampMixin):
         ForeignKey("users.id", ondelete="SET NULL"),
         nullable=True,
     )
+    # Fora do Desempenho (migration 0317, Eduardo, 24/09/2026: "tirar aqueles
+    # 2 tiktoks da outra conta da uranyx"). Preenchido = o post não entra em
+    # soma, média nem comparação, e deixa de ser lido. É uma MARCA, não um
+    # DELETE: o histórico fica, e "Voltar a contar" limpa as três colunas.
+    #
+    # A migration marcou os posts antigos pelo @ do LINK do TikTok, nunca pelo
+    # `conta` daqui: `conta` é snapshot do nome da conta na hora de publicar, e
+    # a conta do YouTube da Uranyx foi renomeada — o post dela ainda diz
+    # `uranyx_brasil` e é da marca. O link do TikTok carrega o dono de verdade.
+    fora_do_desempenho_em: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    fora_do_desempenho_motivo: Mapped[str | None] = mapped_column(Text, nullable=True)
+    fora_do_desempenho_por: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
 
 
 class RedeSocialToken(Base, TimestampMixin):
@@ -292,6 +310,13 @@ class MarketingPostagemMetrica(Base, TimestampMixin):
     # número velho sem ninguém notar —, então o erro fica na linha e a tela
     # mostra "coletado em" por plataforma.
     erro: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Quando saiu a leitura BOA que deu os números desta linha (migration
+    # 0317). NULO = a linha só tem erro. Existe porque `updated_at` não servia:
+    # o upsert (`on_conflict_do_update`) não aplica o `onupdate` do ORM, e ele
+    # ficava congelado no primeiro insert do dia. Agora `updated_at` é gravado
+    # à mão e quer dizer "última TENTATIVA"; `lido_em`, "última leitura que
+    # deu certo" — uma falha à tarde não apaga a leitura boa da manhã.
+    lido_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 # Um retrato por dia por postagem. Recoletar no mesmo dia ATUALIZA a linha (o

@@ -1,186 +1,306 @@
-"""Quanto cada marca rendeu nas redes — a tela de métricas.
+"""Quanto cada vídeo rendeu nas redes — a tela Marketing › Desempenho.
 
 Pedido do Eduardo (23/09/2026): ver as views e interações POR MARCA, com o
-total somado e o detalhe de cada rede.
+total somado e o detalhe de cada rede. E em 24/09/2026: "trackear o que cada
+vídeo deu de retorno pra saber o que investir", "esses vídeos ainda não
+aparecem… será que demora?" e "tirar aqueles 2 tiktoks da outra conta da
+uranyx".
 
-Duas contas diferentes moram aqui, e confundi-las é o jeito mais fácil de a
-tela mentir:
+As contas moram em `services/marketing/desempenho.py`, sem banco; aqui só se
+carrega o universo e se escreve. Três mudanças de 24/09 que valem dizer:
 
-  ACUMULADO   quanto o vídeo tem HOJE. Sai do retrato mais NOVO de cada
-              postagem. Somar todos os retratos multiplicaria o mesmo vídeo
-              por quantas vezes ele foi medido.
+  A TELA PARTE DA POSTAGEM, não do retrato. Antes, post sem retrato não
+  existia — e o retrato só nascia na leitura da madrugada, até 16 h depois de
+  publicar. Agora o post aparece na hora, como "aguardando 1ª leitura".
 
-  NO PERÍODO  quanto ele GANHOU na janela escolhida. Sai da diferença entre o
-              retrato mais novo e o mais velho dentro da janela. É o número
-              que responde "esta semana rendeu mais que a passada".
+  ESCOPO DE EQUIPE, como em Criativos: usuário de agência vê só os criativos
+  da equipe dele. Até 23/09 este endpoint não tinha escopo nenhum.
 
-E uma ressalva que a tela precisa carregar, não esconder em rodapé: "view" não
-quer dizer a mesma coisa nas três redes — o limiar de segundos é diferente em
-cada uma. O total somado serve pra sentir tendência; comparar só vale dentro da
-mesma plataforma. É por isso que o detalhe por rede vem junto, sempre.
+  NINGUÉM EDITA O BANCO pra tirar um post do desempenho: o PATCH marca, e
+  "Voltar a contar" desmarca.
+
+E a ressalva que a tela carrega, não esconde em rodapé: "view" não quer dizer
+a mesma coisa nas três redes — o limiar de segundos é diferente em cada uma.
+Por isso o índice compara cada vídeo com o normal da PRÓPRIA conta.
 """
 
+from __future__ import annotations
+
+import json
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query
-from sqlalchemy import func, select
+import structlog
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
-from app.models import Marca, MarketingPostagem, MarketingPostagemMetrica, User
 from app.deps.auth import require_permission
-from app.services.marketing.metricas import foi_removido
+from app.models import (
+    Marca,
+    MarketingCreative,
+    MarketingPostagem,
+    MarketingPostagemMetrica,
+    MarketingRoteiro,
+    Product,
+    RedeSocial,
+    User,
+)
+from app.models.marketing_postagem import STATUS_PUBLICADO
+from app.redis_client import redis
+from app.routers.marketing_creatives import _ensure_equipe, _user_equipes
+from app.services.marketing import desempenho
+from app.services.marketing.metricas import (
+    CHAVE_AGORA,
+    CHAVE_RODANDO,
+    CHAVE_ULTIMA_RODADA,
+)
+from app.worker_pool import get_arq_ui_pool
+
+logger = structlog.get_logger()
 
 router = APIRouter(prefix="/api/marketing/metricas", tags=["marketing_metricas"])
+
+# O "Atualizar agora" fica travado por 10 min depois de um clique: a leitura
+# da página do TikTok é do IP do servidor, e clique repetido é rajada.
+TRAVA_AGORA_S = 600
 
 _NUMEROS = ("views", "curtidas", "comentarios", "compartilhamentos", "salvamentos", "alcance")
 
 
-def _soma(acc: dict[str, int | None], linha: Any, sinal: int = 1) -> None:
-    """Soma tratando NULO como ausência, não como zero.
+def _iso(dt: datetime) -> str:
+    return dt.astimezone(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
-    A diferença aparece na tela: se nenhuma postagem da marca reportou
-    `salvamentos`, o campo fica NULO e a tela escreve "—". Zerar diria que
-    ninguém salvou, que é uma afirmação que não temos como fazer.
-    """
-    for campo in _NUMEROS:
-        v = getattr(linha, campo, None)
-        if v is None:
-            continue
-        acc[campo] = (acc.get(campo) or 0) + sinal * v
+
+async def _estado_da_coleta(agora: datetime) -> dict[str, Any]:
+    """O que o Redis sabe da coleta. Falha BRANDA: sem Redis a tela ainda
+    mostra os números, só sem "rodando agora" e sem a hora do botão."""
+    out: dict[str, Any] = {"em_andamento": False, "pode_atualizar_em": None, "ultima_rodada": None}
+    try:
+        out["em_andamento"] = bool(await redis.exists(CHAVE_RODANDO))
+        ttl = await redis.ttl(CHAVE_AGORA)
+        if ttl and ttl > 0:
+            out["pode_atualizar_em"] = _iso(agora + timedelta(seconds=ttl))
+        bruto = await redis.get(CHAVE_ULTIMA_RODADA)
+        if bruto:
+            out["ultima_rodada"] = json.loads(bruto)
+    except Exception as e:  # noqa: BLE001 — Redis fora não derruba a tela
+        logger.warning("marketing_metricas_redis_indisponivel", err=str(e)[:200])
+    return out
 
 
 @router.get("")
 async def metricas(
     session: Annotated[AsyncSession, Depends(get_session)],
     # Mesma permissão da aba Criativos: quem vê o que foi publicado vê o que rendeu.
-    _u: Annotated[User, Depends(require_permission("marketing_criativos", "view"))],
+    user: Annotated[User, Depends(require_permission("marketing_criativos", "view"))],
     dias: Annotated[int, Query(ge=1, le=365)] = 30,
+    marco: Annotated[int, Query()] = desempenho.MARCO_PADRAO,
+    marca_id: Annotated[UUID | None, Query()] = None,
 ) -> dict[str, Any]:
-    """Números por marca e por plataforma, na janela pedida."""
-    desde = datetime.now(UTC) - timedelta(days=dias)
-
-    # O retrato mais NOVO e o mais VELHO de cada postagem dentro da janela.
-    # DISTINCT ON é o jeito do Postgres de pegar "a primeira linha de cada
-    # grupo" sem subquery correlacionada.
-    novo = (
-        select(MarketingPostagemMetrica)
-        .where(MarketingPostagemMetrica.dia >= desde)
-        .order_by(MarketingPostagemMetrica.postagem_id, MarketingPostagemMetrica.dia.desc())
-        .distinct(MarketingPostagemMetrica.postagem_id)
-    ).subquery()
-    velho = (
-        select(MarketingPostagemMetrica)
-        .where(MarketingPostagemMetrica.dia >= desde)
-        .order_by(MarketingPostagemMetrica.postagem_id, MarketingPostagemMetrica.dia.asc())
-        .distinct(MarketingPostagemMetrica.postagem_id)
-    ).subquery()
-
-    novos = (await session.execute(select(novo))).all()
-    velhos = {v.postagem_id: v for v in (await session.execute(select(velho))).all()}
-
-    marcas = {
-        m.id: m.nome
-        for m in (await session.execute(select(Marca))).scalars().all()
-    }
-    # O link e a legenda vivem na postagem, não na métrica — a métrica guarda
-    # só o que muda a cada dia.
-    ids = [n.postagem_id for n in novos]
-    posts = {
-        p.id: p
-        for p in (
-            await session.execute(
-                select(MarketingPostagem).where(MarketingPostagem.id.in_(ids))
-            )
-        ).scalars().all()
-    } if ids else {}
-
-    # marca -> plataforma -> números
-    por_marca: dict[str, dict[str, Any]] = {}
-    for n in novos:
-        nome = marcas.get(n.marca_id, "(marca removida)")
-        alvo = por_marca.setdefault(
-            nome,
-            {"marca": nome, "acumulado": {}, "no_periodo": {}, "plataformas": {}, "posts": 0},
+    """Desempenho dos vídeos publicados — o contrato "versao": 2."""
+    if marco not in desempenho.MARCOS:
+        raise HTTPException(
+            422,
+            detail={"code": "marco_invalido", "aceitos": list(desempenho.MARCOS)},
         )
-        plat = alvo["plataformas"].setdefault(
-            n.plataforma,
-            {"plataforma": n.plataforma, "acumulado": {}, "no_periodo": {},
-             "posts": 0, "coletado_em": None, "erro": None, "videos": []},
+    agora = datetime.now(UTC)
+    # O universo cobre a base da conta (90 dias) mesmo quando a janela é
+    # menor: o "normal" de um vídeo de ontem são os vídeos do último trimestre.
+    corte = desempenho.corte_universo(agora, dias)
+    # E vai mais longe só pras somas por rede: o post que hoje passou de 90
+    # dias ainda era lido — e rendia — no período anterior. Desses, só os que
+    # contam (o tirado do desempenho não soma em lugar nenhum).
+    no_universo = (
+        MarketingPostagem.status == STATUS_PUBLICADO,
+        MarketingPostagem.publicado_em.isnot(None),
+        MarketingPostagem.publicado_em >= desempenho.corte_soma(agora, dias),
+        or_(
+            MarketingPostagem.publicado_em >= corte,
+            MarketingPostagem.fora_do_desempenho_em.is_(None),
+        ),
+    )
+
+    posts_q = (
+        select(
+            MarketingPostagem,
+            MarketingCreative,
+            Marca.nome,
+            Product.name,
+            MarketingRoteiro.titulo,
+            RedeSocial.conta,
         )
-        # Vídeo removido não entra em conta nenhuma: ele não está no ar, não
-        # está rendendo, e contá-lo faria a marca parecer ter mais material
-        # publicado do que tem.
-        removido = foi_removido(n.erro)
-        if not removido:
-            alvo["posts"] += 1
-            plat["posts"] += 1
-            _soma(alvo["acumulado"], n)
-            _soma(plat["acumulado"], n)
-        v = velhos.get(n.postagem_id)
-        # Crescimento na janela: o novo menos o velho do MESMO post.
-        if not removido and v is not None and v.dia != n.dia:
-            _soma(alvo["no_periodo"], n)
-            _soma(alvo["no_periodo"], v, sinal=-1)
-            _soma(plat["no_periodo"], n)
-            _soma(plat["no_periodo"], v, sinal=-1)
-        # O vídeo em si — é o nível que o Eduardo pediu pra poder abrir e ver
-        # de onde vem cada número. Sem isto, "a marca fez 9 views" não diz
-        # QUAL vídeo fez, que é o que serve pra decidir o que produzir.
-        post = posts.get(n.postagem_id)
-        ganho = {}
-        if v is not None and v.dia != n.dia:
-            _soma(ganho, n)
-            _soma(ganho, v, sinal=-1)
-        plat["videos"].append(
+        .join(MarketingCreative, MarketingCreative.id == MarketingPostagem.creative_id)
+        .outerjoin(Marca, Marca.id == MarketingCreative.marca_id)
+        .outerjoin(Product, Product.id == MarketingCreative.product_id)
+        .outerjoin(MarketingRoteiro, MarketingRoteiro.id == MarketingCreative.roteiro_id)
+        .outerjoin(RedeSocial, RedeSocial.id == MarketingPostagem.rede_social_id)
+        .where(*no_universo)
+    )
+    posts: list[dict[str, Any]] = []
+    posts_antigos: list[dict[str, Any]] = []
+    for p, c, marca_nome, produto_nome, roteiro_titulo, conta_atual in (
+        await session.execute(posts_q)
+    ).all():
+        (posts if p.publicado_em >= corte else posts_antigos).append(
             {
-                "postagem_id": str(n.postagem_id),
-                "post_url": getattr(post, "post_url", None),
-                "publicado_em": getattr(post, "publicado_em", None),
-                # Primeira linha da legenda: é como o Eduardo reconhece o vídeo
-                # na lista. A legenda inteira não cabe e não ajuda.
-                "titulo": ((getattr(post, "legenda", None) or "").strip().splitlines() or [""])[0][:80],
-                "acumulado": {k: getattr(n, k) for k in _NUMEROS if getattr(n, k) is not None},
-                "no_periodo": ganho,
-                "coletado_em": n.dia,
-                # Removido NÃO é falha de leitura: a leitura funcionou e a
-                # resposta foi "isto não está mais aqui". Misturar os dois põe
-                # alerta em cima de post apagado de propósito.
-                "removido": removido,
-                "erro": None if removido else n.erro,
+                "id": p.id,
+                "creative_id": p.creative_id,
+                "plataforma": p.plataforma,
+                "conta": p.conta,
+                "conta_atual": conta_atual,
+                "rede_social_id": p.rede_social_id,
+                "post_url": p.post_url,
+                "publicado_em": p.publicado_em,
+                "origem": p.origem,
+                "legenda": p.legenda,
+                "fora_do_desempenho_em": p.fora_do_desempenho_em,
+                "fora_do_desempenho_motivo": p.fora_do_desempenho_motivo,
+                "marca_id": c.marca_id,
+                "marca": marca_nome,
+                "equipe": c.equipe,
+                "sku": c.sku,
+                "modelo": c.modelo,
+                "product_id": c.product_id,
+                "produto_nome": produto_nome,
+                "roteiro_id": c.roteiro_id,
+                "roteiro_titulo": roteiro_titulo,
             }
         )
-        # Quando esta rede foi lida pela última vez, e se deu erro. Coleta
-        # falha baixo — sem esta data a tela mostra número velho como se
-        # fosse de hoje. Vídeo removido não conta como erro da rede.
-        if plat["coletado_em"] is None or n.dia > plat["coletado_em"]:
-            plat["coletado_em"] = n.dia
-        if n.erro and not foi_removido(n.erro):
-            plat["erro"] = n.erro
 
-    # Marca (ou rede) cujos vídeos foram TODOS apagados não tem o que reportar,
-    # e linha só de travessão é ruído — pedido do Eduardo em 24/09/2026, depois
-    # de apagar os testes da charlots e da 7buyers. Não some em silêncio: o nome
-    # vai em `sem_video_no_ar`, pra ele não se perguntar "cadê a charlots".
-    sem_video: list[str] = []
-    saida: list[dict[str, Any]] = []
-    for m in sorted(por_marca.values(), key=lambda x: -(x["acumulado"].get("views") or 0)):
-        redes = [p for p in m["plataformas"].values() if p["posts"]]
-        if not redes:
-            sem_video.append(m["marca"])
-            continue
-        m["plataformas"] = sorted(redes, key=lambda x: x["plataforma"])
-        for plat in m["plataformas"]:
-            # O vídeo apagado some da lista junto — ele já não conta em nada.
-            plat["videos"] = [v for v in plat["videos"] if not v["removido"]]
-            # Mais views primeiro: a pergunta é "o que rendeu", não "o que saiu".
-            plat["videos"].sort(key=lambda v: -(v["acumulado"].get("views") or 0))
-        saida.append(m)
+    # Os retratos, projetados: só o que a conta usa. O `bruto` inteiro (a
+    # resposta crua da rede) pesaria à toa — dele só sai o autor do TikTok.
+    met = MarketingPostagemMetrica
+    linhas_q = (
+        select(
+            met.postagem_id,
+            met.dia,
+            met.lido_em,
+            met.updated_at,
+            met.erro,
+            *(getattr(met, k) for k in _NUMEROS),
+            met.bruto["autor"].label("autor"),
+        )
+        .join(MarketingPostagem, MarketingPostagem.id == met.postagem_id)
+        .where(*no_universo)
+    )
+    linhas = [dict(r._mapping) for r in (await session.execute(linhas_q)).all()]
+    # Desde quando existe leitura: sem isto a tela compararia o período com um
+    # "anterior" em que ninguém lia nada.
+    inicio = (await session.execute(select(func.min(met.dia)))).scalar_one_or_none()
+
+    return desempenho.montar(
+        posts,
+        linhas,
+        dias=dias,
+        marco=marco,
+        agora=agora,
+        marca_id=marca_id,
+        equipes_permitidas=_user_equipes(user),
+        inicio_da_coleta=inicio,
+        coleta=await _estado_da_coleta(agora),
+        posts_antigos=posts_antigos,
+    )
+
+
+@router.post("/atualizar", status_code=202)
+async def atualizar_agora(
+    _u: Annotated[User, Depends(require_permission("marketing_criativos", "view"))],
+) -> dict[str, Any]:
+    """Pede uma leitura já, em vez de esperar o próximo :47.
+
+    A trava de 10 min no Redis é o que impede o clique repetido de virar
+    rajada — e NÃO um `_job_id` fixo: o worker da fila UI guarda o resultado
+    por 1 hora, e com id fixo todo clique dessa hora sumiria calado.
+    """
+    agora = datetime.now(UTC)
+    try:
+        pegou = await redis.set(CHAVE_AGORA, _iso(agora), nx=True, ex=TRAVA_AGORA_S)
+        if not pegou:
+            ttl = await redis.ttl(CHAVE_AGORA)
+            raise HTTPException(
+                429,
+                detail={
+                    "code": "atualizacao_recente",
+                    "pode_atualizar_em": _iso(agora + timedelta(seconds=max(ttl or 0, 0))),
+                },
+            )
+    except HTTPException:
+        raise
+    except Exception as e:  # noqa: BLE001
+        logger.warning("marketing_metricas_atualizar_redis_falhou", err=str(e)[:200])
+        raise HTTPException(503, detail={"code": "fila_indisponivel"}) from e
+    try:
+        # Fila UI: a default pode estar horas atrás dos webhooks.
+        await (await get_arq_ui_pool()).enqueue_job("marketing_postagens_metricas_agora")
+    except Exception as e:  # noqa: BLE001
+        logger.warning("marketing_metricas_atualizar_fila_falhou", err=str(e)[:200])
+        # Não enfileirou: solta a trava, senão o botão fica 10 min travado
+        # por um pedido que nunca existiu.
+        try:
+            await redis.delete(CHAVE_AGORA)
+        except Exception:  # noqa: BLE001, S110 — o TTL solta sozinho
+            pass
+        raise HTTPException(503, detail={"code": "fila_indisponivel"}) from e
     return {
-        "dias": dias,
-        "desde": desde,
-        "marcas": saida,
-        "sem_video_no_ar": sorted(sem_video),
+        "enfileirado": True,
+        "pedido_em": _iso(agora),
+        "pode_atualizar_em": _iso(agora + timedelta(seconds=TRAVA_AGORA_S)),
+    }
+
+
+class ContarNoDesempenho(BaseModel):
+    contar: bool
+    motivo: str | None = None
+
+
+@router.patch("/postagens/{postagem_id}/desempenho")
+async def contar_no_desempenho(
+    postagem_id: UUID,
+    payload: ContarNoDesempenho,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("marketing_criativos", "edit"))],
+) -> dict[str, Any]:
+    """Tira um post do desempenho, ou devolve.
+
+    Eduardo, 24/09/2026: "tirar aqueles 2 tiktoks da outra conta da uranyx".
+    Da próxima vez é um clique, não um UPDATE no banco. Tirado sai de toda
+    soma, média e comparação e deixa de ser lido; o histórico fica, e o motivo
+    é obrigatório — daqui a um mês ninguém lembra por que o vídeo sumiu.
+    """
+    p = await session.get(MarketingPostagem, postagem_id)
+    if p is None:
+        raise HTTPException(404, detail={"code": "not_found"})
+    criativo = await session.get(MarketingCreative, p.creative_id)
+    if criativo is not None:
+        _ensure_equipe(user, criativo)
+    if p.status != STATUS_PUBLICADO:
+        raise HTTPException(400, detail={"code": "nao_publicada"})
+
+    if payload.contar:
+        p.fora_do_desempenho_em = None
+        p.fora_do_desempenho_motivo = None
+        p.fora_do_desempenho_por = None
+    else:
+        motivo = (payload.motivo or "").strip()
+        if not 3 <= len(motivo) <= 200:
+            raise HTTPException(422, detail={"code": "motivo_obrigatorio"})
+        p.fora_do_desempenho_em = datetime.now(UTC)
+        p.fora_do_desempenho_motivo = motivo
+        p.fora_do_desempenho_por = user.id
+    await session.commit()
+    logger.info(
+        "marketing_desempenho_contar",
+        user_id=str(user.id),
+        postagem_id=str(postagem_id),
+        contar=payload.contar,
+    )
+    return {
+        "postagem_id": str(p.id),
+        "contar": payload.contar,
+        "motivo": p.fora_do_desempenho_motivo,
+        "em": _iso(p.fora_do_desempenho_em) if p.fora_do_desempenho_em else None,
     }

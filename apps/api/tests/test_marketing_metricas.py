@@ -21,16 +21,75 @@ O que estes testes defendem, e por quê:
 
 from __future__ import annotations
 
+import importlib.util
 import json
+import time
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from app.models import MarketingPostagemMetrica
 from app.services.marketing import metricas as svc
 
 pytestmark = pytest.mark.asyncio
+
+
+class _RedisFalso:
+    """O pedaço do Redis que a tela e o worker usam, em memória: a trava do
+    botão, a trava da rodada e a `ultima_rodada`. Com o Redis de verdade, um
+    teste herdaria a trava de 10 min do anterior."""
+
+    def __init__(self) -> None:
+        self.d: dict[str, tuple[str, float | None]] = {}
+
+    def _vivo(self, k: str) -> bool:
+        if k not in self.d:
+            return False
+        _, expira = self.d[k]
+        if expira is not None and expira <= time.monotonic():
+            del self.d[k]
+            return False
+        return True
+
+    async def set(self, k, v, nx=False, ex=None):
+        if nx and self._vivo(k):
+            return None
+        self.d[k] = (v, time.monotonic() + ex if ex else None)
+        return True
+
+    async def get(self, k):
+        return self.d[k][0] if self._vivo(k) else None
+
+    async def ttl(self, k):
+        if not self._vivo(k):
+            return -2
+        expira = self.d[k][1]
+        return -1 if expira is None else max(int(expira - time.monotonic()), 0)
+
+    async def exists(self, k):
+        return 1 if self._vivo(k) else 0
+
+    async def delete(self, *ks):
+        n = 0
+        for k in ks:
+            if self._vivo(k):
+                del self.d[k]
+                n += 1
+        return n
+
+
+@pytest.fixture(autouse=True)
+def redis_falso(monkeypatch):
+    """Sem pausa entre páginas do TikTok (1 s por post deixaria a suíte lenta
+    à toa) e com o Redis da tela em memória."""
+    from app.routers import marketing_metricas as rota
+
+    monkeypatch.setattr(svc, "PAUSA_TIKTOK_S", 0)
+    falso = _RedisFalso()
+    monkeypatch.setattr(rota, "redis", falso)
+    return falso
 
 
 # ---------- o dia da coleta (fuso) ----------
@@ -86,13 +145,15 @@ def test_erro_nao_pode_carregar_token():
 # ---------- leitura do TikTok (sem API, da página pública) ----------
 
 
-def _pagina_tiktok(stats: dict | None, *, status: int | str = 0) -> str:
+def _pagina_tiktok(stats: dict | None, *, status: int | str = 0, **item) -> str:
     corpo = {
         "__DEFAULT_SCOPE__": {
             "webapp.video-detail": {
                 "statusCode": 0 if not status else 10204,
                 "statusMsg": "" if not status else str(status),
-                "itemInfo": {"itemStruct": {"id": "123", "statsV2": stats}} if stats else {},
+                "itemInfo": (
+                    {"itemStruct": {"id": "123", "statsV2": stats, **item}} if stats else {}
+                ),
             }
         }
     }
@@ -182,8 +243,16 @@ async def test_tiktok_numero_ilegivel_vira_nulo_nao_zero():
 # ---------- o retrato datado (o coração do desenho) ----------
 
 
-async def _cenario(db, *, plataforma: str = "tiktok"):
-    """Marca + criativo + conta + uma postagem PUBLICADA."""
+async def _cenario(
+    db, *, plataforma: str = "tiktok", publicado_ha: timedelta = timedelta(hours=2)
+):
+    """Marca + criativo + conta + uma postagem PUBLICADA.
+
+    `publicado_ha` (24/09/2026): a tela nova compara "na mesma idade" e só
+    trata a primeira leitura como ganho quando o vídeo foi lido desde o
+    nascimento. Teste que simula leitura de dias atrás precisa de um post que
+    já existia nesses dias — senão está medindo um vídeo antes de ele nascer.
+    """
     from app.models import (
         Marca,
         MarketingCreative,
@@ -212,7 +281,7 @@ async def _cenario(db, *, plataforma: str = "tiktok"):
         plataforma=plataforma,
         conta="uranyx_brasil",
         status="publicado",
-        publicado_em=datetime.now(UTC) - timedelta(hours=2),
+        publicado_em=datetime.now(UTC) - publicado_ha,
         post_url="https://www.tiktok.com/@uranyx_brasil/video/123",
         post_external_id="123",
     )
@@ -363,9 +432,13 @@ async def test_tela_separa_acumulado_do_que_rendeu_no_periodo(
     """São duas contas diferentes, e confundi-las é o jeito mais fácil de a
     tela mentir. ACUMULADO é quanto o vídeo tem hoje — vem do retrato mais
     novo. NO PERÍODO é quanto ganhou na janela — é a diferença entre o novo e
-    o velho. Somar todos os retratos multiplicaria o mesmo vídeo."""
+    o velho. Somar todos os retratos multiplicaria o mesmo vídeo.
+
+    24/09/2026: o post agora é de 40 dias atrás. Com o post de 2 h, a primeira
+    leitura (de 2 dias atrás) era de antes de ele existir. O esperado continua
+    200: a primeira leitura de um vídeo antigo é BASE, não ganho."""
     await _ve(make_user, auth_as)
-    _, p = await _cenario(db)
+    _, p = await _cenario(db, publicado_ha=timedelta(days=40))
 
     async def falso(url, *, client):
         return {"views": falso.n, "curtidas": falso.n // 10, "bruto": {}}
@@ -397,9 +470,15 @@ async def test_tela_separa_acumulado_do_que_rendeu_no_periodo(
 async def test_janela_curta_so_conta_o_que_rendeu_dentro_dela(
     client, db, make_user, auth_as, monkeypatch
 ):
-    """Pedindo 1 dia, o ganho tem que ser o do dia — não o histórico inteiro."""
+    """Pedindo 1 dia, o ganho tem que ser o do dia — não o histórico inteiro.
+
+    Mudou de propósito em 24/09/2026: antes, 1 dia com um retrato só na janela
+    dava "não dá pra saber" (vazio). Agora vale a regra única de ganho diário
+    — o buraco de 10 dias entre os dois retratos é dividido por igual (80 por
+    dia) e o post sai marcado "estimado", que a tela desenha mais claro. O
+    post é de 40 dias atrás pra não ser medido antes de nascer."""
     await _ve(make_user, auth_as)
-    _, p = await _cenario(db)
+    _, p = await _cenario(db, publicado_ha=timedelta(days=40))
 
     async def falso(url, *, client):
         return {"views": falso.n, "bruto": {}}
@@ -413,9 +492,35 @@ async def test_janela_curta_so_conta_o_que_rendeu_dentro_dela(
     largo = (await client.get(API_M, params={"dias": 30})).json()["marcas"][0]
     assert largo["no_periodo"]["views"] == 800
 
-    curto = (await client.get(API_M, params={"dias": 1})).json()["marcas"][0]
+    r = (await client.get(API_M, params={"dias": 1})).json()
+    curto = r["marcas"][0]
     assert curto["acumulado"]["views"] == 900, "o acumulado é o mesmo sempre"
-    assert not curto["no_periodo"], "só um retrato na janela = não dá pra saber o ganho"
+    assert curto["no_periodo"]["views"] == 80, "800 em 10 dias, dividido por igual"
+    assert r["postagens"][0]["no_periodo_estimado"] is True
+
+
+async def test_post_que_passou_de_90_dias_ainda_soma_no_que_a_rede_rendeu(
+    client, db, make_user, auth_as
+):
+    """A coleta lê todo post de até 90 dias NO DIA da leitura: o que hoje tem
+    100 dias rendeu nas semanas passadas, e isso é parte do que a rede rendeu
+    no período. Sem ele, o período anterior perdia gente e a comparação
+    mentia. Mas ele não volta pra tabela — a tela é dos últimos 90 dias."""
+    await _ve(make_user, auth_as)
+    agora = datetime.now(UTC)
+    _, velho = await _cenario(db, publicado_ha=timedelta(days=100))
+    await _retrato(db, velho, lido_em=agora - timedelta(days=20), views=100)
+    await _retrato(db, velho, lido_em=agora - timedelta(days=12), views=900)
+    novo = await _outro_post(db, velho, "novo", publicado_em=agora - timedelta(days=5))
+    await _retrato(db, novo, lido_em=agora - timedelta(days=4, hours=12), views=50)
+
+    r = (await client.get(API_M, params={"dias": 30})).json()
+    assert [p["postagem_id"] for p in r["postagens"]] == [str(novo.id)]
+    [rede] = r["resumo"]["redes"]
+    assert rede["videos"] == 1, "o velho só soma, não é vídeo da tela"
+    assert rede["no_periodo"]["views"] == 850, "800 do velho + 50 do novo"
+    assert rede["comparacao"]["atual"] == 850
+    assert r["marcas"][0]["no_periodo"]["views"] == 50, "a matriz por marca é a da tela"
 
 
 async def test_metrica_que_nenhuma_rede_deu_nao_vira_zero_na_tela(
@@ -526,6 +631,12 @@ async def test_video_apagado_nao_conta_no_total_da_marca(
     plat = marca["plataformas"][0]
     assert plat["posts"] == 1
     assert [v["post_url"] for v in plat["videos"]] == [p.post_url], "o apagado sai da lista"
+    # …mas vai pro rodapé COM o criativo: é o que deixa a tabela de vídeos
+    # escrever "apagado da rede" em vez de "não postado" (24/09/2026).
+    fora = (await client.get(API_M)).json()["fora_do_ar"]
+    assert [(f["postagem_id"], f["creative_id"]) for f in fora] == [
+        (str(morto.id), str(p.creative_id))
+    ]
 
 
 async def test_falha_de_verdade_continua_alertando(
@@ -575,3 +686,742 @@ async def test_instagram_post_apagado_e_reconhecido_como_removido():
         assert m.foi_removido(str(e.value)), "apagado tem que ser reconhecível pela tela"
     finally:
         httpx.AsyncClient = orig
+
+
+# ═══ desempenho v2 (24/09/2026) ═══════════════════════════════════════════
+#
+# Eduardo: "tirar aqueles 2 tiktoks da outra conta da uranyx", "esses vídeos
+# ainda não aparecem… será que demora?" e "trackear o que cada vídeo deu de
+# retorno pra saber o que investir".
+
+
+# ---------- o autor do TikTok (pista, nunca exclusão) ----------
+
+
+async def test_tiktok_guarda_autor_no_bruto():
+    """O post dizia uma conta e o link dizia outra — foi assim que os dois
+    TikToks da conta antiga passaram despercebidos. O autor fica guardado pra
+    tela poder avisar."""
+    pagina = _pagina_tiktok({"playCount": "10"}, author={"uniqueId": "Uranyx_BR", "id": 6789})
+    d = await svc.do_tiktok("https://x", client=_ClienteFalso(pagina))
+    assert d["bruto"]["autor"] == {"handle": "uranyx_br", "id": "6789"}
+    assert d["bruto"]["playCount"] == "10", "os números crus continuam lá"
+
+    # Layout antigo da página: `author` é o @ e o id vem em `authorId`.
+    pagina = _pagina_tiktok({"playCount": "10"}, author="uranyx_brasil", authorId="555")
+    d = await svc.do_tiktok("https://x", client=_ClienteFalso(pagina))
+    assert d["bruto"]["autor"] == {"handle": "uranyx_brasil", "id": "555"}
+
+
+async def test_tiktok_sem_autor_nao_quebra_leitura():
+    d = await svc.do_tiktok("https://x", client=_ClienteFalso(_pagina_tiktok({"playCount": "7"})))
+    assert d["views"] == 7
+    assert "autor" not in d["bruto"]
+
+
+# ---------- falha não apaga leitura boa ----------
+
+
+def _hoje_as(hora: int) -> datetime:
+    """Hoje, na hora dada de Brasília — duas leituras no MESMO dia BRT."""
+    return svc._dia(datetime.now(UTC)) + timedelta(hours=hora)
+
+
+async def _boa(url, *, client):
+    return {"views": _boa.n, "curtidas": 4, "bruto": {"playCount": _boa.n}}
+
+
+async def _ruim(url, *, client):
+    raise RuntimeError("o TikTok recusou a página: rate_limit")
+
+
+async def test_falha_no_mesmo_dia_nao_apaga_leitura_boa(db, monkeypatch):
+    """Com leitura de hora em hora, uma falha às 11h por cima da leitura boa
+    das 10h apagava os números do dia — e o vídeo aparecia sem número por
+    causa de um soluço do TikTok."""
+    _, p = await _cenario(db)
+    t = _hoje_as(10)
+    _boa.n = 100
+    monkeypatch.setattr(svc, "do_tiktok", _boa)
+    await svc.coletar(db, agora=t)
+    monkeypatch.setattr(svc, "do_tiktok", _ruim)
+    r = await svc.coletar(db, agora=t + timedelta(hours=1))
+    assert r == {"total": 1, "ok": 0, "falhou": 1}
+
+    pid = p.id
+    db.expire_all()  # o upsert não passa pelo mapa de identidade da sessão
+    [linha] = await _linhas(db, pid)
+    assert linha.views == 100, "a leitura boa fica"
+    assert linha.curtidas == 4
+    assert linha.bruto == {"playCount": 100}
+    assert "rate_limit" in linha.erro, "e a falha fica visível"
+    assert linha.lido_em == t, "os números são das 10h"
+    assert linha.updated_at == t + timedelta(hours=1), "a última TENTATIVA foi às 11h"
+
+
+async def test_sucesso_depois_de_falha_limpa_erro(db, monkeypatch):
+    _, p = await _cenario(db)
+    t = _hoje_as(10)
+    monkeypatch.setattr(svc, "do_tiktok", _ruim)
+    await svc.coletar(db, agora=t)
+    _boa.n = 120
+    monkeypatch.setattr(svc, "do_tiktok", _boa)
+    await svc.coletar(db, agora=t + timedelta(hours=1))
+
+    pid = p.id
+    db.expire_all()  # o upsert não passa pelo mapa de identidade da sessão
+    [linha] = await _linhas(db, pid)
+    assert linha.erro is None
+    assert linha.views == 120
+    assert linha.lido_em == t + timedelta(hours=1)
+
+
+async def test_recoleta_no_mesmo_dia_atualiza_lido_em(db, monkeypatch):
+    """`updated_at` ficava congelado no primeiro insert do dia (o upsert não
+    aplica o `onupdate` do ORM). A idade da leitura depende da hora certa."""
+    _, p = await _cenario(db)
+    t = _hoje_as(10)
+    monkeypatch.setattr(svc, "do_tiktok", _boa)
+    _boa.n = 100
+    await svc.coletar(db, agora=t)
+    _boa.n = 150
+    await svc.coletar(db, agora=t + timedelta(hours=1))
+
+    pid = p.id
+    db.expire_all()  # o upsert não passa pelo mapa de identidade da sessão
+    [linha] = await _linhas(db, pid)
+    assert linha.views == 150
+    assert linha.lido_em == t + timedelta(hours=1)
+    assert linha.updated_at == t + timedelta(hours=1)
+
+
+# ---------- quem cada rodada lê ----------
+
+
+async def _outro_post(db, p, sufixo: str, *, publicado_em: datetime, **kw):
+    """Mais uma postagem publicada, no mesmo criativo/conta de `p` por padrão."""
+    from app.models import MarketingPostagem
+
+    campos = {
+        "creative_id": p.creative_id,
+        "file_id": p.file_id,
+        "rede_social_id": p.rede_social_id,
+        "plataforma": p.plataforma,
+        "conta": p.conta,
+        "status": "publicado",
+        "publicado_em": publicado_em,
+        "post_url": f"https://www.tiktok.com/@uranyx_brasil/video/{sufixo}",
+        "post_external_id": sufixo,
+    }
+    campos.update(kw)
+    q = MarketingPostagem(**campos)
+    db.add(q)
+    await db.commit()
+    await db.refresh(q)
+    return q
+
+
+async def _retrato(db, post, *, lido_em=None, tentado_em=None, erro=None, **numeros):
+    """Um retrato gravado à mão, com a hora que o teste precisa."""
+    quando = tentado_em or lido_em
+    db.add(
+        MarketingPostagemMetrica(
+            postagem_id=post.id,
+            dia=svc._dia(quando),
+            plataforma=post.plataforma,
+            conta=post.conta,
+            lido_em=lido_em,
+            updated_at=quando,
+            erro=erro,
+            **numeros,
+        )
+    )
+    await db.commit()
+
+
+def _espiao(monkeypatch) -> list[str]:
+    lidos: list[str] = []
+
+    async def falso(url, *, client):
+        lidos.append(url.rsplit("/", 1)[-1])
+        return {"views": 1, "bruto": {}}
+
+    monkeypatch.setattr(svc, "do_tiktok", falso)
+    return lidos
+
+
+async def test_modo_recentes_pega_nunca_lido_e_falha_recente(db, monkeypatch):
+    """O passe de hora em hora é o que faz vídeo novo ganhar número em até
+    1 hora, em vez de esperar a madrugada (até 16 h). Ele não relê o resto."""
+    agora = datetime.now(UTC)
+    _, novo = await _cenario(db, publicado_ha=timedelta(minutes=30))  # entra
+    await _outro_post(db, novo, "recem", publicado_em=agora - timedelta(minutes=10))  # cedo
+    lido = await _outro_post(db, novo, "lido", publicado_em=agora - timedelta(days=3))
+    await _retrato(db, lido, lido_em=agora - timedelta(days=1), views=10)
+    falha = await _outro_post(db, novo, "falha", publicado_em=agora - timedelta(days=2))
+    await _retrato(db, falha, tentado_em=agora - timedelta(hours=2), erro="rate_limit")
+    agorinha = await _outro_post(db, novo, "agorinha", publicado_em=agora - timedelta(days=2))
+    await _retrato(db, agorinha, tentado_em=agora - timedelta(minutes=20), erro="rate_limit")
+    apagado = await _outro_post(db, novo, "apagado", publicado_em=agora - timedelta(days=2))
+    await _retrato(
+        db, apagado, tentado_em=agora - timedelta(hours=2), erro=f"{svc.REMOVIDO} saiu do ar"
+    )
+
+    lidos = _espiao(monkeypatch)
+    await svc.coletar(db, agora=agora, modo="recentes")
+    assert sorted(lidos) == ["123", "falha"]
+
+
+async def test_modo_agora_pula_o_tentado_ha_menos_de_10_min(db, monkeypatch):
+    agora = datetime.now(UTC)
+    _, nunca = await _cenario(db)  # entra
+    fresco = await _outro_post(db, nunca, "fresco", publicado_em=agora - timedelta(days=2))
+    await _retrato(db, fresco, lido_em=agora - timedelta(minutes=5), views=1)
+    velho = await _outro_post(db, nunca, "velho", publicado_em=agora - timedelta(days=2))
+    await _retrato(db, velho, lido_em=agora - timedelta(minutes=30), views=1)  # entra
+    apagado = await _outro_post(db, nunca, "apagado", publicado_em=agora - timedelta(days=2))
+    await _retrato(
+        db, apagado, tentado_em=agora - timedelta(minutes=30), erro=f"{svc.REMOVIDO} saiu"
+    )
+    antigo = await _outro_post(db, nunca, "antigo", publicado_em=agora - timedelta(days=10))
+    await _retrato(db, antigo, lido_em=agora - timedelta(minutes=30), views=1)
+
+    lidos = _espiao(monkeypatch)
+    await svc.coletar(db, agora=agora, modo="agora")
+    assert sorted(lidos) == ["123", "velho"]
+
+
+async def test_completo_le_o_mais_atrasado_primeiro(db, monkeypatch):
+    """O `LIMIT 300` antigo ia do mais novo pro mais velho e deixaria o post
+    antigo sem leitura pra sempre. Agora o que não coube é o primeiro da vez
+    seguinte."""
+    monkeypatch.setitem(svc.CAP, "completo", 2)
+    agora = datetime.now(UTC)
+    _, a = await _cenario(db)
+    await _outro_post(db, a, "b", publicado_em=agora - timedelta(hours=3))
+    await _outro_post(db, a, "c", publicado_em=agora - timedelta(hours=4))
+
+    lidos = _espiao(monkeypatch)
+    assert (await svc.coletar(db, agora=agora))["total"] == 2
+    assert sorted(lidos) == ["123", "b"], "sem leitura nenhuma, vai do mais novo"
+    lidos.clear()
+    await svc.coletar(db, agora=agora + timedelta(minutes=1))
+    assert "c" in lidos, "o que ficou de fora é o primeiro da rodada seguinte"
+
+
+async def test_fora_do_desempenho_nao_e_coletado(db, monkeypatch):
+    _, p = await _cenario(db)
+    p.fora_do_desempenho_em = datetime.now(UTC)
+    p.fora_do_desempenho_motivo = "vídeo de teste"
+    await db.commit()
+
+    lidos = _espiao(monkeypatch)
+    for modo in ("completo", "recentes", "agora"):
+        assert (await svc.coletar(db, modo=modo))["total"] == 0, modo
+    assert lidos == []
+
+
+# ---------- a tela: aguardando, falha, fora do desempenho ----------
+
+
+async def test_postagem_sem_leitura_aparece_como_aguardando(client, db, make_user, auth_as):
+    """"esses vídeos ainda não aparecem… será que demora?" — a tela partia do
+    retrato, e o retrato só nascia na madrugada. Agora o post aparece na hora."""
+    await _ve(make_user, auth_as)
+    await _cenario(db)
+
+    r = (await client.get(API_M)).json()
+    assert r["versao"] == 2
+    [post] = r["postagens"]
+    assert post["estado"] == "aguardando"
+    assert post["acumulado"] == {}
+    assert post["marco_motivo"] == "aguardando"
+    assert r["resumo"]["videos"]["aguardando"] == 1
+    assert r["resumo"]["videos"]["no_ar"] == 0
+    [rede] = r["resumo"]["redes"]
+    assert rede["aguardando"] == 1 and rede["videos"] == 0
+    assert rede["acumulado"] == {} and rede["no_periodo"] == {}, "não entra em soma nenhuma"
+    assert r["sem_video_no_ar"] == [], "a marca tem vídeo no ar, só não lido ainda"
+    marca = r["marcas"][0]
+    assert marca["posts"] == 0 and marca["aguardando"] == 1
+    assert marca["plataformas"][0]["videos"][0]["estado"] == "aguardando"
+
+
+async def test_falha_de_hoje_mostra_a_ultima_leitura_boa_e_nao_fica_negativa(
+    client, db, make_user, auth_as, monkeypatch
+):
+    """Antes, a falha de hoje virava uma linha de números NULOS, e o "no
+    período" do vídeo sumia ou ia pra baixo. Agora ele fica com a última
+    leitura boa, com o aviso de que a de hoje falhou."""
+    await _ve(make_user, auth_as)
+    _, p = await _cenario(db, publicado_ha=timedelta(days=40))
+    monkeypatch.setattr(svc, "do_tiktok", _boa)
+    _boa.n = 80
+    await svc.coletar(db, agora=datetime.now(UTC) - timedelta(days=2))
+    _boa.n = 100
+    await svc.coletar(db, agora=datetime.now(UTC) - timedelta(days=1))
+    monkeypatch.setattr(svc, "do_tiktok", _ruim)
+    await svc.coletar(db)
+
+    r = (await client.get(API_M)).json()
+    [post] = r["postagens"]
+    assert post["estado"] == "falhou"
+    assert post["acumulado"]["views"] == 100, "a última leitura boa"
+    assert post["lido_em"] is not None and "rate_limit" in post["erro"]
+    [rede] = r["resumo"]["redes"]
+    assert rede["com_falha"] == 1 and "rate_limit" in rede["erro"]
+    assert rede["no_periodo"]["views"] == 20, "100 - 80, nunca negativo"
+    assert rede["serie"][-1] is None, "hoje não tem leitura boa: sem barra, não zero"
+    assert r["marcas"][0]["acumulado"]["views"] == 100
+
+
+async def _criativo(db, marca, *, equipe=None, modelo="video 15s"):
+    from app.models import MarketingCreative, MarketingCreativeFile
+
+    c = MarketingCreative(
+        modelo=modelo, marca=marca.slug, marca_id=marca.id, aprovado=True, equipe=equipe
+    )
+    db.add(c)
+    await db.flush()
+    f = MarketingCreativeFile(
+        creative_id=c.id, file_name="v.mp4", file_mime="video/mp4", file_rel=f"x/{c.id}.mp4"
+    )
+    db.add(f)
+    await db.commit()
+    return c, f
+
+
+async def test_fora_do_desempenho_some_de_tudo_e_aparece_no_rodape(
+    client, db, make_user, auth_as
+):
+    from app.models import Marca
+
+    await _ve(make_user, auth_as)
+    m, p = await _cenario(db)
+    pub = datetime.now(UTC) - timedelta(days=3)
+    p.publicado_em = pub
+    await db.commit()
+    await _retrato(db, p, lido_em=pub + timedelta(hours=24), views=100)
+    m = (await db.execute(select(Marca).where(Marca.id == m.id))).scalar_one()
+    c2, f2 = await _criativo(db, m)
+    fora = await _outro_post(
+        db, p, "999", publicado_em=pub, creative_id=c2.id, file_id=f2.id
+    )
+    await _retrato(db, fora, lido_em=pub + timedelta(hours=24), views=500)
+    fora.fora_do_desempenho_em = datetime.now(UTC)
+    fora.fora_do_desempenho_motivo = "conta antiga"
+    await db.commit()
+
+    r = (await client.get(API_M, params={"marco": 1})).json()
+    assert [x["postagem_id"] for x in r["postagens"]] == [str(p.id)]
+    assert [x["creative_id"] for x in r["criativos"]] == [str(p.creative_id)]
+    for dim in ("produto", "formato", "agencia", "roteiro", "horario"):
+        assert sum(g["total"] for g in r["grupos"][dim]) == 1, dim
+    assert r["resumo"]["videos"]["fora_do_desempenho"] == 1
+    assert r["resumo"]["videos"]["no_ar"] == 1
+    assert r["resumo"]["redes"][0]["acumulado"]["views"] == 100
+    assert r["postagens"][0]["base"]["n"] == 0, "nem na base da conta ele entra"
+    videos = r["marcas"][0]["plataformas"][0]["videos"]
+    assert [v["postagem_id"] for v in videos] == [str(p.id)]
+    [rodape] = r["fora_do_desempenho"]
+    assert rodape["postagem_id"] == str(fora.id)
+    assert rodape["motivo"] == "conta antiga"
+    assert rodape["plataforma"] == "tiktok" and rodape["em"] is not None
+
+
+def _migration_0317():
+    caminho = (
+        Path(__file__).resolve().parents[1] / "alembic" / "versions" / "0317_desempenho_videos.py"
+    )
+    spec = importlib.util.spec_from_file_location("m0317", caminho)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+async def test_sql_conta_antiga_tira_so_os_tiktoks_de_uranyx_brasil(db):
+    """Casa pelo @ do LINK, nunca pela coluna `conta`: o canal do YouTube da
+    Uranyx foi renomeado e o post dele ainda diz `uranyx_brasil` — é da marca e
+    tem que continuar contando. Regex e não LIKE: no LIKE o `_` é curinga."""
+    from tests.conftest import TEST_SCHEMA
+
+    agora = datetime.now(UTC)
+    _, antiga = await _cenario(db)  # https://www.tiktok.com/@uranyx_brasil/video/123
+    atual = await _outro_post(
+        db, antiga, "456", publicado_em=agora,
+        post_url="https://www.tiktok.com/@uranyx_br/video/456", conta="uranyx_br",
+    )
+    youtube = await _outro_post(
+        db, antiga, "jkt9LLoL9vw", publicado_em=agora, plataforma="youtube",
+        post_url="https://youtu.be/jkt9LLoL9vw", conta="uranyx_brasil",
+    )
+    parecida = await _outro_post(
+        db, antiga, "789", publicado_em=agora,
+        post_url="https://www.tiktok.com/@uranyxAbrasil/video/789",
+    )
+
+    sql = _migration_0317().sql_conta_antiga(TEST_SCHEMA)
+    r = await db.execute(text(sql))
+    await db.commit()
+    assert r.rowcount == 1
+
+    for x in (antiga, atual, youtube, parecida):
+        await db.refresh(x)
+    assert antiga.fora_do_desempenho_em is not None
+    assert "@uranyx_brasil" in antiga.fora_do_desempenho_motivo
+    assert atual.fora_do_desempenho_em is None
+    assert youtube.fora_do_desempenho_em is None, "o YouTube renomeado continua contando"
+    assert parecida.fora_do_desempenho_em is None, "o _ não é curinga"
+
+    r = await db.execute(text(sql))
+    await db.commit()
+    assert r.rowcount == 0, "rodar de novo não mexe em quem já saiu"
+
+
+async def test_youtube_renomeado_continua_contando(client, db, make_user, auth_as):
+    """A conta hoje é `uranyx_br`; o post foi publicado quando ela se chamava
+    `uranyx_brasil`. É a mesma conta (o mesmo cadastro), e divide a base."""
+    from app.models import RedeSocial
+
+    await _ve(make_user, auth_as)
+    _, p = await _cenario(db, plataforma="youtube")
+    rede = (
+        await db.execute(select(RedeSocial).where(RedeSocial.id == p.rede_social_id))
+    ).scalar_one()
+    rede.conta = "uranyx_br"
+    pub = datetime.now(UTC) - timedelta(days=10)
+    p.publicado_em = pub
+    p.post_url = "https://youtu.be/jkt9LLoL9vw"
+    await db.commit()
+    await _retrato(db, p, lido_em=pub + timedelta(hours=72), views=200)
+    for i in range(4):
+        q = await _outro_post(
+            db, p, f"yt{i}", publicado_em=pub, conta="uranyx_br",
+            post_url=f"https://youtu.be/yt{i}",
+        )
+        await _retrato(db, q, lido_em=pub + timedelta(hours=72), views=100)
+    await db.execute(text(_migration_0317().sql_conta_antiga("davinci_test")))
+    await db.commit()
+
+    r = (await client.get(API_M)).json()
+    assert r["fora_do_desempenho"] == []
+    post = next(x for x in r["postagens"] if x["postagem_id"] == str(p.id))
+    assert post["estado"] == "ok"
+    assert post["conta"] == "uranyx_br", "a tela mostra o nome atual"
+    assert post["base"] == {"mediana": 100, "n": 4}
+    assert post["indice_views"] == 2.0
+    outros = [x for x in r["postagens"] if x["postagem_id"] != str(p.id)]
+    assert all(x["base"]["n"] == 4 for x in outros), "e ele entra na base dos outros"
+
+
+# ---------- tirar do desempenho pela tela ----------
+
+
+async def test_patch_desempenho_exige_edit_e_motivo_e_volta(client, db, make_user, auth_as):
+    """Da próxima vez é um clique, não um UPDATE no banco — e o motivo é
+    obrigatório: daqui a um mês ninguém lembra por que o vídeo sumiu."""
+    so_ve = await make_user(permissions={"marketing_criativos": {"view": True}})
+    edita = await make_user(permissions={"marketing_criativos": {"view": True, "edit": True}})
+    _, p = await _cenario(db)
+    url = f"{API_M}/postagens/{p.id}/desempenho"
+
+    auth_as(so_ve)
+    r = await client.patch(url, json={"contar": False, "motivo": "conta antiga"})
+    assert r.status_code == 403
+
+    auth_as(edita)
+    r = await client.patch(url, json={"contar": False})
+    assert r.status_code == 422 and r.json()["detail"]["code"] == "motivo_obrigatorio"
+    r = await client.patch(url, json={"contar": False, "motivo": "  x "})
+    assert r.status_code == 422, "motivo de 1 letra não explica nada"
+
+    r = await client.patch(url, json={"contar": False, "motivo": " conta antiga "})
+    assert r.status_code == 200, r.text
+    assert r.json()["motivo"] == "conta antiga" and r.json()["em"] is not None
+    tela = (await client.get(API_M)).json()
+    assert tela["postagens"] == []
+    assert [x["postagem_id"] for x in tela["fora_do_desempenho"]] == [str(p.id)]
+    await db.refresh(p)
+    assert p.fora_do_desempenho_por == edita.id
+
+    r = await client.patch(url, json={"contar": True})
+    assert r.status_code == 200 and r.json()["em"] is None
+    tela = (await client.get(API_M)).json()
+    assert [x["postagem_id"] for x in tela["postagens"]] == [str(p.id)]
+    assert tela["fora_do_desempenho"] == []
+
+    p.status = "falhou"
+    await db.commit()
+    r = await client.patch(url, json={"contar": False, "motivo": "teste"})
+    assert r.status_code == 400 and r.json()["detail"]["code"] == "nao_publicada"
+    r = await client.patch(
+        f"{API_M}/postagens/00000000-0000-0000-0000-000000000000/desempenho",
+        json={"contar": True},
+    )
+    assert r.status_code == 404
+
+
+async def _equipe(db, p, equipe: str) -> None:
+    from app.models import MarketingCreative
+
+    c = (
+        await db.execute(select(MarketingCreative).where(MarketingCreative.id == p.creative_id))
+    ).scalar_one()
+    c.equipe = equipe
+    await db.commit()
+
+
+async def test_patch_desempenho_respeita_equipe(client, db, make_user, auth_as):
+    u = await make_user(permissions={"marketing_criativos": {"view": True, "edit": True}})
+    u.marketing_teams = ["Outra Agência"]
+    await db.commit()
+    _, p = await _cenario(db)
+    await _equipe(db, p, "Bill Gates")
+
+    auth_as(u)
+    r = await client.patch(
+        f"{API_M}/postagens/{p.id}/desempenho", json={"contar": False, "motivo": "teste"}
+    )
+    assert r.status_code == 403
+    assert r.json()["detail"]["code"] == "fora_da_sua_equipe"
+
+
+async def test_equipe_restrita_so_ve_os_proprios_criativos(client, db, make_user, auth_as):
+    """Mesmo escopo de Criativos: agência vê o que é dela. Até 23/09 esta tela
+    não tinha escopo nenhum."""
+    from app.models import Marca
+
+    m, p = await _cenario(db)
+    await _equipe(db, p, "Bill Gates")
+    m = (await db.execute(select(Marca).where(Marca.id == m.id))).scalar_one()
+    c2, f2 = await _criativo(db, m, equipe="Outra")
+    outro = await _outro_post(
+        db, p, "999", publicado_em=datetime.now(UTC), creative_id=c2.id, file_id=f2.id
+    )
+
+    u = await make_user(permissions={"marketing_criativos": {"view": True}})
+    u.marketing_teams = ["bill gates"]
+    await db.commit()
+    auth_as(u)
+    r = (await client.get(API_M)).json()
+    assert [x["postagem_id"] for x in r["postagens"]] == [str(p.id)]
+    assert [x["creative_id"] for x in r["criativos"]] == [str(p.creative_id)]
+    videos = [v for pl in r["marcas"][0]["plataformas"] for v in pl["videos"]]
+    assert [v["postagem_id"] for v in videos] == [str(p.id)]
+
+    todos = await make_user(permissions={"marketing_criativos": {"view": True}})
+    auth_as(todos)
+    r = (await client.get(API_M)).json()
+    assert {x["postagem_id"] for x in r["postagens"]} == {str(p.id), str(outro.id)}
+
+
+async def test_filtro_marca_mantem_marcas_disponiveis(client, db, make_user, auth_as):
+    """Filtrar a marca não pode sumir com as outras dos chips — senão não dá
+    pra voltar."""
+    from app.models import Marca
+
+    await _ve(make_user, auth_as)
+    m1, p = await _cenario(db)
+    m2 = Marca(nome="Charlots", slug="charlots")
+    db.add(m2)
+    await db.commit()
+    c2, f2 = await _criativo(db, m2)
+    await _outro_post(
+        db, p, "999", publicado_em=datetime.now(UTC), creative_id=c2.id, file_id=f2.id
+    )
+
+    r = (await client.get(API_M, params={"marca_id": str(m1.id)})).json()
+    assert r["marca_id"] == str(m1.id)
+    assert [x["postagem_id"] for x in r["postagens"]] == [str(p.id)]
+    assert [x["marca"] for x in r["marcas"]] == ["Uranyx"]
+    assert [x["nome"] for x in r["marcas_disponiveis"]] == ["Charlots", "Uranyx"]
+
+
+async def test_marco_e_indice_no_endpoint(client, db, make_user, auth_as):
+    """5 vídeos na mesma conta, lidos com 60 h e 84 h: o D+3 é o meio do
+    caminho, e o índice é contra a mediana dos OUTROS 4."""
+    await _ve(make_user, auth_as)
+    _, p = await _cenario(db)
+    pub = datetime.now(UTC) - timedelta(days=5)
+    posts = [p]
+    for i in range(1, 5):
+        posts.append(await _outro_post(db, p, f"v{i}", publicado_em=pub))
+    p.publicado_em = pub
+    await db.commit()
+    pares = [(100, 300), (200, 400), (300, 500), (400, 600), (900, 1300)]
+    for post, (v60, v84) in zip(posts, pares, strict=True):
+        await _retrato(db, post, lido_em=pub + timedelta(hours=60), views=v60)
+        await _retrato(db, post, lido_em=pub + timedelta(hours=84), views=v84)
+
+    r = (await client.get(API_M)).json()
+    assert r["marco"] == 3
+    por = {x["postagem_id"]: x for x in r["postagens"]}
+    assert [por[str(x.id)]["views_marco"] for x in posts] == [200, 300, 400, 500, 1100]
+    top = por[str(posts[4].id)]
+    assert top["base"] == {"mediana": 350, "n": 4}
+    assert top["indice_views"] == round(1100 / 350, 2)
+    assert por[str(posts[0].id)]["indice_views"] == round(200 / 450, 2)
+    assert r["criativos"][0]["n_indices"] == 5
+
+    assert (await client.get(API_M, params={"marco": 2})).status_code == 422
+
+
+# ---------- "Atualizar agora" e a trava da rodada ----------
+
+
+class _PoolFalso:
+    def __init__(self, erro: Exception | None = None) -> None:
+        self.chamadas: list[tuple] = []
+        self.erro = erro
+
+    async def enqueue_job(self, nome, *args, **kwargs):
+        if self.erro:
+            raise self.erro
+        self.chamadas.append((nome, args, kwargs))
+        return object()
+
+
+async def test_atualizar_agora_enfileira_e_segura_10_min(
+    client, db, make_user, auth_as, monkeypatch, redis_falso
+):
+    """Sem `_job_id` fixo: o worker UI guarda o resultado por 1 hora, e com id
+    fixo todo clique dessa hora sumiria calado. Quem segura é a trava."""
+    from app.routers import marketing_metricas as rota
+
+    pool = _PoolFalso()
+
+    async def _pool():
+        return pool
+
+    monkeypatch.setattr(rota, "get_arq_ui_pool", _pool)
+    await _ve(make_user, auth_as)
+
+    r = await client.post(f"{API_M}/atualizar")
+    assert r.status_code == 202, r.text
+    corpo = r.json()
+    assert corpo["enfileirado"] is True and corpo["pedido_em"] and corpo["pode_atualizar_em"]
+    assert pool.chamadas == [("marketing_postagens_metricas_agora", (), {})]
+
+    r = await client.post(f"{API_M}/atualizar")
+    assert r.status_code == 429
+    assert r.json()["detail"]["code"] == "atualizacao_recente"
+    assert r.json()["detail"]["pode_atualizar_em"]
+    assert len(pool.chamadas) == 1
+
+    tela = (await client.get(API_M)).json()
+    assert tela["coleta"]["pode_atualizar_em"] is not None
+
+    # Fila fora: 503, e a trava sai — senão o botão ficaria 10 min travado
+    # por um pedido que nunca existiu.
+    redis_falso.d.clear()
+    pool.erro = RuntimeError("redis caiu")
+    r = await client.post(f"{API_M}/atualizar")
+    assert r.status_code == 503 and r.json()["detail"]["code"] == "fila_indisponivel"
+    assert not await redis_falso.exists(svc.CHAVE_AGORA)
+
+    auth_as(await make_user(permissions={}))
+    assert (await client.post(f"{API_M}/atualizar")).status_code == 403
+
+
+async def test_rodada_pula_quando_outra_esta_rodando(monkeypatch):
+    """Três portas pra mesma leitura (noite, hora em hora, botão): duas juntas
+    leriam o mesmo TikTok duas vezes do mesmo IP. O passe curto e o botão
+    desistem (o próximo resolve); a da noite tenta de novo em 5 min."""
+    from arq import Retry
+
+    from app import worker
+
+    falso = _RedisFalso()
+    monkeypatch.setattr(worker, "redis", falso)
+    monkeypatch.setattr(worker._settings, "enable_marketing", True)
+    chamou: list[str] = []
+    dias: dict[str, datetime | None] = {}
+
+    async def coletar_falso(session, *, agora=None, modo="completo", dia=None):
+        chamou.append(modo)
+        dias[modo] = dia
+        return {"total": 1, "ok": 1, "falhou": 0}
+
+    monkeypatch.setattr(svc, "coletar", coletar_falso)
+
+    await falso.set(svc.CHAVE_RODANDO, "completo", ex=1800)
+    await worker.marketing_postagens_metricas_recentes({})
+    assert chamou == []
+    with pytest.raises(Retry):
+        await worker.marketing_postagens_metricas({})
+    assert chamou == []
+    assert await falso.exists(svc.CHAVE_RODANDO), "a trava de quem está rodando fica"
+
+    await falso.delete(svc.CHAVE_RODANDO)
+    await worker.marketing_postagens_metricas_agora({})
+    assert chamou == ["agora"]
+    assert not await falso.exists(svc.CHAVE_RODANDO), "terminou, soltou"
+    ultima = json.loads(await falso.get(svc.CHAVE_ULTIMA_RODADA))
+    assert ultima["modo"] == "agora" and ultima["ok"] == 1 and ultima["fim"]
+    assert dias["agora"] is None, "o botão grava no dia de hoje"
+
+    # A da noite grava no dia DA NOITE (a que começou depois da meia-noite
+    # ainda é o fim de ontem).
+    antes = svc.dia_da_noite(datetime.now(UTC))
+    await worker.marketing_postagens_metricas({})
+    depois = svc.dia_da_noite(datetime.now(UTC))
+    assert dias["completo"] in (antes, depois)
+
+
+async def test_noite_que_comeca_depois_da_meia_noite_e_da_noite_de_ontem():
+    """A da noite é marcada 13 min antes de o dia virar, numa fila que
+    atrasa. Começando 00:05, o retrato do fim de 27/09 ia pro dia 28 — e a
+    leitura das 23:47 do dia 28 sobrescrevia: o fim do dia 27 se perdia."""
+    assert svc.dia_da_noite(datetime(2026, 9, 28, 2, 47, tzinfo=UTC)).date().isoformat() == (
+        "2026-09-27"
+    ), "no horário: 23:47 de 27/09"
+    assert svc.dia_da_noite(datetime(2026, 9, 28, 3, 5, tzinfo=UTC)).date().isoformat() == (
+        "2026-09-27"
+    ), "00:05 de 28/09 ainda é a noite de 27/09, atrasada"
+    assert svc.dia_da_noite(datetime(2026, 9, 28, 9, 0, tzinfo=UTC)).date().isoformat() == (
+        "2026-09-28"
+    ), "06:00 de Brasília já é outro dia"
+
+
+async def test_noite_atrasada_grava_no_dia_da_noite(db, monkeypatch):
+    """O dia do retrato vem do worker; a hora da leitura continua a real (é
+    ela que diz a idade do vídeo)."""
+    _, p = await _cenario(db, publicado_ha=timedelta(days=40))
+    _boa.n = 300
+    monkeypatch.setattr(svc, "do_tiktok", _boa)
+    t = _hoje_as(0) + timedelta(minutes=5)  # 00:05 de Brasília
+    await svc.coletar(db, agora=t, dia=svc.dia_da_noite(t))
+
+    pid = p.id
+    db.expire_all()
+    [linha] = await _linhas(db, pid)
+    ontem = (t.astimezone(svc.BRT) - timedelta(days=1)).date()
+    assert linha.dia.astimezone(svc.BRT).date() == ontem, "o fim de ontem fica em ontem"
+    assert linha.lido_em == t
+
+
+async def test_leitura_da_noite_e_de_hora_em_hora_no_minuto_47():
+    """23:47 BRT faz o retrato do dia D ser o número do fim de D; o passe de
+    hora em hora cobre as outras 23 horas no mesmo minuto."""
+    from app import worker
+
+    por_nome = {c.coroutine.__name__: c for c in worker.WorkerSettings.cron_jobs}
+    noite = por_nome["marketing_postagens_metricas"]
+    assert noite.hour == {svc.HORA_NOTURNA_UTC} and noite.minute == {svc.MINUTO_COLETA}
+    hora = por_nome["marketing_postagens_metricas_recentes"]
+    assert hora.hour == set(range(24)) - {svc.HORA_NOTURNA_UTC}
+    assert hora.minute == {svc.MINUTO_COLETA}
+    ui = {getattr(f, "name", None): f for f in worker.WorkerSettingsUI.functions}
+    assert ui["marketing_postagens_metricas_agora"].timeout_s == 600, "o 60s da fila UI mataria"
+
+
+async def test_noite_travada_tenta_de_novo_ate_a_trava_vencer():
+    """Travada, a da noite levanta Retry(defer=300). O `cron()` do arq tem
+    max_tries=1 por padrão — e aí o Retry morria sem rodar, e o dia ficava
+    sem o retrato do fim. As retentativas têm que cobrir os 30 min da trava
+    (a órfã, de worker morto no meio da rodada, só sai pelo TTL)."""
+    from app import worker
+
+    por_nome = {c.coroutine.__name__: c for c in worker.WorkerSettings.cron_jobs}
+    noite = por_nome["marketing_postagens_metricas"]
+    assert noite.max_tries is not None and (noite.max_tries - 1) * 300 >= 1800
