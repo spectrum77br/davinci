@@ -86,7 +86,13 @@ def main() -> None:
             SEMPRE,
         ]
     )
-    env = dict(os.environ, BROWSER_CDP_URL=aberto["cdp"])
+    # o navegador do Hermes roda pelo Node dele (agent-browser via npx) — sem o PATH
+    # do ~/.local/bin a sessão sobe só com o cofre de senhas, sem navegar
+    caminho = os.pathsep.join(
+        [os.path.expanduser("~/.local/bin"), os.path.expanduser("~/.hermes/node/bin"),
+         os.environ.get("PATH", "/usr/bin:/bin")]
+    )
+    env = dict(os.environ, BROWSER_CDP_URL=aberto["cdp"], PATH=caminho)
     try:
         r = subprocess.run(
             [HERMES, "-z", prompt, "-t", "browser", "-m", "claude-opus-5-5",
