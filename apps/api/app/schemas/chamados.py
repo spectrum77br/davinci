@@ -702,6 +702,18 @@ class AgentRegraOut(BaseModel):
     plataforma: str | None = None
 
 
+class AgentAprendizadoOut(BaseModel):
+    """Uma decisão da IA que a pessoa avaliou (✓/✗) — vai pra IA a cada passada."""
+
+    certo: bool
+    pedido_bling: str | None = None
+    plataforma: str | None = None
+    # o texto da análise que ela gravou
+    decisao: str
+    # no ✗: o que era o certo
+    correcao: str | None = None
+
+
 class AgentCerebroOut(BaseModel):
     nome: str
     exclusivo: bool
@@ -712,6 +724,8 @@ class AgentCerebroOut(BaseModel):
     legado_ignorado_at: datetime | None = None
     # O manual (só as regras ativas), lido pela IA a cada passada.
     regras: list[AgentRegraOut] = []
+    # 24/09: as correções (✗) e confirmações (✓) mais recentes da pessoa.
+    aprendizado: list[AgentAprendizadoOut] = []
 
 
 class AgentHistoricoIn(BaseModel):
@@ -802,15 +816,40 @@ class IaRegraOut(BaseModel):
     updated_at: datetime
 
 
+class IaAvaliacaoIn(BaseModel):
+    """✓ acertou / ✗ errou. No ✗ a correção é obrigatória: é ela que a IA segue
+    ao refazer o chamado e que fica de aprendizado."""
+
+    certo: bool
+    correcao: str | None = Field(default=None, max_length=4000)
+
+    _clean = field_validator("correcao", mode="before")(_clean_optional_text)
+
+    @model_validator(mode="after")
+    def _errou_precisa_correcao(self) -> "IaAvaliacaoIn":
+        if not self.certo and not self.correcao:
+            raise ValueError("no ✗ (errou), diga o que era o certo")
+        return self
+
+
+class IaAvaliacaoOut(BaseModel):
+    certo: bool
+    correcao: str | None = None
+    autor: str | None = None
+    quando: datetime
+
+
 class IaDecisaoOut(BaseModel):
     """Uma análise que a IA gravou num chamado (o que ela decidiu e por quê)."""
 
+    mensagem_id: UUID
     chamado_id: UUID
     pedido_bling: str | None = None
     plataforma: str | None = None
     conta: str | None = None
     quando: datetime
     texto: str
+    avaliacao: IaAvaliacaoOut | None = None
 
 
 class IaEstadoIn(BaseModel):

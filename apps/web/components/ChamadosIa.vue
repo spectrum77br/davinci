@@ -1,14 +1,14 @@
 <script setup lang="ts">
-import { Bot, BookOpen, Check, Clock, Loader2, Pencil, Plus, Power, RotateCcw, Trash2, X } from 'lucide-vue-next'
+import { Bot, BookOpen, Check, Clock, ExternalLink, Loader2, Pencil, Plus, Power, RotateCcw, ThumbsDown, ThumbsUp, Trash2, Undo2, X } from 'lucide-vue-next'
 
 // Aba Chamados › IA de Chamado (Vinicius 24/09: "essa aba é onde eu vou ensinar
 // ele, e onde vai criando um manual — quando acontecer isso e isso você faz
 // isso"). A IA (hoje o Hermes no Mac Santiago) lê o manual inteiro a cada
 // passada. Aqui: liga/desliga (sem modo teste — ligada decide de verdade), o
-// manual, e o que ela decidiu nos chamados.
+// manual, e o que ela decidiu nos chamados — com ✓ acertou / ✗ errou (o ✗ leva a
+// correção: ela refaz o chamado e aprende).
 
 const props = defineProps<{ canEdit: boolean }>()
-const emit = defineEmits<{ (e: 'abrir-pedido', pedido: string): void }>()
 const { api } = useApi()
 
 type Regra = {
@@ -21,13 +21,16 @@ type Regra = {
   created_at: string
   updated_at: string
 }
+type Avaliacao = { certo: boolean; correcao: string | null; autor: string | null; quando: string }
 type Decisao = {
+  mensagem_id: string
   chamado_id: string
   pedido_bling: string | null
   plataforma: string | null
   conta: string | null
   quando: string
   texto: string
+  avaliacao: Avaliacao | null
 }
 type Estado = {
   nome: string
@@ -168,6 +171,65 @@ async function apagar(r: Regra) {
   }
 }
 
+// ─── ✓ acertou / ✗ errou ────────────────────────────────────────────────────
+// 24/09 (Vinicius: "como eu faço pra dizer: nesse você errou, nesse acertou").
+const corrigindo = ref<string | null>(null)
+const correcao = ref('')
+const avaliando = ref<string | null>(null)
+function trocarDecisao(d: Decisao) {
+  if (!estado.value) return
+  const i = estado.value.decisoes.findIndex(x => x.mensagem_id === d.mensagem_id)
+  if (i >= 0) estado.value.decisoes[i] = d
+}
+async function avaliar(d: Decisao, certo: boolean) {
+  if (!certo && !correcao.value.trim()) return
+  avaliando.value = d.mensagem_id
+  try {
+    trocarDecisao(await api<Decisao>(`/api/chamados/ia/decisoes/${d.mensagem_id}/avaliacao`, {
+      method: 'PUT',
+      body: certo ? { certo: true } : { certo: false, correcao: correcao.value },
+    }))
+    corrigindo.value = null
+    correcao.value = ''
+  } catch (e: any) {
+    erro.value = mensagemDeErro(e, 'Não consegui salvar a avaliação')
+  } finally {
+    avaliando.value = null
+  }
+}
+function abrirCorrecao(d: Decisao) {
+  corrigindo.value = d.mensagem_id
+  correcao.value = d.avaliacao?.certo === false ? (d.avaliacao.correcao || '') : ''
+}
+async function desfazerAvaliacao(d: Decisao) {
+  avaliando.value = d.mensagem_id
+  try {
+    trocarDecisao(await api<Decisao>(`/api/chamados/ia/decisoes/${d.mensagem_id}/avaliacao`, { method: 'DELETE' }))
+  } catch (e: any) {
+    erro.value = mensagemDeErro(e, 'Não consegui desfazer')
+  } finally {
+    avaliando.value = null
+  }
+}
+// "virar regra": abre a nova regra já preenchida com a situação e a correção.
+const manualRef = ref<HTMLElement | null>(null)
+function plataformaDaRegra(p: string | null) {
+  const v = (p || '').toLowerCase()
+  if (['ml', 'mercado livre', 'mercadolivre', 'meli'].includes(v)) return 'ml'
+  return PLATAFORMAS.some(x => x.value === v) ? v : ''
+}
+function virarRegra(d: Decisao) {
+  const situacao = resumoDe(d.texto)
+  nova.quando = situacao.length > 400 ? `${situacao.slice(0, 400)}…` : situacao
+  nova.faca = d.avaliacao?.correcao || ''
+  nova.plataforma = plataformaDaRegra(d.plataforma)
+  novaAberta.value = true
+  nextTick(() => manualRef.value?.scrollIntoView({ behavior: 'smooth', block: 'start' }))
+}
+function linkDoPedido(pedido: string) {
+  return `/chamados?search=${encodeURIComponent(pedido)}`
+}
+
 // ─── resumo e decisões ──────────────────────────────────────────────────────
 const regrasAtivas = computed(() => estado.value?.regras.filter(r => r.ativa).length ?? 0)
 
@@ -253,7 +315,7 @@ function resumoDe(texto: string) {
       </div>
 
       <!-- manual -->
-      <section class="rounded-lg border bg-card">
+      <section ref="manualRef" class="rounded-lg border bg-card scroll-mt-4">
         <div class="flex flex-wrap items-center gap-2 border-b px-3 py-2">
           <BookOpen class="size-4 text-muted-foreground" />
           <h2 class="text-sm font-semibold">Manual</h2>
@@ -336,7 +398,7 @@ function resumoDe(texto: string) {
         <div class="flex items-center gap-2 border-b px-3 py-2">
           <Bot class="size-4 text-muted-foreground" />
           <h2 class="text-sm font-semibold">O que ela decidiu</h2>
-          <span class="text-xs text-muted-foreground">as últimas decisões nos chamados — errou? ensine uma regra nova no manual</span>
+          <span class="text-xs text-muted-foreground">marque <b>acertou</b> ou <b>errou</b> — no errou, diga o que era o certo: ela refaz o chamado e aprende</span>
           <Button size="sm" variant="outline" class="ml-auto" :disabled="loading" @click="carregar">
             <RotateCcw class="size-4 mr-1.5" :class="{ 'animate-spin': loading }" /> atualizar
           </Button>
@@ -346,17 +408,63 @@ function resumoDe(texto: string) {
         </div>
         <table v-else class="w-full text-xs">
           <tbody class="divide-y">
-            <tr v-for="d in estado.decisoes" :key="`${d.chamado_id}-${d.quando}`" class="align-top">
+            <template v-for="d in estado.decisoes" :key="d.mensagem_id">
+            <tr class="align-top" :class="d.avaliacao ? (d.avaliacao.certo ? 'bg-emerald-500/[0.04]' : 'bg-red-500/[0.04]') : ''">
               <td class="whitespace-nowrap px-3 py-2 text-muted-foreground tabular-nums">{{ fmtQuando(d.quando) }}</td>
               <td class="whitespace-nowrap px-2 py-2">
-                <button v-if="d.pedido_bling" type="button" class="font-mono underline decoration-dotted hover:text-primary" title="abrir o chamado" @click="emit('abrir-pedido', d.pedido_bling)">{{ d.pedido_bling }}</button>
+                <!-- 24/09 (Vinicius): abre em OUTRA aba — a tela da IA fica onde está -->
+                <a v-if="d.pedido_bling" :href="linkDoPedido(d.pedido_bling)" target="_blank" rel="noopener" class="inline-flex items-center gap-1 font-mono underline decoration-dotted hover:text-primary" title="abrir o chamado em outra aba">
+                  {{ d.pedido_bling }} <ExternalLink class="size-3 opacity-60" />
+                </a>
                 <div class="text-[11px] text-muted-foreground">{{ [nomePlataforma(d.plataforma), d.conta].filter(Boolean).join(' · ') }}</div>
               </td>
               <td class="whitespace-nowrap px-2 py-2">
                 <span v-if="acaoDe(d.texto)" class="rounded-full px-2 py-0.5 text-[11px] font-medium" :class="acaoDe(d.texto)!.cls">{{ acaoDe(d.texto)!.label }}</span>
               </td>
-              <td class="px-2 py-2 pr-3 text-sm">{{ resumoDe(d.texto) }}</td>
+              <td class="px-2 py-2 text-sm">
+                {{ resumoDe(d.texto) }}
+                <div v-if="d.avaliacao && !d.avaliacao.certo" class="mt-1.5 rounded border border-red-500/30 bg-red-500/5 px-2 py-1 text-xs">
+                  <span class="font-semibold text-red-700 dark:text-red-300">O certo era:</span> {{ d.avaliacao.correcao }}
+                  <span class="text-muted-foreground"> — {{ d.avaliacao.autor }}</span>
+                </div>
+              </td>
+              <td class="whitespace-nowrap px-3 py-2 text-right">
+                <Loader2 v-if="avaliando === d.mensagem_id" class="ml-auto size-4 animate-spin text-muted-foreground" />
+                <template v-else-if="d.avaliacao">
+                  <span class="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium" :class="d.avaliacao.certo ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300' : 'bg-red-500/15 text-red-700 dark:text-red-300'">
+                    <component :is="d.avaliacao.certo ? ThumbsUp : ThumbsDown" class="size-3" />
+                    {{ d.avaliacao.certo ? 'acertou' : 'errou' }}
+                  </span>
+                  <div v-if="canEdit" class="mt-1 flex justify-end gap-0.5">
+                    <Button v-if="!d.avaliacao.certo" size="sm" variant="ghost" class="h-6 px-1.5 text-[11px]" title="criar uma regra no manual a partir desta correção" @click="virarRegra(d)">virar regra</Button>
+                    <Button size="sm" variant="ghost" class="h-6 px-1.5" title="desfazer a avaliação" @click="desfazerAvaliacao(d)"><Undo2 class="size-3" /></Button>
+                  </div>
+                </template>
+                <div v-else-if="canEdit" class="flex justify-end gap-1">
+                  <Button size="sm" variant="outline" class="h-7 px-2 text-xs text-emerald-700 dark:text-emerald-300" title="ela acertou" @click="avaliar(d, true)">
+                    <ThumbsUp class="size-3.5 mr-1" /> acertou
+                  </Button>
+                  <Button size="sm" variant="outline" class="h-7 px-2 text-xs text-red-700 dark:text-red-300" title="ela errou — dizer o que era o certo" @click="abrirCorrecao(d)">
+                    <ThumbsDown class="size-3.5 mr-1" /> errou
+                  </Button>
+                </div>
+              </td>
             </tr>
+            <tr v-if="corrigindo === d.mensagem_id">
+              <td colspan="5" class="bg-red-500/[0.04] px-3 pb-3 pt-1">
+                <div class="flex flex-wrap items-end gap-2">
+                  <label class="min-w-[320px] flex-1 space-y-1">
+                    <span class="text-[11px] font-medium text-muted-foreground">O que era o certo? — ela refaz este chamado na próxima passada (até 5 min) e guarda como aprendizado</span>
+                    <textarea v-model="correcao" rows="3" class="w-full rounded-md border bg-background px-2 py-1.5 text-sm" placeholder="ex.: não era pra esperar — responder pedindo a devolução do valor, citando o rastreio entregue" />
+                  </label>
+                  <Button size="sm" :disabled="!correcao.trim() || avaliando === d.mensagem_id" @click="avaliar(d, false)">
+                    <Check class="size-4 mr-1.5" /> salvar correção
+                  </Button>
+                  <Button size="sm" variant="ghost" @click="corrigindo = null"><X class="size-4" /></Button>
+                </div>
+              </td>
+            </tr>
+            </template>
           </tbody>
         </table>
       </section>

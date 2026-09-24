@@ -7,7 +7,10 @@ chamados (hoje o Hermes no Mac Santiago, `chamados_cerebros`); aqui a pessoa:
 - liga/desliga (desligada, ela não recebe caso nenhum e não decide nada — é o
   próprio servidor que trava, ver `routers/chamados.agent_analisar/analise`);
 - escreve o manual (`chamados_ia_regras`), que a IA lê a cada passada;
-- vê o que ela decidiu (as análises que ela gravou nos chamados).
+- vê o que ela decidiu (as análises que ela gravou nos chamados) e marca ✓ acertou
+  / ✗ errou. O ✗ leva a correção: vira instrução no chamado (a IA refaz na
+  próxima passada) e aprendizado (vai pra IA a cada passada, ver
+  `routers/chamados.agent_cerebro`).
 
 Sem modo teste (decisão dele): ligada = decide de verdade.
 """
@@ -22,10 +25,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
 from app.deps.auth import require_permission
-from app.models import Chamado, ChamadoCerebro, ChamadoIaRegra, ChamadoMensagem, User
+from app.models import (
+    Chamado,
+    ChamadoCerebro,
+    ChamadoIaAvaliacao,
+    ChamadoIaRegra,
+    ChamadoMensagem,
+    User,
+)
 from app.models.chamado import CANAIS
 from app.routers.chamados import _trabalho_do_cerebro
 from app.schemas.chamados import (
+    IaAvaliacaoIn,
+    IaAvaliacaoOut,
     IaDecisaoOut,
     IaEstadoIn,
     IaEstadoOut,
@@ -33,6 +45,7 @@ from app.schemas.chamados import (
     IaRegraOut,
     IaRegraPatch,
 )
+from app.services import chamados as svc
 
 logger = structlog.get_logger()
 # incluído ANTES do router da aba (senão "/ia" cairia em "/{chamado_id}")
@@ -66,17 +79,62 @@ async def _ia(session: AsyncSession) -> ChamadoCerebro:
     return ia
 
 
+async def _nomes(session: AsyncSession, ids: set[UUID | None]) -> dict[UUID, str | None]:
+    ids = {i for i in ids if i is not None}
+    if not ids:
+        return {}
+    return {
+        u.id: _nome(u)
+        for u in (await session.execute(select(User).where(User.id.in_(ids)))).scalars()
+    }
+
+
+async def _decisoes_out(
+    session: AsyncSession, ia: ChamadoCerebro, mensagem_id: UUID | None = None
+) -> list[IaDecisaoOut]:
+    q = (
+        select(ChamadoMensagem, Chamado, ChamadoIaAvaliacao)
+        .join(Chamado, Chamado.id == ChamadoMensagem.chamado_id)
+        .outerjoin(ChamadoIaAvaliacao, ChamadoIaAvaliacao.mensagem_id == ChamadoMensagem.id)
+        .where(ChamadoMensagem.tipo == "analise", ChamadoMensagem.autor_nome == ia.nome)
+    )
+    if mensagem_id is not None:
+        q = q.where(ChamadoMensagem.id == mensagem_id)
+    rows = (
+        await session.execute(q.order_by(ChamadoMensagem.created_at.desc()).limit(_DECISOES))
+    ).all()
+    nomes = await _nomes(session, {av.updated_by for _m, _c, av in rows if av is not None})
+    return [
+        IaDecisaoOut(
+            mensagem_id=m.id,
+            chamado_id=ch.id,
+            pedido_bling=ch.pedido_bling,
+            plataforma=ch.plataforma,
+            conta=ch.conta,
+            quando=m.created_at,
+            texto=m.texto,
+            avaliacao=(
+                IaAvaliacaoOut(
+                    certo=av.certo,
+                    correcao=av.correcao,
+                    autor=nomes.get(av.updated_by),
+                    quando=av.updated_at,
+                )
+                if av is not None
+                else None
+            ),
+        )
+        for m, ch, av in rows
+    ]
+
+
 async def _regras_out(session: AsyncSession) -> list[IaRegraOut]:
     regras = (
         (await session.execute(select(ChamadoIaRegra).order_by(ChamadoIaRegra.created_at)))
         .scalars()
         .all()
     )
-    ids = {r.updated_by or r.created_by for r in regras} - {None}
-    nomes: dict[UUID, str | None] = {}
-    if ids:
-        for u in (await session.execute(select(User).where(User.id.in_(ids)))).scalars():
-            nomes[u.id] = _nome(u)
+    nomes = await _nomes(session, {r.updated_by or r.created_by for r in regras})
     return [
         IaRegraOut(
             id=r.id,
@@ -105,15 +163,6 @@ async def estado(
             )
         )
     ).scalar_one()
-    decisoes = (
-        await session.execute(
-            select(ChamadoMensagem, Chamado)
-            .join(Chamado, Chamado.id == ChamadoMensagem.chamado_id)
-            .where(ChamadoMensagem.tipo == "analise", ChamadoMensagem.autor_nome == ia.nome)
-            .order_by(ChamadoMensagem.created_at.desc())
-            .limit(_DECISOES)
-        )
-    ).all()
     return IaEstadoOut(
         nome=ia.nome,
         ligada=ia.ligada,
@@ -121,17 +170,7 @@ async def estado(
         ultima_passada=ia.last_used_at,
         esperando=esperando,
         regras=await _regras_out(session),
-        decisoes=[
-            IaDecisaoOut(
-                chamado_id=ch.id,
-                pedido_bling=ch.pedido_bling,
-                plataforma=ch.plataforma,
-                conta=ch.conta,
-                quando=m.created_at,
-                texto=m.texto,
-            )
-            for m, ch in decisoes
-        ],
+        decisoes=await _decisoes_out(session, ia),
     )
 
 
@@ -211,3 +250,76 @@ async def apagar_regra(
     await session.commit()
     logger.info("chamados_ia_regra_apagada", regra=str(regra_id), por=_nome(user))
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+async def _decisao_da_ia(
+    session: AsyncSession, mensagem_id: UUID
+) -> tuple[ChamadoCerebro, ChamadoMensagem, Chamado]:
+    ia = await _ia(session)
+    m = await session.get(ChamadoMensagem, mensagem_id)
+    if m is None or m.tipo != "analise" or m.autor_nome != ia.nome:
+        raise HTTPException(404, detail={"code": "decisao_nao_encontrada"})
+    ch = await session.get(Chamado, m.chamado_id)
+    assert ch is not None
+    return ia, m, ch
+
+
+@router.put("/decisoes/{mensagem_id}/avaliacao", response_model=IaDecisaoOut)
+async def avaliar(
+    mensagem_id: UUID,
+    body: IaAvaliacaoIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("chamados", "edit"))],
+) -> IaDecisaoOut:
+    """✓/✗ numa decisão. No ✗, a correção vira instrução no chamado — a IA refaz
+    na próxima passada (salvo chamado Concluído: aí fica só o aprendizado)."""
+    ia, m, ch = await _decisao_da_ia(session, mensagem_id)
+    av = (
+        await session.execute(
+            select(ChamadoIaAvaliacao).where(ChamadoIaAvaliacao.mensagem_id == m.id)
+        )
+    ).scalar_one_or_none()
+    if av is None:
+        av = ChamadoIaAvaliacao(mensagem_id=m.id, chamado_id=ch.id, created_by=user.id)
+        session.add(av)
+    mudou_correcao = not body.certo and (av.certo is not False or av.correcao != body.correcao)
+    av.certo = body.certo
+    av.correcao = None if body.certo else body.correcao
+    av.updated_by = user.id
+    if mudou_correcao and not ch.resolvido:
+        session.add(
+            svc.nova_mensagem(
+                ch,
+                texto=(
+                    f"Correção de {_nome(user) or 'uma pessoa'} sobre a decisão da {ia.nome} "
+                    f"de {m.created_at.astimezone(svc.SAO_PAULO):%d/%m %H:%M}: {body.correcao}"
+                ),
+                tipo="instrucao",
+                direcao="sistema",
+                autor_nome=_nome(user) or "usuário",
+                autor_id=user.id,
+                status="registrada",
+            )
+        )
+    await session.commit()
+    logger.info("chamados_ia_avaliacao", mensagem=str(m.id), certo=body.certo, por=_nome(user))
+    return (await _decisoes_out(session, ia, mensagem_id=m.id))[0]
+
+
+@router.delete("/decisoes/{mensagem_id}/avaliacao", response_model=IaDecisaoOut)
+async def desfazer_avaliacao(
+    mensagem_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[User, Depends(require_permission("chamados", "edit"))],
+) -> IaDecisaoOut:
+    """Tira o ✓/✗ (a instrução que o ✗ mandou continua no histórico)."""
+    ia, m, _ch = await _decisao_da_ia(session, mensagem_id)
+    av = (
+        await session.execute(
+            select(ChamadoIaAvaliacao).where(ChamadoIaAvaliacao.mensagem_id == m.id)
+        )
+    ).scalar_one_or_none()
+    if av is not None:
+        await session.delete(av)
+        await session.commit()
+    return (await _decisoes_out(session, ia, mensagem_id=m.id))[0]

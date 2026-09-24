@@ -332,3 +332,36 @@ class ChamadoIaRegra(Base, TimestampMixin):
     updated_by: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
+
+
+class ChamadoIaAvaliacao(Base, TimestampMixin):
+    """✓ acertou / ✗ errou numa decisão da IA de Chamado (uma por análise).
+
+    Vinicius, 24/09/2026 (aba IA de Chamado): "como eu faço pra dizer: nesse você
+    errou, nesse você acertou". O ✗ leva a correção ("o que era o certo") — ela
+    vira instrução no chamado (a IA refaz na próxima passada) e aprendizado: a IA
+    recebe as correções e as confirmações a cada passada, junto com o manual."""
+
+    __tablename__ = "chamados_ia_avaliacoes"
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    mensagem_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("chamado_mensagem.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+    )
+    chamado_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("chamados.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    certo: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    correcao: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_by: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    updated_by: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )

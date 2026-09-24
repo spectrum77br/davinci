@@ -321,3 +321,92 @@ async def test_aba_ia_de_chamado(client, make_user, auth_as, db, cenario):
     assert (
         await client.post("/api/chamados/ia/regras", json={"quando": "a", "faca": "b"})
     ).status_code == 403
+
+
+async def test_avaliacao_acertou_errou(client, db, cenario):
+    """✓/✗ nas decisões (24/09): o ✗ vira instrução no chamado (a IA refaz) e as
+    avaliações vão pra IA como aprendizado."""
+    hermes = {"X-Agent-Token": _HERMES}
+    an = await client.post(
+        "/api/chamados/agent/analise",
+        headers=hermes,
+        json={
+            "chamado_id": cenario["cid"],
+            "classe": "pede_medidas",
+            "resumo": "ML pediu medidas",
+            "acao": "esperar",
+        },
+    )
+    assert an.status_code == 200, an.text
+    dec = (await client.get("/api/chamados/ia")).json()["decisoes"][0]
+    assert dec["avaliacao"] is None
+    mid = dec["mensagem_id"]
+    assert await _analisar(client, _HERMES) == []
+
+    # ✗ sem correção → 422
+    r = await client.put(f"/api/chamados/ia/decisoes/{mid}/avaliacao", json={"certo": False})
+    assert r.status_code == 422
+    # ✗ com correção: fica marcada, vira instrução, a IA recebe o caso de novo
+    r = await client.put(
+        f"/api/chamados/ia/decisoes/{mid}/avaliacao",
+        json={"certo": False, "correcao": "Responder com as medidas: 52×35×23 cm, 7 kg"},
+    )
+    assert r.status_code == 200, r.text
+    av = r.json()["avaliacao"]
+    assert av["certo"] is False and av["correcao"].startswith("Responder") and av["autor"]
+    casos = await _analisar(client, _HERMES)
+    assert len(casos) == 1 and "52×35×23" in casos[0]["instrucao"]["texto"]
+    # salvar a mesma correção de novo não manda outra instrução
+    await client.put(
+        f"/api/chamados/ia/decisoes/{mid}/avaliacao",
+        json={"certo": False, "correcao": "Responder com as medidas: 52×35×23 cm, 7 kg"},
+    )
+    n_instr = (
+        (
+            await db.execute(
+                select(ChamadoMensagem).where(
+                    ChamadoMensagem.chamado_id == cenario["cid"],
+                    ChamadoMensagem.tipo == "instrucao",
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert len(n_instr) == 1
+
+    # a IA recebe a correção como aprendizado
+    ia = (await client.post("/api/chamados/agent/cerebro", headers=hermes, json={})).json()
+    assert ia["aprendizado"] == [
+        {
+            "certo": False,
+            "pedido_bling": "293413",
+            "plataforma": "ml",
+            "decisao": dec["texto"],
+            "correcao": "Responder com as medidas: 52×35×23 cm, 7 kg",
+        }
+    ]
+
+    # ✓ troca a marcação (sem instrução nova) e desfazer limpa
+    r = await client.put(f"/api/chamados/ia/decisoes/{mid}/avaliacao", json={"certo": True})
+    assert r.json()["avaliacao"]["certo"] is True and r.json()["avaliacao"]["correcao"] is None
+    ia = (await client.post("/api/chamados/agent/cerebro", headers=hermes, json={})).json()
+    assert [a["certo"] for a in ia["aprendizado"]] == [True]
+    r = await client.delete(f"/api/chamados/ia/decisoes/{mid}/avaliacao")
+    assert r.status_code == 200 and r.json()["avaliacao"] is None
+
+    # só decisão da IA pode ser avaliada
+    outra = (
+        (
+            await db.execute(
+                select(ChamadoMensagem).where(
+                    ChamadoMensagem.chamado_id == cenario["cid"], ChamadoMensagem.tipo == "resposta"
+                )
+            )
+        )
+        .scalars()
+        .first()
+    )
+    assert (
+        await client.put(f"/api/chamados/ia/decisoes/{outra.id}/avaliacao", json={"certo": True})
+    ).status_code == 404

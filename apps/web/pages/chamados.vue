@@ -561,12 +561,6 @@ watch([origemFilter, plataformaFilter, contaFilter, mostrar], () => {
 watch(page, () => load())
 
 watch(tab, (t) => { if (t === 'ia') return; page.value = 1; load() })
-// Da aba IA de Chamado: clicou no pedido de uma decisão → abre o chamado na lista.
-function abrirPedidoDaIa(pedido: string) {
-  mostrar.value = 'todos'
-  search.value = pedido
-  tab.value = 'chamados'
-}
 
 // ----------------------------------------------------------------- jurídico
 const juridico = reactive({ open: false, row: null as ChamadoRow | null, obs: '', saving: false, erro: null as string | null, destinatarios: [] as string[], semAcesso: false })
@@ -1521,7 +1515,7 @@ async function confirmarExcluir() {
       </button>
     </div>
 
-    <ChamadosIa v-if="tab === 'ia'" :can-edit="canEdit" @abrir-pedido="abrirPedidoDaIa" />
+    <ChamadosIa v-if="tab === 'ia'" :can-edit="canEdit" />
 
     <template v-if="tab !== 'ia'">
     <!-- filtros -->

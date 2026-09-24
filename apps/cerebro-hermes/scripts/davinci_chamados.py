@@ -13,9 +13,10 @@ Comandos (a IA usa pelo terminal):
                            {"wakeAgent": false} (a IA nem acorda); senão, o
                            MANUAL + os casos
   pendentes                os mesmos casos, JSON completo
+  manual                   o manual do Vinicius (regras ativas), como na passada
   decidir                  lê UMA decisão em JSON da entrada padrão e manda pro
                            DaVinci
-  caso --pedido X | --chamado PROTOCOLO
+  caso --pedido X | --chamado PROTOCOLO | --id UUID
                            um chamado qualquer (pendente ou não), com a conversa:
                            "no chamado do pedido X, vê como está"
   pagamento PEDIDO...      fatos do pagamento no ML (liberação, estorno, envio)
@@ -37,6 +38,7 @@ import hashlib
 import json
 import os
 import sys
+import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
@@ -52,6 +54,10 @@ SERVIDOS = PASTA / "estado" / "servidos.json"
 DECIDIDOS = PASTA / "estado" / "decididos.json"
 
 ACOES = ("esperar", "responder", "resolver", "humano")
+# Caso entregue à IA (pela passada ou pelo `caso`) pode ser decidido por 2 h. A
+# passada automática e uma análise pedida à parte SOMAM na lista — uma não apaga
+# a outra.
+SERVIDO_VALE_S = 2 * 3600
 TEXTO_MAX = 4000  # por mensagem, no que vai pro prompt
 
 
@@ -107,6 +113,17 @@ def _gravar(p: Path, dados: dict) -> None:
     tmp.replace(p)
 
 
+def _servir(casos: list[dict]) -> None:
+    agora = time.time()
+    servidos = {
+        k: v
+        for k, v in _ler(SERVIDOS).items()
+        if isinstance(v, dict) and agora - v.get("t", 0) < SERVIDO_VALE_S
+    }
+    servidos.update({c["chamado_id"]: {"d": _digital(c), "t": agora} for c in casos})
+    _gravar(SERVIDOS, servidos)
+
+
 def _digital(caso: dict) -> str:
     """Muda quando o caso muda: fala nova, instrução nova, bloqueio novo."""
     msgs = caso.get("mensagens") or []
@@ -137,7 +154,7 @@ def _casos(cfg: dict[str, str]) -> list[dict]:
     casos = _post(cfg, "analisar", corpo).get("chamados") or []
     decididos = _ler(DECIDIDOS)
     novos = [c for c in casos if decididos.get(c["chamado_id"]) != _digital(c)]
-    _gravar(SERVIDOS, {c["chamado_id"]: _digital(c) for c in novos})
+    _servir(novos)
     return [_enxuto(c) for c in novos]
 
 
@@ -149,6 +166,27 @@ def _manual(regras: list[dict]) -> str:
         plat = r.get("plataforma") or "todas as plataformas"
         linhas.append(f"{i}. [{plat}] QUANDO: {r['quando']}\n   FAÇA: {r['faca']}")
     return "\n".join(linhas)
+
+
+def _aprendizado(itens: list[dict]) -> str:
+    erros = [a for a in itens if not a.get("certo")]
+    certos = [a for a in itens if a.get("certo")]
+    partes = []
+    if erros:
+        partes.append("CORREÇÕES DO VINICIUS (decisões suas que ele marcou como ERRADAS — não repita):")
+        for a in erros:
+            partes.append(
+                f"- pedido {a.get('pedido_bling')} ({a.get('plataforma')}). Você decidiu: "
+                f"{(a.get('decisao') or '')[:500]}\n  O CERTO ERA: {a.get('correcao')}"
+            )
+    if certos:
+        partes.append("DECISÕES QUE ELE CONFIRMOU (referência do que é certo):")
+        for a in certos:
+            partes.append(
+                f"- pedido {a.get('pedido_bling')} ({a.get('plataforma')}): "
+                f"{(a.get('decisao') or '')[:400]}"
+            )
+    return "\n".join(partes)
 
 
 def cmd_precheck(cfg: dict[str, str], _a: argparse.Namespace) -> None:
@@ -167,8 +205,20 @@ def cmd_precheck(cfg: dict[str, str], _a: argparse.Namespace) -> None:
     )
     print("MANUAL (regras do Vinicius — valem acima do seu julgamento):")
     print(_manual(ia.get("regras") or []))
+    aprendizado = _aprendizado(ia.get("aprendizado") or [])
+    if aprendizado:
+        print("\n" + aprendizado)
     print("\nCASOS:")
     print(json.dumps(casos, ensure_ascii=False, indent=1))
+
+
+def cmd_manual(cfg: dict[str, str], _a: argparse.Namespace) -> None:
+    ia = _post(cfg, "cerebro", {})
+    print(f"IA {'LIGADA' if ia.get('ligada') else 'DESLIGADA'}")
+    print(_manual(ia.get("regras") or []))
+    aprendizado = _aprendizado(ia.get("aprendizado") or [])
+    if aprendizado:
+        print("\n" + aprendizado)
 
 
 def cmd_pendentes(cfg: dict[str, str], _a: argparse.Namespace) -> None:
@@ -213,8 +263,8 @@ def cmd_decidir(cfg: dict[str, str], _a: argparse.Namespace) -> None:
     erro = _validar(d)
     if erro:
         sys.exit(f"decisão recusada: {erro}")
-    servidos = _ler(SERVIDOS)
-    digital = servidos.get(d["chamado_id"])
+    servido = _ler(SERVIDOS).get(d["chamado_id"])
+    digital = servido.get("d") if isinstance(servido, dict) else None
     if digital is None:
         sys.exit("esse chamado não está entre os casos desta rodada (use `caso` pra buscar)")
     resposta = _post(cfg, "analise", d)
@@ -234,13 +284,10 @@ def cmd_decidir(cfg: dict[str, str], _a: argparse.Namespace) -> None:
 
 
 def cmd_caso(cfg: dict[str, str], a: argparse.Namespace) -> None:
-    corpo = {"pedido_bling": a.pedido, "chamado": a.chamado}
+    corpo = {"pedido_bling": a.pedido, "chamado": a.chamado, "chamado_id": a.id}
     out = _post(cfg, "caso", {k: v for k, v in corpo.items() if v})
     casos = out.get("chamados") or []
-    # achado a pedido: pode ser decidido nesta rodada
-    servidos = _ler(SERVIDOS)
-    servidos.update({c["chamado_id"]: _digital(c) for c in casos})
-    _gravar(SERVIDOS, servidos)
+    _servir(casos)  # achado a pedido: pode ser decidido
     print(json.dumps([_enxuto(c) for c in casos], ensure_ascii=False, indent=1))
 
 
@@ -269,10 +316,12 @@ def main() -> None:
     sub = p.add_subparsers(dest="cmd")
     sub.add_parser("precheck")
     sub.add_parser("pendentes")
+    sub.add_parser("manual")
     sub.add_parser("decidir")
     cs = sub.add_parser("caso")
     cs.add_argument("--pedido")
     cs.add_argument("--chamado")
+    cs.add_argument("--id", help="chamado_id (uuid)")
     pg = sub.add_parser("pagamento")
     pg.add_argument("pedidos", nargs="+")
     ex = sub.add_parser("exemplos")
@@ -289,6 +338,7 @@ def main() -> None:
     {
         "precheck": cmd_precheck,
         "pendentes": cmd_pendentes,
+        "manual": cmd_manual,
         "decidir": cmd_decidir,
         "caso": cmd_caso,
         "pagamento": cmd_pagamento,

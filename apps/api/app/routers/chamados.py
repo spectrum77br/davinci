@@ -43,6 +43,7 @@ from app.models import (
     Chamado,
     ChamadoAnexo,
     ChamadoCerebro,
+    ChamadoIaAvaliacao,
     ChamadoIaRegra,
     ChamadoMensagem,
     DevolucaoAnexo,
@@ -57,6 +58,7 @@ from app.schemas.chamados import (
     AgentAnalisarOut,
     AgentAnaliseIn,
     AgentAnaliseOut,
+    AgentAprendizadoOut,
     AgentBloqueioOut,
     AgentCasoIn,
     AgentCasoLeituraOut,
@@ -2312,6 +2314,11 @@ async def agent_caso(
     return AgentAnalisarOut(chamados=[await _item_do_cerebro(session, ch) for ch in rows])
 
 
+# Quanto do aprendizado vai pra IA em cada passada (as mais novas).
+_APRENDIZADO_ERROS = 30
+_APRENDIZADO_ACERTOS = 20
+
+
 @agent_router.post("/cerebro", response_model=AgentCerebroOut)
 async def agent_cerebro(
     body: AgentCerebroIn,
@@ -2347,6 +2354,18 @@ async def agent_cerebro(
             .order_by(ChamadoIaRegra.created_at)
         )
     ).scalars().all()
+    # 24/09: o que a pessoa corrigiu (✗) e confirmou (✓) — mais novas primeiro
+    avaliadas = (
+        await session.execute(
+            select(ChamadoIaAvaliacao, ChamadoMensagem, Chamado)
+            .join(ChamadoMensagem, ChamadoMensagem.id == ChamadoIaAvaliacao.mensagem_id)
+            .join(Chamado, Chamado.id == ChamadoIaAvaliacao.chamado_id)
+            .order_by(ChamadoIaAvaliacao.updated_at.desc())
+            .limit(200)
+        )
+    ).all()
+    erradas = [x for x in avaliadas if not x[0].certo][:_APRENDIZADO_ERROS]
+    certas = [x for x in avaliadas if x[0].certo][:_APRENDIZADO_ACERTOS]
     return AgentCerebroOut(
         nome=row.nome,
         exclusivo=row.exclusivo,
@@ -2355,6 +2374,16 @@ async def agent_cerebro(
         legado_ignorado_at=row.legado_ignorado_at,
         regras=[
             AgentRegraOut(quando=r.quando, faca=r.faca, plataforma=r.plataforma) for r in regras
+        ],
+        aprendizado=[
+            AgentAprendizadoOut(
+                certo=av.certo,
+                pedido_bling=ch.pedido_bling,
+                plataforma=ch.plataforma,
+                decisao=m.texto,
+                correcao=av.correcao,
+            )
+            for av, m, ch in erradas + certas
         ],
     )
 
