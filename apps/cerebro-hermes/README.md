@@ -9,7 +9,7 @@ IA decidiu. Sem modo teste — ligada, ela decide de verdade.
 ```
 DaVinci (nuvem)                                   Hermes (Mac Santiago)
   aba IA de Chamado ── liga/desliga + manual
-  /api/chamados/agent/cerebro  ◄── precheck ───  agendador, a cada 5 min
+  /api/chamados/agent/cerebro  ◄── precheck ───  agendador, a cada 1 min
   /api/chamados/agent/analisar ◄──┘              desligada ou sem caso novo
                                                   → a IA nem acorda (custo zero)
   /api/chamados/agent/analise  ◄── decidir ────  a IA decide: instrução > manual
@@ -25,7 +25,7 @@ DaVinci (nuvem)                                   Hermes (Mac Santiago)
 | `~/DaVinci/cerebro/.env` (chmod 600) | `DAVINCI_CEREBRO_TOKEN` e os filtros (`DAVINCI_CEREBRO_PLATAFORMA`, `_CANAIS`, `_LIMITE`) |
 | `~/DaVinci/cerebro/decisoes.jsonl` | toda decisão, com a resposta do DaVinci |
 | launchd `ai.hermes.gateway` | o agendador do Hermes (volta sozinho) |
-| cron do Hermes `ia-de-chamado` | a passada a cada 5 min |
+| cron do Hermes `ia-de-chamado` | a passada a cada 1 min (instrução de pessoa fura a fila) |
 
 A IA nunca vê o token: o script lê o `.env` sozinho. O token é da IA (tabela
 `chamados_cerebros`, migração 0319 — só o sha256 no banco) e só abre as rotas do

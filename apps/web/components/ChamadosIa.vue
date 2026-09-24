@@ -454,7 +454,7 @@ function resumoDe(texto: string) {
               <td colspan="5" class="bg-red-500/[0.04] px-3 pb-3 pt-1">
                 <div class="flex flex-wrap items-end gap-2">
                   <label class="min-w-[320px] flex-1 space-y-1">
-                    <span class="text-[11px] font-medium text-muted-foreground">O que era o certo? — ela refaz este chamado na próxima passada (até 5 min) e guarda como aprendizado</span>
+                    <span class="text-[11px] font-medium text-muted-foreground">O que era o certo? — ela refaz este chamado na próxima passada (1 a 2 min) e guarda como aprendizado</span>
                     <textarea v-model="correcao" rows="3" class="w-full rounded-md border bg-background px-2 py-1.5 text-sm" placeholder="ex.: não era pra esperar — responder pedindo a devolução do valor, citando o rastreio entregue" />
                   </label>
                   <Button size="sm" :disabled="!correcao.trim() || avaliando === d.mensagem_id" @click="avaliar(d, false)">

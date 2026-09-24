@@ -1963,7 +1963,13 @@ def _trabalho_do_cerebro(plataforma: str | None, canais: list[str]):
         .outerjoin(env, env.c.chamado_id == Chamado.id)
         .outerjoin(blq, blq.c.chamado_id == Chamado.id)
         .where(or_(instrucao, ramo_bloqueio, ramo_resposta))
-        .order_by(func.greatest(rec.c.ult, ins.c.ult, blq.c.ult), Chamado.created_at)
+        # 24/09 (Vinicius: "quando eu apertar instrução, ela consegue cortar fila?"):
+        # instrução de pessoa passa na frente de tudo; o resto, mais antigo primeiro.
+        .order_by(
+            case((instrucao, 0), else_=1),
+            func.greatest(rec.c.ult, ins.c.ult, blq.c.ult),
+            Chamado.created_at,
+        )
     )
 
 

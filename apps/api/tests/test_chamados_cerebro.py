@@ -410,3 +410,30 @@ async def test_avaliacao_acertou_errou(client, db, cenario):
     assert (
         await client.put(f"/api/chamados/ia/decisoes/{outra.id}/avaliacao", json={"certo": True})
     ).status_code == 404
+
+
+async def test_instrucao_fura_a_fila(client, db, cenario):
+    """24/09: instrução de pessoa passa na frente dos casos com resposta nova."""
+    legado = {"X-Agent-Token": _LEGADO}
+    r = await client.post(
+        "/api/chamados/agent/registrar",
+        headers=legado,
+        json={
+            "pedido_bling": "293999",
+            "origem": "margem",
+            "conta": "forpaper",
+            "chamado": "479765999",
+            "mensagem": "Frete cobrado a mais",
+            "status_envio": "enviada",
+        },
+    )
+    novo = r.json()["chamado_id"]
+    # o caso do cenário tem resposta mais antiga; o novo recebe só uma instrução
+    ins = await client.post(f"/api/chamados/{novo}/instrucao", json={"texto": "vê como está"})
+    assert ins.status_code == 200, ins.text
+    r = await client.post(
+        "/api/chamados/agent/analisar",
+        headers={"X-Agent-Token": _HERMES},
+        json={"limite": 1, "plataforma": None, "canais": ["robo", "api", "manual"]},
+    )
+    assert [c["chamado_id"] for c in r.json()["chamados"]] == [novo]
