@@ -200,21 +200,30 @@ async def rodada(session: AsyncSession, *, agora: datetime | None = None) -> dic
 
     for rede in await contas_ligadas(session):
         r["contas"] += 1
-        # Só horários que JÁ CHEGARAM e que chegaram HÁ POUCO.
-        #
-        # O teto de atraso é o mesmo do promotor de agendadas: post atrasado
-        # demais não sai sozinho. Sem ele, preencher "8" no campo às 20h faria
-        # o robô ver as vagas das 08h, 09h… como "já chegaram" e despejar os
-        # posts do dia inteiro nos minutos seguintes — na conta real, fora da
-        # janela que a pessoa acabou de escolher.
+        # Quais vagas da grade de hoje JÁ CHEGARAM — todas, sem janela.
         agora_brt = agora.astimezone(BRT)
-        piso = agora_brt - timedelta(minutes=settings.marketing_postagem_atraso_max_min)
-        grade = [
-            h for h in horarios_do_dia(rede, settings, agora=agora) if piso <= h <= agora_brt
-        ]
-        if not grade:
+        chegaram = [h for h in horarios_do_dia(rede, settings, agora=agora) if h <= agora_brt]
+        if not chegaram:
             continue
-        cabem = len(grade) - await _ja_ocupados(session, rede, agora)
+        # As que chegaram mas ainda não foram preenchidas. A grade é
+        # sequencial: os `ocupados` primeiros horários são os que já saíram,
+        # então a próxima vaga livre é a de índice `ocupados`.
+        #
+        # A PRIMEIRA versão disto filtrava a grade pela janela de atraso ANTES
+        # de subtrair os ocupados — e com a configuração real do Eduardo (12h e
+        # 19h, intervalo de 7 horas) o post das 19h nunca saía. Às 19h a vaga
+        # das 12h já estava fora da janela de 6h, sobrava só a das 19h, e ela
+        # era subtraída do post das 12h: 1 − 1 = 0. Com intervalo curto as
+        # duas vagas cabem na janela e o erro não aparece — por isso os testes
+        # passavam. Pego por simulação do dia inteiro antes de ligar.
+        ocupados = await _ja_ocupados(session, rede, agora)
+        livres = chegaram[ocupados:]
+        # E só as que chegaram HÁ POUCO. O teto de atraso é o mesmo do
+        # promotor de agendadas: preencher "8" às 20h não pode despejar os
+        # posts das 08h, 09h… nos minutos seguintes, fora da janela que a
+        # pessoa acabou de escolher.
+        piso = agora_brt - timedelta(minutes=settings.marketing_postagem_atraso_max_min)
+        cabem = len([h for h in livres if h >= piso])
         for _ in range(max(0, cabem)):
             achado = await proximo_criativo(session, rede)
             if achado is None:

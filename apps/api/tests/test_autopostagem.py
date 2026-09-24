@@ -327,3 +327,53 @@ async def test_hora_ja_passada_ha_muito_nao_despeja_o_dia(db):
 
     agora = datetime.now(UTC).astimezone(BRT).replace(hour=20, minute=0).astimezone(UTC)
     assert (await svc.rodada(db, agora=agora))["agendadas"] == 0, "a janela das 8h já passou"
+
+
+# ---------- o dia inteiro, com a configuração REAL ----------
+
+
+async def test_dia_inteiro_12h_e_19h_com_intervalo_de_7_horas(db, monkeypatch):
+    """A configuração que o Eduardo pediu: 12h, 2 por dia, 420 min — um post no
+    almoço e outro às 19h.
+
+    Simulando o dia hora a hora, ANTES de ligar, apareceram dois defeitos que
+    nenhum teste de intervalo curto pegaria:
+
+    1. o post das 19h nunca saía. A grade era filtrada pela janela de atraso
+       (6h) ANTES de subtrair os ocupados; às 19h a vaga das 12h já estava fora
+       da janela, e a das 19h era subtraída do post das 12h: 1 − 1 = 0;
+    2. corrigido o primeiro, o das 19h caía pras 20h. A guarda de espaçamento
+       usa o mesmo número da grade, e a demora de publicar empurra o primeiro
+       post pra 12:03 — às 19:02 ela media 6h59m, um minuto "cedo demais".
+
+    O relógio da guarda é congelado junto com o do robô: sem isso o `agendar()`
+    usa a hora real e a simulação mente.
+    """
+    import app.services.marketing.postagens as pp
+    from sqlalchemy import select
+
+    m, r = await _cenario(db)
+    r.postagem_hora_inicio = 12
+    r.postagem_max_dia = 2
+    r.postagem_intervalo_min = 420
+    await db.commit()
+    for i in range(3):
+        await _criativo(db, m, nome=f"v{i}", quando=datetime.now(UTC) - timedelta(days=i))
+
+    saidas = []
+    for hora in (11, 12, 13, 18, 19, 20, 21):
+        congelado = datetime.now(UTC).astimezone(BRT).replace(
+            hour=hora, minute=2, second=0, microsecond=0
+        ).astimezone(UTC)
+        monkeypatch.setattr(pp, "_agora", lambda q=None, _c=congelado: q or _c)
+        await svc.rodada(db, agora=congelado)
+        # O publicador: o que o robô agendou sai um minuto depois.
+        for p in (await db.execute(
+            select(MarketingPostagem).where(MarketingPostagem.status == "pendente")
+        )).scalars().all():
+            p.status = "publicado"
+            p.publicado_em = congelado + timedelta(minutes=1)
+            saidas.append(p.publicado_em.astimezone(BRT).strftime("%H:%M"))
+        await db.commit()
+
+    assert saidas == ["12:03", "19:03"], "um no almoço, outro às 19h — nem 20h, nem só um"

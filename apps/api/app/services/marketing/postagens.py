@@ -139,6 +139,11 @@ def _agora(agora: datetime | None) -> datetime:
     return agora if agora is not None else datetime.now(UTC)
 
 
+# Quanto a guarda de espaçamento tolera, nas postagens automáticas, pra
+# absorver a demora de publicar. Ver o comentário no uso, em `pode_publicar`.
+_TOLERANCIA_GRADE = timedelta(minutes=10)
+
+
 # ────────────────────────────────────────────────────────────── guardas
 
 
@@ -362,6 +367,20 @@ async def pode_publicar(
     # Espaçamento: janela nos DOIS sentidos. Agendar 10 min ANTES de um post
     # já marcado colaria os dois do mesmo jeito que 10 min depois.
     folga = timedelta(minutes=_espacamento_min(rede, settings))
+    # Folga pro que é AUTOMÁTICO. O robô de autopostagem usa o intervalo pra
+    # montar a grade (12h + 420 min = 19h) e a guarda usa o MESMO número como
+    # mínimo. Quando os dois coincidem, a demora natural de publicar empurra o
+    # primeiro post pra depois da vaga dele (saiu às 12:03, não às 12:02), e às
+    # 19:02 a guarda mede 6h59m — um minuto "cedo demais". O segundo post do
+    # dia caía pra 20h, uma hora atrasado, todo dia.
+    #
+    # Pego simulando o dia inteiro com a configuração real do Eduardo antes de
+    # ligar. Dez minutos absorvem a demora de publicar sem tirar o sentido da
+    # guarda: com 90 de intervalo, dois posts automáticos ainda ficam a pelo
+    # menos 80 minutos um do outro. O clique humano "publicar agora" continua
+    # com o mínimo exato — ali não existe grade pra desalinhar.
+    if automatico:
+        folga = max(timedelta(0), folga - _TOLERANCIA_GRADE)
     perto = (
         await session.execute(
             select(func.count())
