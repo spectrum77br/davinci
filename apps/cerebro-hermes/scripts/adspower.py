@@ -41,6 +41,11 @@ APELIDOS = {
     "shein": {"shein", "she"},
     "magalu": {"magalu", "ma"},
 }
+# Lojas com nome diferente no DaVinci e no AdsPower (Vinicius, 24/09).
+LOJA_NO_ADSPOWER = {"zorvex": "zortex"}  # "ML Zorvex" = perfil "zortex - Mercado Livre"
+# Loja + plataforma que usam um perfil de outro nome — pelo NÚMERO do perfil.
+# Vinicius 24/09: "shopee marquezini é o número 160, vai tá com nome de mega escrito".
+PERFIL_FIXO = {("marquezini", "shopee"): "160"}
 PALAVRAS_PLATAFORMA = {p for s in APELIDOS.values() for p in s} | {
     "mercadolivre", "loja", "tiktok shop",
 }
@@ -113,7 +118,14 @@ def _loja_da_conta(conta: str) -> str:
 
 def achar(conta: str, plataforma: str | None) -> dict:
     loja = _loja_da_conta(conta)
+    loja = LOJA_NO_ADSPOWER.get(loja, loja)
     plat = _plataforma(plataforma) or _plataforma(conta.split()[0] if conta else "")
+    fixo = PERFIL_FIXO.get((loja, plat or ""))
+    if fixo:
+        perfil = next((p for p in _perfis() if str(p.get("numero")) == fixo), None)
+        if perfil is not None:
+            return {"ok": True, "loja": loja, "plataforma": plat, "perfil": perfil,
+                    "confianca": "alta", "alternativas": [], "motivo": "perfil fixado pelo Vinicius"}
     candidatos = []
     for p in _perfis():
         loja_p, plats_p = _loja_do_perfil(p["nome"])
