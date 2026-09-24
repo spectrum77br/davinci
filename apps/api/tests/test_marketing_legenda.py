@@ -596,6 +596,11 @@ async def test_placeholders_de_nunca_devolve_none(db: AsyncSession, make_user):
         "marca": "Sem Dados",
         "produto": "",
         "produto_modelo": "",
+        # A frase de especificação do produto (migration nenhuma, só
+        # placeholder). Vazia quando não há produto ou o anúncio dele não tem
+        # ficha legível — e vazia é resposta legítima: o sandbox bloqueia
+        # `{% if %}`, então quem não resolve tem que sumir sem deixar buraco.
+        "destaque": "",
         "whatsapp": "",
         "email_sac": "",
         "instagram": "",

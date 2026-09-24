@@ -80,6 +80,13 @@ PLACEHOLDERS = (
     "marca",
     "produto",
     "produto_modelo",
+    # UMA FRASE com o que o produto tem de melhor, montada da descrição real
+    # do anúncio ("Bateria de 10.300 mAh, tela de 6.74” e câmera de 20 MP.").
+    # Frase inteira, e não `{{ bateria }}` solto, porque o sandbox bloqueia
+    # `{% if %}` de propósito: sem condicional, placeholder vazio publicaria
+    # "Bateria de  que aguenta o dia" na conta da marca. Produto sem ficha
+    # devolve vazio e o texto fecha sem ela.
+    "destaque",
     "whatsapp",
     "email_sac",
     "instagram",
@@ -215,6 +222,7 @@ def placeholders_de(
     marca: Marca | None,
     produto_nome: str | None,
     rede: RedeSocial | None,
+    destaque: str = "",
 ) -> dict[str, str]:
     """Contexto do render, num lugar só.
 
@@ -241,6 +249,9 @@ def placeholders_de(
         "email_sac": (marca.sac_email if marca else "") or "",
         "instagram": (rede.conta if rede else "") or "",
         "site": (marca.site if marca else "") or "",
+        # Vazio quando o produto não tem ficha legível — e vazio é resposta
+        # legítima aqui, não falta de dado: o template fecha sem a frase.
+        "destaque": destaque or "",
     }
 
 
@@ -464,6 +475,48 @@ async def _produto_nome(session: AsyncSession, creative: MarketingCreative | Non
     return ((produto.name if produto else "") or "").strip()
 
 
+async def _destaque_do_produto(
+    session: AsyncSession, creative: MarketingCreative | None
+) -> str:
+    """A frase de especificação do produto, ou vazio.
+
+    A fonte é a descrição do ANÚNCIO, não um campo de ficha técnica — esse
+    campo não existe. São 738 anúncios com texto escrito pelo próprio time,
+    com bateria, tela e câmera de verdade; `ficha.destaque` extrai o que casa
+    limpo e ignora o resto.
+
+    Pega a descrição mais LONGA entre os anúncios do produto: as curtas
+    costumam ser variação de kit ("+ fone + relógio") e repetem menos
+    especificação. Vazio nunca trava nada — a legenda sai sem a frase.
+
+    A junção é `product_links.external_id` → `listings.external_id`, e NÃO
+    `listings.product_id`. Parece rodeio e não é: medido em produção, o
+    caminho direto alcança ZERO dos 12 produtos que têm criativo (os anúncios
+    com descrição apontam pra outras linhas de produto), enquanto a ponte pelo
+    anúncio externo alcança os 12. Por SKU também dá zero — o SKU do anúncio é
+    de kit ("dg017.pi+a003.pi+a004.pi"), não o do produto.
+    """
+    product_id = creative.product_id if creative else None
+    if product_id is None:
+        return ""
+    from app.models import Listing, ProductLink
+    from app.services.marketing.ficha import destaque as _frase
+
+    texto = (
+        await session.execute(
+            select(Listing.description)
+            .join(ProductLink, ProductLink.external_id == Listing.external_id)
+            .where(ProductLink.product_id == product_id, Listing.description.isnot(None))
+            .order_by(func.length(Listing.description).desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    # O nome vai junto: nas malas, a descrição é o mesmo texto padrão do
+    # catálogo inteiro, e o que diferencia um kit do outro está no nome.
+    produto = await session.get(Product, product_id)
+    return _frase(texto, (produto.name if produto else "") or "")
+
+
 async def _da_biblioteca(
     session: AsyncSession,
     *,
@@ -555,7 +608,12 @@ async def resolver(
     """
     manual = (legenda_manual or "").strip()
     marca = await _marca_de(session, creative, rede)
-    contexto = placeholders_de(marca, await _produto_nome(session, creative), rede)
+    contexto = placeholders_de(
+        marca,
+        await _produto_nome(session, creative),
+        rede,
+        destaque=await _destaque_do_produto(session, creative),
+    )
     try:
         da_biblioteca = await _da_biblioteca(
             session, creative=creative, rede=rede, contexto=contexto, marca=marca
