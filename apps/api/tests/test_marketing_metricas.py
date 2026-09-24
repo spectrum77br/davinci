@@ -468,13 +468,16 @@ async def test_abrir_a_plataforma_mostra_cada_video_com_seus_numeros(
     assert v["removido"] is False
 
 
-async def test_video_apagado_aparece_como_estado_nao_como_alerta(
+async def test_marca_sem_nenhum_video_no_ar_some_da_tela(
     client, db, make_user, auth_as, monkeypatch
 ):
-    """Ele apaga vídeo de teste de propósito. Marcar isso como 'a leitura
-    falhou' põe alerta em cima do esperado — e some com o alerta de verdade no
-    meio do ruído. Some do erro da rede, mas a linha do vídeo fica: ele
-    existiu e rendeu o que rendeu."""
+    """Pedido do Eduardo (24/09/2026): ele apagou os testes da charlots e da
+    7buyers, e elas ficaram na tela como linhas só de travessão. Marca cujos
+    vídeos foram TODOS apagados não tem o que reportar.
+
+    Mas não pode sumir em silêncio, senão vira "cadê a charlots?": o nome vai
+    numa lista à parte, pra tela poder dizer quantas estão fora e por quê.
+    """
     await _ve(make_user, auth_as)
     await _cenario(db)
 
@@ -484,11 +487,45 @@ async def test_video_apagado_aparece_como_estado_nao_como_alerta(
     monkeypatch.setattr(svc, "do_tiktok", apagado)
     await svc.coletar(db)
 
-    plat = (await client.get(API_M)).json()["marcas"][0]["plataformas"][0]
-    assert plat["erro"] is None, "vídeo apagado não é erro DA REDE"
-    v = plat["videos"][0]
-    assert v["removido"] is True
-    assert v["erro"] is None, "removido não se acumula com erro"
+    r = (await client.get(API_M)).json()
+    assert r["marcas"] == [], "marca sem vídeo no ar não ocupa espaço na tela"
+    assert r["sem_video_no_ar"] == ["Uranyx"], "mas o nome não se perde"
+
+
+async def test_video_apagado_nao_conta_no_total_da_marca(
+    client, db, make_user, auth_as, monkeypatch
+):
+    """Com um vídeo no ar e outro apagado, a marca aparece — com UM vídeo.
+    Contar o apagado faria a marca parecer ter mais material publicado do que
+    tem, e derrubaria qualquer média por vídeo."""
+    from app.models import MarketingPostagem
+
+    await _ve(make_user, auth_as)
+    _, p = await _cenario(db)
+    morto = MarketingPostagem(
+        creative_id=p.creative_id, file_id=p.file_id, rede_social_id=p.rede_social_id,
+        plataforma="tiktok", conta=p.conta, status="publicado",
+        publicado_em=datetime.now(UTC) - timedelta(hours=3),
+        post_url="https://www.tiktok.com/@uranyx_brasil/video/999",
+        post_external_id="999",
+    )
+    db.add(morto)
+    await db.commit()
+
+    async def talvez(url, *, client):
+        if url.endswith("/999"):
+            raise RuntimeError(f"{svc.REMOVIDO} o vídeo não está mais no ar")
+        return {"views": 50, "curtidas": 5, "bruto": {}}
+
+    monkeypatch.setattr(svc, "do_tiktok", talvez)
+    await svc.coletar(db)
+
+    marca = (await client.get(API_M)).json()["marcas"][0]
+    assert marca["posts"] == 1, "só o que está no ar conta"
+    assert marca["acumulado"]["views"] == 50
+    plat = marca["plataformas"][0]
+    assert plat["posts"] == 1
+    assert [v["post_url"] for v in plat["videos"]] == [p.post_url], "o apagado sai da lista"
 
 
 async def test_falha_de_verdade_continua_alertando(

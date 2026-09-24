@@ -74,6 +74,9 @@ const { api } = useApi()
 
 const dias = ref(30)
 const marcas = ref<LinhaMarca[]>([])
+// Marcas cujos vídeos foram todos apagados. Não entram na tabela (linha só de
+// travessão é ruído), mas o nome aparece embaixo — senão vira "cadê a charlots?".
+const semVideo = ref<string[]>([])
 const carregando = ref(false)
 const erro = ref<string | null>(null)
 const abertas = ref<Set<string>>(new Set())
@@ -84,12 +87,16 @@ async function carregar() {
   carregando.value = true
   erro.value = null
   try {
-    const r = await api<{ marcas: LinhaMarca[] }>(`/api/marketing/metricas?dias=${dias.value}`)
+    const r = await api<{ marcas: LinhaMarca[]; sem_video_no_ar?: string[] }>(
+      `/api/marketing/metricas?dias=${dias.value}`,
+    )
     marcas.value = r.marcas ?? []
+    semVideo.value = r.sem_video_no_ar ?? []
   } catch (e: any) {
     // Endpoint fora do ar (servidor antigo) não pode quebrar a aba inteira.
     erro.value = e?.data?.detail?.code || e?.message || 'não consegui carregar'
     marcas.value = []
+    semVideo.value = []
   } finally {
     carregando.value = false
   }
@@ -283,5 +290,10 @@ const totalPosts = computed(() => marcas.value.reduce((a, m) => a + m.posts, 0))
         </div>
       </div>
     </div>
+
+    <p v-if="semVideo.length" class="text-[11px] text-muted-foreground">
+      fora da lista porque nenhum vídeo está no ar: {{ semVideo.join(', ') }} — o histórico
+      continua guardado, e a marca volta a aparecer no primeiro vídeo novo.
+    </p>
   </div>
 </template>

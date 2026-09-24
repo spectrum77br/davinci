@@ -110,13 +110,18 @@ async def metricas(
             {"plataforma": n.plataforma, "acumulado": {}, "no_periodo": {},
              "posts": 0, "coletado_em": None, "erro": None, "videos": []},
         )
-        alvo["posts"] += 1
-        plat["posts"] += 1
-        _soma(alvo["acumulado"], n)
-        _soma(plat["acumulado"], n)
+        # Vídeo removido não entra em conta nenhuma: ele não está no ar, não
+        # está rendendo, e contá-lo faria a marca parecer ter mais material
+        # publicado do que tem.
+        removido = foi_removido(n.erro)
+        if not removido:
+            alvo["posts"] += 1
+            plat["posts"] += 1
+            _soma(alvo["acumulado"], n)
+            _soma(plat["acumulado"], n)
         v = velhos.get(n.postagem_id)
         # Crescimento na janela: o novo menos o velho do MESMO post.
-        if v is not None and v.dia != n.dia:
+        if not removido and v is not None and v.dia != n.dia:
             _soma(alvo["no_periodo"], n)
             _soma(alvo["no_periodo"], v, sinal=-1)
             _soma(plat["no_periodo"], n)
@@ -143,8 +148,8 @@ async def metricas(
                 # Removido NÃO é falha de leitura: a leitura funcionou e a
                 # resposta foi "isto não está mais aqui". Misturar os dois põe
                 # alerta em cima de post apagado de propósito.
-                "removido": foi_removido(n.erro),
-                "erro": None if foi_removido(n.erro) else n.erro,
+                "removido": removido,
+                "erro": None if removido else n.erro,
             }
         )
         # Quando esta rede foi lida pela última vez, e se deu erro. Coleta
@@ -155,10 +160,27 @@ async def metricas(
         if n.erro and not foi_removido(n.erro):
             plat["erro"] = n.erro
 
-    saida = sorted(por_marca.values(), key=lambda x: -(x["acumulado"].get("views") or 0))
-    for m in saida:
-        m["plataformas"] = sorted(m["plataformas"].values(), key=lambda x: x["plataforma"])
+    # Marca (ou rede) cujos vídeos foram TODOS apagados não tem o que reportar,
+    # e linha só de travessão é ruído — pedido do Eduardo em 24/09/2026, depois
+    # de apagar os testes da charlots e da 7buyers. Não some em silêncio: o nome
+    # vai em `sem_video_no_ar`, pra ele não se perguntar "cadê a charlots".
+    sem_video: list[str] = []
+    saida: list[dict[str, Any]] = []
+    for m in sorted(por_marca.values(), key=lambda x: -(x["acumulado"].get("views") or 0)):
+        redes = [p for p in m["plataformas"].values() if p["posts"]]
+        if not redes:
+            sem_video.append(m["marca"])
+            continue
+        m["plataformas"] = sorted(redes, key=lambda x: x["plataforma"])
         for plat in m["plataformas"]:
+            # O vídeo apagado some da lista junto — ele já não conta em nada.
+            plat["videos"] = [v for v in plat["videos"] if not v["removido"]]
             # Mais views primeiro: a pergunta é "o que rendeu", não "o que saiu".
             plat["videos"].sort(key=lambda v: -(v["acumulado"].get("views") or 0))
-    return {"dias": dias, "desde": desde, "marcas": saida}
+        saida.append(m)
+    return {
+        "dias": dias,
+        "desde": desde,
+        "marcas": saida,
+        "sem_video_no_ar": sorted(sem_video),
+    }
