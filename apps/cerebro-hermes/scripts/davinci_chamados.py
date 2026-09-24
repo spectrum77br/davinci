@@ -144,14 +144,30 @@ def _enxuto(caso: dict) -> dict:
     return c
 
 
-def _casos(cfg: dict[str, str]) -> list[dict]:
+def _forte(caso: dict) -> bool:
+    """Caso que vai pro modelo forte (Opus 5.5): pedido de pessoa (instrução,
+    correção do ✗) ou envio travado. O resto — a plataforma respondeu — é
+    tarefa simples (Sonnet 5). Vinicius, 24/09: "colocar um mais barato para
+    executar as tarefas simples"."""
+    return bool(caso.get("instrucao") or caso.get("bloqueio"))
+
+
+def _casos(cfg: dict[str, str], tipo: str = "todos") -> list[dict]:
     plat = cfg["DAVINCI_CEREBRO_PLATAFORMA"].strip()
+    limite = int(cfg["DAVINCI_CEREBRO_LIMITE"])
     corpo = {
-        "limite": int(cfg["DAVINCI_CEREBRO_LIMITE"]),
+        # busca folgada: o DaVinci põe instrução na frente, e a passada simples
+        # não pode ficar sem enxergar os casos dela atrás das instruções
+        "limite": min(100, limite * 3) if tipo != "todos" else limite,
         "plataforma": None if plat in ("", "todas") else plat,
         "canais": [c.strip() for c in cfg["DAVINCI_CEREBRO_CANAIS"].split(",") if c.strip()],
     }
     casos = _post(cfg, "analisar", corpo).get("chamados") or []
+    if tipo == "forte":
+        casos = [c for c in casos if _forte(c)]
+    elif tipo == "simples":
+        casos = [c for c in casos if not _forte(c)]
+    casos = casos[:limite]
     decididos = _ler(DECIDIDOS)
     novos = [c for c in casos if decididos.get(c["chamado_id"]) != _digital(c)]
     _servir(novos)
@@ -189,12 +205,12 @@ def _aprendizado(itens: list[dict]) -> str:
     return "\n".join(partes)
 
 
-def cmd_precheck(cfg: dict[str, str], _a: argparse.Namespace) -> None:
+def cmd_precheck(cfg: dict[str, str], a: argparse.Namespace) -> None:
     ia = _post(cfg, "cerebro", {})
     if not ia.get("ligada"):
         print(json.dumps({"wakeAgent": False}))
         return
-    casos = _casos(cfg)
+    casos = _casos(cfg, getattr(a, "tipo", "todos") or "todos")
     if not casos:
         print(json.dumps({"wakeAgent": False}))
         return
@@ -314,7 +330,8 @@ def cmd_guarda(cfg: dict[str, str], a: argparse.Namespace) -> None:
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     sub = p.add_subparsers(dest="cmd")
-    sub.add_parser("precheck")
+    pc = sub.add_parser("precheck")
+    pc.add_argument("--tipo", choices=("todos", "forte", "simples"), default="todos")
     sub.add_parser("pendentes")
     sub.add_parser("manual")
     sub.add_parser("decidir")
@@ -334,6 +351,7 @@ def main() -> None:
     a = p.parse_args()
     if a.cmd is None:  # o agendador do Hermes chama sem argumento
         a.cmd = "precheck"
+        a.tipo = "todos"
     cfg = _cfg()
     {
         "precheck": cmd_precheck,
