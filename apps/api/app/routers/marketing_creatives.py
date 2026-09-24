@@ -38,6 +38,7 @@ from app.models import (
     MarketingCreativeFile,
     MarketingRoteiro,
     PricingProduct,
+    Product,
     ProductLink,
     User,
     UserRole,
@@ -301,18 +302,66 @@ async def _product_id_do_sku(session: AsyncSession, sku: str | None) -> UUID | N
     Resolvido no SALVAMENTO, nunca na hora de publicar. Casar string no
     instante do post é o que faz a legenda mudar sozinha quando alguém
     renomeia um anúncio — mesmo motivo do `_marca_id_do_texto` acima.
+
+    Quando nem o exato nem a base têm anúncio, sobram dois degraus (Eduardo,
+    24/09/2026 — três criativos `dg046.sp` saíram com a legenda genérica da
+    marca: o anúncio existe só como `dg046.pi`, e o `dg046.sp` só no
+    cadastro):
+
+      IRMÃO   anúncio de OUTRA variante da mesma base, avulso (sem "+", que é
+              kit). Só vale quando todos os irmãos apontam pro MESMO produto:
+              o `dg023` tem irmãos avulso, usado e kit 2 — escolher um deles
+              por sorteio de data faria a legenda falar de celular usado.
+      CADASTRO `products.sku` igual ao SKU inteiro. Identifica o produto,
+              mas sem anúncio não traz a frase de ficha (bateria, tela…).
+
+    O irmão ganha do cadastro quando os dois dão o MESMO nome — é o mesmo
+    aparelho, e pelo irmão vêm o nome E a ficha, e o Desempenho junta os
+    vídeos das duas variantes no mesmo produto. Com nomes diferentes, o
+    cadastro ganha: o SKU inteiro é a identidade, o irmão é palpite.
     """
     alvo = (sku or "").strip().lower()
     if not alvo:
         return None
     base = alvo.split(".")[0]
     externo = func.lower(func.btrim(ProductLink.external_sku))
-    return await session.scalar(
+    direto = await session.scalar(
         select(ProductLink.product_id)
         .where(externo.in_([alvo, base]))
         .order_by((externo == alvo).desc(), ProductLink.created_at, ProductLink.id)
         .limit(1)
     )
+    if direto is not None:
+        return direto
+
+    irmaos = (
+        await session.execute(
+            select(ProductLink.product_id)
+            .where(
+                func.split_part(externo, ".", 1) == base,
+                ~externo.contains("+"),
+                ProductLink.product_id.isnot(None),
+            )
+            .distinct()
+        )
+    ).scalars().all()
+    irmao = irmaos[0] if len(irmaos) == 1 else None
+
+    cadastro = (
+        await session.execute(
+            select(Product.id, Product.name)
+            .where(func.lower(func.btrim(Product.sku)) == alvo)
+            .order_by(Product.created_at, Product.id)
+            .limit(1)
+        )
+    ).first()
+    if cadastro is None:
+        return irmao
+    if irmao is None:
+        return cadastro.id
+    nome_irmao = await session.scalar(select(Product.name).where(Product.id == irmao))
+    mesmo_nome = (nome_irmao or "").strip().lower() == (cadastro.name or "").strip().lower()
+    return irmao if mesmo_nome else cadastro.id
 
 
 async def _roteiro_valido(session: AsyncSession, roteiro_id: UUID | None) -> UUID | None:

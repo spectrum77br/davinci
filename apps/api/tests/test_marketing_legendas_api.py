@@ -506,6 +506,64 @@ async def test_product_id_prefere_o_sku_exato_ao_da_base(client, db, make_user, 
     assert r.json()["product_id"] == str(variante.id)
 
 
+async def test_sku_sem_anuncio_cai_no_irmao_avulso_de_mesmo_nome(client, db, make_user, auth_as):
+    """O caso real de 24/09/2026: `dg046.sp` sem anúncio, anúncio só como
+    `dg046.pi`, os dois com o mesmo nome no cadastro. Vai pro irmão — é por
+    ele que vem a frase de ficha — e ignora o kit (`dg046.pi+a003.pi`)."""
+    user = await _user(make_user, auth_as, edit=True, role=UserRole.ADMIN)
+    irmao = await _produto(db, user, nome="Uranyx F110L 8.128 - Preto", sku="dg046.pi")
+    await _produto(db, user, nome="Uranyx F110L 8.128 - Preto", sku="dg046.sp")
+    kit = await _produto(
+        db, user, nome="Uranyx F110L 8.128 - Preto + Fone U9", sku="dg046.pi+a003.pi"
+    )
+    await _anuncio(db, user, irmao, "dg046.pi")
+    await _anuncio(db, user, kit, "dg046.pi+a003.pi")
+
+    r = await client.post(API_CRIATIVOS, json={"modelo": "video 15s", "sku": "dg046.sp"})
+    assert r.status_code == 200, r.text
+    assert r.json()["product_id"] == str(irmao.id)
+
+
+async def test_irmaos_de_produtos_diferentes_nao_escolhe_por_sorteio(
+    client, db, make_user, auth_as
+):
+    """`dg023` tem irmãos avulso, usado e kit 2. Escolher um por data faria a
+    legenda falar de celular USADO — sem irmão único, fica sem produto."""
+    user = await _user(make_user, auth_as, edit=True, role=UserRole.ADMIN)
+    novo_ = await _produto(db, user, nome="Uranyx WP53 24.128 - Preto")
+    usado = await _produto(db, user, nome="Uranyx WP53 24.128 - Preto - USADO")
+    await _anuncio(db, user, novo_, "dg023.pi")
+    await _anuncio(db, user, usado, "dg023.us")
+
+    r = await client.post(API_CRIATIVOS, json={"modelo": "video 30s", "sku": "dg023.ra"})
+    assert r.status_code == 200, r.text
+    assert r.json()["product_id"] is None
+
+
+async def test_sku_so_no_cadastro_liga_pelo_cadastro(client, db, make_user, auth_as):
+    """Sem anúncio nenhum na base, o `products.sku` idêntico ainda identifica
+    o produto — a legenda ganha o nome, mesmo sem a frase de ficha."""
+    user = await _user(make_user, auth_as, edit=True, role=UserRole.ADMIN)
+    cadastro = await _produto(db, user, nome="Uranyx F110L 8.128 - Preto", sku="dg999.sp")
+
+    r = await client.post(API_CRIATIVOS, json={"modelo": "video 15s", "sku": "DG999.SP "})
+    assert r.status_code == 200, r.text
+    assert r.json()["product_id"] == str(cadastro.id)
+
+
+async def test_irmao_de_outro_nome_perde_pro_cadastro(client, db, make_user, auth_as):
+    """Irmão é palpite; SKU inteiro no cadastro é identidade. Com nomes
+    diferentes (outra cor de verdade), vale o cadastro."""
+    user = await _user(make_user, auth_as, edit=True, role=UserRole.ADMIN)
+    irmao = await _produto(db, user, nome="Cafeteira Elétrica Pink", sku="dg888.pi")
+    cadastro = await _produto(db, user, nome="Cafeteira Elétrica Azul", sku="dg888.az")
+    await _anuncio(db, user, irmao, "dg888.pi")
+
+    r = await client.post(API_CRIATIVOS, json={"modelo": "Cafeteira", "sku": "dg888.az"})
+    assert r.status_code == 200, r.text
+    assert r.json()["product_id"] == str(cadastro.id)
+
+
 async def test_patch_do_sku_arrasta_o_product_id(client, db, make_user, auth_as):
     """Trocar o SKU na célula muda o vínculo junto — inclusive pra NULL.
 
@@ -614,3 +672,47 @@ async def test_resolvida_recusa_conta_de_outra_marca(client, db, make_user, auth
     )
     assert r.status_code == 409
     assert r.json()["detail"]["code"] == "conta_de_outra_marca"
+
+
+async def test_migration_0318_religa_so_quem_esta_sem_produto(client, db, make_user, auth_as):
+    """A migration aplica a MESMA regra a quem já foi salvo sem produto — os
+    três `dg046.sp` de 24/09 estavam assim. Roda o SQL dela de verdade, no
+    schema de teste: liga o irmão único, deixa o ambíguo em paz e nunca troca
+    um vínculo que já existe."""
+    import importlib.util
+    from pathlib import Path
+
+    from sqlalchemy import text
+
+    from app.models import MarketingCreative
+    from tests.conftest import TEST_SCHEMA
+
+    caminho = Path(__file__).parent.parent / "alembic/versions/0318_criativo_produto_irmao.py"
+    spec = importlib.util.spec_from_file_location("m0318", caminho)
+    mig = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mig)
+
+    user = await _user(make_user, auth_as, edit=True, role=UserRole.ADMIN)
+    f110 = await _produto(db, user, nome="Uranyx F110L 8.128 - Preto", sku="dg046.pi")
+    await _produto(db, user, nome="Uranyx F110L 8.128 - Preto", sku="dg046.sp")
+    await _anuncio(db, user, f110, "dg046.pi")
+    novo_ = await _produto(db, user, nome="Uranyx WP53 24.128 - Preto")
+    usado = await _produto(db, user, nome="Uranyx WP53 24.128 - Preto - USADO")
+    await _anuncio(db, user, novo_, "dg023.pi")
+    await _anuncio(db, user, usado, "dg023.us")
+    outro = await _produto(db, user, nome="Cafeteira")
+
+    sem = MarketingCreative(modelo="video 15s", sku="dg046.sp")
+    ambiguo = MarketingCreative(modelo="video 30s", sku="dg023")
+    ja_ligado = MarketingCreative(modelo="video 15s", sku="dg046.sp", product_id=outro.id)
+    db.add_all([sem, ambiguo, ja_ligado])
+    await db.commit()
+
+    await db.execute(text(mig.sql_religar(TEST_SCHEMA, "marketing_creatives")))
+    await db.commit()
+    for c in (sem, ambiguo, ja_ligado):
+        await db.refresh(c)
+
+    assert sem.product_id == f110.id
+    assert ambiguo.product_id is None
+    assert ja_ligado.product_id == outro.id
