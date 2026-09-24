@@ -143,7 +143,7 @@ assert.ok(start > 0 && end > start, 'marcadores dos helpers puros presentes')
 const helpersJs = transpile(script.slice(start, end), ts.ModuleKind.ESNext)
 const H = new Function('PLATAFORMA_LABELS', 'VERIFICACAO_LABELS', 'fmtFone', helpersJs + `
 return { montaBody, chipTitle, rowMatches, sincronizaEfetivos, dotClass, VERIFICACAO_CURTO, verifLabel, senhaHintTexto,
-  tetoOuNull, postagemAutoOn, tokenPillTexto, tokenPillClass, contaExternaId, contaExternaLabel, TOKEN_STATUS_LABELS };
+  tetoOuNull, horaOuNull, postagemAutoOn, tokenPillTexto, tokenPillClass, contaExternaId, contaExternaLabel, TOKEN_STATUS_LABELS };
 `)(redes.PLATAFORMA_LABELS, redes.VERIFICACAO_LABELS, redes.fmtFone)
 
 const SENHA_FALSA = 'senha-falsa-teste-123'
@@ -200,10 +200,31 @@ function form(over = {}) {
   // que dá pra DESLIGAR o executor numa conta sem apagar a conta.
   assert.equal(H.montaBody(form({ adspower_user_id: '  k1dohvrh ' }), 'edit', null).adspower_user_id, 'k1dohvrh')
   assert.equal(H.montaBody(form({ adspower_user_id: '   ' }), 'edit', null).adspower_user_id, null)
+  // Hora de início do robô (24/09/2026): vazio vira null EXPLÍCITO, e null não
+  // quer dizer meia-noite — quer dizer "não publique sozinho nesta conta".
+  assert.equal(H.montaBody(form({ postagem_hora_inicio: 18 }), 'edit', null).postagem_hora_inicio, 18)
+  assert.equal(H.montaBody(form({ postagem_hora_inicio: 0 }), 'edit', null).postagem_hora_inicio, 0,
+    'meia-noite é uma hora válida e não pode virar null')
+  assert.equal(H.montaBody(form({ postagem_hora_inicio: '' }), 'edit', null).postagem_hora_inicio, null)
+  assert.ok(!('postagem_hora_inicio' in H.montaBody(form({ postagem_hora_inicio: 18 }), 'create', null)))
   // Na criação o bloco de publicação nem aparece: não pode vazar campo.
   assert.ok(!('adspower_user_id' in H.montaBody(form({ adspower_user_id: 'x' }), 'create', null)))
   // O token NUNCA passa pelo corpo da conta (vai só no /conectar).
   assert.ok(!JSON.stringify(b2).includes(TOKEN_FALSO) && !('access_token' in b2))
+}
+
+// horaOuNull: 0 é MEIA-NOITE, não "vazio". O tetoOuNull zera o zero (teto 0
+// não faz sentido), e reusá-lo aqui faria quem escolhesse 00:00 desligar o
+// robô sem saber.
+{
+  assert.equal(H.horaOuNull(0), 0, 'meia-noite é hora válida')
+  assert.equal(H.horaOuNull(18), 18)
+  assert.equal(H.horaOuNull(23), 23)
+  assert.equal(H.horaOuNull(''), null, 'vazio = não publique sozinho')
+  assert.equal(H.horaOuNull(24), null, 'fora de 0-23 não passa')
+  assert.equal(H.horaOuNull(-1), null)
+  assert.equal(H.horaOuNull('abc'), null)
+  assert.equal(H.tetoOuNull(0), null, 'no teto, zero continua sendo vazio')
 }
 
 // tetoOuNull: vazio/lixo = null (herda o padrão), número positivo inteiro passa

@@ -363,6 +363,9 @@ class RedeSocialPatch(BaseModel):
     postagem_auto: bool | None = None
     postagem_max_dia: int | None = None
     postagem_intervalo_min: int | None = None
+    # A partir de que hora (0-23, Brasília) o robô publica sozinho nesta conta.
+    # NULO = não publica sozinho, mesmo com postagem_auto ligado.
+    postagem_hora_inicio: int | None = Field(default=None, ge=0, le=23)
     # Perfil do AdsPower que o executor local abre pra publicar nesta conta.
     # Só nas plataformas sem API (hoje o TikTok). Vazio vira NULL.
     adspower_user_id: str | None = None
@@ -401,6 +404,9 @@ class RedeSocialOut(BaseModel):
     postagem_auto: bool = False
     postagem_max_dia: int | None = None
     postagem_intervalo_min: int | None = None
+    # A partir de que hora (0-23, Brasília) o robô publica sozinho nesta conta.
+    # NULO = não publica sozinho, mesmo com postagem_auto ligado.
+    postagem_hora_inicio: int | None = Field(default=None, ge=0, le=23)
     # Perfil do AdsPower (só TikTok). A tela usa pra avisar que falta.
     adspower_user_id: str | None = None
     # Credencial de publicação (redes_sociais_tokens): NUNCA o token, só o

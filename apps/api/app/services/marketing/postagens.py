@@ -407,6 +407,20 @@ async def agendar(
     agendado_para: datetime | None = None,
     opcoes: dict[str, Any] | None = None,
     user_id: UUID | None = None,
+    # Quem está apertando o botão. Inferir isso da presença de hora marcada
+    # funcionou enquanto só existiam duas situações (clique agora / agendar
+    # pra depois). Com o robô de autopostagem (24/09/2026) passou a existir
+    # uma terceira — robô publicando AGORA —, e a dedução a classificava como
+    # clique humano: as guardas que existem SÓ pro robô (`sem_legenda`,
+    # `conta_sem_postagem_auto`) deixavam de disparar, e ele publicava Reel
+    # sem legenda em marca sem biblioteca cadastrada.
+    automatico: bool = False,
+    # `manual` = pessoa; `agenda` = o promotor tirou da agenda; `robo` = a
+    # autopostagem escolheu sozinha. Não é só rastreabilidade: `revalidar`
+    # decide por AQUI se reexamina as guardas do robô na hora de publicar, e
+    # com tudo gravado como `manual` desligar o interruptor não segurava o que
+    # já estava na fila.
+    origem: str = "manual",
 ) -> list[MarketingPostagem]:
     """Cria UMA postagem por conta. Sem hora = `pendente` (sai no próximo tick).
 
@@ -450,9 +464,10 @@ async def agendar(
             # ainda desloca o teto diário pra trás. Folga de 5 min pro
             # relógio do navegador.
             raise RoboError("agendamento_no_passado")
-    # Com hora marcada quem aperta o botão é o ROBÔ, então a conta precisa ter
-    # `postagem_auto` ligada; "publicar agora" é decisão de gente e passa.
-    automatico = quando is not None
+    # Hora marcada implica robô (quem executa depois é ele), mas o contrário
+    # não vale: o robô de autopostagem publica AGORA e mesmo assim é robô.
+    # Por isso o parâmetro manda, e a hora só soma.
+    automatico = automatico or quando is not None
     tokens = await tokens_por_rede(session, [r.id for r in redes])
     criadas: list[MarketingPostagem] = []
     for rede in redes:
@@ -503,7 +518,7 @@ async def agendar(
                 opcoes=opcoes or {},
                 agendado_para=quando,
                 status=STATUS_AGENDADO if quando else STATUS_PENDENTE,
-                origem="manual",
+                origem=origem,
                 created_by=user_id,
             )
         )
@@ -688,8 +703,11 @@ async def revalidar(
         # pela hora que estava marcada (é isso que evita a rajada de catch-up
         # quando o worker volta depois de uma parada).
         quando=None,
-        # `agenda` = quem apertou o botão foi o robô; `manual` = uma pessoa.
-        automatico=postagem.origem == "agenda",
+        # Tudo que não foi uma pessoa: `agenda` (saiu da agenda) e `robo` (a
+        # autopostagem escolheu). Faltar `robo` aqui fazia o interruptor
+        # deixar de ser botão de pânico — desligar não segurava o que o robô
+        # já tinha posto na fila.
+        automatico=postagem.origem in ("agenda", "robo"),
         excluir_id=postagem.id,
     )
 

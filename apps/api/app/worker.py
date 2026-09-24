@@ -1142,6 +1142,35 @@ async def marketing_postagens_publicar(ctx: dict) -> None:
         )
 
 
+async def marketing_autopostagem(ctx: dict) -> None:
+    """O robô escolhe o vídeo e a hora sozinho (Eduardo, 24/09/2026).
+
+    De hora em hora, no minuto 2 (longe do congestionamento do :00). Só toca
+    em conta que tem o interruptor ligado E a hora de início preenchida — o
+    interruptor sozinho significava outra coisa até hoje, e há conta ligada por
+    esse motivo.
+
+    Ele AGENDA; quem publica é o `marketing_postagens_publicar`, que já roda a
+    cada minuto. Duas cópias da lógica de publicar foi o que quebrou o modal do
+    TikTok em 23/09 — não repito o erro.
+
+    De hora em hora e não a cada minuto porque a grade é horária: rodar mais
+    vezes não adianta nada, e cada passada varre criativos de todas as marcas.
+    """
+    if not _settings.enable_marketing:
+        return
+    from app.services.marketing.autopostagem import rodada
+
+    async with session_scope() as s:
+        try:
+            r = await rodada(s)
+        except Exception as e:  # noqa: BLE001
+            logger.error("marketing_autopostagem_failed", err=str(e)[:300])
+            return
+    if r.get("agendadas"):
+        logger.info("marketing_autopostagem_tick", **r)
+
+
 async def marketing_postagens_metricas(ctx: dict) -> None:
     """Quanto cada vídeo publicado rendeu (Eduardo, 23/09/2026) — 1x por dia.
 
@@ -3652,6 +3681,10 @@ class WorkerSettings:
             run_at_startup=False,
             timeout=900,
         ),
+        # Publicação autônoma: de hora em hora, no minuto 2. A grade é horária
+        # (18h, 19h…), então rodar mais vezes não adianta — e cada passada
+        # varre os criativos de todas as marcas ligadas.
+        cron(marketing_autopostagem, minute={2}, run_at_startup=False, timeout=300),
         # Marketing: Shopee round-robin MOVED to the agent-node block below —
         # only the dedicated machine (MARKETING_AGENT_NODE=1) talks to Shopee
         # Ads, so the central server never competes on the same partner-id

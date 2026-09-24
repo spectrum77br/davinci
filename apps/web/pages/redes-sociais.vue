@@ -100,6 +100,8 @@ type RedeSocialOut = {
   postagem_auto: boolean
   postagem_max_dia: number | null
   postagem_intervalo_min: number | null
+  // A partir de que hora (0-23, BRT) o robô publica sozinho. NULO = não publica.
+  postagem_hora_inicio: number | null
   // Perfil do AdsPower — só nas plataformas sem API (hoje o TikTok). É o
   // navegador logado que o executor local abre pra publicar.
   adspower_user_id: string | null
@@ -156,6 +158,7 @@ type Form = {
   postagem_auto: boolean
   postagem_max_dia: Teto
   postagem_intervalo_min: Teto
+  postagem_hora_inicio: Teto
   adspower_user_id: string
 }
 type Modo = 'create' | 'edit'
@@ -172,6 +175,17 @@ function tetoOuNull(v: Teto | null | undefined): number | null {
   if (!s) return null
   const n = Math.trunc(Number(s))
   return Number.isFinite(n) && n > 0 ? n : null
+}
+
+// A hora de início NÃO pode passar pelo `tetoOuNull`: lá o zero vira null,
+// porque teto 0 não faz sentido. Aqui 0 é MEIA-NOITE, hora perfeitamente
+// válida — e null significa outra coisa ("não publique sozinho nesta conta").
+// Confundir os dois faria quem escolhesse 00:00 desligar o robô sem saber.
+function horaOuNull(v: Teto | null | undefined): number | null {
+  const s = String(v ?? '').trim()
+  if (!s) return null
+  const n = Math.trunc(Number(s))
+  return Number.isFinite(n) && n >= 0 && n <= 23 ? n : null
 }
 
 // Corpo do POST/PATCH da conta. `senha` só entra quando o usuário digitou
@@ -198,6 +212,7 @@ function montaBody(f: Form, modo: Modo, senhaSalva: string | null): Record<strin
     body.postagem_auto = f.postagem_auto
     body.postagem_max_dia = tetoOuNull(f.postagem_max_dia)
     body.postagem_intervalo_min = tetoOuNull(f.postagem_intervalo_min)
+    body.postagem_hora_inicio = horaOuNull(f.postagem_hora_inicio)
     body.adspower_user_id = (f.adspower_user_id || '').trim() || null
   }
   // Sem trim: espaço pode ser parte da senha (schemas/marcas.py::_senha).
@@ -759,6 +774,7 @@ function emptyForm(marcaId = '', plataforma: Plataforma = PLATAFORMAS[0]): Form 
     postagem_auto: false,
     postagem_max_dia: '',
     postagem_intervalo_min: '',
+    postagem_hora_inicio: '',
     adspower_user_id: '',
   }
 }
@@ -812,6 +828,7 @@ function openEdit(r: RedeSocialOut) {
     // null = herda o padrão do servidor → campo vazio (o placeholder diz qual é).
     postagem_max_dia: r.postagem_max_dia == null ? '' : r.postagem_max_dia,
     postagem_intervalo_min: r.postagem_intervalo_min == null ? '' : r.postagem_intervalo_min,
+    postagem_hora_inicio: r.postagem_hora_inicio == null ? '' : r.postagem_hora_inicio,
     adspower_user_id: r.adspower_user_id || '',
   }
   modalErr.value = null
@@ -1682,6 +1699,31 @@ await load()
             <p class="text-[11px] text-muted-foreground">
               em branco usa o padrão do servidor (2 posts/dia, 90 min entre um post e outro nesta conta)
             </p>
+
+            <div>
+              <Label>a partir de que horas</Label>
+              <Input
+                v-model="form.postagem_hora_inicio"
+                type="number" min="0" max="23" step="1"
+                :disabled="!canEdit"
+                placeholder="ex.: 18"
+                autocomplete="off"
+              />
+              <p class="text-[11px] text-muted-foreground mt-1">
+                hora de Brasília em que o robô começa a publicar sozinho nesta conta. Com 18, os
+                posts do dia saem às 18h, 19h… conforme o intervalo acima, até bater o teto.
+              </p>
+              <!-- Em branco NÃO quer dizer meia-noite: quer dizer que ninguém pediu publicação
+                   autônoma nesta conta. O interruptor acima significava só "pode executar o que
+                   foi agendado à mão" até 24/09/2026, e há conta ligada por esse motivo — tratar
+                   como autorizada faria o robô publicar onde ninguém pediu. -->
+              <p
+                v-if="form.postagem_auto && !String(form.postagem_hora_inicio).trim()"
+                class="text-[11px] text-amber-600 dark:text-amber-400 mt-1"
+              >
+                em branco, o robô não publica sozinho — ele só executa o que você agendar à mão.
+              </p>
+            </div>
 
             <div v-if="usaExecutorLocal">
               <Label>perfil do AdsPower</Label>

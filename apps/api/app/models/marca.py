@@ -31,6 +31,7 @@ from datetime import date
 from uuid import UUID, uuid4
 
 from sqlalchemy import (
+    SmallInteger,
     Boolean,
     Date,
     ForeignKey,
@@ -183,6 +184,20 @@ class RedeSocial(Base, TimestampMixin):
     )
     postagem_max_dia: Mapped[int | None] = mapped_column(Integer, nullable=True)
     postagem_intervalo_min: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # A partir de que HORA do dia o robô pode publicar sozinho nesta conta
+    # (0-23, horário de Brasília). Migration 0316.
+    #
+    # Sem isto, `postagem_max_dia` e `postagem_intervalo_min` eram só
+    # guarda-corpos: recusavam agendamento apertado demais, mas não mandavam
+    # publicar nada — quem escolhia o vídeo e a hora era sempre uma pessoa.
+    # É esta coluna que transforma os três num horário de trabalho: começa às
+    # 18h, respeita o intervalo, para no teto do dia.
+    #
+    # NULO = o robô NÃO publica sozinho nesta conta, mesmo com `postagem_auto`
+    # ligado. Ligar a publicação autônoma tem que ser um ato deliberado, com
+    # hora escolhida — não efeito colateral de um interruptor que já existia e
+    # significava outra coisa.
+    postagem_hora_inicio: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
     # Perfil do AdsPower que o executor LOCAL abre pra publicar nesta conta
     # (migration 0308). Só as plataformas sem API — hoje o TikTok, que recusou
     # a auditoria duas vezes. Uma conta por perfil, SEMPRE: duas contas no
