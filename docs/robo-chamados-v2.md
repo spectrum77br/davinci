@@ -513,3 +513,30 @@ olhou a linha depois.
 | `/agent/lease` | `abrir` / `responder` | **igual** — nenhuma mudança |
 | classificar fala deles | — | na dúvida mande: eco e repetida o servidor descarta |
 | leitura que falhou | — | `ok: false` → ocorrência na Ouvidoria |
+
+---
+
+## 7. Cérebro novo no Hermes (24/09/2026)
+
+> Decisão do Vinicius: o cérebro passa a rodar no Hermes (Mac Santiago) e
+> SUBSTITUI o cérebro atual. As mãos (lease, resultado, recebida, registrar,
+> historico, leitura, anexo) continuam iguais, com o mesmo token.
+
+- O Hermes tem senha própria (tabela `chamados_cerebros`, só o sha256 no banco) e
+  assina as análises: "Análise do robô Hermes [classe]: …". O fim do texto (a ação)
+  não muda, então a aba lê igual.
+- Troca de guarda: `POST /api/chamados/agent/cerebro {"exclusivo": true}`, chamado
+  pelo próprio Hermes. A partir daí, com o token antigo:
+  - `POST /agent/analisar` devolve `{"chamados": []}` — o cérebro antigo simplesmente
+    não vê mais nada (sem erro);
+  - `POST /agent/analise` devolve `409 cerebro_substituido`;
+  - todo o resto funciona como antes.
+  `{"exclusivo": false}` desfaz; `{}` só consulta (inclui `legado_ignorado_at`, a
+  última vez que o cérebro antigo bateu depois da troca).
+- `POST /agent/exemplos {"limite", "offset", "desde", "plataforma"}` (só cérebro
+  cadastrado): casos que já passaram pelo cérebro, no mesmo formato do
+  `/agent/analisar`, mais nova análise primeiro, com `total`.
+- `POST /agent/caso {"pedido_bling" | "chamado" | "chamado_id"}` (só cérebro
+  cadastrado): até 5 chamados daquele pedido/protocolo, pendentes ou não, no formato
+  do `/agent/analisar` — pra "no chamado do pedido X, faz tal coisa".
+- `POST /agent/pagamento-ml` aceita os dois tokens.

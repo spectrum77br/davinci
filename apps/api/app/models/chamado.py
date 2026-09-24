@@ -262,3 +262,41 @@ class ChamadoPedido(Base, TimestampMixin):
     motivo: Mapped[str | None] = mapped_column(Text, nullable=True)
     corte_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     postagem_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ChamadoCerebro(Base, TimestampMixin):
+    """Um cérebro dos chamados com senha própria — quem chama `/agent/analisar`
+    e decide em `/agent/analise`.
+
+    Vinicius, 24/09/2026: levar o cérebro do PC do Eduardo pro Hermes no Mac
+    Santiago, SUBSTITUINDO o dele. Até aqui o cérebro usava o mesmo token do
+    robô de NF e assinava só "cérebro": não dava pra saber quem decidiu, nem
+    desligar um sem desligar o outro. E o `/agent/analisar` não reserva nada —
+    dois cérebros ao mesmo tempo respondem o mesmo caso duas vezes pra
+    plataforma.
+
+    `exclusivo` é a troca de guarda: ligado, o token antigo continua valendo pro
+    resto (lease, resultado, recebida — as mãos do Eduardo), mas o
+    `/agent/analisar` devolve lista vazia pra ele e o `/agent/analise` recusa.
+    O cérebro antigo para sem erro nenhum do lado dele, e desligar o
+    `exclusivo` devolve tudo como era.
+
+    O token só aparece uma vez; aqui fica o sha256 (mesmo esquema do
+    `ClaudeConector`)."""
+
+    __tablename__ = "chamados_cerebros"
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    # Vai no texto da análise ("Análise do robô Hermes [classe] …").
+    nome: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    token_hash: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    exclusivo: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Última vez que o cérebro antigo bateu na porta depois da troca — mostra
+    # se o programa do Eduardo ainda está rodando à toa.
+    legado_ignorado_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

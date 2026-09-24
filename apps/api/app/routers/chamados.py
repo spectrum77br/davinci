@@ -8,7 +8,9 @@ Recurso de permissão: `chamados` (view/edit/delete). As regras/ações vivem em
 app.services.chamados; aqui é CRUD + histórico + anexos + os botões.
 """
 
+import hashlib
 import secrets
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Annotated
@@ -40,6 +42,7 @@ from app.models import (
     BlingOrder,
     Chamado,
     ChamadoAnexo,
+    ChamadoCerebro,
     ChamadoMensagem,
     DevolucaoAnexo,
     Devolution,
@@ -54,8 +57,13 @@ from app.schemas.chamados import (
     AgentAnaliseIn,
     AgentAnaliseOut,
     AgentBloqueioOut,
+    AgentCasoIn,
     AgentCasoLeituraOut,
+    AgentCerebroIn,
+    AgentCerebroOut,
     AgentChamadoAnaliseOut,
+    AgentExemplosIn,
+    AgentExemplosOut,
     AgentHistoricoIn,
     AgentHistoricoOut,
     AgentInstrucaoOut,
@@ -1201,6 +1209,70 @@ async def _require_agent_token(
 _agent_dep = [Depends(_require_agent_token)]
 
 
+@dataclass(frozen=True)
+class _Cerebro:
+    """Quem chama as rotas do cérebro. `row` = cérebro cadastrado com senha
+    própria (Hermes, 24/09); `None` = o token antigo (NF), que é o cérebro do
+    Eduardo. `substituido` = token antigo depois que um cadastrado virou
+    `exclusivo` — ele para de ver e de decidir, sem erro do lado dele."""
+
+    row: ChamadoCerebro | None
+    substituido: bool = False
+
+    @property
+    def nome(self) -> str | None:
+        return self.row.nome if self.row is not None else None
+
+
+# last_used_at / legado_ignorado_at: grava no máximo 1×/min (o cérebro chama a cada rodada)
+_CEREBRO_CARIMBO = timedelta(minutes=1)
+
+
+async def _cerebro(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    x_agent_token: Annotated[str | None, Header(alias="X-Agent-Token")] = None,
+) -> _Cerebro:
+    token = (x_agent_token or "").strip()
+    if not token:
+        raise HTTPException(401, detail={"code": "chamados_agent_unauthorized"})
+    agora = datetime.now(UTC)
+    legado = get_settings().nf_agent_token
+    if legado and secrets.compare_digest(token, legado):
+        dono = (
+            await session.execute(
+                select(ChamadoCerebro)
+                .where(ChamadoCerebro.exclusivo.is_(True), ChamadoCerebro.revoked_at.is_(None))
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if dono is not None and (
+            dono.legado_ignorado_at is None or dono.legado_ignorado_at < agora - _CEREBRO_CARIMBO
+        ):
+            dono.legado_ignorado_at = agora
+            await session.commit()
+        return _Cerebro(row=None, substituido=dono is not None)
+    row = (
+        await session.execute(
+            select(ChamadoCerebro).where(
+                ChamadoCerebro.token_hash == hashlib.sha256(token.encode()).hexdigest(),
+                ChamadoCerebro.revoked_at.is_(None),
+            )
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(401, detail={"code": "chamados_agent_unauthorized"})
+    if row.last_used_at is None or row.last_used_at < agora - _CEREBRO_CARIMBO:
+        row.last_used_at = agora
+        await session.commit()
+    return _Cerebro(row=row)
+
+
+def _so_cadastrado(cerebro: _Cerebro) -> ChamadoCerebro:
+    if cerebro.row is None:
+        raise HTTPException(403, detail={"code": "cerebro_sem_cadastro"})
+    return cerebro.row
+
+
 async def _chamado_aberto(session: AsyncSession, pedido_bling: str, origem: str) -> Chamado | None:
     return (
         await session.execute(
@@ -1329,10 +1401,11 @@ async def agent_historico(
     return AgentHistoricoOut(chamado_id=ch.id, mensagem_id=m.id, alterado=True)
 
 
-@agent_router.post("/pagamento-ml", response_model=AgentPagamentoMlOut, dependencies=_agent_dep)
+@agent_router.post("/pagamento-ml", response_model=AgentPagamentoMlOut)
 async def agent_pagamento_ml(
     body: AgentPagamentoMlIn,
     session: Annotated[AsyncSession, Depends(get_session)],
+    _quem: Annotated[_Cerebro, Depends(_cerebro)],
 ) -> AgentPagamentoMlOut:
     """15/09 (Eduardo: "sim dá para fazer"): pagamento da venda de cada pedido na API
     do ML — aprovação, liberação pra loja, estorno (e QUEM pagou o estorno) e envio.
@@ -1819,10 +1892,11 @@ def _ultima_fala_nossa(ch: Chamado):
     )
 
 
-@agent_router.post("/analisar", response_model=AgentAnalisarOut, dependencies=_agent_dep)
+@agent_router.post("/analisar", response_model=AgentAnalisarOut)
 async def agent_analisar(
     body: AgentAnalisarIn,
     session: Annotated[AsyncSession, Depends(get_session)],
+    cerebro: Annotated[_Cerebro, Depends(_cerebro)],
 ) -> AgentAnalisarOut:
     """Chamados com trabalho pro cérebro:
     - resposta da plataforma ainda não analisada (nenhuma `analise`, ou a última
@@ -1841,7 +1915,13 @@ async def agent_analisar(
     do Tuta pede canal robô/ML). Instrução e bloqueio saem pra quem chamar, em
     qualquer canal e plataforma (19/09): a pessoa mandou, ou a API travou — se o
     robô não atende aquela plataforma ele responde `humano` com o motivo, mas
-    tem que VER o chamado."""
+    tem que VER o chamado.
+
+    24/09: com um cérebro cadastrado `exclusivo` (Hermes), o token antigo recebe
+    lista vazia — o cérebro do Eduardo para de ver sem quebrar nada do lado dele."""
+    if cerebro.substituido:
+        logger.info("chamados_cerebro_legado_ignorado", rota="analisar")
+        return AgentAnalisarOut(chamados=[])
 
     def _ult(cond):
         return (
@@ -1911,63 +1991,65 @@ async def agent_analisar(
             .limit(body.limite)
         )
     ).scalars().all()
-    out: list[AgentChamadoAnaliseOut] = []
-    for ch in rows:
-        msgs = await _mensagens_do_caso(session, ch)
-        anexos = await _anexos_da_abertura(session, ch)
-        pend = _instrucao_pendente(msgs)
-        _m, bloq = _bloqueio_de(msgs)
-        out.append(
-            AgentChamadoAnaliseOut(
-                chamado_id=ch.id,
-                chamado=ch.chamado,
-                chamado_url=ch.chamado_url,
-                pedido_bling=ch.pedido_bling,
-                pedido_marketplace=ch.pedido_marketplace,
-                conta=ch.conta,
-                plataforma=ch.plataforma,
-                canal=ch.canal,
-                origem=ch.origem,
-                resolvido=ch.resolvido,
-                valor_recuperado=ch.valor_recuperado,
-                valor_sugerido=ch.valor_sugerido,
-                status_plataforma=ch.status_plataforma,
-                observacao=ch.observacao,
-                created_at=ch.created_at,
-                mensagens=[
-                    AgentMensagemOut(
-                        id=m.id,
-                        direcao=m.direcao,
-                        tipo=m.tipo,
-                        status=m.status,
-                        autor_nome=m.autor_nome,
-                        created_at=m.created_at,
-                        texto=limpar_html(m.texto),
-                    )
-                    for m in msgs
-                ],
-                anexos_abertura=[a.id for a in anexos],
-                replicas_robo=sum(
-                    1 for m in msgs if m.direcao == "enviada" and m.autor_nome == AUTOR_CEREBRO
-                ),
-                analises=sum(1 for m in msgs if m.tipo == "analise"),
-                instrucao=(
-                    AgentInstrucaoOut(
-                        texto=pend.texto, autor=pend.autor_nome, quando=pend.created_at
-                    )
-                    if pend
-                    else None
-                ),
-                bloqueio=bloq,
+    return AgentAnalisarOut(chamados=[await _item_do_cerebro(session, ch) for ch in rows])
+
+
+async def _item_do_cerebro(session: AsyncSession, ch: Chamado) -> AgentChamadoAnaliseOut:
+    """O chamado como o cérebro enxerga: a conversa do CASO inteiro (linhas irmãs
+    da mesma consulta), instrução/bloqueio pendentes e os prints da abertura."""
+    msgs = await _mensagens_do_caso(session, ch)
+    anexos = await _anexos_da_abertura(session, ch)
+    pend = _instrucao_pendente(msgs)
+    _m, bloq = _bloqueio_de(msgs)
+    return AgentChamadoAnaliseOut(
+        chamado_id=ch.id,
+        chamado=ch.chamado,
+        chamado_url=ch.chamado_url,
+        pedido_bling=ch.pedido_bling,
+        pedido_marketplace=ch.pedido_marketplace,
+        conta=ch.conta,
+        plataforma=ch.plataforma,
+        canal=ch.canal,
+        origem=ch.origem,
+        resolvido=ch.resolvido,
+        valor_recuperado=ch.valor_recuperado,
+        valor_sugerido=ch.valor_sugerido,
+        status_plataforma=ch.status_plataforma,
+        observacao=ch.observacao,
+        created_at=ch.created_at,
+        mensagens=[
+            AgentMensagemOut(
+                id=m.id,
+                direcao=m.direcao,
+                tipo=m.tipo,
+                status=m.status,
+                autor_nome=m.autor_nome,
+                created_at=m.created_at,
+                texto=limpar_html(m.texto),
             )
-        )
-    return AgentAnalisarOut(chamados=out)
+            for m in msgs
+        ],
+        anexos_abertura=[a.id for a in anexos],
+        replicas_robo=sum(
+            1 for m in msgs if m.direcao == "enviada" and m.autor_nome == AUTOR_CEREBRO
+        ),
+        analises=sum(1 for m in msgs if m.tipo == "analise"),
+        instrucao=(
+            AgentInstrucaoOut(
+                texto=pend.texto, autor=pend.autor_nome, quando=pend.created_at
+            )
+            if pend
+            else None
+        ),
+        bloqueio=bloq,
+    )
 
 
-@agent_router.post("/analise", response_model=AgentAnaliseOut, dependencies=_agent_dep)
+@agent_router.post("/analise", response_model=AgentAnaliseOut)
 async def agent_analise(
     body: AgentAnaliseIn,
     session: Annotated[AsyncSession, Depends(get_session)],
+    cerebro: Annotated[_Cerebro, Depends(_cerebro)],
 ) -> AgentAnaliseOut:
     """Decisão do cérebro sobre a última resposta (ou instrução/bloqueio): grava
     a `analise` no histórico (é o marcador de "já vi" — consome a instrução) e
@@ -1978,7 +2060,13 @@ async def agent_analise(
     api COM bloqueio é aceito — o robô assume por outro caminho (Seller Center)
     e a fala presa na API sai da fila. `resolver` NÃO fecha: põe o chamado em
     Encerrado; `valor_recuperado` (qualquer ação) vira `valor_sugerido`.
-    `humano` só anota (e reabre se `reabrir`)."""
+    `humano` só anota (e reabre se `reabrir`).
+
+    24/09: o cérebro cadastrado assina a análise ("Análise do robô Hermes …");
+    o token antigo, depois da troca de guarda (`exclusivo`), leva 409."""
+    if cerebro.substituido:
+        logger.info("chamados_cerebro_legado_ignorado", rota="analise")
+        raise HTTPException(409, detail={"code": "cerebro_substituido"})
     ch = await _get(session, body.chamado_id)
     # antes de gravar a análise (que consome a instrução)
     com_instrucao = _instrucao_pendente(await _mensagens_do_caso(session, ch)) is not None
@@ -2021,7 +2109,10 @@ async def agent_analise(
         session.add(assumido)
     analise = svc.nova_mensagem(
         ch,
-        texto=f"Análise do robô [{body.classe}]: {body.resumo} → {_ACAO_TXT[body.acao]}",
+        texto=(
+            f"Análise do robô{f' {cerebro.nome}' if cerebro.nome else ''} [{body.classe}]: "
+            f"{body.resumo} → {_ACAO_TXT[body.acao]}"
+        ),
         tipo="analise",
         direcao="sistema",
         autor_nome=AUTOR_CEREBRO,
@@ -2133,12 +2224,111 @@ async def agent_analise(
         classe=body.classe,
         acao=body.acao,
         replica=str(replica.id) if replica else None,
+        cerebro=cerebro.nome,
     )
     return AgentAnaliseOut(
         chamado_id=ch.id,
         analise_id=analise.id,
         replica_id=replica.id if replica else None,
         resolvido=ch.resolvido,
+    )
+
+
+@agent_router.post("/exemplos", response_model=AgentExemplosOut)
+async def agent_exemplos(
+    body: AgentExemplosIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    cerebro: Annotated[_Cerebro, Depends(_cerebro)],
+) -> AgentExemplosOut:
+    """24/09 (Hermes): casos que já passaram pelo cérebro — conversa inteira,
+    análises, e como terminaram (status oficial, valor sugerido × valor que a
+    pessoa gravou ao concluir). Mais nova análise primeiro."""
+    _so_cadastrado(cerebro)
+    ana = (
+        select(
+            ChamadoMensagem.chamado_id, func.max(ChamadoMensagem.created_at).label("ult")
+        )
+        .where(ChamadoMensagem.tipo == "analise")
+        .group_by(ChamadoMensagem.chamado_id)
+        .subquery()
+    )
+    q = select(Chamado).join(ana, ana.c.chamado_id == Chamado.id)
+    if body.desde is not None:
+        q = q.where(ana.c.ult >= body.desde)
+    if body.plataforma:
+        plat = body.plataforma.lower()
+        aceitas = _PLATAFORMA_ML if plat == "ml" else (plat,)
+        q = q.where(func.lower(func.coalesce(Chamado.plataforma, "")).in_(aceitas))
+    total = (await session.execute(select(func.count()).select_from(q.subquery()))).scalar_one()
+    rows = (
+        await session.execute(
+            q.order_by(ana.c.ult.desc(), Chamado.id).offset(body.offset).limit(body.limite)
+        )
+    ).scalars().all()
+    return AgentExemplosOut(
+        total=total, chamados=[await _item_do_cerebro(session, ch) for ch in rows]
+    )
+
+
+@agent_router.post("/caso", response_model=AgentAnalisarOut)
+async def agent_caso(
+    body: AgentCasoIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    cerebro: Annotated[_Cerebro, Depends(_cerebro)],
+) -> AgentAnalisarOut:
+    """24/09 (Hermes): "no chamado do pedido X, vê como está / faz tal coisa" — o
+    chamado pedido, no mesmo formato do `/agent/analisar`, esteja ele pendente ou
+    não. Abertos primeiro, depois o mais novo; no máximo 5 (um pedido pode ter
+    chamado de margem, de logística e de devolução)."""
+    _so_cadastrado(cerebro)
+    q = select(Chamado)
+    if body.chamado_id:
+        q = q.where(Chamado.id == body.chamado_id)
+    if body.pedido_bling:
+        q = q.where(Chamado.pedido_bling == body.pedido_bling)
+    if body.chamado:
+        q = q.where(Chamado.chamado == body.chamado)
+    rows = (
+        await session.execute(
+            q.order_by(Chamado.resolvido, Chamado.created_at.desc()).limit(5)
+        )
+    ).scalars().all()
+    return AgentAnalisarOut(chamados=[await _item_do_cerebro(session, ch) for ch in rows])
+
+
+@agent_router.post("/cerebro", response_model=AgentCerebroOut)
+async def agent_cerebro(
+    body: AgentCerebroIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    cerebro: Annotated[_Cerebro, Depends(_cerebro)],
+) -> AgentCerebroOut:
+    """24/09: troca de guarda. `exclusivo: true` = este cérebro passa a ser o
+    único (o token antigo para de ver e de decidir); `false` devolve a vez pro
+    antigo; `null` só consulta."""
+    row = _so_cadastrado(cerebro)
+    if body.exclusivo is not None and body.exclusivo != row.exclusivo:
+        if body.exclusivo:
+            outro = (
+                await session.execute(
+                    select(ChamadoCerebro).where(
+                        ChamadoCerebro.exclusivo.is_(True),
+                        ChamadoCerebro.revoked_at.is_(None),
+                        ChamadoCerebro.id != row.id,
+                    )
+                )
+            ).scalar_one_or_none()
+            if outro is not None:
+                raise HTTPException(
+                    409, detail={"code": "outro_cerebro_exclusivo", "cerebro": outro.nome}
+                )
+        row.exclusivo = body.exclusivo
+        await session.commit()
+        logger.info("chamados_cerebro_exclusivo", cerebro=row.nome, exclusivo=row.exclusivo)
+    return AgentCerebroOut(
+        nome=row.nome,
+        exclusivo=row.exclusivo,
+        last_used_at=row.last_used_at,
+        legado_ignorado_at=row.legado_ignorado_at,
     )
 
 

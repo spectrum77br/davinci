@@ -649,6 +649,58 @@ class AgentAnaliseOut(BaseModel):
     resolvido: bool
 
 
+class AgentExemplosIn(BaseModel):
+    """24/09 (Hermes): casos que o cérebro JÁ analisou, com a conversa inteira e
+    como terminaram — é daí que saem as regras do cérebro novo (Vinicius:
+    "montar do histórico") e os exemplos que ele consulta. Do mais novo pro mais
+    velho, paginado por `offset`."""
+
+    limite: int = Field(default=50, ge=1, le=200)
+    offset: int = Field(default=0, ge=0)
+    desde: datetime | None = None
+    plataforma: str | None = None
+
+    _clean = field_validator("plataforma", mode="before")(_clean_optional_text)
+
+
+class AgentExemplosOut(BaseModel):
+    total: int
+    chamados: list[AgentChamadoAnaliseOut]
+
+
+class AgentCasoIn(BaseModel):
+    """24/09 (Hermes): achar um chamado quando a pessoa pede "no chamado do pedido
+    X, faz tal coisa" — por pedido do Bling, protocolo ou id. Abertos primeiro."""
+
+    pedido_bling: str | None = None
+    chamado: str | None = None
+    chamado_id: UUID | None = None
+
+    _clean = field_validator("pedido_bling", "chamado", mode="before")(_clean_optional_text)
+
+    @model_validator(mode="after")
+    def _um_filtro(self) -> "AgentCasoIn":
+        if not (self.pedido_bling or self.chamado or self.chamado_id):
+            raise ValueError("informe pedido_bling, chamado ou chamado_id")
+        return self
+
+
+class AgentCerebroIn(BaseModel):
+    """24/09: `exclusivo` = o cérebro que chama passa a ser o ÚNICO. O token
+    antigo (NF) segue valendo pras mãos do Eduardo, mas o `/agent/analisar` vem
+    vazio pra ele e o `/agent/analise` recusa. `null` só consulta."""
+
+    exclusivo: bool | None = None
+
+
+class AgentCerebroOut(BaseModel):
+    nome: str
+    exclusivo: bool
+    last_used_at: datetime | None = None
+    # Última vez que o cérebro antigo bateu depois da troca (ainda rodando?).
+    legado_ignorado_at: datetime | None = None
+
+
 class AgentHistoricoIn(BaseModel):
     """15/09 (Eduardo: "preciso de todo o contexto da conversa"): conversa COMPLETA
     da página do caso (todas as falas desde a abertura na plataforma), guardada à

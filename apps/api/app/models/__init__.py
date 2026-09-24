@@ -8,7 +8,13 @@ from app.models.bling_envio_evento import BlingEnvioEvento
 from app.models.bling_kit_component import BlingKitComponent
 from app.models.bling_nota import BlingNota, BlingNotaEmitida
 from app.models.bling_order import BlingOrder, PrevisaoImpressa
-from app.models.chamado import Chamado, ChamadoAnexo, ChamadoMensagem, ChamadoPedido
+from app.models.chamado import (
+    Chamado,
+    ChamadoAnexo,
+    ChamadoCerebro,
+    ChamadoMensagem,
+    ChamadoPedido,
+)
 from app.models.claude_conector import ClaudeConector
 from app.models.company import Cadastro, CadastroStore, Company, Store
 from app.models.company_certificate import CompanyCertificate
@@ -315,6 +321,7 @@ __all__ = [
     "ProductLink",
     "Chamado",
     "ChamadoAnexo",
+    "ChamadoCerebro",
     "ChamadoMensagem",
     "ChamadoPedido",
     "Refund",
