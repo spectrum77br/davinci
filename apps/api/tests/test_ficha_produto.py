@@ -16,6 +16,7 @@ frase inteira, produto sem ficha simplesmente não rende frase.
 """
 
 import pytest
+from sqlalchemy import select
 
 from app.services.marketing.ficha import atributos, destaque
 
@@ -145,3 +146,32 @@ async def test_ficha_de_produto_de_OUTRA_marca_nao_entra_na_legenda(db, make_use
     await db.commit()
 
     assert await _destaque_do_produto(db, c) == "", "ficha de celular não entra em legenda de mala"
+
+
+@pytest.mark.asyncio
+async def test_produto_SEM_prefixo_de_marca_continua_valendo(db, make_user):
+    """A primeira versão desta guarda exigia que o nome do produto COMEÇASSE
+    com a marca do criativo — e quebrava a Charlots inteira: só os produtos da
+    Uranyx carregam o prefixo ("Uranyx F109S"); os de mala não ("Mala Listrada
+    tamanho 26"). Consertar um problema e criar outro maior.
+
+    A regra certa é mais estreita: recusa só quando o nome começa com OUTRA
+    marca cadastrada. Nome sem prefixo nenhum — que é o caso normal — passa.
+    """
+    from app.models import Marca, MarketingCreative, Product
+    from app.services.marketing.legenda import _destaque_do_produto
+
+    u = await make_user()
+    db.add_all([Marca(nome="charlots", slug="charlots"), Marca(nome="uranyx", slug="uranyx")])
+    await db.flush()
+    m = (await db.execute(select(Marca).where(Marca.nome == "charlots"))).scalar_one()
+    p = Product(name="Mala Listrada tamanho 26 - Mostarda", sku="b024.26", user_id=u.id)
+    db.add(p)
+    await db.flush()
+    c = MarketingCreative(modelo="video", marca="charlots", marca_id=m.id, product_id=p.id)
+    db.add(c)
+    await db.commit()
+
+    # Sem anúncio ligado não há frase, mas o importante é NÃO ter sido
+    # recusado pela guarda — a chamada chega ao fim em vez de sair no começo.
+    assert await _destaque_do_produto(db, c) == ""

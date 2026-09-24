@@ -514,19 +514,32 @@ async def _destaque_do_produto(
     produto = await session.get(Product, product_id)
     nome = (produto.name if produto else "") or ""
 
-    # A FICHA SÓ VALE SE O PRODUTO FOR DA MARCA DO CRIATIVO.
+    # A ficha é recusada quando o produto é VISIVELMENTE de outra marca.
     #
-    # Criativo e produto são vinculados à mão, e o vínculo erra: em produção,
-    # os criativos da charlots (malas) apontam para celulares da Uranyx. Sem
-    # esta guarda, a legenda de mala publicaria "Bateria de 11.000 mAh, tela
-    # de 6.52” e câmera de 13 MP" — visto renderizado antes de subir.
+    # Criativo e produto são vinculados à mão, e o vínculo erra: em produção os
+    # criativos da charlots (malas) apontam para celulares da Uranyx, e sem
+    # guarda a legenda de mala publicaria "Bateria de 11.000 mAh, tela de 6.52”
+    # e câmera de 13 MP" — visto renderizado antes de subir.
     #
-    # Descasou, sai SEM a frase. Legenda mais genérica é um problema pequeno;
-    # ficha técnica de outro produto no ar é um problema grande, e ninguém
-    # revisa legenda de robô antes de publicar.
-    marca_do_criativo = (creative.marca if creative else "") or ""
-    if marca_do_criativo and not nome.lower().startswith(marca_do_criativo.lower()):
-        return ""
+    # A primeira versão desta guarda exigia que o nome do produto COMEÇASSE com
+    # a marca do criativo, e estava errada: só os produtos da Uranyx carregam o
+    # prefixo ("Uranyx F109S"); os de mala não ("Mala Listrada tamanho 26"), e
+    # a Charlots ficaria sem ficha pra sempre. Não existe coluna de marca em
+    # `products` nem segmento confiável — 1.884 malas estão sem segmento.
+    #
+    # Então a regra é mais estreita e sem falso positivo: só recusa quando o
+    # nome começa com o nome de OUTRA marca cadastrada. Produto sem prefixo
+    # nenhum passa, que é o caso normal.
+    marca_do_criativo = ((creative.marca if creative else "") or "").strip().lower()
+    if marca_do_criativo:
+        outras = (
+            await session.execute(
+                select(Marca.nome).where(func.lower(Marca.nome) != marca_do_criativo)
+            )
+        ).scalars().all()
+        primeira = nome.strip().lower()
+        if any(primeira.startswith((o or "").strip().lower() + " ") for o in outras if o):
+            return ""
 
     # O nome vai junto: nas malas, a descrição é o mesmo texto padrão do
     # catálogo inteiro, e o que diferencia um kit do outro está no nome.
