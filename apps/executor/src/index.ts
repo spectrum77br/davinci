@@ -210,6 +210,7 @@ async function processLogisticaCommand(cmd: LeasedLogisticaCommand): Promise<voi
   }
   let session: melhorenvio.Session | null = null;
   try {
+    await adspower.garantirAberto();
     const ws = await adspower.start(userId);
     session = await melhorenvio.connect(ws);
     const r = await melhorenvio.suspenderEntrega(session.page, {
@@ -298,6 +299,9 @@ async function sendHeartbeat(): Promise<void> {
   let adspowerOk: boolean | null = null;
   let accountsOnline: number | null = null;
   try {
+    // Reabre o AdsPower se ele fechou (só com ADSPOWER_APP no .env): a
+    // suspensão é corrida contra o tempo, não dá pra esperar alguém ver.
+    await adspower.garantirAberto();
     const profiles = await adspower.list();
     adspowerOk = true;
     accountsOnline = profiles.length;

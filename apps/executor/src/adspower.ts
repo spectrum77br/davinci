@@ -1,4 +1,10 @@
+import { execFile } from "node:child_process";
+import { log } from "./log";
+
 const BASE = (process.env.ADSPOWER_API_BASE || "http://local.adspower.net:50325").replace(/\/$/, "");
+// Nome do app pra reabrir o AdsPower quando a Local API não responde (ex.:
+// "AdsPower Global"). Vazio = não abre sozinho (o executor do Eduardo).
+const APP = process.env.ADSPOWER_APP || "";
 const API_KEY = process.env.ADSPOWER_API_KEY || "";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -78,4 +84,35 @@ export async function list(): Promise<AdsPowerProfile[]> {
   const data = await apiGet(`/api/v1/user/list?page=1&page_size=100`);
   const items = (data?.list || []) as any[];
   return items.map((x) => ({ user_id: x.user_id, name: x.name }));
+}
+
+/** A Local API está de pé? (sem o rate-limit: é só um "alô"). */
+async function responde(): Promise<boolean> {
+  try {
+    const res = await fetch(`${BASE}/status`, { signal: AbortSignal.timeout(3000) });
+    return res.ok && ((await res.json()) as AdsPowerEnvelope).code === 0;
+  } catch {
+    return false;
+  }
+}
+
+/** Garante o AdsPower aberto antes de usar. Mac Santiago, 24/09/2026: o
+ *  AdsPower fechou sozinho às 13:26 e a primeira suspensão de verdade voltou
+ *  "AdsPower inacessível" — ninguém estava olhando a tela. Com ADSPOWER_APP,
+ *  o executor abre o app (a sessão gráfica do LaunchAgent permite) e espera a
+ *  API subir (~15 s). Devolve se a API respondeu. */
+export async function garantirAberto(): Promise<boolean> {
+  if (await responde()) return true;
+  if (!APP || process.platform !== "darwin") return false;
+  log.warn(`AdsPower não responde — abrindo "${APP}"`);
+  await new Promise<void>((res) => execFile("open", ["-a", APP], () => res()));
+  for (let i = 0; i < 20; i++) {
+    await sleep(3000);
+    if (await responde()) {
+      log.info(`AdsPower de volta depois de ${(i + 1) * 3}s`);
+      return true;
+    }
+  }
+  log.error(`abri "${APP}" mas a Local API não subiu em 60s`);
+  return false;
 }
