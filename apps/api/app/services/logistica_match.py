@@ -43,6 +43,33 @@ def _norm_situacao(v: str | None) -> str:
     return _SITUACAO_ALIASES.get(n, n)
 
 
+# Uma regra pode partir de VÁRIOS estados do Bling (Vinicius, 24/09: a mesma
+# chave do ML com as mesmas ações em "Em aberto" e em "Em andamento" virava duas
+# linhas iguais). A coluna `status_atual` guarda os nomes separados por ";" — o
+# front usa o mesmo separador. Um nome só (o formato de sempre) segue valendo.
+SEPARADOR_STATUS_ATUAL = ";"
+
+
+def status_atuais(valor: str | None) -> list[str]:
+    """Os estados do Bling ("DE") de uma regra, na ordem gravada. Lista vazia =
+    curinga (vale de qualquer estado)."""
+    return [p.strip() for p in (valor or "").split(SEPARADOR_STATUS_ATUAL) if p.strip()]
+
+
+def juntar_status_atual(valor: str | list[str] | None) -> str | None:
+    """Normaliza o que chega da API pra gravar: aceita lista ou texto com ";",
+    tira vazios e repetidos (sem diferenciar maiúscula). None = curinga."""
+    partes = valor if isinstance(valor, list) else status_atuais(valor)
+    out: list[str] = []
+    vistos: set[str] = set()
+    for p in partes:
+        p = (p or "").strip()
+        if p and _norm(p) not in vistos:
+            vistos.add(_norm(p))
+            out.append(p)
+    return f"{SEPARADOR_STATUS_ATUAL} ".join(out) or None
+
+
 def find_matching_rule(
     rows: list[LogisticaStatus], *, assinatura: str | None, plataforma: str | None
 ) -> LogisticaStatus | None:
@@ -106,13 +133,14 @@ def regras_aplicaveis(
     curingas (sem `status_atual`, valem de qualquer estado). É a máquina de
     estados: regra de OUTRO estado fica de fora — ela só vale quando o pedido
     chegar lá. Lista vazia = a combinação (chave + estado) não tem regra.
-    Nomes-apelido da mesma situação (ver `_norm_situacao`) casam entre si."""
+    Nomes-apelido da mesma situação (ver `_norm_situacao`) casam entre si.
+    Regra com vários `status_atual` é exata pra qualquer um deles."""
     atual = _norm_situacao(status_bling)
     exatas = [
         r for r in rules
-        if _norm(r.status_atual) and _norm_situacao(r.status_atual) == atual
+        if atual in {_norm_situacao(s) for s in status_atuais(r.status_atual)}
     ]
-    curingas = [r for r in rules if not _norm(r.status_atual)]
+    curingas = [r for r in rules if not status_atuais(r.status_atual)]
     return exatas + curingas
 
 

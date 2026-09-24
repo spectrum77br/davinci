@@ -459,7 +459,7 @@ async def create_status(
     s = LogisticaStatus(
         plataforma=_clean(body.plataforma),
         status_plataforma=_clean(body.status_plataforma),
-        status_atual=_clean(body.status_atual),
+        status_atual=logistica_match.juntar_status_atual(body.status_atual),
         alterar_status_bling=_clean(body.alterar_status_bling),
         monitoramento=bool(body.monitoramento),
         abrir_chamado=bool(body.abrir_chamado),
@@ -493,7 +493,7 @@ async def patch_status(
     if "status_plataforma" in data:
         s.status_plataforma = _clean(data["status_plataforma"])
     if "status_atual" in data:
-        s.status_atual = _clean(data["status_atual"])
+        s.status_atual = logistica_match.juntar_status_atual(data["status_atual"])
     if "alterar_status_bling" in data:
         s.alterar_status_bling = _clean(data["alterar_status_bling"])
     if "monitoramento" in data:

@@ -283,6 +283,7 @@ class LogisticaStatusOut(BaseModel):
     id: UUID
     plataforma: str | None = None
     status_plataforma: str | None = None
+    # Estados do Bling de onde a regra parte, separados por ";" (vazio = qualquer).
     status_atual: str | None = None
     alterar_status_bling: str | None = None
     monitoramento: bool = False
@@ -301,7 +302,9 @@ class LogisticaStatusOut(BaseModel):
 class LogisticaStatusCreate(BaseModel):
     plataforma: str | None = None
     status_plataforma: str | None = None
-    status_atual: str | None = None
+    # Um ou vários estados do Bling: lista ou texto separado por ";" (é como a
+    # coluna guarda e o Out devolve). Vazio = vale de qualquer estado.
+    status_atual: str | list[str] | None = None
     alterar_status_bling: str | None = None
     monitoramento: bool = False
     abrir_chamado: bool = False
@@ -315,7 +318,7 @@ class LogisticaStatusCreate(BaseModel):
 class LogisticaStatusPatch(BaseModel):
     plataforma: str | None = None
     status_plataforma: str | None = None
-    status_atual: str | None = None
+    status_atual: str | list[str] | None = None
     alterar_status_bling: str | None = None
     monitoramento: bool | None = None
     abrir_chamado: bool | None = None

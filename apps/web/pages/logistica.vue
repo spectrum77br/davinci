@@ -1058,7 +1058,6 @@ type Anexo = {
 type StatusTextField =
   | 'plataforma'
   | 'status_plataforma'
-  | 'status_atual'
   | 'alterar_status_bling'
   | 'mensagem_chamado'
   | 'mensagem_bling'
@@ -1080,6 +1079,36 @@ async function refreshStatus() {
   } finally {
     statusLoading.value = false
   }
+}
+
+// Plataforma de uma regra: escolhida numa lista, com os MESMOS rótulos que o
+// backend grava em `logistica.plataforma` (o casador compara sem maiúscula, então
+// "mercado livre" antigo casa igual). Vazio = geral (vale pra todas).
+const STATUS_PLATAFORMA_OPCOES: string[] = PLATAFORMA_TABS.map((t) => t.label)
+function plataformaCanonica(v: string | null | undefined): string {
+  const p = (v || '').trim()
+  return STATUS_PLATAFORMA_OPCOES.find((o) => o.toLowerCase() === p.toLowerCase()) || p
+}
+// Valor antigo digitado à mão que não é nenhuma das 4 continua na lista (não
+// some da regra sem ninguém ver).
+function plataformaOpcoesPara(v: string | null | undefined): string[] {
+  const p = plataformaCanonica(v)
+  return p && !STATUS_PLATAFORMA_OPCOES.includes(p)
+    ? [...STATUS_PLATAFORMA_OPCOES, p]
+    : STATUS_PLATAFORMA_OPCOES
+}
+
+// "Status Atual" pode ter VÁRIOS estados do Bling — a regra vale pra qualquer
+// um deles. A API guarda/devolve separados por ";" (o mesmo separador do
+// backend, `logistica_match.SEPARADOR_STATUS_ATUAL`); os nomes voltam na grafia
+// do catálogo pra marcar certo no seletor.
+function statusAtuaisDe(v: string | null | undefined): string[] {
+  const base = opcoes.value.status_bling_options
+  return (v || '')
+    .split(';')
+    .map((p) => p.trim())
+    .filter(Boolean)
+    .map((p) => base.find((b) => b.toLowerCase() === p.toLowerCase()) || p)
 }
 
 // Filtro por plataforma na aba Status ('' = todas; '__geral__' = regras sem
@@ -1204,9 +1233,10 @@ function isEditing(s: LogisticaStatus, field: StatusTextField) {
 }
 
 function startEdit(s: LogisticaStatus, field: StatusTextField) {
-  if (!canEdit.value) return
+  if (!canEdit.value || isEditing(s, field)) return
   editing.value = { id: s.id, field }
-  editValue.value = (s[field] as string | null) || ''
+  editValue.value =
+    field === 'plataforma' ? plataformaCanonica(s.plataforma) : (s[field] as string | null) || ''
 }
 
 function cancelEdit() {
@@ -1261,7 +1291,7 @@ const statusSaving = ref(false)
 const statusForm = ref({
   plataforma: '',
   status_plataforma: '',
-  status_atual: '',
+  status_atual: [] as string[],
   alterar_status_bling: '',
   monitoramento: false,
   abrir_chamado: false,
@@ -1275,7 +1305,7 @@ function openStatusForm() {
   statusForm.value = {
     plataforma: '',
     status_plataforma: '',
-    status_atual: '',
+    status_atual: [],
     alterar_status_bling: '',
     monitoramento: false,
     abrir_chamado: false,
@@ -1297,7 +1327,7 @@ async function saveStatusForm() {
       body: {
         plataforma: f.plataforma.trim() || null,
         status_plataforma: f.status_plataforma.trim() || null,
-        status_atual: f.status_atual.trim() || null,
+        status_atual: f.status_atual,
         alterar_status_bling: f.alterar_status_bling.trim() || null,
         monitoramento: f.monitoramento,
         abrir_chamado: f.abrir_chamado,
@@ -2532,19 +2562,21 @@ async function aplicarStatusBling(c: Logistica) {
           </thead>
           <tbody>
             <tr v-for="s in statusRowsFiltradas" :key="s.id" class="border-t hover:bg-muted/20">
-              <!-- Plataforma -->
+              <!-- Plataforma (lista: as 4 plataformas ou geral) -->
               <td class="px-2 py-1 whitespace-nowrap align-top" @click="startEdit(s, 'plataforma')">
-                <input
+                <select
                   v-if="isEditing(s, 'plataforma')"
                   v-model="editValue"
                   autofocus
-                  placeholder="vazio = geral"
                   class="w-40 rounded border bg-background px-1.5 py-1 text-sm"
+                  @change="commitEdit(s)"
                   @blur="commitEdit(s)"
-                  @keydown.enter.prevent="commitEdit(s)"
                   @keydown.esc="cancelEdit"
-                />
-                <span v-else :class="[canEdit ? 'cursor-text' : '', s.plataforma ? '' : 'text-muted-foreground']">{{ s.plataforma || '—' }}</span>
+                >
+                  <option value="">Geral (todas)</option>
+                  <option v-for="p in plataformaOpcoesPara(s.plataforma)" :key="p" :value="p">{{ p }}</option>
+                </select>
+                <span v-else :class="[canEdit ? 'cursor-pointer' : '', s.plataforma ? '' : 'text-muted-foreground']">{{ plataformaCanonica(s.plataforma) || 'Geral' }}</span>
               </td>
               <!-- Status Plataforma -->
               <td class="px-2 py-1 align-top" @click="startEdit(s, 'status_plataforma')">
@@ -2559,24 +2591,14 @@ async function aplicarStatusBling(c: Logistica) {
                 />
                 <span v-else :class="[canEdit ? 'cursor-text' : '', s.status_plataforma ? 'font-medium' : 'text-muted-foreground']">{{ s.status_plataforma || '—' }}</span>
               </td>
-              <!-- Status Atual (dropdown com os status conhecidos do Bling) -->
-              <td class="px-2 py-1 whitespace-nowrap align-top" @click="startEdit(s, 'status_atual')">
-                <select
-                  v-if="isEditing(s, 'status_atual')"
-                  v-model="editValue"
-                  autofocus
-                  class="w-44 rounded border bg-background px-1.5 py-1 text-sm"
-                  @change="commitEdit(s)"
-                  @blur="commitEdit(s)"
-                  @keydown.esc="cancelEdit"
-                >
-                  <option value="">— vazio —</option>
-                  <option v-for="opt in opcoes.status_bling_options" :key="opt" :value="opt">{{ opt }}</option>
-                </select>
-                <template v-else>
-                  <span v-if="s.status_atual" class="text-xs px-2 py-0.5 rounded border border-border" :class="canEdit ? 'cursor-pointer' : ''">{{ s.status_atual }}</span>
-                  <span v-else class="text-muted-foreground" :class="canEdit ? 'cursor-pointer' : ''">—</span>
-                </template>
+              <!-- Status Atual (um ou mais status do Bling; a regra vale pra qualquer um) -->
+              <td class="px-2 py-1 align-top">
+                <StatusBlingMultiSelect
+                  :model-value="statusAtuaisDe(s.status_atual)"
+                  :opcoes="opcoes.status_bling_options"
+                  :disabled="!canEdit || statusBusy.has(s.id)"
+                  @save="(v) => patchStatusField(s.id, { status_atual: v })"
+                />
               </td>
               <!-- Alterar Status Bling (dropdown com os status conhecidos do Bling) -->
               <td class="px-2 py-1 whitespace-nowrap align-top" @click="startEdit(s, 'alterar_status_bling')">
@@ -2746,13 +2768,15 @@ async function aplicarStatusBling(c: Logistica) {
           </div>
           <div>
             <label class="text-xs text-muted-foreground">Plataforma</label>
-            <input
-              :value="s.plataforma || ''"
+            <select
+              :value="plataformaCanonica(s.plataforma)"
               :disabled="!canEdit || statusBusy.has(s.id)"
-              placeholder="vazio = geral"
               class="w-full rounded border bg-background px-2 py-1 text-sm"
-              @change="patchStatusField(s.id, { plataforma: ($event.target as HTMLInputElement).value.trim() || null })"
-            />
+              @change="patchStatusField(s.id, { plataforma: ($event.target as HTMLSelectElement).value || null })"
+            >
+              <option value="">Geral (todas)</option>
+              <option v-for="p in plataformaOpcoesPara(s.plataforma)" :key="p" :value="p">{{ p }}</option>
+            </select>
           </div>
           <div>
             <label class="text-xs text-muted-foreground">Status Plataforma</label>
@@ -2765,15 +2789,13 @@ async function aplicarStatusBling(c: Logistica) {
           </div>
           <div>
             <label class="text-xs text-muted-foreground">Status Atual</label>
-            <select
-              :value="s.status_atual || ''"
+            <StatusBlingMultiSelect
+              :model-value="statusAtuaisDe(s.status_atual)"
+              :opcoes="opcoes.status_bling_options"
               :disabled="!canEdit || statusBusy.has(s.id)"
-              class="w-full rounded border bg-background px-2 py-1 text-sm"
-              @change="patchStatusField(s.id, { status_atual: ($event.target as HTMLSelectElement).value || null })"
-            >
-              <option value="">— vazio —</option>
-              <option v-for="opt in opcoes.status_bling_options" :key="opt" :value="opt">{{ opt }}</option>
-            </select>
+              bloco
+              @save="(v) => patchStatusField(s.id, { status_atual: v })"
+            />
           </div>
           <div>
             <label class="text-xs text-muted-foreground">Alterar Status Bling</label>
@@ -2891,7 +2913,13 @@ async function aplicarStatusBling(c: Logistica) {
 
         <div>
           <Label>Plataforma</Label>
-          <Input v-model="statusForm.plataforma" placeholder="vazio = geral" />
+          <select
+            v-model="statusForm.plataforma"
+            class="w-full rounded-md border bg-background px-2 py-1.5 text-sm"
+          >
+            <option value="">Geral (todas as plataformas)</option>
+            <option v-for="p in STATUS_PLATAFORMA_OPCOES" :key="p" :value="p">{{ p }}</option>
+          </select>
         </div>
         <div>
           <Label>Status Plataforma</Label>
@@ -2899,13 +2927,14 @@ async function aplicarStatusBling(c: Logistica) {
         </div>
         <div>
           <Label>Status Atual</Label>
-          <select
+          <StatusBlingMultiSelect
             v-model="statusForm.status_atual"
-            class="w-full rounded-md border bg-background px-2 py-1.5 text-sm"
-          >
-            <option value="">— vazio —</option>
-            <option v-for="opt in opcoes.status_bling_options" :key="opt" :value="opt">{{ opt }}</option>
-          </select>
+            :opcoes="opcoes.status_bling_options"
+            bloco
+          />
+          <p class="mt-1 text-xs text-muted-foreground">
+            Marque um ou mais: a regra vale pra qualquer um deles. Nenhum = qualquer status.
+          </p>
         </div>
         <div>
           <Label>Alterar Status Bling</Label>

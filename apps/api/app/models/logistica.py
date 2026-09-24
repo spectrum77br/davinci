@@ -277,7 +277,9 @@ class LogisticaStatus(Base, TimestampMixin):
     plataforma: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Opcional: linha pode nascer vazia pra ser completada pelo operador.
     status_plataforma: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # Status que se identifica hoje no Bling (referência, antes de alterar).
+    # Status que se identifica hoje no Bling (referência, antes de alterar). Pode
+    # ser vários, separados por ";" (`logistica_match.status_atuais`); vazio =
+    # vale de qualquer estado.
     status_atual: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Novo status do Bling; se vazio "não faz nada" (obs "alterado logística").
     alterar_status_bling: Mapped[str | None] = mapped_column(Text, nullable=True)

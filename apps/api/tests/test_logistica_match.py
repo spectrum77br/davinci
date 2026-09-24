@@ -316,6 +316,38 @@ def test_regras_aplicaveis_exatas_primeiro_e_sem_emprestimo():
     assert logistica_match.regras_aplicaveis([outra], None) == []
 
 
+def test_regra_com_varios_status_atual_vale_pra_qualquer_um():
+    # Vinicius 24/09: a mesma chave com as mesmas ações em "Em aberto" e em
+    # "Em andamento" é UMA linha com os dois status marcados.
+    r = _rule(status_atual="Em aberto; Em andamento", alterar_status_bling="Entregue")
+    assert logistica_match.regras_aplicaveis([r], "Em aberto") == [r]
+    assert logistica_match.regras_aplicaveis([r], "em andamento") == [r]
+    assert logistica_match.regras_aplicaveis([r], "Problemas") == []
+    assert logistica_match.regra_ativa([r], "Em andamento") is r
+    # Transição pendente nos dois estados; no alvo, resolvido.
+    assert logistica_match.estado_resolvido([r], "Em aberto") is False
+    assert logistica_match.estado_resolvido([r], "Em andamento") is False
+    assert logistica_match.estado_resolvido([r], "Entregue") is True
+    # Fora dos marcados (e fora do alvo) é combinação sem cadastro: não esconde.
+    assert logistica_match.estado_resolvido([r], "Problemas") is False
+    # Apelido "Enviado Etiqueta" (legado) casa "Em digitação" também na lista.
+    e = _rule(status_atual="Em aberto; Enviado Etiqueta", monitoramento=True)
+    assert logistica_match.regras_aplicaveis([e], "Em digitação") == [e]
+    assert logistica_match.deve_monitorar([e], "Em digitação") is True
+
+
+def test_juntar_status_atual_normaliza():
+    j = logistica_match.juntar_status_atual
+    assert j(["Em aberto", " Em andamento ", "", "em aberto"]) == "Em aberto; Em andamento"
+    assert j("Em aberto ;Em andamento;") == "Em aberto; Em andamento"
+    assert j("Em aberto") == "Em aberto"
+    assert j([]) is None
+    assert j("  ") is None
+    assert j(None) is None
+    assert logistica_match.status_atuais("Em aberto; Em andamento") == ["Em aberto", "Em andamento"]
+    assert logistica_match.status_atuais(None) == []
+
+
 def test_estado_resolvido_threema_enviado_resolve():
     # Regra só com Mensagem Threema: pendente até enviar; depois de enviado
     # (threema_enviado=True) deixa de contar → resolvido (some).

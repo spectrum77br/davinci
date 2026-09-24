@@ -563,6 +563,82 @@ async def test_status_atual_divergente(
 
 
 @pytest.mark.asyncio
+async def test_status_regra_com_varios_status_atual(
+    client: AsyncClient,
+    admin: User,
+    db: AsyncSession,
+    auth_as: Callable[[User | None], None],
+    monkeypatch,
+):
+    """Uma regra só com dois "Status Atual" (Em aberto e Em andamento): o pedido
+    em qualquer um deles segue pro alvo, e o "de" mostrado é o estado real dele.
+    Fora dos dois, a explicação cita os dois."""
+    auth_as(admin)
+    meli = {"order_status": "paid", "ship_status": "delivered"}
+    chave = logistica_rules.assinatura_pt(meli)
+    db.add_all(
+        [
+            SituacaoBling(id=6, nome="Em aberto"),
+            SituacaoBling(id=15, nome="Em andamento"),
+            SituacaoBling(id=83953, nome="Entregue"),
+            SituacaoBling(id=12, nome="Cancelado"),
+        ]
+    )
+    rs = await client.post(
+        "/api/logistica/status",
+        json={
+            "status_plataforma": chave,
+            "status_atual": ["Em aberto", "Em andamento", "em aberto"],
+            "alterar_status_bling": "Entregue",
+        },
+    )
+    assert rs.status_code == 201, rs.text
+    assert rs.json()["status_atual"] == "Em aberto; Em andamento"
+    db.add(
+        BlingOrder(bling_id=561, numero="99006", item_codigo="sku1", item_index=0, situacao="15")
+    )
+    await db.commit()
+    rc = await client.post(
+        "/api/logistica",
+        json={"plataforma": "Mercado Livre", "pedido_bling": "99006", "meli_status": meli},
+    )
+    lid = rc.json()["id"]
+    fake = _FakeBling({"id": 561, "numero": 99006, "situacao": {"id": 15, "valor": 0}})
+
+    async def _fake_client(session):
+        return fake
+
+    monkeypatch.setattr(logistica_bling, "_bling_client", _fake_client)
+
+    # Em andamento (o 2º marcado) → aplica, "de" = Em andamento.
+    rp = await client.post(f"/api/logistica/{lid}/alterar-status-bling/preview")
+    assert rp.status_code == 200, rp.text
+    body = rp.json()
+    assert body["aplicavel"] is True
+    assert body["situacao_de"] == "Em andamento"
+    assert body["situacao_de_id"] == 15
+
+    # Em aberto (o 1º) → também aplica.
+    fake._order["situacao"]["id"] = 6
+    body = (await client.post(f"/api/logistica/{lid}/alterar-status-bling/preview")).json()
+    assert body["aplicavel"] is True
+    assert body["situacao_de"] == "Em aberto"
+
+    # Cancelado → fora do fluxo; a explicação cita os dois estados da regra.
+    fake._order["situacao"]["id"] = 12
+    body = (await client.post(f"/api/logistica/{lid}/alterar-status-bling/preview")).json()
+    assert body["aplicavel"] is False
+    assert body["ja_no_alvo"] is False
+    assert body["situacao_de"] == "Em aberto ou Em andamento"
+
+    # PATCH com lista vazia = curinga (vale de qualquer estado).
+    sid = rs.json()["id"]
+    rpatch = await client.patch(f"/api/logistica/status/{sid}", json={"status_atual": []})
+    assert rpatch.status_code == 200, rpatch.text
+    assert rpatch.json()["status_atual"] is None
+
+
+@pytest.mark.asyncio
 async def test_status_maquina_de_estados(
     client: AsyncClient,
     admin: User,
