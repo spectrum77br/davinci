@@ -105,6 +105,11 @@ def atributos(descricao: str | None) -> dict[str, str]:
 # O que diferencia mala ("Kit 6", "Kit 8") está no NOME do produto.
 _DO_NOME: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\bkit\s*(\d{1,2})\b", re.I), "kit com {} peças"),
+    # Mala avulsa: o que separa uma da outra é o TAMANHO (em polegadas), que o
+    # catálogo guarda como "tamanho 12", "tamanho 28". Sem isto, as 104 malas
+    # de 12 polegadas renderiam a mesma frase — a descrição do anúncio é o
+    # mesmo texto padrão pro catálogo inteiro.
+    (re.compile(r"\btamanho\s*(\d{1,2})\b", re.I), "{} polegadas"),
 )
 
 

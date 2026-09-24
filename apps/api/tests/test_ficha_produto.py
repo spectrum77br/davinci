@@ -172,6 +172,34 @@ async def test_produto_SEM_prefixo_de_marca_continua_valendo(db, make_user):
     db.add(c)
     await db.commit()
 
-    # Sem anúncio ligado não há frase, mas o importante é NÃO ter sido
-    # recusado pela guarda — a chamada chega ao fim em vez de sair no começo.
-    assert await _destaque_do_produto(db, c) == ""
+    # A guarda NÃO recusou: a chamada chegou ao fim e o tamanho saiu do nome,
+    # mesmo sem anúncio ligado. Se a guarda tivesse barrado (como na primeira
+    # versão, que exigia prefixo de marca), aqui viria vazio.
+    assert await _destaque_do_produto(db, c) == "26 polegadas."
+
+
+def test_mala_avulsa_se_diferencia_pelo_TAMANHO():
+    """As 104 malas de 12 polegadas têm a MESMA descrição de anúncio (é o
+    texto padrão do catálogo). O que separa uma da outra é o tamanho, que o
+    nome guarda como "tamanho 12" / "tamanho 28"."""
+    doze = destaque(MALA, "Mala Listrada M1 tamanho 12 - Preto")
+    vinte = destaque(MALA, "Mala Chanfrada M3 tamanho 28 - Marrom")
+    assert doze.startswith("12 polegadas")
+    assert vinte.startswith("28 polegadas")
+    assert doze != vinte
+
+
+def test_codigo_interno_do_fornecedor_nao_vaza_pra_legenda():
+    """O catálogo de malas guarda a referência do fornecedor no próprio nome:
+    "Mala Listrada M1 tamanho 12 - Preto (DT - DTLG056 - DT02)". Sem limpeza,
+    o "(DT - DTLG056 - DT02)" ia pro Instagram junto — visto renderizado antes
+    de subir."""
+    from app.services.marketing.legenda import nome_de_vitrine
+
+    completo, _ = nome_de_vitrine(
+        "Mala Listrada M1 tamanho 12 - Preto (DT - DTLG056 - DT02)", "charlots"
+    )
+    assert "DTLG056" not in completo and "(" not in completo
+    assert completo == "Mala Listrada M1 tamanho 12 Preto"
+    # E o nome sem parênteses continua intacto.
+    assert nome_de_vitrine("Uranyx F109S 24.256 - Preto", "uranyx")[0] == "F109S 256 GB Preto"

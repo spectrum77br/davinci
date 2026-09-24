@@ -166,6 +166,10 @@ _DETERMINANTES_COM_GENERO = frozenset(
 _RE_ANTES_DO_PRODUTO = re.compile(r"(\w+)\s*\{\{-?\s*produto\b", re.IGNORECASE)
 
 
+# Referência interna do fornecedor que o catálogo de malas guarda no nome.
+_RE_PARENTESES = re.compile(r"\s*\([^)]*\)\s*")
+
+
 def nome_de_vitrine(bruto: str | None, marca_nome: str | None) -> tuple[str, str]:
     """`products.name` → (rótulo completo, só o modelo).
 
@@ -179,6 +183,11 @@ def nome_de_vitrine(bruto: str | None, marca_nome: str | None) -> tuple[str, str
     bruto = (bruto or "").strip()
     if not bruto:
         return "", ""
+    # Código interno entre parênteses sai fora. O catálogo de malas guarda a
+    # referência do fornecedor no próprio nome — "Mala Listrada M1 tamanho 12
+    # - Preto (DT - DTLG056 - DT02)" —, e sem esta limpeza o "(DT - DTLG056 -
+    # DT02)" ia pro Instagram junto. Visto renderizado antes de subir.
+    bruto = _RE_PARENTESES.sub("", bruto).strip()
     corpo, _, cor = bruto.partition(" - ")
     corpo, cor = corpo.strip(), cor.strip()
     # Prefixo da marca fora: "{{ marca }} {{ produto }}" é a construção que a
