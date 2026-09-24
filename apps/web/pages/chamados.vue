@@ -67,7 +67,7 @@ const FECHAMENTO: Partial<Record<Origem, string[]>> = { logistica: ['Resolvido',
 // aparece no tooltip do chip.
 const STATUS_ABA: { value: string; label: string; cls: string; hint: string }[] = [
   { value: 'analise_humano', label: 'Análise Humano', cls: 'bg-red-500/15 text-red-700 dark:text-red-300', hint: 'o robô não conseguiu — precisa de gente' },
-  { value: 'analise_robo', label: 'Análise Robô', cls: 'bg-indigo-500/15 text-indigo-700 dark:text-indigo-300', hint: 'o robô tem trabalho aqui: responder, reenviar, achar outro caminho, ou uma instrução sua' },
+  { value: 'analise_robo', label: 'Análise Robô', cls: 'bg-indigo-500/15 text-indigo-700 dark:text-indigo-300', hint: 'a IA de Chamado ou o robô têm trabalho aqui: decidir, responder, reenviar, achar outro caminho, ou uma instrução sua' },
   { value: 'aguard_plataforma', label: 'Aguard. Plataforma', cls: 'bg-sky-500/15 text-sky-700 dark:text-sky-300', hint: 'a bola está com a plataforma' },
   { value: 'encerrado', label: 'Encerrado', cls: 'bg-amber-500/15 text-amber-700 dark:text-amber-300', hint: 'a plataforma encerrou o caso — falta fechar com lucro/prejuízo' },
   { value: 'concluido', label: 'Concluído', cls: 'bg-muted text-muted-foreground', hint: 'fechado por uma pessoa' },
@@ -95,7 +95,8 @@ function quemRespondeu(row: ChamadoRow): string {
     const plat = autor && autor !== 'monitor' ? autor : (row.plataforma || 'plataforma').toUpperCase()
     return `plataforma · ${plat}`
   }
-  const nos = autor === 'cérebro' || autor.startsWith('robô') ? 'robô' : autor === 'sistema' ? 'automático' : autor || 'nós'
+  // 24/09: o cérebro virou "IA de Chamado" (a resposta que ela decide sai assinada "cérebro")
+  const nos = autor === 'cérebro' || autor === 'IA de Chamado' ? 'IA de Chamado' : autor.startsWith('robô') ? 'robô' : autor === 'sistema' ? 'automático' : autor || 'nós'
   return `nós · ${nos}`
 }
 
@@ -250,7 +251,9 @@ const mostrar = ref<'abertos' | 'resolvidos' | 'todos'>('abertos')
 // Filtro pela coluna Status — na página carregada (o status é calculado na listagem).
 const statusFilter = ref<'all' | string>('all')
 // Aba Jurídico (Eduardo 04/09): tudo que foi encaminhado ao jurídico, aberto ou resolvido.
-const tab = ref<'chamados' | 'juridico'>('chamados')
+// 24/09 (Vinicius): aba IA de Chamado — o cérebro ganha nome e lugar (liga/desliga,
+// manual "quando acontecer isso, faça isso", o que ela decidiu). `?tab=ia` abre nela.
+const tab = ref<'chamados' | 'juridico' | 'ia'>(useRoute().query.tab === 'ia' ? 'ia' : 'chamados')
 
 // Chegando com ?search=... (link da coluna Chamado em Devoluções): abre já
 // filtrado pelo pedido e mostrando abertos E resolvidos — sem isso um chamado
@@ -282,7 +285,7 @@ type ResumoGrupo = { key: string; label: string; tone: 'default' | 'warning' | '
 // aparece quando o select "mostrar" traz os concluídos — em "abertos" seria sempre 0.
 const RESUMO_GRUPOS: ResumoGrupo[] = [
   { key: 'analise_humano', label: 'Análise Humano', tone: 'danger', icon: UserRound, hint: 'o robô não conseguiu — precisa de gente' },
-  { key: 'analise_robo', label: 'Análise Robô', tone: 'default', icon: Bot, hint: 'o robô tem trabalho aqui' },
+  { key: 'analise_robo', label: 'Análise Robô', tone: 'default', icon: Bot, hint: 'a IA de Chamado ou o robô têm trabalho aqui' },
   { key: 'aguard_plataforma', label: 'Aguard. Plataforma', tone: 'default', icon: Hourglass, hint: 'a bola está com a plataforma' },
   { key: 'encerrado', label: 'Encerrado', tone: 'warning', icon: Gavel, hint: 'a plataforma encerrou — falta fechar com lucro/prejuízo' },
 ]
@@ -557,7 +560,13 @@ watch([origemFilter, plataformaFilter, contaFilter, mostrar], () => {
 })
 watch(page, () => load())
 
-watch(tab, () => { page.value = 1; load() })
+watch(tab, (t) => { if (t === 'ia') return; page.value = 1; load() })
+// Da aba IA de Chamado: clicou no pedido de uma decisão → abre o chamado na lista.
+function abrirPedidoDaIa(pedido: string) {
+  mostrar.value = 'todos'
+  search.value = pedido
+  tab.value = 'chamados'
+}
 
 // ----------------------------------------------------------------- jurídico
 const juridico = reactive({ open: false, row: null as ChamadoRow | null, obs: '', saving: false, erro: null as string | null, destinatarios: [] as string[], semAcesso: false })
@@ -829,7 +838,7 @@ const bolhas = computed<Bolha[]>(() => {
         t, ord: ord++,
         b: {
           chave: m.id, lado: 'instrucao', autor: m.autor_nome || 'nós',
-          quando: fmtDateTime(m.created_at), texto: m.texto, meta: 'instrução pro robô',
+          quando: fmtDateTime(m.created_at), texto: m.texto, meta: 'instrução pra IA de Chamado',
           status: null, erro: null, anexos: m.anexos,
         },
       })
@@ -1389,6 +1398,9 @@ async function confirmarExcluir() {
       <button type="button" class="px-3 py-2 text-sm border-b-2 -mb-px inline-flex items-center gap-1.5" :class="tab === 'juridico' ? 'border-primary font-medium' : 'border-transparent text-muted-foreground hover:text-foreground'" @click="tab = 'juridico'">
         <Scale class="size-4" /> Jurídico
       </button>
+      <button type="button" class="px-3 py-2 text-sm border-b-2 -mb-px inline-flex items-center gap-1.5" :class="tab === 'ia' ? 'border-primary font-medium' : 'border-transparent text-muted-foreground hover:text-foreground'" @click="tab = 'ia'">
+        <Bot class="size-4" /> IA de Chamado
+      </button>
       <div v-if="tab === 'juridico'" class="ml-auto flex items-center gap-2 pb-1">
         <span class="text-xs text-muted-foreground">Tudo que foi encaminhado ao jurídico (abertos e resolvidos).</span>
         <Button v-if="isAdmin" size="sm" variant="outline" @click="juridicoCfgOpen = true">destinatários</Button>
@@ -1509,6 +1521,9 @@ async function confirmarExcluir() {
       </button>
     </div>
 
+    <ChamadosIa v-if="tab === 'ia'" :can-edit="canEdit" @abrir-pedido="abrirPedidoDaIa" />
+
+    <template v-if="tab !== 'ia'">
     <!-- filtros -->
     <div class="flex flex-wrap items-center gap-2">
       <div class="relative">
@@ -1756,6 +1771,8 @@ async function confirmarExcluir() {
       </div>
     </div>
 
+    </template>
+
     <!-- modal: encaminhar ao jurídico -->
     <div v-if="juridico.open && juridico.row" class="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 p-4" @click.self="closeJuridico">
       <div class="w-full max-w-lg rounded-lg border bg-background p-5 shadow-xl space-y-4">
@@ -1865,7 +1882,7 @@ async function confirmarExcluir() {
               class="max-w-[78%] rounded-2xl rounded-br-sm px-3 py-2 shadow-sm bg-indigo-50 dark:bg-indigo-900/25 border border-indigo-200/70 dark:border-indigo-800/60"
             >
               <div class="flex flex-wrap items-center gap-x-2 text-[11px]">
-                <span class="font-medium text-indigo-700 dark:text-indigo-300 inline-flex items-center gap-1"><Bot class="size-3" /> Instrução pro robô · {{ b.autor }}</span>
+                <span class="font-medium text-indigo-700 dark:text-indigo-300 inline-flex items-center gap-1"><Bot class="size-3" /> Instrução pra IA de Chamado · {{ b.autor }}</span>
               </div>
               <div class="mt-1 whitespace-pre-wrap break-words text-sm leading-relaxed">{{ b.texto }}</div>
               <div class="mt-1 text-right text-[10px] text-muted-foreground">{{ b.quando }}</div>
@@ -2024,7 +2041,7 @@ async function confirmarExcluir() {
                  agora quebra linha. -->
             <div class="text-xs font-medium flex items-start gap-1.5 min-w-0">
               <Bot class="size-3.5 shrink-0 mt-0.5 text-indigo-600 dark:text-indigo-400" />
-              <span class="min-w-0">Instrução pro robô <span class="text-muted-foreground font-normal">— não vai pra plataforma; o robô lê na próxima passada e responde aqui</span></span>
+              <span class="min-w-0">Instrução pra IA de Chamado <span class="text-muted-foreground font-normal">— não vai pra plataforma; a IA lê na próxima passada e responde aqui</span></span>
             </div>
             <div v-if="hist.row.instrucao_pendente" class="truncate rounded border border-indigo-500/30 bg-indigo-500/5 px-2 py-1 text-xs" :title="hist.row.instrucao_pendente">
               <span class="font-medium text-indigo-700 dark:text-indigo-300">Instrução pendente:</span> {{ hist.row.instrucao_pendente }}
@@ -2050,7 +2067,7 @@ async function confirmarExcluir() {
                   class="z-[70] w-[440px] max-w-[calc(100vw-16px)] rounded-md border bg-background p-2 shadow-lg"
                   @open-auto-focus="focarCaixa($event, instrucaoCaixa)"
                 >
-                  <div class="mb-1 text-[11px] font-medium text-muted-foreground inline-flex items-center gap-1"><Bot class="size-3 text-indigo-600 dark:text-indigo-400" /> Instrução pro robô — não vai pra plataforma</div>
+                  <div class="mb-1 text-[11px] font-medium text-muted-foreground inline-flex items-center gap-1"><Bot class="size-3 text-indigo-600 dark:text-indigo-400" /> Instrução pra IA de Chamado — não vai pra plataforma</div>
                   <textarea
                     ref="instrucaoCaixa"
                     v-model="hist.instrucao"

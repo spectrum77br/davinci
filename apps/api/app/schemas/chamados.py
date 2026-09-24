@@ -693,12 +693,25 @@ class AgentCerebroIn(BaseModel):
     exclusivo: bool | None = None
 
 
+class AgentRegraOut(BaseModel):
+    """Regra do manual da IA de Chamado — "quando acontecer isso, faça isso"."""
+
+    quando: str
+    faca: str
+    # NULL = vale pra todas as plataformas
+    plataforma: str | None = None
+
+
 class AgentCerebroOut(BaseModel):
     nome: str
     exclusivo: bool
+    # 24/09: a pessoa liga/desliga na aba IA de Chamado; desligada não decide nada
+    ligada: bool = False
     last_used_at: datetime | None = None
     # Última vez que o cérebro antigo bateu depois da troca (ainda rodando?).
     legado_ignorado_at: datetime | None = None
+    # O manual (só as regras ativas), lido pela IA a cada passada.
+    regras: list[AgentRegraOut] = []
 
 
 class AgentHistoricoIn(BaseModel):
@@ -752,3 +765,66 @@ class AgentPagamentoMlItem(BaseModel):
 class AgentPagamentoMlOut(BaseModel):
     pedidos: list[AgentPagamentoMlItem]
 
+
+
+# ─── Aba Chamados › IA de Chamado (24/09) ────────────────────────────────────
+
+
+class IaRegraIn(BaseModel):
+    """Uma regra do manual: "quando acontecer isso" → "faça isso". Texto livre —
+    a IA interpreta. `plataforma` vazia = vale pra todas."""
+
+    quando: str = Field(min_length=1, max_length=2000)
+    faca: str = Field(min_length=1, max_length=4000)
+    plataforma: str | None = None
+
+    _clean = field_validator("quando", "faca", "plataforma", mode="before")(_clean_optional_text)
+
+
+class IaRegraPatch(BaseModel):
+    quando: str | None = Field(default=None, min_length=1, max_length=2000)
+    faca: str | None = Field(default=None, min_length=1, max_length=4000)
+    # mandar `null` explícito = passa a valer pra todas
+    plataforma: str | None = None
+    ativa: bool | None = None
+
+    _clean = field_validator("quando", "faca", "plataforma", mode="before")(_clean_optional_text)
+
+
+class IaRegraOut(BaseModel):
+    id: UUID
+    quando: str
+    faca: str
+    plataforma: str | None = None
+    ativa: bool
+    autor: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class IaDecisaoOut(BaseModel):
+    """Uma análise que a IA gravou num chamado (o que ela decidiu e por quê)."""
+
+    chamado_id: UUID
+    pedido_bling: str | None = None
+    plataforma: str | None = None
+    conta: str | None = None
+    quando: datetime
+    texto: str
+
+
+class IaEstadoIn(BaseModel):
+    ligada: bool
+
+
+class IaEstadoOut(BaseModel):
+    nome: str
+    ligada: bool
+    # o cérebro antigo (do Eduardo) está travado?
+    exclusivo: bool
+    # última vez que a IA chamou o DaVinci (ela chama a cada passada)
+    ultima_passada: datetime | None = None
+    # chamados com trabalho pra IA agora (resposta nova, instrução ou bloqueio)
+    esperando: int
+    regras: list[IaRegraOut]
+    decisoes: list[IaDecisaoOut]

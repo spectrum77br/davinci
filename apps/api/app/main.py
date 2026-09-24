@@ -47,6 +47,7 @@ from app.routers import pricing as pricing_router
 from app.routers import pricing_mega as pricing_mega_router
 from app.routers import products as products_router
 from app.routers import chamados as chamados_router
+from app.routers import chamados_ia as chamados_ia_router
 from app.routers import claude_conector as claude_conector_router
 from app.routers import redes_sociais as redes_sociais_router
 from app.routers import refunds as refunds_router
@@ -200,6 +201,8 @@ app.include_router(informar_router.router)
 app.include_router(refunds_router.router)
 # Rotas do robô (/api/chamados/agent/*) ANTES das rotas /{chamado_id} da aba.
 app.include_router(chamados_router.agent_router)
+# 24/09: aba IA de Chamado (/api/chamados/ia) — também antes de /{chamado_id}
+app.include_router(chamados_ia_router.router)
 app.include_router(chamados_router.router)
 app.include_router(devolutions_router.router)
 app.include_router(estoque_router.router)

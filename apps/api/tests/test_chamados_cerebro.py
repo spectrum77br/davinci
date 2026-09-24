@@ -31,7 +31,9 @@ async def cenario(client, make_user, auth_as, db, monkeypatch):
 
     monkeypatch.setattr(get_settings(), "nf_agent_token", _LEGADO)
     auth_as(await make_user(permissions=_perms()))
-    hermes = ChamadoCerebro(nome="Hermes", token_hash=hashlib.sha256(_HERMES.encode()).hexdigest())
+    hermes = ChamadoCerebro(
+        nome="IA de Chamado", token_hash=hashlib.sha256(_HERMES.encode()).hexdigest(), ligada=True
+    )
     db.add(hermes)
     await db.commit()
     legado = {"X-Agent-Token": _LEGADO}
@@ -80,7 +82,7 @@ async def test_hermes_analisa_e_assina(client, db, cenario):
     texto = (
         await db.execute(select(ChamadoMensagem.texto).where(ChamadoMensagem.tipo == "analise"))
     ).scalar_one()
-    assert texto.startswith("Análise do robô Hermes [pede_medidas]:")
+    assert texto.startswith("Análise da IA de Chamado [pede_medidas]:")
     # a aba ainda lê a ação pelo fim do texto
     assert texto.endswith("precisa de humano")
     await db.refresh(cenario["hermes"])
@@ -156,7 +158,7 @@ async def test_so_um_cerebro_exclusivo(client, db, cenario):
         "/api/chamados/agent/cerebro", headers={"X-Agent-Token": outro}, json={"exclusivo": True}
     )
     assert r.status_code == 409
-    assert r.json()["detail"] == {"code": "outro_cerebro_exclusivo", "cerebro": "Hermes"}
+    assert r.json()["detail"] == {"code": "outro_cerebro_exclusivo", "cerebro": "IA de Chamado"}
 
 
 async def test_exemplos_traz_o_que_ja_foi_analisado(client, db, cenario):
@@ -228,4 +230,94 @@ async def test_caso_acha_pelo_pedido_ou_protocolo(client, db, cenario):
             headers={"X-Agent-Token": _LEGADO},
             json={"pedido_bling": "293413"},
         )
+    ).status_code == 403
+
+
+async def test_ia_desligada_nao_ve_nem_decide(client, db, cenario):
+    cenario["hermes"].ligada = False
+    await db.commit()
+    assert await _analisar(client, _HERMES) == []
+    r = await client.post(
+        "/api/chamados/agent/analise",
+        headers={"X-Agent-Token": _HERMES},
+        json={"chamado_id": cenario["cid"], "classe": "x", "resumo": "y", "acao": "humano"},
+    )
+    assert r.status_code == 409 and r.json()["detail"]["code"] == "ia_desligada"
+
+
+async def test_aba_ia_de_chamado(client, make_user, auth_as, db, cenario):
+    """Aba Chamados › IA de Chamado: liga/desliga, manual e o que ela decidiu."""
+    hermes = {"X-Agent-Token": _HERMES}
+    est = (await client.get("/api/chamados/ia")).json()
+    assert est["nome"] == "IA de Chamado" and est["ligada"] is True
+    assert est["esperando"] == 1 and est["regras"] == [] and est["decisoes"] == []
+
+    # manual: cria, a IA recebe as ativas
+    r = await client.post(
+        "/api/chamados/ia/regras",
+        json={
+            "quando": "A Shopee pedir prova numa devolução",
+            "faca": "Responder com o vídeo da embalagem; sem vídeo, chamar humano",
+            "plataforma": "Shopee",
+        },
+    )
+    assert r.status_code == 201, r.text
+    regra = r.json()
+    assert regra["plataforma"] == "shopee" and regra["ativa"] is True and regra["autor"]
+    r2 = await client.post(
+        "/api/chamados/ia/regras", json={"quando": "Qualquer caso", "faca": "Seja educado"}
+    )
+    assert r2.json()["plataforma"] is None
+    manual = (await client.post("/api/chamados/agent/cerebro", headers=hermes, json={})).json()
+    assert manual["ligada"] is True
+    assert [x["quando"] for x in manual["regras"]] == [
+        "A Shopee pedir prova numa devolução",
+        "Qualquer caso",
+    ]
+    # desativar tira do manual da IA, mas continua na aba
+    ed = await client.patch(f"/api/chamados/ia/regras/{regra['id']}", json={"ativa": False})
+    assert ed.status_code == 200 and ed.json()["ativa"] is False
+    manual = (await client.post("/api/chamados/agent/cerebro", headers=hermes, json={})).json()
+    assert [x["quando"] for x in manual["regras"]] == ["Qualquer caso"]
+    assert len((await client.get("/api/chamados/ia")).json()["regras"]) == 2
+    # editar texto e voltar a valer pra todas
+    ed = await client.patch(
+        f"/api/chamados/ia/regras/{regra['id']}", json={"faca": "Chamar humano", "plataforma": None}
+    )
+    assert ed.json()["faca"] == "Chamar humano" and ed.json()["plataforma"] is None
+    assert (
+        await client.patch(f"/api/chamados/ia/regras/{regra['id']}", json={"quando": ""})
+    ).status_code == 422
+    # apagar
+    assert (await client.delete(f"/api/chamados/ia/regras/{regra['id']}")).status_code == 204
+    assert len((await client.get("/api/chamados/ia")).json()["regras"]) == 1
+
+    # o que ela decidiu aparece na aba; o caso sai do "esperando"
+    an = await client.post(
+        "/api/chamados/agent/analise",
+        headers=hermes,
+        json={
+            "chamado_id": cenario["cid"],
+            "classe": "pede_medidas",
+            "resumo": "ok",
+            "acao": "humano",
+        },
+    )
+    assert an.status_code == 200, an.text
+    est = (await client.get("/api/chamados/ia")).json()
+    assert est["esperando"] == 0
+    assert est["decisoes"][0]["pedido_bling"] == "293413"
+    assert est["decisoes"][0]["texto"].startswith("Análise da IA de Chamado [pede_medidas]")
+
+    # desligar pela aba
+    off = await client.patch("/api/chamados/ia", json={"ligada": False})
+    assert off.status_code == 200 and off.json()["ligada"] is False
+    assert await _analisar(client, _HERMES) == []
+
+    # só quem edita chamados mexe
+    auth_as(await make_user(permissions={"chamados": {"view": True, "edit": False}}))
+    assert (await client.get("/api/chamados/ia")).status_code == 200
+    assert (await client.patch("/api/chamados/ia", json={"ligada": True})).status_code == 403
+    assert (
+        await client.post("/api/chamados/ia/regras", json={"quando": "a", "faca": "b"})
     ).status_code == 403

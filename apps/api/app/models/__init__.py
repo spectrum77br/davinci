@@ -12,6 +12,7 @@ from app.models.chamado import (
     Chamado,
     ChamadoAnexo,
     ChamadoCerebro,
+    ChamadoIaRegra,
     ChamadoMensagem,
     ChamadoPedido,
 )
@@ -322,6 +323,7 @@ __all__ = [
     "Chamado",
     "ChamadoAnexo",
     "ChamadoCerebro",
+    "ChamadoIaRegra",
     "ChamadoMensagem",
     "ChamadoPedido",
     "Refund",

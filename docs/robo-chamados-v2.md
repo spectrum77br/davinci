@@ -540,3 +540,8 @@ olhou a linha depois.
   cadastrado): até 5 chamados daquele pedido/protocolo, pendentes ou não, no formato
   do `/agent/analisar` — pra "no chamado do pedido X, faz tal coisa".
 - `POST /agent/pagamento-ml` aceita os dois tokens.
+- 24/09 (mesmo dia): o cérebro novo ganhou nome e aba — **Chamados › IA de Chamado**
+  (`/api/chamados/ia`). Lá a pessoa liga/desliga (`chamados_cerebros.ligada`;
+  desligada ⇒ `/agent/analisar` vazio e `/agent/analise` 409 `ia_desligada`) e
+  escreve o manual (`chamados_ia_regras`: quando / faça / plataforma), que o
+  `POST /agent/cerebro` devolve em `regras` (só as ativas). Sem modo teste.

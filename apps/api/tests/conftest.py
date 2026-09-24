@@ -322,6 +322,7 @@ async def db() -> AsyncIterator[AsyncSession]:
 
 _CLEANUP_TABLES = (
     "claude_conectores",  # FK -> users: antes de users
+    "chamados_ia_regras",  # FK -> users: antes de users
     "marketing_postagens",  # FK -> criativos/redes_sociais: antes dos dois
     "marketing_creative_files",
     # marketing_creatives tem FK -> marketing_roteiros (SET NULL), então a

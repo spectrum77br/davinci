@@ -1,17 +1,20 @@
 #!/usr/bin/env python3
-"""Ponte entre o Hermes (Mac Santiago) e o cérebro dos chamados do DaVinci.
+"""Ponte entre a IA de Chamado (Hermes, Mac Santiago) e o DaVinci.
 
 Vinicius, 24/09/2026: o cérebro dos chamados sai do computador do Eduardo e
-passa a ser o Hermes. O Hermes nunca vê o token: tudo que fala com o DaVinci
-passa por este script, que lê o token de ~/DaVinci/cerebro/.env.
+passa a ser o Hermes — na aba Chamados ele se chama "IA de Chamado", é lá que
+liga/desliga e escreve o manual. O Hermes nunca vê o token: tudo que fala com o
+DaVinci passa por este script, que lê o token de ~/DaVinci/cerebro/.env.
 
 Comandos (a IA usa pelo terminal):
 
-  precheck                 pré-rodada do cron: casos com trabalho; sem nenhum
-                           novo → {"wakeAgent": false} (a IA nem acorda)
+  precheck                 pré-rodada do cron (é o que roda sem argumento):
+                           IA desligada na aba ou nenhum caso novo →
+                           {"wakeAgent": false} (a IA nem acorda); senão, o
+                           MANUAL + os casos
   pendentes                os mesmos casos, JSON completo
   decidir                  lê UMA decisão em JSON da entrada padrão e manda pro
-                           DaVinci (modo real) ou só anota (modo seco)
+                           DaVinci
   caso --pedido X | --chamado PROTOCOLO
                            um chamado qualquer (pendente ou não), com a conversa:
                            "no chamado do pedido X, vê como está"
@@ -21,9 +24,8 @@ Comandos (a IA usa pelo terminal):
   guarda [estado|assumir|liberar]
                            troca de guarda com o cérebro antigo (só gente usa)
 
-Modo (DAVINCI_CEREBRO_MODO no .env): `seco` = decide e anota em
-decisoes.jsonl, nada vai pro DaVinci; `real` = manda. Nos dois, cada decisão
-fica em decisoes.jsonl.
+Toda decisão também fica em ~/DaVinci/cerebro/decisoes.jsonl. Sem modo teste
+(decisão dele): ligada na aba = decide de verdade.
 
 Só biblioteca padrão: roda no Python do próprio Hermes.
 """
@@ -44,8 +46,8 @@ PASTA = Path(os.environ.get("DAVINCI_CEREBRO_DIR", "~/DaVinci/cerebro")).expandu
 ENV = PASTA / ".env"
 DECISOES = PASTA / "decisoes.jsonl"
 # Casos entregues à IA nesta rodada e casos já decididos (impressão digital da
-# conversa) — no modo seco o DaVinci continua listando o caso, e sem isto a IA
-# decidiria o mesmo caso a cada 10 minutos.
+# conversa) — se a IA pular um caso ou a decisão falhar, ele não acorda a IA de
+# novo a cada passada até algo mudar nele.
 SERVIDOS = PASTA / "estado" / "servidos.json"
 DECIDIDOS = PASTA / "estado" / "decididos.json"
 
@@ -66,8 +68,7 @@ def _cfg() -> dict[str, str]:
     if not cfg.get("DAVINCI_CEREBRO_TOKEN"):
         sys.exit(f"sem DAVINCI_CEREBRO_TOKEN em {ENV}")
     cfg.setdefault("DAVINCI_URL", "https://app.hadken.com")
-    cfg.setdefault("DAVINCI_CEREBRO_MODO", "seco")
-    cfg.setdefault("DAVINCI_CEREBRO_PLATAFORMA", "ml")
+    cfg.setdefault("DAVINCI_CEREBRO_PLATAFORMA", "todas")
     cfg.setdefault("DAVINCI_CEREBRO_CANAIS", "robo,api,manual")
     cfg.setdefault("DAVINCI_CEREBRO_LIMITE", "10")
     return cfg
@@ -135,23 +136,38 @@ def _casos(cfg: dict[str, str]) -> list[dict]:
     }
     casos = _post(cfg, "analisar", corpo).get("chamados") or []
     decididos = _ler(DECIDIDOS)
-    # a digital leva o modo: o que foi decidido no seco volta quando virar real
-    modo = cfg["DAVINCI_CEREBRO_MODO"]
-    novos = [c for c in casos if decididos.get(c["chamado_id"]) != f"{modo}:{_digital(c)}"]
+    novos = [c for c in casos if decididos.get(c["chamado_id"]) != _digital(c)]
     _gravar(SERVIDOS, {c["chamado_id"]: _digital(c) for c in novos})
     return [_enxuto(c) for c in novos]
 
 
+def _manual(regras: list[dict]) -> str:
+    if not regras:
+        return "(o manual ainda está vazio)"
+    linhas = []
+    for i, r in enumerate(regras, 1):
+        plat = r.get("plataforma") or "todas as plataformas"
+        linhas.append(f"{i}. [{plat}] QUANDO: {r['quando']}\n   FAÇA: {r['faca']}")
+    return "\n".join(linhas)
+
+
 def cmd_precheck(cfg: dict[str, str], _a: argparse.Namespace) -> None:
+    ia = _post(cfg, "cerebro", {})
+    if not ia.get("ligada"):
+        print(json.dumps({"wakeAgent": False}))
+        return
     casos = _casos(cfg)
     if not casos:
         print(json.dumps({"wakeAgent": False}))
         return
     print(
-        f"MODO: {cfg['DAVINCI_CEREBRO_MODO']}. {len(casos)} caso(s) esperando o cérebro "
-        f"({datetime.now(timezone.utc):%Y-%m-%d %H:%M} UTC). Decida cada um com "
-        "`python3 ~/.hermes/scripts/davinci_chamados.py decidir`."
+        f"{len(casos)} caso(s) esperando a IA de Chamado "
+        f"({datetime.now(timezone.utc):%Y-%m-%d %H:%M} UTC). Decida CADA UM com "
+        "`python3 ~/.hermes/scripts/davinci_chamados.py decidir`.\n"
     )
+    print("MANUAL (regras do Vinicius — valem acima do seu julgamento):")
+    print(_manual(ia.get("regras") or []))
+    print("\nCASOS:")
     print(json.dumps(casos, ensure_ascii=False, indent=1))
 
 
@@ -200,28 +216,32 @@ def cmd_decidir(cfg: dict[str, str], _a: argparse.Namespace) -> None:
     servidos = _ler(SERVIDOS)
     digital = servidos.get(d["chamado_id"])
     if digital is None:
-        sys.exit("esse chamado não está entre os casos desta rodada")
-    modo = cfg["DAVINCI_CEREBRO_MODO"]
-    resposta = _post(cfg, "analise", d) if modo == "real" else None
+        sys.exit("esse chamado não está entre os casos desta rodada (use `caso` pra buscar)")
+    resposta = _post(cfg, "analise", d)
     with DECISOES.open("a") as f:
         f.write(
             json.dumps(
-                {"quando": datetime.now(timezone.utc).isoformat(), "modo": modo, **d, "resposta": resposta},
+                {"quando": datetime.now(timezone.utc).isoformat(), **d, "resposta": resposta},
                 ensure_ascii=False,
                 default=str,
             )
             + "\n"
         )
     decididos = _ler(DECIDIDOS)
-    decididos[d["chamado_id"]] = f"{modo}:{digital}"
+    decididos[d["chamado_id"]] = digital
     _gravar(DECIDIDOS, decididos)
-    print(json.dumps({"ok": True, "modo": modo, "resposta": resposta}, ensure_ascii=False))
+    print(json.dumps({"ok": True, "resposta": resposta}, ensure_ascii=False))
 
 
 def cmd_caso(cfg: dict[str, str], a: argparse.Namespace) -> None:
     corpo = {"pedido_bling": a.pedido, "chamado": a.chamado}
     out = _post(cfg, "caso", {k: v for k, v in corpo.items() if v})
-    print(json.dumps([_enxuto(c) for c in out.get("chamados") or []], ensure_ascii=False, indent=1))
+    casos = out.get("chamados") or []
+    # achado a pedido: pode ser decidido nesta rodada
+    servidos = _ler(SERVIDOS)
+    servidos.update({c["chamado_id"]: _digital(c) for c in casos})
+    _gravar(SERVIDOS, servidos)
+    print(json.dumps([_enxuto(c) for c in casos], ensure_ascii=False, indent=1))
 
 
 def cmd_pagamento(cfg: dict[str, str], a: argparse.Namespace) -> None:
@@ -246,7 +266,7 @@ def cmd_guarda(cfg: dict[str, str], a: argparse.Namespace) -> None:
 
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    sub = p.add_subparsers(dest="cmd", required=True)
+    sub = p.add_subparsers(dest="cmd")
     sub.add_parser("precheck")
     sub.add_parser("pendentes")
     sub.add_parser("decidir")
@@ -263,6 +283,8 @@ def main() -> None:
     gd = sub.add_parser("guarda")
     gd.add_argument("o_que", nargs="?", default="estado", choices=("estado", "assumir", "liberar"))
     a = p.parse_args()
+    if a.cmd is None:  # o agendador do Hermes chama sem argumento
+        a.cmd = "precheck"
     cfg = _cfg()
     {
         "precheck": cmd_precheck,

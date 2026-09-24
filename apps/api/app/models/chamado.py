@@ -300,3 +300,35 @@ class ChamadoCerebro(Base, TimestampMixin):
         DateTime(timezone=True), nullable=True
     )
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # 24/09 (aba "IA de Chamado"): desligada = não recebe nada e não decide; ligada
+    # = decide de verdade (Vinicius: "ligado e desligado apenas… vamos pôr ele de
+    # verdade", sem modo teste). Quem liga é a pessoa, pela aba.
+    ligada: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+
+
+class ChamadoIaRegra(Base, TimestampMixin):
+    """Uma regra do manual da IA de Chamado — "quando acontecer isso, faça isso".
+
+    Vinicius, 24/09/2026: "essa aba que vai criar é onde eu vou ensinar ele, e onde
+    vai criando um manual — quando acontecer isso e isso você faz isso". A IA lê
+    o manual inteiro a cada passada e interpreta o texto (não é fórmula). O
+    manual mora aqui, não na máquina da IA: trocar a IA de máquina não perde nada.
+    `plataforma` NULL = vale pra todas."""
+
+    __tablename__ = "chamados_ia_regras"
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    quando: Mapped[str] = mapped_column(Text, nullable=False)
+    faca: Mapped[str] = mapped_column(Text, nullable=False)
+    plataforma: Mapped[str | None] = mapped_column(Text, nullable=True)
+    ativa: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default="true"
+    )
+    created_by: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    updated_by: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )

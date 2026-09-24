@@ -43,6 +43,7 @@ from app.models import (
     Chamado,
     ChamadoAnexo,
     ChamadoCerebro,
+    ChamadoIaRegra,
     ChamadoMensagem,
     DevolucaoAnexo,
     Devolution,
@@ -81,6 +82,7 @@ from app.schemas.chamados import (
     AgentRecebidaOut,
     AgentRegistrarIn,
     AgentRegistrarOut,
+    AgentRegraOut,
     AgentResultadoIn,
     AgentTarefaOut,
     AlterarStatusIn,
@@ -1892,36 +1894,9 @@ def _ultima_fala_nossa(ch: Chamado):
     )
 
 
-@agent_router.post("/analisar", response_model=AgentAnalisarOut)
-async def agent_analisar(
-    body: AgentAnalisarIn,
-    session: Annotated[AsyncSession, Depends(get_session)],
-    cerebro: Annotated[_Cerebro, Depends(_cerebro)],
-) -> AgentAnalisarOut:
-    """Chamados com trabalho pro cérebro:
-    - resposta da plataforma ainda não analisada (nenhuma `analise`, ou a última
-      é mais velha que a última `recebida`) — inclui chamados que o monitor
-      antigo fechou na primeira resposta (479765445, 08/09);
-    - 19/09 `bloqueio`: a última fala nossa está presa na API (plataforma não
-      libera) e nenhuma análise veio depois dela — Vinicius: o robô procura
-      outro caminho (`responder` vira tarefa no Seller Center);
-    - 19/09 `instrucao`: recado de pessoa mais novo que a última análise —
-      qualquer canal, mesmo Encerrado (em Concluído a aba nem aceita instrução);
-      a análise consome.
-    Fora isso, Encerrado (status final sem pessoa fechar) e resolvido pela
-    plataforma/pessoa não voltam pro cérebro (17/09).
-
-    Os filtros `canais` e `plataforma` valem SÓ pro ramo "resposta nova" (o robô
-    do Tuta pede canal robô/ML). Instrução e bloqueio saem pra quem chamar, em
-    qualquer canal e plataforma (19/09): a pessoa mandou, ou a API travou — se o
-    robô não atende aquela plataforma ele responde `humano` com o motivo, mas
-    tem que VER o chamado.
-
-    24/09: com um cérebro cadastrado `exclusivo` (Hermes), o token antigo recebe
-    lista vazia — o cérebro do Eduardo para de ver sem quebrar nada do lado dele."""
-    if cerebro.substituido:
-        logger.info("chamados_cerebro_legado_ignorado", rota="analisar")
-        return AgentAnalisarOut(chamados=[])
+def _trabalho_do_cerebro(plataforma: str | None, canais: list[str]):
+    """Os chamados com trabalho pro cérebro (a regra está no `agent_analisar`) —
+    a mesma consulta serve a lista da IA e o "esperando" da aba IA de Chamado."""
 
     def _ult(cond):
         return (
@@ -1968,28 +1943,63 @@ async def agent_analisar(
         *[fechou.like(p) for p in _FECHOU_REABRIVEL],
     )
     ramo_resposta = (
-        Chamado.canal.in_(body.canais) & ~encerrado & nao_fechado_por_gente & resposta_nova
+        Chamado.canal.in_(canais) & ~encerrado & nao_fechado_por_gente & resposta_nova
     )
-    if body.plataforma:
-        plat = body.plataforma.strip().lower()
+    if plataforma:
+        plat = plataforma.strip().lower()
         aceitas = _PLATAFORMA_ML if plat == "ml" else (plat,)
         ramo_resposta = ramo_resposta & func.lower(
             func.coalesce(Chamado.plataforma, "")
         ).in_(aceitas)
     # bloqueio: a fala presa é nossa e o caso está vivo — qualquer canal/plataforma
     ramo_bloqueio = bloqueio & ~encerrado & Chamado.resolvido.is_(False)
+    return (
+        select(Chamado)
+        .outerjoin(rec, rec.c.chamado_id == Chamado.id)
+        .outerjoin(ana, ana.c.chamado_id == Chamado.id)
+        .outerjoin(ins, ins.c.chamado_id == Chamado.id)
+        .outerjoin(env, env.c.chamado_id == Chamado.id)
+        .outerjoin(blq, blq.c.chamado_id == Chamado.id)
+        .where(or_(instrucao, ramo_bloqueio, ramo_resposta))
+        .order_by(func.greatest(rec.c.ult, ins.c.ult, blq.c.ult), Chamado.created_at)
+    )
+
+
+@agent_router.post("/analisar", response_model=AgentAnalisarOut)
+async def agent_analisar(
+    body: AgentAnalisarIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    cerebro: Annotated[_Cerebro, Depends(_cerebro)],
+) -> AgentAnalisarOut:
+    """Chamados com trabalho pro cérebro:
+    - resposta da plataforma ainda não analisada (nenhuma `analise`, ou a última
+      é mais velha que a última `recebida`) — inclui chamados que o monitor
+      antigo fechou na primeira resposta (479765445, 08/09);
+    - 19/09 `bloqueio`: a última fala nossa está presa na API (plataforma não
+      libera) e nenhuma análise veio depois dela — Vinicius: o robô procura
+      outro caminho (`responder` vira tarefa no Seller Center);
+    - 19/09 `instrucao`: recado de pessoa mais novo que a última análise —
+      qualquer canal, mesmo Encerrado (em Concluído a aba nem aceita instrução);
+      a análise consome.
+    Fora isso, Encerrado (status final sem pessoa fechar) e resolvido pela
+    plataforma/pessoa não voltam pro cérebro (17/09).
+
+    Os filtros `canais` e `plataforma` valem SÓ pro ramo "resposta nova" (o robô
+    do Tuta pede canal robô/ML). Instrução e bloqueio saem pra quem chamar, em
+    qualquer canal e plataforma (19/09): a pessoa mandou, ou a API travou — se o
+    robô não atende aquela plataforma ele responde `humano` com o motivo, mas
+    tem que VER o chamado.
+
+    24/09: com um cérebro cadastrado `exclusivo` (Hermes), o token antigo recebe
+    lista vazia — o cérebro do Eduardo para de ver sem quebrar nada do lado dele."""
+    if cerebro.substituido:
+        logger.info("chamados_cerebro_legado_ignorado", rota="analisar")
+        return AgentAnalisarOut(chamados=[])
+    if cerebro.row is not None and not cerebro.row.ligada:
+        return AgentAnalisarOut(chamados=[])
+
     rows = (
-        await session.execute(
-            select(Chamado)
-            .outerjoin(rec, rec.c.chamado_id == Chamado.id)
-            .outerjoin(ana, ana.c.chamado_id == Chamado.id)
-            .outerjoin(ins, ins.c.chamado_id == Chamado.id)
-            .outerjoin(env, env.c.chamado_id == Chamado.id)
-            .outerjoin(blq, blq.c.chamado_id == Chamado.id)
-            .where(or_(instrucao, ramo_bloqueio, ramo_resposta))
-            .order_by(func.greatest(rec.c.ult, ins.c.ult, blq.c.ult), Chamado.created_at)
-            .limit(body.limite)
-        )
+        await session.execute(_trabalho_do_cerebro(body.plataforma, body.canais).limit(body.limite))
     ).scalars().all()
     return AgentAnalisarOut(chamados=[await _item_do_cerebro(session, ch) for ch in rows])
 
@@ -2067,6 +2077,9 @@ async def agent_analise(
     if cerebro.substituido:
         logger.info("chamados_cerebro_legado_ignorado", rota="analise")
         raise HTTPException(409, detail={"code": "cerebro_substituido"})
+    if cerebro.row is not None and not cerebro.row.ligada:
+        # desligada na aba IA de Chamado: não decide nada
+        raise HTTPException(409, detail={"code": "ia_desligada"})
     ch = await _get(session, body.chamado_id)
     # antes de gravar a análise (que consome a instrução)
     com_instrucao = _instrucao_pendente(await _mensagens_do_caso(session, ch)) is not None
@@ -2110,12 +2123,15 @@ async def agent_analise(
     analise = svc.nova_mensagem(
         ch,
         texto=(
-            f"Análise do robô{f' {cerebro.nome}' if cerebro.nome else ''} [{body.classe}]: "
-            f"{body.resumo} → {_ACAO_TXT[body.acao]}"
-        ),
+            f"Análise da {cerebro.nome} [{body.classe}]: " if cerebro.nome
+            else f"Análise do robô [{body.classe}]: "
+        )
+        + f"{body.resumo} → {_ACAO_TXT[body.acao]}",
         tipo="analise",
         direcao="sistema",
-        autor_nome=AUTOR_CEREBRO,
+        # 24/09: a IA de Chamado assina com o nome (a aba lista "o que ela decidiu"
+        # por aqui); o cérebro antigo segue "cérebro".
+        autor_nome=cerebro.nome or AUTOR_CEREBRO,
         status="registrada",
     )
     analise.canal = "robo"
@@ -2324,11 +2340,22 @@ async def agent_cerebro(
         row.exclusivo = body.exclusivo
         await session.commit()
         logger.info("chamados_cerebro_exclusivo", cerebro=row.nome, exclusivo=row.exclusivo)
+    regras = (
+        await session.execute(
+            select(ChamadoIaRegra)
+            .where(ChamadoIaRegra.ativa.is_(True))
+            .order_by(ChamadoIaRegra.created_at)
+        )
+    ).scalars().all()
     return AgentCerebroOut(
         nome=row.nome,
         exclusivo=row.exclusivo,
+        ligada=row.ligada,
         last_used_at=row.last_used_at,
         legado_ignorado_at=row.legado_ignorado_at,
+        regras=[
+            AgentRegraOut(quando=r.quando, faca=r.faca, plataforma=r.plataforma) for r in regras
+        ],
     )
 
 
