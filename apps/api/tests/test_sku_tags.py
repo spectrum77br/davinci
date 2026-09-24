@@ -36,6 +36,10 @@ _col = Column("sku", String)
     ("a074", "mala"),
     ("a075", "mala"),
     ("a076", "mala"),
+    ("a077", "mala"),
+    ("a078", "mala"),
+    ("a079", "mala"),
+    ("a080", "mala"),
     ("A015", "mala"),   # normalização lowercase
     ("a001", None),     # a* fora da lista segue sem tag
     # Mochilas bp* → mala (override; não casam ^b[0-9])
@@ -128,6 +132,11 @@ def _matches(tag: str, sku: str) -> bool:
     ("mala", "a074", True),
     ("mala", "a075", True),
     ("mala", "a076", True),
+    ("mala", "a077", True),
+    ("mala", "a078", True),
+    ("mala", "a079", True),
+    ("mala", "a080", True),
+    ("eletro", "a078", False),
     ("mala", "a001", False),
     ("eletro", "a015", False),
     ("us", "a015", False),

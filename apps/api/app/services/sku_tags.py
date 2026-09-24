@@ -67,6 +67,12 @@ _SKU_TAG_OVERRIDES: dict[str, str] = {
     "a074": "mala",   # Kit 8 Silicone rodinha
     "a075": "mala",   # Chaveiro charlots
     "a076": "mala",   # Encosto Cabeça
+    # Demais cores do Kit 8 Silicone rodinha (item avulso): sem isso o pedido
+    # 298985 (a078) sumia pros usuários factor/marrocos (Eduardo 24/09).
+    "a077": "mala",   # Kit 8 Silicone rodinha preto
+    "a078": "mala",   # Kit 8 Silicone rodinha laranja
+    "a079": "mala",   # Kit 8 Silicone rodinha roxo
+    "a080": "mala",   # Kit 8 Silicone rodinha cinza
     # Mochilas (bp*) — não casam ^b[0-9], mas são do time da mala.
     "bp001": "mala",  # Mochila - Bege
     "bp002": "mala",  # Mochila - Preto
