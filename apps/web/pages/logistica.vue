@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
-import { Plus, RefreshCw, X, Trash2, Search, Send, ImagePlus, ChevronLeft, ChevronRight, Copy, NotebookPen, ArrowLeftRight, UserRound, MessageCircle, Eye, Megaphone, MapPin, Mail, Ban, ExternalLink } from 'lucide-vue-next'
+import { Plus, RefreshCw, X, Trash2, Search, Send, ImagePlus, ChevronLeft, ChevronRight, Copy, NotebookPen, ArrowLeftRight, UserRound, MessageCircle, Eye, Megaphone, MapPin, Mail, Ban, ExternalLink, Combine } from 'lucide-vue-next'
 
 definePageMeta({
   middleware: ['permission'],
@@ -1058,7 +1058,6 @@ type Anexo = {
 type StatusTextField =
   | 'plataforma'
   | 'status_plataforma'
-  | 'status_atual'
   | 'alterar_status_bling'
   | 'mensagem_chamado'
   | 'mensagem_bling'
@@ -1080,6 +1079,36 @@ async function refreshStatus() {
   } finally {
     statusLoading.value = false
   }
+}
+
+// Plataforma de uma regra: escolhida numa lista, com os MESMOS rótulos que o
+// backend grava em `logistica.plataforma` (o casador compara sem maiúscula, então
+// "mercado livre" antigo casa igual). Vazio = geral (vale pra todas).
+const STATUS_PLATAFORMA_OPCOES: string[] = PLATAFORMA_TABS.map((t) => t.label)
+function plataformaCanonica(v: string | null | undefined): string {
+  const p = (v || '').trim()
+  return STATUS_PLATAFORMA_OPCOES.find((o) => o.toLowerCase() === p.toLowerCase()) || p
+}
+// Valor antigo digitado à mão que não é nenhuma das 4 continua na lista (não
+// some da regra sem ninguém ver).
+function plataformaOpcoesPara(v: string | null | undefined): string[] {
+  const p = plataformaCanonica(v)
+  return p && !STATUS_PLATAFORMA_OPCOES.includes(p)
+    ? [...STATUS_PLATAFORMA_OPCOES, p]
+    : STATUS_PLATAFORMA_OPCOES
+}
+
+// "Status Atual" pode ter VÁRIOS estados do Bling — a regra vale pra qualquer
+// um deles. A API guarda/devolve separados por ";" (o mesmo separador do
+// backend, `logistica_match.SEPARADOR_STATUS_ATUAL`); os nomes voltam na grafia
+// do catálogo pra marcar certo no seletor.
+function statusAtuaisDe(v: string | null | undefined): string[] {
+  const base = opcoes.value.status_bling_options
+  return (v || '')
+    .split(';')
+    .map((p) => p.trim())
+    .filter(Boolean)
+    .map((p) => base.find((b) => b.toLowerCase() === p.toLowerCase()) || p)
 }
 
 // Filtro por plataforma na aba Status ('' = todas; '__geral__' = regras sem
@@ -1204,9 +1233,10 @@ function isEditing(s: LogisticaStatus, field: StatusTextField) {
 }
 
 function startEdit(s: LogisticaStatus, field: StatusTextField) {
-  if (!canEdit.value) return
+  if (!canEdit.value || isEditing(s, field)) return
   editing.value = { id: s.id, field }
-  editValue.value = (s[field] as string | null) || ''
+  editValue.value =
+    field === 'plataforma' ? plataformaCanonica(s.plataforma) : (s[field] as string | null) || ''
 }
 
 function cancelEdit() {
@@ -1261,7 +1291,7 @@ const statusSaving = ref(false)
 const statusForm = ref({
   plataforma: '',
   status_plataforma: '',
-  status_atual: '',
+  status_atual: [] as string[],
   alterar_status_bling: '',
   monitoramento: false,
   abrir_chamado: false,
@@ -1275,7 +1305,7 @@ function openStatusForm() {
   statusForm.value = {
     plataforma: '',
     status_plataforma: '',
-    status_atual: '',
+    status_atual: [],
     alterar_status_bling: '',
     monitoramento: false,
     abrir_chamado: false,
@@ -1297,7 +1327,7 @@ async function saveStatusForm() {
       body: {
         plataforma: f.plataforma.trim() || null,
         status_plataforma: f.status_plataforma.trim() || null,
-        status_atual: f.status_atual.trim() || null,
+        status_atual: f.status_atual,
         alterar_status_bling: f.alterar_status_bling.trim() || null,
         monitoramento: f.monitoramento,
         abrir_chamado: f.abrir_chamado,
@@ -1313,6 +1343,75 @@ async function saveStatusForm() {
     statusError.value = e?.data?.detail?.code || e?.message || 'erro'
   } finally {
     statusSaving.value = false
+  }
+}
+
+// ---- Juntar linhas repetidas (mesma plataforma + chave + mesmas ações) ----
+// A prévia vem do backend (só lê); confirmar manda exatamente os grupos que a
+// pessoa viu — grupo que mudou no meio do caminho o backend pula.
+type RepetidaLinha = { id: string; status_atual: string | null; acoes: string[] }
+type RepetidaGrupo = {
+  plataforma: string | null
+  status_plataforma: string | null
+  manter_id: string
+  apagar_ids: string[]
+  status_atual_final: string
+  acoes: string[]
+  linhas: RepetidaLinha[]
+}
+type RepetidaConflito = {
+  plataforma: string | null
+  status_plataforma: string | null
+  linhas: RepetidaLinha[]
+}
+const juntarModal = ref<{
+  open: boolean
+  loading: boolean
+  saving: boolean
+  grupos: RepetidaGrupo[]
+  conflitos: RepetidaConflito[]
+  erro: string | null
+}>({ open: false, loading: false, saving: false, grupos: [], conflitos: [], erro: null })
+
+async function abrirJuntarRepetidas() {
+  juntarModal.value = { open: true, loading: true, saving: false, grupos: [], conflitos: [], erro: null }
+  try {
+    const r = await api<{ grupos: RepetidaGrupo[]; conflitos: RepetidaConflito[] }>(
+      '/api/logistica/status/repetidas',
+    )
+    juntarModal.value.grupos = r.grupos
+    juntarModal.value.conflitos = r.conflitos
+  } catch (e: any) {
+    juntarModal.value.erro = e?.data?.detail?.code || e?.message || 'erro'
+  } finally {
+    juntarModal.value.loading = false
+  }
+}
+
+async function confirmarJuntarRepetidas() {
+  const m = juntarModal.value
+  if (!m.grupos.length) return
+  m.saving = true
+  m.erro = null
+  try {
+    const r = await api<{ juntados: number; linhas_apagadas: number; pulados: number }>(
+      '/api/logistica/status/juntar',
+      {
+        method: 'POST',
+        body: { grupos: m.grupos.map((g) => ({ manter_id: g.manter_id, apagar_ids: g.apagar_ids })) },
+      },
+    )
+    m.open = false
+    await refreshStatus()
+    const pulados = r.pulados ? ` ${r.pulados} grupo(s) mudaram desde a prévia e ficaram como estavam.` : ''
+    toasts.success(
+      'Regras juntadas',
+      `${r.juntados} grupo(s) juntado(s), ${r.linhas_apagadas} linha(s) repetida(s) removida(s).${pulados}`,
+    )
+  } catch (e: any) {
+    m.erro = e?.data?.detail?.code || e?.message || 'erro'
+  } finally {
+    m.saving = false
   }
 }
 
@@ -2501,7 +2600,10 @@ async function aplicarStatusBling(c: Logistica) {
             />
           </div>
         </label>
-        <Button v-if="canEdit" size="sm" class="ml-auto" @click="openStatusForm">
+        <Button v-if="canEdit" size="sm" variant="outline" class="ml-auto" @click="abrirJuntarRepetidas">
+          <Combine class="size-4 mr-1" /> Juntar repetidas
+        </Button>
+        <Button v-if="canEdit" size="sm" @click="openStatusForm">
           <Plus class="size-4 mr-1" /> Novo status
         </Button>
       </div>
@@ -2532,19 +2634,21 @@ async function aplicarStatusBling(c: Logistica) {
           </thead>
           <tbody>
             <tr v-for="s in statusRowsFiltradas" :key="s.id" class="border-t hover:bg-muted/20">
-              <!-- Plataforma -->
+              <!-- Plataforma (lista: as 4 plataformas ou geral) -->
               <td class="px-2 py-1 whitespace-nowrap align-top" @click="startEdit(s, 'plataforma')">
-                <input
+                <select
                   v-if="isEditing(s, 'plataforma')"
                   v-model="editValue"
                   autofocus
-                  placeholder="vazio = geral"
                   class="w-40 rounded border bg-background px-1.5 py-1 text-sm"
+                  @change="commitEdit(s)"
                   @blur="commitEdit(s)"
-                  @keydown.enter.prevent="commitEdit(s)"
                   @keydown.esc="cancelEdit"
-                />
-                <span v-else :class="[canEdit ? 'cursor-text' : '', s.plataforma ? '' : 'text-muted-foreground']">{{ s.plataforma || '—' }}</span>
+                >
+                  <option value="">Geral (todas)</option>
+                  <option v-for="p in plataformaOpcoesPara(s.plataforma)" :key="p" :value="p">{{ p }}</option>
+                </select>
+                <span v-else :class="[canEdit ? 'cursor-pointer' : '', s.plataforma ? '' : 'text-muted-foreground']">{{ plataformaCanonica(s.plataforma) || 'Geral' }}</span>
               </td>
               <!-- Status Plataforma -->
               <td class="px-2 py-1 align-top" @click="startEdit(s, 'status_plataforma')">
@@ -2559,24 +2663,14 @@ async function aplicarStatusBling(c: Logistica) {
                 />
                 <span v-else :class="[canEdit ? 'cursor-text' : '', s.status_plataforma ? 'font-medium' : 'text-muted-foreground']">{{ s.status_plataforma || '—' }}</span>
               </td>
-              <!-- Status Atual (dropdown com os status conhecidos do Bling) -->
-              <td class="px-2 py-1 whitespace-nowrap align-top" @click="startEdit(s, 'status_atual')">
-                <select
-                  v-if="isEditing(s, 'status_atual')"
-                  v-model="editValue"
-                  autofocus
-                  class="w-44 rounded border bg-background px-1.5 py-1 text-sm"
-                  @change="commitEdit(s)"
-                  @blur="commitEdit(s)"
-                  @keydown.esc="cancelEdit"
-                >
-                  <option value="">— vazio —</option>
-                  <option v-for="opt in opcoes.status_bling_options" :key="opt" :value="opt">{{ opt }}</option>
-                </select>
-                <template v-else>
-                  <span v-if="s.status_atual" class="text-xs px-2 py-0.5 rounded border border-border" :class="canEdit ? 'cursor-pointer' : ''">{{ s.status_atual }}</span>
-                  <span v-else class="text-muted-foreground" :class="canEdit ? 'cursor-pointer' : ''">—</span>
-                </template>
+              <!-- Status Atual (um ou mais status do Bling; a regra vale pra qualquer um) -->
+              <td class="px-2 py-1 align-top">
+                <StatusBlingMultiSelect
+                  :model-value="statusAtuaisDe(s.status_atual)"
+                  :opcoes="opcoes.status_bling_options"
+                  :disabled="!canEdit || statusBusy.has(s.id)"
+                  @save="(v) => patchStatusField(s.id, { status_atual: v })"
+                />
               </td>
               <!-- Alterar Status Bling (dropdown com os status conhecidos do Bling) -->
               <td class="px-2 py-1 whitespace-nowrap align-top" @click="startEdit(s, 'alterar_status_bling')">
@@ -2746,13 +2840,15 @@ async function aplicarStatusBling(c: Logistica) {
           </div>
           <div>
             <label class="text-xs text-muted-foreground">Plataforma</label>
-            <input
-              :value="s.plataforma || ''"
+            <select
+              :value="plataformaCanonica(s.plataforma)"
               :disabled="!canEdit || statusBusy.has(s.id)"
-              placeholder="vazio = geral"
               class="w-full rounded border bg-background px-2 py-1 text-sm"
-              @change="patchStatusField(s.id, { plataforma: ($event.target as HTMLInputElement).value.trim() || null })"
-            />
+              @change="patchStatusField(s.id, { plataforma: ($event.target as HTMLSelectElement).value || null })"
+            >
+              <option value="">Geral (todas)</option>
+              <option v-for="p in plataformaOpcoesPara(s.plataforma)" :key="p" :value="p">{{ p }}</option>
+            </select>
           </div>
           <div>
             <label class="text-xs text-muted-foreground">Status Plataforma</label>
@@ -2765,15 +2861,13 @@ async function aplicarStatusBling(c: Logistica) {
           </div>
           <div>
             <label class="text-xs text-muted-foreground">Status Atual</label>
-            <select
-              :value="s.status_atual || ''"
+            <StatusBlingMultiSelect
+              :model-value="statusAtuaisDe(s.status_atual)"
+              :opcoes="opcoes.status_bling_options"
               :disabled="!canEdit || statusBusy.has(s.id)"
-              class="w-full rounded border bg-background px-2 py-1 text-sm"
-              @change="patchStatusField(s.id, { status_atual: ($event.target as HTMLSelectElement).value || null })"
-            >
-              <option value="">— vazio —</option>
-              <option v-for="opt in opcoes.status_bling_options" :key="opt" :value="opt">{{ opt }}</option>
-            </select>
+              bloco
+              @save="(v) => patchStatusField(s.id, { status_atual: v })"
+            />
           </div>
           <div>
             <label class="text-xs text-muted-foreground">Alterar Status Bling</label>
@@ -2891,7 +2985,13 @@ async function aplicarStatusBling(c: Logistica) {
 
         <div>
           <Label>Plataforma</Label>
-          <Input v-model="statusForm.plataforma" placeholder="vazio = geral" />
+          <select
+            v-model="statusForm.plataforma"
+            class="w-full rounded-md border bg-background px-2 py-1.5 text-sm"
+          >
+            <option value="">Geral (todas as plataformas)</option>
+            <option v-for="p in STATUS_PLATAFORMA_OPCOES" :key="p" :value="p">{{ p }}</option>
+          </select>
         </div>
         <div>
           <Label>Status Plataforma</Label>
@@ -2899,13 +2999,14 @@ async function aplicarStatusBling(c: Logistica) {
         </div>
         <div>
           <Label>Status Atual</Label>
-          <select
+          <StatusBlingMultiSelect
             v-model="statusForm.status_atual"
-            class="w-full rounded-md border bg-background px-2 py-1.5 text-sm"
-          >
-            <option value="">— vazio —</option>
-            <option v-for="opt in opcoes.status_bling_options" :key="opt" :value="opt">{{ opt }}</option>
-          </select>
+            :opcoes="opcoes.status_bling_options"
+            bloco
+          />
+          <p class="mt-1 text-xs text-muted-foreground">
+            Marque um ou mais: a regra vale pra qualquer um deles. Nenhum = qualquer status.
+          </p>
         </div>
         <div>
           <Label>Alterar Status Bling</Label>
@@ -2960,6 +3061,80 @@ async function aplicarStatusBling(c: Logistica) {
           <Button variant="ghost" @click="showStatusForm = false">Cancelar</Button>
           <Button :disabled="statusSaving" @click="saveStatusForm">
             {{ statusSaving ? 'Salvando…' : 'Salvar' }}
+          </Button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Modal: juntar linhas repetidas da aba Status (prévia + confirmar) -->
+    <div v-if="juntarModal.open" class="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4" @click.self="juntarModal.open = false">
+      <div class="bg-background border rounded-lg w-full max-w-3xl p-5 space-y-4 max-h-[90vh] overflow-y-auto">
+        <div class="flex items-center">
+          <h2 class="text-lg font-semibold">Juntar regras repetidas</h2>
+          <Button class="ml-auto" size="sm" variant="ghost" @click="juntarModal.open = false">
+            <X class="size-4" />
+          </Button>
+        </div>
+        <p class="text-sm text-muted-foreground">
+          Só junta linhas com a mesma plataforma, o mesmo Status Plataforma e exatamente as mesmas ações
+          (Alterar Status Bling, Monitoramento, Abrir chamado, mensagens, destinatários e imagens). Cada grupo
+          vira uma linha só com todos os Status Atual. Linha sem Status Atual nunca entra.
+        </p>
+
+        <div v-if="juntarModal.loading" class="text-sm text-muted-foreground">Procurando…</div>
+        <div v-else-if="juntarModal.erro" class="text-sm text-red-500">erro: {{ juntarModal.erro }}</div>
+        <template v-else>
+          <div v-if="!juntarModal.grupos.length" class="text-sm">Nenhuma linha repetida pra juntar.</div>
+          <div v-else class="space-y-2">
+            <div class="text-sm font-medium">
+              {{ juntarModal.grupos.length }} grupo(s) —
+              {{ juntarModal.grupos.reduce((n, g) => n + g.linhas.length, 0) }} linhas viram
+              {{ juntarModal.grupos.length }}
+            </div>
+            <div v-for="g in juntarModal.grupos" :key="g.manter_id" class="border rounded-md p-3 space-y-1.5">
+              <div class="text-sm">
+                <span class="text-muted-foreground">{{ plataformaCanonica(g.plataforma) || 'Geral' }} ·</span>
+                <span class="font-medium">{{ g.status_plataforma }}</span>
+              </div>
+              <div class="flex flex-wrap items-center gap-1 text-xs">
+                <template v-for="(l, i) in g.linhas" :key="l.id">
+                  <span v-if="i" class="text-muted-foreground">+</span>
+                  <span class="px-2 py-0.5 rounded border border-border">{{ l.status_atual }}</span>
+                </template>
+                <span class="text-muted-foreground px-1">→ uma linha:</span>
+                <span v-for="st in statusAtuaisDe(g.status_atual_final)" :key="st" class="px-2 py-0.5 rounded border border-primary/60 font-medium">{{ st }}</span>
+              </div>
+              <div class="text-xs text-muted-foreground">
+                Faz: {{ g.acoes.length ? g.acoes.join(' · ') : 'nada (regra sem ação)' }}
+              </div>
+            </div>
+          </div>
+
+          <div v-if="juntarModal.conflitos.length" class="space-y-2">
+            <div class="text-sm font-medium text-amber-600">
+              Não mexi em {{ juntarModal.conflitos.length }} caso(s): o mesmo Status Atual aparece em outra linha
+              da mesma chave que faz outra coisa. Vale conferir à mão.
+            </div>
+            <div v-for="(c, ci) in juntarModal.conflitos" :key="ci" class="border border-amber-500/40 rounded-md p-3 space-y-1">
+              <div class="text-sm">
+                <span class="text-muted-foreground">{{ plataformaCanonica(c.plataforma) || 'Geral' }} ·</span>
+                <span class="font-medium">{{ c.status_plataforma }}</span>
+              </div>
+              <div v-for="l in c.linhas" :key="l.id" class="text-xs">
+                <span class="px-2 py-0.5 rounded border border-border">{{ l.status_atual }}</span>
+                <span class="text-muted-foreground ml-1">{{ l.acoes.length ? l.acoes.join(' · ') : 'sem ação' }}</span>
+              </div>
+            </div>
+          </div>
+        </template>
+
+        <div class="flex justify-end gap-2">
+          <Button variant="ghost" @click="juntarModal.open = false">Cancelar</Button>
+          <Button
+            :disabled="juntarModal.loading || juntarModal.saving || !juntarModal.grupos.length"
+            @click="confirmarJuntarRepetidas"
+          >
+            {{ juntarModal.saving ? 'Juntando…' : `Juntar ${juntarModal.grupos.length} grupo(s)` }}
           </Button>
         </div>
       </div>

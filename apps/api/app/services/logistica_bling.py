@@ -316,14 +316,23 @@ async def sync_status_bling_row(session: AsyncSession, row: Logistica) -> str | 
     return atual_nome
 
 
-async def _cand_info(session: AsyncSession, rule: LogisticaStatus) -> dict:
+async def _cand_infos(session: AsyncSession, rule: LogisticaStatus) -> list[dict]:
     """Resolve os nomes/ids de "de" (Status Atual) e "alvo" (Alterar Status
-    Bling) de uma regra candidata. Levanta se o alvo não existir no catálogo."""
+    Bling) de uma regra candidata — uma entrada por "de" (a regra pode partir de
+    vários estados; curinga = uma entrada com `de` None). `de_todos` junta os
+    "de" da regra pra explicar a transição. Levanta se o alvo não existir no
+    catálogo."""
     alvo = (rule.alterar_status_bling or "").strip()
     alvo_id = await _situacao_id_por_nome(session, alvo) if alvo else None
-    de = (rule.status_atual or "").strip() or None
-    de_id = await _situacao_id_por_nome_opt(session, de) if de else None
-    return {"de": de, "de_id": de_id, "alvo": alvo, "alvo_id": alvo_id}
+    des = logistica_match.status_atuais(rule.status_atual)
+    de_todos = " ou ".join(des) or None
+    out = []
+    for de in des or [None]:
+        de_id = await _situacao_id_por_nome_opt(session, de) if de else None
+        out.append(
+            {"de": de, "de_id": de_id, "de_todos": de_todos, "alvo": alvo, "alvo_id": alvo_id}
+        )
+    return out
 
 
 async def _resolve_status(session: AsyncSession, row: Logistica) -> dict:
@@ -349,7 +358,7 @@ async def _resolve_status(session: AsyncSession, row: Logistica) -> dict:
 
     # Resolve nomes/ids das candidatas ANTES de falar com o Bling (valida o
     # catálogo → "desconhecido" sem custo de rede).
-    infos = [await _cand_info(session, c) for c in cands]
+    infos = [i for c in cands for i in await _cand_infos(session, c)]
 
     bling_id = await _bling_order_id_for_row(session, row)
     client = await _bling_client(session)
@@ -395,7 +404,10 @@ async def _resolve_status(session: AsyncSession, row: Logistica) -> dict:
         # alguma regra: chegou ao fim da cadeia, nada a fazer.
         display, aplicavel, ja_no_alvo = ja_alvo, False, True
     else:
+        # Nenhuma regra parte daqui: explica com TODOS os "de" da 1ª candidata
+        # ("Em aberto ou Em andamento → Entregue"), não só o primeiro.
         display, aplicavel, ja_no_alvo = infos[0], False, False
+        display = {**display, "de": display["de_todos"]}
 
     return {
         "bling_id": bling_id,

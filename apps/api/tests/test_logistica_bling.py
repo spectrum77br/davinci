@@ -563,6 +563,144 @@ async def test_status_atual_divergente(
 
 
 @pytest.mark.asyncio
+async def test_status_regra_com_varios_status_atual(
+    client: AsyncClient,
+    admin: User,
+    db: AsyncSession,
+    auth_as: Callable[[User | None], None],
+    monkeypatch,
+):
+    """Uma regra só com dois "Status Atual" (Em aberto e Em andamento): o pedido
+    em qualquer um deles segue pro alvo, e o "de" mostrado é o estado real dele.
+    Fora dos dois, a explicação cita os dois."""
+    auth_as(admin)
+    meli = {"order_status": "paid", "ship_status": "delivered"}
+    chave = logistica_rules.assinatura_pt(meli)
+    db.add_all(
+        [
+            SituacaoBling(id=6, nome="Em aberto"),
+            SituacaoBling(id=15, nome="Em andamento"),
+            SituacaoBling(id=83953, nome="Entregue"),
+            SituacaoBling(id=12, nome="Cancelado"),
+        ]
+    )
+    rs = await client.post(
+        "/api/logistica/status",
+        json={
+            "status_plataforma": chave,
+            "status_atual": ["Em aberto", "Em andamento", "em aberto"],
+            "alterar_status_bling": "Entregue",
+        },
+    )
+    assert rs.status_code == 201, rs.text
+    assert rs.json()["status_atual"] == "Em aberto; Em andamento"
+    db.add(
+        BlingOrder(bling_id=561, numero="99006", item_codigo="sku1", item_index=0, situacao="15")
+    )
+    await db.commit()
+    rc = await client.post(
+        "/api/logistica",
+        json={"plataforma": "Mercado Livre", "pedido_bling": "99006", "meli_status": meli},
+    )
+    lid = rc.json()["id"]
+    fake = _FakeBling({"id": 561, "numero": 99006, "situacao": {"id": 15, "valor": 0}})
+
+    async def _fake_client(session):
+        return fake
+
+    monkeypatch.setattr(logistica_bling, "_bling_client", _fake_client)
+
+    # Em andamento (o 2º marcado) → aplica, "de" = Em andamento.
+    rp = await client.post(f"/api/logistica/{lid}/alterar-status-bling/preview")
+    assert rp.status_code == 200, rp.text
+    body = rp.json()
+    assert body["aplicavel"] is True
+    assert body["situacao_de"] == "Em andamento"
+    assert body["situacao_de_id"] == 15
+
+    # Em aberto (o 1º) → também aplica.
+    fake._order["situacao"]["id"] = 6
+    body = (await client.post(f"/api/logistica/{lid}/alterar-status-bling/preview")).json()
+    assert body["aplicavel"] is True
+    assert body["situacao_de"] == "Em aberto"
+
+    # Cancelado → fora do fluxo; a explicação cita os dois estados da regra.
+    fake._order["situacao"]["id"] = 12
+    body = (await client.post(f"/api/logistica/{lid}/alterar-status-bling/preview")).json()
+    assert body["aplicavel"] is False
+    assert body["ja_no_alvo"] is False
+    assert body["situacao_de"] == "Em aberto ou Em andamento"
+
+    # PATCH com lista vazia = curinga (vale de qualquer estado).
+    sid = rs.json()["id"]
+    rpatch = await client.patch(f"/api/logistica/status/{sid}", json={"status_atual": []})
+    assert rpatch.status_code == 200, rpatch.text
+    assert rpatch.json()["status_atual"] is None
+
+
+@pytest.mark.asyncio
+async def test_juntar_status_repetidas(
+    client: AsyncClient,
+    admin: User,
+    db: AsyncSession,
+    auth_as: Callable[[User | None], None],
+):
+    """Prévia lista só as iguais; juntar deixa uma linha com os dois estados e
+    não mexe no grupo que mudou depois da prévia."""
+    auth_as(admin)
+    chave = "Pago | Pronto p/ envio | Aguardando NF"
+
+    async def cria(**kw) -> str:
+        rs = await client.post("/api/logistica/status", json={"status_plataforma": chave, **kw})
+        assert rs.status_code == 201, rs.text
+        return rs.json()["id"]
+
+    a = await cria(plataforma="Mercado Livre", status_atual="Em aberto", monitoramento=True)
+    b = await cria(plataforma="Mercado Livre", status_atual="Em andamento", monitoramento=True)
+    # Faz outra coisa (troca status + chamado): fica de fora.
+    c = await cria(plataforma="Mercado Livre", status_atual="Entregue",
+                   alterar_status_bling="Aguardando Devolução", abrir_chamado=True)
+    # Outra chave, iguais entre si: segundo grupo.
+    d = await cria(plataforma="Shopee", status_plataforma="X", status_atual="Em aberto")
+    e = await cria(plataforma="Shopee", status_plataforma="X", status_atual="Cancelado")
+
+    rp = await client.get("/api/logistica/status/repetidas")
+    assert rp.status_code == 200, rp.text
+    prev = rp.json()
+    assert prev["conflitos"] == []
+    grupos = {g["status_plataforma"]: g for g in prev["grupos"]}
+    assert set(grupos) == {chave, "X"}
+    g1 = grupos[chave]
+    assert {g1["manter_id"], *g1["apagar_ids"]} == {a, b}
+    assert g1["status_atual_final"] == "Em aberto; Em andamento"
+    assert g1["acoes"] == ["Monitorar"]
+
+    # Alguém mexe no grupo "X" depois da prévia → esse não junta.
+    await client.patch(f"/api/logistica/status/{e}", json={"monitoramento": True})
+
+    rj = await client.post(
+        "/api/logistica/status/juntar",
+        json={"grupos": [
+            {"manter_id": g["manter_id"], "apagar_ids": g["apagar_ids"]} for g in prev["grupos"]
+        ]},
+    )
+    assert rj.status_code == 200, rj.text
+    assert rj.json() == {"juntados": 1, "linhas_apagadas": 1, "pulados": 1}
+
+    rows = {r["id"]: r for r in (await client.get("/api/logistica/status")).json()}
+    assert set(rows) == {a, c, d, e}
+    assert rows[a]["status_atual"] == "Em aberto; Em andamento"
+    assert rows[a]["monitoramento"] is True
+    assert rows[c]["status_atual"] == "Entregue"
+    # Repetir o mesmo pedido não faz nada (já não há grupo).
+    rj2 = await client.post(
+        "/api/logistica/status/juntar",
+        json={"grupos": [{"manter_id": g1["manter_id"], "apagar_ids": g1["apagar_ids"]}]},
+    )
+    assert rj2.json() == {"juntados": 0, "linhas_apagadas": 0, "pulados": 1}
+
+
+@pytest.mark.asyncio
 async def test_status_maquina_de_estados(
     client: AsyncClient,
     admin: User,

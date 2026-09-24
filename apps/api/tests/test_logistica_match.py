@@ -316,6 +316,108 @@ def test_regras_aplicaveis_exatas_primeiro_e_sem_emprestimo():
     assert logistica_match.regras_aplicaveis([outra], None) == []
 
 
+def test_regra_com_varios_status_atual_vale_pra_qualquer_um():
+    # Vinicius 24/09: a mesma chave com as mesmas ações em "Em aberto" e em
+    # "Em andamento" é UMA linha com os dois status marcados.
+    r = _rule(status_atual="Em aberto; Em andamento", alterar_status_bling="Entregue")
+    assert logistica_match.regras_aplicaveis([r], "Em aberto") == [r]
+    assert logistica_match.regras_aplicaveis([r], "em andamento") == [r]
+    assert logistica_match.regras_aplicaveis([r], "Problemas") == []
+    assert logistica_match.regra_ativa([r], "Em andamento") is r
+    # Transição pendente nos dois estados; no alvo, resolvido.
+    assert logistica_match.estado_resolvido([r], "Em aberto") is False
+    assert logistica_match.estado_resolvido([r], "Em andamento") is False
+    assert logistica_match.estado_resolvido([r], "Entregue") is True
+    # Fora dos marcados (e fora do alvo) é combinação sem cadastro: não esconde.
+    assert logistica_match.estado_resolvido([r], "Problemas") is False
+    # Apelido "Enviado Etiqueta" (legado) casa "Em digitação" também na lista.
+    e = _rule(status_atual="Em aberto; Enviado Etiqueta", monitoramento=True)
+    assert logistica_match.regras_aplicaveis([e], "Em digitação") == [e]
+    assert logistica_match.deve_monitorar([e], "Em digitação") is True
+
+
+def test_juntar_status_atual_normaliza():
+    j = logistica_match.juntar_status_atual
+    assert j(["Em aberto", " Em andamento ", "", "em aberto"]) == "Em aberto; Em andamento"
+    assert j("Em aberto ;Em andamento;") == "Em aberto; Em andamento"
+    assert j("Em aberto") == "Em aberto"
+    assert j([]) is None
+    assert j("  ") is None
+    assert j(None) is None
+    assert logistica_match.status_atuais("Em aberto; Em andamento") == ["Em aberto", "Em andamento"]
+    assert logistica_match.status_atuais(None) == []
+
+
+def test_regras_repetidas_junta_so_o_que_faz_a_mesma_coisa():
+    from datetime import UTC, datetime, timedelta
+
+    t0 = datetime(2026, 9, 1, tzinfo=UTC)
+    chave = "Pago | Pronto p/ envio | Aguardando NF"
+
+    def r(i: int, **kw) -> LogisticaStatus:
+        base = dict(
+            id=uuid.uuid4(), plataforma="Mercado Livre", status_plataforma=chave,
+            created_at=t0 + timedelta(days=i),
+        )
+        return _rule(**{**base, **kw})
+
+    # O caso do print: mesma chave e ações, só o Status Atual muda. A mais
+    # antiga fica; "mercado livre" minúsculo é a mesma plataforma pro casador.
+    aberto = r(1, status_atual="Em aberto", monitoramento=True)
+    andamento = r(0, plataforma="mercado livre", status_atual="Em andamento", monitoramento=True)
+    grupos, conflitos = logistica_match.regras_repetidas([aberto, andamento])
+    assert conflitos == []
+    assert len(grupos) == 1
+    assert grupos[0].manter is andamento
+    assert grupos[0].apagar == [aberto]
+    assert grupos[0].status_atual == "Em andamento; Em aberto"
+
+    # O exemplo dele: "Entregue" troca status e abre chamado, o outro não → separadas.
+    entregue = r(0, status_atual="Entregue", alterar_status_bling="Aguardando Devolução",
+                 abrir_chamado=True)
+    aberto2 = r(1, status_atual="Em aberto")
+    assert logistica_match.regras_repetidas([entregue, aberto2]) == ([], [])
+
+    # Qualquer diferença separa: mensagem (uma letra), Threema, monitorar, chave, plataforma.
+    base = dict(status_atual="Em aberto", mensagem_bling="Aguardando NF")
+    for diferente in (
+        dict(mensagem_bling="Aguardando NF."),
+        dict(mensagem_threema="avisar"),
+        dict(threema_recipients="ABCD1234"),
+        dict(monitoramento=True),
+        dict(abrir_reembolso=True),
+        dict(status_plataforma="Pago | Pronto p/ envio | Etiqueta impressa"),
+        dict(plataforma="Shopee"),
+        dict(plataforma=None),
+    ):
+        a = r(0, **base)
+        b = r(1, **{**base, "status_atual": "Em andamento", **diferente})
+        assert logistica_match.regras_repetidas([a, b]) == ([], []), diferente
+
+    # Mesmos destinatários em outra ordem e espaço nas pontas = iguais.
+    a = r(0, status_atual="Em aberto", mensagem_threema=" oi ", threema_recipients="AAA,BBB")
+    b = r(1, status_atual="Em andamento", mensagem_threema="oi", threema_recipients="BBB, AAA")
+    assert len(logistica_match.regras_repetidas([a, b])[0]) == 1
+
+    # Imagens: iguais pelo conteúdo juntam; diferentes não.
+    assert len(logistica_match.regras_repetidas([a, b], anexos={a.id: ["h1"], b.id: ["h1"]})[0]) == 1
+    assert logistica_match.regras_repetidas([a, b], anexos={a.id: ["h1"]}) == ([], [])
+
+    # Curinga (sem Status Atual) nunca entra — juntar mudaria o que ela cobre.
+    cur = r(0, monitoramento=True)
+    esp = r(1, status_atual="Em aberto", monitoramento=True)
+    assert logistica_match.regras_repetidas([cur, esp]) == ([], [])
+
+    # Conflito: as iguais dividem "Em aberto" com outra que faz OUTRA coisa →
+    # não mexe (hoje vale a primeira; juntar poderia trocar qual vale).
+    x = r(0, status_atual="Em aberto", monitoramento=True)
+    y = r(1, status_atual="Em andamento", monitoramento=True)
+    z = r(2, status_atual="Em aberto", abrir_chamado=True)
+    grupos, conflitos = logistica_match.regras_repetidas([x, y, z])
+    assert grupos == []
+    assert len(conflitos) == 1 and set(map(id, conflitos[0])) == {id(x), id(y), id(z)}
+
+
 def test_estado_resolvido_threema_enviado_resolve():
     # Regra só com Mensagem Threema: pendente até enviar; depois de enviado
     # (threema_enviado=True) deixa de contar → resolvido (some).

@@ -14,6 +14,7 @@ não escreve no Bling automaticamente.
 Gated pelo recurso `logistica`.
 """
 
+import hashlib
 from datetime import UTC, datetime
 from typing import Annotated
 from uuid import UUID
@@ -74,6 +75,12 @@ from app.schemas.logistica import (
     StatusBlingOut,
     StatusBlingPreviewOut,
     StatusDetalheOut,
+    StatusJuntarIn,
+    StatusJuntarOut,
+    StatusRepetidaConflito,
+    StatusRepetidaGrupo,
+    StatusRepetidaLinha,
+    StatusRepetidasOut,
     SugestaoIn,
     SugestaoOut,
     ThreemaDestinatarioOut,
@@ -459,7 +466,7 @@ async def create_status(
     s = LogisticaStatus(
         plataforma=_clean(body.plataforma),
         status_plataforma=_clean(body.status_plataforma),
-        status_atual=_clean(body.status_atual),
+        status_atual=logistica_match.juntar_status_atual(body.status_atual),
         alterar_status_bling=_clean(body.alterar_status_bling),
         monitoramento=bool(body.monitoramento),
         abrir_chamado=bool(body.abrir_chamado),
@@ -474,6 +481,95 @@ async def create_status(
     await session.commit()
     s = await _load_status(session, s.id)
     return _to_status_out(s)
+
+
+# ---- Juntar linhas repetidas da aba Status ----
+# Vinicius 24/09: com o Status Atual aceitando vários estados, as linhas iguais
+# (mesma plataforma + chave + MESMAS ações, só o Status Atual diferente) viram
+# uma. A prévia só lê; o juntar recalcula e só mexe no grupo que continua
+# exatamente como a pessoa viu. Nada do pedido guarda o id da regra (Threema
+# enviado, chamado e troca de status ficam na linha da Logística), então apagar
+# a repetida não faz ação nenhuma rodar de novo.
+
+
+async def _regras_repetidas(
+    session: AsyncSession,
+) -> tuple[list[logistica_match.GrupoRepetido], list[list[LogisticaStatus]]]:
+    rows = (
+        await session.execute(select(LogisticaStatus).options(selectinload(LogisticaStatus.anexos)))
+    ).scalars().all()
+    anexos = {r.id: [hashlib.sha256(a.blob).hexdigest() for a in r.anexos] for r in rows}
+    return logistica_match.regras_repetidas(list(rows), anexos=anexos)
+
+
+def _linha_repetida(r: LogisticaStatus) -> StatusRepetidaLinha:
+    return StatusRepetidaLinha(
+        id=r.id, status_atual=r.status_atual, acoes=logistica_match.resumo_acoes(r)
+    )
+
+
+@router.get("/status/repetidas", response_model=StatusRepetidasOut)
+async def status_repetidas(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[User, Depends(require_permission("logistica", "view"))],
+) -> StatusRepetidasOut:
+    grupos, conflitos = await _regras_repetidas(session)
+    return StatusRepetidasOut(
+        grupos=[
+            StatusRepetidaGrupo(
+                plataforma=g.manter.plataforma,
+                status_plataforma=g.manter.status_plataforma,
+                manter_id=g.manter.id,
+                apagar_ids=[r.id for r in g.apagar],
+                status_atual_final=g.status_atual,
+                acoes=logistica_match.resumo_acoes(g.manter),
+                linhas=[_linha_repetida(r) for r in [g.manter, *g.apagar]],
+            )
+            for g in grupos
+        ],
+        conflitos=[
+            StatusRepetidaConflito(
+                plataforma=c[0].plataforma,
+                status_plataforma=c[0].status_plataforma,
+                linhas=[_linha_repetida(r) for r in c],
+            )
+            for c in conflitos
+        ],
+    )
+
+
+@router.post("/status/juntar", response_model=StatusJuntarOut)
+async def juntar_status_repetidas(
+    body: StatusJuntarIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("logistica", "edit"))],
+) -> StatusJuntarOut:
+    grupos, _ = await _regras_repetidas(session)
+    atuais = {(g.manter.id, frozenset(r.id for r in g.apagar)): g for g in grupos}
+    juntados = apagadas = pulados = 0
+    for pedido in body.grupos:
+        g = atuais.pop((pedido.manter_id, frozenset(pedido.apagar_ids)), None)
+        if g is None:
+            pulados += 1
+            continue
+        # O log guarda as linhas apagadas por inteiro — dá pra refazer à mão.
+        logger.info(
+            "logistica_status_juntada",
+            usuario=str(user.id),
+            manter=str(g.manter.id),
+            status_atual_antes=g.manter.status_atual,
+            status_atual_depois=g.status_atual,
+            apagadas=[
+                _to_status_out(r).model_dump(mode="json", exclude={"anexos"}) for r in g.apagar
+            ],
+        )
+        g.manter.status_atual = g.status_atual
+        for r in g.apagar:
+            await session.delete(r)
+        juntados += 1
+        apagadas += len(g.apagar)
+    await session.commit()
+    return StatusJuntarOut(juntados=juntados, linhas_apagadas=apagadas, pulados=pulados)
 
 
 @router.patch("/status/{status_id}", response_model=LogisticaStatusOut)
@@ -493,7 +589,7 @@ async def patch_status(
     if "status_plataforma" in data:
         s.status_plataforma = _clean(data["status_plataforma"])
     if "status_atual" in data:
-        s.status_atual = _clean(data["status_atual"])
+        s.status_atual = logistica_match.juntar_status_atual(data["status_atual"])
     if "alterar_status_bling" in data:
         s.alterar_status_bling = _clean(data["alterar_status_bling"])
     if "monitoramento" in data:

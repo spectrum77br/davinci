@@ -283,6 +283,7 @@ class LogisticaStatusOut(BaseModel):
     id: UUID
     plataforma: str | None = None
     status_plataforma: str | None = None
+    # Estados do Bling de onde a regra parte, separados por ";" (vazio = qualquer).
     status_atual: str | None = None
     alterar_status_bling: str | None = None
     monitoramento: bool = False
@@ -301,7 +302,9 @@ class LogisticaStatusOut(BaseModel):
 class LogisticaStatusCreate(BaseModel):
     plataforma: str | None = None
     status_plataforma: str | None = None
-    status_atual: str | None = None
+    # Um ou vários estados do Bling: lista ou texto separado por ";" (é como a
+    # coluna guarda e o Out devolve). Vazio = vale de qualquer estado.
+    status_atual: str | list[str] | None = None
     alterar_status_bling: str | None = None
     monitoramento: bool = False
     abrir_chamado: bool = False
@@ -315,7 +318,7 @@ class LogisticaStatusCreate(BaseModel):
 class LogisticaStatusPatch(BaseModel):
     plataforma: str | None = None
     status_plataforma: str | None = None
-    status_atual: str | None = None
+    status_atual: str | list[str] | None = None
     alterar_status_bling: str | None = None
     monitoramento: bool | None = None
     abrir_chamado: bool | None = None
@@ -324,6 +327,55 @@ class LogisticaStatusPatch(BaseModel):
     mensagem_bling: str | None = None
     mensagem_threema: str | None = None
     threema_recipients: str | None = None
+
+
+class StatusRepetidaLinha(BaseModel):
+    id: UUID
+    status_atual: str | None = None
+    acoes: list[str] = Field(default_factory=list)
+
+
+class StatusRepetidaGrupo(BaseModel):
+    """Linhas da aba Status que fazem a mesma coisa e viram uma só: fica a
+    `manter_id` com `status_atual_final`; as `apagar_ids` saem."""
+
+    plataforma: str | None = None
+    status_plataforma: str | None = None
+    manter_id: UUID
+    apagar_ids: list[UUID]
+    status_atual_final: str
+    acoes: list[str] = Field(default_factory=list)
+    linhas: list[StatusRepetidaLinha]
+
+
+class StatusRepetidaConflito(BaseModel):
+    """Mesma chave e mesmo Status Atual, mas ações diferentes: não se junta."""
+
+    plataforma: str | None = None
+    status_plataforma: str | None = None
+    linhas: list[StatusRepetidaLinha]
+
+
+class StatusRepetidasOut(BaseModel):
+    grupos: list[StatusRepetidaGrupo]
+    conflitos: list[StatusRepetidaConflito]
+
+
+class StatusJuntarGrupoIn(BaseModel):
+    manter_id: UUID
+    apagar_ids: list[UUID]
+
+
+class StatusJuntarIn(BaseModel):
+    grupos: list[StatusJuntarGrupoIn]
+
+
+class StatusJuntarOut(BaseModel):
+    juntados: int
+    linhas_apagadas: int
+    # Grupo da prévia que mudou até a confirmação (alguém editou uma linha):
+    # não mexe, a pessoa abre a prévia de novo.
+    pulados: int
 
 
 class ThreemaDestinatarioOut(BaseModel):
