@@ -926,6 +926,16 @@ AMAZON_EASYSHIP_LABELS_PT: dict[str, str] = {
     "OUTFORRETURN": "Saiu p/ devolução",
     "RETURNED": "Devolvido",
 }
+# Pedido de cancelamento do COMPRADOR (Vinicius, 23/09/2026). O OrderStatus
+# não muda quando o cliente pede — só o `BuyerRequestedCancel` dos itens (ver
+# `AmazonClient.get_buyer_cancel`). Vira a 3ª parte da assinatura pra a aba
+# Status ter regra própria: "Não enviado | Cliente pediu cancelamento" (ainda
+# dá pra cancelar sem afetar a métrica) × "Enviado | Cliente pediu
+# cancelamento" (já saiu: suspender a entrega ou esperar voltar).
+AMAZON_CANCELAMENTO_PEDIDO = "Requested"
+AMAZON_CANCELAMENTO_LABELS_PT: dict[str, str] = {
+    "REQUESTED": "Cliente pediu cancelamento",
+}
 
 
 def _amz_label(mapping: dict[str, str], value: str | None) -> str:
@@ -936,12 +946,14 @@ def _amz_label(mapping: dict[str, str], value: str | None) -> str:
 
 
 def assinatura_amazon(status: dict[str, str] | None) -> str:
-    """Assinatura em PT da Amazon = OrderStatus + EasyShipShipmentStatus
-    traduzidos, juntados por " | " (omite os ausentes)."""
+    """Assinatura em PT da Amazon = OrderStatus + EasyShipShipmentStatus +
+    pedido de cancelamento do cliente, traduzidos e juntados por " | " (omite
+    os ausentes)."""
     m = status or {}
     partes = [
         _amz_label(AMAZON_ORDER_LABELS_PT, m.get("order_status")),
         _amz_label(AMAZON_EASYSHIP_LABELS_PT, m.get("easyship_status")),
+        _amz_label(AMAZON_CANCELAMENTO_LABELS_PT, m.get("buyer_cancel")),
     ]
     return " | ".join(p for p in partes if p)
 
@@ -984,11 +996,17 @@ _CAMPOS_POR_PLATAFORMA: dict[str, tuple[list[str], dict[str, str], dict[str, dic
         },
     ),
     "amazon": (
-        ["order_status", "easyship_status"],
-        {"order_status": "Status do pedido", "easyship_status": "Status do envio"},
+        ["order_status", "easyship_status", "buyer_cancel", "buyer_cancel_reason"],
+        {
+            "order_status": "Status do pedido",
+            "easyship_status": "Status do envio",
+            "buyer_cancel": "Cancelamento",
+            "buyer_cancel_reason": "Motivo do cliente",
+        },
         {
             "order_status": AMAZON_ORDER_LABELS_PT,
             "easyship_status": AMAZON_EASYSHIP_LABELS_PT,
+            "buyer_cancel": AMAZON_CANCELAMENTO_LABELS_PT,
         },
     ),
 }
@@ -1039,7 +1057,8 @@ def detalhe_para(
 def assinatura_para(plataforma: str | None, status: dict[str, str] | None) -> str:
     """Assinatura de "Status Plataforma" da linha, despachando pela plataforma:
     Shopee usa `assinatura_shopee` (order_status), TikTok `assinatura_tiktok`
-    (status), Amazon `assinatura_amazon` (OrderStatus + EasyShip); as demais
+    (status), Amazon `assinatura_amazon` (OrderStatus + EasyShip + pedido de
+    cancelamento do cliente); as demais
     usam a assinatura de 8 campos do Meli (`assinatura_pt`)."""
     p = (plataforma or "").strip().lower()
     if p in _SHOPEE_PLATAFORMAS:

@@ -312,3 +312,40 @@ async def test_no_sku_is_fatal(db: AsyncSession, user: User) -> None:
         assert len(router.calls) == 0
     assert result.status == SyncStatus.FATAL
     assert result.error_code == "invalid_sku"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("flag", ["true", True])
+async def test_get_buyer_cancel_um_item_pedido_vale_o_pedido(flag):
+    client = AmazonClient(_amz_creds())
+    itens = [
+        {"ASIN": "B0A", "BuyerRequestedCancel": {"IsBuyerRequestedCancel": "false"}},
+        {
+            "ASIN": "B0HJXPL2SM",
+            "BuyerRequestedCancel": {
+                "IsBuyerRequestedCancel": flag,
+                "BuyerCancelReason": "Outro",
+            },
+        },
+    ]
+    with respx.mock(base_url=SP_API_BASE_NA) as router:
+        router.get("/orders/v0/orders/701-0809246-1772255/orderItems").mock(
+            return_value=httpx.Response(200, json={"payload": {"OrderItems": itens}})
+        )
+        result = await client.get_buyer_cancel("701-0809246-1772255")
+    assert result == {"pedido": True, "motivo": "Outro"}
+
+
+@pytest.mark.asyncio
+async def test_get_buyer_cancel_sem_pedido_e_sem_resposta():
+    client = AmazonClient(_amz_creds())
+    with respx.mock(base_url=SP_API_BASE_NA) as router:
+        router.get("/orders/v0/orders/A/orderItems").mock(
+            return_value=httpx.Response(200, json={"payload": {"OrderItems": [{"ASIN": "B0A"}]}})
+        )
+        router.get("/orders/v0/orders/B/orderItems").mock(
+            return_value=httpx.Response(429, json={"errors": [{"code": "QuotaExceeded"}]})
+        )
+        assert await client.get_buyer_cancel("A") == {"pedido": False, "motivo": None}
+        # Sem resposta = None (o chamador mantém o que já sabia).
+        assert await client.get_buyer_cancel("B") is None

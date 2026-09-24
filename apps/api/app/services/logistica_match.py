@@ -239,14 +239,15 @@ def estado_resolvido(
         # Nada pendente no estado atual → resolvido (regra sem ação = chave
         # conhecida/ok; quem quer a chave na tela marca Monitorar).
         return True
-    # Nenhuma regra aplicável ao estado atual (todas são de outros estados). Se
-    # nenhuma delas muda status, não há cadeia a cumprir → nada a fazer.
-    # Senão, só resolve quando o pedido chegou a algum alvo da cadeia.
+    # Nenhuma regra aplicável ao estado atual (todas são de outros estados). Só
+    # resolve quando o pedido chegou a um alvo da cadeia — uma regra desta chave
+    # o TROUXE até aqui. Fora disso é combinação chave+estado sem cadastro: não
+    # esconde, o painel pinta de vermelho. Vinicius, 23/09: Amazon 293002
+    # ("Cancelado | Etiqueta cancelada" parado em "Em digitação") sumia do
+    # painel porque a chave só tinha regra, sem troca de status, pra OUTRO estado.
     alvos = {
         _norm_situacao(r.alterar_status_bling) for r in rules if _norm(r.alterar_status_bling)
     }
-    if not alvos:
-        return True
     return bool(atual) and atual in alvos
 
 

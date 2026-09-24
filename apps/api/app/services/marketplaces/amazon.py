@@ -220,6 +220,49 @@ class AmazonClient:
             "ship_state": addr.get("StateOrRegion"),
         }
 
+    async def get_buyer_cancel(self, order_id: str) -> dict | None:
+        """Pedido de cancelamento feito pelo COMPRADOR (Vinicius, 23/09/2026).
+
+        O `OrderStatus` não muda quando o cliente pede pra cancelar — o pedido
+        segue "Unshipped"/"Shipped" e o Seller Central só mostra a faixa
+        "O cliente solicitou o cancelamento deste pedido". A informação vem
+        item a item no getOrderItems (`BuyerRequestedCancel.IsBuyerRequestedCancel`
+        + `BuyerCancelReason`); basta um item pedido pra valer o pedido todo.
+        `IsBuyerRequestedCancel` já veio booleano e hoje vem string ("true").
+        Só a primeira página de itens (pedido com mais de uma página é raro e
+        o pedido de cancelamento vale pro pedido inteiro).
+
+        Retorna `{"pedido": bool, "motivo": str | None}`, ou None quando a
+        Amazon não respondeu (403/429/5xx/timeout) — o chamador mantém o que
+        já sabia em vez de "desmarcar" o pedido."""
+        try:
+            r = await self._request("GET", f"/orders/v0/orders/{order_id}/orderItems")
+        except httpx.HTTPError as e:
+            logger.info("amazon_buyer_cancel_http_error", order_id=order_id, err=str(e)[:200])
+            return None
+        if r.status_code != 200:
+            logger.info(
+                "amazon_buyer_cancel_non_200",
+                order_id=order_id, status=r.status_code, body=r.text[:200],
+            )
+            return None
+        body = r.json() or {}
+        payload = body.get("payload") if isinstance(body.get("payload"), dict) else body
+        itens = (payload or {}).get("OrderItems")
+        if not isinstance(itens, list):
+            return None
+        pedido = False
+        motivo: str | None = None
+        for item in itens:
+            brc = item.get("BuyerRequestedCancel") if isinstance(item, dict) else None
+            if not isinstance(brc, dict):
+                continue
+            if str(brc.get("IsBuyerRequestedCancel") or "").strip().lower() != "true":
+                continue
+            pedido = True
+            motivo = motivo or (str(brc.get("BuyerCancelReason") or "").strip() or None)
+        return {"pedido": pedido, "motivo": motivo}
+
     async def get_easyship_tracking(self, order_id: str) -> str | None:
         """Número de rastreio de um pedido EasyShip via Easy Ship API
         (`GET /easyShip/2022-03-23/package?amazonOrderId=`).

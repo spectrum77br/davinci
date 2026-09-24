@@ -268,6 +268,23 @@ def test_estado_resolvido_alvo_de_outro_estado_nao_bloqueia():
     assert logistica_match.estado_resolvido([r1, r2], "Em andamento") is False
 
 
+def test_combinacao_sem_cadastro_nao_esconde():
+    # Caso real 23/09, Amazon 293002: "Cancelado | Etiqueta cancelada" parado em
+    # "Em digitação". A chave só tem regra pra OUTRO estado, sem troca de
+    # status — não há regra pra (chave, Em digitação). Antes dava "resolvido"
+    # (sumia do painel e nem pintava); agora fica visível e vermelha.
+    outra = _rule(status_plataforma="Cancelado | Etiqueta cancelada", status_atual="Cancelado")
+    assert logistica_match.regra_ativa([outra], "Em digitação") is None
+    assert logistica_match.estado_resolvido([outra], "Em digitação") is False
+    assert logistica_match.deve_monitorar([outra], "Em digitação") is False
+    # No estado cadastrado continua obedecendo a regra (vazia → esconde).
+    assert logistica_match.estado_resolvido([outra], "Cancelado") is True
+    # Chegou pelo alvo de uma regra da chave → fim da cadeia, resolvido (como antes).
+    trouxe = _rule(status_atual="Em aberto", alterar_status_bling="Cancelado")
+    assert logistica_match.estado_resolvido([trouxe], "Cancelado") is True
+    assert logistica_match.estado_resolvido([trouxe], "Em digitação") is False
+
+
 def test_regra_ativa_desambigua_pelo_status_atual():
     # A regra MOSTRADA/aplicada tem que respeitar onde o pedido está (287924).
     r1 = _rule(status_atual="Em andamento", alterar_status_bling="Aguardando Devolução")
@@ -357,8 +374,9 @@ def test_devolucao_travada_caso_291683():
         plataforma="Mercado Livre", status_plataforma=chave,
         status_atual="Aguardando Devolução",
     )
-    # Antes do cadastro: some do painel (bug) → o radar tem que segurar a linha.
-    assert logistica_match.estado_resolvido([terminal], "Entregue") is True
+    # Antes do cadastro: combinação sem regra. Desde 23/09 `estado_resolvido`
+    # já não esconde (regra geral, qualquer chave); o radar segue marcando.
+    assert logistica_match.estado_resolvido([terminal], "Entregue") is False
     assert (
         logistica_match.devolucao_travada(
             [terminal], plataforma="Mercado Livre", meli_status=meli, status_bling="Entregue"

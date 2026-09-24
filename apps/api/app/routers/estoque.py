@@ -466,10 +466,10 @@ async def list_estoque_produtos(
             continue
         if is_historical and estoque_filter == "sem" and virtual > 0:
             continue
-        # `Product.stock` is the VIRTUAL balance (Bling saldoVirtualTotal) —
-        # the grid's "Atual" column (disponível pra vender; Vinicius,
-        # 23/09/2026). virtual + reserved reconstructs the FÍSICO (shelf),
-        # shown on hover. Reserva negativa = pedido de entrada em aberto.
+        # Grade Saldo (Vinicius, 23/09/2026): Atual = FÍSICO do Bling
+        # (virtual + reserva), Reserva = pedidos em aberto (físico − virtual;
+        # negativa = pedido de entrada em aberto), Final = `Product.stock`,
+        # o VIRTUAL (Bling saldoVirtualTotal) — disponível pra vender.
         saldo_fisico = virtual + reserved
         result.append({
             "sku": p.sku,
