@@ -681,7 +681,7 @@ def _magalu_client_for(integ: Integration, session: AsyncSession) -> MagaluClien
             integ.token_expires_at = datetime.fromtimestamp(int(exp), tz=UTC)
         await session.commit()
 
-    return MagaluClient(creds, on_token_refresh=_persist_refresh)
+    return MagaluClient(creds, on_token_refresh=_persist_refresh, integration_id=integ.id)
 
 
 async def _link_amazon_integration(

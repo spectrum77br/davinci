@@ -159,6 +159,84 @@ async def test_refresh_persists_rotated_refresh_token() -> None:
     assert client.creds["access_token"] == "AT2"
 
 
+# ----------------------------------------------------------- erros de conexão
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error_type", "description"),
+    [
+        (httpx.ConnectTimeout, "tempo esgotado ao estabelecer conexão"),
+        (httpx.ConnectError, "não foi possível estabelecer conexão"),
+        (httpx.ProxyError, "falha ao conectar pelo proxy configurado"),
+        (httpx.ReadTimeout, "tempo esgotado aguardando a resposta"),
+        (httpx.RemoteProtocolError, "resposta inválida ou conexão encerrada pelo destino"),
+        (httpx.HTTPError, "falha na comunicação HTTP"),
+    ],
+)
+@pytest.mark.parametrize(
+    "message",
+    ["", "http://proxy-user:proxy-secret@proxy.example:8080 Bearer secret-token"],
+)
+async def test_connection_http_error_is_useful_and_does_not_expose_secrets(
+    monkeypatch: pytest.MonkeyPatch,
+    error_type: type[httpx.HTTPError],
+    description: str,
+    message: str,
+) -> None:
+    client = MagaluClient(_creds())
+
+    async def fail_request(*args, **kwargs):
+        raise error_type(message)
+
+    monkeypatch.setattr(client, "_request", fail_request)
+    result = await client.test_connection()
+
+    assert result.ok is False
+    assert result.detail == f"http_error: {error_type.__name__}: {description}"
+    for secret in ("proxy-user", "proxy-secret", "proxy.example", "secret-token"):
+        assert secret not in result.detail
+
+
+@pytest.mark.asyncio
+async def test_connection_http_status_error_keeps_status_without_request_or_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = MagaluClient(_creds())
+    request = httpx.Request(
+        "POST", f"{MAGALU_TOKEN_URL}?secret-token", headers={"Authorization": "secret-token"}
+    )
+    response = httpx.Response(503, request=request, text="secret-response")
+
+    async def fail_request(*args, **kwargs):
+        raise httpx.HTTPStatusError("secret-message", request=request, response=response)
+
+    monkeypatch.setattr(client, "_request", fail_request)
+    result = await client.test_connection()
+
+    assert result.ok is False
+    assert result.detail == "http_error: HTTPStatusError: falha na comunicação HTTP status=503"
+
+
+@pytest.mark.asyncio
+async def test_update_stock_transport_error_keeps_safe_diagnostic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = MagaluClient(_creds())
+    client._channel_id = _CHANNEL
+
+    async def fail_request(*args, **kwargs):
+        raise httpx.ProxyError("http://proxy-user:proxy-secret@proxy.example:8080")
+
+    monkeypatch.setattr(client, "_request", fail_request)
+    result = await client.update_stock(_link(stock=3), 42)
+
+    assert result.status == SyncStatus.RETRYABLE
+    assert result.qty_before == 3
+    assert result.error_code == "magalu_patch_stock_failed"
+    assert result.error_detail == "ProxyError: falha ao conectar pelo proxy configurado"
+
+
 # ---------------------------------------------------------------- update_stock
 
 

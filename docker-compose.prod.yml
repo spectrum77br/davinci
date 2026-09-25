@@ -17,6 +17,38 @@ networks:
     name: web_edge
 
 services:
+  # Magalu-only egress through the owner's Mac. No public port: the TCP bridge
+  # reaches a private Unix socket forwarded by SSH to the authenticated Mac proxy.
+  magalu_proxy:
+    build:
+      context: ./infra/magalu-proxy
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    volumes:
+      - ./data/magalu-proxy:/tunnel:ro
+    networks: [davinci_net]
+    healthcheck:
+      # A 407 proves the bridge, SSH tunnel and Mac proxy are reachable. The
+      # unauthenticated request is rejected before any connection to Magalu.
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import socket;
+          s=socket.create_connection(('127.0.0.1',13129),5);
+          s.settimeout(5);
+          s.sendall(b'CONNECT api.magalu.com:443 HTTP/1.1\r\nHost: api.magalu.com:443\r\n\r\n');
+          status=s.recv(256).split(b'\r\n')[0];
+          s.close();
+          assert b' 407 ' in status
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
   caddy:
     image: caddy:2-alpine
     restart: unless-stopped

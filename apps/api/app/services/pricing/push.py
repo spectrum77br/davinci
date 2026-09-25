@@ -619,7 +619,8 @@ async def push_one(
         await session.commit()
 
     client = client_for(
-        integration.platform, creds, on_token_refresh=_persist_refresh
+        integration.platform, creds, on_token_refresh=_persist_refresh,
+        integration_id=integration.id,
     )
 
     # Pre-load the davinci.products.sku for every link so Amazon (which

@@ -82,7 +82,7 @@ def _client_for_listings(session: AsyncSession, integ: Integration):
     if integ.platform == IntegrationPlatform.ML:
         return MercadoLivreClient(creds, on_token_refresh=on_refresh)
     if integ.platform == IntegrationPlatform.MAGALU:
-        return MagaluClient(creds, on_token_refresh=on_refresh)
+        return MagaluClient(creds, on_token_refresh=on_refresh, integration_id=integ.id)
     return None
 
 

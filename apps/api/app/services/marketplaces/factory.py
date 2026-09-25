@@ -33,7 +33,9 @@ def client_for(
     if platform == IntegrationPlatform.TEMU:
         return TemuClient(creds, on_token_refresh=on_token_refresh)
     if platform == IntegrationPlatform.MAGALU:
-        return MagaluClient(creds, on_token_refresh=on_token_refresh)
+        return MagaluClient(
+            creds, on_token_refresh=on_token_refresh, integration_id=integration_id
+        )
     raise HTTPException(501, detail={"code": "platform_not_implemented", "platform": platform.value})
 
 

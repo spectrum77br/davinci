@@ -71,7 +71,7 @@ if TYPE_CHECKING:
 logger = structlog.get_logger()
 
 MAGALU_AUTH_URL = "https://id.magalu.com/login"
-MAGALU_TOKEN_URL = "https://id.magalu.com/oauth/token"
+MAGALU_TOKEN_URL = "https://id.magalu.com/oauth/token"  # noqa: S105 - endpoint, not a secret
 MAGALU_API_BASE = "https://api.magalu.com"
 
 # Os 11 scopes concedidos ao app "DavinciERP" no ID Magalu (portfólio r/w,
@@ -100,20 +100,19 @@ _MAX_PAGE_SIZE = 100
 def _http_client(timeout: float) -> httpx.AsyncClient:
     """AsyncClient com proxy opcional — usado por TODA saída HTTP da Magalu.
 
-    A Azion (edge da Magalu) bloqueia IPs de datacenter/fora do BR: o servidor
-    de produção (Hetzner/DE) leva 403 em todo id.magalu.com e api.magalu.com. Se
-    `MAGALU_PROXY_URL` estiver setada, o tráfego da Magalu (exchange, refresh e
-    chamadas de API) — e SÓ ele — sai por esse proxy BR; vazia = conexão direta
-    (comportamento padrão). As demais integrações não passam por aqui.
+    `MAGALU_PROXY_URL` direciona exchange, refresh e chamadas de API pela saída
+    configurada. Vazia mantém conexão direta. As demais integrações não passam
+    por aqui; o proxy CONNECT preserva o TLS entre este cliente e a Magalu.
     """
     proxy = get_settings().magalu_proxy_url or None
     return httpx.AsyncClient(timeout=timeout, proxy=proxy)
 
 
 class MagaluClient:
-    def __init__(self, creds: dict, on_token_refresh=None):
+    def __init__(self, creds: dict, on_token_refresh=None, integration_id=None):
         self.creds = dict(creds)
         self._on_refresh = on_token_refresh
+        self._integration_id = integration_id
         # channel.id do seller (obrigatório nos PATCH de estoque/preço). Fica
         # None até a 1ª descoberta e é cacheado aqui pelo resto do ciclo de vida
         # do cliente (o orchestrator reusa 1 cliente por integração no run).
@@ -187,17 +186,73 @@ class MagaluClient:
             r.raise_for_status()
             return _normalize_token(r.json())
 
-    async def refresh(self) -> None:
-        """Renova o access_token. ⚠️ O refresh_token é SINGLE-USE: cada refresh
-        devolve um NOVO refresh_token e invalida o anterior — por isso persistimos
-        via `on_token_refresh` sempre. Sem isso, a conta cai no refresh seguinte.
-        O endpoint de refresh espera **form-urlencoded** (não JSON)."""
-        rt = self.creds.get("refresh_token")
+    async def refresh(
+        self, *, expired_only: bool = False, rejected_access_token: str | None = None,
+    ) -> None:
+        """Serialize refreshes for a saved integration across workers/processes.
+
+        The row lock covers rereading, token rotation and its durable commit.
+        Caller callbacks may own other sessions, so they are used only for
+        clients without an integration ID. No token is adopted before commit.
+        """
+        if self._integration_id is None:
+            new_creds = await self._fetch_refreshed_credentials(self.creds)
+            if self._on_refresh:
+                await self._on_refresh(new_creds)
+            self.creds = new_creds
+            return
+
+        from sqlalchemy import select
+
+        from app import db
+        from app.models import Integration, IntegrationPlatform
+        from app.security.cipher import decrypt_json, encrypt_json
+
+        observed_tokens = (self.access_token, self.creds.get("refresh_token"))
+        async with db.SessionLocal() as session:
+            async with session.begin():
+                integration = await session.scalar(
+                    select(Integration)
+                    .where(
+                        Integration.id == self._integration_id,
+                        Integration.platform == IntegrationPlatform.MAGALU,
+                    )
+                    # FK inserts in the caller can hold KEY SHARE on this row.
+                    # NO KEY UPDATE serializes rotations without blocking those
+                    # callers; refresh never changes the integration's key.
+                    .with_for_update(key_share=True)
+                )
+                if integration is None:
+                    raise RuntimeError("magalu_refresh_integration_missing")
+                current = decrypt_json(integration.credentials)
+                current_tokens = (current.get("access_token"), current.get("refresh_token"))
+                expiry = int(current.get("expires_at") or 0)
+                usable = bool(current_tokens[0]) and (
+                    not expiry or expiry - 30 > int(time.time())
+                )
+                if rejected_access_token is not None:
+                    reuse = usable and current_tokens[0] != rejected_access_token
+                else:
+                    reuse = usable and (expired_only or current_tokens != observed_tokens)
+                if reuse:
+                    new_creds = current
+                else:
+                    new_creds = await self._fetch_refreshed_credentials(current)
+                    integration.credentials = encrypt_json(new_creds)
+                    integration.token_expires_at = datetime.fromtimestamp(
+                        int(new_creds["expires_at"]), tz=UTC,
+                    )
+            # Commit must succeed before any API request uses the new token.
+            self.creds = new_creds
+
+    async def _fetch_refreshed_credentials(self, creds: dict) -> dict:
+        """Refresh uses form-urlencoded; keep rotation separate from persistence."""
+        rt = creds.get("refresh_token")
         if not rt:
             raise RuntimeError("missing refresh_token")
         s = get_settings()
-        cid = str(self.creds.get("client_id") or s.magalu_client_id or "")
-        csec = str(self.creds.get("client_secret") or s.magalu_client_secret or "")
+        cid = str(creds.get("client_id") or s.magalu_client_id or "")
+        csec = str(creds.get("client_secret") or s.magalu_client_secret or "")
         if not cid or not csec:
             raise RuntimeError("missing client_id or client_secret")
         async with _http_client(20.0) as c:
@@ -215,9 +270,7 @@ class MagaluClient:
                 raise RuntimeError(
                     f"magalu_refresh_failed status={r.status_code} body={r.text[:300]}"
                 )
-            self.creds.update(_normalize_token(r.json(), prev=self.creds))
-        if self._on_refresh:
-            await self._on_refresh(self.creds)
+            return _normalize_token(r.json(), prev=creds)
 
     async def _request(
         self,
@@ -228,10 +281,11 @@ class MagaluClient:
         json: Any = None,
     ) -> httpx.Response:
         if self._expired():
-            await self.refresh()
+            await self.refresh(expired_only=True)
         url = f"{MAGALU_API_BASE}{path}"
+        request_token = self.access_token
         headers = {
-            "Authorization": f"Bearer {self.access_token}",
+            "Authorization": f"Bearer {request_token}",
             "Accept": "application/json",
         }
         delay = 1.0
@@ -242,8 +296,9 @@ class MagaluClient:
                     method, url, headers=headers, params=params, json=json
                 )
             if r.status_code == 401 and attempt == 0:
-                await self.refresh()
-                headers["Authorization"] = f"Bearer {self.access_token}"
+                await self.refresh(rejected_access_token=request_token or "")
+                request_token = self.access_token
+                headers["Authorization"] = f"Bearer {request_token}"
                 continue
             if r.status_code in (429, 502, 503, 504):
                 logger.warning(
@@ -274,7 +329,7 @@ class MagaluClient:
                 ok=False, detail=f"status={r.status_code} body={r.text[:200]}"
             )
         except httpx.HTTPError as e:
-            return TestResult(ok=False, detail=f"http_error: {e}")
+            return TestResult(ok=False, detail=f"http_error: {_http_error_detail(e)}")
         except Exception as e:  # noqa: BLE001
             return TestResult(ok=False, detail=f"error: {e}")
 
@@ -581,11 +636,41 @@ def _normalize_magalu_sku(item: dict) -> dict | None:
     }
 
 
+def _http_error_detail(e: httpx.HTTPError) -> str:
+    """Diagnóstico útil mesmo quando httpx não traz mensagem.
+
+    Não reproduzimos `str(e)`: erros de transporte podem conter a URL do proxy
+    (incluindo usuário/senha), headers ou tokens. O tipo e uma descrição fixa
+    identificam a etapa que falhou sem expor esses dados.
+    """
+    descriptions = (
+        (httpx.ProxyError, "falha ao conectar pelo proxy configurado"),
+        (httpx.ConnectTimeout, "tempo esgotado ao estabelecer conexão"),
+        (httpx.ReadTimeout, "tempo esgotado aguardando a resposta"),
+        (httpx.WriteTimeout, "tempo esgotado ao enviar a requisição"),
+        (httpx.PoolTimeout, "tempo esgotado aguardando uma conexão disponível"),
+        (httpx.ConnectError, "não foi possível estabelecer conexão"),
+        (httpx.ReadError, "falha ao receber a resposta"),
+        (httpx.WriteError, "falha ao enviar a requisição"),
+        (httpx.RemoteProtocolError, "resposta inválida ou conexão encerrada pelo destino"),
+        (httpx.LocalProtocolError, "falha ao preparar a requisição HTTP"),
+        (httpx.UnsupportedProtocol, "protocolo de conexão não suportado"),
+        (httpx.TooManyRedirects, "limite de redirecionamentos excedido"),
+    )
+    description = next(
+        (text for kind, text in descriptions if isinstance(e, kind)),
+        "falha na comunicação HTTP",
+    )
+    response = getattr(e, "response", None)
+    status = f" status={response.status_code}" if response is not None else ""
+    return f"{type(e).__name__}: {description}{status}"
+
+
 def _map_http_error(
     e: httpx.HTTPError, qty_before: int | None, code: str
 ) -> SyncResult:
     status: SyncStatus = SyncStatus.RETRYABLE
-    detail = str(e)[:500]
+    detail = _http_error_detail(e)
     response = getattr(e, "response", None)
     http_code = response.status_code if response is not None else None
     if http_code in {400, 401, 403, 404, 422}:

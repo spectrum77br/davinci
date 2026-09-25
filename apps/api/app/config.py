@@ -145,8 +145,8 @@ class Settings(BaseSettings):
     magalu_client_secret: str = ""
     magalu_redirect_uri: str = ""
     # Proxy de saída EXCLUSIVO da Magalu (formato "http://user:senha@host:porta").
-    # A Azion (edge da Magalu) bloqueia IPs de datacenter/fora do BR: o servidor
-    # de produção (Hetzner/DE) leva 403 em TODO id.magalu.com e api.magalu.com.
+    # A conexão direta do servidor foi recusada em testes; o Mac alcança a API.
+    # Isso não estabelece uma regra geral de bloqueio por país/provedor.
     # Setando isto, o tráfego da Magalu (OAuth + API) — e SÓ ele — sai por um
     # proxy BR; as demais integrações continuam saindo direto. Vazia = conexão
     # direta (sem proxy), o comportamento padrão.
