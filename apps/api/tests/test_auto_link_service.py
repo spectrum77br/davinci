@@ -743,6 +743,15 @@ async def test_mass_sync_active_ignora_massa_sem_sinal_de_vida(
     await db.commit()
     assert await mass_sync_active(db, user.id) is not None
 
+    # AUTO_LINK varre uma conta inteira sem dar sinal: calado há 70 min ainda
+    # conta como ativo (vale só a janela de 4h).
+    job.type = BackgroundJobType.AUTO_LINK
+    job.last_heartbeat_at = agora - timedelta(minutes=70)
+    job.started_at = agora - timedelta(minutes=80)
+    await db.commit()
+    assert await mass_sync_active(db, user.id) is not None
+    job.type = BackgroundJobType.SYNC_ALL
+
     # PENDING esperando a fila há 1h (o worker ainda não pegou): continua ativo.
     job.status = BackgroundJobStatus.PENDING
     job.started_at = None

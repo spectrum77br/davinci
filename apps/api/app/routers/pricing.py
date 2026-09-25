@@ -1949,8 +1949,11 @@ def _escolher_integracao(
     eram os dos anúncios da kfa2. Agora, em ordem:
       1. a integração da loja (store_info) à qual a conta já está ligada;
       2. nome exato, sem o sufixo classico/premium;
-      3. palavra INTEIRA em comum, e só se apontar para UMA integração —
-         empate não chuta (fica sem ligar, para alguém escolher).
+      3. TODAS as palavras do nome da integração aparecem no nome da conta
+         ("kfa" em "kfa amazon"), e só se apontar para UMA integração.
+    Sem prova pelo nome não liga — nem quando a plataforma tem uma integração
+    só ("poofy" ia parar em "KFA Amazon"; "lucas mei" em "victor mei" pela
+    palavra "mei"). Fica sem ligar, para alguém escolher na mão.
     """
     if integracao_da_loja is not None:
         for c in candidatas:
@@ -1963,14 +1966,14 @@ def _escolher_integracao(
         return exatas[0]
     if exatas:
         return None
-    tokens = {w for w in palavras if len(w) >= 3 and w not in _SUFIXOS_MODALIDADE}
-    por_palavra = [
-        c for c in candidatas if tokens & set((c.name or "").lower().split())
+    palavras_base = set(base.split())
+    por_nome = [
+        c
+        for c in candidatas
+        if (c.name or "").split() and set((c.name or "").lower().split()) <= palavras_base
     ]
-    if len(por_palavra) == 1:
-        return por_palavra[0]
-    if len(candidatas) == 1 and not por_palavra:
-        return candidatas[0]
+    if len(por_nome) == 1:
+        return por_nome[0]
     return None
 
 
@@ -1995,9 +1998,13 @@ async def auto_match_accounts(
             )
         )
     ).scalars().all()
+    # Arquivada fica de fora: ligar nela esconde a conta da Tabela de Preços
+    # (_exclude_archived_accounts).
     integrations = (
         await session.execute(
-            select(Integration).where(user_scope(Integration, user))
+            select(Integration).where(
+                and_(user_scope(Integration, user), Integration.archived_at.is_(None))
+            )
         )
     ).scalars().all()
 

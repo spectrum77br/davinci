@@ -74,6 +74,8 @@ _MASS_SYNC_ACTIVE_WINDOW = timedelta(hours=4)
 # por até 4h (25/09/2026: marrocos e harry potter travados desde 12:09). Num
 # massa normal o maior intervalo entre sinais foi ~2 min (sync_all de 24-25/09);
 # 15 min dá folga para um link lento sem liberar um segundo massa por engano.
+# Só vale para o SYNC_ALL: o AUTO_LINK varre uma conta inteira sem dar sinal
+# (só no fim de cada integração), então para ele fica a janela de 4h.
 _MASS_SYNC_HEARTBEAT_TIMEOUT = timedelta(minutes=15)
 
 
@@ -110,6 +112,7 @@ async def mass_sync_active(session: AsyncSession, user_id: UUID) -> dict | None:
                     BackgroundJob.created_at >= cutoff,
                     or_(
                         BackgroundJob.status == BackgroundJobStatus.PENDING,
+                        BackgroundJob.type != BackgroundJobType.SYNC_ALL,
                         func.coalesce(
                             BackgroundJob.last_heartbeat_at,
                             BackgroundJob.started_at,
