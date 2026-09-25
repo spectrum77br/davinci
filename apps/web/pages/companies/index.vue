@@ -510,20 +510,45 @@ async function excluirCertificado(row: GridRow, cert: CertificadoItem) {
   certExcluindo.value = cert.id
   certErro.value = null
   try {
-    await apiE(`/api/companies/${empresa}/certificates/${cert.id}`, { method: 'DELETE' })
-    // A senha revelada podia ser justamente a do certificado apagado.
-    if (certAberto.value === empresa) certSenhaGuardada.value = null
+    try {
+      await apiE(`/api/companies/${empresa}/certificates/${cert.id}`, { method: 'DELETE' })
+    } catch (e: any) {
+      // Já excluído em outra aba ou por outro admin: para a tela é o mesmo que ter dado certo.
+      if (e?.data?.detail?.code !== 'certificate_not_found') throw e
+    }
+    tirarCertificadoDaTela(empresa, cert.id)
     await refresh()
     if (certAberto.value === empresa) {
-      const restante = grid.value?.rows.find(r => r.company.id === empresa)?.certificado
-      if (restante) await carregarListaCertificados(empresa)
-      else certLista.value = []
+      // A senha revelada podia ser justamente a do certificado apagado.
+      certSenhaGuardada.value = null
+      await carregarListaCertificados(empresa)
     }
   } catch (e: any) {
     if (certAberto.value === empresa) certErro.value = mensagemDeErro(e, 'erro ao excluir o certificado')
   } finally {
     certExcluindo.value = null
   }
+}
+// Some da tela logo depois do DELETE, sem esperar a recarga: se ela falhar (rede,
+// trava da tela vencendo), o painel e o selo não ficam apontando para um
+// certificado que já não existe.
+function tirarCertificadoDaTela(empresa: string, certId: string) {
+  if (certAberto.value === empresa) {
+    certSenhaGuardada.value = null
+    if (certLista.value) certLista.value = certLista.value.filter(c => c.id !== certId)
+  }
+  const linha = grid.value?.rows.find(r => r.company.id === empresa)
+  const selo = linha?.certificado
+  if (!linha || !selo) return
+  if (selo.id !== certId) {
+    selo.total = Math.max(1, selo.total - 1)
+    return
+  }
+  // Era o mais novo: o próximo da lista (que vem do mais novo para o mais antigo)
+  // passa a representar a empresa. Sem a lista, só dá para saber se era o único.
+  const proximo = certAberto.value === empresa ? certLista.value?.[0] : undefined
+  if (proximo) linha.certificado = { ...proximo, total: certLista.value!.length }
+  else if (selo.total <= 1) linha.certificado = null
 }
 function fecharCertificado() {
   limparPainelCertificado()
@@ -539,6 +564,10 @@ function escolherArquivoCertificado(ev: Event) {
   }
   certArquivo.value = f
 }
+function aindaEOCertificadoDaTela(empresa: string, certId: string) {
+  return certAberto.value === empresa
+    && grid.value?.rows.find(r => r.company.id === empresa)?.certificado?.id === certId
+}
 async function mostrarSenhaGuardada(row: GridRow) {
   const cert = row.certificado
   if (!cert) return
@@ -548,12 +577,12 @@ async function mostrarSenhaGuardada(row: GridRow) {
     const r = await apiE<{ password: string | null }>(
       `/api/companies/${empresa}/certificates/${cert.id}/password`,
     )
-    // Se nesse meio tempo a pessoa abriu o painel de OUTRA empresa, a senha
-    // desta não pode aparecer lá.
-    if (certAberto.value !== empresa) return
+    // Se nesse meio tempo a pessoa abriu o painel de OUTRA empresa, ou o
+    // certificado foi excluído, a senha dele não pode aparecer no painel.
+    if (!aindaEOCertificadoDaTela(empresa, cert.id)) return
     certSenhaGuardada.value = r.password || '(nenhuma senha guardada)'
   } catch (e: any) {
-    if (certAberto.value === empresa) certErro.value = mensagemDeErro(e, 'não foi possível mostrar a senha')
+    if (aindaEOCertificadoDaTela(empresa, cert.id)) certErro.value = mensagemDeErro(e, 'não foi possível mostrar a senha')
   }
 }
 async function salvarCertificado(row: GridRow) {
@@ -606,9 +635,13 @@ function dataBR(iso: string): string {
   return `${dia}/${mes}/${ano}`
 }
 // Situação para o selo da célula: vencido, vencendo em 30 dias, ou ok.
+// Conta dias de calendário: no próprio dia do vencimento ainda "vence" (amarelo),
+// "venceu" só a partir do dia seguinte.
 function vencimentoCertificado(cert: { expires_at: string | null } | null | undefined) {
   if (!cert?.expires_at) return null
-  const dias = Math.floor((new Date(cert.expires_at + 'T00:00:00').getTime() - Date.now()) / 86_400_000)
+  const hoje = new Date()
+  hoje.setHours(0, 0, 0, 0)
+  const dias = Math.round((new Date(cert.expires_at + 'T00:00:00').getTime() - hoje.getTime()) / 86_400_000)
   return { texto: dataBR(cert.expires_at), vencido: dias < 0, vencendo: dias >= 0 && dias <= 30 }
 }
 
@@ -1168,7 +1201,7 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
                   </button>
                 </div>
 
-                <ul v-if="certificadosDoPainel(row).length" class="space-y-1">
+                <ul v-if="certificadosDoPainel(row).length" class="space-y-1 max-h-48 overflow-y-auto">
                   <li
                     v-for="(c, i) in certificadosDoPainel(row)"
                     :key="c.id"
@@ -1202,7 +1235,8 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
                   </li>
                 </ul>
                 <div v-if="certificadosDoPainel(row).length > 1" class="text-muted-foreground">
-                  A senha e a troca de arquivo abaixo valem para o mais novo, que é o que aparece na tabela.
+                  A senha abaixo vale para o mais novo, que é o que aparece na tabela. Subir um arquivo novo
+                  acrescenta outro certificado; os de cima continuam até você excluir.
                 </div>
 
                 <label class="block space-y-1">
@@ -1230,7 +1264,7 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
                 </label>
 
                 <label class="block space-y-1">
-                  <span>{{ row.certificado ? 'Trocar o arquivo (renovação) — opcional' : 'Arquivo do certificado (.pfx ou .p12)' }}</span>
+                  <span>{{ row.certificado ? 'Subir arquivo novo (renovação) — opcional' : 'Arquivo do certificado (.pfx ou .p12)' }}</span>
                   <input type="file" accept=".pfx,.p12" class="block w-full text-xs" @change="escolherArquivoCertificado" />
                 </label>
 
@@ -1243,7 +1277,8 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
                   <button
                     v-if="!certSenhaGuardada"
                     type="button"
-                    class="text-blue-600 hover:underline"
+                    class="text-blue-600 hover:underline disabled:opacity-50"
+                    :disabled="!!certExcluindo"
                     @click="mostrarSenhaGuardada(row)"
                   >
                     ver a senha guardada
