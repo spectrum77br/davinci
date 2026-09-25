@@ -236,8 +236,12 @@ async def patch_company(
         data["ip"] = _ip_ou_422(data["ip"])
         await _garante_ip_livre(session, data["ip"], exceto=c.id)
         if data["ip"] != c.ip:
-            # IP novo: o erro do AdsPower era do IP antigo. Zera para o serviço
-            # do Mac pegar o novo já na próxima passada, sem esperar a hora.
+            # IP novo: o erro do AdsPower era do IP antigo, e a confirmação
+            # também. Zerar as duas faz o serviço do Mac pegar a empresa já na
+            # próxima passada — inclusive quando alguém VOLTA ao IP anterior
+            # depois de uma troca que parou no meio: sem zerar, a tela diria ✓
+            # com perfis presos no IP novo.
+            c.ip_adspower = None
             c.ip_adspower_erro = None
             c.ip_adspower_em = None
     for k, v in data.items():

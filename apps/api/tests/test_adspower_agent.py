@@ -228,3 +228,72 @@ async def test_trocar_o_ip_na_tela_faz_voltar_na_hora(client, db, make_user, aut
     assert r.status_code == 200
     [p] = (await client.get("/api/agent/adspower/ip-pendentes", headers=H)).json()
     assert p["ip"] == "76.13.226.18"
+
+
+# --- achados da revisão ------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_token_com_acento_da_401_e_nao_500(client, espelho):
+    # Em bytes latin-1, como chega de um cliente que manda acento cru.
+    r = await client.get(
+        "/api/agent/adspower/ip-pendentes", headers={"X-Agent-Token": "tokén".encode("latin-1")}
+    )
+    assert r.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_loja_arquivada_nao_conta(client, db, make_user, espelho):
+    """Com servidor morto, ela prenderia a empresa num ✗ para sempre."""
+    u = await make_user()
+    await espelho("k1kfaml", "84", "KFA - Mercado Livre")
+    await _loja(db, u, "ml", "kfa", "84")
+    db.add(
+        StoreInfo(
+            user_id=u.id, platform="shopee", account_name="kfa", server="999",
+            archived_at=datetime.now(UTC),
+        )
+    )
+    await db.commit()
+    await _empresa(db, "KFA", ip="72.60.156.216")
+    [p] = (await client.get("/api/agent/adspower/ip-pendentes", headers=H)).json()
+    assert [x["user_id"] for x in p["perfis"]] == ["k1kfaml"]
+    assert p["sem_perfil"] == []
+
+
+@pytest.mark.asyncio
+async def test_apelidos_iguais_de_empresas_diferentes_nao_tem_perfil_exclusivo(
+    client, db, make_user, espelho
+):
+    """'dream 2' e 'Dream 2' são duas empresas: o perfil de uma não pode ser
+    trocado como se fosse só da outra."""
+    u = await make_user()
+    await espelho("k1dream", "91", "Dream 2 - Mercado Livre")
+    await _loja(db, u, "ml", "dream2", "91")
+    await _empresa(db, "dream 2", ip="72.60.155.20", ip_adspower="72.60.155.20")
+    await _empresa(db, "Dream 2", ip="187.77.9.9")
+    [p] = (await client.get("/api/agent/adspower/ip-pendentes", headers=H)).json()
+    assert p["perfis"] == []
+    assert [x["user_id"] for x in p["compartilhados"]] == ["k1dream"]
+
+
+@pytest.mark.asyncio
+async def test_voltar_ao_ip_antigo_fica_pendente(client, db, make_user, auth_as, espelho):
+    """Troca que parou no meio deixa perfis no IP novo. Voltar ao IP antigo não
+    pode mostrar ✓: tem que ir para a fila para o Mac realinhar."""
+    auth_as(await make_user(role=UserRole.ADMIN))
+    c = await _empresa(db, "KFA", ip="72.60.156.216", ip_adspower="72.60.156.216")
+    await client.patch(f"/api/companies/{c.id}", json={"ip": "76.13.226.18"})
+    r = await client.patch(f"/api/companies/{c.id}", json={"ip": "72.60.156.216"})
+    assert r.json()["ip_adspower"] is None
+    [p] = (await client.get("/api/agent/adspower/ip-pendentes", headers=H)).json()
+    assert p["ip"] == "72.60.156.216"
+
+
+@pytest.mark.asyncio
+async def test_salvar_o_mesmo_ip_nao_mexe_na_confirmacao(client, db, make_user, auth_as, espelho):
+    auth_as(await make_user(role=UserRole.ADMIN))
+    c = await _empresa(db, "KFA", ip="72.60.156.216", ip_adspower="72.60.156.216")
+    r = await client.patch(f"/api/companies/{c.id}", json={"ip": "72.60.156.216"})
+    assert r.json()["ip_adspower"] == "72.60.156.216"
+    assert (await client.get("/api/agent/adspower/ip-pendentes", headers=H)).json() == []

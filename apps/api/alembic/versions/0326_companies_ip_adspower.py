@@ -17,8 +17,8 @@ colocar o IP novo". Esses IPs foram lidos do próprio AdsPower em 25/09/2026,
 então já estão lá; marcá-los garante que o serviço do Mac não toque em nenhum
 perfil existente e só aja no próximo IP que alguém digitar.
 
-Revision ID: 0325_companies_ip_adspower
-Revises: 0324_companies_ip
+Revision ID: 0326_companies_ip_adspower
+Revises: 0325_robo_margem_um_so
 """
 
 from collections.abc import Sequence
@@ -27,8 +27,8 @@ import sqlalchemy as sa
 
 from alembic import op
 
-revision: str = "0325_companies_ip_adspower"
-down_revision: str | None = "0324_companies_ip"
+revision: str = "0326_companies_ip_adspower"
+down_revision: str | None = "0325_robo_margem_um_so"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

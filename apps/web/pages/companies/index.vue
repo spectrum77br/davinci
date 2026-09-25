@@ -300,6 +300,7 @@ async function commitEditCell(row: GridRow, field: EditableField) {
       row.company.ip_adspower = updated.ip_adspower
       row.company.ip_adspower_em = updated.ip_adspower_em
       row.company.ip_adspower_erro = updated.ip_adspower_erro
+      if (updated.ip && updated.ip !== updated.ip_adspower) ligarRelogio()
     }
     // Deu certo: a faixa de erro de uma tentativa anterior (ex.: IP repetido)
     // não pode continuar na tela dizendo que falhou.
@@ -373,23 +374,54 @@ function situacaoAdspower(c: CompanyOut): SituacaoAdspower | null {
   if (c.ip_adspower_erro) {
     return { simbolo: '✗', classe: 'text-red-600', texto: `Não foi para o AdsPower: ${c.ip_adspower_erro}. Tenta de novo sozinho em até 1 hora, ou na hora se você trocar o IP.` }
   }
+  if (macSemResposta.value) {
+    return { simbolo: '⏳', classe: 'text-amber-600', texto: 'O serviço do Mac ainda não aplicou (mais de 5 minutos). Ele pode estar desligado ou o AdsPower fechado.' }
+  }
   return { simbolo: '⏳', classe: 'text-muted-foreground', texto: 'Indo para o AdsPower (leva até 1 minuto)' }
 }
 // Enquanto algum IP está a caminho, recarrega a tabela a cada 20 s para o
-// relógio virar ✓ (ou ✗) sem a pessoa precisar apertar "recarregar".
+// relógio virar ✓ (ou ✗) sem a pessoa precisar apertar "recarregar". Para
+// depois de 5 minutos: se o serviço do Mac está desligado, recarregar para
+// sempre não resolve, e a tela passa a dizer isso.
+const macSemResposta = ref(false)
 let relogioAdspower: ReturnType<typeof setInterval> | null = null
+let relogioDesde = 0
 const algumIpACaminho = computed(() =>
-  (grid.value?.rows || []).some(r => situacaoAdspower(r.company)?.simbolo === '⏳'),
+  (grid.value?.rows || []).some(r => !!r.company.ip && r.company.ip !== r.company.ip_adspower && !r.company.ip_adspower_erro),
 )
-watch(algumIpACaminho, (sim) => {
-  if (sim && !relogioAdspower) {
-    relogioAdspower = setInterval(() => { if (!loading.value && !editingCell.value) refresh() }, 20_000)
-  } else if (!sim && relogioAdspower) {
-    clearInterval(relogioAdspower)
-    relogioAdspower = null
+function pararRelogio() {
+  if (relogioAdspower) clearInterval(relogioAdspower)
+  relogioAdspower = null
+}
+// Recarrega só os dados, sem mexer na faixa de erro e sem atrapalhar quem está
+// editando alguma coisa na tela.
+async function recarregarEmSilencio() {
+  if (loading.value || editingCell.value || editingResp.value || editingObs.value || certAberto.value || showNew.value) return
+  try {
+    grid.value = await api<GridOut>('/api/companies/grid')
+  } catch {
+    // silencioso: a tela continua com o que tem e tenta de novo em 20 s
   }
-})
-onBeforeUnmount(() => { if (relogioAdspower) clearInterval(relogioAdspower) })
+}
+function ligarRelogio() {
+  macSemResposta.value = false
+  relogioDesde = Date.now()
+  if (relogioAdspower) return
+  relogioAdspower = setInterval(() => {
+    if (Date.now() - relogioDesde > 5 * 60_000) {
+      pararRelogio()
+      macSemResposta.value = true
+      return
+    }
+    recarregarEmSilencio()
+  }, 20_000)
+}
+// `immediate`: se a página já abre com algum IP a caminho, liga na hora.
+watch(algumIpACaminho, (sim) => {
+  if (sim) ligarRelogio()
+  else { pararRelogio(); macSemResposta.value = false }
+}, { immediate: true })
+onBeforeUnmount(pararRelogio)
 
 // ---------- certificado digital ----------
 // Clicar na célula abre um painel pequeno para pôr a senha (e o arquivo, se a

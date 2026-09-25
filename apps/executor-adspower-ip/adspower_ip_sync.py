@@ -11,15 +11,28 @@ perfis delas e devolve o resultado, que aparece na tela de Empresas.
 Uma passada por execução; o launchd chama de novo a cada 60 segundos.
 Só usa a biblioteca padrão do Python que vem no macOS (3.9).
 
+A SENHA DO PROXY DEPENDE DO IP
+Os proxies deste AdsPower usam um usuário só, mas a porta e a senha variam por
+IP (em 25/09/2026 eram 3 combinações). Por isso o serviço não reaproveita a
+conta antiga do perfil às cegas: ele descobre qual conta funciona com o IP
+novo, nesta ordem, e grava a primeira que sair pelo IP certo:
+  1. a de algum perfil que já usa esse IP (é exatamente a certa);
+  2. a que os perfis da empresa já usam;
+  3. cada conta conhecida neste AdsPower, da mais usada para a menos.
+Se nenhuma funcionar, é proxy de compra nova com conta nova: basta configurar
+esse IP à mão em um perfil qualquer do AdsPower uma vez, e daí em diante o
+serviço passa a reconhecer a conta.
+
 REGRAS DE SEGURANÇA
 - Nunca escreve usuário nem senha de proxy em log, tela ou resposta. Tudo que
-  sai daqui passa por `_limpo`, que apaga qualquer credencial vista na passada.
+  sai daqui passa por `_limpo`, que apaga qualquer credencial vista.
 - Nunca TIRA o proxy de um perfil: sem proxy, o marketplace veria o IP deste
   Mac. Apagar o IP no DaVinci só para de sincronizar.
-- Antes de gravar, testa o proxy novo e confere que ele sai pelo IP certo. Se
-  não sair, não toca em nenhum perfil.
-- Só mexe em perfil que o DaVinci entregou como da empresa e de mais ninguém
-  (perfil dividido com outra empresa vem à parte e nunca é alterado).
+- Nada é gravado sem antes testar o proxy e confirmar que ele sai pelo IP
+  certo. Se não sair, não toca em nenhum perfil.
+- Só mexe em perfil que o DaVinci entregou como da empresa e de mais ninguém.
+- Não passa por proxy do sistema nem segue redirecionamento: o token do
+  DaVinci e as senhas lidas do AdsPower não podem ir parar em outro lugar.
 
 USO
   adspower_ip_sync.py                         uma passada de verdade
@@ -30,12 +43,14 @@ USO
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import logging
 import os
 import subprocess
 import sys
 import time
+import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -49,16 +64,17 @@ TOKEN_FILE = Path(
         "ADSPOWER_AGENT_TOKEN_FILE", str(Path.home() / ".davinci" / "adspower_agent_token")
     )
 )
-# A API local do AdsPower recusa rajadas: uma chamada por vez, com folga.
+# A API local do AdsPower recusa rajadas, e o executor antigo deste Mac usa a
+# mesma API: uma chamada por vez, com folga, e novas tentativas se recusar.
 PAUSA_ADSPOWER = 1.1
-# Serviço que só devolve o IP de quem pergunta. Usado para conferir por qual IP
-# o proxy novo sai de verdade.
-ECO_DE_IP = "https://api.ipify.org"
+TENTATIVAS_ADSPOWER = 4
+# Serviços que só devolvem o IP de quem pergunta. Dois, para a queda de um não
+# parecer defeito do proxy.
+ECOS_DE_IP = ("https://api.ipify.org", "https://icanhazip.com")
 
 log = logging.getLogger("adspower_ip")
 
-# Credenciais vistas nesta passada — `_limpo` apaga todas de qualquer texto
-# antes de ele ir para log ou para o DaVinci.
+# Credenciais vistas nesta execução — `_limpo` apaga todas de qualquer texto.
 _SEGREDOS: set[str] = set()
 
 
@@ -66,10 +82,17 @@ class Falha(Exception):
     """Erro já explicado em português para aparecer na tela de Empresas."""
 
 
+class FalhaPassageira(Falha):
+    """AdsPower ocupado ou fora do ar. Se nada foi gravado, a empresa não é
+    reportada: tenta de novo no minuto seguinte, sem cair no castigo de 1 hora."""
+
+
 def _limpo(texto: object) -> str:
     s = str(texto)
-    for segredo in _SEGREDOS:
-        if segredo and len(segredo) >= 3:
+    # Do maior para o menor: se o usuário for pedaço da senha (ou o contrário),
+    # apagar o menor primeiro deixaria o resto do maior aparecendo.
+    for segredo in sorted(_SEGREDOS, key=len, reverse=True):
+        if segredo:
             s = s.replace(segredo, "***")
     return s[:480]
 
@@ -79,6 +102,15 @@ def _guardar_segredos(cfg: dict) -> None:
         v = cfg.get(campo)
         if v:
             _SEGREDOS.add(str(v))
+
+
+class _SemRedirecionar(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D102
+        raise urllib.error.HTTPError(req.full_url, code, "redirecionamento recusado", headers, fp)
+
+
+# Sem proxy do sistema (ProxyHandler vazio) e sem seguir redirecionamento.
+_ABRIR = urllib.request.build_opener(urllib.request.ProxyHandler({}), _SemRedirecionar())
 
 
 # --- DaVinci -----------------------------------------------------------------
@@ -102,7 +134,7 @@ def davinci(metodo: str, caminho: str, corpo: dict | None = None):
         data=dados,
         headers={"X-Agent-Token": _token(), "Content-Type": "application/json"},
     )
-    with urllib.request.urlopen(req, timeout=30) as r:
+    with _ABRIR.open(req, timeout=30) as r:
         return json.loads(r.read() or b"null")
 
 
@@ -110,22 +142,33 @@ def davinci(metodo: str, caminho: str, corpo: dict | None = None):
 
 
 def adspower(caminho: str, corpo: dict | None = None):
-    time.sleep(PAUSA_ADSPOWER)
     dados = json.dumps(corpo).encode() if corpo is not None else None
-    req = urllib.request.Request(
-        ADSPOWER + caminho,
-        method="POST" if corpo is not None else "GET",
-        data=dados,
-        headers={"Content-Type": "application/json"},
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=30) as r:
-            d = json.loads(r.read())
-    except urllib.error.URLError:
-        raise Falha("o AdsPower deste Mac não respondeu (está aberto?)") from None
-    if d.get("code") != 0:
-        raise Falha("o AdsPower recusou: " + _limpo(d.get("msg"))[:160])
-    return d.get("data")
+    espera = 2.0
+    for tentativa in range(1, TENTATIVAS_ADSPOWER + 1):
+        time.sleep(PAUSA_ADSPOWER)
+        req = urllib.request.Request(
+            ADSPOWER + caminho,
+            method="POST" if corpo is not None else "GET",
+            data=dados,
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            with _ABRIR.open(req, timeout=30) as r:
+                d = json.loads(r.read())
+        except (urllib.error.URLError, TimeoutError, ConnectionError):
+            if tentativa == TENTATIVAS_ADSPOWER:
+                raise FalhaPassageira("o AdsPower deste Mac não respondeu (está aberto?)") from None
+        else:
+            if d.get("code") == 0:
+                return d.get("data")
+            msg = _limpo(d.get("msg"))
+            if "too many" not in msg.lower():
+                raise Falha("o AdsPower recusou: " + msg[:160])
+            if tentativa == TENTATIVAS_ADSPOWER:
+                raise FalhaPassageira("o AdsPower está recusando por excesso de chamadas")
+        time.sleep(espera)
+        espera *= 2
+    raise FalhaPassageira("o AdsPower não respondeu")  # pragma: no cover
 
 
 def ler_perfil(user_id: str) -> dict | None:
@@ -156,81 +199,138 @@ def tem_proxy(cfg: dict) -> bool:
     )
 
 
-def plano_padrao(perfis: list[dict]) -> dict | None:
-    """O proxy mais usado nos perfis (tipo, porta, usuário e senha).
-
-    Só entra em perfil que ainda não tem proxy nenhum. Perfil que já tem proxy
-    mantém o dele e troca apenas o endereço."""
-    contagem: Counter = Counter()
-    exemplo: dict = {}
-    for p in perfis:
-        c = p.get("user_proxy_config") or {}
-        if not tem_proxy(c):
-            continue
-        chave = (
-            c.get("proxy_soft"),
-            c.get("proxy_type"),
-            str(c.get("proxy_port")),
-            c.get("proxy_user") or "",
-            c.get("proxy_password") or "",
-        )
-        contagem[chave] += 1
-        exemplo[chave] = c
-    if not contagem:
-        return None
-    return exemplo[contagem.most_common(1)[0][0]]
+def _conta(cfg: dict) -> tuple:
+    """A conta do proxy, sem o endereço: o que precisa bater com o IP."""
+    return (
+        cfg.get("proxy_soft") or "other",
+        cfg.get("proxy_type") or "socks5",
+        str(cfg.get("proxy_port") or ""),
+        cfg.get("proxy_user") or "",
+        cfg.get("proxy_password") or "",
+    )
 
 
-def proxy_novo(atual: dict, ip: str, padrao: dict | None) -> dict:
-    base = atual if tem_proxy(atual) else padrao
-    if not base:
-        raise Falha("perfil sem proxy e nenhum outro perfil de onde copiar o plano")
+def _com_endereco(conta: tuple, ip: str) -> dict:
+    soft, tipo, porta, usuario, senha = conta
     return {
-        "proxy_soft": base.get("proxy_soft") or "other",
-        "proxy_type": base.get("proxy_type") or "socks5",
+        "proxy_soft": soft,
+        "proxy_type": tipo,
         "proxy_host": ip,
-        "proxy_port": str(base.get("proxy_port") or ""),
-        "proxy_user": base.get("proxy_user") or "",
-        "proxy_password": base.get("proxy_password") or "",
+        "proxy_port": porta,
+        "proxy_user": usuario,
+        "proxy_password": senha,
     }
 
 
+def contas_candidatas(ip: str, da_empresa: list[dict], todos: list[dict]) -> list[tuple]:
+    """Contas a tentar com o IP novo, da mais provável para a menos."""
+    ordem: list[tuple] = []
+
+    def junta(conta: tuple) -> None:
+        if conta not in ordem:
+            ordem.append(conta)
+
+    # 1) quem já usa esse IP tem exatamente a conta certa
+    for p in todos:
+        c = p.get("user_proxy_config") or {}
+        if tem_proxy(c) and (c.get("proxy_host") or "").strip() == ip:
+            junta(_conta(c))
+    # 2) a que a empresa já usa
+    for c in da_empresa:
+        if tem_proxy(c):
+            junta(_conta(c))
+    # 3) todas as contas conhecidas, da mais usada para a menos
+    uso: Counter = Counter(
+        _conta(p.get("user_proxy_config") or {})
+        for p in todos
+        if tem_proxy(p.get("user_proxy_config") or {})
+    )
+    for conta, _n in uso.most_common():
+        junta(conta)
+    return ordem
+
+
 def _aspas(v: str) -> str:
-    return '"' + str(v).replace("\\", "\\\\").replace('"', '\\"') + '"'
+    """Texto entre aspas no formato de configuração do curl."""
+    s = str(v)
+    for de, para in (("\\", "\\\\"), ('"', '\\"'), ("\n", "\\n"), ("\r", "\\r"), ("\t", "\\t")):
+        s = s.replace(de, para)
+    return '"' + s + '"'
+
+
+_MOTIVO_CURL = {
+    5: "não achou o endereço do proxy",
+    7: "não conseguiu conectar no proxy",
+    28: "o proxy não respondeu a tempo",
+    97: "o proxy recusou o usuário/senha",
+}
 
 
 def testar_proxy(cfg: dict) -> str:
     """Conecta pelo proxy e devolve o IP pelo qual ele sai.
 
     As credenciais vão para o curl pela entrada padrão (`-K -`), nunca pela
-    linha de comando — lá qualquer processo da máquina as veria com `ps`."""
+    linha de comando — lá qualquer processo da máquina as veria com `ps`. O
+    `-q` vem primeiro para o curl ignorar um ~/.curlrc (um `trace` lá dentro
+    gravaria a senha num arquivo)."""
     esquema = {"socks5": "socks5h", "http": "http", "https": "https"}.get(
         cfg["proxy_type"], cfg["proxy_type"]
     )
     endereco = f"{esquema}://{cfg['proxy_host']}:{cfg['proxy_port']}"
-    linhas = [f"proxy = {_aspas(endereco)}"]
-    if cfg.get("proxy_user"):
-        linhas.append(f"proxy-user = {_aspas(cfg['proxy_user'] + ':' + cfg['proxy_password'])}")
-    linhas += [f"url = {_aspas(ECO_DE_IP)}", "silent", "max-time = 20"]
-    r = subprocess.run(
-        ["/usr/bin/curl", "-K", "-"],
-        input="\n".join(linhas),
-        capture_output=True,
-        text=True,
-        timeout=40,
-    )
-    if r.returncode != 0:
-        raise Falha(
-            f"o proxy {cfg['proxy_host']}:{cfg['proxy_port']} não respondeu "
-            f"(curl {r.returncode}); nada foi trocado"
+    ultimo = 0
+    for eco in ECOS_DE_IP:
+        linhas = [f"proxy = {_aspas(endereco)}"]
+        if cfg.get("proxy_user"):
+            linhas.append(f"proxy-user = {_aspas(cfg['proxy_user'] + ':' + cfg['proxy_password'])}")
+        linhas += [f"url = {_aspas(eco)}", "silent", "fail", "max-time = 20", "max-filesize = 200"]
+        r = subprocess.run(
+            ["/usr/bin/curl", "-q", "-K", "-"],
+            input="\n".join(linhas),
+            capture_output=True,
+            text=True,
+            timeout=40,
         )
-    return r.stdout.strip()
+        if r.returncode == 0:
+            saida = r.stdout.strip()
+            try:
+                return str(ipaddress.ip_address(saida))
+            except ValueError:
+                ultimo = -1  # o eco respondeu lixo: tenta o outro
+                continue
+        ultimo = r.returncode
+        # Recusa de senha ou de conexão é do proxy, não do eco: não adianta
+        # perguntar ao segundo eco.
+        if r.returncode in (5, 7, 97):
+            break
+    motivo = _MOTIVO_CURL.get(ultimo, f"falhou (curl {ultimo})" if ultimo > 0 else "resposta estranha")
+    raise Falha(f"proxy {cfg['proxy_host']}:{cfg['proxy_port']}: {motivo}")
+
+
+def conta_que_funciona(ip: str, candidatas: list[tuple]) -> tuple:
+    """A primeira conta que sai pelo IP certo. Nada é gravado aqui."""
+    tentativas = []
+    for conta in candidatas:
+        try:
+            saida = testar_proxy(_com_endereco(conta, ip))
+        except Falha as e:
+            tentativas.append(str(e))
+            continue
+        if saida == ip:
+            return conta
+        tentativas.append(f"saiu pelo IP {saida}")
+    if not candidatas:
+        raise Falha("nenhuma conta de proxy conhecida neste AdsPower para testar")
+    raise Falha(
+        f"nenhuma das {len(candidatas)} contas de proxy deste AdsPower funcionou com o IP {ip} "
+        f"({tentativas[-1]}). Se é proxy de compra nova, configure esse IP à mão uma vez em "
+        "qualquer perfil do AdsPower; depois disso o serviço reconhece a conta. Nada foi trocado."
+    )
 
 
 # --- uma empresa -------------------------------------------------------------
 
 
-def aplicar_empresa(pend: dict, *, simular: bool) -> str:
+def aplicar_empresa(pend: dict, *, simular: bool, todos: list[dict] | None = None) -> str:
     """Troca o proxy de todos os perfis da empresa para o IP novo.
 
     Devolve um resumo. Levanta `Falha` quando algo impede a empresa de ficar
@@ -249,79 +349,97 @@ def aplicar_empresa(pend: dict, *, simular: bool) -> str:
             + (" — " + "; ".join(avisos) if avisos else "")
         )
 
-    # 1) Lê tudo e monta o que seria gravado, sem gravar nada ainda.
-    padrao = None
-    planos = []
+    # 1) Lê os perfis. Perfil que não está neste AdsPower (o da Contabilidade
+    #    fica em outro) não impede os demais de receberem o IP.
+    atuais, fora = [], []
     for p in perfis:
-        atual_perfil = ler_perfil(p["user_id"])
-        if atual_perfil is None:
-            raise Falha(f"perfil n{p['profile_no']} não está no AdsPower deste Mac")
-        atual = atual_perfil.get("user_proxy_config") or {}
-        if (atual.get("proxy_host") or "").strip() == ip:
-            continue  # esse perfil já está no IP novo
-        if not tem_proxy(atual) and padrao is None:
-            padrao = plano_padrao(todos_os_perfis())
-        planos.append((p, proxy_novo(atual, ip, padrao)))
+        lido = ler_perfil(p["user_id"])
+        if lido is None:
+            fora.append(f"n{p['profile_no']}")
+        else:
+            atuais.append((p, lido.get("user_proxy_config") or {}))
+    if fora:
+        avisos.append(
+            f"{', '.join(fora)} não está no AdsPower deste Mac (é do outro, da Contabilidade?) "
+            "e precisa ser trocado lá à mão"
+        )
+    a_trocar = [(p, c) for p, c in atuais if (c.get("proxy_host") or "").strip() != ip]
 
-    # 2) Testa cada proxy diferente ANTES de mexer em qualquer perfil.
-    testados = set()
-    for _p, cfg in planos:
-        chave = (cfg["proxy_type"], cfg["proxy_port"], cfg["proxy_user"], cfg["proxy_password"])
-        if chave in testados:
-            continue
-        saida = testar_proxy(cfg)
-        if saida != ip:
-            raise Falha(
-                f"o proxy novo saiu pelo IP {saida or '(nenhum)'}, não pelo {ip}; "
-                "nada foi trocado"
-            )
-        testados.add(chave)
+    # 2) Descobre a conta certa para o IP e testa, ANTES de mexer em qualquer
+    #    perfil. Um perfil só é trocado com a conta que acabou de funcionar.
+    conta = None
+    if a_trocar:
+        if todos is None:
+            todos = todos_os_perfis()
+        conta = conta_que_funciona(ip, contas_candidatas(ip, [c for _p, c in atuais], todos))
 
     if simular:
         return (
-            f"SIMULAÇÃO {pend['apelido']} {ip}: trocaria {len(planos)} perfil(s) "
-            + ", ".join(f"n{p['profile_no']}" for p, _ in planos)
-            + (f" | {len(perfis) - len(planos)} já estavam no IP" if len(perfis) > len(planos) else "")
+            f"SIMULAÇÃO {pend['apelido']} {ip}: trocaria {len(a_trocar)} perfil(s) "
+            + ", ".join(f"n{p['profile_no']}" for p, _ in a_trocar)
+            + f" | {len(atuais) - len(a_trocar)} já no IP"
+            + (" | " + "; ".join(avisos) if avisos else "")
         )
 
     # 3) Grava e relê cada perfil.
-    trocados = []
-    for p, cfg in planos:
+    trocados: list[str] = []
+    for p, _c in a_trocar:
+        novo = _com_endereco(conta, ip)
         try:
-            adspower("/api/v1/user/update", {"user_id": p["user_id"], "user_proxy_config": cfg})
-            conferido = ((ler_perfil(p["user_id"]) or {}).get("user_proxy_config") or {}).get(
-                "proxy_host"
-            )
+            adspower("/api/v1/user/update", {"user_id": p["user_id"], "user_proxy_config": novo})
         except Falha as e:
-            raise Falha(
-                f"trocado em {', '.join(trocados) or 'nenhum'}; parou no n{p['profile_no']}: {e}"
-            ) from None
-        if conferido != ip:
-            raise Falha(
-                f"trocado em {', '.join(trocados) or 'nenhum'}; o n{p['profile_no']} "
-                "não ficou com o IP novo"
+            e.args = (
+                f"trocado em {', '.join(trocados) or 'nenhum'}; parou no n{p['profile_no']}: {e}",
             )
-        trocados.append(f"n{p['profile_no']}")
+            e.gravou_algo = bool(trocados)
+            raise
+        trocados.append(f"n{p['profile_no']}")  # gravou: conta como trocado já
+        conferido = ((ler_perfil(p["user_id"]) or {}).get("user_proxy_config") or {}).get(
+            "proxy_host"
+        )
+        if conferido != ip:
+            raise Falha(f"trocado em {', '.join(trocados)}; o n{p['profile_no']} não ficou com o IP novo")
 
     if avisos:
-        raise Falha(f"IP aplicado em {len(perfis)} perfil(s), mas: " + "; ".join(avisos))
-    return f"{pend['apelido']} {ip}: {len(trocados)} trocado(s), {len(perfis) - len(trocados)} já estavam"
+        raise Falha(
+            f"IP aplicado em {len(atuais)} perfil(s) deste Mac, mas: " + "; ".join(avisos)
+        )
+    return (
+        f"{pend['apelido']} {ip}: {len(trocados)} trocado(s), "
+        f"{len(atuais) - len(trocados)} já estavam"
+    )
 
 
 # --- execução ----------------------------------------------------------------
 
 
 def passada(simular: bool) -> int:
-    pendentes = davinci("GET", "/api/agent/adspower/ip-pendentes") or []
+    try:
+        pendentes = davinci("GET", "/api/agent/adspower/ip-pendentes") or []
+    except (urllib.error.URLError, TimeoutError, ConnectionError, json.JSONDecodeError) as e:
+        # DaVinci fora do ar: nada a fazer, tenta no minuto seguinte.
+        log.warning("DaVinci indisponível (%s)", type(e).__name__)
+        return 1
     if not pendentes:
         log.info("nada pendente")
         return 0
+    todos = None  # lido uma vez só por passada, e só se precisar
     falhas = 0
     for pend in pendentes:
+        relatar = True
         try:
-            resumo = aplicar_empresa(pend, simular=simular)
+            if todos is None:
+                todos = todos_os_perfis()
+            resumo = aplicar_empresa(pend, simular=simular, todos=todos)
             ok, erro = True, None
             log.info(_limpo(resumo))
+        except FalhaPassageira as e:
+            ok, erro = False, _limpo(e)
+            falhas += 1
+            # Passageira e sem nada gravado: não castiga a empresa por 1 hora.
+            relatar = getattr(e, "gravou_algo", False)
+            log.warning("%s %s: %s%s", pend.get("apelido"), pend.get("ip"), erro,
+                        "" if relatar else " (tenta de novo no próximo minuto)")
         except Falha as e:
             ok, erro = False, _limpo(e)
             falhas += 1
@@ -329,38 +447,41 @@ def passada(simular: bool) -> int:
         except Exception as e:  # noqa: BLE001 - uma empresa não derruba as outras
             ok, erro = False, f"erro inesperado ({type(e).__name__})"
             falhas += 1
-            log.exception("%s: erro inesperado", pend.get("apelido"))
-        if not simular:
-            davinci(
-                "POST",
-                "/api/agent/adspower/ip-resultado",
-                {"company_id": pend["company_id"], "ip": pend["ip"], "ok": ok, "erro": erro},
-            )
+            log.error("%s: erro inesperado\n%s", pend.get("apelido"), _limpo(traceback.format_exc()))
+        if relatar and not simular:
+            try:
+                davinci(
+                    "POST",
+                    "/api/agent/adspower/ip-resultado",
+                    {"company_id": pend["company_id"], "ip": pend["ip"], "ok": ok, "erro": erro},
+                )
+            except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
+                log.warning("não consegui avisar o DaVinci (%s); ele pergunta de novo", type(e).__name__)
     return 1 if falhas else 0
 
 
 def ensaio_perfil(user_id: str, ip: str) -> int:
-    """Monta e testa o proxy de UM perfil com o IP dado. Nunca grava."""
+    """Descobre e testa a conta de proxy para UM perfil com o IP dado. Nunca grava."""
     perfil = ler_perfil(user_id)
     if perfil is None:
         print(f"perfil {user_id} não encontrado neste AdsPower")
         return 1
     atual = perfil.get("user_proxy_config") or {}
     print(f"perfil n{perfil.get('serial_number')} {perfil.get('name')}")
-    print(f"  proxy atual: {atual.get('proxy_type')} {atual.get('proxy_host')}:{atual.get('proxy_port')}"
-          if tem_proxy(atual) else "  proxy atual: nenhum")
-    padrao = None if tem_proxy(atual) else plano_padrao(todos_os_perfis())
-    cfg = proxy_novo(atual, ip, padrao)
-    print(f"  gravaria:    {cfg['proxy_type']} {cfg['proxy_host']}:{cfg['proxy_port']} "
-          f"(usuário e senha {'do próprio perfil' if tem_proxy(atual) else 'do plano padrão'})")
+    if tem_proxy(atual):
+        print(f"  proxy atual: {atual.get('proxy_type')} {atual.get('proxy_host')}:{atual.get('proxy_port')}")
+    else:
+        print("  proxy atual: nenhum")
+    candidatas = contas_candidatas(ip, [atual], todos_os_perfis())
+    print(f"  contas de proxy para tentar: {len(candidatas)}")
     try:
-        saida = testar_proxy(cfg)
+        conta = conta_que_funciona(ip, candidatas)
     except Falha as e:
-        print("  teste do proxy: FALHOU —", _limpo(e))
+        print("  resultado: NÃO FUNCIONOU —", _limpo(e))
         return 1
-    print(f"  teste do proxy: saiu pelo IP {saida} -> {'CERTO' if saida == ip else 'ERRADO'}")
+    print(f"  resultado: a conta {candidatas.index(conta) + 1} sai pelo IP {ip} (porta {conta[2]})")
     print("  (ensaio: nada foi gravado)")
-    return 0 if saida == ip else 1
+    return 0
 
 
 def main() -> int:
@@ -380,7 +501,10 @@ def main() -> int:
         log.error(_limpo(e))
         return 1
     except urllib.error.HTTPError as e:
-        log.error("DaVinci respondeu %s em %s", e.code, e.url.split("?")[0])
+        log.error("DaVinci respondeu %s", e.code)
+        return 1
+    except Exception:  # noqa: BLE001 - nada sai daqui sem passar pelo _limpo
+        log.error("erro inesperado\n%s", _limpo(traceback.format_exc()))
         return 1
 
 

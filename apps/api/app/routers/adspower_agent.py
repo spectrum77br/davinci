@@ -45,7 +45,15 @@ async def _require_adspower_agent_token(
     x_agent_token: Annotated[str | None, Header(alias="X-Agent-Token")] = None,
 ) -> None:
     esperado = get_settings().adspower_agent_token
-    if not esperado or not x_agent_token or not secrets.compare_digest(x_agent_token, esperado):
+    # Em bytes: com um caractere não-ASCII no cabeçalho, compare_digest de dois
+    # textos levanta TypeError e a resposta vira 500 em vez de 401.
+    if (
+        not esperado
+        or not x_agent_token
+        or not secrets.compare_digest(
+            x_agent_token.encode("utf-8", "surrogateescape"), esperado.encode("utf-8")
+        )
+    ):
         raise HTTPException(401, detail={"code": "adspower_agent_unauthorized"})
 
 
@@ -94,7 +102,11 @@ async def _perfis_por_empresa(
     lojas = (
         await session.execute(
             select(StoreInfo.platform, StoreInfo.account_name, StoreInfo.server).where(
-                StoreInfo.server.is_not(None)
+                StoreInfo.server.is_not(None),
+                # Loja arquivada não conta: com servidor morto ela prenderia a
+                # empresa num ✗ para sempre, e com perfil dividido travaria o
+                # perfil de outra empresa.
+                StoreInfo.archived_at.is_(None),
             )
         )
     ).all()
@@ -156,12 +168,20 @@ async def ip_pendentes(
     if not empresas:
         return []
     perfis, empresas_do_perfil, sem_perfil = await _perfis_por_empresa(session)
+    # A loja é ligada à empresa pelo apelido normalizado. Duas empresas com o
+    # mesmo apelido normalizado ("dream 2" e "Dream 2") pegariam os perfis uma
+    # da outra como se fossem só seus — então nesse caso nenhum é exclusivo.
+    todas = (await session.execute(select(Company.apelido))).scalars().all()
+    quantas_por_dono: dict[str, int] = {}
+    for apelido in todas:
+        quantas_por_dono[_norm(apelido)] = quantas_por_dono.get(_norm(apelido), 0) + 1
     saida: list[PendenciaIp] = []
     for c in empresas:
         dono = _norm(c.apelido)
+        apelido_repetido = quantas_por_dono.get(dono, 0) > 1
         livres, compartilhados = [], []
         for p in perfis.get(dono, {}).values():
-            atende_outras = len(empresas_do_perfil.get(p.user_id, set())) > 1
+            atende_outras = apelido_repetido or len(empresas_do_perfil.get(p.user_id, set())) > 1
             (compartilhados if atende_outras else livres).append(p)
         saida.append(
             PendenciaIp(
