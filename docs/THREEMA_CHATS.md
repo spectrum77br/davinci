@@ -25,7 +25,9 @@ Cada prefixo tem os campos `_GATEWAY_ID` e `_GATEWAY_SECRET`. Exemplo de nomes:
 `THREEMA_LOGISTICA_GATEWAY_ID` e `THREEMA_LOGISTICA_GATEWAY_SECRET`.
 
 Os aliases internos `controle_estoque` e `margem_auto` usam, respectivamente,
-Estoque e Margem. Nenhum texto de mensagem é usado para escolher o canal.
+Estoque e Margem. `logistica_amazon` (Informar da aba Amazon) e `chamados`
+(avisos operacionais) usam Logística, que compartilha o perfil Chamados no
+plano abaixo. Nenhum texto de mensagem é usado para escolher o canal.
 Os destinatários e o conteúdo dos avisos permanecem definidos por cada fluxo.
 
 ### Agrupamento explícito de assuntos
@@ -41,8 +43,9 @@ O destino `desativado` bloqueia os avisos do contexto antes de qualquer
 requisição HTTP, inclusive durante a transição e com credenciais explícitas.
 Não usa o remetente global nem participa da comparação de IDs de canais ativos.
 
-As chaves também aceitam os aliases `controle_estoque` e `margem_auto`,
-normalizados para `estoque` e `margem`. Chaves e valores ignoram espaços nas
+As chaves também aceitam os aliases `controle_estoque`, `margem_auto`,
+`logistica_amazon` e `chamados`, normalizados para `estoque`, `margem`,
+`logistica` e `logistica`. Chaves e valores ignoram espaços nas
 extremidades e diferenças de maiúsculas. Os valores devem ser nomes canônicos
 de canal: não aceitam aliases. Alias e chave canônica com destinos
 contraditórios causam erro, independentemente da ordem no JSON. Chaves ou
@@ -75,7 +78,7 @@ que não são usados por nenhum contexto não entram nessa comparação.
 
 | Perfil | Credenciais | Escopo |
 | --- | --- | --- |
-| Chamados | Par global existente (`geral` internamente) | Logística: avisos manuais, automáticos e rastreamento |
+| Chamados | Par global existente (`geral` internamente) | Logística, Amazon, rastreamento e alertas operacionais de credenciais e comandos de marketing |
 | Margem | `THREEMA_MARGEM` | Margem, inclusive alias `margem_auto` |
 | Estoque e Importação | `THREEMA_ESTOQUE` | Estoque, alias `controle_estoque` e Importação mapeada a `estoque` |
 | Devoluções | `THREEMA_DEVOLUCOES` | Devoluções |
@@ -85,6 +88,22 @@ Configuração confirmada pelo usuário:
 ```dotenv
 THREEMA_CONTEXT_CHANNELS={"logistica":"geral","importacao":"estoque","juridico":"desativado"}
 ```
+
+O alias `chamados` já segue `logistica: geral`; não exige outro ID nem outras
+credenciais. No mapa, `"chamados":"geral"` também pode substituir
+`"logistica":"geral"`, com o mesmo resultado para os dois assuntos.
+
+Todos os robôs da Ouvidoria declaram seu assunto no catálogo:
+
+| Robô | Perfil |
+| --- | --- |
+| Importação Pedidos Bling e Importação Pedido DaVinci | Estoque e Importação |
+| API x Contas e Comandos de Ads não aplicados | Chamados |
+| Ocorrências Correio e Robô Melhor Envio | Chamados (Logística) |
+| Robô da Margem | Margem |
+| Robô Leitura de Chamados de devoluções | Devoluções |
+
+A ativação dos perfis não muda destinatários nem liga robôs silenciosos.
 
 Jurídico não envia avisos pelo Threema. A tentativa de encaminhar um chamado
 retorna `threema_juridico_desativado`, com mensagem explicativa na tela, antes de
@@ -139,7 +158,7 @@ Os testes isolados usam HTTP simulado e não carregam o conftest de integração
 que depende de banco. Na pasta `apps/api`, com as dependências de desenvolvimento:
 
 ```sh
-PYTHONPATH=. python -m pytest --confcutdir=tests/unit tests/unit/test_threema_routing.py
+PYTHONPATH=. python -m pytest --confcutdir=tests/unit tests/unit/test_threema_routing.py tests/unit/test_threema_todos_com_contexto.py
 ```
 
 Verificam remetentes e secrets por canal, mesmos destinatários, aliases, modo

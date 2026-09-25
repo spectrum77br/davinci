@@ -25,6 +25,8 @@ CHANNELS = (
     "flex",
 )
 ROUTES = tuple((channel, channel) for channel in CHANNELS) + (
+    ("chamados", "logistica"),
+    ("logistica_amazon", "logistica"),
     ("controle_estoque", "estoque"),
     ("margem_auto", "margem"),
 )
@@ -297,6 +299,10 @@ async def test_general_contexts_do_not_enable_strict_fallback_for_other_subjects
         {"logistica": "gerla"},
         {"controle_estoque": "geral", "estoque": "margem"},
         {"estoque": "margem", "controle_estoque": "geral"},
+        {"chamados": "geral", "logistica": "margem"},
+        {"logistica": "margem", "chamados": "geral"},
+        {"logistica_amazon": "geral", "logistica": "margem"},
+        {"logistica": "margem", "logistica_amazon": "geral"},
         {"importacao": "controle_estoque"},
     ],
 )
@@ -394,6 +400,8 @@ async def test_four_profiles_deliver_active_subjects_and_block_juridico(settings
         )
         for contexto, canal, sender in (
             ("logistica", "geral", "*GLOBAL1"),
+            ("logistica_amazon", "geral", "*GLOBAL1"),
+            ("chamados", "geral", "*GLOBAL1"),
             ("margem", "margem", "*MARGEM1"),
             ("margem_auto", "margem", "*MARGEM1"),
             ("estoque", "estoque", "*ESTOQ01"),
@@ -493,7 +501,13 @@ async def test_disabled_context_blocks_send_even_with_available_credentials(
 
 
 @pytest.mark.parametrize(
-    ("alias", "contexto"), [(" Controle_Estoque ", "estoque"), (" MARGEM_AUTO ", "margem")]
+    ("alias", "contexto"),
+    [
+        (" Controle_Estoque ", "estoque"),
+        (" MARGEM_AUTO ", "margem"),
+        (" CHAMADOS ", "logistica"),
+        (" LOGISTICA_AMAZON ", "logistica"),
+    ],
 )
 async def test_disabled_target_normalizes_alias_and_case(settings, alias, contexto):
     settings.threema_context_channels = {alias: " DESATIVADO "}
@@ -542,3 +556,70 @@ async def test_disabled_juridico_forwarding_stops_before_queries_or_chamado_muta
     assert session.mock_calls == []
     recipients.assert_not_awaited()
     dossier.assert_not_awaited()
+
+
+async def test_every_ouvidoria_robot_delivers_from_its_profile(settings, monkeypatch):
+    """Exercita o emissor real: contexto presente mas vazio também quebra o envio."""
+    from app import config as app_config
+
+    isolated = Settings(_env_file=None, database_url="postgresql+asyncpg://unit-test/davinci")
+    monkeypatch.setattr(app_config, "get_settings", lambda: isolated)
+    from app.services import ouvidoria
+
+    monkeypatch.setattr(ouvidoria, "get_settings", lambda: isolated)
+    settings.threema_separate_chats = True
+    settings.threema_context_channels = {
+        "logistica": "geral",
+        "importacao": "estoque",
+        "juridico": "desativado",
+    }
+    for channel, sender in (
+        ("margem", "*MARGEM1"),
+        ("estoque", "*ESTOQ01"),
+        ("devolucoes", "*DEVOL01"),
+    ):
+        configure_channel(settings, channel, sender, f"{channel}-test-secret")
+    expected_senders = {
+        "vigia_importacao": "*ESTOQ01",
+        "vigia_credenciais": "*GLOBAL1",
+        "vigia_ingest_bling": "*ESTOQ01",
+        "vigia_correios": "*GLOBAL1",
+        "vigia_marketing_comandos": "*GLOBAL1",
+        "vigia_margem": "*MARGEM1",
+        "vigia_robo_melhorenvio": "*GLOBAL1",
+        "vigia_robo_leitura": "*DEVOL01",
+    }
+    # Robô novo precisa de uma decisão de roteamento, sem fallback silencioso.
+    assert set(ouvidoria.ROBOS) == set(expected_senders)
+    with respx.mock(base_url=threema.THREEMA_API_BASE, assert_all_mocked=True) as router:
+        route = router.post("/send_simple").mock(
+            return_value=httpx.Response(200, text="message-id")
+        )
+        for chave, expected_sender in expected_senders.items():
+            definicao = ouvidoria.ROBOS[chave]
+            assert definicao.contexto.strip()
+            robo = SimpleNamespace(
+                nome=definicao.nome, modo="ligado", threema_recipients="ABCD1234"
+            )
+            ocorrencia = SimpleNamespace(
+                conta="Loja teste",
+                pedido="123",
+                titulo="Ocorrência de teste",
+                acao="Conferir pedido",
+                avisada_em=None,
+                reavisada_em=None,
+            )
+            session = AsyncMock()
+            session.get.return_value = robo
+            monkeypatch.setattr(
+                ouvidoria, "pendentes_de_aviso", AsyncMock(return_value=[ocorrencia])
+            )
+
+            assert await ouvidoria.avisar_pendentes(session, chave) == {"avisadas": 1}
+            request = form(route.calls[-1].request)
+            assert request["from"] == expected_sender
+            assert request["to"] == "ABCD1234"
+            assert definicao.nome in request["text"]
+            assert ocorrencia.avisada_em is not None
+            session.flush.assert_awaited_once()
+        assert len(route.calls) == len(expected_senders)

@@ -44,7 +44,12 @@ _CONTEXTOS = frozenset(
         "flex",
     }
 )
-_CONTEXTOS_ALIASES = {"controle_estoque": "estoque", "margem_auto": "margem"}
+_CONTEXTOS_ALIASES = {
+    "chamados": "logistica",
+    "logistica_amazon": "logistica",
+    "controle_estoque": "estoque",
+    "margem_auto": "margem",
+}
 
 
 class ThreemaConfigError(RuntimeError):

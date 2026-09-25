@@ -118,8 +118,9 @@ class RoboDef:
     # Assunto do robô, pra o aviso sair pelo REMETENTE certo quando as
     # conversas estão separadas (services/threema.py). A Ouvidoria é o lugar
     # central dos avisos dos robôs: cada robô novo declara o seu aqui e não
-    # precisa mexer em mais nada. Vazio = remetente geral.
-    contexto: str = ""
+    # precisa mexer em mais nada. Obrigatório: no modo separado, vazio não
+    # pode cair no remetente geral e impediria a entrega do aviso.
+    contexto: str
     # Limites das chaves numéricas da config (chave → Parametro).
     parametros: dict[str, Parametro] = field(default_factory=dict)
     # Rótulo das chaves de config que NÃO são número (chave → texto da tela).
@@ -184,6 +185,7 @@ ROBOS: dict[str, RoboDef] = {
         plataformas=("ml", "shopee", "tiktok", "amazon", "magalu", "bling"),
         config_padrao={"cadencia_min": 60, "vencimento_dias": 7},
         env_threema_recipients=None,
+        contexto="chamados",
         parametros={
             "cadencia_min": Parametro("Cadência esperada", 1, 24 * 60, "min"),
             "vencimento_dias": Parametro("Aviso de vencimento", 1, 60, "dias"),
@@ -203,6 +205,7 @@ ROBOS: dict[str, RoboDef] = {
         plataformas=("bling",),
         config_padrao={"cadencia_min": 15, "idade_min": 30},
         env_threema_recipients=None,
+        contexto="importacao",
         parametros={
             "cadencia_min": Parametro("Cadência esperada", 1, 24 * 60, "min"),
             "idade_min": Parametro("Idade mínima", 5, 24 * 60, "min"),
@@ -238,6 +241,7 @@ ROBOS: dict[str, RoboDef] = {
             "olhar_ocorrencia_desconhecida": False,
         },
         env_threema_recipients=None,
+        contexto="logistica",
         parametros={"cadencia_min": Parametro("Cadência esperada", 1, 24 * 60, "min")},
         rotulos_extras={
             "olhar_apreensao": "Olhar apreensão / retenção fiscal",
@@ -265,6 +269,7 @@ ROBOS: dict[str, RoboDef] = {
         plataformas=("shopee", "ml"),
         config_padrao={"cadencia_min": 10, "pendente_min": 30, "executor_offline_min": 10},
         env_threema_recipients=None,
+        contexto="chamados",
         parametros={
             "cadencia_min": Parametro("Cadência esperada", 1, 24 * 60, "min"),
             "pendente_min": Parametro("Pendente há mais de", 5, 24 * 60, "min"),
@@ -285,6 +290,7 @@ ROBOS: dict[str, RoboDef] = {
         plataformas=("ml", "shopee", "tiktok", "amazon"),
         config_padrao={"cadencia_min": 30, "segurado_horas": 24},
         env_threema_recipients=None,
+        contexto="margem",
         parametros={
             "cadencia_min": Parametro("Cadência esperada", 1, 24 * 60, "min"),
             "segurado_horas": Parametro("Segurado sem decisão", 1, 720, "h"),
@@ -305,6 +311,7 @@ ROBOS: dict[str, RoboDef] = {
         plataformas=("amazon",),
         config_padrao={"cadencia_min": 10, "pendente_min": 30, "executor_offline_min": 10},
         env_threema_recipients=None,
+        contexto="logistica",
         parametros={
             "cadencia_min": Parametro("Cadência esperada", 1, 24 * 60, "min"),
             "pendente_min": Parametro("Suspensão na fila há mais de", 5, 24 * 60, "min"),
@@ -327,6 +334,7 @@ ROBOS: dict[str, RoboDef] = {
         plataformas=("shopee",),
         config_padrao={"cadencia_min": 10, "sem_sinal_min": 30, "atraso_horas": 3},
         env_threema_recipients=None,
+        contexto="devolucoes",
         parametros={
             "cadencia_min": Parametro("Cadência esperada", 1, 24 * 60, "min"),
             "sem_sinal_min": Parametro("Robô sem sinal há", 15, 24 * 60, "min"),
