@@ -72,6 +72,12 @@ def main() -> None:
             f"({caso.get('plataforma')}): {achado.get('motivo')} — precisa de uma pessoa"
         )
     perfil = achado["perfil"]
+    # 25/09 (Vinicius): o que ele ensina no manual vale também na tela — ex.: no
+    # Assistente do Vendedor da Shopee, responder o robô curto e só mandar tudo
+    # quando o chat abrir o caminho.
+    r = subprocess.run([PY, str(AQUI / "davinci_chamados.py"), "manual"],
+                       capture_output=True, text=True, timeout=120)
+    manual = r.stdout.strip() if r.returncode == 0 else "(não consegui ler o manual)"
     aberto = _json([PY, str(AQUI / "adspower.py"), "abrir", perfil["id"]])
 
     prompt = "\n".join(
@@ -81,6 +87,8 @@ def main() -> None:
             f"Chamado: pedido Bling {caso.get('pedido_bling')}, pedido na plataforma "
             f"{caso.get('pedido_marketplace')}, plataforma {caso.get('plataforma')}, conta "
             f"{caso.get('conta')}, protocolo {caso.get('chamado')}, url {caso.get('chamado_url')}.",
+            "MANUAL DO VINICIUS (vale acima do seu julgamento; siga o que se aplicar a esta tela):",
+            manual,
             f"TAREFA: {a.tarefa}",
             AGIR if a.pode_agir else LEITURA,
             SEMPRE,
