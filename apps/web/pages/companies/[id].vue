@@ -236,6 +236,7 @@ function cancelarSenhaCertificado() {
 async function downloadCertificate(cert: CompanyCertificate, senha: string) {
   if (!company.value || certRodando.value) return
   certRodando.value = true
+  certError.value = null
   try {
     // POST com a senha no corpo (nunca na URL).
     const blob = await apiE<Blob>(
@@ -252,11 +253,15 @@ async function downloadCertificate(cert: CompanyCertificate, senha: string) {
     URL.revokeObjectURL(href)
     cancelarSenhaCertificado()
   } catch (e: any) {
-    // Com responseType blob o erro também chega como arquivo: lê o JSON de dentro.
+    // Com responseType blob o erro também chega como arquivo: lê o JSON de
+    // dentro num erro NOVO (o `data` do erro do $fetch é só-leitura).
+    let lido: any = e
     if (typeof Blob !== 'undefined' && e?.data instanceof Blob) {
-      try { e.data = JSON.parse(await e.data.text()) } catch { e.data = null }
+      let data: any = null
+      try { data = JSON.parse(await e.data.text()) } catch { /* não era JSON */ }
+      lido = { data, message: e?.message }
     }
-    certError.value = mensagemCertificado(e, 'erro ao baixar')
+    certError.value = mensagemCertificado(lido, 'erro ao baixar')
   } finally {
     certRodando.value = false
   }
@@ -265,6 +270,7 @@ async function downloadCertificate(cert: CompanyCertificate, senha: string) {
 async function removerSenhaCertificado(cert: CompanyCertificate, senhaAtual: string) {
   if (!company.value || certRodando.value) return
   certRodando.value = true
+  certError.value = null
   try {
     await apiE(`/api/companies/${company.value.id}/certificates/${cert.id}`, {
       method: 'PATCH',
@@ -435,7 +441,14 @@ async function carregarTudo() {
 // pessoa acabou de digitar a senha. Não dá para esperar um aviso do cartão:
 // ao desbloquear o cartão sai da tela, e o Vue descarta o aviso de componente
 // que já saiu — a tabela ficava vazia (25/09/2026).
-watch(() => trava.token.value, (agora, antes) => { if (agora && !antes) carregarTudo() })
+watch(() => trava.token.value, (agora, antes) => {
+  if (agora && !antes) carregarTudo()
+  // Trancou: senha de certificado digitada e não confirmada não fica na memória.
+  if (!agora && antes) {
+    cancelarSenhaCertificado()
+    certForm.password = ''
+  }
+})
 // A lista e a ficha dividem a chave: vindo de uma para a outra ela já existe
 // e o observador acima não dispara, então carrega aqui.
 onMounted(() => { if (trava.iniciar()) carregarTudo() })

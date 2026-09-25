@@ -139,7 +139,12 @@ async function refresh() {
 // pessoa acabou de digitar a senha. Não dá para esperar um aviso do cartão:
 // ao desbloquear o cartão sai da tela, e o Vue descarta o aviso de componente
 // que já saiu — a tabela ficava vazia (25/09/2026).
-watch(() => trava.token.value, (agora, antes) => { if (agora && !antes) refresh() })
+watch(() => trava.token.value, (agora, antes) => {
+  if (agora && !antes) refresh()
+  // Trancou (os 15 min venceram): a senha de certificado digitada e não
+  // confirmada não pode ficar na memória da página esperando o próximo.
+  if (!agora && antes) fecharCertificado()
+})
 // A lista e a ficha dividem a chave: vindo de uma para a outra ela já existe
 // e o observador acima não dispara, então carrega aqui.
 onMounted(() => { if (trava.iniciar()) refresh() })
@@ -608,14 +613,19 @@ async function confirmarAcaoCertificado(row: GridRow, c: CertificadoItem) {
 }
 // Com `responseType: 'blob'` o erro também chega como arquivo: lê o JSON de
 // dentro para a mensagem ("senha incorreta") e a trava da tela funcionarem.
-async function lerErroDeArquivo(e: any) {
-  if (typeof Blob === 'undefined' || !(e?.data instanceof Blob)) return
+// Devolve um erro NOVO: o `data` do erro do $fetch é só-leitura, atribuir nele
+// lança TypeError e a mensagem nunca aparecia.
+async function lerErroDeArquivo(e: any): Promise<any> {
+  if (typeof Blob === 'undefined' || !(e?.data instanceof Blob)) return e
+  let data: any = null
   try {
-    e.data = JSON.parse(await e.data.text())
+    data = JSON.parse(await e.data.text())
   } catch {
-    e.data = null
+    /* corpo que não é JSON: fica a mensagem padrão */
   }
-  if (trava.eTravamento(e)) bloquear()
+  const lido = { data, message: e?.message }
+  if (trava.eTravamento(lido)) bloquear()
+  return lido
 }
 function salvarArquivoNoComputador(arquivo: Blob, nome: string) {
   const href = URL.createObjectURL(arquivo)
@@ -644,8 +654,8 @@ async function baixarCertificado(row: GridRow, c: CertificadoItem, senha: string
     salvarArquivoNoComputador(arquivo, c.filename)
     if (certAberto.value === empresa) fecharAcaoCertificado()
   } catch (e: any) {
-    await lerErroDeArquivo(e)
-    if (certAberto.value === empresa) certErro.value = mensagemDeErro(e, 'erro ao baixar o certificado')
+    const lido = await lerErroDeArquivo(e)
+    if (certAberto.value === empresa) certErro.value = mensagemDeErro(lido, 'erro ao baixar o certificado')
   } finally {
     certAcaoRodando.value = false
     certBaixandoId.value = null
@@ -667,6 +677,9 @@ async function tirarSenhaCertificado(row: GridRow, c: CertificadoItem, senhaAtua
         certLista.value = certLista.value.map(x => (x.id === c.id ? { ...x, has_password: false } : x))
       }
     }
+    // O selo da tabela muda na hora, sem depender da recarga dar certo.
+    const selo = grid.value?.rows.find(r => r.company.id === empresa)?.certificado
+    if (selo?.id === c.id) selo.has_password = false
     await refresh()
   } catch (e: any) {
     if (certAberto.value === empresa) certErro.value = mensagemDeErro(e, 'erro ao excluir a senha')

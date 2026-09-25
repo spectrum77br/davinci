@@ -60,6 +60,7 @@ const tpl = descriptor.template.content
 // --- lógica: o bloco do certificado da página + as mensagens de erro, como estão
 const script = descriptor.scriptSetup.content
 assert.doesNotMatch(script, /certificates\/\$\{[^}]+\}\/password/, 'nenhuma chamada à rota que mostrava a senha')
+assert.match(script, /if \(!agora && antes\) fecharCertificado\(\)/, 'tela trancou: senha digitada sai da memória')
 const bloco = (de, ate) => {
   assert.ok(script.includes(de) && script.includes(ate), `marcadores: ${de}`)
   return script.slice(script.indexOf(de), script.indexOf(ate))
@@ -77,9 +78,14 @@ globalThis.document = {
   body: { appendChild() {} },
 }
 
+// Como o FetchError do ofetch: `data` é getter só-leitura (atribuir lança
+// TypeError em código estrito) — o erro-arquivo tem de ser lido num objeto novo.
 const erroApi = (code, comoArquivo = false) => {
   const corpo = { detail: { code } }
-  return { data: comoArquivo ? new Blob([JSON.stringify(corpo)], { type: 'application/json' }) : corpo }
+  const data = comoArquivo ? new Blob([JSON.stringify(corpo)], { type: 'application/json' }) : corpo
+  const e = new Error(`[POST] "/api": 403`)
+  Object.defineProperty(e, 'data', { get: () => data, enumerable: true })
+  return e
 }
 
 // lista: array fixo, ou função (url, n) com n = quantas GET de lista já houve
@@ -114,7 +120,7 @@ function montar({ lista = [], gridAntes = null, gridDepois, confirma = true, lif
   const bloquear = () => { bloqueios++ }
   const factory = new Function(
     'ref', 'apiE', 'refresh', 'grid', 'confirm', 'trava', 'bloquear',
-    js + `
+    '"use strict";\n' + js + `
 return { certAberto, certLista, certExcluindo, certSalvando, certSenha, certSenhaAtual, certErro, certAcao, certSenhaAcao,
   certBaixandoId, alternarCertificado, certificadosDoPainel, excluirCertificado, salvarCertificado, pedirAcaoCertificado,
   confirmarAcaoCertificado, fecharAcaoCertificado, vencimentoCertificado, dataBR }`,
@@ -281,6 +287,7 @@ async function abrir(t, row) {
     assert.deepEqual(pt.body, { password: null, current_password: 'atual' })
     assert.equal(t.pg.certLista.value.find((c) => c.id === 'a').has_password, false)
     assert.equal(t.pg.certLista.value.find((c) => c.id === 'b').has_password, true, 'só o escolhido')
+    assert.equal(t.grid.value.rows[0].certificado.has_password, false, 'selo da tabela muda na hora')
     assert.equal(t.refreshes(), 1)
     assert.equal(t.pg.certAcao.value, null)
   }

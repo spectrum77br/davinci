@@ -84,6 +84,9 @@ def init_sentry(*, component: str) -> bool:
             "sac_senha_enc",
             "password_enc",
             "pwd",
+            # Senha atual do certificado digital (trocar/excluir a senha pede
+            # ela no PATCH de /companies/{id}/certificates/{cert}).
+            "current_password",
             # Robô de postagem: o token da Meta entra pelo body do
             # POST /redes-sociais/{id}/conectar e publica na conta da marca —
             # vaza-lo é dar a conta. `token_enc` é o BYTEA cifrado, mas nem
