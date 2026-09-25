@@ -1781,6 +1781,16 @@ async function confirmarExcluir() {
                   {{ row.mensagens_total }}
                 </button>
               </div>
+              <!-- 25/09 (294571): a consulta do Portal ligada ao chamado, logo abaixo do
+                   nº da devolução — é ela que o robô de leitura abre no Portal. -->
+              <a
+                v-if="row.consulta_portal"
+                :href="`https://seller-service.cs.shopee.com.br/detail/${row.consulta_portal}`"
+                target="_blank"
+                rel="noopener"
+                class="mt-0.5 block text-[10px] text-muted-foreground hover:underline"
+                title="Consulta no Portal de Atendimento da Shopee (o robô de leitura lê lá também)"
+              >Portal: {{ row.consulta_portal }}</a>
             </td>
             <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
               <select :value="row.canal" :disabled="!canEdit" :class="sheetSelectClass" @change="(e) => { row.canal = (e.target as HTMLSelectElement).value as Canal; saveRow(row) }">
