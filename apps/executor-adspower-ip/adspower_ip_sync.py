@@ -8,7 +8,10 @@ A API do AdsPower só responde nesta máquina, então o servidor não fala com
 ela: este serviço busca no DaVinci as empresas com IP novo, troca o proxy dos
 perfis delas e devolve o resultado, que aparece na tela de Empresas.
 
-Uma passada por execução; o launchd chama de novo a cada 60 segundos.
+Fica rodando sempre (`--loop`): uma passada a cada 60 segundos. O launchd só
+garante que ele esteja de pé — o agendamento por intervalo do launchd
+(StartInterval) não dispara de forma confiável no macOS novo: em 25/09/2026
+rodou uma vez e a próxima ficou "pendente" para sempre.
 Só usa a biblioteca padrão do Python que vem no macOS (3.9).
 
 A SENHA DO PROXY DEPENDE DO IP
@@ -35,6 +38,7 @@ REGRAS DE SEGURANÇA
   DaVinci e as senhas lidas do AdsPower não podem ir parar em outro lugar.
 
 USO
+  adspower_ip_sync.py --loop                  o serviço (uma passada a cada 60 s)
   adspower_ip_sync.py                         uma passada de verdade
   adspower_ip_sync.py --simular               faz tudo menos gravar e reportar
   adspower_ip_sync.py --perfil ID --ip IP     ensaio num perfil só (NUNCA grava)
@@ -460,6 +464,21 @@ def passada(simular: bool) -> int:
     return 1 if falhas else 0
 
 
+def em_loop(simular: bool, intervalo: int = 60) -> int:
+    """O serviço: uma passada por minuto, para sempre. Nenhum erro derruba o
+    laço — se algo escapar, ele registra (limpo) e tenta no minuto seguinte."""
+    log.info("serviço do IP no AdsPower iniciado (a cada %ss)", intervalo)
+    while True:
+        inicio = time.monotonic()
+        try:
+            passada(simular=simular)
+        except Falha as e:
+            log.error(_limpo(e))
+        except Exception:  # noqa: BLE001
+            log.error("erro inesperado na passada\n%s", _limpo(traceback.format_exc()))
+        time.sleep(max(5.0, intervalo - (time.monotonic() - inicio)))
+
+
 def ensaio_perfil(user_id: str, ip: str) -> int:
     """Descobre e testa a conta de proxy para UM perfil com o IP dado. Nunca grava."""
     perfil = ler_perfil(user_id)
@@ -486,6 +505,7 @@ def ensaio_perfil(user_id: str, ip: str) -> int:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--loop", action="store_true", help="fica rodando: uma passada a cada 60 s")
     ap.add_argument("--simular", action="store_true", help="faz tudo menos gravar e reportar")
     ap.add_argument("--perfil", help="ensaio num perfil só (nunca grava)")
     ap.add_argument("--ip", help="IP do ensaio")
@@ -496,6 +516,8 @@ def main() -> int:
             if not a.ip:
                 ap.error("--perfil precisa de --ip")
             return ensaio_perfil(a.perfil, a.ip)
+        if a.loop:
+            return em_loop(simular=a.simular)
         return passada(simular=a.simular)
     except Falha as e:
         log.error(_limpo(e))

@@ -30,13 +30,18 @@ cat > "$PLIST" <<PLIST
     <array>
         <string>/usr/bin/python3</string>
         <string>$DESTINO/adspower_ip_sync.py</string>
+        <string>--loop</string>
     </array>
     <key>WorkingDirectory</key>
     <string>$DESTINO</string>
-    <key>StartInterval</key>
-    <integer>60</integer>
+    <!-- Fica sempre de pé e o próprio programa espera 60 s entre as passadas.
+         StartInterval não disparava de forma confiável neste macOS. -->
     <key>RunAtLoad</key>
     <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
     <key>StandardOutPath</key>
     <string>$DESTINO/logs/servico.log</string>
     <key>StandardErrorPath</key>
@@ -47,4 +52,5 @@ PLIST
 
 launchctl unload "$PLIST" 2>/dev/null || true
 launchctl load "$PLIST"
+launchctl kickstart "gui/$(id -u)/$ROTULO" 2>/dev/null || true
 echo "Instalado. Log em $DESTINO/logs/servico.log"
