@@ -137,6 +137,9 @@ def prepare_command():
 
 def tunnel_command():
     return [SSH] + SSH_OPTIONS + [
+        # O alias pode herdar ClearAllForwardings=yes; este comando precisa
+        # habilitar explicitamente seu -R, sem alterar a configuração global.
+        "-o", "ClearAllForwardings=no",
         "-o", "ExitOnForwardFailure=yes",
         "-R", REMOTE_SOCKET + ":" + LOCAL_DESTINATION,
         SSH_HOST,

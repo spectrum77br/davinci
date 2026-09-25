@@ -2,6 +2,7 @@
 """Instala os dois LaunchAgents Magalu; por padrão apenas confere os arquivos.
 
 Compatível com o Python 3.9 do macOS. Use --apply para gravar e ativar os jobs.
+Cada bootstrap é seguido de kickstart, pois o macOS pode adiar o RunAtLoad.
 Os overrides de diretório permitem validar tudo em uma pasta temporária.
 """
 
@@ -197,6 +198,14 @@ def apply_install(plan):
         )
         if result.returncode:
             raise InstallError("Não foi possível iniciar o serviço " + label + ".")
+        # Bootstrap pode registrar sem iniciar (spawn especulativo do launchd).
+        # Sem -k: solicita a partida sem matar um processo que já esteja ativo.
+        result = subprocess.run(
+            [LAUNCHCTL, "kickstart", domain + "/" + label],
+            capture_output=True, text=True, check=False,
+        )
+        if result.returncode:
+            raise InstallError("Não foi possível ativar o serviço " + label + ".")
 
 
 def main(argv=None):

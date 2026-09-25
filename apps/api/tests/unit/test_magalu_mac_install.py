@@ -125,8 +125,10 @@ def test_apply_installs_private_files_and_ordered_jobs(installation, monkeypatch
         [installer.LAUNCHCTL, "bootout", domain + "/" + installer.LABELS[0]],
         [installer.LAUNCHCTL, "bootstrap", domain,
          str(plan["agents"] / (installer.LABELS[0] + ".plist"))],
+        [installer.LAUNCHCTL, "kickstart", domain + "/" + installer.LABELS[0]],
         [installer.LAUNCHCTL, "bootstrap", domain,
          str(plan["agents"] / (installer.LABELS[1] + ".plist"))],
+        [installer.LAUNCHCTL, "kickstart", domain + "/" + installer.LABELS[1]],
     ]
     assert "FAKE_PRIVATE_PROXY_PASSWORD" not in capsys.readouterr().out
 
@@ -141,10 +143,10 @@ def test_reinstall_preserves_credentials_logs_and_files(installation, monkeypatc
     )
     assert installer.main(_args(installation, "--check")) == 0
     assert _snapshot(tmp_path) == before
-    assert len(installation.calls) == 4
+    assert len(installation.calls) == 6
     assert installer.main(_args(installation, "--apply")) == 0
     assert _snapshot(tmp_path) == before
-    assert len(installation.calls) == 8
+    assert len(installation.calls) == 12
 
 
 @pytest.mark.parametrize("body,mode", [
@@ -208,6 +210,22 @@ def test_activation_failure_is_reported(installation, monkeypatch, capsys):
                         SimpleNamespace(returncode=5, stderr="PRIVATE_SUBPROCESS_OUTPUT"))
     assert installer.main(_args(installation, "--apply")) == 2
     assert "PRIVATE_SUBPROCESS_OUTPUT" not in capsys.readouterr().err
+
+
+def test_kickstart_failure_is_reported_before_starting_next_job(installation, monkeypatch, capsys):
+    calls = []
+
+    def launchctl(command, **kwargs):
+        calls.append(command)
+        return SimpleNamespace(returncode=5 if command[1] == "kickstart" else 0)
+
+    monkeypatch.setattr(installer.subprocess, "run", launchctl)
+    assert installer.main(_args(installation, "--apply")) == 2
+    assert calls[-1] == [
+        installer.LAUNCHCTL, "kickstart", "gui/" + str(os.getuid()) + "/" + installer.LABELS[0],
+    ]
+    assert sum(command[1] == "bootstrap" for command in calls) == 1
+    assert "Não foi possível ativar o serviço " + installer.LABELS[0] in capsys.readouterr().err
 
 
 def test_socket_preparation_creates_private_directory_and_removes_only_stale(socket_dir):
@@ -292,10 +310,11 @@ def test_tunnel_prepares_then_starts_ssh_with_fixed_destinations(monkeypatch):
     assert "-N" not in command and "-T" in command
     assert command[-1].startswith("exec /usr/bin/python3 -c ")
     for option in (
-        "BatchMode=yes", "ExitOnForwardFailure=yes",
+        "BatchMode=yes", "ClearAllForwardings=no", "ExitOnForwardFailure=yes",
         "ServerAliveInterval=30", "ServerAliveCountMax=3",
     ):
         assert option in command
+    assert "ClearAllForwardings=no" not in calls[0][1]
     assert command[command.index("-R") + 1] == tunnel.REMOTE_SOCKET + ":127.0.0.1:13129"
     assert not any("GatewayPorts" in argument or "BindUnlink" in argument for argument in command)
 
