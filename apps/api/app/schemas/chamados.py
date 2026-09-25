@@ -499,6 +499,9 @@ class AgentCasoLeituraOut(BaseModel):
     plataforma: str | None = None
     # Última leitura confirmada — `null` = nunca foi lido.
     leitura_robo_at: datetime | None = None
+    # 25/09 (executor de leitura): `devolucao` = busca o pedido no Seller Center;
+    # `portal` = consulta do Portal de Atendimento, abrir direto a `chamado_url`.
+    tipo: Literal["devolucao", "portal"] = "devolucao"
 
 
 class AgentLeituraOut(BaseModel):
@@ -518,6 +521,10 @@ class AgentLeitorFilaIn(BaseModel):
     limite: int = Field(default=10, ge=1, le=200)
     contas: list[str] | None = None
     espiar: bool = False
+    # 25/09 (292592): inclui as consultas do Portal de Atendimento ao Vendedor
+    # (caso aberto na tela; `tipo: "portal"` + `chamado_url`). Desligado por
+    # padrão: a versão antiga do executor não sabe ler essa página.
+    portal: bool = False
 
 
 class AgentFalaLidaIn(BaseModel):

@@ -13,8 +13,9 @@ ninguém fica sabendo ("não tô achando no ouvidoria robôs … esse aí").
 1. `executor:sem_sinal` — o robô parou de perguntar a fila. Ele pergunta a
    cada 10 min, e cada pergunta carimba `chamados_leitores.last_used_at`.
    Nunca-deu-sinal só vira ocorrência se houver caso esperando leitura.
-2. `caso:<chamado_id>` — devolução da fila (mesma régua da fila do robô,
-   `chamados_leitura.condicoes_devolucao_shopee`) sem leitura além da
+2. `caso:<chamado_id>` — devolução ou consulta do Portal de Atendimento (25/09)
+   da fila (mesma régua da fila do robô, `chamados_leitura.condicoes_do_leitor`)
+   sem leitura além da
    cadência + `atraso_horas`: 3 h + 3 h = 6 h no caso normal; caso frio
    (ninguém fala há 15 dias) é lido 1×/dia, então 24 h + 3 h. Pega login
    caído, perfil sempre em uso, loja sem perfil no AdsPower e página mudada
@@ -133,7 +134,7 @@ async def _casos(
     linhas = (
         await session.execute(
             select(Chamado, ultima_fala.label("ultima_fala"), entrou.label("entrou"))
-            .where(*chamados_leitura.condicoes_devolucao_shopee())
+            .where(*chamados_leitura.condicoes_do_leitor())
             .order_by(Chamado.created_at)
         )
     ).all()
@@ -147,14 +148,19 @@ async def _casos(
             continue
         r.contadores["casos_sem_leitura"] += 1
         minutos = _minutos(desde, agora)
+        # 25/09 (292592): consulta do Portal de Atendimento também é da fila
+        portal = chamados_leitura.e_portal_shopee(ch)
+        o_que = "Consulta do Portal" if portal else "Devolução"
         if lido is None:
-            titulo = f"Devolução sem leitura nenhuma há {_idade(minutos)}"
+            titulo = f"{o_que} sem leitura nenhuma há {_idade(minutos)}"
             detalhe = f"Na fila do robô desde {_br(ent or ch.created_at)} e nunca foi lida"
         else:
-            titulo = f"Devolução sem leitura há {_idade(minutos)}"
-            detalhe = f"Última leitura no Seller Center em {_br(lido)}"
+            titulo = f"{o_que} sem leitura há {_idade(minutos)}"
+            onde = "no Portal de Atendimento" if portal else "no Seller Center"
+            detalhe = f"Última leitura {onde} em {_br(lido)}"
+        numero = f"consulta {ch.chamado or '?'}" if portal else f"solicitação {ch.chamado or '?'}"
         detalhe += (
-            f" — solicitação {ch.chamado or '?'}, pedido Shopee {ch.pedido_marketplace or '?'}. "
+            f" — {numero}, pedido Shopee {ch.pedido_marketplace or '?'}. "
             "Se a Shopee respondeu nesse meio-tempo, o chamado não sabe"
         )
         await _registrar(

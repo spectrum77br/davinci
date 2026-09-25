@@ -35,6 +35,7 @@ reler a mesma página de 3 em 3 h sem sujar o histórico.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
@@ -223,12 +224,59 @@ def condicoes_devolucao_shopee() -> list:
     ]
 
 
+# 25/09 (Vinicius, 292592): chamado da Shopee aberto NA TELA pelo Portal de
+# Atendimento ao Vendedor — `chamado` é o ID da consulta (só dígitos) e a página
+# é seller-service.cs.shopee.com.br/detail/<ID>. Nem a API nem a leitura do
+# Seller Center chegavam nele: o Agente Shopee respondeu em 19/09 e em 23/09
+# (compensação em análise) e o chamado seguia "Aguard. Plataforma" desde 19/09.
+PORTAL_SHOPEE_URL = "https://seller-service.cs.shopee.com.br/detail/{}"
+_CONSULTA_PORTAL = r"^\d{15,}$"
+
+
+def condicoes_portal_shopee() -> list:
+    """Consulta do Portal de Atendimento ao Vendedor da Shopee que o executor de
+    leitura relê: caso aberto na tela, Shopee, vivo, sem decisão final, com o ID
+    da consulta no `chamado`."""
+    return [
+        Chamado.resolvido.is_(False),
+        chamados_svc.NAO_ENCERRADO_SQL,
+        chamados_svc.CASO_DE_TELA_SQL,
+        func.trim(func.coalesce(Chamado.chamado, "")).op("~")(_CONSULTA_PORTAL),
+        func.lower(func.trim(func.coalesce(Chamado.plataforma, ""))).in_(
+            sorted(chamados_svc.apelidos_da_plataforma("shopee"))
+        ),
+    ]
+
+
+def condicoes_do_leitor(*, portal: bool = True) -> list:
+    """Tudo que é da fila do executor de leitura: devolução contestada pela API
+    (Seller Center) e, com `portal`, consulta do Portal de Atendimento."""
+    devolucao = and_(*condicoes_devolucao_shopee())
+    if not portal:
+        return [devolucao]
+    return [or_(devolucao, and_(*condicoes_portal_shopee()))]
+
+
+def e_portal_shopee(ch: Chamado) -> bool:
+    """Consulta do Portal de Atendimento (o `/agent/leitor/resultado` aceita)."""
+    return (
+        bool(ch.chamado_de_tela)
+        and (ch.plataforma or "").strip().lower() in chamados_svc.apelidos_da_plataforma("shopee")
+        and re.match(_CONSULTA_PORTAL, (ch.chamado or "").strip()) is not None
+    )
+
+
+def url_do_portal(ch: Chamado) -> str:
+    return PORTAL_SHOPEE_URL.format((ch.chamado or "").strip())
+
+
 async def fila_devolucao_shopee(
     session: AsyncSession,
     *,
     limite: int = 10,
     contas: list[str] | None = None,
     espiar: bool = False,
+    portal: bool = False,
     agora: datetime | None = None,
 ) -> list[Chamado]:
     """Devoluções da Shopee contestadas PELA API que o executor de leitura deve
@@ -248,11 +296,14 @@ async def fila_devolucao_shopee(
     `contas`: só as lojas que o robô tem perfil pra abrir — sem isso, caso de
     loja sem perfil voltaria sempre primeiro (NULLS FIRST) e tomaria o lugar
     dos outros. `espiar`: devolve sem marcar a entrega (modo seco do robô, e a
-    conferência de quais casos entrariam)."""
+    conferência de quais casos entrariam). `portal` (25/09): entrega também as
+    consultas do Portal de Atendimento — só quando o executor pede, pra versão
+    antiga dele (que só sabe buscar o pedido no Seller Center) não ler o lugar
+    errado."""
     agora = agora or datetime.now(UTC)
     ultima_fala = _ultima_fala_at()
     conds = [
-        *condicoes_devolucao_shopee(),
+        *condicoes_do_leitor(portal=portal),
         or_(
             Chamado.leitura_robo_claim_at.is_(None),
             Chamado.leitura_robo_claim_at < agora - CLAIM_STALE,

@@ -1703,23 +1703,33 @@ async def agent_leitor_fila(
     da solicitação; o robô busca pelo `pedido_marketplace`. Mesma cadência e claim
     do `/agent/leitura` (3 h / 24 h frio / claim 30 min); `espiar` não marca."""
     casos = await chamados_leitura.fila_devolucao_shopee(
-        session, limite=body.limite, contas=body.contas, espiar=body.espiar
+        session,
+        limite=body.limite,
+        contas=body.contas,
+        espiar=body.espiar,
+        portal=body.portal,
     )
-    return AgentLeituraOut(
-        casos=[
+    out: list[AgentCasoLeituraOut] = []
+    for c in casos:
+        portal = chamados_leitura.e_portal_shopee(c)
+        out.append(
             AgentCasoLeituraOut(
                 chamado_id=c.id,
                 chamado=(c.chamado or "").strip(),
-                chamado_url=(c.chamado_url or "").strip() or None,
+                chamado_url=(
+                    chamados_leitura.url_do_portal(c)
+                    if portal
+                    else (c.chamado_url or "").strip() or None
+                ),
                 pedido_bling=c.pedido_bling,
                 pedido_marketplace=(c.pedido_marketplace or "").strip() or None,
                 conta=c.conta,
                 plataforma=c.plataforma,
                 leitura_robo_at=c.leitura_robo_at,
+                tipo="portal" if portal else "devolucao",
             )
-            for c in casos
-        ]
-    )
+        )
+    return AgentLeituraOut(casos=out)
 
 
 @agent_router.post("/leitor/resultado", response_model=AgentLeituraResultadoOut)
@@ -1732,7 +1742,9 @@ async def agent_leitor_resultado(
     com a hora da tela, eco e repetida descartados, `ok: false` vira ocorrência).
     Só aceita chamado do tipo que a fila dele entrega."""
     ch = await _get(session, body.chamado_id)
-    if not chamados_leitura.e_devolucao_shopee_da_api(ch):
+    if not (
+        chamados_leitura.e_devolucao_shopee_da_api(ch) or chamados_leitura.e_portal_shopee(ch)
+    ):
         raise HTTPException(409, detail={"code": "chamado_fora_do_leitor"})
     r = await chamados_leitura.registrar(
         session,

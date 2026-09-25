@@ -258,3 +258,82 @@ async def test_nao_escreve_em_chamado_que_nao_e_da_fila_dele(client, db):
             },
         )
         assert r.status_code == 409, (kw, r.text)
+
+
+# ---------------------------------------------- Portal de Atendimento (25/09)
+
+CONSULTA = "2101308949814067207"
+AGENTE_23_09 = (
+    "Verifiquei seu pedido e identifiquei que o pacote apresentou irregularidades/danos "
+    "conforme as evidências enviadas. Já fiz a solicitação de compensação, que agora está "
+    "em análise pela equipe especializada."
+)
+
+
+async def _consulta_portal(db, **kw) -> Chamado:
+    """Como o 292592: aberto pelo robô NA TELA, no Portal de Atendimento ao Vendedor,
+    e o `chamado` é o ID da consulta."""
+    return await _devolucao(
+        db, return_sn=kw.pop("consulta", CONSULTA), pedido_mkt="260826D2E44FBF",
+        conta="Shopee Marquezini", de_tela=True, **kw,
+    )
+
+
+async def test_portal_so_entra_quando_o_executor_pede(client, db):
+    """292592: o Agente Shopee respondeu no Portal em 19/09 e 23/09 e ninguém lia.
+    A versão antiga do executor (sem `portal`) não recebe esses casos — ela buscaria
+    o pedido no Seller Center e leria o lugar errado."""
+    ch = await _consulta_portal(db)
+    assert await _fila(client, espiar=True) == []
+    casos = await _fila(client, portal=True)
+    assert [c["chamado_id"] for c in casos] == [str(ch.id)]
+    assert casos[0]["tipo"] == "portal"
+    assert casos[0]["chamado_url"] == f"https://seller-service.cs.shopee.com.br/detail/{CONSULTA}"
+
+
+async def test_portal_convive_com_as_devolucoes(client, db):
+    dev = await _devolucao(db)
+    por = await _consulta_portal(db)
+    casos = {c["chamado_id"]: c["tipo"] for c in await _fila(client, portal=True, espiar=True)}
+    assert casos == {str(dev.id): "devolucao", str(por.id): "portal"}
+
+
+@pytest.mark.parametrize(
+    "kw",
+    [
+        {"consulta": "2609200FUTKM4JD"},  # protocolo de tela que não é consulta do Portal
+        {"plataforma": "tiktok"},
+        {"resolvido": True},
+        {"status_plataforma": svc.STATUS_ENCERRADO},
+    ],
+)
+async def test_portal_exclui(client, db, kw):
+    await _consulta_portal(db, **kw)
+    assert await _fila(client, portal=True) == []
+
+
+async def test_fala_do_agente_no_portal_vira_resposta_da_shopee(client, db):
+    ch = await _consulta_portal(db)
+    await _fila(client, portal=True)
+    quando = datetime(2026, 9, 23, 10, 27, tzinfo=svc.SAO_PAULO)
+    r = await client.post(
+        "/api/chamados/agent/leitor/resultado",
+        headers=_HDR,
+        json={
+            "chamado_id": str(ch.id),
+            "falas": [{"texto": AGENTE_23_09, "quando": quando.isoformat(), "autor": "Agente Shopee"}],
+            "historico": f"Status da consulta: Caso concluído\n[23/09 10:27] Agente Shopee: {AGENTE_23_09}",
+        },
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["falas_novas"] == 1 and r.json()["encerrado"] is False
+    fala = (
+        await db.execute(
+            select(ChamadoMensagem).where(
+                ChamadoMensagem.chamado_id == ch.id, ChamadoMensagem.direcao == "recebida"
+            )
+        )
+    ).scalar_one()
+    assert fala.created_at == quando and fala.autor_nome == "Agente Shopee"
+    await db.refresh(ch)
+    assert ch.resolvido is False and ch.status_plataforma is None  # "Caso concluído" não fecha
