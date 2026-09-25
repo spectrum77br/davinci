@@ -99,6 +99,9 @@ python3 ~/.hermes/scripts/tela.py --chamado-id <chamado_id> --pode-agir --fundo 
   fatos do histórico e da observação do chamado), o que pedir e quais links de
   vídeo mandar. A tela também lê o manual (ex.: no chat da Shopee, responder o
   robô curto e só mandar tudo quando ele abrir o caminho).
+- Tarefa de conversar no chat da Shopee pra reabrir a disputa: já ponha na
+  `<tarefa>` o argumento e o link do vídeo pra evidência. Se o atendente reabrir,
+  a tela emenda o "Enviar evidência" na mesma tarefa, pelo manual (25/09).
 - Se os fatos se contradizem (ex.: o DaVinci diz "caixa voltou vazia" e a tela diz
   "somente reembolso"), confirme na tela antes de argumentar e use o que a tela
   mostra; na dúvida, `humano` explicando a contradição.

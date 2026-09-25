@@ -41,7 +41,12 @@ LEITURA = (
 )
 AGIR = (
     "Você PODE agir nesta tela (escrever e enviar) só no que a tarefa pede, neste chamado. "
-    "Antes de enviar, confira que está na loja, no pedido e na conversa certos."
+    "Antes de enviar, confira que está na loja, no pedido e na conversa certos. "
+    # 25/09 (296012): o Kaue reabriu a disputa no chat e a tela parou ("anexar não
+    # fazia parte desta tarefa") — o Vinicius quer que ela emende sozinha.
+    "Se a própria conversa abrir o próximo passo DESTE chamado (ex.: o atendente reabriu "
+    "a disputa e pede evidência — a tela mostra '2ª', 'Upload Evidence' ou 'Enviar "
+    "evidência'), NÃO pare: siga o manual e faça esse passo na mesma tarefa."
 )
 SEMPRE = (
     "Vá DIRETO ao que a tarefa pede. NÃO abra páginas só para reler histórico, pedido ou "
