@@ -409,13 +409,22 @@ function canSeeStockToggle(condicao?: string | null): boolean {
 }
 
 // ── Toast system ─────────────────────────────────────────────────────
-type Toast = { id: number; kind: 'success' | 'error' | 'warning'; title: string; lines: string[] }
+type Toast = { id: number; kind: 'success' | 'error' | 'warning' | 'info'; title: string; lines: string[] }
 const toasts = ref<Toast[]>([])
 let _toastId = 0
-function pushToast(t: Omit<Toast, 'id'>, ttl = 6000) {
+// ttl 0 = fica até alguém fechar (o "Atualizando o estoque no Bling…" some
+// quando a resposta chega, não por tempo).
+function pushToast(t: Omit<Toast, 'id'>, ttl = 6000): number {
   const id = ++_toastId
   toasts.value = [...toasts.value, { id, ...t }]
-  window.setTimeout(() => { toasts.value = toasts.value.filter((x) => x.id !== id) }, ttl)
+  if (ttl > 0) window.setTimeout(() => { toasts.value = toasts.value.filter((x) => x.id !== id) }, ttl)
+  return id
+}
+const TOAST_CORES: Record<Toast['kind'], { caixa: string; titulo: string; linha: string }> = {
+  success: { caixa: 'border-emerald-400 bg-emerald-50', titulo: 'text-emerald-800', linha: 'text-emerald-700' },
+  error: { caixa: 'border-red-400 bg-red-50', titulo: 'text-red-800', linha: 'text-red-700' },
+  warning: { caixa: 'border-amber-400 bg-amber-50', titulo: 'text-amber-800', linha: 'text-amber-700' },
+  info: { caixa: 'border-sky-400 bg-sky-50', titulo: 'text-sky-800', linha: 'text-sky-700' },
 }
 function dismissToast(id: number) {
   toasts.value = toasts.value.filter((x) => x.id !== id)
@@ -863,10 +872,15 @@ function prazoDiasLabel(v: string | null): string {
   return `vencido há ${-dias}d`
 }
 
+// Versão da edição por linha: sobe a cada mudança. O save anota a versão que
+// mandou — se ela mudou enquanto o PATCH estava no ar, alguém mexeu na linha
+// nesse meio-tempo e a resposta não pode apagar isso da tela.
+const rowVersion = new Map<string, number>()
 function markDirty(id: string) {
   const next = new Set(dirtyRows.value)
   next.add(id)
   dirtyRows.value = next
+  rowVersion.set(id, (rowVersion.get(id) ?? 0) + 1)
 }
 function clearDirty(id: string) {
   const next = new Set(dirtyRows.value)
@@ -1806,7 +1820,7 @@ async function toggleRowDevolverEstoque(row: DevolutionRow) {
     applyStockModalFields(row, extra)
   }
   setRowDevolverEstoque(row, next)
-  await saveRow(row)
+  await saveRow(row, { estoque: true })
 }
 
 // Mudança de condição inline: se devolver_estoque on e condição dispara
@@ -1841,11 +1855,22 @@ async function changeRowCondicao(row: DevolutionRow, value: string) {
     applyStockModalFields(row, extra)
     if (autoStock) setRowDevolverEstoque(row, true)
   }
-  await saveRow(row)
+  await saveRow(row, { estoque: autoStock || manualStock })
 }
 
-async function saveRow(row: DevolutionRow) {
-  if (!canEdit.value || !hasDirty(row.id) || isSaving(row.id)) return
+// Save pedido enquanto outro da mesma linha está no ar: espera a resposta e
+// sai logo depois (antes era descartado). Valor = se algum deles mexe no estoque.
+const resaveRows = new Map<string, boolean>()
+
+// `estoque`: o save lança/estorna no Bling — com o Bling limitando chamadas
+// leva 15 s ou mais (caso 294247, 25/09: o z0340 foi criado, mas a operadora
+// viu só "não salvo" e achou que tinha falhado). Mostra o aviso até responder.
+async function saveRow(row: DevolutionRow, opts: { estoque?: boolean } = {}) {
+  if (!canEdit.value || !hasDirty(row.id)) return
+  if (isSaving(row.id)) {
+    resaveRows.set(row.id, (resaveRows.get(row.id) ?? false) || !!opts.estoque)
+    return
+  }
   if (linkRequired(row.condicao_produto) && !row.link_abertura) {
     bloqueiaSave('Link de abertura obrigatório para Extraviado / Sucata / Manutenção')
     return
@@ -1869,25 +1894,53 @@ async function saveRow(row: DevolutionRow) {
   }
   setSaving(row.id, true)
   error.value = null
+  const versaoEnviada = rowVersion.get(row.id) ?? 0
+  const enviado = rowPatchPayload(row)
+  const aviso = opts.estoque
+    ? pushToast({
+        kind: 'info',
+        title: 'Atualizando o estoque no Bling…',
+        lines: [`Pedido ${row.pedido_bling || '—'} · pode levar alguns segundos, não repita`],
+      }, 0)
+    : null
   try {
     const updated = await api<DevolutionRow>(`/api/devolutions/${encodeURIComponent(row.id)}`, {
       method: 'PATCH',
-      body: rowPatchPayload(row),
+      body: enviado,
     })
     const idx = items.value.findIndex((i) => i.id === row.id)
+    const atual = idx >= 0 ? items.value[idx] : row
     // PATCH não devolve `cliente` (só a listagem preenche) — preserva o da linha.
-    if (idx >= 0) items.value[idx] = { ...updated, cliente: updated.cliente ?? row.cliente }
+    const novo: DevolutionRow = { ...updated, cliente: updated.cliente ?? atual.cliente }
+    const editadaNoAr = (rowVersion.get(row.id) ?? 0) !== versaoEnviada
+    if (editadaNoAr) {
+      // O que foi mexido durante o PATCH ainda não está no servidor: fica o da
+      // tela (senão a resposta apagava o texto recém-digitado) e a linha segue
+      // "não salvo" até o próximo save levar.
+      const agora = rowPatchPayload(atual)
+      for (const k of Object.keys(agora) as (keyof typeof agora)[]) {
+        if (agora[k] !== enviado[k]) (novo as any)[k] = atual[k]
+      }
+    }
+    if (idx >= 0) items.value[idx] = novo
     // Troca de motivo com chamado aberto (21/09): o backend diz o que fez com o
     // chamado e a operadora vê na hora — o detalhe fica no histórico do chamado.
     showTrocaMotivoToast(updated.chamado_troca_motivo, platNome(updated))
-    clearDirty(row.id)
+    if (!editadaNoAr) clearDirty(row.id)
     // Reembolso/condição podem mudar quais linhas entram nos filtros e cards.
     void refreshTotals()
     if (updated.bling_stock_result) showStockToast(updated.bling_stock_result)
   } catch (e: any) {
     bloqueiaSave(apiError(e))
   } finally {
+    if (aviso != null) dismissToast(aviso)
     setSaving(row.id, false)
+  }
+  if (resaveRows.has(row.id)) {
+    const estoque = resaveRows.get(row.id)
+    resaveRows.delete(row.id)
+    const linha = items.value.find((i) => i.id === row.id)
+    if (linha) await saveRow(linha, { estoque })
   }
 }
 
@@ -2821,15 +2874,22 @@ async function backfillAddresses() {
             v-for="row in items"
             :key="row.id"
             class="border-t hover:brightness-95 dark:hover:brightness-110"
-            :class="hasDirty(row.id) ? 'border-l-4 border-l-amber-400' : ''"
+            :class="isSaving(row.id) ? 'border-l-4 border-l-sky-400' : hasDirty(row.id) ? 'border-l-4 border-l-amber-400' : ''"
           >
             <td class="px-2 py-1 whitespace-nowrap text-muted-foreground">
               <!-- Marca de linha não salva (22/09): antes, quando uma guarda
                    barrava o save, o único sinal era o banner lá no topo da
                    página — a operadora marcava "Novo", via o select mudar e saía
-                   achando que tinha lançado (caso 292128). -->
+                   achando que tinha lançado (caso 292128). Enquanto o save está
+                   no ar a marca é "salvando…" — o lançamento no Bling pode levar
+                   15 s e "não salvo" nesse meio-tempo parecia erro (caso 294247). -->
               <span
-                v-if="hasDirty(row.id)"
+                v-if="isSaving(row.id)"
+                class="mr-1 inline-flex items-center gap-0.5 rounded bg-sky-100 px-1 text-[10px] font-semibold text-sky-800 dark:bg-sky-900/40 dark:text-sky-200"
+                title="Salvando esta linha — espere terminar antes de repetir"
+              ><Loader2 class="size-2.5 animate-spin" />salvando…</span>
+              <span
+                v-else-if="hasDirty(row.id)"
                 class="mr-1 rounded bg-amber-100 px-1 text-[10px] font-semibold text-amber-800 dark:bg-amber-900/40 dark:text-amber-200"
                 title="Alterações não salvas nesta linha — o salvamento foi barrado ou ainda não aconteceu"
               >não salvo</span>
@@ -3133,25 +3193,24 @@ async function backfillAddresses() {
           v-for="t in toasts"
           :key="t.id"
           class="rounded-lg border-2 shadow-lg px-3 py-2 text-sm"
-          :class="t.kind === 'success' ? 'border-emerald-400 bg-emerald-50' : t.kind === 'error' ? 'border-red-400 bg-red-50' : 'border-amber-400 bg-amber-50'"
+          :class="TOAST_CORES[t.kind].caixa"
         >
           <div class="flex items-start justify-between gap-2">
             <div class="flex-1 min-w-0">
-              <div
-                class="font-semibold"
-                :class="t.kind === 'success' ? 'text-emerald-800' : t.kind === 'error' ? 'text-red-800' : 'text-amber-800'"
-              >{{ t.title }}</div>
+              <div class="font-semibold" :class="TOAST_CORES[t.kind].titulo">
+                <Loader2 v-if="t.kind === 'info'" class="size-3.5 inline animate-spin mr-1 -mt-0.5" />{{ t.title }}
+              </div>
               <ul v-if="t.lines.length" class="mt-0.5 space-y-0.5 font-mono text-xs">
                 <li
                   v-for="(ln, i) in t.lines"
                   :key="i"
-                  :class="t.kind === 'success' ? 'text-emerald-700' : t.kind === 'error' ? 'text-red-700' : 'text-amber-700'"
+                  :class="TOAST_CORES[t.kind].linha"
                 >{{ ln }}</li>
               </ul>
             </div>
             <button
               class="shrink-0 opacity-60 hover:opacity-100"
-              :class="t.kind === 'success' ? 'text-emerald-800' : t.kind === 'error' ? 'text-red-800' : 'text-amber-800'"
+              :class="TOAST_CORES[t.kind].titulo"
               @click="dismissToast(t.id)"
             >
               <X class="size-4" />
