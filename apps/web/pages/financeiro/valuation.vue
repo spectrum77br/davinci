@@ -150,9 +150,7 @@ async function submitUnlock() {
     passwordInput.value = ''
     void loadResumo() // já carrega a aba atual
   } catch (e: any) {
-    unlockError.value = e?.data?.detail?.code === 'wrong_password'
-      ? 'Senha incorreta.'
-      : (e?.data?.detail?.code || e?.message || 'erro')
+    unlockError.value = mensagemDaSenhaExtra(e)
   } finally {
     unlocking.value = false
   }

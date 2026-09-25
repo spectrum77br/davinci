@@ -11,8 +11,9 @@
 #
 #   ./scripts/trocar-senha-extra.sh
 #
-# Depois de trocar, o sistema reinicia (~30 s fora do ar) e todo mundo que
-# estava com a página aberta precisa digitar a senha nova.
+# Depois de trocar, só a API reinicia (alguns segundos; os robôs e as filas
+# não são tocados) e todo mundo que estava com a página aberta precisa digitar
+# a senha nova. A cópia do .env antigo fica com o mesmo acesso restrito do .env.
 set -euo pipefail
 
 HOST="${DAVINCI_SSH:-root@46.225.188.20}"
@@ -38,7 +39,7 @@ fi
 printf '%s' "$A" | ssh -i "$CHAVE" -o StrictHostKeyChecking=no "$HOST" '
 set -e
 cd /opt/davinci
-cp .env ".env.bak.senha-$(date +%Y%m%d-%H%M%S)"
+cp -p .env ".env.bak.senha-$(date +%Y%m%d-%H%M%S)"
 python3 -c "
 import re, sys
 nova = sys.stdin.read()
@@ -51,8 +52,9 @@ else:
     s = s.rstrip(chr(10)) + chr(10) + linha + chr(10)
 open(p, \"w\").write(s)
 "
-docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d >/dev/null 2>&1
-echo "senha trocada no servidor; sistema reiniciando"
+# Só a API lê essa senha. --no-deps: não recria banco, filas nem robôs.
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --no-deps api >/dev/null 2>&1
+echo "senha trocada no servidor; API reiniciando"
 '
 unset A B
-echo "Pronto. Em uns 30 segundos o Valuation e a tela Empresas pedem a senha nova."
+echo "Pronto. Em alguns segundos o Valuation e a tela Empresas pedem a senha nova."

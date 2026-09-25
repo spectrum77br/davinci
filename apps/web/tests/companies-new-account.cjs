@@ -17,7 +17,7 @@ assert.deepEqual(template.errors, [])
 const script = descriptor.scriptSetup.content
 const modal = script.slice(script.indexOf('// ---------- new account modal'), script.indexOf('async function createStoreCell'))
 const js = ts.transpileModule(modal, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText
-const factory = new Function('ref', 'reactive', 'api', 'canEdit', 'MARKETPLACE_SHORT', 'refresh', 'error', 'setTimeout', js + `
+const factory = new Function('ref', 'reactive', 'api', 'apiE', 'canEdit', 'MARKETPLACE_SHORT', 'refresh', 'error', 'setTimeout', js + `
 return { newAccountFor, newAccountForm, availablePhones, availableEmails, availableServers,
   availableCadastrosLoading, availableCadastrosLoaded, availableCadastrosError,
   newAccountSaving, newAccountErr, newAccountResult,
@@ -29,7 +29,7 @@ function setup() {
   let refreshed = 0
   const api = (url, opts) => new Promise((resolve, reject) => calls.push({ url, opts, resolve, reject }))
   return { calls, timers, refreshCount: () => refreshed,
-    state: factory(ref, reactive, api, ref(true), {}, async () => { refreshed++ }, ref(null), (fn) => { timers.push(fn) }) }
+    state: factory(ref, reactive, api, api, ref(true), {}, async () => { refreshed++ }, ref(null), (fn) => { timers.push(fn) }) }
 }
 const row = id => ({ company: { id, apelido: id } })
 const finish = (calls, start, prefix) => calls.slice(start, start + 3).forEach((call, i) => call.resolve([{ id: `${prefix}-${i}`, codigo: prefix }]))

@@ -51,12 +51,7 @@ export function useSenhaExtra(escopo: string, caminhoDesbloqueio: string, cabeca
       sessionStorage.setItem(VENCE, String(Math.floor(Date.now() / 1000) + r.expires_in - 30))
       return true
     } catch (e: any) {
-      const code = e?.data?.detail?.code
-      erro.value =
-        code === 'wrong_password' ? 'Senha incorreta.'
-        : code === 'muitas_tentativas' ? 'Muitas tentativas erradas. Espere 15 minutos e tente de novo.'
-        : code === 'senha_nao_configurada' ? 'A senha desta página ainda não foi configurada.'
-        : (code || e?.message || 'erro')
+      erro.value = mensagemDaSenhaExtra(e)
       return false
     } finally {
       // A senha digitada não fica guardada em lugar nenhum.
@@ -79,4 +74,15 @@ export function useSenhaExtra(escopo: string, caminhoDesbloqueio: string, cabeca
   }
 
   return { token, senha, erro, desbloqueando, iniciar, headers, desbloquear, trancar, eTravamento }
+}
+
+/** Texto em português para o erro do desbloqueio. Serve também ao Valuation,
+ *  que tem o próprio cartão: a contagem de erros é a mesma nas duas telas
+ *  (errar 5 vezes em Empresas trava o Valuation também, é a mesma senha). */
+export function mensagemDaSenhaExtra(e: any): string {
+  const code = e?.data?.detail?.code
+  return code === 'wrong_password' ? 'Senha incorreta.'
+    : code === 'muitas_tentativas' ? 'Muitas tentativas erradas. Espere 15 minutos e tente de novo.'
+    : code === 'senha_nao_configurada' ? 'A senha desta página ainda não foi configurada.'
+    : (code || e?.message || 'erro')
 }
