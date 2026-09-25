@@ -73,6 +73,7 @@ class ChamadoOut(BaseModel):
     origem_ref: str | None = None
     chamado: str | None = None
     chamado_url: str | None = None
+    consulta_portal: str | None = None
     canal: str
     # 22/09: o número acima foi capturado pelo robô NA TELA — nenhuma API responde
     # por ele. A tela usa isto pra dizer a verdade no botão Atualizar ("pus na
@@ -182,6 +183,21 @@ class ChamadoCreate(BaseModel):
         return self
 
 
+def _consulta_portal(value: str | None) -> str | None:
+    """25/09: aceita o link do Portal ou o número; guarda só o ID (vazio = limpa)."""
+    import re
+
+    if value is None:
+        return None
+    v = str(value).strip()
+    if not v:
+        return ""
+    m = re.search(r"(\d{15,})", v)
+    if m is None:
+        raise ValueError("consulta do Portal: cole o link ou o número da consulta")
+    return m.group(1)
+
+
 class ChamadoPatch(BaseModel):
     data: date | None = None
     pedido_bling: str | None = None
@@ -194,6 +210,7 @@ class ChamadoPatch(BaseModel):
     origem_ref: str | None = None
     chamado: str | None = None
     chamado_url: str | None = None
+    consulta_portal: str | None = None
     canal: Canal | None = None
     alterar_status_bling: str | None = None
     auto_ligada: bool | None = None
@@ -218,6 +235,7 @@ class ChamadoPatch(BaseModel):
         "observacao",
         mode="before",
     )(_clean_optional_text)
+    _consulta = field_validator("consulta_portal", mode="before")(_consulta_portal)
 
 
 class ChamadoPage(BaseModel):
@@ -501,7 +519,11 @@ class AgentCasoLeituraOut(BaseModel):
     leitura_robo_at: datetime | None = None
     # 25/09 (executor de leitura): `devolucao` = busca o pedido no Seller Center;
     # `portal` = consulta do Portal de Atendimento, abrir direto a `chamado_url`.
-    tipo: Literal["devolucao", "portal"] = "devolucao"
+    tipo: Literal["devolucao", "portal", "ambos"] = "devolucao"
+    # 25/09 (294571): consulta do Portal ligada ao chamado (`tipo` portal/ambos) —
+    # ler em `consulta_url`. Na devolução, `chamado` segue sendo a solicitação.
+    consulta_portal: str | None = None
+    consulta_url: str | None = None
 
 
 class AgentLeituraOut(BaseModel):
@@ -525,6 +547,9 @@ class AgentLeitorFilaIn(BaseModel):
     # (caso aberto na tela; `tipo: "portal"` + `chamado_url`). Desligado por
     # padrão: a versão antiga do executor não sabe ler essa página.
     portal: bool = False
+    # 25/09 (294571): inclui chamado com `consulta_portal` (consulta aberta à mão
+    # além da devolução) — `tipo: ambos` ou `portal`. Só pra quem sabe ler os dois.
+    consultas: bool = False
 
 
 class AgentFalaLidaIn(BaseModel):
@@ -555,6 +580,10 @@ class AgentLeituraResultadoIn(BaseModel):
     falas: list[AgentFalaLidaIn] = []
     # A tela mostra o caso fechado pela plataforma.
     encerrado: bool = False
+    # 25/09 (296012): o que a tela está PEDINDO de nós, com prazo — ex. "A Shopee
+    # pede evidência até 26/09/2026 … Upload Evidence". Vira aviso no chamado (uma
+    # vez por texto) e a IA/pessoa age antes de vencer.
+    pendencias: list[str] = []
 
     _clean = field_validator("erro", "historico", mode="before")(_clean_optional_text)
 
@@ -563,6 +592,7 @@ class AgentLeituraResultadoOut(BaseModel):
     chamado_id: UUID
     falas_novas: int
     ecos: int
+    pendencias_novas: int = 0
     duplicadas: int
     historico_alterado: bool
     encerrado: bool

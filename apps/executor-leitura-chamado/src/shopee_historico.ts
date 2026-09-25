@@ -46,6 +46,27 @@ export interface Leitura {
   itens: Item[];
   falas: Fala[];
   historico: string;
+  /** 25/09 (296012): o que a tela PEDE de nós com prazo — vira aviso no chamado. */
+  pendencias?: string[];
+}
+
+/** "A Shopee pede evidência até 26/09/2026 (2ª disputa)…" — visto no 296012 em
+ *  25/09: a linha da lista dizia "2ª Disputa – Disputa com a Shopee solicitada –
+ *  Please provide the evidence by 26-09-2026, otherwise dispute will be
+ *  withdrawn" com o botão "Upload Evidence" (e a página, "Evidência Solicitada —
+ *  Envie evidências até 26-09-2026"). A API não mostrava nada disso. */
+export function pendenciasDaTela(textos: string[], pedido: string): string[] {
+  const t = textos.join("\n");
+  const botao = /Upload Evidence|Enviar evid[eê]ncia|Evid[eê]ncia Solicitada/i.test(t);
+  const m = /(?:evidence by|evid[eê]ncias? at[eé])\s*(\d{2})[-/](\d{2})[-/](\d{4})/i.exec(t);
+  if (!botao && !m) return [];
+  const prazo = m ? ` até ${m[1]}/${m[2]}/${m[3]}` : "";
+  const ord = /(\d+)\s*ª\s*Disputa/i.exec(t);
+  const qual = ord ? ` (${ord[1]}ª disputa)` : "";
+  return [
+    `A Shopee pede evidência${prazo}${qual}. Enviar em: Seller Center › Retornos e pedidos ` +
+      `cancelados › pedido ${pedido} › Upload Evidence. Sem isso a disputa é retirada.`,
+  ];
 }
 
 const SEL_BUSCA = 'input[placeholder*="ID da solicita"]';
@@ -90,8 +111,9 @@ export function eFalaDaShopee(i: Item): boolean {
   return i.chat && /shopee/i.test(i.autor) && !/^voc[eê]\b/i.test(i.autor) && !!i.texto && !!i.quando;
 }
 
-/** Acha a devolução do pedido na lista e devolve o link dela. */
-async function acharDevolucao(page: Page, caso: Caso): Promise<string> {
+/** Acha a devolução do pedido na lista e devolve o link dela (+ o texto da linha,
+ *  onde aparece "2ª Disputa … provide the evidence by …"). */
+async function acharDevolucao(page: Page, caso: Caso): Promise<{ href: string; linha: string }> {
   const pedido = (caso.pedido_marketplace || "").trim();
   const solicitacao = (caso.chamado || "").trim();
   await page
@@ -116,14 +138,14 @@ async function acharDevolucao(page: Page, caso: Caso): Promise<string> {
     const links =
       (await evalJS<{ href: string; texto: string }[]>(
         page,
-        `[...document.querySelectorAll('a[href*="/portal/sale/return/"]')].map(function(a){var p=a.parentElement&&a.parentElement.parentElement;return {href:a.getAttribute('href'),texto:((a.innerText||'')+' '+(p?(p.innerText||''):'')).slice(0,800)};})`
+        `[...document.querySelectorAll('a[href*="/portal/sale/return/"]')].map(function(a){var p=a.parentElement&&a.parentElement.parentElement;var tr=a.closest('tr')||p;return {href:a.getAttribute('href'),texto:((a.innerText||'')+' '+(tr?(tr.innerText||''):'')).slice(0,1500)};})`
       )) || [];
     const doPedido = links.filter((l) => l.texto.includes(pedido));
     if (!doPedido.length) continue;
     const exato = solicitacao ? doPedido.find((l) => l.texto.includes(solicitacao)) : undefined;
-    if (exato) return exato.href;
+    if (exato) return { href: exato.href, linha: exato.texto };
     const hrefs = [...new Set(doPedido.map((l) => l.href))];
-    if (hrefs.length === 1 && i >= 2) return hrefs[0];
+    if (hrefs.length === 1 && i >= 2) return { href: hrefs[0], linha: doPedido[0].texto };
     if (hrefs.length > 1 && i >= 4) {
       throw new Error(
         `o pedido ${pedido} tem ${hrefs.length} devoluções e nenhuma mostrou a solicitação ${solicitacao}`
@@ -239,7 +261,7 @@ function montarHistorico(situacao: string, itens: Item[] | null): string {
 /** Lê UM caso. Lança erro quando não deu pra ler (quem chama manda ok:false). */
 export async function ler(page: Page, caso: Caso): Promise<Leitura> {
   if (!(caso.pedido_marketplace || "").trim()) throw new Error("caso sem nº do pedido da Shopee");
-  const href = await acharDevolucao(page, caso);
+  const { href, linha } = await acharDevolucao(page, caso);
   const url = href.startsWith("http") ? href : `${cfg.sellerUrl}${href}`;
   await page.goto(url, { waitUntil: "networkidle2", timeout: 60000 }).catch(() => undefined);
   await conferirLogin(page);
@@ -268,5 +290,14 @@ export async function ler(page: Page, caso: Caso): Promise<Leitura> {
     quando: isoDaTela(i.quando) as string,
     autor: i.autor,
   }));
-  return { url, situacao, itens: itens || [], falas, historico: montarHistorico(situacao, itens) };
+  const pagina = (await evalJS<string>(page, `document.body.innerText||''`)) || "";
+  const pendencias = pendenciasDaTela([linha, situacao, pagina], (caso.pedido_marketplace || "").trim());
+  return {
+    url,
+    situacao,
+    itens: itens || [],
+    falas,
+    historico: montarHistorico(situacao, itens),
+    pendencias,
+  };
 }

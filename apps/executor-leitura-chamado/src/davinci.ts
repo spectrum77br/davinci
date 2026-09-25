@@ -12,7 +12,10 @@ export interface Caso {
   chamado_id: string;
   chamado: string;
   chamado_url?: string | null;
-  tipo?: "devolucao" | "portal";
+  tipo?: "devolucao" | "portal" | "ambos";
+  /** 25/09 (294571): consulta do Portal ligada ao chamado (tipo portal/ambos). */
+  consulta_portal?: string | null;
+  consulta_url?: string | null;
   pedido_bling: string | null;
   pedido_marketplace: string | null;
   conta: string | null;
@@ -33,6 +36,8 @@ export interface Resultado {
   erro?: string;
   falas?: Fala[];
   historico?: string;
+  /** O que a tela PEDE de nós com prazo (ex. evidência da 2ª disputa). */
+  pendencias?: string[];
 }
 
 async function post<T>(path: string, body: unknown): Promise<T> {
@@ -67,6 +72,8 @@ export async function fila(
     contas,
     espiar,
     portal,
+    // v1.2: sabe ler a devolução E a consulta ligada no mesmo caso (tipo "ambos")
+    consultas: portal,
   });
   return data.casos ?? [];
 }
@@ -79,6 +86,7 @@ export async function resultado(r: Resultado): Promise<Record<string, unknown>> 
     erro: r.erro ?? null,
     falas: r.falas ?? [],
     historico: r.historico ?? null,
+    pendencias: r.pendencias ?? [],
     encerrado: false,
   });
 }

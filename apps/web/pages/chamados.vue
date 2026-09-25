@@ -137,6 +137,9 @@ type ChamadoRow = {
   origem_ref: string | null
   chamado: string | null
   chamado_url: string | null
+  // 25/09 (294571): consulta aberta à mão no Portal de Atendimento da Shopee — o
+  // executor de leitura lê lá também (além da devolução em `chamado`).
+  consulta_portal?: string | null
   canal: Canal
   // 22/09: o protocolo veio da TELA (o robô abriu no Seller Center) — nenhuma API
   // responde por ele; quem lê é o robô de leitura.
@@ -1006,6 +1009,47 @@ const relendo = ref(false)
 // "Reler agora" (22/09): o cron relê a plataforma de hora em hora, no minuto 25.
 // Quando a TikTok está com prazo correndo ("sem resposta, aprova o reembolso
 // sozinha"), esperar a próxima janela é caro — este botão lê na hora.
+// ----------------------------------------------- consulta do Portal (25/09)
+
+const consultaDraft = ref('')
+const consultaErro = ref<string | null>(null)
+const salvandoConsulta = ref(false)
+watch(
+  () => [hist.row?.id, hist.row?.consulta_portal],
+  () => {
+    consultaDraft.value = hist.row?.consulta_portal || ''
+    consultaErro.value = null
+  },
+)
+
+function ehShopee(row: ChamadoRow): boolean {
+  return /shopee/i.test(row.plataforma || '')
+}
+
+async function salvarConsulta() {
+  const row = hist.row
+  if (!row || !canEdit.value || salvandoConsulta.value) return
+  const valor = consultaDraft.value.trim()
+  if (valor === (row.consulta_portal || '')) return
+  salvandoConsulta.value = true
+  consultaErro.value = null
+  try {
+    const updated = await api<ChamadoRow>(`/api/chamados/${row.id}`, {
+      method: 'PATCH',
+      body: { consulta_portal: valor },
+    })
+    replaceRow(updated)
+    hist.row = updated
+    if (updated.consulta_portal) {
+      toasts.success('Consulta ligada ao chamado', 'O robô de leitura passa a ler essa consulta no Portal e traz a resposta pra cá.')
+    }
+  } catch (e: any) {
+    consultaErro.value = 'cole o link ou o número da consulta'
+  } finally {
+    salvandoConsulta.value = false
+  }
+}
+
 async function relerAgora() {
   const row = hist.row
   if (!row || !canEdit.value || relendo.value) return
@@ -1019,6 +1063,8 @@ async function relerAgora() {
     // do robô de leitura. Dizer "relido" seria mentira — nada foi lido ainda.
     if (updated.chamado_de_tela) {
       toasts.success('Pus este caso na frente da fila', 'O robô lê a tela da plataforma na próxima passada e o que ele achar aparece aqui.')
+    } else if (updated.consulta_portal) {
+      toasts.success('Caso relido na plataforma', 'E a consulta do Portal foi pra frente da fila do robô de leitura — o que ele achar aparece aqui.')
     } else {
       toasts.success('Caso relido na plataforma', 'O que chegou de novo está no histórico abaixo.')
     }
@@ -1927,6 +1973,21 @@ async function confirmarExcluir() {
             <div class="text-xs text-muted-foreground">
               {{ origemLabel(hist.row.origem) }} · {{ (hist.row.plataforma || '').toUpperCase() }} {{ hist.row.conta || '' }} · canal {{ hist.row.canal }}
               <a v-if="hist.row.chamado_url" :href="hist.row.chamado_url" target="_blank" rel="noopener" class="ml-1 underline">abrir na plataforma</a>
+            </div>
+            <!-- 25/09 (294571): consulta aberta à mão no Portal de Atendimento — o
+                 robô de leitura passa a ler lá também. Aceita o link ou o número. -->
+            <div v-if="ehShopee(hist.row) && !hist.row.chamado_de_tela" class="mt-1 flex flex-wrap items-center gap-1.5 text-xs">
+              <span class="text-muted-foreground">Consulta no Portal:</span>
+              <input
+                v-model="consultaDraft"
+                :disabled="!canEdit || salvandoConsulta"
+                placeholder="cole o link ou o nº da consulta"
+                class="h-6 w-60 rounded border bg-background px-1.5 text-xs"
+                @keydown.enter.prevent="salvarConsulta"
+                @blur="salvarConsulta"
+              />
+              <a v-if="hist.row.consulta_portal" :href="`https://seller-service.cs.shopee.com.br/detail/${hist.row.consulta_portal}`" target="_blank" rel="noopener" class="underline">abrir</a>
+              <span v-if="consultaErro" class="text-red-600">{{ consultaErro }}</span>
             </div>
           </div>
           <div class="flex items-center gap-2">

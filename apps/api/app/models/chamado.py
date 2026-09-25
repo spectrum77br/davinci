@@ -61,6 +61,10 @@ class Chamado(Base, TimestampMixin):
     # formulário (canal robo) — nunca inventado, só o que a plataforma devolveu.
     chamado: Mapped[str | None] = mapped_column(Text, nullable=True)
     chamado_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 25/09 (294571): ID da consulta no Portal de Atendimento ao Vendedor da Shopee
+    # (seller-service.cs.shopee.com.br/detail/<ID>) quando a pessoa abriu uma À MÃO
+    # além da devolução — o executor de leitura lê as duas. Mig 0327.
+    consulta_portal: Mapped[str | None] = mapped_column(Text, nullable=True)
     canal: Mapped[str] = mapped_column(
         Text, nullable=False, default="manual", server_default="manual"
     )

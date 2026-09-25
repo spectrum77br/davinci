@@ -83,6 +83,7 @@ class Resultado:
     duplicadas: int = 0
     historico_alterado: bool = False
     encerrado: bool = False
+    pendencias_novas: int = 0
 
 
 # ------------------------------------------------------------------ a fila
@@ -248,17 +249,20 @@ def condicoes_portal_shopee() -> list:
     ]
 
 
-def condicoes_do_leitor(*, portal: bool = True) -> list:
+def condicoes_do_leitor(*, portal: bool = True, consultas: bool = True) -> list:
     """Tudo que é da fila do executor de leitura: devolução contestada pela API
-    (Seller Center) e, com `portal`, consulta do Portal de Atendimento."""
-    devolucao = and_(*condicoes_devolucao_shopee())
-    if not portal:
-        return [devolucao]
-    return [or_(devolucao, and_(*condicoes_portal_shopee()))]
+    (Seller Center), com `portal` o caso aberto na tela pelo Portal, e com
+    `consultas` o chamado com consulta do Portal ligada (294571)."""
+    ramos = [and_(*condicoes_devolucao_shopee())]
+    if portal:
+        ramos.append(and_(*condicoes_portal_shopee()))
+    if consultas:
+        ramos.append(and_(*condicoes_consulta_ligada()))
+    return [or_(*ramos)]
 
 
 def e_portal_shopee(ch: Chamado) -> bool:
-    """Consulta do Portal de Atendimento (o `/agent/leitor/resultado` aceita)."""
+    """Caso aberto NA TELA pelo Portal (o `chamado` é o ID da consulta)."""
     return (
         bool(ch.chamado_de_tela)
         and (ch.plataforma or "").strip().lower() in chamados_svc.apelidos_da_plataforma("shopee")
@@ -266,8 +270,69 @@ def e_portal_shopee(ch: Chamado) -> bool:
     )
 
 
+def consulta_do_portal(ch: Chamado) -> str | None:
+    """A consulta do Portal a ler neste chamado: a ligada à mão (`consulta_portal`,
+    294571) ou, no caso aberto na tela pelo Portal, o próprio `chamado`."""
+    ligada = (ch.consulta_portal or "").strip()
+    if ligada:
+        return ligada
+    return (ch.chamado or "").strip() if e_portal_shopee(ch) else None
+
+
 def url_do_portal(ch: Chamado) -> str:
-    return PORTAL_SHOPEE_URL.format((ch.chamado or "").strip())
+    return PORTAL_SHOPEE_URL.format(consulta_do_portal(ch) or "")
+
+
+# 25/09 (294571): "abri na mão, tem que consultar por https://seller-service…
+# id da consulta 2103108212314644514" — a pessoa escreve assim na Observação ou
+# numa instrução; o chamado guarda o ID em `consulta_portal`.
+_LINK_PORTAL = re.compile(r"seller-service\.cs\.shopee\.com\.br/detail/(\d{15,})")
+_ID_PORTAL = re.compile(r"consulta\D{0,40}?(\d{19})", re.IGNORECASE)
+
+
+def extrair_consulta_portal(texto: str | None) -> str | None:
+    t = texto or ""
+    m = _LINK_PORTAL.search(t) or _ID_PORTAL.search(t)
+    return m.group(1) if m else None
+
+
+def ligar_consulta_do_texto(ch: Chamado, texto: str | None) -> bool:
+    """Preenche `consulta_portal` a partir do texto (Observação/instrução) se o
+    chamado é da Shopee, ainda não tem consulta e o texto traz uma."""
+    if (ch.consulta_portal or "").strip() or e_portal_shopee(ch):
+        return False
+    if (ch.plataforma or "").strip().lower() not in chamados_svc.apelidos_da_plataforma("shopee"):
+        return False
+    achada = extrair_consulta_portal(texto)
+    if not achada:
+        return False
+    ch.consulta_portal = achada
+    return True
+
+
+def condicoes_consulta_ligada() -> list:
+    """Chamado da Shopee com consulta do Portal ligada e sem pessoa ter concluído —
+    lida mesmo com a devolução já decidida (294571: "perdemos" na disputa e a
+    consulta seguia aberta; é ela que pode virar o jogo)."""
+    return [
+        Chamado.resolvido.is_(False),
+        func.coalesce(func.trim(Chamado.consulta_portal), "") != "",
+        func.lower(func.trim(func.coalesce(Chamado.plataforma, ""))).in_(
+            sorted(chamados_svc.apelidos_da_plataforma("shopee"))
+        ),
+    ]
+
+
+def tipo_de_leitura(ch: Chamado) -> str:
+    """O que o executor lê neste caso: `devolucao` (Seller Center), `portal` ou
+    `ambos`. A devolução só entra se ainda é da régua do acompanhamento."""
+    devolucao = e_devolucao_shopee_da_api(ch) and not (
+        ch.resolvido or ch.status_plataforma in chamados_svc.STATUS_FINAIS
+    )
+    portal = consulta_do_portal(ch) is not None
+    if devolucao and portal:
+        return "ambos"
+    return "portal" if portal else "devolucao"
 
 
 async def fila_devolucao_shopee(
@@ -277,6 +342,7 @@ async def fila_devolucao_shopee(
     contas: list[str] | None = None,
     espiar: bool = False,
     portal: bool = False,
+    consultas: bool = False,
     agora: datetime | None = None,
 ) -> list[Chamado]:
     """Devoluções da Shopee contestadas PELA API que o executor de leitura deve
@@ -303,7 +369,7 @@ async def fila_devolucao_shopee(
     agora = agora or datetime.now(UTC)
     ultima_fala = _ultima_fala_at()
     conds = [
-        *condicoes_do_leitor(portal=portal),
+        *condicoes_do_leitor(portal=portal, consultas=consultas),
         or_(
             Chamado.leitura_robo_claim_at.is_(None),
             Chamado.leitura_robo_claim_at < agora - CLAIM_STALE,
@@ -499,9 +565,15 @@ async def registrar(
     falas: list[FalaLida] | None = None,
     historico: str | None = None,
     encerrado: bool = False,
+    pendencias: list[str] | None = None,
     agora: datetime | None = None,
 ) -> Resultado:
     """O robô voltou da tela. Commita.
+
+    `pendencias` (25/09, 296012): o que a tela PEDE de nós com prazo ("A Shopee
+    pede evidência até 26/09/2026 …"). Entra UMA vez por texto como fala da
+    plataforma — a linha sai de "Aguard. Plataforma", a IA de Chamado lê e a
+    pessoa vê o prazo antes de vencer.
 
     `ok=False`: nada é gravado e `leitura_robo_at` NÃO avança (o caso continua
     "não lido"); o claim de 30 min vira o backoff natural. Leitura que para de
@@ -556,6 +628,35 @@ async def registrar(
                     "Hora da fala ilegível na tela da plataforma — gravada com a hora da leitura.",
                 )
             )
+    if pendencias:
+        ja = {
+            _chave(t)
+            for t in (
+                await session.execute(
+                    select(ChamadoMensagem.texto).where(
+                        ChamadoMensagem.chamado_id == ch.id,
+                        ChamadoMensagem.direcao == "recebida",
+                    )
+                )
+            ).scalars()
+        }
+        for p in pendencias:
+            texto = (p or "").strip()
+            if not texto or _chave(texto) in ja:
+                continue
+            m = chamados_svc.nova_mensagem(
+                ch,
+                texto=texto,
+                tipo="resposta",
+                direcao="recebida",
+                autor_nome="Shopee (pedido na tela)",
+                status="registrada",
+            )
+            m.canal = "robo"
+            m.created_at = m.enviada_at = agora
+            session.add(m)
+            ja.add(_chave(texto))
+            out.pendencias_novas += 1
     if historico:
         out.historico_alterado = await gravar_historico(session, ch, historico)
     if encerrado:

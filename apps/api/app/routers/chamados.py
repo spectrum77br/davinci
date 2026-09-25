@@ -568,8 +568,14 @@ async def patch_chamado(
     if "origem" in data and data["origem"] not in ORIGENS:
         raise HTTPException(422, detail={"code": "chamado_origem_invalida"})
     ligando_auto = bool(data.get("auto_ligada")) and not ch.auto_ligada
+    if data.get("consulta_portal") == "":
+        data["consulta_portal"] = None  # campo apagado na tela
     for key, value in data.items():
         setattr(ch, key, value)
+    if "observacao" in data and "consulta_portal" not in data:
+        # 25/09 (294571): "abri na mão… id da consulta 2103…" na Observação liga a
+        # consulta do Portal ao chamado — o executor de leitura passa a ler lá.
+        chamados_leitura.ligar_consulta_do_texto(ch, data["observacao"])
     if ligando_auto and ch.auto_ultimo_envio_at is None:
         # Ligar não dispara na hora: a 1ª réplica automática sai N dias depois.
         ch.auto_ultimo_envio_at = datetime.now(UTC)
@@ -1181,11 +1187,16 @@ async def reler_na_plataforma(
         logger.info("chamado_reler_fila_leitura", chamado_id=str(cid), autor=_autor(user))
         return await _one_out(session, ch)
     r = await chamados_devolucao_sync.sync_um(session, ch)
-    if not r.get("lido"):
+    await session.refresh(ch)
+    if (ch.consulta_portal or "").strip():
+        # 25/09 (294571): a consulta do Portal ligada ao chamado não tem API — o
+        # Atualizar também a põe na frente da fila do executor de leitura.
+        await chamados_leitura.furar_a_fila(session, ch)
+        await session.refresh(ch)
+    elif not r.get("lido"):
         raise HTTPException(
             422, detail={"code": r.get("erro") or "chamado_sem_api", "plataforma": r.get("plataforma")}
         )
-    await session.refresh(ch)
     return await _one_out(session, ch)
 
 
@@ -1216,6 +1227,7 @@ async def instruir_robo(
         status="registrada",
     )
     session.add(m)
+    chamados_leitura.ligar_consulta_do_texto(ch, body.texto)  # 25/09: link do Portal na instrução
     await session.commit()
     await session.refresh(ch)
     logger.info("chamado_instrucao", chamado_id=str(ch.id), autor=_autor(user))
@@ -1708,17 +1720,23 @@ async def agent_leitor_fila(
         contas=body.contas,
         espiar=body.espiar,
         portal=body.portal,
+        consultas=body.consultas,
     )
     out: list[AgentCasoLeituraOut] = []
     for c in casos:
-        portal = chamados_leitura.e_portal_shopee(c)
+        de_tela = chamados_leitura.e_portal_shopee(c)
+        if body.consultas:
+            tipo = chamados_leitura.tipo_de_leitura(c)
+        else:  # executor que só conhece devolução/portal-de-tela (v1.1)
+            tipo = "portal" if de_tela else "devolucao"
+        consulta = chamados_leitura.consulta_do_portal(c) if tipo != "devolucao" else None
         out.append(
             AgentCasoLeituraOut(
                 chamado_id=c.id,
                 chamado=(c.chamado or "").strip(),
                 chamado_url=(
                     chamados_leitura.url_do_portal(c)
-                    if portal
+                    if de_tela
                     else (c.chamado_url or "").strip() or None
                 ),
                 pedido_bling=c.pedido_bling,
@@ -1726,7 +1744,9 @@ async def agent_leitor_fila(
                 conta=c.conta,
                 plataforma=c.plataforma,
                 leitura_robo_at=c.leitura_robo_at,
-                tipo="portal" if portal else "devolucao",
+                tipo=tipo,
+                consulta_portal=consulta,
+                consulta_url=chamados_leitura.url_do_portal(c) if consulta else None,
             )
         )
     return AgentLeituraOut(casos=out)
@@ -1743,7 +1763,8 @@ async def agent_leitor_resultado(
     Só aceita chamado do tipo que a fila dele entrega."""
     ch = await _get(session, body.chamado_id)
     if not (
-        chamados_leitura.e_devolucao_shopee_da_api(ch) or chamados_leitura.e_portal_shopee(ch)
+        chamados_leitura.e_devolucao_shopee_da_api(ch)
+        or chamados_leitura.consulta_do_portal(ch) is not None
     ):
         raise HTTPException(409, detail={"code": "chamado_fora_do_leitor"})
     r = await chamados_leitura.registrar(
@@ -1757,6 +1778,7 @@ async def agent_leitor_resultado(
         ],
         historico=body.historico,
         encerrado=body.encerrado,
+        pendencias=body.pendencias,
     )
     return AgentLeituraResultadoOut(
         chamado_id=ch.id,
@@ -1765,6 +1787,7 @@ async def agent_leitor_resultado(
         duplicadas=r.duplicadas,
         historico_alterado=r.historico_alterado,
         encerrado=r.encerrado,
+        pendencias_novas=r.pendencias_novas,
         proxima_leitura_at=await chamados_leitura.proxima_leitura(session, ch, ok=body.ok),
     )
 

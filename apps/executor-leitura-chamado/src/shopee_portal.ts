@@ -88,9 +88,13 @@ function montarHistorico(consulta: string, status: string, progresso: string, it
 
 /** Lê UMA consulta. Lança erro quando não deu pra ler (quem chama manda ok:false). */
 export async function ler(page: Page, caso: Caso): Promise<Leitura> {
-  const consulta = (caso.chamado || "").trim();
+  // consulta ligada ao chamado (294571) ou o próprio protocolo (aberto na tela, 292592)
+  const consulta = (caso.consulta_portal || caso.chamado || "").trim();
   if (!/^\d{15,}$/.test(consulta)) throw new Error(`"${consulta}" não é ID de consulta do Portal`);
-  const url = (caso.chamado_url || "").trim() || `${PORTAL_URL}${consulta}`;
+  const url =
+    (caso.consulta_url || "").trim() ||
+    (caso.consulta_portal ? "" : (caso.chamado_url || "").trim()) ||
+    `${PORTAL_URL}${consulta}`;
   await page.goto(url, { waitUntil: "networkidle2", timeout: 90000 }).catch(() => undefined);
   const senha = await evalJS<boolean>(page, `!!document.querySelector('input[type="password"]')`);
   if (/signin|login|\/account\//i.test(page.url()) || senha) throw new LoginNecessario();
@@ -102,7 +106,22 @@ export async function ler(page: Page, caso: Caso): Promise<Leitura> {
       `/Detalhes da consulta|ID da Consulta/i.test(document.body.innerText||'')&&document.querySelectorAll('[class*="message-content___"]').length>0`
     ));
   }
-  if (!pronta) throw new Error(`a consulta não carregou no Portal (${page.url()})`);
+  if (!pronta) {
+    // 25/09 (294571): a página abre logada mas VAZIA quando a consulta foi aberta
+    // com outro login da loja — o Portal só mostra a consulta pra quem abriu.
+    const login = await evalJS<string>(
+      page,
+      `(function(){var e=document.querySelector('[class*="user__info"]');return e?(e.innerText||'').trim():'';})()`
+    );
+    const abriu = await evalJS<boolean>(page, `/Detalhes da consulta/i.test(document.body.innerText||'')`);
+    if (abriu) {
+      throw new Error(
+        `a consulta ${consulta} não aparece no login "${login || "?"}" deste perfil — ` +
+          `ela foi aberta com outro login da loja? (o Portal só mostra pra quem abriu)`
+      );
+    }
+    throw new Error(`a consulta não carregou no Portal (${page.url()})`);
+  }
   const confere = await evalJS<boolean>(
     page,
     `(document.body.innerText||'').indexOf(${JSON.stringify(consulta)})>=0`

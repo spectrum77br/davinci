@@ -20,6 +20,10 @@
  * 25/09 (292592): a fila também traz consulta do Portal de Atendimento ao
  * Vendedor (`tipo: portal`) — chamado que o robô abriu NA TELA, pelo Portal.
  * Essa é lida pelo link direto (shopee_portal.ts), não pela busca do pedido.
+ * `tipo: ambos` (294571): devolução acompanhada pela API COM uma consulta do
+ * Portal aberta à mão — lê as duas e junta no mesmo chamado. E toda leitura da
+ * devolução procura o que a tela PEDE com prazo ("Upload Evidence … até
+ * 26-09-2026") e manda como pendência (vira aviso no chamado).
  *
  * Uso:
  *   npm start                         loop (LEITURA_MODO do .env, default seco)
@@ -44,7 +48,7 @@ import * as historico from "./shopee_historico";
 import * as portal from "./shopee_portal";
 import type { Caso } from "./davinci";
 
-const VERSION = "1.1.0";
+const VERSION = "1.2.0";
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 function arg(nome: string): string | undefined {
@@ -103,12 +107,40 @@ async function print(page: Page, nome: string): Promise<string | undefined> {
 }
 
 async function lerUm(page: Page, caso: Caso, real: boolean): Promise<void> {
-  const noPortal = caso.tipo === "portal";
+  const tipo = caso.tipo || "devolucao";
+  const consulta = caso.consulta_portal || (tipo === "portal" ? caso.chamado : "");
   const rot =
-    `pedido ${caso.pedido_bling || "?"} (${caso.pedido_marketplace} / ` +
-    `${noPortal ? "consulta " : ""}${caso.chamado})`;
+    `pedido ${caso.pedido_bling || "?"} (${caso.pedido_marketplace} / ${caso.chamado}` +
+    `${consulta && consulta !== caso.chamado ? ` + consulta ${consulta}` : ""})`;
   try {
-    const l = noPortal ? await portal.ler(page, caso) : await historico.ler(page, caso);
+    let l: historico.Leitura;
+    if (tipo === "portal") {
+      l = await portal.ler(page, caso);
+    } else if (tipo === "ambos") {
+      const dev = await historico.ler(page, caso);
+      let por: historico.Leitura | null = null;
+      let falhou = "";
+      try {
+        por = await portal.ler(page, caso);
+      } catch (e: any) {
+        if (e instanceof historico.LoginNecessario) throw e;
+        falhou = String(e?.message || e).slice(0, 280);
+        log.error(`${rot}: a devolução eu li, a consulta do Portal não — ${falhou}`);
+      }
+      l = {
+        url: dev.url,
+        situacao: dev.situacao,
+        itens: [...dev.itens, ...(por?.itens ?? [])],
+        falas: [...dev.falas, ...(por?.falas ?? [])],
+        historico:
+          `${dev.historico}\n\n———\n\n` +
+          (por ? por.historico : `Consulta ${consulta} no Portal: não consegui ler — ${falhou}`),
+        pendencias: dev.pendencias,
+      };
+    } else {
+      l = await historico.ler(page, caso);
+    }
+    if (l.pendencias?.length) log.warn(`${rot}: a tela pede algo nosso — ${l.pendencias.join(" | ")}`);
     log.info(`${rot}: ${l.itens.length} mensagem(ns) na janela, ${l.falas.length} da Shopee`);
     if (!real) {
       fs.mkdirSync(cfg.secoDir, { recursive: true });
@@ -122,6 +154,7 @@ async function lerUm(page: Page, caso: Caso, real: boolean): Promise<void> {
       ok: true,
       falas: l.falas,
       historico: l.historico,
+      pendencias: l.pendencias ?? [],
     });
     log.info(`${rot}: enviado — ${JSON.stringify(r)}`);
   } catch (e: any) {

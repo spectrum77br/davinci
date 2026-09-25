@@ -321,8 +321,12 @@ async def test_fala_do_agente_no_portal_vira_resposta_da_shopee(client, db):
         headers=_HDR,
         json={
             "chamado_id": str(ch.id),
-            "falas": [{"texto": AGENTE_23_09, "quando": quando.isoformat(), "autor": "Agente Shopee"}],
-            "historico": f"Status da consulta: Caso concluído\n[23/09 10:27] Agente Shopee: {AGENTE_23_09}",
+            "falas": [
+                {"texto": AGENTE_23_09, "quando": quando.isoformat(), "autor": "Agente Shopee"}
+            ],
+            "historico": (
+                f"Status da consulta: Caso concluído\n[23/09 10:27] Agente Shopee: {AGENTE_23_09}"
+            ),
         },
     )
     assert r.status_code == 200, r.text
@@ -337,3 +341,115 @@ async def test_fala_do_agente_no_portal_vira_resposta_da_shopee(client, db):
     assert fala.created_at == quando and fala.autor_nome == "Agente Shopee"
     await db.refresh(ch)
     assert ch.resolvido is False and ch.status_plataforma is None  # "Caso concluído" não fecha
+
+
+# ------------------------------- consulta do Portal ligada à devolução (25/09)
+
+CONSULTA_MAO = "2103108212314644514"
+OBS_294571 = (
+    "24 - abri na mao tem que consultar por https://seller-service.cs.shopee.com.br/ "
+    f"id da consulta {CONSULTA_MAO}"
+)
+
+
+def _perms_edit() -> dict:
+    return {"chamados": {"view": True, "edit": True, "delete": True}}
+
+
+async def test_observacao_com_a_consulta_liga_ao_chamado(client, db, make_user, auth_as):
+    """294571: o Cairo abriu a consulta à mão e anotou na Observação — o chamado
+    passa a guardar o ID (o nº da devolução continua no `chamado`)."""
+    auth_as(await make_user(permissions=_perms_edit()))
+    ch = await _devolucao(db, return_sn="260914016HQB8XN", conta="Shopee ATV")
+    r = await client.patch(f"/api/chamados/{ch.id}", json={"observacao": OBS_294571})
+    assert r.status_code == 200, r.text
+    assert r.json()["consulta_portal"] == CONSULTA_MAO
+    assert r.json()["chamado"] == "260914016HQB8XN"
+    # o campo aceita o link inteiro e apagar limpa
+    link = f"https://seller-service.cs.shopee.com.br/detail/{CONSULTA_MAO}"
+    r = await client.patch(f"/api/chamados/{ch.id}", json={"consulta_portal": link})
+    assert r.json()["consulta_portal"] == CONSULTA_MAO
+    r = await client.patch(f"/api/chamados/{ch.id}", json={"consulta_portal": ""})
+    assert r.json()["consulta_portal"] is None
+    ruim = await client.patch(f"/api/chamados/{ch.id}", json={"consulta_portal": "abc"})
+    assert ruim.status_code == 422
+
+
+async def test_instrucao_com_o_link_do_portal_liga_ao_chamado(client, db, make_user, auth_as):
+    auth_as(await make_user(permissions=_perms_edit()))
+    ch = await _devolucao(db, return_sn="260914016HQB8XN", conta="Shopee ATV")
+    r = await client.post(
+        f"/api/chamados/{ch.id}/instrucao",
+        json={"texto": f"olha a consulta https://seller-service.cs.shopee.com.br/detail/{CONSULTA_MAO}"},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["consulta_portal"] == CONSULTA_MAO
+
+
+async def test_fila_entrega_a_consulta_ligada_so_pra_quem_pede(client, db):
+    """Devolução já decidida ("perdemos") com a consulta do Cairo aberta: sai da
+    leitura do Seller Center, mas a consulta segue sendo lida — `tipo: portal`."""
+    ch = await _devolucao(db, return_sn="260914016HQB8XN", conta="Shopee ATV",
+                          status_plataforma=svc.STATUS_PERDEMOS)
+    ch.consulta_portal = CONSULTA_MAO
+    await db.commit()
+    assert await _fila(client, portal=True, espiar=True) == []  # executor v1.1
+    casos = await _fila(client, portal=True, consultas=True)
+    assert [c["chamado_id"] for c in casos] == [str(ch.id)]
+    assert casos[0]["tipo"] == "portal"
+    assert casos[0]["chamado"] == "260914016HQB8XN"
+    assert casos[0]["consulta_portal"] == CONSULTA_MAO
+    assert casos[0]["consulta_url"] == f"https://seller-service.cs.shopee.com.br/detail/{CONSULTA_MAO}"
+
+
+async def test_devolucao_viva_com_consulta_le_os_dois(client, db):
+    ch = await _devolucao(db)
+    ch.consulta_portal = CONSULTA_MAO
+    await db.commit()
+    casos = await _fila(client, portal=True, consultas=True, espiar=True)
+    assert casos[0]["tipo"] == "ambos" and casos[0]["consulta_portal"] == CONSULTA_MAO
+    antigo = await _fila(client, portal=True, espiar=True)  # v1.1 segue lendo só a devolução
+    assert antigo[0]["tipo"] == "devolucao" and antigo[0]["consulta_portal"] is None
+
+
+async def test_pedido_de_evidencia_na_tela_vira_aviso_uma_vez(client, db):
+    """296012: a 2ª disputa pedia evidência até 26/09 e só a tela mostrava."""
+    ch = await _devolucao(db)
+    aviso = (
+        "A Shopee pede evidência até 26/09/2026 (2ª disputa). Enviar em: Seller Center › "
+        "Retornos e pedidos cancelados › pedido 260910MATESNVN › Upload Evidence."
+    )
+    for vez in range(2):
+        r = await client.post(
+            "/api/chamados/agent/leitor/resultado",
+            headers=_HDR,
+            json={"chamado_id": str(ch.id), "pendencias": [aviso]},
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["pendencias_novas"] == (1 if vez == 0 else 0)
+    recebidas = (
+        await db.execute(
+            select(ChamadoMensagem).where(
+                ChamadoMensagem.chamado_id == ch.id, ChamadoMensagem.direcao == "recebida"
+            )
+        )
+    ).scalars().all()
+    assert [m.texto for m in recebidas] == [aviso]
+    assert recebidas[0].autor_nome == "Shopee (pedido na tela)"
+
+
+async def test_resultado_aceita_chamado_com_consulta_ligada(client, db):
+    ch = await _devolucao(db, return_sn="260914016HQB8XN", status_plataforma=svc.STATUS_PERDEMOS)
+    ch.consulta_portal = CONSULTA_MAO
+    await db.commit()
+    r = await client.post(
+        "/api/chamados/agent/leitor/resultado",
+        headers=_HDR,
+        json={"chamado_id": str(ch.id), "falas": [{
+            "texto": "Estamos analisando",
+            "quando": "2026-09-25T10:00:00-03:00",
+            "autor": "Agente Shopee",
+        }]},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["falas_novas"] == 1
