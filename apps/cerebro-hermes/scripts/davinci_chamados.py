@@ -24,6 +24,12 @@ Comandos (a IA usa pelo terminal):
                            disputa Shopee: o que a API diz da prova pedida; com
                            --enviar, lê o TEXTO da prova da entrada padrão e manda
                            pela API junto com as fotos da devolução
+  anexos --id UUID --pasta DIR
+                           baixa as fotos/vídeos do chamado pra DIR (Upload
+                           Evidence da Shopee, 25/09) e lista o que baixou
+  guardar-print --id UUID --mensagem UUID --arquivo F
+                           guarda um print no chamado, preso à mensagem (a
+                           análise que contou o envio)
   exemplos [--plataforma ml] [--limite 10] [--offset 0] [--desde 2026-09-01]
                            casos que o cérebro já decidiu, com a conversa
   guarda [estado|assumir|liberar]
@@ -101,6 +107,26 @@ def _post(cfg: dict[str, str], rota: str, corpo: dict) -> dict:
     except urllib.error.HTTPError as e:
         corpo_erro = e.read().decode(errors="replace")[:600]
         sys.exit(f"DaVinci {rota}: HTTP {e.code} {corpo_erro}")
+
+
+def _req_bin(cfg: dict[str, str], rota: str, data: bytes | None = None,
+             tipo: str | None = None) -> tuple[bytes, str]:
+    headers = {"X-Agent-Token": cfg["DAVINCI_CEREBRO_TOKEN"], "User-Agent": "davinci-cerebro-hermes/1"}
+    if tipo:
+        headers["Content-Type"] = tipo
+    req = urllib.request.Request(
+        f"{cfg['DAVINCI_URL'].rstrip('/')}/api/chamados/agent/{rota}",
+        data=data, headers=headers, method="POST" if data is not None else "GET",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=120) as r:  # noqa: S310 — URL do .env
+            return r.read(), (r.headers.get("Content-Type") or "").lower()
+    except urllib.error.HTTPError as e:
+        sys.exit(f"DaVinci {rota}: HTTP {e.code} {e.read().decode(errors='replace')[:600]}")
+
+
+_EXT = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp", "image/gif": ".gif",
+        "video/mp4": ".mp4", "video/quicktime": ".mov"}
 
 
 def _ler(p: Path) -> dict:
@@ -328,6 +354,46 @@ def cmd_prova_shopee(cfg: dict[str, str], a: argparse.Namespace) -> None:
     print(json.dumps(_post(cfg, "shopee-prova", corpo), ensure_ascii=False, indent=1))
 
 
+def cmd_anexos(cfg: dict[str, str], a: argparse.Namespace) -> None:
+    """Fotos e vídeos do chamado → pasta (quem chama apaga a pasta no fim)."""
+    out = _post(cfg, "caso", {"chamado_id": a.id})
+    casos = out.get("chamados") or []
+    if not casos:
+        sys.exit("chamado não encontrado")
+    pasta = Path(a.pasta).expanduser()
+    pasta.mkdir(parents=True, exist_ok=True)
+    abertura = {str(x) for x in casos[0].get("anexos_abertura") or []}
+    baixados = []
+    for n, an in enumerate(casos[0].get("anexos") or [], 1):
+        tipo = (an.get("content_type") or "").lower()
+        if not tipo.startswith(("image/", "video/")):
+            continue
+        conteudo, _ = _req_bin(cfg, f"anexos/{an['id']}")
+        arq = pasta / f"{n:02d}{_EXT.get(tipo, '')}"
+        arq.write_bytes(conteudo)
+        baixados.append({"arquivo": str(arq), "nome_original": an.get("filename"),
+                         "tipo": tipo, "bytes": len(conteudo),
+                         "da_abertura": str(an["id"]) in abertura,
+                         "mensagem_id": an.get("mensagem_id"), "quando": an.get("created_at")})
+    print(json.dumps(baixados, ensure_ascii=False, indent=1))
+
+
+def cmd_guardar_print(cfg: dict[str, str], a: argparse.Namespace) -> None:
+    arq = Path(a.arquivo).expanduser()
+    fronteira = f"----davinci{int(time.time() * 1000)}"
+    partes = []
+    for nome, valor in (("chamado_id", a.id), ("mensagem_id", a.mensagem)):
+        partes.append(f'--{fronteira}\r\nContent-Disposition: form-data; name="{nome}"\r\n\r\n'
+                      f"{valor}\r\n".encode())
+    tipo = "image/png" if arq.suffix.lower() == ".png" else "image/jpeg"
+    partes.append(f'--{fronteira}\r\nContent-Disposition: form-data; name="file"; '
+                  f'filename="{arq.name}"\r\nContent-Type: {tipo}\r\n\r\n'.encode())
+    partes.append(arq.read_bytes())
+    partes.append(f"\r\n--{fronteira}--\r\n".encode())
+    conteudo, _ = _req_bin(cfg, "anexo", b"".join(partes), f"multipart/form-data; boundary={fronteira}")
+    print(conteudo.decode(errors="replace"))
+
+
 def cmd_exemplos(cfg: dict[str, str], a: argparse.Namespace) -> None:
     corpo = {"limite": a.limite, "offset": a.offset, "plataforma": a.plataforma, "desde": a.desde}
     out = _post(cfg, "exemplos", {k: v for k, v in corpo.items() if v is not None})
@@ -357,6 +423,13 @@ def main() -> None:
     ps = sub.add_parser("prova-shopee")
     ps.add_argument("--id", required=True, help="chamado_id (uuid)")
     ps.add_argument("--enviar", action="store_true")
+    an = sub.add_parser("anexos")
+    an.add_argument("--id", required=True, help="chamado_id (uuid)")
+    an.add_argument("--pasta", required=True)
+    gp = sub.add_parser("guardar-print")
+    gp.add_argument("--id", required=True, help="chamado_id (uuid)")
+    gp.add_argument("--mensagem", required=True, help="id da mensagem (a análise)")
+    gp.add_argument("--arquivo", required=True)
     ex = sub.add_parser("exemplos")
     ex.add_argument("--plataforma")
     ex.add_argument("--limite", type=int, default=10)
@@ -377,6 +450,8 @@ def main() -> None:
         "caso": cmd_caso,
         "pagamento": cmd_pagamento,
         "prova-shopee": cmd_prova_shopee,
+        "anexos": cmd_anexos,
+        "guardar-print": cmd_guardar_print,
         "exemplos": cmd_exemplos,
         "guarda": cmd_guarda,
     }[a.cmd](cfg, a)

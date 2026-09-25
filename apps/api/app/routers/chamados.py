@@ -33,7 +33,7 @@ from fastapi.responses import HTMLResponse
 from sqlalchemy import Text, case, cast, func, literal, or_, select
 from sqlalchemy.dialects.postgresql import aggregate_order_by
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import defer, selectinload
 
 from app.config import get_settings
 from app.db import get_session
@@ -1397,6 +1397,32 @@ async def _cerebro(
     return _Cerebro(row=row)
 
 
+async def _agente_ou_cerebro(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    x_agent_token: Annotated[str | None, Header(alias="X-Agent-Token")] = None,
+) -> None:
+    """Anexos do chamado (baixar e guardar print): o robô do Eduardo (token
+    antigo) e, desde 25/09, a IA de Chamado cadastrada — ela escolhe as fotos
+    que sobem no "Upload Evidence" da Shopee e guarda o print do envio. Sem o
+    carimbo de `legado_ignorado_at` do `_cerebro`: mexer em anexo não é decidir."""
+    token = (x_agent_token or "").strip()
+    legado = get_settings().nf_agent_token
+    if token and legado and secrets.compare_digest(token, legado):
+        return
+    if token:
+        cadastrado = (
+            await session.execute(
+                select(ChamadoCerebro.id).where(
+                    ChamadoCerebro.token_hash == hashlib.sha256(token.encode()).hexdigest(),
+                    ChamadoCerebro.revoked_at.is_(None),
+                )
+            )
+        ).scalar_one_or_none()
+        if cadastrado is not None:
+            return
+    raise HTTPException(401, detail={"code": "chamados_agent_unauthorized"})
+
+
 def _so_cadastrado(cerebro: _Cerebro) -> ChamadoCerebro:
     if cerebro.row is None:
         raise HTTPException(403, detail={"code": "cerebro_sem_cadastro"})
@@ -2301,6 +2327,22 @@ async def _item_do_cerebro(session: AsyncSession, ch: Chamado) -> AgentChamadoAn
     # 25/09: mensagem que a pessoa escondeu (lixeirinha) a IA também não lê.
     msgs = await _mensagens_do_caso(session, ch, sem_excluidas=True)
     anexos = await _anexos_da_abertura(session, ch)
+    # 25/09 (Upload Evidence da Shopee): TODOS os arquivos do chamado, sem o
+    # conteúdo — a IA escolhe quais fotos sobem e baixa pelo /agent/anexos/{id}.
+    # O de mensagem escondida (lixeirinha) fica de fora, como a mensagem.
+    visiveis = {m.id for m in msgs}
+    todos = [
+        a
+        for a in (
+            await session.execute(
+                select(ChamadoAnexo)
+                .options(defer(ChamadoAnexo.blob))
+                .where(ChamadoAnexo.chamado_id == ch.id)
+                .order_by(ChamadoAnexo.created_at)
+            )
+        ).scalars()
+        if a.mensagem_id is None or a.mensagem_id in visiveis
+    ]
     pend = _instrucao_pendente(msgs)
     _m, bloq = _bloqueio_de(msgs)
     return AgentChamadoAnaliseOut(
@@ -2332,6 +2374,7 @@ async def _item_do_cerebro(session: AsyncSession, ch: Chamado) -> AgentChamadoAn
             for m in msgs
         ],
         anexos_abertura=[a.id for a in anexos],
+        anexos=[_anexo_out(a) for a in todos],
         replicas_robo=sum(
             1 for m in msgs if m.direcao == "enviada" and m.autor_nome == AUTOR_CEREBRO
         ),
@@ -2716,7 +2759,7 @@ async def agent_cerebro(
     "/anexo",
     response_model=ChamadoAnexoOut,
     status_code=status.HTTP_201_CREATED,
-    dependencies=_agent_dep,
+    dependencies=[Depends(_agente_ou_cerebro)],
 )
 async def agent_anexo(
     session: Annotated[AsyncSession, Depends(get_session)],
@@ -2749,7 +2792,7 @@ async def agent_anexo(
     return _anexo_out(a)
 
 
-@agent_router.get("/anexos/{anexo_id}", dependencies=_agent_dep)
+@agent_router.get("/anexos/{anexo_id}", dependencies=[Depends(_agente_ou_cerebro)])
 async def agent_get_anexo(
     anexo_id: UUID,
     session: Annotated[AsyncSession, Depends(get_session)],

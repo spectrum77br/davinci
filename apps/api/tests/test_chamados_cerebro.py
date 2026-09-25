@@ -233,6 +233,64 @@ async def test_caso_acha_pelo_pedido_ou_protocolo(client, db, cenario):
     ).status_code == 403
 
 
+async def test_ia_baixa_e_guarda_anexo(client, db, cenario):
+    """25/09 (Upload Evidence da Shopee, 294571): a IA de Chamado vê a lista de
+    arquivos do chamado no caso, baixa a foto que escolher e guarda o print do
+    envio. Antes só o token antigo (robô do Eduardo) podia."""
+    png = b"\x89PNG\r\n\x1a\nfoto-da-devolucao"
+    hermes = {"X-Agent-Token": _HERMES}
+    # o robô do Eduardo segue podendo
+    up = await client.post(
+        "/api/chamados/agent/anexo",
+        headers={"X-Agent-Token": _LEGADO},
+        data={"chamado_id": cenario["cid"]},
+        files={"file": ("devolucao.png", png, "image/png")},
+    )
+    assert up.status_code == 201, up.text
+    caso = (
+        await client.post(
+            "/api/chamados/agent/caso", headers=hermes, json={"pedido_bling": "293413"}
+        )
+    ).json()["chamados"][0]
+    assert [(a["id"], a["filename"], a["content_type"]) for a in caso["anexos"]] == [
+        (up.json()["id"], "devolucao.png", "image/png")
+    ]
+    got = await client.get(f"/api/chamados/agent/anexos/{up.json()['id']}", headers=hermes)
+    assert got.status_code == 200 and got.content == png
+    # print do envio preso a uma mensagem (na vida real, a análise da IA): não
+    # vira anexo "da abertura"
+    ana = (
+        await db.execute(
+            select(ChamadoMensagem.id).where(
+                ChamadoMensagem.chamado_id == cenario["cid"], ChamadoMensagem.direcao == "recebida"
+            )
+        )
+    ).scalars().first()
+    meu = await client.post(
+        "/api/chamados/agent/anexo",
+        headers=hermes,
+        data={"chamado_id": cenario["cid"], "mensagem_id": str(ana)},
+        files={"file": ("envio.png", png, "image/png")},
+    )
+    assert meu.status_code == 201, meu.text
+    caso = (
+        await client.post(
+            "/api/chamados/agent/caso", headers=hermes, json={"pedido_bling": "293413"}
+        )
+    ).json()["chamados"][0]
+    assert len(caso["anexos"]) == 2 and caso["anexos_abertura"] == [up.json()["id"]]
+    # token errado ou revogado: nada
+    for token in ("x", ""):
+        r = await client.get(
+            f"/api/chamados/agent/anexos/{up.json()['id']}", headers={"X-Agent-Token": token}
+        )
+        assert r.status_code == 401
+    cenario["hermes"].revoked_at = datetime.now(UTC)
+    await db.commit()
+    r = await client.get(f"/api/chamados/agent/anexos/{up.json()['id']}", headers=hermes)
+    assert r.status_code == 401
+
+
 async def test_ia_desligada_nao_ve_nem_decide(client, db, cenario):
     cenario["hermes"].ligada = False
     await db.commit()

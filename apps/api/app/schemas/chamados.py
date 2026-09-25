@@ -667,6 +667,9 @@ class AgentChamadoAnaliseOut(BaseModel):
     # Prints capturados na abertura (e os sem mensagem) — o cérebro pode
     # reanexá-los na réplica quando o ML pede "os comprovantes" de novo.
     anexos_abertura: list[UUID] = []
+    # 25/09: todos os arquivos do chamado (sem conteúdo) — a IA escolhe as
+    # fotos do "Upload Evidence" da Shopee e baixa por /agent/anexos/{id}.
+    anexos: list[ChamadoAnexoOut] = []
     replicas_robo: int = 0
     analises: int = 0
 
