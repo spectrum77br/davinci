@@ -95,8 +95,10 @@ async function buscarUmaVez(page, pedido) {
   if (!ok) throw new Error("botão Aplicar não encontrado na lista de devoluções");
   for (let i = 0; i < 20; i++) {
     await sleep(1000);
+    // só dentro das linhas da lista: a sugestão da busca ("Procurar por …") também
+    // mostra o nº do pedido e pegava ela no lugar da linha (297335, 25/09)
     const linha = await page.evaluate(
-      `(function(){var s=[...document.querySelectorAll('*')].find(function(e){return e.children.length===0&&(e.innerText||'').trim()===${JSON.stringify(pedido)}});if(!s)return null;var l=${JS_LINHA(pedido, "s")};return l?l.innerText:null;})()`
+      `(function(){var l=[...document.querySelectorAll('a.return-row-item')].find(function(r){return (r.innerText||'').indexOf(${JSON.stringify(pedido)})>=0});return l?l.innerText:null;})()`
     );
     if (linha) return linha;
   }
