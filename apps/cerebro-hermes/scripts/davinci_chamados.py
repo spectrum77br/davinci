@@ -138,7 +138,9 @@ def _ler(p: Path) -> dict:
 
 def _gravar(p: Path, dados: dict) -> None:
     p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_suffix(".tmp")
+    # temporário por processo: as passadas forte e simples rodam no mesmo segundo
+    # e o ".tmp" único fazia uma renomear o da outra (FileNotFoundError, 25/09)
+    tmp = p.with_name(f"{p.name}.{os.getpid()}.tmp")
     tmp.write_text(json.dumps(dados, ensure_ascii=False, indent=1))
     tmp.replace(p)
 
