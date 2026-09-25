@@ -56,7 +56,23 @@ const JS_MODAL = `[...document.querySelectorAll('.eds-modal__box, .eds-modal__co
 const JS_LINHA = (pedido, de) =>
   `(function(e){var a=e;while(a&&!(a.classList&&a.classList.contains('return-row-item')))a=a.parentElement;return a&&(a.innerText||'').indexOf(${JSON.stringify(pedido)})>=0?a:null;})(${de})`;
 
+// A lista às vezes demora e a busca volta vazia (297335, 25/09 16:11: a mesma
+// busca achou em 1 s antes e depois) — tenta a busca inteira 3 vezes.
 async function buscar(page, pedido) {
+  let erro;
+  for (let tentativa = 1; tentativa <= 3; tentativa++) {
+    try {
+      return await buscarUmaVez(page, pedido);
+    } catch (e) {
+      erro = e;
+      if (/login/.test(String(e && e.message))) break;
+      await sleep(3000 * tentativa);
+    }
+  }
+  throw erro;
+}
+
+async function buscarUmaVez(page, pedido) {
   await page.goto(`${SELLER}/portal/sale/returnrefundcancel`, { waitUntil: "networkidle2", timeout: 60000 }).catch(() => {});
   const url = page.url();
   const senha = await page.evaluate(`!!document.querySelector('input[type="password"]')`).catch(() => false);
