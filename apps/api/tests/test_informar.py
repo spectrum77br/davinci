@@ -7,10 +7,21 @@ import uuid
 import pytest
 import pytest_asyncio
 from httpx import AsyncClient
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import Logistica, User, UserRole, UserStatus
+from app.models import Logistica, OuvidoriaRobo, User, UserRole, UserStatus
 from app.services import aprovar_link, informar, logistica_rules
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _limpa_ouvidoria(db: AsyncSession):
+    """`margem_auto` lê/grava a linha do Robô da Margem na Ouvidoria, e as
+    tabelas da Ouvidoria não estão no cleanup do conftest."""
+    yield
+    for tbl in ("ouvidoria_ocorrencias", "ouvidoria_rodadas", "ouvidoria_robos"):
+        await db.execute(text(f"DELETE FROM {tbl}"))  # noqa: S608
+    await db.commit()
 
 
 @pytest_asyncio.fixture
@@ -244,6 +255,47 @@ async def test_informar_put_salva_so_ids_do_diretorio(
     assert r.status_code == 200
     # Normaliza pra maiúsculas e descarta quem não está no diretório.
     assert r.json()["recipients"] == ["AAAA1111"]
+
+
+@pytest.mark.asyncio
+async def test_margem_auto_e_a_lista_do_robo_da_margem(
+    client: AsyncClient,
+    db: AsyncSession,
+    auth_as,
+    admin: User,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Uma lista só (25/09): o modal Informar da aba Margem e o "Avisar" do
+    Robô da Margem na Ouvidoria editam a MESMA lista — quem recebe o aviso na
+    hora (com o link de aprovar pelo celular) e o resumo das pendências."""
+    from app.config import get_settings
+    from app.services import margem_auto_hold
+
+    monkeypatch.setattr(
+        get_settings(), "threema_recipient_names", "AAAA1111:Ana,BBBB2222:Bia",
+        raising=False,
+    )
+    monkeypatch.setattr(get_settings(), "threema_recipients", "", raising=False)
+    auth_as(admin)
+
+    r = await client.put("/api/informar/margem_auto", json={"recipients": ["aaaa1111", "BBBB2222"]})
+    assert r.status_code == 200, r.text
+    assert r.json()["recipients"] == ["AAAA1111", "BBBB2222"]
+
+    robo = await db.get(OuvidoriaRobo, "vigia_margem")
+    await db.refresh(robo)
+    assert robo.threema_recipients == "AAAA1111, BBBB2222"
+    # O robô manda pra essa lista (ligado)…
+    assert await margem_auto_hold._recipients_margem_auto(db) == ["AAAA1111", "BBBB2222"]
+    # …e o que a Ouvidoria grava aparece no modal da Margem.
+    robo.threema_recipients = "BBBB2222"
+    await db.commit()
+    r = await client.get("/api/informar/margem_auto")
+    assert r.status_code == 200 and r.json()["recipients"] == ["BBBB2222"]
+    # Silencioso/desligado: a lista continua lá, mas ninguém recebe.
+    robo.modo = "silencioso"
+    await db.commit()
+    assert await margem_auto_hold._recipients_margem_auto(db) == []
 
 
 @pytest.mark.asyncio

@@ -19,7 +19,6 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import get_settings
 from app.models import BlingOrder, Segment, SegmentSpecialDate, SituacaoBling
 from app.routers import margens as margens_router
 from app.services import margem_auto_hold
@@ -487,15 +486,48 @@ async def test_obs_erro_transiente_nao_segura_e_deixa_pro_retry(db: AsyncSession
     assert await _audits(db, "291677") == []
 
 
-async def test_flag_desligada(db: AsyncSession, monkeypatch):
+async def test_robo_desligado_no_painel_nao_mexe_em_nada(db: AsyncSession, robo_margem):
+    """Um botão só (25/09): Robô da Margem `desligado` na Ouvidoria → o hold
+    não roda — nem Bling, nem espelho, nem auditoria. Antes o botão do painel
+    desligava só o fiscal e a Margem seguia segurando (teste do Cairo)."""
     await _seed_pedido(db, pedido="291670", bling_id=111)
-    monkeypatch.setattr(get_settings(), "margem_auto_hold", False, raising=False)
+    await robo_margem(lista="AAAA1111", modo="desligado")
     fake = FakeBling()
 
     res = await margem_auto_hold.run(db, client=fake, hoje=HOJE)
 
-    assert res == {"held": 0, "reprovados": 0, "failed": 0, "alertas": 0, "skipped": "disabled"}
-    assert fake.get_calls == []
+    assert res == {"held": 0, "reprovados": 0, "failed": 0, "alertas": 0, "skipped": "desligado"}
+    assert fake.get_calls == [] and fake.situacao_calls == []
+    assert (await _snapshot(db, "291670"))["situacao"] == "6"
+    assert await _audits(db, "291670") == []
+
+
+async def test_robo_silencioso_segura_mas_nao_manda_threema(
+    db: AsyncSession, monkeypatch, robo_margem
+):
+    """`silencioso`: o robô age igual (reprova no Bling), mas NENHUM Threema
+    sai — nem o do link de aprovar pelo celular, mesmo com a lista cheia."""
+    from app.services import threema
+
+    await _seed_pedido(db, pedido="291670", bling_id=111)
+    await robo_margem(lista="AAAA1111", modo="silencioso")
+    enviados: list[str] = []
+
+    class _FakeThreema:
+        def __init__(self, *a: object, **k: object) -> None: ...
+
+        async def send_to_all(self, msg: str, recipients: list[str]) -> dict:
+            enviados.append(msg)
+            return {"sent": list(recipients), "failed": []}
+
+    monkeypatch.setattr(threema, "ThreemaClient", _FakeThreema)
+    fake = FakeBling()
+
+    res = await margem_auto_hold.run(db, client=fake, hoje=HOJE)
+
+    assert res == {"held": 0, "reprovados": 1, "failed": 0, "alertas": 0}
+    assert fake.situacao_calls == [(111, 83955)]
+    assert enviados == []
 
 
 async def test_falha_num_pedido_nao_derruba_os_demais(db: AsyncSession):
@@ -685,13 +717,12 @@ async def test_nao_segura_margem_baixa_em_data_especial(db: AsyncSession):
     assert snap_isento["bling_status_margem"] is None
 
 
-async def test_reprovo_avisa_threema_cadastrado(db: AsyncSession, monkeypatch):
-    """Com destinatários no cadastro `margem_auto` (segunda lista do modal
-    Informar da Margem), o robô manda NA HORA uma mensagem por pedido com
+async def test_reprovo_avisa_threema_cadastrado(db: AsyncSession, monkeypatch, robo_margem):
+    """Com destinatários na lista do Robô da Margem (Ouvidoria — a mesma que
+    o modal Informar da Margem edita), o robô manda NA HORA uma mensagem por pedido com
     conta, motivo, margem vs mínima e lucro — margem baixa positiva já sai
     como "reprovado automaticamente" (11/09). Sem cadastro, nada é enviado —
     coberto pelos demais testes, que rodam sem config e sem fake."""
-    from app.models import ThreemaInformarConfig
     from app.services import threema
 
     await _seed_pedido(
@@ -702,7 +733,7 @@ async def test_reprovo_avisa_threema_cadastrado(db: AsyncSession, monkeypatch):
         loja="Loja ML",
         lucro=-15.5,
     )
-    db.add(ThreemaInformarConfig(contexto="margem_auto", recipients="AAAA1111,BBBB2222"))
+    await robo_margem(lista="AAAA1111,BBBB2222")
     await db.commit()
 
     enviados: list[tuple[str, list[str]]] = []
@@ -743,15 +774,14 @@ async def test_reprovo_avisa_threema_cadastrado(db: AsyncSession, monkeypatch):
 
 
 async def test_hold_falha_no_threema_nao_desfaz_o_hold(
-    db: AsyncSession, monkeypatch
+    db: AsyncSession, monkeypatch, robo_margem
 ):
     """O aviso é acessório: Threema fora do ar não desfaz nem conta contra o
     hold — o pedido fica segurado e o run reporta sucesso."""
-    from app.models import ThreemaInformarConfig
     from app.services import threema
 
     await _seed_pedido(db, pedido="291670", bling_id=111)
-    db.add(ThreemaInformarConfig(contexto="margem_auto", recipients="AAAA1111"))
+    await robo_margem(lista="AAAA1111")
     await db.commit()
 
     class _Boom:
@@ -894,10 +924,11 @@ async def test_margem_negativa_acima_da_minima_negativa_nao_reprova(db: AsyncSes
     assert snap["bling_status_margem"] is None
 
 
-async def test_margem_negativa_avisa_threema_reprovado(db: AsyncSession, monkeypatch):
+async def test_margem_negativa_avisa_threema_reprovado(
+    db: AsyncSession, monkeypatch, robo_margem
+):
     """O aviso do auto-reprovo diz que o pedido JÁ foi reprovado e que o link
     desfaz — com os mesmos números (margem vs mínima, lucro) do hold."""
-    from app.models import ThreemaInformarConfig
     from app.services import threema
 
     await _seed_pedido(
@@ -909,7 +940,7 @@ async def test_margem_negativa_avisa_threema_reprovado(db: AsyncSession, monkeyp
         loja="Loja ML",
         lucro=-61.6,
     )
-    db.add(ThreemaInformarConfig(contexto="margem_auto", recipients="AAAA1111"))
+    await robo_margem(lista="AAAA1111")
     await db.commit()
 
     enviados: list[str] = []
@@ -947,11 +978,10 @@ async def test_margem_negativa_avisa_threema_reprovado(db: AsyncSession, monkeyp
 # ---- alerta de margem fora do normal (> 60%, Eduardo 02/09) ----
 
 
-async def test_alerta_margem_alta_avisa_uma_vez(db: AsyncSession, monkeypatch):
+async def test_alerta_margem_alta_avisa_uma_vez(db: AsyncSession, monkeypatch, robo_margem):
     """Margem > 60% em pedido "Em aberto": UM alerta no Threema por pedido
     (dedup pela auditoria — segundo tick não repete) e o pedido fica
     intocado. 55% não alerta."""
-    from app.models import ThreemaInformarConfig
     from app.services import threema
 
     await _seed_pedido(
@@ -965,7 +995,7 @@ async def test_alerta_margem_alta_avisa_uma_vez(db: AsyncSession, monkeypatch):
         lucro=350.0,
     )
     await _seed_pedido(db, pedido="502", bling_id=502, margem_baixa=False, margem=0.55)
-    db.add(ThreemaInformarConfig(contexto="margem_auto", recipients="AAAA1111"))
+    await robo_margem(lista="AAAA1111")
     await db.commit()
 
     enviados: list[str] = []

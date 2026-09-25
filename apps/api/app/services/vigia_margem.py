@@ -1,5 +1,25 @@
 # ruff: noqa: S608
-"""Robô da Margem — o que o auto-hold faz e ninguém mais olha.
+"""Robô da Margem — a rodada inteira: o robô age e o fiscal confere.
+
+UM ROBÔ SÓ (25/09/2026, pedido do Cairo depois de desligar o fiscal pra
+testar e ver a Margem seguir segurando): antes eram duas coisas — o
+`margem_auto_hold` (segura/reprova no Bling, com kill-switch no .env) e este
+fiscal (só lia, com o botão do painel). Agora a rodada de :15/:45 é uma só
+(`vigia_margem_sweep`):
+
+1. números frescos (rebuild do snapshot `verificar_margem`);
+2. o robô AGE (`margem_auto_hold.run`) — se o modo não for `desligado`;
+3. o fiscal confere (tudo abaixo) e a rodada grava as duas coisas: o que o
+   robô fez desde a rodada anterior (lido da auditoria, então conta também o
+   que o "atualizar"/auto-refresh da aba e a revisão de hora em hora fizeram)
+   e o que ficou pendente.
+
+O modo do painel manda em tudo (ver `margem_auto_hold`): `desligado` não
+segura, não reprova, não revisa e não confere; `silencioso` age e confere sem
+Threema; `ligado` avisa — o aviso na hora de cada pedido (com o link de
+aprovar pelo celular) e o resumo das pendências vão pra MESMA lista "Avisar".
+
+O fiscal, de 22/09 — o que o auto-hold faz e ninguém mais olha:
 
 Vinicius, 22/09/2026. O robô da Margem (`margem_auto_hold`) já segura, reprova
 e reavalia pedido sozinho, e avisa no Threema na hora. O que faltava era o
@@ -48,9 +68,10 @@ DEPOIS: três buracos que só apareciam quando alguém ia procurar.
   `routers/margens.py` por import tardio, como o `margem_auto_hold` faz: a
   definição de "pendente" mora lá e o robô tem que dizer o mesmo que a aba.
 
-TUDO AQUI É SÓ LEITURA do lado da Margem: a rodada não escreve em
+A CONFERÊNCIA É SÓ LEITURA do lado da Margem: ela não escreve em
 `bling_orders`, `verificar_margem` nem `margem_audit`, e não chama Bling nem
-Threema por conta própria. Só as tabelas `ouvidoria_*` mudam.
+Threema por conta própria — só as tabelas `ouvidoria_*` mudam. Quem mexe em
+pedido é o passo 2 (`margem_auto_hold.run`), com as regras e os avisos dele.
 """
 
 from __future__ import annotations
@@ -59,12 +80,13 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select, text
+import structlog
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import session_scope
-from app.models import OuvidoriaOcorrencia, OuvidoriaRobo
-from app.services import ouvidoria
+from app.models import OuvidoriaOcorrencia, OuvidoriaRobo, OuvidoriaRodada
+from app.services import margem_auto_hold, ouvidoria
 from app.services.advisory_lock import SYNC_NAMESPACE
 from app.services.margem_auto_hold import (
     MARGEM_ALTA_LIMIAR,
@@ -75,7 +97,10 @@ from app.services.verificar_margem import (
     BLING_ORDERS_TABLE,
     SNAPSHOT_TABLE,
     qualified_table,
+    rebuild_all,
 )
+
+logger = structlog.get_logger()
 
 ROBO = "vigia_margem"
 
@@ -88,6 +113,11 @@ _SEGURADO_HORAS = 24
 
 _MARGEM_AUDIT_TABLE = qualified_table("margem_audit")
 _TZ_BR = ZoneInfo("America/Sao_Paulo")
+
+# "O que o robô fez" é contado desde o início da rodada anterior; robô que
+# ficou parado (desligado, worker fora) não despeja dias de ações na primeira
+# rodada de volta — a janela nunca passa disto.
+_JANELA_ACOES_MAX = timedelta(hours=2)
 
 # Prefixos das chaves. Ocorrência de ESTADO (a rodada re-vê e fecha pelo
 # `fechar_nao_vistas`) vs ocorrência de EVENTO (`falha:`, aberta por hook e
@@ -307,6 +337,57 @@ async def _estado_no_bling(session: AsyncSession, numeros: list[str]) -> dict[st
     return {r.numero: (r.situacao, r.status) for r in rows}
 
 
+def _acoes_sql() -> str:
+    """O que o ROBÔ fez no Bling na janela — pela auditoria dele
+    (`origem='margens_auto'`, `mudado_por IS NULL`), a mesma que o
+    `margem_auto_hold` grava em cada hold/reprovação/liberação. Pela auditoria
+    e não pelo retorno do `run` porque o robô também age fora da rodada: o
+    "atualizar" e o auto-refresh da aba Margem e a revisão de hora em hora
+    (:35). Por pedido (DISTINCT): a reprovação grava duas linhas (situação e
+    pino) e segurar não conta o que foi reprovado."""
+    return f"""
+        WITH a AS (
+            SELECT pedido_bling, acao, valor_antigo, valor_novo
+            FROM {_MARGEM_AUDIT_TABLE}
+            WHERE origem = 'margens_auto'
+              AND mudado_por IS NULL
+              AND created_at >= :desde
+              AND created_at < :ate
+        ), reprovados AS (
+            SELECT DISTINCT pedido_bling FROM a
+            WHERE acao = 'status' AND valor_novo = 'Reprovado'
+        )
+        SELECT
+            (SELECT COUNT(*) FROM reprovados) AS reprovou,
+            (SELECT COUNT(DISTINCT pedido_bling) FROM a
+              WHERE acao = 'situacao'
+                AND valor_novo = '{SITUACAO_AGUARDANDO_CANCELAMENTO}'
+                AND pedido_bling NOT IN (SELECT pedido_bling FROM reprovados))
+                                                    AS segurou,
+            (SELECT COUNT(DISTINCT pedido_bling) FROM a
+              WHERE acao = 'status' AND valor_antigo = 'Reprovado'
+                AND valor_novo = 'Aprovado')        AS liberou,
+            (SELECT COUNT(DISTINCT pedido_bling) FROM a
+              WHERE acao = 'status' AND valor_antigo = 'Reprovado'
+                AND valor_novo = 'Pendente')        AS voltou_analise
+    """
+
+
+async def _inicio_da_janela(session: AsyncSession, agora: datetime) -> datetime:
+    """Início da rodada anterior deste robô — as ações contadas nesta rodada
+    são as de depois dela — limitado a `_JANELA_ACOES_MAX` pra trás."""
+    anterior = (
+        await session.execute(
+            select(func.max(OuvidoriaRodada.iniciada_em)).where(
+                OuvidoriaRodada.robo_chave == ROBO,
+                OuvidoriaRodada.iniciada_em < agora,
+            )
+        )
+    ).scalar()
+    piso = agora - _JANELA_ACOES_MAX
+    return max(anterior, piso) if anterior is not None else piso
+
+
 def operacao_concluida(operacao: str | None, situacao: str | None, status: str | None) -> bool:
     """A operação que tinha falhado já está feita? (fecha a `falha:`)"""
     esperado = _OPERACOES.get(operacao or "")
@@ -408,16 +489,79 @@ def link_margem(pedido_bling: str) -> str:
 # ─── rodada ────────────────────────────────────────────────────────────────
 
 
-async def vigia_margem_run(session: AsyncSession, *, agora: datetime | None = None) -> dict:
-    """Uma varredura completa dentro de uma `Rodada` da Ouvidoria.
+class _RoboNaoRodou(Exception):  # noqa: N818 — é o texto que a rodada grava
+    """O passo que AGE não rodou (snapshot não reconstruiu, ou o `run` caiu
+    inteiro). Sobe DENTRO da Rodada depois de a conferência ser gravada, pra a
+    rodada sair `falhando` na coluna Saúde sem perder as ocorrências."""
+
+
+def _plural(n: int, singular: str, plural: str) -> str:
+    return f"{n} {singular if n == 1 else plural}"
+
+
+def resumo_da_rodada(c: dict) -> str:
+    """"2 reprovados · 1 segurado · 0 liberados · 3 sem decisão · 0 falhas ·
+    1 margem alta": primeiro o que o robô FEZ desde a rodada anterior, depois
+    o que ficou pendente (`sem decisão` = segurado há mais de
+    `segurado_horas` sem ninguém decidir). "voltou pra análise" só aparece
+    quando aconteceu — é raro e alongaria toda linha."""
+    partes = [
+        _plural(c.get("reprovou", 0), "reprovado", "reprovados"),
+        _plural(c.get("segurou", 0), "segurado", "segurados"),
+        _plural(c.get("liberou", 0), "liberado", "liberados"),
+    ]
+    if c.get("voltou_analise"):
+        partes.append(f"{c['voltou_analise']} voltou pra análise")
+    partes += [
+        f"{c.get('segurados', 0)} sem decisão",
+        _plural(c.get("falhas_abertas", 0), "falha", "falhas"),
+        f"{c.get('margem_alta', 0)} margem alta",
+    ]
+    return " · ".join(partes)
+
+
+async def vigia_margem_run(
+    session: AsyncSession,
+    *,
+    agora: datetime | None = None,
+    erro_robo: str | None = None,
+) -> dict:
+    """A conferência dentro de uma `Rodada` da Ouvidoria, com o que o robô
+    fez desde a rodada anterior. `erro_robo` = o passo que age não rodou
+    (ver `_RoboNaoRodou`): a conferência roda igual e a rodada sai com falha.
 
     Só leitura do lado da Margem; quem commita é a Rodada (ao sair) e o
     `session_scope` de quem chama."""
     agora = agora or datetime.now(UTC)
-    async with ouvidoria.Rodada(session, ROBO) as r:
+    desde = await _inicio_da_janela(session, agora)
+    rodada = ouvidoria.Rodada(session, ROBO)
+    try:
+        await _conferir(session, rodada, agora=agora, desde=desde, erro_robo=erro_robo)
+    except _RoboNaoRodou:
+        pass  # a Rodada já gravou a falha; o aviso das pendências sai igual
+    aviso = await ouvidoria.avisar_pendentes(session, ROBO)
+    out = {**dict(rodada.contadores), "avisadas": aviso.get("avisadas", 0), "resumo": rodada.resumo}
+    if erro_robo:
+        out["robo_falhou"] = erro_robo
+    return out
+
+
+async def _conferir(
+    session: AsyncSession,
+    rodada: ouvidoria.Rodada,
+    *,
+    agora: datetime,
+    desde: datetime,
+    erro_robo: str | None,
+) -> None:
+    async with rodada as r:
         # Todos em 0 primeiro: contador ausente e contador zerado dizem
         # coisas diferentes na coluna de contadores da rodada.
         for k in (
+            "reprovou",
+            "segurou",
+            "liberou",
+            "voltou_analise",
             "segurados",
             "segurados_novos",
             "margem_alta",
@@ -431,6 +575,15 @@ async def vigia_margem_run(session: AsyncSession, *, agora: datetime | None = No
         robo = await session.get(OuvidoriaRobo, ROBO)
         cfg = ouvidoria.config_do_robo(robo, ROBO)
         horas_limite = int(cfg.get("segurado_horas", _SEGURADO_HORAS))
+
+        # 0) O que o robô fez no Bling desde a rodada anterior.
+        feitas = (
+            (await session.execute(text(_acoes_sql()), {"desde": desde, "ate": agora}))
+            .mappings()
+            .one()
+        )
+        for k in ("reprovou", "segurou", "liberou", "voltou_analise"):
+            r.contadores[k] = int(feitas[k] or 0)
 
         # 1) Segurados pelo robô sem decisão há mais de `segurado_horas`.
         segurados = (
@@ -547,27 +700,29 @@ async def vigia_margem_run(session: AsyncSession, *, agora: datetime | None = No
         r.contadores["sumiram"] = await r.fechar_nao_vistas(prefixo=PREFIXO_SEGURADO)
         r.contadores["sumiram"] += await r.fechar_nao_vistas(prefixo=PREFIXO_MARGEM_ALTA)
 
-        n = r.contadores["segurados"]
-        m = r.contadores["falhas_abertas"]
-        k = r.contadores["margem_alta"]
-        r.resumo = " · ".join(
-            [
-                f"{n} segurado{'s' if n != 1 else ''}",
-                f"{m} falha{'s' if m != 1 else ''}",
-                f"{k} margem alta",
-            ]
-        )
-
-    aviso = await ouvidoria.avisar_pendentes(session, ROBO)
-    return {**dict(r.contadores), "avisadas": aviso.get("avisadas", 0), "resumo": r.resumo}
+        r.resumo = resumo_da_rodada(r.contadores)
+        if erro_robo:
+            # A conferência fica gravada; a rodada sai com falha (Saúde).
+            r.resumo = f"o robô não agiu nesta rodada · {r.resumo}"
+            await session.commit()
+            raise _RoboNaoRodou(erro_robo)
 
 
 async def vigia_margem_sweep() -> dict:
-    """Sweep do cron / "Rodar agora": sessão própria, serializado por advisory
-    lock transacional numa sessão SÓ do lock (a de trabalho pode commitar, e
-    um commit soltaria o lock se ele estivesse nela). O modo do robô NÃO é
-    olhado aqui: o tick do worker é quem sai quando está `desligado`; o botão
-    "Rodar agora" roda mesmo desligado (a pessoa pediu)."""
+    """A rodada inteira do Robô da Margem (ver docstring do módulo): números
+    frescos → o robô age → o fiscal confere e grava a rodada.
+
+    Quem chama: o `vigia_margem_tick` do worker (:15/:45 — ele mesmo sai
+    quando o robô está `desligado`, só reconstruindo o snapshot) e o "Rodar
+    agora" do painel, que roda mesmo desligado, como todo robô do painel —
+    mas desligado NÃO mexe em pedido: só reconstrói e confere. Snapshot que
+    não reconstruiu → o robô não age (os números seriam velhos) e a rodada
+    sai com falha.
+
+    Serializado por advisory lock transacional numa sessão SÓ do lock (as de
+    trabalho commitam, e um commit soltaria o lock se ele estivesse nelas).
+    Cada passo tem sessão própria: o hold commita por pedido e não pode
+    conviver com o advisory lock do rebuild nem com a Rodada."""
     async with session_scope() as trava:
         got = (
             await trava.execute(
@@ -577,5 +732,25 @@ async def vigia_margem_sweep() -> dict:
         ).scalar()
         if not got:
             return {"skipped": "lock_busy"}
+
+        out: dict = {}
+        erro_robo: str | None = None
+        try:
+            async with session_scope() as s:
+                out["rebuilt"] = await rebuild_all(s)
+        except Exception as e:  # noqa: BLE001 — a conferência roda igual
+            logger.warning("verificar_margem_snapshot_failed", error=str(e)[:200])
+            erro_robo = f"não consegui atualizar os números da Margem: {str(e)[:200]}"
+
+        async with session_scope() as s:
+            modo = await ouvidoria.modo(s, ROBO)
+        if modo != "desligado" and erro_robo is None:
+            try:
+                async with session_scope() as s:
+                    out["robo"] = await margem_auto_hold.run(s)
+            except Exception as e:  # noqa: BLE001 — a conferência roda igual
+                logger.warning("margem_auto_hold_cron_failed", error=str(e)[:200])
+                erro_robo = f"o robô caiu antes de terminar: {str(e)[:200]}"
+
         async with session_scope() as session:
-            return await vigia_margem_run(session)
+            return {**out, **await vigia_margem_run(session, erro_robo=erro_robo)}

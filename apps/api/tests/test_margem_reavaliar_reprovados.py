@@ -21,8 +21,7 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import get_settings
-from app.models import MargemAudit, Segment, SegmentSpecialDate, ThreemaInformarConfig
+from app.models import MargemAudit, Segment, SegmentSpecialDate
 from app.services import margem_auto_hold, threema
 from tests.test_margem_auto_hold import FakeBling, _audits, _seed_pedido, _snapshot
 
@@ -182,7 +181,7 @@ def _threema_fake(monkeypatch) -> list[tuple[str, list[str]]]:
 
 
 async def test_libera_reprovado_cuja_margem_passou_pela_condicao_especial(
-    db: AsyncSession, monkeypatch, _sem_refetch
+    db: AsyncSession, monkeypatch, _sem_refetch, robo_margem
 ):
     """O caso 297400: margem 17,1% < mínima 18%, mas a Condição Especial
     (hotwav ≥16%) casa → o robô libera como o Aprovar: recado nas Observações,
@@ -198,7 +197,7 @@ async def test_libera_reprovado_cuja_margem_passou_pela_condicao_especial(
         produto="Hotwav A17 Pro Max 12.64 - Laranja + Fone",
         lucro=85.57,
     )
-    db.add(ThreemaInformarConfig(contexto="margem_auto", recipients="AAAA1111"))
+    await robo_margem(lista="AAAA1111")
     await db.commit()
     enviados = _threema_fake(monkeypatch)
     fake = FakeBlingComSituacao(
@@ -298,11 +297,13 @@ async def test_segundo_tick_nao_repete(db: AsyncSession):
     assert len(fake.situacao_calls) == 2
 
 
-async def test_margem_ainda_baixa_nao_mexe_nem_avisa(db: AsyncSession, monkeypatch, _sem_refetch):
+async def test_margem_ainda_baixa_nao_mexe_nem_avisa(
+    db: AsyncSession, monkeypatch, _sem_refetch, robo_margem
+):
     """Rebuscou, continua abaixo → nada muda, sem mensagem (sem spam a cada
     hora); volta a olhar na próxima."""
     await _seed_reprovado(db, pedido="297402", bling_id=702, margem=0.15)
-    db.add(ThreemaInformarConfig(contexto="margem_auto", recipients="AAAA1111"))
+    await robo_margem(lista="AAAA1111")
     await db.commit()
     enviados = _threema_fake(monkeypatch)
     fake = FakeBlingComSituacao()
@@ -478,12 +479,14 @@ async def test_parado_no_degrau_atendido_so_completa_o_caminho(db: AsyncSession)
     assert tuple(await _bling_order(db, 710)) == ("6", "Aprovado", None)
 
 
-async def test_bling_recusa_situacao_nada_muda_localmente(db: AsyncSession, monkeypatch):
+async def test_bling_recusa_situacao_nada_muda_localmente(
+    db: AsyncSession, monkeypatch, robo_margem
+):
     """O robô nunca aprova só no DaVinci: Bling fora → pedido fica exatamente
     como estava (sem pino 'Aprovado' preso em 83955), failed=1, sem Threema;
     a próxima hora tenta de novo."""
     await _seed_reprovado(db, pedido="297411", bling_id=711, margem=0.19)
-    db.add(ThreemaInformarConfig(contexto="margem_auto", recipients="AAAA1111"))
+    await robo_margem(lista="AAAA1111")
     await db.commit()
     enviados = _threema_fake(monkeypatch)
     fake = FakeBlingComSituacao(fail_situacao_for={711})
@@ -498,14 +501,16 @@ async def test_bling_recusa_situacao_nada_muda_localmente(db: AsyncSession, monk
     assert enviados == []
 
 
-async def test_margem_passou_mas_saldo_divergente_volta_pra_pendente(db: AsyncSession, monkeypatch):
+async def test_margem_passou_mas_saldo_divergente_volta_pra_pendente(
+    db: AsyncSession, monkeypatch, robo_margem
+):
     """Amazon com repasse presente e divergente: margem agora atende, mas o
     saldo pende → só o pino vira 'Pendente' (segue segurado no Bling, volta
     pra aba) e o Threema avisa que voltou pra análise."""
     await _seed_reprovado(
         db, pedido="297412", bling_id=712, margem=0.19, plataforma="amazon", saldo_gap=True
     )
-    db.add(ThreemaInformarConfig(contexto="margem_auto", recipients="AAAA1111"))
+    await robo_margem(lista="AAAA1111")
     await db.commit()
     enviados = _threema_fake(monkeypatch)
     fake = FakeBlingComSituacao()
@@ -596,15 +601,17 @@ async def test_fora_da_janela_de_30_dias_fica_de_fora(db: AsyncSession):
     assert res["avaliados"] == 0
 
 
-async def test_flag_desligada(db: AsyncSession, monkeypatch, _sem_refetch):
+async def test_robo_desligado_no_painel_nao_revisa(db: AsyncSession, _sem_refetch, robo_margem):
+    """Robô da Margem `desligado` na Ouvidoria: a revisão de hora em hora
+    também para (era o MARGEM_REAVALIAR_REPROVADOS do .env até 25/09)."""
     await _seed_reprovado(db, pedido="297416", bling_id=716, margem=0.19)
-    monkeypatch.setattr(get_settings(), "margem_reavaliar_reprovados", False)
+    await robo_margem(modo="desligado")
 
     res = await margem_auto_hold.reavaliar_reprovados(
         db, client=FakeBlingComSituacao(), hoje=HOJE, agora=AGORA
     )
 
-    assert res["skipped"] == "disabled" and res["avaliados"] == 0
+    assert res["skipped"] == "desligado" and res["avaliados"] == 0
     assert _sem_refetch == []
 
 

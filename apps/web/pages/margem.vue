@@ -1443,7 +1443,7 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
     <InformarThreemaModal
       :open="informarMargemOpen"
       contexto="margem"
-      descricao="Os avisos da Margem são automáticos — o robô manda na hora que segura, reprova ou desconfia de um pedido. Marque aqui quem recebe esses avisos no Threema; a seleção fica salva."
+      descricao="Os avisos da Margem são automáticos — o robô manda na hora que segura, reprova (com o link de aprovar pelo celular) ou desconfia de um pedido. Marque aqui quem recebe esses avisos no Threema; é a mesma lista do Robô da Margem em Ouvidoria › Robôs, e só sai aviso com o robô ligado."
       contexto-auto="margem_auto"
       @close="informarMargemOpen = false"
     />

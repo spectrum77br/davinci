@@ -499,3 +499,25 @@ async def client() -> AsyncIterator[AsyncClient]:
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         yield ac
+
+
+@pytest_asyncio.fixture
+async def robo_margem(db: AsyncSession):
+    """Configura o Robô da Margem na Ouvidoria — desde 25/09 o modo dele é o
+    botão do robô e a lista "Avisar" é quem recebe o Threema. Sem a fixture o
+    robô não tem linha (= `ligado`, ninguém recebe). As tabelas da Ouvidoria
+    não estão no cleanup do conftest: a fixture limpa o que semeou."""
+    from app.models import OuvidoriaRobo
+    from app.services import ouvidoria
+
+    async def _config(*, lista: str | None = None, modo: str = "ligado") -> None:
+        await ouvidoria.sincronizar_catalogo(db)
+        robo = await db.get(OuvidoriaRobo, "vigia_margem")
+        robo.threema_recipients = lista
+        robo.modo = modo
+        await db.commit()
+
+    yield _config
+    for tbl in ("ouvidoria_ocorrencias", "ouvidoria_rodadas", "ouvidoria_robos"):
+        await db.execute(text(f"DELETE FROM {tbl}"))  # noqa: S608
+    await db.commit()

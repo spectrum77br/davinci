@@ -38,7 +38,11 @@ from app.models import (
     MargemAudit,
     OuvidoriaOcorrencia,
     OuvidoriaRobo,
+    OuvidoriaRodada,
     SituacaoBling,
+    User,
+    UserRole,
+    UserStatus,
 )
 from app.services import margem_auto_hold
 from app.services import ouvidoria as svc
@@ -67,6 +71,17 @@ async def _limpa_ouvidoria(db: AsyncSession):
     await db.commit()
     yield
     await _limpar(db)
+
+
+@pytest_asyncio.fixture
+async def admin_id(db: AsyncSession) -> uuid.UUID:
+    """Uma pessoa pra `mudado_por` (ação humana na auditoria)."""
+    email = f"adm-{uuid.uuid4().hex[:6]}@davinci-test.com"
+    u = User(open_id=f"email:{email}", email=email, role=UserRole.ADMIN, status=UserStatus.ACTIVE)
+    db.add(u)
+    await db.commit()
+    await db.refresh(u)
+    return u.id
 
 
 class FakeBling:
@@ -266,7 +281,10 @@ async def test_segurado_ha_mais_de_24h_abre_com_os_numeros_da_aba(db: AsyncSessi
     assert "lucro R$ 120,50" in o.detalhe
     assert o.dados["horas"] == 30 and o.dados["bling_id"] == 111
     assert res["segurados"] == 1 and res["segurados_novos"] == 1
-    assert res["resumo"] == "1 segurado · 0 falhas · 0 margem alta"
+    assert res["resumo"] == (
+        "0 reprovados · 0 segurados · 0 liberados · "
+        "1 sem decisão · 0 falhas · 0 margem alta"
+    )
 
 
 async def test_segurado_ha_10h_ainda_nao_abre(db: AsyncSession):
@@ -359,7 +377,10 @@ async def test_margem_alta_abre_e_fecha_quando_o_custo_e_corrigido(db: AsyncSess
     assert o.acao == vm.ACAO_CUSTO and o.link == "/margem?pedido=291671"
     assert "lucro R$ 300,00" in o.detalhe and "Fone XPTO" in o.detalhe
     assert res["margem_alta"] == 1 and res["margem_alta_novas"] == 1
-    assert res["resumo"] == "0 segurados · 0 falhas · 1 margem alta"
+    assert res["resumo"] == (
+        "0 reprovados · 0 segurados · 0 liberados · "
+        "0 sem decisão · 0 falhas · 1 margem alta"
+    )
 
     # Custo corrigido no cadastro → a margem cai e a linha some da consulta.
     await db.execute(text("UPDATE verificar_margem SET marketplace_margem = 0.22"))
@@ -475,7 +496,10 @@ async def test_fechar_nao_vistas_com_prefixo_nao_mata_a_falha(db: AsyncSession):
     assert falha.fechada_em is None
     assert res["falhas_abertas"] == 1 and res["falhas_fechadas"] == 0
     assert res["sumiram"] == 0
-    assert res["resumo"] == "0 segurados · 1 falha · 0 margem alta"
+    assert res["resumo"] == (
+        "0 reprovados · 0 segurados · 0 liberados · "
+        "0 sem decisão · 1 falha · 0 margem alta"
+    )
 
 
 async def test_hook_nao_grava_com_o_robo_desligado(db: AsyncSession):
@@ -490,11 +514,13 @@ async def test_hook_nao_grava_com_o_robo_desligado(db: AsyncSession):
     assert await _abertas(db) == {}
 
 
-async def test_hook_nasce_silencioso_e_registra_mesmo_assim(db: AsyncSession):
-    """`silencioso` = registra no painel e não manda Threema — é o modo com
-    que os 6 robôs de 22/09 nascem."""
+async def test_hook_registra_no_silencioso(db: AsyncSession):
+    """`silencioso` = registra no painel e não manda Threema. (O Robô da
+    Margem nasce `ligado` desde 25/09 — é o robô que segura pedido.)"""
     robo = await db.get(OuvidoriaRobo, ROBO)
-    assert robo.modo == "silencioso"
+    assert robo.modo == "ligado"
+    robo.modo = "silencioso"
+    await db.commit()
 
     await margem_auto_hold._ouvidoria_falha(
         db, pedido_bling="291670", bling_id=111, operacao="segurar", erro="x"
@@ -518,7 +544,10 @@ async def test_resumo_conta_segurados_falhas_abertas_e_margem_alta(db: AsyncSess
 
     res = await vm.vigia_margem_run(db, agora=AGORA)
 
-    assert res["resumo"] == "2 segurados · 1 falha · 1 margem alta"
+    assert res["resumo"] == (
+        "0 reprovados · 0 segurados · 0 liberados · "
+        "2 sem decisão · 1 falha · 1 margem alta"
+    )
     assert set(await _abertas(db)) == {
         "segurado:291670",
         "segurado:291672",
@@ -570,12 +599,192 @@ async def test_sweep_e_serializado_pelo_advisory_lock(db: AsyncSession, monkeypa
 
     chamado = []
 
-    async def _run(session):
-        chamado.append(1)
+    async def _rebuild(session):
+        return 7
+
+    async def _hold(session):
+        return {"held": 0}
+
+    async def _run(session, **kw):
+        chamado.append(kw)
         return {"ok": True}
 
+    monkeypatch.setattr(vm, "rebuild_all", _rebuild)
+    monkeypatch.setattr(vm.margem_auto_hold, "run", _hold)
     monkeypatch.setattr(vm, "vigia_margem_run", _run)
-    assert await vm.vigia_margem_sweep() == {"ok": True} and chamado == [1]
+    assert await vm.vigia_margem_sweep() == {"rebuilt": 7, "robo": {"held": 0}, "ok": True}
+    assert chamado == [{"erro_robo": None}]
+
+
+# ─── um robô só (25/09): a rodada age e confere ───────────────────────────
+
+
+@pytest.fixture
+def passos(monkeypatch):
+    """Troca rebuild, hold e conferência por fakes que anotam a ordem."""
+    feitos: list[str] = []
+    estado = {"rebuild_falha": False, "hold_falha": False}
+
+    async def _rebuild(session):
+        feitos.append("rebuild")
+        if estado["rebuild_falha"]:
+            raise RuntimeError("view sumiu")
+        return 10
+
+    async def _hold(session):
+        feitos.append("hold")
+        if estado["hold_falha"]:
+            raise RuntimeError("sql quebrou")
+        return {"held": 1, "reprovados": 0, "failed": 0, "alertas": 0}
+
+    async def _run(session, *, erro_robo=None):
+        feitos.append(f"conferir:{erro_robo}")
+        return {"resumo": "ok"}
+
+    monkeypatch.setattr(vm, "rebuild_all", _rebuild)
+    monkeypatch.setattr(vm.margem_auto_hold, "run", _hold)
+    monkeypatch.setattr(vm, "vigia_margem_run", _run)
+    return feitos, estado
+
+
+async def test_sweep_ligado_reconstroi_age_e_confere(db: AsyncSession, passos):
+    feitos, _ = passos
+    res = await vm.vigia_margem_sweep()
+    assert feitos == ["rebuild", "hold", "conferir:None"]
+    assert res["robo"]["held"] == 1 and res["rebuilt"] == 10
+
+
+async def test_sweep_silencioso_age_igual(db: AsyncSession, passos):
+    """Silencioso cala o Threema (lá no margem_auto_hold), não o robô."""
+    feitos, _ = passos
+    robo = await db.get(OuvidoriaRobo, ROBO)
+    robo.modo = "silencioso"
+    await db.commit()
+    await vm.vigia_margem_sweep()
+    assert feitos == ["rebuild", "hold", "conferir:None"]
+
+
+async def test_rodar_agora_com_robo_desligado_so_confere(db: AsyncSession, passos):
+    """"Rodar agora" roda mesmo desligado (como todo robô do painel), mas
+    desligado não mexe em pedido: reconstrói e confere, sem hold."""
+    feitos, _ = passos
+    robo = await db.get(OuvidoriaRobo, ROBO)
+    robo.modo = "desligado"
+    await db.commit()
+    await vm.vigia_margem_sweep()
+    assert feitos == ["rebuild", "conferir:None"]
+
+
+async def test_snapshot_que_nao_reconstruiu_nao_deixa_o_robo_agir(db: AsyncSession, passos):
+    feitos, estado = passos
+    estado["rebuild_falha"] = True
+    await vm.vigia_margem_sweep()
+    assert feitos == [
+        "rebuild",
+        "conferir:não consegui atualizar os números da Margem: view sumiu",
+    ]
+
+
+async def test_robo_que_caiu_vira_rodada_com_falha(db: AsyncSession, passos):
+    feitos, estado = passos
+    estado["hold_falha"] = True
+    await vm.vigia_margem_sweep()
+    assert feitos == ["rebuild", "hold", "conferir:o robô caiu antes de terminar: sql quebrou"]
+
+
+async def test_rodada_do_robo_que_nao_agiu_sai_com_falha_e_guarda_a_conferencia(
+    db: AsyncSession,
+):
+    """O passo que age não rodou: a conferência roda igual (o segurado
+    esquecido continua cobrado), a rodada sai `falhando` na coluna Saúde e o
+    resumo diz que o robô não agiu."""
+    await _seed_segurado(db, pedido="291670", bling_id=111, saldo_gap=True)
+
+    res = await vm.vigia_margem_run(db, agora=AGORA, erro_robo="o robô caiu antes de terminar: x")
+
+    assert res["robo_falhou"] == "o robô caiu antes de terminar: x"
+    assert "segurado:291670" in await _abertas(db)
+    robo = await db.get(OuvidoriaRobo, ROBO)
+    await db.refresh(robo)
+    assert robo.ultima_rodada_ok is False
+    assert robo.ultima_rodada_resumo.startswith("o robô não agiu nesta rodada · ")
+    assert "1 sem decisão" in robo.ultima_rodada_resumo
+    assert robo.ultima_falha_erro == "o robô caiu antes de terminar: x"
+
+
+async def _auditoria(
+    db: AsyncSession,
+    *,
+    pedido: str,
+    acao: str,
+    novo: str,
+    antigo: str | None = None,
+    ha_min: float = 10,
+    por: uuid.UUID | None = None,
+) -> None:
+    db.add(
+        MargemAudit(
+            created_at=AGORA - timedelta(minutes=ha_min),
+            pedido_bling=pedido,
+            bling_id="1",
+            acao=acao,
+            valor_antigo=antigo,
+            valor_novo=novo,
+            origem="margens_auto",
+            mudado_por=por,
+        )
+    )
+    await db.commit()
+
+
+async def test_rodada_conta_o_que_o_robo_fez_desde_a_rodada_anterior(db: AsyncSession, admin_id):
+    """A rodada mostra o que o robô FEZ no Bling desde a anterior — pela
+    auditoria, então conta também o que o "atualizar" da aba e a revisão das
+    :35 fizeram. Reprovar grava situação + pino e conta uma vez só (como
+    reprovado, não como segurado)."""
+    # A rodada anterior começou há 40 min: o que veio antes dela já foi contado.
+    db.add(
+        OuvidoriaRodada(
+            robo_chave=ROBO,
+            iniciada_em=AGORA - timedelta(minutes=40),
+            terminada_em=AGORA - timedelta(minutes=40),
+            ok=True,
+            contadores={},
+        )
+    )
+    await db.commit()
+    # reprovado: situação 6→83955 + pino Reprovado
+    await _auditoria(db, pedido="A", acao="situacao", antigo="6", novo="83955")
+    await _auditoria(db, pedido="A", acao="status", novo="Reprovado")
+    # segurado (saldo divergente): só a situação
+    await _auditoria(db, pedido="B", acao="situacao", antigo="6", novo="83955", ha_min=25)
+    # liberado pela revisão das :35
+    await _auditoria(db, pedido="C", acao="situacao", antigo="83955", novo="6")
+    await _auditoria(db, pedido="C", acao="status", antigo="Reprovado", novo="Aprovado")
+    # voltou pra análise (margem passou, saldo divergente)
+    await _auditoria(db, pedido="D", acao="status", antigo="Reprovado", novo="Pendente")
+    # fora da conta: antes da rodada anterior, e ação de PESSOA
+    await _auditoria(db, pedido="E", acao="status", novo="Reprovado", ha_min=50)
+    await _auditoria(db, pedido="F", acao="status", novo="Reprovado", por=admin_id)
+
+    res = await vm.vigia_margem_run(db, agora=AGORA)
+
+    assert (res["reprovou"], res["segurou"], res["liberou"], res["voltou_analise"]) == (1, 1, 1, 1)
+    assert res["resumo"] == (
+        "1 reprovado · 1 segurado · 1 liberado · 1 voltou pra análise · "
+        "0 sem decisão · 0 falhas · 0 margem alta"
+    )
+
+
+async def test_janela_das_acoes_nao_passa_de_2h(db: AsyncSession):
+    """Robô que ficou dias desligado: a 1ª rodada de volta não despeja o
+    histórico — a janela começa no máximo 2 h antes."""
+    await _auditoria(db, pedido="A", acao="status", novo="Reprovado", ha_min=60 * 3)
+    await _auditoria(db, pedido="B", acao="status", novo="Reprovado", ha_min=90)
+
+    res = await vm.vigia_margem_run(db, agora=AGORA)
+
+    assert res["reprovou"] == 1
 
 
 async def test_operacao_concluida_por_operacao():

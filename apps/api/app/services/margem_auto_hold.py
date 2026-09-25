@@ -113,6 +113,20 @@ está segurado, o Bling achando que não) e ninguém lia o log. O ponto de
 SUCESSO da mesma operação fecha a ocorrência. Nenhuma regra de hold, reprovo
 ou reavaliação muda por causa disso: os helpers são best-effort e engolem o
 próprio erro.
+
+UM BOTÃO SÓ (25/09/2026): o robô e o fiscal dele viraram o mesmo "Robô da
+Margem" da Ouvidoria (chave `vigia_margem`). Antes eram três chaves — o
+kill-switch MARGEM_AUTO_HOLD e o MARGEM_REAVALIAR_REPROVADOS no .env (só o
+admin do servidor mexia) e o modo do fiscal no painel, que desligado não
+parava nada disto (o Cairo desligou pra testar e a Margem seguiu segurando).
+Agora o modo do painel manda em tudo:
+- `ligado`: segura, reprova, revisa, alerta e avisa no Threema;
+- `silencioso`: age igual, mas NENHUM Threema sai (nem o do link de aprovar);
+- `desligado`: `run` e `reavaliar_reprovados` saem sem tocar em nada — vale
+  pro cron, pro "atualizar" da aba e pro auto-refresh da página.
+E uma lista só: os avisos na hora vão pra lista "Avisar" do robô na
+Ouvidoria (a mesma que o modal Informar da aba Margem edita — o contexto
+`margem_auto` do Informar virou uma janela pra ela, migração 0325).
 """
 
 from __future__ import annotations
@@ -125,13 +139,12 @@ import structlog
 from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import get_settings
 from app.models import (
     BlingOrder,
     Integration,
     IntegrationPlatform,
     OuvidoriaOcorrencia,
-    ThreemaInformarConfig,
+    OuvidoriaRobo,
 )
 from app.security.cipher import decrypt_json
 from app.services import aprovar_link, informar, threema
@@ -165,6 +178,10 @@ REAVALIACAO_IDADE_MINIMA = timedelta(minutes=90)
 REAVALIACAO_JANELA_DIAS = 30
 
 _MARGEM_AUDIT_TABLE = qualified_table("margem_audit")
+
+# O Robô da Margem na Ouvidoria: o modo dele liga/desliga ESTE robô e a lista
+# "Avisar" dele é quem recebe os avisos (ver docstring do módulo).
+_OUVIDORIA_ROBO = "vigia_margem"
 
 
 def _mensagem(motivo: str, *, reprovado: bool = False) -> str:
@@ -359,20 +376,35 @@ def _loja(r: Mapping) -> str:
     )
 
 
+async def _modo_do_robo(session: AsyncSession) -> str:
+    """Modo do Robô da Margem na Ouvidoria — o ÚNICO botão do robô desde
+    25/09 (ver docstring do módulo). Import tardio como os ganchos abaixo."""
+    from app.services import ouvidoria
+
+    return await ouvidoria.modo(session, _OUVIDORIA_ROBO)
+
+
 async def _recipients_margem_auto(session: AsyncSession) -> list[str]:
-    row = (
-        await session.execute(
-            select(ThreemaInformarConfig).where(ThreemaInformarConfig.contexto == "margem_auto")
-        )
-    ).scalar_one_or_none()
-    return threema.parse_recipients(row.recipients if row else "")
+    """Quem recebe os avisos NA HORA (segurado, reprovado com o link de
+    aprovar, liberado pela revisão, margem alta): a lista "Avisar" do Robô da
+    Margem na Ouvidoria — a mesma que o modal Informar da aba Margem edita.
+    Só no modo `ligado`: `silencioso` age e cala, como todo robô do painel."""
+    from app.services import ouvidoria
+
+    robo = await session.get(OuvidoriaRobo, _OUVIDORIA_ROBO)
+    modo = robo.modo if robo is not None else await _modo_do_robo(session)
+    if modo != "ligado":
+        return []
+    ids, _origem = ouvidoria.destinatarios(robo, _OUVIDORIA_ROBO)
+    return ids
 
 
 async def _avisar_threema(
     session: AsyncSession, r: Mapping, motivo: str, *, reprovado: bool = False
 ) -> None:
-    """Aviso Threema NA HORA do hold, pros destinatários do cadastro
-    `margem_auto` (segunda lista do modal Informar da Margem). Uma mensagem
+    """Aviso Threema NA HORA do hold, pra lista do Robô da Margem na
+    Ouvidoria (`_recipients_margem_auto`; o modal Informar da aba Margem
+    edita a mesma lista). Uma mensagem
     por pedido, com conta, motivo, margem vs mínima e lucro — pedido do
     Eduardo (02/09): avisar na hora pra ele decidir do celular. `reprovado`
     troca cabeçalho e rodapé (o pedido já foi reprovado; o link desfaz).
@@ -427,8 +459,6 @@ async def _avisar_threema(
 
 
 # --- Ouvidoria: a falha do robô vira ocorrência (ver docstring do módulo) --
-
-_OUVIDORIA_ROBO = "vigia_margem"
 
 
 async def _ouvidoria_falha(
@@ -638,9 +668,11 @@ async def run(
     hoje: date | None = None,
 ) -> dict:
     """Segura/reprova os pendentes "Em aberto" e alerta margens fora do
-    normal. Retorna contadores p/ log/response."""
-    if not get_settings().margem_auto_hold:
-        return {"held": 0, "reprovados": 0, "failed": 0, "alertas": 0, "skipped": "disabled"}
+    normal. Retorna contadores p/ log/response. Robô da Margem `desligado`
+    na Ouvidoria → não faz nada (vale pro cron, pro "atualizar" da aba e pro
+    auto-refresh da página)."""
+    if await _modo_do_robo(session) == "desligado":
+        return {"held": 0, "reprovados": 0, "failed": 0, "alertas": 0, "skipped": "desligado"}
 
     rows = (await session.execute(text(_candidatos_sql()))).mappings().all()
     held = reprovados = failed = 0
@@ -965,7 +997,8 @@ async def _voltar_pendente_one(session: AsyncSession, *, pedido_bling: str, blin
 async def _avisar_threema_reavaliacao(
     session: AsyncSession, r: Mapping, *, pedido_bling: str, motivo: str, liberado: bool
 ) -> None:
-    """Aviso da reavaliação pros mesmos destinatários do hold (`margem_auto`).
+    """Aviso da reavaliação pros mesmos destinatários do hold (a lista do
+    Robô da Margem na Ouvidoria).
     Best-effort como o do hold: falha de envio não desfaz nada."""
     recipients = await _recipients_margem_auto(session)
     if not recipients:
@@ -1038,8 +1071,8 @@ async def reavaliar_reprovados(
 ) -> dict:
     """Revisita os pedidos reprovados pelo robô ainda em Aguardando
     Cancelamento (ver docstring do módulo). Retorna contadores p/ log."""
-    if not get_settings().margem_reavaliar_reprovados:
-        return {"avaliados": 0, "liberados": 0, "pendentes": 0, "failed": 0, "skipped": "disabled"}
+    if await _modo_do_robo(session) == "desligado":
+        return {"avaliados": 0, "liberados": 0, "pendentes": 0, "failed": 0, "skipped": "desligado"}
 
     agora = agora or datetime.now(UTC)
     rows = (

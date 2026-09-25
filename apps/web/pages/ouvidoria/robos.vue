@@ -73,6 +73,9 @@ type Robo = {
   // chave da config → rótulo com a unidade ("Cadência esperada (min)"), do
   // catálogo do backend. Chave que não vier aqui é mostrada crua.
   config_rotulos: Record<string, string>
+  // modo → frase do confirm() ao passar pra ele (ex.: desligar o Robô da
+  // Margem solta os pedidos com margem baixa). Vazio = dica padrão.
+  avisos_modo?: Partial<Record<ModoRobo, string>>
   ultima_rodada_em: string | null
   ultima_rodada_ok: boolean | null
   ultima_rodada_resumo: string | null
@@ -1160,6 +1163,7 @@ const carregandoAba = computed(() => (tab.value === 'robos' ? robosLoading.value
                     v-if="canEdit"
                     :model-value="r.modo"
                     :nome="r.nome"
+                    :avisos="r.avisos_modo"
                     :busy="mudandoModo.has(r.chave)"
                     @change="(m) => mudarModo(r, m)"
                   />

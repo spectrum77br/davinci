@@ -19,11 +19,16 @@ Contextos:
   última localização — pedido do Eduardo (03/09): "em devoluções criar um
   botao informar igual, na margem".
 
-Há ainda um quarto cadastro SEM envio manual: `margem_auto` guarda quem
-recebe o aviso automático que o auto-hold manda NA HORA em que segura um
-pedido (services/margem_auto_hold._avisar_threema). Ele aceita GET/PUT como
-os demais (o modal da Margem edita os dois), mas `/enviar` não existe pra ele
-— quem envia é o robô.
+Há ainda um quarto cadastro SEM envio manual: `margem_auto`, quem recebe o
+aviso automático que o robô da Margem manda NA HORA em que segura, reprova
+(com o link de aprovar pelo celular) ou desconfia de um pedido
+(services/margem_auto_hold._avisar_threema). Ele aceita GET/PUT como os
+demais (o modal da Margem edita os dois), mas `/enviar` não existe pra ele —
+quem envia é o robô. Desde 25/09/2026 ele NÃO tem linha própria: GET/PUT
+leem e gravam a lista "Avisar" do Robô da Margem em Ouvidoria › Robôs
+(`ouvidoria_robos.threema_recipients` de `vigia_margem`) — uma lista só pro
+aviso de cada pedido e pro resumo das pendências, editável nas duas telas
+(migração 0325 juntou as duas).
 
 Cada contexto tem seu cadastro de destinatários (`threema_informar_config`),
 editado no modal do botão. O diretório de opções vem do CADASTRO DE USUÁRIOS
@@ -52,6 +57,7 @@ from app.models import (
     BlingOrder,
     Logistica,
     NfFaturamento,
+    OuvidoriaRobo,
     StoreInfo,
     ThreemaInformarConfig,
     User,
@@ -59,7 +65,7 @@ from app.models import (
 )
 from app.routers.nf import _SITUACAO_AGUARDANDO_CANCELAMENTO
 from app.schemas.informar import InformarConfigIn, InformarConfigOut, InformarEnviarOut
-from app.services import aprovar_link, informar, threema
+from app.services import aprovar_link, informar, ouvidoria, threema
 from app.services.logistica_ingest import _ids_pendentes
 from app.services.margem_auto_hold import _motivo as _motivo_margem
 from app.services.verificar_margem import SNAPSHOT_TABLE
@@ -149,6 +155,23 @@ async def _config_row(
     ).scalar_one_or_none()
 
 
+# `margem_auto` é a lista do Robô da Margem na Ouvidoria (ver docstring).
+_CONTEXTO_ROBO_MARGEM = "margem_auto"
+_ROBO_MARGEM = "vigia_margem"
+
+
+async def _robo_margem(session: AsyncSession) -> OuvidoriaRobo:
+    """A linha do Robô da Margem — criada pelo catálogo se ainda não existe
+    (banco novo antes de alguém abrir a Ouvidoria)."""
+    robo = await session.get(OuvidoriaRobo, _ROBO_MARGEM)
+    if robo is None:
+        await ouvidoria.sincronizar_catalogo(session)
+        robo = await session.get(OuvidoriaRobo, _ROBO_MARGEM)
+    if robo is None:  # o catálogo sempre tem o robô; defesa pro type-checker
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail={"code": "robo_desconhecido"})
+    return robo
+
+
 def _to_config_out(
     contexto: str,
     row: ThreemaInformarConfig | None,
@@ -170,6 +193,14 @@ async def get_config(
     """Cadastro atual + diretório de destinatários (pro modal do botão)."""
     contexto = _valida_contexto(contexto)
     _exige_acesso(user, contexto)
+    if contexto == _CONTEXTO_ROBO_MARGEM:
+        robo = await _robo_margem(session)
+        await session.commit()  # o catálogo pode ter acabado de criar a linha
+        return InformarConfigOut(
+            contexto=contexto,
+            recipients=threema.parse_recipients(robo.threema_recipients or ""),
+            destinatarios=await _diretorio(session),
+        )
     return _to_config_out(
         contexto, await _config_row(session, contexto), await _diretorio(session)
     )
@@ -194,6 +225,16 @@ async def put_config(
         for rid in threema.parse_recipients(",".join(body.recipients))
         if rid in validos
     ]
+    if contexto == _CONTEXTO_ROBO_MARGEM:
+        # Mesmo formato que a Ouvidoria grava (resolver_destinatarios).
+        robo = await _robo_margem(session)
+        robo.threema_recipients = ", ".join(escolhidos)
+        await session.commit()
+        logger.info("informar_config_salva", contexto=contexto, robo=_ROBO_MARGEM,
+                    recipients=escolhidos)
+        return InformarConfigOut(
+            contexto=contexto, recipients=escolhidos, destinatarios=diretorio
+        )
     row = await _config_row(session, contexto)
     if row is None:
         row = ThreemaInformarConfig(contexto=contexto, recipients=",".join(escolhidos))

@@ -132,6 +132,10 @@ class RoboDef:
     # entra `silencioso` — registra no painel e não manda Threema — até o
     # Vinicius ligar na tela; quem já era da casa continua `ligado`.
     modo_padrao: str = "ligado"
+    # Modo → frase do confirm() da tela ao passar pra ele, quando mudar o modo
+    # tem efeito que a dica genérica do interruptor não conta (ex.: o Robô da
+    # Margem mexe em pedido — desligar solta os pedidos com margem baixa).
+    avisos_modo: dict[str, str] = field(default_factory=dict)
 
 
 # Os NOMES são os que o Vinicius escolheu pra tela (22/09/2026: ele agrupou os
@@ -277,16 +281,23 @@ ROBOS: dict[str, RoboDef] = {
         },
         modo_padrao="silencioso",
     ),
+    # 25/09/2026: o robô que AGE (margem_auto_hold: segura, reprova, revisa os
+    # reprovados, avisa margem alta) e o fiscal dele viraram um robô só — este
+    # botão manda nos dois, e a lista do "Avisar" é a mesma do aviso com o
+    # link de aprovar pelo celular. É o único robô do painel que mexe em
+    # pedido: por isso nasce `ligado` (é o comportamento de sempre da casa) e
+    # desligar/silenciar pede confirmação com o que para de acontecer.
     "vigia_margem": RoboDef(
         chave="vigia_margem",
         nome="Robô da Margem",
         descricao=(
-            "Pedido que o robô segurou no Bling e ninguém decidiu, falha do robô "
-            "ao segurar/liberar e margem fora do normal (custo suspeito no "
-            "cadastro do produto)."
+            "Segura no Bling o pedido com saldo divergente e reprova o com margem "
+            "abaixo do mínimo (manda o link de aprovar pelo celular), revisa os "
+            "reprovados de hora em hora e avisa margem fora do normal. Cobra o "
+            "pedido segurado que ninguém decidiu e a falha ao mexer no Bling."
         ),
         area="margem",
-        cadencia_texto="a cada 30 min (:17/:47)",
+        cadencia_texto="a cada 30 min (:15/:45)",
         plataformas=("ml", "shopee", "tiktok", "amazon"),
         config_padrao={"cadencia_min": 30, "segurado_horas": 24},
         env_threema_recipients=None,
@@ -295,7 +306,20 @@ ROBOS: dict[str, RoboDef] = {
             "cadencia_min": Parametro("Cadência esperada", 1, 24 * 60, "min"),
             "segurado_horas": Parametro("Segurado sem decisão", 1, 720, "h"),
         },
-        modo_padrao="silencioso",
+        modo_padrao="ligado",
+        avisos_modo={
+            "desligado": (
+                "O robô para de segurar e de reprovar pedidos com margem baixa: "
+                "eles seguem livres para etiqueta e NF até alguém religar. "
+                "Também para de revisar os reprovados e de cobrar o que ficou "
+                "sem decisão."
+            ),
+            "silencioso": (
+                "O robô continua segurando e reprovando, mas ninguém recebe o "
+                "Threema — nem o aviso de pedido reprovado com o link de aprovar "
+                "pelo celular. Só a aba Margem e este painel mostram."
+            ),
+        },
     ),
     "vigia_robo_melhorenvio": RoboDef(
         chave="vigia_robo_melhorenvio",

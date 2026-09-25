@@ -66,6 +66,9 @@ class RoboOut(BaseModel):
     # `Parametro` do catálogo: a tela mostra isso em vez do nome cru da chave,
     # sem ter que conhecer robô por robô. Chave sem rótulo aparece crua.
     config_rotulos: dict[str, str] = {}
+    # modo → frase do confirm() da tela ao passar pra ele (ex.: desligar o
+    # Robô da Margem solta os pedidos com margem baixa). Vazio = dica padrão.
+    avisos_modo: dict[str, str] = {}
     ultima_rodada_em: datetime | None = None
     ultima_rodada_ok: bool | None = None
     ultima_rodada_resumo: str | None = None

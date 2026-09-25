@@ -469,20 +469,10 @@ class Settings(BaseSettings):
     # OUVIDORIA_THREEMA_RECIPIENTS no .env.
     ouvidoria_threema_recipients: str = ""
 
-    # Auto-hold da Margem (pedido do dono, 21/08): pedido que CAI na aba
-    # Pendentes da Margem (margem baixa / saldo divergente) e ainda está
-    # "Em aberto" (6) no Bling é movido SOZINHO pra Aguardando Cancelamento
-    # (83955) + recado datado nas Observações do pedido — segura etiqueta/NF
-    # até o humano decidir na própria aba (Aprovar solta, Reprovar confirma).
-    # Roda após cada rebuild do snapshot (cron :15/:45 e botão "atualizar").
-    # Kill-switch: MARGEM_AUTO_HOLD=false no .env.
-    margem_auto_hold: bool = True
-    # Reavaliação dos reprovados pelo robô (Vinicius, 16/09 — caso 297400):
-    # de hora em hora, pedido que o robô reprovou e ainda está em Aguardando
-    # Cancelamento é rejulgado com o repasse atualizado da plataforma; se a
-    # margem passou (mínima ou Condição Especial), volta pro fluxo sozinho.
-    # Kill-switch: MARGEM_REAVALIAR_REPROVADOS=false no .env.
-    margem_reavaliar_reprovados: bool = True
+    # O auto-hold da Margem e a reavaliação dos reprovados NÃO têm mais
+    # kill-switch aqui (MARGEM_AUTO_HOLD / MARGEM_REAVALIAR_REPROVADOS saíram
+    # em 25/09/2026): quem liga e desliga é o modo do "Robô da Margem" em
+    # Ouvidoria › Robôs. Variável velha no .env é ignorada (extra="ignore").
 
     # Safety-net cron que re-sincroniza pedidos suspeitos de stale com o
     # Bling (webhooks perdidos). Desligável via ENABLE_BLING_ORDERS_SAFETY_NET=false.

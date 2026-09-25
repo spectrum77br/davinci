@@ -18,14 +18,18 @@ import { computed } from 'vue'
 // (âmbar), à direita = ligado (verde). Cada terço da pista é um botão
 // próprio — clicar escolhe a posição direto, sem ter que "passar" pelo modo
 // do meio. Desligar pede confirmação, porque o robô para de registrar
-// ocorrências e ninguém mais fica sabendo do que ele vigiava.
+// ocorrências e ninguém mais fica sabendo do que ele vigiava. Robô cujo modo
+// tem efeito além disso (o da Margem mexe em pedido) manda a frase em
+// `avisos` — e aí o modo que tiver frase pede confirmação com ela.
 const props = withDefaults(defineProps<{
   modelValue: ModoRobo
   // Nome do robô — só pra frase do confirm().
   nome: string
+  // modo → o que muda ao passar pra ele (vem do catálogo: `avisos_modo`).
+  avisos?: Partial<Record<ModoRobo, string>>
   disabled?: boolean
   busy?: boolean
-}>(), { disabled: false, busy: false })
+}>(), { disabled: false, busy: false, avisos: () => ({}) })
 
 const emit = defineEmits<{
   (e: 'change', modo: ModoRobo): void
@@ -52,7 +56,11 @@ const bolinha = computed(() => {
 
 function escolher(modo: ModoRobo) {
   if (props.disabled || props.busy || modo === props.modelValue) return
-  if (
+  const aviso = props.avisos?.[modo]
+  if (aviso) {
+    const verbo = modo === 'desligado' ? 'Desligar' : modo === 'silencioso' ? 'Deixar em silencioso' : 'Ligar'
+    if (!confirm(`${verbo} o robô "${props.nome}"?\n\n${aviso}`)) return
+  } else if (
     modo === 'desligado'
     && !confirm(`Desligar o robô "${props.nome}"?\n\nEle para de rodar e de registrar ocorrências até alguém religar. As ocorrências abertas continuam na lista.`)
   ) return

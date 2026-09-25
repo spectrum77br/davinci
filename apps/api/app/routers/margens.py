@@ -1628,7 +1628,8 @@ async def refresh_marketplace_mv(
     # Snapshot fresco → auto-hold dos pendentes "Em aberto" (Aguardando
     # Cancelamento + Observações no Bling). Import tardio: o serviço lê os
     # gatilhos de atenção DESTE módulo (fonte única) — em cima criaria ciclo.
-    # Best-effort: falha do hold não pode derrubar o refresh do botão.
+    # Best-effort: falha do hold não pode derrubar o refresh do botão. O
+    # `run` obedece o modo do Robô da Margem (Ouvidoria): desligado = nada.
     auto_hold: dict | None = None
     try:
         from app.services.margem_auto_hold import run as _margem_auto_hold

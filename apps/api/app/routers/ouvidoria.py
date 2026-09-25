@@ -143,6 +143,7 @@ def _robo_out(
         "reaviso_horas": robo.reaviso_horas,
         "config": svc.config_do_robo(robo, robo.chave),
         "config_rotulos": svc.rotulos_config(robo.chave),
+        "avisos_modo": dict(svc.ROBOS[robo.chave].avisos_modo) if robo.chave in svc.ROBOS else {},
         "ultima_rodada_em": robo.ultima_rodada_em,
         "ultima_rodada_ok": robo.ultima_rodada_ok,
         "ultima_rodada_resumo": robo.ultima_rodada_resumo,

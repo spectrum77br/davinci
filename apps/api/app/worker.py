@@ -2410,8 +2410,15 @@ async def condicao_especial_gc(ctx: dict) -> None:
 
 
 async def verificar_margem_snapshot(ctx: dict) -> None:
-    """Rebuild COMPLETO do snapshot davinci.verificar_margem (janela 20d) como
-    backstop periódico (cron 30min).
+    """Rebuild COMPLETO do snapshot davinci.verificar_margem (janela 20d) +
+    a rodada do Robô da Margem. Desde 25/09/2026 o cron das :15/:45 chama o
+    `vigia_margem_tick` direto (é o tick do robô na Ouvidoria); este nome
+    fica pro enfileiramento manual (/admin/run-job) e faz a mesma coisa."""
+    await vigia_margem_tick(ctx)
+
+
+async def _rebuild_snapshot_margem() -> None:
+    """Rebuild COMPLETO do snapshot davinci.verificar_margem (janela 20d).
 
     Antes era INSERT incremental (ON CONFLICT DO NOTHING) e nem rodava como
     cron. Virou rebuild_all porque o refresh per-ingest agora PULA os re-syncs
@@ -2420,7 +2427,6 @@ async def verificar_margem_snapshot(ctx: dict) -> None:
     ao snapshot só via rebuild_all. O load da página /margem já reconstrói
     (throttle 5min), e este cron cobre os períodos sem ninguém olhando.
     Serializado pelo advisory lock do rebuild_all (sem herd)."""
-    from app.services.margem_auto_hold import run as margem_auto_hold_run
     from app.services.verificar_margem import rebuild_all
 
     async with session_scope() as s:
@@ -2429,17 +2435,6 @@ async def verificar_margem_snapshot(ctx: dict) -> None:
             logger.info("verificar_margem_snapshot_done", rebuilt=n)
         except Exception as e:  # noqa: BLE001
             logger.warning("verificar_margem_snapshot_failed", error=str(e)[:200])
-            return
-
-    # Snapshot fresco → segura os pendentes "Em aberto" (Aguardando
-    # Cancelamento + Observações no Bling). Sessão própria: o hold commita por
-    # pedido e não deve conviver com o advisory lock/estado do rebuild.
-    async with session_scope() as s:
-        try:
-            res = await margem_auto_hold_run(s)
-            logger.info("margem_auto_hold_done", **res)
-        except Exception as e:  # noqa: BLE001
-            logger.warning("margem_auto_hold_cron_failed", error=str(e)[:200])
 
 
 async def margem_reavaliar_reprovados(ctx: dict) -> None:
@@ -2786,17 +2781,19 @@ async def vigia_robo_leitura_tick(ctx: dict) -> None:
 
 
 async def vigia_margem_tick(ctx: dict) -> None:
-    """Robô da Margem (robô da Ouvidoria): pedido que o robô segurou no Bling
-    e ninguém decidiu, falha do robô ao segurar/liberar (aberta por hook no
-    próprio margem_auto_hold) e margem fora do normal. Roda em :17/:47, 2 min
-    DEPOIS do ciclo das :15/:45 (`verificar_margem_snapshot`: rebuild do
-    snapshot + `margem_auto_hold.run`) — é o snapshot daquele ciclo que a
-    rodada lê, e é o hold dele que abre a `falha:` que ela confere.
-    """
+    """Robô da Margem (Ouvidoria), :15/:45 — desde 25/09/2026 o robô que age
+    e o fiscal são um só: `vigia_margem_sweep` reconstrói o snapshot, o robô
+    segura/reprova (`margem_auto_hold.run`) e o fiscal confere e grava a
+    rodada (o que o robô fez + o que ficou pendente).
+
+    `desligado` no painel: o robô não age nem confere, mas o snapshot é o
+    dado da aba Margem — as pessoas aprovam e reprovam por ele com o robô
+    desligado —, então o rebuild roda igual, sem rodada na Ouvidoria."""
     try:
         async with session_scope() as s:
             modo = await ouvidoria_modo(s, "vigia_margem")
         if modo == "desligado":
+            await _rebuild_snapshot_margem()
             logger.debug("vigia_margem_desligado")
             return
         try:
@@ -2809,7 +2806,8 @@ async def vigia_margem_tick(ctx: dict) -> None:
             summary.get(k)
             for k in (
                 "novas", "sumiram", "segurados_novos", "margem_alta_novas",
-                "falhas_abertas", "avisadas",
+                "falhas_abertas", "avisadas", "reprovou", "segurou", "liberou",
+                "robo_falhou",
             )
         ):
             logger.info("vigia_margem_done", **summary)
@@ -3805,11 +3803,16 @@ class WorkerSettings:
         # só chegaria ao snapshot quando alguém abrisse a página /margem
         # (que também reconstrói, throttle 5min). Este cron garante a
         # propagação em períodos ociosos. Serializado pelo advisory lock.
-        cron(verificar_margem_snapshot, minute={15, 45}, run_at_startup=False),
+        # Desde 25/09 é a rodada do Robô da Margem (Ouvidoria): o tick
+        # reconstrói e, fora do `desligado`, o robô segura/reprova e o fiscal
+        # confere — ver vigia_margem_tick / vigia_margem_sweep.
+        cron(vigia_margem_tick, minute={15, 45}, run_at_startup=False),
         # Reavaliação dos reprovados pelo robô: de hora em hora, em :35 — fora
         # do :15/:45 (snapshot + hold), do :10/:40 (retry do financeiro) e do
         # :20 (period sync). Rebusca financeiro + Bling por pedido; poucos
         # candidatos (≈10 reprovações automáticas/dia). Ver margem_auto_hold.
+        # Obedece o modo do Robô da Margem (desligado = não revisa); o que ela
+        # libera entra na contagem da rodada seguinte (pela auditoria).
         cron(margem_reavaliar_reprovados, minute=35, run_at_startup=False, timeout=600),
         # Cron `check_marketplace_shipped_orders` MOVIDO pra
         # WorkerSettingsMarketplace (fila `davinci_marketplace`). Função
@@ -3869,12 +3872,11 @@ class WorkerSettings:
         # conta); pedido do Bling que não entra a cada 15 min; Correios 2 min
         # depois do logistica_track_sync (:05/:20/:35/:50); comandos de Ads a
         # cada 10 min em :06… (só banco, e fora dos minutos do espelho de NF-e
-        # abaixo, que é :04…); Margem em :17/:47, 2 min DEPOIS do ciclo das
-        # :15/:45 que reconstrói o snapshot e aplica o hold (é esse snapshot
-        # que a rodada lê, e o hold é quem abre a `falha:`); Chamados em
-        # :27/:57, 2 min depois da réplica automática (:25). `cadencia_texto`
-        # de cada RoboDef descreve estes minutos pra tela — mexer aqui é
-        # mexer lá.
+        # abaixo, que é :04…); Chamados em :27/:57, 2 min depois da réplica
+        # automática (:25). O Robô da Margem roda em :15/:45 no bloco do
+        # snapshot de margem (acima): a rodada dele É o rebuild → hold →
+        # conferência. `cadencia_texto` de cada RoboDef descreve estes
+        # minutos pra tela — mexer aqui é mexer lá.
         cron(vigia_credenciais_tick, minute=21, run_at_startup=False),
         cron(vigia_ingest_bling_tick, minute={3, 18, 33, 48}, run_at_startup=False),
         cron(vigia_correios_tick, minute={7, 22, 37, 52}, run_at_startup=False),
@@ -3883,7 +3885,6 @@ class WorkerSettings:
             minute={6, 16, 26, 36, 46, 56},
             run_at_startup=False,
         ),
-        cron(vigia_margem_tick, minute={17, 47}, run_at_startup=False),
         # Robô do Melhor Envio: a cada 10 min em :09… (só banco).
         cron(
             vigia_robo_melhorenvio_tick,

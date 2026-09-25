@@ -214,27 +214,29 @@ SEIS_ROBOS = {
 async def test_catalogo_dos_seis_robos_novos_nasce_silencioso(db):
     """Robô novo NÃO pode começar mandando Threema: nasce `silencioso`
     (registra no painel e cala) e o Vinicius liga um a um na tela. O vigia de
-    importação, que já era da casa, continua `ligado`."""
+    importação, que já era da casa, continua `ligado` — e o Robô da Margem
+    também (25/09: virou o robô que segura/reprova, e nascer calado cortaria
+    o aviso com o link de aprovar pelo celular)."""
     await svc.sincronizar_catalogo(db)
     await db.commit()
     for chave, (area, plataformas, config) in SEIS_ROBOS.items():
         robo = await db.get(OuvidoriaRobo, chave)
         assert robo is not None, chave
-        assert robo.modo == "silencioso", chave
+        assert robo.modo == ("ligado" if chave == "vigia_margem" else "silencioso"), chave
         assert robo.area == area and robo.plataformas == plataformas
         assert robo.config == config
         assert robo.cadencia_texto and robo.descricao
     assert (await db.get(OuvidoriaRobo, ROBO)).modo == "ligado"
 
     # A pessoa ligou um deles: a sincronização seguinte NÃO desliga de volta.
-    margem = await db.get(OuvidoriaRobo, "vigia_margem")
-    margem.modo = "ligado"
+    correios = await db.get(OuvidoriaRobo, "vigia_correios")
+    correios.modo = "ligado"
     await db.commit()
     await svc.sincronizar_catalogo(db)
     await db.commit()
-    await db.refresh(margem)
-    assert margem.modo == "ligado"
-    assert await svc.modo(db, "vigia_margem") == "ligado"
+    await db.refresh(correios)
+    assert correios.modo == "ligado"
+    assert await svc.modo(db, "vigia_correios") == "ligado"
 
 
 async def test_todo_robo_tem_limite_pra_cada_chave_de_config():
@@ -275,14 +277,14 @@ async def test_ativo_e_falso_so_no_desligado(db):
     comportamento de sempre do `modo`."""
     await svc.sincronizar_catalogo(db)
     await db.commit()
-    robo = await db.get(OuvidoriaRobo, "vigia_margem")
-    assert await svc.ativo(db, "vigia_margem") is True  # nasce silencioso
+    robo = await db.get(OuvidoriaRobo, "vigia_correios")
+    assert await svc.ativo(db, "vigia_correios") is True  # nasce silencioso
     robo.modo = "ligado"
     await db.commit()
-    assert await svc.ativo(db, "vigia_margem") is True
+    assert await svc.ativo(db, "vigia_correios") is True
     robo.modo = "desligado"
     await db.commit()
-    assert await svc.ativo(db, "vigia_margem") is False
+    assert await svc.ativo(db, "vigia_correios") is False
     assert await svc.ativo(db, "robo_que_nao_existe") is True
 
 
@@ -965,7 +967,14 @@ async def test_router_robos_lista_e_patch(client, make_user, auth_as, db):
     assert set(por_chave) == set(svc.ROBOS)
     robo = por_chave[ROBO]
     assert robo["modo"] == "ligado"
-    assert por_chave["vigia_margem"]["modo"] == "silencioso"  # robô novo nasce calado
+    assert por_chave["vigia_correios"]["modo"] == "silencioso"  # robô novo nasce calado
+    # O Robô da Margem mexe em pedido: a tela recebe o que muda ao desligar
+    # e ao silenciar, pra confirmar antes (o toggle mostra a frase).
+    avisos = por_chave["vigia_margem"]["avisos_modo"]
+    assert set(avisos) == {"desligado", "silencioso"}
+    assert "etiqueta e NF" in avisos["desligado"]
+    assert "link de aprovar" in avisos["silencioso"]
+    assert robo["avisos_modo"] == {}
     assert robo["config_rotulos"]["cadencia_min"] == "Cadência esperada (min)"
     assert robo["abertas"] == 1 and robo["abertas_pessoa"] == 1
     assert robo["rodadas_hoje"] == 1 and robo["rodadas_hoje_ok"] == 1
