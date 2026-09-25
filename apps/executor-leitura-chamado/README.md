@@ -31,6 +31,17 @@ mais conversas" (só expande a lista) e lê cada mensagem — o texto do agente
 fica num `<shadow-html data-html>` que o innerText não enxerga. "Caso
 concluído" não fecha o chamado. `LEITURA_PORTAL=0` no `.env` desliga.
 
+**v1.2 (25/09 — 294571 / 296012):**
+- *Consulta ligada* (`tipo: ambos` ou `portal`): devolução acompanhada pela API
+  em que a pessoa abriu À MÃO uma consulta no Portal (campo "Consulta no Portal"
+  do chamado). Lê as duas e junta no mesmo chamado; se só o Portal falhar, a
+  devolução vai assim mesmo e o motivo fica no histórico.
+- *Pendências*: na devolução, procura o que a tela PEDE com prazo ("Evidência
+  Solicitada — Envie evidências até 26-09-2026 … Upload Evidence") e manda como
+  `pendencias` — vira aviso no chamado, uma vez por texto.
+- O Portal só mostra a consulta pro LOGIN que abriu: aberta com outro login da
+  loja, a página vem vazia e o erro diz isso ("não aparece no login …").
+
 Loja → perfil: casa pelo nome do perfil (`Vortan - Shopee` → `Shopee Vortan`).
 O que não casar vai no `PERFIS_EXTRA` do `.env`.
 
