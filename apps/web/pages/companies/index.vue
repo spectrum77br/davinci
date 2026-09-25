@@ -460,12 +460,18 @@ const certAberto = ref<string | null>(null)
 const certSenha = ref('')
 const certMostrarDigitada = ref(false)
 const certArquivo = ref<File | null>(null)
-// Vencimento de um arquivo novo: sem ele o selo "vence MM/AAAA" some justo no
+// Vencimento de um arquivo novo: sem ele o selo "vence DD/MM/AAAA" some justo no
 // certificado renovado, que é o que vai vencer da próxima vez.
 const certVence = ref('')
 const certSenhaGuardada = ref<string | null>(null)
 const certSalvando = ref(false)
 const certErro = ref<string | null>(null)
+// Todos os certificados da empresa aberta, para excluir um a um (Eduardo,
+// 25/09/2026: "um botão para excluir o certificado"). Empresa com renovação
+// subida em dobro tem mais de um; o resumo da tabela só conhece o mais novo.
+type CertificadoItem = { id: string; filename: string; has_password: boolean; expires_at: string | null }
+const certLista = ref<CertificadoItem[] | null>(null)
+const certExcluindo = ref<string | null>(null)
 
 function limparPainelCertificado() {
   certSenha.value = ''
@@ -474,11 +480,50 @@ function limparPainelCertificado() {
   certVence.value = ''
   certSenhaGuardada.value = null
   certErro.value = null
+  certLista.value = null
 }
 function alternarCertificado(row: GridRow) {
   const abrindo = certAberto.value !== row.company.id
   limparPainelCertificado()
   certAberto.value = abrindo ? row.company.id : null
+  if (abrindo && row.certificado) carregarListaCertificados(row.company.id)
+}
+async function carregarListaCertificados(empresa: string) {
+  try {
+    const lista = await apiE<CertificadoItem[]>(`/api/companies/${empresa}/certificates`)
+    // A pessoa pode ter trocado de empresa enquanto a lista vinha.
+    if (certAberto.value === empresa) certLista.value = lista
+  } catch (e: any) {
+    if (certAberto.value === empresa) certErro.value = mensagemDeErro(e, 'não foi possível listar os certificados')
+  }
+}
+// Enquanto a lista não chega (ou se falhar), o mais novo da tabela já dá para excluir.
+function certificadosDoPainel(row: GridRow): CertificadoItem[] {
+  if (certLista.value) return certLista.value
+  return row.certificado ? [row.certificado] : []
+}
+async function excluirCertificado(row: GridRow, cert: CertificadoItem) {
+  if (certExcluindo.value || certSalvando.value) return
+  const empresa = row.company.id
+  const vence = cert.expires_at ? ` (vence ${dataBR(cert.expires_at)})` : ''
+  if (!confirm(`Excluir o certificado ${cert.filename}${vence} de ${row.company.apelido}? O arquivo e a senha guardada são apagados de vez.`)) return
+  certExcluindo.value = cert.id
+  certErro.value = null
+  try {
+    await apiE(`/api/companies/${empresa}/certificates/${cert.id}`, { method: 'DELETE' })
+    // A senha revelada podia ser justamente a do certificado apagado.
+    if (certAberto.value === empresa) certSenhaGuardada.value = null
+    await refresh()
+    if (certAberto.value === empresa) {
+      const restante = grid.value?.rows.find(r => r.company.id === empresa)?.certificado
+      if (restante) await carregarListaCertificados(empresa)
+      else certLista.value = []
+    }
+  } catch (e: any) {
+    if (certAberto.value === empresa) certErro.value = mensagemDeErro(e, 'erro ao excluir o certificado')
+  } finally {
+    certExcluindo.value = null
+  }
 }
 function fecharCertificado() {
   limparPainelCertificado()
@@ -513,8 +558,8 @@ async function mostrarSenhaGuardada(row: GridRow) {
 }
 async function salvarCertificado(row: GridRow) {
   // Enter apertado duas vezes (ou durante o envio) não pode subir o mesmo
-  // certificado duas vezes.
-  if (certSalvando.value) return
+  // certificado duas vezes; nem salvar no meio de uma exclusão.
+  if (certSalvando.value || certExcluindo.value) return
   const cert = row.certificado
   const empresa = row.company.id
   const senha = certSenha.value
@@ -554,12 +599,17 @@ async function salvarCertificado(row: GridRow) {
     certSalvando.value = false
   }
 }
+// "2027-01-15" → "15/01/2027". Eduardo (25/09/2026): só mês/ano não bastava,
+// precisa do dia em que vence.
+function dataBR(iso: string): string {
+  const [ano, mes, dia] = iso.split('-')
+  return `${dia}/${mes}/${ano}`
+}
 // Situação para o selo da célula: vencido, vencendo em 30 dias, ou ok.
-function vencimentoCertificado(cert: CertificadoResumo | null | undefined) {
+function vencimentoCertificado(cert: { expires_at: string | null } | null | undefined) {
   if (!cert?.expires_at) return null
   const dias = Math.floor((new Date(cert.expires_at + 'T00:00:00').getTime() - Date.now()) / 86_400_000)
-  const [ano, mes] = cert.expires_at.split('-')
-  return { texto: `${mes}/${ano}`, vencido: dias < 0, vencendo: dias >= 0 && dias <= 30 }
+  return { texto: dataBR(cert.expires_at), vencido: dias < 0, vencendo: dias >= 0 && dias <= 30 }
 }
 
 // ---------- inline obs edit ----------
@@ -1118,9 +1168,41 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
                   </button>
                 </div>
 
-                <div v-if="row.certificado" class="text-muted-foreground">
-                  {{ row.certificado.filename }}
-                  <span v-if="row.certificado.total > 1"> · {{ row.certificado.total }} certificados, mostrando o mais novo</span>
+                <ul v-if="certificadosDoPainel(row).length" class="space-y-1">
+                  <li
+                    v-for="(c, i) in certificadosDoPainel(row)"
+                    :key="c.id"
+                    class="flex items-start justify-between gap-2 rounded border px-2 py-1"
+                  >
+                    <div class="min-w-0 text-muted-foreground">
+                      <div class="truncate text-foreground" :title="c.filename">{{ c.filename }}</div>
+                      <div>
+                        <span v-if="c.has_password" class="text-green-600">✓ com senha</span>
+                        <span v-else class="text-amber-600">⚠ sem senha</span>
+                        <span
+                          v-if="vencimentoCertificado(c)"
+                          :class="vencimentoCertificado(c)!.vencido
+                            ? 'text-red-600 font-semibold'
+                            : vencimentoCertificado(c)!.vencendo ? 'text-amber-600' : ''"
+                        >
+                          · {{ vencimentoCertificado(c)!.vencido ? 'venceu' : 'vence' }} {{ vencimentoCertificado(c)!.texto }}
+                        </span>
+                        <span v-else> · sem data de vencimento</span>
+                        <span v-if="i === 0 && certificadosDoPainel(row).length > 1"> · o mais novo</span>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      class="shrink-0 text-red-600 hover:underline disabled:opacity-50"
+                      :disabled="!!certExcluindo || certSalvando"
+                      @click="excluirCertificado(row, c)"
+                    >
+                      {{ certExcluindo === c.id ? 'excluindo…' : 'excluir' }}
+                    </button>
+                  </li>
+                </ul>
+                <div v-if="certificadosDoPainel(row).length > 1" class="text-muted-foreground">
+                  A senha e a troca de arquivo abaixo valem para o mais novo, que é o que aparece na tabela.
                 </div>
 
                 <label class="block space-y-1">
@@ -1181,7 +1263,7 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
                   <button
                     type="button"
                     class="rounded px-3 py-1 bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50"
-                    :disabled="certSalvando"
+                    :disabled="certSalvando || !!certExcluindo"
                     @click="salvarCertificado(row)"
                   >
                     {{ certSalvando ? 'salvando…' : 'salvar' }}
