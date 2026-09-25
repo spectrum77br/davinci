@@ -189,7 +189,7 @@ async function uploadCertificate() {
     if (input) input.value = ''
     await loadCertificates()
   } catch (e: any) {
-    certError.value = e?.data?.detail?.code || e?.message || 'erro ao enviar'
+    certError.value = mensagemCertificado(e, 'erro ao enviar')
   } finally {
     certUploading.value = false
   }
@@ -197,6 +197,10 @@ async function uploadCertificate() {
 
 function mensagemCertificado(e: any, padrao: string): string {
   const code = e?.data?.detail?.code
+  if (code === 'certificado_repetido') {
+    const nome = e?.data?.detail?.filename
+    return `Esse arquivo já está cadastrado nesta empresa${nome ? ` (${nome})` : ''}. Para pôr a data, edite o que já existe na lista de Empresas.`
+  }
   if (code === 'senha_incorreta') return 'Senha do certificado incorreta.'
   if (code === 'senha_obrigatoria') return 'Digite a senha do certificado.'
   if (code === 'muitas_tentativas') return 'Muitas tentativas com a senha errada. Espere 15 minutos.'

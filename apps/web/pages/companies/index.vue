@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { TABS_CADASTROS } from '~/lib/navGroups'
 import { ref, computed, reactive, watch } from 'vue'
-import { Plus, RefreshCw, X, ExternalLink, Trash2, Lock } from 'lucide-vue-next'
+import { Plus, RefreshCw, X, ExternalLink, Trash2, Lock, ShieldCheck, KeyRound, Download, Pencil, Upload, Eye, EyeOff } from 'lucide-vue-next'
 import {
   MARKETPLACES,
   MARKETPLACE_SHORT,
@@ -363,6 +363,9 @@ function mensagemDeErro(e: any, padrao = 'erro'): string {
   if (d?.code === 'ip_nao_publico') {
     return 'Esse é um IP de rede interna. Coloque o IP público de saída do proxy.'
   }
+  if (d?.code === 'certificado_repetido') {
+    return `Esse arquivo já está cadastrado nesta empresa${d.filename ? ` (${d.filename})` : ''}. Para pôr a data ou a senha, use o lápis ao lado dele.`
+  }
   if (d?.code === 'senha_incorreta') return 'Senha do certificado incorreta.'
   if (d?.code === 'senha_obrigatoria') return 'Digite a senha do certificado.'
   if (d?.code === 'muitas_tentativas') {
@@ -464,34 +467,40 @@ watch(algumIpACaminho, (sim) => {
 onBeforeUnmount(pararRelogio)
 
 // ---------- certificado digital ----------
-// Clicar na célula abre um painel pequeno para pôr a senha (e o arquivo, se a
-// empresa ainda não tem). A senha é a TRAVA do certificado (Eduardo,
-// 25/09/2026): com senha, baixar pede a senha e trocar ou excluir a senha pede
-// a atual. A senha guardada não aparece mais na tela — mostrar furava a trava.
+// Clicar na célula abre o painel do certificado: cada certificado da empresa é
+// um cartão com baixar / editar (vencimento e senha) / excluir, e embaixo uma
+// seção separada para adicionar (Eduardo, 25/09/2026: "não estou achando
+// organizado e clean"). A senha é a TRAVA do certificado: com senha, baixar
+// pede a senha e trocar ou excluir a senha pede a atual. A senha guardada não
+// aparece na tela — mostrar furava a trava.
 const certAberto = ref<string | null>(null)
-const certSenha = ref('')
-// Senha atual do mais novo: trocar a senha de um certificado travado pede ela.
-const certSenhaAtual = ref('')
-const certMostrarDigitada = ref(false)
-const certArquivo = ref<File | null>(null)
-// Vencimento de um arquivo novo: sem ele o selo "vence DD/MM/AAAA" some justo no
-// certificado renovado, que é o que vai vencer da próxima vez.
-const certVence = ref('')
-const certSalvando = ref(false)
 const certErro = ref<string | null>(null)
-// Todos os certificados da empresa aberta, para excluir um a um (Eduardo,
-// 25/09/2026: "um botão para excluir o certificado"). Empresa com renovação
-// subida em dobro tem mais de um; o resumo da tabela só conhece o mais novo.
+// Todos os certificados da empresa aberta (o resumo da tabela só conhece o mais
+// novo; renovação subida em dobro deixa mais de um).
 type CertificadoItem = { id: string; filename: string; has_password: boolean; expires_at: string | null }
 const certLista = ref<CertificadoItem[] | null>(null)
 const certExcluindo = ref<string | null>(null)
-// Baixar ou excluir a senha de UM certificado da lista abre um campo de senha
-// embaixo dele. Certificado sem senha baixa direto.
-type AcaoCertificado = { tipo: 'baixar' | 'tirar_senha'; id: string }
+// Ação aberta dentro de UM cartão: pedir a senha para baixar, ou editar.
+type AcaoCertificado = { tipo: 'baixar' | 'editar'; id: string }
 const certAcao = ref<AcaoCertificado | null>(null)
 const certSenhaAcao = ref('')
+// Editar: vencimento (AAAA-MM-DD), senha atual e nova senha. Pôr a data num
+// certificado já cadastrado era impossível — por isso subiam o MESMO arquivo de
+// novo só para ter a data (5 empresas com o arquivo em dobro em 25/09).
+const certEdVence = ref('')
+const certEdSenhaAtual = ref('')
+const certEdNovaSenha = ref('')
 const certAcaoRodando = ref(false)
 const certBaixandoId = ref<string | null>(null)
+// Adicionar certificado (seção de baixo; já vem aberta quando a empresa não tem).
+const certNovoAberto = ref(false)
+const certArquivo = ref<File | null>(null)
+const certSenha = ref('')
+const certMostrarDigitada = ref(false)
+// Vencimento do arquivo novo: sem ele o selo "vence DD/MM/AAAA" some justo no
+// certificado renovado, que é o que vai vencer da próxima vez.
+const certVence = ref('')
+const certSalvando = ref(false)
 
 function certOcupado() {
   return certSalvando.value || !!certExcluindo.value || certAcaoRodando.value
@@ -499,22 +508,30 @@ function certOcupado() {
 function fecharAcaoCertificado() {
   certAcao.value = null
   certSenhaAcao.value = ''
+  certEdVence.value = ''
+  certEdSenhaAtual.value = ''
+  certEdNovaSenha.value = ''
+}
+function limparNovoCertificado() {
+  certArquivo.value = null
+  certSenha.value = ''
+  certMostrarDigitada.value = false
+  certVence.value = ''
 }
 function limparPainelCertificado() {
-  certSenha.value = ''
-  certSenhaAtual.value = ''
-  certMostrarDigitada.value = false
-  certArquivo.value = null
-  certVence.value = ''
   certErro.value = null
   certLista.value = null
+  certNovoAberto.value = false
   fecharAcaoCertificado()
+  limparNovoCertificado()
 }
 function alternarCertificado(row: GridRow) {
   const abrindo = certAberto.value !== row.company.id
   limparPainelCertificado()
   certAberto.value = abrindo ? row.company.id : null
-  if (abrindo && row.certificado) carregarListaCertificados(row.company.id)
+  if (!abrindo) return
+  if (row.certificado) carregarListaCertificados(row.company.id)
+  else certNovoAberto.value = true
 }
 async function carregarListaCertificados(empresa: string) {
   try {
@@ -525,7 +542,7 @@ async function carregarListaCertificados(empresa: string) {
     if (certAberto.value === empresa) certErro.value = mensagemDeErro(e, 'não foi possível listar os certificados')
   }
 }
-// Enquanto a lista não chega (ou se falhar), o mais novo da tabela já dá para excluir.
+// Enquanto a lista não chega (ou se falhar), o mais novo da tabela já aparece.
 function certificadosDoPainel(row: GridRow): CertificadoItem[] {
   if (certLista.value) return certLista.value
   return row.certificado ? [row.certificado] : []
@@ -591,25 +608,23 @@ function escolherArquivoCertificado(ev: Event) {
 function pedirAcaoCertificado(row: GridRow, c: CertificadoItem, tipo: AcaoCertificado['tipo']) {
   if (certOcupado()) return
   certErro.value = null
+  const jaAberta = certAcao.value?.id === c.id && certAcao.value?.tipo === tipo
+  fecharAcaoCertificado()
+  if (jaAberta) return // clicar de novo no mesmo ícone fecha
   if (tipo === 'baixar' && !c.has_password) {
-    fecharAcaoCertificado()
     baixarCertificado(row, c, '')
     return
   }
   certAcao.value = { tipo, id: c.id }
-  certSenhaAcao.value = ''
+  if (tipo === 'editar') certEdVence.value = c.expires_at || ''
 }
-async function confirmarAcaoCertificado(row: GridRow, c: CertificadoItem) {
-  const acao = certAcao.value
-  if (!acao || acao.id !== c.id || certOcupado()) return
+async function confirmarBaixarCertificado(row: GridRow, c: CertificadoItem) {
+  if (certAcao.value?.tipo !== 'baixar' || certAcao.value.id !== c.id || certOcupado()) return
   if (!certSenhaAcao.value.trim()) {
-    certErro.value = acao.tipo === 'baixar'
-      ? 'Digite a senha do certificado para baixar.'
-      : 'Digite a senha atual para excluir a senha.'
+    certErro.value = 'Digite a senha do certificado para baixar.'
     return
   }
-  if (acao.tipo === 'baixar') await baixarCertificado(row, c, certSenhaAcao.value)
-  else await tirarSenhaCertificado(row, c, certSenhaAcao.value)
+  await baixarCertificado(row, c, certSenhaAcao.value)
 }
 // Com `responseType: 'blob'` o erro também chega como arquivo: lê o JSON de
 // dentro para a mensagem ("senha incorreta") e a trava da tela funcionarem.
@@ -661,76 +676,83 @@ async function baixarCertificado(row: GridRow, c: CertificadoItem, senha: string
     certBaixandoId.value = null
   }
 }
-async function tirarSenhaCertificado(row: GridRow, c: CertificadoItem, senhaAtual: string) {
-  if (certAcaoRodando.value) return
+// PATCH de um certificado e reflexo na hora (cartão e selo da tabela), sem
+// depender da recarga dar certo.
+async function alterarCertificado(row: GridRow, c: CertificadoItem, body: Record<string, any>, padrao: string) {
   const empresa = row.company.id
   certAcaoRodando.value = true
   certErro.value = null
   try {
-    await apiE(`/api/companies/${empresa}/certificates/${c.id}`, {
-      method: 'PATCH',
-      body: { password: null, current_password: senhaAtual },
-    })
+    const r = await apiE<CertificadoItem>(`/api/companies/${empresa}/certificates/${c.id}`, { method: 'PATCH', body })
+    const novo = { has_password: !!r?.has_password, expires_at: r?.expires_at ?? null }
     if (certAberto.value === empresa) {
       fecharAcaoCertificado()
-      if (certLista.value) {
-        certLista.value = certLista.value.map(x => (x.id === c.id ? { ...x, has_password: false } : x))
-      }
+      if (certLista.value) certLista.value = certLista.value.map(x => (x.id === c.id ? { ...x, ...novo } : x))
     }
-    // O selo da tabela muda na hora, sem depender da recarga dar certo.
-    const selo = grid.value?.rows.find(r => r.company.id === empresa)?.certificado
-    if (selo?.id === c.id) selo.has_password = false
+    const selo = grid.value?.rows.find(x => x.company.id === empresa)?.certificado
+    if (selo?.id === c.id) Object.assign(selo, novo)
     await refresh()
   } catch (e: any) {
-    if (certAberto.value === empresa) certErro.value = mensagemDeErro(e, 'erro ao excluir a senha')
+    if (certAberto.value === empresa) certErro.value = mensagemDeErro(e, padrao)
   } finally {
     certAcaoRodando.value = false
   }
 }
-async function salvarCertificado(row: GridRow) {
-  // Enter apertado duas vezes (ou durante o envio) não pode subir o mesmo
-  // certificado duas vezes; nem salvar no meio de uma exclusão ou download.
-  if (certOcupado()) return
-  const cert = row.certificado
-  const empresa = row.company.id
-  const senha = certSenha.value
+async function salvarEdicaoCertificado(row: GridRow, c: CertificadoItem) {
+  if (certAcao.value?.tipo !== 'editar' || certAcao.value.id !== c.id || certOcupado()) return
+  certErro.value = null
+  const body: Record<string, any> = {}
+  const venceNovo = certEdVence.value || null
+  if (venceNovo !== (c.expires_at || null)) body.expires_at = venceNovo
   // A API tira os espaços das pontas: uma "senha" só de espaços chegaria vazia
   // e APAGARIA a senha guardada. Por isso a conta aqui é sobre o texto limpo.
-  const temSenha = senha.trim() !== ''
+  if (certEdNovaSenha.value.trim()) {
+    if (c.has_password && !certEdSenhaAtual.value.trim()) {
+      certErro.value = 'Digite a senha atual para trocar a senha.'
+      return
+    }
+    body.password = certEdNovaSenha.value
+    if (c.has_password) body.current_password = certEdSenhaAtual.value
+  }
+  if (!Object.keys(body).length) {
+    fecharAcaoCertificado()
+    return
+  }
+  await alterarCertificado(row, c, body, 'erro ao salvar o certificado')
+}
+async function excluirSenhaCertificado(row: GridRow, c: CertificadoItem) {
+  if (certAcao.value?.tipo !== 'editar' || certAcao.value.id !== c.id || certOcupado()) return
+  if (!certEdSenhaAtual.value.trim()) {
+    certErro.value = 'Digite a senha atual para excluir a senha.'
+    return
+  }
+  await alterarCertificado(row, c, { password: null, current_password: certEdSenhaAtual.value }, 'erro ao excluir a senha')
+}
+async function adicionarCertificado(row: GridRow) {
+  // Enter apertado duas vezes (ou durante o envio) não pode subir o mesmo
+  // certificado duas vezes; nem subir no meio de outra ação.
+  if (certOcupado()) return
+  const empresa = row.company.id
   certErro.value = null
-  if (!cert && !certArquivo.value) {
-    certErro.value = 'Esta empresa ainda não tem certificado. Escolha o arquivo .pfx ou .p12.'
-    return
-  }
-  if (cert && !certArquivo.value && !temSenha) {
-    certErro.value = 'Digite a senha do certificado.'
-    return
-  }
-  // Trocar a senha de um certificado travado pede a senha atual.
-  if (cert && !certArquivo.value && cert.has_password && !certSenhaAtual.value.trim()) {
-    certErro.value = 'Digite a senha atual para trocar a senha.'
+  if (!certArquivo.value) {
+    certErro.value = 'Escolha o arquivo do certificado (.pfx ou .p12).'
     return
   }
   certSalvando.value = true
   try {
-    if (certArquivo.value) {
-      // Arquivo novo (primeiro certificado ou renovação): sobe junto com a senha.
-      const fd = new FormData()
-      fd.append('file', certArquivo.value)
-      if (temSenha) fd.append('password', senha)
-      if (certVence.value) fd.append('expires_at', certVence.value)
-      await apiE(`/api/companies/${empresa}/certificates`, { method: 'POST', body: fd })
-    } else if (cert) {
-      // Só a senha, e nunca vazia: vazio apagaria a senha guardada.
-      await apiE(`/api/companies/${empresa}/certificates/${cert.id}`, {
-        method: 'PATCH',
-        body: { password: senha, current_password: cert.has_password ? certSenhaAtual.value : null },
-      })
+    const fd = new FormData()
+    fd.append('file', certArquivo.value)
+    if (certSenha.value.trim()) fd.append('password', certSenha.value)
+    if (certVence.value) fd.append('expires_at', certVence.value)
+    await apiE(`/api/companies/${empresa}/certificates`, { method: 'POST', body: fd })
+    if (certAberto.value === empresa) {
+      limparNovoCertificado()
+      certNovoAberto.value = false
     }
-    if (certAberto.value === empresa) fecharCertificado()
     await refresh()
+    if (certAberto.value === empresa) await carregarListaCertificados(empresa)
   } catch (e: any) {
-    if (certAberto.value === empresa) certErro.value = mensagemDeErro(e, 'erro ao salvar o certificado')
+    if (certAberto.value === empresa) certErro.value = mensagemDeErro(e, 'erro ao adicionar o certificado')
   } finally {
     certSalvando.value = false
   }
@@ -1291,7 +1313,7 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
               <Teleport to="body">
               <div
                 v-if="certAberto === row.company.id"
-                class="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4"
+                class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
                 @click.self="fecharCertificado"
                 @keydown.escape="fecharCertificado"
               >
@@ -1299,162 +1321,265 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
                 role="dialog"
                 aria-modal="true"
                 :aria-label="`Certificado digital de ${row.company.apelido}`"
-                class="w-full max-w-sm rounded-md border bg-background shadow-lg p-4 space-y-3 text-left text-xs whitespace-normal"
+                class="flex w-full max-w-lg max-h-[calc(100vh-2rem)] flex-col rounded-xl border bg-background text-left text-sm shadow-xl whitespace-normal"
               >
-                <div class="flex items-start justify-between gap-2">
-                  <div class="font-medium">Certificado · {{ row.company.apelido }}</div>
-                  <button type="button" class="text-muted-foreground hover:text-foreground" aria-label="fechar" @click="fecharCertificado">
-                    <X class="h-3.5 w-3.5" />
-                  </button>
-                </div>
-
-                <ul v-if="certificadosDoPainel(row).length" class="space-y-1 max-h-48 overflow-y-auto">
-                  <li
-                    v-for="(c, i) in certificadosDoPainel(row)"
-                    :key="c.id"
-                    class="rounded border px-2 py-1 space-y-1"
-                  >
-                    <div class="flex items-start justify-between gap-2">
-                    <div class="min-w-0 text-muted-foreground">
-                      <div class="truncate text-foreground" :title="c.filename">{{ c.filename }}</div>
-                      <div>
-                        <span v-if="c.has_password" class="text-green-600">🔒 com senha</span>
-                        <span v-else class="text-amber-600">⚠ sem senha</span>
-                        <span
-                          v-if="vencimentoCertificado(c)"
-                          :class="vencimentoCertificado(c)!.vencido
-                            ? 'text-red-600 font-semibold'
-                            : vencimentoCertificado(c)!.vencendo ? 'text-amber-600' : ''"
-                        >
-                          · {{ vencimentoCertificado(c)!.vencido ? 'venceu' : 'vence' }} {{ vencimentoCertificado(c)!.texto }}
-                        </span>
-                        <span v-else> · sem data de vencimento</span>
-                        <span v-if="i === 0 && certificadosDoPainel(row).length > 1"> · o mais novo</span>
-                      </div>
-                    </div>
-                    <div class="shrink-0 flex flex-col items-end gap-0.5">
-                      <button
-                        type="button"
-                        class="text-blue-600 hover:underline disabled:opacity-50"
-                        :disabled="certOcupado()"
-                        @click="pedirAcaoCertificado(row, c, 'baixar')"
-                      >
-                        {{ certBaixandoId === c.id ? 'baixando…' : 'baixar' }}
-                      </button>
-                      <button
-                        v-if="c.has_password"
-                        type="button"
-                        class="text-amber-700 hover:underline disabled:opacity-50"
-                        :disabled="certOcupado()"
-                        @click="pedirAcaoCertificado(row, c, 'tirar_senha')"
-                      >
-                        excluir senha
-                      </button>
-                      <button
-                        type="button"
-                        class="text-red-600 hover:underline disabled:opacity-50"
-                        :disabled="certOcupado()"
-                        @click="excluirCertificado(row, c)"
-                      >
-                        {{ certExcluindo === c.id ? 'excluindo…' : 'excluir' }}
-                      </button>
-                    </div>
-                    </div>
-                    <!-- Senha pedida na hora: para baixar (a senha é a trava) ou para
-                         excluir a senha (pede a atual). -->
-                    <div v-if="certAcao?.id === c.id" class="flex items-center gap-1">
-                      <input
-                        v-model="certSenhaAcao"
-                        type="password"
-                        autocomplete="off"
-                        data-lpignore="true"
-                        data-1p-ignore
-                        :placeholder="certAcao.tipo === 'baixar' ? 'senha do certificado' : 'senha atual'"
-                        :aria-label="certAcao.tipo === 'baixar' ? `Senha para baixar ${c.filename}` : `Senha atual de ${c.filename}`"
-                        class="flex-1 min-w-0 border rounded px-2 py-1 bg-background"
-                        @keydown.enter.prevent="confirmarAcaoCertificado(row, c)"
-                        @keydown.escape.stop="fecharAcaoCertificado"
-                      />
-                      <button
-                        type="button"
-                        class="rounded px-2 py-1 text-white disabled:opacity-50"
-                        :class="certAcao.tipo === 'baixar' ? 'bg-blue-600 hover:bg-blue-700' : 'bg-amber-600 hover:bg-amber-700'"
-                        :disabled="certAcaoRodando"
-                        @click="confirmarAcaoCertificado(row, c)"
-                      >
-                        {{ certAcao.tipo === 'baixar' ? 'baixar' : 'excluir senha' }}
-                      </button>
-                      <button type="button" class="border rounded px-2 py-1 hover:bg-accent/40" @click="fecharAcaoCertificado">
-                        cancelar
-                      </button>
-                    </div>
-                  </li>
-                </ul>
-                <div v-if="certificadosDoPainel(row).length > 1" class="text-muted-foreground">
-                  A senha abaixo vale para o mais novo, que é o que aparece na tabela. Subir um arquivo novo
-                  acrescenta outro certificado; os de cima continuam até você excluir.
-                </div>
-
-                <label v-if="row.certificado?.has_password && !certArquivo" class="block space-y-1">
-                  <span>Senha atual (para trocar a senha)</span>
-                  <input
-                    v-model="certSenhaAtual"
-                    type="password"
-                    autocomplete="off"
-                    data-lpignore="true"
-                    data-1p-ignore
-                    placeholder="senha atual"
-                    class="w-full border rounded px-2 py-1 bg-background"
-                    @keydown.enter.prevent="salvarCertificado(row)"
-                  />
-                </label>
-
-                <label class="block space-y-1">
-                  <span>{{ row.certificado?.has_password && !certArquivo ? 'Nova senha' : 'Senha do certificado' }}</span>
-                  <div class="flex items-center gap-1">
-                    <input
-                      v-model="certSenha"
-                      :type="certMostrarDigitada ? 'text' : 'password'"
-                      autocomplete="off"
-                      data-lpignore="true"
-                      data-1p-ignore
-                      :placeholder="row.certificado?.has_password ? 'digite para trocar' : 'digite a senha'"
-                      class="flex-1 border rounded px-2 py-1 bg-background"
-                      @keydown.enter.prevent="salvarCertificado(row)"
-                    />
-                    <button
-                      type="button"
-                      class="border rounded px-2 py-1 hover:bg-accent/40"
-                      :title="certMostrarDigitada ? 'esconder' : 'mostrar o que estou digitando'"
-                      @click="certMostrarDigitada = !certMostrarDigitada"
-                    >
-                      {{ certMostrarDigitada ? 'esconder' : 'mostrar' }}
-                    </button>
+                <!-- cabeçalho -->
+                <div class="flex items-start gap-3 border-b px-5 py-4">
+                  <div class="rounded-lg bg-primary/10 p-2 text-primary">
+                    <ShieldCheck class="size-5" />
                   </div>
-                </label>
-
-                <label class="block space-y-1">
-                  <span>{{ row.certificado ? 'Subir arquivo novo (renovação) — opcional' : 'Arquivo do certificado (.pfx ou .p12)' }}</span>
-                  <input type="file" accept=".pfx,.p12" class="block w-full text-xs" @change="escolherArquivoCertificado" />
-                </label>
-
-                <label v-if="certArquivo" class="block space-y-1">
-                  <span>Vence em (opcional, mas mostra o aviso de vencimento)</span>
-                  <input v-model="certVence" type="date" class="border rounded px-2 py-1 bg-background" />
-                </label>
-
-                <div v-if="certErro" class="text-red-600">{{ certErro }}</div>
-
-                <div class="flex justify-end gap-2 pt-1">
-                  <button type="button" class="border rounded px-3 py-1 hover:bg-accent/40" @click="fecharCertificado">cancelar</button>
+                  <div class="min-w-0 flex-1">
+                    <h2 class="font-semibold leading-tight">Certificado digital</h2>
+                    <p class="truncate text-xs text-muted-foreground">
+                      {{ row.company.apelido }}
+                      <template v-if="certificadosDoPainel(row).length">
+                        · {{ certificadosDoPainel(row).length }}
+                        {{ certificadosDoPainel(row).length === 1 ? 'certificado' : 'certificados' }}
+                      </template>
+                    </p>
+                  </div>
                   <button
                     type="button"
-                    class="rounded px-3 py-1 bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50"
-                    :disabled="certOcupado()"
-                    @click="salvarCertificado(row)"
+                    class="rounded-md p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
+                    aria-label="fechar"
+                    @click="fecharCertificado"
                   >
-                    {{ certSalvando ? 'salvando…' : 'salvar' }}
+                    <X class="size-4" />
                   </button>
+                </div>
+
+                <!-- certificados -->
+                <div
+                  v-if="certErro || certificadosDoPainel(row).length || !certNovoAberto"
+                  class="flex-1 space-y-3 overflow-y-auto px-5 py-4"
+                >
+                  <div
+                    v-if="certErro"
+                    role="alert"
+                    class="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700 dark:border-red-900 dark:bg-red-950/40 dark:text-red-300"
+                  >
+                    {{ certErro }}
+                  </div>
+
+                  <ul v-if="certificadosDoPainel(row).length" class="space-y-2">
+                    <li
+                      v-for="(c, i) in certificadosDoPainel(row)"
+                      :key="c.id"
+                      class="overflow-hidden rounded-lg border transition-colors"
+                      :class="certAcao?.id === c.id ? 'border-primary/50 ring-1 ring-primary/20' : ''"
+                    >
+                      <div class="flex items-start gap-3 p-3">
+                        <KeyRound class="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+                        <div class="min-w-0 flex-1">
+                          <div class="flex items-start gap-2">
+                            <span class="line-clamp-2 break-words font-medium leading-snug" :title="c.filename">{{ c.filename }}</span>
+                            <span
+                              v-if="i === 0 && certificadosDoPainel(row).length > 1"
+                              class="shrink-0 rounded-full bg-primary/10 px-2 py-0.5 text-[11px] font-medium text-primary"
+                              title="É o que aparece na tabela"
+                            >atual</span>
+                          </div>
+                          <div class="mt-1.5 flex flex-wrap gap-1.5 text-[11px] font-medium">
+                            <span
+                              v-if="c.has_password"
+                              class="inline-flex items-center gap-1 rounded-full bg-green-100 px-2 py-0.5 text-green-800 dark:bg-green-950/50 dark:text-green-300"
+                            ><Lock class="size-3" /> com senha</span>
+                            <span
+                              v-else
+                              class="rounded-full bg-amber-100 px-2 py-0.5 text-amber-800 dark:bg-amber-950/50 dark:text-amber-300"
+                            >sem senha</span>
+                            <span
+                              v-if="vencimentoCertificado(c)"
+                              class="rounded-full px-2 py-0.5"
+                              :class="vencimentoCertificado(c)!.vencido
+                                ? 'bg-red-100 text-red-800 dark:bg-red-950/50 dark:text-red-300'
+                                : vencimentoCertificado(c)!.vencendo
+                                  ? 'bg-amber-100 text-amber-800 dark:bg-amber-950/50 dark:text-amber-300'
+                                  : 'bg-muted text-muted-foreground'"
+                            >{{ vencimentoCertificado(c)!.vencido ? 'venceu' : 'vence' }} {{ vencimentoCertificado(c)!.texto }}</span>
+                            <span v-else class="rounded-full bg-muted px-2 py-0.5 text-muted-foreground">sem data de vencimento</span>
+                          </div>
+                        </div>
+                        <div class="flex shrink-0 items-center">
+                          <button
+                            type="button"
+                            class="rounded-md p-1.5 text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-40"
+                            :title="certBaixandoId === c.id ? 'baixando…' : 'Baixar'"
+                            :aria-label="`Baixar ${c.filename}`"
+                            :disabled="certOcupado()"
+                            @click="pedirAcaoCertificado(row, c, 'baixar')"
+                          >
+                            <RefreshCw v-if="certBaixandoId === c.id" class="size-4 animate-spin" />
+                            <Download v-else class="size-4" />
+                          </button>
+                          <button
+                            type="button"
+                            class="rounded-md p-1.5 text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-40"
+                            title="Editar vencimento e senha"
+                            :aria-label="`Editar vencimento e senha de ${c.filename}`"
+                            :aria-expanded="certAcao?.id === c.id && certAcao?.tipo === 'editar'"
+                            :disabled="certOcupado()"
+                            @click="pedirAcaoCertificado(row, c, 'editar')"
+                          >
+                            <Pencil class="size-4" />
+                          </button>
+                          <button
+                            type="button"
+                            class="rounded-md p-1.5 text-muted-foreground hover:bg-red-50 hover:text-red-600 disabled:opacity-40 dark:hover:bg-red-950/40"
+                            :title="certExcluindo === c.id ? 'excluindo…' : 'Excluir certificado'"
+                            :aria-label="`Excluir ${c.filename}`"
+                            :disabled="certOcupado()"
+                            @click="excluirCertificado(row, c)"
+                          >
+                            <Trash2 class="size-4" />
+                          </button>
+                        </div>
+                      </div>
+
+                      <!-- baixar: a senha é a trava -->
+                      <div v-if="certAcao?.id === c.id && certAcao.tipo === 'baixar'" class="space-y-2 border-t bg-muted/30 px-3 py-3">
+                        <div class="text-xs font-medium">Senha do certificado para baixar</div>
+                        <div class="flex items-center gap-2">
+                          <Input
+                            v-model="certSenhaAcao"
+                            type="password"
+                            autocomplete="off"
+                            data-lpignore="true"
+                            data-1p-ignore
+                            placeholder="senha do certificado"
+                            :aria-label="`Senha para baixar ${c.filename}`"
+                            class="h-9"
+                            @keydown.enter.prevent="confirmarBaixarCertificado(row, c)"
+                            @keydown.escape.stop="fecharAcaoCertificado"
+                          />
+                          <Button size="sm" :disabled="certAcaoRodando" @click="confirmarBaixarCertificado(row, c)">Baixar</Button>
+                          <Button size="sm" variant="ghost" @click="fecharAcaoCertificado">Cancelar</Button>
+                        </div>
+                      </div>
+
+                      <!-- editar: vencimento e senha -->
+                      <div v-if="certAcao?.id === c.id && certAcao.tipo === 'editar'" class="space-y-3 border-t bg-muted/30 px-3 py-3">
+                        <div class="grid gap-3 sm:grid-cols-2">
+                          <label class="space-y-1">
+                            <span class="text-xs font-medium">Vencimento</span>
+                            <Input v-model="certEdVence" type="date" class="h-9" />
+                          </label>
+                          <label v-if="c.has_password" class="space-y-1">
+                            <span class="text-xs font-medium">Senha atual</span>
+                            <Input
+                              v-model="certEdSenhaAtual"
+                              type="password"
+                              autocomplete="off"
+                              data-lpignore="true"
+                              data-1p-ignore
+                              placeholder="para trocar ou excluir"
+                              class="h-9"
+                            />
+                          </label>
+                        </div>
+                        <label class="block space-y-1">
+                          <span class="text-xs font-medium">{{ c.has_password ? 'Nova senha (opcional)' : 'Senha (opcional) — trava o download' }}</span>
+                          <Input
+                            v-model="certEdNovaSenha"
+                            type="password"
+                            autocomplete="new-password"
+                            data-lpignore="true"
+                            data-1p-ignore
+                            :placeholder="c.has_password ? 'deixe em branco para manter' : 'sem senha, qualquer admin baixa'"
+                            class="h-9"
+                            @keydown.enter.prevent="salvarEdicaoCertificado(row, c)"
+                          />
+                        </label>
+                        <div class="flex items-center justify-between gap-2 pt-1">
+                          <button
+                            v-if="c.has_password"
+                            type="button"
+                            class="text-xs font-medium text-red-600 hover:underline disabled:opacity-50"
+                            :disabled="certAcaoRodando"
+                            @click="excluirSenhaCertificado(row, c)"
+                          >
+                            Excluir senha
+                          </button>
+                          <span v-else />
+                          <div class="flex gap-2">
+                            <Button size="sm" variant="ghost" @click="fecharAcaoCertificado">Cancelar</Button>
+                            <Button size="sm" :disabled="certAcaoRodando" @click="salvarEdicaoCertificado(row, c)">
+                              {{ certAcaoRodando ? 'Salvando…' : 'Salvar' }}
+                            </Button>
+                          </div>
+                        </div>
+                      </div>
+                    </li>
+                  </ul>
+                  <p v-else-if="!certNovoAberto" class="py-2 text-center text-xs text-muted-foreground">
+                    Nenhum certificado cadastrado.
+                  </p>
+                </div>
+
+                <!-- adicionar certificado -->
+                <div class="px-5 py-4" :class="certErro || certificadosDoPainel(row).length || !certNovoAberto ? 'border-t' : ''">
+                  <button
+                    v-if="!certNovoAberto"
+                    type="button"
+                    class="flex w-full items-center justify-center gap-2 rounded-lg border border-dashed py-2.5 text-sm text-muted-foreground transition-colors hover:border-primary hover:text-primary disabled:opacity-50"
+                    :disabled="certOcupado()"
+                    @click="certNovoAberto = true"
+                  >
+                    <Plus class="size-4" /> Adicionar certificado
+                  </button>
+                  <div v-else class="space-y-3">
+                    <div class="text-sm font-medium">Adicionar certificado</div>
+                    <label
+                      class="flex cursor-pointer items-center gap-3 rounded-lg border border-dashed px-3 py-3 transition-colors hover:border-primary hover:bg-muted/40"
+                    >
+                      <Upload class="size-4 shrink-0 text-muted-foreground" />
+                      <span class="min-w-0 flex-1 truncate" :class="certArquivo ? 'font-medium' : 'text-muted-foreground'">
+                        {{ certArquivo ? certArquivo.name : 'Escolher arquivo .pfx ou .p12' }}
+                      </span>
+                      <input type="file" accept=".pfx,.p12" class="sr-only" @change="escolherArquivoCertificado" />
+                    </label>
+                    <div class="grid gap-3 sm:grid-cols-2">
+                      <label class="space-y-1">
+                        <span class="text-xs font-medium">Senha (opcional)</span>
+                        <div class="relative">
+                          <Input
+                            v-model="certSenha"
+                            :type="certMostrarDigitada ? 'text' : 'password'"
+                            autocomplete="new-password"
+                            data-lpignore="true"
+                            data-1p-ignore
+                            placeholder="trava o download"
+                            class="h-9 pr-9"
+                            @keydown.enter.prevent="adicionarCertificado(row)"
+                          />
+                          <button
+                            type="button"
+                            class="absolute inset-y-0 right-0 flex items-center px-2.5 text-muted-foreground hover:text-foreground"
+                            :aria-label="certMostrarDigitada ? 'esconder a senha' : 'mostrar o que estou digitando'"
+                            @click="certMostrarDigitada = !certMostrarDigitada"
+                          >
+                            <EyeOff v-if="certMostrarDigitada" class="size-4" />
+                            <Eye v-else class="size-4" />
+                          </button>
+                        </div>
+                      </label>
+                      <label class="space-y-1">
+                        <span class="text-xs font-medium">Vence em</span>
+                        <Input v-model="certVence" type="date" class="h-9" />
+                      </label>
+                    </div>
+                    <div class="flex justify-end gap-2">
+                      <Button
+                        v-if="certificadosDoPainel(row).length"
+                        size="sm"
+                        variant="ghost"
+                        @click="limparNovoCertificado(); certNovoAberto = false"
+                      >Cancelar</Button>
+                      <Button size="sm" :disabled="certOcupado() || !certArquivo" @click="adicionarCertificado(row)">
+                        {{ certSalvando ? 'Adicionando…' : 'Adicionar' }}
+                      </Button>
+                    </div>
+                  </div>
                 </div>
               </div>
               </div>

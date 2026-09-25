@@ -281,3 +281,38 @@ async def test_cert_download_trava_com_senha(client, make_user, auth_as, _redis_
     # A antiga rota GET de download não existe mais.
     assert (await client.get(url)).status_code in (404, 405)
 
+
+
+@pytest.mark.asyncio
+async def test_cert_mesmo_arquivo_de_novo_e_recusado(client, make_user, auth_as):
+    """25/09/2026: subiam o MESMO arquivo de novo só para pôr a data. Agora o
+    repetido é recusado (409) e a data se põe no PATCH do que já existe."""
+    admin = await make_user(role=UserRole.ADMIN)
+    auth_as(admin)
+    cid = await _make_company(client)
+    r1 = await client.post(f"/api/companies/{cid}/certificates", files=FILES)
+    assert r1.status_code == 201, r1.text
+
+    outro_nome = {"file": ("empresa - venc 01-07-2027.pfx", P12_BYTES, "application/x-pkcs12")}
+    r2 = await client.post(
+        f"/api/companies/{cid}/certificates", files=outro_nome, data={"expires_at": "2027-07-01"}
+    )
+    assert r2.status_code == 409
+    assert r2.json()["detail"]["code"] == "certificado_repetido"
+    assert r2.json()["detail"]["filename"] == "empresa.p12"
+    assert len((await client.get(f"/api/companies/{cid}/certificates")).json()) == 1
+
+    # A data vai no que já existe.
+    p = await client.patch(
+        f"/api/companies/{cid}/certificates/{r1.json()['id']}", json={"expires_at": "2027-07-01"}
+    )
+    assert p.status_code == 200
+    assert p.json()["expires_at"] == "2027-07-01"
+
+    # Arquivo diferente (renovação) entra normal; e o mesmo arquivo em OUTRA empresa também.
+    novo = {"file": ("empresa-2027.pfx", P12_BYTES + b"renovado", "application/x-pkcs12")}
+    assert (await client.post(f"/api/companies/{cid}/certificates", files=novo)).status_code == 201
+    outra = await client.post("/api/companies", json={"razao_social": "OUTRA LTDA", "apelido": "outra"})
+    assert (
+        await client.post(f"/api/companies/{outra.json()['id']}/certificates", files=FILES)
+    ).status_code == 201

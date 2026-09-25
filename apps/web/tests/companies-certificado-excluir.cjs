@@ -10,8 +10,10 @@
 //    e cada um tem baixar / excluir senha / excluir;
 //  - baixar certificado COM senha pede a senha (vai no corpo do POST); sem senha
 //    baixa direto; erro do servidor (que chega como arquivo) vira mensagem clara;
-//  - excluir senha e trocar senha mandam a senha atual; a tela não tem mais
-//    como MOSTRAR a senha guardada;
+//  - cada certificado tem "editar" (vencimento e senha): pôr a data num já
+//    cadastrado (antes subiam o MESMO arquivo de novo só pela data); trocar ou
+//    excluir a senha mandam a senha atual; a tela não MOSTRA a senha guardada;
+//  - "adicionar certificado" é uma seção separada; arquivo repetido = aviso claro;
 //  - excluir: confirma, apaga AQUELE, sai da tela mesmo se a recarga falhar,
 //    404 = já excluído, clique repetido não duplica;
 //  - a resposta de uma empresa não aparece no painel de outra aberta depois.
@@ -49,12 +51,13 @@ const tpl = descriptor.template.content
   assert.match(tpl, /v-for="\(c, i\) in certificadosDoPainel\(row\)"/, 'painel lista todos os certificados')
   assert.match(tpl, /@click="excluirCertificado\(row, c\)"/, 'cada certificado tem o seu excluir')
   assert.match(tpl, /@click="pedirAcaoCertificado\(row, c, 'baixar'\)"/, 'cada certificado tem o seu baixar')
-  assert.match(tpl, /v-if="c\.has_password"[\s\S]{0,200}@click="pedirAcaoCertificado\(row, c, 'tirar_senha'\)"/, 'excluir senha só quando tem senha')
-  assert.match(tpl, /:disabled="certOcupado\(\)"\s*@click="salvarCertificado\(row\)"/, 'salvar travado durante outra ação')
-  assert.match(tpl, /v-model="certSenhaAtual"/, 'trocar senha pede a atual')
-  assert.match(tpl, /max-h-48 overflow-y-auto/, 'lista longa rola dentro do painel')
+  assert.match(tpl, /@click="pedirAcaoCertificado\(row, c, 'editar'\)"/, 'cada certificado tem o seu editar')
+  assert.match(tpl, /v-if="c\.has_password"[\s\S]{0,300}@click="excluirSenhaCertificado\(row, c\)"/, 'excluir senha só quando tem senha')
+  assert.match(tpl, /v-model="certEdVence" type="date"/, 'editar põe a data num certificado já cadastrado')
+  assert.match(tpl, /@click="adicionarCertificado\(row\)"/, 'adicionar é uma seção própria')
+  assert.match(tpl, /max-h-\[calc\(100vh-2rem\)\]/, 'painel não passa da altura da tela')
   assert.doesNotMatch(tpl, /ver a senha guardada/, 'a senha guardada não aparece mais')
-  assert.doesNotMatch(tpl, /troca de arquivo abaixo valem/, 'subir arquivo acrescenta, não troca')
+  assert.doesNotMatch(tpl, /A senha abaixo vale para o mais novo/, 'sem a frase confusa do painel antigo')
 }
 
 // --- lógica: o bloco do certificado da página + as mensagens de erro, como estão
@@ -85,6 +88,12 @@ const erroApi = (code, comoArquivo = false) => {
   const data = comoArquivo ? new Blob([JSON.stringify(corpo)], { type: 'application/json' }) : corpo
   const e = new Error(`[POST] "/api": 403`)
   Object.defineProperty(e, 'data', { get: () => data, enumerable: true })
+  return e
+}
+
+const erroApiDet = (detail) => {
+  const e = new Error('[POST] "/api": 409')
+  Object.defineProperty(e, 'data', { get: () => ({ detail }), enumerable: true })
   return e
 }
 
@@ -121,9 +130,10 @@ function montar({ lista = [], gridAntes = null, gridDepois, confirma = true, lif
   const factory = new Function(
     'ref', 'apiE', 'refresh', 'grid', 'confirm', 'trava', 'bloquear',
     '"use strict";\n' + js + `
-return { certAberto, certLista, certExcluindo, certSalvando, certSenha, certSenhaAtual, certErro, certAcao, certSenhaAcao,
-  certBaixandoId, alternarCertificado, certificadosDoPainel, excluirCertificado, salvarCertificado, pedirAcaoCertificado,
-  confirmarAcaoCertificado, fecharAcaoCertificado, vencimentoCertificado, dataBR }`,
+return { certAberto, certLista, certExcluindo, certSalvando, certErro, certAcao, certSenhaAcao, certEdVence, certEdSenhaAtual,
+  certEdNovaSenha, certBaixandoId, certNovoAberto, certArquivo, certSenha, certVence, alternarCertificado, certificadosDoPainel,
+  excluirCertificado, pedirAcaoCertificado, confirmarBaixarCertificado, salvarEdicaoCertificado, excluirSenhaCertificado,
+  adicionarCertificado, fecharAcaoCertificado, vencimentoCertificado, dataBR }`,
   )
   const pg = factory(ref, apiE, refresh, grid, confirm, trava, bloquear)
   // Resolve tudo o que está pendurado, inclusive o que for pedido no caminho.
@@ -219,11 +229,11 @@ async function abrir(t, row) {
     t.pg.pedirAcaoCertificado(row, CERT_A, 'baixar')
     assert.deepEqual(t.pg.certAcao.value, { tipo: 'baixar', id: 'a' })
     assert.equal(t.de('POST').length, 0, 'nada sai antes da senha')
-    await t.pg.confirmarAcaoCertificado(row, CERT_A)
+    await t.pg.confirmarBaixarCertificado(row, CERT_A)
     assert.equal(t.de('POST').length, 0)
     assert.match(t.pg.certErro.value, /senha do certificado/)
     t.pg.certSenhaAcao.value = 'segredo'
-    const p = t.pg.confirmarAcaoCertificado(row, CERT_A)
+    const p = t.pg.confirmarBaixarCertificado(row, CERT_A)
     await t.soltar(); await p
     const [dl] = t.de('POST')
     assert.equal(dl.url, '/api/companies/e1/certificates/a/download')
@@ -242,7 +252,7 @@ async function abrir(t, row) {
     await abrir(t, row)
     t.pg.pedirAcaoCertificado(row, CERT_A, 'baixar')
     t.pg.certSenhaAcao.value = 'errada'
-    const p = t.pg.confirmarAcaoCertificado(row, CERT_A)
+    const p = t.pg.confirmarBaixarCertificado(row, CERT_A)
     await t.soltar(); await p
     assert.equal(t.pg.certErro.value, 'Senha do certificado incorreta.')
     assert.deepEqual(baixados, [])
@@ -254,7 +264,7 @@ async function abrir(t, row) {
     await abrir(t, row)
     t.pg.pedirAcaoCertificado(row, CERT_A, 'baixar')
     t.pg.certSenhaAcao.value = 'x'
-    const p = t.pg.confirmarAcaoCertificado(row, CERT_A)
+    const p = t.pg.confirmarBaixarCertificado(row, CERT_A)
     await t.soltar(); await p
     assert.match(t.pg.certErro.value, /15 minutos/)
   }
@@ -265,22 +275,26 @@ async function abrir(t, row) {
     await abrir(t, row)
     t.pg.pedirAcaoCertificado(row, CERT_A, 'baixar')
     t.pg.certSenhaAcao.value = 'x'
-    const p = t.pg.confirmarAcaoCertificado(row, CERT_A)
+    const p = t.pg.confirmarBaixarCertificado(row, CERT_A)
     await t.soltar(); await p
     assert.equal(t.bloqueios(), 1)
   }
 
-  // 7) EXCLUIR SENHA: pede a senha atual e manda junto; a lista mostra sem senha
+  // 7) EXCLUIR SENHA (dentro de "editar"): pede a senha atual e manda junto
   {
     const row = linha('e1', CERT_A)
-    const t = montar({ lista: [CERT_A, CERT_B], gridAntes: { rows: [row] } })
+    const t = montar({
+      lista: [CERT_A, CERT_B],
+      gridAntes: { rows: [row] },
+      responder: (url, o) => (o.method === 'PATCH' ? { valor: { ...CERT_A, has_password: false } } : null),
+    })
     await abrir(t, row)
-    t.pg.pedirAcaoCertificado(row, CERT_A, 'tirar_senha')
-    await t.pg.confirmarAcaoCertificado(row, CERT_A)
+    t.pg.pedirAcaoCertificado(row, CERT_A, 'editar')
+    await t.pg.excluirSenhaCertificado(row, CERT_A)
     assert.equal(t.de('PATCH').length, 0, 'sem a senha atual não manda')
     assert.match(t.pg.certErro.value, /senha atual/)
-    t.pg.certSenhaAcao.value = 'atual'
-    const p = t.pg.confirmarAcaoCertificado(row, CERT_A)
+    t.pg.certEdSenhaAtual.value = 'atual'
+    const p = t.pg.excluirSenhaCertificado(row, CERT_A)
     await t.soltar(); await p
     const [pt] = t.de('PATCH')
     assert.equal(pt.url, '/api/companies/e1/certificates/a')
@@ -290,43 +304,86 @@ async function abrir(t, row) {
     assert.equal(t.grid.value.rows[0].certificado.has_password, false, 'selo da tabela muda na hora')
     assert.equal(t.refreshes(), 1)
     assert.equal(t.pg.certAcao.value, null)
+    assert.equal(t.pg.certEdSenhaAtual.value, '', 'senha atual não fica na memória')
   }
   {
     const row = linha('e1', CERT_A)
     const t = montar({ lista: [CERT_A], responder: () => ({ erro: erroApi('senha_incorreta') }) })
     await abrir(t, row)
-    t.pg.pedirAcaoCertificado(row, CERT_A, 'tirar_senha')
-    t.pg.certSenhaAcao.value = 'errada'
-    const p = t.pg.confirmarAcaoCertificado(row, CERT_A)
+    t.pg.pedirAcaoCertificado(row, CERT_A, 'editar')
+    t.pg.certEdSenhaAtual.value = 'errada'
+    const p = t.pg.excluirSenhaCertificado(row, CERT_A)
     await t.soltar(); await p
     assert.equal(t.pg.certErro.value, 'Senha do certificado incorreta.')
     assert.equal(t.pg.certLista.value[0].has_password, true)
     assert.equal(t.refreshes(), 0)
+    assert.deepEqual(t.pg.certAcao.value, { tipo: 'editar', id: 'a' }, 'continua editando para corrigir')
   }
 
-  // 8) TROCAR a senha do mais novo (com senha) pede a atual e manda junto
+  // 8) EDITAR: pôr/trocar a DATA de um já cadastrado (sem subir o arquivo de novo)
   {
+    const semData = { ...CERT_LIVRE }
+    const row = linha('e1', semData, 1)
+    const t = montar({
+      lista: [semData],
+      gridAntes: { rows: [row] },
+      responder: (url, o) => (o.method === 'PATCH' ? { valor: { ...semData, expires_at: '2027-07-01' } } : null),
+    })
+    await abrir(t, row)
+    t.pg.pedirAcaoCertificado(row, semData, 'editar')
+    assert.equal(t.pg.certEdVence.value, '', 'sem data: campo vazio')
+    t.pg.certEdVence.value = '2027-07-01'
+    const p = t.pg.salvarEdicaoCertificado(row, semData)
+    await t.soltar(); await p
+    assert.deepEqual(t.de('PATCH')[0].body, { expires_at: '2027-07-01' }, 'só a data, sem mexer na senha')
+    assert.equal(t.pg.certLista.value[0].expires_at, '2027-07-01')
+    assert.equal(t.grid.value.rows[0].certificado.expires_at, '2027-07-01', 'selo da tabela já mostra a data')
+  }
+  {
+    // Abrir o editar traz a data atual; salvar sem mudar nada não chama o servidor.
     const row = linha('e1', CERT_A)
     const t = montar({ lista: [CERT_A] })
     await abrir(t, row)
-    t.pg.certSenha.value = 'nova'
-    await t.pg.salvarCertificado(row)
+    t.pg.pedirAcaoCertificado(row, CERT_A, 'editar')
+    assert.equal(t.pg.certEdVence.value, '2027-07-27')
+    await t.pg.salvarEdicaoCertificado(row, CERT_A)
+    assert.equal(t.de('PATCH').length, 0)
+    assert.equal(t.pg.certAcao.value, null)
+    // Clicar de novo no mesmo ícone fecha.
+    t.pg.pedirAcaoCertificado(row, CERT_A, 'editar')
+    t.pg.pedirAcaoCertificado(row, CERT_A, 'editar')
+    assert.equal(t.pg.certAcao.value, null)
+  }
+  {
+    // Trocar a senha de um com senha pede a atual; manda as duas.
+    const row = linha('e1', CERT_A)
+    const t = montar({ lista: [CERT_A], responder: () => ({ valor: CERT_A }) })
+    await abrir(t, row)
+    t.pg.pedirAcaoCertificado(row, CERT_A, 'editar')
+    t.pg.certEdNovaSenha.value = 'nova'
+    await t.pg.salvarEdicaoCertificado(row, CERT_A)
     assert.equal(t.de('PATCH').length, 0)
     assert.match(t.pg.certErro.value, /senha atual/)
-    t.pg.certSenhaAtual.value = 'velha'
-    const p = t.pg.salvarCertificado(row)
+    t.pg.certEdSenhaAtual.value = 'velha'
+    const p = t.pg.salvarEdicaoCertificado(row, CERT_A)
     await t.soltar(); await p
     assert.deepEqual(t.de('PATCH')[0].body, { password: 'nova', current_password: 'velha' })
   }
   {
-    // Certificado sem senha: pôr a primeira senha não pede "atual".
+    // Sem senha: pôr a primeira senha não pede "atual"; só espaços não vira senha.
     const row = linha('e1', CERT_LIVRE, 1)
-    const t = montar({ lista: [CERT_LIVRE] })
+    const t = montar({ lista: [CERT_LIVRE], responder: () => ({ valor: { ...CERT_LIVRE, has_password: true } }) })
     await abrir(t, row)
-    t.pg.certSenha.value = 'primeira'
-    const p = t.pg.salvarCertificado(row)
+    t.pg.pedirAcaoCertificado(row, CERT_LIVRE, 'editar')
+    t.pg.certEdNovaSenha.value = '   '
+    await t.pg.salvarEdicaoCertificado(row, CERT_LIVRE)
+    assert.equal(t.de('PATCH').length, 0, 'só espaços: nada muda')
+    t.pg.pedirAcaoCertificado(row, CERT_LIVRE, 'editar')
+    t.pg.certEdNovaSenha.value = 'primeira'
+    const p = t.pg.salvarEdicaoCertificado(row, CERT_LIVRE)
     await t.soltar(); await p
-    assert.deepEqual(t.de('PATCH')[0].body, { password: 'primeira', current_password: null })
+    assert.deepEqual(t.de('PATCH')[0].body, { password: 'primeira' })
+    assert.equal(t.pg.certLista.value[0].has_password, true)
   }
 
   // 9) excluir o mais novo: confirma, apaga o certo, recarrega a tabela E a lista
@@ -456,12 +513,55 @@ async function abrir(t, row) {
     const t = montar({ lista: [CERT_A] })
     await abrir(t, row)
     t.pg.certExcluindo.value = 'a'
-    t.pg.certSenha.value = 'x'
-    t.pg.certSenhaAtual.value = 'y'
-    await t.pg.salvarCertificado(row)
+    t.pg.certArquivo.value = new File([new Uint8Array([1])], 'novo.pfx')
+    await t.pg.adicionarCertificado(row)
     t.pg.pedirAcaoCertificado(row, CERT_LIVRE, 'baixar')
     await t.soltar()
     assert.equal(t.chamadas.filter((c) => c.method !== 'GET').length, 0)
+  }
+
+  // 18) ADICIONAR: seção própria; abre sozinha quando a empresa não tem; repetido avisa
+  {
+    const t = montar()
+    t.pg.alternarCertificado(linha('e9', null))
+    assert.equal(t.pg.certNovoAberto.value, true, 'sem certificado: já abre o adicionar')
+  }
+  {
+    const row = linha('e1', CERT_A)
+    const t = montar({
+      lista: (url, n) => (n === 0 ? [CERT_A] : [{ id: 'n', filename: 'novo.pfx', has_password: true, expires_at: '2028-01-31' }, CERT_A]),
+      gridAntes: { rows: [row] },
+    })
+    await abrir(t, row)
+    assert.equal(t.pg.certNovoAberto.value, false, 'com certificado: adicionar fechado')
+    await t.pg.adicionarCertificado(row)
+    assert.equal(t.de('POST').length, 0)
+    assert.match(t.pg.certErro.value, /Escolha o arquivo/)
+    t.pg.certNovoAberto.value = true
+    t.pg.certArquivo.value = new File([new Uint8Array([1, 2, 3])], 'novo.pfx')
+    t.pg.certSenha.value = 'trava'
+    t.pg.certVence.value = '2028-01-31'
+    const p = t.pg.adicionarCertificado(row)
+    await t.soltar(); await p
+    const [post] = t.de('POST')
+    assert.equal(post.url, '/api/companies/e1/certificates')
+    assert.equal(post.body.get('password'), 'trava')
+    assert.equal(post.body.get('expires_at'), '2028-01-31')
+    assert.equal(t.pg.certNovoAberto.value, false, 'fecha a seção')
+    assert.equal(t.pg.certSenha.value, '', 'senha digitada sai da memória')
+    assert.deepEqual(t.pg.certLista.value.map((c) => c.id), ['n', 'a'], 'lista recarregada com o novo')
+    assert.equal(t.refreshes(), 1)
+  }
+  {
+    const row = linha('e1', CERT_A)
+    const t = montar({ lista: [CERT_A], responder: () => ({ erro: erroApiDet({ code: 'certificado_repetido', filename: 'JLAS.pfx' }) }) })
+    await abrir(t, row)
+    t.pg.certNovoAberto.value = true
+    t.pg.certArquivo.value = new File([new Uint8Array([1])], 'JLAS - venc 01-07-2027.pfx')
+    const p = t.pg.adicionarCertificado(row)
+    await t.soltar(); await p
+    assert.match(t.pg.certErro.value, /já está cadastrado nesta empresa \(JLAS\.pfx\)/)
+    assert.equal(t.pg.certNovoAberto.value, true, 'continua aberto')
   }
 
   console.log('PASS: vencimento DD/MM/AAAA; baixar com trava de senha (senha no corpo, erro-arquivo traduzido); excluir/trocar senha pedem a atual; senha guardada não aparece; excluir certificado seguro; troca de empresa')

@@ -213,6 +213,27 @@ async def upload_certificate(
     if len(raw) > MAX_CERT_BYTES:
         raise HTTPException(413, detail={"code": "file_too_large"})
 
+    # O MESMO arquivo de novo na mesma empresa é recusado (25/09/2026: 5
+    # empresas com o arquivo em dobro — a tela só deixava pôr a data subindo o
+    # arquivo de novo). Data e senha de um já cadastrado se mudam no PATCH.
+    # Compara o conteúdo decifrado: o blob cifrado muda a cada upload (nonce).
+    existentes = (
+        await session.execute(
+            select(CompanyCertificate.id, CompanyCertificate.filename, CompanyCertificate.blob)
+            .where(CompanyCertificate.company_id == company_id)
+        )
+    ).all()
+    for ex_id, ex_nome, ex_blob in existentes:
+        try:
+            igual = decrypt_bytes(ex_blob) == raw
+        except Exception:  # noqa: BLE001 - blob ilegível não bloqueia o upload
+            igual = False
+        if igual:
+            raise HTTPException(
+                409,
+                detail={"code": "certificado_repetido", "id": str(ex_id), "filename": ex_nome},
+            )
+
     exp = _parse_expires_at(expires_at)
     pwd = (password or "").strip()
 
