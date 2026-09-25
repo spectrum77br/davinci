@@ -198,6 +198,13 @@ class ChamadoMensagem(Base, TimestampMixin):
     tentativas: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, server_default="0"
     )
+    # 25/09 (Vinicius, lixeirinha no histórico): "excluir" ESCONDE — some da tela e da
+    # leitura da IA de Chamado, mas a linha fica. A varredura só grava fala que ainda
+    # não está no histórico (apagada, voltaria na passada seguinte) e marcas de sistema
+    # seguram respostas automáticas (sem elas o robô repetiria a recusa). Status da aba
+    # e robôs continuam contando a mensagem escondida (migration 0329).
+    excluida_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    excluida_por: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     chamado: Mapped["Chamado"] = relationship(back_populates="mensagens")
     anexos: Mapped[list["ChamadoAnexo"]] = relationship(

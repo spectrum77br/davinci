@@ -100,6 +100,9 @@ async def _decisoes_out(
     )
     if mensagem_id is not None:
         q = q.where(ChamadoMensagem.id == mensagem_id)
+    else:
+        # 25/09: decisão escondida pela lixeirinha do histórico sai da lista também
+        q = q.where(ChamadoMensagem.excluida_at.is_(None))
     rows = (
         await session.execute(q.order_by(ChamadoMensagem.created_at.desc()).limit(_DECISOES))
     ).all()

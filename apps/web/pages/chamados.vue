@@ -353,6 +353,9 @@ const ERROS: Record<string, string> = {
   chamado_situacao_obrigatoria: 'escolha a nova situação no Bling',
   // 19/09: instrução não entra em chamado Concluído — a pessoa reabre pela aba antes.
   chamado_concluido: 'chamado concluído — reabra pela aba pra instruir o robô',
+  chamado_mensagem_abertura: 'a abertura do chamado não pode sair do histórico — sem ela o sistema para de acompanhar',
+  chamado_mensagem_na_fila: 'essa mensagem ainda vai sair pra plataforma — espere enviar',
+  chamado_mensagem_not_found: 'essa mensagem já tinha sido excluída',
   // 21/09 (Vinicius): janela "Excluir chamado" (chamado + lançamentos de devolução).
   devolucoes_delete_forbidden: 'sem permissão pra excluir lançamentos de devolução',
   devolucao_fora_do_pedido: 'lançamento escolhido não é deste pedido — feche e abra a janela de novo',
@@ -448,6 +451,9 @@ type Bolha = {
   anexos: Anexo[]
   mensagemId?: string
   avaliacao?: AvaliacaoIa | null
+  // 25/09 (lixeirinha): a mensagem de onde o balão saiu — uma mensagem com a
+  // conversa colada vira vários balões, e excluir leva todos.
+  origem?: { id: string; tipo: string; status: Mensagem['status']; direcao: Mensagem['direcao'] }
 }
 
 // "Mercado Livre" / "Você" seguido da data, do jeito que o ML escreve na página
@@ -800,6 +806,8 @@ function dataDaFala(quando: string, ref: Date): number {
 }
 const RE_CAB_FALA = /^\s*(Mercado Livre|Mercado Pago|Você)\s+\d{1,2} de [a-zç]+(?: de \d{4})?\s*/i
 
+const origemDe = (m: Mensagem): Bolha['origem'] => ({ id: m.id, tipo: m.tipo, status: m.status, direcao: m.direcao })
+
 const bolhas = computed<Bolha[]>(() => {
   const itens: { t: number; ord: number; b: Bolha }[] = []
   const vistas = new Set<string>()
@@ -823,6 +831,7 @@ const bolhas = computed<Bolha[]>(() => {
         status: ultima ? m.status : null,
         erro: ultima ? m.erro : null,
         anexos: ultima ? m.anexos : [],
+        origem: origemDe(m),
       },
     })
   }
@@ -846,7 +855,7 @@ const bolhas = computed<Bolha[]>(() => {
         b: {
           chave: m.id, lado: 'instrucao', autor: m.autor_nome || 'nós',
           quando: fmtDateTime(m.created_at), texto: m.texto, meta: 'instrução pra IA de Chamado',
-          status: null, erro: null, anexos: m.anexos,
+          status: null, erro: null, anexos: m.anexos, origem: origemDe(m),
         },
       })
       continue
@@ -858,7 +867,7 @@ const bolhas = computed<Bolha[]>(() => {
           chave: m.id, lado: 'ia', autor: m.autor_nome || 'IA de Chamado',
           quando: fmtDateTime(m.created_at), texto: m.texto, meta: 'decisão',
           status: null, erro: null, anexos: m.anexos,
-          mensagemId: m.id, avaliacao: m.avaliacao_ia ?? null,
+          mensagemId: m.id, avaliacao: m.avaliacao_ia ?? null, origem: origemDe(m),
         },
       })
       continue
@@ -869,7 +878,7 @@ const bolhas = computed<Bolha[]>(() => {
         b: {
           chave: m.id, lado: 'sistema', autor: m.autor_nome || 'sistema',
           quando: fmtDateTime(m.created_at), texto: m.texto, meta: 'sistema',
-          status: null, erro: null, anexos: m.anexos,
+          status: null, erro: null, anexos: m.anexos, origem: origemDe(m),
         },
       })
       continue
@@ -895,6 +904,7 @@ const bolhas = computed<Bolha[]>(() => {
           autor: m.autor_nome || (m.direcao === 'recebida' ? 'plataforma' : 'nós'),
           quando: fmtDateTime(m.enviada_at || m.created_at),
           texto: m.texto, meta: rotuloTipo(m), status: m.status, erro: m.erro, anexos: m.anexos,
+          origem: origemDe(m),
         },
       })
       continue
@@ -1267,6 +1277,37 @@ async function avaliarNoHistorico(b: Bolha, certo: boolean) {
     histIa.erro = apiError(e)
   } finally {
     histIa.salvando = null
+  }
+}
+// 25/09 (Vinicius: "quero excluir uma mensagem do histórico"): a lixeirinha
+// ESCONDE — some da tela e da IA de Chamado; a linha fica no banco pra fala da
+// plataforma não voltar na próxima leitura e o robô não repetir resposta. A
+// abertura e mensagem nossa ainda na fila não têm lixeira (a API recusa também).
+const histExcluindo = ref<string | null>(null)
+function podeLixeira(b: Bolha): boolean {
+  const o = b.origem
+  if (!canDelete.value || !o || o.tipo === 'abertura') return false
+  return !(o.direcao === 'enviada' && (o.status === 'pendente' || (o.status as string) === 'enviando'))
+}
+async function excluirMensagem(b: Bolha) {
+  const o = b.origem
+  if (!o || !hist.row || histExcluindo.value) return
+  const juntas = bolhas.value.filter(x => x.origem?.id === o.id).length
+  const aviso = [
+    'Excluir esta mensagem do histórico?',
+    juntas > 1 ? `Ela chegou junto com outras ${juntas - 1} fala(s) na mesma leitura — todas somem juntas.` : '',
+    'Some da tela e a IA de Chamado não lê mais. O que já foi pra plataforma não é desfeito.',
+  ].filter(Boolean).join('\n\n')
+  if (!confirm(aviso)) return
+  histExcluindo.value = o.id
+  try {
+    await api(`/api/chamados/mensagens/${o.id}`, { method: 'DELETE' })
+    hist.mensagens = await api<Mensagem[]>(`/api/chamados/${hist.row.id}/mensagens`)
+    toasts.success('Mensagem excluída do histórico')
+  } catch (e: any) {
+    toasts.error('Não consegui excluir a mensagem', apiError(e))
+  } finally {
+    histExcluindo.value = null
   }
 }
 async function desfazerNoHistorico(b: Bolha) {
@@ -2032,7 +2073,7 @@ async function confirmarExcluir() {
           <div
             v-for="b in bolhas"
             :key="b.chave"
-            class="flex"
+            class="group flex"
             :class="{
               'justify-end': b.lado === 'nos' || b.lado === 'instrucao',
               'justify-start': b.lado === 'eles',
@@ -2119,6 +2160,24 @@ async function confirmarExcluir() {
               </div>
               <div class="mt-1 text-right text-[10px] text-muted-foreground">{{ b.quando }}</div>
             </div>
+            <!-- 25/09: lixeirinha — aparece ao passar o mouse (no toque, fica sempre à vista);
+                 do lado de dentro do balão: à esquerda dos nossos, à direita dos outros. -->
+            <button
+              v-if="podeLixeira(b)"
+              type="button"
+              class="shrink-0 rounded p-1 text-muted-foreground opacity-0 transition-opacity hover:bg-red-500/10 hover:text-red-600 focus:opacity-100 group-hover:opacity-100 disabled:opacity-40 [@media(hover:none)]:opacity-60"
+              :class="[
+                b.lado === 'nos' || b.lado === 'instrucao' ? 'order-first mr-1' : 'ml-1',
+                b.lado === 'sistema' ? 'self-center' : 'self-start mt-1',
+              ]"
+              :disabled="histExcluindo === b.origem?.id"
+              title="excluir mensagem do histórico"
+              aria-label="excluir mensagem do histórico"
+              @click="excluirMensagem(b)"
+            >
+              <Loader2 v-if="histExcluindo === b.origem?.id" class="size-3.5 animate-spin" />
+              <Trash2 v-else class="size-3.5" />
+            </button>
           </div>
         </div>
 

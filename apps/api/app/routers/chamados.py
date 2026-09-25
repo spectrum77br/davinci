@@ -652,20 +652,37 @@ def _sem_repetidas(rows: list[ChamadoMensagem]) -> list[ChamadoMensagem]:
     return out
 
 
-async def _mensagens_do_caso(session: AsyncSession, ch: Chamado, *, com_anexos: bool = False) -> list[ChamadoMensagem]:
+async def _ids_do_caso(session: AsyncSession, ch: Chamado) -> list[UUID]:
+    """As linhas do CASO (irmãs com o mesmo protocolo numérico na conta) — só a
+    própria quando o protocolo não agrupa."""
     chave = _chave_caso(ch)
-    if chave is not None:
-        ids = (
+    if chave is None:
+        return [ch.id]
+    return list(
+        (
             await session.execute(
                 select(Chamado.id).where(
                     Chamado.chamado == chave[0],
                     func.lower(func.coalesce(Chamado.conta, "")) == chave[1],
                 )
             )
-        ).scalars().all() or [ch.id]
-    else:
-        ids = [ch.id]
+        ).scalars().all()
+    ) or [ch.id]
+
+
+async def _mensagens_do_caso(
+    session: AsyncSession,
+    ch: Chamado,
+    *,
+    com_anexos: bool = False,
+    sem_excluidas: bool = False,
+) -> list[ChamadoMensagem]:
+    """`sem_excluidas` (25/09, lixeirinha): o que a PESSOA e a IA de Chamado leem —
+    tira as mensagens escondidas. Status da aba e robôs continuam vendo todas."""
+    ids = await _ids_do_caso(session, ch)
     q = select(ChamadoMensagem).where(ChamadoMensagem.chamado_id.in_(ids))
+    if sem_excluidas:
+        q = q.where(ChamadoMensagem.excluida_at.is_(None))
     if com_anexos:
         q = q.options(selectinload(ChamadoMensagem.anexos))
     rows = (await session.execute(q.order_by(ChamadoMensagem.created_at, _ORDEM_SISTEMA_SQL, ChamadoMensagem.id))).scalars().all()
@@ -684,7 +701,7 @@ async def list_mensagens(
     _user: Annotated[User, Depends(require_permission("chamados", "view"))],
 ) -> list[ChamadoMensagemOut]:
     ch = await _get(session, chamado_id)
-    rows = await _mensagens_do_caso(session, ch, com_anexos=True)
+    rows = await _mensagens_do_caso(session, ch, com_anexos=True, sem_excluidas=True)
     out = [_mensagem_out(m) for m in rows]
     # 24/09: as análises da IA de Chamado levam o ✓/✗ (a pessoa avalia no histórico)
     nomes_ia = set(
@@ -717,6 +734,62 @@ async def list_mensagens(
                 o.da_ia = True
                 o.avaliacao_ia = por_msg.get(o.id)
     return out
+
+
+# 25/09 (Vinicius, lixeirinha no histórico): a abertura nunca some — sem ela a
+# varredura para de acompanhar o chamado. Mensagem nossa ainda na fila (pendente/
+# enviando) também não: escondida, ela sairia pra plataforma do mesmo jeito.
+_TIPOS_SEM_LIXEIRA = frozenset({"abertura"})
+_STATUS_NA_FILA = frozenset({"pendente", "enviando"})
+
+
+@router.delete("/mensagens/{mensagem_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def excluir_mensagem(
+    mensagem_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("chamados", "delete"))],
+) -> None:
+    """Esconde a mensagem do histórico (tela e IA de Chamado). Não apaga: a
+    varredura reescreveria a fala da plataforma na passada seguinte e as marcas
+    de sistema seguram respostas automáticas. A cópia da mesma mensagem nas linhas
+    irmãs do caso (mesma direção, tipo e texto em até 2 min — a que o histórico
+    junta) some junto. Status da aba e robôs continuam contando."""
+    m = await session.get(ChamadoMensagem, mensagem_id)
+    if m is None or m.excluida_at is not None:
+        raise HTTPException(404, detail={"code": "chamado_mensagem_not_found"})
+    if m.tipo in _TIPOS_SEM_LIXEIRA:
+        raise HTTPException(422, detail={"code": "chamado_mensagem_abertura"})
+    if m.direcao == "enviada" and m.status in _STATUS_NA_FILA:
+        raise HTTPException(422, detail={"code": "chamado_mensagem_na_fila"})
+    ch = await _get(session, m.chamado_id)
+    alvo = [m]
+    irmas = [i for i in await _ids_do_caso(session, ch) if i != ch.id]
+    if irmas and m.created_at is not None:
+        alvo += (
+            await session.execute(
+                select(ChamadoMensagem).where(
+                    ChamadoMensagem.chamado_id.in_(irmas),
+                    ChamadoMensagem.excluida_at.is_(None),
+                    ChamadoMensagem.direcao == m.direcao,
+                    ChamadoMensagem.tipo == m.tipo,
+                    ChamadoMensagem.texto == m.texto,
+                    ChamadoMensagem.created_at.between(
+                        m.created_at - timedelta(seconds=120),
+                        m.created_at + timedelta(seconds=120),
+                    ),
+                )
+            )
+        ).scalars().all()
+    agora, quem = datetime.now(UTC), _autor(user)
+    for x in alvo:
+        x.excluida_at = agora
+        x.excluida_por = quem
+    await session.commit()
+    logger.info(
+        "chamado_mensagem_excluida",
+        chamado_id=str(ch.id), mensagem_id=str(mensagem_id), tipo=m.tipo,
+        copias=len(alvo) - 1, autor=quem,
+    )
 
 
 @router.post(
@@ -2225,7 +2298,8 @@ async def agent_analisar(
 async def _item_do_cerebro(session: AsyncSession, ch: Chamado) -> AgentChamadoAnaliseOut:
     """O chamado como o cérebro enxerga: a conversa do CASO inteiro (linhas irmãs
     da mesma consulta), instrução/bloqueio pendentes e os prints da abertura."""
-    msgs = await _mensagens_do_caso(session, ch)
+    # 25/09: mensagem que a pessoa escondeu (lixeirinha) a IA também não lê.
+    msgs = await _mensagens_do_caso(session, ch, sem_excluidas=True)
     anexos = await _anexos_da_abertura(session, ch)
     pend = _instrucao_pendente(msgs)
     _m, bloq = _bloqueio_de(msgs)
