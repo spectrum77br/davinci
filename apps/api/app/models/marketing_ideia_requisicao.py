@@ -71,11 +71,11 @@ class MarketingIdeiaRequisicao(Base, TimestampMixin):
         ForeignKey("marketing_personagens.id", ondelete="SET NULL"),
         nullable=True,
     )
-    # Quem está na peça quando NÃO é ninguém do elenco (migration 0330): quem
-    # é e de onde vem a imagem, como a agência escreveu. Preenchido só quando
-    # ela escolhe "outra pessoa" — e aí é obrigatório, porque sem o texto essa
-    # escolha ficaria idêntica a "sem persona". É o caso que mais pesa para a
-    # casa: rosto de pessoa real em peça comercial.
+    # Quem está na peça quando NÃO é ninguém do elenco (migration 0330): a
+    # descrição do personagem, como a agência escreveu. Preenchido só quando
+    # ela escolhe "outro personagem" — e aí é obrigatório, porque sem o texto
+    # essa escolha ficaria idêntica a "sem persona". É o caso que mais pesa
+    # para a casa: personagem que não passou pela aprovação de procedência.
     personagem_outro: Mapped[str | None] = mapped_column(Text, nullable=True)
     # A entrega que trouxe este conceito. SET NULL: apagar o vídeo não apaga o
     # registro de que a agência propôs e a casa decidiu.

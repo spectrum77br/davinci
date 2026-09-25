@@ -1101,10 +1101,10 @@ async def propor_video(
     # Qual persona está na peça. Vem do elenco e é conferida contra ele: id
     # inventado no formulário não pode virar ponteiro no banco.
     #
-    # Ou "outro": alguém que NÃO está no elenco (Marco, 25/09/2026). Aí o
-    # texto de quem é passa a ser obrigatório — sem ele, a escolha ficaria
-    # idêntica a "sem persona" no banco, e a casa não saberia que tem um rosto
-    # de pessoa real na peça. A conferência vem ANTES de criar a linha e de
+    # Ou "outro": um personagem que NÃO está no elenco (pedido de 25/09/2026).
+    # Aí a descrição passa a ser obrigatória — sem ela, a escolha ficaria
+    # idêntica a "sem persona" no banco, e a casa não saberia que tem na peça
+    # alguém fora do elenco aprovado. A conferência vem ANTES de criar a linha e de
     # gravar o vídeo em disco — recusar depois deixava arquivo órfão — e não
     # fica só no portal: a API é a última porta.
     persona = None
@@ -1146,9 +1146,9 @@ async def propor_video(
     # desligado, porque desligado ele ainda aparece na lista de quem escreve.
     # Vira pedido, e o roteiro nasce no sim.
     #
-    # Pedido nasce se houver conceito OU persona OU outra pessoa: dizer "usei
-    # a Márcia" — ou "é um ator contratado" — já é informação que quem decide
-    # precisa, mesmo sem texto junto.
+    # Pedido nasce se houver conceito OU persona OU outro personagem: dizer
+    # "usei a Márcia" — ou "uma feirante criada só para este vídeo" — já é
+    # informação que quem decide precisa, mesmo sem texto junto.
     if conceito or persona or outro:
         session.add(
             MarketingIdeiaRequisicao(

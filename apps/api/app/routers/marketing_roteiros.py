@@ -687,9 +687,9 @@ def _req_ideia_out(
         "personagem_id": str(r.personagem_id) if r.personagem_id else None,
         # QUEM está na peça, legível. O id sozinho chegava ao painel e nunca
         # aparecia — a escolha da agência ficava gravada e invisível para quem
-        # decide. `personagem_outro` é o texto de quando não é ninguém do
-        # elenco: é o caso que mais pesa (rosto de pessoa real em peça
-        # comercial), e por isso vem em destaque na tela.
+        # decide. `personagem_outro` é a descrição de quando não é ninguém do
+        # elenco: personagem que não passou pela aprovação de procedência, e
+        # por isso vem em destaque na tela.
         "personagem_nome": (nomes or {}).get(r.personagem_id) if r.personagem_id else None,
         "personagem_outro": r.personagem_outro,
         "arquivos": [

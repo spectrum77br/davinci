@@ -1241,15 +1241,15 @@ async function recusarPedido(r: Requisicao) {
             </div>
           </div>
 
-          <!-- Quem aparece na peça. "Outra pessoa" vem em âmbar: é rosto de
-               gente fora do elenco — sem cessão registrada aqui — numa peça
-               comercial, e quem aprova precisa ver isso antes de virar briefing. -->
+          <!-- Quem aparece na peça. Personagem fora do elenco vem em âmbar:
+               não passou pela aprovação de procedência que o elenco passa, e
+               quem aprova precisa ver isso antes de virar briefing. -->
           <p v-if="c.personagem_outro" class="mt-1.5 rounded border border-amber-500/40 bg-amber-500/10 px-2 py-1 text-[11px]">
-            <span class="font-medium text-amber-600 dark:text-amber-400">Na peça: outra pessoa, fora do elenco</span>
+            <span class="font-medium text-amber-600 dark:text-amber-400">Na peça: personagem fora do elenco</span>
             — {{ c.personagem_outro }}
           </p>
           <p v-else-if="c.personagem_id" class="mt-1.5 text-[11px] text-muted-foreground">
-            Na peça: <span class="font-medium text-foreground">{{ c.personagem_nome || 'persona removida do elenco' }}</span>
+            Na peça: <span class="font-medium text-foreground">{{ c.personagem_nome || 'personagem removido do elenco' }}</span>
           </p>
 
           <div class="mt-2 grid gap-3 sm:grid-cols-[160px_1fr]">

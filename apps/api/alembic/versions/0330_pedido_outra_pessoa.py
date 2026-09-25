@@ -1,15 +1,15 @@
 """Quem está na peça quando não é ninguém do elenco
 
-Eduardo, 25/09/2026: "em 'quem está na peça' pode ser marcado 'outro', seria
+Pedido de 25/09/2026: "em 'quem está na peça' pode ser marcado 'outro', seria
 uma opção também, né? Caso não seja nenhum daqueles personagens ali".
 
 ## Por que um campo, e não só uma opção a mais no formulário
 
-Uma opção "outra pessoa" sem texto ficaria idêntica a "sem persona" no banco
-(`personagem_id` NULL nas duas) — a equipe não saberia que tem um rosto na
-peça, nem de quem. E é exatamente o caso que a casa mais precisa ver: uso
-comercial de imagem de pessoa real indeniza mesmo sem provar prejuízo, e é por
-isso que o pedido de personagem novo já pergunta a procedência.
+Uma opção "outro personagem" sem texto ficaria idêntica a "sem persona" no
+banco (`personagem_id` NULL nas duas) — a equipe não saberia que tem alguém na
+peça, nem quem. E é exatamente o caso que a casa mais precisa ver: o elenco
+passa pela aprovação de procedência (o pedido de personagem novo pergunta de
+onde vêm imagem e voz), e um personagem fora dele não passou.
 
 ## Por que no PEDIDO e não no criativo
 

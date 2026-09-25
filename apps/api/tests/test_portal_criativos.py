@@ -907,10 +907,10 @@ async def test_video_autoral_sem_titulo_e_recusado(client: AsyncClient):
     assert r.json()["detail"]["code"] == "titulo_obrigatorio"
 
 
-async def test_outra_pessoa_na_peca_vira_pedido_e_o_painel_mostra_quem_e(
+async def test_outro_personagem_na_peca_vira_pedido_e_o_painel_mostra_quem_e(
     client: AsyncClient, db: AsyncSession, make_user, auth_as
 ):
-    """Outra pessoa é rosto fora do elenco numa peça comercial: mesmo sem
+    """Personagem fora do elenco não passou pela procedência: mesmo sem
     conceito, nasce pedido — e o painel mostra QUEM é, não um id."""
     from app.models import MarketingIdeiaRequisicao, UserRole
 
@@ -920,25 +920,25 @@ async def test_outra_pessoa_na_peca_vira_pedido_e_o_painel_mostra_quem_e(
         data={
             "titulo": "Unboxing",
             "personagem_id": "outro",
-            "personagem_outro": "  Carla, vendedora da loja  ",
+            "personagem_outro": "  feirante de uns 60 anos, criada só para este vídeo  ",
         },
         files={"files": ("v.mp4", b"x" * 100, "video/mp4")},
     )
     assert r.status_code == 200, r.text
     req = (await db.execute(select(MarketingIdeiaRequisicao))).scalar_one()
     assert req.personagem_id is None
-    assert req.personagem_outro == "Carla, vendedora da loja"
+    assert req.personagem_outro == "feirante de uns 60 anos, criada só para este vídeo"
 
     auth_as(await make_user(role=UserRole.ADMIN))
     fila = (await client.get("/api/marketing/roteiros/requisicoes")).json()["requisicoes"]
-    assert fila[0]["personagem_outro"] == "Carla, vendedora da loja"
+    assert fila[0]["personagem_outro"] == "feirante de uns 60 anos, criada só para este vídeo"
     assert fila[0]["personagem_nome"] is None
 
 
-async def test_outra_pessoa_sem_dizer_quem_e_recusada_antes_de_gravar(
+async def test_outro_personagem_sem_descricao_e_recusado_antes_de_gravar(
     client: AsyncClient, db: AsyncSession
 ):
-    """Sem o texto, "outra pessoa" ficaria igual a "sem persona" no banco.
+    """Sem o texto, "outro personagem" ficaria igual a "sem persona" no banco.
     E a recusa vem antes da linha nascer: nada fica pela metade."""
     from app.models import MarketingIdeiaRequisicao
 
