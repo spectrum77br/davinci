@@ -49,9 +49,12 @@ function args() {
 // A janela "Enviar Prova" visível (há cópias escondidas no DOM).
 const JS_MODAL = `[...document.querySelectorAll('.eds-modal__box, .eds-modal__content')].find(function(b){return b.getBoundingClientRect().width>0&&/Enviar Prova/.test(b.innerText||'')})`;
 
-// A linha do pedido: 1º ancestral com "ID do Pedido" que tem o nº do pedido.
+// A linha do pedido = o `a.return-row-item` (visto 25/09: cabeçalho com "ID do
+// Pedido" + conteúdo com R$, status e o botão). Subir até "ID do Pedido" parava
+// na célula do ID; subir até "ID do Pedido + R$" pegava a página inteira quando
+// a busca deixa 1 resultado só.
 const JS_LINHA = (pedido, de) =>
-  `(function(e){var a=e;while(a&&!/ID do Pedido/.test(a.innerText||''))a=a.parentElement;return a&&(a.innerText.match(/ID do Pedido/g)||[]).length===1&&a.innerText.indexOf(${JSON.stringify(pedido)})>=0?a:null;})(${de})`;
+  `(function(e){var a=e;while(a&&!(a.classList&&a.classList.contains('return-row-item')))a=a.parentElement;return a&&(a.innerText||'').indexOf(${JSON.stringify(pedido)})>=0?a:null;})(${de})`;
 
 async function buscar(page, pedido) {
   await page.goto(`${SELLER}/portal/sale/returnrefundcancel`, { waitUntil: "networkidle2", timeout: 60000 }).catch(() => {});
@@ -59,10 +62,18 @@ async function buscar(page, pedido) {
   const senha = await page.evaluate(`!!document.querySelector('input[type="password"]')`).catch(() => false);
   if (/signin|login|\/account\//i.test(url) || senha) throw new Error("login do Seller Center caiu — precisa de uma pessoa");
   await page.waitForSelector(SEL_BUSCA, { visible: true, timeout: 30000 });
-  await page.click(SEL_BUSCA, { clickCount: 3 });
-  await page.keyboard.press("Backspace");
-  await page.keyboard.type(pedido, { delay: 40 });
-  await sleep(500);
+  // foco pelo elemento, não por clique: com a janela noutro tamanho o clique
+  // caiu na aba "Todos" e a busca ficou vazia (25/09)
+  for (let i = 0; i < 3; i++) {
+    await page.focus(SEL_BUSCA);
+    await page.evaluate(`(function(){var i=document.querySelector(${JSON.stringify(SEL_BUSCA)});if(i&&i.select)i.select();})()`);
+    await page.keyboard.press("Backspace");
+    await page.keyboard.type(pedido, { delay: 40 });
+    await sleep(500);
+    const v = await page.evaluate(`(document.querySelector(${JSON.stringify(SEL_BUSCA)})||{}).value`);
+    if ((v || "").trim() === pedido) break;
+    if (i === 2) throw new Error("não consegui escrever o pedido na busca da lista");
+  }
   // Enter não filtra (visto em 24/09): tem que ser o botão.
   const ok = await page.evaluate(`(function(){var b=[...document.querySelectorAll('button')].find(function(e){return (e.innerText||'').trim()==='Aplicar'&&e.getBoundingClientRect().width>0});if(b)b.click();return !!b;})()`);
   if (!ok) throw new Error("botão Aplicar não encontrado na lista de devoluções");
@@ -128,9 +139,12 @@ async function fotos(browser, page, a) {
   return { ok: true, devolucao: href, fotos: saida };
 }
 
+// Foto pronta = a Shopee confirmou o upload (POST .../uploadapi/.../notify) e o
+// quadrinho liberou os botões ver/apagar (`.actions-layer` sem display:none).
+// A classe "uploading" do quadrinho NÃO some nunca — não serve (visto 25/09).
 async function estadoJanela(page) {
   return page.evaluate(
-    `(function(){var m=${JS_MODAL};if(!m)return null;var t=m.innerText||'';var c=/(\\d)\\s*\\/\\s*3/.exec(t);var env=[...m.querySelectorAll('button')].find(function(b){return (b.innerText||'').trim()==='Enviar'});return {contador:c?Number(c[1]):null,miniaturas:[...m.querySelectorAll('img')].filter(function(i){return i.getBoundingClientRect().width>0&&i.complete&&i.naturalWidth>0}).length,carregando:[...m.querySelectorAll('[class*="loading"],[class*="progress"],[class*="spin"]')].some(function(e){return e.getBoundingClientRect().width>0}),enviar_ativo:!!env&&!env.disabled&&!/disabled/.test(env.className),erro:(t.match(/[^\\n]*(falh|erro|inválid|excede|grande demais)[^\\n]*/i)||[null])[0]};})()`
+    `(function(){var m=${JS_MODAL};if(!m)return null;var t=m.innerText||'';var c=/(\\d)\\s*\\/\\s*3/.exec(t);var env=[...m.querySelectorAll('button')].find(function(b){return (b.innerText||'').trim()==='Enviar'});var itens=[...m.querySelectorAll('.evidence-item')];return {contador:c?Number(c[1]):null,miniaturas:[...m.querySelectorAll('img')].filter(function(i){return i.getBoundingClientRect().width>0&&i.complete&&i.naturalWidth>0}).length,prontas:itens.filter(function(it){var l=it.querySelector('.actions-layer');return l&&l.style.display!=='none'}).length,enviar_ativo:!!env&&!env.disabled&&!/disabled/.test(env.className),erro:(t.match(/[^\\n]*(falh|erro|inválid|excede|grande demais)[^\\n]*/i)||[null])[0]};})()`
   );
 }
 
@@ -164,19 +178,28 @@ async function enviar(page, a) {
   if (!janela) throw new Error("a janela Enviar Prova não abriu");
   const input = await janela.$("input[type=file]");
   if (!input) throw new Error("a janela não tem campo de arquivo");
+  let subidas = 0;
+  const contar = (r) => {
+    if (r.request().method() === "POST" && r.status() === 200 && /\/uploadapi\/.*notify/.test(r.url())) subidas++;
+  };
+  page.on("response", contar);
   await input.uploadFile(...arquivos);
 
-  // espera as miniaturas subirem (a Shopee manda o arquivo na hora em que entra)
+  // espera cada foto subir pra Shopee (ela manda na hora em que o arquivo entra)
+  const n = arquivos.length;
   let est = null;
-  for (let i = 0; i < 60; i++) {
+  for (let i = 0; i < 90; i++) {
     await sleep(1000);
     est = await estadoJanela(page);
-    if (est && est.contador === arquivos.length && est.miniaturas >= arquivos.length && !est.carregando && est.enviar_ativo) break;
+    if (est && est.miniaturas >= n && est.prontas >= n && subidas >= n && est.enviar_ativo) break;
   }
+  page.off("response", contar);
+  await sleep(1500);
+  if (est) est.subidas = subidas;
   if (a.print) await page.screenshot({ path: a.print.replace(/\.png$/, "-antes.png") }).catch(() => {});
-  if (!est || est.contador !== arquivos.length || est.miniaturas < arquivos.length) {
+  if (!est || est.miniaturas < n || est.prontas < n || subidas < n) {
     await clicarNaJanela(page, "Voltar");
-    return { ok: false, motivo: "as fotos não entraram todas na janela", janela: est, ...antes };
+    return { ok: false, motivo: "as fotos não subiram todas pra Shopee", janela: est, ...antes };
   }
   if (!a["de-verdade"]) {
     await clicarNaJanela(page, "Voltar");
@@ -189,33 +212,48 @@ async function enviar(page, a) {
   }
 
   await clicarNaJanela(page, "Enviar");
-  let fechou = false;
+  // Depois do Enviar a Shopee pergunta (visto no 294571, 25/09): "Contestar
+  // Shopee — Tem certeza que deseja solicitar uma contestação? A Shopee
+  // reserva-se o direito exclusivo de tomar a decisão final." Voltar/Confirmar.
+  // É a confirmação do próprio envio; outra janela qualquer → para e avisa.
+  const JS_OUTRA = `[...document.querySelectorAll('.eds-modal__box, .eds-modal__content')].find(function(b){return b.getBoundingClientRect().width>0&&!/Enviar Prova|Feedback da Plataforma/.test(b.innerText||'')})`;
   let outra = null;
-  for (let i = 0; i < 20 && !fechou; i++) {
+  let confirmou = false;
+  let fechou = false;
+  for (let i = 0; i < 30; i++) {
     await sleep(1000);
-    fechou = !(await page.evaluate(`!!(${JS_MODAL})`));
-    // confirmação depois do Enviar (não vista ainda): só confirma se fala de prova/evidência
-    outra = await page.evaluate(
-      `(function(){var m=[...document.querySelectorAll('.eds-modal__box, .eds-modal__content')].find(function(b){return b.getBoundingClientRect().width>0&&!/Enviar Prova/.test(b.innerText||'')&&!/Feedback da Plataforma/.test(b.innerText||'')});return m?(m.innerText||'').slice(0,500):null;})()`
-    );
-    if (outra && /prova|evid[eê]ncia/i.test(outra)) {
-      await page.evaluate(
-        `(function(){var m=[...document.querySelectorAll('.eds-modal__box, .eds-modal__content')].find(function(b){return b.getBoundingClientRect().width>0&&!/Enviar Prova/.test(b.innerText||'')});var b=m&&[...m.querySelectorAll('button')].find(function(e){return /^(Confirmar|Enviar|OK)$/i.test((e.innerText||'').trim())});if(b)b.click();})()`
+    const aberta = await page.evaluate(`!!(${JS_MODAL})`);
+    outra = await page.evaluate(`(function(){var m=${JS_OUTRA};return m?(m.innerText||'').slice(0,500):null;})()`);
+    if (outra && !confirmou) {
+      if (!/contesta|prova|evid[eê]ncia/i.test(outra)) break; // janela desconhecida: não clica
+      if (a.print) await page.screenshot({ path: a.print.replace(/\.png$/, "-confirmar.png") }).catch(() => {});
+      confirmou = await page.evaluate(
+        `(function(){var m=${JS_OUTRA};var b=m&&[...m.querySelectorAll('button')].find(function(e){return (e.innerText||'').trim()==='Confirmar'});if(b)b.click();return !!b;})()`
       );
+      continue;
+    }
+    if (!aberta && !outra) {
+      fechou = true;
+      break;
     }
   }
   await sleep(2000);
   if (a.print) await page.screenshot({ path: a.print }).catch(() => {});
-  const depois = situacao(await buscar(page, a.pedido).catch(() => ""));
+  let depoisErro = null;
+  const depois = situacao(await buscar(page, a.pedido).catch((e) => ((depoisErro = String(e.message || e)), "Upload Evidence")));
   if (a.print) await page.screenshot({ path: a.print.replace(/\.png$/, "-lista.png") }).catch(() => {});
   return {
     ok: fechou && !depois.pendente,
     enviado: fechou,
+    confirmou,
     anexadas: arquivos.length,
     antes,
     depois,
     outra_janela: outra,
-    motivo: !fechou ? "a janela não fechou depois do Enviar" : depois.pendente ? "a linha ainda pede evidência depois do envio" : null,
+    motivo: !fechou
+      ? (outra && !confirmou ? "apareceu uma janela que eu não conheço depois do Enviar — não cliquei" : "a janela não fechou depois do Enviar/Confirmar")
+      : depoisErro ? `enviado, mas não consegui reler a linha: ${depoisErro}`
+      : depois.pendente ? "a linha ainda pede evidência depois do envio" : null,
   };
 }
 
@@ -224,9 +262,16 @@ if (!a.ws || !a.pedido || !["conferir", "fotos", "enviar"].includes(a.cmd)) {
   console.log(JSON.stringify({ ok: false, motivo: "uso: conferir|fotos|enviar --ws WS --pedido X …" }));
   process.exit(2);
 }
-const browser = await puppeteer.connect({ browserWSEndpoint: a.ws, defaultViewport: null });
+let browser;
 let saida;
 try {
+  // o perfil pode estar acabando de abrir: tenta a conexão algumas vezes
+  for (let i = 0; i < 5 && !browser; i++) {
+    browser = await puppeteer.connect({ browserWSEndpoint: a.ws, defaultViewport: null }).catch((e) => {
+      if (i === 4) throw e;
+      return sleep(3000).then(() => undefined);
+    });
+  }
   const abas = await browser.pages();
   const page = abas.find((p) => p.url().startsWith(SELLER)) || abas[0] || (await browser.newPage());
   await page.bringToFront().catch(() => {});
@@ -236,6 +281,6 @@ try {
 } catch (e) {
   saida = { ok: false, motivo: String((e && e.message) || e) };
 } finally {
-  browser.disconnect();
+  browser?.disconnect();
 }
 console.log(JSON.stringify(saida));
