@@ -1,35 +1,47 @@
-import { ref } from 'vue'
+import { onScopeDispose, ref, watch } from 'vue'
+import { onBeforeRouteLeave } from 'vue-router'
 
-// Senha extra de páginas sensíveis (Valuation, Empresas). Eduardo, 25/09/2026:
-// "senha segura porque tem informações que muita gente não pode ver".
+// Senha extra de páginas sensíveis (Empresas). Eduardo, 25/09/2026: "senha
+// segura porque tem informações que muita gente não pode ver".
 //
-// A chave vem do POST de desbloqueio e fica em sessionStorage: some ao fechar a
-// aba e vale 15 minutos. Quem confere de verdade é o SERVIDOR — sem a chave no
-// cabeçalho ele recusa os dados, então esta trava não é só visual.
-export function useSenhaExtra(escopo: string, caminhoDesbloqueio: string, cabecalho: string) {
+// Quem confere de verdade é o SERVIDOR — sem a chave no cabeçalho ele recusa os
+// dados, então esta trava não é só visual. A chave vale 15 minutos.
+//
+// Onde a chave fica (Eduardo, 25/09: "se eu sair preciso que já bloqueie"):
+// SÓ na memória da página, nunca no navegador. Por isso tranca de novo ao
+// - sair da área (`area`: a lista e a ficha de uma empresa são a mesma área;
+//   Cadastros, Lojas, Valuation etc. não são);
+// - recarregar a página ou fechar a aba;
+// - vencer os 15 minutos, mesmo parado na tela.
+export function useSenhaExtra(
+  escopo: string,
+  caminhoDesbloqueio: string,
+  cabecalho: string,
+  area: RegExp,
+) {
   const { api } = useApi()
-  const CHAVE = `davinci.${escopo}.token`
-  const VENCE = `davinci.${escopo}.token_exp`
-
-  const token = ref<string | null>(null)
+  // useState: a mesma chave para a lista e para a ficha (navegar entre elas
+  // não pede a senha de novo). Na recarga ela recomeça vazia.
+  const token = useState<string | null>(`senha-extra:${escopo}:token`, () => null)
+  const vence = useState<number>(`senha-extra:${escopo}:vence`, () => 0)
   const senha = ref('')
   const erro = ref<string | null>(null)
   const desbloqueando = ref(false)
 
-  function lerGuardado(): string | null {
-    if (import.meta.server) return null
-    const tok = sessionStorage.getItem(CHAVE)
-    const exp = Number(sessionStorage.getItem(VENCE) || 0)
-    if (!tok || !exp || Date.now() / 1000 > exp) {
-      sessionStorage.removeItem(CHAVE)
-      sessionStorage.removeItem(VENCE)
-      return null
-    }
-    return tok
+  // Versões anteriores guardavam a chave na aba; limpa o que tiver sobrado.
+  function limparAntigo() {
+    if (import.meta.server) return
+    try {
+      sessionStorage.removeItem(`davinci.${escopo}.token`)
+      sessionStorage.removeItem(`davinci.${escopo}.token_exp`)
+    } catch { /* navegador sem armazenamento: nada a limpar */ }
   }
 
-  function iniciar() {
-    token.value = lerGuardado()
+  /** Confere a chave em memória; devolve true se ainda vale. */
+  function iniciar(): boolean {
+    limparAntigo()
+    if (token.value && Date.now() >= vence.value) trancar()
+    return !!token.value
   }
 
   function headers(): Record<string, string> {
@@ -45,10 +57,9 @@ export function useSenhaExtra(escopo: string, caminhoDesbloqueio: string, cabeca
         method: 'POST',
         body: { password: senha.value },
       })
-      token.value = r.token
-      sessionStorage.setItem(CHAVE, r.token)
       // 30 s de folga: a tela tranca um pouco antes do servidor recusar.
-      sessionStorage.setItem(VENCE, String(Math.floor(Date.now() / 1000) + r.expires_in - 30))
+      vence.value = Date.now() + (r.expires_in - 30) * 1000
+      token.value = r.token
       return true
     } catch (e: any) {
       erro.value = mensagemDaSenhaExtra(e)
@@ -61,11 +72,27 @@ export function useSenhaExtra(escopo: string, caminhoDesbloqueio: string, cabeca
   }
 
   function trancar() {
-    if (!import.meta.server) {
-      sessionStorage.removeItem(CHAVE)
-      sessionStorage.removeItem(VENCE)
-    }
     token.value = null
+    vence.value = 0
+  }
+
+  // Tranca na hora em que vence, mesmo com a pessoa parada na tela.
+  let relogio: ReturnType<typeof setTimeout> | null = null
+  if (!import.meta.server) {
+    watch(
+      () => (token.value ? vence.value : 0),
+      (quando) => {
+        if (relogio) clearTimeout(relogio)
+        relogio = quando ? setTimeout(trancar, Math.max(0, quando - Date.now())) : null
+      },
+      { immediate: true },
+    )
+    onScopeDispose(() => { if (relogio) clearTimeout(relogio) })
+
+    // Saiu da área: tranca antes de a próxima página abrir.
+    onBeforeRouteLeave((para) => {
+      if (!area.test(para.path)) trancar()
+    })
   }
 
   // A chave venceu no meio do uso: o servidor devolve `<escopo>_locked`.

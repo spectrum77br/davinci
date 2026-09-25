@@ -61,7 +61,7 @@ const router = useRouter()
 const { api } = useApi()
 
 // Senha extra da tela Empresas (a mesma do Valuation) — ver pages/companies/index.vue.
-const trava = useSenhaExtra('empresas', '/api/companies/unlock', 'X-Empresas-Token')
+const trava = useSenhaExtra('empresas', '/api/companies/unlock', 'X-Empresas-Token', /^\/companies(\/|$)/)
 
 async function apiE<T = any>(path: string, opts: any = {}): Promise<T> {
   try {
@@ -378,14 +378,18 @@ async function carregarTudo() {
   await load()
   await loadCertificates()
 }
-onMounted(() => {
-  trava.iniciar()
-  if (trava.token.value) carregarTudo()
-})
+// Carrega quando a chave aparece: já estava guardada na aba (iniciar) ou a
+// pessoa acabou de digitar a senha. Não dá para esperar um aviso do cartão:
+// ao desbloquear o cartão sai da tela, e o Vue descarta o aviso de componente
+// que já saiu — a tabela ficava vazia (25/09/2026).
+watch(() => trava.token.value, (agora, antes) => { if (agora && !antes) carregarTudo() })
+// A lista e a ficha dividem a chave: vindo de uma para a outra ela já existe
+// e o observador acima não dispara, então carrega aqui.
+onMounted(() => { if (trava.iniciar()) carregarTudo() })
 </script>
 
 <template>
-  <SenhaExtraTrava v-if="!trava.token.value" titulo="Empresas" :trava="trava" @desbloqueado="carregarTudo" />
+  <SenhaExtraTrava v-if="!trava.token.value" titulo="Empresas" :trava="trava" />
   <div v-else-if="company" class="space-y-6">
     <div class="flex items-center gap-3">
       <NuxtLink to="/companies" class="text-muted-foreground hover:text-foreground">

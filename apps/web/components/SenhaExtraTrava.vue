@@ -1,18 +1,17 @@
 <script setup lang="ts">
 // Cartão de senha extra — o mesmo visual do Valuation. Recebe o objeto de
-// useSenhaExtra() e avisa quando desbloqueou.
+// useSenhaExtra(). NÃO avisa a página que desbloqueou: ao dar certo o cartão
+// sai da tela e o Vue descartaria o aviso. A página observa trava.token.
 import { ref, onMounted } from 'vue'
 import { Loader2, Lock } from 'lucide-vue-next'
 
 const props = defineProps<{ titulo: string; trava: ReturnType<typeof useSenhaExtra> }>()
-const emit = defineEmits<{ desbloqueado: [] }>()
 const campo = ref<HTMLInputElement | null>(null)
 
 onMounted(() => campo.value?.focus())
 
 async function enviar() {
-  if (await props.trava.desbloquear()) emit('desbloqueado')
-  else campo.value?.focus()
+  if (!(await props.trava.desbloquear())) campo.value?.focus()
 }
 </script>
 

@@ -78,7 +78,7 @@ const { api } = useApi()
 // Eduardo, 25/09/2026: "senha segura porque tem informações que muita gente
 // não pode ver". O servidor recusa os dados sem a chave; esta trava só mostra
 // o cadeado e manda a chave em toda chamada.
-const trava = useSenhaExtra('empresas', '/api/companies/unlock', 'X-Empresas-Token')
+const trava = useSenhaExtra('empresas', '/api/companies/unlock', 'X-Empresas-Token', /^\/companies(\/|$)/)
 
 async function apiE<T = any>(path: string, opts: any = {}): Promise<T> {
   try {
@@ -135,10 +135,14 @@ async function refresh() {
 }
 // Sem `await refresh()` no carregamento: a chave só existe no navegador
 // (sessionStorage), então a primeira carga acontece depois de montar a página.
-onMounted(() => {
-  trava.iniciar()
-  if (trava.token.value) refresh()
-})
+// Carrega quando a chave aparece: já estava guardada na aba (iniciar) ou a
+// pessoa acabou de digitar a senha. Não dá para esperar um aviso do cartão:
+// ao desbloquear o cartão sai da tela, e o Vue descarta o aviso de componente
+// que já saiu — a tabela ficava vazia (25/09/2026).
+watch(() => trava.token.value, (agora, antes) => { if (agora && !antes) refresh() })
+// A lista e a ficha dividem a chave: vindo de uma para a outra ela já existe
+// e o observador acima não dispara, então carrega aqui.
+onMounted(() => { if (trava.iniciar()) refresh() })
 
 // Responsáveis conhecidos (para o filtro e para o autocompletar do campo),
 // tirados da própria grade — o Responsável é um dado DA EMPRESA.
@@ -792,7 +796,7 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
 <template>
   <div class="space-y-4">
     <RouteTabs :tabs="TABS_CADASTROS" />
-    <SenhaExtraTrava v-if="!trava.token.value" titulo="Empresas" :trava="trava" @desbloqueado="refresh" />
+    <SenhaExtraTrava v-if="!trava.token.value" titulo="Empresas" :trava="trava" />
     <template v-else>
     <div class="flex items-center gap-3 flex-wrap">
       <h1 class="text-2xl font-semibold">Empresas</h1>
