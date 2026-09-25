@@ -36,7 +36,7 @@ from app.services import chamados as chamados_svc
 from app.services import threema
 from app.services.chamados_devolucao import TIPO_ABERTURA
 from app.services.chamados_devolucao_sync import ABERTURA_FALHOU_ACOMPANHA
-from app.services.chamados_tiktok_reembolso import _destinatarios
+from app.services.chamados_tiktok_reembolso import _destinatarios, e_chamado_reembolso
 
 logger = structlog.get_logger()
 
@@ -164,6 +164,7 @@ async def varrer(
 
     resumo = {"vistos": len(rows), "robo": 0, "humano": 0, "espera": 0, "acompanha": 0, "novo": 0}
     avisos: list[str] = []
+    avisos_por_contexto: dict[str, list[str]] = {}
     for msg, ch in rows:
         presa_desde = msg.updated_at or msg.created_at
         rota = _rota(msg.erro)
@@ -191,23 +192,35 @@ async def varrer(
         else:
             nota = f"{MARCA} ({msg.erro}) há {dias} dia(s): {motivo}. Precisa de gente."
         session.add(chamados_svc.registrar_sistema(ch, nota))
-        avisos.append(_linha(ch, msg.erro, valor, dias))
+        linha = _linha(ch, msg.erro, valor, dias)
+        avisos.append(linha)
+        # Abertura é usada também por chamados de logística/manuais. Separa
+        # pela origem do caso, sem inferir o assunto pelo erro ou pelo texto.
+        # O vigia antigo da TikTok criou casos de reembolso com origem vendas.
+        contexto = (
+            "devolucoes" if ch.origem == "devolucao" or e_chamado_reembolso(ch) else "logistica"
+        )
+        avisos_por_contexto.setdefault(contexto, []).append(linha)
 
     if not dry_run:
         await session.commit()
         if avisos:
             alvos = _destinatarios()
-            texto = (
-                "⚠️ Chamados com abertura presa (varredura):\n" + "\n".join(avisos[:15])
-                + ("\n…" if len(avisos) > 15 else "")
-            )
             if alvos:
-                try:
-                    await threema.ThreemaClient(contexto="logistica").send_to_all(
-                        texto, recipients=alvos
+                for contexto, linhas in avisos_por_contexto.items():
+                    texto = (
+                        "⚠️ Chamados com abertura presa (varredura):\n" + "\n".join(linhas[:15])
+                        + ("\n…" if len(linhas) > 15 else "")
                     )
-                except Exception as e:  # noqa: BLE001 — aviso é best-effort
-                    logger.warning("chamados_pendencias_threema_falhou", err=str(e)[:200])
+                    try:
+                        await threema.ThreemaClient(contexto=contexto).send_to_all(
+                            texto, recipients=alvos
+                        )
+                    except Exception as e:  # noqa: BLE001 — cada canal é best-effort
+                        logger.warning(
+                            "chamados_pendencias_threema_falhou",
+                            contexto=contexto, err=str(e)[:200],
+                        )
     resumo["avisos"] = avisos
     logger.info(
         "chamados_pendencias_varredura",
