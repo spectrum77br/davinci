@@ -70,6 +70,11 @@ class Company(Base, TimestampMixin):
     # `uq_companies_ip`, migration 0324): dois CNPJs no mesmo IP é o que o
     # marketplace usa para ligar contas.
     ip: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # O que o serviço do Mac confirmou no AdsPower (migration 0325). Pendente
+    # = `ip` preenchido e diferente de `ip_adspower`.
+    ip_adspower: Mapped[str | None] = mapped_column(Text, nullable=True)
+    ip_adspower_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    ip_adspower_erro: Mapped[str | None] = mapped_column(Text, nullable=True)
     obs: Mapped[str | None] = mapped_column(Text, nullable=True)
     enabled_marketplaces: Mapped[list[str]] = mapped_column(
         ARRAY(Text),

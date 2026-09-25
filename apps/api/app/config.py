@@ -375,6 +375,13 @@ class Settings(BaseSettings):
     # servidor E o mesmo valor no .env do executor pra ligar a integração.
     nf_agent_token: str = ""
 
+    # Token M2M do serviço do Mac que aplica o IP de cada empresa no AdsPower
+    # (a API do AdsPower só responde na máquina dele). Guarda
+    # /api/agent/adspower/*. Vazio = FECHADO (401), e aí nada vai para o
+    # AdsPower. Set via ADSPOWER_AGENT_TOKEN no servidor E o mesmo valor no
+    # arquivo de token do serviço no Mac.
+    adspower_agent_token: str = ""
+
     # Auto-enfileirador de NF (sweep): a cada tick varre pedidos Shopee/TikTok
     # "Em aberto" (situacao=6) de loja com faturador atribuído, confere o
     # estoque (saldo negativo → Aguardando Cancelamento) e enfileira a

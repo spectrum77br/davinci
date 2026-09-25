@@ -172,6 +172,10 @@ class CompanyOut(CompanyBase):
     model_config = ConfigDict(from_attributes=True)
     id: UUID
     enabled_marketplaces: list[str] = []
+    # Situação no AdsPower — só leitura, quem grava é o serviço do Mac.
+    ip_adspower: str | None = None
+    ip_adspower_em: datetime | None = None
+    ip_adspower_erro: str | None = None
     created_at: datetime
     updated_at: datetime
 

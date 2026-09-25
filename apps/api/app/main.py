@@ -8,12 +8,16 @@ from sqlalchemy import text
 from app.config import get_settings
 from app.db import engine
 from app.redis_client import redis
+from app.routers import adspower_agent as adspower_agent_router
 from app.routers import alerts as alerts_router
 from app.routers import aprovar_margem as aprovar_margem_router
 from app.routers import audit as audit_router
 from app.routers import auth as auth_router
 from app.routers import automacoes as automacoes_router
 from app.routers import cadastros as cadastros_router
+from app.routers import chamados as chamados_router
+from app.routers import chamados_ia as chamados_ia_router
+from app.routers import claude_conector as claude_conector_router
 from app.routers import companies as companies_router
 from app.routers import company_certificates as company_certificates_router
 from app.routers import dashboard as dashboard_router
@@ -34,8 +38,8 @@ from app.routers import jobs as jobs_router
 from app.routers import listings as listings_router
 from app.routers import logistica as logistica_router
 from app.routers import logistica_track as logistica_track_router
-from app.routers import margem_audit as margem_audit_router
 from app.routers import marcas as marcas_router
+from app.routers import margem_audit as margem_audit_router
 from app.routers import margens as margens_router
 from app.routers import metrics as metrics_router
 from app.routers import nf as nf_router
@@ -46,9 +50,6 @@ from app.routers import ouvidoria as ouvidoria_router
 from app.routers import pricing as pricing_router
 from app.routers import pricing_mega as pricing_mega_router
 from app.routers import products as products_router
-from app.routers import chamados as chamados_router
-from app.routers import chamados_ia as chamados_ia_router
-from app.routers import claude_conector as claude_conector_router
 from app.routers import redes_sociais as redes_sociais_router
 from app.routers import refunds as refunds_router
 from app.routers import segments as segments_router
@@ -164,6 +165,7 @@ app.include_router(auth_router.router)
 app.include_router(users_router.router)
 app.include_router(companies_router.router)
 app.include_router(company_certificates_router.router)
+app.include_router(adspower_agent_router.router)
 app.include_router(stores_router.router)
 app.include_router(cadastros_router.router)
 app.include_router(imagens_router.router)
@@ -222,9 +224,9 @@ if settings.enable_marketing:
     from app.routers import marketing as marketing_router
     from app.routers import marketing_creatives as marketing_creatives_router
     from app.routers import marketing_legendas as marketing_legendas_router
+    from app.routers import marketing_metricas as marketing_metricas_router
     from app.routers import marketing_personagens as marketing_personagens_router
     from app.routers import marketing_postagens as marketing_postagens_router
-    from app.routers import marketing_metricas as marketing_metricas_router
     from app.routers import marketing_roteiros as marketing_roteiros_router
     from app.routers import portal_criativos as portal_criativos_router
     app.include_router(marketing_router.router)

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { TABS_CADASTROS } from '~/lib/navGroups'
-import { ref, computed, reactive } from 'vue'
+import { ref, computed, reactive, watch } from 'vue'
 import { Plus, RefreshCw, X, ExternalLink, Trash2 } from 'lucide-vue-next'
 import {
   MARKETPLACES,
@@ -35,6 +35,10 @@ type CompanyOut = {
   operacao: string | null
   contabilidade: string | null
   ip: string | null
+  // O que o serviço do Mac confirmou no AdsPower (só leitura).
+  ip_adspower: string | null
+  ip_adspower_em: string | null
+  ip_adspower_erro: string | null
   obs: string | null
   enabled_marketplaces: string[]
   created_at: string
@@ -292,6 +296,11 @@ async function commitEditCell(row: GridRow, field: EditableField) {
       body: { [field]: next || null },
     })
     row.company[field] = updated[field] as any
+    if (field === 'ip') {
+      row.company.ip_adspower = updated.ip_adspower
+      row.company.ip_adspower_em = updated.ip_adspower_em
+      row.company.ip_adspower_erro = updated.ip_adspower_erro
+    }
     // Deu certo: a faixa de erro de uma tentativa anterior (ex.: IP repetido)
     // não pode continuar na tela dizendo que falhou.
     error.value = null
@@ -351,6 +360,36 @@ function ipRepetido(row: GridRow) {
   const ip = (row.company.ip || '').trim().toLowerCase()
   return !!ip && ipsRepetidos.value.has(ip)
 }
+
+// ---------- IP no AdsPower ----------
+// Quem aplica é o serviço do Mac, a cada minuto. A tela só mostra a situação.
+type SituacaoAdspower = { simbolo: string; classe: string; texto: string }
+function situacaoAdspower(c: CompanyOut): SituacaoAdspower | null {
+  if (!c.ip) return null
+  if (c.ip === c.ip_adspower) {
+    const quando = c.ip_adspower_em ? new Date(c.ip_adspower_em).toLocaleString('pt-BR') : ''
+    return { simbolo: '✓', classe: 'text-green-600', texto: `Já está no AdsPower${quando ? ` (desde ${quando})` : ''}` }
+  }
+  if (c.ip_adspower_erro) {
+    return { simbolo: '✗', classe: 'text-red-600', texto: `Não foi para o AdsPower: ${c.ip_adspower_erro}. Tenta de novo sozinho em até 1 hora, ou na hora se você trocar o IP.` }
+  }
+  return { simbolo: '⏳', classe: 'text-muted-foreground', texto: 'Indo para o AdsPower (leva até 1 minuto)' }
+}
+// Enquanto algum IP está a caminho, recarrega a tabela a cada 20 s para o
+// relógio virar ✓ (ou ✗) sem a pessoa precisar apertar "recarregar".
+let relogioAdspower: ReturnType<typeof setInterval> | null = null
+const algumIpACaminho = computed(() =>
+  (grid.value?.rows || []).some(r => situacaoAdspower(r.company)?.simbolo === '⏳'),
+)
+watch(algumIpACaminho, (sim) => {
+  if (sim && !relogioAdspower) {
+    relogioAdspower = setInterval(() => { if (!loading.value && !editingCell.value) refresh() }, 20_000)
+  } else if (!sim && relogioAdspower) {
+    clearInterval(relogioAdspower)
+    relogioAdspower = null
+  }
+})
+onBeforeUnmount(() => { if (relogioAdspower) clearInterval(relogioAdspower) })
 
 // ---------- certificado digital ----------
 // Clicar na célula abre um painel pequeno para pôr a senha (e o arquivo, se a
@@ -956,6 +995,13 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
               >
                 {{ row.company.ip || '—' }}<span v-if="ipRepetido(row)"> ⚠ repetido</span>
               </span>
+              <span
+                v-if="!isEditingCell(row, 'ip') && situacaoAdspower(row.company)"
+                class="ml-1 font-sans"
+                :class="situacaoAdspower(row.company)!.classe"
+                :title="situacaoAdspower(row.company)!.texto"
+                :aria-label="situacaoAdspower(row.company)!.texto"
+              >{{ situacaoAdspower(row.company)!.simbolo }}</span>
             </td>
             <td v-if="isAdmin" class="px-3 py-2 text-xs whitespace-nowrap">
               <button
