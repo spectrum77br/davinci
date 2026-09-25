@@ -664,7 +664,9 @@ async def desligar_personagem(
 
 
 def _req_ideia_out(
-    r: MarketingIdeiaRequisicao, arquivos: dict[UUID, list[MarketingCreativeFile]] | None = None
+    r: MarketingIdeiaRequisicao,
+    arquivos: dict[UUID, list[MarketingCreativeFile]] | None = None,
+    nomes: dict[UUID, str] | None = None,
 ) -> dict[str, Any]:
     # O id do ARQUIVO, não só o do criativo: a rota de bytes é
     # /creatives/{id}/arquivo/{file_id} — só `/arquivo` é o POST de upload, e
@@ -683,6 +685,13 @@ def _req_ideia_out(
         # peça em vez de julgar uma descrição.
         "creative_id": str(r.creative_id) if r.creative_id else None,
         "personagem_id": str(r.personagem_id) if r.personagem_id else None,
+        # QUEM está na peça, legível. O id sozinho chegava ao painel e nunca
+        # aparecia — a escolha da agência ficava gravada e invisível para quem
+        # decide. `personagem_outro` é o texto de quando não é ninguém do
+        # elenco: é o caso que mais pesa (rosto de pessoa real em peça
+        # comercial), e por isso vem em destaque na tela.
+        "personagem_nome": (nomes or {}).get(r.personagem_id) if r.personagem_id else None,
+        "personagem_outro": r.personagem_outro,
         "arquivos": [
             {
                 "id": str(f.id),
@@ -740,7 +749,21 @@ async def listar_conceitos(
         ):
             arquivos.setdefault(f.creative_id, []).append(f)
 
-    return {"requisicoes": [_req_ideia_out(r, arquivos) for r in linhas]}
+    # E os nomes das personas, também numa consulta só.
+    pids = {r.personagem_id for r in linhas if r.personagem_id}
+    nomes: dict[UUID, str] = {}
+    if pids:
+        nomes = dict(
+            (
+                await session.execute(
+                    select(MarketingPersonagem.id, MarketingPersonagem.nome).where(
+                        MarketingPersonagem.id.in_(pids)
+                    )
+                )
+            ).all()
+        )
+
+    return {"requisicoes": [_req_ideia_out(r, arquivos, nomes) for r in linhas]}
 
 
 class DecisaoIdeiaIn(BaseModel):

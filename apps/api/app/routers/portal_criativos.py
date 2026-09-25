@@ -1067,6 +1067,7 @@ async def propor_video(
     marca: Annotated[str, Form()] = "",
     sku: Annotated[str, Form()] = "",
     personagem_id: Annotated[str, Form()] = "",
+    personagem_outro: Annotated[str, Form()] = "",
 ) -> dict[str, Any]:
     """A agência publica um vídeo DELA, com o conceito junto, e cai na revisão.
 
@@ -1097,6 +1098,35 @@ async def propor_video(
     marca_txt = (marca or "").strip() or None
     sku_txt = (sku or "").strip() or None
 
+    # Qual persona está na peça. Vem do elenco e é conferida contra ele: id
+    # inventado no formulário não pode virar ponteiro no banco.
+    #
+    # Ou "outro": alguém que NÃO está no elenco (Marco, 25/09/2026). Aí o
+    # texto de quem é passa a ser obrigatório — sem ele, a escolha ficaria
+    # idêntica a "sem persona" no banco, e a casa não saberia que tem um rosto
+    # de pessoa real na peça. A conferência vem ANTES de criar a linha e de
+    # gravar o vídeo em disco — recusar depois deixava arquivo órfão — e não
+    # fica só no portal: a API é a última porta.
+    persona = None
+    outro = None
+    escolhido = (personagem_id or "").strip()
+    if escolhido == "outro":
+        outro = (personagem_outro or "").strip()[:500]
+        if not outro:
+            raise HTTPException(400, detail={"code": "personagem_outro_obrigatorio"})
+    elif escolhido:
+        try:
+            alvo = UUID(escolhido)
+        except ValueError:
+            raise HTTPException(400, detail={"code": "personagem_invalido"}) from None
+        persona = await session.scalar(
+            select(MarketingPersonagem.id).where(
+                MarketingPersonagem.id == alvo, MarketingPersonagem.ativo.is_(True)
+            )
+        )
+        if persona is None:
+            raise HTTPException(404, detail={"code": "personagem_nao_encontrado"})
+
     row = MarketingCreative(
         id=uuid4(),
         modelo=titulo[:190],
@@ -1115,26 +1145,11 @@ async def propor_video(
     # escreveu; texto que chega de fora não entra nela por chegada — nem
     # desligado, porque desligado ele ainda aparece na lista de quem escreve.
     # Vira pedido, e o roteiro nasce no sim.
-    # Qual persona está na peça. Vem do elenco e é conferida contra ele: id
-    # inventado no formulário não pode virar ponteiro no banco.
-    persona = None
-    escolhido = (personagem_id or "").strip()
-    if escolhido:
-        try:
-            alvo = UUID(escolhido)
-        except ValueError:
-            raise HTTPException(400, detail={"code": "personagem_invalido"}) from None
-        persona = await session.scalar(
-            select(MarketingPersonagem.id).where(
-                MarketingPersonagem.id == alvo, MarketingPersonagem.ativo.is_(True)
-            )
-        )
-        if persona is None:
-            raise HTTPException(404, detail={"code": "personagem_nao_encontrado"})
-
-    # Pedido nasce se houver conceito OU persona: dizer "usei a Márcia" já é
-    # informação que quem decide precisa, mesmo sem texto junto.
-    if conceito or persona:
+    #
+    # Pedido nasce se houver conceito OU persona OU outra pessoa: dizer "usei
+    # a Márcia" — ou "é um ator contratado" — já é informação que quem decide
+    # precisa, mesmo sem texto junto.
+    if conceito or persona or outro:
         session.add(
             MarketingIdeiaRequisicao(
                 id=uuid4(),
@@ -1144,6 +1159,7 @@ async def propor_video(
                 sku=sku_txt,
                 equipe=equipe,
                 personagem_id=persona,
+                personagem_outro=outro,
                 creative_id=row.id,
             )
         )

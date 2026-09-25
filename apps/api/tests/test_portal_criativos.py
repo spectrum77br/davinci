@@ -907,6 +907,75 @@ async def test_video_autoral_sem_titulo_e_recusado(client: AsyncClient):
     assert r.json()["detail"]["code"] == "titulo_obrigatorio"
 
 
+async def test_outra_pessoa_na_peca_vira_pedido_e_o_painel_mostra_quem_e(
+    client: AsyncClient, db: AsyncSession, make_user, auth_as
+):
+    """Outra pessoa é rosto fora do elenco numa peça comercial: mesmo sem
+    conceito, nasce pedido — e o painel mostra QUEM é, não um id."""
+    from app.models import MarketingIdeiaRequisicao, UserRole
+
+    r = await client.post(
+        "/api/portal/criativos/proposta",
+        headers={"X-Portal-Token": TOK_A},
+        data={
+            "titulo": "Unboxing",
+            "personagem_id": "outro",
+            "personagem_outro": "  Carla, vendedora da loja  ",
+        },
+        files={"files": ("v.mp4", b"x" * 100, "video/mp4")},
+    )
+    assert r.status_code == 200, r.text
+    req = (await db.execute(select(MarketingIdeiaRequisicao))).scalar_one()
+    assert req.personagem_id is None
+    assert req.personagem_outro == "Carla, vendedora da loja"
+
+    auth_as(await make_user(role=UserRole.ADMIN))
+    fila = (await client.get("/api/marketing/roteiros/requisicoes")).json()["requisicoes"]
+    assert fila[0]["personagem_outro"] == "Carla, vendedora da loja"
+    assert fila[0]["personagem_nome"] is None
+
+
+async def test_outra_pessoa_sem_dizer_quem_e_recusada_antes_de_gravar(
+    client: AsyncClient, db: AsyncSession
+):
+    """Sem o texto, "outra pessoa" ficaria igual a "sem persona" no banco.
+    E a recusa vem antes da linha nascer: nada fica pela metade."""
+    from app.models import MarketingIdeiaRequisicao
+
+    r = await client.post(
+        "/api/portal/criativos/proposta",
+        headers={"X-Portal-Token": TOK_A},
+        data={"titulo": "Unboxing", "personagem_id": "outro", "personagem_outro": "   "},
+        files={"files": ("v.mp4", b"x" * 100, "video/mp4")},
+    )
+    assert r.status_code == 400
+    assert r.json()["detail"]["code"] == "personagem_outro_obrigatorio"
+    assert (await db.execute(select(MarketingCreative))).first() is None
+    assert (await db.execute(select(MarketingIdeiaRequisicao))).first() is None
+
+
+async def test_persona_do_elenco_chega_ao_painel_pelo_nome(
+    client: AsyncClient, db: AsyncSession, make_user, auth_as
+):
+    """O id da persona já era gravado e nunca aparecia para quem decide."""
+    from app.models import UserRole
+
+    p = await _personagem(db, nome="Lívia")
+    r = await client.post(
+        "/api/portal/criativos/proposta",
+        headers={"X-Portal-Token": TOK_A},
+        # texto em personagem_outro com persona do elenco é ignorado
+        data={"titulo": "Com a Lívia", "personagem_id": str(p.id), "personagem_outro": "x"},
+        files={"files": ("v.mp4", b"x" * 100, "video/mp4")},
+    )
+    assert r.status_code == 200, r.text
+
+    auth_as(await make_user(role=UserRole.ADMIN))
+    fila = (await client.get("/api/marketing/roteiros/requisicoes")).json()["requisicoes"]
+    assert fila[0]["personagem_nome"] == "Lívia"
+    assert fila[0]["personagem_outro"] is None
+
+
 # ─────────── catálogo: foto de produto ───────────
 
 
