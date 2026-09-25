@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.db import get_session
+from app.historico.contexto import identificar
 from app.models import User, UserRole, UserStatus
 from app.security.jwt import decode_session_token
 
@@ -27,7 +28,10 @@ async def get_current_user(
     if not sub:
         return None
     res = await session.execute(select(User).where(User.open_id == sub))
-    return res.scalar_one_or_none()
+    user = res.scalar_one_or_none()
+    # Histórico: diz quem é a pessoa deste pedido (só marca o banco em escrita).
+    await identificar(session, user)
+    return user
 
 
 async def require_user(

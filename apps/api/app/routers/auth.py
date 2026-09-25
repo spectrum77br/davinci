@@ -5,6 +5,7 @@ from typing import Annotated
 import structlog
 from arq.connections import ArqRedis
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response, status
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -12,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.db import get_session
 from app.deps.auth import get_current_user
-from app.models import AuthCode, User, UserRole, UserStatus
+from app.models import AuthCode, HistoricoAcesso, User, UserRole, UserStatus
 from app.security.jwt import issue_session_token
 from app.security.otp import (
     generate_code,
@@ -363,10 +364,13 @@ async def logout(resp: Response) -> dict:
 
 
 @router.get("/me", response_model=UserOut | None)
-async def me(user: Annotated[User | None, Depends(get_current_user)]) -> UserOut | None:
+async def me(
+    user: Annotated[User | None, Depends(get_current_user)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+):
     if user is None:
         return None
-    return UserOut(
+    out = UserOut(
         id=str(user.id),
         open_id=user.open_id,
         email=user.email,
@@ -376,3 +380,8 @@ async def me(user: Annotated[User | None, Depends(get_current_user)]) -> UserOut
         permissions=user.permissions,
         stock_tags=user.stock_tags or None,
     )
+    # Sistema › Histórico: a chave só aparece para quem está na lista — para
+    # os outros (inclusive admin) nem o nome do campo existe na resposta.
+    if await session.get(HistoricoAcesso, user.id) is not None:
+        return JSONResponse({**out.model_dump(mode="json"), "historico": True})
+    return out

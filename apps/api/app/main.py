@@ -7,6 +7,8 @@ from sqlalchemy import text
 
 from app.config import get_settings
 from app.db import engine
+from app.historico import banco as historico_banco
+from app.historico.middleware import HistoricoMiddleware
 from app.redis_client import redis
 from app.routers import adspower_agent as adspower_agent_router
 from app.routers import alerts as alerts_router
@@ -29,6 +31,7 @@ from app.routers import email_padroes as email_padroes_router
 from app.routers import estoque as estoque_router
 from app.routers import faturamento as faturamento_router
 from app.routers import faturas as faturas_router
+from app.routers import historico as historico_router
 from app.routers import financeiro as financeiro_router
 from app.routers import imagens as imagens_router
 from app.routers import importacao as importacao_router
@@ -153,6 +156,9 @@ _PROD_ORIGINS = [
     "https://gestaoestoque.com",
     "https://www.gestaoestoque.com",
 ]
+# Histórico (Sistema › Histórico): quem mudou o quê. Ver app/historico/.
+historico_banco.ligar()
+app.add_middleware(HistoricoMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_PROD_ORIGINS if settings.is_prod else _DEV_ORIGINS,
@@ -216,6 +222,8 @@ app.include_router(nf_upload_router.router)
 app.include_router(notas_fiscais_router.router)
 # Ouvidoria › Robôs (21/09/2026): catálogo dos robôs + ocorrências.
 app.include_router(ouvidoria_router.router)
+# Sistema › Histórico (25/09/2026): invisível para quem não está na lista.
+app.include_router(historico_router.router)
 app.include_router(dev_router.router)
 
 if settings.enable_marketing:

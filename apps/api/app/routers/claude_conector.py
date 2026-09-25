@@ -44,6 +44,7 @@ from sqlalchemy.orm import aliased
 from app.config import get_settings
 from app.db import get_session
 from app.deps.auth import require_admin
+from app.historico.contexto import identificar
 from app.models import ClaudeConector, User, UserStatus
 from app.models.enums import AlertSeverity, AlertType
 from app.services import claude_tarefas
@@ -367,6 +368,8 @@ async def mcp_post(
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> Response:
     conector, dono = await _conector_por_token(session, token)
+    # Histórico: o que o Claude muda fica no nome do dono do conector.
+    await identificar(session, dono, via="claude")
     if not _origem_permitida(request.headers.get("origin")):
         return Response(status_code=status.HTTP_403_FORBIDDEN)
     versao_hdr = request.headers.get("mcp-protocol-version")

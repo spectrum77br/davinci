@@ -57,6 +57,7 @@ from app.deps.auth import (  # noqa: E402
     require_user,
 )
 from app.main import app  # noqa: E402
+from app.historico import sql as historico_sql  # noqa: E402
 from app.models import Base, User, UserRole, UserStatus  # noqa: E402
 from app.security.senha_extra import require_empresas_unlock  # noqa: E402
 
@@ -309,6 +310,21 @@ async def _setup_schema():
             EXECUTE FUNCTION bling_envio_evento_capture_fn()
             """
         ))
+        # Histórico (25/09/2026): as mesmas funções e o mesmo gatilho da
+        # migration 0329, em todas as tabelas de negócio do schema de teste.
+        # Só gravam quando um pedido de pessoa marca a transação — os testes
+        # que autenticam pelo `auth_as` não marcam nada.
+        for comando in historico_sql.funcoes(TEST_SCHEMA):
+            await conn.execute(text(comando))
+        nomes = [
+            r[0]
+            for r in await conn.execute(
+                text(historico_sql.TABELAS_SEM_GATILHO),
+                {"schema": TEST_SCHEMA, "gatilho": historico_sql.NOME_GATILHO},
+            )
+        ]
+        for tabela in historico_sql.a_cobrir(nomes):
+            await conn.execute(text(historico_sql.criar_gatilho(TEST_SCHEMA, tabela)))
     yield
     async with _test_engine.begin() as conn:
         await conn.execute(text(f'DROP SCHEMA IF EXISTS "{TEST_SCHEMA}" CASCADE'))
@@ -322,6 +338,9 @@ async def db() -> AsyncIterator[AsyncSession]:
 
 
 _CLEANUP_TABLES = (
+    "historico_evento",  # FK SET NULL -> users
+    "historico_alteracao",
+    "historico_acesso",  # FK -> users: antes de users
     "claude_conectores",  # FK -> users: antes de users
     "chamados_ia_regras",  # FK -> users: antes de users
     "chamados_ia_avaliacoes",  # FK -> users/chamados: antes dos dois

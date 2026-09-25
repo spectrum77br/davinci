@@ -13,6 +13,9 @@ export type AuthUser = {
   // and sees the union of products matching ANY of the tags.
   // Slugs: ci|pi|ra|sa|sp|us|cd|fake|mala|eletro|insumos.
   stock_tags?: string[] | null
+  // Sistema › Histórico (25/09/2026): só vem (true) para quem o Eduardo
+  // liberou. Para os outros, inclusive admin, a chave nem existe.
+  historico?: boolean
 }
 
 export const useAuthStore = defineStore('auth', {

@@ -2372,6 +2372,24 @@ async def sync_logs_partition_gc(ctx: dict) -> None:
     logger.info("sync_logs_partition_ensured", name=name, start=start, end=end)
 
 
+async def historico_manutencao(ctx: dict) -> None:
+    """Sistema › Histórico: (1) põe o gatilho `historico_captura` em tabela
+    que ainda não tem — criada depois da migration 0329 ou ocupada no deploy
+    (roda também ao subir o worker, então tabela nova de um deploy já sai
+    coberta); (2) apaga o que passou de 1 ano."""
+    from app.db import engine
+    from app.historico import banco as historico_banco
+    from app.historico.instalar import instalar
+
+    cobertas, _faltando = await instalar(engine, _settings.database_schema)
+    async with session_scope() as s:
+        eventos, alteracoes = await historico_banco.limpar_antigos(s)
+    logger.info(
+        "historico_manutencao", gatilhos_novos=cobertas, eventos_apagados=eventos,
+        alteracoes_apagadas=alteracoes,
+    )
+
+
 async def alerts_cleanup(ctx: dict) -> None:
     """Delete alerts older than 60 days (B10). Carona diária da Ouvidoria:
     rodadas com mais de 30 dias (`ouvidoria_rodadas` cresce centenas de linhas
@@ -3484,6 +3502,7 @@ class WorkerSettings:
         sync_import_product_to_bling_job,
         push_lote_stock_to_bling_job,
         alerts_cleanup,
+        historico_manutencao,
         condicao_especial_gc,
         margem_reavaliar_reprovados,
         low_stock_polling,
@@ -3703,6 +3722,8 @@ class WorkerSettings:
         cron(sync_logs_partition_gc, day=15, hour=3, minute=0, run_at_startup=False),
         # Stubs — registered so wiring later doesn't need a worker redeploy.
         cron(alerts_cleanup, hour=6, minute=0, run_at_startup=False),  # 03:00 BRT
+        # Sistema › Histórico: gatilho em tabela nova + guarda 1 ano.
+        cron(historico_manutencao, hour=6, minute=40, run_at_startup=True),  # 03:40 BRT
         # Condição Especial de segmento encerrada há 30d (services/condicao_especial).
         cron(condicao_especial_gc, hour=6, minute=10, run_at_startup=False),  # 03:10 BRT
         cron(failed_jobs_alert_scan, minute=_TWO_MIN, run_at_startup=False),

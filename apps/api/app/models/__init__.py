@@ -103,6 +103,7 @@ from app.models.logistica import (
     LogisticaStatusAnexo,
 )
 from app.models.marca import Marca, MarcaEmailAssinatura, MarcaEmailPadrao, RedeSocial
+from app.models.historico import HistoricoAcesso, HistoricoAlteracao, HistoricoEvento
 from app.models.margem_audit import MargemAudit
 from app.models.margem_saldo_manual import MargemSaldoManual
 from app.models.margens import Margens
@@ -266,6 +267,9 @@ __all__ = [
     "MarcaEmailAssinatura",
     "MarcaEmailPadrao",
     "MarcaInpiStatus",
+    "HistoricoAcesso",
+    "HistoricoAlteracao",
+    "HistoricoEvento",
     "MargemAudit",
     "PrioridadeEstoqueMovimento",
     "MargemSaldoManual",

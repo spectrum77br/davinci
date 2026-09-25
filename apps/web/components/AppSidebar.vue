@@ -6,7 +6,7 @@ import {
   Receipt, TrendingUp, Settings, BarChart3,
   ClipboardList, ChevronDown, ChevronLeft, ChevronRight, Warehouse,
   Coins, FileText, Calculator, FlaskConical, Ship, Landmark, Headset,
-  ReceiptText, MessagesSquare, Radar,
+  ReceiptText, MessagesSquare, Radar, History,
 } from 'lucide-vue-next'
 import { allowedTabs, TABS_CADASTROS, TABS_NF, TABS_SISTEMA } from '~/lib/navGroups'
 
@@ -83,6 +83,8 @@ type Item = {
   resource?: string
   adminOnly?: boolean
   ownerOnly?: boolean
+  // Sistema › Histórico: só quem o Eduardo liberou (nem todo admin).
+  historicoOnly?: boolean
   featureFlag?: 'marketing'
   // Grupo unificado (lib/navGroups): o item destaca quando QUALQUER rota
   // do grupo está ativa, e some quando o usuário não pode ver nenhuma aba.
@@ -162,6 +164,9 @@ const sections = computed<Section[]>(() => [
     items: [
       // Sincronizações + Integrações + Alertas viraram abas de um item só.
       groupItem(TABS_SISTEMA, { label: 'Integrações', icon: Plug }),
+      // Histórico (25/09/2026): quem mudou o quê. Invisível para quem não
+      // está na lista do Eduardo — inclusive admin.
+      { to: '/historico', label: 'Histórico', icon: History, historicoOnly: true },
       { to: '/margem-audit', label: 'Auditoria de pedidos', icon: ClipboardList, ownerOnly: true },
     ].filter((x): x is Item => x !== null),
   },
@@ -233,6 +238,7 @@ const visibleSections = computed(() => {
         if (it.adminOnly && !auth.isAdmin) return false
         if (it.hideForAdmin && auth.isAdmin) return false
         if (it.ownerOnly && !isOwner.value) return false
+        if (it.historicoOnly && auth.user?.historico !== true) return false
         if (it.featureFlag === 'marketing' && !enableMarketing.value) return false
         return true
       }),
