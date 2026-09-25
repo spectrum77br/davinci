@@ -163,6 +163,9 @@ DECLARE
   v_bin text[];
   k text;
 BEGIN
+  -- Bloco protegido: se registrar der erro (tipo estranho, disco, o que for),
+  -- a mudança da pessoa passa assim mesmo — o Histórico nunca trava ninguém.
+  BEGIN
   v_ator := nullif(current_setting('davinci.ator', true), '')::uuid;
   IF v_ator IS NULL THEN
     RETURN NULL;
@@ -224,6 +227,9 @@ BEGIN
     nullif(v_antes, '{{}}'::jsonb), nullif(v_depois, '{{}}'::jsonb), v_ident,
     current_setting('application_name', true)
   );
+  EXCEPTION WHEN OTHERS THEN
+    RAISE WARNING 'historico_captura falhou em %: %', TG_TABLE_NAME, SQLERRM;
+  END;
   RETURN NULL;
 END
 $$""",

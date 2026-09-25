@@ -206,6 +206,19 @@ async def test_teto_por_acao(db, make_user):
 
 
 @pytest.mark.asyncio
+async def test_se_o_historico_falhar_a_mudanca_passa(db, make_user):
+    """O Histórico nunca trava ninguém: com a marca estragada o gatilho só
+    avisa (WARNING) e a mudança da pessoa é gravada normalmente."""
+    eu = await make_user(role=UserRole.ADMIN)
+    await db.execute(text("SELECT set_config('davinci.ator', 'nao-e-um-uuid', true)"))
+    await db.execute(text("UPDATE users SET name = 'passou' WHERE id = :i"), {"i": eu.id})
+    await db.commit()
+    nome = (await db.execute(text("SELECT name FROM users WHERE id = :i"), {"i": eu.id})).scalar_one()
+    assert nome == "passou"
+    assert await _alteracoes(db) == []
+
+
+@pytest.mark.asyncio
 async def test_pedido_sem_mudanca_nao_vira_evento(client, db, make_user):
     eu = await make_user(role=UserRole.ADMIN)
     _logar(client, eu)
