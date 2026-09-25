@@ -294,7 +294,7 @@ async def sweep_pos_venda(session: AsyncSession) -> dict:
         velhas_por_conta.setdefault((r.conta or "").strip(), []).append(r)
 
     mudados: set[UUID] = set()
-    n_status = n_returns = contas_ok = n_recriadas = n_velhas = 0
+    n_status = n_returns = contas_ok = n_recriadas = n_velhas = n_reabertos = 0
     agora = int(datetime.now(UTC).timestamp())
     ret_from = agora - _RETURNS_JANELA_DIAS * 24 * 3600 + 300
     for conta in list(dict.fromkeys([*por_conta, *velhas_por_conta])):
@@ -357,6 +357,21 @@ async def sweep_pos_venda(session: AsyncSession) -> dict:
                     conta=conta, pedidos=len(velhas), err=str(e)[:200],
                 )
         melhor = _melhor_devolucao_por_pedido(devolucoes)
+        # 25/09 (292491): caso novo num pedido cujo chamado já teve decisão ou foi
+        # concluído — a varredura dos chamados não lê mais esse chamado; a
+        # Logística, que baixou o caso agora, devolve ele pra fila.
+        try:
+            from app.services import chamados_devolucao_sync  # lazy: evita ciclo
+
+            async with session.begin_nested():
+                n_reabertos += await chamados_devolucao_sync.reabrir_por_caso_novo_tiktok(
+                    session, melhor
+                )
+        except Exception as e:  # noqa: BLE001 — best-effort, a Logística segue
+            logger.warning(
+                "logistica_tiktok_sweep_reabrir_chamado_falhou",
+                conta=conta, err=str(e)[:200],
+            )
         # 2c) caso da lista da loja sem linha carregada: casa com a linha velha
         # que ainda existir (qualquer idade) e recria, do espelho do Bling, a
         # de venda viva que já saiu da aba.
@@ -413,6 +428,7 @@ async def sweep_pos_venda(session: AsyncSession) -> dict:
         "seen": len(rows), "contas": contas_ok,
         "order_status": n_status, "returns": n_returns,
         "velhas_vivas": n_velhas, "recriadas": n_recriadas,
+        "chamados_reabertos": n_reabertos,
     }
     logger.info("logistica_tiktok_sweep_pos_venda", **summary)
     return {"ids": list(mudados), **summary}

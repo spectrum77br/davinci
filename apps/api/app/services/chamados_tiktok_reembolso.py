@@ -458,17 +458,24 @@ async def chamado_da_resposta(session, rid: str) -> Chamado | None:
     ).scalar_one_or_none()
 
 
-async def resposta_enviada(session, ch: Chamado) -> ChamadoMensagem | None:
+async def resposta_enviada(
+    session, ch: Chamado, *, desde: datetime | None = None
+) -> ChamadoMensagem | None:
     """A recusa do reembolso já SAIU por esse chamado? (abertura do lançamento ou réplica
-    manual com status `enviada`)."""
+    manual com status `enviada`). `desde` = abertura do caso: resposta de ANTES dele era
+    pro caso anterior do mesmo chamado (293798 / 292491 — o chamado passa a acompanhar o
+    caso reaberto e o aviso 12 h / 3 h se calava achando que já tínhamos respondido)."""
+    conds = [
+        ChamadoMensagem.chamado_id == ch.id,
+        ChamadoMensagem.tipo.in_(("abertura", "replica")),
+        ChamadoMensagem.status == "enviada",
+    ]
+    if desde is not None:
+        conds.append(ChamadoMensagem.created_at >= desde)
     return (
         await session.execute(
             select(ChamadoMensagem)
-            .where(
-                ChamadoMensagem.chamado_id == ch.id,
-                ChamadoMensagem.tipo.in_(("abertura", "replica")),
-                ChamadoMensagem.status == "enviada",
-            )
+            .where(*conds)
             .order_by(ChamadoMensagem.created_at.desc())
             .limit(1)
         )
@@ -589,7 +596,8 @@ async def run_vigia(session, *, agora: datetime | None = None, dry_run: bool = F
             oid = str(caso.get("order_id") or "").strip()
             prazo = prazo_resposta(caso) or 0
             ch = await chamado_da_resposta(session, rid)
-            if ch is not None and await resposta_enviada(session, ch) is not None:
+            aberto = epoch_to_dt(caso.get("create_time"))
+            if ch is not None and await resposta_enviada(session, ch, desde=aberto) is not None:
                 resumo["respondidos"] += 1
                 continue
             prazo_dt = datetime.fromtimestamp(prazo, UTC)

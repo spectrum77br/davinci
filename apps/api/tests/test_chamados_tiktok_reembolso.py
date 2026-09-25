@@ -6,7 +6,7 @@ resposta (R$ 744) porque o robô só olhava devolução com pacote."""
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
@@ -194,6 +194,44 @@ async def test_vigia_lancamento_respondido_nao_avisa_e_registra_desfecho(db, mak
     assert ch.status_plataforma == chamados_svc.STATUS_GANHAMOS
     r4 = await svc.run_vigia(db, agora=_em(0.3))
     assert r4["desfechos"] == 0
+
+
+async def test_vigia_caso_reaberto_nao_conta_a_resposta_do_caso_antigo(db, make_user, monkeypatch, threema_fake):
+    """25/09 (292491, item 2 do 293798): o chamado passa a acompanhar o caso NOVO (o sync
+    troca, ou a Logística reabre) e a recusa que saiu pelo caso ANTIGO fazia o vigia achar
+    que já tínhamos respondido — sem aviso de 12 h / 3 h. Só vale resposta depois da
+    abertura do caso."""
+    aberto_em = _em(30)
+
+    class _Reaberto(_FakeTikTok):
+        def _caso(self) -> dict:
+            return {**super()._caso(), "create_time": int(aberto_em.timestamp())}
+
+    fake = _Reaberto()
+    await _seed(db, make_user, fake, monkeypatch)
+    from app.services import chamados as chamados_svc
+    ch = _chamado_devolucao()
+    db.add(ch)
+    await db.flush()
+    antiga = chamados_svc.nova_mensagem(ch, texto="Contestamos o caso anterior", tipo="abertura",
+                                        autor_nome=chamados_svc.AUTOR_SISTEMA, status="enviada")
+    antiga.created_at = aberto_em - timedelta(days=3)
+    db.add(antiga)
+    await db.commit()
+
+    r = await svc.run_vigia(db, agora=_em(11))
+    assert r["respondidos"] == 0 and r["avisos_12h"] == 1, r
+    assert len(threema_fake) == 1
+
+    # respondemos o caso novo pela réplica: aí sim, respondido
+    nova = chamados_svc.nova_mensagem(ch, texto="Recusa do caso novo", tipo="replica",
+                                      autor_nome="Vinicius", status="enviada")
+    nova.created_at = aberto_em + timedelta(hours=1)
+    db.add(nova)
+    await db.commit()
+    r2 = await svc.run_vigia(db, agora=_em(2))
+    assert r2["respondidos"] == 1 and r2["avisos_3h"] == 0, r2
+    assert len(threema_fake) == 1
 
 
 async def test_vigia_lancamento_travado_avisa_o_que_falta(db, make_user, monkeypatch, threema_fake):

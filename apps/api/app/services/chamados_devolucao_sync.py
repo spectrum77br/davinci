@@ -1275,3 +1275,92 @@ async def sync_respostas(session: AsyncSession, *, agora: datetime | None = None
     out = {"verificados": verificados, "novos": novos, "encerrados": encerrados, "falhas": falhas}
     logger.info("chamado_devolucao_sync_done", **out, agora=datetime.now(UTC).isoformat())
     return out
+
+
+# ---------------------------------------------------------------- caso novo (Logística)
+
+# 25/09 (292491, Vinicius: "se eu fechar e o cliente reabrir, meu sistema vai
+# pegar?"): chamado TikTok com decisão da plataforma (ganhamos/perdemos/encerrado)
+# ou concluído por pessoa sai da varredura acima — e o `_sync_tiktok` de propósito
+# não troca de caso depois de arbitragem ganha. Um caso NOVO no mesmo pedido (o
+# suporte da TikTok reabre depois da disputa, como no 293798) não aparecia na aba
+# Chamados. Quem vê o caso novo é a Logística (sweep :19, que já baixa os casos da
+# loja); daqui o chamado volta pra fila acompanhando o caso novo, e a varredura
+# das :25 traz a linha do tempo e o prazo. Caso novo que o comprador já cancelou
+# não reabre nada.
+_CASO_NOVO_IGNORA = frozenset({"RETURN_OR_REFUND_REQUEST_CANCEL"})
+
+
+async def reabrir_por_caso_novo_tiktok(session: AsyncSession, casos: dict[str, dict]) -> int:
+    """`casos` = {order_id: caso do returns/search} (o que vale pro pedido, como o
+    sweep da Logística escolhe). Pra cada pedido, o chamado TikTok mais recente que
+    acompanha um caso pela API: se ele já saiu da varredura (concluído ou com
+    status final) e o caso é outro, aberto DEPOIS do chamado, o chamado reabre,
+    passa a acompanhar o caso novo e ganha a fala da TikTok no histórico (vai pra
+    Análise Humano). Não commita. Devolve quantos reabriu."""
+    alvo: dict[str, dict] = {}
+    for oid, caso in (casos or {}).items():
+        rid = str((caso or {}).get("return_id") or "").strip()
+        st = str((caso or {}).get("return_status") or "").strip().upper()
+        criado = epoch_to_dt((caso or {}).get("create_time"))
+        if oid and rid and criado is not None and st not in _CASO_NOVO_IGNORA:
+            alvo[str(oid).strip()] = caso
+    if not alvo:
+        return 0
+    rows = (
+        await session.execute(
+            select(Chamado)
+            .where(
+                Chamado.pedido_marketplace.in_(list(alvo)),
+                func.lower(func.coalesce(Chamado.plataforma, "")).like("tiktok%"),
+                Chamado.canal == "api",
+                Chamado.chamado.op("~")(r"^\d{15,}$"),
+                ~_aberto_na_tela,
+            )
+            .order_by(Chamado.created_at.desc())
+        )
+    ).scalars().all()
+    ultimo: dict[str, Chamado] = {}
+    for ch in rows:
+        ultimo.setdefault((ch.pedido_marketplace or "").strip(), ch)
+    reabertos = 0
+    for oid, ch in ultimo.items():
+        caso = alvo[oid]
+        rid = str(caso.get("return_id") or "").strip()
+        criado = epoch_to_dt(caso.get("create_time"))
+        fora = ch.resolvido or ch.status_plataforma in chamados_svc.STATUS_FINAIS
+        if not fora or rid == (ch.chamado or "").strip():
+            continue
+        aberto_em = ch.created_at
+        if aberto_em is not None and aberto_em.tzinfo is None:
+            aberto_em = aberto_em.replace(tzinfo=UTC)
+        if aberto_em is not None and criado <= aberto_em:
+            continue  # caso de antes do chamado: não é reabertura
+        antigo = (ch.chamado or "").strip()
+        decisao = chamados_svc.MOTIVO_FINAL.get(ch.status_plataforma or "")
+        antes = f"o caso {antigo} tinha terminado" + (f" ({decisao})" if decisao else "")
+        if ch.resolvido:
+            antes += " e o chamado estava concluído"
+        st = str(caso.get("return_status") or "").strip().upper()
+        tipo = _TT_TIPO.get(str(caso.get("return_type") or "").upper(), "solicitação")
+        situacao = _TT_STATUS_NOME.get(st, st.lower() or "situação desconhecida")
+        quando = criado.astimezone(chamados_svc.SAO_PAULO).strftime("%d/%m %H:%M")
+        texto = (
+            f"A TikTok abriu um caso NOVO neste pedido em {quando}: {tipo} {rid} "
+            f"({situacao}) — {antes}. O chamado voltou pra análise e passa a acompanhar "
+            "o caso novo: confira o que a TikTok pede e o prazo."
+        )
+        if ch.resolvido:
+            session.add(chamados_svc.marcar_resolvido(ch, False, autor_nome="Logística"))
+        # Decisão do caso antigo não vale pro novo (set_status_plataforma não deixa
+        # final voltar pra intermediário — aqui é caso novo, não releitura).
+        ch.status_plataforma = None
+        ch.status_plataforma_at = None
+        ch.chamado = rid
+        await registrar_recebida(session, ch, cd.PLAT_TIKTOK, texto, quando=criado)
+        reabertos += 1
+        logger.info(
+            "chamado_tiktok_reaberto_caso_novo",
+            chamado_id=str(ch.id), pedido=oid, caso_antigo=antigo, caso_novo=rid,
+        )
+    return reabertos
