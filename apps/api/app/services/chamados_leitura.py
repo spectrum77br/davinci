@@ -44,7 +44,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Chamado, ChamadoMensagem
 from app.services import chamados as chamados_svc
-from app.services import vigia_chamados
 from app.services.texto_html import limpar_html
 
 logger = structlog.get_logger()
@@ -454,16 +453,13 @@ async def registrar(
     """O robô voltou da tela. Commita.
 
     `ok=False`: nada é gravado e `leitura_robo_at` NÃO avança (o caso continua
-    "não lido"); o claim de 30 min vira o backoff natural e a Ouvidoria recebe a
-    falha — leitura que para de funcionar tem que ser vista, foi o silêncio que
-    criou este problema."""
+    "não lido"); o claim de 30 min vira o backoff natural. Leitura que para de
+    funcionar tem que ser vista — foi o silêncio que criou este problema: quem
+    cobra é o Vigia Robô Leitura de Chamados (caso que não avança)."""
     agora = agora or datetime.now(UTC)
     plat = (ch.plataforma or "").strip().lower() or None
     if not ok:
         ch.leitura_robo_claim_at = agora
-        await vigia_chamados.registrar_falha_consulta(
-            session, ch, plat=plat, erro=(erro or "leitura_falhou")[:300], varredura="leitura_robo"
-        )
         await session.commit()
         logger.warning(
             "chamados_leitura_falhou", chamado_id=str(ch.id), plat=plat, err=(erro or "")[:200]
@@ -516,7 +512,6 @@ async def registrar(
     out.encerrado = bool(ch.resolvido or ch.status_plataforma in chamados_svc.STATUS_FINAIS)
     ch.leitura_robo_at = agora
     ch.leitura_robo_claim_at = None
-    await vigia_chamados.consulta_ok(session, ch)
     await session.commit()
     logger.info(
         "chamados_leitura_registrada",

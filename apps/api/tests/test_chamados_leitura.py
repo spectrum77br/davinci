@@ -14,7 +14,6 @@ O que é garantido aqui:
 - o `/agent/lease` de hoje NÃO muda (o robô do Eduardo não precisa tocar nada);
 - caso de tela sai da varredura por API, que batia nele de hora em hora — mas
   chamado com nº de API VÁLIDO continua sendo varrido (achado da revisão);
-- quem nunca é lido vira ocorrência na Ouvidoria: o silêncio precisa aparecer.
 """
 
 from __future__ import annotations
@@ -663,7 +662,7 @@ async def test_caso_de_tela_em_canal_robo_vai_pra_analise_robo(client, db, make_
     Análise Robô — e o cérebro precisa cobrir aquela plataforma, senão a linha fica
     parada com cara de atendida. Este teste existe pra travar o comportamento REAL:
     a revisão de 22/09 apontou o risco, a regra é deliberada, e a decisão de mudá-la
-    é do Vinicius. O `vigia_chamados` é quem avisa enquanto isso."""
+    é do Vinicius."""
     ch = await _caso_de_tela(db, canal="robo", pedido="292010")
     await client.post(
         "/api/chamados/agent/leitura/resultado",
@@ -798,53 +797,3 @@ async def test_proxima_leitura_conta_a_verdade(client, db):
     )
     prox_ok = datetime.fromisoformat(ok.json()["proxima_leitura_at"])
     assert timedelta(hours=2) < prox_ok - datetime.now(UTC) < timedelta(hours=4)
-
-
-async def test_ninguem_lendo_vira_ocorrencia_na_ouvidoria(db):
-    """A rede que enxerga o SILÊNCIO. As ocorrências de consulta nascem de hook —
-    alguém tentou e falhou. Aqui não há tentativa pra falhar: se o robô de leitura
-    nunca pedir a fila, os casos ficam parados e calados. Era o buraco original."""
-    from app.models import OuvidoriaOcorrencia
-    from app.services import vigia_chamados
-
-    ch = await _caso_de_tela(db, pedido="292013")
-    ch.created_at = datetime.now(UTC) - timedelta(days=4)
-    await db.commit()
-    await vigia_chamados.vigia_chamados_run(db)
-    ocs = (
-        (
-            await db.execute(
-                select(OuvidoriaOcorrencia).where(
-                    OuvidoriaOcorrencia.chave == f"{vigia_chamados.PREFIXO_LEITURA}{ch.id}"
-                )
-            )
-        )
-        .scalars()
-        .all()
-    )
-    assert len(ocs) == 1
-    assert ocs[0].fechada_em is None
-    assert ocs[0].precisa_pessoa is True  # nunca foi lido
-
-
-async def test_caso_lido_nao_gera_ocorrencia(db):
-    from app.models import OuvidoriaOcorrencia
-    from app.services import vigia_chamados
-
-    ch = await _caso_de_tela(db, pedido="292014")
-    ch.created_at = datetime.now(UTC) - timedelta(days=4)
-    ch.leitura_robo_at = datetime.now(UTC)
-    await db.commit()
-    await vigia_chamados.vigia_chamados_run(db)
-    ocs = (
-        (
-            await db.execute(
-                select(OuvidoriaOcorrencia).where(
-                    OuvidoriaOcorrencia.chave == f"{vigia_chamados.PREFIXO_LEITURA}{ch.id}"
-                )
-            )
-        )
-        .scalars()
-        .all()
-    )
-    assert ocs == []

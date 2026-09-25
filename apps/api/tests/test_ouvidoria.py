@@ -201,9 +201,6 @@ SEIS_ROBOS = {
                                   "executor_offline_min": 10}),
     "vigia_margem": ("margem", ["ml", "shopee", "tiktok", "amazon"],
                      {"cadencia_min": 30, "segurado_horas": 24}),
-    "vigia_chamados": ("chamados", ["ml", "shopee", "tiktok"],
-                       {"cadencia_min": 30, "encerrado_dias": 3,
-                        "consultas_falhas_seguidas": 3}),
     # 24/09/2026: o executor do "Suspender entrega" (Mac Santiago).
     "vigia_robo_melhorenvio": ("logistica", ["amazon"],
                                {"cadencia_min": 10, "pendente_min": 30,
@@ -278,14 +275,14 @@ async def test_ativo_e_falso_so_no_desligado(db):
     comportamento de sempre do `modo`."""
     await svc.sincronizar_catalogo(db)
     await db.commit()
-    robo = await db.get(OuvidoriaRobo, "vigia_chamados")
-    assert await svc.ativo(db, "vigia_chamados") is True  # nasce silencioso
+    robo = await db.get(OuvidoriaRobo, "vigia_margem")
+    assert await svc.ativo(db, "vigia_margem") is True  # nasce silencioso
     robo.modo = "ligado"
     await db.commit()
-    assert await svc.ativo(db, "vigia_chamados") is True
+    assert await svc.ativo(db, "vigia_margem") is True
     robo.modo = "desligado"
     await db.commit()
-    assert await svc.ativo(db, "vigia_chamados") is False
+    assert await svc.ativo(db, "vigia_margem") is False
     assert await svc.ativo(db, "robo_que_nao_existe") is True
 
 

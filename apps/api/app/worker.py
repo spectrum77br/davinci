@@ -2819,41 +2819,6 @@ async def vigia_margem_tick(ctx: dict) -> None:
         logger.exception("vigia_margem_unhandled")
 
 
-async def vigia_chamados_tick(ctx: dict) -> None:
-    """Chamados: réplica e monitoramento (robô da Ouvidoria): réplica/abertura
-    que não foi pra plataforma (aberta por hook no ponto do envio), caso que a
-    consulta não consegue mais ler e chamado Encerrado esperando alguém
-    concluir pelo Resolver.
-    """
-    try:
-        async with session_scope() as s:
-            modo = await ouvidoria_modo(s, "vigia_chamados")
-        if modo == "desligado":
-            logger.debug("vigia_chamados_desligado")
-            return
-        try:
-            from app.services.vigia_chamados import vigia_chamados_sweep
-        except ImportError:
-            logger.warning("vigia_chamados_sem_servico")
-            return
-        summary = await vigia_chamados_sweep() or {}
-        if any(
-            summary.get(k)
-            for k in (
-                "novas", "sumiram", "encerrados", "envios_falhos",
-                # 22/09: sem isto a rodada ficaria MUDA justamente quando há caso
-                # de tela sem ninguém lendo e nada mais acontecendo — o sinal do
-                # silêncio some no debug. O painel mostra, o log também precisa.
-                "consultas_falhando", "leitura_parada", "avisadas",
-            )
-        ):
-            logger.info("vigia_chamados_done", **summary)
-        else:
-            logger.debug("vigia_chamados_noop", **summary)
-    except Exception:  # noqa: BLE001
-        logger.exception("vigia_chamados_unhandled")
-
-
 async def nf_recuperar_tick(ctx: dict) -> None:
     """Recuperador de NF: retry de comando failed (teto 3), destrava de lease
     expirado e re-encadeamento de pedidos 'processando' órfãos (varredura
@@ -3567,7 +3532,6 @@ class WorkerSettings:
         vigia_correios_tick,
         vigia_marketing_comandos_tick,
         vigia_margem_tick,
-        vigia_chamados_tick,
         vigia_robo_melhorenvio_tick,
         vigia_robo_leitura_tick,
     ]
@@ -3920,7 +3884,6 @@ class WorkerSettings:
             run_at_startup=False,
         ),
         cron(vigia_margem_tick, minute={17, 47}, run_at_startup=False),
-        cron(vigia_chamados_tick, minute={27, 57}, run_at_startup=False),
         # Robô do Melhor Envio: a cada 10 min em :09… (só banco).
         cron(
             vigia_robo_melhorenvio_tick,

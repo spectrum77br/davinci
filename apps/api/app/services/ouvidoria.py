@@ -291,30 +291,6 @@ ROBOS: dict[str, RoboDef] = {
         },
         modo_padrao="silencioso",
     ),
-    "vigia_chamados": RoboDef(
-        chave="vigia_chamados",
-        nome="Vigia Chamados",
-        descricao=(
-            "Réplica ou abertura de chamado que não foi pra plataforma, caso que a "
-            "consulta não consegue mais ler (o status da aba fica defasado) e "
-            "chamado Encerrado esperando alguém concluir pelo Resolver."
-        ),
-        area="chamados",
-        cadencia_texto="a cada 30 min (:27/:57)",
-        plataformas=("ml", "shopee", "tiktok"),
-        config_padrao={
-            "cadencia_min": 30,
-            "encerrado_dias": 3,
-            "consultas_falhas_seguidas": 3,
-        },
-        env_threema_recipients=None,
-        parametros={
-            "cadencia_min": Parametro("Cadência esperada", 1, 24 * 60, "min"),
-            "encerrado_dias": Parametro("Encerrado há mais de", 1, 60, "dias"),
-            "consultas_falhas_seguidas": Parametro("Consultas falhas seguidas", 1, 20),
-        },
-        modo_padrao="silencioso",
-    ),
     "vigia_robo_melhorenvio": RoboDef(
         chave="vigia_robo_melhorenvio",
         nome="Vigia Robô Melhor Envio",

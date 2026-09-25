@@ -2307,17 +2307,9 @@ async def disparar(
     agora: datetime | None = None,
     texto_override: str | None = None,
 ) -> ChamadoMensagem | None:
-    """`_disparar` + a Ouvidoria (22/09): o desfecho do disparo abre (ou
-    fecha) a ocorrência `envio:` do `vigia_chamados`, sem mudar nada do que o
-    disparo faz. O wrapper existe pra TODOS os caminhos passarem pelo mesmo
-    ponto — réplica manual, reenvio do cron, fila do worker e o disparo inline
-    quando a fila está fora. Best-effort: o vigia nunca derruba o disparo."""
-    msg = await _disparar(session, ch, dev, agora=agora, texto_override=texto_override)
-    if msg is not None:
-        from app.services import vigia_chamados  # lazy: o vigia importa este módulo
-
-        await vigia_chamados.registrar_resultado_envio(session, ch, msg)
-    return msg
+    """Ponto único do disparo — réplica manual, reenvio do cron, fila do worker
+    e o disparo inline quando a fila está fora passam todos por aqui."""
+    return await _disparar(session, ch, dev, agora=agora, texto_override=texto_override)
 
 
 async def _disparar(

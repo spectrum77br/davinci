@@ -89,7 +89,6 @@ _ROBOS_COM_SWEEP = (
     "vigia_correios",
     "vigia_marketing_comandos",
     "vigia_margem",
-    "vigia_chamados",
     "vigia_robo_melhorenvio",
     "vigia_robo_leitura",
 )

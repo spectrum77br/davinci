@@ -116,7 +116,6 @@ from app.services import (
     chamados_devolucao_sync,
     chamados_juridico,
     chamados_leitura,
-    vigia_chamados,
 )
 from app.services.devolution_delete import EstornoFalhouError, excluir_lancamento
 from app.services.texto_html import limpar_html
@@ -1816,14 +1815,6 @@ async def agent_resultado(
             m.tentativas = tentativas
             m.status = "falhou"
             m.erro = erro
-    # Ouvidoria (22/09): só os dois desfechos DEFINITIVOS do robô chegam ao
-    # `vigia_chamados` — `enviada` fecha a ocorrência `envio:`, `falhou` (o
-    # retry esgotou, ou o erro pede gente) abre. O que volta pra fila
-    # (`pendente`) e a abertura cancelada porque o chamado já estava Encerrado
-    # (`registrada`) não são desfecho: a tarefa segue com o robô. É aqui que a
-    # falha do canal `robo` (Mac/AdsPower) vira ocorrência — o caso mais comum.
-    if m.status in ("enviada", "falhou"):
-        await vigia_chamados.registrar_resultado_envio(session, ch, m)
     await session.commit()
     await session.refresh(m)
     logger.info(

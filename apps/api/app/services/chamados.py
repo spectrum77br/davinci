@@ -223,8 +223,7 @@ def _robo_atende(ch: Chamado) -> bool:
     "Análise Robô", mas o cérebro (`/agent/analisar`) sai com `plataforma="ml"` por
     padrão — se o robô não pedir aquela plataforma, a resposta fica parada com cara
     de atendida. A regra de 19/09 é deliberada (ver test_chamados_status_aba) e não
-    foi mexida aqui; o `vigia_chamados` passou a enxergar o caso de tela sem leitura,
-    e a decisão de mudar a rota é do Vinicius."""
+    foi mexida aqui, e a decisão de mudar a rota é do Vinicius."""
     return ch.canal == "robo" or (ch.canal == "manual" and _eh_ml(ch))
 
 
@@ -779,13 +778,6 @@ async def enviar_mensagem(
             msg.status = "falhou"
             msg.erro = str(e)[:300]
             logger.warning("chamado_envio_api_falhou", chamado_id=str(ch.id), err=msg.erro)
-    # Ouvidoria (22/09): a fala nossa que NÃO saiu vira ocorrência do
-    # `vigia_chamados` aqui, no ponto em que o erro ainda se conhece; a que sai
-    # fecha a anterior. Best-effort e dentro de savepoint — nunca derruba o
-    # envio. Import tardio: o vigia importa este módulo.
-    from app.services import vigia_chamados
-
-    await vigia_chamados.registrar_resultado_envio(session, ch, msg)
     return msg
 
 
@@ -1158,13 +1150,7 @@ async def run_replica_automatica(session: AsyncSession, *, agora: datetime | Non
        (Eduardo 15/09: o robô acompanha todos). Chamado já Encerrado não é
        consultado de novo.
     Best-effort por linha: falha de uma não derruba as outras."""
-    from app.services import vigia_chamados  # lazy: o vigia importa este módulo
-
     agora = agora or datetime.now(UTC)
-    # Ouvidoria: o robô e as `consulta:` abertas resolvidos UMA vez pra passada
-    # inteira — os hooks abaixo rodam pra cada chamado, inclusive no caminho
-    # feliz (ver vigia_chamados.Passada).
-    passada = await vigia_chamados.abrir_passada(session)
     rows = list(
         (
             await session.execute(
@@ -1199,13 +1185,9 @@ async def run_replica_automatica(session: AsyncSession, *, agora: datetime | Non
             and _eh_ml(ch)
             and ch.status_plataforma not in STATUS_FINAIS
         ):
-            leu = False
-            erro_consulta = ""
-            sem_integracao = False
             try:
                 client = await _ml_client_para(session, ch.conta)
                 claim = await client.get_claim(ch.chamado.strip())
-                leu = True
                 if (claim.get("status") or "").lower() == "closed":
                     ch.auto_ligada = False
                     set_status_plataforma(ch, ml_status_encerrado(claim), ml_quando(claim))
@@ -1219,32 +1201,8 @@ async def run_replica_automatica(session: AsyncSession, *, agora: datetime | Non
                     set_status_plataforma(ch, STATUS_EM_ANALISE, ml_quando(claim))
             except Exception as e:  # noqa: BLE001
                 falhas += 1
-                erro_consulta = str(e)[:300]
-                sem_integracao = (
-                    isinstance(e, ChamadoError) and e.code == "chamado_sem_integracao_ml"
-                )
                 logger.warning(
-                    "chamado_monitoramento_falhou", chamado_id=str(ch.id), err=erro_consulta
-                )
-            # Ouvidoria (22/09): consulta que não lê o caso deixa o status da
-            # aba defasado sem ninguém saber — vira ocorrência `consulta:` do
-            # `vigia_chamados` depois de N passadas seguidas, e a leitura que
-            # volta a funcionar fecha a anterior.
-            #
-            # `chamado_sem_integracao_ml` NÃO conta: é o chamado de devolução
-            # cuja conta está gravada como nome da loja ("ML Aguiar"), que
-            # ESTE monitor nunca leu e quem acompanha é o `_sync_ml` das
-            # devoluções (com o resolvedor completo). Registrar aqui abriria
-            # uma linha que o sync fecharia minutos depois — a mesma
-            # ocorrência piscando no painel a cada passada.
-            if leu:
-                await vigia_chamados.consulta_ok(session, ch, passada=passada)
-            elif not sem_integracao:
-                await vigia_chamados.registrar_falha_consulta(
-                    session, ch, plat="ml",
-                    erro=erro_consulta or "falha ao ler o caso",
-                    varredura="monitor_ml",
-                    passada=passada,
+                    "chamado_monitoramento_falhou", chamado_id=str(ch.id), err=str(e)[:300]
                 )
     await session.commit()
     return {
