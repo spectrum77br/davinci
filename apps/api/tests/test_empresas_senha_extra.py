@@ -14,6 +14,7 @@ ver". O que estes testes seguram:
 
 # ruff: noqa: S105, S106  (senhas e chaves de teste, nada real)
 
+import asyncio
 import time
 from types import SimpleNamespace
 
@@ -26,24 +27,36 @@ from app.security.cipher import encrypt_bytes
 from app.security.senha_extra import require_empresas_unlock
 
 SENHA = "senha-de-teste-123"
+_dormir = asyncio.sleep  # o original: a fixture troca o sleep do asyncio por um que não espera
 
 
 class RedisFalso:
+    """Cede a vez a cada chamada, como o Redis de verdade (rede), para os
+    pedidos em paralelo se intercalarem."""
+
     def __init__(self):
         self.d = {}
+        self.prazo = {}
 
     async def get(self, k):
+        await _dormir(0)
         return self.d.get(k)
 
     async def incr(self, k):
+        await _dormir(0)
         self.d[k] = int(self.d.get(k) or 0) + 1
         return self.d[k]
 
-    async def expire(self, k, s):
+    async def expire(self, k, s, nx=False):
+        await _dormir(0)
+        if not (nx and k in self.prazo):
+            self.prazo[k] = s
         return True
 
     async def delete(self, k):
+        await _dormir(0)
         self.d.pop(k, None)
+        self.prazo.pop(k, None)
 
 
 @pytest.fixture
@@ -102,7 +115,9 @@ async def test_sem_chave_nada_sai_nem_entra(client, db, make_user, auth_as, trav
     await _admin(make_user, auth_as, trava_de_verdade)
     e = await _empresa(client, await _chave(client))
     db.add(
-        CompanyCertificate(company_id=e["id"], filename="x.pfx", size_bytes=1, blob=encrypt_bytes(b"x"))
+        CompanyCertificate(
+            company_id=e["id"], filename="x.pfx", size_bytes=1, blob=encrypt_bytes(b"x")
+        )
     )
     await db.commit()
 
@@ -168,6 +183,31 @@ async def test_cinco_erros_travam_por_quinze_minutos(client, make_user, auth_as,
 
 
 @pytest.mark.asyncio
+async def test_tentativas_em_paralelo_tambem_param_em_cinco(
+    client, make_user, auth_as, trava_de_verdade
+):
+    """Revisão de 25/09: ler a contagem, conferir e só depois somar deixava
+    uma rajada de pedidos em paralelo ler "0 erros" junto e testar centenas de
+    senhas de uma vez. Agora cada pedido é contado antes de conferir."""
+    await _admin(make_user, auth_as, trava_de_verdade)
+    rs = await asyncio.gather(
+        *[client.post("/api/companies/unlock", json={"password": f"errada{i}"}) for i in range(30)]
+    )
+    codigos = sorted(r.status_code for r in rs)
+    assert codigos.count(401) == 5, codigos
+    assert codigos.count(429) == 25, codigos
+
+
+@pytest.mark.asyncio
+async def test_a_trava_sempre_tem_prazo(client, make_user, auth_as, trava_de_verdade):
+    """A contagem precisa sumir sozinha em 15 minutos; insistir não empurra o fim."""
+    u = await _admin(make_user, auth_as, trava_de_verdade)
+    for _ in range(8):
+        await client.post("/api/companies/unlock", json={"password": "errada"})
+    assert trava_de_verdade.redis.prazo == {senha_extra._chave_erros(u.id): 15 * 60}
+
+
+@pytest.mark.asyncio
 async def test_acertar_zera_a_contagem(client, make_user, auth_as, trava_de_verdade):
     await _admin(make_user, auth_as, trava_de_verdade)
     for _ in range(4):
@@ -225,7 +265,21 @@ async def test_chave_adulterada_nao_abre(client, make_user, auth_as, trava_de_ve
 
 
 @pytest.mark.asyncio
-async def test_quem_nao_e_admin_com_permissao_desbloqueia(client, make_user, auth_as, trava_de_verdade):
+async def test_chave_com_acento_e_recusada_sem_erro(client, make_user, auth_as, trava_de_verdade):
+    """Revisão de 25/09: texto fora do ASCII derrubava a comparação (erro 500)."""
+    await _admin(make_user, auth_as, trava_de_verdade)
+    ts = int(time.time())
+    r = await client.get(
+        "/api/companies/grid", headers={"X-Empresas-Token": f"{ts}.ção".encode("latin-1")}
+    )
+    assert r.status_code == 401
+    assert r.json()["detail"]["code"] == "empresas_locked"
+
+
+@pytest.mark.asyncio
+async def test_quem_nao_e_admin_com_permissao_desbloqueia(
+    client, make_user, auth_as, trava_de_verdade
+):
     """A senha vale para quem tem acesso à tela, não só para admin."""
     auth_as(await make_user(role=UserRole.USER, permissions={"empresa": {"view": True}}))
     trava_de_verdade.ativar()

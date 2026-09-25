@@ -66,7 +66,9 @@ def token_valido(token: str | None, escopo: str) -> bool:
     esperada = hmac.new(
         s.jwt_secret.encode(), f"{escopo}:{ts}".encode(), hashlib.sha256
     ).hexdigest()
-    return hmac.compare_digest(assinatura, esperada)
+    # Em bytes: compare_digest com texto fora do ASCII levanta TypeError, e um
+    # cabeçalho com acento virava erro 500 em vez de "trancado".
+    return hmac.compare_digest(assinatura.encode(), esperada.encode())
 
 
 def _chave_erros(user_id: object) -> str:
@@ -92,21 +94,21 @@ async def conferir_senha(senha: str | None, *, user_id: object, escopo: str) -> 
     redis = None
     try:
         redis = await _redis()
-        erros = int(await redis.get(chave) or 0)
+        # Conta a tentativa ANTES de conferir. Ler, conferir e só depois somar
+        # deixava 400 pedidos em paralelo lerem "0 erros" juntos; o INCR é
+        # atômico, então cada pedido recebe um número e só os 5 primeiros
+        # chegam a comparar a senha. Acertar zera a contagem logo abaixo.
+        tentativa = int(await redis.incr(chave))
+        # NX: põe o prazo só se a chave ainda não tiver um. Assim a chave nunca
+        # fica sem prazo (trava eterna) e insistir não empurra o fim da trava.
+        await redis.expire(chave, JANELA_ERROS_SEGUNDOS, nx=True)
     except Exception:  # noqa: BLE001 - Redis fora não pode trancar todo mundo
         logger.warning("senha_extra_redis_indisponivel", escopo=escopo)
-        redis, erros = None, 0
-    if erros >= MAX_ERROS:
+        redis, tentativa = None, 0
+    if tentativa > MAX_ERROS:
         raise HTTPException(429, detail={"code": "muitas_tentativas"})
 
     if not hmac.compare_digest((senha or "").strip().encode(), esperada.encode()):
-        if redis is not None:
-            try:
-                n = await redis.incr(chave)
-                if n == 1:
-                    await redis.expire(chave, JANELA_ERROS_SEGUNDOS)
-            except Exception:  # noqa: BLE001
-                logger.warning("senha_extra_redis_indisponivel", escopo=escopo)
         logger.info("senha_extra_errada", escopo=escopo, user_id=str(user_id))
         await asyncio.sleep(0.3)
         raise HTTPException(401, detail={"code": "wrong_password"})
