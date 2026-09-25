@@ -59,6 +59,18 @@ type CompanyCertificate = {
 const route = useRoute()
 const router = useRouter()
 const { api } = useApi()
+
+// Senha extra da tela Empresas (a mesma do Valuation) — ver pages/companies/index.vue.
+const trava = useSenhaExtra('empresas', '/api/companies/unlock', 'X-Empresas-Token')
+
+async function apiE<T = any>(path: string, opts: any = {}): Promise<T> {
+  try {
+    return await api<T>(path, { ...opts, headers: { ...(opts.headers || {}), ...trava.headers() } })
+  } catch (e: any) {
+    if (trava.eTravamento(e)) trava.trancar()
+    throw e
+  }
+}
 const company = ref<CompanyDetail | null>(null)
 const loading = ref(false)
 const error = ref<string | null>(null)
@@ -87,7 +99,7 @@ const blingStoresByIntegration = ref<Record<string, { id: number; nome: string |
 
 async function loadIntegrations() {
   try {
-    integrations.value = await api<IntegrationRef[]>('/api/integrations')
+    integrations.value = await apiE<IntegrationRef[]>('/api/integrations')
   } catch { /* ignore */ }
 }
 
@@ -100,7 +112,7 @@ const blingIntegrationForCompany = computed(() => {
 async function loadBlingStores(integrationId: string) {
   if (blingStoresByIntegration.value[integrationId]) return
   try {
-    const r = await api<{ items: { id: number; nome: string | null }[] }>(
+    const r = await apiE<{ items: { id: number; nome: string | null }[] }>(
       `/api/integrations/${integrationId}/bling-stores`
     )
     blingStoresByIntegration.value[integrationId] = r.items
@@ -113,7 +125,7 @@ async function load() {
   loading.value = true
   error.value = null
   try {
-    company.value = await api<CompanyDetail>(`/api/companies/${route.params.id}`)
+    company.value = await apiE<CompanyDetail>(`/api/companies/${route.params.id}`)
     await loadIntegrations()
     if (blingIntegrationForCompany.value) await loadBlingStores(blingIntegrationForCompany.value.id)
   } catch (e: any) {
@@ -122,7 +134,7 @@ async function load() {
     loading.value = false
   }
 }
-await load()
+
 
 // ---------- certificados digitais (admin only) ----------
 const isAdmin = useIsAdmin()
@@ -139,7 +151,7 @@ async function loadCertificates() {
   certLoading.value = true
   certError.value = null
   try {
-    certificates.value = await api<CompanyCertificate[]>(
+    certificates.value = await apiE<CompanyCertificate[]>(
       `/api/companies/${company.value.id}/certificates`,
     )
   } catch (e: any) {
@@ -167,7 +179,7 @@ async function uploadCertificate() {
     if (certForm.label) fd.append('label', certForm.label)
     if (certForm.expires_at) fd.append('expires_at', certForm.expires_at)
     if (certForm.notes) fd.append('notes', certForm.notes)
-    await api(`/api/companies/${company.value.id}/certificates`, { method: 'POST', body: fd })
+    await apiE(`/api/companies/${company.value.id}/certificates`, { method: 'POST', body: fd })
     certForm.password = ''; certForm.label = ''; certForm.expires_at = ''; certForm.notes = ''
     if (input) input.value = ''
     await loadCertificates()
@@ -181,7 +193,7 @@ async function uploadCertificate() {
 async function downloadCertificate(cert: CompanyCertificate) {
   if (!company.value) return
   try {
-    const blob = await api<Blob>(
+    const blob = await apiE<Blob>(
       `/api/companies/${company.value.id}/certificates/${cert.id}/download`,
       { responseType: 'blob' as any },
     )
@@ -205,7 +217,7 @@ async function revealPassword(cert: CompanyCertificate) {
     return
   }
   try {
-    const r = await api<{ password: string | null }>(
+    const r = await apiE<{ password: string | null }>(
       `/api/companies/${company.value.id}/certificates/${cert.id}/password`,
     )
     revealedPw.value = { ...revealedPw.value, [cert.id]: r.password || '(sem senha)' }
@@ -218,7 +230,7 @@ async function deleteCertificate(cert: CompanyCertificate) {
   if (!company.value) return
   if (!confirm(`Excluir o certificado "${cert.label || cert.filename}"? Não dá pra desfazer.`)) return
   try {
-    await api(`/api/companies/${company.value.id}/certificates/${cert.id}`, { method: 'DELETE' })
+    await apiE(`/api/companies/${company.value.id}/certificates/${cert.id}`, { method: 'DELETE' })
     await loadCertificates()
   } catch (e: any) {
     certError.value = e?.data?.detail?.code || e?.message || 'erro ao excluir'
@@ -236,7 +248,7 @@ function isExpired(cert: CompanyCertificate) {
   return new Date(cert.expires_at) < new Date(new Date().toDateString())
 }
 
-await loadCertificates()
+
 
 const showNewIntegration = ref(false)
 const newIntegrationStoreId = ref<string | null>(null)
@@ -252,7 +264,7 @@ function openNewIntegration(s: StoreOut) {
 
 async function unlinkStoreIntegration(s: StoreOut) {
   try {
-    await api(`/api/stores/${s.id}/unlink-integration`, { method: 'POST' })
+    await apiE(`/api/stores/${s.id}/unlink-integration`, { method: 'POST' })
     await load()
   } catch (e: any) {
     error.value = e?.data?.detail?.code || 'erro'
@@ -276,7 +288,7 @@ function availableIntegrationsFor(s: StoreOut): IntegrationRef[] {
 async function attachIntegration(s: StoreOut, integrationId: string) {
   if (!integrationId || integrationId === s.integration_id) return
   try {
-    await api(`/api/stores/${s.id}`, {
+    await apiE(`/api/stores/${s.id}`, {
       method: 'PATCH',
       body: { integration_id: integrationId },
     })
@@ -295,7 +307,7 @@ async function saveCompany() {
   saveMsg.value = null
   try {
     const c = company.value
-    await api(`/api/companies/${c.id}`, {
+    await apiE(`/api/companies/${c.id}`, {
       method: 'PATCH',
       body: {
         razao_social: c.razao_social,
@@ -319,7 +331,7 @@ async function saveCompany() {
 async function createStore(mk: Marketplace) {
   if (!company.value || !canEdit.value) return
   try {
-    await api('/api/stores', {
+    await apiE('/api/stores', {
       method: 'POST',
       body: { company_id: company.value.id, marketplace: mk, status: 'pending' },
     })
@@ -331,7 +343,7 @@ async function createStore(mk: Marketplace) {
 
 async function patchStore(s: StoreOut, patch: Partial<StoreOut>) {
   try {
-    await api(`/api/stores/${s.id}`, { method: 'PATCH', body: patch })
+    await apiE(`/api/stores/${s.id}`, { method: 'PATCH', body: patch })
     await load()
   } catch (e: any) {
     error.value = e?.data?.detail?.code || 'erro'
@@ -341,7 +353,7 @@ async function patchStore(s: StoreOut, patch: Partial<StoreOut>) {
 async function deleteStore(s: StoreOut) {
   if (!confirm(`Excluir loja ${s.marketplace}? (cascade em cadastros vinculados)`)) return
   try {
-    await api(`/api/stores/${s.id}`, { method: 'DELETE' })
+    await apiE(`/api/stores/${s.id}`, { method: 'DELETE' })
     await load()
   } catch (e: any) {
     error.value = e?.data?.detail?.code || 'erro'
@@ -353,16 +365,28 @@ async function deleteCompany() {
   if (!confirm('Excluir empresa? Lojas e vínculos serão removidos em cascade.')) return
   if (!confirm('Confirmar novamente — ação irreversível.')) return
   try {
-    await api(`/api/companies/${company.value.id}`, { method: 'DELETE' })
+    await apiE(`/api/companies/${company.value.id}`, { method: 'DELETE' })
     router.push('/companies')
   } catch (e: any) {
     error.value = e?.data?.detail?.code || 'erro'
   }
 }
+
+// A chave só existe no navegador: carrega depois de montar a página, e de novo
+// quando a pessoa desbloqueia.
+async function carregarTudo() {
+  await load()
+  await loadCertificates()
+}
+onMounted(() => {
+  trava.iniciar()
+  if (trava.token.value) carregarTudo()
+})
 </script>
 
 <template>
-  <div v-if="company" class="space-y-6">
+  <SenhaExtraTrava v-if="!trava.token.value" titulo="Empresas" :trava="trava" @desbloqueado="carregarTudo" />
+  <div v-else-if="company" class="space-y-6">
     <div class="flex items-center gap-3">
       <NuxtLink to="/companies" class="text-muted-foreground hover:text-foreground">
         <ArrowLeft class="size-5" />

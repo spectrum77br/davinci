@@ -19,10 +19,15 @@ from app.schemas.companies import (
     CompanyGridRow,
     CompanyOut,
     CompanyPatch,
+    CompanyResumo,
+    DesbloqueioIn,
+    DesbloqueioOut,
     GridStoreCell,
     StoreOut,
     _normalize_ip,
 )
+from app.security import senha_extra
+from app.security.senha_extra import require_empresas_unlock
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/api/companies", tags=["companies"])
@@ -83,7 +88,25 @@ def _conflito_de_unicidade(e: IntegrityError) -> HTTPException | None:
     return None
 
 
-@router.get("/grid", response_model=CompanyGridOut)
+# Senha extra da tela Empresas (Eduardo, 25/09/2026): a mesma do Valuation, mas
+# com desbloqueio próprio. Toda rota que entrega dado sensível ou altera empresa
+# exige a chave; a lista aberta só devolve id, apelido e razão social.
+_TRAVA = [Depends(require_empresas_unlock)]
+
+
+@router.post("/unlock", response_model=DesbloqueioOut)
+async def desbloquear_empresas(
+    body: DesbloqueioIn,
+    u: Annotated[User, Depends(require_permission("empresa", "view"))],
+) -> DesbloqueioOut:
+    """Confere a senha extra e devolve uma chave de 15 minutos. 5 erros
+    seguidos travam a pessoa por 15 minutos (app/security/senha_extra.py)."""
+    await senha_extra.conferir_senha(body.password, user_id=u.id, escopo="empresas")
+    token, ttl = senha_extra.fazer_token("empresas")
+    return DesbloqueioOut(token=token, expires_in=ttl)
+
+
+@router.get("/grid", response_model=CompanyGridOut, dependencies=_TRAVA)
 async def companies_grid(
     session: Annotated[AsyncSession, Depends(get_session)],
     _u: Annotated[User, Depends(require_permission("empresa", "view"))],
@@ -176,16 +199,22 @@ async def companies_grid(
     return CompanyGridOut(marketplaces=list(MARKETPLACES), rows=rows)
 
 
-@router.get("", response_model=list[CompanyOut])
+@router.get("", response_model=list[CompanyResumo])
 async def list_companies(
     session: Annotated[AsyncSession, Depends(get_session)],
     _u: Annotated[User, Depends(require_permission("empresa", "view"))],
-) -> list[CompanyOut]:
-    rows = (await session.execute(select(Company).order_by(Company.apelido))).scalars().all()
-    return [CompanyOut.model_validate(c) for c in rows]
+) -> list[CompanyResumo]:
+    """Lista aberta, para os menus de outras telas: só id, apelido e razão
+    social. O resto dos dados da empresa exige a senha extra."""
+    rows = (
+        await session.execute(
+            select(Company.id, Company.apelido, Company.razao_social).order_by(Company.apelido)
+        )
+    ).all()
+    return [CompanyResumo(id=i, apelido=a, razao_social=r) for i, a, r in rows]
 
 
-@router.get("/{company_id}", response_model=CompanyDetailOut)
+@router.get("/{company_id}", response_model=CompanyDetailOut, dependencies=_TRAVA)
 async def get_company(
     company_id: UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
@@ -200,7 +229,9 @@ async def get_company(
     return out
 
 
-@router.post("", response_model=CompanyOut, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "", response_model=CompanyOut, status_code=status.HTTP_201_CREATED, dependencies=_TRAVA
+)
 async def create_company(
     body: CompanyCreate,
     session: Annotated[AsyncSession, Depends(get_session)],
@@ -221,7 +252,7 @@ async def create_company(
     return CompanyOut.model_validate(c)
 
 
-@router.patch("/{company_id}", response_model=CompanyOut)
+@router.patch("/{company_id}", response_model=CompanyOut, dependencies=_TRAVA)
 async def patch_company(
     company_id: UUID,
     body: CompanyPatch,
@@ -257,7 +288,7 @@ async def patch_company(
     return CompanyOut.model_validate(c)
 
 
-@router.delete("/{company_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{company_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=_TRAVA)
 async def delete_company(
     company_id: UUID,
     session: Annotated[AsyncSession, Depends(get_session)],

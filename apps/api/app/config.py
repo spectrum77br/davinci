@@ -43,7 +43,11 @@ class Settings(BaseSettings):
     # depois do login independentemente do user. Em prod vem da env
     # VALUATION_PASSWORD. TTL curto (15min) — janela apertada pra não
     # deixar o navegador desbloqueado por horas sem atenção.
-    valuation_password: str = "924005"
+    # Senha extra do Valuation e da tela Empresas. NUNCA com valor aqui: o código
+    # vai para o GitHub. Vem do VALUATION_PASSWORD no .env do servidor; vazio =
+    # trancado para todos (app/security/senha_extra.py). Até 25/09/2026 o valor
+    # ficava escrito aqui — por isso deve ser trocado.
+    valuation_password: str = ""
     valuation_unlock_ttl_seconds: int = 15 * 60
     credentials_key: str = "dev-credentials-key-change-me"
     cookie_name: str = "davinci_session"

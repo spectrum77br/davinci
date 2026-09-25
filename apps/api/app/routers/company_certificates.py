@@ -27,9 +27,16 @@ from app.schemas.company_certificates import (
     CertificatePatch,
 )
 from app.security.cipher import decrypt_bytes, encrypt_bytes
+from app.security.senha_extra import require_empresas_unlock
 
 logger = structlog.get_logger()
-router = APIRouter(prefix="/api/companies", tags=["company-certificates"])
+# Além de só admin, exige o desbloqueio da tela Empresas (senha extra, 25/09/2026):
+# o certificado é o dado mais sensível da empresa.
+router = APIRouter(
+    prefix="/api/companies",
+    tags=["company-certificates"],
+    dependencies=[Depends(require_empresas_unlock)],
+)
 
 MAX_CERT_BYTES = 1 * 1024 * 1024  # 1 MB — certificado A1 tem poucos KB
 _ALLOWED_EXT = (".p12", ".pfx")

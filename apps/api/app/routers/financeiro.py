@@ -8,17 +8,13 @@ cacheado pras próximas. Isso evita inventar números.
 """
 
 import asyncio
-import hashlib
-import hmac
 import re
-import secrets
-import time
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Annotated
 from urllib.parse import quote
-from uuid import UUID, uuid4
+from uuid import UUID
 
 import aiofiles
 import fitz
@@ -75,6 +71,7 @@ from app.schemas.financeiro import (
     ValuationUnlockIn,
     ValuationUnlockOut,
 )
+from app.security import senha_extra
 from app.services.bling_situacoes import SITUACOES_ENVIADO_ETIQUETA_STR
 
 logger = structlog.get_logger()
@@ -1210,31 +1207,16 @@ def _agg_to_secoes(
 # sessionStorage e envia em X-Valuation-Token a cada GET.
 
 
+# Desde 25/09/2026 a lógica mora em app/security/senha_extra.py, compartilhada
+# com a tela Empresas. O formato da chave não mudou ("valuation:<ts>"), então
+# quem já estava desbloqueado continua desbloqueado depois do deploy.
 def _make_valuation_token() -> tuple[str, int]:
     """Devolve (token, expires_in_seconds). Formato `<ts>.<sig_hex>`."""
-    s = get_settings()
-    ttl = s.valuation_unlock_ttl_seconds
-    ts = int(time.time())
-    msg = f"valuation:{ts}".encode()
-    sig = hmac.new(s.jwt_secret.encode(), msg, hashlib.sha256).hexdigest()
-    return f"{ts}.{sig}", ttl
+    return senha_extra.fazer_token("valuation")
 
 
 def _valid_valuation_token(token: str | None) -> bool:
-    if not token:
-        return False
-    try:
-        ts_str, sig = token.split(".", 1)
-        ts = int(ts_str)
-    except (ValueError, AttributeError):
-        return False
-    s = get_settings()
-    if time.time() - ts > s.valuation_unlock_ttl_seconds:
-        return False
-    expected = hmac.new(
-        s.jwt_secret.encode(), f"valuation:{ts}".encode(), hashlib.sha256
-    ).hexdigest()
-    return hmac.compare_digest(sig, expected)
+    return senha_extra.token_valido(token, "valuation")
 
 
 def require_valuation_unlock(
@@ -1664,15 +1646,12 @@ _ESTOQUE_LOCAIS_ORDEM = ["PI", "SA", "SP", "RA", "CD", "CI", "US", "Eletro", "Ma
 @router.post("/valuation/unlock", response_model=ValuationUnlockOut)
 async def valuation_unlock(
     body: ValuationUnlockIn,
-    _u: Annotated[User, Depends(require_admin)],
+    u: Annotated[User, Depends(require_admin)],
 ) -> ValuationUnlockOut:
     """Valida a senha extra e devolve um token (HMAC + TTL). Senha errada =
-    401 com sleep curto (mitiga brute-force; sem rate-limit dedicado porque
-    o usuário já precisa estar logado e com permissão view)."""
-    s = get_settings()
-    if not hmac.compare_digest(body.password.strip(), s.valuation_password):
-        await asyncio.sleep(0.3)
-        raise HTTPException(401, detail={"code": "wrong_password"})
+    401; 5 erros seguidos travam a pessoa por 15 minutos (429) — ver
+    app/security/senha_extra.py."""
+    await senha_extra.conferir_senha(body.password, user_id=u.id, escopo="valuation")
     token, ttl = _make_valuation_token()
     return ValuationUnlockOut(token=token, expires_in=ttl)
 

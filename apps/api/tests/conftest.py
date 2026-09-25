@@ -58,6 +58,7 @@ from app.deps.auth import (  # noqa: E402
 )
 from app.main import app  # noqa: E402
 from app.models import Base, User, UserRole, UserStatus  # noqa: E402
+from app.security.senha_extra import require_empresas_unlock  # noqa: E402
 
 
 @pytest_asyncio.fixture(scope="session", autouse=True)
@@ -467,6 +468,10 @@ def make_user(db: AsyncSession):
     return _f
 
 
+async def _liberado() -> None:
+    return None
+
+
 def _override_as(user: User) -> None:
     async def _get_current():
         return user
@@ -478,6 +483,9 @@ def _override_as(user: User) -> None:
     app.dependency_overrides[require_user] = _require
     app.dependency_overrides[require_active_user] = _require
     app.dependency_overrides[require_admin] = _require
+    # Senha extra da tela Empresas (25/09/2026): os testes de empresa já
+    # autenticam aqui; a trava tem testes próprios, que tiram este desvio.
+    app.dependency_overrides[require_empresas_unlock] = _liberado
 
 
 @pytest.fixture

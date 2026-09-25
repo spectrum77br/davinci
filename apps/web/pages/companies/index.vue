@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { TABS_CADASTROS } from '~/lib/navGroups'
 import { ref, computed, reactive, watch } from 'vue'
-import { Plus, RefreshCw, X, ExternalLink, Trash2 } from 'lucide-vue-next'
+import { Plus, RefreshCw, X, ExternalLink, Trash2, Lock } from 'lucide-vue-next'
 import {
   MARKETPLACES,
   MARKETPLACE_SHORT,
@@ -73,6 +73,27 @@ type StoreInfoLite = {
 }
 
 const { api } = useApi()
+
+// ---------- senha extra (a mesma do Valuation) ----------
+// Eduardo, 25/09/2026: "senha segura porque tem informações que muita gente
+// não pode ver". O servidor recusa os dados sem a chave; esta trava só mostra
+// o cadeado e manda a chave em toda chamada.
+const trava = useSenhaExtra('empresas', '/api/companies/unlock', 'X-Empresas-Token')
+
+async function apiE<T = any>(path: string, opts: any = {}): Promise<T> {
+  try {
+    return await api<T>(path, { ...opts, headers: { ...(opts.headers || {}), ...trava.headers() } })
+  } catch (e: any) {
+    // Venceu no meio do uso: volta para o cadeado em vez de mostrar erro.
+    if (trava.eTravamento(e)) bloquear()
+    throw e
+  }
+}
+
+function bloquear() {
+  trava.trancar()
+  grid.value = null
+}
 const grid = ref<GridOut | null>(null)
 const storeInfos = ref<StoreInfoLite[]>([])
 const loading = ref(false)
@@ -101,8 +122,8 @@ async function refresh() {
   error.value = null
   try {
     const [gridRes, storeRes] = await Promise.all([
-      api<GridOut>('/api/companies/grid'),
-      api<StoreInfoLite[]>('/api/pricing/store-info').catch(() => [] as StoreInfoLite[]),
+      apiE<GridOut>('/api/companies/grid'),
+      apiE<StoreInfoLite[]>('/api/pricing/store-info').catch(() => [] as StoreInfoLite[]),
     ])
     grid.value = gridRes
     storeInfos.value = storeRes
@@ -112,7 +133,12 @@ async function refresh() {
     loading.value = false
   }
 }
-await refresh()
+// Sem `await refresh()` no carregamento: a chave só existe no navegador
+// (sessionStorage), então a primeira carga acontece depois de montar a página.
+onMounted(() => {
+  trava.iniciar()
+  if (trava.token.value) refresh()
+})
 
 // Responsáveis conhecidos (para o filtro e para o autocompletar do campo),
 // tirados da própria grade — o Responsável é um dado DA EMPRESA.
@@ -194,7 +220,7 @@ async function createCompany() {
       if (draft.value[k]) body[k] = draft.value[k]
     }
     if (draft.value.ip.trim()) body.ip = soOIp(draft.value.ip)
-    await api('/api/companies', { method: 'POST', body })
+    await apiE('/api/companies', { method: 'POST', body })
     showNew.value = false
     draft.value = { razao_social: '', apelido: '', cnpj: '', uf: '', inscricao_estadual: '', site_url: '', operacao: '', contabilidade: '', ip: '', obs: '' }
     await refresh()
@@ -247,7 +273,7 @@ async function commitEditResp(row: GridRow) {
   try {
     // O Responsável é da EMPRESA: grava no cadastro dela e não depende de
     // existir loja. O responsável de cada LOJA continua na tela Lojas.
-    await api(`/api/companies/${row.company.id}`, {
+    await apiE(`/api/companies/${row.company.id}`, {
       method: 'PATCH',
       body: { responsavel_nome: next || null },
     })
@@ -291,7 +317,7 @@ async function commitEditCell(row: GridRow, field: EditableField) {
   }
   editCellSaving.value = true
   try {
-    const updated = await api<CompanyOut>(`/api/companies/${row.company.id}`, {
+    const updated = await apiE<CompanyOut>(`/api/companies/${row.company.id}`, {
       method: 'PATCH',
       body: { [field]: next || null },
     })
@@ -396,9 +422,9 @@ function pararRelogio() {
 // Recarrega só os dados, sem mexer na faixa de erro e sem atrapalhar quem está
 // editando alguma coisa na tela.
 async function recarregarEmSilencio() {
-  if (loading.value || editingCell.value || editingResp.value || editingObs.value || certAberto.value || showNew.value) return
+  if (!trava.token.value || loading.value || editingCell.value || editingResp.value || editingObs.value || certAberto.value || showNew.value) return
   try {
-    grid.value = await api<GridOut>('/api/companies/grid')
+    grid.value = await apiE<GridOut>('/api/companies/grid')
   } catch {
     // silencioso: a tela continua com o que tem e tenta de novo em 20 s
   }
@@ -470,7 +496,7 @@ async function mostrarSenhaGuardada(row: GridRow) {
   const empresa = row.company.id
   certErro.value = null
   try {
-    const r = await api<{ password: string | null }>(
+    const r = await apiE<{ password: string | null }>(
       `/api/companies/${empresa}/certificates/${cert.id}/password`,
     )
     // Se nesse meio tempo a pessoa abriu o painel de OUTRA empresa, a senha
@@ -508,10 +534,10 @@ async function salvarCertificado(row: GridRow) {
       fd.append('file', certArquivo.value)
       if (temSenha) fd.append('password', senha)
       if (certVence.value) fd.append('expires_at', certVence.value)
-      await api(`/api/companies/${empresa}/certificates`, { method: 'POST', body: fd })
+      await apiE(`/api/companies/${empresa}/certificates`, { method: 'POST', body: fd })
     } else if (cert) {
       // Só a senha, e nunca vazia: vazio apagaria a senha guardada.
-      await api(`/api/companies/${empresa}/certificates/${cert.id}`, {
+      await apiE(`/api/companies/${empresa}/certificates/${cert.id}`, {
         method: 'PATCH',
         body: { password: senha },
       })
@@ -552,7 +578,7 @@ async function commitEditObs(row: GridRow) {
   if (next === prev.trim()) return cancelEditObs()
   obsSaving.value = true
   try {
-    await api(`/api/companies/${row.company.id}`, {
+    await apiE(`/api/companies/${row.company.id}`, {
       method: 'PATCH',
       body: { obs: next || null },
     })
@@ -599,9 +625,9 @@ async function loadAvailableCadastros(mk: Marketplace) {
   newAccountForm.serverId = ''
   try {
     const [phones, emails, servers] = await Promise.all([
-      api<CadastroLite[]>(`/api/cadastros/available?tipo=fone&marketplace=${mk}`),
-      api<CadastroLite[]>(`/api/cadastros/available?tipo=email&marketplace=${mk}`),
-      api<CadastroLite[]>(`/api/cadastros/available?tipo=servidor&marketplace=${mk}`),
+      apiE<CadastroLite[]>(`/api/cadastros/available?tipo=fone&marketplace=${mk}`),
+      apiE<CadastroLite[]>(`/api/cadastros/available?tipo=email&marketplace=${mk}`),
+      apiE<CadastroLite[]>(`/api/cadastros/available?tipo=servidor&marketplace=${mk}`),
     ])
     if (!isCurrentRequest()) return
     availablePhones.value = phones
@@ -649,7 +675,7 @@ async function submitNewAccount() {
   newAccountErr.value = null
   try {
     // A API reserva os cadastros e cria todos os vínculos na mesma transação.
-    await api('/api/stores/account', {
+    await apiE('/api/stores/account', {
       method: 'POST',
       body: {
         company_id: company.id,
@@ -719,7 +745,7 @@ async function removeStoreCell(row: GridRow, mk: Marketplace) {
   const apelido = row.company.apelido
   if (!confirm(`Remover conta de ${apelido} no ${MARKETPLACE_SHORT[mk]}? Vai apagar Loja, dados em store_info e vínculos em Cadastros.`)) return
   try {
-    await api(`/api/stores/${cell.id}`, { method: 'DELETE' })
+    await apiE(`/api/stores/${cell.id}`, { method: 'DELETE' })
     closeCellPopover()
     await refresh()
   } catch (e: any) {
@@ -736,7 +762,7 @@ async function deleteCompany(row: GridRow) {
     `Isso apaga TODAS as lojas, contas e vínculos dela. Não dá pra desfazer.`,
   )) return
   try {
-    await api(`/api/companies/${row.company.id}`, { method: 'DELETE' })
+    await apiE(`/api/companies/${row.company.id}`, { method: 'DELETE' })
     await refresh()
   } catch (e: any) {
     error.value = e?.data?.detail?.code || e?.message || 'erro ao excluir'
@@ -752,7 +778,7 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
   if (willEnable) enabled.add(mk)
   else enabled.delete(mk)
   try {
-    const updated = await api<CompanyOut>(`/api/companies/${row.company.id}`, {
+    const updated = await apiE<CompanyOut>(`/api/companies/${row.company.id}`, {
       method: 'PATCH',
       body: { enabled_marketplaces: Array.from(enabled) },
     })
@@ -766,10 +792,15 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
 <template>
   <div class="space-y-4">
     <RouteTabs :tabs="TABS_CADASTROS" />
+    <SenhaExtraTrava v-if="!trava.token.value" titulo="Empresas" :trava="trava" @desbloqueado="refresh" />
+    <template v-else>
     <div class="flex items-center gap-3 flex-wrap">
       <h1 class="text-2xl font-semibold">Empresas</h1>
       <Button size="sm" variant="ghost" :disabled="loading" @click="refresh">
         <RefreshCw class="size-4 mr-1" /> recarregar
+      </Button>
+      <Button size="sm" variant="ghost" title="tranca a página de novo nesta aba" @click="bloquear">
+        <Lock class="size-4 mr-1" /> bloquear
       </Button>
       <div class="ml-auto flex gap-2 flex-wrap">
         <Input v-model="search" placeholder="razão social / apelido / CNPJ / responsável / contabilidade" class="w-64" />
@@ -1400,6 +1431,7 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
         </div>
       </div>
     </div>
+    </template>
   </div>
   <datalist id="resp-nomes">
     <option v-for="n in responsaveisOpts" :key="n" :value="n" />

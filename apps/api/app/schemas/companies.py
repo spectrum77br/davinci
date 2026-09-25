@@ -168,6 +168,26 @@ class CompanyPatch(BaseModel):
         return _normalize_company_payload(data)
 
 
+class CompanyResumo(BaseModel):
+    """O que a lista aberta de empresas entrega: só o bastante para os menus de
+    seleção de outras telas (Integrações, Cadastros). O resto — CNPJ, IE, IP,
+    responsável, contabilidade — fica atrás da senha extra da tela Empresas."""
+
+    model_config = ConfigDict(from_attributes=True)
+    id: UUID
+    apelido: str
+    razao_social: str
+
+
+class DesbloqueioIn(BaseModel):
+    password: str
+
+
+class DesbloqueioOut(BaseModel):
+    token: str
+    expires_in: int
+
+
 class CompanyOut(CompanyBase):
     model_config = ConfigDict(from_attributes=True)
     id: UUID
