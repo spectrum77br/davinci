@@ -47,3 +47,12 @@ scp apps/cerebro-hermes/skills/ia-de-chamado/SKILL.md mac-robo:.hermes/skills/ia
 Travado desde 24/09 (`exclusivo`): o token antigo recebe lista vazia no
 `/agent/analisar` e 409 no `/agent/analise`. `davinci_chamados.py guarda liberar`
 desfaz. Ver §7 de `docs/robo-chamados-v2.md`.
+
+## Remendo local no Hermes (25/09)
+
+`~/.hermes/hermes-agent/tools/browser_tool.py` (`_capture_vision_screenshot`):
+tirado o `--full` da captura do `browser_vision`. A lista de Retornos da Shopee
+dava 7616×37218 px — o Pillow recusa reduzir (decompression bomb) e a Anthropic
+recusa a imagem (>10 MB), derrubando a tarefa na tela. Agora a captura é só a
+parte visível; a IA rola a página. Original em `browser_tool.py.orig-20260925`.
+**Um `hermes update` desfaz** — reaplicar depois de atualizar.
