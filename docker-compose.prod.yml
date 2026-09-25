@@ -41,7 +41,9 @@ services:
           s=socket.create_connection(('127.0.0.1',13129),5);
           s.settimeout(5);
           s.sendall(b'CONNECT api.magalu.com:443 HTTP/1.1\r\nHost: api.magalu.com:443\r\n\r\n');
-          status=s.recv(256).split(b'\r\n')[0];
+          stream=s.makefile('rb');
+          status=stream.readline(256);
+          stream.close();
           s.close();
           assert b' 407 ' in status
       interval: 30s
