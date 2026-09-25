@@ -158,6 +158,8 @@ MOTIVO_STATUS_OFICIAL = {
     STATUS_PROVA: "prova enviada — a Shopee analisa",
     STATUS_REEMBOLSO_PAGO: "reembolso pago — 24 h de carência",
     STATUS_AGUARDANDO: "nossa recusa registrada — o comprador ainda pode recorrer",
+    # 25/09: Encerrado sem decisão em que alguém falou DEPOIS (ver regra 3)
+    STATUS_ENCERRADO: "o caso seguiu depois do encerramento",
 }
 # Motivo dos status finais (Encerrado / Concluído).
 MOTIVO_FINAL = {STATUS_GANHAMOS: "ganhamos", STATUS_PERDEMOS: "perdemos"}
@@ -373,6 +375,17 @@ def nova_mensagem(
         autor_nome=autor_nome,
         autor_id=autor_id,
     )
+
+
+def sair_de_encerrado(ch: Chamado, motivo: str) -> ChamadoMensagem | None:
+    """25/09: Encerrado SEM decisão (status `encerrado`, ninguém concluiu) volta a
+    ser caso vivo — alguém falou depois. Ganhamos/perdemos ficam. Devolve o
+    evento de sistema (o caller adiciona) ou None se nada mudou."""
+    if ch.resolvido or ch.status_plataforma != STATUS_ENCERRADO:
+        return None
+    ch.status_plataforma = None
+    ch.status_plataforma_at = None
+    return registrar_sistema(ch, f"Chamado saiu de Encerrado: {motivo}")
 
 
 def registrar_sistema(ch: Chamado, texto: str) -> ChamadoMensagem:
@@ -1006,7 +1019,20 @@ def status_e_motivo_da_aba(
             instrucao_pendente.created_at,
             f"instrução pendente pro robô: {_texto_curto(instrucao_pendente.texto, 60)}",
         )
-    if ch.status_plataforma in STATUS_FINAIS:
+    # 25/09 (Vinicius, 296550: "respondemos agora e ele continua Encerrado"):
+    # Encerrado SEM decisão em que nós ou a plataforma falamos DEPOIS não é mais
+    # Encerrado — o caso seguiu (o `resolver` da IA é só sugestão). Ganhamos/
+    # perdemos (decisão lida da plataforma) ficam.
+    fala_final = _quando(ultima_fala)
+    seguiu = ch.status_plataforma == STATUS_ENCERRADO and (
+        nossa_fala_apos_status
+        or (
+            fala_final is not None
+            and ch.status_plataforma_at is not None
+            and fala_final > ch.status_plataforma_at
+        )
+    )
+    if ch.status_plataforma in STATUS_FINAIS and not seguiu:
         motivo = MOTIVO_FINAL.get(ch.status_plataforma, "plataforma encerrou sem decisão")
         if ch.valor_sugerido is not None:
             motivo = f"{motivo} · robô sugere {resultado_texto(ch.valor_sugerido)}"

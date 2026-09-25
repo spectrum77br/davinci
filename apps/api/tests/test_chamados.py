@@ -1085,17 +1085,19 @@ async def test_agent_analisar_e_analise_do_cerebro(client, make_user, auth_as, d
         "plataforma encerrou sem decisão · robô sugere lucro de R$ 21,60"
     )
     assert float(row["valor_sugerido"]) == 21.6
-    # Encerrado não volta pro cérebro (mesmo com resposta nova)…
+    # Encerrado não volta pro cérebro sozinho…
     assert await analisar() == []
+    # …mas volta quando a plataforma fala DEPOIS do encerramento (25/09, 296550: o
+    # `resolver` é só sugestão e o caso pode seguir vivo) — e a coluna sai do Encerrado
     await client.post(
         "/api/chamados/agent/recebida",
         headers=hdr,
         json={"chamado": "479765445", "texto": "Algo mais?"},
     )
-    assert await analisar() == []
-    assert (await linha())["status_aba"] == "encerrado"
+    assert len(await analisar()) == 1
+    assert (await linha())["status_aba"] != "encerrado"
 
-    # …só com instrução de uma pessoa (19/09)
+    # …e com instrução de uma pessoa (19/09)
     ins = await client.post(
         f"/api/chamados/{cid}/instrucao",
         json={"texto": "  Responde que o crédito não caiu na conta ainda.  "},

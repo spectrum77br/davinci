@@ -756,6 +756,12 @@ async def replicar(
             )
         )
     await svc.enviar_mensagem(session, ch, msg)
+    if msg.status != "falhou":
+        # 25/09 (296550): respondemos num Encerrado sem decisão → o caso seguiu
+        # (a coluna vai pra Aguard. Plataforma e a varredura volta a ler).
+        evento = svc.sair_de_encerrado(ch, "respondemos à plataforma")
+        if evento is not None:
+            session.add(evento)
     await session.commit()
     m = (
         await session.execute(
@@ -2020,6 +2026,18 @@ async def _anexos_da_abertura(session: AsyncSession, ch: Chamado) -> list[Chamad
     )
 
 
+async def _plataforma_falou_depois(session: AsyncSession, ch: Chamado) -> bool:
+    """A plataforma mandou mensagem DEPOIS de o chamado entrar no status atual?"""
+    ult = (
+        await session.execute(
+            select(func.max(ChamadoMensagem.created_at)).where(
+                ChamadoMensagem.chamado_id == ch.id, ChamadoMensagem.direcao == "recebida"
+            )
+        )
+    ).scalar_one_or_none()
+    return ult is not None and ult > ch.status_plataforma_at
+
+
 def _bloqueio_de(
     msgs: list[ChamadoMensagem],
 ) -> tuple[ChamadoMensagem | None, AgentBloqueioOut | None]:
@@ -2094,8 +2112,14 @@ def _trabalho_do_cerebro(plataforma: str | None, canais: list[str]):
         fechou.is_(None),
         *[fechou.like(p) for p in _FECHOU_REABRIVEL],
     )
+    # 25/09 (296550): Encerrado não cega a IA quando a plataforma fala DEPOIS do
+    # encerramento — o `resolver` dela é só sugestão e o caso pode seguir vivo.
+    falou_depois = rec.c.ult > Chamado.status_plataforma_at
     ramo_resposta = (
-        Chamado.canal.in_(canais) & ~encerrado & nao_fechado_por_gente & resposta_nova
+        Chamado.canal.in_(canais)
+        & or_(~encerrado, falou_depois)
+        & nao_fechado_por_gente
+        & resposta_nova
     )
     if plataforma:
         plat = plataforma.strip().lower()
@@ -2242,7 +2266,18 @@ async def agent_analise(
     # antes de gravar a análise (que consome a instrução)
     com_instrucao = _instrucao_pendente(await _mensagens_do_caso(session, ch)) is not None
     assumido: ChamadoMensagem | None = None
-    if body.acao == "responder" and ch.canal != "robo":
+    # 25/09 (Vinicius, 296550: "a IA consegue responder pela própria API?"): no
+    # canal `api` do Mercado Livre, com instrução de PESSOA, a IA responde direto
+    # na reclamação (mesmo envio da Réplica manual). Sem instrução, segue só
+    # sugerindo (`humano`). Shopee/TikTok não têm API de mensagem na disputa.
+    via_api = (
+        body.acao == "responder"
+        and ch.canal == "api"
+        and com_instrucao
+        and svc._eh_ml(ch)
+        and not (ch.origem_ref or "").startswith("tiktok_reembolso:")
+    )
+    if body.acao == "responder" and ch.canal != "robo" and not via_api:
         # Réplica de robô só sai pelo robô de browser (Tuta no ML; Seller Center
         # na Shopee/TikTok). Manual do ML: o robô ASSUME o chamado (Eduardo
         # 09/09: "para os manuais nós vamos tomar conta") — canal vira robô.
@@ -2319,7 +2354,30 @@ async def agent_analise(
         session.add(
             svc.registrar_sistema(ch, "Chamado saiu de Encerrado: o robô vai responder por instrução")
         )
-    if body.acao == "responder":
+    if (
+        body.acao != "resolver"
+        and ch.status_plataforma == svc.STATUS_ENCERRADO
+        and ch.status_plataforma_at is not None
+        and await _plataforma_falou_depois(session, ch)
+    ):
+        # 25/09 (296550): a plataforma voltou a falar depois do Encerrado e a IA não
+        # sugeriu fechar de novo — o caso está vivo.
+        evento = svc.sair_de_encerrado(ch, "a plataforma voltou a falar depois do encerramento")
+        if evento is not None:
+            session.add(evento)
+    if via_api:
+        replica = svc.nova_mensagem(
+            ch,
+            texto=(body.texto_replica or "").strip(),
+            tipo="replica",
+            direcao="enviada",
+            autor_nome=cerebro.nome or AUTOR_CEREBRO,
+            status="pendente",
+        )
+        session.add(replica)
+        await session.flush()
+        await svc.enviar_mensagem(session, ch, replica)  # falha vira `falhou` + erro
+    elif body.acao == "responder":
         replica = svc.nova_mensagem(
             ch,
             texto=(body.texto_replica or "").strip(),

@@ -1111,6 +1111,23 @@ async def _sync_ml(session: AsyncSession, ch: Chamado, dev: Devolution | None) -
 # O mesmo filtro vale pra réplica automática e pro reenvio de abertura pendente —
 # mora em `chamados_svc` pra todo cron usar o mesmo.
 _nao_encerrado = chamados_svc.NAO_ENCERRADO_SQL
+# 25/09 (296550): o `resolver` da IA de Chamado põe o caso em Encerrado, mas é só
+# SUGESTÃO — o mediador do ML voltou a falar 7 min depois pedindo o valor da peça
+# e ninguém leu. Encerrado SEM decisão (nem ganhamos nem perdemos) continua sendo
+# lido por 15 dias; ganhamos/perdemos (decisão lida da plataforma) saem na hora.
+RELER_ENCERRADO = timedelta(days=15)
+
+
+def _le_na_varredura(agora: datetime):
+    return or_(
+        _nao_encerrado,
+        and_(
+            Chamado.status_plataforma == chamados_svc.STATUS_ENCERRADO,
+            Chamado.status_plataforma_at >= agora - RELER_ENCERRADO,
+        ),
+    )
+
+
 # 22/09: o número em `chamados.chamado` foi capturado pelo robô na TELA — nenhuma
 # API sabe responder por ele. Quem lê esses casos é o `chamados_leitura`.
 _aberto_na_tela = chamados_svc.CASO_DE_TELA_SQL
@@ -1160,6 +1177,7 @@ async def sync_respostas(session: AsyncSession, *, agora: datetime | None = None
     e ainda sem decisão da plataforma → consulta a plataforma, grava respostas
     novas e põe os decididos no estado Encerrado (`encerrados` conta os que
     mudaram nesta passada). Best-effort por chamado; commita no fim."""
+    ref = agora or datetime.now(UTC)
     rows = (
         await session.execute(
             select(Chamado, ChamadoMensagem)
@@ -1168,7 +1186,7 @@ async def sync_respostas(session: AsyncSession, *, agora: datetime | None = None
                 Chamado.origem == "devolucao",
                 Chamado.canal == "api",
                 Chamado.resolvido.is_(False),
-                _nao_encerrado,
+                _le_na_varredura(ref),
                 Chamado.chamado.is_not(None),
                 # 22/09 (292592): caso ABERTO NA TELA não tem o que ser lido aqui —
                 # o número guardado é protocolo de tela e a API responde "essa
@@ -1197,7 +1215,7 @@ async def sync_respostas(session: AsyncSession, *, agora: datetime | None = None
             select(Chamado).where(
                 Chamado.canal == "api",
                 Chamado.resolvido.is_(False),
-                _nao_encerrado,
+                _le_na_varredura(ref),
                 ~_aberto_na_tela,  # idem: TikTok/ML abertos na tela saem daqui
                 Chamado.origem != "devolucao",
                 or_(
@@ -1233,6 +1251,7 @@ async def sync_respostas(session: AsyncSession, *, agora: datetime | None = None
         if fn is None:
             continue
         verificados += 1
+        antes = ch.status_plataforma
         try:
             dev = await _dev_de(session, ch)
             if fn is _sync_tiktok:
@@ -1240,7 +1259,8 @@ async def sync_respostas(session: AsyncSession, *, agora: datetime | None = None
             else:
                 n = await fn(session, ch, dev)
             novos += n
-            if ch.status_plataforma in chamados_svc.STATUS_FINAIS:
+            # só quem MUDOU nesta passada (o Encerrado relido já estava final)
+            if ch.status_plataforma in chamados_svc.STATUS_FINAIS and antes != ch.status_plataforma:
                 encerrados += 1
             await session.flush()
         except Exception as e:  # noqa: BLE001

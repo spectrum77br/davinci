@@ -116,9 +116,13 @@ python3 ~/.hermes/scripts/tela.py --chamado-id <chamado_id> --pode-agir --fundo 
 | `humano` | precisa de gente | o chamado vai pra "Análise Humano" |
 | `resolver` | a plataforma encerrou/decidiu; sugira fechar | o chamado vai pra "Encerrado"; uma pessoa conclui |
 
-- `responder` só funciona em canal `robo`, em canal `manual` do Mercado Livre, ou
-  em canal `api` **com bloqueio**. Canal `api` sem bloqueio: use `humano` com a
-  resposta sugerida no `resumo` — ou, se uma pessoa mandou, a tela (seção acima).
+- `responder` só funciona em canal `robo`, em canal `manual` do Mercado Livre,
+  em canal `api` **com bloqueio**, ou em canal `api` do **Mercado Livre com
+  instrução de pessoa** — aí a resposta sai NA HORA pela API da reclamação (25/09).
+  Canal `api` sem instrução (ou Shopee/TikTok): use `humano` com a resposta
+  sugerida no `resumo` — ou, se uma pessoa mandou, a tela (seção acima).
+- Chamado em Encerrado em que a plataforma voltou a falar: o caso seguiu (a sua
+  sugestão de fechar era só sugestão). Leia a fala nova e decida de novo.
 - `texto_replica`: português, educado, curto, objetivo, só com fatos do caso. Sem
   saudação longa, sem emoji. `reanexar_abertura: true` se a plataforma pediu de
   novo os comprovantes que já mandamos na abertura.

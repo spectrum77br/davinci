@@ -2587,3 +2587,147 @@ async def test_ia_de_chamado_prova_shopee_na_disputa_reaberta(client, make_user,
     assert f.status_code == 200 and f.json()["ok"] is False and "not allowed" in f.json()["erro"]
     hist = (await client.get(f"/api/chamados/{ch.id}/mensagens")).json()
     assert any(m["status"] == "falhou" and "not allowed" in (m.get("erro") or "") for m in hist)
+
+
+async def test_ia_encerrado_sem_decisao_segue_quando_alguem_fala_depois(client, make_user, auth_as, db, ml, monkeypatch):
+    """25/09 (296550): a IA sugeriu fechar (Encerrado) lendo o histórico velho e o
+    mediador do ML voltou a falar pedindo o valor da peça. Antes: a varredura não
+    lia mais o caso, a IA não via a fala nova e, mesmo depois de respondermos, a
+    coluna seguia Encerrado. Agora: a varredura relê o Encerrado sem decisão, a IA
+    vê a fala nova, e responder (pessoa ou IA com instrução, direto pela API do ML)
+    tira o chamado do Encerrado → Aguard. Plataforma."""
+    import hashlib
+
+    from app.models import ChamadoCerebro
+    from app.services import chamados_devolucao_sync as sync
+
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+    await _seed_pedido(db, user, numero="296550", numeroloja="2000550")
+    r = await client.post(
+        "/api/devolutions",
+        json={"conta": "aguiar", "pedido_bling": "296550", "pedido_marketplace": "2000550",
+              "condicao_produto": "Não devolvido", "motivo_devolucao": "Não recebido"},
+    )
+    assert r.json()["chamado_ml_status"] == "enviada", r.json()
+    ch = (await db.execute(select(Chamado).where(Chamado.pedido_bling == "296550"))).scalar_one()
+    cid = str(ch.id)
+    db.add(ChamadoCerebro(nome="IA de Chamado", ligada=True,
+                          token_hash=hashlib.sha256(b"tok-ia").hexdigest()))
+    await db.commit()
+    h = {"X-Agent-Token": "tok-ia"}
+    falas = [{"sender_role": "mediator", "message": "Você recebeu uma reclamação",
+              "date_created": "2026-09-16T15:47:00.000-03:00"}]
+    enviadas: list[tuple[str, str, str]] = []
+
+    async def _msgs(claim_id):
+        return list(falas)
+
+    async def _send(claim_id, texto, *, receiver_role):
+        enviadas.append((str(claim_id), texto, receiver_role))
+        return {}
+
+    async def _claim(claim_id):  # mediação aberta: dá pra falar com o mediador
+        return {"id": claim_id, "status": "opened", "players": [
+            {"role": "respondent", "type": "seller",
+             "available_actions": [{"action": "send_message_to_mediator"}]}]}
+
+    ml.get_claim_messages = _msgs
+    ml.send_claim_message = _send
+    ml.get_claim = _claim
+
+    async def _na_fila() -> bool:
+        r = await client.post("/api/chamados/agent/analisar", headers=h,
+                              json={"plataforma": None, "canais": ["api"]})
+        assert r.status_code == 200, r.text
+        return cid in [c["chamado_id"] for c in r.json()["chamados"]]
+
+    async def _aba() -> str:
+        r = await client.get("/api/chamados", params={"search": "296550"})
+        return next(c for c in r.json()["items"] if c["id"] == cid)["status_aba"]
+
+    assert (await sync.sync_respostas(db))["novos"] == 1
+    assert await _na_fila()
+    # a IA lê errado e sugere fechar → Encerrado, some da fila dela
+    a = await client.post("/api/chamados/agent/analise", headers=h, json={
+        "chamado_id": cid, "classe": "ml_encerrada", "resumo": "mediador encerrou", "acao": "resolver"})
+    assert a.status_code == 200, a.text
+    await db.commit()
+    await db.refresh(ch)
+    assert ch.status_plataforma == "encerrado"
+    assert not await _na_fila()
+    assert await _aba() == "encerrado"
+    # a varredura segue lendo o Encerrado sem decisão — e não conta de novo como encerrado
+    s = await sync.sync_respostas(db)
+    assert (s["verificados"], s["novos"], s["encerrados"]) == (1, 0, 0)
+    # o mediador volta a falar → a IA vê; a coluna sai do Encerrado
+    falas.append({"sender_role": "mediator", "message": "Informe o valor aproximado da peça que falta",
+                  "date_created": "2026-09-25T10:34:00.000-03:00"})
+    assert (await sync.sync_respostas(db))["novos"] == 1
+    assert await _na_fila()
+    assert await _aba() != "encerrado"
+    # sem instrução, a IA não responde pela API (só sugere)
+    semi = await client.post("/api/chamados/agent/analise", headers=h, json={
+        "chamado_id": cid, "classe": "ml_pede_valor", "resumo": "pede o valor", "acao": "responder",
+        "texto_replica": "A peça vale R$ 100"})
+    assert semi.status_code == 422 and semi.json()["detail"]["code"] == "canal_sem_robo"
+    assert enviadas == []
+    # com instrução de pessoa, responde na hora pela API do ML e sai do Encerrado
+    ins = await client.post(f"/api/chamados/{cid}/instrucao", json={"texto": "responde que a peça vale R$ 120"})
+    assert ins.status_code == 200, ins.text
+    ok = await client.post("/api/chamados/agent/analise", headers=h, json={
+        "chamado_id": cid, "classe": "ml_pede_valor", "resumo": "informar o valor", "acao": "responder",
+        "texto_replica": "O valor aproximado da peça que falta é R$ 120,00."})
+    assert ok.status_code == 200, ok.text
+    assert enviadas == [("777", "O valor aproximado da peça que falta é R$ 120,00.", "mediator")]
+    await db.commit()
+    await db.refresh(ch)
+    assert ch.canal == "api" and ch.status_plataforma is None
+    hist = (await client.get(f"/api/chamados/{cid}/mensagens")).json()
+    resp = [m for m in hist if m["texto"].startswith("O valor aproximado")]
+    assert len(resp) == 1 and resp[0]["status"] == "enviada" and resp[0]["autor_nome"] == "IA de Chamado"
+    assert await _aba() == "aguard_plataforma"
+
+
+async def test_replica_manual_tira_do_encerrado_sem_decisao(client, make_user, auth_as, db, ml, monkeypatch):
+    """25/09 (Vinicius: "respondemos agora e ele continua Encerrado, teria que ir
+    pra Aguardando plataforma"). Ganhamos/perdemos não mudam."""
+    from app.services import chamados as chamados_svc
+
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+    await _seed_pedido(db, user, numero="296551", numeroloja="2000551")
+    r = await client.post(
+        "/api/devolutions",
+        json={"conta": "aguiar", "pedido_bling": "296551", "pedido_marketplace": "2000551",
+              "condicao_produto": "Não devolvido", "motivo_devolucao": "Não recebido"},
+    )
+    assert r.json()["chamado_ml_status"] == "enviada", r.json()
+    ch = (await db.execute(select(Chamado).where(Chamado.pedido_bling == "296551"))).scalar_one()
+    cid = str(ch.id)
+
+    async def _send(claim_id, texto, *, receiver_role):
+        return {}
+
+    async def _claim(claim_id):
+        return {"id": claim_id, "status": "opened", "players": [
+            {"role": "respondent", "type": "seller",
+             "available_actions": [{"action": "send_message_to_mediator"}]}]}
+
+    ml.send_claim_message = _send
+    ml.get_claim = _claim
+    chamados_svc.set_status_plataforma(ch, chamados_svc.STATUS_ENCERRADO)
+    await db.commit()
+    rep = await client.post(f"/api/chamados/{cid}/mensagens", data={"texto": "A peça vale R$ 120"})
+    assert rep.status_code == 201 and rep.json()["status"] == "enviada", rep.text
+    await db.refresh(ch)
+    assert ch.status_plataforma is None
+    hist = (await client.get(f"/api/chamados/{cid}/mensagens")).json()
+    assert any(m["texto"] == "Chamado saiu de Encerrado: respondemos à plataforma" for m in hist)
+    # ganhamos fica ganhamos
+    chamados_svc.set_status_plataforma(ch, chamados_svc.STATUS_GANHAMOS)
+    await db.commit()
+    rep = await client.post(f"/api/chamados/{cid}/mensagens", data={"texto": "obrigado"})
+    assert rep.status_code == 201, rep.text
+    await db.refresh(ch)
+    assert ch.status_plataforma == "ganhamos"
