@@ -748,7 +748,7 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
         <tbody>
           <tr v-for="row in filteredRows" :key="row.company.id" class="border-t hover:bg-muted/20">
             <td
-              class="px-3 py-2 sticky left-0 bg-background"
+              class="px-3 py-2 sticky left-0 z-10 bg-background"
               :class="{ 'cursor-pointer hover:bg-accent/30': canEdit && !isEditingCell(row, 'razao_social') }"
               @click="canEdit && !isEditingCell(row, 'razao_social') && startEditCell(row, 'razao_social')"
             >
@@ -957,7 +957,7 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
                 {{ row.company.ip || '—' }}<span v-if="ipRepetido(row)"> ⚠ repetido</span>
               </span>
             </td>
-            <td v-if="isAdmin" class="px-3 py-2 text-xs whitespace-nowrap relative">
+            <td v-if="isAdmin" class="px-3 py-2 text-xs whitespace-nowrap">
               <button
                 type="button"
                 class="rounded px-1.5 py-0.5 hover:bg-accent/40"
