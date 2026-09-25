@@ -1,22 +1,26 @@
 #!/usr/bin/python3
 """Mantém a saída Magalu do servidor ligada ao proxy de loopback deste Mac.
 
-O launchd reinicia este processo quando o SSH termina. Um heartbeat libera o
-próprio inode remoto após 75s sem sinal, permitindo reconexão mesmo se o sshd
-antigo ainda aguardar seu timeout TCP. Os destinos são fixos; nenhuma credencial
-OAuth ou senha do proxy passa pela linha de comando.
+Este processo permanece vivo e tenta reconectar após 10s quando a preparação
+ou o SSH falham. SIGTERM encerra sem reconectar. Reiniciar o próprio wrapper
+depende do gerenciador da sessão; KeepAlive pode ser adiado pelo macOS.
+Um heartbeat libera o próprio inode remoto após 75s sem sinal, permitindo
+reconexão mesmo se o sshd antigo ainda aguardar seu timeout TCP. Os destinos
+são fixos; nenhuma credencial OAuth ou senha do proxy passa pela linha de comando.
 """
 
 import shlex
 import signal
 import subprocess
 import sys
+import time
 
 SSH = "/usr/bin/ssh"
 SSH_HOST = "davinci-prod"
 REMOTE_SOCKET = "/opt/davinci/data/magalu-proxy/magalu.sock"
 LOCAL_DESTINATION = "127.0.0.1:13129"
 HEARTBEAT_SECONDS = 15
+RECONNECT_SECONDS = 10
 SSH_OPTIONS = [
     "-T",
     "-o", "BatchMode=yes",
@@ -188,26 +192,30 @@ def main():
     try:
         for signum in (signal.SIGTERM, signal.SIGINT):
             previous_handlers[signum] = signal.signal(signum, _stop)
-        result = subprocess.run(
-            prepare_command(),
-            input=REMOTE_PREPARE_SCRIPT,
-            text=True,
-            capture_output=True,
-            timeout=30,
-            check=False,
-        )
-        if result.returncode:
-            print("Não foi possível preparar o socket remoto da Magalu.", file=sys.stderr)
-            if result.stderr:
-                print(result.stderr.strip(), file=sys.stderr)
-            return 1
-        return _run_tunnel(tunnel_command())
-    except subprocess.TimeoutExpired:
-        print("Tempo esgotado ao preparar o túnel da Magalu.", file=sys.stderr)
-        return 1
-    except OSError as exc:
-        print("Falha ao iniciar o túnel da Magalu: " + type(exc).__name__, file=sys.stderr)
-        return 1
+        while True:
+            try:
+                result = subprocess.run(
+                    prepare_command(),
+                    input=REMOTE_PREPARE_SCRIPT,
+                    text=True,
+                    capture_output=True,
+                    timeout=30,
+                    check=False,
+                )
+                if result.returncode:
+                    print("Não foi possível preparar o socket remoto da Magalu.", file=sys.stderr)
+                    if result.stderr:
+                        print(result.stderr.strip(), file=sys.stderr)
+                else:
+                    status = _run_tunnel(tunnel_command())
+                    print("Conexão SSH da Magalu encerrada: " + str(status), file=sys.stderr)
+            except subprocess.TimeoutExpired:
+                print("Tempo esgotado no controle do túnel da Magalu.", file=sys.stderr)
+            except OSError as exc:
+                print("Falha no túnel da Magalu: " + type(exc).__name__, file=sys.stderr)
+            # SystemExit de SIGTERM/SIGINT não é capturado: _run_tunnel limpa
+            # seu filho e a parada do serviço nunca dispara nova tentativa.
+            time.sleep(RECONNECT_SECONDS)
     finally:
         for signum, handler in previous_handlers.items():
             signal.signal(signum, handler)

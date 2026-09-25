@@ -300,10 +300,12 @@ def test_tunnel_prepares_then_starts_ssh_with_fixed_destinations(monkeypatch):
     monkeypatch.setattr(tunnel.subprocess, "run", prepare)
     def run_tunnel(command):
         calls.append(("tunnel", command))
-        return 0
+        raise SystemExit(0)
 
     monkeypatch.setattr(tunnel, "_run_tunnel", run_tunnel)
-    assert tunnel.main() == 0
+    with pytest.raises(SystemExit) as stopped:
+        tunnel.main()
+    assert stopped.value.code == 0
     assert calls[0][1][-4:] == ["davinci-prod", "/usr/bin/python3", "-", tunnel.REMOTE_SOCKET]
     command = calls[1][1]
     assert command[0] == "/usr/bin/ssh" and command[-2] == "davinci-prod"
@@ -324,7 +326,64 @@ def test_tunnel_does_not_launch_when_socket_preparation_fails(monkeypatch):
     monkeypatch.setattr(tunnel.subprocess, "run", lambda *args, **kwargs:
                         SimpleNamespace(returncode=1, stderr="socket ativo; preservado"))
     monkeypatch.setattr(tunnel, "_run_tunnel", lambda *args: pytest.fail("must not start tunnel"))
-    assert tunnel.main() == 1
+    monkeypatch.setattr(tunnel.time, "sleep", lambda seconds: tunnel._stop(15, None))
+    with pytest.raises(SystemExit) as stopped:
+        tunnel.main()
+    assert stopped.value.code == 143
+
+
+def test_wrapper_retries_preparation_and_ssh_exit_until_stopped(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["tunnel.py"])
+    events = []
+    preparation_codes = iter([1, 0, 0])
+    tunnel_codes = iter([255, 143])
+
+    def prepare(*args, **kwargs):
+        status = next(preparation_codes)
+        events.append(("prepare", status))
+        return SimpleNamespace(returncode=status, stderr="")
+
+    def run_tunnel(command):
+        status = next(tunnel_codes)
+        events.append(("ssh", status))
+        if status == 143:
+            tunnel._stop(15, None)
+        return status
+
+    monkeypatch.setattr(tunnel.subprocess, "run", prepare)
+    monkeypatch.setattr(tunnel, "_run_tunnel", run_tunnel)
+    monkeypatch.setattr(tunnel.time, "sleep", lambda seconds: events.append(("sleep", seconds)))
+    with pytest.raises(SystemExit) as stopped:
+        tunnel.main()
+    assert stopped.value.code == 143
+    assert events == [
+        ("prepare", 1), ("sleep", 10),
+        ("prepare", 0), ("ssh", 255), ("sleep", 10),
+        ("prepare", 0), ("ssh", 143),
+    ]
+
+
+@pytest.mark.parametrize("error", [
+    tunnel.subprocess.TimeoutExpired("ssh", 30), OSError("simulated connection failure"),
+])
+def test_wrapper_retries_preparation_exception(monkeypatch, error):
+    monkeypatch.setattr(sys, "argv", ["tunnel.py"])
+    attempts = []
+    waits = []
+
+    def prepare(*args, **kwargs):
+        attempts.append(True)
+        if len(attempts) == 1:
+            raise error
+        return SimpleNamespace(returncode=0, stderr="")
+
+    monkeypatch.setattr(tunnel.subprocess, "run", prepare)
+    monkeypatch.setattr(tunnel, "_run_tunnel", lambda command: tunnel._stop(15, None))
+    monkeypatch.setattr(tunnel.time, "sleep", waits.append)
+    with pytest.raises(SystemExit) as stopped:
+        tunnel.main()
+    assert stopped.value.code == 143
+    assert len(attempts) == 2 and waits == [10]
 
 
 @pytest.mark.parametrize("reason", ["eof", "timeout", "heartbeats_then_timeout"])

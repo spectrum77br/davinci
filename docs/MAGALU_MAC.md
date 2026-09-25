@@ -26,8 +26,9 @@ No Mac, a partir do checkout publicado:
 /usr/bin/python3 scripts/install_magalu_mac_proxy.py --apply
 ```
 
-Os LaunchAgents `com.davinci.magalu-proxy` e `com.davinci.magalu-tunnel` reiniciam
-os processos automaticamente. As fontes são copiadas para
+Os LaunchAgents `com.davinci.magalu-proxy` e `com.davinci.magalu-tunnel` registram
+os processos para a sessão do usuário. O instalador dá `kickstart` explícito,
+pois o macOS pode adiar o RunAtLoad. As fontes são copiadas para
 `~/Library/Application Support/DaVinci/magalu-proxy`; o serviço não depende da
 existência da worktree. O arquivo `credentials.json` é privado (0600), gerado
 uma vez e preservado em novas instalações. Não contém tokens da Magalu.
@@ -40,6 +41,15 @@ Um heartbeat a cada 15 segundos acompanha a sessão. Após 75 segundos sem sinal
 ou fechamento da sessão, o monitor libera somente o inode criado por ela;
 um socket de uma conexão nova é preservado. O processo SSH antigo pode esperar
 seu timeout TCP, mas não impede a reconexão pelo mesmo caminho.
+O processo local mantém um laço de reconexão com intervalo de 10 segundos para
+falhas de preparação e encerramento do SSH. O proxy permanece ativo quando a
+internet cai. `SIGTERM` do serviço encerra o laço e fecha seu filho SSH.
+
+Neste Mac, o domínio GUI foi observado em `on-demand-only`: `KeepAlive`,
+`RunAtLoad` e `StartInterval` podem ficar adiados. O laço acima recupera quedas do
+SSH sem depender de relançamento do processo pelo macOS. Se o processo principal
+for encerrado, use o instalador ou `launchctl kickstart` para restaurar o serviço
+enquanto essa condição do domínio persistir. Não alteramos o domínio global.
 
 No servidor, iniciar o bridge interno:
 
