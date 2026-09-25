@@ -2513,3 +2513,77 @@ async def test_shopee_so_reembolso_entregue_vai_pro_robo_contestar(client, make_
     assert "ENTREGUE ao comprador em 02/09 14:00" in txt, txt
     assert "Contestamos a alegação do comprador e solicitamos a revisão do reembolso" in txt
     assert "compensação pelo extravio" not in txt
+
+
+async def test_ia_de_chamado_prova_shopee_na_disputa_reaberta(client, make_user, auth_as, db, ml, monkeypatch):
+    """25/09 (296012): a Shopee reabriu a disputa pelo chat e a tela pede "Upload
+    Evidence", mas a API não marca `seller_proof` PENDING → o sync não manda nada.
+    A IA de Chamado consulta e manda a prova pela rota do agente."""
+    import hashlib
+
+    from app.models import ChamadoCerebro
+
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+    fake = _FakeShopee(status="ACCEPTED")
+
+    async def _proofs(return_sn):
+        return {"proof_text": [], "proof_image": []}
+
+    fake.query_proof = _proofs
+
+    async def _c(session, *a):
+        return fake
+
+    monkeypatch.setattr(svc, "_shopee_client_para", _c)
+    await _seed_pedido(db, user, numero="296012", numeroloja="260910PROVA01",
+                       platform="shopee", conta="vortan", loja="90")
+    r = await client.post(
+        "/api/devolutions",
+        json={"conta": "vortan", "pedido_bling": "296012", "pedido_marketplace": "260910PROVA01",
+              "condicao_produto": "Não devolvido", "motivo_devolucao": "Danificado (Outros)"},
+    )
+    await client.post(f"/api/devolutions/{r.json()['id']}/anexos",
+                      files={"file": ("expedicao.png", PNG_1PX, "image/png")})
+    ch = (await db.execute(select(Chamado).where(Chamado.pedido_bling == "296012"))).scalar_one()
+    ch.chamado = "2609200PROVA01"  # a disputa foi aberta à mão no Seller Center
+    db.add(ChamadoCerebro(nome="IA de Chamado", ligada=True,
+                          token_hash=hashlib.sha256(b"tok-ia").hexdigest()))
+    await db.commit()
+    h = {"X-Agent-Token": "tok-ia"}
+
+    # token antigo (NF) não usa a rota; consultar não envia nada
+    assert (await client.post("/api/chamados/agent/shopee-prova", json={"chamado_id": str(ch.id)},
+                              headers={"X-Agent-Token": "nope"})).status_code == 401
+    c = await client.post("/api/chamados/agent/shopee-prova", json={"chamado_id": str(ch.id)}, headers=h)
+    assert c.status_code == 200, c.text
+    assert c.json()["disputa"]["status"] == "ACCEPTED"
+    assert c.json()["fotos_na_devolucao"] == 1
+    assert not getattr(fake, "proofs", [])
+
+    e = await client.post(
+        "/api/chamados/agent/shopee-prova",
+        json={"chamado_id": str(ch.id), "acao": "enviar", "texto": "Produto certo, vídeo: https://mega.nz/x"},
+        headers=h,
+    )
+    assert e.status_code == 200, e.text
+    assert e.json()["enviada"] is True and e.json()["fotos_enviadas"] == 1
+    assert fake.proofs[-1]["text"] == ["Produto certo, vídeo: https://mega.nz/x"]
+    assert len(fake.proofs[-1]["image"]) == 1
+    hist = (await client.get(f"/api/chamados/{ch.id}/mensagens")).json()
+    prova = [m for m in hist if m["texto"].startswith("Prova adicional enviada à Shopee")]
+    assert len(prova) == 1 and prova[0]["status"] == "enviada"
+    assert prova[0]["autor_nome"] == "IA de Chamado"
+
+    # a Shopee recusa → fica no histórico como falhou, com o erro
+    async def _recusa(*a, **k):
+        raise RuntimeError("shopee_upload_proof error_param: not allowed")
+
+    fake.upload_proof = _recusa
+    f = await client.post(
+        "/api/chamados/agent/shopee-prova",
+        json={"chamado_id": str(ch.id), "acao": "enviar", "texto": "de novo"}, headers=h,
+    )
+    assert f.status_code == 200 and f.json()["ok"] is False and "not allowed" in f.json()["erro"]
+    hist = (await client.get(f"/api/chamados/{ch.id}/mensagens")).json()
+    assert any(m["status"] == "falhou" and "not allowed" in (m.get("erro") or "") for m in hist)

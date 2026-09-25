@@ -765,6 +765,98 @@ async def _enviar_prova_shopee(
     return True
 
 
+# 25/09 (296012): a Shopee REABRIU a disputa pelo chat do Assistente do Vendedor
+# ("2ª", "Upload Evidence", vence em 1 dia) e o sync não percebeu — o envio
+# automático acima só dispara com `seller_proof_status == PENDING`. A IA de
+# Chamado consulta o que a API mostra e manda a prova quando a tela pede.
+_CAMPOS_DISPUTA = (
+    "status", "proof", "dispute", "evidence", "due", "negotiation", "compensation",
+    "solution", "reason", "deadline", "logistics", "validation", "time",
+)
+
+
+def _resumo_disputa(det: dict) -> dict:
+    """Só os campos de status/disputa/prova do get_return_detail (nada do comprador)."""
+    return {
+        k: v for k, v in det.items()
+        if any(c in k.lower() for c in _CAMPOS_DISPUTA)
+        and not any(c in k.lower() for c in ("user", "buyer", "address", "image", "video"))
+    }
+
+
+async def prova_shopee_agente(
+    session: AsyncSession, ch: Chamado, *, enviar: bool, texto: str | None, autor: str
+) -> dict:
+    """Consulta (e, com `enviar`, manda) a prova adicional da devolução Shopee do
+    chamado: fotos da devolução (até 5) + texto. Registra no histórico com o
+    mesmo prefixo do envio automático."""
+    return_sn = (ch.chamado or "").strip()
+    if not return_sn:
+        return {"ok": False, "erro": "chamado sem return_sn (protocolo)"}
+    dev = await _dev_de(session, ch)
+    dev_q = dev or Devolution(conta=ch.conta or "", pedido_bling=ch.pedido_bling,
+                              pedido_marketplace=ch.pedido_marketplace)
+    client = await cd._shopee_client_para(session, ch, dev_q)
+    det = await client.get_return_detail(return_sn)
+    try:
+        provas = await client.query_proof(return_sn)
+    except Exception as e:  # noqa: BLE001 — consulta, não derruba
+        provas = {"erro": str(e)[:300]}
+    fotos: list = []
+    if dev is not None:
+        linhas = await cd._linhas_do_pedido(session, dev)
+        anexos = await cd.anexos_de(session, [d.id for d in linhas] or [dev.id])
+        fotos = [a for a in anexos if (a.content_type or "").lower() in cd.FOTO_TIPOS_IMAGEM]
+    out: dict = {
+        "ok": True,
+        "return_sn": return_sn,
+        "disputa": _resumo_disputa(det),
+        "campos": sorted(det.keys()),
+        "provas_enviadas": provas,
+        "fotos_na_devolucao": len(fotos),
+    }
+    if not enviar:
+        return out
+    texto = (texto or "").strip()
+    if not texto:
+        return {**out, "ok": False, "erro": "texto da prova vazio"}
+    msg = chamados_svc.nova_mensagem(
+        ch,
+        texto=f"{PROVA_PREFIXO} ({len(fotos[:5])} foto(s)): {texto}",
+        tipo="replica",
+        direcao="enviada",
+        autor_nome=autor,
+        status="pendente",
+    )
+    msg.canal = "api"
+    session.add(msg)
+    await session.flush()
+    try:
+        urls: list[str] = []
+        for a in fotos[:5]:
+            url = cd._ref_foto(a).get("ref")
+            if not url:
+                url = await cd._subir_foto_shopee(client, return_sn, a)
+                a.ml_file_name = url
+                await session.flush()
+            urls.append(url)
+        resp = await client.upload_proof(
+            return_sn, proof_text=[texto[:1000]], proof_image=urls or None
+        )
+    except Exception as e:  # noqa: BLE001
+        msg.status = "falhou"
+        msg.erro = str(e)[:300]
+        logger.warning(
+            "chamado_shopee_prova_agente_falhou", chamado_id=str(ch.id), err=str(e)[:200]
+        )
+        return {**out, "ok": False, "erro": str(e)[:300], "mensagem_id": str(msg.id)}
+    msg.status = "enviada"
+    msg.enviada_at = datetime.now(UTC)
+    logger.info("chamado_shopee_prova_agente_enviada", chamado_id=str(ch.id), fotos=len(urls))
+    return {**out, "enviada": True, "fotos_enviadas": len(urls), "resposta": resp,
+            "mensagem_id": str(msg.id)}
+
+
 def _brl(v: Decimal) -> str:
     return f"R$ {v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 

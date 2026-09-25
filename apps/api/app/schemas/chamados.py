@@ -890,3 +890,11 @@ class IaEstadoOut(BaseModel):
     esperando: int
     regras: list[IaRegraOut]
     decisoes: list[IaDecisaoOut]
+
+
+class AgentShopeeProvaIn(BaseModel):
+    """25/09: prova da disputa Shopee pela IA de Chamado (`consultar` só lê)."""
+
+    chamado_id: UUID
+    acao: Literal["consultar", "enviar"] = "consultar"
+    texto: str | None = Field(default=None, max_length=1000)

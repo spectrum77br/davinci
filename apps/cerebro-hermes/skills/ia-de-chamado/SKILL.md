@@ -78,6 +78,32 @@ está presa porque a plataforma não libera pela API) e `valor_sugerido`.
 Nunca invente fato: data, valor, rastreio, prazo ou promessa só se estiver no caso
 (ou no `pagamento`, no ML). Na dúvida, `humano`.
 
+## Tarefas na tela da loja (AdsPower)
+
+Quando uma **instrução de pessoa** pede algo que só se faz na tela da loja —
+responder no chat com a plataforma, ler o Seller Center, pedir reavaliação —
+faça você mesma pela tela:
+
+```bash
+python3 ~/.hermes/scripts/tela.py --chamado-id <chamado_id> --pode-agir --fundo --tarefa "<tarefa>"
+```
+
+- **Sempre com `--fundo`**: o script volta na hora e a tarefa roda sozinha
+  (acha o perfil do AdsPower da loja, abre, faz com o navegador, fecha) e, quando
+  termina, **ela mesma grava o resultado no chamado**. Sem instrução de pessoa, só
+  pode LER: tire o `--pode-agir`.
+- Logo depois de disparar, registre a decisão `esperar` com o resumo "tarefa na
+  tela disparada: <o que foi pedido>" — é isso que tira a instrução da fila. Não
+  espere a tela terminar e não dispare de novo (há trava por chamado).
+- Escreva a `<tarefa>` completa: pedido na plataforma, o que aconteceu (com os
+  fatos do histórico e da observação do chamado), o que pedir e quais links de
+  vídeo mandar. A tela também lê o manual (ex.: no chat da Shopee, responder o
+  robô curto e só mandar tudo quando ele abrir o caminho).
+- Se os fatos se contradizem (ex.: o DaVinci diz "caixa voltou vazia" e a tela diz
+  "somente reembolso"), confirme na tela antes de argumentar e use o que a tela
+  mostra; na dúvida, `humano` explicando a contradição.
+- Quebra-cabeça/captcha, login ou código: pare e `humano`.
+
 ## As quatro ações
 
 | `acao` | quando | efeito no DaVinci |
@@ -89,7 +115,7 @@ Nunca invente fato: data, valor, rastreio, prazo ou promessa só se estiver no c
 
 - `responder` só funciona em canal `robo`, em canal `manual` do Mercado Livre, ou
   em canal `api` **com bloqueio**. Canal `api` sem bloqueio: use `humano` com a
-  resposta sugerida no `resumo`.
+  resposta sugerida no `resumo` — ou, se uma pessoa mandou, a tela (seção acima).
 - `texto_replica`: português, educado, curto, objetivo, só com fatos do caso. Sem
   saudação longa, sem emoji. `reanexar_abertura: true` se a plataforma pediu de
   novo os comprovantes que já mandamos na abertura.

@@ -20,6 +20,10 @@ Comandos (a IA usa pelo terminal):
                            um chamado qualquer (pendente ou não), com a conversa:
                            "no chamado do pedido X, vê como está"
   pagamento PEDIDO...      fatos do pagamento no ML (liberação, estorno, envio)
+  prova-shopee --id UUID [--enviar]
+                           disputa Shopee: o que a API diz da prova pedida; com
+                           --enviar, lê o TEXTO da prova da entrada padrão e manda
+                           pela API junto com as fotos da devolução
   exemplos [--plataforma ml] [--limite 10] [--offset 0] [--desde 2026-09-01]
                            casos que o cérebro já decidiu, com a conversa
   guarda [estado|assumir|liberar]
@@ -315,6 +319,15 @@ def cmd_pagamento(cfg: dict[str, str], a: argparse.Namespace) -> None:
     )
 
 
+def cmd_prova_shopee(cfg: dict[str, str], a: argparse.Namespace) -> None:
+    corpo: dict = {"chamado_id": a.id, "acao": "enviar" if a.enviar else "consultar"}
+    if a.enviar:
+        corpo["texto"] = sys.stdin.read().strip()
+        if not corpo["texto"]:
+            sys.exit("--enviar precisa do texto da prova na entrada padrão")
+    print(json.dumps(_post(cfg, "shopee-prova", corpo), ensure_ascii=False, indent=1))
+
+
 def cmd_exemplos(cfg: dict[str, str], a: argparse.Namespace) -> None:
     corpo = {"limite": a.limite, "offset": a.offset, "plataforma": a.plataforma, "desde": a.desde}
     out = _post(cfg, "exemplos", {k: v for k, v in corpo.items() if v is not None})
@@ -341,6 +354,9 @@ def main() -> None:
     cs.add_argument("--id", help="chamado_id (uuid)")
     pg = sub.add_parser("pagamento")
     pg.add_argument("pedidos", nargs="+")
+    ps = sub.add_parser("prova-shopee")
+    ps.add_argument("--id", required=True, help="chamado_id (uuid)")
+    ps.add_argument("--enviar", action="store_true")
     ex = sub.add_parser("exemplos")
     ex.add_argument("--plataforma")
     ex.add_argument("--limite", type=int, default=10)
@@ -360,6 +376,7 @@ def main() -> None:
         "decidir": cmd_decidir,
         "caso": cmd_caso,
         "pagamento": cmd_pagamento,
+        "prova-shopee": cmd_prova_shopee,
         "exemplos": cmd_exemplos,
         "guarda": cmd_guarda,
     }[a.cmd](cfg, a)

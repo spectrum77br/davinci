@@ -88,6 +88,7 @@ from app.schemas.chamados import (
     AgentRegistrarOut,
     AgentRegraOut,
     AgentResultadoIn,
+    AgentShopeeProvaIn,
     AgentTarefaOut,
     AlterarStatusIn,
     AlterarStatusOut,
@@ -1459,6 +1460,34 @@ async def agent_pagamento_ml(
             itens.append(AgentPagamentoMlItem(pedido_bling=pedido, ok=False, erro=f"{type(exc).__name__}: {str(exc)[:160]}"))
     await session.commit()  # tokens do ML renovados durante as consultas
     return AgentPagamentoMlOut(pedidos=itens)
+
+
+@agent_router.post("/shopee-prova")
+async def agent_shopee_prova(
+    body: AgentShopeeProvaIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    quem: Annotated[_Cerebro, Depends(_cerebro)],
+) -> dict:
+    """25/09 (296012): a Shopee reabriu a disputa pelo chat e pede evidência
+    ("Upload Evidence"), mas o sync só manda prova com `seller_proof` PENDING.
+    `consultar` mostra o que a API diz da disputa/prova; `enviar` manda as fotos
+    da devolução + o texto pelo upload_proof e registra no histórico."""
+    from app.services import chamados_devolucao_sync as sync
+
+    ia = _so_cadastrado(quem)
+    ch = await session.get(Chamado, body.chamado_id)
+    if ch is None:
+        raise HTTPException(404, detail={"code": "chamado_nao_encontrado"})
+    if sync.cd.plataforma_de(ch.plataforma) != sync.cd.PLAT_SHOPEE:
+        raise HTTPException(409, detail={"code": "chamado_nao_e_shopee"})
+    try:
+        out = await sync.prova_shopee_agente(
+            session, ch, enviar=body.acao == "enviar", texto=body.texto, autor=ia.nome
+        )
+    except svc.ChamadoError as e:
+        raise HTTPException(409, detail={"code": str(e)}) from e
+    await session.commit()
+    return out
 
 
 @agent_router.post("/lease", response_model=AgentLeaseOut, dependencies=_agent_dep)
