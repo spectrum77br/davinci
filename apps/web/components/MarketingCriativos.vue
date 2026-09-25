@@ -4,7 +4,7 @@ import {
   Check, X, Trash2, Upload, Loader2, Plus, Download, CloudUpload, Search,
   Film, Image as ImageIcon, File as FileIcon,
   Send, CalendarClock, ExternalLink, AlertTriangle,
-  MessageSquare, NotebookPen,
+  MessageSquare, NotebookPen, ChevronUp, ChevronDown,
 } from 'lucide-vue-next'
 import { apiErrMsg, MARCAS_ERROS } from '~/lib/apiError'
 import { isoToday } from '~/lib/date'
@@ -46,6 +46,11 @@ type Creative = {
   pushed_at: string | null
   pushed_dest: string | null
   created_at: string | null
+  // Fila do robô (migration 0327, Eduardo 25/09/2026): NULL = ordem normal (o
+  // aprovado mais recente sai primeiro); número = "furou a fila", o menor sai
+  // antes. A listagem manda a posição EFETIVA (quem já saiu em todas as contas
+  // volta a NULL). Opcional pelo mesmo motivo do `marca_id`.
+  fila_posicao?: number | null
 }
 
 type Field = 'modelo' | 'marca' | 'sku' | 'equipe'
@@ -150,7 +155,18 @@ onMounted(() => { void load(); void loadEquipes(); void loadMarcas() })
 
 // ---- filtro ---------------------------------------------------------------
 const q = ref('')
-const statusFilter = ref<'todos' | 'pendente' | 'aprovado' | 'reprovado'>('todos')
+// 'fila' não filtra a planilha: troca a tela pela fila do robô (mais abaixo).
+type StatusFilter = 'todos' | 'pendente' | 'aprovado' | 'reprovado' | 'fila'
+const statusFilter = ref<StatusFilter>('todos')
+// Dia BRT em que o vídeo chegou (`diaDaLinha`), 'YYYY-MM-DD' (o que o
+// <input type="date"> devolve). Só na tela: não vai pra URL nem pro servidor.
+const dataDe = ref('')
+const dataAte = ref('')
+
+function limparDatas() {
+  dataDe.value = ''
+  dataAte.value = ''
+}
 
 const filteredRows = computed(() => {
   const term = q.value.trim().toLowerCase()
@@ -158,6 +174,7 @@ const filteredRows = computed(() => {
     if (statusFilter.value === 'pendente' && r.aprovado !== null) return false
     if (statusFilter.value === 'aprovado' && r.aprovado !== true) return false
     if (statusFilter.value === 'reprovado' && r.aprovado !== false) return false
+    if (!diaNoIntervalo(diaDaLinha(r), dataDe.value, dataAte.value)) return false
     if (!term) return true
     const hay = [r.modelo, r.marca, r.sku, r.equipe, r.roteiro_titulo, ...r.files.map((f) => f.file_name)]
       .filter(Boolean)
@@ -166,6 +183,12 @@ const filteredRows = computed(() => {
     return hay.includes(term)
   })
 })
+
+// Por dia de chegada do vídeo, com um cabeçalho por dia (`agrupaPorDia`).
+const gruposPorDia = computed(() => agrupaPorDia(filteredRows.value))
+const videosFiltrados = computed(() =>
+  filteredRows.value.reduce((n, r) => n + r.files.filter(ehVideo).length, 0),
+)
 
 // ---- edição estilo planilha (clica na célula → edita; Enter/blur salva,
 // ---- Esc cancela; flash verde ao salvar — mesmo padrão da Tabela de Preços)
@@ -877,6 +900,239 @@ const POSTAGEM_ERROS: Record<string, string> = {
 }
 const POSTAGEM_ERR_MAP: Record<string, string> = { ...MARCAS_ERROS, ...POSTAGEM_ERROS }
 
+// ---- filtro por dia (Eduardo, 25/09/2026)
+//
+// "Quantos vídeos apareceram por dia" é conta que o Eduardo faz olhando esta
+// tela — por isso a lista continua por data e ganha um cabeçalho por dia em
+// vez de virar outra ordenação.
+//
+// O dia é o de CHEGADA DO VÍDEO (`enviado_em`), não o da linha: a linha nasce
+// quando a entrega é aberta e o vídeo pode chegar dias depois (ver o
+// comentário de CreativeFile). Contar pela linha jogava o vídeo de 27/09
+// no cabeçalho de 25/09. Linha sem vídeo (ou backend sem `enviado_em`) fica
+// no dia em que foi criada.
+
+// Dia BRT ('YYYY-MM-DD') de um instante; '' quando não há data. Sai do mesmo
+// brtPartes das pills: o dia do operador, não o da máquina nem o UTC.
+function diaBrt(iso: string | null | undefined): string {
+  return brtPartes(iso)?.data ?? ''
+}
+
+const DIA_SEMANA = ['dom', 'seg', 'ter', 'qua', 'qui', 'sex', 'sáb']
+
+// "qui, 25/09" — o ano só aparece quando não é o corrente (lista longa passa
+// da virada do ano e "25/09" sozinho mentiria).
+function diaRotulo(dia: string, hojeBrt: string = isoToday()): string {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dia || '')
+  if (!m) return 'sem data'
+  const [, ano, mes, d] = m
+  const semana = DIA_SEMANA[new Date(Date.UTC(+ano, +mes - 1, +d)).getUTCDay()]
+  return `${semana}, ${d}/${mes}${ano === hojeBrt.slice(0, 4) ? '' : `/${ano}`}`
+}
+
+function ehVideo(f: { file_mime: string | null }): boolean {
+  return !!f.file_mime?.startsWith('video/')
+}
+
+type LinhaComData = {
+  created_at: string | null
+  files: { file_mime: string | null; enviado_em?: string | null }[]
+}
+
+// Dia BRT em que a linha "apareceu" com vídeo: o do vídeo MAIS NOVO dela (o
+// que acabou de chegar — inclusive o reenvio depois de uma recusa). Sem vídeo
+// com data, o dia em que a linha foi criada.
+function diaDaLinha(r: LinhaComData): string {
+  let dia = ''
+  for (const f of r.files) {
+    if (!ehVideo(f)) continue
+    const d = diaBrt(f.enviado_em)
+    if (d > dia) dia = d
+  }
+  return dia || diaBrt(r.created_at)
+}
+
+// "de"/"até" (os dois inclusivos, valores do <input type="date">). Sem
+// nenhum, tudo passa — inclusive linha sem data; com algum, linha sem data
+// fica de fora, porque não dá pra dizer que ela é "do dia 25".
+function noIntervalo(iso: string | null | undefined, de: string, ate: string): boolean {
+  return diaNoIntervalo(diaBrt(iso), de, ate)
+}
+
+// O mesmo, pra um dia já calculado ('YYYY-MM-DD' ou '' = sem data).
+function diaNoIntervalo(d: string, de: string, ate: string): boolean {
+  if (!de && !ate) return true
+  if (!d) return false
+  if (de && d < de) return false
+  if (ate && d > ate) return false
+  return true
+}
+
+type GrupoDia<T> = { dia: string; criativos: number; videos: number; rows: T[] }
+
+// Um grupo por `diaDaLinha`, dias em ordem crescente (a da API) e "sem data"
+// no fim; dentro do dia, a ordem de entrada (created_at). A ordenação dos
+// grupos é necessária: a linha criada dia 25 cujo vídeo chegou dia 27 vem
+// da API antes das linhas do dia 26.
+function agrupaPorDia<T extends LinhaComData>(list: readonly T[]): GrupoDia<T>[] {
+  const grupos = new Map<string, GrupoDia<T>>()
+  for (const r of list) {
+    const dia = diaDaLinha(r)
+    let g = grupos.get(dia)
+    if (!g) {
+      g = { dia, criativos: 0, videos: 0, rows: [] }
+      grupos.set(dia, g)
+    }
+    g.rows.push(r)
+    g.criativos += 1
+    g.videos += r.files.filter(ehVideo).length
+  }
+  return [...grupos.values()].sort((a, b) => {
+    if (a.dia === b.dia) return 0
+    if (!a.dia) return 1
+    if (!b.dia) return -1
+    return a.dia < b.dia ? -1 : 1
+  })
+}
+
+function plural(n: number, um: string, varios: string): string {
+  return `${n} ${n === 1 ? um : varios}`
+}
+
+// Cabeçalho do dia: "qui, 25/09 · 7 criativos · 9 vídeos". Vídeo conta
+// ARQUIVO (uma linha pode ter mais de um), que é o que o robô posta.
+function grupoResumo(g: { dia: string; criativos: number; videos: number }, hojeBrt: string = isoToday()): string {
+  return `${diaRotulo(g.dia, hojeBrt)} · ${plural(g.criativos, 'criativo', 'criativos')} · ${plural(g.videos, 'vídeo', 'vídeos')}`
+}
+
+// ---- fila do robô (Eduardo, 25/09/2026)
+//
+// O robô tira, por conta, o aprovado MAIS RECENTE que ainda não saiu nela
+// (services/marketing/autopostagem.py). O pedido: arrastar um vídeo mais
+// antigo pra frente. Quem guarda a ordem é o backend (`fila_posicao`, a mesma
+// ordenação que o robô usa) — a tela só mostra e reordena.
+
+type FilaConta = { rede_id: string; plataforma: string; conta: string | null }
+
+// Um item de GET /api/marketing/creatives/fila: um por ARQUIVO de vídeo, já na
+// ordem do robô.
+type FilaItem = {
+  creative_id: string
+  file_id: string
+  fila_posicao: number | null
+  created_at: string | null
+  modelo: string
+  sku: string | null
+  equipe: string | null
+  file_name: string
+  // Quando o VÍDEO chegou (o `created_at` acima é o da linha — é por ele que
+  // o robô ordena). Opcionais: backend antigo não manda.
+  enviado_em?: string | null
+  // O robô pula este vídeo em toda conta ("arquivo_sumiu", "sem_arquivo").
+  bloqueado?: string | null
+  pendente_em: FilaConta[]
+}
+
+// O que se arrasta é o CRIATIVO (é ele que tem `fila_posicao`); os arquivos
+// de vídeo dele vão juntos, cada um com as contas onde ainda não saiu.
+type FilaEntrada = {
+  creative_id: string
+  fila_posicao: number | null
+  created_at: string | null
+  modelo: string
+  sku: string | null
+  equipe: string | null
+  arquivos: {
+    file_id: string
+    file_name: string
+    enviado_em: string | null
+    bloqueado: string | null
+    pendente_em: FilaConta[]
+  }[]
+}
+
+function agrupaFila(resp: any): FilaEntrada[] {
+  const lista: any[] = Array.isArray(resp) ? resp : []
+  const porId = new Map<string, FilaEntrada>()
+  for (const it of lista) {
+    const id = String(it?.creative_id ?? '')
+    if (!id) continue
+    let e = porId.get(id)
+    if (!e) {
+      e = {
+        creative_id: id,
+        fila_posicao: Number.isFinite(it?.fila_posicao) ? Math.trunc(it.fila_posicao) : null,
+        created_at: it?.created_at ?? null,
+        modelo: String(it?.modelo ?? ''),
+        sku: it?.sku ?? null,
+        equipe: it?.equipe ?? null,
+        arquivos: [],
+      }
+      porId.set(id, e)
+    }
+    e.arquivos.push({
+      file_id: String(it?.file_id ?? ''),
+      file_name: String(it?.file_name ?? ''),
+      enviado_em: it?.enviado_em ?? null,
+      bloqueado: it?.bloqueado ? String(it.bloqueado) : null,
+      pendente_em: Array.isArray(it?.pendente_em) ? it.pendente_em : [],
+    })
+  }
+  return [...porId.values()]
+}
+
+// Tira o item de `de` e põe em `para` (índices da lista ORIGINAL). Fora da
+// faixa ou parado no lugar = cópia igual.
+function moveItem<T>(arr: readonly T[], de: number, para: number): T[] {
+  const out = [...arr]
+  if (de === para || de < 0 || para < 0 || de >= out.length || para >= out.length) return out
+  const [x] = out.splice(de, 1)
+  out.splice(para, 0, x as T)
+  return out
+}
+
+// ids do PUT depois de mover `movido` pra nova ordem `lista`: tudo até o
+// último item que é o movido OU já tinha furado a fila. Os de cima dele
+// precisam de número pra continuar na frente (pela data sairiam depois); os
+// de baixo continuam pela data — furar a fila de um não congela o resto.
+function filaIdsAposMover(
+  lista: readonly { creative_id: string; fila_posicao: number | null }[],
+  movido: string,
+): string[] {
+  let k = -1
+  lista.forEach((e, i) => {
+    if (e.creative_id === movido || e.fila_posicao != null) k = i
+  })
+  const ids: string[] = []
+  for (const e of lista.slice(0, k + 1)) {
+    if (!ids.includes(e.creative_id)) ids.push(e.creative_id)
+  }
+  return ids
+}
+
+// Códigos do PUT da fila. `criativo_nao_aprovado` já existe no mapa do
+// publicar, mas lá a frase fala em publicar — aqui é entrar na fila.
+const FILA_ERR_MAP: Record<string, string> = {
+  ...POSTAGEM_ERR_MAP,
+  criativo_nao_aprovado: 'Só criativo aprovado entra na fila do robô — aprove a linha primeiro.',
+  criativo_de_outra_marca: 'Esse criativo é de outra marca — a fila é por marca.',
+  marca_nao_encontrada: 'Essa marca não existe mais no cadastro — recarregue a página.',
+  not_found: 'Algum criativo da fila não existe mais — recarregue a página.',
+  fora_da_sua_equipe: 'Essa linha é de outra equipe de marketing.',
+}
+
+// Por que o robô vai pular um vídeo da fila (`bloqueado` do GET /fila). Ele
+// pula e segue pro próximo; o vídeo fica na posição até alguém resolver.
+const FILA_BLOQUEIO: Record<string, string> = {
+  arquivo_sumiu: 'o vídeo sumiu do servidor — o robô pula este (anexe de novo)',
+  sem_arquivo: 'sem arquivo — o robô pula este',
+}
+
+function bloqueioRotulo(code: string | null | undefined): string {
+  if (!code) return ''
+  return FILA_BLOQUEIO[code] ?? 'o robô pula este vídeo'
+}
+
 // ---------- fim helpers puros
 
 function pubErrMsg(e: any): string {
@@ -1210,6 +1466,249 @@ async function cancelarPostagem(p: Postagem) {
     toasts.error('Erro ao cancelar', pubErrMsg(e))
   }
 }
+
+// ---- fila do robô ----------------------------------------------------------
+//
+// Duas portas pro mesmo PUT /api/marketing/creatives/fila: na planilha, o
+// "⤒ frente da fila" e o × do selo "#n na fila"; e a visão "fila do robô"
+// (opção do select de status), que mostra a ordem de verdade do robô pra uma
+// marca e deixa arrastar. O PUT manda a lista INTEIRA dos que furam a fila —
+// quem fica de fora volta pra ordem por data.
+
+function filaErrMsg(e: any): string {
+  return apiErrMsg(e, FILA_ERR_MAP)
+}
+
+const fila = ref<FilaEntrada[]>([])
+const filaMarcaId = ref('')
+const filaLoading = ref(false)
+const filaSaving = ref(false)
+const filaErro = ref('')
+
+// Escolher "fila do robô" no select já abre a fila. Setter no lugar de um
+// watch: a troca vem de um gesto do operador, e é nele que a carga acontece.
+const statusModel = computed<StatusFilter>({
+  get: () => statusFilter.value,
+  set: (v) => {
+    statusFilter.value = v
+    if (v === 'fila') abrirFila()
+  },
+})
+
+const filaMarca = computed<string>({
+  get: () => filaMarcaId.value,
+  set: (v) => {
+    filaMarcaId.value = v
+    void loadFila()
+  },
+})
+
+const filaMarcaNome = computed(() => {
+  const m = marcas.value.find((x) => x.id === filaMarcaId.value)
+  return m ? (m.nome || m.slug) : ''
+})
+
+function abrirFila() {
+  if (!filaMarcaId.value) filaMarcaId.value = marcas.value[0]?.id ?? ''
+  void loadFila()
+}
+
+// Mesmo esquema da legenda: trocar de marca depressa dispara duas cargas, e
+// só a última pode escrever na tela.
+let filaSeq = 0
+
+async function loadFila() {
+  const marcaId = filaMarcaId.value
+  const seq = ++filaSeq
+  filaErro.value = ''
+  if (!marcaId) {
+    fila.value = []
+    filaLoading.value = false
+    return
+  }
+  filaLoading.value = true
+  try {
+    const q = new URLSearchParams({ marca_id: marcaId })
+    const resp = await api<FilaItem[]>(`/api/marketing/creatives/fila?${q.toString()}`)
+    if (seq !== filaSeq) return
+    fila.value = agrupaFila(resp)
+  } catch (e: any) {
+    if (seq !== filaSeq) return
+    fila.value = []
+    filaErro.value = filaErrMsg(e)
+  } finally {
+    if (seq === filaSeq) filaLoading.value = false
+  }
+}
+
+// A marca da linha PRA FILA: só o `marca_id`. Diferente do modal de publicar
+// (`marcaDoCriativo`), aqui não vale casar o texto da coluna com o cadastro:
+// o robô e o PUT /fila olham só o `marca_id`, e a linha com NULL nem entra na
+// fila — o botão prometeria algo que o servidor recusa (criativo_de_outra_marca).
+function marcaDaFila(r: Creative): string {
+  return r.marca_id ?? ''
+}
+
+// O selo "#n na fila" da planilha segue o que o servidor gravou: posição pra
+// quem está na lista, NULL pro resto da marca (o PUT zera quem ficou de fora).
+function aplicaFilaNasLinhas(marcaId: string, ids: string[]) {
+  for (const r of rows.value) {
+    if (marcaDaFila(r) !== marcaId) continue
+    const i = ids.indexOf(r.id)
+    r.fila_posicao = i >= 0 ? i + 1 : null
+  }
+}
+
+async function salvarFila(marcaId: string, ids: string[]): Promise<void> {
+  const resp = await api<{ ids?: string[] }>('/api/marketing/creatives/fila', {
+    method: 'PUT',
+    body: { marca_id: marcaId, ids },
+  })
+  aplicaFilaNasLinhas(marcaId, Array.isArray(resp?.ids) ? resp.ids.map(String) : ids)
+}
+
+// Os que já furaram a fila da marca, na ordem. Só aprovado: linha que perdeu a
+// aprovação (arquivo novo zera) com número velho faria o PUT inteiro voltar
+// 422 `criativo_nao_aprovado`, e o operador nem saberia qual linha é.
+function prioritariosDaMarca(marcaId: string): string[] {
+  return rows.value
+    .filter((r) => r.fila_posicao != null && r.aprovado === true && marcaDaFila(r) === marcaId)
+    .sort((a, b) => (a.fila_posicao ?? 0) - (b.fila_posicao ?? 0))
+    .map((r) => r.id)
+}
+
+// O robô só posta vídeo, então o botão só aparece em linha aprovada com vídeo
+// e marca do cadastro (a fila é por marca).
+function podeFurarFila(r: Creative): boolean {
+  return canEdit.value && r.aprovado === true && r.files.some(ehVideo) && !!marcaDaFila(r)
+}
+
+// Aprovada, com vídeo, mas sem `marca_id`: o robô não a enxerga. Em vez do
+// botão, uma dica de como ligar a linha ao cadastro.
+function filaSemMarca(r: Creative): boolean {
+  return canEdit.value && r.aprovado === true && r.files.some(ehVideo) && !marcaDaFila(r)
+}
+
+async function frenteDaFila(r: Creative) {
+  const marcaId = marcaDaFila(r)
+  if (!marcaId) {
+    toasts.warning(
+      'Linha sem marca do cadastro',
+      'Reescolha a marca na célula pra ligar a linha a Cadastros › Marcas — a fila do robô é por marca.',
+    )
+    return
+  }
+  filaSaving.value = true
+  try {
+    await salvarFila(marcaId, [r.id, ...prioritariosDaMarca(marcaId).filter((id) => id !== r.id)])
+    toasts.success(
+      'Na frente da fila',
+      'É o próximo vídeo que o robô posta nas contas da marca onde ele ainda não saiu.',
+    )
+    if (statusFilter.value === 'fila' && filaMarcaId.value === marcaId) await loadFila()
+  } catch (e: any) {
+    toasts.error('Erro ao mexer na fila', filaErrMsg(e))
+  } finally {
+    filaSaving.value = false
+  }
+}
+
+async function tirarDaFila(creativeId: string, marcaId: string, prioritarios: string[]) {
+  if (!marcaId) return
+  filaSaving.value = true
+  try {
+    await salvarFila(marcaId, prioritarios.filter((id) => id !== creativeId))
+    toasts.info('Saiu da frente da fila', 'Volta pra ordem normal: do mais recente pro mais antigo.')
+    if (statusFilter.value === 'fila' && filaMarcaId.value === marcaId) await loadFila()
+  } catch (e: any) {
+    toasts.error('Erro ao mexer na fila', filaErrMsg(e))
+  } finally {
+    filaSaving.value = false
+  }
+}
+
+function tirarDaFilaLinha(r: Creative) {
+  const marcaId = marcaDaFila(r)
+  void tirarDaFila(r.id, marcaId, prioritariosDaMarca(marcaId))
+}
+
+function tirarDaFilaEntrada(e: FilaEntrada) {
+  // Na visão da fila a lista de quem furou é a própria fila (já na ordem).
+  const prioritarios = fila.value.filter((x) => x.fila_posicao != null).map((x) => x.creative_id)
+  void tirarDaFila(e.creative_id, filaMarcaId.value, prioritarios)
+}
+
+// Arrastar (ou ↑/↓) = mover na lista e mandar o PUT com a regra de
+// filaIdsAposMover. Otimista: a lista muda na hora e volta se o PUT falhar.
+async function moverFila(de: number, para: number) {
+  if (!canEdit.value || filaSaving.value) return
+  const antes = fila.value
+  const marcaId = filaMarcaId.value
+  const item = antes[de]
+  if (!marcaId || !item || de === para || para < 0 || para >= antes.length) return
+  const nova = moveItem(antes, de, para)
+  const ids = filaIdsAposMover(nova, item.creative_id)
+  fila.value = nova.map((x, i) => (i < ids.length ? { ...x, fila_posicao: i + 1 } : x))
+  filaSaving.value = true
+  try {
+    await salvarFila(marcaId, ids)
+    await loadFila()
+  } catch (e: any) {
+    if (filaMarcaId.value === marcaId) fila.value = antes
+    toasts.error('Não deu pra reordenar a fila', filaErrMsg(e))
+  } finally {
+    filaSaving.value = false
+  }
+}
+
+// Arrastar nativo do HTML5 (o repo não tem lib de drag-and-drop). No celular
+// o arraste nativo não funciona — pra isso existem os botões ↑/↓.
+const arrastando = ref<number | null>(null)
+const arrastoAlvo = ref<number | null>(null)
+
+function onFilaDragStart(i: number, e: DragEvent) {
+  if (!canEdit.value || filaSaving.value) {
+    e.preventDefault()
+    return
+  }
+  arrastando.value = i
+  if (e.dataTransfer) {
+    e.dataTransfer.effectAllowed = 'move'
+    // O Firefox só começa o arraste se houver algum dado no dataTransfer.
+    e.dataTransfer.setData('text/plain', fila.value[i]?.creative_id ?? '')
+  }
+}
+
+function onFilaDragOver(i: number, e: DragEvent) {
+  // Só aceita soltar o que saiu desta lista (arquivo do Finder, texto etc. não).
+  if (arrastando.value === null) return
+  e.preventDefault()
+  if (e.dataTransfer) e.dataTransfer.dropEffect = 'move'
+  arrastoAlvo.value = i
+}
+
+function onFilaDrop(i: number) {
+  const de = arrastando.value
+  arrastando.value = null
+  arrastoAlvo.value = null
+  if (de !== null) void moverFila(de, i)
+}
+
+function onFilaDragEnd() {
+  arrastando.value = null
+  arrastoAlvo.value = null
+}
+
+// Linha-alvo do arraste: a borda mostra onde o item vai cair — em cima de
+// quem estava lá quando sobe, embaixo quando desce. Vai nas CÉLULAS: com
+// border-collapse a borda do <tr> perde pra das células e não aparece.
+function filaDropClass(i: number): string {
+  const de = arrastando.value
+  if (de === null || arrastoAlvo.value !== i || de === i) return ''
+  return de > i
+    ? '[&>td]:border-t-2 [&>td]:border-t-primary'
+    : '[&>td]:border-b-2 [&>td]:border-b-primary'
+}
 </script>
 
 <template>
@@ -1225,7 +1724,7 @@ async function cancelarPostagem(p: Postagem) {
 
     <!-- filtro -->
     <div class="flex flex-wrap items-center gap-2">
-      <div class="relative">
+      <div v-if="statusFilter !== 'fila'" class="relative">
         <Search class="absolute left-2 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground" />
         <input
           v-model="q"
@@ -1235,20 +1734,66 @@ async function cancelarPostagem(p: Postagem) {
         />
       </div>
       <select
-        v-model="statusFilter"
+        v-model="statusModel"
         class="h-8 rounded-md border bg-background px-2 text-xs outline-none focus:ring-2 focus:ring-ring"
       >
         <option value="todos">todos</option>
         <option value="pendente">pendentes</option>
         <option value="aprovado">aprovados</option>
         <option value="reprovado">não aprovados</option>
+        <option value="fila">fila do robô</option>
       </select>
-      <span class="ml-auto text-xs text-muted-foreground">
-        {{ filteredRows.length }} de {{ rows.length }}
+      <!-- fila do robô: é por marca (as contas de rede social são da marca) -->
+      <select
+        v-if="statusFilter === 'fila'"
+        v-model="filaMarca"
+        class="h-8 rounded-md border bg-background px-2 text-xs outline-none focus:ring-2 focus:ring-ring"
+      >
+        <option value="">escolha a marca…</option>
+        <option v-for="m in marcas" :key="m.id" :value="m.id">{{ m.nome || m.slug }}</option>
+      </select>
+      <!-- filtro por dia de chegada do vídeo (enviado_em, horário de Brasília) -->
+      <template v-else>
+        <label
+          class="inline-flex items-center gap-1 text-xs text-muted-foreground"
+          title="Dia em que o vídeo chegou (horário de Brasília). Linha sem vídeo conta pelo dia em que foi criada."
+        >
+          de
+          <input
+            v-model="dataDe"
+            type="date"
+            :max="dataAte || undefined"
+            class="h-8 rounded-md border bg-background px-1.5 text-xs text-foreground outline-none focus:ring-2 focus:ring-ring"
+          />
+        </label>
+        <label
+          class="inline-flex items-center gap-1 text-xs text-muted-foreground"
+          title="Dia em que o vídeo chegou (horário de Brasília). Linha sem vídeo conta pelo dia em que foi criada."
+        >
+          até
+          <input
+            v-model="dataAte"
+            type="date"
+            :min="dataDe || undefined"
+            class="h-8 rounded-md border bg-background px-1.5 text-xs text-foreground outline-none focus:ring-2 focus:ring-ring"
+          />
+        </label>
+        <button
+          v-if="dataDe || dataAte"
+          type="button"
+          class="text-xs text-primary hover:underline"
+          @click="limparDatas"
+        >limpar datas</button>
+      </template>
+      <span v-if="statusFilter === 'fila'" class="ml-auto text-xs text-muted-foreground">
+        {{ plural(fila.length, 'criativo na fila', 'criativos na fila') }}
+      </span>
+      <span v-else class="ml-auto text-xs text-muted-foreground">
+        {{ filteredRows.length }} de {{ rows.length }} · {{ plural(videosFiltrados, 'vídeo', 'vídeos') }}
       </span>
     </div>
 
-    <div class="border rounded-lg overflow-auto max-h-[calc(100vh-300px)]">
+    <div v-if="statusFilter !== 'fila'" class="border rounded-lg overflow-auto max-h-[calc(100vh-300px)]">
       <table class="w-full text-sm border-collapse">
         <thead class="sticky top-0 bg-muted z-10">
           <tr>
@@ -1280,8 +1825,17 @@ async function cancelarPostagem(p: Postagem) {
             </td>
           </tr>
 
-          <!-- data rows -->
-          <tr v-for="r in filteredRows" :key="r.id" class="hover:bg-accent/30 align-top">
+        </tbody>
+        <!-- data rows: um tbody por dia de chegada (BRT), com o cabeçalho do dia -->
+        <tbody v-for="g in gruposPorDia" :key="`dia-${g.dia}`">
+          <tr class="bg-muted/50">
+            <td
+              colspan="9"
+              class="border border-border px-2 py-1 text-[11px] font-medium text-muted-foreground"
+              :title="g.dia ? `Criativos que chegaram em ${diaRotulo(g.dia)} (horário de Brasília)` : 'Linhas sem data de criação'"
+            >{{ grupoResumo(g) }}</td>
+          </tr>
+          <tr v-for="r in g.rows" :key="r.id" class="hover:bg-accent/30 align-top">
             <!-- modelo -->
             <td
               class="border border-border px-2 py-1.5 text-xs"
@@ -1553,6 +2107,45 @@ async function cancelarPostagem(p: Postagem) {
                     <Send class="size-3" /> publicar / agendar
                   </button>
                 </span>
+                <!-- fila do robô: o selo diz a posição de quem furou a fila;
+                     o botão põe esta linha em primeiro na marca. -->
+                <div
+                  v-if="r.aprovado === true && (r.fila_posicao != null || podeFurarFila(r) || filaSemMarca(r))"
+                  class="flex flex-wrap items-center gap-1"
+                >
+                  <span
+                    v-if="r.fila_posicao != null"
+                    class="pill-info whitespace-nowrap"
+                    title="Furou a fila do robô: sai antes dos vídeos que estão pela data"
+                  >
+                    #{{ r.fila_posicao }} na fila
+                    <button
+                      v-if="canEdit"
+                      type="button"
+                      class="-mr-1 rounded-full p-0.5 hover:bg-primary/20 disabled:opacity-50"
+                      title="Tirar da frente da fila — volta pra ordem por data"
+                      :disabled="filaSaving"
+                      @click.stop="tirarDaFilaLinha(r)"
+                    >
+                      <X class="size-3" />
+                    </button>
+                  </span>
+                  <button
+                    v-if="podeFurarFila(r) && r.fila_posicao !== 1"
+                    type="button"
+                    class="inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[11px] bg-background hover:bg-muted disabled:opacity-50"
+                    title="Põe este vídeo em primeiro na fila do robô da marca — ele sai antes dos mais novos"
+                    :disabled="filaSaving"
+                    @click.stop="frenteDaFila(r)"
+                  >
+                    ⤒ frente da fila
+                  </button>
+                  <span
+                    v-else-if="filaSemMarca(r)"
+                    class="text-[11px] text-muted-foreground"
+                    title="O robô só enxerga linha ligada a Cadastros › Marcas. Reescolha a marca na célula pra ligar."
+                  >fila: reescolha a marca</span>
+                </div>
               </div>
             </td>
             <!-- ações -->
@@ -1567,7 +2160,8 @@ async function cancelarPostagem(p: Postagem) {
               </button>
             </td>
           </tr>
-
+        </tbody>
+        <tbody>
           <!-- add row -->
           <tr v-if="canEdit" class="bg-blue-50/40 dark:bg-blue-900/10">
             <td class="border border-border px-1 py-1">
@@ -1627,7 +2221,169 @@ async function cancelarPostagem(p: Postagem) {
       </table>
     </div>
 
-    <p class="text-xs text-muted-foreground">
+    <!-- fila do robô: a ordem em que ele vai postar os vídeos da marca -->
+    <div v-else class="space-y-2">
+      <p class="text-xs text-muted-foreground">
+        Ordem em que o robô posta os vídeos aprovados<template v-if="filaMarcaNome"> de <b class="text-foreground">{{ filaMarcaNome }}</b></template>.
+        Sem mexer, sai o mais recente primeiro. Arraste pelo <span class="font-mono">⠿</span> (ou use
+        <ChevronUp class="inline size-3" />/<ChevronDown class="inline size-3" />) pra pôr um vídeo na frente
+        — o que você move e os de cima dele ficam fixos; os de baixo continuam pela data. Cada conta pula
+        o que já saiu nela, e o robô pula o vídeo com aviso em vermelho e segue pro próximo.
+      </p>
+      <div class="border rounded-lg overflow-auto max-h-[calc(100vh-300px)]">
+        <table class="w-full text-sm border-collapse">
+          <thead class="sticky top-0 bg-muted z-10">
+            <tr>
+              <th class="px-2 py-2 font-medium border-b border-border w-20"></th>
+              <th class="text-right px-2 py-2 font-medium border-b border-border w-10">#</th>
+              <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[140px]">Criativo</th>
+              <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[240px]">Vídeo · falta sair em</th>
+              <th
+                class="text-left px-2 py-2 font-medium border-b border-border w-28"
+                title="Dia em que a linha foi criada — é por ele que o robô ordena quem não furou a fila (o mais recente primeiro). O dia em que cada vídeo chegou fica ao lado do nome do arquivo."
+              >Criado</th>
+              <th class="text-center px-2 py-2 font-medium border-b border-border w-28">Prioridade</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-if="!filaMarcaId">
+              <td colspan="6" class="text-center py-6 text-muted-foreground">
+                {{ marcas.length ? 'Escolha a marca pra ver a fila.' : 'Não deu pra carregar as marcas (Cadastros › Marcas).' }}
+              </td>
+            </tr>
+            <tr v-else-if="filaLoading && !fila.length">
+              <td colspan="6" class="text-center py-6 text-muted-foreground">
+                <Loader2 class="inline h-4 w-4 animate-spin" /> carregando…
+              </td>
+            </tr>
+            <tr v-else-if="filaErro">
+              <td colspan="6" class="text-center py-6 text-destructive">
+                Erro ao carregar a fila: {{ filaErro }}
+              </td>
+            </tr>
+            <tr v-else-if="!fila.length">
+              <td colspan="6" class="text-center py-6 text-muted-foreground">
+                Nenhum vídeo aprovado esperando pra sair nas contas dessa marca.
+              </td>
+            </tr>
+            <template v-else>
+              <tr
+                v-for="(e, i) in fila"
+                :key="e.creative_id"
+                class="align-top hover:bg-accent/30"
+                :class="[filaDropClass(i), { 'opacity-50': arrastando === i }]"
+                :draggable="canEdit && !filaSaving"
+                @dragstart="onFilaDragStart(i, $event)"
+                @dragover="onFilaDragOver(i, $event)"
+                @drop.prevent="onFilaDrop(i)"
+                @dragend="onFilaDragEnd"
+              >
+                <!-- alça + ↑/↓ (teclado e celular, onde o arraste nativo não vai) -->
+                <td class="border border-border px-1 py-1.5">
+                  <div class="flex items-center gap-0.5">
+                    <span
+                      class="select-none px-1 font-mono text-base leading-none text-muted-foreground"
+                      :class="canEdit ? 'cursor-grab active:cursor-grabbing' : 'opacity-40'"
+                      :title="canEdit ? 'Arraste pra mudar a ordem' : 'Você não tem permissão de edição em Criativos.'"
+                      aria-hidden="true"
+                    >⠿</span>
+                    <template v-if="canEdit">
+                      <button
+                        type="button"
+                        class="rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-30"
+                        title="Subir uma posição"
+                        :aria-label="`Subir ${e.modelo} uma posição`"
+                        :disabled="filaSaving || i === 0"
+                        @click.stop="moverFila(i, i - 1)"
+                      >
+                        <ChevronUp class="size-3.5" />
+                      </button>
+                      <button
+                        type="button"
+                        class="rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-30"
+                        title="Descer uma posição"
+                        :aria-label="`Descer ${e.modelo} uma posição`"
+                        :disabled="filaSaving || i === fila.length - 1"
+                        @click.stop="moverFila(i, i + 1)"
+                      >
+                        <ChevronDown class="size-3.5" />
+                      </button>
+                    </template>
+                  </div>
+                </td>
+                <td class="border border-border px-2 py-1.5 text-right text-xs font-medium tabular-nums">{{ i + 1 }}</td>
+                <td class="border border-border px-2 py-1.5 text-xs">
+                  <div class="font-medium">{{ e.modelo }}</div>
+                  <div class="text-muted-foreground">
+                    <span v-if="e.sku" class="font-mono">{{ e.sku }}</span>
+                    <span v-if="e.sku && e.equipe"> · </span>
+                    <span v-if="e.equipe">{{ e.equipe }}</span>
+                  </div>
+                </td>
+                <td class="border border-border px-2 py-1.5 text-xs">
+                  <div class="space-y-1.5">
+                    <div v-for="a in e.arquivos" :key="a.file_id" class="space-y-0.5">
+                      <div class="flex items-center gap-1">
+                        <Film class="size-3.5 shrink-0 text-muted-foreground" />
+                        <span class="truncate max-w-[220px]" :title="a.file_name">{{ a.file_name }}</span>
+                        <span
+                          v-if="a.enviado_em"
+                          class="shrink-0 text-[10px] text-muted-foreground tabular-nums"
+                          :title="`Vídeo chegou em ${fmtBrtLongo(a.enviado_em)}`"
+                        >chegou {{ fmtBrtCurto(a.enviado_em) }}</span>
+                      </div>
+                      <div
+                        v-if="a.bloqueado"
+                        class="flex items-center gap-1 text-[11px] text-destructive"
+                      >
+                        <AlertTriangle class="size-3 shrink-0" />
+                        <span>{{ bloqueioRotulo(a.bloqueado) }}</span>
+                      </div>
+                      <div class="flex flex-wrap gap-1">
+                        <span
+                          v-for="c in a.pendente_em"
+                          :key="c.rede_id"
+                          class="pill-muted"
+                          :title="`Ainda não saiu em ${plataformaLabel(c.plataforma)} ${contaLabel(c)}`"
+                        >
+                          <span class="shrink-0">{{ plataformaLabel(c.plataforma) }}</span>
+                          <span class="truncate max-w-[110px]">{{ contaLabel(c) }}</span>
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                </td>
+                <td class="border border-border px-2 py-1.5 text-xs text-muted-foreground" :title="fmtBrtLongo(e.created_at)">
+                  {{ fmtBrtCurto(e.created_at) }}
+                </td>
+                <td class="border border-border px-2 py-1.5 text-center text-xs">
+                  <span
+                    v-if="e.fila_posicao != null"
+                    class="pill-info whitespace-nowrap"
+                    :title="`Furou a fila (#${e.fila_posicao}): sai antes dos que estão pela data`"
+                  >
+                    furou a fila
+                    <button
+                      v-if="canEdit"
+                      type="button"
+                      class="-mr-1 rounded-full p-0.5 hover:bg-primary/20 disabled:opacity-50"
+                      title="Tirar da frente da fila — volta pra ordem por data"
+                      :disabled="filaSaving"
+                      @click.stop="tirarDaFilaEntrada(e)"
+                    >
+                      <X class="size-3" />
+                    </button>
+                  </span>
+                  <span v-else class="text-muted-foreground" title="Sem prioridade: sai pela data, do mais recente pro mais antigo">pela data</span>
+                </td>
+              </tr>
+            </template>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <p v-if="statusFilter !== 'fila'" class="text-xs text-muted-foreground">
       Clique numa célula pra editar (Enter salva, Esc cancela). O roteiro é escrito
       na aba Roteiros — "escrever roteiro" cria um já com a marca e o SKU da linha.
       Dá pra anexar vários
@@ -1637,7 +2393,10 @@ async function cancelarPostagem(p: Postagem) {
       Tabela de Preços (aba Produtos). Depois de aprovado, "publicar / agendar"
       (<Send class="size-3 inline text-muted-foreground" />) manda o arquivo pras
       contas da marca em Cadastros › Redes Sociais — quem publica é o robô no
-      servidor, na hora marcada (BRT).
+      servidor, na hora marcada (BRT). Sozinho, o robô posta o aprovado mais recente
+      primeiro; "⤒ frente da fila" põe um vídeo mais antigo antes dos outros, e a
+      ordem inteira (com arrastar) fica em "fila do robô", no filtro. As linhas vêm
+      agrupadas pelo dia em que chegaram — use "de"/"até" pra contar os vídeos de um período.
     </p>
 
     <!-- recusa com motivo -->

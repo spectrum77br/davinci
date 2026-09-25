@@ -18,6 +18,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -303,6 +304,11 @@ class MarketingCreative(Base, TimestampMixin):
     pra pasta do produto."""
 
     __tablename__ = "marketing_creatives"
+    # A pergunta do robô e da tela "Fila do robô": a fila desta marca.
+    # Declarado aqui (create_all dos testes) E na migration 0327.
+    __table_args__ = (
+        Index("ix_marketing_creatives_marca_fila", "marca_id", "fila_posicao"),
+    )
 
     id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
     modelo: Mapped[str] = mapped_column(String(160), nullable=False)
@@ -352,6 +358,14 @@ class MarketingCreative(Base, TimestampMixin):
     # tela"), em inglês, e publicá-lo põe instrução de gravação no Instagram.
     legenda: Mapped[str | None] = mapped_column(Text, nullable=True)
     aprovado: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # Posição na fila do robô de autopostagem (migration 0327, Eduardo
+    # 25/09/2026: "eu ia querer um video mais antigo rodasse antes"). NULL =
+    # ordem normal (o mais recente primeiro); preenchido = furou a fila, e o
+    # menor sai primeiro, antes de qualquer NULL. Quem ordena é
+    # `autopostagem.ordem_da_fila()` — o robô e a tela usam a MESMA ordem.
+    # Só vale pra criativo aprovado da marca: reprovar ou trocar de marca
+    # zera (routers/marketing_creatives.py).
+    fila_posicao: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # Recado da equipe interna pra quem produziu — escrito na hora de aprovar
     # ou reprovar e lido no portal das agências (migration 0299). É o único
     # texto daqui que SAI pra fora, então nunca recebe dado de outra linha.

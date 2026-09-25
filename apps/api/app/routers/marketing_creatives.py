@@ -25,7 +25,7 @@ from uuid import UUID, uuid4
 import structlog
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -44,7 +44,7 @@ from app.models import (
     UserRole,
 )
 from app.schemas.marketing_legendas import legenda_opcional
-from app.services.marketing import link_criativo
+from app.services.marketing import autopostagem, link_criativo
 from app.services.marketing.anexos import (
     caminho_confinado,
     mime_seguro,
@@ -70,11 +70,16 @@ def _file_out(f: MarketingCreativeFile) -> dict[str, Any]:
     }
 
 
-def _row_out(row: MarketingCreative) -> dict[str, Any]:
+def _row_out(
+    row: MarketingCreative, posicoes: dict[UUID, int] | None = None
+) -> dict[str, Any]:
     return {
         "id": str(row.id),
         "modelo": row.modelo,
         "marca": row.marca,
+        # O elo com Cadastros › Marcas — é por ele que a tela pede a fila do
+        # robô da marca (o texto `marca` é livre e pode divergir do cadastro).
+        "marca_id": str(row.marca_id) if row.marca_id else None,
         "sku": row.sku,
         "equipe": row.equipe,
         "roteiro": row.roteiro,
@@ -101,7 +106,33 @@ def _row_out(row: MarketingCreative) -> dict[str, Any]:
         "pushed_at": row.pushed_at.isoformat() if row.pushed_at else None,
         "pushed_dest": row.pushed_dest,
         "created_at": row.created_at.isoformat() if row.created_at else None,
+        # Posição na fila do robô (1 = o próximo a sair), ou None na ordem
+        # normal. É a posição EFETIVA (`autopostagem.posicoes_efetivas`), não
+        # o número cru do banco: o que furou a fila e já saiu em todas as
+        # contas volta a None, e os de trás sobem. Sem `posicoes` (linha
+        # recém-criada) é sempre None.
+        "fila_posicao": (posicoes or {}).get(row.id),
     }
+
+
+async def _posicoes_na_fila(
+    session: AsyncSession, rows: list[MarketingCreative]
+) -> dict[UUID, int]:
+    """Posição efetiva na fila do robô de cada linha que furou a fila.
+
+    Só consulta as marcas que têm alguém priorizado — na lista inteira isso é
+    uma ou duas marcas, e na resposta de uma linha só, quase sempre nenhuma.
+    """
+    marcas = {r.marca_id for r in rows if r.fila_posicao is not None and r.marca_id}
+    out: dict[UUID, int] = {}
+    for marca_id in marcas:
+        itens = await autopostagem.fila(session, marca_id, so_priorizados=True)
+        out.update(autopostagem.posicoes_efetivas(itens))
+    return out
+
+
+async def _row_out_com_fila(session: AsyncSession, row: MarketingCreative) -> dict[str, Any]:
+    return _row_out(row, await _posicoes_na_fila(session, [row]))
 
 
 async def _get_row(session: AsyncSession, creative_id: UUID) -> MarketingCreative:
@@ -190,7 +221,156 @@ async def list_creatives(
     allowed = _user_equipes(user)
     if allowed is not None:
         rows = [r for r in rows if (r.equipe or "").strip().lower() in allowed]
-    return [_row_out(r) for r in rows]
+    posicoes = await _posicoes_na_fila(session, rows)
+    return [_row_out(r, posicoes) for r in rows]
+
+
+# ───────────────────────────────────────────── a fila do robô de autopostagem
+#
+# Eduardo, 25/09/2026: "em criativos deveria dar pra ordenar a sequencia dos
+# videos pq dai eu ia querer um video mais antigo rodasse antes". O robô tira
+# o mais recente por padrão; aqui dá pra ver a fila e passar um na frente.
+#
+# Declaradas ANTES das rotas `/{creative_id}`: senão o FastAPI tenta ler
+# "fila" como UUID de criativo e responde 422 antes de chegar aqui.
+
+
+def _item_fila_out(it: autopostagem.ItemFila, posicoes: dict[UUID, int]) -> dict[str, Any]:
+    c, f = it.criativo, it.arquivo
+    return {
+        "creative_id": str(c.id),
+        "file_id": str(f.id),
+        "fila_posicao": posicoes.get(c.id),
+        "created_at": c.created_at.isoformat() if c.created_at else None,
+        "modelo": c.modelo,
+        "sku": c.sku,
+        "equipe": c.equipe,
+        "file_name": f.file_name,
+        # Quando o VÍDEO chegou (mesmo `enviado_em` da listagem). O
+        # `created_at` acima é o da linha — é por ele que o robô ordena.
+        "enviado_em": f.created_at.isoformat() if f.created_at else None,
+        # O robô pula este vídeo em toda conta (ex.: "arquivo_sumiu"); None =
+        # sai normal. Ver `autopostagem.ItemFila.bloqueado`.
+        "bloqueado": it.bloqueado,
+        "pendente_em": [
+            {"rede_id": str(r.id), "plataforma": r.plataforma, "conta": r.conta}
+            for r in it.pendente_em
+        ],
+    }
+
+
+@router.get("/fila")
+async def get_fila(
+    marca_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("marketing_criativos", "view"))],
+) -> list[dict[str, Any]]:
+    """A fila do robô da marca, na ordem em que ele vai tirar.
+
+    Um item por vídeo que ainda não saiu em pelo menos uma conta; `pendente_em`
+    diz onde falta. A ordem e os candidatos são os MESMOS do robô
+    (`autopostagem.fila`), e a posição é contada na fila inteira da marca
+    ANTES do corte por equipe — quem só vê a própria equipe vê o número real
+    que o robô vai seguir, mesmo que o de cima seja de outra equipe.
+    """
+    itens = await autopostagem.fila(session, marca_id)
+    posicoes = autopostagem.posicoes_efetivas(itens)
+    allowed = _user_equipes(user)
+    if allowed is not None:
+        itens = [it for it in itens if (it.criativo.equipe or "").strip().lower() in allowed]
+    return [_item_fila_out(it, posicoes) for it in itens]
+
+
+class FilaIn(BaseModel):
+    marca_id: UUID
+    # A ordem nova dos que furam a fila, o primeiro sai primeiro. Os que não
+    # estão aqui voltam pra ordem normal (por data). Lista vazia = limpa a fila.
+    ids: list[UUID] = Field(default_factory=list, max_length=500)
+
+
+@router.put("/fila")
+async def put_fila(
+    payload: FilaIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("marketing_criativos", "edit"))],
+) -> dict[str, Any]:
+    """Grava a ordem dos que furam a fila da marca: `ids` viram 1..n.
+
+    Todo criativo da marca que estava priorizado e ficou de fora volta a NULL
+    (ordem normal). Recusa o que não é da marca ou não está aprovado: o robô
+    nunca publicaria esses, e aceitar faria a tela prometer uma ordem que ele
+    não vai seguir.
+    """
+    # Trava a marca: dois PUTs ao mesmo tempo (duas abas, dois operadores)
+    # leriam a mesma fila antiga e gravariam uma mistura das duas ordens.
+    marca = await session.scalar(
+        select(Marca.id).where(Marca.id == payload.marca_id).with_for_update()
+    )
+    if marca is None:
+        raise HTTPException(404, detail={"code": "marca_nao_encontrada"})
+    ids = list(dict.fromkeys(payload.ids))  # sem repetir, mantendo a ordem
+    rows: dict[UUID, MarketingCreative] = {}
+    if ids:
+        rows = {
+            r.id: r
+            for r in (
+                await session.execute(
+                    select(MarketingCreative).where(MarketingCreative.id.in_(ids))
+                )
+            ).scalars()
+        }
+    for cid in ids:
+        row = rows.get(cid)
+        if row is None:
+            raise HTTPException(404, detail={"code": "not_found", "id": str(cid)})
+        if row.marca_id != payload.marca_id:
+            raise HTTPException(
+                422, detail={"code": "criativo_de_outra_marca", "id": str(cid)}
+            )
+        if row.aprovado is not True:
+            raise HTTPException(422, detail={"code": "criativo_nao_aprovado", "id": str(cid)})
+        _ensure_equipe(user, row)
+
+    ficou_de_fora = [
+        MarketingCreative.marca_id == payload.marca_id,
+        MarketingCreative.fila_posicao.isnot(None),
+    ]
+    if ids:
+        ficou_de_fora.append(MarketingCreative.id.notin_(ids))
+    antigos = (
+        await session.execute(
+            select(MarketingCreative)
+            .where(*ficou_de_fora)
+            .order_by(
+                MarketingCreative.fila_posicao,
+                MarketingCreative.created_at.desc(),
+                MarketingCreative.id.desc(),
+            )
+        )
+    ).scalars().all()
+    # Quem só enxerga a própria equipe não pode tirar da fila o que nem vê: os
+    # priorizados das outras equipes ficam, logo atrás dos que ele ordenou e
+    # na ordem em que estavam. Admin e usuário sem equipe veem tudo, então
+    # para eles "ficou de fora" é sempre "voltou pra ordem normal".
+    allowed = _user_equipes(user)
+    escondidos = []
+    for r in antigos:
+        if allowed is not None and (r.equipe or "").strip().lower() not in allowed:
+            escondidos.append(r)
+        else:
+            r.fila_posicao = None
+    for pos, cid in enumerate(ids, start=1):
+        rows[cid].fila_posicao = pos
+    for pos, r in enumerate(escondidos, start=len(ids) + 1):
+        r.fila_posicao = pos
+    await session.commit()
+    logger.info(
+        "criativos_fila_reordenada",
+        marca_id=str(payload.marca_id),
+        priorizados=len(ids),
+        user_id=str(user.id),
+    )
+    return {"ids": [str(cid) for cid in ids]}
 
 
 class CreativeIn(BaseModel):
@@ -420,7 +600,13 @@ async def patch_creative(
         row.marca = (data["marca"] or "").strip() or None
         # O id acompanha o texto SEMPRE — inclusive virando NULL quando a
         # célula é esvaziada ou aponta pra uma marca que não está no cadastro.
-        row.marca_id = await _marca_id_do_texto(session, row.marca)
+        nova_marca_id = await _marca_id_do_texto(session, row.marca)
+        if nova_marca_id != row.marca_id:
+            # A posição na fila foi escolhida olhando a fila da marca ANTIGA.
+            # Levada junto, o vídeo furaria a fila de uma marca onde ninguém
+            # pediu isso.
+            row.fila_posicao = None
+        row.marca_id = nova_marca_id
     if "sku" in data:
         row.sku = (data["sku"] or "").strip() or None
         # O produto acompanha o SKU SEMPRE — inclusive virando NULL quando a
@@ -449,7 +635,7 @@ async def patch_creative(
         # mudar. Sem recarregar, a resposta do PATCH volta com o título do
         # roteiro antigo (ou None) e a célula da planilha pisca errado.
         await session.refresh(row)
-    return _row_out(row)
+    return await _row_out_com_fila(session, row)
 
 
 async def _tem_postagem(session: AsyncSession, file_id: UUID) -> bool:
@@ -564,6 +750,10 @@ async def upload_arquivos(
         added.append(name)
 
     row.aprovado = None  # arquivo novo volta pra "pendente"
+    # E perde o lugar na fila, como na reprovação: aprovada de novo, não volta
+    # sozinha pra frente com uma prioridade que ninguém viu (pendente não
+    # aparece na fila).
+    row.fila_posicao = None
     await session.commit()
     logger.info(
         "creative_files_upload",
@@ -571,7 +761,7 @@ async def upload_arquivos(
         files=added,
         user_id=str(user.id),
     )
-    return _row_out(row)
+    return await _row_out_com_fila(session, row)
 
 
 _RX_LINK_NO_PATH = re.compile(r"(/api/marketing/creatives/video/)[^/\s?]+")
@@ -696,7 +886,7 @@ async def delete_arquivo(
         file=name,
         user_id=str(user.id),
     )
-    return _row_out(row)
+    return await _row_out_com_fila(session, row)
 
 
 def _skus_a_tentar(sku: str) -> list[str]:
@@ -759,13 +949,17 @@ async def aprovar_creative(
 
     if payload.aprovado is False:
         row.aprovado = False
+        # Reprovado sai da fila do robô de vez. Guardar a posição faria o
+        # vídeo, se um dia voltasse a ser aprovado, reaparecer lá na frente
+        # por uma escolha feita antes da recusa.
+        row.fila_posicao = None
         await session.commit()
         return _row_out(row)
 
     if row.pushed_at is not None:  # já foi pro MEGA — só garante o V
         row.aprovado = True
         await session.commit()
-        return _row_out(row)
+        return await _row_out_com_fila(session, row)
 
     recs = list(row.files)
     if not recs:
@@ -860,7 +1054,7 @@ async def aprovar_creative(
         n_files=len(paths),
         user_id=str(user.id),
     )
-    out = _row_out(row)
+    out = await _row_out_com_fila(session, row)
     out["enviados"] = len(paths)
     out["fotos_count"] = fotos_count
     out["videos_count"] = videos_count

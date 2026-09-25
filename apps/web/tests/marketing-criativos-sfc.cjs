@@ -139,7 +139,8 @@ assert.match(tpl, /:disabled="!!motivoPublicar\(r, canEdit\)"/, 'botão travado 
   const pos = ['>Aprovado<', '>Publicação<'].map((x) => thead.indexOf(x))
   assert.ok(pos.every((p) => p >= 0), `cabeçalhos presentes: ${pos}`)
   assert.ok(pos[0] < pos[1], 'Publicação vem depois de Aprovado')
-  assert.equal((tpl.match(/colspan="9"/g) || []).length, 3, 'os 3 estados vazios cobrem 9 colunas')
+  // 3 estados vazios + o cabeçalho de cada dia (Eduardo, 25/09/2026).
+  assert.equal((tpl.match(/colspan="9"/g) || []).length, 4, 'estados vazios e cabeçalho do dia cobrem 9 colunas')
   assert.ok(!/colspan="8"/.test(tpl), 'nenhum colspan velho de 8 sobrou')
 }
 
@@ -173,6 +174,8 @@ return {
   statusLabel, statusPill, podeCancelar, emVoo, ordenaPostagens, postagemQuando, postagemTitle,
   chaveConta, escondeFalhasSuperadas,
   POSTAGEM_ERR_MAP, legendaRotulo, normalizaLegenda, LEGENDA_ORIGEM_LABEL,
+  diaBrt, diaRotulo, noIntervalo, agrupaPorDia, grupoResumo, agrupaFila, moveItem,
+  filaIdsAposMover, FILA_ERR_MAP, diaDaLinha, bloqueioRotulo,
 };
 `)(dateLib.isoToday, redes.PLATAFORMA_LABELS, apiError.MARCAS_ERROS)
 
@@ -496,6 +499,172 @@ assert.deepEqual(H.STATUS_EM_VOO, ['agendado', 'pendente', 'containering', 'publ
   )
 }
 
+// ---------------------------------------------------------------- fila do robô + filtro por dia
+// Pedido do Eduardo (25/09/2026): escolher a ORDEM em que o robô posta
+// (arrastar um vídeo antigo pra frente) sem perder a contagem de vídeos por
+// dia. O que custa caro se quebrar: o PUT mandar ids a mais (congela a ordem
+// por data de quem não foi mexido) ou a menos (o vídeo movido volta pro lugar),
+// e o dia do cabeçalho sair em UTC (22h BRT já é "amanhã").
+assert.match(tpl, /<option value="fila">fila do robô<\/option>/, 'opção "fila do robô" no select de status')
+assert.equal((tpl.match(/type="date"/g) || []).length, 2, 'filtro "de" e "até"')
+assert.match(tpl, /limpar datas/, 'link pra limpar as datas')
+assert.match(tpl, /:draggable="canEdit && !filaSaving"/, 'arrastar só com permissão e fora de um PUT')
+assert.match(tpl, /@drop\.prevent="onFilaDrop\(i\)"/, 'soltar reordena')
+assert.match(tpl, /moverFila\(i, i - 1\)/, 'botão ↑ (teclado/celular)')
+assert.match(tpl, /moverFila\(i, i \+ 1\)/, 'botão ↓ (teclado/celular)')
+assert.match(tpl, /#\{\{ r\.fila_posicao \}\} na fila/, 'selo da posição na planilha')
+assert.match(tpl, /⤒ frente da fila/, 'botão de furar a fila')
+assert.match(script, /'\/api\/marketing\/creatives\/fila',\s*\{\s*method: 'PUT'/, 'reordenar = PUT /fila')
+assert.match(script, /\/api\/marketing\/creatives\/fila\?\$\{q\.toString\(\)\}/, 'fila vem de GET /fila?marca_id=')
+{
+  // Nenhuma dependência nova de drag-and-drop: só o HTML5 nativo.
+  const imports = [...script.matchAll(/from\s+'([^']+)'/g)].map((m) => m[1])
+  assert.deepEqual(
+    [...new Set(imports)].sort(),
+    ['lucide-vue-next', 'vue', '~/lib/apiError', '~/lib/date', '~/lib/redesSociais'],
+    'sem lib nova',
+  )
+}
+
+// diaBrt: o dia do operador. 22h30 BRT do dia 25 é 01h30 UTC do dia 26.
+assert.equal(H.diaBrt('2026-09-26T01:30:00Z'), '2026-09-25')
+assert.equal(H.diaBrt('2026-09-26T03:00:00Z'), '2026-09-26', 'meia-noite BRT já é o dia seguinte')
+assert.equal(H.diaBrt(null), '')
+assert.equal(H.diaBrt('lixo'), '')
+
+// diaRotulo: dia da semana + dd/mm; o ano só quando não é o corrente.
+assert.equal(H.diaRotulo('2026-09-25', '2026-09-25'), 'sex, 25/09')
+assert.equal(H.diaRotulo('2026-01-01', '2026-09-25'), 'qui, 01/01')
+assert.equal(H.diaRotulo('2025-12-31', '2026-01-02'), 'qua, 31/12/2025', 'outro ano mostra o ano')
+assert.equal(H.diaRotulo(''), 'sem data')
+
+// noIntervalo: as duas pontas inclusivas; linha sem data só passa sem filtro.
+{
+  const iso = '2026-09-26T01:30:00Z' // 25/09 em BRT
+  assert.equal(H.noIntervalo(iso, '', ''), true)
+  assert.equal(H.noIntervalo(iso, '2026-09-25', '2026-09-25'), true, 'um dia só, inclusivo')
+  assert.equal(H.noIntervalo(iso, '2026-09-26', ''), false, 'o UTC (26) não vale — o dia é 25 em BRT')
+  assert.equal(H.noIntervalo(iso, '', '2026-09-24'), false)
+  assert.equal(H.noIntervalo(null, '', ''), true, 'sem filtro, sem data também aparece')
+  assert.equal(H.noIntervalo(null, '2026-09-01', ''), false, 'com filtro, sem data fica de fora')
+}
+
+// agrupaPorDia: ordem de entrada, um cabeçalho por dia, vídeo = ARQUIVO de vídeo.
+{
+  const vid = { file_mime: 'video/mp4' }
+  const img = { file_mime: 'image/png' }
+  const lista = [
+    { id: 'a', created_at: '2026-09-25T13:00:00Z', files: [vid, img] },
+    { id: 'b', created_at: '2026-09-26T01:30:00Z', files: [vid, vid] }, // ainda 25/09 BRT
+    { id: 'c', created_at: '2026-09-26T12:00:00Z', files: [] },
+    { id: 'd', created_at: null, files: [vid] },
+  ]
+  const g = H.agrupaPorDia(lista)
+  assert.deepEqual(g.map((x) => x.dia), ['2026-09-25', '2026-09-26', ''])
+  assert.deepEqual(g[0].rows.map((r) => r.id), ['a', 'b'], 'mantém a ordem da API')
+  assert.equal(g[0].criativos, 2)
+  assert.equal(g[0].videos, 3, 'conta arquivo de vídeo, não imagem')
+  assert.equal(H.grupoResumo(g[0], '2026-09-26'), 'sex, 25/09 · 2 criativos · 3 vídeos')
+  assert.equal(H.grupoResumo(g[1], '2026-09-26'), 'sáb, 26/09 · 1 criativo · 0 vídeos')
+  assert.equal(H.grupoResumo(g[2], '2026-09-26'), 'sem data · 1 criativo · 1 vídeo')
+  assert.deepEqual(H.agrupaPorDia([]), [])
+}
+
+// diaDaLinha: o dia é o da CHEGADA DO VÍDEO (enviado_em), não o da linha. A
+// linha nasce quando a entrega é aberta; o vídeo pode chegar dias depois.
+{
+  const lin = (created_at, files) => ({ created_at, files })
+  const v = (enviado_em) => ({ file_mime: 'video/mp4', enviado_em })
+  assert.equal(H.diaDaLinha(lin('2026-09-25T13:00:00Z', [v('2026-09-27T13:00:00Z')])), '2026-09-27')
+  assert.equal(
+    H.diaDaLinha(lin('2026-09-25T13:00:00Z', [v('2026-09-25T14:00:00Z'), v('2026-09-28T02:00:00Z')])),
+    '2026-09-27', 'o vídeo mais novo manda, em BRT (02h UTC do 28 = 23h do 27)',
+  )
+  assert.equal(
+    H.diaDaLinha(lin('2026-09-25T13:00:00Z', [{ file_mime: 'image/png', enviado_em: '2026-09-29T13:00:00Z' }])),
+    '2026-09-25', 'imagem não move a linha',
+  )
+  assert.equal(H.diaDaLinha(lin('2026-09-25T13:00:00Z', [v(null), { file_mime: 'video/mp4' }])), '2026-09-25', 'sem enviado_em, a data da linha')
+  assert.equal(H.diaDaLinha(lin(null, [])), '')
+
+  // No agrupamento: a linha de 25 cujo vídeo chegou dia 27 conta no 27, e os
+  // dias continuam em ordem mesmo ela vindo da API antes das linhas do 26.
+  const g = H.agrupaPorDia([
+    { id: 'a', ...lin('2026-09-25T13:00:00Z', [v('2026-09-27T13:00:00Z')]) },
+    { id: 'b', ...lin('2026-09-26T13:00:00Z', [v('2026-09-26T13:00:00Z')]) },
+    { id: 'c', ...lin(null, []) },
+    { id: 'd', ...lin('2026-09-27T15:00:00Z', [v('2026-09-27T15:00:00Z'), v('2026-09-27T16:00:00Z')]) },
+  ])
+  assert.deepEqual(g.map((x) => x.dia), ['2026-09-26', '2026-09-27', ''], 'dias crescentes, sem data no fim')
+  assert.deepEqual(g[1].rows.map((r) => r.id), ['a', 'd'], 'dentro do dia, a ordem da API')
+  assert.equal(g[1].videos, 3)
+  assert.equal(g[0].videos, 1)
+}
+
+// O aviso do vídeo que o robô vai pular (GET /fila `bloqueado`).
+assert.match(H.bloqueioRotulo('arquivo_sumiu'), /sumiu/)
+assert.match(H.bloqueioRotulo('codigo_novo'), /pula/, 'código desconhecido ainda avisa')
+assert.equal(H.bloqueioRotulo(null), '')
+assert.match(tpl, /bloqueioRotulo\(a\.bloqueado\)/, 'aviso por arquivo na fila')
+assert.match(tpl, /fila: reescolha a marca/, 'linha sem marca_id ganha dica em vez do botão')
+
+// agrupaFila: GET /fila vem um item por ARQUIVO; a tela arrasta o CRIATIVO.
+{
+  const f = H.agrupaFila([
+    { creative_id: 'c1', file_id: 'f1', fila_posicao: 1, created_at: '2026-09-01T12:00:00Z', modelo: 'video 30s', sku: 'S1', equipe: null, file_name: 'a.mp4', pendente_em: [{ rede_id: 'r1', plataforma: 'instagram', conta: 'poofy' }] },
+    { creative_id: 'c1', file_id: 'f2', fila_posicao: 1, created_at: '2026-09-01T12:00:00Z', modelo: 'video 30s', sku: 'S1', equipe: null, file_name: 'b.mp4', pendente_em: [] },
+    { creative_id: 'c2', file_id: 'f3', fila_posicao: null, created_at: '2026-09-20T12:00:00Z', modelo: 'video 15s', sku: null, equipe: 'time', file_name: 'c.mp4' },
+  ])
+  assert.deepEqual(f.map((e) => e.creative_id), ['c1', 'c2'], 'ordem do robô, um por criativo')
+  assert.deepEqual(f[0].arquivos.map((a) => a.file_id), ['f1', 'f2'])
+  assert.equal(f[0].fila_posicao, 1)
+  assert.equal(f[1].fila_posicao, null)
+  assert.deepEqual(f[1].arquivos[0].pendente_em, [], 'pendente_em ausente vira lista vazia')
+  assert.equal(f[1].arquivos[0].enviado_em, null, 'backend antigo sem enviado_em')
+  assert.equal(f[1].arquivos[0].bloqueado, null)
+  const b = H.agrupaFila([
+    { creative_id: 'c9', file_id: 'f9', fila_posicao: 1, created_at: null, modelo: 'm', file_name: 'z.mp4', enviado_em: '2026-09-27T13:00:00Z', bloqueado: 'arquivo_sumiu', pendente_em: [] },
+  ])
+  assert.equal(b[0].arquivos[0].enviado_em, '2026-09-27T13:00:00Z')
+  assert.equal(b[0].arquivos[0].bloqueado, 'arquivo_sumiu')
+  for (const ruim of [null, undefined, {}, 'x', [{}], [{ creative_id: '' }]]) {
+    assert.deepEqual(H.agrupaFila(ruim), [], `resposta ruim não derruba: ${JSON.stringify(ruim)}`)
+  }
+}
+
+// moveItem: índices da lista original; fora da faixa = cópia igual.
+assert.deepEqual(H.moveItem(['a', 'b', 'c'], 2, 0), ['c', 'a', 'b'])
+assert.deepEqual(H.moveItem(['a', 'b', 'c'], 0, 2), ['b', 'c', 'a'])
+assert.deepEqual(H.moveItem(['a', 'b', 'c'], 1, 1), ['a', 'b', 'c'])
+assert.deepEqual(H.moveItem(['a', 'b', 'c'], 0, 5), ['a', 'b', 'c'])
+
+// filaIdsAposMover: ids até o último que é o movido ou já tinha número.
+{
+  const e = (id, fila_posicao = null) => ({ creative_id: id, fila_posicao })
+  // Nada fixo; o antigo (C) vai pra frente: só ele ganha número.
+  assert.deepEqual(H.filaIdsAposMover([e('C'), e('A'), e('B')], 'C'), ['C'])
+  // Desce o mais novo (A) uma casa: B precisa de número pra ficar na frente dele.
+  assert.deepEqual(H.filaIdsAposMover([e('B'), e('A'), e('C')], 'A'), ['B', 'A'])
+  // Entre dois fixos: os três ficam fixos, o resto segue pela data.
+  assert.deepEqual(
+    H.filaIdsAposMover([e('P1', 1), e('B'), e('P2', 2), e('A')], 'B'),
+    ['P1', 'B', 'P2'],
+  )
+  // Fixo levado pro fim: tudo acima dele precisa de número.
+  assert.deepEqual(
+    H.filaIdsAposMover([e('P2', 2), e('A'), e('B'), e('P1', 1)], 'P1'),
+    ['P2', 'A', 'B', 'P1'],
+  )
+  assert.deepEqual(H.filaIdsAposMover([], 'x'), [])
+}
+
+// Códigos do PUT traduzidos; os do publicar continuam valendo.
+for (const code of ['criativo_de_outra_marca', 'criativo_nao_aprovado', 'forbidden']) {
+  const msg = apiError.apiErrMsg({ data: { detail: { code } } }, H.FILA_ERR_MAP)
+  assert.ok(msg && !msg.includes('_'), `código traduzido: ${code}`)
+}
+assert.match(H.FILA_ERR_MAP.criativo_nao_aprovado, /fila/, 'a frase fala da fila, não de publicar')
+
 // ---------------------------------------------------------------- script setup
 // Molde de marcas-sfc.cjs / redes-sociais-sfc.cjs: executa o <script setup>
 // com api, window e timers FALSOS pra travar o fluxo do modal de ponta a ponta
@@ -509,6 +678,10 @@ const exportsForTest = `return {
   pubSemLegenda, onLegendaInput,
   openPublicar, closePublicar, toggleConta, salvarPostagem, cancelarPostagem, loadPostagens,
   motivoPublicar, pickFile, criarRoteiroDaLinha, criandoRoteiro,
+  statusFilter, statusModel, dataDe, dataAte, limparDatas, filteredRows, gruposPorDia, videosFiltrados,
+  fila, filaMarca, filaMarcaId, filaErro, filaSaving, loadFila, moverFila, frenteDaFila,
+  tirarDaFilaLinha, tirarDaFilaEntrada, prioritariosDaMarca, podeFurarFila, filaSemMarca,
+  onFilaDragStart, onFilaDragOver, onFilaDrop, onFilaDragEnd, filaDropClass, arrastando,
 }`
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor
 const factory = new AsyncFunction(
@@ -553,7 +726,7 @@ const LEGENDA_FAKE = {
 async function tela({
   canEdit = true, linhas = [criativo()], contasResp = { commit: false, contas: CONTAS_FAKE },
   marcasErro = false, postagensIniciais = [], postError = null, confirmAnswer = true,
-  legendaResp = LEGENDA_FAKE,
+  legendaResp = LEGENDA_FAKE, filaResp = [], filaPutError = null,
 } = {}) {
   const calls = []
   const toastLog = []
@@ -562,6 +735,16 @@ async function tela({
     calls.push({ url, opts })
     if (url === '/api/marketing/creatives') return Promise.resolve(linhas.map((l) => ({ ...l })))
     if (url === '/api/marketing/creatives/equipes') return Promise.resolve(['time'])
+    // Fila do robô (Eduardo, 25/09/2026): GET na ordem do robô; o PUT devolve
+    // os ids gravados.
+    if (url.startsWith('/api/marketing/creatives/fila')) {
+      if (opts?.method === 'PUT') {
+        return filaPutError ? Promise.reject(filaPutError) : Promise.resolve({ ids: [...opts.body.ids] })
+      }
+      return filaResp === 'erro'
+        ? Promise.reject(new Error('404'))
+        : Promise.resolve(filaResp.map((x) => ({ ...x })))
+    }
     if (url === '/api/marcas?ativo=true') {
       return marcasErro
         ? Promise.reject(new Error('sem permissão'))
@@ -923,10 +1106,220 @@ async function run() {
     const { s } = await tela({ postagensIniciais: 'erro' })
     assert.deepEqual(s.postagens.value, [], 'agenda vazia em vez de erro na cara do operador')
   }
+
+  // ------------------------------------------------ filtro por dia (25/09/2026)
+  {
+    const vid = (id) => ({ id, file_name: `${id}.mp4`, file_mime: 'video/mp4', file_size: 1 })
+    const linhas = [
+      criativo({ id: 'd1', created_at: '2026-09-24T15:00:00Z', files: [vid('v1')] }),
+      criativo({ id: 'd2', created_at: '2026-09-25T13:00:00Z', files: [vid('v2'), vid('v3')] }),
+      criativo({ id: 'd3', created_at: '2026-09-26T01:30:00Z', files: [vid('v4')] }), // 25/09 22h30 BRT
+      criativo({ id: 'd4', created_at: null, files: [] }),
+    ]
+    const { s } = await tela({ linhas })
+    assert.deepEqual(s.gruposPorDia.value.map((g) => g.dia), ['2026-09-24', '2026-09-25', ''])
+    assert.deepEqual(s.gruposPorDia.value[1].rows.map((r) => r.id), ['d2', 'd3'], 'ordem da API mantida')
+    assert.equal(s.videosFiltrados.value, 4)
+
+    s.dataDe.value = '2026-09-25'
+    s.dataAte.value = '2026-09-25'
+    assert.deepEqual(s.filteredRows.value.map((r) => r.id), ['d2', 'd3'], 'dia BRT, não UTC; sem data fica fora')
+    assert.equal(s.videosFiltrados.value, 3)
+    assert.equal(s.gruposPorDia.value.length, 1)
+
+    s.dataAte.value = ''
+    s.statusFilter.value = 'reprovado'
+    assert.deepEqual(s.filteredRows.value, [], 'data soma com o filtro de status')
+    s.statusFilter.value = 'todos'
+
+    s.limparDatas()
+    assert.equal(s.filteredRows.value.length, 4, 'limpar datas volta tudo')
+  }
+
+  // O filtro olha o dia em que o VÍDEO chegou: linha aberta dia 25 com vídeo
+  // do dia 27 é do dia 27.
+  {
+    const linhas = [
+      criativo({
+        id: 'tarde', created_at: '2026-09-25T13:00:00Z',
+        files: [{ id: 'vt', file_name: 't.mp4', file_mime: 'video/mp4', file_size: 1, enviado_em: '2026-09-27T13:00:00Z' }],
+      }),
+      criativo({
+        id: 'mesmo', created_at: '2026-09-25T14:00:00Z',
+        files: [{ id: 'vm', file_name: 'm.mp4', file_mime: 'video/mp4', file_size: 1, enviado_em: '2026-09-25T14:05:00Z' }],
+      }),
+    ]
+    const { s } = await tela({ linhas })
+    s.dataDe.value = '2026-09-25'
+    s.dataAte.value = '2026-09-25'
+    assert.deepEqual(s.filteredRows.value.map((r) => r.id), ['mesmo'])
+    s.dataDe.value = '2026-09-27'
+    s.dataAte.value = '2026-09-27'
+    assert.deepEqual(s.filteredRows.value.map((r) => r.id), ['tarde'])
+    assert.equal(s.gruposPorDia.value[0].videos, 1)
+  }
+
+  // ------------------------------------------------ fila do robô (25/09/2026)
+  const FILA_FAKE = [
+    { creative_id: 'n1', file_id: 'fn1', fila_posicao: null, created_at: '2026-09-25T12:00:00Z', modelo: 'video 30s', sku: 'N1', equipe: null, file_name: 'n1.mp4', pendente_em: [{ rede_id: 'r1', plataforma: 'instagram', conta: 'poofy' }] },
+    { creative_id: 'n2', file_id: 'fn2', fila_posicao: null, created_at: '2026-09-20T12:00:00Z', modelo: 'video 30s', sku: 'N2', equipe: null, file_name: 'n2.mp4', pendente_em: [{ rede_id: 'r1', plataforma: 'instagram', conta: 'poofy' }] },
+    { creative_id: 'velho', file_id: 'fv', fila_posicao: null, created_at: '2026-08-01T12:00:00Z', modelo: 'video 15s', sku: 'V', equipe: null, file_name: 'velho.mp4', pendente_em: [{ rede_id: 'r1', plataforma: 'instagram', conta: 'poofy' }] },
+  ]
+  const puts = (calls) => calls.filter((c) => c.opts?.method === 'PUT')
+  const dragEv = () => ({
+    prevented: false,
+    preventDefault() { this.prevented = true },
+    dataTransfer: { effectAllowed: '', dropEffect: '', setData() {} },
+  })
+
+  // Escolher "fila do robô" já carrega a fila da primeira marca.
+  {
+    const { s, calls } = await tela({ filaResp: FILA_FAKE })
+    s.statusModel.value = 'fila'
+    await new Promise(setImmediate)
+    assert.equal(s.filaMarcaId.value, 'm1')
+    assert.ok(calls.some((c) => c.url === '/api/marketing/creatives/fila?marca_id=m1'), 'GET /fila?marca_id=')
+    assert.deepEqual(s.fila.value.map((e) => e.creative_id), ['n1', 'n2', 'velho'])
+
+    // Arrastar o antigo pra frente: só ele ganha número (os outros seguem pela data).
+    const ev = dragEv()
+    s.onFilaDragStart(2, ev)
+    const over = dragEv()
+    s.onFilaDragOver(0, over)
+    assert.equal(over.prevented, true, 'aceita soltar o item da própria lista')
+    assert.match(s.filaDropClass(0), /\[&>td\]:border-t-2/, 'indicador acima quando sobe (nas células)')
+    s.onFilaDrop(0)
+    await new Promise(setImmediate)
+    await new Promise(setImmediate)
+    const put = puts(calls).at(-1)
+    assert.equal(put.url, '/api/marketing/creatives/fila')
+    assert.deepEqual(put.opts.body, { marca_id: 'm1', ids: ['velho'] })
+    assert.equal(s.arrastando.value, null, 'arraste zerado depois de soltar')
+    const gets = calls.filter((c) => c.url.startsWith('/api/marketing/creatives/fila?') && !c.opts?.method)
+    assert.equal(gets.length, 2, 'recarrega a fila depois do PUT')
+  }
+
+  // Arraste que não saiu da lista (arquivo do Finder, texto) não é aceito.
+  {
+    const { s } = await tela({ filaResp: FILA_FAKE })
+    s.statusModel.value = 'fila'
+    await new Promise(setImmediate)
+    const over = dragEv()
+    s.onFilaDragOver(0, over)
+    assert.equal(over.prevented, false)
+  }
+
+  // ↓ no mais novo: o de baixo sobe e precisa de número pra ficar na frente.
+  {
+    const { s, calls } = await tela({ filaResp: FILA_FAKE })
+    s.statusModel.value = 'fila'
+    await new Promise(setImmediate)
+    await s.moverFila(0, 1)
+    assert.deepEqual(puts(calls).at(-1).opts.body.ids, ['n2', 'n1'])
+  }
+
+  // PUT falhou: a lista volta como estava e o erro aparece traduzido.
+  {
+    const { s, calls, toastLog } = await tela({
+      filaResp: FILA_FAKE,
+      filaPutError: { data: { detail: { code: 'criativo_nao_aprovado' } } },
+    })
+    s.statusModel.value = 'fila'
+    await new Promise(setImmediate)
+    await s.moverFila(2, 0)
+    assert.equal(puts(calls).length, 1)
+    assert.deepEqual(s.fila.value.map((e) => e.creative_id), ['n1', 'n2', 'velho'], 'rollback')
+    assert.equal(s.fila.value[2].fila_posicao, null, 'o número otimista some junto')
+    const erro = toastLog.find((t) => t[0] === 'error')
+    assert.ok(erro, 'toast de erro')
+    assert.match(erro[2], /aprovado/)
+    assert.equal(s.filaSaving.value, false)
+  }
+
+  // Sem permissão de edição: nada de PUT, nem arrastando.
+  {
+    const { s, calls } = await tela({ canEdit: false, filaResp: FILA_FAKE })
+    s.statusModel.value = 'fila'
+    await new Promise(setImmediate)
+    await s.moverFila(2, 0)
+    const ev = dragEv()
+    s.onFilaDragStart(2, ev)
+    assert.equal(ev.prevented, true)
+    assert.equal(puts(calls).length, 0)
+  }
+
+  // GET /fila fora do ar: mensagem na tela, sem derrubar nada.
+  {
+    const { s } = await tela({ filaResp: 'erro' })
+    s.statusModel.value = 'fila'
+    await new Promise(setImmediate)
+    assert.deepEqual(s.fila.value, [])
+    assert.ok(s.filaErro.value)
+  }
+
+  // Planilha: "⤒ frente da fila" põe a linha em 1º e empurra quem já tinha número.
+  {
+    const vid = [{ id: 'fv', file_name: 'x.mp4', file_mime: 'video/mp4', file_size: 1 }]
+    const linhas = [
+      criativo({ id: 'p1', marca_id: 'm1', files: vid, fila_posicao: 1 }),
+      criativo({ id: 'p2', marca_id: 'm1', files: vid, fila_posicao: 2 }),
+      criativo({ id: 'x', marca_id: 'm1', files: vid, fila_posicao: null }),
+      // Perdeu a aprovação com número velho: não pode ir no PUT (daria 422).
+      criativo({ id: 'reprov', marca_id: 'm1', files: vid, fila_posicao: 3, aprovado: null }),
+      // Outra marca: a fila dela não é tocada.
+      criativo({ id: 'outra', marca_id: 'm2', files: vid, fila_posicao: 1 }),
+      criativo({ id: 'img', marca_id: 'm1', files: [{ id: 'fi', file_name: 'a.png', file_mime: 'image/png', file_size: 1 }] }),
+    ]
+    const { s, calls, toastLog } = await tela({ linhas })
+    const linha = (id) => s.rows.value.find((r) => r.id === id)
+    assert.deepEqual(s.prioritariosDaMarca('m1'), ['p1', 'p2'])
+    assert.equal(s.podeFurarFila(linha('x')), true)
+    assert.equal(s.podeFurarFila(linha('img')), false, 'o robô só posta vídeo')
+    assert.equal(s.podeFurarFila(linha('reprov')), false, 'só aprovado')
+
+    await s.frenteDaFila(linha('x'))
+    assert.deepEqual(puts(calls).at(-1).opts.body, { marca_id: 'm1', ids: ['x', 'p1', 'p2'] })
+    assert.equal(linha('x').fila_posicao, 1)
+    assert.equal(linha('p1').fila_posicao, 2)
+    assert.equal(linha('p2').fila_posicao, 3)
+    assert.equal(linha('reprov').fila_posicao, null, 'o servidor zera quem ficou de fora')
+    assert.equal(linha('outra').fila_posicao, 1, 'outra marca intacta')
+    assert.equal(toastLog.at(-1)[0], 'success')
+
+    // O × do selo tira da frente e mantém a ordem dos outros.
+    await s.tirarDaFilaLinha(linha('p1'))
+    await new Promise(setImmediate)
+    assert.deepEqual(puts(calls).at(-1).opts.body, { marca_id: 'm1', ids: ['x', 'p2'] })
+    assert.equal(linha('p1').fila_posicao, null)
+    assert.equal(linha('p2').fila_posicao, 2)
+
+    // Linha com o texto da marca mas SEM marca_id: o robô e o PUT só olham o
+    // marca_id, então nada de botão (o PUT voltaria criativo_de_outra_marca).
+    {
+      const semId = criativo({ id: 'semid', marca: 'poofy', marca_id: null, files: vid })
+      s.rows.value.push(semId)
+      const r = s.rows.value.find((x) => x.id === 'semid')
+      assert.equal(s.podeFurarFila(r), false, 'sem marca_id não fura a fila')
+      assert.equal(s.filaSemMarca(r), true, 'mostra a dica de reescolher a marca')
+      assert.deepEqual(s.prioritariosDaMarca('m1'), ['x', 'p2'], 'não entra na conta da marca pelo texto')
+      const antes = puts(calls).length
+      await s.frenteDaFila(r)
+      assert.equal(puts(calls).length, antes, 'nenhum PUT')
+      assert.equal(toastLog.at(-1)[0], 'warning')
+      s.rows.value.splice(s.rows.value.indexOf(r), 1)
+    }
+
+    // Tirar o último: lista vazia limpa a fila da marca.
+    await s.tirarDaFilaLinha(linha('x'))
+    await new Promise(setImmediate)
+    await s.tirarDaFilaLinha(linha('p2'))
+    await new Promise(setImmediate)
+    assert.deepEqual(puts(calls).at(-1).opts.body, { marca_id: 'm1', ids: [] })
+  }
 }
 
 run().then(() => {
-  console.log('PASS: SFC parse + template compile; higiene (sem token/senha, rel=noopener, confirm no cancelar, roteiro fora da legenda); helpers puros (BRT→ISO, corpo do POST, contas, pills, motivos, rótulo/origem da legenda); script setup com api falso (modal, travas, legenda resolvida, edição manual, endpoint fora do ar, confirm do post sem legenda, cancelar)')
+  console.log('PASS: SFC parse + template compile; higiene (sem token/senha, rel=noopener, confirm no cancelar, roteiro fora da legenda); helpers puros (BRT→ISO, corpo do POST, contas, pills, motivos, rótulo/origem da legenda, dia BRT/cabeçalho do dia, fila do robô); script setup com api falso (modal, travas, legenda resolvida, edição manual, endpoint fora do ar, confirm do post sem legenda, cancelar, filtro por dia, arrastar/↑↓ na fila com rollback, frente da fila na planilha)')
 }).catch((e) => {
   console.error(e)
   process.exit(1)

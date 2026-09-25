@@ -14,7 +14,12 @@ hora de início), ele monta a grade do dia:
     18h de início, intervalo 60, teto 2  →  um às 18h, outro às 19h
 
 REGRA DE ESCOLHA: o criativo aprovado MAIS RECENTE que ainda não saiu naquela
-conta. Escolhida pelo Eduardo — "tacamos do mais recente".
+conta. Escolhida pelo Eduardo — "tacamos do mais recente". Continua sendo o
+padrão, mas desde 25/09/2026 dá pra passar um vídeo na frente: "eu ia querer
+um video mais antigo rodasse antes". O criativo com `fila_posicao` preenchida
+fura a fila (o menor primeiro) e só depois vem o resto, do mais recente pro
+mais antigo. A ordem mora em `ordem_da_fila()`, que o robô e a tela "Fila do
+robô" usam juntos — a tela não pode mostrar uma ordem e o robô seguir outra.
 
 ELE AGENDA, NÃO PUBLICA. Cria a postagem em `agendado`, que aparece na tela e
 dá pra cancelar antes de sair; o publicador que já existe faz o resto. Duas
@@ -29,7 +34,9 @@ intervalo, nada em voo pro mesmo vídeo. Um robô que pula as guardas do humano
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from uuid import UUID
 
 import structlog
 from sqlalchemy import func, select
@@ -44,17 +51,21 @@ from app.models import (
 )
 from app.services.marketing.postagens import (
     BRT,
+    PLATAFORMAS_SUPORTADAS,
     STATUS_OCUPA_CONTA,
     RoboError,
     _espacamento_min,
     _teto_dia,
     agendar,
+    motivo_do_arquivo,
 )
 
 logger = structlog.get_logger()
 
 
-async def contas_ligadas(session: AsyncSession) -> list[RedeSocial]:
+async def contas_ligadas(
+    session: AsyncSession, *, marca_id: UUID | None = None
+) -> list[RedeSocial]:
     """Contas onde o robô tem permissão de publicar sozinho.
 
     Exige as DUAS coisas: o interruptor ligado E a hora preenchida. O
@@ -62,20 +73,17 @@ async def contas_ligadas(session: AsyncSession) -> list[RedeSocial]:
     ("pode executar o que foi agendado à mão") — e há contas com ele ligado por
     esse motivo. Tratar essas como autorizadas faria o robô começar a publicar
     sozinho no dia do deploy, em conta que ninguém pediu.
+
+    `marca_id` restringe a uma marca (a tela da fila); sem ele, todas (a rodada).
     """
-    return list(
-        (
-            await session.execute(
-                select(RedeSocial).where(
-                    RedeSocial.ativo.is_(True),
-                    RedeSocial.postagem_auto.is_(True),
-                    RedeSocial.postagem_hora_inicio.isnot(None),
-                )
-            )
-        )
-        .scalars()
-        .all()
+    stmt = select(RedeSocial).where(
+        RedeSocial.ativo.is_(True),
+        RedeSocial.postagem_auto.is_(True),
+        RedeSocial.postagem_hora_inicio.isnot(None),
     )
+    if marca_id is not None:
+        stmt = stmt.where(RedeSocial.marca_id == marca_id)
+    return list((await session.execute(stmt)).scalars().all())
 
 
 def horarios_do_dia(rede: RedeSocial, settings, *, agora: datetime) -> list[datetime]:
@@ -131,18 +139,69 @@ async def _ja_ocupados(session: AsyncSession, rede: RedeSocial, dia: datetime) -
     ).scalar_one()
 
 
-async def proximo_criativo(
-    session: AsyncSession, rede: RedeSocial
-) -> tuple[MarketingCreative, MarketingCreativeFile] | None:
-    """O aprovado MAIS RECENTE da marca que ainda não saiu nesta conta.
+def ordem_da_fila() -> tuple:
+    """A ordem em que o robô tira os vídeos da fila — UMA fonte só.
 
-    "Tacamos do mais recente" — escolha do Eduardo. Consequência que vale
-    saber: um criativo novo fura a fila dos antigos, e um vídeo antigo que
-    nunca saiu pode nunca sair se a produção não parar. É o comportamento
-    pedido, não um efeito colateral.
+    Usada por `proximo_criativo` (o robô) e por `fila` (a tela "Fila do
+    robô"). Se cada lado tivesse o seu ORDER BY, bastava alguém mexer num pra
+    tela prometer um vídeo e o robô postar outro.
+
+      1. `fila_posicao` ASC, NULLS LAST — quem o Eduardo passou na frente sai
+         primeiro, o menor antes; NULL é a ordem normal e vem depois de todos.
+      2. o criativo mais recente — o "tacamos do mais recente" de sempre.
+      3. dentro do criativo, o arquivo mais recente (a linha aceita vários).
+
+    Os `id` no fim só desempatam data igual: sem eles o Postgres pode
+    devolver empates em ordem diferente a cada consulta, e a tela e o robô
+    discordariam justo no empate. O `id` do criativo antes do arquivo mantém
+    os vídeos de uma mesma linha juntos na fila.
+    """
+    return (
+        MarketingCreative.fila_posicao.asc().nulls_last(),
+        MarketingCreative.created_at.desc(),
+        MarketingCreative.id.desc(),
+        MarketingCreativeFile.created_at.desc(),
+        MarketingCreativeFile.id.desc(),
+    )
+
+
+def _candidatos(marca_id: UUID) -> list:
+    """O que PODE entrar na fila da marca — o robô e a tela usam o mesmo."""
+    return [
+        MarketingCreative.marca_id == marca_id,
+        MarketingCreative.aprovado.is_(True),
+        MarketingCreativeFile.file_rel.isnot(None),
+        # SÓ VÍDEO. O upload aceita imagem e PDF (a linha do criativo
+        # guarda referência, arte, carrossel), e sem este filtro o
+        # robô escolheria o JPG mais recente e tentaria publicá-lo
+        # como Reel. O modal manual já pré-seleciona vídeo; aqui não
+        # havia ninguém pra pré-selecionar.
+        MarketingCreativeFile.file_mime.ilike("video/%"),
+    ]
+
+
+async def proximo_criativo(
+    session: AsyncSession,
+    rede: RedeSocial,
+    *,
+    excluir: set[UUID] | frozenset[UUID] = frozenset(),
+) -> tuple[MarketingCreative, MarketingCreativeFile] | None:
+    """O primeiro da fila da marca que ainda não saiu nesta conta.
+
+    Sem ninguém mexer na fila, é o aprovado MAIS RECENTE — "tacamos do mais
+    recente", escolha do Eduardo. Consequência que vale saber: um criativo
+    novo fura a fila dos antigos, e um vídeo antigo que nunca saiu pode nunca
+    sair se a produção não parar. Era exatamente isso que ele queria poder
+    contornar (25/09/2026): o criativo com `fila_posicao` sai antes, em
+    qualquer conta onde ainda não saiu. Ver `ordem_da_fila()`.
 
     "Já saiu nesta conta" é por ARQUIVO, não por criativo: a linha do criativo
-    aceita vários vídeos, e cada um é uma publicação diferente.
+    aceita vários vídeos, e cada um é uma publicação diferente. E é POR
+    CONTA: o vídeo que furou a fila e já saiu no TikTok continua na frente no
+    Instagram até sair lá — e no TikTok o robô volta ao mais recente.
+
+    `excluir` são arquivos que a rodada já viu serem recusados NESTA conta
+    por motivo do próprio vídeo (ver `MOTIVOS_DO_VIDEO`): pula pro seguinte.
     """
     if rede.marca_id is None:
         return None
@@ -169,27 +228,137 @@ async def proximo_criativo(
     saiu = select(MarketingPostagem.file_id).where(
         MarketingPostagem.rede_social_id == rede.id
     )
+    filtros = [*_candidatos(rede.marca_id), MarketingCreativeFile.id.notin_(saiu)]
+    if excluir:
+        filtros.append(MarketingCreativeFile.id.notin_(list(excluir)))
     linha = (
         await session.execute(
             select(MarketingCreative, MarketingCreativeFile)
             .join(MarketingCreativeFile, MarketingCreativeFile.creative_id == MarketingCreative.id)
-            .where(
-                MarketingCreative.marca_id == rede.marca_id,
-                MarketingCreative.aprovado.is_(True),
-                MarketingCreativeFile.file_rel.isnot(None),
-                # SÓ VÍDEO. O upload aceita imagem e PDF (a linha do criativo
-                # guarda referência, arte, carrossel), e sem este filtro o
-                # robô escolheria o JPG mais recente e tentaria publicá-lo
-                # como Reel. O modal manual já pré-seleciona vídeo; aqui não
-                # havia ninguém pra pré-selecionar.
-                MarketingCreativeFile.file_mime.ilike("video/%"),
-                MarketingCreativeFile.id.notin_(saiu),
-            )
-            .order_by(MarketingCreative.created_at.desc(), MarketingCreativeFile.created_at.desc())
+            .where(*filtros)
+            .order_by(*ordem_da_fila())
             .limit(1)
         )
     ).first()
     return (linha[0], linha[1]) if linha else None
+
+
+@dataclass
+class ItemFila:
+    criativo: MarketingCreative
+    arquivo: MarketingCreativeFile
+    # As contas onde este vídeo AINDA não saiu (nem foi tentado).
+    pendente_em: list[RedeSocial]
+    # Por que o robô vai PULAR este arquivo em toda conta ("arquivo_sumiu",
+    # "sem_arquivo"), ou None. A posição continua a dele — quem decide tirar
+    # da fila é gente —, mas a tela avisa em vez de prometer um vídeo que
+    # não vai sair.
+    bloqueado: str | None = None
+
+
+async def contas_da_fila(session: AsyncSession, marca_id: UUID) -> list[RedeSocial]:
+    """As contas contra as quais a fila da marca é medida.
+
+    As do robô, quando existem — é a fila DELE. Sem nenhuma conta com o robô
+    ligado, caem as contas ativas das plataformas que o robô sabe publicar:
+    a marca que ainda não ligou o robô também precisa ver e arrumar a fila
+    ANTES de ligar, senão o primeiro dia sai na ordem que ninguém escolheu.
+    """
+    contas = await contas_ligadas(session, marca_id=marca_id)
+    if not contas:
+        contas = list(
+            (
+                await session.execute(
+                    select(RedeSocial).where(
+                        RedeSocial.marca_id == marca_id,
+                        RedeSocial.ativo.is_(True),
+                        RedeSocial.plataforma.in_(PLATAFORMAS_SUPORTADAS),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+    return sorted(contas, key=lambda r: (r.plataforma, (r.conta or "").lower(), str(r.id)))
+
+
+async def fila(
+    session: AsyncSession, marca_id: UUID, *, so_priorizados: bool = False
+) -> list[ItemFila]:
+    """A fila do robô para a marca, na ordem em que ele vai tirar.
+
+    Um item por ARQUIVO de vídeo que ainda não saiu em pelo menos uma das
+    `contas_da_fila`. Mesmos candidatos e mesma ordem do `proximo_criativo`;
+    "já saiu" também igual — qualquer postagem, em qualquer estado.
+
+    `so_priorizados` corta nos que furaram a fila: é o que a listagem precisa
+    pra numerar o selo "#n na fila" sem carregar a fila inteira.
+    """
+    contas = await contas_da_fila(session, marca_id)
+    if not contas:
+        return []
+    stmt = (
+        select(MarketingCreative, MarketingCreativeFile)
+        .join(MarketingCreativeFile, MarketingCreativeFile.creative_id == MarketingCreative.id)
+        .where(*_candidatos(marca_id))
+        .order_by(*ordem_da_fila())
+    )
+    if so_priorizados:
+        stmt = stmt.where(MarketingCreative.fila_posicao.isnot(None))
+    linhas = (await session.execute(stmt)).all()
+    if not linhas:
+        return []
+    saiu = {
+        (fid, rid)
+        for fid, rid in (
+            await session.execute(
+                select(MarketingPostagem.file_id, MarketingPostagem.rede_social_id).where(
+                    MarketingPostagem.rede_social_id.in_([c.id for c in contas]),
+                    MarketingPostagem.file_id.in_([f.id for _c, f in linhas]),
+                )
+            )
+        ).all()
+    }
+    itens = []
+    for criativo, arquivo in linhas:
+        pendente = [c for c in contas if (arquivo.id, c.id) not in saiu]
+        if pendente:
+            itens.append(ItemFila(criativo, arquivo, pendente, motivo_do_arquivo(arquivo)))
+    return itens
+
+
+def posicoes_efetivas(itens: list[ItemFila]) -> dict[UUID, int]:
+    """criativo → 1, 2, 3… entre os que furaram a fila E ainda têm onde sair.
+
+    O número gravado em `fila_posicao` é só chave de ordem: o vídeo que furou
+    a fila e já saiu em todas as contas continua com o número dele no banco.
+    Mostrar esse número cru deixava o selo "#1 na fila" num vídeo que saiu
+    semana passada — e o de verdade aparecia como "#2". A tela recebe a
+    posição que o robô de fato vai seguir.
+    """
+    out: dict[UUID, int] = {}
+    for it in itens:
+        if it.criativo.fila_posicao is not None and it.criativo.id not in out:
+            out[it.criativo.id] = len(out) + 1
+    return out
+
+
+# Recusas do `agendar()` que dizem respeito AO VÍDEO, não à conta: outro vídeo
+# pode sair na mesma vaga. `sem_legenda` e `legenda_template_invalido` entram
+# porque a legenda pode vir do próprio criativo (ou do produto dele) — mas
+# também podem ser da marca inteira (biblioteca vazia ou variação quebrada), e
+# aí TODO vídeo seria recusado: por isso o teto de pulos abaixo.
+MOTIVOS_DO_VIDEO = frozenset({
+    "sem_arquivo",
+    "arquivo_sumiu",
+    "sem_legenda",
+    "legenda_template_invalido",
+    "video_ja_usado_em_outra_marca",
+})
+# Quantos vídeos recusados a rodada pula numa conta antes de desistir dela.
+# Sem teto, uma marca sem legenda cadastrada faria a rodada tentar a fila
+# inteira, vídeo por vídeo, a cada passada.
+MAX_PULOS_POR_CONTA = 5
 
 
 async def rodada(session: AsyncSession, *, agora: datetime | None = None) -> dict[str, int]:
@@ -224,12 +393,17 @@ async def rodada(session: AsyncSession, *, agora: datetime | None = None) -> dic
         # pessoa acabou de escolher.
         piso = agora_brt - timedelta(minutes=settings.marketing_postagem_atraso_max_min)
         cabem = len([h for h in livres if h >= piso])
-        for _ in range(max(0, cabem)):
-            achado = await proximo_criativo(session, rede)
+        agendadas_aqui = 0
+        pulados: set[UUID] = set()
+        while agendadas_aqui < cabem:
+            achado = await proximo_criativo(session, rede, excluir=pulados)
             if achado is None:
                 r["sem_criativo"] += 1
                 break
             criativo, arquivo = achado
+            # Guardado antes: a recusa `postagem_em_voo` vem de um rollback,
+            # que expira os objetos da sessão.
+            arquivo_id = arquivo.id
             try:
                 # Sem `agendado_para`: publica no próximo ciclo. O horário da
                 # grade já passou — marcar hora no passado seria pedir pro
@@ -251,11 +425,26 @@ async def rodada(session: AsyncSession, *, agora: datetime | None = None) -> dic
                     origem="robo",
                 )
                 r["agendadas"] += 1
+                agendadas_aqui += 1
             except RoboError as e:
                 # As guardas do humano valendo pro robô: teto, intervalo, vídeo
                 # em voo. Não é erro — é o sistema funcionando.
-                logger.info("autopostagem_recusada", conta=rede.conta, motivo=str(e))
+                logger.info(
+                    "autopostagem_recusada",
+                    conta=rede.conta,
+                    motivo=str(e),
+                    file=str(arquivo_id),
+                )
                 r["recusadas"] += 1
+                # Recusa que é DO VÍDEO (sumiu do disco, sem legenda…) pula só
+                # ele nesta conta e tenta o seguinte. Com `break` aqui, o vídeo
+                # que alguém passou na frente e sumiu do disco travava a conta
+                # pra sempre: `fila_posicao` o devolve primeiro toda rodada, ao
+                # contrário do "mais recente", que um vídeo novo desbanca.
+                # Recusa da CONTA (teto, intervalo, token…) para a conta.
+                if e.code in MOTIVOS_DO_VIDEO and len(pulados) < MAX_PULOS_POR_CONTA:
+                    pulados.add(arquivo_id)
+                    continue
                 break
     if any(r.values()):
         logger.info("autopostagem_rodada", **r)

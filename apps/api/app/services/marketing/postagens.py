@@ -162,6 +162,22 @@ def _espacamento_min(rede: RedeSocial, settings) -> int:
     return settings.marketing_postagem_intervalo_min
 
 
+def motivo_do_arquivo(file: MarketingCreativeFile | None) -> str | None:
+    """O que impede ESTE ARQUIVO de sair em qualquer conta — só olha o disco.
+
+    Separada do resto das guardas porque a tela "Fila do robô" precisa avisar,
+    por vídeo, o que o robô vai pular (o vídeo antigo que alguém passou na
+    frente é justamente o que mais tende a ter sumido do disco).
+    """
+    if file is None or not (file.file_rel or "").strip():
+        return "sem_arquivo"
+    # O vídeo é lido do disco do servidor na hora de publicar; se sumiu (disco
+    # trocado, limpeza), é melhor descobrir agora do que no meio do upload.
+    if not (Path(get_settings().uploads_dir) / file.file_rel).exists():
+        return "arquivo_sumiu"
+    return None
+
+
 def pode_publicar_local(
     creative: MarketingCreative | None,
     file: MarketingCreativeFile | None,
@@ -180,12 +196,9 @@ def pode_publicar_local(
     # — só `True` libera. Postar criativo não aprovado é o erro caro aqui.
     if creative is None or creative.aprovado is not True:
         return "criativo_nao_aprovado"
-    if file is None or not (file.file_rel or "").strip():
-        return "sem_arquivo"
-    # O vídeo é lido do disco do servidor na hora de publicar; se sumiu (disco
-    # trocado, limpeza), é melhor descobrir agora do que no meio do upload.
-    if not (Path(get_settings().uploads_dir) / file.file_rel).exists():
-        return "arquivo_sumiu"
+    motivo = motivo_do_arquivo(file)
+    if motivo:
+        return motivo
     if rede is None or not rede.ativo:
         return "conta_inativa"
     return motivo_da_conta(rede, token, automatico=automatico)

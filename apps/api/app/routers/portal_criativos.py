@@ -695,8 +695,10 @@ async def enviar_arquivo(
 
     # Arquivo novo volta a linha pra "pendente" — mesmo comportamento do
     # caminho interno. A agência precisa ver isso na tela dela, senão parece
-    # que a aprovação foi desfeita sem motivo.
+    # que a aprovação foi desfeita sem motivo. A prioridade na fila do robô
+    # cai junto, igual ao caminho interno.
     row.aprovado = None
+    row.fila_posicao = None
     await session.commit()
     logger.info("portal_upload", creative_id=str(row.id), equipe=equipe, arquivos=entraram)
     # Sem o conjunto de visíveis, `roteiro_id` sai NULL — conservador de
