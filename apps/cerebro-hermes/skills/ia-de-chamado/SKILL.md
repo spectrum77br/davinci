@@ -1,7 +1,7 @@
 ---
 name: ia-de-chamado
 description: IA de Chamado do DaVinci — decide cada chamado pelo manual do Vinicius.
-version: 1.0.0
+version: 1.1.0
 author: DaVinci
 platforms: [macos, linux]
 prerequisites:
@@ -100,12 +100,41 @@ python3 ~/.hermes/scripts/tela.py --chamado-id <chamado_id> --pode-agir --fundo 
   vídeo mandar. A tela também lê o manual (ex.: no chat da Shopee, responder o
   robô curto e só mandar tudo quando ele abrir o caminho).
 - Tarefa de conversar no chat da Shopee pra reabrir a disputa: já ponha na
-  `<tarefa>` o argumento e o link do vídeo pra evidência. Se o atendente reabrir,
-  a tela emenda o "Enviar evidência" na mesma tarefa, pelo manual (25/09).
+  `<tarefa>` o argumento e o link do vídeo. Se o atendente reabrir a disputa e a
+  tela pedir evidência ("Upload Evidence"), a tarefa de tela NÃO anexa (o
+  navegador não pega arquivo do disco): ela avisa, e o envio de evidência (seção
+  abaixo) roda sozinho logo depois (25/09).
 - Se os fatos se contradizem (ex.: o DaVinci diz "caixa voltou vazia" e a tela diz
   "somente reembolso"), confirme na tela antes de argumentar e use o que a tela
   mostra; na dúvida, `humano` explicando a contradição.
 - Quebra-cabeça/captcha, login ou código: pare e `humano`.
+
+## Evidência pedida na tela (Upload Evidence da Shopee)
+
+A 2ª disputa da Shopee (reaberta pelo atendente no chat) pede evidência na tela:
+"Envie evidências até DD-MM-AAAA… Upload Evidence". A API não enxerga isso. No
+chamado aparece como fala da Shopee: "A Shopee pede evidência até …
+Upload Evidence. Sem isso a disputa é retirada." A janela "Enviar Prova" só
+aceita ARQUIVO (até 3 fotos de 10 MB, ou vídeo de 1 min/30 MB): não tem texto e
+não aceita link.
+
+Quando o caso mostrar esse pedido (ou uma pessoa mandar enviar a evidência),
+dispare o envio — vale **sem instrução de pessoa** (Vinicius, 25/09: "quero que
+o agente de IA escolha e suba"):
+
+```bash
+python3 ~/.hermes/scripts/evidencia.py --chamado-id <chamado_id> --de-verdade --fundo
+```
+
+- Ele baixa as fotos do chamado, você (em outra chamada) olha e escolhe até 3, o
+  programa anexa, clica Enviar, confirma a pergunta "Contestar Shopee" e confere
+  que a linha saiu do "Upload Evidence". Grava o resultado e 2 prints no chamado
+  e apaga as fotos do Mac no fim.
+- Logo depois de disparar, registre `esperar` com o resumo "envio de evidência
+  disparado (prazo DD/MM)". Não dispare de novo (há trava por chamado).
+- Se a linha já não pede evidência, ele só anota "nada a enviar". Se não houver
+  foto que prove o caso, ele devolve `humano`.
+- Nunca tente anexar pela tarefa de tela, e nunca mande só o link: não serve.
 
 ## As quatro ações
 

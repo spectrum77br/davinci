@@ -44,6 +44,8 @@ TRAVAS = BASE / "estado"
 LOGS_FUNDO = BASE / "tela_logs"
 TEMP = BASE / "evidencias"
 MAX_FOTO = 9_500_000  # a Shopee aceita até 10 MB por imagem
+# 25/09: assinatura do ChatGPT no Hermes (openai-codex), no lugar da API da Anthropic
+MODELO, PROVEDOR = "gpt-6-sol", "openai-codex"
 
 
 def _rodar(cmd: list[str], timeout: int = 300, **kw) -> subprocess.CompletedProcess:
@@ -121,8 +123,8 @@ def _escolher(caso: dict, candidatos: list[dict], janela: str) -> tuple[list[str
     caminho = os.pathsep.join([os.path.expanduser("~/.local/bin"),
                                os.path.expanduser("~/.hermes/node/bin"),
                                os.environ.get("PATH", "/usr/bin:/bin")])
-    r = _rodar([HERMES, "-z", prompt, "-t", "vision", "-m", "claude-sonnet-5",
-                "--provider", "anthropic", "--reasoning", "xhigh"],
+    r = _rodar([HERMES, "-z", prompt, "-t", "vision", "-m", MODELO,
+                "--provider", PROVEDOR, "--reasoning", "xhigh"],
                timeout=900, env=dict(os.environ, PATH=caminho))
     saida = (r.stdout or r.stderr or "").strip()
     m = re.search(r"ESCOLHA:\s*(.+)", saida)

@@ -10,6 +10,9 @@ caía com "Invalid signature in thinking block". O modo direto não tem isso
 Rodado pelo agendador como job sem agente (`--no-agent`): faz a pré-rodada
 (instrução de pessoa ou envio travado); sem caso → não imprime nada (passada
 silenciosa, custo zero); com caso → chama a IA direto com o manual e os casos.
+
+25/09 (tarde): o modelo passou a ser o gpt-6-sol pela assinatura do ChatGPT do
+Vinicius (provider openai-codex) — o crédito da API da Anthropic estava acabando.
 """
 
 import os
@@ -38,7 +41,7 @@ env = dict(os.environ)
 env["PATH"] = os.pathsep.join([os.path.expanduser("~/.local/bin"),
                                os.path.expanduser("~/.hermes/node/bin"), env.get("PATH", "/usr/bin:/bin")])
 r = subprocess.run([os.path.expanduser("~/.local/bin/hermes"), "-z", PROMPT + "\n\n" + saida,
-                    "-s", "ia-de-chamado", "-t", "terminal,file", "-m", "claude-sonnet-5",
-                    "--provider", "anthropic", "--reasoning", "xhigh"],
+                    "-s", "ia-de-chamado", "-t", "terminal,file", "-m", "gpt-6-sol",
+                    "--provider", "openai-codex", "--reasoning", "xhigh"],
                    capture_output=True, text=True, env=env, timeout=3000)
 print((r.stdout or r.stderr or "").strip()[-3000:])

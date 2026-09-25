@@ -12,6 +12,10 @@ isso — `--fundo` dispara a tarefa desacoplada e volta na hora; no fim a própr
 tarefa grava a análise no chamado (ACAO/RESUMO que a IA da tela devolve). Trava
 por chamado: nunca duas tarefas de tela no mesmo chamado.
 
+25/09 (tarde): a tela não anexa arquivo. Se ela avisar "EVIDENCIA: sim", no fim
+dispara o evidencia.py (a IA escolhe as fotos e o programa envia) — a trava do
+chamado já foi solta.
+
   tela.py --chamado-id UUID --tarefa "…" [--pode-agir] [--fundo]
   tela.py --pedido 296012 --tarefa "…"
 """
@@ -34,6 +38,9 @@ BASE = Path("~/DaVinci/cerebro").expanduser()
 LOG = BASE / "tela.jsonl"
 TRAVAS = BASE / "estado"
 LOGS_FUNDO = BASE / "tela_logs"
+# 25/09: sai a API da Anthropic (crédito acabando), entra a assinatura do ChatGPT
+# do Vinicius no Hermes (provider openai-codex, login por código de dispositivo).
+MODELO, PROVEDOR = "gpt-6-sol", "openai-codex"
 
 LEITURA = (
     "MODO SÓ LEITURA: NÃO envie mensagem, NÃO clique em botões que enviam, confirmam, "
@@ -44,9 +51,12 @@ AGIR = (
     "Antes de enviar, confira que está na loja, no pedido e na conversa certos. "
     # 25/09 (296012): o Kaue reabriu a disputa no chat e a tela parou ("anexar não
     # fazia parte desta tarefa") — o Vinicius quer que ela emende sozinha.
-    "Se a própria conversa abrir o próximo passo DESTE chamado (ex.: o atendente reabriu "
-    "a disputa e pede evidência — a tela mostra '2ª', 'Upload Evidence' ou 'Enviar "
-    "evidência'), NÃO pare: siga o manual e faça esse passo na mesma tarefa."
+    "Se a própria conversa abrir o próximo passo DESTE chamado, NÃO pare: siga o manual "
+    "e faça esse passo na mesma tarefa. EXCEÇÃO — evidência em arquivo: se a tela pedir "
+    "evidência ('2ª Disputa', 'Upload Evidence', 'Enviar evidência' com prazo), NÃO tente "
+    "anexar (este navegador não pega arquivo do disco e a janela não aceita texto nem "
+    "link): termine a tarefa e ponha a linha 'EVIDENCIA: sim' antes do ACAO — o envio "
+    "das fotos roda sozinho logo depois."
 )
 SEMPRE = (
     "Vá DIRETO ao que a tarefa pede. NÃO abra páginas só para reler histórico, pedido ou "
@@ -142,6 +152,7 @@ def main() -> None:
         return
 
     trava.write_text(str(os.getpid()))
+    encadear_evidencia = False
     try:
         achado = _json(
             [PY, str(AQUI / "adspower.py"), "achar", "--conta", caso.get("conta") or "",
@@ -185,8 +196,8 @@ def main() -> None:
         env = dict(os.environ, BROWSER_CDP_URL=aberto["cdp"], PATH=caminho)
         try:
             r = subprocess.run(
-                [HERMES, "-z", prompt, "-t", "browser", "-m", "claude-sonnet-5",
-                 "--provider", "anthropic", "--reasoning", "xhigh"],
+                [HERMES, "-z", prompt, "-t", "browser", "-m", MODELO,
+                 "--provider", PROVEDOR, "--reasoning", "xhigh"],
                 capture_output=True, text=True, env=env, timeout=1800,
             )
             saida = (r.stdout or "").strip() or (r.stderr or "").strip()
@@ -196,6 +207,8 @@ def main() -> None:
             subprocess.run([PY, str(AQUI / "adspower.py"), "fechar", perfil["id"]],
                            capture_output=True, timeout=120)
         registro = "" if a.nao_registrar else _registrar(caso, perfil, saida)
+        encadear_evidencia = a.pode_agir and not a.nao_registrar and bool(
+            re.search(r"EVIDENCIA:\s*sim", saida, re.I))
         with LOG.open("a") as f:
             f.write(json.dumps({"quando": time.strftime("%Y-%m-%d %H:%M:%S"),
                                 "pedido": caso.get("pedido_bling"), "perfil": perfil,
@@ -207,6 +220,11 @@ def main() -> None:
             trava.unlink()
         except OSError:
             pass
+    if encadear_evidencia:
+        # a tela viu o "Upload Evidence" e não anexa: a IA escolhe as fotos e o
+        # evidencia.py envia (roda sozinho e grava no chamado)
+        subprocess.run([PY, str(AQUI / "evidencia.py"), "--chamado-id", caso["chamado_id"],
+                        "--de-verdade", "--fundo"], capture_output=True, text=True, timeout=120)
 
 
 if __name__ == "__main__":

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Pré-rodada da passada "simples" da IA de Chamado (o agendador do Hermes não passa
-argumento ao script). forte = instrução de pessoa ou envio travado → Opus 5.5
-no esforço extra; simples = a plataforma respondeu → Sonnet 5. Vinicius, 24/09."""
+argumento ao script). forte = instrução de pessoa ou envio travado; simples = a
+plataforma respondeu. Vinicius, 24/09. Modelos desde 25/09 (assinatura do ChatGPT,
+openai-codex): forte gpt-6-sol, simples gpt-6-luna — fixados no job do agendador."""
 
 import runpy
 import sys

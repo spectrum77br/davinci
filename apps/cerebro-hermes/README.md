@@ -23,12 +23,23 @@ DaVinci (nuvem)                                   Hermes (Mac Santiago)
 | `~/.hermes/scripts/davinci_chamados.py` | cópia de `scripts/davinci_chamados.py` — a única coisa que fala com o DaVinci; sem argumento = pré-rodada do agendador |
 | `~/.hermes/scripts/adspower.py` | cópia de `scripts/adspower.py` — acha o perfil do AdsPower da loja ("Loja - Plataforma"), abre e fecha pela Local API |
 | `~/.hermes/scripts/tela.py` | cópia de `scripts/tela.py` — a IA NA TELA: chamado → perfil → abre → `hermes -z -t browser` com `BROWSER_CDP_URL` do perfil → fecha. Padrão só leitura; `--pode-agir` libera |
+| `~/.hermes/scripts/evidencia.py` + `shopee_evidencia.mjs` | cópias de `scripts/` — o "Upload Evidence" da Shopee (2ª disputa): baixa as fotos do chamado, a IA escolhe até 3 (visão), o `.mjs` (puppeteer do `~/DaVinci/executor-leitura-chamado`) anexa, clica Enviar, confirma "Contestar Shopee" e confere a linha; grava análise + 2 prints e apaga as fotos (25/09) |
 | `~/.hermes/skills/ia-de-chamado/SKILL.md` | cópia de `skills/ia-de-chamado/SKILL.md` — as instruções fixas (o manual do Vinicius vem do DaVinci a cada passada) |
 | `~/DaVinci/cerebro/.env` (chmod 600) | `DAVINCI_CEREBRO_TOKEN` e os filtros (`DAVINCI_CEREBRO_PLATAFORMA`, `_CANAIS`, `_LIMITE`) |
 | `~/DaVinci/cerebro/decisoes.jsonl` | toda decisão, com a resposta do DaVinci |
 | launchd `ai.hermes.gateway` | o agendador do Hermes (volta sozinho) |
-| cron `ia-de-chamado-forte` (`ia_chamado_forte.py`) | a cada 1 min, **Sonnet 5 esforço extra** (25/09, antes Opus 5.5 — custo): instrução de pessoa (inclui a correção do ✗) e envio travado |
-| cron `ia-de-chamado-simples` (`ia_chamado_simples.py`) | a cada 1 min, **Sonnet 5 esforço extra** (25/09): a plataforma respondeu, sem instrução (metade do preço) |
+| cron `ia-de-chamado-forte` (`ia_chamado_forte_direto.py`, sem agente) | a cada 1 min, **gpt-6-sol** esforço extra: instrução de pessoa (inclui a correção do ✗) e envio travado |
+| cron `ia-de-chamado-simples` (`ia_chamado_simples.py`) | a cada 1 min, **gpt-6-luna** esforço extra: a plataforma respondeu, sem instrução |
+
+**Modelo (25/09, tarde):** saiu a API da Anthropic (crédito acabando) e entrou a
+**assinatura do ChatGPT** do Vinicius — provider `openai-codex` do Hermes, login por
+código de dispositivo (`hermes auth add openai-codex --no-browser`; a conta precisa
+de "Ativar login com código de dispositivo para Codex…" em ChatGPT › Configurações ›
+Segurança e login). Sem custo por uso, mas com limite de uso do plano (Plus).
+`config.yaml`: `model.default: gpt-6-sol`, `provider: openai-codex` e **sem**
+`base_url` (o da Anthropic sobrando dava 404 em tudo). `tela.py`, `evidencia.py` e
+`ia_chamado_forte_direto.py` fixam `gpt-6-sol`; os jobs do cron, `hermes cron edit
+<id> --model … --provider openai-codex`. Backups `*.bak-20260925-chatgpt`.
 
 A IA nunca vê o token: o script lê o `.env` sozinho. O token é da IA (tabela
 `chamados_cerebros`, migração 0319 — só o sha256 no banco) e só abre as rotas do
@@ -38,7 +49,8 @@ antigo.
 ## Atualizar
 
 ```bash
-scp apps/cerebro-hermes/scripts/davinci_chamados.py mac-robo:.hermes/scripts/
+scp apps/cerebro-hermes/scripts/{davinci_chamados,tela,evidencia,adspower}.py \
+    apps/cerebro-hermes/scripts/shopee_evidencia.mjs mac-robo:.hermes/scripts/
 scp apps/cerebro-hermes/skills/ia-de-chamado/SKILL.md mac-robo:.hermes/skills/ia-de-chamado/
 ```
 
