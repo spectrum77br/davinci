@@ -1,7 +1,17 @@
 from datetime import datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import BigInteger, DateTime, Enum, ForeignKey, String, Text, UniqueConstraint, text
+from sqlalchemy import (
+    BigInteger,
+    DateTime,
+    Enum,
+    ForeignKey,
+    Index,
+    String,
+    Text,
+    UniqueConstraint,
+    text,
+)
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -27,6 +37,16 @@ def _enum(py_enum, name: str):
 
 class Company(Base, TimestampMixin):
     __tablename__ = "companies"
+    # Espelho do índice da migration 0324: um IP por empresa. Fica também no
+    # modelo para o banco de teste (create_all) ter a mesma trava que produção.
+    __table_args__ = (
+        Index(
+            "uq_companies_ip",
+            text("lower(btrim(ip))"),
+            unique=True,
+            postgresql_where=text("ip IS NOT NULL AND btrim(ip) <> ''"),
+        ),
+    )
 
     id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
     razao_social: Mapped[str] = mapped_column(Text, nullable=False)
@@ -46,6 +66,10 @@ class Company(Base, TimestampMixin):
     site_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     operacao: Mapped[str | None] = mapped_column(Text, nullable=True)
     contabilidade: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # IP de saída da empresa nos marketplaces. Único entre empresas (índice
+    # `uq_companies_ip`, migration 0324): dois CNPJs no mesmo IP é o que o
+    # marketplace usa para ligar contas.
+    ip: Mapped[str | None] = mapped_column(Text, nullable=True)
     obs: Mapped[str | None] = mapped_column(Text, nullable=True)
     enabled_marketplaces: Mapped[list[str]] = mapped_column(
         ARRAY(Text),

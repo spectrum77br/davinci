@@ -1,11 +1,12 @@
-from datetime import datetime
+import ipaddress
+import re
+from datetime import date, datetime
 from typing import Any
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, model_validator
 from stdnum.br import cnpj as br_cnpj
 from stdnum.exceptions import ValidationError as StdValidationError
-
 
 # 27 BR states + DF. Anything else in `uf` is treated as a foreign-
 # company marker — skips the strict CNPJ checksum so the operator can
@@ -44,6 +45,59 @@ def _normalize_cnpj(v: Any, *, strict: bool) -> str | None:
     return digits[:14]
 
 
+# Um IPv4 no começo do texto: "72.60.155.3", "72.60.155.3:1080" ou a linha
+# inteira do proxy como o AdsPower exporta, "72.60.155.3:1080:usuario:senha".
+_IPV4_NA_FRENTE = re.compile(r"^(\d{1,3}(?:\.\d{1,3}){3})(?::|$)")
+_ESQUEMA = re.compile(r"^[a-z][a-z0-9+.-]*://", re.IGNORECASE)
+
+
+def _normalize_ip(v: Any) -> str | None:
+    """IP público de saída da empresa, na forma canônica, ou None.
+
+    Aceita o jeito como o IP costuma ser colado e fica só com o endereço:
+      72.60.155.3:1080                  (com a porta)
+      72.60.155.3:1080:usuario:senha    (a linha inteira do proxy)
+      socks5://usuario:senha@72.60.155.3:1080
+      [2606:4700::1111]:1080            (IPv6 entre colchetes)
+    A unicidade é sobre o IP: para o marketplace, porta e usuário não mudam
+    quem é a máquina.
+
+    Levanta ValueError só com um CÓDIGO ("ip_invalido", "ip_nao_publico"),
+    nunca com o texto digitado: ele pode ser a linha do proxy, com a senha.
+    Por isso quem chama NÃO deve deixar o erro subir como validação do
+    formulário — o 422 do FastAPI devolveria o texto inteiro na resposta.
+    """
+    if v is None:
+        return None
+    s = str(v).strip()
+    if not s:
+        return None
+    s = _ESQUEMA.sub("", s)
+    if "@" in s:
+        s = s.rsplit("@", 1)[1]
+    if s.startswith("["):
+        fim = s.find("]")
+        if fim < 0:
+            raise ValueError("ip_invalido")
+        s = s[1:fim]
+    elif (m := _IPV4_NA_FRENTE.match(s)) is not None:
+        s = m.group(1)
+    try:
+        ip = ipaddress.ip_address(s)
+    except ValueError:
+        raise ValueError("ip_invalido") from None
+    # "::ffff:72.60.155.3" é o mesmo IPv4 escrito como IPv6: sem isto ele
+    # passaria como "outro IP" e furaria a regra de um por empresa.
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    # IP de rede interna (192.168.x, 10.x, 127.0.0.1...) não é o que o
+    # marketplace enxerga: dez empresas com IPs internos diferentes podem sair
+    # todas pelo mesmo IP público, e a trava daria uma falsa garantia.
+    if not ip.is_global:
+        raise ValueError("ip_nao_publico")
+    return str(ip)
+
+
 def _normalize_company_payload(data: Any) -> Any:
     """Cross-field normalisation: validates uf first, then applies the
     appropriate cnpj rule based on whether uf is a BR state. Runs in
@@ -80,6 +134,7 @@ class CompanyBase(BaseModel):
     site_url: str | None = None
     operacao: str | None = None
     contabilidade: str | None = None
+    ip: str | None = None
     obs: str | None = None
 
     @model_validator(mode="before")
@@ -103,6 +158,7 @@ class CompanyPatch(BaseModel):
     site_url: str | None = None
     operacao: str | None = None
     contabilidade: str | None = None
+    ip: str | None = None
     obs: str | None = None
     enabled_marketplaces: list[str] | None = None
 
@@ -171,9 +227,26 @@ class GridStoreCell(BaseModel):
     from_store_info: bool = False
 
 
+class CertificadoResumo(BaseModel):
+    """O que a tabela de Empresas mostra do certificado digital.
+
+    Nunca o arquivo nem a senha — só se existe, se tem senha guardada e quando
+    vence. Arquivo e senha continuam atrás das rotas de admin de
+    `routers/company_certificates.py`.
+    """
+
+    id: UUID
+    filename: str
+    has_password: bool
+    expires_at: date | None = None
+    total: int = 1
+
+
 class CompanyGridRow(BaseModel):
     company: CompanyOut
     stores: dict[str, GridStoreCell | None]
+    # Só vem preenchido para admin; para os demais fica None e a coluna some.
+    certificado: CertificadoResumo | None = None
 
 
 class CompanyGridOut(BaseModel):

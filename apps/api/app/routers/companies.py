@@ -3,14 +3,16 @@ from uuid import UUID
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
 from app.deps.auth import require_permission
-from app.models import MARKETPLACES, Company, Store, StoreInfo, User
+from app.models import MARKETPLACES, Company, CompanyCertificate, Store, StoreInfo, User
+from app.models.enums import UserRole
 from app.schemas.companies import (
+    CertificadoResumo,
     CompanyCreate,
     CompanyDetailOut,
     CompanyGridOut,
@@ -19,6 +21,7 @@ from app.schemas.companies import (
     CompanyPatch,
     GridStoreCell,
     StoreOut,
+    _normalize_ip,
 )
 
 logger = structlog.get_logger()
@@ -37,6 +40,47 @@ def _norm_conta(s: str | None) -> str:
     casamento que pinta o X verde no grid.
     """
     return "".join((s or "").split()).lower()
+
+
+async def _garante_ip_livre(session: AsyncSession, ip: str | None, *, exceto: UUID | None) -> None:
+    """Recusa um IP que já é de outra empresa, dizendo DE QUAL.
+
+    Um IP por empresa (Eduardo, 25/09/2026): o marketplace liga contas que
+    aparecem pelo mesmo IP. O índice `uq_companies_ip` é quem garante de
+    verdade; esta checagem existe só para a mensagem vir com o nome da empresa
+    em vez de um erro de banco.
+    """
+    if not ip:
+        return
+    q = select(Company.apelido).where(func.lower(func.btrim(Company.ip)) == ip.strip().lower())
+    if exceto is not None:
+        q = q.where(Company.id != exceto)
+    dono = (await session.execute(q)).scalars().first()
+    if dono is not None:
+        raise HTTPException(409, detail={"code": "ip_exists", "empresa": dono})
+
+
+def _ip_ou_422(bruto: str | None) -> str | None:
+    """Normaliza o IP ou responde 422 SÓ com o código do erro.
+
+    O IP não é validado no formulário de propósito: o 422 padrão do FastAPI
+    devolve o texto digitado, e colar a linha do proxy do AdsPower
+    ("ip:porta:usuario:senha") mandaria a senha do proxy de volta na resposta.
+    """
+    try:
+        return _normalize_ip(bruto)
+    except ValueError as e:
+        raise HTTPException(422, detail={"code": str(e)}) from None
+
+
+def _conflito_de_unicidade(e: IntegrityError) -> HTTPException | None:
+    msg = str(e.orig)
+    if "uq_companies_cnpj" in msg:
+        return HTTPException(409, detail={"code": "cnpj_exists"})
+    if "uq_companies_ip" in msg:
+        # Duas gravações ao mesmo tempo passaram pela checagem: o índice barrou.
+        return HTTPException(409, detail={"code": "ip_exists"})
+    return None
 
 
 @router.get("/grid", response_model=CompanyGridOut)
@@ -70,6 +114,32 @@ async def companies_grid(
             _norm_conta(name)
         )
 
+    # Certificado digital: só admin vê (mesma regra das rotas de certificado).
+    # Seleciona colunas uma a uma para NUNCA trazer o arquivo nem a senha
+    # cifrados para a memória só para desenhar a tabela.
+    certificados: dict[UUID, CertificadoResumo] = {}
+    if _u.role == UserRole.ADMIN:
+        cert_rows = (
+            await session.execute(
+                select(
+                    CompanyCertificate.id,
+                    CompanyCertificate.company_id,
+                    CompanyCertificate.filename,
+                    CompanyCertificate.password_enc.is_not(None),
+                    CompanyCertificate.expires_at,
+                ).order_by(CompanyCertificate.created_at.desc())
+            )
+        ).all()
+        for cid, company_id, filename, tem_senha, vence in cert_rows:
+            atual = certificados.get(company_id)
+            if atual is None:
+                # O mais recente representa a empresa; os outros só contam.
+                certificados[company_id] = CertificadoResumo(
+                    id=cid, filename=filename, has_password=bool(tem_senha), expires_at=vence
+                )
+            else:
+                atual.total += 1
+
     rows: list[CompanyGridRow] = []
     for c in companies:
         cells: dict[str, GridStoreCell | None] = {}
@@ -96,7 +166,13 @@ async def companies_grid(
                 )
             else:
                 cells[mk] = None
-        rows.append(CompanyGridRow(company=CompanyOut.model_validate(c), stores=cells))
+        rows.append(
+            CompanyGridRow(
+                company=CompanyOut.model_validate(c),
+                stores=cells,
+                certificado=certificados.get(c.id),
+            )
+        )
     return CompanyGridOut(marketplaces=list(MARKETPLACES), rows=rows)
 
 
@@ -130,14 +206,16 @@ async def create_company(
     session: Annotated[AsyncSession, Depends(get_session)],
     _u: Annotated[User, Depends(require_permission("empresa", "edit"))],
 ) -> CompanyOut:
-    c = Company(**body.model_dump())
+    ip = _ip_ou_422(body.ip)
+    await _garante_ip_livre(session, ip, exceto=None)
+    c = Company(**{**body.model_dump(), "ip": ip})
     session.add(c)
     try:
         await session.commit()
     except IntegrityError as e:
         await session.rollback()
-        if "uq_companies_cnpj" in str(e.orig):
-            raise HTTPException(409, detail={"code": "cnpj_exists"}) from e
+        if (erro := _conflito_de_unicidade(e)) is not None:
+            raise erro from e
         raise
     await session.refresh(c)
     return CompanyOut.model_validate(c)
@@ -154,14 +232,17 @@ async def patch_company(
     if c is None:
         raise HTTPException(404, detail={"code": "company_not_found"})
     data = body.model_dump(exclude_unset=True)
+    if "ip" in data:
+        data["ip"] = _ip_ou_422(data["ip"])
+        await _garante_ip_livre(session, data["ip"], exceto=c.id)
     for k, v in data.items():
         setattr(c, k, v)
     try:
         await session.commit()
     except IntegrityError as e:
         await session.rollback()
-        if "uq_companies_cnpj" in str(e.orig):
-            raise HTTPException(409, detail={"code": "cnpj_exists"}) from e
+        if (erro := _conflito_de_unicidade(e)) is not None:
+            raise erro from e
         raise
     await session.refresh(c)
     return CompanyOut.model_validate(c)

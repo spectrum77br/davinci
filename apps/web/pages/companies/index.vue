@@ -34,13 +34,28 @@ type CompanyOut = {
   site_url: string | null
   operacao: string | null
   contabilidade: string | null
+  ip: string | null
   obs: string | null
   enabled_marketplaces: string[]
   created_at: string
   updated_at: string
 }
 
-type GridRow = { company: CompanyOut; stores: Record<string, GridStoreCell | null> }
+// Resumo do certificado digital que a tabela recebe — só vem para admin, e
+// nunca traz o arquivo nem a senha (esses ficam nas rotas de certificado).
+type CertificadoResumo = {
+  id: string
+  filename: string
+  has_password: boolean
+  expires_at: string | null
+  total: number
+}
+
+type GridRow = {
+  company: CompanyOut
+  stores: Record<string, GridStoreCell | null>
+  certificado?: CertificadoResumo | null
+}
 type GridOut = { marketplaces: string[]; rows: GridRow[] }
 
 type StoreInfoLite = {
@@ -70,6 +85,8 @@ const showNew = ref(false)
 
 const canEdit = useCan('empresa', 'edit')
 const canDelete = useCan('empresa', 'delete')
+// Certificado digital é só de admin (mesma regra das rotas de certificado).
+const isAdmin = useIsAdmin()
 
 // Compara nomes de conta ignorando espaços e maiúsculas ("dream 2" == "dream2")
 // — mesmo normalizador do backend (companies.py/_norm_conta).
@@ -142,20 +159,22 @@ const filteredRows = computed(() => {
       // isso a busca devolvia zero e parecia defeito.
       const contab = (r.company.contabilidade || '').toLowerCase()
       const oper = (r.company.operacao || '').toLowerCase()
+      const ip = (r.company.ip || '').toLowerCase()
       return (
         r.company.razao_social.toLowerCase().includes(q) ||
         r.company.apelido.toLowerCase().includes(q) ||
         (r.company.cnpj || '').includes(q) ||
         resp.includes(q) ||
         contab.includes(q) ||
-        oper.includes(q)
+        oper.includes(q) ||
+        ip.includes(q)
       )
     })
   }
   return rows
 })
 
-const draft = ref({ razao_social: '', apelido: '', cnpj: '', uf: '', inscricao_estadual: '', site_url: '', operacao: '', contabilidade: '', obs: '' })
+const draft = ref({ razao_social: '', apelido: '', cnpj: '', uf: '', inscricao_estadual: '', site_url: '', operacao: '', contabilidade: '', ip: '', obs: '' })
 const creating = ref(false)
 const createErr = ref<string | null>(null)
 
@@ -170,14 +189,19 @@ async function createCompany() {
     for (const k of ['cnpj', 'uf', 'inscricao_estadual', 'site_url', 'operacao', 'contabilidade', 'obs'] as const) {
       if (draft.value[k]) body[k] = draft.value[k]
     }
+    if (draft.value.ip.trim()) body.ip = soOIp(draft.value.ip)
     await api('/api/companies', { method: 'POST', body })
     showNew.value = false
-    draft.value = { razao_social: '', apelido: '', cnpj: '', uf: '', inscricao_estadual: '', site_url: '', operacao: '', contabilidade: '', obs: '' }
+    draft.value = { razao_social: '', apelido: '', cnpj: '', uf: '', inscricao_estadual: '', site_url: '', operacao: '', contabilidade: '', ip: '', obs: '' }
     await refresh()
   } catch (e: any) {
     // Two shapes: our HTTPException ({code: ...}) and Pydantic 422
     // (list of {loc, msg}). Surface the latter as "campo: motivo".
     const det = e?.data?.detail
+    if (typeof det?.code === 'string' && det.code.startsWith('ip_')) {
+      createErr.value = mensagemDeErro(e)
+      return
+    }
     if (Array.isArray(det)) {
       createErr.value = det.map((x: any) => {
         const field = Array.isArray(x?.loc) ? x.loc[x.loc.length - 1] : '?'
@@ -233,7 +257,7 @@ async function commitEditResp(row: GridRow) {
 }
 
 // ---------- generic inline edit for company text fields ----------
-type EditableField = 'razao_social' | 'apelido' | 'uf' | 'cnpj' | 'inscricao_estadual' | 'site_url' | 'operacao' | 'contabilidade'
+type EditableField = 'razao_social' | 'apelido' | 'uf' | 'cnpj' | 'inscricao_estadual' | 'site_url' | 'operacao' | 'contabilidade' | 'ip'
 
 const editingCell = ref<{ id: string; field: EditableField } | null>(null)
 const editCellValue = ref('')
@@ -253,7 +277,7 @@ function isEditingCell(row: GridRow, field: EditableField) {
 }
 async function commitEditCell(row: GridRow, field: EditableField) {
   if (!isEditingCell(row, field)) return
-  const next = editCellValue.value.trim()
+  const next = field === 'ip' ? soOIp(editCellValue.value) : editCellValue.value.trim()
   const prev = (row.company[field] || '') as string
   if (next === prev.trim()) return cancelEditCell()
   // razao_social and apelido are non-null on the server; refuse to blank them.
@@ -268,12 +292,173 @@ async function commitEditCell(row: GridRow, field: EditableField) {
       body: { [field]: next || null },
     })
     row.company[field] = updated[field] as any
+    // Deu certo: a faixa de erro de uma tentativa anterior (ex.: IP repetido)
+    // não pode continuar na tela dizendo que falhou.
+    error.value = null
   } catch (e: any) {
-    error.value = e?.data?.detail?.code || e?.message || 'erro'
+    error.value = mensagemDeErro(e)
   } finally {
     editCellSaving.value = false
     cancelEditCell()
   }
+}
+
+// Traduz os erros que a pessoa consegue resolver sozinha. O resto segue como
+// o código cru, como já era.
+function mensagemDeErro(e: any, padrao = 'erro'): string {
+  const d = e?.data?.detail
+  if (d?.code === 'ip_exists') {
+    return d.empresa
+      ? `Esse IP já é da empresa ${d.empresa}. Cada empresa precisa de um IP só dela.`
+      : 'Esse IP já é de outra empresa. Cada empresa precisa de um IP só dela.'
+  }
+  if (d?.code === 'ip_invalido') {
+    return 'IP inválido. Use o formato 72.60.155.3 — pode colar a linha do proxy, fica só o IP.'
+  }
+  if (d?.code === 'ip_nao_publico') {
+    return 'Esse é um IP de rede interna. Coloque o IP público de saída do proxy.'
+  }
+  return d?.code || e?.message || padrao
+}
+
+// Fica só com o IP do que foi colado, ANTES de mandar para o servidor: a linha
+// do proxy do AdsPower vem como "ip:porta:usuario:senha", e a senha do proxy
+// não tem por que sair do navegador. O servidor repete a mesma limpeza.
+function soOIp(texto: string): string {
+  let s = (texto || '').trim()
+  s = s.replace(/^[a-z][a-z0-9+.-]*:\/\//i, '') // socks5://
+  if (s.includes('@')) s = s.slice(s.lastIndexOf('@') + 1) // usuario:senha@
+  if (s.startsWith('[')) {
+    const fim = s.indexOf(']')
+    return fim > 0 ? s.slice(1, fim) : s // [IPv6]:porta
+  }
+  const m = s.match(/^(\d{1,3}(?:\.\d{1,3}){3})(?::|$)/)
+  return m ? m[1] : s // ip, ip:porta, ip:porta:usuario:senha
+}
+
+// ---------- IP (um por empresa) ----------
+// O banco já recusa IP repetido; isto só pinta de vermelho se algum dado antigo
+// escapou, para não passar despercebido.
+const ipsRepetidos = computed(() => {
+  const vezes = new Map<string, number>()
+  for (const r of grid.value?.rows || []) {
+    const ip = (r.company.ip || '').trim().toLowerCase()
+    if (ip) vezes.set(ip, (vezes.get(ip) || 0) + 1)
+  }
+  return new Set([...vezes].filter(([, n]) => n > 1).map(([ip]) => ip))
+})
+function ipRepetido(row: GridRow) {
+  const ip = (row.company.ip || '').trim().toLowerCase()
+  return !!ip && ipsRepetidos.value.has(ip)
+}
+
+// ---------- certificado digital ----------
+// Clicar na célula abre um painel pequeno para pôr a senha (e o arquivo, se a
+// empresa ainda não tem). A senha guardada só aparece se a pessoa pedir.
+const certAberto = ref<string | null>(null)
+const certSenha = ref('')
+const certMostrarDigitada = ref(false)
+const certArquivo = ref<File | null>(null)
+// Vencimento de um arquivo novo: sem ele o selo "vence MM/AAAA" some justo no
+// certificado renovado, que é o que vai vencer da próxima vez.
+const certVence = ref('')
+const certSenhaGuardada = ref<string | null>(null)
+const certSalvando = ref(false)
+const certErro = ref<string | null>(null)
+
+function limparPainelCertificado() {
+  certSenha.value = ''
+  certMostrarDigitada.value = false
+  certArquivo.value = null
+  certVence.value = ''
+  certSenhaGuardada.value = null
+  certErro.value = null
+}
+function alternarCertificado(row: GridRow) {
+  const abrindo = certAberto.value !== row.company.id
+  limparPainelCertificado()
+  certAberto.value = abrindo ? row.company.id : null
+}
+function fecharCertificado() {
+  limparPainelCertificado()
+  certAberto.value = null
+}
+function escolherArquivoCertificado(ev: Event) {
+  const f = (ev.target as HTMLInputElement)?.files?.[0] || null
+  certErro.value = null
+  if (f && !/\.(p12|pfx)$/i.test(f.name)) {
+    certErro.value = 'O arquivo do certificado precisa ser .pfx ou .p12.'
+    certArquivo.value = null
+    return
+  }
+  certArquivo.value = f
+}
+async function mostrarSenhaGuardada(row: GridRow) {
+  const cert = row.certificado
+  if (!cert) return
+  const empresa = row.company.id
+  certErro.value = null
+  try {
+    const r = await api<{ password: string | null }>(
+      `/api/companies/${empresa}/certificates/${cert.id}/password`,
+    )
+    // Se nesse meio tempo a pessoa abriu o painel de OUTRA empresa, a senha
+    // desta não pode aparecer lá.
+    if (certAberto.value !== empresa) return
+    certSenhaGuardada.value = r.password || '(nenhuma senha guardada)'
+  } catch (e: any) {
+    if (certAberto.value === empresa) certErro.value = mensagemDeErro(e, 'não foi possível mostrar a senha')
+  }
+}
+async function salvarCertificado(row: GridRow) {
+  // Enter apertado duas vezes (ou durante o envio) não pode subir o mesmo
+  // certificado duas vezes.
+  if (certSalvando.value) return
+  const cert = row.certificado
+  const empresa = row.company.id
+  const senha = certSenha.value
+  // A API tira os espaços das pontas: uma "senha" só de espaços chegaria vazia
+  // e APAGARIA a senha guardada. Por isso a conta aqui é sobre o texto limpo.
+  const temSenha = senha.trim() !== ''
+  certErro.value = null
+  if (!cert && !certArquivo.value) {
+    certErro.value = 'Esta empresa ainda não tem certificado. Escolha o arquivo .pfx ou .p12.'
+    return
+  }
+  if (cert && !certArquivo.value && !temSenha) {
+    certErro.value = 'Digite a senha do certificado.'
+    return
+  }
+  certSalvando.value = true
+  try {
+    if (certArquivo.value) {
+      // Arquivo novo (primeiro certificado ou renovação): sobe junto com a senha.
+      const fd = new FormData()
+      fd.append('file', certArquivo.value)
+      if (temSenha) fd.append('password', senha)
+      if (certVence.value) fd.append('expires_at', certVence.value)
+      await api(`/api/companies/${empresa}/certificates`, { method: 'POST', body: fd })
+    } else if (cert) {
+      // Só a senha, e nunca vazia: vazio apagaria a senha guardada.
+      await api(`/api/companies/${empresa}/certificates/${cert.id}`, {
+        method: 'PATCH',
+        body: { password: senha },
+      })
+    }
+    if (certAberto.value === empresa) fecharCertificado()
+    await refresh()
+  } catch (e: any) {
+    if (certAberto.value === empresa) certErro.value = mensagemDeErro(e, 'erro ao salvar o certificado')
+  } finally {
+    certSalvando.value = false
+  }
+}
+// Situação para o selo da célula: vencido, vencendo em 30 dias, ou ok.
+function vencimentoCertificado(cert: CertificadoResumo | null | undefined) {
+  if (!cert?.expires_at) return null
+  const dias = Math.floor((new Date(cert.expires_at + 'T00:00:00').getTime() - Date.now()) / 86_400_000)
+  const [ano, mes] = cert.expires_at.split('-')
+  return { texto: `${mes}/${ano}`, vencido: dias < 0, vencendo: dias >= 0 && dias <= 30 }
 }
 
 // ---------- inline obs edit ----------
@@ -552,6 +737,8 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
             <th class="px-3 py-2">Responsável</th>
             <th class="px-3 py-2">operação</th>
             <th class="px-3 py-2">contabilidade</th>
+            <th class="px-3 py-2" title="IP de saída da empresa nos marketplaces — cada empresa tem o seu, sem repetir">IP</th>
+            <th v-if="isAdmin" class="px-3 py-2 whitespace-nowrap">certificado digital</th>
             <th v-for="mk in MARKETPLACES" :key="mk" class="px-2 py-2 text-center">
               {{ MARKETPLACE_SHORT[mk] }}
             </th>
@@ -743,6 +930,154 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
                 {{ row.company.contabilidade || '—' }}
               </span>
             </td>
+            <td
+              class="px-3 py-2 text-xs font-mono whitespace-nowrap"
+              :class="{ 'cursor-pointer hover:bg-accent/30': canEdit && !isEditingCell(row, 'ip') }"
+              :title="ipRepetido(row) ? 'Esse IP aparece em mais de uma empresa' : (row.company.ip || 'sem IP')"
+              @click="canEdit && !isEditingCell(row, 'ip') && startEditCell(row, 'ip')"
+            >
+              <input
+                v-if="isEditingCell(row, 'ip')"
+                v-model="editCellValue"
+                type="text"
+                autocapitalize="off"
+                spellcheck="false"
+                placeholder="72.60.155.3"
+                class="w-32 text-xs font-mono bg-transparent outline-none border-b border-blue-500"
+                :disabled="editCellSaving"
+                autofocus
+                @blur="commitEditCell(row, 'ip')"
+                @keydown.enter.prevent="commitEditCell(row, 'ip')"
+                @keydown.escape.prevent="cancelEditCell"
+              />
+              <span
+                v-else
+                :class="ipRepetido(row) ? 'text-red-600 font-semibold' : !row.company.ip ? 'text-muted-foreground' : ''"
+              >
+                {{ row.company.ip || '—' }}<span v-if="ipRepetido(row)"> ⚠ repetido</span>
+              </span>
+            </td>
+            <td v-if="isAdmin" class="px-3 py-2 text-xs whitespace-nowrap relative">
+              <button
+                type="button"
+                class="rounded px-1.5 py-0.5 hover:bg-accent/40"
+                :aria-expanded="certAberto === row.company.id"
+                @click="alternarCertificado(row)"
+              >
+                <template v-if="!row.certificado">
+                  <span class="text-muted-foreground">+ adicionar</span>
+                </template>
+                <template v-else>
+                  <span v-if="row.certificado.has_password" class="text-green-600">✓ com senha</span>
+                  <span v-else class="text-amber-600">⚠ sem senha</span>
+                  <span
+                    v-if="vencimentoCertificado(row.certificado)"
+                    class="ml-1"
+                    :class="vencimentoCertificado(row.certificado)!.vencido
+                      ? 'text-red-600 font-semibold'
+                      : vencimentoCertificado(row.certificado)!.vencendo ? 'text-amber-600' : 'text-muted-foreground'"
+                  >
+                    · {{ vencimentoCertificado(row.certificado)!.vencido ? 'venceu' : 'vence' }}
+                    {{ vencimentoCertificado(row.certificado)!.texto }}
+                  </span>
+                </template>
+              </button>
+
+              <!-- Abre fora da tabela: dentro dela a caixa de rolagem cortava o
+                   painel, e com a busca filtrando uma empresa ele sumia. -->
+              <Teleport to="body">
+              <div
+                v-if="certAberto === row.company.id"
+                class="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4"
+                @click.self="fecharCertificado"
+                @keydown.escape="fecharCertificado"
+              >
+              <div
+                role="dialog"
+                aria-modal="true"
+                :aria-label="`Certificado digital de ${row.company.apelido}`"
+                class="w-full max-w-sm rounded-md border bg-background shadow-lg p-4 space-y-3 text-left text-xs whitespace-normal"
+              >
+                <div class="flex items-start justify-between gap-2">
+                  <div class="font-medium">Certificado · {{ row.company.apelido }}</div>
+                  <button type="button" class="text-muted-foreground hover:text-foreground" aria-label="fechar" @click="fecharCertificado">
+                    <X class="h-3.5 w-3.5" />
+                  </button>
+                </div>
+
+                <div v-if="row.certificado" class="text-muted-foreground">
+                  {{ row.certificado.filename }}
+                  <span v-if="row.certificado.total > 1"> · {{ row.certificado.total }} certificados, mostrando o mais novo</span>
+                </div>
+
+                <label class="block space-y-1">
+                  <span>Senha do certificado</span>
+                  <div class="flex items-center gap-1">
+                    <input
+                      v-model="certSenha"
+                      :type="certMostrarDigitada ? 'text' : 'password'"
+                      autocomplete="off"
+                      data-lpignore="true"
+                      data-1p-ignore
+                      :placeholder="row.certificado?.has_password ? 'digite para trocar' : 'digite a senha'"
+                      class="flex-1 border rounded px-2 py-1 bg-background"
+                      @keydown.enter.prevent="salvarCertificado(row)"
+                    />
+                    <button
+                      type="button"
+                      class="border rounded px-2 py-1 hover:bg-accent/40"
+                      :title="certMostrarDigitada ? 'esconder' : 'mostrar o que estou digitando'"
+                      @click="certMostrarDigitada = !certMostrarDigitada"
+                    >
+                      {{ certMostrarDigitada ? 'esconder' : 'mostrar' }}
+                    </button>
+                  </div>
+                </label>
+
+                <label class="block space-y-1">
+                  <span>{{ row.certificado ? 'Trocar o arquivo (renovação) — opcional' : 'Arquivo do certificado (.pfx ou .p12)' }}</span>
+                  <input type="file" accept=".pfx,.p12" class="block w-full text-xs" @change="escolherArquivoCertificado" />
+                </label>
+
+                <label v-if="certArquivo" class="block space-y-1">
+                  <span>Vence em (opcional, mas mostra o aviso de vencimento)</span>
+                  <input v-model="certVence" type="date" class="border rounded px-2 py-1 bg-background" />
+                </label>
+
+                <div v-if="row.certificado?.has_password" class="text-muted-foreground">
+                  <button
+                    v-if="!certSenhaGuardada"
+                    type="button"
+                    class="text-blue-600 hover:underline"
+                    @click="mostrarSenhaGuardada(row)"
+                  >
+                    ver a senha guardada
+                  </button>
+                  <template v-else>
+                    <span class="font-mono text-foreground select-all">{{ certSenhaGuardada }}</span>
+                    <button type="button" class="ml-2 text-blue-600 hover:underline" @click="certSenhaGuardada = null">
+                      ocultar
+                    </button>
+                  </template>
+                </div>
+
+                <div v-if="certErro" class="text-red-600">{{ certErro }}</div>
+
+                <div class="flex justify-end gap-2 pt-1">
+                  <button type="button" class="border rounded px-3 py-1 hover:bg-accent/40" @click="fecharCertificado">cancelar</button>
+                  <button
+                    type="button"
+                    class="rounded px-3 py-1 bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50"
+                    :disabled="certSalvando"
+                    @click="salvarCertificado(row)"
+                  >
+                    {{ certSalvando ? 'salvando…' : 'salvar' }}
+                  </button>
+                </div>
+              </div>
+              </div>
+              </Teleport>
+            </td>
             <td v-for="mk in MARKETPLACES" :key="mk" class="px-2 py-2 text-center relative">
               <template v-if="row.stores[mk]">
                 <button
@@ -821,7 +1156,7 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
             </td>
           </tr>
           <tr v-if="!loading && filteredRows.length === 0">
-            <td :colspan="18" class="px-3 py-6 text-center text-muted-foreground">nenhuma empresa</td>
+            <td :colspan="isAdmin ? 20 : 19" class="px-3 py-6 text-center text-muted-foreground">nenhuma empresa</td>
           </tr>
         </tbody>
       </table>
@@ -967,6 +1302,10 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
             <div>
               <Label>Contabilidade</Label>
               <Input v-model="draft.contabilidade" />
+            </div>
+            <div>
+              <Label>IP</Label>
+              <Input v-model="draft.ip" placeholder="72.60.155.3" autocapitalize="off" spellcheck="false" />
             </div>
           </div>
           <div>
