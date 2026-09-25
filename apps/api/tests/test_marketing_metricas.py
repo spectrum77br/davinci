@@ -27,7 +27,9 @@ import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import httpx
 import pytest
+import respx
 from sqlalchemy import select, text
 
 from app.models import MarketingPostagemMetrica
@@ -686,6 +688,448 @@ async def test_instagram_post_apagado_e_reconhecido_como_removido():
         assert m.foi_removido(str(e.value)), "apagado tem que ser reconhecível pela tela"
     finally:
         httpx.AsyncClient = orig
+
+
+# ---------- Facebook: o Reel da Página (25/09/2026) ----------
+#
+# Até 25/09 o Facebook caía no leitor do Instagram, que pede `like_count` e
+# `/insights?metric=views,...` — campos que o nó de VÍDEO do Facebook não tem.
+# Todo reel do FB voltava "(#100) Tried accessing nonexisting field" e nunca
+# teve número no Desempenho. A Meta inteira é fakada com respx: ZERO rede, e
+# nenhum token de verdade sai daqui.
+
+TOKEN_FB = "TOKENPAGINAFB123"  # noqa: S105 — token de teste, não é segredo
+VIDEO_FB = "4491972657708925"
+
+
+def _base_fb() -> str:
+    from app.services.marketing import meta_client
+
+    return f"{meta_client.GRAPH_HOST}/{meta_client.graph_version()}"
+
+
+def _no_video(curtidas: int = 4, comentarios: int = 3) -> dict:
+    return {
+        "id": VIDEO_FB,
+        "comments": {"data": [], "summary": {"order": "ranked", "total_count": comentarios}},
+        "likes": {"data": [], "summary": {"total_count": curtidas, "can_like": True}},
+    }
+
+
+def _metrica(nome: str, valor, period: str = "lifetime") -> dict:
+    return {
+        "name": nome,
+        "period": period,
+        "values": [{"value": valor}],
+        "id": f"{VIDEO_FB}/video_insights/{nome}/{period}",
+    }
+
+
+def _sem_token(router) -> None:
+    """O token vai no cabeçalho e em NENHUM outro lugar (vazamento de 23/09)."""
+    for chamada in router.calls:
+        assert TOKEN_FB not in str(chamada.request.url), "token não pode ir na URL"
+        assert chamada.request.headers["authorization"] == f"Bearer {TOKEN_FB}"
+
+
+async def test_facebook_le_views_e_interacoes_do_video_insights():
+    insights = {
+        "data": [
+            _metrica("fb_reels_total_plays", 1500),
+            _metrica("blue_reels_play_count", 1200),
+            _metrica("post_impressions_unique", 900),
+            _metrica("post_video_social_actions", {"COMMENT": 5, "SHARE": 2}),
+            _metrica("post_video_likes_by_reaction_type", {"REACTION_LIKE": 4, "REACTION_LOVE": 1}),
+            _metrica("post_video_retention_graph", {str(i): 100 - i for i in range(40)}),
+        ],
+        "paging": {},
+    }
+    with respx.mock(assert_all_called=True) as router:
+        no = router.get(f"{_base_fb()}/{VIDEO_FB}").mock(
+            return_value=httpx.Response(200, json=_no_video())
+        )
+        ins = router.get(f"{_base_fb()}/{VIDEO_FB}/video_insights").mock(
+            return_value=httpx.Response(200, json=insights)
+        )
+        d = await svc.do_facebook(VIDEO_FB, TOKEN_FB)
+        _sem_token(router)
+
+    assert d["views"] == 1500, "total de plays conta replay, como as views do Instagram"
+    assert d["curtidas"] == 5, "curtida no Facebook é qualquer reação, somadas"
+    assert d["comentarios"] == 5, "o insights conta resposta; o nó só o comentário raiz"
+    assert d["compartilhamentos"] == 2
+    assert d["alcance"] == 900
+    assert d["salvamentos"] is None, "o Facebook não mede salvamento: nulo, não zero"
+    assert d["bruto"]["fonte"] == {
+        "views": "fb_reels_total_plays",
+        "curtidas": "insights",
+        "comentarios": "insights",
+        "compartilhamentos": "insights",
+    }
+    assert "post_video_retention_graph" not in d["bruto"]["insights"], "gráfico não é número"
+    assert d["bruto"]["video"]["id"] == VIDEO_FB, "o cru fica guardado pra conferência"
+
+    campos = no.calls.last.request.url.params["fields"]
+    assert "likes" in campos and "comments" in campos
+    assert "reactions" not in campos, "campo que o nó não conhece derruba a chamada inteira"
+    params = ins.calls.last.request.url.params
+    assert "metric" not in params and "period" not in params, (
+        "métrica aposentada na lista derruba o insights inteiro; reel recusa period"
+    )
+
+
+async def test_facebook_bruto_nao_guarda_link_de_paginacao_com_token():
+    """Aresta da Graph pode trazer `paging.next` com `access_token=` na URL, e o
+    bruto vai pro banco sem redação. Só os totais do nó entram."""
+    no = _no_video()
+    no["likes"]["paging"] = {"next": f"{_base_fb()}/{VIDEO_FB}/likes?access_token={TOKEN_FB}"}
+    with respx.mock(assert_all_called=True) as router:
+        router.get(f"{_base_fb()}/{VIDEO_FB}").mock(return_value=httpx.Response(200, json=no))
+        router.get(f"{_base_fb()}/{VIDEO_FB}/video_insights").mock(
+            return_value=httpx.Response(200, json={"data": []})
+        )
+        d = await svc.do_facebook(VIDEO_FB, TOKEN_FB)
+
+    assert TOKEN_FB not in json.dumps(d)
+    assert d["curtidas"] == 4 and d["comentarios"] == 3
+
+
+async def test_facebook_metrica_so_do_dia_nao_vira_total():
+    """`day` é o balde do último dia: gravado como acumulado, o "ganhou no dia"
+    seguinte viraria tombo negativo. Só o `lifetime` entra."""
+    insights = {
+        "data": [
+            {
+                "name": "fb_reels_total_plays",
+                "period": "day",
+                "values": [{"value": 900}, {"value": 12}],
+            },
+            _metrica("blue_reels_play_count", 700),
+        ]
+    }
+    with respx.mock(assert_all_called=True) as router:
+        router.get(f"{_base_fb()}/{VIDEO_FB}").mock(
+            return_value=httpx.Response(200, json=_no_video())
+        )
+        router.get(f"{_base_fb()}/{VIDEO_FB}/video_insights").mock(
+            return_value=httpx.Response(200, json=insights)
+        )
+        d = await svc.do_facebook(VIDEO_FB, TOKEN_FB)
+
+    assert d["views"] == 700
+    assert d["bruto"]["fonte"]["views"] == "blue_reels_play_count"
+
+
+@pytest.mark.parametrize(
+    ("code", "frase"),
+    [
+        (10, "(#10) Application does not have permission."),
+        (200, "(#200) Requires extended permission: read_insights."),
+    ],
+    ids=["code-10", "code-200"],
+)
+async def test_facebook_sem_permissao_de_insights_ainda_da_curtidas_e_comentarios(code, frase):
+    """Mesmo desenho do Instagram: o token pode não ter `read_insights`. Aí
+    sobram curtidas e comentários do próprio nó, que é melhor que linha vazia —
+    e NÃO é falha da coleta, é permissão que falta."""
+    recusa = {
+        "error": {
+            "message": f"{frase} access_token={TOKEN_FB}",
+            "type": "OAuthException",
+            "code": code,
+        }
+    }
+    with respx.mock(assert_all_called=True) as router:
+        router.get(f"{_base_fb()}/{VIDEO_FB}").mock(
+            return_value=httpx.Response(200, json=_no_video(curtidas=4, comentarios=3))
+        )
+        router.get(f"{_base_fb()}/{VIDEO_FB}/video_insights").mock(
+            return_value=httpx.Response(400, json=recusa)
+        )
+        d = await svc.do_facebook(VIDEO_FB, TOKEN_FB)
+        _sem_token(router)
+
+    assert "erro" not in d, "permissão faltando não é falha da leitura"
+    assert d["curtidas"] == 4 and d["comentarios"] == 3
+    assert d["bruto"]["fonte"] == {"curtidas": "video", "comentarios": "video"}
+    assert d.get("views") is None, "não veio ≠ veio zero"
+    assert d.get("compartilhamentos") is None
+    assert f"code {code}" in d["bruto"]["insights_erro"], "o motivo fica anotado pra investigar"
+    assert TOKEN_FB not in json.dumps(d), "nem quando a Meta ecoa o token de volta"
+
+
+@pytest.mark.parametrize(
+    "resposta",
+    [
+        httpx.Response(
+            500, json={"error": {"message": "An unknown error", "code": 1, "is_transient": True}}
+        ),
+        httpx.Response(400, json={"error": {"message": "(#4) Request limit reached", "code": 4}}),
+        httpx.Response(200, json={"error": {"message": "(#613) Calls exceeded", "code": 613}}),
+        httpx.Response(503, text="<html><body>Service Unavailable</body></html>"),
+    ],
+    ids=["500-code-1", "400-code-4", "200-com-code-613", "503-html"],
+)
+async def test_facebook_soluco_no_insights_e_falha_nao_permissao(resposta):
+    """O insights é a fonte das views do FB. Soluço dele (5xx, limite de
+    chamadas, página HTML) tratado como "falta permissão" voltava views NULAS
+    como leitura boa: apagava as do mesmo dia e, sem `erro`, a rodada de hora
+    em hora nunca relia (revisão de 25/09/2026)."""
+    with respx.mock(assert_all_called=True) as router:
+        router.get(f"{_base_fb()}/{VIDEO_FB}").mock(
+            return_value=httpx.Response(200, json=_no_video())
+        )
+        router.get(f"{_base_fb()}/{VIDEO_FB}/video_insights").mock(return_value=resposta)
+        with pytest.raises(RuntimeError) as e:
+            await svc.do_facebook(VIDEO_FB, TOKEN_FB)
+        _sem_token(router)
+
+    msg = str(e.value)
+    assert "insights" in msg
+    assert not svc.foi_removido(msg), "soluço tem que alertar e ser relido, não ir pro rodapé"
+    assert TOKEN_FB not in msg
+
+
+async def test_facebook_soluco_no_insights_nao_apaga_a_leitura_boa_do_dia(db, monkeypatch):
+    """Ponta a ponta: views às 10h, insights fora do ar às 11h. A linha do
+    dia fica com as views das 10h — e com o erro à vista pra ser relida."""
+    p = await _cenario_fb(db, monkeypatch)
+    insights = {
+        "data": [
+            _metrica("fb_reels_total_plays", 1500),
+            _metrica("post_video_likes_by_reaction_type", {"REACTION_LIKE": 5}),
+        ]
+    }
+    t = _hoje_as(10)
+    with respx.mock(assert_all_called=True) as router:
+        router.get(f"{_base_fb()}/123").mock(return_value=httpx.Response(200, json=_no_video()))
+        ins = router.get(f"{_base_fb()}/123/video_insights")
+        ins.mock(return_value=httpx.Response(200, json=insights))
+        await svc.coletar(db, agora=t)
+        ins.mock(return_value=httpx.Response(500, json={"error": {"code": 2, "message": "retry"}}))
+        r = await svc.coletar(db, agora=t + timedelta(hours=1))
+    assert r == {"total": 1, "ok": 0, "falhou": 1}
+
+    pid = p.id
+    db.expire_all()  # o upsert não passa pelo mapa de identidade da sessão
+    [linha] = await _linhas(db, pid)
+    assert linha.views == 1500, "a leitura boa das 10h fica"
+    assert linha.curtidas == 5, "e não troca pra contagem do nó (só o joinha)"
+    assert linha.lido_em == t
+    assert "code 2" in linha.erro and not svc.foi_removido(linha.erro)
+
+
+async def test_facebook_no_recusado_com_insights_vazio_e_falha():
+    """O nó recusou (não é o 100/33 de apagado) e o insights veio `data: []`:
+    não há número de lugar nenhum. Voltar isso sem `erro` gravava uma leitura
+    "boa" toda nula, sem alerta e sem releitura — o reel sem número e sem
+    motivo que esta mudança veio consertar (revisão de 25/09/2026)."""
+    campo = {
+        "error": {
+            "message": "(#100) Tried accessing nonexisting field (likes)",
+            "type": "OAuthException",
+            "code": 100,
+        }
+    }
+    with respx.mock(assert_all_called=True) as router:
+        router.get(f"{_base_fb()}/{VIDEO_FB}").mock(return_value=httpx.Response(400, json=campo))
+        router.get(f"{_base_fb()}/{VIDEO_FB}/video_insights").mock(
+            return_value=httpx.Response(200, json={"data": []})
+        )
+        with pytest.raises(RuntimeError) as e:
+            await svc.do_facebook(VIDEO_FB, TOKEN_FB)
+        _sem_token(router)
+
+    msg = str(e.value)
+    assert not svc.foi_removido(msg), "campo inválido não é post apagado"
+    assert "Tried accessing nonexisting field" in msg and "code 100" in msg
+
+
+async def test_facebook_no_recusado_mas_insights_com_numero_ainda_le():
+    """O outro lado: o nó é plano B. Se ele recusar e o insights trouxer
+    número, a leitura vale — e o motivo do nó fica no bruto."""
+    campo = {"error": {"message": "(#100) Tried accessing nonexisting field (likes)", "code": 100}}
+    insights = {"data": [_metrica("fb_reels_total_plays", 80)]}
+    with respx.mock(assert_all_called=True) as router:
+        router.get(f"{_base_fb()}/{VIDEO_FB}").mock(return_value=httpx.Response(400, json=campo))
+        router.get(f"{_base_fb()}/{VIDEO_FB}/video_insights").mock(
+            return_value=httpx.Response(200, json=insights)
+        )
+        d = await svc.do_facebook(VIDEO_FB, TOKEN_FB)
+
+    assert "erro" not in d
+    assert d["views"] == 80
+    assert d.get("curtidas") is None, "sem o nó e sem reações no insights: nulo"
+    assert "code 100" in d["bruto"]["video_erro"]
+
+
+async def test_facebook_reel_recem_publicado_fica_nulo_e_nao_zero():
+    """Reel novo volta `data: []` sem erro. É "ainda não tem número": a
+    próxima leitura preenche. Zero ali diria que ninguém viu."""
+    insights = {"data": [_metrica("post_video_social_actions", {"COMMENT": 1})]}
+    with respx.mock(assert_all_called=True) as router:
+        router.get(f"{_base_fb()}/{VIDEO_FB}").mock(
+            return_value=httpx.Response(200, json=_no_video(curtidas=2, comentarios=1))
+        )
+        router.get(f"{_base_fb()}/{VIDEO_FB}/video_insights").mock(
+            return_value=httpx.Response(200, json=insights)
+        )
+        d = await svc.do_facebook(VIDEO_FB, TOKEN_FB)
+
+    assert d.get("views") is None, "sem play no insights ≠ zero play"
+    assert d.get("alcance") is None
+    assert d["compartilhamentos"] == 0, "o dict de ações veio e não tinha SHARE: é zero medido"
+    assert d["curtidas"] == 2 and d["bruto"]["fonte"]["curtidas"] == "video"
+    assert "insights_erro" not in d["bruto"], "resposta vazia não é erro"
+
+
+@pytest.mark.parametrize("status", [400, 200], ids=["http-400", "200-com-error-no-corpo"])
+async def test_facebook_reel_apagado_e_removido(status):
+    """Os posts de teste que o Eduardo apagou do Facebook (25/09/2026) têm
+    que ir pro rodapé "fora do ar", sem alerta. A Meta diz apagado do mesmo
+    jeito que no Instagram (100/33) — e às vezes com HTTP 200 e o erro no
+    corpo. Código como texto também vale."""
+    apagado = {
+        "error": {
+            "message": f"Unsupported get request. Object with ID '{VIDEO_FB}' does not exist",
+            "type": "GraphMethodException",
+            "code": "100",
+            "error_subcode": 33,
+        }
+    }
+    with respx.mock(assert_all_called=False) as router:
+        router.get(f"{_base_fb()}/{VIDEO_FB}").mock(
+            return_value=httpx.Response(status, json=apagado)
+        )
+        ins = router.get(f"{_base_fb()}/{VIDEO_FB}/video_insights")
+        with pytest.raises(RuntimeError) as e:
+            await svc.do_facebook(VIDEO_FB, TOKEN_FB)
+
+    assert svc.foi_removido(str(e.value)), "apagado tem que ser reconhecível pela tela"
+    assert "Facebook" in str(e.value)
+    assert not ins.called, "apagado não precisa de insights"
+
+
+async def test_facebook_campo_invalido_nao_e_apagado_e_a_frase_da_meta_fica():
+    """100 SEM o 33 é campo/parâmetro inválido — exatamente o erro que todo
+    reel do FB dava até 25/09. Não pode se disfarçar de post apagado, senão o
+    alerta some pra sempre. E o erro gravado tem que ter a frase da Meta, não
+    só "400 Bad Request" — sem o token, mesmo quando ela o ecoa."""
+    campo = {
+        "error": {
+            "message": "(#100) Tried accessing nonexisting field (like_count)",
+            "type": "OAuthException",
+            "code": 100,
+        }
+    }
+    vencido = {
+        "error": {
+            "message": f"Error validating access token: {TOKEN_FB} expired",
+            "type": "OAuthException",
+            "code": 190,
+            "error_subcode": 463,
+        }
+    }
+    with respx.mock(assert_all_called=True) as router:
+        router.get(f"{_base_fb()}/{VIDEO_FB}").mock(return_value=httpx.Response(400, json=campo))
+        router.get(f"{_base_fb()}/{VIDEO_FB}/video_insights").mock(
+            return_value=httpx.Response(400, json=vencido)
+        )
+        with pytest.raises(RuntimeError) as e:
+            await svc.do_facebook(VIDEO_FB, TOKEN_FB)
+        _sem_token(router)
+
+    msg = str(e.value)
+    assert not svc.foi_removido(msg), "problema de verdade tem que alertar"
+    assert "Tried accessing nonexisting field" in msg
+    assert "code 190" in msg and "subcode 463" in msg
+    assert TOKEN_FB not in msg
+
+
+async def _cenario_fb(db, monkeypatch, plataforma: str = "facebook"):
+    """Postagem de Meta com a conta conectada: o cofre guarda o token da
+    Página (`page_access_token`) e o do usuário que o gerou."""
+    _, p = await _cenario(db, plataforma=plataforma)
+
+    async def token(session, rede_social_id):
+        return {"page_access_token": TOKEN_FB, "access_token": "TOKENDOUSUARIO"}
+
+    monkeypatch.setattr(svc, "_token_de", token)
+    return p
+
+
+@pytest.mark.parametrize(
+    ("plataforma", "leitor", "outro"),
+    [("facebook", "do_facebook", "do_instagram"), ("instagram", "do_instagram", "do_facebook")],
+)
+async def test_cada_rede_da_meta_vai_pro_seu_leitor(db, monkeypatch, plataforma, leitor, outro):
+    """Mesmo token, API diferente: o Reel do FB é nó de vídeo, e o do IG é
+    mídia. Trocar os leitores é o bug de 25/09 de volta."""
+    p = await _cenario_fb(db, monkeypatch, plataforma)
+    chamou = []
+
+    async def certo(media_id, access_token):
+        chamou.append((media_id, access_token))
+        return {
+            "views": 70,
+            "curtidas": 5,
+            "comentarios": 2,
+            "compartilhamentos": 1,
+            "salvamentos": None,
+            "bruto": {},
+        }
+
+    async def errado(*a, **kw):
+        raise AssertionError(f"{plataforma} não pode cair em {outro}")
+
+    monkeypatch.setattr(svc, leitor, certo)
+    monkeypatch.setattr(svc, outro, errado)
+    assert await svc.coletar(db) == {"total": 1, "ok": 1, "falhou": 0}
+
+    assert chamou == [("123", TOKEN_FB)], "o id da postagem, com o token da Página"
+    linha = (await _linhas(db, p.id))[0]
+    assert (linha.views, linha.curtidas, linha.comentarios) == (70, 5, 2)
+    assert linha.compartilhamentos == 1
+    assert linha.salvamentos is None, "não veio ≠ veio zero"
+    assert linha.erro is None
+
+
+async def test_facebook_apagado_grava_removido_na_linha(db, monkeypatch):
+    """Ponta a ponta, com a Meta fakada: o reel de teste apagado vira
+    `removido:` na linha — rodapé, sem alerta."""
+    p = await _cenario_fb(db, monkeypatch)
+    apagado = {
+        "error": {
+            "message": "Object with ID '123' does not exist",
+            "code": 100,
+            "error_subcode": 33,
+        }
+    }
+    with respx.mock(assert_all_called=False) as router:
+        router.get(f"{_base_fb()}/123").mock(return_value=httpx.Response(400, json=apagado))
+        r = await svc.coletar(db)
+
+    assert r == {"total": 1, "ok": 0, "falhou": 1}
+    linha = (await _linhas(db, p.id))[0]
+    assert svc.foi_removido(linha.erro), "o prefixo tem que ficar no começo pra tela ler"
+
+
+async def test_facebook_recusado_grava_a_frase_da_meta_sem_token(db, monkeypatch):
+    """A coluna `erro` aparece no tooltip da tela: tem que dizer o motivo, e
+    nunca carregar o token."""
+    p = await _cenario_fb(db, monkeypatch)
+    vencido = {"error": {"message": f"Invalid OAuth access token {TOKEN_FB}.", "code": 190}}
+    with respx.mock(assert_all_called=True) as router:
+        router.get(f"{_base_fb()}/123").mock(return_value=httpx.Response(400, json=vencido))
+        router.get(f"{_base_fb()}/123/video_insights").mock(
+            return_value=httpx.Response(400, json=vencido)
+        )
+        await svc.coletar(db)
+
+    linha = (await _linhas(db, p.id))[0]
+    assert "Invalid OAuth access token" in linha.erro and "code 190" in linha.erro
+    assert TOKEN_FB not in linha.erro
+    assert not svc.foi_removido(linha.erro)
 
 
 # ═══ desempenho v2 (24/09/2026) ═══════════════════════════════════════════
