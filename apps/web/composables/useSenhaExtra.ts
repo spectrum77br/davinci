@@ -1,4 +1,4 @@
-import { onScopeDispose, ref, watch } from 'vue'
+import { onScopeDispose, onUnmounted, ref, watch } from 'vue'
 import { onBeforeRouteLeave } from 'vue-router'
 
 // Senha extra de páginas sensíveis (Empresas). Eduardo, 25/09/2026: "senha
@@ -89,9 +89,17 @@ export function useSenhaExtra(
     )
     onScopeDispose(() => { if (relogio) clearTimeout(relogio) })
 
-    // Saiu da área: tranca antes de a próxima página abrir.
+    // Saiu da área: tranca quando esta página SAI da tela, não no clique.
+    // Trancar no clique mostrava o cadeado enquanto a próxima página ainda
+    // carregava (o cadeado piscava antes de mudar de aba). Aqui só anota para
+    // onde vai; se a navegação for cancelada, a página fica e nada tranca.
+    let saindoDaArea = false
     onBeforeRouteLeave((para) => {
-      if (!area.test(para.path)) trancar()
+      saindoDaArea = !area.test(para.path)
+    })
+    // onUnmounted (e não antes): a página já saiu, não tem como redesenhar o cadeado.
+    onUnmounted(() => {
+      if (saindoDaArea) trancar()
     })
   }
 
