@@ -84,6 +84,7 @@ from sqlalchemy.orm import selectinload
 
 from app.config import get_settings
 from app.db import get_session
+from app.models.marca import Marca
 from app.models.marketing import MarketingCreative, MarketingCreativeFile
 from app.models.marketing_ideia_requisicao import MarketingIdeiaRequisicao
 from app.models.marketing_personagem import MarketingPersonagem, MarketingPersonagemArquivo
@@ -984,6 +985,17 @@ async def listar_referencias(
         .all()
     )
 
+    # O NOME da marca, e não só o código gravado. O seletor de Criativos
+    # mostra `nome` e grava `slug`, e os dois divergem onde a marca foi
+    # renomeada: a Poofy virou "charlots" e continua gravando `poofy`. Sem
+    # isto a agência lia "poofy" em vídeo da Charlot's, e o filtro por empresa
+    # do portal precisaria de um de-para escrito à mão — que envelheceria na
+    # próxima marca. Marca apagada ou código solto cai no próprio código.
+    nomes = {
+        (slug or "").lower(): nome
+        for slug, nome in (await session.execute(select(Marca.slug, Marca.nome))).all()
+    }
+
     saida = []
     for row in linhas:
         videos = [f for f in row.files if (f.file_mime or "").lower() in MIMES_VIDEO]
@@ -995,6 +1007,7 @@ async def listar_referencias(
                 "id": str(row.id),
                 "modelo": row.modelo,
                 "marca": row.marca,
+                "marca_nome": nomes.get((row.marca or "").lower(), row.marca),
                 "sku": row.sku,
                 "criado_em": row.created_at.isoformat() if row.created_at else None,
                 "arquivos": [

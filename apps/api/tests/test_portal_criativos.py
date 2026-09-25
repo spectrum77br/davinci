@@ -1036,3 +1036,34 @@ def test_disposicao_sobrevive_a_latin1(nome: str) -> None:
     assert ascii_parte.strip(), f"fallback vazio para {nome!r}"
     # E nunca com barra: `filename=` é nome de arquivo, não caminho.
     assert "/" not in ascii_parte
+
+
+async def test_referencia_traz_o_nome_da_marca_e_nao_so_o_codigo(
+    client: AsyncClient, db: AsyncSession
+):
+    """O seletor de Criativos mostra `nome` e grava `slug`, e eles divergem
+    onde a marca foi renomeada: a Poofy virou "charlots" e continua gravando
+    `poofy`. Sem o nome, a agência lia "poofy" em vídeo da Charlot's e o
+    filtro por empresa do portal teria de manter um de-para à mão."""
+    from app.models.marca import Marca
+
+    db.add(Marca(nome="charlots", slug="poofy"))
+    mala = MarketingCreative(modelo="Mala premium", equipe="beta", aprovado=True,
+                             marca="poofy", files=[])
+    solto = MarketingCreative(modelo="Código sem marca cadastrada", equipe="beta",
+                              aprovado=True, marca="marca-que-nao-existe", files=[])
+    db.add_all([mala, solto])
+    await db.flush()
+    for c in (mala, solto):
+        db.add(MarketingCreativeFile(creative_id=c.id, file_name="v.mp4", file_mime="video/mp4",
+                                     file_rel=f"creatives/{c.id}/v.mp4", file_size=10))
+    await db.commit()
+
+    r = await client.get("/api/portal/referencias", headers={"X-Portal-Token": TOK_A})
+    assert r.status_code == 200
+    por = {x["modelo"]: x for x in r.json()["referencias"]}
+    # o código continua saindo (é a chave estável do filtro) e o nome vem junto
+    assert por["Mala premium"]["marca"] == "poofy"
+    assert por["Mala premium"]["marca_nome"] == "charlots"
+    # marca apagada ou código solto não some: cai no próprio código
+    assert por["Código sem marca cadastrada"]["marca_nome"] == "marca-que-nao-existe"
