@@ -144,7 +144,12 @@ const certError = ref<string | null>(null)
 const certForm = reactive({ password: '', label: '', expires_at: '', notes: '' })
 const certFileEl = ref<HTMLInputElement | null>(null)
 const certUploading = ref(false)
-const revealedPw = ref<Record<string, string>>({})
+// A senha é a TRAVA do certificado (Eduardo, 25/09/2026): com senha, baixar
+// pede a senha e excluir a senha pede a atual. A senha guardada não aparece
+// mais — mostrar furava a trava. Quando pede, abre um campo na linha.
+const certPedido = ref<{ id: string; tipo: 'baixar' | 'tirar_senha' } | null>(null)
+const certSenhaDigitada = ref('')
+const certRodando = ref(false)
 
 async function loadCertificates() {
   if (!isAdmin.value || !company.value) return
@@ -190,12 +195,52 @@ async function uploadCertificate() {
   }
 }
 
-async function downloadCertificate(cert: CompanyCertificate) {
-  if (!company.value) return
+function mensagemCertificado(e: any, padrao: string): string {
+  const code = e?.data?.detail?.code
+  if (code === 'senha_incorreta') return 'Senha do certificado incorreta.'
+  if (code === 'senha_obrigatoria') return 'Digite a senha do certificado.'
+  if (code === 'muitas_tentativas') return 'Muitas tentativas com a senha errada. Espere 15 minutos.'
+  return code || e?.message || padrao
+}
+
+function pedirSenhaCertificado(cert: CompanyCertificate, tipo: 'baixar' | 'tirar_senha') {
+  if (certRodando.value) return
+  certError.value = null
+  if (tipo === 'baixar' && !cert.has_password) {
+    certPedido.value = null
+    downloadCertificate(cert, '')
+    return
+  }
+  certPedido.value = { id: cert.id, tipo }
+  certSenhaDigitada.value = ''
+}
+
+async function confirmarSenhaCertificado(cert: CompanyCertificate) {
+  const pedido = certPedido.value
+  if (!pedido || pedido.id !== cert.id || certRodando.value) return
+  if (!certSenhaDigitada.value.trim()) {
+    certError.value = pedido.tipo === 'baixar'
+      ? 'Digite a senha do certificado para baixar.'
+      : 'Digite a senha atual para excluir a senha.'
+    return
+  }
+  if (pedido.tipo === 'baixar') await downloadCertificate(cert, certSenhaDigitada.value)
+  else await removerSenhaCertificado(cert, certSenhaDigitada.value)
+}
+
+function cancelarSenhaCertificado() {
+  certPedido.value = null
+  certSenhaDigitada.value = ''
+}
+
+async function downloadCertificate(cert: CompanyCertificate, senha: string) {
+  if (!company.value || certRodando.value) return
+  certRodando.value = true
   try {
+    // POST com a senha no corpo (nunca na URL).
     const blob = await apiE<Blob>(
       `/api/companies/${company.value.id}/certificates/${cert.id}/download`,
-      { responseType: 'blob' as any },
+      { method: 'POST', body: { password: senha || null }, responseType: 'blob' as any },
     )
     const href = URL.createObjectURL(blob as any)
     const a = document.createElement('a')
@@ -205,24 +250,32 @@ async function downloadCertificate(cert: CompanyCertificate) {
     a.click()
     a.remove()
     URL.revokeObjectURL(href)
+    cancelarSenhaCertificado()
   } catch (e: any) {
-    certError.value = e?.data?.detail?.code || e?.message || 'erro ao baixar'
+    // Com responseType blob o erro também chega como arquivo: lê o JSON de dentro.
+    if (typeof Blob !== 'undefined' && e?.data instanceof Blob) {
+      try { e.data = JSON.parse(await e.data.text()) } catch { e.data = null }
+    }
+    certError.value = mensagemCertificado(e, 'erro ao baixar')
+  } finally {
+    certRodando.value = false
   }
 }
 
-async function revealPassword(cert: CompanyCertificate) {
-  if (!company.value) return
-  if (revealedPw.value[cert.id] != null) {
-    const cp = { ...revealedPw.value }; delete cp[cert.id]; revealedPw.value = cp
-    return
-  }
+async function removerSenhaCertificado(cert: CompanyCertificate, senhaAtual: string) {
+  if (!company.value || certRodando.value) return
+  certRodando.value = true
   try {
-    const r = await apiE<{ password: string | null }>(
-      `/api/companies/${company.value.id}/certificates/${cert.id}/password`,
-    )
-    revealedPw.value = { ...revealedPw.value, [cert.id]: r.password || '(sem senha)' }
+    await apiE(`/api/companies/${company.value.id}/certificates/${cert.id}`, {
+      method: 'PATCH',
+      body: { password: null, current_password: senhaAtual },
+    })
+    cancelarSenhaCertificado()
+    await loadCertificates()
   } catch (e: any) {
-    certError.value = e?.data?.detail?.code || e?.message || 'erro'
+    certError.value = mensagemCertificado(e, 'erro ao excluir a senha')
+  } finally {
+    certRodando.value = false
   }
 }
 
@@ -663,17 +716,37 @@ onMounted(() => { if (trava.iniciar()) carregarTudo() })
               </td>
               <td class="px-3 py-2 text-xs">
                 <template v-if="cert.has_password">
-                  <button class="text-blue-500 hover:underline" @click="revealPassword(cert)">
-                    {{ revealedPw[cert.id] != null ? 'ocultar' : 'ver' }}
+                  <span class="text-green-600">🔒 com senha</span>
+                  <button
+                    class="ml-2 text-amber-700 hover:underline disabled:opacity-50"
+                    :disabled="certRodando"
+                    @click="pedirSenhaCertificado(cert, 'tirar_senha')"
+                  >
+                    excluir senha
                   </button>
-                  <span v-if="revealedPw[cert.id] != null" class="ml-2 font-mono break-all">{{ revealedPw[cert.id] }}</span>
                 </template>
                 <span v-else class="text-muted-foreground">—</span>
+                <div v-if="certPedido?.id === cert.id" class="mt-1 flex items-center gap-1">
+                  <input
+                    v-model="certSenhaDigitada"
+                    type="password"
+                    autocomplete="off"
+                    data-lpignore="true"
+                    data-1p-ignore
+                    :placeholder="certPedido.tipo === 'baixar' ? 'senha do certificado' : 'senha atual'"
+                    class="w-36 border rounded px-2 py-1 bg-background"
+                    @keydown.enter.prevent="confirmarSenhaCertificado(cert)"
+                  />
+                  <Button size="sm" variant="outline" :disabled="certRodando" @click="confirmarSenhaCertificado(cert)">
+                    {{ certPedido.tipo === 'baixar' ? 'baixar' : 'excluir senha' }}
+                  </Button>
+                  <Button size="sm" variant="ghost" @click="cancelarSenhaCertificado">cancelar</Button>
+                </div>
               </td>
               <td class="px-3 py-2 text-xs whitespace-nowrap">{{ fmtBytes(cert.size_bytes) }}</td>
               <td class="px-3 py-2 text-xs">{{ cert.uploaded_by_name || '—' }}</td>
               <td class="px-3 py-2 text-right whitespace-nowrap">
-                <Button size="sm" variant="ghost" @click="downloadCertificate(cert)">baixar</Button>
+                <Button size="sm" variant="ghost" :disabled="certRodando" @click="pedirSenhaCertificado(cert, 'baixar')">baixar</Button>
                 <Button size="sm" variant="ghost" class="text-destructive" title="excluir" @click="deleteCertificate(cert)">
                   <Trash2 class="size-4" />
                 </Button>

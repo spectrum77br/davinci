@@ -43,14 +43,16 @@ async def test_cert_upload_download_roundtrip(client, make_user, auth_as):
     assert lst.status_code == 200
     assert any(c["id"] == cert_id for c in lst.json())
 
-    # download devolve exatamente os bytes originais (round-trip de cifra)
-    dl = await client.get(f"/api/companies/{cid}/certificates/{cert_id}/download")
+    # download devolve exatamente os bytes originais (round-trip de cifra) —
+    # com senha, só com a senha certa (a senha é a trava do certificado).
+    url_dl = f"/api/companies/{cid}/certificates/{cert_id}/download"
+    dl = await client.post(url_dl, json={"password": "senha-secreta"})
     assert dl.status_code == 200
     assert dl.content == P12_BYTES
 
+    # Não existe mais rota que mostre a senha guardada (furava a trava).
     pw = await client.get(f"/api/companies/{cid}/certificates/{cert_id}/password")
-    assert pw.status_code == 200
-    assert pw.json()["password"] == "senha-secreta"
+    assert pw.status_code in (404, 405)
 
 
 @pytest.mark.asyncio
@@ -130,9 +132,10 @@ async def test_cert_upload_without_password_and_delete(client, make_user, auth_a
     assert r.json()["has_password"] is False
     cert_id = r.json()["id"]
 
-    pw = await client.get(f"/api/companies/{cid}/certificates/{cert_id}/password")
-    assert pw.status_code == 200
-    assert pw.json()["password"] is None
+    # Sem senha: baixa direto, sem pedir nada.
+    dl = await client.post(f"/api/companies/{cid}/certificates/{cert_id}/download")
+    assert dl.status_code == 200
+    assert dl.content == P12_BYTES
 
     d = await client.delete(f"/api/companies/{cid}/certificates/{cert_id}")
     assert d.status_code == 204
@@ -158,15 +161,32 @@ async def test_cert_patch_metadata_and_password(client, make_user, auth_as):
     assert p.json()["label"] == "A1 novo"
     assert p.json()["has_password"] is True
 
-    pw = await client.get(f"/api/companies/{cid}/certificates/{cert_id}/password")
-    assert pw.json()["password"] == "abc123"
+    url = f"/api/companies/{cid}/certificates/{cert_id}"
+    # Trocar ou excluir a senha de um certificado travado exige a atual.
+    sem_atual = await client.patch(url, json={"password": "outra"})
+    assert sem_atual.status_code == 403
+    assert sem_atual.json()["detail"]["code"] == "senha_obrigatoria"
+    errada = await client.patch(url, json={"password": "", "current_password": "nao-e"})
+    assert errada.status_code == 403
+    assert errada.json()["detail"]["code"] == "senha_incorreta"
+    # Mexer só no rótulo não pede senha.
+    rot = await client.patch(url, json={"label": "A1 renovado"})
+    assert rot.status_code == 200
+    assert rot.json()["has_password"] is True
 
-    # remove a senha mandando string vazia
-    p2 = await client.patch(
-        f"/api/companies/{cid}/certificates/{cert_id}", json={"password": ""}
-    )
+    troca = await client.patch(url, json={"password": "xyz789", "current_password": "abc123"})
+    assert troca.status_code == 200
+    dl_velha = await client.post(f"{url}/download", json={"password": "abc123"})
+    assert dl_velha.status_code == 403
+    dl_nova = await client.post(f"{url}/download", json={"password": "xyz789"})
+    assert dl_nova.status_code == 200
+
+    # remove a senha mandando string vazia + a senha atual
+    p2 = await client.patch(url, json={"password": "", "current_password": " xyz789 "})
     assert p2.status_code == 200
     assert p2.json()["has_password"] is False
+    # sem senha: baixa direto
+    assert (await client.post(f"{url}/download")).status_code == 200
 
 
 @pytest.mark.asyncio
@@ -191,3 +211,73 @@ async def test_cert_cascade_on_company_delete(client, make_user, auth_as, db):
         )
     ).scalar_one()
     assert cnt == 0
+
+
+class _RedisDeMentira:
+    """Contagem de erros em memória: o teste não escreve no Redis de verdade."""
+
+    def __init__(self):
+        self.d: dict[str, int] = {}
+
+    async def incr(self, k):
+        self.d[k] = self.d.get(k, 0) + 1
+        return self.d[k]
+
+    async def expire(self, k, s, nx=False):
+        return True
+
+    async def delete(self, k):
+        self.d.pop(k, None)
+
+
+@pytest.fixture(autouse=True)
+def _redis_falso(monkeypatch):
+    from app.routers import company_certificates as rota
+
+    falso = _RedisDeMentira()
+
+    async def _fake():
+        return falso
+
+    monkeypatch.setattr(rota, "_redis", _fake)
+    return falso
+
+
+@pytest.mark.asyncio
+async def test_cert_download_trava_com_senha(client, make_user, auth_as, _redis_falso):
+    """Eduardo, 25/09/2026: "a senha quando colocarmos dentro é para travar e
+    não deixarem baixar". Sem senha ou com a errada, o arquivo não sai; 5 erros
+    seguidos travam aquele certificado por 15 min (mesmo com a senha certa)."""
+    falso = _redis_falso
+
+    admin = await make_user(role=UserRole.ADMIN)
+    auth_as(admin)
+    cid = await _make_company(client)
+    r = await client.post(
+        f"/api/companies/{cid}/certificates", files=FILES, data={"password": "certa"}
+    )
+    url = f"/api/companies/{cid}/certificates/{r.json()['id']}/download"
+
+    sem = await client.post(url)
+    assert sem.status_code == 403
+    assert sem.json()["detail"]["code"] == "senha_obrigatoria"
+    assert P12_BYTES not in sem.content
+
+    errada = await client.post(url, json={"password": "errada"})
+    assert errada.status_code == 403
+    assert errada.json()["detail"]["code"] == "senha_incorreta"
+    assert P12_BYTES not in errada.content
+
+    # Acertar zera a contagem.
+    assert (await client.post(url, json={"password": "certa"})).status_code == 200
+    assert falso.d == {}
+
+    for _ in range(5):
+        assert (await client.post(url, json={"password": "x"})).status_code == 403
+    travado = await client.post(url, json={"password": "certa"})
+    assert travado.status_code == 429
+    assert travado.json()["detail"]["code"] == "muitas_tentativas"
+
+    # A antiga rota GET de download não existe mais.
+    assert (await client.get(url)).status_code in (404, 405)
+

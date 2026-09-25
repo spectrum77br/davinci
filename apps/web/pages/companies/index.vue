@@ -358,6 +358,11 @@ function mensagemDeErro(e: any, padrao = 'erro'): string {
   if (d?.code === 'ip_nao_publico') {
     return 'Esse é um IP de rede interna. Coloque o IP público de saída do proxy.'
   }
+  if (d?.code === 'senha_incorreta') return 'Senha do certificado incorreta.'
+  if (d?.code === 'senha_obrigatoria') return 'Digite a senha do certificado.'
+  if (d?.code === 'muitas_tentativas') {
+    return 'Muitas tentativas com a senha errada. Espere 15 minutos para tentar de novo.'
+  }
   return d?.code || e?.message || padrao
 }
 
@@ -455,15 +460,18 @@ onBeforeUnmount(pararRelogio)
 
 // ---------- certificado digital ----------
 // Clicar na célula abre um painel pequeno para pôr a senha (e o arquivo, se a
-// empresa ainda não tem). A senha guardada só aparece se a pessoa pedir.
+// empresa ainda não tem). A senha é a TRAVA do certificado (Eduardo,
+// 25/09/2026): com senha, baixar pede a senha e trocar ou excluir a senha pede
+// a atual. A senha guardada não aparece mais na tela — mostrar furava a trava.
 const certAberto = ref<string | null>(null)
 const certSenha = ref('')
+// Senha atual do mais novo: trocar a senha de um certificado travado pede ela.
+const certSenhaAtual = ref('')
 const certMostrarDigitada = ref(false)
 const certArquivo = ref<File | null>(null)
 // Vencimento de um arquivo novo: sem ele o selo "vence DD/MM/AAAA" some justo no
 // certificado renovado, que é o que vai vencer da próxima vez.
 const certVence = ref('')
-const certSenhaGuardada = ref<string | null>(null)
 const certSalvando = ref(false)
 const certErro = ref<string | null>(null)
 // Todos os certificados da empresa aberta, para excluir um a um (Eduardo,
@@ -472,15 +480,30 @@ const certErro = ref<string | null>(null)
 type CertificadoItem = { id: string; filename: string; has_password: boolean; expires_at: string | null }
 const certLista = ref<CertificadoItem[] | null>(null)
 const certExcluindo = ref<string | null>(null)
+// Baixar ou excluir a senha de UM certificado da lista abre um campo de senha
+// embaixo dele. Certificado sem senha baixa direto.
+type AcaoCertificado = { tipo: 'baixar' | 'tirar_senha'; id: string }
+const certAcao = ref<AcaoCertificado | null>(null)
+const certSenhaAcao = ref('')
+const certAcaoRodando = ref(false)
+const certBaixandoId = ref<string | null>(null)
 
+function certOcupado() {
+  return certSalvando.value || !!certExcluindo.value || certAcaoRodando.value
+}
+function fecharAcaoCertificado() {
+  certAcao.value = null
+  certSenhaAcao.value = ''
+}
 function limparPainelCertificado() {
   certSenha.value = ''
+  certSenhaAtual.value = ''
   certMostrarDigitada.value = false
   certArquivo.value = null
   certVence.value = ''
-  certSenhaGuardada.value = null
   certErro.value = null
   certLista.value = null
+  fecharAcaoCertificado()
 }
 function alternarCertificado(row: GridRow) {
   const abrindo = certAberto.value !== row.company.id
@@ -503,7 +526,7 @@ function certificadosDoPainel(row: GridRow): CertificadoItem[] {
   return row.certificado ? [row.certificado] : []
 }
 async function excluirCertificado(row: GridRow, cert: CertificadoItem) {
-  if (certExcluindo.value || certSalvando.value) return
+  if (certOcupado()) return
   const empresa = row.company.id
   const vence = cert.expires_at ? ` (vence ${dataBR(cert.expires_at)})` : ''
   if (!confirm(`Excluir o certificado ${cert.filename}${vence} de ${row.company.apelido}? O arquivo e a senha guardada são apagados de vez.`)) return
@@ -518,11 +541,7 @@ async function excluirCertificado(row: GridRow, cert: CertificadoItem) {
     }
     tirarCertificadoDaTela(empresa, cert.id)
     await refresh()
-    if (certAberto.value === empresa) {
-      // A senha revelada podia ser justamente a do certificado apagado.
-      certSenhaGuardada.value = null
-      await carregarListaCertificados(empresa)
-    }
+    if (certAberto.value === empresa) await carregarListaCertificados(empresa)
   } catch (e: any) {
     if (certAberto.value === empresa) certErro.value = mensagemDeErro(e, 'erro ao excluir o certificado')
   } finally {
@@ -534,7 +553,7 @@ async function excluirCertificado(row: GridRow, cert: CertificadoItem) {
 // certificado que já não existe.
 function tirarCertificadoDaTela(empresa: string, certId: string) {
   if (certAberto.value === empresa) {
-    certSenhaGuardada.value = null
+    if (certAcao.value?.id === certId) fecharAcaoCertificado()
     if (certLista.value) certLista.value = certLista.value.filter(c => c.id !== certId)
   }
   const linha = grid.value?.rows.find(r => r.company.id === empresa)
@@ -564,31 +583,101 @@ function escolherArquivoCertificado(ev: Event) {
   }
   certArquivo.value = f
 }
-function aindaEOCertificadoDaTela(empresa: string, certId: string) {
-  return certAberto.value === empresa
-    && grid.value?.rows.find(r => r.company.id === empresa)?.certificado?.id === certId
+function pedirAcaoCertificado(row: GridRow, c: CertificadoItem, tipo: AcaoCertificado['tipo']) {
+  if (certOcupado()) return
+  certErro.value = null
+  if (tipo === 'baixar' && !c.has_password) {
+    fecharAcaoCertificado()
+    baixarCertificado(row, c, '')
+    return
+  }
+  certAcao.value = { tipo, id: c.id }
+  certSenhaAcao.value = ''
 }
-async function mostrarSenhaGuardada(row: GridRow) {
-  const cert = row.certificado
-  if (!cert) return
+async function confirmarAcaoCertificado(row: GridRow, c: CertificadoItem) {
+  const acao = certAcao.value
+  if (!acao || acao.id !== c.id || certOcupado()) return
+  if (!certSenhaAcao.value.trim()) {
+    certErro.value = acao.tipo === 'baixar'
+      ? 'Digite a senha do certificado para baixar.'
+      : 'Digite a senha atual para excluir a senha.'
+    return
+  }
+  if (acao.tipo === 'baixar') await baixarCertificado(row, c, certSenhaAcao.value)
+  else await tirarSenhaCertificado(row, c, certSenhaAcao.value)
+}
+// Com `responseType: 'blob'` o erro também chega como arquivo: lê o JSON de
+// dentro para a mensagem ("senha incorreta") e a trava da tela funcionarem.
+async function lerErroDeArquivo(e: any) {
+  if (typeof Blob === 'undefined' || !(e?.data instanceof Blob)) return
+  try {
+    e.data = JSON.parse(await e.data.text())
+  } catch {
+    e.data = null
+  }
+  if (trava.eTravamento(e)) bloquear()
+}
+function salvarArquivoNoComputador(arquivo: Blob, nome: string) {
+  const href = URL.createObjectURL(arquivo)
+  const a = document.createElement('a')
+  a.href = href
+  a.download = nome
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  URL.revokeObjectURL(href)
+}
+async function baixarCertificado(row: GridRow, c: CertificadoItem, senha: string) {
+  if (certAcaoRodando.value) return
   const empresa = row.company.id
+  certAcaoRodando.value = true
+  certBaixandoId.value = c.id
   certErro.value = null
   try {
-    const r = await apiE<{ password: string | null }>(
-      `/api/companies/${empresa}/certificates/${cert.id}/password`,
-    )
-    // Se nesse meio tempo a pessoa abriu o painel de OUTRA empresa, ou o
-    // certificado foi excluído, a senha dele não pode aparecer no painel.
-    if (!aindaEOCertificadoDaTela(empresa, cert.id)) return
-    certSenhaGuardada.value = r.password || '(nenhuma senha guardada)'
+    // POST com a senha no corpo (nunca na URL). Sem senha o servidor só entrega
+    // se o certificado não tiver senha.
+    const arquivo = await apiE<Blob>(`/api/companies/${empresa}/certificates/${c.id}/download`, {
+      method: 'POST',
+      body: { password: senha || null },
+      responseType: 'blob',
+    })
+    salvarArquivoNoComputador(arquivo, c.filename)
+    if (certAberto.value === empresa) fecharAcaoCertificado()
   } catch (e: any) {
-    if (aindaEOCertificadoDaTela(empresa, cert.id)) certErro.value = mensagemDeErro(e, 'não foi possível mostrar a senha')
+    await lerErroDeArquivo(e)
+    if (certAberto.value === empresa) certErro.value = mensagemDeErro(e, 'erro ao baixar o certificado')
+  } finally {
+    certAcaoRodando.value = false
+    certBaixandoId.value = null
+  }
+}
+async function tirarSenhaCertificado(row: GridRow, c: CertificadoItem, senhaAtual: string) {
+  if (certAcaoRodando.value) return
+  const empresa = row.company.id
+  certAcaoRodando.value = true
+  certErro.value = null
+  try {
+    await apiE(`/api/companies/${empresa}/certificates/${c.id}`, {
+      method: 'PATCH',
+      body: { password: null, current_password: senhaAtual },
+    })
+    if (certAberto.value === empresa) {
+      fecharAcaoCertificado()
+      if (certLista.value) {
+        certLista.value = certLista.value.map(x => (x.id === c.id ? { ...x, has_password: false } : x))
+      }
+    }
+    await refresh()
+  } catch (e: any) {
+    if (certAberto.value === empresa) certErro.value = mensagemDeErro(e, 'erro ao excluir a senha')
+  } finally {
+    certAcaoRodando.value = false
   }
 }
 async function salvarCertificado(row: GridRow) {
   // Enter apertado duas vezes (ou durante o envio) não pode subir o mesmo
-  // certificado duas vezes; nem salvar no meio de uma exclusão.
-  if (certSalvando.value || certExcluindo.value) return
+  // certificado duas vezes; nem salvar no meio de uma exclusão ou download.
+  if (certOcupado()) return
   const cert = row.certificado
   const empresa = row.company.id
   const senha = certSenha.value
@@ -604,6 +693,11 @@ async function salvarCertificado(row: GridRow) {
     certErro.value = 'Digite a senha do certificado.'
     return
   }
+  // Trocar a senha de um certificado travado pede a senha atual.
+  if (cert && !certArquivo.value && cert.has_password && !certSenhaAtual.value.trim()) {
+    certErro.value = 'Digite a senha atual para trocar a senha.'
+    return
+  }
   certSalvando.value = true
   try {
     if (certArquivo.value) {
@@ -617,7 +711,7 @@ async function salvarCertificado(row: GridRow) {
       // Só a senha, e nunca vazia: vazio apagaria a senha guardada.
       await apiE(`/api/companies/${empresa}/certificates/${cert.id}`, {
         method: 'PATCH',
-        body: { password: senha },
+        body: { password: senha, current_password: cert.has_password ? certSenhaAtual.value : null },
       })
     }
     if (certAberto.value === empresa) fecharCertificado()
@@ -1164,7 +1258,7 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
                   <span class="text-muted-foreground">+ adicionar</span>
                 </template>
                 <template v-else>
-                  <span v-if="row.certificado.has_password" class="text-green-600">✓ com senha</span>
+                  <span v-if="row.certificado.has_password" class="text-green-600">🔒 com senha</span>
                   <span v-else class="text-amber-600">⚠ sem senha</span>
                   <span
                     v-if="vencimentoCertificado(row.certificado)"
@@ -1205,12 +1299,13 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
                   <li
                     v-for="(c, i) in certificadosDoPainel(row)"
                     :key="c.id"
-                    class="flex items-start justify-between gap-2 rounded border px-2 py-1"
+                    class="rounded border px-2 py-1 space-y-1"
                   >
+                    <div class="flex items-start justify-between gap-2">
                     <div class="min-w-0 text-muted-foreground">
                       <div class="truncate text-foreground" :title="c.filename">{{ c.filename }}</div>
                       <div>
-                        <span v-if="c.has_password" class="text-green-600">✓ com senha</span>
+                        <span v-if="c.has_password" class="text-green-600">🔒 com senha</span>
                         <span v-else class="text-amber-600">⚠ sem senha</span>
                         <span
                           v-if="vencimentoCertificado(c)"
@@ -1224,14 +1319,62 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
                         <span v-if="i === 0 && certificadosDoPainel(row).length > 1"> · o mais novo</span>
                       </div>
                     </div>
-                    <button
-                      type="button"
-                      class="shrink-0 text-red-600 hover:underline disabled:opacity-50"
-                      :disabled="!!certExcluindo || certSalvando"
-                      @click="excluirCertificado(row, c)"
-                    >
-                      {{ certExcluindo === c.id ? 'excluindo…' : 'excluir' }}
-                    </button>
+                    <div class="shrink-0 flex flex-col items-end gap-0.5">
+                      <button
+                        type="button"
+                        class="text-blue-600 hover:underline disabled:opacity-50"
+                        :disabled="certOcupado()"
+                        @click="pedirAcaoCertificado(row, c, 'baixar')"
+                      >
+                        {{ certBaixandoId === c.id ? 'baixando…' : 'baixar' }}
+                      </button>
+                      <button
+                        v-if="c.has_password"
+                        type="button"
+                        class="text-amber-700 hover:underline disabled:opacity-50"
+                        :disabled="certOcupado()"
+                        @click="pedirAcaoCertificado(row, c, 'tirar_senha')"
+                      >
+                        excluir senha
+                      </button>
+                      <button
+                        type="button"
+                        class="text-red-600 hover:underline disabled:opacity-50"
+                        :disabled="certOcupado()"
+                        @click="excluirCertificado(row, c)"
+                      >
+                        {{ certExcluindo === c.id ? 'excluindo…' : 'excluir' }}
+                      </button>
+                    </div>
+                    </div>
+                    <!-- Senha pedida na hora: para baixar (a senha é a trava) ou para
+                         excluir a senha (pede a atual). -->
+                    <div v-if="certAcao?.id === c.id" class="flex items-center gap-1">
+                      <input
+                        v-model="certSenhaAcao"
+                        type="password"
+                        autocomplete="off"
+                        data-lpignore="true"
+                        data-1p-ignore
+                        :placeholder="certAcao.tipo === 'baixar' ? 'senha do certificado' : 'senha atual'"
+                        :aria-label="certAcao.tipo === 'baixar' ? `Senha para baixar ${c.filename}` : `Senha atual de ${c.filename}`"
+                        class="flex-1 min-w-0 border rounded px-2 py-1 bg-background"
+                        @keydown.enter.prevent="confirmarAcaoCertificado(row, c)"
+                        @keydown.escape.stop="fecharAcaoCertificado"
+                      />
+                      <button
+                        type="button"
+                        class="rounded px-2 py-1 text-white disabled:opacity-50"
+                        :class="certAcao.tipo === 'baixar' ? 'bg-blue-600 hover:bg-blue-700' : 'bg-amber-600 hover:bg-amber-700'"
+                        :disabled="certAcaoRodando"
+                        @click="confirmarAcaoCertificado(row, c)"
+                      >
+                        {{ certAcao.tipo === 'baixar' ? 'baixar' : 'excluir senha' }}
+                      </button>
+                      <button type="button" class="border rounded px-2 py-1 hover:bg-accent/40" @click="fecharAcaoCertificado">
+                        cancelar
+                      </button>
+                    </div>
                   </li>
                 </ul>
                 <div v-if="certificadosDoPainel(row).length > 1" class="text-muted-foreground">
@@ -1239,8 +1382,22 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
                   acrescenta outro certificado; os de cima continuam até você excluir.
                 </div>
 
+                <label v-if="row.certificado?.has_password && !certArquivo" class="block space-y-1">
+                  <span>Senha atual (para trocar a senha)</span>
+                  <input
+                    v-model="certSenhaAtual"
+                    type="password"
+                    autocomplete="off"
+                    data-lpignore="true"
+                    data-1p-ignore
+                    placeholder="senha atual"
+                    class="w-full border rounded px-2 py-1 bg-background"
+                    @keydown.enter.prevent="salvarCertificado(row)"
+                  />
+                </label>
+
                 <label class="block space-y-1">
-                  <span>Senha do certificado</span>
+                  <span>{{ row.certificado?.has_password && !certArquivo ? 'Nova senha' : 'Senha do certificado' }}</span>
                   <div class="flex items-center gap-1">
                     <input
                       v-model="certSenha"
@@ -1273,24 +1430,6 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
                   <input v-model="certVence" type="date" class="border rounded px-2 py-1 bg-background" />
                 </label>
 
-                <div v-if="row.certificado?.has_password" class="text-muted-foreground">
-                  <button
-                    v-if="!certSenhaGuardada"
-                    type="button"
-                    class="text-blue-600 hover:underline disabled:opacity-50"
-                    :disabled="!!certExcluindo"
-                    @click="mostrarSenhaGuardada(row)"
-                  >
-                    ver a senha guardada
-                  </button>
-                  <template v-else>
-                    <span class="font-mono text-foreground select-all">{{ certSenhaGuardada }}</span>
-                    <button type="button" class="ml-2 text-blue-600 hover:underline" @click="certSenhaGuardada = null">
-                      ocultar
-                    </button>
-                  </template>
-                </div>
-
                 <div v-if="certErro" class="text-red-600">{{ certErro }}</div>
 
                 <div class="flex justify-end gap-2 pt-1">
@@ -1298,7 +1437,7 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
                   <button
                     type="button"
                     class="rounded px-3 py-1 bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50"
-                    :disabled="certSalvando || !!certExcluindo"
+                    :disabled="certOcupado()"
                     @click="salvarCertificado(row)"
                   >
                     {{ certSalvando ? 'salvando…' : 'salvar' }}

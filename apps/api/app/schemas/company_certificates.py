@@ -21,7 +21,8 @@ class CertificateOut(BaseModel):
     updated_at: datetime
 
 
-class CertificatePasswordOut(BaseModel):
+class CertificateDownloadIn(BaseModel):
+    # Obrigatória quando o certificado tem senha (a senha é a trava).
     password: str | None = None
 
 
@@ -32,3 +33,6 @@ class CertificatePatch(BaseModel):
     # `password` presente e não-vazio troca a senha; presente e vazio/nulo
     # remove a senha guardada; ausente mantém a atual (exclude_unset).
     password: str | None = None
+    # Senha atual: obrigatória para trocar/excluir a senha de um certificado
+    # que já tem senha (a senha é a trava do certificado).
+    current_password: str | None = None
