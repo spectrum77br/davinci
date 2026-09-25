@@ -38,7 +38,7 @@ env = dict(os.environ)
 env["PATH"] = os.pathsep.join([os.path.expanduser("~/.local/bin"),
                                os.path.expanduser("~/.hermes/node/bin"), env.get("PATH", "/usr/bin:/bin")])
 r = subprocess.run([os.path.expanduser("~/.local/bin/hermes"), "-z", PROMPT + "\n\n" + saida,
-                    "-s", "ia-de-chamado", "-t", "terminal,file", "-m", "claude-opus-5-5",
+                    "-s", "ia-de-chamado", "-t", "terminal,file", "-m", "claude-sonnet-5",
                     "--provider", "anthropic", "--reasoning", "xhigh"],
                    capture_output=True, text=True, env=env, timeout=3000)
 print((r.stdout or r.stderr or "").strip()[-3000:])

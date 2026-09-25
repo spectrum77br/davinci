@@ -185,7 +185,7 @@ def main() -> None:
         env = dict(os.environ, BROWSER_CDP_URL=aberto["cdp"], PATH=caminho)
         try:
             r = subprocess.run(
-                [HERMES, "-z", prompt, "-t", "browser", "-m", "claude-opus-5-5",
+                [HERMES, "-z", prompt, "-t", "browser", "-m", "claude-sonnet-5",
                  "--provider", "anthropic", "--reasoning", "xhigh"],
                 capture_output=True, text=True, env=env, timeout=1800,
             )

@@ -27,8 +27,8 @@ DaVinci (nuvem)                                   Hermes (Mac Santiago)
 | `~/DaVinci/cerebro/.env` (chmod 600) | `DAVINCI_CEREBRO_TOKEN` e os filtros (`DAVINCI_CEREBRO_PLATAFORMA`, `_CANAIS`, `_LIMITE`) |
 | `~/DaVinci/cerebro/decisoes.jsonl` | toda decisão, com a resposta do DaVinci |
 | launchd `ai.hermes.gateway` | o agendador do Hermes (volta sozinho) |
-| cron `ia-de-chamado-forte` (`ia_chamado_forte.py`) | a cada 1 min, **Opus 5.5 esforço extra**: instrução de pessoa (inclui a correção do ✗) e envio travado |
-| cron `ia-de-chamado-simples` (`ia_chamado_simples.py`) | a cada 1 min, **Sonnet 5 esforço médio**: a plataforma respondeu, sem instrução (metade do preço) |
+| cron `ia-de-chamado-forte` (`ia_chamado_forte.py`) | a cada 1 min, **Sonnet 5 esforço extra** (25/09, antes Opus 5.5 — custo): instrução de pessoa (inclui a correção do ✗) e envio travado |
+| cron `ia-de-chamado-simples` (`ia_chamado_simples.py`) | a cada 1 min, **Sonnet 5 esforço extra** (25/09): a plataforma respondeu, sem instrução (metade do preço) |
 
 A IA nunca vê o token: o script lê o `.env` sozinho. O token é da IA (tabela
 `chamados_cerebros`, migração 0319 — só o sha256 no banco) e só abre as rotas do
