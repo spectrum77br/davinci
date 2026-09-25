@@ -4,11 +4,15 @@
  *  que poste na conversa com o cliente. */
 import { cfg } from "./config";
 
-/** Um caso pra reler. `chamado` = nº da solicitação na Shopee (ex.
- *  2609200FUTKM4JD); a busca na tela é pelo `pedido_marketplace`. */
+/** Um caso pra reler. `tipo: devolucao` — `chamado` = nº da solicitação na
+ *  Shopee (ex. 2609200FUTKM4JD) e a busca na tela é pelo `pedido_marketplace`.
+ *  `tipo: portal` (25/09) — `chamado` = ID da consulta no Portal de Atendimento
+ *  e `chamado_url` = a página dela. */
 export interface Caso {
   chamado_id: string;
   chamado: string;
+  chamado_url?: string | null;
+  tipo?: "devolucao" | "portal";
   pedido_bling: string | null;
   pedido_marketplace: string | null;
   conta: string | null;
@@ -52,11 +56,17 @@ async function post<T>(path: string, body: unknown): Promise<T> {
 
 /** Casos pra reler agora. `espiar` = só olha (não marca a entrega) — modo seco
  *  e o `--so`. `contas` = as lojas que este Mac tem perfil pra abrir. */
-export async function fila(limite: number, contas: string[], espiar: boolean): Promise<Caso[]> {
+export async function fila(
+  limite: number,
+  contas: string[],
+  espiar: boolean,
+  portal: boolean
+): Promise<Caso[]> {
   const data = await post<{ casos: Caso[] }>("/api/chamados/agent/leitor/fila", {
     limite,
     contas,
     espiar,
+    portal,
   });
   return data.casos ?? [];
 }

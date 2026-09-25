@@ -17,6 +17,10 @@
  *   3. real: manda o que leu (/agent/leitor/resultado); seco: grava em
  *      logs/seco/ e não manda nada.
  *
+ * 25/09 (292592): a fila também traz consulta do Portal de Atendimento ao
+ * Vendedor (`tipo: portal`) — chamado que o robô abriu NA TELA, pelo Portal.
+ * Essa é lida pelo link direto (shopee_portal.ts), não pela busca do pedido.
+ *
  * Uso:
  *   npm start                         loop (LEITURA_MODO do .env, default seco)
  *   npm start -- --uma-vez            uma passada e sai
@@ -37,9 +41,10 @@ import * as adspower from "./adspower";
 import * as davinci from "./davinci";
 import * as perfis from "./perfis";
 import * as historico from "./shopee_historico";
+import * as portal from "./shopee_portal";
 import type { Caso } from "./davinci";
 
-const VERSION = "1.0.0";
+const VERSION = "1.1.0";
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 function arg(nome: string): string | undefined {
@@ -98,9 +103,12 @@ async function print(page: Page, nome: string): Promise<string | undefined> {
 }
 
 async function lerUm(page: Page, caso: Caso, real: boolean): Promise<void> {
-  const rot = `pedido ${caso.pedido_bling || "?"} (${caso.pedido_marketplace} / ${caso.chamado})`;
+  const noPortal = caso.tipo === "portal";
+  const rot =
+    `pedido ${caso.pedido_bling || "?"} (${caso.pedido_marketplace} / ` +
+    `${noPortal ? "consulta " : ""}${caso.chamado})`;
   try {
-    const l = await historico.ler(page, caso);
+    const l = noPortal ? await portal.ler(page, caso) : await historico.ler(page, caso);
     log.info(`${rot}: ${l.itens.length} mensagem(ns) na janela, ${l.falas.length} da Shopee`);
     if (!real) {
       fs.mkdirSync(cfg.secoDir, { recursive: true });
@@ -143,7 +151,7 @@ async function passada(): Promise<void> {
     const contas = [...mapa.keys()];
     // `--so` sempre espia: não marca a entrega dos outros casos da fila.
     const espiar = cfg.modo === "seco" || !!SO;
-    let casos = await davinci.fila(SO ? 200 : cfg.limite, contas, espiar);
+    let casos = await davinci.fila(SO ? 200 : cfg.limite, contas, espiar, cfg.portal);
     if (SO) {
       casos = casos.filter((c) =>
         [c.chamado_id, c.pedido_bling, c.pedido_marketplace, c.chamado].includes(SO)

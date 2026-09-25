@@ -1,7 +1,8 @@
 # Executor de leitura de chamado
 
 Robô do Mac Santiago que **lê** o "Histórico da Solicitação" das devoluções da
-Shopee no Seller Center e devolve o texto pro chamado do DaVinci. Nasceu no
+Shopee no Seller Center — e, desde 25/09, as **consultas do Portal de
+Atendimento ao Vendedor** — e devolve o texto pro chamado do DaVinci. Nasceu no
 chamado 2609200FUTKM4JD (pedido 296012, 24/09/2026): a Shopee recusou a disputa
 às 15:59 com uma explicação escrita, a API dela seguia dizendo "aguardando
 análise", e o chamado ficou mudo.
@@ -22,6 +23,13 @@ análise", e o chamado ficou mudo.
 4. `real`: as falas do **Agente da Shopee** entram no chamado com a hora da
    tela, e a página inteira vira o "histórico" (só contexto). `seco`: grava em
    `logs/seco/` e não manda nada.
+
+**Portal de Atendimento** (`tipo: portal`, 25/09 — 292592): chamado que o robô
+abriu NA TELA pelo Portal (`chamado` = ID da consulta). Abre direto
+`seller-service.cs.shopee.com.br/detail/<ID>` no perfil da loja, clica "Ver N
+mais conversas" (só expande a lista) e lê cada mensagem — o texto do agente
+fica num `<shadow-html data-html>` que o innerText não enxerga. "Caso
+concluído" não fecha o chamado. `LEITURA_PORTAL=0` no `.env` desliga.
 
 Loja → perfil: casa pelo nome do perfil (`Vortan - Shopee` → `Shopee Vortan`).
 O que não casar vai no `PERFIS_EXTRA` do `.env`.

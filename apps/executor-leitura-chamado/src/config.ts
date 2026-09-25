@@ -28,6 +28,8 @@ export interface Config {
   sellerUrl: string;
   debugDir: string;
   secoDir: string;
+  /** 25/09: também lê as consultas do Portal de Atendimento (LEITURA_PORTAL=0 desliga). */
+  portal: boolean;
   /** conta do chamado (minúscula) -> user_id do AdsPower, por cima do casamento
    *  automático pelo nome do perfil ("Vortan - Shopee" -> "Shopee Vortan"). */
   perfisExtra: Record<string, string>;
@@ -61,5 +63,6 @@ export const cfg: Config = {
   sellerUrl: str("SHOPEE_SELLER_URL", "https://seller.shopee.com.br").replace(/\/$/, ""),
   debugDir: str("DEBUG_DIR", "./debug"),
   secoDir: str("SECO_DIR", "./logs/seco"),
+  portal: str("LEITURA_PORTAL", "1") !== "0",
   perfisExtra: perfisExtra(),
 };
