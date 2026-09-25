@@ -34,7 +34,7 @@ def ligar() -> None:
 
 
 async def garantir_gatilhos(conn, schema: str) -> list[str]:
-    """Põe o gatilho em tabela que ainda não tem (criada depois da 0330, ou
+    """Põe o gatilho em tabela que ainda não tem (criada depois da 0331, ou
     que estava ocupada no deploy). Uma tabela por vez, com lock curto.
     `conn` é uma AsyncConnection em autocommit. Devolve as tabelas cobertas."""
     await conn.execute(text("SET lock_timeout = '3s'"))

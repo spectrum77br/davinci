@@ -18,8 +18,8 @@ gatilho é posto tabela por tabela, cada uma na sua transação curta, por
 (testado numa cópia da estrutura de produção: o autocommit_block do alembic
 não funciona com o env assíncrono daqui).
 
-Revision ID: 0330_historico
-Revises: 0329_chamado_mensagem_excluida
+Revision ID: 0331_historico
+Revises: 0330_pedido_outra_pessoa
 """
 
 from collections.abc import Sequence
@@ -30,8 +30,8 @@ from sqlalchemy.dialects import postgresql as pg
 from alembic import op
 from app.historico import sql as hsql
 
-revision: str = "0330_historico"
-down_revision: str | None = "0329_chamado_mensagem_excluida"
+revision: str = "0331_historico"
+down_revision: str | None = "0330_pedido_outra_pessoa"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

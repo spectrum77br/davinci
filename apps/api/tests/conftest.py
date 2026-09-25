@@ -311,7 +311,7 @@ async def _setup_schema():
             """
         ))
         # Histórico (25/09/2026): as mesmas funções e o mesmo gatilho da
-        # migration 0330, em todas as tabelas de negócio do schema de teste.
+        # migration 0331, em todas as tabelas de negócio do schema de teste.
         # Só gravam quando um pedido de pessoa marca a transação — os testes
         # que autenticam pelo `auth_as` não marcam nada.
         for comando in historico_sql.funcoes(TEST_SCHEMA):

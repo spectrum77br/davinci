@@ -2,7 +2,7 @@
 
     python -m app.historico.instalar
 
-Roda no deploy, logo depois da migration 0330, e o worker repete ao subir e
+Roda no deploy, logo depois da migration 0331, e o worker repete ao subir e
 todo dia (`historico_manutencao`): cobre tabela criada depois e tabela que
 estava ocupada. Cada tabela na sua transação curta, com lock_timeout de 3 s —
 se um robô está segurando a tabela, ela fica para a próxima rodada em vez de

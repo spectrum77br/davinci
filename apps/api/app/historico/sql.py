@@ -1,7 +1,7 @@
 # ruff: noqa: E501, S608  (texto SQL; o schema vem das settings, nunca do usuário)
 """SQL do Histórico: as funções e o gatilho que gravam antes/depois no banco.
 
-Usado pela migration 0330 (produção) e pelo conftest (testes), para os dois
+Usado pela migration 0331 (produção) e pelo conftest (testes), para os dois
 terem exatamente o mesmo gatilho.
 
 Por que gatilho no banco e não gancho no ORM: o mapeamento de 25/09/2026
