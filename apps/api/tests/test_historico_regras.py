@@ -12,6 +12,7 @@ from app.historico import nomes
 from app.historico import sql as hsql
 from app.historico.mascara import e_segredo, limpar_texto
 from app.main import app
+from app.models.base import Base
 
 SEGREDOS = [
     "password", "password_hash", "password_enc", "senha", "senha_enc", "sac_senha_enc",
@@ -85,7 +86,10 @@ async def test_toda_tabela_de_negocio_tem_o_gatilho(db):
             {"schema": "davinci_test", "gatilho": hsql.NOME_GATILHO},
         )
     ]
-    assert hsql.a_cobrir(sem) == []
+    # Só as tabelas dos models: outros testes criam tabelas avulsas no meio
+    # da bateria (depois da instalação), e em produção o worker cobre essas.
+    dos_models = {t.name for t in Base.metadata.sorted_tables}
+    assert [t for t in hsql.a_cobrir(sem) if t in dos_models] == []
     com = {
         r[0]
         for r in await db.execute(
