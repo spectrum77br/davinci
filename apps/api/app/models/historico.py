@@ -46,6 +46,8 @@ class HistoricoEvento(Base):
     ip: Mapped[str | None] = mapped_column(Text, nullable=True)
     corpo: Mapped[dict | list | None] = mapped_column(JSONB, nullable=True)
     n_alteracoes: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    # Nomes dos itens mudados, congelados na hora (busca por SKU, empresa…).
+    itens_texto: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class HistoricoAlteracao(Base):
@@ -69,6 +71,9 @@ class HistoricoAlteracao(Base):
     operacao: Mapped[str] = mapped_column(Text, nullable=False)
     registro_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     rotulo: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Nome do item como a tela mostra ("dg053 · ML kia"), resolvido e
+    # congelado quando o evento é gravado (sobrevive a renomear/apagar).
+    item: Mapped[str | None] = mapped_column(Text, nullable=True)
     antes: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     depois: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     ident: Mapped[dict | None] = mapped_column(JSONB, nullable=True)

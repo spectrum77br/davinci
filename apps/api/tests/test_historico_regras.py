@@ -39,6 +39,10 @@ TEXTOS = [
     ("proxy socks5://joao:s3nh4@1.2.3.4", "proxy socks5://***:***@1.2.3.4"),
     ("token APP_USR-1234567890-abcdef", "token APP_USR-***"),
     ("pedido 293114 enviado", "pedido 293114 enviado"),
+    ("login x senha: Abacaxi!", "login x senha: ***"),
+    ("Password: Loja2024!", "Password: ***"),
+    ('config {"api_key": "abc123", "x": 1}', 'config {"api_key": "***", "x": 1}'),
+    ("Authorization: Basic dXNlcjpwYXNz", "Authorization: Basic ***"),
 ]
 
 

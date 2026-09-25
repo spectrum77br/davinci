@@ -60,27 +60,52 @@ def e_segredo(nome: str) -> bool:
     return bool(_PALAVRA.search(n) or _SUFIXO.search(n))
 
 
+# Cada regra em duas versões, Python (corpo do pedido) e Postgres (gatilho):
+# (regex Python, troca Python, padrão Postgres, troca Postgres, flags Postgres).
+# O SQL do gatilho é GERADO desta lista (sql.py) e o teste confere que as duas
+# dão o mesmo resultado. No Postgres: \m = começo de palavra (\b lá é
+# backspace) e sem "(?:" — o text() do SQLAlchemy leria ":nome" como parâmetro.
+_PALAVRAS_SENHA = "segredo do cadeado|c[oó]digo do cadeado|senha|password|passwd|pwd|segredo|pin"
+_CHAVES_URL = (
+    "access_token|refresh_token|input_token|client_secret|partner_key|app_secret|code|state"
+    "|sign|signature|token|key|password|passwd|senha|api_key|apikey|secret"
+)
+_CHAVES_JSON = "password|passwd|senha|secret|client_secret|token|access_token|refresh_token|api_key|apikey"
+
+REGRAS_TEXTO = [
+    # Authorization: Bearer <token> / Basic <base64>
+    (r"\bbearer\s+[A-Za-z0-9._~+/=-]{8,}", "Bearer ***",
+     r"\mbearer\s+[A-Za-z0-9._~+/=-]{8,}", "Bearer ***", "gi"),
+    (r"\bbasic\s+[A-Za-z0-9+/=]{8,}", "Basic ***",
+     r"\mbasic\s+[A-Za-z0-9+/=]{8,}", "Basic ***", "gi"),
+    # ?code=…&state=…&password=…
+    (r"([?&](?:" + _CHAVES_URL + r")=)[^&#\s]+", r"\1***",
+     r"([?&](" + _CHAVES_URL + r")=)[^&#[:space:]]+", r"\1***", "gi"),
+    # socks5://usuario:senha@host
+    (r"://[^/\s:@]+:[^/\s@]+@", "://***:***@",
+     r"://[^/[:space:]:@]+:[^/[:space:]@]+@", "://***:***@", "g"),
+    # JWT e token do Mercado Livre
+    (r"eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}", "***",
+     r"eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}", "***", "g"),
+    (r"(APP_USR|TG)-[A-Za-z0-9-]{10,}", r"\1-***",
+     r"(APP_USR|TG)-[A-Za-z0-9-]{10,}", r"\1-***", "g"),
+    # JSON colado em texto: "api_key": "abc"
+    (r'("(?:' + _CHAVES_JSON + r')"\s*:\s*)"[^"]*"', r'\1"***"',
+     r'("(' + _CHAVES_JSON + r')"[[:space:]]*:[[:space:]]*)"[^"]*"', r'\1"***"', "gi"),
+    # "senha: Abacaxi!", "Password = Loja2024" — com ":" ou "=" esconde o que
+    # vier, mesmo sem número (até 3 palavras no meio: "senha do aparelho: …")
+    (r"\b(" + _PALAVRAS_SENHA + r")((?:\s+[^\W\d_]+){0,3}\s*[:=]\s*)[^\s,;]{2,}", r"\1\2***",
+     r"\m(" + _PALAVRAS_SENHA + r")(([[:space:]]+[[:alpha:]]+){0,3}[[:space:]]*[:=][[:space:]]*)[^[:space:],;]{2,}",
+     r"\1\2***", "gi"),
+    # "a senha é 4821", "senha 4821" — sem ":" só quando o valor tem número,
+    # para "Senha extra liberada" continuar legível
+    (r"\b(" + _PALAVRAS_SENHA + r")((?:\s+[^\W\d_]+){0,3}\s*(?:é|-)?\s*)(?=[^\s,.;]*\d)[^\s,;]{3,}",
+     r"\1\2***",
+     r"\m(" + _PALAVRAS_SENHA + r")(([[:space:]]+[[:alpha:]]+){0,3}[[:space:]]*(é|-)?[[:space:]]*)(?=[^[:space:],.;]*[0-9])[^[:space:],;]{3,}",
+     r"\1\2***", "gi"),
+]
 _TEXTO = [
-    (re.compile(r"\bbearer\s+[A-Za-z0-9._~+/=-]{8,}", re.I), "Bearer ***"),
-    (
-        re.compile(
-            r"([?&](?:access_token|refresh_token|input_token|client_secret|partner_key|app_secret"
-            r"|code|state|sign|signature|token|key)=)[^&#\s]+",
-            re.I,
-        ),
-        r"\1***",
-    ),
-    (re.compile(r"://[^/\s:@]+:[^/\s@]+@"), "://***:***@"),
-    (re.compile(r"eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}"), "***"),
-    (re.compile(r"(APP_USR|TG)-[A-Za-z0-9-]{10,}"), r"\1-***"),
-    (
-        re.compile(
-            r"\b(segredo do cadeado|c[oó]digo do cadeado|senha|segredo|pin)"
-            r"((?:\s+[^\W\d_]+){0,3}\s*(?:é|:|=|-)?\s*)(?=[^\s,.;]*\d)[^\s,;]{3,}",
-            re.I,
-        ),
-        r"\1\2***",
-    ),
+    (re.compile(py, re.I if "i" in flags else 0), troca) for py, troca, _pg, _tpg, flags in REGRAS_TEXTO
 ]
 
 

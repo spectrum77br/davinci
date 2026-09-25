@@ -382,6 +382,13 @@ async def me(
     )
     # Sistema › Histórico: a chave só aparece para quem está na lista — para
     # os outros (inclusive admin) nem o nome do campo existe na resposta.
-    if await session.get(HistoricoAcesso, user.id) is not None:
+    # Falha aqui (ex. migration que não rodou) nunca pode trancar o login.
+    try:
+        async with session.begin_nested():
+            ve = await session.get(HistoricoAcesso, user.id) is not None
+    except Exception:  # noqa: BLE001
+        logger.warning("historico_me_falhou")
+        ve = False
+    if ve:
         return JSONResponse({**out.model_dump(mode="json"), "historico": True})
     return out

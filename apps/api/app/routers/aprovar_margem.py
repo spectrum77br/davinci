@@ -26,6 +26,7 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
+from app.historico.contexto import identificar
 from app.models import User, UserRole, UserStatus
 from app.services import aprovar_link
 
@@ -198,6 +199,9 @@ async def aprovar(
         )
 
     usuario = await _usuario_sistema(session)
+    # Histórico: quem aprovou pelo celular aparece como "Aprovação via Threema"
+    # (o link não diz qual pessoa tocou no botão).
+    await identificar(session, usuario, via="threema")
 
     async def _aprovar(update_bling: bool) -> None:
         await _apply_bling_decision_by_pedido(

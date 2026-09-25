@@ -61,7 +61,18 @@ export const useAuthStore = defineStore('auth', {
         body: { email, password },
       })
       this.user = r.user
+      await this.recarregarDepoisDoLogin()
       return r
+    },
+
+    // A resposta do login não traz o que só o /me traz (ex. `historico`):
+    // sem isto o menu Histórico sumia e /historico dava "não encontrada"
+    // até apertar F5. Falhar aqui não atrapalha o login.
+    async recarregarDepoisDoLogin() {
+      if (this.user?.status !== 'active') return
+      const antes = this.user
+      await this.fetchMe()
+      if (!this.user) this.user = antes
     },
 
     async requestOtp(email: string, turnstileToken?: string) {
@@ -85,6 +96,7 @@ export const useAuthStore = defineStore('auth', {
         body: { email, code },
       })
       this.user = r.user
+      await this.recarregarDepoisDoLogin()
       return r
     },
 

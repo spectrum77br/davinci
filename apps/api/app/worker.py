@@ -2374,7 +2374,7 @@ async def sync_logs_partition_gc(ctx: dict) -> None:
 
 async def historico_manutencao(ctx: dict) -> None:
     """Sistema › Histórico: (1) põe o gatilho `historico_captura` em tabela
-    que ainda não tem — criada depois da migration 0329 ou ocupada no deploy
+    que ainda não tem — criada depois da migration 0330 ou ocupada no deploy
     (roda também ao subir o worker, então tabela nova de um deploy já sai
     coberta); (2) apaga o que passou de 1 ano."""
     from app.db import engine

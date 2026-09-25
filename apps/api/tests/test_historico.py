@@ -185,7 +185,8 @@ async def test_commit_no_meio_continua_marcando(db, make_user):
 
 @pytest.mark.asyncio
 async def test_teto_por_acao(db, make_user):
-    """Importar milhares de linhas não enche o disco: 500 detalhadas + 1 aviso."""
+    """Importar milhares de linhas não enche o disco: 200 detalhadas + 1 aviso,
+    e o teto vale para o PEDIDO inteiro, mesmo com vários commits."""
     eu = await make_user(role=UserRole.ADMIN)
     ator = Ator(metodo="POST", caminho="/api/x", grava=True, user_id=eu.id)
     token = abrir(ator)
@@ -193,15 +194,16 @@ async def test_teto_por_acao(db, make_user):
         from app.db import SessionLocal
 
         async with SessionLocal() as s:
-            await s.execute(text(
-                "INSERT INTO segments (id, name, slug) SELECT gen_random_uuid(), 'seg ' || g, 'seg-' || g"
-                " FROM generate_series(1, 520) g"
-            ))
-            await s.commit()
+            for lote in range(3):  # 3 transações de 150 no mesmo pedido
+                await s.execute(text(
+                    "INSERT INTO segments (id, name, slug) SELECT gen_random_uuid(),"
+                    f" 'seg {lote}-' || g, 'seg-{lote}-' || g FROM generate_series(1, 150) g"
+                ))
+                await s.commit()
     finally:
         fechar(token)
     linhas = await _alteracoes(db, tabela="segments")
-    assert len(linhas) == 501
+    assert len(linhas) == 201
     assert linhas[-1].operacao == "X"
 
 
@@ -312,7 +314,12 @@ async def test_eduardo_ve_e_gerencia(client, db, make_user):
     assert alt["verbo"] == "criou"
     assert alt["item"] == "dg053 · ML kia"  # nomes resolvidos pelas chaves
     campos = {c["nome"]: c for c in alt["campos"]}
-    assert campos["Preço manual"]["depois"] == "10"
+    assert campos["Preço manual"]["depois"] == "R$ 10,00"
+
+    # busca pelo SKU acha a mudança de preço (nome congelado no evento)
+    achou = (await client.get("/api/historico", params={"busca": "dg053"})).json()
+    assert [i for i in achou["items"] if i["id"] == preco[0]["id"]]
+    assert (await client.get("/api/historico", params={"busca": "nada-disso"})).json()["total"] == 0
 
     detalhe = (await client.get(f"/api/historico/{preco[0]['id']}")).json()
     assert detalhe["alteracoes"][0]["item"] == "dg053 · ML kia"
@@ -346,3 +353,120 @@ async def test_liberar_um_admin(client, db, make_user):
     assert (await client.get("/api/historico")).json()["pode_gerenciar"] is False
     assert (await client.get("/api/historico/acesso")).status_code == 404
     assert (await client.put(f"/api/historico/acesso/{usuario_comum.id}", json={"liberado": True})).status_code == 404
+
+
+# --- correções da revisão de 25/09 --------------------------------------------------
+
+
+async def _chamar_middleware(app_falso, metodo="POST", caminho="/api/x"):
+    async def receive():
+        return {"type": "http.request", "body": b"{}", "more_body": False}
+
+    async def send(_msg):
+        return None
+
+    escopo = {"type": "http", "method": metodo, "path": caminho, "headers": []}
+    try:
+        await HistoricoMiddleware(app_falso)(escopo, receive, send)
+    except RuntimeError:
+        pass
+
+
+@pytest.mark.asyncio
+async def test_o_que_roda_depois_da_resposta_nao_e_da_pessoa(db, make_user):
+    """"Rodar agora" da Ouvidoria agenda o robô em BackgroundTasks, que o
+    Starlette roda depois de responder, ainda dentro do pedido. Isso é robô."""
+    eu = await make_user(role=UserRole.ADMIN)
+    eu_id = eu.id
+
+    async def app_falso(scope, receive, send):
+        a = ator_atual()
+        a.user_id, a.nome = eu_id, "eu"
+        from app.db import SessionLocal
+
+        async with SessionLocal() as s:  # durante o pedido: é da pessoa
+            await s.execute(text("UPDATE users SET name = 'antes' WHERE id = :i"), {"i": eu_id})
+            await s.commit()
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"{}"})
+        async with SessionLocal() as s:  # depois da resposta: robô
+            await s.execute(text("UPDATE users SET name = 'robo' WHERE id = :i"), {"i": eu_id})
+            await s.commit()
+
+    await _chamar_middleware(app_falso, "POST", "/api/ouvidoria/robos/x/rodar")
+    linhas = await _alteracoes(db, tabela="users")
+    assert [x.depois["name"] for x in linhas] == ["antes"]
+
+
+@pytest.mark.asyncio
+async def test_mudanca_com_erro_depois_do_commit_aparece(db, make_user):
+    """Rota que comita e depois responde 502 (ex. parte do Bling falhou): a
+    mudança aconteceu, então o evento fica, com o status do erro."""
+    eu = await make_user(role=UserRole.ADMIN)
+    eu_id = eu.id
+
+    async def app_falso(scope, receive, send):
+        a = ator_atual()
+        a.user_id, a.nome = eu_id, "eu"
+        from app.db import SessionLocal
+
+        async with SessionLocal() as s:
+            await s.execute(text("UPDATE users SET name = 'meio caminho' WHERE id = :i"), {"i": eu_id})
+            await s.commit()
+        await send({"type": "http.response.start", "status": 502, "headers": []})
+        await send({"type": "http.response.body", "body": b"{}"})
+
+    await _chamar_middleware(app_falso)
+    [ev] = await _eventos(db)
+    assert ev.status == 502
+    assert ev.n_alteracoes == 1
+
+
+@pytest.mark.asyncio
+async def test_permissao_mostra_so_o_que_mudou_e_numeros_legiveis(client, db, make_user):
+    eu = await make_user(role=UserRole.ADMIN)
+    await _liberar(db, eu, gerente=True)
+    joana = await make_user(role=UserRole.USER, permissions={"margem": {"view": True}})
+    joana_id = joana.id
+    ator = Ator(metodo="PATCH", caminho="/api/users/x", grava=True, escrita=True, user_id=eu.id)
+    token = abrir(ator)
+    try:
+        from app.db import SessionLocal
+
+        async with SessionLocal() as s:
+            await s.execute(
+                text("UPDATE users SET permissions = :p WHERE id = :i"),
+                {"p": '{"margem": {"view": true, "edit": true}}', "i": joana_id},
+            )
+            await s.commit()
+    finally:
+        fechar(token)
+    [alt] = await _alteracoes(db, tabela="users")
+    from app.historico import leitura
+
+    campos = leitura.campos(alt, {})
+    assert [(c["nome"], c["antes"], c["depois"]) for c in campos] == [
+        ("Permissões › margem › edit", "—", "sim")
+    ]
+    assert leitura.fmt(0.125, "margin1") == "12,5%"
+    assert leitura.fmt(0.1234, "commission") == "12,34%"
+    assert leitura.fmt(1249, "price_override") == "R$ 1.249,00"
+    assert leitura.fmt("2026-09-25T22:30:00-03:00") == "25/09/2026 22:30"
+    assert leitura.fmt(293114, "numero") == "293114"
+
+
+@pytest.mark.asyncio
+async def test_tirar_quem_foi_suspenso(client, db, make_user):
+    eu = await make_user(role=UserRole.ADMIN)
+    joana = await make_user(role=UserRole.ADMIN)
+    joana_id = joana.id
+    await _liberar(db, eu, gerente=True)
+    await _liberar(db, joana)
+    await db.execute(text("UPDATE users SET status = 'suspended' WHERE id = :i"), {"i": joana_id})
+    await db.commit()
+    _logar(client, eu)
+    lista = {x["id"]: x for x in (await client.get("/api/historico/acesso")).json()}
+    assert lista[str(joana_id)]["situacao"] == "suspenso"
+    r = await client.put(f"/api/historico/acesso/{joana_id}", json={"liberado": False})
+    assert r.status_code == 200
+    assert await db.get(HistoricoAcesso, joana_id) is None

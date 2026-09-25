@@ -18,8 +18,8 @@ gatilho é posto tabela por tabela, cada uma na sua transação curta, por
 (testado numa cópia da estrutura de produção: o autocommit_block do alembic
 não funciona com o env assíncrono daqui).
 
-Revision ID: 0329_historico
-Revises: 0328_criativos_fila_posicao
+Revision ID: 0330_historico
+Revises: 0329_chamado_mensagem_excluida
 """
 
 from collections.abc import Sequence
@@ -30,8 +30,8 @@ from sqlalchemy.dialects import postgresql as pg
 from alembic import op
 from app.historico import sql as hsql
 
-revision: str = "0329_historico"
-down_revision: str | None = "0328_criativos_fila_posicao"
+revision: str = "0330_historico"
+down_revision: str | None = "0329_chamado_mensagem_excluida"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
@@ -57,6 +57,7 @@ def upgrade() -> None:
         sa.Column("ip", sa.Text(), nullable=True),
         sa.Column("corpo", pg.JSONB(), nullable=True),
         sa.Column("n_alteracoes", sa.Integer(), server_default="0", nullable=False),
+        sa.Column("itens_texto", sa.Text(), nullable=True),
         sa.ForeignKeyConstraint(
             ["ator_id"], [f"{SCHEMA}.users.id"],
             name="fk_historico_evento_ator_id_users", ondelete="SET NULL",
@@ -88,6 +89,7 @@ def upgrade() -> None:
         sa.Column("operacao", sa.Text(), nullable=False),
         sa.Column("registro_id", sa.Text(), nullable=True),
         sa.Column("rotulo", sa.Text(), nullable=True),
+        sa.Column("item", sa.Text(), nullable=True),
         sa.Column("antes", pg.JSONB(), nullable=True),
         sa.Column("depois", pg.JSONB(), nullable=True),
         sa.Column("ident", pg.JSONB(), nullable=True),

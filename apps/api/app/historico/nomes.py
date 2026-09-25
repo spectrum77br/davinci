@@ -163,6 +163,20 @@ ACOES: dict[tuple[str, str], str] = {
     ("POST", "/api/informar/{contexto}/enviar"): "enviou relatório no Threema",
     ("POST", "/api/email-padroes/{padrao_id}/enviar-teste"): "enviou e-mail de teste",
     ("POST", "/api/metrics/reset"): "zerou as métricas",
+    # Desde 25/09 baixar o certificado é POST com a senha dele no corpo.
+    ("POST", "/api/companies/{company_id}/certificates/{cert_id}/download"): "baixou o certificado digital",
+}
+
+# Só a frase (o evento fica se o banco mudou): GET que carimba e retorno de
+# login de marketplace.
+FRASES: dict[tuple[str, str], str] = {
+    ("GET", "/api/estoque/pedidos/{pedido_bling}/etiqueta"): "imprimiu a etiqueta",
+    ("GET", "/api/integrations/ml/callback"): "conectou conta do Mercado Livre",
+    ("GET", "/api/integrations/tiktok/callback"): "conectou conta do TikTok",
+    ("GET", "/api/integrations/magalu/callback"): "conectou conta da Magalu",
+    ("GET", "/api/integrations/shopee/callback/{state}"): "conectou conta da Shopee",
+    ("GET", "/api/oauth/{provider}/callback"): "conectou conta de marketplace",
+    ("POST", "/api/aprovar/{token}"): "aprovou o pedido pelo celular (Threema)",
 }
 
 # Ver uma senha ou baixar um certificado: não muda nada, mas precisa ficar.
@@ -172,8 +186,6 @@ REVELACOES: dict[tuple[str, str], str] = {
     ("GET", "/api/marcas/{marca_id}/senha"): "viu a senha da marca",
     ("GET", "/api/redes-sociais/marca/{marca_id}/sac-senha"): "viu a senha do SAC da marca",
     ("GET", "/api/redes-sociais/{rede_id}/senha"): "viu a senha da rede social",
-    ("GET", "/api/companies/{company_id}/certificates/{cert_id}/password"): "viu a senha do certificado digital",
-    ("GET", "/api/companies/{company_id}/certificates/{cert_id}/download"): "baixou o certificado digital",
 }
 
 # Pedidos de pessoa que na verdade rodam robô: o recarregar automático da
@@ -183,10 +195,17 @@ ROTAS_DE_ROBO: set[tuple[str, str]] = {
     ("POST", "/api/margens/marketplace/refresh"),
 }
 
+# GET que muda coisa e é de pessoa: marca a etiqueta como impressa, e o
+# retorno do login de marketplace (reconectar conta). Casado no endereço cru,
+# antes de o roteador escolher a rota.
+GET_QUE_GRAVA = re.compile(
+    r"^/api/(estoque/pedidos/[^/]+/etiqueta$|integrations/[a-z]+/callback(/|$)|oauth/[a-z]+/callback$)"
+)
+
 # Corpo nunca guardado (senha, código de login, segredo no caminho).
 SEM_CORPO = re.compile(
     r"^/api/(auth/|pricing/mega/login|companies/unlock|financeiro/valuation/unlock"
-    r"|claude-mcp/|webhooks/|aprovar/)|/callback"
+    r"|claude-mcp/|webhooks/|aprovar/)|/callback|/certificates/[^/]+/download$"
 )
 
 # Parâmetro de caminho que é segredo: vira *** no endereço guardado.
@@ -198,7 +217,10 @@ TABELAS: dict[str, str] = {
     "pricing_overrides": "Preço da célula",
     "pricing_accounts": "Conta (Tabela de preços)",
     "pricing_products": "Produto (Tabela de preços)",
-    "pricing_dismissed_skus": "Pendência dispensada (Tabela de preços)",
+    "audit_dismissed_skus": "Pendência dispensada (Tabela de preços)",
+    "audit_uploads": "Planilha da auditoria de preços",
+    "audit_runs": "Rodada da auditoria de preços",
+    "pricing_product_variant": "Variação de produto (Tabela de preços)",
     "store_info": "Loja",
     "stores": "Conta de marketplace",
     "companies": "Empresa",

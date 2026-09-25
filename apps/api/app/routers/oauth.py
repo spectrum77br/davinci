@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.db import get_session
 from app.deps.auth import require_permission
+from app.historico.contexto import identificar_por_id
 from app.models import (
     Integration,
     IntegrationPlatform,
@@ -92,6 +93,8 @@ async def oauth_callback(
         raise HTTPException(400, detail={"code": "state_expired"})
     if row.platform != platform:
         raise HTTPException(400, detail={"code": "state_platform_mismatch"})
+    # Histórico: reconectar conta de marketplace fica no nome de quem pediu.
+    await identificar_por_id(session, row.user_id)
 
     try:
         creds, exp_at = await oauth_exchange_code(platform, code)

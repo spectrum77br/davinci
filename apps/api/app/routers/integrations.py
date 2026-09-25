@@ -15,6 +15,7 @@ from app.config import get_settings
 from app.db import get_session
 from app.deps.auth import require_active_user, require_permission
 from app.deps.team_scope import resolve_team_scope
+from app.historico.contexto import identificar_por_id
 from app.models import (
     Integration,
     IntegrationPlatform,
@@ -338,6 +339,8 @@ async def tiktok_oauth_callback(
         raise HTTPException(400, detail={"code": "state_expired"})
     if row.platform != IntegrationPlatform.TIKTOK:
         raise HTTPException(400, detail={"code": "state_platform_mismatch"})
+    # Histórico: reconectar conta de marketplace fica no nome de quem pediu.
+    await identificar_por_id(session, row.user_id)
 
     integ: Integration | None = None
     if row.code_verifier:
@@ -469,6 +472,8 @@ async def ml_oauth_callback(
         raise HTTPException(400, detail={"code": "state_expired"})
     if row.platform != IntegrationPlatform.ML:
         raise HTTPException(400, detail={"code": "state_platform_mismatch"})
+    # Histórico: reconectar conta de marketplace fica no nome de quem pediu.
+    await identificar_por_id(session, row.user_id)
 
     integ: Integration | None = None
     if row.code_verifier:
@@ -587,6 +592,8 @@ async def magalu_oauth_callback(
         raise HTTPException(400, detail={"code": "state_expired"})
     if row.platform != IntegrationPlatform.MAGALU:
         raise HTTPException(400, detail={"code": "state_platform_mismatch"})
+    # Histórico: reconectar conta de marketplace fica no nome de quem pediu.
+    await identificar_por_id(session, row.user_id)
 
     integ: Integration | None = None
     if row.code_verifier:
@@ -721,6 +728,8 @@ async def shopee_oauth_callback(
         raise HTTPException(400, detail={"code": "state_expired"})
     if row.platform != IntegrationPlatform.SHOPEE:
         raise HTTPException(400, detail={"code": "state_platform_mismatch"})
+    # Histórico: reconectar conta de marketplace fica no nome de quem pediu.
+    await identificar_por_id(session, row.user_id)
     if not shop_id:
         raise HTTPException(400, detail={"code": "missing_shop_id"})
 

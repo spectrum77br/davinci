@@ -1,7 +1,7 @@
 # ruff: noqa: E501, S608  (texto SQL; o schema vem das settings, nunca do usuário)
 """SQL do Histórico: as funções e o gatilho que gravam antes/depois no banco.
 
-Usado pela migration 0329 (produção) e pelo conftest (testes), para os dois
+Usado pela migration 0330 (produção) e pelo conftest (testes), para os dois
 terem exatamente o mesmo gatilho.
 
 Por que gatilho no banco e não gancho no ORM: o mapeamento de 25/09/2026
@@ -19,13 +19,14 @@ from __future__ import annotations
 
 import re
 
-from app.historico.mascara import _EXATOS, _LIVRES, _NEUTRO, _PALAVRA, _SUFIXO
+from app.historico.mascara import _EXATOS, _LIVRES, _NEUTRO, _PALAVRA, _SUFIXO, REGRAS_TEXTO
 
 NOME_GATILHO = "historico_captura"
 
 # Até quantas linhas um único pedido detalha. Acima disso fica uma linha
-# "e mais alterações" (ex. importar uma planilha de 5 mil produtos).
-TETO_POR_TRANSACAO = 500
+# "e mais alterações" (ex. importar uma planilha de 5 mil produtos) e as
+# demais só são contadas — cada linha detalhada custa uma subtransação.
+TETO_POR_PEDIDO = 200
 
 # Tabelas que nunca recebem o gatilho: as do próprio Histórico (menos
 # historico_acesso: liberar alguém também fica registrado), as de
@@ -33,10 +34,13 @@ TETO_POR_TRANSACAO = 500
 # de segurança. O resto do schema recebe — inclusive tabelas criadas no
 # futuro, pelo `garantir_gatilhos` diário do worker.
 EXCLUIDAS = re.compile(
-    r"^(historico_(evento|alteracao)$|sync_logs|background_job|audit_|alembic_version$|auth_codes$"
+    r"^(historico_(evento|alteracao)$|sync_logs|background_job|alembic_version$|auth_codes$"
     r"|oauth_states$|pricing_push_idempotency$|pricing_push_confirmacao$"
-    r"|marketing_agent_heartbeat$|alerts$|verificar_margem$|perfis$)"
-    r"|(_audit$|_bak|bkp|backup)",
+    r"|marketing_agent_heartbeat$|alerts$|verificar_margem$|perfis$"
+    # trilhas que o próprio sistema já grava junto com a mudança da pessoa
+    r"|products_audit$|product_links_audit$|audit_em_andamento_data$|margem_audit$"
+    r"|bling_envio_evento$|bling_envio_correcao$|prioridade_estoque_movimentos$)"
+    r"|(_bak|bkp|backup)",
     re.I,
 )
 
@@ -55,6 +59,14 @@ _ROTULO = (
     "sku", "apelido", "nome", "name", "account_name", "titulo", "numero", "codigo",
     "razao_social", "slug", "label",
 )
+
+
+def _limpa_texto_sql() -> str:
+    expr = "t"
+    for _py, _troca, pg, troca_pg, flags in REGRAS_TEXTO:
+        assert "'" not in pg and "'" not in troca_pg
+        expr = f"regexp_replace({expr}, '{pg}', '{troca_pg}', '{flags}')"
+    return expr
 
 
 def _lista(valores) -> str:
@@ -77,19 +89,11 @@ LANGUAGE sql IMMUTABLE AS $$
   END
 $$""",
         # --- texto livre: senha escrita, token, link com chave ----------------
-        # Postgres: \\m = começo de palavra (\\b aqui seria backspace). Sem
-        # grupo "(?:" — o text() do SQLAlchemy leria ":nome" como parâmetro.
-        rf"""
+        # Gerado de mascara.REGRAS_TEXTO (a mesma lista do corpo dos pedidos).
+        f"""
 CREATE OR REPLACE FUNCTION {s}.historico_limpa_texto(t text) RETURNS text
 LANGUAGE sql IMMUTABLE AS $$
-  SELECT regexp_replace(regexp_replace(regexp_replace(regexp_replace(regexp_replace(
-         regexp_replace(t,
-    '\mbearer\s+[A-Za-z0-9._~+/=-]{{8,}}', 'Bearer ***', 'gi'),
-    '([?&](access_token|refresh_token|input_token|client_secret|partner_key|app_secret|code|state|sign|signature|token|key)=)[^&#[:space:]]+', '\1***', 'gi'),
-    '://[^/[:space:]:@]+:[^/[:space:]@]+@', '://***:***@', 'g'),
-    'eyJ[A-Za-z0-9_-]{{5,}}\.[A-Za-z0-9_-]{{5,}}\.[A-Za-z0-9_-]{{5,}}', '***', 'g'),
-    '(APP_USR|TG)-[A-Za-z0-9-]{{10,}}', '\1-***', 'g'),
-    '\m(segredo do cadeado|c[oó]digo do cadeado|senha|segredo|pin)(([[:space:]]+[[:alpha:]]+){{0,3}}[[:space:]]*(é|:|=|-)?[[:space:]]*)(?=[^[:space:],.;]*[0-9])[^[:space:],;]{{3,}}', '\1\2***', 'gi')
+  SELECT {_limpa_texto_sql()}
 $$""",
         # --- JSON: limpa chave secreta em qualquer profundidade --------------
         f"""
@@ -151,9 +155,12 @@ $$""",
 CREATE OR REPLACE FUNCTION {s}.historico_captura() RETURNS trigger
 LANGUAGE plpgsql AS $$
 DECLARE
+  v_ator_txt text;
+  v_req_txt text;
+  v_conta text;
+  v_n int;
   v_ator uuid;
   v_req uuid;
-  v_n int;
   v_old jsonb;
   v_new jsonb;
   v_linha jsonb;
@@ -163,70 +170,99 @@ DECLARE
   v_bin text[];
   k text;
 BEGIN
+  -- Nada aqui fora pode dar erro: só leitura de marca e contagem.
+  v_ator_txt := current_setting('davinci.ator', true);
+  IF v_ator_txt IS NULL OR v_ator_txt !~ '^[0-9a-fA-F-]{{36}}$' THEN
+    RETURN NULL;
+  END IF;
+  v_req_txt := coalesce(current_setting('davinci.req', true), '');
+
+  -- Teto POR PEDIDO (não por transação: rota que comita a cada linha não
+  -- escapa). A marca de sessão guarda "pedido:n"; na primeira linha do pedido
+  -- nesta conexão (cada commit pode pegar outra do pool) o ponto de partida é
+  -- o que o pedido já gravou. Checado antes de qualquer trabalho: acima do
+  -- teto a linha só conta.
+  v_conta := coalesce(current_setting('davinci.hist_conta', true), '');
+  IF v_req_txt <> '' AND split_part(v_conta, ':', 1) = v_req_txt
+     AND split_part(v_conta, ':', 2) ~ '^[0-9]+$' THEN
+    v_n := split_part(v_conta, ':', 2)::int + 1;
+  ELSIF v_req_txt ~ '^[0-9a-fA-F-]{{36}}$' THEN
+    SELECT count(*)::int + 1 INTO v_n FROM {s}.historico_alteracao WHERE req_id = v_req_txt::uuid;
+  ELSE
+    v_n := 1;
+  END IF;
+  PERFORM set_config('davinci.hist_conta', v_req_txt || ':' || v_n, false);
+  IF v_n > {TETO_POR_PEDIDO} THEN
+    IF v_n = {TETO_POR_PEDIDO} + 1 THEN
+      BEGIN
+        INSERT INTO {s}.historico_alteracao (req_id, ator_id, tabela, operacao, rotulo, app)
+        VALUES (nullif(v_req_txt, '')::uuid, v_ator_txt::uuid, TG_TABLE_NAME, 'X',
+                'mais alterações nesta ação (não detalhadas)', current_setting('application_name', true));
+      EXCEPTION WHEN OTHERS THEN
+        RAISE WARNING 'historico_captura falhou em %: %', TG_TABLE_NAME, SQLERRM;
+      END;
+    END IF;
+    RETURN NULL;
+  END IF;
+
   -- Bloco protegido: se registrar der erro (tipo estranho, disco, o que for),
   -- a mudança da pessoa passa assim mesmo — o Histórico nunca trava ninguém.
   BEGIN
-  v_ator := nullif(current_setting('davinci.ator', true), '')::uuid;
-  IF v_ator IS NULL THEN
-    RETURN NULL;
-  END IF;
-  v_req := nullif(current_setting('davinci.req', true), '')::uuid;
-  IF TG_OP <> 'INSERT' THEN v_old := to_jsonb(OLD); END IF;
-  IF TG_OP <> 'DELETE' THEN v_new := to_jsonb(NEW); END IF;
-  v_linha := coalesce(v_new, v_old);
+    v_ator := v_ator_txt::uuid;
+    v_req := nullif(v_req_txt, '')::uuid;
+    IF TG_OP <> 'INSERT' THEN v_old := to_jsonb(OLD); END IF;
+    IF TG_OP <> 'DELETE' THEN v_new := to_jsonb(NEW); END IF;
+    v_linha := coalesce(v_new, v_old);
 
-  SELECT coalesce(array_agg(a.attname::text), '{{}}') INTO v_bin
-    FROM pg_attribute a
-   WHERE a.attrelid = TG_RELID AND a.attnum > 0 AND NOT a.attisdropped
-     AND a.atttypid = 'bytea'::regtype;
+    SELECT coalesce(array_agg(a.attname::text), '{{}}') INTO v_bin
+      FROM pg_attribute a
+     WHERE a.attrelid = TG_RELID AND a.attnum > 0 AND NOT a.attisdropped
+       AND a.atttypid = 'bytea'::regtype;
 
-  IF TG_OP = 'UPDATE' THEN
-    FOR k IN SELECT jsonb_object_keys(v_new) LOOP
-      CONTINUE WHEN k IN ({_lista(_RUIDO)});
-      IF (v_new -> k) IS DISTINCT FROM (v_old -> k) THEN
-        v_antes := v_antes || jsonb_build_object(k, {s}.historico_valor(k, v_old -> k, k = ANY(v_bin)));
-        v_depois := v_depois || jsonb_build_object(k, {s}.historico_valor(k, v_new -> k, k = ANY(v_bin)));
+    IF TG_OP = 'UPDATE' THEN
+      FOR k IN SELECT jsonb_object_keys(v_new) LOOP
+        CONTINUE WHEN k IN ({_lista(_RUIDO)});
+        IF (v_new -> k) IS DISTINCT FROM (v_old -> k) THEN
+          v_antes := v_antes || jsonb_build_object(k, {s}.historico_valor(k, v_old -> k, k = ANY(v_bin)));
+          v_depois := v_depois || jsonb_build_object(k, {s}.historico_valor(k, v_new -> k, k = ANY(v_bin)));
+        END IF;
+      END LOOP;
+      IF v_depois = '{{}}'::jsonb THEN
+        -- só mudou carimbo de horário: devolve a vaga do teto
+        PERFORM set_config('davinci.hist_conta', v_req_txt || ':' || (v_n - 1), false);
+        RETURN NULL;
       END IF;
-    END LOOP;
-    IF v_depois = '{{}}'::jsonb THEN
-      RETURN NULL;  -- só mudou carimbo de horário
+    ELSE
+      FOR k IN SELECT jsonb_object_keys(v_linha) LOOP
+        CONTINUE WHEN k IN ({_lista(_RUIDO_CRIACAO)}) OR (v_linha -> k) = 'null'::jsonb;
+        IF TG_OP = 'INSERT' THEN
+          v_depois := v_depois || jsonb_build_object(k, {s}.historico_valor(k, v_linha -> k, k = ANY(v_bin)));
+        ELSE
+          v_antes := v_antes || jsonb_build_object(k, {s}.historico_valor(k, v_linha -> k, k = ANY(v_bin)));
+        END IF;
+      END LOOP;
     END IF;
-  ELSE
-    FOR k IN SELECT jsonb_object_keys(v_linha) LOOP
-      CONTINUE WHEN k IN ({_lista(_RUIDO_CRIACAO)}) OR (v_linha -> k) = 'null'::jsonb;
-      IF TG_OP = 'INSERT' THEN
-        v_depois := v_depois || jsonb_build_object(k, {s}.historico_valor(k, v_linha -> k, k = ANY(v_bin)));
-      ELSE
-        v_antes := v_antes || jsonb_build_object(k, {s}.historico_valor(k, v_linha -> k, k = ANY(v_bin)));
-      END IF;
-    END LOOP;
-  END IF;
 
-  v_n := coalesce(nullif(current_setting('davinci.hist_n', true), ''), '0')::int + 1;
-  PERFORM set_config('davinci.hist_n', v_n::text, true);
-  IF v_n > {TETO_POR_TRANSACAO} THEN
-    IF v_n = {TETO_POR_TRANSACAO} + 1 THEN
-      INSERT INTO {s}.historico_alteracao (req_id, ator_id, tabela, operacao, rotulo, app)
-      VALUES (v_req, v_ator, TG_TABLE_NAME, 'X', 'mais alterações nesta ação (não detalhadas)',
-              current_setting('application_name', true));
-    END IF;
-    RETURN NULL;
-  END IF;
+    -- Identificação da linha, com texto limpo (nome com "senha 1234" também).
+    SELECT coalesce(jsonb_object_agg(
+             e.key,
+             CASE WHEN jsonb_typeof(e.value) = 'string'
+                  THEN to_jsonb({s}.historico_limpa_texto(e.value #>> '{{}}'))
+                  ELSE e.value END), '{{}}'::jsonb)
+      INTO v_ident
+      FROM jsonb_each(v_linha) e
+     WHERE (e.key IN ({_lista(_IDENT)}) OR e.key LIKE '%\\_id' ESCAPE '\\')
+       AND NOT {s}.historico_e_segredo(e.key)
+       AND jsonb_typeof(e.value) IN ('string', 'number');
 
-  SELECT coalesce(jsonb_object_agg(e.key, e.value), '{{}}'::jsonb) INTO v_ident
-    FROM jsonb_each(v_linha) e
-   WHERE (e.key IN ({_lista(_IDENT)}) OR e.key LIKE '%\\_id' ESCAPE '\\')
-     AND NOT {s}.historico_e_segredo(e.key)
-     AND jsonb_typeof(e.value) IN ('string', 'number');
-
-  INSERT INTO {s}.historico_alteracao
-    (req_id, ator_id, tabela, operacao, registro_id, rotulo, antes, depois, ident, app)
-  VALUES (
-    v_req, v_ator, TG_TABLE_NAME, left(TG_OP, 1), v_linha ->> 'id',
-    left({s}.historico_limpa_texto(coalesce({", ".join(f"nullif(v_linha ->> '{c}', '')" for c in _ROTULO)})), 200),
-    nullif(v_antes, '{{}}'::jsonb), nullif(v_depois, '{{}}'::jsonb), v_ident,
-    current_setting('application_name', true)
-  );
+    INSERT INTO {s}.historico_alteracao
+      (req_id, ator_id, tabela, operacao, registro_id, rotulo, antes, depois, ident, app)
+    VALUES (
+      v_req, v_ator, TG_TABLE_NAME, left(TG_OP, 1), v_linha ->> 'id',
+      left({s}.historico_limpa_texto(coalesce({", ".join(f"nullif(v_linha ->> '{c}', '')" for c in _ROTULO)})), 200),
+      nullif(v_antes, '{{}}'::jsonb), nullif(v_depois, '{{}}'::jsonb), v_ident,
+      current_setting('application_name', true)
+    );
   EXCEPTION WHEN OTHERS THEN
     RAISE WARNING 'historico_captura falhou em %: %', TG_TABLE_NAME, SQLERRM;
   END;

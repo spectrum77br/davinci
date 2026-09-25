@@ -30,6 +30,7 @@ type Alteracao = {
   verbo: string
   item: string
   campos: Campo[]
+  vezes: number
 }
 type Evento = {
   id: number
@@ -39,12 +40,15 @@ type Evento = {
   tela: string | null
   acao: string | null
   metodo: string
+  status: number
   n_alteracoes: number
   alteracoes: Alteracao[]
 }
 type Detalhe = Evento & { pagina: string | null; caminho: string; ip: string | null; corpo: unknown }
 type Pessoa = { id: string; nome: string }
-type PessoaAcesso = { id: string; nome: string; liberado: boolean; pode_gerenciar: boolean }
+type PessoaAcesso = {
+  id: string; nome: string; liberado: boolean; pode_gerenciar: boolean; situacao: string | null
+}
 
 const { api } = useApi()
 
@@ -174,18 +178,24 @@ function corVerbo(op?: string): string {
 // ── Detalhe (gaveta) ───────────────────────────────────────────────────────
 const detalhe = ref<Detalhe | null>(null)
 const abrindo = ref(false)
+// Fechar enquanto carrega descarta a resposta que chegar depois.
+let seqDetalhe = 0
 async function abrir(e: Evento) {
+  const meu = ++seqDetalhe
   abrindo.value = true
   detalhe.value = null
   try {
-    detalhe.value = await api<Detalhe>(`/api/historico/${e.id}`)
+    const d = await api<Detalhe>(`/api/historico/${e.id}`)
+    if (meu === seqDetalhe) detalhe.value = d
   } catch {
-    erro.value = 'Não deu para abrir esse registro.'
+    if (meu === seqDetalhe) erro.value = 'Não deu para abrir esse registro.'
   } finally {
-    abrindo.value = false
+    if (meu === seqDetalhe) abrindo.value = false
   }
 }
 function fecharDetalhe() {
+  seqDetalhe++
+  abrindo.value = false
   detalhe.value = null
 }
 const corpoTexto = computed(() => {
@@ -208,7 +218,9 @@ async function abrirAcesso() {
     acessoErro.value = 'Não deu para carregar a lista.'
   }
 }
-async function mudarAcesso(p: PessoaAcesso, liberado: boolean) {
+async function mudarAcesso(p: PessoaAcesso, ev: Event) {
+  const caixa = ev.target as HTMLInputElement
+  const liberado = caixa.checked
   salvandoAcesso.value = p.id
   acessoErro.value = null
   try {
@@ -216,6 +228,7 @@ async function mudarAcesso(p: PessoaAcesso, liberado: boolean) {
     p.liberado = liberado
   } catch {
     acessoErro.value = `Não deu para ${liberado ? 'liberar' : 'tirar'} ${p.nome}.`
+    caixa.checked = p.liberado // a caixa volta a mostrar o que está valendo
   } finally {
     salvandoAcesso.value = null
   }
@@ -319,6 +332,7 @@ async function mudarAcesso(p: PessoaAcesso, liberado: boolean) {
               <span :class="corVerbo(e.alteracoes[0]?.operacao)">{{ oQue(e) }}</span>
               <span v-if="item(e)" class="ml-1.5 font-medium">{{ item(e) }}</span>
               <span v-if="mais(e) > 0" class="ml-1.5 text-xs text-muted-foreground">+{{ mais(e) }} {{ mais(e) === 1 ? 'alteração' : 'alterações' }}</span>
+              <span v-if="e.status >= 400" class="pill-warning ml-1.5" title="A ação terminou com erro depois de já ter mudado algo — confira o detalhe">terminou com erro</span>
             </td>
             <td>
               <div v-for="c in resumoCampos(e)" :key="c.campo" class="flex flex-wrap items-center gap-1 text-xs">
@@ -354,6 +368,9 @@ async function mudarAcesso(p: PessoaAcesso, liberado: boolean) {
                 {{ detalhe.ator || '—' }}<span v-if="detalhe.via === 'claude'"> (via Claude)</span>
                 · {{ fmtCompleta(detalhe.criado_em) }} · {{ detalhe.tela || '—' }}
               </p>
+              <p v-if="detalhe && detalhe.status >= 400" class="mt-1 text-sm text-amber-700">
+                A ação terminou com erro, mas as mudanças abaixo chegaram a ser gravadas.
+              </p>
             </div>
             <button class="ml-auto rounded p-1 hover:bg-muted" title="Fechar" @click="fecharDetalhe"><X class="size-5" /></button>
           </div>
@@ -367,6 +384,7 @@ async function mudarAcesso(p: PessoaAcesso, liberado: boolean) {
                 <span :class="corVerbo(a.operacao)">{{ a.verbo }}</span>
                 <span class="font-medium">{{ a.entidade }}</span>
                 <span v-if="a.item" class="text-muted-foreground">{{ a.item }}</span>
+                <span v-if="a.vezes > 1" class="text-xs text-muted-foreground">({{ a.vezes }}×)</span>
               </div>
               <p v-if="a.operacao === 'X'" class="px-3 py-2 text-sm text-muted-foreground">{{ a.item }}</p>
               <table v-else class="w-full text-sm">
@@ -424,10 +442,13 @@ async function mudarAcesso(p: PessoaAcesso, liberado: boolean) {
                 type="checkbox"
                 class="size-4"
                 :checked="p.liberado"
-                :disabled="p.pode_gerenciar || salvandoAcesso === p.id"
-                @change="mudarAcesso(p, ($event.target as HTMLInputElement).checked)"
+                :disabled="p.pode_gerenciar || salvandoAcesso === p.id || (!p.liberado && !!p.situacao)"
+                @change="mudarAcesso(p, $event)"
               />
-              <label :for="`acesso-${p.id}`" class="flex-1 cursor-pointer">{{ p.nome }}</label>
+              <label :for="`acesso-${p.id}`" class="flex-1 cursor-pointer">
+                {{ p.nome }}
+                <span v-if="p.situacao" class="ml-1 text-xs text-amber-700">({{ p.situacao }} — desmarque para tirar)</span>
+              </label>
               <span v-if="p.pode_gerenciar" class="text-xs text-muted-foreground">você (quem libera)</span>
             </li>
           </ul>

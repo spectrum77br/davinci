@@ -368,8 +368,6 @@ async def mcp_post(
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> Response:
     conector, dono = await _conector_por_token(session, token)
-    # Histórico: o que o Claude muda fica no nome do dono do conector.
-    await identificar(session, dono, via="claude")
     if not _origem_permitida(request.headers.get("origin")):
         return Response(status_code=status.HTTP_403_FORBIDDEN)
     versao_hdr = request.headers.get("mcp-protocol-version")
@@ -393,6 +391,11 @@ async def mcp_post(
     if conector.last_used_at is None or conector.last_used_at < agora - timedelta(minutes=1):
         conector.last_used_at = agora
         await session.commit()
+
+    # Histórico: o que o Claude muda fica no nome do dono do conector. Depois
+    # do carimbo de uso — senão toda conversa, até só de leitura, viraria
+    # "alterou Conector do Claude".
+    await identificar(session, dono, via="claude")
 
     if isinstance(corpo, list):
         if len(corpo) > MAX_LOTE:
