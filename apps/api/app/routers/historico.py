@@ -16,7 +16,7 @@ from typing import Annotated
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 from sqlalchemy import and_, distinct, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -156,6 +156,7 @@ async def listar(
                 "metodo": e.metodo,
                 "status": e.status,
                 "n_alteracoes": e.n_alteracoes,
+                "itens": e.itens_texto,
                 "alteracoes": leitura.agrupar(
                     [leitura.alteracao_out(a, fk_nomes) for a in primeiras.get(e.req_id, [])]
                 ),
@@ -216,8 +217,16 @@ async def listar_acesso(acesso: Acesso, session: Sessao) -> list[dict]:
 
 
 @router.put("/acesso/{user_id}")
-async def mudar_acesso(user_id: UUID, body: AcessoIn, acesso: Acesso, session: Sessao) -> dict:
+async def mudar_acesso(user_id: str, request: Request, acesso: Acesso, session: Sessao) -> dict:
+    # Corpo e id lidos só DEPOIS de saber que a pessoa gerencia: com corpo
+    # Pydantic o FastAPI responderia 422 a um JSON quebrado antes da trava,
+    # entregando que a rota existe.
     eu = _gerente(acesso)
+    try:
+        body = AcessoIn.model_validate(await request.json())
+        user_id = UUID(user_id)
+    except (ValueError, TypeError):
+        raise HTTPException(400, detail={"code": "pedido_invalido"}) from None
     if user_id == eu.id:
         raise HTTPException(400, detail={"code": "nao_pode_se_tirar"})
     atual = await session.get(HistoricoAcesso, user_id)
@@ -240,8 +249,10 @@ async def mudar_acesso(user_id: UUID, body: AcessoIn, acesso: Acesso, session: S
 
 
 @router.get("/{evento_id}")
-async def detalhe(evento_id: int, acesso: Acesso, session: Sessao) -> dict:
-    e = await session.get(HistoricoEvento, evento_id)
+async def detalhe(evento_id: str, acesso: Acesso, session: Sessao) -> dict:
+    if not evento_id.isdigit():
+        raise _nao_existe()
+    e = await session.get(HistoricoEvento, int(evento_id))
     if e is None:
         raise _nao_existe()
     q = (
@@ -265,6 +276,7 @@ async def detalhe(evento_id: int, acesso: Acesso, session: Sessao) -> dict:
         "ip": e.ip,
         "corpo": e.corpo,
         "n_alteracoes": e.n_alteracoes,
+        "itens": e.itens_texto,
         "alteracoes": leitura.agrupar([leitura.alteracao_out(a, fk_nomes) for a in alteracoes]),
     }
 

@@ -45,25 +45,31 @@ EXCLUIDAS = re.compile(
 )
 
 # Colunas que mudam sozinhas e não dizem nada a quem lê.
-_RUIDO = ("updated_at", "atualizado_em")
+# last_used_at/ultimo_erro: carimbos do conector do Claude, gravados em toda
+# conversa (até só de leitura) — não são mudança de ninguém.
+_RUIDO = ("updated_at", "atualizado_em", "last_used_at", "ultimo_erro")
 _RUIDO_CRIACAO = ("updated_at", "atualizado_em", "created_at", "criado_em")
 
 # Colunas que identificam a linha na tela ("dg053", "kia", "pedido 293114").
 _IDENT = (
     "id", "sku", "apelido", "nome", "name", "account_name", "titulo", "numero", "codigo",
     "razao_social", "slug", "label", "email", "pedido", "numero_pedido", "bling_id",
-    "marketplace", "platform", "plataforma",
+    "marketplace", "platform", "plataforma", "pedido_bling", "pedido_marketplace",
+    "apelido_override", "tarefa",
 )
 # Mesma ordem de routers/historico._ROTULOS (nome da linha na tela).
 _ROTULO = (
     "sku", "apelido", "nome", "name", "account_name", "titulo", "numero", "codigo",
-    "razao_social", "slug", "label",
+    "razao_social", "slug", "label", "pedido_bling", "pedido_marketplace",
+    "apelido_override", "tarefa",
 )
 
 
-def _limpa_texto_sql() -> str:
+def _limpa_texto_sql(tipos=("token", "palavra")) -> str:
     expr = "t"
-    for _py, _troca, pg, troca_pg, flags in REGRAS_TEXTO:
+    for _py, _troca, pg, troca_pg, flags, tipo in REGRAS_TEXTO:
+        if tipo not in tipos:
+            continue
         assert "'" not in pg and "'" not in troca_pg
         expr = f"regexp_replace({expr}, '{pg}', '{troca_pg}', '{flags}')"
     return expr
@@ -94,6 +100,13 @@ $$""",
 CREATE OR REPLACE FUNCTION {s}.historico_limpa_texto(t text) RETURNS text
 LANGUAGE sql IMMUTABLE AS $$
   SELECT {_limpa_texto_sql()}
+$$""",
+        # --- nome da linha (rótulo, identificação): só as regras de token ------
+        # ("Camiseta Basic Feminina" e "PIN-001" têm de continuar buscáveis)
+        f"""
+CREATE OR REPLACE FUNCTION {s}.historico_limpa_rotulo(t text) RETURNS text
+LANGUAGE sql IMMUTABLE AS $$
+  SELECT {_limpa_texto_sql(("token",))}
 $$""",
         # --- JSON: limpa chave secreta em qualquer profundidade --------------
         f"""
@@ -247,7 +260,7 @@ BEGIN
     SELECT coalesce(jsonb_object_agg(
              e.key,
              CASE WHEN jsonb_typeof(e.value) = 'string'
-                  THEN to_jsonb({s}.historico_limpa_texto(e.value #>> '{{}}'))
+                  THEN to_jsonb({s}.historico_limpa_rotulo(e.value #>> '{{}}'))
                   ELSE e.value END), '{{}}'::jsonb)
       INTO v_ident
       FROM jsonb_each(v_linha) e
@@ -259,7 +272,7 @@ BEGIN
       (req_id, ator_id, tabela, operacao, registro_id, rotulo, antes, depois, ident, app)
     VALUES (
       v_req, v_ator, TG_TABLE_NAME, left(TG_OP, 1), v_linha ->> 'id',
-      left({s}.historico_limpa_texto(coalesce({", ".join(f"nullif(v_linha ->> '{c}', '')" for c in _ROTULO)})), 200),
+      left({s}.historico_limpa_rotulo(coalesce({", ".join(f"nullif(v_linha ->> '{c}', '')" for c in _ROTULO)})), 200),
       nullif(v_antes, '{{}}'::jsonb), nullif(v_depois, '{{}}'::jsonb), v_ident,
       current_setting('application_name', true)
     );

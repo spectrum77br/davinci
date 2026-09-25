@@ -66,6 +66,7 @@ def e_segredo(nome: str) -> bool:
 # dão o mesmo resultado. No Postgres: \m = começo de palavra (\b lá é
 # backspace) e sem "(?:" — o text() do SQLAlchemy leria ":nome" como parâmetro.
 _PALAVRAS_SENHA = "segredo do cadeado|c[oó]digo do cadeado|senha|password|passwd|pwd|segredo|pin"
+_PALAVRAS_SEPARADOR = "segredo do cadeado|c[oó]digo do cadeado|senha|password|passwd|pwd|segredo"
 _CHAVES_URL = (
     "access_token|refresh_token|input_token|client_secret|partner_key|app_secret|code|state"
     "|sign|signature|token|key|password|passwd|senha|api_key|apikey|secret"
@@ -73,39 +74,47 @@ _CHAVES_URL = (
 _CHAVES_JSON = "password|passwd|senha|secret|client_secret|token|access_token|refresh_token|api_key|apikey"
 
 REGRAS_TEXTO = [
+    # "token": vale também para nome/rótulo (JWT, link com chave…).
+    # "palavra": só para texto livre — num nome de produto "Camiseta Basic
+    # Feminina" ou "PIN-001" ela esconderia o que a busca precisa achar.
     # Authorization: Bearer <token> / Basic <base64>
     (r"\bbearer\s+[A-Za-z0-9._~+/=-]{8,}", "Bearer ***",
-     r"\mbearer\s+[A-Za-z0-9._~+/=-]{8,}", "Bearer ***", "gi"),
-    (r"\bbasic\s+[A-Za-z0-9+/=]{8,}", "Basic ***",
-     r"\mbasic\s+[A-Za-z0-9+/=]{8,}", "Basic ***", "gi"),
+     r"\mbearer\s+[A-Za-z0-9._~+/=-]{8,}", "Bearer ***", "gi", "token"),
+    (r"(authorization\W{0,3}basic\s+)[A-Za-z0-9+/=]{8,}", r"\1***",
+     r"(authorization[^[:alnum:]]{0,3}basic[[:space:]]+)[A-Za-z0-9+/=]{8,}", r"\1***", "gi", "token"),
+    (r"\bbasic\s+(?=[A-Za-z0-9+/=]*[0-9+/=])[A-Za-z0-9+/=]{12,}", "Basic ***",
+     r"\mbasic[[:space:]]+(?=[A-Za-z0-9+/=]*[0-9+/=])[A-Za-z0-9+/=]{12,}", "Basic ***", "gi", "token"),
     # ?code=…&state=…&password=…
     (r"([?&](?:" + _CHAVES_URL + r")=)[^&#\s]+", r"\1***",
-     r"([?&](" + _CHAVES_URL + r")=)[^&#[:space:]]+", r"\1***", "gi"),
+     r"([?&](" + _CHAVES_URL + r")=)[^&#[:space:]]+", r"\1***", "gi", "token"),
     # socks5://usuario:senha@host
     (r"://[^/\s:@]+:[^/\s@]+@", "://***:***@",
-     r"://[^/[:space:]:@]+:[^/[:space:]@]+@", "://***:***@", "g"),
+     r"://[^/[:space:]:@]+:[^/[:space:]@]+@", "://***:***@", "g", "token"),
     # JWT e token do Mercado Livre
     (r"eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}", "***",
-     r"eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}", "***", "g"),
+     r"eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}", "***", "g", "token"),
     (r"(APP_USR|TG)-[A-Za-z0-9-]{10,}", r"\1-***",
-     r"(APP_USR|TG)-[A-Za-z0-9-]{10,}", r"\1-***", "g"),
+     r"(APP_USR|TG)-[A-Za-z0-9-]{10,}", r"\1-***", "g", "token"),
     # JSON colado em texto: "api_key": "abc"
     (r'("(?:' + _CHAVES_JSON + r')"\s*:\s*)"[^"]*"', r'\1"***"',
-     r'("(' + _CHAVES_JSON + r')"[[:space:]]*:[[:space:]]*)"[^"]*"', r'\1"***"', "gi"),
+     r'("(' + _CHAVES_JSON + r')"[[:space:]]*:[[:space:]]*)"[^"]*"', r'\1"***"', "gi", "token"),
     # "senha: Abacaxi!", "Password = Loja2024" — com ":" ou "=" esconde o que
-    # vier, mesmo sem número (até 3 palavras no meio: "senha do aparelho: …")
-    (r"\b(" + _PALAVRAS_SENHA + r")((?:\s+[^\W\d_]+){0,3}\s*[:=]\s*)[^\s,;]{2,}", r"\1\2***",
-     r"\m(" + _PALAVRAS_SENHA + r")(([[:space:]]+[[:alpha:]]+){0,3}[[:space:]]*[:=][[:space:]]*)[^[:space:],;]{2,}",
-     r"\1\2***", "gi"),
-    # "a senha é 4821", "senha 4821" — sem ":" só quando o valor tem número,
-    # para "Senha extra liberada" continuar legível
-    (r"\b(" + _PALAVRAS_SENHA + r")((?:\s+[^\W\d_]+){0,3}\s*(?:é|-)?\s*)(?=[^\s,.;]*\d)[^\s,;]{3,}",
+    # vier, mesmo sem número (até 3 palavras no meio). Não vale para "pin"
+    # nem para "senha extra" (nome da trava das telas).
+    (r"\b(" + _PALAVRAS_SEPARADOR + r")(?!\s+extra\b)((?:\s+[^\W\d_]+){0,3}\s*[:=]\s*)[^\s,;]{2,}",
      r"\1\2***",
-     r"\m(" + _PALAVRAS_SENHA + r")(([[:space:]]+[[:alpha:]]+){0,3}[[:space:]]*(é|-)?[[:space:]]*)(?=[^[:space:],.;]*[0-9])[^[:space:],;]{3,}",
-     r"\1\2***", "gi"),
+     r"\m(" + _PALAVRAS_SEPARADOR + r")(?![[:space:]]+extra\M)(([[:space:]]+[[:alpha:]]+){0,3}[[:space:]]*[:=][[:space:]]*)[^[:space:],;]{2,}",
+     r"\1\2***", "gi", "palavra"),
+    # "a senha é 4821", "senha 4821", "pin: 1234" — sem ":" só quando o valor
+    # tem número, para "Senha extra liberada" continuar legível
+    (r"\b(" + _PALAVRAS_SENHA + r")((?:\s+[^\W\d_]+){0,3}\s*(?:é|:|=|-)?\s*)(?=[^\s,.;]*\d)[^\s,;]{3,}",
+     r"\1\2***",
+     r"\m(" + _PALAVRAS_SENHA + r")(([[:space:]]+[[:alpha:]]+){0,3}[[:space:]]*(é|:|=|-)?[[:space:]]*)(?=[^[:space:],.;]*[0-9])[^[:space:],;]{3,}",
+     r"\1\2***", "gi", "palavra"),
 ]
 _TEXTO = [
-    (re.compile(py, re.I if "i" in flags else 0), troca) for py, troca, _pg, _tpg, flags in REGRAS_TEXTO
+    (re.compile(py, re.I if "i" in flags else 0), troca)
+    for py, troca, _pg, _tpg, flags, _tipo in REGRAS_TEXTO
 ]
 
 

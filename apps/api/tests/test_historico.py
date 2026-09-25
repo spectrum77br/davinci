@@ -280,6 +280,11 @@ async def test_admin_fora_da_lista_nao_sabe_que_existe(client, db, make_user):
         r = await client.request(metodo, caminho, json={"liberado": True})
         assert r.status_code == 404, (metodo, caminho, r.status_code)
         assert r.json() == inexistente.json(), (metodo, caminho)
+        # JSON quebrado também: o 422 do FastAPI entregaria que a rota existe
+        r = await client.request(
+            metodo, caminho, content="{", headers={"content-type": "application/json"}
+        )
+        assert r.status_code == 404, ("json quebrado", metodo, caminho, r.status_code)
     me = (await client.get("/api/auth/me")).json()
     assert "historico" not in me
     caminhos = (await client.get("/api/openapi.json")).json()["paths"]
@@ -446,7 +451,7 @@ async def test_permissao_mostra_so_o_que_mudou_e_numeros_legiveis(client, db, ma
 
     campos = leitura.campos(alt, {})
     assert [(c["nome"], c["antes"], c["depois"]) for c in campos] == [
-        ("Permissões › margem › edit", "—", "sim")
+        ("Permissões › margem › editar", "—", "sim")
     ]
     assert leitura.fmt(0.125, "margin1") == "12,5%"
     assert leitura.fmt(0.1234, "commission") == "12,34%"
@@ -470,3 +475,79 @@ async def test_tirar_quem_foi_suspenso(client, db, make_user):
     r = await client.put(f"/api/historico/acesso/{joana_id}", json={"liberado": False})
     assert r.status_code == 200
     assert await db.get(HistoricoAcesso, joana_id) is None
+
+
+@pytest.mark.asyncio
+async def test_pedido_da_logistica_e_do_reembolso_tem_nome(db, make_user):
+    """Logística e Reembolso só têm pedido_bling como nome: tem de aparecer o
+    número, não um código."""
+    eu = await make_user(role=UserRole.ADMIN)
+    ator = Ator(metodo="POST", caminho="/api/refunds", grava=True, escrita=True, user_id=eu.id)
+    token = abrir(ator)
+    try:
+        from app.db import SessionLocal
+
+        async with SessionLocal() as s:
+            await s.execute(text(
+                "INSERT INTO refunds (id, pedido_bling, conta) VALUES (gen_random_uuid(), '293114', 'kia')"
+            ))
+            await s.commit()
+    finally:
+        fechar(token)
+    [alt] = await _alteracoes(db, tabela="refunds")
+    assert alt.rotulo == "293114"
+
+
+@pytest.mark.asyncio
+async def test_carimbo_do_conector_nao_vira_mudanca(db, make_user):
+    eu = await make_user(role=UserRole.ADMIN)
+    await db.execute(text(
+        "INSERT INTO claude_conectores (id, user_id, nome, token_hash) VALUES"
+        " (gen_random_uuid(), :u, 'c', 'h')"
+    ), {"u": eu.id})
+    await db.commit()
+    ator = Ator(metodo="POST", caminho="/api/claude-mcp/x/mcp", grava=True, escrita=True, user_id=eu.id)
+    token = abrir(ator)
+    try:
+        from app.db import SessionLocal
+
+        async with SessionLocal() as s:
+            await s.execute(text("UPDATE claude_conectores SET ultimo_erro = 'x', last_used_at = now()"))
+            await s.commit()
+    finally:
+        fechar(token)
+    assert await _alteracoes(db, tabela="claude_conectores") == []
+
+
+@pytest.mark.asyncio
+async def test_ver_senha_diz_qual_loja(client, db, make_user):
+    eu = await make_user(role=UserRole.ADMIN)
+    _logar(client, eu)
+    r = await client.post(
+        "/api/pricing/store-info",
+        json={"platform": "shopee", "account_name": "loja kia", "password": "Segredo-1"},
+    )
+    loja = r.json()
+    r = await client.get(f"/api/pricing/store-info/{loja['id']}/password")
+    assert r.status_code == 200, r.text
+    evs = [e for e in await _eventos(db) if e.acao == "viu a senha da loja"]
+    assert len(evs) == 1
+    assert evs[0].itens_texto == "loja kia"
+
+
+def test_permissao_ausente_igual_a_nao():
+    from types import SimpleNamespace
+
+    from app.historico import leitura
+
+    alt = SimpleNamespace(
+        tabela="users", operacao="U", antes={"permissions": {"margem": {"view": True}}},
+        depois={"permissions": {"alertas": {"view": False, "edit": False}, "margem": {"view": True, "edit": True}}},
+    )
+    campos = leitura.campos(alt, {})
+    assert [(c["nome"], c["antes"], c["depois"]) for c in campos] == [
+        ("Permissões › margem › editar", "—", "sim")
+    ]
+    assert leitura.fmt(1234.5, "valorbase") == "R$ 1.234,50"
+    assert leitura.fmt(10, "valor", "margem_saldo_manual") == "R$ 10,00"
+    assert leitura.fmt(10, "valor", "outra_tabela") == "10"

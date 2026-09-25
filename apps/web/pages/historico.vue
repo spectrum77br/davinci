@@ -42,6 +42,7 @@ type Evento = {
   metodo: string
   status: number
   n_alteracoes: number
+  itens: string | null
   alteracoes: Alteracao[]
 }
 type Detalhe = Evento & { pagina: string | null; caminho: string; ip: string | null; corpo: unknown }
@@ -158,7 +159,11 @@ function oQue(e: Evento): string {
   return `${a.verbo} ${a.entidade.toLowerCase()}`
 }
 function item(e: Evento): string {
-  return e.alteracoes[0]?.item || ''
+  // ação sem mudança no banco (ver senha, enviar preço): o nome vem do evento
+  return e.alteracoes[0]?.item || e.itens || ''
+}
+function vezesTotal(e: Evento): number {
+  return e.alteracoes.reduce((s, a) => s + (a.vezes || 1), 0)
 }
 function mais(e: Evento): number {
   return Math.max(0, e.n_alteracoes - 1)
@@ -341,7 +346,9 @@ async function mudarAcesso(p: PessoaAcesso, ev: Event) {
                 <ArrowRight class="size-3 text-muted-foreground" />
                 <span class="font-medium max-w-[14rem] truncate">{{ c.depois }}</span>
               </div>
-              <span v-if="(e.alteracoes[0]?.campos.length || 0) > 2" class="text-xs text-muted-foreground">…e mais campos</span>
+              <span v-if="resumoCampos(e).length && (e.alteracoes[0]?.campos.length || 0) > 2" class="text-xs text-muted-foreground">…e mais campos</span>
+              <span v-else-if="e.alteracoes[0]?.operacao === 'I'" class="text-xs text-muted-foreground">registro novo</span>
+              <span v-else-if="e.alteracoes[0]?.operacao === 'D'" class="text-xs text-muted-foreground">registro apagado</span>
             </td>
             <td class="text-muted-foreground">›</td>
           </tr>
@@ -377,7 +384,7 @@ async function mudarAcesso(p: PessoaAcesso, ev: Event) {
 
           <template v-if="detalhe">
             <p v-if="detalhe.alteracoes.length === 0" class="mb-4 rounded-md border bg-muted/30 px-3 py-2 text-sm">
-              Esta ação não mudou nenhum cadastro do DaVinci ({{ detalhe.acao || 'sem alteração registrada' }}).
+              Esta ação não mudou nenhum cadastro do DaVinci ({{ detalhe.acao || 'sem alteração registrada' }}<span v-if="detalhe.itens">: {{ detalhe.itens }}</span>).
             </p>
             <div v-for="a in detalhe.alteracoes" :key="a.id" class="mb-4 rounded-md border">
               <div class="flex flex-wrap items-center gap-2 border-b bg-muted/30 px-3 py-2 text-sm">
@@ -404,8 +411,8 @@ async function mudarAcesso(p: PessoaAcesso, ev: Event) {
                 </tbody>
               </table>
             </div>
-            <p v-if="detalhe.n_alteracoes > detalhe.alteracoes.length" class="mb-4 text-sm text-muted-foreground">
-              E mais {{ detalhe.n_alteracoes - detalhe.alteracoes.length }} alterações nesta mesma ação.
+            <p v-if="detalhe.n_alteracoes > vezesTotal(detalhe)" class="mb-4 text-sm text-muted-foreground">
+              E mais {{ detalhe.n_alteracoes - vezesTotal(detalhe) }} alterações nesta mesma ação.
             </p>
 
             <details v-if="corpoTexto" class="mb-3 rounded-md border px-3 py-2 text-sm">

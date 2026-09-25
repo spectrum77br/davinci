@@ -8,6 +8,7 @@ pediu não espera por ele, e uma falha aqui nunca derruba o pedido.
 
 from __future__ import annotations
 
+import asyncio
 from urllib.parse import urlsplit
 
 import structlog
@@ -15,7 +16,7 @@ from sqlalchemy import func, select
 
 from app.historico import nomes
 from app.historico.contexto import Ator, abrir, fechar
-from app.historico.leitura import congelar
+from app.historico.leitura import congelar, nomes_da_acao
 from app.historico.mascara import limpar_texto, resumir_corpo
 
 logger = structlog.get_logger()
@@ -104,7 +105,12 @@ class HistoricoMiddleware:
             fechar(token)
             if ator.user_id is not None and (status or falhou):
                 try:
-                    await _gravar_evento(ator, scope, bytes(corpo), status[0] if status else 500)
+                    # Com prazo: com o banco engasgado (pool esgotado), o erro
+                    # da pessoa não pode esperar o Histórico.
+                    await asyncio.wait_for(
+                        _gravar_evento(ator, scope, bytes(corpo), status[0] if status else 500),
+                        timeout=5,
+                    )
                 except Exception as e:  # noqa: BLE001 - o Histórico nunca derruba o pedido
                     # Só o molde da rota: o caminho de verdade pode ter token
                     # (ex. /api/claude-mcp/<token>/mcp).
@@ -139,11 +145,16 @@ async def _gravar_evento(ator: Ator, scope, corpo: bytes, status: int) -> None:
         if n == 0 and (acao is None or status >= 400):
             return  # pedido que não mudou nada (prévia, consulta, senha extra)
 
-        itens_texto = await congelar(s, ator.req_id) if n else None
         pagina = _pagina(scope)
         corpo_resumo = None
         if ator.escrita and not nomes.SEM_CORPO.search(scope["path"]):
             corpo_resumo = resumir_corpo(corpo, _cabecalho(scope, b"content-type") or "")
+        if n:
+            itens_texto = await congelar(s, ator.req_id)
+        else:
+            # ação sem mudança no banco: o nome vem do endereço/corpo
+            # ("viu a senha da loja kia", "enviou preço de dg053 · ML kia")
+            itens_texto = await nomes_da_acao(s, scope.get("path_params") or {}, corpo_resumo)
         s.add(
             HistoricoEvento(
                 req_id=ator.req_id,

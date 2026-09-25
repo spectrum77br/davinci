@@ -27,7 +27,8 @@ BRT = ZoneInfo("America/Sao_Paulo")
 # Coluna que dá nome à linha de outra tabela.
 ROTULOS = (
     "sku", "apelido", "nome", "name", "account_name", "titulo", "numero", "codigo",
-    "razao_social", "slug", "label", "email",
+    "razao_social", "slug", "label", "pedido_bling", "pedido_marketplace",
+    "apelido_override", "tarefa", "email",
 )
 
 # Quais chaves compõem o NOME do item, por tabela, em ordem. Tabela fora
@@ -38,14 +39,21 @@ ITEM_FKS: dict[str, tuple[str, ...]] = {
     "historico_acesso": ("user_id",),
     "product_links": ("product_id",),
     "segment_special_dates": ("segment_id",),
+    "chamado_mensagem": ("chamado_id",),
+    "stores": ("company_id",),
 }
 
 # Guardados como fração (0,125) e digitados como porcentagem (12,5%).
 PERCENTUAIS = {"commission", "min_margin", *(f"margin{i}" for i in range(1, 6))}
 DINHEIRO = {
-    "price_override", "bling_cost_price", "valor_base",
+    "price_override", "bling_cost_price", "valorbase", "taxacomissao", "custofrete",
+    "reembolso", "prejuizo",
     *(f"cost_kit{i}" for i in range(1, 9)), *(f"shipping{i}" for i in range(1, 6)),
 }
+# "valor" só é dinheiro onde se sabe que é.
+DINHEIRO_TABELA = {("margem_saldo_manual", "valor")}
+# Permissões: o JSON guarda view/edit/delete.
+_ACOES_PERMISSAO = {"view": "ver", "edit": "editar", "delete": "excluir"}
 
 
 def _tabela_meta(tabela: str):
@@ -140,7 +148,7 @@ def e_codigo(k: str) -> bool:
     return k == "id" or k.endswith("_id") or k in ("numero", "codigo", "bling_id", "pedido")
 
 
-def fmt(v: Any, campo: str | None = None) -> str:
+def fmt(v: Any, campo: str | None = None, tabela: str | None = None) -> str:
     if v is None:
         return "—"
     if isinstance(v, dict):
@@ -158,7 +166,7 @@ def fmt(v: Any, campo: str | None = None) -> str:
             return str(v)
         if campo in PERCENTUAIS:
             return _numero(v * 100, 2) + "%"
-        if campo in DINHEIRO:
+        if campo in DINHEIRO or (tabela, campo) in DINHEIRO_TABELA:
             return "R$ " + f"{v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
         return _numero(v)
     if isinstance(v, str):
@@ -208,15 +216,27 @@ def campos(a, fk_nomes: dict) -> list[dict]:
             and not _e_marcador(antes) and not _e_marcador(depois)
         ):
             fa, fd = _folhas(antes), _folhas(depois)
+            linhas = []
             for caminho in sorted(set(fa) | set(fd)):
-                if fa.get(caminho) != fd.get(caminho):
-                    rotulo = " › ".join(p.replace("_", " ") for p in caminho)
-                    saida.append({
-                        "campo": f"{k}.{'.'.join(caminho)}",
-                        "nome": f"{nomes.nome_campo(k)} › {rotulo}",
-                        "antes": fmt(fa.get(caminho)),
-                        "depois": fmt(fd.get(caminho)),
-                    })
+                va, vd = fa.get(caminho), fd.get(caminho)
+                # ausente e "não" são a mesma coisa numa permissão; 1 == True
+                if va in (None, False) and vd in (None, False):
+                    continue
+                if va == vd:
+                    continue
+                rotulo = " › ".join(_ACOES_PERMISSAO.get(p, p.replace("_", " ")) for p in caminho)
+                linhas.append({
+                    "campo": f"{k}.{'.'.join(caminho)}",
+                    "nome": f"{nomes.nome_campo(k)} › {rotulo}",
+                    "antes": fmt(va),
+                    "depois": fmt(vd),
+                    # primeiro o que mudou de um valor para outro
+                    "_ordem": 0 if va is not None and vd is not None else 1,
+                })
+            linhas.sort(key=lambda x: x["_ordem"])
+            for linha in linhas:
+                linha.pop("_ordem")
+            saida.extend(linhas)
             continue
 
         def rotular(v, k=k):
@@ -224,7 +244,7 @@ def campos(a, fk_nomes: dict) -> list[dict]:
                 nome = fk_nomes.get((alvo[k].name, str(v)))
                 if nome:
                     return nome
-            return fmt(v, k)
+            return fmt(v, k, a.tabela)
 
         saida.append({
             "campo": k,
@@ -287,3 +307,43 @@ async def congelar(session, req_id) -> str:
         if nome_item and nome_item not in vistos:
             vistos.append(nome_item)
     return " | ".join(vistos)[:4000]
+
+
+# Parâmetro do endereço (ou chave do corpo) → tabela, para dar nome ao item
+# de uma ação que não muda o banco ("viu a senha da loja kia").
+PARAMETROS_TABELA = {
+    "store_info_id": "store_info",
+    "marca_id": "marcas",
+    "rede_id": "redes_sociais",
+    "faturador_id": "nf_faturador",
+    "company_id": "companies",
+    "cert_id": "company_certificates",
+    "product_id": "products",
+    "logistica_id": "logistica",
+    "status_id": "logistica_status",
+    "pricing_product_id": "pricing_products",
+    "pricing_account_id": "pricing_accounts",
+}
+
+
+async def nomes_da_acao(session, params: dict, corpo) -> str | None:
+    pares: list[tuple[str, Any]] = [(k, v) for k, v in (params or {}).items()]
+    if isinstance(corpo, dict):
+        pares += [(k, v) for k, v in corpo.items() if k in PARAMETROS_TABELA]
+    elif isinstance(corpo, list):  # envio em lote: [{pricing_product_id, …}, …]
+        for x in corpo[:20]:
+            if isinstance(x, dict):
+                pares += [(k, v) for k, v in x.items() if k in PARAMETROS_TABELA]
+    vistos: list[str] = []
+    for k, v in pares:
+        t = _tabela_meta(PARAMETROS_TABELA.get(k, ""))
+        if t is None or "id" not in t.c:
+            continue
+        coluna = next((t.c[c] for c in ROTULOS if c in t.c), None)
+        chave = _chave(t.c["id"], v)
+        if coluna is None or chave is None:
+            continue
+        nome = (await session.execute(select(coluna).where(t.c["id"] == chave))).scalar_one_or_none()
+        if nome and str(nome) not in vistos:
+            vistos.append(str(nome))
+    return " · ".join(vistos)[:1000] or None

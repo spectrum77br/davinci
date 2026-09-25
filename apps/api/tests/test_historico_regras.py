@@ -43,6 +43,9 @@ TEXTOS = [
     ("Password: Loja2024!", "Password: ***"),
     ('config {"api_key": "abc123", "x": 1}', 'config {"api_key": "***", "x": 1}'),
     ("Authorization: Basic dXNlcjpwYXNz", "Authorization: Basic ***"),
+    ("Camiseta Basic Feminina", "Camiseta Basic Feminina"),
+    ("Senha extra: liberada", "Senha extra: liberada"),
+    ("pin: 1234", "pin: ***"),
 ]
 
 
@@ -109,3 +112,16 @@ async def test_toda_tabela_de_negocio_tem_o_gatilho(db):
         assert tabela in com, tabela
     for tabela in ("historico_evento", "historico_alteracao", "background_jobs", "alerts"):
         assert tabela not in com, tabela
+
+
+@pytest.mark.asyncio
+async def test_nome_da_linha_so_perde_token(db):
+    """No rótulo/identificação só as regras de token valem: nome de produto
+    com "Basic" ou código "PIN-001" continuam buscáveis."""
+    for entrada, esperado in [
+        ("Camiseta Basic Feminina", "Camiseta Basic Feminina"),
+        ("PIN-001 senha: 1234", "PIN-001 senha: 1234"),
+        ("link https://x.com/?token=abc123", "link https://x.com/?token=***"),
+    ]:
+        r = (await db.execute(text("SELECT historico_limpa_rotulo(:t)"), {"t": entrada})).scalar_one()
+        assert r == esperado, entrada
