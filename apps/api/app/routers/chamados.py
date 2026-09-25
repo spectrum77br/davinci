@@ -1188,12 +1188,13 @@ async def reler_na_plataforma(
         return await _one_out(session, ch)
     r = await chamados_devolucao_sync.sync_um(session, ch)
     await session.refresh(ch)
-    if (ch.consulta_portal or "").strip():
-        # 25/09 (294571): a consulta do Portal ligada ao chamado não tem API — o
-        # Atualizar também a põe na frente da fila do executor de leitura.
+    if (ch.consulta_portal or "").strip() or chamados_leitura.e_devolucao_shopee_da_api(ch):
+        # 25/09 (294571/296012): o que só a TELA mostra (consulta do Portal, "Upload
+        # Evidence" da 2ª disputa) não vem pela API — o Atualizar também põe o caso
+        # na frente da fila do executor de leitura (lê em até 10 min).
         await chamados_leitura.furar_a_fila(session, ch)
         await session.refresh(ch)
-    elif not r.get("lido"):
+    if not r.get("lido") and not (ch.consulta_portal or "").strip():
         raise HTTPException(
             422, detail={"code": r.get("erro") or "chamado_sem_api", "plataforma": r.get("plataforma")}
         )

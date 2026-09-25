@@ -387,8 +387,9 @@ async def test_instrucao_com_o_link_do_portal_liga_ao_chamado(client, db, make_u
 
 
 async def test_fila_entrega_a_consulta_ligada_so_pra_quem_pede(client, db):
-    """Devolução já decidida ("perdemos") com a consulta do Cairo aberta: sai da
-    leitura do Seller Center, mas a consulta segue sendo lida — `tipo: portal`."""
+    """Devolução já decidida ("perdemos") com a consulta do Cairo aberta: a consulta
+    segue sendo lida E a devolução também — o atendente reabriu a 2ª disputa pedindo
+    evidência até 26/09 e só a tela do Seller Center mostrava (`tipo: ambos`)."""
     ch = await _devolucao(db, return_sn="260914016HQB8XN", conta="Shopee ATV",
                           status_plataforma=svc.STATUS_PERDEMOS)
     ch.consulta_portal = CONSULTA_MAO
@@ -396,7 +397,7 @@ async def test_fila_entrega_a_consulta_ligada_so_pra_quem_pede(client, db):
     assert await _fila(client, portal=True, espiar=True) == []  # executor v1.1
     casos = await _fila(client, portal=True, consultas=True)
     assert [c["chamado_id"] for c in casos] == [str(ch.id)]
-    assert casos[0]["tipo"] == "portal"
+    assert casos[0]["tipo"] == "ambos"
     assert casos[0]["chamado"] == "260914016HQB8XN"
     assert casos[0]["consulta_portal"] == CONSULTA_MAO
     assert casos[0]["consulta_url"] == f"https://seller-service.cs.shopee.com.br/detail/{CONSULTA_MAO}"

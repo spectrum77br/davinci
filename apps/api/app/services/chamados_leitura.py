@@ -325,11 +325,13 @@ def condicoes_consulta_ligada() -> list:
 
 def tipo_de_leitura(ch: Chamado) -> str:
     """O que o executor lê neste caso: `devolucao` (Seller Center), `portal` ou
-    `ambos`. A devolução só entra se ainda é da régua do acompanhamento."""
-    devolucao = e_devolucao_shopee_da_api(ch) and not (
-        ch.resolvido or ch.status_plataforma in chamados_svc.STATUS_FINAIS
-    )
+    `ambos`. Com consulta do Portal ligada, a devolução é lida MESMO decidida
+    (25/09, 294571: "perdemos" na API e a 2ª disputa aberta pelo atendente pedindo
+    evidência até 26/09 — só a tela do Seller Center mostrava)."""
     portal = consulta_do_portal(ch) is not None
+    devolucao = e_devolucao_shopee_da_api(ch) and (
+        portal or not (ch.resolvido or ch.status_plataforma in chamados_svc.STATUS_FINAIS)
+    )
     if devolucao and portal:
         return "ambos"
     return "portal" if portal else "devolucao"
