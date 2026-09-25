@@ -20,7 +20,7 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
-from sqlalchemy import and_, select, text
+from sqlalchemy import and_, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # Namespace constant: first int passed to `pg_try_advisory_lock(int4, int4)`.
@@ -65,10 +65,16 @@ async def try_user_sync_lock(session: AsyncSession, user_id: UUID):
 
 
 # Janela p/ considerar um massa "ativo". O sync_all completo roda até ~3h
-# (WorkerSettings sync_all timeout=10800). Um RUNNING órfão é coberto pelo
-# background_jobs_gc (5min sem heartbeat → FAILED); esta janela só limita um
-# PENDING que nunca foi pego pelo worker (raro) pra não travar o gate p/ sempre.
+# (WorkerSettings sync_all timeout=10800); esta janela só limita um PENDING que
+# nunca foi pego pelo worker (raro) pra não travar o gate p/ sempre.
 _MASS_SYNC_ACTIVE_WINDOW = timedelta(hours=4)
+# RUNNING sem sinal de vida há mais que isto = worker morreu (reinício/deploy no
+# meio do massa). O background_jobs_gc marca esses como FAILED, mas só roda 1x
+# por dia (03:30): até lá o botão "Sincronizar Todos" do usuário ficava cinza
+# por até 4h (25/09/2026: marrocos e harry potter travados desde 12:09). Num
+# massa normal o maior intervalo entre sinais foi ~2 min (sync_all de 24-25/09);
+# 15 min dá folga para um link lento sem liberar um segundo massa por engano.
+_MASS_SYNC_HEARTBEAT_TIMEOUT = timedelta(minutes=15)
 
 
 async def mass_sync_active(session: AsyncSession, user_id: UUID) -> dict | None:
@@ -85,7 +91,9 @@ async def mass_sync_active(session: AsyncSession, user_id: UUID) -> dict | None:
     # Import local: app.models importa cedo demais p/ topo deste módulo.
     from app.models import BackgroundJob, BackgroundJobStatus, BackgroundJobType
 
-    cutoff = datetime.now(UTC) - _MASS_SYNC_ACTIVE_WINDOW
+    now = datetime.now(UTC)
+    cutoff = now - _MASS_SYNC_ACTIVE_WINDOW
+    vivo_desde = now - _MASS_SYNC_HEARTBEAT_TIMEOUT
     row = (
         await session.execute(
             select(BackgroundJob)
@@ -100,6 +108,15 @@ async def mass_sync_active(session: AsyncSession, user_id: UUID) -> dict | None:
                     ),
                     BackgroundJob.finished_at.is_(None),
                     BackgroundJob.created_at >= cutoff,
+                    or_(
+                        BackgroundJob.status == BackgroundJobStatus.PENDING,
+                        func.coalesce(
+                            BackgroundJob.last_heartbeat_at,
+                            BackgroundJob.started_at,
+                            BackgroundJob.created_at,
+                        )
+                        >= vivo_desde,
+                    ),
                 )
             )
             .order_by(BackgroundJob.created_at.desc())

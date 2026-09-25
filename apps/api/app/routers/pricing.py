@@ -1931,6 +1931,49 @@ _STORE_TO_PRICING_PLATFORM = {
 }
 
 
+# Sufixos de modalidade no nome da conta de preço ("kfa classico", "kfa premium").
+_SUFIXOS_MODALIDADE = {"classico", "clássico", "premium"}
+
+
+def _escolher_integracao(
+    nome_conta: str | None,
+    integracao_da_loja: UUID | None,
+    candidatas: list[Integration],
+) -> Integration | None:
+    """Qual integração (da mesma plataforma) é a desta conta de preço.
+
+    25/09/2026: o casamento era por PEDAÇO do nome ("kfa" in "kfa2"), e a
+    primeira que casasse ganhava — "kfa classico" e "kfa premium" foram ligadas
+    à integração da kfa2. Resultado: a conta sumia da Tabela de Preços da
+    equipe da KFA (a cerca por equipe olha a integração) e os preços lidos
+    eram os dos anúncios da kfa2. Agora, em ordem:
+      1. a integração da loja (store_info) à qual a conta já está ligada;
+      2. nome exato, sem o sufixo classico/premium;
+      3. palavra INTEIRA em comum, e só se apontar para UMA integração —
+         empate não chuta (fica sem ligar, para alguém escolher).
+    """
+    if integracao_da_loja is not None:
+        for c in candidatas:
+            if c.id == integracao_da_loja:
+                return c
+    palavras = [w for w in (nome_conta or "").lower().split() if w]
+    base = " ".join(w for w in palavras if w not in _SUFIXOS_MODALIDADE)
+    exatas = [c for c in candidatas if (c.name or "").strip().lower() == base]
+    if len(exatas) == 1:
+        return exatas[0]
+    if exatas:
+        return None
+    tokens = {w for w in palavras if len(w) >= 3 and w not in _SUFIXOS_MODALIDADE}
+    por_palavra = [
+        c for c in candidatas if tokens & set((c.name or "").lower().split())
+    ]
+    if len(por_palavra) == 1:
+        return por_palavra[0]
+    if len(candidatas) == 1 and not por_palavra:
+        return candidatas[0]
+    return None
+
+
 @router.post("/accounts/auto-match", response_model=AutoMatchResult)
 async def auto_match_accounts(
     session: Annotated[AsyncSession, Depends(get_session)],
@@ -1938,10 +1981,9 @@ async def auto_match_accounts(
         User, Depends(require_permission("tabela_precos_contas", "edit"))
     ],
 ) -> AutoMatchResult:
-    """Tries to fill `pricing_accounts.integration_id` when null by matching:
-      1. pricing_account.platform → integration.platform
-      2. account.name (case-insensitive substring) ↔ integration.name
-    First plain-platform match wins when a single integration exists.
+    """Tries to fill `pricing_accounts.integration_id` when null by matching
+    pricing_account.platform → integration.platform and then the rules of
+    `_escolher_integracao` (loja ligada → nome exato → palavra inteira única).
     """
     accounts = (
         await session.execute(
@@ -1963,6 +2005,19 @@ async def auto_match_accounts(
     for integ in integrations:
         by_platform.setdefault(integ.platform, []).append(integ)
 
+    loja_ids = {a.store_info_id for a in accounts if a.store_info_id is not None}
+    integracao_da_loja: dict[UUID, UUID | None] = {}
+    if loja_ids:
+        integracao_da_loja = dict(
+            (
+                await session.execute(
+                    select(StoreInfo.id, StoreInfo.integration_id).where(
+                        StoreInfo.id.in_(loja_ids)
+                    )
+                )
+            ).all()
+        )
+
     matched: list = []
     skipped = 0
     for acc in accounts:
@@ -1975,18 +2030,11 @@ async def auto_match_accounts(
         if not candidates:
             skipped += 1
             continue
-        chosen: Integration | None = None
-        if len(candidates) == 1:
-            chosen = candidates[0]
-        else:
-            tokens = [
-                t for t in (acc.name or "").lower().split() if len(t) >= 3
-            ]
-            for c in candidates:
-                cname = (c.name or "").lower()
-                if any(t in cname for t in tokens):
-                    chosen = c
-                    break
+        chosen = _escolher_integracao(
+            acc.name,
+            integracao_da_loja.get(acc.store_info_id) if acc.store_info_id else None,
+            candidates,
+        )
         if chosen is None:
             skipped += 1
             continue
