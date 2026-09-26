@@ -56,14 +56,18 @@ const tpl = descriptor.template.content
   assert.match(tpl, /v-model="certEdVence" type="date"/, 'editar põe a data num certificado já cadastrado')
   assert.match(tpl, /@click="adicionarCertificado\(row\)"/, 'adicionar é uma seção própria')
   assert.match(tpl, /max-h-\[calc\(100vh-2rem\)\]/, 'painel não passa da altura da tela')
-  assert.doesNotMatch(tpl, /ver a senha guardada/, 'a senha guardada não aparece mais')
+  // Só no painel do CERTIFICADO (o do proxy, 26/09, mostra a senha de propósito).
+  const inicioCert = tpl.indexOf('`Certificado digital de ${row.company.apelido}`')
+  assert.ok(inicioCert > 0, 'painel do certificado encontrado')
+  const painelCert = tpl.slice(inicioCert, tpl.indexOf('</Teleport>', inicioCert))
+  assert.doesNotMatch(painelCert, /ver a senha guardada/, 'a senha guardada do certificado não aparece mais')
   assert.doesNotMatch(tpl, /A senha abaixo vale para o mais novo/, 'sem a frase confusa do painel antigo')
 }
 
 // --- lógica: o bloco do certificado da página + as mensagens de erro, como estão
 const script = descriptor.scriptSetup.content
 assert.doesNotMatch(script, /certificates\/\$\{[^}]+\}\/password/, 'nenhuma chamada à rota que mostrava a senha')
-assert.match(script, /if \(!agora && antes\) fecharCertificado\(\)/, 'tela trancou: senha digitada sai da memória')
+assert.match(script, /if \(!agora && antes\) \{\s*fecharCertificado\(\)\s*fecharProxy\(\)/, 'tela trancou: senha digitada (certificado e proxy) sai da memória')
 const bloco = (de, ate) => {
   assert.ok(script.includes(de) && script.includes(ate), `marcadores: ${de}`)
   return script.slice(script.indexOf(de), script.indexOf(ate))

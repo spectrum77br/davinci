@@ -39,6 +39,8 @@ type CompanyOut = {
   ip_adspower: string | null
   ip_adspower_em: string | null
   ip_adspower_erro: string | null
+  // Só o sinal de que porta/usuário/senha do proxy estão cadastrados.
+  proxy_configurado?: boolean
   obs: string | null
   enabled_marketplaces: string[]
   created_at: string
@@ -143,7 +145,10 @@ watch(() => trava.token.value, (agora, antes) => {
   if (agora && !antes) refresh()
   // Trancou (os 15 min venceram): a senha de certificado digitada e não
   // confirmada não pode ficar na memória da página esperando o próximo.
-  if (!agora && antes) fecharCertificado()
+  if (!agora && antes) {
+    fecharCertificado()
+    fecharProxy()
+  }
 })
 // A lista e a ficha dividem a chave: vindo de uma para a outra ela já existe
 // e o observador acima não dispara, então carrega aqui.
@@ -363,6 +368,18 @@ function mensagemDeErro(e: any, padrao = 'erro'): string {
   if (d?.code === 'ip_nao_publico') {
     return 'Esse é um IP de rede interna. Coloque o IP público de saída do proxy.'
   }
+  if (d?.code === 'perfil_invalido') return 'Perfil do AdsPower inválido: use só o número (ex.: 61).'
+  if (d?.code === 'perfil_de_outra_empresa') {
+    return `O perfil ${d.perfil} já é da empresa ${d.empresa}. Um perfil só pode receber o proxy de uma empresa.`
+  }
+  if (d?.code === 'proxy_incompleto') return 'Para o robô usar o proxy, preencha porta, usuário e senha juntos (ou deixe os três vazios).'
+  if (d?.code === 'ip_obrigatorio') return 'Coloque o IP do proxy.'
+  if (d?.code === 'proxy_mudou_enquanto_editava') {
+    return 'Alguém mudou este proxy enquanto você editava. Feche e abra de novo para ver o que está valendo.'
+  }
+  if (d?.code === 'ip_pelo_painel_proxy') {
+    return 'Esta empresa tem proxy com usuário e senha: troque o IP pelo painel do proxy (a chave ao lado do IP), junto com o usuário e a senha novos.'
+  }
   if (d?.code === 'certificado_repetido') {
     return `Esse arquivo já está cadastrado nesta empresa${d.filename ? ` (${d.filename})` : ''}. Para pôr a data ou a senha, use o lápis ao lado dele.`
   }
@@ -465,6 +482,251 @@ watch(algumIpACaminho, (sim) => {
   else { pararRelogio(); macSemResposta.value = false }
 }, { immediate: true })
 onBeforeUnmount(pararRelogio)
+
+// ---------- proxy da empresa ----------
+// Eduardo (26/09/2026): "colocarmos usuário e senha, um toogle bem organizado,
+// aí quando mudarmos o ip corrige corretamente e salva e já deixa no ar". O
+// painel guarda IP, tipo, porta, usuário, senha e os perfis "extras" do
+// AdsPower; o serviço do Mac testa o proxy e grava em todos os perfis da
+// empresa (até 1 minuto). Só admin; a senha só aparece se a pessoa pedir.
+// Um painel só, fora da tabela: filtrar ou recarregar a tabela não o fecha.
+type PerfilDaEmpresa = { profile_no: string; nome: string | null; origem: 'loja' | 'extra'; compartilhado: boolean }
+type ProxyDados = {
+  ip: string | null
+  tipo: string
+  porta: number | null
+  usuario: string | null
+  tem_senha: boolean
+  perfis_extras: string[]
+  perfis: PerfilDaEmpresa[]
+  sem_perfil: string[]
+  ip_adspower: string | null
+  ip_adspower_em: string | null
+  ip_adspower_erro: string | null
+  rev: number
+}
+const proxyAberto = ref<string | null>(null)
+const proxyDados = ref<ProxyDados | null>(null)
+const proxyForm = reactive({ ip: '', tipo: 'socks5', porta: '', usuario: '', senha: '' })
+const proxyExtras = ref<string[]>([])
+const proxyNovoExtra = ref('')
+const proxyApagarSenha = ref(false)
+const proxyMostrar = ref(false)
+const proxySenhaVista = ref<string | null>(null)
+const proxySalvando = ref(false)
+const proxyErro = ref<string | null>(null)
+const proxyAviso = ref<string | null>(null)
+// A linha da tabela da empresa aberta (para o nome e a situação ao vivo).
+const proxyLinha = computed(() => (grid.value?.rows || []).find(r => r.company.id === proxyAberto.value) || null)
+
+function limparPainelProxy() {
+  proxyDados.value = null
+  Object.assign(proxyForm, { ip: '', tipo: 'socks5', porta: '', usuario: '', senha: '' })
+  proxyExtras.value = []
+  proxyNovoExtra.value = ''
+  proxyApagarSenha.value = false
+  proxyMostrar.value = false
+  proxySenhaVista.value = null
+  proxyErro.value = null
+  proxyAviso.value = null
+}
+function preencherProxy(d: ProxyDados) {
+  proxyDados.value = d
+  Object.assign(proxyForm, {
+    ip: d.ip || '',
+    tipo: d.tipo || 'socks5',
+    porta: d.porta ? String(d.porta) : '',
+    usuario: d.usuario || '',
+    senha: '',
+  })
+  proxyExtras.value = [...(d.perfis_extras || [])]
+  proxyApagarSenha.value = false
+}
+async function abrirProxy(row: GridRow) {
+  limparPainelProxy()
+  proxyAberto.value = row.company.id
+  const empresa = row.company.id
+  try {
+    const d = await apiE<ProxyDados>(`/api/companies/${empresa}/proxy`)
+    if (proxyAberto.value === empresa) preencherProxy(d)
+  } catch (e: any) {
+    if (proxyAberto.value === empresa) proxyErro.value = mensagemDeErro(e, 'não foi possível ler o proxy')
+  }
+}
+function fecharProxy() {
+  limparPainelProxy()
+  proxyAberto.value = null
+}
+// Colar a linha do proxy no campo IP ("ip:porta:usuario:senha", como o
+// AdsPower exporta, ou "socks5://usuario:senha@ip:porta") separa nos campos:
+// a senha vai para o campo de senha e nunca fica escrita no campo do IP.
+function separarLinhaDoProxy(texto: string) {
+  let s = (texto || '').trim()
+  let tipo: string | null = null
+  const esquema = s.match(/^([a-z][a-z0-9+.-]*):\/\//i)
+  if (esquema) {
+    const e = esquema[1].toLowerCase()
+    tipo = e.startsWith('socks') ? 'socks5' : e.startsWith('http') ? 'http' : null
+    s = s.slice(esquema[0].length)
+  }
+  let usuario: string | null = null
+  let senha: string | null = null
+  if (s.includes('@')) {
+    const cred = s.slice(0, s.lastIndexOf('@'))
+    s = s.slice(s.lastIndexOf('@') + 1)
+    const i = cred.indexOf(':')
+    usuario = i >= 0 ? cred.slice(0, i) : cred
+    senha = i >= 0 ? cred.slice(i + 1) : null
+  }
+  const m = s.match(/^(\d{1,3}(?:\.\d{1,3}){3})(?::(\d{1,5}))?(?::([^:]*)(?::([\s\S]*))?)?$/)
+  if (!m) return null
+  if (m[3] !== undefined) usuario = m[3]
+  if (m[4] !== undefined) senha = m[4]
+  return { ip: m[1], porta: m[2] || null, usuario, senha, tipo }
+}
+watch(() => proxyForm.ip, (texto) => {
+  if (!/[:@]/.test(texto || '')) return
+  const l = separarLinhaDoProxy(texto)
+  if (!l) return
+  proxyForm.ip = l.ip
+  if (l.porta) proxyForm.porta = l.porta
+  if (l.usuario) proxyForm.usuario = l.usuario
+  if (l.senha) {
+    proxyForm.senha = l.senha
+    proxyApagarSenha.value = false
+  }
+  if (l.tipo) proxyForm.tipo = l.tipo
+  if (l.usuario || l.senha) proxyAviso.value = 'Linha do proxy separada nos campos. Confira e clique em Salvar e aplicar.'
+})
+// Marcar "apagar a senha guardada" descarta a que estiver digitada.
+watch(proxyApagarSenha, (apagar) => {
+  if (apagar) proxyForm.senha = ''
+})
+function adicionarExtras() {
+  proxyErro.value = null
+  const numeros = proxyNovoExtra.value.split(/[\s,;]+/).map(x => x.replace(/^[nN#]/, '').trim()).filter(Boolean)
+  for (const n of numeros) {
+    if (!/^\d{1,6}$/.test(n)) {
+      proxyErro.value = 'Perfil do AdsPower inválido: use só o número (ex.: 61).'
+      return
+    }
+    if (!proxyExtras.value.includes(n)) proxyExtras.value.push(n)
+  }
+  proxyNovoExtra.value = ''
+}
+function removerExtra(n: string) {
+  proxyExtras.value = proxyExtras.value.filter(x => x !== n)
+}
+// Como mostrar um perfil extra: o nome dele no AdsPower, ⚠ se também é de
+// outra empresa, ⚠ se o número não existe lá, e "novo" antes de salvar.
+function chipDoExtra(n: string): { classe: string; titulo: string; marca: string } {
+  const d = proxyDados.value
+  const p = d?.perfis.find(x => x.profile_no === n)
+  if (p?.compartilhado) {
+    return { classe: 'bg-red-100 text-red-800 dark:bg-red-950/50 dark:text-red-300', titulo: `${p.nome || ''} — também é de outra empresa: o robô NÃO troca`, marca: ' ⚠' }
+  }
+  if (p) return { classe: 'bg-primary/10 text-primary', titulo: `${p.nome || 'perfil extra'}`, marca: '' }
+  if (d?.perfis_extras.includes(n)) {
+    return { classe: 'bg-amber-100 text-amber-800 dark:bg-amber-950/50 dark:text-amber-300', titulo: 'Esse número não existe no AdsPower — confira', marca: ' ⚠' }
+  }
+  return { classe: 'bg-primary/10 text-primary', titulo: 'Novo: salve para conferir no AdsPower', marca: ' (novo)' }
+}
+async function verSenhaProxy() {
+  const empresa = proxyAberto.value
+  if (!empresa) return
+  proxyErro.value = null
+  try {
+    const r = await apiE<{ senha: string | null }>(`/api/companies/${empresa}/proxy/senha`)
+    if (proxyAberto.value === empresa) proxySenhaVista.value = r.senha || '(nenhuma senha guardada)'
+  } catch (e: any) {
+    if (proxyAberto.value === empresa) proxyErro.value = mensagemDeErro(e, 'não foi possível mostrar a senha')
+  }
+}
+async function salvarProxy() {
+  const empresa = proxyAberto.value
+  const antes = proxyDados.value
+  if (proxySalvando.value || !empresa || !antes) return
+  proxyErro.value = null
+  proxyAviso.value = null
+  if (proxyNovoExtra.value.trim()) adicionarExtras()
+  if (proxyErro.value) return
+  const ip = soOIp(proxyForm.ip)
+  const porta = proxyForm.porta.trim() ? Number(proxyForm.porta.trim()) : null
+  if (porta !== null && (!Number.isInteger(porta) || porta < 1 || porta > 65535)) {
+    proxyErro.value = 'Porta inválida (1 a 65535).'
+    return
+  }
+  const usuario = proxyForm.usuario.trim()
+  const senhaDigitada = proxyForm.senha.trim() ? proxyForm.senha : null
+  const temSenha = !proxyApagarSenha.value && (!!senhaDigitada || antes.tem_senha)
+  // Tudo ou nada: o robô só usa o proxy inteiro (o servidor recusa o meio).
+  const partes = [porta !== null, !!usuario, temSenha]
+  if (partes.some(Boolean) && !partes.every(Boolean)) {
+    proxyErro.value = 'Para o robô usar o proxy, preencha porta, usuário e senha juntos (ou deixe os três vazios).'
+    return
+  }
+  if (partes.every(Boolean) && !ip) {
+    proxyErro.value = 'Coloque o IP do proxy.'
+    return
+  }
+  // Cada proxy novo tem usuário e senha próprios: trocar só o IP e manter os
+  // antigos quase sempre é engano (o robô testa e marca ✗).
+  const mudouIp = !!antes.ip && ip !== antes.ip
+  const credsIguais = usuario === (antes.usuario || '') && !senhaDigitada && !proxyApagarSenha.value && temSenha
+  if (mudouIp && credsIguais && !confirm(
+    'Você trocou o IP mas manteve o mesmo usuário e senha. Cada proxy novo tem usuário e senha próprios. Salvar assim mesmo?',
+  )) return
+  proxySalvando.value = true
+  try {
+    const d = await apiE<ProxyDados>(`/api/companies/${empresa}/proxy`, {
+      method: 'PUT',
+      body: {
+        ip: ip || null,
+        tipo: proxyForm.tipo,
+        porta,
+        usuario: usuario || null,
+        // Vazio no campo = mantém a guardada; "apagar senha" manda "".
+        senha: proxyApagarSenha.value ? '' : senhaDigitada,
+        perfis_extras: proxyExtras.value,
+        // Versão que o painel abriu: se outra pessoa mudou, o servidor recusa.
+        rev: antes.rev,
+      },
+    })
+    if (proxyAberto.value === empresa) {
+      preencherProxy(d)
+      proxySenhaVista.value = null
+      proxyAviso.value = d.ip && d.ip !== d.ip_adspower
+        ? 'Salvo. O robô testa o proxy e aplica nos perfis em até 1 minuto.'
+        : 'Salvo.'
+    }
+    await refresh()
+    if (d.ip && d.ip !== d.ip_adspower) ligarRelogio()
+  } catch (e: any) {
+    if (proxyAberto.value === empresa) proxyErro.value = mensagemDeErro(e, 'erro ao salvar o proxy')
+  } finally {
+    proxySalvando.value = false
+  }
+}
+// Situação no topo do painel: a da tabela (que o relógio recarrega) quando é
+// o mesmo IP; senão a do que o painel leu.
+function situacaoDoPainel(): SituacaoAdspower | null {
+  const d = proxyDados.value
+  if (!d?.ip) return null
+  const c = proxyLinha.value?.company
+  if (c && c.ip === d.ip) return situacaoAdspower(c)
+  return situacaoAdspower({ ip: d.ip, ip_adspower: d.ip_adspower, ip_adspower_em: d.ip_adspower_em, ip_adspower_erro: d.ip_adspower_erro } as CompanyOut)
+}
+// Clique na célula do IP: empresa com proxy cadastrado troca o IP pelo painel
+// (IP e senha andam juntos); as outras seguem editando ali mesmo.
+function cliqueNoIp(row: GridRow) {
+  if (isEditingCell(row, 'ip')) return
+  if (row.company.proxy_configurado) {
+    if (isAdmin.value) abrirProxy(row)
+    else error.value = 'O IP desta empresa muda pelo painel do proxy (só administrador), junto com o usuário e a senha.'
+    return
+  }
+  if (canEdit.value) startEditCell(row, 'ip')
+}
 
 // ---------- certificado digital ----------
 // Clicar na célula abre o painel do certificado: cada certificado da empresa é
@@ -1250,9 +1512,9 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
             </td>
             <td
               class="px-3 py-2 text-xs font-mono whitespace-nowrap"
-              :class="{ 'cursor-pointer hover:bg-accent/30': canEdit && !isEditingCell(row, 'ip') }"
+              :class="{ 'cursor-pointer hover:bg-accent/30': (row.company.proxy_configurado ? isAdmin : canEdit) && !isEditingCell(row, 'ip') }"
               :title="ipRepetido(row) ? 'Esse IP aparece em mais de uma empresa' : (row.company.ip || 'sem IP')"
-              @click="canEdit && !isEditingCell(row, 'ip') && startEditCell(row, 'ip')"
+              @click="cliqueNoIp(row)"
             >
               <input
                 v-if="isEditingCell(row, 'ip')"
@@ -1281,6 +1543,18 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
                 :title="situacaoAdspower(row.company)!.texto"
                 :aria-label="situacaoAdspower(row.company)!.texto"
               >{{ situacaoAdspower(row.company)!.simbolo }}</span>
+              <button
+                v-if="isAdmin && !isEditingCell(row, 'ip')"
+                type="button"
+                class="ml-1 inline-flex rounded p-0.5 align-middle font-sans hover:bg-accent"
+                :class="row.company.proxy_configurado ? 'text-green-600' : 'text-muted-foreground'"
+                :title="row.company.proxy_configurado ? 'Proxy com usuário e senha — editar' : 'Configurar proxy (porta, usuário e senha)'"
+                :aria-label="`Proxy de ${row.company.apelido}`"
+                @click.stop="abrirProxy(row)"
+              >
+                <KeyRound class="size-3.5" />
+              </button>
+
             </td>
             <td v-if="isAdmin" class="px-3 py-2 text-xs whitespace-nowrap">
               <button
@@ -1829,6 +2103,168 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
         </div>
       </div>
     </div>
+        <!-- Painel do proxy: um só, fora da tabela (a rolagem cortava e o filtro o fechava). -->
+        <Teleport to="body">
+        <div
+          v-if="proxyAberto"
+          class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+          @click.self="fecharProxy"
+          @keydown.escape="fecharProxy"
+        >
+        <div
+          role="dialog"
+          aria-modal="true"
+          :aria-label="`Proxy de ${proxyLinha?.company.apelido || ''}`"
+          class="flex w-full max-w-lg max-h-[calc(100vh-2rem)] flex-col rounded-xl border bg-background text-left text-sm font-sans shadow-xl whitespace-normal"
+        >
+          <div class="flex items-start gap-3 border-b px-5 py-4">
+            <div class="rounded-lg bg-primary/10 p-2 text-primary">
+              <KeyRound class="size-5" />
+            </div>
+            <div class="min-w-0 flex-1">
+              <h2 class="font-semibold leading-tight">Proxy</h2>
+              <p class="truncate text-xs text-muted-foreground">
+                {{ proxyLinha?.company.apelido }}
+                <template v-if="situacaoDoPainel()">
+                  · <span :class="situacaoDoPainel()!.classe">{{ situacaoDoPainel()!.simbolo }}
+                    {{ situacaoDoPainel()!.texto }}</span>
+                </template>
+              </p>
+            </div>
+            <button
+              type="button"
+              class="rounded-md p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
+              aria-label="fechar"
+              @click="fecharProxy"
+            >
+              <X class="size-4" />
+            </button>
+          </div>
+
+          <div class="flex-1 space-y-4 overflow-y-auto px-5 py-4">
+            <div
+              v-if="proxyErro"
+              role="alert"
+              class="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700 dark:border-red-900 dark:bg-red-950/40 dark:text-red-300"
+            >{{ proxyErro }}</div>
+            <div
+              v-if="proxyAviso"
+              class="rounded-md border border-green-200 bg-green-50 px-3 py-2 text-xs text-green-800 dark:border-green-900 dark:bg-green-950/40 dark:text-green-300"
+            >{{ proxyAviso }}</div>
+            <p v-if="!proxyDados && !proxyErro" class="text-xs text-muted-foreground">carregando…</p>
+
+            <template v-if="proxyDados">
+              <div class="grid gap-3 sm:grid-cols-[1fr_7rem_6rem]">
+                <label class="space-y-1">
+                  <span class="text-xs font-medium">IP</span>
+                  <Input v-model="proxyForm.ip" placeholder="IP público do proxy (ou cole a linha inteira)" class="h-9 font-mono" autocomplete="off" spellcheck="false" />
+                </label>
+                <label class="space-y-1">
+                  <span class="text-xs font-medium">Tipo</span>
+                  <select v-model="proxyForm.tipo" class="h-9 w-full rounded-md border border-input bg-background px-2 text-sm">
+                    <option value="socks5">SOCKS5</option>
+                    <option value="http">HTTP</option>
+                  </select>
+                </label>
+                <label class="space-y-1">
+                  <span class="text-xs font-medium">Porta</span>
+                  <Input v-model="proxyForm.porta" inputmode="numeric" placeholder="7128" class="h-9 font-mono" />
+                </label>
+              </div>
+              <div class="grid gap-3 sm:grid-cols-2">
+                <label class="space-y-1">
+                  <span class="text-xs font-medium">Usuário</span>
+                  <Input v-model="proxyForm.usuario" placeholder="px…" class="h-9 font-mono" autocomplete="off" spellcheck="false" data-lpignore="true" data-1p-ignore />
+                </label>
+                <label class="space-y-1">
+                  <span class="text-xs font-medium">Senha</span>
+                  <div class="relative">
+                    <Input
+                      v-model="proxyForm.senha"
+                      :type="proxyMostrar ? 'text' : 'password'"
+                      autocomplete="new-password"
+                      data-lpignore="true"
+                      data-1p-ignore
+                      :disabled="proxyApagarSenha"
+                      :placeholder="proxyDados.tem_senha ? '•••••• guardada' : 'senha do proxy'"
+                      class="h-9 pr-9 font-mono"
+                    />
+                    <button
+                      type="button"
+                      class="absolute inset-y-0 right-0 flex items-center px-2.5 text-muted-foreground hover:text-foreground"
+                      :aria-label="proxyMostrar ? 'esconder a senha' : 'mostrar o que estou digitando'"
+                      @click="proxyMostrar = !proxyMostrar"
+                    >
+                      <EyeOff v-if="proxyMostrar" class="size-4" />
+                      <Eye v-else class="size-4" />
+                    </button>
+                  </div>
+                </label>
+              </div>
+              <div v-if="proxyDados.tem_senha" class="flex flex-wrap items-center gap-3 text-xs">
+                <template v-if="!proxySenhaVista">
+                  <button type="button" class="text-blue-600 hover:underline" @click="verSenhaProxy()">ver a senha guardada</button>
+                </template>
+                <template v-else>
+                  <span class="font-mono select-all">{{ proxySenhaVista }}</span>
+                  <button type="button" class="text-blue-600 hover:underline" @click="proxySenhaVista = null">ocultar</button>
+                </template>
+                <label class="inline-flex items-center gap-1.5 text-red-600">
+                  <input v-model="proxyApagarSenha" type="checkbox" class="size-3.5" /> apagar a senha guardada
+                </label>
+              </div>
+
+              <div class="space-y-2">
+                <div class="text-xs font-medium">Perfis do AdsPower que recebem este proxy</div>
+                <div class="flex flex-wrap gap-1.5">
+                  <span
+                    v-for="pf in proxyDados.perfis.filter(x => x.origem === 'loja')"
+                    :key="'l' + pf.profile_no"
+                    class="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium"
+                    :class="pf.compartilhado ? 'bg-red-100 text-red-800 dark:bg-red-950/50 dark:text-red-300' : 'bg-muted text-foreground'"
+                    :title="pf.compartilhado ? 'Também é de outra empresa: o robô NÃO troca' : `${pf.nome || ''} (vem das lojas)`"
+                  >n{{ pf.profile_no }}<span v-if="pf.compartilhado"> ⚠</span></span>
+                  <span
+                    v-for="n in proxyExtras"
+                    :key="'e' + n"
+                    class="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium"
+                    :class="chipDoExtra(n).classe"
+                    :title="chipDoExtra(n).titulo"
+                  >
+                    n{{ n }}{{ chipDoExtra(n).marca }}
+                    <button type="button" class="hover:text-red-600" :aria-label="`tirar o perfil ${n}`" @click="removerExtra(n)"><X class="size-3" /></button>
+                  </span>
+                  <span v-if="!proxyDados.perfis.length && !proxyExtras.length" class="text-xs text-muted-foreground">nenhum perfil ligado a esta empresa</span>
+                </div>
+                <div class="flex items-center gap-2">
+                  <Input
+                    v-model="proxyNovoExtra"
+                    inputmode="numeric"
+                    placeholder="acrescentar perfil (ex.: 61, 109)"
+                    class="h-8 text-xs"
+                    @keydown.enter.prevent="adicionarExtras"
+                  />
+                  <Button size="sm" variant="outline" class="h-8" @click="adicionarExtras">Acrescentar</Button>
+                </div>
+                <p class="text-[11px] text-muted-foreground">
+                  Os cinza vêm das lojas (campo servidor). Os azuis são extras desta empresa. ⚠ vermelho = perfil de mais de uma empresa (o robô não troca); ⚠ amarelo = número que não existe no AdsPower.
+                </p>
+                <ul v-if="proxyDados.sem_perfil.length" class="list-disc pl-5 text-[11px] text-amber-700 dark:text-amber-400">
+                  <li v-for="x in proxyDados.sem_perfil" :key="x">{{ x }}</li>
+                </ul>
+              </div>
+            </template>
+          </div>
+
+          <div class="flex justify-end gap-2 border-t px-5 py-3">
+            <Button size="sm" variant="ghost" @click="fecharProxy">Fechar</Button>
+            <Button size="sm" :disabled="proxySalvando || !proxyDados" @click="salvarProxy()">
+              {{ proxySalvando ? 'Salvando…' : 'Salvar e aplicar' }}
+            </Button>
+          </div>
+        </div>
+        </div>
+        </Teleport>
     </template>
   </div>
   <datalist id="resp-nomes">

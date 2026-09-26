@@ -265,6 +265,12 @@ async def patch_company(
     data = body.model_dump(exclude_unset=True)
     if "ip" in data:
         data["ip"] = _ip_ou_422(data["ip"])
+        if data["ip"] != c.ip and c.proxy_configurado:
+            # Cada proxy tem usuário e senha próprios: trocar só o IP daria ✗
+            # certo — e faria o robô mandar a senha para o IP digitado (que
+            # pode ser de qualquer um). IP e senha mudam juntos, pelo painel
+            # do proxy (só admin).
+            raise HTTPException(409, detail={"code": "ip_pelo_painel_proxy"})
         await _garante_ip_livre(session, data["ip"], exceto=c.id)
         if data["ip"] != c.ip:
             # IP novo: o erro do AdsPower era do IP antigo, e a confirmação
@@ -275,6 +281,8 @@ async def patch_company(
             c.ip_adspower = None
             c.ip_adspower_erro = None
             c.ip_adspower_em = None
+            # Versão nova do proxy: um resultado do IP anterior não vale.
+            c.proxy_rev = (c.proxy_rev or 0) + 1
     for k, v in data.items():
         setattr(c, k, v)
     try:

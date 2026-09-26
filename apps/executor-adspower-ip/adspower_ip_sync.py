@@ -26,6 +26,19 @@ Se nenhuma funcionar, é proxy de compra nova com conta nova: basta configurar
 esse IP à mão em um perfil qualquer do AdsPower uma vez, e daí em diante o
 serviço passa a reconhecer a conta.
 
+PROXY CADASTRADO NO DAVINCI (versão 2, 26/09/2026)
+Eduardo: "colocarmos usuário e senha [...] quando mudarmos o ip corrige
+corretamente e salva e já deixa no ar". Quando a empresa tem tipo, porta,
+usuário e senha na tela Empresas, o DaVinci manda o proxy inteiro e o serviço
+usa SÓ ele (não sai tentando outras contas): testa, e se sair pelo IP certo,
+grava em todos os perfis da empresa em que qualquer parte (IP, porta, tipo,
+usuário ou senha) esteja diferente. Os perfis "extras" cadastrados na empresa
+vêm junto com os das lojas. Perfil EXTRA que hoje está no IP de outra
+empresa não é trocado (o número foi digitado errado?): vira aviso na tela.
+
+Empresa SEM proxy cadastrado fica com o serviço antigo, do outro computador:
+este só pega essas com `--tambem-sem-proxy` (os dois juntos brigariam por ela).
+
 REGRAS DE SEGURANÇA
 - Nunca escreve usuário nem senha de proxy em log, tela ou resposta. Tudo que
   sai daqui passa por `_limpo`, que apaga qualquer credencial vista.
@@ -41,6 +54,8 @@ USO
   adspower_ip_sync.py --loop                  o serviço (uma passada a cada 60 s)
   adspower_ip_sync.py                         uma passada de verdade
   adspower_ip_sync.py --simular               faz tudo menos gravar e reportar
+  adspower_ip_sync.py --empresa barbosa ...   só essa empresa (junto com --simular = ensaio)
+  adspower_ip_sync.py --tambem-sem-proxy ...  pega também as empresas sem proxy cadastrado
   adspower_ip_sync.py --perfil ID --ip IP     ensaio num perfil só (NUNCA grava)
 """
 
@@ -331,6 +346,32 @@ def conta_que_funciona(ip: str, candidatas: list[tuple]) -> tuple:
     )
 
 
+def conta_do_davinci(pend: dict) -> tuple | None:
+    """A conta do proxy cadastrada na empresa (versão 2), ou None."""
+    px = pend.get("proxy") or None
+    if not px:
+        return None
+    usuario, senha = str(px.get("usuario") or ""), str(px.get("senha") or "")
+    _SEGREDOS.update(v for v in (usuario, senha) if v)
+    if not (usuario and senha and px.get("porta")):
+        raise Falha("proxy cadastrado no DaVinci está incompleto (porta, usuário ou senha)")
+    return ("other", px.get("tipo") or "socks5", str(px["porta"]), usuario, senha)
+
+
+def _precisa_trocar(cfg: dict, ip: str, conta: tuple | None) -> bool:
+    if not tem_proxy(cfg) or (cfg.get("proxy_host") or "").strip() != ip:
+        return True
+    if conta is None:
+        return False  # jeito antigo: só o IP importa
+    _soft, tipo, porta, usuario, senha = conta
+    return (
+        (cfg.get("proxy_type") or "socks5") != tipo
+        or str(cfg.get("proxy_port") or "") != porta
+        or (cfg.get("proxy_user") or "") != usuario
+        or (cfg.get("proxy_password") or "") != senha
+    )
+
+
 # --- uma empresa -------------------------------------------------------------
 
 
@@ -367,15 +408,41 @@ def aplicar_empresa(pend: dict, *, simular: bool, todos: list[dict] | None = Non
             f"{', '.join(fora)} não está no AdsPower deste Mac (é do outro, da Contabilidade?) "
             "e precisa ser trocado lá à mão"
         )
-    a_trocar = [(p, c) for p, c in atuais if (c.get("proxy_host") or "").strip() != ip]
+    cadastrada = conta_do_davinci(pend)
+    a_trocar = [(p, c) for p, c in atuais if _precisa_trocar(c, ip, cadastrada)]
+    # Perfil extra (digitado na empresa) que hoje sai pelo IP de OUTRA empresa:
+    # provavelmente é o número errado. Trocar tiraria a outra empresa do ar.
+    de_outras = set(pend.get("ips_de_outras") or []) - {ip}
+    suspeitos = [
+        (p, c) for p, c in a_trocar
+        if p.get("origem") == "extra" and tem_proxy(c) and (c.get("proxy_host") or "").strip() in de_outras
+    ]
+    if suspeitos:
+        a_trocar = [x for x in a_trocar if x not in suspeitos]
+        avisos.append(
+            "perfil extra que hoje está no IP de outra empresa não foi trocado ("
+            + ", ".join(f"n{p['profile_no']} em {(c.get('proxy_host') or '').strip()}" for p, c in suspeitos)
+            + ") — confira o número no painel do proxy"
+        )
 
     # 2) Descobre a conta certa para o IP e testa, ANTES de mexer em qualquer
     #    perfil. Um perfil só é trocado com a conta que acabou de funcionar.
     conta = None
     if a_trocar:
-        if todos is None:
-            todos = todos_os_perfis()
-        conta = conta_que_funciona(ip, contas_candidatas(ip, [c for _p, c in atuais], todos))
+        if cadastrada is not None:
+            # Versão 2: só o proxy cadastrado na empresa. Não sai tentando
+            # outras contas — se ele não funciona, o cadastro está errado.
+            try:
+                saida = testar_proxy(_com_endereco(cadastrada, ip))
+            except Falha as e:
+                raise Falha(f"o proxy cadastrado no DaVinci não funcionou ({e}). Nada foi trocado.") from None
+            if saida != ip:
+                raise Falha(f"o proxy cadastrado no DaVinci saiu pelo IP {saida}, não pelo {ip}. Nada foi trocado.")
+            conta = cadastrada
+        else:
+            if todos is None:
+                todos = todos_os_perfis()
+            conta = conta_que_funciona(ip, contas_candidatas(ip, [c for _p, c in atuais], todos))
 
     if simular:
         return (
@@ -398,11 +465,9 @@ def aplicar_empresa(pend: dict, *, simular: bool, todos: list[dict] | None = Non
             e.gravou_algo = bool(trocados)
             raise
         trocados.append(f"n{p['profile_no']}")  # gravou: conta como trocado já
-        conferido = ((ler_perfil(p["user_id"]) or {}).get("user_proxy_config") or {}).get(
-            "proxy_host"
-        )
-        if conferido != ip:
-            raise Falha(f"trocado em {', '.join(trocados)}; o n{p['profile_no']} não ficou com o IP novo")
+        conferido = (ler_perfil(p["user_id"]) or {}).get("user_proxy_config") or {}
+        if _precisa_trocar(conferido, ip, conta if cadastrada is not None else None):
+            raise Falha(f"trocado em {', '.join(trocados)}; o n{p['profile_no']} não ficou com o proxy novo")
 
     if avisos:
         raise Falha(
@@ -417,15 +482,26 @@ def aplicar_empresa(pend: dict, *, simular: bool, todos: list[dict] | None = Non
 # --- execução ----------------------------------------------------------------
 
 
-def passada(simular: bool) -> int:
+def passada(simular: bool, empresa: str | None = None, tambem_sem_proxy: bool = False) -> int:
     try:
-        pendentes = davinci("GET", "/api/agent/adspower/ip-pendentes") or []
+        pendentes = davinci("GET", "/api/agent/adspower/ip-pendentes?v=2") or []
     except (urllib.error.URLError, TimeoutError, ConnectionError, json.JSONDecodeError) as e:
         # DaVinci fora do ar: nada a fazer, tenta no minuto seguinte.
         log.warning("DaVinci indisponível (%s)", type(e).__name__)
         return 1
+    if empresa:
+        alvo = "".join(empresa.split()).lower()
+        pendentes = [p for p in pendentes if "".join(str(p.get("apelido") or "").split()).lower() == alvo]
+    if not tambem_sem_proxy:
+        # Sem proxy cadastrado é do serviço antigo (outro computador).
+        pendentes = [p for p in pendentes if p.get("proxy")]
+    for p in pendentes:
+        # Senha do proxy entra na lista de segredos ANTES de qualquer log.
+        px = p.get("proxy") or {}
+        _SEGREDOS.update(str(v) for v in (px.get("usuario"), px.get("senha")) if v)
     if not pendentes:
-        log.info("nada pendente")
+        log.info("nada pendente" + (f" para {empresa}" if empresa else "")
+                 + ("" if tambem_sem_proxy else " (só empresas com proxy cadastrado)"))
         return 0
     todos = None  # lido uma vez só por passada, e só se precisar
     falhas = 0
@@ -457,21 +533,23 @@ def passada(simular: bool) -> int:
                 davinci(
                     "POST",
                     "/api/agent/adspower/ip-resultado",
-                    {"company_id": pend["company_id"], "ip": pend["ip"], "ok": ok, "erro": erro},
+                    {"company_id": pend["company_id"], "ip": pend["ip"], "ok": ok, "erro": erro,
+                     "rev": pend.get("rev")},
                 )
             except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
                 log.warning("não consegui avisar o DaVinci (%s); ele pergunta de novo", type(e).__name__)
     return 1 if falhas else 0
 
 
-def em_loop(simular: bool, intervalo: int = 60) -> int:
+def em_loop(simular: bool, intervalo: int = 60, empresa: str | None = None,
+            tambem_sem_proxy: bool = False) -> int:
     """O serviço: uma passada por minuto, para sempre. Nenhum erro derruba o
     laço — se algo escapar, ele registra (limpo) e tenta no minuto seguinte."""
     log.info("serviço do IP no AdsPower iniciado (a cada %ss)", intervalo)
     while True:
         inicio = time.monotonic()
         try:
-            passada(simular=simular)
+            passada(simular=simular, empresa=empresa, tambem_sem_proxy=tambem_sem_proxy)
         except Falha as e:
             log.error(_limpo(e))
         except Exception:  # noqa: BLE001
@@ -507,6 +585,9 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--loop", action="store_true", help="fica rodando: uma passada a cada 60 s")
     ap.add_argument("--simular", action="store_true", help="faz tudo menos gravar e reportar")
+    ap.add_argument("--empresa", help="só esta empresa (apelido), para testar uma de cada vez")
+    ap.add_argument("--tambem-sem-proxy", action="store_true",
+                    help="pega também empresa sem proxy cadastrado (hoje é do serviço antigo)")
     ap.add_argument("--perfil", help="ensaio num perfil só (nunca grava)")
     ap.add_argument("--ip", help="IP do ensaio")
     a = ap.parse_args()
@@ -517,8 +598,8 @@ def main() -> int:
                 ap.error("--perfil precisa de --ip")
             return ensaio_perfil(a.perfil, a.ip)
         if a.loop:
-            return em_loop(simular=a.simular)
-        return passada(simular=a.simular)
+            return em_loop(simular=a.simular, empresa=a.empresa, tambem_sem_proxy=a.tambem_sem_proxy)
+        return passada(simular=a.simular, empresa=a.empresa, tambem_sem_proxy=a.tambem_sem_proxy)
     except Falha as e:
         log.error(_limpo(e))
         return 1

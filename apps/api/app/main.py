@@ -22,6 +22,7 @@ from app.routers import chamados_ia as chamados_ia_router
 from app.routers import claude_conector as claude_conector_router
 from app.routers import companies as companies_router
 from app.routers import company_certificates as company_certificates_router
+from app.routers import company_proxy as company_proxy_router
 from app.routers import dashboard as dashboard_router
 from app.routers import dev as dev_router
 from app.routers import devolutions as devolutions_router
@@ -171,6 +172,7 @@ app.include_router(auth_router.router)
 app.include_router(users_router.router)
 app.include_router(companies_router.router)
 app.include_router(company_certificates_router.router)
+app.include_router(company_proxy_router.router)
 app.include_router(adspower_agent_router.router)
 app.include_router(stores_router.router)
 app.include_router(cadastros_router.router)

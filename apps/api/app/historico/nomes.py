@@ -186,6 +186,7 @@ REVELACOES: dict[tuple[str, str], str] = {
     ("GET", "/api/marcas/{marca_id}/senha"): "viu a senha da marca",
     ("GET", "/api/redes-sociais/marca/{marca_id}/sac-senha"): "viu a senha do SAC da marca",
     ("GET", "/api/redes-sociais/{rede_id}/senha"): "viu a senha da rede social",
+    ("GET", "/api/companies/{company_id}/proxy/senha"): "viu a senha do proxy da empresa",
 }
 
 # Pedidos de pessoa que na verdade rodam robô: o recarregar automático da
@@ -206,6 +207,9 @@ GET_QUE_GRAVA = re.compile(
 SEM_CORPO = re.compile(
     r"^/api/(auth/|pricing/mega/login|companies/unlock|financeiro/valuation/unlock"
     r"|claude-mcp/|webhooks/|aprovar/)|/callback|/certificates/[^/]+/download$"
+    # Proxy da empresa (26/09/2026): o corpo leva usuário/senha, e colar a
+    # linha "ip:porta:usuario:senha" no campo IP escaparia da máscara.
+    r"|^/api/companies/[^/]+/proxy$"
 )
 
 # Parâmetro de caminho que é segredo: vira *** no endereço guardado.

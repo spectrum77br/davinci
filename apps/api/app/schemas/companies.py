@@ -196,6 +196,8 @@ class CompanyOut(CompanyBase):
     ip_adspower: str | None = None
     ip_adspower_em: datetime | None = None
     ip_adspower_erro: str | None = None
+    # Só o sinal de que usuário/senha do proxy estão cadastrados (nunca eles).
+    proxy_configurado: bool = False
     created_at: datetime
     updated_at: datetime
 

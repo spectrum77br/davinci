@@ -7,6 +7,8 @@ from sqlalchemy import (
     Enum,
     ForeignKey,
     Index,
+    Integer,
+    LargeBinary,
     String,
     Text,
     UniqueConstraint,
@@ -75,6 +77,25 @@ class Company(Base, TimestampMixin):
     ip_adspower: Mapped[str | None] = mapped_column(Text, nullable=True)
     ip_adspower_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     ip_adspower_erro: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Proxy da empresa (migration 0332): com usuário/senha aqui, o serviço do
+    # Mac grava o proxy inteiro nos perfis (os proxies novos têm senha por IP).
+    # A senha fica cifrada; só admin vê, e só pelas rotas de proxy.
+    proxy_tipo: Mapped[str | None] = mapped_column(Text, nullable=True)
+    proxy_porta: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    proxy_usuario: Mapped[str | None] = mapped_column(Text, nullable=True)
+    proxy_senha_enc: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    # Perfis do AdsPower da empresa que nenhuma loja aponta (números).
+    adspower_perfis_extras: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), nullable=False, default=list, server_default=text("'{}'::text[]")
+    )
+    # Sobe a cada mudança de IP/proxy: o resultado do serviço traz a versão
+    # que aplicou, e uma versão velha não marca a nova como aplicada.
+    proxy_rev: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
+
+    @property
+    def proxy_configurado(self) -> bool:
+        """Tem o proxy inteiro (porta, usuário e senha) — só o sinal, nunca a senha."""
+        return bool(self.proxy_usuario and self.proxy_senha_enc is not None and self.proxy_porta)
     obs: Mapped[str | None] = mapped_column(Text, nullable=True)
     enabled_marketplaces: Mapped[list[str]] = mapped_column(
         ARRAY(Text),

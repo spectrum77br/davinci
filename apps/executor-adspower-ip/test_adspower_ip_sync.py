@@ -241,7 +241,7 @@ class Passada(unittest.TestCase):
             raise s.FalhaPassageira("o AdsPower está recusando por excesso de chamadas")
 
         with mock.patch.object(s, "davinci", self.davinci), mock.patch.object(s, "adspower", ocupado):
-            s.passada(simular=False)
+            s.passada(simular=False, tambem_sem_proxy=True)
         self.assertEqual(self.reportes, [])
 
     def test_falha_de_verdade_e_reportada(self):
@@ -249,7 +249,7 @@ class Passada(unittest.TestCase):
         with mock.patch.object(s, "davinci", self.davinci), mock.patch.object(
             s, "adspower", AdsPowerFalso(perfis)
         ), mock.patch.object(s, "testar_proxy", proxy_que_aceita(dict(CONTA_A, proxy_port="1"))):
-            s.passada(simular=False)
+            s.passada(simular=False, tambem_sem_proxy=True)
         self.assertEqual(len(self.reportes), 1)
         self.assertFalse(self.reportes[0]["ok"])
         self.assertNotIn("senha-A-secreta", self.reportes[0]["erro"])
@@ -259,8 +259,183 @@ class Passada(unittest.TestCase):
         with mock.patch.object(s, "davinci", self.davinci), mock.patch.object(
             s, "adspower", AdsPowerFalso(perfis)
         ), mock.patch.object(s, "testar_proxy", proxy_que_aceita(CONTA_A)):
+            s.passada(simular=False, tambem_sem_proxy=True)
+        self.assertEqual(self.reportes, [{"company_id": "c1", "ip": "72.60.9.9", "ok": True, "erro": None,
+                                          "rev": None}])
+
+    def test_sem_proxy_cadastrado_fica_com_o_servico_antigo(self):
+        """O serviço antigo, no outro computador, ainda cuida delas: os dois
+        juntos brigariam pela mesma empresa."""
+        falso = AdsPowerFalso([perfil("a", 84, cfg(CONTA_A, "1.1.1.1"))])
+        with mock.patch.object(s, "davinci", self.davinci), mock.patch.object(s, "adspower", falso), \
+                mock.patch.object(s, "testar_proxy", proxy_que_aceita(CONTA_A)):
             s.passada(simular=False)
-        self.assertEqual(self.reportes, [{"company_id": "c1", "ip": "72.60.9.9", "ok": True, "erro": None}])
+        self.assertEqual((falso.gravacoes, self.reportes), ([], []))
+
+
+# --- versão 2: proxy inteiro cadastrado na empresa (26/09/2026) ---------------
+CONTA_NOVA = {"proxy_soft": "other", "proxy_type": "socks5", "proxy_port": "7128",
+              "proxy_user": "pxnovo01", "proxy_password": "SenhaDoVpsNovo123"}
+
+
+def pend_v2(ip, *ids, rev=3, **extra):
+    return pendencia(ip, *ids, rev=rev, proxy={"tipo": "socks5", "porta": 7128,
+                                               "usuario": "pxnovo01", "senha": "SenhaDoVpsNovo123"}, **extra)
+
+
+class ProxyCadastrado(unittest.TestCase):
+    """Eduardo: 'quando mudarmos o ip corrige corretamente e salva e já deixa no ar'."""
+
+    def setUp(self):
+        s._SEGREDOS.clear()
+
+    def rodar(self, perfis, pend, conta_certa, ip_de_saida=None, simular=False):
+        falso = AdsPowerFalso(perfis)
+        testados = []
+
+        def testar(c):
+            testados.append(dict(c))
+            return proxy_que_aceita(conta_certa, ip_de_saida)(c)
+
+        with mock.patch.object(s, "adspower", falso), mock.patch.object(s, "testar_proxy", testar):
+            try:
+                return falso, testados, s.aplicar_empresa(pend, simular=simular), None
+            except s.Falha as e:
+                return falso, testados, None, e
+
+    def test_usa_so_o_proxy_cadastrado_e_grava_em_todos(self):
+        perfis = [perfil("a", 34, cfg(CONTA_A, "198.51.100.7")), perfil("b", 113, cfg(CONTA_B, "198.51.100.7")),
+                  perfil("novo", 61, {"proxy_soft": "no_proxy"})]
+        falso, testados, _, erro = self.rodar(perfis, pend_v2("203.0.113.10", "a", "b", "novo"), CONTA_NOVA)
+        self.assertIsNone(erro)
+        self.assertEqual(len(testados), 1)  # não sai tentando outras contas
+        self.assertEqual(testados[0]["proxy_user"], "pxnovo01")
+        self.assertEqual(len(falso.gravacoes), 3)
+        for uid in ("a", "b", "novo"):
+            c = falso.perfis[uid]["user_proxy_config"]
+            self.assertEqual((c["proxy_host"], c["proxy_port"], c["proxy_user"], c["proxy_password"]),
+                             ("203.0.113.10", "7128", "pxnovo01", "SenhaDoVpsNovo123"))
+
+    def test_mesmo_ip_com_senha_errada_no_perfil_e_corrigido(self):
+        """Antes só o IP importava: perfil já no IP com a senha antiga ficava errado."""
+        perfis = [perfil("a", 34, cfg(dict(CONTA_NOVA, proxy_password="antiga"), "203.0.113.10")),
+                  perfil("b", 113, cfg(CONTA_NOVA, "203.0.113.10"))]
+        falso, _, _, erro = self.rodar(perfis, pend_v2("203.0.113.10", "a", "b"), CONTA_NOVA)
+        self.assertIsNone(erro)
+        self.assertEqual([g["user_id"] for g in falso.gravacoes], ["a"])  # o b já estava certo
+
+    def test_tudo_certo_nao_grava_nem_testa(self):
+        perfis = [perfil("a", 34, cfg(CONTA_NOVA, "203.0.113.10"))]
+        falso, testados, _, erro = self.rodar(perfis, pend_v2("203.0.113.10", "a"), CONTA_NOVA)
+        self.assertIsNone(erro)
+        self.assertEqual((falso.gravacoes, testados), ([], []))
+
+    def test_proxy_cadastrado_que_nao_funciona_nao_troca_nada(self):
+        perfis = [perfil("a", 34, cfg(CONTA_A, "198.51.100.7"))]
+        falso, testados, _, erro = self.rodar(perfis, pend_v2("203.0.113.10", "a"), CONTA_A)
+        self.assertIn("proxy cadastrado no DaVinci não funcionou", str(erro))
+        self.assertIn("Nada foi trocado", str(erro))
+        self.assertEqual(falso.gravacoes, [])
+        self.assertEqual(len(testados), 1)  # não tenta as contas do AdsPower
+
+    def test_proxy_que_sai_por_outro_ip_nao_troca_nada(self):
+        perfis = [perfil("a", 34, cfg(CONTA_A, "198.51.100.7"))]
+        falso, _, _, erro = self.rodar(perfis, pend_v2("203.0.113.10", "a"), CONTA_NOVA, ip_de_saida="8.8.8.8")
+        self.assertIn("saiu pelo IP 8.8.8.8", str(erro))
+        self.assertEqual(falso.gravacoes, [])
+
+    def test_cadastro_incompleto_e_recusado(self):
+        pend = pendencia("203.0.113.10", "a", proxy={"tipo": "socks5", "porta": 7128, "usuario": "px", "senha": ""})
+        falso, _, _, erro = self.rodar([perfil("a", 34, cfg(CONTA_A, "1.1.1.1"))], pend, CONTA_NOVA)
+        self.assertIn("incompleto", str(erro))
+        self.assertEqual(falso.gravacoes, [])
+
+    def test_simulacao_nao_grava(self):
+        perfis = [perfil("a", 34, cfg(CONTA_A, "198.51.100.7"))]
+        falso, _, resumo, erro = self.rodar(perfis, pend_v2("203.0.113.10", "a"), CONTA_NOVA, simular=True)
+        self.assertIsNone(erro)
+        self.assertIn("trocaria 1 perfil", resumo)
+        self.assertEqual(falso.gravacoes, [])
+
+    def test_extra_que_esta_no_ip_de_outra_empresa_nao_e_trocado(self):
+        """Número de perfil extra digitado errado não tira outra empresa do ar."""
+        pend = pend_v2("203.0.113.10", "a", "x", ips_de_outras=["203.0.113.20", "198.51.100.99"])
+        pend["perfis"][1]["origem"] = "extra"
+        perfis = [perfil("a", 34, cfg(CONTA_A, "198.51.100.7")), perfil("x", 85, cfg(CONTA_B, "203.0.113.20"))]
+        falso, _, _, erro = self.rodar(perfis, pend, CONTA_NOVA)
+        self.assertEqual([g["user_id"] for g in falso.gravacoes], ["a"])
+        self.assertIn("n85 em 203.0.113.20", str(erro))
+        self.assertEqual(falso.perfis["x"]["user_proxy_config"]["proxy_host"], "203.0.113.20")
+
+    def test_perfil_de_loja_no_ip_antigo_de_outra_empresa_e_trocado(self):
+        """A trava é só para extra: o perfil da loja vem do cadastro da loja."""
+        pend = pend_v2("203.0.113.10", "a", ips_de_outras=["198.51.100.7"])
+        falso, _, _, erro = self.rodar([perfil("a", 34, cfg(CONTA_A, "198.51.100.7"))], pend, CONTA_NOVA)
+        self.assertIsNone(erro)
+        self.assertEqual([g["user_id"] for g in falso.gravacoes], ["a"])
+
+
+class PassadaV2(unittest.TestCase):
+    def setUp(self):
+        s._SEGREDOS.clear()
+        self.reportes, self.caminhos = [], []
+
+    def davinci(self, pendentes):
+        def f(metodo, caminho, corpo=None):
+            if metodo == "GET":
+                self.caminhos.append(caminho)
+                return pendentes
+            self.reportes.append(corpo)
+            return {"registrado": True}
+        return f
+
+    def test_pede_a_versao_2_e_devolve_o_rev(self):
+        perfis = [perfil("a", 34, cfg(CONTA_A, "1.1.1.1"))]
+        with mock.patch.object(s, "davinci", self.davinci([pend_v2("203.0.113.10", "a", rev=7)])), \
+                mock.patch.object(s, "adspower", AdsPowerFalso(perfis)), \
+                mock.patch.object(s, "testar_proxy", proxy_que_aceita(CONTA_NOVA)):
+            s.passada(simular=False)
+        self.assertTrue(self.caminhos[0].endswith("?v=2"))
+        self.assertEqual(self.reportes[0]["rev"], 7)
+        self.assertTrue(self.reportes[0]["ok"])
+
+    def test_senha_cadastrada_nunca_vai_no_erro_nem_no_log(self):
+        perfis = [perfil("a", 34, cfg(CONTA_A, "1.1.1.1"))]
+
+        def testar_que_vaza(c):
+            raise s.Falha(f"falhou com {c['proxy_user']}:{c['proxy_password']}")
+
+        with mock.patch.object(s, "davinci", self.davinci([pend_v2("203.0.113.10", "a")])), \
+                mock.patch.object(s, "adspower", AdsPowerFalso(perfis)), \
+                mock.patch.object(s, "testar_proxy", testar_que_vaza), \
+                self.assertLogs("adspower_ip", level="INFO") as logs:
+            s.passada(simular=False)
+        tudo = self.reportes[0]["erro"] + "\n".join(logs.output)
+        self.assertNotIn("SenhaDoVpsNovo123", tudo)
+        self.assertNotIn("pxnovo01", tudo)
+
+    def test_empresa_filtra_so_uma(self):
+        outra = dict(pend_v2("203.0.113.20", "b"), apelido="Inova", company_id="c2")
+        barbosa = dict(pend_v2("203.0.113.10", "a"), apelido="Barbosa")
+        perfis = [perfil("a", 34, cfg(CONTA_A, "1.1.1.1")), perfil("b", 53, cfg(CONTA_A, "1.1.1.1"))]
+        falso = AdsPowerFalso(perfis)
+        with mock.patch.object(s, "davinci", self.davinci([outra, barbosa])), \
+                mock.patch.object(s, "adspower", falso), \
+                mock.patch.object(s, "testar_proxy", proxy_que_aceita(CONTA_NOVA)):
+            s.passada(simular=False, empresa=" barbosa ")
+        self.assertEqual([g["user_id"] for g in falso.gravacoes], ["a"])
+        self.assertEqual([r["company_id"] for r in self.reportes], ["c1"])
+
+    def test_loop_repassa_empresa_e_sem_proxy(self):
+        vistos = []
+
+        def parar(_segundos):
+            raise KeyboardInterrupt
+
+        with mock.patch.object(s, "passada", lambda **k: vistos.append(k)), \
+                mock.patch.object(s.time, "sleep", parar), self.assertRaises(KeyboardInterrupt):
+            s.em_loop(simular=True, empresa="barbosa")
+        self.assertEqual(vistos, [{"simular": True, "empresa": "barbosa", "tambem_sem_proxy": False}])
 
 
 if __name__ == "__main__":
