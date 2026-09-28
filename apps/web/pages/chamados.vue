@@ -91,11 +91,21 @@ function statusTitle(row: ChamadoRow): string {
   const info = statusInfo(row)
   return row.status_aba_motivo ? `${info.label} — ${row.status_aba_motivo}` : `${info.label} — ${info.hint}`
 }
+// 28/09 (Vinicius): "ml" e "mercado livre" são a mesma plataforma — a coluna
+// guarda como cada caminho gravou; a tela mostra um nome só (o filtro também).
+const APELIDOS_PLATAFORMA: Record<string, string> = {
+  ml: 'mercado livre', mercadolivre: 'mercado livre', meli: 'mercado livre',
+  'tik tok': 'tiktok', 'tiktok shop': 'tiktok',
+}
+function nomePlataforma(p: string | null | undefined): string {
+  const k = (p || '').trim().toLowerCase()
+  return APELIDOS_PLATAFORMA[k] || k
+}
 // Quem falou por último, pra coluna Últ. resposta: "nós · robô" / "plataforma · Shopee".
 function quemRespondeu(row: ChamadoRow): string {
   const autor = (row.ultima_resposta_autor || '').trim()
   if (row.ultima_resposta_direcao === 'recebida') {
-    const plat = autor && autor !== 'monitor' ? autor : (row.plataforma || 'plataforma').toUpperCase()
+    const plat = autor && autor !== 'monitor' ? autor : (nomePlataforma(row.plataforma) || 'plataforma').toUpperCase()
     return `plataforma · ${plat}`
   }
   // 24/09: o cérebro virou "IA de Chamado" (a resposta que ela decide sai assinada "cérebro")
@@ -1472,13 +1482,13 @@ function closeExcluir() {
 
 // Nome da plataforma pro aviso ("na Shopee", não "na SHOPEE").
 const PLATAFORMA_NA: Record<string, string> = {
-  ml: 'no Mercado Livre',
+  'mercado livre': 'no Mercado Livre',
   shopee: 'na Shopee',
   tiktok: 'na TikTok',
   amazon: 'na Amazon',
 }
 function plataformaNa(p: string | null | undefined): string {
-  return PLATAFORMA_NA[(p || '').trim().toLowerCase()] || 'na plataforma'
+  return PLATAFORMA_NA[nomePlataforma(p)] || 'na plataforma'
 }
 
 function toggleLancamento(id: string) {
@@ -1654,7 +1664,7 @@ async function confirmarExcluir() {
               <td class="px-2 py-1 whitespace-nowrap text-muted-foreground">{{ fmtDate(draft.data) }}</td>
               <td class="px-2 py-1 font-mono">{{ draft.pedido_bling || '—' }}</td>
               <td class="px-2 py-1 font-mono text-muted-foreground">{{ draft.pedido_marketplace || '—' }}</td>
-              <td class="px-2 py-1 uppercase">{{ draft.plataforma || '—' }}</td>
+              <td class="px-2 py-1 uppercase">{{ nomePlataforma(draft.plataforma) || '—' }}</td>
               <td class="px-2 py-1 max-w-[320px] truncate" :title="draft.produto || ''">{{ draft.produto || '—' }}</td>
               <td class="px-2 py-1 font-mono">{{ draft.sku || '—' }}</td>
               <td class="px-2 py-1">{{ draft.conta || '—' }}</td>
@@ -1787,7 +1797,7 @@ async function confirmarExcluir() {
             <td class="px-2 py-1 whitespace-nowrap text-muted-foreground">{{ fmtDate(row.data) }}</td>
             <td class="px-2 py-1 font-mono whitespace-nowrap">{{ row.pedido_bling || '—' }}</td>
             <td class="px-2 py-1 font-mono text-muted-foreground whitespace-nowrap">{{ row.pedido_marketplace || '—' }}</td>
-            <td class="px-2 py-1 uppercase whitespace-nowrap">{{ row.plataforma || '—' }}</td>
+            <td class="px-2 py-1 uppercase whitespace-nowrap">{{ nomePlataforma(row.plataforma) || '—' }}</td>
             <td class="px-2 py-1 max-w-[320px] truncate" :title="row.produto || ''">{{ row.produto || '—' }}</td>
             <td class="px-2 py-1 font-mono whitespace-nowrap max-w-[180px] truncate" :title="row.sku || ''">{{ row.sku || '—' }}</td>
             <td class="px-2 py-1 whitespace-nowrap">{{ row.conta || '—' }}</td>
@@ -1976,7 +1986,7 @@ async function confirmarExcluir() {
           <div>
             <div class="text-sm font-semibold inline-flex items-center gap-1.5"><Scale class="size-4 text-violet-600" /> Encaminhar ao jurídico</div>
             <div class="text-xs text-muted-foreground">
-              Chamado {{ juridico.row.chamado || '(sem nº)' }} · pedido {{ juridico.row.pedido_bling || juridico.row.pedido_marketplace }} · {{ (juridico.row.plataforma || '').toUpperCase() }} {{ juridico.row.conta || '' }}
+              Chamado {{ juridico.row.chamado || '(sem nº)' }} · pedido {{ juridico.row.pedido_bling || juridico.row.pedido_marketplace }} · {{ nomePlataforma(juridico.row.plataforma).toUpperCase() }} {{ juridico.row.conta || '' }}
             </div>
           </div>
           <button type="button" class="rounded p-1 hover:bg-muted" @click="closeJuridico"><X class="size-4" /></button>
@@ -2019,10 +2029,10 @@ async function confirmarExcluir() {
             <!-- 21/09 (Vinicius): o pedido do marketplace junto do Bling — é o número
                  que a pessoa procura na plataforma. -->
             <div class="text-sm font-semibold">
-              Chamado {{ hist.row.chamado || '(sem nº)' }} · pedido {{ hist.row.pedido_bling || hist.row.pedido_marketplace }}<template v-if="hist.row.pedido_bling && hist.row.pedido_marketplace"> · {{ (hist.row.plataforma || 'marketplace').toUpperCase() }} {{ hist.row.pedido_marketplace }}</template>
+              Chamado {{ hist.row.chamado || '(sem nº)' }} · pedido {{ hist.row.pedido_bling || hist.row.pedido_marketplace }}<template v-if="hist.row.pedido_bling && hist.row.pedido_marketplace"> · {{ (nomePlataforma(hist.row.plataforma) || 'marketplace').toUpperCase() }} {{ hist.row.pedido_marketplace }}</template>
             </div>
             <div class="text-xs text-muted-foreground">
-              {{ origemLabel(hist.row.origem) }} · {{ (hist.row.plataforma || '').toUpperCase() }} {{ hist.row.conta || '' }} · canal {{ hist.row.canal }}
+              {{ origemLabel(hist.row.origem) }} · {{ nomePlataforma(hist.row.plataforma).toUpperCase() }} {{ hist.row.conta || '' }} · canal {{ hist.row.canal }}
               <a v-if="hist.row.chamado_url" :href="hist.row.chamado_url" target="_blank" rel="noopener" class="ml-1 underline">abrir na plataforma</a>
             </div>
             <!-- 25/09 (294571): consulta aberta à mão no Portal de Atendimento — o
@@ -2510,7 +2520,7 @@ async function confirmarExcluir() {
               Excluir chamado · pedido {{ excluir.row.pedido_bling || excluir.row.pedido_marketplace }}
             </div>
             <div class="text-xs text-muted-foreground">
-              Chamado {{ excluir.row.chamado || '(sem nº)' }} · {{ (excluir.row.plataforma || '').toUpperCase() }} {{ excluir.row.conta || '' }}
+              Chamado {{ excluir.row.chamado || '(sem nº)' }} · {{ nomePlataforma(excluir.row.plataforma).toUpperCase() }} {{ excluir.row.conta || '' }}
             </div>
           </div>
           <button type="button" class="rounded p-1 hover:bg-muted" @click="closeExcluir"><X class="size-4" /></button>

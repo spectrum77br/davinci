@@ -49,7 +49,8 @@ const PLATAFORMAS = [
   { value: 'tiktok', label: 'TikTok' },
   { value: 'amazon', label: 'Amazon' },
 ]
-const nomePlataforma = (v: string | null) => PLATAFORMAS.find(p => p.value === (v || ''))?.label || v || ''
+// "mercado livre" gravado por extenso também é o Mercado Livre (28/09)
+const nomePlataforma = (v: string | null) => PLATAFORMAS.find(p => p.value === (plataformaDaRegra(v) || v || ''))?.label || v || ''
 
 const estado = ref<Estado | null>(null)
 const loading = ref(false)
