@@ -212,8 +212,11 @@ class MercadoLivreClient:
         except Exception as e:  # noqa: BLE001
             return TestResult(ok=False, detail=f"error: {e}")
 
-    async def get_item(self, item_id: str) -> dict:
-        r = await self._request("GET", f"/items/{item_id}")
+    async def get_item(self, item_id: str, *, include_attributes: bool = False) -> dict:
+        # include_attributes=all: sem ele o ML NÃO manda os `attributes` das
+        # variações (onde mora o SELLER_SKU de cada variação).
+        params = {"include_attributes": "all"} if include_attributes else None
+        r = await self._request("GET", f"/items/{item_id}", params=params)
         r.raise_for_status()
         return r.json() or {}
 
@@ -515,7 +518,7 @@ class MercadoLivreClient:
         (by stored variation_id); if that variation is gone we return None
         rather than guess. Used by the on-demand reconcile."""
         try:
-            item = await self.get_item(link.external_id)
+            item = await self.get_item(link.external_id, include_attributes=True)
         except Exception:  # noqa: BLE001
             return None
         if not isinstance(item, dict) or not item:
@@ -525,9 +528,9 @@ class MercadoLivreClient:
         if link.variation_id:
             for v in variations:
                 if str(v.get("id")) == str(link.variation_id):
-                    return {"sku": _ml_sku_of(v), "title": title}
+                    return {"sku": _ml_sku_oficial(v), "title": title}
             return None
-        return {"sku": _ml_sku_of(item), "title": title}
+        return {"sku": _ml_sku_oficial(item), "title": title}
 
     async def update_stock(
         self,
@@ -570,7 +573,7 @@ class MercadoLivreClient:
 
         item_id = link.external_id
         try:
-            item = await self.get_item(item_id)
+            item = await self.get_item(item_id, include_attributes=sku_esperado is not None)
         except httpx.HTTPStatusError as e:
             code = e.response.status_code if e.response is not None else None
             if code == 404:
@@ -632,7 +635,7 @@ class MercadoLivreClient:
 
             new_var_id = str(target_var["id"])
             payload_extra: dict[str, Any] = {}
-            sku_atual = _ml_sku_of(target_var)
+            sku_atual = _ml_sku_oficial(target_var)
             trocado = _sku_trocado(sku_atual, sku_esperado, qty_before, item_id, new_var_id)
             if trocado is not None:
                 return trocado
@@ -664,7 +667,7 @@ class MercadoLivreClient:
             )
 
         # No variations on the listing -- single-item update.
-        sku_atual = _ml_sku_of(item)
+        sku_atual = _ml_sku_oficial(item)
         trocado = _sku_trocado(sku_atual, sku_esperado, qty_before, item_id, None)
         if trocado is not None:
             return trocado
@@ -1069,6 +1072,18 @@ def _iter_ml_variants(body: dict):
             "listing_type": listing_type,
             "raw": body,
         }
+
+
+def _ml_sku_oficial(obj: dict) -> str | None:
+    """Só o atributo SELLER_SKU (o SKU que o vendedor edita hoje). Para
+    decidir MOVER vínculo não usamos `seller_custom_field`: é o campo antigo e
+    pode estar desatualizado — com ele um anúncio seria movido para o produto
+    errado. Sem o atributo, None (= não conferir)."""
+    for attr in obj.get("attributes") or []:
+        if (attr.get("id") or "").upper() == "SELLER_SKU":
+            v = (attr.get("value_name") or attr.get("value") or "").strip()
+            return v or None
+    return None
 
 
 def _ml_sku_of(obj: dict) -> str | None:

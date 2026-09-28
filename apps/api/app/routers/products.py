@@ -44,6 +44,7 @@ from app.services.marketplaces.bling import (
     parse_bling_product,
 )
 from app.services.relink_hook import trigger_user_relink
+from app.worker_pool import get_arq_pool
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/api", tags=["products"])
@@ -226,23 +227,23 @@ async def list_products(
 
     seg_map = await _segment_lookup(session, [p.segment_id for p in rows if p.segment_id])
     items = [_to_product_out(p, by_pid.get(p.id, []), seg_map) for p in rows]
-    saude = SaudeVinculos(
-        **{
-            nome: (
-                await session.execute(
-                    select(func.count())
-                    .select_from(ProductLink)
-                    .join(Product, Product.id == ProductLink.product_id)
-                    .where(user_scope(Product, user), _vinculo_visivel(), filtro())
-                )
-            ).scalar_one()
-            for nome, filtro in (
-                ("mortos", _FILTROS_VINCULO["mortos"]),
-                ("sku_divergente", _FILTROS_VINCULO["sku"]),
-                ("erro", _FILTROS_VINCULO["erro"]),
+    # Uma consulta só, no mesmo escopo da listagem (equipe incluída).
+    escopo_links = [user_scope(Product, user), _vinculo_visivel()]
+    if not scope.unrestricted:
+        escopo_links.append(ProductLink.integration_id.in_(scope.integration_ids))
+    contagem = (
+        await session.execute(
+            select(
+                func.count().filter(_FILTROS_VINCULO["mortos"]()),
+                func.count().filter(_FILTROS_VINCULO["sku"]()),
+                func.count().filter(_FILTROS_VINCULO["erro"]()),
             )
-        }
-    )
+            .select_from(ProductLink)
+            .join(Product, Product.id == ProductLink.product_id)
+            .where(*escopo_links)
+        )
+    ).one()
+    saude = SaudeVinculos(mortos=contagem[0], sku_divergente=contagem[1], erro=contagem[2])
     return ProductPage(items=items, total=total, page=page, page_size=page_size, saude=saude)
 
 
@@ -642,23 +643,28 @@ async def remover_vinculos_mortos(
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[User, Depends(require_permission("produtos", "delete"))],
 ) -> dict:
-    """Apaga de uma vez os vínculos marcados como mortos (anúncio encerrado,
-    excluído ou bloqueado no marketplace). A varredura diária já faz isso
-    sozinha depois de 30 dias; este botão é o "agora"."""
-    res = await session.execute(
-        delete(ProductLink).where(
-            ProductLink.morto_desde.is_not(None),
-            ProductLink.product_id.in_(select(Product.id).where(user_scope(Product, user))),
-        )
-    )
-    await session.commit()
+    """Apaga os vínculos marcados como mortos (anúncio encerrado, excluído ou
+    bloqueado no marketplace). A varredura diária já faz isso sozinha depois
+    de 30 dias; este botão é o "agora". Roda em segundo plano, em lotes: cada
+    vínculo apagado solta centenas de linhas do histórico de envio, e de uma
+    vez só isso travaria a tabela de vínculos."""
+    scope = await resolve_team_scope(session, user)
+    integ = None if scope.unrestricted else [str(i) for i in scope.integration_ids]
+    cond = [ProductLink.morto_desde.is_not(None), _vinculo_visivel()]
+    if integ is not None:
+        cond.append(ProductLink.integration_id.in_(scope.integration_ids))
+    quantidade = (
+        await session.execute(select(func.count()).select_from(ProductLink).where(*cond))
+    ).scalar_one()
+    pool = await get_arq_pool()
+    await pool.enqueue_job("remover_vinculos_mortos_run", integ)
     logger.info(
-        "vinculos_mortos_removidos_manual",
+        "vinculos_mortos_remocao_agendada",
         actor_user_id=str(user.id),
-        removidos=res.rowcount or 0,
+        quantidade=quantidade,
         **_audit_request_ctx(request),
     )
-    return {"removidos": res.rowcount or 0}
+    return {"agendado": True, "quantidade": quantidade}
 
 
 # ----------------------------------------------------------- Bling preview/import

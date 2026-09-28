@@ -341,8 +341,9 @@ class SyncOrchestrator:
         if sku_atual:
             link.external_sku = sku_atual
         if result.status == SyncStatus.OK:
-            link.morto_desde = None
-            link.morto_motivo = None
+            if not (link.morto_motivo or "").startswith(vinculo_saude.PREFIXO_DUPLICADO):
+                link.morto_desde = None
+                link.morto_motivo = None
             return
         if result.error_code == "vinculo_morto":
             return
@@ -648,6 +649,9 @@ class SyncOrchestrator:
             stmt = select(ProductLink).where(ProductLink.product_id == product.id)
             if link_filter is not None:
                 stmt = stmt.where(ProductLink.id.in_(link_filter))
+            if not self.force:
+                # Vínculo morto nem entra na passada (sem chamada, sem SyncLog).
+                stmt = stmt.where(ProductLink.morto_desde.is_(None))
             links = (await self.session.execute(stmt)).scalars().all()
             bling_links = [l for l in links if l.platform == IntegrationPlatform.BLING]
             other_links = [l for l in links if l.platform != IntegrationPlatform.BLING]
@@ -732,6 +736,8 @@ class SyncOrchestrator:
                         )
                         if link_filter is not None:
                             stmt = stmt.where(ProductLink.id.in_(link_filter))
+                        if not self.force:
+                            stmt = stmt.where(ProductLink.morto_desde.is_(None))
                         links = (await sub_s.execute(stmt)).scalars().all()
 
                         sub_job = (

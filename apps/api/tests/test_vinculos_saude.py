@@ -262,7 +262,7 @@ async def test_motor_marca_morto_e_depois_nao_gasta_chamada(db: AsyncSession):
         await SyncOrchestrator(db, user_id=u.id).run([p])
     await db.commit()
     await db.refresh(link)
-    assert link.last_error.startswith("vinculo_morto")
+    assert link.last_error.startswith("ml_listing_closed")  # nem entrou na passada
 
 
 @pytest.mark.asyncio
@@ -337,10 +337,34 @@ async def test_tela_conta_filtra_e_remove_mortos(client, db: AsyncSession, make_
     so_sku = (await client.get("/api/products", params={"vinculos": "sku"})).json()
     assert [i["sku"] for i in so_sku["items"]] == ["zz71"]
 
-    r = await client.post("/api/product-links/remover-mortos")
-    assert r.json() == {"removidos": 1}
+    agendados = []
+
+    class _Pool:
+        async def enqueue_job(self, *a, **k):
+            agendados.append(a)
+
+    async def _pool():
+        return _Pool()
+
+    with patch("app.routers.products.get_arq_pool", _pool):
+        r = await client.post("/api/product-links/remover-mortos")
+    assert r.json() == {"agendado": True, "quantidade": 1}
+    assert agendados == [("remover_vinculos_mortos_run", None)]
+
+    # o job: apaga em lotes, soltando antes o histórico de envio
+    from app.models import SyncLog
+    from app.services.vinculo_saude import apagar_mortos_em_lotes
+
+    db.add(SyncLog(
+        user_id=admin.id, product_id=p.id, product_link_id=morto.id, integration_id=morto.integration_id,
+        platform=morto.platform, action="update_stock", status=LinkSyncStatus.SKIPPED,
+    ))
+    await db.commit()
+    assert await apagar_mortos_em_lotes(pausa=0) == 1
     restantes = (await db.execute(select(ProductLink.id))).scalars().all()
     assert morto.id not in restantes and divergente.id in restantes
+    solto = (await db.execute(select(SyncLog.product_link_id))).scalars().all()
+    assert solto == [None]
 
 
 # --- 6. a varredura da madrugada roda uma vez só -------------------------------------
@@ -400,3 +424,43 @@ async def test_integracao_existe(db: AsyncSession):
     # sanidade: IntegrationPlatform.ML existe e o índice do motor aceita dono qualquer
     assert IntegrationPlatform.ML.value == "ml"
     assert LinkSyncStatus.FATAL.value == "fatal"
+
+
+@pytest.mark.asyncio
+async def test_duplicado_marcado_nao_revive(db: AsyncSession):
+    """O vínculo "do anúncio inteiro" que duplicava a variação foi marcado
+    como morto pela migration. Um envio forçado que dá certo NÃO o revive."""
+    u = await _usuario(db, "d1")
+    p = Product(user_id=u.id, sku="zz80", name="p", stock=4)
+    db.add(p)
+    await db.commit()
+    _integ, link = await _ml_link(db, u, p, sku_link="zz80")
+    link.morto_desde = link.created_at
+    link.morto_motivo = "duplicado: o anúncio já tem vínculo por variação"
+    await db.commit()
+    with patch("app.services.sync_orchestrator.client_for", return_value=_MLFalso("zz80")):
+        await SyncOrchestrator(db, user_id=u.id, force=True).run([p])
+    await db.commit()
+    await db.refresh(link)
+    assert link.morto_desde is not None
+
+
+@pytest.mark.asyncio
+async def test_ml_so_confia_no_sku_oficial_da_variacao(db: AsyncSession):
+    """Variação sem o atributo SELLER_SKU e com o campo antigo
+    `seller_custom_field` desatualizado: NÃO pode mover (não confere)."""
+    u = await _usuario(db, "ml5")
+    _, product, link = await _make_setup(db, u, link_stock=5)
+    link.variation_id = "777"
+    await db.commit()
+    client = MercadoLivreClient(_ml_creds())
+    item = {
+        "id": "MLB123", "status": "active",
+        "variations": [{"id": 777, "seller_custom_field": "sku-velho-do-campo-antigo"}],
+    }
+    with respx.mock(base_url=ML_API_BASE) as router:
+        get = router.get("/items/MLB123").mock(return_value=httpx.Response(200, json=item))
+        router.put("/items/MLB123").mock(return_value=httpx.Response(200, json={}))
+        r = await client.update_stock(link, 7, force=True, sku_esperado=product.sku)
+    assert r.status == SyncStatus.OK
+    assert "include_attributes=all" in str(get.calls[0].request.url)

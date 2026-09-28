@@ -3116,7 +3116,14 @@ async def varredura_vinculos(ctx: dict) -> None:
         ids = [
             str(i)
             for i in (
-                await s.execute(select(Integration.id).where(Integration.archived_at.is_(None)))
+                await s.execute(
+                    select(Integration.id).where(
+                        Integration.archived_at.is_(None),
+                        # Só marketplaces: o vínculo do Bling é a origem do
+                        # estoque e não é assunto desta varredura.
+                        Integration.platform != IntegrationPlatform.BLING,
+                    )
+                )
             ).scalars()
         ]
         if dono is None or not ids:
@@ -3134,13 +3141,19 @@ async def varredura_vinculos(ctx: dict) -> None:
     await auto_link_run(ctx, job_id, ids)
 
     limite = datetime.now(UTC) - timedelta(days=vinculo_saude.DIAS_ATE_REMOVER)
-    async with session_scope() as s:
-        res = await s.execute(
-            delete(ProductLink).where(
-                ProductLink.morto_desde.is_not(None), ProductLink.morto_desde < limite
-            )
-        )
-    logger.info("vinculos_mortos_removidos", quantidade=res.rowcount or 0)
+    removidos = await vinculo_saude.apagar_mortos_em_lotes(antes_de=limite)
+    logger.info("vinculos_mortos_removidos", quantidade=removidos)
+
+
+async def remover_vinculos_mortos_run(ctx: dict, integration_ids: list[str] | None = None) -> None:
+    """Botão "Remover mortos" da tela Produtos: apaga já (em lotes, em
+    segundo plano — fora da requisição, que não aguentaria 1,6 mi de linhas
+    de sync_logs para soltar)."""
+    from app.services import vinculo_saude
+
+    ids = [UUID(i) for i in integration_ids] if integration_ids is not None else None
+    removidos = await vinculo_saude.apagar_mortos_em_lotes(integration_ids=ids)
+    logger.info("vinculos_mortos_removidos_botao", quantidade=removidos)
 
 
 async def auto_import_link(ctx: dict) -> None:
@@ -3538,6 +3551,7 @@ class WorkerSettings:
         auth_codes_cleanup,
         auto_link_run,
         varredura_vinculos,
+        remover_vinculos_mortos_run,
         chamado_devolucao_disparar,
         devolucao_mensagem_comprador_enviar,
         bling_situacoes_sync,

@@ -80,3 +80,50 @@ CASE
   WHEN platform = 'magalu' AND last_error LIKE 'magalu_sku_not_found%' THEN 'anúncio não existe mais na Magalu'
 END
 """
+
+
+# ── Apagar vínculo morto, em lotes ────────────────────────────────────────────
+# Cada vínculo apagado zera `sync_logs.product_link_id` (FK ON DELETE SET NULL)
+# em todas as partições — os mortos de hoje têm ~1,6 milhão dessas linhas. Um
+# DELETE só travava product_links por dezenas de minutos (medido pela revisão
+# de 28/09: 21 min e 22 GB de WAL para 583 mil linhas numa cópia local) e parava
+# o envio de estoque. Em lotes pequenos, cada um na sua transação curta.
+LOTE_APAGAR = 100
+
+# Duplicado que a migration 0333 marcou: nunca "revive" com envio que dá certo.
+PREFIXO_DUPLICADO = "duplicado:"
+
+
+async def apagar_mortos_em_lotes(
+    *,
+    antes_de=None,
+    integration_ids: list | None = None,
+    pausa: float = 0.5,
+) -> int:
+    """Apaga vínculos mortos (opcionalmente só os mortos antes de `antes_de`
+    e/ou só destas contas). Devolve quantos apagou."""
+    import asyncio
+
+    from sqlalchemy import delete, select, update
+
+    from app.db import session_scope
+    from app.models import ProductLink, SyncLog
+
+    total = 0
+    while True:
+        async with session_scope() as s:
+            q = select(ProductLink.id).where(ProductLink.morto_desde.is_not(None))
+            if antes_de is not None:
+                q = q.where(ProductLink.morto_desde < antes_de)
+            if integration_ids is not None:
+                q = q.where(ProductLink.integration_id.in_(integration_ids))
+            ids = (await s.execute(q.limit(LOTE_APAGAR))).scalars().all()
+            if not ids:
+                break
+            await s.execute(
+                update(SyncLog).where(SyncLog.product_link_id.in_(ids)).values(product_link_id=None)
+            )
+            await s.execute(delete(ProductLink).where(ProductLink.id.in_(ids)))
+        total += len(ids)
+        await asyncio.sleep(pausa)
+    return total

@@ -163,6 +163,7 @@ ACOES: dict[tuple[str, str], str] = {
     ("POST", "/api/informar/{contexto}/enviar"): "enviou relatório no Threema",
     ("POST", "/api/email-padroes/{padrao_id}/enviar-teste"): "enviou e-mail de teste",
     ("POST", "/api/metrics/reset"): "zerou as métricas",
+    ("POST", "/api/product-links/remover-mortos"): "mandou remover os vínculos mortos",
     # Desde 25/09 baixar o certificado é POST com a senha dele no corpo.
     ("POST", "/api/companies/{company_id}/certificates/{cert_id}/download"): "baixou o certificado digital",
 }

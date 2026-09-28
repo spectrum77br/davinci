@@ -9,13 +9,12 @@ tentativas de envio por dia, e aparecendo na tela como se estivessem normais.
   volta a viver se reaparecer ativo. Os de hoje são marcados já, pelo último
   erro gravado (mesma regra de services/vinculo_saude.py) — contam 30 dias a
   partir de agora.
-- Apaga 226 vínculos ML "do anúncio inteiro" que convivem com vínculos por
-  variação do mesmo anúncio (216 duplicavam o envio; 10 apontavam para outro
-  produto e brigavam com o da variação). Fica o da variação.
-- Apaga 1.886 vínculos Amazon no formato antigo (ASIN no lugar do SKU) que têm
-  o par atual do mesmo seller-sku: mandavam o mesmo estoque duas vezes. Tinham
-  sido apagados em 02/07 (0167) e ressuscitados pelo cache `listings` de maio
-  no dia seguinte — o que também foi desligado (listings_import.py).
+- Marca como morto ("duplicado: …") 226 vínculos ML "do anúncio inteiro" que
+  convivem com vínculos por variação do mesmo anúncio (216 duplicavam o envio;
+  10 apontavam para outro produto e brigavam com o da variação) e 1.886
+  vínculos Amazon no formato antigo (ASIN no lugar do SKU) com o par atual do
+  mesmo seller-sku. Param de receber envio já; saem na limpeza em lotes.
+  NADA é apagado aqui (ver o comentário no upgrade).
 
 Revision ID: 0333_vinculos_mortos
 Revises: 0332_companies_proxy
@@ -57,9 +56,16 @@ def upgrade() -> None:
         """
     )
 
+    # Duplicados: MARCADOS como mortos (param de receber envio agora) em vez de
+    # apagados aqui. Apagar vínculo zera sync_logs.product_link_id (FK SET
+    # NULL) — 583 mil linhas para estes — e dentro da migration isso travaria
+    # product_links por dezenas de minutos. Quem apaga é a limpeza em lotes
+    # (vinculo_saude.apagar_mortos_em_lotes), sem travar nada.
     op.execute(
         f"""
-        DELETE FROM {SCHEMA}.product_links a
+        UPDATE {SCHEMA}.product_links a
+           SET morto_desde = now(),
+               morto_motivo = 'duplicado: o anúncio já tem vínculo por variação'
          WHERE a.platform = 'ml' AND coalesce(a.variation_id, '') = ''
            AND EXISTS (
              SELECT 1 FROM {SCHEMA}.product_links b
@@ -68,24 +74,24 @@ def upgrade() -> None:
            )
         """
     )
-
     op.execute(
         f"""
-        DELETE FROM {SCHEMA}.product_links a
+        UPDATE {SCHEMA}.product_links a
+           SET morto_desde = now(),
+               morto_motivo = 'duplicado: formato antigo da Amazon (o atual continua)'
          WHERE a.platform = 'amazon' AND coalesce(a.variation_id, '') = ''
            AND a.external_id ~ '^B0[A-Z0-9]{{8}}$'
            AND EXISTS (
              SELECT 1 FROM {SCHEMA}.product_links b
               WHERE b.platform = 'amazon' AND b.integration_id = a.integration_id
-                AND lower(b.external_id) = lower(a.external_sku) AND b.id <> a.id
+                AND b.external_id = a.external_sku AND b.id <> a.id
            )
         """
     )
 
 
 def downgrade() -> None:
-    # Os vínculos apagados não voltam (eram duplicatas; ficaram registrados em
-    # product_links_audit). Só as colunas saem.
+    # Só as colunas saem (a migration não apaga vínculo).
     op.drop_index("ix_product_links_morto_desde", table_name="product_links", schema=SCHEMA)
     op.drop_column("product_links", "morto_motivo", schema=SCHEMA)
     op.drop_column("product_links", "morto_desde", schema=SCHEMA)

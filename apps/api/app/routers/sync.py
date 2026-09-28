@@ -319,6 +319,9 @@ async def sync_product(
             # BEFORE the marketplace push (so the moved listing gets the right
             # product's fresh stock, not a stale value).
             sync_ids = set(original_link_ids) - set(report.excedent_deleted)
+            # Vínculo que veio de OUTRO produto (clique no produto novo): também
+            # recebe o estoque agora — antes era movido e ficava sem envio.
+            sync_ids |= {m.link_id for m in report.moves}
             target_ids = report.moved_product_ids
             bling_ids = (
                 await session.execute(
@@ -342,7 +345,7 @@ async def sync_product(
                     )
                 )
             ).scalars().all()
-            products_to_sync = [product, *extra]
+            products_to_sync = list({x.id: x for x in [product, *extra]}.values())
 
     # Individual sync intentionally bypasses the per-user advisory lock that
     # `sync_all` uses: this endpoint runs synchronously, is scoped to one
@@ -628,6 +631,9 @@ async def reload_product_links(
     only_link_ids: list[UUID] | None = None
     if report.moves:
         sync_ids = set(original_link_ids) - set(report.excedent_deleted)
+        # Vínculo que veio de OUTRO produto (clique no produto novo): também
+        # recebe o estoque agora — antes era movido e ficava sem envio.
+        sync_ids |= {m.link_id for m in report.moves}
         bling_ids = (
             await session.execute(
                 select(ProductLink.id).where(
@@ -647,7 +653,7 @@ async def reload_product_links(
                 )
             )
         ).scalars().all()
-        products_to_sync = [product, *extra]
+        products_to_sync = list({x.id: x for x in [product, *extra]}.values())
 
     orch = SyncOrchestrator(
         session, user_id=user.id, job=job, force=True, force_bling_refresh=True

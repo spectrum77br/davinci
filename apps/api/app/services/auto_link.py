@@ -487,8 +487,7 @@ def _repoint_link(
     link.stock = stock
     link.last_sync_status = LinkSyncStatus.OK
     link.last_sync_at = _now()
-    link.morto_desde = None
-    link.morto_motivo = None
+    # morto/vivo fica por conta de _saude_pelo_status (status lido agora).
 
 
 # Status (normalizado pelo list_listings / cru do TikTok) → morto ou vivo.

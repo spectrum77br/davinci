@@ -599,8 +599,12 @@ function dicaVinculo(p: Product, l: ProductLink): string {
 async function removerMortos() {
   removendoMortos.value = true
   try {
-    const r = await api<{ removidos: number }>('/api/product-links/remover-mortos', { method: 'POST' })
-    pushToast({ kind: 'success', title: `${r.removidos} vínculo(s) morto(s) removido(s)`, lines: [] })
+    const r = await api<{ quantidade: number }>('/api/product-links/remover-mortos', { method: 'POST' })
+    pushToast({
+      kind: 'success',
+      title: `Removendo ${r.quantidade.toLocaleString('pt-BR')} vínculo(s) morto(s)`,
+      lines: ['Em segundo plano, aos poucos — pode levar alguns minutos. Eles já não recebem estoque.'],
+    }, 10000)
     confirmandoRemoverMortos.value = false
     if (filtroVinculos.value === 'mortos') filtroVinculos.value = ''
     await refreshAll()
