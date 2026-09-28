@@ -128,6 +128,20 @@ def apelidos_da_plataforma(plat: str) -> tuple[str, ...]:
     return PLATAFORMAS_SELLER_CENTER.get(plat, (plat,))
 
 
+def plataforma_canonica(plat: str | None) -> str:
+    """Um nome só por plataforma no filtro da aba Chamados. 28/09 (Vinicius): o
+    filtro mostrava "ml" e "mercado livre" como duas opções — a coluna guarda a
+    plataforma como cada caminho gravou (Logística/Devolução "ml", outros por
+    extenso) — e cada uma escondia metade dos chamados do Mercado Livre."""
+    p = (plat or "").strip().lower()
+    if p in PLATAFORMA_ML:
+        return "mercado livre"
+    for nome, aceitas in PLATAFORMAS_SELLER_CENTER.items():
+        if p in aceitas:
+            return nome
+    return p
+
+
 # 2. Status da ABA (`status_aba`, derivado na hora pela listagem, não persiste).
 #    Vinicius 19/09: os 13 códigos de antes viraram CINCO, e a regra é "primeiro o
 #    robô; gente só quando o robô desiste":

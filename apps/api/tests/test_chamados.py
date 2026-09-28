@@ -168,7 +168,8 @@ async def test_create_preenche_do_pedido_e_lista_status_atual(client, make_user,
     assert body["total"] == 2
     por_pedido = {i["pedido_bling"]: i for i in body["items"]}
     assert por_pedido["293000"]["status_bling_atual"] == "Problemas"
-    assert body["plataformas"] == ["ml"]
+    # "ml" e "mercado livre" viram uma opção só no filtro (28/09)
+    assert body["plataformas"] == ["mercado livre"]
     assert body["contas"] == ["aguiar"]
 
     # filtro por conta (Eduardo 15/09: "ex. ML Aguiar 2") — sem caixa
@@ -178,6 +179,8 @@ async def test_create_preenche_do_pedido_e_lista_status_atual(client, make_user,
     # as contas do dropdown seguem a plataforma filtrada
     por_plat = await client.get("/api/chamados", params={"plataforma": "ml"})
     assert por_plat.json()["contas"] == ["aguiar"]
+    por_plat = await client.get("/api/chamados", params={"plataforma": "mercado livre"})
+    assert por_plat.json()["total"] == 1 and por_plat.json()["contas"] == ["aguiar"]
     por_plat = await client.get("/api/chamados", params={"plataforma": "shopee"})
     assert por_plat.json()["contas"] == []
 
@@ -192,6 +195,23 @@ async def test_create_preenche_do_pedido_e_lista_status_atual(client, make_user,
     # só situações que existem no Bling (a "Enviado Geral CI" inativa fica fora)
     sit = await client.get("/api/chamados/situacoes")
     assert sit.json()["nomes"] == ["Perdimento", "Problemas", "Resolvido"]
+
+
+async def test_filtro_junta_ml_e_mercado_livre(client, make_user, auth_as, db):
+    """28/09 (Vinicius): o filtro tinha "ml" e "mercado livre" como duas opções e
+    cada uma escondia metade dos chamados do Mercado Livre."""
+    auth_as(await make_user(permissions=_perms()))
+    for plat, conta in (("ml", "aguiar"), ("Mercado Livre", "marquezini"), ("tiktok", "injox")):
+        db.add(Chamado(id=uuid4(), origem="logistica", plataforma=plat, conta=conta,
+                       pedido_bling=f"p-{conta}"))
+    await db.commit()
+    body = (await client.get("/api/chamados")).json()
+    assert body["plataformas"] == ["mercado livre", "tiktok"]
+    for valor in ("mercado livre", "ml", "MERCADO LIVRE"):
+        r = (await client.get("/api/chamados", params={"plataforma": valor})).json()
+        assert r["total"] == 2, valor
+        assert r["contas"] == ["aguiar", "marquezini"]
+    assert (await client.get("/api/chamados", params={"plataforma": "tiktok"})).json()["total"] == 1
 
 
 async def test_replica_manual_registra_e_robo_enfileira(client, make_user, auth_as, db):

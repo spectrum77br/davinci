@@ -445,8 +445,9 @@ async def list_chamados(
         conds.append(Chamado.origem == origem)
     cond_plataforma = None
     if plataforma:
-        cond_plataforma = (
-            func.lower(func.coalesce(Chamado.plataforma, "")) == plataforma.strip().lower()
+        # "ml" e "mercado livre" são a mesma plataforma (28/09)
+        cond_plataforma = func.lower(func.trim(func.coalesce(Chamado.plataforma, ""))).in_(
+            svc.apelidos_da_plataforma(plataforma)
         )
         conds.append(cond_plataforma)
     if conta and conta.strip():
@@ -480,17 +481,15 @@ async def list_chamados(
         .scalars()
         .all()
     )
-    plataformas = [
-        p
-        for p in (
-            await session.execute(
-                select(func.lower(Chamado.plataforma))
-                .distinct()
-                .order_by(func.lower(Chamado.plataforma))
-            )
-        ).scalars()
-        if p
-    ]
+    plataformas = sorted(
+        {
+            svc.plataforma_canonica(p)
+            for p in (
+                await session.execute(select(func.lower(Chamado.plataforma)).distinct())
+            ).scalars()
+            if (p or "").strip()
+        }
+    )
     # Contas do dropdown: só as da plataforma filtrada (quando há uma), uma
     # por nome ignorando caixa, na grafia que aparece na linha.
     q_contas = (
