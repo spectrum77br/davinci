@@ -3782,12 +3782,14 @@ class WorkerSettings:
         ),
         # Vendas do ML canceladas com o líquido cheio gravado (ver a função).
         # De 3 em 3 h, no :27 — longe do retry (:10/:40), da esteira lenta
-        # (:05/:20/:35/:50) e do snapshot (:15/:45).
+        # (:05/:20/:35/:50) e do snapshot (:15/:45). Roda também ao ligar o
+        # worker (Vinicius, 28/09: "pode forçar e rodar agora") — depois do
+        # backlog a rodada é curta: só quem ainda não foi relido.
         cron(
             marketplace_financials_ml_cancelados,
             hour={0, 3, 6, 9, 12, 15, 18, 21},
             minute=27,
-            run_at_startup=False,
+            run_at_startup=True,
             timeout=900,
         ),
         # A cada 10min ("pegar isso estantaneo", 01/09): o TikTok libera a

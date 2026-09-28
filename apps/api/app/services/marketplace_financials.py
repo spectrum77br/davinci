@@ -555,9 +555,9 @@ async def run_ml_cancelados_resync(
                 ),
             )
         )
-        # Quem foi lido há mais tempo primeiro: o que acabou de ser relido
-        # vai pro fim da fila.
-        .order_by(mof.fetched_at.asc().nullsfirst(), mof.created_at.desc())
+        # Mais recente primeiro: é o que aparece na aba Margem (30 dias). Quem
+        # acabou de ser relido não volta — ganha a chave ou espera as 20 h.
+        .order_by(mof.created_at.desc())
         .limit(limit)
     )
     bling_ids = [int(b) for b in (await session.execute(stmt)).scalars().all()]
