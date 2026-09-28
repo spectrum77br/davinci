@@ -712,6 +712,9 @@ async def list_estoque_pedidos(
     # duplicidade na impressão em lote: a tela marca "Impressa" e o operador
     # deixa de selecionar de novo sem querer.
     impressa_por_pedido: dict[str, datetime] = {}
+    # Pedidos que também levam a NF de 100% DENTRO DA CAIXA (28/09/2026): a
+    # tela avisa ao lado do Imprimir qual página é a da caixa.
+    com_nf_caixa: set[str] = set()
     if numeros:
         et_rows = (
             await session.execute(
@@ -719,6 +722,7 @@ async def list_estoque_pedidos(
                     NfEtiquetaArquivo.pedido_bling,
                     NfEtiquetaArquivo.created_at,
                     NfEtiquetaArquivo.impressa_em,
+                    (func.coalesce(func.length(NfEtiquetaArquivo.nf_caixa_pdf), 0) > 0).label("tem_nf_caixa"),
                 ).where(
                     NfEtiquetaArquivo.pedido_bling.in_(numeros),
                     # Placeholder só-NF (blob vazio) não é etiqueta: sem esse
@@ -732,6 +736,7 @@ async def list_estoque_pedidos(
         impressa_por_pedido = {
             r.pedido_bling: r.impressa_em for r in et_rows if r.impressa_em
         }
+        com_nf_caixa = {r.pedido_bling for r in et_rows if r.tem_nf_caixa}
 
     # Papel de PREVISÃO já impresso? (previsao_impressa, por numero — o 🖨
     # da aba carimba via POST /pedidos/previsoes/impressas). A tela mostra a
@@ -872,6 +877,9 @@ async def list_estoque_pedidos(
             "observacao": check["observacao"],
             "bling_id": o.bling_id,
             "etiqueta_disponivel": bool(o.numero) and o.numero in etiquetas_por_pedido,
+            # A impressão leva também a NF de 100% (última página) que vai
+            # dentro da caixa — a tela avisa; o papel não tem marca.
+            "nf_caixa": bool(o.numero) and o.numero in com_nf_caixa,
             # Pedido dividido entre armazéns — a tela pede confirmação
             # ("Atenção: estoque compartilhado") antes de imprimir.
             "estoque_compartilhado": (
@@ -966,21 +974,29 @@ def _pdf_para_impressao(row: NfEtiquetaArquivo) -> bytes:
     melhor imprimir a etiqueta sozinha do que travar o despacho. SÓ a etiqueta é
     redimensionada pro tamanho térmico (104,23×152,4mm); a NF fica no tamanho
     original (pedido do usuário, 28/08). Falha no resize degrada pro blob cru.
+
+    28/09/2026: depois da NF de 1% vem a de 100% que vai DENTRO DA CAIXA
+    (`nf_caixa_pdf`), sem nenhuma marca no papel — quem avisa é a tela. Cada
+    junção degrada sozinha: falhar a da caixa não tira a de 1%.
     """
     try:
-        etiqueta = redimensionar_para_etiqueta(row.blob)
+        pdf = redimensionar_para_etiqueta(row.blob)
     except EtiquetaJuntarError:
         logger.warning(
             "nf_etiqueta_redimensionar_falhou", pedido_bling=row.pedido_bling
         )
-        etiqueta = row.blob
-    if not row.nf_pdf:
-        return etiqueta
-    try:
-        return juntar_etiqueta_nf(etiqueta, row.nf_pdf)
-    except EtiquetaJuntarError:
-        logger.warning("nf_etiqueta_juntar_falhou", pedido_bling=row.pedido_bling)
-        return etiqueta
+        pdf = row.blob
+    for evento, nota in (
+        ("nf_etiqueta_juntar_falhou", row.nf_pdf),
+        ("nf_etiqueta_juntar_caixa_falhou", row.nf_caixa_pdf),
+    ):
+        if not nota:
+            continue
+        try:
+            pdf = juntar_etiqueta_nf(pdf, nota)
+        except EtiquetaJuntarError:
+            logger.warning(evento, pedido_bling=row.pedido_bling)
+    return pdf
 
 
 class PrevisoesImpressasIn(BaseModel):

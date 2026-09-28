@@ -2043,11 +2043,53 @@ async def nf_agent_nf(
     chegada (etiqueta antes ou depois da NF) não importa — a junção é feita na
     hora de servir.
     """
+    raw = await _ler_pdf_nf(file)
+    row = await _linha_etiqueta(session, pedido_bling)
+    row.nf_pdf = raw
+    row.nf_size_bytes = len(raw)
+    await session.commit()
+    logger.info("nf_agent_nf", pedido_bling=pedido_bling, size=len(raw))
+    return {"ok": True, "pedido_bling": pedido_bling, "nf_size_bytes": len(raw)}
+
+
+@router.post(
+    "/agent/nf-caixa",
+    dependencies=[Depends(_require_nf_agent_token)],
+)
+async def nf_agent_nf_caixa(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    pedido_bling: Annotated[str, Form()],
+    file: Annotated[UploadFile, File()],
+) -> dict:
+    """DANFE da NF de 100% (produto) que vai DENTRO DA CAIXA (28/09/2026).
+
+    Os pedidos Correios seguem com a NF de 1% (`/agent/nf`, viaja com a
+    etiqueta) e passam a levar também esta. Guardada à parte em
+    `nf_caixa_pdf`: a impressão sai etiqueta → NF 1% → NF 100%, e o Controle de
+    Estoque mostra na tela qual é a da caixa (o aviso NÃO vai pro papel — pedido
+    do Eduardo). Mesma regra da `/agent/nf`: pode chegar antes da etiqueta."""
+    raw = await _ler_pdf_nf(file)
+    row = await _linha_etiqueta(session, pedido_bling)
+    row.nf_caixa_pdf = raw
+    row.nf_caixa_size_bytes = len(raw)
+    await session.commit()
+    logger.info("nf_agent_nf_caixa", pedido_bling=pedido_bling, size=len(raw))
+    return {"ok": True, "pedido_bling": pedido_bling, "nf_caixa_size_bytes": len(raw)}
+
+
+async def _ler_pdf_nf(file: UploadFile) -> bytes:
     raw = await file.read()
     if not raw:
         raise HTTPException(400, detail={"code": "nf_pdf_vazia"})
     if len(raw) > _ETIQUETA_MAX_BYTES:
         raise HTTPException(413, detail={"code": "nf_pdf_grande"})
+    return raw
+
+
+async def _linha_etiqueta(session: AsyncSession, pedido_bling: str) -> NfEtiquetaArquivo:
+    """A linha do pedido em `nf_etiqueta_arquivo`. A NF pode chegar antes da
+    etiqueta; cria a linha só com a NF (a etiqueta preenche blob/filename
+    depois via /agent/etiqueta)."""
     row = (
         await session.execute(
             select(NfEtiquetaArquivo).where(
@@ -2056,8 +2098,6 @@ async def nf_agent_nf(
         )
     ).scalar_one_or_none()
     if row is None:
-        # A NF pode chegar antes da etiqueta; cria a linha só com a NF (a
-        # etiqueta preenche blob/filename depois via /agent/etiqueta).
         row = NfEtiquetaArquivo(
             pedido_bling=pedido_bling,
             filename=f"etiqueta_{pedido_bling}.pdf",
@@ -2066,11 +2106,7 @@ async def nf_agent_nf(
             blob=b"",
         )
         session.add(row)
-    row.nf_pdf = raw
-    row.nf_size_bytes = len(raw)
-    await session.commit()
-    logger.info("nf_agent_nf", pedido_bling=pedido_bling, size=len(raw))
-    return {"ok": True, "pedido_bling": pedido_bling, "nf_size_bytes": len(raw)}
+    return row
 
 
 # Janela do casamento nota → pedido. Nota emitida hoje casa com pedido recente;

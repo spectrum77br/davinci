@@ -17,7 +17,7 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import {
   Boxes, Truck, ClipboardList, Loader2, RefreshCw,
   AlertTriangle, Download, Printer, FileText, FileUp, Upload, Trash2,
-  ArrowUp, ArrowDown, Megaphone, Check, LifeBuoy, Send, Video,
+  ArrowUp, ArrowDown, Megaphone, Check, LifeBuoy, Send, Video, Package,
 } from 'lucide-vue-next'
 import { isoDateBrt, isoDaysAgo, isoToday } from '~/lib/date'
 import { erroLinkMega } from '~/lib/linkMega'
@@ -74,6 +74,9 @@ type PedidoRow = {
   observacao: string | null
   bling_id: number | null
   etiqueta_disponivel: boolean
+  // A impressão leva também a NF de 100% (a ÚLTIMA página) que vai DENTRO DA
+  // CAIXA (28/09/2026). O aviso é só na tela — o papel não tem marca.
+  nf_caixa?: boolean
   // Pedido que sai de 2+ armazéns (itens com tags diferentes). A tela pede
   // confirmação "Atenção: estoque compartilhado" antes de imprimir.
   estoque_compartilhado: boolean
@@ -2764,10 +2767,14 @@ async function conferirTodos() {
                 rel="noopener"
                 @click="confirmarCompartilhado(row, $event)"
                 class="inline-flex items-center gap-1 rounded-md border bg-primary text-primary-foreground px-2 py-1 text-[10px] hover:opacity-90"
-                title="Abrir etiqueta pronta pra impressão"
+                :title="row.nf_caixa ? 'Saem 3 páginas: etiqueta, NF de 1% (vai com a etiqueta) e NF de 100% — a última vai DENTRO DA CAIXA' : 'Abrir etiqueta pronta pra impressão'"
               >
                 <Printer class="size-3" />
                 Imprimir
+                <!-- 28/09: pedido com as DUAS notas — a caixinha avisa que a última
+                     página vai dentro da caixa. Só na tela (Eduardo: "na hora de
+                     imprimir não pode aparecer aquela frase"; "algo sutil"). -->
+                <Package v-if="row.nf_caixa" class="size-3 opacity-80" aria-label="a última página vai dentro da caixa" />
               </a>
               <!-- Horas de chegada/impressão da etiqueta agora moram nas
                    colunas "Etiqueta" e "Impressão" — sem carimbo duplicado

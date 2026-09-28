@@ -354,6 +354,12 @@ class NfEtiquetaArquivo(Base, TimestampMixin):
     # declaração). NULL = fluxo agência (só etiqueta).
     nf_pdf: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
     nf_size_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # DANFE da NF de 100% (produto) que vai DENTRO DA CAIXA (28/09/2026): os
+    # Correios seguem com a de 1% (`nf_pdf`, viaja com a etiqueta) e passam a
+    # levar também esta. Imprime DEPOIS da de 1%; a tela avisa qual é a da
+    # caixa (o aviso não sai no papel). NULL = pedido sem a segunda nota.
+    nf_caixa_pdf: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    nf_caixa_size_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     # Quando a etiqueta saiu da impressora pela PRIMEIRA vez (a reimpressão não
     # sobrescreve). NULL = nunca impressa. É o sinal que o Controle de Estoque
     # usa pra marcar "Impressa" e evitar duplicidade na impressão em lote.
