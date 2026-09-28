@@ -199,21 +199,53 @@ async function lerChatDaPagina(page: Page): Promise<Item[] | null> {
   return (await evalJS<Item[]>(page, JS_EXTRAIR(JS_CHAT_PAGINA))) || [];
 }
 
+// "Ver detalhes" do quadro "Histórico do chat". `acao`: "ponto" rola até ele
+// (vertical E horizontal) e devolve o centro + se nada o cobre; "js" clica pelo
+// próprio elemento. 28/09 (294571): com a janela de 721 px o botão ficava meio
+// debaixo da barra lateral fixa da Shopee (sino/chat) — o clique no centro caía
+// nela e a janela nunca abria.
+const JS_VER_DETALHES = (acao: "ponto" | "js") =>
+  `(function(){var t=document.querySelector('.discussion-history-title');if(!t)return null;var box=t.parentElement;for(var k=0;k<5&&box;k++){var v=[...box.querySelectorAll('*')].find(function(e){return e.children.length===0&&(e.innerText||'').trim()==='Ver detalhes'});if(v){` +
+  (acao === "js"
+    ? `v.click();return true;`
+    : `v.scrollIntoView({block:'center',inline:'center'});var r=v.getBoundingClientRect();if(r.width>0){var x=r.left+r.width/2,y=r.top+r.height/2;var el=document.elementFromPoint(x,y);return {x:x,y:y,livre:!!el&&(el===v||v.contains(el)||el.contains(v))};}`) +
+  `}box=box.parentElement;}return null;})()`;
+
+async function modalAbriu(page: Page, tentativas: number): Promise<boolean> {
+  for (let i = 0; i < tentativas; i++) {
+    await sleep(500);
+    if (await evalJS<boolean>(page, `!!${JS_MODAL}`)) return true;
+  }
+  return false;
+}
+
 /** Abre "Histórico do chat › Ver detalhes", carrega tudo e lê as mensagens. */
 async function lerJanela(page: Page): Promise<Item[] | null> {
-  const ver = await evalJS<{ x: number; y: number } | null>(
+  const ver = await evalJS<{ x: number; y: number; livre: boolean } | null>(
     page,
-    `(function(){var t=document.querySelector('.discussion-history-title');if(!t)return null;var box=t.parentElement;for(var k=0;k<5&&box;k++){var v=[...box.querySelectorAll('*')].find(function(e){return e.children.length===0&&(e.innerText||'').trim()==='Ver detalhes'});if(v){v.scrollIntoView({block:'center'});var r=v.getBoundingClientRect();if(r.width>0)return {x:r.left+r.width/2,y:r.top+r.height/2};}box=box.parentElement;}return null;})()`
+    JS_VER_DETALHES("ponto")
   );
   if (!ver) return null; // página sem "Histórico do chat": ainda não houve conversa
   await sleep(400);
-  await clicar(page, ver);
+  // Coberto por outra coisa (barra lateral, aviso): clicar no ponto acertaria
+  // ELA — vai direto pelo elemento. Livre: clique de mouse, e o elemento como
+  // segunda tentativa. O botão só abre a janela de leitura.
   let aberta = false;
-  for (let i = 0; i < 20 && !aberta; i++) {
-    await sleep(500);
-    aberta = !!(await evalJS<boolean>(page, `!!${JS_MODAL}`));
+  if (ver.livre) {
+    await clicar(page, ver);
+    aberta = await modalAbriu(page, 12);
   }
-  if (!aberta) throw new Error('cliquei em "Ver detalhes" e a janela "Histórico da Solicitação" não abriu');
+  if (!aberta) {
+    await evalJS(page, JS_VER_DETALHES("js"));
+    aberta = await modalAbriu(page, 16);
+  }
+  if (!aberta) {
+    const tam = await evalJS<string>(page, "window.innerWidth+'x'+window.innerHeight");
+    throw new Error(
+      `cliquei em "Ver detalhes" e a janela "Histórico da Solicitação" não abriu` +
+        `${ver.livre ? "" : " (o botão estava coberto por outro elemento)"} — janela ${tam || "?"}`
+    );
+  }
 
   // Rolagem infinita: sobe e desce até o nº de mensagens parar de mudar.
   let antes = -1;

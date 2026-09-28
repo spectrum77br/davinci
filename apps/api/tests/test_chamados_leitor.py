@@ -24,6 +24,7 @@ from sqlalchemy import select
 
 from app.models import Chamado, ChamadoLeitor, ChamadoMensagem
 from app.services import chamados as svc
+from app.services import chamados_leitura
 
 pytestmark = pytest.mark.asyncio
 
@@ -69,6 +70,7 @@ async def _devolucao(
     de_tela: bool = False,
     resolvido: bool = False,
     status_plataforma: str | None = None,
+    decidido_ha: timedelta | None = None,
 ) -> Chamado:
     """Um chamado como o do 296012: devolução Shopee contestada pela API (a
     abertura saiu pelo `returns/dispute` às 13:01)."""
@@ -84,6 +86,7 @@ async def _devolucao(
         chamado_de_tela=de_tela,
         resolvido=resolvido,
         status_plataforma=status_plataforma,
+        status_plataforma_at=datetime.now(UTC) - decidido_ha if decidido_ha is not None else None,
     )
     db.add(ch)
     await db.flush()
@@ -131,8 +134,14 @@ async def test_fila_entrega_a_devolucao_shopee_contestada_pela_api(client, db):
         {"de_tela": True},  # esse é da fila do robô de tela (`/agent/leitura`)
         {"canal": "robo"},
         {"origem": "logistica"},
-        {"resolvido": True},
-        {"status_plataforma": svc.STATUS_ENCERRADO},
+        {"resolvido": True},  # pessoa concluiu: nem decidido na véspera volta
+        {
+            "resolvido": True,
+            "status_plataforma": svc.STATUS_PERDEMOS,
+            "decidido_ha": timedelta(hours=2),
+        },
+        # decidido há mais de 15 dias e ninguém concluiu: para de ler
+        {"status_plataforma": svc.STATUS_PERDEMOS, "decidido_ha": timedelta(days=16)},
         {"abertura_status": "pendente"},  # disputa ainda não saiu
         {"abertura_status": "falhou", "abertura_erro": "devolucao_sem_foto"},
         {"pedido_mkt": None},  # sem o nº do pedido o robô não acha a devolução
@@ -176,6 +185,68 @@ async def test_depois_de_lido_volta_so_na_cadencia(client, db):
     ch.leitura_robo_at = datetime.now(UTC) - timedelta(hours=4)
     await db.commit()
     assert len(await _fila(client)) == 1
+
+
+@pytest.mark.parametrize("status", [svc.STATUS_PERDEMOS, svc.STATUS_GANHAMOS, svc.STATUS_ENCERRADO])
+async def test_decidido_continua_na_fila_ate_alguem_concluir(client, db, status):
+    """28/09 (290730): a disputa saiu com o Mac desligado e a API decidiu
+    "perdemos" antes de o robô voltar — a fala do Agente da Shopee só estava na
+    tela e o caso já tinha saído da fila."""
+    ch = await _devolucao(db, status_plataforma=status, decidido_ha=timedelta(days=1))
+    assert [c["chamado_id"] for c in await _fila(client)] == [str(ch.id)]
+
+
+async def test_decidido_le_logo_depois_da_decisao_e_depois_1x_por_dia(client, db):
+    agora = datetime.now(UTC)
+    ch = await _devolucao(db, status_plataforma=svc.STATUS_PERDEMOS, decidido_ha=timedelta(hours=1))
+    # lido ANTES da decisão (3 h atrás): relê já — a fala final sai junto com ela
+    ch.leitura_robo_at = agora - timedelta(hours=3)
+    await db.commit()
+    assert len(await _fila(client, espiar=True)) == 1
+    # lido DEPOIS da decisão: só 24 h depois (não mais de 3 em 3 h)
+    ch.leitura_robo_at = agora - timedelta(minutes=30)
+    await db.commit()
+    assert await _fila(client, espiar=True) == []
+    ch.status_plataforma_at = agora - timedelta(days=3)
+    ch.leitura_robo_at = agora - timedelta(hours=5)
+    await db.commit()
+    assert await _fila(client, espiar=True) == []
+    ch.leitura_robo_at = agora - timedelta(hours=25)
+    await db.commit()
+    assert len(await _fila(client, espiar=True)) == 1
+
+
+async def test_atualizar_no_decidido_poe_na_frente_da_fila(client, db):
+    """O botão Atualizar fura a fila — antes, no caso decidido, a fila recusava
+    e o botão não trazia nada."""
+    ch = await _devolucao(db, status_plataforma=svc.STATUS_PERDEMOS, decidido_ha=timedelta(days=1))
+    ch.leitura_robo_at = datetime.now(UTC) - timedelta(hours=1)
+    await db.commit()
+    assert await _fila(client, espiar=True) == []
+    await chamados_leitura.furar_a_fila(db, ch)
+    assert [c["chamado_id"] for c in await _fila(client, espiar=True)] == [str(ch.id)]
+
+
+async def test_resultado_do_decidido_marca_a_proxima_em_24h(client, db):
+    ch = await _devolucao(db, status_plataforma=svc.STATUS_PERDEMOS, decidido_ha=timedelta(days=1))
+    await _fila(client)
+    r = await client.post(
+        "/api/chamados/agent/leitor/resultado",
+        headers=_HDR,
+        json={
+            "chamado_id": str(ch.id),
+            "falas": [
+                {"texto": RECUSA, "quando": QUANDO_RECUSOU.isoformat(), "autor": "Agente da Shopee"}
+            ],
+            "encerrado": True,
+        },
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["falas_novas"] == 1
+    proxima = datetime.fromisoformat(r.json()["proxima_leitura_at"])
+    assert proxima - datetime.now(UTC) > timedelta(hours=23)
+    await db.refresh(ch)
+    assert ch.status_plataforma == svc.STATUS_PERDEMOS  # "perdemos" não vira "encerrado"
 
 
 # --------------------------------------------------------------- a senha

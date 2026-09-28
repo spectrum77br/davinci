@@ -71,6 +71,7 @@ async def _devolucao(
     ultima_fala_h: float | None = None,
     plataforma: str = "shopee",
     resolvido: bool = False,
+    perdemos_h: float | None = None,
 ) -> Chamado:
     """Devolução Shopee contestada pela API (como a do 296012). `disputa_h` =
     há quanto tempo a disputa saiu; `ultima_fala_h` = última fala da Shopee."""
@@ -85,6 +86,10 @@ async def _devolucao(
         canal="api",
         resolvido=resolvido,
         leitura_robo_at=_agora() - timedelta(hours=lido_h) if lido_h is not None else None,
+        status_plataforma=chamados_svc.STATUS_PERDEMOS if perdemos_h is not None else None,
+        status_plataforma_at=(
+            _agora() - timedelta(hours=perdemos_h) if perdemos_h is not None else None
+        ),
     )
     db.add(ch)
     await db.flush()
@@ -210,7 +215,20 @@ async def test_caso_frio_so_cobra_depois_de_27h(db):
     assert await _abertas(db) == [f"caso:{ch.id}"]
 
 
-@pytest.mark.parametrize("kw", [{"plataforma": "ml"}, {"resolvido": True}])
+async def test_decidido_e_lido_1x_por_dia_entao_so_cobra_depois_de_27h(db):
+    """28/09 (290730): "perdemos" sem ninguém concluir segue na fila do robô,
+    1×/dia — 10 h sem leitura é o normal, mesmo com fala recente."""
+    await _leitor(db, visto_min=1)
+    ch = await _devolucao(db, disputa_h=48, lido_h=10, ultima_fala_h=20, perdemos_h=20)
+    r = await vigia.vigia_robo_leitura_run(db)
+    assert await _abertas(db) == [] and r["casos_na_fila"] == 1
+    ch.leitura_robo_at = _agora() - timedelta(hours=28)
+    await db.commit()
+    await vigia.vigia_robo_leitura_run(db)
+    assert await _abertas(db) == [f"caso:{ch.id}"]
+
+
+@pytest.mark.parametrize("kw", [{"plataforma": "ml"}, {"resolvido": True}, {"perdemos_h": 24 * 16}])
 async def test_chamado_fora_da_fila_nao_vira_ocorrencia(db, kw):
     await _leitor(db, visto_min=1)
     await _devolucao(db, disputa_h=48, lido_h=40, ultima_fala_h=40, **kw)

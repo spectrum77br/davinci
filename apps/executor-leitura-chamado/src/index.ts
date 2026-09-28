@@ -48,7 +48,7 @@ import * as historico from "./shopee_historico";
 import * as portal from "./shopee_portal";
 import type { Caso } from "./davinci";
 
-const VERSION = "1.2.0";
+const VERSION = "1.2.1";
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 function arg(nome: string): string | undefined {
@@ -81,7 +81,26 @@ async function abrirPerfil(userId: string, nome: string): Promise<Sessao | null>
   }
   const browser = await puppeteer.connect({ browserWSEndpoint: ws, defaultViewport: null });
   const page = await browser.newPage();
+  await maximizar(page, nome);
   return { browser, page, userId };
+}
+
+/** A janela do perfil abre do tamanho que o AdsPower lembra — no Santiago era
+ *  721×659: a página da devolução não cabia e o "Ver detalhes" ficava debaixo
+ *  da barra lateral fixa da Shopee (28/09, 294571). Maximiza antes de ler; se
+ *  não der, segue (o clique tem plano B pelo elemento). */
+async function maximizar(page: Page, nome: string): Promise<void> {
+  try {
+    const cdp = await page.target().createCDPSession();
+    const { windowId } = (await cdp.send("Browser.getWindowForTarget")) as { windowId: number };
+    await cdp.send("Browser.setWindowBounds", { windowId, bounds: { windowState: "maximized" } });
+    await cdp.detach().catch(() => undefined);
+    await sleep(600);
+    const larg = (await page.evaluate("window.innerWidth").catch(() => 0)) as number;
+    if (larg && larg < 1100) log.warn(`${nome}: janela ainda estreita (${larg}px) depois de maximizar`);
+  } catch (e: any) {
+    log.warn(`${nome}: não maximizei a janela (${String(e?.message || e)}) — sigo assim`);
+  }
 }
 
 async function fecharPerfil(s: Sessao): Promise<void> {

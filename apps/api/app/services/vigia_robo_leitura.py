@@ -134,13 +134,15 @@ async def _casos(
     linhas = (
         await session.execute(
             select(Chamado, ultima_fala.label("ultima_fala"), entrou.label("entrou"))
-            .where(*chamados_leitura.condicoes_do_leitor())
+            .where(*chamados_leitura.condicoes_do_leitor(agora=agora))
             .order_by(Chamado.created_at)
         )
     ).all()
     for ch, ult, ent in linhas:
         ult, ent = _utc(ult), _utc(ent)
         frio = ult is None or ult < agora - chamados_leitura.FRIO
+        # decidido (28/09): o robô relê 1×/dia até alguém concluir
+        frio = frio or chamados_leitura.decidido(ch)
         esperado = chamados_leitura.INTERVALO_FRIO if frio else chamados_leitura.INTERVALO
         lido = _utc(ch.leitura_robo_at)
         desde = lido or ent or _utc(ch.created_at)

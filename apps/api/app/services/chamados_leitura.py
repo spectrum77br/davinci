@@ -186,13 +186,37 @@ async def fila(
     return list(rows)
 
 
-def condicoes_devolucao_shopee() -> list:
+def decidido_sql():
+    """Devolução com decisão da plataforma (ganhamos/perdemos/encerrado) que
+    ninguém ligou a uma consulta do Portal — a consulta ligada segue na cadência
+    normal (294571: é ela que pode virar o jogo). Nunca NULL: entra em `~`."""
+    return and_(
+        func.coalesce(Chamado.status_plataforma, "").in_(sorted(chamados_svc.STATUS_FINAIS)),
+        func.coalesce(func.trim(Chamado.consulta_portal), "") == "",
+    )
+
+
+def decidido(ch: Chamado) -> bool:
+    return ch.status_plataforma in chamados_svc.STATUS_FINAIS and not (
+        (ch.consulta_portal or "").strip()
+    )
+
+
+def condicoes_devolucao_shopee(agora: datetime | None = None) -> list:
     """Quem É da fila do executor de leitura, sem cadência nem claim: devolução
     da Shopee contestada pela API (o mesmo conjunto que o
-    `chamados_devolucao_sync` acompanha), viva e sem decisão final. O Vigia
+    `chamados_devolucao_sync` acompanha), que nenhuma pessoa concluiu. O Vigia
     Robô Leitura de Chamados (Ouvidoria) usa a mesma régua pra cobrar caso
-    que ficou sem leitura."""
+    que ficou sem leitura.
+
+    28/09 (Vinicius, 290730): caso DECIDIDO continua na fila por até `FRIO`
+    depois da decisão. A disputa saiu sábado 09:11 com o Mac Santiago desligado;
+    domingo a API disse "encerrou sem compensação" → "perdemos" → o caso saiu da
+    fila, e a fala do Agente da Shopee ("Programa Devolução Fácil…") nunca entrou.
+    Nem o Atualizar trazia: ele fura a fila, mas a fila recusava caso decidido."""
     from app.services import chamados_devolucao_sync as acompanhamento
+
+    agora = agora or datetime.now(UTC)
 
     abertura_acompanhada = (
         select(ChamadoMensagem.id)
@@ -214,7 +238,10 @@ def condicoes_devolucao_shopee() -> list:
         Chamado.origem == "devolucao",
         Chamado.canal == "api",
         Chamado.resolvido.is_(False),
-        chamados_svc.NAO_ENCERRADO_SQL,
+        or_(
+            chamados_svc.NAO_ENCERRADO_SQL,
+            Chamado.status_plataforma_at >= agora - FRIO,
+        ),
         ~chamados_svc.CASO_DE_TELA_SQL,
         func.coalesce(func.trim(Chamado.chamado), "") != "",
         func.coalesce(func.trim(Chamado.pedido_marketplace), "") != "",
@@ -249,11 +276,13 @@ def condicoes_portal_shopee() -> list:
     ]
 
 
-def condicoes_do_leitor(*, portal: bool = True, consultas: bool = True) -> list:
+def condicoes_do_leitor(
+    *, portal: bool = True, consultas: bool = True, agora: datetime | None = None
+) -> list:
     """Tudo que é da fila do executor de leitura: devolução contestada pela API
     (Seller Center), com `portal` o caso aberto na tela pelo Portal, e com
     `consultas` o chamado com consulta do Portal ligada (294571)."""
-    ramos = [and_(*condicoes_devolucao_shopee())]
+    ramos = [and_(*condicoes_devolucao_shopee(agora))]
     if portal:
         ramos.append(and_(*condicoes_portal_shopee()))
     if consultas:
@@ -370,19 +399,31 @@ async def fila_devolucao_shopee(
     errado."""
     agora = agora or datetime.now(UTC)
     ultima_fala = _ultima_fala_at()
+    ja_decidido = decidido_sql()
     conds = [
-        *condicoes_do_leitor(portal=portal, consultas=consultas),
+        *condicoes_do_leitor(portal=portal, consultas=consultas, agora=agora),
         or_(
             Chamado.leitura_robo_claim_at.is_(None),
             Chamado.leitura_robo_claim_at < agora - CLAIM_STALE,
         ),
         or_(
             Chamado.leitura_robo_at.is_(None),
+            # decidido (28/09, 290730): uma leitura logo depois da decisão — a
+            # fala final da Shopee sai junto com ela — e depois 1×/dia
             and_(
+                ja_decidido,
+                or_(
+                    Chamado.leitura_robo_at < Chamado.status_plataforma_at,
+                    Chamado.leitura_robo_at < agora - INTERVALO_FRIO,
+                ),
+            ),
+            and_(
+                ~ja_decidido,
                 ultima_fala >= agora - FRIO,
                 Chamado.leitura_robo_at < agora - INTERVALO,
             ),
             and_(
+                ~ja_decidido,
                 or_(ultima_fala.is_(None), ultima_fala < agora - FRIO),
                 Chamado.leitura_robo_at < agora - INTERVALO_FRIO,
             ),
@@ -423,7 +464,8 @@ def e_devolucao_shopee_da_api(ch: Chamado) -> bool:
 async def proxima_leitura(
     session: AsyncSession, ch: Chamado, *, ok: bool, agora: datetime | None = None
 ) -> datetime:
-    """Quando a fila devolve este caso — pelos MESMOS três ramos que a `fila` usa.
+    """Quando a fila devolve este caso — pelos MESMOS ramos que a `fila` usa
+    (decidido: 1×/dia, 28/09).
 
     Antes isto era sempre "+3 h", e mentia em dois dos três casos documentados: o
     caso frio volta em 24 h, e a leitura que falhou volta pelo vencimento do claim,
@@ -432,6 +474,8 @@ async def proxima_leitura(
     agora = agora or datetime.now(UTC)
     if not ok:
         return agora + CLAIM_STALE
+    if decidido(ch):
+        return agora + INTERVALO_FRIO
     ultima = (
         await session.execute(
             select(func.max(func.coalesce(ChamadoMensagem.enviada_at, ChamadoMensagem.created_at)))
