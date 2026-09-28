@@ -3834,6 +3834,9 @@ class WorkerSettings:
         # Varredura dos vínculos (SKU trocado, anúncio sem vínculo, morto): 10:00 BRT,
         # longe da varredura de estoque da madrugada.
         cron(varredura_vinculos, hour=13, minute=0, run_at_startup=False, timeout=3 * 3600),
+        # Vigia da soma por família: 9h20 e 16h20 BRT. Estava só na lista de
+        # funções, sem cron — nunca tinha rodado (auditoria de 28/09/2026).
+        cron(vigia_estoque_familia_tick, hour={12, 19}, minute=20, run_at_startup=False),
         # Marketing module (per-platform/department) — every quarter-hour
         # per enabled MarketingAccount.
         cron(marketing_agent_cycle, minute={0, 15, 30, 45}, run_at_startup=False),

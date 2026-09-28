@@ -766,11 +766,16 @@ class BlingClient:
             "raw": raw,
         }
 
-    async def find_active_product_by_sku(self, sku: str) -> dict | None:
+    async def find_active_product_by_sku(self, sku: str, *, estrito: bool = False) -> dict | None:
         """Search Bling for an active product matching the given SKU.
 
         Bling's /produtos endpoint supports filtering by codigo (SKU).
         Returns the first active product found, or None.
+
+        `estrito=True`: erro na consulta (429 depois das tentativas, timeout,
+        5xx) SOBE em vez de virar None — para quem precisa separar "não sei"
+        de "não existe / sem saldo" (robô de prioridade: o None de um 429 virava
+        "lote sem peça" e o pedido ia para o lote irmão e voltava, 28/09/2026).
         """
         if not sku:
             return None
@@ -799,6 +804,8 @@ class BlingClient:
                         }
             return None
         except Exception:  # noqa: BLE001
+            if estrito:
+                raise
             return None
 
     async def cost_by_skus(self, skus: set[str]) -> dict[str, float]:

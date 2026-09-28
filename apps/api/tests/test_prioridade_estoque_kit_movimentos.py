@@ -65,7 +65,7 @@ class FakeBling:
         self.ids = dict(IDS, **(existe or {}))
         self._itens: list[tuple[str, int]] = []
 
-    async def find_active_product_by_sku(self, sku):
+    async def find_active_product_by_sku(self, sku, estrito=False):
         self.calls.append(f"find:{sku}")
         pid = self.ids.get(sku.lower())
         return {"id": pid, "sku": sku, "name": sku, "stock": 50} if pid else None

@@ -31,7 +31,7 @@ class FakeBling:
         self.puts: list[dict] = []
         self.movs: list[tuple[str, int, int]] = []
 
-    async def find_active_product_by_sku(self, sku):
+    async def find_active_product_by_sku(self, sku, estrito=False):
         pid = IDS.get(sku.lower())
         return {"id": pid, "sku": sku, "name": f"Produto {sku}", "stock": 50} if pid else None
 
@@ -124,3 +124,74 @@ async def test_desligada_o_robo_faz_o_de_sempre(db: AsyncSession, monkeypatch):
 
     resumo = await prio.aplicar_prioridade_estoque(db, numeros=["298789"])
     assert resumo["trocados"] == 0 and client.puts == []
+
+
+# --- vai-e-volta (auditoria de 28/09/2026) ------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_consulta_que_falha_adia_o_pedido_inteiro(db: AsyncSession, monkeypatch):
+    """298750/298789 (2 kits): o 429 da madrugada numa consulta fazia o CI
+    "não cobrir" e o pedido inteiro ia para o SP — e voltava na rodada seguinte.
+    Agora nenhuma troca, nenhum PUT: fica para a próxima rodada."""
+    client = await _prepara(db, monkeypatch, "298750")
+    original = client.find_active_product_by_sku
+
+    async def _com_429(sku, estrito=False):
+        if sku.lower() == "dg052.ci+a001.ci":
+            if estrito:
+                raise RuntimeError("429 Too Many Requests")
+            return None
+        return await original(sku, estrito=estrito)
+
+    client.find_active_product_by_sku = _com_429
+    resumo = await prio.aplicar_prioridade_estoque(db, numeros=["298750"])
+    await db.commit()
+    assert resumo["trocados"] == 0 and client.puts == []
+    assert resumo["consulta_falhou"] == 1
+
+
+@pytest.mark.asyncio
+async def test_nao_desfaz_troca_feita_ha_menos_de_uma_hora(db: AsyncSession, monkeypatch):
+    """Rede de segurança: o robô trocou dg052.ci -> dg052.sp há 10 min; mesmo
+    que agora a conta diga CI, ele não desfaz na mesma hora."""
+    from datetime import timedelta
+
+    client = await _prepara(db, monkeypatch, "298751")
+    db.add(MargemAudit(
+        pedido_bling="298751", bling_id="298751", sku="dg052.ci+a001.ci",
+        valor_antigo="dg052.ci+a001.ci", valor_novo="dg052.sp+a001.sp",
+        origem="prioridade_estoque", acao="sku",
+        created_at=datetime.now(UTC) - timedelta(minutes=10),
+    ))
+    await db.commit()
+    resumo = await prio.aplicar_prioridade_estoque(db, numeros=["298751"])
+    await db.commit()
+    assert resumo["trocados"] == 0 and client.puts == []
+    assert resumo["anti_vai_e_volta"] == 1
+
+
+@pytest.mark.asyncio
+async def test_troca_antiga_nao_trava(db: AsyncSession, monkeypatch):
+    """Passada a janela, a prioridade volta a valer."""
+    from datetime import timedelta
+
+    client = await _prepara(db, monkeypatch, "298752")
+    db.add(MargemAudit(
+        pedido_bling="298752", bling_id="298752", sku="dg052.ci+a001.ci",
+        valor_antigo="dg052.ci+a001.ci", valor_novo="dg052.sp+a001.sp",
+        origem="prioridade_estoque", acao="sku",
+        created_at=datetime.now(UTC) - timedelta(minutes=90),
+    ))
+    await db.commit()
+    resumo = await prio.aplicar_prioridade_estoque(db, numeros=["298752"])
+    await db.commit()
+    assert resumo["trocados"] == 1 and len(client.puts) == 1
+
+
+def test_vigia_da_soma_tem_horario():
+    from app.worker import WorkerSettings
+
+    crons = {c.name: c for c in WorkerSettings.cron_jobs}
+    vigia = crons["cron:vigia_estoque_familia_tick"]
+    assert vigia.hour == {12, 19} and vigia.minute == 20  # 9h20 e 16h20 BRT

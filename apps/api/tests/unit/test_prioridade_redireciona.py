@@ -18,7 +18,7 @@ class ClienteFalso:
         self.saldos = saldos
         self.consultas: list[str] = []
 
-    async def find_active_product_by_sku(self, sku: str):
+    async def find_active_product_by_sku(self, sku: str, estrito: bool = False):
         # O Bling acha o produto sem ligar para maiúscula/minúscula.
         self.consultas.append(sku)
         chave = sku.strip().lower()
@@ -82,15 +82,77 @@ async def test_sem_redirecionamento_o_comportamento_e_o_de_hoje(ligar_familia):
 
 
 async def test_nenhum_lote_cobre_a_quantidade(ligar_familia):
+    """O .ci está devendo (-3: o pedido de 5 só tem 2) e o .sp tem 1."""
     ligar_familia()
-    c = ClienteFalso({"dg057.ci": 0, "dg057.sp": 1})
+    c = ClienteFalso({"dg057.ci": -3, "dg057.sp": 1})
     alvo, _ = await escolher(c, "dg057.ci", "ci", "ci", qtd=5)
     assert alvo is None
 
 
-async def test_kit_redireciona_o_kit_inteiro(ligar_familia):
+async def test_saldo_zero_no_proprio_lote_e_a_peca_deste_pedido(ligar_familia):
+    """O vai-e-volta do 298543 (486 trocas em 24 h): o .ci tinha 1 peça, o
+    pedido a reservou e o virtual foi a 0. Zero no lote ATUAL quer dizer "só
+    tem a peça deste pedido", não "vazio" — o pedido fica onde está."""
     ligar_familia()
     c = ClienteFalso({"dg057.ci+a001.ci": 0, "dg057.sp+a001.sp": 36})
+    alvo, _ = await escolher(c, "dg057.ci+a001.ci", "ci", "ci")
+    assert alvo == "dg057.ci+a001.ci"
+
+
+async def test_no_irmao_com_prioridade_sem_sobra_fica_no_irmao(ligar_familia):
+    """A outra metade do vai-e-volta: estando no .sp, o .ci com 0 NÃO tem peça
+    sobrando para receber o pedido — ele não volta."""
+    ligar_familia()
+    c = ClienteFalso({"dg057.ci": 0, "dg057.sp": 36})
+    alvo, _ = await escolher(c, "dg057.sp", "sp", "ci")
+    assert alvo == "dg057.sp"
+
+
+class ClienteQueFalha(ClienteFalso):
+    """O Bling devolvendo 429 para alguns SKUs (a madrugada de 3h às 6h)."""
+
+    def __init__(self, saldos, falham):
+        super().__init__(saldos)
+        self.falham = {f.lower() for f in falham}
+        self.tentativas_que_falharam = 0
+
+    async def find_active_product_by_sku(self, sku: str, estrito: bool = False):
+        if sku.strip().lower() in self.falham:
+            self.tentativas_que_falharam += 1
+            if estrito:
+                raise RuntimeError("429 Too Many Requests")
+            return None
+        return await super().find_active_product_by_sku(sku)
+
+
+async def test_consulta_que_falha_nao_vira_lote_vazio(ligar_familia):
+    """O .ci tem peça de sobra, mas a consulta dele deu 429: antes o robô lia
+    "sem peça" e mandava para o .sp (e voltava 2 min depois). Agora é "não sei"
+    e o pedido fica para a próxima rodada."""
+    ligar_familia()
+    c = ClienteQueFalha({"dg057.ci": 23, "dg057.sp": 36}, falham=["dg057.ci"])
+    with pytest.raises(prioridade_estoque._ConsultaFalhouError):
+        await escolher(c, "dg057.ci", "ci", "ci")
+
+
+async def test_consulta_que_falha_nao_e_repetida_na_mesma_rodada(ligar_familia):
+    ligar_familia()
+    c = ClienteQueFalha({"dg057.ci": 23}, falham=["dg057.ci"])
+    cache: dict = {}
+    for _ in range(3):
+        with pytest.raises(prioridade_estoque._ConsultaFalhouError):
+            await prioridade_estoque._lote_com_saldo(
+                c, cache, codigo="dg057.ci", tag_atual="ci", prioridade="ci",
+                qtd=1, redirecionar=True,
+            )
+    assert c.tentativas_que_falharam == 1  # 429 não é repetido na mesma rodada
+
+
+async def test_kit_redireciona_o_kit_inteiro(ligar_familia):
+    """Kit no .ci com o .ci devendo (-1): sai do .sp, o kit inteiro. (Com 0 o
+    kit FICA — é a peça do próprio pedido; ver o teste do 298543 abaixo.)"""
+    ligar_familia()
+    c = ClienteFalso({"dg057.ci+a001.ci": -1, "dg057.sp+a001.sp": 36})
     alvo, _ = await escolher(c, "dg057.ci+a001.ci", "ci", "ci")
     assert alvo == "dg057.sp+a001.sp"
 

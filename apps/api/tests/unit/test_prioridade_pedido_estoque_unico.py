@@ -22,7 +22,7 @@ class ClienteFalso:
         self.saldos = {k.lower(): v for k, v in saldos.items()}
         self.consultas: list[str] = []
 
-    async def find_active_product_by_sku(self, sku: str):
+    async def find_active_product_by_sku(self, sku: str, estrito: bool = False):
         self.consultas.append(sku)
         chave = sku.strip().lower()
         if chave not in self.saldos:

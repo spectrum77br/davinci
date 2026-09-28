@@ -65,7 +65,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.db import session_scope
-from app.models import BlingOrder, PricingProduct
+from app.models import BlingOrder, MargemAudit, PricingProduct
 from app.services import estoque_familia, nf_emissao_gerar
 from app.services.advisory_lock import SYNC_NAMESPACE
 from app.services.logistica_bling import build_observacoes_put_body, compose_observacoes
@@ -83,6 +83,40 @@ _SITUACAO_EM_ABERTO = "6"
 # Janela do sweep: pedido sai daqui quando muda de situação; 7 dias cobre
 # qualquer atraso de fila sem varrer histórico infinito.
 _JANELA_DIAS = 7
+
+
+# Vai-e-volta (auditoria de 28/09/2026: 2.517 trocas em 7 dias, ~92% desfeitas
+# minutos depois; o 298543 trocou 486 vezes num dia). Três travas:
+#   1. o lote ATUAL do item cobre com saldo virtual >= 0 — o Bling já desconta a
+#      reserva do próprio pedido, então 0 é "só tem a peça deste pedido", não
+#      "vazio" (mesma regra do `_cobertura`);
+#   2. consulta ao Bling que FALHA (429 da madrugada, timeout) é "não sei", não
+#      "sem peça": o pedido fica como está nesta rodada;
+#   3. o robô não desfaz, dentro de `_JANELA_ANTI_VOLTA`, uma troca que ele
+#      mesmo fez — rede de segurança para qualquer causa que sobrar.
+_JANELA_ANTI_VOLTA = timedelta(minutes=60)
+# Marca, no cache da rodada, a consulta que falhou (não repete o GET nesta
+# rodada — em 429 isso só pioraria). Comparado por identidade.
+_FALHOU: dict = {"__consulta_falhou__": True}
+
+
+class _ConsultaFalhouError(Exception):
+    """O Bling não respondeu sobre um SKU — decisão fica para a próxima rodada."""
+
+
+async def _buscar(client, cache: dict, sku: str) -> dict | None:
+    """Produto do Bling pelo SKU, com cache da rodada. None = não existe;
+    `_ConsultaFalhouError` = não deu para saber."""
+    if sku not in cache:
+        try:
+            cache[sku] = await client.find_active_product_by_sku(sku, estrito=True)
+        except Exception as exc:  # noqa: BLE001 — 429/timeout/5xx
+            cache[sku] = _FALHOU
+            logger.info("prioridade_estoque_consulta_falhou", sku=sku, erro=str(exc)[:200])
+    prod = cache[sku]
+    if prod is _FALHOU:
+        raise _ConsultaFalhouError(sku)
+    return prod
 
 
 def _tag_de(pedaco: str) -> str | None:
@@ -158,6 +192,11 @@ async def _lote_com_saldo(
     saber sair de qualquer um deles. Sem isso, um anúncio que mostra 36 peças com
     o lote dele em zero derruba o saldo para negativo — foi o que aconteceu com o
     dg057.ci.
+
+    O lote ATUAL cobre com saldo >= 0 (o virtual já desconta a reserva deste
+    pedido); lote para onde o item MUDA precisa de saldo >= quantidade. Se a
+    consulta de um lote que vem antes na ordem falhar, levanta
+    `_ConsultaFalhouError` — sem saber se a prioridade tem peça, não troca nada.
     """
     atual = (codigo or "").strip().lower()
     candidatos: list[str] = []
@@ -170,15 +209,14 @@ async def _lote_com_saldo(
                 candidatos.append(irmao)
 
     for alvo in candidatos:
-        if alvo not in cache:
-            cache[alvo] = await client.find_active_product_by_sku(alvo)
-        prod = cache[alvo]
+        prod = await _buscar(client, cache, alvo)
         if not prod or not prod.get("id"):
             continue
         if (prod.get("sku") or "").strip().lower() != alvo.strip().lower():
             continue
         saldo = prod.get("stock")
-        if saldo is None or float(saldo) < qtd:
+        minimo = 0 if alvo.strip().lower() == atual else qtd
+        if saldo is None or float(saldo) < minimo:
             continue
         return alvo, prod
     return None, None
@@ -186,10 +224,9 @@ async def _lote_com_saldo(
 
 async def _produto_exato(client, cache: dict, sku: str) -> dict | None:
     """Produto ativo do Bling com EXATAMENTE este SKU (sem ligar pra caixa),
-    usando o cache do tick. None se não existe ou se a busca devolveu outro."""
-    if sku not in cache:
-        cache[sku] = await client.find_active_product_by_sku(sku)
-    prod = cache[sku]
+    usando o cache do tick. None se não existe ou se a busca devolveu outro;
+    `_ConsultaFalhouError` se o Bling não respondeu."""
+    prod = await _buscar(client, cache, sku)
     if not prod or not prod.get("id"):
         return None
     if (prod.get("sku") or "").strip().lower() != sku.strip().lower():
@@ -406,6 +443,28 @@ async def _mapa_prioridades(session: AsyncSession) -> dict[str, str]:
     return mapa
 
 
+async def _desfaz_troca_recente(session: AsyncSession, numero: str, trocas: list[dict]) -> bool:
+    """Alguma destas trocas desfaz uma que o próprio robô fez neste pedido há
+    menos de `_JANELA_ANTI_VOLTA`? (ci→sp agora depois de sp→ci há 10 min)."""
+    desde = datetime.now(UTC) - _JANELA_ANTI_VOLTA
+    feitas = (
+        await session.execute(
+            select(MargemAudit.valor_antigo, MargemAudit.valor_novo).where(
+                MargemAudit.pedido_bling == str(numero),
+                MargemAudit.origem == "prioridade_estoque",
+                MargemAudit.acao == "sku",
+                MargemAudit.created_at >= desde,
+            )
+        )
+    ).all()
+    recentes = {
+        ((antigo or "").strip().lower(), (novo or "").strip().lower()) for antigo, novo in feitas
+    }
+    return any(
+        (t["alvo"].strip().lower(), t["antigo"].strip().lower()) in recentes for t in trocas
+    )
+
+
 def aplicar_trocas_nos_itens(
     itens: list[dict], trocas: list[dict], *, substituir: bool
 ) -> tuple[list[dict], list[dict]]:
@@ -439,6 +498,152 @@ def aplicar_trocas_nos_itens(
         if t not in aplicadas:
             aplicadas.append(t)
     return novos, aplicadas
+
+
+def _redireciona(cod: str) -> bool:
+    """Com a soma por família ligada nesta linha, o robô também pode
+    redirecionar a venda para um lote irmão — inclusive quando o item JÁ está
+    no lote da prioridade, mas esse lote não tem a peça."""
+    return bool(get_settings().estoque_familia_redireciona) and estoque_familia.familia_ligada(cod)
+
+
+class _Descontos:
+    """Saldo descontado do cache da rodada por troca PLANEJADA de um pedido;
+    volta se o pedido acabar não sendo trocado (consulta falhou, anti-volta)."""
+
+    def __init__(self) -> None:
+        self._feitos: list[tuple[dict, float]] = []
+
+    def descontar(self, prod: dict, qtd: float) -> None:
+        prod["stock"] = float(prod["stock"]) - qtd
+        self._feitos.append((prod, qtd))
+
+    def devolver(self) -> None:
+        for prod, qtd in self._feitos:
+            prod["stock"] = float(prod["stock"]) + qtd
+        self._feitos.clear()
+
+
+async def _decidir_pedido(
+    client,
+    cache: dict,
+    *,
+    numero: str,
+    qtd_por_codigo: dict[str, int],
+    mapa: dict[str, str],
+    estoque_unico: bool,
+    summary: dict,
+    descontos: _Descontos,
+) -> list[dict]:
+    """Planeja as trocas de UM pedido (sem PUT). Pode levantar
+    `_ConsultaFalhouError` — aí o caller devolve os descontos e adia o pedido.
+
+    Pedido num estoque só: decide o pedido INTEIRO antes do item a item. Os
+    itens que o plano cobre não passam pela regra item a item (senão duas
+    prioridades diferentes voltariam a dividir o pedido)."""
+    trocas: list[dict] = []
+    decididos: set[str] = set()
+    if estoque_unico:
+        plano = await _plano_estoque_unico(
+            client,
+            cache,
+            qtd_por_codigo=qtd_por_codigo,
+            mapa=mapa,
+            redireciona=_redireciona,
+        )
+        if plano and plano.get("estoque"):
+            decididos = set(plano["itens"])
+            summary["avaliados"] += len(decididos)
+            for chave, qtd in plano["consumo"].items():
+                prod = cache.get(chave)
+                if prod and prod.get("stock") is not None:
+                    descontos.descontar(prod, qtd)
+            trocas.extend(plano["trocas"])
+            if plano["trocas"]:
+                summary["pedidos_estoque_unico"] = (
+                    summary.get("pedidos_estoque_unico", 0) + 1
+                )
+                logger.info(
+                    "prioridade_estoque_pedido_estoque_unico",
+                    pedido=numero,
+                    estoque=plano["estoque"],
+                    motivo=plano["motivo"],
+                    misturado=plano["misturado"],
+                    trocas=[f"{t['antigo']} -> {t['alvo']}" for t in plano["trocas"]],
+                )
+            else:
+                summary["ja_no_lote_certo"] = (
+                    summary.get("ja_no_lote_certo", 0) + len(decididos)
+                )
+        elif plano and plano.get("sem_estoque") and plano.get("misturado"):
+            summary["pedidos_sem_estoque_unico"] = (
+                summary.get("pedidos_sem_estoque_unico", 0) + 1
+            )
+            logger.info(
+                "prioridade_estoque_pedido_sem_estoque_unico",
+                pedido=numero,
+                estoques=plano["estoques"],
+            )
+
+    for cod, qtd in qtd_por_codigo.items():
+        if cod in decididos:
+            continue
+        info = analisa_codigo(cod)
+        if not info:
+            continue
+        base, tag_atual = info
+        prio = mapa.get(base)
+        redirecionar = _redireciona(cod)
+        if not redirecionar and (not prio or prio == tag_atual):
+            continue
+        summary["avaliados"] += 1
+        alvo, prod = await _lote_com_saldo(
+            client,
+            cache,
+            codigo=cod,
+            tag_atual=tag_atual,
+            prioridade=prio,
+            qtd=qtd,
+            redirecionar=redirecionar,
+        )
+        if alvo is None:
+            summary["sem_saldo_alvo"] += 1
+            logger.info(
+                "prioridade_estoque_sem_saldo_alvo",
+                pedido=numero,
+                de=cod,
+                prioridade=prio,
+                qtd=qtd,
+                redirecionar=redirecionar,
+            )
+            continue
+        if alvo.strip().lower() == (cod or "").strip().lower():
+            # Já está no lote que tem a peça: nada a fazer.
+            summary["ja_no_lote_certo"] = summary.get("ja_no_lote_certo", 0) + 1
+            continue
+        if prio and alvo.strip().lower() != sku_alvo(
+            cod, tag_atual, prio
+        ).strip().lower():
+            summary["redirecionados"] = summary.get("redirecionados", 0) + 1
+            logger.info(
+                "prioridade_estoque_redirecionado",
+                pedido=numero,
+                de=cod,
+                para=alvo,
+                prioridade=prio,
+                motivo="lote da prioridade sem saldo",
+            )
+        descontos.descontar(prod, qtd)
+        trocas.append(
+            {
+                "antigo": cod,
+                "alvo": alvo,
+                "alvo_id": int(prod["id"]),
+                "alvo_nome": prod.get("name"),
+                "qtd": qtd,
+            }
+        )
+    return trocas
 
 
 async def aplicar_prioridade_estoque(
@@ -511,120 +716,33 @@ async def aplicar_prioridade_estoque(
                 it.item_quantidade or 1
             )
 
-        trocas: list[dict] = []
-
-        def _redireciona(cod: str) -> bool:
-            # Com a soma por família ligada nesta linha, o robô também pode
-            # redirecionar a venda para um lote irmão — inclusive quando o item
-            # JÁ está no lote da prioridade, mas esse lote está vazio.
-            return bool(
-                get_settings().estoque_familia_redireciona
-            ) and estoque_familia.familia_ligada(cod)
-
-        # Pedido num estoque só: decide o pedido INTEIRO antes do item a item.
-        # Os itens que o plano cobre não passam pela regra item a item (senão
-        # duas prioridades diferentes voltariam a dividir o pedido).
-        decididos: set[str] = set()
-        if estoque_unico:
-            plano = await _plano_estoque_unico(
+        descontos = _Descontos()
+        try:
+            trocas = await _decidir_pedido(
                 client,
                 alvo_cache,
+                numero=numero,
                 qtd_por_codigo=qtd_por_codigo,
                 mapa=mapa,
-                redireciona=_redireciona,
+                estoque_unico=estoque_unico,
+                summary=summary,
+                descontos=descontos,
             )
-            if plano and plano.get("estoque"):
-                decididos = set(plano["itens"])
-                summary["avaliados"] += len(decididos)
-                for chave, qtd in plano["consumo"].items():
-                    prod = alvo_cache.get(chave)
-                    if prod and prod.get("stock") is not None:
-                        prod["stock"] = float(prod["stock"]) - qtd
-                trocas.extend(plano["trocas"])
-                if plano["trocas"]:
-                    summary["pedidos_estoque_unico"] = (
-                        summary.get("pedidos_estoque_unico", 0) + 1
-                    )
-                    logger.info(
-                        "prioridade_estoque_pedido_estoque_unico",
-                        pedido=numero,
-                        estoque=plano["estoque"],
-                        motivo=plano["motivo"],
-                        misturado=plano["misturado"],
-                        trocas=[f"{t['antigo']} -> {t['alvo']}" for t in plano["trocas"]],
-                    )
-                else:
-                    summary["ja_no_lote_certo"] = (
-                        summary.get("ja_no_lote_certo", 0) + len(decididos)
-                    )
-            elif plano and plano.get("sem_estoque") and plano.get("misturado"):
-                summary["pedidos_sem_estoque_unico"] = (
-                    summary.get("pedidos_sem_estoque_unico", 0) + 1
-                )
-                logger.info(
-                    "prioridade_estoque_pedido_sem_estoque_unico",
-                    pedido=numero,
-                    estoques=plano["estoques"],
-                )
+        except _ConsultaFalhouError as exc:
+            descontos.devolver()
+            summary["consulta_falhou"] = summary.get("consulta_falhou", 0) + 1
+            logger.info("prioridade_estoque_pedido_adiado", pedido=numero, sku=str(exc))
+            continue
 
-        for cod, qtd in qtd_por_codigo.items():
-            if cod in decididos:
-                continue
-            info = analisa_codigo(cod)
-            if not info:
-                continue
-            base, tag_atual = info
-            prio = mapa.get(base)
-            redirecionar = _redireciona(cod)
-            if not redirecionar and (not prio or prio == tag_atual):
-                continue
-            summary["avaliados"] += 1
-            alvo, prod = await _lote_com_saldo(
-                client,
-                alvo_cache,
-                codigo=cod,
-                tag_atual=tag_atual,
-                prioridade=prio,
-                qtd=qtd,
-                redirecionar=redirecionar,
+        if trocas and await _desfaz_troca_recente(session, numero, trocas):
+            descontos.devolver()
+            summary["anti_vai_e_volta"] = summary.get("anti_vai_e_volta", 0) + 1
+            logger.info(
+                "prioridade_estoque_anti_vai_e_volta",
+                pedido=numero,
+                trocas=[f"{t['antigo']} -> {t['alvo']}" for t in trocas],
             )
-            if alvo is None:
-                summary["sem_saldo_alvo"] += 1
-                logger.info(
-                    "prioridade_estoque_sem_saldo_alvo",
-                    pedido=numero,
-                    de=cod,
-                    prioridade=prio,
-                    qtd=qtd,
-                    redirecionar=redirecionar,
-                )
-                continue
-            if alvo.strip().lower() == (cod or "").strip().lower():
-                # Já está no lote que tem a peça: nada a fazer.
-                summary["ja_no_lote_certo"] = summary.get("ja_no_lote_certo", 0) + 1
-                continue
-            if prio and alvo.strip().lower() != sku_alvo(
-                cod, tag_atual, prio
-            ).strip().lower():
-                summary["redirecionados"] = summary.get("redirecionados", 0) + 1
-                logger.info(
-                    "prioridade_estoque_redirecionado",
-                    pedido=numero,
-                    de=cod,
-                    para=alvo,
-                    prioridade=prio,
-                    motivo="lote da prioridade sem saldo",
-                )
-            prod["stock"] = float(prod["stock"]) - qtd
-            trocas.append(
-                {
-                    "antigo": cod,
-                    "alvo": alvo,
-                    "alvo_id": int(prod["id"]),
-                    "alvo_nome": prod.get("name"),
-                    "qtd": qtd,
-                }
-            )
+            continue
 
         if not trocas:
             continue
