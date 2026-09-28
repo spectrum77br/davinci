@@ -108,7 +108,11 @@ async def _seed_dois_faturadores(db: AsyncSession, admin: User) -> None:
                      bling_store_id="930002", nf_faturador_id=f2.id))
     await db.flush()
     await _seed_pedido(db, numero="830001", loja="930001", sku="dg053.ci", nome="Capa", unit=500)
-    await _seed_pedido(db, numero="830002", loja="930002", sku="x1", nome="Produto X", unit=1000)
+    # bling_id próprio: com o mesmo 700001 do 830001, o índice único
+    # (bling_id, item_index) — que tests/test_bling_orders_em_andamento_upsert.py
+    # cria no schema de teste — derrubava todo teste que roda depois dele.
+    await _seed_pedido(db, numero="830002", loja="930002", sku="x1", nome="Produto X",
+                       unit=1000, bling_id=700002)
     await db.commit()
 
 
@@ -209,7 +213,7 @@ async def test_enfileirar_pula_pedido_sem_estoque(
     assert [n for c in cmds for n in c.numeros] == ["830001"]
 
     # o sem estoque foi pra Aguardando Cancelamento no Bling e localmente
-    assert fake.chamadas == [(700001, 83955)]
+    assert fake.chamadas == [(700002, 83955)]
     situacoes = {
         r.numero: r.situacao
         for r in (
