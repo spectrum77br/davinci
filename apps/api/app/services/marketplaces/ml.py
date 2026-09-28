@@ -41,6 +41,7 @@ import structlog
 
 from app.config import get_settings
 from app.services.marketplaces.base import SyncResult, SyncStatus, TestResult
+from app.services.vinculo_saude import norm_sku
 
 if TYPE_CHECKING:
     from app.models import ProductLink
@@ -535,9 +536,17 @@ class MercadoLivreClient:
         *,
         bling_store_id: int | None = None,  # ignored on ML side
         force: bool = False,
+        sku_esperado: str | None = None,
     ) -> SyncResult:
         """ABC entrypoint. Resolves variation, applies B1 guard, dispatches to
         the correct ML endpoint, and classifies the outcome.
+
+        `sku_esperado` (SKU do produto do vínculo): o GET do anúncio já vem de
+        graça antes do PUT, então conferimos o SELLER_SKU atual. Se o anúncio
+        agora tem OUTRO SKU (dg053.ci → dg053.sp trocado lá dentro), NÃO
+        envia o estoque do produto velho: devolve `sku_trocado` com o SKU
+        atual e o orquestrador move o vínculo e reenvia o estoque certo.
+        SKU vazio no anúncio não conta como troca.
 
         B1: never write `available_quantity=0` when caller has positive stock —
         unless `force=True` (manual/individual sync where the user explicitly
@@ -588,11 +597,17 @@ class MercadoLivreClient:
                 error_code=f"ml_listing_{listing_status}",
             )
         if not force and listing_status == "paused":
-            return SyncResult(
-                status=SyncStatus.SKIPPED,
-                qty_before=qty_before,
-                error_code="ml_listing_paused",
-            )
+            # Pausado POR FALTA DE ESTOQUE volta sozinho quando recebe estoque
+            # positivo — é justamente o anúncio que zerou (ex. vínculo preso no
+            # lote velho) e precisa voltar. Pausado pelo vendedor continua
+            # intocado.
+            sub = {str(x).lower() for x in (item.get("sub_status") or [])}
+            if not (qty > 0 and "out_of_stock" in sub):
+                return SyncResult(
+                    status=SyncStatus.SKIPPED,
+                    qty_before=qty_before,
+                    error_code="ml_listing_paused",
+                )
 
         variations = item.get("variations") or []
         seller_sku = (link.external_sku or "").strip() or None
@@ -617,9 +632,15 @@ class MercadoLivreClient:
 
             new_var_id = str(target_var["id"])
             payload_extra: dict[str, Any] = {}
+            sku_atual = _ml_sku_of(target_var)
+            trocado = _sku_trocado(sku_atual, sku_esperado, qty_before, item_id, new_var_id)
+            if trocado is not None:
+                return trocado
+            if sku_atual:
+                payload_extra["sku_atual"] = sku_atual
             if repointed:
-                link.variation_id = new_var_id
                 payload_extra["variation_repointed_from"] = link.variation_id
+                link.variation_id = new_var_id
 
             try:
                 r = await self._request(
@@ -643,6 +664,10 @@ class MercadoLivreClient:
             )
 
         # No variations on the listing -- single-item update.
+        sku_atual = _ml_sku_of(item)
+        trocado = _sku_trocado(sku_atual, sku_esperado, qty_before, item_id, None)
+        if trocado is not None:
+            return trocado
         try:
             r = await self._request(
                 "PUT",
@@ -657,7 +682,7 @@ class MercadoLivreClient:
             status=SyncStatus.OK,
             qty_before=qty_before,
             qty_after=qty,
-            payload={"item_id": item_id},
+            payload={"item_id": item_id, **({"sku_atual": sku_atual} if sku_atual else {})},
         )
 
     async def update_price(
@@ -869,21 +894,31 @@ class MercadoLivreClient:
         if not seller_id:
             return
 
-        offset = 0
+        # Paginação por SCROLL (search_type=scan): a por `offset` o ML recusa
+        # passar de 1.000 anúncios ("Invalid limit and offset values") — as
+        # contas kfa, forpaper e marquezini nunca eram lidas até o fim, e o que
+        # passava do 1.000º nunca era vinculado nem religado.
+        # `listagem_completa` diz se a leitura foi até o fim sem buraco (fica
+        # no relatório da varredura; sumir da lista NÃO marca morto — só o
+        # status "closed" ou o 404 no envio).
+        self.listagem_completa = False
+        scroll_id: str | None = None
         page_idx = 0
+        algum_buraco = False
         while True:
             if max_pages is not None and page_idx >= max_pages:
+                algum_buraco = True
                 break
-            r = await self._request(
-                "GET",
-                f"/users/{seller_id}/items/search",
-                params={"limit": page_size, "offset": offset},
-            )
+            params: dict[str, Any] = {"search_type": "scan", "limit": 100}
+            if scroll_id:
+                params["scroll_id"] = scroll_id
+            r = await self._request("GET", f"/users/{seller_id}/items/search", params=params)
             if r.status_code != 200:
                 raise RuntimeError(
                     f"ml_search_failed status={r.status_code} body={r.text[:200]}"
                 )
             data = r.json() or {}
+            scroll_id = data.get("scroll_id") or scroll_id
             ids = data.get("results") or []
             if not ids:
                 break
@@ -896,25 +931,23 @@ class MercadoLivreClient:
                     params={"ids": ",".join(chunk), "include_attributes": "all"},
                 )
                 if rr.status_code != 200:
+                    algum_buraco = True
                     logger.warning(
                         "ml_multiget_failed", status=rr.status_code, body=rr.text[:200]
                     )
                     continue
                 for entry in rr.json() or []:
                     if entry.get("code") != 200:
+                        algum_buraco = True
                         continue
                     body = entry.get("body") or {}
                     for normalized in _iter_ml_variants(body):
                         yield normalized
                 if chunk_idx < n_chunks - 1:
                     await asyncio.sleep(1.0)
-            paging = data.get("paging") or {}
-            total = int(paging.get("total") or 0)
-            offset += page_size
             page_idx += 1
-            if offset >= total:
-                break
             await asyncio.sleep(0.3)
+        self.listagem_completa = not algum_buraco
 
 
 # ---------------------------------------------------------------- helpers
@@ -1048,6 +1081,28 @@ def _ml_sku_of(obj: dict) -> str | None:
             if v:
                 return v
     return (obj.get("seller_custom_field") or "").strip() or None
+
+
+def _sku_trocado(
+    sku_atual: str | None,
+    sku_esperado: str | None,
+    qty_before: int | None,
+    item_id: str,
+    variation_id: str | None,
+) -> SyncResult | None:
+    """Resultado `sku_trocado` quando o anúncio tem um SKU (não vazio)
+    diferente do produto do vínculo; None quando está tudo certo."""
+    if not sku_esperado or not sku_atual:
+        return None
+    if norm_sku(sku_atual) == norm_sku(sku_esperado):
+        return None
+    return SyncResult(
+        status=SyncStatus.REQUIRES_REVIEW,
+        qty_before=qty_before,
+        error_code="sku_trocado",
+        error_detail=f"anúncio agora com SKU {sku_atual} (vínculo em {sku_esperado})",
+        payload={"item_id": item_id, "variation_id": variation_id, "sku_atual": sku_atual},
+    )
 
 
 def _resolve_variation(

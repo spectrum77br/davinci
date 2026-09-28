@@ -295,8 +295,10 @@ async def _link_tiktok_integration(
     # SSH parity: MAX_PAGES=20 (caps at 2000 products) and a 2-minute wall
     # timeout per account so a slow/wedged search can't block the auto-link
     # job indefinitely.
-    MAX_PAGES = 20
-    TIMEOUT_SECONDS = 120.0
+    # Antes 20 páginas (2.000 produtos) e 2 min: contas maiores ficavam pela
+    # metade. 200 páginas = 20 mil produtos por conta.
+    MAX_PAGES = 200
+    TIMEOUT_SECONDS = 900.0
     started_at = _loop_now()
 
     created = 0
@@ -304,6 +306,8 @@ async def _link_tiktok_integration(
     not_found = 0
     sku_vazio = 0
     repointed = 0
+    mortos = 0
+    revividos = 0
     error: str | None = None
     page_token: str | None = None
     page_idx = 0
@@ -357,6 +361,13 @@ async def _link_tiktok_integration(
                 sku_id = (sku.get("id") or "").strip()
                 if not sku_id:
                     continue
+                visto = existing_by_key.get((product_id, sku_id))
+                if visto is not None:
+                    if seller_sku:
+                        visto.external_sku = seller_sku
+                    efeito = _saude_pelo_status(visto, IntegrationPlatform.TIKTOK, tp.get("status"))
+                    mortos += efeito == "morto"
+                    revividos += efeito == "revivido"
                 if not seller_sku:
                     sku_vazio += 1
                     continue
@@ -406,10 +417,14 @@ async def _link_tiktok_integration(
             break
 
     await session.commit()
-    return _stats(
-        created=created, already=already, not_found=not_found,
-        sku_vazio=sku_vazio, repointed=repointed, sku_index=sku_index, error=error,
-    )
+    return {
+        **_stats(
+            created=created, already=already, not_found=not_found,
+            sku_vazio=sku_vazio, repointed=repointed, sku_index=sku_index, error=error,
+        ),
+        "mortos": mortos,
+        "revividos": revividos,
+    }
 
 
 async def _safe_flush_batch(
@@ -472,6 +487,48 @@ def _repoint_link(
     link.stock = stock
     link.last_sync_status = LinkSyncStatus.OK
     link.last_sync_at = _now()
+    link.morto_desde = None
+    link.morto_motivo = None
+
+
+# Status (normalizado pelo list_listings / cru do TikTok) → morto ou vivo.
+# Sumir da lista NÃO é morto (a lista do marketplace pode não trazer todo
+# status); só o que o próprio marketplace diz. Parado (pausado, em revisão,
+# inativo) não é nem um nem outro.
+_MORTO_POR_STATUS = {
+    IntegrationPlatform.ML: {"closed": "anúncio encerrado no Mercado Livre"},
+    IntegrationPlatform.SHOPEE: {"closed": "anúncio excluído na Shopee"},
+    IntegrationPlatform.TIKTOK: {
+        "DELETED": "produto excluído no TikTok",
+        "FREEZE": "produto congelado ou excluído no TikTok",
+        "PLATFORM_DEACTIVATED": "produto desativado pelo TikTok",
+    },
+}
+_VIVO_POR_STATUS = {
+    IntegrationPlatform.ML: {"active"},
+    IntegrationPlatform.SHOPEE: {"active"},
+    IntegrationPlatform.TIKTOK: {"ACTIVATE", "LIVE", "ACTIVE"},
+}
+
+
+def _saude_pelo_status(
+    link: ProductLink, platform: IntegrationPlatform, status: str | None
+) -> str | None:
+    """Marca/desmarca o vínculo como morto pelo status que a varredura leu.
+    Devolve 'morto', 'revivido' ou None."""
+    st = (status or "").strip()
+    motivo = _MORTO_POR_STATUS.get(platform, {}).get(st)
+    if motivo:
+        novo = link.morto_desde is None
+        link.morto_motivo = motivo
+        if novo:
+            link.morto_desde = _now()
+        return "morto" if novo else None
+    if st in _VIVO_POR_STATUS.get(platform, set()) and link.morto_desde is not None:
+        link.morto_desde = None
+        link.morto_motivo = None
+        return "revivido"
+    return None
 
 
 async def _link_via_listings(
@@ -539,6 +596,8 @@ async def _link_via_listings(
     not_found = 0
     sku_vazio = 0
     repointed = 0
+    mortos = 0
+    revividos = 0
     error: str | None = None
 
     async def _flush() -> None:
@@ -558,6 +617,16 @@ async def _link_via_listings(
             variation_id = (listing.get("variation_id") or "").strip() or None
             if not external_id:
                 continue
+            key = (external_id, variation_id or "")
+            existing_link = existing_by_key.get(key)
+            if existing_link is not None:
+                # O que o anúncio é HOJE: SKU e se morreu/voltou — mesmo quando
+                # o SKU novo não tem produto (fica visível como divergente).
+                if sku:
+                    existing_link.external_sku = sku
+                efeito = _saude_pelo_status(existing_link, platform, listing.get("status"))
+                mortos += efeito == "morto"
+                revividos += efeito == "revivido"
             if not sku:
                 sku_vazio += 1
                 continue
@@ -566,8 +635,6 @@ async def _link_via_listings(
                 if motivo == "not_found":
                     not_found += 1
                 continue
-            key = (external_id, variation_id or "")
-            existing_link = existing_by_key.get(key)
             if existing_link is not None:
                 if not repoint or existing_link.product_id == local.id:
                     already += 1
@@ -625,10 +692,14 @@ async def _link_via_listings(
             platform=platform.value,
             skipped=skipped,
         )
-    return _stats(
-        created=created, already=already, not_found=not_found,
-        sku_vazio=sku_vazio, repointed=repointed, sku_index=sku_index, error=error,
-    )
+    return {
+        **_stats(
+            created=created, already=already, not_found=not_found,
+            sku_vazio=sku_vazio, repointed=repointed, sku_index=sku_index, error=error,
+        ),
+        "mortos": mortos,
+        "revividos": revividos,
+    }
 
 
 def _ml_client_for(integ: Integration, session: AsyncSession) -> MercadoLivreClient:
@@ -932,6 +1003,8 @@ async def run_auto_link(
         "sku_vazio": 0,
         "sku_ambiguo": 0,
         "repointed": 0,
+        "mortos": 0,
+        "revividos": 0,
         # `failed_integrations` mantido (o front lê essa chave) e agora é
         # sinônimo de `pending_integrations`: contas que esgotaram os retries.
         "failed_integrations": 0,
@@ -949,6 +1022,8 @@ async def run_auto_link(
         summary["sku_vazio"] += stats.get("sku_vazio", 0)
         summary["sku_ambiguo"] += stats.get("sku_ambiguo", 0)
         summary["repointed"] += stats.get("repointed", 0)
+        summary["mortos"] += stats.get("mortos", 0)
+        summary["revividos"] += stats.get("revividos", 0)
 
     async def _run_one(integ_id: UUID) -> None:
         async with sem:

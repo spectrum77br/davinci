@@ -49,7 +49,7 @@ from app.models import (
     SyncLogAction,
 )
 from app.security.cipher import decrypt_json, encrypt_json
-from app.services import estoque_familia
+from app.services import estoque_familia, vinculo_saude
 from app.services.alerts import emit_alert
 from app.services.job_details import append_job_detail
 from app.services.marketplaces.base import SyncResult, SyncStatus
@@ -127,6 +127,20 @@ class SyncOrchestrator:
         # SSH delta #1 — populated by run_parallel after each pass so
         # run_with_retry knows which products to re-sync.
         self._last_round_retryable_ids: list[UUID] = []
+        # SKU → produto (TODOS os produtos, de qualquer dono), montado só se um
+        # anúncio aparecer com o SKU trocado (vinculo_saude / ml.update_stock).
+        self._sku_index = None
+
+    async def _produto_do_sku(self, sku: str) -> Product | None:
+        """O único produto com este SKU (mesma regra do Vincular Automático:
+        SKU em 2+ produtos é ambíguo e não move nada)."""
+        if self._sku_index is None:
+            from app.services.auto_link import _SkuIndex
+
+            todos = (await self.session.execute(select(Product))).scalars().all()
+            self._sku_index = _SkuIndex(list(todos))
+        alvo, _motivo = self._sku_index.resolve(sku)
+        return alvo
 
     async def _get_integration(self, integration_id: UUID) -> Integration:
         if integration_id in self._integration_cache:
@@ -268,6 +282,78 @@ class SyncOrchestrator:
             payload={"source": "bling_refresh"},
         )
 
+    async def _tratar_sku_trocado(
+        self,
+        client,
+        product: Product,
+        link: ProductLink,
+        qty: int,
+        result: SyncResult,
+        bling_store_id,
+    ) -> SyncResult:
+        """O anúncio agora tem outro SKU (trocado dentro do marketplace).
+        Se esse SKU é de exatamente um produto, o vínculo MUDA para ele e o
+        anúncio recebe o estoque dele. Se não (SKU sem produto ou em 2+
+        produtos), fica onde está e recebe o estoque de antes — exatamente o
+        comportamento antigo — com o aviso `sku_divergente` na tela."""
+        sku_atual = (result.payload or {}).get("sku_atual") or ""
+        link.external_sku = sku_atual or link.external_sku
+        alvo = await self._produto_do_sku(sku_atual) if sku_atual else None
+        if alvo is not None and alvo.id != product.id:
+            de = product.sku
+            link.product_id = alvo.id
+            qty_novo = await estoque_familia.saldo_publicavel(
+                self.session, alvo, cache=self._familia_cache
+            )
+            novo = await client.update_stock(
+                link, qty_novo, bling_store_id=bling_store_id, force=self.force,
+                sku_esperado=alvo.sku,
+            )
+            logger.info(
+                "vinculo_movido_por_sku", link_id=str(link.id), de=de, para=alvo.sku,
+                status=novo.status.value,
+            )
+            if novo.status == SyncStatus.OK:
+                novo.error_code = "sku_movido"
+                novo.error_detail = f"anúncio trocou de SKU: {de} → {alvo.sku}"
+            novo.payload = {**(novo.payload or {}), "sku_novo": alvo.sku, "sku_antigo": de}
+            return novo
+        # Sem para onde mover: comportamento antigo (estoque do produto do
+        # vínculo), com aviso.
+        antigo = await client.update_stock(
+            link, qty, bling_store_id=bling_store_id, force=self.force, sku_esperado=None
+        )
+        if antigo.status == SyncStatus.OK:
+            antigo.error_code = "sku_divergente"
+            antigo.error_detail = (
+                f"anúncio com SKU {sku_atual}, que "
+                + ("está em mais de um produto" if self._sku_index and
+                   self._sku_index.resolve(sku_atual)[1] == "ambiguo" else "não existe no DaVinci")
+            )
+        return antigo
+
+    def _atualizar_saude(self, link: ProductLink, result: SyncResult) -> None:
+        """Morto quando o marketplace diz que o anúncio acabou; vivo de novo
+        quando um envio dá certo. Também guarda o SKU atual lido do anúncio."""
+        if link.platform == IntegrationPlatform.BLING:
+            return
+        sku_atual = (result.payload or {}).get("sku_atual")
+        if sku_atual:
+            link.external_sku = sku_atual
+        if result.status == SyncStatus.OK:
+            link.morto_desde = None
+            link.morto_motivo = None
+            return
+        if result.error_code == "vinculo_morto":
+            return
+        motivo = vinculo_saude.motivo_morto(
+            link.platform.value, result.error_code, result.error_detail
+        )
+        if motivo:
+            link.morto_motivo = motivo
+            if link.morto_desde is None:
+                link.morto_desde = datetime.now(UTC)
+
     async def _process_link(
         self,
         product: Product,
@@ -288,6 +374,17 @@ class SyncOrchestrator:
                     status=SyncStatus.SKIPPED,
                     error_code="bling_refresh_failed_no_push",
                     error_detail="local stock stale; refusing to push to marketplace",
+                )
+            elif link.morto_desde is not None and not self.force:
+                # Anúncio que o marketplace já disse que morreu: não gasta
+                # chamada (eram ~35 mil por dia). O envio forçado (botão de
+                # sincronizar do produto) ainda tenta — se der certo, revive.
+                action = SyncLogAction.UPDATE_STOCK
+                result = SyncResult(
+                    status=SyncStatus.SKIPPED,
+                    qty_before=link.stock,
+                    error_code="vinculo_morto",
+                    error_detail=link.morto_motivo,
                 )
             else:
                 action = SyncLogAction.UPDATE_STOCK
@@ -335,9 +432,18 @@ class SyncOrchestrator:
                         # external edits to the marketplace can drift link.stock
                         # without us noticing, and operators expect "sincronizar"
                         # to actually call the API every time.
-                        result = await client.update_stock(  # type: ignore[union-attr]
-                            link, qty, bling_store_id=bling_store_id, force=self.force
+                        extra = (
+                            {"sku_esperado": product.sku}
+                            if link.platform == IntegrationPlatform.ML
+                            else {}
                         )
+                        result = await client.update_stock(  # type: ignore[union-attr]
+                            link, qty, bling_store_id=bling_store_id, force=self.force, **extra
+                        )
+                        if result.error_code == "sku_trocado":
+                            result = await self._tratar_sku_trocado(
+                                client, product, link, qty, result, bling_store_id
+                            )
                 except HTTPException as e:
                     code = "platform_not_implemented" if e.status_code == 501 else "http_error"
                     result = SyncResult(
@@ -357,6 +463,7 @@ class SyncOrchestrator:
                 bucket.error(result.error_code)
 
         self._tally(result.status)
+        self._atualizar_saude(link, result)
         link.last_sync_status = _status_to_link_status(result.status)
         link.last_sync_at = datetime.now(UTC)
         link.last_error = (
@@ -379,8 +486,8 @@ class SyncOrchestrator:
 
         await self._append_detail(
             {
-                "product_id": str(product.id),
-                "sku": product.sku,
+                "product_id": str(link.product_id or product.id),
+                "sku": (result.payload or {}).get("sku_novo") or product.sku,
                 "platform": link.platform.value,
                 "integration_id": str(link.integration_id),
                 "external_id": link.external_id,
@@ -397,7 +504,7 @@ class SyncOrchestrator:
             SyncLog(
                 user_id=self.user_id,
                 job_id=self.job.id if self.job else None,
-                product_id=product.id,
+                product_id=link.product_id or product.id,
                 product_link_id=link.id,
                 integration_id=link.integration_id,
                 store_id=link.store_id,

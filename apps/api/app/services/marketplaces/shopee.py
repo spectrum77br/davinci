@@ -1575,8 +1575,12 @@ def _classify_response(
         )
 
     err_lower = err.lower()
+    # "product … status is abnormal" (anúncio excluído/bloqueado) e "model ID
+    # not exist" são definitivos: antes caíam em "desconhecido" → RETRYABLE e
+    # eram repetidos para sempre (e faziam o produto inteiro repetir a rodada).
     if err in _BANNED_CODES or any(
-        kw in err_lower or kw in msg.lower() for kw in ("ban", "delisted", "removed", "off-shelf", "off_shelf")
+        kw in err_lower or kw in msg.lower()
+        for kw in ("ban", "delisted", "removed", "off-shelf", "off_shelf", "abnormal", "not exist")
     ):
         return SyncResult(
             status=SyncStatus.REQUIRES_REVIEW,

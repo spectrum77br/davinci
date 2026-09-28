@@ -41,6 +41,16 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger()
 
+# Erro de envio que quer dizer "o produto não aceita mais estoque" (congelado,
+# excluído, desativado pela plataforma) — inclusive depois da tentativa de
+# reativar.
+_TIKTOK_STATUS_BLOQUEADO = (
+    "must be in one of these statuses",
+    "change the product to one of these statuses",
+    "não foi possível reativá-lo",
+)
+_TIKTOK_PASSAGEIRO = ("internal error", "retry later", "service unavailable", "timeout", "busy")
+
 TIKTOK_BASE_URL = "https://open-api.tiktokglobalshop.com"
 TIKTOK_AUTH_BASE = "https://auth.tiktok-shops.com"
 TIKTOK_AUTHORIZE_BASE = "https://services.tiktokshop.com/open/authorize"
@@ -962,11 +972,30 @@ class TikTokClient:
         except httpx.HTTPError as e:
             return _http_error_to_result(e, qty_before)
         except Exception as e:  # noqa: BLE001
+            msg = str(e)
+            baixo = msg.lower()
+            if any(k in baixo for k in _TIKTOK_STATUS_BLOQUEADO):
+                # Produto congelado/excluído no TikTok: definitivo (vira
+                # "morto" no vínculo e para de ser tentado).
+                return SyncResult(
+                    status=SyncStatus.REQUIRES_REVIEW,
+                    qty_before=qty_before,
+                    error_code="tiktok_status_bloqueado",
+                    error_detail=msg[:500],
+                )
+            if any(k in baixo for k in _TIKTOK_PASSAGEIRO):
+                # "Internal error. Retry later", 503 etc.: tenta de novo.
+                return SyncResult(
+                    status=SyncStatus.RETRYABLE,
+                    qty_before=qty_before,
+                    error_code="tiktok_temporario",
+                    error_detail=msg[:500],
+                )
             return SyncResult(
                 status=SyncStatus.FATAL,
                 qty_before=qty_before,
                 error_code="tiktok_exception",
-                error_detail=str(e)[:500],
+                error_detail=msg[:500],
             )
 
     async def _update_product_stock_with_activation(

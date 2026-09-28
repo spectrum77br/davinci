@@ -1451,18 +1451,23 @@ async def daily_sync_scheduler(ctx: dict) -> None:
                 hora <= window_end,
             )
         )
-        for us in rows.scalars():
-            already = (
-                await s.execute(
-                    select(BackgroundJob.id).where(
-                        BackgroundJob.created_by == us.user_id,
-                        BackgroundJob.type == BackgroundJobType.SYNC_ALL,
-                        BackgroundJob.created_at >= today_cutoff_utc,
-                    )
+        # UMA varredura por dia, não uma por pessoa que ligou: o sync_all_run
+        # pega os produtos de TODOS os donos, então 3 pessoas com a chave
+        # ligada = 3 varreduras iguais e simultâneas (28/09/2026: ~3.400
+        # respostas 429 do Bling por noite, produtos inteiros sem envio e os
+        # jobs cortados às 06:00 sem terminar).
+        ja_hoje = (
+            await s.execute(
+                select(BackgroundJob.id).where(
+                    BackgroundJob.type == BackgroundJobType.SYNC_ALL,
+                    BackgroundJob.payload["trigger"].astext == "daily_sync",
+                    BackgroundJob.created_at >= today_cutoff_utc,
                 )
-            ).first()
-            if already is not None:
-                continue
+            )
+        ).first()
+        if ja_hoje is not None:
+            return
+        for us in list(rows.scalars())[:1]:
             job = BackgroundJob(
                 type=BackgroundJobType.SYNC_ALL,
                 status=BackgroundJobStatus.PENDING,
@@ -3090,6 +3095,54 @@ async def faturas_vencimento_scan(ctx: dict) -> None:
         )
 
 
+async def varredura_vinculos(ctx: dict) -> None:
+    """Todo dia: lê as contas inteiras dos marketplaces (o mesmo motor do botão
+    "Vincular Automático") e
+    - MOVE o vínculo cujo anúncio trocou de SKU (dg053.ci → dg053.sp);
+    - cria o vínculo que falta (anúncio vendendo sem vínculo);
+    - marca como MORTO o anúncio encerrado/excluído e revive o que voltou;
+    - apaga o vínculo morto há mais de 30 dias.
+    Eduardo, 28/09/2026: "estamos deixando links mortos" / "fica travado no
+    link velho e não muda, fazendo ficar sem estoque"."""
+    from app.services import vinculo_saude
+
+    async with session_scope() as s:
+        dono = (
+            await s.execute(
+                select(Product.user_id).group_by(Product.user_id)
+                .order_by(sa_func.count().desc()).limit(1)
+            )
+        ).scalar_one_or_none()
+        ids = [
+            str(i)
+            for i in (
+                await s.execute(select(Integration.id).where(Integration.archived_at.is_(None)))
+            ).scalars()
+        ]
+        if dono is None or not ids:
+            return
+        job = BackgroundJob(
+            type=BackgroundJobType.AUTO_LINK,
+            status=BackgroundJobStatus.PENDING,
+            created_by=dono,
+            total=len(ids),
+            payload={"trigger": "varredura_diaria", "integration_ids": ids},
+        )
+        s.add(job)
+        await s.flush()
+        job_id = str(job.id)
+    await auto_link_run(ctx, job_id, ids)
+
+    limite = datetime.now(UTC) - timedelta(days=vinculo_saude.DIAS_ATE_REMOVER)
+    async with session_scope() as s:
+        res = await s.execute(
+            delete(ProductLink).where(
+                ProductLink.morto_desde.is_not(None), ProductLink.morto_desde < limite
+            )
+        )
+    logger.info("vinculos_mortos_removidos", quantidade=res.rowcount or 0)
+
+
 async def auto_import_link(ctx: dict) -> None:
     """Fase 8: scan listings whose product_id is null and a non-blank SKU
     matches a product; attach product_id and promote into product_links.
@@ -3484,6 +3537,7 @@ class WorkerSettings:
         send_otp_email,
         auth_codes_cleanup,
         auto_link_run,
+        varredura_vinculos,
         chamado_devolucao_disparar,
         devolucao_mensagem_comprador_enviar,
         bling_situacoes_sync,
@@ -3738,6 +3792,9 @@ class WorkerSettings:
         # Safety-net only — hooks via app.services.relink_hook handle the
         # day-to-day work. Runs at 02:00 and 14:00 UTC.
         cron(auto_import_link, hour={2, 14}, minute=0, run_at_startup=False),
+        # Varredura dos vínculos (SKU trocado, anúncio sem vínculo, morto): 10:00 BRT,
+        # longe da varredura de estoque da madrugada.
+        cron(varredura_vinculos, hour=13, minute=0, run_at_startup=False, timeout=3 * 3600),
         # Marketing module (per-platform/department) — every quarter-hour
         # per enabled MarketingAccount.
         cron(marketing_agent_cycle, minute={0, 15, 30, 45}, run_at_startup=False),

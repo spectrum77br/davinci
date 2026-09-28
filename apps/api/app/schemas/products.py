@@ -26,6 +26,9 @@ class ProductLinkOut(BaseModel):
     last_sync_status: str
     last_sync_at: datetime | None = None
     last_error: str | None = None
+    # Anúncio que o marketplace disse que acabou (services/vinculo_saude.py).
+    morto_desde: datetime | None = None
+    morto_motivo: str | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -58,11 +61,21 @@ class ProductOut(BaseModel):
     links: list[ProductLinkOut] = Field(default_factory=list)
 
 
+class SaudeVinculos(BaseModel):
+    """Contagem de vínculos com problema (todos os produtos visíveis, não só a
+    página): mortos, SKU do anúncio diferente do produto, erro no envio."""
+
+    mortos: int = 0
+    sku_divergente: int = 0
+    erro: int = 0
+
+
 class ProductPage(BaseModel):
     items: list[ProductOut]
     total: int
     page: int
     page_size: int
+    saude: SaudeVinculos | None = None
 
 
 class ProductCreate(BaseModel):

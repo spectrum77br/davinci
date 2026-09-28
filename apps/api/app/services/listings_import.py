@@ -185,6 +185,12 @@ async def _create_product_links_for_matched(session: AsyncSession) -> int:
             FROM "{schema}".listings l
             JOIN "{schema}".integrations i ON i.id = l.integration_id
             WHERE l.product_id IS NOT NULL
+              -- Só anúncio lido há pouco. A tabela `listings` parou em
+              -- 19/05/2026: promover a foto velha RESSUSCITAVA vínculo que
+              -- alguém tinha apagado (1.106 da Amazon voltaram em 03/07) e
+              -- religava anúncio no produto de maio. Hoje quem cria e move
+              -- vínculo é a varredura diária (auto_link), lendo a conta ao vivo.
+              AND l.imported_at >= NOW() - INTERVAL '2 days'
         )
         INSERT INTO "{schema}".product_links (
             id, user_id, product_id, integration_id, store_id, platform,

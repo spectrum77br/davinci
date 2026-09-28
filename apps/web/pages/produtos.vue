@@ -27,6 +27,10 @@ type ProductLink = {
   last_sync_status: string
   last_sync_at: string | null
   last_error: string | null
+  // Anúncio que o marketplace disse que acabou (encerrado/excluído/bloqueado):
+  // não recebe mais envio e sai sozinho em 30 dias.
+  morto_desde?: string | null
+  morto_motivo?: string | null
 }
 
 type Product = {
@@ -64,7 +68,10 @@ type Segment = {
   active: boolean
 }
 
-type ProductPage = { items: Product[]; total: number; page: number; page_size: number }
+type SaudeVinculos = { mortos: number; sku_divergente: number; erro: number }
+type ProductPage = {
+  items: Product[]; total: number; page: number; page_size: number; saude?: SaudeVinculos | null
+}
 
 type BlingPreviewItem = {
   bling_product_id: number
@@ -109,6 +116,11 @@ const pageSize = 50
 const filtroIntegration = ref<string>('')
 const filtroSegment = ref<string>('')
 const stockFilter = ref<'' | 'low' | 'ok' | 'zero'>('')
+// Saúde dos vínculos (28/09/2026): mortos, SKU do anúncio diferente, erro.
+const filtroVinculos = ref<'' | 'mortos' | 'sku' | 'erro'>('')
+const saude = ref<SaudeVinculos>({ mortos: 0, sku_divergente: 0, erro: 0 })
+const confirmandoRemoverMortos = ref(false)
+const removendoMortos = ref(false)
 const expanded = ref<Set<string>>(new Set())
 const selected = ref<Set<string>>(new Set())
 // Checked product_links in the expanded rows (Item 4 — batch link delete).
@@ -237,7 +249,8 @@ async function refreshAll() {
         (buscaProdutos ? `&search=${encodeURIComponent(buscaProdutos)}` : '') +
         (filtroIntegration.value ? `&integration_id=${filtroIntegration.value}` : '') +
         (stockFilter.value === 'low' ? `&low_stock=true` : '') +
-        (stockFilter.value === 'zero' ? `&zero_stock=true` : '')),
+        (stockFilter.value === 'zero' ? `&zero_stock=true` : '') +
+        (filtroVinculos.value ? `&vinculos=${filtroVinculos.value}` : '')),
         // 'ok' is handled client-side (filteredItems) to avoid backend changes
       api<Integration[]>('/api/integrations'),
       api<UserSettings>('/api/settings'),
@@ -245,6 +258,7 @@ async function refreshAll() {
     ])
     items.value = pg.items
     total.value = pg.total
+    if (pg.saude) saude.value = pg.saude
     integrations.value = integ
     autoSyncEnabled.value = settings.daily_sync_enabled
     segments.value = segs
@@ -558,6 +572,43 @@ function removeLinksLocal(ids: Set<string> | string[]) {
   )
   for (const id of idSet) selectedLinks.value.delete(id)
   selectedLinks.value = new Set(selectedLinks.value)
+}
+
+// ── Saúde do vínculo ────────────────────────────────────────────────────────
+function normSku(v?: string | null): string {
+  return (v || '').replace(/\s+/g, '').toLowerCase()
+}
+// O anúncio está com outro SKU e ficou onde estava (SKU sem produto ou em 2+
+// produtos). Os que tinham para onde ir já foram movidos sozinhos.
+function skuDiferente(p: Product, l: ProductLink): boolean {
+  return !!l.external_sku && !l.morto_desde && normSku(l.external_sku) !== normSku(p.sku)
+}
+function fmtQuando(v?: string | null): string {
+  if (!v) return '—'
+  const d = new Date(v)
+  return Number.isNaN(d.getTime()) ? v : d.toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' })
+}
+function dicaVinculo(p: Product, l: ProductLink): string {
+  const linhas = [integrationById.value[l.integration_id]?.name?.trim() || l.platform]
+  if (l.morto_desde) linhas.push(`MORTO desde ${fmtQuando(l.morto_desde)}: ${l.morto_motivo || 'anúncio acabou'}`)
+  if (l.external_sku) linhas.push(`SKU no anúncio: ${l.external_sku}${skuDiferente(p, l) ? ` (produto é ${p.sku})` : ''}`)
+  linhas.push(`último envio: ${fmtQuando(l.last_sync_at)} · ${l.last_sync_status}`)
+  if (l.last_error) linhas.push(l.last_error)
+  return linhas.join('\n')
+}
+async function removerMortos() {
+  removendoMortos.value = true
+  try {
+    const r = await api<{ removidos: number }>('/api/product-links/remover-mortos', { method: 'POST' })
+    pushToast({ kind: 'success', title: `${r.removidos} vínculo(s) morto(s) removido(s)`, lines: [] })
+    confirmandoRemoverMortos.value = false
+    if (filtroVinculos.value === 'mortos') filtroVinculos.value = ''
+    await refreshAll()
+  } catch (e: any) {
+    pushToast({ kind: 'error', title: 'Não deu para remover os vínculos mortos', lines: [e?.data?.detail?.code || e?.message || 'erro'] }, 15000)
+  } finally {
+    removendoMortos.value = false
+  }
 }
 
 async function deleteLink(id: string) {
@@ -1255,6 +1306,9 @@ function autoLinkCurrent(details: Array<Record<string, any>> | undefined): strin
 }
 function autoLinkTotals(job: any): {
   created: number
+  movidos: number
+  mortos: number
+  revividos: number
   already: number
   not_found: number
   sku_vazio: number
@@ -1264,6 +1318,10 @@ function autoLinkTotals(job: any): {
   const r = (job?.result || {}) as Record<string, any>
   return {
     created: r.created ?? 0,
+    // anúncio que trocou de SKU e teve o vínculo movido para o produto novo
+    movidos: r.repointed ?? 0,
+    mortos: r.mortos ?? 0,
+    revividos: r.revividos ?? 0,
     already: r.already_present ?? 0,
     not_found: r.not_found ?? 0,
     sku_vazio: r.sku_vazio ?? 0,
@@ -1645,6 +1703,17 @@ onUnmounted(() => {
         <option value="ok">Estoque OK</option>
         <option value="zero">Sem estoque</option>
       </select>
+      <select
+        v-model="filtroVinculos"
+        class="h-9 w-[240px] rounded-md border bg-background px-2 text-sm"
+        title="Vínculos com problema: anúncio encerrado/excluído (morto), anúncio com SKU diferente do produto, ou erro no envio de estoque"
+        @change="page = 1; refreshAll()"
+      >
+        <option value="">Vínculos: todos</option>
+        <option value="mortos">Vínculos: mortos ({{ saude.mortos }})</option>
+        <option value="sku">Vínculos: SKU do anúncio diferente ({{ saude.sku_divergente }})</option>
+        <option value="erro">Vínculos: com erro no envio ({{ saude.erro }})</option>
+      </select>
       <select v-model="filtroIntegration" class="h-9 w-[220px] rounded-md border bg-background px-2 text-sm" @change="refreshAll">
         <option value="">Todas as contas</option>
         <optgroup v-for="g in integrationGroups" :key="g.platform" :label="g.platform">
@@ -1665,6 +1734,42 @@ onUnmounted(() => {
       <Button v-if="canDelete && selected.size > 0" size="sm" variant="destructive" @click="bulkDelete">
         <Trash2 class="size-4 mr-1.5" /> excluir {{ selected.size }}
       </Button>
+    </div>
+
+    <div
+      v-if="saude.mortos || saude.sku_divergente || saude.erro"
+      class="flex flex-wrap items-center gap-2 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900"
+    >
+      <span class="font-medium">Vínculos:</span>
+      <button v-if="saude.mortos" class="underline" @click="filtroVinculos = 'mortos'; page = 1; refreshAll()">
+        {{ saude.mortos.toLocaleString('pt-BR') }} mortos (anúncio encerrado, excluído ou bloqueado — não recebem mais estoque)
+      </button>
+      <span v-if="saude.mortos && (saude.sku_divergente || saude.erro)">·</span>
+      <button v-if="saude.sku_divergente" class="underline" @click="filtroVinculos = 'sku'; page = 1; refreshAll()">
+        {{ saude.sku_divergente.toLocaleString('pt-BR') }} com SKU do anúncio diferente do produto
+      </button>
+      <span v-if="saude.sku_divergente && saude.erro">·</span>
+      <button v-if="saude.erro" class="underline" @click="filtroVinculos = 'erro'; page = 1; refreshAll()">
+        {{ saude.erro.toLocaleString('pt-BR') }} com erro no envio
+      </button>
+      <template v-if="canDelete && saude.mortos">
+        <Button
+          v-if="!confirmandoRemoverMortos"
+          size="sm"
+          variant="outline"
+          class="ml-auto"
+          @click="confirmandoRemoverMortos = true"
+        >
+          <Trash2 class="size-4 mr-1.5" /> Remover os {{ saude.mortos.toLocaleString('pt-BR') }} mortos
+        </Button>
+        <span v-else class="ml-auto flex items-center gap-2">
+          Apagar {{ saude.mortos.toLocaleString('pt-BR') }} vínculos mortos? (sozinhos eles saem em 30 dias)
+          <Button size="sm" variant="destructive" :disabled="removendoMortos" @click="removerMortos">
+            {{ removendoMortos ? 'removendo…' : 'Sim, remover' }}
+          </Button>
+          <Button size="sm" variant="ghost" :disabled="removendoMortos" @click="confirmandoRemoverMortos = false">cancelar</Button>
+        </span>
+      </template>
     </div>
 
     <!-- Anúncio buscado por ID: todas as variações/SKUs agrupados embaixo,
@@ -1876,14 +1981,17 @@ onUnmounted(() => {
                     :key="l.id"
                     class="group/link relative flex flex-col items-center leading-tight px-3"
                     :class="idx > 0 ? 'border-t border-border/30 pt-0.5 mt-0.5' : ''"
+                    :title="dicaVinculo(p, l)"
                   >
                     <span
                       class="text-xs font-bold tabular-nums"
-                      :class="l.last_sync_status === 'fatal' ? 'text-red-600' : ''"
+                      :class="l.morto_desde ? 'line-through text-muted-foreground font-normal' : l.last_sync_status === 'fatal' ? 'text-red-600' : ''"
                     >{{ l.stock ?? 0 }}</span>
                     <span class="text-[9px] text-muted-foreground leading-none">
                       {{ integrationById[l.integration_id]?.name?.trim() || l.platform }}
                     </span>
+                    <span v-if="l.morto_desde" class="text-[8px] uppercase tracking-wide text-red-700 leading-none">morto</span>
+                    <span v-else-if="skuDiferente(p, l)" class="text-[8px] uppercase tracking-wide text-purple-700 leading-none">sku ≠</span>
                     <button
                       v-if="canDelete"
                       class="absolute -right-2 -top-0.5 hidden group-hover/link:flex items-center justify-center size-3.5 rounded-full bg-red-500 hover:bg-red-600 text-white text-[9px]"
@@ -2027,8 +2135,10 @@ onUnmounted(() => {
                         <th>External ID</th>
                         <th>Variação</th>
                         <th>Título</th>
+                        <th>SKU no anúncio</th>
                         <th class="text-right">Estoque</th>
                         <th>Status</th>
+                        <th>Último envio</th>
                         <th class="w-8"></th>
                       </tr>
                     </thead>
@@ -2048,11 +2158,20 @@ onUnmounted(() => {
                         <td class="font-mono">{{ l.external_id }}</td>
                         <td>{{ l.variation_id || '—' }}</td>
                         <td>{{ l.listing_title || '—' }}</td>
-                        <td class="text-right tabular-nums">{{ l.stock ?? '—' }}</td>
+                        <td class="font-mono" :class="skuDiferente(p, l) ? 'text-purple-700 font-semibold' : ''" :title="skuDiferente(p, l) ? `O anúncio está com outro SKU; o produto é ${p.sku}` : ''">
+                          {{ l.external_sku || '—' }}
+                        </td>
+                        <td class="text-right tabular-nums" :class="l.morto_desde ? 'line-through text-muted-foreground' : ''">{{ l.stock ?? '—' }}</td>
                         <td>
-                          <span class="pill" :class="l.last_sync_status === 'ok' ? 'pill-success' : l.last_sync_status === 'fatal' ? 'pill-danger' : 'pill-muted'">
+                          <span v-if="l.morto_desde" class="pill pill-danger" :title="l.morto_motivo || ''">morto</span>
+                          <span v-else class="pill" :class="l.last_sync_status === 'ok' ? 'pill-success' : l.last_sync_status === 'fatal' ? 'pill-danger' : 'pill-muted'">
                             {{ l.last_sync_status }}
                           </span>
+                        </td>
+                        <td class="max-w-[280px]">
+                          <div class="text-muted-foreground">{{ fmtQuando(l.last_sync_at) }}</div>
+                          <div v-if="l.morto_desde" class="text-red-700 truncate" :title="l.morto_motivo || ''">{{ l.morto_motivo }}</div>
+                          <div v-else-if="l.last_error" class="truncate" :class="l.last_error.startsWith('sku_movido') ? 'text-emerald-700' : 'text-amber-700'" :title="l.last_error">{{ l.last_error }}</div>
                         </td>
                         <td>
                           <Button v-if="canDelete" size="icon" variant="ghost" @click="deleteLink(l.id)">
@@ -2441,7 +2560,10 @@ onUnmounted(() => {
           >
             <div class="text-center">
               <div class="text-lg font-bold tabular-nums">
-                {{ autoLinkTotals(activeJob).created }} produto(s) vinculados
+                {{ autoLinkTotals(activeJob).created }} produto(s) vinculados<template v-if="autoLinkTotals(activeJob).movidos"> ·
+                {{ autoLinkTotals(activeJob).movidos }} movido(s) para o SKU novo do anúncio</template><template v-if="autoLinkTotals(activeJob).mortos"> ·
+                {{ autoLinkTotals(activeJob).mortos }} anúncio(s) marcado(s) como morto(s)</template><template v-if="autoLinkTotals(activeJob).revividos"> ·
+                {{ autoLinkTotals(activeJob).revividos }} voltaram a viver</template>
               </div>
               <div class="text-xs mt-0.5 opacity-90">
                 {{ autoLinkTotals(activeJob).already }} já existentes ·

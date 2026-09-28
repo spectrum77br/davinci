@@ -8,8 +8,10 @@ product row re-reads each listing's CURRENT seller_sku and, when it no longer
 matches, MOVES the link onto the product that owns the new SKU (re-point, not
 delete/recreate) — then the normal stock push runs from the right product.
 
-This runs ONLY from the per-product reload endpoint (routers.sync.sync_product),
-never from auto-link or sync-all. Only platforms whose seller_sku is an editable
+This runs from the per-product reload/sync endpoints (routers.sync). Desde
+28/09/2026 o envio ao ML também confere o SKU a cada push (ml.update_stock +
+sync_orchestrator._tratar_sku_trocado) e a varredura diária (auto_link) move o
+resto — este botão é o "agora" para um produto. Only platforms whose seller_sku is an editable
 field on the listing are in scope (ML/Shopee/TikTok). Bling self-links are the
 source of truth; Amazon's seller-sku IS the immutable listing key; Temu has no
 read adapter — all skipped.
@@ -77,10 +79,17 @@ async def reconcile_product_links(
     the caller commits. Never touches links on other platforms."""
     report = ReconcileReport()
 
+    # Os vínculos DESTE produto e também os de OUTROS produtos cujo anúncio já
+    # foi visto com o SKU deste (external_sku é atualizado a cada envio ao
+    # ML): assim clicar no produto NOVO (dg053.sp) também puxa os anúncios que
+    # ficaram presos no velho (dg053.ci) — antes era preciso achar e clicar no
+    # velho.
+    chave = _norm_sku(product.sku)
     stmt = select(ProductLink).where(
         and_(
-            ProductLink.product_id == product.id,
             ProductLink.platform != IntegrationPlatform.BLING,
+            (ProductLink.product_id == product.id)
+            | (func.lower(func.btrim(ProductLink.external_sku)) == chave),
         )
     )
     if only_integration_ids:
@@ -93,12 +102,14 @@ async def reconcile_product_links(
     if not links:
         return report
 
-    # SKU → product with the SAME ambiguity semantics as auto-link: a SKU shared
-    # by two products is "ambiguo" and does NOT move (can't pick a target).
-    products = (
-        await session.execute(select(Product).where(Product.user_id == user.id))
-    ).scalars().all()
+    # SKU → produto de QUALQUER dono, com a mesma regra de ambiguidade do
+    # Vincular Automático. Até 28/09/2026 o índice só tinha os produtos de
+    # quem clicou: 4.723 dos 5.050 produtos são do "bill gates" e quem clica é
+    # heisenberg/harry potter — o botão respondia "SKU novo sem produto
+    # cadastrado" (falso) e NUNCA moveu um vínculo (0 em 101 tentativas).
+    products = (await session.execute(select(Product))).scalars().all()
     sku_index = _SkuIndex(products)
+    por_id = {p.id: p for p in products}
 
     _client_cache: dict[UUID, object] = {}
 
@@ -140,8 +151,10 @@ async def reconcile_product_links(
             # → leave the link exactly as-is; the normal push still runs.
             report.unreadable += 1
             continue
-        if _norm_sku(cur_sku) == _norm_sku(product.sku):
-            continue  # listing still matches this product — nothing to move
+        atual = por_id.get(link.product_id) or product
+        link.external_sku = cur_sku  # o que o anúncio diz HOJE
+        if _norm_sku(cur_sku) == _norm_sku(atual.sku):
+            continue  # listing still matches its product — nothing to move
 
         target, motivo = sku_index.resolve(cur_sku)
         if target is None:
@@ -190,8 +203,8 @@ async def reconcile_product_links(
                 platform=link.platform.value,
                 external_id=link.external_id,
                 variation_id=link.variation_id,
-                from_product_id=product.id,
-                from_sku=product.sku,
+                from_product_id=atual.id,
+                from_sku=atual.sku,
                 to_product_id=target.id,
                 to_sku=cur_sku,
             )

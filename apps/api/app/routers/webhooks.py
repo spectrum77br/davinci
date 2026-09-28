@@ -592,9 +592,12 @@ async def receive_bling_webhook(
         await session.execute(
             select(ProductLink).where(
                 ProductLink.product_id == product_id,
-                ProductLink.last_sync_status.in_(
-                    [LinkSyncStatus.OK, LinkSyncStatus.PENDING, LinkSyncStatus.REQUIRES_REVIEW]
-                ),
+                # Todos os vínculos vivos, menos os de erro fatal (conta sem
+                # acesso etc.). Antes só OK/pendente/revisar: o anúncio que o
+                # ML PAUSOU por zerar (status "pulado") nunca mais recebia o
+                # estoque que voltou — ficava "sem estoque" de vez.
+                ProductLink.last_sync_status != LinkSyncStatus.FATAL,
+                ProductLink.morto_desde.is_(None),
             )
         )
     ).scalars().all()

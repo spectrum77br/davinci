@@ -163,6 +163,11 @@ class ProductLink(Base, TimestampMixin):
     )
     last_sync_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Anúncio que o marketplace disse que não existe mais / foi encerrado ou
+    # bloqueado de vez (services/vinculo_saude.py). Não recebe envio de
+    # estoque; sai sozinho depois de 30 dias; volta a viver se reaparecer.
+    morto_desde: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    morto_motivo: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class BackgroundJob(Base, TimestampMixin):

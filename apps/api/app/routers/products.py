@@ -35,6 +35,7 @@ from app.schemas.products import (
     ProductOut,
     ProductPage,
     ProductPatch,
+    SaudeVinculos,
 )
 from app.security.cipher import decrypt_json
 from app.services.marketplaces.bling import (
@@ -131,6 +132,9 @@ async def list_products(
     integration_id: UUID | None = Query(None),
     low_stock: bool = Query(False),
     zero_stock: bool = Query(False),
+    vinculos: str | None = Query(
+        None, description="mortos | sku (SKU do anúncio ≠ produto) | erro (falha no envio)"
+    ),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
 ) -> ProductPage:
@@ -178,6 +182,14 @@ async def list_products(
         cond = Product.stock == 0
         stmt = stmt.where(cond)
         count_stmt = count_stmt.where(cond)
+    if vinculos in _FILTROS_VINCULO:
+        cond = (
+            select(ProductLink.id)
+            .where(ProductLink.product_id == Product.id, _vinculo_visivel(), _FILTROS_VINCULO[vinculos]())
+            .exists()
+        )
+        stmt = stmt.where(cond)
+        count_stmt = count_stmt.where(cond)
 
     total = (await session.execute(count_stmt)).scalar_one()
     rows = (
@@ -214,7 +226,51 @@ async def list_products(
 
     seg_map = await _segment_lookup(session, [p.segment_id for p in rows if p.segment_id])
     items = [_to_product_out(p, by_pid.get(p.id, []), seg_map) for p in rows]
-    return ProductPage(items=items, total=total, page=page, page_size=page_size)
+    saude = SaudeVinculos(
+        **{
+            nome: (
+                await session.execute(
+                    select(func.count())
+                    .select_from(ProductLink)
+                    .join(Product, Product.id == ProductLink.product_id)
+                    .where(user_scope(Product, user), _vinculo_visivel(), filtro())
+                )
+            ).scalar_one()
+            for nome, filtro in (
+                ("mortos", _FILTROS_VINCULO["mortos"]),
+                ("sku_divergente", _FILTROS_VINCULO["sku"]),
+                ("erro", _FILTROS_VINCULO["erro"]),
+            )
+        }
+    )
+    return ProductPage(items=items, total=total, page=page, page_size=page_size, saude=saude)
+
+
+def _vinculo_visivel():
+    """Vínculo de marketplace de conta não arquivada (o que a tela mostra)."""
+    arquivadas = select(Integration.id).where(Integration.archived_at.is_not(None))
+    return and_(
+        ProductLink.platform != IntegrationPlatform.BLING,
+        or_(ProductLink.integration_id.is_(None), ProductLink.integration_id.not_in(arquivadas)),
+    )
+
+
+_FILTROS_VINCULO = {
+    "mortos": lambda: ProductLink.morto_desde.is_not(None),
+    # O anúncio está com outro SKU e ficou onde estava (SKU sem produto, ou em
+    # 2+ produtos): o envio continua do produto do vínculo, mas alguém precisa
+    # olhar. (O que tinha para onde ir já foi movido sozinho.)
+    "sku": lambda: and_(
+        ProductLink.morto_desde.is_(None),
+        func.coalesce(func.btrim(ProductLink.external_sku), "") != "",
+        func.lower(func.regexp_replace(ProductLink.external_sku, r"\s+", "", "g"))
+        != func.lower(func.regexp_replace(Product.sku, r"\s+", "", "g")),
+    ),
+    "erro": lambda: and_(
+        ProductLink.morto_desde.is_(None),
+        ProductLink.last_sync_status.in_([LinkSyncStatus.FATAL, LinkSyncStatus.REQUIRES_REVIEW]),
+    ),
+}
 
 
 @router.get("/products/{product_id}", response_model=ProductOut)
@@ -578,6 +634,31 @@ async def bulk_delete_product_links(
         **_audit_request_ctx(request),
     )
     return {"deleted": res.rowcount or 0, "deleted_ids": deleted_ids}
+
+
+@router.post("/product-links/remover-mortos")
+async def remover_vinculos_mortos(
+    request: Request,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("produtos", "delete"))],
+) -> dict:
+    """Apaga de uma vez os vínculos marcados como mortos (anúncio encerrado,
+    excluído ou bloqueado no marketplace). A varredura diária já faz isso
+    sozinha depois de 30 dias; este botão é o "agora"."""
+    res = await session.execute(
+        delete(ProductLink).where(
+            ProductLink.morto_desde.is_not(None),
+            ProductLink.product_id.in_(select(Product.id).where(user_scope(Product, user))),
+        )
+    )
+    await session.commit()
+    logger.info(
+        "vinculos_mortos_removidos_manual",
+        actor_user_id=str(user.id),
+        removidos=res.rowcount or 0,
+        **_audit_request_ctx(request),
+    )
+    return {"removidos": res.rowcount or 0}
 
 
 # ----------------------------------------------------------- Bling preview/import
