@@ -59,6 +59,7 @@ from __future__ import annotations
 from collections import Counter
 from datetime import UTC, datetime, timedelta
 
+import httpx
 import structlog
 from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -70,6 +71,7 @@ from app.services import estoque_familia, nf_emissao_gerar
 from app.services.advisory_lock import SYNC_NAMESPACE
 from app.services.logistica_bling import build_observacoes_put_body, compose_observacoes
 from app.services.margem_audit import record_margem_audit
+from app.services.marketplaces.bling import BlingCloudflareError
 from app.services.prioridade_estoque_movimentos import compensar_estoque_kits, pecas_que_mudam
 from app.services.sku_tags import SUFFIX_TAGS
 
@@ -419,17 +421,12 @@ async def _plano_estoque_unico(
             "misturado": len(presentes) > 1,
             "estoques": sorted(candidatos),
         }
-    # Necessária = o estoque em que o pedido está NÃO atende (sair é obrigação);
-    # opcional = ele atende e a troca é só preferência (a prioridade). Só a
+    # Necessária = o lote em que O ITEM está não atende (sair é obrigação);
+    # opcional = atende e a troca é só preferência. Item por item, como na regra
+    # item a item — pedido misturado não tem "estoque atual" único. Só troca
     # opcional pode ser segurada pela trava anti-volta.
-    necessaria = motivo == "mais_estoque" or (
-        motivo == "prioridade"
-        and atual is not None
-        and escolha["estoque"] != atual
-        and not await cobre(atual)
-    )
     for t in escolha["trocas"]:
-        t["necessaria"] = necessaria
+        t["necessaria"] = await _lote_atual_nao_cobre(client, cache, t["antigo"])
     return {
         **escolha,
         "motivo": motivo,
@@ -541,16 +538,24 @@ def _redireciona(cod: str) -> bool:
 
 
 async def _lote_atual_nao_cobre(client, cache: dict, cod: str) -> bool:
-    """O lote em que o item ESTÁ não atende (saldo virtual < 0, produto sumido
-    ou sem resposta do Bling)? Então sair dele é necessário, não preferência."""
-    try:
-        prod = await _buscar(client, cache, cod)
-    except _ConsultaFalhouError:
-        return True
+    """O lote em que o item ESTÁ não atende (saldo virtual < 0 ou produto
+    sumido)? Então sair dele é necessário, não preferência. Sem resposta do
+    Bling levanta `_ConsultaFalhouError` — o pedido fica para a próxima rodada."""
+    prod = await _buscar(client, cache, cod)
     if not prod or not prod.get("id") or _chave(prod.get("sku") or "") != _chave(cod):
         return True
     saldo = _saldo(prod)
     return saldo is None or saldo < 0
+
+
+def _falha_passageira(exc: Exception) -> bool:
+    """429, 5xx, timeout, rede: pode dar certo daqui a pouco. (A recusa de
+    validação do Bling — erro 67 — é definitiva e não entra aqui.)"""
+    if isinstance(exc, (BlingCloudflareError, httpx.TransportError, httpx.TimeoutException)):
+        return True
+    return isinstance(exc, httpx.HTTPStatusError) and (
+        exc.response.status_code == 429 or exc.response.status_code >= 500
+    )
 
 
 class _Descontos:
@@ -805,6 +810,7 @@ async def aplicar_prioridade_estoque(
 
         if not trocas:
             continue
+        necessaria = any(t.get("necessaria") for t in trocas)
 
         try:
             order = await client.get_order(int(bling_id))
@@ -814,8 +820,12 @@ async def aplicar_prioridade_estoque(
             )
             if len(aplicadas) < len(trocas):
                 # Espelho local não bate com o Bling (item trocado à mão?) — não
-                # arrisca o PUT, nem pela metade (dividiria o pedido).
+                # arrisca o PUT, nem pela metade (dividiria o pedido). Se sair do
+                # lote era obrigação, o check de estoque do gancho leria o SKU
+                # velho do espelho: fica para depois do próximo sync.
                 descontos.devolver()
+                if necessaria:
+                    summary.setdefault("adiados", []).append(numero)
                 logger.info(
                     "prioridade_estoque_espelho_divergente",
                     pedido=numero,
@@ -837,6 +847,11 @@ async def aplicar_prioridade_estoque(
             await client.update_order(int(bling_id), body)
         except Exception as exc:  # noqa: BLE001 — PUT revalida a venda inteira
             descontos.devolver()
+            # Timeout/504 pode ter sido processado pelo Bling: o próximo pedido
+            # da rodada relê o saldo em vez de confiar no desconto devolvido.
+            _esquecer(alvo_cache, [t["antigo"] for t in trocas] + [t["alvo"] for t in trocas])
+            if necessaria and _falha_passageira(exc):
+                summary.setdefault("adiados", []).append(numero)
             summary["falhas"] += 1
             logger.warning(
                 "prioridade_estoque_put_falhou",

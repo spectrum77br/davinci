@@ -189,3 +189,58 @@ async def test_saldo_zero_do_proprio_pedido_nao_troca(db: AsyncSession, cenario)
         await prio.aplicar_prioridade_estoque(db, numeros=["650001"])
         await db.commit()
     assert bling.puts == []
+
+
+@pytest.mark.asyncio
+async def test_pedido_misturado_com_item_em_lote_negativo_nao_e_segurado(
+    db: AsyncSession, cenario
+):
+    """Pedido [dg054.ci, dg052.sp]; o robô tinha tirado o dg052 do ci há 10
+    min, e agora o dg052.sp ficou a -1 e o ci tem peça. Pedido misturado não
+    tem "estoque atual" único: a necessidade é item por item — e este item
+    PRECISA sair, então a trava não segura (senão: Aguardando Cancelamento)."""
+    bling = await cenario(
+        {"dg054.ci": 5, "dg054.sp": 5, "dg052.ci": 3, "dg052.sp": 0},
+        {"660001": [("dg054.ci", 1), ("dg052.sp", 1)]},
+    )
+    db.add(MargemAudit(
+        pedido_bling="660001", bling_id="660001", sku="dg052.ci",
+        valor_antigo="dg052.ci", valor_novo="dg052.sp", origem="prioridade_estoque",
+        acao="sku", created_at=datetime.now(UTC) - timedelta(minutes=10),
+    ))
+    await db.commit()
+    resumo = await prio.aplicar_prioridade_estoque(db, numeros=["660001"])
+    await db.commit()
+    assert resumo["trocados"] == 1
+    assert bling.puts == [("660001", ["dg054.ci", "dg052.ci"])]
+
+
+@pytest.mark.asyncio
+async def test_troca_obrigatoria_que_toma_429_e_adiada(db: AsyncSession, cenario):
+    """O pedido precisa sair do dg057.ci (-1), mas o GET do pedido toma 429:
+    fica em 'adiados' — o gancho do enfileirar não o manda para o check de
+    estoque (que o poria em Aguardando Cancelamento com 36 no sp)."""
+    from app.services.marketplaces.bling import BlingCloudflareError
+
+    bling = await cenario({"dg057.ci": 0, "dg057.sp": 36}, {"670001": [("dg057.ci", 1)]})
+
+    async def _429(bling_id):
+        raise BlingCloudflareError("429 Too Many Requests")
+
+    bling.get_order = _429
+    resumo = await prio.aplicar_prioridade_estoque(db, numeros=["670001"])
+    assert resumo["adiados"] == ["670001"] and resumo["falhas"] == 1
+    assert bling.puts == []
+
+
+@pytest.mark.asyncio
+async def test_recusa_definitiva_do_bling_nao_adia(db: AsyncSession, cenario):
+    """Erro de validação do Bling (definitivo) não prende o pedido fora do check."""
+    bling = await cenario({"dg057.ci": 0, "dg057.sp": 36}, {"680001": [("dg057.ci", 1)]})
+
+    async def _recusa(bling_id, body):
+        raise ValueError("erro 67: venda inválida")
+
+    bling.update_order = _recusa
+    resumo = await prio.aplicar_prioridade_estoque(db, numeros=["680001"])
+    assert "adiados" not in resumo and resumo["falhas"] == 1

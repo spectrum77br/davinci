@@ -225,6 +225,42 @@ async def test_enfileirar_pula_pedido_sem_estoque(
 
 
 @pytest.mark.asyncio
+async def test_enfileirar_pedido_adiado_pela_prioridade_nao_vai_para_aguardando_cancelamento(
+    db: AsyncSession, client: AsyncClient, admin: User,
+    auth_as: Callable[[User | None], None], monkeypatch: pytest.MonkeyPatch,
+):
+    """O robô de prioridade não conseguiu consultar o Bling sobre o 830002
+    (429): ele fica de fora desta vez, com aviso — sem passar pelo check que o
+    mandaria para Aguardando Cancelamento sem o lote ter sido decidido."""
+    from app.routers import nf as nf_router
+
+    auth_as(admin)
+    await _seed_dois_faturadores(db, admin)
+    db.add(Product(user_id=admin.id, sku="x1", name="Produto X", stock=-3))
+    db.add(Product(user_id=admin.id, sku="dg053.ci", name="Capa", stock=5))
+    await db.commit()
+    fake = _FakeBlingSituacao()
+    monkeypatch.setattr(
+        nf_emissao_gerar, "_bling_client_opt", lambda _s: _async_return(fake)
+    )
+
+    async def _prio(session, numeros=None):
+        return {"trocados": 0, "adiados": ["830002"]}
+
+    monkeypatch.setattr(nf_router, "aplicar_prioridade_estoque", _prio)
+
+    r = await client.post(
+        "/api/nf-cadastro/faturamento/enfileirar",
+        json={"numeros": ["830001", "830002"]},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["pedidos_ok"] == 1
+    assert [p["numero"] for p in body["pulados"]] == ["830002"]
+    assert "não respondeu" in body["pulados"][0]["motivo"]
+    assert fake.chamadas == []  # nada de Aguardando Cancelamento
+
+@pytest.mark.asyncio
 async def test_enfileirar_todos_sem_estoque_422(
     db: AsyncSession, client: AsyncClient, admin: User,
     auth_as: Callable[[User | None], None], monkeypatch: pytest.MonkeyPatch,
@@ -1543,39 +1579,3 @@ async def test_agent_etiqueta_lote_sem_token_401(
     )
     assert r.status_code == 401
 
-
-@pytest.mark.asyncio
-async def test_enfileirar_pedido_adiado_pela_prioridade_nao_vai_para_aguardando_cancelamento(
-    db: AsyncSession, client: AsyncClient, admin: User,
-    auth_as: Callable[[User | None], None], monkeypatch: pytest.MonkeyPatch,
-):
-    """O robô de prioridade não conseguiu consultar o Bling sobre o 830002
-    (429): ele fica de fora desta vez, com aviso — sem passar pelo check que o
-    mandaria para Aguardando Cancelamento sem o lote ter sido decidido."""
-    from app.routers import nf as nf_router
-
-    auth_as(admin)
-    await _seed_dois_faturadores(db, admin)
-    db.add(Product(user_id=admin.id, sku="x1", name="Produto X", stock=-3))
-    db.add(Product(user_id=admin.id, sku="dg053.ci", name="Capa", stock=5))
-    await db.commit()
-    fake = _FakeBlingSituacao()
-    monkeypatch.setattr(
-        nf_emissao_gerar, "_bling_client_opt", lambda _s: _async_return(fake)
-    )
-
-    async def _prio(session, numeros=None):
-        return {"trocados": 0, "adiados": ["830002"]}
-
-    monkeypatch.setattr(nf_router, "aplicar_prioridade_estoque", _prio)
-
-    r = await client.post(
-        "/api/nf-cadastro/faturamento/enfileirar",
-        json={"numeros": ["830001", "830002"]},
-    )
-    assert r.status_code == 200, r.text
-    body = r.json()
-    assert body["pedidos_ok"] == 1
-    assert [p["numero"] for p in body["pulados"]] == ["830002"]
-    assert "não respondeu" in body["pulados"][0]["motivo"]
-    assert fake.chamadas == []  # nada de Aguardando Cancelamento

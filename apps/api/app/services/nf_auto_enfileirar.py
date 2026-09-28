@@ -303,6 +303,7 @@ async def run_auto_enfileirar_nf() -> dict:
                 adiados = set(prio.get("adiados") or [])
                 if adiados:
                     logger.info("nf_auto_enfileirar_prioridade_adiados", pedidos=sorted(adiados))
+                    summary["adiados_prioridade"] = len(adiados)
                     numeros = [n for n in numeros if n not in adiados]
             except Exception:  # noqa: BLE001
                 logger.exception("nf_auto_enfileirar_prioridade_falhou")
