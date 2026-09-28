@@ -104,19 +104,41 @@ class _ConsultaFalhouError(Exception):
     """O Bling não respondeu sobre um SKU — decisão fica para a próxima rodada."""
 
 
+def _chave(sku: str) -> str:
+    """Chave do cache da rodada: sem caixa e sem espaço nas pontas — 'DG057.ci'
+    e 'dg057.ci' são o mesmo produto e não podem ter dois saldos."""
+    return (sku or "").strip().lower()
+
+
 async def _buscar(client, cache: dict, sku: str) -> dict | None:
     """Produto do Bling pelo SKU, com cache da rodada. None = não existe;
     `_ConsultaFalhouError` = não deu para saber."""
-    if sku not in cache:
+    chave = _chave(sku)
+    if chave not in cache:
         try:
-            cache[sku] = await client.find_active_product_by_sku(sku, estrito=True)
+            cache[chave] = await client.find_active_product_by_sku(sku, estrito=True)
         except Exception as exc:  # noqa: BLE001 — 429/timeout/5xx
-            cache[sku] = _FALHOU
+            cache[chave] = _FALHOU
             logger.info("prioridade_estoque_consulta_falhou", sku=sku, erro=str(exc)[:200])
-    prod = cache[sku]
+    prod = cache[chave]
     if prod is _FALHOU:
         raise _ConsultaFalhouError(sku)
     return prod
+
+
+def _esquecer(cache: dict, skus: list[str]) -> None:
+    """Depois de uma troca feita no Bling: tira do cache os SKUs envolvidos e
+    todo kit que usa alguma das mesmas peças. O Bling já moveu a reserva, então
+    o próximo pedido da rodada consulta o saldo REAL — em vez de um número que
+    não sabe que o pedido saiu de um lote (os outros pedidos daquele lote
+    fugiriam juntos) ou que a peça (o fone a001) foi usada por outro kit."""
+    chaves = {_chave(s) for s in skus}
+    pecas = {p.strip() for c in chaves for p in c.split("+") if p.strip()}
+    for chave in list(cache):
+        if not isinstance(chave, str) or chave.startswith("prod:"):
+            continue  # ids da compensação (prioridade_estoque_movimentos)
+        if chave in chaves or pecas & {p.strip() for p in chave.split("+")}:
+            del cache[chave]
 
 
 def _tag_de(pedaco: str) -> str | None:
@@ -397,6 +419,17 @@ async def _plano_estoque_unico(
             "misturado": len(presentes) > 1,
             "estoques": sorted(candidatos),
         }
+    # Necessária = o estoque em que o pedido está NÃO atende (sair é obrigação);
+    # opcional = ele atende e a troca é só preferência (a prioridade). Só a
+    # opcional pode ser segurada pela trava anti-volta.
+    necessaria = motivo == "mais_estoque" or (
+        motivo == "prioridade"
+        and atual is not None
+        and escolha["estoque"] != atual
+        and not await cobre(atual)
+    )
+    for t in escolha["trocas"]:
+        t["necessaria"] = necessaria
     return {
         **escolha,
         "motivo": motivo,
@@ -507,6 +540,19 @@ def _redireciona(cod: str) -> bool:
     return bool(get_settings().estoque_familia_redireciona) and estoque_familia.familia_ligada(cod)
 
 
+async def _lote_atual_nao_cobre(client, cache: dict, cod: str) -> bool:
+    """O lote em que o item ESTÁ não atende (saldo virtual < 0, produto sumido
+    ou sem resposta do Bling)? Então sair dele é necessário, não preferência."""
+    try:
+        prod = await _buscar(client, cache, cod)
+    except _ConsultaFalhouError:
+        return True
+    if not prod or not prod.get("id") or _chave(prod.get("sku") or "") != _chave(cod):
+        return True
+    saldo = _saldo(prod)
+    return saldo is None or saldo < 0
+
+
 class _Descontos:
     """Saldo descontado do cache da rodada por troca PLANEJADA de um pedido;
     volta se o pedido acabar não sendo trocado (consulta falhou, anti-volta)."""
@@ -555,7 +601,7 @@ async def _decidir_pedido(
             decididos = set(plano["itens"])
             summary["avaliados"] += len(decididos)
             for chave, qtd in plano["consumo"].items():
-                prod = cache.get(chave)
+                prod = cache.get(_chave(chave))
                 if prod and prod.get("stock") is not None:
                     descontos.descontar(prod, qtd)
             trocas.extend(plano["trocas"])
@@ -641,6 +687,7 @@ async def _decidir_pedido(
                 "alvo_id": int(prod["id"]),
                 "alvo_nome": prod.get("name"),
                 "qtd": qtd,
+                "necessaria": await _lote_atual_nao_cobre(client, cache, cod),
             }
         )
     return trocas
@@ -684,6 +731,10 @@ async def aplicar_prioridade_estoque(
         BlingOrder.item_codigo.is_not(None),
         BlingOrder.bling_id.is_not(None),
     )
+    # Sempre na mesma ordem (do pedido mais antigo para o mais novo): quem
+    # chegou antes pega a peça do lote da prioridade primeiro, e o resultado da
+    # rodada não depende da ordem em que o banco devolve as linhas.
+    q = q.order_by(BlingOrder.numero, BlingOrder.item_index)
     if numeros is not None:
         q = q.where(BlingOrder.numero.in_(numeros))
     else:
@@ -731,10 +782,18 @@ async def aplicar_prioridade_estoque(
         except _ConsultaFalhouError as exc:
             descontos.devolver()
             summary["consulta_falhou"] = summary.get("consulta_falhou", 0) + 1
+            summary.setdefault("adiados", []).append(numero)
             logger.info("prioridade_estoque_pedido_adiado", pedido=numero, sku=str(exc))
             continue
 
-        if trocas and await _desfaz_troca_recente(session, numero, trocas):
+        # A trava só segura troca OPCIONAL (o lote atual atende): sair de lote
+        # negativo nunca espera — senão o check de estoque do enfileirar mandaria
+        # o pedido para Aguardando Cancelamento com peça no irmão.
+        if (
+            trocas
+            and not any(t.get("necessaria") for t in trocas)
+            and await _desfaz_troca_recente(session, numero, trocas)
+        ):
             descontos.devolver()
             summary["anti_vai_e_volta"] = summary.get("anti_vai_e_volta", 0) + 1
             logger.info(
@@ -753,8 +812,16 @@ async def aplicar_prioridade_estoque(
             body["itens"], aplicadas = aplicar_trocas_nos_itens(
                 body.get("itens") or [], trocas, substituir=substituir_item
             )
-            if not aplicadas:
-                # Espelho local não bate com o Bling — não arrisca o PUT.
+            if len(aplicadas) < len(trocas):
+                # Espelho local não bate com o Bling (item trocado à mão?) — não
+                # arrisca o PUT, nem pela metade (dividiria o pedido).
+                descontos.devolver()
+                logger.info(
+                    "prioridade_estoque_espelho_divergente",
+                    pedido=numero,
+                    planejadas=len(trocas),
+                    casaram=len(aplicadas),
+                )
                 continue
             # Registro humano da troca nas Observações do pedido — pedido do
             # Eduardo (28/08): "quando alterar, você tem que adicionar no
@@ -769,6 +836,7 @@ async def aplicar_prioridade_estoque(
             )
             await client.update_order(int(bling_id), body)
         except Exception as exc:  # noqa: BLE001 — PUT revalida a venda inteira
+            descontos.devolver()
             summary["falhas"] += 1
             logger.warning(
                 "prioridade_estoque_put_falhou",
@@ -776,6 +844,8 @@ async def aplicar_prioridade_estoque(
                 erro=str(exc),
             )
             continue
+
+        _esquecer(alvo_cache, [t["antigo"] for t in aplicadas] + [t["alvo"] for t in aplicadas])
 
         kits = [(t["antigo"], t["alvo"], int(t["qtd"])) for t in aplicadas if "+" in t["antigo"]]
         if kits and substituir_item:

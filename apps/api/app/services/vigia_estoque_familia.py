@@ -37,7 +37,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.db import session_scope
-from app.models import Product, ProductLink
+from app.models import IntegrationPlatform, Product, ProductLink
 from app.services import threema
 from app.services.estoque_familia import familia_ligada, saldo_publicavel
 
@@ -94,7 +94,14 @@ async def _medir(session: AsyncSession) -> dict:
     links = (
         (
             await session.execute(
-                select(ProductLink).where(ProductLink.last_sync_status.in_(_STATUS_VIVOS))
+                select(ProductLink).where(
+                    ProductLink.last_sync_status.in_(_STATUS_VIVOS),
+                    # O vínculo do Bling guarda o saldo PRÓPRIO do lote (é a
+                    # origem do estoque, não um anúncio): nunca mostra o total
+                    # da família e virava "atrasado" falso. Morto não recebe envio.
+                    ProductLink.platform != IntegrationPlatform.BLING,
+                    ProductLink.morto_desde.is_(None),
+                )
             )
         )
         .scalars()

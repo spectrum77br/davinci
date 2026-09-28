@@ -1383,12 +1383,27 @@ async def enfileirar_importacao(
     # PRIORIDADE de estoque (Tabela de Preços → coluna Prioridade): troca o
     # SKU pra tag prioritária ANTES do check de estoque — o check abaixo e a
     # NF já enxergam o SKU novo. Falha aqui nunca trava o enfileiramento.
+    adiados: set[str] = set()
     if body.numeros:
         try:
-            await aplicar_prioridade_estoque(session, body.numeros)
+            prio = await aplicar_prioridade_estoque(session, body.numeros)
+            adiados = set(prio.get("adiados") or [])
         except Exception:  # noqa: BLE001
             logger.exception("enfileirar_prioridade_falhou")
-    sem_estoque = await _pedidos_sem_estoque(session, body.numeros)
+    # O Bling não respondeu sobre o estoque destes: ficam de fora desta vez
+    # (sem passar pelo check que mandaria para Aguardando Cancelamento).
+    pulados_adiados = [
+        {
+            "numero": n,
+            "motivo": (
+                "o Bling não respondeu à consulta de estoque — tente de novo em alguns minutos"
+            ),
+        }
+        for n in body.numeros
+        if n in adiados
+    ]
+    candidatos = [n for n in body.numeros if n not in adiados]
+    sem_estoque = await _pedidos_sem_estoque(session, candidatos) if candidatos else {}
     pulados_estoque = [
         {
             "numero": numero,
@@ -1408,13 +1423,13 @@ async def enfileirar_importacao(
                 erro=f"Aguardando Cancelamento — saldo negativo: {', '.join(skus)}",
             )
         await session.commit()
-    numeros = [n for n in body.numeros if n not in sem_estoque]
+    numeros = [n for n in candidatos if n not in sem_estoque]
     res = (
         await nf_emissao_gerar.gerar_por_faturador(session, numeros)
         if numeros
         else nf_emissao_gerar.ResultadoPorFaturador(blocos=[], pulados=[])
     )
-    pulados = pulados_estoque + [
+    pulados = pulados_adiados + pulados_estoque + [
         {"numero": p.numero, "motivo": p.motivo} for p in res.pulados
     ]
     if not res.blocos:

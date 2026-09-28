@@ -296,7 +296,14 @@ async def run_auto_enfileirar_nf() -> dict:
         #     NF sai com ele. Falha aqui nunca trava o enfileiramento.
         if numeros:
             try:
-                await aplicar_prioridade_estoque(session, numeros)
+                prio = await aplicar_prioridade_estoque(session, numeros)
+                # O Bling não respondeu sobre o estoque deste pedido: ele não
+                # passa pelo check de estoque AGORA (sairia daqui para Aguardando
+                # Cancelamento sem o robô ter decidido o lote); volta na próxima.
+                adiados = set(prio.get("adiados") or [])
+                if adiados:
+                    logger.info("nf_auto_enfileirar_prioridade_adiados", pedidos=sorted(adiados))
+                    numeros = [n for n in numeros if n not in adiados]
             except Exception:  # noqa: BLE001
                 logger.exception("nf_auto_enfileirar_prioridade_falhou")
 
