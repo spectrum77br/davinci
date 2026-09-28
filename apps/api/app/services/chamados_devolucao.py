@@ -138,8 +138,8 @@ MOTIVO_SHOPEE: dict[str, tuple[str, ...]] = {
     "danificado (outros)": ("physical damage", "damage"),
     "golpe": ("incomplete return", "wrong return product", "missing"),
     "não recebido": ("did not receive", "not receive"),
-    "bloqueado": ("claim incorrect", "item is used", "used"),
-    "mudou de ideia": ("claim incorrect", "item is used", "used"),
+    "bloqueado": ("item is used", "used"),  # 28/09: ver _SHOPEE_PREF_PACOTE
+    "mudou de ideia": ("item is used", "used"),
 }
 REASONS_EXIGEM_FOTO = frozenset({"SRF2", "SRF4"})
 REASONS_DO_PACOTE = frozenset({"SRF7"})
@@ -1637,14 +1637,27 @@ _SHOPEE_ID_SEM = {
     41: "enviei_com_prova", 1: "rejeito_nao_recebimento",
     55: "outras_preocupacoes", 44: "sem_acordo", 54: "valor_errado",
 }
+# 28/09 (Vinicius, 290730): o 86 NÃO é "alegação incorreta" na tela da Shopee
+# BR — o Seller Center mostra "Eu não concordo com o desconto das taxas de
+# devolução" (visto no Histórico da Solicitação do 290730, e antes no 292128 e
+# 292317). Loja no Programa Devolução Fácil não paga taxa de devolução, então a
+# Shopee responde "este caso não terá desconto das taxas" e fecha em minutos,
+# sem olhar o produto (290730: disputa 09:11, recusada 09:25). E disputa é tiro
+# único: a errada queima a certa.
+# Tabela oficial dos motivos (Centro de Educação do Vendedor, artigo 18651,
+# "Como funciona o processo de disputa"): para o aparelho que volta travado com
+# a senha do comprador o motivo é "O produto recebido apresenta sinais de uso
+# indevido. Gostaria de uma revisão da Shopee." (evidência: fotos do uso, na
+# recepção da devolução) — o 89 ("item is used").
 # motivo da tela → semânticas aceitas, na ordem de preferência
 _SHOPEE_PREF_PACOTE: dict[str, tuple[str, ...]] = {
     "danificado (outros)": ("danificado", "usado", "alegacao_incorreta"),
     "golpe": ("incompleto", "produto_errado", "alegacao_incorreta"),
     "item faltando": ("incompleto", "alegacao_incorreta"),
     "não recebido": ("nao_recebi",),
-    "bloqueado": ("alegacao_incorreta", "usado"),
-    "mudou de ideia": ("alegacao_incorreta", "usado"),
+    # sem o "uso indevido" na lista, não disputa (vai pra gente): o 86 perde
+    "bloqueado": ("usado",),
+    "mudou de ideia": ("usado",),
 }
 _SHOPEE_PREF_REEMBOLSO: dict[str, tuple[str, ...]] = {
     # comprador alega (pacote vazio / danificado / errado / faltando) e NÃO há
