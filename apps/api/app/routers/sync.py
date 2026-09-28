@@ -364,6 +364,8 @@ async def sync_product(
         job=job,
         force=True,
         force_bling_refresh=True,
+        # A pessoa pediu: tenta até o vínculo morto (se der certo, revive).
+        incluir_mortos=True,
     )
     await orch.run(products_to_sync, only_link_ids=only_link_ids)
 
@@ -501,6 +503,8 @@ async def anuncio_sync(
         job=job,
         force=True,
         force_bling_refresh=True,
+        # A pessoa pediu: tenta até o vínculo morto (se der certo, revive).
+        incluir_mortos=True,
     )
     # run_with_retry, não run (Eduardo, 2026-09-02): estouro de limite do
     # Bling (429) no refresh marcava o link RETRYABLE e NINGUÉM tentava de
@@ -656,7 +660,8 @@ async def reload_product_links(
         products_to_sync = list({x.id: x for x in [product, *extra]}.values())
 
     orch = SyncOrchestrator(
-        session, user_id=user.id, job=job, force=True, force_bling_refresh=True
+        session, user_id=user.id, job=job, force=True, force_bling_refresh=True,
+        incluir_mortos=True,
     )
     await orch.run(products_to_sync, only_link_ids=only_link_ids)
     await session.commit()

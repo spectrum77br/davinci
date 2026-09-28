@@ -255,9 +255,6 @@ async def test_motor_marca_morto_e_depois_nao_gasta_chamada(db: AsyncSession):
     assert link.morto_desde is not None
     assert "encerrado" in link.morto_motivo
 
-    def _proibido(*a, **k):
-        raise AssertionError("não devia chamar o marketplace para vínculo morto")
-
     with patch("app.services.sync_orchestrator.client_for", side_effect=_proibido):
         await SyncOrchestrator(db, user_id=u.id).run([p])
     await db.commit()
@@ -265,8 +262,32 @@ async def test_motor_marca_morto_e_depois_nao_gasta_chamada(db: AsyncSession):
     assert link.last_error.startswith("ml_listing_closed")  # nem entrou na passada
 
 
+def _proibido(*a, **k):
+    raise AssertionError("não devia chamar o marketplace para vínculo morto")
+
+
 @pytest.mark.asyncio
-async def test_envio_forcado_que_da_certo_revive(db: AsyncSession):
+async def test_webhook_pedido_e_irmaos_nao_enviam_para_morto(db: AsyncSession):
+    """Webhook do Bling, pedido e irmãos da família rodam com force=True (para
+    passar da trava de zero do ML) — e mesmo com a lista de vínculos na mão,
+    o morto fica de fora. Revisão de 28/09: ~4 mil envios/dia por esse caminho."""
+    u = await _usuario(db, "m5")
+    p = Product(user_id=u.id, sku="zz64", name="p", stock=4)
+    db.add(p)
+    await db.commit()
+    _integ, link = await _ml_link(db, u, p, sku_link="zz64")
+    link.morto_desde = link.created_at
+    link.morto_motivo = "anúncio encerrado no Mercado Livre"
+    await db.commit()
+    with patch("app.services.sync_orchestrator.client_for", side_effect=_proibido):
+        await SyncOrchestrator(db, user_id=u.id, force=True, force_bling_refresh=True).run(
+            [p], only_link_ids=[link.id]
+        )
+        await SyncOrchestrator(db, user_id=u.id, force=True).run([p])
+
+
+@pytest.mark.asyncio
+async def test_botao_de_sincronizar_que_da_certo_revive(db: AsyncSession):
     u = await _usuario(db, "m4")
     p = Product(user_id=u.id, sku="zz63", name="p", stock=4)
     db.add(p)
@@ -276,10 +297,59 @@ async def test_envio_forcado_que_da_certo_revive(db: AsyncSession):
     link.morto_motivo = "x"
     await db.commit()
     with patch("app.services.sync_orchestrator.client_for", return_value=_MLFalso("zz63")):
-        await SyncOrchestrator(db, user_id=u.id, force=True).run([p])
+        await SyncOrchestrator(db, user_id=u.id, force=True, incluir_mortos=True).run([p])
     await db.commit()
     await db.refresh(link)
     assert link.morto_desde is None
+
+
+def test_botoes_de_sincronizar_incluem_mortos():
+    import inspect
+
+    from app.routers import sync as sync_router
+
+    fonte = inspect.getsource(sync_router)
+    assert fonte.count("incluir_mortos=True") == 3  # produto, anúncio, recarregar
+
+
+@pytest.mark.asyncio
+async def test_shopee_bloqueado_so_morre_sem_envio_certo_em_24h(db: AsyncSession):
+    """Shopee "abnormal": 30 de 4.040 voltaram no mês. Um erro isolado num
+    anúncio que vendia até hoje não o derruba; sem envio certo há 24 h, sim."""
+    from app.models import SyncLog
+
+    u = await _usuario(db, "s1")
+    p = Product(user_id=u.id, sku="zz65", name="p", stock=4)
+    db.add(p)
+    await db.flush()
+    integ = await _shopee_integration(db, u)
+    link = await _shopee_link(db, u, integ, p, sku="zz65")
+    db.add(SyncLog(
+        user_id=u.id, product_id=p.id, product_link_id=link.id, integration_id=integ.id,
+        platform=link.platform, action="update_stock", status=LinkSyncStatus.OK,
+    ))
+    await db.commit()
+    erro = SyncResult(
+        status=SyncStatus.REQUIRES_REVIEW, error_code="product.error_busi",
+        error_detail="product 1 status is abnormal",
+    )
+    orch = SyncOrchestrator(db, user_id=u.id)
+    await orch._atualizar_saude(link, erro)
+    assert link.morto_desde is None  # vendeu nas últimas 24 h: ainda não
+
+    await db.execute(text("UPDATE sync_logs SET created_at = now() - interval '2 days'"))
+    await orch._atualizar_saude(link, erro)
+    assert link.morto_desde is not None
+    assert link.morto_motivo == "anúncio bloqueado ou excluído na Shopee"
+
+    # variação excluída é definitiva: marca na hora, mesmo tendo vendido hoje
+    link.morto_desde = None
+    await db.execute(text("UPDATE sync_logs SET created_at = now()"))
+    await orch._atualizar_saude(link, SyncResult(
+        status=SyncStatus.REQUIRES_REVIEW, error_code="x", error_detail="model id not exist"
+    ))
+    assert link.morto_desde is not None
+    await db.commit()
 
 
 # --- 4. classificação dos erros ----------------------------------------------------
@@ -349,9 +419,19 @@ async def test_tela_conta_filtra_e_remove_mortos(client, db: AsyncSession, make_
     with patch("app.routers.products.get_arq_pool", _pool):
         r = await client.post("/api/product-links/remover-mortos")
     assert r.json() == {"agendado": True, "quantidade": 1}
-    assert agendados == [("remover_vinculos_mortos_run", None)]
+    assert agendados == [("remover_vinculos_mortos_run", None, True)]
 
-    # o job: apaga em lotes, soltando antes o histórico de envio
+    # morto de conta arquivada: a tela não mostra nem conta, o botão não apaga
+    from datetime import UTC, datetime
+
+    arq_integ, arquivado = await _ml_link(db, admin, q, sku_link="zz71")
+    arquivado.external_id = "MLB555"
+    arquivado.morto_desde = arquivado.created_at
+    arquivado.morto_motivo = "duplicado: o anúncio já tem vínculo por variação"
+    arq_integ.archived_at = datetime.now(UTC)
+    await db.commit()
+
+    # o job: apaga em lotes; o histórico de envio fica como está (com o id)
     from app.models import SyncLog
     from app.services.vinculo_saude import apagar_mortos_em_lotes
 
@@ -360,11 +440,18 @@ async def test_tela_conta_filtra_e_remove_mortos(client, db: AsyncSession, make_
         platform=morto.platform, action="update_stock", status=LinkSyncStatus.SKIPPED,
     ))
     await db.commit()
-    assert await apagar_mortos_em_lotes(pausa=0) == 1
+    assert await apagar_mortos_em_lotes(somente_visiveis=True, pausa=0) == 1
     restantes = (await db.execute(select(ProductLink.id))).scalars().all()
-    assert morto.id not in restantes and divergente.id in restantes
-    solto = (await db.execute(select(SyncLog.product_link_id))).scalars().all()
-    assert solto == [None]
+    assert morto.id not in restantes and divergente.id in restantes and arquivado.id in restantes
+    log = (await db.execute(select(SyncLog.product_link_id))).scalars().all()
+    assert log == [morto.id]
+
+    # nada morto à vista: nem agenda
+    agendados.clear()
+    with patch("app.routers.products.get_arq_pool", _pool):
+        r = await client.post("/api/product-links/remover-mortos")
+    assert r.json() == {"agendado": True, "quantidade": 0}
+    assert agendados == []
 
 
 # --- 6. a varredura da madrugada roda uma vez só -------------------------------------
@@ -439,10 +526,21 @@ async def test_duplicado_marcado_nao_revive(db: AsyncSession):
     link.morto_motivo = "duplicado: o anúncio já tem vínculo por variação"
     await db.commit()
     with patch("app.services.sync_orchestrator.client_for", return_value=_MLFalso("zz80")):
-        await SyncOrchestrator(db, user_id=u.id, force=True).run([p])
+        await SyncOrchestrator(db, user_id=u.id, force=True, incluir_mortos=True).run([p])
     await db.commit()
     await db.refresh(link)
     assert link.morto_desde is not None
+
+    # nem a varredura das 10h (anúncio "active") nem um erro trocam o motivo
+    from app.services.auto_link import _saude_pelo_status
+
+    assert _saude_pelo_status(link, IntegrationPlatform.ML, "active") is None
+    assert _saude_pelo_status(link, IntegrationPlatform.ML, "closed") is None
+    orch = SyncOrchestrator(db, user_id=u.id)
+    await orch._atualizar_saude(link, SyncResult(status=SyncStatus.SKIPPED, error_code="ml_listing_closed"))
+    assert link.morto_desde is not None
+    assert link.morto_motivo.startswith("duplicado:")
+    await db.commit()
 
 
 @pytest.mark.asyncio

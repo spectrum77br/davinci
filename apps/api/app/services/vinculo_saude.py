@@ -57,6 +57,29 @@ def motivo_morto(platform: str, error_code: str | None, error_detail: str | None
     return None
 
 
+# Bloqueio da Shopee ("status is abnormal") e produto congelado no TikTok às
+# vezes voltam: medido em 28/09, 30 de 4.040 anúncios Shopee voltaram a aceitar
+# estoque no mês (TikTok: nenhum). Para um erro isolado não derrubar anúncio
+# que estava vendendo, esses só viram morto se não houve envio certo nas
+# últimas CARENCIA_HORAS. Excluído/encerrado (ML, Amazon, Magalu, variação da
+# Shopee) é definitivo e marca na hora.
+CARENCIA_HORAS = 24
+_COM_CARENCIA = {
+    "anúncio bloqueado ou excluído na Shopee",
+    "produto congelado ou excluído no TikTok",
+}
+
+
+def precisa_carencia(motivo: str | None) -> bool:
+    return motivo in _COM_CARENCIA
+
+
+def eh_duplicado(motivo: str | None) -> bool:
+    """Duplicado marcado pela migration 0333: fica morto até ser apagado —
+    nem envio certo nem a varredura o fazem voltar, e o motivo não é trocado."""
+    return (motivo or "").startswith(PREFIXO_DUPLICADO)
+
+
 def norm_sku(sku: str | None) -> str:
     """Mesma normalização do Vincular Automático (auto_link._norm_sku)."""
     return re.sub(r"\s+", "", (sku or "").strip()).lower()
@@ -83,12 +106,11 @@ END
 
 
 # ── Apagar vínculo morto, em lotes ────────────────────────────────────────────
-# Cada vínculo apagado zera `sync_logs.product_link_id` (FK ON DELETE SET NULL)
-# em todas as partições — os mortos de hoje têm ~1,6 milhão dessas linhas. Um
-# DELETE só travava product_links por dezenas de minutos (medido pela revisão
-# de 28/09: 21 min e 22 GB de WAL para 583 mil linhas numa cópia local) e parava
-# o envio de estoque. Em lotes pequenos, cada um na sua transação curta.
-LOTE_APAGAR = 100
+# Desde a 0333 sync_logs não tem mais FK para product_links (o log fica com o
+# id), então apagar não mexe no histórico. Lotes curtos mesmo assim, e SKIP
+# LOCKED para dois pedidos ao mesmo tempo (botão + varredura) não brigarem
+# pelos mesmos vínculos nem contarem em dobro.
+LOTE_APAGAR = 500
 
 # Duplicado que a migration 0333 marcou: nunca "revive" com envio que dá certo.
 PREFIXO_DUPLICADO = "duplicado:"
@@ -98,16 +120,17 @@ async def apagar_mortos_em_lotes(
     *,
     antes_de=None,
     integration_ids: list | None = None,
-    pausa: float = 0.5,
+    somente_visiveis: bool = False,
+    pausa: float = 0.2,
 ) -> int:
-    """Apaga vínculos mortos (opcionalmente só os mortos antes de `antes_de`
-    e/ou só destas contas). Devolve quantos apagou."""
+    """Apaga vínculos mortos (opcionalmente só os mortos antes de `antes_de`,
+    só destas contas e/ou só os que a tela mostra). Devolve quantos apagou."""
     import asyncio
 
-    from sqlalchemy import delete, select, update
+    from sqlalchemy import delete, select
 
     from app.db import session_scope
-    from app.models import ProductLink, SyncLog
+    from app.models import ProductLink
 
     total = 0
     while True:
@@ -117,13 +140,28 @@ async def apagar_mortos_em_lotes(
                 q = q.where(ProductLink.morto_desde < antes_de)
             if integration_ids is not None:
                 q = q.where(ProductLink.integration_id.in_(integration_ids))
-            ids = (await s.execute(q.limit(LOTE_APAGAR))).scalars().all()
+            if somente_visiveis:
+                q = q.where(condicao_visivel())
+            ids = (
+                await s.execute(q.limit(LOTE_APAGAR).with_for_update(skip_locked=True))
+            ).scalars().all()
             if not ids:
                 break
-            await s.execute(
-                update(SyncLog).where(SyncLog.product_link_id.in_(ids)).values(product_link_id=None)
-            )
-            await s.execute(delete(ProductLink).where(ProductLink.id.in_(ids)))
-        total += len(ids)
+            res = await s.execute(delete(ProductLink).where(ProductLink.id.in_(ids)))
+            total += res.rowcount or 0
         await asyncio.sleep(pausa)
     return total
+
+
+def condicao_visivel():
+    """Vínculo de marketplace de conta não arquivada — o que a tela Produtos
+    mostra e conta (e, portanto, o que o botão "Remover mortos" apaga)."""
+    from sqlalchemy import and_, or_, select
+
+    from app.models import Integration, IntegrationPlatform, ProductLink
+
+    arquivadas = select(Integration.id).where(Integration.archived_at.is_not(None))
+    return and_(
+        ProductLink.platform != IntegrationPlatform.BLING,
+        or_(ProductLink.integration_id.is_(None), ProductLink.integration_id.not_in(arquivadas)),
+    )

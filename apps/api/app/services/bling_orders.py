@@ -964,6 +964,7 @@ async def _enqueue_stock_refresh_for_order(
             await session.execute(
                 select(ProductLink).where(
                     ProductLink.product_id == product.id,
+                    ProductLink.morto_desde.is_(None),
                     ProductLink.last_sync_status.in_(
                         [
                             LinkSyncStatus.OK,

@@ -38,6 +38,7 @@ from app.schemas.products import (
     SaudeVinculos,
 )
 from app.security.cipher import decrypt_json
+from app.services import vinculo_saude
 from app.services.marketplaces.bling import (
     BLING_PRODUCTS_PAGE_SIZE,
     BlingClient,
@@ -186,7 +187,11 @@ async def list_products(
     if vinculos in _FILTROS_VINCULO:
         cond = (
             select(ProductLink.id)
-            .where(ProductLink.product_id == Product.id, _vinculo_visivel(), _FILTROS_VINCULO[vinculos]())
+            .where(
+                ProductLink.product_id == Product.id,
+                _vinculo_visivel(),
+                _FILTROS_VINCULO[vinculos](),
+            )
             .exists()
         )
         stmt = stmt.where(cond)
@@ -249,11 +254,7 @@ async def list_products(
 
 def _vinculo_visivel():
     """Vínculo de marketplace de conta não arquivada (o que a tela mostra)."""
-    arquivadas = select(Integration.id).where(Integration.archived_at.is_not(None))
-    return and_(
-        ProductLink.platform != IntegrationPlatform.BLING,
-        or_(ProductLink.integration_id.is_(None), ProductLink.integration_id.not_in(arquivadas)),
-    )
+    return vinculo_saude.condicao_visivel()
 
 
 _FILTROS_VINCULO = {
@@ -645,9 +646,9 @@ async def remover_vinculos_mortos(
 ) -> dict:
     """Apaga os vínculos marcados como mortos (anúncio encerrado, excluído ou
     bloqueado no marketplace). A varredura diária já faz isso sozinha depois
-    de 30 dias; este botão é o "agora". Roda em segundo plano, em lotes: cada
-    vínculo apagado solta centenas de linhas do histórico de envio, e de uma
-    vez só isso travaria a tabela de vínculos."""
+    de 30 dias; este botão é o "agora". Roda em segundo plano, em lotes, e
+    apaga exatamente o que foi contado: mortos das contas não arquivadas no
+    escopo de quem clicou."""
     scope = await resolve_team_scope(session, user)
     integ = None if scope.unrestricted else [str(i) for i in scope.integration_ids]
     cond = [ProductLink.morto_desde.is_not(None), _vinculo_visivel()]
@@ -656,8 +657,9 @@ async def remover_vinculos_mortos(
     quantidade = (
         await session.execute(select(func.count()).select_from(ProductLink).where(*cond))
     ).scalar_one()
-    pool = await get_arq_pool()
-    await pool.enqueue_job("remover_vinculos_mortos_run", integ)
+    if quantidade:
+        pool = await get_arq_pool()
+        await pool.enqueue_job("remover_vinculos_mortos_run", integ, True)
     logger.info(
         "vinculos_mortos_remocao_agendada",
         actor_user_id=str(user.id),

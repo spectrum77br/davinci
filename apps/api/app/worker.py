@@ -3145,14 +3145,17 @@ async def varredura_vinculos(ctx: dict) -> None:
     logger.info("vinculos_mortos_removidos", quantidade=removidos)
 
 
-async def remover_vinculos_mortos_run(ctx: dict, integration_ids: list[str] | None = None) -> None:
-    """Botão "Remover mortos" da tela Produtos: apaga já (em lotes, em
-    segundo plano — fora da requisição, que não aguentaria 1,6 mi de linhas
-    de sync_logs para soltar)."""
+async def remover_vinculos_mortos_run(
+    ctx: dict, integration_ids: list[str] | None = None, somente_visiveis: bool = False
+) -> None:
+    """Botão "Remover mortos" da tela Produtos: apaga já, em lotes, em
+    segundo plano (o botão só conta e agenda)."""
     from app.services import vinculo_saude
 
     ids = [UUID(i) for i in integration_ids] if integration_ids is not None else None
-    removidos = await vinculo_saude.apagar_mortos_em_lotes(integration_ids=ids)
+    removidos = await vinculo_saude.apagar_mortos_em_lotes(
+        integration_ids=ids, somente_visiveis=somente_visiveis
+    )
     logger.info("vinculos_mortos_removidos_botao", quantidade=removidos)
 
 

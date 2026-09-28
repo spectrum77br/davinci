@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import asdict, dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Iterable
 from uuid import UUID
@@ -106,6 +106,7 @@ class SyncOrchestrator:
         job: BackgroundJob | None = None,
         force_bling_refresh: bool = False,
         force: bool = False,
+        incluir_mortos: bool = False,
     ):
         self.session = session
         self.user_id = user_id
@@ -116,6 +117,11 @@ class SyncOrchestrator:
         # explicitly wants the marketplace to mirror Bling, even when that
         # means writing 0 on a link that previously had positive stock.
         self.force = force
+        # Vínculo morto só entra quando a PESSOA manda sincronizar (botões de
+        # Sincronizar do produto/anúncio): se der certo, ele revive. Webhook do
+        # Bling, pedido, irmãos da família e sync_all usam `force` para passar
+        # da trava de zero do ML, mas NÃO devem gastar chamada com anúncio morto.
+        self.incluir_mortos = incluir_mortos
         self.report = OrchestratorReport()
         self._client_cache: dict[UUID, object] = {}
         # Total da familia por chave, so DENTRO de uma passada: evita repetir a
@@ -332,7 +338,7 @@ class SyncOrchestrator:
             )
         return antigo
 
-    def _atualizar_saude(self, link: ProductLink, result: SyncResult) -> None:
+    async def _atualizar_saude(self, link: ProductLink, result: SyncResult) -> None:
         """Morto quando o marketplace diz que o anúncio acabou; vivo de novo
         quando um envio dá certo. Também guarda o SKU atual lido do anúncio."""
         if link.platform == IntegrationPlatform.BLING:
@@ -340,20 +346,41 @@ class SyncOrchestrator:
         sku_atual = (result.payload or {}).get("sku_atual")
         if sku_atual:
             link.external_sku = sku_atual
+        if vinculo_saude.eh_duplicado(link.morto_motivo):
+            return
         if result.status == SyncStatus.OK:
-            if not (link.morto_motivo or "").startswith(vinculo_saude.PREFIXO_DUPLICADO):
-                link.morto_desde = None
-                link.morto_motivo = None
+            link.morto_desde = None
+            link.morto_motivo = None
             return
         if result.error_code == "vinculo_morto":
             return
         motivo = vinculo_saude.motivo_morto(
             link.platform.value, result.error_code, result.error_detail
         )
-        if motivo:
-            link.morto_motivo = motivo
-            if link.morto_desde is None:
-                link.morto_desde = datetime.now(UTC)
+        if not motivo:
+            return
+        if (
+            link.morto_desde is None
+            and vinculo_saude.precisa_carencia(motivo)
+            and await self._teve_envio_certo_recente(link.id)
+        ):
+            return
+        link.morto_motivo = motivo
+        if link.morto_desde is None:
+            link.morto_desde = datetime.now(UTC)
+
+    async def _teve_envio_certo_recente(self, link_id: UUID) -> bool:
+        desde = datetime.now(UTC) - timedelta(hours=vinculo_saude.CARENCIA_HORAS)
+        achou = await self.session.execute(
+            select(SyncLog.id)
+            .where(
+                SyncLog.product_link_id == link_id,
+                SyncLog.status == LinkSyncStatus.OK,
+                SyncLog.created_at >= desde,
+            )
+            .limit(1)
+        )
+        return achou.first() is not None
 
     async def _process_link(
         self,
@@ -376,10 +403,10 @@ class SyncOrchestrator:
                     error_code="bling_refresh_failed_no_push",
                     error_detail="local stock stale; refusing to push to marketplace",
                 )
-            elif link.morto_desde is not None and not self.force:
+            elif link.morto_desde is not None and not self.incluir_mortos:
                 # Anúncio que o marketplace já disse que morreu: não gasta
-                # chamada (eram ~35 mil por dia). O envio forçado (botão de
-                # sincronizar do produto) ainda tenta — se der certo, revive.
+                # chamada (eram ~35 mil por dia). O botão de sincronizar do
+                # produto ainda tenta — se der certo, revive.
                 action = SyncLogAction.UPDATE_STOCK
                 result = SyncResult(
                     status=SyncStatus.SKIPPED,
@@ -464,7 +491,7 @@ class SyncOrchestrator:
                 bucket.error(result.error_code)
 
         self._tally(result.status)
-        self._atualizar_saude(link, result)
+        await self._atualizar_saude(link, result)
         link.last_sync_status = _status_to_link_status(result.status)
         link.last_sync_at = datetime.now(UTC)
         link.last_error = (
@@ -649,7 +676,7 @@ class SyncOrchestrator:
             stmt = select(ProductLink).where(ProductLink.product_id == product.id)
             if link_filter is not None:
                 stmt = stmt.where(ProductLink.id.in_(link_filter))
-            if not self.force:
+            if not self.incluir_mortos:
                 # Vínculo morto nem entra na passada (sem chamada, sem SyncLog).
                 stmt = stmt.where(ProductLink.morto_desde.is_(None))
             links = (await self.session.execute(stmt)).scalars().all()
@@ -736,7 +763,7 @@ class SyncOrchestrator:
                         )
                         if link_filter is not None:
                             stmt = stmt.where(ProductLink.id.in_(link_filter))
-                        if not self.force:
+                        if not self.incluir_mortos:
                             stmt = stmt.where(ProductLink.morto_desde.is_(None))
                         links = (await sub_s.execute(stmt)).scalars().all()
 
@@ -751,6 +778,7 @@ class SyncOrchestrator:
                             job=sub_job,
                             force_bling_refresh=self.force_bling_refresh,
                             force=self.force,
+                            incluir_mortos=self.incluir_mortos,
                         )
 
                         bling_links = [

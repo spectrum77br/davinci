@@ -49,9 +49,12 @@ class SyncLog(Base):
         ForeignKey("products.id", ondelete="SET NULL"),
         nullable=True,
     )
+    # Sem FK desde a migration 0333: o log guarda o id do vínculo mesmo depois
+    # que ele é apagado. Com o antigo ON DELETE SET NULL, cada vínculo apagado
+    # reescrevia centenas de linhas daqui (sync_logs nunca é podado) — apagar
+    # os ~12 mil vínculos mortos seria reescrever 1,6 milhão de linhas.
     product_link_id: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True),
-        ForeignKey("product_links.id", ondelete="SET NULL"),
         nullable=True,
     )
     integration_id: Mapped[UUID | None] = mapped_column(

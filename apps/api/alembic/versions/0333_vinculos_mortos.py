@@ -9,12 +9,16 @@ tentativas de envio por dia, e aparecendo na tela como se estivessem normais.
   volta a viver se reaparecer ativo. Os de hoje são marcados já, pelo último
   erro gravado (mesma regra de services/vinculo_saude.py) — contam 30 dias a
   partir de agora.
-- Marca como morto ("duplicado: …") 226 vínculos ML "do anúncio inteiro" que
-  convivem com vínculos por variação do mesmo anúncio (216 duplicavam o envio;
-  10 apontavam para outro produto e brigavam com o da variação) e 1.886
-  vínculos Amazon no formato antigo (ASIN no lugar do SKU) com o par atual do
-  mesmo seller-sku. Param de receber envio já; saem na limpeza em lotes.
-  NADA é apagado aqui (ver o comentário no upgrade).
+- Marca como morto ("duplicado: …") os vínculos ML "do anúncio inteiro" cujo
+  anúncio tem vínculo por VARIAÇÃO funcionando (último envio ok) — ~30; os
+  outros 190 são de conta arquivada/sem acesso ou o da variação é que está
+  falhando, e ficam como estão — e 1.886 vínculos Amazon no formato antigo
+  (ASIN no lugar do SKU) com o par atual do mesmo seller-sku. Param de
+  receber envio já; saem na limpeza em lotes. NADA é apagado aqui.
+- sync_logs.product_link_id perde a FK (ON DELETE SET NULL): o log guarda o
+  id do vínculo apagado. sync_logs nunca é podado, e a FK obrigava a
+  reescrever ~1,6 milhão de linhas do histórico para apagar os mortos
+  (medido pela revisão de 28/09: 21 min de trava e 22 GB de WAL numa cópia).
 
 Revision ID: 0333_vinculos_mortos
 Revises: 0332_companies_proxy
@@ -56,11 +60,15 @@ def upgrade() -> None:
         """
     )
 
-    # Duplicados: MARCADOS como mortos (param de receber envio agora) em vez de
-    # apagados aqui. Apagar vínculo zera sync_logs.product_link_id (FK SET
-    # NULL) — 583 mil linhas para estes — e dentro da migration isso travaria
-    # product_links por dezenas de minutos. Quem apaga é a limpeza em lotes
-    # (vinculo_saude.apagar_mortos_em_lotes), sem travar nada.
+    op.drop_constraint(
+        "sync_logs_product_link_id_fkey", "sync_logs", schema=SCHEMA, type_="foreignkey"
+    )
+
+    # Duplicados: MARCADOS como mortos (param de receber envio agora); quem
+    # apaga é a limpeza em lotes (vinculo_saude.apagar_mortos_em_lotes).
+    # ML: só quando a variação do mesmo anúncio está funcionando — se é ela que
+    # falha, o do anúncio inteiro pode ser o certo (anúncio que perdeu as
+    # variações), e fica.
     op.execute(
         f"""
         UPDATE {SCHEMA}.product_links a
@@ -71,6 +79,7 @@ def upgrade() -> None:
              SELECT 1 FROM {SCHEMA}.product_links b
               WHERE b.platform = 'ml' AND b.integration_id = a.integration_id
                 AND b.external_id = a.external_id AND coalesce(b.variation_id, '') <> ''
+                AND b.last_sync_status = 'ok' AND b.morto_desde IS NULL
            )
         """
     )
@@ -91,7 +100,20 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    # Só as colunas saem (a migration não apaga vínculo).
+    # A migration não apaga vínculo. Para a FK voltar, o log de vínculo que já
+    # foi apagado depois dela precisa ficar sem dono (como a FK fazia).
+    op.execute(
+        f"""
+        UPDATE {SCHEMA}.sync_logs s SET product_link_id = NULL
+         WHERE s.product_link_id IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM {SCHEMA}.product_links l WHERE l.id = s.product_link_id)
+        """
+    )
+    op.create_foreign_key(
+        "sync_logs_product_link_id_fkey", "sync_logs", "product_links",
+        ["product_link_id"], ["id"], source_schema=SCHEMA, referent_schema=SCHEMA,
+        ondelete="SET NULL",
+    )
     op.drop_index("ix_product_links_morto_desde", table_name="product_links", schema=SCHEMA)
     op.drop_column("product_links", "morto_motivo", schema=SCHEMA)
     op.drop_column("product_links", "morto_desde", schema=SCHEMA)

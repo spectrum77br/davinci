@@ -34,6 +34,7 @@ from app.models import (
     ProductLink,
 )
 from app.security.cipher import decrypt_json, encrypt_json
+from app.services import vinculo_saude
 from app.services.job_details import append_job_detail
 from app.services.marketplaces.amazon import AmazonClient
 from app.services.marketplaces.magalu import MagaluClient
@@ -515,6 +516,10 @@ def _saude_pelo_status(
 ) -> str | None:
     """Marca/desmarca o vínculo como morto pelo status que a varredura leu.
     Devolve 'morto', 'revivido' ou None."""
+    if vinculo_saude.eh_duplicado(link.morto_motivo):
+        # Duplicado fica morto até a limpeza apagar: o anúncio estar ativo não
+        # quer dizer que ESTE vínculo deva voltar (o outro já cobre).
+        return None
     st = (status or "").strip()
     motivo = _MORTO_POR_STATUS.get(platform, {}).get(st)
     if motivo:
