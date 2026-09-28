@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import UTC, date, datetime
 from io import BytesIO
 from typing import Annotated
 from uuid import UUID
@@ -60,6 +60,7 @@ from app.services.verificar_margem import (
 from app.services.verificar_margem import (
     refresh_for_pedido as _refresh_verificar_margem_for_pedido,
 )
+from app.worker_pool import get_arq_financials_pool
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/api/margens", tags=["margens"])
@@ -1638,6 +1639,110 @@ async def refresh_marketplace_mv(
     except Exception as e:  # noqa: BLE001
         logger.warning("margem_auto_hold_refresh_failed", error=str(e)[:200])
     return {"refreshed": True, "rows": inserted, "auto_hold": auto_hold}
+
+
+# Botão "buscar saldo" (Vinicius, 28/09): a chave da Shopee Barbosa venceu em
+# 25/09 e ~40 pedidos ficaram "aguardando saldo da plataforma". Trocada a
+# chave, o financeiro só voltava sozinho na esteira lenta (12 h depois de cada
+# recusa) ou quando o pedido mudava no Bling — e não havia como pedir de novo.
+# O botão põe na fila de financeiro, na hora, os pedidos em triagem que estão
+# aguardando o saldo (mesmo gatilho da aba), respeitando plataforma e conta
+# escolhidas na tela.
+#
+# Trigger próprio, NÃO "manual": o "manual" refresca o snapshot pedido a pedido
+# sob advisory lock (~6/min) e prenderia a fila inteira num lote de dezenas; a
+# tela reconstrói o snapshot uma vez só, depois que a fila drena.
+_BUSCAR_SALDO_TRIGGER = "botao_margem"
+# Teto por clique — a triagem inteira tem poucas dezenas de "aguardando" num dia
+# normal; o teto só segura um clique num dia de pane de não afogar a fila.
+_BUSCAR_SALDO_MAX_PEDIDOS = 300
+# Dois cliques seguidos não dobram a fila: o job_id do arq repete dentro da
+# mesma janela de 5 min e o arq recusa o duplicado.
+_BUSCAR_SALDO_JANELA_S = 300
+
+
+@router.post("/marketplace/buscar-saldo")
+async def buscar_saldo_plataforma(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("margem", "edit"))],
+    platform: str | None = Query(None),
+    conta: str | None = Query(None),
+) -> dict:
+    """Busca de novo, na plataforma, o saldo dos pedidos "aguardando saldo".
+
+    Devolve quantos pedidos entraram na fila (`enfileirados`), quantos já
+    estavam na fila de um clique recente (`ja_na_fila`) e quantas falhas de
+    enfileiramento houve. O resultado chega pela fila de financeiro; a tela
+    reconstrói o snapshot depois.
+    """
+    where = [
+        _SITUACAO_TRIAGEM_SQL,
+        _ATTENTION_SALDO_AGUARDANDO_SQL,
+        "v.bling_id IS NOT NULL",
+    ]
+    params: dict = {"limite": _BUSCAR_SALDO_MAX_PEDIDOS}
+    if platform:
+        where.append("COALESCE(v.plataforma_bling, v.plataforma_financeiro) = :platform")
+        params["platform"] = platform
+    if conta:
+        where.append("v.loja_nome = :conta")
+        params["conta"] = conta
+    where_sql = " AND ".join(where)
+    bling_ids = (
+        await session.execute(
+            text(
+                f"SELECT v.bling_id FROM {_VERIFICAR_MARGEM_TABLE} v "  # noqa: S608
+                f"WHERE {where_sql} "
+                "GROUP BY v.bling_id "
+                # Mais antigo primeiro: é quem está parado há mais tempo.
+                "ORDER BY MIN(v.data) ASC NULLS LAST, v.bling_id "
+                "LIMIT :limite"
+            ),
+            params,
+        )
+    ).scalars().all()
+
+    janela = int(datetime.now(UTC).timestamp()) // _BUSCAR_SALDO_JANELA_S
+    enfileirados = ja_na_fila = falhas = 0
+    if bling_ids:
+        pool = await get_arq_financials_pool()
+        for bling_id in bling_ids:
+            try:
+                job = await pool.enqueue_job(
+                    "sync_marketplace_financials_for_order_run",
+                    int(bling_id),
+                    _BUSCAR_SALDO_TRIGGER,
+                    _job_id=f"buscar-saldo:{int(bling_id)}:{janela}",
+                )
+            except Exception as e:  # noqa: BLE001
+                falhas += 1
+                logger.warning(
+                    "margem_buscar_saldo_enqueue_failed",
+                    bling_id=int(bling_id),
+                    error=str(e)[:300],
+                )
+                continue
+            if job is None:
+                ja_na_fila += 1
+            else:
+                enfileirados += 1
+
+    logger.info(
+        "margem_buscar_saldo",
+        user_id=str(user.id),
+        platform=platform,
+        conta=conta,
+        pedidos=len(bling_ids),
+        enfileirados=enfileirados,
+        ja_na_fila=ja_na_fila,
+        falhas=falhas,
+    )
+    return {
+        "pedidos": len(bling_ids),
+        "enfileirados": enfileirados,
+        "ja_na_fila": ja_na_fila,
+        "falhas": falhas,
+    }
 
 
 class MarketplaceStatusPatch(BaseModel):

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { AlertCircle, BookOpen, Check, ChevronLeft, ChevronRight, Download, Loader2, Megaphone, Pencil, RefreshCw, Search, X } from 'lucide-vue-next'
+import { AlertCircle, Banknote, BookOpen, Check, ChevronLeft, ChevronRight, Download, Loader2, Megaphone, Pencil, RefreshCw, Search, X } from 'lucide-vue-next'
 
 definePageMeta({
   middleware: ['permission'],
@@ -353,6 +353,54 @@ async function refreshAndLoad() {
   await reloadCurrent()
 }
 
+// "buscar saldo" (Vinicius, 28/09): manda a plataforma devolver AGORA o saldo
+// dos pedidos "aguardando saldo" (plataforma/conta da tela) — sem ele, depois
+// de uma chave vencida trocada, o financeiro só voltava 12 h depois. O saldo
+// chega pela fila de financeiro; ~2 min depois a tela reconstrói a margem.
+interface BuscarSaldoResponse {
+  pedidos: number
+  enfileirados: number
+  ja_na_fila: number
+  falhas: number
+}
+const BUSCAR_SALDO_RECARREGA_MS = 120_000
+const buscandoSaldo = ref(false)
+let buscarSaldoTimer: ReturnType<typeof setTimeout> | null = null
+
+async function buscarSaldo() {
+  buscandoSaldo.value = true
+  error.value = null
+  notice.value = null
+  try {
+    const params = new URLSearchParams()
+    if (platform.value !== 'all') params.set('platform', platform.value)
+    if (conta.value !== 'all') params.set('conta', conta.value)
+    const qs = params.toString()
+    const res = await api<BuscarSaldoResponse>(
+      `/api/margens/marketplace/buscar-saldo${qs ? `?${qs}` : ''}`,
+      { method: 'POST' },
+    )
+    if (!res.pedidos) {
+      notice.value = 'Nenhum pedido aguardando saldo da plataforma neste filtro.'
+      return
+    }
+    const partes = [`Buscando na plataforma o saldo de ${res.pedidos} pedido(s).`]
+    if (res.ja_na_fila) partes.push(`${res.ja_na_fila} já estava(m) na fila de um clique recente.`)
+    if (res.falhas) partes.push(`${res.falhas} não entrou(aram) na fila — tente de novo.`)
+    partes.push('A lista se atualiza sozinha em cerca de 2 minutos.')
+    notice.value = partes.join(' ')
+    if (buscarSaldoTimer) clearTimeout(buscarSaldoTimer)
+    buscarSaldoTimer = setTimeout(() => {
+      buscarSaldoTimer = null
+      void refreshAndLoad()
+    }, BUSCAR_SALDO_RECARREGA_MS)
+  } catch (e: any) {
+    error.value = apiError(e)
+  } finally {
+    buscandoSaldo.value = false
+  }
+}
+
 // Reconstrói o snapshot ao abrir a página E a cada 1 minuto enquanto ela fica
 // aberta (cadência pedida pelo Eduardo 2026-08-31: "tem que atualizar, de 1 em
 // 1 minuto"). A tabela já foi renderizada com o snapshot atual (await load()
@@ -418,6 +466,7 @@ onMounted(() => {
 })
 onBeforeUnmount(() => {
   if (autoRefreshTimer) clearInterval(autoRefreshTimer)
+  if (buscarSaldoTimer) clearTimeout(buscarSaldoTimer)
   document.removeEventListener('visibilitychange', onTabVisible)
 })
 
@@ -906,6 +955,17 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
               planilha
             </Button>
           </div>
+          <Button
+            v-if="canEdit"
+            size="sm"
+            variant="outline"
+            :disabled="buscandoSaldo"
+            title="Pede de novo à Shopee / Mercado Livre / TikTok o saldo dos pedidos que estão 'aguardando saldo da plataforma' (respeita a plataforma e a conta escolhidas nos filtros)"
+            @click="buscarSaldo"
+          >
+            <Banknote class="size-4 mr-1.5" :class="{ 'animate-pulse': buscandoSaldo }" />
+            buscar saldo
+          </Button>
           <Button size="sm" variant="outline" :disabled="loading" @click="refreshAndLoad">
             <RefreshCw class="size-4 mr-1.5" :class="{ 'animate-spin': loading }" />
             atualizar
