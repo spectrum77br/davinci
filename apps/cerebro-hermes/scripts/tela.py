@@ -31,6 +31,8 @@ import sys
 import time
 from pathlib import Path
 
+import hermes_erro
+
 AQUI = Path(__file__).resolve().parent
 PY = sys.executable
 HERMES = os.path.expanduser("~/.local/bin/hermes")
@@ -93,7 +95,10 @@ def _registrar(caso: dict, perfil: dict, saida: str) -> str:
     if m:
         acao = m.group(1).lower()
     m = re.search(r"RESUMO:\s*(.+)", saida, re.S)
-    resumo = (m.group(1).strip() if m else saida.strip()[-450:]).replace("\n", " ")
+    # 28/09 (297335): sem RESUMO e com erro do Hermes (limite do ChatGPT), o texto
+    # cru em inglês virava a decisão — vai a frase em português
+    resumo = m.group(1).strip() if m else (hermes_erro.falha(saida) or saida.strip()[-450:])
+    resumo = resumo.replace("\n", " ")
     resumo = f"Na tela ({perfil['nome']}): {resumo}"[:590]
     subprocess.run([PY, str(AQUI / "davinci_chamados.py"), "caso", "--id", caso["chamado_id"]],
                    capture_output=True, text=True, timeout=120)

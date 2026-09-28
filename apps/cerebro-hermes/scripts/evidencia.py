@@ -34,6 +34,8 @@ import sys
 import time
 from pathlib import Path
 
+import hermes_erro
+
 AQUI = Path(__file__).resolve().parent
 PY = sys.executable
 HERMES = os.path.expanduser("~/.local/bin/hermes")
@@ -210,6 +212,11 @@ def _tarefa(caso: dict, a: argparse.Namespace, pasta: Path, det: dict) -> tuple[
     escolhidas, motivo, saida_ia = _escolher(caso, candidatos, janela)
     det["escolhidas"] = [Path(e).name for e in escolhidas]
     det["ia"] = saida_ia[-1500:]
+    erro_ia = None if re.search(r"ESCOLHA:", saida_ia) else hermes_erro.falha(saida_ia)
+    if erro_ia:
+        # 28/09: sem cota no ChatGPT não é "nenhuma foto serve"
+        return "humano", f"Na tela ({perfil['nome']}): a Shopee pede evidência até " \
+                         f"{antes.get('prazo')}; nada foi enviado — {erro_ia}", []
     if not escolhidas:
         return "humano", f"Na tela ({perfil['nome']}): a Shopee pede evidência até " \
                          f"{antes.get('prazo')}; a IA olhou {len(candidatos)} foto(s) e não achou " \
