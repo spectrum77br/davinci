@@ -603,7 +603,7 @@ async function removerMortos() {
     pushToast({
       kind: 'success',
       title: `Removendo ${r.quantidade.toLocaleString('pt-BR')} vínculo(s) morto(s)`,
-      lines: ['Em segundo plano, aos poucos — pode levar alguns minutos. Eles já não recebem estoque.'],
+      lines: ['Em segundo plano — em instantes somem da lista. Eles já não recebem estoque.'],
     }, 10000)
     confirmandoRemoverMortos.value = false
     if (filtroVinculos.value === 'mortos') filtroVinculos.value = ''
