@@ -11,19 +11,21 @@ from typing import Any
 
 import httpx
 import structlog
-from sqlalchemy import delete, select
+from sqlalchemy import and_, delete, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
     BlingOrder,
     Integration,
     IntegrationPlatform,
+    Logistica,
     MarketplaceFinancialEvent,
     MarketplaceOrderFinancial,
     MarketplaceOrderFreightReconciliation,
     Store,
 )
 from app.security.cipher import decrypt_json, encrypt_json
+from app.services.bling_situacoes import SITUACAO_CANCELADO
 from app.services.marketplaces.amazon import AmazonClient
 from app.services.marketplaces.factory import client_for
 from app.services.marketplaces.ml import MercadoLivreClient
@@ -272,7 +274,9 @@ async def run_sync_marketplace_financials_for_bling_order(
     # _DEFER_MARGEM_REFRESH_EVENTS). Só o fetch MANUAL de 1 pedido refresca na
     # hora. Destrava a vazão da fila davinci_financials (estava presa no lock,
     # ~6/min; agora limitada só pela latência da API do marketplace).
-    if trigger == "manual":
+    # A varredura das vendas canceladas do ML também refresca: é um lote
+    # pequeno e o pedido pode estar fora da janela de 20 dias do rebuild.
+    if trigger in {"manual", ML_CANCELADOS_TRIGGER}:
         await _verificar_margem_refresh_silent(session, bling_id=bling_order_id)
 
     return {
@@ -489,6 +493,80 @@ async def run_ressuscitar_financials(
         ignorados=ignorados,
     )
     return {"vistos": len(rows), "revividos": revividos, "ignorados": ignorados}
+
+
+# Varredura das vendas do ML canceladas (28/09, pedido 296576). O financeiro de
+# um pedido já "posted" só é relido quando o pedido muda no Bling, e até a
+# correção de 28/09 a conta do ML ignorava o cancelamento — então o que já
+# estava gravado ficou com o líquido cheio. Esta varredura relê no ML:
+#   * quem foi gravado com a conta antiga (sem `raw.ml_cancelamento`);
+#   * e, no máximo 1×/dia, quem a leitura ainda viu de pé (o Bling ou a
+#     Logística cancelaram antes de o ML processar o estorno);
+# sempre que há sinal de cancelamento: pedido cancelado no ML, Cancelado no
+# Bling ou `order_status` cancelled na Logística.
+ML_CANCELADOS_TRIGGER = "ml_cancelado"
+ML_CANCELADOS_JANELA_DIAS = 60
+ML_CANCELADOS_RELEITURA_HORAS = 20
+
+
+async def run_ml_cancelados_resync(
+    session: AsyncSession,
+    *,
+    limit: int = 150,
+    limite_s: float | None = ESTEIRA_LIMITE_S,
+) -> dict[str, int]:
+    """Relê no ML o financeiro das vendas canceladas que a Margem ainda mostra
+    com valor cheio. O trigger próprio refresca o snapshot da Margem pedido a
+    pedido (inclusive fora da janela de 20 dias do rebuild)."""
+    now = datetime.now(UTC)
+    mof = MarketplaceOrderFinancial
+    ml_cancelamento = mof.raw["ml_cancelamento"]
+    stmt = (
+        select(mof.bling_id)
+        .where(mof.platform == IntegrationPlatform.ML)
+        .where(mof.bling_id.is_not(None))
+        .where(mof.created_at >= now - timedelta(days=ML_CANCELADOS_JANELA_DIAS))
+        .where(
+            or_(
+                ~mof.raw.has_key("ml_cancelamento"),
+                and_(
+                    func.coalesce(
+                        func.jsonb_array_length(ml_cancelamento["desfeitas"]), 0
+                    )
+                    == 0,
+                    or_(
+                        mof.fetched_at.is_(None),
+                        mof.fetched_at
+                        < now - timedelta(hours=ML_CANCELADOS_RELEITURA_HORAS),
+                    ),
+                ),
+            )
+        )
+        .where(
+            or_(
+                mof.raw["order"]["status"].astext == "cancelled",
+                exists().where(
+                    BlingOrder.bling_id == mof.bling_id,
+                    BlingOrder.situacao == str(SITUACAO_CANCELADO),
+                ),
+                exists().where(
+                    Logistica.pedido_bling == mof.pedido_bling,
+                    Logistica.meli_status["order_status"].astext == "cancelled",
+                ),
+            )
+        )
+        # Quem foi lido há mais tempo primeiro: o que acabou de ser relido
+        # vai pro fim da fila.
+        .order_by(mof.fetched_at.asc().nullsfirst(), mof.created_at.desc())
+        .limit(limit)
+    )
+    bling_ids = [int(b) for b in (await session.execute(stmt)).scalars().all()]
+    if not bling_ids:
+        logger.info("marketplace_financials_ml_cancelados", vistos=0)
+        return {"vistos": 0, "ok": 0, "error": 0}
+    return await _rodar_lote(
+        session, bling_ids, trigger=ML_CANCELADOS_TRIGGER, limite_s=limite_s
+    )
 
 
 def _tiktok_unsettled_order_map(pages: list[dict]) -> dict[str, dict]:
@@ -1146,6 +1224,40 @@ def _ml_order_item_skus(order: Any) -> set[str]:
     return skus
 
 
+def _ml_coberto_pelo_ml(order: Any) -> bool:
+    """`bpp_covered`: o ML pagou o comprador do próprio bolso — o estorno não
+    saiu do nosso dinheiro (285250; ver chamados_pagamento_ml)."""
+    payments = order.get("payments") if isinstance(order, dict) else None
+    return any(
+        isinstance(pg, dict) and pg.get("status_detail") == "bpp_covered"
+        for pg in (payments if isinstance(payments, list) else [])
+    )
+
+
+def _ml_estornado(order: Any) -> Decimal:
+    """Quanto dos pagamentos do pedido voltou ao comprador (fora `bpp_covered`)."""
+    total = Decimal("0")
+    payments = order.get("payments") if isinstance(order, dict) else None
+    for pg in payments if isinstance(payments, list) else []:
+        if not isinstance(pg, dict) or pg.get("status_detail") == "bpp_covered":
+            continue
+        valor = _money(pg.get("transaction_amount_refunded"))
+        if valor is not None and valor > 0:
+            total += valor
+    return total
+
+
+def _ml_venda_desfeita(order: Any) -> bool:
+    """Venda que não rende nada pra loja: cancelada no ML ou com o pagamento
+    estornado por inteiro — salvo quando o ML cobriu o estorno."""
+    if not isinstance(order, dict) or _ml_coberto_pelo_ml(order):
+        return False
+    if order.get("status") == "cancelled":
+        return True
+    total = _money(order.get("total_amount"))
+    return total is not None and total > 0 and _ml_estornado(order) >= total
+
+
 def _ml_order_commission(order: Any) -> Decimal:
     """sum(sale_fee * quantity) over an ML order's items."""
     commission = Decimal("0")
@@ -1395,6 +1507,44 @@ async def _fetch_ml(
         and billing["results"]
     )
     status = "posted" if has_billing else "estimated"
+
+    # --- Venda cancelada / estornada ------------------------------------
+    # O `total_amount` do pedido NÃO muda quando o ML cancela: a conta acima
+    # continuava dando o líquido cheio de uma venda que não existe mais
+    # (Vinicius, 28/09, pedido 296576 / 2000014989416509: cancelado, "no
+    # mercado livre ta sem valor nenhum", Margem com R$ 2.107,98 e 23,7%).
+    # Venda desfeita = o ML devolveu tudo ao comprador e desfez comissão e
+    # frete; a tela da venda fecha em zero (283344: "Cancelamento do produto
+    # −R$ 930,95, total líquido R$ 0,00"). Com o saldo zerado a Margem mostra
+    # o custo inteiro como prejuízo (−100%) — escolha do Vinicius.
+    # Estorno parcial num pedido que continua de pé sai do líquido pelo valor
+    # devolvido. Exceção: `bpp_covered` = o ML pagou o comprador do próprio
+    # bolso e o nosso dinheiro não saiu (ver chamados_pagamento_ml).
+    desfeitas = [o for o in matched_orders if _ml_venda_desfeita(o)]
+    estorno: Decimal | None = None
+    if gross is not None and matched_orders and len(desfeitas) == len(matched_orders):
+        commission = Decimal("0")
+        freight = Decimal("0")
+        discount = None
+        estorno = gross
+        net = Decimal("0.00")
+        # Nada mais a esperar do billing: o valor é final.
+        status = "posted"
+        has_billing = True
+    elif net is not None:
+        perdido = sum(
+            (
+                # Irmão do pack cancelado: sai o que ele somou (bruto − comissão).
+                (_money(o.get("total_amount")) or Decimal("0")) - _ml_order_commission(o)
+                if any(o is d for d in desfeitas)
+                else min(_ml_estornado(o), _money(o.get("total_amount")) or Decimal("0"))
+                for o in matched_orders
+            ),
+            Decimal("0"),
+        )
+        if perdido > 0:
+            estorno = perdido
+            net -= perdido
     # `frete_anuncio` for ML = sum of `freight_promised_amount` across items
     # (= list_cost * (1 - discount.rate) from /shipping_options/free, per item).
     # Same event name as Shopee so the view exposes both uniformly.
@@ -1424,6 +1574,13 @@ async def _fetch_ml(
                 currency=currency,
                 raw={"source": "orders/{id}/discounts amounts.seller (excl. offers)"},
             ),
+            _event(
+                "refund",
+                estorno,
+                negative=True,
+                currency=currency,
+                raw={"source": "ML order cancelled / payments.transaction_amount_refunded"},
+            ),
             _event("net_estimated", net, currency=currency, status=status),
         ]
     )
@@ -1434,8 +1591,16 @@ async def _fetch_ml(
         fee_amount=abs(commission),
         freight_amount=abs(freight) if freight is not None else None,
         discount_amount=discount,
+        refund_amount=estorno,
         net_amount=net,
         raw={
+            # Presente em toda leitura do ML feita depois da correção de 28/09:
+            # a varredura `run_ml_cancelados_resync` usa a ausência dela pra
+            # achar quem foi gravado com a conta antiga.
+            "ml_cancelamento": {
+                "desfeitas": [_text_value(o.get("id")) for o in desfeitas],
+                "estorno": str(estorno) if estorno is not None else None,
+            },
             "order": order,
             "billing": billing,
             "billing_error": billing_error,

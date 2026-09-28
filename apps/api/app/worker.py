@@ -2205,6 +2205,16 @@ async def marketplace_financials_ressuscitar(ctx: dict) -> None:
     logger.info("marketplace_financials_ressuscitar_done", **result)
 
 
+async def marketplace_financials_ml_cancelados(ctx: dict) -> None:
+    """Relê no ML as vendas canceladas que a Margem ainda mostrava com o
+    líquido cheio (28/09, pedido 296576). Ver run_ml_cancelados_resync."""
+    from app.services.marketplace_financials import run_ml_cancelados_resync
+
+    async with session_scope() as s:
+        result = await run_ml_cancelados_resync(s, limit=150)
+    logger.info("marketplace_financials_ml_cancelados_done", **result)
+
+
 async def tiktok_unsettled_sweep(ctx: dict) -> None:
     """Estimativa oficial pré-liquidação do TikTok (a mesma da Central do
     Vendedor) para os financeiros ainda sem settlement real — 1-2 chamadas
@@ -3770,6 +3780,16 @@ class WorkerSettings:
             run_at_startup=True,
             timeout=300,
         ),
+        # Vendas do ML canceladas com o líquido cheio gravado (ver a função).
+        # De 3 em 3 h, no :27 — longe do retry (:10/:40), da esteira lenta
+        # (:05/:20/:35/:50) e do snapshot (:15/:45).
+        cron(
+            marketplace_financials_ml_cancelados,
+            hour={0, 3, 6, 9, 12, 15, 18, 21},
+            minute=27,
+            run_at_startup=False,
+            timeout=900,
+        ),
         # A cada 10min ("pegar isso estantaneo", 01/09): o TikTok libera a
         # estimativa ~30-60min após a venda (caso 293707, medido ao vivo) e o
         # tick de 30min somava até mais meia hora em cima. 10min × 8 lojas ×
@@ -4306,6 +4326,7 @@ __all__ = [
     "tuta_devolucoes_tick",
     "marketplace_financials_esteira_lenta",
     "marketplace_financials_ressuscitar",
+    "marketplace_financials_ml_cancelados",
     "tiktok_unsettled_sweep",
     "tiktok_unsettled_fast_lane",
     "refunds_freight_backfill",
