@@ -25,11 +25,12 @@ import asyncio
 from uuid import UUID
 
 import structlog
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Integration, IntegrationPlatform, LinkSyncStatus, Product, ProductLink
 from app.services import bling_product_create
+from app.services.marketplaces.bling import BlingCloudflareError
 
 logger = structlog.get_logger()
 
@@ -38,6 +39,11 @@ _POR_PAGINA = 100
 _PAGINAS_RECENTES = 2
 # Pausa entre criações: cada uma faz 1 GET /produtos/{id} (limite ~3 req/s).
 _PAUSA = 0.4
+# Lista inteira: ~25 páginas. Depois de cada deploy o product_bling_cost_sync
+# (run_at_startup) também lista tudo e o Bling devolve 429 — a 1ª importação de
+# 29/09 caiu assim. Pausa entre páginas e nova tentativa por página.
+_PAUSA_PAGINA = 1.5
+_TENTATIVAS_PAGINA = 6
 
 
 async def _integracao_bling(session: AsyncSession) -> Integration | None:
@@ -48,22 +54,35 @@ async def _integracao_bling(session: AsyncSession) -> Integration | None:
     ).scalar_one_or_none()
 
 
-async def _candidatos(client, *, completo: bool) -> list[dict]:
-    if completo:
-        return [p async for p in client.list_products()]
+async def _pagina(client, pagina: int, *, recentes: bool, pausa: float) -> list[dict]:
+    params = {"pagina": pagina, "limite": _POR_PAGINA}
+    if recentes:
+        params["criterio"] = 1  # "últimos incluídos", do mais novo para o mais antigo
+    for tentativa in range(_TENTATIVAS_PAGINA):
+        try:
+            r = await client._request("GET", "/produtos", params=params)
+            r.raise_for_status()
+            return r.json().get("data") or []
+        except BlingCloudflareError:
+            if tentativa == _TENTATIVAS_PAGINA - 1:
+                raise
+            await asyncio.sleep(pausa * 3 * (tentativa + 1))
+    return []
+
+
+async def _candidatos(client, *, completo: bool, pausa: float = _PAUSA_PAGINA) -> list[dict]:
     out: list[dict] = []
-    for pagina in range(1, _PAGINAS_RECENTES + 1):
-        r = await client._request(
-            "GET",
-            "/produtos",
-            params={"pagina": pagina, "limite": _POR_PAGINA, "criterio": 1},
-        )
-        r.raise_for_status()
-        itens = r.json().get("data") or []
+    pagina = 1
+    while True:
+        itens = await _pagina(client, pagina, recentes=not completo, pausa=pausa)
         out.extend(itens)
         if len(itens) < _POR_PAGINA:
-            break
-    return out
+            return out
+        if not completo and pagina >= _PAGINAS_RECENTES:
+            return out
+        pagina += 1
+        if pausa:
+            await asyncio.sleep(pausa)
 
 
 async def _garantir_vinculo_bling(
@@ -96,11 +115,36 @@ async def _garantir_vinculo_bling(
     await session.commit()
 
 
+async def _reativar(session: AsyncSession, bling_id: int, codigo: str) -> int:
+    """Ativo no Bling e inativo aqui (29/09: dg078.pi+a020.pi estava 'I') — a
+    busca de Devoluções e as telas só mostram ativo. O Bling é a fonte."""
+    prod = (
+        await session.execute(
+            select(Product).where(Product.bling_product_id == bling_id).limit(1)
+        )
+    ).scalar_one_or_none()
+    if prod is None:
+        prod = (
+            await session.execute(
+                select(Product).where(func.lower(Product.sku) == codigo.lower()).limit(1)
+            )
+        ).scalar_one_or_none()
+    if prod is None or (prod.situacao or "A") == "A":
+        return 0
+    logger.info("produto_reativado_pelo_bling", sku=prod.sku, antes=prod.situacao)
+    prod.situacao = "A"
+    await session.commit()
+    return 1
+
+
 async def importar_produtos_novos(
     session: AsyncSession, *, completo: bool = False, pausa: float = _PAUSA
 ) -> dict:
     """Cria no DaVinci os produtos ativos do Bling que ainda não existem aqui."""
-    resumo = {"lidos": 0, "faltando": 0, "criados": 0, "falhas": 0, "completo": completo}
+    resumo = {
+        "lidos": 0, "faltando": 0, "criados": 0, "falhas": 0, "reativados": 0,
+        "completo": completo,
+    }
     integ = await _integracao_bling(session)
     if integ is None:
         return {**resumo, "erro": "sem_integracao_bling"}
@@ -108,7 +152,7 @@ async def importar_produtos_novos(
     if client is None:
         return {**resumo, "erro": "sem_integracao_bling"}
 
-    candidatos = await _candidatos(client, completo=completo)
+    candidatos = await _candidatos(client, completo=completo, pausa=_PAUSA_PAGINA if pausa else 0)
     resumo["lidos"] = len(candidatos)
     ids = {
         r[0]
@@ -130,6 +174,8 @@ async def importar_produtos_novos(
         if not codigo or situacao not in ("A", "ATIVO", ""):
             continue
         if bling_id in ids or codigo.lower() in skus:
+            if completo:
+                resumo["reativados"] += await _reativar(session, bling_id, codigo)
             continue
         resumo["faltando"] += 1
         res = await bling_product_create.run_auto_create_product_from_bling(
@@ -155,6 +201,6 @@ async def importar_produtos_novos(
         if pausa:
             await asyncio.sleep(pausa)
 
-    if resumo["criados"] or resumo["falhas"]:
+    if resumo["criados"] or resumo["falhas"] or resumo["reativados"]:
         logger.info("produtos_novos_bling", **resumo, skus=criados[:50])
     return resumo

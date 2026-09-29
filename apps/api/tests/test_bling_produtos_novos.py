@@ -132,3 +132,40 @@ def test_agendado_fora_dos_minutos_de_pico():
     crons = {c.name: c for c in WorkerSettings.cron_jobs}
     assert crons["cron:produtos_novos_bling_tick"].minute == {7, 22, 37, 52}
     assert crons["cron:produtos_novos_bling_completo"].hour == 15
+
+
+@pytest.mark.asyncio
+async def test_completo_reativa_produto_ativo_no_bling(db: AsyncSession, cenario):
+    """dg078.pi+a020.pi (29/09): ativo no Bling, 'I' no DaVinci — sumia das telas."""
+    dono, montar = cenario
+    db.add(Product(user_id=dono.id, sku="dg078.pi+a020.pi", name="C3 + Óculos", stock=70,
+                   bling_product_id=555, situacao="I"))
+    await db.commit()
+    montar([{"id": 555, "codigo": "dg078.pi+a020.pi", "nome": "C3 + Óculos", "situacao": "A"}])
+    resumo = await novos.importar_produtos_novos(db, completo=True, pausa=0)
+    assert resumo["reativados"] == 1 and resumo["criados"] == 0
+    prod = (await db.execute(select(Product).where(Product.bling_product_id == 555))).scalar_one()
+    await db.refresh(prod)
+    assert prod.situacao == "A"
+
+
+@pytest.mark.asyncio
+async def test_pagina_recusada_pelo_bling_e_tentada_de_novo(db: AsyncSession, cenario):
+    """A 1ª importação de 29/09 caiu num 429 da lista inteira (o custo diário
+    listava ao mesmo tempo)."""
+    from app.services.marketplaces.bling import BlingCloudflareError
+
+    _dono, montar = cenario
+    bling = montar([{"id": 666, "codigo": "dg1035.pi", "nome": "C2", "situacao": "A"}])
+    original = bling._request
+    falhas = {"n": 2}
+
+    async def _com_429(metodo, caminho, params=None, **kw):
+        if falhas["n"]:
+            falhas["n"] -= 1
+            raise BlingCloudflareError("status=429 cf_html=False")
+        return await original(metodo, caminho, params=params, **kw)
+
+    bling._request = _com_429
+    resumo = await novos.importar_produtos_novos(db, completo=True, pausa=0)  # pausa 0: sem espera
+    assert resumo["criados"] == 1
