@@ -107,7 +107,7 @@ def _registrar(caso: dict, perfil: dict, saida: str) -> str:
     m = re.search(r"RESUMO:\s*(.+)", saida, re.S)
     # 28/09 (297335): sem RESUMO e com erro do Hermes (limite do ChatGPT), o texto
     # cru em inglês virava a decisão — vai a frase em português
-    resumo = m.group(1).strip() if m else (hermes_erro.falha(saida) or saida.strip()[-450:])
+    resumo = m.group(1).strip() if m else (hermes_erro.falha(saida, durante_tarefa=True) or saida.strip()[-450:])
     resumo = resumo.replace("\n", " ")
     resumo = f"Na tela ({perfil['nome']}): {resumo}"[:590]
     subprocess.run([PY, str(AQUI / "davinci_chamados.py"), "caso", "--id", caso["chamado_id"]],
