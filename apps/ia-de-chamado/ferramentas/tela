@@ -1,0 +1,4 @@
+#!/bin/sh
+# ferramentas/tela <perfil> <comando> [args] — ver tela.mjs
+cd "$(dirname "$0")/.." || exit 1
+exec node ferramentas/tela.mjs "$@"

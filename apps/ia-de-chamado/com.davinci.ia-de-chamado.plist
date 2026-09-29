@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Despertador da IA de Chamado: roda o rodada.sh a cada 10 minutos.
+     Instalar: cp para ~/Library/LaunchAgents/ e launchctl load (ver LEIAME.md). -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.davinci.ia-de-chamado</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/sh</string>
+    <string>/Users/santiagogeral/DaVinci/ia-de-chamado/rodada.sh</string>
+  </array>
+  <key>StartInterval</key>
+  <integer>600</integer>
+  <key>RunAtLoad</key>
+  <false/>
+  <key>StandardOutPath</key>
+  <string>/Users/santiagogeral/DaVinci/ia-de-chamado/registros/despertador.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/santiagogeral/DaVinci/ia-de-chamado/registros/despertador.log</string>
+</dict>
+</plist>
