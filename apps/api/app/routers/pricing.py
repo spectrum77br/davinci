@@ -69,6 +69,8 @@ from app.schemas.pricing import (
 )
 from app.schemas.products import JobCreatedOut
 from app.security.cipher import decrypt, encrypt
+from app.services.mega_fotos import MegaError, sidecar_request
+from app.services.mega_midias import RAIZ_POR_DEPARTAMENTO
 from app.services.pricing.audit import (
     match_pricing_to_product_keys,
     scan_missing_skus,
@@ -563,28 +565,60 @@ async def patch_product(
     return _product_out(row, leaves_by_id)
 
 
-@router.delete(
-    "/products/{product_id}", status_code=status.HTTP_204_NO_CONTENT
-)
+@router.delete("/products/{product_id}")
 async def delete_product(
     product_id: UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[
         User, Depends(require_permission("tabela_precos_produtos", "delete"))
     ],
-) -> None:
-    res = await session.execute(
-        delete(PricingProduct).where(
-            and_(
-                PricingProduct.id == product_id,
-                user_scope(PricingProduct, user),
+) -> dict:
+    """Exclui o produto e manda a pasta dele no MEGA para a LIXEIRA do MEGA.
+
+    Eduardo, 29/09/2026: "quando eu remover um produto, ele tem que remover do
+    MEGA também". Lixeira, não exclusão definitiva — recupera pelo site do MEGA.
+    A pasta FICA quando outra linha ainda usa (as variações de memória dividem
+    a pasta: S7 16.128 e S7 32.256) ou quando está fora de /Celular, /Malas e
+    /uranyx. O produto sai do banco ANTES: MEGA fora do ar não pode impedir a
+    exclusão — a resposta diz o que aconteceu com a pasta, e a tela mostra.
+    """
+    row = (
+        await session.execute(
+            select(PricingProduct).where(
+                and_(
+                    PricingProduct.id == product_id,
+                    user_scope(PricingProduct, user),
+                )
             )
         )
-    )
-    if res.rowcount == 0:
+    ).scalar_one_or_none()
+    if row is None:
         raise HTTPException(404, detail={"code": "product_not_found"})
+    pasta = row.fotos_path
+    sku = row.sku
+    await session.execute(delete(PricingProduct).where(PricingProduct.id == product_id))
     await session.commit()
-    return None
+
+    out: dict = {"pasta": pasta, "mega": "sem_pasta"}
+    if not (pasta or "").strip():
+        return out
+    # Quem mais usa a pasta — de QUALQUER usuário: a pasta é uma só no MEGA.
+    outros = (
+        await session.execute(
+            select(PricingProduct.sku).where(PricingProduct.fotos_path == pasta).limit(10)
+        )
+    ).scalars().all()
+    if outros:
+        return {**out, "mega": "mantida", "usada_por": list(outros)}
+    if not any(pasta.startswith(f"{r}/") for r in RAIZ_POR_DEPARTAMENTO.values()):
+        return {**out, "mega": "fora_das_raizes"}
+    try:
+        res = await sidecar_request("POST", "/lixeira", json={"path": pasta}, timeout=180.0)
+    except MegaError as exc:
+        logger.warning("produto_excluido_pasta_mega_falhou", sku=sku, pasta=pasta, erro=exc.message)
+        return {**out, "mega": "erro", "erro": exc.message}
+    logger.info("produto_excluido_pasta_na_lixeira", sku=sku, pasta=pasta, user_id=str(user.id))
+    return {**out, "mega": "lixeira", "lixeira": res.get("lixeira")}
 
 
 @router.post(

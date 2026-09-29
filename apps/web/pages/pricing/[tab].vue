@@ -1392,11 +1392,34 @@ async function toggleActive(p: PricingProduct) {
   }
 }
 
+// Excluir o produto leva a pasta dele no MEGA para a LIXEIRA do MEGA
+// (Eduardo 29/09: "quando eu remover um produto, ele tem que remover do MEGA
+// também") — menos quando outra linha usa a mesma pasta. A confirmação diz
+// antes o que vai acontecer; a API decide de novo (outras linhas podem não
+// estar carregadas nesta tela) e o aviso final conta o que aconteceu.
 async function deleteProduct(p: PricingProduct) {
-  if (!confirm(`Excluir produto "${p.sku}"?`)) return
+  const pasta = (p.fotos_path || '').trim()
+  const irmas = pasta ? products.value.filter((x) => x.id !== p.id && x.fotos_path === p.fotos_path) : []
+  let aviso = ''
+  if (pasta && irmas.length) {
+    aviso = `\n\nA pasta no MEGA (${pasta}) NÃO será apagada: ela também é usada por ${irmas.map((x) => x.sku).join(', ')}.`
+  } else if (pasta) {
+    const itens = [
+      p.fotos_count ? `${p.fotos_count} foto(s)` : '',
+      p.videos_count ? `${p.videos_count} vídeo(s)` : '',
+      p.embalagens_count ? `${p.embalagens_count} embalagem(ns)` : '',
+    ].filter(Boolean).join(', ')
+    aviso = `\n\nA pasta dele no MEGA (${pasta}${itens ? ` — ${itens}` : ''}) vai junto para a LIXEIRA do MEGA. Se foi engano, dá para recuperar pelo site do MEGA.`
+  }
+  if (!confirm(`Excluir produto "${p.sku}"?${aviso}`)) return
   try {
-    await api(`/api/pricing/products/${p.id}`, { method: 'DELETE' })
+    const res = await api<any>(`/api/pricing/products/${p.id}`, { method: 'DELETE' })
     products.value = products.value.filter((x) => x.id !== p.id)
+    const mega = res?.mega
+    if (mega === 'lixeira') toast.success('Produto excluído', `A pasta ${pasta} foi para a lixeira do MEGA`)
+    else if (mega === 'mantida') toast.info('Produto excluído', `A pasta ${pasta} continua no MEGA — usada por ${(res?.usada_por || []).join(', ')}`)
+    else if (mega === 'erro') toast.warning('Produto excluído, mas a pasta continua no MEGA', `O MEGA não respondeu (${res?.erro || 'fora do ar'}). Apague ${pasta} pelo site do MEGA.`)
+    else if (mega === 'fora_das_raizes') toast.info('Produto excluído', `A pasta ${pasta} fica no MEGA (fora de Celular/Malas/uranyx)`)
   } catch (e: any) {
     productsErr.value = e?.data?.detail?.code ?? 'delete_failed'
   }

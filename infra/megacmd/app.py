@@ -801,3 +801,46 @@ def upload(
         if rc != 0:
             raise HTTPException(status_code=502, detail=out[-400:] or "upload failed")
     return {"uploaded": len(paths), "dest": dest}
+
+
+# ── lixeira: produto excluído na Tabela de Preços leva a pasta junto ──
+#
+# Eduardo, 29/09/2026: "quando eu remover um produto, ele tem que remover do
+# MEGA também". Vai para a LIXEIRA do MEGA (//bin), não é apagado: `mega-rm`
+# não tem volta, e a lixeira deixa recuperar pelo site se foi engano. O nome
+# ganha um carimbo — sem ele, uma 2ª pasta de mesmo nome entraria DENTRO da
+# 1ª ("se o destino existe e é pasta, a origem vai para dentro dela").
+_LS_PASTA_RE = re.compile(r"^d\S*\s+\S+\s+\S+\s+\S+\s+\S+\s")
+
+
+class LixeiraIn(BaseModel):
+    path: str
+
+
+@app.post("/lixeira")
+def lixeira(body: LixeiraIn, _: None = Depends(check_token)) -> dict:
+    path = "/" + body.path.strip().strip("/")
+    partes = [p for p in path.split("/") if p]
+    # Nunca uma raiz (/Celular, /Malas…) nem a conta: pasta de produto fica
+    # no mínimo no 2º nível.
+    if (
+        len(partes) < 2
+        or any(c in path for c in "*?")
+        or any(p.strip() in (".", "..") for p in partes)
+    ):
+        raise HTTPException(400, "caminho inválido")
+    pai, nome = path.rsplit("/", 1)
+    rc, out = run(["mega-ls", "-l", pai or "/"], timeout=60)
+    e_pasta = rc == 0 and any(
+        (m := _LS_PASTA_RE.match(ln)) and ln[m.end():].rstrip() == nome.rstrip()
+        for ln in out.splitlines()
+    )
+    if not e_pasta:
+        raise HTTPException(404, "pasta não encontrada")
+    carimbo = time.strftime("%d-%m-%Y %Hh%Mm%Ss", time.gmtime())
+    destino = f"//bin/{nome.strip()} (excluído no DaVinci {carimbo} UTC)"
+    rc, out = run(["mega-mv", path, destino], timeout=180)
+    if rc != 0:
+        raise HTTPException(502, out[-400:] or "não moveu para a lixeira")
+    return {"ok": True, "lixeira": destino}
+
