@@ -223,7 +223,8 @@ class RoboHeartbeatIn(BaseModel):
 
 class RoboComandoOut(BaseModel):
     id: UUID
-    logistica_id: UUID
+    # Vazio em tarefa que não é de um pedido da Logística (Tuta, senha TikTok).
+    logistica_id: UUID | None = None
     acao: str
     payload: dict = Field(default_factory=dict)
     attempts: int = 0

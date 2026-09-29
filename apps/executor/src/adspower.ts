@@ -86,6 +86,19 @@ export async function list(): Promise<AdsPowerProfile[]> {
   return items.map((x) => ({ user_id: x.user_id, name: x.name }));
 }
 
+/** Todos os profiles, página por página (o Mac Santiago tem ~140 e o
+ *  `list()` só lê a primeira página de 100). */
+export async function listAll(): Promise<AdsPowerProfile[]> {
+  const out: AdsPowerProfile[] = [];
+  for (let pagina = 1; pagina <= 20; pagina++) {
+    const data = await apiGet(`/api/v1/user/list?page=${pagina}&page_size=100`);
+    const items = (data?.list || []) as any[];
+    out.push(...items.map((x) => ({ user_id: x.user_id, name: x.name })));
+    if (items.length < 100) break;
+  }
+  return out;
+}
+
 /** A Local API está de pé? (sem o rate-limit: é só um "alô"). */
 async function responde(): Promise<boolean> {
   try {

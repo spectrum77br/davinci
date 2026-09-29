@@ -29,10 +29,11 @@ import * as shopee from "./shopee";
 import * as flashsale from "./flashsale";
 import * as melhorenvio from "./melhorenvio";
 import * as tuta from "./tuta";
+import * as tiktok from "./tiktok";
 import * as davinci from "./davinci";
 import type { LeasedCommand, LeasedLogisticaCommand } from "./davinci";
 
-const VERSION = "1.1.0";
+const VERSION = "1.2.0";
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 let ticking = false;
@@ -185,9 +186,31 @@ async function processTutaCommand(cmd: LeasedLogisticaCommand): Promise<void> {
   }
 }
 
+/** Pedido de senha ao comprador no chat da TikTok (devolução "Bloqueado"):
+ *  abre o perfil da loja SÓ se estiver fechado, escreve no chat do pedido e
+ *  fecha. Modo seco enquanto TIKTOK_CALIBRATED != true. */
+async function processTiktokCommand(cmd: LeasedLogisticaCommand): Promise<void> {
+  const p = (cmd.payload || {}) as tiktok.PedidoSenha;
+  let r: tiktok.Resultado;
+  try {
+    r = await tiktok.pedirSenha(cmd.id, p);
+  } catch (err: any) {
+    r = { ok: false, motivo: "erro", detalhe: String(err?.message || err).slice(0, 300) };
+  }
+  await davinci.reportLogistica(cmd.id, r.ok ? "done" : "failed", JSON.stringify(r));
+  const oque = r.ok ? (r.ja_enviada ? "já estava no chat" : `enviada${r.com_foto ? " + foto" : ""}`) : r.motivo;
+  const msg = `TikTok senha ${p.pedido_bling || "?"} (${p.conta || "?"}) → ${oque}${r.detalhe ? ` — ${r.detalhe}` : ""}`;
+  if (r.ok || r.seco) log.info(msg);
+  else log.warn(msg);
+}
+
 async function processLogisticaCommand(cmd: LeasedLogisticaCommand): Promise<void> {
   if (cmd.acao === "tuta_devolucoes") {
     await processTutaCommand(cmd);
+    return;
+  }
+  if (cmd.acao === "tiktok_senha") {
+    await processTiktokCommand(cmd);
     return;
   }
   if (cmd.acao !== "melhorenvio_suspender") {
@@ -260,6 +283,7 @@ function acoesLogistica(): string[] {
   const acoes: string[] = [];
   if (cfg.filas.has("melhorenvio")) acoes.push("melhorenvio_suspender");
   if (cfg.filas.has("tuta")) acoes.push("tuta_devolucoes");
+  if (cfg.filas.has("tiktok")) acoes.push("tiktok_senha");
   return acoes;
 }
 
@@ -338,6 +362,7 @@ async function sendHeartbeat(): Promise<void> {
           filas: [...cfg.filas],
           melhorenvio_calibrated: cfg.melhorEnvioCalibrated,
           perfil_melhorenvio: Boolean(cfg.melhorEnvioAdspowerUserId),
+          tiktok_calibrated: cfg.filas.has("tiktok") ? cfg.tiktokCalibrated : undefined,
         },
       });
     } catch (err: any) {
@@ -346,14 +371,33 @@ async function sendHeartbeat(): Promise<void> {
   }
 }
 
+/** `npm start -- --teste-tiktok "TikTok Mini" 585945262750598710`: roda o
+ *  pedido de senha de UM pedido em modo seco (nunca envia), sem o DaVinci —
+ *  pra conferir perfil, login e tela de uma loja. */
+async function testeTiktok(conta: string, pedido: string): Promise<void> {
+  const r = await tiktok.pedirSenha("teste", {
+    conta,
+    pedido_tiktok: pedido,
+    texto: "(teste — nada é enviado)",
+    texto_loja: "(teste da loja {LOJA} — nada é enviado)",
+    commit: false,
+  });
+  console.log(JSON.stringify(r, null, 1));
+}
+
 async function main(): Promise<void> {
+  const i = process.argv.indexOf("--teste-tiktok");
+  if (i >= 0) {
+    await testeTiktok(process.argv[i + 1] || "", process.argv[i + 2] || "");
+    return;
+  }
   log.info(
     `davinci-executor v${VERSION} — api=${cfg.davinciApiUrl} agent=${cfg.agentName} ` +
       `filas=${[...cfg.filas].join(",") || "(nenhuma)"}` +
       (cfg.filas.has("shopee") ? ` calibrated=${cfg.calibrated} mode=${cfg.defaultMode}` : "")
   );
   if (!cfg.filas.size) {
-    log.error("EXECUTOR_FILAS sem nenhuma fila válida (shopee, melhorenvio, tuta) — nada a fazer.");
+    log.error("EXECUTOR_FILAS sem nenhuma fila válida (shopee, melhorenvio, tuta, tiktok) — nada a fazer.");
   }
   if (!cfg.agentToken) {
     log.error("MARKETING_AGENT_TOKEN vazio — o DaVinci vai recusar com 401. Preencha o .env.");
@@ -366,6 +410,13 @@ async function main(): Promise<void> {
       cfg.melhorEnvioCalibrated
         ? "Melhor Envio: MELHORENVIO_CALIBRATED=true — o robô clica de verdade."
         : "Melhor Envio: MODO SECO — acha o envio e para antes de clicar em Suspender entrega."
+    );
+  }
+  if (cfg.filas.has("tiktok")) {
+    log.info(
+      cfg.tiktokCalibrated
+        ? "TikTok: TIKTOK_CALIBRATED=true — o robô pede a senha no chat de verdade."
+        : "TikTok: MODO SECO — abre o chat do pedido, confere a conversa e não envia."
     );
   }
   if (cfg.filas.has("shopee") && !cfg.calibrated) {

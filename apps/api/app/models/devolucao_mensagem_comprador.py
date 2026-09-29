@@ -21,8 +21,9 @@ class DevolucaoMensagemComprador(Base, TimestampMixin):
     o comprador vem do próprio pedido (`buyer_user_id`). No Mercado Livre a
     devolução cancela o pedido e o ML fecha o chat ("blocked_by_cancelled_order",
     10 de 10 casos conferidos em 22/09); na TikTok falta o escopo
-    `seller.customer_service` (401 nas 8 lojas). Por isso a linha nasce com
-    `plataforma` e só vira envio quando há canal.
+    `seller.customer_service` (401 nas 8 lojas), então desde 29/09 quem escreve
+    é o robô do Mac Santiago pela tela (tarefa `tiktok_senha`). Por isso a
+    linha nasce com `plataforma` e só vira envio quando há canal.
 
     Uma linha por (pedido, conta, evento) — a UNIQUE é o que segura o kit (3
     linhas de devolução do mesmo pedido) e o gancho do router, que roda em todo

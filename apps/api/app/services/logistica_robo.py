@@ -24,6 +24,12 @@ dormindo) e vai pra um executor só dele no Mac Santiago. Cada executor diz no
 lease o que faz (`acoes`); a suspensão é EXCLUSIVA — só vai pra quem pediu por
 ela, então o executor antigo (que não manda `acoes`) para de pegá-la sem
 ninguém mexer nele. O resto da fila (a leitura do Tuta) segue como estava.
+
+Vinicius, 29/09/2026: o pedido de senha ao comprador da TikTok (devolução
+"Bloqueado") também passa por aqui — a API da TikTok não deixa a loja falar
+com o comprador (falta o escopo de atendimento), então o executor do Mac
+Santiago escreve no chat da loja pelo AdsPower (`tiktok_senha`, exclusiva).
+Quem cria e fecha essa tarefa é `devolucao_mensagem_comprador`.
 """
 
 from __future__ import annotations
@@ -43,6 +49,9 @@ from app.services import logistica_amazon_canal, logistica_track, tuta_devolucoe
 logger = structlog.get_logger()
 
 ACAO_SUSPENDER = "melhorenvio_suspender"
+# Pedido de senha ao comprador no chat da TikTok (não é de um pedido da
+# Logística: `logistica_id` vazio, o vínculo é `payload.linha_id`).
+ACAO_TIKTOK_SENHA = "tiktok_senha"
 
 STATUS_PENDENTE = "pendente"
 STATUS_SOLICITADA = "solicitada"
@@ -52,7 +61,7 @@ STATUS_FALHOU = "falhou"
 LEASE_STALE = timedelta(minutes=30)
 
 # Só vão pra executor que as pediu pelo nome no lease (ver docstring).
-ACOES_EXCLUSIVAS = frozenset({ACAO_SUSPENDER})
+ACOES_EXCLUSIVAS = frozenset({ACAO_SUSPENDER, ACAO_TIKTOK_SENHA})
 
 
 class RoboError(Exception):
@@ -144,7 +153,9 @@ async def lease(
         out.append(
             {
                 "id": str(cmd.id),
-                "logistica_id": str(cmd.logistica_id),
+                # Tarefa que não é de um pedido (Tuta, senha da TikTok) vem sem
+                # vínculo — str(None) virava "None" e derrubava o lease inteiro.
+                "logistica_id": str(cmd.logistica_id) if cmd.logistica_id else None,
                 "acao": cmd.acao,
                 "payload": cmd.payload or {},
                 "attempts": cmd.attempts,
@@ -212,6 +223,13 @@ async def registrar_resultado(
     if cmd.acao == tuta_devolucoes.ACAO:
         await session.commit()
         await tuta_devolucoes.entregar_resultado(session, cmd.result)
+        logger.info("logistica_robo_resultado", comando=str(comando_id), status=cmd.status)
+        return cmd
+    if cmd.acao == ACAO_TIKTOK_SENHA:
+        from app.services import devolucao_mensagem_comprador
+
+        await devolucao_mensagem_comprador.registrar_resultado_robo(session, cmd, ok=ok)
+        await session.commit()
         logger.info("logistica_robo_resultado", comando=str(comando_id), status=cmd.status)
         return cmd
     if row is not None and cmd.acao == ACAO_SUSPENDER:

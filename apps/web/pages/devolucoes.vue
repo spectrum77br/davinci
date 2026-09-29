@@ -263,9 +263,11 @@ function mlStatusLabel(row: DevolutionRow): string {
   }
   return ''
 }
-// Mensagem ao comprador pedindo a senha (Vinicius 22/09). Só a Shopee tem
-// canal: no ML a devolução cancela o pedido e o chat fecha; na TikTok falta o
-// escopo de atendimento. Por isso `sem_canal` é um estado legítimo, e não erro.
+// Mensagem ao comprador pedindo a senha (Vinicius 22/09). Shopee pela API e,
+// desde 29/09, TikTok pelo robô do Mac Santiago (escreve no chat pela tela).
+// No ML a devolução cancela o pedido e o chat fecha; a Amazon só tem e-mail.
+// Por isso `sem_canal` é um estado legítimo, e não erro. Pendente com `erro` =
+// o último recado do robô (loja sem login, perfil em uso…) — segue na fila.
 function senhaLabel(row: DevolutionRow): string {
   const st = row.senha_status
   if (!st) return ''
@@ -274,7 +276,7 @@ function senhaLabel(row: DevolutionRow): string {
     const quando = d ? ` ${d.toLocaleDateString('pt-BR')} ${d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}` : ''
     return `Senha pedida ao cliente${quando}`
   }
-  if (st === 'pendente') return 'Senha: pedido na fila'
+  if (st === 'pendente') return row.senha_erro ? `Senha: na fila — ${row.senha_erro}` : 'Senha: pedido na fila'
   if (st === 'falhou') {
     // A Shopee só deixa a loja puxar conversa se o comprador falou com ela nos
     // últimos 7 dias, comprou nos últimos 30, ou tem devolução em aberto.

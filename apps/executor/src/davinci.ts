@@ -106,6 +106,22 @@ export async function reportLogistica(
   });
 }
 
+/** Foto do produto da tarefa `tiktok_senha` (o servidor só entrega a da
+ *  tarefa que está com este executor). null = a tarefa não tem foto. */
+export async function baixarFotoLogistica(
+  commandId: string
+): Promise<{ dados: Buffer; tipo: string } | null> {
+  const res = await fetch(`${cfg.davinciApiUrl}/api/logistica/agent/comandos/${commandId}/foto`, {
+    headers: { "X-Agent-Token": cfg.agentToken },
+  });
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`DaVinci foto HTTP ${res.status}`);
+  return {
+    dados: Buffer.from(await res.arrayBuffer()),
+    tipo: res.headers.get("content-type") || "image/jpeg",
+  };
+}
+
 /** Sinal de vida — alimenta o badge ONLINE/OFFLINE + saúde do AdsPower no
  *  dashboard (o DaVinci considera ONLINE quando o último heartbeat < 120s). */
 export async function heartbeat(payload: HeartbeatPayload): Promise<void> {

@@ -16,9 +16,10 @@ function int(name: string, def: number): number {
 
 /** Trabalhos que um executor pode fazer. Cada máquina liga só os seus
  *  (EXECUTOR_FILAS): desde 24/09/2026 o Melhor Envio roda no Mac Santiago e a
- *  Shopee/Tuta continuam no executor do Eduardo. */
-export type Fila = "shopee" | "melhorenvio" | "tuta";
-const FILAS: readonly Fila[] = ["shopee", "melhorenvio", "tuta"];
+ *  Shopee/Tuta continuam no executor do Eduardo. Desde 29/09 o Santiago também
+ *  pede a senha ao comprador no chat da TikTok (`tiktok`). */
+export type Fila = "shopee" | "melhorenvio" | "tuta" | "tiktok";
+const FILAS: readonly Fila[] = ["shopee", "melhorenvio", "tuta", "tiktok"];
 
 export interface Config {
   filas: Set<Fila>;
@@ -41,6 +42,28 @@ export interface Config {
   // Tuta (leitura da caixa atrás dos códigos de devolução)
   tutaAdspowerUserId: string;
   tutaCaixaUrl: string;
+  // TikTok (pedido de senha ao comprador no chat — devolução "Bloqueado")
+  tiktokCalibrated: boolean;
+  tiktokSellerUrl: string;
+  tiktokPerfisExtra: Record<string, string>;
+}
+
+/** {"Loja 206081932": "k1dkfg0l"} → chave em minúsculas, sem acento, espaço
+ *  simples (o mesmo jeito que o tiktok.ts compara a conta). */
+function perfisExtra(name: string): Record<string, string> {
+  const raw = str(name);
+  if (!raw) return {};
+  try {
+    const out: Record<string, string> = {};
+    for (const [conta, uid] of Object.entries(JSON.parse(raw) as Record<string, string>)) {
+      const k = conta.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/\s+/g, " ").trim();
+      if (k && String(uid).trim()) out[k] = String(uid).trim();
+    }
+    return out;
+  } catch {
+    console.error(`${name} não é um JSON válido — ignorado`);
+    return {};
+  }
 }
 
 const modeRaw = str("EXECUTOR_DEFAULT_MODE", "manual");
@@ -84,4 +107,8 @@ export const cfg: Config = {
   logisticaLeaseLimit: int("LOGISTICA_LEASE_LIMIT", 5),
   tutaAdspowerUserId: str("TUTA_ADSPOWER_USER_ID"),
   tutaCaixaUrl: str("TUTA_CAIXA_URL", "https://app.tuta.com"),
+  // TRAVA: sem "true" o robô abre o chat, confere a conversa e NÃO envia.
+  tiktokCalibrated: str("TIKTOK_CALIBRATED") === "true",
+  tiktokSellerUrl: str("TIKTOK_SELLER_URL", "https://seller-br.tiktok.com").replace(/\/$/, ""),
+  tiktokPerfisExtra: perfisExtra("TIKTOK_PERFIS_EXTRA"),
 };

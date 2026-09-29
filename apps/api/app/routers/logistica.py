@@ -967,6 +967,30 @@ async def robo_resultado(
     return {"ok": True, "status": cmd.status}
 
 
+@router.get("/agent/comandos/{comando_id}/foto")
+async def robo_foto(
+    comando_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _tok: Annotated[None, Depends(_require_agent_token_logistica())],
+) -> Response:
+    """Foto do produto que o robô anexa no chat da TikTok (tarefa
+    `tiktok_senha` em andamento). 404 = sem foto: o robô manda só o texto."""
+    from app.services import devolucao_mensagem_comprador
+
+    try:
+        foto = await devolucao_mensagem_comprador.foto_para_robo(session, comando_id)
+    except RuntimeError as e:  # tipo não aceito / não deu pra reduzir
+        raise HTTPException(404, detail={"code": "foto_invalida", "erro": str(e)[:200]}) from e
+    if foto is None:
+        raise HTTPException(404, detail={"code": "sem_foto"})
+    nome, dados, ctype = foto
+    return Response(
+        content=dados,
+        media_type=ctype,
+        headers={"Content-Disposition": f'attachment; filename="{nome}"'},
+    )
+
+
 @router.post("/{logistica_id}/suspender-entrega", response_model=LogisticaOut)
 async def suspender_entrega(
     logistica_id: UUID,

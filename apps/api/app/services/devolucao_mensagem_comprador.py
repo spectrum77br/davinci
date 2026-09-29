@@ -10,15 +10,18 @@ desse motivo não recupera nada: medido em 22/09, "alegação incorreta" (o moti
 que a Shopee oferece pro Bloqueado) está 0 ganhas em 5 disparos. Pedir a senha
 ao comprador é a única saída que ainda devolve dinheiro.
 
-**Só a Shopee tem canal hoje** (conferido em produção em 22/09):
+**Canal por plataforma** (conferido em produção em 22/09 e 29/09):
 - Shopee: o chat responde nas 14 lojas e o comprador sai do próprio pedido
   (`buyer_user_id`), mesmo com o pedido COMPLETED/CANCELLED;
+- TikTok: a API não serve (falta o escopo `seller.customer_service`, 401 nas 8
+  lojas), mas a TELA serve — desde 29/09 o executor do Mac Santiago abre o
+  chat do pedido no AdsPower e escreve (tarefa `tiktok_senha` do robô da
+  Logística). Testado no 296301 (TikTok Barbosa): texto e foto saíram;
 - Mercado Livre: a devolução cancela o pedido e o ML fecha o chat
   (`blocked_by_cancelled_order`, 10 de 10 casos) — e a reclamação já tinha
   encerrado antes do lançamento em 8 de 10. Não há canal, nem por robô;
-- TikTok: falta o escopo `seller.customer_service` (401 nas 8 lojas);
 - Amazon: só o e-mail de retransmissão, com as regras de conteúdo da Amazon.
-Nessas três a linha nasce `sem_canal` — a tela mostra "mandar na mão" em vez de
+Nessas duas a linha nasce `sem_canal` — a tela mostra "mandar na mão" em vez de
 fingir que pediu.
 
 Uma mensagem por PEDIDO (kit = várias linhas de devolução, um comprador só): a
@@ -34,6 +37,7 @@ não busca conversa por comprador).
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
@@ -47,9 +51,10 @@ from app.models import (
     DevolucaoAnexo,
     DevolucaoMensagemComprador,
     Devolution,
+    LogisticaRoboComando,
 )
 from app.services import chamados as chamados_svc
-from app.services import chamados_devolucao, logistica_shopee
+from app.services import chamados_devolucao, logistica_robo, logistica_shopee
 from app.services.marketplaces.shopee import ShopeeClient
 
 logger = structlog.get_logger()
@@ -59,6 +64,21 @@ EVENTO_SENHA = "senha"
 # na migration 0239 e continua na lista por segurança).
 MOTIVOS_SENHA = frozenset({"bloqueado", "mudou de ideia"})
 PLAT_SHOPEE = chamados_devolucao.PLAT_SHOPEE
+PLAT_TIKTOK = chamados_devolucao.PLAT_TIKTOK
+# Onde há como falar com o comprador: Shopee pela API, TikTok pela tela (robô).
+PLATAFORMAS_COM_CANAL = frozenset({PLAT_SHOPEE, PLAT_TIKTOK})
+_NOME_PLATAFORMA = {PLAT_SHOPEE: "Shopee", PLAT_TIKTOK: "TikTok"}
+# Desfechos do robô da TikTok que NÃO gastam tentativa: não dizem nada sobre o
+# pedido (perfil da loja aberto por alguém, AdsPower fechado, modo seco) — a
+# linha segue na fila e o cron :25 cria outra tarefa.
+_ROBO_NAO_CONTA = frozenset({"perfil_em_uso", "adspower", "seco"})
+# E os que encerram na hora: o chat JÁ fala de senha (alguém pediu na mão pelo
+# Duoke, ou o comprador mandou sozinho — Mini 295333, 29/09). Repetir o pedido
+# só irrita o comprador; a tela fica vermelha pra alguém ler a conversa.
+_ROBO_FINAL = frozenset({"ja_conversando"})
+# Teto da foto no chat da TikTok. Não é publicado; 2,7 MB passou no teste de
+# 29/09 — acima disto a foto é reduzida antes de ir pro Mac.
+TIKTOK_FOTO_MAX_BYTES = 3_000_000
 # Quantas vezes o cron tenta antes de desistir. Mensagem ao comprador que falha
 # 3 vezes é problema de gente, não de retentativa eterna (mesmo teto do
 # logistica_cliente_mensagens).
@@ -234,6 +254,7 @@ async def garantir(
     ch = await chamados_svc.chamado_da_devolucao(session, dev)
     plat = await _plataforma_de(session, dev, ch)
     texto = texto_para(dev)
+    tem_canal = plat in PLATAFORMAS_COM_CANAL
     if linha is None:
         linha = DevolucaoMensagemComprador(
             devolution_id=dev.id,
@@ -244,8 +265,8 @@ async def garantir(
             plataforma=plat,
             evento=EVENTO_SENHA,
             texto=texto,
-            status=STATUS_PENDENTE if plat == PLAT_SHOPEE else STATUS_SEM_CANAL,
-            erro=None if plat == PLAT_SHOPEE else f"sem_canal_{plat or 'plataforma'}",
+            status=STATUS_PENDENTE if tem_canal else STATUS_SEM_CANAL,
+            erro=None if tem_canal else f"sem_canal_{plat or 'plataforma'}",
             created_by=created_by,
         )
         session.add(linha)
@@ -258,9 +279,12 @@ async def garantir(
             linha.chamado_id = ch.id
         linha.plataforma = plat or linha.plataforma
         linha.texto = texto
-        if plat == PLAT_SHOPEE:
+        if tem_canal:
+            # Na TikTok o `erro` da linha pendente é o último recado do robô
+            # (loja sem login, perfil em uso) — não some a cada save da linha.
+            if plat == PLAT_SHOPEE or linha.status != STATUS_PENDENTE:
+                linha.erro = None
             linha.status = STATUS_PENDENTE
-            linha.erro = None
         elif linha.status != STATUS_SEM_CANAL:
             linha.status = STATUS_SEM_CANAL
             linha.erro = f"sem_canal_{plat or 'plataforma'}"
@@ -344,16 +368,26 @@ async def enviar(
 ) -> DevolucaoMensagemComprador:
     """Manda a mensagem pro comprador na Shopee. Atualiza a linha: `enviada`
     (com o id da conversa) ou `pendente` + `erro` (o cron retenta até
-    MAX_TENTATIVAS, depois `falhou`). NÃO commita."""
+    MAX_TENTATIVAS, depois `falhou`). Na TikTok não envia: põe a tarefa na
+    fila do robô (`_enfileirar_robo_tiktok`). NÃO commita."""
     if linha.status != STATUS_PENDENTE:
         return linha
-    if not get_settings().shopee_mensagens_comprador:
+    tiktok = linha.plataforma == PLAT_TIKTOK
+    ligado = (
+        get_settings().tiktok_mensagens_comprador
+        if tiktok
+        else get_settings().shopee_mensagens_comprador
+    )
+    if not ligado:
         linha.erro = "envio_desligado"
         return linha
     dev = await session.get(Devolution, linha.devolution_id) if linha.devolution_id else None
     if dev is not None and not motivo_pede_senha(dev):
         linha.status = STATUS_CANCELADA
         linha.erro = "motivo_mudou"
+        return linha
+    if tiktok:
+        await _enfileirar_robo_tiktok(session, linha, dev)
         return linha
     order_sn = (linha.pedido_marketplace or "").strip()
     try:
@@ -430,14 +464,165 @@ async def _registrar_no_chamado(
         return
     quando = (linha.enviada_at or datetime.now(UTC)).astimezone(chamados_svc.SAO_PAULO)
     com_foto = " (com a foto do produto)" if linha.anexo_id else ""
+    plat = _NOME_PLATAFORMA.get(linha.plataforma or "", "Shopee")
     session.add(
         chamados_svc.registrar_sistema(
             ch,
-            f"Mensagem enviada ao comprador no chat da Shopee em "
+            f"Mensagem enviada ao comprador no chat da {plat} em "
             f"{quando.strftime('%d/%m/%Y %H:%M')} pedindo a senha do produto{com_foto}. "
             "A resposta cai no chat da loja (Duoke/Seller Center).",
         )
     )
+
+
+# ---------------------------------------------------------------- TikTok (robô)
+
+
+async def _tarefa_aberta(
+    session: AsyncSession, linha: DevolucaoMensagemComprador
+) -> LogisticaRoboComando | None:
+    """Tarefa do robô ainda não devolvida pra esta linha (na fila ou com o
+    executor). Uma por vez: duas escreveriam duas vezes pro mesmo comprador."""
+    return (
+        await session.execute(
+            select(LogisticaRoboComando)
+            .where(
+                LogisticaRoboComando.acao == logistica_robo.ACAO_TIKTOK_SENHA,
+                LogisticaRoboComando.status.in_(("pending", "claimed")),
+                LogisticaRoboComando.payload["linha_id"].astext == str(linha.id),
+            )
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+
+
+async def _enfileirar_robo_tiktok(
+    session: AsyncSession, linha: DevolucaoMensagemComprador, dev: Devolution | None
+) -> None:
+    """TikTok: a API não fala com o comprador, então a mensagem vira tarefa do
+    executor do Mac Santiago (abre o chat do pedido no AdsPower e escreve).
+    A linha fica `pendente` até o robô devolver (`registrar_resultado_robo`).
+    O texto vai com "{LOJA}" pro robô trocar pelo nome que o comprador vê no
+    chat (o nome da loja na TikTok não é o do Bling)."""
+    if await _tarefa_aberta(session, linha) is not None:
+        return
+    pedido_tiktok = (linha.pedido_marketplace or "").strip()
+    if not pedido_tiktok:
+        linha.status = STATUS_FALHOU
+        linha.erro = "sem o nº do pedido da TikTok — pedir na mão"
+        return
+    texto = texto_para(dev) if dev is not None else (linha.texto or "")
+    texto_loja = texto_para(dev, loja="{LOJA}") if dev is not None else ""
+    if not texto.strip():
+        linha.status = STATUS_FALHOU
+        linha.erro = "sem texto"
+        return
+    anexo = await _foto_do_pedido(session, dev)
+    session.add(
+        LogisticaRoboComando(
+            logistica_id=None,
+            acao=logistica_robo.ACAO_TIKTOK_SENHA,
+            payload={
+                "linha_id": str(linha.id),
+                "pedido_bling": linha.pedido_bling,
+                "pedido_tiktok": pedido_tiktok,
+                "conta": linha.conta,
+                "texto": texto,
+                "texto_loja": texto_loja,
+                "foto_anexo_id": str(anexo.id) if anexo is not None else None,
+                "commit": True,
+            },
+        )
+    )
+    linha.texto = texto
+    logger.info(
+        "devolucao_mensagem_comprador_tiktok_enfileirada",
+        linha_id=str(linha.id),
+        pedido=linha.pedido_bling,
+        conta=linha.conta,
+        com_foto=anexo is not None,
+    )
+
+
+def _resultado(cmd: LogisticaRoboComando) -> dict:
+    try:
+        r = json.loads(cmd.result or "{}")
+    except ValueError:
+        return {"detalhe": (cmd.result or "")[:300]}
+    return r if isinstance(r, dict) else {}
+
+
+async def registrar_resultado_robo(
+    session: AsyncSession, cmd: LogisticaRoboComando, *, ok: bool
+) -> DevolucaoMensagemComprador | None:
+    """O executor devolveu a tarefa `tiktok_senha`. Deu certo → `enviada` e
+    evento no chamado. Não deu → `erro` em português na linha; perfil em uso /
+    AdsPower fechado / modo seco não gastam tentativa (nada a ver com o
+    pedido); o resto conta até MAX_TENTATIVAS e aí vira `falhou`. NÃO commita."""
+    linha_id = (cmd.payload or {}).get("linha_id")
+    try:
+        linha = await session.get(DevolucaoMensagemComprador, UUID(str(linha_id)))
+    except ValueError:
+        linha = None
+    if linha is None:
+        return None
+    r = _resultado(cmd)
+    if ok:
+        if linha.status == STATUS_ENVIADA:
+            return linha
+        linha.status = STATUS_ENVIADA
+        linha.erro = None
+        linha.enviada_at = datetime.now(UTC)
+        if str(r.get("texto") or "").strip():
+            linha.texto = str(r["texto"])
+        foto = (cmd.payload or {}).get("foto_anexo_id")
+        if r.get("com_foto") and foto:
+            try:
+                linha.anexo_id = UUID(str(foto))
+            except ValueError:
+                pass
+        await _registrar_no_chamado(session, linha)
+        return linha
+    if linha.status != STATUS_PENDENTE:
+        return linha
+    motivo = str(r.get("motivo") or "")
+    linha.erro = (str(r.get("detalhe") or "").strip() or motivo or "erro no robô")[:300]
+    if motivo in _ROBO_FINAL:
+        linha.status = STATUS_FALHOU
+    elif motivo not in _ROBO_NAO_CONTA:
+        linha.tentativas += 1
+        if linha.tentativas >= MAX_TENTATIVAS:
+            linha.status = STATUS_FALHOU
+    logger.warning(
+        "devolucao_mensagem_comprador_tiktok_falhou",
+        linha_id=str(linha.id),
+        pedido=linha.pedido_bling,
+        motivo=motivo,
+        tentativas=linha.tentativas,
+    )
+    return linha
+
+
+async def foto_para_robo(
+    session: AsyncSession, comando_id: UUID
+) -> tuple[str, bytes, str] | None:
+    """A foto que o robô anexa no chat: só a da tarefa `tiktok_senha` que está
+    COM o executor (claimed). O token do robô não abre nenhum outro anexo."""
+    cmd = await session.get(LogisticaRoboComando, comando_id)
+    if (
+        cmd is None
+        or cmd.acao != logistica_robo.ACAO_TIKTOK_SENHA
+        or cmd.status != "claimed"
+    ):
+        return None
+    try:
+        anexo_id = UUID(str((cmd.payload or {}).get("foto_anexo_id")))
+    except ValueError:
+        return None
+    anexo = await session.get(DevolucaoAnexo, anexo_id)
+    if anexo is None:
+        return None
+    return chamados_devolucao.preparar_foto(anexo, max_bytes=TIKTOK_FOTO_MAX_BYTES)
 
 
 async def candidatos_pendentes(

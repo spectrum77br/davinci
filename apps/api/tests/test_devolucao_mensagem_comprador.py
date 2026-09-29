@@ -429,16 +429,16 @@ async def test_cartao_do_video_e_video_nunca_vao_pro_comprador(
     ("platform", "conta", "loja", "pedido", "order_sn"),
     [
         ("ml", "aguiar", "55", "295011", "2000099001"),
-        ("tiktok", "injox", "77", "295012", "585585025945338891"),
+        # TikTok saiu daqui em 29/09: o robô do Mac escreve pela tela
+        # (tests/test_devolucao_mensagem_tiktok.py).
         ("amazon", "poofy", "99", "295013", "701-9431449-5435416"),
     ],
 )
 async def test_plataforma_sem_canal_nao_finge_que_pediu(
     client, make_user, auth_as, db, shopee, platform, conta, loja, pedido, order_sn
 ):
-    """ML fecha o chat com o pedido cancelado, a TikTok não deu o escopo e a
-    Amazon só tem e-mail: a linha nasce `sem_canal` pra tela dizer "mandar na
-    mão" — e NADA é chamado no chat."""
+    """ML fecha o chat com o pedido cancelado e a Amazon só tem e-mail: a linha
+    nasce `sem_canal` pra tela dizer "mandar na mão" — e NADA é chamado no chat."""
     user = await make_user(permissions=_perms())
     auth_as(user)
     body = await _lancar(client, db, user, pedido=pedido, order_sn=order_sn,

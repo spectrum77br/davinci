@@ -24,7 +24,7 @@ O mesmo código roda em mais de um Mac; cada um liga só o que faz:
 | Máquina | `EXECUTOR_FILAS` | O que faz |
 |---|---|---|
 | executor do Eduardo | `shopee,tuta` (default) | anúncios/Oferta Relâmpago da Shopee + caixa do Tuta |
-| Mac Santiago (desde 24/09/2026) | `melhorenvio` | "Suspender entrega" da Logística |
+| Mac Santiago (desde 24/09/2026) | `melhorenvio,tiktok` | "Suspender entrega" da Logística + pedido de senha no chat da TikTok (29/09) |
 
 O servidor só entrega a suspensão (`melhorenvio_suspender`) pra quem a declara
 no lease — executor sem `acoes` (versão antiga) não pega mais. Ligue
@@ -32,6 +32,30 @@ no lease — executor sem `acoes` (versão antiga) não pega mais. Ligue
 quem faz `shopee` acende o badge "Executor local" do Marketing; o de quem faz
 `melhorenvio` vai pra Ouvidoria › Robôs ("Vigia Robô Melhor Envio"), que avisa
 quando o robô some, o AdsPower fecha ou uma suspensão fica parada/falha.
+
+## Senha do comprador na TikTok (`tiktok`, desde 29/09/2026)
+
+Devolução lançada como **Bloqueado** numa loja TikTok: o DaVinci cria a tarefa
+`tiktok_senha` (um minuto depois do lançamento, pra as fotos subirem) e este
+executor pede a senha ao comprador **no chat da loja**, porque a API da TikTok
+não deixa (falta o escopo de atendimento). O texto é o mesmo da Shopee.
+
+1. Acha o perfil da loja pelo nome: conta "TikTok Barbosa" → perfil
+   "Barbosa - Tiktok" (grupo das lojas). O que não casar vai no
+   `TIKTOK_PERFIS_EXTRA` (ex.: `{"Loja 206081932": "k1dkfg0l"}` — JLAS).
+2. Perfil **aberto** = alguém usando: não mexe, devolve "perfil em uso" e o
+   DaVinci tenta de novo no :25 (não gasta tentativa).
+3. Página do pedido → link do chat daquele comprador (`mGetContactBuyerLinkByOrder`)
+   → recusa os cookies opcionais → confere a conversa (cabeçalho = comprador e
+   painel com `#pedido`) → se o pedido de senha **já está no chat**, só avisa
+   → escreve pelo `value` da caixa (nunca teclado) → confere de novo → Enviar
+   → anexa a foto (janela "Enviar fotos" › Enviar) → fecha o perfil e apaga a
+   foto do disco.
+4. `TIKTOK_CALIBRATED` diferente de `true` = modo seco: faz tudo até antes do
+   Enviar e devolve o que faria (não gasta tentativa).
+
+O resultado volta pra linha da aba Devoluções ("Senha pedida ao cliente …" ou
+"Senha: na fila — <motivo>") e, quando sai, vira evento no chamado.
 
 ## Por que roda no Mac (e não na nuvem)
 
@@ -115,7 +139,7 @@ O diretório `~/marionete` pode ficar como backup; ele não é mais usado.
 
 | Variável | Default | Papel |
 |---|---|---|
-| `EXECUTOR_FILAS` | `shopee,tuta` | o que esta máquina faz: `shopee`, `melhorenvio`, `tuta` |
+| `EXECUTOR_FILAS` | `shopee,tuta` | o que esta máquina faz: `shopee`, `melhorenvio`, `tuta`, `tiktok` |
 | `DAVINCI_API_URL` | `http://localhost:8000` | base da API do DaVinci (sem barra no fim) |
 | `MARKETING_AGENT_TOKEN` | — | token M2M; **igual** ao do DaVinci (vazio → 401) |
 | `AGENT_NAME` | `marionete` | nome no badge do dashboard |

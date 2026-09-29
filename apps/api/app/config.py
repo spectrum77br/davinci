@@ -110,6 +110,10 @@ class Settings(BaseSettings):
     # reclamar do envio automático (a FAQ do Chat API proíbe "proactive order
     # updates" e a conta é da casa).
     shopee_mensagens_comprador: bool = True
+    # O mesmo pedido de senha na TikTok (29/09): sem API de chat, quem escreve
+    # é o executor do Mac Santiago pelo AdsPower (fila `tiktok_senha` do robô da
+    # Logística). Desligado = a linha fica "na fila" e nenhuma tarefa é criada.
+    tiktok_mensagens_comprador: bool = True
 
     # Melhor Envio — confere o frete da impressão tipo "próprio" (só Amazon).
     # `melhor_envio_token`: Bearer token OAuth2 da conta ME (calcula frete).
