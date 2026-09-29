@@ -541,29 +541,33 @@ def _gravar_cache(destino: str, dados: bytes) -> None:
 
 
 def _gerar_previas(destino: str, ext: str, lados: list[int], tmp: str) -> dict[int, bytes]:
-    import warnings
-
     from PIL import Image
 
     maior = max(lados)
     try:
-        # Acima de ~89 Mpx o Pillow só AVISA; aqui vira erro (422). Com 4
-        # prévias em paralelo no pré-aquecimento, um PSD de 80x60 cm a 300 dpi
-        # passava de 800 MB por prévia (medido na revisão de 29/09).
-        with warnings.catch_warnings():
-            warnings.simplefilter("error", Image.DecompressionBombWarning)
-            return _reduzir(destino, ext, lados, maior, tmp)
-    except (
-        OSError, ValueError, Image.DecompressionBombError, Image.DecompressionBombWarning
-    ) as exc:
+        return _reduzir(destino, ext, lados, maior, tmp)
+    except (OSError, ValueError, Image.DecompressionBombError) as exc:
         raise HTTPException(422, f"não abriu como imagem: {exc}") from exc
+
+
+# Acima disto a prévia não é gerada (422). O Pillow só AVISA entre 89 e 179
+# Mpx, e o aviso não serve de trava com várias prévias em paralelo (o filtro de
+# warnings é global). Um PSD de 80x60 cm a 300 dpi (67 Mpx) passa; 12000x12000
+# embutido num .af (144 Mpx, >1 GB na memória) não. Conferido na revisão de 29/09.
+_PIXELS_MAX = 100_000_000
 
 
 def _reduzir(destino: str, ext: str, lados: list[int], maior: int, tmp: str) -> dict[int, bytes]:
     from PIL import Image, ImageOps
 
     with _abrir_para_previa(destino, ext, maior, tmp) as im:
-        im.draft("RGB", (maior * 2, maior * 2))  # JPEG grande decodifica já reduzido
+        # Só o cabeçalho foi lido até aqui: tamanho absurdo para antes de
+        # decodificar.
+        if im.width * im.height > _PIXELS_MAX:
+            raise ValueError(f"imagem grande demais ({im.width}x{im.height})")
+        # JPEG decodifica já reduzido (1/2, 1/4, 1/8) para o menor fator que
+        # ainda cobre a maior prévia — metade do custo de uma foto de celular.
+        im.draft("RGB", (maior, maior))
         # Reduz ANTES de girar/converter: as cópias e conversões abaixo
         # passam a ser do tamanho da prévia, não da imagem inteira. Paleta
         # e 1 bit convertem antes, senão a redução sai serrilhada.
@@ -571,7 +575,7 @@ def _reduzir(destino: str, ext: str, lados: list[int], maior: int, tmp: str) -> 
             im = im.convert("RGBA")
         elif im.mode == "1":
             im = im.convert("L")
-        im.thumbnail((maior * 2, maior * 2))
+        im.thumbnail((maior, maior))
         im = ImageOps.exif_transpose(im)
         if im.mode in ("RGBA", "LA", "P"):
             im = im.convert("RGBA")
@@ -604,6 +608,39 @@ def _trava_do_arquivo(chave: str) -> threading.Lock:
         return _TRAVAS.setdefault(chave, threading.Lock())
 
 
+# Limpeza do cache: prévia sem uso há 180 dias (a leitura renova a data) e
+# ".tmp" largado há mais de 1 dia. Arquivo trocado no MEGA gera chave nova e
+# a prévia velha fica sem uso — é ela que esta limpeza leva. Roda ao subir o
+# container, numa thread, sem atrasar a primeira resposta.
+_SEM_USO_DIAS = 180
+
+
+def _usado_agora(caminho: str) -> None:
+    try:
+        if time.time() - os.path.getmtime(caminho) > 86400:  # 1 escrita por dia, no máximo
+            os.utime(caminho, None)
+    except OSError:
+        pass
+
+
+def _limpar_cache() -> None:
+    agora = time.time()
+    for raiz, _dirs, nomes in os.walk(_PREVIAS_DIR):
+        for nome in nomes:
+            caminho = os.path.join(raiz, nome)
+            try:
+                idade = agora - os.path.getmtime(caminho)
+                if idade > _SEM_USO_DIAS * 86400 or (nome.endswith(".tmp") and idade > 86400):
+                    os.unlink(caminho)
+            except OSError:
+                pass
+
+
+@app.on_event("startup")
+def _limpar_cache_ao_subir() -> None:
+    threading.Thread(target=_limpar_cache, daemon=True).start()
+
+
 def _jpeg(dados: bytes, cache: str) -> Response:
     return Response(content=dados, media_type="image/jpeg", headers={"X-Previa-Cache": cache})
 
@@ -630,7 +667,9 @@ def thumb(path: str, lado: int = 320, _: None = Depends(check_token)) -> Respons
     pedido = _arquivo_cache(path, ident, lado)
     try:
         with open(pedido, "rb") as fh:
-            return _jpeg(fh.read(), "hit")
+            dados = fh.read()
+        _usado_agora(pedido)
+        return _jpeg(dados, "hit")
     except OSError:
         pass
     with _trava_do_arquivo(f"{path}\0{ident}"):
