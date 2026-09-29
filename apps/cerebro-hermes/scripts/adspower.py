@@ -3,7 +3,7 @@
 
 Vinicius, 24/09/2026: "ele tem que identificar qual perfil é e abrir no
 AdsPower". Os perfis seguem "Loja - Plataforma" ("Vortan - Shopee", "Aguiar 2 -
-Mercado Livre"). Os grupos de operação são Israel/Marrocos/Contas; o grupo
+Mercado Livre"). O grupo de operação é Lojas (antes Israel/Marrocos/Contas); o grupo
 Contabilidade tem cópias ("Mega - ml sh") e só entra se não houver outro.
 
   achar --conta "Shopee Vortan" --plataforma shopee   → o perfil + confiança
@@ -29,7 +29,9 @@ from pathlib import Path
 BASE = os.environ.get("ADSPOWER_API_BASE", "http://local.adspower.net:50325").rstrip("/")
 CACHE = Path("~/DaVinci/cerebro/estado/adspower_perfis.json").expanduser()
 CACHE_VALE_S = 3600
-GRUPOS_OPERACAO = {"israel", "marrocos", "contas"}
+# 29/09: os grupos viraram "Lojas" (operação) e "Contabilidade" (cópias). Sem
+# "lojas" aqui a cópia da Contabilidade empatava com o perfil da operação.
+GRUPOS_OPERACAO = {"lojas", "israel", "marrocos", "contas"}
 
 # plataforma do chamado → como aparece no nome do perfil
 APELIDOS = {
@@ -43,6 +45,14 @@ APELIDOS = {
 }
 # Lojas com nome diferente no DaVinci e no AdsPower (Vinicius, 24/09).
 LOJA_NO_ADSPOWER = {"zorvex": "zortex"}  # "ML Zorvex" = perfil "zortex - Mercado Livre"
+# Renomeadas SÓ na Shopee em 23/09 (jlas → atlas, kia → fiore): TikTok, ML,
+# Amazon… continuam "JLAS - …"/"KIA - …". 29/09 (294654): a tela procurou "jlas"
+# e pegou a cópia "JLAS - am ml sh tk te" da Contabilidade, não "ATLAS - Shopee".
+LOJA_NO_ADSPOWER_POR_PLATAFORMA = {
+    ("jlas", "shopee"): "atlas",
+    ("kia", "shopee"): "fiore",
+    ("kia/fiore", "shopee"): "fiore",
+}
 # Loja + plataforma que usam um perfil de outro nome — pelo NÚMERO do perfil.
 # Vinicius 24/09: "shopee marquezini é o número 160, vai tá com nome de mega escrito".
 PERFIL_FIXO = {
@@ -124,6 +134,7 @@ def achar(conta: str, plataforma: str | None) -> dict:
     loja = _loja_da_conta(conta)
     loja = LOJA_NO_ADSPOWER.get(loja, loja)
     plat = _plataforma(plataforma) or _plataforma(conta.split()[0] if conta else "")
+    loja = LOJA_NO_ADSPOWER_POR_PLATAFORMA.get((loja, plat or ""), loja)
     fixo = PERFIL_FIXO.get((loja, plat or ""))
     if fixo:
         perfil = next((p for p in _perfis() if str(p.get("numero")) == fixo), None)

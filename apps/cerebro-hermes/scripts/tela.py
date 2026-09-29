@@ -80,6 +80,16 @@ def _json(cmd: list[str]) -> dict | list:
     return json.loads(r.stdout)
 
 
+def _falha_adspower(e: SystemExit) -> str:
+    """Erro do AdsPower em português pro chamado."""
+    t = str(e.code or "").removeprefix("erro:").strip()
+    if "is updating" in t or "waiting for download" in t:
+        return "o AdsPower estava baixando uma atualização do navegador"
+    if "Connection refused" in t or "urlopen error" in t or "timed out" in t:
+        return "o AdsPower não respondeu (fechado, ou o Mac do robô dormindo/reiniciando)"
+    return t[:200] or "erro sem mensagem"
+
+
 def _vivo(pid: int) -> bool:
     try:
         os.kill(pid, 0)
@@ -159,10 +169,16 @@ def main() -> None:
     trava.write_text(str(os.getpid()))
     encadear_evidencia = False
     try:
-        achado = _json(
-            [PY, str(AQUI / "adspower.py"), "achar", "--conta", caso.get("conta") or "",
-             "--plataforma", caso.get("plataforma") or ""]
-        )
+        try:
+            achado = _json(
+                [PY, str(AQUI / "adspower.py"), "achar", "--conta", caso.get("conta") or "",
+                 "--plataforma", caso.get("plataforma") or ""]
+            )
+        except SystemExit as e:
+            if not a.nao_registrar:
+                _registrar(caso, {"nome": "AdsPower"}, "ACAO: humano\nRESUMO: não consegui "
+                           f"consultar os perfis — {_falha_adspower(e)}. Nada foi feito na tela.")
+            raise
         if not achado.get("ok"):
             msg = (f"não achei o perfil do AdsPower da loja '{caso.get('conta')}' "
                    f"({caso.get('plataforma')}): {achado.get('motivo')} — precisa de uma pessoa")
@@ -176,7 +192,16 @@ def main() -> None:
         r = subprocess.run([PY, str(AQUI / "davinci_chamados.py"), "manual"],
                            capture_output=True, text=True, timeout=120)
         manual = r.stdout.strip() if r.returncode == 0 else "(não consegui ler o manual)"
-        aberto = _json([PY, str(AQUI / "adspower.py"), "abrir", perfil["id"]])
+        # 29/09 (294654): o AdsPower baixando atualização derrubava a tarefa calada e
+        # o chamado ficava "aguardar a plataforma" sem ninguém na tela
+        try:
+            aberto = _json([PY, str(AQUI / "adspower.py"), "abrir", perfil["id"]])
+        except SystemExit as e:
+            if not a.nao_registrar:
+                _registrar(caso, perfil, "ACAO: humano\nRESUMO: não consegui abrir o "
+                           f"navegador — {_falha_adspower(e)}. Nada foi feito na tela; "
+                           "mandar a tarefa de novo mais tarde.")
+            raise
 
         prompt = "\n".join(
             [
