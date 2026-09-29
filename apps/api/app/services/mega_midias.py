@@ -16,6 +16,7 @@ router.
 """
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -26,7 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.models import PricingProduct, Segment
-from app.services.mega_fotos import MegaError, sidecar_request
+from app.services.mega_fotos import MegaError, sidecar_bytes, sidecar_request
 
 logger = structlog.get_logger()
 
@@ -48,6 +49,10 @@ EXT_VIDEO = frozenset(
 EXT_EMBALAGEM = EXT_IMAGEM | {
     "pdf", "ai", "psd", "eps", "cdr", "svg", "zip", "af", "afdesign", "afphoto", "afpub",
 }
+# Arquivo de gráfica que ganha PRÉVIA na tela (1ª página do PDF/AI, a prévia
+# que o Affinity grava dentro do .af, a imagem composta do PSD) — gerada pelo
+# /thumb do sidecar. O resto (EPS, CDR, SVG, ZIP) fica com o ícone.
+EXT_COM_PREVIA = frozenset({"pdf", "ai", "psd", "af", "afdesign", "afphoto", "afpub"})
 EXT_POR_TIPO: dict[str, frozenset[str]] = {
     "fotos": EXT_IMAGEM | EXT_VIDEO,
     "embalagens": EXT_EMBALAGEM,
@@ -265,3 +270,69 @@ async def recontar_todas(
         "pastas_com_erro": falhas,
         "pastas_de_embalagens": len(links),
     }
+
+
+# ─────────────── pré-aquecimento das prévias ───────────────
+
+
+async def pastas_de_produto(session: AsyncSession) -> list[str]:
+    stmt = select(PricingProduct.fotos_path).where(PricingProduct.fotos_path.is_not(None))
+    # Sem strip: a chave do cache no sidecar é o caminho EXATO que a tela pede.
+    return sorted({p for p in (await session.execute(stmt)).scalars() if (p or "").strip()})
+
+
+async def aquecer_previas(
+    session: AsyncSession | None = None, *, paralelo: int = 4, pastas: list[str] | None = None
+) -> dict[str, Any]:
+    """Gera no sidecar a miniatura (e, junto, a prévia grande) de toda foto e
+    de toda arte com prévia das pastas de produto — para ninguém esperar o
+    MEGA na hora de abrir o painel (Eduardo 29/09: "para todos precisa ser
+    rápido e bem otimizado").
+
+    O sidecar guarda em disco e reconhece o que já fez (chave com tamanho e
+    data do arquivo no MEGA): depois da 1ª vez, cada item custa um `mega-ls`
+    (~70 ms) e só o que é novo ou mudou é baixado. `paralelo` baixo de
+    propósito: é o mesmo MEGAcmd que atende a tela e o portal das agências.
+    Vídeo fica de fora (abre no MEGA). Não mexe no banco.
+    """
+    if pastas is None:
+        if session is None:
+            raise ValueError("aquecer_previas precisa de session ou pastas")
+        pastas = await pastas_de_produto(session)
+    alvos: list[str] = []
+    erros_lista = 0
+    for pasta in pastas:
+        for tipo in ("imagens", "embalagens"):
+            try:
+                resp = await sidecar_request(
+                    "GET", "/files", params={"path": pasta, "tipo": tipo}, timeout=300.0
+                )
+            except MegaError:
+                erros_lista += 1
+                continue
+            for a in resp.get("arquivos") or []:
+                nome = str(a.get("nome") or "")
+                if a.get("imagem") or extensao(nome) in EXT_COM_PREVIA:
+                    alvos.append(f"{pasta}/{nome}")
+
+    sem = asyncio.Semaphore(max(1, paralelo))
+    feitos = falhas = 0
+
+    async def um(caminho: str) -> None:
+        nonlocal feitos, falhas
+        async with sem:
+            try:
+                await sidecar_bytes("/thumb", params={"path": caminho, "lado": 320}, timeout=600.0)
+                feitos += 1
+            except MegaError:
+                falhas += 1  # 422 = sem prévia (fica anotado no sidecar)
+
+    await asyncio.gather(*(um(c) for c in dict.fromkeys(alvos)))
+    return {
+        "pastas": len(pastas),
+        "arquivos": len(set(alvos)),
+        "prontos": feitos,
+        "sem_previa": falhas,
+        "pastas_com_erro": erros_lista,
+    }
+

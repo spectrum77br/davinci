@@ -101,6 +101,10 @@ const PASTA_POR_DEPT: Record<string, string> = {
 const EXT_IMAGEM = new Set(['jpg', 'jpeg', 'png', 'webp', 'gif', 'heic', 'heif', 'bmp', 'tif', 'tiff', 'avif', 'jfif'])
 const EXT_VIDEO = new Set(['mp4', 'mov', 'm4v', 'avi', 'mkv', 'webm', '3gp', 'mpg', 'mpeg', 'wmv', 'flv'])
 const EXT_ARTE = new Set(['pdf', 'ai', 'psd', 'eps', 'cdr', 'svg', 'zip', 'af', 'afdesign', 'afphoto', 'afpub'])
+// Arte que ganha PRÉVIA (JPEG gerado no servidor: 1ª página do PDF/AI, a
+// prévia gravada no .af do Affinity, a imagem do PSD). Eduardo 29/09: a caixa
+// aparecia só como ícone "PDF". Espelha EXT_COM_PREVIA da API.
+const EXT_COM_PREVIA = new Set(['pdf', 'ai', 'psd', 'af', 'afdesign', 'afphoto', 'afpub'])
 
 // 5 arquivos por requisição: vídeo de celular passa fácil de 100 MB, e um
 // lote pequeno deixa o progresso andar e não perde tudo se um lote falhar.
@@ -371,8 +375,24 @@ function ehVideo(a: Arquivo): boolean {
   return EXT_VIDEO.has(extDe(a))
 }
 
+// Arquivo de gráfica com prévia: aparece como imagem na grade e abre no
+// visor, mas o Baixar entrega o arquivo original. Se a prévia não sair
+// (PDF que não abre, .af sem prévia embutida), `falhas` devolve o ícone.
+function temPrevia(a: Arquivo): boolean {
+  return !a.imagem && EXT_COM_PREVIA.has(extDe(a))
+}
+
 function mostraMiniatura(a: Arquivo): boolean {
-  return a.imagem && !falhas.has(a.nome)
+  return (a.imagem || temPrevia(a)) && !falhas.has(a.nome)
+}
+
+// O visor abre a versão de 1600 px (JPEG gerado e guardado no servidor), não
+// o original: foto de fornecedor e imagem de IA têm de 1 a 10 MB, e o visor
+// ficava segundos desenhando aos pedaços (Eduardo 29/09: "demoram muito para
+// renderizar"). O Baixar continua entregando o arquivo original. Arte (PDF,
+// .af…) abre sempre pela prévia — o PDF em si nunca é aberto na tela.
+function urlVisor(a: Arquivo): string {
+  return `${urlArquivo(a.nome, false, true)}&grande=1`
 }
 
 // Mesma origem da página: o cookie de sessão vai junto, sem token na URL.
@@ -405,6 +425,29 @@ function abrirVisor(a: Arquivo) {
   const i = imagensAba.value.findIndex((x) => x.nome === a.nome)
   visor.value = i >= 0 ? i : null
 }
+// Enquanto a imagem grande não chega, o visor mostra "Carregando…" em vez
+// de desenhar aos pedaços; e a anterior/próxima já vêm baixando, para o
+// Anterior/Próxima trocar na hora.
+const visorCarregando = ref(false)
+const visorErro = ref(false)
+const _preCarregadas = new Set<string>()
+function preCarregar(a: Arquivo | undefined) {
+  if (!a) return
+  const url = urlVisor(a)
+  if (_preCarregadas.has(url)) return
+  _preCarregadas.add(url)
+  const img = new Image()
+  img.src = url
+}
+watch(visorArquivo, (a) => {
+  if (!a) return
+  visorCarregando.value = true
+  visorErro.value = false
+  const i = visor.value ?? 0
+  preCarregar(imagensAba.value[i + 1])
+  preCarregar(imagensAba.value[i - 1])
+})
+
 function visorAnterior() {
   if (visor.value != null && visor.value > 0) visor.value--
 }
@@ -1015,14 +1058,22 @@ onBeforeUnmount(() => {
                   :title="a.nome"
                   @click="abrirVisor(a)"
                 >
-                  <div class="aspect-square w-full overflow-hidden rounded border bg-muted">
+                  <div
+                    class="relative aspect-square w-full overflow-hidden rounded border"
+                    :class="temPrevia(a) ? 'bg-white' : 'bg-muted'"
+                  >
                     <img
                       :src="urlArquivo(a.nome, false, true)"
                       :alt="nomeCurto(a.nome)"
                       loading="lazy"
-                      class="h-full w-full object-cover transition-transform group-hover:scale-105"
+                      class="h-full w-full transition-transform group-hover:scale-105"
+                      :class="temPrevia(a) ? 'object-contain p-1' : 'object-cover'"
                       @error="falhas.add(a.nome)"
                     />
+                    <span
+                      v-if="temPrevia(a)"
+                      class="absolute left-1 top-1 rounded bg-foreground/80 px-1 text-[10px] font-semibold uppercase text-background"
+                    >{{ extDe(a) }}</span>
                   </div>
                   <div v-if="pastaDoMeio(a.nome)" class="mt-0.5 truncate text-[11px] font-medium">{{ pastaDoMeio(a.nome) }}</div>
                   <div class="truncate text-[11px] text-muted-foreground" :class="{ 'mt-0.5': !pastaDoMeio(a.nome) }">{{ nomeCurto(a.nome) }}</div>
@@ -1084,7 +1135,12 @@ onBeforeUnmount(() => {
         class="absolute inset-0 z-10 flex flex-col bg-black/90 text-white"
       >
         <div class="flex items-center justify-between gap-2 p-3">
-          <span class="min-w-0 truncate text-sm" :title="visorArquivo.nome">{{ visorArquivo.nome }}</span>
+          <span class="min-w-0 truncate text-sm" :title="visorArquivo.nome">
+            {{ visorArquivo.nome }}
+            <span v-if="temPrevia(visorArquivo)" class="ml-2 text-xs text-white/70">
+              prévia — o arquivo é {{ extDe(visorArquivo).toUpperCase() }}; use Baixar para abrir no programa
+            </span>
+          </span>
           <div class="flex shrink-0 items-center gap-2">
             <span class="text-xs tabular-nums text-white/70">{{ (visor ?? 0) + 1 }} de {{ imagensAba.length }}</span>
             <a :href="urlArquivo(visorArquivo.nome, true)" download class="btn btn-sm text-foreground">
@@ -1095,12 +1151,21 @@ onBeforeUnmount(() => {
             </button>
           </div>
         </div>
-        <div class="flex min-h-0 flex-1 items-center justify-center p-3" @click.self="visor = null">
+        <div class="relative flex min-h-0 flex-1 items-center justify-center p-3" @click.self="visor = null">
+          <div v-if="visorCarregando" class="absolute flex items-center gap-2 text-sm text-white/80">
+            <Loader2 class="h-4 w-4 animate-spin" /> Carregando…
+          </div>
+          <div v-else-if="visorErro" class="absolute max-w-sm text-center text-sm text-white/80">
+            Não deu para abrir a prévia deste arquivo agora. Use <b>Baixar</b> para abrir o original.
+          </div>
           <img
             :key="visorArquivo.nome"
-            :src="urlArquivo(visorArquivo.nome)"
+            :src="urlVisor(visorArquivo)"
             :alt="nomeCurto(visorArquivo.nome)"
-            class="max-h-full max-w-full object-contain"
+            class="max-h-full max-w-full object-contain transition-opacity"
+            :class="{ 'bg-white': temPrevia(visorArquivo), 'opacity-0': visorCarregando || visorErro }"
+            @load="visorCarregando = false"
+            @error="visorCarregando = false; visorErro = true"
           />
         </div>
         <div class="flex items-center justify-center gap-3 p-3">

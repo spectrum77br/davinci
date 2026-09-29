@@ -60,6 +60,7 @@ class MegaFalso:
         self.formato_antigo = False
         self.fora_do_ar = False
         self.thumb = "ok"
+        self.lados: list[int] = []
 
     # --- montar a árvore ---
     def pasta(self, *paths: str) -> None:
@@ -150,6 +151,7 @@ class MegaFalso:
         self.chamadas.append(("GET", path))
         alvo = params["path"]
         if path == "/thumb":
+            self.lados.append(params.get("lado"))
             # thumb: "ok" reduz; "antigo" = container sem a rota (404 do
             # FastAPI); "nao_abre" = Pillow não decodifica (422).
             if self.thumb == "antigo":
@@ -189,6 +191,7 @@ def mega(monkeypatch) -> MegaFalso:
         monkeypatch.setattr(f"{mod}.sidecar_request", m.request)
     monkeypatch.setattr("app.routers.pricing_mega.sidecar_stream", m.stream)
     monkeypatch.setattr("app.routers.pricing_mega.sidecar_bytes", m.bytes_)
+    monkeypatch.setattr("app.services.mega_midias.sidecar_bytes", m.bytes_)
     monkeypatch.setattr("app.routers.portal_criativos.sidecar_bytes", m.bytes_)
     monkeypatch.setattr(get_settings(), "mega_fotos_root", "/")
     return m
@@ -627,14 +630,15 @@ async def test_miniatura_reduzida_e_volta_ao_original_quando_nao_da(
     por aba. Sidecar antigo (sem /thumb) ou imagem que o Pillow não abre caem
     no arquivo inteiro — a tela nunca fica sem a foto por causa disso."""
     mega.arquivo("/Celular/X/frente.png", conteudo=b"PNGDATA")
-    mega.arquivo("/Celular/X/Embalagens/caixa.pdf", conteudo=b"%PDF")
+    mega.arquivo("/Celular/X/Embalagens/arte.zip", conteudo=b"PK")
     p = await _produto(db, editor, nome="X", pasta="/Celular/X")
     url = f"/api/pricing/mega/products/{p.id}/midias/arquivo"
 
     r = await client.get(url, params={"nome": "frente.png", "miniatura": 1})
     assert r.status_code == 200 and r.content == b"MINI:PNGDATA"
     assert r.headers["content-type"] == "image/jpeg"
-    assert r.headers["content-disposition"].startswith("inline;")
+    # É um JPEG: "Salvar imagem como…" tem de sair .jpg, não .png/.pdf.
+    assert r.headers["content-disposition"].startswith('inline; filename="frente.jpg"')
     assert r.headers["cache-control"] == "private, max-age=86400"
 
     for modo in ("antigo", "nao_abre"):
@@ -648,10 +652,10 @@ async def test_miniatura_reduzida_e_volta_ao_original_quando_nao_da(
     r = await client.get(url, params={"nome": "frente.png", "miniatura": 1})
     assert r.status_code == 503 and r.json()["detail"]["code"] == "mega_sidecar"
 
-    # Não-imagem ignora o pedido de miniatura e continua download.
+    # Arquivo sem prévia (ZIP) ignora o pedido de miniatura e continua download.
     mega.thumb = "ok"
-    r = await client.get(url, params={"nome": "Embalagens/caixa.pdf", "miniatura": 1})
-    assert r.content == b"%PDF"
+    r = await client.get(url, params={"nome": "Embalagens/arte.zip", "miniatura": 1})
+    assert r.content == b"PK"
     assert r.headers["content-disposition"].startswith("attachment;")
     # Baixar sempre entrega o original.
     r = await client.get(url, params={"nome": "frente.png", "miniatura": 1, "baixar": 1})
@@ -660,6 +664,50 @@ async def test_miniatura_reduzida_e_volta_ao_original_quando_nao_da(
     # Arquivo que não existe: 404 do /thumb cai para o /file, que diz 404.
     r = await client.get(url, params={"nome": "some.jpg", "miniatura": 1})
     assert r.status_code == 404 and r.json()["detail"]["code"] == "arquivo_nao_encontrado"
+
+
+async def test_previa_de_pdf_e_affinity_na_aba_embalagens(
+    client: AsyncClient, db: AsyncSession, editor: User, mega: MegaFalso,
+):
+    """Eduardo 29/09: a caixa aparecia só como ícone "PDF". PDF/AI/Affinity/PSD
+    ganham prévia (JPEG do sidecar); o arquivo em si nunca sai inline, e arte
+    sem prévia fica no ícone (404 sem_previa) — nunca o PDF aberto na tela."""
+    mega.arquivo("/Celular/X/Embalagens/caixa.pdf", conteudo=b"%PDF")
+    mega.arquivo("/Celular/X/Embalagens/caixa.af", conteudo=b"AFFINITY")
+    mega.arquivo("/Celular/X/Embalagens/faca.eps", conteudo=b"%!PS")
+    p = await _produto(db, editor, nome="X", pasta="/Celular/X")
+    url = f"/api/pricing/mega/products/{p.id}/midias/arquivo"
+
+    for nome, bruto in (("Embalagens/caixa.pdf", b"%PDF"), ("Embalagens/caixa.af", b"AFFINITY")):
+        r = await client.get(url, params={"nome": nome, "miniatura": 1})
+        assert r.status_code == 200 and r.content == b"MINI:" + bruto, nome
+        assert r.headers["content-type"] == "image/jpeg"
+        assert r.headers["content-disposition"].startswith("inline;")
+    assert mega.lados == [320, 320]
+
+    # Visor: prévia grande.
+    r = await client.get(url, params={"nome": "Embalagens/caixa.pdf", "miniatura": 1, "grande": 1})
+    assert r.status_code == 200 and mega.lados[-1] == 1600
+
+    # Sem miniatura (ou com baixar) continua download do original.
+    for extra in ({}, {"miniatura": 1, "baixar": 1}):
+        r = await client.get(url, params={"nome": "Embalagens/caixa.pdf", **extra})
+        assert r.content == b"%PDF"
+        assert r.headers["content-disposition"].startswith("attachment;")
+
+    # Prévia que não sai (sidecar antigo ou PDF que o poppler não abre): 404,
+    # e NÃO o PDF inline.
+    for modo in ("antigo", "nao_abre"):
+        mega.thumb = modo
+        r = await client.get(url, params={"nome": "Embalagens/caixa.pdf", "miniatura": 1})
+        assert r.status_code == 404 and r.json()["detail"]["code"] == "sem_previa", modo
+
+    # EPS não tem prévia: o pedido de miniatura é ignorado (download, sem /thumb).
+    mega.thumb = "ok"
+    antes = len(mega.lados)
+    r = await client.get(url, params={"nome": "Embalagens/faca.eps", "miniatura": 1})
+    assert r.content == b"%!PS" and r.headers["content-disposition"].startswith("attachment;")
+    assert len(mega.lados) == antes
 
 
 @pytest.mark.parametrize(
@@ -1049,3 +1097,64 @@ async def test_sidecar_stream_confere_status_antes_do_primeiro_byte(monkeypatch)
     with pytest.raises(MegaError) as e:
         await mega_fotos.sidecar_stream("/file", params={"path": "/C/X/some.pdf"})
     assert e.value.status_code == 404
+
+
+async def test_aquecer_previas_pede_uma_vez_cada_foto_e_arte(
+    db: AsyncSession, editor: User, mega: MegaFalso,
+):
+    """Pré-aquecimento (29/09: "para todos precisa ser rápido"): toda foto e
+    toda arte com prévia de cada pasta de produto, uma vez só mesmo com duas
+    linhas na mesma pasta; vídeo e arte sem prévia (ZIP) ficam de fora."""
+    from app.services.mega_midias import aquecer_previas
+
+    mega.arquivo("/Celular/S7/a.jpg", "/Celular/S7/sub/b.png", "/Celular/S7/clip.mp4")
+    mega.arquivo("/Celular/S7/Embalagens/caixa.pdf", "/Celular/S7/Embalagens/caixa.af",
+                 "/Celular/S7/Embalagens/foto caixa.jpg", "/Celular/S7/Embalagens/arte.zip")
+    mega.arquivo("/Malas/ABS/M1/c.jpg")
+    await _produto(db, editor, nome="S7 16", pasta="/Celular/S7")
+    await _produto(db, editor, nome="S7 32", pasta="/Celular/S7")
+    await _produto(db, editor, nome="ABS", raiz="mala", pasta="/Malas/ABS")
+    mega.thumb = "ok"
+
+    r = await aquecer_previas(db, paralelo=2)
+    pedidos = sorted(p for m_, p in mega.chamadas if p == "/thumb")
+    assert r == {"pastas": 2, "arquivos": 6, "prontos": 6, "sem_previa": 0, "pastas_com_erro": 0}
+    assert len(pedidos) == 6 and set(mega.lados) == {320}
+
+
+async def test_nome_com_dois_pontos_dentro_nao_e_subir_de_nivel(
+    client: AsyncClient, db: AsyncSession, editor: User, mega: MegaFalso,
+):
+    """"manual-uranyx-p01..af" é um arquivo real (Panelas ferro, 29/09): ".."
+    só é proibido como trecho do caminho."""
+    mega.arquivo("/Celular/X/Embalagens/manual-uranyx-p01..af", conteudo=b"AF")
+    p = await _produto(db, editor, nome="X", pasta="/Celular/X")
+    url = f"/api/pricing/mega/products/{p.id}/midias/arquivo"
+    r = await client.get(url, params={"nome": "Embalagens/manual-uranyx-p01..af"})
+    assert r.status_code == 200 and r.content == b"AF"
+    for nome in ("../x.jpg", "a/../b.jpg", "a/..", ".."):
+        r = await client.get(url, params={"nome": nome})
+        assert r.status_code == 400, nome
+
+
+def test_sidecar_identidade_so_aceita_o_proprio_arquivo(monkeypatch):
+    """Pasta também responde ao `mega-ls -l`; só a linha com o NOME INTEIRO do
+    arquivo vale (formato conferido em produção em 29/09/2026)."""
+    saidas = {
+        "/C/X/a b (1).jpeg": "FLAGS VERS      SIZE            DATE       NAME\n"
+                             "----    1       199502 08Sep2026 12:41:11 a b (1).jpeg",
+        "/C/X/M2 v1.5": "/C/X/M2 v1.5: \nFLAGS VERS      SIZE            DATE       NAME\n"
+                        "----    1        10 29Sep2026 10:00:00 capa M2 v1.5",
+    }
+    def run(cmd, **_k):
+        return (0, saidas[cmd[-1]]) if cmd[-1] in saidas else (1, "nf")
+
+    monkeypatch.setattr(SIDECAR, "run", run)
+    assert SIDECAR._identidade("/C/X/a b (1).jpeg") == "199502|08Sep2026 12:41:11"
+    assert SIDECAR._identidade("/C/X/M2 v1.5") is None
+    assert SIDECAR._identidade("/C/X/nao.jpg") is None
+    assert SIDECAR._validar_caminho("/C/X/manual-uranyx-p01..af") == "manual-uranyx-p01..af"
+    for ruim in ("/C/../x.jpg", "/C/./x.jpg", "/C/*.jpg", "/C/x?.jpg"):
+        with pytest.raises(HTTPException):
+            SIDECAR._validar_caminho(ruim)
+

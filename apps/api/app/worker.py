@@ -2506,6 +2506,27 @@ async def mega_midias_recontar(ctx: dict) -> None:
         logger.exception("mega_midias_recontar_unhandled")
 
 
+async def mega_previas_aquecer(ctx: dict) -> None:
+    """Madrugada, depois da recontagem: deixa prontas as miniaturas e prévias
+    de todas as pastas de produto no cache do sidecar (29/09/2026 — "para
+    todos precisa ser rápido"). O que já está pronto custa um `mega-ls`; só
+    o arquivo novo ou trocado é baixado do MEGA."""
+    from app.services.mega_fotos import MegaError
+    from app.services.mega_midias import aquecer_previas, pastas_de_produto
+
+    try:
+        # Sessão curta só para ler as pastas: o aquecimento leva até 1 h e não
+        # pode segurar uma transação aberta esse tempo todo.
+        async with session_scope() as s:
+            pastas = await pastas_de_produto(s)
+        resumo = await aquecer_previas(pastas=pastas)
+        logger.info("mega_previas_aquecer", **resumo)
+    except MegaError as exc:
+        logger.warning("mega_previas_aquecer_sidecar", erro=exc.message)
+    except Exception:  # noqa: BLE001
+        logger.exception("mega_previas_aquecer_unhandled")
+
+
 async def condicao_especial_gc(ctx: dict) -> None:
     """Apaga Condições Especiais de segmento cujo período terminou há mais de
     30 dias (pedido de 10/09: "quando acabar essa data pode excluir"). O painel
@@ -3663,6 +3684,7 @@ class WorkerSettings:
         historico_manutencao,
         condicao_especial_gc,
         func(mega_midias_recontar, timeout=2400),
+        func(mega_previas_aquecer, timeout=3600),
         margem_reavaliar_reprovados,
         low_stock_polling,
         import_listings_run,
@@ -3901,6 +3923,9 @@ class WorkerSettings:
         # hora sem outro cron diário. Um mega-find por pasta (~90 pastas);
         # 40 min de teto porque o /folders do sidecar tem 30.
         cron(mega_midias_recontar, hour=7, minute=25, run_at_startup=False, timeout=2400),
+        # Prévias prontas para o painel de mídias: 04:50 BRT, depois da
+        # recontagem. 1ª rodada baixa o acervo (~1,3 GB); depois, só o novo.
+        cron(mega_previas_aquecer, hour=7, minute=50, run_at_startup=False, timeout=3600),
         cron(failed_jobs_alert_scan, minute=_TWO_MIN, run_at_startup=False),
         cron(webhook_signature_alert_scan, minute={5, 35}, run_at_startup=False),
         cron(low_stock_polling, minute=_TWO_MIN, run_at_startup=False),

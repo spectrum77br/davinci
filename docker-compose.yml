@@ -198,8 +198,13 @@ services:
     restart: unless-stopped
     environment:
       MEGA_SIDECAR_TOKEN: ${MEGA_SIDECAR_TOKEN:-}
+      PREVIAS_DIR: /srv/previas
     volumes:
       - ./data/megacmd:/root/.megaCmd
+      # Cache das miniaturas/prévias do painel de mídias (JPEG de 320 e 1600
+      # px; ~200 MB para o acervo de set/2026). Volume próprio para não
+      # misturar com a sessão do MEGA e sobreviver ao rebuild.
+      - ./data/megacmd_previas:/srv/previas
     networks:
       davinci_net:
         aliases:

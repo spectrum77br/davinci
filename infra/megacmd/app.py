@@ -9,6 +9,7 @@ setado no ambiente.
 """
 from __future__ import annotations
 
+import hashlib
 import io
 import os
 import re
@@ -16,6 +17,7 @@ import secrets
 import shutil
 import subprocess
 import tempfile
+import time
 import unicodedata
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
@@ -372,6 +374,9 @@ def file(path: str, _: None = Depends(check_token)):
     temporário e é removido depois de servido — o container não acumula cópia
     do acervo.
     """
+    _validar_caminho(path)
+    if _identidade(path) is None:  # não existe, ou é pasta (ver _identidade)
+        raise HTTPException(404, "arquivo não encontrado")
     tmp, destino = _baixar(path)
     return FileResponse(
         destino,
@@ -383,6 +388,18 @@ def file(path: str, _: None = Depends(check_token)):
 def _baixar(path: str) -> tuple[str, str]:
     """`mega-get` de UM arquivo para um diretório temporário: (tmp, arquivo).
     Quem chama apaga o tmp depois de usar."""
+    nome = _validar_caminho(path)
+    tmp = tempfile.mkdtemp(prefix="megafile")
+    rc, out = run(["mega-get", path, tmp], timeout=600)
+    destino = os.path.join(tmp, nome)
+    if rc != 0 or not os.path.isfile(destino):
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise HTTPException(404, f"não baixou: {out[-300:]}")
+    return tmp, destino
+
+
+def _validar_caminho(path: str) -> str:
+    """Devolve o nome do arquivo, ou HTTPException 400."""
     nome = path.rsplit("/", 1)[-1]
     # `..` fora: o nome vem da listagem, mas chega por parâmetro. Subpasta é
     # legítima (as malas têm uma por modelo), subir de nível não é.
@@ -394,58 +411,233 @@ def _baixar(path: str) -> tuple[str, str]:
     # Preços e portal das agências). Nenhum fotos_path de produção tem "*" ou
     # "?"; trecho vazio ("//") não é barrado aqui porque o caminho inteiro
     # inclui a pasta do produto — quem chama já recusa no nome do arquivo.
+    # ".." barrado como TRECHO do caminho, não como pedaço de nome: o arquivo
+    # real "manual-uranyx-p01..af" (Panelas ferro, 29/09) era recusado inteiro.
     if (
         not nome
-        or ".." in path
         or any(c in path for c in "*?")
-        or any(s.strip() == "." for s in path.split("/"))
+        or any(s.strip() in (".", "..") for s in path.split("/"))
     ):
         raise HTTPException(400, "caminho inválido")
-    tmp = tempfile.mkdtemp(prefix="megafile")
-    rc, out = run(["mega-get", path, tmp], timeout=600)
-    destino = os.path.join(tmp, nome)
-    if rc != 0 or not os.path.isfile(destino):
-        shutil.rmtree(tmp, ignore_errors=True)
-        raise HTTPException(404, f"não baixou: {out[-300:]}")
-    return tmp, destino
+    return nome
+
+
+# Prévia de arquivo de gráfica (29/09/2026): na aba Embalagens a caixa da
+# Uranyx aparecia só como ícone "PDF"/"AF" — o Eduardo: "está aparecendo em
+# pdf". PDF e AI (salvo com compatibilidade PDF, o padrão do Illustrator) saem
+# pela 1ª página no pdftoppm (poppler-utils); o Affinity grava a prévia do
+# documento como o ÚLTIMO PNG do arquivo (os anteriores são as fotos e logos
+# usados dentro da arte — conferido nos 20 .af da pasta CAIXAS); o PSD o
+# Pillow abre pela imagem composta.
+_EXT_PDF = {"pdf", "ai"}
+_EXT_AFFINITY = {"af", "afdesign", "afphoto", "afpub"}
+_PNG_INICIO = b"\x89PNG\r\n\x1a\n"
+
+
+def _png_do_affinity(caminho: str) -> bytes | None:
+    with open(caminho, "rb") as fh:
+        dados = fh.read()
+    ultimo = None
+    pos = dados.find(_PNG_INICIO)
+    while pos >= 0:
+        fim = dados.find(b"IEND", pos)
+        if fim < 0:
+            break
+        ultimo = (pos, fim + 8)
+        pos = dados.find(_PNG_INICIO, fim)
+    return dados[ultimo[0] : ultimo[1]] if ultimo else None
+
+
+def _abrir_para_previa(caminho: str, ext: str, lado: int, tmp: str):
+    """Imagem (Pillow) que representa o arquivo, ou HTTPException 422."""
+    from PIL import Image
+
+    if ext in _EXT_PDF:
+        saida = os.path.join(tmp, "pagina1")
+        rc, out = run(
+            ["pdftoppm", "-f", "1", "-l", "1", "-singlefile", "-png",
+             "-scale-to", str(lado), caminho, saida],
+            timeout=180,
+        )
+        if rc == 124 or rc < 0:
+            # Estourou o tempo ou foi morto (memória): problema da hora, não do
+            # arquivo — 503 não fica anotado como "sem prévia".
+            raise HTTPException(503, f"prévia do PDF não terminou: {out[-200:]}")
+        if rc != 0 or not os.path.isfile(saida + ".png"):
+            raise HTTPException(422, f"sem prévia do PDF: {out[-200:]}")
+        return Image.open(saida + ".png")
+    if ext in _EXT_AFFINITY:
+        png = _png_do_affinity(caminho)
+        if not png:
+            raise HTTPException(422, "arquivo do Affinity sem prévia embutida")
+        return Image.open(io.BytesIO(png))
+    return Image.open(caminho)
+
+
+# Cache das prévias (29/09/2026). Eduardo: "quando eu clico para ver as fotos
+# demoram muito para renderizar […] para todos precisa ser rápido". Cada
+# miniatura custava um `mega-get` do arquivo inteiro (0,3 s a 5 s; um .af de
+# caixa tem 60 MB) em TODA abertura por outra pessoa ou outro navegador. Agora
+# o JPEG gerado fica em disco (volume próprio, sobrevive ao rebuild) e a
+# chave inclui tamanho+data do arquivo no MEGA (`mega-ls -l`, ~70 ms): trocou
+# o arquivo com o mesmo nome, a chave muda e a prévia é refeita sozinha.
+# Numa descida só saem as DUAS medidas que a tela usa (320 da grade e 1600 do
+# visor) — pré-aquecer uma já deixa a outra pronta.
+_PREVIAS_DIR = os.environ.get("PREVIAS_DIR", "/srv/previas")
+_PREVIA_VERSAO = "1"  # mude se o jeito de gerar mudar (invalida o cache todo)
+_LADOS_PADRAO = (320, 1600)
+_LS_ARQUIVO_RE = re.compile(r"^-\S*\s+\S+\s+(\d+)\s+(\S+\s+\S+)\s")
+
+
+def _identidade(path: str) -> str | None:
+    """"tamanho|data" do ARQUIVO no MEGA, ou None se não existe ou é pasta.
+
+    Pasta também responde ao `mega-ls -l` (lista os filhos) — por isso a
+    linha tem de terminar no próprio nome. Sem essa conferência, uma subpasta
+    com ponto no nome ("M2 v1.5") passava por arquivo e o `mega-get`, que é
+    recursivo, descia a pasta inteira para o disco antes do 404.
+    """
+    nome = path.rsplit("/", 1)[-1]
+    rc, out = run(["mega-ls", "-l", path], timeout=60)
+    if rc != 0:
+        return None
+    for ln in out.splitlines():
+        m = _LS_ARQUIVO_RE.match(ln)
+        # O nome INTEIRO depois da data (conferido em produção: arquivo sai
+        # numa linha só, com o nome simples). "endswith" deixava passar uma
+        # pasta "M2 v1.5" que tivesse dentro um arquivo "capa M2 v1.5".
+        if m and ln[m.end():].rstrip() == nome.rstrip():
+            return f"{m.group(1)}|{m.group(2)}"
+    return None
+
+
+def _arquivo_cache(path: str, ident: str, lado: int, sufixo: str = ".jpg") -> str:
+    chave = hashlib.sha1(
+        f"{_PREVIA_VERSAO}\0{path}\0{ident}\0{lado}".encode("utf-8", "surrogateescape")
+    ).hexdigest()
+    return os.path.join(_PREVIAS_DIR, chave[:2], chave + sufixo)
+
+
+def _gravar_cache(destino: str, dados: bytes) -> None:
+    # Escreve ao lado e troca de uma vez: quem ler no meio nunca pega meio JPEG.
+    tmp = None
+    try:
+        os.makedirs(os.path.dirname(destino), exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(destino), suffix=".tmp")
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(dados)
+        os.replace(tmp, destino)
+    except OSError:
+        # Cache é otimização: disco cheio não pode derrubar a prévia — mas
+        # também não pode deixar ".tmp" pela metade para trás.
+        if tmp:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+
+
+def _gerar_previas(destino: str, ext: str, lados: list[int], tmp: str) -> dict[int, bytes]:
+    import warnings
+
+    from PIL import Image
+
+    maior = max(lados)
+    try:
+        # Acima de ~89 Mpx o Pillow só AVISA; aqui vira erro (422). Com 4
+        # prévias em paralelo no pré-aquecimento, um PSD de 80x60 cm a 300 dpi
+        # passava de 800 MB por prévia (medido na revisão de 29/09).
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            return _reduzir(destino, ext, lados, maior, tmp)
+    except (OSError, ValueError, Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
+        raise HTTPException(422, f"não abriu como imagem: {exc}") from exc
+
+
+def _reduzir(destino: str, ext: str, lados: list[int], maior: int, tmp: str) -> dict[int, bytes]:
+    from PIL import Image, ImageOps
+
+    with _abrir_para_previa(destino, ext, maior, tmp) as im:
+        im.draft("RGB", (maior * 2, maior * 2))  # JPEG grande decodifica já reduzido
+        # Reduz ANTES de girar/converter: as cópias e conversões abaixo
+        # passam a ser do tamanho da prévia, não da imagem inteira. Paleta
+        # e 1 bit convertem antes, senão a redução sai serrilhada.
+        if im.mode == "P":
+            im = im.convert("RGBA")
+        elif im.mode == "1":
+            im = im.convert("L")
+        im.thumbnail((maior * 2, maior * 2))
+        im = ImageOps.exif_transpose(im)
+        if im.mode in ("RGBA", "LA", "P"):
+            im = im.convert("RGBA")
+            fundo = Image.new("RGB", im.size, (255, 255, 255))
+            fundo.paste(im, mask=im.getchannel("A"))
+            im = fundo
+        elif im.mode != "RGB":
+            im = im.convert("RGB")
+        saidas: dict[int, bytes] = {}
+        for lado in sorted(lados, reverse=True):
+            copia = im.copy()
+            copia.thumbnail((lado, lado))
+            buf = io.BytesIO()
+            copia.save(buf, "JPEG", quality=80, optimize=True, progressive=lado > 320)
+            saidas[lado] = buf.getvalue()
+        return saidas
+
+
+def _jpeg(dados: bytes, cache: str) -> Response:
+    return Response(content=dados, media_type="image/jpeg", headers={"X-Previa-Cache": cache})
 
 
 @app.get("/thumb")
 def thumb(path: str, lado: int = 320, _: None = Depends(check_token)) -> Response:
-    """Miniatura JPEG de UMA imagem (lado maior = `lado`, entre 64 e 800).
+    """Miniatura JPEG de UMA imagem, ou prévia de PDF/AI/Affinity/PSD (lado
+    maior = `lado`, entre 64 e 1600 — 1600 é a prévia grande do visor).
 
     O painel de mídias da Tabela de Preços pede 24 fotos de uma vez, e as
     fotos do fornecedor têm 0,3 a 1,5 MB cada: medido em 29/09/2026, a aba
     Fotos do Fossibot S7 baixava 24,8 MB para desenhar quadrados de 112 px
     (o MEGA entregava as 24 em 2,5 s; o resto era a internet de quem abria).
     A redução acontece aqui, onde o arquivo já desce do MEGA, e só a
-    miniatura atravessa a API. Imagem que o Pillow não abre → 422, e a API
-    cai para o arquivo inteiro.
+    miniatura atravessa a API. O que não abre → 422 (e fica anotado no cache
+    para não baixar de novo): imagem a API entrega inteira; arquivo de
+    gráfica fica com o ícone.
     """
-    from PIL import Image, ImageOps  # só este endpoint precisa
+    _validar_caminho(path)
+    lado = min(1600, max(64, lado))
+    ident = _identidade(path)
+    if ident is None:
+        raise HTTPException(404, "arquivo não encontrado")
+    pedido = _arquivo_cache(path, ident, lado)
+    try:
+        with open(pedido, "rb") as fh:
+            return _jpeg(fh.read(), "hit")
+    except OSError:
+        pass
+    falhou = _arquivo_cache(path, ident, 0, ".falhou")
+    try:
+        # Validade de 7 dias: se o que faltava era do servidor (poppler, fonte),
+        # a prévia volta sozinha depois de um deploy.
+        if time.time() - os.path.getmtime(falhou) < 7 * 86400:
+            raise HTTPException(422, "sem prévia (já tentado)")
+    except OSError:
+        pass
 
-    lado = min(800, max(64, lado))
+    ext = path.rsplit(".", 1)[-1].lower() if "." in path.rsplit("/", 1)[-1] else ""
+    lados = sorted({*_LADOS_PADRAO, lado})
     tmp, destino = _baixar(path)
     try:
         try:
-            with Image.open(destino) as im:
-                im.draft("RGB", (lado * 2, lado * 2))  # JPEG grande decodifica já reduzido
-                im = ImageOps.exif_transpose(im)
-                if im.mode in ("RGBA", "LA", "P"):
-                    im = im.convert("RGBA")
-                    fundo = Image.new("RGB", im.size, (255, 255, 255))
-                    fundo.paste(im, mask=im.getchannel("A"))
-                    im = fundo
-                elif im.mode != "RGB":
-                    im = im.convert("RGB")
-                im.thumbnail((lado, lado))
-                saida = io.BytesIO()
-                im.save(saida, "JPEG", quality=80, optimize=True)
-        except (OSError, ValueError, Image.DecompressionBombError) as exc:
-            raise HTTPException(422, f"não abriu como imagem: {exc}") from exc
+            saidas = _gerar_previas(destino, ext, lados, tmp)
+        except HTTPException as exc:
+            if exc.status_code == 422:  # o arquivo não tem prévia; 503 é da hora
+                _gravar_cache(falhou, b"")
+            raise
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
-    return Response(content=saida.getvalue(), media_type="image/jpeg")
+    for lado_gerado, dados in saidas.items():
+        _gravar_cache(_arquivo_cache(path, ident, lado_gerado), dados)
+    return _jpeg(saidas[lado], "miss")
 
 
 class ExportIn(BaseModel):

@@ -16,6 +16,13 @@ RUN apt-get update \
 
 RUN pip install --no-cache-dir fastapi uvicorn python-multipart pillow
 
+# Prévia de PDF/AI da aba Embalagens (pdftoppm). RUN separado de propósito:
+# mexer na linha do megacmd refaria a camada e atualizaria o MEGAcmd sem
+# ninguém pedir. poppler-data: fontes CJK dos PDFs de fornecedor chinês.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends poppler-utils poppler-data \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /srv
 COPY app.py .
 

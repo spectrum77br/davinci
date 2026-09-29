@@ -52,6 +52,7 @@ from app.services.mega_fotos import (
     sidecar_stream,
 )
 from app.services.mega_midias import (
+    EXT_COM_PREVIA,
     EXT_IMAGEM,
     EXT_VIDEO,
     RAIZ_POR_DEPARTAMENTO,
@@ -655,12 +656,13 @@ def _nome_invalido(nome: str) -> bool:
     # extensão, sem trecho vazio ou "." e sem curinga; nada legítimo é barrado.
     # Resta a subpasta com ponto no nome ("M2 v1.5"), que tem "extensão" —
     # essa só se fecha no sidecar, conferindo se o caminho é pasta.
+    # ".." vale como TRECHO ("../x", "a/../b"), não dentro do nome: o arquivo
+    # real "manual-uranyx-p01..af" (29/09) não abria nem baixava.
     return (
         not nome.strip()
-        or ".." in nome
         or nome.startswith("/")
         or any(ord(c) < 32 for c in nome)
-        or any(s.strip() in ("", ".") for s in nome.split("/"))
+        or any(s.strip() in ("", ".", "..") for s in nome.split("/"))
         or any(c in nome for c in "*?")
         or not extensao(nome)
     )
@@ -676,6 +678,7 @@ async def baixar_midia(
     nome: Annotated[str, Query(max_length=1000)],
     baixar: bool = False,
     miniatura: bool = False,
+    grande: bool = False,
 ) -> Response:
     """Os bytes de UM arquivo da pasta do produto.
 
@@ -683,6 +686,10 @@ async def baixar_midia(
     o resto saem SEMPRE como download (`octet-stream` + `attachment`), que o
     navegador não executa — SVG incluso, porque SVG carrega <script>.
     Vídeo não passa por aqui: são centenas de MB, e o MEGA toca melhor.
+
+    `miniatura=1` devolve um JPEG gerado pelo sidecar (320 px; `grande=1`,
+    1600 px para o visor): de foto, e também a PRÉVIA de PDF/AI/Affinity/PSD
+    (EXT_COM_PREVIA) — o arquivo em si continua só como download.
     """
     row = await _produto(session, user, product_id)
     if _nome_invalido(nome):
@@ -695,28 +702,38 @@ async def baixar_midia(
     # O MIME sai da EXTENSÃO, nunca do que o MEGA disser (mesma regra do
     # portal e dos anexos do Marketing).
     media, disposicao = mime_seguro(_EXT_IMAGEM.get(f".{ext}"), permitidos=MIMES_IMAGEM)
+    previa_de_arte = ext in EXT_COM_PREVIA
     if baixar:
         disposicao = "attachment"
-    elif miniatura and disposicao == "inline":
+    elif miniatura and (disposicao == "inline" or previa_de_arte):
         # A grade do painel pede a miniatura: 24 fotos do fornecedor eram
         # ~25 MB por aba (medido 29/09/2026 no Fossibot S7). O sidecar reduz
         # para JPEG de 320 px. Sidecar antigo (sem /thumb, 404) ou imagem que
-        # não abre (422) → segue para o arquivo inteiro, como antes.
+        # não abre (422) → segue para o arquivo inteiro, como antes. Arte
+        # (PDF/.af…) que não gera prévia NUNCA cai no arquivo inteiro inline:
+        # 404 sem_previa, e a tela mostra o ícone com o Baixar.
         try:
             menor = await sidecar_bytes(
-                "/thumb", params={"path": f"{row.fotos_path}/{nome}", "lado": 320}
+                "/thumb",
+                params={"path": f"{row.fotos_path}/{nome}", "lado": 1600 if grande else 320},
             )
         except MegaError as exc:
             if exc.status_code == 400:
                 raise HTTPException(400, detail={"code": "nome_invalido"}) from exc
             if exc.status_code not in (404, 422):
                 raise _sidecar_http_error(exc) from exc
+            if previa_de_arte:
+                raise HTTPException(404, detail={"code": "sem_previa"}) from exc
         else:
             return Response(
                 content=menor,
                 media_type="image/jpeg",
                 headers={
-                    "Content-Disposition": disposicao_segura("inline", nome),
+                    # Nome .jpg: é um JPEG — "Salvar imagem como…" da prévia de
+                    # "caixa.pdf" gravava um JPEG chamado .pdf.
+                    "Content-Disposition": disposicao_segura(
+                        "inline", f"{nome.rsplit('.', 1)[0]}.jpg"
+                    ),
                     "X-Content-Type-Options": "nosniff",
                     "Cache-Control": "private, max-age=86400",
                 },
