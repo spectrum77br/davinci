@@ -19,6 +19,8 @@ Fluxo do operador:
   * POST /products/{id}/recontar → reconta só a pasta daquele produto.
   * GET  /products/{id}/midias(?tipo=) e /midias/arquivo → a tela vê e baixa
                     fotos/embalagens sem sair do DaVinci.
+  * GET  /products/{id}/midias/video → toca o vídeo (MP4 convertido pelo
+                    sidecar, com Range); a capa sai do /midias/arquivo.
   * GET  /pastas, PUT/DELETE /products/{id}/pasta → trocar ou desligar a
                     pasta de UM produto, escolhendo da lista real do MEGA.
 
@@ -31,7 +33,7 @@ from typing import Annotated, Any, Literal
 from uuid import UUID
 
 import structlog
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -50,6 +52,7 @@ from app.services.mega_fotos import (
     sidecar_bytes,
     sidecar_request,
     sidecar_stream,
+    sidecar_stream_repasse,
 )
 from app.services.mega_midias import (
     EXT_COM_PREVIA,
@@ -685,24 +688,38 @@ async def baixar_midia(
     Imagem que o navegador desenha sai inline (miniatura); PDF, AI, PSD, ZIP e
     o resto saem SEMPRE como download (`octet-stream` + `attachment`), que o
     navegador não executa — SVG incluso, porque SVG carrega <script>.
-    Vídeo não passa por aqui: são centenas de MB, e o MEGA toca melhor.
+    O original de vídeo não passa por aqui: são centenas de MB, e o MEGA
+    entrega melhor (o que a tela toca vem de /midias/video).
 
     `miniatura=1` devolve um JPEG gerado pelo sidecar (320 px; `grande=1`,
-    1600 px para o visor): de foto, e também a PRÉVIA de PDF/AI/Affinity/PSD
-    (EXT_COM_PREVIA) — o arquivo em si continua só como download.
+    1600 px para o visor): de foto, a PRÉVIA de PDF/AI/Affinity/PSD
+    (EXT_COM_PREVIA) e a CAPA de vídeo — o arquivo em si continua só como
+    download (ou, no vídeo, só no MEGA).
     """
     row = await _produto(session, user, product_id)
     if _nome_invalido(nome):
         raise HTTPException(400, detail={"code": "nome_invalido"})
-    if not row.fotos_path:
+    pasta = row.fotos_path
+    if not pasta:
         raise HTTPException(404, detail={"code": "sem_pasta"})
+    # Devolve a conexão do banco ANTES do sidecar (revisão de 29/09): a grade
+    # pede 24 miniaturas de uma vez e um download de arte grande leva
+    # segundos — com a sessão aberta, cada pedido segurava uma conexão do
+    # pool parada, e uma aba cheia esgotava o pool da API inteira.
+    await session.close()
     ext = extensao(nome)
-    if ext in EXT_VIDEO:
+    video = ext in EXT_VIDEO
+    if video and (baixar or not miniatura):
+        # O ORIGINAL do vídeo continua não passando pelo DaVinci (centenas de
+        # MB, e o MEGA entrega melhor). O que a tela toca é o MP4 convertido,
+        # em /midias/video; aqui só sai a capa (miniatura).
         raise HTTPException(400, detail={"code": "video_abre_no_mega"})
     # O MIME sai da EXTENSÃO, nunca do que o MEGA disser (mesma regra do
     # portal e dos anexos do Marketing).
     media, disposicao = mime_seguro(_EXT_IMAGEM.get(f".{ext}"), permitidos=MIMES_IMAGEM)
-    previa_de_arte = ext in EXT_COM_PREVIA
+    # Capa de vídeo segue o caminho da prévia de arte: se não sair, 404
+    # sem_previa (a tela volta ao ícone de filme) — nunca o arquivo inteiro.
+    previa_de_arte = ext in EXT_COM_PREVIA or video
     if baixar:
         disposicao = "attachment"
     elif miniatura and (disposicao == "inline" or previa_de_arte):
@@ -715,7 +732,14 @@ async def baixar_midia(
         try:
             menor = await sidecar_bytes(
                 "/thumb",
-                params={"path": f"{row.fotos_path}/{nome}", "lado": 1600 if grande else 320},
+                params={
+                    "path": f"{pasta}/{nome}",
+                    "lado": 1600 if grande else 320,
+                    # Capa de vídeo: só a que já existe (o sidecar responde
+                    # 404 na hora). Converter é do play e do pré-aquecimento.
+                    "preparar": 0 if video else 1,
+                },
+                timeout=600.0,
             )
         except MegaError as exc:
             if exc.status_code == 400:
@@ -740,7 +764,7 @@ async def baixar_midia(
             )
     try:
         pedacos, fechar = await sidecar_stream(
-            "/file", params={"path": f"{row.fotos_path}/{nome}"}
+            "/file", params={"path": f"{pasta}/{nome}"}
         )
     except MegaError as exc:
         if exc.status_code == 404:
@@ -755,6 +779,94 @@ async def baixar_midia(
             "Content-Disposition": disposicao_segura(disposicao, nome),
             "X-Content-Type-Options": "nosniff",
             # Conteúdo de catálogo muda pouco e a volta ao MEGA é cara.
+            "Cache-Control": "private, max-age=86400",
+        },
+        background=BackgroundTask(fechar),
+    )
+
+
+# Headers do sidecar que o <video> precisa ver: tamanho e trecho (206), e os
+# validadores — com eles o navegador manda If-Range e nunca emenda pedaços de
+# duas versões do vídeo (arquivo trocado no MEGA com o mesmo nome).
+_HEADERS_DO_VIDEO = {
+    "content-length": "Content-Length",
+    "content-range": "Content-Range",
+    "etag": "ETag",
+    "last-modified": "Last-Modified",
+}
+
+
+@router.get("/products/{product_id}/midias/video")
+async def ver_video(
+    product_id: UUID,
+    request: Request,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[
+        User, Depends(require_permission("tabela_precos_produtos", "view"))
+    ],
+    nome: Annotated[str, Query(max_length=1000)],
+) -> Response:
+    """O vídeo para tocar no painel de mídias, sem abrir o MEGA.
+
+    Eduardo, 29/09/2026, com o print da aba Vídeos só com "Abrir no MEGA":
+    "não tem como eles aparecerem aqui também?". Sai o MP4 que o sidecar
+    converteu (H.264, lado maior até 1280 px: 149 MB viraram 18 MB), não o
+    original — há vídeo HEVC no acervo, que o Chrome nem toca.
+
+    O header Range vai e volta (206 + Content-Range): é assim que o <video>
+    começa a tocar antes de baixar tudo e pula para o meio. A 1ª vez de um
+    vídeo converte antes de responder (segundos; minuto e meio no maior) —
+    o pré-aquecimento da madrugada faz isso antes de alguém abrir.
+    """
+    row = await _produto(session, user, product_id)
+    if _nome_invalido(nome) or extensao(nome) not in EXT_VIDEO:
+        raise HTTPException(400, detail={"code": "nome_invalido"})
+    if not row.fotos_path:
+        raise HTTPException(404, detail={"code": "sem_pasta"})
+    caminho = f"{row.fotos_path}/{nome}"
+    # Devolve a conexão do banco ANTES de esperar o sidecar: a 1ª conversão
+    # leva minutos e o vídeo fica tocando (streaming) o tempo que a pessoa
+    # assistir — com a sessão aberta, cada vídeo na tela segurava uma conexão
+    # do pool (10+20) parada "idle in transaction".
+    await session.close()
+
+    entrada = {
+        k: v
+        for k, v in (("Range", request.headers.get("range")),
+                     ("If-Range", request.headers.get("if-range")))
+        if v
+    }
+    try:
+        status, cabecalhos, pedacos, fechar = await sidecar_stream_repasse(
+            "/video", params={"path": caminho}, headers=entrada, timeout=1800.0
+        )
+    except MegaError as exc:
+        if exc.status_code == 404:
+            raise HTTPException(404, detail={"code": "arquivo_nao_encontrado"}) from exc
+        if exc.status_code == 400:
+            raise HTTPException(400, detail={"code": "nome_invalido"}) from exc
+        if exc.status_code == 422:
+            # O ffmpeg não leu o arquivo (corrompido, só áudio): fica anotado
+            # no sidecar; a tela mostra "Abrir no MEGA".
+            raise HTTPException(404, detail={"code": "sem_previa"}) from exc
+        if exc.status_code == 416:
+            # Trecho fora do arquivo (o vídeo foi reconvertido e ficou menor):
+            # o navegador pede de novo sem Range.
+            raise HTTPException(416, detail={"code": "trecho_invalido"}) from exc
+        raise _sidecar_http_error(exc) from exc
+    saida = {
+        nome_saida: cabecalhos[chave]
+        for chave, nome_saida in _HEADERS_DO_VIDEO.items()
+        if chave in cabecalhos
+    }
+    return StreamingResponse(
+        pedacos,
+        status_code=status,
+        media_type="video/mp4",
+        headers={
+            **saida,
+            "Accept-Ranges": "bytes",
+            "X-Content-Type-Options": "nosniff",
             "Cache-Control": "private, max-age=86400",
         },
         background=BackgroundTask(fechar),

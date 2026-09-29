@@ -386,15 +386,19 @@ def file(path: str, _: None = Depends(check_token)):
     )
 
 
-def _baixar(path: str) -> tuple[str, str]:
+def _baixar(path: str, timeout: int = 600) -> tuple[str, str]:
     """`mega-get` de UM arquivo para um diretório temporário: (tmp, arquivo).
     Quem chama apaga o tmp depois de usar."""
     nome = _validar_caminho(path)
     tmp = tempfile.mkdtemp(prefix="megafile")
-    rc, out = run(["mega-get", path, tmp], timeout=600)
+    rc, out = run(["mega-get", path, tmp], timeout=timeout)
     destino = os.path.join(tmp, nome)
     if rc != 0 or not os.path.isfile(destino):
         shutil.rmtree(tmp, ignore_errors=True)
+        if rc == 124:
+            # Estourou o tempo (vídeo de 150 MB com o MEGA lento): é da hora,
+            # não do arquivo — 404 mandava a tela dizer "apagado no MEGA".
+            raise HTTPException(503, f"download não terminou: {out[-300:]}")
         raise HTTPException(404, f"não baixou: {out[-300:]}")
     return tmp, destino
 
@@ -641,12 +645,27 @@ def _limpar_cache_ao_subir() -> None:
     threading.Thread(target=_limpar_cache, daemon=True).start()
 
 
+# Vídeo (29/09/2026): a capa de um vídeo ainda não convertido segura a thread
+# do pedido enquanto espera a vez da conversão (uma por vez; 89 s no vídeo de
+# 149 MB). Uma aba de vídeos aberta com o cache frio são 10-15 capas esperando
+# juntas; duas pessoas assim esgotavam as 40 threads padrão e o sidecar
+# inteiro (fotos, portal das agências, /health) parava junto. Thread parada
+# esperando trava não custa CPU.
+@app.on_event("startup")
+async def _mais_threads() -> None:
+    import anyio.to_thread
+
+    anyio.to_thread.current_default_thread_limiter().total_tokens = 100
+
+
 def _jpeg(dados: bytes, cache: str) -> Response:
     return Response(content=dados, media_type="image/jpeg", headers={"X-Previa-Cache": cache})
 
 
 @app.get("/thumb")
-def thumb(path: str, lado: int = 320, _: None = Depends(check_token)) -> Response:
+def thumb(
+    path: str, lado: int = 320, preparar: int = 1, _: None = Depends(check_token)
+) -> Response:
     """Miniatura JPEG de UMA imagem, ou prévia de PDF/AI/Affinity/PSD (lado
     maior = `lado`, entre 64 e 1600 — 1600 é a prévia grande do visor).
 
@@ -658,6 +677,15 @@ def thumb(path: str, lado: int = 320, _: None = Depends(check_token)) -> Respons
     miniatura atravessa a API. O que não abre → 422 (e fica anotado no cache
     para não baixar de novo): imagem a API entrega inteira; arquivo de
     gráfica fica com o ícone.
+
+    Vídeo: a miniatura é a CAPA (um quadro do MP4 que o /video toca). A 1ª
+    capa de um vídeo converte o vídeo inteiro (ver _garantir_mp4) — é o que o
+    pré-aquecimento da madrugada pede, para ninguém esperar isso na tela.
+    `preparar=0` (a grade e o visor pedem assim): capa de vídeo que ainda não
+    existe dá 404 NA HORA, sem converter — senão uma grade de 11 vídeos novos
+    enfileirava 11 conversões, e o vídeo que a pessoa clicou esperava atrás
+    de todas (revisão de 29/09). Quem converte é o play (/video) e o
+    pré-aquecimento.
     """
     _validar_caminho(path)
     lado = min(1600, max(64, lado))
@@ -672,6 +700,15 @@ def thumb(path: str, lado: int = 320, _: None = Depends(check_token)) -> Respons
         return _jpeg(dados, "hit")
     except OSError:
         pass
+    nome = path.rsplit("/", 1)[-1]
+    if (
+        not preparar
+        and "." in nome
+        and nome.rsplit(".", 1)[-1].lower() in _VID_EXT
+        # MP4 já convertido (alguém deu play): tirar a capa dele é barato.
+        and not os.path.exists(_arquivo_cache(path, ident, 0, ".mp4"))
+    ):
+        raise HTTPException(404, "vídeo ainda não preparado")
     with _trava_do_arquivo(f"{path}\0{ident}"):
         # Outro pedido pode ter gerado enquanto este esperava a vez.
         try:
@@ -682,31 +719,219 @@ def thumb(path: str, lado: int = 320, _: None = Depends(check_token)) -> Respons
         return _gerar_e_guardar(path, ident, lado)
 
 
-def _gerar_e_guardar(path: str, ident: str, lado: int) -> Response:
+def _marca_de_falha(path: str, ident: str) -> str:
+    """Caminho do ".falhou" do arquivo — 422 se ele marca uma falha recente.
+
+    Validade de 7 dias: se o que faltava era do servidor (poppler, ffmpeg,
+    fonte), a prévia volta sozinha depois de um deploy."""
     falhou = _arquivo_cache(path, ident, 0, ".falhou")
     try:
-        # Validade de 7 dias: se o que faltava era do servidor (poppler, fonte),
-        # a prévia volta sozinha depois de um deploy.
         if time.time() - os.path.getmtime(falhou) < 7 * 86400:
             raise HTTPException(422, "sem prévia (já tentado)")
     except OSError:
         pass
+    return falhou
 
-    ext = path.rsplit(".", 1)[-1].lower() if "." in path.rsplit("/", 1)[-1] else ""
+
+def _ext(path: str) -> str:
+    folha = path.rsplit("/", 1)[-1]
+    return folha.rsplit(".", 1)[-1].lower() if "." in folha else ""
+
+
+def _gerar_e_guardar(path: str, ident: str, lado: int) -> Response:
+    falhou = _marca_de_falha(path, ident)
+    ext = _ext(path)
     lados = sorted({*_LADOS_PADRAO, lado})
-    tmp, destino = _baixar(path)
     try:
-        try:
-            saidas = _gerar_previas(destino, ext, lados, tmp)
-        except HTTPException as exc:
-            if exc.status_code == 422:  # o arquivo não tem prévia; 503 é da hora
-                _gravar_cache(falhou, b"")
-            raise
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+        if ext in _VID_EXT:
+            # A capa do vídeo sai do MP4 convertido (ver _garantir_mp4): a
+            # mesma descida prepara o que o visor vai tocar.
+            saidas = _capas_do_video(path, ident, lados)
+        else:
+            saidas = _previas_do_arquivo(path, ext, lados)
+    except HTTPException as exc:
+        if exc.status_code == 422:  # o arquivo não tem prévia; 503 é da hora
+            _gravar_cache(falhou, b"")
+        raise
     for lado_gerado, dados in saidas.items():
         _gravar_cache(_arquivo_cache(path, ident, lado_gerado), dados)
     return _jpeg(saidas[lado], "miss")
+
+
+def _previas_do_arquivo(path: str, ext: str, lados: list[int]) -> dict[int, bytes]:
+    tmp, destino = _baixar(path)
+    try:
+        return _gerar_previas(destino, ext, lados, tmp)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+# ── vídeo no painel, sem abrir o MEGA (29/09/2026) ──
+#
+# Eduardo, com o print da aba Vídeos mostrando só "Airfryer.mp4 — Abrir no
+# MEGA": "não tem como eles aparecerem aqui também?". O original não serve para
+# tocar no navegador: há vídeo HEVC no acervo ("Fossibot F109S/0825(1).mp4"),
+# que o Chrome não toca; os 5 conferidos têm o índice ("moov") no FIM; e o
+# acervo (93 vídeos, 2,9 GB em 29/09) chega a 149 MB num arquivo só — o
+# DaVinci repassaria tudo isso a cada abertura. Cada vídeo é convertido UMA vez
+# (sob a trava do arquivo) para MP4 H.264/AAC com o lado maior em até 1280 px e
+# o índice no começo (+faststart), e fica no mesmo cache das prévias, com a
+# mesma chave (tamanho+data no MEGA: trocou o arquivo, converte de novo). A
+# capa da grade e do visor é um quadro desse MP4, nas mesmas chaves do /thumb.
+_VIDEO_LADO = 1280
+_VIDEO_TIMEOUT = 1800
+# Lado maior ≤ 1280 (vídeo em pé de celular também: limitar só a largura
+# deixava um 1080x1920 em 1080x1920) e sempre par — o yuv420p exige. As aspas
+# simples protegem as vírgulas da expressão no filtergraph; o -2 do outro lado
+# mantém a proporção, também par.
+_ESCALA_VIDEO = (
+    f"scale=w='if(gte(iw,ih),trunc(min({_VIDEO_LADO},iw)/2)*2,-2)'"
+    f":h='if(gte(iw,ih),-2,trunc(min({_VIDEO_LADO},ih)/2)*2)'"
+)
+# UMA conversão por vez no servidor inteiro: são 4 núcleos para API, web,
+# worker e banco. Com o `nice` e 2 threads, a conversão só usa o que sobra.
+_CONVERTENDO = threading.Semaphore(1)
+# Download de vídeo também com teto: é o mesmo MEGAcmd que desce as fotos da
+# tela e do portal das agências, e cada vídeo espera a vez da conversão com o
+# original no disco.
+_BAIXANDO_VIDEO = threading.Semaphore(2)
+
+
+def _falha_do_ffmpeg(rc: int, out: str, oque: str) -> HTTPException:
+    # Estourou o tempo, foi morto (memória) ou o disco encheu: é da hora, não
+    # do arquivo — 503 não fica anotado como "sem prévia". O resto é vídeo
+    # que o ffmpeg não lê (arquivo corrompido, só áudio): 422, anotado.
+    if rc == 124 or rc < 0 or "No space left" in out:
+        return HTTPException(503, f"{oque} não terminou: {out[-300:]}")
+    return HTTPException(422, f"{oque} falhou: {out[-300:]}")
+
+
+def _converter_video(origem: str, destino: str) -> None:
+    cmd = [
+        "nice", "-n", "15",
+        "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+        "-i", origem,
+        # Só a 1ª trilha de vídeo e a 1ª de áudio, se houver: .MOV de iPhone
+        # traz trilhas de metadados que o MP4 recusa.
+        "-map", "0:v:0", "-map", "0:a:0?",
+        "-vf", _ESCALA_VIDEO,
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "27", "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-b:a", "96k", "-ac", "2",
+        # O índice no começo: o navegador começa a tocar sem baixar tudo e
+        # consegue pular para o meio (Range).
+        "-movflags", "+faststart",
+        # Áudio esparso ou trilha que começa depois enchem a fila do muxer
+        # ("Too many packets buffered") e derrubavam arquivo bom.
+        "-max_muxing_queue_size", "1024",
+        "-threads", "2",
+        # O destino é um ".tmp" (troca atômica): o formato vai explícito.
+        "-f", "mp4", destino,
+    ]
+    with _CONVERTENDO:
+        rc, out = run(cmd, timeout=_VIDEO_TIMEOUT)
+    if rc != 0 or not os.path.isfile(destino) or os.path.getsize(destino) == 0:
+        raise _falha_do_ffmpeg(rc, out, "conversão do vídeo")
+
+
+def _garantir_mp4(path: str, ident: str) -> str:
+    """MP4 tocável do vídeo, do cache ou convertido agora. Chame SOB a trava
+    do arquivo: dois pedidos juntos (grade e visor) convertem uma vez só."""
+    mp4 = _arquivo_cache(path, ident, 0, ".mp4")
+    if os.path.isfile(mp4):
+        _usado_agora(mp4)
+        return mp4
+    with _BAIXANDO_VIDEO:
+        tmp, original = _baixar(path, timeout=_VIDEO_TIMEOUT)
+    parcial = None
+    try:
+        try:
+            # Converte direto AO LADO do destino e troca de uma vez: quem ler
+            # no meio nunca pega meio MP4, e não há cópia de 50 MB entre discos
+            # (o /tmp do container e o volume do cache são sistemas diferentes).
+            # ".tmp" largado (container morto no meio) sai na limpeza de 1 dia.
+            os.makedirs(os.path.dirname(mp4), exist_ok=True)
+            fd, parcial = tempfile.mkstemp(dir=os.path.dirname(mp4), suffix=".tmp")
+            os.close(fd)
+        except OSError as exc:
+            raise HTTPException(503, f"sem lugar para guardar o vídeo: {exc}") from exc
+        _converter_video(original, parcial)
+        try:
+            os.replace(parcial, mp4)
+        except OSError as exc:
+            raise HTTPException(503, f"não guardou o vídeo: {exc}") from exc
+        parcial = None
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+        if parcial:
+            try:
+                os.unlink(parcial)
+            except OSError:
+                pass
+    return mp4
+
+
+def _capas_do_mp4(mp4: str, lados: list[int], tmp: str) -> dict[int, bytes]:
+    quadro = os.path.join(tmp, "capa.png")
+    out = ""
+    # ~1 s para dentro: o quadro 0 costuma ser preto ou o começo de um fade.
+    # Vídeo mais curto que isso não tem quadro em 1 s (o ffmpeg sai com 0 e
+    # não grava nada) — aí vale o quadro 0.
+    for inicio in ("1", "0"):
+        rc, out = run(
+            ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-ss", inicio,
+             "-i", mp4, "-frames:v", "1", "-update", "1", quadro],
+            timeout=180,
+        )
+        if rc == 124 or rc < 0:
+            raise _falha_do_ffmpeg(rc, out, "capa do vídeo")
+        if rc == 0 and os.path.isfile(quadro) and os.path.getsize(quadro) > 0:
+            return _gerar_previas(quadro, "png", lados, tmp)
+    raise HTTPException(422, f"vídeo sem quadro para a capa: {out[-300:]}")
+
+
+def _capas_do_video(path: str, ident: str, lados: list[int]) -> dict[int, bytes]:
+    mp4 = _garantir_mp4(path, ident)
+    tmp = tempfile.mkdtemp(prefix="megacapa")
+    try:
+        return _capas_do_mp4(mp4, lados, tmp)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+@app.get("/video")
+def video(path: str, _: None = Depends(check_token)):
+    """O vídeo convertido para tocar no navegador (MP4 H.264, lado maior até
+    1280 px), com Range — o <video> pula para o meio pedindo só aquele trecho.
+
+    Na 1ª vez baixa do MEGA e converte (de segundos a minutos, conforme o
+    tamanho); depois sai do cache em disco. O arquivo ORIGINAL nunca sai por
+    aqui: quem quer o original abre no MEGA.
+    """
+    _validar_caminho(path)
+    if _ext(path) not in _VID_EXT:
+        raise HTTPException(400, "não é vídeo")
+    ident = _identidade(path)
+    if ident is None:
+        raise HTTPException(404, "arquivo não encontrado")
+    mp4 = _arquivo_cache(path, ident, 0, ".mp4")
+    cache = "hit"
+    if os.path.isfile(mp4):
+        _usado_agora(mp4)
+    else:
+        cache = "miss"
+        with _trava_do_arquivo(f"{path}\0{ident}"):
+            # Outro pedido (a capa da grade, o pré-aquecimento) pode ter
+            # convertido enquanto este esperava a vez.
+            if not os.path.isfile(mp4):
+                falhou = _marca_de_falha(path, ident)
+                try:
+                    _garantir_mp4(path, ident)
+                except HTTPException as exc:
+                    if exc.status_code == 422:
+                        _gravar_cache(falhou, b"")
+                    raise
+    # FileResponse do Starlette atende Range (206 + Content-Range) e If-Range.
+    return FileResponse(mp4, media_type="video/mp4", headers={"X-Previa-Cache": cache})
 
 
 class ExportIn(BaseModel):

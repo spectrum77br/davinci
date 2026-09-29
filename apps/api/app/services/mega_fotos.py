@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 
 import httpx
@@ -122,6 +122,56 @@ async def sidecar_stream(
         await client.aclose()
 
     return resp.aiter_bytes(), fechar
+
+
+async def sidecar_stream_repasse(
+    path: str,
+    *,
+    params: dict[str, Any],
+    headers: dict[str, str] | None = None,
+    timeout: float = 1800.0,
+) -> tuple[int, dict[str, str], AsyncIterator[bytes], Callable[[], Awaitable[None]]]:
+    """Como `sidecar_stream`, mas repassa headers de ENTRADA (Range) e devolve
+    também o status e os headers da resposta: (status, headers, pedaços,
+    fechar).
+
+    Existe por causa do vídeo no painel de mídias (29/09/2026): o <video> do
+    navegador pede o arquivo aos pedaços (`Range: bytes=…`) para começar a
+    tocar e para pular para o meio, e só funciona se o 206 e o Content-Range
+    do sidecar chegarem até ele. Nada é carregado na memória da API. Erro
+    (status ≥ 400) vira MegaError com o status do sidecar, antes do 1º byte.
+    `timeout` longo de propósito: a 1ª vez de um vídeo baixa do MEGA e
+    converte antes de responder (minutos, no vídeo de 150 MB).
+    """
+    settings = get_settings()
+    client = httpx.AsyncClient(
+        base_url=settings.mega_sidecar_url,
+        headers=_headers(),
+        timeout=httpx.Timeout(timeout, connect=10.0),
+    )
+    try:
+        resp = await client.send(
+            client.build_request("GET", path, params=params, headers=headers or {}),
+            stream=True,
+        )
+    except httpx.HTTPError as exc:
+        await client.aclose()
+        raise MegaError(f"sidecar MEGA inacessível: {exc}", 503) from exc
+    if resp.status_code >= 400:
+        await resp.aclose()
+        await client.aclose()
+        raise MegaError(f"sidecar HTTP {resp.status_code}", resp.status_code)
+
+    async def fechar() -> None:
+        await resp.aclose()
+        await client.aclose()
+
+    # Chaves em minúsculas: quem chama escolhe o que repassar sem se preocupar
+    # com a grafia que o servidor usou.
+    cabecalhos = {k.lower(): v for k, v in resp.headers.items()}
+    # O sidecar não comprime (uvicorn sem GZip): os bytes decodificados são
+    # os mesmos do Content-Length que é repassado.
+    return resp.status_code, cabecalhos, resp.aiter_bytes(), fechar
 
 
 _NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")

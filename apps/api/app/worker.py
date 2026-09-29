@@ -2510,12 +2510,15 @@ async def mega_previas_aquecer(ctx: dict) -> None:
     """Madrugada, depois da recontagem: deixa prontas as miniaturas e prévias
     de todas as pastas de produto no cache do sidecar (29/09/2026 — "para
     todos precisa ser rápido"). O que já está pronto custa um `mega-ls`; só
-    o arquivo novo ou trocado é baixado do MEGA."""
+    o arquivo novo ou trocado é baixado do MEGA. Desde 29/09 também converte
+    os vídeos para o visor do painel (um por vez; ~0,8 s de CPU por MB,
+    medido em produção: 15-45 min na 1ª rodada dos 2,9 GB, conforme a carga
+    do servidor — depois, só o vídeo novo)."""
     from app.services.mega_fotos import MegaError
     from app.services.mega_midias import aquecer_previas, pastas_de_produto
 
     try:
-        # Sessão curta só para ler as pastas: o aquecimento leva até 1 h e não
+        # Sessão curta só para ler as pastas: o aquecimento leva até 2 h e não
         # pode segurar uma transação aberta esse tempo todo.
         async with session_scope() as s:
             pastas = await pastas_de_produto(s)
@@ -3684,7 +3687,8 @@ class WorkerSettings:
         historico_manutencao,
         condicao_especial_gc,
         func(mega_midias_recontar, timeout=2400),
-        func(mega_previas_aquecer, timeout=3600),
+        # 2 h: a 1ª rodada com os vídeos converte o acervo inteiro (2,9 GB).
+        func(mega_previas_aquecer, timeout=7200),
         margem_reavaliar_reprovados,
         low_stock_polling,
         import_listings_run,
@@ -3924,8 +3928,9 @@ class WorkerSettings:
         # 40 min de teto porque o /folders do sidecar tem 30.
         cron(mega_midias_recontar, hour=7, minute=25, run_at_startup=False, timeout=2400),
         # Prévias prontas para o painel de mídias: 04:50 BRT, depois da
-        # recontagem. 1ª rodada baixa o acervo (~1,3 GB); depois, só o novo.
-        cron(mega_previas_aquecer, hour=7, minute=50, run_at_startup=False, timeout=3600),
+        # recontagem. 1ª rodada baixa o acervo (~1,3 GB de fotos e 2,9 GB de
+        # vídeo, que é convertido um por vez); depois, só o novo. 2 h de teto.
+        cron(mega_previas_aquecer, hour=7, minute=50, run_at_startup=False, timeout=7200),
         cron(failed_jobs_alert_scan, minute=_TWO_MIN, run_at_startup=False),
         cron(webhook_signature_alert_scan, minute={5, 35}, run_at_startup=False),
         cron(low_stock_polling, minute=_TWO_MIN, run_at_startup=False),

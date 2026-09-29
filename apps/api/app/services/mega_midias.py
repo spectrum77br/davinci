@@ -293,16 +293,25 @@ async def aquecer_previas(
     data do arquivo no MEGA): depois da 1ª vez, cada item custa um `mega-ls`
     (~70 ms) e só o que é novo ou mudou é baixado. `paralelo` baixo de
     propósito: é o mesmo MEGAcmd que atende a tela e o portal das agências.
-    Vídeo fica de fora (abre no MEGA). Não mexe no banco.
+    Não mexe no banco.
+
+    Vídeos (29/09/2026, "não tem como eles aparecerem aqui também?"): depois
+    das fotos, UM de cada vez — a capa pedida ao sidecar converte o vídeo
+    inteiro para o MP4 que o visor toca (medido em produção com o servidor
+    ocupado: 3 s num vídeo de 2 MB, 18 s em 32 MB, 89 s no maior, de 149 MB —
+    37 s com ele folgado). É o que tira da tela o
+    "Preparando o vídeo…" da 1ª vez. O sidecar já converte um por vez; mais
+    de um pedido aqui só deixaria o pedido de quem está na tela para trás.
     """
     if pastas is None:
         if session is None:
             raise ValueError("aquecer_previas precisa de session ou pastas")
         pastas = await pastas_de_produto(session)
     alvos: list[str] = []
+    videos: list[str] = []
     erros_lista = 0
     for pasta in pastas:
-        for tipo in ("imagens", "embalagens"):
+        for tipo in ("imagens", "embalagens", "videos"):
             try:
                 resp = await sidecar_request(
                     "GET", "/files", params={"path": pasta, "tipo": tipo}, timeout=300.0
@@ -312,7 +321,12 @@ async def aquecer_previas(
                 continue
             for a in resp.get("arquivos") or []:
                 nome = str(a.get("nome") or "")
-                if a.get("imagem") or extensao(nome) in EXT_COM_PREVIA:
+                if tipo == "videos":
+                    # Extensão conferida aqui também: sidecar antigo ignora
+                    # `tipo` e devolveria as fotos de novo.
+                    if extensao(nome) in EXT_VIDEO:
+                        videos.append(f"{pasta}/{nome}")
+                elif a.get("imagem") or extensao(nome) in EXT_COM_PREVIA:
                     alvos.append(f"{pasta}/{nome}")
 
     sem = asyncio.Semaphore(max(1, paralelo))
@@ -328,11 +342,32 @@ async def aquecer_previas(
                 falhas += 1  # 422 = sem prévia (fica anotado no sidecar)
 
     await asyncio.gather(*(um(c) for c in dict.fromkeys(alvos)))
+
+    sem_video = asyncio.Semaphore(1)
+    videos_prontos = videos_falhas = 0
+
+    async def um_video(caminho: str) -> None:
+        nonlocal videos_prontos, videos_falhas
+        async with sem_video:
+            try:
+                await sidecar_bytes(
+                    "/thumb", params={"path": caminho, "lado": 320}, timeout=1800.0
+                )
+                videos_prontos += 1
+            except MegaError:
+                # 422 = o ffmpeg não leu o arquivo (fica anotado no sidecar);
+                # 503 = estourou o tempo — a próxima madrugada tenta de novo.
+                videos_falhas += 1
+
+    await asyncio.gather(*(um_video(c) for c in dict.fromkeys(videos)))
     return {
         "pastas": len(pastas),
         "arquivos": len(set(alvos)),
         "prontos": feitos,
         "sem_previa": falhas,
         "pastas_com_erro": erros_lista,
+        "videos": len(set(videos)),
+        "videos_prontos": videos_prontos,
+        "videos_sem_previa": videos_falhas,
     }
 

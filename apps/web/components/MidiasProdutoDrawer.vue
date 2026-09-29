@@ -12,7 +12,7 @@
 import {
   X, Loader2, Upload, ExternalLink, Copy, FolderOpen, FolderSync, FolderX,
   Image as ImageIcon, Film, Package, FileText, Download, ChevronLeft,
-  ChevronRight, RefreshCw, AlertCircle, Search,
+  ChevronRight, RefreshCw, AlertCircle, Search, Play,
 } from 'lucide-vue-next'
 
 type Aba = 'fotos' | 'videos' | 'embalagens'
@@ -382,8 +382,13 @@ function temPrevia(a: Arquivo): boolean {
   return !a.imagem && EXT_COM_PREVIA.has(extDe(a))
 }
 
+// Vídeo também ganha miniatura: a CAPA (um quadro do MP4 que o servidor
+// converte para tocar no visor). Eduardo 29/09, com o print da aba Vídeos só
+// com "Abrir no MEGA": "não tem como eles aparecerem aqui também?". Se a capa
+// não sair (vídeo que o servidor não lê), `falhas` devolve o cartão com o
+// ícone de filme e o "Abrir no MEGA", como antes.
 function mostraMiniatura(a: Arquivo): boolean {
-  return (a.imagem || temPrevia(a)) && !falhas.has(a.nome)
+  return (a.imagem || temPrevia(a) || ehVideo(a)) && !falhas.has(a.nome)
 }
 
 // O visor abre a versão de 1600 px (JPEG gerado e guardado no servidor), não
@@ -403,6 +408,13 @@ function urlArquivo(nome: string, baixar = false, miniatura = false): string {
   return `/api/pricing/mega/products/${props.produto.id}/midias/arquivo?nome=${encodeURIComponent(nome)}${baixar ? '&baixar=1' : ''}${miniatura ? '&miniatura=1' : ''}`
 }
 
+// O vídeo que o visor toca: MP4 convertido no servidor (lado maior até 1280
+// px — o de 149 MB vira 18 MB), com Range para começar antes de baixar tudo
+// e pular para o meio. O original não passa pelo DaVinci: fica no MEGA.
+function urlVideo(a: Arquivo): string {
+  return `/api/pricing/mega/products/${props.produto.id}/midias/video?nome=${encodeURIComponent(a.nome)}`
+}
+
 const textoVazio = computed(() => {
   if (aba.value === 'embalagens')
     return props.podeEditar
@@ -417,7 +429,11 @@ const textoVazio = computed(() => {
 })
 
 // ------------------------------------------------------------ visor de imagem
-const imagensAba = computed(() => arquivosAba.value.filter((a) => mostraMiniatura(a)))
+// O que abre no visor (e anda com Anterior/Próxima): o que tem miniatura —
+// foto, prévia de arte e, na aba Vídeos, os vídeos com capa.
+// Vídeo entra no visor mesmo sem capa: a capa só existe depois da 1ª
+// conversão (play ou pré-aquecimento), e sem ela o vídeo novo não abria.
+const imagensAba = computed(() => arquivosAba.value.filter((a) => mostraMiniatura(a) || ehVideo(a)))
 // O visor guarda o NOME do arquivo aberto, não a posição: quando uma
 // miniatura falha (prévia que não sai), ela sai da lista e a posição passava a
 // apontar para outro arquivo. `visor` segue sendo a posição, calculada.
@@ -440,7 +456,9 @@ function abrirVisor(a: Arquivo) {
 }
 // Enquanto a imagem grande não chega, o visor mostra "Carregando…" em vez
 // de desenhar aos pedaços; e a anterior/próxima já vêm baixando, para o
-// Anterior/Próxima trocar na hora.
+// Anterior/Próxima trocar na hora. De vídeo, só a CAPA do vizinho é
+// pré-carregada (urlVisor): pré-carregar o vídeo seria baixar dezenas de MB
+// que a pessoa talvez nem abra.
 const visorCarregando = ref(false)
 const visorErro = ref(false)
 const _preCarregadas = new Set<string>()
@@ -452,7 +470,25 @@ function preCarregar(a: Arquivo | undefined) {
   const img = new Image()
   img.src = url
 }
-watch(visorArquivo, (a) => {
+
+// O <video> que está no visor. Ao trocar de arquivo ou fechar, o vídeo
+// anterior para E solta a conexão: tirado da tela, o navegador pausava mas
+// continuava baixando o MP4 inteiro em segundo plano.
+const videoEl = ref<HTMLVideoElement | null>(null)
+function pararVideo() {
+  const v = videoEl.value
+  if (!v) return
+  v.pause()
+  v.removeAttribute('src')
+  v.load()
+}
+
+watch(visorArquivo, (a, antes) => {
+  // Mesmo arquivo (a lista foi recarregada e o objeto é outro): nada muda na
+  // tela — reabrir o "Carregando…" aqui o deixava preso, porque o <img>/<video>
+  // é o mesmo e não dispara load de novo.
+  if (a?.nome === antes?.nome) return
+  pararVideo()
   if (!a) return
   visorCarregando.value = true
   visorErro.value = false
@@ -461,11 +497,12 @@ watch(visorArquivo, (a) => {
   preCarregar(imagensAba.value[i - 1])
 })
 
-// O <img> de uma foto que já saiu do visor ainda dispara load/error (o
-// navegador não cancela o download): sem esta checagem, trocar rápido de foto
-// tirava o "Carregando…" da atual ou mostrava o erro da anterior nela.
+// O <img>/<video> de um arquivo que já saiu do visor ainda dispara
+// load/canplay/error (o navegador não cancela o download na hora): sem esta
+// checagem, trocar rápido de arquivo tirava o "Carregando…" do atual ou
+// mostrava o erro do anterior nele.
 function visorFim(ev: Event, erro: boolean) {
-  if (!(ev.target as HTMLImageElement | null)?.isConnected) return
+  if (!(ev.target as HTMLElement | null)?.isConnected) return
   visorCarregando.value = false
   visorErro.value = erro
 }
@@ -788,6 +825,7 @@ onMounted(() => {
 })
 onBeforeUnmount(() => {
   desmontado = true
+  pararVideo()
   window.removeEventListener('keydown', onKeydown)
 })
 </script>
@@ -1042,32 +1080,9 @@ onBeforeUnmount(() => {
           {{ textoVazio }}
         </p>
 
-        <!-- vídeos: só a lista — vídeo não passa pelo DaVinci, abre no MEGA -->
-        <div v-else-if="aba === 'videos' && listas.videos" class="space-y-3">
-          <div v-for="g in grupos" :key="g.titulo" class="space-y-1">
-            <h4 v-if="g.titulo" class="text-xs font-semibold text-muted-foreground">{{ g.titulo }}</h4>
-            <div class="divide-y rounded border">
-              <div
-                v-for="a in g.itens"
-                :key="a.nome"
-                class="flex items-center gap-2 px-3 py-2 text-sm"
-              >
-                <Film class="h-4 w-4 shrink-0 text-muted-foreground" />
-                <span class="min-w-0 flex-1 truncate" :title="a.nome">{{ nomeCurto(a.nome) }}</span>
-                <span class="rounded bg-muted px-1.5 text-[10px] font-semibold uppercase">{{ extDe(a) }}</span>
-                <a
-                  v-if="produto.fotos_url"
-                  :href="produto.fotos_url"
-                  target="_blank"
-                  rel="noopener"
-                  class="btn btn-xs"
-                ><ExternalLink class="h-3 w-3" /> Abrir no MEGA</a>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <!-- fotos / embalagens: grade de miniaturas + cartões de arquivo -->
+        <!-- fotos / vídeos / embalagens: grade de miniaturas + cartões de
+             arquivo. Vídeo entra na mesma grade, com a capa e o play; clicar
+             toca no visor (antes era só uma lista com "Abrir no MEGA"). -->
         <div v-else-if="listas[aba]" class="space-y-4">
           <div v-for="g in grupos" :key="g.titulo" class="space-y-1.5">
             <h4 v-if="g.titulo" class="text-xs font-semibold text-muted-foreground">{{ g.titulo }}</h4>
@@ -1093,9 +1108,20 @@ onBeforeUnmount(() => {
                       @error="falhas.add(a.nome)"
                     />
                     <span
-                      v-if="temPrevia(a)"
+                      v-if="temPrevia(a) || ehVideo(a)"
                       class="absolute left-1 top-1 rounded bg-foreground/80 px-1 text-[10px] font-semibold uppercase text-background"
                     >{{ extDe(a) }}</span>
+                    <!-- Play sempre à vista (não só no hover): é o que diz que
+                         o cartão é vídeo e toca — e já aparece enquanto a capa
+                         ainda está sendo preparada. -->
+                    <span
+                      v-if="ehVideo(a)"
+                      class="pointer-events-none absolute inset-0 flex items-center justify-center"
+                    >
+                      <span class="rounded-full bg-black/60 p-2 text-white shadow">
+                        <Play class="h-5 w-5 fill-current" />
+                      </span>
+                    </span>
                   </div>
                   <div v-if="pastaDoMeio(a.nome)" class="mt-0.5 truncate text-[11px] font-medium">{{ pastaDoMeio(a.nome) }}</div>
                   <div class="truncate text-[11px] text-muted-foreground" :class="{ 'mt-0.5': !pastaDoMeio(a.nome) }">{{ nomeCurto(a.nome) }}</div>
@@ -1104,13 +1130,21 @@ onBeforeUnmount(() => {
                   <div class="flex aspect-square w-full flex-col items-center justify-center gap-1 rounded border bg-muted/40 p-2">
                     <component :is="ehVideo(a) ? Film : FileText" class="h-7 w-7 text-muted-foreground" />
                     <span class="rounded bg-background px-1.5 text-[11px] font-semibold uppercase">{{ extDe(a) || 'arquivo' }}</span>
+                    <!-- Vídeo sem capa ainda (novo, não preparado): assiste
+                         mesmo assim — o play prepara e a capa aparece depois. -->
+                    <button
+                      v-if="ehVideo(a)"
+                      type="button"
+                      class="btn btn-xs"
+                      @click="abrirVisor(a)"
+                    ><Play class="h-3 w-3" /> Assistir</button>
                     <a
                       v-if="ehVideo(a) && produto.fotos_url"
                       :href="produto.fotos_url"
                       target="_blank"
                       rel="noopener"
-                      class="btn btn-xs"
-                    ><ExternalLink class="h-3 w-3" /> Abrir no MEGA</a>
+                      class="text-[10px] text-muted-foreground underline"
+                    >Abrir no MEGA</a>
                     <a
                       v-else-if="!ehVideo(a)"
                       :href="urlArquivo(a.nome, true)"
@@ -1162,10 +1196,29 @@ onBeforeUnmount(() => {
             <div v-if="temPrevia(visorArquivo)" class="text-xs text-white/70">
               prévia — o arquivo é {{ extDe(visorArquivo).toUpperCase() }}; use Baixar para abrir no programa
             </div>
+            <div v-else-if="ehVideo(visorArquivo)" class="text-xs text-white/70">
+              versão para ver aqui (até 1280 px) — o original fica no MEGA
+            </div>
           </div>
           <div class="flex shrink-0 items-center gap-2">
             <span class="text-xs tabular-nums text-white/70">{{ (visor ?? 0) + 1 }} de {{ imagensAba.length }}</span>
-            <a :href="urlArquivo(visorArquivo.nome, true)" download class="btn btn-sm text-foreground">
+            <!-- Vídeo não tem Baixar pelo DaVinci: o original (centenas de MB)
+                 não passa por aqui — quem precisa dele abre no MEGA. -->
+            <a
+              v-if="ehVideo(visorArquivo) && linkAtual"
+              :href="linkAtual"
+              target="_blank"
+              rel="noopener"
+              class="btn btn-sm text-foreground"
+            >
+              <ExternalLink class="h-3.5 w-3.5 mr-1" /> Abrir no MEGA
+            </a>
+            <a
+              v-else-if="!ehVideo(visorArquivo)"
+              :href="urlArquivo(visorArquivo.nome, true)"
+              download
+              class="btn btn-sm text-foreground"
+            >
               <Download class="h-3.5 w-3.5 mr-1" /> Baixar
             </a>
             <button class="btn btn-sm text-foreground" title="Fechar (Esc)" @click="visor = null">
@@ -1174,13 +1227,41 @@ onBeforeUnmount(() => {
           </div>
         </div>
         <div class="relative flex min-h-0 flex-1 items-center justify-center p-3" @click.self="visor = null">
-          <div v-if="visorCarregando" class="absolute flex items-center gap-2 text-sm text-white/80">
+          <!-- Vídeo: a capa (poster) fica à vista e o aviso vai por cima, numa
+               caixa escura — a 1ª vez de um vídeo que o pré-aquecimento da
+               madrugada ainda não pegou converte antes de tocar. -->
+          <div
+            v-if="visorCarregando && ehVideo(visorArquivo)"
+            class="pointer-events-none absolute z-10 flex items-center gap-2 rounded bg-black/70 px-3 py-2 text-sm text-white/90"
+          >
+            <Loader2 class="h-4 w-4 shrink-0 animate-spin" /> Preparando o vídeo… na primeira vez pode levar até 1 minuto
+          </div>
+          <div v-else-if="visorCarregando" class="absolute flex items-center gap-2 text-sm text-white/80">
             <Loader2 class="h-4 w-4 animate-spin" /> Carregando…
+          </div>
+          <div v-else-if="visorErro && ehVideo(visorArquivo)" class="absolute max-w-sm text-center text-sm text-white/80">
+            Não deu para tocar este vídeo agora. Use <b>Abrir no MEGA</b> para ver o original.
           </div>
           <div v-else-if="visorErro" class="absolute max-w-sm text-center text-sm text-white/80">
             Não deu para abrir a prévia deste arquivo agora. Use <b>Baixar</b> para abrir o original.
           </div>
+          <video
+            v-if="ehVideo(visorArquivo)"
+            ref="videoEl"
+            :key="visorArquivo.nome"
+            :src="urlVideo(visorArquivo)"
+            :poster="urlVisor(visorArquivo)"
+            controls
+            autoplay
+            playsinline
+            preload="auto"
+            class="max-h-full max-w-full bg-black transition-opacity"
+            :class="{ 'opacity-0': visorErro }"
+            @canplay="visorFim($event, false)"
+            @error="visorFim($event, true)"
+          />
           <img
+            v-else
             :key="visorArquivo.nome"
             :src="urlVisor(visorArquivo)"
             :alt="nomeCurto(visorArquivo.nome)"

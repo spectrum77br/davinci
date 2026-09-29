@@ -22,9 +22,11 @@ RUN pip install --no-cache-dir fastapi uvicorn python-multipart pillow
 # O pacote megacmd instala a PRÓPRIA lista do repositório do MEGA (com outro
 # Signed-By); com a nossa megacmd.list junto, o apt-get update recusa as duas
 # ("Conflicting values set for option Signed-By"). A nossa já cumpriu o papel.
+# ffmpeg (29/09/2026): converte os vídeos do produto para MP4 H.264 que o
+# navegador toca no painel de mídias, e tira a capa (ver /video no app.py).
 RUN rm -f /etc/apt/sources.list.d/megacmd.list \
     && apt-get update \
-    && apt-get install -y --no-install-recommends poppler-utils poppler-data \
+    && apt-get install -y --no-install-recommends poppler-utils poppler-data ffmpeg \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /srv

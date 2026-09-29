@@ -202,8 +202,10 @@ services:
     volumes:
       - ./data/megacmd:/root/.megaCmd
       # Cache das miniaturas/prévias do painel de mídias (JPEG de 320 e 1600
-      # px; ~200 MB para o acervo de set/2026). Volume próprio para não
-      # misturar com a sessão do MEGA e sobreviver ao rebuild.
+      # px; ~200 MB para o acervo de set/2026) e dos vídeos convertidos para
+      # o visor (MP4 de até 1280 px: ~10% do original, ~300 MB para os 2,9 GB
+      # de set/2026). Volume próprio para não misturar com a sessão do MEGA e
+      # sobreviver ao rebuild.
       - ./data/megacmd_previas:/srv/previas
     networks:
       davinci_net:

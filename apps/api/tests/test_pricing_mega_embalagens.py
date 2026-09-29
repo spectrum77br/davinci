@@ -1102,9 +1102,10 @@ async def test_sidecar_stream_confere_status_antes_do_primeiro_byte(monkeypatch)
 async def test_aquecer_previas_pede_uma_vez_cada_foto_e_arte(
     db: AsyncSession, editor: User, mega: MegaFalso,
 ):
-    """Pré-aquecimento (29/09: "para todos precisa ser rápido"): toda foto e
-    toda arte com prévia de cada pasta de produto, uma vez só mesmo com duas
-    linhas na mesma pasta; vídeo e arte sem prévia (ZIP) ficam de fora."""
+    """Pré-aquecimento (29/09: "para todos precisa ser rápido"): toda foto,
+    toda arte com prévia e (desde os vídeos no painel) todo vídeo de cada pasta
+    de produto, uma vez só mesmo com duas linhas na mesma pasta; arte sem
+    prévia (ZIP) fica de fora."""
     from app.services.mega_midias import aquecer_previas
 
     mega.arquivo("/Celular/S7/a.jpg", "/Celular/S7/sub/b.png", "/Celular/S7/clip.mp4")
@@ -1118,8 +1119,11 @@ async def test_aquecer_previas_pede_uma_vez_cada_foto_e_arte(
 
     r = await aquecer_previas(db, paralelo=2)
     pedidos = sorted(p for m_, p in mega.chamadas if p == "/thumb")
-    assert r == {"pastas": 2, "arquivos": 6, "prontos": 6, "sem_previa": 0, "pastas_com_erro": 0}
-    assert len(pedidos) == 6 and set(mega.lados) == {320}
+    assert r == {
+        "pastas": 2, "arquivos": 6, "prontos": 6, "sem_previa": 0, "pastas_com_erro": 0,
+        "videos": 1, "videos_prontos": 1, "videos_sem_previa": 0,
+    }
+    assert len(pedidos) == 7 and set(mega.lados) == {320}
 
 
 async def test_nome_com_dois_pontos_dentro_nao_e_subir_de_nivel(
