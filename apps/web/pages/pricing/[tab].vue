@@ -3,8 +3,7 @@ import {
   Plus, Trash2, RefreshCw, Save, X, AlertCircle, Loader2, Eye, EyeOff,
   Star, Send, Ban, Check, Link2, Copy, Minus,
   Smartphone, Briefcase, Zap, BarChart3, DollarSign, Settings2, Upload,
-  ChevronDown, Download, Undo2, Redo2, Search, Tags, Camera, Pencil, FolderPlus,
-  Image as ImageIcon, Film,
+  ChevronDown, Download, Undo2, Redo2, Search, Tags, Camera, FolderPlus,
 } from 'lucide-vue-next'
 import { isoToday } from '~/lib/date'
 
@@ -430,8 +429,15 @@ type PricingProduct = {
   is_active: boolean
   in_catalog: boolean
   fotos_url: string | null
+  fotos_path: string | null
   fotos_count: number | null
   videos_count: number | null
+  // Embalagens (caixa, arte em PDF…) = subpasta "Embalagens" dentro da pasta
+  // de fotos no MEGA. count NULL = nunca contado (≠ 0 = pasta vazia).
+  embalagens_url: string | null
+  embalagens_path: string | null
+  embalagens_count: number | null
+  midias_contadas_em: string | null
   prioridade_estoque: string | null
   created_at: string
   updated_at: string
@@ -573,7 +579,23 @@ const productsByDept = computed(() => {
   return m
 })
 
-const productsCurrent = computed(() => {
+// Filtro "Mídias:" ao lado da busca — acha rápido quem ainda não tem pasta,
+// fotos ou embalagem, sem precisar rolar a tabela inteira.
+type FiltroMidias = '' | 'sem_pasta' | 'sem_fotos' | 'sem_embalagem'
+const filtroMidias = ref<FiltroMidias>('')
+
+function semPasta(p: PricingProduct): boolean {
+  return !p.fotos_path && !p.fotos_url
+}
+
+function passaFiltroMidias(p: PricingProduct, f: FiltroMidias): boolean {
+  if (f === 'sem_pasta') return semPasta(p)
+  if (f === 'sem_fotos') return semPasta(p) || p.fotos_count === 0
+  if (f === 'sem_embalagem') return p.embalagens_count == null || p.embalagens_count === 0
+  return true
+}
+
+const productsBuscados = computed(() => {
   const list = productsByDept.value[department.value] ?? []
   const q = searchProdutos.value.trim().toLowerCase()
   if (!q) return list
@@ -583,6 +605,24 @@ const productsCurrent = computed(() => {
       p.name.toLowerCase().includes(q) ||
       (p.ean ?? '').toLowerCase().includes(q),
   )
+})
+
+const productsCurrent = computed(() => {
+  const f = filtroMidias.value
+  if (!f) return productsBuscados.value
+  return productsBuscados.value.filter((p) => passaFiltroMidias(p, f))
+})
+
+// Quantos caem em cada opção do filtro (já com a busca aplicada) — o número
+// aparece no próprio select.
+const contagemFiltroMidias = computed(() => {
+  const out: Record<Exclude<FiltroMidias, ''>, number> = { sem_pasta: 0, sem_fotos: 0, sem_embalagem: 0 }
+  for (const p of productsBuscados.value) {
+    if (passaFiltroMidias(p, 'sem_pasta')) out.sem_pasta++
+    if (passaFiltroMidias(p, 'sem_fotos')) out.sem_fotos++
+    if (passaFiltroMidias(p, 'sem_embalagem')) out.sem_embalagem++
+  }
+  return out
 })
 
 // =========================================================== inline-edit infra
@@ -844,18 +884,50 @@ const showMegaLogin = ref(false)
 const megaLoginForm = reactive({ email: '', password: '', code: '' })
 const megaLoginBusy = ref(false)
 const megaLoginErr = ref('')
+// O login pode ser aberto pela pílula de status (só conectar) ou pelo
+// "Vincular pastas pelo nome…" (conectar e já mostrar a prévia).
+const megaLoginDepois = ref<'previa' | null>(null)
 const showMegaPreview = ref(false)
 const megaPreview = ref<any | null>(null)
 const megaApplyBusy = ref(false)
-const uploadingFotosId = ref<string | null>(null)
-const fotosFileInput = ref<HTMLInputElement | null>(null)
-let fotosUploadTarget: PricingProduct | null = null
+
+// Pílula de status no topo da aba Produtos: antes o único jeito de saber se
+// o MEGA estava conectado era clicar em "Fotos (MEGA)" e ver o que acontecia.
+type MegaStatus = 'verificando' | 'conectado' | 'desconectado' | 'fora'
+const megaStatus = ref<MegaStatus | null>(null)
+const megaStatusInfo = ref('')
+
+async function carregarMegaStatus() {
+  megaStatus.value = 'verificando'
+  try {
+    const st = await api<any>('/api/pricing/mega/status')
+    if (!st.available) {
+      megaStatus.value = 'fora'
+      megaStatusInfo.value = st.error || 'serviço do MEGA não está no ar'
+    } else if (!st.logged_in) {
+      megaStatus.value = 'desconectado'
+      megaStatusInfo.value = ''
+    } else {
+      megaStatus.value = 'conectado'
+      megaStatusInfo.value = st.email || ''
+    }
+  } catch (e: any) {
+    megaStatus.value = 'fora'
+    megaStatusInfo.value = megaErrMsg(e)
+  }
+}
+
+function abrirMegaLogin(depois: 'previa' | null) {
+  megaLoginErr.value = ''
+  megaLoginDepois.value = depois
+  showMegaLogin.value = true
+}
 
 function megaErrMsg(e: any): string {
   const d = e?.data?.detail
   const msg = d?.message || d?.code || e?.message || 'erro'
   if (/not logged/i.test(String(msg)))
-    return 'Conta MEGA não conectada — clique em "Fotos (MEGA)" pra fazer login'
+    return 'Conta MEGA não conectada — clique em "MEGA desconectado — Conectar" no topo'
   return String(msg)
 }
 
@@ -865,14 +937,18 @@ async function megaSyncClick() {
   try {
     const st = await api<any>('/api/pricing/mega/status')
     if (!st.available) {
-      toast.error('MEGA indisponível', [st.error || 'serviço não está no ar'])
+      megaStatus.value = 'fora'
+      megaStatusInfo.value = st.error || 'serviço do MEGA não está no ar'
+      toast.error('MEGA fora do ar', [st.error || 'serviço não está no ar'])
       return
     }
     if (!st.logged_in) {
-      megaLoginErr.value = ''
-      showMegaLogin.value = true
+      megaStatus.value = 'desconectado'
+      abrirMegaLogin('previa')
       return
     }
+    megaStatus.value = 'conectado'
+    megaStatusInfo.value = st.email || ''
     await megaDryRun()
   } catch (e: any) {
     toast.error('MEGA', [megaErrMsg(e)])
@@ -910,6 +986,12 @@ async function submitMegaLogin() {
     showMegaLogin.value = false
     megaLoginForm.password = ''
     megaLoginForm.code = ''
+    megaStatus.value = 'conectado'
+    megaStatusInfo.value = megaLoginForm.email.trim()
+    if (megaLoginDepois.value !== 'previa') {
+      toast.success('MEGA conectado')
+      return
+    }
     toast.success('MEGA conectado', ['Buscando pastas de fotos…'])
     megaBusy.value = true
     try {
@@ -933,24 +1015,27 @@ async function megaApply() {
       body: { dry_run: false, only_missing: true },
     })
     showMegaPreview.value = false
-    const lines = [`${rep.applied} produto(s) receberam link de fotos`]
+    const lines = [`${rep.applied} produto(s) ligados à pasta do MEGA`]
     if (rep.errors?.length) {
       lines.push(`${rep.errors.length} erro(s) ao gerar link`)
-      toast.warning('Fotos do MEGA sincronizadas', lines)
+      toast.warning('Pastas vinculadas', lines)
     } else {
-      toast.success('Fotos do MEGA sincronizadas', lines)
+      toast.success('Pastas vinculadas', lines)
     }
     await loadProducts()
-    // Reconta fotos/vídeos em segundo plano (não segura o fechamento do modal).
+    // Reconta fotos/vídeos/embalagens em segundo plano (não segura o
+    // fechamento do modal).
     void megaCountsRefresh(true)
   } catch (e: any) {
-    toast.error('Sincronizar MEGA', [megaErrMsg(e)])
+    toast.error('Vincular pastas', [megaErrMsg(e)])
   } finally {
     megaApplyBusy.value = false
   }
 }
 
-// -- contagem de fotos/vídeos por pasta (mega-find via sidecar) --------
+// -- contagem de fotos/vídeos/embalagens por pasta (mega-find via sidecar)
+// Botão "Recontar fotos e embalagens" do topo e da prévia; a API grava
+// fotos_count/videos_count/embalagens_count e a hora da contagem.
 const megaCountsBusy = ref(false)
 async function megaCountsRefresh(silent = false) {
   if (megaCountsBusy.value) return
@@ -962,12 +1047,12 @@ async function megaCountsRefresh(silent = false) {
     })
     await loadProducts()
     if (!silent)
-      toast.success('Contagem de mídias atualizada', [
+      toast.success('Fotos e embalagens recontadas', [
         `${rep.folders_counted} pasta(s) contadas`,
         `${rep.products_updated} produto(s) atualizados`,
       ])
   } catch (e: any) {
-    if (!silent) toast.error('Contar fotos/vídeos', [megaErrMsg(e)])
+    if (!silent) toast.error('Recontar fotos e embalagens', [megaErrMsg(e)])
   } finally {
     megaCountsBusy.value = false
   }
@@ -1063,44 +1148,107 @@ async function megaScaffoldCreate() {
   }
 }
 
-function pickFotosUpload(p: PricingProduct) {
-  fotosUploadTarget = p
-  fotosFileInput.value?.click()
+// -- painel de mídias do produto (MidiasProdutoDrawer) ------------------
+// Substitui a célula antiga (câmera + lápis + upload de 10px + campo que
+// gravava o link ao sair dele): a célula virou uma etiqueta com texto e o
+// clique abre o painel com fotos, vídeos e embalagens do produto.
+type AbaMidias = 'fotos' | 'videos' | 'embalagens'
+type CamposMidias = Partial<Pick<PricingProduct,
+  | 'fotos_url' | 'fotos_path' | 'embalagens_url' | 'embalagens_path'
+  | 'fotos_count' | 'videos_count' | 'embalagens_count' | 'midias_contadas_em'>>
+
+// Guarda só o id: se a lista for recarregada com o painel aberto, o painel
+// continua olhando a linha nova (e não um objeto que saiu da tabela).
+const midiasProdutoId = ref<string | null>(null)
+const midiasAba = ref<AbaMidias>('fotos')
+const midiasEnviandoId = ref<string | null>(null)
+const midiasProduto = computed(() =>
+  midiasProdutoId.value ? products.value.find((x) => x.id === midiasProdutoId.value) ?? null : null,
+)
+
+function abrirMidias(p: PricingProduct, aba: AbaMidias) {
+  midiasAba.value = aba
+  midiasProdutoId.value = p.id
 }
 
-async function onFotosPicked(ev: Event) {
-  const input = ev.target as HTMLInputElement
-  const files = input.files
-  const p = fotosUploadTarget
-  if (!files?.length || !p) {
-    if (input) input.value = ''
-    return
-  }
-  uploadingFotosId.value = p.id
-  try {
-    const fd = new FormData()
-    for (const f of Array.from(files)) fd.append('files', f)
-    const res = await api<any>(
-      `/api/pricing/mega/products/${p.id}/fotos/upload`,
-      { method: 'POST', body: fd },
-    )
-    p.fotos_url = res.fotos_url
-    const lines = [`${res.uploaded} arquivo(s) → ${p.name}`]
-    if (typeof res.fotos_count === 'number') {
-      p.fotos_count = res.fotos_count
-      p.videos_count = res.videos_count ?? 0
-      lines.push(
-        `pasta agora tem ${res.fotos_count} foto(s) e ${res.videos_count ?? 0} vídeo(s)`,
-      )
+function fecharMidias() {
+  midiasProdutoId.value = null
+  midiasEnviandoId.value = null
+}
+
+// Linhas que apontam pra MESMA pasta do MEGA (ex.: M2 listrada 12" e 18"):
+// o que se envia numa aparece em todas, e o painel avisa isso.
+function irmaosDe(p: PricingProduct): { id: string; sku: string; name: string }[] {
+  if (!p.fotos_path) return []
+  return products.value
+    .filter((x) => x.id !== p.id && x.fotos_path === p.fotos_path)
+    .map((x) => ({ id: x.id, sku: x.sku, name: x.name }))
+}
+
+// Aplica o que a API devolveu (envio, recontagem, troca de pasta) sem
+// recarregar a tabela inteira. A linha aberta recebe tudo; as irmãs — as que
+// JÁ apontavam pra pasta resultante — recebem link, contagens e embalagens,
+// porque são a mesma pasta no MEGA. Trocar ou desligar a pasta mexe só na
+// linha aberta (a API faz o mesmo), então quem ficou na pasta antiga não muda.
+//
+// A linha é achada pelo `id` que o painel guardou no início da operação, e
+// não pelo painel aberto: fechar o painel no meio de um envio zera
+// midiasProdutoId, e o resultado que chegava depois (a pasta criada no 1º
+// lote) se perdia — a linha ficava "+ Adicionar" até o F5. `irmas`: o que
+// copiar para as irmãs (omitido = o mesmo da linha; false = não mexer —
+// ex.: troca de pasta cuja recontagem falhou, ver MidiasProdutoDrawer).
+function aplicarMidias(id: string, campos: CamposMidias, irmas?: CamposMidias | false) {
+  const aberto = products.value.find((x) => x.id === id)
+  if (!aberto) return
+  const semIndefinidos = (c: CamposMidias) => Object.fromEntries(
+    Object.entries(c).filter(([, v]) => v !== undefined),
+  ) as CamposMidias
+  const presentes = semIndefinidos(campos)
+  const pathNovo = 'fotos_path' in presentes ? presentes.fotos_path ?? null : aberto.fotos_path
+  if (pathNovo && irmas !== false) {
+    const { fotos_path: _ignorado, ...paraIrmas } = semIndefinidos(irmas ?? presentes)
+    for (const x of products.value) {
+      if (x.id !== aberto.id && x.fotos_path === pathNovo) Object.assign(x, paraIrmas)
     }
-    toast.success('Enviado pro MEGA', lines)
-    await loadProducts()
-  } catch (e: any) {
-    toast.error('Upload de fotos/vídeos', [megaErrMsg(e)])
-  } finally {
-    uploadingFotosId.value = null
-    fotosUploadTarget = null
-    input.value = ''
+  }
+  Object.assign(aberto, presentes)
+}
+
+function onMidiasEnviando(ativo: boolean) {
+  midiasEnviandoId.value = ativo ? midiasProdutoId.value : null
+}
+
+// Etiqueta da célula Fotos: texto visível, sem nada escondido no hover.
+function rotuloFotos(p: PricingProduct): { linha1: string; linha2: string | null; tom: 'vazio' | 'ver' | 'ambar' | 'ok' } {
+  if (semPasta(p)) return { linha1: '+ Adicionar', linha2: null, tom: 'vazio' }
+  if (p.fotos_count == null) return { linha1: 'Ver pasta', linha2: null, tom: 'ver' }
+  const f = p.fotos_count
+  const v = p.videos_count ?? 0
+  if (f === 0 && v === 0) return { linha1: 'Pasta vazia', linha2: null, tom: 'ambar' }
+  return {
+    linha1: `${f} ${f === 1 ? 'foto' : 'fotos'}`,
+    linha2: v > 0 ? `${v} ${v === 1 ? 'vídeo' : 'vídeos'}` : null,
+    tom: 'ok',
+  }
+}
+
+function rotuloEmbalagens(p: PricingProduct): { texto: string; tom: 'vazio' | 'ver' | 'ambar' | 'ok' } {
+  if (!p.embalagens_path) return { texto: '+ Adicionar', tom: 'vazio' }
+  const n = p.embalagens_count
+  if (n == null) return { texto: 'Ver pasta', tom: 'ver' }
+  if (n === 0) return { texto: 'Pasta vazia', tom: 'ambar' }
+  return { texto: `${n} ${n === 1 ? 'arquivo' : 'arquivos'}`, tom: 'ok' }
+}
+
+// Mesmo peso visual do badge da coluna Tabela, com borda pra parecer botão.
+const ETIQUETA_MIDIA_BASE = 'inline-flex flex-col items-center justify-center min-w-[5.5rem] px-2 py-0.5 rounded border text-[11px] font-medium leading-tight transition-colors'
+function classeEtiquetaMidia(tom: 'vazio' | 'ver' | 'ambar' | 'ok' | 'enviando'): string {
+  switch (tom) {
+    case 'vazio': return `${ETIQUETA_MIDIA_BASE} border-dashed border-muted-foreground/40 text-muted-foreground hover:border-blue-400 hover:text-blue-700 dark:hover:text-blue-300`
+    case 'ver': return `${ETIQUETA_MIDIA_BASE} border-slate-200 bg-slate-100 text-slate-700 hover:bg-slate-200 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200`
+    case 'ambar': return `${ETIQUETA_MIDIA_BASE} border-amber-300 bg-amber-50 text-amber-800 hover:bg-amber-100 dark:border-amber-700 dark:bg-amber-900/30 dark:text-amber-200`
+    case 'enviando': return `${ETIQUETA_MIDIA_BASE} border-blue-200 bg-blue-50 text-blue-700 dark:border-blue-800 dark:bg-blue-900/30 dark:text-blue-200`
+    default: return `${ETIQUETA_MIDIA_BASE} border-sky-200 bg-sky-50 text-sky-800 hover:bg-sky-100 dark:border-sky-800 dark:bg-sky-900/30 dark:text-sky-200`
   }
 }
 
@@ -1165,9 +1313,6 @@ async function _patchProduct(id: string, field: string, raw: string) {
     }
   } else if (field === 'description' || field === 'model' || field === 'ean') {
     payload[field] = raw || null
-  } else if (field === 'fotos_url') {
-    // Normaliza links colados sem protocolo (ex.: "mega.nz/folder/...").
-    payload[field] = raw ? (/^https?:\/\//i.test(raw) ? raw : `https://${raw}`) : null
   } else {
     return
   }
@@ -2412,11 +2557,28 @@ await loadAccounts()
 await loadProducts()
 await loadIntegrations()
 
+// Status do MEGA pra pílula do topo: uma vez por visita à aba Produtos e só
+// depois de montar — no servidor a chamada ao sidecar só atrasaria a página,
+// e mudar o estado antes da hidratação faria a pílula piscar.
+let paginaMontada = false
+function talvezCarregarMegaStatus() {
+  if (!paginaMontada || tab.value !== 'produtos' || !canEditProdutos.value) return
+  if (megaStatus.value != null) return
+  void carregarMegaStatus()
+}
+onMounted(() => {
+  paginaMontada = true
+  talvezCarregarMegaStatus()
+})
+
 watch(
   tab,
   async (t) => {
     if (t === 'tabela') await loadGrid()
-    if (t === 'produtos') loadAudit()
+    if (t === 'produtos') {
+      loadAudit()
+      talvezCarregarMegaStatus()
+    }
   },
   { immediate: true },
 )
@@ -2950,7 +3112,7 @@ watch(department, async () => {
         </div>
       </div>
 
-      <div class="flex items-center justify-between">
+      <div class="flex flex-wrap items-center justify-between gap-2">
         <div>
           <h3 class="text-base font-semibold">
             Produtos — {{ DEPARTMENTS.find(d => d.value === department)?.label }}
@@ -2959,26 +3121,88 @@ watch(department, async () => {
             {{ productsCurrent.length }} produto(s) — clique para editar
           </p>
         </div>
-        <div class="flex gap-2">
-          <input
-            v-model="searchProdutos"
-            placeholder="buscar SKU, nome, EAN…"
-            class="border rounded px-2 py-1 text-sm bg-background w-56"
-          />
-          <button
-            v-if="canEditProdutos"
-            class="btn btn-sm"
-            :disabled="megaBusy"
-            title="Conectar a conta MEGA e preencher os links de fotos automaticamente pelo nome"
-            @click="megaSyncClick"
-          >
-            <Loader2 v-if="megaBusy" class="h-4 w-4 mr-1 animate-spin" />
-            <Camera v-else class="h-4 w-4 mr-1" /> Fotos (MEGA)
-          </button>
+        <div class="flex flex-wrap items-center justify-end gap-2">
+          <!-- MEGA: três controles visíveis no lugar do antigo "Fotos (MEGA)",
+               que escondia login, vínculo e contagem atrás de um clique só. -->
+          <template v-if="canEditProdutos">
+            <span
+              v-if="megaStatus === 'verificando' || megaStatus == null"
+              class="inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-xs text-muted-foreground"
+            >
+              <Loader2 class="h-3 w-3 animate-spin" /> Verificando MEGA…
+            </span>
+            <span
+              v-else-if="megaStatus === 'conectado'"
+              class="inline-flex items-center gap-1.5 rounded-full border border-emerald-300 bg-emerald-50 px-2.5 py-1 text-xs font-medium text-emerald-800 dark:border-emerald-800 dark:bg-emerald-900/30 dark:text-emerald-200"
+              :title="megaStatusInfo ? `Conta: ${megaStatusInfo}` : undefined"
+            >
+              <span class="h-1.5 w-1.5 rounded-full bg-emerald-500"></span> MEGA conectado
+            </span>
+            <button
+              v-else-if="megaStatus === 'desconectado'"
+              class="inline-flex items-center gap-1.5 rounded-full border border-amber-300 bg-amber-50 px-2.5 py-1 text-xs font-medium text-amber-800 hover:bg-amber-100 dark:border-amber-700 dark:bg-amber-900/30 dark:text-amber-200"
+              title="Entrar na conta MEGA (feito uma vez; a sessão fica salva no servidor)"
+              @click="abrirMegaLogin(null)"
+            >
+              <span class="h-1.5 w-1.5 rounded-full bg-amber-500"></span> MEGA desconectado — Conectar
+            </button>
+            <button
+              v-else
+              class="inline-flex items-center gap-1.5 rounded-full border border-slate-300 bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-600 hover:bg-slate-200 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300"
+              :title="`${megaStatusInfo || 'serviço do MEGA não respondeu'} — clique para verificar de novo`"
+              @click="carregarMegaStatus"
+            >
+              <span class="h-1.5 w-1.5 rounded-full bg-slate-400"></span> MEGA fora do ar
+            </button>
+            <button
+              class="btn btn-sm"
+              :disabled="megaBusy"
+              title="Procura no MEGA uma pasta com o nome de cada produto sem pasta e mostra a prévia antes de gravar"
+              @click="megaSyncClick"
+            >
+              <Loader2 v-if="megaBusy" class="h-4 w-4 mr-1 animate-spin" />
+              <Link2 v-else class="h-4 w-4 mr-1" /> Vincular pastas pelo nome…
+            </button>
+            <button
+              class="btn btn-sm"
+              :disabled="megaCountsBusy"
+              title="Conta de novo as fotos, vídeos e embalagens de todas as pastas do MEGA"
+              @click="megaCountsRefresh()"
+            >
+              <Loader2 v-if="megaCountsBusy" class="h-4 w-4 mr-1 animate-spin" />
+              <RefreshCw v-else class="h-4 w-4 mr-1" />
+              {{ megaCountsBusy ? 'Recontando…' : 'Recontar fotos e embalagens' }}
+            </button>
+          </template>
           <button v-if="canEditProdutos" class="btn btn-sm btn-primary" :disabled="showAddProd" @click="openAddProd">
             <Plus class="h-4 w-4 mr-1" /> Adicionar Produto
           </button>
         </div>
+      </div>
+
+      <!-- barra de filtros: busca + filtro de mídias (rotulado, sempre à vista) -->
+      <div class="flex flex-wrap items-center gap-3">
+        <input
+          v-model="searchProdutos"
+          placeholder="buscar SKU, nome, EAN…"
+          class="border rounded px-2 py-1 text-sm bg-background w-56"
+        />
+        <label class="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
+          Mídias:
+          <select
+            v-model="filtroMidias"
+            class="border rounded px-2 py-1 text-sm bg-background text-foreground"
+            :class="filtroMidias ? 'border-blue-400 font-medium' : ''"
+          >
+            <option value="">Todas</option>
+            <option value="sem_pasta">Sem pasta ({{ contagemFiltroMidias.sem_pasta }})</option>
+            <option value="sem_fotos">Sem fotos ({{ contagemFiltroMidias.sem_fotos }})</option>
+            <option value="sem_embalagem">Sem embalagem ({{ contagemFiltroMidias.sem_embalagem }})</option>
+          </select>
+        </label>
+        <button v-if="filtroMidias" class="text-xs text-muted-foreground underline" @click="filtroMidias = ''">
+          limpar filtro
+        </button>
       </div>
 
       <div v-if="productsErr" class="rounded border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive flex items-center gap-2">
@@ -3000,7 +3224,14 @@ watch(department, async () => {
                 Kit {{ k }}
                 <span v-if="kitNome(k)" class="block text-[9px] font-normal text-muted-foreground leading-tight whitespace-normal">{{ kitNome(k) }}</span>
               </th>
-              <th class="text-center px-2 py-2 font-medium border-b border-border w-14">Fotos</th>
+              <th
+                class="text-center px-2 py-2 font-medium border-b border-border w-28"
+                title="Fotos e vídeos do produto no MEGA. Clique na etiqueta para ver as fotos, enviar mais, baixar ou trocar a pasta."
+              >Fotos</th>
+              <th
+                class="text-center px-2 py-2 font-medium border-b border-border w-28"
+                title="Fotos da caixa, PDF da arte e outros arquivos de embalagem. Ficam na subpasta Embalagens, dentro da pasta de fotos do produto no MEGA, e não aparecem para as agências."
+              >Embalagens</th>
               <th class="text-center px-2 py-2 font-medium border-b border-border w-24">Tabela</th>
               <th class="text-center px-2 py-2 font-medium border-b border-border w-16">Catálogo</th>
               <th
@@ -3012,13 +3243,13 @@ watch(department, async () => {
           </thead>
           <tbody>
             <tr v-if="productsLoading && !products.length">
-              <td colSpan="17" class="text-center py-6 text-muted-foreground">
+              <td colSpan="18" class="text-center py-6 text-muted-foreground">
                 <Loader2 class="inline h-4 w-4 animate-spin" /> carregando…
               </td>
             </tr>
             <tr v-else-if="!productsCurrent.length && !showAddProd">
-              <td colSpan="17" class="text-center py-6 text-muted-foreground">
-                Nenhum produto neste departamento.
+              <td colSpan="18" class="text-center py-6 text-muted-foreground">
+                {{ filtroMidias || searchProdutos.trim() ? 'Nenhum produto com esse filtro.' : 'Nenhum produto neste departamento.' }}
               </td>
             </tr>
 
@@ -3060,7 +3291,8 @@ watch(department, async () => {
               <td v-for="k in kitCount" :key="`newkit-${k}`" class="border border-border px-1 py-1">
                 <input v-model="(newProd as any)[`cost_kit${k}`]" type="text" inputmode="decimal" :placeholder="k === 1 ? '0.00' : ''" class="w-full text-xs border rounded px-1.5 py-1 bg-background text-right" />
               </td>
-              <!-- Fotos: link é adicionado depois, editando a linha criada. -->
+              <!-- Fotos e Embalagens: enviadas depois, pelo painel da linha criada. -->
+              <td class="border border-border px-1 py-1 text-center text-xs text-muted-foreground">—</td>
               <td class="border border-border px-1 py-1 text-center text-xs text-muted-foreground">—</td>
               <td class="border border-border px-1 py-1">
                 <select v-model.number="newProd.product_type" class="w-full text-xs border rounded px-1.5 py-1 bg-background text-center">
@@ -3188,67 +3420,49 @@ watch(department, async () => {
                 />
                 <span v-else>{{ fmtBRL((p as any)[`cost_kit${k}`]) }}</span>
               </td>
-              <!-- Fotos: link da pasta (MEGA) com as fotos de todas as cores.
-                   Câmera azul abre o link; cinza = sem link (clique pra colar). -->
-              <td
-                class="border border-border px-1 py-1.5 text-center"
-                :class="{
-                  'ring-2 ring-blue-500 ring-inset bg-background': isEditing(p.id, 'fotos_url'),
-                  'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(p.id, 'fotos_url'),
-                }"
-              >
-                <Loader2
-                  v-if="uploadingFotosId === p.id"
-                  class="h-3.5 w-3.5 animate-spin text-blue-600 inline"
-                />
-                <input
-                  v-else-if="isEditing(p.id, 'fotos_url')"
-                  :ref="setEditInputRef"
-                  v-model="editValue" type="text"
-                  placeholder="cole o link das fotos (MEGA)…"
-                  class="w-56 text-xs bg-transparent outline-none"
-                  @blur="commitEditProduct" @keydown.enter.prevent="commitEditProduct" @keydown.escape.prevent="cancelEdit"
-                />
-                <span v-else-if="p.fotos_url" class="inline-flex items-center gap-0.5">
-                  <a
-                    :href="p.fotos_url" target="_blank" rel="noopener"
-                    class="p-1 text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded"
-                    :title="`Abrir fotos — ${p.fotos_url}`"
-                  ><Camera class="h-3.5 w-3.5" /></a>
-                  <button
-                    v-if="canEditProdutos"
-                    class="p-0.5 text-muted-foreground hover:text-foreground rounded"
-                    title="Editar link das fotos"
-                    @click="startEditProduct(p, 'fotos_url')"
-                  ><Pencil class="h-2.5 w-2.5" /></button>
-                  <button
-                    v-if="canEditProdutos"
-                    class="p-0.5 text-muted-foreground hover:text-foreground rounded"
-                    title="Enviar mais fotos/vídeos pra pasta deste produto no MEGA"
-                    @click="pickFotosUpload(p)"
-                  ><Upload class="h-2.5 w-2.5" /></button>
-                  <span
-                    v-if="typeof p.fotos_count === 'number'"
-                    class="ml-1 inline-flex items-center gap-0.5 text-[10px] tabular-nums text-muted-foreground whitespace-nowrap"
-                    :title="`${p.fotos_count} foto(s) e ${p.videos_count ?? 0} vídeo(s) na pasta — recontagem pelo botão Fotos (MEGA)`"
-                  >
-                    <ImageIcon class="h-2.5 w-2.5" />{{ p.fotos_count }}
-                    <Film class="h-2.5 w-2.5 ml-0.5" />{{ p.videos_count ?? 0 }}
+              <!-- Fotos: etiqueta com texto (quantas fotos/vídeos, pasta vazia,
+                   sem pasta). O clique abre o painel de mídias na aba Fotos —
+                   ver, enviar, baixar e trocar a pasta moram lá. -->
+              <td class="border border-border px-1 py-1 text-center">
+                <span
+                  v-if="midiasEnviandoId === p.id"
+                  :class="classeEtiquetaMidia('enviando')"
+                >
+                  <span class="inline-flex items-center gap-1">
+                    <Loader2 class="h-3 w-3 animate-spin" /> Enviando…
                   </span>
                 </span>
-                <span v-else-if="canEditProdutos" class="inline-flex items-center gap-0.5">
-                  <button
-                    class="p-1 text-muted-foreground/50 hover:text-blue-600 rounded"
-                    title="Colar link das fotos (pasta do MEGA com todas as cores)"
-                    @click="startEditProduct(p, 'fotos_url')"
-                  ><Camera class="h-3.5 w-3.5" /></button>
-                  <button
-                    class="p-0.5 text-muted-foreground/50 hover:text-foreground rounded"
-                    title="Enviar fotos pro MEGA (cria a pasta do produto e salva o link)"
-                    @click="pickFotosUpload(p)"
-                  ><Upload class="h-2.5 w-2.5" /></button>
-                </span>
-                <span v-else class="text-xs text-muted-foreground">—</span>
+                <span
+                  v-else-if="semPasta(p) && !canEditProdutos"
+                  class="text-xs text-muted-foreground"
+                >—</span>
+                <button
+                  v-else
+                  type="button"
+                  :class="classeEtiquetaMidia(rotuloFotos(p).tom)"
+                  :title="p.fotos_path ? `Pasta no MEGA: ${p.fotos_path}` : semPasta(p) ? 'Enviar as primeiras fotos ou escolher uma pasta do MEGA' : 'Abrir as fotos deste produto'"
+                  @click="abrirMidias(p, 'fotos')"
+                >
+                  <span>{{ rotuloFotos(p).linha1 }}</span>
+                  <span v-if="rotuloFotos(p).linha2" class="text-[10px] font-normal">{{ rotuloFotos(p).linha2 }}</span>
+                </button>
+              </td>
+              <!-- Embalagens: subpasta "Embalagens" dentro da pasta de fotos.
+                   Mesma etiqueta; o clique abre o painel na aba Embalagens. -->
+              <td class="border border-border px-1 py-1 text-center">
+                <span
+                  v-if="!p.embalagens_path && !canEditProdutos"
+                  class="text-xs text-muted-foreground"
+                >—</span>
+                <button
+                  v-else
+                  type="button"
+                  :class="classeEtiquetaMidia(rotuloEmbalagens(p).tom)"
+                  :title="p.embalagens_path ? `Pasta no MEGA: ${p.embalagens_path}` : 'Enviar fotos da caixa, PDF da arte etc.'"
+                  @click="abrirMidias(p, 'embalagens')"
+                >
+                  {{ rotuloEmbalagens(p).texto }}
+                </button>
               </td>
               <td
                 class="border border-border px-2 py-1.5 text-xs text-center cursor-pointer"
@@ -3324,12 +3538,17 @@ watch(department, async () => {
         </table>
       </div>
 
-      <!-- MEGA: input de upload compartilhado (alvo = fotosUploadTarget) -->
-      <input
-        ref="fotosFileInput"
-        type="file" multiple accept="image/*,video/*"
-        class="hidden"
-        @change="onFotosPicked"
+      <!-- MEGA: painel de mídias do produto (fotos, vídeos, embalagens) -->
+      <MidiasProdutoDrawer
+        v-if="midiasProduto"
+        :produto="midiasProduto"
+        :aba-inicial="midiasAba"
+        :pode-editar="canEditProdutos"
+        :irmaos="irmaosDe(midiasProduto)"
+        :aplicar="aplicarMidias"
+        @enviando="onMidiasEnviando"
+        @mega-desconectado="carregarMegaStatus"
+        @fechar="fecharMidias"
       />
 
       <!-- MEGA: modal de login -->
@@ -3385,13 +3604,13 @@ watch(department, async () => {
       >
         <div class="bg-background border rounded-lg shadow-xl w-full max-w-2xl p-4 space-y-3 max-h-[85vh] overflow-auto">
           <h3 class="text-sm font-semibold flex items-center gap-2">
-            <Camera class="h-4 w-4" /> Fotos do MEGA — prévia da sincronização
+            <Link2 class="h-4 w-4" /> Vincular pastas pelo nome — prévia
           </h3>
           <p class="text-xs text-muted-foreground">
             {{ megaPreview.folders_total }} pasta(s) no MEGA ·
             {{ megaPreview.matched_total }} produto(s) casaram pelo nome ·
-            <b class="text-foreground">{{ megaPreview.to_apply }}</b> vão receber link agora
-            (quem já tem link não é alterado)
+            <b class="text-foreground">{{ megaPreview.to_apply }}</b> vão ser ligados à pasta agora
+            (quem já tem pasta não muda). Nada é gravado antes de você clicar em "Ligar".
           </p>
           <p v-if="!megaPreview.folders_total && canEditProdutos" class="text-xs text-amber-700">
             A conta MEGA ainda está sem pastas — use "Criar pastas no MEGA" pra montar a
@@ -3401,7 +3620,7 @@ watch(department, async () => {
             <table class="w-full text-xs">
               <tbody>
                 <tr
-                  v-for="m in megaPreview.matched.filter(x => !x.has_url)"
+                  v-for="m in megaPreview.matched.filter((x: any) => !x.has_url)"
                   :key="m.sku"
                   class="border-b border-border/50"
                 >
@@ -3415,7 +3634,7 @@ watch(department, async () => {
           <details v-if="megaPreview.ambiguous?.length" class="text-xs">
             <summary class="cursor-pointer text-amber-700">
               {{ megaPreview.ambiguous.length }} produto(s) com mais de uma pasta possível
-              (resolver colando o link à mão)
+              (escolha no painel do produto: clique na coluna Fotos › "Escolher pasta existente…")
             </summary>
             <ul class="mt-1 pl-4 list-disc space-y-0.5">
               <li v-for="a in megaPreview.ambiguous" :key="a.sku">
@@ -3447,12 +3666,12 @@ watch(department, async () => {
               <button
                 class="btn btn-sm"
                 :disabled="megaCountsBusy"
-                title="Reconta as fotos e vídeos de cada pasta do MEGA e mostra os números na coluna Fotos"
+                title="Conta de novo as fotos, vídeos e embalagens de cada pasta do MEGA e mostra os números nas colunas Fotos e Embalagens"
                 @click="megaCountsRefresh()"
               >
                 <Loader2 v-if="megaCountsBusy" class="h-4 w-4 mr-1 animate-spin" />
                 <RefreshCw v-else class="h-4 w-4 mr-1" />
-                Contar fotos/vídeos
+                Recontar fotos e embalagens
               </button>
             </div>
             <span v-else></span>
@@ -3464,7 +3683,7 @@ watch(department, async () => {
                 @click="megaApply"
               >
                 <Loader2 v-if="megaApplyBusy" class="h-4 w-4 mr-1 animate-spin" />
-                Aplicar {{ megaPreview.to_apply }} link(s)
+                Ligar {{ megaPreview.to_apply }} produto(s)
               </button>
             </div>
           </div>

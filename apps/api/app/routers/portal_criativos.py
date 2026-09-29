@@ -57,11 +57,9 @@ MEGA continua acontecendo só no clique do admin dentro do DaVinci.
 from __future__ import annotations
 
 import secrets
-import unicodedata
 from hashlib import sha256
 from pathlib import Path
 from typing import Annotated, Any
-from urllib.parse import quote
 from uuid import UUID, uuid4
 
 import structlog
@@ -111,8 +109,9 @@ from app.services.marketing.anexos import (
     mime_da_extensao,
     mime_seguro,
 )
+from app.services.marketing.anexos import disposicao_segura as _disposicao
 from app.services.marketing.vinculos import _marca_id_do_texto, _product_id_do_sku
-from app.services.mega_fotos import MegaError, sidecar_bytes, sidecar_request
+from app.services.mega_fotos import MegaError, eh_de_embalagens, sidecar_bytes, sidecar_request
 
 logger = structlog.get_logger()
 
@@ -1435,6 +1434,8 @@ async def listar_fotos_do_produto(
     """
     row = await _produto_do_portal(session, produto_id)
     try:
+        # Sem `tipo` o sidecar devolve só imagens — e, desde 29/09/2026, já
+        # sem a subpasta de embalagens, que é material interno.
         resp = await sidecar_request("GET", "/files", params={"path": row.fotos_path})
     except MegaError as e:
         raise HTTPException(503, detail={"code": "mega_indisponivel", "message": str(e)}) from e
@@ -1459,35 +1460,10 @@ async def listar_fotos_do_produto(
     }
 
 
-def _disposicao(tipo: str, nome: str) -> str:
-    """`Content-Disposition` que sobrevive a nome fora do latin-1.
-
-    O Starlette codifica cabeçalho em latin-1. Um nome em chinês
-    (`s7-详情2_01.jpg`, `画板 1.jpg`) estoura ali dentro com UnicodeEncodeError,
-    a rota devolve 500 e o portal traduz num card que carrega para sempre.
-    Medido em 23/09/2026: 178 dos 2467 arquivos do acervo (7,2%), 4 produtos
-    furados por inteiro — e como o cache só grava em caso de sucesso, cada um
-    desses custava de 0,25s a 1,4s de novo em TODA carga da página.
-
-    Vai o par que a RFC 6266 pede: `filename=` em ASCII para quem é velho e
-    `filename*=` em UTF-8 para quem não é. O portal já sabe LER o segundo
-    (app/davinci.php:73 tenta a RFC 5987 primeiro justamente por causa dos
-    nomes com acento que o FastAPI manda).
-    """
-    # Só o último trecho: `nome` pode vir com subpasta (`M1 listrada/b005/x.jpg`)
-    # e barra dentro de `filename=` confunde o navegador na hora de salvar.
-    base = nome.rsplit("/", 1)[-1]
-    # O fallback ASCII é o que resta depois de tirar acento; se não restar nada
-    # legível (nome inteiro em chinês), um nome genérico com a extensão certa —
-    # melhor que aspas vazias, que alguns navegadores recusam.
-    ascii_nome = (
-        unicodedata.normalize("NFKD", base).encode("ascii", "ignore").decode("ascii")
-    )
-    ascii_nome = ascii_nome.replace('"', "").replace("\\", "").strip()
-    if not ascii_nome or ascii_nome.startswith("."):
-        ext = base.rsplit(".", 1)[-1].lower() if "." in base else "bin"
-        ascii_nome = f"foto.{ext if ext.isalnum() else 'bin'}"
-    return f"{tipo}; filename=\"{ascii_nome}\"; filename*=UTF-8''{quote(base)}"
+# `_disposicao` (o Content-Disposition que sobrevive a nome em chinês) nasceu
+# aqui e mudou para services/marketing/anexos.py como `disposicao_segura`: a
+# Tabela de Preços também serve arquivo do MEGA. O nome antigo continua
+# importável daqui.
 
 
 @router.get("/produtos/{produto_id}/foto")
@@ -1506,6 +1482,22 @@ async def baixar_foto_do_produto(
     # Subpasta é legítima — `/Malas/<linha>` guarda uma por modelo. Subir de
     # nível não é, e barra no começo viraria caminho absoluto lá do outro lado.
     if ".." in nome or not nome.strip() or nome.startswith("/"):
+        raise HTTPException(400, detail={"code": "nome_invalido"})
+    # O MEGAcmd resolve "." no caminho e trata "*" e "?" como curinga
+    # (conferido em produção: `mega-ls /Celular/./` e `mega-ls /Cel*lar` listam
+    # /Celular). Com isso "./Embalagens/caixa.jpg", "Embalagen?/caixa.jpg" ou
+    # "*/caixa.jpg" chegavam à caixa sem que o 1º trecho fosse "Embalagens" — e
+    # a trava logo abaixo só olha o 1º trecho. Nome que vem da listagem nunca
+    # tem trecho vazio, "." ou curinga, então nada legítimo é barrado. O strip
+    # é só na comparação: pasta com espaço no fim do nome continua valendo.
+    if any(s.strip() in ("", ".", "..") for s in nome.split("/")) or any(
+        c in nome for c in "*?"
+    ):
+        raise HTTPException(400, detail={"code": "nome_invalido"})
+    # A subpasta de embalagens (caixa, arte de impressão) é material interno:
+    # a listagem acima já não a mostra, e aqui ela também não desce — senão
+    # bastaria adivinhar "Embalagens/caixa.jpg" para baixar.
+    if eh_de_embalagens(nome):
         raise HTTPException(400, detail={"code": "nome_invalido"})
     # O MIME sai da EXTENSÃO, nunca do que o MEGA disser: é a mesma regra das
     # outras rotas de bytes daqui, e é ela que impede servir HTML como imagem.

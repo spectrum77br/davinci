@@ -2482,6 +2482,30 @@ async def alerts_cleanup(ctx: dict) -> None:
         logger.exception("ouvidoria_gc_ocorrencias_unhandled")
 
 
+async def mega_midias_recontar(ctx: dict) -> None:
+    """Madrugada: reconta fotos, vídeos e embalagens de TODAS as pastas de
+    produto no MEGA (29/09/2026).
+
+    A contagem só mudava quando alguém subia pelo DaVinci ou apertava
+    "Recontar"; quem arrastava arquivo direto no MEGA deixava o número velho
+    na tela (e o portal das agências escondia produto que já tinha foto). É
+    também aqui que a subpasta "Embalagens" criada à mão ganha link.
+    Sem escopo de usuário (é o robô). Sidecar fora do ar: só loga — a tela
+    continua com o último número e a data dele.
+    """
+    from app.services.mega_fotos import MegaError
+    from app.services.mega_midias import recontar_todas
+
+    try:
+        async with session_scope() as s:
+            resumo = await recontar_todas(s)
+        logger.info("mega_midias_recontar", **resumo)
+    except MegaError as exc:
+        logger.warning("mega_midias_recontar_sidecar", erro=exc.message)
+    except Exception:  # noqa: BLE001
+        logger.exception("mega_midias_recontar_unhandled")
+
+
 async def condicao_especial_gc(ctx: dict) -> None:
     """Apaga Condições Especiais de segmento cujo período terminou há mais de
     30 dias (pedido de 10/09: "quando acabar essa data pode excluir"). O painel
@@ -3638,6 +3662,7 @@ class WorkerSettings:
         alerts_cleanup,
         historico_manutencao,
         condicao_especial_gc,
+        func(mega_midias_recontar, timeout=2400),
         margem_reavaliar_reprovados,
         low_stock_polling,
         import_listings_run,
@@ -3872,6 +3897,10 @@ class WorkerSettings:
         cron(historico_manutencao, hour=6, minute=40, run_at_startup=True),  # 03:40 BRT
         # Condição Especial de segmento encerrada há 30d (services/condicao_especial).
         cron(condicao_especial_gc, hour=6, minute=10, run_at_startup=False),  # 03:10 BRT
+        # Recontagem das pastas do MEGA (fotos/vídeos/embalagens): 04:25 BRT,
+        # hora sem outro cron diário. Um mega-find por pasta (~90 pastas);
+        # 40 min de teto porque o /folders do sidecar tem 30.
+        cron(mega_midias_recontar, hour=7, minute=25, run_at_startup=False, timeout=2400),
         cron(failed_jobs_alert_scan, minute=_TWO_MIN, run_at_startup=False),
         cron(webhook_signature_alert_scan, minute={5, 35}, run_at_startup=False),
         cron(low_stock_polling, minute=_TWO_MIN, run_at_startup=False),

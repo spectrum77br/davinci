@@ -223,6 +223,13 @@ class PricingProductOut(PricingProductBase):
     # Contagem de mídias na pasta do MEGA (NULL = nunca contado).
     fotos_count: int | None = None
     videos_count: int | None = None
+    # Embalagens: subpasta "Embalagens" dentro da pasta de fotos (29/09/2026).
+    # Só saída — quem grava é o envio/contagem do MEGA (routers/pricing_mega),
+    # por isso Patch e Import não ganham estes campos.
+    embalagens_url: str | None = None
+    embalagens_path: str | None = None
+    embalagens_count: int | None = None
+    midias_contadas_em: datetime | None = None
 
 
 class PricingProductImportItem(BaseModel):

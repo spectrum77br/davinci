@@ -520,6 +520,49 @@ async def test_carimbo_do_conector_nao_vira_mudanca(db, make_user):
 
 
 @pytest.mark.asyncio
+async def test_recontar_midias_sem_numero_novo_nao_vira_mudanca(db, make_user):
+    """Toda recontagem do MEGA carimba `midias_contadas_em` em TODAS as linhas
+    com pasta. Um clique em "Recontar fotos e embalagens" virava uma
+    "alteração" por produto (86 em produção) em nome de quem clicou. Número
+    que muda continua registrado — sem o carimbo junto."""
+    eu = await make_user(role=UserRole.ADMIN)
+    _, p = await _conta_e_produto(db, eu)
+    ator = Ator(metodo="POST", caminho="/api/pricing/mega/counts/refresh", grava=True,
+                escrita=True, user_id=eu.id)
+    token = abrir(ator)
+    try:
+        from app.db import SessionLocal
+
+        async with SessionLocal() as s:
+            await s.execute(
+                text("UPDATE pricing_products SET midias_contadas_em = now() WHERE id = :id"),
+                {"id": p["id"]},
+            )
+            await s.commit()
+    finally:
+        fechar(token)
+    assert await _alteracoes(db, tabela="pricing_products") == []
+
+    token = abrir(ator)
+    try:
+        from app.db import SessionLocal
+
+        async with SessionLocal() as s:
+            await s.execute(
+                text(
+                    "UPDATE pricing_products SET fotos_count = 7, "
+                    "midias_contadas_em = now() + interval '1 minute' WHERE id = :id"
+                ),
+                {"id": p["id"]},
+            )
+            await s.commit()
+    finally:
+        fechar(token)
+    [alt] = await _alteracoes(db, tabela="pricing_products")
+    assert alt.depois == {"fotos_count": 7}
+
+
+@pytest.mark.asyncio
 async def test_ver_senha_diz_qual_loja(client, db, make_user):
     eu = await make_user(role=UserRole.ADMIN)
     _logar(client, eu)

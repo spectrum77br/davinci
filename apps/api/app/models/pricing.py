@@ -201,6 +201,21 @@ class PricingProduct(Base, TimestampMixin):
     # mega-find; NULL = nunca contado). Atualizado no sync/refresh/upload.
     fotos_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     videos_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Embalagens (Eduardo, 29/09/2026): foto de caixa, embalagem e arte de
+    # impressão ficam na subpasta "Embalagens" DENTRO da pasta de fotos —
+    # mesma pasta da linha, link próprio. O que está lá dentro não conta em
+    # fotos_count/videos_count e não aparece no portal das agências.
+    # A caixa é da LINHA: upload e contagem gravam em todos os produtos com o
+    # mesmo fotos_path. embalagens_count NULL = nunca contado.
+    embalagens_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    embalagens_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    embalagens_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Quando as três contagens acima foram feitas pela última vez (upload,
+    # "Recontar", botão da aba ou o cron da madrugada). A tela mostra isto
+    # para o operador saber se o número está velho.
+    midias_contadas_em: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     # Tag de estoque prioritária (ci/pi/ra/sa/sp/us/cd). Eduardo (2026-08-27):
     # "a tag que eu colocar la, o sku com a tag, ja deve trocar, porque a
     # prioridade e ele" — o robô (services/prioridade_estoque.py) troca o item

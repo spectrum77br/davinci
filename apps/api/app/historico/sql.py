@@ -47,7 +47,11 @@ EXCLUIDAS = re.compile(
 # Colunas que mudam sozinhas e não dizem nada a quem lê.
 # last_used_at/ultimo_erro: carimbos do conector do Claude, gravados em toda
 # conversa (até só de leitura) — não são mudança de ninguém.
-_RUIDO = ("updated_at", "atualizado_em", "last_used_at", "ultimo_erro")
+# midias_contadas_em (pricing_products, 29/09/2026): toda recontagem do MEGA
+# carimba TODAS as linhas com pasta, mesmo sem número novo. Um clique em
+# "Recontar fotos e embalagens" virava ~86 "alterações" em nome de quem
+# clicou; as contagens em si continuam registradas quando mudam.
+_RUIDO = ("updated_at", "atualizado_em", "last_used_at", "ultimo_erro", "midias_contadas_em")
 _RUIDO_CRIACAO = ("updated_at", "atualizado_em", "created_at", "criado_em")
 
 # Colunas que identificam a linha na tela ("dg053", "kia", "pedido 293114").

@@ -520,6 +520,21 @@ async def patch_product(
         raise HTTPException(404, detail={"code": "product_not_found"})
 
     data = body.model_dump(exclude_unset=True)
+    # Apagar o link das fotos na tela = desligar a pasta do MEGA desta linha.
+    # Antes só o link sumia: o fotos_path ficava, e o próximo envio continuava
+    # indo para a pasta antiga que a tela já dizia não ter. Vão junto a
+    # embalagem (subpasta dela) e as contagens, que eram daquela pasta.
+    if "fotos_url" in data and not (data["fotos_url"] or "").strip():
+        data.update(
+            fotos_url=None,
+            fotos_path=None,
+            embalagens_url=None,
+            embalagens_path=None,
+            fotos_count=None,
+            videos_count=None,
+            embalagens_count=None,
+            midias_contadas_em=None,
+        )
     # Translate (department + product_type) → segment_id when the caller used
     # the legacy fields. Explicit segment_id wins if both are present.
     dept_str = data.pop("department", None)

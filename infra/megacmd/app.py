@@ -15,6 +15,7 @@ import secrets
 import shutil
 import subprocess
 import tempfile
+import unicodedata
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.responses import FileResponse
@@ -125,24 +126,126 @@ def _list_one(root: str) -> tuple[list[dict], bool]:
 _IMG_EXT = {"jpg", "jpeg", "png", "webp", "gif", "heic", "heif", "bmp", "tif", "tiff", "avif", "jfif"}
 _VID_EXT = {"mp4", "mov", "m4v", "avi", "mkv", "webm", "3gp", "mpg", "mpeg", "wmv", "flv"}
 
+# ── embalagens: a subpasta da caixa, dentro da pasta de fotos ──
+#
+# Eduardo, 29/09/2026: as fotos de caixa, embalagem e arte de impressão ficam
+# na pasta do produto, numa subpasta "Embalagens". Tudo lá dentro conta SÓ
+# como embalagem: a foto da caixa não pode inflar a contagem de fotos, e o
+# portal das agências (que lê /files) não pode mostrar arte de impressão.
+# Reconhece o nome como o operador digita no MEGA: "Embalagens", "embalagem",
+# "EMBALAGÉNS " — é a mesma normalização do DaVinci (services/mega_fotos.py),
+# para os dois lados concordarem sobre o que é embalagem.
+_NOMES_EMBALAGEM = {"embalagens", "embalagem"}
+# Lixo que o Windows e o Mac deixam ao copiar pasta (medido em 29/09/2026:
+# Thumbs.db em /Celular/Fossibot S7, .DS_Store em /Malas/_geral). Ninguém
+# subiu isso de propósito; contar como "arquivo de embalagem" seria mentir.
+_LIXO_DE_SISTEMA = {"thumbs.db", ".ds_store", "desktop.ini"}
+_NAO_ALNUM_RE = re.compile(r"[^a-z0-9]+")
 
-def _count_media(path: str) -> tuple[int, int]:
-    """(fotos, vídeos) dentro da pasta, recursivo, classificado por extensão
-    via `mega-find` (lista a própria pasta + descendentes, 1 caminho/linha)."""
-    rc, out = run(["mega-find", path], timeout=300)
-    if rc != 0:
-        raise HTTPException(status_code=502, detail=out[-400:])
-    fotos = videos = 0
-    for ln in out.splitlines():
-        leaf = ln.strip().rstrip("/").rsplit("/", 1)[-1]
-        if "." not in leaf:
+
+def _norm(nome: str) -> str:
+    s = unicodedata.normalize("NFKD", nome)
+    s = "".join(ch for ch in s if not unicodedata.combining(ch)).lower()
+    return _NAO_ALNUM_RE.sub(" ", s).strip()
+
+
+def _raiz(path: str) -> str:
+    """Caminho absoluto sem barra no fim. NÃO tira espaço: o MEGA tem pasta
+    com espaço no fim do nome ("b006 M1 listrada verde claro  "), e cortar
+    o espaço é apontar para uma pasta que não existe."""
+    return "/" + (path or "").strip("/")
+
+
+def _classificar(raiz: str, linhas: list[str]) -> dict:
+    """Separa a saída do `mega-find` em fotos, vídeos e embalagens.
+
+    Função pura (sem chamar o MEGA) para dar para testar com a saída real.
+    O `mega-find` imprime um caminho ABSOLUTO por linha — a própria pasta,
+    cada subpasta e cada arquivo, sem barra no fim de pasta (conferido em
+    produção em 29/09/2026). Por isso pasta e arquivo só se distinguem pelo
+    nome: é arquivo o que tem "." na folha e não é pai de outra linha (pasta
+    com ponto no nome e conteúdo dentro deixa de virar arquivo fantasma).
+
+    `nome` sai RELATIVO à raiz ("M1 listrada/b005.jpg",
+    "Embalagens/caixa.pdf"): é ele que volta na hora de baixar.
+    `embalagens_pasta` é o caminho absoluto da subpasta de embalagens se ela
+    existir, mesmo vazia — o DaVinci usa para achar a pasta criada à mão.
+    """
+    base = _raiz(raiz)
+    prefixo = base.rstrip("/") + "/"
+    rels: list[str] = []
+    for linha in linhas:
+        # Só a quebra de linha: espaço no fim é parte do nome da pasta.
+        caminho = linha.rstrip("\r\n")
+        if caminho != "/":
+            caminho = caminho.rstrip("/")
+        if not caminho.strip() or caminho == base:
             continue
-        ext = leaf.rsplit(".", 1)[-1].lower()
-        if ext in _IMG_EXT:
+        if caminho.startswith(prefixo):
+            rel = caminho[len(prefixo) :]
+        else:
+            # Caminho fora da raiz pedida (não deveria acontecer): fica só a
+            # folha, como a versão anterior fazia.
+            rel = caminho.rsplit("/", 1)[-1]
+        if rel:
+            rels.append(rel)
+    pais = {r.rsplit("/", 1)[0] for r in rels if "/" in r}
+
+    def _eh_pasta_emb(rel: str) -> bool:
+        seg = rel.split("/", 1)[0]
+        if _norm(seg) not in _NOMES_EMBALAGEM:
+            return False
+        return "/" in rel or rel in pais or "." not in seg
+
+    pastas_emb = sorted({r.split("/", 1)[0] for r in rels if _eh_pasta_emb(r)})
+    fotos = videos = embalagens = 0
+    arquivos: list[dict] = []
+    for rel in rels:
+        if rel in pais:
+            continue  # pasta com conteúdo
+        folha = rel.rsplit("/", 1)[-1]
+        if "." not in folha:
+            continue  # pasta (vazia) ou arquivo sem extensão
+        ext = folha.rsplit(".", 1)[-1].lower()
+        if "/" in rel and rel.split("/", 1)[0] in pastas_emb:
+            if folha.lower() in _LIXO_DE_SISTEMA:
+                continue
+            grupo = "embalagem"
+            embalagens += 1
+        elif ext in _IMG_EXT:
+            grupo = "foto"
             fotos += 1
         elif ext in _VID_EXT:
+            grupo = "video"
             videos += 1
-    return fotos, videos
+        else:
+            grupo = "outro"
+        arquivos.append({"nome": rel, "ext": ext, "grupo": grupo})
+    arquivos.sort(key=lambda a: a["nome"])
+
+    escolhida = None
+    if pastas_emb:
+        # Duas pastas ("Embalagens" e "embalagem")? As duas contam; o destino
+        # de envio é a com o nome padrão, ou sempre a mesma pela ordem.
+        escolhida = "Embalagens" if "Embalagens" in pastas_emb else pastas_emb[0]
+    return {
+        "fotos": fotos,
+        "videos": videos,
+        "embalagens": embalagens,
+        "embalagens_pasta": prefixo + escolhida if escolhida else None,
+        "arquivos": arquivos,
+    }
+
+
+def _count_media(path: str) -> dict:
+    """fotos/vídeos/embalagens da pasta, recursivo, via `mega-find`.
+
+    fotos e vídeos NÃO contam o que está na subpasta de embalagens."""
+    raiz = _raiz(path)
+    rc, out = run(["mega-find", raiz], timeout=300)
+    if rc != 0:
+        raise HTTPException(status_code=502, detail=out[-400:])
+    return _classificar(raiz, out.splitlines())
 
 
 @app.get("/folders")
@@ -161,6 +264,8 @@ def folders(
 
     media_counts=1 acrescenta fotos/videos (contagem por extensão) em cada
     pasta-folha — um mega-find por pasta, então só ligue quando precisar.
+    Vem junto embalagens/embalagens_pasta (ver `_classificar`); as chaves
+    fotos/videos continuam iguais porque o Marketing e o portal leem elas.
     """
     items, parsed = _list_one(root)
     if depth >= 2:
@@ -184,16 +289,26 @@ def folders(
             if not it["is_folder"] or it["has_children"]:
                 continue
             try:
-                it["fotos"], it["videos"] = _count_media(it["path"])
+                c = _count_media(it["path"])
             except HTTPException:
-                it["fotos"] = it["videos"] = None
+                it["fotos"] = it["videos"] = it["embalagens"] = None
+                it["embalagens_pasta"] = None
+                continue
+            for chave in ("fotos", "videos", "embalagens", "embalagens_pasta"):
+                it[chave] = c[chave]
     return {"root": root, "items": items, "flags_parsed": parsed}
 
 
 @app.get("/media_counts")
 def media_counts_one(path: str, _: None = Depends(check_token)) -> dict:
-    fotos, videos = _count_media(path)
-    return {"path": path, "fotos": fotos, "videos": videos}
+    c = _count_media(path)
+    return {
+        "path": path,
+        "fotos": c["fotos"],
+        "videos": c["videos"],
+        "embalagens": c["embalagens"],
+        "embalagens_pasta": c["embalagens_pasta"],
+    }
 
 
 @app.get("/debug/ls")
@@ -210,44 +325,41 @@ def debug_ls(path: str = "/", long: bool = True, _: None = Depends(check_token))
 # o material do fornecedor junto. Com estes dois, os bytes passam pelo DaVinci
 # e pela mesma trava de equipe das outras rotas.
 
-_EXT_IMAGEM = (".jpg", ".jpeg", ".png", ".webp", ".gif")
+# O que o /files entrega em cada `tipo`. "imagens" é o padrão porque é o que
+# o portal das agências sempre pediu (sem passar tipo) — e continua sem a
+# subpasta de embalagens, que é material interno.
+_GRUPO_POR_TIPO = {"imagens": "foto", "videos": "video", "embalagens": "embalagem"}
 
 
 @app.get("/files")
-def files(path: str, _: None = Depends(check_token)) -> dict:
-    """Lista as IMAGENS de uma pasta, RECURSIVO, já separando de vídeo.
+def files(path: str, tipo: str = "imagens", _: None = Depends(check_token)) -> dict:
+    """Lista os arquivos de uma pasta, RECURSIVO, de um tipo só.
 
     Recursivo porque as pastas não têm o mesmo formato: `/Celular/<modelo>`
     guarda as fotos soltas, e `/Malas/<linha>` guarda uma subpasta por modelo
     (`M1 listrada`, `M2 lisa`…). Lendo só o primeiro nível, as 791 fotos de
     malas — a maior parte do acervo — apareciam como zero.
 
-    Usa `mega-find`, que é o mesmo caminho da contagem que alimenta
-    `fotos_count`; assim a lista e o número não divergem.
+    Usa `mega-find` e a mesma `_classificar` da contagem que alimenta
+    `fotos_count`/`embalagens_count`; assim a lista e o número não divergem.
 
-    `nome` vem RELATIVO à pasta pedida, com a subpasta junto quando houver —
-    é ele que volta na hora de baixar.
+    `nome` vem RELATIVO à pasta pedida, com a subpasta junto quando houver
+    (embalagem vem como "Embalagens/caixa.pdf") — é ele que volta na hora de
+    baixar. `ext` em minúsculas, sem o ponto.
     """
-    raiz = "/" + path.strip().strip("/")
+    grupo = _GRUPO_POR_TIPO.get(tipo)
+    if grupo is None:
+        raise HTTPException(400, "tipo inválido")
+    raiz = _raiz(path)
     rc, out = run(["mega-find", raiz], timeout=300)
     if rc != 0:
         return {"rc": rc, "out": out[-2000:], "arquivos": []}
-
-    arquivos = []
-    for linha in out.splitlines():
-        caminho = linha.strip().rstrip("/")
-        if not caminho or caminho == raiz:
-            continue
-        folha = caminho.rsplit("/", 1)[-1]
-        if "." not in folha:
-            continue  # pasta
-        ext = folha.rsplit(".", 1)[-1].lower()
-        if ext not in _IMG_EXT:
-            continue  # vídeo entregue e afins ficam de fora
-        relativo = caminho[len(raiz) :].lstrip("/") if caminho.startswith(raiz) else folha
-        arquivos.append({"nome": relativo, "imagem": True})
-
-    arquivos.sort(key=lambda a: a["nome"])
+    c = _classificar(raiz, out.splitlines())
+    arquivos = [
+        {"nome": a["nome"], "ext": a["ext"], "imagem": a["ext"] in _IMG_EXT}
+        for a in c["arquivos"]
+        if a["grupo"] == grupo
+    ]
     return {"rc": 0, "arquivos": arquivos}
 
 
@@ -262,7 +374,20 @@ def file(path: str, _: None = Depends(check_token)):
     nome = path.rsplit("/", 1)[-1]
     # `..` fora: o nome vem da listagem, mas chega por parâmetro. Subpasta é
     # legítima (as malas têm uma por modelo), subir de nível não é.
-    if not nome or ".." in path:
+    # Curinga e trecho "." também: o MEGAcmd trata "*" e "?" como padrão e
+    # resolve "." (conferido em produção, 29/09/2026). Com eles, "./Embalagens/
+    # caixa.jpg" furava a trava de embalagens do portal, e "*" fazia o
+    # `mega-get` — que é recursivo — baixar a pasta inteira do produto para
+    # o disco antes do 404. Vale para todos que chamam /file (Tabela de
+    # Preços e portal das agências). Nenhum fotos_path de produção tem "*" ou
+    # "?"; trecho vazio ("//") não é barrado aqui porque o caminho inteiro
+    # inclui a pasta do produto — quem chama já recusa no nome do arquivo.
+    if (
+        not nome
+        or ".." in path
+        or any(c in path for c in "*?")
+        or any(s.strip() == "." for s in path.split("/"))
+    ):
         raise HTTPException(400, "caminho inválido")
     tmp = tempfile.mkdtemp(prefix="megafile")
     rc, out = run(["mega-get", path, tmp], timeout=600)

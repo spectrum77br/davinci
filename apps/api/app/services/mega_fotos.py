@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from collections.abc import AsyncIterator
 from typing import Any
 
 import httpx
@@ -88,6 +89,41 @@ async def sidecar_bytes(path: str, *, params: dict[str, Any], timeout: float = 6
     return resp.content
 
 
+async def sidecar_stream(
+    path: str, *, params: dict[str, Any], timeout: float = 600.0
+) -> tuple[AsyncIterator[bytes], Any]:
+    """Como `sidecar_bytes`, mas SEM carregar o arquivo na memória da API.
+
+    Existe por causa das embalagens: arte de impressão (.ai, .psd, .zip) passa
+    fácil de 100 MB, e `resp.content` seguraria o arquivo inteiro na API a
+    cada download. Devolve (pedaços, fechar): quem chama entrega os pedaços
+    num StreamingResponse e roda `fechar()` no fim (BackgroundTask). O status
+    é conferido ANTES do primeiro byte — erro do sidecar vira MegaError com o
+    status dele (404 = arquivo não achado), não uma resposta cortada.
+    """
+    settings = get_settings()
+    client = httpx.AsyncClient(
+        base_url=settings.mega_sidecar_url,
+        headers=_headers(),
+        timeout=httpx.Timeout(timeout, connect=10.0),
+    )
+    try:
+        resp = await client.send(client.build_request("GET", path, params=params), stream=True)
+    except httpx.HTTPError as exc:
+        await client.aclose()
+        raise MegaError(f"sidecar MEGA inacessível: {exc}", 503) from exc
+    if resp.status_code >= 400:
+        await resp.aclose()
+        await client.aclose()
+        raise MegaError(f"sidecar HTTP {resp.status_code}", resp.status_code)
+
+    async def fechar() -> None:
+        await resp.aclose()
+        await client.aclose()
+
+    return resp.aiter_bytes(), fechar
+
+
 _NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
 
 
@@ -95,6 +131,26 @@ def norm_name(s: str) -> str:
     s = unicodedata.normalize("NFKD", s)
     s = "".join(ch for ch in s if not unicodedata.combining(ch)).lower()
     return _NON_ALNUM_RE.sub(" ", s).strip()
+
+
+# A subpasta de embalagens dentro da pasta de fotos do produto (Eduardo,
+# 29/09/2026). O sidecar (infra/megacmd/app.py, `_classificar`) usa a MESMA
+# regra para contar e listar; os dois lados precisam concordar, senão o portal
+# recusaria um arquivo que a listagem mostrou (ou o contrário).
+NOMES_PASTA_EMBALAGEM = frozenset({"embalagens", "embalagem"})
+PASTA_EMBALAGEM_PADRAO = "Embalagens"
+
+
+def eh_de_embalagens(nome_relativo: str) -> bool:
+    """O 1º segmento do caminho RELATIVO à pasta do produto é a subpasta de
+    embalagens? ("Embalagens/caixa.pdf", "embalagem/x.jpg", "EMBALAGÉNS/y").
+
+    Trecho vazio e "." são pulados: o MEGAcmd resolve "./Embalagens/x.jpg"
+    e "/Embalagens//x.jpg" para a mesma subpasta, e olhar só o 1º trecho
+    literal ("." vira "" no norm_name) deixava a caixa passar. As rotas já
+    recusam esses nomes antes; isto é a segunda trava."""
+    segs = [s for s in (nome_relativo or "").split("/") if s.strip() not in ("", ".")]
+    return bool(segs) and norm_name(segs[0]) in NOMES_PASTA_EMBALAGEM
 
 
 def match_products_to_folders(
