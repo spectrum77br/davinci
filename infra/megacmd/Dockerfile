@@ -19,7 +19,11 @@ RUN pip install --no-cache-dir fastapi uvicorn python-multipart pillow
 # Prévia de PDF/AI da aba Embalagens (pdftoppm). RUN separado de propósito:
 # mexer na linha do megacmd refaria a camada e atualizaria o MEGAcmd sem
 # ninguém pedir. poppler-data: fontes CJK dos PDFs de fornecedor chinês.
-RUN apt-get update \
+# O pacote megacmd instala a PRÓPRIA lista do repositório do MEGA (com outro
+# Signed-By); com a nossa megacmd.list junto, o apt-get update recusa as duas
+# ("Conflicting values set for option Signed-By"). A nossa já cumpriu o papel.
+RUN rm -f /etc/apt/sources.list.d/megacmd.list \
+    && apt-get update \
     && apt-get install -y --no-install-recommends poppler-utils poppler-data \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
