@@ -108,4 +108,6 @@ def test_prefixos_da_familia_saem_da_configuracao(monkeypatch):
     monkeypatch.setattr(worker, "get_settings", lambda: _Config(prefixos="dg052,dg053"))
     assert worker._prefixos_familia() == ["dg052", "dg053"]
     monkeypatch.setattr(worker, "get_settings", lambda: _Config(ativo=False))
-    assert worker._prefixos_familia() == []
+    assert worker._prefixos_familia() is None  # desligada
+    monkeypatch.setattr(worker, "get_settings", lambda: _Config(prefixos=""))
+    assert worker._prefixos_familia() == []  # ligada para TODAS as linhas

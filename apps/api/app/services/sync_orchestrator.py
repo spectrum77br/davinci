@@ -245,6 +245,12 @@ class SyncOrchestrator:
         # for both the local cache and the outbound push.
         clamped = max(0, int(new_stock))
         link.stock = clamped
+        if clamped != (product.stock or 0):
+            # O total da família guardado nesta passada ficou velho: o irmão
+            # seguinte recalcula (pesa em família de 4 lotes, como a003).
+            chave = estoque_familia.chave_familia(product.sku)
+            if chave is not None:
+                self._familia_cache.pop(chave, None)
         product.stock = clamped
         if parsed.get("min_stock") is not None:
             product.min_stock = int(parsed["min_stock"])

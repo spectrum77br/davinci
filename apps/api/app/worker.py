@@ -127,20 +127,41 @@ DAILY_SYNC_HORA_PADRAO = time(3, 0)
 SYNC_ALL_LOW_STOCK_THRESHOLD = 10
 
 
-def _prefixos_familia() -> list[str]:
-    """Linhas em que a soma por família está ligada, ou lista vazia.
+def _prefixos_familia() -> list[str] | None:
+    """Linhas em que a soma por família está ligada.
 
-    Vazio tem dois significados diferentes: a soma desligada (não isenta
-    ninguém da varredura) e a soma ligada para TODAS as linhas (aí ninguém pode
-    ser pulado, e é isso que o `not prefixos` trata em quem chama)."""
+    None = soma DESLIGADA (não isenta ninguém da varredura); lista vazia = soma
+    ligada para TODAS as linhas (ESTOQUE_FAMILIA_PREFIXOS vazio). Antes os dois
+    eram `[]` e a varredura tratava "todas" como "desligada" — com a soma para
+    todos, sairiam dela os 52 produtos do A17 de estoque alto (auditoria 29/09).
+    """
     s = get_settings()
     if not getattr(s, "estoque_familia_ativo", False):
-        return []
+        return None
     return [
         p.strip().lower()
         for p in (getattr(s, "estoque_familia_prefixos", "") or "").split(",")
         if p.strip()
     ]
+
+
+async def _produtos_de_familia_com_irmao(session) -> list:
+    """Ids dos produtos ativos cuja família (mesmo produto, outro lote de
+    venda) tem 2 ou mais membros ativos — os únicos em que a soma muda o número
+    publicado."""
+    linhas = (
+        await session.execute(
+            select(Product.id, Product.sku).where(
+                Product.situacao == "A", Product.sku.is_not(None)
+            )
+        )
+    ).all()
+    por_familia: dict[str, list] = {}
+    for pid, sku in linhas:
+        chave = estoque_familia.chave_familia(sku)
+        if chave is not None and estoque_familia.familia_ligada(sku):
+            por_familia.setdefault(chave, []).append(pid)
+    return [pid for ids in por_familia.values() if len(ids) >= 2 for pid in ids]
 
 
 async def send_otp_email(ctx: dict, *, email: str, prefix: str, code: str, ttl_minutes: int) -> None:
@@ -261,6 +282,13 @@ async def sync_all_run(
                             *[Product.sku.ilike(f"{p}%") for p in prefixos_familia],
                         )
                     )
+                elif prefixos_familia is not None:
+                    # Soma para TODAS as linhas: entra quem é de família com
+                    # 2+ lotes ativos (o número dele depende do irmão). As
+                    # famílias de um lote só (a maioria) publicam o próprio
+                    # saldo e seguem a regra do estoque baixo.
+                    ids_familia = await _produtos_de_familia_com_irmao(s)
+                    where.append(or_(baixo, Product.id.in_(ids_familia)) if ids_familia else baixo)
                 else:
                     where.append(baixo)
             stmt = select(Product)

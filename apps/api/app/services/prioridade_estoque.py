@@ -66,7 +66,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.db import session_scope
-from app.models import BlingOrder, MargemAudit, PricingProduct
+from app.models import BlingOrder, MargemAudit, PricingProduct, Product
 from app.services import estoque_familia, nf_emissao_gerar
 from app.services.advisory_lock import SYNC_NAMESPACE
 from app.services.logistica_bling import build_observacoes_put_body, compose_observacoes
@@ -203,6 +203,7 @@ async def _lote_com_saldo(
     prioridade: str | None,
     qtd: int,
     redirecionar: bool,
+    existentes: set[str] | None = None,
 ) -> tuple[str | None, dict | None]:
     """De qual lote a peça vai sair, de verdade.
 
@@ -223,13 +224,20 @@ async def _lote_com_saldo(
     `_ConsultaFalhouError` — sem saber se a prioridade tem peça, não troca nada.
     """
     atual = (codigo or "").strip().lower()
+
+    def _existe(sku: str) -> bool:
+        # Irmão sem produto ativo no DaVinci não vale a consulta ao Bling (com a
+        # soma para todas as linhas, eram até 4 consultas por item a lotes que
+        # não existem). O lote ATUAL e o da PRIORIDADE são sempre consultados.
+        return existentes is None or _chave(sku) in existentes
+
     candidatos: list[str] = []
     if prioridade and prioridade != tag_atual:
         candidatos.append(sku_alvo(codigo, tag_atual, prioridade))
     candidatos.append(atual)
     if redirecionar:
         for irmao in estoque_familia.irmaos(codigo):
-            if irmao not in candidatos:
+            if irmao not in candidatos and _existe(irmao):
                 candidatos.append(irmao)
 
     for alvo in candidatos:
@@ -341,6 +349,7 @@ async def _plano_estoque_unico(
     qtd_por_codigo: dict[str, int],
     mapa: dict[str, str],
     redireciona,
+    existentes: set[str] | None = None,
 ) -> dict | None:
     """Põe o pedido INTEIRO num estoque só (Vinicius, 23/09/2026).
 
@@ -380,7 +389,17 @@ async def _plano_estoque_unico(
     votos = Counter(p for p in prios.values() if p)
     irmaos: set[str] = set()
     if all(redireciona(cod) for cod, _b, _t, _q in itens):
-        irmaos = set(estoque_familia.LOTES_DE_VENDA)
+        # Só os lotes em que TODOS os itens existem como produto ativo — os
+        # outros nunca cobririam o pedido e custariam consultas ao Bling.
+        irmaos = {
+            lote
+            for lote in estoque_familia.LOTES_DE_VENDA
+            if existentes is None
+            or all(
+                tag == lote or _chave(sku_alvo(cod, tag, lote)) in existentes
+                for cod, _b, tag, _q in itens
+            )
+        }
     candidatos = presentes | set(votos) | irmaos
     if len(candidatos) < 2:
         return None  # tudo num estoque, sem prioridade apontando pra outro
@@ -585,6 +604,7 @@ async def _decidir_pedido(
     estoque_unico: bool,
     summary: dict,
     descontos: _Descontos,
+    existentes: set[str] | None = None,
 ) -> list[dict]:
     """Planeja as trocas de UM pedido (sem PUT). Pode levantar
     `_ConsultaFalhouError` — aí o caller devolve os descontos e adia o pedido.
@@ -601,6 +621,7 @@ async def _decidir_pedido(
             qtd_por_codigo=qtd_por_codigo,
             mapa=mapa,
             redireciona=_redireciona,
+            existentes=existentes,
         )
         if plano and plano.get("estoque"):
             decididos = set(plano["itens"])
@@ -656,6 +677,7 @@ async def _decidir_pedido(
             prioridade=prio,
             qtd=qtd,
             redirecionar=redirecionar,
+            existentes=existentes,
         )
         if alvo is None:
             summary["sem_saldo_alvo"] += 1
@@ -758,6 +780,17 @@ async def aplicar_prioridade_estoque(
         logger.warning("prioridade_estoque_sem_bling")
         return summary
 
+    # SKUs de produto ativo no DaVinci (1 consulta ao banco por rodada): lote
+    # irmão que não existe aqui não é consultado no Bling.
+    existentes = {
+        _chave(sku)
+        for (sku,) in (
+            await session.execute(
+                select(Product.sku).where(Product.situacao == "A", Product.sku.is_not(None))
+            )
+        ).all()
+    }
+
     # Cache alvo → resultado do Bling; o saldo em cache é DECREMENTADO a cada
     # troca planejada pra dois pedidos do mesmo tick não contarem a mesma peça.
     alvo_cache: dict[str, dict | None] = {}
@@ -783,6 +816,7 @@ async def aplicar_prioridade_estoque(
                 estoque_unico=estoque_unico,
                 summary=summary,
                 descontos=descontos,
+                existentes=existentes,
             )
         except _ConsultaFalhouError as exc:
             descontos.devolver()

@@ -11,13 +11,14 @@ que os pedidos em aberto seguram" e a troca move a reserva, como no Bling:
 
 from __future__ import annotations
 
+import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
-from app.models import BlingOrder, MargemAudit
+from app.models import BlingOrder, MargemAudit, Product, User, UserRole, UserStatus
 from app.services import estoque_familia, nf_emissao_gerar
 from app.services import prioridade_estoque as prio
 
@@ -92,6 +93,24 @@ def cenario(db: AsyncSession, monkeypatch):
 
     async def _montar(fisico, pedidos):
         bling = BlingComReserva(fisico, pedidos)
+        # O catálogo do DaVinci espelha o Bling (a importação a cada 15 min
+        # garante): o robô só considera lote que existe como produto ativo.
+        dono = User(open_id=f"email:{uuid.uuid4().hex[:8]}@x", email=f"{uuid.uuid4().hex[:8]}@x",
+                    name="dono", role=UserRole.ADMIN, status=UserStatus.ACTIVE)
+        db.add(dono)
+        await db.flush()
+        catalogo: set[str] = set(bling.fisico)
+        for itens in pedidos.values():
+            for cod, _q in itens:
+                for lote in estoque_familia.LOTES_DE_VENDA:
+                    pecas = [
+                        (p.rsplit(".", 1)[0] + "." + lote) if "." in p else p
+                        for p in cod.lower().split("+")
+                    ]
+                    if all(pc in bling.fisico for pc in pecas):
+                        catalogo.add("+".join(pecas))
+        for sku in sorted(catalogo):
+            db.add(Product(user_id=dono.id, sku=sku, name=sku, stock=0, situacao="A"))
         for numero, itens in pedidos.items():
             for i, (cod, q) in enumerate(itens):
                 db.add(BlingOrder(numero=numero, bling_id=int(numero), loja="5001", item_index=i,

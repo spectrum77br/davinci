@@ -137,6 +137,10 @@ async def saldo_publicavel(
     s = get_settings()
     if not getattr(s, "estoque_familia_ativo", False):
         return proprio
+    if (product.situacao or "A") != "A":
+        # Produto inativo/excluído não promete o estoque dos irmãos (29/09:
+        # 2.343 vínculos vivos apontam para produto excluído).
+        return proprio
 
     if not familia_ligada(product.sku):
         return proprio
