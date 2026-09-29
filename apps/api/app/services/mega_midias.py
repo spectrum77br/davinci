@@ -42,8 +42,12 @@ EXT_VIDEO = frozenset(
 )
 # Embalagem é foto da caixa E arquivo de gráfica: a arte vem da agência em PDF,
 # Illustrator, Photoshop, Corel, EPS/SVG, ou tudo zipado. Vídeo não — vídeo de
-# caixa é criativo e vai em Fotos.
-EXT_EMBALAGEM = EXT_IMAGEM | {"pdf", "ai", "psd", "eps", "cdr", "svg", "zip"}
+# caixa é criativo e vai em Fotos. Affinity (.af e as extensões antigas
+# .afdesign/.afphoto/.afpub): é onde as caixas da Uranyx são desenhadas — a
+# pasta ~/Downloads/CAIXAS do Eduardo tinha 14 .af editáveis (29/09/2026).
+EXT_EMBALAGEM = EXT_IMAGEM | {
+    "pdf", "ai", "psd", "eps", "cdr", "svg", "zip", "af", "afdesign", "afphoto", "afpub",
+}
 EXT_POR_TIPO: dict[str, frozenset[str]] = {
     "fotos": EXT_IMAGEM | EXT_VIDEO,
     "embalagens": EXT_EMBALAGEM,

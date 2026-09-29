@@ -371,6 +371,7 @@ async def test_embalagem_usa_a_subpasta_feita_a_mao(
     [
         ("fotos", ["ok.jpg", "manual.pdf"], ["manual.pdf"]),
         ("fotos", ["script.html"], ["script.html"]),
+        ("fotos", ["caixa.af"], ["caixa.af"]),
         ("embalagens", ["caixa.pdf", "unboxing.mp4"], ["unboxing.mp4"]),
         ("embalagens", ["sem_extensao"], ["sem_extensao"]),
     ],
@@ -392,7 +393,10 @@ async def test_embalagem_aceita_os_formatos_de_grafica(
     client: AsyncClient, db: AsyncSession, editor: User, mega: MegaFalso,
 ):
     p = await _produto(db, editor, nome="X", pasta="/Celular/X")
-    nomes = ["a.PDF", "b.ai", "c.psd", "d.eps", "e.cdr", "f.svg", "g.zip", "h.jpeg"]
+    # .af = Affinity, onde as caixas da Uranyx são desenhadas (e as extensões
+    # antigas do Affinity).
+    nomes = ["a.PDF", "b.ai", "c.psd", "d.eps", "e.cdr", "f.svg", "g.zip", "h.jpeg",
+             "Caixa Panela 17.09.af", "j.afdesign", "k.afpub", "l.afphoto"]
     r = await client.post(f"/api/pricing/mega/products/{p.id}/embalagens/upload",
                           files=_arquivos(*nomes))
     assert r.status_code == 200, r.text

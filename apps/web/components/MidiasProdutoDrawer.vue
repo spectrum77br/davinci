@@ -100,7 +100,7 @@ const PASTA_POR_DEPT: Record<string, string> = {
 // checagem aqui só evita subir 4 lotes e descobrir no 5º que tinha um PDF.
 const EXT_IMAGEM = new Set(['jpg', 'jpeg', 'png', 'webp', 'gif', 'heic', 'heif', 'bmp', 'tif', 'tiff', 'avif', 'jfif'])
 const EXT_VIDEO = new Set(['mp4', 'mov', 'm4v', 'avi', 'mkv', 'webm', '3gp', 'mpg', 'mpeg', 'wmv', 'flv'])
-const EXT_ARTE = new Set(['pdf', 'ai', 'psd', 'eps', 'cdr', 'svg', 'zip'])
+const EXT_ARTE = new Set(['pdf', 'ai', 'psd', 'eps', 'cdr', 'svg', 'zip', 'af', 'afdesign', 'afphoto', 'afpub'])
 
 // 5 arquivos por requisição: vídeo de celular passa fácil de 100 MB, e um
 // lote pequeno deixa o progresso andar e não perde tudo se um lote falhar.
@@ -231,7 +231,7 @@ function mensagemErro(e: any): string {
 function textoRecusados(nomes: string[]): string {
   const lista = nomes.slice(0, 8).join(', ') + (nomes.length > 8 ? ` e mais ${nomes.length - 8}` : '')
   const dica = aba.value === 'embalagens'
-    ? 'Embalagens aceita fotos, PDF, AI, PSD, EPS, CDR, SVG e ZIP. Vídeo vai na aba Vídeos.'
+    ? 'Embalagens aceita fotos, PDF, AI, PSD, EPS, CDR, SVG, Affinity (.af) e ZIP. Vídeo vai na aba Vídeos.'
     : 'Aqui entram fotos e vídeos. PDF, arte e ZIP vão na aba Embalagens.'
   return `Não aceito aqui: ${lista}. ${dica}`
 }
@@ -422,13 +422,13 @@ let cancelado = false
 
 const acceptAba = computed(() =>
   aba.value === 'embalagens'
-    ? 'image/*,.pdf,.ai,.psd,.eps,.cdr,.svg,.zip'
+    ? 'image/*,.pdf,.ai,.psd,.eps,.cdr,.svg,.zip,.af,.afdesign,.afphoto,.afpub'
     : aba.value === 'videos' ? 'video/*' : 'image/*',
 )
 
 const aceitaTexto = computed(() =>
   aba.value === 'embalagens'
-    ? 'Fotos da caixa, PDF, AI, PSD, EPS, CDR, SVG ou ZIP'
+    ? 'Fotos da caixa, PDF, AI, PSD, EPS, CDR, SVG, Affinity (.af) ou ZIP'
     : aba.value === 'videos'
       ? 'Vídeos (MP4, MOV…) — vídeo grande demora para subir'
       : 'Fotos (JPG, PNG, WEBP…)',
