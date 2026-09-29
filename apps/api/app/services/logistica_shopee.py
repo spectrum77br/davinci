@@ -102,10 +102,32 @@ async def build_enrichment(client: ShopeeClient, order_sn: str) -> dict:
     }
 
 
+# Nomes que são a MESMA loja Shopee. Em 23/09 às 12:51 duas lojas foram
+# renomeadas no cadastro de lojas (store_info.account_name: jlas → atlas,
+# kia → fiore), mas a integração continuou com o nome antigo — e a linha nasce
+# com o nome do cadastro. Resultado: todo pedido novo dessas lojas ficava sem
+# Status Plataforma, Localização e prazo de devolução (29/09: 54 linhas puladas
+# a cada rodada). Linha de antes de 23/09 segue com o nome antigo, então os
+# dois lados têm que achar a integração. "kia/fiore" é o nome no Upseller
+# (ver nf_upseller._LOJA_UPSELLER).
+_MESMA_LOJA: tuple[frozenset[str], ...] = (
+    frozenset({"atlas", "jlas"}),
+    frozenset({"fiore", "kia", "kia/fiore"}),
+)
+
+
+def _nomes_da_loja(key: str) -> frozenset[str]:
+    for grupo in _MESMA_LOJA:
+        if key in grupo:
+            return grupo
+    return frozenset({key})
+
+
 async def _shopee_integration_for_conta(
     session: AsyncSession, conta: str | None
 ) -> Integration | None:
-    """Integração Shopee cuja `name` casa (trim+lower) com a `conta` da linha."""
+    """Integração Shopee cuja `name` casa (trim+lower) com a `conta` da linha.
+    Nome exato vence; senão vale outro nome da mesma loja (`_MESMA_LOJA`)."""
     key = (conta or "").strip().lower()
     if not key:
         return None
@@ -116,6 +138,10 @@ async def _shopee_integration_for_conta(
     ).scalars().all()
     for it in rows:
         if (it.name or "").strip().lower() == key:
+            return it
+    nomes = _nomes_da_loja(key)
+    for it in rows:
+        if (it.name or "").strip().lower() in nomes:
             return it
     return None
 

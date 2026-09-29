@@ -137,3 +137,39 @@ def test_divergencia_shopee_sem_divergencia():
     assert logistica_rules.detectar_divergencia_shopee({"order_status": "CANCELLED"}) is None
     assert logistica_rules.detectar_divergencia_shopee({}) is None
     assert logistica_rules.detectar_divergencia_shopee(None) is None
+
+
+@pytest.mark.asyncio
+async def test_integracao_da_loja_renomeada_casa_pelos_dois_nomes(db, make_user):
+    """23/09: as lojas Shopee viraram 'atlas'/'fiore' no cadastro de lojas, mas a
+    integração ficou 'Jlas'/'Kia'. A linha nova (nome novo) e a antiga (nome
+    velho) acham a mesma integração; nome exato vence o nome da mesma loja."""
+    from app.models import Integration, IntegrationPlatform
+
+    user = await make_user()
+
+    def _integ(nome: str) -> Integration:
+        return Integration(
+            user_id=user.id, platform=IntegrationPlatform.SHOPEE, name=nome,
+            credentials=b"x", status="active",
+        )
+
+    jlas, kia, mega = _integ("Jlas"), _integ("Kia"), _integ("mega")
+    db.add_all([jlas, kia, mega])
+    await db.flush()
+
+    achar = logistica_shopee._shopee_integration_for_conta
+    assert (await achar(db, "atlas")).id == jlas.id
+    assert (await achar(db, " Atlas ")).id == jlas.id
+    assert (await achar(db, "jlas")).id == jlas.id
+    assert (await achar(db, "fiore")).id == kia.id
+    assert (await achar(db, "kia")).id == kia.id
+    assert (await achar(db, "mega")).id == mega.id
+    assert await achar(db, "outra") is None
+    assert await achar(db, "") is None
+
+    # Se um dia a integração ganhar o nome novo, o exato continua valendo.
+    atlas = _integ("atlas")
+    db.add(atlas)
+    await db.flush()
+    assert (await achar(db, "atlas")).id == atlas.id
