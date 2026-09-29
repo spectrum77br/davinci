@@ -41,8 +41,9 @@ Captcha, login ou código: a IA **para**, deixa a tela aberta e chama uma pessoa
 | `tmp/` | fotos e prints da rodada — apagado no fim de cada rodada |
 
 No projeto (`apps/ia-de-chamado/`) ficam só as partes que não são segredo nem
-diário: `CLAUDE.md`, `rodada.sh`, `ferramentas/`, `.claude/settings.json`, o
-despertador (`com.davinci.ia-de-chamado.plist`) e este LEIAME.
+diário: `CLAUDE.md`, `rodada.sh`, `ferramentas/`, `permissoes.json` (no Mac vira
+`.claude/settings.json`), o despertador (`com.davinci.ia-de-chamado.plist`) e
+este LEIAME.
 
 ## Ligar e desligar
 

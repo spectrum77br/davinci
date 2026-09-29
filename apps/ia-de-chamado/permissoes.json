@@ -1,0 +1,30 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 ferramentas/davinci_chamados.py *)",
+      "Bash(/usr/bin/python3 ferramentas/davinci_chamados.py *)",
+      "Bash(python3 ferramentas/adspower.py *)",
+      "Bash(/usr/bin/python3 ferramentas/adspower.py *)",
+      "Bash(ferramentas/tela *)",
+      "Bash(node ferramentas/shopee_evidencia.mjs *)",
+      "Bash(mkdir -p tmp/*)",
+      "Bash(sips -Z *)",
+      "Read(tmp/**)"
+    ],
+    "deny": [
+      "Read(.env)",
+      "Read(.env.claude)",
+      "Read(claude/**)",
+      "Edit(CLAUDE.md)",
+      "Write(CLAUDE.md)",
+      "Edit(.claude/**)",
+      "Write(.claude/**)",
+      "Edit(ferramentas/**)",
+      "Write(ferramentas/**)",
+      "Bash(curl *)",
+      "WebFetch",
+      "WebSearch"
+    ]
+  },
+  "cleanupPeriodDays": 30
+}
