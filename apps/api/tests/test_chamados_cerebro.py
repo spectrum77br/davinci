@@ -522,3 +522,51 @@ async def test_avaliacao_no_historico_e_ao_fechar(client, db, cenario):
     av = next(m for m in msgs if m["da_ia"])["avaliacao_ia"]
     assert av["certo"] is False and av["correcao"] == "Era pra fechar como perdido"
     assert not [m for m in msgs if m["tipo"] == "instrucao"]
+
+
+async def test_caso_sem_foto_ve_as_da_devolucao(client, db, cenario):
+    """29/09 (294654): a abertura falhou (loja sem integração) e o chamado ficou
+    sem foto; o atendente da Shopee abriu a disputa na mão e pediu evidência. O
+    caso passa a listar as fotos da devolução (sem o cartão do vídeo) e o
+    /agent/anexos entrega; com foto no próprio chamado, só as dele."""
+    from datetime import date
+
+    from app.models import ChamadoAnexo, DevolucaoAnexo, Devolution
+
+    hermes = {"X-Agent-Token": _HERMES}
+    jpg = b"\xff\xd8\xff\xe0aparelho-bloqueado"
+    dev = Devolution(conta="Shopee Jlas", motivo_devolucao="Bloqueado", pedido_bling="294654")
+    outra = Devolution(conta="Shopee Jlas", motivo_devolucao="Bloqueado", pedido_bling="999001")
+    db.add_all([dev, outra])
+    await db.flush()
+    foto = DevolucaoAnexo(devolution_id=dev.id, filename="tela.jpg", content_type="image/jpeg",
+                          size_bytes=len(jpg), blob=jpg)
+    cartao = DevolucaoAnexo(devolution_id=dev.id, filename="video-expedicao.png",
+                            content_type="image/png", size_bytes=3, blob=b"png")
+    alheia = DevolucaoAnexo(devolution_id=outra.id, filename="x.jpg", content_type="image/jpeg",
+                            size_bytes=3, blob=b"jpg")
+    ch = Chamado(pedido_bling="294654", plataforma="shopee", conta="Shopee Jlas",
+                 origem="devolucao", origem_ref=str(dev.id), canal="api", data=date.today())
+    db.add_all([foto, cartao, alheia, ch])
+    await db.commit()
+
+    caso = (
+        await client.post("/api/chamados/agent/caso", headers=hermes,
+                          json={"pedido_bling": "294654"})
+    ).json()["chamados"][0]
+    assert [(a["id"], a["filename"]) for a in caso["anexos"]] == [(str(foto.id), "tela.jpg")]
+    assert caso["anexos_abertura"] == []
+    got = await client.get(f"/api/chamados/agent/anexos/{foto.id}", headers=hermes)
+    assert got.status_code == 200 and got.content == jpg
+    # foto de pedido sem chamado de devolução não sai por aqui
+    r = await client.get(f"/api/chamados/agent/anexos/{alheia.id}", headers=hermes)
+    assert r.status_code == 404
+
+    db.add(ChamadoAnexo(chamado_id=ch.id, filename="print.png", content_type="image/png",
+                        size_bytes=3, blob=b"png"))
+    await db.commit()
+    caso = (
+        await client.post("/api/chamados/agent/caso", headers=hermes,
+                          json={"pedido_bling": "294654"})
+    ).json()["chamados"][0]
+    assert [a["filename"] for a in caso["anexos"]] == ["print.png"]

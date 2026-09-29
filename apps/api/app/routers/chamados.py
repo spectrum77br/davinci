@@ -2320,6 +2320,41 @@ async def agent_analisar(
     return AgentAnalisarOut(chamados=[await _item_do_cerebro(session, ch) for ch in rows])
 
 
+async def _fotos_da_devolucao(session: AsyncSession, ch: Chamado) -> list[ChamadoAnexoOut]:
+    """Fotos das linhas de devolução do pedido, pro chamado que não tem nenhuma.
+
+    29/09 (294654): a abertura só copia as fotos pro chamado quando sai (ou vai
+    pro robô). Falhou — loja sem integração, prazo vencido — e o chamado fica sem
+    foto; aí o atendente da Shopee abre a disputa na mão e pede evidência, e a IA
+    não tinha o que mandar. Baixa pelo mesmo /agent/anexos/{id}. Sem o cartão do
+    vídeo (é gerado por nós, não é prova)."""
+    if ch.origem != "devolucao":
+        return []
+    ids = [d.id for d in await _lancamentos_do_chamado(session, ch)]
+    if not ids:
+        return []
+    rows = (
+        await session.execute(
+            select(DevolucaoAnexo)
+            .options(defer(DevolucaoAnexo.blob))
+            .where(DevolucaoAnexo.devolution_id.in_(ids))
+            .order_by(DevolucaoAnexo.created_at)
+        )
+    ).scalars()
+    return [
+        ChamadoAnexoOut(
+            id=a.id,
+            filename=a.filename,
+            content_type=a.content_type,
+            size_bytes=a.size_bytes,
+            created_at=a.created_at,
+        )
+        for a in rows
+        if (a.content_type or "").lower().startswith("image/")
+        and not chamados_devolucao._e_cartao_video(a)
+    ]
+
+
 async def _item_do_cerebro(session: AsyncSession, ch: Chamado) -> AgentChamadoAnaliseOut:
     """O chamado como o cérebro enxerga: a conversa do CASO inteiro (linhas irmãs
     da mesma consulta), instrução/bloqueio pendentes e os prints da abertura."""
@@ -2342,6 +2377,8 @@ async def _item_do_cerebro(session: AsyncSession, ch: Chamado) -> AgentChamadoAn
         ).scalars()
         if a.mensagem_id is None or a.mensagem_id in visiveis
     ]
+    tem_foto = any((a.content_type or "").lower().startswith("image/") for a in todos)
+    fotos_dev = [] if tem_foto else await _fotos_da_devolucao(session, ch)
     pend = _instrucao_pendente(msgs)
     _m, bloq = _bloqueio_de(msgs)
     return AgentChamadoAnaliseOut(
@@ -2373,7 +2410,7 @@ async def _item_do_cerebro(session: AsyncSession, ch: Chamado) -> AgentChamadoAn
             for m in msgs
         ],
         anexos_abertura=[a.id for a in anexos],
-        anexos=[_anexo_out(a) for a in todos],
+        anexos=[_anexo_out(a) for a in todos] + fotos_dev,
         replicas_robo=sum(
             1 for m in msgs if m.direcao == "enviada" and m.autor_nome == AUTOR_CEREBRO
         ),
@@ -2799,6 +2836,27 @@ async def agent_get_anexo(
     a = (
         await session.execute(select(ChamadoAnexo).where(ChamadoAnexo.id == anexo_id))
     ).scalar_one_or_none()
-    if a is None:
-        raise HTTPException(404, detail={"code": "chamado_anexo_not_found"})
-    return Response(content=a.blob, media_type=a.content_type)
+    if a is not None:
+        return Response(content=a.blob, media_type=a.content_type)
+    # 29/09: foto da devolução que o caso lista quando o chamado não tem nenhuma
+    # (`_fotos_da_devolucao`) — só de pedido que tem chamado de devolução.
+    d = await session.get(DevolucaoAnexo, anexo_id)
+    dev = await session.get(Devolution, d.devolution_id) if d is not None else None
+    if dev is not None:
+        pedido = (dev.pedido_bling or "").strip()
+        dono = (
+            await session.execute(
+                select(Chamado.id)
+                .where(
+                    Chamado.origem == "devolucao",
+                    or_(
+                        Chamado.origem_ref == str(dev.id),
+                        func.trim(Chamado.pedido_bling) == pedido if pedido else literal(False),
+                    ),
+                )
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if dono is not None:
+            return Response(content=d.blob, media_type=d.content_type)
+    raise HTTPException(404, detail={"code": "chamado_anexo_not_found"})
