@@ -1487,6 +1487,31 @@ async def daily_sync_scheduler(ctx: dict) -> None:
             )
 
 
+async def produtos_novos_bling_tick(ctx: dict) -> None:
+    """A cada 15 min: produto criado no Bling entra no DaVinci sem esperar
+    movimento de estoque (a009.cd, 29/09/2026). Lê os "últimos incluídos"."""
+    from app.services.bling_produtos_novos import importar_produtos_novos
+
+    try:
+        async with session_scope() as s:
+            await importar_produtos_novos(s, completo=False)
+    except Exception:  # noqa: BLE001
+        logger.exception("produtos_novos_bling_unhandled")
+
+
+async def produtos_novos_bling_completo(ctx: dict) -> None:
+    """1x por dia: confere TODOS os produtos ativos do Bling (rede de segurança
+    do tick de 15 min — produto que escapou da página dos mais novos)."""
+    from app.services.bling_produtos_novos import importar_produtos_novos
+
+    try:
+        async with session_scope() as s:
+            resumo = await importar_produtos_novos(s, completo=True)
+        logger.info("produtos_novos_bling_completo", **resumo)
+    except Exception:  # noqa: BLE001
+        logger.exception("produtos_novos_bling_completo_unhandled")
+
+
 async def product_bling_cost_sync(ctx: dict) -> None:
     """Diário: atualiza `products.bling_cost_price` de TODOS os produtos a
     partir da listagem `/produtos` do Bling (a lista traz precoCusto; o
@@ -3834,6 +3859,12 @@ class WorkerSettings:
         # Varredura dos vínculos (SKU trocado, anúncio sem vínculo, morto): 10:00 BRT,
         # longe da varredura de estoque da madrugada.
         cron(varredura_vinculos, hour=13, minute=0, run_at_startup=False, timeout=3 * 3600),
+        # Produto criado no Bling → DaVinci sem esperar venda (29/09/2026): a cada
+        # 15 min os mais novos (fora dos :00/:10/:20 de pico do Bling) e 1x por
+        # dia a lista inteira (15:35 UTC = 12:35 BRT).
+        cron(produtos_novos_bling_tick, minute={7, 22, 37, 52}, run_at_startup=False),
+        cron(produtos_novos_bling_completo, hour=15, minute=35, run_at_startup=False,
+             timeout=3600),
         # Vigia da soma por família: 9h20 e 16h20 BRT. Estava só na lista de
         # funções, sem cron — nunca tinha rodado (auditoria de 28/09/2026).
         cron(vigia_estoque_familia_tick, hour={12, 19}, minute=20, run_at_startup=False),
@@ -4324,6 +4355,8 @@ __all__ = [
     "kit_components_sync",
     "low_stock_polling",
     "product_bling_cost_sync",
+    "produtos_novos_bling_tick",
+    "produtos_novos_bling_completo",
     "ml_backfill_run",
     "ml_token_refresh",
     "marketplace_financials_retry",
