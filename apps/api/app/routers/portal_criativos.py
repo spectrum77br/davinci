@@ -110,6 +110,7 @@ from app.services.marketing.anexos import (
     mime_da_extensao,
     mime_seguro,
 )
+from app.services.marketing.vinculos import _marca_id_do_texto, _product_id_do_sku
 from app.services.mega_fotos import MegaError, sidecar_bytes, sidecar_request
 
 logger = structlog.get_logger()
@@ -791,7 +792,22 @@ async def entregar_do_roteiro(
             # ao banco de dentro do laço síncrono de gravação — MissingGreenlet.
             files=[],
         )
-        session.add(row)
+    # O roteiro normalmente já traz os dois ids (`marketing_roteiros` resolve
+    # no salvamento), mas roteiro antigo, ou salvo antes de o anúncio existir,
+    # pode ter o texto sem o id — e a linha vazia reaproveitada lá em cima
+    # também. Sem isto a entrega caía na revisão igual aos cinco vídeos do
+    # conceito próprio em 28/09/2026: "sem legenda" e fora da fila do robô de
+    # postagem (ver `services/marketing/vinculos.py`, 29/09/2026). Só preenche
+    # o que FALTA: o id que o roteiro já tem é vínculo escolhido por gente, e
+    # não é trocado por um palpite tirado do texto.
+    if row.marca_id is None:
+        row.marca_id = await _marca_id_do_texto(session, row.marca)
+    if row.product_id is None:
+        row.product_id = await _product_id_do_sku(session, row.sku)
+    # Depois da resolução, e não antes: as duas consultas acima disparariam o
+    # autoflush e a linha nova sairia num INSERT seguido de UPDATE. Na linha
+    # reaproveitada, que já está na sessão, o `add` não faz nada.
+    session.add(row)
     await session.flush()
 
     entraram = _gravar_arquivos(row, files)
@@ -1127,11 +1143,21 @@ async def propor_video(
         if persona is None:
             raise HTTPException(404, detail={"code": "personagem_nao_encontrado"})
 
+    # Texto E id, sempre juntos. Até 29/09/2026 esta linha gravava só o texto
+    # livre: os cinco vídeos do conceito próprio de 28/09 (marca "uranyx", SKU
+    # preenchido) entraram com `marca_id` e `product_id` NULL, apareceram
+    # "sem legenda" na aba Criativos e o robô de postagem, que filtra por
+    # `marca_id`, nunca os viu. É a mesma resolução do PATCH da aba interna.
+    # Marca fora do cadastro não barra a entrega: a linha nasce com o id NULL
+    # e a equipe corrige a célula na revisão — recusar aqui jogaria fora o
+    # vídeo que a agência acabou de subir.
     row = MarketingCreative(
         id=uuid4(),
         modelo=titulo[:190],
         marca=marca_txt,
+        marca_id=await _marca_id_do_texto(session, marca_txt),
         sku=sku_txt,
+        product_id=await _product_id_do_sku(session, sku_txt),
         equipe=equipe,
         aprovado=None,
         files=[],

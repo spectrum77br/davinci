@@ -527,17 +527,46 @@ async def test_sku_sem_anuncio_cai_no_irmao_avulso_de_mesmo_nome(client, db, mak
 async def test_irmaos_de_produtos_diferentes_nao_escolhe_por_sorteio(
     client, db, make_user, auth_as
 ):
-    """`dg023` tem irmãos avulso, usado e kit 2. Escolher um por data faria a
-    legenda falar de celular USADO — sem irmão único, fica sem produto."""
+    """`dg023` tem irmãos avulsos de produtos diferentes. Escolher um por data
+    trocaria de produto sem ninguém mexer — sem irmão único, fica sem produto."""
     user = await _user(make_user, auth_as, edit=True, role=UserRole.ADMIN)
     novo_ = await _produto(db, user, nome="Uranyx WP53 24.128 - Preto")
-    usado = await _produto(db, user, nome="Uranyx WP53 24.128 - Preto - USADO")
+    outro = await _produto(db, user, nome="Uranyx WP53 24.128 - Azul")
     await _anuncio(db, user, novo_, "dg023.pi")
-    await _anuncio(db, user, usado, "dg023.us")
+    await _anuncio(db, user, outro, "dg023.az")
 
     r = await client.post(API_CRIATIVOS, json={"modelo": "video 30s", "sku": "dg023.ra"})
     assert r.status_code == 200, r.text
     assert r.json()["product_id"] is None
+
+
+async def test_irmao_usado_nao_conta(client, db, make_user, auth_as):
+    """O caso real de 29/09/2026: o `dg019` da agência não tem anúncio nem
+    cadastro, e o único irmão avulso é o `dg019.us` — USADO. Ligar nele poria
+    "USADO" na legenda de vídeo de aparelho novo. Com o usado fora, o novo
+    avulso que sobra é o irmão; sem ele, fica sem produto."""
+    user = await _user(make_user, auth_as, edit=True, role=UserRole.ADMIN)
+    usado = await _produto(
+        db, user, nome="Uranyx Fossibot F105 12.64 - Preto - USADO - AVULSO", sku="dg019.us"
+    )
+    await _anuncio(db, user, usado, "dg019.us")
+
+    r = await client.post(API_CRIATIVOS, json={"modelo": "video 15s", "sku": "dg019"})
+    assert r.status_code == 200, r.text
+    assert r.json()["product_id"] is None
+
+    novo_ = await _produto(db, user, nome="Uranyx WP53 24.128 - Preto")
+    usado2 = await _produto(db, user, nome="Uranyx WP53 24.128 - Preto - USADO")
+    await _anuncio(db, user, novo_, "dg023.pi")
+    await _anuncio(db, user, usado2, "dg023.us")
+    r = await client.post(API_CRIATIVOS, json={"modelo": "video 30s", "sku": "dg023.ra"})
+    assert r.status_code == 200, r.text
+    assert r.json()["product_id"] == str(novo_.id)
+
+    # Quem quer o usado escreve o SKU dele e casa pelo exato.
+    r = await client.post(API_CRIATIVOS, json={"modelo": "video 15s", "sku": "dg019.us"})
+    assert r.status_code == 200, r.text
+    assert r.json()["product_id"] == str(usado.id)
 
 
 async def test_sku_so_no_cadastro_liga_pelo_cadastro(client, db, make_user, auth_as):

@@ -1136,3 +1136,169 @@ async def test_referencia_traz_o_nome_da_marca_e_nao_so_o_codigo(
     assert por["Mala premium"]["marca_nome"] == "charlots"
     # marca apagada ou código solto não some: cai no próprio código
     assert por["Código sem marca cadastrada"]["marca_nome"] == "marca-que-nao-existe"
+
+
+# ─────────── vínculo com o cadastro: marca_id e product_id ───────────
+#
+# Incidente de 28/09/2026: cinco vídeos do conceito próprio chegaram com
+# `marca="uranyx"` e o SKU preenchidos, mas `marca_id` e `product_id` NULL —
+# o portal gravava só o texto livre. Na aba Criativos apareciam "sem legenda"
+# e o robô de postagem, que filtra por `marca_id`, nunca os viu. Corrigido em
+# 29/09/2026 com a resolução de `services/marketing/vinculos.py`, a mesma do
+# PATCH interno, em TODA porta do portal que cria criativo.
+
+
+async def _uranyx_e_f105(db: AsyncSession, make_user):
+    """A marca e o produto de verdade do incidente: `dg019` é o Fossibot F105.
+
+    O SKU casa pelo ANÚNCIO (`product_links.external_sku`), não pelo cadastro —
+    é a corrente que o resolvedor segue, então a semente tem de tê-la."""
+    from app.models import Integration, IntegrationPlatform, Product, ProductLink
+    from app.models.marca import Marca
+    from app.security.cipher import encrypt_json
+
+    dono = await make_user()
+    marca = Marca(nome="uranyx", slug="uranyx")
+    produto = Product(
+        user_id=dono.id, sku="f105-cadastro", name="Uranyx Fossibot F105 12.64 - Preto",
+        stock=0, min_stock=0,
+    )
+    integ = Integration(
+        user_id=dono.id, platform=IntegrationPlatform.ML, name=f"ml-{uuid4().hex[:6]}",
+        credentials=encrypt_json({"access_token": "fake"}),
+    )
+    db.add_all([marca, produto, integ])
+    await db.flush()
+    db.add(
+        ProductLink(
+            user_id=dono.id, product_id=produto.id, integration_id=integ.id,
+            platform=IntegrationPlatform.ML, external_id=f"MLB{uuid4().hex[:8]}",
+            external_sku="dg019",
+        )
+    )
+    await db.commit()
+    return dono, marca, produto
+
+
+async def test_conceito_proprio_nasce_ligado_a_marca_e_ao_produto(
+    client: AsyncClient, db: AsyncSession, make_user
+):
+    """O caso exato de 28/09: "uranyx" + "dg019" pelo conceito próprio."""
+    _, marca, produto = await _uranyx_e_f105(db, make_user)
+    r = await client.post(
+        "/api/portal/criativos/proposta",
+        headers={"X-Portal-Token": TOK_A},
+        data={"titulo": "F105 na obra", "conceito": "0-3s: cai no chão.",
+              "marca": "uranyx", "sku": "dg019"},
+        files={"files": ("v.mp4", b"x" * 100, "video/mp4")},
+    )
+    assert r.status_code == 200, r.text
+    linha = await db.get(MarketingCreative, UUID(r.json()["id"]))
+    assert linha.marca == "uranyx"
+    assert linha.sku == "dg019"
+    assert linha.marca_id == marca.id, "sem o id o robô de postagem não enxerga o vídeo"
+    assert linha.product_id == produto.id, "sem o produto a legenda cai na genérica"
+    # O id é interno: continua fora da lista branca do portal.
+    assert "product_id" not in r.text and "marca_id" not in r.text
+
+
+async def test_conceito_com_marca_fora_do_cadastro_entra_com_id_nulo(
+    client: AsyncClient, db: AsyncSession
+):
+    """Marca que não casa não recusa a entrega: o vídeo entra, o texto fica, o
+    id fica NULL e a equipe corrige a célula na revisão."""
+    r = await client.post(
+        "/api/portal/criativos/proposta",
+        headers={"X-Portal-Token": TOK_A},
+        data={"titulo": "Marca nova", "marca": "marca-que-nao-existe", "sku": "zz999"},
+        files={"files": ("v.mp4", b"x" * 100, "video/mp4")},
+    )
+    assert r.status_code == 200, r.text
+    linha = await db.get(MarketingCreative, UUID(r.json()["id"]))
+    assert linha.marca == "marca-que-nao-existe"
+    assert linha.marca_id is None
+    assert linha.sku == "zz999"
+    assert linha.product_id is None
+    assert linha.aprovado is None, "entrou na revisão mesmo sem vínculo"
+
+
+async def test_entrega_de_roteiro_sem_id_resolve_pelo_texto(
+    client: AsyncClient, db: AsyncSession, make_user
+):
+    """Roteiro antigo com texto e sem id: a entrega não herda o NULL."""
+    _, marca, produto = await _uranyx_e_f105(db, make_user)
+    r0 = MarketingRoteiro(
+        titulo="F105 antigo", texto="briefing", marca="uranyx", sku="dg019",
+        equipe_destino="alpha", ativo=True,
+    )
+    db.add(r0)
+    await db.commit()
+
+    e = await client.post(
+        f"/api/portal/roteiros/{r0.id}/entrega",
+        headers={"X-Portal-Token": TOK_A},
+        files={"files": ("v.mp4", b"x" * 100, "video/mp4")},
+    )
+    assert e.status_code == 200, e.text
+    linha = await db.get(MarketingCreative, UUID(e.json()["id"]))
+    assert linha.marca_id == marca.id
+    assert linha.product_id == produto.id
+
+
+async def test_entrega_de_roteiro_mantem_o_id_que_o_roteiro_ja_tem(
+    client: AsyncClient, db: AsyncSession, make_user
+):
+    """Só preenche o que falta: o produto escolhido no roteiro não é trocado
+    pelo palpite que o texto do SKU daria."""
+    from app.models import Product
+
+    dono, marca, _ = await _uranyx_e_f105(db, make_user)
+    escolhido = Product(user_id=dono.id, sku="f105-kit", name="F105 kit", stock=0, min_stock=0)
+    db.add(escolhido)
+    await db.flush()
+    r0 = MarketingRoteiro(
+        titulo="F105 kit", texto="briefing", marca="uranyx", marca_id=marca.id,
+        sku="dg019", product_id=escolhido.id, equipe_destino="alpha", ativo=True,
+    )
+    db.add(r0)
+    await db.commit()
+
+    e = await client.post(
+        f"/api/portal/roteiros/{r0.id}/entrega",
+        headers={"X-Portal-Token": TOK_A},
+        files={"files": ("v.mp4", b"x" * 100, "video/mp4")},
+    )
+    assert e.status_code == 200, e.text
+    linha = await db.get(MarketingCreative, UUID(e.json()["id"]))
+    assert linha.product_id == escolhido.id
+
+
+async def test_entrega_na_linha_vazia_reaproveitada_tambem_resolve(
+    client: AsyncClient, db: AsyncSession, make_user
+):
+    """A linha vazia antiga (da época em que o roteiro abria uma por agência)
+    pode ter só o texto. Ela recebe o vídeo e vai pra revisão — com o id."""
+    _, marca, produto = await _uranyx_e_f105(db, make_user)
+    r0 = MarketingRoteiro(titulo="Com entrega aberta", texto="briefing", ativo=True)
+    db.add(r0)
+    await db.flush()
+    vazia = MarketingCreative(
+        modelo="Com entrega aberta", marca="uranyx", sku="dg019", equipe="alpha",
+        roteiro_id=r0.id, aprovado=None, files=[],
+    )
+    db.add(vazia)
+    await db.commit()
+
+    e = await client.post(
+        f"/api/portal/roteiros/{r0.id}/entrega",
+        headers={"X-Portal-Token": TOK_A},
+        files={"files": ("v.mp4", b"x" * 100, "video/mp4")},
+    )
+    assert e.status_code == 200, e.text
+    ids = (vazia.id, marca.id, produto.id)
+    assert e.json()["id"] == str(ids[0])
+    # A sessão do teste ainda guarda a linha como estava antes do POST.
+    db.expire_all()
+    linha = await db.get(MarketingCreative, ids[0])
+    assert linha.marca_id == ids[1]
+    assert linha.product_id == ids[2]

@@ -70,11 +70,7 @@ from app.models.marketing_ideia_requisicao import (
 from app.models.marketing_ideia_requisicao import (
     STATUS_RECUSADA as IDEIA_RECUSADA,
 )
-from app.routers.marketing_creatives import (
-    _marca_id_do_texto,
-    _product_id_do_sku,
-    _user_equipes,
-)
+from app.routers.marketing_creatives import _user_equipes
 from app.services.marketing.anexos import (
     _EXT_REFERENCIA,
     MAX_ANEXOS_POR_LINHA,
@@ -88,6 +84,7 @@ from app.services.marketing.anexos import (
     nome_seguro,
     url_de_produto,
 )
+from app.services.marketing.vinculos import _marca_id_do_texto, _product_id_do_sku
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/api/marketing/roteiros", tags=["marketing"])
