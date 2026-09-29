@@ -395,7 +395,14 @@ export async function pedirSenha(cmdId: string, p: PedidoSenha): Promise<Resulta
     if (!perfil) {
       return { ok: false, motivo: "sem_perfil", detalhe: `a loja "${conta}" não tem perfil TikTok no AdsPower do Mac Santiago` };
     }
+    // O AdsPower segue dizendo "Active" por alguns segundos depois do stop
+    // (29/09: a tarefa seguinte da MESMA loja voltou "perfil em uso" 6 s
+    // depois de a anterior fechar). Só é "em uso" se continuar aberto.
     emUso = await adspower.active(perfil.userId);
+    for (let i = 0; emUso && i < 3; i++) {
+      await sleep(7000);
+      emUso = await adspower.active(perfil.userId);
+    }
   } catch (e: any) {
     return { ok: false, motivo: "adspower", detalhe: `AdsPower: ${String(e?.message || e).slice(0, 150)} — tento de novo depois` };
   }
@@ -427,6 +434,11 @@ export async function pedirSenha(cmdId: string, p: PedidoSenha): Promise<Resulta
     }
     try {
       await adspower.stop(perfil.userId);
+      // espera o AdsPower largar o perfil, senão a próxima tarefa da mesma
+      // loja acha que tem alguém usando
+      for (let i = 0; i < 10 && (await adspower.active(perfil.userId).catch(() => false)); i++) {
+        await sleep(2000);
+      }
     } catch (e) {
       log.error(`falha ao fechar profile ${perfil.userId}: ${String(e)}`);
     }
