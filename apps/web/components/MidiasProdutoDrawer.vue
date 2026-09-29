@@ -418,7 +418,20 @@ const textoVazio = computed(() => {
 
 // ------------------------------------------------------------ visor de imagem
 const imagensAba = computed(() => arquivosAba.value.filter((a) => mostraMiniatura(a)))
-const visor = ref<number | null>(null)
+// O visor guarda o NOME do arquivo aberto, não a posição: quando uma
+// miniatura falha (prévia que não sai), ela sai da lista e a posição passava a
+// apontar para outro arquivo. `visor` segue sendo a posição, calculada.
+const visorNome = ref<string | null>(null)
+const visor = computed<number | null>({
+  get: () => {
+    if (visorNome.value == null) return null
+    const i = imagensAba.value.findIndex((x) => x.nome === visorNome.value)
+    return i >= 0 ? i : null
+  },
+  set: (i) => {
+    visorNome.value = i == null ? null : (imagensAba.value[i]?.nome ?? null)
+  },
+})
 const visorArquivo = computed(() => (visor.value == null ? null : imagensAba.value[visor.value] ?? null))
 
 function abrirVisor(a: Arquivo) {
@@ -447,6 +460,15 @@ watch(visorArquivo, (a) => {
   preCarregar(imagensAba.value[i + 1])
   preCarregar(imagensAba.value[i - 1])
 })
+
+// O <img> de uma foto que já saiu do visor ainda dispara load/error (o
+// navegador não cancela o download): sem esta checagem, trocar rápido de foto
+// tirava o "Carregando…" da atual ou mostrava o erro da anterior nela.
+function visorFim(ev: Event, erro: boolean) {
+  if (!(ev.target as HTMLImageElement | null)?.isConnected) return
+  visorCarregando.value = false
+  visorErro.value = erro
+}
 
 function visorAnterior() {
   if (visor.value != null && visor.value > 0) visor.value--
@@ -1135,12 +1157,12 @@ onBeforeUnmount(() => {
         class="absolute inset-0 z-10 flex flex-col bg-black/90 text-white"
       >
         <div class="flex items-center justify-between gap-2 p-3">
-          <span class="min-w-0 truncate text-sm" :title="visorArquivo.nome">
-            {{ visorArquivo.nome }}
-            <span v-if="temPrevia(visorArquivo)" class="ml-2 text-xs text-white/70">
+          <div class="min-w-0">
+            <div class="truncate text-sm" :title="visorArquivo.nome">{{ visorArquivo.nome }}</div>
+            <div v-if="temPrevia(visorArquivo)" class="text-xs text-white/70">
               prévia — o arquivo é {{ extDe(visorArquivo).toUpperCase() }}; use Baixar para abrir no programa
-            </span>
-          </span>
+            </div>
+          </div>
           <div class="flex shrink-0 items-center gap-2">
             <span class="text-xs tabular-nums text-white/70">{{ (visor ?? 0) + 1 }} de {{ imagensAba.length }}</span>
             <a :href="urlArquivo(visorArquivo.nome, true)" download class="btn btn-sm text-foreground">
@@ -1164,8 +1186,8 @@ onBeforeUnmount(() => {
             :alt="nomeCurto(visorArquivo.nome)"
             class="max-h-full max-w-full object-contain transition-opacity"
             :class="{ 'bg-white': temPrevia(visorArquivo), 'opacity-0': visorCarregando || visorErro }"
-            @load="visorCarregando = false"
-            @error="visorCarregando = false; visorErro = true"
+            @load="visorFim($event, false)"
+            @error="visorFim($event, true)"
           />
         </div>
         <div class="flex items-center justify-center gap-3 p-3">

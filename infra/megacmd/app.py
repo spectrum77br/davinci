@@ -17,6 +17,7 @@ import secrets
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 import unicodedata
 
@@ -512,8 +513,10 @@ def _identidade(path: str) -> str | None:
 
 
 def _arquivo_cache(path: str, ident: str, lado: int, sufixo: str = ".jpg") -> str:
+    # sha1 só como nome de arquivo (não é segurança): usedforsecurity=False.
     chave = hashlib.sha1(
-        f"{_PREVIA_VERSAO}\0{path}\0{ident}\0{lado}".encode("utf-8", "surrogateescape")
+        f"{_PREVIA_VERSAO}\0{path}\0{ident}\0{lado}".encode("utf-8", "surrogateescape"),
+        usedforsecurity=False,
     ).hexdigest()
     return os.path.join(_PREVIAS_DIR, chave[:2], chave + sufixo)
 
@@ -550,7 +553,9 @@ def _gerar_previas(destino: str, ext: str, lados: list[int], tmp: str) -> dict[i
         with warnings.catch_warnings():
             warnings.simplefilter("error", Image.DecompressionBombWarning)
             return _reduzir(destino, ext, lados, maior, tmp)
-    except (OSError, ValueError, Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
+    except (
+        OSError, ValueError, Image.DecompressionBombError, Image.DecompressionBombWarning
+    ) as exc:
         raise HTTPException(422, f"não abriu como imagem: {exc}") from exc
 
 
@@ -585,6 +590,20 @@ def _reduzir(destino: str, ext: str, lados: list[int], maior: int, tmp: str) -> 
         return saidas
 
 
+# Um pedido por arquivo de cada vez: a grade (320) e o visor/pré-carga (1600)
+# pedem a mesma foto quase juntos, e com o cache frio cada um baixava e
+# convertia o arquivo inteiro. Quem chega depois espera e lê o cache.
+_TRAVAS: dict[str, threading.Lock] = {}
+_TRAVAS_GUARDA = threading.Lock()
+
+
+def _trava_do_arquivo(chave: str) -> threading.Lock:
+    with _TRAVAS_GUARDA:
+        if len(_TRAVAS) > 5000:  # não cresce para sempre
+            _TRAVAS.clear()
+        return _TRAVAS.setdefault(chave, threading.Lock())
+
+
 def _jpeg(dados: bytes, cache: str) -> Response:
     return Response(content=dados, media_type="image/jpeg", headers={"X-Previa-Cache": cache})
 
@@ -614,6 +633,17 @@ def thumb(path: str, lado: int = 320, _: None = Depends(check_token)) -> Respons
             return _jpeg(fh.read(), "hit")
     except OSError:
         pass
+    with _trava_do_arquivo(f"{path}\0{ident}"):
+        # Outro pedido pode ter gerado enquanto este esperava a vez.
+        try:
+            with open(pedido, "rb") as fh:
+                return _jpeg(fh.read(), "hit")
+        except OSError:
+            pass
+        return _gerar_e_guardar(path, ident, lado)
+
+
+def _gerar_e_guardar(path: str, ident: str, lado: int) -> Response:
     falhou = _arquivo_cache(path, ident, 0, ".falhou")
     try:
         # Validade de 7 dias: se o que faltava era do servidor (poppler, fonte),
