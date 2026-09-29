@@ -290,9 +290,11 @@ def _validar(d: dict) -> str | None:
     return None
 
 
-def cmd_decidir(cfg: dict[str, str], _a: argparse.Namespace) -> None:
+def cmd_decidir(cfg: dict[str, str], a: argparse.Namespace) -> None:
+    # 29/09 (Claude Code): `--json '{…}'` numa linha só — a lista de permissões da
+    # rodada casa o comando pelo começo, e o heredoc de várias linhas não casava.
     try:
-        d = json.loads(sys.stdin.read())
+        d = json.loads(a.json if getattr(a, "json", None) else sys.stdin.read())
     except ValueError as e:
         sys.exit(f"JSON inválido: {e}")
     campos = {
@@ -351,9 +353,9 @@ def cmd_pagamento(cfg: dict[str, str], a: argparse.Namespace) -> None:
 def cmd_prova_shopee(cfg: dict[str, str], a: argparse.Namespace) -> None:
     corpo: dict = {"chamado_id": a.id, "acao": "enviar" if a.enviar else "consultar"}
     if a.enviar:
-        corpo["texto"] = sys.stdin.read().strip()
+        corpo["texto"] = (a.texto or sys.stdin.read()).strip()
         if not corpo["texto"]:
-            sys.exit("--enviar precisa do texto da prova na entrada padrão")
+            sys.exit("--enviar precisa do texto da prova (--texto ou entrada padrão)")
     print(json.dumps(_post(cfg, "shopee-prova", corpo), ensure_ascii=False, indent=1))
 
 
@@ -416,7 +418,8 @@ def main() -> None:
     pc.add_argument("--tipo", choices=("todos", "forte", "simples"), default="todos")
     sub.add_parser("pendentes")
     sub.add_parser("manual")
-    sub.add_parser("decidir")
+    dc = sub.add_parser("decidir")
+    dc.add_argument("--json", help="a decisão em JSON (senão lê da entrada padrão)")
     cs = sub.add_parser("caso")
     cs.add_argument("--pedido")
     cs.add_argument("--chamado")
@@ -426,6 +429,7 @@ def main() -> None:
     ps = sub.add_parser("prova-shopee")
     ps.add_argument("--id", required=True, help="chamado_id (uuid)")
     ps.add_argument("--enviar", action="store_true")
+    ps.add_argument("--texto", help="texto da prova (senão lê da entrada padrão)")
     an = sub.add_parser("anexos")
     an.add_argument("--id", required=True, help="chamado_id (uuid)")
     an.add_argument("--pasta", required=True)

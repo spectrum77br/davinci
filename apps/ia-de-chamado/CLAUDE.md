@@ -24,7 +24,8 @@ no Sonnet — se na simples aparecer algo que exige tela ou argumento novo, deci
 `humano` explicando, ou `esperar` se não houver pressa: a forte pega.
 
 Pasta de trabalho: `~/DaVinci/ia-de-chamado`. Tudo o que você baixar vai em
-`tmp/` dentro dela e é **apagado no fim da rodada** (regra do Vinicius).
+`tmp/` dentro dela; **a própria rodada apaga `tmp/` no fim** (regra do Vinicius) —
+você não precisa (nem consegue) apagar.
 
 ## Como falar com o DaVinci
 
@@ -38,12 +39,12 @@ python3 ferramentas/davinci_chamados.py pagamento 292592     # ML: liberação, 
 python3 ferramentas/davinci_chamados.py exemplos --plataforma shopee --limite 5
 python3 ferramentas/davinci_chamados.py anexos --id <chamado_id> --pasta tmp/<pedido>
 python3 ferramentas/davinci_chamados.py guardar-print --id <chamado_id> --mensagem <analise_id> --arquivo tmp/x.png
-python3 ferramentas/davinci_chamados.py decidir <<'JSON'
-{"chamado_id": "…", "classe": "…", "resumo": "…", "acao": "humano"}
-JSON
+python3 ferramentas/davinci_chamados.py decidir --json '{"chamado_id": "…", "classe": "…", "resumo": "…", "acao": "humano"}'
 ```
 
-- `decidir` só aceita caso que você buscou nesta rodada (`pendentes` ou `caso`).
+- `decidir` **sempre com `--json '…'` numa linha só** (heredoc e arquivo são
+  bloqueados pela lista de permissões). Aspas simples por fora; se o texto tiver
+  apóstrofo, troque por ’. Só aceita caso que você buscou nesta rodada.
 - Não use `curl` nem outro caminho pro DaVinci. Não mexa em `guarda`.
 
 ## O que vem em cada caso
@@ -102,7 +103,9 @@ ela mostra; persistindo a dúvida, `humano` explicando a contradição.
   reais. Mande sempre que souber.
 - `classe`: rótulo curto em snake_case (`shopee_pede_prova`), até 60 caracteres.
 - `resumo`: 1 a 3 frases que a equipe entende sem abrir o caso, até 600
-  caracteres. Em `humano`, diga **o que a pessoa precisa fazer**.
+  caracteres. Em `humano`, diga **o que a pessoa precisa fazer**. Não escreva a
+  hora em que você conferiu (o DaVinci já carimba a decisão); hora de fala da
+  plataforma ou do comprador, só a que você leu.
 
 ## Tela da loja (AdsPower no Mac Santiago)
 
@@ -206,7 +209,7 @@ Evidence" (ou uma pessoa mandar), envie — vale **sem instrução de pessoa**
 4. De verdade: o mesmo com `--de-verdade --print tmp/enviado.png`. Só vale se
    voltar `enviado: true` e `depois.pendente: false`.
 5. `decidir` com `esperar` ("evidência enviada: <quais fotos>; em análise"),
-   `guardar-print` com o print, fechar o perfil, apagar `tmp/`.
+   `guardar-print` com o print, fechar o perfil.
 
 A janela só aceita arquivo (foto até 10 MB, vídeo até 1 min): sem texto, sem link.
 
@@ -225,5 +228,5 @@ A janela só aceita arquivo (foto até 10 MB, vídeo até 1 min): sem texto, sem
 
 ## No fim da rodada
 
-Apague `tmp/`, feche os perfis que abriu e escreva só a lista curta:
-pedido → ação → por quê.
+Feche os perfis que abriu (menos o que ficou parado em captcha/login pra uma
+pessoa) e escreva só a lista curta: pedido → ação → por quê.

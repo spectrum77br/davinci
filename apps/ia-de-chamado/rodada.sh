@@ -29,6 +29,7 @@ if [ -f "$TRAVA" ] && kill -0 "$(cat "$TRAVA")" 2>/dev/null; then
 fi
 echo $$ > "$TRAVA"
 trap 'rm -f "$TRAVA"' EXIT INT TERM
+date '+%Y-%m-%d %H:%M:%S' > estado/ultima-rodada   # prova de vida do despertador
 
 PEDIDO="Rodada da IA de Chamado. Abaixo: o MANUAL do Vinicius, as correções e confirmações \
 dele e os CASOS que esperam por você. Decida CADA caso seguindo o CLAUDE.md (instrução de \
@@ -46,7 +47,8 @@ for tipo in forte simples; do
   echo "$(agora) [$tipo] começou ($MODELO, esforço $ESFORCO)" >> "$LOG"
   printf '%s\n' "$casos" | claude -p "$PEDIDO" \
     --model "$MODELO" --effort "$ESFORCO" \
-    --permission-mode dontAsk --output-format text >> "$LOG" 2>&1
+    --permission-mode dontAsk --permission-prompts none \
+    --output-format text >> "$LOG" 2>&1
   echo "$(agora) [$tipo] terminou (saída $?)" >> "$LOG"
 done
 

@@ -16,11 +16,9 @@
       "Read(.env.claude)",
       "Read(claude/**)",
       "Edit(CLAUDE.md)",
-      "Write(CLAUDE.md)",
       "Edit(.claude/**)",
-      "Write(.claude/**)",
       "Edit(ferramentas/**)",
-      "Write(ferramentas/**)",
+      "Edit(rodada.sh)",
       "Bash(curl *)",
       "WebFetch",
       "WebSearch"
