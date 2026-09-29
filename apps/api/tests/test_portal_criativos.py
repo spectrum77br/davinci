@@ -1041,6 +1041,112 @@ async def test_catalogo_so_traz_as_familias_do_portal(
     assert abs18["marca"] == "charlots-park"
 
 
+
+async def test_por_codigo_acha_o_produto_escondido_da_listagem(
+    client: AsyncClient, db: AsyncSession, make_user
+):
+    """A agência vai cadastrar o que "falta" — e o que falta quase sempre
+    existe aqui, com a pasta vazia. É esse caso que a consulta tem que achar,
+    para o portal juntar as fotos em vez de criar um segundo produto."""
+    dono = await make_user()
+    await _produto(db, dono, sku="dg061,dg062", nome="uranyx WP36",
+                   pasta="/Celular/Oukitel WP36", fotos=0)
+    await _produto(db, dono, sku="b005.12,b005.18", nome="ABS 12", pasta="/Malas/ABS", fotos=40)
+    await _produto(db, dono, sku="ap001", nome="apple iphone 17 pro",
+                   pasta="/Celular/apple iphone 17 pro", fotos=0, segmento="Apple")
+    await _produto(db, dono, sku="xx001", nome="Coisa interna", pasta="/Financeiro/Notas", fotos=9)
+    await _produto(db, dono, sku="xx002", nome="Sem pasta", pasta=None)
+    await db.commit()
+
+    r = await client.get(
+        "/api/portal/produtos/por-codigo",
+        params=[("sku", "DG062"), ("sku", "b005.12"), ("sku", "ap001"),
+                ("sku", "xx001"), ("sku", "xx002")],
+        headers={"X-Portal-Token": TOK_A},
+    )
+    assert r.status_code == 200, r.text
+    achados = r.json()["produtos"]
+    por_situacao = {a["situacao"]: a for a in achados}
+    assert set(por_situacao) == {"sem_foto", "visivel", "apple"}
+
+    escondido = por_situacao["sem_foto"]
+    assert escondido["nome"] == "uranyx WP36"
+    assert escondido["marca"] == "uranyx"
+    # Maiúscula não importa; o código volta como está na casa.
+    assert escondido["casados"] == ["dg062"]
+    assert escondido["skus"] == ["dg061", "dg062"]
+
+    assert por_situacao["visivel"]["nome"] == "ABS 12"
+    assert por_situacao["visivel"]["marca"] == "charlots-park"
+
+    # Apple: só o fato, sem nome — basta para o portal recusar.
+    assert por_situacao["apple"] == {"situacao": "apple", "casados": ["ap001"]}
+
+    # Fora das famílias do portal não vaza nem o nome.
+    assert "Coisa interna" not in r.text and "Sem pasta" not in r.text
+
+
+async def test_por_codigo_compara_codigo_inteiro_e_nao_pedaco(
+    client: AsyncClient, db: AsyncSession, make_user
+):
+    """O banco só pré-filtra por substring. `b005` não é `b005.12`, e um `%`
+    ou `_` digitado não pode virar curinga no LIKE."""
+    dono = await make_user()
+    await _produto(db, dono, sku="b005.12,b005.18", nome="ABS 12", pasta="/Malas/ABS", fotos=0)
+    await db.commit()
+
+    for codigo in ("b005", "005.1", "b%", "b_05.12", "%"):
+        r = await client.get(
+            "/api/portal/produtos/por-codigo",
+            params={"sku": codigo},
+            headers={"X-Portal-Token": TOK_A},
+        )
+        assert r.status_code == 200
+        assert r.json()["produtos"] == [], codigo
+
+
+async def test_por_codigo_junta_a_mesma_pasta_replicada(
+    client: AsyncClient, db: AsyncSession, make_user
+):
+    """A casa replica a linha do produto por departamento: mesma pasta, mesmos
+    códigos, linhas diferentes. Para o portal é UM produto — senão o cadastro
+    diria "produtos diferentes" e nunca passaria."""
+    dono = await make_user()
+    a = await _produto(db, dono, sku="dg061,dg062", nome="uranyx WP36",
+                       pasta="/Celular/Oukitel WP36", fotos=0)
+    b = await _produto(db, dono, sku="dg061,dg062,dg063", nome="uranyx WP36",
+                       pasta="Celular/Oukitel WP36/", fotos=0)
+    await db.commit()
+
+    r = await client.get(
+        "/api/portal/produtos/por-codigo",
+        params=[("sku", "dg062"), ("sku", "dg063")],
+        headers={"X-Portal-Token": TOK_A},
+    )
+    assert r.status_code == 200, r.text
+    achados = r.json()["produtos"]
+    assert len(achados) == 1, achados
+    unico = achados[0]
+    # O representante é sempre o mesmo (menor id), e carrega a união.
+    assert unico["id"] == str(min(a.id, b.id))
+    assert unico["situacao"] == "sem_foto"
+    assert unico["skus"][:2] == ["dg061", "dg062"] and "dg063" in unico["skus"]
+    assert sorted(unico["casados"]) == ["dg062", "dg063"]
+
+
+async def test_por_codigo_sem_codigo_e_com_codigo_demais(client: AsyncClient):
+    h = {"X-Portal-Token": TOK_A}
+    r = await client.get("/api/portal/produtos/por-codigo", headers=h)
+    assert r.status_code == 200 and r.json() == {"produtos": []}
+
+    muitos = [("sku", f"c{i}") for i in range(81)]
+    r = await client.get("/api/portal/produtos/por-codigo", params=muitos, headers=h)
+    assert r.status_code == 400
+    assert r.json()["detail"]["code"] == "codigos_demais"
+
+    r = await client.get("/api/portal/produtos/por-codigo", params={"sku": "x"})
+    assert r.status_code in (401, 403), "sem token não consulta o catálogo"
+
 async def test_produto_de_pasta_proibida_e_404(
     client: AsyncClient, db: AsyncSession, make_user
 ):

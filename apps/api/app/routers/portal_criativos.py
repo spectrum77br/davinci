@@ -72,6 +72,7 @@ from fastapi import (
     Form,
     Header,
     HTTPException,
+    Query,
     Response,
     UploadFile,
     status,
@@ -1302,6 +1303,113 @@ async def listar_produtos(
         if _raiz_permitida(p.fotos_path or "")
     ]
     return {"equipe": equipe, "produtos": saida}
+
+
+# Teto de códigos por consulta. Um produto da casa chega a 53 códigos numa
+# linha só (as malas por cor e tamanho); 80 cobre isso com folga e ainda
+# impede que a consulta vire um OR de mil termos.
+_MAX_CODIGOS_POR_CONSULTA = 80
+
+
+@router.get("/produtos/por-codigo")
+async def produtos_por_codigo(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    equipe: Annotated[str, Depends(equipe_do_token)],
+    sku: Annotated[list[str] | None, Query()] = None,
+) -> dict[str, Any]:
+    """Quem da casa já tem estes códigos — INCLUSIVE produto escondido.
+
+    O portal deixa a agência cadastrar o produto que falta (29/09/2026). E
+    "falta", quase sempre, quer dizer "existe aqui, mas a pasta do MEGA está
+    vazia": a listagem acima só manda produto com foto. Sem esta consulta o
+    cadastro viraria um SEGUNDO produto com o mesmo código, e no dia em que a
+    pasta fosse preenchida os dois apareceriam lado a lado. Com ela, o portal
+    junta as fotos ao produto que já existe.
+
+    Só leitura. `situacao` de cada produto casado:
+
+    - `visivel`  — já aparece na listagem do portal;
+    - `sem_foto` — família do portal, pasta vazia: é o que a agência pode completar;
+    - `apple`    — revenda Apple, que o portal não mostra (ver a listagem).
+
+    Produto FORA das famílias do portal não sai daqui: o nome dele não é
+    assunto de agência, e um código adivinhado não pode virar consulta ao
+    catálogo interno inteiro. Para o portal, esse código está livre.
+    """
+    pedidos = {s.strip().lower() for s in (sku or []) if s and s.strip()}
+    if not pedidos:
+        return {"produtos": []}
+    if len(pedidos) > _MAX_CODIGOS_POR_CONSULTA:
+        raise HTTPException(400, detail={"code": "codigos_demais"})
+
+    apple = set(
+        (
+            await session.execute(select(Segment.id).where(func.lower(Segment.name) == "apple"))
+        ).scalars()
+    )
+    # O `sku` guarda a linha inteira separada por vírgula, então o banco só
+    # PRÉ-filtra por substring; quem decide é a comparação exata abaixo, código
+    # a código. `autoescape`: código com `_` ou `%` não pode virar curinga.
+    candidatos = (
+        (
+            await session.execute(
+                select(PricingProduct)
+                .where(
+                    or_(
+                        *(
+                            func.lower(PricingProduct.sku).contains(s, autoescape=True)
+                            for s in pedidos
+                        )
+                    )
+                )
+                # Ordem estável: quando a mesma pasta vem em mais de uma linha,
+                # é sempre a mesma que representa as outras (e recebe as fotos).
+                .order_by(PricingProduct.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    saida: list[dict[str, Any]] = []
+    # A mesma pasta em mais de uma linha da tabela de preços (a casa replica a
+    # linha por departamento): para o portal a pasta é o produto, então as
+    # linhas viram UMA entrada. Sem isto o portal via "produtos diferentes da
+    # casa" e recusava o cadastro para sempre.
+    por_pasta: dict[str, dict[str, Any]] = {}
+    for p in candidatos:
+        codigos = [c.strip() for c in (p.sku or "").split(",") if c.strip()]
+        casados = [c for c in codigos if c.lower() in pedidos]
+        if not casados or not _raiz_permitida(p.fotos_path or ""):
+            continue
+        if p.segment_id in apple:
+            # Só o fato, sem nome: basta para o portal recusar o cadastro.
+            saida.append({"situacao": "apple", "casados": casados})
+            continue
+        situacao = "visivel" if (p.fotos_count or 0) > 0 else "sem_foto"
+        pasta = "/" + (p.fotos_path or "").strip().strip("/")
+        ja = por_pasta.get(pasta)
+        if ja is not None:
+            vistos = {c.lower() for c in ja["skus"]}
+            ja["skus"] += [c for c in codigos if c.lower() not in vistos]
+            vistos = {c.lower() for c in ja["casados"]}
+            ja["casados"] += [c for c in casados if c.lower() not in vistos]
+            if situacao == "visivel":
+                ja["situacao"] = "visivel"
+            continue
+        item = {
+            "id": str(p.id),
+            "nome": p.name,
+            "marca": _marca_da_pasta(p.fotos_path or ""),
+            "skus": codigos,
+            "casados": casados,
+            "situacao": situacao,
+        }
+        por_pasta[pasta] = item
+        saida.append(item)
+    logger.info(
+        "portal_produtos_por_codigo", equipe=equipe, pedidos=len(pedidos), casados=len(saida)
+    )
+    return {"produtos": saida}
 
 
 async def _produto_do_portal(session: AsyncSession, produto_id: UUID) -> PricingProduct:
