@@ -22,10 +22,12 @@ Só produtos ATIVOS; nunca altera nem apaga o que já existe.
 from __future__ import annotations
 
 import asyncio
+import json
 from uuid import UUID
 
+import httpx
 import structlog
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Integration, IntegrationPlatform, LinkSyncStatus, Product, ProductLink
@@ -63,7 +65,12 @@ async def _pagina(client, pagina: int, *, recentes: bool, pausa: float) -> list[
             r = await client._request("GET", "/produtos", params=params)
             r.raise_for_status()
             return r.json().get("data") or []
-        except BlingCloudflareError:
+        except (BlingCloudflareError, httpx.TransportError, httpx.TimeoutException,
+                httpx.HTTPStatusError, json.JSONDecodeError) as exc:
+            # 429/503 (Cloudflare), 502/504, timeout, conexão, 200 com HTML.
+            # Erro 4xx de verdade (fora 429) não melhora tentando de novo.
+            if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code < 500:
+                raise
             if tentativa == _TENTATIVAS_PAGINA - 1:
                 raise
             await asyncio.sleep(pausa * 3 * (tentativa + 1))
@@ -117,24 +124,61 @@ async def _garantir_vinculo_bling(
 
 async def _reativar(session: AsyncSession, bling_id: int, codigo: str) -> int:
     """Ativo no Bling e inativo aqui (29/09: dg078.pi+a020.pi estava 'I') — a
-    busca de Devoluções e as telas só mostram ativo. O Bling é a fonte."""
-    prod = (
-        await session.execute(
-            select(Product).where(Product.bling_product_id == bling_id).limit(1)
-        )
-    ).scalar_one_or_none()
-    if prod is None:
-        prod = (
-            await session.execute(
-                select(Product).where(func.lower(Product.sku) == codigo.lower()).limit(1)
-            )
-        ).scalar_one_or_none()
-    if prod is None or (prod.situacao or "A") == "A":
+    busca de Devoluções e as telas só mostram ativo. O Bling é a fonte. Só pelo
+    id do Bling: pelo código, poderia reativar uma cópia velha (produto apagado
+    e recriado no Bling com o mesmo código) com o estoque de quando foi excluída."""
+    linhas = (
+        await session.execute(select(Product).where(Product.bling_product_id == bling_id))
+    ).scalars().all()
+    if not linhas or any((p.situacao or "A") == "A" for p in linhas):
         return 0
+    prod = linhas[0]
     logger.info("produto_reativado_pelo_bling", sku=prod.sku, antes=prod.situacao)
     prod.situacao = "A"
     await session.commit()
     return 1
+
+
+# Trava do "inativar quem saiu do Bling": acima disso numa rodada é anomalia
+# (lista incompleta, conta trocada) — não mexe em nada e avisa no log.
+_MAX_INATIVAR = 50
+
+
+async def _inativar_quem_saiu(session: AsyncSession, ativos_bling: list[dict]) -> int:
+    """Ativo aqui, com id do Bling, e FORA da lista completa de ativos do Bling
+    = foi inativado (ou excluído) lá. Revisão de 29/09: nada rebaixava A→I, e com
+    a soma por família para todas as linhas um anúncio de outro lote passaria a
+    prometer as peças desse produto — que o robô não consegue usar na venda."""
+    ids_ativos = {
+        int(a["id"])
+        for a in ativos_bling
+        if a.get("id") and (a.get("situacao") or "A").strip().upper() in ("A", "ATIVO")
+    }
+    aqui = (
+        await session.execute(
+            select(Product).where(
+                Product.situacao == "A", Product.bling_product_id.is_not(None)
+            )
+        )
+    ).scalars().all()
+    if len(ids_ativos) < 0.9 * len(aqui):
+        logger.warning(
+            "produtos_bling_inativar_lista_curta", ativos_bling=len(ids_ativos), aqui=len(aqui)
+        )
+        return 0
+    sairam = [p for p in aqui if int(p.bling_product_id) not in ids_ativos]
+    if len(sairam) > _MAX_INATIVAR:
+        logger.warning(
+            "produtos_bling_inativar_demais", quantidade=len(sairam),
+            amostra=[p.sku for p in sairam[:20]],
+        )
+        return 0
+    for p in sairam:
+        logger.info("produto_inativado_pelo_bling", sku=p.sku, estoque=p.stock)
+        p.situacao = "I"
+    if sairam:
+        await session.commit()
+    return len(sairam)
 
 
 async def importar_produtos_novos(
@@ -201,6 +245,9 @@ async def importar_produtos_novos(
         if pausa:
             await asyncio.sleep(pausa)
 
-    if resumo["criados"] or resumo["falhas"] or resumo["reativados"]:
+    if completo:
+        resumo["inativados"] = await _inativar_quem_saiu(session, candidatos)
+
+    if resumo["criados"] or resumo["falhas"] or resumo["reativados"] or resumo.get("inativados"):
         logger.info("produtos_novos_bling", **resumo, skus=criados[:50])
     return resumo

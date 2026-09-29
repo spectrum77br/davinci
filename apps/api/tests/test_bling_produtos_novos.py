@@ -169,3 +169,60 @@ async def test_pagina_recusada_pelo_bling_e_tentada_de_novo(db: AsyncSession, ce
     bling._request = _com_429
     resumo = await novos.importar_produtos_novos(db, completo=True, pausa=0)  # pausa 0: sem espera
     assert resumo["criados"] == 1
+
+
+async def _ativo(db, dono, sku, bling_id, situacao="A", stock=5):
+    db.add(Product(user_id=dono.id, sku=sku, name=sku, stock=stock,
+                   bling_product_id=bling_id, situacao=situacao))
+    await db.commit()
+
+
+@pytest.mark.asyncio
+async def test_completo_inativa_quem_saiu_da_lista_do_bling(db: AsyncSession, cenario):
+    """Revisão 29/09: nada rebaixava A→I — inativado no Bling seguia ativo aqui
+    e, com a soma para todas as linhas, emprestaria estoque aos irmãos."""
+    dono, montar = cenario
+    await _ativo(db, dono, "dg210.pi", 777, stock=15)
+    montar([{"id": 111, "codigo": "a009.ci", "nome": "Fonte", "situacao": "A"}])
+    resumo = await novos.importar_produtos_novos(db, completo=True, pausa=0)
+    assert resumo["inativados"] == 1
+    prod = (await db.execute(select(Product).where(Product.bling_product_id == 777))).scalar_one()
+    await db.refresh(prod)
+    assert prod.situacao == "I"
+
+
+@pytest.mark.asyncio
+async def test_lista_curta_do_bling_nao_inativa_nada(db: AsyncSession, cenario):
+    """Se a lista do Bling vier curta demais (menos de 90% dos ativos daqui),
+    é anomalia: não inativa ninguém."""
+    dono, montar = cenario
+    for i in range(10):
+        await _ativo(db, dono, f"x{i}.pi", 900 + i)
+    montar([{"id": 111, "codigo": "a009.ci", "nome": "Fonte", "situacao": "A"}])
+    resumo = await novos.importar_produtos_novos(db, completo=True, pausa=0)
+    assert resumo["inativados"] == 0
+    assert (await db.execute(select(Product).where(Product.situacao == "I"))).first() is None
+
+
+@pytest.mark.asyncio
+async def test_rapido_nunca_inativa(db: AsyncSession, cenario):
+    """Os 'últimos incluídos' não são a lista inteira — o tick de 15 min não
+    pode concluir que alguém saiu do Bling."""
+    dono, montar = cenario
+    await _ativo(db, dono, "dg210.pi", 777)
+    montar([{"id": 111, "codigo": "a009.ci", "nome": "Fonte", "situacao": "A"}])
+    resumo = await novos.importar_produtos_novos(db, completo=False, pausa=0)
+    assert "inativados" not in resumo
+
+
+@pytest.mark.asyncio
+async def test_reativacao_so_pelo_id_do_bling(db: AsyncSession, cenario):
+    """Cópia velha com o mesmo código mas outro id (produto apagado e recriado
+    no Bling) não é reativada."""
+    dono, montar = cenario
+    await _ativo(db, dono, "dg300.pi", 1234, situacao="E", stock=40)
+    montar([{"id": 5678, "codigo": "dg300.pi", "nome": "Novo", "situacao": "A"}])
+    resumo = await novos.importar_produtos_novos(db, completo=True, pausa=0)
+    assert resumo["reativados"] == 0
+    velho = (await db.execute(select(Product).where(Product.bling_product_id == 1234))).scalar_one()
+    assert velho.situacao == "E"

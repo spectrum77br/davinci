@@ -39,7 +39,7 @@ from app.config import get_settings
 from app.db import session_scope
 from app.models import IntegrationPlatform, Product, ProductLink
 from app.services import threema
-from app.services.estoque_familia import familia_ligada, saldo_publicavel
+from app.services.estoque_familia import chave_familia, familia_ligada, saldo_publicavel
 
 logger = structlog.get_logger()
 
@@ -108,6 +108,15 @@ async def _medir(session: AsyncSession) -> dict:
         .all()
     )
 
+    # Só famílias com 2+ lotes ativos: nas de um lote só a soma é o próprio
+    # saldo e não há o que vigiar (com a soma para todas as linhas, seriam
+    # milhares de anúncios e qualquer divergência antiga viraria alarme).
+    membros: dict[str, int] = {}
+    for prod in produtos.values():
+        chave = chave_familia(prod.sku)
+        if chave is not None:
+            membros[chave] = membros.get(chave, 0) + 1
+
     corte = datetime.now(UTC) - timedelta(hours=_TOLERANCIA_HORAS)
     cache: dict[str, int] = {}
     total = certos = 0
@@ -117,6 +126,8 @@ async def _medir(session: AsyncSession) -> dict:
     for link in links:
         produto = produtos.get(link.product_id)
         if produto is None or not familia_ligada(produto.sku):
+            continue
+        if membros.get(chave_familia(produto.sku) or "", 0) < 2:
             continue
         total += 1
         esperado = await saldo_publicavel(session, produto, cache=cache)
