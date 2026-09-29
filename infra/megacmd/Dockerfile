@@ -14,7 +14,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends megacmd \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-RUN pip install --no-cache-dir fastapi uvicorn python-multipart
+RUN pip install --no-cache-dir fastapi uvicorn python-multipart pillow
 
 WORKDIR /srv
 COPY app.py .

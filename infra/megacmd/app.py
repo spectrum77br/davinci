@@ -9,6 +9,7 @@ setado no ambiente.
 """
 from __future__ import annotations
 
+import io
 import os
 import re
 import secrets
@@ -18,7 +19,7 @@ import tempfile
 import unicodedata
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from starlette.background import BackgroundTask
 from pydantic import BaseModel
 
@@ -371,6 +372,17 @@ def file(path: str, _: None = Depends(check_token)):
     temporário e é removido depois de servido — o container não acumula cópia
     do acervo.
     """
+    tmp, destino = _baixar(path)
+    return FileResponse(
+        destino,
+        filename=destino.rsplit("/", 1)[-1],
+        background=BackgroundTask(shutil.rmtree, tmp, ignore_errors=True),
+    )
+
+
+def _baixar(path: str) -> tuple[str, str]:
+    """`mega-get` de UM arquivo para um diretório temporário: (tmp, arquivo).
+    Quem chama apaga o tmp depois de usar."""
     nome = path.rsplit("/", 1)[-1]
     # `..` fora: o nome vem da listagem, mas chega por parâmetro. Subpasta é
     # legítima (as malas têm uma por modelo), subir de nível não é.
@@ -395,11 +407,45 @@ def file(path: str, _: None = Depends(check_token)):
     if rc != 0 or not os.path.isfile(destino):
         shutil.rmtree(tmp, ignore_errors=True)
         raise HTTPException(404, f"não baixou: {out[-300:]}")
-    return FileResponse(
-        destino,
-        filename=nome,
-        background=BackgroundTask(shutil.rmtree, tmp, ignore_errors=True),
-    )
+    return tmp, destino
+
+
+@app.get("/thumb")
+def thumb(path: str, lado: int = 320, _: None = Depends(check_token)) -> Response:
+    """Miniatura JPEG de UMA imagem (lado maior = `lado`, entre 64 e 800).
+
+    O painel de mídias da Tabela de Preços pede 24 fotos de uma vez, e as
+    fotos do fornecedor têm 0,3 a 1,5 MB cada: medido em 29/09/2026, a aba
+    Fotos do Fossibot S7 baixava 24,8 MB para desenhar quadrados de 112 px
+    (o MEGA entregava as 24 em 2,5 s; o resto era a internet de quem abria).
+    A redução acontece aqui, onde o arquivo já desce do MEGA, e só a
+    miniatura atravessa a API. Imagem que o Pillow não abre → 422, e a API
+    cai para o arquivo inteiro.
+    """
+    from PIL import Image, ImageOps  # só este endpoint precisa
+
+    lado = min(800, max(64, lado))
+    tmp, destino = _baixar(path)
+    try:
+        try:
+            with Image.open(destino) as im:
+                im.draft("RGB", (lado * 2, lado * 2))  # JPEG grande decodifica já reduzido
+                im = ImageOps.exif_transpose(im)
+                if im.mode in ("RGBA", "LA", "P"):
+                    im = im.convert("RGBA")
+                    fundo = Image.new("RGB", im.size, (255, 255, 255))
+                    fundo.paste(im, mask=im.getchannel("A"))
+                    im = fundo
+                elif im.mode != "RGB":
+                    im = im.convert("RGB")
+                im.thumbnail((lado, lado))
+                saida = io.BytesIO()
+                im.save(saida, "JPEG", quality=80, optimize=True)
+        except (OSError, ValueError, Image.DecompressionBombError) as exc:
+            raise HTTPException(422, f"não abriu como imagem: {exc}") from exc
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return Response(content=saida.getvalue(), media_type="image/jpeg")
 
 
 class ExportIn(BaseModel):

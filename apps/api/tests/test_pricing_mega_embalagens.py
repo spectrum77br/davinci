@@ -59,6 +59,7 @@ class MegaFalso:
         # Simula o container ANTES do rebuild: /media_counts sem embalagens.
         self.formato_antigo = False
         self.fora_do_ar = False
+        self.thumb = "ok"
 
     # --- montar a árvore ---
     def pasta(self, *paths: str) -> None:
@@ -148,6 +149,18 @@ class MegaFalso:
     async def bytes_(self, path: str, *, params: dict, timeout: float = 0) -> bytes:
         self.chamadas.append(("GET", path))
         alvo = params["path"]
+        if path == "/thumb":
+            # thumb: "ok" reduz; "antigo" = container sem a rota (404 do
+            # FastAPI); "nao_abre" = Pillow não decodifica (422).
+            if self.thumb == "antigo":
+                raise MegaError("sidecar HTTP 404", 404)
+            if self.thumb == "nao_abre":
+                raise MegaError("sidecar HTTP 422", 422)
+            if self.thumb == "fora":
+                raise MegaError("sidecar MEGA inacessível", 503)
+            if alvo not in self.arquivos:
+                raise MegaError("sidecar HTTP 404", 404)
+            return b"MINI:" + self.arquivos[alvo]
         if alvo not in self.arquivos:
             raise MegaError("sidecar HTTP 404", 404)
         return self.arquivos[alvo]
@@ -175,6 +188,7 @@ def mega(monkeypatch) -> MegaFalso:
     ):
         monkeypatch.setattr(f"{mod}.sidecar_request", m.request)
     monkeypatch.setattr("app.routers.pricing_mega.sidecar_stream", m.stream)
+    monkeypatch.setattr("app.routers.pricing_mega.sidecar_bytes", m.bytes_)
     monkeypatch.setattr("app.routers.portal_criativos.sidecar_bytes", m.bytes_)
     monkeypatch.setattr(get_settings(), "mega_fotos_root", "/")
     return m
@@ -600,6 +614,48 @@ async def test_arquivo_imagem_inline_resto_download(
 
     r = await client.get(url, params={"nome": "nao/existe.jpg"})
     assert r.status_code == 404
+
+
+async def test_miniatura_reduzida_e_volta_ao_original_quando_nao_da(
+    client: AsyncClient, db: AsyncSession, editor: User, mega: MegaFalso,
+):
+    """A grade pede `miniatura=1`: 24 fotos originais do fornecedor eram ~25 MB
+    por aba. Sidecar antigo (sem /thumb) ou imagem que o Pillow não abre caem
+    no arquivo inteiro — a tela nunca fica sem a foto por causa disso."""
+    mega.arquivo("/Celular/X/frente.png", conteudo=b"PNGDATA")
+    mega.arquivo("/Celular/X/Embalagens/caixa.pdf", conteudo=b"%PDF")
+    p = await _produto(db, editor, nome="X", pasta="/Celular/X")
+    url = f"/api/pricing/mega/products/{p.id}/midias/arquivo"
+
+    r = await client.get(url, params={"nome": "frente.png", "miniatura": 1})
+    assert r.status_code == 200 and r.content == b"MINI:PNGDATA"
+    assert r.headers["content-type"] == "image/jpeg"
+    assert r.headers["content-disposition"].startswith("inline;")
+    assert r.headers["cache-control"] == "private, max-age=86400"
+
+    for modo in ("antigo", "nao_abre"):
+        mega.thumb = modo
+        r = await client.get(url, params={"nome": "frente.png", "miniatura": 1})
+        assert r.status_code == 200 and r.content == b"PNGDATA", modo
+        assert r.headers["content-type"] == "image/png"
+
+    # MEGA fora do ar não vira "foto quebrada" silenciosa: erro do sidecar.
+    mega.thumb = "fora"
+    r = await client.get(url, params={"nome": "frente.png", "miniatura": 1})
+    assert r.status_code == 503 and r.json()["detail"]["code"] == "mega_sidecar"
+
+    # Não-imagem ignora o pedido de miniatura e continua download.
+    mega.thumb = "ok"
+    r = await client.get(url, params={"nome": "Embalagens/caixa.pdf", "miniatura": 1})
+    assert r.content == b"%PDF"
+    assert r.headers["content-disposition"].startswith("attachment;")
+    # Baixar sempre entrega o original.
+    r = await client.get(url, params={"nome": "frente.png", "miniatura": 1, "baixar": 1})
+    assert r.content == b"PNGDATA"
+    assert r.headers["content-disposition"].startswith("attachment;")
+    # Arquivo que não existe: 404 do /thumb cai para o /file, que diz 404.
+    r = await client.get(url, params={"nome": "some.jpg", "miniatura": 1})
+    assert r.status_code == 404 and r.json()["detail"]["code"] == "arquivo_nao_encontrado"
 
 
 @pytest.mark.parametrize(

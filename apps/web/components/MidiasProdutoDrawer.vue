@@ -315,17 +315,29 @@ function nomeCurto(nome: string): string {
   return i >= 0 ? nome.slice(i + 1) : nome
 }
 
-// Subpasta do arquivo, relativa à pasta do produto ("M1 listrada/b005.jpg" →
-// "M1 listrada"). Na aba Embalagens tudo está dentro de "Embalagens/", então
-// esse primeiro nível sai do subtítulo.
+// Caminho do arquivo dentro da pasta do produto, sem o "Embalagens/" da aba
+// Embalagens (lá tudo mora dentro dela).
+function relativo(nome: string): string {
+  if (aba.value !== 'embalagens') return nome
+  const [primeiro, ...resto] = nome.split('/')
+  return resto.length && ['embalagens', 'embalagem'].includes(normalizar(primeiro)) ? resto.join('/') : nome
+}
+
+// Grupo = só o PRIMEIRO nível de subpasta ("M1 listrada/b005 M1 listrada
+// preto/b005.12.jpg" → "M1 listrada"). Com o caminho inteiro, cada cor de mala
+// virava um grupo de UMA foto e a aba das malas era uma coluna comprida (visto
+// no teste de tela de 29/09/2026); o nível de baixo vai para a legenda.
 function subpasta(nome: string): string {
-  const i = nome.lastIndexOf('/')
-  let dir = i >= 0 ? nome.slice(0, i) : ''
-  if (aba.value === 'embalagens' && dir) {
-    const [primeiro, ...resto] = dir.split('/')
-    if (['embalagens', 'embalagem'].includes(normalizar(primeiro))) dir = resto.join('/')
-  }
-  return dir
+  const r = relativo(nome)
+  const i = r.indexOf('/')
+  return i >= 0 ? r.slice(0, i) : ''
+}
+
+// Pasta intermediária entre o grupo e o arquivo ("b005 M1 listrada preto"),
+// mostrada acima do nome na legenda da miniatura. Vazio quando não há.
+function pastaDoMeio(nome: string): string {
+  const partes = relativo(nome).split('/')
+  return partes.length > 2 ? partes.slice(1, -1).join('/') : ''
 }
 
 const arquivosAba = computed<Arquivo[]>(() => {
@@ -333,6 +345,7 @@ const arquivosAba = computed<Arquivo[]>(() => {
   if (!l) return []
   return [...l.arquivos].sort((a, b) =>
     _COLLATOR.compare(subpasta(a.nome), subpasta(b.nome))
+    || _COLLATOR.compare(pastaDoMeio(a.nome), pastaDoMeio(b.nome))
     || _COLLATOR.compare(nomeCurto(a.nome), nomeCurto(b.nome)),
   )
 })
@@ -363,8 +376,11 @@ function mostraMiniatura(a: Arquivo): boolean {
 }
 
 // Mesma origem da página: o cookie de sessão vai junto, sem token na URL.
-function urlArquivo(nome: string, baixar = false): string {
-  return `/api/pricing/mega/products/${props.produto.id}/midias/arquivo?nome=${encodeURIComponent(nome)}${baixar ? '&baixar=1' : ''}`
+// `miniatura`: a grade pede o JPEG de 320 px que o servidor gera (a foto
+// original do fornecedor tem até 1,5 MB); o visor grande e o Baixar pedem o
+// arquivo original.
+function urlArquivo(nome: string, baixar = false, miniatura = false): string {
+  return `/api/pricing/mega/products/${props.produto.id}/midias/arquivo?nome=${encodeURIComponent(nome)}${baixar ? '&baixar=1' : ''}${miniatura ? '&miniatura=1' : ''}`
 }
 
 const textoVazio = computed(() => {
@@ -1001,14 +1017,15 @@ onBeforeUnmount(() => {
                 >
                   <div class="aspect-square w-full overflow-hidden rounded border bg-muted">
                     <img
-                      :src="urlArquivo(a.nome)"
+                      :src="urlArquivo(a.nome, false, true)"
                       :alt="nomeCurto(a.nome)"
                       loading="lazy"
                       class="h-full w-full object-cover transition-transform group-hover:scale-105"
                       @error="falhas.add(a.nome)"
                     />
                   </div>
-                  <div class="mt-0.5 truncate text-[11px] text-muted-foreground">{{ nomeCurto(a.nome) }}</div>
+                  <div v-if="pastaDoMeio(a.nome)" class="mt-0.5 truncate text-[11px] font-medium">{{ pastaDoMeio(a.nome) }}</div>
+                  <div class="truncate text-[11px] text-muted-foreground" :class="{ 'mt-0.5': !pastaDoMeio(a.nome) }">{{ nomeCurto(a.nome) }}</div>
                 </button>
                 <div v-else class="min-w-0" :title="a.nome">
                   <div class="flex aspect-square w-full flex-col items-center justify-center gap-1 rounded border bg-muted/40 p-2">

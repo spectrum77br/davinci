@@ -32,7 +32,7 @@ from uuid import UUID
 
 import structlog
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -47,6 +47,7 @@ from app.services.mega_fotos import (
     MegaError,
     eh_de_embalagens,
     match_products_to_folders,
+    sidecar_bytes,
     sidecar_request,
     sidecar_stream,
 )
@@ -674,7 +675,8 @@ async def baixar_midia(
     ],
     nome: Annotated[str, Query(max_length=1000)],
     baixar: bool = False,
-) -> StreamingResponse:
+    miniatura: bool = False,
+) -> Response:
     """Os bytes de UM arquivo da pasta do produto.
 
     Imagem que o navegador desenha sai inline (miniatura); PDF, AI, PSD, ZIP e
@@ -695,6 +697,30 @@ async def baixar_midia(
     media, disposicao = mime_seguro(_EXT_IMAGEM.get(f".{ext}"), permitidos=MIMES_IMAGEM)
     if baixar:
         disposicao = "attachment"
+    elif miniatura and disposicao == "inline":
+        # A grade do painel pede a miniatura: 24 fotos do fornecedor eram
+        # ~25 MB por aba (medido 29/09/2026 no Fossibot S7). O sidecar reduz
+        # para JPEG de 320 px. Sidecar antigo (sem /thumb, 404) ou imagem que
+        # não abre (422) → segue para o arquivo inteiro, como antes.
+        try:
+            menor = await sidecar_bytes(
+                "/thumb", params={"path": f"{row.fotos_path}/{nome}", "lado": 320}
+            )
+        except MegaError as exc:
+            if exc.status_code == 400:
+                raise HTTPException(400, detail={"code": "nome_invalido"}) from exc
+            if exc.status_code not in (404, 422):
+                raise _sidecar_http_error(exc) from exc
+        else:
+            return Response(
+                content=menor,
+                media_type="image/jpeg",
+                headers={
+                    "Content-Disposition": disposicao_segura("inline", nome),
+                    "X-Content-Type-Options": "nosniff",
+                    "Cache-Control": "private, max-age=86400",
+                },
+            )
     try:
         pedacos, fechar = await sidecar_stream(
             "/file", params={"path": f"{row.fotos_path}/{nome}"}
