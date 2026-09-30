@@ -930,7 +930,7 @@ onBeforeUnmount(() => {
 // ── Horário de corte ("despachar até" do marketplace) ─────────────────
 // Mostrado embaixo do nome da loja, só em pedido ainda NÃO enviado.
 // 30/09/2026 (Vinicius): o rótulo diz "envio" (antes "corte") — tela e papel.
-// Relógio de 60s mantém "falta Xmin"/"estourou" vivos sem recarregar.
+// Relógio de 60s mantém a cor (vermelho quando o prazo passa) viva sem recarregar.
 const corteAgoraMs = ref(Date.now())
 let corteClock: number | null = null
 onMounted(() => {
@@ -946,24 +946,15 @@ function corteInfo(row: PedidoRow): { label: string; cls: string } | null {
   const dia = isoDateBrt(dl)
   const hoje = isoToday()
   const ddmm = `${dia.slice(8)}/${dia.slice(5, 7)}`
-  if (dia > hoje) {
-    // Corte só amanhã ou depois: discreto, sem urgência.
-    return { label: `envio ${ddmm} ${hora}`, cls: 'text-muted-foreground' }
-  }
+  // Sempre só data + hora, sem "falta Xmin"/"estourou" (Vinicius 30/09:
+  // "coloca padrão, data e horário"). A urgência fica só na cor.
+  const label = `envio ${ddmm} ${hora}`
+  // Corte só amanhã ou depois: discreto, sem urgência.
+  if (dia > hoje) return { label, cls: 'text-muted-foreground' }
   const faltaMin = Math.floor((dl.getTime() - corteAgoraMs.value) / 60_000)
-  if (faltaMin < 0) {
-    return {
-      label: `envio ${dia === hoje ? hora : `${ddmm} ${hora}`} — estourou`,
-      cls: 'text-red-600 dark:text-red-400 font-semibold',
-    }
-  }
-  if (faltaMin < 60) {
-    return {
-      label: `envio ${hora} — falta ${faltaMin}min`,
-      cls: 'text-amber-700 dark:text-amber-400 font-semibold',
-    }
-  }
-  return { label: `envio ${hora}`, cls: 'text-amber-700 dark:text-amber-400' }
+  if (faltaMin < 0) return { label, cls: 'text-red-600 dark:text-red-400 font-semibold' }
+  if (faltaMin < 60) return { label, cls: 'text-amber-700 dark:text-amber-400 font-semibold' }
+  return { label, cls: 'text-amber-700 dark:text-amber-400' }
 }
 
 // Dia da previsão pelo corte: 'hoje' = corte hoje ou atrasado (sai JÁ);
@@ -1387,7 +1378,7 @@ function formatDateBR(iso: string): string {
 // ficam sempre juntos (a etiqueta é do pedido, e o checkbox/separador
 // dependem disso). O critério vem da 1ª linha do grupo.
 type PedidoSortKey =
-  | 'data' | 'loja' | 'pedido_bling' | 'pedido_marketplace' | 'cliente'
+  | 'data' | 'prazo' | 'loja' | 'pedido_bling' | 'pedido_marketplace' | 'cliente'
   | 'sku' | 'produto' | 'quantidade' | 'etiqueta' | 'impressao' | 'envio'
 const sortKey = ref<PedidoSortKey>('data')
 const sortDir = ref<'asc' | 'desc'>('desc')
@@ -1416,9 +1407,20 @@ const PEDIDO_COLS: { key: PedidoSortKey; label: string; cls: string }[] = [
   { key: 'impressao', label: 'Impressão', cls: 'text-center' },
   { key: 'envio', label: 'Envio', cls: 'text-center' },
 ]
+// "Ordenar" também tem o prazo de envio (o "envio 30/09 23:59" embaixo da
+// loja), que não é coluna própria — Vinicius 30/09: saber o que postar
+// primeiro. Abre no crescente: o prazo mais perto no topo.
+const ORDENAR_OPCOES: { key: PedidoSortKey; label: string }[] = [
+  PEDIDO_COLS[0]!,
+  { key: 'prazo', label: 'Prazo de envio' },
+  ...PEDIDO_COLS.slice(1),
+]
 function sortValue(r: PedidoRow): string | number {
   switch (sortKey.value) {
     case 'data': return r.data_envio || r.data || ''
+    // Já enviado não tem mais prazo na tela → vai pro fim, como célula vazia.
+    case 'prazo':
+      return r.ship_deadline && r.status !== 'enviado' ? new Date(r.ship_deadline).getTime() : ''
     case 'loja': return r.loja || ''
     case 'pedido_bling': return Number(r.pedido_bling) || 0
     case 'pedido_marketplace': return r.pedido_marketplace || ''
@@ -2249,7 +2251,7 @@ async function conferirTodos() {
           :value="sortKey"
           @change="ordenarPor(($event.target as HTMLSelectElement).value as PedidoSortKey)"
         >
-          <option v-for="col in PEDIDO_COLS" :key="col.key" :value="col.key">
+          <option v-for="col in ORDENAR_OPCOES" :key="col.key" :value="col.key">
             {{ col.label }}
           </option>
         </select>
