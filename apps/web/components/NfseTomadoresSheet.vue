@@ -12,8 +12,9 @@ import { computed, nextTick, ref, watch } from 'vue'
 import { AlertTriangle, Building2, CheckCircle2, ChevronRight, Contact, IdCard, Loader2, UserRound } from 'lucide-vue-next'
 import { Button } from '~/components/ui/button'
 import {
-  campoDoErro, codigoErro, docValido, enderecoTomador, erroApi, fmtDoc, prestadorPorId, soDigitos,
-  tomadorParaForm, TOM_TEXTO, useNfseTela, type AbrirTomadorOpts, type Tomador, type TomadorApi, type TomadorForm,
+  campoDoErro, codigoErro, docValido, EMAIL_VALIDO, enderecoTomador, erroApi, fmtDoc, listaDeEmails, prestadorPorId,
+  soDigitos, tomadorParaForm, TOM_TEXTO, useNfseTela, type AbrirTomadorOpts, type Tomador, type TomadorApi,
+  type TomadorForm,
   useNfseApi,
 } from '~/lib/nfse'
 
@@ -268,8 +269,10 @@ function validar(): Partial<Record<Campo, string>> {
     else if (!docValido(d)) e.documento = 'CNPJ/CPF inválido: confira os números.'
     if (!(f.nome ?? '').trim()) e.nome = 'Preencha o nome ou a razão social.'
   }
-  const email = (f.email ?? '').trim()
-  if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) e.email = 'Confira o e-mail: falta o @ ou o domínio.'
+  // Mais de um (a janela de envio manual pode guardar "a@x.com, b@y.com"): confere cada um.
+  if (listaDeEmails(f.email).some((x) => !EMAIL_VALIDO.test(x))) {
+    e.email = 'Confira o e-mail: o certo é como financeiro@empresa.com.br.'
+  }
   const fone = soDigitos(f.fone)
   if (fone && fone.length < 10) e.fone = 'Telefone com DDD: 10 ou 11 números.'
   const cep = soDigitos(f.cep)
@@ -471,7 +474,15 @@ const classeErro = 'border-red-500 dark:border-red-400'
         <!-- 3. Contato -->
         <NfseSecao titulo="Contato" descricao="opcional" :icone="Contact">
           <div class="grid gap-3 sm:grid-cols-2">
-            <NfseCampo id="nfse-tomador-campo-email" rotulo="E-mail" :erro="erros.email" para="nfse-tomador-email">
+            <!-- 30/09/2026: o e-mail NÃO vai à NFE.io (ela mandaria a nota sozinha ao
+                 tomador); fica só para o envio manual pelo DaVinci. -->
+            <NfseCampo
+              id="nfse-tomador-campo-email"
+              rotulo="E-mail"
+              :erro="erros.email"
+              para="nfse-tomador-email"
+              dica="Não é enviado automaticamente. Serve para o envio manual da nota (⋯ › Enviar por e-mail)."
+            >
               <input
                 id="nfse-tomador-email"
                 v-model="form.email"

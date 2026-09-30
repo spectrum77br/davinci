@@ -27,19 +27,19 @@
 // para mostrar — o servidor reenvia com a mesma base e o mesmo %. Com a % padrão
 // da empresa (29/09), a conta sai "0,5% (da empresa) de R$ 200.000,00".
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
-import { AlertTriangle, ChevronDown, Clock, FileDown, FlaskConical, Loader2, Send, ShieldAlert } from 'lucide-vue-next'
+import { AlertTriangle, ChevronDown, Clock, FileDown, FlaskConical, Loader2, Printer, Send, ShieldAlert } from 'lucide-vue-next'
 import { Button } from '~/components/ui/button'
 import {
-  codigoErro, empresaTeste, erroApi, explicarProblema, falhaDeRede, fmtBrl, fmtMes, fmtPctOrigem, mesParaData,
-  origemDaEmissao, plural, prestadorPorId, problemasApi, resultadoDaEmissao, situacao, TEXTO_TESTE, textoIr, TOM_TEXTO,
-  useNfseTela,
+  codigoErro, empresaTeste, erroApi, explicarProblema, falhaDeRede, fmtBrl, fmtMes, fmtPctOrigem, MAX_LOTE_ARQUIVOS,
+  mesParaData, origemDaEmissao, plural, prestadorPorId, problemasApi, resultadoDaEmissao, situacao, temArquivoNaNfeio,
+  TEXTO_TESTE, textoIr, TOM_TEXTO, useNfseTela,
   type Emissao, type EstadoLote, type ItemLote, type LoteApi, type ResultadoLote, type SecaoEmpresa,
   useNfseApi,
 } from '~/lib/nfse'
 
 const tela = useNfseTela()
 // Com a chave da senha extra (a página entrega): useApi() direto volta nfse_locked.
-const { api, abrirPdf } = useNfseApi()
+const { api, abrirPdf, imprimirLote } = useNfseApi()
 const toasts = useToasts()
 
 type Passo = 'conferir' | 'emitindo' | 'aguardando' | 'fim'
@@ -49,6 +49,12 @@ type GrupoEmpresa = { company_id: string; empresa: string; itens: ItemLote[]; to
 const PASSO_MS = 4000
 const JANELA_MS = 120_000
 const ESPERA = new Set<string>(['processando', 'enviando', 'incerta'])
+// 30/09/2026 (Eduardo: "se clicarmos em enviar 50 de uma só vez não vai dar
+// problema na api?"): cada id do /emissoes/atualizar é uma consulta à NFE.io.
+// Com 50 notas na prefeitura eram 50 consultas a cada 4 s. Agora vão no máximo
+// 10 por volta, em rodízio (as conferidas há mais tempo primeiro): com 50, cada
+// nota é conferida a cada ~20 s; com até 10, nada muda.
+const MAX_POR_VOLTA = 10
 
 const aberto = ref(false)
 const passo = ref<Passo>('conferir')
@@ -74,6 +80,11 @@ let resolver: ((r: ResultadoLote[]) => void) | null = null
 // Sobe a cada lote novo e ao fechar: invalida o acompanhamento anterior.
 let rodada = 0
 let acompanhamento: Promise<void> | null = null
+// Quando cada nota em espera foi conferida por último (id → Date.now()); a que
+// nunca foi conferida vem primeiro no rodízio. Zera a cada lote novo.
+let conferidaEm = new Map<string, number>()
+// "Imprimir todas" (fim) em andamento.
+const imprimindo = ref(false)
 
 const reenvio = computed(() => itens.value.length > 0 && itens.value.every((i) => i.tipo === 'reenviar'))
 const avulsa = computed(() => itens.value.length === 1 && itens.value[0]?.chave === 'avulsa')
@@ -282,6 +293,8 @@ function emitir(o: { competencia: string; itens: ItemLote[] }): Promise<Resultad
   if (aberto.value) return Promise.resolve([])
   rodada++
   acompanhamento = null
+  conferidaEm = new Map()
+  imprimindo.value = false
   competencia.value = o.competencia.slice(0, 7)
   itens.value = ordenarPorEmpresa(o.itens)
   resultados.value = {}
@@ -498,15 +511,22 @@ function acompanhar() {
       while (minha === rodada && aberto.value && Date.now() < prazo.value) {
         await esperar(PASSO_MS)
         if (minha !== rodada || !aberto.value) return
-        const lista = emEspera()
-        if (!lista.length) {
+        const esperando = emEspera()
+        if (!esperando.length) {
           // Nada esperando: só continua se ainda tem nota para sair.
           if (passo.value === 'emitindo') continue
           return
         }
+        // Rodízio: as conferidas há mais tempo (ou nunca) primeiro, até 10.
+        // O sort é estável: empate fica na ordem do lote.
+        const lista = [...esperando]
+          .sort((a, b) => (conferidaEm.get(a.id) ?? 0) - (conferidaEm.get(b.id) ?? 0))
+          .slice(0, MAX_POR_VOLTA)
         const novas = await tela.atualizarEmissoes(lista.map((x) => x.id))
-        // Sem resposta agora: tenta de novo na próxima volta.
+        // Sem resposta agora: tenta de novo na próxima volta (as mesmas).
         if (minha !== rodada || !novas) continue
+        const quando = Date.now()
+        for (const x of lista) conferidaEm.set(x.id, quando)
         const porId = new Map(novas.map((e) => [e.id, e]))
         const r = { ...resultados.value }
         for (const x of lista) {
@@ -570,7 +590,7 @@ async function comecar() {
         naoEnviada(it, 'erro', 'Já existe nota desta nota fixa neste mês: confira em Notas enviadas.', { codigo: c })
       } else if (c === 'nfse_locked') {
         semSenhaAgora =
-          'Não enviada: a senha desta página venceu (15 minutos). Feche esta janela, digite a senha de novo e envie as que faltaram.'
+          'Não enviada: a senha desta página venceu (30 minutos). Feche esta janela, digite a senha de novo e envie as que faltaram.'
         naoEnviada(it, 'erro', semSenhaAgora, { codigo: c })
       } else if (c === 'chave_nfeio') {
         semChaveAgora = `Não enviada: ${erroApi(err)}`
@@ -658,6 +678,31 @@ function pdfDe(r: ResultadoLote): string | null {
 function verPdf(r: ResultadoLote) {
   const id = pdfDe(r)
   if (id) void abrirPdf(id)
+}
+
+// Fim (30/09): as notas emitidas nesta rodada num PDF só, para imprimir de uma
+// vez (abrir PDF por PDF, o navegador bloqueia a partir da 2ª aba).
+const paraImprimir = computed<Emissao[]>(() =>
+  itens.value.flatMap((it) => {
+    const r = resultados.value[it.chave]
+    return r?.estado === 'emitida' && r.emissao && temArquivoNaNfeio(r.emissao) ? [r.emissao] : []
+  }),
+)
+
+// No máximo 100 por vez (o servidor recusa mais): acima disso o botão fica
+// desligado e a dica manda imprimir por partes na aba Notas enviadas.
+const demaisParaImprimir = computed(() => paraImprimir.value.length > MAX_LOTE_ARQUIVOS)
+
+// Direto do clique: a aba de impressão abre antes de esperar o servidor.
+async function imprimirTodas() {
+  const notas = paraImprimir.value
+  if (imprimindo.value || notas.length < 2 || demaisParaImprimir.value) return
+  imprimindo.value = true
+  try {
+    await imprimirLote(notas)
+  } finally {
+    imprimindo.value = false
+  }
 }
 
 const exposto: LoteApi = {
@@ -982,6 +1027,28 @@ defineExpose(exposto)
         <Button v-if="paraRetentar.length" variant="outline" size="sm" class="sm:mr-auto" @click="retentar">
           tentar de novo {{ paraRetentar.length === 1 ? 'a não enviada' : 'as não enviadas' }}
         </Button>
+        <NfseDica
+          v-if="paraImprimir.length > 1"
+          :texto="
+            demaisParaImprimir
+              ? `São ${paraImprimir.length} notas e o máximo é ${MAX_LOTE_ARQUIVOS} por vez: imprima por partes na aba Notas enviadas (filtre por mês ou empresa).`
+              : null
+          "
+        >
+          <span class="inline-flex" :tabindex="demaisParaImprimir ? 0 : undefined">
+            <Button
+              variant="outline"
+              size="sm"
+              :disabled="imprimindo || demaisParaImprimir"
+              :title="demaisParaImprimir ? undefined : `junta os PDFs das ${paraImprimir.length} notas emitidas num só, para imprimir`"
+              @click="imprimirTodas"
+            >
+              <Loader2 v-if="imprimindo" class="mr-1.5 size-4 animate-spin motion-reduce:animate-none" aria-hidden="true" />
+              <Printer v-else class="mr-1.5 size-4" aria-hidden="true" />
+              imprimir todas
+            </Button>
+          </span>
+        </NfseDica>
         <Button variant="outline" size="sm" @click="verNotasEnviadas">ver notas enviadas</Button>
         <Button size="sm" data-foco-lote @click="fechar">Fechar</Button>
       </template>

@@ -5,17 +5,18 @@ import { onBeforeRouteLeave } from 'vue-router'
 // segura porque tem informações que muita gente não pode ver".
 //
 // Quem confere de verdade é o SERVIDOR — sem a chave no cabeçalho ele recusa os
-// dados, então esta trava não é só visual. A chave vale 15 minutos.
+// dados, então esta trava não é só visual. A chave vale o tempo que o servidor
+// mandar (`expires_in`): Empresas 15 min, Emissão de Serviço 30 min (30/09/2026).
 //
 // Onde a chave fica (Eduardo, 25/09: "se eu sair preciso que já bloqueie"):
 // SÓ na memória da página, nunca no navegador. Por isso tranca de novo ao
 // - sair da área (`area`: a lista e a ficha de uma empresa são a mesma área;
 //   Cadastros, Lojas, Valuation etc. não são);
 // - recarregar a página ou fechar a aba;
-// - vencer os 15 minutos, mesmo parado na tela.
+// - vencer o prazo da chave, mesmo parado na tela.
 //
 // Opções (Emissão de Serviço, 30/09/2026):
-// - `podeTrancar`: quando os 15 min vencem no meio de um trabalho que não pode
+// - `podeTrancar`: quando a chave vence no meio de um trabalho que não pode
 //   ser cortado (notas saindo para a NFE.io), a tela espera ele acabar para
 //   trancar. Só para trabalho que termina sozinho — nunca "janela aberta".
 // - `antesDeTrancar`: fecha o que precisa fechar direito antes do cadeado

@@ -19,6 +19,11 @@
 // senha extra (a mesma de Empresas e do Valuation) e só carrega depois dela.
 // Quem confere é o servidor: sem a chave, /api/nfse recusa tudo. As abas e as
 // janelas chamam a API por useNfseApi() (provide daqui), que leva a chave.
+//
+// 30/09/2026 (Eduardo: "aumente o tempo de acesso para 30 min"): a chave desta
+// página vale 30 minutos (Empresas e Valuation continuam 15). Na mesma leva:
+// imprimir e baixar notas em lote (Notas enviadas) e o e-mail da nota passou a
+// ser só MANUAL, mandado pelo DaVinci (a NFE.io não recebe mais o e-mail do tomador).
 import { computed, onBeforeUnmount, onMounted, provide, ref, watch, type Ref } from 'vue'
 import { onBeforeRouteLeave, type LocationQuery, type LocationQueryRaw } from 'vue-router'
 import { TooltipProvider } from 'reka-ui'
@@ -29,11 +34,12 @@ import { Button } from '~/components/ui/button'
 import { SENHA_EXTRA_TRAVA } from '~/composables/useSenhaExtra'
 import { TABS_CADASTROS } from '~/lib/navGroups'
 import {
-  erroApi, fmtMes, itemReenvio, mesAtual, mesValido, NFSE_API, NFSE_TELA, plural, prestadorPorId, STATUS_PARA_RESOLVER,
+  erroApi, fmtMes, itemReenvio, MAX_LOTE_ARQUIVOS, mesAtual, mesValido, NFSE_API, NFSE_TELA, plural, prestadorPorId,
+  STATUS_PARA_RESOLVER,
   type AbaId, type AbrirModeloOpts, type AbrirTomadorOpts, type AvulsaApi, type CancelarApi, type ConfirmApi,
-  type ConfirmarOpts, type Emissao, type EmpresaApi, type ItemLote, type LoteApi, type Modelo, type ModeloApi,
-  type NfseApi, type NfseTela, type NotaApi, type Prestador, type ResultadoLote, type SecaoEmpresa, type StatusNfse, type Tomador,
-  type TomadorApi,
+  type ConfirmarOpts, type EmailApi, type Emissao, type EmpresaApi, type ItemLote, type LoteApi, type Modelo, type ModeloApi,
+  type NfseApi, type NfseTela, type NotaApi, type NotaDoLote, type Prestador, type ResultadoArquivos, type ResultadoLote,
+  type SecaoEmpresa, type StatusNfse, type Tomador, type TomadorApi,
 } from '~/lib/nfse'
 
 definePageMeta({
@@ -109,6 +115,7 @@ const loteRef = ref<LoteApi | null>(null)
 const avulsaRef = ref<AvulsaApi | null>(null)
 const notaRef = ref<NotaApi | null>(null)
 const cancelarRef = ref<CancelarApi | null>(null)
+const emailRef = ref<EmailApi | null>(null)
 const modeloRef = ref<ModeloApi | null>(null)
 const tomadorRef = ref<TomadorApi | null>(null)
 const empresaRef = ref<EmpresaApi | null>(null)
@@ -116,10 +123,11 @@ const empresaRef = ref<EmpresaApi | null>(null)
 // --- Senha extra -------------------------------------------------------------
 // A mesma senha de Empresas e do Valuation, com desbloqueio próprio (a chave de
 // Empresas não abre esta página). A chave fica só na memória da página: tranca
-// ao sair de /emissao-servico, ao recarregar e aos 15 minutos. Só espera o que
-// termina sozinho: notas saindo no assistente ou um cancelamento a caminho da
-// prefeitura (trancar no meio desmontaria a janela e o resultado se perderia).
-// No último minuto, um aviso deixa digitar a senha de novo sem trancar.
+// ao sair de /emissao-servico, ao recarregar e aos 30 minutos (o prazo vem do
+// servidor, `expires_in`). Só espera o que termina sozinho: notas saindo no
+// assistente, um cancelamento a caminho da prefeitura, um e-mail saindo ou
+// notas descendo em lote (trancar no meio desmontaria a janela e o resultado
+// se perderia). No último minuto, um aviso deixa digitar a senha de novo sem trancar.
 
 function loteOcupado(): boolean {
   const lote = loteRef.value as Partial<LoteApi> | null
@@ -129,6 +137,15 @@ function cancelamentoOcupado(): boolean {
   const c = cancelarRef.value as Partial<CancelarApi> | null
   return !!(c && typeof c.ocupado === 'function' && c.ocupado())
 }
+function emailOcupado(): boolean {
+  const m = emailRef.value as Partial<EmailApi> | null
+  return !!(m && typeof m.ocupado === 'function' && m.ocupado())
+}
+// Imprimir/baixar em lote em andamento (100 PDFs levam uns 20 s na NFE.io).
+const arquivosOcupado = ref(false)
+function algoOcupado(): boolean {
+  return loteOcupado() || cancelamentoOcupado() || emailOcupado() || arquivosOcupado.value
+}
 // A janela de envio aberta (conferindo, esperando a prefeitura ou no fim)
 // fecha do jeito normal antes do cadeado: mostra o resumo e devolve o resultado.
 function fecharLote() {
@@ -137,7 +154,7 @@ function fecharLote() {
 }
 
 const trava = useSenhaExtra('nfse', '/api/nfse/unlock', 'X-Nfse-Token', /^\/emissao-servico(\/|$)/, {
-  podeTrancar: () => !loteOcupado() && !cancelamentoOcupado(),
+  podeTrancar: () => !algoOcupado(),
   antesDeTrancar: fecharLote,
 })
 // As janelas mostram o aviso do último minuto por dentro (NfseSheet/NfseDialog).
@@ -203,12 +220,201 @@ async function baixarXml(id: string): Promise<void> {
   }
 }
 
-const nfseApi: NfseApi = { api: apiN, abrirPdf, baixarXml }
+// --- Notas em lote (30/09) -----------------------------------------------------
+// Imprimir e baixar várias notas de uma vez (aba Notas enviadas e fim do
+// assistente de emissão). A NFE.io não tem download em lote: o servidor busca
+// nota por nota e devolve UM arquivo — o PDF juntado (imprimir) ou o .zip com
+// uma pasta por empresa (o nº da nota é por empresa: ATV nº 4 e Rocha nº 4 não
+// se sobrescrevem). O que não veio da NFE.io fica de fora e é avisado aqui pelo
+// nº e pela empresa (no .zip, com o motivo, em _FALTARAM.txt).
+
+// Com responseType 'blob' o erro também chega como arquivo: lê o JSON de
+// dentro para a mensagem aparecer e para a senha vencida voltar ao cadeado
+// (trava.eTravamento só olha e.data.detail). Devolve um erro NOVO: o `data` do
+// erro do $fetch é só-leitura (mesma lição da tela Empresas).
+async function lerErroDeArquivo(e: any): Promise<any> {
+  if (typeof Blob === 'undefined' || !(e?.data instanceof Blob)) return e
+  let data: any = null
+  try {
+    data = JSON.parse(await e.data.text())
+  } catch {
+    // corpo que não é JSON (proxy fora do ar, por exemplo): fica a mensagem padrão
+  }
+  const lido = { data, message: e?.message, status: e?.status, statusCode: e?.statusCode }
+  if (trava.eTravamento(lido)) trava.trancarQuandoPuder()
+  return lido
+}
+
+function lerCabecalhos(h: Headers, pedidas: number): ResultadoArquivos {
+  const numero = (nome: string, padrao: number) => {
+    const bruto = (h.get(nome) ?? '').trim()
+    const v = Number(bruto)
+    return bruto && Number.isFinite(v) ? v : padrao
+  }
+  const faltaram = (h.get('X-Nfse-Faltaram') ?? '').split(',').map((s) => s.trim()).filter(Boolean)
+  const total = numero('X-Nfse-Total', pedidas)
+  return { total, ok: numero('X-Nfse-Ok', total - faltaram.length), faltaram }
+}
+
+// "20260930-1415" (hora daqui) para o nome do arquivo.
+function carimbo(): string {
+  const d = new Date()
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}`
+}
+
+function salvarBlob(arquivo: Blob, nome: string) {
+  const href = URL.createObjectURL(arquivo)
+  const a = document.createElement('a')
+  a.href = href
+  a.download = nome
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  // Revogar na hora corta o download em alguns navegadores.
+  setTimeout(() => URL.revokeObjectURL(href), 60_000)
+}
+
+// "nº 5 (ATV), nº 7 (Rocha)" das que faltaram; acima de 8, "e mais N".
+function quaisFaltaram(notas: NotaDoLote[], ids: string[]): string {
+  const porId = new Map(notas.map((n) => [n.id, n]))
+  const nomes = ids.map((id) => {
+    const n = porId.get(id)
+    if (!n) return 'uma nota'
+    const numero = n.n_nfse ? `nº ${n.n_nfse}` : 'nota sem número'
+    return n.prestador_nome ? `${numero} (${n.prestador_nome})` : numero
+  })
+  const primeiras = nomes.slice(0, 8).join(', ')
+  return nomes.length > 8 ? `${primeiras} e mais ${nomes.length - 8}` : primeiras
+}
+
+function idsDoLote(notas: NotaDoLote[]): string[] {
+  return [...new Set(notas.map((n) => n.id))]
+}
+
+// Um lote por vez (a aba Notas enviadas e o fim do assistente usam o mesmo).
+function avisarOcupado() {
+  toasts.info('Espere terminar o que está descendo', 'Um lote de notas por vez.')
+}
+
+// No máximo 100 por vez (o servidor recusa mais). Confere ANTES de abrir a aba
+// de impressão: sem isto, a aba abria em branco, fechava e o aviso vinha em inglês.
+function demaisNoLote(ids: string[]): boolean {
+  if (ids.length <= MAX_LOTE_ARQUIVOS) return false
+  toasts.warning(
+    `No máximo ${MAX_LOTE_ARQUIVOS} notas por vez`,
+    `São ${ids.length}. Vá por partes: filtre por mês ou empresa na aba Notas enviadas.`,
+  )
+  return true
+}
+
+// Junta os PDFs no servidor e abre numa aba para imprimir (Ctrl+P no leitor de
+// PDF do navegador). A aba abre JÁ no clique: depois de esperar o servidor, o
+// navegador a bloquearia sem aviso (lição do controle-estoque: "5 funcionava e
+// 8 não"). Bloqueador de janelas (sem aba): baixa o PDF. A pessoa fechou a aba
+// antes de o PDF chegar: desistiu, não faz nada.
+async function imprimirLote(notas: NotaDoLote[]): Promise<ResultadoArquivos | null> {
+  const ids = idsDoLote(notas)
+  if (!ids.length || demaisNoLote(ids)) return null
+  if (arquivosOcupado.value) {
+    avisarOcupado()
+    return null
+  }
+  const aba = window.open('', '_blank')
+  if (aba) {
+    aba.opener = null
+    try {
+      aba.document.title = 'Notas para imprimir'
+      aba.document.body.textContent = `Juntando ${plural(ids.length, 'nota', 'notas')} para imprimir…`
+    } catch {
+      // aba de outro jeito (extensão, política do navegador): segue sem o aviso
+    }
+  }
+  arquivosOcupado.value = true
+  try {
+    let cab: ResultadoArquivos | null = null
+    const pdf = await apiN<Blob>('/api/nfse/emissoes/lote/imprimir', {
+      method: 'POST',
+      body: { ids },
+      responseType: 'blob',
+      onResponse({ response }: { response: Response }) {
+        if (response.ok) cab = lerCabecalhos(response.headers, ids.length)
+      },
+    })
+    const r: ResultadoArquivos = cab ?? { total: ids.length, ok: ids.length, faltaram: [] }
+    if (!aba) {
+      salvarBlob(pdf, `notas-de-servico_${carimbo()}.pdf`)
+    } else if (!aba.closed) {
+      const url = URL.createObjectURL(pdf)
+      aba.location.href = url
+      // O leitor de PDF já carregou; depois de 1 minuto o link some da memória.
+      setTimeout(() => URL.revokeObjectURL(url), 60_000)
+    }
+    if (r.faltaram.length) {
+      toasts.warning('Ficaram fora da impressão', [
+        `${quaisFaltaram(notas, r.faltaram)}.`,
+        'A NFE.io não devolveu o PDF dessas notas. Tente de novo em alguns minutos.',
+      ])
+    }
+    return r
+  } catch (e) {
+    aba?.close()
+    const lido = await lerErroDeArquivo(e)
+    // Senha vencida: o cadeado já explica.
+    if (!trava.eTravamento(lido)) toasts.error('Não deu para juntar as notas para imprimir', erroApi(lido))
+    return null
+  } finally {
+    arquivosOcupado.value = false
+  }
+}
+
+// Baixa o .zip com os PDFs ou os XMLs das notas (uma pasta por empresa). O nome
+// é montado aqui: o $fetch com blob não lê o nome que o servidor manda.
+async function baixarLote(notas: NotaDoLote[], tipo: 'pdf' | 'xml'): Promise<ResultadoArquivos | null> {
+  const ids = idsDoLote(notas)
+  if (!ids.length || demaisNoLote(ids)) return null
+  if (arquivosOcupado.value) {
+    avisarOcupado()
+    return null
+  }
+  arquivosOcupado.value = true
+  const rotulo = tipo === 'pdf' ? 'PDFs' : 'XMLs'
+  try {
+    let cab: ResultadoArquivos | null = null
+    const zip = await apiN<Blob>('/api/nfse/emissoes/lote/arquivos', {
+      method: 'POST',
+      body: { ids, tipo },
+      responseType: 'blob',
+      onResponse({ response }: { response: Response }) {
+        if (response.ok) cab = lerCabecalhos(response.headers, ids.length)
+      },
+    })
+    const r: ResultadoArquivos = cab ?? { total: ids.length, ok: ids.length, faltaram: [] }
+    salvarBlob(zip, `notas-de-servico_${tipo}_${carimbo()}.zip`)
+    if (r.faltaram.length) {
+      toasts.warning(`Baixadas ${r.ok} de ${plural(r.total, 'nota', 'notas')} (${rotulo})`, [
+        `Faltaram: ${quaisFaltaram(notas, r.faltaram)}.`,
+        'A NFE.io não devolveu o arquivo dessas notas; o motivo está no _FALTARAM.txt, dentro do .zip.',
+      ])
+    } else {
+      toasts.success(r.ok === 1 ? `1 nota baixada (${rotulo})` : `${r.ok} notas baixadas (${rotulo})`)
+    }
+    return r
+  } catch (e) {
+    const lido = await lerErroDeArquivo(e)
+    if (!trava.eTravamento(lido)) toasts.error(`Não deu para baixar os ${rotulo}`, erroApi(lido))
+    return null
+  } finally {
+    arquivosOcupado.value = false
+  }
+}
+
+const nfseApi: NfseApi = { api: apiN, abrirPdf, baixarXml, imprimirLote, baixarLote }
 provide(NFSE_API, nfseApi)
 
 function bloquear() {
-  if (loteOcupado() || cancelamentoOcupado()) {
-    toasts.warning('Espere terminar o que está saindo', 'Dá para bloquear assim que o envio acabar.')
+  if (algoOcupado()) {
+    toasts.warning('Espere terminar o que está em andamento', 'Dá para bloquear assim que acabar.')
     return
   }
   fecharLote()
@@ -534,22 +740,13 @@ async function excluirModelo(m: Modelo): Promise<boolean> {
   }
 }
 
-// "Reenviar por e-mail": a NFE.io manda o PDF e o XML de novo para o e-mail do tomador.
+// "Enviar por e-mail" (30/09/2026, Eduardo: nada automático). O e-mail do
+// tomador não vai mais à NFE.io (com ele, ela avisava o tomador sozinha na
+// emissão e no cancelamento). Quem manda o PDF e o XML é o DaVinci, só quando a
+// pessoa pede, para o endereço que ela confirma na janela (NfseEmailDialog).
 async function enviarEmail(e: Emissao): Promise<boolean> {
-  const ok = await confirmar({
-    titulo: 'Reenviar a nota por e-mail?',
-    texto: `A NFE.io manda o PDF e o XML${e.n_nfse ? ` da nota nº ${e.n_nfse}` : ''} de novo para o e-mail do tomador${e.tomador_nome ? ` (${e.tomador_nome})` : ''}.`,
-    botao: 'Reenviar e-mail',
-  })
-  if (!ok) return false
-  try {
-    await apiN(`/api/nfse/emissoes/${e.id}/enviar-email`, { method: 'POST' })
-    toasts.success('E-mail pedido à NFE.io', 'O tomador recebe a nota em alguns minutos.')
-    return true
-  } catch (err) {
-    toasts.error('Não deu para reenviar o e-mail', erroApi(err))
-    return false
-  }
+  const j = janela(emailRef, 'enviar')
+  return j ? j.enviar(e) : false
 }
 
 const tela: NfseTela = {
@@ -754,7 +951,7 @@ onBeforeRouteLeave(() => {
     <div class="space-y-5">
       <RouteTabs :tabs="TABS_CADASTROS" />
 
-      <SenhaExtraTrava v-if="!trava.token.value" titulo="Emissão de Serviço" :trava="trava" />
+      <SenhaExtraTrava v-if="!trava.token.value" titulo="Emissão de Serviço" :trava="trava" :minutos="30" />
       <template v-else>
       <SenhaExtraRenovar :trava="trava" />
       <PageHeader
@@ -840,6 +1037,7 @@ onBeforeRouteLeave(() => {
       <NfseEmitirAvulsa ref="avulsaRef" />
       <NfseHistoricoNota ref="notaRef" />
       <NfseHistoricoCancelar ref="cancelarRef" />
+      <NfseEmailDialog ref="emailRef" />
       <NfseModelosSheet ref="modeloRef" />
       <NfseTomadoresSheet ref="tomadorRef" />
       <NfsePrestadoresSheet ref="empresaRef" />

@@ -8,6 +8,7 @@ from decimal import Decimal
 from typing import Literal
 from uuid import UUID
 
+from email_validator import EmailNotValidError, validate_email
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 
 
@@ -380,6 +381,44 @@ class CancelarIn(BaseModel):
 
 class AtualizarIn(BaseModel):
     ids: list[UUID] = Field(min_length=1, max_length=200)
+
+
+class EmailNotaIn(BaseModel):
+    """Envio manual da nota por e-mail, pelo DaVinci (30/09/2026). De 1 a 5
+    endereços; `salvar_no_tomador` grava os endereços no cadastro do tomador."""
+
+    para: list[str]
+    salvar_no_tomador: bool = False
+
+    @field_validator("para")
+    @classmethod
+    def _para(cls, v: list[str]) -> list[str]:
+        limpos = [x.strip() for x in v if isinstance(x, str) and x.strip()]
+        if not limpos:
+            raise ValueError("Digite pelo menos um e-mail.")
+        if len(limpos) > 5:
+            raise ValueError("No máximo 5 e-mails por vez.")
+        out = []
+        for x in limpos:
+            try:
+                out.append(validate_email(x, check_deliverability=False).normalized)
+            except EmailNotValidError as e:
+                raise ValueError(f'O e-mail "{x}" não parece válido.') from e
+        return out
+
+
+# Lote de notas (30/09/2026): no máximo 100 por vez (services/nfse/lote_arquivos.py).
+class LoteArquivosIn(BaseModel):
+    """Baixar os PDFs ou os XMLs das notas marcadas num .zip."""
+
+    ids: list[UUID] = Field(min_length=1, max_length=100)
+    tipo: Literal["pdf", "xml"]
+
+
+class LoteImprimirIn(BaseModel):
+    """Imprimir as notas marcadas: um PDF só, na ordem dos ids."""
+
+    ids: list[UUID] = Field(min_length=1, max_length=100)
 
 
 class EmissaoOut(BaseModel):

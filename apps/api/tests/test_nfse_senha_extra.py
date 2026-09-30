@@ -7,7 +7,9 @@ esquema de senha do empresas". O que estes testes seguram:
 - a chave de Empresas não abre a Emissão de Serviço, e vice-versa;
 - a senha é a mesma, e os erros somam com as outras telas (5 → 15 min);
 - PDF/XML abrem por um link de 60 s que só vale para aquele arquivo;
-- o webhook da NFE.io (/api/webhooks/nfeio) não depende da senha.
+- o webhook da NFE.io (/api/webhooks/nfeio) não depende da senha;
+- a chave da Emissão de Serviço vale 30 minutos (Eduardo, 30/09: "aumente o
+  tempo de acesso para 30 min"); a de Empresas continua com 15.
 """
 
 # ruff: noqa: S105, S106  (senhas e chaves de teste, nada real)
@@ -47,7 +49,10 @@ class RedisFalso:
 def trava_de_verdade(monkeypatch):
     """Tira os desvios do conftest e fixa senha, segredo e Redis de teste."""
     config = SimpleNamespace(
-        valuation_password=SENHA, jwt_secret="segredo-de-teste", valuation_unlock_ttl_seconds=900
+        valuation_password=SENHA,
+        jwt_secret="segredo-de-teste",
+        valuation_unlock_ttl_seconds=900,
+        nfse_unlock_ttl_seconds=1800,
     )
     monkeypatch.setattr(senha_extra, "get_settings", lambda: config)
     redis = RedisFalso()
@@ -83,7 +88,7 @@ async def _admin(make_user, auth_as, trava):
 async def _chave(client) -> dict:
     r = await client.post("/api/nfse/unlock", json={"password": SENHA})
     assert r.status_code == 200, r.text
-    assert r.json()["expires_in"] == 900
+    assert r.json()["expires_in"] == 1800  # 30 min (30/09)
     return {"X-Nfse-Token": r.json()["token"]}
 
 
@@ -134,7 +139,18 @@ async def test_sem_chave_nada_sai_nem_entra(client, make_user, auth_as, trava_de
     rotas = _rotas_nfse()
     # As que mais importam estão mesmo na lista (PDF/XML e as que mexem na NFE.io).
     caminhos = {c.rsplit("/", 1)[-1] for _, c in rotas}
-    assert {"pdf", "xml", "emitir", "cancelar", "status", "faturamento", "tomadores"} <= caminhos
+    assert {
+        "pdf",
+        "xml",
+        "emitir",
+        "cancelar",
+        "status",
+        "faturamento",
+        "tomadores",
+        "enviar-email",
+        "arquivos",  # lote: .zip de PDFs/XMLs (30/09)
+        "imprimir",  # lote: PDF juntado (30/09)
+    } <= caminhos
     for metodo, caminho in rotas:
         r = await client.request(metodo, caminho, json={})
         assert r.status_code == 401, (metodo, caminho, r.status_code, r.text)
@@ -239,10 +255,34 @@ async def test_chave_vencida_nao_abre(client, make_user, auth_as, trava_de_verda
     await _admin(make_user, auth_as, trava_de_verdade)
     chave = await _chave(client)
     agora = time.time()
-    monkeypatch.setattr(senha_extra.time, "time", lambda: agora + 16 * 60)
+    monkeypatch.setattr(senha_extra.time, "time", lambda: agora + 31 * 60)
     r = await client.get("/api/nfse/status", headers=chave)
     assert r.status_code == 401
     assert r.json()["detail"]["code"] == "nfse_locked"
+
+
+@pytest.mark.asyncio
+async def test_chave_da_emissao_vale_30_min_e_a_de_empresas_15(
+    client, make_user, auth_as, trava_de_verdade, monkeypatch
+):
+    """Eduardo (30/09): "aumente o tempo de acesso para 30 min" — só na
+    Emissão de Serviço. Aos 16 minutos a da Emissão ainda abre e a de
+    Empresas já não; aos 29 a da Emissão continua abrindo."""
+    await _admin(make_user, auth_as, trava_de_verdade)
+    chave = await _chave(client)
+    r = await client.post("/api/companies/unlock", json={"password": SENHA})
+    assert r.status_code == 200 and r.json()["expires_in"] == 900
+    chave_empresas = {"X-Empresas-Token": r.json()["token"]}
+    agora = time.time()
+    monkeypatch.setattr(senha_extra.time, "time", lambda: agora + 16 * 60)
+    assert (await client.get("/api/nfse/status", headers=chave)).status_code == 200
+    r = await client.get("/api/companies/grid", headers=chave_empresas)
+    assert r.status_code == 401 and r.json()["detail"]["code"] == "empresas_locked"
+    monkeypatch.setattr(senha_extra.time, "time", lambda: agora + 29 * 60)
+    assert (await client.get("/api/nfse/status", headers=chave)).status_code == 200
+    # Valuation também continua com 15.
+    _, ttl = senha_extra.fazer_token("valuation")
+    assert ttl == 900
 
 
 @pytest.mark.asyncio

@@ -1502,3 +1502,459 @@ def test_tomador_no_estilo_da_nfeio_e_endereco_do_xml():
     assert end["cep"] == "01506000" and end["cmun_ibge"] == "3550308"
     assert contas_bling.endereco_do_emitente(b"<nada/>") == {}
     assert contas_bling.endereco_do_emitente(b"nao e xml") == {}
+
+
+# --- e-mail: nada sai sozinho; o envio manual é do DaVinci (30/09) -----------------------
+# Eduardo (30/09): o tomador só recebe a nota quando alguém manda. O e-mail do
+# tomador não vai mais à NFE.io (com ele a NFE.io avisa sozinha na emissão e no
+# cancelamento) e o "Enviar por e-mail" sai pelo Mailjet do DaVinci. Com
+# assert_all_mocked, qualquer PUT /sendemail derrubaria o teste.
+
+PDF_FALSO = b"%PDF-1.4 nota falsa"
+XML_GUARDADO = b"<Nfse><Numero>2</Numero></Nfse>"
+
+
+class _Carteiro:
+    """No lugar do Mailjet: guarda o que seria enviado (ou falha como ele)."""
+
+    name = "falso"
+
+    def __init__(self, falha: Exception | None = None):
+        self.enviados: list[dict] = []
+        self.falha = falha
+
+    async def send(self, **kw) -> None:
+        if self.falha is not None:
+            raise self.falha
+        self.enviados.append(kw)
+
+
+@pytest.fixture
+def carteiro(monkeypatch) -> _Carteiro:
+    from app.services import email as email_svc
+
+    c = _Carteiro()
+    monkeypatch.setattr(email_svc, "get_email_sender", lambda: c)
+    return c
+
+
+async def _nota_no_banco(
+    db: AsyncSession,
+    company_id: uuid.UUID,
+    *,
+    status: str = "emitida",
+    n_nfse: str | None = "2",
+    nfeio_id: str | None = NOTA_ID,
+    xml: bytes | None = XML_GUARDADO,
+    ambiente: str = "Development",
+    cid: str | None = CID,
+    tomador_email: str | None = None,
+    tomador_nome: str = "TOMADOR LTDA",
+    competencia: date = date(2026, 9, 1),
+) -> NfseEmissao:
+    """Nota já emitida (sem passar pela NFE.io), com o tomador de fora."""
+    import base64
+
+    from app.models.nfse import NfseTomador
+
+    t = NfseTomador(tipo="externo", documento=CNPJ_TOMA, nome=tomador_nome, email=tomador_email)
+    db.add(t)
+    await db.flush()
+    prestador = {"nome": "EMPRESA TESTE LTDA", "cnpj": CNPJ_PREST}
+    if cid:
+        prestador["nfeio_company_id"] = cid
+    e = NfseEmissao(
+        company_id=company_id,
+        tomador_id=t.id,
+        competencia=competencia,
+        status=status,
+        descricao="Intermediação 09/2026",
+        valor_servico=Decimal("1500.00"),
+        nfeio_id=nfeio_id,
+        nfeio_ambiente=ambiente,
+        n_nfse=n_nfse,
+        snapshot={
+            "prestador": prestador,
+            "tomador": {"nome": tomador_nome, "documento": CNPJ_TOMA, "tipo": "externo"},
+        },
+        nfse_xml_b64=base64.b64encode(xml).decode() if xml else None,
+    )
+    db.add(e)
+    await db.commit()
+    return e
+
+
+def _rota_pdf(api: respx.MockRouter, nota_id: str = NOTA_ID, cid: str = CID) -> respx.Route:
+    return api.get(
+        path=f"/v3/companies/{cid}/serviceinvoices/{nota_id}/pdf", host="api.nfe.io"
+    ).mock(
+        return_value=httpx.Response(
+            200, content=PDF_FALSO, headers={"content-type": "application/pdf"}
+        )
+    )
+
+
+@pytest.mark.asyncio
+async def test_email_do_tomador_nunca_vai_para_a_nfeio(
+    client: AsyncClient,
+    db: AsyncSession,
+    operador: User,
+    cenario: dict,
+    auth_as: Callable[[User | None], None],
+):
+    """Tomador COM e-mail: nem a prévia, nem o POST, nem o reenvio levam o
+    e-mail — senão a NFE.io manda a nota sozinha ao tomador."""
+    auth_as(operador)
+    r = await client.post(
+        "/api/nfse/tomadores",
+        json={
+            "tipo": "externo",
+            "documento": CNPJ_TOMA,
+            "nome": "TOMADOR LTDA",
+            "email": "fin@tomador.com.br",
+        },
+    )
+    assert r.status_code == 201, r.text
+    item = {
+        "company_id": str(cenario["prest"]),
+        "tomador_id": r.json()["id"],
+        "descricao": "Intermediação",
+        "valor": "100.00",
+    }
+    enviados: list[dict] = []
+
+    def _captura(status: int):
+        def _f(request: httpx.Request) -> httpx.Response:
+            enviados.append(json.loads(request.content))
+            if status == 400:
+                return httpx.Response(400, json={"message": "dados inválidos"})
+            return _aceita(request)
+
+        return _f
+
+    with respx.mock(assert_all_mocked=True, assert_all_called=False) as api:
+        rotas = _rotas(api)
+        prev = (
+            await client.post(
+                "/api/nfse/previa", json={"competencia": "2026-09-01", "itens": [item]}
+            )
+        ).json()["itens"][0]
+        assert prev["problemas"] == [], prev
+        assert "email" not in prev["payload"]["borrower"]
+        rotas["post"].mock(side_effect=_captura(400))
+        e = (
+            await client.post("/api/nfse/emitir", json={"competencia": "2026-09-01", "item": item})
+        ).json()
+        assert e["status"] == "rejeitada"
+        # O reenvio remonta o tomador: também sem e-mail.
+        rotas["external"].mock(return_value=httpx.Response(200, json={"serviceInvoices": []}))
+        rotas["post"].mock(side_effect=_captura(202))
+        r = await client.post(f"/api/nfse/emissoes/{e['id']}/reenviar")
+        assert r.status_code == 200, r.text
+    assert len(enviados) == 2
+    for corpo in enviados:
+        assert "email" not in corpo["borrower"], corpo["borrower"]
+        assert "fin@tomador.com.br" not in json.dumps(corpo)
+
+
+@pytest.mark.asyncio
+async def test_email_mal_digitado_no_tomador_nao_trava_a_emissao(
+    client: AsyncClient,
+    db: AsyncSession,
+    operador: User,
+    cenario: dict,
+    auth_as: Callable[[User | None], None],
+):
+    auth_as(operador)
+    r = await client.post(
+        "/api/nfse/tomadores",
+        json={"tipo": "externo", "documento": CNPJ_TOMA, "nome": "TOMADOR LTDA", "email": "fin"},
+    )
+    item = {
+        "company_id": str(cenario["prest"]),
+        "tomador_id": r.json()["id"],
+        "descricao": "Intermediação",
+        "valor": "100.00",
+    }
+    with respx.mock(assert_all_mocked=True, assert_all_called=False) as api:
+        _rotas(api)
+        prev = (
+            await client.post(
+                "/api/nfse/previa", json={"competencia": "2026-09-01", "itens": [item]}
+            )
+        ).json()["itens"][0]
+    assert prev["problemas"] == [] and prev["payload"] is not None
+    assert not any("e-mail" in p for p in prev["problemas"])
+
+
+@pytest.mark.asyncio
+async def test_enviar_email_manual_anexa_pdf_e_xml(
+    client: AsyncClient,
+    db: AsyncSession,
+    operador: User,
+    cenario: dict,
+    auth_as: Callable[[User | None], None],
+    carteiro: _Carteiro,
+):
+    auth_as(operador)
+    e = await _nota_no_banco(db, cenario["prest"], tomador_email="fin@tomador.com.br")
+    with respx.mock(assert_all_mocked=True, assert_all_called=False) as api:
+        rotas = _rotas(api)
+        pdf = _rota_pdf(api)
+        r = await client.post(
+            f"/api/nfse/emissoes/{e.id}/enviar-email",
+            json={"para": ["fin@tomador.com.br", " Outro@Tomador.com.br "]},
+        )
+        assert r.status_code == 200, r.text
+        assert pdf.call_count == 1
+        assert not rotas["xml"].called  # o XML sai do banco
+    assert r.json() == {"ok": True, "para": ["fin@tomador.com.br", "Outro@tomador.com.br"]}
+    assert [m["to"] for m in carteiro.enviados] == ["fin@tomador.com.br", "Outro@tomador.com.br"]
+    m = carteiro.enviados[0]
+    # Empresa em TESTE na NFE.io: o assunto avisa (nota sem valor fiscal).
+    assert m["subject"].startswith("[TESTE, sem valor fiscal] NFS-e nº 2")
+    assert "EMPRESA TESTE LTDA" in m["subject"] and "09/2026" in m["subject"]
+    assert m["from_name"] == "EMPRESA TESTE LTDA"
+    assert [(nome, mime) for nome, mime, _ in m["attachments"]] == [
+        ("NFSe_teste_2.pdf", "application/pdf"),
+        ("NFSe_teste_2.xml", "application/xml"),
+    ]
+    assert m["attachments"][0][2] == PDF_FALSO and m["attachments"][1][2] == XML_GUARDADO
+    assert "sem valor fiscal" in m["text"] and "R$ 1.500,00" in m["text"]
+    # Nenhuma ida à NFE.io virou "enviar_email"; só o PDF ficou registrado.
+    ops = [c.operacao for c in (await db.execute(select(NfseChamada))).scalars()]
+    assert ops == ["pdf"]
+
+
+@pytest.mark.asyncio
+async def test_enviar_email_guarda_no_tomador_so_quando_pedido(
+    client: AsyncClient,
+    db: AsyncSession,
+    operador: User,
+    cenario: dict,
+    auth_as: Callable[[User | None], None],
+    carteiro: _Carteiro,
+):
+    from app.models.nfse import NfseTomador
+
+    auth_as(operador)
+    e = await _nota_no_banco(db, cenario["prest"])  # tomador sem e-mail
+    with respx.mock(assert_all_mocked=True, assert_all_called=False) as api:
+        _rotas(api)
+        _rota_pdf(api)
+        r = await client.post(
+            f"/api/nfse/emissoes/{e.id}/enviar-email", json={"para": ["a@tomador.com.br"]}
+        )
+        assert r.status_code == 200, r.text
+        t = await db.get(NfseTomador, e.tomador_id)
+        await db.refresh(t)
+        assert t.email is None  # não pediu pra guardar
+        r = await client.post(
+            f"/api/nfse/emissoes/{e.id}/enviar-email",
+            json={"para": ["a@tomador.com.br", "b@tomador.com.br"], "salvar_no_tomador": True},
+        )
+        assert r.status_code == 200, r.text
+    await db.refresh(t)
+    assert t.email == "a@tomador.com.br, b@tomador.com.br"
+    assert len(carteiro.enviados) == 3
+
+
+@pytest.mark.asyncio
+async def test_enviar_email_valida_os_enderecos(
+    client: AsyncClient,
+    db: AsyncSession,
+    operador: User,
+    cenario: dict,
+    auth_as: Callable[[User | None], None],
+    carteiro: _Carteiro,
+):
+    auth_as(operador)
+    e = await _nota_no_banco(db, cenario["prest"])
+    url = f"/api/nfse/emissoes/{e.id}/enviar-email"
+    for para in ([], [" "], ["nao-e-email"], [f"x{i}@tomador.com.br" for i in range(6)]):
+        r = await client.post(url, json={"para": para})
+        assert r.status_code == 422, (para, r.text)
+    assert (await client.post(url, json={})).status_code == 422
+    assert carteiro.enviados == []
+
+
+@pytest.mark.asyncio
+async def test_enviar_email_so_de_nota_emitida(
+    client: AsyncClient,
+    db: AsyncSession,
+    operador: User,
+    cenario: dict,
+    auth_as: Callable[[User | None], None],
+    carteiro: _Carteiro,
+):
+    auth_as(operador)
+    for i, status in enumerate(("processando", "rejeitada", "cancelada", "cancelando")):
+        e = await _nota_no_banco(db, cenario["prest"], status=status, nfeio_id=f"{i:024x}")
+        r = await client.post(
+            f"/api/nfse/emissoes/{e.id}/enviar-email", json={"para": ["a@tomador.com.br"]}
+        )
+        assert r.status_code == 409, (status, r.text)
+        assert r.json()["detail"]["code"] == "sem_nota"
+    sem_id = await _nota_no_banco(db, cenario["prest"], nfeio_id=None)
+    r = await client.post(
+        f"/api/nfse/emissoes/{sem_id.id}/enviar-email", json={"para": ["a@tomador.com.br"]}
+    )
+    assert r.status_code == 409
+    assert carteiro.enviados == []
+
+
+@pytest.mark.asyncio
+async def test_enviar_email_falha_do_mailjet_vira_502(
+    client: AsyncClient,
+    db: AsyncSession,
+    operador: User,
+    cenario: dict,
+    auth_as: Callable[[User | None], None],
+    carteiro: _Carteiro,
+):
+    auth_as(operador)
+    e = await _nota_no_banco(db, cenario["prest"])
+    pedido = httpx.Request("POST", "https://api.mailjet.com/v3.1/send")
+    carteiro.falha = httpx.HTTPStatusError(
+        "401", request=pedido, response=httpx.Response(401, request=pedido)
+    )
+    with respx.mock(assert_all_mocked=True, assert_all_called=False) as api:
+        _rotas(api)
+        _rota_pdf(api)
+        r = await client.post(
+            f"/api/nfse/emissoes/{e.id}/enviar-email",
+            json={"para": ["a@tomador.com.br"], "salvar_no_tomador": True},
+        )
+    assert r.status_code == 502, r.text
+    assert r.json()["detail"]["code"] == "email_falhou"
+    assert "a@tomador.com.br" in r.json()["detail"]["mensagem"]
+    from app.models.nfse import NfseTomador
+
+    t = await db.get(NfseTomador, e.tomador_id)
+    await db.refresh(t)
+    assert t.email is None  # não saiu: não guarda
+
+
+@pytest.mark.asyncio
+async def test_enviar_email_responde_para_a_empresa_so_com_email_valido(
+    client: AsyncClient,
+    db: AsyncSession,
+    operador: User,
+    cenario: dict,
+    auth_as: Callable[[User | None], None],
+    carteiro: _Carteiro,
+):
+    """O e-mail da empresa não é conferido no cadastro: torto, o Mailjet recusaria
+    o envio inteiro. Sai sem o "responder para"; com vários, vale o 1º."""
+    auth_as(operador)
+    e = await _nota_no_banco(db, cenario["prest"])
+    url = f"/api/nfse/emissoes/{e.id}/enviar-email"
+    with respx.mock(assert_all_mocked=True, assert_all_called=False) as api:
+        _rotas(api)
+        _rota_pdf(api)
+        for email, esperado in (
+            ("financeiro", None),
+            (
+                "Fin@Empresa.com.br; outro@empresa.com.br",
+                ("Fin@empresa.com.br", "EMPRESA TESTE LTDA"),
+            ),
+            (None, None),
+        ):
+            await _fiscal(db, cenario, email=email)
+            r = await client.post(url, json={"para": ["a@tomador.com.br"]})
+            assert r.status_code == 200, (email, r.text)
+            assert carteiro.enviados[-1]["reply_to"] == esperado, email
+
+
+@pytest.mark.asyncio
+async def test_enviar_email_nfeio_lenta_nao_segura_a_tela(
+    client: AsyncClient,
+    db: AsyncSession,
+    operador: User,
+    cenario: dict,
+    auth_as: Callable[[User | None], None],
+    carteiro: _Carteiro,
+    monkeypatch,
+):
+    """O PDF do anexo tem prazo (como no lote): passou, 502 "a NFE.io não
+    respondeu" e nada é enviado — em vez de minutos com a tela esperando."""
+    import asyncio
+
+    auth_as(operador)
+    monkeypatch.setattr(svc, "PRAZO_ANEXO_S", 0.05)
+    e = await _nota_no_banco(db, cenario["prest"])
+
+    async def _trava(_request: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(5)
+        return httpx.Response(200, content=PDF_FALSO)
+
+    with respx.mock(assert_all_mocked=True, assert_all_called=False) as api:
+        _rotas(api)
+        api.get(path=f"/v3/companies/{CID}/serviceinvoices/{NOTA_ID}/pdf", host="api.nfe.io").mock(
+            side_effect=_trava
+        )
+        r = await client.post(
+            f"/api/nfse/emissoes/{e.id}/enviar-email", json={"para": ["a@tomador.com.br"]}
+        )
+    assert r.status_code == 502, r.text
+    assert r.json()["detail"]["code"] == "nfeio_sem_resposta"
+    assert carteiro.enviados == []
+    [chamada] = (await db.execute(select(NfseChamada))).scalars().all()
+    assert chamada.operacao == "pdf" and "prazo" in (chamada.erro or "")
+
+
+@pytest.mark.asyncio
+async def test_enviar_email_sem_mailjet_fora_do_localhost_503(
+    client: AsyncClient,
+    db: AsyncSession,
+    operador: User,
+    cenario: dict,
+    auth_as: Callable[[User | None], None],
+    monkeypatch,
+):
+    """Sem as chaves do Mailjet o "envio" é só uma linha no log: em produção a
+    tela diria "enviado" sem ter enviado nada. Recusa antes de ir à NFE.io."""
+    from app.services import email as email_svc
+
+    auth_as(operador)
+    e = await _nota_no_banco(db, cenario["prest"])
+    monkeypatch.setattr(email_svc, "get_email_sender", lambda: email_svc.ConsoleEmailSender())
+    monkeypatch.setattr(get_settings(), "env", "production")
+    with respx.mock(assert_all_mocked=True, assert_all_called=False) as api:
+        _rotas(api)
+        pdf = _rota_pdf(api)
+        r = await client.post(
+            f"/api/nfse/emissoes/{e.id}/enviar-email", json={"para": ["a@tomador.com.br"]}
+        )
+        assert r.status_code == 503, r.text
+        assert r.json()["detail"]["code"] == "email_nao_configurado"
+        assert not pdf.called
+        # No localhost (development) o Console vale: só registra no log.
+        monkeypatch.setattr(get_settings(), "env", "development")
+        r = await client.post(
+            f"/api/nfse/emissoes/{e.id}/enviar-email", json={"para": ["a@tomador.com.br"]}
+        )
+        assert r.status_code == 200, r.text
+
+
+@pytest.mark.asyncio
+async def test_enviar_email_exige_poder_editar(
+    client: AsyncClient,
+    db: AsyncSession,
+    make_user,
+    cenario: dict,
+    auth_as: Callable[[User | None], None],
+    carteiro: _Carteiro,
+):
+    e = await _nota_no_banco(db, cenario["prest"])
+    auth_as(await make_user(permissions={"emissao_servico": {"view": True}}))
+    r = await client.post(
+        f"/api/nfse/emissoes/{e.id}/enviar-email", json={"para": ["a@tomador.com.br"]}
+    )
+    assert r.status_code == 403
+    assert carteiro.enviados == []
+
+
+def test_cliente_da_nfeio_nao_tem_mais_o_sendemail():
+    """O PUT /sendemail manda para o e-mail gravado na nota (que não vai mais)."""
+    assert not hasattr(nfeio.ClienteNfeio, "enviar_email")

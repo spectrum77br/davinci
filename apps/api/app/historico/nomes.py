@@ -173,7 +173,13 @@ ACOES: dict[tuple[str, str], str] = {
     ("POST", "/api/nfse/emissoes/{emissao_id}/reenviar"): "reenviou nota fiscal de serviço (NFS-e)",
     ("POST", "/api/nfse/emissoes/{emissao_id}/conferir"): "atualizou nota de serviço da NFE.io",
     ("POST", "/api/nfse/emissoes/{emissao_id}/cancelar"): "cancelou nota fiscal de serviço (NFS-e)",
-    ("POST", "/api/nfse/emissoes/{emissao_id}/enviar-email"): "pediu o e-mail da nota de serviço",
+    # Desde 30/09 o e-mail sai pelo DaVinci (os endereços ficam no corpo do evento).
+    (
+        "POST",
+        "/api/nfse/emissoes/{emissao_id}/enviar-email",
+    ): "enviou a nota de serviço por e-mail (manual)",
+    ("POST", "/api/nfse/emissoes/lote/arquivos"): "baixou notas de serviço em lote (PDF/XML)",
+    ("POST", "/api/nfse/emissoes/lote/imprimir"): "imprimiu notas de serviço em lote",
     ("POST", "/api/nfse/prestadores/{company_id}/nfeio/ligar"): "ligou a empresa na NFE.io",
     ("POST", "/api/nfse/prestadores/{company_id}/nfeio/atualizar"): "atualizou a empresa da NFE.io",
     ("POST", "/api/nfse/nfeio/sincronizar"): "sincronizou as empresas com a NFE.io",
@@ -222,7 +228,7 @@ GET_QUE_GRAVA = re.compile(
 # Corpo nunca guardado (senha, código de login, segredo no caminho; e a
 # resposta ao comprador do Atendimento, que pode ter nome e endereço dele).
 SEM_CORPO = re.compile(
-    r"^/api/(auth/|pricing/mega/login|companies/unlock|financeiro/valuation/unlock"
+    r"^/api/(auth/|pricing/mega/login|companies/unlock|financeiro/valuation/unlock|nfse/unlock"
     r"|claude-mcp/|webhooks/|aprovar/|atendimento/(conversas|rascunhos|mensagens)/)"
     r"|/callback|/certificates/[^/]+/download$"
     # Proxy da empresa (26/09/2026): o corpo leva usuário/senha, e colar a

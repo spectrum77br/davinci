@@ -18,15 +18,21 @@ chave que ele mesmo entrega. PDF e XML (`router_arquivos`) aceitam a chave OU
 um link de 60 s só daquele arquivo, pedido com a chave em
 `POST /emissoes/{id}/link`: link direto do navegador não leva cabeçalho, e a
 aba do PDF precisa abrir com o nome do arquivo.
+
+Lote (30/09/2026): `POST /emissoes/lote/arquivos` (.zip de PDFs ou XMLs) e
+`POST /emissoes/lote/imprimir` (um PDF só) ficam no router trancado — a tela
+manda a chave no cabeçalho — e nunca terminam em /pdf ou /xml (essas são as
+do link de 60 s). E-mail da nota: sai pelo DaVinci, nunca mais pela NFE.io.
 """
 
 from __future__ import annotations
 
 import contextlib
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Annotated
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 import structlog
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
@@ -49,12 +55,15 @@ from app.schemas.companies import DesbloqueioIn, DesbloqueioOut
 from app.schemas.nfse import (
     AtualizarIn,
     CancelarIn,
+    EmailNotaIn,
     EmissaoOut,
     EmitirIn,
     FiscalIn,
     FiscalOut,
     ItemIn,
     LigarIn,
+    LoteArquivosIn,
+    LoteImprimirIn,
     ModeloIn,
     ModeloOut,
     MunicipioOut,
@@ -71,14 +80,13 @@ from app.services.nfse import contas_bling as svc_contas_bling
 from app.services.nfse import emissao as svc
 from app.services.nfse import empresas as svc_empresas
 from app.services.nfse import faturamento as svc_faturamento
+from app.services.nfse import lote_arquivos as svc_lote
 from app.services.nfse import municipios, nfeio, receita
 from app.services.nfse.ambiente import eh_teste, producao_liberada
 
 logger = structlog.get_logger()
 # A trava vale para o router inteiro: rota nova já nasce trancada.
-router = APIRouter(
-    prefix="/api/nfse", tags=["nfse"], dependencies=[Depends(require_nfse_unlock)]
-)
+router = APIRouter(prefix="/api/nfse", tags=["nfse"], dependencies=[Depends(require_nfse_unlock)])
 router_desbloqueio = APIRouter(prefix="/api/nfse", tags=["nfse"])
 # PDF e XML: trava própria (a chave OU o link de 60 s daquele arquivo).
 router_arquivos = APIRouter(prefix="/api/nfse", tags=["nfse"])
@@ -93,11 +101,13 @@ async def desbloquear_nfse(
     body: DesbloqueioIn, u: Annotated[User, Depends(_view)]
 ) -> DesbloqueioOut:
     """Confere a senha extra (a mesma de Empresas e do Valuation) e devolve uma
-    chave de 15 minutos só da Emissão de Serviço. Os erros somam com as outras
-    telas: 5 seguidos travam a pessoa por 15 minutos."""
+    chave de 30 minutos só da Emissão de Serviço (30/09/2026, Eduardo: "aumente
+    o tempo de acesso para 30 min"; Empresas e Valuation seguem com 15). Os
+    erros somam com as outras telas: 5 seguidos travam a pessoa por 15 minutos."""
     await senha_extra.conferir_senha(body.password, user_id=u.id, escopo="nfse")
     token, ttl = senha_extra.fazer_token("nfse")
     return DesbloqueioOut(token=token, expires_in=ttl)
+
 
 Sess = Annotated[AsyncSession, Depends(get_session)]
 
@@ -626,6 +636,67 @@ async def atualizar_emissoes(
     return {"emissoes": [(await _emissao_out(session, e)).model_dump(mode="json") for e in rows]}
 
 
+# --- lote: baixar e imprimir várias notas (30/09/2026) --------------------------------
+# Declaradas ANTES das /emissoes/{emissao_id}/…: "lote" não é id de nota.
+
+
+def _carimbo() -> str:
+    return datetime.now(ZoneInfo("America/Sao_Paulo")).strftime("%Y%m%d-%H%M")
+
+
+def _cabecalhos_do_lote(lote: svc_lote.Lote, disposicao: str) -> dict[str, str]:
+    """Quantas foram, quantas saíram e quais faltaram (ids separados por
+    vírgula; vazio = nenhuma): a tela avisa o nº e a empresa das que faltaram."""
+    return {
+        "Content-Disposition": disposicao,
+        "Cache-Control": "no-store",
+        "X-Nfse-Total": str(len(lote.itens)),
+        "X-Nfse-Ok": str(len(lote.prontos)),
+        "X-Nfse-Faltaram": ",".join(str(i.id) for i in lote.faltaram),
+        "Access-Control-Expose-Headers": (
+            "X-Nfse-Total, X-Nfse-Ok, X-Nfse-Faltaram, Content-Disposition"
+        ),
+    }
+
+
+@router.post("/emissoes/lote/arquivos")
+async def lote_arquivos(
+    body: LoteArquivosIn, session: Sess, _u: Annotated[User, Depends(_view)]
+) -> Response:
+    """Os PDFs (ou os XMLs) das notas marcadas num .zip: uma pasta por empresa
+    e, na raiz, o `_FALTARAM.txt` com as que não vieram e o motivo. Só entram
+    notas emitidas ou canceladas; o XML já guardado nem vai à NFE.io."""
+    try:
+        lote = await svc_lote.baixar_lote(session, body.ids, body.tipo)
+    except svc.NfseError as err:
+        raise _http(err) from err
+    nome = f"notas-de-servico_{body.tipo}_{_carimbo()}.zip"
+    return Response(
+        svc_lote.montar_zip(lote),
+        media_type="application/zip",
+        headers=_cabecalhos_do_lote(lote, f'attachment; filename="{nome}"'),
+    )
+
+
+@router.post("/emissoes/lote/imprimir")
+async def lote_imprimir(
+    body: LoteImprimirIn, session: Sess, _u: Annotated[User, Depends(_view)]
+) -> Response:
+    """Os PDFs das notas marcadas juntados num PDF só, na ordem em que vieram,
+    para imprimir de uma vez. PDF corrompido fica de fora (e conta em
+    X-Nfse-Faltaram) em vez de derrubar a impressão."""
+    try:
+        lote = await svc_lote.baixar_lote(session, body.ids, "pdf")
+        pdf = svc_lote.juntar_pdfs(lote)
+    except svc.NfseError as err:
+        raise _http(err) from err
+    return Response(
+        pdf,
+        media_type="application/pdf",
+        headers=_cabecalhos_do_lote(lote, f'inline; filename="notas-de-servico_{_carimbo()}.pdf"'),
+    )
+
+
 @router.post("/emissoes/{emissao_id}/reenviar", response_model=EmissaoOut)
 async def reenviar(
     emissao_id: UUID, session: Sess, user: Annotated[User, Depends(_edit)]
@@ -696,15 +767,19 @@ async def cancelar(
 
 @router.post("/emissoes/{emissao_id}/enviar-email")
 async def enviar_email(
-    emissao_id: UUID, session: Sess, _u: Annotated[User, Depends(_edit)]
+    emissao_id: UUID, body: EmailNotaIn, session: Sess, _u: Annotated[User, Depends(_edit)]
 ) -> dict:
-    """Pede à NFE.io pra mandar a nota por e-mail ao tomador."""
+    """Envio MANUAL da nota por e-mail (30/09/2026): o DaVinci manda o PDF e o
+    XML para os endereços digitados — nada sai automático na emissão, e a
+    NFE.io não manda mais nada ao tomador. Só nota emitida."""
     e = await _emissao(session, emissao_id)
     try:
-        await svc.enviar_email(session, e)
+        para = await svc.enviar_por_email(
+            session, e, body.para, salvar_no_tomador=body.salvar_no_tomador
+        )
     except svc.NfseError as err:
         raise _http(err) from err
-    return {"ok": True}
+    return {"ok": True, "para": para}
 
 
 @router.get("/emissoes", response_model=list[EmissaoOut])

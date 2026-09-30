@@ -3,7 +3,9 @@
 // um botão principal com texto + menu ⋯ com o resto. Chama sozinho
 // tela.conferir ("atualizar da NFE.io") / reenviar / cancelar / enviarEmail e
 // emite `atualizada` com o retorno.
-//   emitida        → PDF        · ⋯ ver detalhes, XML, reenviar por e-mail, cancelar
+// 30/09/2026: "Enviar por e-mail…" é o envio MANUAL pelo DaVinci (abre a janela
+// com o endereço); a NFE.io não manda mais nada ao tomador sozinha.
+//   emitida        → PDF        · ⋯ ver detalhes, XML, enviar por e-mail, cancelar
 //   cancelada      → PDF        · ⋯ ver detalhes, XML
 //   na prefeitura / sem resposta / enviando → atualizar · ⋯ ver detalhes
 //   cancelando     → atualizar cancelamento · ⋯ ver detalhes, XML
@@ -49,7 +51,7 @@ const itens = computed<MenuItem[]>(() => {
     lista.push({ id: 'xml', rotulo: 'Baixar XML da nota', icone: FileCode2 })
   }
   if (s === 'emitida' && tela.canEdit.value) {
-    lista.push({ id: 'email', rotulo: 'Reenviar por e-mail ao tomador', icone: Mail })
+    lista.push({ id: 'email', rotulo: 'Enviar por e-mail…', icone: Mail })
   }
   if (s === 'rejeitada' && tela.canEdit.value) {
     lista.push({ id: 'conferir', rotulo: 'Atualizar da NFE.io', icone: RefreshCw })

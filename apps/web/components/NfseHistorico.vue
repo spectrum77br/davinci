@@ -12,14 +12,20 @@
 // 29/09/2026 (motor NFE.io): o ambiente é de cada nota (a empresa estava em
 // Teste ou em Produção na NFE.io quando ela saiu). A lista traz as duas e o
 // filtro Teste × Produção é daqui; nota de teste ganha o selo "teste".
+//
+// 30/09/2026 (Eduardo: imprimir e baixar várias de uma vez): caixa de marcar
+// em cada nota que tem PDF/XML na NFE.io (emitida ou cancelada) e a barra
+// NfseHistoricoBarra no rodapé — imprimir (um PDF só), baixar os PDFs ou os
+// XMLs (.zip). Vale só o que está marcado E na tela: mudou o filtro, a nota
+// que sumiu sai da seleção. Clicar na caixa não abre o detalhe.
 import { computed, onActivated, onMounted, ref, watch } from 'vue'
 import {
   Ban, CheckCircle2, ChevronDown, FileText, FlaskConical, HelpCircle, Loader2, Search, SearchX, Send, ShieldAlert, X,
 } from 'lucide-vue-next'
 import { Button } from '~/components/ui/button'
 import {
-  erroApi, fmtBrl, fmtCompetencia, fmtDataHora, fmtPctOrigem, mesParaData, origemDaEmissao, plural, prestadorPorId,
-  STATUS_PARA_RESOLVER, tomadorDaEmissao, useNfseTela, type Emissao,
+  erroApi, fmtBrl, fmtCompetencia, fmtDataHora, fmtPctOrigem, MAX_LOTE_ARQUIVOS, mesParaData, origemDaEmissao, plural,
+  prestadorPorId, STATUS_PARA_RESOLVER, temArquivoNaNfeio, tomadorDaEmissao, useNfseTela, type Emissao,
   useNfseApi,
 } from '~/lib/nfse'
 
@@ -42,7 +48,7 @@ const LIMITE_SERVIDOR = 500
 const tela = useNfseTela()
 const route = useRoute()
 // Com a chave da senha extra (a página entrega): useApi() direto volta nfse_locked.
-const { api } = useNfseApi()
+const { api, imprimirLote, baixarLote } = useNfseApi()
 
 function grupoDaQuery(v: unknown): Grupo | null {
   return typeof v === 'string' && (GRUPOS as readonly string[]).includes(v) ? (v as Grupo) : null
@@ -301,6 +307,90 @@ const opcoesEmpresa = computed(() => {
 // Teste, o aviso vai uma vez só, no rodapé da tabela.
 const misturaAmbientes = computed(() => amb.value === 'todas')
 
+// --- Seleção (imprimir / baixar em lote) -------------------------------------------
+
+const selecionados = ref<Set<string>>(new Set())
+// A ação de lote em andamento (a barra gira o botão dela e espera).
+const acaoLote = ref<'imprimir' | 'pdf' | 'xml' | null>(null)
+
+// Só nota com PDF/XML na NFE.io: emitida ou cancelada (com o id de lá).
+const podeMarcar = temArquivoNaNfeio
+
+function motivoNaoMarca(l: Emissao): string | null {
+  if (podeMarcar(l)) return null
+  if (l.status === 'cancelando') return 'Cancelamento em andamento: o PDF muda quando a prefeitura confirmar.'
+  if (l.status === 'rejeitada') return 'Recusada: não virou nota, não tem PDF nem XML.'
+  if (l.status === 'emitida' || l.status === 'cancelada') return 'Esta nota ficou sem o registro da NFE.io: não tem PDF nem XML aqui.'
+  return 'Ainda não autorizada: o PDF e o XML saem quando a prefeitura autorizar.'
+}
+
+function alternar(l: Emissao) {
+  if (!podeMarcar(l) || acaoLote.value) return
+  const s = new Set(selecionados.value)
+  if (s.has(l.id)) s.delete(l.id)
+  else s.add(l.id)
+  selecionados.value = s
+}
+
+// Clique na célula da caixa (fora dela): marca/desmarca, sem abrir o detalhe.
+function cliqueCaixa(ev: MouseEvent, l: Emissao) {
+  if ((ev.target as HTMLElement | null)?.closest('input')) return
+  alternar(l)
+}
+
+const marcaveis = computed(() => visiveis.value.filter(podeMarcar))
+
+// Cabeçalho: todas / algumas / nenhuma das notas do filtro que dá para marcar.
+const marcacao = computed<'todas' | 'algumas' | 'nenhuma'>(() => {
+  const m = marcaveis.value
+  if (!m.length) return 'nenhuma'
+  const n = m.filter((l) => selecionados.value.has(l.id)).length
+  return n === 0 ? 'nenhuma' : n === m.length ? 'todas' : 'algumas'
+})
+
+// Marca todas as do filtro; se já estavam todas, desmarca.
+function marcarTodas() {
+  if (acaoLote.value) return
+  const m = marcaveis.value
+  const s = new Set(selecionados.value)
+  const todas = marcacao.value === 'todas'
+  for (const l of m) {
+    if (todas) s.delete(l.id)
+    else s.add(l.id)
+  }
+  selecionados.value = s
+}
+
+function limparSelecao() {
+  selecionados.value = new Set()
+}
+
+// Na ordem da tela: é a ordem das páginas no PDF de imprimir.
+const marcadas = computed(() => marcaveis.value.filter((l) => selecionados.value.has(l.id)))
+
+// A lista mudou (recarregou, filtro, busca): sai da seleção o que sumiu da tela
+// ou deixou de ter arquivo (ex.: foi para "cancelando").
+watch(marcaveis, (m) => {
+  if (!selecionados.value.size) return
+  const pode = new Set(m.map((l) => l.id))
+  const s = new Set([...selecionados.value].filter((id) => pode.has(id)))
+  if (s.size !== selecionados.value.size) selecionados.value = s
+})
+
+// Chamado direto do clique: imprimir abre a aba antes de esperar o servidor
+// (depois de um await o navegador bloquearia).
+async function acaoArquivos(acao: 'imprimir' | 'pdf' | 'xml') {
+  const notas = marcadas.value
+  if (acaoLote.value || !notas.length || notas.length > MAX_LOTE_ARQUIVOS) return
+  acaoLote.value = acao
+  try {
+    if (acao === 'imprimir') await imprimirLote(notas)
+    else await baixarLote(notas, acao)
+  } finally {
+    acaoLote.value = null
+  }
+}
+
 // --- Linha -----------------------------------------------------------------------
 
 function marca(l: Emissao): string {
@@ -461,6 +551,18 @@ function motivoRecusa(l: Emissao): string {
         <table class="w-full">
           <thead>
             <tr>
+              <th class="w-10">
+                <input
+                  type="checkbox"
+                  class="size-4 rounded align-middle accent-primary disabled:opacity-40 dark:[color-scheme:dark]"
+                  :checked="marcacao === 'todas'"
+                  :indeterminate="marcacao === 'algumas'"
+                  :disabled="!marcaveis.length || !!acaoLote"
+                  aria-label="marcar todas as notas do filtro"
+                  title="marcar todas as notas do filtro (emitidas e canceladas)"
+                  @change="marcarTodas"
+                />
+              </th>
               <th class="whitespace-nowrap">Nº</th>
               <th>Mês</th>
               <th>Empresa → tomador</th>
@@ -475,12 +577,33 @@ function motivoRecusa(l: Emissao): string {
               v-for="l in visiveis"
               :key="l.id"
               class="cursor-pointer transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+              :class="selecionados.has(l.id) && 'linha-marcada bg-primary/5'"
               tabindex="0"
               :aria-label="`abrir a nota ${l.n_nfse ? 'nº ' + l.n_nfse : 'ainda sem número'}`"
               @click="abrir(l)"
               @keydown.enter.self="abrir(l)"
             >
-              <td class="whitespace-nowrap" :class="marca(l)">
+              <!-- A caixa não abre o detalhe (a linha abre). -->
+              <td
+                class="w-10"
+                :class="[marca(l), (!podeMarcar(l) || acaoLote) && 'cursor-default']"
+                @click.stop="cliqueCaixa($event, l)"
+                @keydown.enter.stop
+              >
+                <NfseDica :texto="motivoNaoMarca(l)">
+                  <span class="inline-flex align-middle">
+                    <input
+                      type="checkbox"
+                      class="size-4 rounded accent-primary disabled:pointer-events-none disabled:opacity-40 dark:[color-scheme:dark]"
+                      :checked="selecionados.has(l.id)"
+                      :disabled="!podeMarcar(l) || !!acaoLote"
+                      :aria-label="`marcar a nota ${l.n_nfse ? 'nº ' + l.n_nfse : 'sem número'} de ${l.prestador_nome || 'empresa'}`"
+                      @change="alternar(l)"
+                    />
+                  </span>
+                </NfseDica>
+              </td>
+              <td class="whitespace-nowrap">
                 <div class="flex items-center gap-1.5">
                   <span v-if="l.n_nfse" class="font-medium tabular-nums">{{ l.n_nfse }}</span>
                   <span v-else class="text-muted-foreground">—</span>
@@ -551,5 +674,14 @@ function motivoRecusa(l: Emissao): string {
         </span>
       </div>
     </div>
+
+    <!-- Barra fixa: imprimir / baixar as marcadas -->
+    <NfseHistoricoBarra
+      :marcadas="marcadas"
+      :acao="acaoLote"
+      @imprimir="acaoArquivos('imprimir')"
+      @baixar="acaoArquivos"
+      @limpar="limparSelecao"
+    />
   </section>
 </template>

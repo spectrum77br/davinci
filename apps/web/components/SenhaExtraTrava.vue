@@ -2,10 +2,16 @@
 // Cartão de senha extra — o mesmo visual do Valuation. Recebe o objeto de
 // useSenhaExtra(). NÃO avisa a página que desbloqueou: ao dar certo o cartão
 // sai da tela e o Vue descartaria o aviso. A página observa trava.token.
+// `minutos` (30/09/2026): o tempo que a página diz que fica liberada — Empresas
+// e Valuation 15, Emissão de Serviço 30 (Eduardo: "aumente o tempo de acesso
+// para 30 min"). Quem conta de verdade é o servidor (`expires_in`).
 import { ref, onMounted } from 'vue'
 import { Loader2, Lock } from 'lucide-vue-next'
 
-const props = defineProps<{ titulo: string; trava: ReturnType<typeof useSenhaExtra> }>()
+const props = withDefaults(
+  defineProps<{ titulo: string; trava: ReturnType<typeof useSenhaExtra>; minutos?: number }>(),
+  { minutos: 15 },
+)
 const campo = ref<HTMLInputElement | null>(null)
 
 onMounted(() => campo.value?.focus())
@@ -26,7 +32,7 @@ async function enviar() {
         <h1 class="text-lg font-semibold">{{ titulo }}</h1>
       </div>
       <p class="text-xs text-muted-foreground">
-        Esta página exige uma senha adicional. O acesso fica liberado por 15 minutos nesta aba.
+        Esta página exige uma senha adicional. O acesso fica liberado por {{ minutos }} minutos nesta aba.
       </p>
       <div class="space-y-1">
         <label :for="`senha-${titulo}`" class="block text-xs font-medium">Senha</label>

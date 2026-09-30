@@ -2,7 +2,7 @@
 // Último minuto da senha extra (Emissão de Serviço, 30/09/2026): digitar a
 // senha de novo aqui troca a chave SEM passar pelo cadeado, então o que está
 // digitado na tela (valores do Emitir do mês, uma nota aberta) não se perde.
-// Ignorar o aviso: a página tranca no fim dos 15 minutos, como sempre.
+// Ignorar o aviso: a página tranca no fim dos 30 minutos, como sempre.
 // `emJanela`: a versão que vai dentro das janelas (gavetas e diálogos), que
 // prendem o foco — lá o aviso da página não recebe clique.
 import { computed, ref, useId } from 'vue'

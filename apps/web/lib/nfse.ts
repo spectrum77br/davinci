@@ -435,6 +435,7 @@ export interface NfseTela {
   atualizarEmissoes(ids: string[]): Promise<Emissao[] | null>
   reenviar(e: Emissao): Promise<Emissao | null>
   cancelar(e: Emissao): Promise<Emissao | null>
+  // 30/09: envio MANUAL pelo DaVinci (janela com o "Para" editável). true = enviado.
   enviarEmail(e: Emissao): Promise<boolean>
 }
 
@@ -456,6 +457,48 @@ export type NfseApi = {
   // Link direto (<a href>) não leva cabeçalho: PDF e XML descem com a chave.
   abrirPdf(emissaoId: string): Promise<void> // abre em outra aba
   baixarXml(emissaoId: string): Promise<void> // baixa o arquivo
+  // Várias notas de uma vez (30/09, Notas enviadas): o servidor junta os PDFs
+  // num só (imprimir) ou monta o .zip. Recebe as notas (e não só os ids) para
+  // o aviso dizer quais faltaram pelo nº e pela empresa. null = não saiu nada.
+  // Chame direto do clique: imprimir abre a aba antes de esperar o servidor.
+  imprimirLote(notas: NotaDoLote[]): Promise<ResultadoArquivos | null>
+  baixarLote(notas: NotaDoLote[], tipo: 'pdf' | 'xml'): Promise<ResultadoArquivos | null>
+}
+
+// O que o lote de arquivos precisa de cada nota.
+export type NotaDoLote = Pick<Emissao, 'id' | 'n_nfse' | 'prestador_nome'>
+
+// Cabeçalhos X-Nfse-Total / X-Nfse-Ok / X-Nfse-Faltaram da resposta do lote.
+export type ResultadoArquivos = { total: number; ok: number; faltaram: string[] }
+
+// Igual ao backend (services/nfse/lote_arquivos.py MAX_LOTE): notas por vez.
+export const MAX_LOTE_ARQUIVOS = 100
+
+// A nota tem PDF e XML na NFE.io: autorizada (ou já cancelada) e com o id de
+// lá. "Cancelando" fica de fora do lote: o PDF muda quando a prefeitura confirmar.
+export function temArquivoNaNfeio(e: Pick<Emissao, 'status' | 'nfeio_id'>): boolean {
+  return (e.status === 'emitida' || e.status === 'cancelada') && !!e.nfeio_id
+}
+
+// E-mail: a mesma regra do cadastro do tomador (NfseTomadoresSheet) e da janela
+// de envio manual. "a@x.com; b@y.com" → ['a@x.com', 'b@y.com'] (vírgula, ponto e
+// vírgula ou espaço separam; repetido sai uma vez só).
+// 30/09/2026: sem espaço, um @ só, sem ponto no começo ou no fim de cada lado
+// e sem ".." — o servidor (validate_email) recusa esses, e a pessoa só via o
+// erro depois de clicar em Enviar. Ainda é mais frouxa que a do servidor
+// (ex.: "x@empresa.local"): o que passar daqui volta embaixo do campo.
+export const EMAIL_VALIDO = /^(?!.*\.\.)[^\s@.](?:[^\s@]*[^\s@.])?@[^\s@.]+(?:\.[^\s@.]+)+$/
+
+export function listaDeEmails(texto: string | null | undefined): string[] {
+  const vistos = new Set<string>()
+  const out: string[] = []
+  for (const parte of (texto ?? '').split(/[,;\s]+/)) {
+    const e = parte.trim()
+    if (!e || vistos.has(e.toLowerCase())) continue
+    vistos.add(e.toLowerCase())
+    out.push(e)
+  }
+  return out
 }
 
 export const NFSE_API: InjectionKey<NfseApi> = Symbol('nfse-api')
@@ -478,6 +521,10 @@ export type NotaApi = { abrir(e: Emissao | string): Promise<void> }
 export type CancelarApi = {
   cancelar(e: Emissao): Promise<Emissao | null>
   ocupado(): boolean // pedido indo à NFE.io ou esperando a prefeitura (a senha que vence espera)
+}
+export type EmailApi = {
+  enviar(e: Emissao): Promise<boolean> // true = enviado
+  ocupado(): boolean // e-mail saindo (a senha que vence espera)
 }
 export type ModeloApi = { abrir(o?: AbrirModeloOpts): Promise<Modelo | null> }
 export type TomadorApi = { abrir(o?: AbrirTomadorOpts): Promise<Tomador | null> }
@@ -701,7 +748,10 @@ export const MENSAGENS_ERRO: Record<string, string> = {
   chave_nfeio: 'A chave de acesso da NFE.io não está configurada ou não vale. Fale com o administrador.',
   avulsa_incompleta: 'A nota avulsa precisa de empresa, tomador, descrição e valor.',
   sem_percentual: 'Falta a porcentagem: defina na nota fixa ou na empresa (Cadastros › Empresas).',
-  nfse_locked: 'A senha desta página venceu (15 minutos). Digite a senha de novo e tente outra vez.',
+  nfse_locked: 'A senha desta página venceu (30 minutos). Digite a senha de novo e tente outra vez.',
+  sem_arquivo: 'Nenhuma das notas marcadas tem PDF ou XML disponível na NFE.io.',
+  email_falhou: 'O serviço de e-mail não aceitou o envio. Tente de novo em alguns minutos.',
+  email_nao_configurado: 'O envio de e-mail não está configurado neste servidor. Fale com o administrador do DaVinci.',
 }
 
 // Pendência do backend (já em texto para ler) → onde se resolve. CNPJ se

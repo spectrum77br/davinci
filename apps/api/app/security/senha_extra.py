@@ -8,7 +8,8 @@ senha (`settings.valuation_password`), mas cada página tem o seu desbloqueio:
 abrir o Valuation não abre Empresas, e Empresas não abre a Emissão de Serviço.
 
 Como funciona
-- A pessoa digita a senha; se bater, recebe uma chave que vale 15 minutos.
+- A pessoa digita a senha; se bater, recebe uma chave que vale 15 minutos
+  (30 na Emissão de Serviço — ver `_ttl`).
 - A chave é `<ts>.<HMAC(jwt_secret, "<escopo>:<ts>")>`: não fica guardada em
   lugar nenhum do servidor, e uma chave do Valuation não serve para Empresas.
 - Toda rota protegida confere a chave no cabeçalho. Sem ela, o servidor
@@ -35,12 +36,22 @@ from typing import Annotated
 import structlog
 from fastapi import Header, HTTPException
 
-from app.config import get_settings
+from app.config import Settings, get_settings
 
 logger = structlog.get_logger()
 
 MAX_ERROS = 5
 JANELA_ERROS_SEGUNDOS = 15 * 60
+
+
+def _ttl(s: Settings, escopo: str) -> int:
+    """Validade da chave de cada página. 30/09/2026 (Eduardo: "aumente o tempo
+    de acesso para 30 min"): só a Emissão de Serviço passou a 30 minutos —
+    Empresas e Valuation continuam com 15. Quem confere (`token_valido`) usa o
+    mesmo prazo de quem fez a chave."""
+    if escopo == "nfse":
+        return s.nfse_unlock_ttl_seconds
+    return s.valuation_unlock_ttl_seconds
 
 
 def fazer_token(escopo: str) -> tuple[str, int]:
@@ -50,7 +61,7 @@ def fazer_token(escopo: str) -> tuple[str, int]:
     assinatura = hmac.new(
         s.jwt_secret.encode(), f"{escopo}:{ts}".encode(), hashlib.sha256
     ).hexdigest()
-    return f"{ts}.{assinatura}", s.valuation_unlock_ttl_seconds
+    return f"{ts}.{assinatura}", _ttl(s, escopo)
 
 
 def _ts_da_chave(chave: str) -> int | None:
@@ -71,7 +82,7 @@ def token_valido(token: str | None, escopo: str) -> bool:
         return False
     assinatura = token.split(".", 1)[1]
     s = get_settings()
-    if time.time() - ts > s.valuation_unlock_ttl_seconds:
+    if time.time() - ts > _ttl(s, escopo):
         return False
     esperada = hmac.new(
         s.jwt_secret.encode(), f"{escopo}:{ts}".encode(), hashlib.sha256

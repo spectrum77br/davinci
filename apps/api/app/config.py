@@ -49,6 +49,9 @@ class Settings(BaseSettings):
     # ficava escrito aqui — por isso deve ser trocado.
     valuation_password: str = ""
     valuation_unlock_ttl_seconds: int = 15 * 60
+    # Emissão de Serviço: a chave vale 30 min (30/09/2026, Eduardo: "aumente o
+    # tempo de acesso para 30 min"). Empresas e Valuation continuam nos 15 acima.
+    nfse_unlock_ttl_seconds: int = 30 * 60
     credentials_key: str = "dev-credentials-key-change-me"
     cookie_name: str = "davinci_session"
     cookie_domain: str = ""

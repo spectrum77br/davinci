@@ -3,13 +3,14 @@
 // por tela.abrirNota(e | id). De cima para baixo: o que aconteceu (com a ação
 // certa para a situação), resumo, arquivos, avisos da NFE.io, linha do tempo
 // (com os pedidos de cancelamento) e os detalhes técnicos fechados. Atualizar
-// da NFE.io, reenviar, cancelar e reenviar por e-mail passam pela tela
+// da NFE.io, reenviar, cancelar e enviar por e-mail passam pela tela
 // (confirmação e lote são as janelas de sempre) e a gaveta passa a mostrar a
 // nota que voltou.
 //
 // 29/09/2026 (motor NFE.io): saem série/nº e identificador da DPS, perfil de
 // assinatura e o XML enviado; entram o nº da nota, o código de verificação, o
-// IR retido e o "Reenviar por e-mail".
+// IR retido e o envio por e-mail. 30/09/2026: "Enviar por e-mail" é manual, pelo
+// DaVinci (janela com o endereço); a NFE.io não manda nada ao tomador sozinha.
 import { computed, ref } from 'vue'
 import {
   Activity, AlertTriangle, Ban, Building2, ChevronRight, Copy, FileCode2, FileDown, FlaskConical, History, Loader2, Mail,
@@ -565,7 +566,7 @@ const recibo = computed(() => {
           >
             <Loader2 v-if="acao === 'email'" class="mr-1.5 size-4 animate-spin" aria-hidden="true" />
             <Mail v-else class="mr-1.5 size-4" aria-hidden="true" />
-            Reenviar por e-mail
+            Enviar por e-mail
           </Button>
         </div>
         <p v-else class="text-sm text-muted-foreground">O PDF e o XML aparecem aqui quando a prefeitura autorizar a nota.</p>

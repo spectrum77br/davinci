@@ -14,7 +14,10 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import html
+import re
 import time
+import unicodedata
 import xml.etree.ElementTree as ET
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
@@ -24,10 +27,13 @@ from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any
 from uuid import UUID, uuid4
 
+import httpx
 import structlog
+from email_validator import EmailNotValidError, validate_email
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import get_settings
 from app.models import Company
 from app.models.nfse import (
     STATUS_EM_ANDAMENTO,
@@ -39,6 +45,7 @@ from app.models.nfse import (
     NfseModelo,
     NfseTomador,
 )
+from app.services import email as email_svc
 from app.services.nfse import empresas as E  # noqa: N812
 from app.services.nfse import municipios, nfeio
 from app.services.nfse import texto as T  # noqa: N812
@@ -452,18 +459,20 @@ def montar_borrower(
     documento: str,
     nome: str,
     *,
-    email: str | None = None,
     fone: str | None = None,
     endereco: dict | None = None,
 ) -> dict:
+    """O tomador como a NFE.io quer. O e-mail do tomador NUNCA vai (30/09/2026,
+    Eduardo: nada de envio automático): com ele a NFE.io avisa o tomador
+    sozinha na emissão e no cancelamento (notificação ligada de fábrica nas 25
+    empresas da conta). O e-mail fica só no cadastro, para o envio manual pelo
+    DaVinci (`enviar_por_email`)."""
     b: dict[str, Any] = {
         "type": "LegalEntity" if len(documento) == 14 else "NaturalPerson",
         "name": (nome or "").strip(),
         # v3: texto (aceita o CNPJ alfanumérico).
         "federalTaxNumber": documento,
     }
-    if (email or "").strip():
-        b["email"] = (email or "").strip()
     fone_d = T.so_digitos(fone)
     if 7 <= len(fone_d) <= 19:
         b["phoneNumber"] = fone_d
@@ -508,7 +517,7 @@ async def tomador_nota(session: AsyncSession, tomador_id: UUID) -> TomadorNota:
         t=t,
         documento=doc,
         nome=nome,
-        borrower=montar_borrower(doc, nome, email=t.email, fone=t.fone, endereco=end),
+        borrower=montar_borrower(doc, nome, fone=t.fone, endereco=end),
         com_endereco=end is not None,
     )
 
@@ -593,9 +602,10 @@ def problemas_payload(
     descricao: str,
     inf_comp: str | None,
     codigos: tuple[str | None, str | None, str | None],
-    borrower: dict,
 ) -> list[str]:
-    """O que a NFE.io recusaria com 400 e dá pra saber antes (vazio = pode ir)."""
+    """O que a NFE.io recusaria com 400 e dá pra saber antes (vazio = pode ir).
+    O e-mail do tomador saiu daqui em 30/09 (não vai mais à NFE.io): um e-mail
+    mal digitado no cadastro não trava mais a emissão."""
     p: list[str] = []
     if not T.documento_valido(documento):
         p.append("O CNPJ/CPF do tomador não é válido.")
@@ -618,9 +628,6 @@ def problemas_payload(
         p.append(E.PEND_SEM_CODIGO)
     if nbs and not (nbs.isdigit() and len(nbs) == 9):
         p.append("O código NBS tem 9 dígitos (ex.: 102010000).")
-    email = borrower.get("email")
-    if email and ("@" not in email or len(email) > 120):
-        p.append("O e-mail do tomador não parece válido.")
     return p
 
 
@@ -836,7 +843,6 @@ def montar(
         descricao=descricao,
         inf_comp=inf_comp,
         codigos=codigos,
-        borrower=tn.borrower,
     )
     probs = _com_problemas_do_valor(item, base_desc, inf_comp, probs)
     pend, avisos = E.pendencias_e_avisos(c, f, hoje=hoje)
@@ -1709,30 +1715,162 @@ async def cancelar(
     return e
 
 
-async def enviar_email(
-    session: AsyncSession, e: NfseEmissao, *, cli: nfeio.ClienteNfeio | None = None
-) -> None:
-    """Pede à NFE.io pra mandar a nota por e-mail ao tomador (PUT sendemail)."""
-    if e.status not in ("emitida", "cancelada") or not e.nfeio_id:
-        raise NfseError(409, "sem_nota", "Só nota emitida pode ser enviada por e-mail.")
-    if not pode_emitir(e.nfeio_ambiente):
-        raise NfseError(409, "producao_bloqueada", MSG_PRODUCAO_BLOQUEADA)
-    cid = await _cid(session, e)
-    if not cid:
-        raise NfseError(422, "nao_ligada", E.MSG_NAO_LIGADA)
+# --- envio manual por e-mail (30/09/2026) ------------------------------------------------
+# Eduardo (30/09): nada sai sozinho para o tomador. O e-mail do tomador não vai
+# mais à NFE.io (`montar_borrower`) e o "Enviar por e-mail" da tela sai pelo
+# próprio DaVinci (o mesmo Mailjet da Logística), com o PDF e o XML anexados.
+# O PUT /sendemail da NFE.io não serve: não aceita destinatário e manda só para
+# o e-mail gravado na nota — que agora vai vazio.
+
+MSG_EMAIL_SO_EMITIDA = "Só nota emitida pode ser enviada por e-mail."
+MSG_EMAIL_NAO_CONFIGURADO = (
+    "O envio de e-mail não está configurado neste servidor (faltam as chaves do Mailjet). "
+    "Nada foi enviado."
+)
+# Prazo de cada anexo buscado na NFE.io (o mesmo do lote): sem ele, com as
+# repetições do GET e o timeout de leitura de 75 s, uma NFE.io lenta segurava a
+# tela uns 4 a 6 minutos antes de mandar o e-mail.
+PRAZO_ANEXO_S = 40.0
+
+
+def slug_arquivo(v: str | None) -> str:
+    """Pedaço de nome de arquivo sem acento, só com letras, números, _ e -."""
+    txt = unicodedata.normalize("NFKD", v or "").encode("ascii", "ignore").decode()
+    return re.sub(r"[^A-Za-z0-9_-]+", "-", txt).strip("-_")[:40]
+
+
+def nome_do_anexo(e: NfseEmissao, empresa: str | None, ext: str) -> str:
+    """NFSe_<empresa>_<nº>.pdf: o nº da NFS-e é POR EMPRESA (ATV nº 4, Rocha nº 4)."""
+    return f"NFSe_{slug_arquivo(empresa) or 'empresa'}_{e.n_nfse or 'sem-numero'}.{ext}"
+
+
+def _responder_para(email: str | None, nome: str) -> tuple[str, str] | None:
+    """O "responder para" do e-mail: o 1º endereço do e-mail da empresa, se
+    for válido. O cadastro da empresa não confere o e-mail (FiscalIn só tira
+    os espaços), e um endereço torto no ReplyTo faz o Mailjet recusar o envio
+    inteiro: melhor mandar sem o "responder para" do que não mandar."""
+    primeiro = next((x for x in re.split(r"[,;\s]+", email or "") if x), "")
+    if not primeiro:
+        return None
+    try:
+        return validate_email(primeiro, check_deliverability=False).normalized, nome
+    except EmailNotValidError:
+        logger.warning("nfse_email_responder_para_invalido")
+        return None
+
+
+def _texto_do_email(
+    *, numero: str, razao: str, tomador: str, comp: str, valor: str, teste: bool
+) -> tuple[str, str]:
+    """(texto puro, HTML) curtos: quem recebe é o financeiro do tomador."""
+    linhas = [
+        "Olá,",
+        f"Segue a nota fiscal de serviço (NFS-e) nº {numero} emitida por {razao}"
+        + (f" para {tomador}." if tomador else "."),
+        f"Competência: {comp} · Valor do serviço: {valor}.",
+        "O PDF e o XML da nota estão anexados.",
+    ]
+    if teste:
+        linhas.append("ATENÇÃO: nota de TESTE, sem valor fiscal.")
+    linhas.append(f"Mensagem enviada pelo DaVinci em nome de {razao}.")
+    texto = "\n\n".join(linhas)
+    corpo = "".join(f"<p>{html.escape(x)}</p>" for x in linhas)
+    return texto, f'<div style="font-family:Arial,sans-serif;font-size:14px">{corpo}</div>'
+
+
+async def enviar_por_email(
+    session: AsyncSession,
+    e: NfseEmissao,
+    para: list[str],
+    *,
+    salvar_no_tomador: bool = False,
+    sender: email_svc.EmailSender | None = None,
+    cli: nfeio.ClienteNfeio | None = None,
+) -> list[str]:
+    """Manda o PDF e o XML da nota pelo DaVinci para os endereços digitados
+    (um e-mail por endereço). Só nota emitida (cancelada não vai). Com
+    `salvar_no_tomador`, os endereços viram o e-mail do cadastro do tomador.
+    Devolve para quem foi."""
+    if e.status != "emitida" or not e.nfeio_id:
+        raise NfseError(409, "sem_nota", MSG_EMAIL_SO_EMITIDA)
+    para = list(dict.fromkeys(x.strip() for x in para if (x or "").strip()))
+    if not para:
+        raise NfseError(422, "sem_destinatario", "Digite para quem mandar o e-mail.")
+    sender = sender or email_svc.get_email_sender()
+    # Sem as chaves do Mailjet o envio vira só uma linha no log: fora do
+    # localhost a tela diria "enviado" sem ter enviado nada.
+    if getattr(sender, "name", "") == "console" and get_settings().env != "development":
+        raise NfseError(503, "email_nao_configurado", MSG_EMAIL_NAO_CONFIGURADO)
+
+    # Os anexos (o XML costuma vir do banco: é guardado na hora da emissão).
     async with _cliente(cli) as cliente:
-        r = await cliente.enviar_email(cid, e.nfeio_id)
-    _log(session, r, e.company_id, e.id, e.nfeio_ambiente)
-    await session.commit()
-    if r.status in (401, 403):
-        raise NfseError(503, "chave_nfeio", nfeio.CHAVE_RECUSADA)
-    if not r.ok:
-        raise NfseError(
-            502,
-            "nfeio_email",
-            "A NFE.io não aceitou o pedido de e-mail agora: "
-            + (nfeio.texto_do_erro(r) or r.erro_rede or f"HTTP {r.status}"),
-        )
+        pdf, _ = await baixar(session, e, "pdf", cli=cliente, prazo=PRAZO_ANEXO_S)
+        xml, _ = await baixar(session, e, "xml", cli=cliente, prazo=PRAZO_ANEXO_S)
+    c = await session.get(Company, e.company_id)
+    f = await session.get(CompanyFiscal, e.company_id)
+    snap = e.snapshot or {}
+    razao = (snap.get("prestador") or {}).get("nome") or (c.razao_social if c else "") or ""
+    tomador = (snap.get("tomador") or {}).get("nome") or ""
+    numero = e.n_nfse or "sem número"
+    comp = f"{e.competencia.month:02d}/{e.competencia.year}"
+    teste = eh_teste(e.nfeio_ambiente)
+    assunto = f"NFS-e nº {numero} · {razao} · competência {comp}"
+    if teste:
+        assunto = f"[TESTE, sem valor fiscal] {assunto}"
+    texto, corpo_html = _texto_do_email(
+        numero=numero,
+        razao=razao,
+        tomador=tomador,
+        comp=comp,
+        valor=T.fmt_reais(e.valor_servico),
+        teste=teste,
+    )
+    empresa = c.apelido if c else None
+    anexos = [
+        (nome_do_anexo(e, empresa, "pdf"), "application/pdf", pdf),
+        (nome_do_anexo(e, empresa, "xml"), "application/xml", xml),
+    ]
+    # Resposta do tomador vai para o e-mail da empresa (se cadastrado e
+    # válido), não para o no-reply do DaVinci.
+    responder = _responder_para(f.email if f is not None else None, razao)
+
+    enviados: list[str] = []
+    for destino in para:
+        try:
+            await sender.send(
+                to=destino,
+                subject=assunto,
+                html=corpo_html,
+                text=texto,
+                from_name=razao or None,
+                reply_to=responder,
+                attachments=anexos,
+            )
+        except httpx.HTTPError as ex:
+            resposta = getattr(ex, "response", None)
+            logger.warning(
+                "nfse_email_falhou",
+                emissao=str(e.id),
+                http=getattr(resposta, "status_code", None),
+                erro=type(ex).__name__,
+            )
+            ja = f" Já tinha ido para: {', '.join(enviados)}." if enviados else ""
+            raise NfseError(
+                502,
+                "email_falhou",
+                f"O e-mail para {destino} não saiu: o serviço de e-mail recusou ou não "
+                f"respondeu. Tente de novo em instantes.{ja}",
+                enviados=enviados,
+            ) from ex
+        enviados.append(destino)
+    logger.info("nfse_email_enviado", emissao=str(e.id), destinos=len(enviados), teste=teste)
+
+    if salvar_no_tomador and e.tomador_id:
+        t = await session.get(NfseTomador, e.tomador_id)
+        if t is not None:
+            t.email = ", ".join(enviados)
+            await session.commit()
+    return enviados
 
 
 MSG_SEM_PDF = "A NFE.io ainda não gerou o PDF"
@@ -1745,8 +1883,11 @@ async def baixar(
     tipo: str,
     *,
     cli: nfeio.ClienteNfeio | None = None,
+    prazo: float | None = None,
 ) -> tuple[bytes, str]:
-    """PDF/XML da NFE.io. O XML da nota emitida fica guardado (nfse_xml_b64)."""
+    """PDF/XML da NFE.io. O XML da nota emitida fica guardado (nfse_xml_b64).
+    `prazo` (segundos) vale só para a ida à NFE.io — o commit fica de fora,
+    para o corte não pegar a gravação no meio. Estourou: 502 nfeio_sem_resposta."""
     sem = MSG_SEM_PDF if tipo == "pdf" else MSG_SEM_XML
     if tipo == "xml" and e.nfse_xml_b64:
         return base64.b64decode(e.nfse_xml_b64), "application/xml"
@@ -1755,10 +1896,29 @@ async def baixar(
     cid = await _cid(session, e)
     if not cid:
         raise NfseError(404, "sem_arquivo", sem)
-    async with _cliente(cli) as cliente:
-        arq = await (
-            cliente.pdf(cid, e.nfeio_id) if tipo == "pdf" else cliente.xml(cid, e.nfeio_id)
+    try:
+        async with _cliente(cli) as cliente:
+            arq = await asyncio.wait_for(
+                cliente.pdf(cid, e.nfeio_id) if tipo == "pdf" else cliente.xml(cid, e.nfeio_id),
+                prazo,
+            )
+    except TimeoutError as ex:
+        # Só o prazo corta assim: rede fora do ar já volta como Resposta sem status.
+        espera = prazo or 0.0
+        _log(
+            session,
+            nfeio.Resposta(
+                tipo,
+                None,
+                erro_rede=f"prazo esgotado ({espera:.0f} s)",
+                duracao_ms=int(espera * 1000),
+            ),
+            e.company_id,
+            e.id,
+            e.nfeio_ambiente,
         )
+        await session.commit()
+        raise NfseError(502, "nfeio_sem_resposta", E.MSG_SEM_RESPOSTA) from ex
     _log(session, arq.resposta, e.company_id, e.id, e.nfeio_ambiente)
     if arq.conteudo and tipo == "xml" and e.status == "emitida":
         e.nfse_xml_b64 = base64.b64encode(arq.conteudo).decode("ascii")

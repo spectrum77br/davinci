@@ -339,10 +339,9 @@ class ClienteNfeio:
         """DELETE: NUNCA repete. 200 (nota) ou 202 (WaitingSendCancel)."""
         return await self._uma("cancelar", "DELETE", self._si(cid, f"/{quote(nota_id, safe='')}"))
 
-    async def enviar_email(self, cid: str, nota_id: str) -> Resposta:
-        return await self._uma(
-            "enviar_email", "PUT", self._si(cid, f"/{quote(nota_id, safe='')}/sendemail")
-        )
+    # Sem `enviar_email` (PUT /sendemail) desde 30/09/2026: ele não aceita
+    # destinatário e manda para o e-mail gravado na nota, que não vai mais à
+    # NFE.io. O envio é do DaVinci (`emissao.enviar_por_email`).
 
     async def _baixar(self, operacao: str, url: str, accept: str) -> Arquivo:
         r = await self._get(operacao, url, headers={"Accept": accept})
