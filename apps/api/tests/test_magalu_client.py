@@ -289,6 +289,136 @@ async def test_update_stock_202_is_ok() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("branch", [None, "omitted"])
+@pytest.mark.parametrize("qty", [0, 42])
+async def test_update_stock_conflict_confirms_target_with_one_fresh_read(branch, qty) -> None:
+    client = MagaluClient(_creds())
+    client._channel_id = _CHANNEL
+    data = _stock_sub(quantity=qty)
+    if branch is None:
+        data["results"][0]["branch"] = None
+    data["results"].insert(0, _stock_sub(channel_id="another-channel", quantity=999)["results"][0])
+    data["results"].append({"type": "RESERVED", "quantity": 10, "channel": {"id": _CHANNEL}})
+    data["private_field"] = "must-not-be-copied"
+    with respx.mock(base_url=MAGALU_API_BASE) as router:
+        router.patch("/seller/v1/portfolios/stocks/b001-20").respond(
+            409, json={"message": "Stock already exists"}
+        )
+        router.get("/seller/v1/portfolios/stocks/b001-20").respond(200, json=data)
+        result = await client.update_stock(_link(stock=3), qty, force=True)
+        methods = [call.request.method for call in router.calls]
+
+    assert methods == ["PATCH", "GET"]
+    assert result.status == SyncStatus.OK
+    assert result.qty_before == 3
+    assert result.qty_after == qty
+    assert result.error_code is None
+    assert result.payload["http_status"] == 409
+    assert result.payload["stock_verification"] == {
+        "confirmed": True,
+        "target_quantity": qty,
+        "http_status": 200,
+        "reason": "target_confirmed",
+        "observed_quantity": qty,
+    }
+    assert "must-not-be-copied" not in json.dumps(result.payload)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("rows", "reason"),
+    [
+        (_stock_sub(quantity=30)["results"], "quantity_mismatch"),
+        (_stock_sub(channel_id="other-channel", quantity=42)["results"], "stock_not_unique"),
+        ([{"type": "RESERVED", "quantity": 42, "channel": {"id": _CHANNEL}}], "stock_not_unique"),
+        ([{**_stock_sub(quantity=42)["results"][0], "branch": {"id": "cd-1"}}], "stock_not_unique"),
+        ([{**_stock_sub(quantity=42)["results"][0], "branch": {}}], "stock_not_unique"),
+        (_stock_sub(quantity=42)["results"] * 2, "stock_not_unique"),
+        ([], "stock_not_unique"),
+        ([{"type": "AVAILABLE", "quantity": 42}], "stock_not_unique"),
+        ([_stock_sub(quantity=42)["results"][0], None], "invalid_response"),
+        (None, "invalid_response"),
+        ({}, "invalid_response"),
+        (_stock_sub(quantity="42")["results"], "invalid_quantity"),
+        (_stock_sub(quantity=42.0)["results"], "invalid_quantity"),
+        (_stock_sub(quantity=True)["results"], "invalid_quantity"),
+        (_stock_sub(quantity=None)["results"], "invalid_quantity"),
+    ],
+)
+async def test_update_stock_conflict_needs_unambiguous_matching_stock(rows, reason) -> None:
+    client = MagaluClient(_creds())
+    client._channel_id = _CHANNEL
+    with respx.mock(base_url=MAGALU_API_BASE) as router:
+        router.patch("/seller/v1/portfolios/stocks/b001-20").respond(
+            409, json={"message": "Stock already exists"}
+        )
+        router.get("/seller/v1/portfolios/stocks/b001-20").respond(200, json={"results": rows})
+        result = await client.update_stock(_link(stock=3), 42)
+        methods = [call.request.method for call in router.calls]
+
+    assert methods == ["PATCH", "GET"]
+    assert result.status == SyncStatus.RETRYABLE
+    assert result.qty_after is None
+    assert result.error_code == "magalu_patch_stock_status_409"
+    assert "Stock already exists" in result.error_detail
+    assert result.payload["stock_verification"]["confirmed"] is False
+    assert result.payload["stock_verification"]["reason"] == reason
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "read_result",
+    [
+        httpx.Response(404, text="sensitive-response"),
+        httpx.Response(500, text="sensitive-response"),
+        httpx.Response(200, text="invalid-json-sensitive-response"),
+        httpx.Response(200, json=[{"quantity": 42}]),
+        httpx.ReadTimeout("proxy-user:proxy-secret@proxy.example secret-token"),
+        RuntimeError("token-refresh-secret-response"),
+    ],
+)
+async def test_update_stock_conflict_keeps_failure_when_read_fails(read_result) -> None:
+    client = MagaluClient(_creds())
+    client._channel_id = _CHANNEL
+    with respx.mock(base_url=MAGALU_API_BASE) as router:
+        router.patch("/seller/v1/portfolios/stocks/b001-20").respond(409, text="Conflict")
+        get_route = router.get("/seller/v1/portfolios/stocks/b001-20")
+        if isinstance(read_result, Exception):
+            get_route.mock(side_effect=read_result)
+        else:
+            get_route.mock(return_value=read_result)
+        result = await client.update_stock(_link(stock=3), 42)
+
+    assert result.status == SyncStatus.RETRYABLE
+    assert result.error_code == "magalu_patch_stock_status_409"
+    assert result.error_detail == "Conflict"
+    assert result.qty_after is None
+    assert result.payload["stock_verification"]["confirmed"] is False
+    assert "secret" not in json.dumps(result.payload)
+    assert "sensitive" not in json.dumps(result.payload)
+
+
+@pytest.mark.asyncio
+async def test_update_stock_conflict_does_not_reuse_channel_discovery_stock() -> None:
+    client = MagaluClient(_creds())
+    with respx.mock(base_url=MAGALU_API_BASE) as router:
+        get_route = router.get("/seller/v1/portfolios/stocks/b001-20").mock(
+            side_effect=[
+                httpx.Response(200, json=_stock_sub(quantity=42)),
+                httpx.Response(200, json=_stock_sub(quantity=30)),
+            ]
+        )
+        router.patch("/seller/v1/portfolios/stocks/b001-20").respond(409, text="Conflict")
+        result = await client.update_stock(_link(stock=3), 42)
+        methods = [call.request.method for call in router.calls]
+
+    assert get_route.call_count == 2
+    assert methods == ["GET", "PATCH", "GET"]
+    assert result.status == SyncStatus.RETRYABLE
+    assert result.payload["stock_verification"]["observed_quantity"] == 30
+
+
+@pytest.mark.asyncio
 async def test_update_stock_discovers_channel_when_unset() -> None:
     """Sem canal em cache, faz o GET de descoberta e injeta o channel.id no PATCH."""
     client = MagaluClient(_creds())

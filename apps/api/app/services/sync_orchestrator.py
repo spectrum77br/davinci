@@ -97,6 +97,19 @@ def _status_to_link_status(s: SyncStatus) -> LinkSyncStatus:
     }[s]
 
 
+def _confirmed_bling_stock(result: SyncResult) -> bool:
+    """Only a successful source read in this pass can authorize a new zero.
+
+    A cached/skipped read or a response without stock is not confirmation,
+    even when the local product happens to have stock=0.
+    """
+    return (
+        result.status == SyncStatus.OK
+        and result.qty_after is not None
+        and (result.payload or {}).get("source") == "bling_refresh"
+    )
+
+
 class SyncOrchestrator:
     def __init__(
         self,
@@ -394,6 +407,7 @@ class SyncOrchestrator:
         link: ProductLink,
         *,
         skip_non_bling: bool = False,
+        bling_stock_confirmed: bool = False,
     ) -> SyncResult:
         store = await self._get_store(link.store_id)
         bling_store_id = store.bling_store_id if store is not None else None  # type: ignore[attr-defined]
@@ -472,7 +486,16 @@ class SyncOrchestrator:
                             else {}
                         )
                         result = await client.update_stock(  # type: ignore[union-attr]
-                            link, qty, bling_store_id=bling_store_id, force=self.force, **extra
+                            link, qty, bling_store_id=bling_store_id,
+                            # A real Bling sellout must reach Magalu even when
+                            # its cached link still has stock. Other platforms
+                            # and manual/webhook force retain their behavior.
+                            force=self.force or (
+                                link.platform == IntegrationPlatform.MAGALU
+                                and qty == 0
+                                and bling_stock_confirmed
+                            ),
+                            **extra,
                         )
                         if result.error_code == "sku_trocado":
                             result = await self._tratar_sku_trocado(
@@ -689,15 +712,25 @@ class SyncOrchestrator:
             bling_links = [l for l in links if l.platform == IntegrationPlatform.BLING]
             other_links = [l for l in links if l.platform != IntegrationPlatform.BLING]
             bling_failed = False
+            bling_stock_confirmed = bool(bling_links)
             for link in bling_links:
                 r = await self._process_link(product, link)
+                bling_stock_confirmed = bling_stock_confirmed and _confirmed_bling_stock(r)
                 if r.status in (SyncStatus.FATAL, SyncStatus.RETRYABLE):
                     bling_failed = True
                 processed += 1
                 if processed % HEARTBEAT_EVERY == 0:
                     await self._heartbeat(processed)
             for link in other_links:
-                await self._process_link(product, link, skip_non_bling=bling_failed)
+                await self._process_link(
+                    product, link,
+                    skip_non_bling=bling_failed or (
+                        link.platform == IntegrationPlatform.MAGALU
+                        and bool(bling_links)
+                        and not bling_stock_confirmed
+                    ),
+                    bling_stock_confirmed=bling_stock_confirmed,
+                )
                 processed += 1
                 if processed % HEARTBEAT_EVERY == 0:
                     await self._heartbeat(processed)
@@ -796,8 +829,12 @@ class SyncOrchestrator:
                             if l.platform != IntegrationPlatform.BLING
                         ]
                         bling_failed = False
+                        bling_stock_confirmed = bool(bling_links)
                         for link in bling_links:
                             r = await sub_orch._process_link(p, link)
+                            bling_stock_confirmed = (
+                                bling_stock_confirmed and _confirmed_bling_stock(r)
+                            )
                             if r.status in (
                                 SyncStatus.FATAL,
                                 SyncStatus.RETRYABLE,
@@ -805,7 +842,13 @@ class SyncOrchestrator:
                                 bling_failed = True
                         for link in other_links:
                             await sub_orch._process_link(
-                                p, link, skip_non_bling=bling_failed
+                                p, link,
+                                skip_non_bling=bling_failed or (
+                                    link.platform == IntegrationPlatform.MAGALU
+                                    and bool(bling_links)
+                                    and not bling_stock_confirmed
+                                ),
+                                bling_stock_confirmed=bling_stock_confirmed,
                             )
                         # Advance the shared job's processed counter once per
                         # product (relative bump, atomic across tasks) and let

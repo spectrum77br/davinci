@@ -22,9 +22,8 @@ from uuid import UUID
 
 import structlog
 from sqlalchemy import and_, func, select, update
-from sqlalchemy.ext.asyncio import AsyncSession
-
 from sqlalchemy import text as sa_text
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.models import (
@@ -37,6 +36,7 @@ from app.models import (
     Product,
 )
 from app.security.cipher import decrypt_json, encrypt_json
+from app.services.auto_link import _magalu_sku_key, _SkuIndex
 from app.services.marketplaces.magalu import MagaluClient
 from app.services.marketplaces.ml import MercadoLivreClient
 from app.services.marketplaces.shopee import ShopeeClient
@@ -225,13 +225,43 @@ async def _create_product_links_for_matched(session: AsyncSession) -> int:
     return r.rowcount or 0
 
 
+async def _link_magalu_by_sku(session: AsyncSession) -> int:
+    """Resolve o SKU cru pelo catálogo codificado, sem adivinhar '+' de kits."""
+    listings = (
+        await session.execute(
+            select(Listing).where(
+                Listing.platform == IntegrationPlatform.MAGALU,
+                Listing.product_id.is_(None),
+            )
+        )
+    ).scalars().all()
+    if not listings:
+        return 0
+    products = (await session.execute(select(Product))).scalars().all()
+    sku_index = _SkuIndex(products, normalize=_magalu_sku_key)
+    linked = 0
+    for listing in listings:
+        product, _reason = sku_index.resolve(listing.external_id)
+        if product is None:
+            continue
+        listing.product_id = product.id
+        listing.sku = product.sku
+        linked += 1
+    if linked:
+        # A promoção seguinte usa SQL textual, que não faz autoflush das
+        # alterações ORM. Os vínculos precisam ficar visíveis nesta transação.
+        await session.flush()
+    return linked
+
+
 async def _link_by_sku(session: AsyncSession) -> int:
     """Single-pass auto-link: set listings.product_id where sku matches.
 
     Uses a single UPDATE gated by an EXISTS so the rowcount only counts
     listings that actually got linked (otherwise listings with no matching
     product would be counted as updated too, even though `product_id` ends
-    up unchanged)."""
+    up unchanged). Magalu usa o índice de SKU codificado para preservar kits
+    e recusar colisões, como o adapter direto de auto_link."""
     matching_product_subq = (
         select(Product.id)
         .where(Product.sku == Listing.sku)
@@ -241,6 +271,7 @@ async def _link_by_sku(session: AsyncSession) -> int:
         update(Listing)
         .where(
             and_(
+                Listing.platform != IntegrationPlatform.MAGALU,
                 Listing.product_id.is_(None),
                 Listing.sku.is_not(None),
                 func.length(func.trim(Listing.sku)) > 0,
@@ -249,7 +280,7 @@ async def _link_by_sku(session: AsyncSession) -> int:
         )
         .values(product_id=matching_product_subq.scalar_subquery())
     )
-    return res.rowcount or 0
+    return (res.rowcount or 0) + await _link_magalu_by_sku(session)
 
 
 async def run_import_listings(

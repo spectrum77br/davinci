@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
@@ -135,6 +136,15 @@ def _norm_sku(raw: str | None) -> str:
     return " ".join((raw or "").split()).lower()
 
 
+def _magalu_sku_key(raw: str | None) -> str:
+    """Codifica o SKU do catálogo como a Magalu: ponto e '+' viram hífen.
+
+    A transformação inversa perde a diferença entre tamanho e componente de
+    kit. O índice resolve pelo SKU codificado e rejeita qualquer colisão.
+    """
+    return _norm_sku(raw).replace(".", "-").replace("+", "-")
+
+
 class _SkuIndex:
     """products.sku → Product, com colisão explícita em vez de sobrescrita.
 
@@ -144,17 +154,23 @@ class _SkuIndex:
     Aqui SKU ambíguo não linka: conta em `sku_ambiguo` e aparece no detail.
     """
 
-    def __init__(self, products: list[Product]):
+    def __init__(
+        self,
+        products: list[Product],
+        *,
+        normalize: Callable[[str | None], str] = _norm_sku,
+    ):
+        self._normalize = normalize
         self._by_sku: dict[str, list[Product]] = {}
         for p in products:
-            key = _norm_sku(p.sku)
+            key = self._normalize(p.sku)
             if key:
                 self._by_sku.setdefault(key, []).append(p)
         self.ambiguous_hits: dict[str, int] = {}
 
     def resolve(self, sku: str | None) -> tuple[Product | None, str]:
         """→ (product, motivo) com motivo ∈ {'match', 'not_found', 'ambiguo'}."""
-        key = _norm_sku(sku)
+        key = self._normalize(sku)
         candidates = self._by_sku.get(key)
         if not candidates:
             return None, "not_found"
@@ -558,7 +574,10 @@ async def _link_via_listings(
     SKU on ML). Left off for Shopee to keep that path's behavior unchanged.
     """
     products = (await session.execute(select(Product))).scalars().all()
-    sku_index = _SkuIndex(products)
+    sku_index = _SkuIndex(
+        products,
+        normalize=_magalu_sku_key if platform == IntegrationPlatform.MAGALU else _norm_sku,
+    )
 
     # Dedup key matches the DB unique constraint (uq_product_links_identity):
     # (user_id, platform, integration_id, external_id, COALESCE(variation_id, '')).
@@ -621,24 +640,32 @@ async def _link_via_listings(
             variation_id = (listing.get("variation_id") or "").strip() or None
             if not external_id:
                 continue
+            # Magalu usa o SKU cru como identidade. O campo `sku` do adapter
+            # não consegue reconstruir os '+' dos kits a partir dos hífens.
+            match_sku = external_id if platform == IntegrationPlatform.MAGALU else sku
             key = (external_id, variation_id or "")
             existing_link = existing_by_key.get(key)
             if existing_link is not None:
                 # O que o anúncio é HOJE: SKU e se morreu/voltou — mesmo quando
                 # o SKU novo não tem produto (fica visível como divergente).
-                if sku:
+                if sku and platform != IntegrationPlatform.MAGALU:
                     existing_link.external_sku = sku
                 efeito = _saude_pelo_status(existing_link, platform, listing.get("status"))
                 mortos += efeito == "morto"
                 revividos += efeito == "revivido"
-            if not sku:
+            if not match_sku:
                 sku_vazio += 1
                 continue
-            local, motivo = sku_index.resolve(sku)
+            local, motivo = sku_index.resolve(match_sku)
             if local is None:
                 if motivo == "not_found":
                     not_found += 1
                 continue
+            if platform == IntegrationPlatform.MAGALU:
+                # Guarde o SKU real do produto, incluindo os '+' do kit.
+                sku = local.sku
+                if existing_link is not None:
+                    existing_link.external_sku = sku
             if existing_link is not None:
                 if not repoint or existing_link.product_id == local.id:
                     already += 1
@@ -912,11 +939,9 @@ async def _link_dispatch(
             IntegrationPlatform.SHOPEE, repoint=True,
         )
     if platform == IntegrationPlatform.MAGALU:
-        # Magalu's listing SKU (com hífen) e o external_id andam juntos — o
-        # `list_listings` já devolve external_id=SKU-com-hífen e sku=SKU-com-ponto
-        # (canônico do Bling/produtos), então o match usa o ponto e o link
-        # guarda o hífen p/ o PATCH de estoque. repoint=True por uniformidade
-        # (na prática nunca dispara: mudar o SKU na Magalu troca o external_id).
+        # Compare o external_id cru ao catálogo codificado para Magalu; o
+        # SKU canônico de um kit contém '+' que não podem ser adivinhados
+        # pela conversão inversa dos hífens. O PATCH preserva o external_id.
         return await _link_via_listings(
             session, job_id, integ, _magalu_client_for(integ, session),
             IntegrationPlatform.MAGALU, repoint=True,

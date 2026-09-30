@@ -7,17 +7,15 @@ variation_id. Logo, para links Magalu:
   * `link.variation_id` == None;
   * stock/price dão PATCH em `/seller/v1/portfolios/{stocks|prices}/{sku}`.
 
-⚠️ Regra de SKU (Magalu NÃO aceita ponto no SKU, só hífen):
-O SKU canônico do sistema (Bling + todos os outros marketplaces) usa PONTO como
-separador — ex. `b001.20`. Na Magalu o mesmo produto vira `b001-20` (hífen). Como
-NUNCA existiu hífen real nos SKUs canônicos (o separador sempre foi o ponto), a
-conversão hífen→ponto é inequívoca. Por isso `list_listings` emite:
+Regra de SKU desta integração: pontos e '+' do catálogo viram hífens na
+Magalu. A conversão inversa é ambígua para kits e não recupera o SKU canônico.
+`list_listings` preserva:
   * `external_id = "b001-20"`  (SKU cru da Magalu — usado no PATCH e gravado em
     product_links.external_id);
-  * `sku        = "b001.20"`  (forma canônica — casa com `products.sku` nos DOIS
-    caminhos de vínculo: o SQL exato de `listings_import._link_by_sku` E o
-    `_norm_sku` de `auto_link`).
-Assim, ao vincular, o estoque do produto `b001.20` flui pro anúncio `b001-20`.
+  * `sku = "b001.20"` (normalização legada de hífens para pontos).
+O vínculo em `auto_link` e `listings_import` compara o external_id cru com um
+índice do catálogo codificado para Magalu. Só uma correspondência única permite
+vincular, preservando o SKU real do produto e os '+' dos kits.
 
 Credenciais (em `integrations.credentials`, cifradas):
     {
@@ -36,6 +34,7 @@ Semântica confirmada na doc oficial (developers.magalu.com, API "Produtos"):
   * PATCH stock: PATCH /seller/v1/portfolios/stocks/{sku}
                 body {"quantity": <int>, "type": "AVAILABLE",
                 "channel": {"id": <uuid>}} → 202 (async = OK)
+                409 só é OK após GET confirmar a quantidade no mesmo estoque.
   * PATCH price: PATCH /seller/v1/portfolios/prices/{sku}
                 body {"price": <cent>, "list_price": <cent>, "currency": "BRL",
                 "normalizer": 100, "channel": {"id": <uuid>}} → 202. Preços são
@@ -456,6 +455,19 @@ class MagaluClient:
                 qty_after=qty,
                 payload={"sku": sku, "http_status": r.status_code},
             )
+        if r.status_code == 409:
+            verification = await self._verify_stock_conflict(sku, channel_id, int(qty))
+            payload = {"sku": sku, "http_status": 409, "stock_verification": verification}
+            if verification.get("confirmed"):
+                return SyncResult(
+                    status=SyncStatus.OK,
+                    qty_before=qty_before,
+                    qty_after=qty,
+                    payload=payload,
+                )
+            result = _map_status_error(r, qty_before, "magalu_patch_stock_status")
+            result.payload = payload
+            return result
         if r.status_code == 404:
             return SyncResult(
                 status=SyncStatus.FATAL,
@@ -464,6 +476,52 @@ class MagaluClient:
                 error_detail=f"sku={sku}",
             )
         return _map_status_error(r, qty_before, "magalu_patch_stock_status")
+
+    async def _verify_stock_conflict(self, sku: str, channel_id: str, qty: int) -> dict:
+        """A conflict is successful only when a fresh read proves the target stock.
+
+        This client's PATCH omits branch, so only an unassigned/default stock
+        (branch absent or null) can confirm it. Never combine CDs or RESERVED
+        stock, and reject duplicate matching rows as ambiguous.
+        """
+        verification: dict[str, Any] = {"confirmed": False, "target_quantity": qty}
+        try:
+            response = await self._request(
+                "GET", f"/seller/v1/portfolios/stocks/{quote(sku, safe='')}"
+            )
+            verification["http_status"] = response.status_code
+            if response.status_code != 200:
+                verification["reason"] = "read_failed"
+                return verification
+            data = response.json()
+        except Exception as exc:  # noqa: BLE001 - preserve the original PATCH failure
+            # Exception text may contain proxy credentials or token refresh bodies.
+            verification.update(reason="read_failed", error_type=type(exc).__name__)
+            return verification
+        rows = data.get("results") if isinstance(data, dict) else None
+        if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+            verification["reason"] = "invalid_response"
+            return verification
+        matches = [
+            row for row in rows
+            if row.get("type") == "AVAILABLE"
+            and isinstance(row.get("channel"), dict)
+            and row["channel"].get("id") == channel_id
+            and row.get("branch") is None
+        ]
+        if len(matches) != 1:
+            verification.update(reason="stock_not_unique", matching_rows=len(matches))
+            return verification
+        observed = matches[0].get("quantity")
+        if type(observed) is not int:
+            verification["reason"] = "invalid_quantity"
+            return verification
+        verification.update(
+            confirmed=observed == qty,
+            reason="target_confirmed" if observed == qty else "quantity_mismatch",
+            observed_quantity=observed,
+        )
+        return verification
 
     async def update_price(
         self,
@@ -580,11 +638,10 @@ class MagaluClient:
 
 
 def _canonical_sku(raw: str) -> str:
-    """Converte o SKU cru da Magalu (hífen) na forma canônica do sistema (ponto).
+    """Normalização legada do SKU cru: hífens viram pontos.
 
-    A Magalu não aceita ponto no SKU, só hífen; e como o separador canônico
-    SEMPRE foi o ponto (nunca houve hífen real), trocar todo hífen por ponto é
-    inequívoco — é o que faz `b001-20` (Magalu) casar com `b001.20` (products).
+    Não recupera os '+' dos kits. Os vínculos usam o external_id cru e o
+    catálogo codificado para Magalu, recusando correspondências ambíguas.
     """
     return (raw or "").replace("-", ".")
 
@@ -621,8 +678,8 @@ def _first_image_url(item: dict) -> str | None:
 def _normalize_magalu_sku(item: dict) -> dict | None:
     """Um SKU do portfólio → dict normalizado no formato do `_upsert_listing`.
 
-    `external_id` fica com o SKU CRU (hífen — id do recurso na Magalu, usado no
-    PATCH); `sku` recebe a forma canônica (ponto) pra casar com `products.sku`.
+    `external_id` fica com o SKU CRU (id do recurso usado no PATCH); `sku`
+    recebe a normalização legada. O vínculo resolve o catálogo pelo ID cru.
     """
     if not isinstance(item, dict):
         return None
