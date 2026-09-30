@@ -625,6 +625,23 @@ class MercadoLivreClient:
                 error_detail="Cannot preserve every variation: missing, invalid or duplicate ID",
                 payload={"item_id": item_id},
             )
+        if link.variation_id and not variations:
+            # A removed variation must not become the remaining simple item.
+            # Manual sync includes dead links; falling through could repoint
+            # their SKU, write to a sibling and revive the obsolete link.
+            return SyncResult(
+                status=SyncStatus.REQUIRES_REVIEW,
+                qty_before=qty_before,
+                error_code="ml_variation_not_found",
+                error_detail=(
+                    f"variation_id={link.variation_id!r} no longer exists: "
+                    "the listing has no variations"
+                ),
+                payload={
+                    "item_id": item_id, "variation_id": link.variation_id,
+                    "variations_seen": 0,
+                },
+            )
         seller_sku = (link.external_sku or "").strip() or None
 
         if variations:

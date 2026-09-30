@@ -13,7 +13,9 @@ from __future__ import annotations
 import json
 import time
 import uuid
+from datetime import UTC, datetime
 from typing import Any
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -131,6 +133,114 @@ async def _make_setup(
 
 
 # ---------------------------------------------------------------- B1 (zero block)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("variations_field", [{}, {"variations": None}, {"variations": []}])
+@pytest.mark.parametrize("remote_sku", ["dg091.pi", "dg090.pi"])
+@pytest.mark.parametrize("qty", [0, 1])
+async def test_removed_variation_never_updates_remaining_simple_item(
+    variations_field: dict, remote_sku: str, qty: int,
+) -> None:
+    dead_since = datetime.now(UTC)
+    product_id = uuid.uuid4()
+    link = ProductLink(
+        product_id=product_id, external_id="MLB123", variation_id="111",
+        external_sku="dg091.pi", stock=77,
+        morto_desde=dead_since, morto_motivo="variação removida",
+    )
+    client = MercadoLivreClient(_ml_creds())
+    with respx.mock(base_url=ML_API_BASE, assert_all_called=False) as router:
+        router.get("/items/MLB123").mock(return_value=httpx.Response(200, json={
+            "id": "MLB123", "status": "paused", "sub_status": ["out_of_stock"],
+            "attributes": [{"id": "SELLER_SKU", "value_name": remote_sku}],
+            **variations_field,
+        }))
+        put = router.put("/items/MLB123").mock(return_value=httpx.Response(200, json={}))
+        result = await client.update_stock(link, qty, force=True, sku_esperado="dg091.pi")
+
+    assert not put.called
+    assert result.status == SyncStatus.REQUIRES_REVIEW
+    assert result.error_code == "ml_variation_not_found"
+    assert result.qty_after is None
+    assert "sku_atual" not in result.payload
+    assert link.product_id == product_id
+    assert link.variation_id == "111"
+    assert link.external_sku == "dg091.pi"
+    assert link.stock == 77
+    assert link.morto_desde == dead_since
+
+
+@pytest.mark.asyncio
+async def test_simple_item_without_variation_id_still_updates_stock() -> None:
+    link = ProductLink(external_id="MLB123", variation_id=None, stock=9)
+    client = MercadoLivreClient(_ml_creds())
+    with respx.mock(base_url=ML_API_BASE) as router:
+        router.get("/items/MLB123").mock(return_value=httpx.Response(200, json={
+            "id": "MLB123", "status": "paused", "sub_status": ["out_of_stock"],
+            "variations": [],
+            "attributes": [{"id": "SELLER_SKU", "value_name": "dg090.pi"}],
+        }))
+        put = router.put("/items/MLB123").mock(return_value=httpx.Response(200, json={}))
+        result = await client.update_stock(link, 0, force=True, sku_esperado="dg090.pi")
+
+    assert result.status == SyncStatus.OK
+    assert result.qty_after == 0
+    assert json.loads(put.calls.last.request.content) == {"available_quantity": 0}
+
+
+@pytest.mark.asyncio
+async def test_manual_sync_keeps_removed_variation_dead_and_on_original_product(
+    db: AsyncSession, user: User, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import sync_orchestrator
+
+    _, product, link = await _make_setup(db, user, link_stock=77)
+    product.sku = "dg091.pi"
+    link.external_sku = product.sku
+    link.variation_id = "111"
+    link.morto_desde = datetime.now(UTC)
+    link.morto_motivo = "variação removida"
+    db.add(Product(user_id=user.id, sku="dg090.pi", name="surviving sibling", stock=0))
+    await db.commit()
+    dead_since = link.morto_desde
+    original_product_id = product.id
+    client = MercadoLivreClient(_ml_creds())
+    monkeypatch.setattr(sync_orchestrator, "client_for", lambda *a, **kw: client)
+    monkeypatch.setattr(
+        sync_orchestrator.estoque_familia, "saldo_publicavel", AsyncMock(return_value=0),
+    )
+    monkeypatch.setattr(sync_orchestrator, "emit_alert", AsyncMock())
+
+    with respx.mock(base_url=ML_API_BASE, assert_all_called=False) as router:
+        router.get("/items/MLB123").mock(return_value=httpx.Response(200, json={
+            "id": "MLB123", "status": "paused", "sub_status": ["out_of_stock"],
+            "variations": [],
+            "attributes": [{"id": "SELLER_SKU", "value_name": "dg090.pi"}],
+        }))
+        put = router.put("/items/MLB123").mock(return_value=httpx.Response(200, json={}))
+        orch = sync_orchestrator.SyncOrchestrator(
+            db, user_id=user.id, force=True, incluir_mortos=True,
+        )
+        report = await orch.run([product], only_link_ids=[link.id])
+
+    await db.refresh(link)
+    logs = (
+        await db.execute(select(SyncLog).where(SyncLog.product_link_id == link.id))
+    ).scalars().all()
+    assert not put.called
+    assert report.requires_review == 1
+    assert report.ok == 0
+    assert link.product_id == original_product_id
+    assert link.variation_id == "111"
+    assert link.external_sku == "dg091.pi"
+    assert link.stock == 77
+    assert link.morto_desde == dead_since
+    assert link.morto_motivo == "variação removida"
+    assert link.last_sync_status == LinkSyncStatus.REQUIRES_REVIEW
+    assert len(logs) == 1
+    assert logs[0].error_code == "ml_variation_not_found"
+    assert logs[0].qty_after is None
 
 
 @pytest.mark.asyncio
