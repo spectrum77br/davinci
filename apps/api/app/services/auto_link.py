@@ -578,6 +578,7 @@ async def _link_via_listings(
         products,
         normalize=_magalu_sku_key if platform == IntegrationPlatform.MAGALU else _norm_sku,
     )
+    products_by_id = {product.id: product for product in products}
 
     # Dedup key matches the DB unique constraint (uq_product_links_identity):
     # (user_id, platform, integration_id, external_id, COALESCE(variation_id, '')).
@@ -621,6 +622,7 @@ async def _link_via_listings(
     repointed = 0
     mortos = 0
     revividos = 0
+    not_published = 0
     error: str | None = None
 
     async def _flush() -> None:
@@ -645,6 +647,26 @@ async def _link_via_listings(
             match_sku = external_id if platform == IntegrationPlatform.MAGALU else sku
             key = (external_id, variation_id or "")
             existing_link = existing_by_key.get(key)
+            if platform == IntegrationPlatform.MAGALU:
+                raw_status = str((listing.get("raw") or {}).get("status") or "").strip().upper()
+                if existing_link is None and (
+                    listing.get("status") != "active" or raw_status != "PUBLISHED"
+                ):
+                    # An unpublished predecessor must not be recreated after
+                    # its link was explicitly moved to a replacement listing.
+                    not_published += 1
+                    continue
+                linked_product = (
+                    products_by_id.get(existing_link.product_id)
+                    if existing_link is not None else None
+                )
+                if linked_product is not None and (
+                    _magalu_sku_key(external_id) != _magalu_sku_key(linked_product.sku)
+                ):
+                    # Existing explicit mappings outrank an inferred SKU match.
+                    # Do not infer aliases by stripping suffixes such as '-2'.
+                    already += 1
+                    continue
             if existing_link is not None:
                 # O que o anúncio é HOJE: SKU e se morreu/voltou — mesmo quando
                 # o SKU novo não tem produto (fica visível como divergente).
@@ -730,6 +752,7 @@ async def _link_via_listings(
         ),
         "mortos": mortos,
         "revividos": revividos,
+        "not_published": not_published,
     }
 
 

@@ -34,6 +34,7 @@ from app.models import (
     Listing,
     ListingStatus,
     Product,
+    ProductLink,
 )
 from app.security.cipher import decrypt_json, encrypt_json
 from app.services.auto_link import _magalu_sku_key, _SkuIndex
@@ -185,6 +186,12 @@ async def _create_product_links_for_matched(session: AsyncSession) -> int:
             FROM "{schema}".listings l
             JOIN "{schema}".integrations i ON i.id = l.integration_id
             WHERE l.product_id IS NOT NULL
+              -- Manual mappings can target any status; automatic promotion
+              -- must not recreate an unpublished Magalu predecessor.
+              AND (l.platform <> 'magalu' OR (
+                  l.status = 'active'
+                  AND UPPER(BTRIM(l.raw_data ->> 'status')) = 'PUBLISHED'
+              ))
               -- Só anúncio lido há pouco. A tabela `listings` parou em
               -- 19/05/2026: promover a foto velha RESSUSCITAVA vínculo que
               -- alguém tinha apagado (1.106 da Amazon voltaram em 03/07) e
@@ -232,6 +239,8 @@ async def _link_magalu_by_sku(session: AsyncSession) -> int:
             select(Listing).where(
                 Listing.platform == IntegrationPlatform.MAGALU,
                 Listing.product_id.is_(None),
+                Listing.status == ListingStatus.ACTIVE,
+                func.upper(func.btrim(Listing.raw_data["status"].astext)) == "PUBLISHED",
             )
         )
     ).scalars().all()
@@ -239,9 +248,23 @@ async def _link_magalu_by_sku(session: AsyncSession) -> int:
         return 0
     products = (await session.execute(select(Product))).scalars().all()
     sku_index = _SkuIndex(products, normalize=_magalu_sku_key)
+    products_by_id = {product.id: product for product in products}
+    # A manually corrected ProductLink is authoritative even if the remote
+    # SKU has an unrelated suffix, or a different product later uses that SKU.
+    existing = {
+        (link.integration_id, link.external_id): products_by_id.get(link.product_id)
+        for link in (await session.execute(
+            select(ProductLink).where(
+                ProductLink.platform == IntegrationPlatform.MAGALU,
+                ProductLink.variation_id.is_(None),
+            )
+        )).scalars().all()
+    }
     linked = 0
     for listing in listings:
-        product, _reason = sku_index.resolve(listing.external_id)
+        product = existing.get((listing.integration_id, listing.external_id))
+        if product is None:
+            product, _reason = sku_index.resolve(listing.external_id)
         if product is None:
             continue
         listing.product_id = product.id

@@ -111,7 +111,8 @@ async def test_magalu_adapter_creates_or_repairs_kit_link(monkeypatch, existing_
         ))
     stats, created = await _run_adapter(
         monkeypatch, [product],
-        [{"external_id": external, "sku": external.replace("-", "."), "status": "active"}],
+        [{"external_id": external, "sku": external.replace("-", "."),
+          "status": "active", "raw": {"status": "PUBLISHED"}}],
         existing,
     )
 
@@ -129,7 +130,8 @@ async def test_magalu_adapter_creates_or_repairs_kit_link(monkeypatch, existing_
 async def test_magalu_adapter_uses_raw_identity_even_without_normalized_sku(monkeypatch):
     product = _product("b009.8")
     stats, created = await _run_adapter(
-        monkeypatch, [product], [{"external_id": "b009-8", "sku": None}],
+        monkeypatch, [product], [{"external_id": "b009-8", "sku": None,
+                                 "status": "active", "raw": {"status": "PUBLISHED"}}],
     )
 
     assert stats["created"] == 1
@@ -149,7 +151,8 @@ async def test_magalu_adapter_does_not_link_or_repoint_collisions(monkeypatch, h
     )] if has_existing else []
     stats, created = await _run_adapter(
         monkeypatch, products,
-        [{"external_id": "b099-20-a075", "sku": "b099.20.a075"}], existing,
+        [{"external_id": "b099-20-a075", "sku": "b099.20.a075", "status": "active",
+          "raw": {"status": "PUBLISHED"}}], existing,
     )
 
     assert not created
@@ -163,11 +166,27 @@ async def test_magalu_adapter_does_not_link_or_repoint_collisions(monkeypatch, h
 @pytest.mark.asyncio
 async def test_magalu_adapter_does_not_guess_seller_suffix(monkeypatch):
     stats, created = await _run_adapter(
-        monkeypatch, [_product("a076")], [{"external_id": "a076-2", "sku": "a076.2"}],
+        monkeypatch, [_product("a076")],
+        [{"external_id": "a076-2", "sku": "a076.2", "status": "active",
+          "raw": {"status": "PUBLISHED"}}],
     )
 
     assert not created
     assert stats["not_found"] == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("raw_status", [None, "", "UNPUBLISHED", "BLOCKED", "UNDER_REVIEW"])
+async def test_magalu_creation_requires_explicit_published_status(monkeypatch, raw_status):
+    # The normalizer historically defaults missing status to active; that
+    # fallback must never count as evidence for creating a stock-sync link.
+    stats, created = await _run_adapter(
+        monkeypatch, [_product("a006")],
+        [{"external_id": "a006", "sku": "a006", "status": "active",
+          "raw": {"status": raw_status}}],
+    )
+    assert not created
+    assert stats["not_published"] == 1
 
 
 @pytest.mark.asyncio
@@ -198,7 +217,7 @@ async def test_listings_import_uses_same_unique_encoder_and_preserves_kit_sku():
     ]
     session = SimpleNamespace(
         execute=AsyncMock(side_effect=[
-            SimpleNamespace(rowcount=3), _rows(listings), _rows(products),
+            SimpleNamespace(rowcount=3), _rows(listings), _rows(products), _rows([]),
         ]),
         flush=AsyncMock(),
     )
