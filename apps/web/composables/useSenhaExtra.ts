@@ -13,11 +13,17 @@ import { onBeforeRouteLeave } from 'vue-router'
 //   Cadastros, Lojas, Valuation etc. não são);
 // - recarregar a página ou fechar a aba;
 // - vencer os 15 minutos, mesmo parado na tela.
+//
+// `podeTrancar` (Emissão de Serviço, 30/09/2026): quando os 15 min vencem no
+// meio de um trabalho que não pode ser cortado (notas saindo para a NFE.io),
+// a tela espera ele acabar para trancar — trancar desmontaria o assistente
+// com as notas no meio do caminho.
 export function useSenhaExtra(
   escopo: string,
   caminhoDesbloqueio: string,
   cabecalho: string,
   area: RegExp,
+  opcoes: { podeTrancar?: () => boolean } = {},
 ) {
   const { api } = useApi()
   // useState: a mesma chave para a lista e para a ficha (navegar entre elas
@@ -76,6 +82,18 @@ export function useSenhaExtra(
     vence.value = 0
   }
 
+  // Tranca assim que puder: na hora, ou quando o trabalho em andamento
+  // (`podeTrancar`) terminar — confere de novo a cada 2 s.
+  function trancarQuandoPuder() {
+    if (relogio) clearTimeout(relogio)
+    relogio = null
+    if (opcoes.podeTrancar && !opcoes.podeTrancar()) {
+      relogio = setTimeout(trancarQuandoPuder, 2000)
+      return
+    }
+    trancar()
+  }
+
   // Tranca na hora em que vence, mesmo com a pessoa parada na tela.
   let relogio: ReturnType<typeof setTimeout> | null = null
   if (!import.meta.server) {
@@ -83,7 +101,7 @@ export function useSenhaExtra(
       () => (token.value ? vence.value : 0),
       (quando) => {
         if (relogio) clearTimeout(relogio)
-        relogio = quando ? setTimeout(trancar, Math.max(0, quando - Date.now())) : null
+        relogio = quando ? setTimeout(trancarQuandoPuder, Math.max(0, quando - Date.now())) : null
       },
       { immediate: true },
     )
@@ -108,7 +126,9 @@ export function useSenhaExtra(
     return e?.data?.detail?.code === `${escopo}_locked`
   }
 
-  return { token, senha, erro, desbloqueando, iniciar, headers, desbloquear, trancar, eTravamento }
+  return {
+    token, senha, erro, desbloqueando, iniciar, headers, desbloquear, trancar, trancarQuandoPuder, eTravamento,
+  }
 }
 
 /** Texto em português para o erro do desbloqueio. Serve também ao Valuation,

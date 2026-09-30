@@ -27,11 +27,13 @@ import {
   erroApi, fmtDoc, fmtHora, fmtPct, pctPositivo, pendenciaTexto, plural, regimeTexto, situacaoCertificado,
   situacaoFiscalTexto, soDigitos, TOM_TEXTO, useNfseTela,
   type AmbienteNfeio, type ChecklistItem, type Prestador, type Sincronizacao,
+  useNfseApi,
 } from '~/lib/nfse'
 
 const tela = useNfseTela()
 const { prestadores, modelos, carregado, carregando, canEdit, isAdmin, podeAbrirCadastroEmpresa } = tela
-const { api } = useApi()
+// Com a chave da senha extra (a página entrega): useApi() direto volta nfse_locked.
+const { api } = useNfseApi()
 const toasts = useToasts()
 
 // Esqueleto na 1ª carga — inclusive no HTML do servidor, antes de a página

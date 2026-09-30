@@ -39,10 +39,12 @@ import {
   textoFaturamento, textoIr, TOM_TEXTO, useNfseTela,
   type AvulsaApi, type Emissao, type FaturamentoEmpresa, type ItemIn, type ItemPrevia, type OrigemPct,
   type ResultadoLote,
+  useNfseApi,
 } from '~/lib/nfse'
 
 const tela = useNfseTela()
-const { api } = useApi()
+// Com a chave da senha extra (a página entrega): useApi() direto volta nfse_locked.
+const { api } = useNfseApi()
 
 // Eduardo (30/09): "fixo = intermediação (sem mais detalhes), mas deixar opção de colocar".
 const DESCRICAO_PADRAO = 'Intermediação'

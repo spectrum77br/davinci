@@ -9,6 +9,12 @@ permissão, o "digite EMITIR" da tela e a trava de produção
 ENV=production e NFSE_PRODUCAO_LIBERADA=true.
 
 Nenhuma rota devolve a chave da NFE.io nem dado sensível da prefeitura.
+
+Senha extra (30/09/2026, Eduardo: "o mesmo esquema de senha do empresas"):
+TODAS as rotas deste router exigem a chave `X-Nfse-Token`
+(app/security/senha_extra.py), inclusive PDF e XML. A chave sai de
+`POST /api/nfse/unlock`, que fica num router à parte (`router_desbloqueio`)
+justamente por não poder exigir a chave que ele mesmo entrega.
 """
 
 from __future__ import annotations
@@ -36,6 +42,7 @@ from app.models.nfse import (
     NfseModelo,
     NfseTomador,
 )
+from app.schemas.companies import DesbloqueioIn, DesbloqueioOut
 from app.schemas.nfse import (
     AtualizarIn,
     CancelarIn,
@@ -60,14 +67,32 @@ from app.services.nfse import emissao as svc
 from app.services.nfse import empresas as svc_empresas
 from app.services.nfse import faturamento as svc_faturamento
 from app.services.nfse import municipios, nfeio, receita
+from app.security import senha_extra
+from app.security.senha_extra import require_nfse_unlock
 from app.services.nfse.ambiente import eh_teste, producao_liberada
 
 logger = structlog.get_logger()
-router = APIRouter(prefix="/api/nfse", tags=["nfse"])
+# A trava vale para o router inteiro: rota nova já nasce trancada.
+router = APIRouter(
+    prefix="/api/nfse", tags=["nfse"], dependencies=[Depends(require_nfse_unlock)]
+)
+router_desbloqueio = APIRouter(prefix="/api/nfse", tags=["nfse"])
 
 _view = require_permission("emissao_servico", "view")
 _edit = require_permission("emissao_servico", "edit")
 _delete = require_permission("emissao_servico", "delete")
+
+
+@router_desbloqueio.post("/unlock", response_model=DesbloqueioOut)
+async def desbloquear_nfse(
+    body: DesbloqueioIn, u: Annotated[User, Depends(_view)]
+) -> DesbloqueioOut:
+    """Confere a senha extra (a mesma de Empresas e do Valuation) e devolve uma
+    chave de 15 minutos só da Emissão de Serviço. Os erros somam com as outras
+    telas: 5 seguidos travam a pessoa por 15 minutos."""
+    await senha_extra.conferir_senha(body.password, user_id=u.id, escopo="nfse")
+    token, ttl = senha_extra.fazer_token("nfse")
+    return DesbloqueioOut(token=token, expires_in=ttl)
 
 Sess = Annotated[AsyncSession, Depends(get_session)]
 

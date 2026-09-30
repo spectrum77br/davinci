@@ -59,7 +59,10 @@ from app.deps.auth import (  # noqa: E402
 from app.main import app  # noqa: E402
 from app.historico import sql as historico_sql  # noqa: E402
 from app.models import Base, User, UserRole, UserStatus  # noqa: E402
-from app.security.senha_extra import require_empresas_unlock  # noqa: E402
+from app.security.senha_extra import (  # noqa: E402
+    require_empresas_unlock,
+    require_nfse_unlock,
+)
 
 
 @pytest_asyncio.fixture(scope="session", autouse=True)
@@ -512,6 +515,9 @@ def _override_as(user: User) -> None:
     # Senha extra da tela Empresas (25/09/2026): os testes de empresa já
     # autenticam aqui; a trava tem testes próprios, que tiram este desvio.
     app.dependency_overrides[require_empresas_unlock] = _liberado
+    # Idem para a Emissão de Serviço (30/09/2026): test_nfse_senha_extra.py
+    # tira este desvio e testa a trava de verdade.
+    app.dependency_overrides[require_nfse_unlock] = _liberado
 
 
 @pytest.fixture

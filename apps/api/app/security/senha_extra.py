@@ -2,9 +2,10 @@
 
 Nasceu no Valuation; em 25/09/2026 passou a valer também para a tela Empresas
 (Eduardo: "a mesma que tem em valuation, senha segura porque tem informações
-que muita gente não pode ver"). As duas usam a MESMA senha
-(`settings.valuation_password`), mas cada página tem o seu desbloqueio: abrir
-o Valuation não abre Empresas.
+que muita gente não pode ver") e em 30/09/2026 para Cadastros › Emissão de
+Serviço (Eduardo: "o mesmo esquema de senha do empresas"). Todas usam a MESMA
+senha (`settings.valuation_password`), mas cada página tem o seu desbloqueio:
+abrir o Valuation não abre Empresas, e Empresas não abre a Emissão de Serviço.
 
 Como funciona
 - A pessoa digita a senha; se bater, recebe uma chave que vale 15 minutos.
@@ -129,3 +130,13 @@ async def require_empresas_unlock(
     alteração — esconder a tela não bastaria."""
     if not token_valido(x_empresas_token, "empresas"):
         raise HTTPException(401, detail={"code": "empresas_locked"})
+
+
+async def require_nfse_unlock(
+    x_nfse_token: Annotated[str | None, Header(alias="X-Nfse-Token")] = None,
+) -> None:
+    """Trava da Emissão de Serviço (30/09/2026), por cima da permissão
+    `emissao_servico`: sem a chave o servidor não entrega notas, tomadores,
+    faturamento, PDF/XML nem emite, cancela ou altera nada."""
+    if not token_valido(x_nfse_token, "nfse"):
+        raise HTTPException(401, detail={"code": "nfse_locked"})

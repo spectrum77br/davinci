@@ -43,10 +43,12 @@ import {
   type ChecklistItem, type Emissao, type EstadoLinha, type FaturamentoEmpresa, type ItemIn, type ItemLote,
   type ItemPrevia, type Modelo,
   type OrigemPct, type SecaoEmpresa,
+  useNfseApi,
 } from '~/lib/nfse'
 
 const tela = useNfseTela()
-const { api } = useApi()
+// Com a chave da senha extra (a página entrega): useApi() direto volta nfse_locked.
+const { api, abrirPdf } = useNfseApi()
 const { mes, canEdit, canDelete, podeAbrirCadastroEmpresa } = tela
 
 const hoje = mesAtual()
@@ -907,9 +909,6 @@ function alternarExpandida(id: string) {
 
 // --- Ações da linha ----------------------------------------------------------------------
 
-function pdf(id: string): string {
-  return `/api/nfse/emissoes/${id}/pdf`
-}
 
 function corrigir(l: Linha) {
   const c = l.conserto
@@ -1511,13 +1510,10 @@ const girando = computed(() => carregandoLista.value || tela.carregando.value)
                           </Button>
                           <Button
                             v-if="l.estado === 'emitida' && l.idEmissao"
-                            as="a"
-                            :href="pdf(l.idEmissao)"
-                            target="_blank"
-                            rel="noopener"
                             size="sm"
                             variant="ghost"
                             class="h-8 px-2.5"
+                            @click="abrirPdf(l.idEmissao)"
                           >
                             <FileDown class="mr-1.5 size-4" aria-hidden="true" /> PDF
                           </Button>
@@ -1597,13 +1593,10 @@ const girando = computed(() => carregandoLista.value || tela.carregando.value)
                     </Button>
                     <Button
                       v-else-if="l.estado === 'emitida' && l.idEmissao"
-                      as="a"
-                      :href="pdf(l.idEmissao)"
-                      target="_blank"
-                      rel="noopener"
                       size="sm"
                       variant="ghost"
                       class="h-8 px-2.5"
+                      @click="abrirPdf(l.idEmissao)"
                     >
                       <FileDown class="mr-1.5 size-4" aria-hidden="true" /> PDF
                     </Button>

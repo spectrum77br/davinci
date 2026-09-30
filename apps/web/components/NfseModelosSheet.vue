@@ -28,6 +28,7 @@ import {
   mesAtual, mesParaData, modeloParaForm, paraDecimal, pctPositivo, pendenciaTexto, prestadorPorId, soDigitos,
   TOM_TEXTO, tomadorEstiloNfeio, tomadorNaNota, useNfseTela,
   type AbrirModeloOpts, type FaturamentoEmpresa, type Modelo, type ModeloApi, type ModeloForm, type OrigemPct,
+  useNfseApi,
 } from '~/lib/nfse'
 
 // Campos lado a lado: cada NfseCampo vira subgrade (rótulo, campo, dica)
@@ -93,7 +94,8 @@ const CAMPO_POR_CODIGO: Record<string, Campo> = {
 }
 
 const tela = useNfseTela()
-const { api } = useApi()
+// Com a chave da senha extra (a página entrega): useApi() direto volta nfse_locked.
+const { api } = useNfseApi()
 const toasts = useToasts()
 
 const mes = mesAtual()

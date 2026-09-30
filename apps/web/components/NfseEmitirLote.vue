@@ -34,10 +34,12 @@ import {
   origemDaEmissao, plural, prestadorPorId, problemasApi, resultadoDaEmissao, situacao, TEXTO_TESTE, textoIr, TOM_TEXTO,
   useNfseTela,
   type Emissao, type EstadoLote, type ItemLote, type LoteApi, type ResultadoLote, type SecaoEmpresa,
+  useNfseApi,
 } from '~/lib/nfse'
 
 const tela = useNfseTela()
-const { api } = useApi()
+// Com a chave da senha extra (a página entrega): useApi() direto volta nfse_locked.
+const { api, abrirPdf } = useNfseApi()
 const toasts = useToasts()
 
 type Passo = 'conferir' | 'emitindo' | 'aguardando' | 'fim'
@@ -532,6 +534,9 @@ async function comecar() {
   // Empresa que deu erro de ligação: as outras notas dela nem vão.
   const puladas = new Map<string, string>()
   let semChaveAgora: string | null = null
+  // A senha da página venceu no meio do envio: o servidor recusou ANTES de
+  // mandar à NFE.io, então esta e as próximas não saíram (nada duplica).
+  let semSenhaAgora: string | null = null
 
   for (let i = 0; i < lista.length; i++) {
     const it = lista[i]!
@@ -541,6 +546,10 @@ async function comecar() {
     }
     if (semChaveAgora) {
       naoEnviada(it, 'erro', semChaveAgora, { codigo: 'chave_nfeio' })
+      continue
+    }
+    if (semSenhaAgora) {
+      naoEnviada(it, 'erro', semSenhaAgora, { codigo: 'nfse_locked' })
       continue
     }
     const pulo = puladas.get(it.company_id)
@@ -559,6 +568,10 @@ async function comecar() {
       const c = codigoErro(err)
       if (c === 'ja_emitida') {
         naoEnviada(it, 'erro', 'Já existe nota desta nota fixa neste mês: confira em Notas enviadas.', { codigo: c })
+      } else if (c === 'nfse_locked') {
+        semSenhaAgora =
+          'Não enviada: a senha desta página venceu (15 minutos). Feche esta janela, digite a senha de novo e envie as que faltaram.'
+        naoEnviada(it, 'erro', semSenhaAgora, { codigo: c })
       } else if (c === 'chave_nfeio') {
         semChaveAgora = `Não enviada: ${erroApi(err)}`
         naoEnviada(it, 'erro', semChaveAgora, { codigo: c })
@@ -637,11 +650,23 @@ function corrigir(it: ItemLote, r: ResultadoLote) {
   if (f) tela.abrirEmpresa(it.company_id, f.foco)
 }
 
+// id da nota com PDF (o PDF desce com a chave da senha extra, não por link).
 function pdfDe(r: ResultadoLote): string | null {
-  return r.estado === 'emitida' && r.emissao ? `/api/nfse/emissoes/${r.emissao.id}/pdf` : null
+  return r.estado === 'emitida' && r.emissao ? r.emissao.id : null
 }
 
-const exposto: LoteApi = { emitir, ocupado: () => aberto.value && passo.value === 'emitindo' }
+function verPdf(r: ResultadoLote) {
+  const id = pdfDe(r)
+  if (id) void abrirPdf(id)
+}
+
+const exposto: LoteApi = {
+  emitir,
+  ocupado: () => aberto.value && passo.value === 'emitindo',
+  // Com resultado na tela (enviando, esperando a prefeitura ou no fim), a senha
+  // que vence espera a janela fechar para trancar a página.
+  emUso: () => aberto.value && passo.value !== 'conferir',
+}
 defineExpose(exposto)
 </script>
 
@@ -904,13 +929,10 @@ defineExpose(exposto)
           <div class="shrink-0 self-center">
             <Button
               v-if="pdfDe(resultadoDe(it))"
-              as="a"
-              :href="pdfDe(resultadoDe(it)) ?? undefined"
-              target="_blank"
-              rel="noopener"
               variant="ghost"
               size="sm"
               class="h-8 px-2.5"
+              @click="verPdf(resultadoDe(it))"
             >
               <FileDown class="mr-1.5 size-4" aria-hidden="true" /> PDF
             </Button>

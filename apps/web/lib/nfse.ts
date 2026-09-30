@@ -446,11 +446,32 @@ export function useNfseTela(): NfseTela {
   return t
 }
 
+// Senha extra (30/09/2026, Eduardo: "o mesmo esquema de senha do empresas"):
+// o servidor recusa TODA chamada a /api/nfse sem a chave da página
+// (X-Nfse-Token). A página cria a chave e entrega esta API por provide; os
+// componentes usam useNfseApi() no lugar de useApi() — com useApi() direto a
+// chamada sai sem a chave e volta `nfse_locked`.
+export type NfseApi = {
+  api<T = any>(path: string, opts?: any): Promise<T>
+  // Link direto (<a href>) não leva cabeçalho: PDF e XML descem com a chave.
+  abrirPdf(emissaoId: string): Promise<void> // abre em outra aba
+  baixarXml(emissaoId: string): Promise<void> // baixa o arquivo
+}
+
+export const NFSE_API: InjectionKey<NfseApi> = Symbol('nfse-api')
+
+export function useNfseApi(): NfseApi {
+  const a = inject(NFSE_API, null)
+  if (!a) throw new Error('NfseApi ausente')
+  return a
+}
+
 // O que cada janela expõe (defineExpose). A página guarda ref<XApi | null>(null).
 export type ConfirmApi = { perguntar(o: ConfirmarOpts): Promise<boolean> }
 export type LoteApi = {
   emitir(o: { competencia: string; itens: ItemLote[] }): Promise<ResultadoLote[]>
   ocupado(): boolean // true enquanto as notas estão saindo (não dá para sair da página)
+  emUso(): boolean // aberta com envio ou resultado na tela: a senha que vence espera fechar
 }
 export type AvulsaApi = { abrir(o?: { competencia?: string }): Promise<void> }
 export type NotaApi = { abrir(e: Emissao | string): Promise<void> }
@@ -677,6 +698,7 @@ export const MENSAGENS_ERRO: Record<string, string> = {
   chave_nfeio: 'A chave de acesso da NFE.io não está configurada ou não vale. Fale com o administrador.',
   avulsa_incompleta: 'A nota avulsa precisa de empresa, tomador, descrição e valor.',
   sem_percentual: 'Falta a porcentagem: defina na nota fixa ou na empresa (Cadastros › Empresas).',
+  nfse_locked: 'A senha desta página venceu (15 minutos). Digite a senha de novo e tente outra vez.',
 }
 
 // Pendência do backend (já em texto para ler) → onde se resolve. CNPJ se

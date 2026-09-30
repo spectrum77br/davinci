@@ -29,11 +29,13 @@ import {
   pendenciaTexto, plural, prestadorPorId, regimeTexto, situacaoCertificado, situacaoFiscalTexto, soDigitos, TOM_TEXTO,
   useNfseTela,
   type Fiscal, type Prestador, type RetencaoIr, type SecaoEmpresa,
+  useNfseApi,
 } from '~/lib/nfse'
 
 const tela = useNfseTela()
 const { prestadores, canEdit, podeAbrirCadastroEmpresa, podeEditarCadastroEmpresa } = tela
-const { api } = useApi()
+// Com a chave da senha extra (a página entrega): useApi() direto volta nfse_locked.
+const { api } = useNfseApi()
 const toasts = useToasts()
 
 // O padrão do grupo (medido nas notas que já saíram pela NFE.io): 6303 na

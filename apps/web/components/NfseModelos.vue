@@ -16,11 +16,13 @@ import {
   paraDecimal, pctDoModelo, pendenciaTexto, plural, prestadorPorId, renderDescricao, soDigitos, STATUS_VIVOS,
   tomadorEstiloNfeio, tomadorNaNota, useNfseTela, type Emissao, type MenuItem, type Modelo, type Prestador,
   type Tomador,
+  useNfseApi,
 } from '~/lib/nfse'
 
 const tela = useNfseTela()
 const { canEdit, canDelete, carregado } = tela
-const { api } = useApi()
+// Com a chave da senha extra (a página entrega): useApi() direto volta nfse_locked.
+const { api } = useNfseApi()
 const toasts = useToasts()
 
 const mes = mesAtual()

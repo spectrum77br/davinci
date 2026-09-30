@@ -14,6 +14,7 @@ import { Button } from '~/components/ui/button'
 import {
   campoDoErro, codigoErro, docValido, enderecoTomador, erroApi, fmtDoc, prestadorPorId, soDigitos,
   tomadorParaForm, TOM_TEXTO, useNfseTela, type AbrirTomadorOpts, type Tomador, type TomadorApi, type TomadorForm,
+  useNfseApi,
 } from '~/lib/nfse'
 
 type Campo =
@@ -37,7 +38,8 @@ const ARTIGO: Record<string, string> = {
 }
 
 const tela = useNfseTela()
-const { api } = useApi()
+// Com a chave da senha extra (a página entrega): useApi() direto volta nfse_locked.
+const { api } = useNfseApi()
 const toasts = useToasts()
 
 function vazio(): TomadorForm {

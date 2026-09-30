@@ -11,30 +11,28 @@
 import { computed, ref } from 'vue'
 import { Ban, Eye, FileCode2, FileDown, Loader2, Mail, RefreshCw, RotateCw } from 'lucide-vue-next'
 import { Button } from '~/components/ui/button'
-import { useNfseTela, type Emissao, type MenuItem } from '~/lib/nfse'
+import { useNfseApi, useNfseTela, type Emissao, type MenuItem } from '~/lib/nfse'
 
 const props = defineProps<{ emissao: Emissao }>()
 const emit = defineEmits<{ (e: 'abrir'): void; (e: 'atualizada', v: Emissao): void }>()
 
 const tela = useNfseTela()
+// PDF e XML descem com a chave da senha extra (link direto seria recusado).
+const { abrirPdf, baixarXml } = useNfseApi()
 
 const rodando = ref(false)
 
 const e = computed(() => props.emissao)
-// Links do navegador: sempre relativos (no SSR, useApi().url daria o endereço
-// interno da API, que o navegador não alcança).
-const pdf = computed(() => `/api/nfse/emissoes/${e.value.id}/pdf`)
-const xml = computed(() => `/api/nfse/emissoes/${e.value.id}/xml`)
 
 type Acao = 'conferir' | 'reenviar' | 'cancelar'
 type Principal =
-  | { tipo: 'link'; rotulo: string; href: string }
+  | { tipo: 'pdf'; rotulo: string }
   | { tipo: 'acao'; rotulo: string; acao: Acao; icone: typeof RefreshCw }
   | { tipo: 'ver' }
 
 const principal = computed<Principal>(() => {
   const s = e.value.status
-  if (s === 'emitida' || s === 'cancelada') return { tipo: 'link', rotulo: 'PDF', href: pdf.value }
+  if (s === 'emitida' || s === 'cancelada') return { tipo: 'pdf', rotulo: 'PDF' }
   if (!tela.canEdit.value) return { tipo: 'ver' }
   if (s === 'incerta' || s === 'enviando' || s === 'processando') {
     return { tipo: 'acao', rotulo: 'atualizar', acao: 'conferir', icone: RefreshCw }
@@ -48,7 +46,7 @@ const itens = computed<MenuItem[]>(() => {
   const s = e.value.status
   const lista: MenuItem[] = [{ id: 'ver', rotulo: 'Ver detalhes', icone: Eye }]
   if (s === 'emitida' || s === 'cancelada' || s === 'cancelando') {
-    lista.push({ id: 'xml', rotulo: 'Baixar XML da nota', icone: FileCode2, href: xml.value, download: true })
+    lista.push({ id: 'xml', rotulo: 'Baixar XML da nota', icone: FileCode2 })
   }
   if (s === 'emitida' && tela.canEdit.value) {
     lista.push({ id: 'email', rotulo: 'Reenviar por e-mail ao tomador', icone: Mail })
@@ -86,6 +84,7 @@ async function email() {
 
 function escolher(id: string) {
   if (id === 'ver') emit('abrir')
+  else if (id === 'xml') void baixarXml(e.value.id)
   else if (id === 'email') void email()
   else if (id === 'conferir' || id === 'cancelar') rodar(id)
 }
@@ -94,15 +93,11 @@ function escolher(id: string) {
 <template>
   <div class="inline-flex items-center justify-end gap-1 whitespace-nowrap">
     <Button
-      v-if="principal.tipo === 'link'"
-      as="a"
-      :href="principal.href"
-      target="_blank"
-      rel="noopener"
+      v-if="principal.tipo === 'pdf'"
       variant="ghost"
       size="sm"
       class="h-8 px-2.5"
-      @click.stop
+      @click.stop="abrirPdf(e.id)"
     >
       <FileDown class="mr-1.5 size-4" aria-hidden="true" /> {{ principal.rotulo }}
     </Button>

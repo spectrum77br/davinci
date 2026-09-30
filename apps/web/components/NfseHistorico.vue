@@ -20,6 +20,7 @@ import { Button } from '~/components/ui/button'
 import {
   erroApi, fmtBrl, fmtCompetencia, fmtDataHora, fmtPctOrigem, mesParaData, origemDaEmissao, plural, prestadorPorId,
   STATUS_PARA_RESOLVER, tomadorDaEmissao, useNfseTela, type Emissao,
+  useNfseApi,
 } from '~/lib/nfse'
 
 type Grupo = 'emitidas' | 'resolver' | 'canceladas'
@@ -40,7 +41,8 @@ const LIMITE_SERVIDOR = 500
 
 const tela = useNfseTela()
 const route = useRoute()
-const { api } = useApi()
+// Com a chave da senha extra (a página entrega): useApi() direto volta nfse_locked.
+const { api } = useNfseApi()
 
 function grupoDaQuery(v: unknown): Grupo | null {
   return typeof v === 'string' && (GRUPOS as readonly string[]).includes(v) ? (v as Grupo) : null

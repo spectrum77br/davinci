@@ -14,19 +14,24 @@
 // recebem props. As janelas (confirmação, emissão, nota avulsa,
 // detalhe da nota, cancelamento, formulários) ficam montadas UMA vez aqui, e
 // qualquer aba abre por cima sem trocar de lugar.
+//
+// 30/09/2026 (Eduardo: "o mesmo esquema de senha do empresas"): a página pede a
+// senha extra (a mesma de Empresas e do Valuation) e só carrega depois dela.
+// Quem confere é o servidor: sem a chave, /api/nfse recusa tudo. As abas e as
+// janelas chamam a API por useNfseApi() (provide daqui), que leva a chave.
 import { computed, onBeforeUnmount, onMounted, provide, ref, watch, type Ref } from 'vue'
 import { onBeforeRouteLeave, type LocationQuery, type LocationQueryRaw } from 'vue-router'
 import { TooltipProvider } from 'reka-ui'
 import {
-  BookUser, Building2, CheckCircle2, FilePlus2, FileText, FlaskConical, Loader2, RotateCcw, Send, ShieldAlert,
+  BookUser, Building2, CheckCircle2, FilePlus2, FileText, FlaskConical, Loader2, Lock, RotateCcw, Send, ShieldAlert,
 } from 'lucide-vue-next'
 import { Button } from '~/components/ui/button'
 import { TABS_CADASTROS } from '~/lib/navGroups'
 import {
-  erroApi, fmtMes, itemReenvio, mesAtual, mesValido, NFSE_TELA, plural, prestadorPorId, STATUS_PARA_RESOLVER,
+  erroApi, fmtMes, itemReenvio, mesAtual, mesValido, NFSE_API, NFSE_TELA, plural, prestadorPorId, STATUS_PARA_RESOLVER,
   type AbaId, type AbrirModeloOpts, type AbrirTomadorOpts, type AvulsaApi, type CancelarApi, type ConfirmApi,
   type ConfirmarOpts, type Emissao, type EmpresaApi, type ItemLote, type LoteApi, type Modelo, type ModeloApi,
-  type NfseTela, type NotaApi, type Prestador, type ResultadoLote, type SecaoEmpresa, type StatusNfse, type Tomador,
+  type NfseApi, type NfseTela, type NotaApi, type Prestador, type ResultadoLote, type SecaoEmpresa, type StatusNfse, type Tomador,
   type TomadorApi,
 } from '~/lib/nfse'
 
@@ -107,6 +112,127 @@ const modeloRef = ref<ModeloApi | null>(null)
 const tomadorRef = ref<TomadorApi | null>(null)
 const empresaRef = ref<EmpresaApi | null>(null)
 
+// --- Senha extra -------------------------------------------------------------
+// A mesma senha de Empresas e do Valuation, com desbloqueio próprio (a chave de
+// Empresas não abre esta página). A chave fica só na memória da página: tranca
+// ao sair de /emissao-servico, ao recarregar e aos 15 minutos — mas nunca com
+// notas saindo no assistente (espera ele terminar; trancar desmontaria tudo).
+
+function loteOcupado(): boolean {
+  const lote = loteRef.value as Partial<LoteApi> | null
+  return !!(lote && typeof lote.ocupado === 'function' && lote.ocupado())
+}
+function loteEmUso(): boolean {
+  const lote = loteRef.value as Partial<LoteApi> | null
+  return !!(lote && typeof lote.emUso === 'function' && lote.emUso())
+}
+
+const trava = useSenhaExtra('nfse', '/api/nfse/unlock', 'X-Nfse-Token', /^\/emissao-servico(\/|$)/, {
+  podeTrancar: () => !loteEmUso(),
+})
+
+// Toda chamada a /api/nfse passa por aqui (e pelas abas, via useNfseApi()).
+async function apiN<T = any>(path: string, opts: any = {}): Promise<T> {
+  try {
+    return await api<T>(path, { ...opts, headers: { ...(opts.headers || {}), ...trava.headers() } })
+  } catch (e) {
+    // A chave venceu no meio do uso: volta para o cadeado.
+    if (trava.eTravamento(e)) trava.trancarQuandoPuder()
+    throw e
+  }
+}
+
+// PDF e XML: link direto não leva o cabeçalho com a chave, então o arquivo
+// desce por fetch e é aberto (PDF, em outra aba) ou baixado (XML) daqui.
+async function arquivoComChave(path: string): Promise<{ blob: Blob; nome: string | null }> {
+  const r = await fetch(path, { credentials: 'include', headers: trava.headers() })
+  if (!r.ok) {
+    let data: unknown = null
+    try {
+      data = await r.json()
+    } catch {
+      // sem corpo JSON: fica só o status
+    }
+    throw Object.assign(new Error(`HTTP ${r.status}`), { status: r.status, statusCode: r.status, data })
+  }
+  const nome = /filename="?([^";]+)"?/i.exec(r.headers.get('content-disposition') || '')?.[1] ?? null
+  return { blob: await r.blob(), nome }
+}
+
+function salvarArquivo(url: string, nome: string) {
+  const a = document.createElement('a')
+  a.href = url
+  a.download = nome
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+}
+
+async function abrirPdf(id: string): Promise<void> {
+  // A aba abre JÁ no clique: depois de esperar o arquivo, o navegador a bloquearia.
+  const aba = window.open('', '_blank')
+  if (aba) {
+    aba.opener = null
+    try {
+      aba.document.title = 'PDF da nota'
+      aba.document.body.textContent = 'Carregando o PDF da nota…'
+    } catch {
+      // aba de outro jeito (extensão, política do navegador): segue sem o aviso
+    }
+  }
+  try {
+    const { blob, nome } = await arquivoComChave(`/api/nfse/emissoes/${id}/pdf`)
+    const url = URL.createObjectURL(blob.type === 'application/pdf' ? blob : new Blob([blob], { type: 'application/pdf' }))
+    // Bloqueador de janelas: sem a aba, o PDF é baixado.
+    if (aba && !aba.closed) aba.location.href = url
+    else salvarArquivo(url, nome ?? `NFSe_${id}.pdf`)
+    setTimeout(() => URL.revokeObjectURL(url), 5 * 60_000)
+  } catch (e) {
+    aba?.close()
+    if (trava.eTravamento(e)) trava.trancarQuandoPuder()
+    toasts.error('Não deu para abrir o PDF', erroApi(e))
+  }
+}
+
+async function baixarXml(id: string): Promise<void> {
+  try {
+    const { blob, nome } = await arquivoComChave(`/api/nfse/emissoes/${id}/xml`)
+    const url = URL.createObjectURL(blob)
+    salvarArquivo(url, nome ?? `NFSe_${id}.xml`)
+    setTimeout(() => URL.revokeObjectURL(url), 60_000)
+  } catch (e) {
+    if (trava.eTravamento(e)) trava.trancarQuandoPuder()
+    toasts.error('Não deu para baixar o XML', erroApi(e))
+  }
+}
+
+const nfseApi: NfseApi = { api: apiN, abrirPdf, baixarXml }
+provide(NFSE_API, nfseApi)
+
+function bloquear() {
+  if (loteOcupado()) {
+    toasts.warning('Espere as notas terminarem de sair', 'A página tranca depois que o envio acabar.')
+    return
+  }
+  trava.trancar()
+}
+
+// Trancou: nada da página fica na memória esperando a próxima senha. `geracao`
+// descarta a resposta de uma carga que ainda estava no caminho.
+let geracao = 0
+function esquecerTudo() {
+  geracao++
+  status.value = null
+  erroStatus.value = null
+  prestadores.value = []
+  tomadores.value = []
+  modelos.value = []
+  contadorNotas.value = 0
+  contadorEmitir.value = null
+  erroCarga.value = null
+  carregado.value = false
+}
+
 // A janela só vale se já expôs o método (enquanto um componente não existe,
 // o Vue renderiza uma tag desconhecida no lugar e o ref aponta para ela).
 // Nunca falha calado: sem a janela, a pessoa vê o aviso e o console registra.
@@ -124,7 +250,7 @@ function janela<T extends object>(r: Ref<T | null>, metodo: keyof T): T | null {
 async function contarParaResolver(): Promise<number> {
   try {
     const listas = await Promise.all(
-      STATUS_PARA_RESOLVER.map((s) => api<Emissao[]>(`/api/nfse/emissoes?status=${s}`)),
+      STATUS_PARA_RESOLVER.map((s) => apiN<Emissao[]>(`/api/nfse/emissoes?status=${s}`)),
     )
     return listas.reduce((total, l) => total + l.length, 0)
   } catch {
@@ -135,12 +261,15 @@ async function contarParaResolver(): Promise<number> {
 // Lê a ligação do servidor com a NFE.io (chave e trava de produção). Falhou:
 // ninguém emite até saber (erroStatus).
 async function lerStatus(): Promise<StatusNfse | null> {
+  const minha = geracao
   try {
-    const st = await api<StatusNfse>('/api/nfse/status')
+    const st = await apiN<StatusNfse>('/api/nfse/status')
+    if (minha !== geracao) return null
     status.value = st
     erroStatus.value = null
     return st
   } catch (e) {
+    if (minha !== geracao) return null
     status.value = null
     erroStatus.value = erroApi(e)
     return null
@@ -152,7 +281,9 @@ async function lerStatus(): Promise<StatusNfse | null> {
 // status e as empresas; a tela acompanha sem recarregar tudo.
 async function conferirEmpresas(): Promise<Prestador[] | null> {
   try {
-    const [, ps] = await Promise.all([lerStatus(), api<Prestador[]>('/api/nfse/prestadores')])
+    const minha = geracao
+    const [, ps] = await Promise.all([lerStatus(), apiN<Prestador[]>('/api/nfse/prestadores')])
+    if (minha !== geracao) return null
     if (JSON.stringify(ps) !== JSON.stringify(prestadores.value)) {
       prestadores.value = ps
       versao.value++
@@ -164,15 +295,20 @@ async function conferirEmpresas(): Promise<Prestador[] | null> {
 }
 
 async function carregarTudo(): Promise<void> {
+  // Trancada: não há o que carregar (a senha dispara a carga de novo).
+  if (!trava.token.value) return
+  const minha = geracao
   carregando.value = true
   try {
     const [ps, ts, ms, n] = await Promise.all([
-      api<Prestador[]>('/api/nfse/prestadores'),
-      api<Tomador[]>('/api/nfse/tomadores'),
-      api<Modelo[]>('/api/nfse/modelos'),
+      apiN<Prestador[]>('/api/nfse/prestadores'),
+      apiN<Tomador[]>('/api/nfse/tomadores'),
+      apiN<Modelo[]>('/api/nfse/modelos'),
       contarParaResolver(),
       lerStatus(),
     ])
+    // Trancou enquanto carregava: descarta.
+    if (minha !== geracao) return
     prestadores.value = ps
     tomadores.value = ts
     modelos.value = ms
@@ -181,6 +317,8 @@ async function carregarTudo(): Promise<void> {
     versao.value++
     carregado.value = true
   } catch (e) {
+    // Trancou no meio (ou a chave venceu): o cadeado já explica, sem aviso de erro.
+    if (minha !== geracao || trava.eTravamento(e)) return
     erroCarga.value = erroApi(e)
     toasts.error('Não carregou a Emissão de Serviço', erroApi(e))
   } finally {
@@ -223,7 +361,7 @@ async function aoVoltarParaAba() {
   if (lote && typeof lote.ocupado === 'function' && lote.ocupado()) return
   relendoEmpresas = true
   try {
-    const ps = await api<Prestador[]>('/api/nfse/prestadores')
+    const ps = await apiN<Prestador[]>('/api/nfse/prestadores')
     if (JSON.stringify(ps) !== JSON.stringify(prestadores.value)) await recarregar()
   } catch {
     // Sem conexão agora: fica o que já está na tela ("atualizar" relê tudo).
@@ -341,7 +479,7 @@ function avisarConferencia(antes: Emissao['status'], depois: Emissao) {
 // "Atualizar da NFE.io": relê a nota lá (não precisa de senha).
 async function conferir(e: Emissao): Promise<Emissao | null> {
   try {
-    const nova = await api<Emissao>(`/api/nfse/emissoes/${e.id}/conferir`, { method: 'POST' })
+    const nova = await apiN<Emissao>(`/api/nfse/emissoes/${e.id}/conferir`, { method: 'POST' })
     avisarConferencia(e.status, nova)
     await recarregar()
     return nova
@@ -360,7 +498,7 @@ async function atualizarEmissoes(ids: string[]): Promise<Emissao[] | null> {
     for (let i = 0; i < ids.length; i += 200) partes.push(ids.slice(i, i + 200))
     const rs = await Promise.all(
       partes.map((p) =>
-        api<{ emissoes: Emissao[] }>('/api/nfse/emissoes/atualizar', { method: 'POST', body: { ids: p } }),
+        apiN<{ emissoes: Emissao[] }>('/api/nfse/emissoes/atualizar', { method: 'POST', body: { ids: p } }),
       ),
     )
     return rs.flatMap((r) => r.emissoes ?? [])
@@ -380,7 +518,7 @@ async function excluirModelo(m: Modelo): Promise<boolean> {
   })
   if (!ok) return false
   try {
-    await api(`/api/nfse/modelos/${m.id}`, { method: 'DELETE' })
+    await apiN(`/api/nfse/modelos/${m.id}`, { method: 'DELETE' })
     await recarregar()
     if (modelos.value.some((x) => x.id === m.id)) {
       toasts.info('A nota fixa já tinha nota: ficou desativada', 'O que já saiu continua em Notas enviadas.')
@@ -403,7 +541,7 @@ async function enviarEmail(e: Emissao): Promise<boolean> {
   })
   if (!ok) return false
   try {
-    await api(`/api/nfse/emissoes/${e.id}/enviar-email`, { method: 'POST' })
+    await apiN(`/api/nfse/emissoes/${e.id}/enviar-email`, { method: 'POST' })
     toasts.success('E-mail pedido à NFE.io', 'O tomador recebe a nota em alguns minutos.')
     return true
   } catch (err) {
@@ -568,10 +706,26 @@ watch(
   },
 )
 
-onMounted(async () => {
-  document.addEventListener('visibilitychange', aoVoltarParaAba)
+// Carrega quando a chave aparece (a pessoa acabou de digitar a senha). Não dá
+// para esperar um aviso do cartão: ao desbloquear ele sai da tela e o Vue
+// descarta o aviso (lição da tela Empresas, 25/09/2026).
+async function carregarAposSenha() {
   await recarregar()
-  abrirDaQuery(route.query)
+  // Link com ?nota= / ?empresa=: abre depois da senha e da carga.
+  if (trava.token.value && carregado.value) abrirDaQuery(route.query)
+}
+
+watch(
+  () => trava.token.value,
+  (agora, antes) => {
+    if (agora && !antes) void carregarAposSenha()
+    if (!agora && antes) esquecerTudo()
+  },
+)
+
+onMounted(() => {
+  document.addEventListener('visibilitychange', aoVoltarParaAba)
+  if (trava.iniciar()) void carregarAposSenha()
 })
 onBeforeUnmount(() => {
   document.removeEventListener('visibilitychange', aoVoltarParaAba)
@@ -597,6 +751,8 @@ onBeforeRouteLeave(() => {
     <div class="space-y-5">
       <RouteTabs :tabs="TABS_CADASTROS" />
 
+      <SenhaExtraTrava v-if="!trava.token.value" titulo="Emissão de Serviço" :trava="trava" />
+      <template v-else>
       <PageHeader
         title="Emissão de Serviço"
         description="Notas fiscais de serviço (NFS-e) das empresas do grupo, emitidas pela NFE.io."
@@ -625,6 +781,10 @@ onBeforeRouteLeave(() => {
           <Button v-if="canEdit" size="sm" variant="outline" @click="abrirAvulsa({ competencia: mes })">
             <FilePlus2 class="mr-1.5 size-4" aria-hidden="true" />
             nota avulsa
+          </Button>
+          <Button size="sm" variant="ghost" title="tranca a página de novo nesta aba" @click="bloquear">
+            <Lock class="mr-1.5 size-4" aria-hidden="true" />
+            bloquear
           </Button>
         </template>
       </PageHeader>
@@ -679,6 +839,7 @@ onBeforeRouteLeave(() => {
       <NfseModelosSheet ref="modeloRef" />
       <NfseTomadoresSheet ref="tomadorRef" />
       <NfsePrestadoresSheet ref="empresaRef" />
+      </template>
     </div>
   </TooltipProvider>
 </template>

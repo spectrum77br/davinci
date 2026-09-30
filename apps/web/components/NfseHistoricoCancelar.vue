@@ -16,6 +16,7 @@ import { Button } from '~/components/ui/button'
 import {
   erroApi, falhaDeRede, fmtBrl, fmtMes, fmtPct, mesParaData, MOTIVOS_CANCELAMENTO, plural, problemasApi,
   useNfseTela, type CancelarApi, type Emissao, type EventoNota, type Msg,
+  useNfseApi,
 } from '~/lib/nfse'
 
 type Motivo = 1 | 2 | 9
@@ -31,7 +32,8 @@ const MIN = 15
 const MAX = 255
 
 const tela = useNfseTela()
-const { api } = useApi()
+// Com a chave da senha extra (a página entrega): useApi() direto volta nfse_locked.
+const { api } = useNfseApi()
 const toasts = useToasts()
 
 const aberto = ref(false)

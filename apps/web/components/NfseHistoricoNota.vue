@@ -20,10 +20,12 @@ import {
   ambienteTexto, erroApi, fmtBrl, fmtDataHora, fmtDoc, fmtMes, fmtPctOrigem, mesParaData, MOTIVOS_CANCELAMENTO,
   origemDaEmissao, situacao, TEXTO_TESTE, useNfseTela,
   type Emissao, type EventoNota, type Msg, type NotaApi, type Tom,
+  useNfseApi,
 } from '~/lib/nfse'
 
 const tela = useNfseTela()
-const { api } = useApi()
+// Com a chave da senha extra (a página entrega): useApi() direto volta nfse_locked.
+const { api, abrirPdf, baixarXml } = useNfseApi()
 const toasts = useToasts()
 
 const aberto = ref(false)
@@ -198,9 +200,13 @@ function pct(v: string | null | undefined): string {
 // nestas situações.
 const autorizada = computed(() => ['emitida', 'cancelando', 'cancelada'].includes(nota.value?.status ?? ''))
 
-// Links do navegador: sempre relativos (Caddy manda /api/* para a API).
-const pdf = computed(() => (nota.value ? `/api/nfse/emissoes/${nota.value.id}/pdf` : ''))
-const xml = computed(() => (nota.value ? `/api/nfse/emissoes/${nota.value.id}/xml` : ''))
+// PDF e XML descem com a chave da senha extra (link direto seria recusado).
+function verPdf() {
+  if (nota.value) void abrirPdf(nota.value.id)
+}
+function verXml() {
+  if (nota.value) void baixarXml(nota.value.id)
+}
 // PDF e XML vêm da NFE.io depois que a prefeitura autoriza. "PDF pendente na
 // NFE.io" (alerta) = a nota saiu, mas o PDF ainda não: o link pode dar erro.
 const temPdf = autorizada
@@ -544,10 +550,10 @@ const recibo = computed(() => {
         descricao="PDF e XML da nota autorizada, gerados pela NFE.io."
       >
         <div v-if="temPdf || temXmlNota" class="flex flex-wrap gap-2">
-          <Button v-if="temPdf" as="a" :href="pdf" target="_blank" rel="noopener" size="sm" variant="outline">
+          <Button v-if="temPdf" size="sm" variant="outline" @click="verPdf">
             <FileDown class="mr-1.5 size-4" aria-hidden="true" /> Baixar PDF
           </Button>
-          <Button v-if="temXmlNota" as="a" :href="xml" download size="sm" variant="outline">
+          <Button v-if="temXmlNota" size="sm" variant="outline" @click="verXml">
             <FileCode2 class="mr-1.5 size-4" aria-hidden="true" /> XML da nota
           </Button>
           <Button
