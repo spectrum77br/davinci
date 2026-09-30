@@ -1,0 +1,94 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  LaunchAgent do robô de LEITURA do chat da Temu/AliExpress (Mac mini).
+  EXEMPLO: não está instalado. TEM que ser LaunchAgent (sessão gráfica do
+  usuário), não LaunchDaemon: o AdsPower e os navegadores dos perfis só
+  existem na sessão de quem está logado no Mac.
+
+  Antes de usar:
+    1. Troque os placeholders:
+         __REPO__  -> clone do repositório            (ex.: /Users/thorfinn/davinci)
+         __HOME__  -> pasta do usuário                (ex.: /Users/thorfinn)
+         __URL__   -> DaVinci que recebe os eventos   (ex.: https://app.hadken.com)
+    2. Guarde o token (o MESMO ATENDIMENTO_ROBO_TOKEN do DaVinci de __URL__)
+       num arquivo só seu — o plist fica legível em ~/Library/LaunchAgents,
+       então o token NÃO mora aqui:
+         mkdir -p ~/.davinci && chmod 700 ~/.davinci
+         (cole o token)  pbpaste > ~/.davinci/robo_atendimento.token
+         chmod 600 ~/.davinci/robo_atendimento.token
+    3. Teste à mão primeiro (seco = não manda nada ao DaVinci):
+         cd __REPO__/apps/api && uv run - -no-project - -with selenium \
+           python scripts/atendimento_robo_adspower.py - -seco - -duracao 300
+       (sem os espaços entre os hífens: comentário XML não aceita hífen duplo)
+    4. Instale:
+         cp atendimento_robo_adspower.plist.exemplo \
+            ~/Library/LaunchAgents/com.davinci.robo-atendimento.plist
+         launchctl load ~/Library/LaunchAgents/com.davinci.robo-atendimento.plist
+       Parar:  launchctl unload ~/Library/LaunchAgents/com.davinci.robo-atendimento.plist
+       (no unload o robô fecha a PRÓPRIA aba em cada perfil e sai.)
+
+  Logs (só contagens, estados e rotas; nunca texto de comprador nem token):
+    ~/Library/Logs/davinci-robo-atendimento.log
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.davinci.robo-atendimento</string>
+
+    <!-- caffeinate -i: o Mac não dorme por inatividade enquanto o robô lê
+         (Mac dormindo = WebSocket do chat caído = nenhuma mensagem nova).
+         uv run - -no-project: o robô só usa stdlib + selenium; não precisa
+         instalar as dependências da API. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/caffeinate</string>
+        <string>-i</string>
+        <string>/opt/homebrew/bin/uv</string>
+        <string>run</string>
+        <string>--no-project</string>
+        <string>--python</string>
+        <string>3.12</string>
+        <string>--with</string>
+        <string>selenium</string>
+        <string>python</string>
+        <string>__REPO__/apps/api/scripts/atendimento_robo_adspower.py</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>__REPO__/apps/api</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>DAVINCI_ROBO_URL</key>
+        <string>__URL__</string>
+        <key>DAVINCI_ROBO_TOKEN_ARQUIVO</key>
+        <string>__HOME__/.davinci/robo_atendimento.token</string>
+        <!-- saída do Python sem buffer: o log aparece na hora -->
+        <key>PYTHONUNBUFFERED</key>
+        <string>1</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Caiu, volta. ThrottleInterval: no mínimo 60 s entre reinícios — um
+         erro de configuração não vira um laço abrindo perfil sem parar. -->
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>60</integer>
+
+    <!-- No unload o robô drena, entrega o pendente e fecha as abas dele:
+         dá tempo antes do SIGKILL. -->
+    <key>ExitTimeOut</key>
+    <integer>90</integer>
+
+    <key>StandardOutPath</key>
+    <string>__HOME__/Library/Logs/davinci-robo-atendimento.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>__HOME__/Library/Logs/davinci-robo-atendimento.log</string>
+</dict>
+</plist>

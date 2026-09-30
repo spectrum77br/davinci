@@ -33,13 +33,30 @@ TETO_POR_PEDIDO = 200
 # máquina (logs, filas, eventos, carimbos), as de segredo puro e as cópias
 # de segurança. O resto do schema recebe — inclusive tabelas criadas no
 # futuro, pelo `garantir_gatilhos` diário do worker.
+#
+# Atendimento (25/09/2026): as tabelas que guardam TEXTO DE COMPRADOR (e a
+# nossa resposta a ele) ficam de fora — a máscara do Histórico esconde
+# segredo, não dado pessoal, e cada resposta pela tela copiaria para cá, por
+# 365 dias, o CPF/endereço/telefone que o cliente escreveu
+# (`ultima_mensagem_resumo`, `texto`, `fatos`, `texto_final`). Ficam COM o
+# gatilho `atendimento_canais`, `atendimento_regras` e `atendimento_modelos`:
+# trocar o modo da loja e mudar o manual da IA é exatamente o que o
+# Histórico serve para mostrar (e `atendimento_categorias`, a lista de
+# assuntos do manual base, pelo mesmo motivo). Parte 2 (28/09/2026): os
+# índices do cartão "Cliente" também ficam de fora — `atendimento_avaliacoes_
+# loja` guarda o usuário e o texto da avaliação do comprador, e os dois
+# (`atendimento_pedidos_comprador` junto) são escritos pela MÁQUINA a cada
+# hora: no Histórico seriam milhares de linhas que ninguém mudou.
 EXCLUIDAS = re.compile(
     r"^(historico_(evento|alteracao)$|sync_logs|background_job|alembic_version$|auth_codes$"
     r"|oauth_states$|pricing_push_idempotency$|pricing_push_confirmacao$"
     r"|marketing_agent_heartbeat$|alerts$|verificar_margem$|perfis$"
     # trilhas que o próprio sistema já grava junto com a mudança da pessoa
     r"|products_audit$|product_links_audit$|audit_em_andamento_data$|margem_audit$"
-    r"|bling_envio_evento$|bling_envio_correcao$|prioridade_estoque_movimentos$|nfse_chamada$)"
+    r"|bling_envio_evento$|bling_envio_correcao$|prioridade_estoque_movimentos$|nfse_chamada$"
+    # texto de comprador (atendimento) e os índices que a máquina escreve
+    r"|atendimento_(mensagens|rascunhos|avaliacoes|conversas|avaliacoes_loja"
+    r"|pedidos_comprador)$)"
     r"|(_bak|bkp|backup)",
     re.I,
 )

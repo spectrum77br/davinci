@@ -1,0 +1,643 @@
+"""Atendimento unificado: a caixa de conversas de todas as lojas (25/09/2026).
+
+Eduardo quer "o Duoke nosso": Shopee, Mercado Livre, TikTok e Amazon numa
+fila só, com a IA deixando a resposta pronta e a pessoa conferindo. Plano em
+`docs/atendimento-unificado.md`.
+
+Por que tabelas PRÓPRIAS e não `dm_conversas`/`dm_mensagens`: o robô do
+Instagram varre aquelas tabelas e responde sozinho. Conversa de marketplace
+lá dentro seria respondida por um robô que não conhece pedido, prazo nem as
+regras de cada loja. O Instagram aparece na tela por um adaptador SÓ LEITURA
+sobre as tabelas dele (`services/atendimento/instagram.py`).
+
+Dez tabelas:
+
+  `atendimento_canais`     — uma por (integração × canal). Guarda o MODO da
+                             loja (observar/humano/copiloto/auto), a saúde da
+                             leitura e o cursor da consulta periódica.
+  `atendimento_conversas`  — uma por conversa na plataforma. Os campos
+                             `ultima_*`, `aguardando_resposta` e
+                             `prazo_resposta_em` são DERIVADOS das mensagens
+                             (`services/atendimento/gravar.recalcular`) para a
+                             lista ordenar e filtrar sem varrer mensagem.
+  `atendimento_mensagens`  — entrada imutável E saída na mesma linha, no
+                             vocabulário de `dm_mensagens`/`chamado_mensagem`.
+  `atendimento_rascunhos`  — o que a IA sugeriu, com o porquê e o custo.
+  `atendimento_avaliacoes` — o que a pessoa FEZ com a sugestão (enviou igual,
+                             editou, descartou, escreveu do zero). É o
+                             material do aprendizado: resposta aprovada por
+                             pessoa vira exemplo.
+  `atendimento_regras`     — o manual "QUANDO → FAÇA" da IA. Só muda por
+                             pessoa; a IA nunca escreve as próprias regras.
+  `atendimento_modelos`    — respostas prontas (macros) da tela.
+
+Parte 2 (28/09/2026):
+
+  `atendimento_categorias`       — a lista oficial de ASSUNTOS (o manual base
+                                   importado), com a descrição que a IA usa
+                                   para classificar. Vazia = vale a lista de
+                                   `constantes.CATEGORIAS`.
+  `atendimento_pedidos_comprador` — índice (loja × pedido → comprador) para o
+                                   cartão "Cliente": a Shopee não filtra
+                                   pedido por comprador, então o DaVinci
+                                   anota cada pedido que já vê passar.
+  `atendimento_avaliacoes_loja`  — as avaliações que o comprador deixou na
+                                   loja (Shopee `get_comment`), casadas com ele
+                                   pelo pedido e pelo usuário.
+
+Duas travas vivem NO BANCO, não na aplicação, pelo mesmo motivo do
+`uq_dm_resposta_em_voo`: dois workers (ou duas abas) podem tentar, só um grava.
+
+  `uq_atendimento_envio_em_voo`      — uma resposta `enviando` por conversa.
+  `uq_atendimento_rascunho_pendente` — um rascunho `pendente` por conversa.
+
+`autor` × `origem`: autor é QUEM escreveu na plataforma (cliente, loja,
+sistema); origem é POR ONDE saiu (pelo DaVinci por pessoa, pela IA, ou fora
+do DaVinci — Duoke, Seller Center, celular). É a origem `externo` que diz
+"alguém já respondeu por fora, cale-se", e é ela que aposenta o rascunho.
+
+Os valores válidos das colunas de estado estão em
+`services/atendimento/constantes.py` — um lugar só, lido pelo model, pelo
+sync, pela IA e pela tela.
+"""
+
+from datetime import datetime
+from uuid import UUID, uuid4
+
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    SmallInteger,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+    text,
+)
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
+from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.types import DateTime
+
+from app.models.base import Base, TimestampMixin
+
+
+class AtendimentoCanal(Base, TimestampMixin):
+    """Uma caixa de entrada: (integração × canal).
+
+    O ML tem DOIS canais por conta (pergunta pré-venda e mensagem pós-venda),
+    com prazo, limite de caracteres e API diferentes — por isso o canal é
+    linha própria e o modo é por canal, não por loja.
+
+    Temu e AliExpress (30/09/2026) não têm API de chat: a loja é lida pelo
+    robô do Mac mini (um perfil do AdsPower por loja) e o canal é
+    (`robo_perfil_id` × canal), SEM integração. O cron do sync nunca o vê
+    (junta com `integrations`); quem o escreve é `services/atendimento/robo.py`.
+    """
+
+    __tablename__ = "atendimento_canais"
+    __table_args__ = (
+        UniqueConstraint("integration_id", "canal"),
+        # Um canal por perfil do AdsPower (loja lida pelo robô do Mac mini).
+        UniqueConstraint("robo_perfil_id"),
+        # Todo canal tem por onde ler: a integração (API da loja) OU o robô.
+        CheckConstraint(
+            "integration_id IS NOT NULL OR robo_perfil_id IS NOT NULL",
+            name="integracao_ou_robo",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    # CASCADE: canal sem integração não tem como ler nem enviar. A conversa,
+    # essa sim, sobrevive (SET NULL lá embaixo) — histórico não se apaga.
+    # NULL só nas lojas do ROBÔ (Temu/AliExpress, migration 0347): elas não
+    # têm integração, e criar uma poria a loja na mira de todo worker que
+    # percorre `integrations` (factory → TemuClient sem credencial).
+    integration_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("integrations.id", ondelete="CASCADE"),
+        nullable=True,
+    )
+    # O perfil do AdsPower (`user_id` da API local dele) que o robô mantém
+    # aberto no chat da loja. É a identidade da loja do robô: o nome da loja e
+    # o último sinal ficam em `cursor["robo"]` (services/atendimento/robo.py).
+    robo_perfil_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    plataforma: Mapped[str] = mapped_column(String(16), nullable=False)
+    canal: Mapped[str] = mapped_column(String(16), nullable=False)
+    # Toda loja nasce em `observar` (só lê). Enquanto o Duoke estiver ligado,
+    # é ele quem responde; o DaVinci assume loja por loja, por decisão de
+    # pessoa na tela — nunca por deploy.
+    modo: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="observar", server_default=text("'observar'")
+    )
+    # novo | ok | sem_escopo | erro | desligado. `sem_escopo` é o 401/403 de
+    # permissão (TikTok sem `seller.customer_service`, ML Poofy): não adianta
+    # insistir a cada 2 minutos.
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="novo", server_default=text("'novo'")
+    )
+    # Onde a consulta parou (formato de cada plataforma). Só o adaptador lê.
+    cursor: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+    # O número que a PLATAFORMA diz ter de não lidas — o termômetro de que a
+    # leitura está completa, comparado com o que temos aqui.
+    nao_lidas_plataforma: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    ultimo_ok_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    ultimo_erro_em: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # Mensagem de operação (código/HTTP), nunca texto de comprador.
+    ultimo_erro: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Categorias liberadas para envio automático NESTE canal (modo `auto`).
+    # Vazia = nada sai sozinho, mesmo com o modo ligado.
+    auto_categorias: Mapped[list] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
+
+
+class AtendimentoConversa(Base, TimestampMixin):
+    __tablename__ = "atendimento_conversas"
+    __table_args__ = (UniqueConstraint("integration_id", "canal", "externo_id"),)
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    # SET NULL (não CASCADE) nos dois: desligar uma loja não apaga o que o
+    # cliente escreveu — por isso plataforma/canal/conta ficam em SNAPSHOT.
+    canal_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("atendimento_canais.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    integration_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("integrations.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    plataforma: Mapped[str] = mapped_column(String(16), nullable=False)
+    canal: Mapped[str] = mapped_column(String(16), nullable=False)
+    # Nome da integração no momento em que a conversa entrou.
+    conta: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Id da conversa NA PLATAFORMA: conversation_id da Shopee, pack/pergunta
+    # do ML, thread do e-mail da Amazon. Mesmo tamanho do `mid` de
+    # `dm_mensagens`: cabe o Message-ID de e-mail, o maior dos quatro.
+    externo_id: Mapped[str] = mapped_column(String(191), nullable=False)
+    comprador_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    comprador_nome: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Foto do comprador: SÓ a URL que a própria API de chat entrega (Shopee
+    # `to_avatar`, participante da TikTok). ML e Amazon não têm — a tela
+    # mostra as iniciais. Endereço da imagem, nunca o arquivo (28/09/2026,
+    # "a pessoa que enviou a mensagem" igual ao Duoke).
+    comprador_avatar: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # O elo com o resto do DaVinci (Bling, logística, chamados, devoluções).
+    pedido_marketplace: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, index=True
+    )
+    anuncio_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    anuncio_titulo: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # ── Derivados das mensagens (gravar.recalcular) ─────────────────────
+    ultima_mensagem_em: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    # Uma linha, até 160 caracteres: é o que a lista mostra.
+    ultima_mensagem_resumo: Mapped[str | None] = mapped_column(Text, nullable=True)
+    ultima_autor: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    ultima_do_cliente_em: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    ultima_da_loja_em: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # O cliente falou por último e ninguém respondeu (nem por fora).
+    aguardando_resposta: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false"), index=True
+    )
+    # Relógio do SLA de cada plataforma (ML pergunta 1 h, Amazon 24 h...).
+    # É a coluna do filtro "vencendo" e do alerta no Telegram.
+    prazo_resposta_em: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    # Não lidas segundo a PLATAFORMA (o DaVinci nunca marca como lido).
+    nao_lidas: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    # aberta | respondida | fechada | bloqueada
+    situacao: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="aberta", server_default=text("'aberta'")
+    )
+    # Por que a plataforma não deixa responder (ML pós-venda bloqueada,
+    # mediação aberta...). Texto de operação, sem dado pessoal.
+    bloqueio_motivo: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Janela de envio da plataforma, quando ela existe.
+    pode_enviar_ate: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # "Não é necessária resposta" (o "obrigado" da Amazon): tira da fila sem
+    # fingir que alguém respondeu.
+    sem_resposta_necessaria: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    atribuido_a: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    # Desliga a IA NESTA conversa (a pessoa assumiu, ou o assunto é delicado).
+    ia_pausada: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    # Sobras de cada plataforma que a tela ou o adaptador querem guardar.
+    dados: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+
+
+class AtendimentoMensagem(Base, TimestampMixin):
+    __tablename__ = "atendimento_mensagens"
+    __table_args__ = (
+        # Idempotência do sync NO BANCO: a mesma mensagem volta em toda
+        # rodada de consulta. Nullable de propósito — a nossa resposta só
+        # ganha id da plataforma depois de enviada, e o Postgres deixa vários
+        # NULL conviverem no índice único.
+        UniqueConstraint("conversa_id", "externo_id"),
+    )
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    conversa_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("atendimento_conversas.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    externo_id: Mapped[str | None] = mapped_column(String(191), nullable=True)
+    # cliente | loja | sistema — QUEM escreveu na plataforma.
+    autor: Mapped[str] = mapped_column(String(16), nullable=False)
+    # cliente | davinci_humano | davinci_ia | externo | sistema — POR ONDE saiu.
+    origem: Mapped[str] = mapped_column(String(24), nullable=False)
+    # Quem da equipe apertou "Enviar" (origem davinci_humano).
+    autor_user_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    # texto | imagem | video | produto | pedido | arquivo | outro
+    tipo: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="texto", server_default=text("'texto'")
+    )
+    texto: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Endereço e tipo do anexo, nunca o arquivo: URL de CDN de marketplace
+    # expira e baixar mídia de comprador é escopo perdido em v1.
+    anexos: Mapped[list] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
+    # Relógio da PLATAFORMA, não o nosso: é ele que conta o SLA.
+    enviada_em: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    # recebida | enviando | enviada | falhou | revisar. `revisar` é o envio
+    # AMBÍGUO (timeout, erro sem código): pode ter saído, e ninguém retenta
+    # em cima disso — mensagem não se desenvia.
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="recebida", server_default=text("'recebida'")
+    )
+    # Erro de operação (código da plataforma), nunca o texto do comprador.
+    erro: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # De qual rascunho saiu esta resposta. SEM FK de propósito: o rascunho já
+    # aponta para a mensagem (gatilho), e FK nos dois sentidos vira ciclo no
+    # DELETE e no create_all.
+    rascunho_id: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True), nullable=True)
+    # Item cru da plataforma — material de depuração do adaptador.
+    payload: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+
+
+class AtendimentoRascunho(Base, TimestampMixin):
+    """A sugestão da IA para uma conversa.
+
+    Fica salva mesmo quando precisa de humano ou quando o validador barrou:
+    é o que a pessoa vê como ponto de partida, e é o que se mede depois.
+    """
+
+    __tablename__ = "atendimento_rascunhos"
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    conversa_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("atendimento_conversas.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    # A mensagem do cliente que motivou a sugestão. Nome curto e explícito:
+    # o da convenção passaria dos 63 caracteres do Postgres.
+    mensagem_gatilho_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey(
+            "atendimento_mensagens.id",
+            ondelete="SET NULL",
+            name="fk_atendimento_rascunhos_gatilho_atendimento_mensagens",
+        ),
+        nullable=True,
+    )
+    texto: Mapped[str | None] = mapped_column(Text, nullable=True)
+    categoria: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    confianca: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Nasce True: na dúvida, pessoa confere.
+    precisa_humano: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=text("true")
+    )
+    motivo: Mapped[str | None] = mapped_column(Text, nullable=True)
+    validador_ok: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    validador_erros: Mapped[list] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
+    # Os fatos que o CÓDIGO deu ao modelo (pedido, rastreio, prazo) — sem
+    # dado pessoal. Sem eles não dá para auditar de onde saiu uma frase.
+    fatos: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+    modelo: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    prompt_versao: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # Hash do manual (regras ativas) usado: resposta ruim se rastreia até a
+    # versão do manual que a produziu.
+    manual_hash: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    tokens_entrada: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    tokens_saida: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # pendente | enviado | editado | descartado | substituido | bloqueado
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="pendente", server_default=text("'pendente'")
+    )
+
+
+class AtendimentoAvaliacao(Base, TimestampMixin):
+    """O que a pessoa fez com o rascunho — UMA por rascunho.
+
+    `enviou_igual`/`editou` com `texto_final` viram exemplo para a IA; o
+    `motivo` do descarte e a `correcao` são o material da revisão semanal do
+    manual (que só muda por pessoa).
+    """
+
+    __tablename__ = "atendimento_avaliacoes"
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    rascunho_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("atendimento_rascunhos.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+    )
+    # enviou_igual | editou | descartou | escreveu_do_zero
+    acao: Mapped[str] = mapped_column(String(24), nullable=False)
+    texto_final: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # difflib entre o rascunho e o que saiu (0–1).
+    similaridade: Mapped[float | None] = mapped_column(Float, nullable=True)
+    motivo: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 'ok' | 'erro' — a nota que a pessoa dá depois.
+    nota: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    correcao: Mapped[str | None] = mapped_column(Text, nullable=True)
+    user_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+
+class AtendimentoRegra(Base, TimestampMixin):
+    """Uma linha do manual da IA: QUANDO acontecer isto → FAÇA aquilo.
+
+    Parte 2 (P7, "manual sem regra batendo com regra"): cada regra tem um
+    TIPO, que diz onde ela entra no prompt —
+
+      `seguranca` — vale para TODA mensagem e vem primeiro (o que nunca se
+                    diz, o que sempre vai para pessoa);
+      `categoria` — só entra quando a mensagem foi classificada no assunto da
+                    regra (`categoria` NULL = geral, entra sempre);
+      `estilo`    — tom e assinatura, por último.
+
+    Duas regras ATIVAS do tipo `categoria` para o mesmo (assunto, plataforma,
+    canal) se contradizem na certa — é a IA escolhendo qual obedecer. A trava
+    fica na aplicação (`services/atendimento/manual.conflitos_da_regra`), não
+    num índice: o manual que já existia antes dela precisa continuar
+    legível (a tela pinta o conflito de vermelho) em vez de quebrar a
+    migration.
+    """
+
+    __tablename__ = "atendimento_regras"
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    quando: Mapped[str] = mapped_column(Text, nullable=False)
+    faca: Mapped[str] = mapped_column(Text, nullable=False)
+    # NULL = vale para todas as plataformas / todos os canais.
+    plataforma: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    canal: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # Id de `atendimento_categorias` (ou de `constantes.CATEGORIAS`). Sem FK:
+    # a lista pode estar só nas constantes (tabela vazia), e trocar o manual
+    # base não pode apagar regra em cascata.
+    categoria: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # seguranca | categoria | estilo (constantes.TIPOS_REGRA). O que já
+    # existia vira `categoria` sem categoria = geral: o mesmo comportamento
+    # de antes (entra sempre).
+    tipo: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="categoria", server_default=text("'categoria'")
+    )
+    # Menor = mais importante: vem antes, dentro do mesmo tipo.
+    prioridade: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=100, server_default=text("100")
+    )
+    ativa: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=text("true")
+    )
+    criado_por: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    atualizado_por: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+
+class AtendimentoModelo(Base, TimestampMixin):
+    """Resposta pronta (macro) que a pessoa escolhe na tela."""
+
+    __tablename__ = "atendimento_modelos"
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    titulo: Mapped[str] = mapped_column(Text, nullable=False)
+    texto: Mapped[str] = mapped_column(Text, nullable=False)
+    plataforma: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    canal: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # O assunto da resposta pronta (manual base, P7): a tela pode sugerir a
+    # resposta pronta da categoria da conversa. NULL = qualquer assunto.
+    categoria: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    ativo: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=text("true")
+    )
+    ordem: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    criado_por: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+
+class AtendimentoCategoria(Base, TimestampMixin):
+    """Um ASSUNTO de atendimento — a lista oficial que a IA usa para classificar.
+
+    Vem do manual base (`scripts/atendimento_manual.py importar`). A IA lê
+    daqui as ativas; tabela vazia = `constantes.CATEGORIAS` com as descrições
+    de `constantes.CATEGORIAS_INFO` (é o que vale até o manual base entrar).
+    O id é o que as regras, os rascunhos e o `auto_categorias` do canal
+    guardam — por isso é texto curto e estável, não UUID.
+    """
+
+    __tablename__ = "atendimento_categorias"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    nome: Mapped[str] = mapped_column(Text, nullable=False)
+    # A classificação da IA é pela DESCRIÇÃO, não pelo id: "prazo_envio"
+    # sozinho não diz se "já foi postado?" é prazo ou rastreio.
+    descricao: Mapped[str] = mapped_column(
+        Text, nullable=False, default="", server_default=text("''")
+    )
+    # Frases típicas do cliente neste assunto (ajudam a classificar).
+    exemplos: Mapped[list] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
+    # Assunto que só pessoa responde. O banco ACRESCENTA a
+    # `constantes.CATEGORIAS_SO_HUMANO`, nunca tira (manual.categorias_ativas).
+    so_humano: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    # As lacunas ({rastreio}, {nf_numero}...) que a resposta deste assunto usa.
+    lacunas: Mapped[list] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
+    ativa: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=text("true")
+    )
+    ordem: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=100, server_default=text("100")
+    )
+
+
+class AtendimentoPedidoComprador(Base):
+    """Pedido × comprador, por loja — o histórico de compra do cartão "Cliente".
+
+    A Shopee não filtra pedido por comprador (o ML filtra: `/orders/search?
+    buyer=`). Então cada retrato de pedido que o DaVinci já busca (o
+    enriquecimento da conversa, o job `atendimento_indexar_pedidos`) anota a
+    linha aqui. `comprador_id` é o id da plataforma (`buyer_user_id`), não
+    nome nem contato: o índice não guarda dado pessoal.
+    """
+
+    __tablename__ = "atendimento_pedidos_comprador"
+    __table_args__ = (
+        # O mesmo pedido volta em toda leitura: a linha é atualizada, não repetida.
+        UniqueConstraint("integration_id", "pedido"),
+        # "Todos os pedidos deste comprador nesta loja" — a pergunta do cartão.
+        Index(
+            "ix_atendimento_pedidos_comprador_integration_id_comprador_id",
+            "integration_id",
+            "comprador_id",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    # CASCADE: índice de uma loja desligada não tem mais para quem servir.
+    integration_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("integrations.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    plataforma: Mapped[str] = mapped_column(String(16), nullable=False)
+    comprador_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    pedido: Mapped[str] = mapped_column(String(64), nullable=False)
+    # Relógio da PLATAFORMA (hora da compra), não o nosso.
+    criado_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    total: Mapped[float | None] = mapped_column(Float, nullable=True)
+    status: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # "2× Mala de bordo ABS; 1× Cadeado" — o que a linha do tempo mostra.
+    itens_resumo: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Quando o DaVinci anotou/atualizou a linha. O upsert (INSERT ... ON
+    # CONFLICT) não dispara o `onupdate` do ORM: quem grava põe `now()`.
+    atualizado_em: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+
+class AtendimentoAvaliacaoLoja(Base):
+    """Uma avaliação que o comprador deixou na loja (Shopee `get_comment`).
+
+    O cartão "Cliente" mostra as estrelas e o sinal `avaliou_mal`; a IA manda
+    para pessoa quem avaliou mal. Casa com o comprador pelo pedido
+    (`order_sn`) e pelo usuário da loja (`buyer_username` = `to_name` da
+    conversa). O texto vai cortado em 500 caracteres: é o que a tela mostra.
+    """
+
+    __tablename__ = "atendimento_avaliacoes_loja"
+    __table_args__ = (
+        # Idempotência do job: o cursor do get_comment pode trazer de novo.
+        UniqueConstraint("integration_id", "comentario_id"),
+        Index("ix_atendimento_avaliacoes_loja_integration_id_pedido", "integration_id", "pedido"),
+    )
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    integration_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("integrations.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    plataforma: Mapped[str] = mapped_column(String(16), nullable=False)
+    comentario_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    pedido: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    comprador_nome_loja: Mapped[str | None] = mapped_column(Text, nullable=True)
+    item_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # 1 a 5.
+    estrelas: Mapped[int] = mapped_column(SmallInteger, nullable=False)
+    texto: Mapped[str | None] = mapped_column(Text, nullable=True)
+    resposta_loja: Mapped[str | None] = mapped_column(Text, nullable=True)
+    criado_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+# UMA resposta em voo por conversa — declarado no model (create_all dos testes)
+# E na migration 0346, como `uq_dm_resposta_em_voo`. Duas abas apertando
+# "Enviar", ou a pessoa e o envio automático ao mesmo tempo: só um INSERT
+# passa; o outro vira `envio_em_andamento` e o cliente recebe uma resposta só.
+Index(
+    "uq_atendimento_envio_em_voo",
+    AtendimentoMensagem.conversa_id,
+    unique=True,
+    postgresql_where=text("status = 'enviando'"),
+)
+
+# UM rascunho pendente por conversa: a caixa de resposta mostra UMA sugestão,
+# e dois workers de IA gerando para a mesma conversa gastariam token à toa.
+Index(
+    "uq_atendimento_rascunho_pendente",
+    AtendimentoRascunho.conversa_id,
+    unique=True,
+    postgresql_where=text("status = 'pendente'"),
+)
+
+# A idempotência da conversa das lojas do ROBÔ (migration 0347). Elas não têm
+# integração, e o UNIQUE (integration_id, canal, externo_id) não vale com
+# NULL: a chave é o CANAL (a loja) — duas lojas Temu podem repetir o id de
+# conversa. A Amazon sem conta identificada (integração e canal NULL) fica de
+# fora do predicado, com a regra de sempre (`gravar._buscar_conversa`).
+Index(
+    "uq_atendimento_conversas_robo",
+    AtendimentoConversa.canal_id,
+    AtendimentoConversa.externo_id,
+    unique=True,
+    postgresql_where=text("integration_id IS NULL AND canal_id IS NOT NULL"),
+)

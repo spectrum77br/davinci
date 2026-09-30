@@ -1,4 +1,16 @@
 from app.models.alert import Alert
+from app.models.atendimento import (
+    AtendimentoAvaliacao,
+    AtendimentoAvaliacaoLoja,
+    AtendimentoCanal,
+    AtendimentoCategoria,
+    AtendimentoConversa,
+    AtendimentoMensagem,
+    AtendimentoModelo,
+    AtendimentoPedidoComprador,
+    AtendimentoRascunho,
+    AtendimentoRegra,
+)
 from app.models.audit import AuditFinding, AuditRun, AuditUpload
 from app.models.auth_code import AuthCode
 from app.models.automacao import Automacao
@@ -216,6 +228,16 @@ __all__ = [
     "NfseModelo",
     "NfseTomador",
     "Alert",
+    "AtendimentoAvaliacao",
+    "AtendimentoAvaliacaoLoja",
+    "AtendimentoCanal",
+    "AtendimentoCategoria",
+    "AtendimentoConversa",
+    "AtendimentoMensagem",
+    "AtendimentoModelo",
+    "AtendimentoPedidoComprador",
+    "AtendimentoRascunho",
+    "AtendimentoRegra",
     "ClaudeConector",
     "AlertSeverity",
     "AlertType",

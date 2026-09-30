@@ -871,6 +871,139 @@ async def dm_responder_pendentes(ctx: dict) -> None:
         logger.info("dm_responder_tick", tratadas=tratadas)
 
 
+# Minutos ÍMPARES para a leitura do atendimento: os crons de token da
+# Shopee (:00, de 4 em 4 h) e do ML (:00 e :30) renovam sem a trava de
+# renovação do atendimento. No mesmo segundo, os dois usariam o mesmo
+# refresh token de uso único — um falha, e no pior caso a loja fica
+# desconectada. Fora do :00/:30 a colisão deixa de ser toda rodada.
+_ATENDIMENTO_MINUTOS = set(range(1, 60, 2))
+
+
+async def atendimento_sincronizar(ctx: dict) -> dict | None:
+    """Minutos ímpares: lê as caixas de Shopee, ML, TikTok e Amazon (atendimento).
+
+    Consulta periódica, não webhook: é a fonte confiável (webhook perdido num
+    deploy é mensagem perdida; a consulta seguinte acha). Cada canal lê na
+    própria sessão, sob trava Redis por canal, com concorrência limitada
+    (`atendimento_sync_concorrencia`) — ver services/atendimento/sync.py.
+    Também é o job que o botão "Sincronizar" da tela enfileira.
+
+    Desligado por padrão (`atendimento_leitura_ativa`): deploy não liga nada.
+    Nunca marca como lido — o Duoke continua ligado e depende do "não lido".
+    """
+    if not _settings.atendimento_leitura_ativa:
+        return None
+    from app.services.atendimento import sync as _atendimento_sync
+
+    try:
+        resumo = await _atendimento_sync.sincronizar_tudo()
+    except Exception as e:  # noqa: BLE001
+        # Só o tipo: a mensagem de erro de cliente HTTP pode trazer URL assinada.
+        logger.error("atendimento_sincronizar_falhou", err=type(e).__name__)
+        return None
+    logger.info("atendimento_sincronizar_tick", **resumo)
+    return resumo
+
+
+async def atendimento_rascunhos(ctx: dict) -> None:
+    """A cada minuto: a IA escreve a sugestão das conversas que esperam resposta.
+
+    Espera o cliente ficar 90 s em silêncio (junta as mensagens seguidas) e
+    pega até 10 conversas por tick — as travas todas (IA pausada, conversa
+    fechada, rascunho já pendente, UMA rodada por vez: o arq dispara um job
+    novo por minuto mesmo com o anterior rodando) ficam no serviço
+    (services/atendimento/ia.py). Desligado por padrão (`atendimento_ia_ativa`).
+    """
+    if not _settings.atendimento_ia_ativa:
+        return
+    from app.services.atendimento import ia as _atendimento_ia
+
+    async with session_scope() as s:
+        try:
+            gerados = await _atendimento_ia.gerar_pendentes(s, limite=10)
+        except Exception as e:  # noqa: BLE001
+            logger.error("atendimento_rascunhos_falhou", err=type(e).__name__)
+            return
+    if gerados:
+        logger.info("atendimento_rascunhos_tick", gerados=gerados)
+
+
+async def atendimento_prazos(ctx: dict) -> None:
+    """A cada 15 min: aviso no Telegram das conversas com prazo vencendo ou vencido.
+
+    É o remédio dos 80 h da Amazon: a mensagem que cai num e-mail que ninguém
+    olha. Um aviso agrupado por rodada; cada conversa entra uma vez por nível
+    (dedupe Redis). Desligado por padrão (`atendimento_alerta_telegram`).
+    """
+    if not _settings.atendimento_alerta_telegram:
+        return
+    from app.services.atendimento import sync as _atendimento_sync
+
+    async with session_scope() as s:
+        try:
+            avisadas = await _atendimento_sync.alertar_prazos(s)
+        except Exception as e:  # noqa: BLE001
+            logger.error("atendimento_prazos_falhou", err=type(e).__name__)
+            return
+    if avisadas:
+        logger.info("atendimento_prazos_tick", avisadas=avisadas)
+
+
+async def atendimento_indexar_pedidos(ctx: dict) -> dict | None:
+    """De hora em hora (:22): pedidos e avaliações da Shopee por comprador.
+
+    A Shopee não filtra pedido nem avaliação por comprador; o cartão "Cliente"
+    da caixa lê o índice que este job monta — as últimas 2 h de pedidos
+    (`get_order_list` + `get_order_detail` em lotes de 50, só id do
+    comprador, status, total, data e itens) e as avaliações novas, com teto
+    por rodada (services/atendimento/indexar.py). O :22 fica longe do
+    :00/:30 dos crons de token. Desligado por padrão, junto com a leitura
+    (`atendimento_leitura_ativa`).
+    """
+    if not _settings.atendimento_leitura_ativa:
+        return None
+    from app.services.atendimento import indexar as _atendimento_indexar
+
+    try:
+        resumo = await _atendimento_indexar.indexar_pedidos()
+    except Exception as e:  # noqa: BLE001
+        # Só o tipo: a mensagem de erro de cliente HTTP pode trazer URL assinada.
+        logger.error("atendimento_indexar_pedidos_falhou", err=type(e).__name__)
+        return None
+    logger.info("atendimento_indexar_pedidos_tick", **resumo)
+    return resumo
+
+
+async def atendimento_importar_historico(
+    ctx: dict,
+    dias: int = 90,
+    loja: str | None = None,
+    seco: bool = False,
+    forcar: bool = False,
+) -> dict | None:
+    """Importação do histórico do atendimento — NÃO agendada; só roda chamada à mão.
+
+    O mesmo que `uv run python -m scripts.atendimento_importar_historico`,
+    para enfileirar no worker de produção (`enqueue_job(
+    "atendimento_importar_historico", dias=90)`) em vez de segurar um
+    terminal por horas. Sem IA, sem alerta, nunca marca lido, retomável
+    (services/atendimento/importar.py). Recusa sem a leitura ligada, a não
+    ser com `forcar=True`.
+    """
+    from app.services.atendimento import importar as _atendimento_importar
+
+    try:
+        return await _atendimento_importar.importar_historico(
+            dias=dias, loja=loja, seco=seco, forcar=forcar
+        )
+    except _atendimento_importar.ImportacaoRecusada as e:
+        logger.warning("atendimento_importar_recusada", code=e.code)
+        return {"recusada": e.code}
+    except Exception as e:  # noqa: BLE001
+        logger.error("atendimento_importar_falhou", err=type(e).__name__)
+        return None
+
+
 async def marketing_postagens_publicar(ctx: dict) -> None:
     """A cada minuto: publica as postagens que já podem sair.
 
@@ -2059,6 +2192,44 @@ async def logistica_vigia(ctx: dict) -> dict[str, int]:
     return {"atrasados": len(atrasados), "admins": len(admin_ids)}
 
 
+# Plataformas cujo refresh token é de USO ÚNICO e que o atendimento também
+# renova (atendimento/clientes.py): o cron passa pela mesma trava por
+# integração, senão os dois gastariam o mesmo refresh token no mesmo segundo.
+_REFRESH_COM_TRAVA = (
+    IntegrationPlatform.SHOPEE,
+    IntegrationPlatform.ML,
+    IntegrationPlatform.TIKTOK,
+)
+
+
+@asynccontextmanager
+async def _trava_de_token(integration_id: UUID):
+    """`token_refresh_lock` que não impede a renovação se o Redis cair.
+
+    Yields True = pode renovar; False = outro processo está renovando agora
+    (o token dele vale; este ciclo pula a loja). Sem Redis, renova como
+    sempre renovou — ficar sem renovar derrubaria a loja.
+    """
+    from app.services.token_refresh_lock import token_refresh_lock
+
+    cm = token_refresh_lock(integration_id)
+    try:
+        pegou = await cm.__aenter__()
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "token_refresh_lock_indisponivel", integration_id=str(integration_id), err=str(e)
+        )
+        yield True
+        return
+    try:
+        yield pegou
+    finally:
+        try:
+            await cm.__aexit__(None, None, None)
+        except Exception:  # noqa: BLE001, S110 — a trava expira sozinha (TTL)
+            pass
+
+
 async def _refresh_tokens_for(platform: IntegrationPlatform, *, expiring_within_s: int) -> None:
     cutoff = datetime.now(UTC) + timedelta(seconds=expiring_within_s)
     async with session_scope() as s:
@@ -2072,43 +2243,77 @@ async def _refresh_tokens_for(platform: IntegrationPlatform, *, expiring_within_
             )
         ).scalars().all()
         for it in ints:
-            try:
-                creds = decrypt_json(it.credentials)
+            if platform in _REFRESH_COM_TRAVA:
+                async with _trava_de_token(it.id) as pegou:
+                    if not pegou:
+                        # O atendimento (ou outro processo) está renovando
+                        # esta loja agora: o token dele vale, e o próximo
+                        # ciclo confere de novo.
+                        logger.info(
+                            "token_refresh_skipped_locked",
+                            platform=platform.value,
+                            integration_id=str(it.id),
+                        )
+                        continue
+                    # As credenciais foram lidas no começo do ciclo; o
+                    # atendimento pode ter renovado desde então (o refresh
+                    # token de uso único que está em memória já morreu).
+                    try:
+                        await s.refresh(it)
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning(
+                            "token_refresh_failed",
+                            platform=platform.value,
+                            integration_id=str(it.id),
+                            err=str(e),
+                        )
+                        continue
+                    if it.token_expires_at is not None and it.token_expires_at > cutoff:
+                        continue  # já renovado por outro processo
+                    await _refresh_um(platform, it, s)
+            else:
+                await _refresh_um(platform, it, s)
 
-                async def _persist(new_creds: dict, _it=it, _s=s) -> None:
-                    _it.credentials = encrypt_json(new_creds)
-                    # TikTok stores `token_expires_at`; Shopee/ML use
-                    # `expires_at`. Read whichever is present so the column
-                    # mirrors the real expiry across platforms.
-                    exp = new_creds.get("token_expires_at") or new_creds.get("expires_at")
-                    if exp:
-                        _it.token_expires_at = datetime.fromtimestamp(int(exp), tz=UTC)
-                    await _s.commit()
 
-                if platform == IntegrationPlatform.BLING:
-                    client = BlingClient(creds, integration_id=it.id)
-                elif platform == IntegrationPlatform.SHOPEE:
-                    client = ShopeeClient(creds, on_token_refresh=_persist)
-                elif platform == IntegrationPlatform.ML:
-                    client = MercadoLivreClient(creds, on_token_refresh=_persist)
-                elif platform == IntegrationPlatform.TIKTOK:
-                    from app.services.marketplaces.tiktok import TikTokClient
-                    client = TikTokClient(creds, on_token_refresh=_persist)
-                else:
-                    continue
-                await client.refresh()
-                logger.info(
-                    "token_refresh_ok",
-                    platform=platform.value,
-                    integration_id=str(it.id),
-                )
-            except Exception as e:  # noqa: BLE001
-                logger.warning(
-                    "token_refresh_failed",
-                    platform=platform.value,
-                    integration_id=str(it.id),
-                    err=str(e),
-                )
+async def _refresh_um(platform: IntegrationPlatform, it: Integration, s) -> None:
+    """Renova o token de UMA integração. Nunca levanta (loga)."""
+    try:
+        creds = decrypt_json(it.credentials)
+
+        async def _persist(new_creds: dict, _it=it, _s=s) -> None:
+            _it.credentials = encrypt_json(new_creds)
+            # TikTok stores `token_expires_at`; Shopee/ML use
+            # `expires_at`. Read whichever is present so the column
+            # mirrors the real expiry across platforms.
+            exp = new_creds.get("token_expires_at") or new_creds.get("expires_at")
+            if exp:
+                _it.token_expires_at = datetime.fromtimestamp(int(exp), tz=UTC)
+            await _s.commit()
+
+        if platform == IntegrationPlatform.BLING:
+            client = BlingClient(creds, integration_id=it.id)
+        elif platform == IntegrationPlatform.SHOPEE:
+            client = ShopeeClient(creds, on_token_refresh=_persist)
+        elif platform == IntegrationPlatform.ML:
+            client = MercadoLivreClient(creds, on_token_refresh=_persist)
+        elif platform == IntegrationPlatform.TIKTOK:
+            from app.services.marketplaces.tiktok import TikTokClient
+            client = TikTokClient(creds, on_token_refresh=_persist)
+        else:
+            return
+        await client.refresh()
+        logger.info(
+            "token_refresh_ok",
+            platform=platform.value,
+            integration_id=str(it.id),
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "token_refresh_failed",
+            platform=platform.value,
+            integration_id=str(it.id),
+            err=str(e),
+        )
 
 
 async def bling_token_refresh(ctx: dict) -> None:
@@ -3769,6 +3974,16 @@ class WorkerSettings:
         vigia_margem_tick,
         vigia_robo_melhorenvio_tick,
         vigia_robo_leitura_tick,
+        # Atendimento unificado (25/09/2026). Em `functions` também para o
+        # botão "Sincronizar" da tela poder enfileirar a leitura.
+        func(atendimento_sincronizar, timeout=300),
+        atendimento_rascunhos,
+        atendimento_prazos,
+        func(atendimento_indexar_pedidos, timeout=1200),
+        # Importação do histórico (28/09/2026): SÓ aqui, nunca em `cron_jobs` —
+        # roda uma vez, à mão, depois da aprovação. Uma tentativa só: é
+        # retomável, e quem decide rodar de novo é pessoa.
+        func(atendimento_importar_historico, timeout=6 * 3600, max_tries=1),
     ]
     cron_jobs = [
         # A consulta bem-sucedida agenda a próxima em 24h; falhas tentam de novo em 1h.
@@ -4023,6 +4238,23 @@ class WorkerSettings:
         # Resposta de DM: mesmo tick de 1 minuto, pelo mesmo motivo —
         # mensagem é reativa e o cliente está esperando agora.
         cron(dm_responder_pendentes, run_at_startup=False, timeout=300),
+        # Atendimento unificado (25/09/2026): leitura das lojas nos minutos
+        # ímpares (longe do :00/:30 dos crons de token; a trava por canal põe
+        # uma rodada por vez em cada loja), a sugestão da IA a cada minuto
+        # (mensagem é reativa; a trava da rodada no Redis põe uma de cada vez)
+        # e o alerta de prazo a cada 15. Os três saem na hora com o seu
+        # setting desligado.
+        cron(
+            atendimento_sincronizar,
+            minute=_ATENDIMENTO_MINUTOS,
+            run_at_startup=False,
+            timeout=300,
+        ),
+        cron(atendimento_rascunhos, run_at_startup=False, timeout=300),
+        cron(atendimento_prazos, minute={0, 15, 30, 45}, run_at_startup=False, timeout=120),
+        # Índice de pedidos/avaliações da Shopee para o cartão "Cliente": de
+        # hora em hora, janela de 2 h (uma rodada que falha não deixa buraco).
+        cron(atendimento_indexar_pedidos, minute={22}, run_at_startup=False, timeout=1200),
         # Reconciliação a cada 10 min, no :05 (longe do congestionamento do
         # :00): postagem presa é CONSULTADA, nunca retentada.
         cron(

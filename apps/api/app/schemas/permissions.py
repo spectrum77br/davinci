@@ -33,6 +33,13 @@ Resource = Literal[
     # plataformas (origem Margem/Logística/Devolução), com histórico,
     # réplica manual/automática e alterar status Bling.
     "chamados",
+    # Atendimento (25/09/2026) — caixa única das conversas de Shopee, ML,
+    # TikTok e Amazon, com rascunho da IA. view lê a fila; edit responde e
+    # mexe no manual/respostas prontas; delete apaga regra/modelo. Mesmo
+    # nome no useCan.ts. SÓ ADMIN por enquanto (30/09/2026): o router exige
+    # admin (SO_ADMIN em routers/atendimento.py) e o recurso saiu da tela de
+    # Permissões; fica aqui para o JSON salvo validar e para quando abrir.
+    "atendimento",
     # Legacy single-bucket — no longer used by any route after the
     # financeiro_* split below, but kept in the literal so stored
     # permissions JSON containing the old key still validates.

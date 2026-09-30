@@ -27,6 +27,7 @@ dependencies = [
     "pymupdf>=1.24",
     "segno>=1.6",
     "sentry-sdk[fastapi]>=2.18",
+    "anthropic>=1.9.0",
 ]
 
 [dependency-groups]

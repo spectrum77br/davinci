@@ -12,10 +12,26 @@ from collections.abc import AsyncIterator, Callable
 import pytest
 import pytest_asyncio
 
-TEST_SCHEMA = "davinci_test"
+# Cada lote de agentes roda no SEU schema (DAVINCI_TEST_SCHEMA) para não
+# travar um no DROP SCHEMA do outro; sem a variável, o de sempre.
+TEST_SCHEMA = os.environ.get("DAVINCI_TEST_SCHEMA", "davinci_test")
 
 os.environ["DATABASE_SCHEMA"] = TEST_SCHEMA
 os.environ.setdefault("OWNER_OPEN_ID", "email:owner@davinci-test.com")
+# A caixa de e-mail da Amazon do atendimento (IMAP/SMTP) é de VERDADE quando
+# o `.env` local a tem: teste nenhum pode ler nem mandar e-mail por ela (nem
+# depender de ela existir — o teste que precisa liga por monkeypatch).
+# Variável de ambiente vence o `.env` no pydantic-settings.
+for _var in (
+    "ATENDIMENTO_AMAZON_IMAP_HOST",
+    "ATENDIMENTO_AMAZON_IMAP_USUARIO",
+    "ATENDIMENTO_AMAZON_IMAP_SENHA",
+    "ATENDIMENTO_AMAZON_SMTP_HOST",
+    "ATENDIMENTO_AMAZON_SMTP_USUARIO",
+    "ATENDIMENTO_AMAZON_SMTP_SENHA",
+    "ATENDIMENTO_AMAZON_REMETENTE",
+):
+    os.environ[_var] = ""
 
 from httpx import ASGITransport, AsyncClient  # noqa: E402
 from sqlalchemy import text  # noqa: E402
@@ -365,6 +381,20 @@ _CLEANUP_TABLES = (
     "marketing_ideia_requisicoes",
     "marketing_personagem_requisicoes",
     "marketing_personagens",
+    # Atendimento unificado: filhas antes das mães, todas antes de
+    # integrations e users (FKs CASCADE/SET NULL para os dois).
+    "atendimento_avaliacoes",
+    "atendimento_rascunhos",
+    "atendimento_mensagens",
+    "atendimento_conversas",
+    "atendimento_canais",
+    "atendimento_regras",
+    "atendimento_modelos",
+    # Parte 2: índices do cartão "Cliente" (FK CASCADE → integrations) e a
+    # lista de assuntos do manual (sem FK).
+    "atendimento_pedidos_comprador",
+    "atendimento_avaliacoes_loja",
+    "atendimento_categorias",
     "dm_mensagens",  # FK -> dm_conversas: antes dela
     "dm_contas",  # FK -> redes_sociais
     "dm_conversas",  # FK -> redes_sociais/users: antes dos dois

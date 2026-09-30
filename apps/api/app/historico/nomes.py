@@ -219,10 +219,12 @@ GET_QUE_GRAVA = re.compile(
     r"^/api/(estoque/pedidos/[^/]+/etiqueta$|integrations/[a-z]+/callback(/|$)|oauth/[a-z]+/callback$)"
 )
 
-# Corpo nunca guardado (senha, código de login, segredo no caminho).
+# Corpo nunca guardado (senha, código de login, segredo no caminho; e a
+# resposta ao comprador do Atendimento, que pode ter nome e endereço dele).
 SEM_CORPO = re.compile(
     r"^/api/(auth/|pricing/mega/login|companies/unlock|financeiro/valuation/unlock"
-    r"|claude-mcp/|webhooks/|aprovar/)|/callback|/certificates/[^/]+/download$"
+    r"|claude-mcp/|webhooks/|aprovar/|atendimento/(conversas|rascunhos|mensagens)/)"
+    r"|/callback|/certificates/[^/]+/download$"
     # Proxy da empresa (26/09/2026): o corpo leva usuário/senha, e colar a
     # linha "ip:porta:usuario:senha" no campo IP escaparia da máscara.
     r"|^/api/companies/[^/]+/proxy$"

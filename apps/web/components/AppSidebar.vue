@@ -6,7 +6,7 @@ import {
   Receipt, TrendingUp, Settings, BarChart3,
   ClipboardList, ChevronDown, ChevronLeft, ChevronRight, Warehouse,
   Coins, FileText, Calculator, FlaskConical, Ship, Landmark, Headset,
-  ReceiptText, MessagesSquare, Radar, History, ScanSearch, Flag, Scale,
+  ReceiptText, MessagesSquare, Radar, History, ScanSearch, Flag, Scale, Inbox,
 } from 'lucide-vue-next'
 import { allowedTabs, TABS_CADASTROS, TABS_NF, TABS_SISTEMA } from '~/lib/navGroups'
 
@@ -141,6 +141,11 @@ const sections = computed<Section[]>(() => [
       { to: '/logistica', label: 'Logística', icon: Headset, resource: 'logistica' },
       { to: '/notas-fiscais', label: 'Notas fiscais', icon: FileText, resource: 'notas_fiscais' },
       { to: '/chamados', label: 'Chamados', icon: MessagesSquare, resource: 'chamados' },
+      // Atendimento (25/09/2026): conversas de Shopee, ML, TikTok e Amazon numa
+      // caixa só, com a resposta sugerida pela IA. SÓ ADMIN por enquanto
+      // (Eduardo, 30/09/2026) — mesma trava da página e da API; para abrir,
+      // volta para `resource: 'atendimento'` (ver useCan.ts).
+      { to: '/atendimento', label: 'Atendimento', icon: Inbox, adminOnly: true },
     ],
   },
   {

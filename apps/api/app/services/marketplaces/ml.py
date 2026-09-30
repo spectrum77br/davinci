@@ -1017,6 +1017,301 @@ class MercadoLivreClient:
             await asyncio.sleep(0.3)
         self.listagem_completa = not algum_buraco
 
+    # ── Atendimento: perguntas pré-venda e mensagens pós-venda (25/09/2026) ──
+    #
+    # Usados pela caixa de atendimento (services/atendimento/ml.py). Enquanto
+    # o Duoke estiver ligado, NADA aqui pode marcar mensagem como lida: a
+    # equipe se guia pelo "não lido" de lá.
+
+    async def _request_uma_vez(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict | None = None,
+        json: Any = None,
+    ) -> httpx.Response:
+        """Como `_request`, mas SEM repetir em 429/5xx — para o que ESCREVE ao comprador.
+
+        O `_request` repete em 502/503/504, o que é ótimo para leitura e
+        péssimo para envio: um 502 do gateway pode chegar depois que o ML já
+        gravou a mensagem, e a repetição mandaria a mesma resposta duas vezes
+        (ou, na pergunta, devolveria "já respondida" para uma resposta que
+        saiu). Aqui só o 401 repete — token recusado é pedido que o ML não
+        processou. O 5xx volta para quem chamou tratar como AMBÍGUO.
+        """
+        if self._expired():
+            await self.refresh()
+        url = f"{ML_API_BASE}{path}"
+        for attempt in range(2):
+            headers = {
+                "Authorization": f"Bearer {self.access_token}",
+                "Accept": "application/json",
+            }
+            async with httpx.AsyncClient(timeout=30.0) as c:
+                r = await c.request(method, url, headers=headers, params=params, json=json)
+            if r.status_code == 401 and attempt == 0:
+                await self.refresh()
+                continue
+            return r
+        return r
+
+    async def perguntas_recebidas(
+        self,
+        *,
+        status: str = "UNANSWERED",
+        offset: int = 0,
+        limit: int = 50,
+    ) -> dict:
+        """Perguntas dos anúncios da conta (GET /my/received_questions/search).
+
+        `api_version=4` é o formato com `from: {id}` e `answer` embutido
+        (`{text, status, date_created}`), medido em produção em 25/09.
+        Mais novas primeiro. `status`: UNANSWERED | ANSWERED | CLOSED_UNANSWERED
+        | UNDER_REVIEW | BANNED | DELETED. Devolve `{total, limit, questions}`;
+        levanta em não-2xx (quem chama traduz o erro)."""
+        r = await self._request(
+            "GET",
+            "/my/received_questions/search",
+            params={
+                "status": status,
+                "api_version": 4,
+                "sort_fields": "date_created",
+                "sort_types": "DESC",
+                "offset": offset,
+                "limit": limit,
+            },
+        )
+        r.raise_for_status()
+        return r.json() or {}
+
+    async def detalhe_pergunta(self, question_id: str | int) -> dict:
+        """Uma pergunta pelo id (GET /questions/{id}, `api_version=4`).
+
+        A busca por status só mostra quem ESTÁ naquele status: a pergunta que
+        saiu de UNANSWERED sem aparecer em ANSWERED (apagada pelo comprador,
+        fechada com o anúncio, banida, em revisão) só se descobre assim.
+        Levanta em não-2xx (404 = apagada)."""
+        r = await self._request(
+            "GET", f"/questions/{question_id}", params={"api_version": 4}
+        )
+        r.raise_for_status()
+        return r.json() or {}
+
+    async def responder_pergunta(self, question_id: str | int, texto: str) -> httpx.Response:
+        """Responde uma pergunta pré-venda (POST /answers). Até 2.000 caracteres.
+
+        Devolve a resposta HTTP crua, sem levantar por status: quem chama
+        decide o que é recusa (4xx) e o que é ambíguo (5xx). Uma tentativa
+        só (`_request_uma_vez`) — resposta pública não se desfaz."""
+        return await self._request_uma_vez(
+            "POST",
+            "/answers",
+            json={"question_id": int(question_id), "text": texto},
+        )
+
+    async def mensagens_nao_lidas(self, tag: str = "post_sale") -> dict:
+        """Conversas pós-venda com mensagem não lida pelo vendedor.
+
+        GET /messages/unread?role=seller&tag=post_sale →
+        `{user_id, total, results: [{resource: "/packs/<pack>/sellers/<seller>",
+        count}]}`. Só CONTA; não marca nada como lido. Levanta em não-2xx
+        (403 `PA_UNAUTHORIZED_RESULT_FROM_POLICIES` = conta sem permissão)."""
+        r = await self._request(
+            "GET", "/messages/unread", params={"role": "seller", "tag": tag}
+        )
+        r.raise_for_status()
+        return r.json() or {}
+
+    async def mensagens_do_pack(
+        self,
+        pack_id: str | int,
+        seller_id: str | int,
+        *,
+        offset: int = 0,
+        limit: int = 20,
+    ) -> dict:
+        """As mensagens pós-venda de um pack (GET /messages/packs/{pack}/sellers/{seller}).
+
+        `mark_as_read=false` é FIXO e não é parâmetro de propósito: sem ele o
+        ML marca a conversa como lida ao ler, e a equipe perde o "não lido"
+        no Duoke — que é por onde ela sabe o que falta responder. Devolve
+        `{paging, conversation_status, messages, seller_max_message_length,
+        buyer_max_message_length}`; levanta em não-2xx.
+
+        Pedido sem pack usa o próprio order_id no lugar do pack_id (regra do ML).
+        """
+        r = await self._request(
+            "GET",
+            f"/messages/packs/{pack_id}/sellers/{seller_id}",
+            params={
+                "tag": "post_sale",
+                "mark_as_read": "false",
+                "offset": offset,
+                "limit": limit,
+            },
+        )
+        r.raise_for_status()
+        return r.json() or {}
+
+    async def enviar_mensagem_pack(
+        self,
+        pack_id: str | int,
+        seller_id: str | int,
+        buyer_id: str | int,
+        texto: str,
+    ) -> httpx.Response:
+        """Manda uma mensagem pós-venda no pack. Até 350 caracteres, só ISO-8859-1.
+
+        POST /messages/packs/{pack}/sellers/{seller}?tag=post_sale. Devolve a
+        resposta HTTP crua, sem levantar por status (4xx = recusa, com a
+        conversa bloqueada dizendo o motivo; 5xx = ambíguo). Uma tentativa só
+        (`_request_uma_vez`): mensagem não se desenvia.
+
+        `user_id` vai como número, o mesmo tipo que o GET devolve em
+        `from`/`to` (medido em produção)."""
+
+        def _uid(v: str | int) -> str | int:
+            return int(v) if str(v).isdigit() else str(v)
+
+        return await self._request_uma_vez(
+            "POST",
+            f"/messages/packs/{pack_id}/sellers/{seller_id}",
+            params={"tag": "post_sale"},
+            json={
+                "from": {"user_id": _uid(seller_id)},
+                "to": {"user_id": _uid(buyer_id)},
+                "text": texto,
+            },
+        )
+
+    # ── Atendimento: pedido, envio e anúncio no painel da caixa (28/09/2026) ──
+    #
+    # O painel "Pedido" (services/atendimento/enriquecer.py) mostra o que o
+    # Duoke mostra: status, itens com foto, valores, pagamento e envio. SÓ
+    # LEITURA (GET). O comprador e o endereço vêm nas respostas do ML, mas o
+    # enriquecimento não os guarda. Formato medido em produção em 28/09/2026.
+
+    _CAMPOS_ITEM_ATENDIMENTO = (
+        "id,title,price,original_price,thumbnail,secure_thumbnail,permalink,variations"
+    )
+
+    async def _get_com_cabecalhos(
+        self, path: str, *, params: dict | None = None, headers: dict | None = None
+    ) -> httpx.Response:
+        """GET como o `_request` (renova no 401, repete em 429/5xx), com
+        cabeçalhos a mais — o `/shipments` só devolve o formato novo com
+        `x-format-new: true`."""
+        if self._expired():
+            await self.refresh()
+        url = f"{ML_API_BASE}{path}"
+        delay = 1.0
+        for attempt in range(3):
+            cabecalhos = {
+                "Authorization": f"Bearer {self.access_token}",
+                "Accept": "application/json",
+                **(headers or {}),
+            }
+            async with httpx.AsyncClient(timeout=30.0) as c:
+                r = await c.get(url, headers=cabecalhos, params=params)
+            if r.status_code == 401 and attempt == 0:
+                await self.refresh()
+                continue
+            if r.status_code in (429, 502, 503, 504):
+                logger.warning("ml_retry", attempt=attempt + 1, status=r.status_code, path=path)
+                await asyncio.sleep(delay)
+                delay *= 2
+                continue
+            return r
+        return r
+
+    async def pedido(self, order_id: str | int) -> dict:
+        """UM pedido (GET /orders/{id}): itens, valores, pagamentos e o id do
+        envio (`shipping.id`). Levanta em não-2xx (404 = não é pedido desta conta)."""
+        return await self.get_order(str(order_id))
+
+    async def envio(self, shipment_id: str | int) -> dict:
+        """UM envio no formato novo (GET /shipments/{id}, `x-format-new: true`):
+        `status`, `substatus`, `tracking_number`, `tracking_method`,
+        `last_updated`. Levanta em não-2xx."""
+        r = await self._get_com_cabecalhos(
+            f"/shipments/{shipment_id}", headers={"x-format-new": "true"}
+        )
+        r.raise_for_status()
+        return r.json() or {}
+
+    async def itens(self, ids: list[str]) -> list[dict]:
+        """Os anúncios pedidos (GET /items?ids=a,b&attributes=...), de 20 em 20:
+        título, preço, preço original, miniatura (`secure_thumbnail`) e link.
+
+        Devolve o `body` de cada anúncio que o ML achou (`code` 200); os outros
+        ficam de fora. Levanta em não-2xx da chamada inteira."""
+        unicos = [str(i).strip() for i in dict.fromkeys(ids) if str(i or "").strip()]
+        saida: list[dict] = []
+        for inicio in range(0, len(unicos), 20):
+            lote = unicos[inicio : inicio + 20]
+            r = await self._request(
+                "GET",
+                "/items",
+                params={"ids": ",".join(lote), "attributes": self._CAMPOS_ITEM_ATENDIMENTO},
+            )
+            r.raise_for_status()
+            corpo = r.json()
+            for entrada in corpo if isinstance(corpo, list) else []:
+                if not isinstance(entrada, dict) or entrada.get("code") != 200:
+                    continue
+                body = entrada.get("body")
+                if isinstance(body, dict):
+                    saida.append(body)
+        return saida
+
+    # ── Atendimento: o cartão "Cliente" da caixa (28/09/2026) ──
+    #
+    # Quem escreve já comprou? Quanto? Avaliou mal? O ML filtra pedido por
+    # comprador (medido em 28/09: `buyer=` devolve só os dele), então o cartão
+    # (services/atendimento/cliente.py) pergunta AO VIVO, com cache de 2 h.
+    # SÓ LEITURA. A resposta traz nome e apelido do comprador: quem chama
+    # guarda só número, data, valor, status e itens.
+
+    async def pedidos_do_comprador(
+        self, buyer_id: str | int, *, limit: int = 50, offset: int = 0
+    ) -> dict:
+        """Os pedidos da conta feitos por UM comprador, mais novos primeiro
+        (GET /orders/search?seller=<uid>&buyer=<buyer_id>&sort=date_desc).
+
+        Devolve `{results: [pedido...], paging: {total, offset, limit}}` como
+        veio. O vendedor é o `creds["user_id"]` (gravado no primeiro /users/me);
+        sem ele, `ValueError`. Levanta em não-2xx."""
+        seller = str((self.creds or {}).get("user_id") or "").strip()
+        if not seller:
+            raise ValueError("pedidos_do_comprador: conta sem user_id")
+        r = await self._request(
+            "GET",
+            "/orders/search",
+            params={
+                "seller": seller,
+                "buyer": str(buyer_id),
+                "sort": "date_desc",
+                "limit": max(1, min(int(limit), 50)),
+                "offset": max(0, int(offset)),
+            },
+        )
+        r.raise_for_status()
+        return r.json() or {}
+
+    async def feedback_do_pedido(self, order_id: str | int) -> dict | None:
+        """A avaliação da venda (GET /orders/{id}/feedback), ou None quando não
+        houve — o ML responde 404 para venda sem avaliação (medido em 28/09).
+        Devolve o corpo como veio (`{sale, purchase}`: cada lado com `rating`
+        positive|neutral|negative, `message`, `reply`, `date_created`, `from`,
+        `to`). Levanta nos outros não-2xx."""
+        r = await self._request("GET", f"/orders/{order_id}/feedback")
+        if r.status_code == 404:
+            return None
+        r.raise_for_status()
+        corpo = r.json()
+        return corpo if isinstance(corpo, dict) else {}
+
 
 # ---------------------------------------------------------------- helpers
 #

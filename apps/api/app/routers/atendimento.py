@@ -1,0 +1,2881 @@
+"""Pós-venda › Atendimento: a caixa única de Shopee, ML, TikTok e Amazon (25/09/2026).
+
+"O Duoke nosso" (plano em `docs/atendimento-unificado.md`). A tela lê a fila,
+abre a conversa com o pedido ao lado, mostra a sugestão da IA e responde —
+sempre pelo `services/atendimento/enviar.py`, o caminho único de saída.
+
+Permissão: recurso `atendimento` — view lê, edit responde e mexe no manual
+e nas respostas prontas, delete apaga regra/modelo. Modo `auto` (a IA envia
+sozinha) só admin liga — e, com alguma loja em `auto`, só admin mexe nas
+regras do manual que valem para ela (a regra muda o que sai sozinho).
+
+SÓ ADMIN POR ENQUANTO (Eduardo, 30/09/2026): enquanto a caixa estiver no
+primeiro teste em produção, só observando, TODAS as rotas deste router
+exigem admin (`SO_ADMIN`, logo abaixo do `router`), mesmo para quem tiver o
+recurso `atendimento`. As permissões finas (view/edit/delete) continuam nas
+rotas e passam a valer quando `SO_ADMIN` voltar para False.
+
+ESCOPO POR EQUIPE: como Integrações e Anúncios, pela `integration_id` da
+conversa/canal (`deps/team_scope.py`). Admin e quem não tem equipe veem
+tudo; quem tem equipe vê só as lojas dela. As DMs do Instagram não são de
+loja nenhuma (são das marcas): só aparecem para quem vê tudo.
+
+A lista mistura as conversas do marketplace com as DMs do Instagram (id
+`ig:<uuid>`, SÓ LEITURA), paginando as duas pela mesma chave
+(`ultima_mensagem_em < antes_de`).
+
+O cérebro (validador, contexto, ia) é importado na hora de usar: o app
+carrega este router sempre, e ele não precisa do cérebro para subir.
+
+Tela "igual ao Duoke" (28/09/2026): a barra de lojas vem do /resumo (toda
+loja conectada, com as não lidas da plataforma e a saúde do canal); o
+detalhe traz o retrato do pedido na plataforma (`pedido_mkt`) e o cartão do
+anúncio (`produto`), guardados em `conversa.dados` pelo enriquecimento
+(`services/atendimento/enriquecer.py`), e as sugestões da IA que não saíram
+pelo DaVinci com a resposta real ao lado — o "IA × equipe" do primeiro teste
+em produção, só observando (quem responde é o Duoke).
+
+Parte 2 (28/09/2026): a caixa mostra o nome da LOJA, não o da integração
+(`lojas.nome_da_loja`: "mega" → "Marquezini", como no Duoke); o detalhe
+traz o cartão "Cliente" (`cliente.cartao_cliente`: histórico de compra,
+avaliações, perguntas antes de comprar, sinais) e diz se o "atualizar" do
+pedido tem o que fazer; o manual ganha tipo/categoria/prioridade, e a API
+não deixa nascer regra batendo com regra (`manual.conflitos_da_regra` →
+409 `regra_conflitante`). Esses três módulos também entram na hora de usar,
+pelo nome: sem eles o router sobe e a tela cai no que já tinha.
+"""
+
+from __future__ import annotations
+
+import importlib
+import re
+import statistics
+from datetime import UTC, datetime, timedelta
+from math import ceil
+from typing import Annotated, Any
+from urllib.parse import urlsplit
+from uuid import UUID
+
+import structlog
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi.encoders import jsonable_encoder
+from sqlalchemy import and_, case, exists, false, func, or_, select, text, true
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
+
+from app import worker_pool
+from app.config import get_settings
+from app.db import get_session
+from app.deps.auth import require_active_user, require_permission
+from app.deps.team_scope import TeamScope, resolve_team_scope
+from app.models import (
+    AtendimentoAvaliacao,
+    AtendimentoCanal,
+    AtendimentoConversa,
+    AtendimentoMensagem,
+    AtendimentoModelo,
+    AtendimentoRascunho,
+    AtendimentoRegra,
+    Integration,
+    User,
+    UserRole,
+)
+from app.redis_client import redis
+from app.schemas.atendimento import (
+    AvaliacaoIn,
+    AvaliacaoOut,
+    AvaliacaoResumoOut,
+    AvaliacaoUnicaOut,
+    CanalOut,
+    CanalPatch,
+    CategoriaOut,
+    ConferirIn,
+    ConferirOut,
+    ConversaDetalheOut,
+    ConversaOut,
+    ConversaPatch,
+    ConversaUnicaOut,
+    DescartarIn,
+    EnvioOut,
+    FlagsOut,
+    ListaConversasOut,
+    ListaRegrasOut,
+    LojaResumoOut,
+    MensagemOut,
+    MetricaIaOut,
+    MetricaLojaOut,
+    MetricasOut,
+    ModeloIn,
+    ModeloOut,
+    ModeloPatch,
+    PedidoAtualizarOut,
+    PlataformaResumoOut,
+    RascunhoOut,
+    RascunhoUnicoOut,
+    RegraIn,
+    RegraOut,
+    RegraPatch,
+    ResponderIn,
+    ResponderOut,
+    RespostaRealOut,
+    ResumoOut,
+    SincronizarOut,
+    SugestaoOut,
+)
+from app.services.atendimento import clientes, enviar, gravar, instagram, robo
+from app.services.atendimento.constantes import (
+    ACAO_OBSERVOU,
+    AUTOR_CLIENTE,
+    AUTOR_LOJA,
+    CANAIS_POR_PLATAFORMA,
+    CANAL_EMAIL,
+    CATEGORIAS,
+    CATEGORIAS_INFO,
+    CATEGORIAS_SO_HUMANO,
+    CONVERSA_ABERTA,
+    CONVERSA_FECHADA,
+    MODO_AUTO,
+    MODO_OBSERVAR,
+    MSG_ENVIADA,
+    MSG_FALHOU,
+    MSG_REVISAR,
+    ORIGEM_HUMANO,
+    ORIGENS_DAVINCI,
+    PLATAFORMAS,
+    PLATAFORMAS_CAIXA,
+    PLATAFORMAS_ROBO,
+    PRIORIDADE_REGRA_PADRAO,
+    RASCUNHO_BLOQUEADO,
+    RASCUNHO_DESCARTADO,
+    RASCUNHO_EDITADO,
+    RASCUNHO_ENVIADO,
+    RASCUNHO_PENDENTE,
+    RASCUNHO_SUBSTITUIDO,
+    STATUS_CANAL_PARADO,
+    STATUS_CANAL_SESSAO_CAIU,
+    TIPO_REGRA_CATEGORIA,
+    limite_caracteres,
+    sla_horas,
+)
+from app.services.atendimento.enviar import EnvioRecusado
+
+logger = structlog.get_logger()
+
+# Só admin por enquanto (Eduardo, 30/09/2026): a primeira subida é só
+# observação. Vale para todas as rotas deste router, antes da permissão fina
+# de cada uma, e responde o mesmo 403 `admin_only` do `require_admin`. O
+# /api/atendimento/robo/* é outro router (atendimento_robo.py), com token
+# próprio, e não passa por aqui. Para abrir para a equipe: SO_ADMIN = False
+# e, no web, o recurso volta para a tela de Permissões (RESOURCE_GROUPS do
+# composables/useCan.ts), o item do menu volta para `resource: 'atendimento'`
+# (components/AppSidebar.vue) e a página volta para o middleware
+# `permission` (pages/atendimento.vue).
+SO_ADMIN = True
+
+
+async def _so_admin(user: Annotated[User, Depends(require_active_user)]) -> User:
+    if SO_ADMIN and user.role != UserRole.ADMIN:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail={"code": "admin_only"})
+    return user
+
+
+router = APIRouter(
+    prefix="/api/atendimento", tags=["atendimento"], dependencies=[Depends(_so_admin)]
+)
+
+_view = require_permission("atendimento", "view")
+_edit = require_permission("atendimento", "edit")
+_delete = require_permission("atendimento", "delete")
+
+FILTROS = (
+    "todas",
+    "aguardando",
+    "vencendo",
+    "vencidas",
+    "com_rascunho",
+    "a_conferir",
+    "minhas",
+    "fechadas",
+)
+# "Vencendo" = prazo da plataforma em menos de 2 h (e ainda não vencido).
+VENCENDO = timedelta(hours=2)
+MAX_MENSAGENS_DETALHE = 300
+
+# Botão "Sincronizar": um pedido por minuto basta — o cron já lê a cada 2.
+CHAVE_SINCRONIZAR = "atendimento:sincronizar:manual"
+TRAVA_SINCRONIZAR_S = 60
+
+# Métricas: quanto antes do período ler para saber se o primeiro "turno" do
+# cliente dentro dele começou lá atrás (e então não é dele).
+_MARGEM_METRICAS = timedelta(days=3)
+
+_ACAO_PELO_STATUS = {
+    RASCUNHO_ENVIADO: "enviou_igual",
+    RASCUNHO_EDITADO: "editou",
+    RASCUNHO_DESCARTADO: "descartou",
+    RASCUNHO_SUBSTITUIDO: "escreveu_do_zero",
+    RASCUNHO_BLOQUEADO: "descartou",
+}
+# `ACAO_OBSERVOU` (constantes) = nota dada a uma sugestão AINDA pendente
+# (modo observação: nada sai pelo DaVinci, a pessoa só diz se a IA acertou).
+# Não é "enviou"/"editou" — nada saiu; o que ensina é a NOTA: o 👍 faz o
+# texto da sugestão virar exemplo aprovado, o 👎 com correção vira correção
+# no prompt (parte 2, P3, em `ia.py`). Quando a sugestão sai da caixa (a loja
+# respondeu por fora, alguém descartou), a próxima nota promove a ação à de
+# verdade — e o envio pelo DaVinci também promove (enviar._avaliar_rascunho).
+
+# Sugestões que NÃO saíram pelo DaVinci: o que a IA teria respondido.
+_STATUS_SUGESTAO = (
+    RASCUNHO_PENDENTE,
+    RASCUNHO_SUBSTITUIDO,
+    RASCUNHO_BLOQUEADO,
+    RASCUNHO_DESCARTADO,
+)
+MAX_SUGESTOES_DETALHE = 50
+
+# Da pior para a melhor. A loja aparece na barra com o PIOR estado dos canais
+# dela: o ML com a pós-venda sem permissão não está sendo lido por inteiro.
+# `parado`/`sessao_caiu` só nas lojas do robô do Mac mini (Temu/AliExpress):
+# o robô sem sinal é o pior — a loja inteira não está sendo lida.
+_GRAVIDADE_STATUS = (
+    STATUS_CANAL_PARADO,
+    STATUS_CANAL_SESSAO_CAIU,
+    "sem_escopo",
+    "erro",
+    "desligado",
+    "novo",
+    "ok",
+)
+_ROTULO_CANAL = {
+    "chat": "Chat",
+    "pergunta": "Perguntas",
+    "pos_venda": "Pós-venda",
+    "email": "E-mail",
+}
+
+# Botão "atualizar" do painel Pedido: uma ida à loja por conversa por minuto.
+# O retrato já se renova sozinho a cada 30 min no sync; o botão é para a
+# pessoa que está com o cliente na frente — não para virar rajada na API.
+PLATAFORMAS_COM_PEDIDO = ("shopee", "ml")
+TRAVA_PEDIDO_S = 60
+_ENRIQUECER = "app.services.atendimento.enriquecer"
+# A trava por conversa não segura quem percorre a lista clicando (ou um
+# script com a sessão de alguém): 200 conversas × até 3 GET na mesma loja em
+# segundos, e de novo a cada minuto. Então há também um teto por LOJA (é
+# onde a API da plataforma conta) e por PESSOA, por minuto. Acima dele, o
+# painel fica com o retrato que tem (`motivo="limite"`), sem ir à loja.
+LIMITE_PEDIDO_POR_LOJA = 10
+LIMITE_PEDIDO_POR_PESSOA = 20
+JANELA_LIMITE_PEDIDO_S = 60
+# O status do canal que o sync nem lê (`sync.STATUS_DESLIGADO`; o router não
+# importa o sync ao subir).
+_CANAL_DESLIGADO = "desligado"
+
+# Parte 2: módulos de outros lotes, importados na hora de usar e pelo NOME
+# (como o enriquecimento) — o router sobe sem eles, e o teste troca o módulo
+# inteiro em `sys.modules`.
+_LOJAS = "app.services.atendimento.lojas"
+_CLIENTE = "app.services.atendimento.cliente"
+_MANUAL = "app.services.atendimento.manual"
+# Trava da TRANSAÇÃO de quem grava regra: a conferência de conflito e o
+# INSERT/UPDATE ficam juntos. Sem ela, dois "Salvar" ao mesmo tempo (duas
+# abas, o importador do manual rodando) passavam os dois pela conferência e
+# nasciam as duas regras que batem. O importador deve pegar a mesma chave.
+TRAVA_REGRAS = "atendimento:regras"
+
+
+def _chave_pedido(conversa_id: UUID) -> str:
+    return f"atd:pedido:atualizar:{conversa_id}"
+
+
+def _chave_limite_loja(integration_id: UUID) -> str:
+    return f"atd:pedido:atualizar:loja:{integration_id}"
+
+
+def _chave_limite_pessoa(user_id: UUID) -> str:
+    return f"atd:pedido:atualizar:pessoa:{user_id}"
+
+
+# ── Ajudantes ─────────────────────────────────────────────────────────────
+
+
+def _nome(user: User | None) -> str | None:
+    if user is None:
+        return None
+    return (user.name or user.email or "").strip() or None
+
+
+def _utc(quando: datetime | None) -> datetime | None:
+    if quando is None:
+        return None
+    return quando if quando.tzinfo else quando.replace(tzinfo=UTC)
+
+
+def _no_escopo(scope: TeamScope, integration_id: UUID | None) -> bool:
+    return scope.unrestricted or (
+        integration_id is not None and integration_id in scope.integration_ids
+    )
+
+
+def _clausula_escopo(scope: TeamScope, coluna):
+    """WHERE da equipe sobre uma coluna `integration_id`; None = sem filtro."""
+    if scope.unrestricted:
+        return None
+    if not scope.integration_ids:
+        return false()
+    return coluna.in_(scope.integration_ids)
+
+
+async def _nomes(session: AsyncSession, ids: set[UUID | None]) -> dict[UUID, str | None]:
+    ids = {i for i in ids if i is not None}
+    if not ids:
+        return {}
+    return {
+        u.id: _nome(u)
+        for u in (await session.execute(select(User).where(User.id.in_(ids)))).scalars()
+    }
+
+
+def _modulo(nome: str) -> Any:
+    """O módulo pelo nome, na hora de usar; None se ele (ainda) não existe."""
+    try:
+        return importlib.import_module(nome)
+    except ImportError as e:
+        logger.warning("atendimento_modulo_ausente", modulo=nome, err=type(e).__name__)
+        return None
+
+
+async def _nomes_das_lojas(session: AsyncSession, ids: set[UUID | None]) -> dict[UUID, str]:
+    """O nome da LOJA de cada integração — o que o Duoke mostra (parte 2, P2).
+
+    A integração "mega" é a loja "Shopee Marquezini", que o Duoke chama de
+    "Marquezini": quem atende reconhece a loja, não o apelido da conexão.
+    Achar a loja ligada e tirar o prefixo da plataforma é com
+    `lojas.nome_da_loja` (uma função só, a mesma que grava `conversa.conta`
+    no sync); aqui ela é chamada uma vez por integração da resposta — assim a
+    conversa antiga e a loja renomeada saem com o nome de hoje.
+
+    Sem o módulo, ou se ele falhar, fica o nome da integração: o nome nunca
+    derruba a fila. O SAVEPOINT impede que uma consulta que falhe lá dentro
+    deixe a transação abortada para o resto da resposta. Quem chama lê os
+    atributos dos objetos ANTES (o rollback do SAVEPOINT pode expirá-los).
+    """
+    ids = {i for i in ids if i is not None}
+    if not ids:
+        return {}
+    integracoes = list(
+        (await session.execute(select(Integration).where(Integration.id.in_(ids)))).scalars()
+    )
+    nomes = {i.id: i.name for i in integracoes}
+    lojas_svc = _modulo(_LOJAS)
+    if lojas_svc is None:
+        return nomes
+    try:
+        async with session.begin_nested():
+            for integ in integracoes:
+                nome = await lojas_svc.nome_da_loja(session, integ)
+                if isinstance(nome, str) and nome.strip():
+                    nomes[integ.id] = nome.strip()
+    except Exception as e:  # noqa: BLE001 — fica o nome da integração
+        logger.warning("atendimento_nome_da_loja_falhou", err=type(e).__name__)
+    return nomes
+
+
+async def _com_nome_da_loja(session: AsyncSession, itens: list[dict[str, Any]]) -> None:
+    """Troca `conta` pelo nome da loja nas linhas da lista (as do Instagram ficam)."""
+    nomes = await _nomes_das_lojas(
+        session, {i.get("integration_id") for i in itens if not i.get("somente_leitura")}
+    )
+    for item in itens:
+        nome = nomes.get(item.get("integration_id"))
+        if nome and not item.get("somente_leitura"):
+            item["conta"] = nome
+
+
+def _recusa_http(e: EnvioRecusado) -> HTTPException:
+    """Trava do envio → 409 (texto reprovado → 422), com o `code` estável."""
+    codigo = 422 if e.code == enviar.RECUSA_TEXTO_INVALIDO else 409
+    return HTTPException(codigo, detail={"code": e.code, "detail": e.detail})
+
+
+def _somente_leitura() -> HTTPException:
+    return _recusa_http(
+        EnvioRecusado(
+            enviar.RECUSA_SOMENTE_LEITURA,
+            "Instagram é só leitura aqui: responda pela caixa de entrada do Instagram.",
+        )
+    )
+
+
+def _uuid_ou_404(texto: str, code: str) -> UUID:
+    try:
+        return UUID(str(texto))
+    except ValueError as e:
+        raise HTTPException(404, detail={"code": code}) from e
+
+
+async def _conversa_ou_404(
+    session: AsyncSession, conversa_id: str, scope: TeamScope
+) -> AtendimentoConversa:
+    uid = _uuid_ou_404(conversa_id, "conversa_nao_encontrada")
+    c = await session.get(AtendimentoConversa, uid)
+    if c is None or not _no_escopo(scope, c.integration_id):
+        raise HTTPException(404, detail={"code": "conversa_nao_encontrada"})
+    return c
+
+
+def _pendente_existe():
+    return (
+        exists()
+        .where(
+            AtendimentoRascunho.conversa_id == AtendimentoConversa.id,
+            AtendimentoRascunho.status == RASCUNHO_PENDENTE,
+        )
+        .correlate(AtendimentoConversa)
+    )
+
+
+def _a_conferir_existe():
+    """Há resposta NOSSA em `revisar` (pode ter saído): alguém precisa conferir.
+
+    Ela conta como resposta (a conversa sai da fila para ninguém responder por
+    cima), então sem este sinal a conversa sumiria sem ninguém saber se o
+    comprador recebeu — timeout, deploy no meio do envio, envio automático.
+    """
+    return (
+        exists()
+        .where(
+            AtendimentoMensagem.conversa_id == AtendimentoConversa.id,
+            AtendimentoMensagem.status == MSG_REVISAR,
+            AtendimentoMensagem.origem.in_(ORIGENS_DAVINCI),
+        )
+        .correlate(AtendimentoConversa)
+    )
+
+
+def _ultimo_tipo():
+    """O tipo da última mensagem da conversa (subconsulta correlacionada).
+
+    Sem coluna própria: a lista mostra 50 conversas por vez, e o índice por
+    `conversa_id` acha a última de cada uma sem varrer. Mesma ordem do
+    detalhe (relógio da plataforma; sem ele, quando a linha nasceu).
+    """
+    momento = func.coalesce(AtendimentoMensagem.enviada_em, AtendimentoMensagem.created_at)
+    return (
+        select(AtendimentoMensagem.tipo)
+        .where(AtendimentoMensagem.conversa_id == AtendimentoConversa.id)
+        .order_by(momento.desc(), AtendimentoMensagem.created_at.desc())
+        .limit(1)
+        .correlate(AtendimentoConversa)
+        .scalar_subquery()
+    )
+
+
+def _do_dados(c: AtendimentoConversa, chave: str) -> dict[str, Any] | None:
+    """Um cartão guardado em `conversa.dados` (pedido_mkt, produto); formato estranho → None."""
+    valor = (c.dados or {}).get(chave) if isinstance(c.dados, dict) else None
+    return dict(valor) if isinstance(valor, dict) and valor else None
+
+
+# Os mesmos hosts que o leitor da caixa aceita ao gravar
+# (`amazon_email._links_do_rodape`). Aqui é o cinto da saída: `conversa.dados`
+# é JSON livre, e o que sai daqui vira botão/link que a pessoa clica.
+_HOSTS_SELLER_CENTRAL = frozenset({"sellercentral.amazon.com.br", "sellercentral.amazon.com"})
+# Id do caso (o real é um UUID): letra, dígito e hífen — nada que mexa no
+# resto da URL que a tela monta com ele.
+_RE_CASO_AMAZON = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{7,63}")
+
+
+def _link_seller_central(valor: Any) -> str | None:
+    """O link como veio, se for https do próprio Seller Central; senão None.
+
+    Nada de "consertar" o link: o "não precisa de resposta" é assinado
+    (`h=`), e mexer nele o invalida.
+    """
+    if not isinstance(valor, str) or not valor.strip():
+        return None
+    link = valor.strip()
+    try:
+        partes = urlsplit(link)
+    except ValueError:
+        return None
+    if (
+        partes.scheme != "https"
+        or partes.hostname not in _HOSTS_SELLER_CENTRAL
+        or partes.username
+        or partes.password
+    ):
+        return None
+    return link
+
+
+def _copia_a_conferir(c: AtendimentoConversa) -> datetime | None:
+    """Quando a Central respondeu alguém com o nome desta conversa — se ainda vale avisar.
+
+    O leitor da caixa (`amazon_email._marcar_a_conferir`) marca as conversas
+    do mesmo nome quando a cópia da resposta do Seller Central empata entre
+    duas ou mais: nenhuma sai da fila (seria chute), mas a pessoa precisa
+    saber que talvez já tenha sido respondida. Só enquanto a conversa aguarda
+    e nenhuma pergunta MAIS NOVA que a cópia chegou — depois disso o aviso é
+    sobre outra pergunta.
+    """
+    aviso = c.dados.get("amazon_copia_a_conferir") if isinstance(c.dados, dict) else None
+    em = aviso.get("em") if isinstance(aviso, dict) else None
+    if not isinstance(em, str) or not c.aguardando_resposta:
+        return None
+    try:
+        quando = _utc(datetime.fromisoformat(em))
+    except ValueError:
+        return None
+    do_cliente = _utc(c.ultima_do_cliente_em)
+    if quando is None or (do_cliente is not None and do_cliente > quando):
+        return None
+    return quando
+
+
+def _links_amazon(c: AtendimentoConversa) -> dict[str, Any]:
+    """Os links do rodapé do e-mail da Amazon para o cabeçalho da conversa.
+
+    Outra plataforma (ou `dados` estranho) → tudo None: a tela esconde os
+    botões. Quem grava é `amazon_email._dados_do_email` (e, o aviso da
+    cópia ambígua, `amazon_email._marcar_a_conferir`).
+    """
+    vazio: dict[str, Any] = {
+        "amazon_link_sem_resposta": None,
+        "amazon_link_caso": None,
+        "amazon_caso_id": None,
+        "amazon_copia_a_conferir_em": None,
+    }
+    if c.plataforma != "amazon" or not isinstance(c.dados, dict):
+        return vazio
+    caso_id = c.dados.get("amazon_caso_id")
+    caso_id = caso_id.strip() if isinstance(caso_id, str) else None
+    return {
+        "amazon_link_sem_resposta": _link_seller_central(c.dados.get("amazon_link_sem_resposta")),
+        "amazon_link_caso": _link_seller_central(c.dados.get("amazon_link_caso")),
+        "amazon_caso_id": caso_id if caso_id and _RE_CASO_AMAZON.fullmatch(caso_id) else None,
+        "amazon_copia_a_conferir_em": _copia_a_conferir(c),
+    }
+
+
+def _resumo_dict(
+    c: AtendimentoConversa,
+    *,
+    tem_rascunho: bool,
+    atribuido_nome: str | None,
+    a_conferir: bool = False,
+    ultimo_tipo: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "id": str(c.id),
+        "plataforma": c.plataforma,
+        "canal": c.canal,
+        "conta": c.conta,
+        "integration_id": c.integration_id,
+        "comprador_nome": c.comprador_nome,
+        "comprador_avatar": c.comprador_avatar,
+        "pedido_marketplace": c.pedido_marketplace,
+        "anuncio_titulo": c.anuncio_titulo,
+        "ultima_mensagem_em": _utc(c.ultima_mensagem_em),
+        "ultima_mensagem_resumo": c.ultima_mensagem_resumo,
+        "ultima_mensagem_tipo": gravar.tipo_previa(ultimo_tipo),
+        "ultima_autor": c.ultima_autor,
+        "aguardando_resposta": c.aguardando_resposta,
+        "prazo_resposta_em": _utc(c.prazo_resposta_em),
+        "situacao": c.situacao,
+        "nao_lidas": c.nao_lidas or 0,
+        "tem_rascunho": bool(tem_rascunho),
+        "atribuido_a": c.atribuido_a,
+        "atribuido_a_nome": atribuido_nome,
+        "ia_pausada": c.ia_pausada,
+        "sem_resposta_necessaria": c.sem_resposta_necessaria,
+        "somente_leitura": False,
+        "envio_a_conferir": bool(a_conferir),
+    }
+
+
+async def _conversa_out(session: AsyncSession, c: AtendimentoConversa) -> ConversaOut:
+    tem = bool(
+        await session.scalar(
+            select(AtendimentoRascunho.id)
+            .where(
+                AtendimentoRascunho.conversa_id == c.id,
+                AtendimentoRascunho.status == RASCUNHO_PENDENTE,
+            )
+            .limit(1)
+        )
+    )
+    a_conferir = bool(
+        await session.scalar(
+            select(AtendimentoMensagem.id)
+            .where(
+                AtendimentoMensagem.conversa_id == c.id,
+                AtendimentoMensagem.status == MSG_REVISAR,
+                AtendimentoMensagem.origem.in_(ORIGENS_DAVINCI),
+            )
+            .limit(1)
+        )
+    )
+    nomes = await _nomes(session, {c.atribuido_a})
+    ultimo_tipo = await session.scalar(
+        select(_ultimo_tipo()).where(AtendimentoConversa.id == c.id)
+    )
+    base = _resumo_dict(
+        c,
+        tem_rascunho=tem,
+        atribuido_nome=nomes.get(c.atribuido_a),
+        a_conferir=a_conferir,
+        ultimo_tipo=ultimo_tipo,
+    )
+    base.update(
+        comprador_id=c.comprador_id,
+        anuncio_id=c.anuncio_id,
+        bloqueio_motivo=c.bloqueio_motivo,
+        pode_enviar_ate=_utc(c.pode_enviar_ate),
+        # Vai também no PATCH e no "conferir" (mesmo `_conversa_out`): a tela
+        # junta com spread, e o link do caso não pode sumir depois de um clique.
+        **_links_amazon(c),
+    )
+    # O cabeçalho com o nome da loja (lido DEPOIS dos atributos: ver
+    # `_nomes_das_lojas`).
+    await _com_nome_da_loja(session, [base])
+    return ConversaOut(**base)
+
+
+def _simulado(m: AtendimentoMensagem) -> bool:
+    """Esta resposta "saiu" pelo simulador (só local) — não chegou a ninguém.
+
+    Vem do que o envio gravou (`payload.envio.simulador`), não da chave de
+    hoje: com o simulador ligado e a Amazon na exceção, a resposta da Amazon
+    CHEGA ao comprador, e a tela não pode dizer o contrário.
+    """
+    envio = (m.payload or {}).get("envio") if isinstance(m.payload, dict) else None
+    return isinstance(envio, dict) and envio.get("simulador") is True
+
+
+def _mensagem_out(
+    m: AtendimentoMensagem, *, conversa: AtendimentoConversa, nomes: dict[UUID, str | None]
+) -> MensagemOut:
+    if m.autor == AUTOR_CLIENTE:
+        autor_nome = conversa.comprador_nome
+    elif m.origem == ORIGEM_HUMANO:
+        autor_nome = nomes.get(m.autor_user_id) if m.autor_user_id else None
+    else:
+        autor_nome = None
+    return MensagemOut(
+        id=str(m.id),
+        autor=m.autor,
+        origem=m.origem,
+        autor_nome=autor_nome,
+        tipo=m.tipo,
+        texto=m.texto,
+        anexos=list(m.anexos or []),
+        # Resposta que não saiu não tem relógio da plataforma: vale a hora
+        # em que a pessoa apertou "Enviar".
+        enviada_em=_utc(m.enviada_em or m.created_at),
+        status=m.status,
+        erro=m.erro,
+        simulado=_simulado(m),
+    )
+
+
+def _rascunho_out(r: AtendimentoRascunho | None) -> RascunhoOut | None:
+    if r is None:
+        return None
+    return RascunhoOut(
+        id=r.id,
+        texto=r.texto,
+        categoria=r.categoria,
+        confianca=r.confianca,
+        precisa_humano=r.precisa_humano,
+        motivo=r.motivo,
+        validador_erros=list(r.validador_erros or []),
+        status=r.status,
+        created_at=_utc(r.created_at),
+    )
+
+
+def _canal_out(
+    canal: AtendimentoCanal, conta: str | None, *, integracao: str | None = None
+) -> CanalOut:
+    status_canal, ultimo_erro = canal.status, canal.ultimo_erro
+    if robo.eh_do_robo(canal):
+        # Loja do robô do Mac mini (sem integração): o nome vem da config do
+        # robô, e a saúde é calculada AGORA — sem pulso há minutos é `parado`
+        # (o robô morto não avisa que morreu).
+        status_canal, ultimo_erro = robo.status_efetivo(canal)
+        conta = conta or robo.nome_da_loja(canal)
+        integracao = integracao or f"robô do Mac mini · perfil {canal.robo_perfil_id}"
+    return CanalOut(
+        id=canal.id,
+        integration_id=canal.integration_id,
+        robo_perfil_id=canal.robo_perfil_id,
+        plataforma=canal.plataforma,
+        canal=canal.canal,
+        conta=conta,
+        integracao=integracao,
+        modo=canal.modo,
+        status=status_canal,
+        nao_lidas_plataforma=canal.nao_lidas_plataforma,
+        ultimo_ok_em=_utc(canal.ultimo_ok_em),
+        ultimo_erro_em=_utc(canal.ultimo_erro_em),
+        ultimo_erro=ultimo_erro,
+        auto_categorias=list(canal.auto_categorias or []),
+        sla_horas=sla_horas(canal.plataforma, canal.canal),
+        limite_caracteres=limite_caracteres(canal.plataforma, canal.canal),
+    )
+
+
+async def _canais(session: AsyncSession, scope: TeamScope) -> list[CanalOut]:
+    """Os canais do escopo, com o nome da LOJA (e o da integração ao lado).
+
+    OUTER join: o canal das lojas do robô (Temu/AliExpress) não tem integração
+    — e, como a conversa sem integração, só aparece para quem vê tudo.
+    """
+    consulta = select(AtendimentoCanal, Integration.name).outerjoin(
+        Integration, Integration.id == AtendimentoCanal.integration_id
+    )
+    cond = _clausula_escopo(scope, AtendimentoCanal.integration_id)
+    if cond is not None:
+        consulta = consulta.where(cond)
+    canais = [
+        _canal_out(c, nome, integracao=nome) for c, nome in (await session.execute(consulta)).all()
+    ]
+    nomes = await _nomes_das_lojas(session, {c.integration_id for c in canais})
+    for c in canais:
+        c.conta = nomes.get(c.integration_id) or c.conta
+    return sorted(
+        canais,
+        key=lambda c: (
+            c.plataforma,
+            (c.conta or "").lower(),
+            (c.integracao or "").lower(),
+            str(c.integration_id),
+            c.canal,
+        ),
+    )
+
+
+def _validar_par(plataforma: str | None, canal: str | None) -> None:
+    """Canal tem que existir na plataforma (o ML não tem `chat`, a Shopee não tem `pergunta`)."""
+    if plataforma and canal and canal not in CANAIS_POR_PLATAFORMA.get(plataforma, ()):
+        raise HTTPException(422, detail={"code": "canal_invalido"})
+
+
+def _escapar_like(termo: str) -> str:
+    return termo.replace("\\", "\\\\").replace("%", r"\%").replace("_", r"\_")
+
+
+# ── Resumo ────────────────────────────────────────────────────────────────
+
+
+def _gravidade(status_canal: str) -> int:
+    # Estado desconhecido (vocabulário novo que o router ainda não conhece)
+    # conta como erro: melhor a loja aparecer com alerta do que "tudo certo".
+    if status_canal in _GRAVIDADE_STATUS:
+        return _GRAVIDADE_STATUS.index(status_canal)
+    return _GRAVIDADE_STATUS.index("erro")
+
+
+def _motivo_do_status(canal: CanalOut) -> str | None:
+    """Por que o canal não está sendo lido — para o `title` da barra de lojas."""
+    erro = (canal.ultimo_erro or "").strip()[:200]
+    if canal.status == "ok":
+        return None
+    if canal.status == "sem_escopo":
+        texto = (
+            "Sem permissão de atendimento na plataforma (reautorize a loja com o escopo "
+            "de mensagens)"
+        )
+    elif canal.status == "desligado":
+        texto = "Leitura desligada para esta loja"
+    elif canal.status == STATUS_CANAL_PARADO:
+        texto = "Leitura parada"
+    elif canal.status == STATUS_CANAL_SESSAO_CAIU:
+        texto = "O Seller Center saiu da conta no AdsPower"
+    elif canal.status == "novo":
+        texto = "Ainda não foi lida"
+    else:
+        texto = "A última leitura falhou"
+    return f"{texto}: {erro}" if erro and canal.status != "novo" else texto
+
+
+def _saude_da_loja(canais: list[CanalOut]) -> tuple[str, str | None]:
+    """O pior estado entre os canais da loja e o porquê (com o canal, se há mais de um)."""
+    pior = min(canais, key=lambda c: _gravidade(c.status))
+    motivo = _motivo_do_status(pior)
+    if motivo and len(canais) > 1:
+        motivo = f"{_ROTULO_CANAL.get(pior.canal, pior.canal)}: {motivo}"
+    return pior.status, motivo
+
+
+@router.get("/resumo", response_model=ResumoOut)
+async def resumo(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(_view)],
+) -> ResumoOut:
+    """Contadores da fila (por plataforma e por loja), saúde dos canais e as chaves."""
+    scope = await resolve_team_scope(session, user)
+    agora = datetime.now(UTC)
+    aguardando = AtendimentoConversa.aguardando_resposta.is_(True)
+    prazo = AtendimentoConversa.prazo_resposta_em
+    vencendo = and_(aguardando, prazo >= agora, prazo < agora + VENCENDO)
+    vencidas = and_(aguardando, prazo < agora)
+    cond = _clausula_escopo(scope, AtendimentoConversa.integration_id)
+
+    nao_lidas = func.coalesce(func.sum(AtendimentoConversa.nao_lidas), 0)
+
+    q_plat = select(
+        AtendimentoConversa.plataforma,
+        func.count().filter(aguardando),
+        func.count().filter(vencendo),
+        func.count().filter(vencidas),
+        func.count().filter(_a_conferir_existe()),
+        nao_lidas,
+    ).group_by(AtendimentoConversa.plataforma)
+    if cond is not None:
+        q_plat = q_plat.where(cond)
+    por_plataforma = {
+        p: PlataformaResumoOut(
+            plataforma=p,
+            aguardando=a or 0,
+            vencendo=v or 0,
+            vencidas=x or 0,
+            a_conferir=r or 0,
+            nao_lidas=int(n or 0),
+        )
+        for p, a, v, x, r, n in (await session.execute(q_plat)).all()
+    }
+    canais = await _canais(session, scope)
+    # As do robô (Temu/AliExpress) só quando existem: loja com canal ou conversa.
+    com_robo = {c.plataforma for c in canais} | set(por_plataforma)
+    plataformas = [
+        por_plataforma.get(p)
+        or PlataformaResumoOut(plataforma=p, aguardando=0, vencendo=0, vencidas=0)
+        for p in (*PLATAFORMAS, *(p for p in PLATAFORMAS_ROBO if p in com_robo))
+    ]
+    if scope.unrestricted:
+        ig = await instagram.contar(session)
+        if ig["total"]:
+            plataformas.append(
+                PlataformaResumoOut(
+                    plataforma=instagram.PLATAFORMA,
+                    aguardando=ig["aguardando"],
+                    vencendo=ig["vencendo"],
+                    vencidas=ig["vencidas"],
+                )
+            )
+
+    # A loja do robô (Temu/AliExpress) não tem integração: ela é o CANAL. Sem
+    # esta chave, as quatro lojas Temu virariam uma só linha na barra.
+    # Rótulo: o GROUP BY vai pelo nome (a expressão repetida teria outros
+    # parâmetros e o Postgres não a reconheceria como a mesma).
+    canal_robo = case(
+        (
+            and_(
+                AtendimentoConversa.integration_id.is_(None),
+                AtendimentoConversa.plataforma.in_(PLATAFORMAS_ROBO),
+            ),
+            AtendimentoConversa.canal_id,
+        ),
+        else_=None,
+    ).label("canal_robo")
+    q_loja = select(
+        AtendimentoConversa.integration_id,
+        AtendimentoConversa.plataforma,
+        canal_robo,
+        func.max(AtendimentoConversa.conta),
+        func.count().filter(aguardando),
+        func.count().filter(vencidas),
+        nao_lidas,
+    ).group_by(AtendimentoConversa.integration_id, AtendimentoConversa.plataforma, canal_robo)
+    if cond is not None:
+        q_loja = q_loja.where(cond)
+    lojas: dict[tuple[UUID | None, str, UUID | None], LojaResumoOut] = {
+        (i, p, rc): LojaResumoOut(
+            integration_id=i,
+            canal_id=rc,
+            plataforma=p,
+            conta=conta,
+            nao_lidas=int(n or 0),
+            aguardando=a or 0,
+            vencidas=x or 0,
+        )
+        for i, p, rc, conta, a, x, n in (await session.execute(q_loja)).all()
+    }
+    canais_da_loja: dict[tuple[UUID | None, str, UUID | None], list[CanalOut]] = {}
+    for c in canais:
+        chave_canal = c.id if c.robo_perfil_id else None
+        canais_da_loja.setdefault((c.integration_id, c.plataforma, chave_canal), []).append(c)
+    for chave, da_loja in canais_da_loja.items():
+        # Loja conectada sem conversa ainda também aparece na barra — com zero.
+        loja = lojas.get(chave)
+        if loja is None:
+            loja = lojas[chave] = LojaResumoOut(
+                integration_id=chave[0],
+                canal_id=chave[2],
+                plataforma=chave[1],
+                conta=da_loja[0].conta,
+                aguardando=0,
+                vencidas=0,
+            )
+        else:
+            loja.conta = da_loja[0].conta or loja.conta
+        loja.integracao = da_loja[0].integracao
+        loja.status_canal, loja.status_motivo = _saude_da_loja(da_loja)
+    # O nome da LOJA (P2): o dos canais já veio de `lojas.nome_da_loja`; a
+    # loja que só tem conversa (canal apagado) pede o dela aqui — a
+    # `conversa.conta` gravada é o retrato de quando o sync passou.
+    sem_canal = {
+        lj.integration_id
+        for chave, lj in lojas.items()
+        if chave not in canais_da_loja and lj.integration_id is not None
+    }
+    nomes = await _nomes_das_lojas(session, sem_canal)
+    for lj in lojas.values():
+        if lj.integration_id in sem_canal:
+            lj.conta = nomes.get(lj.integration_id) or lj.conta
+    s = get_settings()
+    return ResumoOut(
+        plataformas=plataformas,
+        a_conferir=sum(p.a_conferir for p in plataformas),
+        lojas=sorted(
+            lojas.values(),
+            key=lambda lj: (
+                lj.plataforma,
+                (lj.conta or "").lower(),
+                (lj.integracao or "").lower(),
+                str(lj.integration_id),
+            ),
+        ),
+        canais=canais,
+        flags=FlagsOut(
+            leitura_ativa=s.atendimento_leitura_ativa,
+            envio_ativo=s.atendimento_envio_ativo,
+            ia_ativa=s.atendimento_ia_ativa,
+            auto_ativo=s.atendimento_auto_ativo,
+            simulador=s.atendimento_simulador,
+            simulador_exceto=enviar.fora_do_simulador(),
+            alerta_telegram=s.atendimento_alerta_telegram,
+        ),
+    )
+
+
+# ── Lista e detalhe ───────────────────────────────────────────────────────
+
+
+async def _listar_marketplace(
+    session: AsyncSession,
+    *,
+    scope: TeamScope,
+    user: User,
+    plataforma: str | None,
+    integration_id: UUID | None,
+    canal: str | None,
+    filtro: str,
+    q: str | None,
+    antes_de: datetime | None,
+    limite: int,
+    canal_id: UUID | None = None,
+) -> list[dict[str, Any]]:
+    agora = datetime.now(UTC)
+    tem = _pendente_existe()
+    a_conferir = _a_conferir_existe()
+    consulta = select(
+        AtendimentoConversa,
+        tem.label("tem_rascunho"),
+        a_conferir.label("a_conferir"),
+        _ultimo_tipo().label("ultimo_tipo"),
+        User,
+    ).outerjoin(User, User.id == AtendimentoConversa.atribuido_a)
+    cond = _clausula_escopo(scope, AtendimentoConversa.integration_id)
+    if cond is not None:
+        consulta = consulta.where(cond)
+    if plataforma:
+        consulta = consulta.where(AtendimentoConversa.plataforma == plataforma)
+    if integration_id:
+        consulta = consulta.where(AtendimentoConversa.integration_id == integration_id)
+    if canal_id:
+        # Uma loja do robô (Temu/AliExpress): sem integração, ela é o canal.
+        consulta = consulta.where(AtendimentoConversa.canal_id == canal_id)
+    if canal:
+        consulta = consulta.where(AtendimentoConversa.canal == canal)
+    aguardando = AtendimentoConversa.aguardando_resposta.is_(True)
+    prazo = AtendimentoConversa.prazo_resposta_em
+    if filtro == "todas":
+        # Fechada = resolvida: sai da frente (volta sozinha se o cliente escrever).
+        consulta = consulta.where(AtendimentoConversa.situacao != CONVERSA_FECHADA)
+    elif filtro == "aguardando":
+        consulta = consulta.where(aguardando)
+    elif filtro == "vencendo":
+        consulta = consulta.where(aguardando, prazo >= agora, prazo < agora + VENCENDO)
+    elif filtro == "vencidas":
+        consulta = consulta.where(aguardando, prazo < agora)
+    elif filtro == "com_rascunho":
+        consulta = consulta.where(tem)
+    elif filtro == "a_conferir":
+        consulta = consulta.where(a_conferir)
+    elif filtro == "minhas":
+        consulta = consulta.where(AtendimentoConversa.atribuido_a == user.id)
+    elif filtro == "fechadas":
+        consulta = consulta.where(AtendimentoConversa.situacao == CONVERSA_FECHADA)
+    if q and q.strip():
+        termo = f"%{_escapar_like(q.strip())}%"
+        consulta = consulta.where(
+            or_(
+                *(
+                    col.ilike(termo, escape="\\")
+                    for col in (
+                        AtendimentoConversa.comprador_nome,
+                        AtendimentoConversa.pedido_marketplace,
+                        AtendimentoConversa.anuncio_titulo,
+                        AtendimentoConversa.conta,
+                        AtendimentoConversa.externo_id,
+                        AtendimentoConversa.ultima_mensagem_resumo,
+                    )
+                )
+            )
+        )
+    if antes_de is not None:
+        consulta = consulta.where(AtendimentoConversa.ultima_mensagem_em < antes_de)
+    consulta = consulta.order_by(
+        AtendimentoConversa.ultima_mensagem_em.desc().nulls_last(),
+        AtendimentoConversa.id.desc(),
+    ).limit(limite)
+    return [
+        _resumo_dict(
+            c,
+            tem_rascunho=bool(tem_r),
+            atribuido_nome=_nome(u),
+            a_conferir=bool(r),
+            ultimo_tipo=tipo,
+        )
+        for c, tem_r, r, tipo, u in (await session.execute(consulta)).all()
+    ]
+
+
+@router.get("/conversas", response_model=ListaConversasOut)
+async def listar_conversas(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(_view)],
+    plataforma: Annotated[str | None, Query()] = None,
+    integration_id: Annotated[UUID | None, Query()] = None,
+    canal: Annotated[str | None, Query()] = None,
+    filtro: Annotated[str, Query()] = "todas",
+    q: Annotated[str | None, Query(max_length=200)] = None,
+    antes_de: Annotated[datetime | None, Query()] = None,
+    limite: Annotated[int, Query(ge=1, le=200)] = 50,
+    canal_id: Annotated[UUID | None, Query()] = None,
+) -> ListaConversasOut:
+    """A fila, mais recente primeiro; página seguinte com `antes_de=<proximo>`.
+
+    `canal_id` filtra uma loja do robô do Mac mini (Temu/AliExpress), que não
+    tem integração (o `canal_id` vem da barra de lojas do /resumo).
+    """
+    plataforma = (plataforma or "").strip().lower() or None
+    canal = (canal or "").strip().lower() or None
+    filtro = (filtro or "todas").strip().lower()
+    if plataforma and plataforma not in (*PLATAFORMAS_CAIXA, instagram.PLATAFORMA):
+        raise HTTPException(422, detail={"code": "plataforma_invalida"})
+    if filtro not in FILTROS:
+        raise HTTPException(422, detail={"code": "filtro_invalido"})
+    antes_de = _utc(antes_de)
+    scope = await resolve_team_scope(session, user)
+
+    itens: list[dict[str, Any]] = []
+    if plataforma != instagram.PLATAFORMA:
+        itens += await _listar_marketplace(
+            session,
+            scope=scope,
+            user=user,
+            plataforma=plataforma,
+            integration_id=integration_id,
+            canal=canal,
+            filtro=filtro,
+            q=q,
+            antes_de=antes_de,
+            limite=limite + 1,
+            canal_id=canal_id,
+        )
+    quer_instagram = (
+        plataforma in (None, instagram.PLATAFORMA)
+        and integration_id is None
+        and canal_id is None
+        and canal in (None, instagram.CANAL)
+        and scope.unrestricted
+    )
+    if quer_instagram:
+        itens += await instagram.listar_conversas(
+            session,
+            antes_de=antes_de,
+            limite=limite + 1,
+            q=q,
+            filtro=filtro,
+            user_id=user.id,
+        )
+    piso = datetime.min.replace(tzinfo=UTC)
+    itens.sort(key=lambda i: i["ultima_mensagem_em"] or piso, reverse=True)
+    pagina, proximo = _paginar(itens, limite)
+    # Só as da página: no máximo uma consulta de nome por loja que aparece.
+    await _com_nome_da_loja(session, pagina)
+    return ListaConversasOut(itens=pagina, proximo=proximo)
+
+
+def _paginar(
+    itens: list[dict[str, Any]], limite: int
+) -> tuple[list[dict[str, Any]], datetime | None]:
+    """Corta a página sem partir um EMPATE de horário ao meio.
+
+    O relógio da Shopee é em segundos: duas conversas com a última mensagem
+    no mesmo segundo são comuns. Se o corte caísse no meio delas, a próxima
+    página (`< antes_de`) pularia a segunda — conversa sumindo da fila sem
+    erro nenhum. Então as empatadas com a primeira que ficou de fora vão
+    TODAS para a página seguinte (salvo se a página inteira for um empate só).
+    """
+    pagina = itens[:limite]
+    if len(itens) <= limite or not pagina:
+        return pagina, None
+    corte = itens[limite]["ultima_mensagem_em"]
+    aparada = list(pagina)
+    while len(aparada) > 1 and corte is not None and aparada[-1]["ultima_mensagem_em"] == corte:
+        aparada.pop()
+    if aparada[-1]["ultima_mensagem_em"] != corte:
+        pagina = aparada
+    return pagina, pagina[-1]["ultima_mensagem_em"]
+
+
+async def _contexto(session: AsyncSession, conversa: AtendimentoConversa) -> dict[str, Any]:
+    """O pedido por trás da conversa. Falha aqui não pode esconder a conversa."""
+    # Mesmas chaves de `contexto.vazio()` (inclusive `nota_fiscal`), escritas
+    # aqui porque é justamente o import do cérebro que pode ter falhado.
+    vazio: dict[str, Any] = {
+        "pedido": None,
+        "logistica": None,
+        "chamados": [],
+        "devolucoes": [],
+        "nota_fiscal": None,
+        "outras_perguntas": [],
+    }
+    try:
+        from app.services.atendimento import contexto as contexto_svc
+
+        return dict(await contexto_svc.contexto_da_conversa(session, conversa) or vazio)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "atendimento_contexto_falhou", conversa_id=str(conversa.id), err=type(e).__name__
+        )
+        return vazio
+
+
+async def _cliente(session: AsyncSession, conversa: AtendimentoConversa) -> dict[str, Any]:
+    """O cartão "Cliente" (parte 2, P5). Falha aqui não pode esconder a conversa.
+
+    `cliente.cartao_cliente` já promete não levantar; mesmo assim a chamada
+    vai num SAVEPOINT e com o erro engolido: é o último pedaço do detalhe, e
+    uma consulta que falhe lá dentro não pode abortar a transação nem virar
+    500 — a tela mostra a conversa sem o cartão. Só o tipo do erro no log
+    (o cartão tem histórico de compra e avaliação do comprador).
+    """
+    cliente_svc = _modulo(_CLIENTE)
+    if cliente_svc is None:
+        return {}
+    conversa_id = str(conversa.id)
+    try:
+        async with session.begin_nested():
+            cartao = await cliente_svc.cartao_cliente(session, conversa)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("atendimento_cliente_falhou", conversa_id=conversa_id, err=type(e).__name__)
+        return {}
+    return dict(cartao) if isinstance(cartao, dict) else {}
+
+
+async def _pedido_atualizavel(session: AsyncSession, conversa: AtendimentoConversa) -> bool:
+    """O "atualizar" do painel Pedido iria à loja? (P4: a tela esconde o botão.)
+
+    Os mesmos portões do POST /pedido/atualizar, na mesma ordem, menos as
+    travas de minuto (essas dependem do clique): plataforma com retrato,
+    loja conectada, leitura ligada e canal não desligado.
+    """
+    if conversa.plataforma not in PLATAFORMAS_COM_PEDIDO or conversa.integration_id is None:
+        return False
+    if not get_settings().atendimento_leitura_ativa:
+        return False
+    integration = await session.get(Integration, conversa.integration_id)
+    if integration is None or integration.archived_at is not None:
+        return False
+    if conversa.canal_id is None:
+        return True
+    canal = await session.get(AtendimentoCanal, conversa.canal_id)
+    return canal is None or canal.status != _CANAL_DESLIGADO
+
+
+async def _envio(session: AsyncSession, conversa: AtendimentoConversa) -> EnvioOut:
+    # Modo observação = quem responde é o Duoke/Seller Center: a loja em
+    # `observar` ou o envio desligado no servidor. A tela troca a caixa de
+    # envio pelo "O que a IA responderia" (com 👍/👎 e "Copiar").
+    envio_desligado = not get_settings().atendimento_envio_ativo
+    if conversa.plataforma == "amazon" and conversa.integration_id is None:
+        # O e-mail não disse de qual conta Amazon é: antes de qualquer outra
+        # trava (envio desligado...), a tela precisa pedir a conta.
+        return EnvioOut(
+            pode_enviar=False,
+            motivo=enviar.MOTIVO_AMAZON_SEM_CONTA,
+            codigo=enviar.RECUSA_SEM_INTEGRACAO,
+            limite_caracteres=limite_caracteres(conversa.plataforma, conversa.canal),
+            modo=None,
+            sla_horas=sla_horas(conversa.plataforma, conversa.canal),
+            modo_observacao=envio_desligado,
+        )
+    recusa = await enviar.motivo_para_nao_enviar(session, conversa)
+    canal = (
+        await session.get(AtendimentoCanal, conversa.canal_id)
+        if conversa.canal_id is not None
+        else None
+    )
+    # Loja do robô (Temu/AliExpress): nada sai por aqui em modo nenhum — a
+    # tela mostra a sugestão para COPIAR no Seller Center.
+    so_le = conversa.plataforma in PLATAFORMAS_ROBO
+    return EnvioOut(
+        pode_enviar=recusa is None,
+        motivo=str(recusa.detail) if recusa else None,
+        codigo=recusa.code if recusa else None,
+        limite_caracteres=limite_caracteres(conversa.plataforma, conversa.canal),
+        # Sem canal não há modo: "observar" diria que a loja existe e só lê.
+        modo=canal.modo if canal is not None else None,
+        sla_horas=sla_horas(conversa.plataforma, conversa.canal),
+        modo_observacao=(
+            envio_desligado or so_le or (canal is not None and canal.modo == MODO_OBSERVAR)
+        ),
+    )
+
+
+async def _sugestoes(
+    session: AsyncSession, conversa_id: UUID, *, so_rascunho: UUID | None = None
+) -> list[SugestaoOut]:
+    """As sugestões da IA que NÃO saíram pelo DaVinci, cada uma com a resposta real.
+
+    É o "IA × equipe" do modo observação: o Duoke responde, o DaVinci lê e
+    guarda o que a IA teria dito. `resposta_real` é a primeira mensagem da
+    LOJA (qualquer origem, menos a que falhou) a partir da mensagem do
+    cliente que a sugestão responde — a mesma régua de `gravar.
+    _aposentar_rascunho`; sem gatilho (a mensagem sumiu), vale a hora da
+    sugestão. Uma consulta só (LATERAL), não uma por sugestão.
+    `so_rascunho` = só aquela sugestão (a avaliação quer a resposta real dela).
+    """
+    gatilho = aliased(AtendimentoMensagem)
+    resposta = aliased(AtendimentoMensagem)
+    referencia = func.coalesce(
+        gatilho.enviada_em, gatilho.created_at, AtendimentoRascunho.created_at
+    )
+    momento = func.coalesce(resposta.enviada_em, resposta.created_at)
+    real = (
+        select(
+            resposta.id.label("id"),
+            resposta.texto.label("texto"),
+            momento.label("em"),
+            resposta.origem.label("origem"),
+        )
+        .where(
+            resposta.conversa_id == AtendimentoRascunho.conversa_id,
+            resposta.autor == AUTOR_LOJA,
+            resposta.status != MSG_FALHOU,
+            momento >= referencia,
+        )
+        .order_by(momento.asc(), resposta.created_at.asc())
+        .limit(1)
+        .lateral("resposta_real")
+    )
+    consulta = (
+        select(
+            AtendimentoRascunho,
+            AtendimentoAvaliacao.nota,
+            AtendimentoAvaliacao.correcao,
+            real.c.id,
+            real.c.texto,
+            real.c.em,
+            real.c.origem,
+        )
+        .outerjoin(
+            AtendimentoAvaliacao, AtendimentoAvaliacao.rascunho_id == AtendimentoRascunho.id
+        )
+        .outerjoin(gatilho, gatilho.id == AtendimentoRascunho.mensagem_gatilho_id)
+        .outerjoin(real, true())
+        .where(
+            AtendimentoRascunho.conversa_id == conversa_id,
+            AtendimentoRascunho.status.in_(_STATUS_SUGESTAO),
+        )
+    )
+    if so_rascunho is not None:
+        consulta = consulta.where(AtendimentoRascunho.id == so_rascunho)
+    linhas = (
+        await session.execute(
+            consulta.order_by(
+                AtendimentoRascunho.created_at.desc(), AtendimentoRascunho.id.desc()
+            ).limit(MAX_SUGESTOES_DETALHE)
+        )
+    ).all()
+    saida: list[SugestaoOut] = []
+    # As mais novas na consulta (limite), da mais velha para a mais nova na
+    # tela — a mesma ordem das mensagens.
+    for r, nota, correcao, real_id, real_texto, real_em, real_origem in reversed(linhas):
+        saida.append(
+            SugestaoOut(
+                id=r.id,
+                texto=r.texto,
+                categoria=r.categoria,
+                confianca=r.confianca,
+                status=r.status,
+                created_at=_utc(r.created_at),
+                precisa_humano=r.precisa_humano,
+                validador_erros=list(r.validador_erros or []),
+                mensagem_gatilho_id=(
+                    str(r.mensagem_gatilho_id) if r.mensagem_gatilho_id is not None else None
+                ),
+                avaliacao=(
+                    AvaliacaoResumoOut(nota=nota, correcao=correcao)
+                    if nota is not None or correcao is not None
+                    else None
+                ),
+                resposta_real=(
+                    RespostaRealOut(
+                        mensagem_id=str(real_id),
+                        texto=real_texto,
+                        enviada_em=_utc(real_em),
+                        origem=real_origem,
+                    )
+                    if real_id is not None
+                    else None
+                ),
+            )
+        )
+    return saida
+
+
+@router.get("/conversas/{conversa_id}", response_model=ConversaDetalheOut)
+async def detalhe_conversa(
+    conversa_id: str,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(_view)],
+) -> ConversaDetalheOut | dict[str, Any]:
+    """A conversa aberta: mensagens, sugestão da IA, pedido e se dá para enviar."""
+    scope = await resolve_team_scope(session, user)
+    if instagram.e_instagram(conversa_id):
+        dados = await instagram.detalhe(session, conversa_id) if scope.unrestricted else None
+        if dados is None:
+            raise HTTPException(404, detail={"code": "conversa_nao_encontrada"})
+        return dados
+    c = await _conversa_ou_404(session, conversa_id, scope)
+    # Envio que morreu no meio (deploy) com a leitura desligada: ninguém mais
+    # o aposentaria, e a linha `enviando` ficaria "enviando…" para sempre.
+    # Aqui ele vira `revisar` (e aparece em "A conferir").
+    if await enviar.aposentar_envios_presos(session, conversa_id=c.id):
+        await session.commit()
+    momento = func.coalesce(AtendimentoMensagem.enviada_em, AtendimentoMensagem.created_at)
+    mensagens = list(
+        reversed(
+            (
+                await session.execute(
+                    select(AtendimentoMensagem)
+                    .where(AtendimentoMensagem.conversa_id == c.id)
+                    .order_by(momento.desc(), AtendimentoMensagem.created_at.desc())
+                    .limit(MAX_MENSAGENS_DETALHE)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    )
+    nomes = await _nomes(session, {m.autor_user_id for m in mensagens})
+    rascunho = (
+        await session.execute(
+            select(AtendimentoRascunho)
+            .where(
+                AtendimentoRascunho.conversa_id == c.id,
+                AtendimentoRascunho.status == RASCUNHO_PENDENTE,
+            )
+            .order_by(AtendimentoRascunho.created_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    detalhe = {
+        "conversa": await _conversa_out(session, c),
+        "mensagens": [_mensagem_out(m, conversa=c, nomes=nomes) for m in mensagens],
+        "rascunho": _rascunho_out(rascunho),
+        "contexto": await _contexto(session, c),
+        "envio": await _envio(session, c),
+        "pedido_mkt": _do_dados(c, "pedido_mkt"),
+        "produto": _do_dados(c, "produto"),
+        "sugestoes": await _sugestoes(session, c.id),
+        "pedido_atualizavel": await _pedido_atualizavel(session, c),
+    }
+    # Por ÚLTIMO: o cartão pode ir à loja (ML ao vivo, com cache) e, se
+    # falhar, nada depois dele depende da sessão.
+    detalhe["cliente"] = await _cliente(session, c)
+    return ConversaDetalheOut(**detalhe)
+
+
+# ── Ações na conversa ─────────────────────────────────────────────────────
+
+
+@router.post("/conversas/{conversa_id}/responder", response_model=ResponderOut)
+async def responder(
+    conversa_id: str,
+    body: ResponderIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(_edit)],
+) -> ResponderOut:
+    """Envia a resposta. Trava → 409 com o `code` (texto reprovado → 422).
+
+    Erro da PLATAFORMA não é erro HTTP: volta 200 com a mensagem em
+    `falhou`/`revisar` — a linha existe e a tela mostra o que houve.
+    """
+    if instagram.e_instagram(conversa_id):
+        raise _somente_leitura()
+    scope = await resolve_team_scope(session, user)
+    c = await _conversa_ou_404(session, conversa_id, scope)
+    try:
+        m = await enviar.enviar_resposta(
+            session,
+            c,
+            body.texto,
+            user=user,
+            rascunho_id=body.rascunho_id,
+            origem=ORIGEM_HUMANO,
+            ultima_vista_id=body.ultima_vista_id,
+            confirmar=body.confirmar,
+        )
+    except EnvioRecusado as e:
+        logger.info(
+            "atendimento_envio_recusado",
+            conversa_id=str(c.id),
+            code=e.code,
+            user_id=str(user.id),
+        )
+        raise _recusa_http(e) from e
+    return ResponderOut(mensagem=_mensagem_out(m, conversa=c, nomes={user.id: _nome(user)}))
+
+
+@router.post("/conversas/{conversa_id}/rascunho", response_model=RascunhoUnicoOut)
+async def pedir_rascunho(
+    conversa_id: str,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(_edit)],
+) -> RascunhoUnicoOut:
+    """Pede uma sugestão da IA agora (mesmo sem o cliente estar esperando)."""
+    if instagram.e_instagram(conversa_id):
+        raise _somente_leitura()
+    if not get_settings().atendimento_ia_ativa:
+        raise HTTPException(
+            409,
+            detail={"code": "ia_desligada", "detail": "A IA do atendimento está desligada."},
+        )
+    scope = await resolve_team_scope(session, user)
+    c = await _conversa_ou_404(session, conversa_id, scope)
+    from app.services.atendimento import ia as ia_svc
+
+    r = await ia_svc.gerar_rascunho(session, c, forcar=True)
+    await session.commit()
+    motivo = None
+    if r is not None:
+        await session.refresh(r)
+    else:
+        motivo = await ia_svc.motivo_sem_rascunho(session, c)
+    logger.info(
+        "atendimento_rascunho_pedido",
+        conversa_id=str(c.id),
+        gerado=r is not None,
+        motivo=motivo,
+        user_id=str(user.id),
+    )
+    return RascunhoUnicoOut(rascunho=_rascunho_out(r), motivo=motivo)
+
+
+async def _travar_ou_409(session: AsyncSession, obj, code: str) -> None:
+    """Trava a linha (esperando no máximo 5 s) e a relê; ocupada → 409 "tente de novo".
+
+    A rodada do sync segura a conversa (e o canal) enquanto grava. Sem a
+    trava, fechar a conversa no meio da rodada perdia a mensagem nova do
+    cliente (o sync derivava a fila do retrato velho); sem o limite, a tela
+    pendurava até a rodada acabar.
+    """
+    if not await gravar.travar_linha(session, obj, espera=gravar.ESPERA_TRAVA_TELA):
+        raise HTTPException(
+            409,
+            detail={
+                "code": code,
+                "detail": "A leitura da loja está gravando isto agora. Tente de novo em "
+                "alguns segundos.",
+            },
+        )
+
+
+def _sem_pedido_na_plataforma(plataforma: str) -> HTTPException:
+    """409 limpo: esta plataforma não tem retrato de pedido pela API (ainda)."""
+    if plataforma == instagram.PLATAFORMA:
+        detalhe = "DM do Instagram não tem pedido de loja."
+    else:
+        # TikTok: a loja não deu o escopo; Amazon: a caixa ainda não existe.
+        # O painel continua com o que o DaVinci já sabe (Bling/Logística).
+        detalhe = (
+            "O pedido desta plataforma não é lido pela API da loja: o painel mostra o que "
+            "o DaVinci já sabe (Bling e Logística)."
+        )
+    return HTTPException(409, detail={"code": "sem_pedido_na_plataforma", "detail": detalhe})
+
+
+async def _soltar_trava_pedido(chave: str) -> None:
+    try:
+        await redis.delete(chave)
+    except Exception:  # noqa: BLE001, S110 — o TTL de 60 s solta sozinho
+        pass
+
+
+async def _contar_na_janela(chave: str) -> int:
+    """Soma 1 no contador da janela de 1 min e devolve o total (INCR + EXPIRE).
+
+    A validade só é posta no primeiro da janela (o INCR não mexe nela) — e
+    reposta se a chave ficou sem (o processo caiu entre os dois comandos):
+    contador sem validade travaria o botão da loja para sempre.
+    """
+    n = int(await redis.incr(chave))
+    if n == 1 or await redis.ttl(chave) < 0:
+        await redis.expire(chave, JANELA_LIMITE_PEDIDO_S)
+    return n
+
+
+async def _dentro_do_limite_pedido(integration_id: UUID, user_id: UUID) -> bool:
+    """Ainda cabe uma ida à loja neste minuto, para esta loja e esta pessoa?
+
+    A tentativa barrada também conta (quem insiste não abre a janela antes)
+    — mas a barrada pela LOJA não gasta o teto da PESSOA: a loja cheia não
+    impede a pessoa de atualizar o pedido de outra loja. Levanta se o Redis
+    cair — quem chama recusa.
+    """
+    if await _contar_na_janela(_chave_limite_loja(integration_id)) > LIMITE_PEDIDO_POR_LOJA:
+        return False
+    return await _contar_na_janela(_chave_limite_pessoa(user_id)) <= LIMITE_PEDIDO_POR_PESSOA
+
+
+@router.post("/conversas/{conversa_id}/pedido/atualizar", response_model=PedidoAtualizarOut)
+async def atualizar_pedido(
+    conversa_id: str,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(_edit)],
+) -> PedidoAtualizarOut:
+    """Renova AGORA o retrato do pedido na plataforma (botão "atualizar" do painel Pedido).
+
+    Só LEITURA na loja (pedido, itens, rastreio) — nada marca lido nem mexe
+    no pedido. Uma ida por conversa por minuto (trava no Redis): o clique
+    repetido devolve o retrato que já existe, com `atualizado=false`.
+    Shopee e ML têm o retrato; TikTok (sem escopo), Amazon (sem caixa) e
+    Instagram ficam com o que o DaVinci já sabe — recusa 409, sem ir à loja.
+
+    A conversa fica TRAVADA enquanto a loja responde, como na rodada do
+    sync: o retrato vai para `dados`, e sem a trava a leitura que gravasse
+    outra chave de `dados` no meio (a reclamação do ML, que tira a conversa
+    do automático) seria desfeita pelo `dados` velho desta sessão. A trava
+    que o enriquecimento pega antes de mesclar é a mesma (mesma transação).
+    Assim quem espera é a rodada do sync, em segundo plano — não a tela: sync
+    gravando a conversa agora → 409 "tente de novo" (espera no máximo 5 s),
+    antes de gastar a chamada à loja.
+
+    Falha da loja não é erro HTTP: volta 200 com o retrato que já havia e
+    `motivo` — o painel não pode ficar em branco porque a API caiu.
+
+    As chaves de leitura valem aqui também: com a leitura desligada (geral,
+    `atendimento_leitura_ativa`, ou o canal da loja `desligado`) → 409, sem
+    ir à loja — é o interruptor que se usa quando a plataforma começa a
+    devolver 429. E há teto por loja e por pessoa por minuto
+    (`motivo="limite"`), além da trava por conversa.
+    """
+    if instagram.e_instagram(conversa_id):
+        raise _sem_pedido_na_plataforma(instagram.PLATAFORMA)
+    scope = await resolve_team_scope(session, user)
+    c = await _conversa_ou_404(session, conversa_id, scope)
+    if c.plataforma not in PLATAFORMAS_COM_PEDIDO:
+        raise _sem_pedido_na_plataforma(c.plataforma)
+    integration = (
+        await session.get(Integration, c.integration_id) if c.integration_id is not None else None
+    )
+    if integration is None or integration.archived_at is not None:
+        raise HTTPException(
+            409,
+            detail={
+                "code": enviar.RECUSA_SEM_INTEGRACAO,
+                "detail": "A loja desta conversa não está mais conectada ao DaVinci.",
+            },
+        )
+    if not get_settings().atendimento_leitura_ativa:
+        raise HTTPException(
+            409,
+            detail={
+                "code": "leitura_desligada",
+                "detail": "A leitura das lojas está desligada no DaVinci: o painel fica com o "
+                "último retrato do pedido.",
+            },
+        )
+    canal = await session.get(AtendimentoCanal, c.canal_id) if c.canal_id is not None else None
+    if canal is not None and canal.status == _CANAL_DESLIGADO:
+        raise HTTPException(
+            409,
+            detail={
+                "code": "canal_desligado",
+                "detail": "A leitura desta loja está desligada: o painel fica com o último "
+                "retrato do pedido.",
+            },
+        )
+
+    chave = _chave_pedido(c.id)
+    try:
+        pegou = await redis.set(chave, "1", nx=True, ex=TRAVA_PEDIDO_S)
+    except Exception as e:  # noqa: BLE001
+        # Sem a trava não há como segurar a rajada na API da loja: melhor não ir.
+        logger.warning("atendimento_pedido_trava_falhou", err=type(e).__name__)
+        raise HTTPException(503, detail={"code": "trava_indisponivel"}) from e
+    if not pegou:
+        return PedidoAtualizarOut(
+            pedido_mkt=_do_dados(c, "pedido_mkt"),
+            produto=_do_dados(c, "produto"),
+            atualizado=False,
+            motivo="recente",
+        )
+    try:
+        cabe = await _dentro_do_limite_pedido(integration.id, user.id)
+    except Exception as e:  # noqa: BLE001
+        await _soltar_trava_pedido(chave)
+        logger.warning("atendimento_pedido_limite_falhou", err=type(e).__name__)
+        raise HTTPException(503, detail={"code": "trava_indisponivel"}) from e
+    if not cabe:
+        # Não foi à loja: a trava da conversa sai (passado o minuto, o
+        # clique nesta mesma conversa vale de novo).
+        await _soltar_trava_pedido(chave)
+        logger.info(
+            "atendimento_pedido_limite",
+            conversa_id=str(c.id),
+            integration_id=str(integration.id),
+            user_id=str(user.id),
+        )
+        return PedidoAtualizarOut(
+            pedido_mkt=_do_dados(c, "pedido_mkt"),
+            produto=_do_dados(c, "produto"),
+            atualizado=False,
+            motivo="limite",
+        )
+    if not await gravar.travar_linha(session, c, espera=gravar.ESPERA_TRAVA_TELA):
+        # Não foi à loja: a pessoa pode tentar de novo já, sem esperar o minuto.
+        await _soltar_trava_pedido(chave)
+        raise HTTPException(
+            409,
+            detail={
+                "code": enviar.RECUSA_CONVERSA_OCUPADA,
+                "detail": "A leitura da loja está gravando esta conversa agora. Tente de novo "
+                "em alguns segundos.",
+            },
+        )
+
+    motivo: str | None = None
+    atualizado = False
+    # Os ids antes: o rollback expira os objetos, e ler atributo expirado
+    # numa sessão assíncrona estoura fora do greenlet.
+    ids_log = {"conversa_id": str(c.id), "integration_id": str(integration.id)}
+    user_id = str(user.id)
+    try:
+        cliente = await clientes.cliente_da_integracao(integration)
+        # Import tardio pelo nome: o router sobe sem o enriquecimento, e o
+        # teste troca o módulo inteiro.
+        enriquecer_svc = importlib.import_module(_ENRIQUECER)
+        atualizado = bool(
+            await enriquecer_svc.enriquecer_conversa(
+                session, c, integration, cliente, forcar=True
+            )
+        )
+        await session.commit()
+        if not atualizado:
+            motivo = "sem_alteracao"
+    except Exception as e:  # noqa: BLE001 — o painel fica com o retrato que já tinha
+        await session.rollback()
+        motivo = "falhou"
+        logger.warning("atendimento_pedido_atualizar_falhou", **ids_log, err=type(e).__name__)
+    await session.refresh(c)
+    logger.info(
+        "atendimento_pedido_atualizado",
+        **ids_log,
+        atualizado=atualizado,
+        motivo=motivo,
+        user_id=user_id,
+    )
+    return PedidoAtualizarOut(
+        pedido_mkt=_do_dados(c, "pedido_mkt"),
+        produto=_do_dados(c, "produto"),
+        atualizado=atualizado,
+        motivo=motivo,
+    )
+
+
+async def _ligar_conta_amazon(
+    session: AsyncSession, c: AtendimentoConversa, integration_id: UUID, scope: TeamScope
+) -> None:
+    """Conversa da Amazon sem conta identificada → a conta que a pessoa escolheu.
+
+    Só para essa conversa (Amazon e SEM integração): trocar a loja de uma
+    conversa que já tem loja mudaria por onde a resposta sai. A integração
+    tem de ser Amazon, ativa e do escopo da pessoa; o canal `email` dela é
+    garantido (nasce em `observar`, como todo canal).
+    """
+    if c.plataforma != "amazon" or c.integration_id is not None:
+        raise HTTPException(409, detail={"code": "integracao_fixa"})
+    integ = await session.get(Integration, integration_id)
+    plataforma = getattr(getattr(integ, "platform", None), "value", None)
+    if (
+        integ is None
+        or plataforma != "amazon"
+        or integ.archived_at is not None
+        or not _no_escopo(scope, integ.id)
+    ):
+        raise HTTPException(422, detail={"code": "integracao_invalida"})
+    canal = (
+        await session.execute(
+            select(AtendimentoCanal).where(
+                AtendimentoCanal.integration_id == integ.id,
+                AtendimentoCanal.canal == CANAL_EMAIL,
+            )
+        )
+    ).scalar_one_or_none()
+    if canal is None:
+        from app.services.atendimento import sync as sync_svc
+
+        await sync_svc.garantir_canais(session)
+        canal = (
+            await session.execute(
+                select(AtendimentoCanal).where(
+                    AtendimentoCanal.integration_id == integ.id,
+                    AtendimentoCanal.canal == CANAL_EMAIL,
+                )
+            )
+        ).scalar_one_or_none()
+    if canal is None:
+        raise HTTPException(422, detail={"code": "integracao_invalida"})
+    duplicada = await session.scalar(
+        select(AtendimentoConversa.id).where(
+            AtendimentoConversa.integration_id == integ.id,
+            AtendimentoConversa.canal == c.canal,
+            AtendimentoConversa.externo_id == c.externo_id,
+        )
+    )
+    if duplicada is not None:
+        # A mesma thread já existe na conta escolhida (o e-mail chegou pelas
+        # duas caixas): juntar conversas não é coisa de um PATCH.
+        raise HTTPException(409, detail={"code": "conversa_duplicada", "id": str(duplicada)})
+    # O nome ANTES de mexer na conversa (ver `_nomes_das_lojas`): o mesmo
+    # nome de loja que o sync grava nas outras conversas dessa conta.
+    integ_id, canal_id, integ_nome = integ.id, canal.id, integ.name
+    conta = (await _nomes_das_lojas(session, {integ_id})).get(integ_id) or integ_nome
+    c.integration_id = integ_id
+    c.canal_id = canal_id
+    c.conta = conta
+
+
+@router.patch("/conversas/{conversa_id}", response_model=ConversaUnicaOut)
+async def editar_conversa(
+    conversa_id: str,
+    body: ConversaPatch,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(_edit)],
+) -> ConversaUnicaOut:
+    """Atribuir, pausar a IA, fechar/reabrir, "não precisa de resposta" e a conta Amazon."""
+    if instagram.e_instagram(conversa_id):
+        raise _somente_leitura()
+    scope = await resolve_team_scope(session, user)
+    c = await _conversa_ou_404(session, conversa_id, scope)
+    # Trava e relê: o que o sync gravou até agora (mensagem nova do cliente)
+    # entra no recálculo abaixo, e o que ele gravar depois vê o nosso fechar.
+    await _travar_ou_409(session, c, "conversa_ocupada")
+    campos = body.model_fields_set
+    if "integration_id" in campos and body.integration_id is not None:
+        await _ligar_conta_amazon(session, c, body.integration_id, scope)
+    if "atribuido_a" in campos:
+        if body.atribuido_a is not None and await session.get(User, body.atribuido_a) is None:
+            raise HTTPException(422, detail={"code": "usuario_inexistente"})
+        c.atribuido_a = body.atribuido_a
+    if "ia_pausada" in campos and body.ia_pausada is not None:
+        c.ia_pausada = body.ia_pausada
+    if "situacao" in campos and body.situacao is not None:
+        if body.situacao == "fechada":
+            c.situacao = CONVERSA_FECHADA
+        else:
+            # Reabrir à mão vale também para a bloqueada (a plataforma
+            # liberou): o recálculo decide entre aberta e respondida.
+            c.situacao = CONVERSA_ABERTA
+            c.bloqueio_motivo = None
+    if "sem_resposta_necessaria" in campos and body.sem_resposta_necessaria is not None:
+        c.sem_resposta_necessaria = body.sem_resposta_necessaria
+    # Fila e prazo derivam da situação e do "não precisa": refaz do banco.
+    await gravar.recalcular_conversa(session, c)
+    await session.commit()
+    logger.info(
+        "atendimento_conversa_editada",
+        conversa_id=str(c.id),
+        campos=sorted(campos),
+        user_id=str(user.id),
+    )
+    return ConversaUnicaOut(conversa=await _conversa_out(session, c))
+
+
+@router.post("/mensagens/{mensagem_id}/conferir", response_model=ConferirOut)
+async def conferir_mensagem(
+    mensagem_id: UUID,
+    body: ConferirIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(_edit)],
+) -> ConferirOut:
+    """A resposta em `revisar` saiu ou não? A pessoa conferiu na plataforma.
+
+    Saiu → `enviada`. Não saiu → `falhou`: a conversa volta para a fila (o
+    cliente continua esperando) e dá para responder de novo. Até alguém
+    conferir, a `revisar` conta como resposta — responder por cima de uma
+    que pode ter saído é o erro que o comprador vê.
+    """
+    scope = await resolve_team_scope(session, user)
+    m = await session.get(AtendimentoMensagem, mensagem_id)
+    c = await session.get(AtendimentoConversa, m.conversa_id) if m is not None else None
+    if m is None or c is None or not _no_escopo(scope, c.integration_id):
+        raise HTTPException(404, detail={"code": "mensagem_nao_encontrada"})
+    await _travar_ou_409(session, c, "conversa_ocupada")
+    await session.refresh(m)
+    if m.status != MSG_REVISAR or m.origem not in ORIGENS_DAVINCI:
+        # O sync pode ter adotado (virou `enviada`) enquanto a pessoa olhava.
+        raise HTTPException(409, detail={"code": "mensagem_nao_revisar", "status": m.status})
+    conferido = {
+        "saiu": body.saiu,
+        "user_id": str(user.id),
+        "em": datetime.now(UTC).isoformat(),
+        "erro_antes": m.erro,
+    }
+    m.payload = {**(m.payload or {}), "conferido": conferido}
+    if body.saiu:
+        m.status = MSG_ENVIADA
+        m.erro = None
+    else:
+        m.status = MSG_FALHOU
+        m.erro = "conferido: não saiu"
+    await gravar.recalcular_conversa(session, c)
+    await session.commit()
+    logger.info(
+        "atendimento_mensagem_conferida",
+        mensagem_id=str(m.id),
+        conversa_id=str(c.id),
+        saiu=body.saiu,
+        user_id=str(user.id),
+    )
+    nomes = await _nomes(session, {m.autor_user_id, user.id})
+    return ConferirOut(
+        mensagem=_mensagem_out(m, conversa=c, nomes=nomes),
+        conversa=await _conversa_out(session, c),
+    )
+
+
+# ── Sugestão da IA: descartar e avaliar ───────────────────────────────────
+
+
+async def _rascunho_ou_404(
+    session: AsyncSession, rascunho_id: UUID, scope: TeamScope
+) -> AtendimentoRascunho:
+    r = await session.get(AtendimentoRascunho, rascunho_id)
+    conversa = await session.get(AtendimentoConversa, r.conversa_id) if r is not None else None
+    if r is None or conversa is None or not _no_escopo(scope, conversa.integration_id):
+        raise HTTPException(404, detail={"code": "rascunho_nao_encontrado"})
+    return r
+
+
+async def _avaliacao_de(session: AsyncSession, rascunho_id: UUID) -> AtendimentoAvaliacao | None:
+    return (
+        await session.execute(
+            select(AtendimentoAvaliacao).where(AtendimentoAvaliacao.rascunho_id == rascunho_id)
+        )
+    ).scalar_one_or_none()
+
+
+def _avaliacao_out(av: AtendimentoAvaliacao) -> AvaliacaoOut:
+    return AvaliacaoOut(
+        id=av.id,
+        rascunho_id=av.rascunho_id,
+        acao=av.acao,
+        texto_final=av.texto_final,
+        similaridade=av.similaridade,
+        motivo=av.motivo,
+        nota=av.nota,
+        correcao=av.correcao,
+    )
+
+
+@router.post("/rascunhos/{rascunho_id}/descartar", response_model=RascunhoUnicoOut)
+async def descartar_rascunho(
+    rascunho_id: UUID,
+    body: DescartarIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(_edit)],
+) -> RascunhoUnicoOut:
+    """A sugestão não serve — e o PORQUÊ fica para a revisão do manual."""
+    r = await _rascunho_ou_404(session, rascunho_id, await resolve_team_scope(session, user))
+    if r.status not in (RASCUNHO_PENDENTE, RASCUNHO_BLOQUEADO):
+        raise HTTPException(409, detail={"code": "rascunho_nao_pendente"})
+    r.status = RASCUNHO_DESCARTADO
+    av = await _avaliacao_de(session, r.id)
+    if av is None:
+        session.add(
+            AtendimentoAvaliacao(
+                rascunho_id=r.id, acao="descartou", motivo=body.motivo, user_id=user.id
+            )
+        )
+    else:
+        av.acao = "descartou"
+        av.motivo = body.motivo
+    await session.commit()
+    await session.refresh(r)
+    logger.info("atendimento_rascunho_descartado", rascunho_id=str(r.id), user_id=str(user.id))
+    return RascunhoUnicoOut(rascunho=_rascunho_out(r))
+
+
+async def _texto_final(session: AsyncSession, r: AtendimentoRascunho) -> str | None:
+    """O que saiu no lugar da sugestão, para a avaliação.
+
+    A resposta que saiu DELA (enviada igual/editada); na sugestão
+    `substituido`, a resposta da loja que tomou o lugar dela (Duoke, Seller
+    Center ou a equipe escrevendo do zero) — é a comparação IA × equipe.
+    Descartada/bloqueada: nada saiu dela, fica None.
+    """
+    proprio = await session.scalar(
+        select(AtendimentoMensagem.texto)
+        .where(
+            AtendimentoMensagem.rascunho_id == r.id,
+            AtendimentoMensagem.status != MSG_FALHOU,
+        )
+        .order_by(AtendimentoMensagem.created_at.desc())
+        .limit(1)
+    )
+    if proprio is not None or r.status != RASCUNHO_SUBSTITUIDO:
+        return proprio
+    sugestoes = await _sugestoes(session, r.conversa_id, so_rascunho=r.id)
+    real = sugestoes[0].resposta_real if sugestoes else None
+    return real.texto if real is not None else None
+
+
+async def _preencher_acao(
+    session: AsyncSession, av: AtendimentoAvaliacao, r: AtendimentoRascunho, acao: str
+) -> None:
+    """A ação e, quando algo saiu no lugar da sugestão, o texto e a similaridade."""
+    av.acao = acao
+    if acao == ACAO_OBSERVOU:
+        # Pendente: nada saiu ainda — não há texto final a comparar.
+        return
+    texto_final = await _texto_final(session, r)
+    av.texto_final = texto_final
+    av.similaridade = (
+        enviar.similaridade(texto_final, r.texto) if texto_final is not None else None
+    )
+
+
+@router.post("/rascunhos/{rascunho_id}/avaliacao", response_model=AvaliacaoUnicaOut)
+async def avaliar_rascunho(
+    rascunho_id: UUID,
+    body: AvaliacaoIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(_edit)],
+) -> AvaliacaoUnicaOut:
+    """👍/👎 na sugestão — é o que ensina a IA. Uma por sugestão (upsert).
+
+    Vale para qualquer estado — inclusive a sugestão AINDA pendente: no modo
+    observação nada sai pelo DaVinci (quem responde é o Duoke), e a pessoa
+    avalia o que a IA teria dito sem enviar. O 👍 faz o texto da sugestão
+    virar exemplo aprovado; o 👎 com correção vira correção no prompt (P3,
+    em `ia.py`). Como a regra do manual, a nota de admin vale na plataforma
+    e a de quem não é admin só na mesma loja, nunca num canal em `auto`
+    (`ia._avaliacao_vale_aqui`) — por isso aqui basta o `edit` e o escopo
+    da equipe. A pendente ganha a ação `observou`; quando ela sai da
+    caixa (a loja respondeu por fora → `substituido`; bloqueada/descartada),
+    a próxima nota promove a ação à de verdade, com a resposta real ao lado.
+
+    Sugestão enviada pelo AUTOMÁTICO não tem avaliação (exemplo aprovado é o
+    que pessoa aprovou): a nota de uma pessoa aqui é que cria a linha.
+    """
+    r = await _rascunho_ou_404(session, rascunho_id, await resolve_team_scope(session, user))
+    acao = _ACAO_PELO_STATUS.get(r.status, ACAO_OBSERVOU)
+    av = await _avaliacao_de(session, r.id)
+    criada = False
+    if av is None:
+        nova = AtendimentoAvaliacao(
+            rascunho_id=r.id, user_id=user.id, nota=body.nota, correcao=body.correcao
+        )
+        await _preencher_acao(session, nova, r, acao)
+        await session.flush()  # pendências alheias fora do SAVEPOINT
+        try:
+            # Dois cliques (ou duas abas) ao mesmo tempo: o UNIQUE barra o
+            # segundo INSERT, e ele vira atualização da linha do primeiro.
+            async with session.begin_nested():
+                session.add(nova)
+                await session.flush()
+            av, criada = nova, True
+        except IntegrityError:
+            av = await _avaliacao_de(session, r.id)
+            if av is None:
+                raise
+    autor_anterior = av.user_id
+    if not criada:
+        if av.acao == ACAO_OBSERVOU and acao != ACAO_OBSERVOU:
+            await _preencher_acao(session, av, r, acao)
+        av.nota = body.nota
+        av.correcao = body.correcao
+        # A nota e a correção são de quem as deu AGORA: se outra pessoa
+        # refaz a avaliação, a linha passa a ser dela (o `updated_at` anda
+        # junto). Manter o primeiro autor punha o 👎 e o texto de B no nome
+        # de A — e o "IA × equipe" do teste em observação é o que decide se
+        # a IA passa a responder. A troca fica no log (a tabela está fora
+        # do Histórico).
+        av.user_id = user.id
+    await session.commit()
+    await session.refresh(av)
+    logger.info(
+        "atendimento_rascunho_avaliado",
+        rascunho_id=str(r.id),
+        nota=body.nota,
+        user_id=str(user.id),
+        autor_anterior=(
+            str(autor_anterior)
+            if autor_anterior is not None and autor_anterior != user.id
+            else None
+        ),
+    )
+    return AvaliacaoUnicaOut(avaliacao=_avaliacao_out(av))
+
+
+# ── Canais (lojas e modo) ─────────────────────────────────────────────────
+
+
+@router.get("/canais", response_model=list[CanalOut])
+async def listar_canais(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(_view)],
+) -> list[CanalOut]:
+    return await _canais(session, await resolve_team_scope(session, user))
+
+
+@router.patch("/canais/{canal_id}", response_model=CanalOut)
+async def editar_canal(
+    canal_id: UUID,
+    body: CanalPatch,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(_edit)],
+) -> CanalOut:
+    """Troca o modo da loja (observar/humano/copiloto/auto) e as categorias do automático.
+
+    Ligar `auto` — ou mexer nas categorias que saem sozinhas — só admin:
+    é resposta a comprador sem pessoa conferindo. Desligar qualquer um pode.
+    Categoria só-humano (troca, reembolso, defeito...) nunca entra no automático.
+    """
+    canal = await session.get(AtendimentoCanal, canal_id)
+    scope = await resolve_team_scope(session, user)
+    if canal is None or not _no_escopo(scope, canal.integration_id):
+        raise HTTPException(404, detail={"code": "canal_nao_encontrado"})
+    # Desligar o `auto` numa emergência não pode pendurar atrás da rodada do
+    # sync (que grava o contador de não lidas no canal): 409 e tenta de novo.
+    await _travar_ou_409(session, canal, "canal_ocupado")
+    eh_admin = user.role == UserRole.ADMIN
+    campos = body.model_fields_set
+    if canal.plataforma in PLATAFORMAS_ROBO and (
+        ("modo" in campos and not robo.modo_permitido(canal.plataforma, body.modo))
+        or ("auto_categorias" in campos and body.auto_categorias)
+    ):
+        # Loja do robô do Mac mini: nada sai pelo DaVinci (a resposta é no
+        # Seller Center), então nem `humano` nem `auto` fazem sentido.
+        raise HTTPException(
+            422,
+            detail={
+                "code": "modo_invalido_robo",
+                "detail": "Loja lida pelo robô do Mac mini: só observar ou copiloto "
+                "(a resposta é dada no Seller Center).",
+            },
+        )
+    if "modo" in campos and body.modo is not None and body.modo != canal.modo:
+        if body.modo == MODO_AUTO and not eh_admin:
+            raise HTTPException(403, detail={"code": "so_admin"})
+        canal.modo = body.modo
+    if (
+        "auto_categorias" in campos
+        and body.auto_categorias is not None
+        and set(body.auto_categorias) != set(canal.auto_categorias or [])
+    ):
+        if not eh_admin:
+            raise HTTPException(403, detail={"code": "so_admin"})
+        # Os assuntos são os do manual base (a mesma lista com que a IA
+        # classifica; sem manual, as constantes): um assunto que só existe no
+        # manual pode ir para o automático, e um que não existe não entra.
+        manual = await _categorias_do_manual(session)
+        ordem = [str(c["id"]) for c in manual]
+        # Só-humano pelas constantes E pelo manual base (a tabela pode marcar
+        # outro assunto como só-humano): nunca menos trava que as constantes.
+        # Vem antes do "desconhecido": é a recusa que importa mais.
+        so_humano_manual = {c["id"] for c in manual if c.get("so_humano")}
+        so_humano = [
+            c for c in body.auto_categorias if c in CATEGORIAS_SO_HUMANO or c in so_humano_manual
+        ]
+        if so_humano:
+            raise HTTPException(
+                422, detail={"code": "categoria_so_humano", "categorias": so_humano}
+            )
+        desconhecidas = [c for c in body.auto_categorias if c not in ordem]
+        if desconhecidas:
+            raise HTTPException(
+                422,
+                detail={
+                    "code": "categoria_invalida",
+                    "detail": "Assunto desconhecido (ou desativado) no manual: "
+                    + ", ".join(desconhecidas),
+                    "categorias": desconhecidas,
+                },
+            )
+        # Ordem do manual e sem repetição: o JSONB compara igual entre edições.
+        escolhidas = set(body.auto_categorias)
+        canal.auto_categorias = [c for c in ordem if c in escolhidas]
+    await session.commit()
+    await session.refresh(canal)
+    integration = (
+        await session.get(Integration, canal.integration_id)
+        if canal.integration_id is not None
+        else None
+    )
+    logger.info(
+        "atendimento_canal_editado",
+        canal_id=str(canal.id),
+        modo=canal.modo,
+        auto_categorias=len(canal.auto_categorias or []),
+        user_id=str(user.id),
+    )
+    integracao = integration.name if integration else None
+    saida = _canal_out(canal, integracao, integracao=integracao)
+    nomes = await _nomes_das_lojas(session, {saida.integration_id})
+    saida.conta = nomes.get(saida.integration_id) or saida.conta
+    return saida
+
+
+# ── Manual da IA (regras QUANDO → FAÇA) ───────────────────────────────────
+
+
+async def _so_admin_se_vale_para_auto(
+    session: AsyncSession, user: User, *escopos: tuple[str | None, str | None]
+) -> None:
+    """Regra que vale para algum canal em `auto` só admin cria, muda, liga ou apaga.
+
+    O manual entra no prompt de todas as lojas do escopo da regra — inclusive
+    das que estão no automático, que só admin liga. Sem isto, quem não pode
+    ligar o `auto` mudaria o que ele manda sozinho ("QUANDO agradecer → FAÇA
+    peça para avaliar"). Regra de plataforma/canal sem loja em `auto`
+    continua com quem tem `edit`: ela só muda sugestão que PESSOA confere.
+    """
+    if user.role == UserRole.ADMIN:
+        return
+    for plataforma, canal in escopos:
+        consulta = select(AtendimentoCanal.id).where(AtendimentoCanal.modo == MODO_AUTO)
+        if plataforma:
+            consulta = consulta.where(AtendimentoCanal.plataforma == plataforma)
+        if canal:
+            consulta = consulta.where(AtendimentoCanal.canal == canal)
+        if await session.scalar(consulta.limit(1)) is not None:
+            raise HTTPException(
+                403,
+                detail={
+                    "code": "so_admin",
+                    "detail": "Esta regra vale para uma loja no envio automático: só admin "
+                    "muda.",
+                },
+            )
+
+
+async def _categorias_do_manual(session: AsyncSession) -> list[dict[str, Any]]:
+    """Os assuntos oficiais (`manual.categorias_ativas`); sem o manual, as constantes.
+
+    A tabela `atendimento_categorias` (o manual base importado) é a lista
+    que a IA usa para classificar; vazia, o próprio serviço cai em
+    `constantes.CATEGORIAS`. Aqui a queda vale também para o serviço
+    ausente ou falhando (SAVEPOINT: a transação segue viva) — a tela do
+    manual e a trava das categorias do automático não podem parar por isso.
+    """
+    manual_svc = _modulo(_MANUAL)
+    categorias: list[dict[str, Any]] = []
+    if manual_svc is not None:
+        try:
+            async with session.begin_nested():
+                categorias = [
+                    dict(c)
+                    for c in await manual_svc.categorias_ativas(session) or []
+                    if isinstance(c, dict) and c.get("id")
+                ]
+        except Exception as e:  # noqa: BLE001 — cai nas constantes
+            logger.warning("atendimento_categorias_falhou", err=type(e).__name__)
+            categorias = []
+    if categorias:
+        return categorias
+    return [
+        {
+            "id": c,
+            "nome": CATEGORIAS_INFO.get(c, (c, ""))[0],
+            "descricao": CATEGORIAS_INFO.get(c, (c, ""))[1],
+            "so_humano": c in CATEGORIAS_SO_HUMANO,
+            "ordem": (i + 1) * 10,
+        }
+        for i, c in enumerate(CATEGORIAS)
+    ]
+
+
+async def _conferir_categoria(session: AsyncSession, categoria: str | None) -> None:
+    """Regra só aponta para assunto que existe (e está ativo) no manual → senão 422."""
+    if categoria is None:
+        return
+    if categoria not in {str(c["id"]) for c in await _categorias_do_manual(session)}:
+        raise HTTPException(
+            422,
+            detail={
+                "code": "categoria_invalida",
+                "detail": f"Assunto desconhecido (ou desativado) no manual: {categoria}.",
+            },
+        )
+
+
+def _dados_da_regra(r: AtendimentoRegra) -> dict[str, Any]:
+    """A regra no formato de `manual.conflitos_da_regra` (o mesmo do importador)."""
+    return {
+        "quando": r.quando,
+        "faca": r.faca,
+        "tipo": r.tipo,
+        "categoria": r.categoria,
+        "plataforma": r.plataforma,
+        "canal": r.canal,
+        "prioridade": r.prioridade,
+        "ativa": r.ativa,
+    }
+
+
+async def _recusar_conflito(
+    session: AsyncSession, dados: dict[str, Any], *, ignorar_id: UUID | None = None
+) -> None:
+    """Regra ativa que bate com outra ativa → 409 `regra_conflitante` com a existente.
+
+    Conflito (P7) = duas regras ATIVAS do tipo `categoria` para o mesmo
+    (assunto, plataforma, canal): a IA receberia duas ordens para o mesmo
+    caso e escolheria sozinha. Quem decide o que bate é
+    `manual.conflitos_da_regra` (o mesmo que o importador do manual usa) —
+    aqui só a trava e o 409. A trava da transação (`TRAVA_REGRAS`) fica
+    até o commit de quem chama: a conferência e o INSERT/UPDATE andam
+    juntos. Sem o serviço, recusa (503) em vez de gravar sem conferir.
+    """
+    manual_svc = _modulo(_MANUAL)
+    if manual_svc is None:
+        raise HTTPException(
+            503,
+            detail={
+                "code": "manual_indisponivel",
+                "detail": "A conferência de conflito do manual não está disponível agora.",
+            },
+        )
+    travar = getattr(manual_svc, "travar_regras", None)
+    if travar is not None:
+        await travar(session)  # a mesma chave `TRAVA_REGRAS`, do lado do manual
+    else:
+        await session.execute(
+            text("SELECT pg_advisory_xact_lock(hashtext(:k))"), {"k": TRAVA_REGRAS}
+        )
+    conflitos = list(
+        await manual_svc.conflitos_da_regra(session, dados, ignorar_id=ignorar_id) or []
+    )
+    if conflitos:
+        conflitos = jsonable_encoder(conflitos)
+        raise HTTPException(
+            409,
+            detail={
+                "code": "regra_conflitante",
+                "detail": "Já existe uma regra ativa para este assunto, plataforma e canal: "
+                "edite ou desative a outra antes.",
+                "regra": conflitos[0],
+                "conflitos": conflitos,
+            },
+        )
+
+
+def _ids_citados(conflito: Any, conhecidos: set[str]) -> set[str]:
+    """Os ids de regra citados num conflito, em qualquer profundidade.
+
+    O formato de `manual.conflitos_existentes` é do serviço (hoje um grupo
+    `{categoria, plataforma, canal, regra_ids, regras}`); aqui só interessa
+    QUAIS regras aparecem juntas — e isso não quebra se o formato mudar.
+    """
+    achados: set[str] = set()
+    pilha = [conflito]
+    while pilha:
+        valor = pilha.pop()
+        if isinstance(valor, dict):
+            pilha.extend(valor.values())
+        elif isinstance(valor, list | tuple | set):
+            pilha.extend(valor)
+        elif valor is not None and str(valor) in conhecidos:
+            achados.add(str(valor))
+    return achados
+
+
+async def _conflitos_atuais(session: AsyncSession, r: AtendimentoRegra) -> set[str] | None:
+    """Com quem a regra (já gravada) bate AGORA — para a resposta do PATCH.
+
+    Editar só o texto de uma regra que já estava em conflito passa, e a tela
+    tem de continuar vendo o vermelho. Só leitura (sem trava); se a
+    conferência falhar, a resposta sai sem a marca (o GET /regras a traz).
+    """
+    if not r.ativa:
+        return None
+    dados, regra_id = _dados_da_regra(r), r.id
+    manual_svc = _modulo(_MANUAL)
+    if manual_svc is None:
+        return None
+    try:
+        async with session.begin_nested():
+            outras = await manual_svc.conflitos_da_regra(session, dados, ignorar_id=regra_id)
+    except Exception as e:  # noqa: BLE001 — a resposta sai sem a marca
+        logger.warning("atendimento_conflitos_falhou", regra_id=str(regra_id), err=type(e).__name__)
+        return None
+    ids = {str(o.get("id")) for o in outras or [] if isinstance(o, dict) and o.get("id")}
+    return ids or None
+
+
+def _regra_out(r: AtendimentoRegra, *, conflita_com: set[str] | None = None) -> RegraOut:
+    """`conflita_com=None` = não está em conflito; conjunto (até vazio) = está."""
+    return RegraOut(
+        id=r.id,
+        quando=r.quando,
+        faca=r.faca,
+        plataforma=r.plataforma,
+        canal=r.canal,
+        ativa=r.ativa,
+        tipo=r.tipo or TIPO_REGRA_CATEGORIA,
+        categoria=r.categoria,
+        prioridade=r.prioridade if r.prioridade is not None else PRIORIDADE_REGRA_PADRAO,
+        updated_at=_utc(r.updated_at),
+        em_conflito=conflita_com is not None,
+        conflita_com=[UUID(i) for i in sorted(conflita_com or ())],
+    )
+
+
+@router.get("/regras", response_model=ListaRegrasOut)
+async def listar_regras(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[User, Depends(_view)],
+) -> ListaRegrasOut:
+    """O manual inteiro e os conflitos que JÁ existem (a tela pinta de vermelho).
+
+    A API não deixa nascer conflito novo (409 no POST/PATCH) e o importador
+    do manual recusa o arquivo que traria um, mas o que veio de antes da
+    trava — regra criada antes da parte 2, ou uma regra geral que ganhou
+    assunto pelo banco — continua lá até alguém resolver. Se a conferência
+    falhar, o manual aparece sem os conflitos (e o log diz).
+    """
+    regras = (
+        (await session.execute(select(AtendimentoRegra).order_by(AtendimentoRegra.created_at)))
+        .scalars()
+        .all()
+    )
+    conflitos: list[dict[str, Any]] = []
+    manual_svc = _modulo(_MANUAL)
+    if manual_svc is not None:
+        try:
+            async with session.begin_nested():
+                conflitos = [
+                    dict(c)
+                    for c in await manual_svc.conflitos_existentes(session) or []
+                    if isinstance(c, dict)
+                ]
+        except Exception as e:  # noqa: BLE001 — o manual aparece sem os conflitos
+            logger.warning("atendimento_conflitos_falhou", err=type(e).__name__)
+            conflitos = []
+    conhecidos = {str(r.id) for r in regras}
+    vizinhos: dict[str, set[str]] = {}
+    for conflito in conflitos:
+        ids = _ids_citados(conflito, conhecidos)
+        for i in ids:
+            vizinhos.setdefault(i, set()).update(ids - {i})
+    return ListaRegrasOut(
+        regras=[_regra_out(r, conflita_com=vizinhos.get(str(r.id))) for r in regras],
+        conflitos=jsonable_encoder(conflitos),
+    )
+
+
+@router.get("/categorias", response_model=list[CategoriaOut])
+async def listar_categorias(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[User, Depends(_view)],
+) -> list[CategoriaOut]:
+    """Os assuntos oficiais do manual (o seletor de categoria da regra e do automático)."""
+    saida: list[CategoriaOut] = []
+    for c in await _categorias_do_manual(session):
+        try:
+            saida.append(
+                CategoriaOut.model_validate(
+                    {**c, "exemplos": c.get("exemplos") or [], "lacunas": c.get("lacunas") or []}
+                )
+            )
+        except ValueError as e:
+            # Uma linha estranha não esconde as outras (só o id no log).
+            logger.warning(
+                "atendimento_categoria_invalida", categoria=str(c.get("id"))[:40], err=str(e)[:200]
+            )
+    return saida
+
+
+@router.post("/regras", response_model=RegraOut, status_code=status.HTTP_201_CREATED)
+async def criar_regra(
+    body: RegraIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(_edit)],
+) -> RegraOut:
+    """Nova regra. Ativa e batendo com outra ativa → 409 `regra_conflitante`."""
+    _validar_par(body.plataforma, body.canal)
+    # Assunto só tem efeito no tipo `categoria`: segurança e estilo valem
+    # para toda mensagem, e gravar um assunto ali só confundiria a leitura.
+    categoria = body.categoria if body.tipo == TIPO_REGRA_CATEGORIA else None
+    await _conferir_categoria(session, categoria)
+    if body.ativa:
+        await _so_admin_se_vale_para_auto(session, user, (body.plataforma, body.canal))
+    r = AtendimentoRegra(
+        quando=body.quando,
+        faca=body.faca,
+        plataforma=body.plataforma,
+        canal=body.canal,
+        ativa=body.ativa,
+        tipo=body.tipo,
+        categoria=categoria,
+        prioridade=body.prioridade,
+        criado_por=user.id,
+        atualizado_por=user.id,
+    )
+    if r.ativa:
+        await _recusar_conflito(session, _dados_da_regra(r))
+    session.add(r)
+    await session.commit()
+    await session.refresh(r)
+    logger.info(
+        "atendimento_regra_criada",
+        regra_id=str(r.id),
+        tipo=r.tipo,
+        categoria=r.categoria,
+        user_id=str(user.id),
+    )
+    return _regra_out(r)
+
+
+@router.patch("/regras/{regra_id}", response_model=RegraOut)
+async def editar_regra(
+    regra_id: UUID,
+    body: RegraPatch,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(_edit)],
+) -> RegraOut:
+    """Muda a regra. Ativar ou mudá-la de lugar para cima de outra ativa → 409.
+
+    Mexer só no texto/prioridade de uma regra que JÁ estava em conflito
+    passa (o conflito não é novo, e é editando que se resolve); desativar
+    passa sempre.
+    """
+    r = await session.get(AtendimentoRegra, regra_id)
+    if r is None:
+        raise HTTPException(404, detail={"code": "regra_nao_encontrada"})
+    antes = (r.plataforma, r.canal) if r.ativa else None
+    lugar_antes = (r.ativa, r.tipo, r.categoria, r.plataforma, r.canal)
+    campos = body.model_fields_set
+    if "quando" in campos:
+        if not body.quando:
+            raise HTTPException(422, detail={"code": "quando_vazio"})
+        r.quando = body.quando
+    if "faca" in campos:
+        if not body.faca:
+            raise HTTPException(422, detail={"code": "faca_vazio"})
+        r.faca = body.faca
+    if "plataforma" in campos:
+        r.plataforma = body.plataforma
+    if "canal" in campos:
+        r.canal = body.canal
+    if "ativa" in campos and body.ativa is not None:
+        r.ativa = body.ativa
+    if "tipo" in campos and body.tipo is not None:
+        r.tipo = body.tipo
+    if "categoria" in campos:
+        r.categoria = body.categoria
+    if "prioridade" in campos and body.prioridade is not None:
+        r.prioridade = body.prioridade
+    if r.tipo != TIPO_REGRA_CATEGORIA:
+        r.categoria = None
+    _validar_par(r.plataforma, r.canal)
+    # Só confere o assunto que MUDOU: a regra cujo assunto saiu do manual
+    # (desativado, ou o manual base reimportado sem ele) continua editável —
+    # corrigir o texto ou desativá-la não pode voltar 422 por um assunto
+    # que a pessoa nem tocou.
+    if "categoria" in campos and r.categoria != lugar_antes[2]:
+        await _conferir_categoria(session, r.categoria)
+    # Vale onde ela valia (tirar/mudar a regra de uma loja em `auto`) e onde
+    # passa a valer (levar uma regra para uma loja em `auto`).
+    escopos = [e for e in (antes, (r.plataforma, r.canal) if r.ativa else None) if e]
+    await _so_admin_se_vale_para_auto(session, user, *escopos)
+    if r.ativa and (r.ativa, r.tipo, r.categoria, r.plataforma, r.canal) != lugar_antes:
+        await _recusar_conflito(session, _dados_da_regra(r), ignorar_id=r.id)
+    r.atualizado_por = user.id
+    await session.commit()
+    await session.refresh(r)
+    return _regra_out(r, conflita_com=await _conflitos_atuais(session, r))
+
+
+@router.delete("/regras/{regra_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def apagar_regra(
+    regra_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(_delete)],
+) -> Response:
+    r = await session.get(AtendimentoRegra, regra_id)
+    if r is None:
+        raise HTTPException(404, detail={"code": "regra_nao_encontrada"})
+    if r.ativa:
+        await _so_admin_se_vale_para_auto(session, user, (r.plataforma, r.canal))
+    await session.delete(r)
+    await session.commit()
+    logger.info("atendimento_regra_apagada", regra_id=str(regra_id), user_id=str(user.id))
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+# ── Respostas prontas (modelos) ───────────────────────────────────────────
+
+
+def _modelo_out(m: AtendimentoModelo) -> ModeloOut:
+    return ModeloOut(
+        id=m.id,
+        titulo=m.titulo,
+        texto=m.texto,
+        plataforma=m.plataforma,
+        canal=m.canal,
+        categoria=m.categoria,
+        ativo=m.ativo,
+        ordem=m.ordem,
+    )
+
+
+@router.get("/modelos", response_model=list[ModeloOut])
+async def listar_modelos(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[User, Depends(_view)],
+    plataforma: Annotated[str | None, Query()] = None,
+    canal: Annotated[str | None, Query()] = None,
+) -> list[ModeloOut]:
+    """Todas as respostas prontas; com plataforma/canal, as que valem ali (e as gerais)."""
+    consulta = select(AtendimentoModelo)
+    if plataforma:
+        consulta = consulta.where(
+            or_(AtendimentoModelo.plataforma.is_(None), AtendimentoModelo.plataforma == plataforma)
+        )
+    if canal:
+        consulta = consulta.where(
+            or_(AtendimentoModelo.canal.is_(None), AtendimentoModelo.canal == canal)
+        )
+    modelos = (
+        (
+            await session.execute(
+                consulta.order_by(AtendimentoModelo.ordem, AtendimentoModelo.titulo)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return [_modelo_out(m) for m in modelos]
+
+
+@router.post("/modelos", response_model=ModeloOut, status_code=status.HTTP_201_CREATED)
+async def criar_modelo(
+    body: ModeloIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(_edit)],
+) -> ModeloOut:
+    _validar_par(body.plataforma, body.canal)
+    await _conferir_categoria(session, body.categoria)
+    m = AtendimentoModelo(
+        titulo=body.titulo,
+        texto=body.texto,
+        plataforma=body.plataforma,
+        canal=body.canal,
+        categoria=body.categoria,
+        ativo=body.ativo,
+        ordem=body.ordem,
+        criado_por=user.id,
+    )
+    session.add(m)
+    await session.commit()
+    await session.refresh(m)
+    return _modelo_out(m)
+
+
+@router.patch("/modelos/{modelo_id}", response_model=ModeloOut)
+async def editar_modelo(
+    modelo_id: UUID,
+    body: ModeloPatch,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[User, Depends(_edit)],
+) -> ModeloOut:
+    m = await session.get(AtendimentoModelo, modelo_id)
+    if m is None:
+        raise HTTPException(404, detail={"code": "modelo_nao_encontrado"})
+    campos = body.model_fields_set
+    if "titulo" in campos:
+        if not body.titulo:
+            raise HTTPException(422, detail={"code": "titulo_vazio"})
+        m.titulo = body.titulo
+    if "texto" in campos:
+        if not body.texto:
+            raise HTTPException(422, detail={"code": "texto_vazio"})
+        m.texto = body.texto
+    if "plataforma" in campos:
+        m.plataforma = body.plataforma
+    if "canal" in campos:
+        m.canal = body.canal
+    if "categoria" in campos and body.categoria != m.categoria:
+        await _conferir_categoria(session, body.categoria)
+        m.categoria = body.categoria
+    if "ativo" in campos and body.ativo is not None:
+        m.ativo = body.ativo
+    if "ordem" in campos and body.ordem is not None:
+        m.ordem = body.ordem
+    _validar_par(m.plataforma, m.canal)
+    await session.commit()
+    await session.refresh(m)
+    return _modelo_out(m)
+
+
+@router.delete("/modelos/{modelo_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def apagar_modelo(
+    modelo_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[User, Depends(_delete)],
+) -> Response:
+    m = await session.get(AtendimentoModelo, modelo_id)
+    if m is None:
+        raise HTTPException(404, detail={"code": "modelo_nao_encontrado"})
+    await session.delete(m)
+    await session.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+# ── Sincronizar agora ─────────────────────────────────────────────────────
+
+
+@router.post("/sincronizar", response_model=SincronizarOut)
+async def sincronizar_agora(
+    user: Annotated[User, Depends(_edit)],
+) -> SincronizarOut:
+    """Pede uma leitura já, sem esperar o próximo minuto ímpar.
+
+    A trava de 60 s no Redis impede que clique repetido vire rajada na API
+    das lojas (a trava por canal do sync segura o resto).
+    """
+    if not get_settings().atendimento_leitura_ativa:
+        return SincronizarOut(enfileirado=False, motivo="leitura_desligada")
+    try:
+        pegou = await redis.set(CHAVE_SINCRONIZAR, "1", nx=True, ex=TRAVA_SINCRONIZAR_S)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("atendimento_sincronizar_redis_falhou", err=type(e).__name__)
+        raise HTTPException(503, detail={"code": "fila_indisponivel"}) from e
+    if not pegou:
+        return SincronizarOut(enfileirado=False, motivo="recente")
+    try:
+        await (await worker_pool.get_arq_pool()).enqueue_job("atendimento_sincronizar")
+    except Exception as e:  # noqa: BLE001
+        logger.warning("atendimento_sincronizar_fila_falhou", err=type(e).__name__)
+        # Não enfileirou: solta a trava, senão o botão fica travado por nada.
+        try:
+            await redis.delete(CHAVE_SINCRONIZAR)
+        except Exception:  # noqa: BLE001, S110 — o TTL solta sozinho
+            pass
+        raise HTTPException(503, detail={"code": "fila_indisponivel"}) from e
+    logger.info("atendimento_sincronizar_enfileirado", user_id=str(user.id))
+    return SincronizarOut(enfileirado=True)
+
+
+# ── Métricas ──────────────────────────────────────────────────────────────
+
+
+def _p90(valores: list[float]) -> float:
+    """Percentil 90 pelo posto mais próximo (sem interpolar: é um tempo que aconteceu)."""
+    ordenados = sorted(valores)
+    return ordenados[max(0, ceil(0.9 * len(ordenados)) - 1)]
+
+
+async def _metricas_lojas(
+    session: AsyncSession, scope: TeamScope, desde: datetime, agora: datetime
+) -> list[MetricaLojaOut]:
+    """Primeira resposta por loja, em "turnos" do cliente.
+
+    Um turno começa quando o cliente fala e a última palavra era da loja (ou
+    a conversa começou), junta as mensagens seguidas dele, e termina na
+    primeira resposta da loja que não falhou — pelo DaVinci ou por fora.
+    Conta o turno que COMEÇOU no período. `pct_no_prazo` é sobre os turnos
+    já decididos: respondidos, e os sem resposta cujo prazo já venceu (o
+    que ainda está no prazo não é nem acerto nem erro).
+    """
+    filtro = [AtendimentoConversa.ultima_mensagem_em >= desde]
+    cond = _clausula_escopo(scope, AtendimentoConversa.integration_id)
+    if cond is not None:
+        filtro.append(cond)
+    consulta_conversas = select(
+        AtendimentoConversa.id,
+        AtendimentoConversa.integration_id,
+        AtendimentoConversa.canal_id,
+        AtendimentoConversa.plataforma,
+        AtendimentoConversa.canal,
+        AtendimentoConversa.conta,
+        AtendimentoConversa.sem_resposta_necessaria,
+    ).where(*filtro)
+    conversas = {row.id: row for row in (await session.execute(consulta_conversas)).all()}
+    if not conversas:
+        return []
+
+    momento = func.coalesce(AtendimentoMensagem.enviada_em, AtendimentoMensagem.created_at)
+    linhas = (
+        await session.execute(
+            select(AtendimentoMensagem.conversa_id, AtendimentoMensagem.autor, momento)
+            .where(
+                # SUBCONSULTA, não a lista de ids: o asyncpg aceita no máximo
+                # 32.767 parâmetros, e 90 dias de todas as lojas passam disso.
+                AtendimentoMensagem.conversa_id.in_(
+                    select(AtendimentoConversa.id).where(*filtro)
+                ),
+                momento >= desde - _MARGEM_METRICAS,
+                or_(
+                    AtendimentoMensagem.autor == AUTOR_CLIENTE,
+                    and_(
+                        AtendimentoMensagem.autor == AUTOR_LOJA,
+                        AtendimentoMensagem.status != MSG_FALHOU,
+                    ),
+                ),
+            )
+            .order_by(AtendimentoMensagem.conversa_id, momento, AtendimentoMensagem.created_at)
+        )
+    ).all()
+
+    por_conversa: dict[UUID, list[tuple[str, datetime]]] = {}
+    for conversa_id, autor, quando in linhas:
+        por_conversa.setdefault(conversa_id, []).append((autor, _utc(quando)))
+
+    lojas: dict[tuple[UUID | None, str, UUID | None], dict[str, Any]] = {}
+    for conversa_id, msgs in por_conversa.items():
+        info = conversas.get(conversa_id)
+        if info is None:  # entrou no período entre as duas consultas
+            continue
+        prazo = timedelta(hours=sla_horas(info.plataforma, info.canal))
+        # A loja do robô (sem integração) é o canal: uma linha por loja Temu.
+        robo_canal = (
+            info.canal_id
+            if info.integration_id is None and info.plataforma in PLATAFORMAS_ROBO
+            else None
+        )
+        loja = lojas.setdefault(
+            (info.integration_id, info.plataforma, robo_canal),
+            {"conta": info.conta, "recebidas": 0, "tempos": [], "no_prazo": 0, "vencidas": 0},
+        )
+        loja["conta"] = loja["conta"] or info.conta
+        inicio: datetime | None = None
+        for autor, quando in msgs:
+            if autor == AUTOR_CLIENTE:
+                inicio = inicio or quando
+                continue
+            if inicio is not None:
+                if inicio >= desde:
+                    loja["recebidas"] += 1
+                    tempo = quando - inicio
+                    loja["tempos"].append(tempo.total_seconds() / 60)
+                    loja["no_prazo"] += int(tempo <= prazo)
+                inicio = None
+        if inicio is not None and inicio >= desde and not info.sem_resposta_necessaria:
+            loja["recebidas"] += 1
+            loja["vencidas"] += int(agora - inicio > prazo)
+
+    # O nome de HOJE da loja (P2), não o retrato gravado na conversa.
+    nomes = await _nomes_das_lojas(session, {integration_id for integration_id, _, _ in lojas})
+    saida: list[MetricaLojaOut] = []
+    for (integration_id, plataforma, _robo_canal), loja in lojas.items():
+        tempos: list[float] = loja["tempos"]
+        decididas = len(tempos) + loja["vencidas"]
+        saida.append(
+            MetricaLojaOut(
+                integration_id=integration_id,
+                conta=nomes.get(integration_id) or loja["conta"],
+                plataforma=plataforma,
+                recebidas=loja["recebidas"],
+                respondidas=len(tempos),
+                mediana_primeira_resposta_min=(
+                    round(statistics.median(tempos), 1) if tempos else None
+                ),
+                p90_primeira_resposta_min=round(_p90(tempos), 1) if tempos else None,
+                pct_no_prazo=(
+                    round(100 * loja["no_prazo"] / decididas, 1) if decididas else None
+                ),
+            )
+        )
+    return sorted(saida, key=lambda m: (m.plataforma, (m.conta or "").lower()))
+
+
+async def _metricas_ia(session: AsyncSession, scope: TeamScope, desde: datetime) -> MetricaIaOut:
+    cond = _clausula_escopo(scope, AtendimentoConversa.integration_id)
+    q_rascunhos = (
+        select(func.count())
+        .select_from(AtendimentoRascunho)
+        .join(AtendimentoConversa, AtendimentoConversa.id == AtendimentoRascunho.conversa_id)
+        .where(AtendimentoRascunho.created_at >= desde)
+    )
+    q_acoes = (
+        select(AtendimentoAvaliacao.acao, func.count())
+        .join(AtendimentoRascunho, AtendimentoRascunho.id == AtendimentoAvaliacao.rascunho_id)
+        .join(AtendimentoConversa, AtendimentoConversa.id == AtendimentoRascunho.conversa_id)
+        .where(AtendimentoAvaliacao.created_at >= desde)
+        .group_by(AtendimentoAvaliacao.acao)
+    )
+    # A nota vem DEPOIS da ação (a pessoa avalia horas depois): conta pela
+    # última mudança da avaliação, não por quando ela nasceu.
+    q_notas = (
+        select(AtendimentoAvaliacao.nota, func.count())
+        .join(AtendimentoRascunho, AtendimentoRascunho.id == AtendimentoAvaliacao.rascunho_id)
+        .join(AtendimentoConversa, AtendimentoConversa.id == AtendimentoRascunho.conversa_id)
+        .where(AtendimentoAvaliacao.updated_at >= desde, AtendimentoAvaliacao.nota.is_not(None))
+        .group_by(AtendimentoAvaliacao.nota)
+    )
+    if cond is not None:
+        q_rascunhos = q_rascunhos.where(cond)
+        q_acoes = q_acoes.where(cond)
+        q_notas = q_notas.where(cond)
+    rascunhos = int(await session.scalar(q_rascunhos) or 0)
+    acoes = {acao: int(n) for acao, n in (await session.execute(q_acoes)).all()}
+    notas = {nota: int(n) for nota, n in (await session.execute(q_notas)).all()}
+    return MetricaIaOut(
+        rascunhos=rascunhos,
+        enviou_igual=acoes.get("enviou_igual", 0),
+        editou=acoes.get("editou", 0),
+        descartou=acoes.get("descartou", 0),
+        escreveu_do_zero=acoes.get("escreveu_do_zero", 0),
+        nota_ok=notas.get("ok", 0),
+        nota_erro=notas.get("erro", 0),
+    )
+
+
+@router.get("/metricas", response_model=MetricasOut)
+async def metricas(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(_view)],
+    dias: Annotated[int, Query(ge=1, le=90)] = 7,
+) -> MetricasOut:
+    """Tempo de primeira resposta e % no prazo por loja; o que a pessoa fez com a IA."""
+    scope = await resolve_team_scope(session, user)
+    agora = datetime.now(UTC)
+    desde = agora - timedelta(days=dias)
+    return MetricasOut(
+        dias=dias,
+        lojas=await _metricas_lojas(session, scope, desde, agora),
+        ia=await _metricas_ia(session, scope, desde),
+    )

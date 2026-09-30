@@ -709,6 +709,110 @@ class ShopeeClient:
         msgs = resp.get("messages") or []
         return [m for m in msgs if isinstance(m, dict)]
 
+    # ---- leitura do chat para a caixa de atendimento (25/09/2026) ------------
+    #
+    # A caixa `/atendimento` (services/atendimento/shopee.py) lê por CONSULTA
+    # periódica. Formato medido em produção em 25/09 (só leitura). Nenhum
+    # método daqui marca nada como lido — e `read_conversation` NÃO existe
+    # neste cliente de propósito: enquanto o Duoke estiver ligado, é o "não
+    # lido" da Shopee que avisa a equipe, e ler pelo DaVinci apagaria o aviso.
+
+    async def chat_conversation_list(
+        self,
+        *,
+        direction: str = "older",
+        tipo: str = "all",
+        page_size: int = 25,
+        next_timestamp_nano: int | str | None = None,
+    ) -> dict:
+        """Uma página da lista de conversas da loja
+        (GET /api/v2/sellerchat/get_conversation_list). Devolve o `response`
+        como veio: `{conversations: [...], page_result: {page_size, more,
+        next_cursor: {next_message_time_nano, conversation_id}}}`.
+
+        O SENTIDO, medido em produção em 28/09 (só leitura, loja kfa):
+          - `older` sem horário → as MAIS NOVAS primeiro, decrescente (o topo
+            da caixa). É o padrão daqui.
+          - `latest` SEM horário → as MAIS ANTIGAS (2023), crescente — a
+            armadilha: parece funcionar e lê o fundo do baú.
+          - `latest` com `next_timestamp_nano=X` → as que têm mensagem depois
+            de X, crescente.
+
+        Cada conversa traz `conversation_id`, `to_id`/`to_name` (o comprador),
+        `shop_id`, `unread_count`, `pinned`, `latest_message_id`/`_type`/
+        `_content`/`_from_id` e `last_message_timestamp` (NANOssegundos). A
+        próxima página vem de `next_cursor.next_message_time_nano` (texto de
+        19 dígitos) — quem pagina manda de volta em `next_timestamp_nano`.
+        `tipo` vai no parâmetro `type` (all | pinned | unread). `page_size`
+        acima de 25 é cortado: 60 devolveu lista VAZIA em algumas lojas
+        (medido em 28/09) — o que pareceria "sem conversa nova"."""
+        params: dict[str, Any] = {
+            "direction": direction,
+            "type": tipo,
+            "page_size": max(1, min(25, int(page_size))),
+        }
+        if next_timestamp_nano not in (None, ""):
+            params["next_timestamp_nano"] = int(next_timestamp_nano)
+        return await self._call(
+            "GET",
+            "/api/v2/sellerchat/get_conversation_list",
+            params=params,
+            what="shopee_chat_conversas",
+        )
+
+    async def chat_one_conversation(self, conversation_id: str) -> dict:
+        """UMA conversa (GET /api/v2/sellerchat/get_one_conversation), no
+        mesmo formato de cada item da `chat_conversation_list`. Não marca como
+        lida."""
+        return await self._call(
+            "GET",
+            "/api/v2/sellerchat/get_one_conversation",
+            params={"conversation_id": str(conversation_id)},
+            what="shopee_chat_conversa",
+        )
+
+    async def chat_unread_count(self) -> int:
+        """Quantas conversas a Shopee diz estarem não lidas na loja
+        (GET /api/v2/sellerchat/get_unread_conversation_count →
+        `total_unread_count`). É o termômetro da caixa: se aqui diz 5 e a
+        leitura do DaVinci não mostra nada, a leitura está incompleta."""
+        resp = await self._call(
+            "GET",
+            "/api/v2/sellerchat/get_unread_conversation_count",
+            what="shopee_chat_nao_lidas",
+        )
+        try:
+            return int(resp.get("total_unread_count") or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    async def chat_mensagens_pagina(
+        self,
+        conversation_id: str,
+        *,
+        offset: str | None = None,
+        page_size: int = 25,
+    ) -> dict:
+        """Uma página das mensagens de UMA conversa
+        (GET /api/v2/sellerchat/get_message), das mais novas para as mais
+        antigas, com a paginação que o `chat_messages` não expõe. Devolve o
+        `response` como veio: `{messages: [...], page_result: {next_offset,
+        page_size}}` — a página seguinte (mais antiga) sai de `offset=
+        next_offset`. Não marca como lida (ver `chat_messages` para quem
+        mandou: `from_shop_id == shop_id`)."""
+        params: dict[str, Any] = {
+            "conversation_id": str(conversation_id),
+            "page_size": min(max(1, int(page_size)), 50),
+        }
+        if offset not in (None, ""):
+            params["offset"] = str(offset)
+        return await self._call(
+            "GET",
+            "/api/v2/sellerchat/get_message",
+            params=params,
+            what="shopee_chat_mensagens",
+        )
+
     async def dispute(
         self,
         return_sn: str,
@@ -819,6 +923,168 @@ class ShopeeClient:
         if body.get("error"):
             return {}
         return body.get("response") or {}
+
+    # ---- pedido e produto para a caixa de atendimento (28/09/2026) -----------
+    #
+    # O painel "Pedido" da caixa (services/atendimento/enriquecer.py) mostra o
+    # que o Duoke mostra: status, itens com foto, valores, pagamento e
+    # logística. SÓ LEITURA (GET). O rastreio usa `get_tracking_number` e
+    # `get_tracking_info` (acima). Formato medido em produção em 28/09/2026.
+
+    # Os campos opcionais do pedido que o painel usa — escolhidos a dedo: NADA
+    # de `recipient_address`, `buyer_username` nem `buyer_cpf_id`. O que não
+    # se pede não chega, nem por engano, ao banco. `buyer_user_id` é o ID
+    # numérico do comprador (o mesmo `to_id` do chat, não nome nem contato):
+    # vai só para o índice de pedidos do cartão "Cliente", nunca ao retrato.
+    # `pickup_done_time` é a "Hora de envio" do painel (P4, como no Duoke).
+    _CAMPOS_PEDIDO_ATENDIMENTO = (
+        "item_list,total_amount,payment_method,pay_time,shipping_carrier,package_list,"
+        "order_status,create_time,update_time,actual_shipping_fee,estimated_shipping_fee,"
+        "invoice_data,buyer_user_id,pickup_done_time"
+    )
+
+    async def get_order_detail_completo(self, order_sn: str) -> dict:
+        """UM pedido com itens (foto em `item_list[].image_info.image_url`),
+        valores, pagamento, pacotes e NF (GET /api/v2/order/get_order_detail).
+
+        Devolve o pedido (o item de `order_list`) ou `{}` quando a Shopee não o
+        devolve. Levanta `RuntimeError` com o código da Shopee em erro de API
+        (e `httpx.HTTPError` em erro de rede) — quem chama decide o que fazer."""
+        resp = await self._call(
+            "GET",
+            "/api/v2/order/get_order_detail",
+            params={
+                "order_sn_list": str(order_sn),
+                "response_optional_fields": self._CAMPOS_PEDIDO_ATENDIMENTO,
+            },
+            what="shopee_order_detail",
+        )
+        for o in resp.get("order_list") or []:
+            if isinstance(o, dict):
+                return o
+        return {}
+
+    async def get_item_base_info(self, item_ids: list[int | str]) -> list[dict]:
+        """Título, fotos (`image.image_url_list`) e, no anúncio SEM variação,
+        o preço (`price_info`) de até 50 anúncios
+        (GET /api/v2/product/get_item_base_info). Levanta em erro de API.
+
+        Anúncio com variação (`has_model`) não traz preço aqui: o preço de
+        cada variação sai do `get_model_list`."""
+        ids = [str(int(x)) for x in item_ids][:50]
+        if not ids:
+            return []
+        resp = await self._call(
+            "GET",
+            "/api/v2/product/get_item_base_info",
+            params={"item_id_list": ",".join(ids)},
+            what="shopee_item_base_info",
+        )
+        return [it for it in resp.get("item_list") or [] if isinstance(it, dict)]
+
+    async def get_model_list(self, item_id: int | str) -> dict:
+        """As variações de UM anúncio com o preço de cada uma
+        (GET /api/v2/product/get_model_list → `{tier_variation, model: [{model_id,
+        model_name, model_sku, price_info: [{current_price, original_price}]}]}`).
+        Levanta em erro de API — diferente do `_get_model_list` da importação,
+        que engole o erro e devolve lista vazia."""
+        return await self._call(
+            "GET",
+            "/api/v2/product/get_model_list",
+            params={"item_id": int(item_id)},
+            what="shopee_model_list",
+        )
+
+    # ---- índice de pedidos e avaliações do comprador (atendimento, 28/09/2026) --
+    #
+    # O cartão "Cliente" da caixa (services/atendimento/cliente.py) diz se quem
+    # escreve já comprou, quanto, se cancelou ou devolveu e como avaliou. A
+    # Shopee NÃO filtra pedido por comprador: o DaVinci monta um índice próprio
+    # (`atendimento_pedidos_comprador`, `atendimento_avaliacoes_loja`) com o job
+    # `atendimento_indexar_pedidos` e a importação do histórico. SÓ LEITURA.
+
+    # Só o que o índice guarda: o `buyer_user_id` é o id numérico do comprador
+    # (o mesmo `to_id` do chat) — id, não dado pessoal. Nada de
+    # `buyer_username`, endereço nem CPF: o que não se pede não chega.
+    _CAMPOS_PEDIDO_INDICE = "buyer_user_id,order_status,total_amount,create_time,item_list"
+
+    async def get_order_list_janela(
+        self,
+        *,
+        time_from: int,
+        time_to: int,
+        time_range_field: str = "update_time",
+        maximo: int = 500,
+    ) -> tuple[list[str], bool]:
+        """Os `order_sn` dos pedidos que MUDARAM (ou nasceram) na janela (epoch UTC).
+
+        `(pedidos, completo)`: `completo=False` quando o teto `maximo` cortou a
+        lista — quem chama sabe que a janela não foi lida inteira. Janela maior
+        que 15 dias é fatiada pelo `iter_orders`. Por `update_time` (padrão), um
+        pedido novo e um pedido que passou a COMPLETED/CANCELLED entram do mesmo
+        jeito. Levanta `RuntimeError` em erro de API (ver `get_order_list`)."""
+        vistos: dict[str, None] = {}
+        async for o in self.iter_orders(
+            time_from=time_from, time_to=time_to, time_range_field=time_range_field
+        ):
+            sn = str(o.get("order_sn") or "").strip()
+            if not sn or sn in vistos:
+                continue
+            if len(vistos) >= max(1, int(maximo)):
+                return list(vistos), False
+            vistos[sn] = None
+        return list(vistos), True
+
+    async def get_order_detail_indice(self, order_sns: list[str]) -> list[dict]:
+        """Até 50 pedidos com o mínimo do índice do atendimento
+        (GET /api/v2/order/get_order_detail, `order_sn_list`):
+        `order_sn`, `buyer_user_id`, `order_status`, `total_amount`,
+        `create_time` e `item_list` (nome e quantidade de cada item).
+
+        Os campos padrão da Shopee vêm junto (a resposta sempre traz alguns);
+        o índice só lê os acima. Levanta em erro de API."""
+        lote = [str(sn).strip() for sn in order_sns if str(sn or "").strip()][:50]
+        if not lote:
+            return []
+        resp = await self._call(
+            "GET",
+            "/api/v2/order/get_order_detail",
+            params={
+                "order_sn_list": ",".join(lote),
+                "response_optional_fields": self._CAMPOS_PEDIDO_INDICE,
+            },
+            what="shopee_order_detail_indice",
+        )
+        return [o for o in resp.get("order_list") or [] if isinstance(o, dict)]
+
+    async def get_comments(
+        self,
+        *,
+        cursor: str = "",
+        page_size: int = 50,
+        item_id: int | str | None = None,
+        comment_id: int | str | None = None,
+    ) -> dict:
+        """UMA página das avaliações da loja (GET /api/v2/product/get_comment).
+
+        Devolve o `response` como veio (formato medido em 28/09/2026):
+        `{item_comment_list: [{comment_id, comment, buyer_username, order_sn,
+        item_id, model_id, create_time (s), rating_star (1-5), editable, hidden,
+        comment_reply: {reply, hidden, create_time}, media}], more,
+        next_cursor}`. A página seguinte sai de `cursor=next_cursor` (a 1ª
+        manda ""). Filtros opcionais por anúncio (`item_id`) ou avaliação
+        (`comment_id`). Levanta em erro de API."""
+        params: dict[str, Any] = {
+            "cursor": str(cursor or ""),
+            "page_size": min(max(1, int(page_size)), 100),
+        }
+        if item_id not in (None, ""):
+            params["item_id"] = int(item_id)
+        if comment_id not in (None, ""):
+            params["comment_id"] = int(comment_id)
+        return await self._call(
+            "GET", "/api/v2/product/get_comment", params=params, what="shopee_comentarios"
+        )
 
     async def update_stock(
         self,

@@ -72,6 +72,17 @@ logger = structlog.get_logger()
 MAGALU_AUTH_URL = "https://id.magalu.com/login"
 MAGALU_TOKEN_URL = "https://id.magalu.com/oauth/token"  # noqa: S105 - endpoint, not a secret
 MAGALU_API_BASE = "https://api.magalu.com"
+# Perguntas & Respostas e Chat com Cliente moram em OUTRO servidor (o SAC fica
+# no `api.magalu.com`). Mesmo token, mesmo proxy, mesma renovação: só muda a
+# base da URL (`_request(..., base=MAGALU_SERVICES_BASE)`).
+MAGALU_SERVICES_BASE = "https://services.magalu.com"
+
+# Limites de texto das APIs de atendimento (developers.magalu.com, 30/09/2026):
+# chat `content` maxLength 2200; SAC `message` maxLength 3000. A resposta de
+# pergunta não tem limite documentado — quem decide é a caixa
+# (`atendimento.constantes.limite_caracteres`).
+LIMITE_CHAT = 2200
+LIMITE_SAC = 3000
 
 # Escopos solicitados pelo DaVinci, separados por espaço no authorize.
 # Além de produtos e pedidos, inclui perguntas, conversas e SAC. Novos
@@ -103,6 +114,10 @@ MAGALU_SCOPES = " ".join(
 
 # Máximo de itens por página aceito pelo list de SKUs (schema: _limit max=100).
 _MAX_PAGE_SIZE = 100
+# SAC (get_tickets e get_ticket_messages): a OpenAPI limita também o
+# `_offset` a 100 — acima disso a Magalu responde 422. Quem precisa de mais
+# anda pela DATA (`updated_at_gte`) ou pela ordem (`_sort`), não pelo offset.
+_MAX_OFFSET_SAC = 100
 
 
 def _http_client(timeout: float) -> httpx.AsyncClient:
@@ -287,10 +302,25 @@ class MagaluClient:
         *,
         params: dict | None = None,
         json: Any = None,
+        base: str = MAGALU_API_BASE,
+        repetir_5xx: bool = True,
     ) -> httpx.Response:
+        """Uma chamada à Magalu: token renovado (401 → refresh), proxy e 429 com espera.
+
+        `base`: `MAGALU_API_BASE` (portfólio, pedidos, SAC) ou
+        `MAGALU_SERVICES_BASE` (perguntas e chat).
+        `repetir_5xx=False` é para o POST de mensagem ao comprador: 502/503/504
+        pode ter sido processado, e repetir mandaria a mesma frase duas vezes.
+        O 429 continua repetido (a Magalu recusou antes de processar).
+
+        O `read_by` (marca a conversa como lida) é recusado AQUI, antes de
+        sair: enquanto a equipe ler pelo portal, o "não lido" é dela.
+        """
+        if "read_by" in path:
+            raise RuntimeError("magalu_read_by_proibido")
         if self._expired():
             await self.refresh(expired_only=True)
-        url = f"{MAGALU_API_BASE}{path}"
+        url = f"{base}{path}"
         request_token = self.access_token
         headers = {
             "Authorization": f"Bearer {request_token}",
@@ -308,7 +338,7 @@ class MagaluClient:
                 request_token = self.access_token
                 headers["Authorization"] = f"Bearer {request_token}"
                 continue
-            if r.status_code in (429, 502, 503, 504):
+            if r.status_code == 429 or (repetir_5xx and r.status_code in (502, 503, 504)):
                 logger.warning(
                     "magalu_retry", attempt=attempt + 1, status=r.status_code, path=path
                 )
@@ -641,6 +671,235 @@ class MagaluClient:
             offset += limit
             page_idx += 1
             await asyncio.sleep(0.3)
+
+    # ------------------------------------------------------- atendimento
+    # Leitura e resposta das três caixas do vendedor (caixa /atendimento,
+    # `services/atendimento/magalu.py`). As LEITURAS devolvem o JSON e levantam
+    # `httpx.HTTPStatusError` fora do 2xx (quem chama traduz 401/403/429); os
+    # ENVIOS devolvem a resposta crua, para quem chama decidir entre "saiu",
+    # "recusou" e "pode ter saído" — e nunca repetem 5xx.
+    #
+    # NÃO existe (e não pode existir) chamada ao `PATCH .../read_by`: marcar
+    # como lido tiraria o aviso de quem lê pelo portal. O `_request` recusa.
+
+    async def _ler_json(
+        self, path: str, *, base: str, params: dict | None = None
+    ) -> dict:
+        r = await self._request("GET", path, params=params, base=base)
+        r.raise_for_status()
+        if not r.content:
+            return {}
+        corpo = r.json()
+        return corpo if isinstance(corpo, dict) else {}
+
+    # Perguntas & Respostas (pré-venda) — services:questions-seller:read/write.
+
+    async def perguntas(
+        self, *, status: str, offset: int = 0, limit: int = _MAX_PAGE_SIZE
+    ) -> dict:
+        """GET /v0/questions (WAITING_RESPONSE | APPROVED | REJECTED_RESPONSE)."""
+        return await self._ler_json(
+            "/v0/questions",
+            base=MAGALU_SERVICES_BASE,
+            params={
+                "status": status,
+                "_offset": max(0, int(offset)),
+                "_limit": min(max(int(limit), 1), _MAX_PAGE_SIZE),
+            },
+        )
+
+    async def pergunta(self, question_id: str) -> dict:
+        """GET /v0/questions/{id}."""
+        return await self._ler_json(
+            f"/v0/questions/{quote(str(question_id), safe='')}", base=MAGALU_SERVICES_BASE
+        )
+
+    async def responder_pergunta(
+        self,
+        question_id: str,
+        mensagem: str,
+        *,
+        autor_nome: str,
+        autor_id: str,
+        ref: str | None = None,
+    ) -> httpx.Response:
+        """POST /v0/questions/{id}/answer → 202 (a resposta vai para a moderação).
+
+        `ref` vai em `external_id` e volta na leitura (`answer.external_id`):
+        é por ele que o sync reconhece a resposta que saiu daqui.
+        """
+        corpo: dict[str, Any] = {
+            "message": mensagem,
+            "owner": {"name": autor_nome, "external_id": autor_id},
+        }
+        if ref:
+            corpo["external_id"] = ref
+        return await self._request(
+            "POST",
+            f"/v0/questions/{quote(str(question_id), safe='')}/answer",
+            json=corpo,
+            base=MAGALU_SERVICES_BASE,
+            repetir_5xx=False,
+        )
+
+    # Chat com Cliente — services:conversations-seller:read/write.
+
+    async def conversas(
+        self,
+        *,
+        status: str = "OPENED",
+        desde: str | None = None,
+        ate: str | None = None,
+        offset: int = 0,
+        limit: int = _MAX_PAGE_SIZE,
+    ) -> dict:
+        """GET /v0/conversations, filtrando pela última interação (`desde`/`ate`, ISO)."""
+        params: dict[str, Any] = {
+            "status": status,
+            "_offset": max(0, int(offset)),
+            "_limit": min(max(int(limit), 1), _MAX_PAGE_SIZE),
+        }
+        if desde:
+            params["last_interaction_at_start"] = desde
+        if ate:
+            params["last_interaction_at_end"] = ate
+        return await self._ler_json("/v0/conversations", base=MAGALU_SERVICES_BASE, params=params)
+
+    async def conversa(self, conversation_id: str) -> dict:
+        """GET /v0/conversations/{id} (status, não lidas, última interação)."""
+        return await self._ler_json(
+            f"/v0/conversations/{quote(str(conversation_id), safe='')}",
+            base=MAGALU_SERVICES_BASE,
+        )
+
+    async def mensagens_da_conversa(
+        self, conversation_id: str, *, offset: int = 0, limit: int = _MAX_PAGE_SIZE
+    ) -> dict:
+        """GET /v0/conversations/{id}/messages. Só lê: não registra leitura."""
+        return await self._ler_json(
+            f"/v0/conversations/{quote(str(conversation_id), safe='')}/messages",
+            base=MAGALU_SERVICES_BASE,
+            params={
+                "_offset": max(0, int(offset)),
+                "_limit": min(max(int(limit), 1), _MAX_PAGE_SIZE),
+            },
+        )
+
+    async def enviar_mensagem_conversa(
+        self,
+        conversation_id: str,
+        conteudo: str,
+        *,
+        autor_nome: str,
+        autor_id: str,
+        ref: str | None = None,
+    ) -> httpx.Response:
+        """POST /v0/conversations/{id}/messages (até 2200 caracteres) → 201 com o `id`."""
+        if len(conteudo) > LIMITE_CHAT:
+            raise ValueError(f"magalu_chat_acima_do_limite ({len(conteudo)} > {LIMITE_CHAT})")
+        corpo: dict[str, Any] = {
+            "content": conteudo,
+            "owner": {"name": autor_nome, "external_id": autor_id},
+        }
+        if ref:
+            corpo["external_id"] = ref
+        return await self._request(
+            "POST",
+            f"/v0/conversations/{quote(str(conversation_id), safe='')}/messages",
+            json=corpo,
+            base=MAGALU_SERVICES_BASE,
+            repetir_5xx=False,
+        )
+
+    # SAC (protocolos de pós-venda) — open:tickets-seller:read e
+    # open:ticket-messages-seller:read/write. Servidor api.magalu.com.
+
+    async def tickets(
+        self,
+        *,
+        status: str | None = None,
+        atualizado_desde: str | None = None,
+        ordem: str | None = None,
+        offset: int = 0,
+        limit: int = _MAX_PAGE_SIZE,
+    ) -> dict:
+        """GET /seller/v0/tickets (status=waiting_seller é a fila; `due_date` é o prazo).
+
+        `_offset` vai no máximo a 100 (a OpenAPI do SAC recusa acima disso).
+        """
+        params: dict[str, Any] = {
+            "_offset": min(max(0, int(offset)), _MAX_OFFSET_SAC),
+            "_limit": min(max(int(limit), 1), _MAX_PAGE_SIZE),
+        }
+        if status:
+            params["status"] = status
+        if atualizado_desde:
+            params["updated_at_gte"] = atualizado_desde
+        if ordem:
+            params["_sort"] = ordem
+        return await self._ler_json("/seller/v0/tickets", base=MAGALU_API_BASE, params=params)
+
+    async def ticket(self, ticket_id: str) -> dict:
+        """GET /seller/v0/tickets/{id}."""
+        return await self._ler_json(
+            f"/seller/v0/tickets/{quote(str(ticket_id), safe='')}", base=MAGALU_API_BASE
+        )
+
+    async def mensagens_do_ticket(
+        self,
+        ticket_id: str,
+        *,
+        offset: int = 0,
+        limit: int = _MAX_PAGE_SIZE,
+        ordem: str = "created_at:desc",
+    ) -> dict:
+        """GET /seller/v0/tickets/{id}/messages, da mais NOVA para a mais antiga.
+
+        Com o `_offset` no máximo em 100, duas páginas trazem as 200 mais
+        recentes — as que importam para a fila.
+        """
+        return await self._ler_json(
+            f"/seller/v0/tickets/{quote(str(ticket_id), safe='')}/messages",
+            base=MAGALU_API_BASE,
+            params={
+                "_offset": min(max(0, int(offset)), _MAX_OFFSET_SAC),
+                "_limit": min(max(int(limit), 1), _MAX_PAGE_SIZE),
+                "_sort": ordem,
+            },
+        )
+
+    async def enviar_mensagem_ticket(
+        self,
+        ticket_id: str,
+        mensagem: str,
+        *,
+        autor_nome: str,
+        autor_codigo: str,
+        destino: str = "customer",
+        ref: str | None = None,
+    ) -> httpx.Response:
+        """POST /seller/v0/tickets/{id}/messages (até 3000) → 202 + `transaction_id`.
+
+        O 202 é assíncrono e não traz o id da mensagem: `ref` vai em `code`
+        (campo livre do seller) e volta na leitura — é por ele que o sync
+        reconhece a nossa.
+        """
+        if len(mensagem) > LIMITE_SAC:
+            raise ValueError(f"magalu_sac_acima_do_limite ({len(mensagem)} > {LIMITE_SAC})")
+        corpo: dict[str, Any] = {
+            "message": mensagem,
+            "destination": destino,
+            "owner": {"code": autor_codigo, "name": autor_nome},
+        }
+        if ref:
+            corpo["code"] = ref
+        return await self._request(
+            "POST",
+            f"/seller/v0/tickets/{quote(str(ticket_id), safe='')}/messages",
+            json=corpo,
+            base=MAGALU_API_BASE,
+            repetir_5xx=False,
+        )
 
 
 # ---------------------------------------------------------------- helpers

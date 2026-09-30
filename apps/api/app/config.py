@@ -389,6 +389,94 @@ class Settings(BaseSettings):
     # ("essa mala"); com histórico demais, gasta token e sai dado à toa.
     dm_ia_max_trocas: int = 6
 
+    # ─── Atendimento unificado (Shopee, ML, TikTok, Amazon) ───────────────
+    # A caixa `/atendimento` (docs/atendimento-unificado.md). TUDO nasce
+    # desligado: deploy não liga nada, cada interruptor é decisão do Eduardo.
+    # Mesmo ligado, cada canal nasce em modo `observar` (só lê) na tela Lojas.
+    #
+    # Cron que lê as conversas de cada loja (consulta periódica). Enquanto o
+    # Duoke estiver ligado, o DaVinci NUNCA marca nada como lido.
+    atendimento_leitura_ativa: bool = False
+    # Permite enviar — inclusive a pessoa pela tela. Desligado, o botão
+    # "Enviar" recusa com `envio_desligado`; o canal ainda precisa estar em
+    # humano/copiloto/auto.
+    atendimento_envio_ativo: bool = False
+    # Gera rascunhos com a IA. Separado do envio pelo mesmo motivo do
+    # `dm_ia_ativa`: dá pra ler uma semana do que ela TERIA dito antes de
+    # deixar alguém enviar.
+    atendimento_ia_ativa: bool = False
+    # Envio AUTOMÁTICO. Só vale para canal em modo `auto` e categoria liberada
+    # nele — os três precisam concordar.
+    atendimento_auto_ativo: bool = False
+    # Aviso no Telegram de conversa com prazo vencendo/vencido.
+    atendimento_alerta_telegram: bool = False
+    # SÓ LOCAL: o envio vai para um simulador que finge sucesso (externo_id
+    # `sim:...`). É como se testa a tela de ponta a ponta sem escrever para
+    # comprador nenhum. Nunca ligar em produção.
+    atendimento_simulador: bool = False
+    # SÓ LOCAL: plataformas (separadas por vírgula) que ESCAPAM do simulador
+    # e saem de verdade — o `scripts.atendimento_local api --envio-real-amazon`
+    # põe `amazon` para responder pela tela a um e-mail de teste real, com as
+    # outras lojas ainda no simulador. Sem o simulador não muda nada (tudo já
+    # sai de verdade); com o simulador em produção o envio é recusado do mesmo
+    # jeito. Em produção fica vazia.
+    atendimento_simulador_exceto: str = ""
+    # Provedor do cérebro do atendimento. Vazio = usa o mesmo `llm_*` da DM;
+    # separado para poder trocar de modelo (ou de conta, e de teto de gasto)
+    # sem mexer no robô do Instagram.
+    atendimento_llm_base_url: str = ""
+    atendimento_llm_model: str = ""
+    atendimento_llm_api_key: str = ""
+    # Em quais modos de canal o cron da IA escreve sugestão (lista separada
+    # por vírgula). Padrão só `copiloto,auto`: ligar a IA para as 1–2 lojas
+    # piloto (postas em copiloto na tela Lojas e modo) não gasta token com as
+    # ~35 lojas em `observar`. Para ler "o que a IA TERIA dito" nas lojas que
+    # o Duoke responde, acrescente `observar`. O botão "Sugerir" da tela vale
+    # em qualquer modo.
+    atendimento_ia_modos: str = "copiloto,auto"
+    # Teto de chamadas ao modelo por dia (fuso de São Paulo), só do cron:
+    # freio de gasto para bug de fila ou primeira leitura de loja grande.
+    # 0 = sem teto. Estimativa do plano: 200–500 mensagens/dia.
+    atendimento_ia_teto_diario: int = 1000
+    # Quantos canais leem ao mesmo tempo. Shopee e ML limitam por app; mais
+    # que isso vira 429 e rodada mais lenta, não mais rápida.
+    atendimento_sync_concorrencia: int = 4
+    # Teto de conversas lidas por canal por rodada: a primeira rodada de uma
+    # loja com meses de histórico não pode prender o worker. O resto vem nas
+    # próximas (o cursor anda).
+    atendimento_sync_max_conversas: int = 40
+    # Amazon não tem API de leitura de mensagem de comprador: ela manda cada
+    # mensagem para o e-mail cadastrado no Seller Central, e a resposta é um
+    # e-mail de volta ao endereço de retransmissão, saindo do e-mail
+    # AUTORIZADO. Leitura só com EXAMINE/BODY.PEEK (não marca como lido).
+    # Host vazio = canal Amazon `desligado`. Senha é senha de app, no .env do
+    # servidor — nunca em código nem em log.
+    atendimento_amazon_imap_host: str = ""
+    atendimento_amazon_imap_port: int = 993
+    atendimento_amazon_imap_usuario: str = ""
+    atendimento_amazon_imap_senha: str = ""
+    atendimento_amazon_imap_pasta: str = "INBOX"
+    atendimento_amazon_smtp_host: str = ""
+    atendimento_amazon_smtp_port: int = 587
+    # Login do SMTP. Vazios = os mesmos do IMAP (o caso comum: uma caixa só,
+    # Gmail/Workspace/Zoho). Separados para o provedor que usa outra conta ou
+    # outra senha de app para enviar. Senha só no .env do servidor.
+    atendimento_amazon_smtp_usuario: str = ""
+    atendimento_amazon_smtp_senha: str = ""
+    # O e-mail autorizado em Seller Central → Mensagens → E-mails autorizados.
+    # Resposta que sai de outro endereço a Amazon descarta sem avisar.
+    atendimento_amazon_remetente: str = ""
+    # Temu e AliExpress não têm API de chat: um robô no Mac mini mantém um
+    # perfil do AdsPower por loja com o chat aberto, só ESCUTA o que a página
+    # recebe e manda para /api/atendimento/robo/* (routers/atendimento_robo.py)
+    # com `Authorization: Bearer <token>`. Vazio = endpoints DESLIGADOS (404):
+    # nada entra. O mesmo valor vai no DAVINCI_ROBO_TOKEN do robô. Só no .env.
+    atendimento_robo_token: str = ""
+    # Sem pulso do robô há mais que isto (minutos), a loja aparece como
+    # "leitura parada" na barra de lojas: o Seller Center continua recebendo,
+    # só não chega aqui — ninguém pode achar que "não tem mensagem".
+    atendimento_robo_parado_min: int = 5
+
     # Token M2M do executor de IMPORTAÇÃO DE NF (marionete AdsPower da Fase
     # 3a-4). Guarda os /nf-cadastro/agent/* (lease/result). Vazio = endpoints
     # FECHADOS (401). O executor local abre o AdsPower do faturador, loga no

@@ -23,6 +23,7 @@ export type Resource =
   | 'logistica'
   | 'notas_fiscais'
   | 'chamados'
+  | 'atendimento'
   | 'sincronizacoes'
   | 'sync_logs'
   | 'integracoes'
@@ -74,6 +75,14 @@ export const RESOURCE_GROUPS: ResourceGroup[] = [
   },
   {
     label: 'Pós-venda',
+    // Atendimento (25/09/2026): caixa única das conversas das lojas com a
+    // sugestão da IA. view = ler a fila; edit = responder, mexer no modo da
+    // loja, no manual e nas respostas prontas; delete = apagar regra/resposta.
+    // SÓ ADMIN POR ENQUANTO (Eduardo, 30/09/2026): fica FORA desta lista, como
+    // o Valuation, para ninguém receber a permissão pela tela de Permissões
+    // (nem pelo "marcar a coluna toda"). O tipo e o rótulo continuam, e a API
+    // exige admin (SO_ADMIN em apps/api/app/routers/atendimento.py). Para
+    // abrir para a equipe, 'atendimento' volta para o fim desta lista.
     resources: ['devolucoes', 'reembolso', 'logistica', 'notas_fiscais', 'chamados'],
   },
   {
@@ -156,6 +165,7 @@ export const RESOURCE_LABELS: Record<Resource, string> = {
   logistica: 'Logística',
   notas_fiscais: 'Notas Fiscais',
   chamados: 'Chamados',
+  atendimento: 'Atendimento',
   sincronizacoes: 'Sincronizações',
   sync_logs: 'Sync Logs',
   integracoes: 'Integrações',

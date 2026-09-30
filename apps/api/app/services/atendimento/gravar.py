@@ -1,0 +1,932 @@
+"""A única porta de escrita de conversa e mensagem do atendimento.
+
+Todo adaptador (Shopee, ML, TikTok, Amazon) e o envio passam por aqui. Três
+coisas que ninguém pode esquecer ficam num lugar só:
+
+1. IDEMPOTÊNCIA — a consulta periódica traz a mesma mensagem em toda rodada.
+   A chave é (conversa, id externo), no banco (UNIQUE) e aqui (busca antes de
+   inserir; se outro processo ganhou a corrida, o SAVEPOINT desfaz só a linha).
+
+2. AUTOR × ORIGEM — mensagem da loja que chega pelo sync pode ser:
+     • a NOSSA resposta voltando (enviamos pelo DaVinci e a plataforma a
+       devolve na próxima leitura) → ADOTA a linha que já temos em vez de
+       duplicar a conversa com a mesma frase duas vezes;
+     • resposta dada FORA do DaVinci (Duoke, Seller Center, celular) → origem
+       `externo`. É ela que diz "alguém já respondeu, a IA se cala" e que
+       aposenta o rascunho pendente.
+
+3. A FILA — `aguardando_resposta` e `prazo_resposta_em` são derivados das
+   mensagens aqui (`recalcular`), para a lista ordenar e filtrar sem varrer
+   mensagem e para o alerta de prazo ter uma coluna só para olhar.
+
+4. A ORDEM DAS TRAVAS — quem muda mensagem trava a CONVERSA antes (sync,
+   envio e a tela). Com a mesma ordem em todo lugar, o sync que adota a
+   nossa resposta e o envio que grava o resultado dela não se travam um ao
+   outro (deadlock), e ninguém deriva a fila de um retrato velho da conversa.
+
+Nada aqui commita: quem chama decide a transação (o sync commita no fim da
+rodada do canal; o envio commita antes e depois de chamar a plataforma).
+
+Texto de comprador nunca vai para o log — só ids e contagens.
+"""
+
+from __future__ import annotations
+
+import difflib
+import re
+import unicodedata
+from collections.abc import Iterable
+from datetime import UTC, datetime, timedelta
+
+import structlog
+from sqlalchemy import func, inspect, select, text
+from sqlalchemy.exc import DBAPIError, IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models import (
+    AtendimentoAvaliacao,
+    AtendimentoCanal,
+    AtendimentoConversa,
+    AtendimentoMensagem,
+    AtendimentoRascunho,
+    Integration,
+)
+from app.services.atendimento import lojas
+from app.services.atendimento.constantes import (
+    AUTOR_CLIENTE,
+    AUTOR_LOJA,
+    AUTOR_SISTEMA,
+    AUTORES,
+    AVALIACAO_OBSERVOU,
+    CHAVE_PRAZO_LIDO_EM,
+    CHAVE_PRAZO_PLATAFORMA,
+    CHAVE_VEZ_DA_LOJA,
+    CONVERSA_ABERTA,
+    CONVERSA_BLOQUEADA,
+    CONVERSA_FECHADA,
+    CONVERSA_RESPONDIDA,
+    MSG_ENVIADA,
+    MSG_ENVIANDO,
+    MSG_FALHOU,
+    MSG_RECEBIDA,
+    MSG_REVISAR,
+    ORIGEM_CLIENTE,
+    ORIGEM_EXTERNO,
+    ORIGEM_SISTEMA,
+    ORIGENS_DAVINCI,
+    RASCUNHO_PENDENTE,
+    RASCUNHO_SUBSTITUIDO,
+    sla_horas,
+)
+
+logger = structlog.get_logger()
+
+# O que a lista mostra de cada conversa: uma linha.
+RESUMO_MAX = 160
+
+# Quanto a mensagem que volta pelo sync pode se afastar da nossa para ainda
+# ser "a mesma". Cobre a diferença entre o relógio da plataforma e o nosso e
+# a demora da própria plataforma para listar a mensagem.
+JANELA_ADOCAO = timedelta(minutes=15)
+
+# Linhas NOSSAS que podem ser adotadas: em voo, ambígua (o timeout que na
+# verdade saiu — a adoção é a prova) ou enviada sem id da plataforma.
+_STATUS_ADOTAVEIS = (MSG_ENVIANDO, MSG_REVISAR, MSG_ENVIADA)
+
+# A ação da avaliação quando a sugestão foi substituída pela resposta de
+# fora (a mesma do router: `_ACAO_PELO_STATUS[substituido]`).
+ACAO_SUBSTITUIDO = "escreveu_do_zero"
+
+# Situações que só pessoa (ou a plataforma) muda: o recálculo não mexe.
+_SITUACOES_FIXAS = (CONVERSA_FECHADA, CONVERSA_BLOQUEADA)
+
+
+# ── Texto ─────────────────────────────────────────────────────────────────
+
+
+def sem_nul(valor):
+    """Tira o caractere NUL (\\x00) de texto e, recursivamente, de dict/list.
+
+    O Postgres recusa NUL em TEXT (CharacterNotInRepertoire) e em JSONB
+    (\\u0000, UntranslatableCharacter). Um comprador que manda um NUL (ou uma
+    plataforma que o devolve no JSON) derrubaria a gravação — e, como o sync
+    desfaz a rodada inteira e o cursor não anda, a mesma mensagem voltaria
+    primeiro em toda rodada: a loja pararia de entrar para sempre. Aqui, na
+    porta única, o NUL some antes de chegar ao banco.
+    """
+    if isinstance(valor, str):
+        return valor.replace("\x00", "") if "\x00" in valor else valor
+    if isinstance(valor, dict):
+        return {sem_nul(k): sem_nul(v) for k, v in valor.items()}
+    if isinstance(valor, list | tuple):
+        return [sem_nul(v) for v in valor]
+    return valor
+
+
+def similaridade(a: str | None, b: str | None) -> float:
+    """Quanto o texto enviado se parece com a sugestão (0–1, difflib).
+
+    Compara com espaços normalizados: quebra de linha a mais não é edição.
+    Mora aqui (e o `enviar` a usa) porque a resposta que chega de FORA — o
+    Duoke respondendo no teste em observação — também é comparada com a
+    sugestão da IA, na gravação (`_promover_observacao`).
+    """
+    x = " ".join((a or "").split())
+    y = " ".join((b or "").split())
+    if not x and not y:
+        return 1.0
+    return round(difflib.SequenceMatcher(None, x, y).ratio(), 4)
+
+
+def resumo(texto: str | None) -> str:
+    """Uma linha de até 160 caracteres para a lista de conversas."""
+    uma_linha = " ".join((texto or "").split())
+    if len(uma_linha) <= RESUMO_MAX:
+        return uma_linha
+    return uma_linha[: RESUMO_MAX - 1].rstrip() + "…"
+
+
+# A prévia da lista ("[Pedido]", "[Produto]", "[Imagem]", como no Duoke).
+# Vídeo, arquivo e o que vier de novo caem em "outro".
+TIPOS_PREVIA = ("texto", "imagem", "produto", "pedido")
+
+
+def tipo_previa(tipo: str | None) -> str | None:
+    """Tipo da mensagem → o da prévia da lista (texto|imagem|produto|pedido|outro)."""
+    if tipo is None:
+        return None
+    return tipo if tipo in TIPOS_PREVIA else "outro"
+
+
+def normalizar_para_comparar(texto: str | None) -> str:
+    """Forma canônica para decidir se duas mensagens são "o mesmo texto".
+
+    A plataforma pode devolver a nossa resposta com espaço a menos, aspas
+    trocadas, emoji removido (o ML só aceita ISO-8859-1) ou acento
+    normalizado. Sem acento, sem pontuação, sem caixa, espaço único — o que
+    sobra é o conteúdo. Serve SÓ para comparar, nunca para exibir.
+    """
+    decomposto = unicodedata.normalize("NFKD", texto or "")
+    sem_acento = "".join(ch for ch in decomposto if not unicodedata.combining(ch))
+    so_palavras = re.sub(r"[\W_]+", " ", sem_acento.casefold())
+    return " ".join(so_palavras.split())
+
+
+# ── Relógio ───────────────────────────────────────────────────────────────
+
+
+def _utc(quando: datetime | None) -> datetime | None:
+    """Datas sempre com fuso. Adaptador que mandar data ingênua está em UTC."""
+    if quando is None:
+        return None
+    if quando.tzinfo is None:
+        return quando.replace(tzinfo=UTC)
+    return quando.astimezone(UTC)
+
+
+def _quando(m: AtendimentoMensagem) -> datetime:
+    """Momento da mensagem: o relógio da plataforma; sem ele, quando a linha nasceu.
+
+    `created_at` é lido do estado já carregado (nunca dispara ida ao banco —
+    numa sessão assíncrona isso estouraria fora do greenlet).
+    """
+    if m.enviada_em is not None:
+        return _utc(m.enviada_em)
+    criada = inspect(m).dict.get("created_at")
+    return _utc(criada) if criada is not None else datetime.now(UTC)
+
+
+async def _atributo(session: AsyncSession, obj: object, nome: str):
+    """Lê um atributo que pode não ter vindo do banco (default do servidor)."""
+    if nome in inspect(obj).unloaded:
+        await session.refresh(obj, [nome])
+    return getattr(obj, nome)
+
+
+# ── Trava ─────────────────────────────────────────────────────────────────
+
+# Quanto quem age pela TELA (Enviar, Fechar, trocar o modo) espera pela trava
+# da linha. A rodada do sync pode segurar a conversa por minutos; é melhor a
+# pessoa ver "tente de novo" do que a tela pendurada.
+ESPERA_TRAVA_TELA = "5s"
+
+
+def _trava_indisponivel(e: BaseException) -> bool:
+    """O Postgres desistiu de esperar a trava (`lock_timeout`, SQLSTATE 55P03)?"""
+    orig = getattr(e, "orig", None)
+    causa = getattr(orig, "__cause__", None) or orig
+    return getattr(causa, "sqlstate", None) == "55P03"
+
+
+def _cabe(valor: str, tamanho: int) -> str:
+    """Corta no tamanho da coluna: um id anômalo da plataforma (maior que a
+    coluna) daria erro de banco em TODA rodada e congelaria o canal — a
+    mesma "mensagem envenenada" do NUL. Corte determinístico: a leitura
+    seguinte chega ao mesmo id e continua idempotente."""
+    return valor[:tamanho]
+
+
+# URL de foto maior que isto não é foto de perfil de CDN: é lixo (ou um
+# `data:` inteiro) que só incharia a lista de conversas.
+URL_AVATAR_MAX = 2048
+
+
+def url_avatar(valor: object) -> str | None:
+    """A URL da foto do comprador, se servir para um `<img>` da tela; senão None.
+
+    Só `https://`/`http://` (a CDN da plataforma) ou um caminho da própria
+    web (`/atendimento-demo/...`, a semente local). `javascript:`, `data:`,
+    `//outro-site` e vazio viram None — e None, no upsert, NÃO apaga a foto
+    que já estava (a Shopee manda `to_avatar: ""` quando a pessoa tirou a foto
+    ou quando a lista vem incompleta).
+    """
+    if not isinstance(valor, str):
+        return None
+    url = sem_nul(valor).strip()
+    if not url or len(url) > URL_AVATAR_MAX or any(c.isspace() for c in url):
+        return None
+    minusculo = url.lower()
+    if minusculo.startswith(("https://", "http://")):
+        return url
+    if url.startswith("/") and not url.startswith("//"):
+        return url
+    return None
+
+
+async def fim_do_item(session: AsyncSession) -> None:
+    """Commit entre uma conversa e a próxima na rodada do sync (só os adaptadores).
+
+    A rodada de um canal fala com a API da loja conversa por conversa. Numa
+    transação só, cada conversa gravada ficava TRAVADA até o fim da rodada
+    (dezenas de chamadas HTTP depois) — e o "Enviar", o "Fechar" e a troca de
+    modo da tela esperavam por ela. Commitando por conversa, a trava dura só
+    a gravação daquela conversa. É seguro: a gravação é idempotente (id
+    externo) e o cursor só anda no fim da rodada — uma rodada que cai no meio
+    relê, na próxima, o que já estava gravado, sem duplicar.
+    """
+    await session.commit()
+
+
+async def travar_linha(session: AsyncSession, obj, *, espera: str | None = None) -> bool:
+    """Trava a linha de `obj` (FOR NO KEY UPDATE) e relê o objeto do banco; False = ocupada.
+
+    Com `espera` (ex.: "5s"), desiste depois desse tempo e devolve False, sem
+    estragar a transação de quem chamou: a tentativa roda num SAVEPOINT.
+    `SET LOCAL lock_timeout` vale até o fim da transação — quem chama commita
+    logo (a tela) ou não passa `espera` (o sync, o resultado de um envio que
+    já saiu: esses esperam o que for preciso).
+
+    Relê DEPOIS de travar: o que a pessoa ou outro processo commitou enquanto
+    este objeto estava em memória (fechou, pausou a IA, respondeu) passa a
+    valer aqui. O que estava pendente no objeto é gravado antes (flush).
+    """
+    await session.flush()
+    modelo = type(obj)
+    chave = inspect(obj).identity
+    if chave is None:  # objeto que nunca foi ao banco: não há o que travar
+        return True
+    try:
+        async with session.begin_nested():
+            if espera:
+                # Valor fixo daqui (nunca de fora): SET não aceita parâmetro.
+                await session.execute(text(f"SET LOCAL lock_timeout = '{espera}'"))
+            # FOR NO KEY UPDATE (key_share), a mesma trava de um UPDATE comum:
+            # segura quem muda a linha, mas NÃO quem só a referencia — a IA
+            # gravando um rascunho (FK para a conversa) não espera a rodada do
+            # sync acabar.
+            await session.execute(
+                select(modelo.id).where(modelo.id == chave[0]).with_for_update(key_share=True)
+            )
+    except DBAPIError as e:
+        if not _trava_indisponivel(e):
+            raise
+        return False
+    await session.refresh(obj)
+    return True
+
+
+# ── Conversa ──────────────────────────────────────────────────────────────
+
+
+async def _nome_da_loja(session: AsyncSession, integration: Integration | None) -> str | None:
+    """O `conta` de quando o adaptador não mandou um: o nome da LOJA (parte 2, P2).
+
+    Os adaptadores já passam `lojas.nome_da_loja`; isto cobre quem grava sem
+    ele (a semente local, um adaptador novo) — sem isto a conversa nascia com
+    o apelido técnico da integração ("mega" em vez de "Marquezini"). A
+    consulta roda num SAVEPOINT: o cadastro de lojas com problema não pode
+    derrubar a gravação da conversa (fica o nome da integração).
+    """
+    if integration is None:
+        return None
+    try:
+        async with session.begin_nested():
+            nome = await lojas.nome_da_loja(session, integration)
+    except Exception as e:  # noqa: BLE001 — o nome é enfeite; a conversa entra
+        logger.warning(
+            "atendimento_nome_da_loja_falhou",
+            integration_id=str(integration.id),
+            erro=type(e).__name__,
+        )
+        nome = None
+    return nome or integration.name
+
+
+async def _buscar_conversa(
+    session: AsyncSession,
+    *,
+    integration_id,
+    plataforma: str,
+    canal_nome: str,
+    externo_id: str,
+    canal_robo_id=None,
+) -> AtendimentoConversa | None:
+    q = select(AtendimentoConversa).where(
+        AtendimentoConversa.canal == canal_nome,
+        AtendimentoConversa.externo_id == externo_id,
+    )
+    if integration_id is None:
+        # Sem integração (conta que o e-mail da Amazon não identificou): o
+        # UNIQUE não cobre NULL, então a plataforma entra na chave aqui.
+        q = q.where(
+            AtendimentoConversa.integration_id.is_(None),
+            AtendimentoConversa.plataforma == plataforma,
+        )
+        if canal_robo_id is not None:
+            # Loja do ROBÔ (Temu/AliExpress, canal sem integração): a chave é o
+            # canal — duas lojas da mesma plataforma podem repetir o id de
+            # conversa (`uq_atendimento_conversas_robo`, migration 0347).
+            q = q.where(AtendimentoConversa.canal_id == canal_robo_id)
+    else:
+        q = q.where(AtendimentoConversa.integration_id == integration_id)
+    return (await session.execute(q.limit(1))).scalar_one_or_none()
+
+
+async def upsert_conversa(
+    session: AsyncSession,
+    *,
+    canal: AtendimentoCanal | None,
+    integration: Integration | None,
+    plataforma: str,
+    canal_nome: str,
+    externo_id: str,
+    conta: str | None = None,
+    comprador_id: str | None = None,
+    comprador_nome: str | None = None,
+    pedido_marketplace: str | None = None,
+    anuncio_id: str | None = None,
+    anuncio_titulo: str | None = None,
+    nao_lidas: int | None = None,
+    situacao: str | None = None,
+    bloqueio_motivo: str | None = None,
+    pode_enviar_ate: datetime | None = None,
+    dados: dict | None = None,
+    comprador_avatar: str | None = None,
+) -> tuple[AtendimentoConversa, bool]:
+    """Acha ou cria a conversa de (integração, canal, id externo) → (conversa, criada).
+
+    Campo None NÃO sobrescreve o que já existe: uma leitura parcial (a lista
+    de conversas da Shopee não traz o pedido; o detalhe traz) não pode apagar
+    o que uma leitura anterior achou. `dados` é MESCLADO (chave a chave).
+    `comprador_avatar` passa por `url_avatar` (URL que não serve para `<img>`
+    conta como None). Nunca commita (só flush).
+    """
+    externo_id = _cabe(sem_nul(str(externo_id)), 191)
+    conta = sem_nul(conta)
+    comprador_nome = sem_nul(comprador_nome)
+    anuncio_titulo = sem_nul(anuncio_titulo)
+    bloqueio_motivo = sem_nul(bloqueio_motivo)
+    dados = sem_nul(dados)
+    integration_id = (
+        integration.id if integration is not None else (canal.integration_id if canal else None)
+    )
+    # Canal sem integração só existe para as lojas do robô (migration 0347).
+    canal_robo_id = canal.id if canal is not None and integration_id is None else None
+    campos = {
+        "comprador_id": None if comprador_id is None else _cabe(sem_nul(str(comprador_id)), 128),
+        "comprador_nome": comprador_nome,
+        "comprador_avatar": url_avatar(comprador_avatar),
+        "pedido_marketplace": (
+            None if pedido_marketplace is None else _cabe(sem_nul(str(pedido_marketplace)), 64)
+        ),
+        "anuncio_id": None if anuncio_id is None else _cabe(sem_nul(str(anuncio_id)), 64),
+        "anuncio_titulo": anuncio_titulo,
+        "nao_lidas": nao_lidas,
+        "situacao": situacao,
+        "bloqueio_motivo": bloqueio_motivo,
+        "pode_enviar_ate": _utc(pode_enviar_ate),
+    }
+
+    conversa = await _buscar_conversa(
+        session,
+        integration_id=integration_id,
+        plataforma=plataforma,
+        canal_nome=canal_nome,
+        externo_id=externo_id,
+        canal_robo_id=canal_robo_id,
+    )
+    if conversa is None:
+        iniciais = {"nao_lidas": 0, "situacao": CONVERSA_ABERTA}
+        iniciais.update({k: v for k, v in campos.items() if v is not None})
+        nova = AtendimentoConversa(
+            canal_id=canal.id if canal is not None else None,
+            integration_id=integration_id,
+            plataforma=plataforma,
+            canal=canal_nome,
+            externo_id=externo_id,
+            # Snapshot do nome: a integração pode ser apagada; a conversa fica.
+            conta=conta if conta is not None else await _nome_da_loja(session, integration),
+            dados=dict(dados or {}),
+            **iniciais,
+        )
+        # O que já estava pendente vai ANTES do SAVEPOINT: dentro dele fica só
+        # esta linha, e um rollback do savepoint não leva junto o trabalho alheio.
+        await session.flush()
+        try:
+            # SAVEPOINT: se outro processo criou a mesma conversa no meio, só
+            # esta linha é desfeita — o resto da rodada do sync continua.
+            async with session.begin_nested():
+                session.add(nova)
+                await session.flush()
+        except IntegrityError:
+            conversa = await _buscar_conversa(
+                session,
+                integration_id=integration_id,
+                plataforma=plataforma,
+                canal_nome=canal_nome,
+                externo_id=externo_id,
+                canal_robo_id=canal_robo_id,
+            )
+            if conversa is None:
+                raise
+        else:
+            return nova, True
+
+    if canal is not None and conversa.canal_id != canal.id:
+        conversa.canal_id = canal.id
+    if conta is not None:
+        conversa.conta = conta
+    elif conversa.conta is None and integration is not None:
+        conversa.conta = await _nome_da_loja(session, integration)
+    for nome, valor in campos.items():
+        if valor is not None:
+            setattr(conversa, nome, valor)
+    if dados:
+        # Dicionário NOVO: mutar o JSONB no lugar não marca a coluna como suja.
+        conversa.dados = {**(conversa.dados or {}), **dados}
+    if situacao is not None and conversa.ultima_mensagem_em is not None:
+        # Situação vinda do adaptador ("aberta" ao desbloquear) precisa
+        # voltar a bater com as mensagens: aberta × respondida é derivada.
+        recalcular(conversa)
+    await session.flush()
+    return conversa, False
+
+
+# ── Mensagem ──────────────────────────────────────────────────────────────
+
+
+async def _mensagem_por_externo(
+    session: AsyncSession, conversa_id, externo_id: str
+) -> AtendimentoMensagem | None:
+    return (
+        await session.execute(
+            select(AtendimentoMensagem)
+            .where(
+                AtendimentoMensagem.conversa_id == conversa_id,
+                AtendimentoMensagem.externo_id == externo_id,
+            )
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+
+
+async def _nossa_para_adotar(
+    session: AsyncSession,
+    conversa: AtendimentoConversa,
+    texto: str | None,
+    enviada_em: datetime | None,
+) -> AtendimentoMensagem | None:
+    """A resposta que NÓS mandamos e que o sync está trazendo de volta.
+
+    Linha nossa (pessoa ou IA), ainda sem id da plataforma, em voo / ambígua /
+    enviada, com o mesmo texto normalizado, a até 15 min da que chegou. A
+    mais antiga ganha: se mandamos a mesma frase duas vezes, cada volta do
+    sync adota uma.
+    """
+    alvo = normalizar_para_comparar(texto)
+    if not alvo:
+        return None
+    referencia = enviada_em or datetime.now(UTC)
+    momento = func.coalesce(AtendimentoMensagem.enviada_em, AtendimentoMensagem.created_at)
+    candidatas = (
+        (
+            await session.execute(
+                select(AtendimentoMensagem)
+                .where(
+                    AtendimentoMensagem.conversa_id == conversa.id,
+                    AtendimentoMensagem.origem.in_(ORIGENS_DAVINCI),
+                    AtendimentoMensagem.externo_id.is_(None),
+                    AtendimentoMensagem.status.in_(_STATUS_ADOTAVEIS),
+                    momento >= referencia - JANELA_ADOCAO,
+                    momento <= referencia + JANELA_ADOCAO,
+                )
+                .order_by(momento.asc())
+            )
+        )
+        .scalars()
+        .all()
+    )
+    for m in candidatas:
+        if normalizar_para_comparar(m.texto) == alvo:
+            return m
+    return None
+
+
+def sanear_mensagem(
+    *,
+    externo_id: str | None,
+    texto: str | None,
+    anexos: list | None,
+    payload: dict | None,
+) -> tuple[str | None, str | None, list, dict]:
+    """A limpeza da porta única para o que vai numa linha de mensagem.
+
+    Sem NUL (o Postgres recusa em TEXT e em JSONB — ver `sem_nul`) e o id
+    cortado no tamanho da coluna (`_cabe`). Quem grava mensagem por outro
+    caminho — a adoção da prévia do robô (`robo._adotar_previa`) — usa ESTA
+    função: sem ela, o NUL de um comprador derrubava a leva inteira ali, em
+    toda tentativa (revisão 30/09).
+    """
+    externo_id = None if externo_id in (None, "") else _cabe(sem_nul(str(externo_id)), 191)
+    return externo_id, sem_nul(texto), sem_nul(list(anexos or [])), sem_nul(dict(payload or {}))
+
+
+def _reabrir_se_nova(conversa: AtendimentoConversa, mensagem: AtendimentoMensagem) -> None:
+    """Cliente escreveu DE NOVO depois de a conversa ser fechada: volta para a fila.
+
+    Fechar é "está resolvido"; uma pergunta nova não pode sumir numa conversa
+    fechada (é assim que se perde o prazo da Amazon). Idem o "não precisa de
+    resposta": vale para o que já estava lá, não para o que chega depois.
+    Mensagem ANTIGA chegando atrasada (primeira leitura, reenvio) não reabre.
+    """
+    anterior = conversa.ultima_do_cliente_em
+    if anterior is not None and _quando(mensagem) <= _utc(anterior):
+        return
+    if conversa.situacao == CONVERSA_FECHADA:
+        conversa.situacao = CONVERSA_ABERTA
+    conversa.sem_resposta_necessaria = False
+
+
+async def gravar_mensagem(
+    session: AsyncSession,
+    conversa: AtendimentoConversa,
+    *,
+    externo_id: str | None,
+    autor: str,
+    texto: str | None,
+    enviada_em: datetime | None,
+    tipo: str = "texto",
+    anexos: list | None = None,
+    payload: dict | None = None,
+    origem: str | None = None,
+) -> tuple[AtendimentoMensagem, bool]:
+    """Grava uma mensagem vinda da plataforma → (mensagem, criada).
+
+    Idempotente por (conversa, externo_id): a mesma mensagem na rodada
+    seguinte devolve a linha que já existe, sem mexer nela.
+
+    Origem, quando o adaptador não disser:
+      cliente → `cliente`; sistema → `sistema`;
+      loja    → ADOTA a nossa linha com o mesmo texto (±15 min), se houver:
+                preenche o id externo e confirma `enviada` (devolve criada=False);
+                senão é resposta dada fora do DaVinci: `externo`.
+
+    `enviada_em` é o relógio da PLATAFORMA; sem ele, vale a hora em que
+    vimos. Recalcula a fila da conversa e aposenta o rascunho pendente quando
+    a loja respondeu depois da mensagem que ele responde. Nunca commita.
+
+    Antes de mexer, TRAVA a conversa e a relê do banco (`travar_linha`): a
+    rodada do sync carregou a conversa minutos antes, e a pessoa pode tê-la
+    fechado (ou marcado "não precisa de resposta") nesse meio. Derivar a fila
+    do retrato velho faria a mensagem nova do cliente sumir numa conversa
+    fechada. Travar a conversa ANTES da mensagem é também a ordem do envio.
+    """
+    if autor not in AUTORES:
+        raise ValueError(f"autor desconhecido: {autor!r}")
+    externo_id, texto, anexos, payload = sanear_mensagem(
+        externo_id=externo_id, texto=texto, anexos=anexos, payload=payload
+    )
+    enviada_em = _utc(enviada_em)
+
+    if externo_id is not None:
+        existente = await _mensagem_por_externo(session, conversa.id, externo_id)
+        if existente is not None:
+            return existente, False
+
+    await travar_linha(session, conversa)
+
+    if origem is None:
+        if autor == AUTOR_CLIENTE:
+            origem = ORIGEM_CLIENTE
+        elif autor == AUTOR_SISTEMA:
+            origem = ORIGEM_SISTEMA
+        else:
+            nossa = await _nossa_para_adotar(session, conversa, texto, enviada_em)
+            if nossa is not None:
+                nossa.externo_id = externo_id
+                nossa.status = MSG_ENVIADA
+                nossa.erro = None
+                if enviada_em is not None:
+                    nossa.enviada_em = enviada_em
+                if payload:
+                    nossa.payload = {**(nossa.payload or {}), "sync": payload}
+                recalcular(conversa, [nossa])
+                # O envio que adotamos pode ter morrido antes de avaliar a
+                # sugestão (deploy no meio): a que ficou pendente não vale mais.
+                await _aposentar_rascunho(session, conversa, nossa)
+                await session.flush()
+                logger.info(
+                    "atendimento_mensagem_adotada",
+                    conversa_id=str(conversa.id),
+                    mensagem_id=str(nossa.id),
+                )
+                return nossa, False
+            origem = ORIGEM_EXTERNO
+
+    mensagem = AtendimentoMensagem(
+        conversa_id=conversa.id,
+        externo_id=externo_id,
+        autor=autor,
+        origem=origem,
+        tipo=tipo or "texto",
+        texto=texto,
+        anexos=anexos,
+        enviada_em=enviada_em or datetime.now(UTC),
+        # Mensagem da loja que chegou pela plataforma JÁ saiu — `enviada`.
+        status=MSG_ENVIADA if autor == AUTOR_LOJA else MSG_RECEBIDA,
+        payload=payload,
+    )
+    await session.flush()  # pendências alheias fora do SAVEPOINT (ver upsert_conversa)
+    try:
+        async with session.begin_nested():
+            session.add(mensagem)
+            await session.flush()
+    except IntegrityError:
+        # Outro processo gravou a mesma mensagem no meio (o UNIQUE barrou).
+        if externo_id is None:
+            raise
+        existente = await _mensagem_por_externo(session, conversa.id, externo_id)
+        if existente is None:
+            raise
+        return existente, False
+
+    if autor == AUTOR_CLIENTE:
+        _reabrir_se_nova(conversa, mensagem)
+    recalcular(conversa, [mensagem])
+    if autor == AUTOR_LOJA:
+        # Qualquer resposta da loja (por fora ou pelo DaVinci) depois da
+        # mensagem que a sugestão responde deixa a sugestão para trás.
+        await _aposentar_rascunho(session, conversa, mensagem)
+    await session.flush()
+    return mensagem, True
+
+
+# ── Fila e prazo ──────────────────────────────────────────────────────────
+
+
+def _iso_utc(bruto: object) -> datetime | None:
+    """Data ISO guardada em `dados` → UTC; None sem ela ou ilegível. Sem fuso é UTC."""
+    if not isinstance(bruto, str) or not bruto.strip():
+        return None
+    try:
+        quando = datetime.fromisoformat(bruto.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return _utc(quando)
+
+
+def prazo_da_plataforma(dados: object) -> datetime | None:
+    """O prazo oficial guardado pelo adaptador em `dados` (ISO); None sem ele ou ilegível.
+
+    Data sem fuso é UTC (como o resto da gravação).
+    """
+    return _iso_utc(dados.get(CHAVE_PRAZO_PLATAFORMA) if isinstance(dados, dict) else None)
+
+
+def _derivar(conversa: AtendimentoConversa) -> None:
+    """aguardando / prazo / situação a partir dos carimbos `ultima_*`.
+
+    Quando a PLATAFORMA diz de quem é a vez (`dados[CHAVE_VEZ_DA_LOJA]` — SAC
+    da Magalu: o status do protocolo), vale ela, não quem falou por último: a
+    mediação que cobra a loja é `sistema`, e o cliente que fala com a Magalu
+    não pede nada à loja.
+    """
+    dados = conversa.dados if isinstance(conversa.dados, dict) else {}
+    do_cliente = _utc(conversa.ultima_do_cliente_em)
+    da_loja = _utc(conversa.ultima_da_loja_em)
+    cliente_por_ultimo = do_cliente is not None and (da_loja is None or do_cliente > da_loja)
+    vez_desde = None
+    if CHAVE_VEZ_DA_LOJA in dados:
+        # A vez é da loja desde a leitura; a resposta dada DEPOIS dela (o
+        # envio pelo DaVinci) tira da fila até a leitura seguinte decidir.
+        vez_desde = _iso_utc(dados.get(CHAVE_VEZ_DA_LOJA))
+        vez_da_loja = vez_desde is not None and (da_loja is None or da_loja <= vez_desde)
+    else:
+        vez_da_loja = cliente_por_ultimo
+    # Fechada = "resolvido" por pessoa: sai da fila (e do alerta) até o
+    # cliente escrever de novo (`_reabrir_se_nova`). Bloqueada continua na
+    # fila: a plataforma não deixa responder por ali, mas alguém precisa agir.
+    aguardando = (
+        vez_da_loja
+        and not conversa.sem_resposta_necessaria
+        and conversa.situacao != CONVERSA_FECHADA
+    )
+    conversa.aguardando_resposta = bool(aguardando)
+    prazo = None
+    if aguardando:
+        # A vez que veio da plataforma sem o cliente por último (a mediação
+        # cobrou): o SLA conta da última mensagem.
+        inicio = (
+            do_cliente
+            if cliente_por_ultimo
+            else (_utc(conversa.ultima_mensagem_em) or vez_desde or do_cliente)
+        )
+        prazo = inicio + timedelta(hours=sla_horas(conversa.plataforma, conversa.canal))
+        # O prazo que a PRÓPRIA plataforma deu (SAC da Magalu: `due_date` do
+        # protocolo) vale mais que o número fixo. LIDO depois da última
+        # mensagem do cliente (a mesma leitura), vale mesmo vencido — é a
+        # verdade da plataforma. Sem isso, só se for posterior à mensagem: um
+        # prazo velho (de antes de o cliente voltar a escrever, ainda não
+        # relido) daria "vencida" para quem acabou de chegar.
+        oficial = prazo_da_plataforma(dados)
+        if oficial is not None:
+            lido_em = _iso_utc(dados.get(CHAVE_PRAZO_LIDO_EM))
+            fresco = lido_em is not None and (do_cliente is None or lido_em >= do_cliente)
+            if fresco or oficial > inicio:
+                prazo = oficial
+    conversa.prazo_resposta_em = prazo
+    if conversa.situacao not in _SITUACOES_FIXAS:
+        # "Respondida" é a loja ter falado por último (ou, quando a plataforma
+        # diz de quem é a vez, não ser a vez da loja). O "não precisa de
+        # resposta" tira da fila (aguardando/prazo acima) mas NÃO vira
+        # respondida — ninguém respondeu; a tela mostra o selo pelo campo.
+        conversa.situacao = CONVERSA_ABERTA if vez_da_loja else CONVERSA_RESPONDIDA
+
+
+def recalcular(
+    conversa: AtendimentoConversa,
+    mensagens_recentes: Iterable[AtendimentoMensagem] = (),
+) -> None:
+    """Dobra mensagens novas nos carimbos da conversa e rededuz a fila. Sem banco.
+
+    Só ANDA para frente: mensagem mais velha que a última conhecida não muda
+    a última. Resposta da loja que FALHOU não conta como resposta (o cliente
+    continua esperando); em voo e ambígua contam — responder de novo por
+    cima de uma que pode ter saído é o pior erro, e a tela mostra o
+    `revisar`. Para refazer tudo do zero (status mudou, mensagem sumiu), use
+    `recalcular_conversa`.
+    """
+    for m in mensagens_recentes:
+        quando = _quando(m)
+        ultima = _utc(conversa.ultima_mensagem_em)
+        if ultima is None or quando >= ultima:
+            conversa.ultima_mensagem_em = quando
+            conversa.ultima_mensagem_resumo = resumo(m.texto) or f"[{m.tipo or 'outro'}]"
+            conversa.ultima_autor = m.autor
+        if m.autor == AUTOR_CLIENTE:
+            atual = _utc(conversa.ultima_do_cliente_em)
+            if atual is None or quando > atual:
+                conversa.ultima_do_cliente_em = quando
+        elif m.autor == AUTOR_LOJA and m.status != MSG_FALHOU:
+            atual = _utc(conversa.ultima_da_loja_em)
+            if atual is None or quando > atual:
+                conversa.ultima_da_loja_em = quando
+    _derivar(conversa)
+
+
+async def recalcular_conversa(session: AsyncSession, conversa: AtendimentoConversa) -> None:
+    """Refaz os carimbos da conversa do zero, lendo as mensagens do banco.
+
+    Para quem MUDA mensagem que já existia (o envio que virou `falhou`, a
+    pessoa que fechou/reabriu, o "não precisa de resposta"). Lê só as três
+    linhas que importam — a última, a última do cliente e a última resposta
+    válida da loja —, não a conversa inteira. Nunca commita.
+    """
+    momento = func.coalesce(AtendimentoMensagem.enviada_em, AtendimentoMensagem.created_at)
+    base = select(AtendimentoMensagem).where(AtendimentoMensagem.conversa_id == conversa.id)
+
+    async def _uma(q) -> AtendimentoMensagem | None:
+        return (await session.execute(q.limit(1))).scalar_one_or_none()
+
+    ultima = await _uma(
+        base.order_by(momento.desc(), AtendimentoMensagem.created_at.desc())
+    )
+    do_cliente = await _uma(
+        base.where(AtendimentoMensagem.autor == AUTOR_CLIENTE).order_by(momento.desc())
+    )
+    da_loja = await _uma(
+        base.where(
+            AtendimentoMensagem.autor == AUTOR_LOJA,
+            AtendimentoMensagem.status != MSG_FALHOU,
+        ).order_by(momento.desc())
+    )
+
+    conversa.ultima_mensagem_em = None
+    conversa.ultima_mensagem_resumo = None
+    conversa.ultima_autor = None
+    conversa.ultima_do_cliente_em = None
+    conversa.ultima_da_loja_em = None
+    # A última por último: em empate de horário, é ela que dá o resumo.
+    recalcular(conversa, [m for m in (do_cliente, da_loja, ultima) if m is not None])
+    if da_loja is not None:
+        await _aposentar_rascunho(session, conversa, da_loja)
+    await session.flush()
+
+
+async def _aposentar_rascunho(
+    session: AsyncSession, conversa: AtendimentoConversa, resposta: AtendimentoMensagem
+) -> None:
+    """A loja respondeu DEPOIS da mensagem que a sugestão responde: ela vira `substituido`.
+
+    Sem isto, a caixa de resposta mostraria uma sugestão para uma pergunta
+    que já foi respondida — e alguém poderia enviá-la por cima (o comprador
+    recebe duas respostas).
+
+    A comparação é com o GATILHO da sugestão (a mensagem do cliente), não com
+    a hora em que ela foi criada: a IA escreve minutos depois (90 s de
+    silêncio + a rodada do sync), e o Duoke pode ter respondido nesse meio —
+    a resposta dele é "mais velha" que a sugestão, mas é posterior à
+    pergunta. Resposta que falhou não conta (o cliente continua esperando).
+    """
+    if resposta.status == MSG_FALHOU:
+        return
+    rascunho = (
+        await session.execute(
+            select(AtendimentoRascunho)
+            .where(
+                AtendimentoRascunho.conversa_id == conversa.id,
+                AtendimentoRascunho.status == RASCUNHO_PENDENTE,
+            )
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if rascunho is None:
+        return
+    gatilho = (
+        await session.get(AtendimentoMensagem, rascunho.mensagem_gatilho_id)
+        if rascunho.mensagem_gatilho_id is not None
+        else None
+    )
+    if gatilho is not None:
+        referencia = _quando(gatilho)
+    else:
+        # Sem gatilho (a mensagem sumiu): vale o nosso relógio.
+        referencia = _utc(await _atributo(session, rascunho, "created_at"))
+    # Mesmo segundo conta como depois: o relógio da Shopee é em segundos, e
+    # deixar uma sugestão velha na caixa é o erro caro (resposta em dobro).
+    if _quando(resposta) >= referencia:
+        rascunho.status = RASCUNHO_SUBSTITUIDO
+        logger.info(
+            "atendimento_rascunho_substituido",
+            conversa_id=str(conversa.id),
+            rascunho_id=str(rascunho.id),
+            mensagem_id=str(resposta.id),
+        )
+        if resposta.origem not in ORIGENS_DAVINCI:
+            await _promover_observacao(session, rascunho, resposta)
+
+
+async def _promover_observacao(
+    session: AsyncSession, rascunho: AtendimentoRascunho, resposta: AtendimentoMensagem
+) -> None:
+    """A nota do modo observação ganha a ação de verdade quando a loja responde POR FORA.
+
+    No teste em observação a pessoa dá 👍/👎 na sugestão ainda pendente
+    (ação provisória `observou`) e quem responde é o Duoke. Quando a
+    resposta dele chega, a sugestão vira `substituido` — e a avaliação
+    passa a `escreveu_do_zero`, com a resposta real e a similaridade: é a
+    comparação IA × equipe. Sem isto a linha ficava `observou` para sempre
+    (a tela esconde o 👍 já dado, ninguém reenviava a nota) e a métrica
+    perdia justamente os casos do teste. A nota e a correção ficam.
+
+    Só resposta de FORA: a que saiu pelo DaVinci é avaliada pelo `enviar`
+    (enviou igual/editou, com o que a pessoa escolheu) — promover aqui, na
+    adoção pelo sync, tomaria o lugar da avaliação certa.
+    """
+    av = (
+        await session.execute(
+            select(AtendimentoAvaliacao).where(AtendimentoAvaliacao.rascunho_id == rascunho.id)
+        )
+    ).scalar_one_or_none()
+    if av is None or av.acao != AVALIACAO_OBSERVOU:
+        return
+    av.acao = ACAO_SUBSTITUIDO
+    av.texto_final = resposta.texto
+    av.similaridade = (
+        similaridade(resposta.texto, rascunho.texto) if resposta.texto is not None else None
+    )
+    logger.info(
+        "atendimento_avaliacao_promovida",
+        rascunho_id=str(rascunho.id),
+        mensagem_id=str(resposta.id),
+    )

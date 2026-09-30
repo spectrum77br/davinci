@@ -928,6 +928,77 @@ class TikTokClient:
             return {}
         return resp.get("data") or {}
 
+    # ---- chat com o comprador (Customer Service API 202309) -----------------
+    #
+    # Para a caixa `/atendimento` (services/atendimento/tiktok.py). Em 25/09/2026
+    # as 8 lojas respondem `401 · 105005 Access denied`: o app ainda NÃO tem o
+    # escopo `seller.customer_service` (pedido manual no Partner Center). Os
+    # métodos devolvem o corpo CRU (`code`/`message`/`data`) — é quem chama que
+    # decide que 401/105005 é "sem escopo" e não erro a cada rodada. Formato
+    # pela documentação oficial (não medido). Nenhum método aqui chama o
+    # `Read Message`: ler pelo DaVinci apagaria o "não lido" da equipe.
+
+    async def cs_conversations(
+        self, page_size: int = 20, page_token: str | None = None
+    ) -> dict:
+        """Uma página das conversas da loja com compradores.
+
+            GET /customer_service/202309/conversations
+
+        `data.conversations[]`: `id`, `participants[]` (`role` BUYER/SHOP/
+        CUSTOMER_SERVICE, `user_id` — o mesmo da Order API —, `im_user_id`,
+        `nickname`), `latest_message` (mesmo formato das mensagens),
+        `unread_count`, `can_send_message`, `create_time` (s).
+        `data.next_page_token` vazio = acabou. Máximo de 20 por página (doc).
+        `locale=pt-BR`: as mensagens do SISTEMA vêm em português."""
+        params = {"page_size": str(min(max(1, int(page_size)), 20)), "locale": "pt-BR"}
+        if page_token:
+            params["page_token"] = str(page_token)
+        return await self._get("/customer_service/202309/conversations", params)
+
+    async def cs_messages(
+        self,
+        conversation_id: str,
+        page_size: int = 10,
+        page_token: str | None = None,
+    ) -> dict:
+        """Uma página das mensagens de UMA conversa, das mais novas para as
+        mais antigas (`sort_order=DESC` por `create_time`). Não marca como lida.
+
+            GET /customer_service/202309/conversations/{conversation_id}/messages
+
+        `data.messages[]`: `id`, `type` (TEXT, IMAGE, PRODUCT_CARD, ORDER_CARD,
+        NOTIFICATION, ...), `content` (JSON EM TEXTO — `{"content": "..."}` no
+        TEXT), `create_time` (s), `is_visible`, `sender.role` (BUYER/SHOP/
+        CUSTOMER_SERVICE/SYSTEM/ROBOT), `index`. A doc limita a 10 por página
+        (o de conversas é 20) — acima disso a chamada é recusada, por isso o
+        teto aqui."""
+        params = {
+            "page_size": str(min(max(1, int(page_size)), 10)),
+            "locale": "pt-BR",
+            "sort_order": "DESC",
+            "sort_field": "create_time",
+        }
+        if page_token:
+            params["page_token"] = str(page_token)
+        return await self._get(
+            f"/customer_service/202309/conversations/{conversation_id}/messages", params
+        )
+
+    async def cs_send_text(self, conversation_id: str, texto: str) -> dict:
+        """Manda UMA mensagem de texto na conversa (até 2.000 caracteres, sem
+        link — a TikTok recusa "conteúdo sensível" com 45101006).
+
+            POST /customer_service/202309/conversations/{conversation_id}/messages
+            body {"type": "TEXT", "content": "{\\"content\\": \\"...\\"}"}
+
+        O `content` é JSON serializado DENTRO do JSON (é assim na doc). Devolve
+        o corpo cru; sucesso traz `data.message_id`."""
+        corpo = {"type": "TEXT", "content": json.dumps({"content": texto}, ensure_ascii=False)}
+        return await self._post(
+            f"/customer_service/202309/conversations/{conversation_id}/messages", corpo
+        )
+
     async def update_stock(
         self,
         link: "ProductLink",

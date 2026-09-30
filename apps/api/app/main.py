@@ -13,6 +13,8 @@ from app.redis_client import redis
 from app.routers import adspower_agent as adspower_agent_router
 from app.routers import alerts as alerts_router
 from app.routers import aprovar_margem as aprovar_margem_router
+from app.routers import atendimento as atendimento_router
+from app.routers import atendimento_robo as atendimento_robo_router
 from app.routers import audit as audit_router
 from app.routers import auth as auth_router
 from app.routers import automacoes as automacoes_router
@@ -126,6 +128,11 @@ _OPENAPI_TAGS = [
     {"name": "refunds", "description": "Reembolsos vinculados aos pedidos da conciliação."},
     {"name": "chamados", "description": "Chamados abertos nas plataformas (Margem/Logística/Devolução) — histórico, réplica manual/automática, status Bling."},
     {"name": "devolutions", "description": "Devoluções por pedido — controle manual de retorno de produto."},
+    {
+        "name": "atendimento",
+        "description": "Caixa única de conversas (Shopee, ML, TikTok, Amazon; Instagram só "
+        "leitura) com o rascunho da IA.",
+    },
     {"name": "financeiro", "description": "Consórcio, suprimentos (certificações) e simulação de cotações de importação."},
     {"name": "importacao", "description": "Controle de pedidos de importação de malas — SKUs, lotes, resumo financeiro."},
     {"name": "notas_fiscais", "description": "NF-e — upload de XML → ML e consulta/export (XML/XLSX) das contas bling_notas."},
@@ -226,6 +233,11 @@ app.include_router(chamados_router.agent_router)
 app.include_router(chamados_ia_router.router)
 app.include_router(chamados_router.router)
 app.include_router(devolutions_router.router)
+# Pós-venda › Atendimento (25/09/2026): caixa única das lojas + rascunho da IA.
+app.include_router(atendimento_router.router)
+# Temu/AliExpress (30/09/2026): o robô do Mac mini manda o que a página do
+# Seller Center recebe (token próprio; vazio = desligado).
+app.include_router(atendimento_robo_router.router)
 app.include_router(estoque_router.router)
 app.include_router(faturamento_router.router)
 app.include_router(financeiro_router.router)

@@ -86,11 +86,15 @@ def test_acoes_listadas_existem():
 
 @pytest.mark.asyncio
 async def test_toda_tabela_de_negocio_tem_o_gatilho(db):
+    # O schema do conftest (DAVINCI_TEST_SCHEMA), não um nome fixo: cada lote
+    # de testes roda no seu.
+    from tests.conftest import TEST_SCHEMA
+
     sem = [
         r[0]
         for r in await db.execute(
             text(hsql.TABELAS_SEM_GATILHO),
-            {"schema": "davinci_test", "gatilho": hsql.NOME_GATILHO},
+            {"schema": TEST_SCHEMA, "gatilho": hsql.NOME_GATILHO},
         )
     ]
     # Só as tabelas dos models: outros testes criam tabelas avulsas no meio
@@ -103,14 +107,34 @@ async def test_toda_tabela_de_negocio_tem_o_gatilho(db):
             text(
                 "SELECT c.relname FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid"
                 " JOIN pg_namespace n ON n.oid = c.relnamespace"
-                " WHERE n.nspname = 'davinci_test' AND t.tgname = :g"
+                " WHERE n.nspname = :schema AND t.tgname = :g"
             ),
-            {"g": hsql.NOME_GATILHO},
+            {"schema": TEST_SCHEMA, "g": hsql.NOME_GATILHO},
         )
     }
     for tabela in ("pricing_overrides", "companies", "store_info", "users", "historico_acesso"):
         assert tabela in com, tabela
     for tabela in ("historico_evento", "historico_alteracao", "background_jobs", "alerts"):
+        assert tabela not in com, tabela
+    # Atendimento: o que muda o comportamento da loja (modo, manual, respostas
+    # prontas) aparece no Histórico; o que guarda texto de comprador, não.
+    for tabela in (
+        "atendimento_canais",
+        "atendimento_regras",
+        "atendimento_modelos",
+        "atendimento_categorias",
+    ):
+        assert tabela in com, tabela
+    for tabela in (
+        "atendimento_mensagens",
+        "atendimento_rascunhos",
+        "atendimento_avaliacoes",
+        "atendimento_conversas",
+        # Parte 2: índices do cartão "Cliente", escritos pela máquina (e a
+        # avaliação com o usuário e o texto do comprador).
+        "atendimento_pedidos_comprador",
+        "atendimento_avaliacoes_loja",
+    ):
         assert tabela not in com, tabela
 
 
