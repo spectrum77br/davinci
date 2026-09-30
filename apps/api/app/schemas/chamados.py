@@ -451,6 +451,37 @@ class AgentLeaseOut(BaseModel):
     tarefas: list[AgentTarefaOut]
 
 
+class AgentAbrirMlIn(BaseModel):
+    """30/09 (passo 4): a IA de Chamado pega UMA abertura do ML pra fazer pelo
+    Fale conosco (marca `enviando`: ninguém mais pega)."""
+
+    mensagem_id: UUID
+
+
+class AgentAbrirMlResultadoIn(BaseModel):
+    """Abriu (`ok` + nº da consulta que o ML mostrou) ou não (`erro`). O nº vira o
+    protocolo do chamado: dali em diante a leitura e as respostas do Mac Santiago
+    cuidam da consulta."""
+
+    mensagem_id: UUID
+    ok: bool
+    consulta: str | None = Field(default=None, pattern=r"^\d{6,12}$")
+    # "humano: <o que viu>" = vai direto pra Análise Humano (não tenta de novo)
+    erro: str | None = None
+    # parou na tela da loja (captcha/login), perfil deixado aberto: avisa no Threema
+    parado: Literal["captcha", "login"] | None = None
+
+    _clean = field_validator("erro", mode="before")(_clean_optional_text)
+
+    @model_validator(mode="after")
+    def _consulta_quando_ok(self) -> "AgentAbrirMlResultadoIn":
+        if self.ok and not self.consulta:
+            raise ValueError("ok=true exige o nº da consulta")
+        if self.ok and self.parado:
+            raise ValueError("parado só com ok=false")
+        return self
+
+
 class AgentMaosMlFilaIn(BaseModel):
     """30/09 (298394): as mãos do ML no Mac Santiago pedem as réplicas pra postar
     nas consultas do formulário de ajuda. `espiar` = modo seco (não marca)."""
@@ -787,6 +818,9 @@ class AgentCerebroIn(BaseModel):
     vazio pra ele e o `/agent/analise` recusa. `null` só consulta."""
 
     exclusivo: bool | None = None
+    # 30/09: `true` = esta IA passa a ABRIR as consultas do ML (Fale conosco) e o
+    # robô antigo para de recebê-las; `false` devolve; `null` só consulta.
+    abre_ml: bool | None = None
 
 
 class AgentRegraOut(BaseModel):
@@ -813,6 +847,7 @@ class AgentAprendizadoOut(BaseModel):
 class AgentCerebroOut(BaseModel):
     nome: str
     exclusivo: bool
+    abre_ml: bool = False
     # 24/09: a pessoa liga/desliga na aba IA de Chamado; desligada não decide nada
     ligada: bool = False
     last_used_at: datetime | None = None

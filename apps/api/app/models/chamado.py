@@ -317,6 +317,12 @@ class ChamadoCerebro(Base, TimestampMixin):
     ligada: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default="false"
     )
+    # 30/09 (passo 4, saída do Eduardo): esta IA ABRE a consulta do ML pelo Fale
+    # conosco (`/agent/abrir-ml/*`); ligado, o token antigo não recebe mais essas
+    # aberturas no `/agent/lease`.
+    abre_ml: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
 
 
 class ChamadoLeitor(Base, TimestampMixin):

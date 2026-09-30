@@ -35,6 +35,7 @@ PEDIDO="Rodada da IA de Chamado. Abaixo: o MANUAL do Vinicius, as correções e 
 dele e os CASOS que esperam por você. Decida CADA caso seguindo o CLAUDE.md (instrução de \
 pessoa > manual > prudência) e registre cada decisão com python3 ferramentas/davinci_chamados.py \
 decidir --json. Comandos UM POR VEZ, no formato exato do CLAUDE.md (sem cd, &&, |, ; ou >). \
+Se vier a seção ABRIR NO ML, siga a seção dela no CLAUDE.md (não usa decidir). \
 Na dúvida, humano. No fim, feche os perfis que abriu e escreva só a lista curta: \
 pedido → ação → por quê."
 

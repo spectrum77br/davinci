@@ -225,8 +225,9 @@ ERROS_ACOMPANHADOS = frozenset({
 
 def _erro_pede_humano(erro: str) -> bool:
     e = (erro or "").strip()
-    # o robô da página do ML grava a frase inteira ("tem foto anexada: …")
-    return e in ERROS_PEDEM_HUMANO or e.startswith("tem foto anexada")
+    # o robô da página do ML grava a frase inteira ("tem foto anexada: …"); a IA
+    # de Chamado, ao abrir no ML (30/09), escreve "humano: <o que viu>"
+    return e in ERROS_PEDEM_HUMANO or e.startswith(("tem foto anexada", "humano:"))
 
 
 def _robo_atende(ch: Chamado) -> bool:

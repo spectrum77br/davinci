@@ -55,6 +55,8 @@ from app.models import (
 )
 from app.models.chamado import CANAIS, ORIGENS
 from app.schemas.chamados import (
+    AgentAbrirMlIn,
+    AgentAbrirMlResultadoIn,
     AgentAnalisarIn,
     AgentAnalisarOut,
     AgentAnaliseIn,
@@ -1675,6 +1677,31 @@ async def _maos_do_ml_ativas(session: AsyncSession) -> bool:
     ).scalar_one_or_none() is not None
 
 
+async def _ia_abre_ml(session: AsyncSession) -> bool:
+    """30/09 (passo 4): a IA de Chamado abre as consultas do ML (Fale conosco)?"""
+    return (
+        await session.execute(
+            select(ChamadoCerebro.id)
+            .where(ChamadoCerebro.abre_ml.is_(True), ChamadoCerebro.revoked_at.is_(None))
+            .limit(1)
+        )
+    ).scalar_one_or_none() is not None
+
+
+def _plataforma_ml_sql():
+    return func.lower(func.trim(func.coalesce(Chamado.plataforma, ""))).in_(_PLATAFORMA_ML)
+
+
+def _condicoes_abrir_ml(agora: datetime) -> list:
+    """Abertura de chamado do ML ainda sem consulta, na fila do robô (canal robô)."""
+    return [
+        *_condicoes_da_fila(agora),
+        _SEM_PROTOCOLO,
+        ChamadoMensagem.tipo == "abertura",
+        _plataforma_ml_sql(),
+    ]
+
+
 async def _entregar(
     session: AsyncSession, conds: list, limite: int, *, marcar: bool = True
 ) -> list[AgentTarefaOut]:
@@ -1761,6 +1788,10 @@ async def agent_lease(
     # não recebe mais, senão os dois postariam a mesma réplica.
     if await _maos_do_ml_ativas(session):
         conds.append(~and_(~_SEM_PROTOCOLO, chamados_leitura.consulta_ml_sql()))
+    # 30/09 (passo 4): com a IA de Chamado abrindo no ML (Fale conosco), a
+    # abertura do ML sem consulta também não sai mais pra este token.
+    if await _ia_abre_ml(session):
+        conds.append(~and_(_SEM_PROTOCOLO, _plataforma_ml_sql()))
     return AgentLeaseOut(tarefas=await _entregar(session, conds, body.limite))
 
 
@@ -2049,6 +2080,119 @@ async def agent_maos_ml_resultado(
         ch.leitura_robo_at = None
         ch.leitura_robo_claim_at = None
     return await agent_resultado(body, session)
+
+
+# --------------------------------- IA de Chamado abre a consulta do ML (30/09)
+# Passo 4 da saída do Eduardo: o chamado do ML sem mediação aberta e sem devolução
+# pra revisar ia pro robô dele, que abria num formulário de ajuda. Agora a IA de
+# Chamado (Mac Santiago) abre pelo Fale conosco — assistente › atendente › E-mail
+# › formulário. É conversa: uma tarefa por vez, pega (`enviando`) antes de ir pra
+# tela, e devolve o nº da consulta. Com `abre_ml` desligado ela só OLHA a fila
+# (teste); pegar e devolver exigem `abre_ml`, que também tira a fila do Eduardo.
+
+
+def _so_quem_abre_ml(cerebro: _Cerebro) -> ChamadoCerebro:
+    row = _so_cadastrado(cerebro)
+    if not row.abre_ml:
+        raise HTTPException(409, detail={"code": "ia_nao_abre_ml"})
+    return row
+
+
+@agent_router.post("/abrir-ml/fila", response_model=AgentLeaseOut)
+async def agent_abrir_ml_fila(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    cerebro: Annotated[_Cerebro, Depends(_cerebro)],
+) -> AgentLeaseOut:
+    """Aberturas do ML esperando consulta (só olha — não marca nada)."""
+    _so_cadastrado(cerebro)
+    conds = _condicoes_abrir_ml(datetime.now(UTC))
+    return AgentLeaseOut(tarefas=await _entregar(session, conds, 20, marcar=False))
+
+
+@agent_router.post("/abrir-ml/pegar", response_model=AgentTarefaOut)
+async def agent_abrir_ml_pegar(
+    body: AgentAbrirMlIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    cerebro: Annotated[_Cerebro, Depends(_cerebro)],
+) -> AgentTarefaOut:
+    """A IA vai abrir ESTA no Fale conosco: marca `enviando` (ninguém mais pega;
+    se ela sumir, volta pra fila em 30 min). 409 se já não está na fila."""
+    _so_quem_abre_ml(cerebro)
+    achada = (
+        await session.execute(
+            select(ChamadoMensagem.id)
+            .join(Chamado, Chamado.id == ChamadoMensagem.chamado_id)
+            .where(ChamadoMensagem.id == body.mensagem_id, *_condicoes_abrir_ml(datetime.now(UTC)))
+            .with_for_update(of=ChamadoMensagem)
+        )
+    ).scalar_one_or_none()
+    if achada is None:
+        raise HTTPException(409, detail={"code": "abertura_fora_da_fila"})
+    (t,) = await _entregar(
+        session, [ChamadoMensagem.id == body.mensagem_id], 1, marcar=True
+    )
+    return t
+
+
+@agent_router.post("/abrir-ml/resultado", response_model=ChamadoMensagemOut)
+async def agent_abrir_ml_resultado(
+    body: AgentAbrirMlResultadoIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    cerebro: Annotated[_Cerebro, Depends(_cerebro)],
+) -> ChamadoMensagemOut:
+    """Abriu: o nº da consulta vira o protocolo (caso de tela), a linha da
+    Logística recebe o protocolo e a consulta vai pro topo da leitura. Não abriu:
+    as mesmas regras do robô antigo (volta pra fila até 3 tentativas; erro que
+    pede gente vai direto pra Análise Humano)."""
+    _so_quem_abre_ml(cerebro)
+    m = (
+        await session.execute(
+            select(ChamadoMensagem)
+            .options(selectinload(ChamadoMensagem.anexos))
+            .where(ChamadoMensagem.id == body.mensagem_id)
+        )
+    ).scalar_one_or_none()
+    if m is None:
+        raise HTTPException(404, detail={"code": "chamado_mensagem_not_found"})
+    ch = await _get(session, m.chamado_id)
+    if not (
+        m.tipo == "abertura"
+        and (m.canal or "") == "robo"
+        and (ch.plataforma or "").strip().lower() in _PLATAFORMA_ML
+    ):
+        raise HTTPException(409, detail={"code": "abertura_fora_da_ia"})
+    if body.ok and (ch.chamado or "").strip() and ch.chamado.strip() != body.consulta:
+        raise HTTPException(409, detail={"code": "chamado_ja_tem_protocolo", "chamado": ch.chamado})
+    erro = body.erro
+    if body.parado:
+        erro = f"humano: parou na tela ({body.parado}) — {body.erro or 'perfil deixado aberto'}"
+    elif not body.ok and not erro:
+        erro = "a IA não conseguiu abrir a consulta"
+    if body.ok:
+        ch.leitura_robo_at = None
+        ch.leitura_robo_claim_at = None
+    out = await agent_resultado(
+        AgentResultadoIn(
+            mensagem_id=m.id,
+            ok=body.ok,
+            erro=erro,
+            chamado=body.consulta if body.ok else None,
+            chamado_url=(
+                chamados_leitura.CONSULTA_ML_URL.format(body.consulta) if body.ok else None
+            ),
+        ),
+        session,
+    )
+    if body.parado:
+        # mesmo aviso da decisão `parado` (297130): Threema pra quem está no cadastro
+        try:
+            ch = await _get(session, m.chamado_id)
+            await chamados_ia_aviso.avisar(session, ch, body.parado, erro)
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            logger.exception("chamados_ia_aviso_falhou", chamado_id=str(m.chamado_id))
+    return out
 
 
 @agent_router.post("/resultado", response_model=ChamadoMensagemOut, dependencies=_agent_dep)
@@ -2923,6 +3067,10 @@ async def agent_cerebro(
         row.exclusivo = body.exclusivo
         await session.commit()
         logger.info("chamados_cerebro_exclusivo", cerebro=row.nome, exclusivo=row.exclusivo)
+    if body.abre_ml is not None and body.abre_ml != row.abre_ml:
+        row.abre_ml = body.abre_ml
+        await session.commit()
+        logger.info("chamados_cerebro_abre_ml", cerebro=row.nome, abre_ml=row.abre_ml)
     regras = (
         await session.execute(
             select(ChamadoIaRegra)
@@ -2945,6 +3093,7 @@ async def agent_cerebro(
     return AgentCerebroOut(
         nome=row.nome,
         exclusivo=row.exclusivo,
+        abre_ml=row.abre_ml,
         ligada=row.ligada,
         last_used_at=row.last_used_at,
         legado_ignorado_at=row.legado_ignorado_at,

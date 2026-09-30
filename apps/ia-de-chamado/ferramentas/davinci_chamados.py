@@ -35,6 +35,17 @@ Comandos (a IA usa pelo terminal):
                            casos que o cérebro já decidiu, com a conversa
   guarda [estado|assumir|liberar]
                            troca de guarda com o cérebro antigo (só gente usa)
+  abrir-ml fila            aberturas do ML esperando consulta (só olha)
+  abrir-ml pegar --mensagem ID
+                           (REAL) pega a abertura antes de ir pra tela
+  abrir-ml resultado --json '{"mensagem_id": "…", "ok": true, "consulta": "485…"}'
+                           (REAL) abriu (nº da consulta) ou não ("erro": "…";
+                           "humano: …" vai pra pessoa; "parado": "captcha"|"login")
+  abrir-ml teste --mensagem ID --print tmp/x.png --nota "…"
+                           (TESTE) guarda o print do formulário preenchido e o que
+                           você viu — nada vai pro DaVinci nem pro ML
+  abrir-ml [estado|assumir|liberar]
+                           a IA abre no ML no lugar do robô antigo (só gente usa)
 
 Toda decisão também fica em ~/DaVinci/ia-de-chamado/decisoes.jsonl. Sem modo teste
 (decisão dele): ligada na aba = decide de verdade.
@@ -70,6 +81,9 @@ ACOES = ("esperar", "responder", "resolver", "humano")
 # a outra.
 SERVIDO_VALE_S = 2 * 3600
 TEXTO_MAX = 4000  # por mensagem, no que vai pro prompt
+# 30/09 (passo 4): abrir a consulta do ML pelo Fale conosco. ABRIR_ML no .env:
+# desligado (padrão) | teste (vai até o formulário preenchido e PARA) | real.
+TESTES_ABRIR = PASTA / "estado" / "teste-abrir-ml"
 
 
 def _cfg() -> dict[str, str]:
@@ -238,13 +252,33 @@ def _aprendizado(itens: list[dict]) -> str:
     return "\n".join(partes)
 
 
+def _modo_abrir(cfg: dict[str, str]) -> str:
+    m = (cfg.get("ABRIR_ML") or "desligado").strip().lower()
+    return m if m in ("teste", "real") else "desligado"
+
+
+def _aberturas(cfg: dict[str, str], ia: dict) -> list[dict]:
+    """Uma abertura do ML por rodada (é conversa na tela, leva minutos). TESTE: a
+    que ainda não foi testada; REAL: só com a IA assumida (`abre_ml`)."""
+    modo = _modo_abrir(cfg)
+    if modo == "desligado" or (modo == "real" and not ia.get("abre_ml")):
+        return []
+    tarefas = _post(cfg, "abrir-ml/fila", {}).get("tarefas") or []
+    if modo == "teste":
+        testadas = _ler(TESTES_ABRIR / "testadas.json")
+        tarefas = [t for t in tarefas if t["mensagem_id"] not in testadas]
+    return tarefas[:1]
+
+
 def cmd_precheck(cfg: dict[str, str], a: argparse.Namespace) -> None:
     ia = _post(cfg, "cerebro", {})
     if not ia.get("ligada"):
         print(json.dumps({"wakeAgent": False}))
         return
-    casos = _casos(cfg, getattr(a, "tipo", "todos") or "todos")
-    if not casos:
+    tipo = getattr(a, "tipo", "todos") or "todos"
+    casos = _casos(cfg, tipo)
+    aberturas = _aberturas(cfg, ia) if tipo in ("forte", "todos") else []
+    if not casos and not aberturas:
         print(json.dumps({"wakeAgent": False}))
         return
     print(
@@ -257,8 +291,22 @@ def cmd_precheck(cfg: dict[str, str], a: argparse.Namespace) -> None:
     aprendizado = _aprendizado(ia.get("aprendizado") or [])
     if aprendizado:
         print("\n" + aprendizado)
-    print("\nCASOS:")
-    print(json.dumps(casos, ensure_ascii=False, indent=1))
+    if casos:
+        print("\nCASOS:")
+        print(json.dumps(casos, ensure_ascii=False, indent=1))
+    if aberturas:
+        modo = _modo_abrir(cfg).upper()
+        print(
+            f"\nABRIR NO ML — MODO {modo} (siga a seção \"Mercado Livre — ABRIR a consulta "
+            "pelo Fale conosco\" do CLAUDE.md; estas NÃO usam `decidir`):"
+        )
+        if modo == "TESTE":
+            print(
+                "TESTE: vá até o formulário preenchido, tire a foto, registre com "
+                "`abrir-ml teste` e PARE — não clique Continuar/Enviar. Não use `pegar` nem "
+                "`resultado`."
+            )
+        print(json.dumps(aberturas, ensure_ascii=False, indent=1))
 
 
 def cmd_manual(cfg: dict[str, str], _a: argparse.Namespace) -> None:
@@ -415,6 +463,57 @@ def cmd_guarda(cfg: dict[str, str], a: argparse.Namespace) -> None:
     print(json.dumps(_post(cfg, "cerebro", corpo), ensure_ascii=False, indent=1))
 
 
+def cmd_abrir_ml(cfg: dict[str, str], a: argparse.Namespace) -> None:
+    modo = _modo_abrir(cfg)
+    if a.acao in ("estado", "assumir", "liberar"):
+        corpo = {"estado": {}, "assumir": {"abre_ml": True}, "liberar": {"abre_ml": False}}[a.acao]
+        ia = _post(cfg, "cerebro", corpo)
+        print(json.dumps({"modo_no_mac": modo, "abre_ml": ia.get("abre_ml")}, ensure_ascii=False))
+        return
+    if a.acao == "fila":
+        print(json.dumps(_post(cfg, "abrir-ml/fila", {}), ensure_ascii=False, indent=1))
+        return
+    if a.acao == "teste":
+        if not (a.mensagem and a.print):
+            sys.exit("teste precisa de --mensagem e --print")
+        arq = Path(a.print).expanduser()
+        if not arq.exists():
+            sys.exit(f"print não encontrado: {arq}")
+        TESTES_ABRIR.mkdir(parents=True, exist_ok=True)
+        carimbo = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+        destino = TESTES_ABRIR / f"{a.mensagem[:8]}-{carimbo}{arq.suffix}"
+        destino.write_bytes(arq.read_bytes())
+        with (TESTES_ABRIR / "registro.jsonl").open("a") as f:
+            f.write(json.dumps({"quando": carimbo, "mensagem_id": a.mensagem, "print": str(destino),
+                                "nota": a.nota or ""}, ensure_ascii=False) + "\n")
+        testadas = _ler(TESTES_ABRIR / "testadas.json")
+        testadas[a.mensagem] = carimbo
+        _gravar(TESTES_ABRIR / "testadas.json", testadas)
+        print(json.dumps({"ok": True, "print": str(destino)}, ensure_ascii=False))
+        return
+    if modo != "real":
+        sys.exit(f"ABRIR_ML está '{modo}' neste Mac: `{a.acao}` só no modo real")
+    if a.acao == "pegar":
+        if not a.mensagem:
+            sys.exit("pegar precisa de --mensagem")
+        print(json.dumps(_post(cfg, "abrir-ml/pegar", {"mensagem_id": a.mensagem}),
+                         ensure_ascii=False, indent=1))
+        return
+    if a.acao == "resultado":
+        try:
+            d = json.loads(a.json or "")
+        except ValueError as e:
+            sys.exit(f"JSON inválido: {e}")
+        extras = set(d) - {"mensagem_id", "ok", "consulta", "erro", "parado"}
+        if extras:
+            sys.exit(f"campos desconhecidos: {sorted(extras)}")
+        resposta = _post(cfg, "abrir-ml/resultado", d)
+        with DECISOES.open("a") as f:
+            f.write(json.dumps({"quando": datetime.now(timezone.utc).isoformat(), "abrir_ml": d,
+                                "resposta": resposta}, ensure_ascii=False, default=str) + "\n")
+        print(json.dumps({"ok": True, "resposta": resposta}, ensure_ascii=False))
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     sub = p.add_subparsers(dest="cmd")
@@ -448,6 +547,12 @@ def main() -> None:
     ex.add_argument("--desde")
     gd = sub.add_parser("guarda")
     gd.add_argument("o_que", nargs="?", default="estado", choices=("estado", "assumir", "liberar"))
+    ab = sub.add_parser("abrir-ml")
+    ab.add_argument("acao", choices=("fila", "pegar", "resultado", "teste", "estado", "assumir", "liberar"))
+    ab.add_argument("--mensagem", help="mensagem_id da abertura")
+    ab.add_argument("--json", help="resultado em JSON, numa linha")
+    ab.add_argument("--print", help="(teste) print do formulário preenchido")
+    ab.add_argument("--nota", help="(teste) o que você viu e fez")
     a = p.parse_args()
     if a.cmd is None:  # o agendador do Hermes chama sem argumento
         a.cmd = "precheck"
@@ -465,6 +570,7 @@ def main() -> None:
         "guardar-print": cmd_guardar_print,
         "exemplos": cmd_exemplos,
         "guarda": cmd_guarda,
+        "abrir-ml": cmd_abrir_ml,
     }[a.cmd](cfg, a)
 
 

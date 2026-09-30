@@ -54,7 +54,8 @@ python3 ferramentas/davinci_chamados.py decidir --json '{"chamado_id": "…", "c
 - `decidir` **sempre com `--json '…'` numa linha só** (heredoc e arquivo são
   bloqueados pela lista de permissões). Aspas simples por fora; se o texto tiver
   apóstrofo, troque por ’. Só aceita caso que você buscou nesta rodada.
-- Não use `curl` nem outro caminho pro DaVinci. Não mexa em `guarda`.
+- Não use `curl` nem outro caminho pro DaVinci. Não mexa em `guarda` nem em
+  `abrir-ml assumir/liberar` (troca de guarda é coisa de gente).
 
 ## O que vem em cada caso
 
@@ -198,6 +199,53 @@ em 29/09, 297130) — só com instrução de pessoa ou regra do manual:
    ("consulta enviada pelo formulário, nº …"), `guardar-print`, fechar o perfil.
    A consulta fica "Finalizada" ~15 min depois da 1ª resposta automática do ML,
    mas a conversa segue nela — não abra outra pro mesmo pedido.
+
+## Mercado Livre — ABRIR a consulta pelo Fale conosco (seção "ABRIR NO ML")
+
+Desde 30/09 **você** abre a consulta dos chamados do ML que não têm mediação
+aberta nem devolução pra revisar (antes era o robô do Eduardo, por um formulário).
+Os casos vêm na seção **ABRIR NO ML** da rodada — uma abertura por rodada, com o
+MODO (TESTE ou REAL). Eles **não** usam `decidir`: o que a IA faz aqui é levar o
+texto da abertura (campo `texto`) e as fotos dela até o ML e devolver o nº da
+consulta.
+
+1. **REAL:** pegue a abertura antes de ir pra tela:
+   `python3 ferramentas/davinci_chamados.py abrir-ml pegar --mensagem <mensagem_id>`.
+   Se der 409, alguém já pegou: pule. **TESTE:** não pegue.
+2. Perfil: `python3 ferramentas/adspower.py achar --conta "<conta>" --plataforma ml`
+   (confiança baixa → `humano` no REAL, ou anote no TESTE e pare).
+3. Venda: `ferramentas/tela <perfil> ir https://vendedores.mercadolivre.com.br/vendas/<pedido_marketplace>/detalhe`
+   → menu **⋮** do pacote → **"Preciso de ajuda"** → **"Ajuda sobre outros tópicos"**
+   → na Central de Ajuda, **"Fale conosco"** → chat do assistente (caixa "Pergunte
+   algo"). Se o caminho não aparecer, vá direto a
+   `https://www.mercadolivre.com.br/ajuda` → "Fale conosco".
+4. No chat, curto: o nº da venda e, em uma frase, o que pedimos (tire do `texto`).
+   **Leia o que o assistente conta** da venda/mediação. Se contradisser o nosso
+   texto (ex.: 297130 — o reembolso parcial foi proposta NOSSA), **pare**: REAL →
+   `abrir-ml resultado` com `"ok": false, "erro": "humano: <o que ele disse>"`.
+5. Peça atendimento humano e confirme ("Sim, quero seguir com a consulta com
+   atendimento humano"). Ele manda um link → "Como você prefere conversar?" →
+   **E-mail** → "Complete o formulário de ajuda".
+6. `ferramentas/tela <perfil> campos`. Na caixa da descrição, o `texto` da
+   abertura como está (só fatos; não invente nada). Na caixa "número da venda
+   (Opcional)", o `pedido_marketplace`. Fotos: `anexos --id <chamado_id> --pasta
+   tmp/<pedido>` e `anexar` **só as da abertura** (`da_abertura: true`).
+7. `ferramentas/tela <perfil> foto tmp/abrir-<pedido>.png` e confira o print.
+   - **TESTE — pare aqui.** Não clique "Continuar". Registre:
+     `python3 ferramentas/davinci_chamados.py abrir-ml teste --mensagem <mensagem_id> --print tmp/abrir-<pedido>.png --nota "<o que o assistente disse e o que você preencheu>"`
+     e feche o perfil.
+   - **REAL:** `clicar "Continuar"` e siga as telas ("Enviar"/"Confirmar") até a
+     confirmação. O nº da consulta: na confirmação ou em
+     `https://www.mercadolivre.com.br/minhas-consultas` (a mais nova, de hoje).
+     Registre: `python3 ferramentas/davinci_chamados.py abrir-ml resultado --json '{"mensagem_id": "…", "ok": true, "consulta": "485…"}'`
+     e feche o perfil. Sem o nº da consulta NÃO diga que abriu.
+8. "Não sou robô" ou login: pare, deixe o perfil aberto e (REAL)
+   `abrir-ml resultado --json '{"mensagem_id": "…", "ok": false, "parado": "captcha"}'`
+   (ou `"login"`) — o DaVinci avisa o Cairo no Threema. Outro problema que você
+   não resolve: `"ok": false, "erro": "<o que houve>"` (volta pra fila e tenta
+   de novo depois, até 3 vezes).
+9. Nunca abra duas consultas pro mesmo chamado. Se o histórico do chamado já tem
+   nº de consulta, não abra outra.
 
 ## Shopee — caminhos que funcionam
 
