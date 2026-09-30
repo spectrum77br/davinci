@@ -1,0 +1,158 @@
+#!/usr/bin/env python3
+"""Sistema de Fiscalização rodando no Mac mini da Makisa (30/09/2026).
+
+O sistema (Flask + SQLite) saiu do servidor da Hostinger e roda aqui, dentro de
+`~/Desktop/Denuncias/Ecomerce/fiscalizacao-sistema` — Vinicius: "quero que
+fique tudo dentro daquela pasta Denuncias que tá na Mesa".
+
+Por que numa janela do Terminal (atalho "00 - Sistema no Mac mini"): o macOS
+barra tarefas de fundo (LaunchAgent) de ler a Mesa ("Operation not
+permitted", testado em 30/09). O robô já rodava assim; o sistema segue o mesmo
+caminho, e tudo que ele dispara herda a permissão do Terminal.
+
+Uma janela faz quatro coisas:
+1. o sistema em http://127.0.0.1:8710 (o robô e o Cowork falam com ele);
+2. a cópia pro DaVinci a cada 5 min (`enviar_ao_davinci.py --so-dados`);
+3. as provas e o backup do banco pro MEGA a cada 2 min (`app/mega_sync.py`),
+   quando o MEGAcmd estiver instalado e logado na conta da empresa;
+4. o `status_mac.py` do robô (painel Operação/Status), que antes era um
+   LaunchAgent e parou de poder ler a pasta.
+Mais o backup diário local do banco em `data/backups` (guarda 30), como fazia
+o `run.py` no servidor.
+
+Rodar: `.venv/bin/python` do sistema (tem Flask/Waitress):
+    ~/Desktop/Denuncias/Ecomerce/fiscalizacao-sistema/.venv/bin/python servidor_mini.py
+"""
+
+import datetime
+import glob
+import os
+import socket
+import sqlite3
+import subprocess
+import sys
+import threading
+import time
+
+ECOMERCE = os.path.expanduser("~/Desktop/Denuncias/Ecomerce")
+SISTEMA = os.path.join(ECOMERCE, "fiscalizacao-sistema")
+APP = os.path.join(SISTEMA, "app")
+DADOS = os.path.join(SISTEMA, "data")
+ROBO = os.path.join(ECOMERCE, "Fiscalizacao")
+DAVINCI = os.path.join(ECOMERCE, "DaVinci")
+MEGACMD = "/Applications/MEGAcmd.app/Contents/MacOS"
+PORTA = int(os.environ.get("FISC_PORT", "8710"))
+LOG = os.path.join(DADOS, "servidor_mini.log")
+
+
+def log(msg):
+    linha = "%s %s" % (time.strftime("%Y-%m-%d %H:%M:%S"), msg)
+    print(linha, flush=True)
+    try:
+        if os.path.exists(LOG) and os.path.getsize(LOG) > 5 * 1024 * 1024:
+            os.replace(LOG, LOG + ".1")
+        with open(LOG, "a") as f:
+            f.write(linha + "\n")
+    except OSError:
+        pass
+
+
+def porta_ocupada(porta):
+    with socket.socket() as s:
+        return s.connect_ex(("127.0.0.1", porta)) == 0
+
+
+def a_cada(segundos, nome, fn):
+    """Roda `fn` pra sempre, com intervalo; erro não derruba o sistema."""
+    def laco():
+        time.sleep(20)  # deixa o sistema subir antes
+        while True:
+            try:
+                fn()
+            except Exception as e:  # noqa: BLE001
+                log("%s: erro %s" % (nome, e))
+            time.sleep(segundos)
+    threading.Thread(target=laco, name=nome, daemon=True).start()
+
+
+def rodar(nome, args, cwd, env=None, timeout=1800):
+    p = subprocess.run(args, cwd=cwd, env=env, capture_output=True, text=True, timeout=timeout)
+    saida = (p.stdout + p.stderr).strip().splitlines()
+    ultima = saida[-1] if saida else ""
+    if p.returncode != 0:
+        log("%s: saiu com %s — %s" % (nome, p.returncode, ultima[:300]))
+    return p.returncode, ultima
+
+
+def davinci():
+    script = os.path.join(DAVINCI, "enviar_ao_davinci.py")
+    if os.path.exists(script):
+        rodar("davinci", ["/usr/bin/python3", script, "--so-dados"], cwd=DAVINCI)
+
+
+def mega():
+    if not os.path.exists(os.path.join(MEGACMD, "mega-whoami")):
+        return  # MEGAcmd ainda não instalado: as provas ficam só aqui por enquanto
+    env = dict(os.environ, PATH=MEGACMD + ":" + os.environ.get("PATH", ""))
+    rodar("mega", [sys.executable, "mega_sync.py"], cwd=APP, env=env)
+
+
+def backup_diario():
+    pasta = os.path.join(DADOS, "backups")
+    os.makedirs(pasta, exist_ok=True)
+    nome = os.path.join(pasta, "fiscalizacao_%s.sqlite" % datetime.date.today().isoformat())
+    if os.path.exists(nome):
+        return
+    src = sqlite3.connect(os.path.join(DADOS, "fiscalizacao.db"))
+    dst = sqlite3.connect(nome)
+    src.backup(dst)
+    dst.close()
+    src.close()
+    for velho in sorted(glob.glob(os.path.join(pasta, "fiscalizacao_*.sqlite")))[:-30]:
+        os.remove(velho)
+    log("backup local: %s" % os.path.basename(nome))
+
+
+def status_mac():
+    """Mantém o status_mac.py do robô vivo (ele mesmo roda em laço)."""
+    py = "/usr/local/bin/python3" if os.path.exists("/usr/local/bin/python3") else "/usr/bin/python3"
+    while True:
+        try:
+            p = subprocess.Popen([py, "status_mac.py"], cwd=ROBO,
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            p.wait()
+            log("status_mac: parou (%s), religando em 30 s" % p.returncode)
+        except Exception as e:  # noqa: BLE001
+            log("status_mac: erro %s" % e)
+        time.sleep(30)
+
+
+def main():
+    if porta_ocupada(PORTA):
+        print("O sistema já está rodando neste Mac (porta %d). Pode fechar esta janela." % PORTA)
+        return 0
+    if not os.path.exists(os.path.join(DADOS, "fiscalizacao.db")):
+        print("Falta o banco em %s/fiscalizacao.db" % DADOS)
+        return 1
+    os.environ["FISC_DATA"] = DADOS
+    os.environ.setdefault("FISC_HOST", "127.0.0.1")
+    os.environ["FISC_PORT"] = str(PORTA)
+    os.chdir(APP)
+    sys.path.insert(0, APP)
+    from app import app  # noqa: E402 — o Flask do sistema
+
+    a_cada(300, "davinci", davinci)
+    a_cada(120, "mega", mega)
+    a_cada(3600, "backup", backup_diario)
+    threading.Thread(target=status_mac, name="status_mac", daemon=True).start()
+
+    from waitress import serve
+    log("Sistema de Fiscalização no ar em http://127.0.0.1:%d (Mac mini). Deixe esta janela aberta." % PORTA)
+    serve(app, host="127.0.0.1", port=PORTA, threads=8,
+          max_request_body_size=app.config["MAX_CONTENT_LENGTH"], channel_timeout=300,
+          ident="fiscalizacao")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

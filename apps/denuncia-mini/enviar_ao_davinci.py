@@ -85,10 +85,14 @@ def ler_config():
     c["provas"] = os.path.expanduser(c["provas"])
     if "*" in c["banco"]:
         # antes do sistema rodar no mini: o backup do dia (fiscalizacao_AAAA-MM-DD.sqlite)
-        # o backup das 03:00 ainda sendo gravado não conta (mudou há < 5 min)
-        achados = sorted(f for f in glob.glob(c["banco"]) if time.time() - os.path.getmtime(f) > 300)
+        achados = sorted(glob.glob(c["banco"]))
         if not achados:
             raise SystemExit("nenhum banco em %s" % c["banco"])
+        # o backup do dia ainda sendo gravado (mexido há < 5 min): pula a rodada.
+        # NUNCA cai pro de ontem — em 30/09 isso apagou do DaVinci, por 3 min,
+        # o que tinha sido feito no dia.
+        if time.time() - os.path.getmtime(achados[-1]) < 300:
+            raise SystemExit("backup %s sendo gravado agora — fica pra próxima rodada" % achados[-1])
         c["banco"] = achados[-1]
     return c
 
@@ -111,15 +115,18 @@ def pedir(cfg, metodo, rota, corpo=None, dados=None, timeout=120):
 
 
 def abrir_banco(caminho):
-    """Só leitura. Banco em modo WAL sem o `-shm` ao lado (o backup do dia, que
-    ninguém abriu ainda) não abre em `mode=ro` — aí vai `immutable=1`, que lê o
-    arquivo como está (backup/sistema parado não tem nada pendente no WAL)."""
+    """Só leitura. O sistema usa WAL e apaga o `-shm` quando fecha a última
+    conexão; aí `mode=ro` não abre ("unable to open database file") — então
+    abre normal com `PRAGMA query_only`: o próprio SQLite recusa qualquer
+    escrita, e a leitura continua consistente com o que o sistema gravou."""
     try:
         c = sqlite3.connect("file:%s?mode=ro" % caminho, uri=True, timeout=30)
         c.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchall()
         return c
     except sqlite3.OperationalError:
-        return sqlite3.connect("file:%s?mode=ro&immutable=1" % caminho, uri=True)
+        c = sqlite3.connect("file:%s?mode=rw" % caminho, uri=True, timeout=30)
+        c.execute("PRAGMA query_only = ON")
+        return c
 
 
 def abrir_estado():
