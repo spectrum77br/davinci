@@ -5,9 +5,9 @@ A API e os workers continuam no servidor. Somente o tráfego configurado em
 
 Fluxo: cliente Magalu → serviço Docker interno `magalu_proxy:13129` → socket
 Unix privado no host → túnel reverso SSH → proxy em `127.0.0.1:13129` no Mac →
-`id.magalu.com:443` ou `api.magalu.com:443`.
+`id.magalu.com:443`, `api.magalu.com:443` ou `services.magalu.com:443`.
 
-O proxy exige autenticação própria, permite apenas CONNECT para esses dois
+O proxy exige autenticação própria, permite apenas CONNECT para esses três
 destinos e mantém o TLS entre o cliente da API e a Magalu. Não interpreta os
 tokens ou dados das contas. Não há porta publicada no host nem bind público no
 Mac. O bridge não recebe variáveis de ambiente com credenciais; roda com disco
@@ -18,6 +18,9 @@ somente leitura e sem capabilities.
 Editar e testar no Mac; atualizar com `git pull --ff-only origin main`, commitar
 arquivos explícitos e enviar para `origin/main`. No servidor, fazer fetch/reset
 conforme o fluxo de publicação do projeto. Não editar as fontes no servidor.
+Para uma alteração apenas na lista de destinos do proxy Mac já instalado,
+publicar o código e reinstalar no Mac é suficiente; o bridge do servidor
+continua encaminhando pelo mesmo túnel, sem reconstrução dos serviços.
 
 No Mac, a partir do checkout publicado:
 
