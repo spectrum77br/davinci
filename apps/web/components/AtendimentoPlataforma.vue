@@ -1404,7 +1404,7 @@ const ERROS_ENVIO: [RegExp, string][] = [
   [/envio_interrompido/, 'O envio foi interrompido no meio (o servidor reiniciou).'],
   [/timeout|sem_resposta:|inesperado/, 'A plataforma não respondeu a tempo.'],
   [/canal_desconhecido/, 'Esta caixa não aceita resposta pelo DaVinci.'],
-  // Magalu: a moderação recusou a resposta (pergunta em REJECTED_RESPONSE).
+  // Magalu: a moderação recusou a resposta (pergunta em RESPONSE_REJECTED).
   [/modera[çc][ãa]o|rejected_response/i, 'A moderação da Magalu recusou a resposta — tire CPF, Pix, e-mail ou outro dado de contato e escreva de novo.'],
   // Limite de requisições da plataforma (Magalu: ~200 leituras/min por loja).
   [/HTTP 429\b|too_many_requests|rate.?limit/i, 'A plataforma pediu para esperar (muitas requisições agora) — a mensagem não saiu. Tente de novo em 1 minuto.'],

@@ -10,7 +10,7 @@ Pesquisa completa em `docs/atendimento-magalu.md`.
   cliente e a resposta, `a:<id>:<external_id>` da loja. O `external_id` da
   resposta é o nosso `ref` quando ela sai daqui (vai no POST e volta na
   leitura); a dada no portal traz o dela. Uma resposta que a moderação
-  RECUSOU (status REJECTED_RESPONSE) vira `falhou` e a pergunta volta para a
+  RECUSOU (status RESPONSE_REJECTED) vira `falhou` e a pergunta volta para a
   fila — a Magalu deixa responder de novo, e a nova resposta é outra linha.
   Pergunta recusada ou apagada (REJECTED, DELETED, 404) fecha a conversa com
   o status como motivo; se voltar, reabre.
@@ -159,7 +159,7 @@ PREFIXO_PERGUNTA = "q:"
 PREFIXO_RESPOSTA = "a:"
 PERGUNTA_AGUARDANDO = "WAITING_RESPONSE"
 PERGUNTA_APROVADA = "APPROVED"
-PERGUNTA_RESPOSTA_REJEITADA = "REJECTED_RESPONSE"
+PERGUNTA_RESPOSTA_REJEITADA = "RESPONSE_REJECTED"
 # Estas duas não vêm na lista (só no webhook e no GET por id): a pergunta que
 # a moderação barrou ou que foi apagada não deixa responder.
 PERGUNTA_FECHADA = ("REJECTED", "DELETED")
@@ -943,7 +943,7 @@ def _externo_resposta(qid: str, resposta: dict) -> str:
 def _assinatura_pergunta(q: dict) -> str:
     """O que muda numa pergunta entre rodadas (status, resposta, moderação).
 
-    Com a HORA da decisão da moderação: duas recusas seguidas (REJECTED_RESPONSE
+    Com a HORA da decisão da moderação: duas recusas seguidas (RESPONSE_REJECTED
     sem `answer`) só diferem nela. O status da moderação fica por último
     (o SQL do `_para_reler` lê o fim).
     """
@@ -1313,7 +1313,7 @@ async def _pergunta_pendente(
 ) -> AtendimentoMensagem | None:
     """A pergunta desta conversa, se ela ainda espera resposta na Magalu; senão None.
 
-    Pendente = último status visto WAITING_RESPONSE ou REJECTED_RESPONSE e
+    Pendente = último status visto WAITING_RESPONSE ou RESPONSE_REJECTED e
     nenhuma resposta da loja que conte (a nossa enviada ou em conferência, ou
     a do portal). A recusada pela moderação é `falhou` e não conta.
     """

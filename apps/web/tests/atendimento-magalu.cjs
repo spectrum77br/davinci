@@ -109,7 +109,7 @@ assert.match(origemLabel(externa, 'shopee'), /Duoke/)
 assert.equal(origemLabel({ autor: 'loja', origem: 'davinci_ia', autor_nome: null }, 'magalu'), 'IA')
 
 // Recusa da moderação e limite de requisições viram frase de gente.
-assert.match(erroEnvioLegivel('magalu moderacao: REJECTED_RESPONSE'), /moderação da Magalu recusou/)
+assert.match(erroEnvioLegivel('magalu moderacao: RESPONSE_REJECTED'), /moderação da Magalu recusou/)
 assert.match(erroEnvioLegivel('rejected_response'), /moderação da Magalu recusou/)
 assert.match(erroEnvioLegivel('magalu HTTP 429 too many'), /pediu para esperar/)
 // Os que já existiam não mudaram.

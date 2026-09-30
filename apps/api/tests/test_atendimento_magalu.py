@@ -302,7 +302,7 @@ class MagaluFalsa:
     def __init__(self) -> None:
         self.perguntas: dict[str, list[dict]] = {
             "WAITING_RESPONSE": [],
-            "REJECTED_RESPONSE": [],
+            "RESPONSE_REJECTED": [],
             "APPROVED": [],
         }
         self.pergunta_por_id: dict[str, dict] = {}
@@ -743,10 +743,10 @@ async def test_envio_da_pergunta_fica_em_moderacao_e_a_recusa_volta_para_a_fila(
 
     # A moderação recusou: a resposta vira `falhou` e a pergunta volta à fila.
     magalu.perguntas["WAITING_RESPONSE"] = []
-    magalu.perguntas["REJECTED_RESPONSE"] = [
+    magalu.perguntas["RESPONSE_REJECTED"] = [
         _pergunta(
             "q1",
-            status="REJECTED_RESPONSE",
+            status="RESPONSE_REJECTED",
             resposta="Serve sim, é compatível com o iPhone 15.",
             resposta_id=ref,
             moderacao="REJECTED",
@@ -776,7 +776,7 @@ async def test_envio_de_pergunta_ja_respondida_nao_vai_a_magalu(
 async def test_pergunta_segunda_recusa_da_moderacao_volta_para_a_fila(
     db: AsyncSession, make_user, magalu, relogio, monkeypatch
 ):
-    """REJECTED_RESPONSE sem `answer`, duas vezes: a 2ª recusa (outro
+    """RESPONSE_REJECTED sem `answer`, duas vezes: a 2ª recusa (outro
     `moderation.when_at`) é vista — e a lista atrasada, com a recusa ANTIGA,
     não derruba a resposta nova que saiu depois dela."""
     s = get_settings()
@@ -789,7 +789,7 @@ async def test_pergunta_segunda_recusa_da_moderacao_volta_para_a_fila(
     c = await _conversa_db(db, "q:q1")
 
     def _recusa(quando: datetime) -> dict:
-        q = _pergunta("q1", status="REJECTED_RESPONSE", moderacao="REJECTED")
+        q = _pergunta("q1", status="RESPONSE_REJECTED", moderacao="REJECTED")
         q["moderation"]["when_at"] = _z(quando)
         return q
 
@@ -799,7 +799,7 @@ async def test_pergunta_segunda_recusa_da_moderacao_volta_para_a_fila(
     # 1ª recusa.
     relogio["agora"] = T0 + timedelta(minutes=33)
     magalu.perguntas["WAITING_RESPONSE"] = []
-    magalu.perguntas["REJECTED_RESPONSE"] = [_recusa(T0 + timedelta(minutes=32))]
+    magalu.perguntas["RESPONSE_REJECTED"] = [_recusa(T0 + timedelta(minutes=32))]
     await _rodar(db, canal, integ)
     await db.refresh(m1)
     assert (m1.status, m1.erro) == ("falhou", "moderacao_magalu")
@@ -815,7 +815,7 @@ async def test_pergunta_segunda_recusa_da_moderacao_volta_para_a_fila(
 
     # 2ª recusa, depois do envio da m2.
     relogio["agora"] = T0 + timedelta(minutes=47)
-    magalu.perguntas["REJECTED_RESPONSE"] = [_recusa(T0 + timedelta(minutes=45))]
+    magalu.perguntas["RESPONSE_REJECTED"] = [_recusa(T0 + timedelta(minutes=45))]
     await _rodar(db, canal, integ)
     await db.refresh(m2)
     await db.refresh(c)

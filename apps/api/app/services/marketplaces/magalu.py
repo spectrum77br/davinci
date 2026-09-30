@@ -697,7 +697,7 @@ class MagaluClient:
     async def perguntas(
         self, *, status: str, offset: int = 0, limit: int = _MAX_PAGE_SIZE
     ) -> dict:
-        """GET /v0/questions (WAITING_RESPONSE | APPROVED | REJECTED_RESPONSE)."""
+        """GET /v0/questions (WAITING_RESPONSE | APPROVED | RESPONSE_REJECTED)."""
         return await self._ler_json(
             "/v0/questions",
             base=MAGALU_SERVICES_BASE,
