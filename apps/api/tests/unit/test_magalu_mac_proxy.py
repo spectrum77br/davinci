@@ -74,8 +74,8 @@ class ParserTests(unittest.TestCase):
             proxy.parse_connect(raw, CREDENTIALS)
         self.assertEqual(error.exception.status, status)
 
-    def test_only_two_literal_authorities_are_allowed(self):
-        for host in (b"api.magalu.com", b"id.magalu.com"):
+    def test_only_three_literal_authorities_are_allowed(self):
+        for host in (b"api.magalu.com", b"id.magalu.com", b"services.magalu.com"):
             self.assertEqual(
                 proxy.parse_connect(request(host + b":443"), CREDENTIALS),
                 (host.decode(), 443),
@@ -88,6 +88,7 @@ class ParserTests(unittest.TestCase):
             b"user@api.magalu.com:443", b"api.magalu.com.evil.test:443",
             b"api.magalu.com.:443", b"API.MAGALU.COM:443", b"api%2emagalu.com:443",
             b"api.magalu.com:443\x00", b"api.magalu.com:443\t",
+            b"services.magalu.com:80", b"services.magalu.com.evil.test:443",
         ):
             with self.subTest(target=target):
                 self.assert_status(request(target), 403)
@@ -96,6 +97,7 @@ class ParserTests(unittest.TestCase):
         for auth in (None, b"", b"not!base64", base64.b64encode(b"test-user:wrong")):
             with self.subTest(auth=auth):
                 self.assert_status(request(auth=auth), 407)
+                self.assert_status(request(b"services.magalu.com:443", auth=auth), 407)
         self.assert_status(request().replace(b"Basic ", b"Bearer "), 407)
 
     def test_ambiguous_and_injected_headers_are_rejected(self):

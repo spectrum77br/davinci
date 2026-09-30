@@ -20,7 +20,7 @@ import sys
 LISTEN_HOST = "127.0.0.1"
 DEFAULT_PORT = 13129
 MAX_HEADER_BYTES = 16384
-ALLOWED_TARGETS = {"id.magalu.com:443", "api.magalu.com:443"}
+ALLOWED_TARGETS = {"id.magalu.com:443", "api.magalu.com:443", "services.magalu.com:443"}
 HEADER_NAME = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
 
 
@@ -65,7 +65,7 @@ def load_credentials(path):
 
 
 def parse_connect(header, credentials):
-    """Accept only a complete, unambiguous CONNECT header to the two hosts."""
+    """Accept only a complete, unambiguous CONNECT header to the allowed hosts."""
     if len(header) > MAX_HEADER_BYTES:
         raise ProxyError(431)
     if not header.endswith(b"\r\n\r\n"):
