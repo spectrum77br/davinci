@@ -929,6 +929,7 @@ onBeforeUnmount(() => {
 
 // ── Horário de corte ("despachar até" do marketplace) ─────────────────
 // Mostrado embaixo do nome da loja, só em pedido ainda NÃO enviado.
+// 30/09/2026 (Vinicius): o rótulo diz "envio" (antes "corte") — tela e papel.
 // Relógio de 60s mantém "falta Xmin"/"estourou" vivos sem recarregar.
 const corteAgoraMs = ref(Date.now())
 let corteClock: number | null = null
@@ -947,22 +948,22 @@ function corteInfo(row: PedidoRow): { label: string; cls: string } | null {
   const ddmm = `${dia.slice(8)}/${dia.slice(5, 7)}`
   if (dia > hoje) {
     // Corte só amanhã ou depois: discreto, sem urgência.
-    return { label: `corte ${ddmm} ${hora}`, cls: 'text-muted-foreground' }
+    return { label: `envio ${ddmm} ${hora}`, cls: 'text-muted-foreground' }
   }
   const faltaMin = Math.floor((dl.getTime() - corteAgoraMs.value) / 60_000)
   if (faltaMin < 0) {
     return {
-      label: `corte ${dia === hoje ? hora : `${ddmm} ${hora}`} — estourou`,
+      label: `envio ${dia === hoje ? hora : `${ddmm} ${hora}`} — estourou`,
       cls: 'text-red-600 dark:text-red-400 font-semibold',
     }
   }
   if (faltaMin < 60) {
     return {
-      label: `corte ${hora} — falta ${faltaMin}min`,
+      label: `envio ${hora} — falta ${faltaMin}min`,
       cls: 'text-amber-700 dark:text-amber-400 font-semibold',
     }
   }
-  return { label: `corte ${hora}`, cls: 'text-amber-700 dark:text-amber-400' }
+  return { label: `envio ${hora}`, cls: 'text-amber-700 dark:text-amber-400' }
 }
 
 // Dia da previsão pelo corte: 'hoje' = corte hoje ou atrasado (sai JÁ);
