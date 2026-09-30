@@ -429,6 +429,10 @@ class AgentTarefaOut(BaseModel):
     chamado_url: str | None = None
     texto: str
     anexos: list[UUID] = []
+    # 30/09 (298394): quando a réplica nasceu — as mãos do ML só consideram "já
+    # enviada" uma fala "Você" da conversa com data a partir daqui (a réplica do
+    # Cairo repetia a abertura de 24/09, que já estava na página).
+    criada_em: datetime | None = None
 
 
 class AgentLeaseIn(BaseModel):

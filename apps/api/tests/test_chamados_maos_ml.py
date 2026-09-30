@@ -120,6 +120,7 @@ async def test_fila_entrega_a_replica_da_consulta_do_ml(client, db):
     (t,) = r.json()["tarefas"]
     assert t["mensagem_id"] == str(m.id) and t["tipo"] == "responder"
     assert t["chamado"] == "484465159" and t["texto"] == TEXTO_A
+    assert t["criada_em"].startswith("2026-09-29T16:41")  # a trava de "já enviada" usa
     await db.refresh(m)
     assert m.status == "pendente"  # espiar não marca
     (t,) = (await _fila(client)).json()["tarefas"]

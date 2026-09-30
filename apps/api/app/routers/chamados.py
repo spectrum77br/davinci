@@ -1722,6 +1722,7 @@ async def _entregar(
                 chamado_url=c.chamado_url,
                 texto=limpar_html(m.texto),
                 anexos=anexos,
+                criada_em=m.created_at,
             )
         )
     if marcar:

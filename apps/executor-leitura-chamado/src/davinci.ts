@@ -115,6 +115,8 @@ export interface Tarefa {
   chamado_url: string | null;
   texto: string;
   anexos: string[];
+  /** Quando a réplica nasceu (ISO) — a trava de "já enviada" só olha dali pra frente. */
+  criada_em?: string | null;
 }
 
 /** Réplicas pra postar. `espiar` = seco: não marca `enviando`. */

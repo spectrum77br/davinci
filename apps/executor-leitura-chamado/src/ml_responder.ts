@@ -4,7 +4,7 @@ import type { Page } from "puppeteer-core";
 import { cfg } from "./config";
 import * as davinci from "./davinci";
 import { log } from "./log";
-import { CONSULTA_URL } from "./ml_consulta";
+import { CONSULTA_URL, diaDaTela } from "./ml_consulta";
 import { LoginNecessario } from "./shopee_historico";
 
 /**
@@ -26,8 +26,10 @@ import { LoginNecessario } from "./shopee_historico";
  * Travas contra mandar duas vezes / mandar errado:
  *   - o texto entra pelo `value` da caixa (evento `input`), nunca por teclado —
  *     um Enter no meio do texto poderia disparar o envio;
- *   - antes de escrever, se a conversa já tem um "Você" com este texto (tentativa
- *     anterior que enviou mas não conseguiu avisar o DaVinci), só avisa "enviada";
+ *   - antes de escrever, se a conversa já tem um "Você" com este texto DATADO a
+ *     partir do dia em que a réplica nasceu (tentativa anterior que enviou mas não
+ *     conseguiu avisar o DaVinci), só avisa "enviada". Sem a data, a réplica do
+ *     Cairo (cópia da abertura de 24/09) passava por "já enviada" (30/09);
  *   - depois de clicar Enviar, só conta como enviada se o card "Você" com o texto
  *     aparecer na conversa;
  *   - `seco`: escreve, fotografa, APAGA e não clica Enviar (nem anexa: o anexo
@@ -43,22 +45,46 @@ async function evalJS<T = any>(page: Page, js: string): Promise<T | undefined> {
   return (page.evaluate(js) as Promise<T>).catch(() => undefined);
 }
 
-/** Compara textos como a tela os mostra: sem espaço repetido, minúsculo. */
+/** Compara textos como a tela os mostra: sem NENHUM espaço/quebra (a página
+ *  junta linhas — "Solicito:\n1." vira "Solicito:1."), minúsculo. */
 export function normal(t: string): string {
-  return (t || "").replace(/\s+/g, " ").trim().toLowerCase();
+  return (t || "").replace(/\s+/g, "").toLowerCase();
 }
 
-/** O começo do nosso texto (o card pode cortar/reformatar o fim). */
+/** O começo do nosso texto (o card pode reformatar o fim). */
 export function assinatura(t: string): string {
-  return normal(t).slice(0, 160);
+  return normal(t).slice(0, 120);
+}
+
+/** Dia (AAAA-MM-DD, São Paulo) de um ISO. */
+export function diaSP(iso: string | null | undefined): string | null {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+  return new Intl.DateTimeFormat("en-CA", { timeZone: "America/Sao_Paulo" }).format(d);
+}
+
+export interface Nossa {
+  texto: string;
+  dia: string | null;
+}
+
+/** A nossa réplica já está na conversa? Só vale fala "Você" do dia em que ela
+ *  nasceu em diante, com o mesmo começo de texto. */
+export function jaNaConversa(nossas: Nossa[], texto: string, criadaEm?: string | null): boolean {
+  const alvo = assinatura(texto);
+  const desde = diaSP(criadaEm);
+  return nossas.some(
+    (v) => (!desde || (v.dia !== null && v.dia >= desde)) && normal(v.texto).includes(alvo)
+  );
 }
 
 const JS_NOSSAS = `(function(){
   return [...document.querySelectorAll('[data-testid="message-card"]')].map(function(b){
-    var s=b.querySelector('.message-card__header span');
+    var s=[...b.querySelectorAll('.message-card__header span')].map(function(e){return (e.textContent||'').trim();});
     var t=b.querySelector('[data-testid="message-card-text"]');
-    return {autor:s?(s.textContent||'').trim():'', texto:t?(t.innerText||''):''};
-  }).filter(function(m){return /^voc[êe]$/i.test(m.autor);}).map(function(m){return m.texto;});
+    return {autor:s[0]||'', data:s[1]||'', texto:t?(t.innerText||''):''};
+  }).filter(function(m){return /^voc[êe]$/i.test(m.autor);});
 })()`;
 
 const JS_TEM_CAIXA = `!!document.querySelector('textarea[placeholder="Digite uma mensagem"], .message-input textarea')`;
@@ -109,8 +135,9 @@ async function print(page: Page, nome: string): Promise<string | undefined> {
   }
 }
 
-async function nossasNaConversa(page: Page): Promise<string[]> {
-  return (await evalJS<string[]>(page, JS_NOSSAS)) || [];
+async function nossasNaConversa(page: Page): Promise<Nossa[]> {
+  const brutas = (await evalJS<{ texto: string; data: string }[]>(page, JS_NOSSAS)) || [];
+  return brutas.map((b) => ({ texto: b.texto, dia: diaDaTela(b.data) }));
 }
 
 /** Baixa as fotos da réplica do DaVinci pra anexar. */
@@ -151,9 +178,8 @@ export async function responder(page: Page, t: davinci.Tarefa, real: boolean): P
   }
   if (!achou) return { ok: false, erro: `a consulta ${consulta} não abriu neste login do ML (${page.url()})` };
 
-  const alvo = assinatura(texto);
   const antes = await nossasNaConversa(page);
-  if (antes.some((v) => normal(v).includes(alvo))) {
+  if (jaNaConversa(antes, texto, t.criada_em)) {
     // tentativa anterior mandou e não conseguiu avisar: não manda de novo
     log.warn(`${rot}: a conversa JÁ tem esta réplica — não mando de novo`);
     return { ok: true, jaEstava: true };
@@ -216,7 +242,7 @@ export async function responder(page: Page, t: davinci.Tarefa, real: boolean): P
   for (let i = 0; i < 40; i++) {
     await sleep(750);
     const agora = await nossasNaConversa(page);
-    if (agora.length > antes.length && agora.some((v) => normal(v).includes(alvo))) {
+    if (agora.length > antes.length && jaNaConversa(agora, texto, t.criada_em)) {
       const depois = await print(page, `responder-enviada-${t.pedido_bling || consulta}`);
       for (const f of arquivos) fs.rmSync(f, { force: true });
       return { ok: true, print: depois };
@@ -225,7 +251,7 @@ export async function responder(page: Page, t: davinci.Tarefa, real: boolean): P
   // Pode ter saído sem a tela atualizar: recarrega e confere antes de dizer que falhou
   await page.reload({ waitUntil: "networkidle2", timeout: 90000 }).catch(() => undefined);
   await sleep(2000);
-  if ((await nossasNaConversa(page)).some((v) => normal(v).includes(alvo))) {
+  if (jaNaConversa(await nossasNaConversa(page), texto, t.criada_em)) {
     return { ok: true, print: await print(page, `responder-enviada-${t.pedido_bling || consulta}`) };
   }
   const falha = await print(page, `responder-falhou-${t.pedido_bling || consulta}`);

@@ -335,7 +335,12 @@ async function responderMl(mapaMl: Map<string, perfis.Perfil>): Promise<void> {
           fs.mkdirSync(cfg.secoDir, { recursive: true });
           const file = path.join(cfg.secoDir, `responder-${t.pedido_bling || t.chamado}.json`);
           fs.writeFileSync(file, JSON.stringify({ tarefa: t, resultado: r }, null, 2));
-          log.info(`${rot}: SECO — escrevi, fotografei e apaguei (${r.ok ? "ok" : r.erro}); ${file}`);
+          const oque = r.jaEstava
+            ? "a conversa JÁ tem esta réplica — não escreveria"
+            : r.ok
+              ? "escrevi, fotografei e apaguei"
+              : `não consegui: ${r.erro}`;
+          log.info(`${rot}: SECO — ${oque}; ${file}`);
           continue;
         }
         const out = await davinci
