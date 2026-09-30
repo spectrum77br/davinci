@@ -34,7 +34,8 @@ date '+%Y-%m-%d %H:%M:%S' > estado/ultima-rodada   # prova de vida do despertado
 PEDIDO="Rodada da IA de Chamado. Abaixo: o MANUAL do Vinicius, as correções e confirmações \
 dele e os CASOS que esperam por você. Decida CADA caso seguindo o CLAUDE.md (instrução de \
 pessoa > manual > prudência) e registre cada decisão com python3 ferramentas/davinci_chamados.py \
-decidir. Na dúvida, humano. No fim, feche os perfis que abriu e escreva só a lista curta: \
+decidir --json. Comandos UM POR VEZ, no formato exato do CLAUDE.md (sem cd, &&, |, ; ou >). \
+Na dúvida, humano. No fim, feche os perfis que abriu e escreva só a lista curta: \
 pedido → ação → por quê."
 
 for tipo in forte simples; do
@@ -44,6 +45,11 @@ for tipo in forte simples; do
 
   if [ "$tipo" = forte ]; then MODELO=claude-opus-5-5; ESFORCO=high
   else MODELO=claude-sonnet-5-5; ESFORCO=medium; fi
+  # Evidência pedida na tela (Upload Evidence) não é caso simples: escolher as
+  # fotos e mexer no Seller Center é trabalho do Opus (290730, 29/09).
+  case "$casos" in
+    *"Upload Evidence"*|*"vidência até"*|*"vidências até"*) MODELO=claude-opus-5-5; ESFORCO=high ;;
+  esac
   echo "$(agora) [$tipo] começou ($MODELO, esforço $ESFORCO)" >> "$LOG"
   printf '%s\n' "$casos" | claude -p "$PEDIDO" \
     --model "$MODELO" --effort "$ESFORCO" \

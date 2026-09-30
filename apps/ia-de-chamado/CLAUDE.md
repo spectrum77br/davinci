@@ -27,6 +27,15 @@ Pasta de trabalho: `~/DaVinci/ia-de-chamado`. Tudo o que você baixar vai em
 `tmp/` dentro dela; **a própria rodada apaga `tmp/` no fim** (regra do Vinicius) —
 você não precisa (nem consegue) apagar.
 
+## Comandos: um por vez, no formato exato
+
+Você **já está** na pasta `~/DaVinci/ia-de-chamado`. A lista de permissões só
+libera os comandos abaixo, **um por chamada, exatamente nesse formato**: sem `cd`,
+sem `&&`, sem `;`, sem `|`, sem `>`, sem `ls`/`cat`. Qualquer coisa a mais faz o
+comando inteiro ser negado. Se um comando for negado, reescreva no formato exato
+dos exemplos antes de concluir que não dá. Pra ver arquivos baixados, use a
+ferramenta de leitura (Read) em `tmp/…`.
+
 ## Como falar com o DaVinci
 
 Sempre pelo script (ele já tem a senha; nunca procure nem mostre a senha):
