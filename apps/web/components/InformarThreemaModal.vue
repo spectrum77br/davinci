@@ -17,9 +17,10 @@ type EnviarOut = { pedidos: number; mensagens: number; sent: string[]; failed: s
 
 const props = defineProps<{
   open: boolean
-  contexto: 'logistica' | 'controle_estoque' | 'margem' | 'devolucoes' | 'juridico' | 'logistica_amazon'
+  contexto: 'logistica' | 'controle_estoque' | 'margem' | 'devolucoes' | 'juridico' | 'logistica_amazon' | 'chamados_ia'
   // Só cadastro de destinatários (sem 'Enviar agora'): o envio sai de outro lugar
-  // (jurídico: POST /api/chamados/{id}/juridico).
+  // (jurídico: POST /api/chamados/{id}/juridico; chamados_ia: a IA de Chamado
+  // parada em captcha/login, services/chamados_ia_aviso).
   somenteCadastro?: boolean
   // O que este botão informa — aparece como descrição no modal.
   descricao: string

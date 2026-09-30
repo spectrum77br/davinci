@@ -287,6 +287,9 @@ def _validar(d: dict) -> str | None:
         return "responder exige texto_replica"
     if d["acao"] != "responder" and d.get("texto_replica"):
         return "texto_replica só com acao=responder"
+    # 30/09 (297130): parou na tela (captcha/login) → o DaVinci avisa no Threema
+    if d.get("parado") is not None and (d["parado"] not in ("captcha", "login") or d["acao"] != "humano"):
+        return 'parado: "captcha" ou "login", e só com acao=humano'
     return None
 
 
@@ -307,6 +310,7 @@ def cmd_decidir(cfg: dict[str, str], a: argparse.Namespace) -> None:
         "valor_recuperado",
         "observacao",
         "reabrir",
+        "parado",
     }
     extras = set(d) - campos
     if extras:

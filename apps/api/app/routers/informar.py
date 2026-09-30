@@ -98,6 +98,9 @@ _CONTEXTOS = (
     # Aviso automático do prazo de resposta nas devoluções (Acompanhamento) —
     # services/devolucao_acao_avisos. Cadastro pelo modal Informar da aba.
     "devolucoes_auto",
+    # 30/09: IA de Chamado parada em "não sou robô"/login na tela da loja —
+    # services/chamados_ia_aviso. Cadastro pela aba Chamados › IA de Chamado.
+    "chamados_ia",
 )
 _CONTEXTOS_ENVIO = ("logistica", "controle_estoque", "margem", "devolucoes", "logistica_amazon")
 
@@ -115,6 +118,10 @@ _EMAILS_EXTRAS: dict[str, frozenset[str]] = {
     # pages/logistica.vue.
     "logistica_amazon": _EMAILS_MARGEM,
     "logistica_amazon_auto": _EMAILS_MARGEM,
+    # IA de Chamado: o aviso de "parou no não sou robô" vai pro Cairo (30/09) —
+    # ele também escolhe quem recebe. Espelho no front: AVISO_IA_USERS em
+    # pages/chamados.vue.
+    "chamados_ia": _EMAILS_MARGEM,
 }
 
 

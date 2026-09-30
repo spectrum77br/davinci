@@ -115,6 +115,7 @@ from app.services import chamados as svc
 from app.services import (
     chamados_devolucao,
     chamados_devolucao_sync,
+    chamados_ia_aviso,
     chamados_juridico,
     chamados_leitura,
 )
@@ -2639,6 +2640,17 @@ async def agent_analise(
             )
     await session.commit()
     await session.refresh(analise)
+    aviso: str | None = None
+    if body.parado:
+        # 30/09 (297130): IA parada em captcha/login na tela → Threema (Cairo).
+        # Depois do commit: a decisão já está salva mesmo se o Threema falhar.
+        try:
+            aviso = await chamados_ia_aviso.avisar(session, ch, body.parado, body.resumo)
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            logger.exception("chamados_ia_aviso_falhou", chamado_id=str(ch.id))
+            aviso = "aviso não saiu: erro no DaVinci"
     logger.info(
         "chamado_agent_analise",
         chamado_id=str(ch.id),
@@ -2646,12 +2658,14 @@ async def agent_analise(
         acao=body.acao,
         replica=str(replica.id) if replica else None,
         cerebro=cerebro.nome,
+        parado=body.parado,
     )
     return AgentAnaliseOut(
         chamado_id=ch.id,
         analise_id=analise.id,
         replica_id=replica.id if replica else None,
         resolvido=ch.resolvido,
+        aviso=aviso,
     )
 
 

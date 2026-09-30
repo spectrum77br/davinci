@@ -130,7 +130,10 @@ ferramentas/tela <perfil> texto 3000             # últimos 3000 caracteres da p
 ferramentas/tela <perfil> foto tmp/p.png         # print (leia a imagem pra ver)
 ferramentas/tela <perfil> clicar "Texto exato do botão"
 ferramentas/tela <perfil> ponto X Y              # clique por coordenada (CSS, não do print)
-ferramentas/tela <perfil> escrever "placeholder do campo" "texto" [enter]
+ferramentas/tela <perfil> campos                 # caixas da página, numeradas, com o texto de cada uma
+ferramentas/tela <perfil> escrever "#2" "texto" [enter]   # ou "placeholder", ou um pedaço do rótulo
+ferramentas/tela <perfil> anexar "#4" tmp/<pedido>/a.jpg,tmp/<pedido>/b.jpg
+ferramentas/tela <perfil> captcha                # tem "não sou robô" na tela?
 ferramentas/tela <perfil> vivo                   # responde "Sim" ao aviso de inatividade do chat
 ferramentas/tela <perfil> js "expressão"         # só pra ler/depurar
 python3 ferramentas/adspower.py fechar <perfil>
@@ -138,7 +141,13 @@ python3 ferramentas/adspower.py fechar <perfil>
 
 - **Antes de abrir**: se o perfil já está aberto e não foi você que abriu, é
   alguém usando (pessoa ou o executor de leitura) → não mexa; `esperar` com
-  "perfil em uso, tento na próxima rodada".
+  "perfil em uso, tento na próxima rodada". Exceção: o perfil que você deixou
+  aberto parado num captcha/login — quando a pessoa mandar instrução ("continua",
+  "resolvi"), siga nele de onde parou.
+- **Formulário**: rode `campos` antes de escrever e escreva por número (`"#N"`).
+  O `escrever` apaga o que já estava na caixa e confere: só siga com `confere:
+  true` (com `aviso` de limite de caracteres, encurte o texto). Em caixa de uma
+  linha os parágrafos viram uma linha só; Enter só com `enter` no fim (chat).
 - **Sempre feche o perfil no fim** — o executor de leitura pula perfil aberto.
 - O print sai em dobro do tamanho: coordenada do print ÷ 2 = coordenada do `ponto`.
 - Um chamado por perfil de cada vez. Confira loja, pedido e conversa antes de enviar.
@@ -151,10 +160,44 @@ python3 ferramentas/adspower.py fechar <perfil>
 ### CAPTCHA, login e código — você PARA
 
 Quebra-cabeça, CAPTCHA, tela de login, senha, código por SMS/e-mail: **não tente
-passar**. Deixe o perfil aberto nessa tela, decida `humano` dizendo exatamente
-onde parou e o que a pessoa precisa fazer, e siga pro próximo caso. (O Hermes
-tinha ordem de tentar resolver CAPTCHA; você não faz isso.) Nunca digite senha
-nem credencial de ninguém.
+passar**. Os comandos de tela avisam sozinhos (`captcha: "desafio"`/`"caixa"` ou
+a linha "⚠ CAPTCHA NA TELA"); o print também mostra. Quando aparecer:
+
+1. Não clique em mais nada. Tire um `foto` da tela.
+2. Deixe o perfil **aberto** nessa tela (não feche no fim da rodada).
+3. `decidir` com `"acao": "humano"` e **`"parado": "captcha"`** (ou `"login"`),
+   dizendo no `resumo` exatamente onde parou e o que já estava preenchido. O
+   DaVinci manda um Threema pro Cairo na hora; a resposta traz o `aviso` (se
+   saiu e pra quem). Guarde o print com `guardar-print`.
+4. Siga pro próximo caso. Quando a pessoa resolver e mandar "continua", você
+   retoma no mesmo perfil, confere a tela e termina.
+
+(O Hermes tinha ordem de tentar resolver CAPTCHA; você não faz isso.) Nunca digite
+senha nem credencial de ninguém.
+
+## Mercado Livre — caminhos que funcionam
+
+**Consulta pelo formulário "Fale conosco › E-mail"** (funcionou até o formulário
+em 29/09, 297130) — só com instrução de pessoa ou regra do manual:
+1. Página da venda (`vendedores.mercadolivre.com.br/vendas/<venda>/detalhe`) →
+   Central de Ajuda → "Fale conosco" → chat do assistente (caixa "Pergunte algo").
+2. Diga a venda e o que quer, curto. O assistente conta o histórico da venda e
+   da mediação: **leia antes de mandar**. Se ele contar algo que contradiz o
+   nosso texto (ex.: a proposta de reembolso foi nossa), pare: `humano` com a
+   contradição, sem enviar.
+3. Peça atendimento humano e confirme. Ele manda um link → "Como você prefere
+   conversar?" → **E-mail** → "Complete o formulário de ajuda".
+4. `campos`. Na caixa da descrição, escreva o texto da abertura do chamado
+   ajustado ao que o assistente disse (só fatos). Na caixa "número da venda
+   (Opcional)", escreva o nº da venda. Fotos: `anexos` do chamado e `anexar`
+   só as que provam o caso.
+5. `foto` pra conferir tudo, depois `clicar "Continuar"` e siga as telas
+   ("Enviar"/"Confirmar"). Captcha → pare (seção acima).
+6. Feito só com a confirmação ou o nº da consulta na tela (a consulta nova
+   aparece em `mercadolivre.com.br/minhas-consultas`): `decidir` com `esperar`
+   ("consulta enviada pelo formulário, nº …"), `guardar-print`, fechar o perfil.
+   A consulta fica "Finalizada" ~15 min depois da 1ª resposta automática do ML,
+   mas a conversa segue nela — não abra outra pro mesmo pedido.
 
 ## Shopee — caminhos que funcionam
 

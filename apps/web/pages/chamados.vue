@@ -251,6 +251,15 @@ const toasts = useToasts()
 const auth = useAuthStore()
 const isAdmin = computed(() => auth.user?.role === 'admin')
 const canEdit = useCan('chamados', 'edit')
+// 30/09: aviso da IA de Chamado parada em "não sou robô"/login vai pro Cairo —
+// ele também escolhe quem recebe. Espelho do backend: _EMAILS_EXTRAS["chamados_ia"]
+// em routers/informar.py.
+const AVISO_IA_USERS = ['sa.geral@tutamail.com']
+const podeAvisoIa = computed(() => {
+  const email = (auth.user?.email || '').trim().toLowerCase()
+  return isAdmin.value || (!!email && AVISO_IA_USERS.includes(email))
+})
+const avisoIaCfgOpen = ref(false)
 const canDelete = useCan('chamados', 'delete')
 
 const items = ref<ChamadoRow[]>([])
@@ -1601,6 +1610,10 @@ async function confirmarExcluir() {
         <span class="text-xs text-muted-foreground">Tudo que foi encaminhado ao jurídico (abertos e resolvidos).</span>
         <Button v-if="isAdmin" size="sm" variant="outline" @click="juridicoCfgOpen = true">destinatários</Button>
       </div>
+      <div v-if="tab === 'ia' && podeAvisoIa" class="ml-auto flex items-center gap-2 pb-1">
+        <span class="text-xs text-muted-foreground">Se a IA parar num "não sou robô" ou login, avisa no Threema.</span>
+        <Button size="sm" variant="outline" @click="avisoIaCfgOpen = true">quem recebe o aviso</Button>
+      </div>
     </div>
 
     <div v-if="error" class="flex items-center gap-2 rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-400">
@@ -2019,6 +2032,7 @@ async function confirmarExcluir() {
         </div>
       </div>
     </div>
+    <InformarThreemaModal :open="avisoIaCfgOpen" contexto="chamados_ia" somente-cadastro descricao="Quem está marcado recebe no Threema o aviso de quando a IA de Chamado para na tela da loja num 'não sou robô' (captcha/quebra-cabeça) ou num login: qual pedido, onde parou e o link do chamado. A loja fica aberta nessa tela no Mac Santiago — resolva lá e mande a instrução 'continua' no chamado. A seleção fica salva." @close="avisoIaCfgOpen = false" />
     <InformarThreemaModal :open="juridicoCfgOpen" contexto="juridico" somente-cadastro descricao="Quem está marcado recebe no Threema o aviso do botão 'encaminhar ao jurídico' (dados do chamado + link do dossiê com o histórico e as fotos). A seleção fica salva." @close="juridicoCfgOpen = false; if (juridico.open && juridico.row) openJuridico(juridico.row)" />
 
     <!-- modal: histórico + réplica -->

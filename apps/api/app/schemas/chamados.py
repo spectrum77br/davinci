@@ -699,6 +699,10 @@ class AgentAnaliseIn(BaseModel):
     observacao: str | None = None
     # `humano` num chamado que o monitor antigo já tinha fechado: reabre.
     reabrir: bool = False
+    # 30/09 (297130): a IA parou na tela da loja ("não sou robô" ou login) e
+    # deixou o perfil aberto ali — o DaVinci avisa no Threema quem está no
+    # cadastro `chamados_ia` (services/chamados_ia_aviso). Só com `humano`.
+    parado: Literal["captcha", "login"] | None = None
 
     _clean = field_validator("texto_replica", "observacao", mode="before")(_clean_optional_text)
 
@@ -706,6 +710,8 @@ class AgentAnaliseIn(BaseModel):
     def _replica_precisa_texto(self) -> "AgentAnaliseIn":
         if self.acao == "responder" and not (self.texto_replica or "").strip():
             raise ValueError("texto_replica é obrigatório quando acao=responder")
+        if self.parado and self.acao != "humano":
+            raise ValueError("parado só vale com acao=humano")
         return self
 
 
@@ -714,6 +720,8 @@ class AgentAnaliseOut(BaseModel):
     analise_id: UUID
     replica_id: UUID | None = None
     resolvido: bool
+    # com `parado`: o que aconteceu com o aviso no Threema, em texto de gente
+    aviso: str | None = None
 
 
 class AgentExemplosIn(BaseModel):
