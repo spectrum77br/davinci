@@ -1,16 +1,14 @@
 <script setup lang="ts">
-// ── Denúncia › Casos (30/09/2026) ──────────────────────────────────────────
+// ── Ouvidoria › Denúncia › aba Casos (30/09/2026) ──────────────────────────────────────────
 // Casos jurídicos (CASO-00N): o anúncio, a compra de prova (pedido, NF-e,
 // entrega), as provas obrigatórias e o envio ao advogado. Cópia só leitura
 // do sistema de Fiscalização do Mac mini da Makisa.
 import { computed, onMounted, ref } from 'vue'
-import { RefreshCw } from 'lucide-vue-next'
 import {
   type Prova, dataBr, dinheiro, numero, pillResultado, pillSituacaoAnuncio, pillSituacaoDenuncia,
   pillStatusCaso, pillStatusCompra,
 } from '~/lib/denuncia'
 
-definePageMeta({ middleware: ['permission'], permission: { resource: 'denuncia', action: 'view' } })
 
 type Caso = {
   id: number
@@ -41,7 +39,6 @@ const itens = ref<Caso[]>([])
 const porStatus = ref<Record<string, number>>({})
 const carregando = ref(true)
 const erro = ref<string | null>(null)
-const copia = ref<{ carregar: () => Promise<void> } | null>(null)
 const status = ref('')
 
 const aberto = ref<number | null>(null)
@@ -64,10 +61,6 @@ async function carregar() {
   }
 }
 
-function recarregar() {
-  void copia.value?.carregar()
-  void carregar()
-}
 
 async function abrir(c: Caso) {
   aberto.value = c.id
@@ -95,21 +88,12 @@ function verAnuncio(id: string | null | undefined) {
 }
 
 onMounted(carregar)
+// o botão "recarregar" do topo do painel chama isto na aba aberta
+defineExpose({ carregar })
 </script>
 
 <template>
   <div class="space-y-5">
-    <PageHeader
-      title="Casos"
-      description="Casos jurídicos: compra de prova, provas obrigatórias e envio ao advogado."
-    >
-      <template #actions>
-        <DenunciaCopia ref="copia" />
-        <Button size="sm" variant="outline" @click="recarregar">
-          <RefreshCw class="size-4 mr-1.5" /> recarregar
-        </Button>
-      </template>
-    </PageHeader>
 
     <div v-if="Object.keys(porStatus).length" class="grid grid-cols-2 sm:grid-cols-4 gap-2">
       <button

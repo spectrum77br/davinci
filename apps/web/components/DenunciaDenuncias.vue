@@ -1,15 +1,13 @@
 <script setup lang="ts">
-// ── Denúncia › Denúncias (30/09/2026) ──────────────────────────────────────
+// ── Ouvidoria › Denúncia › aba Denúncias (30/09/2026) ──────────────────────────────────────
 // Cada denúncia feita (marketplace, Anatel, Anatel SEI…). Mesma regra do
 // sistema do mini: o mesmo canal + protocolo cobrindo vários anúncios é UMA
 // linha. Prazo vencido sem resposta fica em vermelho. Cópia só leitura.
 import { computed, onMounted, ref } from 'vue'
-import { RefreshCw } from 'lucide-vue-next'
 import {
   type Prova, dataBr, numero, pillResultado, pillSituacaoAnuncio, pillSituacaoDenuncia, prazoVencido,
 } from '~/lib/denuncia'
 
-definePageMeta({ middleware: ['permission'], permission: { resource: 'denuncia', action: 'view' } })
 
 type Grupo = {
   id: number
@@ -48,7 +46,6 @@ const resumo = ref<Resposta['resumo']>({})
 const opcoes = ref<Resposta['opcoes']>({ canais: [], situacoes: [] })
 const carregando = ref(true)
 const erro = ref<string | null>(null)
-const copia = ref<{ carregar: () => Promise<void> } | null>(null)
 
 const canal = ref('')
 const situacao = ref('')
@@ -92,10 +89,6 @@ async function carregar() {
   }
 }
 
-function recarregar() {
-  void copia.value?.carregar()
-  void carregar()
-}
 
 function porCanal(c: string) {
   canal.value = canal.value === c ? '' : c
@@ -121,21 +114,12 @@ const gavetaAberta = computed({
 const d = computed(() => detalhe.value?.denuncia || {})
 
 onMounted(carregar)
+// o botão "recarregar" do topo do painel chama isto na aba aberta
+defineExpose({ carregar })
 </script>
 
 <template>
   <div class="space-y-5">
-    <PageHeader
-      title="Denúncias"
-      description="Denúncias feitas pelo robô da fiscalização nos marketplaces e na Anatel — uma linha por protocolo."
-    >
-      <template #actions>
-        <DenunciaCopia ref="copia" />
-        <Button size="sm" variant="outline" @click="recarregar">
-          <RefreshCw class="size-4 mr-1.5" /> recarregar
-        </Button>
-      </template>
-    </PageHeader>
 
     <div v-if="canaisOrdenados.length" class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2">
       <button

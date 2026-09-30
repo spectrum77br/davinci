@@ -123,14 +123,9 @@ export const RESOURCE_GROUPS: ResourceGroup[] = [
     // Admin. Um recurso só cobre a página inteira (Robôs + Ocorrências):
     // view = olhar; edit = ligar/desligar robô, rodar agora, tratar/ignorar.
     label: 'Ouvidoria',
-    resources: ['ouvidoria'],
-  },
-  {
-    // Denúncia (30/09/2026): Anúncios, Denúncias e Casos da fiscalização da
-    // marca (cópia que o Mac mini da Makisa manda). Vinicius: logo abaixo de
-    // Ouvidoria. Só leitura — um recurso cobre as três telas.
-    label: 'Denúncia',
-    resources: ['denuncia'],
+    // Denúncia (30/09/2026): Anúncios, Denúncias, Casos (+ Jurídico, que pede
+    // também Chamados) — item dentro da Ouvidoria. Só leitura.
+    resources: ['ouvidoria', 'denuncia'],
   },
   {
     label: 'Admin',

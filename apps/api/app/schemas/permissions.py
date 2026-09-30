@@ -86,8 +86,8 @@ Resource = Literal[
     # menu, entre Cadastros e Admin — mesmo nome no useCan.ts.
     "ouvidoria",
     # Denúncia (30/09/2026): Anúncios, Denúncias e Casos da fiscalização da
-    # marca — cópia que o Mac mini da Makisa manda. Só leitura (view); grupo
-    # próprio no menu, logo abaixo de Ouvidoria. Mesmo nome no useCan.ts.
+    # marca — cópia que o Mac mini da Makisa manda. Só leitura (view); item
+    # dentro da Ouvidoria no menu. Mesmo nome no useCan.ts.
     "denuncia",
     "usuarios",
     "permissoes",

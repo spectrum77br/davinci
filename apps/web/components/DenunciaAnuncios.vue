@@ -1,14 +1,13 @@
 <script setup lang="ts">
-// ── Denúncia › Anúncios (30/09/2026) ───────────────────────────────────────
+// ── Ouvidoria › Denúncia › aba Anúncios (30/09/2026) ───────────────────────────────────────
 // Os anúncios que o robô da fiscalização (Mac mini da Makisa) achou nos
 // marketplaces usando a nossa homologação/marca. Cópia só leitura do sistema
 // de lá. Mesmo recorte padrão do sistema do mini: sem os descartados/fora de
 // escopo (só aparecem filtrando o Grupo) e sem os anúncios das lojas próprias.
 import { onMounted, ref } from 'vue'
-import { RefreshCw, ChevronLeft, ChevronRight, ExternalLink } from 'lucide-vue-next'
+import { ChevronLeft, ChevronRight, ExternalLink } from 'lucide-vue-next'
 import { dataBr, numero, pillGrupo, pillSituacaoAnuncio } from '~/lib/denuncia'
 
-definePageMeta({ middleware: ['permission'], permission: { resource: 'denuncia', action: 'view' } })
 
 type Item = {
   id: string
@@ -51,7 +50,6 @@ const opcoes = ref<Resposta['opcoes']>({ marketplaces: [], grupos: [] })
 const offset = ref(0)
 const carregando = ref(true)
 const erro = ref<string | null>(null)
-const copia = ref<{ carregar: () => Promise<void> } | null>(null)
 
 const q = ref('')
 const marketplace = ref('')
@@ -89,31 +87,18 @@ function filtrar() {
   offset.value = 0
   void carregar()
 }
-function recarregar() {
-  void copia.value?.carregar()
-  filtrar()
-}
 function pagina(delta: number) {
   offset.value = Math.max(0, offset.value + delta * LIMITE)
   void carregar()
 }
 
 onMounted(carregar)
+// o botão "recarregar" do topo do painel chama isto na aba aberta
+defineExpose({ carregar })
 </script>
 
 <template>
   <div class="space-y-5">
-    <PageHeader
-      title="Anúncios"
-      description="Anúncios que o robô da fiscalização encontrou nos marketplaces usando a nossa homologação ou a marca Uranyx."
-    >
-      <template #actions>
-        <DenunciaCopia ref="copia" />
-        <Button size="sm" variant="outline" @click="recarregar">
-          <RefreshCw class="size-4 mr-1.5" /> recarregar
-        </Button>
-      </template>
-    </PageHeader>
 
     <div v-if="numeros" class="grid grid-cols-2 sm:grid-cols-4 gap-2">
       <StatCard compact label="Anúncios" :value="numero(numeros.total)" hint="no filtro atual" />
