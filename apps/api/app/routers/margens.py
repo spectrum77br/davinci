@@ -213,9 +213,16 @@ _SALDO_FINAL_BLING_SQL = (
 # (valor_base − frete − taxa + reembolso, sobre o custo): o mesmo número da
 # coluna Margem da aba e o mesmo critério da edição do Saldo Efetivo
 # (clears_minimum). Quando o real chega (pós-envio, já fora da triagem) ele
-# vence pelo COALESCE. Só Amazon: Magalu/AliExpress/etc. continuam
-# aguardando o repasse (_ATTENTION_SALDO_SQL, ramo a).
-_PLATAFORMAS_MARGEM_SEM_REPASSE_IN = "('amazon')"
+# vence pelo COALESCE.
+# MAGALU (30/09): mesma regra, por outro motivo — o DaVinci NÃO tem adaptador
+# financeiro da Magalu (marketplace_financials.SUPPORTED_PLATFORMS só tem
+# Shopee/ML/Amazon/TikTok; o snapshot grava "financial adapter not implemented
+# for magalu"), então o líquido real NUNCA chega e todo pedido Magalu era
+# segurado por "aguardando saldo da plataforma" (3 de 3 em setembro; caso
+# 299836, margem Bling 193%). Sem repasse, decide pela âncora Bling como a
+# Amazon. AliExpress/etc. continuam aguardando o repasse (_ATTENTION_SALDO_SQL,
+# ramo a). Se um dia existir adaptador da Magalu, o real vence pelo COALESCE.
+_PLATAFORMAS_MARGEM_SEM_REPASSE_IN = "('amazon', 'magalu')"
 _MARGEM_SEM_REPASSE_SQL = (
     "COALESCE(v.plataforma_bling, v.plataforma_financeiro, '') "
     f"IN {_PLATAFORMAS_MARGEM_SEM_REPASSE_IN}"

@@ -351,15 +351,16 @@ async def test_segura_pendente_gravado_sem_gatilho(db: AsyncSession):
 
 async def test_motivo_distingue_ramos_do_saldo(db: AsyncSession):
     """Gap real → "saldo divergente"; líquido ainda NULL → "aguardando saldo
-    da plataforma" (não acusa divergência que não existe). O 402 é Magalu:
-    Amazon deixou de esperar o repasse em 15/09 (teste
-    test_amazon_sem_repasse_decide_pela_margem_do_bling)."""
+    da plataforma" (não acusa divergência que não existe). O 402 é AliExpress:
+    Amazon deixou de esperar o repasse em 15/09 e Magalu em 30/09 (testes
+    test_amazon_sem_repasse_decide_pela_margem_do_bling e
+    test_magalu_sem_adaptador_decide_pela_margem_do_bling)."""
     await _seed_pedido(
         db, pedido="401", bling_id=401, margem_baixa=False, saldo_gap=True
     )
     await _seed_pedido(
         db, pedido="402", bling_id=402, margem_baixa=False, saldo_aguardando=True,
-        plataforma="magalu",
+        plataforma="aliexpress",
     )
     fake = FakeBling()
 
@@ -449,6 +450,34 @@ async def test_amazon_sem_repasse_decide_pela_margem_do_bling(db: AsyncSession):
     assert situacoes["601"] == "6"
     assert situacoes["602"] == "83955"
     assert situacoes["603"] == "83955"
+
+
+async def test_magalu_sem_adaptador_decide_pela_margem_do_bling(db: AsyncSession):
+    """Magalu não tem adaptador financeiro (marketplace_financials só cobre
+    Shopee/ML/Amazon/TikTok): o líquido real NUNCA chega, e todo pedido Magalu
+    era segurado por "aguardando saldo da plataforma" (caso 299836, 30/09,
+    margem Bling de 193%). Agora segue a regra da Amazon: saudável pela âncora
+    Bling passa sem hold, abaixo da mínima reprova direto."""
+    # 701: saldo Bling 100, custo 80 → 25% ≥ 10%: passa, sem hold.
+    await _seed_pedido(
+        db, pedido="701", bling_id=701, margem_null=True, saldo_aguardando=True,
+        custo=80, plataforma="magalu",
+    )
+    # 702: saldo Bling 100, custo 95 → 5,3% < 10%: reprova direto pelo Bling.
+    await _seed_pedido(
+        db, pedido="702", bling_id=702, margem_null=True, saldo_aguardando=True,
+        custo=95, plataforma="magalu",
+    )
+    fake = FakeBling()
+
+    res = await margem_auto_hold.run(db, client=fake, hoje=HOJE)
+
+    assert res == {"held": 0, "reprovados": 1, "failed": 0, "alertas": 0}
+    assert fake.situacao_calls == [(702, 83955)]
+    obs = {bid: body["observacoes"] for bid, body in fake.put_bodies}
+    assert 701 not in obs
+    assert "margem abaixo do mínimo" in obs[702]
+    assert "aguardando" not in obs[702]
 
 
 async def test_obs_rejeitada_pelo_bling_ainda_segura_o_pedido(db: AsyncSession):

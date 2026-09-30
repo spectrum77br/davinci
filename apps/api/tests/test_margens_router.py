@@ -709,8 +709,9 @@ async def test_marketplace_amazon_sem_repasse_decide_pela_margem_bling(
     pendência de saldo na Amazon — a margem decide pela âncora Bling:
       - 100 − 0 − 0 vs custo 80 → 25% ≥ 10%: Aprovado, sem motivo;
       - 100 vs custo 95 → 5,3% < 10%: Pendente por margem baixa;
-      - Magalu (fora da exceção) com líquido NULL: continua Pendente por
-        saldo (aguardando o repasse)."""
+      - AliExpress (fora da exceção) com líquido NULL: continua Pendente por
+        saldo (aguardando o repasse). Magalu entrou na exceção em 30/09 (sem
+        adaptador financeiro, o repasse nunca chega)."""
     user = await make_user(permissions=_margem_permissions())
     auth_as(user)
     ok = BlingOrder(
@@ -719,12 +720,12 @@ async def test_marketplace_amazon_sem_repasse_decide_pela_margem_bling(
     baixa = BlingOrder(
         bling_id=987701, numero="124001", item_codigo="sku-bx", item_index=0, situacao="6",
     )
-    magalu = BlingOrder(
+    aliexpress = BlingOrder(
         bling_id=987702, numero="124002", item_codigo="sku-mg", item_index=0, situacao="6",
     )
-    db.add_all([ok, baixa, magalu])
+    db.add_all([ok, baixa, aliexpress])
     await db.commit()
-    for o in (ok, baixa, magalu):
+    for o in (ok, baixa, aliexpress):
         await db.refresh(o)
     await db.execute(
         text(
@@ -751,14 +752,14 @@ async def test_marketplace_amazon_sem_repasse_decide_pela_margem_bling(
                  NULL, NULL,
                  NULL),
                 (:mg, '124002', 987702, 'sku-mg',
-                 '6', 'Em aberto', 'magalu', 1,
+                 '6', 'Em aberto', 'aliexpress', 1,
                  100, 0, 0,
                  80, 0.10,
                  NULL, NULL,
                  NULL)
             """
         ),
-        {"ok": str(ok.id), "bx": str(baixa.id), "mg": str(magalu.id)},
+        {"ok": str(ok.id), "bx": str(baixa.id), "mg": str(aliexpress.id)},
     )
     await db.commit()
 
