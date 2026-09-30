@@ -21,6 +21,16 @@ from app.models.chamado import (
 from app.models.claude_conector import ClaudeConector
 from app.models.company import Cadastro, CadastroStore, Company, Store
 from app.models.company_certificate import CompanyCertificate
+from app.models.denuncia import (
+    DenunciaAnuncio,
+    DenunciaCaso,
+    DenunciaCompra,
+    DenunciaDenuncia,
+    DenunciaLoja,
+    DenunciaProva,
+    DenunciaRemetente,
+    DenunciaVerificacao,
+)
 from app.models.devolucao_anexo import DevolucaoAnexo
 from app.models.devolucao_mensagem_comprador import DevolucaoMensagemComprador
 from app.models.devolucao_rastreio import DevolucaoRastreio
@@ -243,6 +253,14 @@ __all__ = [
     "DevolucaoRastreio",
     "EMAIL_CONTEXTOS",
     "EmailContexto",
+    "DenunciaAnuncio",
+    "DenunciaCaso",
+    "DenunciaCompra",
+    "DenunciaDenuncia",
+    "DenunciaLoja",
+    "DenunciaProva",
+    "DenunciaRemetente",
+    "DenunciaVerificacao",
     "DevolucaoAnexo",
     "DevolucaoMensagemComprador",
     "Devolution",

@@ -6,7 +6,7 @@ import {
   Receipt, TrendingUp, Settings, BarChart3,
   ClipboardList, ChevronDown, ChevronLeft, ChevronRight, Warehouse,
   Coins, FileText, Calculator, FlaskConical, Ship, Landmark, Headset,
-  ReceiptText, MessagesSquare, Radar, History,
+  ReceiptText, MessagesSquare, Radar, History, ScanSearch, Flag, Scale,
 } from 'lucide-vue-next'
 import { allowedTabs, TABS_CADASTROS, TABS_NF, TABS_SISTEMA } from '~/lib/navGroups'
 
@@ -186,6 +186,17 @@ const sections = computed<Section[]>(() => [
     label: 'Ouvidoria',
     items: [
       { to: '/ouvidoria/robos', label: 'Robôs', icon: Radar, resource: 'ouvidoria' },
+    ],
+  },
+  {
+    // Denúncia (30/09/2026): a fiscalização da marca (Uranyx e homologações)
+    // que o robô do Mac mini da Makisa faz — cópia só leitura do sistema de
+    // lá. Vinicius: logo abaixo de Ouvidoria, só estas três telas.
+    label: 'Denúncia',
+    items: [
+      { to: '/denuncia/anuncios', label: 'Anúncios', icon: ScanSearch, resource: 'denuncia' },
+      { to: '/denuncia/denuncias', label: 'Denúncias', icon: Flag, resource: 'denuncia' },
+      { to: '/denuncia/casos', label: 'Casos', icon: Scale, resource: 'denuncia' },
     ],
   },
   {

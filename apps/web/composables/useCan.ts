@@ -38,6 +38,7 @@ export type Resource =
   | 'redes_sociais'
   | 'email_padroes'
   | 'ouvidoria'
+  | 'denuncia'
   | 'usuarios'
   | 'permissoes'
   | 'configuracoes'
@@ -116,6 +117,13 @@ export const RESOURCE_GROUPS: ResourceGroup[] = [
     resources: ['ouvidoria'],
   },
   {
+    // Denúncia (30/09/2026): Anúncios, Denúncias e Casos da fiscalização da
+    // marca (cópia que o Mac mini da Makisa manda). Vinicius: logo abaixo de
+    // Ouvidoria. Só leitura — um recurso cobre as três telas.
+    label: 'Denúncia',
+    resources: ['denuncia'],
+  },
+  {
     label: 'Admin',
     resources: ['usuarios', 'permissoes', 'configuracoes'],
   },
@@ -163,6 +171,7 @@ export const RESOURCE_LABELS: Record<Resource, string> = {
   redes_sociais: 'Redes Sociais',
   email_padroes: 'E-mails (padrões)',
   ouvidoria: 'Robôs (Ouvidoria)',
+  denuncia: 'Denúncia (Anúncios, Denúncias, Casos)',
   usuarios: 'Usuários',
   permissoes: 'Permissões',
   configuracoes: 'Configurações',

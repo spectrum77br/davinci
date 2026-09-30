@@ -53,6 +53,7 @@ from app.routers import nf_upload as nf_upload_router
 from app.routers import notas_fiscais as notas_fiscais_router
 from app.routers import oauth as oauth_router
 from app.routers import ouvidoria as ouvidoria_router
+from app.routers import denuncia as denuncia_router
 from app.routers import pricing as pricing_router
 from app.routers import pricing_mega as pricing_mega_router
 from app.routers import products as products_router
@@ -234,6 +235,10 @@ app.include_router(nf_upload_router.router)
 app.include_router(notas_fiscais_router.router)
 # Ouvidoria › Robôs (21/09/2026): catálogo dos robôs + ocorrências.
 app.include_router(ouvidoria_router.router)
+# Denúncia (30/09/2026): cópia do sistema de Fiscalização que o Mac mini da
+# Makisa manda (sync) + as três telas. O sync vem antes: rota fixa `/sync/…`.
+app.include_router(denuncia_router.sync_router)
+app.include_router(denuncia_router.router)
 # Sistema › Histórico (25/09/2026): invisível para quem não está na lista.
 app.include_router(historico_router.router)
 app.include_router(dev_router.router)
