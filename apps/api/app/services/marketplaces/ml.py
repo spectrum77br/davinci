@@ -18,7 +18,8 @@ Credential shape stored in `integrations.credentials`:
 
 ML stock writes:
 - Listings without variations  : PUT /items/{item_id}        body={"available_quantity": qty}
-- Listings *with* variations   : PUT /items/{item_id}        body={"variations": [{"id": var_id, "available_quantity": qty}]}
+- Listings *with* variations   : PUT /items/{item_id}, retaining every variation ID
+  and setting available_quantity only on the target variation.
 
 If the variation_id stored locally is no longer present on ML (variations were
 edited in the seller dashboard), `update_stock` walks the variations on the
@@ -612,7 +613,18 @@ class MercadoLivreClient:
                     error_code="ml_listing_paused",
                 )
 
-        variations = item.get("variations") or []
+        variations = item.get("variations")
+        if variations is None:
+            variations = []
+        variation_ids = _stock_variation_ids(variations)
+        if variation_ids is None:
+            return SyncResult(
+                status=SyncStatus.REQUIRES_REVIEW,
+                qty_before=qty_before,
+                error_code="ml_variations_invalid",
+                error_detail="Cannot preserve every variation: missing, invalid or duplicate ID",
+                payload={"item_id": item_id},
+            )
         seller_sku = (link.external_sku or "").strip() or None
 
         if variations:
@@ -651,7 +663,10 @@ class MercadoLivreClient:
                     f"/items/{item_id}",
                     json={
                         "variations": [
-                            {"id": int(new_var_id), "available_quantity": qty}
+                            {"id": variation_id, "available_quantity": qty}
+                            if variation_id == int(new_var_id)
+                            else {"id": variation_id}
+                            for variation_id in variation_ids
                         ]
                     },
                 )
@@ -659,6 +674,39 @@ class MercadoLivreClient:
                 return _map_http_error(e, qty_before, "ml_put_variation_failed")
             if r.status_code >= 400:
                 return _map_status_error(r, qty_before, "ml_put_variation_status")
+            try:
+                updated_item = r.json()
+            except ValueError:
+                updated_item = {}
+            if isinstance(updated_item, dict) and "variations" in updated_item:
+                returned = updated_item["variations"]
+                returned_ids = _stock_variation_ids(returned)
+                returned_qty = None
+                if returned_ids is not None:
+                    returned_qty = next(
+                        (v.get("available_quantity")
+                         for v, vid in zip(returned, returned_ids, strict=True)
+                         if vid == int(new_var_id)),
+                        None,
+                    )
+                if (
+                    returned_ids is None
+                    or set(returned_ids) != set(variation_ids)
+                    or isinstance(returned_qty, bool)
+                    or returned_qty != qty
+                ):
+                    return SyncResult(
+                        status=SyncStatus.REQUIRES_REVIEW,
+                        qty_before=qty_before,
+                        error_code="ml_variations_changed",
+                        error_detail="ML response did not preserve variation IDs and target stock",
+                        payload={
+                            "item_id": item_id, "variation_id": new_var_id,
+                            "variations_expected": variation_ids,
+                            "variations_returned": returned_ids,
+                            "stock_returned": returned_qty,
+                        },
+                    )
             return SyncResult(
                 status=SyncStatus.OK,
                 qty_before=qty_before,
@@ -1118,6 +1166,29 @@ def _sku_trocado(
         error_detail=f"anúncio agora com SKU {sku_atual} (vínculo em {sku_esperado})",
         payload={"item_id": item_id, "variation_id": variation_id, "sku_atual": sku_atual},
     )
+
+
+def _stock_variation_ids(variations: Any) -> list[int] | None:
+    """A PUT variations array replaces membership: never omit a sibling ID.
+
+    Retain only IDs for siblings, without resending potentially stale stock.
+    If the complete set cannot be identified, refuse the stock update.
+    """
+    if not isinstance(variations, list):
+        return None
+    ids = []
+    for variation in variations:
+        raw = variation.get("id") if isinstance(variation, dict) else None
+        if isinstance(raw, bool) or not isinstance(raw, (int, str)):
+            return None
+        value = str(raw)
+        if not value.isascii() or not value.isdigit() or int(value) <= 0:
+            return None
+        variation_id = int(value)
+        if variation_id in ids:
+            return None
+        ids.append(variation_id)
+    return ids
 
 
 def _resolve_variation(

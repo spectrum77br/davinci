@@ -10,6 +10,7 @@ Tests use respx to stub the ML HTTP surface; no real network calls.
 
 from __future__ import annotations
 
+import json
 import time
 import uuid
 from typing import Any
@@ -130,6 +131,110 @@ async def _make_setup(
 
 
 # ---------------------------------------------------------------- B1 (zero block)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("qty", [0, 17])
+@pytest.mark.parametrize("stored_id", ["222", "999"])
+async def test_stock_update_preserves_all_variations(qty: int, stored_id: str) -> None:
+    link = ProductLink(
+        external_id="MLB123", variation_id=stored_id,
+        external_sku="dg090.pi", stock=9,
+    )
+    client = MercadoLivreClient(_ml_creds())
+    item = {
+        "id": "MLB123", "status": "active",
+        "variations": [
+            {"id": 111, "available_quantity": 41},
+            {"id": "222", "available_quantity": 9,
+             "attributes": [{"id": "SELLER_SKU", "value_name": "dg090.pi"}]},
+            {"id": 333, "available_quantity": 52},
+        ],
+    }
+    updated_item = {
+        **item,
+        "variations": [
+            {**v, "available_quantity": qty} if str(v["id"]) == "222" else v
+            for v in item["variations"]
+        ],
+    }
+    with respx.mock(base_url=ML_API_BASE) as router:
+        router.get("/items/MLB123").mock(return_value=httpx.Response(200, json=item))
+        put = router.put("/items/MLB123").mock(return_value=httpx.Response(200, json=updated_item))
+        result = await client.update_stock(link, qty, force=True, sku_esperado="dg090.pi")
+
+    assert result.status == SyncStatus.OK
+    assert result.qty_after == qty
+    assert json.loads(put.calls.last.request.content) == {
+        "variations": [{"id": 111}, {"id": 222, "available_quantity": qty}, {"id": 333}]
+    }
+    assert link.variation_id == "222"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("returned", [
+    [{"id": 222, "available_quantity": 0}],
+    [{"id": 111}, {"id": 222, "available_quantity": 8}, {"id": 333}],
+    [{"id": 111}, {"id": 222}, {"id": 333}],
+    [],
+])
+async def test_stock_update_does_not_confirm_changed_variations(returned: Any) -> None:
+    link = ProductLink(external_id="MLB123", variation_id="222", stock=9)
+    client = MercadoLivreClient(_ml_creds())
+    with respx.mock(base_url=ML_API_BASE) as router:
+        router.get("/items/MLB123").mock(return_value=httpx.Response(200, json={
+            "id": "MLB123", "status": "active",
+            "variations": [{"id": 111}, {"id": 222}, {"id": 333}],
+        }))
+        router.put("/items/MLB123").mock(return_value=httpx.Response(200, json={
+            "id": "MLB123", "variations": returned,
+        }))
+        result = await client.update_stock(link, 0, force=True)
+
+    assert result.status == SyncStatus.REQUIRES_REVIEW
+    assert result.error_code == "ml_variations_changed"
+    assert result.qty_after is None
+    assert link.stock == 9
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid_sibling", [
+    None, {}, {"id": None}, {"id": 0}, {"id": -1}, {"id": True},
+    {"id": 3.5}, {"id": "invalid"}, {"id": 222},
+])
+async def test_stock_update_refuses_incomplete_variation_ids(invalid_sibling: Any) -> None:
+    link = ProductLink(external_id="MLB123", variation_id="222", stock=9)
+    client = MercadoLivreClient(_ml_creds())
+    item = {
+        "id": "MLB123", "status": "active",
+        "variations": [{"id": 111}, {"id": 222}, invalid_sibling],
+    }
+    with respx.mock(base_url=ML_API_BASE, assert_all_called=False) as router:
+        router.get("/items/MLB123").mock(return_value=httpx.Response(200, json=item))
+        put = router.put("/items/MLB123").mock(return_value=httpx.Response(200, json={}))
+        result = await client.update_stock(link, 0, force=True)
+
+    assert not put.called
+    assert result.status == SyncStatus.REQUIRES_REVIEW
+    assert result.error_code == "ml_variations_invalid"
+    assert result.qty_after is None
+    assert link.stock == 9
+
+
+@pytest.mark.asyncio
+async def test_stock_update_refuses_malformed_variations_array() -> None:
+    link = ProductLink(external_id="MLB123", variation_id="222", stock=9)
+    client = MercadoLivreClient(_ml_creds())
+    with respx.mock(base_url=ML_API_BASE, assert_all_called=False) as router:
+        router.get("/items/MLB123").mock(return_value=httpx.Response(
+            200, json={"id": "MLB123", "status": "active", "variations": {"id": 222}}
+        ))
+        put = router.put("/items/MLB123").mock(return_value=httpx.Response(200, json={}))
+        result = await client.update_stock(link, 0, force=True)
+
+    assert not put.called
+    assert result.error_code == "ml_variations_invalid"
+    assert result.qty_after is None
 
 
 @pytest.mark.asyncio
