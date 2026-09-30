@@ -519,7 +519,9 @@ class AgentCasoLeituraOut(BaseModel):
     leitura_robo_at: datetime | None = None
     # 25/09 (executor de leitura): `devolucao` = busca o pedido no Seller Center;
     # `portal` = consulta do Portal de Atendimento, abrir direto a `chamado_url`.
-    tipo: Literal["devolucao", "portal", "ambos"] = "devolucao"
+    # 30/09: `ml_consulta` = consulta do formulário de ajuda do ML, abrir a
+    # `chamado_url` (mercadolivre.com.br/cases/detail/<N>).
+    tipo: Literal["devolucao", "portal", "ambos", "ml_consulta"] = "devolucao"
     # 25/09 (294571): consulta do Portal ligada ao chamado (`tipo` portal/ambos) —
     # ler em `consulta_url`. Na devolução, `chamado` segue sendo a solicitação.
     consulta_portal: str | None = None
@@ -550,6 +552,10 @@ class AgentLeitorFilaIn(BaseModel):
     # 25/09 (294571): inclui chamado com `consulta_portal` (consulta aberta à mão
     # além da devolução) — `tipo: ambos` ou `portal`. Só pra quem sabe ler os dois.
     consultas: bool = False
+    # 30/09 (298394): lojas em que o robô tem perfil do ML (chave "forpaper",
+    # "aguiar2") — entram as consultas do formulário de ajuda do ML delas,
+    # `tipo: "ml_consulta"`. Vazio/ausente = nenhuma (executor antigo).
+    ml_lojas: list[str] | None = None
 
 
 class AgentFalaLidaIn(BaseModel):
@@ -561,6 +567,9 @@ class AgentFalaLidaIn(BaseModel):
     quando: datetime
     # O nome que a tela mostra ("Agente Shopee"); vazio = "página do caso".
     autor: str | None = None
+    # 30/09 (ML): a tela só mostra o dia — `quando` vale pela data e a repetida
+    # se reconhece por (texto, dia).
+    so_dia: bool = False
 
     _clean = field_validator("autor", mode="before")(_clean_optional_text)
 

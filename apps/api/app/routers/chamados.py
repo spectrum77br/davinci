@@ -1756,7 +1756,9 @@ async def agent_leitura_resultado(
         ok=body.ok,
         erro=body.erro,
         falas=[
-            chamados_leitura.FalaLida(texto=f.texto, quando=f.quando, autor=f.autor)
+            chamados_leitura.FalaLida(
+                texto=f.texto, quando=f.quando, autor=f.autor, so_dia=f.so_dia
+            )
             for f in body.falas
         ],
         historico=body.historico,
@@ -1821,9 +1823,25 @@ async def agent_leitor_fila(
         espiar=body.espiar,
         portal=body.portal,
         consultas=body.consultas,
+        ml_lojas=body.ml_lojas,
     )
     out: list[AgentCasoLeituraOut] = []
     for c in casos:
+        if chamados_leitura.e_consulta_ml(c):
+            out.append(
+                AgentCasoLeituraOut(
+                    chamado_id=c.id,
+                    chamado=(c.chamado or "").strip(),
+                    chamado_url=chamados_leitura.url_da_consulta_ml(c),
+                    pedido_bling=c.pedido_bling,
+                    pedido_marketplace=(c.pedido_marketplace or "").strip() or None,
+                    conta=c.conta,
+                    plataforma=c.plataforma,
+                    leitura_robo_at=c.leitura_robo_at,
+                    tipo="ml_consulta",
+                )
+            )
+            continue
         de_tela = chamados_leitura.e_portal_shopee(c)
         if body.consultas:
             tipo = chamados_leitura.tipo_de_leitura(c)
@@ -1865,6 +1883,7 @@ async def agent_leitor_resultado(
     if not (
         chamados_leitura.e_devolucao_shopee_da_api(ch)
         or chamados_leitura.consulta_do_portal(ch) is not None
+        or chamados_leitura.e_consulta_ml(ch)
     ):
         raise HTTPException(409, detail={"code": "chamado_fora_do_leitor"})
     r = await chamados_leitura.registrar(
@@ -1873,7 +1892,9 @@ async def agent_leitor_resultado(
         ok=body.ok,
         erro=body.erro,
         falas=[
-            chamados_leitura.FalaLida(texto=f.texto, quando=f.quando, autor=f.autor)
+            chamados_leitura.FalaLida(
+                texto=f.texto, quando=f.quando, autor=f.autor, so_dia=f.so_dia
+            )
             for f in body.falas
         ],
         historico=body.historico,

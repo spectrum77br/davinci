@@ -57,6 +57,7 @@ async function apiGet(pathQ: string): Promise<any> {
 export interface AdsPowerProfile {
   user_id: string;
   name: string;
+  group_name?: string;
 }
 
 /** Abre o profile e retorna o wsEndpoint (CDP) pra anexar o puppeteer. */
@@ -86,7 +87,13 @@ export async function list(): Promise<AdsPowerProfile[]> {
   for (let page = 1; page <= 20; page++) {
     const data = await apiGet(`/api/v1/user/list?page=${page}&page_size=100`);
     const items = (data?.list || []) as any[];
-    out.push(...items.map((x) => ({ user_id: String(x.user_id), name: String(x.name || "") })));
+    out.push(
+      ...items.map((x) => ({
+        user_id: String(x.user_id),
+        name: String(x.name || ""),
+        group_name: String(x.group_name || ""),
+      }))
+    );
     if (items.length < 100) break;
   }
   return out;

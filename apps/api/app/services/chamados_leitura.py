@@ -74,6 +74,10 @@ class FalaLida:
     texto: str
     quando: datetime
     autor: str | None = None
+    # 30/09 (ML): a tela só mostra o DIA ("24 de setembro"). `quando` vale pela
+    # data; a hora gravada é o fim desse dia (ou a hora da leitura, se for hoje)
+    # e a repetida se reconhece por (texto, dia) — ver `registrar`.
+    so_dia: bool = False
 
 
 @dataclass(slots=True)
@@ -276,17 +280,82 @@ def condicoes_portal_shopee() -> list:
     ]
 
 
+# 30/09 (Vinicius, 298394): a parte de chamados do ML sai do computador do
+# Eduardo pro Mac Santiago. A consulta aberta pelo formulário de ajuda do ML
+# (`chamado` = nº da consulta, só dígitos; página mercadolivre.com.br/cases/
+# detail/<N>) era lida pelo monitor do e-mail do Tuta, do lado dele. A página
+# mostra a conversa inteira — inclusive o que o ML responde por e-mail — e o
+# ML marca a consulta "Finalizou" ~15 min depois da 1ª resposta, mas a conversa
+# continua (479763421: falas nossas e dele de 02/09 a 23/09).
+CONSULTA_ML_URL = "https://www.mercadolivre.com.br/cases/detail/{}"
+_CONSULTA_ML = r"^\d{6,12}$"
+# "ML Forpaper", "forpaper", "Mercado Livre Aguiar 2" → "forpaper", "aguiar2" —
+# a mesma chave que o executor tira do nome do perfil ("Aguiar 2 - Mercado Livre").
+_PLAT_ML_PREFIXO = r"^(mercado ?livre|meli|ml)[^a-z0-9]+"
+_PLAT_ML_SUFIXO = r"[^a-z0-9]+(mercado ?livre|meli|ml)$"
+
+
+def loja_ml(conta: str | None) -> str:
+    t = (conta or "").strip().lower()
+    t = re.sub(_PLAT_ML_PREFIXO, "", t)
+    t = re.sub(_PLAT_ML_SUFIXO, "", t)
+    return re.sub(r"[^a-z0-9]+", "", t)
+
+
+def loja_ml_sql():
+    t = func.lower(func.trim(func.coalesce(Chamado.conta, "")))
+    t = func.regexp_replace(t, _PLAT_ML_PREFIXO, "")
+    t = func.regexp_replace(t, _PLAT_ML_SUFIXO, "")
+    return func.regexp_replace(t, "[^a-z0-9]+", "", "g")
+
+
+def condicoes_consulta_ml() -> list:
+    """Consulta do formulário de ajuda do ML que o executor de leitura relê: caso
+    aberto na tela, ML, vivo, sem decisão final, com o nº da consulta no `chamado`."""
+    return [
+        Chamado.resolvido.is_(False),
+        chamados_svc.NAO_ENCERRADO_SQL,
+        chamados_svc.CASO_DE_TELA_SQL,
+        func.trim(func.coalesce(Chamado.chamado, "")).op("~")(_CONSULTA_ML),
+        func.lower(func.trim(func.coalesce(Chamado.plataforma, ""))).in_(
+            sorted(chamados_svc.PLATAFORMA_ML)
+        ),
+    ]
+
+
+def e_consulta_ml(ch: Chamado) -> bool:
+    return (
+        bool(ch.chamado_de_tela)
+        and (ch.plataforma or "").strip().lower() in chamados_svc.PLATAFORMA_ML
+        and re.match(_CONSULTA_ML, (ch.chamado or "").strip()) is not None
+    )
+
+
+def url_da_consulta_ml(ch: Chamado) -> str:
+    url = (ch.chamado_url or "").strip()
+    if "mercadolivre.com.br/cases/" in url:
+        return url
+    return CONSULTA_ML_URL.format((ch.chamado or "").strip())
+
+
 def condicoes_do_leitor(
-    *, portal: bool = True, consultas: bool = True, agora: datetime | None = None
+    *,
+    portal: bool = True,
+    consultas: bool = True,
+    ml: bool = False,
+    agora: datetime | None = None,
 ) -> list:
     """Tudo que é da fila do executor de leitura: devolução contestada pela API
-    (Seller Center), com `portal` o caso aberto na tela pelo Portal, e com
-    `consultas` o chamado com consulta do Portal ligada (294571)."""
+    (Seller Center), com `portal` o caso aberto na tela pelo Portal, com
+    `consultas` o chamado com consulta do Portal ligada (294571) e com `ml` a
+    consulta do formulário de ajuda do ML (30/09)."""
     ramos = [and_(*condicoes_devolucao_shopee(agora))]
     if portal:
         ramos.append(and_(*condicoes_portal_shopee()))
     if consultas:
         ramos.append(and_(*condicoes_consulta_ligada()))
+    if ml:
+        ramos.append(and_(*condicoes_consulta_ml()))
     return [or_(*ramos)]
 
 
@@ -356,7 +425,10 @@ def tipo_de_leitura(ch: Chamado) -> str:
     """O que o executor lê neste caso: `devolucao` (Seller Center), `portal` ou
     `ambos`. Com consulta do Portal ligada, a devolução é lida MESMO decidida
     (25/09, 294571: "perdemos" na API e a 2ª disputa aberta pelo atendente pedindo
-    evidência até 26/09 — só a tela do Seller Center mostrava)."""
+    evidência até 26/09 — só a tela do Seller Center mostrava). Consulta do
+    formulário do ML: `ml_consulta` (30/09)."""
+    if e_consulta_ml(ch):
+        return "ml_consulta"
     portal = consulta_do_portal(ch) is not None
     devolucao = e_devolucao_shopee_da_api(ch) and (
         portal or not (ch.resolvido or ch.status_plataforma in chamados_svc.STATUS_FINAIS)
@@ -374,10 +446,14 @@ async def fila_devolucao_shopee(
     espiar: bool = False,
     portal: bool = False,
     consultas: bool = False,
+    ml_lojas: list[str] | None = None,
     agora: datetime | None = None,
 ) -> list[Chamado]:
     """Devoluções da Shopee contestadas PELA API que o executor de leitura deve
-    reler no Seller Center — a fila do `/agent/leitor/fila`.
+    reler no Seller Center — a fila do `/agent/leitor/fila`. Com `ml_lojas`
+    (30/09) entram também as consultas do formulário de ajuda do ML dessas lojas
+    (chave de `loja_ml`: "forpaper", "aguiar2") — a lista é das lojas em que o
+    robô tem perfil do ML, pelo mesmo motivo de `contas`.
 
     Vinicius 24/09 (296012): a API da Shopee só dá códigos; a fala do agente
     ("não será possível aprovar sua solicitação…") mora no "Histórico da
@@ -400,8 +476,23 @@ async def fila_devolucao_shopee(
     agora = agora or datetime.now(UTC)
     ultima_fala = _ultima_fala_at()
     ja_decidido = decidido_sql()
+    ramos = []
+    shopee = condicoes_do_leitor(portal=portal, consultas=consultas, agora=agora)
+    if contas is None:
+        ramos.append(and_(*shopee))
+    else:
+        nomes = sorted({c.strip().lower() for c in contas if (c or "").strip()})
+        if nomes:
+            ramos.append(
+                and_(*shopee, func.lower(func.trim(func.coalesce(Chamado.conta, ""))).in_(nomes))
+            )
+    lojas = sorted({loja_ml(x) for x in ml_lojas or []} - {""})
+    if lojas:
+        ramos.append(and_(*condicoes_consulta_ml(), loja_ml_sql().in_(lojas)))
+    if not ramos:
+        return []
     conds = [
-        *condicoes_do_leitor(portal=portal, consultas=consultas, agora=agora),
+        or_(*ramos),
         or_(
             Chamado.leitura_robo_claim_at.is_(None),
             Chamado.leitura_robo_claim_at < agora - CLAIM_STALE,
@@ -429,11 +520,6 @@ async def fila_devolucao_shopee(
             ),
         ),
     ]
-    if contas is not None:
-        nomes = sorted({c.strip().lower() for c in contas if (c or "").strip()})
-        if not nomes:
-            return []
-        conds.append(func.lower(func.trim(func.coalesce(Chamado.conta, ""))).in_(nomes))
     q = (
         select(Chamado)
         .where(*conds)
@@ -446,7 +532,9 @@ async def fila_devolucao_shopee(
     for ch in rows:
         ch.leitura_robo_claim_at = agora
     await session.commit()
-    logger.info("chamados_leitor_fila", casos=len(rows), contas=len(contas or []))
+    logger.info(
+        "chamados_leitor_fila", casos=len(rows), contas=len(contas or []), ml_lojas=len(lojas)
+    )
     return list(rows)
 
 
@@ -541,6 +629,36 @@ def _chave(texto: str | None) -> str:
     MESMA resposta entrar de novo a cada 3 h e o caso ficaria preso em
     "plataforma respondeu"."""
     return " ".join(limpar_html(texto or "").split()).strip().lower()
+
+
+def _dia_sp(quando: datetime):
+    if quando.tzinfo is None:
+        quando = quando.replace(tzinfo=chamados_svc.SAO_PAULO)
+    return quando.astimezone(chamados_svc.SAO_PAULO).date()
+
+
+def _quando_do_dia(quando: datetime, agora: datetime) -> datetime:
+    """Fala só com o dia: grava no FIM do dia (23:59:59 de São Paulo), ou na hora
+    da leitura se o dia é hoje. Puxar pra tarde é de propósito: se nós e eles
+    falamos no mesmo dia, a fala deles não pode cair antes da nossa e sumir da
+    coluna "Últ. resposta" — o pior que acontece é a linha pedir uma olhada a mais."""
+    fim = datetime.combine(_dia_sp(quando), datetime.max.time(), chamados_svc.SAO_PAULO)
+    return min(fim.replace(microsecond=0), agora)
+
+
+def _ja_vista_no_dia(
+    chave: str, dia, vistas: set[tuple[str, datetime | None]]
+) -> bool:
+    """Mesma fala no mesmo dia, ou (texto longo) já contida numa recebida — o
+    monitor do e-mail gravava a resposta do ML com cabeçalho e rodapé da página
+    ("Mercado Livre 24 de setembro … Retomar consulta … CNPJ"), e a releitura não
+    pode duplicar o que ele já trouxe."""
+    for c, q in vistas:
+        if c == chave and q is not None and _dia_sp(q) == dia:
+            return True
+        if len(chave) >= 80 and chave != c and chave in c:
+            return True
+    return False
 
 
 def _quando_valido(ch: Chamado, quando: datetime, agora: datetime) -> tuple[datetime, bool]:
@@ -638,7 +756,8 @@ async def registrar(
     out = Resultado()
     nossas = await _nossas_falas(session, ch)
     vistas = await _ja_recebidas(session, ch)
-    for fala in falas or []:
+    lista = list(falas or [])
+    for pos, fala in enumerate(lista):
         texto = limpar_html(fala.texto or "").strip()
         if not texto:
             continue
@@ -649,7 +768,15 @@ async def registrar(
             # linha pediria gente à toa.
             out.ecos += 1
             continue
-        quando, clampada = _quando_valido(ch, fala.quando, agora)
+        if fala.so_dia:
+            if _ja_vista_no_dia(chave, _dia_sp(fala.quando), vistas):
+                out.duplicadas += 1
+                continue
+            # duas falas no mesmo dia ficam na ordem da página: 1 s entre elas
+            quando = _quando_do_dia(fala.quando, agora) - timedelta(seconds=len(lista) - 1 - pos)
+            quando, clampada = _quando_valido(ch, quando, agora)
+        else:
+            quando, clampada = _quando_valido(ch, fala.quando, agora)
         if (chave, quando) in vistas:
             out.duplicadas += 1
             continue

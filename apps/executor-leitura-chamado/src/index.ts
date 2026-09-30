@@ -25,6 +25,12 @@
  * devolução procura o que a tela PEDE com prazo ("Upload Evidence … até
  * 26-09-2026") e manda como pendência (vira aviso no chamado).
  *
+ * 30/09 (298394): consulta do formulário de ajuda do Mercado Livre (`tipo:
+ * ml_consulta`) — a parte de chamados do ML saiu do computador do Eduardo. Lida
+ * pelo link direto (ml_consulta.ts) no perfil "<Loja> - Mercado Livre". Fila e
+ * modo PRÓPRIOS: `LEITURA_ML=seco|real` (sem nada = desligado), pra ligar o ML
+ * sem mexer na Shopee que já roda de verdade.
+ *
  * Uso:
  *   npm start                         loop (LEITURA_MODO do .env, default seco)
  *   npm start -- --uma-vez            uma passada e sai
@@ -33,6 +39,8 @@
  *                                     nº da solicitação ou id do chamado)
  *   npm start -- --teste-pedido 260910MATESNVN --conta "Shopee Vortan"
  *                                     lê direto na tela, sem falar com o DaVinci
+ *   npm start -- --teste-ml 484465159 --conta forpaper
+ *                                     idem, consulta do ML
  */
 import "dotenv/config";
 
@@ -46,9 +54,10 @@ import * as davinci from "./davinci";
 import * as perfis from "./perfis";
 import * as historico from "./shopee_historico";
 import * as portal from "./shopee_portal";
+import * as ml from "./ml_consulta";
 import type { Caso } from "./davinci";
 
-const VERSION = "1.2.1";
+const VERSION = "1.3.0";
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 function arg(nome: string): string | undefined {
@@ -58,6 +67,7 @@ function arg(nome: string): string | undefined {
 const UMA_VEZ = process.argv.includes("--uma-vez");
 const SO = arg("--so");
 const TESTE_PEDIDO = arg("--teste-pedido");
+const TESTE_ML = arg("--teste-ml");
 
 interface Sessao {
   browser: Browser;
@@ -133,7 +143,9 @@ async function lerUm(page: Page, caso: Caso, real: boolean): Promise<void> {
     `${consulta && consulta !== caso.chamado ? ` + consulta ${consulta}` : ""})`;
   try {
     let l: historico.Leitura;
-    if (tipo === "portal") {
+    if (tipo === "ml_consulta") {
+      l = await ml.ler(page, caso);
+    } else if (tipo === "portal") {
       l = await portal.ler(page, caso);
     } else if (tipo === "ambos") {
       const dev = await historico.ler(page, caso);
@@ -160,7 +172,8 @@ async function lerUm(page: Page, caso: Caso, real: boolean): Promise<void> {
       l = await historico.ler(page, caso);
     }
     if (l.pendencias?.length) log.warn(`${rot}: a tela pede algo nosso — ${l.pendencias.join(" | ")}`);
-    log.info(`${rot}: ${l.itens.length} mensagem(ns) na janela, ${l.falas.length} da Shopee`);
+    const deles = tipo === "ml_consulta" ? "do ML" : "da Shopee";
+    log.info(`${rot}: ${l.itens.length} mensagem(ns) na janela, ${l.falas.length} ${deles}`);
     if (!real) {
       fs.mkdirSync(cfg.secoDir, { recursive: true });
       const file = path.join(cfg.secoDir, `${caso.pedido_bling || caso.pedido_marketplace}.json`);
@@ -199,35 +212,52 @@ async function passada(): Promise<void> {
       log.error("AdsPower não responde — passada cancelada");
       return;
     }
-    const mapa = await perfis.mapa();
+    const todos = await adspower.list();
+    const mapa = await perfis.mapa(todos);
+    const mapaMl = cfg.ml === "desligado" ? new Map<string, perfis.Perfil>() : await perfis.mapaMl(todos);
     const contas = [...mapa.keys()];
     // `--so` sempre espia: não marca a entrega dos outros casos da fila.
     const espiar = cfg.modo === "seco" || !!SO;
     let casos = await davinci.fila(SO ? 200 : cfg.limite, contas, espiar, cfg.portal);
+    if (mapaMl.size) {
+      // Fila própria do ML (30/09): modo dele, sem mexer na Shopee.
+      const espiarMl = cfg.ml === "seco" || !!SO;
+      casos = casos.concat(
+        await davinci.fila(SO ? 200 : cfg.limite, [], espiarMl, false, perfis.lojasMlDaFila(mapaMl))
+      );
+    }
     if (SO) {
       casos = casos.filter((c) =>
         [c.chamado_id, c.pedido_bling, c.pedido_marketplace, c.chamado].includes(SO)
       );
     }
     if (!casos.length) {
-      log.info(`nada pra ler agora (${contas.length} lojas com perfil)`);
+      log.info(`nada pra ler agora (${contas.length} lojas Shopee, ${mapaMl.size} ML com perfil)`);
       return;
     }
-    const porConta = new Map<string, Caso[]>();
+    // Agrupa pelo PERFIL: a mesma loja tem um perfil na Shopee e outro no ML.
+    const porPerfil = new Map<string, { p: perfis.Perfil; lista: Caso[] }>();
     for (const c of casos) {
-      const k = (c.conta || "").trim().toLowerCase();
-      porConta.set(k, [...(porConta.get(k) || []), c]);
-    }
-    for (const [conta, lista] of porConta) {
-      const p = mapa.get(conta);
+      const p =
+        c.tipo === "ml_consulta"
+          ? perfis.perfilMl(mapaMl, c.conta)
+          : mapa.get((c.conta || "").trim().toLowerCase());
       if (!p) {
-        log.warn(`${conta}: sem perfil no AdsPower — ${lista.length} caso(s) ficam pra depois`);
+        log.warn(`${c.conta}: sem perfil no AdsPower — o caso ${c.chamado} fica pra depois`);
         continue;
       }
+      const g = porPerfil.get(p.userId) || { p, lista: [] };
+      g.lista.push(c);
+      porPerfil.set(p.userId, g);
+    }
+    for (const { p, lista } of porPerfil.values()) {
       const s = await abrirPerfil(p.userId, p.nome);
       if (!s) continue;
       try {
-        for (const caso of lista) await lerUm(s.page, caso, cfg.modo === "real");
+        for (const caso of lista) {
+          const real = caso.tipo === "ml_consulta" ? cfg.ml === "real" : cfg.modo === "real";
+          await lerUm(s.page, caso, real);
+        }
       } catch (e: any) {
         log.error(`${p.nome}: parei a loja — ${String(e?.message || e)}`);
       } finally {
@@ -239,6 +269,30 @@ async function passada(): Promise<void> {
     log.error(`passada falhou: ${String(e?.message || e)}`);
   } finally {
     rodando = false;
+  }
+}
+
+/** `--teste-ml`: lê a consulta do ML direto na tela, sem DaVinci. */
+async function testeMl(): Promise<void> {
+  const conta = arg("--conta") || "";
+  const p = perfis.perfilMl(await perfis.mapaMl(), conta);
+  if (!p) throw new Error(`sem perfil "<loja> - Mercado Livre" no AdsPower pra "${conta}"`);
+  const s = await abrirPerfil(p.userId, p.nome);
+  if (!s) throw new Error(`perfil ${p.nome} em uso`);
+  try {
+    const l = await ml.ler(s.page, {
+      chamado_id: "teste",
+      chamado: TESTE_ML || "",
+      pedido_bling: null,
+      pedido_marketplace: null,
+      conta,
+      plataforma: "ml",
+      leitura_robo_at: null,
+      tipo: "ml_consulta",
+    });
+    console.log(JSON.stringify({ perfil: p.nome, ...l }, null, 2));
+  } finally {
+    await fecharPerfil(s);
   }
 }
 
@@ -268,8 +322,12 @@ async function teste(): Promise<void> {
 async function main(): Promise<void> {
   log.info(
     `executor-leitura-chamado v${VERSION} — api=${cfg.davinciApiUrl} modo=${cfg.modo.toUpperCase()}` +
-      ` intervalo=${Math.round(cfg.intervaloMs / 60000)}min`
+      ` intervalo=${Math.round(cfg.intervaloMs / 60000)}min ml=${cfg.ml.toUpperCase()}`
   );
+  if (TESTE_ML) {
+    await testeMl();
+    return;
+  }
   if (TESTE_PEDIDO) {
     await teste();
     return;

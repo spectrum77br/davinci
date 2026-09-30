@@ -42,13 +42,25 @@ concluído" não fecha o chamado. `LEITURA_PORTAL=0` no `.env` desliga.
 - O Portal só mostra a consulta pro LOGIN que abriu: aberta com outro login da
   loja, a página vem vazia e o erro diz isso ("não aparece no login …").
 
-Loja → perfil: casa pelo nome do perfil (`Vortan - Shopee` → `Shopee Vortan`).
-O que não casar vai no `PERFIS_EXTRA` do `.env`.
+**v1.3 (30/09 — 298394): consulta do formulário de ajuda do Mercado Livre**
+(`tipo: ml_consulta`). A parte de chamados do ML saiu do computador do Eduardo,
+onde a resposta vinha pelo e-mail do Tuta. Abre direto
+`mercadolivre.com.br/cases/detail/<N>` no perfil `<Loja> - Mercado Livre` e lê
+cada `[data-testid="message-card"]` (autor, dia, texto). A tela só mostra o DIA
+("24 de setembro"): a fala vai com `so_dia` e o DaVinci reconhece a repetida por
+(texto, dia). "Finalizou" é o ML fechando o formulário, não a decisão — não
+encerra nada. Fila e modo próprios: `LEITURA_ML=seco|real` no `.env` (sem nada
+= desligado), independente do `LEITURA_MODO` da Shopee.
+
+Loja → perfil: casa pelo nome do perfil (`Vortan - Shopee` → `Shopee Vortan`;
+`Forpaper - Mercado Livre` → `forpaper`, aceitando "ML Forpaper" no chamado).
+O que não casar na Shopee vai no `PERFIS_EXTRA` do `.env`.
 
 ## Rodar
 
 ```bash
 npm start -- --teste-pedido 260910MATESNVN --conta "Shopee Vortan"   # só a tela, sem DaVinci
+npm start -- --teste-ml 484465159 --conta forpaper                   # idem, consulta do ML
 npm start -- --uma-vez                                               # uma passada (modo do .env)
 LEITURA_MODO=real npm start -- --uma-vez --so 296012                  # um caso, de verdade
 ```

@@ -12,7 +12,9 @@ export interface Caso {
   chamado_id: string;
   chamado: string;
   chamado_url?: string | null;
-  tipo?: "devolucao" | "portal" | "ambos";
+  /** 30/09: `ml_consulta` = consulta do formulário de ajuda do ML
+   *  (`chamado_url` = mercadolivre.com.br/cases/detail/<N>). */
+  tipo?: "devolucao" | "portal" | "ambos" | "ml_consulta";
   /** 25/09 (294571): consulta do Portal ligada ao chamado (tipo portal/ambos). */
   consulta_portal?: string | null;
   consulta_url?: string | null;
@@ -28,6 +30,8 @@ export interface Fala {
   texto: string;
   quando: string;
   autor: string;
+  /** 30/09 (ML): a tela só mostra o dia — `quando` vale pela data. */
+  so_dia?: boolean;
 }
 
 export interface Resultado {
@@ -60,12 +64,14 @@ async function post<T>(path: string, body: unknown): Promise<T> {
 }
 
 /** Casos pra reler agora. `espiar` = só olha (não marca a entrega) — modo seco
- *  e o `--so`. `contas` = as lojas que este Mac tem perfil pra abrir. */
+ *  e o `--so`. `contas` = as lojas da Shopee que este Mac tem perfil pra abrir;
+ *  `mlLojas` (30/09) = as do ML ("forpaper", "aguiar2"), vazio = nenhuma. */
 export async function fila(
   limite: number,
   contas: string[],
   espiar: boolean,
-  portal: boolean
+  portal: boolean,
+  mlLojas: string[] = []
 ): Promise<Caso[]> {
   const data = await post<{ casos: Caso[] }>("/api/chamados/agent/leitor/fila", {
     limite,
@@ -74,6 +80,7 @@ export async function fila(
     portal,
     // v1.2: sabe ler a devolução E a consulta ligada no mesmo caso (tipo "ambos")
     consultas: portal,
+    ml_lojas: mlLojas,
   });
   return data.casos ?? [];
 }

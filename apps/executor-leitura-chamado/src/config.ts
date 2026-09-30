@@ -17,6 +17,8 @@ function int(name: string, def: number): number {
  *  DaVinci (e sem marcar a entrega na fila). `real` = manda o que leu pro
  *  chamado. Default seco: quem liga o real é uma pessoa, de propósito. */
 export type Modo = "seco" | "real";
+/** 30/09: consultas do formulário de ajuda do ML — desligado até alguém ligar. */
+export type ModoMl = "desligado" | "seco" | "real";
 
 export interface Config {
   davinciApiUrl: string;
@@ -30,6 +32,8 @@ export interface Config {
   secoDir: string;
   /** 25/09: também lê as consultas do Portal de Atendimento (LEITURA_PORTAL=0 desliga). */
   portal: boolean;
+  /** 30/09 (298394): LEITURA_ML=seco|real lê as consultas do ML; sem nada = desligado. */
+  ml: ModoMl;
   /** conta do chamado (minúscula) -> user_id do AdsPower, por cima do casamento
    *  automático pelo nome do perfil ("Vortan - Shopee" -> "Shopee Vortan"). */
   perfisExtra: Record<string, string>;
@@ -64,5 +68,6 @@ export const cfg: Config = {
   debugDir: str("DEBUG_DIR", "./debug"),
   secoDir: str("SECO_DIR", "./logs/seco"),
   portal: str("LEITURA_PORTAL", "1") !== "0",
+  ml: ((v) => (v === "real" || v === "seco" ? v : "desligado"))(str("LEITURA_ML")) as ModoMl,
   perfisExtra: perfisExtra(),
 };
