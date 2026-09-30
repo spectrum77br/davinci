@@ -115,20 +115,29 @@ const empresaRef = ref<EmpresaApi | null>(null)
 // --- Senha extra -------------------------------------------------------------
 // A mesma senha de Empresas e do Valuation, com desbloqueio próprio (a chave de
 // Empresas não abre esta página). A chave fica só na memória da página: tranca
-// ao sair de /emissao-servico, ao recarregar e aos 15 minutos — mas nunca com
-// notas saindo no assistente (espera ele terminar; trancar desmontaria tudo).
+// ao sair de /emissao-servico, ao recarregar e aos 15 minutos. Só espera o que
+// termina sozinho: notas saindo no assistente ou um cancelamento a caminho da
+// prefeitura (trancar no meio desmontaria a janela e o resultado se perderia).
+// No último minuto, um aviso deixa digitar a senha de novo sem trancar.
 
 function loteOcupado(): boolean {
   const lote = loteRef.value as Partial<LoteApi> | null
   return !!(lote && typeof lote.ocupado === 'function' && lote.ocupado())
 }
-function loteEmUso(): boolean {
+function cancelamentoOcupado(): boolean {
+  const c = cancelarRef.value as Partial<CancelarApi> | null
+  return !!(c && typeof c.ocupado === 'function' && c.ocupado())
+}
+// A janela de envio aberta (conferindo, esperando a prefeitura ou no fim)
+// fecha do jeito normal antes do cadeado: mostra o resumo e devolve o resultado.
+function fecharLote() {
   const lote = loteRef.value as Partial<LoteApi> | null
-  return !!(lote && typeof lote.emUso === 'function' && lote.emUso())
+  if (lote && typeof lote.fecharParaTrancar === 'function') lote.fecharParaTrancar()
 }
 
 const trava = useSenhaExtra('nfse', '/api/nfse/unlock', 'X-Nfse-Token', /^\/emissao-servico(\/|$)/, {
-  podeTrancar: () => !loteEmUso(),
+  podeTrancar: () => !loteOcupado() && !cancelamentoOcupado(),
+  antesDeTrancar: fecharLote,
 })
 
 // Toda chamada a /api/nfse passa por aqui (e pelas abas, via useNfseApi()).
@@ -142,34 +151,25 @@ async function apiN<T = any>(path: string, opts: any = {}): Promise<T> {
   }
 }
 
-// PDF e XML: link direto não leva o cabeçalho com a chave, então o arquivo
-// desce por fetch e é aberto (PDF, em outra aba) ou baixado (XML) daqui.
-async function arquivoComChave(path: string): Promise<{ blob: Blob; nome: string | null }> {
-  const r = await fetch(path, { credentials: 'include', headers: trava.headers() })
-  if (!r.ok) {
-    let data: unknown = null
-    try {
-      data = await r.json()
-    } catch {
-      // sem corpo JSON: fica só o status
-    }
-    throw Object.assign(new Error(`HTTP ${r.status}`), { status: r.status, statusCode: r.status, data })
-  }
-  const nome = /filename="?([^";]+)"?/i.exec(r.headers.get('content-disposition') || '')?.[1] ?? null
-  return { blob: await r.blob(), nome }
-}
-
-function salvarArquivo(url: string, nome: string) {
+// PDF e XML: link direto não leva o cabeçalho com a chave. A página pede, com a
+// chave, um link de 60 s só daquele arquivo, e o navegador abre esse link: o
+// PDF abre na aba com o nome da nota (NFSe_<nº>.pdf) e o XML baixa com o nome certo.
+function salvarArquivo(url: string) {
   const a = document.createElement('a')
   a.href = url
-  a.download = nome
+  a.download = '' // o nome vem do servidor
   document.body.appendChild(a)
   a.click()
   a.remove()
 }
 
+async function linkDoArquivo(id: string, tipo: 'pdf' | 'xml'): Promise<string> {
+  const r = await apiN<{ url: string }>(`/api/nfse/emissoes/${id}/link?tipo=${tipo}`, { method: 'POST' })
+  return r.url
+}
+
 async function abrirPdf(id: string): Promise<void> {
-  // A aba abre JÁ no clique: depois de esperar o arquivo, o navegador a bloquearia.
+  // A aba abre JÁ no clique: depois de esperar o link, o navegador a bloquearia.
   const aba = window.open('', '_blank')
   if (aba) {
     aba.opener = null
@@ -181,27 +181,20 @@ async function abrirPdf(id: string): Promise<void> {
     }
   }
   try {
-    const { blob, nome } = await arquivoComChave(`/api/nfse/emissoes/${id}/pdf`)
-    const url = URL.createObjectURL(blob.type === 'application/pdf' ? blob : new Blob([blob], { type: 'application/pdf' }))
+    const url = await linkDoArquivo(id, 'pdf')
     // Bloqueador de janelas: sem a aba, o PDF é baixado.
     if (aba && !aba.closed) aba.location.href = url
-    else salvarArquivo(url, nome ?? `NFSe_${id}.pdf`)
-    setTimeout(() => URL.revokeObjectURL(url), 5 * 60_000)
+    else salvarArquivo(url)
   } catch (e) {
     aba?.close()
-    if (trava.eTravamento(e)) trava.trancarQuandoPuder()
     toasts.error('Não deu para abrir o PDF', erroApi(e))
   }
 }
 
 async function baixarXml(id: string): Promise<void> {
   try {
-    const { blob, nome } = await arquivoComChave(`/api/nfse/emissoes/${id}/xml`)
-    const url = URL.createObjectURL(blob)
-    salvarArquivo(url, nome ?? `NFSe_${id}.xml`)
-    setTimeout(() => URL.revokeObjectURL(url), 60_000)
+    salvarArquivo(await linkDoArquivo(id, 'xml'))
   } catch (e) {
-    if (trava.eTravamento(e)) trava.trancarQuandoPuder()
     toasts.error('Não deu para baixar o XML', erroApi(e))
   }
 }
@@ -210,10 +203,11 @@ const nfseApi: NfseApi = { api: apiN, abrirPdf, baixarXml }
 provide(NFSE_API, nfseApi)
 
 function bloquear() {
-  if (loteOcupado()) {
-    toasts.warning('Espere as notas terminarem de sair', 'A página tranca depois que o envio acabar.')
+  if (loteOcupado() || cancelamentoOcupado()) {
+    toasts.warning('Espere terminar o que está saindo', 'Dá para bloquear assim que o envio acabar.')
     return
   }
+  fecharLote()
   trava.trancar()
 }
 
@@ -231,6 +225,10 @@ function esquecerTudo() {
   contadorEmitir.value = null
   erroCarga.value = null
   carregado.value = false
+  // A janela da nota/empresa que estava aberta sumiu com o cadeado. Com a
+  // ?nota= / ?empresa= ainda na URL, ela reabre depois da senha, como um link.
+  notaAberta = null
+  empresaAberta = null
 }
 
 // A janela só vale se já expôs o método (enquanto um componente não existe,
@@ -711,8 +709,9 @@ watch(
 // descarta o aviso (lição da tela Empresas, 25/09/2026).
 async function carregarAposSenha() {
   await recarregar()
-  // Link com ?nota= / ?empresa=: abre depois da senha e da carga.
-  if (trava.token.value && carregado.value) abrirDaQuery(route.query)
+  // Link com ?nota= / ?empresa=: abre depois da senha e da carga (mesmo se a
+  // carga falhou, como antes da senha existir: a janela lê a nota sozinha).
+  if (trava.token.value) abrirDaQuery(route.query)
 }
 
 watch(
@@ -753,6 +752,7 @@ onBeforeRouteLeave(() => {
 
       <SenhaExtraTrava v-if="!trava.token.value" titulo="Emissão de Serviço" :trava="trava" />
       <template v-else>
+      <SenhaExtraRenovar :trava="trava" />
       <PageHeader
         title="Emissão de Serviço"
         description="Notas fiscais de serviço (NFS-e) das empresas do grupo, emitidas pela NFE.io."

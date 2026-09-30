@@ -663,9 +663,12 @@ function verPdf(r: ResultadoLote) {
 const exposto: LoteApi = {
   emitir,
   ocupado: () => aberto.value && passo.value === 'emitindo',
-  // Com resultado na tela (enviando, esperando a prefeitura ou no fim), a senha
-  // que vence espera a janela fechar para trancar a página.
-  emUso: () => aberto.value && passo.value !== 'conferir',
+  // A senha da página venceu: fecha como no botão Fechar (mostra o resumo e
+  // devolve o resultado) antes do cadeado. Com notas saindo não fecha — a
+  // página espera o envio acabar (ocupado) antes de pedir isto.
+  fecharParaTrancar: () => {
+    if (aberto.value) fechar()
+  },
 }
 defineExpose(exposto)
 </script>

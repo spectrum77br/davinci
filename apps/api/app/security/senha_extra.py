@@ -132,6 +132,42 @@ async def require_empresas_unlock(
         raise HTTPException(401, detail={"code": "empresas_locked"})
 
 
+# Link de arquivo (PDF/XML da NFS-e, 30/09/2026): um link direto do navegador
+# não leva cabeçalho, então a página troca a chave por um link que vale 60 s e
+# só para AQUELE arquivo. A assinatura começa com "arquivo:", então nunca se
+# confunde com a chave de uma página (e vice-versa).
+TTL_LINK_ARQUIVO = 60
+
+
+def fazer_link_arquivo(escopo: str, recurso: str) -> str:
+    ts = int(time.time())
+    assinatura = hmac.new(
+        get_settings().jwt_secret.encode(),
+        f"arquivo:{escopo}:{recurso}:{ts}".encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    return f"{ts}.{assinatura}"
+
+
+def link_arquivo_valido(chave: str | None, escopo: str, recurso: str) -> bool:
+    if not chave:
+        return False
+    try:
+        ts_txt, assinatura = chave.split(".", 1)
+        ts = int(ts_txt)
+    except (ValueError, AttributeError):
+        return False
+    idade = time.time() - ts
+    if idade > TTL_LINK_ARQUIVO or idade < -5:
+        return False
+    esperada = hmac.new(
+        get_settings().jwt_secret.encode(),
+        f"arquivo:{escopo}:{recurso}:{ts}".encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    return hmac.compare_digest(assinatura.encode(), esperada.encode())
+
+
 async def require_nfse_unlock(
     x_nfse_token: Annotated[str | None, Header(alias="X-Nfse-Token")] = None,
 ) -> None:

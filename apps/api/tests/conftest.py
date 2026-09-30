@@ -56,9 +56,10 @@ from app.deps.auth import (  # noqa: E402
     require_admin,
     require_user,
 )
-from app.main import app  # noqa: E402
 from app.historico import sql as historico_sql  # noqa: E402
+from app.main import app  # noqa: E402
 from app.models import Base, User, UserRole, UserStatus  # noqa: E402
+from app.routers import nfse as nfse_router  # noqa: E402
 from app.security.senha_extra import (  # noqa: E402
     require_empresas_unlock,
     require_nfse_unlock,
@@ -518,6 +519,8 @@ def _override_as(user: User) -> None:
     # Idem para a Emissão de Serviço (30/09/2026): test_nfse_senha_extra.py
     # tira este desvio e testa a trava de verdade.
     app.dependency_overrides[require_nfse_unlock] = _liberado
+    app.dependency_overrides[nfse_router.trava_pdf] = _liberado
+    app.dependency_overrides[nfse_router.trava_xml] = _liberado
 
 
 @pytest.fixture

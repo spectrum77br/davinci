@@ -12,9 +12,12 @@ Nenhuma rota devolve a chave da NFE.io nem dado sensível da prefeitura.
 
 Senha extra (30/09/2026, Eduardo: "o mesmo esquema de senha do empresas"):
 TODAS as rotas deste router exigem a chave `X-Nfse-Token`
-(app/security/senha_extra.py), inclusive PDF e XML. A chave sai de
-`POST /api/nfse/unlock`, que fica num router à parte (`router_desbloqueio`)
-justamente por não poder exigir a chave que ele mesmo entrega.
+(app/security/senha_extra.py). A chave sai de `POST /api/nfse/unlock`, que fica
+num router à parte (`router_desbloqueio`) justamente por não poder exigir a
+chave que ele mesmo entrega. PDF e XML (`router_arquivos`) aceitam a chave OU
+um link de 60 s só daquele arquivo, pedido com a chave em
+`POST /emissoes/{id}/link`: link direto do navegador não leva cabeçalho, e a
+aba do PDF precisa abrir com o nome do arquivo.
 """
 
 from __future__ import annotations
@@ -26,7 +29,7 @@ from typing import Annotated
 from uuid import UUID
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -62,13 +65,13 @@ from app.schemas.nfse import (
     TomadorIn,
     TomadorOut,
 )
+from app.security import senha_extra
+from app.security.senha_extra import require_nfse_unlock
 from app.services.nfse import contas_bling as svc_contas_bling
 from app.services.nfse import emissao as svc
 from app.services.nfse import empresas as svc_empresas
 from app.services.nfse import faturamento as svc_faturamento
 from app.services.nfse import municipios, nfeio, receita
-from app.security import senha_extra
-from app.security.senha_extra import require_nfse_unlock
 from app.services.nfse.ambiente import eh_teste, producao_liberada
 
 logger = structlog.get_logger()
@@ -77,6 +80,8 @@ router = APIRouter(
     prefix="/api/nfse", tags=["nfse"], dependencies=[Depends(require_nfse_unlock)]
 )
 router_desbloqueio = APIRouter(prefix="/api/nfse", tags=["nfse"])
+# PDF e XML: trava própria (a chave OU o link de 60 s daquele arquivo).
+router_arquivos = APIRouter(prefix="/api/nfse", tags=["nfse"])
 
 _view = require_permission("emissao_servico", "view")
 _edit = require_permission("emissao_servico", "edit")
@@ -755,7 +760,44 @@ def _nome_arquivo(e: NfseEmissao, ext: str) -> str:
     return f"NFSe_{e.n_nfse or e.nfeio_id or e.id}.{ext}"
 
 
-@router.get("/emissoes/{emissao_id}/xml")
+def _trava_arquivo(tipo: str):
+    """A chave da página OU o link de 60 s deste arquivo (desta nota, deste
+    tipo). Os dois só valem com a sessão e a permissão de ver."""
+
+    async def _dep(
+        emissao_id: UUID,
+        chave: Annotated[str | None, Query(max_length=200)] = None,
+        x_nfse_token: Annotated[str | None, Header(alias="X-Nfse-Token")] = None,
+    ) -> None:
+        if senha_extra.token_valido(x_nfse_token, "nfse"):
+            return
+        if senha_extra.link_arquivo_valido(chave, "nfse", f"{emissao_id}:{tipo}"):
+            return
+        raise HTTPException(401, detail={"code": "nfse_locked"})
+
+    _dep.__qualname__ = f"_trava_arquivo_{tipo}"
+    return _dep
+
+
+# Nomes fixos: os testes que não cuidam da senha desviam destas duas também.
+trava_pdf = _trava_arquivo("pdf")
+trava_xml = _trava_arquivo("xml")
+
+
+@router.post("/emissoes/{emissao_id}/link")
+async def link_arquivo(
+    emissao_id: UUID,
+    session: Sess,
+    _u: Annotated[User, Depends(_view)],
+    tipo: str = Query(pattern="^(pdf|xml)$"),
+) -> dict:
+    """Link de 60 s para abrir o PDF (ou baixar o XML) desta nota numa aba."""
+    await _emissao(session, emissao_id)
+    chave = senha_extra.fazer_link_arquivo("nfse", f"{emissao_id}:{tipo}")
+    return {"url": f"/api/nfse/emissoes/{emissao_id}/{tipo}?chave={chave}"}
+
+
+@router_arquivos.get("/emissoes/{emissao_id}/xml", dependencies=[Depends(trava_xml)])
 async def baixar_xml(
     emissao_id: UUID,
     session: Sess,
@@ -777,7 +819,7 @@ async def baixar_xml(
     )
 
 
-@router.get("/emissoes/{emissao_id}/pdf")
+@router_arquivos.get("/emissoes/{emissao_id}/pdf", dependencies=[Depends(trava_pdf)])
 async def baixar_pdf(
     emissao_id: UUID, session: Sess, _u: Annotated[User, Depends(_view)]
 ) -> Response:

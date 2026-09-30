@@ -6,6 +6,7 @@ esquema de senha do empresas". O que estes testes seguram:
   XML, emitir e cancelar; rota nova no router já nasce trancada;
 - a chave de Empresas não abre a Emissão de Serviço, e vice-versa;
 - a senha é a mesma, e os erros somam com as outras telas (5 → 15 min);
+- PDF/XML abrem por um link de 60 s que só vale para aquele arquivo;
 - o webhook da NFE.io (/api/webhooks/nfeio) não depende da senha.
 """
 
@@ -20,6 +21,7 @@ from fastapi.routing import APIRoute
 
 from app.main import app
 from app.models import UserRole
+from app.routers import nfse as nfse_router
 from app.security import senha_extra
 from app.security.senha_extra import require_empresas_unlock, require_nfse_unlock
 
@@ -60,8 +62,13 @@ def trava_de_verdade(monkeypatch):
     monkeypatch.setattr(senha_extra.asyncio, "sleep", _sem_espera)
 
     def _ativar():
-        app.dependency_overrides.pop(require_nfse_unlock, None)
-        app.dependency_overrides.pop(require_empresas_unlock, None)
+        for dep in (
+            require_nfse_unlock,
+            require_empresas_unlock,
+            nfse_router.trava_pdf,
+            nfse_router.trava_xml,
+        ):
+            app.dependency_overrides.pop(dep, None)
 
     return SimpleNamespace(ativar=_ativar, config=config, redis=redis)
 
@@ -105,12 +112,20 @@ def test_todas_as_rotas_da_emissao_exigem_a_chave():
     rotas = [
         r
         for r in app.routes
-        if isinstance(r, APIRoute) and r.path.startswith("/api/nfse/") and r.path != "/api/nfse/unlock"
+        if isinstance(r, APIRoute)
+        and r.path.startswith("/api/nfse/")
+        and r.path != "/api/nfse/unlock"
     ]
     assert len(rotas) >= 25, len(rotas)
     for r in rotas:
         deps = [d.call for d in r.dependant.dependencies]
-        assert require_nfse_unlock in deps, r.path
+        if r.path.endswith(("/pdf", "/xml")):
+            # PDF/XML: a chave OU o link de 60 s daquele arquivo.
+            assert any(getattr(d, "__qualname__", "").startswith("_trava_arquivo") for d in deps), (
+                r.path
+            )
+        else:
+            assert require_nfse_unlock in deps, r.path
 
 
 @pytest.mark.asyncio
@@ -189,9 +204,7 @@ async def test_quem_nao_tem_permissao_nem_tenta(client, make_user, auth_as, trav
 async def test_quem_nao_e_admin_com_permissao_desbloqueia(
     client, make_user, auth_as, trava_de_verdade
 ):
-    auth_as(
-        await make_user(role=UserRole.USER, permissions={"emissao_servico": {"view": True}})
-    )
+    auth_as(await make_user(role=UserRole.USER, permissions={"emissao_servico": {"view": True}}))
     trava_de_verdade.ativar()
     chave = await _chave(client)
     assert (await client.get("/api/nfse/status", headers=chave)).status_code == 200
@@ -242,3 +255,75 @@ async def test_chave_adulterada_ou_com_acento_e_recusada(
         r = await client.get("/api/nfse/status", headers={"X-Nfse-Token": chave})
         assert r.status_code == 401
         assert r.json()["detail"]["code"] == "nfse_locked"
+
+
+# --- link de 60 s do PDF/XML ---------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_link_do_pdf_abre_so_aquele_arquivo(client, make_user, auth_as, trava_de_verdade):
+    """A aba do PDF abre por link (sem cabeçalho). O link vale 60 s, só para
+    aquela nota e aquele tipo; a chave da página não serve de link e vice-versa."""
+    await _admin(make_user, auth_as, trava_de_verdade)
+    chave_pagina = (await _chave(client))["X-Nfse-Token"]
+    a, b = uuid.uuid4(), uuid.uuid4()
+    link_pdf_a = senha_extra.fazer_link_arquivo("nfse", f"{a}:pdf")
+
+    # Passou da trava: a nota não existe, então quem responde é a própria rota (404).
+    r = await client.get(f"/api/nfse/emissoes/{a}/pdf", params={"chave": link_pdf_a})
+    assert r.status_code == 404, r.text
+    assert r.json()["detail"]["code"] == "emissao_nao_encontrada"
+
+    recusados = [
+        (f"/api/nfse/emissoes/{a}/xml", {"chave": link_pdf_a}, {}),  # outro tipo
+        (f"/api/nfse/emissoes/{b}/pdf", {"chave": link_pdf_a}, {}),  # outra nota
+        (f"/api/nfse/emissoes/{a}/pdf", {"chave": chave_pagina}, {}),  # chave da página não é link
+        (f"/api/nfse/emissoes/{a}/pdf", {}, {"X-Nfse-Token": link_pdf_a}),  # link não é chave
+        (f"/api/nfse/emissoes/{a}/pdf", {"chave": "lixo"}, {}),
+    ]
+    for caminho, params, headers in recusados:
+        r = await client.get(caminho, params=params, headers=headers)
+        assert r.status_code == 401, (caminho, params, headers, r.status_code)
+        assert r.json()["detail"]["code"] == "nfse_locked"
+
+    # Com a chave no cabeçalho, PDF e XML continuam abrindo (sem link).
+    r = await client.get(f"/api/nfse/emissoes/{a}/xml", headers={"X-Nfse-Token": chave_pagina})
+    assert r.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_link_do_pdf_vence_em_60_segundos(
+    client, make_user, auth_as, trava_de_verdade, monkeypatch
+):
+    await _admin(make_user, auth_as, trava_de_verdade)
+    a = uuid.uuid4()
+    link = senha_extra.fazer_link_arquivo("nfse", f"{a}:pdf")
+    agora = time.time()
+    monkeypatch.setattr(senha_extra.time, "time", lambda: agora + 61)
+    r = await client.get(f"/api/nfse/emissoes/{a}/pdf", params={"chave": link})
+    assert r.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_link_exige_a_chave_e_a_nota(client, make_user, auth_as, trava_de_verdade):
+    await _admin(make_user, auth_as, trava_de_verdade)
+    a = uuid.uuid4()
+    r = await client.post(f"/api/nfse/emissoes/{a}/link", params={"tipo": "pdf"})
+    assert r.status_code == 401
+    assert r.json()["detail"]["code"] == "nfse_locked"
+    chave = await _chave(client)
+    r = await client.post(f"/api/nfse/emissoes/{a}/link", params={"tipo": "pdf"}, headers=chave)
+    assert r.status_code == 404
+    r = await client.post(f"/api/nfse/emissoes/{a}/link", params={"tipo": "exe"}, headers=chave)
+    assert r.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_link_sem_sessao_nao_abre(client, trava_de_verdade):
+    """O link sozinho não basta: precisa também da sessão e da permissão."""
+    trava_de_verdade.ativar()
+    a = uuid.uuid4()
+    link = senha_extra.fazer_link_arquivo("nfse", f"{a}:pdf")
+    r = await client.get(f"/api/nfse/emissoes/{a}/pdf", params={"chave": link})
+    assert r.status_code in (401, 403), r.status_code
+    assert "emissao_nao_encontrada" not in r.text

@@ -471,11 +471,14 @@ export type ConfirmApi = { perguntar(o: ConfirmarOpts): Promise<boolean> }
 export type LoteApi = {
   emitir(o: { competencia: string; itens: ItemLote[] }): Promise<ResultadoLote[]>
   ocupado(): boolean // true enquanto as notas estão saindo (não dá para sair da página)
-  emUso(): boolean // aberta com envio ou resultado na tela: a senha que vence espera fechar
+  fecharParaTrancar(): void // a senha venceu: fecha com o resumo antes do cadeado
 }
 export type AvulsaApi = { abrir(o?: { competencia?: string }): Promise<void> }
 export type NotaApi = { abrir(e: Emissao | string): Promise<void> }
-export type CancelarApi = { cancelar(e: Emissao): Promise<Emissao | null> }
+export type CancelarApi = {
+  cancelar(e: Emissao): Promise<Emissao | null>
+  ocupado(): boolean // pedido indo à NFE.io ou esperando a prefeitura (a senha que vence espera)
+}
 export type ModeloApi = { abrir(o?: AbrirModeloOpts): Promise<Modelo | null> }
 export type TomadorApi = { abrir(o?: AbrirTomadorOpts): Promise<Tomador | null> }
 export type EmpresaApi = { abrir(companyId: string, foco?: SecaoEmpresa): Promise<boolean> }

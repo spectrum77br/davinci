@@ -10,7 +10,7 @@
 // justificativa ficam guardados no DaVinci (a NFE.io não recebe motivo). A
 // prefeitura pode demorar para confirmar: a nota fica "Cancelando" e o diálogo
 // pergunta à NFE.io por alguns segundos antes de fechar.
-import { computed, nextTick, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref } from 'vue'
 import { Ban, Loader2, RefreshCw } from 'lucide-vue-next'
 import { Button } from '~/components/ui/button'
 import {
@@ -96,8 +96,18 @@ function aoMudar(v: boolean) {
   }
 }
 
-const exposto: CancelarApi = { cancelar }
+const exposto: CancelarApi = {
+  cancelar,
+  // Pedido a caminho ou esperando a prefeitura: a senha da página que vencer
+  // espera acabar (trancar desmontaria a janela e o resultado se perderia).
+  ocupado: () => aberto.value && (enviando.value || conferindo.value || esperando.value),
+}
 defineExpose(exposto)
+
+// Desmontada (a página trancou ou saiu): para de perguntar à prefeitura.
+onBeforeUnmount(() => {
+  aberto.value = false
+})
 
 // --- Formulário -------------------------------------------------------------------
 
@@ -267,8 +277,10 @@ async function confirmar() {
       terminar(e)
       return
     }
-    // Continua emitida: o cancelamento foi recusado. Fica aberto, com o motivo.
+    // Continua emitida: o cancelamento foi recusado. Fica aberto, com o motivo
+    // (e avisa também fora da janela, caso ela feche antes de a pessoa ler).
     errosGov.value = await motivoRecusa(e, evento)
+    toasts.warning(`${rotulo}: o cancelamento foi recusado`, errosGov.value[0]?.descricao || 'Veja o motivo na janela de cancelamento.')
   } catch (err) {
     errosGov.value = null
     if (falhaDeRede(err)) {

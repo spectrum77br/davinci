@@ -200,6 +200,7 @@ app.include_router(pricing_mega_router.router)
 app.include_router(segments_router.router)
 app.include_router(marcas_router.router)
 app.include_router(nfse_router.router_desbloqueio)  # POST /api/nfse/unlock (sem a trava)
+app.include_router(nfse_router.router_arquivos)  # PDF/XML: a chave OU o link de 60 s
 app.include_router(nfse_router.router)
 app.include_router(redes_sociais_router.router)
 app.include_router(email_padroes_router.router)

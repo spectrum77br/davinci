@@ -14,16 +14,20 @@ import { onBeforeRouteLeave } from 'vue-router'
 // - recarregar a página ou fechar a aba;
 // - vencer os 15 minutos, mesmo parado na tela.
 //
-// `podeTrancar` (Emissão de Serviço, 30/09/2026): quando os 15 min vencem no
-// meio de um trabalho que não pode ser cortado (notas saindo para a NFE.io),
-// a tela espera ele acabar para trancar — trancar desmontaria o assistente
-// com as notas no meio do caminho.
+// Opções (Emissão de Serviço, 30/09/2026):
+// - `podeTrancar`: quando os 15 min vencem no meio de um trabalho que não pode
+//   ser cortado (notas saindo para a NFE.io), a tela espera ele acabar para
+//   trancar. Só para trabalho que termina sozinho — nunca "janela aberta".
+// - `antesDeTrancar`: fecha o que precisa fechar direito antes do cadeado
+//   (ex.: a janela de envio, que ao fechar mostra o resumo).
+// `perto` fica true no último minuto: a página pode oferecer digitar a senha de
+// novo SEM trancar (o que está digitado ou aberto não se perde).
 export function useSenhaExtra(
   escopo: string,
   caminhoDesbloqueio: string,
   cabecalho: string,
   area: RegExp,
-  opcoes: { podeTrancar?: () => boolean } = {},
+  opcoes: { podeTrancar?: () => boolean; antesDeTrancar?: () => void } = {},
 ) {
   const { api } = useApi()
   // useState: a mesma chave para a lista e para a ficha (navegar entre elas
@@ -91,21 +95,33 @@ export function useSenhaExtra(
       relogio = setTimeout(trancarQuandoPuder, 2000)
       return
     }
+    opcoes.antesDeTrancar?.()
     trancar()
   }
 
   // Tranca na hora em que vence, mesmo com a pessoa parada na tela.
   let relogio: ReturnType<typeof setTimeout> | null = null
+  const perto = ref(false)
+  let relogioAviso: ReturnType<typeof setTimeout> | null = null
   if (!import.meta.server) {
     watch(
       () => (token.value ? vence.value : 0),
       (quando) => {
         if (relogio) clearTimeout(relogio)
         relogio = quando ? setTimeout(trancarQuandoPuder, Math.max(0, quando - Date.now())) : null
+        // Aviso do último minuto (renovar zera: `vence` muda e isto roda de novo).
+        if (relogioAviso) clearTimeout(relogioAviso)
+        perto.value = false
+        relogioAviso = quando
+          ? setTimeout(() => { perto.value = true }, Math.max(0, quando - 60_000 - Date.now()))
+          : null
       },
       { immediate: true },
     )
-    onScopeDispose(() => { if (relogio) clearTimeout(relogio) })
+    onScopeDispose(() => {
+      if (relogio) clearTimeout(relogio)
+      if (relogioAviso) clearTimeout(relogioAviso)
+    })
 
     // Saiu da área: tranca quando esta página SAI da tela, não no clique.
     // Trancar no clique mostrava o cadeado enquanto a próxima página ainda
@@ -127,7 +143,7 @@ export function useSenhaExtra(
   }
 
   return {
-    token, senha, erro, desbloqueando, iniciar, headers, desbloquear, trancar, trancarQuandoPuder, eTravamento,
+    token, senha, erro, desbloqueando, perto, iniciar, headers, desbloquear, trancar, trancarQuandoPuder, eTravamento,
   }
 }
 
