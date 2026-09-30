@@ -191,6 +191,20 @@ async def _remetente(
     raise HTTPException(401, detail={"code": "denuncia_sync_token_invalido"})
 
 
+@sync_router.post("/pulso")
+async def sync_pulso(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    remetente: Annotated[DenunciaRemetente, Depends(_remetente)],
+) -> dict:
+    """O mini chama no fim de toda rodada, mesmo sem nada novo — é o "cópia
+    de há 3 min" do topo das telas. Sem isso, horário parado (noite, fim de
+    semana) pareceria mini desligado."""
+    remetente.ultimo_envio_em = datetime.now(UTC)
+    await session.commit()
+    return {"ok": True}
+
+
+# Rota genérica por último: `/pulso` acima não pode cair aqui.
 @sync_router.post("/{tabela}")
 async def sync_tabela(
     tabela: str,

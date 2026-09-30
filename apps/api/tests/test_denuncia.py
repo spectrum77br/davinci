@@ -236,3 +236,12 @@ async def test_resumo_conta_provas_fora_do_mega_e_ficha_traz_caminho(client, mak
     ficha = (await client.get("/api/denuncia/anuncios/A1")).json()
     caminhos = {p["id"]: p["mega_caminho"] for p in ficha["provas"]}
     assert caminhos == {30: "/Fiscalização/Denuncias/A1 - loja_x/a.png", 31: None}
+
+
+async def test_pulso_marca_contato_sem_mandar_nada(client, db):
+    assert (await db.execute(text("SELECT ultimo_envio_em FROM denuncia_remetentes"))).scalar() is None
+    r = await client.post("/api/denuncia/sync/pulso", headers=H)
+    assert r.status_code == 200
+    db.expire_all()
+    assert (await db.execute(text("SELECT ultimo_envio_em FROM denuncia_remetentes"))).scalar() is not None
+    assert (await client.post("/api/denuncia/sync/pulso")).status_code == 401

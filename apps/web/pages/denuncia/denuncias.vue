@@ -46,7 +46,7 @@ const itens = ref<Grupo[]>([])
 const total = ref(0)
 const resumo = ref<Resposta['resumo']>({})
 const opcoes = ref<Resposta['opcoes']>({ canais: [], situacoes: [] })
-const carregando = ref(false)
+const carregando = ref(true)
 const erro = ref<string | null>(null)
 const copia = ref<{ carregar: () => Promise<void> } | null>(null)
 
@@ -193,7 +193,8 @@ onMounted(carregar)
           </tr>
           <tr v-for="g in itens" :key="g.id" class="cursor-pointer" @click="abrir(g)">
             <td class="text-xs tabular-nums whitespace-nowrap">
-              {{ dataBr(g.data, false) }}<span v-if="g.hora" class="text-muted-foreground"> {{ g.hora }}</span>
+              {{ dataBr(g.data, false) }}
+              <div v-if="g.hora" class="text-[11px] text-muted-foreground">{{ g.hora }}</div>
             </td>
             <td class="text-xs whitespace-nowrap">
               {{ g.canal }}

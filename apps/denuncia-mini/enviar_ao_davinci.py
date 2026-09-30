@@ -223,6 +223,9 @@ def main():
             if subidos or sem:
                 partes.append("provas: %d arquivos (%.1f MB)%s" % (
                     subidos, b / 1048576.0, ", %d sem arquivo no mini" % sem if sem else ""))
+        # sinal de vida: o topo das telas mostra "cópia de há N min" mesmo
+        # quando nada mudou (noite, fim de semana)
+        pedir(cfg, "POST", "/api/denuncia/sync/pulso", {})
     except Exception as e:  # noqa: BLE001 — a próxima rodada tenta de novo
         log("ERRO: %s" % e)
         return 1

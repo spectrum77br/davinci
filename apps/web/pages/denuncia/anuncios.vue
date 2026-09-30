@@ -49,7 +49,7 @@ const total = ref(0)
 const numeros = ref<Resposta['numeros'] | null>(null)
 const opcoes = ref<Resposta['opcoes']>({ marketplaces: [], grupos: [] })
 const offset = ref(0)
-const carregando = ref(false)
+const carregando = ref(true)
 const erro = ref<string | null>(null)
 const copia = ref<{ carregar: () => Promise<void> } | null>(null)
 

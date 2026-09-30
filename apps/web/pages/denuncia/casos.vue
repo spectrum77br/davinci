@@ -39,7 +39,7 @@ type Detalhe = {
 const { api } = useApi()
 const itens = ref<Caso[]>([])
 const porStatus = ref<Record<string, number>>({})
-const carregando = ref(false)
+const carregando = ref(true)
 const erro = ref<string | null>(null)
 const copia = ref<{ carregar: () => Promise<void> } | null>(null)
 const status = ref('')
