@@ -1,4 +1,4 @@
-"""NF Faturador › Emissão de Serviço — NFS-e pela NFE.io (28/09/2026; motor NFE.io 29/09).
+"""Cadastros › Emissão de Serviço — NFS-e pela NFE.io (28/09/2026; motor NFE.io 29/09).
 
 Recurso de permissão `emissao_servico` (view/edit/delete). Emitir, reenviar,
 conferir e ligar empresa pedem `edit`; cancelar pede `delete`; sincronizar

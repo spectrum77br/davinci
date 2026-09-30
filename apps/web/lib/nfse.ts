@@ -1,4 +1,4 @@
-// Tipos e helpers da aba NF Faturador › Emissão de Serviço (NFS-e).
+// Tipos e helpers da aba Cadastros › Emissão de Serviço (NFS-e).
 //
 // 29/09/2026: o motor passou a ser a NFE.io (a NFE.io assina, numera e fala com
 // a prefeitura; não há mais senha do certificado). Teste × produção agora é de

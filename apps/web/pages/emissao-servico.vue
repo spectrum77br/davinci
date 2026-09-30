@@ -1,5 +1,5 @@
 <script setup lang="ts">
-// NF Faturador › Emissão de Serviço: NFS-e de intermediação das empresas do
+// Cadastros › Emissão de Serviço (ao lado de Empresas desde 30/09): NFS-e de intermediação das empresas do
 // grupo. Eduardo: tomador do grupo ou de fora, "todo mês, as mesmas" — por isso
 // as notas fixas e o "Emitir do mês".
 //
@@ -21,7 +21,7 @@ import {
   BookUser, Building2, CheckCircle2, FilePlus2, FileText, FlaskConical, Loader2, RotateCcw, Send, ShieldAlert,
 } from 'lucide-vue-next'
 import { Button } from '~/components/ui/button'
-import { TABS_NF } from '~/lib/navGroups'
+import { TABS_CADASTROS } from '~/lib/navGroups'
 import {
   erroApi, fmtMes, itemReenvio, mesAtual, mesValido, NFSE_TELA, plural, prestadorPorId, STATUS_PARA_RESOLVER,
   type AbaId, type AbrirModeloOpts, type AbrirTomadorOpts, type AvulsaApi, type CancelarApi, type ConfirmApi,
@@ -569,7 +569,7 @@ onBeforeRouteLeave(() => {
 <template>
   <TooltipProvider :delay-duration="300">
     <div class="space-y-5">
-      <RouteTabs :tabs="TABS_NF" />
+      <RouteTabs :tabs="TABS_CADASTROS" />
 
       <PageHeader
         title="Emissão de Serviço"

@@ -101,7 +101,7 @@ export const RESOURCE_GROUPS: ResourceGroup[] = [
     label: 'Cadastros',
     resources: [
       'empresa', 'cadastro', 'lojas_info', 'nf_faturador', 'nf_faturamento',
-      // Emissão de Serviço (28/09/2026): NFS-e Nacional, aba do NF Faturador.
+      // Emissão de Serviço (28/09/2026): NFS-e pela NFE.io, aba de Cadastros (ao lado de Empresas).
       'emissao_servico', 'segmentos',
       // Marcas e Redes Sociais (15/09/2026) — abas novas do grupo Cadastros.
       'marcas', 'redes_sociais', 'email_padroes',
