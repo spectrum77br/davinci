@@ -40,8 +40,12 @@ novo e revogar a antiga (`revoked_at`).
 - Se mais de 20% das linhas já mandadas de uma tabela "somem" numa rodada, ele
   para sem apagar nada no DaVinci (banco errado ou pela metade) e registra no log.
 - Linhas de teste da API (`teste = 1`) não saem do mini.
-- Provas: o DaVinci confere o sha256 de cada arquivo; até `MAX_MB_RODADA`
-  (400 MB) por rodada, então a primeira carga (~4 GB) leva algumas horas.
+- **Provas: só a ficha vem pro DaVinci** (tipo, data, tamanho, `mega_caminho`).
+  Os arquivos ficam no MEGA da empresa (conta sac@makisa, `/Fiscalização/…`) —
+  decisão do Vinicius em 30/09 (o disco do servidor do DaVinci tinha 11 GB
+  livres e as provas somavam 3,9 GB, crescendo 100–300 MB/dia). Por isso o
+  agendador roda com `--so-dados`. A porta de arquivo (PUT com sha256) ficou
+  pronta caso um dia se queira subir alguma.
 
 ## Comandos
 

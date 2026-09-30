@@ -5,8 +5,9 @@ Contexto em `models/denuncia.py`. Duas metades:
 
 1. **`/api/denuncia/sync/*`** — só o remetente cadastrado (`denuncia_remetentes`,
    `Authorization: Bearer <token>`). O `enviar_ao_davinci.py` do mini manda,
-   por tabela, as linhas novas ou mudadas e os ids que sumiram; depois pergunta
-   quais provas ainda estão sem arquivo e sobe os arquivos um a um.
+   por tabela, as linhas novas ou mudadas e os ids que sumiram. Os ARQUIVOS das
+   provas ficam no MEGA (Vinicius, 30/09: disco do servidor curto); a porta de
+   arquivo (`PUT …/provas/{id}/arquivo`) existe mas o mini roda `--so-dados`.
 2. **Telas** — `require_permission("denuncia", "view")`. Só leitura: quem muda
    algo é o sistema do mini.
 
@@ -338,6 +339,10 @@ def _prova_resumo(p: DenunciaProva) -> dict:
         "enviado_em": d.get("enviado_em"),
         "enviado_por": d.get("enviado_por"),
         "obs": d.get("obs"),
+        # 30/09: as provas ficam no MEGA (conta sac@makisa), não no disco do
+        # DaVinci — a tela mostra a pasta e copia o caminho.
+        "mega_caminho": d.get("mega_caminho"),
+        "mega_em": d.get("mega_em"),
         "tem_arquivo": p.arquivo_local is not None,
     }
 
@@ -362,9 +367,13 @@ async def resumo(
         ("provas", DenunciaProva),
     ):
         contagens[nome] = (await session.execute(select(func.count()).select_from(m))).scalar() or 0
-    contagens["provas_sem_arquivo"] = (
+    # prova que o sistema do mini ainda não conseguiu pôr no MEGA (login do
+    # MEGA caiu, sem internet…) — a tela avisa quando passa de zero.
+    contagens["provas_fora_do_mega"] = (
         await session.execute(
-            select(func.count()).select_from(DenunciaProva).where(DenunciaProva.arquivo_local.is_(None))
+            select(func.count())
+            .select_from(DenunciaProva)
+            .where(DenunciaProva.dados["mega_em"].astext.is_(None))
         )
     ).scalar() or 0
     return {"ultimo_envio_em": ultimo, **contagens}

@@ -176,7 +176,8 @@ async def test_prova_arquivo_sobe_e_confere_hash(client, make_user, auth_as, pas
         "/api/denuncia/sync/provas",
         json={"linhas": [
             {"id": 10, "anuncio_id": "A1", "tipo": "Captura no ato", "arquivo": "A1/x.png",
-             "nome_original": "x.png", "sha256": sha, "tamanho": len(conteudo)},
+             "nome_original": "x.png", "sha256": sha, "tamanho": len(conteudo),
+             "mega_caminho": "/Fiscalização/Denuncias/A1 - loja_x/x.png", "mega_em": "2026-09-30 00:11:33"},
             {"id": 11, "anuncio_id": "A1", "tipo": "Outro", "arquivo": "A1/y.pdf", "sha256": "0" * 64},
         ]},
         headers=H,
@@ -216,3 +217,22 @@ async def test_prova_html_sempre_baixa_com_sandbox(client, make_user, auth_as, p
     assert r.headers["content-disposition"].startswith("attachment")
     assert r.headers["content-security-policy"] == "sandbox"
     assert r.headers["x-content-type-options"] == "nosniff"
+
+
+async def test_resumo_conta_provas_fora_do_mega_e_ficha_traz_caminho(client, make_user, auth_as):
+    await _carga(client)
+    await client.post(
+        "/api/denuncia/sync/provas",
+        json={"linhas": [
+            {"id": 30, "anuncio_id": "A1", "tipo": "Print", "arquivo": "A1/a.png",
+             "mega_caminho": "/Fiscalização/Denuncias/A1 - loja_x/a.png", "mega_em": "2026-09-30 00:11:33"},
+            {"id": 31, "anuncio_id": "A1", "tipo": "Print", "arquivo": "A1/b.png", "mega_caminho": None, "mega_em": None},
+        ]},
+        headers=H,
+    )
+    auth_as(await make_user(role=UserRole.ADMIN))
+    r = (await client.get("/api/denuncia/resumo")).json()
+    assert r["provas"] == 2 and r["provas_fora_do_mega"] == 1
+    ficha = (await client.get("/api/denuncia/anuncios/A1")).json()
+    caminhos = {p["id"]: p["mega_caminho"] for p in ficha["provas"]}
+    assert caminhos == {30: "/Fiscalização/Denuncias/A1 - loja_x/a.png", 31: None}

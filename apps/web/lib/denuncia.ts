@@ -15,6 +15,9 @@ export type Prova = {
   enviado_em: string | null
   enviado_por: string | null
   obs: string | null
+  // Os arquivos das provas ficam no MEGA (conta sac@makisa), não no DaVinci.
+  mega_caminho: string | null
+  mega_em: string | null
   tem_arquivo: boolean
 }
 
@@ -24,7 +27,7 @@ export type Resumo = {
   denuncias: number
   casos: number
   provas: number
-  provas_sem_arquivo: number
+  provas_fora_do_mega: number
 }
 
 /** "2026-09-30 00:11:06" → "30/09/26 00:11"; "2026-09-30" → "30/09/26". */

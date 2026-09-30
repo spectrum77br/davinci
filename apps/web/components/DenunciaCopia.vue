@@ -31,6 +31,10 @@ defineExpose({ carregar, resumo })
   >
     <Monitor class="size-3.5" />
     cópia do Mac mini · {{ haQuanto(resumo.ultimo_envio_em) }}
-    <template v-if="resumo.provas_sem_arquivo"> · {{ resumo.provas_sem_arquivo.toLocaleString('pt-BR') }} provas chegando</template>
+    <span
+      v-if="resumo.provas_fora_do_mega"
+      class="text-amber-700 dark:text-amber-400"
+      title="Provas que o sistema do Mac mini ainda não pôs no MEGA — se o número não baixa, o MEGA do mini pode ter desconectado."
+    > · {{ resumo.provas_fora_do_mega.toLocaleString('pt-BR') }} provas fora do MEGA</span>
   </span>
 </template>
