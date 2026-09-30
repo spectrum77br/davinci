@@ -18,7 +18,9 @@ import {
   Boxes, Truck, ClipboardList, Loader2, RefreshCw,
   AlertTriangle, Download, Printer, FileText, FileUp, Upload, Trash2,
   ArrowUp, ArrowDown, Megaphone, Check, LifeBuoy, Send, Video, Package,
+  ChevronDown,
 } from 'lucide-vue-next'
+import { PopoverContent, PopoverPortal, PopoverRoot, PopoverTrigger } from 'reka-ui'
 import { isoDateBrt, isoDaysAgo, isoToday } from '~/lib/date'
 import { erroLinkMega } from '~/lib/linkMega'
 
@@ -189,7 +191,11 @@ const isGerenteEtiquetas = computed(
     (auth.user?.permissions as Record<string, unknown> | undefined)
       ?.controle_estoque_pedidos_todas_tags === true,
 )
-const tagOverride = ref<string>('')
+// Tags marcadas no filtro (caixinhas, 30/09): nenhuma = todas. Vai pro
+// backend como `tag=mala,fake` — ele filtra por OR, como já fazia com as
+// stock_tags do operador.
+const tagsSelecionadas = ref<string[]>([])
+const tagOverride = computed(() => tagsSelecionadas.value.join(','))
 
 const visibleTabs: readonly Tab[] = ['estoque', 'pedidos', 'envios', 'upload-nf']
 
@@ -215,6 +221,30 @@ const TAG_OPTIONS: { slug: string; label: string }[] = [
   { slug: 'eletro', label: 'Eletro' },
   { slug: 'insumos', label: 'Insumos' },
 ]
+
+// Menu de caixinhas do filtro de Tag: marca à vontade e só recarrega ao
+// fechar (clicar fora, Esc ou "Aplicar") — cada clique não refaz a busca.
+const tagMenuAberto = ref(false)
+const tagRascunho = ref<string[]>([])
+function abrirFecharTagMenu(aberto: boolean) {
+  if (aberto) {
+    tagRascunho.value = [...tagsSelecionadas.value]
+  } else {
+    const novo = TAG_OPTIONS.map((o) => o.slug).filter((s) => tagRascunho.value.includes(s))
+    if (novo.join(',') !== tagOverride.value) tagsSelecionadas.value = novo
+  }
+  tagMenuAberto.value = aberto
+}
+function alternarTag(slug: string) {
+  tagRascunho.value = tagRascunho.value.includes(slug)
+    ? tagRascunho.value.filter((s) => s !== slug)
+    : [...tagRascunho.value, slug]
+}
+const tagResumo = computed(() => {
+  const labels = TAG_OPTIONS.filter((o) => tagsSelecionadas.value.includes(o.slug)).map((o) => o.label)
+  if (!labels.length) return 'todas'
+  return labels.length <= 2 ? labels.join(', ') : `${labels.length} tags`
+})
 
 // Manual reload — calls POST /api/estoque/sync-stocks which fans out
 // GET /estoques/saldos on Bling for the visible product set. Used when
@@ -2080,27 +2110,67 @@ async function conferirTodos() {
           </select>
         </label>
       </template>
-      <label
+      <div
         v-if="canUseTagFilter || (isGerenteEtiquetas && tab === 'pedidos')"
         class="inline-flex items-center gap-1"
       >
         Tag:
-        <select
-          v-model="tagOverride"
-          class="h-7 border rounded px-2 bg-background"
-          :class="tagOverride === '' ? 'text-muted-foreground' : ''"
-        >
-          <option value="" class="text-muted-foreground">todas</option>
-          <option
-            v-for="opt in TAG_OPTIONS"
-            :key="opt.slug"
-            :value="opt.slug"
-            class="text-foreground"
-          >
-            {{ opt.label }}
-          </option>
-        </select>
-      </label>
+        <PopoverRoot :open="tagMenuAberto" @update:open="abrirFecharTagMenu">
+          <PopoverTrigger as-child>
+            <button
+              type="button"
+              class="h-7 w-44 border rounded px-2 bg-background inline-flex items-center gap-1 text-left"
+              :class="tagsSelecionadas.length ? '' : 'text-muted-foreground'"
+              :title="tagsSelecionadas.length ? TAG_OPTIONS.filter((o) => tagsSelecionadas.includes(o.slug)).map((o) => o.label).join(', ') : 'Marque uma ou mais tags'"
+            >
+              <span class="truncate">{{ tagResumo }}</span>
+              <ChevronDown class="ml-auto size-3.5 shrink-0 opacity-60" />
+            </button>
+          </PopoverTrigger>
+          <PopoverPortal>
+            <PopoverContent
+              side="bottom"
+              align="start"
+              :side-offset="4"
+              :collision-padding="8"
+              class="z-[70] w-60 max-w-[calc(100vw-16px)] rounded-md border bg-background p-2 shadow-lg"
+            >
+              <div class="mb-1 flex items-center px-1 text-[11px] font-medium text-muted-foreground">
+                Tag — marque uma ou mais
+                <button
+                  v-if="tagRascunho.length"
+                  type="button"
+                  class="ml-auto font-normal underline hover:text-foreground"
+                  @click="tagRascunho = []"
+                >limpar</button>
+              </div>
+              <div class="max-h-72 overflow-y-auto">
+                <label
+                  v-for="opt in TAG_OPTIONS"
+                  :key="opt.slug"
+                  class="flex cursor-pointer items-center gap-2 rounded px-1 py-1 text-sm hover:bg-muted/50"
+                >
+                  <input
+                    type="checkbox"
+                    class="size-4"
+                    :checked="tagRascunho.includes(opt.slug)"
+                    @change="alternarTag(opt.slug)"
+                  />
+                  {{ opt.label }}
+                </label>
+              </div>
+              <div class="mt-1 flex items-center gap-2 border-t px-1 pt-2 text-[11px] text-muted-foreground">
+                Nenhuma marcada = todas.
+                <button
+                  type="button"
+                  class="ml-auto h-7 rounded border px-3 text-xs font-medium text-foreground hover:bg-muted"
+                  @click="abrirFecharTagMenu(false)"
+                >Aplicar</button>
+              </div>
+            </PopoverContent>
+          </PopoverPortal>
+        </PopoverRoot>
+      </div>
       <!-- Stock-presence filter — only meaningful on the Estoque tab.
            Backend ignores the param for Pedidos / Envios, so it's safe
            to leave the dropdown visible everywhere, but we keep it

@@ -18,8 +18,8 @@
                                carry it; this is the manual hook).
 
 Scoping:
-  * Admin (UserRole.ADMIN) sees everything; can pass `?tag=` to
-    narrow to a specific operator's view.
+  * Admin (UserRole.ADMIN) sees everything; can pass `?tag=` (one tag
+    or several comma-separated, e.g. `mala,fake`) to narrow the view.
   * Operator (stock_tag set, role != admin) sees ONLY products /
     orders whose SKU ends with `.{stock_tag}` and `situacao = 'A'`,
     `formato = 'S'` (simples — kits aren't operated by warehouse).
@@ -212,23 +212,35 @@ def _pedidos_todas_tags(user: User) -> bool:
     return bool(perms.get("controle_estoque_pedidos_todas_tags", False))
 
 
+def _parse_tag_override(override: str | None) -> list[str]:
+    """`?tag=` da tela: uma tag (`mala`) ou várias separadas por vírgula
+    (`mala,fake` — caixinhas do filtro de Tag, 30/09). Vazio = []."""
+    tags: list[str] = []
+    for parte in (override or "").split(","):
+        t = parte.strip().lower()
+        if not t:
+            continue
+        if t not in _VALID_TAGS:
+            raise HTTPException(400, detail={"code": "invalid_tag"})
+        if t not in tags:
+            tags.append(t)
+    return tags
+
+
 def _resolve_tags(user: User, override: str | None) -> list[str] | None:
     """Returns the list of tags to OR-filter products by. `None` means
     "no tag filter" (admin viewing all). Empty list also collapses to
     None — UI sends "" for "todas" no dropdown.
 
     Admin: honra `override` se vier; senão None (vê tudo).
-    Non-admin: se vier `override` E estiver entre as stock_tags do user,
-    restringe ao override (sub-seleção — ex. churchill tem todas as 9 tags
-    e filtra uma por vez pela UI). Senão, devolve todas as stock_tags.
-    Segurança preservada: usuário não consegue ver tag fora do seu set."""
+    Non-admin: se vier `override` E todas as tags dele estiverem entre as
+    stock_tags do user, restringe ao override (sub-seleção — ex. churchill
+    tem todas as 9 tags e marca uma ou mais na UI). Senão, devolve todas as
+    stock_tags. Segurança preservada: usuário não consegue ver tag fora do
+    seu set."""
+    pedidas = _parse_tag_override(override)
     if user.role == UserRole.ADMIN:
-        if override:
-            ov = override.strip().lower()
-            if ov not in _VALID_TAGS:
-                raise HTTPException(400, detail={"code": "invalid_tag"})
-            return [ov]
-        return None
+        return pedidas or None
 
     allowed = [
         t.lower() for t in (user.stock_tags or [])
@@ -237,13 +249,10 @@ def _resolve_tags(user: User, override: str | None) -> list[str] | None:
     if not allowed:
         raise HTTPException(403, detail={"code": "no_stock_tag"})
 
-    if override:
-        ov = override.strip().lower()
-        if ov not in _VALID_TAGS:
-            raise HTTPException(400, detail={"code": "invalid_tag"})
-        if ov not in allowed:
+    if pedidas:
+        if any(t not in allowed for t in pedidas):
             raise HTTPException(403, detail={"code": "tag_not_allowed"})
-        return [ov]
+        return pedidas
 
     return allowed
 
@@ -252,12 +261,9 @@ def _tags_pedidos(user: User, tag: str | None) -> list[str] | None:
     """Tags que o chamador enxerga na aba Pedidos (None = todas).
 
     Gerente de etiquetas não tem cerca aqui (vê o time inteiro), mas o
-    dropdown de tag continua valendo como sub-seleção."""
+    filtro de tag continua valendo como sub-seleção."""
     if user.role != UserRole.ADMIN and _pedidos_todas_tags(user):
-        ov = (tag or "").strip().lower()
-        if ov and ov not in _VALID_TAGS:
-            raise HTTPException(400, detail={"code": "invalid_tag"})
-        return [ov] if ov else None
+        return _parse_tag_override(tag) or None
     return _resolve_tags(user, tag)
 
 
