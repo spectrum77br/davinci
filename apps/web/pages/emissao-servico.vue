@@ -369,6 +369,31 @@ async function atualizarEmissoes(ids: string[]): Promise<Emissao[] | null> {
   }
 }
 
+// Excluir nota fixa (Eduardo, 30/09: "precisa ter um botão para apagar quando
+// necessário"). Do "Emitir do mês", da lista de notas fixas e do formulário.
+async function excluirModelo(m: Modelo): Promise<boolean> {
+  const ok = await confirmar({
+    tom: 'perigo',
+    titulo: `Excluir a nota fixa “${m.nome}”?`,
+    texto: 'Se ela já tiver nota emitida, fica só desativada: o que já saiu não muda.',
+    botao: 'Excluir nota fixa',
+  })
+  if (!ok) return false
+  try {
+    await api(`/api/nfse/modelos/${m.id}`, { method: 'DELETE' })
+    await recarregar()
+    if (modelos.value.some((x) => x.id === m.id)) {
+      toasts.info('A nota fixa já tinha nota: ficou desativada', 'O que já saiu continua em Notas enviadas.')
+    } else {
+      toasts.success('Nota fixa excluída')
+    }
+    return true
+  } catch (e) {
+    toasts.error('Não deu para excluir a nota fixa', erroApi(e))
+    return false
+  }
+}
+
 // "Reenviar por e-mail": a NFE.io manda o PDF e o XML de novo para o e-mail do tomador.
 async function enviarEmail(e: Emissao): Promise<boolean> {
   const ok = await confirmar({
@@ -409,6 +434,7 @@ const tela: NfseTela = {
   confirmar,
   abrirEmpresa,
   abrirModelo,
+  excluirModelo,
   abrirTomador,
   abrirNota,
   abrirAvulsa,

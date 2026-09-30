@@ -21,7 +21,7 @@
 // empresa, a nota fixa salva percentual = null e acompanha a empresa se a % dela
 // mudar. Sem % na empresa, o campo é obrigatório, como antes.
 import { computed, nextTick, ref, watch } from 'vue'
-import { Banknote, Building2, Calculator, ChevronRight, ExternalLink, FileText, Loader2, Percent } from 'lucide-vue-next'
+import { Banknote, Building2, Calculator, ChevronRight, ExternalLink, FileText, Loader2, Percent, Trash2 } from 'lucide-vue-next'
 import { Button } from '~/components/ui/button'
 import {
   calcularPercentual, campoDoErro, codigoErro, erroApi, fmtBrl, fmtMes, fmtPct, fmtPctOrigem, inserirNoCursor,
@@ -388,6 +388,12 @@ async function cancelar() {
     if (!ok) return
   }
   fechar(null)
+}
+
+// Excluir daqui mesmo (Eduardo, 30/09: "precisa ter um botão para apagar").
+async function excluir() {
+  if (!original.value) return
+  if (await tela.excluirModelo(original.value)) fechar(null)
 }
 
 defineExpose<ModeloApi>({ abrir })
@@ -985,6 +991,17 @@ const classeErro = 'border-red-500 dark:border-red-400'
       />
       <span v-else />
       <div class="flex items-center gap-2">
+        <Button
+          v-if="editando && original && tela.canDelete.value && !somenteLeitura"
+          type="button"
+          variant="ghost"
+          size="sm"
+          class="text-red-700 hover:text-red-700 dark:text-red-400"
+          :disabled="salvando"
+          @click="excluir"
+        >
+          <Trash2 class="mr-1.5 size-4" aria-hidden="true" /> Excluir
+        </Button>
         <Button type="button" variant="outline" size="sm" :disabled="salvando" @click="cancelar">
           {{ somenteLeitura ? 'Fechar' : 'Cancelar' }}
         </Button>

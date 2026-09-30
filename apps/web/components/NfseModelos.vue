@@ -273,24 +273,7 @@ async function alternarAtiva(m: Modelo, v: boolean) {
 }
 
 async function excluir(m: Modelo) {
-  const ok = await tela.confirmar({
-    tom: 'perigo',
-    titulo: `Excluir a nota fixa “${m.nome}”?`,
-    texto: 'Se ela já tiver nota emitida, fica só desativada: o que já saiu não muda.',
-    botao: 'Excluir nota fixa',
-  })
-  if (!ok) return
-  try {
-    await api(`/api/nfse/modelos/${m.id}`, { method: 'DELETE' })
-    await tela.recarregar()
-    if (tela.modelos.value.some((x) => x.id === m.id)) {
-      toasts.info('A nota fixa já tinha nota: ficou desativada', 'O que já saiu continua em Notas enviadas.')
-    } else {
-      toasts.success('Nota fixa excluída')
-    }
-  } catch (e) {
-    toasts.error('Não deu para excluir a nota fixa', erroApi(e))
-  }
+  await tela.excluirModelo(m)
 }
 
 function itensMenu(m: Modelo): MenuItem[] {

@@ -32,7 +32,7 @@ import { PopoverContent, PopoverPortal, PopoverRoot, PopoverTrigger } from 'reka
 import {
   AlertCircle, AlertTriangle, Building2, CalendarDays, CheckCircle2, ChevronDown, Eye, ExternalLink, FileCheck2,
   FileDown, FilePlus2, HelpCircle, Info, Loader2, Pencil, Plus, RefreshCw, Repeat, RotateCcw, Search, SearchX,
-  Settings2, X,
+  Settings2, Trash2, X,
 } from 'lucide-vue-next'
 import { Button } from '~/components/ui/button'
 import {
@@ -47,7 +47,7 @@ import {
 
 const tela = useNfseTela()
 const { api } = useApi()
-const { mes, canEdit, podeAbrirCadastroEmpresa } = tela
+const { mes, canEdit, canDelete, podeAbrirCadastroEmpresa } = tela
 
 const hoje = mesAtual()
 
@@ -1528,6 +1528,15 @@ const girando = computed(() => carregandoLista.value || tela.carregando.value)
                           <Button v-if="canEdit" size="sm" variant="ghost" class="h-8 px-2.5" @click="editarModelo(l)">
                             <Pencil class="mr-1.5 size-4" aria-hidden="true" /> editar nota fixa
                           </Button>
+                          <Button
+                            v-if="canDelete"
+                            size="sm"
+                            variant="ghost"
+                            class="h-8 px-2.5 text-red-700 hover:text-red-700 dark:text-red-400"
+                            @click="tela.excluirModelo(l.m)"
+                          >
+                            <Trash2 class="mr-1.5 size-4" aria-hidden="true" /> excluir nota fixa
+                          </Button>
                         </div>
                       </PopoverContent>
                     </PopoverPortal>
@@ -1629,9 +1638,18 @@ const girando = computed(() => carregandoLista.value || tela.carregando.value)
                       <dd v-if="d.extra" class="tabular-nums text-muted-foreground">{{ d.extra }}</dd>
                     </div>
                   </dl>
-                  <div v-if="canEdit || temNota(l)" class="mt-3 flex flex-wrap gap-2">
+                  <div v-if="canEdit || canDelete || temNota(l)" class="mt-3 flex flex-wrap gap-2">
                     <Button v-if="canEdit" size="sm" variant="ghost" class="h-8 px-2.5" @click="editarModelo(l)">
                       <Pencil class="mr-1.5 size-4" aria-hidden="true" /> editar nota fixa
+                    </Button>
+                    <Button
+                      v-if="canDelete"
+                      size="sm"
+                      variant="ghost"
+                      class="h-8 px-2.5 text-red-700 hover:text-red-700 dark:text-red-400"
+                      @click="tela.excluirModelo(l.m)"
+                    >
+                      <Trash2 class="mr-1.5 size-4" aria-hidden="true" /> excluir nota fixa
                     </Button>
                     <Button v-if="temNota(l)" size="sm" variant="ghost" class="h-8 px-2.5" @click="verNota(l)">
                       <Eye class="mr-1.5 size-4" aria-hidden="true" />

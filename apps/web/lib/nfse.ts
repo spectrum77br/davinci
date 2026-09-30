@@ -421,6 +421,9 @@ export interface NfseTela {
   confirmar(o: ConfirmarOpts): Promise<boolean>
   abrirEmpresa(companyId: string, foco?: SecaoEmpresa): Promise<boolean> // true = salvou algo
   abrirModelo(o?: AbrirModeloOpts): Promise<Modelo | null>
+  // Excluir nota fixa (Eduardo, 30/09: "precisa ter um botão para apagar"):
+  // pergunta antes; se ela já tem nota emitida, só desativa. true = feito.
+  excluirModelo(m: Modelo): Promise<boolean>
   abrirTomador(o?: AbrirTomadorOpts): Promise<Tomador | null>
   abrirNota(e: Emissao | string): Promise<void> // resolve ao fechar
   abrirAvulsa(o?: { competencia?: string }): Promise<void>
