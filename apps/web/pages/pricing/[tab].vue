@@ -202,6 +202,9 @@ const kitCount = computed(() => KIT_COUNT_BY_DEPT[department.value] ?? 4)
 // Só informativo: aparece embaixo do "Kit N" no cabeçalho da aba Produtos
 // e no hover das colunas "kit N" da calculadora. Mala e eletro têm um kit
 // só, sem nome — ficam sem legenda.
+// Kit 8 (Eduardo, 30/09/2026): "agora é celular + fone + óculos + airtag".
+// Os custos já estavam nessa conta (A17 12.128: 560 + 40 + 320 + 22 = 942);
+// só o nome tinha ficado em "Celular + Airtag".
 const KIT_NOMES_CELULAR: Record<number, string> = {
   1: 'Celular + Fone c/ fio',
   2: 'Celular + Fone',
@@ -210,7 +213,7 @@ const KIT_NOMES_CELULAR: Record<number, string> = {
   5: 'Celular + Relógio + Airtag',
   6: 'Celular + Fone + Airtag',
   7: 'Celular + Óculos',
-  8: 'Celular + Airtag',
+  8: 'Celular + Fone + Óculos + Airtag',
 }
 // Versão curta pro cabeçalho (coluna estreita): "Celular" vira "Cel".
 function kitNome(k: number): string {
