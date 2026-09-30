@@ -294,3 +294,77 @@ async def test_patch_de_outro_campo_nao_apaga_o_responsavel(client, make_user, a
     r = await client.patch(f"/api/companies/{cid}", json={"uf": "sp"})
     assert r.status_code == 200, r.text
     assert r.json()["responsavel_nome"] == "ingrid"
+
+
+@pytest.mark.asyncio
+async def test_porcentagem_da_empresa_grava_valida_e_limpa(client, make_user, auth_as):
+    """Eduardo, 29/09/2026: "em cadastros na aba empresas, precisamos colocar uma
+    nova coluna, porcentagem". É o % padrão das notas de serviço de percentual
+    da empresa: aceita vírgula, 4 casas, de 0 (exclusive) a 100."""
+    admin = await make_user(role=UserRole.ADMIN)
+    auth_as(admin)
+    r = await client.post(
+        "/api/companies",
+        json={"razao_social": "PCT LTDA", "apelido": "pct", "percentual_servico": "0,5"},
+    )
+    assert r.status_code == 201, r.text
+    cid = r.json()["id"]
+    assert r.json()["percentual_servico"] == "0.5000"
+
+    # A grade (de onde a tela lê a coluna) e o detalhe devolvem.
+    g = (await client.get("/api/companies/grid")).json()
+    linha = next(x for x in g["rows"] if x["company"]["id"] == cid)
+    assert linha["company"]["percentual_servico"] == "0.5000"
+    assert (await client.get(f"/api/companies/{cid}")).json()["percentual_servico"] == "0.5000"
+
+    for digitado, gravado in (("1,25%", "1.2500"), ("0.1234", "0.1234"), (100, "100.0000")):
+        r = await client.patch(f"/api/companies/{cid}", json={"percentual_servico": digitado})
+        assert r.status_code == 200, (digitado, r.text)
+        assert r.json()["percentual_servico"] == gravado
+
+    # Editar outra coluna não apaga a porcentagem.
+    r = await client.patch(f"/api/companies/{cid}", json={"obs": "x"})
+    assert r.json()["percentual_servico"] == "100.0000"
+
+    ruins = (
+        ("0", "maior que zero"),
+        ("-1", "maior que zero"),
+        ("100,01", "100%"),
+        ("0,12345", "4 casas"),
+        ("abc", "Digite só o número"),
+    )
+    for digitado, trecho in ruins:
+        r = await client.patch(f"/api/companies/{cid}", json={"percentual_servico": digitado})
+        assert r.status_code == 422, (digitado, r.text)
+        erro = r.json()["detail"][0]
+        assert erro["loc"][-1] == "percentual_servico", erro
+        assert "porcentagem" in erro["msg"] and trecho in erro["msg"], (digitado, erro["msg"])
+    r = await client.post(
+        "/api/companies",
+        json={"razao_social": "X", "apelido": "x", "percentual_servico": "101"},
+    )
+    assert r.status_code == 422
+
+    # Vazio ou null limpa.
+    for vazio in ("", None):
+        r = await client.patch(f"/api/companies/{cid}", json={"percentual_servico": "2"})
+        assert r.json()["percentual_servico"] == "2.0000"
+        r = await client.patch(f"/api/companies/{cid}", json={"percentual_servico": vazio})
+        assert r.status_code == 200, r.text
+        assert r.json()["percentual_servico"] is None
+
+
+@pytest.mark.asyncio
+async def test_o_banco_barra_porcentagem_fora_da_faixa(db):
+    """A trava `ck_companies_percentual_servico` (0339) segura mesmo sem a API."""
+    from decimal import Decimal
+
+    from sqlalchemy.exc import IntegrityError
+
+    from app.models import Company
+
+    for ruim in (Decimal("0"), Decimal("100.5")):
+        db.add(Company(razao_social="Y", apelido="y", percentual_servico=ruim))
+        with pytest.raises(IntegrityError):
+            await db.flush()
+        await db.rollback()

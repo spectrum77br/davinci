@@ -39,7 +39,7 @@ EXCLUIDAS = re.compile(
     r"|marketing_agent_heartbeat$|alerts$|verificar_margem$|perfis$"
     # trilhas que o próprio sistema já grava junto com a mudança da pessoa
     r"|products_audit$|product_links_audit$|audit_em_andamento_data$|margem_audit$"
-    r"|bling_envio_evento$|bling_envio_correcao$|prioridade_estoque_movimentos$)"
+    r"|bling_envio_evento$|bling_envio_correcao$|prioridade_estoque_movimentos$|nfse_chamada$)"
     r"|(_bak|bkp|backup)",
     re.I,
 )

@@ -61,6 +61,7 @@ export const TABS_CADASTROS: RouteTab[] = [
 export const TABS_NF: RouteTab[] = [
   { to: '/nf-cadastros', label: 'NF (Faturador)', resource: 'nf_faturador' },
   { to: '/nf-faturamento', label: 'Faturamento NF', resource: 'nf_faturamento' },
+  { to: '/emissao-servico', label: 'Emissão de Serviço', resource: 'emissao_servico' },
 ]
 
 export const TABS_SISTEMA: RouteTab[] = [

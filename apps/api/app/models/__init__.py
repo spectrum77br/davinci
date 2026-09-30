@@ -103,6 +103,14 @@ from app.models.logistica import (
     LogisticaStatusAnexo,
 )
 from app.models.marca import Marca, MarcaEmailAssinatura, MarcaEmailPadrao, RedeSocial
+from app.models.nfse import (
+    CompanyFiscal,
+    NfseChamada,
+    NfseEmissao,
+    NfseEvento,
+    NfseModelo,
+    NfseTomador,
+)
 from app.models.historico import HistoricoAcesso, HistoricoAlteracao, HistoricoEvento
 from app.models.margem_audit import MargemAudit
 from app.models.margem_saldo_manual import MargemSaldoManual
@@ -191,6 +199,12 @@ from app.models.user import User
 from app.models.user_settings import UserSettings
 
 __all__ = [
+    "CompanyFiscal",
+    "NfseChamada",
+    "NfseEmissao",
+    "NfseEvento",
+    "NfseModelo",
+    "NfseTomador",
     "Alert",
     "ClaudeConector",
     "AlertSeverity",

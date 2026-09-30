@@ -1,14 +1,17 @@
 from datetime import datetime
+from decimal import Decimal
 from uuid import UUID, uuid4
 
 from sqlalchemy import (
     BigInteger,
+    CheckConstraint,
     DateTime,
     Enum,
     ForeignKey,
     Index,
     Integer,
     LargeBinary,
+    Numeric,
     String,
     Text,
     UniqueConstraint,
@@ -48,6 +51,11 @@ class Company(Base, TimestampMixin):
             unique=True,
             postgresql_where=text("ip IS NOT NULL AND btrim(ip) <> ''"),
         ),
+        # Migration 0339 (op.f, mesmo nome no banco).
+        CheckConstraint(
+            "percentual_servico IS NULL OR (percentual_servico > 0 AND percentual_servico <= 100)",
+            name="percentual_servico",
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
@@ -68,6 +76,10 @@ class Company(Base, TimestampMixin):
     site_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     operacao: Mapped[str | None] = mapped_column(Text, nullable=True)
     contabilidade: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Porcentagem da empresa (Eduardo, 29/09/2026): o % PADRÃO das notas de
+    # serviço (NFS-e) de percentual que ELA emite — 0.5 = 0,5%. A nota fixa sem
+    # % próprio usa este (migration 0339).
+    percentual_servico: Mapped[Decimal | None] = mapped_column(Numeric(9, 4), nullable=True)
     # IP de saída da empresa nos marketplaces. Único entre empresas (índice
     # `uq_companies_ip`, migration 0324): dois CNPJs no mesmo IP é o que o
     # marketplace usa para ligar contas.

@@ -1527,6 +1527,39 @@ async def produtos_novos_bling_tick(ctx: dict) -> None:
         logger.exception("produtos_novos_bling_unhandled")
 
 
+async def nfse_nfeio_reconciliar(ctx: dict) -> None:
+    """A cada 2 min: notas de serviço ainda em andamento na NFE.io (enviando,
+    incerta, processando, cancelando — últimos 15 dias) → GET e traduz o
+    estado. Nunca faz POST. Sem chave configurada ou sem nota pendente = só um
+    SELECT. O webhook (quando cadastrado) adianta; esta rotina é a rede."""
+    from app.services.nfse import emissao as nfse_emissao
+
+    try:
+        async with session_scope() as s:
+            resumo = await nfse_emissao.conferir_pendentes(s)
+        if resumo.get("conferidas"):
+            logger.info("nfse_nfeio_reconciliar", **resumo)
+    except Exception:  # noqa: BLE001
+        logger.exception("nfse_nfeio_reconciliar_unhandled")
+
+
+async def nfse_nfeio_sync_empresas(ctx: dict) -> None:
+    """1x por dia (06:40): relê na NFE.io ambiente (Teste/Produção), situação
+    fiscal e validade do certificado das empresas ligadas — alimenta as
+    pendências da aba Emissão de Serviço. Só GET."""
+    from app.services.nfse import empresas as nfse_empresas
+    from app.services.nfse import nfeio
+
+    if not nfeio.chave_configurada():
+        return
+    try:
+        async with session_scope() as s, nfeio.ClienteNfeio() as cli:
+            resumo = await nfse_empresas.atualizar_ligadas(s, cli)
+        logger.info("nfse_nfeio_sync_empresas", **resumo)
+    except Exception:  # noqa: BLE001
+        logger.exception("nfse_nfeio_sync_empresas_unhandled")
+
+
 async def produtos_novos_bling_completo(ctx: dict) -> None:
     """1x por dia: confere TODOS os produtos ativos do Bling (rede de segurança
     do tick de 15 min — produto que escapou da página dos mais novos)."""
@@ -4140,6 +4173,12 @@ class WorkerSettings:
         # app principal; o custo por rodada é 1-2 páginas de lista por conta
         # + até 80 detalhes (teto no service).
         cron(pos_vendas_notas_sync, minute={4, 14, 24, 34, 44, 54}, run_at_startup=False),
+        # NFS-e pela NFE.io (aba Emissão de Serviço, 29/09/2026): conferência
+        # das notas em andamento (só GET; sem nota pendente = 1 SELECT) e a
+        # releitura diária das empresas ligadas (ambiente, certificado).
+        cron(nfse_nfeio_reconciliar, minute=_TWO_MIN, run_at_startup=False, timeout=600),
+        # 09:40 UTC = 06:40 de SP (os crons do worker rodam em UTC).
+        cron(nfse_nfeio_sync_empresas, hour=9, minute=40, run_at_startup=False, timeout=600),
     ]
     # Marketing agent-node crons (Shopee sync + command consumer + schedule
     # reconciler) are NOT registered here — they run ONLY on the dedicated

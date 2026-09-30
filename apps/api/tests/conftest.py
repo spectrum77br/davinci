@@ -420,6 +420,13 @@ _CLEANUP_TABLES = (
     "background_jobs",
     "integrations",
     "stores",
+    # NFS-e (antes de companies/company_certificates/users)
+    "nfse_chamada",
+    "nfse_evento",
+    "nfse_emissao",
+    "nfse_modelo",
+    "nfse_tomador",
+    "company_fiscal",
     "companies",
     "faturas",
     "nf_command",

@@ -44,6 +44,7 @@ PAGINAS: dict[str, str] = {
     "/store-info": "Cadastros › Lojas",
     "/admin/segments": "Cadastros › Segmentos",
     "/marcas": "Cadastros › Marcas",
+    "/emissao-servico": "NF Faturador › Emissão de Serviço",
     "/redes-sociais": "Cadastros › Redes Sociais",
     "/email-padroes": "Cadastros › E-mails",
     "/legendas": "Cadastros › Legendas",
@@ -93,6 +94,7 @@ API: dict[str, str] = {
     "/api/stores": "Cadastros › Empresas",
     "/api/segments": "Cadastros › Segmentos",
     "/api/marcas": "Cadastros › Marcas",
+    "/api/nfse": "NF Faturador › Emissão de Serviço",
     "/api/redes-sociais": "Cadastros › Redes Sociais",
     "/api/email-assinaturas": "Cadastros › E-mails",
     "/api/email-padroes": "Cadastros › E-mails",
@@ -166,6 +168,15 @@ ACOES: dict[tuple[str, str], str] = {
     ("POST", "/api/product-links/remover-mortos"): "mandou remover os vínculos mortos",
     # Desde 25/09 baixar o certificado é POST com a senha dele no corpo.
     ("POST", "/api/companies/{company_id}/certificates/{cert_id}/download"): "baixou o certificado digital",
+    # NFS-e (desde 29/09 pela NFE.io): o que vai e volta da NFE.io.
+    ("POST", "/api/nfse/emitir"): "emitiu nota fiscal de serviço (NFS-e)",
+    ("POST", "/api/nfse/emissoes/{emissao_id}/reenviar"): "reenviou nota fiscal de serviço (NFS-e)",
+    ("POST", "/api/nfse/emissoes/{emissao_id}/conferir"): "atualizou nota de serviço da NFE.io",
+    ("POST", "/api/nfse/emissoes/{emissao_id}/cancelar"): "cancelou nota fiscal de serviço (NFS-e)",
+    ("POST", "/api/nfse/emissoes/{emissao_id}/enviar-email"): "pediu o e-mail da nota de serviço",
+    ("POST", "/api/nfse/prestadores/{company_id}/nfeio/ligar"): "ligou a empresa na NFE.io",
+    ("POST", "/api/nfse/prestadores/{company_id}/nfeio/atualizar"): "atualizou a empresa da NFE.io",
+    ("POST", "/api/nfse/nfeio/sincronizar"): "sincronizou as empresas com a NFE.io",
 }
 
 # Só a frase (o evento fica se o banco mudou): GET que carimba e retorno de
@@ -195,6 +206,10 @@ REVELACOES: dict[tuple[str, str], str] = {
 # quem só estava com a tela aberta seria mentir.
 ROTAS_DE_ROBO: set[tuple[str, str]] = {
     ("POST", "/api/margens/marketplace/refresh"),
+    # NFS-e (30/09/2026): a tela pergunta a cada ~4 s se a nota saiu (só GET na
+    # NFE.io) e a prévia só monta — não mudam nada que a pessoa fez.
+    ("POST", "/api/nfse/emissoes/atualizar"),
+    ("POST", "/api/nfse/previa"),
 }
 
 # GET que muda coisa e é de pessoa: marca a etiqueta como impressa, e o
@@ -254,6 +269,11 @@ TABELAS: dict[str, str] = {
     "margem_saldo_manual": "Saldo manual (Margem)",
     "historico_acesso": "Acesso ao Histórico",
     "importacao_lotes": "Lote de importação",
+    "company_fiscal": "Dados fiscais da empresa (NFS-e)",
+    "nfse_tomador": "Tomador de NFS-e",
+    "nfse_modelo": "Modelo de NFS-e mensal",
+    "nfse_emissao": "Nota fiscal de serviço (NFS-e)",
+    "nfse_evento": "Cancelamento de NFS-e",
 }
 
 CAMPOS: dict[str, str] = {
@@ -309,6 +329,12 @@ CAMPOS: dict[str, str] = {
     "user_id": "Pessoa",
     "pricing_product_id": "Produto",
     "pricing_account_id": "Conta",
+    # NFS-e de percentual (29/09): "Base padrao"/"Base calculo" sem acento ficava feio.
+    "tipo_valor": "Tipo de valor (fixo ou %)",
+    "base_padrao": "Base sugerida",
+    "base_calculo": "Base de cálculo",
+    # Porcentagem da empresa (Cadastros › Empresas, 29/09): % padrão da NFS-e.
+    "percentual_servico": "Porcentagem (nota de serviço)",
 }
 for _i in range(1, 6):
     CAMPOS[f"margin{_i}"] = f"Margem {_i}"

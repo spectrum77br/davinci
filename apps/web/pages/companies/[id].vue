@@ -7,6 +7,7 @@ import {
   type Marketplace,
   type StoreStatus,
 } from '~/composables/useMarketplaces'
+import { PCT_EMPRESA_DICA, lerPctEmpresa, pctParaCampo } from '~/lib/percentualEmpresa'
 
 definePageMeta({ middleware: ['permission'], permission: { resource: 'empresa', action: 'view' } })
 
@@ -34,6 +35,8 @@ type CompanyDetail = {
   site_url: string | null
   operacao: string | null
   contabilidade: string | null
+  // % padrão das notas de serviço de percentual ("0.5000" = 0,5%).
+  percentual_servico?: string | null
   obs: string | null
   created_at: string
   updated_at: string
@@ -75,6 +78,19 @@ const company = ref<CompanyDetail | null>(null)
 const loading = ref(false)
 const error = ref<string | null>(null)
 const saveMsg = ref<string | null>(null)
+// A porcentagem edita como texto ("0,5"); a API guarda e devolve "0.5000".
+const pctCampo = ref('')
+
+// Os campos de texto vêm como null da API e o <Input> só aceita texto: o null
+// aparece vazio e só muda quando a pessoa digita — sem mexer, continua null e
+// o salvar manda null como antes.
+type CampoTexto = 'cnpj' | 'uf' | 'inscricao_estadual' | 'site_url' | 'operacao' | 'contabilidade' | 'obs'
+function textoDe(k: CampoTexto): string {
+  return company.value?.[k] ?? ''
+}
+function mudarTexto(k: CampoTexto, v: string | number) {
+  if (company.value) company.value[k] = String(v)
+}
 
 const canEdit = useCan('empresa', 'edit')
 const canDelete = useCan('empresa', 'delete')
@@ -126,6 +142,7 @@ async function load() {
   error.value = null
   try {
     company.value = await apiE<CompanyDetail>(`/api/companies/${route.params.id}`)
+    pctCampo.value = pctParaCampo(company.value.percentual_servico)
     await loadIntegrations()
     if (blingIntegrationForCompany.value) await loadBlingStores(blingIntegrationForCompany.value.id)
   } catch (e: any) {
@@ -368,9 +385,14 @@ function storeFor(mk: Marketplace): StoreOut | null {
 async function saveCompany() {
   if (!company.value) return
   saveMsg.value = null
+  const pct = lerPctEmpresa(pctCampo.value)
+  if (!pct.ok) {
+    error.value = pct.erro
+    return
+  }
   try {
     const c = company.value
-    await apiE(`/api/companies/${c.id}`, {
+    const salvo = await apiE<CompanyDetail>(`/api/companies/${c.id}`, {
       method: 'PATCH',
       body: {
         razao_social: c.razao_social,
@@ -381,13 +403,22 @@ async function saveCompany() {
         site_url: c.site_url,
         operacao: c.operacao,
         contabilidade: c.contabilidade,
+        percentual_servico: pct.valor || null,
         obs: c.obs,
       },
     })
+    c.percentual_servico = salvo?.percentual_servico ?? null
+    pctCampo.value = pctParaCampo(c.percentual_servico)
+    error.value = null
     saveMsg.value = 'salvo'
     setTimeout(() => (saveMsg.value = null), 2000)
   } catch (e: any) {
-    error.value = e?.data?.detail?.code || 'erro'
+    const d = e?.data?.detail
+    // Recusa do formulário (422): a API já escreve o motivo em português.
+    const motivos = Array.isArray(d)
+      ? d.map((x: any) => String(x?.msg || '').replace(/^Value error,\s*/i, '')).filter(Boolean)
+      : []
+    error.value = motivos.length ? motivos.join(' · ') : d?.code || 'erro'
   }
 }
 
@@ -487,32 +518,48 @@ onMounted(() => { if (trava.iniciar()) carregarTudo() })
         </div>
         <div>
           <Label>CNPJ</Label>
-          <Input v-model="company.cnpj" :disabled="!canEdit" />
+          <Input :model-value="textoDe('cnpj')" :disabled="!canEdit" @update:model-value="mudarTexto('cnpj', $event)" />
         </div>
         <div>
           <Label>UF</Label>
-          <Input v-model="company.uf" maxlength="2" :disabled="!canEdit" />
+          <Input :model-value="textoDe('uf')" maxlength="2" :disabled="!canEdit" @update:model-value="mudarTexto('uf', $event)" />
         </div>
         <div>
           <Label>Inscrição estadual</Label>
-          <Input v-model="company.inscricao_estadual" :disabled="!canEdit" />
+          <Input :model-value="textoDe('inscricao_estadual')" :disabled="!canEdit" @update:model-value="mudarTexto('inscricao_estadual', $event)" />
         </div>
         <div>
           <Label>Site</Label>
-          <Input v-model="company.site_url" :disabled="!canEdit" />
+          <Input :model-value="textoDe('site_url')" :disabled="!canEdit" @update:model-value="mudarTexto('site_url', $event)" />
         </div>
         <div>
           <Label>Operação</Label>
-          <Input v-model="company.operacao" :disabled="!canEdit" />
+          <Input :model-value="textoDe('operacao')" :disabled="!canEdit" @update:model-value="mudarTexto('operacao', $event)" />
         </div>
         <div>
           <Label>Contabilidade</Label>
-          <Input v-model="company.contabilidade" :disabled="!canEdit" />
+          <Input :model-value="textoDe('contabilidade')" :disabled="!canEdit" @update:model-value="mudarTexto('contabilidade', $event)" />
+        </div>
+        <div>
+          <Label for="empresa-pct">Porcentagem</Label>
+          <div class="relative">
+            <Input
+              id="empresa-pct"
+              v-model="pctCampo"
+              inputmode="decimal"
+              placeholder="ex.: 0,5"
+              class="pr-7"
+              aria-describedby="empresa-pct-dica"
+              :disabled="!canEdit"
+            />
+            <span class="pointer-events-none absolute inset-y-0 right-2.5 flex items-center text-sm text-muted-foreground">%</span>
+          </div>
+          <p id="empresa-pct-dica" class="mt-1 text-xs text-muted-foreground">{{ PCT_EMPRESA_DICA }}</p>
         </div>
       </div>
       <div>
         <Label>Observação</Label>
-        <Input v-model="company.obs" :disabled="!canEdit" />
+        <Input :model-value="textoDe('obs')" :disabled="!canEdit" @update:model-value="mudarTexto('obs', $event)" />
       </div>
       <div class="flex gap-2 items-center">
         <Button v-if="canEdit" size="sm" @click="saveCompany">

@@ -61,6 +61,10 @@ Resource = Literal[
     # faturamento por etapa. Antes admin-only; viraram recursos concedíveis.
     "nf_faturador",
     "nf_faturamento",
+    # NF Faturador › Emissão de Serviço (28/09/2026): NFS-e Nacional de
+    # intermediação pelo Emissor Nacional. Emitir/conferir = edit, cancelar =
+    # delete. Mesmo nome no useCan.ts.
+    "emissao_servico",
     "segmentos",
     # Cadastros › Marcas e Redes Sociais (15/09/2026): marcas da operação
     # (INPI, domínio, login) e as contas por plataforma — que mais tarde

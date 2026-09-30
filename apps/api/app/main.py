@@ -43,6 +43,8 @@ from app.routers import listings as listings_router
 from app.routers import logistica as logistica_router
 from app.routers import logistica_track as logistica_track_router
 from app.routers import marcas as marcas_router
+from app.routers import nfse as nfse_router
+from app.routers import nfse_webhook as nfse_webhook_router
 from app.routers import margem_audit as margem_audit_router
 from app.routers import margens as margens_router
 from app.routers import metrics as metrics_router
@@ -183,6 +185,7 @@ app.include_router(products_router.router)
 app.include_router(jobs_router.router)
 app.include_router(sync_router.router)
 app.include_router(webhooks_router.router)
+app.include_router(nfse_webhook_router.router)  # POST /api/webhooks/nfeio
 app.include_router(settings_router.router)
 app.include_router(alerts_router.router)
 app.include_router(claude_conector_router.router)
@@ -192,6 +195,7 @@ app.include_router(pricing_router.router)
 app.include_router(pricing_mega_router.router)
 app.include_router(segments_router.router)
 app.include_router(marcas_router.router)
+app.include_router(nfse_router.router)
 app.include_router(redes_sociais_router.router)
 app.include_router(email_padroes_router.router)
 app.include_router(email_assinaturas_router.router)

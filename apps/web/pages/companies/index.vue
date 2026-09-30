@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import { TABS_CADASTROS } from '~/lib/navGroups'
+import { fmtPct } from '~/lib/nfse'
+import { PCT_EMPRESA_DICA, lerPctEmpresa, pctNormal, pctParaCampo } from '~/lib/percentualEmpresa'
 import { ref, computed, reactive, watch } from 'vue'
 import { Plus, RefreshCw, X, ExternalLink, Trash2, Lock, ShieldCheck, KeyRound, Download, Pencil, Upload, Eye, EyeOff } from 'lucide-vue-next'
 import {
@@ -34,6 +36,8 @@ type CompanyOut = {
   site_url: string | null
   operacao: string | null
   contabilidade: string | null
+  // % padrão das notas de serviço de percentual ("0.5000" = 0,5%).
+  percentual_servico?: string | null
   ip: string | null
   // O que o serviço do Mac confirmou no AdsPower (só leitura).
   ip_adspower: string | null
@@ -218,13 +222,19 @@ const filteredRows = computed(() => {
   return rows
 })
 
-const draft = ref({ razao_social: '', apelido: '', cnpj: '', uf: '', inscricao_estadual: '', site_url: '', operacao: '', contabilidade: '', ip: '', obs: '' })
+const rascunhoVazio = () => ({ razao_social: '', apelido: '', cnpj: '', uf: '', inscricao_estadual: '', site_url: '', operacao: '', contabilidade: '', percentual_servico: '', ip: '', obs: '' })
+const draft = ref(rascunhoVazio())
 const creating = ref(false)
 const createErr = ref<string | null>(null)
 
 async function createCompany() {
-  creating.value = true
   createErr.value = null
+  const pct = lerPctEmpresa(draft.value.percentual_servico)
+  if (!pct.ok) {
+    createErr.value = pct.erro
+    return
+  }
+  creating.value = true
   try {
     const body: Record<string, any> = {
       razao_social: draft.value.razao_social,
@@ -234,9 +244,10 @@ async function createCompany() {
       if (draft.value[k]) body[k] = draft.value[k]
     }
     if (draft.value.ip.trim()) body.ip = soOIp(draft.value.ip)
+    if (pct.valor) body.percentual_servico = pct.valor
     await apiE('/api/companies', { method: 'POST', body })
     showNew.value = false
-    draft.value = { razao_social: '', apelido: '', cnpj: '', uf: '', inscricao_estadual: '', site_url: '', operacao: '', contabilidade: '', ip: '', obs: '' }
+    draft.value = rascunhoVazio()
     await refresh()
   } catch (e: any) {
     // Two shapes: our HTTPException ({code: ...}) and Pydantic 422
@@ -301,29 +312,60 @@ async function commitEditResp(row: GridRow) {
 }
 
 // ---------- generic inline edit for company text fields ----------
-type EditableField = 'razao_social' | 'apelido' | 'uf' | 'cnpj' | 'inscricao_estadual' | 'site_url' | 'operacao' | 'contabilidade' | 'ip'
+// percentual_servico: a porcentagem da empresa (lib/percentualEmpresa.ts) —
+// edita como texto ("0,5") e vai para a API como "0.5".
+type EditableField = 'razao_social' | 'apelido' | 'uf' | 'cnpj' | 'inscricao_estadual' | 'site_url' | 'operacao' | 'contabilidade' | 'percentual_servico' | 'ip'
 
 const editingCell = ref<{ id: string; field: EditableField } | null>(null)
 const editCellValue = ref('')
 const editCellSaving = ref(false)
+// Porcentagem digitada errada ("150", "0,5 porcento"): a célula fica aberta
+// com o texto, com a borda vermelha, para só corrigir (Esc desiste).
+const editCellInvalida = ref(false)
 
 function startEditCell(row: GridRow, field: EditableField) {
   if (!canEdit.value) return
+  largarPctInvalida()
   editingCell.value = { id: row.company.id, field }
-  editCellValue.value = (row.company[field] || '') as string
+  editCellValue.value = field === 'percentual_servico'
+    ? pctParaCampo(row.company.percentual_servico)
+    : (row.company[field] || '') as string
 }
 function cancelEditCell() {
   editingCell.value = null
   editCellValue.value = ''
+  largarPctInvalida()
+}
+// Desistiu da % errada (Esc ou outra célula): a faixa de erro dela sai junto.
+function largarPctInvalida() {
+  if (!editCellInvalida.value) return
+  editCellInvalida.value = false
+  error.value = null
 }
 function isEditingCell(row: GridRow, field: EditableField) {
   return editingCell.value?.id === row.company.id && editingCell.value?.field === field
 }
 async function commitEditCell(row: GridRow, field: EditableField) {
   if (!isEditingCell(row, field)) return
-  const next = field === 'ip' ? soOIp(editCellValue.value) : editCellValue.value.trim()
-  const prev = (row.company[field] || '') as string
-  if (next === prev.trim()) return cancelEditCell()
+  let next: string
+  let prev: string
+  if (field === 'percentual_servico') {
+    const pct = lerPctEmpresa(editCellValue.value)
+    if (!pct.ok) {
+      error.value = pct.erro
+      editCellInvalida.value = true
+      return
+    }
+    // Corrigiu: a faixa não fica dizendo que a % está errada.
+    largarPctInvalida()
+    // "0,5" digitado e "0.5000" guardado são o mesmo número.
+    next = pct.valor
+    prev = pctNormal(row.company.percentual_servico)
+  } else {
+    next = field === 'ip' ? soOIp(editCellValue.value) : editCellValue.value.trim()
+    prev = ((row.company[field] || '') as string).trim()
+  }
+  if (next === prev) return cancelEditCell()
   // razao_social and apelido are non-null on the server; refuse to blank them.
   if ((field === 'razao_social' || field === 'apelido') && !next) {
     error.value = `${field === 'razao_social' ? 'Razão social' : 'Apelido'} não pode ficar vazio.`
@@ -387,6 +429,12 @@ function mensagemDeErro(e: any, padrao = 'erro'): string {
   if (d?.code === 'senha_obrigatoria') return 'Digite a senha do certificado.'
   if (d?.code === 'muitas_tentativas') {
     return 'Muitas tentativas com a senha errada. Espere 15 minutos para tentar de novo.'
+  }
+  // Recusa do formulário (422): a API já escreve o motivo em português
+  // (ex.: porcentagem acima de 100).
+  if (Array.isArray(d)) {
+    const motivos = d.map((x: any) => String(x?.msg || '').replace(/^Value error,\s*/i, '')).filter(Boolean)
+    if (motivos.length) return motivos.join(' · ')
   }
   return d?.code || e?.message || padrao
 }
@@ -1317,6 +1365,7 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
             <th class="px-3 py-2">Responsável</th>
             <th class="px-3 py-2">operação</th>
             <th class="px-3 py-2">contabilidade</th>
+            <th class="px-3 py-2 whitespace-nowrap" :title="`${PCT_EMPRESA_DICA} (Emissão de Serviço)`">Porcentagem</th>
             <th class="px-3 py-2" title="IP de saída da empresa nos marketplaces — cada empresa tem o seu, sem repetir">IP</th>
             <th v-if="isAdmin" class="px-3 py-2 whitespace-nowrap">certificado digital</th>
             <th v-for="mk in MARKETPLACES" :key="mk" class="px-2 py-2 text-center">
@@ -1508,6 +1557,34 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
               />
               <span v-else :class="{ 'text-muted-foreground': !row.company.contabilidade }" class="block truncate">
                 {{ row.company.contabilidade || '—' }}
+              </span>
+            </td>
+            <td
+              class="px-3 py-2 text-xs whitespace-nowrap tabular-nums"
+              :class="{ 'cursor-pointer hover:bg-accent/30': canEdit && !isEditingCell(row, 'percentual_servico') }"
+              :title="PCT_EMPRESA_DICA"
+              @click="canEdit && !isEditingCell(row, 'percentual_servico') && startEditCell(row, 'percentual_servico')"
+            >
+              <span v-if="isEditingCell(row, 'percentual_servico')" class="inline-flex items-center gap-0.5">
+                <input
+                  v-model="editCellValue"
+                  type="text"
+                  inputmode="decimal"
+                  placeholder="0,5"
+                  :aria-label="`Porcentagem de ${row.company.apelido} (${PCT_EMPRESA_DICA})`"
+                  class="w-14 text-xs bg-transparent outline-none border-b tabular-nums"
+                  :class="editCellInvalida ? 'border-red-500 dark:border-red-400' : 'border-blue-500'"
+                  :aria-invalid="editCellInvalida ? 'true' : undefined"
+                  :disabled="editCellSaving"
+                  autofocus
+                  @blur="commitEditCell(row, 'percentual_servico')"
+                  @keydown.enter.prevent="commitEditCell(row, 'percentual_servico')"
+                  @keydown.escape.prevent="cancelEditCell"
+                />
+                <span class="text-muted-foreground">%</span>
+              </span>
+              <span v-else :class="{ 'text-muted-foreground': !row.company.percentual_servico }">
+                {{ fmtPct(row.company.percentual_servico) }}
               </span>
             </td>
             <td
@@ -1937,7 +2014,7 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
             </td>
           </tr>
           <tr v-if="!loading && filteredRows.length === 0">
-            <td :colspan="isAdmin ? 20 : 19" class="px-3 py-6 text-center text-muted-foreground">nenhuma empresa</td>
+            <td :colspan="isAdmin ? 21 : 20" class="px-3 py-6 text-center text-muted-foreground">nenhuma empresa</td>
           </tr>
         </tbody>
       </table>
@@ -2087,6 +2164,21 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
             <div>
               <Label>IP</Label>
               <Input v-model="draft.ip" placeholder="72.60.155.3" autocapitalize="off" spellcheck="false" />
+            </div>
+            <div>
+              <Label for="nova-empresa-pct">Porcentagem</Label>
+              <div class="relative">
+                <Input
+                  id="nova-empresa-pct"
+                  v-model="draft.percentual_servico"
+                  inputmode="decimal"
+                  placeholder="ex.: 0,5"
+                  class="pr-7"
+                  aria-describedby="nova-empresa-pct-dica"
+                />
+                <span class="pointer-events-none absolute inset-y-0 right-2.5 flex items-center text-sm text-muted-foreground">%</span>
+              </div>
+              <p id="nova-empresa-pct-dica" class="mt-1 text-xs text-muted-foreground">{{ PCT_EMPRESA_DICA }}</p>
             </div>
           </div>
           <div>

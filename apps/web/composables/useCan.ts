@@ -32,6 +32,7 @@ export type Resource =
   | 'lojas_info'
   | 'nf_faturador'
   | 'nf_faturamento'
+  | 'emissao_servico'
   | 'segmentos'
   | 'marcas'
   | 'redes_sociais'
@@ -99,7 +100,9 @@ export const RESOURCE_GROUPS: ResourceGroup[] = [
   {
     label: 'Cadastros',
     resources: [
-      'empresa', 'cadastro', 'lojas_info', 'nf_faturador', 'nf_faturamento', 'segmentos',
+      'empresa', 'cadastro', 'lojas_info', 'nf_faturador', 'nf_faturamento',
+      // Emissão de Serviço (28/09/2026): NFS-e Nacional, aba do NF Faturador.
+      'emissao_servico', 'segmentos',
       // Marcas e Redes Sociais (15/09/2026) — abas novas do grupo Cadastros.
       'marcas', 'redes_sociais', 'email_padroes',
     ],
@@ -154,6 +157,7 @@ export const RESOURCE_LABELS: Record<Resource, string> = {
   lojas_info: 'Lojas (info)',
   nf_faturador: 'NF (Faturador)',
   nf_faturamento: 'Faturamento NF',
+  emissao_servico: 'Emissão de Serviço (NFS-e)',
   segmentos: 'Segmentos',
   marcas: 'Marcas',
   redes_sociais: 'Redes Sociais',

@@ -511,6 +511,21 @@ class Settings(BaseSettings):
     # minutos, não no backfill diário. Desligável via ENABLE_INGEST_ORDERS_RETRY_SWEEP=false.
     enable_ingest_orders_retry_sweep: bool = True
 
+    # NFS-e (aba NF Faturador › Emissão de Serviço): desde 29/09/2026 o motor
+    # é a NFE.io. A chave "Nota Fiscal" da conta emite por TODAS as empresas:
+    # fica só aqui (.env) — nunca em log, banco, resposta ou front. A chave
+    # "Dados" (consulta CNPJ/CEP) fica guardada, ainda sem uso.
+    nfeio_api_key: str = ""
+    nfeio_dados_api_key: str = ""
+    nfeio_base_url: str = "https://api.nfe.io"
+    nfeio_nfse_base_url: str = "https://api.nfse.io"
+    # Segredo do webhook (32 a 64 caracteres). Vazio = a rota do webhook
+    # responde 503. Cadastrar na conta NFE.io só com OK do Eduardo.
+    nfeio_webhook_secret: str = ""
+    # Empresa em Production na NFE.io (nota real) só emite com isto E
+    # ENV=production. No localhost fica false: nenhuma nota real sai daqui.
+    nfse_producao_liberada: bool = False
+
     @property
     def is_prod(self) -> bool:
         return self.env == "production"

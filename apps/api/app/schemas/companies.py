@@ -1,12 +1,15 @@
 import ipaddress
 import re
 from datetime import date, datetime
+from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 from stdnum.br import cnpj as br_cnpj
 from stdnum.exceptions import ValidationError as StdValidationError
+
+from app.schemas.nfse import _numero_br, checar_percentual
 
 # 27 BR states + DF. Anything else in `uf` is treated as a foreign-
 # company marker — skips the strict CNPJ checksum so the operator can
@@ -98,6 +101,25 @@ def _normalize_ip(v: Any) -> str | None:
     return str(ip)
 
 
+def _texto_percentual(v: Any) -> Any:
+    """Porcentagem como a pessoa digita: "0,5", "0.5" ou "0,5%". Vazio = sem %."""
+    if isinstance(v, str):
+        v = v.strip().removesuffix("%").strip()
+    v = _numero_br(v)
+    if isinstance(v, str):
+        try:
+            Decimal(v)
+        except ArithmeticError:
+            # Sem isto o erro sairia em inglês ("Input should be a valid decimal").
+            raise ValueError("Digite só o número da porcentagem (ex.: 0,5).") from None
+    return v
+
+
+def _checar_percentual_servico(v: Decimal | None) -> Decimal | None:
+    # Mensagem direto pra tela (o front tira o "Value error, ").
+    return checar_percentual(v, "A porcentagem")
+
+
 def _normalize_company_payload(data: Any) -> Any:
     """Cross-field normalisation: validates uf first, then applies the
     appropriate cnpj rule based on whether uf is a BR state. Runs in
@@ -134,6 +156,9 @@ class CompanyBase(BaseModel):
     site_url: str | None = None
     operacao: str | None = None
     contabilidade: str | None = None
+    # Porcentagem da empresa: o % padrão das notas de serviço de percentual
+    # (0.5 = 0,5%). Aceita "0,5"; 4 casas; > 0 e <= 100; null limpa.
+    percentual_servico: Decimal | None = None
     ip: str | None = None
     obs: str | None = None
 
@@ -141,6 +166,16 @@ class CompanyBase(BaseModel):
     @classmethod
     def _normalize(cls, data: Any) -> Any:
         return _normalize_company_payload(data)
+
+    @field_validator("percentual_servico", mode="before")
+    @classmethod
+    def _percentual_texto(cls, v: Any) -> Any:
+        return _texto_percentual(v)
+
+    @field_validator("percentual_servico")
+    @classmethod
+    def _percentual(cls, v: Decimal | None) -> Decimal | None:
+        return _checar_percentual_servico(v)
 
 
 class CompanyCreate(CompanyBase):
@@ -158,6 +193,7 @@ class CompanyPatch(BaseModel):
     site_url: str | None = None
     operacao: str | None = None
     contabilidade: str | None = None
+    percentual_servico: Decimal | None = None
     ip: str | None = None
     obs: str | None = None
     enabled_marketplaces: list[str] | None = None
@@ -166,6 +202,16 @@ class CompanyPatch(BaseModel):
     @classmethod
     def _normalize(cls, data: Any) -> Any:
         return _normalize_company_payload(data)
+
+    @field_validator("percentual_servico", mode="before")
+    @classmethod
+    def _percentual_texto(cls, v: Any) -> Any:
+        return _texto_percentual(v)
+
+    @field_validator("percentual_servico")
+    @classmethod
+    def _percentual(cls, v: Decimal | None) -> Decimal | None:
+        return _checar_percentual_servico(v)
 
 
 class CompanyResumo(BaseModel):
