@@ -289,6 +289,48 @@ async def test_update_stock_202_is_ok() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "trace_id", ["b7e6c7e2-8c2a-4e2a-9c1a-2e6c7e2b8c2a", "x" * 100]
+)
+async def test_update_stock_202_preserves_only_trace_id(trace_id) -> None:
+    client = MagaluClient(_creds())
+    client._channel_id = _CHANNEL
+    with respx.mock(base_url=MAGALU_API_BASE) as router:
+        router.patch("/seller/v1/portfolios/stocks/b001-20").respond(
+            202, json={"trace_id": trace_id, "private_data": "must-not-be-copied"}
+        )
+        result = await client.update_stock(_link(stock=3), 42)
+
+    assert result.status == SyncStatus.OK
+    assert result.qty_after == 42
+    assert result.payload == {"sku": "b001-20", "http_status": 202, "trace_id": trace_id}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.Response(202, text="not-json"),
+        httpx.Response(202, json=[{"trace_id": "not-a-response-object"}]),
+        *[
+            httpx.Response(202, json={"trace_id": value})
+            for value in (None, "", "   ", 42, True, {}, [], "x" * 101)
+        ],
+    ],
+)
+async def test_update_stock_202_tolerates_missing_or_invalid_trace_id(response) -> None:
+    client = MagaluClient(_creds())
+    client._channel_id = _CHANNEL
+    with respx.mock(base_url=MAGALU_API_BASE) as router:
+        router.patch("/seller/v1/portfolios/stocks/b001-20").mock(return_value=response)
+        result = await client.update_stock(_link(stock=3), 42)
+
+    assert result.status == SyncStatus.OK
+    assert result.qty_after == 42
+    assert result.payload == {"sku": "b001-20", "http_status": 202}
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("branch", [None, "omitted"])
 @pytest.mark.parametrize("qty", [0, 42])
 async def test_update_stock_conflict_confirms_target_with_one_fresh_read(branch, qty) -> None:

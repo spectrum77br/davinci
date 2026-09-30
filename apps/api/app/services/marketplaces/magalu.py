@@ -449,11 +449,20 @@ class MagaluClient:
             return _map_http_error(e, qty_before, "magalu_patch_stock_failed")
         # 202 Accepted = update aceito (processamento assíncrono).
         if r.status_code in (200, 202):
+            payload = {"sku": sku, "http_status": r.status_code}
+            # Preserve the tracking ID without storing the provider's full body.
+            try:
+                body = r.json()
+            except ValueError:
+                body = None
+            trace_id = body.get("trace_id") if isinstance(body, dict) else None
+            if isinstance(trace_id, str) and 0 < len(trace_id) <= 100 and trace_id.strip():
+                payload["trace_id"] = trace_id
             return SyncResult(
                 status=SyncStatus.OK,
                 qty_before=qty_before,
                 qty_after=qty,
-                payload={"sku": sku, "http_status": r.status_code},
+                payload=payload,
             )
         if r.status_code == 409:
             verification = await self._verify_stock_conflict(sku, channel_id, int(qty))
