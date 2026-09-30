@@ -341,7 +341,10 @@ class SyncOrchestrator:
             if novo.status == SyncStatus.OK:
                 novo.error_code = "sku_movido"
                 novo.error_detail = f"anúncio trocou de SKU: {de} → {alvo.sku}"
-            novo.payload = {**(novo.payload or {}), "sku_novo": alvo.sku, "sku_antigo": de}
+            novo.payload = {
+                **(novo.payload or {}), "sku_novo": alvo.sku, "sku_antigo": de,
+                "requested_stock": qty_novo,
+            }
             return novo
         # Sem para onde mover: comportamento antigo (estoque do produto do
         # vínculo), com aviso.
@@ -355,6 +358,7 @@ class SyncOrchestrator:
                 + ("está em mais de um produto" if self._sku_index and
                    self._sku_index.resolve(sku_atual)[1] == "ambiguo" else "não existe no DaVinci")
             )
+        antigo.payload = {**(antigo.payload or {}), "requested_stock": qty}
         return antigo
 
     async def _atualizar_saude(self, link: ProductLink, result: SyncResult) -> None:
@@ -411,6 +415,7 @@ class SyncOrchestrator:
     ) -> SyncResult:
         store = await self._get_store(link.store_id)
         bling_store_id = store.bling_store_id if store is not None else None  # type: ignore[attr-defined]
+        requested_stock: int | None = None
 
         async with time_sync(link.platform.value) as bucket:
             if link.platform == IntegrationPlatform.BLING:
@@ -474,6 +479,7 @@ class SyncOrchestrator:
                         qty = await estoque_familia.saldo_publicavel(
                             self.session, product, cache=self._familia_cache
                         )
+                        requested_stock = qty
                         # Always push to the marketplace — SSH parity. The earlier
                         # "verify-before-send" optimization (skip when link.stock
                         # equals qty + last_sync_status=OK) was removed because
@@ -487,17 +493,22 @@ class SyncOrchestrator:
                         )
                         result = await client.update_stock(  # type: ignore[union-attr]
                             link, qty, bling_store_id=bling_store_id,
-                            # A real Bling sellout must reach Magalu even when
-                            # its cached link still has stock. Other platforms
+                            # A confirmed Bling sellout must reach Magalu/ML
+                            # even when the cached link still has stock. Other platforms
                             # and manual/webhook force retain their behavior.
                             force=self.force or (
-                                link.platform == IntegrationPlatform.MAGALU
+                                link.platform in {
+                                    IntegrationPlatform.MAGALU, IntegrationPlatform.ML
+                                }
                                 and qty == 0
                                 and bling_stock_confirmed
                             ),
                             **extra,
                         )
                         if result.error_code == "sku_trocado":
+                            # The replacement SKU can have a different quantity.
+                            # Its result records the quantity actually requested.
+                            requested_stock = None
                             result = await self._tratar_sku_trocado(
                                 client, product, link, qty, result, bling_store_id
                             )
@@ -518,6 +529,9 @@ class SyncOrchestrator:
             bucket.set(result.status.value)
             if result.error_code:
                 bucket.error(result.error_code)
+
+        if requested_stock is not None:
+            result.payload = {**(result.payload or {}), "requested_stock": requested_stock}
 
         self._tally(result.status)
         await self._atualizar_saude(link, result)
@@ -582,6 +596,40 @@ class SyncOrchestrator:
     ) -> None:
         """B5/B3: surface banned (REQUIRES_REVIEW) and FATAL outcomes as alerts.
         Dedupe per (product, link) so re-runs collapse."""
+        if (result.payload or {}).get("requested_stock") == 0 and (
+            result.status in {
+                SyncStatus.RETRYABLE, SyncStatus.FATAL, SyncStatus.REQUIRES_REVIEW
+            }
+            or result.error_code == "b1_guard_zero_block"
+        ):
+            # A retryable stock failure is still urgent when the requested
+            # quantity was zero. Preserve retry/classification and make the
+            # unconfirmed sellout visible in the dashboard without sending
+            # additional external messages on every retry.
+            await emit_alert(
+                self.session,
+                user_id=self.user_id,
+                type=AlertType.SYNC_FAILURE,
+                severity=AlertSeverity.ERROR,
+                title=(f"Zeramento não confirmado — {link.platform.value}: "
+                       f"{(result.payload or {}).get('sku_novo') or product.sku}"),
+                message=(
+                    "O estoque a publicar é zero, mas o marketplace não confirmou "
+                    "a atualização. Verifique o anúncio para evitar venda sem estoque. "
+                    + (result.error_detail or result.error_code or "")
+                )[:500],
+                payload={
+                    "product_id": str(link.product_id or product.id),
+                    "link_id": str(link.id),
+                    "platform": link.platform.value,
+                    "external_id": link.external_id,
+                    "variation_id": link.variation_id,
+                    "requested_stock": 0,
+                    "error_code": result.error_code,
+                },
+                dedupe_key=f"stock_zero_unconfirmed:{link.id}",
+                notify_telegram=False,
+            )
         if result.status == SyncStatus.REQUIRES_REVIEW:
             classification = (result.payload or {}).get("shopee_classification")
             if classification == "banned" or link.platform == IntegrationPlatform.SHOPEE:
@@ -725,7 +773,7 @@ class SyncOrchestrator:
                 await self._process_link(
                     product, link,
                     skip_non_bling=bling_failed or (
-                        link.platform == IntegrationPlatform.MAGALU
+                        link.platform in {IntegrationPlatform.MAGALU, IntegrationPlatform.ML}
                         and bool(bling_links)
                         and not bling_stock_confirmed
                     ),
@@ -844,7 +892,9 @@ class SyncOrchestrator:
                             await sub_orch._process_link(
                                 p, link,
                                 skip_non_bling=bling_failed or (
-                                    link.platform == IntegrationPlatform.MAGALU
+                                    link.platform in {
+                                        IntegrationPlatform.MAGALU, IntegrationPlatform.ML
+                                    }
                                     and bool(bling_links)
                                     and not bling_stock_confirmed
                                 ),

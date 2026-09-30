@@ -1,4 +1,4 @@
-"""Source confirmation for Magalu sellouts; no database or network required."""
+"""Source confirmation for Magalu/ML sellouts; no database or network required."""
 
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -75,7 +75,8 @@ class _Marketplace:
 
 
 class _Harness:
-    def __init__(self, monkeypatch):
+    def __init__(self, monkeypatch, platform):
+        self.platform = platform
         self.user_id = uuid4()
         self.products = {}
         self.links = []
@@ -120,14 +121,14 @@ class _Harness:
             self.source_stock[int(external_id)] = source_stock
         return link
 
-    def product(self, *, source_stock=0, with_bling=True, platform=IntegrationPlatform.MAGALU):
+    def product(self, *, source_stock=0, with_bling=True, platform=None):
         product = Product(
             id=uuid4(), user_id=self.user_id, sku=f"b039.{len(self.products)}", stock=0
         )
         self.products[product.id] = product
         if with_bling:
             self.add_link(product, IntegrationPlatform.BLING, source_stock=source_stock)
-        target = self.add_link(product, platform)
+        target = self.add_link(product, platform or self.platform)
         return product, target
 
     async def run(self, mode, *, force=False, orch=None, only_link_ids=None):
@@ -139,15 +140,15 @@ class _Harness:
         return orch
 
 
-@pytest.fixture
-def h(monkeypatch):
-    return _Harness(monkeypatch)
+@pytest.fixture(params=[IntegrationPlatform.MAGALU, IntegrationPlatform.ML])
+def h(monkeypatch, request):
+    return _Harness(monkeypatch, request.param)
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["sequential", "parallel"])
 @pytest.mark.parametrize("source_stock", [0, -3])
-async def test_confirmed_bling_sellout_reaches_magalu(h, mode, source_stock):
+async def test_confirmed_bling_sellout_reaches_marketplace(h, mode, source_stock):
     product, link = h.product(source_stock=source_stock)
     await h.run(mode)
     assert h.marketplace.calls == [(link.id, 0, True)]
@@ -159,7 +160,7 @@ async def test_confirmed_bling_sellout_reaches_magalu(h, mode, source_stock):
 @pytest.mark.parametrize("mode", ["sequential", "parallel"])
 @pytest.mark.parametrize("source_stock", [None, RuntimeError("Bling unavailable")])
 @pytest.mark.parametrize("force", [False, True])
-async def test_attempted_bling_without_stock_never_pushes_magalu(h, mode, source_stock, force):
+async def test_attempted_bling_without_stock_never_pushes_marketplace(h, mode, source_stock, force):
     product, link = h.product(source_stock=source_stock)
     product.stock = 17  # An old positive cache is not source confirmation either.
     await h.run(mode, force=force)
@@ -208,6 +209,36 @@ async def test_confirmation_cannot_leak_between_products(h, mode):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("h", [IntegrationPlatform.ML], indirect=True)
+@pytest.mark.parametrize("mode", ["sequential", "parallel"])
+async def test_ml_source_confirmation_does_not_force_a_repointed_sku(h, monkeypatch, mode):
+    product, link = h.product(source_stock=0)
+    replacement = Product(id=uuid4(), user_id=h.user_id, sku="replacement", stock=0)
+    monkeypatch.setattr(
+        module.SyncOrchestrator, "_produto_do_sku", AsyncMock(return_value=replacement)
+    )
+    update_stock = h.marketplace.update_stock
+
+    async def sku_changed(link, qty, *, force, **kwargs):
+        if kwargs.get("sku_esperado") == product.sku:
+            h.marketplace.calls.append((link.id, qty, force))
+            return SyncResult(
+                status=SyncStatus.REQUIRES_REVIEW,
+                error_code="sku_trocado",
+                payload={"sku_atual": replacement.sku},
+            )
+        return await update_stock(link, qty, force=force, **kwargs)
+
+    monkeypatch.setattr(h.marketplace, "update_stock", sku_changed)
+    await h.run(mode)
+
+    assert h.marketplace.calls == [(link.id, 0, True), (link.id, 0, False)]
+    assert link.product_id == replacement.id
+    assert link.stock == 105
+    assert link.last_sync_status.value == "skipped"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["sequential", "parallel"])
 async def test_confirmation_cannot_survive_a_failed_second_pass(h, mode):
     _, link = h.product(source_stock=0)
@@ -223,7 +254,7 @@ async def test_confirmation_cannot_survive_a_failed_second_pass(h, mode):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["sequential", "parallel"])
 @pytest.mark.parametrize("sources", [(None, 0), (0, None)])
-async def test_any_missing_bling_source_blocks_magalu(h, mode, sources):
+async def test_any_missing_bling_source_blocks_marketplace(h, mode, sources):
     product, link = h.product(source_stock=sources[0])
     h.add_link(product, IntegrationPlatform.BLING, source_stock=sources[1])
     await h.run(mode, force=True)
@@ -247,8 +278,11 @@ async def test_cached_bling_refresh_does_not_count_as_confirmation(h, monkeypatc
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["sequential", "parallel"])
 @pytest.mark.parametrize("source_stock", [0, None])
-async def test_other_platforms_keep_existing_guard_behavior(h, mode, source_stock):
-    _, link = h.product(source_stock=source_stock, platform=IntegrationPlatform.ML)
+@pytest.mark.parametrize(
+    "platform", [IntegrationPlatform.SHOPEE, IntegrationPlatform.TIKTOK, IntegrationPlatform.AMAZON]
+)
+async def test_other_platforms_keep_existing_guard_behavior(h, mode, source_stock, platform):
+    _, link = h.product(source_stock=source_stock, platform=platform)
     await h.run(mode)
     assert h.marketplace.calls == [(link.id, 0, False)]
     assert link.last_sync_status.value == "skipped"

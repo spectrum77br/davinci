@@ -33,7 +33,7 @@ from app.models import (
 )
 from app.security.cipher import encrypt_json
 from app.services.marketplaces.base import SyncStatus
-from app.services.marketplaces.shopee import ShopeeClient
+from app.services.marketplaces.shopee import ShopeeClient, _classify_response
 
 
 def _shopee_creds() -> dict[str, Any]:
@@ -319,6 +319,128 @@ async def test_uses_variation_id_as_model_id(db: AsyncSession, user: User) -> No
 # OK for a push that never landed, so the panel showed "enviado N" while Shopee
 # kept the old stock (the dup-listing bug on conta mega, i215.sa). These tests
 # pin the confirm-before-OK behavior.
+
+
+@pytest.mark.parametrize("model_id", [0, 777])
+def test_top_level_stock_error_preserves_target_model_failure(model_id: int) -> None:
+    reason = "stock is locked by an ongoing promotion"
+    response = httpx.Response(
+        200,
+        json={
+            "error": "product.error_busi_update_stock_failed",
+            "message": "Update stock failed, please check failure_list for detailed reason",
+            "response": {
+                "failure_list": [
+                    {"model_id": 999, "failed_reason": "other model was deleted"},
+                    {"model_id": str(model_id), "failed_reason": reason},
+                ],
+                "success_list": [{"model_id": 888, "stock": 0}],
+            },
+        },
+    )
+
+    result = _classify_response(response, 2, qty_after=0, model_id=model_id)
+
+    assert result.status == SyncStatus.RETRYABLE
+    assert result.error_code == "product.error_busi_update_stock_failed"
+    assert result.error_detail == reason
+    assert result.qty_before == 2
+    assert result.qty_after is None
+    assert result.payload["shopee_classification"] == "unknown"
+    assert result.payload["failed_model_id"] == str(model_id)
+    assert result.payload["failed_reason"] == reason
+    assert "check failure_list" in result.payload["shopee_message"]
+
+
+@pytest.mark.parametrize("target_in_success", [False, True])
+def test_top_level_stock_error_does_not_use_another_model_failure(
+    target_in_success: bool,
+) -> None:
+    response = httpx.Response(
+        200,
+        json={
+            "error": "product.error_busi_update_stock_failed",
+            "message": "check failure_list",
+            "response": {
+                "failure_list": [
+                    {"model_id": 999, "failed_reason": "other model was deleted"}
+                ],
+                "success_list": [{"model_id": 777}] if target_in_success else [],
+            },
+        },
+    )
+
+    result = _classify_response(response, 2, qty_after=0, model_id=777)
+
+    # A nonempty top-level error is not proof that our stock update landed,
+    # even if a contradictory success_list mentions the target model.
+    assert result.status == SyncStatus.RETRYABLE
+    assert result.error_code == "product.error_busi_update_stock_failed"
+    assert result.error_detail == "check failure_list"
+    assert result.qty_after is None
+    assert result.payload == {"shopee_classification": "unknown"}
+
+
+@pytest.mark.parametrize(
+    ("error", "status", "classification"),
+    [
+        ("error_auth", SyncStatus.FATAL, "auth"),
+        ("error_param", SyncStatus.FATAL, None),
+        ("error_server", SyncStatus.RETRYABLE, None),
+    ],
+)
+def test_top_level_stock_error_keeps_known_error_precedence(
+    error: str, status: SyncStatus, classification: str | None,
+) -> None:
+    response = httpx.Response(
+        200,
+        json={
+            "error": error,
+            "message": "top-level diagnosis",
+            "response": {
+                "failure_list": [
+                    {"model_id": 777, "failed_reason": "model was deleted"}
+                ],
+            },
+        },
+    )
+
+    result = _classify_response(response, 2, qty_after=0, model_id=777)
+
+    assert result.status == status
+    assert result.error_code == error
+    assert result.error_detail == "top-level diagnosis"
+    assert result.qty_after is None
+    assert result.payload.get("shopee_classification") == classification
+
+
+@pytest.mark.parametrize(
+    "failure_list",
+    [
+        None,
+        {},
+        [None, "invalid"],
+        [{"model_id": 0, "failed_reason": None}],
+        [{"failed_reason": "missing model must not be assumed to be model zero"}],
+    ],
+)
+def test_top_level_stock_error_without_usable_reason_keeps_message(
+    failure_list: Any,
+) -> None:
+    response = httpx.Response(
+        200,
+        json={
+            "error": "product.error_busi_update_stock_failed",
+            "message": "check failure_list",
+            "response": {"failure_list": failure_list},
+        },
+    )
+
+    result = _classify_response(response, 2, qty_after=0, model_id=0)
+
+    assert result.status == SyncStatus.RETRYABLE
+    assert result.error_detail == "check failure_list"
+    assert result.qty_after is None
 
 
 @pytest.mark.asyncio

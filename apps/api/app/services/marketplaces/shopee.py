@@ -1617,12 +1617,36 @@ def _classify_response(
 
     # Unknown error code — be conservative: mark RETRYABLE so we don't FATAL
     # and silently lose retries on a code we haven't classified yet.
+    # Shopee also returns product.error_busi_update_stock_failed alongside a
+    # per-model failure_list. Keep the top-level code/classification, but show
+    # the actual rejection for the model we sent instead of "check failure_list".
+    # Auth/validation/server classifications above retain their own diagnostics.
+    detail = msg[:500] if msg else None
+    result_payload: dict[str, Any] = {"shopee_classification": "unknown"}
+    resp = payload.get("response")
+    failures = resp.get("failure_list") if isinstance(resp, dict) else None
+    if isinstance(failures, list):
+        failed = _find_pushed_model(
+            [
+                entry for entry in failures
+                if isinstance(entry, dict) and entry.get("model_id") is not None
+            ],
+            model_id,
+        )
+        reason = failed.get("failed_reason") if failed is not None else None
+        if failed is not None and isinstance(reason, str) and reason.strip():
+            detail = reason.strip()[:500]
+            result_payload.update({
+                "failed_model_id": failed.get("model_id"),
+                "failed_reason": detail,
+                "shopee_message": msg[:500],
+            })
     return SyncResult(
         status=SyncStatus.RETRYABLE,
         qty_before=qty_before,
         error_code=err or "shopee_unknown_error",
-        error_detail=msg[:500] if msg else None,
-        payload={"shopee_classification": "unknown"},
+        error_detail=detail,
+        payload=result_payload,
     )
 
 
