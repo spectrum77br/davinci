@@ -74,9 +74,10 @@ MAGALU_AUTH_URL = "https://id.magalu.com/login"
 MAGALU_TOKEN_URL = "https://id.magalu.com/oauth/token"  # noqa: S105 - endpoint, not a secret
 MAGALU_API_BASE = "https://api.magalu.com"
 
-# Os 11 scopes concedidos ao app "DavinciERP" no ID Magalu (portfólio r/w,
-# estoque r/w, preço r/w, categorias r, pedidos/nf/entrega). Separados por
-# espaço no parâmetro `scope` do authorize.
+# Escopos solicitados pelo DaVinci, separados por espaço no authorize.
+# Além de produtos e pedidos, inclui perguntas, conversas e SAC. Novos
+# escopos precisam estar liberados no app ID Magalu e receber consentimento
+# do seller; renovar o token existente não concede permissões adicionais.
 MAGALU_SCOPES = " ".join(
     [
         "open:portfolio-skus-seller:read",
@@ -90,6 +91,14 @@ MAGALU_SCOPES = " ".join(
         "open:order-invoice-seller:read",
         "open:order-delivery-seller:read",
         "open:order-delivery-seller:write",
+        "services:questions-seller:read",
+        "services:questions-seller:write",
+        "services:conversations-seller:read",
+        "services:conversations-seller:write",
+        "open:tickets-seller:read",
+        "open:tickets-seller:write",
+        "open:ticket-messages-seller:read",
+        "open:ticket-messages-seller:write",
     ]
 )
 

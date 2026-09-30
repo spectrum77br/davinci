@@ -20,6 +20,7 @@ import json
 import time
 from types import SimpleNamespace
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 
 import httpx
 import pytest
@@ -83,8 +84,32 @@ def test_authorize_url_has_choose_tenants_and_scopes() -> None:
     assert "client_id=cid-test" in url
     assert "state=state-xyz" in url
     assert "scope=" in url
-    # pelo menos um scope de portfólio presente (encodado no querystring).
-    assert "portfolio-skus-seller" in url
+    # O novo consentimento deve manter os acessos existentes e solicitar
+    # também as oito permissões de atendimento, sem extras ou duplicatas.
+    scopes = parse_qs(urlparse(url).query)["scope"][0].split()
+    expected = {
+        "open:portfolio-skus-seller:read",
+        "open:portfolio-skus-seller:write",
+        "open:portfolio-stocks-seller:read",
+        "open:portfolio-stocks-seller:write",
+        "open:portfolio-prices-seller:read",
+        "open:portfolio-prices-seller:write",
+        "open:portfolio-categories-seller:read",
+        "open:order-order-seller:read",
+        "open:order-invoice-seller:read",
+        "open:order-delivery-seller:read",
+        "open:order-delivery-seller:write",
+        "services:questions-seller:read",
+        "services:questions-seller:write",
+        "services:conversations-seller:read",
+        "services:conversations-seller:write",
+        "open:tickets-seller:read",
+        "open:tickets-seller:write",
+        "open:ticket-messages-seller:read",
+        "open:ticket-messages-seller:write",
+    }
+    assert set(scopes) == expected
+    assert len(scopes) == len(expected)
 
 
 # --------------------------------------------------------------- exchange_code
