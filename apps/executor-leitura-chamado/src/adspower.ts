@@ -35,23 +35,34 @@ interface AdsPowerEnvelope {
 }
 
 async function apiGet(pathQ: string): Promise<any> {
-  return rateLimited(async () => {
-    const headers: Record<string, string> = {};
-    // A Local API normalmente nao exige chave. Se a sua versao exigir, ela vai aqui.
-    if (API_KEY) headers["Authorization"] = `Bearer ${API_KEY}`;
-    let res: Response;
+  // 30/09: o limite de ~1 req/s é do AdsPower, não deste processo — o executor da
+  // Logística e a IA de Chamado batem na mesma Local API, e quando caem no mesmo
+  // segundo vem "Too many request per second". Antes a passada inteira morria
+  // (9 das passadas de 30/09 manhã); agora espera e tenta de novo.
+  for (let tentativa = 1; ; tentativa++) {
     try {
-      res = await fetch(`${BASE}${pathQ}`, { headers });
+      return await rateLimited(async () => {
+        const headers: Record<string, string> = {};
+        // A Local API normalmente nao exige chave. Se a sua versao exigir, ela vai aqui.
+        if (API_KEY) headers["Authorization"] = `Bearer ${API_KEY}`;
+        let res: Response;
+        try {
+          res = await fetch(`${BASE}${pathQ}`, { headers });
+        } catch (e: any) {
+          throw new Error(`AdsPower inacessivel em ${BASE} (a Local API esta ligada?): ${e?.message || e}`);
+        }
+        if (!res.ok) throw new Error(`AdsPower HTTP ${res.status}`);
+        const json = (await res.json()) as AdsPowerEnvelope;
+        if (json.code !== 0) {
+          throw new Error(`AdsPower: ${json.msg || "erro desconhecido"} (code ${json.code})`);
+        }
+        return json.data;
+      });
     } catch (e: any) {
-      throw new Error(`AdsPower inacessivel em ${BASE} (a Local API esta ligada?): ${e?.message || e}`);
+      if (tentativa >= 4 || !/too many request/i.test(String(e?.message || e))) throw e;
+      await sleep(1500 * tentativa);
     }
-    if (!res.ok) throw new Error(`AdsPower HTTP ${res.status}`);
-    const json = (await res.json()) as AdsPowerEnvelope;
-    if (json.code !== 0) {
-      throw new Error(`AdsPower: ${json.msg || "erro desconhecido"} (code ${json.code})`);
-    }
-    return json.data;
-  });
+  }
 }
 
 export interface AdsPowerProfile {
