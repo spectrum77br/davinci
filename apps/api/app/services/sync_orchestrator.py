@@ -596,40 +596,6 @@ class SyncOrchestrator:
     ) -> None:
         """B5/B3: surface banned (REQUIRES_REVIEW) and FATAL outcomes as alerts.
         Dedupe per (product, link) so re-runs collapse."""
-        if (result.payload or {}).get("requested_stock") == 0 and (
-            result.status in {
-                SyncStatus.RETRYABLE, SyncStatus.FATAL, SyncStatus.REQUIRES_REVIEW
-            }
-            or result.error_code == "b1_guard_zero_block"
-        ):
-            # A retryable stock failure is still urgent when the requested
-            # quantity was zero. Preserve retry/classification and make the
-            # unconfirmed sellout visible in the dashboard without sending
-            # additional external messages on every retry.
-            await emit_alert(
-                self.session,
-                user_id=self.user_id,
-                type=AlertType.SYNC_FAILURE,
-                severity=AlertSeverity.ERROR,
-                title=(f"Zeramento não confirmado — {link.platform.value}: "
-                       f"{(result.payload or {}).get('sku_novo') or product.sku}"),
-                message=(
-                    "O estoque a publicar é zero, mas o marketplace não confirmou "
-                    "a atualização. Verifique o anúncio para evitar venda sem estoque. "
-                    + (result.error_detail or result.error_code or "")
-                )[:500],
-                payload={
-                    "product_id": str(link.product_id or product.id),
-                    "link_id": str(link.id),
-                    "platform": link.platform.value,
-                    "external_id": link.external_id,
-                    "variation_id": link.variation_id,
-                    "requested_stock": 0,
-                    "error_code": result.error_code,
-                },
-                dedupe_key=f"stock_zero_unconfirmed:{link.id}",
-                notify_telegram=False,
-            )
         if result.status == SyncStatus.REQUIRES_REVIEW:
             classification = (result.payload or {}).get("shopee_classification")
             if classification == "banned" or link.platform == IntegrationPlatform.SHOPEE:

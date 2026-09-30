@@ -1,4 +1,4 @@
-"""Rejected sellouts must be visible without mirroring an unconfirmed zero."""
+"""Preserve failed stock results and logs without adding sellout alerts."""
 
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -6,7 +6,7 @@ from uuid import uuid4
 
 import pytest
 
-from app.models import AlertSeverity, AlertType, IntegrationPlatform, Product, ProductLink
+from app.models import AlertType, IntegrationPlatform, Product, ProductLink
 from app.services import sync_orchestrator as module
 from app.services.marketplaces.base import SyncResult, SyncStatus
 
@@ -55,37 +55,40 @@ async def process(monkeypatch, *, qty=0, status=SyncStatus.RETRYABLE,
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("status,code", [
-    (SyncStatus.RETRYABLE, "product.error_busi_update_stock_failed"),
-    (SyncStatus.FATAL, "http_400"),
-    (SyncStatus.REQUIRES_REVIEW, "stock_rejected"),
-    (SyncStatus.SKIPPED, "b1_guard_zero_block"),
+@pytest.mark.parametrize("status,code,existing_alert", [
+    (SyncStatus.RETRYABLE, "product.error_busi_update_stock_failed", None),
+    (SyncStatus.FATAL, "http_400", AlertType.SYNC_FAILURE),
+    (SyncStatus.REQUIRES_REVIEW, "stock_rejected", AlertType.LISTING_BANNED),
+    (SyncStatus.SKIPPED, "b1_guard_zero_block", None),
 ])
-async def test_rejected_zero_alerts_without_claiming_success(monkeypatch, status, code):
+async def test_rejected_zero_preserves_error_log_and_existing_alerts_only(
+    monkeypatch, status, code, existing_alert
+):
     link, result, alert, session = await process(monkeypatch, status=status, error_code=code)
-    critical = [c.kwargs for c in alert.await_args_list
-                if c.kwargs["dedupe_key"].startswith("stock_zero_unconfirmed:")]
-    assert len(critical) == 1
-    notice = critical[0]
-    assert notice["type"] == AlertType.SYNC_FAILURE
-    assert notice["severity"] == AlertSeverity.ERROR
-    assert notice["notify_telegram"] is False
-    assert notice["payload"]["variation_id"] == "228803725060"
-    assert notice["payload"]["requested_stock"] == 0
-    assert notice["dedupe_key"] == f"stock_zero_unconfirmed:{link.id}"
+    assert [c.kwargs["type"] for c in alert.await_args_list] == (
+        [existing_alert] if existing_alert is not None else []
+    )
     assert link.stock == 1
     assert result.status == status
     assert result.error_code == code
-    assert session.add.call_args.args[0].payload["requested_stock"] == 0
+    log = session.add.call_args.args[0]
+    assert log.payload["requested_stock"] == 0
+    assert log.error_code == code
+    assert log.error_detail == "Reserved stock cannot be reduced"
+    assert log.qty_after is None
 
 
 @pytest.mark.asyncio
-async def test_interrupted_zero_request_also_alerts(monkeypatch):
-    link, result, alert, _ = await process(monkeypatch, raises=True)
+async def test_interrupted_zero_preserves_error_and_existing_failure_alert(monkeypatch):
+    link, result, alert, session = await process(monkeypatch, raises=True)
     assert result.status == SyncStatus.FATAL
     assert link.stock == 1
-    assert any(c.kwargs["title"].startswith("Zeramento não confirmado")
-               for c in alert.await_args_list)
+    alert.assert_awaited_once()
+    assert alert.await_args.kwargs["dedupe_key"] == f"sync_failure:{link.id}"
+    log = session.add.call_args.args[0]
+    assert log.error_code == "orchestrator_exception"
+    assert log.error_detail == "Connection interrupted"
+    assert log.payload["requested_stock"] == 0
 
 
 @pytest.mark.asyncio
@@ -95,25 +98,23 @@ async def test_interrupted_zero_request_also_alerts(monkeypatch):
     (0, SyncStatus.SKIPPED, "ml_listing_closed"),
     (12, SyncStatus.RETRYABLE, "product.error_busi_update_stock_failed"),
 ])
-async def test_confirmed_or_safe_skip_and_positive_stock_do_not_raise_zero_alert(
+async def test_confirmed_or_safe_skip_and_positive_retry_do_not_alert(
     monkeypatch, qty, status, code
 ):
     link, _, alert, _ = await process(monkeypatch, qty=qty, status=status, error_code=code)
-    assert not any(c.kwargs["dedupe_key"].startswith("stock_zero_unconfirmed:")
-                   for c in alert.await_args_list)
+    alert.assert_not_awaited()
     assert link.stock == (qty if status == SyncStatus.OK else 1)
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("original,replacement", [(0, 77), (77, 0)])
-async def test_sku_repoint_alert_uses_actual_target_quantity(monkeypatch, original, replacement):
-    link, result, alert, _ = await process(
+async def test_sku_repoint_log_uses_actual_target_quantity(monkeypatch, original, replacement):
+    link, result, alert, session = await process(
         monkeypatch, qty=original, replacement_qty=replacement
     )
-    notices = [c.kwargs for c in alert.await_args_list
-               if c.kwargs["dedupe_key"].startswith("stock_zero_unconfirmed:")]
     assert result.payload["requested_stock"] == replacement
-    assert len(notices) == (1 if replacement == 0 else 0)
-    if notices:
-        assert notices[0]["title"].endswith("dg091.pi")
-        assert notices[0]["payload"]["product_id"] == str(link.product_id)
+    log = session.add.call_args.args[0]
+    assert log.payload["requested_stock"] == replacement
+    assert log.product_id == link.product_id
+    assert link.stock == 1
+    alert.assert_not_awaited()
