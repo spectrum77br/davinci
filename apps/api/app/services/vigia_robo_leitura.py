@@ -13,9 +13,9 @@ ninguém fica sabendo ("não tô achando no ouvidoria robôs … esse aí").
 1. `executor:sem_sinal` — o robô parou de perguntar a fila. Ele pergunta a
    cada 10 min, e cada pergunta carimba `chamados_leitores.last_used_at`.
    Nunca-deu-sinal só vira ocorrência se houver caso esperando leitura.
-2. `caso:<chamado_id>` — devolução ou consulta do Portal de Atendimento (25/09)
-   da fila (mesma régua da fila do robô, `chamados_leitura.condicoes_do_leitor`)
-   sem leitura além da
+2. `caso:<chamado_id>` — devolução, consulta do Portal de Atendimento (25/09)
+   ou consulta do formulário de ajuda do ML (30/09) da fila (mesma régua da
+   fila do robô, `chamados_leitura.condicoes_do_leitor`) sem leitura além da
    cadência + `atraso_horas`: 3 h + 3 h = 6 h no caso normal; caso frio
    (ninguém fala há 15 dias) é lido 1×/dia, então 24 h + 3 h. Pega login
    caído, perfil sempre em uso, loja sem perfil no AdsPower e página mudada
@@ -64,6 +64,12 @@ ACAO_CASO = (
     "› logs): login do Seller Center caído, perfil da loja aberto por alguém, "
     "loja sem perfil no AdsPower ou página da Shopee mudada. Enquanto isso, "
     "conferir a devolução direto no Seller Center"
+)
+ACAO_CASO_ML = (
+    "Ver o registro do robô no Mac Santiago (DaVinci › executor-leitura-chamado "
+    "› logs): login do Mercado Livre caído, perfil \"<Loja> - Mercado Livre\" aberto "
+    "por alguém ou faltando no AdsPower, ou página da consulta mudada. Enquanto "
+    "isso, conferir a consulta direto no Mercado Livre (Ajuda › Consultas recentes)"
 )
 
 _CONTADORES = (
@@ -134,7 +140,7 @@ async def _casos(
     linhas = (
         await session.execute(
             select(Chamado, ultima_fala.label("ultima_fala"), entrou.label("entrou"))
-            .where(*chamados_leitura.condicoes_do_leitor(agora=agora))
+            .where(*chamados_leitura.condicoes_do_leitor(ml=True, agora=agora))
             .order_by(Chamado.created_at)
         )
     ).all()
@@ -150,31 +156,40 @@ async def _casos(
             continue
         r.contadores["casos_sem_leitura"] += 1
         minutos = _minutos(desde, agora)
-        # 25/09 (292592): consulta do Portal de Atendimento também é da fila
-        portal = chamados_leitura.e_portal_shopee(ch)
-        o_que = "Consulta do Portal" if portal else "Devolução"
+        # 25/09 (292592): consulta do Portal de Atendimento também é da fila;
+        # 30/09 (298394): e a consulta do formulário de ajuda do ML
+        ml = chamados_leitura.e_consulta_ml(ch)
+        portal = not ml and chamados_leitura.e_portal_shopee(ch)
+        o_que = "Consulta do ML" if ml else "Consulta do Portal" if portal else "Devolução"
         if lido is None:
             titulo = f"{o_que} sem leitura nenhuma há {_idade(minutos)}"
             detalhe = f"Na fila do robô desde {_br(ent or ch.created_at)} e nunca foi lida"
         else:
             titulo = f"{o_que} sem leitura há {_idade(minutos)}"
-            onde = "no Portal de Atendimento" if portal else "no Seller Center"
+            onde = (
+                "na página da consulta"
+                if ml
+                else "no Portal de Atendimento" if portal else "no Seller Center"
+            )
             detalhe = f"Última leitura {onde} em {_br(lido)}"
-        numero = f"consulta {ch.chamado or '?'}" if portal else f"solicitação {ch.chamado or '?'}"
+        numero = (
+            f"consulta {ch.chamado or '?'}" if ml or portal else f"solicitação {ch.chamado or '?'}"
+        )
+        quem = "o ML" if ml else "a Shopee"
         detalhe += (
-            f" — {numero}, pedido Shopee {ch.pedido_marketplace or '?'}. "
-            "Se a Shopee respondeu nesse meio-tempo, o chamado não sabe"
+            f" — {numero}, pedido {'ML' if ml else 'Shopee'} {ch.pedido_marketplace or '?'}. "
+            f"Se {quem} respondeu nesse meio-tempo, o chamado não sabe"
         )
         await _registrar(
             r,
             agora,
             chave=f"caso:{ch.id}",
-            plataforma="shopee",
+            plataforma="ml" if ml else "shopee",
             conta=ch.conta,
             pedido=ch.pedido_bling,
             titulo=titulo,
             detalhe=detalhe,
-            acao=ACAO_CASO,
+            acao=ACAO_CASO_ML if ml else ACAO_CASO,
             link=f"{LINK_PAINEL}?search={ch.pedido_bling}" if ch.pedido_bling else LINK_PAINEL,
             severidade="pessoa",
             precisa_pessoa=True,
@@ -214,7 +229,7 @@ async def _executor(
             titulo=f"{QUEM} nunca deu sinal",
             detalhe=(
                 "O robô nunca perguntou a fila e há "
-                + _plural(na_fila, "devolução esperando leitura", "devoluções esperando leitura")
+                + _plural(na_fila, "caso esperando leitura", "casos esperando leitura")
             ),
             acao=ACAO_SEM_SINAL,
             link=LINK_PAINEL,
@@ -233,7 +248,7 @@ async def _executor(
         )
         if na_fila:
             detalhe += " — " + _plural(
-                na_fila, "devolução na fila", "devoluções na fila"
+                na_fila, "caso na fila", "casos na fila"
             )
         await _registrar(
             r,
@@ -281,7 +296,7 @@ async def vigia_robo_leitura_run(session: AsyncSession) -> dict:
         # re-viu, sumiu.
         r.contadores["sumiram"] = await r.fechar_nao_vistas()
 
-        partes = [_plural(na_fila, "devolução na fila", "devoluções na fila")]
+        partes = [_plural(na_fila, "caso na fila", "casos na fila")]
         if r.contadores["casos_sem_leitura"]:
             partes.append(f"{r.contadores['casos_sem_leitura']} sem leitura")
         partes.append(executor_txt)

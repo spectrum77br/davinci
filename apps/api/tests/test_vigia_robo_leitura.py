@@ -144,7 +144,7 @@ async def _por_chave(db: AsyncSession, chave: str) -> OuvidoriaOcorrencia | None
 async def test_sem_robo_e_sem_fila_nao_cobra_ninguem(db):
     r = await vigia.vigia_robo_leitura_run(db)
     assert await _abertas(db) == []
-    assert r["resumo"] == "0 devoluções na fila · robô nunca deu sinal"
+    assert r["resumo"] == "0 casos na fila · robô nunca deu sinal"
 
 
 async def test_nunca_deu_sinal_com_caso_na_fila(db):
@@ -152,7 +152,7 @@ async def test_nunca_deu_sinal_com_caso_na_fila(db):
     await _devolucao(db)
     await vigia.vigia_robo_leitura_run(db)
     o = await _por_chave(db, "executor:sem_sinal")
-    assert o is not None and "1 devolução esperando leitura" in o.detalhe
+    assert o is not None and "1 caso esperando leitura" in o.detalhe
 
 
 async def test_sem_sinal_abre_e_fecha_quando_volta(db):
@@ -184,7 +184,7 @@ async def test_caso_sem_leitura_ha_mais_de_6h_abre_e_fecha_quando_lido(db):
     assert o is not None and o.fechada_em is None
     assert o.pedido == ch.pedido_bling and o.conta == "Shopee Vortan"
     assert o.link == f"/chamados?search={ch.pedido_bling}"
-    assert "Última leitura" in o.detalhe and r["resumo"].startswith("1 devolução na fila · 1 sem")
+    assert "Última leitura" in o.detalhe and r["resumo"].startswith("1 caso na fila · 1 sem")
     ch.leitura_robo_at = _agora()
     await db.commit()
     await vigia.vigia_robo_leitura_run(db)
@@ -237,6 +237,31 @@ async def test_chamado_fora_da_fila_nao_vira_ocorrencia(db, kw):
 
 
 # ─── sweep e catálogo ──────────────────────────────────────────────────────
+
+
+async def test_consulta_do_ml_sem_leitura_vira_ocorrencia_do_ml(db):
+    """30/09 (298394): a consulta do formulário de ajuda do ML entrou na fila do
+    robô — se ela ficar sem leitura, o vigia cobra com o texto do ML."""
+    await _leitor(db, visto_min=1)
+    ch = Chamado(
+        id=uuid4(), pedido_bling=f"vrl-{uuid4().hex[:6]}", pedido_marketplace="2000015125791563",
+        plataforma="Mercado Livre", conta="forpaper", origem="logistica", chamado="484465159",
+        canal="robo", chamado_de_tela=True, leitura_robo_at=_agora() - timedelta(hours=7),
+    )
+    db.add(ch)
+    await db.flush()
+    f = chamados_svc.nova_mensagem(
+        ch, texto="Vamos encaminhar o seu caso.", tipo="resposta", direcao="recebida",
+        autor_nome="Mercado Livre", status="registrada",
+    )
+    f.created_at = f.enviada_at = _agora() - timedelta(hours=10)
+    db.add(f)
+    await db.commit()
+    await vigia.vigia_robo_leitura_run(db)
+    o = await _por_chave(db, f"caso:{ch.id}")
+    assert o is not None and o.titulo.startswith("Consulta do ML sem leitura")
+    assert "consulta 484465159, pedido ML 2000015125791563" in o.detalhe
+    assert "Mercado Livre" in o.acao and "Seller Center" not in o.acao
 
 
 async def test_sweep_e_serializado_pelo_advisory_lock(db):
