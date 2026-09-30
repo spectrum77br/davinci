@@ -340,6 +340,11 @@ class ChamadoLeitor(Base, TimestampMixin):
     token_hash: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # 30/09 (298394): as MÃOS do ML no Mac Santiago — responde na página da
+    # consulta (`/agent/leitor/responder/*`). A senha de leitura não tem isto.
+    responde_ml: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
 
 
 class ChamadoIaRegra(Base, TimestampMixin):

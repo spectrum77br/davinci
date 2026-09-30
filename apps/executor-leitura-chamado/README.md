@@ -52,6 +52,18 @@ cada `[data-testid="message-card"]` (autor, dia, texto). A tela só mostra o DIA
 encerra nada. Fila e modo próprios: `LEITURA_ML=seco|real` no `.env` (sem nada
 = desligado), independente do `LEITURA_MODO` da Shopee.
 
+**v1.4 (30/09 — 298394): as MÃOS do ML — responder na consulta.** Com
+`RESPONDER_ML=seco|real` e a senha PRÓPRIA `RESPONDER_TOKEN` (a `LEITOR_TOKEN`
+continua só lendo), o começo de cada passada pede as réplicas pendentes das
+consultas do ML (`/api/chamados/agent/leitor/responder/fila`), abre a consulta
+no perfil da loja, clica "Retomar consulta", põe o texto na caixa "Digite uma
+mensagem" (pelo `value`, nunca por teclado — Enter poderia enviar), anexa as
+fotos da réplica, clica Enviar e só avisa "enviada" quando o card "Você" com o
+texto aparece na conversa. Se a conversa já tem o texto (tentativa anterior que
+não conseguiu avisar), não manda de novo. `seco`: escreve, fotografa, apaga,
+não anexa e não envia (`logs/seco/responder-<pedido>.json` + print em `debug/`).
+Com as mãos ativas, o DaVinci não entrega mais essas réplicas ao robô antigo.
+
 Loja → perfil: casa pelo nome do perfil (`Vortan - Shopee` → `Shopee Vortan`;
 `Forpaper - Mercado Livre` → `forpaper`, aceitando "ML Forpaper" no chamado).
 O que não casar na Shopee vai no `PERFIS_EXTRA` do `.env`.

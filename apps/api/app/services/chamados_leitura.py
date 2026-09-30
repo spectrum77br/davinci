@@ -309,17 +309,25 @@ def loja_ml_sql():
     return func.regexp_replace(t, "[^a-z0-9]+", "", "g")
 
 
+def consulta_ml_sql():
+    """O chamado É uma consulta do formulário de ajuda do ML (caso de tela, ML,
+    `chamado` só dígitos) — vivo ou não. Serve à leitura e às mãos do ML."""
+    return and_(
+        chamados_svc.CASO_DE_TELA_SQL,
+        func.trim(func.coalesce(Chamado.chamado, "")).op("~")(_CONSULTA_ML),
+        func.lower(func.trim(func.coalesce(Chamado.plataforma, ""))).in_(
+            sorted(chamados_svc.PLATAFORMA_ML)
+        ),
+    )
+
+
 def condicoes_consulta_ml() -> list:
     """Consulta do formulário de ajuda do ML que o executor de leitura relê: caso
     aberto na tela, ML, vivo, sem decisão final, com o nº da consulta no `chamado`."""
     return [
         Chamado.resolvido.is_(False),
         chamados_svc.NAO_ENCERRADO_SQL,
-        chamados_svc.CASO_DE_TELA_SQL,
-        func.trim(func.coalesce(Chamado.chamado, "")).op("~")(_CONSULTA_ML),
-        func.lower(func.trim(func.coalesce(Chamado.plataforma, ""))).in_(
-            sorted(chamados_svc.PLATAFORMA_ML)
-        ),
+        consulta_ml_sql(),
     ]
 
 

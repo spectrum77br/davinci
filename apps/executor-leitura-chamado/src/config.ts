@@ -34,6 +34,11 @@ export interface Config {
   portal: boolean;
   /** 30/09 (298394): LEITURA_ML=seco|real lê as consultas do ML; sem nada = desligado. */
   ml: ModoMl;
+  /** 30/09 (298394): RESPONDER_ML=seco|real posta as réplicas nas consultas do
+   *  ML (seco: escreve, fotografa e apaga); sem nada = desligado. */
+  responder: ModoMl;
+  /** Senha das mãos do ML — separada da LEITOR_TOKEN, que só lê. */
+  responderToken: string;
   /** conta do chamado (minúscula) -> user_id do AdsPower, por cima do casamento
    *  automático pelo nome do perfil ("Vortan - Shopee" -> "Shopee Vortan"). */
   perfisExtra: Record<string, string>;
@@ -69,5 +74,7 @@ export const cfg: Config = {
   secoDir: str("SECO_DIR", "./logs/seco"),
   portal: str("LEITURA_PORTAL", "1") !== "0",
   ml: ((v) => (v === "real" || v === "seco" ? v : "desligado"))(str("LEITURA_ML")) as ModoMl,
+  responder: ((v) => (v === "real" || v === "seco" ? v : "desligado"))(str("RESPONDER_ML")) as ModoMl,
+  responderToken: str("RESPONDER_TOKEN"),
   perfisExtra: perfisExtra(),
 };

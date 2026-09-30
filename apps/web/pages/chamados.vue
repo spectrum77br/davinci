@@ -373,7 +373,7 @@ const ERROS: Record<string, string> = {
   // 19/09: instrução não entra em chamado Concluído — a pessoa reabre pela aba antes.
   chamado_concluido: 'chamado concluído — reabra pela aba pra instruir o robô',
   chamado_mensagem_abertura: 'a abertura do chamado não pode sair do histórico — sem ela o sistema para de acompanhar',
-  chamado_mensagem_na_fila: 'essa mensagem ainda vai sair pra plataforma — espere enviar',
+  chamado_mensagem_na_fila: 'o robô está enviando essa mensagem agora — espere terminar',
   chamado_mensagem_not_found: 'essa mensagem já tinha sido excluída',
   // 21/09 (Vinicius): janela "Excluir chamado" (chamado + lançamentos de devolução).
   devolucoes_delete_forbidden: 'sem permissão pra excluir lançamentos de devolução',
@@ -1301,28 +1301,36 @@ async function avaliarNoHistorico(b: Bolha, certo: boolean) {
 // 25/09 (Vinicius: "quero excluir uma mensagem do histórico"): a lixeirinha
 // ESCONDE — some da tela e da IA de Chamado; a linha fica no banco pra fala da
 // plataforma não voltar na próxima leitura e o robô não repetir resposta. A
-// abertura e mensagem nossa ainda na fila não têm lixeira (a API recusa também).
+// abertura e mensagem nossa que o robô está postando agora (enviando) não têm
+// lixeira (a API recusa também). 30/09 (298394): a réplica ainda PENDENTE tem — a
+// lixeira a cancela (o robô não manda), pra trocar o texto antes de sair.
 const histExcluindo = ref<string | null>(null)
 function podeLixeira(b: Bolha): boolean {
   const o = b.origem
   if (!canDelete.value || !o || o.tipo === 'abertura') return false
-  return !(o.direcao === 'enviada' && (o.status === 'pendente' || (o.status as string) === 'enviando'))
+  return !(o.direcao === 'enviada' && (o.status as string) === 'enviando')
 }
 async function excluirMensagem(b: Bolha) {
   const o = b.origem
   if (!o || !hist.row || histExcluindo.value) return
   const juntas = bolhas.value.filter(x => x.origem?.id === o.id).length
-  const aviso = [
-    'Excluir esta mensagem do histórico?',
-    juntas > 1 ? `Ela chegou junto com outras ${juntas - 1} fala(s) na mesma leitura — todas somem juntas.` : '',
-    'Some da tela e a IA de Chamado não lê mais. O que já foi pra plataforma não é desfeito.',
-  ].filter(Boolean).join('\n\n')
+  const naFila = o.direcao === 'enviada' && o.status === 'pendente'
+  const aviso = naFila
+    ? [
+        'Cancelar esta réplica?',
+        'Ela ainda não saiu: o robô não vai mandar. Para trocar o texto, escreva a nova réplica depois de cancelar.',
+      ].join('\n\n')
+    : [
+        'Excluir esta mensagem do histórico?',
+        juntas > 1 ? `Ela chegou junto com outras ${juntas - 1} fala(s) na mesma leitura — todas somem juntas.` : '',
+        'Some da tela e a IA de Chamado não lê mais. O que já foi pra plataforma não é desfeito.',
+      ].filter(Boolean).join('\n\n')
   if (!confirm(aviso)) return
   histExcluindo.value = o.id
   try {
     await api(`/api/chamados/mensagens/${o.id}`, { method: 'DELETE' })
     hist.mensagens = await api<Mensagem[]>(`/api/chamados/${hist.row.id}/mensagens`)
-    toasts.success('Mensagem excluída do histórico')
+    toasts.success(naFila ? 'Réplica cancelada — não vai sair' : 'Mensagem excluída do histórico')
   } catch (e: any) {
     toasts.error('Não consegui excluir a mensagem', apiError(e))
   } finally {
@@ -2195,7 +2203,7 @@ async function confirmarExcluir() {
                 b.lado === 'sistema' ? 'self-center' : 'self-start mt-1',
               ]"
               :disabled="histExcluindo === b.origem?.id"
-              title="excluir mensagem do histórico"
+              :title="b.origem?.direcao === 'enviada' && b.origem?.status === 'pendente' ? 'cancelar réplica (ainda não saiu)' : 'excluir mensagem do histórico'"
               aria-label="excluir mensagem do histórico"
               @click="excluirMensagem(b)"
             >

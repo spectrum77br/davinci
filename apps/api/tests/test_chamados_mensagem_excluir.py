@@ -5,8 +5,8 @@ pedido 294571: "quero excluir uma mensagem do histórico").
 Excluir ESCONDE: a mensagem some da tela e da leitura da IA de Chamado, mas a linha fica
 — a varredura só grava a fala da plataforma que ainda não está no histórico (apagada, ela
 voltaria na passada seguinte) e as marcas de sistema seguram respostas automáticas. A
-abertura não tem lixeira; mensagem nossa ainda na fila também não. Só quem pode excluir
-chamado."""
+abertura não tem lixeira; mensagem nossa que o robô está postando (`enviando`) também não
+— a ainda `pendente` é CANCELADA (30/09, 298394). Só quem pode excluir chamado."""
 
 from __future__ import annotations
 
@@ -101,9 +101,11 @@ async def test_instrucao_escondida_some_da_ia(client, make_user, auth_as, db):
     assert (await _item_do_cerebro(db, ch)).instrucao is None
 
 
-async def test_abertura_e_mensagem_na_fila_nao_tem_lixeira(client, make_user, auth_as, db):
+async def test_abertura_e_mensagem_sendo_postada_nao_tem_lixeira(client, make_user, auth_as, db):
     auth_as(await make_user(permissions=PERMS))
     ch, msgs = await _seed(db)
+    msgs["pendente"].status = "enviando"  # o robô pegou e está postando agora
+    await db.commit()
 
     r = await client.delete(f"/api/chamados/mensagens/{msgs['abertura'].id}")
     assert r.status_code == 422 and r.json()["detail"]["code"] == "chamado_mensagem_abertura", r.text
@@ -111,6 +113,21 @@ async def test_abertura_e_mensagem_na_fila_nao_tem_lixeira(client, make_user, au
     assert r.status_code == 422 and r.json()["detail"]["code"] == "chamado_mensagem_na_fila", r.text
     textos = await _textos_na_tela(client, ch)
     assert "Contestamos a devolução" in textos and "Segue a evidência" in textos
+
+
+async def test_replica_pendente_e_cancelada_e_nao_sai(client, make_user, auth_as, db):
+    """30/09 (298394): a réplica do Cairo era cópia da abertura — trocar o texto
+    antes de o robô mandar = cancelar a pendente e escrever outra."""
+    auth_as(await make_user(email="cairo@davinci-test.com", permissions=PERMS))
+    ch, msgs = await _seed(db)
+
+    r = await client.delete(f"/api/chamados/mensagens/{msgs['pendente'].id}")
+    assert r.status_code == 204, r.text
+    await db.refresh(msgs["pendente"])
+    assert msgs["pendente"].status == "cancelada" and msgs["pendente"].excluida_at is not None
+    textos = await _textos_na_tela(client, ch)
+    assert "Segue a evidência" not in textos
+    assert any(t.startswith("Réplica cancelada por") for t in textos)
 
 
 async def test_so_quem_pode_excluir_chamado(client, make_user, auth_as, db):

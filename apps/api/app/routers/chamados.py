@@ -30,7 +30,7 @@ from fastapi import (
     status,
 )
 from fastapi.responses import HTMLResponse
-from sqlalchemy import Text, case, cast, func, literal, or_, select
+from sqlalchemy import Text, and_, case, cast, func, literal, or_, select
 from sqlalchemy.dialects.postgresql import aggregate_order_by
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import defer, selectinload
@@ -78,6 +78,7 @@ from app.schemas.chamados import (
     AgentLeituraOut,
     AgentLeituraResultadoIn,
     AgentLeituraResultadoOut,
+    AgentMaosMlFilaIn,
     AgentMensagemOut,
     AgentPagamentoMlIn,
     AgentPagamentoMlItem,
@@ -293,7 +294,11 @@ async def _to_out(session: AsyncSession, rows: list[Chamado]) -> list[ChamadoOut
         o.custo_produto, o.custo_detalhe = custo_map.get(r.pedido_bling or "", (None, None))
         o.mensagens_total = len(msgs)
         o.ultima_mensagem_at = msgs[-1].created_at if msgs else None
-        falas = [m for m in msgs if m.direcao in ("enviada", "recebida")]
+        falas = [
+            m
+            for m in msgs
+            if m.direcao in ("enviada", "recebida") and m.status != STATUS_CANCELADA
+        ]
         entregues = [m for m in falas if m.status not in ("pendente", "falhou")]
         if entregues:
             u = entregues[-1]
@@ -737,10 +742,12 @@ async def list_mensagens(
 
 
 # 25/09 (Vinicius, lixeirinha no histórico): a abertura nunca some — sem ela a
-# varredura para de acompanhar o chamado. Mensagem nossa ainda na fila (pendente/
-# enviando) também não: escondida, ela sairia pra plataforma do mesmo jeito.
+# varredura para de acompanhar o chamado. Mensagem nossa que o robô está POSTANDO
+# agora (`enviando`) também não. 30/09 (298394): a que ainda está `pendente` pode
+# — a lixeira a CANCELA (`cancelada`, o robô não pega mais), pra trocar o texto
+# de uma réplica antes de sair.
 _TIPOS_SEM_LIXEIRA = frozenset({"abertura"})
-_STATUS_NA_FILA = frozenset({"pendente", "enviando"})
+STATUS_CANCELADA = "cancelada"
 
 
 @router.delete("/mensagens/{mensagem_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -754,13 +761,19 @@ async def excluir_mensagem(
     de sistema seguram respostas automáticas. A cópia da mesma mensagem nas linhas
     irmãs do caso (mesma direção, tipo e texto em até 2 min — a que o histórico
     junta) some junto. Status da aba e robôs continuam contando."""
-    m = await session.get(ChamadoMensagem, mensagem_id)
+    # FOR UPDATE: a réplica pendente pode estar sendo entregue ao robô agora
+    m = (
+        await session.execute(
+            select(ChamadoMensagem).where(ChamadoMensagem.id == mensagem_id).with_for_update()
+        )
+    ).scalar_one_or_none()
     if m is None or m.excluida_at is not None:
         raise HTTPException(404, detail={"code": "chamado_mensagem_not_found"})
     if m.tipo in _TIPOS_SEM_LIXEIRA:
         raise HTTPException(422, detail={"code": "chamado_mensagem_abertura"})
-    if m.direcao == "enviada" and m.status in _STATUS_NA_FILA:
+    if m.direcao == "enviada" and m.status == "enviando":
         raise HTTPException(422, detail={"code": "chamado_mensagem_na_fila"})
+    cancelar = m.direcao == "enviada" and m.status == "pendente"
     ch = await _get(session, m.chamado_id)
     alvo = [m]
     irmas = [i for i in await _ids_do_caso(session, ch) if i != ch.id]
@@ -784,11 +797,19 @@ async def excluir_mensagem(
     for x in alvo:
         x.excluida_at = agora
         x.excluida_por = quem
+        if cancelar and x.direcao == "enviada" and x.status == "pendente":
+            x.status = STATUS_CANCELADA
+    if cancelar:
+        session.add(
+            svc.registrar_sistema(
+                ch, f"Réplica cancelada por {quem} antes de sair — não foi enviada"
+            )
+        )
     await session.commit()
     logger.info(
         "chamado_mensagem_excluida",
         chamado_id=str(ch.id), mensagem_id=str(mensagem_id), tipo=m.tipo,
-        copias=len(alvo) - 1, autor=quem,
+        copias=len(alvo) - 1, autor=quem, cancelada=cancelar,
     )
 
 
@@ -1420,6 +1441,18 @@ async def _agente_ou_cerebro(
         ).scalar_one_or_none()
         if cadastrado is not None:
             return
+        # 30/09: as mãos do ML (Mac Santiago) anexam a foto da réplica na consulta
+        maos = (
+            await session.execute(
+                select(ChamadoLeitor.id).where(
+                    ChamadoLeitor.token_hash == hashlib.sha256(token.encode()).hexdigest(),
+                    ChamadoLeitor.responde_ml.is_(True),
+                    ChamadoLeitor.revoked_at.is_(None),
+                )
+            )
+        ).scalar_one_or_none()
+        if maos is not None:
+            return
     raise HTTPException(401, detail={"code": "chamados_agent_unauthorized"})
 
 
@@ -1608,6 +1641,95 @@ async def agent_shopee_prova(
     return out
 
 
+def _condicoes_da_fila(agora: datetime) -> list:
+    """O que é tarefa do robô: réplica/abertura nossa de canal robô ainda na fila
+    (ou presa em `enviando` há mais de 30 min), de chamado não resolvido."""
+    return [
+        ChamadoMensagem.canal == "robo",
+        ChamadoMensagem.direcao == "enviada",
+        Chamado.resolvido.is_(False),
+        or_(
+            ChamadoMensagem.status == "pendente",
+            (ChamadoMensagem.status == "enviando")
+            & (ChamadoMensagem.updated_at < agora - _LEASE_STALE),
+        ),
+        # 21/09: ABERTURA de chamado já Encerrado (ex. motivo trocado e outro
+        # chamado aberto no lugar) não volta pro robô — nem presa em `enviando`.
+        # Réplica e instrução em Encerrado continuam saindo (é o jeito de o robô
+        # voltar num caso).
+        or_(ChamadoMensagem.tipo != "abertura", svc.NAO_ENCERRADO_SQL),
+    ]
+
+
+_SEM_PROTOCOLO = or_(Chamado.chamado.is_(None), func.trim(Chamado.chamado) == "")
+
+
+async def _maos_do_ml_ativas(session: AsyncSession) -> bool:
+    """30/09: o Mac Santiago tem as mãos do ML (senha com `responde_ml`)?"""
+    return (
+        await session.execute(
+            select(ChamadoLeitor.id)
+            .where(ChamadoLeitor.responde_ml.is_(True), ChamadoLeitor.revoked_at.is_(None))
+            .limit(1)
+        )
+    ).scalar_one_or_none() is not None
+
+
+async def _entregar(
+    session: AsyncSession, conds: list, limite: int, *, marcar: bool = True
+) -> list[AgentTarefaOut]:
+    """As tarefas que casam com `conds`, da mais velha pra mais nova. `marcar`:
+    passa pra `enviando` (o robô vai postar); sem marcar é só olhar (modo seco)."""
+    rows = (
+        await session.execute(
+            select(ChamadoMensagem, Chamado)
+            .join(Chamado, Chamado.id == ChamadoMensagem.chamado_id)
+            .options(selectinload(ChamadoMensagem.anexos))
+            .where(*conds)
+            .order_by(ChamadoMensagem.created_at)
+            .limit(limite)
+        )
+    ).all()
+    tarefas: list[AgentTarefaOut] = []
+    if not rows:
+        return tarefas
+    anexos_auto = {}
+    for a in (
+        await session.execute(
+            select(ChamadoAnexo).where(
+                ChamadoAnexo.chamado_id.in_([c.id for _, c in rows]),
+                ChamadoAnexo.mensagem_id.is_(None),
+            )
+        )
+    ).scalars():
+        anexos_auto.setdefault(a.chamado_id, []).append(a.id)
+    for m, c in rows:
+        if marcar:
+            m.status = "enviando"
+        anexos = [a.id for a in (m.anexos or [])]
+        if m.tipo == "replica_auto":
+            anexos += anexos_auto.get(c.id, [])
+        tarefas.append(
+            AgentTarefaOut(
+                tipo="responder" if (c.chamado or "").strip() else "abrir",
+                mensagem_id=m.id,
+                chamado_id=c.id,
+                pedido_bling=c.pedido_bling,
+                pedido_marketplace=c.pedido_marketplace,
+                conta=c.conta,
+                plataforma=c.plataforma,
+                chamado=c.chamado,
+                chamado_url=c.chamado_url,
+                texto=limpar_html(m.texto),
+                anexos=anexos,
+            )
+        )
+    if marcar:
+        await session.commit()
+        logger.info("chamado_agent_lease", tarefas=len(tarefas))
+    return tarefas
+
+
 @agent_router.post("/lease", response_model=AgentLeaseOut, dependencies=_agent_dep)
 async def agent_lease(
     body: AgentLeaseIn,
@@ -1616,25 +1738,11 @@ async def agent_lease(
     """Entrega ao robô as réplicas pendentes de canal robô (manuais e
     automáticas) e marca-as `enviando`. Tarefa presa em `enviando` há mais de
     30 min volta pra fila. Chamado resolvido não gera tarefa."""
-    limite_stale = datetime.now(UTC) - _LEASE_STALE
-    sem_protocolo = or_(Chamado.chamado.is_(None), func.trim(Chamado.chamado) == "")
-    conds = [
-        ChamadoMensagem.canal == "robo",
-        ChamadoMensagem.direcao == "enviada",
-        Chamado.resolvido.is_(False),
-        or_(
-            ChamadoMensagem.status == "pendente",
-            (ChamadoMensagem.status == "enviando") & (ChamadoMensagem.updated_at < limite_stale),
-        ),
-    ]
-    # 21/09: ABERTURA de chamado já Encerrado (ex. motivo trocado e outro chamado
-    # aberto no lugar) não volta pro robô — nem presa em `enviando`. Réplica e
-    # instrução em Encerrado continuam saindo (é o jeito de o robô voltar num caso).
-    conds.append(or_(ChamadoMensagem.tipo != "abertura", svc.NAO_ENCERRADO_SQL))
+    conds = _condicoes_da_fila(datetime.now(UTC))
     if body.tipo == "abrir":
-        conds.append(sem_protocolo)
+        conds.append(_SEM_PROTOCOLO)
     elif body.tipo == "responder":
-        conds.append(~sem_protocolo)
+        conds.append(~_SEM_PROTOCOLO)
     # Plataforma: TikTok/Shopee (regra da aba Status → robô abre no Seller
     # Center) só saem pra quem pede por elas; o consumidor padrão (robô do
     # formulário do ML) nunca as recebe — senão tentaria abrir no lugar errado.
@@ -1647,52 +1755,12 @@ async def agent_lease(
         conds.append(plat_col.in_(aceitas))
     else:
         conds.append(plat_col.not_in(_PLATAFORMAS_SO_COM_PEDIDO))
-    rows = (
-        await session.execute(
-            select(ChamadoMensagem, Chamado)
-            .join(Chamado, Chamado.id == ChamadoMensagem.chamado_id)
-            .options(selectinload(ChamadoMensagem.anexos))
-            .where(*conds)
-            .order_by(ChamadoMensagem.created_at)
-            .limit(body.limite)
-        )
-    ).all()
-    tarefas: list[AgentTarefaOut] = []
-    if rows:
-        ids = [m.id for m, _ in rows]
-        anexos_auto = {}
-        for a in (
-            await session.execute(
-                select(ChamadoAnexo).where(
-                    ChamadoAnexo.chamado_id.in_([c.id for _, c in rows]),
-                    ChamadoAnexo.mensagem_id.is_(None),
-                )
-            )
-        ).scalars():
-            anexos_auto.setdefault(a.chamado_id, []).append(a.id)
-        for m, c in rows:
-            m.status = "enviando"
-            anexos = [a.id for a in (m.anexos or [])]
-            if m.tipo == "replica_auto":
-                anexos += anexos_auto.get(c.id, [])
-            tarefas.append(
-                AgentTarefaOut(
-                    tipo="responder" if (c.chamado or "").strip() else "abrir",
-                    mensagem_id=m.id,
-                    chamado_id=c.id,
-                    pedido_bling=c.pedido_bling,
-                    pedido_marketplace=c.pedido_marketplace,
-                    conta=c.conta,
-                    plataforma=c.plataforma,
-                    chamado=c.chamado,
-                    chamado_url=c.chamado_url,
-                    texto=limpar_html(m.texto),
-                    anexos=anexos,
-                )
-            )
-        await session.commit()
-        logger.info("chamado_agent_lease", tarefas=len(ids))
-    return AgentLeaseOut(tarefas=tarefas)
+    # 30/09 (298394): com as mãos do ML no Mac Santiago, a resposta numa consulta
+    # do ML é SÓ dele (`/agent/leitor/responder/*`) — este token (o do Eduardo)
+    # não recebe mais, senão os dois postariam a mesma réplica.
+    if await _maos_do_ml_ativas(session):
+        conds.append(~and_(~_SEM_PROTOCOLO, chamados_leitura.consulta_ml_sql()))
+    return AgentLeaseOut(tarefas=await _entregar(session, conds, body.limite))
 
 
 @agent_router.post("/leitura", response_model=AgentLeituraOut, dependencies=_agent_dep)
@@ -1911,6 +1979,75 @@ async def agent_leitor_resultado(
         pendencias_novas=r.pendencias_novas,
         proxima_leitura_at=await chamados_leitura.proxima_leitura(session, ch, ok=body.ok),
     )
+
+
+# ------------------------------------------------ mãos do ML (Mac Santiago, 30/09)
+# 298394: a réplica do Cairo ficou "pendente" desde 29/09 — ninguém pedia a fila
+# "responder" do ML (o robô do Eduardo respondia pelo e-mail do Tuta e parou ~24/09).
+# Agora quem responde é o executor do Mac Santiago, na página da consulta
+# ("Retomar consulta" › "Digite uma mensagem" › Enviar), com a senha da linha de
+# `chamados_leitores` que tem `responde_ml` — a senha de leitura segue só lendo.
+
+
+async def _maos_ml(
+    leitor: Annotated[ChamadoLeitor, Depends(_leitor)],
+) -> ChamadoLeitor:
+    if not leitor.responde_ml:
+        raise HTTPException(403, detail={"code": "chamados_leitor_sem_maos"})
+    return leitor
+
+
+@agent_router.post("/leitor/responder/fila", response_model=AgentLeaseOut)
+async def agent_maos_ml_fila(
+    body: AgentMaosMlFilaIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _quem: Annotated[ChamadoLeitor, Depends(_maos_ml)],
+) -> AgentLeaseOut:
+    """Réplicas nossas pra postar numa consulta do formulário de ajuda do ML (as
+    mesmas regras do `/agent/lease`: canal robô, pendente ou presa há 30 min,
+    chamado não resolvido). `espiar` = modo seco: devolve sem marcar `enviando`."""
+    conds = [
+        *_condicoes_da_fila(datetime.now(UTC)),
+        ~_SEM_PROTOCOLO,
+        ChamadoMensagem.tipo != "abertura",
+        chamados_leitura.consulta_ml_sql(),
+    ]
+    return AgentLeaseOut(
+        tarefas=await _entregar(session, conds, body.limite, marcar=not body.espiar)
+    )
+
+
+@agent_router.post("/leitor/responder/resultado", response_model=ChamadoMensagemOut)
+async def agent_maos_ml_resultado(
+    body: AgentResultadoIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _quem: Annotated[ChamadoLeitor, Depends(_maos_ml)],
+) -> ChamadoMensagemOut:
+    """Enviada/falhou da réplica — mesmas regras do `/agent/resultado` (falha
+    volta pra fila até `MAX_TENTATIVAS_ROBO`). Enviada: a consulta vai pro topo da
+    fila de leitura, e a conversa com a nossa fala entra no histórico na mesma
+    passada do robô (é a prova de que saiu)."""
+    m = (
+        await session.execute(
+            select(ChamadoMensagem)
+            .options(selectinload(ChamadoMensagem.anexos))
+            .where(ChamadoMensagem.id == body.mensagem_id)
+        )
+    ).scalar_one_or_none()
+    if m is None:
+        raise HTTPException(404, detail={"code": "chamado_mensagem_not_found"})
+    ch = await _get(session, m.chamado_id)
+    if not (
+        chamados_leitura.e_consulta_ml(ch)
+        and (m.canal or "") == "robo"
+        and m.direcao == "enviada"
+        and m.tipo != "abertura"
+    ):
+        raise HTTPException(409, detail={"code": "chamado_fora_das_maos"})
+    if body.ok:
+        ch.leitura_robo_at = None
+        ch.leitura_robo_claim_at = None
+    return await agent_resultado(body, session)
 
 
 @agent_router.post("/resultado", response_model=ChamadoMensagemOut, dependencies=_agent_dep)

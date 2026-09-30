@@ -44,12 +44,12 @@ export interface Resultado {
   pendencias?: string[];
 }
 
-async function post<T>(path: string, body: unknown): Promise<T> {
+async function post<T>(path: string, body: unknown, token = cfg.token): Promise<T> {
   let res: Response;
   try {
     res = await fetch(`${cfg.davinciApiUrl}${path}`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", "X-Agent-Token": cfg.token },
+      headers: { "Content-Type": "application/json", "X-Agent-Token": token },
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(30000),
     });
@@ -96,4 +96,52 @@ export async function resultado(r: Resultado): Promise<Record<string, unknown>> 
     pendencias: r.pendencias ?? [],
     encerrado: false,
   });
+}
+
+// ------------------------------------------------ mãos do ML (30/09, 298394)
+// Senha PRÓPRIA (RESPONDER_TOKEN, linha de `chamados_leitores` com
+// `responde_ml`): a LEITOR_TOKEN só lê e não abre estas rotas.
+
+/** Uma réplica nossa pra postar na consulta do ML (mesmo formato do lease). */
+export interface Tarefa {
+  tipo: "abrir" | "responder";
+  mensagem_id: string;
+  chamado_id: string;
+  pedido_bling: string | null;
+  pedido_marketplace: string | null;
+  conta: string | null;
+  plataforma: string | null;
+  chamado: string | null;
+  chamado_url: string | null;
+  texto: string;
+  anexos: string[];
+}
+
+/** Réplicas pra postar. `espiar` = seco: não marca `enviando`. */
+export async function maosFila(limite: number, espiar: boolean): Promise<Tarefa[]> {
+  const data = await post<{ tarefas: Tarefa[] }>(
+    "/api/chamados/agent/leitor/responder/fila",
+    { limite, espiar },
+    cfg.responderToken
+  );
+  return data.tarefas ?? [];
+}
+
+/** Enviada (ok) ou falhou (+ erro — volta pra fila até 3 tentativas). */
+export async function maosResultado(mensagemId: string, ok: boolean, erro?: string): Promise<Record<string, unknown>> {
+  return post(
+    "/api/chamados/agent/leitor/responder/resultado",
+    { mensagem_id: mensagemId, ok, erro: erro ?? null },
+    cfg.responderToken
+  );
+}
+
+/** A foto da réplica (pra anexar na consulta). */
+export async function baixarAnexo(id: string): Promise<{ conteudo: Buffer; tipo: string }> {
+  const res = await fetch(`${cfg.davinciApiUrl}/api/chamados/agent/anexos/${id}`, {
+    headers: { "X-Agent-Token": cfg.responderToken },
+    signal: AbortSignal.timeout(60000),
+  });
+  if (!res.ok) throw new Error(`DaVinci anexo ${id} HTTP ${res.status}`);
+  return { conteudo: Buffer.from(await res.arrayBuffer()), tipo: res.headers.get("content-type") || "" };
 }

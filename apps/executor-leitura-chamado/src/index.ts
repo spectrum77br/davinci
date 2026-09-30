@@ -31,6 +31,11 @@
  * modo PRÓPRIOS: `LEITURA_ML=seco|real` (sem nada = desligado), pra ligar o ML
  * sem mexer na Shopee que já roda de verdade.
  *
+ * 30/09 (298394), MÃOS do ML: `RESPONDER_ML=seco|real` posta a nossa réplica na
+ * consulta (ml_responder.ts), com a senha PRÓPRIA `RESPONDER_TOKEN` — a
+ * LEITOR_TOKEN segue só lendo. Roda no começo da passada: a resposta que saiu
+ * volta pra fila de leitura e a conversa com ela entra no chamado na mesma passada.
+ *
  * Uso:
  *   npm start                         loop (LEITURA_MODO do .env, default seco)
  *   npm start -- --uma-vez            uma passada e sai
@@ -55,9 +60,10 @@ import * as perfis from "./perfis";
 import * as historico from "./shopee_historico";
 import * as portal from "./shopee_portal";
 import * as ml from "./ml_consulta";
+import * as maos from "./ml_responder";
 import type { Caso } from "./davinci";
 
-const VERSION = "1.3.0";
+const VERSION = "1.4.0";
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 function arg(nome: string): string | undefined {
@@ -214,7 +220,10 @@ async function passada(): Promise<void> {
     }
     const todos = await adspower.list();
     const mapa = await perfis.mapa(todos);
-    const mapaMl = cfg.ml === "desligado" ? new Map<string, perfis.Perfil>() : await perfis.mapaMl(todos);
+    const precisaMl = cfg.ml !== "desligado" || cfg.responder !== "desligado";
+    const perfisMl = precisaMl ? await perfis.mapaMl(todos) : new Map<string, perfis.Perfil>();
+    if (cfg.responder !== "desligado") await responderMl(perfisMl);
+    const mapaMl = cfg.ml === "desligado" ? new Map<string, perfis.Perfil>() : perfisMl;
     const contas = [...mapa.keys()];
     // `--so` sempre espia: não marca a entrega dos outros casos da fila.
     const espiar = cfg.modo === "seco" || !!SO;
@@ -272,6 +281,78 @@ async function passada(): Promise<void> {
   }
 }
 
+/** As mãos do ML: posta as réplicas pendentes nas consultas (30/09, 298394). */
+async function responderMl(mapaMl: Map<string, perfis.Perfil>): Promise<void> {
+  if (!cfg.responderToken) {
+    log.error("RESPONDER_ML ligado mas RESPONDER_TOKEN vazio — não respondo nada");
+    return;
+  }
+  const real = cfg.responder === "real" && !SO;
+  let tarefas: davinci.Tarefa[];
+  try {
+    tarefas = await davinci.maosFila(SO ? 50 : 5, !real);
+  } catch (e: any) {
+    log.error(`mãos do ML: fila falhou — ${String(e?.message || e)}`);
+    return;
+  }
+  if (SO) {
+    tarefas = tarefas.filter((t) =>
+      [t.mensagem_id, t.chamado_id, t.pedido_bling, t.pedido_marketplace, t.chamado].includes(SO)
+    );
+  }
+  if (!tarefas.length) return;
+  const porPerfil = new Map<string, { p: perfis.Perfil; lista: davinci.Tarefa[] }>();
+  for (const t of tarefas) {
+    const p = perfis.perfilMl(mapaMl, t.conta);
+    if (!p) {
+      const erro = `sem perfil "<loja> - Mercado Livre" no AdsPower pra "${t.conta}"`;
+      log.warn(`pedido ${t.pedido_bling}: ${erro}`);
+      if (real) await davinci.maosResultado(t.mensagem_id, false, erro).catch(() => undefined);
+      continue;
+    }
+    const g = porPerfil.get(p.userId) || { p, lista: [] };
+    g.lista.push(t);
+    porPerfil.set(p.userId, g);
+  }
+  for (const { p, lista } of porPerfil.values()) {
+    // perfil em uso: as tarefas (já `enviando`) voltam sozinhas pra fila em 30 min
+    const s = await abrirPerfil(p.userId, p.nome);
+    if (!s) continue;
+    try {
+      for (const t of lista) {
+        const rot = `pedido ${t.pedido_bling || "?"} (consulta ${t.chamado})`;
+        let r: maos.Resultado;
+        try {
+          r = await maos.responder(s.page, t, real);
+        } catch (e: any) {
+          r = { ok: false, erro: String(e?.message || e).slice(0, 280) };
+          if (real) await davinci.maosResultado(t.mensagem_id, false, r.erro).catch(() => undefined);
+          log.error(`${rot}: não respondi — ${r.erro}`);
+          if (e instanceof historico.LoginNecessario) throw e;
+          continue;
+        }
+        if (!real) {
+          fs.mkdirSync(cfg.secoDir, { recursive: true });
+          const file = path.join(cfg.secoDir, `responder-${t.pedido_bling || t.chamado}.json`);
+          fs.writeFileSync(file, JSON.stringify({ tarefa: t, resultado: r }, null, 2));
+          log.info(`${rot}: SECO — escrevi, fotografei e apaguei (${r.ok ? "ok" : r.erro}); ${file}`);
+          continue;
+        }
+        const out = await davinci
+          .maosResultado(t.mensagem_id, r.ok, r.erro)
+          .catch((e) => ({ erro_ao_avisar: String(e?.message || e) }));
+        if (r.ok) log.info(`${rot}: RÉPLICA ENVIADA${r.jaEstava ? " (já estava na conversa)" : ""} — ${JSON.stringify(out)}`);
+        else log.error(`${rot}: não enviei — ${r.erro}${r.print ? ` (print: ${r.print})` : ""} — ${JSON.stringify(out)}`);
+      }
+    } catch (e: any) {
+      log.error(`${p.nome}: parei as respostas da loja — ${String(e?.message || e)}`);
+    } finally {
+      await fecharPerfil(s);
+    }
+    await sleep(cfg.profileGapMs);
+  }
+}
+
 /** `--teste-ml`: lê a consulta do ML direto na tela, sem DaVinci. */
 async function testeMl(): Promise<void> {
   const conta = arg("--conta") || "";
@@ -322,7 +403,8 @@ async function teste(): Promise<void> {
 async function main(): Promise<void> {
   log.info(
     `executor-leitura-chamado v${VERSION} — api=${cfg.davinciApiUrl} modo=${cfg.modo.toUpperCase()}` +
-      ` intervalo=${Math.round(cfg.intervaloMs / 60000)}min ml=${cfg.ml.toUpperCase()}`
+      ` intervalo=${Math.round(cfg.intervaloMs / 60000)}min ml=${cfg.ml.toUpperCase()}` +
+      ` responder=${cfg.responder.toUpperCase()}`
   );
   if (TESTE_ML) {
     await testeMl();

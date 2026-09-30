@@ -447,6 +447,14 @@ class AgentLeaseOut(BaseModel):
     tarefas: list[AgentTarefaOut]
 
 
+class AgentMaosMlFilaIn(BaseModel):
+    """30/09 (298394): as mãos do ML no Mac Santiago pedem as réplicas pra postar
+    nas consultas do formulário de ajuda. `espiar` = modo seco (não marca)."""
+
+    limite: int = Field(default=5, ge=1, le=50)
+    espiar: bool = False
+
+
 class AgentResultadoIn(BaseModel):
     mensagem_id: UUID
     ok: bool
