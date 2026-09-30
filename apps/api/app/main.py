@@ -60,6 +60,7 @@ from app.routers import redes_sociais as redes_sociais_router
 from app.routers import refunds as refunds_router
 from app.routers import segments as segments_router
 from app.routers import settings as settings_router
+from app.routers import sites_estoque as sites_estoque_router
 from app.routers import stores as stores_router
 from app.routers import sync as sync_router
 from app.routers import tarefas as tarefas_router
@@ -182,6 +183,9 @@ app.include_router(imagens_router.router)
 app.include_router(integrations_router.router)
 app.include_router(oauth_router.router)
 app.include_router(products_router.router)
+# Estoque só leitura para os sites Charlots/Uranyx (30/09/2026). Fecha
+# sozinha se SITES_ESTOQUE_TOKENS estiver vazio; fora do openapi.
+app.include_router(sites_estoque_router.router)
 app.include_router(jobs_router.router)
 app.include_router(sync_router.router)
 app.include_router(webhooks_router.router)

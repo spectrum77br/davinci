@@ -324,6 +324,19 @@ class Settings(BaseSettings):
     # webhook do Bling, que não rejeita nunca.
     portal_tokens: str = ""
 
+    # ─── Estoque para os sites Charlots e Uranyx (30/09/2026) ───────────
+    # GET /api/sites/estoque, só leitura (routers/sites_estoque.py). O site
+    # PHP chama servidor-a-servidor com `Authorization: Bearer <token>` e o
+    # token diz QUAL site é — o recorte de SKUs vem do site, nunca do
+    # request.
+    #
+    # Formato: "token:site,token:site" (site = charlots | uranyx). Revogar é
+    # apagar a entrada e recriar só a api.
+    #
+    # VAZIO = ROTA FECHADA (401), nunca aberta — o mesmo desenho do
+    # `portal_tokens` acima.
+    sites_estoque_tokens: str = ""
+
     # ─── Robô de resposta das DMs do Instagram ───────────────────────────
     # A CHAVE SECRETA DO APP da Meta. Ela valida o `X-Hub-Signature-256` de
     # todo webhook de mensagem — e é a MESMA que hoje falta para renovar o
