@@ -16,6 +16,9 @@ export type AuthUser = {
   // Sistema › Histórico (25/09/2026): só vem (true) para quem o Eduardo
   // liberou. Para os outros, inclusive admin, a chave nem existe.
   historico?: boolean
+  // /atendimento (30/09/2026): só vem (true) para quem está em
+  // ATENDIMENTO_USUARIOS no .env da api (hoje thorfinn e heisenberg).
+  atendimento?: boolean
 }
 
 export const useAuthStore = defineStore('auth', {

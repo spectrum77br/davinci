@@ -195,6 +195,7 @@ O último comando deve responder `2`. Referência do que o bloco tem, e do que a
 | `ATENDIMENTO_SYNC_CONCORRENCIA` | `2` no primeiro dia (padrão 4) | não | 4 canais ao mesmo tempo |
 | `ATENDIMENTO_SYNC_MAX_CONVERSAS` | `15` no primeiro dia (padrão 40) | não | até 40 conversas por canal por rodada |
 | `ATENDIMENTO_IA_TETO_DIARIO` | `600` na primeira semana (padrão 1000) | não | teto de 1000 chamadas por dia |
+| `ATENDIMENTO_USUARIOS` | e-mails de login do thorfinn e do heisenberg, separados por vírgula (30/09) | não | todo admin vê a caixa |
 | `ATENDIMENTO_ROBO_TOKEN` | o mesmo valor do `~/.davinci/robo_atendimento.token` do Mac mini | **sim** | a rota do robô dá 404 e o robô não entrega |
 | `ATENDIMENTO_LLM_BASE_URL` | `https://api.groq.com/openai/v1` (decisão 30/09: Groq por enquanto) | não | herda o `LLM_BASE_URL` do DM; com Claude é ignorado |
 | `ATENDIMENTO_LLM_MODEL` | `openai/gpt-oss-120b` (Groq). Para trocar para Claude: `claude-opus-5-5` ou `claude-sonnet-5-5` | não | herda o `LLM_MODEL` do DM |

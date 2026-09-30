@@ -123,7 +123,7 @@ from app.schemas.atendimento import (
     SincronizarOut,
     SugestaoOut,
 )
-from app.services.atendimento import clientes, enviar, gravar, instagram, robo
+from app.services.atendimento import acesso, clientes, enviar, gravar, instagram, robo
 from app.services.atendimento.constantes import (
     ACAO_OBSERVOU,
     AUTOR_CLIENTE,
@@ -177,6 +177,10 @@ SO_ADMIN = True
 async def _so_admin(user: Annotated[User, Depends(require_active_user)]) -> User:
     if SO_ADMIN and user.role != UserRole.ADMIN:
         raise HTTPException(status.HTTP_403_FORBIDDEN, detail={"code": "admin_only"})
+    # E, dentro dos admins, só quem está em ATENDIMENTO_USUARIOS (Eduardo,
+    # 30/09/2026: thorfinn e heisenberg). Vazio = todo admin.
+    if SO_ADMIN and not acesso.liberado(user):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail={"code": "atendimento_restrito"})
     return user
 
 

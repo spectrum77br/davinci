@@ -84,7 +84,7 @@ const can = loadLib('../composables/useCan.ts', { useAuthStore: lojaFalsa })
   assert.equal(chamadas.length, 1, 'um definePageMeta só')
   let meta
   new Function('definePageMeta', chamadas[0])((m) => { meta = m })
-  assert.deepEqual(meta, { middleware: ['admin'] }, 'página: middleware admin, sem o `permission`')
+  assert.deepEqual(meta, { middleware: ['admin', 'atendimento'] }, 'página: middleware admin + atendimento (ATENDIMENTO_USUARIOS), sem o `permission`')
 }
 
 // ------------------------------------------------ components/AppSidebar.vue (o menu)
@@ -117,10 +117,16 @@ function menuPara(user) {
 }
 const rotasDoGrupo = (secoes, label) => (secoes.find((s) => s.label === label)?.items ?? []).map((i) => i.to)
 {
-  const admin = menuPara(ADMIN)
-  assert.ok(rotasDoGrupo(admin, 'Pós-venda').includes('/atendimento'), 'admin vê o Atendimento no menu')
+  // 30/09/2026: entre os admins, só quem o /me devolve com `atendimento: true`
+  // (ATENDIMENTO_USUARIOS no .env da api: thorfinn e heisenberg).
+  const adminSemLiberacao = menuPara(ADMIN)
+  assert.ok(!rotasDoGrupo(adminSemLiberacao, 'Pós-venda').includes('/atendimento'), 'admin fora da lista não vê o Atendimento')
+  const admin = menuPara({ ...ADMIN, atendimento: true })
+  assert.ok(rotasDoGrupo(admin, 'Pós-venda').includes('/atendimento'), 'admin liberado vê o Atendimento no menu')
+  assert.ok(!menuPara({ ...COM_ATENDIMENTO, atendimento: true }).flatMap((s) => s.items.map((i) => i.to)).includes('/atendimento'), 'não-admin não vê nem com a chave')
   const item = admin.find((s) => s.label === 'Pós-venda').items.find((i) => i.to === '/atendimento')
   assert.equal(item.adminOnly, true)
+  assert.equal(item.atendimentoOnly, true, 'menu: só quem vem com atendimento: true no /me')
   assert.equal(item.resource, undefined, 'o item não depende do recurso (que saiu da tela de Permissões)')
 
   const POS_VENDA_SEM_ATENDIMENTO = ['/devolucoes', '/reembolso', '/logistica', '/notas-fiscais', '/chamados']

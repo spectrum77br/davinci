@@ -18,8 +18,9 @@ import type { FiltrosLista } from '~/components/AtendimentoLista.vue'
 // SÓ ADMIN POR ENQUANTO (Eduardo, 30/09/2026): mesma trava do menu
 // (AppSidebar) e da API (SO_ADMIN em apps/api/app/routers/atendimento.py).
 // Para abrir para a equipe: middleware: ['permission'], permission:
-// { resource: 'atendimento', action: 'view' }.
-definePageMeta({ middleware: ['admin'] })
+// { resource: 'atendimento', action: 'view' }. E, entre os admins, só quem
+// está em ATENDIMENTO_USUARIOS (middleware `atendimento`, 30/09/2026).
+definePageMeta({ middleware: ['admin', 'atendimento'] })
 
 // Atendimento (Pós-venda, 25/09/2026): a caixa única das conversas de Shopee,
 // Mercado Livre, TikTok, Amazon e Magalu (30/09/2026: pergunta, chat e SAC),

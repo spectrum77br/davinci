@@ -23,6 +23,7 @@ from app.security.otp import (
     verify_code,
 )
 from app.security.password import dummy_verify, verify_password
+from app.services.atendimento import acesso as atendimento_acesso
 from app.services.rate_limit import RateLimitError, sliding_window_check
 from app.services.turnstile import verify_turnstile
 from app.worker_pool import get_arq_pool
@@ -389,6 +390,12 @@ async def me(
     except Exception:  # noqa: BLE001
         logger.warning("historico_me_falhou")
         ve = False
+    extra: dict[str, bool] = {}
     if ve:
-        return JSONResponse({**out.model_dump(mode="json"), "historico": True})
+        extra["historico"] = True
+    # /atendimento: a mesma regra da trava da API (menu e página leem isto).
+    if atendimento_acesso.liberado(user):
+        extra["atendimento"] = True
+    if extra:
+        return JSONResponse({**out.model_dump(mode="json"), **extra})
     return out

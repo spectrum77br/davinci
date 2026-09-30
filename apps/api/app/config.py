@@ -476,6 +476,10 @@ class Settings(BaseSettings):
     # "leitura parada" na barra de lojas: o Seller Center continua recebendo,
     # só não chega aqui — ninguém pode achar que "não tem mensagem".
     atendimento_robo_parado_min: int = 5
+    # Quem vê a caixa /atendimento enquanto ela é só observação: e-mails de
+    # login separados por vírgula, e só entre os admins. Vazio = todo admin.
+    # Fica no .env (não no código) para trocar sem deploy de código.
+    atendimento_usuarios: str = ""
 
     # Token M2M do executor de IMPORTAÇÃO DE NF (marionete AdsPower da Fase
     # 3a-4). Guarda os /nf-cadastro/agent/* (lease/result). Vazio = endpoints

@@ -85,6 +85,8 @@ type Item = {
   ownerOnly?: boolean
   // Sistema › Histórico: só quem o Eduardo liberou (nem todo admin).
   historicoOnly?: boolean
+  // /atendimento: só quem vem com `atendimento: true` no /me (nem todo admin).
+  atendimentoOnly?: boolean
   featureFlag?: 'marketing'
   // Grupo unificado (lib/navGroups): o item destaca quando QUALQUER rota
   // do grupo está ativa, e some quando o usuário não pode ver nenhuma aba.
@@ -142,10 +144,11 @@ const sections = computed<Section[]>(() => [
       { to: '/notas-fiscais', label: 'Notas fiscais', icon: FileText, resource: 'notas_fiscais' },
       { to: '/chamados', label: 'Chamados', icon: MessagesSquare, resource: 'chamados' },
       // Atendimento (25/09/2026): conversas de Shopee, ML, TikTok e Amazon numa
-      // caixa só, com a resposta sugerida pela IA. SÓ ADMIN por enquanto
-      // (Eduardo, 30/09/2026) — mesma trava da página e da API; para abrir,
-      // volta para `resource: 'atendimento'` (ver useCan.ts).
-      { to: '/atendimento', label: 'Atendimento', icon: Inbox, adminOnly: true },
+      // caixa só, com a resposta sugerida pela IA. Por enquanto só quem está
+      // em ATENDIMENTO_USUARIOS (Eduardo, 30/09/2026: thorfinn e heisenberg),
+      // a mesma regra da página e da API; para abrir, volta para
+      // `resource: 'atendimento'` (ver useCan.ts).
+      { to: '/atendimento', label: 'Atendimento', icon: Inbox, adminOnly: true, atendimentoOnly: true },
     ],
   },
   {
@@ -248,6 +251,7 @@ const visibleSections = computed(() => {
         if (it.hideForAdmin && auth.isAdmin) return false
         if (it.ownerOnly && !isOwner.value) return false
         if (it.historicoOnly && auth.user?.historico !== true) return false
+        if (it.atendimentoOnly && auth.user?.atendimento !== true) return false
         if (it.featureFlag === 'marketing' && !enableMarketing.value) return false
         return true
       }),
