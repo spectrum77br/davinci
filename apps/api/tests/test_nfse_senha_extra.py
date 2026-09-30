@@ -251,7 +251,8 @@ async def test_chave_adulterada_ou_com_acento_e_recusada(
 ):
     await _admin(make_user, auth_as, trava_de_verdade)
     ts = int(time.time())
-    for chave in (f"{ts}.{'0' * 64}".encode(), f"{ts}.ção".encode("latin-1"), b"lixo"):
+    gigante = f"1{'0' * 400}.x".encode()  # revisão 30/09: estourava o relógio (erro 500)
+    for chave in (f"{ts}.{'0' * 64}".encode(), f"{ts}.ção".encode("latin-1"), b"lixo", gigante):
         r = await client.get("/api/nfse/status", headers={"X-Nfse-Token": chave})
         assert r.status_code == 401
         assert r.json()["detail"]["code"] == "nfse_locked"
@@ -327,3 +328,34 @@ async def test_link_sem_sessao_nao_abre(client, trava_de_verdade):
     r = await client.get(f"/api/nfse/emissoes/{a}/pdf", params={"chave": link})
     assert r.status_code in (401, 403), r.status_code
     assert "emissao_nao_encontrada" not in r.text
+
+
+@pytest.mark.asyncio
+async def test_link_de_verdade_abre_o_pdf_com_o_nome_da_nota(
+    client, make_user, auth_as, trava_de_verdade, monkeypatch
+):
+    """O caminho que a página usa: POST /link com a chave → GET do endereço
+    devolvido, sem cabeçalho → o PDF com o nome da nota."""
+    await _admin(make_user, auth_as, trava_de_verdade)
+    chave = await _chave(client)
+    a = uuid.uuid4()
+    nota = SimpleNamespace(id=a, n_nfse="1234", nfeio_id=None)
+
+    async def _emissao(_session, emissao_id):
+        assert emissao_id == a
+        return nota
+
+    async def _baixar(_session, _e, tipo):
+        return (b"%PDF-1.4 teste", "application/pdf")
+
+    monkeypatch.setattr(nfse_router, "_emissao", _emissao)
+    monkeypatch.setattr(nfse_router.svc, "baixar", _baixar)
+
+    r = await client.post(f"/api/nfse/emissoes/{a}/link", params={"tipo": "pdf"}, headers=chave)
+    assert r.status_code == 200, r.text
+    url = r.json()["url"]
+    assert url.startswith(f"/api/nfse/emissoes/{a}/pdf?chave=")
+    r = await client.get(url)  # sem cabeçalho nenhum, como a aba do navegador
+    assert r.status_code == 200, r.text
+    assert r.content == b"%PDF-1.4 teste"
+    assert r.headers["content-disposition"] == 'inline; filename="NFSe_1234.pdf"'

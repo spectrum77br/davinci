@@ -53,14 +53,23 @@ def fazer_token(escopo: str) -> tuple[str, int]:
     return f"{ts}.{assinatura}", s.valuation_unlock_ttl_seconds
 
 
+def _ts_da_chave(chave: str) -> int | None:
+    """O `<ts>` do começo da chave, ou None se não for um horário de verdade.
+    Só dígitos e no máximo 12: um número gigante passava pelo int() e a conta
+    com o relógio estourava (OverflowError → erro 500 em vez de "trancado")."""
+    ts_txt, sep, _ = chave.partition(".") if isinstance(chave, str) else ("", "", "")
+    if not sep or not ts_txt.isascii() or not ts_txt.isdigit() or len(ts_txt) > 12:
+        return None
+    return int(ts_txt)
+
+
 def token_valido(token: str | None, escopo: str) -> bool:
     if not token:
         return False
-    try:
-        ts_txt, assinatura = token.split(".", 1)
-        ts = int(ts_txt)
-    except (ValueError, AttributeError):
+    ts = _ts_da_chave(token)
+    if ts is None:
         return False
+    assinatura = token.split(".", 1)[1]
     s = get_settings()
     if time.time() - ts > s.valuation_unlock_ttl_seconds:
         return False
@@ -152,11 +161,10 @@ def fazer_link_arquivo(escopo: str, recurso: str) -> str:
 def link_arquivo_valido(chave: str | None, escopo: str, recurso: str) -> bool:
     if not chave:
         return False
-    try:
-        ts_txt, assinatura = chave.split(".", 1)
-        ts = int(ts_txt)
-    except (ValueError, AttributeError):
+    ts = _ts_da_chave(chave)
+    if ts is None:
         return False
+    assinatura = chave.split(".", 1)[1]
     idade = time.time() - ts
     if idade > TTL_LINK_ARQUIVO or idade < -5:
         return False

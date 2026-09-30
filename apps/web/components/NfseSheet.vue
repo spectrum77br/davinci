@@ -9,6 +9,7 @@ import {
 } from 'reka-ui'
 import { X } from 'lucide-vue-next'
 import { Button } from '~/components/ui/button'
+import { SENHA_EXTRA_TRAVA } from '~/composables/useSenhaExtra'
 import { NFSE_TELA } from '~/lib/nfse'
 
 const props = withDefaults(
@@ -24,6 +25,8 @@ const props = withDefaults(
   { largura: 'lg', sujo: false, fechavel: true, textoSujo: 'O que você mudou vai se perder.' },
 )
 
+// Aviso do último minuto da senha da página, aqui dentro (a janela prende o foco).
+const travaSenha = inject(SENHA_EXTRA_TRAVA, null)
 const emit = defineEmits<{ (e: 'update:open', v: boolean): void }>()
 
 const tela = inject(NFSE_TELA, null)
@@ -105,6 +108,7 @@ defineExpose({ rolarPara })
           </Button>
         </div>
 
+        <SenhaExtraRenovar v-if="travaSenha" :trava="travaSenha" em-janela />
         <div ref="corpo" class="flex-1 overflow-y-auto px-5 py-5">
           <slot />
         </div>

@@ -26,6 +26,7 @@ import {
   BookUser, Building2, CheckCircle2, FilePlus2, FileText, FlaskConical, Loader2, Lock, RotateCcw, Send, ShieldAlert,
 } from 'lucide-vue-next'
 import { Button } from '~/components/ui/button'
+import { SENHA_EXTRA_TRAVA } from '~/composables/useSenhaExtra'
 import { TABS_CADASTROS } from '~/lib/navGroups'
 import {
   erroApi, fmtMes, itemReenvio, mesAtual, mesValido, NFSE_API, NFSE_TELA, plural, prestadorPorId, STATUS_PARA_RESOLVER,
@@ -139,6 +140,8 @@ const trava = useSenhaExtra('nfse', '/api/nfse/unlock', 'X-Nfse-Token', /^\/emis
   podeTrancar: () => !loteOcupado() && !cancelamentoOcupado(),
   antesDeTrancar: fecharLote,
 })
+// As janelas mostram o aviso do último minuto por dentro (NfseSheet/NfseDialog).
+provide(SENHA_EXTRA_TRAVA, trava)
 
 // Toda chamada a /api/nfse passa por aqui (e pelas abas, via useNfseApi()).
 async function apiN<T = any>(path: string, opts: any = {}): Promise<T> {
@@ -182,9 +185,10 @@ async function abrirPdf(id: string): Promise<void> {
   }
   try {
     const url = await linkDoArquivo(id, 'pdf')
-    // Bloqueador de janelas: sem a aba, o PDF é baixado.
-    if (aba && !aba.closed) aba.location.href = url
-    else salvarArquivo(url)
+    // Bloqueador de janelas (sem aba): o PDF é baixado. A pessoa fechou a aba
+    // antes de o link chegar: desistiu, não baixa nada.
+    if (!aba) salvarArquivo(url)
+    else if (!aba.closed) aba.location.href = url
   } catch (e) {
     aba?.close()
     toasts.error('Não deu para abrir o PDF', erroApi(e))

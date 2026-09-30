@@ -1,4 +1,4 @@
-import { onScopeDispose, onUnmounted, ref, watch } from 'vue'
+import { onScopeDispose, onUnmounted, ref, watch, type InjectionKey } from 'vue'
 import { onBeforeRouteLeave } from 'vue-router'
 
 // Senha extra de páginas sensíveis (Empresas). Eduardo, 25/09/2026: "senha
@@ -84,6 +84,10 @@ export function useSenhaExtra(
   function trancar() {
     token.value = null
     vence.value = 0
+    // O cadeado abre limpo: sem o erro (nem o texto) de uma tentativa no aviso
+    // do último minuto.
+    senha.value = ''
+    erro.value = null
   }
 
   // Tranca assim que puder: na hora, ou quando o trabalho em andamento
@@ -91,6 +95,13 @@ export function useSenhaExtra(
   function trancarQuandoPuder() {
     if (relogio) clearTimeout(relogio)
     relogio = null
+    // A pessoa acabou de mandar a senha no aviso do último minuto: espera a
+    // resposta (a chave nova chega e remarca o relógio; o servidor ainda aceita
+    // a velha por 30 s).
+    if (desbloqueando.value) {
+      relogio = setTimeout(trancarQuandoPuder, 500)
+      return
+    }
     if (opcoes.podeTrancar && !opcoes.podeTrancar()) {
       relogio = setTimeout(trancarQuandoPuder, 2000)
       return
@@ -146,6 +157,13 @@ export function useSenhaExtra(
     token, senha, erro, desbloqueando, perto, iniciar, headers, desbloquear, trancar, trancarQuandoPuder, eTravamento,
   }
 }
+
+export type SenhaExtra = ReturnType<typeof useSenhaExtra>
+
+// A página entrega a trava às janelas (NfseSheet/NfseDialog): o aviso do último
+// minuto precisa aparecer DENTRO da janela aberta — a janela modal prende o
+// foco e o clique, e o aviso da página fica atrás dela.
+export const SENHA_EXTRA_TRAVA: InjectionKey<SenhaExtra> = Symbol('senha-extra-trava')
 
 /** Texto em português para o erro do desbloqueio. Serve também ao Valuation,
  *  que tem o próprio cartão: a contagem de erros é a mesma nas duas telas

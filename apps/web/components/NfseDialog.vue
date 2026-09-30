@@ -2,12 +2,13 @@
 // Casca de todo diálogo central da Emissão de Serviço (confirmação, senha,
 // emissão em lote, cancelamento). reka Dialog: foco preso, Esc e clique fora
 // fecham (exceto com `fechavel=false`) e o foco volta para quem abriu.
-import { computed, type Component } from 'vue'
+import { computed, inject, type Component } from 'vue'
 import {
   DialogContent, DialogDescription, DialogOverlay, DialogPortal, DialogRoot, DialogTitle,
 } from 'reka-ui'
 import { X } from 'lucide-vue-next'
 import { Button } from '~/components/ui/button'
+import { SENHA_EXTRA_TRAVA } from '~/composables/useSenhaExtra'
 
 const props = withDefaults(
   defineProps<{
@@ -25,6 +26,8 @@ const props = withDefaults(
   { tamanho: 'md', tom: 'padrao', fechavel: true, camada: 'normal' },
 )
 
+// Aviso do último minuto da senha da página, aqui dentro (a janela prende o foco).
+const travaSenha = inject(SENHA_EXTRA_TRAVA, null)
 const emit = defineEmits<{ (e: 'update:open', v: boolean): void }>()
 
 const largura = computed(() => ({ sm: 'max-w-md', md: 'max-w-lg', lg: 'max-w-2xl' })[props.tamanho])
@@ -95,6 +98,7 @@ function aoAbrir(ev: Event) {
           </Button>
         </div>
 
+        <SenhaExtraRenovar v-if="travaSenha" :trava="travaSenha" em-janela />
         <slot name="faixa" />
 
         <div class="flex-1 space-y-4 overflow-y-auto px-5 py-4">
