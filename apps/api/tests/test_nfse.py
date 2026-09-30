@@ -1401,3 +1401,104 @@ async def test_base_da_nota_de_percentual_vem_do_faturamento(
         )
         p = r.json()["itens"][0]
         assert p["base_origem"] == "nota_fixa" and p["base_calculo"] == "999999.00"
+
+
+# --- tomadores automáticos: as contas Bling de NF (Eduardo, 30/09) ------------------------
+
+_EMIT_XML = (
+    '<NFe xmlns="http://www.portalfiscal.inf.br/nfe"><infNFe><emit><CNPJ>{cnpj}</CNPJ>'
+    "<xNome>{nome}</xNome><enderEmit><xLgr>Rua Galvao Bueno</xLgr><nro>412</nro>"
+    "<xBairro>Liberdade</xBairro><cMun>3550308</cMun><xMun>Sao Paulo</xMun><UF>SP</UF>"
+    "<CEP>01506000</CEP></enderEmit></emit></infNFe></NFe>"
+)
+
+
+async def _nota_produto(db: AsyncSession, cnpj: str, nome: str, quando: datetime) -> None:
+    from app.models.nf import NfNota
+
+    db.add(
+        NfNota(
+            chave=f"35{uuid.uuid4().int % 10**42:042d}",
+            numero=str(uuid.uuid4().int % 10000),
+            emitente_cnpj=cnpj,
+            emitente_nome=nome,
+            data_emissao=quando,
+            valor=Decimal("100.00"),
+            xml=_EMIT_XML.format(cnpj=cnpj, nome=nome).encode(),
+        )
+    )
+    await db.commit()
+
+
+@pytest.mark.asyncio
+async def test_contas_bling_de_nf_viram_tomadores_sozinhas(
+    client: AsyncClient,
+    db: AsyncSession,
+    operador: User,
+    cenario: dict,
+    auth_as: Callable[[User | None], None],
+):
+    auth_as(operador)
+    agora = datetime.now(UTC)
+    conta = "66829674000101"  # COMERCIAL DL
+    await _nota_produto(db, conta, "COMERCIAL DL", agora - timedelta(days=3))
+    await _nota_produto(db, conta, "COMERCIAL DL", agora - timedelta(days=1))
+    await _nota_produto(db, CNPJ_PREST, "EMPRESA TESTE LTDA", agora)  # do grupo: prestadora
+    await _nota_produto(
+        db, "04252011000110", "CONTA VELHA", agora - timedelta(days=200)
+    )  # fora da janela
+
+    r = await client.get("/api/nfse/tomadores")
+    assert r.status_code == 200, r.text
+    por_doc = {t["documento"]: t for t in r.json() if t["tipo"] == "externo"}
+    assert set(por_doc) == {conta}
+    t = por_doc[conta]
+    assert t["nome"] == "COMERCIAL DL" and t["conta_bling"]["notas_90d"] == 2
+    assert (t["logradouro"], t["numero"], t["bairro"], t["cep"], t["cmun_ibge"]) == (
+        "Rua Galvao Bueno",
+        "412",
+        "Liberdade",
+        "01506000",
+        "3550308",
+    )
+
+    # Alguém completou o e-mail à mão; a conta mudou o nome na NFe mais nova.
+    r = await client.patch(
+        f"/api/nfse/tomadores/{t['id']}",
+        json={
+            **{
+                k: t[k]
+                for k in (
+                    "tipo",
+                    "company_id",
+                    "documento",
+                    "nome",
+                    "fone",
+                    "cep",
+                    "cmun_ibge",
+                    "logradouro",
+                    "numero",
+                    "complemento",
+                    "bairro",
+                    "ativo",
+                )
+            },
+            "email": "fin@dl.com.br",
+        },
+    )
+    assert r.status_code == 200, r.text
+    await _nota_produto(db, conta, "COMERCIAL DL LTDA", agora)
+    r = await client.get("/api/nfse/tomadores")
+    t2 = next(x for x in r.json() if x["documento"] == conta)
+    assert t2["id"] == t["id"] and t2["nome"] == "COMERCIAL DL LTDA"
+    assert t2["email"] == "fin@dl.com.br"  # o digitado fica
+    assert len([x for x in r.json() if x["documento"] == conta]) == 1  # nunca duplica
+
+
+def test_tomador_no_estilo_da_nfeio_e_endereco_do_xml():
+    from app.services.nfse import contas_bling
+
+    end = contas_bling.endereco_do_emitente(_EMIT_XML.format(cnpj="1", nome="X").encode())
+    assert end["cep"] == "01506000" and end["cmun_ibge"] == "3550308"
+    assert contas_bling.endereco_do_emitente(b"<nada/>") == {}
+    assert contas_bling.endereco_do_emitente(b"nao e xml") == {}

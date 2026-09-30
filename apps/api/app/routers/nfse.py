@@ -55,6 +55,7 @@ from app.schemas.nfse import (
     TomadorIn,
     TomadorOut,
 )
+from app.services.nfse import contas_bling as svc_contas_bling
 from app.services.nfse import emissao as svc
 from app.services.nfse import empresas as svc_empresas
 from app.services.nfse import faturamento as svc_faturamento
@@ -288,8 +289,17 @@ async def _tomador_out(session: AsyncSession, t: NfseTomador) -> TomadorOut:
 
 @router.get("/tomadores", response_model=list[TomadorOut])
 async def listar_tomadores(session: Sess, _u: Annotated[User, Depends(_view)]) -> list[TomadorOut]:
+    # As contas Bling de NF entram (ou se atualizam) sozinhas a cada abertura —
+    # Eduardo, 30/09: "precisa ser atualizado os bling toda vez que mudar".
+    contas = await svc_contas_bling.sincronizar_tomadores(session)
     rows = (await session.execute(select(NfseTomador).order_by(NfseTomador.created_at))).scalars()
-    return [await _tomador_out(session, t) for t in rows]
+    out = []
+    for t in rows:
+        o = await _tomador_out(session, t)
+        conta = contas.get(t.documento or "") if t.tipo == "externo" else None
+        o.conta_bling = conta.resumo() if conta else None
+        out.append(o)
+    return out
 
 
 def _checar_tomador(body: TomadorIn) -> None:

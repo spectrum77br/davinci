@@ -44,7 +44,8 @@ import {
 const tela = useNfseTela()
 const { api } = useApi()
 
-const DESCRICAO_PADRAO = 'Intermediação de negócios referente a {competencia}'
+// Eduardo (30/09): "fixo = intermediação (sem mais detalhes), mas deixar opção de colocar".
+const DESCRICAO_PADRAO = 'Intermediação'
 
 type TipoValor = 'fixo' | 'percentual'
 // Percentual: a % da empresa (se ela tiver) ou "outra %", a digitada aqui.

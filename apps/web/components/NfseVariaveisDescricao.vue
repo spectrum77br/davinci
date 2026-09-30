@@ -92,7 +92,7 @@ const variavelSemUso = computed(
     </div>
     <p v-if="comPercentual" class="text-xs text-muted-foreground">
       <span class="font-mono text-foreground/80">{percentual}</span> vira o percentual (ex.: “0,5%”) e
-      <span class="font-mono text-foreground/80">{base}</span> vira a base digitada na hora de emitir
+      <span class="font-mono text-foreground/80">{base}</span> vira a base (o faturamento do mês)
       (ex.: “R$ 200.000,00”).
     </p>
     <p v-if="texto" class="line-clamp-2 text-xs text-muted-foreground">

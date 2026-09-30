@@ -38,7 +38,8 @@ import { Button } from '~/components/ui/button'
 import {
   ambienteTexto, calcularPercentual, empresaTeste, erroApi, estadoLinha, explicarProblema, fmtBrl, fmtData, fmtDoc,
   fmtHora, fmtMes, fmtPct, fmtPctOrigem, mesAtual, mesParaData, origemDaEmissao, paraDecimal, pctDoModelo, pctPositivo,
-  plural, prestadorPorId, renderDescricao, situacao, textoFaturamento, textoIr, TOM_TEXTO, useNfseTela,
+  plural, prestadorPorId, renderDescricao, situacao, textoFaturamento, textoIr, TOM_TEXTO, tomadorDaEmissao,
+  tomadorEstiloNfeio, tomadorNaNota, useNfseTela,
   type ChecklistItem, type Emissao, type EstadoLinha, type FaturamentoEmpresa, type ItemIn, type ItemLote,
   type ItemPrevia, type Modelo,
   type OrigemPct, type SecaoEmpresa,
@@ -407,11 +408,13 @@ function nomeEmpresa(companyId: string, reserva?: string | null): string {
   return prestadorPorId(tela.prestadores.value, companyId)?.apelido || reserva || 'Empresa'
 }
 
+// No estilo da lista da NFE.io (30/09): "61.989.102 LEOMAR ALVES ANTUNES".
 function nomeTomador(m: Modelo, previa: ItemPrevia | null): string {
-  if (previa?.tomador?.nome) return previa.tomador.nome
-  if (m.tomador_nome) return m.tomador_nome
+  if (previa?.tomador?.nome) return tomadorEstiloNfeio(previa.tomador.documento, previa.tomador.nome)
   const t = tela.tomadores.value.find((x) => x.id === m.tomador_id)
-  return t?.nome_nota || t?.nome || '—'
+  const nn = tomadorNaNota(t)
+  if (nn.nome) return tomadorEstiloNfeio(nn.doc, nn.nome)
+  return m.tomador_nome || '—'
 }
 
 // O backend ainda fala "(aba Prestadores)" em alguns textos; a aba agora é
@@ -1660,7 +1663,7 @@ const girando = computed(() => carregandoLista.value || tela.carregando.value)
           <div class="min-w-0 flex-1">
             <div class="truncate">
               <span class="font-medium">{{ nomeEmpresa(e.company_id, e.prestador_nome) }}</span>
-              <span class="text-muted-foreground"> → </span>{{ e.tomador_nome || '—' }}
+              <span class="text-muted-foreground"> → </span>{{ tomadorDaEmissao(e) }}
             </div>
             <div class="truncate text-xs text-muted-foreground" :title="e.descricao">{{ e.descricao }}</div>
           </div>

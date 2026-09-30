@@ -47,7 +47,15 @@ const opcoes = computed(() => {
       if (!q) return true
       return nome(t).toLowerCase().includes(q) || (!!dq && soDigitos(t.documento_nota || t.documento).includes(dq))
     })
-    .sort((a, b) => nome(a).localeCompare(nome(b), 'pt-BR'))
+    // As contas Bling de NF (Eduardo, 30/09) vêm primeiro — a que emitiu por
+    // último no topo —, depois os outros por nome.
+    .sort((a, b) => {
+      const ca = a.conta_bling?.ultima ?? ''
+      const cb = b.conta_bling?.ultima ?? ''
+      if (!!ca !== !!cb) return ca ? -1 : 1
+      if (ca && cb && ca !== cb) return cb.localeCompare(ca)
+      return nome(a).localeCompare(nome(b), 'pt-BR')
+    })
 })
 
 function proximoLivre(de: number, passo: 1 | -1): number {
@@ -175,11 +183,18 @@ async function cadastrarNovo() {
               <div class="truncate font-medium">{{ nome(t) }}</div>
               <div class="truncate text-xs text-muted-foreground tabular-nums">
                 <template v-if="bloqueado(t)">é a própria empresa que emite</template>
-                <template v-else>{{ fmtDoc(t.documento_nota || t.documento) }}</template>
+                <template v-else>
+                  {{ fmtDoc(t.documento_nota || t.documento) }}<template v-if="t.conta_bling">
+                    · {{ t.conta_bling.notas_mes }} {{ t.conta_bling.notas_mes === 1 ? 'nota' : 'notas' }} de produto no mês</template>
+                </template>
               </div>
             </div>
-            <span :class="t.tipo === 'grupo' ? 'pill-info' : 'pill-muted'" class="shrink-0">
-              {{ t.tipo === 'grupo' ? 'Do grupo' : 'De fora' }}
+            <span
+              :class="t.conta_bling ? 'pill-success' : t.tipo === 'grupo' ? 'pill-info' : 'pill-muted'"
+              class="shrink-0"
+              :title="t.conta_bling ? 'Conta Bling de NF: entra sozinha na lista a partir das notas de produto emitidas' : undefined"
+            >
+              {{ t.conta_bling ? 'Bling de NF' : t.tipo === 'grupo' ? 'Do grupo' : 'De fora' }}
             </span>
             <Check v-if="t.id === modelValue" class="size-4 shrink-0 text-primary" aria-hidden="true" />
           </li>

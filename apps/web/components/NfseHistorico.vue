@@ -19,7 +19,7 @@ import {
 import { Button } from '~/components/ui/button'
 import {
   erroApi, fmtBrl, fmtCompetencia, fmtDataHora, fmtPctOrigem, mesParaData, origemDaEmissao, plural, prestadorPorId,
-  STATUS_PARA_RESOLVER, useNfseTela, type Emissao,
+  STATUS_PARA_RESOLVER, tomadorDaEmissao, useNfseTela, type Emissao,
 } from '~/lib/nfse'
 
 type Grupo = 'emitidas' | 'resolver' | 'canceladas'
@@ -492,7 +492,7 @@ function motivoRecusa(l: Emissao): string {
                 <div class="font-medium" :class="l.status === 'cancelada' && 'text-muted-foreground'">
                   {{ l.prestador_nome || '—' }}
                 </div>
-                <div class="text-xs text-muted-foreground">para {{ l.tomador_nome || '—' }}</div>
+                <div class="text-xs text-muted-foreground">para {{ tomadorDaEmissao(l) }}</div>
               </td>
               <td class="whitespace-nowrap text-right tabular-nums">
                 <div

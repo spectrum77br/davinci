@@ -224,6 +224,9 @@ class TomadorOut(BaseModel):
     # Do grupo: o que vai na nota (vem da empresa).
     nome_nota: str | None = None
     documento_nota: str | None = None
+    # 30/09: tomador que é conta Bling de NF (lista automática): notas do mês,
+    # dos últimos 90 dias e as datas da primeira e da última. None = avulso.
+    conta_bling: dict | None = None
 
 
 class ModeloIn(BaseModel):

@@ -14,7 +14,8 @@ import { Button } from '~/components/ui/button'
 import {
   calcularPercentual, erroApi, fmtBrl, fmtMes, fmtPct, listaE, mesAtual, mesParaData, minusculo, modeloParaForm,
   paraDecimal, pctDoModelo, pendenciaTexto, plural, prestadorPorId, renderDescricao, soDigitos, STATUS_VIVOS,
-  useNfseTela, type Emissao, type MenuItem, type Modelo, type Prestador, type Tomador,
+  tomadorEstiloNfeio, tomadorNaNota, useNfseTela, type Emissao, type MenuItem, type Modelo, type Prestador,
+  type Tomador,
 } from '~/lib/nfse'
 
 const tela = useNfseTela()
@@ -71,9 +72,10 @@ function apelidoEmpresa(m: Modelo): string {
   return prestadorPorId(tela.prestadores.value, m.company_id)?.apelido || m.prestador_nome || 'Empresa'
 }
 
+// No estilo da lista da NFE.io (30/09): "61.989.102 LEOMAR ALVES ANTUNES".
 function nomeTomador(m: Modelo): string {
-  const t = tomadorPorId.value.get(m.tomador_id)
-  return m.tomador_nome || t?.nome_nota || t?.nome || 'tomador sem nome'
+  const nn = tomadorNaNota(tomadorPorId.value.get(m.tomador_id))
+  return nn.nome ? tomadorEstiloNfeio(nn.doc, nn.nome) : m.tomador_nome || 'tomador sem nome'
 }
 
 function tomadorDesativado(m: Modelo): boolean {

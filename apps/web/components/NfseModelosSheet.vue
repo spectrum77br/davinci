@@ -24,9 +24,10 @@ import { computed, nextTick, ref, watch } from 'vue'
 import { Banknote, Building2, Calculator, ChevronRight, ExternalLink, FileText, Loader2, Percent } from 'lucide-vue-next'
 import { Button } from '~/components/ui/button'
 import {
-  calcularPercentual, campoDoErro, codigoErro, erroApi, fmtBrl, fmtPct, fmtPctOrigem, inserirNoCursor, mesAtual,
-  modeloParaForm, paraDecimal, pctPositivo, pendenciaTexto, prestadorPorId, soDigitos, TOM_TEXTO, useNfseTela,
-  type AbrirModeloOpts, type Modelo, type ModeloApi, type ModeloForm, type OrigemPct,
+  calcularPercentual, campoDoErro, codigoErro, erroApi, fmtBrl, fmtMes, fmtPct, fmtPctOrigem, inserirNoCursor,
+  mesAtual, mesParaData, modeloParaForm, paraDecimal, pctPositivo, pendenciaTexto, prestadorPorId, soDigitos,
+  TOM_TEXTO, tomadorEstiloNfeio, tomadorNaNota, useNfseTela,
+  type AbrirModeloOpts, type FaturamentoEmpresa, type Modelo, type ModeloApi, type ModeloForm, type OrigemPct,
 } from '~/lib/nfse'
 
 // Campos lado a lado: cada NfseCampo vira subgrade (rótulo, campo, dica)
@@ -52,7 +53,7 @@ const OPCOES_TIPO: { id: TipoValor; rotulo: string; icone: typeof Banknote }[] =
 const EXPLICA_TIPO: Record<TipoValor, string> = {
   fixo: 'A nota sai com o mesmo valor todo mês. Dá para mudar na hora de emitir.',
   percentual:
-    'Na hora de emitir você digita a base (o valor sobre o qual incide o %, ex.: o faturamento do mês) e o valor da nota é calculado sozinho.',
+    'A base é o faturamento do mês da empresa (todas as lojas com o CNPJ dela) e o valor da nota é calculado sozinho. Dá para trocar a base na hora de emitir.',
 }
 // Base do exemplo quando não há base sugerida.
 const BASE_EXEMPLO = '100000.00'
@@ -102,7 +103,9 @@ function vazio(): ModeloForm {
     company_id: null,
     tomador_id: null,
     nome: '',
-    descricao: 'Intermediação de negócios referente a {competencia}',
+    // Eduardo (30/09): "fixo = intermediação (sem mais detalhes), mas deixar
+    // opção de colocar se precisar" — igual às notas que já saem pela NFE.io.
+    descricao: 'Intermediação',
     tipo_valor: 'fixo',
     valor: '',
     percentual: '',
@@ -173,11 +176,11 @@ const subtitulo = computed(() => {
   return 'Uma nota que sai todo mês, da empresa que emite para quem recebe.'
 })
 
-// Enquanto a pessoa não mexe no nome, ele acompanha empresa e tomador.
+// Enquanto a pessoa não mexe no nome, ele acompanha o tomador, no estilo da
+// lista da NFE.io (Eduardo, 30/09): "61.989.102 LEOMAR ALVES ANTUNES".
 const sugestaoNome = computed(() => {
-  const e = empresa.value?.apelido
-  const t = nomeCurtoTomador()
-  return e && t ? `Intermediação ${e} → ${t}` : ''
+  const t = tomadorNaNota(tomador.value)
+  return t.nome ? tomadorEstiloNfeio(t.doc, t.nome) : ''
 })
 
 watch(sugestaoNome, (s) => {
@@ -255,6 +258,33 @@ const erroPctConta = computed(() => {
 })
 const baseApi = computed(() => paraDecimal(form.value.base_padrao) || null)
 
+// A prévia do valor (Eduardo, 30/09: "depois que colocamos a porcentagem que
+// queremos na empresa, ele aparece aqui e tem que mostrar a prévia do valor"):
+// o faturamento do mês da empresa, a mesma base que o "Emitir do mês" usa.
+const faturamentoMes = ref<FaturamentoEmpresa | null>(null)
+const faturamentoCarregado = ref(false)
+let seqFaturamento = 0
+watch(
+  () => [aberto.value, form.value.company_id, form.value.tipo_valor] as const,
+  async ([ab, cid, tipo]) => {
+    const minha = ++seqFaturamento
+    faturamentoMes.value = null
+    faturamentoCarregado.value = false
+    if (!ab || !cid || tipo !== 'percentual') return
+    const r = await api<{ empresas: FaturamentoEmpresa[] }>(
+      `/api/nfse/faturamento?competencia=${mesParaData(mes)}`,
+    ).catch(() => null)
+    if (minha !== seqFaturamento) return
+    faturamentoMes.value = r?.empresas.find((e) => e.company_id === cid) ?? null
+    faturamentoCarregado.value = !!r
+  },
+  { immediate: true },
+)
+const baseFaturamento = computed(() => {
+  const v = paraDecimal(faturamentoMes.value?.valor)
+  return v && Number(v) > 0 ? v : ''
+})
+
 function escolherTipo(v: string) {
   form.value.tipo_valor = v === 'percentual' ? 'percentual' : 'fixo'
 }
@@ -264,16 +294,21 @@ function ajustarPercentual() {
   if (pctApi.value) form.value.percentual = textoPercentual(pctApi.value)
 }
 
-// A conta de exemplo, igual à do servidor: base × % ÷ 100, no centavo.
+// A conta, igual à do servidor: base × % ÷ 100, no centavo. A base é o
+// faturamento do mês; sem venda, a base sugerida antiga da nota fixa (se
+// houver); senão, um exemplo.
 const exemplo = computed(() => {
   const pct = pctEfetivo.value
   if (!pct) return null
-  const daBase = !!baseApi.value && Number(baseApi.value) > 0
-  const base = daBase ? baseApi.value! : BASE_EXEMPLO
+  const origem: 'faturamento' | 'sugerida' | 'exemplo' = baseFaturamento.value
+    ? 'faturamento'
+    : baseApi.value && Number(baseApi.value) > 0 ? 'sugerida' : 'exemplo'
+  const base = origem === 'faturamento' ? baseFaturamento.value : origem === 'sugerida' ? baseApi.value! : BASE_EXEMPLO
   const valor = calcularPercentual(base, pct)
+  const deOnde = origem === 'faturamento' ? ` (faturamento de ${fmtMes(mes)})` : ''
   return {
-    daBase,
-    texto: `${fmtPctOrigem(pct, origemPct.value)} de ${fmtBrl(base)} = ${fmtBrl(valor)}`,
+    origem,
+    texto: `${fmtPctOrigem(pct, origemPct.value)} de ${fmtBrl(base)}${deOnde} = ${fmtBrl(valor)}`,
     pouco: !valor || Number(valor) < 0.01,
   }
 })
@@ -623,7 +658,7 @@ const classeErro = 'border-red-500 dark:border-red-400'
             rotulo="Nome (para você achar na lista)"
             obrigatorio
             :erro="erros.nome"
-            :dica="!nomeTocado && form.nome ? 'Sugerido pela empresa e pelo tomador. Pode trocar.' : 'Só aparece aqui no DaVinci, não vai na nota.'"
+            :dica="!nomeTocado && form.nome ? 'Sugerido pelo tomador, no estilo da NFE.io. Pode trocar.' : 'Só aparece aqui no DaVinci, não vai na nota.'"
             para="nfse-modelo-nome"
           >
             <input
@@ -632,7 +667,7 @@ const classeErro = 'border-red-500 dark:border-red-400'
               type="text"
               maxlength="200"
               autocomplete="off"
-              placeholder="Ex.: Intermediação KIA → Aguiar"
+              placeholder="Ex.: 61.989.102 LEOMAR ALVES ANTUNES"
               :class="[classeCampo, erros.nome && classeErro]"
               :aria-invalid="erros.nome ? 'true' : undefined"
               @input="aoDigitarNome"
@@ -769,22 +804,6 @@ const classeErro = 'border-red-500 dark:border-red-400'
                   >%</span>
                 </div>
               </NfseCampo>
-              <NfseCampo
-                :class="CAMPO_EM_GRADE"
-                id="nfse-modelo-campo-base_padrao"
-                rotulo="Base sugerida"
-                opcional
-                :erro="erros.base_padrao"
-                dica="Já vem preenchida na hora de emitir; dá para trocar."
-                para="nfse-modelo-base"
-              >
-                <NfseValorInput
-                  id="nfse-modelo-base"
-                  v-model="form.base_padrao"
-                  :disabled="somenteLeitura || salvando"
-                  :invalido="!!erros.base_padrao"
-                />
-              </NfseCampo>
             </div>
 
             <p v-if="!pctEmpresa && empresa && !somenteLeitura" class="text-xs text-muted-foreground">
@@ -812,7 +831,9 @@ const classeErro = 'border-red-500 dark:border-red-400'
               <Calculator class="mt-0.5 size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
               <div class="min-w-0 space-y-0.5">
                 <p v-if="exemplo" class="tabular-nums">
-                  <span class="text-muted-foreground">{{ exemplo.daBase ? 'Com a base sugerida:' : 'Ex.:' }}</span>
+                  <span class="text-muted-foreground">{{
+                    exemplo.origem === 'faturamento' ? 'Prévia:' : exemplo.origem === 'sugerida' ? 'Com a base sugerida:' : 'Ex.:'
+                  }}</span>
                   {{ exemplo.texto }}
                 </p>
                 <p v-else-if="erroPctConta" :class="TOM_TEXTO.perigo">{{ erroPctConta }}</p>
@@ -820,8 +841,18 @@ const classeErro = 'border-red-500 dark:border-red-400'
                 <p v-if="exemplo?.pouco" class="text-xs text-amber-700 dark:text-amber-400">
                   Com essa base a nota daria menos de R$ 0,01: na hora de emitir, use uma base maior.
                 </p>
+                <p
+                  v-else-if="empresa && faturamentoCarregado && !baseFaturamento"
+                  class="text-xs text-muted-foreground"
+                >
+                  {{
+                    faturamentoMes
+                      ? `A ${empresa.apelido} não teve venda em ${fmtMes(mes)}: na hora de emitir, digite a base.`
+                      : `A ${empresa.apelido} não tem loja com o CNPJ dela em Cadastros › Lojas: na hora de emitir, digite a base.`
+                  }}
+                </p>
                 <p v-else class="text-xs text-muted-foreground">
-                  Na hora de emitir: valor da nota = base × percentual, arredondado no centavo.
+                  Na hora de emitir a base é o faturamento do mês (dá para trocar); valor = base × percentual.
                 </p>
               </div>
             </div>

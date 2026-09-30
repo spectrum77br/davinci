@@ -100,7 +100,12 @@ export type Tomador = {
   ativo: boolean
   nome_nota: string | null
   documento_nota: string | null
+  // 30/09: conta Bling de NF (lista automática, vem das notas de produto
+  // emitidas). null = tomador cadastrado à mão.
+  conta_bling?: ContaBling | null
 }
+
+export type ContaBling = { notas_mes: number; notas_90d: number; primeira: string | null; ultima: string | null }
 
 export type Modelo = {
   id: string
@@ -713,6 +718,33 @@ export function fmtDoc(v: string | null | undefined): string {
   if (d.length === 14) return `${d.slice(0, 2)}.${d.slice(2, 5)}.${d.slice(5, 8)}/${d.slice(8, 12)}-${d.slice(12)}`
   if (d.length === 11) return `${d.slice(0, 3)}.${d.slice(3, 6)}.${d.slice(6, 9)}-${d.slice(9)}`
   return v || '—'
+}
+
+// O tomador no estilo da lista da NFE.io (Eduardo, 30/09): raiz do CNPJ + nome
+// em maiúsculas — "61.989.102 LEOMAR ALVES ANTUNES". Nome que já começa com a
+// raiz (MEI: "62.570.297 PEDRO …") não repete. CPF: o CPF inteiro + nome.
+export function tomadorEstiloNfeio(doc: string | null | undefined, nome: string | null | undefined): string {
+  const d = (doc || '').replace(/\D/g, '')
+  const n = (nome || '').trim().toUpperCase()
+  if (d.length === 14) {
+    const raiz = `${d.slice(0, 2)}.${d.slice(2, 5)}.${d.slice(5, 8)}`
+    return n.startsWith(raiz) ? n : `${raiz} ${n}`.trim()
+  }
+  if (d.length === 11) return `${fmtDoc(d)} ${n}`.trim()
+  return n
+}
+
+// O tomador gravado na nota enviada, no estilo da NFE.io.
+export function tomadorDaEmissao(e: Pick<Emissao, 'snapshot' | 'tomador_nome'>): string {
+  const t = e.snapshot?.tomador ?? {}
+  const nome = t.nome || e.tomador_nome
+  return nome ? tomadorEstiloNfeio(t.documento, nome) : '—'
+}
+
+// Documento e nome que vão na nota (do grupo: a empresa; de fora: o cadastro).
+export function tomadorNaNota(t: Tomador | null | undefined): { doc: string | null; nome: string | null } {
+  if (!t) return { doc: null, nome: null }
+  return { doc: t.documento_nota || t.documento, nome: t.nome_nota || t.nome }
 }
 
 export function fmtData(v: string | null | undefined): string {
