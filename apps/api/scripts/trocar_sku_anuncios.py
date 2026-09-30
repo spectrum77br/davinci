@@ -890,12 +890,28 @@ def _tk_dados(r: Resp) -> dict:
     return ((r.corpo or {}) if isinstance(r.corpo, dict) else {}).get("data") or {}
 
 
+_TK_AUDITORIA_SEM_OUTRA_VERSAO = {"APPROVED", "", "NONE"}
+
+
 async def _tiktok_ler(c, path: str) -> tuple[dict | None, dict | None, Resp]:
     """(versão no ar, versão mais recente — a em auditoria, se houver, que é a
     que o partial_edit edita —, resposta que falhou ou a última)."""
     r = await tiktok_chamar(c, "GET", path)
     if _tiktok_erro(r):
         return None, None, r
+    no_ar = _tk_dados(r)
+    # Sem auditoria em andamento, a "versão em auditoria" que a TikTok devolve
+    # é uma cópia VELHA (da análise anterior): no piloto de 30/09 a troca de
+    # seller_sku entrou direto no ar (ACTIVATE/APPROVED, SKUs .ci) e a cópia
+    # ainda mostrava .sp — o script achou que nada tinha mudado. Só existe
+    # versão mais recente que a do ar quando há análise pendente.
+    # Reprovada/FAILED: pode existir uma edição mais nova (a reprovada), que
+    # é a que o partial_edit edita — continua lendo a outra versão.
+    if (
+        ts.tiktok_auditoria(no_ar) in _TK_AUDITORIA_SEM_OUTRA_VERSAO
+        and str(no_ar.get("status") or "").upper() != "PENDING"
+    ):
+        return no_ar, no_ar, r
     r2 = await tiktok_chamar(c, "GET", path, params=ts.TIKTOK_PARAM_VERSAO_EM_AUDITORIA)
     if _tiktok_erro(r2):
         return _tk_dados(r), None, r2

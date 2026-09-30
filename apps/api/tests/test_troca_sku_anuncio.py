@@ -356,13 +356,14 @@ def test_tiktok_payload_manda_todos_os_skus():
         ]
     }
     p = ts.tiktok_payload(prod, {"2": "dg090.pi", "5": "dg091.pi+a001.pi"})
+    attrs = [{"id": "100000", "value_id": "Preto"}]  # os de _tk_sku, como vieram
     assert p == {
         "skus": [
-            {"id": "1", "seller_sku": "dg073.pi"},
-            {"id": "2", "seller_sku": "dg090.pi"},
-            {"id": "3", "seller_sku": "dg072.pi+003.pi+a004.pia"},
-            {"id": "4"},
-            {"id": "5", "seller_sku": "dg091.pi+a001.pi"},
+            {"id": "1", "sales_attributes": attrs, "seller_sku": "dg073.pi"},
+            {"id": "2", "sales_attributes": attrs, "seller_sku": "dg090.pi"},
+            {"id": "3", "sales_attributes": attrs, "seller_sku": "dg072.pi+003.pi+a004.pia"},
+            {"id": "4", "sales_attributes": attrs},
+            {"id": "5", "sales_attributes": attrs, "seller_sku": "dg091.pi+a001.pi"},
         ]
     }
     with pytest.raises(ValueError):
@@ -711,3 +712,47 @@ def test_alvo_sem_lote_nao_serve():
     assert motivo_alvo_invalido("dg010.sp", "dg010").startswith("alvo_sem_lote")
     assert motivo_alvo_invalido("dg010.sp+a001.sp", "dg010.pi+a001").startswith("alvo_sem_lote")
     assert motivo_alvo_invalido("dg010.sp+a001.sp", "dg010.pi+a001.pi") is None
+
+
+def test_tiktok_payload_leva_os_atributos_de_venda():
+    """Piloto de 30/09: a TikTok recusou o partial_edit sem sales_attributes
+    (12052241). Cada SKU vai com os atributos lidos e a imagem pelo uri."""
+    from app.services import troca_sku_anuncio as ts
+
+    cor = {"id": "100000", "name": "Cor", "value_id": "76", "value_name": "Preto"}
+    mem = {"id": "100027", "name": "Memória", "value_id": "74", "value_name": "12/128"}
+    img = {"uri": "tos/abc", "urls": ["https://x"], "height": 1, "width": 1}
+    prod = {"skus": [{
+        "id": "1", "seller_sku": "dg052.sp+a001.sp",
+        "sales_attributes": [{**cor, "sku_img": img}, mem],
+    }]}
+    p = ts.tiktok_payload(prod, {"1": "dg052.ci+a001.ci"})
+    assert p == {"skus": [{
+        "id": "1",
+        "sales_attributes": [{**cor, "sku_img": {"uri": "tos/abc"}}, mem],
+        "seller_sku": "dg052.ci+a001.ci",
+    }]}
+
+
+def test_tiktok_payload_mantem_ean_medidas_e_nao_manda_preco_estoque():
+    """2º piloto de 30/09 (12052593): o EAN já enviado não pode mudar, e no edit
+    da TikTok o que não vai é apagado — menos preço e estoque, que por isso
+    ficam de fora."""
+    from app.services import troca_sku_anuncio as ts
+
+    sku = {
+        "id": "1", "seller_sku": "dg052.sp+a001.sp",
+        "sales_attributes": [{"id": "100000", "value_id": "76"}],
+        "identifier_code": {"code": "7908855902292", "type": "EAN"},
+        "sku_dimensions": {"height": "15", "length": "10", "unit": "CENTIMETER", "width": "5"},
+        "sku_weight": {"unit": "KILOGRAM", "value": "0.6"},
+        "price": {"currency": "BRL", "sale_price": "1226.7"},
+        "inventory": [{"quantity": 175, "warehouse_id": "w1"}],
+        "status_info": {"status": "NORMAL"},
+    }
+    [e] = ts.tiktok_payload({"skus": [sku]}, {"1": "dg052.ci+a001.ci"})["skus"]
+    assert e["seller_sku"] == "dg052.ci+a001.ci"
+    assert e["identifier_code"] == sku["identifier_code"]
+    assert e["sku_dimensions"] == sku["sku_dimensions"] and e["sku_weight"] == sku["sku_weight"]
+    assert "price" not in e and "inventory" not in e and "status_info" not in e
+

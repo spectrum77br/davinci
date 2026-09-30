@@ -459,11 +459,12 @@ async def test_tiktok_reprovado_monta_payload_da_versao_recente(tmp_path):
     assert r["resultado"] == ts.TROCARIA
     assert [s["id"] for s in r["payload"]["skus"]] == ["1", "2", "3"]  # o SKU 3 não é apagado
     assert r["skus_so_numa_versao"] == ["3"]
-    # sem a opção, versões com SKUs diferentes não são mexidas
+    # produto aprovado: a "versão em auditoria" é cópia velha (piloto de 30/09)
+    # e fica fora da conta — vale a versão no ar
     ex2 = _ex(tmp_path, modo="dry-run")
     await S.processar_tiktok(ex2, FakeTK(_tk(), _tk(skus=(("2", "dg090.sp"), ("3", "x")))),
                              [_linha("tiktok", "1735", "2", "dg090.sp", "dg090.pi")])
-    assert ex2.registros[-1]["resultado"] == ts.SKU_INESPERADO
+    assert ex2.registros[-1]["resultado"] == ts.TROCARIA
 
 
 async def test_tiktok_desfazer_pela_versao_em_auditoria(tmp_path):
@@ -550,3 +551,16 @@ async def test_erro_interno_depois_de_enviar_entra_no_desfazer(tmp_path, monkeyp
     assert (d.sku_esperado, d.sku_novo) == ("dg010.pi", "dg010.sp")
     prog = json.loads(log_path.with_name(log_path.stem + ".progresso.json").read_text())
     assert prog["estado"] == "parada" and prog["pid"] == os.getpid()
+
+
+async def test_tiktok_aprovado_usa_a_versao_no_ar(tmp_path):
+    """Piloto de 30/09: a troca de seller_sku entrou direto no ar (ACTIVATE,
+    auditoria APPROVED) e a "versão em auditoria" devolvida pela TikTok era a
+    cópia velha, ainda .sp. Sem análise pendente, vale a versão no ar."""
+    no_ar = _tk(audit="APPROVED", skus=(("1", "dg073.pi"), ("2", "dg090.pi")))
+    copia_velha = _tk(audit="APPROVED", skus=(("1", "dg073.pi"), ("2", "dg090.sp")))
+    ex = _ex(tmp_path, modo="dry-run")
+    await S.processar_tiktok(ex, FakeTK(no_ar, copia_velha),
+                             [_linha("tiktok", "1735", "2", "dg090.sp", "dg090.pi")])
+    assert ex.registros[-1]["resultado"] == ts.JA_TROCADO
+

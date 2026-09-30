@@ -752,12 +752,42 @@ def tiktok_payload(produto: dict, trocas: dict[str, str]) -> dict:
     for s in skus:
         sid = str(s.get("id"))
         entrada: dict[str, Any] = {"id": sid}
+        # A TikTok recusa SKU sem os atributos de venda (12052241, piloto de
+        # 30/09: "each sales attribute must include either name or id"). Vão
+        # os MESMOS atributos lidos (id/nome e valor), com a imagem pelo `uri`.
+        atributos = _tk_atributos_para_envio(s)
+        if atributos:
+            entrada["sales_attributes"] = atributos
+        # No edit da TikTok o que não vai é APAGADO ("all inputs, including
+        # blanks, will overwrite existing values"), menos preço e estoque, que
+        # ficam como estão se omitidos (e por isso NÃO vão — não há risco de
+        # reescrever preço). O EAN, uma vez enviado, nem pode mudar (12052593,
+        # 2º piloto de 30/09): vai o mesmo lido, e as medidas/peso também.
+        for campo in _TK_CAMPOS_MANTIDOS:
+            if s.get(campo) not in (None, "", {}, []):
+                entrada[campo] = s[campo]
         if sid in trocas:
             entrada["seller_sku"] = trocas[sid]
         elif s.get("seller_sku") is not None and s.get("seller_sku") != "":
             entrada["seller_sku"] = s.get("seller_sku")
         out.append(entrada)
     return {"skus": out}
+
+
+_TK_CAMPOS_MANTIDOS = ("identifier_code", "external_sku_id", "sku_dimensions", "sku_weight")
+
+
+def _tk_atributos_para_envio(s: dict) -> list[dict]:
+    saida = []
+    for a in s.get("sales_attributes") or []:
+        item = {
+            k: a[k] for k in ("id", "name", "value_id", "value_name") if a.get(k) not in (None, "")
+        }
+        uri = (a.get("sku_img") or {}).get("uri")
+        if uri:
+            item["sku_img"] = {"uri": uri}
+        saida.append(item)
+    return saida
 
 
 def _tk_sales_attrs(s: dict) -> list[tuple[str, str]]:
