@@ -23,9 +23,12 @@ dele (ex.: `vigia_importacao.py`), que só faz:
 2. **Gente manda mais que robô.** `ignorada` por uma pessoa não reabre nunca;
    `tratada` há menos de 24 h também não (dá tempo do Bling/plataforma
    refletir o que a pessoa fez). Passou disso e o problema voltou → linha
-   nova, o histórico fica. Ocorrência que a rodada NÃO re-vê (a que um hook
-   abre no ponto da falha) é fechada pelo ponto de sucesso, com
-   `fechar_por_chave`, e fica de fora do `fechar_nao_vistas` pelo `prefixo`.
+   nova, o histórico fica — salvo no robô que passa `mesmo_problema` ao
+   `registrar` (problema que dura semanas, ex.: apreensão nos Correios): aí
+   `tratada` vale enquanto ele disser que é o MESMO problema. Ocorrência
+   que a rodada NÃO re-vê (a que um hook abre no ponto da falha) é fechada
+   pelo ponto de sucesso, com `fechar_por_chave`, e fica de fora do
+   `fechar_nao_vistas` pelo `prefixo`.
 3. **Aviso é por robô, não por ocorrência.** Uma mensagem no Threema com
    tudo que está pendente daquele robô; re-aviso a cada `reaviso_horas`
    enquanto persistir. Falha no envio não carimba — retenta no próximo tick.
@@ -41,7 +44,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from collections import Counter
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from types import TracebackType
@@ -612,13 +615,20 @@ async def registrar(
     severidade: str = "pessoa",
     precisa_pessoa: bool = True,
     dados: dict | None = None,
+    mesmo_problema: Callable[[dict], bool] | None = None,
     agora: datetime | None = None,
 ) -> OuvidoriaOcorrencia:
     """O robô viu um problema. Aberta existe → carimba `ultima_vista_em` (e
     atualiza texto/dados se mudaram — o valor do pedido pode ter chegado
     depois). Não existe → cria, salvo quando a última fechada foi `ignorada`
     (nunca reabre) ou `tratada` há menos de CARENCIA_TRATADA — nesses dois
-    casos devolve a fechada e não grava nada. Flush, sem commit."""
+    casos devolve a fechada e não grava nada.
+
+    `mesmo_problema` (opcional) recebe os `dados` da última `tratada` e diz
+    se o que o robô vê agora é o MESMO problema: sim → continua fechada
+    mesmo depois da carência. É pra robô de problema que dura semanas, em
+    que a pessoa já agiu e "continua igual" não é motivo pra avisar de novo
+    (Cairo, 01/10/2026, apreensão nos Correios). Flush, sem commit."""
     agora = _agora(agora)
     dados = dados or {}
     row = await _aberta(session, robo_chave, chave)
@@ -652,10 +662,9 @@ async def registrar(
     if fechada is not None:
         if fechada.fechamento == "ignorada":
             return fechada
-        if (
-            fechada.fechamento == "tratada"
-            and fechada.fechada_em is not None
-            and agora - fechada.fechada_em < CARENCIA_TRATADA
+        if fechada.fechamento == "tratada" and (
+            (fechada.fechada_em is not None and agora - fechada.fechada_em < CARENCIA_TRATADA)
+            or (mesmo_problema is not None and mesmo_problema(fechada.dados or {}))
         ):
             return fechada
 

@@ -913,6 +913,16 @@ function roboCadencia(chave: string): string {
   return robosPorChave.value[chave]?.cadencia_texto ?? ''
 }
 
+// O que o "Tratado" segura. Padrão: 24 h (dá tempo do Bling/plataforma
+// refletir). Vigia Correio: até o pacote ter outro TIPO de problema — apreensão
+// dura semanas (Cairo, 01/10/2026; regra em services/vigia_correios.py).
+function dicaTratado(o: Ocorrencia): string {
+  if (o.robo_chave === 'vigia_correios') {
+    return 'Resolvi — fecha a ocorrência. O robô só avisa de novo se aparecer outro tipo de problema nesse pacote.'
+  }
+  return 'Resolvi — fecha a ocorrência. Se o problema voltar depois de 24 h, o robô abre outra.'
+}
+
 // Status da ocorrência: aberta (por severidade) ou o tipo de fechamento. A
 // segunda linha ("quem") diz quem fechou / quando avisou.
 const SEV_LABEL: Record<Severidade, string> = {
@@ -1690,7 +1700,7 @@ const carregandoAba = computed(() => (tab.value === 'robos' ? robosLoading.value
                       type="button"
                       class="inline-flex h-[26px] items-center gap-1 rounded-md bg-primary px-2 text-[11.5px] font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
                       :disabled="acoesEmVoo.has(o.id)"
-                      title="Resolvi — fecha a ocorrência. Se o problema voltar depois de 24 h, o robô abre outra."
+                      :title="dicaTratado(o)"
                       @click="agir(o, 'tratar')"
                     >
                       <Loader2 v-if="acoesEmVoo.has(o.id)" class="size-3 animate-spin" />

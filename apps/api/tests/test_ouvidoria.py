@@ -337,6 +337,24 @@ async def test_registrar_tratada_recente_nao_reabre_mas_velha_abre_linha_nova(db
     assert len(await _todas(db, "tiktok:3")) == 2
 
 
+async def test_registrar_mesmo_problema_segura_a_tratada_depois_da_carencia(db):
+    """Robô de problema que dura semanas (apreensão nos Correios): a tratada
+    fica fechada enquanto o robô disser que é o MESMO problema; tipo novo
+    abre linha nova. Quem não passa `mesmo_problema` segue com as 24 h."""
+    await _robo(db)
+    a = await _reg(db, "pedido:1", dados={"tipo": "apreensao"})
+    await svc.tratar(db, a.id, usuario="Cairo", fechamento="tratada", agora=_t(days=5))
+
+    def mesmo(tipo):
+        return lambda d: d.get("tipo") == tipo
+
+    b = await _reg(db, "pedido:1", dados={"tipo": "apreensao"}, mesmo_problema=mesmo("apreensao"))
+    assert b.id == a.id and await _abertas(db) == []
+
+    c = await _reg(db, "pedido:1", dados={"tipo": "extravio"}, mesmo_problema=mesmo("extravio"))
+    assert c.id != a.id and c.fechada_em is None and c.dados == {"tipo": "extravio"}
+
+
 async def test_fechar_nao_vistas_respeita_excluir_contas(db):
     LUCAS = "Mercado Livre lucas"  # noqa: N806
     await _robo(db)

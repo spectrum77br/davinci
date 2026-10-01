@@ -12,6 +12,8 @@
 - `logistica.chamado` preenchido rebaixa pra `baixa` sem pessoa (e não abre
   linha nova — é a mesma ocorrência), e a família "nova tentativa" (não
   entregue / endereço / recusado) já NASCE em `baixa` sem pessoa;
+- "Tratado" vale até o problema mudar de TIPO (família do evento): o mesmo
+  tipo não reabre nem depois das 24 h da Ouvidoria; tipo novo avisa;
 - `17track:saldo` abre e fecha pela flag do Redis; `rastreio:<codigo>` abre
   só pro número PENDENTE de registro que está em quarentena e fecha quando o
   sync consegue registrar;
@@ -26,7 +28,7 @@ O Redis é sempre substituído pelos wrappers do módulo (`_sem_saldo_desde` /
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 import pytest_asyncio
@@ -66,6 +68,9 @@ async def _limpa_ouvidoria(db: AsyncSession):
 
 class _Threema:
     enviados: list[tuple[str, list[str]]] = []
+
+    def __init__(self, *_a, **_kw) -> None:
+        """O aviso abre o cliente com `contexto=` (assunto do robô)."""
 
     async def send_to_all(self, texto: str, recipients=None) -> dict:
         self.enviados.append((texto, list(recipients or [])))
@@ -440,6 +445,48 @@ async def test_chamado_aberto_rebaixa_a_mesma_ocorrencia(db):
     assert depois.titulo.endswith(" (chamado aberto)")
     assert "Chamado: 5104417290" in depois.detalhe
     assert depois.dados["chamado"] == "5104417290"
+
+
+async def test_tratado_vale_ate_o_problema_mudar_de_tipo(db, _sem_threema):
+    """Cairo, 01/10/2026: o 299243 (apreendido) voltou no Threema 24 h depois
+    do Tratado porque o pacote seguia retido. Tratado vale enquanto o problema
+    for do mesmo tipo; tipo novo no mesmo pacote (apreensão → extravio) abre
+    linha nova e avisa de novo."""
+    row = await _linha(db, pedido_bling="299243", rastreio="AD961477235BR", **_grave())
+    await svc.sincronizar_catalogo(db)
+    robo = await db.get(OuvidoriaRobo, ROBO)
+    robo.modo = "ligado"
+    robo.threema_recipients = "ABCDEFGH"
+    await db.commit()
+
+    await vigia.vigia_correios_run(db)
+    assert len(_sem_threema) == 1
+    antes = (await _abertas(db))["pedido:299243"]
+    tratada = await svc.tratar(db, antes.id, usuario="Cairo", fechamento="tratada")
+    # Dois dias depois do Tratado (a carência de 24 h da Ouvidoria já passou)
+    # e o pacote segue apreendido, agora "em análise de destinação".
+    tratada.fechada_em = datetime.now(UTC) - timedelta(days=2)
+    row.localizacao = "Objeto em análise de destinação"
+    await db.commit()
+
+    r2 = await vigia.vigia_correios_run(db)
+
+    assert await _abertas(db) == {}
+    assert r2["persistem"] == 1 and r2["novas"] == 0 and r2["avisadas"] == 0
+    assert len(_sem_threema) == 1
+
+    # Os Correios trazem outro tipo de problema: o sync re-carimba
+    # `problema_correios` (evento grave depois de um normal).
+    row.localizacao = row.problema_correios = "Objeto extraviado"
+    row.problema_correios_em = datetime.now(UTC)
+    await db.commit()
+
+    r3 = await vigia.vigia_correios_run(db)
+
+    nova = (await _abertas(db))["pedido:299243"]
+    assert nova.id != tratada.id and nova.titulo.startswith("Extravio — ")
+    assert r3["novas"] == 1 and r3["avisadas"] == 1
+    assert len(_sem_threema) == 2 and "Extravio" in _sem_threema[1][0]
 
 
 async def test_linha_manual_sem_pedido_bling_usa_o_id(db):

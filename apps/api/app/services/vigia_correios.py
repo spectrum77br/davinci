@@ -32,11 +32,20 @@ minutos depois do `logistica_track_sync` (cron :07/:22/:37/:52 × :05/:20/
 
    Com `logistica.chamado` preenchido a ocorrência CONTINUA aberta, mas cai
    pra `baixa` sem pessoa e ganha "(chamado aberto)" no título: apreensão e
-   extravio duram semanas, e sem isso o "Tratado" de hoje viraria um Threema
-   novo amanhã (`CARENCIA_TRATADA` de 24 h) até o caso acabar. A família "nova
-   tentativa" (não entregue, endereço incorreto, recusado) nasce direto em
-   `baixa` sem pessoa — é o dia a dia dos Correios, e `problema_correios`
-   nunca é limpo (ver `_EVENTOS_NOVA_TENTATIVA`).
+   extravio duram semanas, e a cobrança de pessoa a cada 24 h não faz sentido
+   depois que a operação agiu. A família "nova tentativa" (não entregue,
+   endereço incorreto, recusado) nasce direto em `baixa` sem pessoa — é o dia
+   a dia dos Correios, e `problema_correios` nunca é limpo (ver
+   `_EVENTOS_NOVA_TENTATIVA`).
+
+   **"Tratado" vale até o problema mudar de tipo** (Cairo, 01/10/2026: o
+   299243, apreendido, voltou no Threema 24 h depois do Tratado porque o
+   pacote seguia retido). O padrão da Ouvidoria reabre a `tratada` depois de
+   `CARENCIA_TRATADA`; aqui o `registrar` recebe `mesmo_problema` e só abre
+   linha nova quando a FAMÍLIA do evento (o rótulo: apreensão, extravio,
+   roubo/furto, avaria, devolvido…) é outra que a da ocorrência tratada. A
+   família sai de `problema_correios`, que o sync re-carimba quando os
+   Correios trazem um evento grave depois de um normal.
 
 2. **`17track:saldo`** — a flag que o sync liga quando o 17track recusa por
    falta de crédito. Sem saldo nenhum rastreio novo é registrado e a coluna
@@ -176,6 +185,13 @@ _CONFIG_DA_FAMILIA: dict[str, str] = {
 # (redação nova dos Correios, ou veio do proxy do marketplace). Caixinha
 # própria porque é justamente o que pode esconder uma apreensão rebatizada.
 _CONFIG_DESCONHECIDO = "olhar_ocorrencia_desconhecida"
+
+
+def _familia(evento: str | None) -> str:
+    """Rótulo da família do evento ("Roubo/furto" junta roubo, roubad, furtad
+    e sinistro). É o que diz se a ocorrência tratada e a de agora são o MESMO
+    problema — a palavra exata muda com a redação dos Correios, a família não."""
+    return _EVENTOS.get(evento or "", _EVENTO_DESCONHECIDO)[0]
 
 
 def _olha(cfg: dict, evento: str | None) -> bool:
@@ -461,6 +477,9 @@ async def _graves(r: ouvidoria.Rodada, agora: datetime, cfg: dict) -> None:
                 "chamado": chamado or None,
                 "entregue_em": _iso(row.entregue_em),
             },
+            # Tratado não reabre enquanto o pacote seguir com o MESMO tipo de
+            # problema — só um tipo novo avisa de novo (docstring do módulo).
+            mesmo_problema=lambda d, rotulo=rotulo: _familia(d.get("evento")) == rotulo,
             agora=agora,
         )
         _contar(r, oco, agora)
