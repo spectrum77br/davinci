@@ -252,9 +252,9 @@ async def _reenfileirar_orfaos(session, summary: dict) -> None:
                 # Import já fechou — o elo perdido é a emissão da NF
                 # (Upseller ou Bling destino).
                 emitindo = await _enfileirar_emissao_upseller(
-                    session, done.faturador_id, [n]
+                    session, done.faturador_id, [n], urgente=done.urgente
                 ) or await _enfileirar_emissao_bling(
-                    session, done.faturador_id, [n]
+                    session, done.faturador_id, [n], urgente=done.urgente
                 )
                 if not emitindo:
                     # Faturador sumiu: nada mais a encadear — espelha o
@@ -314,6 +314,7 @@ async def _reenfileirar_orfaos(session, summary: dict) -> None:
                     [n],
                     faturador_id=done.faturador_id,
                     ads_power=done.ads_power,
+                    urgente=done.urgente,
                 )
                 summary["orfaos_etiqueta"] += 1
             else:

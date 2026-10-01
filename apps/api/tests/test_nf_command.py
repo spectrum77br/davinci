@@ -482,6 +482,70 @@ async def test_lease_padrao_nao_imprime_etiqueta_ao_meio_dia(
 
 
 @pytest.mark.asyncio
+async def test_lease_urgente_passa_na_frente_e_etiqueta_sai_no_loop(
+    db: AsyncSession, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+):
+    """Pedido enfileirado na mão (urgente) sai antes dos automáticos, e a
+    etiqueta dele vem no loop contínuo (que exclui `imprimir_etiqueta`) em vez
+    de esperar o passe horário. Etiqueta comum continua fora do loop."""
+    from app.routers import nf as nf_router
+
+    monkeypatch.setattr(get_settings(), "nf_agent_token", _TOKEN)
+    monkeypatch.setattr(
+        nf_router, "_agora_brt",
+        lambda: datetime(2026, 10, 1, 14, 30, tzinfo=nf_router._TZ_BRT),
+    )
+    db.add_all([
+        NfCommand(action="import_avulsa", numeros=["960001"], planilha=b"x",
+                  nome_arquivo="a.csv", status="pending", source="auto"),
+        NfCommand(action="imprimir_etiqueta", numeros=["960002"], planilha=b"",
+                  nome_arquivo="", status="pending", source="auto"),
+        NfCommand(action="imprimir_etiqueta", numeros=["960003"], planilha=b"",
+                  nome_arquivo="", status="pending", source="auto", urgente=True),
+    ])
+    await db.commit()
+
+    loop = {"limit": 1, "exclude_actions": ["imprimir_etiqueta"]}
+    r = await client.post("/api/nf-cadastro/agent/lease", json=loop,
+                          headers={"X-Agent-Token": _TOKEN})
+    assert [c["numeros"] for c in r.json()["commands"]] == [["960003"]]
+
+    r = await client.post("/api/nf-cadastro/agent/lease",
+                          json={**loop, "limit": 5},
+                          headers={"X-Agent-Token": _TOKEN})
+    assert [c["numeros"] for c in r.json()["commands"]] == [["960001"]]
+
+    # a etiqueta comum segue esperando o passe horário
+    r = await client.post("/api/nf-cadastro/agent/lease",
+                          json={"limit": 5, "actions": ["imprimir_etiqueta"]},
+                          headers={"X-Agent-Token": _TOKEN})
+    assert [c["numeros"] for c in r.json()["commands"]] == [["960002"]]
+
+
+@pytest.mark.asyncio
+async def test_lease_etiqueta_urgente_respeita_meio_dia(
+    db: AsyncSession, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+):
+    """Urgente não fura a pausa das 12h: o perfil AdsPower é o mesmo do lote do
+    ML e dois robôs no mesmo Firefox corrompem a sessão."""
+    from app.routers import nf as nf_router
+
+    monkeypatch.setattr(get_settings(), "nf_agent_token", _TOKEN)
+    monkeypatch.setattr(
+        nf_router, "_agora_brt",
+        lambda: datetime(2026, 10, 1, 12, 15, tzinfo=nf_router._TZ_BRT),
+    )
+    db.add(NfCommand(action="imprimir_etiqueta", numeros=["960004"], planilha=b"",
+                     nome_arquivo="", status="pending", source="auto", urgente=True))
+    await db.commit()
+
+    r = await client.post("/api/nf-cadastro/agent/lease",
+                          json={"limit": 5, "exclude_actions": ["imprimir_etiqueta"]},
+                          headers={"X-Agent-Token": _TOKEN})
+    assert r.json()["commands"] == []
+
+
+@pytest.mark.asyncio
 async def test_agent_lease_sem_token_401(
     db: AsyncSession, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
 ):
@@ -943,6 +1007,27 @@ async def test_faturamento_ok_auto_enfileira_etiqueta(
     await db.refresh(fat)
     assert fat.status_faturamento == "ok"
     assert fat.status_etiqueta == "processando"
+
+
+@pytest.mark.asyncio
+async def test_enfileirar_manual_e_urgente_em_toda_a_cadeia(
+    db: AsyncSession, client: AsyncClient, admin: User,
+    auth_as: Callable[[User | None], None], monkeypatch: pytest.MonkeyPatch,
+):
+    """O "Enfileirar" do painel marca o import como urgente e cada elo que nasce
+    dele (emissão, etiqueta) herda a marca — senão o pedido furava a fila só no
+    primeiro passo e a etiqueta voltava a esperar o passe horário."""
+    monkeypatch.setattr(get_settings(), "nf_agent_token", _TOKEN)
+    auth_as(admin)
+    await _seed_upseller(db, admin)
+    await _ciclo_upseller(client, ["850001"])
+
+    cmds = (await db.execute(select(NfCommand))).scalars().all()
+    por_action = {c.action: c for c in cmds}
+    assert set(por_action) == {
+        "import_avulsa", "emitir_nf_upseller", "imprimir_etiqueta",
+    }
+    assert all(c.urgente for c in cmds)
 
 
 @pytest.mark.asyncio

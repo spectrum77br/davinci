@@ -281,6 +281,12 @@ class NfCommand(Base, TimestampMixin):
     # AdsPower do comando (etiqueta ML: perfil do cadastro Etiqueta, NÃO do
     # faturador). None → o lease cai no ads_power do faturador (fluxo antigo).
     ads_power: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Pedido que alguém mandou na mão pelo "Enfileirar" do painel. Passa na
+    # frente da fila em todas as etapas (os elos encadeados herdam) e a
+    # etiqueta dele sai no loop contínuo do robô, sem esperar o passe horário.
+    urgente: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
 
 
 class NfImpressao(Base, TimestampMixin):

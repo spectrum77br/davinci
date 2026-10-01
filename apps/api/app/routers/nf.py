@@ -1138,7 +1138,11 @@ async def _marcar_aguardando_cancelamento(
 
 
 async def _enfileirar_emissao_upseller(
-    session: AsyncSession, faturador_id: UUID | None, numeros: list[str]
+    session: AsyncSession,
+    faturador_id: UUID | None,
+    numeros: list[str],
+    *,
+    urgente: bool = False,
 ) -> bool:
     """Auto-enfileira UM comando `emitir_nf_upseller` por pedido depois que a
     importação avulsa fecha no Upseller.
@@ -1173,13 +1177,18 @@ async def _enfileirar_emissao_upseller(
                 status="pending",
                 source="auto",
                 ads_power=fat.ads_power,
+                urgente=urgente,
             )
         )
     return True
 
 
 async def _enfileirar_emissao_bling(
-    session: AsyncSession, faturador_id: UUID | None, numeros: list[str]
+    session: AsyncSession,
+    faturador_id: UUID | None,
+    numeros: list[str],
+    *,
+    urgente: bool = False,
 ) -> bool:
     """Auto-enfileira UM comando `emitir_nf_bling` por pedido depois que a
     importação avulsa fecha no Bling destino.
@@ -1213,6 +1222,7 @@ async def _enfileirar_emissao_bling(
                 status="pending",
                 source="auto",
                 ads_power=fat.ads_power,
+                urgente=urgente,
             )
         )
     return True
@@ -1224,6 +1234,7 @@ async def _enfileirar_captura_nf(
     *,
     faturador_id: UUID | None = None,
     ads_power: str | None = None,
+    urgente: bool = False,
 ) -> int:
     """Cria UM comando `capturar_nf` por pedido: a marionete baixa a DANFE
     ("Gerar PDF DANFE") do Bling destino e sobe em /agent/nf — no fluxo
@@ -1245,6 +1256,7 @@ async def _enfileirar_captura_nf(
                 status="pending",
                 source="auto",
                 ads_power=ads_power,
+                urgente=urgente,
             )
         )
     return len(criar)
@@ -1269,6 +1281,7 @@ async def _criar_comandos_etiqueta(
     *,
     faturador_id: UUID | None = None,
     ads_power: str | None = None,
+    urgente: bool = False,
 ) -> int:
     """Cria UM comando `imprimir_etiqueta` por pedido (grão = 1 etiqueta), com o
     AdsPower do comando (perfil do cadastro Etiqueta no fluxo ML). Dedupe: pula
@@ -1299,6 +1312,7 @@ async def _criar_comandos_etiqueta(
                 status="pending",
                 source="auto",
                 ads_power=ads_power,
+                urgente=urgente,
             )
         )
     if criar:
@@ -1337,7 +1351,7 @@ async def _resolver_comandos_etiqueta(
 
 
 async def _enfileirar_etiqueta_ml(
-    session: AsyncSession, numeros: list[str]
+    session: AsyncSession, numeros: list[str], *, urgente: bool = False
 ) -> int:
     """Auto-enfileira a IMPORTAÇÃO da etiqueta no Upseller (fluxo ML): pedidos com
     faturador Bling + cadastro de Etiqueta 'upseller'. A NF já saiu do Bling, então
@@ -1359,6 +1373,7 @@ async def _enfileirar_etiqueta_ml(
                 status="pending",
                 source="auto",
                 ads_power=bloco.ads_power,
+                urgente=urgente,
             )
         )
         await _marcar_etiqueta(
@@ -1449,6 +1464,8 @@ async def enfileirar_importacao(
                 status="pending",
                 source="manual",
                 created_by=user.id,
+                # Clique no painel = alguém esperando esse pedido agora.
+                urgente=True,
             )
         )
         await _marcar_faturamento(
@@ -1556,17 +1573,28 @@ async def nf_agent_lease(
     """Reivindica até `limit` comandos pendentes (FOR UPDATE SKIP LOCKED), vira
     pra 'claimed' e devolve cada um com o login do faturador (AdsPower/usuário/
     senha descriptografada) + a planilha em base64. Seguro sob concorrência."""
+    # Urgente (clique no "Enfileirar" do painel) sai antes de todo o resto;
+    # dentro de cada grupo segue a ordem de chegada.
     stmt = (
         select(NfCommand)
         .where(NfCommand.status == "pending")
-        .order_by(NfCommand.created_at.asc())
+        .order_by(NfCommand.urgente.desc(), NfCommand.created_at.asc())
         .limit(body.limit)
         .with_for_update(skip_locked=True)
     )
     if body.actions:
         stmt = stmt.where(NfCommand.action.in_(body.actions))
     if body.exclude_actions:
-        stmt = stmt.where(NfCommand.action.not_in(body.exclude_actions))
+        # O loop contínuo do robô da nuvem pede tudo menos `imprimir_etiqueta`
+        # (etiqueta fica pro passe horário). Comando urgente fura esse filtro:
+        # a etiqueta de quem foi enfileirado na mão não espera a hora cheia.
+        # Se o loop falhar nela, o recuperador devolve e o lote horário cobre.
+        stmt = stmt.where(
+            or_(
+                NfCommand.urgente.is_(True),
+                NfCommand.action.not_in(body.exclude_actions),
+            )
+        )
 
     # Plataforma do comando: derivada do 1º pedido (loja do Bling → store_info).
     # Não precisa de coluna nova porque os geradores agrupam por plataforma — um
@@ -1727,6 +1755,7 @@ async def nf_agent_command_result(
                 numeros,
                 faturador_id=cmd.faturador_id,
                 ads_power=cmd.ads_power,
+                urgente=cmd.urgente,
             )
         else:
             await _marcar_faturamento(
@@ -1744,6 +1773,7 @@ async def nf_agent_command_result(
                 numeros,
                 faturador_id=cmd.faturador_id,
                 ads_power=cmd.ads_power,
+                urgente=cmd.urgente,
             )
         else:
             await _marcar_faturamento(
@@ -1765,7 +1795,7 @@ async def nf_agent_command_result(
         # da etiqueta (imprimir_etiqueta) no mesmo AdsPower do cadastro Etiqueta.
         if new_status == "done":
             await _criar_comandos_etiqueta(
-                session, numeros, ads_power=cmd.ads_power
+                session, numeros, ads_power=cmd.ads_power, urgente=cmd.urgente
             )
         else:
             await _marcar_etiqueta(
@@ -1776,11 +1806,13 @@ async def nf_agent_command_result(
         # Importar o avulso é só o 1º passo — a NF ainda não saiu, então o
         # pedido segue 'processando' até a emissão fechar (Upseller ou Bling).
         emitindo = await _enfileirar_emissao_upseller(
-            session, cmd.faturador_id, numeros
-        ) or await _enfileirar_emissao_bling(session, cmd.faturador_id, numeros)
+            session, cmd.faturador_id, numeros, urgente=cmd.urgente
+        ) or await _enfileirar_emissao_bling(
+            session, cmd.faturador_id, numeros, urgente=cmd.urgente
+        )
         if not emitindo:
             await _marcar_faturamento(session, numeros, status_txt="ok", erro=None)
-        await _enfileirar_etiqueta_ml(session, numeros)
+        await _enfileirar_etiqueta_ml(session, numeros, urgente=cmd.urgente)
     else:
         await _marcar_faturamento(
             session, numeros, status_txt="erro", erro=cmd.result or "falha na importação"
