@@ -119,6 +119,8 @@ class ConversaResumoOut(BaseModel):
     prazo_resposta_em: datetime | None = None
     situacao: str
     nao_lidas: int = 0
+    # Mensagens do comprador desde a última resposta de verdade (a bolinha).
+    pendentes: int = 0
     tem_rascunho: bool = False
     atribuido_a: UUID | None = None
     atribuido_a_nome: str | None = None

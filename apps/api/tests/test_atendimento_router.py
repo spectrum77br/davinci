@@ -257,6 +257,50 @@ async def test_sem_permissao_e_403(client, make_user, auth_as, db):
 # ─────────────── lista ───────────────
 
 
+async def test_menu_filtrar_e_bolinha_de_pendentes(client, db, make_user, pessoa):
+    """01/10/2026: Todas / Falta responder + menu Filtrar, como o Duoke.
+
+    "automatica" = esperando, mas só a resposta automática falou depois do
+    comprador; pré/pós-venda pelo canal e pelo pedido; e a bolinha
+    (`pendentes`) conta as mensagens do comprador desde a última resposta de
+    verdade — a automática não zera.
+    """
+    integ, canal, fila = await _fila(db, make_user)
+    ids = {k: str(v.id) for k, v in fila.items()}
+    f = await _conversa(db, integ, canal, "F", cliente_ha=timedelta(minutes=40))
+    await gravar.gravar_mensagem(
+        db, f, externo_id="F-c2", autor="cliente", texto="alô?",
+        enviada_em=AGORA - timedelta(minutes=35),
+    )
+    await gravar.gravar_mensagem(
+        db, f, externo_id="F-auto", autor="loja",
+        texto="Olá, a sua mensagem foi recebida. Há mais mensagens neste momento",
+        enviada_em=AGORA - timedelta(minutes=25),
+    )
+    await db.commit()
+    ids["auto"] = str(f.id)
+
+    async def filtro(nome: str) -> list[str]:
+        resposta = await client.get(f"{URL}/conversas", params={"filtro": nome})
+        assert resposta.status_code == 200
+        return _ids(resposta)
+
+    assert await filtro("automatica") == [ids["auto"]]
+    assert ids["auto"] in await filtro("aguardando")
+    assert await filtro("pre_venda") == [
+        ids["auto"], ids["respondida"], ids["aguardando"], ids["vencendo"]
+    ]
+    assert await filtro("pos_venda") == [ids["vencida"]]
+
+    itens = {i["id"]: i for i in (await client.get(f"{URL}/conversas")).json()["itens"]}
+    assert itens[ids["auto"]]["pendentes"] == 2
+    assert itens[ids["auto"]]["nao_lidas"] == 0  # o "não lida" da plataforma zerou
+    assert itens[ids["aguardando"]]["pendentes"] == 1
+    assert itens[ids["respondida"]]["pendentes"] == 0
+    detalhe = (await client.get(f"{URL}/conversas/{ids['auto']}")).json()
+    assert detalhe["conversa"]["pendentes"] == 2
+
+
 async def test_lista_filtros_e_paginacao(client, db, make_user, pessoa):
     _integ, _canal, fila = await _fila(db, make_user)
     ids = {k: str(v.id) for k, v in fila.items()}

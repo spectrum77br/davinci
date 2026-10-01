@@ -81,6 +81,9 @@ export type ConversaResumo = {
   prazo_resposta_em: string | null
   situacao: string
   nao_lidas: number
+  // Mensagens do comprador desde a última resposta de verdade (a bolinha);
+  // a API antiga não manda — cai no `nao_lidas` da plataforma.
+  pendentes?: number
   tem_rascunho: boolean
   atribuido_a: string | null
   atribuido_a_nome: string | null

@@ -1,8 +1,11 @@
 <script setup lang="ts">
 // Barra de lojas da Caixa (Atendimento, 28/09/2026) — a coluna estreita da
 // esquerda do Duoke: "Todas" no topo e as lojas agrupadas por plataforma, cada
-// uma com o ícone da plataforma, o nome e a bolinha VERMELHA com as não lidas
-// (o número da própria plataforma, o mesmo do Duoke). Clicar filtra a lista.
+// uma com o ícone da plataforma, o nome e a bolinha VERMELHA com as conversas
+// esperando resposta (01/10/2026: antes era o "não lida" da plataforma, que a
+// Shopee zera quando o robô do Duoke responde sozinho — a loja ficava sem
+// bolinha com comprador esperando, ou com bolinha e a lista vazia). O número
+// da plataforma continua no title. Clicar filtra a lista.
 // Loja que o DaVinci não consegue ler (TikTok sem escopo, canal com erro)
 // aparece apagada, com cadeado/alerta e o motivo no title — ninguém acha que
 // "não tem mensagem" quando na verdade não dá para ler. Loja com UM canal
@@ -44,7 +47,10 @@ type LojaBarra = {
   integration_id: string
   plataforma: string
   conta: string
+  // A bolinha: conversas esperando resposta (= `aguardando`).
   nao_lidas: number
+  // O "não lida" que a própria plataforma informa (só no title).
+  nao_lidas_plataforma: number | null
   aguardando: number
   vencidas: number
   status: string
@@ -79,7 +85,8 @@ const lojas = computed<LojaBarra[]>(() => {
       integration_id: l.integration_id || '',
       plataforma: l.plataforma,
       conta: l.conta || 'sem nome',
-      nao_lidas: typeof l.nao_lidas === 'number' ? l.nao_lidas : l.aguardando || 0,
+      nao_lidas: l.aguardando || 0,
+      nao_lidas_plataforma: typeof l.nao_lidas === 'number' ? l.nao_lidas : null,
       aguardando: l.aguardando || 0,
       vencidas: l.vencidas || 0,
       status: l.status_canal || '',
@@ -96,6 +103,7 @@ const lojas = computed<LojaBarra[]>(() => {
       plataforma: c.plataforma,
       conta: c.conta || 'sem nome',
       nao_lidas: 0,
+      nao_lidas_plataforma: null,
       aguardando: 0,
       vencidas: 0,
       status: '',
@@ -151,8 +159,8 @@ function motivo(l: LojaBarra): string {
     partes.push(st ? `${st.label}: ${st.hint}` : l.status)
     if (l.motivo) partes.push(l.motivo)
   } else {
-    partes.push(`${l.nao_lidas} não lida(s) na plataforma`)
-    if (l.aguardando) partes.push(`${l.aguardando} aguardando resposta`)
+    partes.push(`${l.aguardando} conversa(s) esperando resposta`)
+    if (typeof l.nao_lidas_plataforma === 'number') partes.push(`${l.nao_lidas_plataforma} não lida(s) segundo a plataforma`)
     if (l.vencidas) partes.push(`${l.vencidas} vencida(s)`)
     if (l.parcial) partes.push(l.motivo ? `Atenção — ${l.motivo}` : 'Atenção: um dos canais desta loja não está sendo lido')
   }

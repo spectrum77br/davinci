@@ -7,18 +7,27 @@ export type FiltrosLista = {
   filtro: string
   q: string
 }
-export const FILTROS_RAPIDOS: { value: string; label: string; hint: string }[] = [
-  { value: 'aguardando', label: 'Aguardando', hint: 'o cliente falou por último e ninguém respondeu ainda' },
+type OpcaoFiltro = { value: string; label: string; hint: string }
+// Como o Duoke (01/10/2026): duas abas em cima — "Todas" (o All, onde a lista
+// abre) e "Falta responder" (a Fila) — e o resto no menu "Filtrar" ao lado.
+export const ABAS_LISTA: OpcaoFiltro[] = [
+  { value: 'todas', label: 'Todas', hint: 'todas as conversas abertas, da mais recente para a mais antiga' },
+  { value: 'aguardando', label: 'Falta responder', hint: 'o comprador falou por último e ninguém respondeu de verdade (resposta automática não conta)' },
+]
+export const FILTROS_MENU: OpcaoFiltro[] = [
   { value: 'vencendo', label: 'Vencendo', hint: 'o prazo de resposta acaba em menos de 2 h' },
   { value: 'vencidas', label: 'Vencidas', hint: 'passou do prazo sem resposta' },
-  { value: 'com_rascunho', label: 'Com sugestão', hint: 'a IA deixou uma resposta pronta para conferir' },
+  { value: 'automatica', label: 'Só resposta automática', hint: 'o robô do Duoke (ou uma campanha) respondeu e nenhuma pessoa ainda' },
+  { value: 'com_rascunho', label: 'Com sugestão da IA', hint: 'a IA deixou uma resposta pronta para conferir' },
   // Resposta nossa que a plataforma não confirmou: pode ter chegado ou não.
   // Alguém precisa olhar na plataforma e marcar — o DaVinci não reenvia.
   { value: 'a_conferir', label: 'A conferir', hint: 'resposta enviada pelo DaVinci que a plataforma não confirmou — confira se chegou ao comprador' },
   { value: 'minhas', label: 'Minhas', hint: 'conversas atribuídas a você' },
-  { value: 'todas', label: 'Todas', hint: 'abertas e respondidas' },
+  { value: 'pre_venda', label: 'Pré-venda', hint: 'perguntas e conversas sem pedido ligado' },
+  { value: 'pos_venda', label: 'Pós-venda', hint: 'conversas de um pedido, pós-venda, SAC e e-mail da Amazon' },
   { value: 'fechadas', label: 'Fechadas', hint: 'fechadas por alguém da equipe' },
 ]
+export const FILTROS_RAPIDOS: OpcaoFiltro[] = [...ABAS_LISTA, ...FILTROS_MENU]
 </script>
 
 <script setup lang="ts">
@@ -33,7 +42,8 @@ export const FILTROS_RAPIDOS: { value: string; label: string; hint: string }[] =
 // contar os itens carregados mentiria). Setas ↑/↓ andam pela lista sem mouse.
 // A plataforma e a loja se escolhem na barra de lojas (AtendimentoLojas); em
 // tela estreita, onde a barra some, voltam os dois seletores aqui.
-import { Bot, Inbox, Loader2, Lock, PauseCircle, RotateCcw, Search, Sparkles, TriangleAlert, UserRound, X } from 'lucide-vue-next'
+import { onClickOutside } from '@vueuse/core'
+import { Bot, Check, Inbox, ListFilter, Loader2, Lock, PauseCircle, RotateCcw, Search, Sparkles, TriangleAlert, UserRound, X } from 'lucide-vue-next'
 import {
   PLATAFORMAS_ATENDIMENTO,
   canaisDa,
@@ -115,6 +125,17 @@ function contadorCls(value: string, n: number | null | undefined) {
   return 'bg-primary/15 text-primary'
 }
 
+// ─── menu "Filtrar" ─────────────────────────────────────────────────────────
+const menuAberto = ref(false)
+const menuRef = ref<HTMLElement | null>(null)
+onClickOutside(menuRef, () => { menuAberto.value = false })
+const filtroDoMenu = computed(() => FILTROS_MENU.find((f) => f.value === filtros.value.filtro) ?? null)
+function escolherDoMenu(value: string) {
+  menuAberto.value = false
+  // Clicar de novo no filtro escolhido tira o filtro (volta para Todas).
+  mudar('filtro', filtros.value.filtro === value ? 'todas' : value)
+}
+
 function aguardandoDaPlataforma(p: string): number | null {
   const x = props.resumo?.plataformas.find((y) => y.plataforma === p)
   return x ? x.aguardando : null
@@ -192,6 +213,9 @@ function selo(sel: boolean, cls: string) {
 
 const VAZIO: Record<string, string> = {
   aguardando: 'Nada esperando resposta agora.',
+  automatica: 'Nenhuma conversa só com a resposta automática.',
+  pre_venda: 'Nenhuma conversa de pré-venda com esses filtros.',
+  pos_venda: 'Nenhuma conversa de pós-venda com esses filtros.',
   vencendo: 'Nenhuma conversa perto de vencer.',
   vencidas: 'Nenhuma conversa vencida.',
   com_rascunho: 'Nenhuma sugestão da IA esperando conferência.',
@@ -278,25 +302,74 @@ function mover(delta: number) {
           <option v-for="c in canais" :key="c.value" :value="c.value">{{ c.label }}</option>
         </select>
       </div>
-      <!-- filtros rápidos -->
-      <div class="flex flex-wrap gap-1">
-        <button
-          v-for="f in FILTROS_RAPIDOS"
-          :key="f.value"
-          type="button"
-          class="inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] transition-colors"
-          :class="filtros.filtro === f.value ? 'border-primary bg-primary text-primary-foreground' : 'hover:bg-muted'"
-          :title="f.hint"
-          :aria-pressed="filtros.filtro === f.value"
-          @click="mudar('filtro', f.value)"
-        >
-          {{ f.label }}
-          <span
-            v-if="contagem[f.value] !== undefined && contagem[f.value] !== null"
-            class="min-w-[18px] rounded-full px-1 text-center text-[10px] font-semibold tabular-nums"
-            :class="filtros.filtro === f.value ? 'bg-primary-foreground/25 text-primary-foreground' : contadorCls(f.value, contagem[f.value])"
-          >{{ contagem[f.value] }}</span>
-        </button>
+      <!-- abas (Todas / Falta responder) + menu Filtrar, como o Duoke -->
+      <div class="flex items-end gap-2 border-b">
+        <div class="flex min-w-0 flex-1 items-end gap-3" role="tablist" aria-label="conversas">
+          <button
+            v-for="a in ABAS_LISTA"
+            :key="a.value"
+            type="button"
+            role="tab"
+            class="-mb-px inline-flex items-center gap-1 border-b-2 px-0.5 pb-1.5 text-xs font-medium transition-colors"
+            :class="filtros.filtro === a.value ? 'border-primary text-primary' : 'border-transparent text-muted-foreground hover:text-foreground'"
+            :title="a.hint"
+            :aria-selected="filtros.filtro === a.value"
+            @click="mudar('filtro', a.value)"
+          >
+            {{ a.label }}
+            <span
+              v-if="a.value === 'aguardando' && contagem.aguardando"
+              class="min-w-[18px] rounded-full bg-red-500 px-1 text-center text-[10px] font-semibold tabular-nums text-white"
+            >{{ contagem.aguardando > 99 ? '99+' : contagem.aguardando }}</span>
+          </button>
+        </div>
+        <div ref="menuRef" class="relative mb-1 shrink-0" @keydown.esc="menuAberto = false">
+          <button
+            type="button"
+            class="inline-flex h-7 items-center gap-1 rounded-md border px-2 text-[11px] transition-colors"
+            :class="filtroDoMenu ? 'border-primary bg-primary/10 text-primary' : 'hover:bg-muted'"
+            aria-haspopup="menu"
+            :aria-expanded="menuAberto"
+            @click="menuAberto = !menuAberto"
+          >
+            <ListFilter class="size-3.5" /> Filtrar
+          </button>
+          <div
+            v-if="menuAberto"
+            role="menu"
+            aria-label="filtrar conversas"
+            class="absolute right-0 z-30 mt-1 w-60 rounded-md border bg-background p-1 shadow-lg"
+          >
+            <button
+              v-for="f in FILTROS_MENU"
+              :key="f.value"
+              type="button"
+              role="menuitemradio"
+              :aria-checked="filtros.filtro === f.value"
+              class="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs hover:bg-muted"
+              :class="filtros.filtro === f.value ? 'font-medium text-primary' : ''"
+              :title="f.hint"
+              @click="escolherDoMenu(f.value)"
+            >
+              <span class="min-w-0 flex-1 truncate">{{ f.label }}</span>
+              <span
+                v-if="contagem[f.value] !== undefined && contagem[f.value] !== null"
+                class="min-w-[18px] rounded-full px-1 text-center text-[10px] font-semibold tabular-nums"
+                :class="contadorCls(f.value, contagem[f.value])"
+              >{{ contagem[f.value] }}</span>
+              <Check v-if="filtros.filtro === f.value" class="size-3.5 shrink-0" />
+            </button>
+          </div>
+        </div>
+      </div>
+      <div v-if="filtroDoMenu" class="flex items-center gap-1 text-[11px]">
+        <span class="text-muted-foreground">Filtro:</span>
+        <span class="inline-flex items-center gap-1 rounded-full border border-primary bg-primary/10 px-2 py-0.5 text-primary" :title="filtroDoMenu.hint">
+          {{ filtroDoMenu.label }}
+          <button type="button" class="rounded-full hover:bg-primary/20" aria-label="tirar o filtro" @click="mudar('filtro', 'todas')">
+            <X class="size-3" />
+          </button>
+        </span>
       </div>
     </div>
 
@@ -354,7 +427,7 @@ function mover(delta: number) {
               :nome="c.comprador_nome || c.pedido_marketplace"
               :foto="c.comprador_avatar"
               :plataforma="c.plataforma"
-              :nao-lidas="c.nao_lidas"
+              :nao-lidas="c.pendentes ?? c.nao_lidas"
               :tamanho="40"
             />
             <span class="min-w-0 flex-1">

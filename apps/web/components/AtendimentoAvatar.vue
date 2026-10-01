@@ -56,7 +56,7 @@ const contador = computed(() => {
     <span
       v-if="contador"
       class="absolute -right-1.5 -top-1 flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-red-500 px-1 text-[10px] font-semibold leading-none text-white ring-2 ring-background tabular-nums"
-      :title="`${naoLidas} não lida(s) na plataforma`"
+      :title="`${naoLidas} mensagem(ns) do comprador sem resposta`"
     >{{ contador }}</span>
   </span>
 </template>

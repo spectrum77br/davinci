@@ -108,7 +108,8 @@ const avisosAbertos = ref(false)
 
 // ─── lista ──────────────────────────────────────────────────────────────────
 const FILTROS_KEY = 'davinci.atendimento.filtros'
-const filtros = ref<FiltrosLista>({ plataforma: '', integration_id: '', canal: '', filtro: 'aguardando', q: '' })
+// Abre em "Todas", como o All do Duoke (01/10/2026); "Falta responder" é a aba ao lado.
+const filtros = ref<FiltrosLista>({ plataforma: '', integration_id: '', canal: '', filtro: 'todas', q: '' })
 const itens = ref<ConversaResumo[]>([])
 const proximo = ref<string | null>(null)
 const carregando = ref(false)
@@ -281,7 +282,9 @@ onMounted(() => {
       const salvo = JSON.parse(raw)
       if (salvo && typeof salvo === 'object') {
         const f = { ...filtros.value }
-        for (const k of ['plataforma', 'integration_id', 'canal', 'filtro'] as const) {
+        // A aba (`filtro`) não volta: abre sempre em "Todas", como o Duoke
+        // (01/10/2026). Loja e plataforma escolhidas, sim.
+        for (const k of ['plataforma', 'integration_id', 'canal'] as const) {
           if (typeof salvo[k] === 'string') f[k] = salvo[k]
         }
         if (JSON.stringify(f) !== JSON.stringify(filtros.value)) filtros.value = f

@@ -130,6 +130,9 @@ from app.services.atendimento.constantes import (
     AUTOR_LOJA,
     CANAIS_POR_PLATAFORMA,
     CANAL_EMAIL,
+    CANAL_PERGUNTA,
+    CANAL_POS_VENDA,
+    CANAL_SAC,
     CATEGORIAS,
     CATEGORIAS_INFO,
     CATEGORIAS_SO_HUMANO,
@@ -201,6 +204,10 @@ FILTROS = (
     "a_conferir",
     "minhas",
     "fechadas",
+    # 01/10/2026 (menu Filtrar, como o do Duoke):
+    "automatica",
+    "pre_venda",
+    "pos_venda",
 )
 # "Vencendo" = prazo da plataforma em menos de 2 h (e ainda não vencido).
 VENCENDO = timedelta(hours=2)
@@ -458,6 +465,30 @@ def _a_conferir_existe():
     )
 
 
+def _pendentes():
+    """Mensagens do comprador desde a última resposta de VERDADE da loja.
+
+    A bolinha vermelha da conversa (01/10/2026, a do Duoke): o "não lida" da
+    Shopee zera quando o robô do Duoke responde sozinho; este número não —
+    `ultima_da_loja_em` ignora a resposta automática (`gravar.recalcular`).
+    Só vale para quem está esperando resposta (`_resumo_dict` zera o resto).
+    """
+    momento = func.coalesce(AtendimentoMensagem.enviada_em, AtendimentoMensagem.created_at)
+    return (
+        select(func.count())
+        .where(
+            AtendimentoMensagem.conversa_id == AtendimentoConversa.id,
+            AtendimentoMensagem.autor == AUTOR_CLIENTE,
+            or_(
+                AtendimentoConversa.ultima_da_loja_em.is_(None),
+                momento > AtendimentoConversa.ultima_da_loja_em,
+            ),
+        )
+        .correlate(AtendimentoConversa)
+        .scalar_subquery()
+    )
+
+
 def _ultimo_tipo():
     """O tipo da última mensagem da conversa (subconsulta correlacionada).
 
@@ -570,6 +601,7 @@ def _resumo_dict(
     atribuido_nome: str | None,
     a_conferir: bool = False,
     ultimo_tipo: str | None = None,
+    pendentes: int = 0,
 ) -> dict[str, Any]:
     return {
         "id": str(c.id),
@@ -589,6 +621,7 @@ def _resumo_dict(
         "prazo_resposta_em": _utc(c.prazo_resposta_em),
         "situacao": c.situacao,
         "nao_lidas": c.nao_lidas or 0,
+        "pendentes": int(pendentes or 0) if c.aguardando_resposta else 0,
         "tem_rascunho": bool(tem_rascunho),
         "atribuido_a": c.atribuido_a,
         "atribuido_a_nome": atribuido_nome,
@@ -625,12 +658,14 @@ async def _conversa_out(session: AsyncSession, c: AtendimentoConversa) -> Conver
     ultimo_tipo = await session.scalar(
         select(_ultimo_tipo()).where(AtendimentoConversa.id == c.id)
     )
+    pendentes = await session.scalar(select(_pendentes()).where(AtendimentoConversa.id == c.id))
     base = _resumo_dict(
         c,
         tem_rascunho=tem,
         atribuido_nome=nomes.get(c.atribuido_a),
         a_conferir=a_conferir,
         ultimo_tipo=ultimo_tipo,
+        pendentes=pendentes or 0,
     )
     base.update(
         comprador_id=c.comprador_id,
@@ -991,6 +1026,7 @@ async def _listar_marketplace(
         tem.label("tem_rascunho"),
         a_conferir.label("a_conferir"),
         _ultimo_tipo().label("ultimo_tipo"),
+        _pendentes().label("pendentes"),
         User,
     ).outerjoin(User, User.id == AtendimentoConversa.atribuido_a)
     cond = _clausula_escopo(scope, AtendimentoConversa.integration_id)
@@ -1024,6 +1060,24 @@ async def _listar_marketplace(
         consulta = consulta.where(AtendimentoConversa.atribuido_a == user.id)
     elif filtro == "fechadas":
         consulta = consulta.where(AtendimentoConversa.situacao == CONVERSA_FECHADA)
+    elif filtro == "automatica":
+        # Esperando, mas a ÚLTIMA mensagem é da loja: só a resposta automática
+        # (robô do Duoke, campanha) falou depois do comprador.
+        consulta = consulta.where(aguardando, AtendimentoConversa.ultima_autor == AUTOR_LOJA)
+    elif filtro in ("pre_venda", "pos_venda"):
+        # Pergunta = antes da compra; Pós-venda/SAC/e-mail (Amazon) = depois.
+        # Chat (Shopee, TikTok, Magalu, Temu, AliExpress): pelo pedido ligado.
+        pos = or_(
+            AtendimentoConversa.canal.in_((CANAL_POS_VENDA, CANAL_SAC, CANAL_EMAIL)),
+            and_(
+                AtendimentoConversa.canal != CANAL_PERGUNTA,
+                AtendimentoConversa.pedido_marketplace.is_not(None),
+            ),
+        )
+        consulta = consulta.where(
+            AtendimentoConversa.situacao != CONVERSA_FECHADA,
+            pos if filtro == "pos_venda" else ~pos,
+        )
     if q and q.strip():
         termo = f"%{_escapar_like(q.strip())}%"
         consulta = consulta.where(
@@ -1054,8 +1108,9 @@ async def _listar_marketplace(
             atribuido_nome=_nome(u),
             a_conferir=bool(r),
             ultimo_tipo=tipo,
+            pendentes=pend,
         )
-        for c, tem_r, r, tipo, u in (await session.execute(consulta)).all()
+        for c, tem_r, r, tipo, pend, u in (await session.execute(consulta)).all()
     ]
 
 
