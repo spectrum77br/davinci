@@ -16,7 +16,7 @@ H = {"Authorization": f"Bearer {TOKEN}"}
 _TABELAS = (
     "denuncia_anuncios", "denuncia_lojas", "denuncia_denuncias", "denuncia_casos",
     "denuncia_compras", "denuncia_provas", "denuncia_verificacoes", "denuncia_remetentes",
-    "denuncia_robo_status",
+    "denuncia_robo_status", "denuncia_robo_comandos",
 )
 
 
@@ -456,3 +456,36 @@ def test_painel_modo_manual_nao_acusa_rodada():
     assert p["modo"] == "manual"
     assert [r["estado"] for r in p["rodadas"]] == ["manual", "feita", "manual"]
     assert not any("não começou" in x["titulo"] for x in p["precisa"])
+
+
+
+async def test_robo_botoes_ligar_e_rodar_passo(client, make_user, auth_as):
+    auth_as(await make_user(permissions={"denuncia": {"view": True}}))
+    r = await client.post("/api/denuncia/robo/automatico", json={"ligado": True})
+    assert r.status_code == 403  # só quem edita a Denúncia aperta os botões
+
+    auth_as(await make_user(permissions={"denuncia": {"view": True, "edit": True}}))
+    r = await client.post("/api/denuncia/robo/automatico", json={"ligado": "sim"})
+    assert r.status_code == 422
+    r = await client.post("/api/denuncia/robo/passo", json={"acao": "rm -rf"})
+    assert r.status_code == 422
+    r = await client.post("/api/denuncia/robo/automatico", json={"ligado": False})
+    assert r.status_code == 200
+    r = await client.post("/api/denuncia/robo/passo", json={"acao": "varredura_mercadolivre"})
+    assert r.status_code == 200, r.text
+
+    # o mini busca os pendentes, executa e responde
+    assert (await client.get("/api/denuncia/sync/robo/comandos")).status_code == 401
+    cmds = (await client.get("/api/denuncia/sync/robo/comandos", headers=H)).json()["comandos"]
+    assert [(c["tipo"], c["dados"]) for c in cmds] == [
+        ("automatico", {"ligado": False}), ("passo", {"acao": "varredura_mercadolivre"})]
+    r = await client.post(f"/api/denuncia/sync/robo/comandos/{cmds[0]['id']}",
+                          json={"ok": True, "resultado": "rotina automática desligada"}, headers=H)
+    assert r.status_code == 200
+    resto = (await client.get("/api/denuncia/sync/robo/comandos", headers=H)).json()["comandos"]
+    assert [c["id"] for c in resto] == [cmds[1]["id"]]
+
+    j = (await client.get("/api/denuncia/robo")).json()
+    assert [c["tipo"] for c in j["comandos"]] == ["passo", "automatico"]
+    assert j["comandos"][1]["ok"] is True and j["comandos"][1]["entregue_em"]
+    assert len(j["passos_disponiveis"]) == 12

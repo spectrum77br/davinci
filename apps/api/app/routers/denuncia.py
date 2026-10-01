@@ -48,11 +48,12 @@ from app.models.denuncia import (
     DenunciaLoja,
     DenunciaProva,
     DenunciaRemetente,
+    DenunciaRoboComando,
     DenunciaRoboStatus,
     DenunciaVerificacao,
 )
 from app.models.user import User
-from app.services.denuncia_robo import montar_painel
+from app.services.denuncia_robo import PASSOS, montar_painel
 
 logger = structlog.get_logger()
 
@@ -60,6 +61,7 @@ router = APIRouter(prefix="/api/denuncia", tags=["denuncia"])
 sync_router = APIRouter(prefix="/api/denuncia/sync", tags=["denuncia"], include_in_schema=False)
 
 _ver = require_permission("denuncia", "view")
+_editar = require_permission("denuncia", "edit")
 
 # Pasta das provas dentro de `uploads_dir` (volume compartilhado api/worker).
 PASTA_PROVAS = "denuncia/provas"
@@ -236,6 +238,52 @@ async def sync_robo(
             set_={"dados": stmt.excluded.dados, "recebido_em": stmt.excluded.recebido_em},
         )
     )
+    await session.commit()
+    return {"ok": True}
+
+
+# Botões da aba Robô (01/10): o mini busca os comandos pendentes a cada 5 s.
+# Comando que ninguém pegou em 1 h (mini desligado) não vale mais.
+COMANDO_VALE = timedelta(hours=1)
+
+
+@sync_router.get("/robo/comandos")
+async def sync_robo_comandos(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _r: Annotated[DenunciaRemetente, Depends(_remetente)],
+) -> dict:
+    rows = (
+        await session.execute(
+            select(DenunciaRoboComando)
+            .where(
+                DenunciaRoboComando.entregue_em.is_(None),
+                DenunciaRoboComando.pedido_em >= datetime.now(UTC) - COMANDO_VALE,
+            )
+            .order_by(DenunciaRoboComando.id)
+        )
+    ).scalars().all()
+    return {"comandos": [
+        {"id": c.id, "tipo": c.tipo, "dados": c.dados, "pedido_por": c.pedido_por} for c in rows
+    ]}
+
+
+@sync_router.post("/robo/comandos/{comando_id}")
+async def sync_robo_comando_feito(
+    comando_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _r: Annotated[DenunciaRemetente, Depends(_remetente)],
+    corpo: Annotated[dict, Body()],
+) -> dict:
+    c = (
+        await session.execute(
+            select(DenunciaRoboComando).where(DenunciaRoboComando.id == comando_id)
+        )
+    ).scalar_one_or_none()
+    if c is None:
+        raise HTTPException(404, detail={"code": "denuncia_comando_nao_encontrado"})
+    c.entregue_em = datetime.now(UTC)
+    c.ok = bool(corpo.get("ok"))
+    c.resultado = str(corpo.get("resultado") or "")[:1000]
     await session.commit()
     return {"ok": True}
 
@@ -486,9 +534,61 @@ async def robo(
             select(DenunciaRoboStatus).order_by(DenunciaRoboStatus.recebido_em.desc()).limit(1)
         )
     ).scalar_one_or_none()
-    if st is None:
-        return montar_painel(None, None, datetime.now(UTC))
-    return montar_painel(st.dados, st.recebido_em, datetime.now(UTC))
+    painel = montar_painel(st.dados if st else None, st.recebido_em if st else None,
+                           datetime.now(UTC))
+    comandos = (
+        await session.execute(
+            select(DenunciaRoboComando).order_by(DenunciaRoboComando.id.desc()).limit(10)
+        )
+    ).scalars().all()
+    painel["comandos"] = [
+        {"id": c.id, "tipo": c.tipo, "dados": c.dados, "pedido_por": c.pedido_por,
+         "pedido_em": c.pedido_em, "entregue_em": c.entregue_em, "ok": c.ok,
+         "resultado": c.resultado,
+         "caducou": c.entregue_em is None and datetime.now(UTC) - c.pedido_em > COMANDO_VALE}
+        for c in comandos
+    ]
+    painel["passos_disponiveis"] = [
+        {"acao": a, "nome": nome, "ordem": ordem} for a, (ordem, nome) in PASSOS.items()
+    ]
+    return painel
+
+
+async def _comando(session: AsyncSession, u: User, tipo: str, dados: dict) -> dict:
+    c = DenunciaRoboComando(tipo=tipo, dados=dados, pedido_por=u.name or u.email)
+    session.add(c)
+    await session.flush()
+    cid = c.id
+    await session.commit()
+    logger.info("denuncia_robo_comando", tipo=tipo, dados=dados, por=u.email)
+    return {"id": cid}
+
+
+@router.post("/robo/automatico")
+async def robo_automatico(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    u: Annotated[User, Depends(_editar)],
+    corpo: Annotated[dict, Body()],
+) -> dict:
+    """Liga/desliga a rotina automática do robô (despertador das 06/12/18h e
+    o ciclo de e-mails de 3 em 3 h). Desligada = só roda o passo pedido."""
+    if not isinstance(corpo.get("ligado"), bool):
+        raise HTTPException(422, detail={"code": "denuncia_robo_ligado_invalido"})
+    return await _comando(session, u, "automatico", {"ligado": corpo["ligado"]})
+
+
+@router.post("/robo/passo")
+async def robo_passo(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    u: Annotated[User, Depends(_editar)],
+    corpo: Annotated[dict, Body()],
+) -> dict:
+    """Pede ao robô um passo da rodada agora (o mesmo que o pedir_tarefa.py
+    --retomar faz no mini)."""
+    acao = corpo.get("acao")
+    if acao not in PASSOS:
+        raise HTTPException(422, detail={"code": "denuncia_robo_passo_invalido", "acao": acao})
+    return await _comando(session, u, "passo", {"acao": acao})
 
 
 _ORDEM_ANUNCIOS = {

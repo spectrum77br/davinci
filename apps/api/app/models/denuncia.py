@@ -22,7 +22,7 @@ from __future__ import annotations
 from datetime import datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import BigInteger, DateTime, Index, Integer, Text, func
+from sqlalchemy import BigInteger, Boolean, DateTime, Index, Integer, Text, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -160,6 +160,24 @@ class DenunciaRoboStatus(Base):
     recebido_em: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+
+
+class DenunciaRoboComando(Base):
+    """Botão da aba Robô: ligar/desligar a rotina automática ou rodar um
+    passo agora. O mini busca os pendentes, executa e marca `entregue_em`."""
+
+    __tablename__ = "denuncia_robo_comandos"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    tipo: Mapped[str] = mapped_column(Text, nullable=False)  # "automatico" | "passo"
+    dados: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    pedido_por: Mapped[str | None] = mapped_column(Text)
+    pedido_em: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    entregue_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    ok: Mapped[bool | None] = mapped_column(Boolean)
+    resultado: Mapped[str | None] = mapped_column(Text)
 
 
 class DenunciaRemetente(Base):

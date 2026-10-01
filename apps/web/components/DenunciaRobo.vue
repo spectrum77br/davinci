@@ -4,8 +4,11 @@
 // O robô do Mac mini da Makisa manda a cada 60 s o estado dele; aqui aparece
 // o que precisa de alguém, o que cada frente faz agora e os passos das
 // rodadas de hoje (06h, 12h, 18h). Regras em services/denuncia_robo.py.
+// Botões (01/10, Vinicius: "disparamos o passo 1, acompanhamos… depois o passo
+// 2" e "um botão para ligar rotinas automáticas e desligar"): o DaVinci grava o
+// comando e a janela do sistema no mini busca a cada 5 s e executa.
 import { computed, onMounted, onUnmounted, ref } from 'vue'
-import { Bot, Globe, Landmark, Mail, Hand, TriangleAlert } from 'lucide-vue-next'
+import { Bot, Globe, Landmark, Mail, Hand, TriangleAlert, Play, Power, Loader2 } from 'lucide-vue-next'
 import { haQuanto, numero } from '~/lib/denuncia'
 
 type Passo = {
@@ -33,6 +36,17 @@ type Frente = {
   presa: boolean
 }
 type Aviso = { titulo: string; detalhe: string; o_que_fazer: string; desde: string | null }
+type Comando = {
+  id: number
+  tipo: 'automatico' | 'passo' | string
+  dados: { ligado?: boolean; acao?: string }
+  pedido_por: string | null
+  pedido_em: string
+  entregue_em: string | null
+  ok: boolean | null
+  resultado: string | null
+  caducou: boolean
+}
 type Painel = {
   modo: 'manual' | 'automatico'
   recebido_em: string | null
@@ -43,6 +57,8 @@ type Painel = {
   avisos: Aviso[]
   rodadas: Rodada[]
   denuncias_hoje: { canal: string; enviadas: number; refeitas: number }[]
+  comandos: Comando[]
+  passos_disponiveis: { acao: string; nome: string; ordem: number }[]
 }
 
 const { api } = useApi()
@@ -68,6 +84,61 @@ onUnmounted(() => {
   if (timer) clearInterval(timer)
 })
 defineExpose({ carregar })
+
+// ── botões ────────────────────────────────────────────────────────────────
+const podeMandar = useCan('denuncia', 'edit')
+const mandando = ref<string | null>(null)
+
+async function mandar(chave: string, url: string, corpo: Record<string, unknown>) {
+  mandando.value = chave
+  try {
+    await api(url, { method: 'POST', body: corpo })
+    await carregar()
+    // o mini pega em até 5 s: relê logo pra mostrar "recebido"
+    setTimeout(carregar, 7000)
+    setTimeout(carregar, 15000)
+  } catch (e: any) {
+    useToasts().push({ kind: 'error', title: 'Não deu para mandar ao robô', lines: e?.data?.detail?.code || e?.message || 'erro' })
+  } finally {
+    mandando.value = null
+  }
+}
+
+function alternarAutomatico() {
+  const ligar = painel.value?.modo === 'manual'
+  const msg = ligar
+    ? 'Ligar a rotina automática? O robô volta a rodar sozinho às 06h, 12h e 18h (checagem 15 min antes) e o ciclo de e-mails a cada 3 h.'
+    : 'Desligar a rotina automática? O robô para de começar rodadas sozinho e só roda o passo que for pedido aqui.'
+  if (!window.confirm(msg)) return
+  void mandar('automatico', '/api/denuncia/robo/automatico', { ligado: ligar })
+}
+
+function rodarPasso(acao: string, nome: string) {
+  if (!window.confirm(`Rodar agora: ${nome}?`)) return
+  void mandar(acao, '/api/denuncia/robo/passo', { acao })
+}
+
+/** Último estado do passo hoje (a rodada mais recente em que ele aparece). */
+function ultimoDoPasso(acao: string): Passo | null {
+  let achado: Passo | null = null
+  for (const r of painel.value?.rodadas || []) {
+    const p = r.passos.find((x) => x.acao === acao)
+    if (p) achado = p
+  }
+  return achado
+}
+
+function pendente(acao: string): boolean {
+  return (painel.value?.comandos || []).some((c) => c.tipo === 'passo' && c.dados.acao === acao && !c.entregue_em && !c.caducou)
+}
+
+const automaticoPendente = computed(() => (painel.value?.comandos || []).some((c) => c.tipo === 'automatico' && !c.entregue_em && !c.caducou))
+
+function nomeComando(c: Comando): string {
+  if (c.tipo === 'automatico') return c.dados.ligado ? 'Ligar a rotina automática' : 'Desligar a rotina automática'
+  const p = painel.value?.passos_disponiveis.find((x) => x.acao === c.dados.acao)
+  return `Rodar: ${p?.nome || c.dados.acao}`
+}
 
 const ICONE: Record<string, any> = { M: Globe, S: Landmark, E: Mail }
 
@@ -144,6 +215,77 @@ const totalHoje = computed(() => (painel.value?.denuncias_hoje || []).reduce((s,
           <template v-if="painel.denuncias_hoje.length"> · {{ numero(totalHoje) }} denúncia(s) enviada(s) hoje</template>
         </span>
       </div>
+
+      <section class="rounded-lg border bg-card">
+        <div class="flex flex-wrap items-center gap-3 px-4 py-3">
+          <Power class="size-4 text-muted-foreground" />
+          <div class="min-w-0 flex-1">
+            <div class="text-sm font-medium">
+              Rotina automática:
+              <span :class="painel.modo === 'manual' ? 'text-muted-foreground' : 'text-emerald-700 dark:text-emerald-400'">
+                {{ painel.modo === 'manual' ? 'desligada (modo manual)' : 'ligada' }}
+              </span>
+            </div>
+            <div class="text-xs text-muted-foreground">
+              <template v-if="painel.modo === 'manual'">O robô só roda o passo que for pedido abaixo.</template>
+              <template v-else>Rodadas às 06h, 12h e 18h (checagem 15 min antes) e ciclo de e-mails a cada 3 h.</template>
+            </div>
+          </div>
+          <Button
+            v-if="podeMandar"
+            size="sm"
+            :variant="painel.modo === 'manual' ? 'default' : 'outline'"
+            :disabled="!!mandando || automaticoPendente"
+            @click="alternarAutomatico"
+          >
+            <Loader2 v-if="mandando === 'automatico' || automaticoPendente" class="mr-1.5 size-4 animate-spin" />
+            {{ painel.modo === 'manual' ? 'Ligar' : 'Desligar' }}
+          </Button>
+        </div>
+        <details v-if="podeMandar" class="border-t" :open="painel.modo === 'manual'">
+          <summary class="cursor-pointer px-4 py-2 text-sm">Rodar um passo agora</summary>
+          <ul class="divide-y border-t">
+            <li v-for="p in painel.passos_disponiveis" :key="p.acao" class="flex items-center gap-2 px-4 py-1.5 text-sm">
+              <span class="w-6 text-right text-xs tabular-nums text-muted-foreground">{{ p.ordem }}</span>
+              <span class="flex-1">{{ p.nome }}</span>
+              <template v-if="ultimoDoPasso(p.acao)">
+                <span class="text-xs" :class="(PASSO[ultimoDoPasso(p.acao)!.status] || ['', 'pill-muted'])[1]">
+                  {{ (PASSO[ultimoDoPasso(p.acao)!.status] || [ultimoDoPasso(p.acao)!.status])[0] }}
+                </span>
+                <span class="w-[86px] text-xs tabular-nums text-muted-foreground">
+                  {{ hora(ultimoDoPasso(p.acao)!.fim || ultimoDoPasso(p.acao)!.inicio) }}
+                </span>
+              </template>
+              <span v-else class="w-[86px] text-xs text-muted-foreground">não rodou hoje</span>
+              <Button
+                size="sm"
+                variant="outline"
+                class="h-7"
+                :disabled="!!mandando || pendente(p.acao) || ['rodando', 'fila'].includes(ultimoDoPasso(p.acao)?.status || '')"
+                @click="rodarPasso(p.acao, p.nome)"
+              >
+                <Loader2 v-if="mandando === p.acao || pendente(p.acao)" class="mr-1 size-3.5 animate-spin" />
+                <Play v-else class="mr-1 size-3.5" /> Rodar agora
+              </Button>
+            </li>
+          </ul>
+        </details>
+        <div v-if="painel.comandos.length" class="border-t px-4 py-2">
+          <div class="mb-1 text-xs font-medium text-muted-foreground">Pedidos ao robô</div>
+          <ul class="space-y-0.5 text-xs">
+            <li v-for="c in painel.comandos.slice(0, 5)" :key="c.id" class="flex flex-wrap gap-x-2">
+              <span class="tabular-nums text-muted-foreground">{{ hora(c.pedido_em) }}</span>
+              <span>{{ nomeComando(c) }}</span>
+              <span class="text-muted-foreground">· {{ c.pedido_por }}</span>
+              <span v-if="c.entregue_em" :class="c.ok ? 'text-emerald-700 dark:text-emerald-400' : 'text-red-700 dark:text-red-400'">
+                · {{ c.ok ? 'Mac mini recebeu' : 'não deu' }} às {{ hora(c.entregue_em) }}<template v-if="c.resultado"> — {{ c.resultado }}</template>
+              </span>
+              <span v-else-if="c.caducou" class="text-red-700 dark:text-red-400">· o Mac mini não pegou em 1 h</span>
+              <span v-else class="text-amber-700 dark:text-amber-400">· aguardando o Mac mini…</span>
+            </li>
+          </ul>
+        </div>
+      </section>
 
       <section
         v-if="painel.precisa.length"

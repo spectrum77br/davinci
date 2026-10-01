@@ -21,7 +21,9 @@ Uma janela faz quatro coisas:
    `status_mac.py` grava em `Fiscalizacao/_cowork/status_ultimo.json` vai pra
    `POST /api/denuncia/sync/robo` — é a aba Robô de Ouvidoria › Denúncia;
 6. (01/10) as provas sob demanda: a cada 5 s pergunta ao DaVinci se alguém
-   clicou numa prova que não está lá e sobe só aquele arquivo.
+   clicou numa prova que não está lá e sobe só aquele arquivo;
+7. (01/10) os botões da aba Robô: a cada 5 s busca os comandos (ligar/desligar
+   a rotina automática, rodar um passo agora), executa e responde.
 Mais o backup diário local do banco em `data/backups` (guarda 30), como fazia
 o `run.py` no servidor.
 
@@ -160,21 +162,33 @@ def robo():
 _provas = {"falhou": {}, "aviso_rede": 0.0}
 
 
-def provas_pedidas():
-    """Prova que alguém abriu no DaVinci e o arquivo não está lá: sobe só ela.
-    Usa o mesmo config/banco/rotas da cópia (enviar_ao_davinci.py)."""
+def _env():
+    """O mesmo config/banco/rotas da cópia (enviar_ao_davinci.py, só biblioteca padrão)."""
     if DAVINCI not in sys.path:
         sys.path.insert(0, DAVINCI)
-    import enviar_ao_davinci as env  # noqa: E402 — só biblioteca padrão
+    import enviar_ao_davinci as env  # noqa: E402
 
-    cfg = env.ler_config()
+    return env
+
+
+def _perguntar(env, cfg, rota):
     try:
-        ids = env.pedir(cfg, "GET", "/api/denuncia/sync/provas-pedidas", timeout=30).get("ids") or []
+        return env.pedir(cfg, "GET", rota, timeout=30)
     except (OSError, RuntimeError) as e:
         if time.time() - _provas["aviso_rede"] > 600:  # sem internet: avisa de 10 em 10 min, não a cada 5 s
-            log("provas: DaVinci não respondeu (%s)" % e)
+            log("DaVinci não respondeu (%s)" % e)
             _provas["aviso_rede"] = time.time()
+        return None
+
+
+def provas_pedidas():
+    """Prova que alguém abriu no DaVinci e o arquivo não está lá: sobe só ela."""
+    env = _env()
+    cfg = env.ler_config()
+    r = _perguntar(env, cfg, "/api/denuncia/sync/provas-pedidas")
+    if r is None:
         return
+    ids = r.get("ids") or []
     ids = [i for i in ids if time.time() - _provas["falhou"].get(i, 0) > 300]
     if not ids:
         return
@@ -200,6 +214,85 @@ def provas_pedidas():
             _provas["falhou"][pid] = time.time()
             continue
         log("provas: %s enviada ao DaVinci (%d KB)" % (pid, len(dados) // 1024))
+
+
+# ordem de cada passo na fila do agente (ORDEM_ACAO do agente_varredura.py)
+ORDEM_PASSO = {"checagem": 0, "ciclo_emails": 1, "varredura_mercadolivre": 2, "varredura_shopee": 3,
+               "varredura_tiktok": 4, "varredura_amazon": 5, "anatel": 6, "conferencia": 6,
+               "compras": 7, "juridico": 8, "relatorio": 9, "capa_perguntas": 10}
+
+
+def _gravar(caminho, texto):
+    tmp = caminho + ".tmp"   # o agente lê _gatilhos/*.json: nunca vê arquivo pela metade
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(texto)
+    os.replace(tmp, caminho)
+
+
+def _automatico(ligado, por):
+    """Liga/desliga a rotina automática: o despertador do agente (06/12/18h) e o
+    ciclo de e-mails de 3 em 3 h (arquivo _varredura_ciclo_off)."""
+    p = os.path.join(ROBO, "despertador.json")
+    with open(p, encoding="utf-8") as f:
+        d = json.load(f)
+    d["ligado"] = ligado
+    d["_mudado_por"] = "DaVinci (%s) em %s" % (por, time.strftime("%d/%m %H:%M"))
+    _gravar(p, json.dumps(d, ensure_ascii=False, indent=1) + "\n")
+    off = os.path.join(ROBO, "_varredura_ciclo_off")
+    if ligado:
+        if os.path.exists(off):
+            os.remove(off)
+    else:
+        _gravar(off, "Modo manual pedido pelo DaVinci (%s) em %s. Apague para voltar ao automático.\n"
+                % (por, time.strftime("%d/%m %H:%M")))
+    return True, "rotina automática %s" % ("ligada" if ligado else "desligada")
+
+
+def _passo(acao, por):
+    """O mesmo gatilho que o pedir_tarefa.py <acao> --retomar grava."""
+    if acao not in ORDEM_PASSO:
+        return False, "passo desconhecido: %s" % acao
+    gat = os.path.join(ROBO, "_gatilhos")
+    for f in sorted(os.listdir(gat)):
+        if not (f.startswith(acao + "_") and f.endswith(".json")) or f.endswith((".feito.json", ".rodando.json", ".erro.json")):
+            continue
+        base = os.path.join(gat, f[:-5])
+        if os.path.exists(base + ".feito.json"):
+            continue
+        if os.path.exists(base + ".rodando.json"):
+            return True, "já está rodando (%s)" % f
+        if time.time() - os.path.getmtime(os.path.join(gat, f)) < 5 * 3600:
+            return True, "já estava na fila (%s)" % f
+    agora = datetime.datetime.now()
+    jan = "%s_%02dh" % (agora.strftime("%Y-%m-%d"), max(h for h in (0, 6, 12, 18) if h <= agora.hour))
+    nome = "%s_%s_r%s.json" % (acao, jan, agora.strftime("%H%M%S"))
+    _gravar(os.path.join(gat, nome), json.dumps({
+        "acao": acao, "ordem": ORDEM_PASSO[acao], "janela": jan, "forcar": True,
+        "origem": "DaVinci (%s)" % por, "pedido_em": agora.isoformat(timespec="seconds")}, ensure_ascii=False))
+    return True, "pedido ao robô (%s)" % nome
+
+
+def comandos():
+    """Botões da aba Robô do DaVinci."""
+    env = _env()
+    cfg = env.ler_config()
+    r = _perguntar(env, cfg, "/api/denuncia/sync/robo/comandos")
+    for c in (r or {}).get("comandos") or []:
+        dados, por = c.get("dados") or {}, c.get("pedido_por") or "?"
+        try:
+            if c.get("tipo") == "automatico":
+                ok, res = _automatico(bool(dados.get("ligado")), por)
+            elif c.get("tipo") == "passo":
+                ok, res = _passo(dados.get("acao"), por)
+            else:
+                ok, res = False, "comando desconhecido: %s" % c.get("tipo")
+        except Exception as e:  # noqa: BLE001
+            ok, res = False, "erro: %s" % e
+        log("comando %s do DaVinci (%s, %s): %s" % (c.get("id"), por, dados, res))
+        env.pedir(cfg, "POST", "/api/denuncia/sync/robo/comandos/%d" % c["id"],
+                  corpo={"ok": ok, "resultado": res}, timeout=30)
+        if c.get("tipo") == "automatico":
+            robo()   # a aba Robô já mostra ligada/desligada, sem esperar o minuto
 
 
 def status_mac():
@@ -235,6 +328,7 @@ def main():
     a_cada(3600, "backup", backup_diario)
     a_cada(60, "robo", robo)
     a_cada(5, "provas", provas_pedidas)
+    a_cada(5, "comandos", comandos)
     threading.Thread(target=status_mac, name="status_mac", daemon=True).start()
 
     from waitress import serve
