@@ -1353,7 +1353,7 @@ const girando = computed(() => carregandoLista.value || tela.carregando.value)
       {{ linhas.length === 1 ? 'já foi emitida' : 'já foram emitidas' }} ({{ fmtBrl(resumo.vEmitidas) }}).
       <template #acoes>
         <Button size="sm" variant="outline" class="text-foreground" @click="tela.irPara('notas')">
-          ver notas enviadas
+          ver notas emitidas
         </Button>
       </template>
     </NfseAviso>

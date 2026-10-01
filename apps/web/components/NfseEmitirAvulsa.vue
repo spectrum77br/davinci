@@ -425,7 +425,7 @@ const textoPendencias = computed(() => listaE(pendenciasEmpresa.value.map((x) =>
 
 const motivoBloqueio = computed<string | null>(() => {
   if (!tela.canEdit.value) return 'Você não tem permissão para emitir.'
-  if (travada.value) return 'Confira esta nota em Notas enviadas antes de emitir outra.'
+  if (travada.value) return 'Confira esta nota em Notas emitidas antes de emitir outra.'
   if (semStatus.value) return MOTIVO_SEM_STATUS
   if (producaoTravada.value) return MOTIVO_PRODUCAO
   if (contaPequena.value) return 'O valor calculado fica abaixo de R$ 0,01.'
@@ -570,7 +570,7 @@ function aoMudar(v: boolean) {
   if (!v) fechar()
 }
 
-// Com nota recusada, fechar não perde nada: ela fica em Notas enviadas.
+// Com nota recusada, fechar não perde nada: ela fica em Notas emitidas.
 const sujo = computed(() => preenchida.value && !emitida.value && !recusada.value)
 
 // O botão "Cancelar" do rodapé pergunta igual ao X da gaveta.
@@ -644,7 +644,7 @@ async function emitir() {
     const seguir = await tela.confirmar({
       tom: 'perigo',
       titulo: 'Emitir uma nota nova?',
-      texto: 'Ela sai como outra nota. A recusada fica em Notas enviadas e não é usada.',
+      texto: 'Ela sai como outra nota. A recusada fica em Notas emitidas e não é usada.',
       linhas: ['Não reenvie a recusada depois: sairiam duas notas do mesmo serviço.'],
       botao: 'Emitir nota nova',
     })
@@ -1067,10 +1067,10 @@ defineExpose(exposto)
         :icone="AlertTriangle"
         titulo="A NFE.io não confirmou esta nota"
       >
-        A nota pode ter saído. Não emita de novo daqui: confira primeiro em Notas enviadas.
+        A nota pode ter saído. Não emita de novo daqui: confira primeiro em Notas emitidas.
         <template #acoes>
           <Button size="sm" variant="outline" class="h-8 px-2.5 text-foreground" @click="verNota">
-            ver em Notas enviadas
+            ver em Notas emitidas
           </Button>
         </template>
       </NfseAviso>
@@ -1093,7 +1093,7 @@ defineExpose(exposto)
               novos, vai uma nota <strong class="font-semibold">nova</strong>.
             </p>
             <p class="font-medium">
-              A recusada fica em Notas enviadas e não deve ser reenviada depois, senão saem duas notas do mesmo
+              A recusada fica em Notas emitidas e não deve ser reenviada depois, senão saem duas notas do mesmo
               serviço.
             </p>
           </template>

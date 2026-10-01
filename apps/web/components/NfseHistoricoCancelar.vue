@@ -272,7 +272,7 @@ async function confirmar() {
     if (e.status === 'cancelando') {
       toasts.info(
         'Cancelamento pedido',
-        'A prefeitura ainda não confirmou. O DaVinci confere sozinho; veja depois em Notas enviadas.',
+        'A prefeitura ainda não confirmou. O DaVinci confere sozinho; veja depois em Notas emitidas.',
       )
       terminar(e)
       return
@@ -392,7 +392,7 @@ function atalho(ev: KeyboardEvent) {
       <NfseAviso v-if="erroGeral" :tom="travado ? 'atencao' : 'perigo'" :titulo="tituloErro">
         {{ erroGeral }}
         <p v-if="travado && !tela.canEdit.value" class="text-xs">
-          Peça a alguém com permissão de edição para atualizar a nota em Notas enviadas.
+          Peça a alguém com permissão de edição para atualizar a nota em Notas emitidas.
         </p>
         <template v-if="travado && tela.canEdit.value" #acoes>
           <Button type="button" size="sm" variant="outline" :disabled="ocupado" @click="conferirAgora">

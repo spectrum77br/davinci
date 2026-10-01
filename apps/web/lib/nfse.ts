@@ -464,7 +464,7 @@ export type NfseApi = {
   // Link direto (<a href>) não leva cabeçalho: PDF e XML descem com a chave.
   abrirPdf(emissaoId: string): Promise<void> // abre em outra aba
   baixarXml(emissaoId: string): Promise<void> // baixa o arquivo
-  // Várias notas de uma vez (30/09, Notas enviadas): o servidor junta os PDFs
+  // Várias notas de uma vez (30/09, Notas emitidas): o servidor junta os PDFs
   // num só (imprimir) ou monta o .zip. Recebe as notas (e não só os ids) para
   // o aviso dizer quais faltaram pelo nº e pela empresa. null = não saiu nada.
   // Chame direto do clique: imprimir abre a aba antes de esperar o servidor.
@@ -697,7 +697,7 @@ export const SITUACOES: Record<EstadoNota, SituacaoInfo> = {
   },
   desconhecido: {
     rotulo: 'Não sabemos se chegou', icone: HelpCircle, tom: 'atencao',
-    explicacao: 'A conexão caiu durante o envio. Confira em Notas enviadas antes de tentar de novo.',
+    explicacao: 'A conexão caiu durante o envio. Confira em Notas emitidas antes de tentar de novo.',
   },
 }
 
@@ -1219,12 +1219,12 @@ export function resultadoDaEmissao(e: Emissao): Pick<ResultadoLote, 'estado' | '
   }
   if (e.status === 'rejeitada') {
     const m = e.erros?.[0]
-    const motivo = m?.o_que_fazer || m?.descricao || e.flow_message || 'veja o motivo em Notas enviadas.'
+    const motivo = m?.o_que_fazer || m?.descricao || e.flow_message || 'veja o motivo em Notas emitidas.'
     return { estado: 'rejeitada', texto: `Recusada: ${motivo}`, erros: e.erros }
   }
   return {
     estado: 'desconhecido',
-    texto: `A nota ficou como "${situacao(e.status).rotulo}". Confira em Notas enviadas.`,
+    texto: `A nota ficou como "${situacao(e.status).rotulo}". Confira em Notas emitidas.`,
     erros: e.erros,
   }
 }

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-// Aba "Notas enviadas": todas as notas que já foram para a NFE.io, com o
+// Aba "Notas emitidas": todas as notas que já foram para a NFE.io, com o
 // resumo que filtra (emitidas, para resolver, canceladas), busca, mês,
 // empresa e ambiente (teste × produção). Cada linha tem UMA ação principal
 // (PDF, atualizar, reenviar) + menu ⋯ (NfseAcoesNota) e o clique na linha abre
@@ -529,7 +529,7 @@ function motivoRecusa(l: Emissao): string {
     <EmptyState
       v-else-if="carregou && !linhas.length && !temFiltro"
       :icon="FileText"
-      title="Nenhuma nota enviada ainda"
+      title="Nenhuma nota emitida ainda"
       description="Quando você emitir, as notas aparecem aqui com PDF, XML e a resposta da prefeitura."
     >
       <div class="flex flex-wrap justify-center gap-2">

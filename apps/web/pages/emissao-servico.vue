@@ -22,7 +22,7 @@
 //
 // 30/09/2026 (Eduardo: "aumente o tempo de acesso para 30 min"): a chave desta
 // página vale 30 minutos (Empresas e Valuation continuam 15). Na mesma leva:
-// imprimir e baixar notas em lote (Notas enviadas) e o e-mail da nota passou a
+// imprimir e baixar notas em lote (Notas emitidas) e o e-mail da nota passou a
 // ser só MANUAL, mandado pelo DaVinci (a NFE.io não recebe mais o e-mail do tomador).
 import { computed, onBeforeUnmount, onMounted, provide, ref, unref, watch, type Ref } from 'vue'
 import { onBeforeRouteLeave, type LocationQuery, type LocationQueryRaw } from 'vue-router'
@@ -221,7 +221,7 @@ async function baixarXml(id: string): Promise<void> {
 }
 
 // --- Notas em lote (30/09) -----------------------------------------------------
-// Imprimir e baixar várias notas de uma vez (aba Notas enviadas e fim do
+// Imprimir e baixar várias notas de uma vez (aba Notas emitidas e fim do
 // assistente de emissão). A NFE.io não tem download em lote: o servidor busca
 // nota por nota e devolve UM arquivo — o PDF juntado (imprimir) ou o .zip com
 // uma pasta por empresa (o nº da nota é por empresa: ATV nº 4 e Rocha nº 4 não
@@ -292,7 +292,7 @@ function idsDoLote(notas: NotaDoLote[]): string[] {
   return [...new Set(notas.map((n) => n.id))]
 }
 
-// Um lote por vez (a aba Notas enviadas e o fim do assistente usam o mesmo).
+// Um lote por vez (a aba Notas emitidas e o fim do assistente usam o mesmo).
 function avisarOcupado() {
   toasts.info('Espere terminar o que está descendo', 'Um lote de notas por vez.')
 }
@@ -303,7 +303,7 @@ function demaisNoLote(ids: string[]): boolean {
   if (ids.length <= MAX_LOTE_ARQUIVOS) return false
   toasts.warning(
     `No máximo ${MAX_LOTE_ARQUIVOS} notas por vez`,
-    `São ${ids.length}. Vá por partes: filtre por mês ou empresa na aba Notas enviadas.`,
+    `São ${ids.length}. Vá por partes: filtre por mês ou empresa na aba Notas emitidas.`,
   )
   return true
 }
@@ -750,7 +750,7 @@ async function excluirModelo(m: Modelo): Promise<boolean> {
     await apiN(`/api/nfse/modelos/${m.id}`, { method: 'DELETE' })
     await recarregar()
     if (modelos.value.some((x) => x.id === m.id)) {
-      toasts.info('A nota fixa já tinha nota: ficou desativada', 'O que já saiu continua em Notas enviadas.')
+      toasts.info('A nota fixa já tinha nota: ficou desativada', 'O que já saiu continua em Notas emitidas.')
     } else {
       toasts.success('Nota fixa excluída')
     }
@@ -832,7 +832,7 @@ const opcoesAbas = computed(() => [
   },
   {
     id: 'notas',
-    rotulo: 'Notas enviadas',
+    rotulo: 'Notas emitidas',
     icone: FileText,
     contador: contadorNotas.value,
     tomContador: 'atencao' as const,

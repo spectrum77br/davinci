@@ -1,5 +1,5 @@
 <script setup lang="ts">
-// Regra ÚNICA de botões por situação da nota (Notas enviadas, avulsas do mês):
+// Regra ÚNICA de botões por situação da nota (Notas emitidas, avulsas do mês):
 // um botão principal com texto + menu ⋯ com o resto. Chama sozinho
 // tela.conferir ("atualizar da NFE.io") / reenviar / cancelar / enviarEmail e
 // emite `atualizada` com o retorno.

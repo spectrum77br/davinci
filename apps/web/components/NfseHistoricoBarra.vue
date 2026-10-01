@@ -1,5 +1,5 @@
 <script setup lang="ts">
-// Barra fixa de ação da aba "Notas enviadas" (30/09/2026): quantas notas
+// Barra fixa de ação da aba "Notas emitidas" (30/09/2026): quantas notas
 // estão marcadas, quanto somam, quantas são canceladas ou de teste, e os
 // botões de lote — imprimir (um PDF só, com todas), baixar os PDFs ou os XMLs
 // (.zip, uma pasta por empresa). Mesmo visual da barra do "Emitir do mês"

@@ -220,7 +220,7 @@ function linhasResumo(): { curto: string; longo: string }[] {
     const t = `${c.processando} na prefeitura`
     out.push({
       curto: t,
-      longo: `${t}: a prefeitura ainda não respondeu. O DaVinci confere sozinho a cada 2 minutos; veja depois em Notas enviadas.`,
+      longo: `${t}: a prefeitura ainda não respondeu. O DaVinci confere sozinho a cada 2 minutos; veja depois em Notas emitidas.`,
     })
   }
   if (c.rejeitada) {
@@ -233,7 +233,7 @@ function linhasResumo(): { curto: string; longo: string }[] {
   }
   if (c.desconhecido) {
     const t = `${c.desconhecido} sem confirmação`
-    out.push({ curto: t, longo: `${t} (a conexão caiu): confira em Notas enviadas antes de tentar de novo.` })
+    out.push({ curto: t, longo: `${t} (a conexão caiu): confira em Notas emitidas antes de tentar de novo.` })
   }
   if (c.nao_enviada) {
     const t = plural(c.nao_enviada, 'não enviada', 'não enviadas')
@@ -592,7 +592,7 @@ async function comecar() {
     } catch (err) {
       const c = codigoErro(err)
       if (c === 'ja_emitida') {
-        naoEnviada(it, 'erro', 'Já existe nota desta nota fixa neste mês: confira em Notas enviadas.', { codigo: c })
+        naoEnviada(it, 'erro', 'Já existe nota desta nota fixa neste mês: confira em Notas emitidas.', { codigo: c })
       } else if (c === 'nfse_locked') {
         semSenhaAgora =
           'Não enviada: a senha desta página venceu (30 minutos). Feche esta janela, digite a senha de novo e envie as que faltaram.'
@@ -607,7 +607,7 @@ async function comecar() {
       } else if (falhaDeRede(err)) {
         marcar(it, {
           estado: 'desconhecido',
-          texto: 'Não sabemos se chegou (a conexão caiu). Confira em Notas enviadas antes de tentar de novo.',
+          texto: 'Não sabemos se chegou (a conexão caiu). Confira em Notas emitidas antes de tentar de novo.',
         })
       } else {
         naoEnviada(it, 'erro', erroApi(err), { problemas: problemasApi(err), codigo: c })
@@ -695,7 +695,7 @@ const paraImprimir = computed<Emissao[]>(() =>
 )
 
 // No máximo 100 por vez (o servidor recusa mais): acima disso o botão fica
-// desligado e a dica manda imprimir por partes na aba Notas enviadas.
+// desligado e a dica manda imprimir por partes na aba Notas emitidas.
 const demaisParaImprimir = computed(() => paraImprimir.value.length > MAX_LOTE_ARQUIVOS)
 
 // Direto do clique: a aba de impressão abre antes de esperar o servidor.
@@ -920,7 +920,7 @@ defineExpose(exposto)
           A NFE.io já recebeu e está esperando a prefeitura autorizar. Conferimos de novo a cada 4 segundos
           <span class="tabular-nums">(mais {{ segundosRestantes }} s)</span>.
         </p>
-        <p class="text-xs">Pode fechar: o DaVinci continua conferindo sozinho e a nota aparece em Notas enviadas.</p>
+        <p class="text-xs">Pode fechar: o DaVinci continua conferindo sozinho e a nota aparece em Notas emitidas.</p>
       </NfseAviso>
 
       <NfseAviso v-else :tom="resumoFim.tom" :titulo="resumoFim.titulo">
@@ -1036,7 +1036,7 @@ defineExpose(exposto)
           v-if="paraImprimir.length > 1"
           :texto="
             demaisParaImprimir
-              ? `São ${paraImprimir.length} notas e o máximo é ${MAX_LOTE_ARQUIVOS} por vez: imprima por partes na aba Notas enviadas (filtre por mês ou empresa).`
+              ? `São ${paraImprimir.length} notas e o máximo é ${MAX_LOTE_ARQUIVOS} por vez: imprima por partes na aba Notas emitidas (filtre por mês ou empresa).`
               : null
           "
         >
@@ -1054,7 +1054,7 @@ defineExpose(exposto)
             </Button>
           </span>
         </NfseDica>
-        <Button variant="outline" size="sm" @click="verNotasEnviadas">ver notas enviadas</Button>
+        <Button variant="outline" size="sm" @click="verNotasEnviadas">ver notas emitidas</Button>
         <Button size="sm" data-foco-lote @click="fechar">Fechar</Button>
       </template>
     </template>

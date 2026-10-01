@@ -106,7 +106,7 @@ async function desativar(t: Tomador) {
   const ok = await tela.confirmar({
     tom: 'perigo',
     titulo: `Desativar o tomador ${nome(t)}?`,
-    texto: 'Ele some das listas de escolha. As notas que já saíram continuam em Notas enviadas.',
+    texto: 'Ele some das listas de escolha. As notas que já saíram continuam em Notas emitidas.',
     linhas: uso.length
       ? [
           `Está em ${plural(uso.length, 'nota fixa ativa', 'notas fixas ativas')}: ${uso.map((m) => m.nome).join(', ')}. Troque o tomador nelas ou desative-as também.`,
