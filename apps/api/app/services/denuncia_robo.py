@@ -49,7 +49,7 @@ PASSOS: dict[str, tuple[int, str, str, str]] = {
                  "confere logins, AdsPower, captcha, Safari e Tuta — não muda nada"),
     "ciclo_emails": (1, "E-mails das plataformas", "escritório",
                      "aplica nas denúncias as respostas que as plataformas mandaram"),
-    # 01/10 (Vinicius): nos passos 2 a 5 o robô denuncia no marketplace só o "Nosso", pela
+    # 01/10 (Vinicius): nos passos 2 a 6 o robô denuncia no marketplace só o "Nosso", pela
     # conta da MAKISA (config.json → denunciar_nas_lojas no mini); o "Diversos" só é salvo.
     "varredura_mercadolivre": (2, "Mercado Livre", "perfil 50",
                                "procura anúncios novos, salva e denuncia só o Nosso"),
@@ -59,7 +59,7 @@ PASSOS: dict[str, tuple[int, str, str, str]] = {
                          "procura no site, salva e denuncia só o Nosso (app no celular)"),
     "varredura_amazon": (5, "Amazon", "perfil 50", "procura e registra (ainda não denuncia)"),
     "conferencia": (6, 'Conferência e "saiu do ar?"', "perfil 50",
-                    "print no ato, resultados da Shopee, refação e quem saiu do ar"),
+                    "print no ato, resultados da Shopee, reenvio das recusadas do Nosso e quem saiu do ar"),
     "anatel": (7, "Anatel / SEI", "Safari",
                "lê o andamento das antigas e peticiona as novas no SEI"),
     "compras": (8, "Compras de prova", "perfil 50", "atualiza os pedidos da conta compradora"),
