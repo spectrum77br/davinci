@@ -47,8 +47,9 @@ NUCLEO = {
 PASSOS: dict[str, tuple[int, str, str, str]] = {
     "checagem": (0, "Checagem antes da rodada", "perfil 50 + Safari",
                  "confere logins, AdsPower, captcha, Safari e Tuta — não muda nada"),
-    "ciclo_emails": (1, "E-mails das plataformas", "escritório",
-                     "aplica nas denúncias as respostas que as plataformas mandaram"),
+    # 01/10: o robô lê o Tuta sozinho (o leitor do Claude do mini parou em 17/09).
+    "ciclo_emails": (1, "E-mails das plataformas", "escritório + Tuta",
+                     "lê no Tuta as respostas das plataformas e aplica nas denúncias"),
     # 01/10 (Vinicius): nos passos 2 a 6 o robô denuncia no marketplace só o "Nosso", pela
     # conta da MAKISA (config.json → denunciar_nas_lojas no mini); o "Diversos" só é salvo.
     "varredura_mercadolivre": (2, "Mercado Livre", "perfil 50",
