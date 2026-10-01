@@ -24,7 +24,7 @@
 // página vale 30 minutos (Empresas e Valuation continuam 15). Na mesma leva:
 // imprimir e baixar notas em lote (Notas enviadas) e o e-mail da nota passou a
 // ser só MANUAL, mandado pelo DaVinci (a NFE.io não recebe mais o e-mail do tomador).
-import { computed, onBeforeUnmount, onMounted, provide, ref, watch, type Ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, provide, ref, unref, watch, type Ref } from 'vue'
 import { onBeforeRouteLeave, type LocationQuery, type LocationQueryRaw } from 'vue-router'
 import { TooltipProvider } from 'reka-ui'
 import {
@@ -555,6 +555,27 @@ function recarregar(): Promise<void> {
   return proxima
 }
 
+// Botão "atualizar" do topo (01/10/2026, Eduardo: "quando clique no botão de
+// atualizar, ele atualize tudo também"): antes de reler o DaVinci, relê da
+// NFE.io todas as empresas ligadas (certificado trocado lá só aparecia no
+// "Atualizar" de dentro da empresa). Só GET lá; quem não edita só recarrega.
+// Se a NFE.io não responder, avisa e mostra o que já estava guardado.
+const relendoNfeio = ref(false)
+
+async function atualizarTudo(): Promise<void> {
+  if (unref(canEdit) && !relendoNfeio.value) {
+    relendoNfeio.value = true
+    try {
+      await apiN('/api/nfse/nfeio/atualizar-ligadas', { method: 'POST' })
+    } catch (e) {
+      if (!trava.eTravamento(e)) toasts.warning('Não deu para reler a NFE.io agora', erroApi(e))
+    } finally {
+      relendoNfeio.value = false
+    }
+  }
+  await recarregar()
+}
+
 // Voltou para esta aba do navegador. Os links "Cadastros › Empresas" abrem a
 // ficha da empresa em OUTRA aba (ex.: para cadastrar a % da empresa) e a tela lia as empresas uma vez só: ao voltar, a gaveta da
 // nota fixa continuava "sem % padrão" e o Emitir mandava a % antiga. Relê as
@@ -975,9 +996,15 @@ onBeforeRouteLeave(() => {
               {{ seloServidor.texto }}
             </span>
           </NfseDica>
-          <Button size="sm" variant="outline" :disabled="carregando" @click="recarregar()">
-            <RotateCcw class="mr-1.5 size-4" :class="carregando && 'animate-spin'" aria-hidden="true" />
-            atualizar
+          <Button
+            size="sm"
+            variant="outline"
+            :disabled="carregando || relendoNfeio"
+            :title="canEdit ? 'relê da NFE.io todas as empresas ligadas e recarrega a tela' : 'recarrega a tela'"
+            @click="atualizarTudo()"
+          >
+            <RotateCcw class="mr-1.5 size-4" :class="(carregando || relendoNfeio) && 'animate-spin'" aria-hidden="true" />
+            {{ relendoNfeio ? 'relendo a NFE.io…' : 'atualizar' }}
           </Button>
           <Button v-if="canEdit" size="sm" variant="outline" @click="abrirAvulsa({ competencia: mes })">
             <FilePlus2 class="mr-1.5 size-4" aria-hidden="true" />

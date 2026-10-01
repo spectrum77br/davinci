@@ -276,6 +276,20 @@ async def atualizar_nfeio(
     return await _prestador(session, company_id)
 
 
+@router.post("/nfeio/atualizar-ligadas")
+async def atualizar_ligadas_nfeio(session: Sess, _u: Annotated[User, Depends(_edit)]) -> dict:
+    """Relê da NFE.io TODAS as empresas ligadas (ambiente, situação, certificado,
+    inscrição) — o mesmo do worker diário. Só GET. 01/10/2026 (Eduardo: "quando
+    clique no botão de atualizar, ele atualize tudo também"): o "atualizar" do
+    topo só relia o DaVinci; certificado trocado na NFE.io só aparecia no
+    "Atualizar" de dentro da empresa."""
+    async with _nfeio() as cli:
+        try:
+            return await svc_empresas.atualizar_ligadas(session, cli)
+        except svc.NfseError as e:
+            raise _http(e) from e
+
+
 @router.post("/nfeio/sincronizar")
 async def sincronizar_nfeio(session: Sess, _a: Annotated[User, Depends(require_admin)]) -> dict:
     """Casa as empresas da conta NFE.io com as do DaVinci pelo CNPJ. Só GET."""

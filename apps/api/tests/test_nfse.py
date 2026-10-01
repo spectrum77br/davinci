@@ -813,6 +813,35 @@ async def test_sincronizar_casa_pelo_cnpj_e_nunca_guarda_a_senha_da_prefeitura(
 
 
 @pytest.mark.asyncio
+async def test_atualizar_do_topo_rele_o_certificado_de_todas_as_ligadas(
+    client: AsyncClient,
+    db: AsyncSession,
+    operador: User,
+    auth_as: Callable[[User | None], None],
+):
+    # 01/10/2026 (Eduardo): trocou o certificado vencido na NFE.io e o "atualizar"
+    # do topo não mudava nada — só o "Atualizar" de dentro da empresa relia.
+    prest = Company(razao_social="EMPRESA TESTE LTDA", apelido="teste", cnpj=CNPJ_PREST)
+    db.add(prest)
+    await db.flush()
+    f = svc_empresas.novo_fiscal(prest.id)
+    f.nfeio_company_id = CID
+    f.nfeio_cert_status = "Overdue"
+    f.nfeio_cert_expira = date(2026, 8, 1)
+    db.add(f)
+    await db.commit()
+    auth_as(operador)
+    novo = {"status": "Active", "expiresOn": "2027-07-27T19:29:00+00:00"}
+    with respx.mock(assert_all_mocked=True, assert_all_called=False) as api:
+        _mock_empresas(api, [_empresa_nfeio(certificate=novo)])
+        r = await client.post("/api/nfse/nfeio/atualizar-ligadas")
+    assert r.status_code == 200, r.text
+    assert r.json()["atualizadas"] == 1
+    await db.refresh(f)
+    assert f.nfeio_cert_status == "Active" and f.nfeio_cert_expira == date(2027, 7, 27)
+
+
+@pytest.mark.asyncio
 async def test_ligar_pelo_link_colado_e_pelo_cnpj(
     client: AsyncClient,
     db: AsyncSession,
@@ -937,6 +966,7 @@ async def test_sem_permissao_nao_ve_nem_emite(
     )
     assert r.status_code == 403
     assert (await client.post("/api/nfse/nfeio/sincronizar")).status_code == 403
+    assert (await client.post("/api/nfse/nfeio/atualizar-ligadas")).status_code == 403
 
 
 # --- regras nossas que ficaram: percentual, Receita, municípios -----------------------
