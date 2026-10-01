@@ -41,6 +41,7 @@ from app.models.denuncia import (
     DenunciaLoja,
     DenunciaProva,
     DenunciaRemetente,
+    DenunciaRoboStatus,
     DenunciaVerificacao,
 )
 from app.models.devolucao_anexo import DevolucaoAnexo
@@ -282,6 +283,7 @@ __all__ = [
     "DenunciaLoja",
     "DenunciaProva",
     "DenunciaRemetente",
+    "DenunciaRoboStatus",
     "DenunciaVerificacao",
     "DevolucaoAnexo",
     "DevolucaoMensagemComprador",

@@ -16,6 +16,7 @@ H = {"Authorization": f"Bearer {TOKEN}"}
 _TABELAS = (
     "denuncia_anuncios", "denuncia_lojas", "denuncia_denuncias", "denuncia_casos",
     "denuncia_compras", "denuncia_provas", "denuncia_verificacoes", "denuncia_remetentes",
+    "denuncia_robo_status",
 )
 
 
@@ -245,3 +246,121 @@ async def test_pulso_marca_contato_sem_mandar_nada(client, db):
     db.expire_all()
     assert (await db.execute(text("SELECT ultimo_envio_em FROM denuncia_remetentes"))).scalar() is not None
     assert (await client.post("/api/denuncia/sync/pulso")).status_code == 401
+
+
+# ───────────────────────────────── aba Robô (01/10/2026)
+
+
+def _tarefa(acao, janela, status, **kw):
+    pedido = kw.pop("pedido_em", f"{janela[:10]}T{janela[11:13]}:00:00-03:00")
+    return {
+        # no mini a chave é o nome do gatilho: a retomada (_r1220) tem outra
+        "chave": f"tarefa_{acao}_{janela}_r{pedido[11:13]}{pedido[14:16]}",
+        "estado": "erro" if status == "erro" else "ok", "detalhe": "", "o_que_fazer": "",
+        "dados": {"acao": acao, "nome": acao, "janela": janela, "status": status,
+                  "pedido_em": pedido, **kw},
+    }
+
+
+def _resumo(*tarefas, **itens):
+    base = [
+        {"chave": "agente", "estado": "ok", "detalhe": "v20 no ar", "o_que_fazer": "",
+         "dados": {"versao": "20", "desde": "2026-10-01T10:13:56-03:00"}},
+        {"chave": "fila_M", "estado": "ok", "detalhe": "rodando: Mercado Livre", "o_que_fazer": "",
+         "dados": {"rodando": {"acao": "varredura_mercadolivre", "nome": "Mercado Livre",
+                               "desde": "2026-10-01T12:07:00-03:00",
+                               "progresso": "denunciando 3 de 9"},
+                   "proximos": [{"acao": "varredura_shopee", "nome": "Shopee"}], "n_proximos": 1}},
+        *({"chave": f"fila_{f}", "estado": "ok", "detalhe": "livre", "o_que_fazer": "",
+           "dados": {"rodando": None}} for f in ("S", "E")),
+        *tarefas,
+    ]
+    for k, v in itens.items():
+        base.append({"chave": k, **v})
+    return {"quando": "2026-10-01T12:30:00-03:00", "itens": base}
+
+
+def test_painel_rodadas_frentes_e_alarme():
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from app.services.denuncia_robo import montar_painel
+
+    br = ZoneInfo("America/Sao_Paulo")
+    agora = datetime(2026, 10, 1, 12, 30, tzinfo=br)
+    j = "2026-10-01_12h"
+    resumo = _resumo(
+        _tarefa("checagem", j, "concluida", pedido_em="2026-10-01T11:45:00-03:00"),
+        _tarefa("varredura_mercadolivre", j, "rodando", progresso="denunciando 3 de 9"),
+        _tarefa("varredura_shopee", j, "erro", pedido_em="2026-10-01T12:00:00-03:00",
+                erro="captcha"),
+        _tarefa("varredura_shopee", j, "fila", pedido_em="2026-10-01T12:20:00-03:00"),
+        sei_assinatura={"estado": "atencao", "detalhe": "loja X aguardando assinatura desde 12:10",
+                        "o_que_fazer": "Assinar no Safari", "dados": {}},
+        problemas={"estado": "erro", "detalhe": "", "o_que_fazer": "", "dados": {"lista": [
+            {"quando": "2026-10-01 12:05", "tarefa": "código do sei", "problema": "não chegou",
+             "pergunta": "encaminhar o e-mail", "bloqueia": True},
+            {"quando": "2026-10-01 11:00", "tarefa": "ML 429", "problema": "limite",
+             "pergunta": "nada", "bloqueia": False},
+        ]}},
+    )
+    # 06h: só e-mails e conferência (rodam pelo relógio do robô) — não é rodada
+    resumo["itens"].append(_tarefa("ciclo_emails", "2026-10-01_06h", "concluida"))
+    p = montar_painel(resumo, agora, agora)
+
+    assert p["conectado"] is True and p["agente"]["versao"] == "20"
+    r6, r12, r18 = p["rodadas"]
+    assert r6["estado"] == "nao_comecou" and r18["estado"] == "futura"
+    assert [x["acao"] for x in r6["passos"]] == ["ciclo_emails"]
+    assert r12["estado"] == "rodando"
+    acoes = [x["acao"] for x in r12["passos"]]
+    assert acoes == ["checagem", "varredura_mercadolivre", "varredura_shopee"]
+    shopee = r12["passos"][2]
+    assert shopee["status"] == "fila" and shopee["tentativas"] == 2  # vale a retomada mais nova
+
+    m = next(f for f in p["frentes"] if f["fila"] == "M")
+    assert m["fazendo"] == "Mercado Livre" and m["progresso"] == "denunciando 3 de 9"
+    assert m["proximos"] == ["Shopee"]
+
+    titulos = [x["titulo"] for x in p["precisa"]]
+    assert "SEI esperando a assinatura da titular" in titulos
+    assert "código do sei" in titulos
+    assert "A rodada das 06h não começou" in titulos
+    assert [x["titulo"] for x in p["avisos"]] == ["ML 429"]
+
+
+def test_painel_mini_sem_noticia_e_nunca():
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+
+    from app.services.denuncia_robo import montar_painel
+
+    agora = datetime(2026, 10, 1, 9, 0, tzinfo=ZoneInfo("America/Sao_Paulo"))
+    p = montar_painel(_resumo(), agora - timedelta(minutes=12), agora)
+    assert p["conectado"] is False
+    assert p["precisa"][0]["titulo"] == "O Mac mini não dá notícia há 12 min"
+    p = montar_painel(None, None, agora)
+    assert p["precisa"][0]["titulo"] == "O Mac mini nunca mandou o estado do robô"
+    assert [r["estado"] for r in p["rodadas"]] == ["nao_comecou", "futura", "futura"]
+
+
+async def test_robo_sync_e_tela(client, make_user, auth_as):
+    assert (await client.post("/api/denuncia/sync/robo", json=_resumo())).status_code == 401
+    r = await client.post("/api/denuncia/sync/robo", json={"itens": "x"}, headers=H)
+    assert r.status_code == 422
+    r = await client.post("/api/denuncia/sync/robo", json=_resumo(), headers=H)
+    assert r.status_code == 200, r.text
+    # o segundo resumo substitui o primeiro (uma linha por remetente)
+    r = await client.post("/api/denuncia/sync/robo",
+                          json=_resumo(agente={"estado": "erro", "detalhe": "agente parado",
+                                               "o_que_fazer": "Abrir o 6", "dados": {}}),
+                          headers=H)
+    assert r.status_code == 200, r.text
+
+    auth_as(await make_user(permissions={}))
+    assert (await client.get("/api/denuncia/robo")).status_code == 403
+    auth_as(await make_user(permissions={"denuncia": {"view": True}}))
+    j = (await client.get("/api/denuncia/robo")).json()
+    assert j["conectado"] is True
+    assert len(j["rodadas"]) == 3 and len(j["frentes"]) == 3
+    assert any(x["titulo"] == "Robô parado" for x in j["precisa"])

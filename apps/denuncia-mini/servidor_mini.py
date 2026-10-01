@@ -16,7 +16,10 @@ Uma janela faz quatro coisas:
 3. as provas e o backup do banco pro MEGA a cada 2 min (`app/mega_sync.py`),
    quando o MEGAcmd estiver instalado e logado na conta da empresa;
 4. o `status_mac.py` do robô (painel Operação/Status), que antes era um
-   LaunchAgent e parou de poder ler a pasta.
+   LaunchAgent e parou de poder ler a pasta;
+5. (01/10) o estado do robô pro DaVinci a cada 60 s: o resumo que o
+   `status_mac.py` grava em `Fiscalizacao/_cowork/status_ultimo.json` vai pra
+   `POST /api/denuncia/sync/robo` — é a aba Robô de Ouvidoria › Denúncia.
 Mais o backup diário local do banco em `data/backups` (guarda 30), como fazia
 o `run.py` no servidor.
 
@@ -26,6 +29,7 @@ Rodar: `.venv/bin/python` do sistema (tem Flask/Waitress):
 
 import datetime
 import glob
+import json
 import os
 import socket
 import sqlite3
@@ -33,6 +37,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.request
 
 ECOMERCE = os.path.expanduser("~/Desktop/Denuncias/Ecomerce")
 SISTEMA = os.path.join(ECOMERCE, "fiscalizacao-sistema")
@@ -113,6 +118,34 @@ def backup_diario():
     log("backup local: %s" % os.path.basename(nome))
 
 
+_robo = {"enviado": None}
+
+
+def robo():
+    """Manda pro DaVinci o último resumo do status_mac.py, se mudou."""
+    caminho = os.path.join(ROBO, "_cowork", "status_ultimo.json")
+    if not os.path.exists(caminho):
+        return
+    marca = os.path.getmtime(caminho)
+    if marca == _robo["enviado"]:
+        return  # status_mac.py parado: o DaVinci acusa "sem notícia" sozinho
+    with open(caminho, encoding="utf-8") as f:
+        resumo = json.load(f)
+    with open(os.path.expanduser("~/.davinci_denuncia.json")) as f:
+        cfg = json.load(f)
+    corpo = {"quando": resumo.get("quando"), "itens": resumo.get("itens") or []}
+    req = urllib.request.Request(
+        cfg["url"].rstrip("/") + "/api/denuncia/sync/robo",
+        data=json.dumps(corpo, ensure_ascii=False).encode("utf-8"),
+        method="POST",
+        headers={"Authorization": "Bearer " + cfg["token"], "Content-Type": "application/json",
+                 "User-Agent": "denuncia-mini/1"},
+    )
+    with urllib.request.urlopen(req, timeout=30) as r:
+        r.read()
+    _robo["enviado"] = marca
+
+
 def status_mac():
     """Mantém o status_mac.py do robô vivo (ele mesmo roda em laço)."""
     py = "/usr/local/bin/python3" if os.path.exists("/usr/local/bin/python3") else "/usr/bin/python3"
@@ -144,6 +177,7 @@ def main():
     a_cada(300, "davinci", davinci)
     a_cada(120, "mega", mega)
     a_cada(3600, "backup", backup_diario)
+    a_cada(60, "robo", robo)
     threading.Thread(target=status_mac, name="status_mac", daemon=True).start()
 
     from waitress import serve

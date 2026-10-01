@@ -45,9 +45,11 @@ from app.models.denuncia import (
     DenunciaLoja,
     DenunciaProva,
     DenunciaRemetente,
+    DenunciaRoboStatus,
     DenunciaVerificacao,
 )
 from app.models.user import User
+from app.services.denuncia_robo import montar_painel
 
 logger = structlog.get_logger()
 
@@ -60,6 +62,8 @@ _ver = require_permission("denuncia", "view")
 PASTA_PROVAS = "denuncia/provas"
 # Um lote do sync: o mini manda de 500 em 500.
 MAX_LINHAS_LOTE = 2000
+# Resumo do robô: hoje ~30 itens (um por tarefa do dia + contas); folga larga.
+MAX_ITENS_ROBO = 1000
 # Grupos que a lista de anúncios esconde por padrão (igual ao sistema do mini).
 GRUPOS_ESCONDIDOS = ("DESCARTADO", "FORA DE ESCOPO")
 
@@ -204,7 +208,31 @@ async def sync_pulso(
     return {"ok": True}
 
 
-# Rota genérica por último: `/pulso` acima não pode cair aqui.
+@sync_router.post("/robo")
+async def sync_robo(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    remetente: Annotated[DenunciaRemetente, Depends(_remetente)],
+    corpo: Annotated[dict, Body()],
+) -> dict:
+    """O resumo do robô (`status_mac.py`, a cada 60 s) — a aba Robô. Guarda
+    só o último, por remetente."""
+    itens = corpo.get("itens")
+    if not isinstance(itens, list) or len(itens) > MAX_ITENS_ROBO:
+        raise HTTPException(422, detail={"code": "denuncia_robo_corpo_invalido"})
+    stmt = pg_insert(DenunciaRoboStatus).values(
+        remetente=remetente.nome, dados=corpo, recebido_em=datetime.now(UTC)
+    )
+    await session.execute(
+        stmt.on_conflict_do_update(
+            index_elements=["remetente"],
+            set_={"dados": stmt.excluded.dados, "recebido_em": stmt.excluded.recebido_em},
+        )
+    )
+    await session.commit()
+    return {"ok": True}
+
+
+# Rota genérica por último: `/pulso` e `/robo` acima não podem cair aqui.
 @sync_router.post("/{tabela}")
 async def sync_tabela(
     tabela: str,
@@ -391,6 +419,23 @@ async def resumo(
         )
     ).scalar() or 0
     return {"ultimo_envio_em": ultimo, **contagens}
+
+
+@router.get("/robo")
+async def robo(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(_ver)],
+) -> dict:
+    """Aba Robô: em que passo a rodada está, o que cada frente faz agora e o
+    que precisa de alguém (regras em `services/denuncia_robo.py`)."""
+    st = (
+        await session.execute(
+            select(DenunciaRoboStatus).order_by(DenunciaRoboStatus.recebido_em.desc()).limit(1)
+        )
+    ).scalar_one_or_none()
+    if st is None:
+        return montar_painel(None, None, datetime.now(UTC))
+    return montar_painel(st.dados, st.recebido_em, datetime.now(UTC))
 
 
 _ORDEM_ANUNCIOS = {

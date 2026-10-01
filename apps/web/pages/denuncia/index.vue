@@ -6,12 +6,13 @@
 // Jurídico. As três primeiras são a cópia (só leitura) que o mini manda a cada
 // 5 min; o Jurídico é a lista de chamados encaminhados ao jurídico, que saiu da
 // tela de Chamados e mora aqui (precisa também da permissão de Chamados).
+// Robô (01/10): em que passo a rodada do robô do mini está e o que precisa de alguém.
 import { computed, ref, watch } from 'vue'
-import { ScanSearch, Flag, Briefcase, Scale, RefreshCw } from 'lucide-vue-next'
+import { ScanSearch, Flag, Briefcase, Scale, RefreshCw, Bot } from 'lucide-vue-next'
 
 definePageMeta({ middleware: ['permission'], permission: { resource: 'denuncia', action: 'view' } })
 
-type Aba = 'anuncios' | 'denuncias' | 'casos' | 'juridico'
+type Aba = 'anuncios' | 'denuncias' | 'casos' | 'juridico' | 'robo'
 
 const route = useRoute()
 const router = useRouter()
@@ -22,6 +23,7 @@ const ABAS = computed(() => [
   { key: 'denuncias' as Aba, label: 'Denúncias', icon: Flag },
   { key: 'casos' as Aba, label: 'Casos', icon: Briefcase },
   ...(podeJuridico.value ? [{ key: 'juridico' as Aba, label: 'Jurídico', icon: Scale }] : []),
+  { key: 'robo' as Aba, label: 'Robô', icon: Bot },
 ])
 
 function abaDaUrl(): Aba {
@@ -72,6 +74,7 @@ function recarregar() {
     <DenunciaAnuncios v-if="aba === 'anuncios'" ref="atual" />
     <DenunciaDenuncias v-else-if="aba === 'denuncias'" ref="atual" />
     <DenunciaCasos v-else-if="aba === 'casos'" ref="atual" />
+    <DenunciaRobo v-else-if="aba === 'robo'" ref="atual" />
     <ChamadosPainel v-else-if="aba === 'juridico'" modo="juridico" />
   </div>
 </template>

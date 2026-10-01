@@ -145,6 +145,20 @@ class DenunciaVerificacao(_Espelho, Base):
     __table_args__ = (Index("ix_denuncia_verificacoes_anuncio_id", "anuncio_id"),)
 
 
+class DenunciaRoboStatus(Base):
+    """Último resumo do robô do mini (`status_mac.py`, a cada 60 s): agente,
+    filas, tarefas da rodada do dia, contas e problemas. Uma linha por
+    remetente — a aba Robô só precisa do estado de agora."""
+
+    __tablename__ = "denuncia_robo_status"
+
+    remetente: Mapped[str] = mapped_column(Text, primary_key=True)
+    dados: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    recebido_em: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
 class DenunciaRemetente(Base):
     """Quem pode mandar a cópia (o Mac mini da Makisa). Só o sha256 do token
     fica aqui — o token mora em `~/.davinci_denuncia.json` no mini. Guarda
