@@ -27,6 +27,16 @@
 // Empresas) e a linha mostra "0,5% (da empresa) de [base]". A tela resolve na
 // mesma ordem do servidor (pctDoModelo) e manda esse % na prévia e na emissão:
 // o que foi conferido é o que sai. Sem % nenhuma, a prévia acusa a pendência.
+//
+// 01/10/2026 (Eduardo: "como virou o mês, o faturamento de outubro está zerado
+// ainda… precisa ter a opção de eu escolher o mês, por exemplo setembro"): ao
+// lado do mês, "Base do %: faturamento de [mês]" (NfseMesBase) — o mesmo mês da
+// nota (padrão) ou um dos 3 anteriores. Só a BASE das notas de percentual muda:
+// a nota continua com a competência do mês escolhido. Trocou o mês da base: carrega
+// o faturamento daquele mês, refaz a prévia e as notas de % levam base_competencia.
+// Trocou o mês da NOTA: a base volta para o mesmo mês (o padrão). A recusada que
+// vai de novo leva a base E o mês da base gravados nela (mesDoCampo), qualquer
+// que seja o seletor — para usar o faturamento do seletor, "voltar" no campo.
 import { computed, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch, watchEffect } from 'vue'
 import { PopoverContent, PopoverPortal, PopoverRoot, PopoverTrigger } from 'reka-ui'
 import {
@@ -37,9 +47,9 @@ import {
 import { Button } from '~/components/ui/button'
 import {
   ambienteTexto, calcularPercentual, empresaTeste, erroApi, estadoLinha, explicarProblema, fmtBrl, fmtData, fmtDoc,
-  fmtHora, fmtMes, fmtPct, fmtPctOrigem, mesAtual, mesParaData, origemDaEmissao, paraDecimal, pctDoModelo, pctPositivo,
-  plural, prestadorPorId, renderDescricao, situacao, textoFaturamento, textoIr, TOM_TEXTO, tomadorDaEmissao,
-  tomadorEstiloNfeio, tomadorNaNota, useNfseTela,
+  fmtHora, fmtMes, fmtPct, fmtPctOrigem, mesAtual, mesBaseDaEmissao, mesParaData, origemDaEmissao, paraDecimal,
+  pctDoModelo, pctPositivo, plural, prestadorPorId, renderDescricao, situacao, textoFaturamento, textoIr, textoMesBase,
+  TOM_TEXTO, tomadorDaEmissao, tomadorEstiloNfeio, tomadorNaNota, useNfseTela,
   type ChecklistItem, type Emissao, type EstadoLinha, type FaturamentoEmpresa, type ItemIn, type ItemLote,
   type ItemPrevia, type Modelo,
   type OrigemPct, type SecaoEmpresa,
@@ -72,6 +82,11 @@ type Linha = {
   percentual: string | null // percentual: "0.5000" (o da nota fixa ou da empresa; ou o que foi, se já saiu)
   origemPct: OrigemPct | null // de onde veio o % (o de agora; ou o gravado na nota que saiu): 'empresa' → "(da empresa)"
   formula: string | null // "0,5% de R$ 200.000,00" · "0,5% (da empresa) de R$ 200.000,00"
+  mesBaseNota: string | null // já saiu com a base de outro mês: "faturamento de setembro/2026" (01/10)
+  // Percentual que ainda não saiu: o mês do faturamento que vai junto da base do
+  // campo ('AAAA-MM'). O do seletor "Base do %"; com a base da recusada, o mês dela.
+  mesCampo: string
+  daRecusada: boolean // o campo está com a base da nota recusada (nada digitado)
   semBase: boolean // percentual sem base digitada: não marca
   explicacao: string | undefined // troca a explicação padrão da situação
   estado: EstadoLinha
@@ -116,6 +131,7 @@ const AJUSTE = new Set<EstadoLinha>(['pendencia', 'valor_invalido'])
 
 const previas = ref<Record<string, ItemPrevia>>({})
 const previasMes = ref('') // de que mês é a prévia guardada ('' = nunca carregou)
+const previasBase = ref('') // e com o faturamento de que mês (o mês da base)
 const emissoes = ref<Emissao[]>([])
 const emissoesMes = ref('')
 const carregandoLista = ref(false)
@@ -134,7 +150,25 @@ const conferindoNotas = ref<Set<string>>(new Set()) // "atualizar da NFE.io" em 
 const emitindo = ref(false)
 
 const ativos = computed(() => tela.modelos.value.filter((m) => m.ativo))
-const temPrevia = computed(() => previasMes.value === mes.value)
+
+// Mês da base (01/10): a escolha vale só para o mês da nota em que foi feita —
+// trocou o mês da nota, volta ao padrão (o faturamento do mesmo mês da nota).
+const escolhaBase = ref<{ mes: string; valor: string }>({ mes: '', valor: '' })
+const mesBase = computed(() => (escolhaBase.value.mes === mes.value ? escolhaBase.value.valor : ''))
+const mesDaBase = computed(() => mesBase.value || mes.value) // 'AAAA-MM' que vale agora
+const baseDeOutroMes = computed(() => mesDaBase.value !== mes.value)
+// O seletor só aparece com nota de percentual (a de valor fixo não tem base).
+const temPercentual = computed(() => ativos.value.some((m) => ehPct(m)))
+// "faturamento do mês" · "faturamento de setembro/2026"
+const rotuloFaturamento = computed(() =>
+  baseDeOutroMes.value ? `faturamento de ${fmtMes(mesDaBase.value)}` : 'faturamento do mês',
+)
+
+function escolherMesBase(v: string) {
+  escolhaBase.value = { mes: mes.value, valor: v && v !== mes.value ? v : '' }
+}
+
+const temPrevia = computed(() => previasMes.value === mes.value && previasBase.value === mesDaBase.value)
 const colunas = computed(() => (canEdit.value ? 5 : 4))
 
 // --- Carga ---------------------------------------------------------------------------
@@ -150,33 +184,52 @@ function chaveCampo(m: Modelo): string {
 }
 
 // Faturamento do mês de cada empresa (base das notas de percentual — Eduardo,
-// 30/09: "faz com base no faturamento já"), por mês → empresa.
+// 30/09: "faz com base no faturamento já"), por mês → empresa. 01/10: o mês é o
+// da BASE (mesDaBase), que pode ser anterior ao da nota.
 const faturamentos = ref<Record<string, Record<string, FaturamentoEmpresa>>>({})
 
-function faturamentoDe(m: Modelo, mm = mes.value): FaturamentoEmpresa | null {
-  return faturamentos.value[mm]?.[m.company_id] ?? null
+function faturamentoDe(m: Modelo, mb = mesDaBase.value): FaturamentoEmpresa | null {
+  return faturamentos.value[mb]?.[m.company_id] ?? null
 }
 
-// A base que vem do faturamento ('' = sem loja ou sem venda no mês).
-function baseFaturamento(m: Modelo, mm = mes.value): string {
-  return positivo(faturamentoDe(m, mm)?.valor)
+// A base que vem do faturamento ('' = sem loja ou sem venda no mês da base).
+function baseFaturamento(m: Modelo, mb = mesDaBase.value): string {
+  return positivo(faturamentoDe(m, mb)?.valor)
 }
 
 // O que está no campo: o digitado nesta página; senão, no percentual, a base da
 // nota recusada do mês (ela vai de novo com a mesma base), o faturamento do mês
-// da empresa ou, sem venda, a base sugerida; no valor fixo, o valor da nota fixa.
-function campoDe(m: Modelo, mm = mes.value): string {
+// da base ou, sem venda, a base sugerida; no valor fixo, o valor da nota fixa.
+function campoDe(m: Modelo, mm = mes.value, mb = mesDaBase.value): string {
   const digitado = valores.value[mm]?.[chaveCampo(m)]
   if (digitado != null) return digitado
   if (!ehPct(m)) return m.valor ?? ''
-  return (mm === mes.value ? baseRecusada(m) : '') || baseFaturamento(m, mm) || m.base_padrao || ''
+  return (mm === mes.value ? baseRecusada(m) : '') || baseFaturamento(m, mb) || m.base_padrao || ''
+}
+
+// Percentual: a última nota recusada deste mês (null = não tem).
+function recusadaDe(m: Modelo): Emissao | null {
+  if (!ehPct(m)) return null
+  return (emissoesPorModelo.value[m.id] ?? []).find((e) => e.status === 'rejeitada') ?? null
 }
 
 // Percentual: a base da última nota recusada deste mês ('' = não tem).
 function baseRecusada(m: Modelo): string {
-  if (!ehPct(m)) return ''
-  const rec = (emissoesPorModelo.value[m.id] ?? []).find((e) => e.status === 'rejeitada')
-  return positivo(rec?.base_calculo)
+  return positivo(recusadaDe(m)?.base_calculo)
+}
+
+// O campo está com a base da recusada: nada digitado nesta página (campoDe).
+function campoDaRecusada(m: Modelo, mm = mes.value): boolean {
+  return mm === mes.value && valores.value[mm]?.[chaveCampo(m)] == null && !!baseRecusada(m)
+}
+
+// O mês do faturamento que vai junto da base do campo (revisão de 01/10): a base
+// da recusada vai de novo com o mês GRAVADO nela (base de setembro numa nota de
+// outubro continua "faturamento de setembro", mesmo com o seletor no padrão
+// depois de recarregar; gravada antes de 01/10 = o mês da nota). A digitada, a do
+// faturamento e a sugerida vão com o mês do seletor "Base do %".
+function mesDoCampo(m: Modelo, mm = mes.value, mb = mesDaBase.value): string {
+  return campoDaRecusada(m, mm) ? mesBaseDaEmissao(recusadaDe(m)) ?? mm : mb
 }
 
 // Decimal da API maior que zero, ou ''.
@@ -211,19 +264,28 @@ function valorDaNota(m: Modelo, campo: string, pct: string | null): string {
 // O item da prévia com o que está no campo (vazio = o servidor usa o da nota fixa).
 // Percentual: vai também o % que a tela mostra (o da nota fixa ou o da empresa),
 // para a conta do servidor ser a mesma da tela mesmo se a nota fixa ou a empresa
-// mudarem em outra aba.
-function itemDoCampo(m: Modelo, campo: string): ItemIn {
-  if (!campo) return { modelo_id: m.id }
-  if (!ehPct(m)) return { modelo_id: m.id, valor: campo }
+// mudarem em outra aba — e o mês da base, se não for o da nota (mesmo sem base
+// no campo: aí o servidor usa o faturamento DAQUELE mês). `mb` = o mês que vai
+// junto DESTE campo (mesDoCampo: o da recusada quando a base é dela).
+function itemDoCampo(m: Modelo, campo: string, mm = mes.value, mb = mesDoCampo(m, mm)): ItemIn {
+  const it: ItemIn = { modelo_id: m.id }
+  if (!ehPct(m)) {
+    if (campo) it.valor = campo
+    return it
+  }
+  if (mb !== mm) it.base_competencia = mesParaData(mb)
+  if (!campo) return it
+  it.base_calculo = campo
   const pct = pctDaLinha(m).pct
-  return pct ? { modelo_id: m.id, base_calculo: campo, percentual: pct } : { modelo_id: m.id, base_calculo: campo }
+  if (pct) it.percentual = pct
+  return it
 }
 
-function itemPrevia(m: Modelo, mm: string): ItemIn {
-  return itemDoCampo(m, positivo(campoDe(m, mm)))
+function itemPrevia(m: Modelo, mm: string, mb: string): ItemIn {
+  return itemDoCampo(m, positivo(campoDe(m, mm, mb)), mm, mesDoCampo(m, mm, mb))
 }
 
-async function preverTodos(mm: string, lista: Modelo[]): Promise<ItemPrevia[]> {
+async function preverTodos(mm: string, mb: string, lista: Modelo[]): Promise<ItemPrevia[]> {
   if (!lista.length) return []
   // A API aceita até 200 itens por prévia.
   const partes: Modelo[][] = []
@@ -232,7 +294,7 @@ async function preverTodos(mm: string, lista: Modelo[]): Promise<ItemPrevia[]> {
     partes.map((p) =>
       api<{ itens: ItemPrevia[] }>('/api/nfse/previa', {
         method: 'POST',
-        body: { competencia: mesParaData(mm), itens: p.map((m) => itemPrevia(m, mm)) },
+        body: { competencia: mesParaData(mm), itens: p.map((m) => itemPrevia(m, mm, mb)) },
       }),
     ),
   )
@@ -243,27 +305,28 @@ let seqCarga = 0
 
 async function carregar() {
   const mm = mes.value
+  const mb = mesDaBase.value
   const lista = ativos.value
   const minha = ++seqCarga
   carregandoLista.value = true
   try {
-    // O faturamento vem antes: é ele que enche a base das notas de percentual.
+    // O faturamento (do mês da BASE) vem antes: é ele que enche a base das notas de percentual.
     const fat = await api<{ empresas: FaturamentoEmpresa[] }>(
-      `/api/nfse/faturamento?competencia=${mesParaData(mm)}`,
+      `/api/nfse/faturamento?competencia=${mesParaData(mb)}`,
     ).catch(() => null)
-    if (minha !== seqCarga || mm !== mes.value) return
+    if (minha !== seqCarga || mm !== mes.value || mb !== mesDaBase.value) return
     if (fat) {
       faturamentos.value = {
         ...faturamentos.value,
-        [mm]: Object.fromEntries(fat.empresas.map((e) => [e.company_id, e])),
+        [mb]: Object.fromEntries(fat.empresas.map((e) => [e.company_id, e])),
       }
     }
     const [itens, ems] = await Promise.all([
-      preverTodos(mm, lista),
+      preverTodos(mm, mb, lista),
       api<Emissao[]>(`/api/nfse/emissoes?competencia=${mesParaData(mm)}`),
     ])
-    // Resposta velha (outro mês, ou outra carga começou depois): descarta.
-    if (minha !== seqCarga || mm !== mes.value) return
+    // Resposta velha (outro mês, outro mês da base, ou outra carga começou depois): descarta.
+    if (minha !== seqCarga || mm !== mes.value || mb !== mesDaBase.value) return
     const mapa: Record<string, ItemPrevia> = {}
     lista.forEach((m, i) => {
       const it = itens[i]
@@ -271,13 +334,14 @@ async function carregar() {
     })
     previas.value = mapa
     previasMes.value = mm
+    previasBase.value = mb
     emissoes.value = ems
     emissoesMes.value = mm
     erro.value = null
     falhaLinhas.value = new Set()
     conferidoEm.value = new Date()
     podarSelecao()
-    reconferirRecusadas(mm, lista, mapa)
+    reconferirRecusadas(mm, mb, lista, mapa)
   } catch (e) {
     if (minha !== seqCarga) return
     erro.value = erroApi(e)
@@ -311,9 +375,20 @@ onDeactivated(() => {
 
 watch(() => tela.versao.value, pedirCarga)
 watch(mes, () => {
+  escolhaBase.value = { mes: '', valor: '' } // a base volta para o mesmo mês da nota
   selecionados.value = new Set()
   expandidas.value = new Set()
   falhaLinhas.value = new Set()
+})
+// Mudou o mês da nota ou o da base: uma carga só (os dois mudam juntos ao trocar o mês).
+watch(() => `${mes.value}|${mesDaBase.value}`, (_novo, velho) => {
+  if (velho?.startsWith(`${mes.value}|`)) {
+    // Só o mês da base mudou: as notas de % marcadas saem da seleção (o valor delas
+    // muda) e a conferência da base nova que falhou deixa de valer.
+    const pct = new Set(ativos.value.filter((m) => ehPct(m)).map((m) => m.id))
+    selecionados.value = new Set([...selecionados.value].filter((id) => !pct.has(id)))
+    falhaLinhas.value = new Set([...falhaLinhas.value].filter((id) => !pct.has(id)))
+  }
   pedirCarga()
 })
 
@@ -329,6 +404,7 @@ const timersLinha = new Map<string, ReturnType<typeof setTimeout>>()
 
 function mudarCampo(m: Modelo, v: string) {
   const mm = mes.value
+  const mb = mesDaBase.value
   valores.value = { ...valores.value, [mm]: { ...(valores.value[mm] ?? {}), [chaveCampo(m)]: v } }
   const t = timersLinha.get(m.id)
   if (t) clearTimeout(t)
@@ -342,28 +418,33 @@ function mudarCampo(m: Modelo, v: string) {
   conferindoLinhas.value.add(m.id)
   timersLinha.set(
     m.id,
-    setTimeout(() => preverLinha(m, mm, d), 600),
+    setTimeout(() => preverLinha(m, mm, mb, d), 600),
   )
 }
 
 // `campo` = o valor ou, na nota de percentual, a base (vai como base_calculo).
-async function preverLinha(m: Modelo, mm: string, campo: string) {
+// `mb` = o mês do seletor "Base do %" quando o campo mudou (01/10); o mês que vai
+// junto do campo é o mesDoCampo (o da recusada, se a base é dela).
+async function preverLinha(m: Modelo, mm: string, mb: string, campo: string) {
   timersLinha.delete(m.id)
+  const mc = mesDoCampo(m, mm, mb)
+  const mesmo = () =>
+    mm === mes.value && mb === mesDaBase.value && positivo(campoDe(m, mm, mb)) === campo && mesDoCampo(m, mm, mb) === mc
   try {
     const r = await api<{ itens: ItemPrevia[] }>('/api/nfse/previa', {
       method: 'POST',
-      body: { competencia: mesParaData(mm), itens: [itemDoCampo(m, campo)] },
+      body: { competencia: mesParaData(mm), itens: [itemDoCampo(m, campo, mm, mc)] },
     })
     const it = r.itens[0]
-    // Só vale se ainda é o mesmo mês e o campo não mudou de novo.
-    if (it && mm === mes.value && previasMes.value === mm && positivo(campoDe(m, mm)) === campo) {
+    // Só vale se ainda é o mesmo mês (e mês da base) e o campo não mudou de novo.
+    if (it && mesmo() && previasMes.value === mm && previasBase.value === mb) {
       previas.value = { ...previas.value, [m.id]: it }
       falhaLinhas.value.delete(m.id)
     }
   } catch {
     // A conferência anterior é de OUTRO valor: a linha não pode sair com ela.
     // Fica "não conferida" (sem marcar) até conferir de novo.
-    if (mm === mes.value && positivo(campoDe(m, mm)) === campo) falhaLinhas.value.add(m.id)
+    if (mesmo()) falhaLinhas.value.add(m.id)
   } finally {
     if (!timersLinha.has(m.id)) conferindoLinhas.value.delete(m.id)
   }
@@ -371,14 +452,17 @@ async function preverLinha(m: Modelo, mm: string, campo: string) {
 
 // A prévia de todas sai junto com a busca das notas do mês: a nota de percentual
 // recusada foi conferida com a base sugerida (ou sem base). Agora que a base da
-// recusada está no campo, confere de novo só essas linhas.
-function reconferirRecusadas(mm: string, lista: Modelo[], mapa: Record<string, ItemPrevia>) {
+// recusada está no campo, confere de novo só essas linhas — também quando a base
+// bate mas o mês dela não (01/10: a recusada vai com o mês gravado nela).
+function reconferirRecusadas(mm: string, mb: string, lista: Modelo[], mapa: Record<string, ItemPrevia>) {
   for (const m of lista) {
     if (!ehPct(m) || valores.value[mm]?.[chaveCampo(m)] != null) continue
     const b = baseRecusada(m)
-    if (!b || positivo(mapa[m.id]?.base_calculo) === b) continue
+    if (!b) continue
+    const p = mapa[m.id]
+    if (positivo(p?.base_calculo) === b && (p?.base_competencia ?? '').slice(0, 7) === mesDoCampo(m, mm, mb)) continue
     conferindoLinhas.value.add(m.id)
-    preverLinha(m, mm, b)
+    preverLinha(m, mm, mb, b)
   }
 }
 
@@ -387,7 +471,7 @@ function reconferirLinha(l: Linha) {
   if (!d || conferindoLinhas.value.has(l.m.id)) return
   falhaLinhas.value.delete(l.m.id)
   conferindoLinhas.value.add(l.m.id)
-  preverLinha(l.m, mes.value, d)
+  preverLinha(l.m, mes.value, mesDaBase.value, d)
 }
 
 onBeforeUnmount(() => {
@@ -501,6 +585,29 @@ function formulaDe(pct: string | null | undefined, base: string, origem?: Origem
   return base ? `${p} de ${fmtBrl(base)}` : `${p} da base`
 }
 
+// Percentual que ainda não saiu, com a base de outro mês que veio mesmo do
+// faturamento dele (a prévia do servidor diz): "base: faturamento de setembro/2026".
+function textoMesBaseCampo(l: Linha): string | undefined {
+  const t = l.mesCampo !== mes.value ? textoMesBase(l.mesCampo, l.previa?.base_origem) : null
+  return t ? `base: ${t}` : undefined
+}
+
+// O texto embaixo da base (percentual). Revisão de 01/10: com a base da recusada
+// no campo, diz que é ela — e de que mês, se veio do faturamento — em vez do
+// faturamento do mês do seletor ("faturamento de outubro/2026: R$ 0,00" embaixo
+// de uma base de setembro). Senão: o faturamento do mês da base e, se o campo não
+// bate com ele, "base trocada à mão".
+function textoDaBase(l: Linha): string {
+  if (l.daRecusada) {
+    const rec = recusadaDe(l.m)
+    const t = textoMesBase(mesBaseDaEmissao(rec) ?? mes.value, rec?.snapshot?.servico?.base_origem)
+    return `base da nota recusada${t ? ` (${t})` : ''}`
+  }
+  const fat = textoFaturamento(faturamentoDe(l.m), fmtMes(mesDaBase.value))
+  const doFat = baseFaturamento(l.m)
+  return l.base && doFat && Number(l.base) !== Number(doFat) ? `${fat} — base trocada à mão` : fat
+}
+
 // {percentual} e {base} como o servidor escreve (sem base, "{base}" fica). O
 // Intl põe espaço sem quebra depois do "R$"; na nota vai espaço comum.
 function comValores(texto: string, m: Modelo, base: string, pct: string | null): string {
@@ -518,14 +625,17 @@ function descricaoDe(m: Modelo, previa: ItemPrevia | null, base: string, pct: st
   return comValores(m.descricao, m, base, pct)
 }
 
-const SEM_BASE = 'Digite a base (o valor sobre o qual incide o %). O valor da nota é calculado sozinho.'
+// 01/10: sem venda no mês da base (ex.: dia 1º, o mês ainda zerado), a saída
+// pode ser o faturamento de um mês anterior — o seletor "Base do %" lá em cima.
+const SEM_BASE =
+  'Digite a base (o valor sobre o qual incide o %) ou escolha o faturamento de outro mês em "Base do %", lá em cima. O valor da nota é calculado sozinho.'
 
 // Percentual com valor inválido: o que falta de verdade (base, % ou a conta).
 function ajustePct(semBase: boolean, pct: string | null): { rotulo?: string; sub: Linha['sub']; explicacao: string } {
   if (semBase) {
     return {
       rotulo: 'Falta a base',
-      sub: { texto: 'digite a base para calcular o valor', cor: TOM_TEXTO.perigo },
+      sub: { texto: 'digite a base ou escolha outro mês em "Base do %"', cor: TOM_TEXTO.perigo },
       explicacao: SEM_BASE,
     }
   }
@@ -568,6 +678,10 @@ const linhas = computed<Linha[]>(() =>
     const percentual = travada ? r.emissao?.percentual ?? null : pct ? agora.pct : null
     const origemPct = travada ? origemDaEmissao(r.emissao) : pct ? agora.origem : null
     const base = travada ? positivo(r.emissao?.base_calculo) : baseCampo
+    // Já saiu com a base de outro mês (01/10): a linha diz de qual.
+    const mesBaseNota = travada
+      ? textoMesBase(mesBaseDaEmissao(r.emissao), r.emissao?.snapshot?.servico?.base_origem)
+      : null
     const semBase = pct && !baseCampo
     const ajuste = pct && r.estado === 'valor_invalido' ? ajustePct(semBase, agora.pct) : null
     const idEmissao = r.emissao?.id ?? (travada ? previa?.ja_emitida?.id ?? null : null)
@@ -584,6 +698,9 @@ const linhas = computed<Linha[]>(() =>
       percentual,
       origemPct,
       formula: formulaDe(percentual, base, origemPct),
+      mesBaseNota,
+      mesCampo: mesDoCampo(m),
+      daRecusada: pct && campoDaRecusada(m),
       semBase,
       explicacao: ajuste?.explicacao,
       estado: r.estado,
@@ -1013,6 +1130,7 @@ function detalhes(l: Linha) {
       valor: l.base
         ? `${l.formula} = ${v ? fmtBrl(v) : 'menos de R$ 0,01'}`
         : `${fmtPctOrigem(l.percentual, l.origemPct)} da base: digite a base`,
+      extra: l.mesBaseNota ?? (l.pct ? textoMesBaseCampo(l) : undefined),
       largo: true,
     })
   }
@@ -1051,15 +1169,23 @@ async function emitirMarcadas() {
     // Percentual: vão a base e o % que a tela mostrou; o servidor faz a conta
     // (o `valor` aqui é a mesma conta, para o lote mostrar e somar). Com o %
     // junto, a nota sai com o % conferido mesmo se a nota fixa mudar em outra aba.
+    // 01/10: com a base de outro mês, vai base_competencia (a nota segue no mês dela).
+    // O mês é o do campo (l.mesCampo): o do seletor ou, na recusada que vai de novo
+    // com a base dela, o mês gravado nela. A origem é a que a prévia do servidor
+    // deu para essa mesma base e mês (o lote só escreve "faturamento de setembro/2026"
+    // quando a base veio mesmo de lá).
     if (l.pct) {
       const item: ItemIn = { modelo_id: l.m.id, base_calculo: l.base }
       if (l.percentual) item.percentual = l.percentual
+      const outroMes = l.mesCampo !== mes.value
+      if (outroMes) item.base_competencia = mesParaData(l.mesCampo)
       return {
         ...comum,
         valor: l.valor,
         base_calculo: l.base,
         percentual: l.percentual ?? undefined,
         percentual_origem: l.origemPct,
+        ...(outroMes ? { base_competencia: l.mesCampo, base_origem: l.previa?.base_origem ?? null } : {}),
         item,
       }
     }
@@ -1141,6 +1267,14 @@ const girando = computed(() => carregandoLista.value || tela.carregando.value)
           <Info class="size-4" aria-hidden="true" />
         </button>
       </NfseDica>
+      <!-- 01/10: de que mês vem o faturamento que vira a base das notas de % -->
+      <NfseMesBase
+        v-if="temPercentual"
+        :model-value="mesBase"
+        :competencia="mes"
+        :disabled="emitindo"
+        @update:model-value="escolherMesBase"
+      />
       <div v-if="ativos.length > 10" class="relative w-full sm:w-64">
         <Search
           class="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground"
@@ -1387,6 +1521,7 @@ const girando = computed(() => carregandoLista.value || tela.carregando.value)
                       {{ fmtBrl(l.valor) }}
                     </span>
                     <span v-if="l.formula" class="text-[11px] tabular-nums text-muted-foreground">{{ l.formula }}</span>
+                    <span v-if="l.mesBaseNota" class="text-[11px] text-muted-foreground">{{ l.mesBaseNota }}</span>
                   </div>
                   <!-- Percentual: o valor da nota sai calculado; o campo é a Base (R$),
                        lido como "0,5% de [R$ 200.000,00]" -->
@@ -1427,7 +1562,7 @@ const girando = computed(() => carregandoLista.value || tela.carregando.value)
                         :model-value="l.campo"
                         :padrao="baseFaturamento(l.m) || l.m.base_padrao"
                         rotulo="base"
-                        :rotulo-padrao="baseFaturamento(l.m) ? 'faturamento do mês' : 'base sugerida'"
+                        :rotulo-padrao="baseFaturamento(l.m) ? rotuloFaturamento : 'base sugerida'"
                         placeholder="digite a base"
                         :invalido="l.semBase || l.estado === 'valor_invalido'"
                         :disabled="!canEdit || emitindo"
@@ -1440,10 +1575,10 @@ const girando = computed(() => carregandoLista.value || tela.carregando.value)
                       class="rounded px-1.5 text-[11px] text-primary underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                       @click.stop="mudarCampo(l.m, baseFaturamento(l.m) || positivo(l.m.base_padrao))"
                     >
-                      {{ baseFaturamento(l.m) ? `usar o faturamento do mês (${fmtBrl(baseFaturamento(l.m))})` : `usar a base sugerida (${fmtBrl(l.m.base_padrao)})` }}
+                      {{ baseFaturamento(l.m) ? `usar o ${rotuloFaturamento} (${fmtBrl(baseFaturamento(l.m))})` : `usar a base sugerida (${fmtBrl(l.m.base_padrao)})` }}
                     </button>
                     <span v-if="l.pct" class="max-w-[280px] whitespace-normal text-right text-[11px] leading-tight text-muted-foreground">
-                      {{ textoFaturamento(faturamentoDe(l.m), fmtMes(mes)) }}{{ l.base && baseFaturamento(l.m) && Number(l.base) !== Number(baseFaturamento(l.m)) ? ' — base trocada à mão' : '' }}
+                      {{ textoDaBase(l) }}
                     </span>
                   </div>
                   <NfseValorInput

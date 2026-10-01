@@ -27,6 +27,13 @@
 // origem ("0,5% (da empresa) de R$ …") e a prévia/emissão mandam o % que a tela
 // mostrou: o que foi conferido é o que sai. Sem % na empresa, o campo é
 // obrigatório, como antes.
+//
+// 01/10/2026 (Eduardo: "como virou o mês, o faturamento de outubro está zerado
+// ainda… precisa ter a opção de eu escolher o mês, por exemplo setembro"): no
+// Percentual, "Base do %: faturamento de [mês]" (NfseMesBase) — o mesmo mês da
+// nota (padrão) ou um dos 3 anteriores. A base vem cheia com o faturamento
+// daquele mês e a prévia/emissão mandam base_competencia; a nota continua no mês
+// de competência dela. Trocou o mês da nota: a base volta para o mesmo mês.
 import { computed, nextTick, reactive, ref, watch } from 'vue'
 import {
   AlertTriangle, Banknote, Building2, Calculator, CalendarDays, CheckCircle2, ExternalLink, FileText, FlaskConical, Info,
@@ -36,7 +43,7 @@ import { Button } from '~/components/ui/button'
 import {
   calcularPercentual, erroApi, fmtBrl, fmtDoc, fmtMes, fmtPct, fmtPctOrigem, inserirNoCursor, itemReenvio, listaE,
   mesAtual, mesParaData, mesValido, minusculo, paraDecimal, pctPositivo, pendenciaTexto, prestadorPorId, TEXTO_TESTE,
-  textoFaturamento, textoIr, TOM_TEXTO, useNfseTela,
+  textoFaturamento, textoIr, textoMesBase, TOM_TEXTO, useNfseTela,
   type AvulsaApi, type Emissao, type FaturamentoEmpresa, type ItemIn, type ItemPrevia, type OrigemPct,
   type ResultadoLote,
   useNfseApi,
@@ -112,6 +119,7 @@ type Enviado = {
   percentual: string
   modoPct: ModoPct
   pctApi: string | null // o % que valeu (o da empresa ou o digitado)
+  mesBase: string // percentual: o mês da base ('' = o mês da nota)
   inf_comp: string
 }
 const recusada = ref<Emissao | null>(null)
@@ -216,15 +224,43 @@ const baseDecimal = computed(() => {
   return d && Number(d) > 0 ? d : ''
 })
 
+// Mês da base (01/10): a escolha vale só para o mês da nota em que foi feita —
+// trocou o mês da nota, volta ao padrão (o faturamento do mesmo mês).
+const escolhaBase = ref<{ mes: string; valor: string }>({ mes: '', valor: '' })
+const mesBase = computed(() => (escolhaBase.value.mes === form.competencia ? escolhaBase.value.valor : ''))
+const mesDaBase = computed(() => mesBase.value || form.competencia)
+
+function escolherMesBase(v: string) {
+  escolhaBase.value = { mes: form.competencia, valor: v && v !== form.competencia ? v : '' }
+}
+
+// Trocou o mês da nota: a escolha é apagada, como no "Emitir do mês" (revisão de
+// 01/10: sem isso, voltar ao mês trazia de volta o mês da base escolhido antes). O
+// desfazer() grava o mês e a escolha juntos com o mesmo mês: esse não é apagado.
+watch(
+  () => form.competencia,
+  (c) => {
+    if (escolhaBase.value.mes !== c) escolhaBase.value = { mes: '', valor: '' }
+  },
+)
+
+// "(faturamento de setembro/2026)" no "Tudo certo para emitir" — só com a base de
+// outro mês que veio mesmo do faturamento dele (a prévia diz).
+const textoMesDaBase = computed(() =>
+  ehPct.value && mesBase.value ? textoMesBase(mesBase.value, previa.value?.base_origem) : null,
+)
+
 // Base = faturamento do mês da empresa (Eduardo, 30/09: "faz com base no
 // faturamento já"): ao escolher empresa/mês no Percentual, a base vem cheia com
 // ele. O que a pessoa digitar vale — só troca a base que ainda é a automática.
+// 01/10: o mês é o da base (mesDaBase); num mês sem venda, a base automática de
+// outro mês sai do campo (não fica um número que não é daquele mês).
 const faturamento = ref<FaturamentoEmpresa | null>(null)
 const faturamentoCarregado = ref(false)
 const baseAutomatica = ref('')
 let seqFat = 0
 watch(
-  () => [form.competencia, form.company_id, form.tipo_valor] as const,
+  () => [mesDaBase.value, form.company_id, form.tipo_valor] as const,
   async ([mm, cid, tipo]) => {
     const minha = ++seqFat
     faturamento.value = null
@@ -240,6 +276,9 @@ watch(
     if (v && (!form.base || form.base === baseAutomatica.value)) {
       form.base = v
       baseAutomatica.value = v
+    } else if (!v && r && baseAutomatica.value && form.base === baseAutomatica.value) {
+      form.base = ''
+      baseAutomatica.value = ''
     }
   },
 )
@@ -309,6 +348,7 @@ const camposMudados = computed<string[]>(() => {
   else if (ehPct.value) {
     if (baseDecimal.value !== paraDecimal(e.base)) out.push('a base')
     if (Number(pctEfetivo.value) !== Number(e.pctApi)) out.push('o percentual')
+    if (form.competencia === e.competencia && mesBase.value !== e.mesBase) out.push('o mês da base')
   }
   if (form.descricao.trim() !== e.descricao.trim()) out.push('a descrição')
   if (form.inf_comp.trim() !== e.inf_comp.trim()) out.push('as informações complementares')
@@ -406,9 +446,14 @@ function item(): ItemIn {
     company_id: form.company_id ?? undefined,
     tomador_id: form.tomador_id ?? undefined,
     descricao: form.descricao.trim(),
-    // Percentual: vai o % que a tela mostra (o da empresa ou o digitado).
+    // Percentual: vai o % que a tela mostra (o da empresa ou o digitado) e, com
+    // a base de outro mês, de que mês ela é (01/10).
     ...(ehPct.value
-      ? { base_calculo: baseDecimal.value, percentual: pctEfetivo.value ?? undefined }
+      ? {
+          base_calculo: baseDecimal.value,
+          percentual: pctEfetivo.value ?? undefined,
+          ...(mesBase.value ? { base_competencia: mesParaData(mesBase.value) } : {}),
+        }
       : { valor: valorDecimal.value }),
     ...(extra ? { inf_comp: extra } : {}),
   }
@@ -456,7 +501,7 @@ watch(
   // O % entra já lido ("0,5" e "0,50" são o mesmo: não confere de novo).
   () => [
     form.competencia, form.company_id, form.tomador_id, form.descricao, form.tipo_valor, form.valor, form.base,
-    pctEfetivo.value, form.inf_comp,
+    pctEfetivo.value, mesDaBase.value, form.inf_comp,
   ],
   () => {
     if (!travada.value) resultado.value = null
@@ -490,6 +535,7 @@ function abrir(o?: { competencia?: string }): Promise<void> {
   baseAutomatica.value = ''
   form.percentual = ''
   form.modoPct = 'empresa'
+  escolhaBase.value = { mes: '', valor: '' }
   pctTocado.value = false
   form.inf_comp = ''
   seq++
@@ -566,6 +612,7 @@ function fotoDoFormulario(): Enviado {
     percentual: form.percentual,
     modoPct: form.modoPct,
     pctApi: pctEfetivo.value,
+    mesBase: mesBase.value,
     inf_comp: form.inf_comp,
   }
 }
@@ -625,6 +672,7 @@ async function emitir() {
                 base_calculo: baseDecimal.value,
                 percentual: pctEfetivo.value ?? undefined,
                 percentual_origem: origemPct.value,
+                ...(mesBase.value ? { base_competencia: mesBase.value, base_origem: p.base_origem ?? null } : {}),
               }
             : {}),
           item: item(),
@@ -693,6 +741,7 @@ function desfazer() {
   form.base = e.base
   form.percentual = e.percentual
   form.modoPct = e.modoPct
+  escolhaBase.value = { mes: e.competencia, valor: e.mesBase }
   pctTocado.value = false
   form.inf_comp = e.inf_comp
 }
@@ -857,16 +906,24 @@ defineExpose(exposto)
             </div>
           </NfseCampo>
 
+          <!-- 01/10: de que mês vem o faturamento que vira a base -->
+          <NfseMesBase
+            id="nfse-avulsa-mes-base"
+            :model-value="mesBase"
+            :competencia="form.competencia"
+            @update:model-value="escolherMesBase"
+          />
+
           <div class="grid gap-3 sm:grid-cols-2">
             <NfseCampo
               rotulo="Base (R$)"
               obrigatorio
-              dica="O valor sobre o qual incide o %. Vem preenchido com o faturamento do mês da empresa (todas as lojas com o CNPJ dela); pode trocar."
+              dica="O valor sobre o qual incide o %. Vem preenchido com o faturamento da empresa (todas as lojas com o CNPJ dela) no mês escolhido em “Base do %”; pode trocar."
               para="nfse-avulsa-base"
             >
               <NfseValorInput id="nfse-avulsa-base" v-model="form.base" :invalido="contaPequena" />
               <p v-if="form.company_id && faturamentoCarregado" class="mt-1 text-xs text-muted-foreground">
-                {{ textoFaturamento(faturamento, fmtMes(form.competencia)) }}{{
+                {{ textoFaturamento(faturamento, fmtMes(mesDaBase)) }}{{
                   baseAutomatica && form.base && form.base !== baseAutomatica ? ' — base trocada à mão' : ''
                 }}
               </p>
@@ -985,7 +1042,9 @@ defineExpose(exposto)
             <span>
               {{ recusada && !mudou ? 'Nada bloqueia o reenvio.' : 'Tudo certo para emitir.' }}
               <span class="text-muted-foreground">
-                {{ fmtBrl(previa?.valor || valorDecimal) }}<template v-if="formula"> = {{ formula }},</template>
+                {{ fmtBrl(previa?.valor || valorDecimal) }}<template v-if="formula"> = {{ formula }}<template
+                  v-if="textoMesDaBase"
+                > ({{ textoMesDaBase }})</template>,</template>
                 em {{ fmtMes(form.competencia) }}.
               </span>
             </span>

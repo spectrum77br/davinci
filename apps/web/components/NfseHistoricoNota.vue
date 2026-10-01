@@ -18,8 +18,8 @@ import {
 } from 'lucide-vue-next'
 import { Button } from '~/components/ui/button'
 import {
-  ambienteTexto, erroApi, fmtBrl, fmtDataHora, fmtDoc, fmtMes, fmtPctOrigem, mesParaData, MOTIVOS_CANCELAMENTO,
-  origemDaEmissao, situacao, TEXTO_TESTE, useNfseTela,
+  ambienteTexto, erroApi, fmtBrl, fmtDataHora, fmtDoc, fmtMes, fmtPctOrigem, mesBaseDaEmissao, mesParaData,
+  MOTIVOS_CANCELAMENTO, origemDaEmissao, situacao, TEXTO_TESTE, textoMesBase, useNfseTela,
   type Emissao, type EventoNota, type Msg, type NotaApi, type Tom,
   useNfseApi,
 } from '~/lib/nfse'
@@ -261,6 +261,12 @@ const deOnde = computed(() => {
   const base = x.base_calculo ?? x.snapshot?.servico?.base_calculo ?? null
   return p != null && base != null ? `${fmtPctOrigem(p, origemDaEmissao(x))} de ${fmtBrl(base)}` : ''
 })
+
+// 01/10/2026: a base veio do faturamento de outro mês (ex.: setembro numa nota de
+// outubro) → "faturamento de setembro/2026". Mesmo mês da nota: nada.
+const mesBase = computed(() =>
+  textoMesBase(mesBaseDaEmissao(nota.value), nota.value?.snapshot?.servico?.base_origem),
+)
 
 const tomador = computed(() => tela.tomadores.value.find((t) => t.id === nota.value?.tomador_id) ?? null)
 const modelo = computed(() => tela.modelos.value.find((m) => m.id === nota.value?.modelo_id) ?? null)
@@ -508,6 +514,7 @@ const recibo = computed(() => {
             <div v-if="deOnde" class="text-xs tabular-nums text-muted-foreground" title="percentual sobre a base de cálculo">
               {{ deOnde }}
             </div>
+            <div v-if="deOnde && mesBase" class="text-xs text-muted-foreground">{{ mesBase }}</div>
           </dd>
 
           <template v-if="n.v_issqn">

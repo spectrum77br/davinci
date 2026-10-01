@@ -202,6 +202,8 @@ export type ItemPrevia = {
   // 30/09: de onde veio a base (percentual) e o faturamento do mês da empresa.
   base_origem?: OrigemBase | null
   faturamento?: FaturamentoMes | null
+  // 01/10: de que mês é esse faturamento ('AAAA-MM-01'; null = valor fixo).
+  base_competencia?: string | null
   city_service_code?: string | null
   federal_service_code?: string | null
   c_nbs?: string | null
@@ -273,6 +275,9 @@ export type ItemIn = {
   // calcula o valor = base × % ÷ 100, arredondado no centavo.
   base_calculo?: string
   percentual?: string
+  // 01/10/2026: de que mês vem o faturamento da base ('AAAA-MM-01'). Sem ele, o
+  // mesmo mês da nota. A competência da nota não muda.
+  base_competencia?: string
   // Códigos do serviço só desta nota (vazio = os da empresa).
   city_service_code?: string | null
   federal_service_code?: string | null
@@ -290,6 +295,8 @@ export type ItemLote = {
   base_calculo?: string // percentual: a base digitada
   percentual?: string // percentual: "0.5000"
   percentual_origem?: OrigemPct | null // percentual: "da empresa" aparece junto do %
+  base_competencia?: string // percentual: mês da base ('AAAA-MM'), se não for o da nota
+  base_origem?: OrigemBase | null // percentual: só 'faturamento' mostra "faturamento de setembro/2026"
   item?: ItemIn // tipo 'emitir'
   emissao_id?: string // tipo 'reenviar'
   reenvio?: boolean // recusada antes ou reenvio → chip "vai de novo"
@@ -1255,6 +1262,11 @@ export function itemReenvio(e: Emissao): ItemLote {
     it.percentual = e.percentual
     it.percentual_origem = origemDaEmissao(e)
     if (e.base_calculo) it.base_calculo = e.base_calculo
+    const mb = mesBaseDaEmissao(e)
+    if (mb) {
+      it.base_competencia = mb
+      it.base_origem = e.snapshot?.servico?.base_origem ?? null
+    }
   }
   return it
 }
@@ -1430,6 +1442,41 @@ export function pctDoModelo(
 export function origemDaEmissao(e: Pick<Emissao, 'snapshot'> | null | undefined): OrigemPct | null {
   const o = e?.snapshot?.servico?.percentual_origem
   return o === 'item' || o === 'nota_fixa' || o === 'empresa' ? o : null
+}
+
+// --- Mês da base (01/10/2026) ---
+//
+// Eduardo: "como virou o mês, o faturamento de outubro está zerado ainda… precisa
+// ter a opção de eu escolher o mês, por exemplo setembro". A nota continua com o
+// mês de competência dela; só a BASE do % pode vir do faturamento de um mês
+// anterior (o servidor aceita até 12; a tela oferece o mesmo mês e os 3 anteriores).
+export const MESES_ANTES_BASE = 3
+
+// Opções do "Base do %: faturamento de [mês]": '' = o mesmo mês da nota (padrão).
+export function opcoesMesBase(mes: string): { valor: string; rotulo: string }[] {
+  if (!mesValido(mes)) return [{ valor: '', rotulo: 'mês da nota' }]
+  const out = [{ valor: '', rotulo: `${fmtMes(mes)} (mês da nota)` }]
+  for (let i = 1; i <= MESES_ANTES_BASE; i++) {
+    const m = somarMes(mes, -i)
+    out.push({ valor: m, rotulo: fmtMes(m) })
+  }
+  return out
+}
+
+// O mês da base de uma nota que já foi ('AAAA-MM'), só se não for o mês da nota.
+// Notas gravadas antes de 01/10 não têm: null (a base era do mês da nota).
+export function mesBaseDaEmissao(e: Pick<Emissao, 'snapshot' | 'competencia'> | null | undefined): string | null {
+  const b = e?.snapshot?.servico?.base_competencia
+  if (typeof b !== 'string' || !mesValido(b.slice(0, 7))) return null
+  return b.slice(0, 7) === (e?.competencia ?? '').slice(0, 7) ? null : b.slice(0, 7)
+}
+
+// "faturamento de setembro/2026" — só quando a base VEIO do faturamento daquele
+// mês. Base digitada à mão, a sugerida da nota fixa ou de origem desconhecida:
+// null — o mês não entrou na conta, e "mês da base: setembro/2026" fazia parecer
+// que sim (revisão de 01/10).
+export function textoMesBase(mesBase: string | null | undefined, origem?: OrigemBase | string | null): string | null {
+  return mesBase && origem === 'faturamento' ? `faturamento de ${fmtMes(mesBase)}` : null
 }
 
 // "0,5%" · "0,5% (da empresa)". Só a da empresa ganha o aviso: a da nota fixa

@@ -1403,6 +1403,232 @@ async def test_base_da_nota_de_percentual_vem_do_faturamento(
         assert p["base_origem"] == "nota_fixa" and p["base_calculo"] == "999999.00"
 
 
+# --- mês da base: faturamento de OUTRO mês (Eduardo, 01/10/2026) ---------------------------
+# "como virou o mês, o faturamento de outubro está zerado ainda… precisa ter a opção
+# de eu escolher o mês, por exemplo setembro." A nota continua de outubro; só a base
+# vem do faturamento de setembro. Em _vendas: setembro = R$ 150,50, outubro = R$ 70,00.
+
+
+def test_mes_da_base_padrao_e_limites():
+    out = date(2026, 10, 1)
+    assert svc.mes_da_base(out, None) == out  # padrão: o mesmo mês da nota
+    assert svc.mes_da_base(date(2026, 10, 20), date(2026, 9, 15)) == date(2026, 9, 1)
+    assert svc.mes_da_base(out, date(2025, 10, 1)) == date(2025, 10, 1)  # 12 meses: pode
+    for mes, msg in (
+        (date(2026, 11, 1), svc.MES_BASE_FUTURO),
+        (date(2025, 9, 1), svc.MES_BASE_ANTIGO),
+    ):
+        with pytest.raises(svc.NfseError) as e:
+            svc.mes_da_base(out, mes)
+        assert e.value.status == 422
+        assert e.value.detail == {"code": "mes_da_base_invalido", "mensagem": msg}
+
+
+@pytest.mark.asyncio
+async def test_completar_base_usa_o_faturamento_do_mes_da_base(
+    db: AsyncSession, operador: User, cenario: dict
+):
+    await _vendas(db, operador, CNPJ_PREST)
+
+    def item(base_competencia: date | None = None) -> svc.Item:
+        it = svc.Item(
+            company_id=cenario["prest"],
+            tomador_id=uuid.uuid4(),
+            descricao="x",
+            valor=None,
+            base_competencia=base_competencia,
+        )
+        return it.usar_percentual(None, Decimal("10"))
+
+    # Sem mês da base: o faturamento do mês da nota, como antes de 01/10.
+    it = await svc.completar_base(db, item(), date(2026, 10, 1))
+    assert it.base_calculo == Decimal("70.00") and it.base_origem == svc.BASE_FATURAMENTO
+    assert it.base_competencia == date(2026, 10, 1) and it.valor == Decimal("7.00")
+    # Base de setembro numa nota de outubro.
+    it = await svc.completar_base(db, item(date(2026, 9, 1)), date(2026, 10, 1))
+    assert it.base_calculo == Decimal("150.50") and it.base_origem == svc.BASE_FATURAMENTO
+    assert it.base_competencia == date(2026, 9, 1) and it.faturamento.pedidos == 2
+    assert it.valor == Decimal("15.05")
+    # Base digitada igual ao faturamento de setembro continua "do faturamento".
+    it = item(date(2026, 9, 1)).usar_percentual(Decimal("150.50"), Decimal("10"))
+    await svc.completar_base(db, it, date(2026, 10, 1))
+    assert it.base_origem == svc.BASE_FATURAMENTO
+    # Mês da base depois do mês da nota: recusa.
+    with pytest.raises(svc.NfseError):
+        await svc.completar_base(db, item(date(2026, 11, 1)), date(2026, 10, 1))
+
+
+@pytest.mark.asyncio
+async def test_previa_emitir_e_reenvio_com_a_base_de_outro_mes(
+    client: AsyncClient,
+    db: AsyncSession,
+    operador: User,
+    cenario: dict,
+    auth_as: Callable[[User | None], None],
+):
+    auth_as(operador)
+    await _vendas(db, operador, CNPJ_PREST)
+    tomador = (
+        await client.post(
+            "/api/nfse/tomadores",
+            json={"tipo": "grupo", "company_id": str(cenario["toma_company"])},
+        )
+    ).json()
+
+    async def modelo(**campos) -> dict:
+        r = await client.post(
+            "/api/nfse/modelos",
+            json={
+                "company_id": str(cenario["prest"]),
+                "tomador_id": tomador["id"],
+                "descricao": "Intermediação {competencia}",
+                **campos,
+            },
+        )
+        assert r.status_code == 201, r.text
+        return r.json()
+
+    pct = await modelo(nome="Comissão", tipo_valor="percentual", percentual="10")
+    fixo = await modelo(nome="Mensalidade", valor="1500.00")
+    setembro = {"modelo_id": pct["id"], "base_competencia": "2026-09-01"}
+
+    with respx.mock(assert_all_mocked=True, assert_all_called=False) as api:
+        rotas = _rotas(api)
+
+        async def previa(*itens: dict) -> list[dict]:
+            r = await client.post(
+                "/api/nfse/previa", json={"competencia": "2026-10-01", "itens": list(itens)}
+            )
+            assert r.status_code == 200, r.text
+            return r.json()["itens"]
+
+        # Padrão (sem mês da base): o faturamento de outubro.
+        (p,) = await previa({"modelo_id": pct["id"]})
+        assert p["base_calculo"] == "70.00" and p["base_competencia"] == "2026-10-01"
+        # Setembro: a base é o faturamento de setembro; a nota continua de outubro.
+        p, f = await previa(setembro, {"modelo_id": fixo["id"], "base_competencia": "2026-09-01"})
+        assert p["base_calculo"] == "150.50" and p["valor"] == "15.05"
+        assert p["base_origem"] == "faturamento" and p["base_competencia"] == "2026-09-01"
+        assert p["faturamento"]["valor"] == "150.50" and p["faturamento"]["pedidos"] == 2
+        assert p["descricao"] == "Intermediação 10/2026" and p["problemas"] == []
+        # Valor fixo não muda com o mês da base.
+        assert f["valor"] == "1500.00" and f["base_competencia"] is None
+        assert f["faturamento"] is None
+
+        # Mês da base depois do mês da nota, ou mais de 12 meses antes: 422 na prévia.
+        for mes, msg in (("2026-11-01", svc.MES_BASE_FUTURO), ("2025-09-01", svc.MES_BASE_ANTIGO)):
+            r = await client.post(
+                "/api/nfse/previa",
+                json={
+                    "competencia": "2026-10-01",
+                    "itens": [{"modelo_id": pct["id"], "base_competencia": mes}],
+                },
+            )
+            assert r.status_code == 422, r.text
+            assert r.json()["detail"] == {"code": "mes_da_base_invalido", "mensagem": msg}
+
+        # ... e no emitir, sem nenhum POST.
+        rotas["post"].mock(side_effect=_aceita)
+        r = await client.post(
+            "/api/nfse/emitir",
+            json={
+                "competencia": "2026-10-01",
+                "item": {"modelo_id": pct["id"], "base_competencia": "2026-11-01"},
+            },
+        )
+        assert r.status_code == 422 and r.json()["detail"]["code"] == "mes_da_base_invalido"
+        assert rotas["post"].call_count == 0
+
+        # Emitir com a base de setembro: o retrato grava o mês da base.
+        r = await client.post(
+            "/api/nfse/emitir", json={"competencia": "2026-10-01", "item": setembro}
+        )
+        assert r.status_code == 200, r.text
+        e = r.json()
+        assert e["competencia"] == "2026-10-01"
+        assert e["base_calculo"] == "150.50" and e["valor_servico"] == "15.05"
+        serv = e["snapshot"]["servico"]
+        assert serv["base_competencia"] == "2026-09-01" and serv["base_origem"] == "faturamento"
+        assert serv["faturamento"]["valor"] == "150.50"
+        assert json.loads(rotas["post"].calls[0].request.content)["servicesAmount"] == 15.05
+
+        # Recusada: o reenvio vai com a mesma base E o mesmo mês da base (setembro),
+        # não com o faturamento de outubro.
+        rotas["nota"].mock(
+            return_value=httpx.Response(200, json=_nota("IssueFailed", "Error", flowMessage="x"))
+        )
+        rotas["external"].mock(
+            return_value=httpx.Response(
+                200, json={"serviceInvoices": [_nota("IssueFailed", "Error", flowMessage="x")]}
+            )
+        )
+
+        async def recusar(emissao_id: str) -> dict:
+            r = await client.post("/api/nfse/emissoes/atualizar", json={"ids": [emissao_id]})
+            (x,) = r.json()["emissoes"]
+            assert x["status"] == "rejeitada"
+            return x
+
+        e = await recusar(e["id"])
+
+        # Revisão de 01/10: a recusada que sai de novo pela aba "Emitir do mês" (o
+        # /emitir, que reaproveita a linha) manda a base e o mês GRAVADOS nela — o
+        # retrato continua "faturamento de setembro", não "base digitada" de outubro.
+        r = await client.post(
+            "/api/nfse/emitir",
+            json={
+                "competencia": "2026-10-01",
+                "item": {
+                    "modelo_id": pct["id"],
+                    "base_calculo": "150.50",
+                    "percentual": "10",
+                    "base_competencia": "2026-09-01",
+                },
+            },
+        )
+        assert r.status_code == 200, r.text
+        x = r.json()
+        assert x["id"] == e["id"] and x["tentativas"] == 2 and x["base_calculo"] == "150.50"
+        serv = x["snapshot"]["servico"]
+        assert serv["base_competencia"] == "2026-09-01" and serv["base_origem"] == "faturamento"
+        assert serv["faturamento"]["valor"] == "150.50"
+        assert json.loads(rotas["post"].calls[1].request.content)["servicesAmount"] == 15.05
+
+        # E o reenvio pela rota da recusada reaproveita o mês gravado sozinho.
+        e = await recusar(x["id"])
+        r = await client.post(f"/api/nfse/emissoes/{e['id']}/reenviar")
+        assert r.status_code == 200, r.text
+        e = r.json()
+        assert e["tentativas"] == 3 and e["base_calculo"] == "150.50"
+        serv = e["snapshot"]["servico"]
+        assert serv["base_competencia"] == "2026-09-01" and serv["base_origem"] == "faturamento"
+        assert serv["faturamento"]["valor"] == "150.50"
+        assert json.loads(rotas["post"].calls[2].request.content)["servicesAmount"] == 15.05
+
+
+@pytest.mark.asyncio
+async def test_reenvio_de_nota_gravada_antes_do_mes_da_base_usa_o_mes_da_nota(
+    db: AsyncSession, cenario: dict
+):
+    """Nota de percentual gravada antes de 01/10 (sem base_competencia no
+    retrato): o reenvio fica no mês da nota, como era."""
+    e = NfseEmissao(
+        company_id=cenario["prest"],
+        competencia=date(2026, 9, 1),
+        status="rejeitada",
+        descricao="x",
+        valor_servico=Decimal("15.05"),
+        base_calculo=Decimal("150.50"),
+        percentual=Decimal("10"),
+        snapshot={"servico": {"base_origem": "faturamento", "percentual_origem": "nota_fixa"}},
+    )
+    it = svc.Item(company_id=cenario["prest"], tomador_id=uuid.uuid4(), descricao="x", valor=None)
+    svc.repetir_valor(it, e)
+    assert it.base_competencia is None and it.base_calculo == Decimal("150.50")
+    await svc.completar_base(db, it, e.competencia)
+    assert it.base_competencia == date(2026, 9, 1) and it.base_origem == "faturamento"
+
+
 # --- tomadores automáticos: as contas Bling de NF (Eduardo, 30/09) ------------------------
 
 _EMIT_XML = (

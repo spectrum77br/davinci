@@ -31,8 +31,8 @@ import { AlertTriangle, ChevronDown, Clock, FileDown, FlaskConical, Loader2, Pri
 import { Button } from '~/components/ui/button'
 import {
   codigoErro, empresaTeste, erroApi, explicarProblema, falhaDeRede, fmtBrl, fmtMes, fmtPctOrigem, MAX_LOTE_ARQUIVOS,
-  mesParaData, origemDaEmissao, plural, prestadorPorId, problemasApi, resultadoDaEmissao, situacao, temArquivoNaNfeio,
-  TEXTO_TESTE, textoIr, TOM_TEXTO, useNfseTela,
+  mesBaseDaEmissao, mesParaData, origemDaEmissao, plural, prestadorPorId, problemasApi, resultadoDaEmissao, situacao,
+  temArquivoNaNfeio, TEXTO_TESTE, textoIr, textoMesBase, TOM_TEXTO, useNfseTela,
   type Emissao, type EstadoLote, type ItemLote, type LoteApi, type ResultadoLote, type SecaoEmpresa,
   useNfseApi,
 } from '~/lib/nfse'
@@ -133,13 +133,18 @@ const totalValor = computed(() => itens.value.reduce((s, it) => s + (Number(it.v
 // --- Nota de percentual --------------------------------------------------------------
 
 // "0,5% de R$ 200.000,00" — do item ou, depois de emitida, da própria nota.
-// Com a % da empresa: "0,5% (da empresa) de R$ 200.000,00".
+// Com a % da empresa: "0,5% (da empresa) de R$ 200.000,00". Com a base de outro
+// mês (01/10): "0,5% de R$ 200.000,00 (faturamento de setembro/2026)".
 function formulaDe(it: ItemLote): string | null {
   const e = resultados.value[it.chave]?.emissao
   const pct = it.percentual || e?.percentual
   const base = it.base_calculo || e?.base_calculo
   if (!pct || !base) return null
-  return `${fmtPctOrigem(pct, it.percentual ? it.percentual_origem : origemDaEmissao(e))} de ${fmtBrl(base)}`
+  const f = `${fmtPctOrigem(pct, it.percentual ? it.percentual_origem : origemDaEmissao(e))} de ${fmtBrl(base)}`
+  const mb = it.base_competencia
+    ? textoMesBase(it.base_competencia, it.base_origem)
+    : textoMesBase(mesBaseDaEmissao(e), e?.snapshot?.servico?.base_origem)
+  return mb ? `${f} (${mb})` : f
 }
 
 const formulaReenvio = computed(() => (reenvio.value && itens.value[0] ? formulaDe(itens.value[0]) : null))

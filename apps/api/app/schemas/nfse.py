@@ -311,7 +311,12 @@ class ItemIn(BaseModel):
     Percentual (29/09): nota fixa de percentual usa `base_calculo` (ou a base
     sugerida do modelo) e `percentual` (ou o do modelo, ou o da empresa); avulsa
     manda OU `valor`, OU `base_calculo` + `percentual` (sem `percentual`, o da
-    empresa). O servidor faz a conta."""
+    empresa). O servidor faz a conta.
+
+    `base_competencia` (01/10/2026, Eduardo: "o faturamento de outubro está
+    zerado ainda… precisa ter a opção de eu escolher o mês, por exemplo
+    setembro"): de que mês vem o faturamento que vira a base (qualquer dia do
+    mês serve). None = o mesmo mês da nota. A competência da nota não muda."""
 
     modelo_id: UUID | None = None
     company_id: UUID | None = None
@@ -320,6 +325,7 @@ class ItemIn(BaseModel):
     valor: Decimal | None = None
     base_calculo: Decimal | None = None
     percentual: Decimal | None = None
+    base_competencia: date | None = None
     city_service_code: str | None = Field(default=None, max_length=30)
     federal_service_code: str | None = Field(default=None, max_length=30)
     c_nbs: str | None = None

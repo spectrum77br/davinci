@@ -132,6 +132,9 @@ class Item:
     base_origem: str | None = None
     base_padrao: Decimal | None = None  # a base sugerida da nota fixa (reserva)
     faturamento: Any = None  # o faturamento do mês usado/mostrado (prévia)
+    # 01/10/2026: de que mês é o faturamento da base (1º dia). None = o mesmo
+    # mês da nota (a competência não muda) — ver `mes_da_base`.
+    base_competencia: date | None = None
 
     def usar_fixo(self, valor: Decimal | None) -> Item:
         self.tipo_valor = "fixo"
@@ -198,16 +201,52 @@ BASE_FATURAMENTO = "faturamento"  # vendas do mês da empresa (aba Faturamento)
 BASE_DIGITADA = "digitada"  # a pessoa trocou a base
 BASE_NOTA_FIXA = "nota_fixa"  # a base sugerida da nota fixa (empresa sem loja/sem venda)
 
+# Mês da base (01/10/2026, Eduardo: "como virou o mês, o faturamento de outubro
+# está zerado ainda… precisa ter a opção de eu escolher o mês, por exemplo
+# setembro"): a nota continua com a competência dela; só a BASE do % pode vir
+# do faturamento de um mês anterior. Até 12 meses para trás, nunca para frente.
+MESES_BASE_MAX = 12
+MES_BASE_FUTURO = "O mês da base não pode ser depois do mês da nota."
+MES_BASE_ANTIGO = f"O mês da base pode ser no máximo {MESES_BASE_MAX} meses antes do mês da nota."
+
+
+def mes_da_base(competencia: date, base_competencia: date | None) -> date:
+    """O mês do faturamento que vira a base da nota de percentual (sempre o
+    1º dia). None = o mesmo mês da nota. Mês depois do da nota, ou mais de 12
+    meses antes, é recusado (422) em vez de virar base calado."""
+    competencia = competencia.replace(day=1)
+    if base_competencia is None:
+        return competencia
+    mes = base_competencia.replace(day=1)
+    distancia = (competencia.year - mes.year) * 12 + competencia.month - mes.month
+    if distancia < 0:
+        raise NfseError(422, "mes_da_base_invalido", MES_BASE_FUTURO)
+    if distancia > MESES_BASE_MAX:
+        raise NfseError(422, "mes_da_base_invalido", MES_BASE_ANTIGO)
+    return mes
+
+
+def _mes_gravado(v: Any) -> date | None:
+    """'2026-09-01' do retrato da nota → date (notas de antes de 01/10: None)."""
+    try:
+        return date.fromisoformat(str(v)[:10]) if v else None
+    except ValueError:
+        return None
+
 
 async def completar_base(session: AsyncSession, item: Item, competencia: date) -> Item:
     """Nota de percentual (Eduardo, 30/09: "faz com base no faturamento já"):
     a base é o faturamento da empresa no mês — todas as lojas com o CNPJ dela,
     mesma régua da aba Faturamento. Sem base na nota: o faturamento (se houver
     venda), senão a base sugerida da nota fixa. Base que veio digitada igual ao
-    faturamento continua "do faturamento" (a tela manda o que mostrou)."""
+    faturamento continua "do faturamento" (a tela manda o que mostrou).
+
+    01/10/2026: o faturamento é o do mês da base (`item.base_competencia`, ex.:
+    setembro numa nota de outubro); sem ele, o do mês da nota, como antes."""
     if item.tipo_valor != "percentual":
         return item
-    fat = await faturamento_da_empresa(session, item.company_id, competencia)
+    item.base_competencia = mes_da_base(competencia, item.base_competencia)
+    fat = await faturamento_da_empresa(session, item.company_id, item.base_competencia)
     item.faturamento = fat
     tem_venda = fat is not None and fat.valor > 0
     if item.base_calculo is None:
@@ -262,6 +301,9 @@ def repetir_valor(item: Item, e: NfseEmissao) -> Item:
         # A origem que a nota recusada gravou (None nas gravadas antes da % da empresa).
         serv = (e.snapshot or {}).get("servico") or {}
         item.base_origem = serv.get("base_origem")  # a base continua a mesma, e a origem dela
+        # E o mês dela (01/10/2026): base de setembro numa nota de outubro volta
+        # como base de setembro (None nas gravadas antes = o mês da nota).
+        item.base_competencia = _mes_gravado(serv.get("base_competencia"))
         return item.usar_percentual(e.base_calculo, e.percentual, serv.get("percentual_origem"))
     return item.usar_fixo(e.valor_servico)
 
@@ -308,6 +350,13 @@ def checar_conta(item: Item) -> None:
 
 def _txt(v: Decimal | None, casas: Decimal) -> str | None:
     return str(Decimal(v).quantize(casas)) if v is not None else None
+
+
+def _mes_txt(item: Item) -> str | None:
+    """O mês da base ('2026-09-01') da nota de percentual; None na de valor fixo."""
+    if item.tipo_valor != "percentual" or item.base_competencia is None:
+        return None
+    return item.base_competencia.isoformat()
 
 
 # --- retenção de IR (regra medida nas 137 notas reais, 29/09) --------------------
@@ -943,6 +992,8 @@ async def previa(
         # 30/09: 'faturamento' | 'digitada' | 'nota_fixa' (None = nota de valor fixo)
         "base_origem": item.base_origem,
         "faturamento": item.faturamento.resumo() if item.faturamento else None,
+        # 01/10/2026: de que mês é o `faturamento` acima ('AAAA-MM-01'; None = fixo).
+        "base_competencia": _mes_txt(item),
         "base_calculo": _txt(item.base_calculo, T.CENTAVO),
         "city_service_code": m.codigos[0],
         "federal_service_code": m.codigos[1],
@@ -1556,6 +1607,8 @@ async def emitir(
                 "percentual_origem": item.percentual_origem,
                 "base_origem": item.base_origem,
                 "faturamento": item.faturamento.resumo() if item.faturamento else None,
+                # 01/10/2026: o mês do faturamento da base (o reenvio usa o mesmo).
+                "base_competencia": _mes_txt(item),
             },
             "ir": {
                 "retem": m.ir.retem,

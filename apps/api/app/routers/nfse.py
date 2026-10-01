@@ -507,7 +507,20 @@ async def _pct_empresa(session: AsyncSession, company_id: UUID) -> Decimal | Non
     return c.percentual_servico if c is not None else None
 
 
-async def _item(session: AsyncSession, i: ItemIn) -> svc.Item:
+async def _item(session: AsyncSession, i: ItemIn, competencia: date) -> svc.Item:
+    """O item com o mês da base (01/10/2026): mês depois do da nota, ou mais de
+    12 meses antes, recusa o pedido inteiro (422) — a prévia não mostra uma
+    base que a emissão recusaria."""
+    try:
+        svc.mes_da_base(competencia, i.base_competencia)
+    except svc.NfseError as e:
+        raise _http(e) from e
+    it = await _item_da_nota(session, i)
+    it.base_competencia = i.base_competencia.replace(day=1) if i.base_competencia else None
+    return it
+
+
+async def _item_da_nota(session: AsyncSession, i: ItemIn) -> svc.Item:
     """O % da nota de percentual: o do item → o da nota fixa → o da empresa
     (`svc.resolver_percentual`); sem nenhum, a prévia diz o que falta."""
     if i.modelo_id:
@@ -564,7 +577,12 @@ async def previa(body: PreviaIn, session: Sess, _u: Annotated[User, Depends(_vie
         for i in body.itens:
             try:
                 itens.append(
-                    await svc.previa(session, await _item(session, i), body.competencia, cli=cli)
+                    await svc.previa(
+                        session,
+                        await _item(session, i, body.competencia),
+                        body.competencia,
+                        cli=cli,
+                    )
                 )
             except svc.NfseError as e:
                 itens.append(
@@ -593,7 +611,7 @@ async def _emissao_out(session: AsyncSession, e: NfseEmissao) -> EmissaoOut:
 async def emitir(
     body: EmitirIn, session: Sess, user: Annotated[User, Depends(_edit)]
 ) -> EmissaoOut:
-    item = await _item(session, body.item)
+    item = await _item(session, body.item, body.competencia)
     try:
         # Percentual sem base (nem faturamento) ou sem %: o emitir recusa antes
         # de ir à NFE.io (checar_conta depois de completar a base).
@@ -725,7 +743,7 @@ async def reenviar(
         )
     # A descrição que foi (sem o bloco de retenções: o IR é recalculado).
     item.descricao = serv.get("descricao_base") or e.descricao
-    # Mesmo valor — ou a mesma base e o mesmo % — da nota recusada.
+    # Mesmo valor — ou a mesma base, o mesmo % e o mesmo mês da base — da nota recusada.
     svc.repetir_valor(item, e)
     try:
         e = await svc.emitir(session, item, e.competencia, user.id, reenviar=e)

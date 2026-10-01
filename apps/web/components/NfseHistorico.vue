@@ -24,8 +24,9 @@ import {
 } from 'lucide-vue-next'
 import { Button } from '~/components/ui/button'
 import {
-  erroApi, fmtBrl, fmtCompetencia, fmtDataHora, fmtPctOrigem, MAX_LOTE_ARQUIVOS, mesParaData, origemDaEmissao, plural,
-  prestadorPorId, STATUS_PARA_RESOLVER, temArquivoNaNfeio, tomadorDaEmissao, useNfseTela, type Emissao,
+  erroApi, fmtBrl, fmtCompetencia, fmtDataHora, fmtPctOrigem, MAX_LOTE_ARQUIVOS, mesBaseDaEmissao, mesParaData,
+  origemDaEmissao, plural, prestadorPorId, STATUS_PARA_RESOLVER, temArquivoNaNfeio, textoMesBase, tomadorDaEmissao,
+  useNfseTela, type Emissao,
   useNfseApi,
 } from '~/lib/nfse'
 
@@ -408,6 +409,11 @@ function deOnde(l: Emissao): string {
   return pct != null && base != null ? `${fmtPctOrigem(pct, origemDaEmissao(l))} de ${fmtBrl(base)}` : ''
 }
 
+// 01/10/2026: base de outro mês que não o da nota → "faturamento de setembro/2026".
+function mesBaseDe(l: Emissao): string | null {
+  return textoMesBase(mesBaseDaEmissao(l), l.snapshot?.servico?.base_origem)
+}
+
 function motivoRecusa(l: Emissao): string {
   const m = l.erros?.[0]
   return m?.o_que_fazer || m?.descricao || l.flow_message || 'veja o motivo no detalhe'
@@ -628,6 +634,7 @@ function motivoRecusa(l: Emissao): string {
                 <div v-if="deOnde(l)" class="text-xs text-muted-foreground" title="percentual sobre a base de cálculo">
                   {{ deOnde(l) }}
                 </div>
+                <div v-if="deOnde(l) && mesBaseDe(l)" class="text-xs text-muted-foreground">{{ mesBaseDe(l) }}</div>
               </td>
               <td class="hidden whitespace-nowrap tabular-nums text-muted-foreground lg:table-cell">
                 {{ AUTORIZADAS.has(l.status) && l.dh_emi ? fmtDataHora(l.dh_emi) : '—' }}
