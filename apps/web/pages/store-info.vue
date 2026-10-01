@@ -118,6 +118,7 @@ const PLATFORMS = [
   { value: 'tiktok', label: 'TikTok' },
   { value: 'magalu', label: 'Magalu' },
   { value: 'shein', label: 'Shein' },
+  { value: 'site', label: 'Site' },
 ]
 
 function platformLabel(p: string) {
