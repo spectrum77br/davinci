@@ -1,4 +1,4 @@
-"""Polls marketplace APIs (Shopee/ML/Amazon) for shipped-status changes
+"""Polls marketplace APIs (Shopee/ML/Amazon/TikTok/Magalu) for shipment changes
 on Bling orders that haven't yet transitioned to situacao=15 ("Em
 andamento") in Bling.
 
@@ -54,9 +54,12 @@ from app.services.amazon_shipment_status import (
     amazon_shipment_confirmed,
 )
 from app.services.bling_situacoes import SITUACOES_ENVIADO_ETIQUETA_STR
+from app.services.magalu_shipment_status import MagaluShipmentStatus, get_magalu_shipment_status
+from app.services.magalu_shipment_sync import apply_magalu_shipment
 from app.services.margem_audit import record_margem_audit
 from app.services.marketplaces.amazon import AmazonClient
 from app.services.marketplaces.bling import BlingClient
+from app.services.marketplaces.magalu import MagaluClient
 from app.services.marketplaces.ml import MercadoLivreClient
 from app.services.marketplaces.shopee import ShopeeClient
 from app.services.marketplaces.tiktok import TikTokClient
@@ -392,6 +395,9 @@ async def run_check_marketplace_shipped_orders() -> dict[str, int]:
             logger.warning("shipment_check_no_bling_integration")
             return summary
 
+        # One client for the entire sweep keeps rotated tokens coherent across
+        # stores. The client durably persists them in its own short transaction.
+        bling_client: BlingClient | None = None
         for loja, orders in by_loja.items():
             try:
                 store, integration = await _resolve_store_and_integration(session, loja)
@@ -411,9 +417,13 @@ async def run_check_marketplace_shipped_orders() -> dict[str, int]:
             summary["stores_checked"] += 1
 
             deadlines: dict[int, datetime] = {}
+            magalu_confirmations: dict[int, MagaluShipmentStatus] = {}
+            query_errors: list[str] = []
             try:
                 shipped_bling_ids = await _check_marketplace_shipped(
                     session, integration, orders, deadlines,
+                    magalu_confirmations=magalu_confirmations,
+                    query_errors=query_errors,
                 )
             except Exception as e:  # noqa: BLE001
                 logger.exception(
@@ -423,6 +433,7 @@ async def run_check_marketplace_shipped_orders() -> dict[str, int]:
                 summary["errors"] += 1
                 continue
             summary["shipped_found"] += len(shipped_bling_ids)
+            summary["errors"] += len(query_errors)
 
             # Prazo de despacho ("despachar até") capturado nas MESMAS
             # consultas acima — carimba mesmo quando nada foi enviado (é
@@ -444,8 +455,35 @@ async def run_check_marketplace_shipped_orders() -> dict[str, int]:
             if not shipped_bling_ids:
                 continue
 
-            bling_client = await _build_bling_client(session, bling_integration)
+            if bling_client is None:
+                bling_client = await _build_bling_client(
+                    session, bling_integration, persist_in_session=False,
+                )
             for bling_id, real_ship_date in shipped_bling_ids.items():
+                if integration.platform == IntegrationPlatform.MAGALU:
+                    confirmation = magalu_confirmations.get(bling_id)
+                    candidate = cand_by_id.get(bling_id)
+                    if confirmation is None or candidate is None:
+                        continue
+                    try:
+                        async with session.begin_nested():
+                            applied = await apply_magalu_shipment(
+                                session, bling_client, candidate, confirmation,
+                            )
+                        summary["bling_updated"] += int(applied.bling_updated)
+                        summary["local_updated"] += applied.local_updated
+                        summary["errors"] += int(applied.error)
+                        logger.info(
+                            "shipment_check_magalu_apply", bling_id=bling_id,
+                            result=applied.reason, local_updated=applied.local_updated,
+                        )
+                    except Exception as exc:  # one failure must not roll back other orders
+                        summary["errors"] += 1
+                        logger.warning(
+                            "shipment_check_magalu_apply_failed", bling_id=bling_id,
+                            error_type=type(exc).__name__,
+                        )
+                    continue
                 try:
                     await bling_client.update_order_situacao(
                         int(bling_id), _SHIPPED_SITUACAO,
@@ -663,6 +701,7 @@ async def _get_bling_integration(session: AsyncSession) -> Integration | None:
 
 async def _build_bling_client(
     session: AsyncSession, integration: Integration,
+    *, persist_in_session: bool = True,
 ) -> BlingClient:
     creds = decrypt_json(integration.credentials)
 
@@ -673,7 +712,13 @@ async def _build_bling_client(
             integration.token_expires_at = datetime.fromtimestamp(int(exp), tz=UTC)
         await session.flush()
 
-    return BlingClient(creds, on_token_refresh=_persist, integration_id=integration.id)
+    # Bling already persists each token rotation durably using integration_id.
+    # Magalu's per-order savepoints must not lock this row in the sweep's
+    # outer transaction, which can deadlock a subsequent token rotation.
+    return BlingClient(
+        creds, on_token_refresh=_persist if persist_in_session else None,
+        integration_id=integration.id,
+    )
 
 
 # ─── per-marketplace shipment checks ───────────────────────────────
@@ -684,6 +729,9 @@ async def _check_marketplace_shipped(
     integration: Integration,
     orders: list[BlingOrder],
     deadlines: dict[int, datetime] | None = None,
+    *,
+    magalu_confirmations: dict[int, MagaluShipmentStatus] | None = None,
+    query_errors: list[str] | None = None,
 ) -> dict[int, date | None]:
     """Returns `{bling_id: real_ship_date_BRT}` for orders the marketplace
     reports as shipped. Value is None when the marketplace surfaced the
@@ -717,7 +765,51 @@ async def _check_marketplace_shipped(
     platform = integration.platform
     shipped: dict[int, date | None] = {}
 
-    if platform == IntegrationPlatform.SHOPEE:
+    if platform == IntegrationPlatform.MAGALU:
+        if integration.archived_at is not None or integration.status != "active":
+            return shipped
+        # Magalu's own client persists token rotations with a separate locked
+        # session; do not attach the sweep's long-lived credential callback.
+        client = MagaluClient(creds, integration_id=integration.id)
+        sem = asyncio.Semaphore(2)
+
+        async def one_magalu(order: BlingOrder):
+            async with sem:
+                return order, await get_magalu_shipment_status(client, order.numeroloja)
+
+        targets = [order for order in orders if order.numeroloja and order.bling_id]
+        results = await asyncio.gather(
+            *(one_magalu(order) for order in targets), return_exceptions=True,
+        )
+        failures = 0
+        for result in results:
+            if isinstance(result, BaseException):
+                failures += 1
+                if query_errors is not None:
+                    query_errors.append("request_failed")
+                continue
+            order, confirmation = result
+            bid = int(order.bling_id)
+            if not confirmation.confirmed:
+                if confirmation.reason not in ("not_shipped", "order_not_shipped"):
+                    failures += 1
+                    if query_errors is not None:
+                        query_errors.append(confirmation.reason or "invalid_response")
+                logger.info(
+                    "shipment_check_magalu_pending", bling_id=bid, reason=confirmation.reason,
+                )
+                continue
+            shipped[bid] = (
+                confirmation.shipped_at.astimezone(_BRT).date()
+                if confirmation.shipped_at else None
+            )
+            if magalu_confirmations is not None:
+                magalu_confirmations[bid] = confirmation
+        logger.info(
+            "shipment_check_magalu", orders=len(targets), shipped=len(shipped), errors=failures,
+        )
+
+    elif platform == IntegrationPlatform.SHOPEE:
         client = ShopeeClient(creds, on_token_refresh=_persist)
         order_sns = [str(o.numeroloja) for o in orders if o.numeroloja]
         status_map = await client.get_order_status_map(order_sns)
