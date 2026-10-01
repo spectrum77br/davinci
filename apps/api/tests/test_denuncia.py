@@ -324,7 +324,8 @@ def test_painel_rodadas_frentes_e_alarme():
 
     # aba Passos: os 12, com a última vez de hoje
     passos = {x["acao"]: x for x in p["passos"]}
-    assert len(p["passos"]) == 12 and p["passos"][0]["acao"] == "checagem"
+    assert len(p["passos"]) == 13 and p["passos"][0]["acao"] == "checagem"
+    assert p["passos"][-1]["acao"] == "ativos_inativos"
     assert passos["varredura_mercadolivre"]["ultima"]["status"] == "rodando"
     assert passos["varredura_shopee"]["ultima"]["vezes"] == 2
     assert passos["varredura_amazon"]["ultima"] is None
@@ -501,7 +502,7 @@ async def test_robo_botoes_ligar_e_rodar_passo(client, make_user, auth_as):
     j = (await client.get("/api/denuncia/robo")).json()
     assert [c["tipo"] for c in j["comandos"]] == ["passo", "automatico"]
     assert j["comandos"][1]["ok"] is True and j["comandos"][1]["entregue_em"]
-    assert len(j["passos"]) == 12
+    assert len(j["passos"]) == 13
 
 
 

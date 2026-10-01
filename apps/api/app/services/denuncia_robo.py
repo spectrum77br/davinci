@@ -11,7 +11,7 @@ problemas — e o mini manda pra cá. Aqui vira o que a tela mostra:
   aconteceu em 30/09 18h e 01/10 06h: ninguém pediu a rodada e ninguém viu;
 - **frentes**: o que cada fila do robô está fazendo agora (navegador do
   perfil 50, Anatel/SEI no Safari, escritório);
-- **passos** (01/10, desenho da Ouvidoria › Robôs): os 12 passos com onde
+- **passos** (01/10, desenho da Ouvidoria › Robôs): os passos com onde
   rodam, o que fazem e a última vez de hoje (status, progresso, fim do log);
 - **ocorrências**: o que só uma pessoa resolve (tipo "pessoa": captcha,
   assinatura no SEI, código que não chegou, robô parado, mini sem notícia) e
@@ -58,8 +58,10 @@ PASSOS: dict[str, tuple[int, str, str, str]] = {
     "varredura_tiktok": (4, "TikTok", "perfil 50 + celular",
                          "procura no site, salva e denuncia só o Nosso (app no celular)"),
     "varredura_amazon": (5, "Amazon", "perfil 50", "procura e registra (ainda não denuncia)"),
-    "conferencia": (6, 'Conferência e "saiu do ar?"', "perfil 50",
-                    "print no ato, resultados da Shopee, reenvio das recusadas do Nosso e quem saiu do ar"),
+    # 01/10 (Vinicius): o "saiu do ar?" levava 3–4 h dentro do passo 6 e virou o último passo,
+    # feito com o robô parado (para quando a rodada chega e continua depois).
+    "conferencia": (6, "Conferência e denúncias rejeitadas", "perfil 50",
+                    "print no ato, resultados da Shopee e denunciar de novo as recusadas do Nosso (ML e Shopee)"),
     "anatel": (7, "Anatel / SEI", "Safari",
                "lê o andamento das antigas e peticiona as novas no SEI"),
     "compras": (8, "Compras de prova", "perfil 50", "atualiza os pedidos da conta compradora"),
@@ -67,6 +69,9 @@ PASSOS: dict[str, tuple[int, str, str, str]] = {
     "relatorio": (10, "Relatório", "escritório", "denunciados × responderam × resolvidos"),
     "capa_perguntas": (11, "Perguntas nos anúncios disfarçados", "perfil 50",
                        "pergunta ao vendedor de capa/tablet se vende o aparelho"),
+    "ativos_inativos": (12, "Conferência de anúncios ativos/inativos", "perfil 50",
+                        "abre um por um os anúncios que acompanhamos e vê quem saiu do ar; "
+                        "roda com o robô parado, para se a rodada chegar e continua depois"),
 }
 FRENTES = (
     ("M", "Navegador (perfil 50)", "Mercado Livre, Shopee, TikTok, Amazon e conferências"),
