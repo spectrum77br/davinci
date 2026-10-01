@@ -2,8 +2,10 @@
 
 ffmpeg DE VERDADE (pulado se a máquina não tem): foto 1500x1500 e MP4 de 3 s
 com áudio feitos pelo próprio ffmpeg (`lavfi`), passando pelo código real com o
-sidecar falso. Depois, a varredura (teto, LRU, versão velha, tmp), a
-conferência de mudança, a máscara do access log e os PNGs dos logos.
+sidecar falso — a marca tem de sair pequena, no canto inferior direito, e o
+meio da imagem intacto. Depois, a varredura (teto, LRU, versão velha, tmp,
+simulação), o aquecimento varrendo antes de medir, a conferência de mudança, a
+máscara do access log e os PNGs dos logos.
 """
 
 from __future__ import annotations
@@ -123,17 +125,18 @@ async def test_foto_real_sai_com_a_marca_no_lugar_certo(tmp_path, monkeypatch):
     assert meta["fonte"]  # a impressão digital da prévia de 320
     assert [p["lado"] for p in pedidos] == [1600, 320]
 
-    # A marca está "quase no meio": centro horizontal, a 58% da altura, com
-    # 40% do lado menor de largura (600 px). Lá a imagem muda; no canto, não.
-    w = h = 300  # comparar em 1/5 da escala
+    # A marca é a pílula pequena no canto INFERIOR DIREITO: 16% do lado menor
+    # (240 px) a 38 px da direita e de baixo. Lá a imagem muda; no meio (onde
+    # ficava a marca grande) e no canto superior esquerdo, não.
+    assert (d.largura_logo("charlots", 1500, 1500), d.margem(1500, 1500)) == (240, 38)
+    w = h = 300  # comparar em 1/5 da escala: pílula de 48×16 a 7,6 px das bordas
     antes, depois = _cinza(fonte, w, h), _cinza(grande[0], w, h)
-    lw = 600 // 5
-    meio = _diferenca(antes, depois, w, (w - lw) // 2, int(h * 0.58) - 8,
-                      (w + lw) // 2, int(h * 0.58) + 8)  # fmt: skip
-    canto = _diferenca(antes, depois, w, 5, 5, 60, 60)
-    em_cima = _diferenca(antes, depois, w, (w - lw) // 2, 20, (w + lw) // 2, 50)
-    assert meio > 8, meio
-    assert canto < 3 and em_cima < 3, (canto, em_cima)
+    canto_marca = _diferenca(antes, depois, w, 248, 280, 289, 290)
+    meio = _diferenca(antes, depois, w, 90, 120, 210, 200)
+    canto_livre = _diferenca(antes, depois, w, 5, 5, 60, 60)
+    em_cima_dir = _diferenca(antes, depois, w, 240, 5, 295, 60)
+    assert canto_marca > 8, canto_marca
+    assert meio < 3 and canto_livre < 3 and em_cima_dir < 3, (meio, canto_livre, em_cima_dir)
 
 
 @pytest.mark.skipif(SEM_FFMPEG, reason="sem ffmpeg nesta máquina")
@@ -183,12 +186,18 @@ async def test_video_real_faststart_capas_audio_copiado_e_duracao(tmp_path, monk
     assert 2.8 <= meta["duracao"] <= 3.2
     # Nenhum tmp largado.
     assert not [p for p in g.dir.iterdir() if ".tmp." in p.name]
-    # A marca está no vídeo: o quadro do meio difere do original na faixa do logo.
+    # A marca está no vídeo, no canto inferior direito: pílula da Uranyx de
+    # 144 px (20% de 720) a 18 px das bordas. O meio do quadro não muda.
+    assert (d.largura_logo("uranyx", 720, 1280), d.margem(720, 1280)) == (144, 18)
     q1, q2 = tmp_path / "q1.png", tmp_path / "q2.png"
     _ffmpeg("-ss", "1.5", "-i", str(fonte), "-frames:v", "1", "-update", "1", str(q1))
     _ffmpeg("-ss", "1.5", "-i", str(mp4), "-frames:v", "1", "-update", "1", str(q2))
-    a, b = _cinza(q1, 180, 320), _cinza(q2, 180, 320)
-    assert _diferenca(a, b, 180, 30, int(320 * 0.58) - 5, 150, int(320 * 0.58) + 5) > 8
+    a, b = _cinza(q1, 720, 1280), _cinza(q2, 720, 1280)
+    canto_marca = _diferenca(a, b, 720, 562, 1245, 698, 1258)
+    meio = _diferenca(a, b, 720, 160, 560, 560, 820)
+    em_cima_esq = _diferenca(a, b, 720, 10, 10, 200, 200)
+    assert canto_marca > 8, canto_marca
+    assert meio < 4 and em_cima_esq < 4, (meio, em_cima_esq)
 
 
 @pytest.mark.skipif(SEM_FFMPEG, reason="sem ffmpeg nesta máquina")
@@ -207,9 +216,20 @@ async def test_dimensoes_jpeg_baseline_progressivo_e_quebrado(tmp_path):
 
 
 def test_largura_do_logo():
-    assert d.largura_logo("charlots", 1500, 1500) == 600
-    assert d.largura_logo("uranyx", 1600, 751) == 412  # 55% de 751, par
+    assert d.largura_logo("charlots", 1500, 1500) == 240  # 16% do lado menor
+    assert d.largura_logo("uranyx", 1600, 751) == 150  # 20% de 751, par
+    assert d.largura_logo("uranyx", 1600, 1600) == 320
+    assert d.largura_logo("uranyx", 720, 1280) == 144  # vídeo vertical
+    assert d.largura_logo("charlots", 480, 480) == 96  # piso: 16% daria 76
+    assert d.largura_logo("charlots", 150, 600) == 50  # piso limitado a 1/3 da largura
     assert d.largura_logo("charlots", 3, 3) == 2
+
+
+def test_margem():
+    assert d.margem(1500, 1500) == 38
+    assert d.margem(1000, 1600) == 25
+    assert d.margem(1600, 720) == 18
+    assert d.margem(200, 200) == 8  # mínimo
 
 
 # ─────────────── varredura ───────────────
@@ -272,8 +292,87 @@ def test_varrer_abaixo_do_teto_nao_apaga(monkeypatch):
     agora = time.time()
     gs = [_grupo_falso("charlots", f"a{i}.jpg", 50, uso=agora - i) for i in range(4)]
     r = d.varrer(agora)
-    assert r["apagados"] == 0
+    assert r["apagados"] == 0 and r["liberado"] == 0
     assert all(g.arq("json").exists() for g in gs)
+
+
+def _bytes_dos(grupos: list[d.Grupo]) -> int:
+    return sum(p.stat().st_size for g in grupos for p in g.dir.glob(g.k + ".*"))
+
+
+def test_trocou_a_marca_a_versao_velha_sai_inteira_e_simular_so_conta(monkeypatch):
+    """Muda uma constante (como a troca para o canto): os grupos gerados com a
+    versão anterior saem de verdade na varredura — não ficam esperando o LRU."""
+    agora = time.time()
+    velhos = [_grupo_falso("charlots", f"v{i}.jpg", 100, uso=agora) for i in range(3)]
+    velhos.append(_grupo_falso("uranyx", "v.jpg", 100, uso=agora))
+    d._VERSAO.clear()
+    monkeypatch.setattr(d, "MARGEM", d.MARGEM + 0.01)
+    novos = [_grupo_falso("charlots", f"v{i}.jpg", 40, uso=agora - 5) for i in range(2)]
+    assert not {g.k for g in novos} & {g.k for g in velhos}, "versão nova, chave nova"
+    antes, tam_velho = d.tamanho_cache(), _bytes_dos(velhos)
+    esperado = {"total": antes - tam_velho, "apagados": 3 * len(velhos), "liberado": tam_velho}
+
+    assert d.varrer(agora, simular=True) == esperado
+    assert d.tamanho_cache() == antes, "simular não apaga nada"
+    assert all(g.arq("json").exists() for g in velhos + novos)
+
+    assert d.varrer(agora) == esperado
+    assert _bytes_dos(velhos) == 0, "a versão velha sai inteira"
+    assert all(d.foto_pronta(g) and g.arq("json").exists() for g in novos)
+    assert d.tamanho_cache() == antes - tam_velho
+    assert d.varrer(agora) == {"total": antes - tam_velho, "apagados": 0, "liberado": 0}
+
+
+def test_simular_tambem_conta_tmp_largado_e_lru_sem_apagar(monkeypatch):
+    monkeypatch.setattr(get_settings(), "sites_midia_cache_mb", 1)
+    agora = time.time()
+    gs = [_grupo_falso("charlots", f"g{i}.jpg", 300, uso=agora - 1000 * (5 - i)) for i in range(5)]
+    tmp = gs[0].dir / f"{gs[0].k}.mp4.1-abcd.tmp.mp4"
+    tmp.write_bytes(b"\0" * 1000)
+    os.utime(tmp, (agora - 7200, agora - 7200))
+    simulado = d.varrer(agora, simular=True)
+    assert tmp.exists() and all(g.arq("json").exists() for g in gs)
+    assert simulado["apagados"] > 1 and simulado["total"] <= int(MB * 0.85)
+    assert d.varrer(agora) == simulado
+    assert not tmp.exists()
+
+
+async def test_aquecimento_varre_antes_de_medir_o_cache(monkeypatch):
+    """A versão velha ainda no disco contaria no teto: a varredura vem antes
+    do `tamanho_cache`, e no `--dry-run` só simula."""
+    from scripts.sites_midia_aquecer import aquecer
+
+    ordem: list[str] = []
+    varrer_de_verdade, tamanho_de_verdade = d.varrer, d.tamanho_cache
+
+    def _varrer(agora: float | None = None, *, simular: bool = False) -> dict[str, int]:
+        ordem.append(f"varrer simular={simular}")
+        return varrer_de_verdade(agora, simular=simular)
+
+    def _tamanho() -> int:
+        ordem.append("tamanho_cache")
+        return tamanho_de_verdade()
+
+    monkeypatch.setattr(d, "varrer", _varrer)
+    monkeypatch.setattr(d, "tamanho_cache", _tamanho)
+    monkeypatch.setattr(get_settings(), "sites_midia_cache_mb", 3)
+    velho = _grupo_falso("charlots", "velho.jpg", 2048, uso=time.time(), versao="0000000000")
+    linhas: list[str] = []
+
+    assert await aquecer([], so_fotos=False, dry_run=True, saida=linhas.append) == 0
+    assert ordem == ["varrer simular=True", "tamanho_cache"]
+    assert "varredura: seriam apagados 3 arquivos de versão velha/órfãos (2 MB)" in linhas[0]
+    assert "cache=2 MB" in linhas[1]
+    assert velho.arq("json").exists(), "dry-run não apaga"
+
+    ordem.clear()
+    linhas.clear()
+    assert await aquecer([], so_fotos=False, dry_run=False, saida=linhas.append) == 0
+    assert ordem == ["varrer simular=False", "tamanho_cache"]
+    assert "varredura: 3 arquivos de versão velha/órfãos apagados (2 MB)" in linhas[0]
+    assert "cache=0 MB" in linhas[1]
+    assert not velho.arq("json").exists()
 
 
 def test_grupo_sem_meta_ha_mais_de_1h_e_orfao():
@@ -290,16 +389,30 @@ def test_grupo_sem_meta_ha_mais_de_1h_e_orfao():
     assert g2.arq("grande.jpg").exists()
 
 
-def test_versao_muda_com_o_logo_e_com_as_constantes(monkeypatch):
+def test_versao_muda_com_o_logo_e_com_as_constantes(monkeypatch, tmp_path):
     v = d.versao("charlots")
     assert len(v) == 10 and v != d.versao("uranyx")
+    k = d.grupo("charlots", "/Malas/a.jpg").k
+    for nome, outro in (("OPACIDADE", 0.5), ("MARGEM", 0.03), ("MARGEM_MIN_PX", 12),
+                        ("LARGURA_MIN_PX", 120)):  # fmt: skip
+        original = getattr(d, nome)
+        d._VERSAO.clear()
+        monkeypatch.setattr(d, nome, outro)
+        assert d.versao("charlots") != v, nome
+        assert d.grupo("charlots", "/Malas/a.jpg").k != k, nome
+        d._VERSAO.clear()
+        monkeypatch.setattr(d, nome, original)
+        assert d.versao("charlots") == v, nome
+    # O logo: mesmos nomes, outros bytes → outra versão.
+    pasta = tmp_path / "marcas"
+    pasta.mkdir()
+    for arq in d.ASSETS_MARCAS.iterdir():
+        (pasta / arq.name).write_bytes(arq.read_bytes())
+    (pasta / "charlots.png").write_bytes((pasta / "charlots.png").read_bytes() + b"\0")
     d._VERSAO.clear()
-    monkeypatch.setattr(d, "OPACIDADE", 0.5)
+    monkeypatch.setattr(d, "ASSETS_MARCAS", pasta)
     assert d.versao("charlots") != v
-    k_novo = d.grupo("charlots", "/Malas/a.jpg").k
-    d._VERSAO.clear()
-    monkeypatch.setattr(d, "OPACIDADE", 0.42)
-    assert d.grupo("charlots", "/Malas/a.jpg").k != k_novo
+    assert len(d.versao("uranyx")) == 10
 
 
 # ─────────────── conferência de mudança ───────────────
@@ -472,15 +585,18 @@ def test_logos_existem_rgba_com_branco_opaco_e_transparencia(site: str):
     assert arquivo.is_file()
     w, h, px = _png_rgba(arquivo)
     assert 0 < w <= 1400 and h > 0
-    brancos = transparentes = 0
+    brancos = transparentes = capsula = 0
     for i in range(0, len(px), 4 * 7):  # amostra
         r, g, b, a = px[i : i + 4]
         if a == 255 and r == g == b == 255:
             brancos += 1
         elif a == 0:
             transparentes += 1
+        elif r == g == b == 0 and 92 <= a <= 102:  # preto a 38%
+            capsula += 1
     assert brancos > 100, "o logo tem de ser branco puro e opaco nos glifos"
-    assert transparentes > 100, "e transparente em volta (a margem de 6%)"
+    assert transparentes > 100, "e transparente fora da cápsula (os cantos arredondados da pílula)"
+    assert capsula > brancos, "a cápsula preta translúcida em volta (lê no fundo branco)"
 
 
 async def test_video_do_sidecar_grande_demais_nao_enche_o_disco(monkeypatch):

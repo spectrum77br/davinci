@@ -1,10 +1,29 @@
 """A marca d'água dos sites, e o cache em disco das mídias com marca (01/10/2026).
 
 Cada foto e cada vídeo que vai para a Charlots ou para a Uranyx sai daqui já
-com o logo do site queimado, branco com sombra suave, a 42% de opacidade,
-centrado na horizontal e com o centro a 58% da altura ("quase no meio", um
-pouco abaixo). A marca é aplicada ANTES de a mídia sair do DaVinci: o site
-nunca recebe a versão sem marca.
+com o logo do site queimado, PEQUENO e no canto INFERIOR DIREITO (o Marco:
+a marca grande no meio atrapalhava o lojista). A marca é aplicada ANTES de a
+mídia sair do DaVinci: o site nunca recebe a versão sem marca.
+
+## A marca
+
+Uma "pílula": o logo em branco sobre uma cápsula preta a 38%, a pílula inteira
+a 85% de opacidade (fundo efetivo ≈ 32% de preto, letras ≈ 85% de branco).
+Branco com sombra sumia no fundo branco das fotos de produto; a pílula se lê
+no claro e no escuro. Largura: 16% do lado MENOR na Charlots e 20% na Uranyx
+(logotipo comprido e fino), com piso de `min(96 px, largura // 3)`; margem de
+2,5% do lado menor (mínimo 8 px) à direita e embaixo. Foto e vídeo usam a
+mesma conta; a capa do vídeo sai do MP4 já marcado. Ex.: foto 1500×1500 da
+Charlots → pílula de 240 px a 38 px do canto; vídeo 720×1280 da Uranyx →
+144 px a 18 px.
+
+Os PNGs (`app/assets/marcas/{charlots,uranyx}.png`) foram feitos com Pillow
+11.3 a partir do logo claro de cada site (`charlots/assets/img/
+logo-charlots-light.png`, `uranyx/assets/img/logo-white.png`): glifos
+recortados ao conteúdo, normalizados a 1000 px de largura, em branco puro com
+a alpha original; cápsula `rounded_rectangle` de raio = altura/2, preto com
+alpha 38%, folga horizontal 0,42×h e vertical 0,30×h (h = altura dos
+glifos); glifos compostos por cima.
 
 ## De onde vem a mídia
 
@@ -18,8 +37,10 @@ a marca custa ~38% menos CPU do que partir do original (HEVC, 4K de iPhone).
 `<sites_midia_dir>/<site>/<k[:2]>/<k>.{mini.webp,grande.jpg,mp4,json}`, com
 `k = sha1(VERSAO\\0site\\0caminho)`. `VERSAO` inclui as constantes abaixo e os
 bytes do PNG do logo: trocou o logo ou uma constante, a chave muda e a
-varredura apaga a versão velha. Toda escrita vai para um `.tmp.` ao lado e
-termina em `os.replace` (quem lê no meio nunca pega meio arquivo).
+varredura apaga a versão velha (a api na 1ª requisição do processo e a cada
+5 min de uso; o script de aquecimento logo no começo, antes de medir o
+cache). Toda escrita vai para um `.tmp.` ao lado e termina em `os.replace`
+(quem lê no meio nunca pega meio arquivo).
 
 Teto rígido (`SITES_MIDIA_CACHE_MB`, padrão 2 GB) com descarte LRU por grupo, e
 piso de disco livre (`SITES_MIDIA_DISCO_MIN_MB`, padrão 3 GB): o disco do VPS
@@ -62,14 +83,17 @@ logger = structlog.get_logger()
 # ─────────────── a marca (o ajuste é aqui) ───────────────
 
 ASSETS_MARCAS = Path(__file__).resolve().parent.parent / "assets" / "marcas"
-# site → (PNG, largura do logo como fração do lado MENOR da imagem). A Uranyx
-# é um logotipo comprido (URANYX em caixa alta), por isso a fração maior.
+# site → (PNG da pílula, largura da pílula como fração do lado MENOR). A Uranyx
+# é um logotipo comprido e fino: precisa de fração maior para a letra ter a
+# mesma altura.
 MARCAS: dict[str, tuple[str, float]] = {
-    "charlots": ("charlots.png", 0.40),
-    "uranyx": ("uranyx.png", 0.55),
+    "charlots": ("charlots.png", 0.16),
+    "uranyx": ("uranyx.png", 0.20),
 }
-OPACIDADE = 0.42
-CENTRO_Y = 0.58
+OPACIDADE = 0.85
+MARGEM = 0.025  # do lado menor, à direita e embaixo
+MARGEM_MIN_PX = 8
+LARGURA_MIN_PX = 96  # piso, limitado a 1/3 da largura
 
 # Saídas. `grande` é o JPEG do visor (no vídeo, a capa); `mini` é a grade.
 FONTE_LADO = 1600
@@ -103,7 +127,8 @@ def versao(site: str) -> str:
     if site not in _VERSAO:
         arquivo, fator = MARCAS[site]
         constantes = (
-            f"1|{arquivo}|{fator}|{OPACIDADE}|{CENTRO_Y}|{FONTE_LADO}|{MINI_LADO}|{GRANDE_QV}"
+            f"2|{arquivo}|{fator}|{OPACIDADE}|canto-inf-dir|{MARGEM}|{MARGEM_MIN_PX}"
+            f"|{LARGURA_MIN_PX}|{FONTE_LADO}|{MINI_LADO}|{GRANDE_QV}"
             f"|{MINI_WEBP_QUALIDADE}|{MINI_JPEG_QV}|{VIDEO_CRF}|{VIDEO_MAXRATE}|{VIDEO_BUFSIZE}|"
         )
         dados = constantes.encode() + (ASSETS_MARCAS / arquivo).read_bytes()
@@ -112,8 +137,16 @@ def versao(site: str) -> str:
 
 
 def largura_logo(site: str, largura: int, altura: int) -> int:
-    """Largura do logo em px: fração do lado menor, par e ≥ 2."""
-    return max(2, int(min(largura, altura) * MARCAS[site][1]) // 2 * 2)
+    """Largura da pílula em px: fração do lado menor, com piso de
+    `min(LARGURA_MIN_PX, largura // 3)` (mídia pequena não fica com marca
+    ilegível, e a marca nunca passa de 1/3 da largura), par e ≥ 2."""
+    lw = max(int(min(largura, altura) * MARCAS[site][1]), min(LARGURA_MIN_PX, largura // 3))
+    return max(2, lw // 2 * 2)
+
+
+def margem(largura: int, altura: int) -> int:
+    """Distância da pílula às bordas direita e de baixo, em px."""
+    return max(MARGEM_MIN_PX, round(min(largura, altura) * MARGEM))
 
 
 # ─────────────── erros ───────────────
@@ -358,17 +391,18 @@ def _filtro_marca(lw: int) -> str:
     return f"[1:v]scale={lw}:-1,format=rgba,colorchannelmixer=aa={OPACIDADE}[m]"
 
 
-def _overlay() -> str:
-    return f"overlay=x=(W-w)/2:y=H*{CENTRO_Y}-h/2:format=auto"
+def _overlay(mg: int) -> str:
+    """Canto inferior direito, `mg` px das bordas."""
+    return f"overlay=x=W-w-{mg}:y=H-h-{mg}:format=auto"
 
 
 def cmd_foto(
-    fonte: Path, marca: Path, lw: int, grande: Path, mini: Path, sufixo_mini: str
+    fonte: Path, marca: Path, lw: int, mg: int, grande: Path, mini: Path, sufixo_mini: str
 ) -> list[str]:
     """Uma passada, duas saídas: `grande` (JPEG no tamanho da prévia) e `mini`."""
     filtro = (
         f"{_filtro_marca(lw)};"
-        f"[0:v][m]{_overlay()},split=2[g][t];"
+        f"[0:v][m]{_overlay(mg)},split=2[g][t];"
         f"[g]format=yuvj420p[g2];"
         f"[t]{_filtro_mini(sufixo_mini)}[t2]"
     )
@@ -383,8 +417,8 @@ def cmd_foto(
     ]
 
 
-def cmd_video(fonte: Path, marca: Path, lw: int, destino: Path) -> list[str]:
-    filtro = f"{_filtro_marca(lw)};[0:v:0][m]{_overlay()},format=yuv420p[v]"
+def cmd_video(fonte: Path, marca: Path, lw: int, mg: int, destino: Path) -> list[str]:
+    filtro = f"{_filtro_marca(lw)};[0:v:0][m]{_overlay(mg)},format=yuv420p[v]"
     return [
         "nice", "-n", "19",
         "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
@@ -558,9 +592,9 @@ async def _gerar_foto(g: Grupo) -> None:
             raise MidiaIndisponivel
         largura, altura = dims
         marca = ASSETS_MARCAS / MARCAS[g.site][0]
-        lw = largura_logo(g.site, largura, altura)
+        lw, mg = largura_logo(g.site, largura, altura), margem(largura, altura)
         s = await _rodar(
-            cmd_foto(tmp_fonte, marca, lw, tmp_grande, tmp_mini, sufixo_mini), TIMEOUT_FOTO_S
+            cmd_foto(tmp_fonte, marca, lw, mg, tmp_grande, tmp_mini, sufixo_mini), TIMEOUT_FOTO_S
         )
         if s.rc != 0 or not _cheio(tmp_grande, tmp_mini):
             raise _erro_do_ffmpeg(g, s, "foto")
@@ -704,8 +738,8 @@ async def _gerar_video(g: Grupo) -> None:
             raise MidiaIndisponivel
         largura, altura, duracao = info
         marca = ASSETS_MARCAS / MARCAS[g.site][0]
-        lw = largura_logo(g.site, largura, altura)
-        s = await _rodar(cmd_video(tmp_fonte, marca, lw, tmp_mp4), TIMEOUT_VIDEO_S)
+        lw, mg = largura_logo(g.site, largura, altura), margem(largura, altura)
+        s = await _rodar(cmd_video(tmp_fonte, marca, lw, mg, tmp_mp4), TIMEOUT_VIDEO_S)
         if s.rc != 0 or not _cheio(tmp_mp4):
             raise _erro_do_ffmpeg(g, s, "vídeo")
         _limpar(tmp_fonte)  # o original do sidecar não é mais preciso
@@ -883,14 +917,34 @@ _ULTIMA_VARREDURA = 0.0
 _VARRENDO: asyncio.Task[Any] | None = None
 
 
-def varrer(agora: float | None = None) -> dict[str, int]:
-    """Soma o cache, apaga a versão velha e o tmp largado, e, passando do teto,
-    apaga grupos inteiros pelo uso mais antigo até ficar abaixo de 85%."""
+def varrer(agora: float | None = None, *, simular: bool = False) -> dict[str, int]:
+    """Soma o cache, apaga a versão velha, o grupo órfão e o tmp largado, e,
+    passando do teto, apaga grupos inteiros pelo uso mais antigo até ficar
+    abaixo de 85%.
+
+    `simular=True` só conta o que sairia, sem apagar nada (o `--dry-run` do
+    aquecimento). Devolve `total` (bytes que ficam), `apagados` (arquivos) e
+    `liberado` (bytes)."""
     agora = time.time() if agora is None else agora
     teto = get_settings().sites_midia_cache_mb * MB
     r = raiz()
     grupos: dict[tuple[str, str], list[tuple[Path, os.stat_result]]] = {}
-    total = apagados = 0
+    total = apagados = liberado = 0
+
+    def _sai(arq: Path, tamanho: int) -> bool:
+        nonlocal apagados, liberado
+        if not simular:
+            try:
+                arq.unlink()
+            except OSError:  # já saiu (outro processo varrendo) ou sem permissão
+                return False
+        apagados += 1
+        liberado += tamanho
+        return True
+
+    def _apagar(arquivos: list[tuple[Path, os.stat_result]]) -> int:
+        return sum(st.st_size for arq, st in arquivos if _sai(arq, st.st_size))
+
     for site in MARCAS:
         base = r / site
         if not base.is_dir():
@@ -904,26 +958,13 @@ def varrer(agora: float | None = None) -> dict[str, int]:
                 except OSError:
                     continue
                 if ".tmp." in arq.name:
-                    if agora - st.st_mtime > TMP_VELHO_S:
-                        with contextlib.suppress(OSError):
-                            arq.unlink()
-                            apagados += 1
-                            continue
+                    if agora - st.st_mtime > TMP_VELHO_S and _sai(arq, st.st_size):
+                        continue
                     total += st.st_size  # tmp novo: alguém gera agora
                     continue
                 total += st.st_size
                 k = arq.name.split(".", 1)[0]
                 grupos.setdefault((site, k), []).append((arq, st))
-
-    def _apagar(arquivos: list[tuple[Path, os.stat_result]]) -> int:
-        nonlocal apagados
-        liberado = 0
-        for arq, st in arquivos:
-            with contextlib.suppress(OSError):
-                arq.unlink()
-                liberado += st.st_size
-                apagados += 1
-        return liberado
 
     vivos: list[tuple[float, int, list[tuple[Path, os.stat_result]]]] = []
     for (site, _k), arquivos in grupos.items():
@@ -954,9 +995,14 @@ def varrer(agora: float | None = None) -> dict[str, int]:
             if total <= alvo:
                 break
             total -= _apagar(arquivos)
-    if apagados:
-        logger.info("sites_midia_varrido", apagados=apagados, total_mb=total // MB)
-    return {"total": total, "apagados": apagados}
+    if apagados and not simular:
+        logger.info(
+            "sites_midia_varrido",
+            apagados=apagados,
+            liberado_mb=liberado // MB,
+            total_mb=total // MB,
+        )
+    return {"total": total, "apagados": apagados, "liberado": liberado}
 
 
 def tamanho_cache() -> int:

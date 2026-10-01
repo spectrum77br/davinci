@@ -634,6 +634,57 @@ async def test_link_nao_carrega_nome_legivel():
         assert pedaco not in bruto
 
 
+def _abrir(url: str) -> dict[str, Any]:
+    """O payload inteiro do link (como `ler_link` decifra, sem as regras)."""
+    from cryptography.exceptions import InvalidTag
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+    bruto = midia._b64d(url.rsplit("/", 1)[1])
+    for site, chave in midia._chaves():
+        try:
+            texto = AESGCM(chave).decrypt(
+                bruto[:12], bruto[12:], midia._PREFIXO_CHAVE + site.encode()
+            )
+        except InvalidTag:
+            continue
+        return json.loads(texto)
+    raise AssertionError("o link não abre com nenhuma chave")
+
+
+async def test_link_leva_a_versao_da_marca_e_link_sem_ela_continua_valendo(
+    client: AsyncClient, monkeypatch
+):
+    """`m` muda o link quando a marca muda: o navegador guarda a mídia por até
+    6 h (`max-age`) e, com o mesmo link, mostraria a marca antiga."""
+    _semear("uranyx", "/Celular/F117/a.jpg")
+    item = midia.Item(site="uranyx", pasta="/Celular/F117", nome="a.jpg", tipo="foto")
+    exp = midia.expiracao(time.time())
+    url = midia.link(item, "grande", exp)
+    assert _abrir(url) == {
+        "s": "uranyx",
+        "p": "/Celular/F117",
+        "n": "a.jpg",
+        "v": "grande",
+        "e": exp,
+        "m": derivados.versao("uranyx"),
+    }
+    assert midia.link(item, "grande", exp) == url, "estável dentro da janela"
+    assert (await client.get(url)).status_code == 200
+
+    # Link emitido antes (sem `m`): continua aceito.
+    antigo = _link("uranyx", "/Celular/F117", "a.jpg")
+    assert "m" not in _abrir(antigo)
+    assert midia.ler_link(antigo.rsplit("/", 1)[1]) is not None
+    assert (await client.get(antigo)).status_code == 200
+
+    # Trocou a marca: o mesmo item na mesma janela ganha link novo.
+    derivados._VERSAO.clear()
+    monkeypatch.setattr(derivados, "OPACIDADE", derivados.OPACIDADE / 2)
+    novo = midia.link(item, "grande", exp)
+    assert novo != url
+    assert _abrir(novo)["m"] == derivados.versao("uranyx") != _abrir(url)["m"]
+
+
 # ─────────────── os bytes ───────────────
 
 
@@ -830,6 +881,7 @@ async def test_aquecimento_dry_run_rodada_e_teto(
 
     assert await aquecer(["charlots", "uranyx"], so_fotos=False, dry_run=True,
                          saida=linhas.append) == 0  # fmt: skip
+    assert "varredura: seriam apagados 0 arquivos" in linhas[0], linhas
     assert any("charlots: pastas=1 fotos=2 (prontas 0) videos=0" in x for x in linhas), linhas
     assert any("uranyx: pastas=1 fotos=1 (prontas 0) videos=1 (prontos 0)" in x for x in linhas)
     assert (ff.fotos, ff.videos) == (0, 0), "dry-run não gera nada"
@@ -851,14 +903,18 @@ async def test_aquecimento_dry_run_rodada_e_teto(
     await aquecer(["uranyx"], so_fotos=False, dry_run=False, saida=linhas.append)
     assert (ff.fotos, ff.videos) == (3, 1)
 
-    # Teto: para antes de passar de 90%, com aviso.
+    # Teto: para antes de passar de 90%, com aviso. O cache medido (DEPOIS da
+    # varredura, que não acha nada velho) já está em 95% do teto.
     midia.limpar_caches()
     sidecar.pastas["/Malas/ABS 20"]["imagens"].append("3.jpg")
-    monkeypatch.setattr(get_settings(), "sites_midia_cache_mb", 0)
+    teto = get_settings().sites_midia_cache_mb * 1024 * 1024
+    monkeypatch.setattr(derivados, "tamanho_cache", lambda: int(teto * 0.95))
     linhas.clear()
     await aquecer(["charlots"], so_fotos=False, dry_run=False, saida=linhas.append)
+    assert "varredura: 0 arquivos" in linhas[0], linhas
     assert ff.fotos == 3
     assert any("AVISO: parei em 90% do teto" in x for x in linhas)
+    assert derivados.foto_pronta(derivados.grupo("charlots", "/Malas/ABS 20/1.jpg"))
 
 
 @pytest.mark.parametrize(

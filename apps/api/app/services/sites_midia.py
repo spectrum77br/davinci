@@ -432,8 +432,22 @@ def cifrar(site: str, payload: dict[str, Any]) -> str | None:
 
 
 def link(item: Item, variante: str, exp: int) -> str | None:
+    # `m` = versão da marca. O nonce é determinístico e a rota de bytes manda
+    # `Cache-Control: private, max-age=21600`: sem `m`, trocar a marca não
+    # mudaria o link da janela, e o navegador serviria a mídia com a marca
+    # antiga por até 6 h. `ler_link` não lê `m` (link sem ela continua valendo).
+    from app.services.sites_midia_derivados import versao  # importa este módulo
+
     token = cifrar(
-        item.site, {"s": item.site, "p": item.pasta, "n": item.nome, "v": variante, "e": exp}
+        item.site,
+        {
+            "s": item.site,
+            "p": item.pasta,
+            "n": item.nome,
+            "v": variante,
+            "e": exp,
+            "m": versao(item.site),
+        },
     )
     return f"/api/sites/midia/a/{token}" if token else None
 

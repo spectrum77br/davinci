@@ -7,13 +7,18 @@ pequeno do que está publicado —, com as mesmas exclusões da listagem, e gera
 o que falta: fotos em paralelo de 2, vídeos UM por vez, sob a mesma trava de
 arquivo da api. Para antes de passar de 90% do teto do cache, com aviso.
 
+Antes de medir o cache, varre: apaga a versão velha da marca (trocou o logo
+ou uma constante, as chaves mudam), grupo órfão e tmp largado — senão a
+versão velha contaria no teto e a rodada pararia sem gerar a nova.
+
 Uso (no VPS; `-d` = em segundo plano, uma queda do SSH não mata a rodada):
 
     docker exec -d davinci-api-1 nice -n 19 python -m scripts.sites_midia_aquecer \\
         --log /data/uploads/sites-midia/aquecer.log
     python -m scripts.sites_midia_aquecer --site uranyx --so-fotos --dry-run
 
-`--dry-run` só conta (pastas, fotos, vídeos, o que já está pronto). A saída é
+`--dry-run` só conta (o que a varredura apagaria, pastas, fotos, vídeos, o que
+já está pronto) e não apaga nem gera nada. A saída é
 curta: contagens, MB gravados, tempo e erros. Nunca token nem caminho.
 """
 
@@ -65,6 +70,21 @@ async def aquecer(
     """Devolve o número de erros (0 = tudo certo)."""
     inicio = time.perf_counter()
     teto = get_settings().sites_midia_cache_mb * MB
+    # Primeiro a varredura: depois de trocar a marca (versão nova), a velha
+    # ainda está no disco e contaria no teto — o aquecimento pararia em 90%
+    # sem gerar a nova. No `--dry-run` só conta o que sairia.
+    if dry_run:
+        r = await asyncio.to_thread(d.varrer, simular=True)
+        saida(
+            f"varredura: seriam apagados {r['apagados']} arquivos de versão velha/órfãos "
+            f"({r['liberado'] // MB} MB)"
+        )
+    else:
+        r = await asyncio.to_thread(d.varrer)
+        saida(
+            f"varredura: {r['apagados']} arquivos de versão velha/órfãos apagados "
+            f"({r['liberado'] // MB} MB)"
+        )
     usado = await asyncio.to_thread(d.tamanho_cache)
     saida(f"inicio sites={','.join(sites)} cache={usado // MB} MB teto={teto // MB} MB")
     gravado = erros = indisponiveis = 0
