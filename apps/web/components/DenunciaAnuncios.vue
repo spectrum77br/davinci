@@ -6,7 +6,7 @@
 // escopo (só aparecem filtrando o Grupo) e sem os anúncios das lojas próprias.
 import { onMounted, ref } from 'vue'
 import { ChevronLeft, ChevronRight, ExternalLink } from 'lucide-vue-next'
-import { dataBr, numero, pillGrupo, pillSituacaoAnuncio } from '~/lib/denuncia'
+import { dataBr, nomeGrupo, numero, pillGrupo, pillSituacaoAnuncio } from '~/lib/denuncia'
 
 
 type Item = {
@@ -116,8 +116,8 @@ defineExpose({ carregar })
         <option v-for="m in opcoes.marketplaces" :key="m" :value="m">{{ m }}</option>
       </select>
       <select v-model="grupo" class="h-9 rounded-md border bg-background px-2 text-sm" @change="filtrar">
-        <option value="">grupos ativos</option>
-        <option v-for="g in opcoes.grupos" :key="g" :value="g">{{ g }}</option>
+        <option value="">certificado: todos (sem descartados)</option>
+        <option v-for="g in opcoes.grupos" :key="g" :value="g">certificado: {{ nomeGrupo(g).toLowerCase() }}</option>
       </select>
       <select v-model="situacao" class="h-9 rounded-md border bg-background px-2 text-sm" @change="filtrar">
         <option value="">no ar e fora do ar</option>
@@ -139,7 +139,7 @@ defineExpose({ carregar })
         <option value="vendas">mais vendas</option>
         <option value="novos">vistos por último</option>
         <option value="loja">por loja</option>
-        <option value="grupo">por grupo</option>
+        <option value="grupo">por certificado</option>
       </select>
     </div>
 
@@ -151,7 +151,7 @@ defineExpose({ carregar })
             <th>Loja</th>
             <th>Título</th>
             <th>Nº declarado</th>
-            <th>Grupo</th>
+            <th>Certificado</th>
             <th class="text-right">Vendas</th>
             <th>Situação</th>
             <th class="text-right">Den.</th>
@@ -182,7 +182,7 @@ defineExpose({ carregar })
               <div v-if="a.escopo" class="text-[11px] text-muted-foreground truncate">{{ a.escopo }}</div>
             </td>
             <td class="font-mono text-xs whitespace-nowrap">{{ a.hom || (a.inmetro ? `Inmetro ${a.inmetro}` : '—') }}</td>
-            <td><span v-if="a.grupo" :class="pillGrupo(a.grupo)">{{ a.grupo }}</span></td>
+            <td><span v-if="a.grupo" :class="pillGrupo(a.grupo)" :title="a.grupo">{{ nomeGrupo(a.grupo) }}</span></td>
             <td class="text-right text-xs tabular-nums">{{ numero(a.vendas) }}</td>
             <td class="whitespace-nowrap">
               <span :class="pillSituacaoAnuncio(a.situacao)">{{ a.situacao || '—' }}</span>

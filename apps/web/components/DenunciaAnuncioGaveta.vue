@@ -5,7 +5,7 @@
 import { computed, ref, watch } from 'vue'
 import { ExternalLink } from 'lucide-vue-next'
 import {
-  type Prova, dataBr, dinheiro, numero, pillGrupo, pillResultado, pillSituacaoAnuncio,
+  type Prova, dataBr, dinheiro, nomeGrupo, numero, pillGrupo, pillResultado, pillSituacaoAnuncio,
   pillSituacaoDenuncia, pillStatusCaso, pillStatusCompra, prazoVencido,
 } from '~/lib/denuncia'
 
@@ -74,7 +74,7 @@ const campos = computed(() => CAMPOS.filter(([k]) => a.value[k] !== null && a.va
     :subtitulo="[a.marketplace, a.loja || ficha?.loja?.nome, anuncioId].filter(Boolean).join(' · ')"
   >
     <template #cabecalho-extra>
-      <span v-if="a.grupo" class="pill" :class="pillGrupo(a.grupo)">{{ a.grupo }}</span>
+      <span v-if="a.grupo" class="pill" :class="pillGrupo(a.grupo)" :title="a.grupo">certificado: {{ nomeGrupo(a.grupo).toLowerCase() }}</span>
       <span v-if="a.situacao" class="pill" :class="pillSituacaoAnuncio(a.situacao)">{{ a.situacao }}</span>
       <span v-if="a.propria" class="pill pill-info">loja própria</span>
     </template>

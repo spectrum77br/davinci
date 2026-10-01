@@ -81,6 +81,23 @@ export function pillSituacaoAnuncio(s: string | null | undefined): string {
   return 'pill-muted'
 }
 
+// Vinicius, 01/10/2026: na tela a coluna "Grupo" vira "Certificado" — GRUPO 1
+// (o anúncio usa a nossa homologação Anatel ou a nossa certificação Inmetro)
+// é "Nosso"; GRUPO 2 (nº de outra empresa, sem nº ou nº inválido) é
+// "Diversos". O sistema do mini e o robô continuam com GRUPO 1/2 por dentro.
+const NOME_GRUPO: Record<string, string> = {
+  'GRUPO 1': 'Nosso',
+  'GRUPO 2': 'Diversos',
+  VERIFICAR: 'Verificar',
+  DESCARTADO: 'Descartado',
+  'FORA DE ESCOPO': 'Fora de escopo',
+}
+
+export function nomeGrupo(g: string | null | undefined): string {
+  if (!g) return '—'
+  return NOME_GRUPO[g] || g
+}
+
 // GRUPO 1 = terceiro declarando a NOSSA certificação (o mais grave).
 export function pillGrupo(g: string | null | undefined): string {
   if (g === 'GRUPO 1') return 'pill-danger'
