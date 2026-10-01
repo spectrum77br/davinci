@@ -137,7 +137,7 @@ defineExpose({ carregar })
       </select>
       <select v-model="ordem" class="h-9 rounded-md border bg-background px-2 text-sm" @change="filtrar">
         <option value="vendas">mais vendas</option>
-        <option value="novos">vistos por último</option>
+        <option value="novos">achados mais recentes</option>
         <option value="loja">por loja</option>
         <option value="grupo">por certificado</option>
       </select>
@@ -147,6 +147,7 @@ defineExpose({ carregar })
       <table class="w-full">
         <thead>
           <tr>
+            <th title="Quando o robô viu o anúncio pela primeira vez">Achado em</th>
             <th>Anúncio</th>
             <th>Loja</th>
             <th>Título</th>
@@ -161,12 +162,17 @@ defineExpose({ carregar })
         </thead>
         <tbody>
           <tr v-if="carregando && itens.length === 0">
-            <td colspan="10" class="text-center text-muted-foreground py-6">carregando…</td>
+            <td colspan="11" class="text-center text-muted-foreground py-6">carregando…</td>
           </tr>
           <tr v-else-if="itens.length === 0">
-            <td colspan="10" class="text-center text-muted-foreground py-6">nenhum anúncio neste filtro</td>
+            <td colspan="11" class="text-center text-muted-foreground py-6">nenhum anúncio neste filtro</td>
           </tr>
           <tr v-for="a in itens" :key="a.id" class="cursor-pointer" @click="aberto = a.id">
+            <!-- visto_primeiro: quando o robô achou o anúncio (hora do Mac mini, Brasília). -->
+            <td class="text-xs whitespace-nowrap tabular-nums" :title="a.visto_primeiro || ''">
+              <div>{{ dataBr(a.visto_primeiro, false) }}</div>
+              <div v-if="a.visto_primeiro && a.visto_primeiro.length >= 16" class="text-[11px] text-muted-foreground">{{ a.visto_primeiro.slice(11, 16) }}</div>
+            </td>
             <td class="whitespace-nowrap">
               <div class="font-mono text-xs">{{ a.id }}</div>
               <div class="text-[11px] text-muted-foreground">{{ a.marketplace }}</div>
