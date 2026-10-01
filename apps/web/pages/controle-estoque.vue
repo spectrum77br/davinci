@@ -151,12 +151,27 @@ type VideoPendente = {
 type Tab = 'estoque' | 'pedidos' | 'envios' | 'upload-nf'
 const tab = ref<Tab>('estoque')
 
-// Single-day filter for Estoque + Pedidos. Envios uses a 7-day window
+// Single-day filter for Estoque. Envios uses a 7-day window
 // that auto-resets on first activation (see watch below) — operators
 // still want per-day counts but with enough rows on screen to compare.
 const dia = ref(isoToday())
 const enviosInicio = ref(isoDaysAgo(6))
 const enviosFim = ref(isoToday())
+// Pedidos: período De/Até pela data de envio (Vinicius, 01/10/2026 — "de
+// 30/09 até 01/10"). Abre em hoje–hoje, a rotina do dia não muda. Pendente
+// e previsão contam como HOJE no backend: só aparecem se o período incluir
+// hoje.
+const pedidosInicio = ref(isoToday())
+const pedidosFim = ref(isoToday())
+// De depois do Até → troca (o backend devolveria lista vazia).
+const pedidosPeriodo = computed(() => {
+  const a = pedidosInicio.value || isoToday()
+  const b = pedidosFim.value || isoToday()
+  return a <= b ? { inicio: a, fim: b } : { inicio: b, fim: a }
+})
+function _isoBR(iso: string): string {
+  return `${iso.slice(8)}/${iso.slice(5, 7)}/${iso.slice(0, 4)}`
+}
 
 // Admin-only tag override.
 const isAdmin = computed(() => auth.user?.role === 'admin')
@@ -489,8 +504,9 @@ const errorText = ref<string | null>(null)
 
 // ── Fetchers ──────────────────────────────────────────────────────────
 function singleDayDates(): string {
-  // Estoque + Pedidos send the same value for both endpoints — backend
-  // tolerates either treating the window as a single point or a range.
+  // Estoque sends the same value for both ends — backend tolerates
+  // either treating the window as a single point or a range (Pedidos
+  // manda o período De/Até, ver loadPedidos).
   // Input de data limpo → string vazia quebra o parse de date no backend
   // (422); cai pra hoje.
   const d = dia.value || isoToday()
@@ -528,11 +544,12 @@ async function loadPedidos() {
   loading.value = true
   errorText.value = null
   try {
-    const qs = [singleDayDates()]
+    const { inicio, fim } = pedidosPeriodo.value
+    const qs = [`data_inicio=${inicio}`, `data_fim=${fim}`]
+    if (canUseTagFilter.value && tagOverride.value) qs.push(`tag=${tagOverride.value}`)
     // Gerente de etiquetas: o tag= do dropdown vale na aba Pedidos mesmo
     // sem canUseTagFilter (que também alimenta o /produtos — lá o cairo
-    // continua cercado nas stock_tags dele, então não entra no
-    // singleDayDates compartilhado).
+    // continua cercado nas stock_tags dele).
     if (!canUseTagFilter.value && isGerenteEtiquetas.value && tagOverride.value)
       qs.push(`tag=${tagOverride.value}`)
     if (statusFilter.value !== 'all') qs.push(`status=${statusFilter.value}`)
@@ -599,6 +616,10 @@ watch(estoqueFilter, () => {
   // conferência counter so the percentage matches the visible set.
   if (tab.value === 'estoque') void loadCurrentTab()
   void refreshConferenciaHoje()
+})
+watch(pedidosPeriodo, (novo, antigo) => {
+  if (novo.inicio === antigo.inicio && novo.fim === antigo.fim) return
+  if (tab.value === 'pedidos') void loadCurrentTab()
 })
 watch([enviosInicio, enviosFim, conferidoFilter], () => {
   if (tab.value === 'envios') void loadCurrentTab()
@@ -731,7 +752,7 @@ async function togglePedido(row: PedidoRow) {
   // reference_date é informacional pra section=pedido (backend filtra
   // só por reference_id); usar data_envio mantém alinhado com a coluna
   // "DATA ENVIO" exibida ao operador.
-  const refDate = (row.data_envio || dia.value).slice(0, 10)
+  const refDate = (row.data_envio || isoToday()).slice(0, 10)
   try {
     await toggleCheck('pedido', row.id, refDate, next, row.observacao)
   } catch {
@@ -740,7 +761,7 @@ async function togglePedido(row: PedidoRow) {
 }
 async function patchPedidoObs(row: PedidoRow, newObs: string) {
   row.observacao = newObs
-  const refDate = (row.data_envio || dia.value).slice(0, 10)
+  const refDate = (row.data_envio || isoToday()).slice(0, 10)
   try {
     await toggleCheck('pedido', row.id, refDate, row.conferido, newObs)
   } catch { /* next reload reverts */ }
@@ -1196,8 +1217,9 @@ function imprimirPrevisoes() {
     if (arr) arr.push(r)
     else porPedido.set(k, [r])
   }
-  const [y, m, d] = dia.value.split('-')
-  const dataBR = `${d}/${m}/${y}`
+  // Previsão é sempre de HOJE (o backend fixa no dia atual), seja qual for
+  // o período da tela.
+  const dataBR = _isoBR(isoToday())
   const hora = _HORA_BRT.format(new Date())
   // HOJE × AMANHÃ (Eduardo, 2026-08-26): corte hoje/atrasado sai JÁ; corte
   // amanhã é adiantamento. Cada grupo ganha sua tabela de separação; na
@@ -1355,14 +1377,14 @@ function imprimirPrevisoes() {
 // Esse dado vem do backend (`atrasados`), porque o effective_date desses
 // pedidos é a data da etiqueta (passada) — eles NÃO aparecem no filtro de
 // hoje, então o frontend não conseguiria derivá-los do que está carregado.
-// O chip só aparece no filtro de HOJE (data local/BRT) — é um alerta do
-// que sobrou de dias anteriores.
+// O chip só aparece quando o período termina HOJE (data local/BRT) — é um
+// alerta do que sobrou de dias anteriores.
 function _localToday(): string {
   const n = new Date()
   return `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, '0')}-${String(n.getDate()).padStart(2, '0')}`
 }
 const pendentesAntigosByDay = computed(() => {
-  if (dia.value !== _localToday()) return []
+  if (pedidosPeriodo.value.fim !== _localToday()) return []
   return pedidosAtrasadosRaw.value
 })
 const totalPendentesAntigos = computed(() =>
@@ -1880,9 +1902,8 @@ function imprimirRelatorio() {
       <td>${r.quantidade}</td>
       <td class="desc">${esc(r.produto)}</td>
     </tr>`).join('')
-  const diaLabel = dia.value
-    ? `${dia.value.slice(8)}/${dia.value.slice(5, 7)}/${dia.value.slice(0, 4)}`
-    : ''
+  const { inicio, fim } = pedidosPeriodo.value
+  const diaLabel = inicio === fim ? _isoBR(fim) : `${_isoBR(inicio)} a ${_isoBR(fim)}`
   const html = `<!doctype html>
 <html lang="pt-BR"><head><meta charset="utf-8">
 <title>Relatório de pedidos ${esc(diaLabel)}</title>
@@ -2080,7 +2101,18 @@ async function conferirTodos() {
         placeholder="Buscar SKU, nome, pedido…"
         class="h-7 border rounded px-2 bg-background min-w-[200px]"
       />
-      <template v-if="tab !== 'envios'">
+      <template v-if="tab === 'pedidos'">
+        <!-- Período pela data de envio. Pendente/previsão contam como hoje. -->
+        <label class="inline-flex items-center gap-1" title="Data de envio. Pedido ainda não enviado conta como hoje.">
+          De:
+          <input v-model="pedidosInicio" type="date" class="h-7 border rounded px-2 bg-background" />
+        </label>
+        <label class="inline-flex items-center gap-1" title="Data de envio. Pedido ainda não enviado conta como hoje.">
+          Até:
+          <input v-model="pedidosFim" type="date" class="h-7 border rounded px-2 bg-background" />
+        </label>
+      </template>
+      <template v-else-if="tab !== 'envios'">
         <label class="inline-flex items-center gap-1">
           Dia:
           <input v-model="dia" type="date" class="h-7 border rounded px-2 bg-background" />
@@ -2693,7 +2725,7 @@ async function conferirTodos() {
         <tbody>
           <tr v-if="pedidosFiltered.length === 0">
             <td colspan="16" class="py-6 text-center text-muted-foreground">
-              Nenhum pedido para esse dia.
+              Nenhum pedido nesse período.
             </td>
           </tr>
           <tr
