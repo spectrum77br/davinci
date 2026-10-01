@@ -37,18 +37,25 @@
 // Trocou o mês da NOTA: a base volta para o mesmo mês (o padrão). A recusada que
 // vai de novo leva a base E o mês da base gravados nela (mesDoCampo), qualquer
 // que seja o seletor — para usar o faturamento do seletor, "voltar" no campo.
-import { computed, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch, watchEffect } from 'vue'
+//
+// 01/10/2026 (Eduardo: "quando vou gerar uma nova nota fixa, não aparece para qual
+// mês eu quero gerar ela… quero a opção de escolher na hora"): a gaveta da nota
+// fixa nova escolhe o mês e a "Base do %" e, ao salvar, a página traz para cá
+// (tela.irParaEmitir). O pedido chega em tela.pedidoEmitir: a aba aplica a base,
+// limpa filtro e busca (as novas têm de aparecer) e, quando a prévia daquele mês
+// chega, marca as recém-criadas que podem sair. Nada é emitido sozinho.
+import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch, watchEffect } from 'vue'
 import { PopoverContent, PopoverPortal, PopoverRoot, PopoverTrigger } from 'reka-ui'
 import {
   AlertCircle, AlertTriangle, Building2, CalendarDays, CheckCircle2, ChevronDown, Eye, ExternalLink, FileCheck2,
-  FileDown, FilePlus2, HelpCircle, Info, Loader2, Pencil, Plus, RefreshCw, Repeat, RotateCcw, Search, SearchX,
+  FileDown, HelpCircle, Info, Loader2, Pencil, RefreshCw, Repeat, RotateCcw, Search, SearchX,
   Settings2, Trash2, X,
 } from 'lucide-vue-next'
 import { Button } from '~/components/ui/button'
 import {
   ambienteTexto, calcularPercentual, empresaTeste, erroApi, estadoLinha, explicarProblema, fmtBrl, fmtData, fmtDoc,
   fmtHora, fmtMes, fmtPct, fmtPctOrigem, mesAtual, mesBaseDaEmissao, mesParaData, origemDaEmissao, paraDecimal,
-  pctDoModelo, pctPositivo, plural, prestadorPorId, renderDescricao, situacao, textoFaturamento, textoIr, textoMesBase,
+  opcoesMesBase, pctDoModelo, pctPositivo, plural, prestadorPorId, renderDescricao, situacao, textoFaturamento, textoIr, textoMesBase,
   TOM_TEXTO, tomadorDaEmissao, tomadorEstiloNfeio, tomadorNaNota, useNfseTela,
   type ChecklistItem, type Emissao, type EstadoLinha, type FaturamentoEmpresa, type ItemIn, type ItemLote,
   type ItemPrevia, type Modelo,
@@ -153,7 +160,9 @@ const ativos = computed(() => tela.modelos.value.filter((m) => m.ativo))
 
 // Mês da base (01/10): a escolha vale só para o mês da nota em que foi feita —
 // trocou o mês da nota, volta ao padrão (o faturamento do mesmo mês da nota).
-const escolhaBase = ref<{ mes: string; valor: string }>({ mes: '', valor: '' })
+// 01/10/2026: o ref mora na página (tela.baseEmitir) para a gaveta da nota fixa
+// nova abrir com a mesma base e não apagá-la ao salvar.
+const escolhaBase = tela.baseEmitir
 const mesBase = computed(() => (escolhaBase.value.mes === mes.value ? escolhaBase.value.valor : ''))
 const mesDaBase = computed(() => mesBase.value || mes.value) // 'AAAA-MM' que vale agora
 const baseDeOutroMes = computed(() => mesDaBase.value !== mes.value)
@@ -164,8 +173,13 @@ const rotuloFaturamento = computed(() =>
   baseDeOutroMes.value ? `faturamento de ${fmtMes(mesDaBase.value)}` : 'faturamento do mês',
 )
 
+// Pedido da gaveta da nota fixa nova (01/10): as recém-criadas a marcar quando a
+// prévia daquele mês (e daquele mês da base) chegar. Ver tela.pedidoEmitir abaixo.
+let paraMarcar: { mes: string; base: string; ids: Set<string> } | null = null
+
 function escolherMesBase(v: string) {
   escolhaBase.value = { mes: mes.value, valor: v && v !== mes.value ? v : '' }
+  paraMarcar = null // trocou a base à mão: o pedido da gaveta deixa de valer
 }
 
 const temPrevia = computed(() => previasMes.value === mes.value && previasBase.value === mesDaBase.value)
@@ -341,9 +355,13 @@ async function carregar() {
     falhaLinhas.value = new Set()
     conferidoEm.value = new Date()
     podarSelecao()
+    marcarPedidas(mm, mb, lista)
     reconferirRecusadas(mm, mb, lista, mapa)
   } catch (e) {
     if (minha !== seqCarga) return
+    // A carga que ia marcar as recém-criadas falhou: o pedido some (não marca nada
+    // mais tarde, sem ligação com a gaveta).
+    if (paraMarcar && paraMarcar.mes === mm && paraMarcar.base === mb) paraMarcar = null
     erro.value = erroApi(e)
   } finally {
     if (minha === seqCarga) carregandoLista.value = false
@@ -374,8 +392,12 @@ onDeactivated(() => {
 })
 
 watch(() => tela.versao.value, pedirCarga)
-watch(mes, () => {
-  escolhaBase.value = { mes: '', valor: '' } // a base volta para o mesmo mês da nota
+watch(mes, (m) => {
+  // A base volta para o mesmo mês da nota — menos quando quem trocou o mês já
+  // escolheu a base junto (a gaveta da nota fixa nova, 01/10).
+  if (escolhaBase.value.mes !== m) escolhaBase.value = { mes: '', valor: '' }
+  // Trocou para outro mês que não o do pedido da gaveta: o pedido deixa de valer.
+  if (paraMarcar && paraMarcar.mes !== m) paraMarcar = null
   selecionados.value = new Set()
   expandidas.value = new Set()
   falhaLinhas.value = new Set()
@@ -391,6 +413,50 @@ watch(() => `${mes.value}|${mesDaBase.value}`, (_novo, velho) => {
   }
   pedirCarga()
 })
+
+// Pedido da gaveta da nota fixa nova (01/10): o mês já veio trocado pela página.
+// `paraMarcar` (declarado lá em cima) espera a prévia daquele mês e base chegar.
+watch(
+  () => tela.pedidoEmitir.value,
+  (p) => {
+    if (!p) return
+    tela.pedidoEmitir.value = null
+    if (emitindo.value) return
+    if (p.mesBase !== undefined) {
+      const ok = !!p.mesBase && p.mesBase !== p.mes && opcoesMesBase(p.mes).some((o) => o.valor === p.mesBase)
+      escolhaBase.value = { mes: p.mes, valor: ok ? p.mesBase : '' }
+    }
+    filtro.value = null
+    busca.value = ''
+    // mes.value já é p.mes (a página trocou antes): mesDaBase já é o que vai valer.
+    paraMarcar = p.marcar?.length ? { mes: p.mes, base: mesDaBase.value, ids: new Set(p.marcar) } : null
+    // Mesmo mês e mesma base: nenhuma carga nova foi pedida pela troca. Se nenhuma
+    // está em andamento (a do recarregar() da gaveta), pede uma para marcar.
+    nextTick(() => {
+      if (paraMarcar && !carregandoLista.value) pedirCarga()
+    })
+  },
+  { immediate: true },
+)
+
+// Marca as recém-criadas que podem sair (empresa pronta, valor conferido). As
+// que não podem ficam na lista, com o que falta, sem marcar. O pedido vale para
+// UMA carga: a primeira que termina com as notas novas (outro mês/base = some).
+function marcarPedidas(mm: string, mb: string, lista: Modelo[]) {
+  const p = paraMarcar
+  if (!p) return
+  if (p.mes !== mm || p.base !== mb) {
+    paraMarcar = null
+    return
+  }
+  // Carga que começou antes de as notas novas chegarem: espera a próxima.
+  if (!lista.some((m) => p.ids.has(m.id))) return
+  paraMarcar = null
+  if (!canEdit.value || emitindo.value) return
+  const s = new Set(selecionados.value)
+  for (const l of linhas.value) if (p.ids.has(l.m.id) && l.marcavel) s.add(l.m.id)
+  if (s.size !== selecionados.value.size) selecionados.value = s
+}
 
 function conferirDeNovo() {
   // Recarrega a tela toda (empresas, tomadores, notas fixas) e, com a versão
@@ -1257,7 +1323,7 @@ const girando = computed(() => carregandoLista.value || tela.carregando.value)
   <section class="space-y-4">
     <!-- A) Barra do mês -->
     <div class="flex flex-wrap items-center gap-2">
-      <NfseMesPicker v-model="mes" :max="hoje" />
+      <NfseMesPicker v-model="mes" nome="Mês da nota" :max="hoje" />
       <NfseDica texto="O mês em que o serviço foi prestado. É ele que vai escrito na nota.">
         <button
           type="button"
@@ -1368,14 +1434,12 @@ const girando = computed(() => carregandoLista.value || tela.carregando.value)
       title="Nenhuma nota fixa ainda"
       description="Cadastre as notas que saem todo mês (quem emite, quem recebe, descrição e valor). Depois é só marcar e emitir aqui."
     >
-      <div v-if="canEdit" class="flex flex-wrap justify-center gap-2">
-        <Button size="sm" @click="tela.abrirModelo()">
-          <Plus class="mr-1.5 size-4" aria-hidden="true" /> nova nota fixa
-        </Button>
-        <Button size="sm" variant="outline" @click="tela.abrirAvulsa({ competencia: mes })">
-          <FilePlus2 class="mr-1.5 size-4" aria-hidden="true" /> nota avulsa
-        </Button>
-      </div>
+      <!-- 01/10/2026: "nova nota fixa" e "nota avulsa" ficam só no topo da página
+           (Eduardo: "precisa ir lá pra cima do lado de nota avulsa"). -->
+      <p v-if="canEdit" class="text-sm text-muted-foreground">
+        Use <span class="font-medium text-foreground">+ nova nota fixa</span> lá em cima, ao lado de
+        <span class="font-medium text-foreground">nota avulsa</span>.
+      </p>
       <div v-if="mostrarPrimeirosPassos" class="mx-auto mt-6 max-w-md rounded-lg border bg-background p-3 text-left">
         <NfseChecklist
           titulo="Primeiros passos"

@@ -28,7 +28,7 @@ import { computed, onBeforeUnmount, onMounted, provide, ref, unref, watch, type 
 import { onBeforeRouteLeave, type LocationQuery, type LocationQueryRaw } from 'vue-router'
 import { TooltipProvider } from 'reka-ui'
 import {
-  BookUser, Building2, CheckCircle2, FilePlus2, FileText, FlaskConical, Loader2, Lock, RotateCcw, Send, ShieldAlert,
+  BookUser, Building2, CheckCircle2, FilePlus2, FileText, FlaskConical, Loader2, Lock, Plus, RotateCcw, Send, ShieldAlert,
 } from 'lucide-vue-next'
 import { Button } from '~/components/ui/button'
 import { SENHA_EXTRA_TRAVA } from '~/composables/useSenhaExtra'
@@ -38,7 +38,8 @@ import {
   STATUS_PARA_RESOLVER,
   type AbaId, type AbrirModeloOpts, type AbrirTomadorOpts, type AvulsaApi, type CancelarApi, type ConfirmApi,
   type ConfirmarOpts, type EmailApi, type Emissao, type EmpresaApi, type IntegrarApi, type ItemLote, type LoteApi, type Modelo, type ModeloApi,
-  type NfseApi, type NfseTela, type NotaApi, type NotaDoLote, type Prestador, type ResultadoArquivos, type ResultadoLote,
+  type NfseApi, type NfseTela, type NotaApi, type NotaDoLote, type PedidoEmitir, type Prestador, type ResultadoArquivos,
+  type ResultadoLote,
   type SecaoEmpresa, type StatusNfse, type Tomador, type TomadorApi,
 } from '~/lib/nfse'
 
@@ -613,6 +614,21 @@ function irPara(destino: AbaId, extra?: Record<string, string | undefined>) {
   mudarQuery({ ...(extra ?? {}), aba: destino === 'emitir' ? undefined : destino })
 }
 
+// 01/10/2026 (Eduardo: "não aparece para qual mês eu quero gerar ela, ela já cai
+// em outubro… quero a opção de escolher na hora"): a gaveta da nota fixa nova
+// chama isto ao salvar. Troca o mês do Emitir e deixa o pedido (base do % e as
+// recém-criadas para marcar) para o NfseEmitir ler. Mês futuro não vale.
+const pedidoEmitir = ref<PedidoEmitir | null>(null)
+// A "Base do %" do Emitir mora aqui (o NfseEmitir usa este ref) para a gaveta
+// da nota fixa nova começar com ela.
+const baseEmitir = ref<{ mes: string; valor: string }>({ mes: '', valor: '' })
+function irParaEmitir(o: PedidoEmitir) {
+  const m = mesDaQuery(o.mes)
+  mes.value = m
+  pedidoEmitir.value = { ...o, mes: m }
+  irPara('emitir')
+}
+
 async function confirmar(o: ConfirmarOpts): Promise<boolean> {
   const j = janela(confirmRef, 'perguntar')
   return j ? j.perguntar(o) : false
@@ -817,6 +833,9 @@ const tela: NfseTela = {
   cancelar,
   enviarEmail,
   integrarEmpresa,
+  irParaEmitir,
+  pedidoEmitir,
+  baseEmitir,
 }
 provide(NFSE_TELA, tela)
 
@@ -1020,6 +1039,12 @@ onBeforeRouteLeave(() => {
           >
             <RotateCcw class="mr-1.5 size-4" :class="(carregando || relendoNfeio) && 'animate-spin'" aria-hidden="true" />
             {{ relendoNfeio ? 'relendo a NFE.io…' : 'atualizar' }}
+          </Button>
+          <!-- 01/10/2026 (Eduardo: "ele precisa ir lá pra cima do lado de nota avulsa, e
+               precisa aparecer em emitir do mês"): saiu do cartão "Notas fixas". -->
+          <Button v-if="canEdit" size="sm" variant="outline" @click="abrirModelo()">
+            <Plus class="mr-1.5 size-4" aria-hidden="true" />
+            nova nota fixa
           </Button>
           <Button v-if="canEdit" size="sm" variant="outline" @click="abrirAvulsa({ competencia: mes })">
             <FilePlus2 class="mr-1.5 size-4" aria-hidden="true" />

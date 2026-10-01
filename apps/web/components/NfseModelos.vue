@@ -344,10 +344,8 @@ function limparBusca() {
           v-model="mostrarDesativadas"
           :rotulo="`mostrar desativadas (${qtdDesativadas})`"
         />
-        <Button v-if="canEdit" size="sm" @click="novaNotaFixa">
-          <Plus class="mr-1.5 size-4" aria-hidden="true" />
-          nova nota fixa
-        </Button>
+        <!-- 01/10/2026 (Eduardo): o "nova nota fixa" foi para o topo da página, ao lado
+             de "nota avulsa". Aqui fica só o atalho da lista vazia. -->
       </div>
     </div>
 

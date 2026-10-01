@@ -2,6 +2,9 @@
 // Seletor de mês de competência ('AAAA-MM'; '' = todos os meses): ‹ › para
 // andar um mês e um popover com a grade dos 12 meses. Substitui o seletor
 // de mês nativo do navegador.
+// 01/10/2026: os botões são type="button" — o seletor agora também fica dentro do
+// formulário da nota fixa (NfseModelosSheet) e não pode enviar o formulário.
+// `nome` (opcional) diz ao leitor de tela o que é o mês: "Mês da nota: setembro de 2026".
 import { computed, ref, watch } from 'vue'
 import { PopoverContent, PopoverPortal, PopoverRoot, PopoverTrigger } from 'reka-ui'
 import { CalendarDays, ChevronLeft, ChevronRight } from 'lucide-vue-next'
@@ -15,6 +18,7 @@ const props = withDefaults(
     min?: string
     max?: string
     disabled?: boolean
+    nome?: string
   }>(),
   { permitirTodos: false, disabled: false },
 )
@@ -73,6 +77,7 @@ function mesDaGrade(i: number): string {
 <template>
   <div class="inline-flex items-center gap-1">
     <Button
+      type="button"
       variant="outline"
       size="icon"
       class="size-9"
@@ -85,7 +90,15 @@ function mesDaGrade(i: number): string {
 
     <PopoverRoot v-model:open="aberto">
       <PopoverTrigger as-child :disabled="disabled">
-        <Button variant="outline" size="sm" class="min-w-[176px] justify-start" :disabled="disabled" aria-haspopup="dialog">
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          class="min-w-[176px] justify-start"
+          :disabled="disabled"
+          aria-haspopup="dialog"
+          :aria-label="nome ? `${nome}: ${rotulo}` : undefined"
+        >
           <CalendarDays class="mr-1.5 size-4 text-muted-foreground" aria-hidden="true" />
           {{ rotulo }}
         </Button>
@@ -163,6 +176,7 @@ function mesDaGrade(i: number): string {
     </PopoverRoot>
 
     <Button
+      type="button"
       variant="outline"
       size="icon"
       class="size-9"

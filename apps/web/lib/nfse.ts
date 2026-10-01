@@ -413,6 +413,12 @@ export type ConfirmarOpts = {
   digitar?: string // ex.: 'EMITIR' → só confirma digitando
 }
 export type AbrirModeloOpts = { modelo?: Modelo | null; preset?: Partial<ModeloForm>; titulo?: string }
+// 01/10/2026 (Eduardo: "quero a opção de escolher na hora que eu tiver fazendo
+// já"): a gaveta da nota fixa nova leva a tela ao "Emitir do mês" no mês
+// escolhido. mesBase: o mês do faturamento da "Base do %" ('' = o mês da nota;
+// ausente = não mexe na escolha do Emitir). marcar: as recém-criadas, que já
+// entram marcadas se puderem sair (nada é emitido sozinho).
+export type PedidoEmitir = { mes: string; mesBase?: string; marcar?: string[] }
 export type AbrirTomadorOpts = { tomador?: Tomador | null; preset?: Partial<TomadorForm> }
 
 export type ModeloForm = {
@@ -530,6 +536,14 @@ export interface NfseTela {
   enviarEmail(e: Emissao): Promise<boolean>
   // 01/10: "Integrar na NFE.io" / "Completar integração". true = mudou algo.
   integrarEmpresa(p: Prestador): Promise<boolean>
+  // 01/10: vai para o "Emitir do mês" já no mês pedido (e com a "Base do %"
+  // pedida). O Emitir lê o pedido em `pedidoEmitir` e o apaga.
+  irParaEmitir(o: PedidoEmitir): void
+  pedidoEmitir: Ref<PedidoEmitir | null>
+  // 01/10: a "Base do %" escolhida no Emitir do mês (vale só para o mês `mes`;
+  // valor '' = o mês da nota). Fica na página para a gaveta da nota fixa nova
+  // abrir com a mesma base e não desfazer a escolha ao salvar.
+  baseEmitir: Ref<{ mes: string; valor: string }>
 }
 
 export const NFSE_TELA: InjectionKey<NfseTela> = Symbol('nfse-tela')

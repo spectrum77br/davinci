@@ -32,12 +32,25 @@
 // nota fixa acompanha a sua empresa); empresa sem % padrão exige "Outra %" ou
 // sair da lista. Códigos vazios = os de cada empresa. Ao EDITAR, uma só, como
 // antes. Quem abre continua recebendo UMA nota fixa: a primeira criada.
+//
+// Para qual mês (01/10/2026, Eduardo: "quando vou gerar uma nova nota fixa, não
+// aparece para qual mês eu quero gerar ela, ela já cai em outubro… quero a opção
+// de escolher na hora"): ao CRIAR, "Para qual mês" (padrão = o mês do Emitir do
+// mês; só até o mês atual) e, no Percentual, "Base do %: faturamento de" junto
+// da prévia do valor (o mês da nota ou um dos 3 anteriores, como no Emitir; abre
+// com a base já escolhida lá, para salvar não desfazê-la). Eles mudam a prévia (o texto
+// "Em setembro/2026 vai sair", os marcadores e o faturamento de cada empresa) e,
+// ao salvar, a tela vai para o Emitir do mês naquele mês e com aquela base, com
+// as recém-criadas marcadas (tela.irParaEmitir). A nota fixa continua "todo mês":
+// o mês NÃO é gravado. Ao EDITAR o campo não aparece (editar não leva a lugar
+// nenhum): a prévia usa o mês e a base que estão no Emitir do mês. Nota criada
+// desativada não aparece no Emitir: a tela fica onde está (e o texto diz isso).
 import { computed, nextTick, ref, watch } from 'vue'
-import { Banknote, Building2, Calculator, ChevronRight, ExternalLink, FileText, Loader2, Percent, RotateCcw, Trash2 } from 'lucide-vue-next'
+import { Banknote, Building2, Calculator, CalendarDays, ChevronRight, ExternalLink, FileText, Loader2, Percent, RotateCcw, Trash2 } from 'lucide-vue-next'
 import { Button } from '~/components/ui/button'
 import {
   calcularPercentual, campoDoErro, codigoErro, erroApi, fmtBrl, fmtMes, fmtPct, fmtPctOrigem, inserirNoCursor,
-  mesAtual, mesParaData, modeloParaForm, paraDecimal, pctPositivo, pendenciaTexto, plural, prestadorPorId, soDigitos,
+  mesAtual, mesParaData, mesValido, modeloParaForm, paraDecimal, pctPositivo, pendenciaTexto, plural, prestadorPorId, soDigitos,
   TOM_TEXTO, tomadorEstiloNfeio, tomadorNaNota, useNfseTela,
   type AbrirModeloOpts, type FaturamentoEmpresa, type Modelo, type ModeloApi, type ModeloForm, type OrigemPct,
   type Prestador,
@@ -111,7 +124,18 @@ const tela = useNfseTela()
 const { api } = useNfseApi()
 const toasts = useToasts()
 
-const mes = mesAtual()
+// Para qual mês (01/10/2026): a competência da nota que a pessoa vai emitir agora
+// e o mês do faturamento da "Base do %" ('' = o mês da nota). Só na tela.
+const hoje = ref(mesAtual())
+const mesNota = ref(hoje.value)
+// A base vale só para o mês da nota em que foi escolhida (igual ao Emitir do
+// mês): trocou o mês da nota, volta para o mesmo mês. Abre com a do Emitir.
+const escolhaBase = ref<{ mes: string; valor: string }>({ mes: '', valor: '' })
+const mesBase = computed(() => (escolhaBase.value.mes === mesNota.value ? escolhaBase.value.valor : ''))
+const mesDaBase = computed(() => mesBase.value || mesNota.value)
+function escolherMesBase(v: string) {
+  escolhaBase.value = { mes: mesNota.value, valor: v && v !== mesNota.value ? v : '' }
+}
 
 function vazio(): ModeloForm {
   return {
@@ -372,14 +396,14 @@ const faturamentoCarregado = ref(false)
 let seqFaturamento = 0
 // Várias fontes (comparadas uma a uma): marcar/desmarcar empresa não busca de novo.
 watch(
-  [aberto, () => idsAlvo.value.length > 0, () => form.value.tipo_valor],
-  async ([ab, temEmpresa, tipo]) => {
+  [aberto, () => idsAlvo.value.length > 0, () => form.value.tipo_valor, mesDaBase],
+  async ([ab, temEmpresa, tipo, mb]) => {
     const minha = ++seqFaturamento
     faturamentoLista.value = null
     faturamentoCarregado.value = false
     if (!ab || !temEmpresa || tipo !== 'percentual') return
     const r = await api<{ empresas: FaturamentoEmpresa[] }>(
-      `/api/nfse/faturamento?competencia=${mesParaData(mes)}`,
+      `/api/nfse/faturamento?competencia=${mesParaData(mb)}`,
     ).catch(() => null)
     if (minha !== seqFaturamento) return
     faturamentoLista.value = r?.empresas ?? null
@@ -415,7 +439,7 @@ const exemplo = computed(() => {
     : baseApi.value && Number(baseApi.value) > 0 ? 'sugerida' : 'exemplo'
   const base = origem === 'faturamento' ? baseFaturamento.value : origem === 'sugerida' ? baseApi.value! : BASE_EXEMPLO
   const valor = calcularPercentual(base, pct)
-  const deOnde = origem === 'faturamento' ? ` (faturamento de ${fmtMes(mes)})` : ''
+  const deOnde = origem === 'faturamento' ? ` (faturamento de ${fmtMes(mesDaBase.value)})` : ''
   return {
     origem,
     texto: `${fmtPctOrigem(pct, origemPct.value)} de ${fmtBrl(base)}${deOnde} = ${fmtBrl(valor)}`,
@@ -485,6 +509,13 @@ function abrir(o?: AbrirModeloOpts): Promise<Modelo | null> {
   modoPct.value = lerPercentual(form.value.percentual).pct ? 'outra' : 'empresa'
   original.value = o?.modelo ?? null
   tituloPedido.value = o?.titulo
+  // Para qual mês: o que está no Emitir do mês (nunca um mês futuro).
+  hoje.value = mesAtual()
+  const mesTela = tela.mes.value
+  mesNota.value = mesValido(mesTela) && mesTela <= hoje.value ? mesTela : hoje.value
+  // A "Base do %" que já está escolhida no Emitir (só vale se o mês for o mesmo):
+  // salvar sem mexer nela não desfaz a escolha de lá.
+  escolhaBase.value = { ...tela.baseEmitir.value }
   // Criando: a empresa do preset (Duplicar, Emitir do mês…) já vem marcada.
   empresasIds.value = !form.value.id && form.value.company_id ? [form.value.company_id] : []
   empresaOriginal.value = !o?.modelo && o?.preset?.company_id ? o.preset.company_id : null
@@ -511,8 +542,30 @@ function abrir(o?: AbrirModeloOpts): Promise<Modelo | null> {
 
 function fechar(m: Modelo | null) {
   aberto.value = false
+  // As criadas nesta abertura (a de uma empresa só chega em `m`).
+  const novas = editando.value ? [] : [...new Set([...criadas.value.map((x) => x.id), ...(m ? [m.id] : [])])]
   // Saindo depois de criar algumas (e desistir das que falharam): devolve a 1ª criada.
   terminar(m ?? primeiraCriada())
+  levarAoEmitir(novas)
+}
+
+// 01/10/2026: criou (uma ou várias) → Emitir do mês, no mês e na base escolhidos,
+// com as novas marcadas. Desativada não aparece lá: fica onde está. A "Base do %"
+// só vai se a nota for de percentual (a de valor fixo não mexe na do Emitir).
+function levarAoEmitir(ids: string[]) {
+  if (!ids.length || !form.value.ativo) return
+  tela.irParaEmitir({
+    mes: mesNota.value,
+    ...(ehPercentual.value ? { mesBase: mesBase.value } : {}),
+    marcar: ids,
+  })
+}
+
+// "Já está no Emitir do mês de setembro/2026 para conferir." (aviso de salvo, ao
+// criar). Sem "pronta": a empresa pode ter pendência ou a nota ficar sem base.
+function textoDestino(total: number): string | undefined {
+  if (!form.value.ativo) return undefined
+  return `Já ${total === 1 ? 'está' : 'estão'} no Emitir do mês de ${fmtMes(mesNota.value)} para conferir.`
 }
 
 // A gaveta já perguntou "Sair sem salvar?" quando precisava.
@@ -718,7 +771,7 @@ async function salvar() {
     const salvo = f.id
       ? await api<Modelo>(`/api/nfse/modelos/${f.id}`, { method: 'PATCH', body: corpo })
       : await api<Modelo>('/api/nfse/modelos', { method: 'POST', body: corpo })
-    toasts.success('Nota fixa salva')
+    toasts.success('Nota fixa salva', f.id ? undefined : textoDestino(1))
     await tela.recarregar()
     // A resposta do salvar não traz os nomes; a lista recarregada traz.
     fechar(tela.modelos.value.find((m) => m.id === salvo.id) ?? salvo)
@@ -804,7 +857,10 @@ async function criarVarias(corpo: Record<string, unknown>, pct: boolean) {
 
     if (!restantes.length) {
       const total = criadas.value.length
-      toasts.success(total === 1 ? 'Nota fixa salva' : `${plural(total, 'nota fixa criada', 'notas fixas criadas')}`)
+      toasts.success(
+        total === 1 ? 'Nota fixa salva' : `${plural(total, 'nota fixa criada', 'notas fixas criadas')}`,
+        textoDestino(total),
+      )
       fechar(primeiraCriada())
       return
     }
@@ -952,6 +1008,20 @@ const classeErro = 'border-red-500 dark:border-red-400'
       </NfseAviso>
 
       <fieldset :disabled="somenteLeitura || salvando" class="min-w-0 space-y-5">
+        <!-- 0. Para qual mês (01/10/2026): só ao criar -->
+        <NfseSecao v-if="!editando && !somenteLeitura" id="nfse-modelo-mes" titulo="Para qual mês" :icone="CalendarDays">
+          <NfseMesPicker v-model="mesNota" nome="Mês da nota" :max="hoje" :disabled="salvando" />
+          <p v-if="form.ativo" class="text-xs text-muted-foreground">
+            A nota fixa sai todo mês; aqui é só o mês que você vai emitir agora. Ao salvar, a tela vai para o
+            Emitir do mês de {{ fmtMes(mesNota) }}, com
+            {{ varias ? 'as notas novas já marcadas (as que puderem sair)' : 'a nota nova já marcada (se ela puder sair)' }}.
+            Nada é emitido sem você mandar.
+          </p>
+          <p v-else class="text-xs text-muted-foreground">
+            Desativada: ela não aparece no Emitir do mês até ser ativada. Ao salvar, a tela fica aqui.
+          </p>
+        </NfseSecao>
+
         <!-- 1. Quem emite e quem recebe -->
         <NfseSecao titulo="Quem emite e quem recebe" :icone="Building2">
           <NfseCampo
@@ -1093,7 +1163,7 @@ const classeErro = 'border-red-500 dark:border-red-400'
             />
             <NfseVariaveisDescricao
               v-if="!somenteLeitura"
-              :competencia="mes"
+              :competencia="mesNota"
               :texto="form.descricao"
               :com-percentual="ehPercentual"
               :percentual="pctEfetivo"
@@ -1228,6 +1298,16 @@ const classeErro = 'border-red-500 dark:border-red-400'
               </template>
             </p>
 
+            <!-- 01/10/2026: de que mês vem o faturamento da prévia (e do Emitir, ao
+                 salvar). Fica junto da prévia; só ao criar, como o "Para qual mês". -->
+            <NfseMesBase
+              v-if="!editando && !somenteLeitura"
+              id="nfse-modelo-mes-base"
+              :model-value="mesBase"
+              :competencia="mesNota"
+              :disabled="salvando"
+              @update:model-value="escolherMesBase"
+            />
             <div
               class="flex items-start gap-2 rounded-md border bg-muted/40 px-3 py-2 text-sm"
               aria-live="polite"
@@ -1236,7 +1316,7 @@ const classeErro = 'border-red-500 dark:border-red-400'
               <!-- Várias (01/10/2026): a prévia de cada empresa -->
               <div v-if="varias" class="min-w-0 flex-1 space-y-1">
                 <p class="text-muted-foreground">
-                  Prévia de cada empresa (faturamento de {{ fmtMes(mes) }}):
+                  Prévia de cada empresa (faturamento de {{ fmtMes(mesDaBase) }}):
                 </p>
                 <p v-if="erroPctConta" :class="TOM_TEXTO.perigo">{{ erroPctConta }}</p>
                 <ul class="max-h-48 space-y-0.5 overflow-y-auto text-xs">
@@ -1256,7 +1336,7 @@ const classeErro = 'border-red-500 dark:border-red-400'
                           ? 'carregando o faturamento…'
                           : x.semLoja
                             ? 'não tem loja com o CNPJ dela em Cadastros › Lojas: na hora de emitir, digite a base'
-                            : `sem venda em ${fmtMes(mes)}: na hora de emitir, digite a base`
+                            : `sem venda em ${fmtMes(mesDaBase)}: na hora de emitir, digite a base`
                       }}
                     </span>
                   </li>
@@ -1283,7 +1363,7 @@ const classeErro = 'border-red-500 dark:border-red-400'
                 >
                   {{
                     faturamentoMes
-                      ? `A ${empresa.apelido} não teve venda em ${fmtMes(mes)}: na hora de emitir, digite a base.`
+                      ? `A ${empresa.apelido} não teve venda em ${fmtMes(mesDaBase)}: na hora de emitir, digite a base.`
                       : `A ${empresa.apelido} não tem loja com o CNPJ dela em Cadastros › Lojas: na hora de emitir, digite a base.`
                   }}
                 </p>
