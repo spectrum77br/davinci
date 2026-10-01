@@ -245,13 +245,13 @@ defineExpose({ carregar })
       <table class="w-full">
         <thead>
           <tr>
+            <th title="Quando o robô achou o anúncio mais novo desta loja">Último achado</th>
             <th>Loja</th>
             <th>Marketplace</th>
             <th>Certificado</th>
             <th class="text-right">Anúncios</th>
             <th class="text-right">Vendas</th>
             <th class="text-right">Denúncias</th>
-            <th title="Quando o robô achou o anúncio mais novo desta loja">Último achado</th>
           </tr>
         </thead>
         <tbody>
@@ -263,6 +263,10 @@ defineExpose({ carregar })
           </tr>
           <template v-for="l in lojas" :key="chaveLoja(l)">
             <tr class="cursor-pointer" @click="abrirLoja(l)">
+              <td class="text-xs whitespace-nowrap tabular-nums" :title="l.ultimo_achado || ''">
+                <div>{{ dataBr(l.ultimo_achado, false) }}</div>
+                <div v-if="l.ultimo_achado && l.ultimo_achado.length >= 16" class="text-[11px] text-muted-foreground">{{ l.ultimo_achado.slice(11, 16) }}</div>
+              </td>
               <td class="max-w-[240px]">
                 <div class="flex items-center gap-1 min-w-0">
                   <ChevronDown v-if="lojaAberta === chaveLoja(l)" class="size-3.5 shrink-0 text-muted-foreground" />
@@ -286,7 +290,6 @@ defineExpose({ carregar })
                 {{ l.denuncias ? numero(l.denuncias) : '—' }}
                 <div v-if="l.denuncias" class="text-[11px] text-muted-foreground">em {{ numero(l.com_denuncia) }} anúncio{{ l.com_denuncia > 1 ? 's' : '' }}</div>
               </td>
-              <td class="text-xs tabular-nums whitespace-nowrap">{{ dataBr(l.ultimo_achado, false) }}</td>
             </tr>
             <tr v-if="lojaAberta === chaveLoja(l)">
               <td colspan="7" class="bg-muted/30 p-0">
@@ -294,7 +297,10 @@ defineExpose({ carregar })
                 <table v-else class="w-full">
                   <tbody>
                     <tr v-for="a in anunciosDaLoja" :key="a.id" class="cursor-pointer" @click="aberto = a.id">
-                      <td class="pl-8 text-xs whitespace-nowrap tabular-nums">{{ dataBr(a.visto_primeiro, false) }}</td>
+                      <td class="pl-8 text-xs whitespace-nowrap tabular-nums">
+                        {{ dataBr(a.visto_primeiro, false) }}
+                        <span v-if="a.visto_primeiro && a.visto_primeiro.length >= 16" class="text-[11px] text-muted-foreground">{{ a.visto_primeiro.slice(11, 16) }}</span>
+                      </td>
                       <td class="font-mono text-xs whitespace-nowrap">{{ a.id }}</td>
                       <td class="text-xs max-w-[340px]">
                         <div class="flex items-center gap-1 min-w-0">

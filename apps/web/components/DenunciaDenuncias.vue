@@ -244,13 +244,13 @@ defineExpose({ carregar })
       <table class="w-full">
         <thead>
           <tr>
+            <th title="Data da denúncia mais recente desta loja">Última</th>
             <th>Loja</th>
             <th>Marketplace</th>
             <th class="text-right">Denúncias</th>
             <th>Resultado</th>
             <th>Canais</th>
             <th class="text-right">Anúncios</th>
-            <th>Última</th>
           </tr>
         </thead>
         <tbody>
@@ -262,6 +262,10 @@ defineExpose({ carregar })
           </tr>
           <template v-for="l in lojas" :key="chaveLoja(l)">
             <tr class="cursor-pointer" @click="abrirLoja(l)">
+              <td class="text-xs whitespace-nowrap tabular-nums">
+                <div>{{ dataBr(l.ultima, false) }}</div>
+                <div v-if="l.ultima && l.ultima.length >= 16" class="text-[11px] text-muted-foreground">{{ l.ultima.slice(11, 16) }}</div>
+              </td>
               <td class="max-w-[240px]">
                 <div class="flex items-center gap-1 min-w-0">
                   <ChevronDown v-if="lojaAberta === chaveLoja(l)" class="size-3.5 shrink-0 text-muted-foreground" />
@@ -282,7 +286,6 @@ defineExpose({ carregar })
                 {{ numero(l.anuncios) }}
                 <div class="text-[11px] text-muted-foreground">{{ numero(l.anuncios_no_ar) }} no ar</div>
               </td>
-              <td class="text-xs tabular-nums whitespace-nowrap">{{ dataBr(l.ultima, false) }}</td>
             </tr>
             <tr v-if="lojaAberta === chaveLoja(l)">
               <td colspan="7" class="bg-muted/30 p-0">
