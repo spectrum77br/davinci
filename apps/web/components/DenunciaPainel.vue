@@ -131,6 +131,11 @@ function pillTom(t: string | undefined): string {
   return TOM[t || 'muted'] || 'pill-muted'
 }
 
+// "ativo" é como o robô grava; na tela fica "no ar"
+function textoSituacao(s: string | null): string {
+  return s === 'ativo' ? 'no ar' : s || '—'
+}
+
 function chaveLoja(l: Loja): string {
   return `${l.marketplace || ''}|${l.chave}`
 }
@@ -271,7 +276,7 @@ defineExpose({ carregar })
       <button type="button" class="text-left rounded-lg" :class="naAnatel === 'fila' ? 'ring-2 ring-primary' : ''" title="filtrar os que estão na fila da Anatel" @click="porCartao('naAnatel', 'fila')">
         <StatCard
           compact label="Na fila da Anatel" :value="numero(n.na_anatel.fila)" tone="warning"
-          :hint="`${numero(n.na_anatel.falta_print)} falta o print · ${numero(n.na_anatel.esperando_recusa)} esperando recusa`"
+          :hint="`${numero(n.na_anatel.falta_print)} sem print · ${numero(n.na_anatel.esperando_recusa)} aguardam a loja`"
         />
       </button>
     </div>
@@ -338,12 +343,23 @@ defineExpose({ carregar })
         </select>
       </div>
 
-      <!-- ══ Por loja ══ -->
+      <!-- ══ Por loja ══ — 01/10 (Vinicius: "tudo desalinhado"): colunas de largura fixa e os
+           anúncios da loja aberta como linhas da MESMA tabela (antes era uma tabela dentro da outra) -->
       <div v-if="visao === 'loja'" class="table-card overflow-x-auto">
-        <table class="w-full">
+        <table class="w-full min-w-[1080px] table-fixed">
+          <colgroup>
+            <col class="w-[108px]">
+            <col>
+            <col class="w-[150px]">
+            <col class="w-[92px]">
+            <col class="w-[92px]">
+            <col class="w-[210px]">
+            <col class="w-[230px]">
+            <col class="w-[120px]">
+          </colgroup>
           <thead>
-            <tr>
-              <th class="w-24" title="Quando o robô achou o anúncio mais novo desta loja">Último achado</th>
+            <tr class="[&>th]:whitespace-nowrap">
+              <th title="Quando o robô achou o anúncio mais novo desta loja">Último achado</th>
               <th>Loja</th>
               <th>Certificado</th>
               <th class="text-right">Anúncios</th>
@@ -361,12 +377,12 @@ defineExpose({ carregar })
               <td colspan="8" class="text-center text-muted-foreground py-6">nenhuma loja neste filtro</td>
             </tr>
             <template v-for="l in lojas" :key="chaveLoja(l)">
-              <tr class="cursor-pointer" @click="abrirLoja(l)">
-                <td class="text-xs whitespace-nowrap tabular-nums align-top" :title="l.ultimo_achado || ''">
+              <tr class="cursor-pointer [&>td]:align-middle" :class="lojaAberta === chaveLoja(l) ? 'bg-muted/40' : ''" @click="abrirLoja(l)">
+                <td class="text-xs tabular-nums whitespace-nowrap" :title="l.ultimo_achado || ''">
                   <div>{{ dataBr(l.ultimo_achado, false) }}</div>
-                  <div v-if="l.ultimo_achado && l.ultimo_achado.length >= 16" class="text-[11px] text-muted-foreground">{{ l.ultimo_achado.slice(11, 16) }}</div>
+                  <div class="text-[11px] text-muted-foreground">{{ l.ultimo_achado && l.ultimo_achado.length >= 16 ? l.ultimo_achado.slice(11, 16) : '' }}</div>
                 </td>
-                <td class="max-w-[260px] align-top">
+                <td>
                   <div class="flex items-center gap-1 min-w-0">
                     <ChevronDown v-if="lojaAberta === chaveLoja(l)" class="size-3.5 shrink-0 text-muted-foreground" />
                     <ChevronRight v-else class="size-3.5 shrink-0 text-muted-foreground" />
@@ -376,69 +392,73 @@ defineExpose({ carregar })
                     {{ l.marketplace || '—' }}<span v-if="l.shop_id" class="font-mono"> · {{ l.shop_id }}</span>
                   </div>
                 </td>
-                <td class="align-top">
+                <td>
                   <div class="flex flex-wrap gap-1">
                     <span v-if="l.nosso" class="pill-danger">Nosso {{ l.nosso }}</span>
                     <span v-if="l.diversos" class="pill-warning">Diversos {{ l.diversos }}</span>
                     <span v-if="l.outros" class="pill-muted">outros {{ l.outros }}</span>
                   </div>
                 </td>
-                <td class="text-right tabular-nums whitespace-nowrap align-top">
+                <td class="text-right tabular-nums">
                   <div class="text-sm">{{ numero(l.anuncios) }}</div>
-                  <div class="text-[11px] text-muted-foreground">{{ numero(l.no_ar) }} no ar</div>
+                  <div class="text-[11px] text-muted-foreground whitespace-nowrap">{{ numero(l.no_ar) }} no ar</div>
                 </td>
-                <td class="text-right text-sm font-medium tabular-nums whitespace-nowrap align-top">{{ numero(l.vendas) }}</td>
-                <td class="align-top">
+                <td class="text-right text-sm font-medium tabular-nums">{{ numero(l.vendas) }}</td>
+                <td>
                   <div class="flex flex-wrap gap-1">
                     <span v-for="e in etiquetas(l.na_loja, ETIQ_LOJA)" :key="e.k" :class="e.cls">{{ e.texto }}</span>
                   </div>
                 </td>
-                <td class="align-top">
+                <td>
                   <div class="flex flex-wrap gap-1" :title="l.processos.join('\n')">
                     <span v-for="e in etiquetas(l.na_anatel, ETIQ_ANATEL)" :key="e.k" :class="e.cls">{{ e.texto }}</span>
                     <span v-if="!etiquetas(l.na_anatel, ETIQ_ANATEL).length" class="text-xs text-muted-foreground">—</span>
                   </div>
                 </td>
-                <td class="align-top whitespace-nowrap">
+                <td>
                   <span v-if="l.fora_do_ar" class="pill-success">{{ l.fora_do_ar }} fora do ar</span>
                   <span v-else class="text-xs text-muted-foreground">—</span>
                 </td>
               </tr>
-              <tr v-if="lojaAberta === chaveLoja(l)">
-                <td colspan="8" class="bg-muted/30 p-0">
-                  <div v-if="carregandoLoja" class="px-4 py-3 text-xs text-muted-foreground">carregando os anúncios da loja…</div>
-                  <table v-else class="w-full">
-                    <tbody>
-                      <tr v-for="a in anunciosDaLoja" :key="a.id" class="cursor-pointer" @click="abrirAnuncio(a.id)">
-                        <td class="pl-8 w-28 text-xs whitespace-nowrap tabular-nums">{{ dataBr(a.visto_primeiro, false) }}</td>
-                        <td class="text-xs max-w-[340px]">
-                          <div class="flex items-center gap-1 min-w-0">
-                            <span class="truncate" :title="a.titulo || ''">{{ a.titulo || '—' }}</span>
-                            <a v-if="a.url" :href="a.url" target="_blank" rel="noopener noreferrer" class="shrink-0 text-muted-foreground hover:text-primary" title="abrir no marketplace" @click.stop>
-                              <ExternalLink class="size-3.5" />
-                            </a>
-                          </div>
-                          <div class="font-mono text-[11px] text-muted-foreground">{{ a.id }} · {{ a.hom || (a.inmetro ? `Inmetro ${a.inmetro}` : 'sem nº') }}</div>
-                        </td>
-                        <td><span v-if="a.grupo" :class="pillGrupo(a.grupo)">{{ nomeGrupo(a.grupo) }}</span></td>
-                        <td class="text-right text-xs tabular-nums">{{ numero(a.vendas) }}</td>
-                        <td class="whitespace-nowrap">
-                          <span :class="pillTom(a.loja_st.tom)">{{ a.loja_st.rotulo }}</span>
-                          <div v-if="a.loja_st.data" class="text-[11px] text-muted-foreground mt-0.5">{{ dataBr(a.loja_st.data, false) }}<template v-if="(a.loja_st.tentativas || 0) > 1"> · {{ a.loja_st.tentativas }} tentativas</template></div>
-                        </td>
-                        <td class="whitespace-nowrap">
-                          <span :class="pillTom(a.anatel_st.tom)">{{ a.anatel_st.rotulo }}</span>
-                          <div v-if="a.anatel_st.protocolo" class="font-mono text-[11px] text-muted-foreground mt-0.5">{{ a.anatel_st.protocolo }}</div>
-                        </td>
-                        <td class="whitespace-nowrap"><span :class="pillSituacaoAnuncio(a.situacao)">{{ a.situacao || '—' }}</span></td>
-                      </tr>
-                      <tr v-if="!anunciosDaLoja.length">
-                        <td class="px-4 py-3 text-xs text-muted-foreground">nenhum anúncio desta loja neste filtro</td>
-                      </tr>
-                    </tbody>
-                  </table>
-                </td>
-              </tr>
+              <template v-if="lojaAberta === chaveLoja(l)">
+                <tr v-if="carregandoLoja">
+                  <td colspan="8" class="bg-muted/20 text-xs text-muted-foreground">carregando os anúncios da loja…</td>
+                </tr>
+                <tr v-else-if="!anunciosDaLoja.length">
+                  <td colspan="8" class="bg-muted/20 text-xs text-muted-foreground">nenhum anúncio desta loja neste filtro</td>
+                </tr>
+                <tr
+                  v-for="a in anunciosDaLoja"
+                  :key="a.id"
+                  class="cursor-pointer bg-muted/20 [&>td]:align-middle"
+                  @click="abrirAnuncio(a.id)"
+                >
+                  <td class="text-xs tabular-nums whitespace-nowrap text-muted-foreground">{{ dataBr(a.visto_primeiro, false) }}</td>
+                  <td>
+                    <div class="pl-[18px] border-l-2 border-border ml-1.5">
+                      <div class="flex items-center gap-1 min-w-0">
+                        <span class="truncate text-xs" :title="a.titulo || ''">{{ a.titulo || '—' }}</span>
+                        <a v-if="a.url" :href="a.url" target="_blank" rel="noopener noreferrer" class="shrink-0 text-muted-foreground hover:text-primary" title="abrir no marketplace" @click.stop>
+                          <ExternalLink class="size-3.5" />
+                        </a>
+                      </div>
+                      <div class="font-mono text-[11px] text-muted-foreground truncate">{{ a.id }} · {{ a.hom || (a.inmetro ? `Inmetro ${a.inmetro}` : 'sem nº') }}</div>
+                    </div>
+                  </td>
+                  <td><span v-if="a.grupo" :class="pillGrupo(a.grupo)">{{ nomeGrupo(a.grupo) }}</span></td>
+                  <td />
+                  <td class="text-right text-xs tabular-nums">{{ numero(a.vendas) }}</td>
+                  <td>
+                    <span :class="pillTom(a.loja_st.tom)">{{ a.loja_st.rotulo }}</span>
+                    <div v-if="a.loja_st.data" class="text-[11px] text-muted-foreground mt-0.5 whitespace-nowrap">{{ dataBr(a.loja_st.data, false) }}<template v-if="(a.loja_st.tentativas || 0) > 1"> · {{ a.loja_st.tentativas }} tentativas</template></div>
+                  </td>
+                  <td>
+                    <span :class="pillTom(a.anatel_st.tom)">{{ a.anatel_st.rotulo }}</span>
+                    <div v-if="a.anatel_st.protocolo" class="font-mono text-[11px] text-muted-foreground mt-0.5 truncate">{{ a.anatel_st.protocolo }}</div>
+                  </td>
+                  <td><span :class="pillSituacaoAnuncio(a.situacao)">{{ textoSituacao(a.situacao) }}</span></td>
+                </tr>
+              </template>
             </template>
           </tbody>
         </table>
@@ -446,10 +466,20 @@ defineExpose({ carregar })
 
       <!-- ══ Por anúncio ══ -->
       <div v-else class="table-card overflow-x-auto">
-        <table class="w-full">
+        <table class="w-full min-w-[1080px] table-fixed">
+          <colgroup>
+            <col class="w-[108px]">
+            <col>
+            <col class="w-[180px]">
+            <col class="w-[110px]">
+            <col class="w-[92px]">
+            <col class="w-[200px]">
+            <col class="w-[220px]">
+            <col class="w-[110px]">
+          </colgroup>
           <thead>
-            <tr>
-              <th class="w-24" title="Quando o robô viu o anúncio pela primeira vez">Achado em</th>
+            <tr class="[&>th]:whitespace-nowrap">
+              <th title="Quando o robô viu o anúncio pela primeira vez">Achado em</th>
               <th>Anúncio</th>
               <th>Loja</th>
               <th>Certificado</th>
@@ -466,35 +496,35 @@ defineExpose({ carregar })
             <tr v-else-if="itens.length === 0">
               <td colspan="8" class="text-center text-muted-foreground py-6">nenhum anúncio neste filtro</td>
             </tr>
-            <tr v-for="a in itens" :key="a.id" class="cursor-pointer" @click="abrirAnuncio(a.id)">
-              <td class="text-xs whitespace-nowrap tabular-nums align-top">
+            <tr v-for="a in itens" :key="a.id" class="cursor-pointer [&>td]:align-middle" @click="abrirAnuncio(a.id)">
+              <td class="text-xs tabular-nums whitespace-nowrap">
                 <div>{{ dataBr(a.visto_primeiro, false) }}</div>
-                <div v-if="a.visto_primeiro && a.visto_primeiro.length >= 16" class="text-[11px] text-muted-foreground">{{ a.visto_primeiro.slice(11, 16) }}</div>
+                <div class="text-[11px] text-muted-foreground">{{ a.visto_primeiro && a.visto_primeiro.length >= 16 ? a.visto_primeiro.slice(11, 16) : '' }}</div>
               </td>
-              <td class="text-xs max-w-[320px] align-top">
+              <td>
                 <div class="flex items-center gap-1 min-w-0">
-                  <span class="truncate" :title="a.titulo || ''">{{ a.titulo || '—' }}</span>
+                  <span class="truncate text-xs" :title="a.titulo || ''">{{ a.titulo || '—' }}</span>
                   <a v-if="a.url" :href="a.url" target="_blank" rel="noopener noreferrer" class="shrink-0 text-muted-foreground hover:text-primary" title="abrir no marketplace" @click.stop>
                     <ExternalLink class="size-3.5" />
                   </a>
                 </div>
-                <div class="font-mono text-[11px] text-muted-foreground">{{ a.id }} · {{ a.hom || (a.inmetro ? `Inmetro ${a.inmetro}` : 'sem nº') }}</div>
+                <div class="font-mono text-[11px] text-muted-foreground truncate">{{ a.id }} · {{ a.hom || (a.inmetro ? `Inmetro ${a.inmetro}` : 'sem nº') }}</div>
               </td>
-              <td class="text-xs max-w-[180px] align-top">
-                <div class="truncate" :title="a.loja || ''">{{ a.loja || '—' }}</div>
-                <div class="text-[11px] text-muted-foreground">{{ a.marketplace || '' }}</div>
+              <td>
+                <div class="truncate text-xs" :title="a.loja || ''">{{ a.loja || '—' }}</div>
+                <div class="text-[11px] text-muted-foreground truncate">{{ a.marketplace || '' }}</div>
               </td>
-              <td class="align-top"><span v-if="a.grupo" :class="pillGrupo(a.grupo)">{{ nomeGrupo(a.grupo) }}</span></td>
-              <td class="text-right text-xs tabular-nums align-top">{{ numero(a.vendas) }}</td>
-              <td class="whitespace-nowrap align-top">
+              <td><span v-if="a.grupo" :class="pillGrupo(a.grupo)">{{ nomeGrupo(a.grupo) }}</span></td>
+              <td class="text-right text-xs tabular-nums">{{ numero(a.vendas) }}</td>
+              <td>
                 <span :class="pillTom(a.loja_st.tom)">{{ a.loja_st.rotulo }}</span>
-                <div v-if="a.loja_st.data" class="text-[11px] text-muted-foreground mt-0.5">{{ dataBr(a.loja_st.data, false) }}<template v-if="(a.loja_st.tentativas || 0) > 1"> · {{ a.loja_st.tentativas }} tentativas</template></div>
+                <div v-if="a.loja_st.data" class="text-[11px] text-muted-foreground mt-0.5 whitespace-nowrap">{{ dataBr(a.loja_st.data, false) }}<template v-if="(a.loja_st.tentativas || 0) > 1"> · {{ a.loja_st.tentativas }} tentativas</template></div>
               </td>
-              <td class="whitespace-nowrap align-top">
+              <td>
                 <span :class="pillTom(a.anatel_st.tom)">{{ a.anatel_st.rotulo }}</span>
-                <div v-if="a.anatel_st.protocolo" class="font-mono text-[11px] text-muted-foreground mt-0.5">{{ a.anatel_st.protocolo }}</div>
+                <div v-if="a.anatel_st.protocolo" class="font-mono text-[11px] text-muted-foreground mt-0.5 truncate">{{ a.anatel_st.protocolo }}</div>
               </td>
-              <td class="whitespace-nowrap align-top"><span :class="pillSituacaoAnuncio(a.situacao)">{{ a.situacao || '—' }}</span></td>
+              <td><span :class="pillSituacaoAnuncio(a.situacao)">{{ textoSituacao(a.situacao) }}</span></td>
             </tr>
           </tbody>
         </table>
