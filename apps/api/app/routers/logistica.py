@@ -1614,17 +1614,21 @@ async def aplicar_alterar_status_bling(
     logistica_id: UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
     _user: Annotated[User, Depends(require_permission("logistica", "edit"))],
+    forcar: bool = False,
 ) -> StatusBlingOut:
     """Muda a situação do pedido no Bling para a `alterar_status_bling` da regra
     casada (via PATCH /situacoes — não reenvia o pedido) e sincroniza o
-    `status_bling` local da linha."""
+    `status_bling` local da linha. `forcar=true` = a pessoa confirmou mudar
+    mesmo depois de alguém ter tirado o pedido do alvo que o robô aplicou."""
     c = (
         await session.execute(select(Logistica).where(Logistica.id == logistica_id))
     ).scalar_one_or_none()
     if c is None:
         raise HTTPException(404, detail={"code": "logistica_not_found"})
     try:
-        data = await logistica_bling.apply_alterar_status_bling(session, c)
+        data = await logistica_bling.apply_alterar_status_bling(
+            session, c, forcar=forcar, por=_user.email
+        )
     except logistica_bling.BlingObsError as e:
         raise HTTPException(422, detail={"code": e.code}) from e
     except Exception as e:  # noqa: BLE001

@@ -430,6 +430,17 @@ async def test_status_override_humano_nao_reaplica(
     assert ra2.status_code == 422
     assert ra2.json()["detail"]["code"] == "logistica_status_override_humano"
     assert fake.situacao_set is None  # não mexeu
+    # o robô (lote) também não reaplica
+    lote = await logistica_bling.aplicar_status_em_lote(db, [uuid.UUID(lid)])
+    assert lote["pulados"] == 1 and lote["aplicados"] == 0
+    assert fake.situacao_set is None
+    # 01/10 (TikTok 296856): quem aperta o botão de propósito e confirma passa a trava
+    raf = await client.post(
+        f"/api/logistica/{lid}/alterar-status-bling", params={"forcar": "true"}
+    )
+    assert raf.status_code == 200, raf.text
+    assert fake.situacao_set == 83957
+    fake.situacao_set = None
     # a plataforma MUDOU (assinatura nova que também casa uma regra) → volta a aplicar
     meli2 = {"order_status": "cancelled", "ship_status": "delivered"}
     rs2 = await client.post(

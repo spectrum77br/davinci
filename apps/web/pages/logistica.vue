@@ -1813,6 +1813,7 @@ async function aplicarStatusBling(c: Logistica) {
       situacao_alvo: string
       situacao_atual_nome: string | null
       ja_no_alvo: boolean
+      override_humano: boolean
       aplicavel: boolean
     }>(`/api/logistica/${c.id}/alterar-status-bling/preview`, { method: 'POST' })
     // O preview lê a situação viva do Bling e o backend já sincronizou o
@@ -1821,6 +1822,26 @@ async function aplicarStatusBling(c: Logistica) {
     if (prev.situacao_atual_nome) c.status_bling = prev.situacao_atual_nome
     if (prev.ja_no_alvo) {
       toasts.info('Nada a fazer', `Pedido já está em "${prev.situacao_alvo}".`)
+      return
+    }
+    // O robô já levou o pedido ao alvo e alguém tirou dali: o robô não reaplica,
+    // mas quem aperta o botão decide (01/10, TikTok 296856 — antes caía no
+    // "Fora do fluxo", que não fazia sentido).
+    if (prev.override_humano) {
+      const atualNome = prev.situacao_atual_nome || '(desconhecida)'
+      if (
+        !confirm(
+          `O robô já tinha mudado este pedido para "${prev.situacao_alvo}" e depois alguém voltou para "${atualNome}".\n\n` +
+            `Mudar mesmo assim?\n\n${atualNome}  →  ${prev.situacao_alvo}`,
+        )
+      )
+        return
+      await api(`/api/logistica/${c.id}/alterar-status-bling`, {
+        method: 'POST',
+        query: { forcar: true },
+      })
+      c.status_bling = prev.situacao_alvo
+      toasts.success('Status Bling alterado', `${c.pedido_bling || ''} → ${prev.situacao_alvo}`)
       return
     }
     // A regra tem "Status Atual" (o "de") mas o pedido não está nele → não muda

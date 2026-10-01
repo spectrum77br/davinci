@@ -515,21 +515,36 @@ def pacote_ainda_com_o_vendedor(
     return False
 
 
-async def apply_alterar_status_bling(session: AsyncSession, row: Logistica) -> dict:
+async def apply_alterar_status_bling(
+    session: AsyncSession, row: Logistica, *, forcar: bool = False, por: str | None = None
+) -> dict:
     """Aplica de verdade: só muda quando uma regra se aplica ao estado atual
     (guarda contra regressão/pulo de etapa), então PATCH da situação no Bling e
     sincroniza o `status_bling` local. `logistica_status_atual_divergente` se o
-    pedido não está no "de" de nenhuma regra."""
+    pedido não está no "de" de nenhuma regra.
+
+    `forcar` passa só a trava do "humano tirou dali" (`override_humano`): essa
+    trava existe pra o ROBÔ não brigar com quem mexeu, não pra barrar a pessoa
+    que aperta o botão de propósito (Vinicius, 01/10/2026, TikTok 296856). O
+    lote do robô nunca força; as demais guardas valem pros dois."""
     r = await _resolve_status(session, row)
     if r.get("override_humano"):
+        if not forcar:
+            logger.info(
+                "logistica_status_override_humano",
+                pedido=row.pedido_bling,
+                situacao_atual=r["atual_id"],
+                situacao_alvo=r["alvo_id"],
+            )
+            raise BlingObsError("logistica_status_override_humano")
         logger.info(
-            "logistica_status_override_humano",
+            "logistica_status_override_humano_forcado",
             pedido=row.pedido_bling,
             situacao_atual=r["atual_id"],
             situacao_alvo=r["alvo_id"],
+            por=por,
         )
-        raise BlingObsError("logistica_status_override_humano")
-    if not r["aplicavel"]:
+    elif not r["aplicavel"]:
         raise BlingObsError("logistica_status_atual_divergente")
     alvo, alvo_id = r["alvo"], r["alvo_id"]
     if alvo_id == _SITUACAO_EM_ANDAMENTO_ID and pacote_ainda_com_o_vendedor(
