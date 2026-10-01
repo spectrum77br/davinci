@@ -19,7 +19,9 @@ Uma janela faz quatro coisas:
    LaunchAgent e parou de poder ler a pasta;
 5. (01/10) o estado do robô pro DaVinci a cada 60 s: o resumo que o
    `status_mac.py` grava em `Fiscalizacao/_cowork/status_ultimo.json` vai pra
-   `POST /api/denuncia/sync/robo` — é a aba Robô de Ouvidoria › Denúncia.
+   `POST /api/denuncia/sync/robo` — é a aba Robô de Ouvidoria › Denúncia;
+6. (01/10) as provas sob demanda: a cada 5 s pergunta ao DaVinci se alguém
+   clicou numa prova que não está lá e sobe só aquele arquivo.
 Mais o backup diário local do banco em `data/backups` (guarda 30), como fazia
 o `run.py` no servidor.
 
@@ -146,6 +148,51 @@ def robo():
     _robo["enviado"] = marca
 
 
+_provas = {"falhou": {}, "aviso_rede": 0.0}
+
+
+def provas_pedidas():
+    """Prova que alguém abriu no DaVinci e o arquivo não está lá: sobe só ela.
+    Usa o mesmo config/banco/rotas da cópia (enviar_ao_davinci.py)."""
+    if DAVINCI not in sys.path:
+        sys.path.insert(0, DAVINCI)
+    import enviar_ao_davinci as env  # noqa: E402 — só biblioteca padrão
+
+    cfg = env.ler_config()
+    try:
+        ids = env.pedir(cfg, "GET", "/api/denuncia/sync/provas-pedidas", timeout=30).get("ids") or []
+    except (OSError, RuntimeError) as e:
+        if time.time() - _provas["aviso_rede"] > 600:  # sem internet: avisa de 10 em 10 min, não a cada 5 s
+            log("provas: DaVinci não respondeu (%s)" % e)
+            _provas["aviso_rede"] = time.time()
+        return
+    ids = [i for i in ids if time.time() - _provas["falhou"].get(i, 0) > 300]
+    if not ids:
+        return
+    banco = env.abrir_banco(cfg["banco"])
+    try:
+        caminhos = dict(banco.execute(
+            "SELECT id, arquivo FROM provas WHERE id IN (%s)" % ",".join("?" * len(ids)), ids))
+    finally:
+        banco.close()
+    for pid in ids:
+        rel = caminhos.get(pid)
+        caminho = os.path.join(cfg["provas"], rel) if rel else None
+        if not caminho or not os.path.isfile(caminho):
+            log("provas: %s pedida no DaVinci, mas o arquivo não está neste Mac (%s)" % (pid, rel))
+            _provas["falhou"][pid] = time.time()
+            continue
+        with open(caminho, "rb") as f:
+            dados = f.read()
+        try:
+            env.pedir(cfg, "PUT", "/api/denuncia/sync/provas/%d/arquivo" % pid, dados=dados, timeout=600)
+        except (OSError, RuntimeError) as e:
+            log("provas: %s não subiu — %s" % (pid, e))
+            _provas["falhou"][pid] = time.time()
+            continue
+        log("provas: %s enviada ao DaVinci (%d KB)" % (pid, len(dados) // 1024))
+
+
 def status_mac():
     """Mantém o status_mac.py do robô vivo (ele mesmo roda em laço)."""
     py = "/usr/local/bin/python3" if os.path.exists("/usr/local/bin/python3") else "/usr/bin/python3"
@@ -178,6 +225,7 @@ def main():
     a_cada(120, "mega", mega)
     a_cada(3600, "backup", backup_diario)
     a_cada(60, "robo", robo)
+    a_cada(5, "provas", provas_pedidas)
     threading.Thread(target=status_mac, name="status_mac", daemon=True).start()
 
     from waitress import serve

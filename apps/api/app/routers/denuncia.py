@@ -7,7 +7,10 @@ Contexto em `models/denuncia.py`. Duas metades:
    `Authorization: Bearer <token>`). O `enviar_ao_davinci.py` do mini manda,
    por tabela, as linhas novas ou mudadas e os ids que sumiram. Os ARQUIVOS das
    provas ficam no MEGA (Vinicius, 30/09: disco do servidor curto); a porta de
-   arquivo (`PUT …/provas/{id}/arquivo`) existe mas o mini roda `--so-dados`.
+   arquivo (`PUT …/provas/{id}/arquivo`) existe mas o mini roda `--so-dados`;
+   desde 01/10 o arquivo sobe sob demanda: a tela pede (`POST
+   /provas/{id}/preparar`), o mini vê em `GET …/sync/provas-pedidas` e sobe só
+   aquele, e o DaVinci guarda até `TETO_PROVAS_BYTES`.
 2. **Telas** — `require_permission("denuncia", "view")`. Só leitura: quem muda
    algo é o sistema do mini.
 
@@ -23,14 +26,14 @@ import re
 import secrets
 import tempfile
 from collections import OrderedDict
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any
 
 import structlog
 from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse
-from sqlalchemy import delete, func, or_, select
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -62,6 +65,11 @@ _ver = require_permission("denuncia", "view")
 PASTA_PROVAS = "denuncia/provas"
 # Um lote do sync: o mini manda de 500 em 500.
 MAX_LINHAS_LOTE = 2000
+# Provas sob demanda (01/10): pedido que o mini não atendeu em 10 min caduca
+# (mini desligado); o DaVinci guarda os arquivos abertos até este teto e
+# apaga os abertos há mais tempo (disco do servidor curto — ver migration 0349).
+PEDIDO_PROVA_VALE = timedelta(minutes=10)
+TETO_PROVAS_BYTES = 1024 * 1024 * 1024
 # Resumo do robô: hoje ~30 itens (um por tarefa do dia + contas); folga larga.
 MAX_ITENS_ROBO = 1000
 # Grupos que a lista de anúncios esconde por padrão (igual ao sistema do mini).
@@ -295,6 +303,26 @@ async def sync_tabela(
     return {"gravadas": len(valores), "apagadas": apagados}
 
 
+@sync_router.get("/provas-pedidas")
+async def sync_provas_pedidas(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _r: Annotated[DenunciaRemetente, Depends(_remetente)],
+) -> dict:
+    """Provas que alguém clicou pra ver e ainda não estão aqui. O mini
+    pergunta a cada poucos segundos e sobe só essas (PUT abaixo)."""
+    ids = (
+        await session.execute(
+            select(DenunciaProva.id)
+            .where(
+                DenunciaProva.arquivo_local.is_(None),
+                DenunciaProva.arquivo_pedido_em >= datetime.now(UTC) - PEDIDO_PROVA_VALE,
+            )
+            .order_by(DenunciaProva.arquivo_pedido_em)
+        )
+    ).scalars().all()
+    return {"ids": list(ids)}
+
+
 @sync_router.get("/provas-sem-arquivo")
 async def sync_provas_sem_arquivo(
     session: Annotated[AsyncSession, Depends(get_session)],
@@ -358,8 +386,33 @@ async def sync_prova_arquivo(
         if tmp:
             Path(tmp).unlink(missing_ok=True)
     prova.arquivo_local = f"{PASTA_PROVAS}/{prova_id}{ext}"
+    prova.arquivo_pedido_em = None
+    apagados = _caber_no_teto(manter=destino)
+    if apagados:
+        await session.execute(
+            update(DenunciaProva).where(DenunciaProva.id.in_(apagados)).values(arquivo_local=None)
+        )
     await session.commit()
     return {"ok": True, "sha256": digest}
+
+
+def _caber_no_teto(manter: Path) -> list[int]:
+    """Apaga do disco as provas abertas há mais tempo (mtime: chegada ou
+    última abertura) até o total caber em `TETO_PROVAS_BYTES`. Devolve os ids
+    apagados — clicando de novo, o mini manda outra vez."""
+    arquivos = [f for f in _pasta_provas().iterdir() if f.is_file() and not f.name.startswith(".")]
+    total = sum(f.stat().st_size for f in arquivos)
+    apagados: list[int] = []
+    for f in sorted(arquivos, key=lambda f: f.stat().st_mtime):
+        if total <= TETO_PROVAS_BYTES:
+            break
+        if f == manter:
+            continue
+        total -= f.stat().st_size
+        f.unlink(missing_ok=True)
+        if f.stem.isdigit():
+            apagados.append(int(f.stem))
+    return apagados
 
 
 # ─────────────────────────────────────────────────────────────── telas
@@ -866,6 +919,31 @@ async def ver_caso(
     }
 
 
+@router.post("/provas/{prova_id}/preparar")
+async def preparar_prova(
+    prova_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(_ver)],
+) -> dict:
+    """Clique em "abrir": o arquivo já está aqui → pronto; senão pede ao
+    mini e a tela pergunta de novo a cada 2 s até chegar."""
+    p = (
+        await session.execute(select(DenunciaProva).where(DenunciaProva.id == prova_id))
+    ).scalar_one_or_none()
+    if p is None:
+        raise HTTPException(404, detail={"code": "denuncia_prova_nao_encontrada"})
+    agora = datetime.now(UTC)
+    if p.arquivo_local and (Path(get_settings().uploads_dir) / p.arquivo_local).exists():
+        return {"pronto": True}
+    p.arquivo_local = None
+    if p.arquivo_pedido_em is None or agora - p.arquivo_pedido_em > PEDIDO_PROVA_VALE:
+        p.arquivo_pedido_em = agora
+    pedido = p.arquivo_pedido_em
+    await session.commit()
+    esperando = int((agora - pedido).total_seconds())
+    return {"pronto": False, "pedido_em": pedido, "esperando_s": esperando}
+
+
 @router.get("/provas/{prova_id}/arquivo")
 async def baixar_prova(
     prova_id: int,
@@ -883,6 +961,8 @@ async def baixar_prova(
     caminho = Path(get_settings().uploads_dir) / p.arquivo_local
     if not caminho.exists():
         raise HTTPException(404, detail={"code": "denuncia_prova_sumiu_do_disco"})
+    # aberta agora: fica por último na fila do teto (_caber_no_teto)
+    os.utime(caminho)
     resumo_p = _prova_resumo(p)
     mime = resumo_p["mime"] or "application/octet-stream"
     headers = {"Cache-Control": "private, max-age=3600", "X-Content-Type-Options": "nosniff"}

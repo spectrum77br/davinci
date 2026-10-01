@@ -364,3 +364,80 @@ async def test_robo_sync_e_tela(client, make_user, auth_as):
     assert j["conectado"] is True
     assert len(j["rodadas"]) == 3 and len(j["frentes"]) == 3
     assert any(x["titulo"] == "Robô parado" for x in j["precisa"])
+
+
+# ───────────────────────────────── provas sob demanda (01/10/2026)
+
+
+async def _prova(client, pid, conteudo, nome="x.png"):
+    r = await client.post(
+        "/api/denuncia/sync/provas",
+        json={"linhas": [{"id": pid, "anuncio_id": "A1", "tipo": "Captura no ato",
+                          "arquivo": f"A1/{nome}", "nome_original": nome, "sha256": hashlib.sha256(conteudo).hexdigest(),
+                          "tamanho": len(conteudo)}]},
+        headers=H,
+    )
+    assert r.status_code == 200, r.text
+
+
+async def test_prova_sob_demanda_pede_ao_mini_e_abre(client, make_user, auth_as, pasta_uploads):
+    conteudo = b"\x89PNG prova 20"
+    await _prova(client, 20, conteudo)
+    auth_as(await make_user(permissions={"denuncia": {"view": True}}))
+    # ninguém pediu ainda: o mini não tem o que mandar
+    assert (await client.get("/api/denuncia/sync/provas-pedidas", headers=H)).json()["ids"] == []
+
+    r = await client.post("/api/denuncia/provas/20/preparar")
+    assert r.status_code == 200 and r.json()["pronto"] is False
+    assert (await client.get("/api/denuncia/sync/provas-pedidas", headers=H)).json()["ids"] == [20]
+    assert (await client.get("/api/denuncia/sync/provas-pedidas")).status_code == 401
+
+    r = await client.put("/api/denuncia/sync/provas/20/arquivo", content=conteudo, headers=H)
+    assert r.status_code == 200, r.text
+    assert (await client.get("/api/denuncia/sync/provas-pedidas", headers=H)).json()["ids"] == []
+    assert (await client.post("/api/denuncia/provas/20/preparar")).json() == {"pronto": True}
+    r = await client.get("/api/denuncia/provas/20/arquivo")
+    assert r.status_code == 200 and r.content == conteudo
+    assert (await client.post("/api/denuncia/provas/999/preparar")).status_code == 404
+
+
+async def test_prova_pedido_velho_caduca(client, db, make_user, auth_as, pasta_uploads):
+    await _prova(client, 21, b"x")
+    auth_as(await make_user(permissions={"denuncia": {"view": True}}))
+    await client.post("/api/denuncia/provas/21/preparar")
+    await db.execute(text(
+        "UPDATE denuncia_provas SET arquivo_pedido_em = now() - interval '11 minutes' WHERE id = 21"
+    ))
+    await db.commit()
+    # mini desligado na hora do clique: o pedido não fica pendurado pra sempre
+    assert (await client.get("/api/denuncia/sync/provas-pedidas", headers=H)).json()["ids"] == []
+    # clicou de novo: pede de novo
+    await client.post("/api/denuncia/provas/21/preparar")
+    assert (await client.get("/api/denuncia/sync/provas-pedidas", headers=H)).json()["ids"] == [21]
+
+
+async def test_prova_teto_apaga_a_aberta_ha_mais_tempo(
+    client, db, make_user, auth_as, pasta_uploads, monkeypatch
+):
+    import os
+
+    from app.routers import denuncia as rota
+
+    monkeypatch.setattr(rota, "TETO_PROVAS_BYTES", 25)
+    a, b = b"a" * 15, b"b" * 15
+    await _prova(client, 30, a)
+    await _prova(client, 31, b)
+    r = await client.put("/api/denuncia/sync/provas/30/arquivo", content=a, headers=H)
+    assert r.status_code == 200
+    velho = pasta_uploads / "denuncia/provas/30.png"
+    os.utime(velho, (1, 1))
+    r = await client.put("/api/denuncia/sync/provas/31/arquivo", content=b, headers=H)
+    assert r.status_code == 200
+    # 30 + 31 passam de 25 bytes: sai a 30 (a mais antiga), fica a que acabou de chegar
+    assert not velho.exists()
+    assert (pasta_uploads / "denuncia/provas/31.png").exists()
+    db.expire_all()
+    locais = dict((await db.execute(text("SELECT id, arquivo_local FROM denuncia_provas"))).all())
+    assert locais[30] is None and locais[31]
+    auth_as(await make_user(permissions={"denuncia": {"view": True}}))
+    assert (await client.post("/api/denuncia/provas/30/preparar")).json()["pronto"] is False

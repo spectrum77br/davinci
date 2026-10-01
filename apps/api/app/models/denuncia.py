@@ -130,6 +130,9 @@ class DenunciaProva(_Espelho, Base):
     sha256: Mapped[str | None] = mapped_column(Text)
     tamanho: Mapped[int | None] = mapped_column(BigInteger)
     arquivo_local: Mapped[str | None] = mapped_column(Text)
+    # 01/10: alguém clicou pra ver e o arquivo não está aqui — o mini vê o
+    # pedido (`GET /api/denuncia/sync/provas-pedidas`) e manda só este.
+    arquivo_pedido_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     __table_args__ = (Index("ix_denuncia_provas_anuncio_id", "anuncio_id"),)
 
