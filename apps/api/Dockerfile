@@ -6,9 +6,14 @@ ENV PYTHONUNBUFFERED=1 \
     UV_COMPILE_BYTECODE=1 \
     UV_PROJECT_ENVIRONMENT=/usr/local
 
+# ffmpeg (01/10/2026): a marca d'água das fotos e vídeos dos sites
+# (services/sites_midia_derivados.py). O build FALHA se faltar o libx264 (vídeo)
+# ou o libwebp (miniatura da grade).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+    curl ca-certificates ffmpeg \
+    && rm -rf /var/lib/apt/lists/* \
+    && ffmpeg -hide_banner -encoders | grep -q libx264 \
+    && ffmpeg -hide_banner -encoders | grep -q libwebp
 
 COPY --from=ghcr.io/astral-sh/uv:0.5 /uv /uvx /usr/local/bin/
 

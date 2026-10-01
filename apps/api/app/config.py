@@ -340,6 +340,18 @@ class Settings(BaseSettings):
     # `portal_tokens` acima.
     sites_estoque_tokens: str = ""
 
+    # ─── Fotos e vídeos com marca d'água para os sites (01/10/2026) ──────
+    # GET /api/sites/midia (routers/sites_midia.py) usa os MESMOS tokens de
+    # `sites_estoque_tokens` — não há token novo. As derivadas (foto e vídeo
+    # já com o logo do site) ficam em disco, neste diretório do volume de
+    # uploads, com TETO rígido: passou de `sites_midia_cache_mb`, a varredura
+    # apaga pelo uso mais antigo até 85% do teto. Abaixo de
+    # `sites_midia_disco_min_mb` livres no disco, nada novo é gerado (503).
+    # O essencial dos dois sites ocupa ~0,6 GB (SPEC-midia §5).
+    sites_midia_dir: str = "/data/uploads/sites-midia"
+    sites_midia_cache_mb: int = 2048
+    sites_midia_disco_min_mb: int = 3072
+
     # ─── Robô de resposta das DMs do Instagram ───────────────────────────
     # A CHAVE SECRETA DO APP da Meta. Ela valida o `X-Hub-Signature-256` de
     # todo webhook de mensagem — e é a MESMA que hoje falta para renovar o
