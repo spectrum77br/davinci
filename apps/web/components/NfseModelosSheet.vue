@@ -20,14 +20,27 @@
 // "Usar a % da empresa (0,5%)" (marcado) ou "Outra %" com o campo. Usando a da
 // empresa, a nota fixa salva percentual = null e acompanha a empresa se a % dela
 // mudar. Sem % na empresa, o campo é obrigatório, como antes.
+//
+// Várias empresas de uma vez (01/10/2026, Eduardo: "nova nota fixa queria poder
+// selecionar várias empresas em massa, para fazer de uma vez só"): ao CRIAR, o
+// campo "Empresa que emite" aceita várias (NfseEmpresasMultiSelect). Tomador,
+// nome, descrição, valor/%, base, complemento e códigos são os mesmos; salvar
+// cria UMA nota fixa por empresa, uma de cada vez, com "criando 3 de 12". As que
+// deram certo saem da lista (não dá para marcar de novo nesta abertura, para não
+// duplicar); as que falharam ficam, com o motivo, e "tentar de novo" só refaz
+// essas. Percentual: "Usar a % de cada empresa" salva percentual = null (cada
+// nota fixa acompanha a sua empresa); empresa sem % padrão exige "Outra %" ou
+// sair da lista. Códigos vazios = os de cada empresa. Ao EDITAR, uma só, como
+// antes. Quem abre continua recebendo UMA nota fixa: a primeira criada.
 import { computed, nextTick, ref, watch } from 'vue'
-import { Banknote, Building2, Calculator, ChevronRight, ExternalLink, FileText, Loader2, Percent, Trash2 } from 'lucide-vue-next'
+import { Banknote, Building2, Calculator, ChevronRight, ExternalLink, FileText, Loader2, Percent, RotateCcw, Trash2 } from 'lucide-vue-next'
 import { Button } from '~/components/ui/button'
 import {
   calcularPercentual, campoDoErro, codigoErro, erroApi, fmtBrl, fmtMes, fmtPct, fmtPctOrigem, inserirNoCursor,
-  mesAtual, mesParaData, modeloParaForm, paraDecimal, pctPositivo, pendenciaTexto, prestadorPorId, soDigitos,
+  mesAtual, mesParaData, modeloParaForm, paraDecimal, pctPositivo, pendenciaTexto, plural, prestadorPorId, soDigitos,
   TOM_TEXTO, tomadorEstiloNfeio, tomadorNaNota, useNfseTela,
   type AbrirModeloOpts, type FaturamentoEmpresa, type Modelo, type ModeloApi, type ModeloForm, type OrigemPct,
+  type Prestador,
   useNfseApi,
 } from '~/lib/nfse'
 
@@ -138,12 +151,32 @@ const sheet = ref<{ rolarPara(id: string): void } | null>(null)
 const campoDescricao = ref<HTMLTextAreaElement | null>(null)
 let resolver: ((m: Modelo | null) => void) | null = null
 
+// Várias empresas (01/10/2026): ao criar, as empresas marcadas (na ordem em que
+// foram marcadas); form.company_id acompanha a 1ª. As já criadas nesta abertura
+// e as que falharam na última tentativa (com o motivo).
+const empresasIds = ref<string[]>([])
+const criadas = ref<Modelo[]>([])
+type Falha = { company_id: string; apelido: string; motivo: string }
+const falhas = ref<Falha[]>([])
+const progresso = ref<{ feito: number; total: number } | null>(null)
+// 01/10/2026 (revisão): cada abertura tem um número; a criação em lote para se a
+// gaveta for reaberta no meio (não mexe na abertura nova). As notas fixas que já
+// existiam ao abrir: o que aparecer depois, da mesma empresa para o mesmo tomador,
+// foi criado daqui (mesmo que a resposta tenha se perdido no caminho).
+let sessao = 0
+let idsAntes = new Set<string>()
+// Duplicar: a empresa da nota original já vem marcada (avisa para desmarcar).
+const empresaOriginal = ref<string | null>(null)
+
 // Percentual: usar a % da empresa (se ela tiver) ou "outra %", a desta nota fixa.
 type ModoPct = 'empresa' | 'outra'
 const modoPct = ref<ModoPct>('empresa')
 
 const somenteLeitura = computed(() => !tela.canEdit.value)
 const editando = computed(() => !!form.value.id)
+// Criando: dá para marcar várias empresas. Editando: uma só, como antes.
+const multi = computed(() => !editando.value)
+const varias = computed(() => multi.value && empresasIds.value.length > 1)
 
 const titulo = computed(() => {
   if (tituloPedido.value) return tituloPedido.value
@@ -153,18 +186,54 @@ const titulo = computed(() => {
 
 // --- Empresa e tomador ----------------------------------------------------------
 
-const empresa = computed(() => prestadorPorId(tela.prestadores.value, form.value.company_id))
+// Com várias empresas, `empresa` (a única) fica null: cada trecho da tela que
+// fala de "a empresa" tem a sua versão para várias.
+const empresa = computed(() => (varias.value ? null : prestadorPorId(tela.prestadores.value, form.value.company_id)))
 const tomador = computed(() => tela.tomadores.value.find((t) => t.id === form.value.tomador_id) ?? null)
 
-const tomadorIgualEmpresa = computed(
-  () =>
-    !!tomador.value &&
-    tomador.value.tipo === 'grupo' &&
-    !!form.value.company_id &&
-    tomador.value.company_id === form.value.company_id,
+watch(empresasIds, (ids) => {
+  if (multi.value) form.value.company_id = ids[0] ?? null
+})
+
+// As empresas que vão emitir (uma ao editar; as marcadas ao criar).
+const idsAlvo = computed<string[]>(() =>
+  multi.value ? empresasIds.value : form.value.company_id ? [form.value.company_id] : [],
 )
+const empresasEscolhidas = computed(() =>
+  empresasIds.value.map((id) => prestadorPorId(tela.prestadores.value, id)).filter((p): p is Prestador => !!p),
+)
+function apelidoDe(id: string): string {
+  return prestadorPorId(tela.prestadores.value, id)?.apelido || 'empresa'
+}
+// "A, B e C"
+function juntarNomes(ps: { apelido: string }[]): string {
+  const n = ps.map((p) => p.apelido)
+  return n.length > 1 ? `${n.slice(0, -1).join(', ')} e ${n[n.length - 1]}` : n[0] ?? ''
+}
+
+// A empresa do grupo que é o tomador (ou null): ela não pode estar entre as que emitem.
+const empresaDoTomador = computed(() =>
+  tomador.value?.tipo === 'grupo' && tomador.value.company_id ? tomador.value.company_id : null,
+)
+const tomadorIgualEmpresa = computed(() => !!empresaDoTomador.value && idsAlvo.value.includes(empresaDoTomador.value))
+const msgTomadorIgual = computed(() =>
+  varias.value && empresaDoTomador.value
+    ? `O tomador é a ${apelidoDe(empresaDoTomador.value)}, que está entre as empresas que emitem: tire ela da lista.`
+    : 'O tomador não pode ser a própria empresa que emite.',
+)
+// No seletor de várias não aparecem a empresa do tomador nem as já criadas aqui.
+const excluirDaEscolha = computed(() => [
+  ...(empresaDoTomador.value ? [empresaDoTomador.value] : []),
+  ...criadas.value.map((m) => m.company_id),
+])
 
 const pendenciasEmpresa = computed(() => (empresa.value?.pendencias ?? []).map(pendenciaTexto))
+// Várias: as marcadas que ainda não podem emitir.
+const naoProntas = computed(() => (varias.value ? empresasEscolhidas.value.filter((p) => !p.pronto) : []))
+function pendenciasDe(p: Prestador): string {
+  const t = p.pendencias.map((x) => pendenciaTexto(x).texto.replace(/[.]$/, ''))
+  return t.length ? t.join('; ') : 'ligar a empresa à NFE.io'
+}
 
 function nomeCurtoTomador(): string {
   const t = tomador.value
@@ -174,6 +243,10 @@ function nomeCurtoTomador(): string {
 }
 
 const subtitulo = computed(() => {
+  if (varias.value) {
+    const n = plural(empresasIds.value.length, 'empresa', 'empresas')
+    return tomador.value ? `${n} → ${nomeCurtoTomador()} (uma nota fixa para cada)` : `${n}: uma nota fixa para cada, com o mesmo tomador e o mesmo texto.`
+  }
   if (empresa.value && tomador.value) return `${empresa.value.apelido} → ${nomeCurtoTomador()}`
   return 'Uma nota que sai todo mês, da empresa que emite para quem recebe.'
 })
@@ -194,6 +267,13 @@ function aoDigitarNome() {
 }
 
 const codigosEmpresa = computed(() => {
+  if (varias.value) {
+    const sem = empresasEscolhidas.value.filter((p) => !p.fiscal?.city_service_code)
+    return (
+      'Por padrão, cada nota fixa usa os códigos do serviço da empresa que emite.' +
+      (sem.length ? ` Ainda sem código do serviço salvo (aba Empresas): ${juntarNomes(sem)}.` : '')
+    )
+  }
   const f = empresa.value?.fiscal
   if (!empresa.value) return 'Por padrão, a nota usa os códigos do serviço da empresa que emite.'
   if (!f?.city_service_code) return `A ${empresa.value.apelido} ainda não tem o código do serviço salvo (aba Empresas).`
@@ -212,8 +292,17 @@ const pctLido = computed(() => lerPercentual(form.value.percentual))
 const pctApi = computed(() => pctLido.value.pct)
 // A % padrão da empresa escolhida ("0.5000"), ou null se ela não tiver.
 const pctEmpresa = computed(() => pctPositivo(empresa.value?.percentual_servico))
-const usaPctEmpresa = computed(() => ehPercentual.value && !!pctEmpresa.value && modoPct.value === 'empresa')
+// Várias (01/10/2026): a opção "da empresa" aparece se ao menos uma tem % padrão;
+// as que não têm ficam em semPctVarias (exigem "Outra %" ou sair da lista).
+const semPctVarias = computed(() =>
+  varias.value ? empresasEscolhidas.value.filter((p) => !pctPositivo(p.percentual_servico)) : [],
+)
+const temPctEmpresa = computed(() =>
+  varias.value ? semPctVarias.value.length < empresasEscolhidas.value.length : !!pctEmpresa.value,
+)
+const usaPctEmpresa = computed(() => ehPercentual.value && temPctEmpresa.value && modoPct.value === 'empresa')
 // A % que vale nesta nota fixa: a da empresa ou a digitada (formato da API).
+// Várias usando a de cada uma: não há uma % só (null).
 const pctEfetivo = computed(() => (usaPctEmpresa.value ? pctEmpresa.value : pctApi.value))
 const origemPct = computed<OrigemPct | null>(() =>
   usaPctEmpresa.value ? 'empresa' : pctApi.value ? 'nota_fixa' : null,
@@ -230,6 +319,19 @@ const modoPctModel = computed({
 })
 
 const opcoesPct = computed(() => {
+  if (varias.value) {
+    const sem = semPctVarias.value
+    return [
+      {
+        valor: 'empresa',
+        titulo: 'Usar a % de cada empresa',
+        descricao: sem.length
+          ? `${juntarNomes(sem)} ${sem.length === 1 ? 'não tem' : 'não têm'} % padrão: para usar esta opção, tire ${sem.length === 1 ? 'ela' : 'elas'} da lista.`
+          : 'Cada nota fixa usa a % cadastrada da sua empresa (Cadastros › Empresas). Se mudar lá, muda aqui.',
+      },
+      { valor: 'outra', titulo: 'Outra %', descricao: 'A mesma % para todas as empresas marcadas.' },
+    ]
+  }
   const apelido = empresa.value?.apelido
   return [
     {
@@ -263,24 +365,30 @@ const baseApi = computed(() => paraDecimal(form.value.base_padrao) || null)
 // A prévia do valor (Eduardo, 30/09: "depois que colocamos a porcentagem que
 // queremos na empresa, ele aparece aqui e tem que mostrar a prévia do valor"):
 // o faturamento do mês da empresa, a mesma base que o "Emitir do mês" usa.
-const faturamentoMes = ref<FaturamentoEmpresa | null>(null)
+// 01/10/2026: guarda o faturamento de todas (a API já devolve todas) para a
+// prévia de cada empresa quando há várias marcadas.
+const faturamentoLista = ref<FaturamentoEmpresa[] | null>(null)
 const faturamentoCarregado = ref(false)
 let seqFaturamento = 0
+// Várias fontes (comparadas uma a uma): marcar/desmarcar empresa não busca de novo.
 watch(
-  () => [aberto.value, form.value.company_id, form.value.tipo_valor] as const,
-  async ([ab, cid, tipo]) => {
+  [aberto, () => idsAlvo.value.length > 0, () => form.value.tipo_valor],
+  async ([ab, temEmpresa, tipo]) => {
     const minha = ++seqFaturamento
-    faturamentoMes.value = null
+    faturamentoLista.value = null
     faturamentoCarregado.value = false
-    if (!ab || !cid || tipo !== 'percentual') return
+    if (!ab || !temEmpresa || tipo !== 'percentual') return
     const r = await api<{ empresas: FaturamentoEmpresa[] }>(
       `/api/nfse/faturamento?competencia=${mesParaData(mes)}`,
     ).catch(() => null)
     if (minha !== seqFaturamento) return
-    faturamentoMes.value = r?.empresas.find((e) => e.company_id === cid) ?? null
+    faturamentoLista.value = r?.empresas ?? null
     faturamentoCarregado.value = !!r
   },
   { immediate: true },
+)
+const faturamentoMes = computed(
+  () => faturamentoLista.value?.find((e) => e.company_id === form.value.company_id) ?? null,
 )
 const baseFaturamento = computed(() => {
   const v = paraDecimal(faturamentoMes.value?.valor)
@@ -315,6 +423,24 @@ const exemplo = computed(() => {
   }
 })
 
+// Várias: a prévia de cada empresa (a % dela ou a outra %, sobre o faturamento
+// do mês dela; sem venda, a base sugerida; sem nenhuma, só a %).
+const previaVarias = computed(() => {
+  if (!varias.value || !ehPercentual.value) return []
+  const sugerida = baseApi.value && Number(baseApi.value) > 0 ? baseApi.value : ''
+  return empresasEscolhidas.value.map((p) => {
+    const pct = usaPctEmpresa.value ? pctPositivo(p.percentual_servico) : pctApi.value
+    const linha = faturamentoLista.value?.find((e) => e.company_id === p.company_id)
+    const fat = paraDecimal(linha?.valor)
+    const baseFat = fat && Number(fat) > 0 ? fat : ''
+    const base = baseFat || sugerida
+    const valor = pct && base ? calcularPercentual(base, pct) : null
+    // Fora do faturamento = não tem loja com o CNPJ dela (igual à tela de uma empresa).
+    const semLoja = faturamentoCarregado.value && !linha
+    return { p, pct, base, deFaturamento: !!baseFat, valor, pouco: !!valor && Number(valor) < 0.01, semLoja }
+  })
+})
+
 // --- Abrir / fechar -------------------------------------------------------------
 
 // "Sujo" compara com o que abriu; o nome sugerido sozinho não conta.
@@ -328,6 +454,7 @@ function retrato(): string {
     percentual: pctEmpresaUsada ? null : lerPercentual(f.percentual).pct ?? f.percentual,
     pctEmpresaUsada,
     codigosProprios: codigosProprios.value,
+    empresas: multi.value ? empresasIds.value : null,
   })
 }
 
@@ -337,6 +464,12 @@ function terminar(m: Modelo | null) {
   const r = resolver
   resolver = null
   r?.(m)
+}
+
+// Quem abriu espera UMA nota fixa: com várias criadas, a 1ª (com os nomes da lista recarregada).
+function primeiraCriada(): Modelo | null {
+  const m = criadas.value[0]
+  return m ? (tela.modelos.value.find((x) => x.id === m.id) ?? m) : null
 }
 
 function abrir(o?: AbrirModeloOpts): Promise<Modelo | null> {
@@ -352,6 +485,14 @@ function abrir(o?: AbrirModeloOpts): Promise<Modelo | null> {
   modoPct.value = lerPercentual(form.value.percentual).pct ? 'outra' : 'empresa'
   original.value = o?.modelo ?? null
   tituloPedido.value = o?.titulo
+  // Criando: a empresa do preset (Duplicar, Emitir do mês…) já vem marcada.
+  empresasIds.value = !form.value.id && form.value.company_id ? [form.value.company_id] : []
+  empresaOriginal.value = !o?.modelo && o?.preset?.company_id ? o.preset.company_id : null
+  sessao++
+  idsAntes = new Set(tela.modelos.value.map((m) => m.id))
+  criadas.value = []
+  falhas.value = []
+  progresso.value = null
   codigosProprios.value = !!(form.value.city_service_code || form.value.federal_service_code || form.value.c_nbs)
   abrirCodigos.value = codigosProprios.value
   abrirComplemento.value = !!form.value.inf_comp
@@ -370,7 +511,8 @@ function abrir(o?: AbrirModeloOpts): Promise<Modelo | null> {
 
 function fechar(m: Modelo | null) {
   aberto.value = false
-  terminar(m)
+  // Saindo depois de criar algumas (e desistir das que falharam): devolve a 1ª criada.
+  terminar(m ?? primeiraCriada())
 }
 
 // A gaveta já perguntou "Sair sem salvar?" quando precisava.
@@ -378,11 +520,18 @@ function aoMudar(v: boolean) {
   if (!v) fechar(null)
 }
 
+// O mesmo texto no Cancelar e no X / Esc / clique fora (a gaveta pergunta sozinha).
+const textoSair = computed(() =>
+  criadas.value.length
+    ? `${criadas.value.length === 1 ? 'A nota fixa já criada continua salva' : `As ${criadas.value.length} notas fixas já criadas continuam salvas`}; as empresas que faltam ficam sem.`
+    : 'O que você mudou vai se perder.',
+)
+
 async function cancelar() {
   if (sujo.value) {
     const ok = await tela.confirmar({
       titulo: 'Sair sem salvar?',
-      texto: 'O que você mudou vai se perder.',
+      texto: textoSair.value,
       tom: 'perigo',
       botao: 'Sair sem salvar',
       voltar: 'Continuar editando',
@@ -431,9 +580,9 @@ function aoAlternarDetalhe(qual: 'codigos' | 'complemento', ev: Event) {
 function validar(): Partial<Record<Campo, string>> {
   const f = form.value
   const e: Partial<Record<Campo, string>> = {}
-  if (!f.company_id) e.company_id = 'Escolha a empresa que emite.'
+  if (!idsAlvo.value.length) e.company_id = multi.value ? 'Escolha a empresa que emite (dá para marcar várias).' : 'Escolha a empresa que emite.'
   if (!f.tomador_id) e.tomador_id = 'Escolha o tomador.'
-  else if (tomadorIgualEmpresa.value) e.tomador_id = 'O tomador não pode ser a própria empresa que emite.'
+  else if (tomadorIgualEmpresa.value) e.tomador_id = msgTomadorIgual.value
   if (!f.nome.trim()) e.nome = 'Dê um nome.'
   if (!f.descricao.trim()) e.descricao = 'Escreva a descrição.'
   if (f.tipo_valor === 'percentual') {
@@ -441,15 +590,23 @@ function validar(): Partial<Record<Campo, string>> {
       const { pct: digitado, erro } = lerPercentual(f.percentual)
       if (erro) e.percentual = erro
       else if (!digitado) {
-        e.percentual = pctEmpresa.value
+        e.percentual = temPctEmpresa.value
           ? 'Digite a outra %. Ex.: 0,5 para 0,5%.'
           : 'Digite o percentual. Ex.: 0,5 para 0,5%.'
       }
+    } else if (semPctVarias.value.length) {
+      // Várias usando a % de cada uma: toda empresa marcada precisa ter a dela.
+      const sem = semPctVarias.value
+      e.percentual = `${juntarNomes(sem)} ${sem.length === 1 ? 'não tem' : 'não têm'} % padrão: escolha "Outra %" ou tire ${sem.length === 1 ? 'ela' : 'elas'} da lista.`
     }
-    const pct = pctEfetivo.value
+    // Várias usando a de cada uma: a conta da base sugerida vale para cada %.
+    const pcts =
+      varias.value && usaPctEmpresa.value
+        ? empresasEscolhidas.value.map((p) => pctPositivo(p.percentual_servico)).filter((x): x is string => !!x)
+        : pctEfetivo.value ? [pctEfetivo.value] : []
     const base = paraDecimal(f.base_padrao)
     if (base && Number(base) <= 0) e.base_padrao = 'A base precisa ser maior que zero (ou deixe em branco).'
-    else if (base && pct && !(Number(calcularPercentual(base, pct)) >= 0.01)) {
+    else if (base && pcts.some((pct) => !(Number(calcularPercentual(base, pct)) >= 0.01))) {
       e.base_padrao = 'Com essa base, a nota daria menos de R$ 0,01.'
     }
   } else {
@@ -475,7 +632,7 @@ function validar(): Partial<Record<Campo, string>> {
 
 // Depois da 1ª tentativa, os erros acompanham o que a pessoa corrige.
 watch(
-  [form, codigosProprios, modoPct],
+  [form, codigosProprios, modoPct, empresasIds],
   () => {
     if (tentouSalvar.value) erros.value = validar()
   },
@@ -484,7 +641,7 @@ watch(
 
 // Erro que aparece na hora, sem esperar o salvar.
 const erroTomador = computed(
-  () => erros.value.tomador_id || (tomadorIgualEmpresa.value ? 'O tomador não pode ser a própria empresa que emite.' : null),
+  () => erros.value.tomador_id || (tomadorIgualEmpresa.value ? msgTomadorIgual.value : null),
 )
 
 function irParaCampo(campo: Campo) {
@@ -504,6 +661,15 @@ function irParaCampo(campo: Campo) {
         )
     alvo?.focus({ preventScroll: true })
   })
+}
+
+// O campo da tela a que o erro da API se refere (ou undefined).
+function campoDaFalha(err: unknown, pct: boolean): Campo | undefined {
+  let campo = (campoDoErro(err) ?? CAMPO_POR_CODIGO[codigoErro(err) ?? '']) as Campo | undefined
+  // No percentual não há campo "valor" na tela: o erro vai para o percentual.
+  if (campo === 'valor' && pct) campo = 'percentual'
+  else if ((campo === 'percentual' || campo === 'base_padrao') && !pct) campo = 'valor'
+  return campo && ORDEM.includes(campo) ? campo : undefined
 }
 
 async function salvar() {
@@ -540,6 +706,13 @@ async function salvar() {
     ordem: f.ordem,
   }
 
+  // 01/10/2026: criando com várias empresas (ou refazendo as que falharam).
+  if (multi.value && (empresasIds.value.length > 1 || criadas.value.length || falhas.value.length)) {
+    await criarVarias(corpo, pct)
+    return
+  }
+
+  falhas.value = []
   salvando.value = true
   try {
     const salvo = f.id
@@ -551,11 +724,8 @@ async function salvar() {
     fechar(tela.modelos.value.find((m) => m.id === salvo.id) ?? salvo)
   } catch (err) {
     const msg = erroApi(err)
-    let campo = (campoDoErro(err) ?? CAMPO_POR_CODIGO[codigoErro(err) ?? '']) as Campo | undefined
-    // No percentual não há campo "valor" na tela: o erro vai para o percentual.
-    if (campo === 'valor' && pct) campo = 'percentual'
-    else if ((campo === 'percentual' || campo === 'base_padrao') && !pct) campo = 'valor'
-    if (campo && ORDEM.includes(campo)) {
+    const campo = campoDaFalha(err, pct)
+    if (campo) {
       erros.value = { ...erros.value, [campo]: msg }
       irParaCampo(campo)
     } else {
@@ -567,10 +737,147 @@ async function salvar() {
   }
 }
 
-async function corrigirEmpresa() {
-  const p = empresa.value
+// Notas fixas que apareceram na lista desde que a gaveta abriu, destas empresas
+// para este tomador, e que ainda não estão em `criadas`: o POST gravou mas a
+// resposta não chegou (502/504, rede caiu). Contam como criadas: nada em dobro.
+function gravadasMesmoComErro(tomadorId: unknown, cids: string[]): Modelo[] {
+  const ja = new Set(criadas.value.map((m) => m.id))
+  const achadas: Modelo[] = []
+  for (const cid of cids) {
+    const m = tela.modelos.value.find(
+      (x) => !idsAntes.has(x.id) && !ja.has(x.id) && x.company_id === cid && x.tomador_id === tomadorId,
+    )
+    if (m) achadas.push(m)
+  }
+  return achadas
+}
+
+// Uma nota fixa por empresa, uma de cada vez ("criando 3 de 12"). Cada uma que
+// dá certo entra em `criadas` na hora (e não dá para marcar de novo nesta
+// abertura: nada em dobro); as que falharam ficam marcadas, com o motivo, para
+// tentar de novo. A gaveta não fecha enquanto cria (:fechavel="!salvando").
+async function criarVarias(corpo: Record<string, unknown>, pct: boolean) {
+  const minha = sessao
+  const erradas: (Falha & { campo?: Campo })[] = []
+  let novas = 0
+  salvando.value = true
+  try {
+    // Tentando de novo: a que "falhou" pode ter sido gravada assim mesmo.
+    if (falhas.value.length) {
+      await tela.recarregar()
+      if (minha !== sessao) return
+      const achadas = gravadasMesmoComErro(corpo.tomador_id, empresasIds.value)
+      criadas.value = [...criadas.value, ...achadas]
+      novas += achadas.length
+    }
+    falhas.value = []
+    const feitasAntes = new Set(criadas.value.map((m) => m.company_id))
+    const alvos = empresasIds.value.filter((id) => !feitasAntes.has(id))
+    for (const [i, cid] of alvos.entries()) {
+      progresso.value = { feito: i, total: alvos.length }
+      try {
+        const m = await api<Modelo>('/api/nfse/modelos', { method: 'POST', body: { ...corpo, company_id: cid } })
+        if (minha !== sessao) break
+        criadas.value = [...criadas.value, m]
+        novas++
+      } catch (err) {
+        if (minha !== sessao) break
+        erradas.push({ company_id: cid, apelido: apelidoDe(cid), motivo: erroApi(err), campo: campoDaFalha(err, pct) })
+      }
+    }
+    await tela.recarregar()
+    // Reaberta no meio (outra nota fixa): a lista já mostra as criadas; não mexe na gaveta nova.
+    if (minha !== sessao) return
+
+    // Falhou no navegador mas gravou no servidor: conta como criada.
+    const achadas = erradas.length ? gravadasMesmoComErro(corpo.tomador_id, erradas.map((x) => x.company_id)) : []
+    criadas.value = [...criadas.value, ...achadas]
+    novas += achadas.length
+    const restantes = erradas.filter((x) => !achadas.some((m) => m.company_id === x.company_id))
+
+    // Só troca a lista se alguma saiu: trocar à toa dispara a validação de novo
+    // e apaga o erro da API que vai no campo (logo abaixo).
+    const feitas = new Set(criadas.value.map((m) => m.company_id))
+    if (empresasIds.value.some((id) => feitas.has(id))) {
+      empresasIds.value = empresasIds.value.filter((id) => !feitas.has(id))
+    }
+
+    if (!restantes.length) {
+      const total = criadas.value.length
+      toasts.success(total === 1 ? 'Nota fixa salva' : `${plural(total, 'nota fixa criada', 'notas fixas criadas')}`)
+      fechar(primeiraCriada())
+      return
+    }
+
+    falhas.value = restantes.map((x) => ({ company_id: x.company_id, apelido: x.apelido, motivo: x.motivo }))
+    if (novas) {
+      toasts.warning(
+        `${plural(novas, 'nota fixa criada', 'notas fixas criadas')}; ${plural(restantes.length, 'empresa falhou', 'empresas falharam')}`,
+      )
+    }
+    // Todas falharam pelo mesmo campo da tela (ex.: descrição): marca o campo.
+    const campo = restantes[0]!.campo
+    if (!novas && campo && campo !== 'company_id' && restantes.every((x) => x.campo === campo)) {
+      erros.value = { ...erros.value, [campo]: restantes[0]!.motivo }
+      irParaCampo(campo)
+    } else {
+      nextTick(() => sheet.value?.rolarPara('nfse-modelo-resultado'))
+    }
+  } finally {
+    if (minha === sessao) {
+      salvando.value = false
+      progresso.value = null
+    }
+  }
+}
+
+// O botão do resumo: refaz as marcadas (normalmente só as que falharam).
+function tentarDeNovo() {
+  salvar()
+}
+
+// No resumo, só as que falharam e continuam marcadas (tirou da lista, some daqui).
+const falhasVisiveis = computed(() => falhas.value.filter((x) => empresasIds.value.includes(x.company_id)))
+
+// O texto acompanha o que o botão faz: marcou outras depois da falha, cria todas as marcadas.
+const textoTentar = computed(() => {
+  const n = empresasIds.value.length
+  if (n === falhasVisiveis.value.length) {
+    return n === 1 ? 'tentar de novo a que falhou' : `tentar de novo as ${n} que falharam`
+  }
+  return n === 1 ? 'criar a marcada' : `criar as ${n} marcadas`
+})
+
+const tituloResultado = computed(() => {
+  const c = criadas.value.length
+  const f = falhasVisiveis.value.length
+  const feitas = plural(c, 'nota fixa criada', 'notas fixas criadas')
+  if (!f) return feitas
+  const falharam = plural(f, 'empresa falhou', 'empresas falharam')
+  return c ? `${feitas}; ${falharam}` : `Nenhuma nota fixa criada: ${falharam}`
+})
+
+// Dica do campo das empresas. Duplicar: a da nota original já vem marcada e,
+// diferente do seletor de uma só, marcar outra SOMA (não troca).
+const dicaEmpresas = computed(() => {
+  if (!multi.value) return undefined
+  const orig = empresaOriginal.value
+  if (orig && empresasIds.value.includes(orig)) {
+    return `A ${apelidoDe(orig)} já vem marcada (é a da nota original). Se a cópia for só para outra empresa, desmarque ela.`
+  }
+  return empresasIds.value.length < 2 ? 'Dá para marcar várias: sai uma nota fixa para cada, com o resto igual.' : undefined
+})
+
+const textoSalvar = computed(() => {
+  if (!multi.value || empresasIds.value.length < 2) return 'Salvar nota fixa'
+  return `Criar ${empresasIds.value.length} notas fixas`
+})
+
+async function corrigirEmpresa(alvo?: Prestador) {
+  const p = alvo ?? empresa.value
   if (!p) return
-  await tela.abrirEmpresa(p.company_id, pendenciasEmpresa.value.find((x) => x.alvo === 'empresa')?.foco)
+  const pend = p.pendencias.map(pendenciaTexto)
+  await tela.abrirEmpresa(p.company_id, pend.find((x) => x.alvo === 'empresa')?.foco)
 }
 
 const classeCampo =
@@ -588,6 +895,8 @@ const classeErro = 'border-red-500 dark:border-red-400'
     :subtitulo="subtitulo"
     largura="lg"
     :sujo="sujo"
+    :fechavel="!salvando"
+    :texto-sujo="textoSair"
     @update:open="aoMudar"
   >
     <template #cabecalho-extra>
@@ -595,11 +904,48 @@ const classeErro = 'border-red-500 dark:border-red-400'
       <span v-if="ehPercentual && pctEfetivo" class="pill-info tabular-nums">
         {{ fmtPct(pctEfetivo) }} da base{{ usaPctEmpresa ? ' (da empresa)' : '' }}
       </span>
+      <span v-else-if="ehPercentual && varias && usaPctEmpresa" class="pill-info">a % de cada empresa</span>
+      <span v-if="varias" class="pill-info tabular-nums">{{ plural(empresasIds.length, 'empresa', 'empresas') }}</span>
     </template>
 
     <form id="nfse-modelo-form" class="space-y-5" novalidate @submit.prevent="salvar">
       <NfseAviso v-if="erroGeral" id="nfse-modelo-erro" tom="perigo" titulo="Não deu para salvar a nota fixa">
         {{ erroGeral }}
+      </NfseAviso>
+
+      <!-- Várias empresas (01/10/2026): progresso e resumo -->
+      <NfseAviso v-if="progresso" tom="info" compacto>
+        <span aria-live="polite" class="tabular-nums">
+          Criando {{ Math.min(progresso.feito + 1, progresso.total) }} de {{ progresso.total }}…
+        </span>
+      </NfseAviso>
+      <NfseAviso
+        v-else-if="criadas.length || falhasVisiveis.length"
+        id="nfse-modelo-resultado"
+        :tom="falhasVisiveis.length ? (criadas.length ? 'atencao' : 'perigo') : 'sucesso'"
+        :titulo="tituloResultado"
+      >
+        <p v-if="criadas.length" class="text-xs">
+          Criadas: {{ juntarNomes(criadas.map((m) => ({ apelido: apelidoDe(m.company_id) }))) }}.
+          <template v-if="falhasVisiveis.length">Elas já estão salvas e não vão de novo.</template>
+        </p>
+        <template v-if="falhasVisiveis.length">
+          <p class="text-xs">Continuam marcadas só as que falharam:</p>
+          <ul class="list-disc space-y-0.5 pl-5 text-xs">
+            <li v-for="x in falhasVisiveis" :key="x.company_id">
+              <span class="font-medium">{{ x.apelido }}</span>: {{ x.motivo }}
+            </li>
+          </ul>
+          <p v-if="criadas.length" class="text-xs text-muted-foreground">
+            Tentar de novo usa o formulário como está agora; as já criadas não mudam.
+          </p>
+        </template>
+        <template v-if="falhasVisiveis.length && !somenteLeitura" #acoes>
+          <Button type="button" size="sm" variant="outline" class="h-8" :disabled="salvando" @click="tentarDeNovo">
+            <RotateCcw class="mr-1.5 size-3.5" aria-hidden="true" />
+            {{ textoTentar }}
+          </Button>
+        </template>
       </NfseAviso>
       <NfseAviso v-if="somenteLeitura" tom="neutro" compacto>
         Você pode ver esta nota fixa, mas não tem permissão para mudar.
@@ -610,12 +956,43 @@ const classeErro = 'border-red-500 dark:border-red-400'
         <NfseSecao titulo="Quem emite e quem recebe" :icone="Building2">
           <NfseCampo
             id="nfse-modelo-campo-company_id"
-            rotulo="Empresa que emite"
+            :rotulo="multi ? 'Empresas que emitem' : 'Empresa que emite'"
             obrigatorio
             :erro="erros.company_id"
+            :dica="dicaEmpresas"
             para="nfse-modelo-empresa"
           >
+            <!-- Criando: várias de uma vez (01/10/2026). Editando: uma só. -->
+            <NfseEmpresasMultiSelect
+              v-if="multi"
+              id="nfse-modelo-empresa"
+              v-model="empresasIds"
+              filtro="uteis"
+              mostrar-prontidao
+              :excluir-ids="excluirDaEscolha"
+              :disabled="somenteLeitura || salvando"
+              :invalido="!!erros.company_id"
+            >
+              <template #extra="{ empresa: p }">
+                <template v-if="ehPercentual && usaPctEmpresa">
+                  <span v-if="pctPositivo(p.percentual_servico)" class="pill-info shrink-0 tabular-nums">
+                    {{ fmtPct(p.percentual_servico) }}
+                  </span>
+                  <!-- Sem % padrão: atalho para cadastrar (igual à tela de uma empresa) -->
+                  <a
+                    v-else-if="tela.podeEditarCadastroEmpresa.value"
+                    :href="`/companies/${p.company_id}`"
+                    target="_blank"
+                    rel="noopener"
+                    class="pill-danger inline-flex shrink-0 items-center gap-0.5 hover:underline"
+                    :title="`cadastrar a % da ${p.apelido} em Cadastros › Empresas`"
+                  >sem % padrão<ExternalLink class="size-3" aria-hidden="true" /></a>
+                  <span v-else class="pill-danger shrink-0">sem % padrão</span>
+                </template>
+              </template>
+            </NfseEmpresasMultiSelect>
             <NfseEmpresaSelect
+              v-else
               id="nfse-modelo-empresa"
               v-model="form.company_id"
               filtro="uteis"
@@ -624,6 +1001,22 @@ const classeErro = 'border-red-500 dark:border-red-400'
               :invalido="!!erros.company_id"
             />
           </NfseCampo>
+
+          <NfseAviso
+            v-if="naoProntas.length"
+            tom="atencao"
+            :titulo="plural(naoProntas.length, 'empresa ainda não pode emitir', 'empresas ainda não podem emitir')"
+          >
+            <ul class="space-y-1">
+              <li v-for="p in naoProntas" :key="p.company_id" class="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                <span><span class="font-medium">{{ p.apelido }}</span>: {{ pendenciasDe(p) }}.</span>
+                <button type="button" class="text-xs text-primary hover:underline" @click="corrigirEmpresa(p)">
+                  corrigir
+                </button>
+              </li>
+            </ul>
+            <p>Dá para criar as notas fixas agora e ajustar as empresas depois.</p>
+          </NfseAviso>
 
           <NfseAviso
             v-if="empresa && !empresa.pronto"
@@ -635,7 +1028,7 @@ const classeErro = 'border-red-500 dark:border-red-400'
               Dá para salvar a nota fixa agora e ajustar a empresa depois.
             </p>
             <template #acoes>
-              <Button type="button" size="sm" variant="outline" class="h-8" @click="corrigirEmpresa">
+              <Button type="button" size="sm" variant="outline" class="h-8" @click="corrigirEmpresa()">
                 corrigir {{ empresa.apelido }}
               </Button>
             </template>
@@ -652,7 +1045,7 @@ const classeErro = 'border-red-500 dark:border-red-400'
             <NfseTomadorSelect
               id="nfse-modelo-tomador"
               v-model="form.tomador_id"
-              :excluir-empresa-id="form.company_id"
+              :excluir-empresa-id="varias ? null : form.company_id"
               :disabled="somenteLeitura || salvando"
               :invalido="!!erroTomador"
             />
@@ -745,7 +1138,7 @@ const classeErro = 'border-red-500 dark:border-red-400'
           <template v-else>
             <!-- A empresa tem % padrão: usar a dela (marcado) ou outra % -->
             <NfseCampo
-              v-if="pctEmpresa"
+              v-if="temPctEmpresa"
               id="nfse-modelo-campo-percentual"
               rotulo="Percentual"
               obrigatorio
@@ -783,7 +1176,7 @@ const classeErro = 'border-red-500 dark:border-red-400'
             <div class="grid gap-3 sm:grid-cols-2">
               <!-- Empresa sem % padrão: o campo é obrigatório, como antes -->
               <NfseCampo
-                v-if="!pctEmpresa"
+                v-if="!temPctEmpresa"
                 :class="CAMPO_EM_GRADE"
                 id="nfse-modelo-campo-percentual"
                 rotulo="Percentual"
@@ -814,6 +1207,9 @@ const classeErro = 'border-red-500 dark:border-red-400'
               </NfseCampo>
             </div>
 
+            <p v-if="varias && !temPctEmpresa && !somenteLeitura" class="text-xs text-muted-foreground">
+              Nenhuma das empresas marcadas tem % padrão: a % digitada vale para todas.
+            </p>
             <p v-if="!pctEmpresa && empresa && !somenteLeitura" class="text-xs text-muted-foreground">
               A {{ empresa.apelido }} não tem % padrão.
               <template v-if="tela.podeEditarCadastroEmpresa.value">
@@ -837,7 +1233,39 @@ const classeErro = 'border-red-500 dark:border-red-400'
               aria-live="polite"
             >
               <Calculator class="mt-0.5 size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
-              <div class="min-w-0 space-y-0.5">
+              <!-- Várias (01/10/2026): a prévia de cada empresa -->
+              <div v-if="varias" class="min-w-0 flex-1 space-y-1">
+                <p class="text-muted-foreground">
+                  Prévia de cada empresa (faturamento de {{ fmtMes(mes) }}):
+                </p>
+                <p v-if="erroPctConta" :class="TOM_TEXTO.perigo">{{ erroPctConta }}</p>
+                <ul class="max-h-48 space-y-0.5 overflow-y-auto text-xs">
+                  <li v-for="x in previaVarias" :key="x.p.company_id" class="flex flex-wrap gap-x-1.5 tabular-nums">
+                    <span class="font-medium">{{ x.p.apelido }}:</span>
+                    <span v-if="!x.pct" :class="usaPctEmpresa ? TOM_TEXTO.perigo : 'text-muted-foreground'">
+                      {{ usaPctEmpresa ? 'sem % padrão (use "Outra %" ou tire ela da lista)' : 'digite a % para ver a conta' }}
+                    </span>
+                    <span v-else-if="x.valor">
+                      {{ fmtPct(x.pct) }} de {{ fmtBrl(x.base) }}{{ x.deFaturamento ? '' : ' (base sugerida)' }} = {{ fmtBrl(x.valor) }}
+                      <span v-if="x.pouco" class="text-amber-700 dark:text-amber-400">· menos de R$ 0,01</span>
+                    </span>
+                    <span v-else class="text-muted-foreground">
+                      {{ fmtPct(x.pct) }} ·
+                      {{
+                        !faturamentoCarregado
+                          ? 'carregando o faturamento…'
+                          : x.semLoja
+                            ? 'não tem loja com o CNPJ dela em Cadastros › Lojas: na hora de emitir, digite a base'
+                            : `sem venda em ${fmtMes(mes)}: na hora de emitir, digite a base`
+                      }}
+                    </span>
+                  </li>
+                </ul>
+                <p class="text-xs text-muted-foreground">
+                  Na hora de emitir a base é o faturamento do mês de cada empresa (dá para trocar); valor = base × percentual.
+                </p>
+              </div>
+              <div v-else class="min-w-0 space-y-0.5">
                 <p v-if="exemplo" class="tabular-nums">
                   <span class="text-muted-foreground">{{
                     exemplo.origem === 'faturamento' ? 'Prévia:' : exemplo.origem === 'sugerida' ? 'Com a base sugerida:' : 'Ex.:'
@@ -1009,7 +1437,8 @@ const classeErro = 'border-red-500 dark:border-red-400'
         </Button>
         <Button v-if="!somenteLeitura" type="submit" form="nfse-modelo-form" size="sm" :disabled="salvando">
           <Loader2 v-if="salvando" class="mr-1.5 size-4 animate-spin" aria-hidden="true" />
-          Salvar nota fixa
+          <template v-if="salvando && progresso">Criando {{ Math.min(progresso.feito + 1, progresso.total) }} de {{ progresso.total }}…</template>
+          <template v-else>{{ textoSalvar }}</template>
         </Button>
       </div>
     </template>
