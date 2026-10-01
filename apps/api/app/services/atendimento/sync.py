@@ -42,7 +42,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 import structlog
-from sqlalchemy import or_, select, update
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -81,6 +81,8 @@ _CHAVE_TRAVA = "atendimento:sync:canal:{}"
 
 # Canal sem permissão é tentado de novo só depois disto.
 SEM_ESCOPO_RETENTAR = timedelta(hours=1)
+# O código que os adaptadores do ML e da Magalu gravam quando o refresh falha.
+ERRO_TOKEN_NAO_RENOVOU = "token_nao_renovou"  # noqa: S105 — código de erro, não segredo
 
 # ── Alerta de prazo ───────────────────────────────────────────────────────
 # "Vencendo" = menos de 2 h para o prazo da plataforma. A Amazon mede 24 h
@@ -385,6 +387,17 @@ async def _canais_da_rodada(session: AsyncSession) -> list[UUID]:
     nenhuma loja fica sempre no fim da fila.
     """
     agora = datetime.now(UTC)
+    # Parado = não adianta insistir a cada 2 minutos: sem permissão, ou o token
+    # que não renova (ML/Magalu a reconectar — 01/10/2026: o "lucas mei" tentou
+    # o refresh 748 vezes num dia). Volta de hora em hora, ou NA HORA em que a
+    # integração muda (reautorizada/reconectada em Integrações).
+    parado = or_(
+        AtendimentoCanal.status == STATUS_SEM_ESCOPO,
+        and_(
+            AtendimentoCanal.status == STATUS_ERRO,
+            func.coalesce(AtendimentoCanal.ultimo_erro, "").contains(ERRO_TOKEN_NAO_RENOVOU),
+        ),
+    )
     return list(
         (
             await session.execute(
@@ -395,9 +408,10 @@ async def _canais_da_rodada(session: AsyncSession) -> list[UUID]:
                     AtendimentoCanal.plataforma.in_(PLATAFORMAS),
                     AtendimentoCanal.status != STATUS_DESLIGADO,
                     or_(
-                        AtendimentoCanal.status != STATUS_SEM_ESCOPO,
+                        ~parado,
                         AtendimentoCanal.ultimo_erro_em.is_(None),
                         AtendimentoCanal.ultimo_erro_em < agora - SEM_ESCOPO_RETENTAR,
+                        Integration.updated_at > AtendimentoCanal.ultimo_erro_em,
                     ),
                 )
                 .order_by(AtendimentoCanal.ultimo_ok_em.asc().nulls_first())

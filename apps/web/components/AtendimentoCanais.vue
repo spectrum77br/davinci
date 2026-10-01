@@ -67,6 +67,18 @@ async function carregar() {
 }
 onMounted(carregar)
 
+// O último erro só fica VERMELHO se for da leitura mais recente (ou se nunca
+// leu). Uma rodada que leu depois sem erro já resolveu: o aviso fica cinza,
+// com a hora, para não parecer quebrado o que está lendo normalmente
+// (01/10/2026: a Pergunta da Magalu mostrava o 422 já corrigido 16 h depois).
+// A rodada parcial ("1 de 20 conversas com erro") grava o erro e o ok na
+// mesma hora, então continua vermelha até uma rodada limpa.
+function erroAtual(c: Canal) {
+  if (!c.ultimo_erro) return false
+  if (!c.ultimo_erro_em || !c.ultimo_ok_em) return true
+  return new Date(c.ultimo_erro_em).getTime() >= new Date(c.ultimo_ok_em).getTime() - 5000
+}
+
 function contaDe(c: Canal) {
   return c.conta || props.lojas.find((l) => l.integration_id === c.integration_id)?.conta || '—'
 }
@@ -289,8 +301,8 @@ async function sincronizar() {
             </td>
             <td class="whitespace-nowrap px-2 py-2 text-muted-foreground" :title="fmtDataHora(c.ultimo_ok_em)">{{ c.ultimo_ok_em ? haQuanto(c.ultimo_ok_em, agora) : 'nunca' }}</td>
             <td class="max-w-[260px] px-2 py-2">
-              <div v-if="c.ultimo_erro" class="line-clamp-2 text-red-600 dark:text-red-400" :title="`${c.ultimo_erro}${c.ultimo_erro_em ? ` — ${fmtDataHora(c.ultimo_erro_em)}` : ''}`">{{ c.ultimo_erro }}</div>
-              <div v-if="c.ultimo_erro && c.ultimo_erro_em" class="text-[10px] text-muted-foreground">{{ haQuanto(c.ultimo_erro_em, agora) }}</div>
+              <div v-if="c.ultimo_erro" class="line-clamp-2" :class="erroAtual(c) ? 'text-red-600 dark:text-red-400' : 'text-muted-foreground'" :title="`${c.ultimo_erro}${c.ultimo_erro_em ? ` — ${fmtDataHora(c.ultimo_erro_em)}` : ''}${erroAtual(c) ? '' : ' (já leu normalmente depois)'}`">{{ c.ultimo_erro }}</div>
+              <div v-if="c.ultimo_erro && c.ultimo_erro_em" class="text-[10px] text-muted-foreground">{{ haQuanto(c.ultimo_erro_em, agora) }}{{ erroAtual(c) ? '' : ' · resolvido, já leu depois' }}</div>
               <span v-if="!c.ultimo_erro" class="text-muted-foreground">—</span>
             </td>
             <td class="px-2 py-2 text-right tabular-nums">{{ c.nao_lidas_plataforma ?? '—' }}</td>

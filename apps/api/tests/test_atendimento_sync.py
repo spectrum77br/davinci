@@ -264,6 +264,50 @@ async def test_401_vira_sem_escopo_e_so_volta_de_hora_em_hora(db, make_user, mon
     assert len(lidos) == 2
 
 
+async def test_token_que_nao_renova_so_volta_de_hora_em_hora_ou_ao_reconectar(
+    db, make_user, monkeypatch
+):
+    """01/10/2026: o ML do "lucas mei" (token vencido) tentava o refresh a cada 2 min."""
+    user = await make_user()
+    canal = await _canal_shopee(db, user, "token-morto")
+
+    async def ler(session, canal, integration, cliente):
+        return ResultadoSync(status="erro", erro="token_nao_renovou")
+
+    lidos = _adaptador(monkeypatch, ler)
+    r = await sync.sincronizar_canal(canal.id)
+    assert r.status == "erro"
+    (c,) = await _canais(db)
+    assert (c.status, c.ultimo_erro) == ("erro", "token_nao_renovou")
+
+    # Rodada seguinte: pulado…
+    resumo = await sync.sincronizar_tudo()
+    assert resumo["canais"] == 0
+    assert len(lidos) == 1
+
+    # …até reconectarem a loja (a integração muda): volta na hora.
+    await db.execute(
+        update(Integration)
+        .where(Integration.id == canal.integration_id)
+        .values(updated_at=datetime.now(UTC) + timedelta(seconds=5))
+    )
+    await db.commit()
+    resumo = await sync.sincronizar_tudo()
+    assert resumo["canais"] == 1
+    assert len(lidos) == 2
+
+    # Outro erro qualquer (não o token) continua sendo tentado toda rodada.
+    await db.execute(
+        update(AtendimentoCanal).values(ultimo_erro="RuntimeError · HTTP 500")
+    )
+    await db.execute(
+        update(Integration).values(updated_at=datetime.now(UTC) - timedelta(days=1))
+    )
+    await db.commit()
+    resumo = await sync.sincronizar_tudo()
+    assert resumo["canais"] == 1
+
+
 async def test_adaptador_que_devolve_sem_escopo(db, make_user, monkeypatch):
     user = await make_user()
     canal = await _canal_shopee(db, user, "poofy")
