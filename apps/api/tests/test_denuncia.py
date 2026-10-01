@@ -609,3 +609,100 @@ async def test_denuncias_por_loja(client, make_user, auth_as):
     assert j["total"] == 4
     r = await client.get("/api/denuncia/denuncias", params={"loja": "999"})
     assert r.json()["total"] == 0
+
+
+def test_painel_status_na_loja_e_na_anatel():
+    """01/10 (Vinicius): o que a loja fez com a denúncia e onde o anúncio está no caminho da
+    Anatel — o Nosso só vai depois da recusa; o Diversos vai sem denúncia na loja; sem o
+    print da página não vai."""
+    from app.services import denuncia_painel as p
+
+    nosso = {"situacao": "ativo", "grupo": "GRUPO 1", "hom": "08216-25-18234",
+             "marketplace": "Shopee"}
+    diversos = {**nosso, "grupo": "GRUPO 2", "hom": "04814-15-08787"}
+    loja = lambda *ds: p.status_loja(list(ds))  # noqa: E731
+    def den(data, situacao, resultado):
+        return {"canal": "Shopee", "data": data, "situacao": situacao, "resultado": resultado}
+    pend = den("2026-09-20", "Em análise", "Aguardando")
+    rec = den("2026-09-25", "Improcedente", "Improcedente")
+    rem = den("2026-09-22", "Procedente", "Anúncio removido")
+    assert loja()["chave"] == "nao"
+    assert loja(pend)["chave"] == "aguardando"
+    assert loja(pend, rec)["chave"] == "recusou" and loja(pend, rec)["tentativas"] == 2
+    assert loja(rec, rem)["chave"] == "removido"   # removido vale mesmo com recusa antes
+    # Anatel não é loja
+    assert loja({"canal": "Anatel SEI", "data": "2026-09-30"})["chave"] == "nao"
+
+    def anatel(a, ds, tem_print=True):
+        return p.status_anatel(a, ds, p.status_loja(ds), tem_print)["chave"]
+    sei = {"canal": "Anatel SEI", "protocolo": "53500.144118/2026-11", "data": "2026-10-01"}
+    assert anatel(nosso, [pend]) == "esperando_recusa"
+    assert anatel(nosso, []) == "falta_loja"
+    assert anatel(nosso, [rec]) == "fila"
+    assert anatel(nosso, [rec], tem_print=False) == "falta_print"
+    assert anatel(nosso, [rem]) == "nada"
+    assert anatel(diversos, []) == "fila"                     # Diversos sem denúncia na loja vai
+    assert anatel({**diversos, "hom": ""}, []) == "nada"      # sem nº declarado não cabe
+    assert anatel({**diversos, "hom": "", "marketplace": "TikTok Shop"}, []) == "fila"
+    assert anatel({**diversos, "situacao": "fora do ar"}, []) == "nada"
+    st = p.status_anatel(diversos, [pend, sei], p.status_loja([pend]), False)
+    assert st["chave"] == "processo" and st["protocolo"] == "53500.144118/2026-11"
+
+
+async def test_painel_junta_anuncios_e_denuncias(client, make_user, auth_as):
+    await _carga(client)
+    r = await client.post(
+        "/api/denuncia/sync/anuncios",
+        json={"linhas": [
+            _anuncio("B1", shop_id="222", loja="loja_y", vendas=300, grupo="GRUPO 2",
+                     hom="04814-15-08787"),
+            _anuncio("B2", shop_id="222", loja="loja_y", vendas=700, grupo="GRUPO 1"),
+            _anuncio("B3", shop_id="222", loja="loja_y", vendas=1, grupo="GRUPO 1"),
+        ]},
+        headers=H,
+    )
+    assert r.status_code == 200, r.text
+    await client.post(
+        "/api/denuncia/sync/denuncias",
+        json={"linhas": [
+            {"id": 10, "anuncio_id": "B2", "canal": "Shopee", "data": "2026-09-20",
+             "situacao": "Improcedente", "resultado": "Improcedente", "tipo": "normal"},
+            {"id": 11, "anuncio_id": "B1", "canal": "Anatel SEI", "protocolo": "53500.1/2026-1",
+             "data": "2026-10-01", "situacao": "Enviada", "resultado": "Aguardando"},
+            {"id": 12, "anuncio_id": "B3", "canal": "Anatel SEI", "protocolo": "53500.1/2026-1",
+             "data": "2026-10-01", "situacao": "Enviada", "resultado": "Aguardando"},
+        ]},
+        headers=H,
+    )
+    await client.post(
+        "/api/denuncia/sync/provas",
+        json={"linhas": [{"id": 90, "anuncio_id": "B2", "tipo": "Captura no ato",
+                          "nome_original": "c.png"}]},
+        headers=H,
+    )
+    auth_as(await make_user(permissions={"denuncia": {"view": True}}))
+    j = (await client.get("/api/denuncia/painel")).json()
+    lojas = {x["loja"]: x for x in j["itens"]}
+    y = lojas["loja_y"]
+    assert (y["anuncios"], y["vendas"], y["nosso"], y["diversos"]) == (3, 1001, 2, 1)
+    assert y["na_loja"]["recusou"] == 1 and y["na_loja"]["nao"] == 2
+    # B2 (Nosso, recusou, com print) na fila; B1 e B3 com o mesmo processo SEI
+    assert y["na_anatel"]["fila"] == 1 and y["na_anatel"]["processo"] == 2
+    assert y["processos"] == ["53500.1/2026-1"]
+    assert j["numeros"]["processos"] == 1 and j["numeros"]["na_loja"]["recusou"] == 1
+    # loja_x: A1 com denúncia Shopee "Enviada" → aguardando; o SEI da carga não tem protocolo
+    assert lojas["loja_x"]["na_loja"]["aguardando"] == 2
+    # por anúncio, filtrando o que está na fila da Anatel
+    j = (await client.get("/api/denuncia/painel",
+                          params={"visao": "anuncios", "na_anatel": "fila"})).json()
+    assert [x["id"] for x in j["itens"]] == ["B2"]
+    assert j["itens"][0]["loja_st"]["rotulo"] == "recusou"
+    assert j["itens"][0]["anatel_st"]["rotulo"] == "na fila"
+    j = (await client.get("/api/denuncia/painel",
+                          params={"visao": "anuncios", "loja": "222", "ordem": "vendas"})).json()
+    assert [x["id"] for x in j["itens"]] == ["B2", "B1", "B3"]
+    # a ficha junta tudo: status e os outros anúncios da mesma petição
+    f = (await client.get("/api/denuncia/anuncios/B1")).json()
+    assert f["status"]["na_anatel"]["chave"] == "processo"
+    assert [x["id"] for x in f["junto"]["Anatel SEI|53500.1/2026-1"]] == ["B3"]
+    assert f["denuncias"][0]["id"] == 11

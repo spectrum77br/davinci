@@ -25,7 +25,7 @@ import os
 import re
 import secrets
 import tempfile
-from collections import OrderedDict
+from collections import OrderedDict, defaultdict
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any
@@ -54,6 +54,7 @@ from app.models.denuncia import (
     DenunciaVerificacao,
 )
 from app.models.user import User
+from app.services import denuncia_painel as painel
 from app.services.denuncia_robo import PASSOS, montar_painel
 
 logger = structlog.get_logger()
@@ -924,15 +925,152 @@ async def ver_anuncio(
             select(DenunciaCompra).where(DenunciaCompra.anuncio_id == anuncio_id)
         )
     ).scalars().all()
+    # 01/10: a ficha mostra tudo junto — o status "na loja"/"na Anatel" e, em cada denúncia com
+    # protocolo (a petição do SEI é por loja), os outros anúncios que ela cobre
+    st = (await _status_dos_anuncios(session, [a]))[0]
+    A = DenunciaAnuncio
+    chaves = {(d.canal, d.protocolo) for d in dens if d.protocolo}
+    junto: dict[str, list[dict]] = defaultdict(list)
+    if chaves:
+        rows = (
+            await session.execute(
+                select(
+                    DenunciaDenuncia.canal, DenunciaDenuncia.protocolo,
+                    A.id, A.loja, A.titulo, A.situacao,
+                )
+                .join(A, A.id == DenunciaDenuncia.anuncio_id)
+                .where(
+                    DenunciaDenuncia.protocolo.in_([p for _, p in chaves]),
+                    DenunciaDenuncia.anuncio_id != anuncio_id,
+                )
+            )
+        ).all()
+        for canal, proto, aid, lj, tit, sit in rows:
+            if (canal, proto) in chaves:
+                junto[f"{canal}|{proto}"].append(
+                    {"id": aid, "loja": lj, "titulo": tit, "situacao": sit}
+                )
     return {
         "anuncio": a.dados,
         "loja": loja.dados if loja else None,
-        "denuncias": [d.dados for d in dens],
+        "status": {"na_loja": st["loja_st"], "na_anatel": st["anatel_st"]},
+        "junto": junto,
+        "denuncias": [{**(d.dados or {}), "id": d.id} for d in dens],
         "provas": [_prova_resumo(p) for p in provas],
         "verificacoes": [v.dados for v in verifs],
         "casos": [c.dados for c in casos],
         "compras": [c.dados for c in compras],
     }
+
+
+def _den_dict(d: DenunciaDenuncia) -> dict:
+    return {**(d.dados or {}), "id": d.id, "anuncio_id": d.anuncio_id, "canal": d.canal,
+            "protocolo": d.protocolo, "data": d.data, "situacao": d.situacao,
+            "resultado": d.resultado, "tipo": d.tipo, "prazo": d.prazo}
+
+
+def _anuncio_base(a: DenunciaAnuncio) -> dict:
+    d = a.dados or {}
+    return {
+        "id": a.id, "marketplace": a.marketplace, "shop_id": a.shop_id, "loja": a.loja,
+        "titulo": a.titulo, "url": d.get("url"), "hom": d.get("hom"), "inmetro": d.get("inmetro"),
+        "grupo": a.grupo, "vendas": a.vendas, "situacao": a.situacao, "propria": a.propria,
+        "visto_primeiro": a.visto_primeiro, "saiu_em": d.get("saiu_em"),
+    }
+
+
+async def _status_dos_anuncios(
+    session: AsyncSession, anuncios: list[DenunciaAnuncio],
+) -> list[dict]:
+    """Cada anúncio com o status "na loja" e "na Anatel" (services/denuncia_painel)."""
+    ids = [a.id for a in anuncios]
+    dens: dict[str, list[dict]] = defaultdict(list)
+    com_print: set[str] = set()
+    if ids:
+        for d in (
+            await session.execute(
+                select(DenunciaDenuncia).where(DenunciaDenuncia.anuncio_id.in_(ids))
+            )
+        ).scalars():
+            dens[d.anuncio_id].append(_den_dict(d))
+        com_print = set(
+            (
+                await session.execute(
+                    select(DenunciaProva.anuncio_id)
+                    .where(
+                        DenunciaProva.anuncio_id.in_(ids), DenunciaProva.tipo == "Captura no ato",
+                    )
+                    .distinct()
+                )
+            ).scalars()
+        )
+    out = []
+    for a in anuncios:
+        base = _anuncio_base(a)
+        ds = dens.get(a.id, [])
+        lst = painel.status_loja(ds)
+        base["loja_st"] = painel.rotular(lst, painel.LOJA)
+        ana = painel.status_anatel(base, ds, lst, a.id in com_print)
+        base["anatel_st"] = painel.rotular(ana, painel.ANATEL)
+        base["ultima_denuncia"] = max((x.get("data") or "" for x in ds), default="") or None
+        base["nden"] = len(ds)
+        out.append(base)
+    return out
+
+
+@router.get("/painel")
+async def painel_anuncios_e_denuncias(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(_ver)],
+    visao: Annotated[str, Query(pattern="^(lojas|anuncios)$")] = "lojas",
+    q: str | None = None,
+    marketplace: str | None = None,
+    grupo: str | None = None,
+    situacao: str | None = None,
+    loja: str | None = None,
+    na_loja: str | None = None,
+    na_anatel: str | None = None,
+    propria: Annotated[str, Query(pattern="^(0|1|todas)$")] = "0",
+    ordem: str = "vendas",
+    limite: Annotated[int, Query(ge=1, le=2000)] = 500,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> dict:
+    """Vinicius, 01/10: as abas Anúncios e Denúncias numa só ("são quase as mesmas
+    informações") — por loja ou por anúncio, cada um com o que a loja fez com a nossa
+    denúncia e onde ele está no caminho da Anatel. na_loja / na_anatel filtram pelas
+    chaves de services/denuncia_painel (LOJA, ANATEL)."""
+    A = DenunciaAnuncio
+    conds, _nden = _filtro_anuncios(q, marketplace, grupo, situacao, loja, None, propria)
+    anuncios = (await session.execute(select(A).where(*conds))).scalars().all()
+    itens = await _status_dos_anuncios(session, list(anuncios))
+    if na_loja in painel.LOJA:
+        itens = [a for a in itens if a["loja_st"]["chave"] == na_loja]
+    if na_anatel in painel.ANATEL:
+        itens = [a for a in itens if a["anatel_st"]["chave"] == na_anatel]
+    lojas = painel.somar_lojas(itens)
+    marketplaces = (await session.execute(select(A.marketplace).distinct())).scalars().all()
+    grupos = (await session.execute(select(A.grupo).distinct())).scalars().all()
+    resp: dict[str, Any] = {
+        "numeros": painel.numeros(itens, lojas),
+        "opcoes": {
+            "marketplaces": sorted(m for m in marketplaces if m),
+            "grupos": sorted(g for g in grupos if g),
+            "na_loja": [{"chave": k, "rotulo": v[0]} for k, v in painel.LOJA.items()],
+            "na_anatel": [
+                {"chave": k, "rotulo": v[0]} for k, v in painel.ANATEL.items() if k != "nada"
+            ],
+        },
+    }
+    if visao == "lojas":
+        lojas = painel.ordenar_lojas(lojas, ordem)
+        return {**resp, "total": len(lojas), "itens": lojas[offset: offset + limite]}
+    ordens = {
+        "vendas": lambda x: (-(x["vendas"] or 0), x["id"]),
+        "recentes": lambda x: (x["visto_primeiro"] or "",),
+        "loja": lambda x: ((x["loja"] or "").lower(), -(x["vendas"] or 0)),
+    }
+    itens.sort(key=ordens.get(ordem, ordens["vendas"]), reverse=(ordem == "recentes"))
+    return {**resp, "total": len(itens), "itens": itens[offset: offset + limite]}
 
 
 def _chave_grupo(d: DenunciaDenuncia) -> tuple:

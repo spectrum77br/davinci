@@ -21,6 +21,22 @@ export type Prova = {
   tem_arquivo: boolean
 }
 
+// Uma linha da sub-aba "Denúncias enviadas" (mesmo canal + protocolo = uma denúncia).
+export type DenunciaEnviada = {
+  id: number
+  canal: string | null
+  protocolo: string | null
+  data: string | null
+  hora: string | null
+  situacao: string | null
+  resultado: string | null
+  prazo: string | null
+  tipo: string | null
+  tentativa: number | null
+  refazer: number | null
+  anuncios: { id: string | null; loja: string | null; titulo: string | null; situacao: string | null }[]
+}
+
 export type Resumo = {
   ultimo_envio_em: string | null
   anuncios: number

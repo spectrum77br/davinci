@@ -7,20 +7,22 @@
 // 5 min; o Jurídico é a lista de chamados encaminhados ao jurídico, que saiu da
 // tela de Chamados e mora aqui (precisa também da permissão de Chamados).
 // Robô (01/10): em que passo a rodada do robô do mini está e o que precisa de alguém.
+// 01/10 (Vinicius: "juntar aba anúncios e denúncias… são quase as mesmas informações"):
+// Anúncios + Denúncias viraram uma aba só, "Anúncios e denúncias" (DenunciaPainel). Link
+// antigo ?aba=denuncias cai nela.
 import { computed, ref, watch } from 'vue'
-import { ScanSearch, Flag, Briefcase, Scale, RefreshCw, Bot } from 'lucide-vue-next'
+import { ScanSearch, Briefcase, Scale, RefreshCw, Bot } from 'lucide-vue-next'
 
 definePageMeta({ middleware: ['permission'], permission: { resource: 'denuncia', action: 'view' } })
 
-type Aba = 'anuncios' | 'denuncias' | 'casos' | 'juridico' | 'robo'
+type Aba = 'anuncios' | 'casos' | 'juridico' | 'robo'
 
 const route = useRoute()
 const router = useRouter()
 const podeJuridico = useCan('chamados', 'view')
 
 const ABAS = computed(() => [
-  { key: 'anuncios' as Aba, label: 'Anúncios', icon: ScanSearch },
-  { key: 'denuncias' as Aba, label: 'Denúncias', icon: Flag },
+  { key: 'anuncios' as Aba, label: 'Anúncios e denúncias', icon: ScanSearch },
   { key: 'casos' as Aba, label: 'Casos', icon: Briefcase },
   ...(podeJuridico.value ? [{ key: 'juridico' as Aba, label: 'Jurídico', icon: Scale }] : []),
   { key: 'robo' as Aba, label: 'Robô', icon: Bot },
@@ -71,8 +73,7 @@ function recarregar() {
       </button>
     </div>
 
-    <DenunciaAnuncios v-if="aba === 'anuncios'" ref="atual" />
-    <DenunciaDenuncias v-else-if="aba === 'denuncias'" ref="atual" />
+    <DenunciaPainel v-if="aba === 'anuncios'" ref="atual" />
     <DenunciaCasos v-else-if="aba === 'casos'" ref="atual" />
     <DenunciaRobo v-else-if="aba === 'robo'" ref="atual" />
     <ChamadosPainel v-else-if="aba === 'juridico'" modo="juridico" />

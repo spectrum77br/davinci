@@ -120,8 +120,11 @@
     @apply px-3 py-2.5 text-left text-xs font-medium text-muted-foreground bg-muted/40 border-b;
   }
   .table-card tbody td {
-    @apply px-3 py-2.5 text-sm border-b last:border-0;
+    @apply px-3 py-2.5 text-sm border-b;
   }
+  /* 01/10: era `last:border-0` na célula — tirava a linha da ÚLTIMA COLUNA de todas as linhas
+     (a linha da tabela "parava" antes do fim). O que se quer é sem linha na última LINHA. */
+  .table-card tbody tr:last-child > td { @apply border-b-0; }
   .table-card tbody tr:hover td { @apply bg-muted/30; }
 
   .btn {

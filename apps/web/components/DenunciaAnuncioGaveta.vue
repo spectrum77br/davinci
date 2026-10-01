@@ -1,13 +1,19 @@
 <script setup lang="ts">
 // Denúncia (30/09/2026): ficha do anúncio — dados que a varredura leu, as
 // denúncias feitas contra ele, caso/compra de prova, provas e o histórico de
-// "ainda está no ar?". Usada nas três telas (clicar num anúncio abre aqui).
-import { computed, ref, watch } from 'vue'
+// "ainda está no ar?". Usada nas telas (clicar num anúncio abre aqui).
+// 01/10 (Vinicius: "hoje apareceria tudo junto, certo?"): a ficha da denúncia virou parte
+// desta — "Na loja" (cada denúncia no marketplace: texto, resposta, provas) e "Na Anatel"
+// (o processo do SEI, a petição, os outros anúncios da mesma petição) ou, sem processo,
+// onde o anúncio está no caminho. focoDenuncia = rola até a denúncia clicada.
+import { computed, nextTick, ref, watch } from 'vue'
 import { ExternalLink } from 'lucide-vue-next'
 import {
   type Prova, dataBr, dinheiro, nomeGrupo, numero, pillGrupo, pillResultado, pillSituacaoAnuncio,
   pillSituacaoDenuncia, pillStatusCaso, pillStatusCompra, prazoVencido,
 } from '~/lib/denuncia'
+
+type Status = { chave: string; rotulo: string; tom: string; protocolo?: string | null; consumidor?: string | null }
 
 type Ficha = {
   anuncio: Record<string, any>
@@ -17,9 +23,11 @@ type Ficha = {
   verificacoes: Record<string, any>[]
   casos: Record<string, any>[]
   compras: Record<string, any>[]
+  status?: { na_loja: Status; na_anatel: Status }
+  junto?: Record<string, { id: string; loja: string | null; titulo: string | null; situacao: string | null }[]>
 }
 
-const props = defineProps<{ anuncioId: string | null }>()
+const props = defineProps<{ anuncioId: string | null; focoDenuncia?: number | null }>()
 const emit = defineEmits<{ (e: 'fechar'): void }>()
 
 const { api } = useApi()
@@ -43,6 +51,10 @@ watch(
     carregando.value = true
     try {
       ficha.value = await api<Ficha>(`/api/denuncia/anuncios/${encodeURIComponent(id)}`)
+      if (props.focoDenuncia) {
+        await nextTick()
+        document.getElementById(`den-${props.focoDenuncia}`)?.scrollIntoView({ block: 'start', behavior: 'smooth' })
+      }
     } catch (e: any) {
       erro.value = e?.data?.detail?.code || e?.message || 'erro'
     } finally {
@@ -65,6 +77,31 @@ const CAMPOS: [string, string][] = [
   ['categoria', 'Categoria'],
 ]
 const campos = computed(() => CAMPOS.filter(([k]) => a.value[k] !== null && a.value[k] !== undefined && a.value[k] !== ''))
+
+const CANAIS_ANATEL = ['Anatel SEI', 'Anatel']
+const naLoja = computed(() => (ficha.value?.denuncias || []).filter((d) => !CANAIS_ANATEL.includes(d.canal)))
+const naAnatel = computed(() => (ficha.value?.denuncias || []).filter((d) => CANAIS_ANATEL.includes(d.canal)))
+const idsDenuncias = computed(() => new Set((ficha.value?.denuncias || []).map((d) => d.id)))
+function provasDa(id: number): Prova[] {
+  return (ficha.value?.provas || []).filter((p) => p.denuncia_id === id)
+}
+const outrasProvas = computed(() =>
+  (ficha.value?.provas || []).filter((p) => !p.denuncia_id || !idsDenuncias.value.has(p.denuncia_id)),
+)
+function junto(d: Record<string, any>) {
+  return (ficha.value?.junto || {})[`${d.canal}|${d.protocolo}`] || []
+}
+const TOM: Record<string, string> = {
+  success: 'pill-success', danger: 'pill-danger', warning: 'pill-warning', info: 'pill-info', muted: 'pill-muted',
+}
+// sem processo na Anatel: o que falta para ir (mesmas regras de 01/10 do robô)
+const EXPLICA_ANATEL: Record<string, string> = {
+  fila: 'Está na fila: vai no próximo passo 7 (Anatel / SEI).',
+  falta_print: 'Falta o print da página do anúncio — o robô tira no passo 6; depois entra na fila.',
+  esperando_recusa: 'Nosso: só vai à Anatel depois que a loja recusar a nossa denúncia.',
+  falta_loja: 'Nosso: primeiro denunciamos na loja; se ela recusar, vai à Anatel.',
+  nada: 'Não vai à Anatel: fora do ar, já resolvido ou fora das regras (sem nº declarado).',
+}
 </script>
 
 <template>
@@ -77,6 +114,8 @@ const campos = computed(() => CAMPOS.filter(([k]) => a.value[k] !== null && a.va
       <span v-if="a.grupo" class="pill" :class="pillGrupo(a.grupo)" :title="a.grupo">certificado: {{ nomeGrupo(a.grupo).toLowerCase() }}</span>
       <span v-if="a.situacao" class="pill" :class="pillSituacaoAnuncio(a.situacao)">{{ a.situacao }}</span>
       <span v-if="a.propria" class="pill pill-info">loja própria</span>
+      <span v-if="ficha?.status" :class="TOM[ficha.status.na_loja.tom]" title="na loja">loja: {{ ficha.status.na_loja.rotulo }}</span>
+      <span v-if="ficha?.status && ficha.status.na_anatel.chave !== 'nada'" :class="TOM[ficha.status.na_anatel.tom]" title="na Anatel">Anatel: {{ ficha.status.na_anatel.rotulo }}</span>
     </template>
 
     <div v-if="carregando" class="text-sm text-muted-foreground">carregando…</div>
@@ -105,24 +144,89 @@ const campos = computed(() => CAMPOS.filter(([k]) => a.value[k] !== null && a.va
       </section>
 
       <section>
-        <h3 class="text-sm font-semibold mb-2">Denúncias ({{ ficha.denuncias.length }})</h3>
-        <div v-if="ficha.denuncias.length === 0" class="text-sm text-muted-foreground">Nenhuma denúncia contra este anúncio.</div>
-        <div v-else class="table-card">
-          <table class="w-full">
-            <thead>
-              <tr><th>Data</th><th>Canal</th><th>Protocolo</th><th>Situação</th><th>Resultado</th><th>Prazo</th></tr>
-            </thead>
-            <tbody>
-              <tr v-for="d in ficha.denuncias" :key="d.id">
-                <td class="text-xs tabular-nums whitespace-nowrap">{{ dataBr(d.data, false) }}</td>
-                <td class="text-xs">{{ d.canal }}<span v-if="d.tipo && d.tipo !== 'normal'" class="text-muted-foreground"> · {{ d.tipo }}</span></td>
-                <td class="font-mono text-xs">{{ d.protocolo || '—' }}</td>
-                <td><span class="pill" :class="pillSituacaoDenuncia(d.situacao)">{{ d.situacao }}</span></td>
-                <td><span v-if="d.resultado" class="pill" :class="pillResultado(d.resultado)">{{ d.resultado }}</span></td>
-                <td class="text-xs tabular-nums whitespace-nowrap" :class="prazoVencido(d.prazo, d.situacao) ? 'text-red-600 font-medium' : ''">{{ dataBr(d.prazo, false) }}</td>
-              </tr>
-            </tbody>
-          </table>
+        <h3 class="text-sm font-semibold mb-2">Na loja ({{ naLoja.length }})</h3>
+        <div v-if="naLoja.length === 0" class="text-sm text-muted-foreground">
+          Não denunciado na loja.<template v-if="a.grupo === 'GRUPO 2'"> Desde 01/10 o Diversos não é mais denunciado nas lojas — vai direto à Anatel.</template>
+        </div>
+        <div class="space-y-2">
+          <div
+            v-for="d in naLoja"
+            :id="`den-${d.id}`"
+            :key="d.id"
+            class="rounded-lg border px-3 py-2.5 space-y-2 scroll-mt-4"
+            :class="focoDenuncia === d.id ? 'ring-2 ring-primary' : ''"
+          >
+            <div class="flex flex-wrap items-center gap-2 text-sm">
+              <span class="font-medium">{{ d.canal }}</span>
+              <span class="text-xs text-muted-foreground tabular-nums">{{ dataBr(d.data, false) }} {{ d.hora || '' }}</span>
+              <span v-if="(d.tentativa || 1) > 1 || (d.tipo && d.tipo !== 'normal')" class="text-xs text-muted-foreground">
+                · {{ d.tipo && d.tipo !== 'normal' ? d.tipo : `${d.tentativa}ª tentativa` }}
+              </span>
+              <span class="flex-1" />
+              <span :class="pillSituacaoDenuncia(d.situacao)">{{ d.situacao }}</span>
+              <span v-if="d.resultado" :class="pillResultado(d.resultado)">{{ d.resultado }}</span>
+            </div>
+            <div v-if="d.protocolo || d.motivo || d.prazo" class="text-xs text-muted-foreground flex flex-wrap gap-x-3">
+              <span v-if="d.protocolo">protocolo <span class="font-mono">{{ d.protocolo }}</span></span>
+              <span v-if="d.motivo">motivo: {{ d.motivo }}</span>
+              <span v-if="d.prazo" :class="prazoVencido(d.prazo, d.situacao) ? 'text-red-600 font-medium' : ''">prazo {{ dataBr(d.prazo, false) }}</span>
+            </div>
+            <p v-if="d.resposta" class="text-sm whitespace-pre-wrap rounded-md border bg-muted/30 px-3 py-2"><span class="text-[11px] uppercase tracking-wider text-muted-foreground block mb-0.5">Resposta da loja</span>{{ d.resposta }}</p>
+            <p v-if="d.resultado_nota" class="text-xs text-muted-foreground whitespace-pre-wrap">{{ d.resultado_nota }}</p>
+            <details v-if="d.texto" class="text-xs">
+              <summary class="cursor-pointer text-muted-foreground">texto enviado</summary>
+              <p class="mt-1 whitespace-pre-wrap rounded-md border bg-muted/30 px-3 py-2 max-h-72 overflow-y-auto">{{ d.texto }}</p>
+            </details>
+            <DenunciaProvas v-if="provasDa(d.id).length" :provas="provasDa(d.id)" />
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <h3 class="text-sm font-semibold mb-2">Na Anatel</h3>
+        <div v-if="naAnatel.length === 0 && ficha.status" class="rounded-lg border px-3 py-2.5 text-sm flex flex-wrap items-center gap-2">
+          <span :class="TOM[ficha.status.na_anatel.tom]">{{ ficha.status.na_anatel.rotulo === '—' ? 'sem processo' : ficha.status.na_anatel.rotulo }}</span>
+          <span class="text-xs text-muted-foreground">{{ EXPLICA_ANATEL[ficha.status.na_anatel.chave] }}</span>
+        </div>
+        <div class="space-y-2">
+          <div
+            v-for="d in naAnatel"
+            :id="`den-${d.id}`"
+            :key="d.id"
+            class="rounded-lg border px-3 py-2.5 space-y-2 scroll-mt-4"
+            :class="focoDenuncia === d.id ? 'ring-2 ring-primary' : ''"
+          >
+            <div class="flex flex-wrap items-center gap-2 text-sm">
+              <span class="font-medium">{{ d.canal === 'Anatel SEI' ? 'SEI' : 'Anatel Consumidor' }}</span>
+              <span v-if="d.protocolo" class="font-mono text-xs">{{ d.protocolo }}</span>
+              <span class="text-xs text-muted-foreground tabular-nums">{{ dataBr(d.data, false) }} {{ d.hora || '' }}</span>
+              <span class="flex-1" />
+              <span :class="pillSituacaoDenuncia(d.situacao)">{{ d.situacao }}</span>
+              <span v-if="d.resultado" :class="pillResultado(d.resultado)">{{ d.resultado }}</span>
+            </div>
+            <div v-if="d.status_anatel" class="text-xs">
+              <span class="text-muted-foreground">andamento na Anatel:</span> {{ d.status_anatel }}
+              <span class="text-muted-foreground">{{ dataBr(d.status_anatel_em) }}</span>
+            </div>
+            <p v-if="d.canal === 'Anatel'" class="text-xs text-muted-foreground">Anatel Consumidor (antigo): desde 25/09 só acompanhamos o andamento; a denúncia nova sai pelo SEI.</p>
+            <p v-if="d.resposta || d.resposta_anatel" class="text-sm whitespace-pre-wrap rounded-md border bg-muted/30 px-3 py-2"><span class="text-[11px] uppercase tracking-wider text-muted-foreground block mb-0.5">Resposta da Anatel</span>{{ d.resposta || d.resposta_anatel }}</p>
+            <div v-if="junto(d).length" class="text-xs">
+              <span class="text-muted-foreground">Esta petição incluiu também {{ junto(d).length }} anúncio{{ junto(d).length > 1 ? 's' : '' }} da loja:</span>
+              <ul class="mt-1 space-y-0.5">
+                <li v-for="x in junto(d)" :key="x.id" class="flex items-center gap-2">
+                  <span class="font-mono">{{ x.id }}</span>
+                  <span class="truncate text-muted-foreground">{{ x.titulo }}</span>
+                  <span :class="pillSituacaoAnuncio(x.situacao)">{{ x.situacao }}</span>
+                </li>
+              </ul>
+            </div>
+            <p v-if="d.obs" class="text-xs text-muted-foreground whitespace-pre-wrap">{{ d.obs }}</p>
+            <details v-if="d.texto" class="text-xs">
+              <summary class="cursor-pointer text-muted-foreground">texto da denúncia / petição</summary>
+              <p class="mt-1 whitespace-pre-wrap rounded-md border bg-muted/30 px-3 py-2 max-h-72 overflow-y-auto">{{ d.texto }}</p>
+            </details>
+            <DenunciaProvas v-if="provasDa(d.id).length" :provas="provasDa(d.id)" />
+          </div>
         </div>
       </section>
 
@@ -143,9 +247,9 @@ const campos = computed(() => CAMPOS.filter(([k]) => a.value[k] !== null && a.va
         </div>
       </section>
 
-      <section>
-        <h3 class="text-sm font-semibold mb-2">Provas ({{ ficha.provas.length }})</h3>
-        <DenunciaProvas :provas="ficha.provas" />
+      <section v-if="outrasProvas.length">
+        <h3 class="text-sm font-semibold mb-2">Outras provas ({{ outrasProvas.length }})</h3>
+        <DenunciaProvas :provas="outrasProvas" />
       </section>
 
       <section v-if="ficha.verificacoes.length">
