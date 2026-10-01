@@ -33,7 +33,7 @@ from typing import Annotated, Any
 import structlog
 from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse
-from sqlalchemy import delete, func, or_, select, update
+from sqlalchemy import case, delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -637,41 +637,21 @@ _ORDEM_ANUNCIOS = {
 }
 
 
-@router.get("/anuncios")
-async def listar_anuncios(
-    session: Annotated[AsyncSession, Depends(get_session)],
-    _u: Annotated[User, Depends(_ver)],
-    q: str | None = None,
-    marketplace: str | None = None,
-    grupo: str | None = None,
-    situacao: str | None = None,
-    loja: str | None = None,
-    den: Annotated[str | None, Query(pattern="^(com|sem)$")] = None,
-    propria: Annotated[str, Query(pattern="^(0|1|todas)$")] = "0",
-    ordem: str = "vendas",
-    limite: Annotated[int, Query(ge=1, le=1000)] = 200,
-    offset: Annotated[int, Query(ge=0)] = 0,
-) -> dict:
+# "Por loja" (01/10): loja sem shop_id no anúncio vem com este valor no filtro.
+SEM_LOJA = "_sem"
+
+
+def _filtro_anuncios(
+    q: str | None, marketplace: str | None, grupo: str | None, situacao: str | None,
+    loja: str | None, den: str | None, propria: str,
+) -> tuple[list, Any]:
+    """Recorte da aba Anúncios — o mesmo nas visões "por anúncio" e "por loja"."""
     A = DenunciaAnuncio
     nden = (
         select(func.count())
         .select_from(DenunciaDenuncia)
         .where(DenunciaDenuncia.anuncio_id == A.id)
         .correlate(A)
-        .scalar_subquery()
-    )
-    nprov = (
-        select(func.count())
-        .select_from(DenunciaProva)
-        .where(DenunciaProva.anuncio_id == A.id)
-        .correlate(A)
-        .scalar_subquery()
-    )
-    caso = (
-        select(DenunciaCaso.codigo)
-        .where(DenunciaCaso.anuncio_id == A.id)
-        .correlate(A)
-        .limit(1)
         .scalar_subquery()
     )
     conds = []
@@ -685,7 +665,9 @@ async def listar_anuncios(
         conds.append(A.situacao == situacao)
     if marketplace:
         conds.append(A.marketplace == marketplace)
-    if loja:
+    if loja == SEM_LOJA:
+        conds.append(A.shop_id.is_(None))
+    elif loja:
         conds.append(A.shop_id == loja)
     if den == "com":
         conds.append(nden > 0)
@@ -703,6 +685,68 @@ async def listar_anuncios(
                 A.dados["inmetro"].astext.ilike(t),
             )
         )
+    return conds, nden
+
+
+async def _numeros_e_opcoes(session: AsyncSession, conds: list, nden: Any, total: int) -> dict:
+    """Números do topo e opções dos filtros, sobre o mesmo recorte (sem limite)."""
+    A = DenunciaAnuncio
+    base = select(A.situacao, func.count()).where(*conds).group_by(A.situacao)
+    por_situacao = {k or "": v for k, v in (await session.execute(base)).all()}
+    com_den = (
+        await session.execute(select(func.count()).select_from(A).where(*conds, nden > 0))
+    ).scalar() or 0
+    marketplaces = (
+        await session.execute(select(A.marketplace).distinct().order_by(A.marketplace))
+    ).scalars().all()
+    grupos = (
+        await session.execute(select(A.grupo).distinct().order_by(A.grupo))
+    ).scalars().all()
+    return {
+        "numeros": {
+            "total": total,
+            "ativos": por_situacao.get("ativo", 0),
+            "fora_do_ar": por_situacao.get("fora do ar", 0),
+            "com_denuncia": com_den,
+        },
+        "opcoes": {
+            "marketplaces": [m for m in marketplaces if m],
+            "grupos": [g for g in grupos if g],
+        },
+    }
+
+
+@router.get("/anuncios")
+async def listar_anuncios(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(_ver)],
+    q: str | None = None,
+    marketplace: str | None = None,
+    grupo: str | None = None,
+    situacao: str | None = None,
+    loja: str | None = None,
+    den: Annotated[str | None, Query(pattern="^(com|sem)$")] = None,
+    propria: Annotated[str, Query(pattern="^(0|1|todas)$")] = "0",
+    ordem: str = "vendas",
+    limite: Annotated[int, Query(ge=1, le=1000)] = 200,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> dict:
+    A = DenunciaAnuncio
+    conds, nden = _filtro_anuncios(q, marketplace, grupo, situacao, loja, den, propria)
+    nprov = (
+        select(func.count())
+        .select_from(DenunciaProva)
+        .where(DenunciaProva.anuncio_id == A.id)
+        .correlate(A)
+        .scalar_subquery()
+    )
+    caso = (
+        select(DenunciaCaso.codigo)
+        .where(DenunciaCaso.anuncio_id == A.id)
+        .correlate(A)
+        .limit(1)
+        .scalar_subquery()
+    )
     total = (await session.execute(select(func.count()).select_from(A).where(*conds))).scalar() or 0
     rows = (
         await session.execute(
@@ -742,31 +786,95 @@ async def listar_anuncios(
                 "caso": cod,
             }
         )
-    # números do topo, sobre o mesmo recorte (sem limite)
-    base = select(A.situacao, func.count()).where(*conds).group_by(A.situacao)
-    por_situacao = {k or "": v for k, v in (await session.execute(base)).all()}
-    com_den = (
-        await session.execute(select(func.count()).select_from(A).where(*conds, nden > 0))
+    return {"total": total, "itens": itens, **await _numeros_e_opcoes(session, conds, nden, total)}
+
+
+_ORDEM_LOJAS = {"vendas", "anuncios", "denuncias", "nome"}
+
+
+@router.get("/anuncios/lojas")
+async def anuncios_por_loja(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(_ver)],
+    q: str | None = None,
+    marketplace: str | None = None,
+    grupo: str | None = None,
+    situacao: str | None = None,
+    den: Annotated[str | None, Query(pattern="^(com|sem)$")] = None,
+    propria: Annotated[str, Query(pattern="^(0|1|todas)$")] = "0",
+    ordem: str = "vendas",
+    limite: Annotated[int, Query(ge=1, le=2000)] = 500,
+) -> dict:
+    """Vinicius, 01/10: "por loja — essa loja quantos anúncios tem, a soma das
+    vendas". Os anúncios do mesmo recorte da lista, somados por marketplace +
+    loja; abrir a loja = GET /anuncios?loja=<shop_id>."""
+    A = DenunciaAnuncio
+    conds, nden = _filtro_anuncios(q, marketplace, grupo, situacao, None, den, propria)
+    dens = (
+        select(DenunciaDenuncia.anuncio_id.label("aid"), func.count().label("n"))
+        .group_by(DenunciaDenuncia.anuncio_id)
+        .subquery()
+    )
+
+    def conta(cond: Any) -> Any:
+        return func.sum(case((cond, 1), else_=0))
+
+    n_den = func.coalesce(func.sum(dens.c.n), 0)
+    vendas = func.coalesce(func.sum(A.vendas), 0)
+    n_anuncios = func.count()
+    ordenar = {
+        "vendas": (vendas.desc(), n_anuncios.desc()),
+        "anuncios": (n_anuncios.desc(), vendas.desc()),
+        "denuncias": (n_den.desc(), vendas.desc()),
+        "nome": (func.max(A.loja),),
+    }[ordem if ordem in _ORDEM_LOJAS else "vendas"]
+    q_lojas = (
+        select(
+            A.marketplace,
+            A.shop_id,
+            func.max(A.loja).label("loja"),
+            n_anuncios.label("anuncios"),
+            conta(A.situacao == "ativo").label("no_ar"),
+            conta(A.situacao == "fora do ar").label("fora_do_ar"),
+            vendas.label("vendas"),
+            conta(A.grupo == "GRUPO 1").label("nosso"),
+            conta(A.grupo == "GRUPO 2").label("diversos"),
+            n_den.label("denuncias"),
+            conta(dens.c.n > 0).label("com_denuncia"),
+            func.max(A.visto_primeiro).label("ultimo_achado"),
+        )
+        .outerjoin(dens, dens.c.aid == A.id)
+        .where(*conds)
+        .group_by(A.marketplace, A.shop_id)
+    )
+    total_lojas = (
+        await session.execute(select(func.count()).select_from(q_lojas.subquery()))
     ).scalar() or 0
-    marketplaces = (
-        await session.execute(select(A.marketplace).distinct().order_by(A.marketplace))
-    ).scalars().all()
-    grupos = (
-        await session.execute(select(A.grupo).distinct().order_by(A.grupo))
-    ).scalars().all()
+    rows = (await session.execute(q_lojas.order_by(*ordenar).limit(limite))).all()
+    itens = [
+        {
+            "marketplace": r.marketplace,
+            "shop_id": r.shop_id,
+            "chave": r.shop_id or SEM_LOJA,
+            "loja": r.loja,
+            "anuncios": r.anuncios,
+            "no_ar": r.no_ar,
+            "fora_do_ar": r.fora_do_ar,
+            "vendas": int(r.vendas or 0),
+            "nosso": r.nosso,
+            "diversos": r.diversos,
+            "outros": r.anuncios - r.nosso - r.diversos,
+            "denuncias": int(r.denuncias or 0),
+            "com_denuncia": r.com_denuncia,
+            "ultimo_achado": r.ultimo_achado,
+        }
+        for r in rows
+    ]
+    total = (await session.execute(select(func.count()).select_from(A).where(*conds))).scalar() or 0
     return {
-        "total": total,
+        "total": total_lojas,
         "itens": itens,
-        "numeros": {
-            "total": total,
-            "ativos": por_situacao.get("ativo", 0),
-            "fora_do_ar": por_situacao.get("fora do ar", 0),
-            "com_denuncia": com_den,
-        },
-        "opcoes": {
-            "marketplaces": [m for m in marketplaces if m],
-            "grupos": [g for g in grupos if g],
-        },
+        **await _numeros_e_opcoes(session, conds, nden, total),
     }
 
 
@@ -833,26 +941,19 @@ def _chave_grupo(d: DenunciaDenuncia) -> tuple:
     return (d.canal, d.protocolo) if d.protocolo else ("_id", d.id)
 
 
-@router.get("/denuncias")
-async def listar_denuncias(
-    session: Annotated[AsyncSession, Depends(get_session)],
-    _u: Annotated[User, Depends(_ver)],
-    canal: str | None = None,
-    situacao: str | None = None,
-    tipo: str | None = None,
-    q: str | None = None,
-    limite: Annotated[int, Query(ge=1, le=2000)] = 500,
-) -> dict:
+async def _denuncias_agrupadas(session: AsyncSession) -> list[dict]:
+    """Todas as denúncias, uma linha por denúncia (mesmo canal + protocolo = uma
+    só), com os anúncios — e a loja de cada um — que ela cobre."""
     D, A = DenunciaDenuncia, DenunciaAnuncio
     rows = (
         await session.execute(
-            select(D, A.loja, A.titulo, A.situacao)
+            select(D, A.loja, A.titulo, A.situacao, A.shop_id, A.marketplace)
             .outerjoin(A, A.id == D.anuncio_id)
             .order_by(D.data.desc().nulls_last(), D.id.desc())
         )
     ).all()
     grupos: OrderedDict[tuple, dict] = OrderedDict()
-    for d, loja, titulo, sit_anuncio in rows:
+    for d, loja, titulo, sit_anuncio, shop_id, mp in rows:
         k = _chave_grupo(d)
         g = grupos.get(k)
         if g is None:
@@ -876,9 +977,15 @@ async def listar_denuncias(
             }
         g["ids"].append(d.id)
         g["anuncios"].append(
-            {"id": d.anuncio_id, "loja": loja, "titulo": titulo, "situacao": sit_anuncio}
+            {"id": d.anuncio_id, "loja": loja, "titulo": titulo, "situacao": sit_anuncio,
+             "shop_id": shop_id, "marketplace": mp}
         )
-    todos = list(grupos.values())
+    return list(grupos.values())
+
+
+def _resumo_e_filtro(
+    todos: list[dict], canal: str | None, situacao: str | None, tipo: str | None, q: str | None,
+) -> tuple[dict, list[dict]]:
     resumo: dict[str, dict[str, int]] = {}
     for g in todos:
         r = resumo.setdefault(g["canal"] or "—", {"total": 0})
@@ -902,12 +1009,101 @@ async def listar_denuncias(
                 for x in g["anuncios"]
             )
         ]
-    situacoes = sorted({g["situacao"] for g in todos if g["situacao"]})
+    return resumo, filtrados
+
+
+def _opcoes_denuncias(todos: list[dict], resumo: dict) -> dict:
+    return {
+        "canais": sorted(resumo.keys()),
+        "situacoes": sorted({g["situacao"] for g in todos if g["situacao"]}),
+    }
+
+
+@router.get("/denuncias")
+async def listar_denuncias(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(_ver)],
+    canal: str | None = None,
+    situacao: str | None = None,
+    tipo: str | None = None,
+    q: str | None = None,
+    loja: str | None = None,
+    limite: Annotated[int, Query(ge=1, le=2000)] = 500,
+) -> dict:
+    todos = await _denuncias_agrupadas(session)
+    resumo, filtrados = _resumo_e_filtro(todos, canal, situacao, tipo, q)
+    if loja:   # abrir a loja na visão "por loja"
+        alvo = None if loja == SEM_LOJA else loja
+        filtrados = [g for g in filtrados if any(x["shop_id"] == alvo for x in g["anuncios"])]
     return {
         "total": len(filtrados),
         "itens": filtrados[:limite],
         "resumo": resumo,
-        "opcoes": {"canais": sorted(resumo.keys()), "situacoes": situacoes},
+        "opcoes": _opcoes_denuncias(todos, resumo),
+    }
+
+
+# resultado de uma denúncia → coluna da visão por loja
+_RESOLVEU = ("Anúncio removido", "Anúncio ajustado", "Loja suspensa")
+
+
+def _desfecho(g: dict) -> str:
+    if (g.get("resultado") or "") in _RESOLVEU:
+        return "removidas"
+    if "improcedente" in f"{g.get('resultado') or ''} {g.get('situacao') or ''}".lower():
+        return "recusadas"
+    return "aguardando"
+
+
+@router.get("/denuncias/lojas")
+async def denuncias_por_loja(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(_ver)],
+    canal: str | None = None,
+    situacao: str | None = None,
+    tipo: str | None = None,
+    q: str | None = None,
+    limite: Annotated[int, Query(ge=1, le=2000)] = 500,
+) -> dict:
+    """Vinicius, 01/10: as denúncias somadas por loja — quantas, o resultado,
+    por qual canal e a última. Abrir a loja = GET /denuncias?loja=<shop_id>."""
+    todos = await _denuncias_agrupadas(session)
+    resumo, filtrados = _resumo_e_filtro(todos, canal, situacao, tipo, q)
+    lojas: dict[tuple, dict] = {}
+    for g in filtrados:
+        quando = f"{g.get('data') or ''} {g.get('hora') or ''}".strip()
+        for chave_loja in {(x["marketplace"], x["shop_id"]) for x in g["anuncios"]}:
+            mp, shop = chave_loja
+            lj = lojas.get(chave_loja)
+            if lj is None:
+                lj = lojas[chave_loja] = {
+                    "marketplace": mp, "shop_id": shop, "chave": shop or SEM_LOJA, "loja": None,
+                    "denuncias": 0, "removidas": 0, "recusadas": 0, "aguardando": 0,
+                    "canais": {}, "_anuncios": set(), "_no_ar": set(), "ultima": "",
+                }
+            lj["denuncias"] += 1
+            lj[_desfecho(g)] += 1
+            lj["canais"][g["canal"] or "—"] = lj["canais"].get(g["canal"] or "—", 0) + 1
+            for x in g["anuncios"]:
+                if (x["marketplace"], x["shop_id"]) != chave_loja:
+                    continue
+                lj["loja"] = lj["loja"] or x["loja"]
+                lj["_anuncios"].add(x["id"])
+                if x["situacao"] == "ativo":
+                    lj["_no_ar"].add(x["id"])
+            lj["ultima"] = max(lj["ultima"], quando)
+    itens = []
+    for lj in lojas.values():
+        lj["anuncios"] = len(lj.pop("_anuncios"))
+        lj["anuncios_no_ar"] = len(lj.pop("_no_ar"))
+        lj["ultima"] = lj["ultima"] or None
+        itens.append(lj)
+    itens.sort(key=lambda x: (-x["denuncias"], x["loja"] or ""))
+    return {
+        "total": len(itens),
+        "itens": itens[:limite],
+        "resumo": resumo,
+        "opcoes": _opcoes_denuncias(todos, resumo),
     }
 
 

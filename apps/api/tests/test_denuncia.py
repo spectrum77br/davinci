@@ -537,3 +537,74 @@ async def test_robo_tratado_some_e_resolve_no_mini(client, make_user, auth_as):
     # só o que tem chave própria no robô vira comando pro mini
     cmds = (await client.get("/api/denuncia/sync/robo/comandos", headers=H)).json()["comandos"]
     assert [(c["tipo"], c["dados"]) for c in cmds] == [("resolver", {"chave": "codigo_sei"})]
+
+
+
+# ───────────────────────────────── visão por loja (01/10/2026)
+
+
+async def test_anuncios_por_loja_soma_vendas_e_abre_a_loja(client, make_user, auth_as):
+    await _carga(client)
+    r = await client.post(
+        "/api/denuncia/sync/anuncios",
+        json={"linhas": [
+            _anuncio("B1", shop_id="222", loja="loja_y", vendas=300, grupo="GRUPO 2"),
+            _anuncio("B2", shop_id="222", loja="loja_y", vendas=700, grupo="GRUPO 1",
+                     situacao="fora do ar"),
+            _anuncio("C1", shop_id=None, loja="sem id", vendas=1, grupo="GRUPO 2"),
+        ]},
+        headers=H,
+    )
+    assert r.status_code == 200, r.text
+    auth_as(await make_user(permissions={"denuncia": {"view": True}}))
+    j = (await client.get("/api/denuncia/anuncios/lojas")).json()
+    lojas = {x["loja"]: x for x in j["itens"]}
+    # loja_x: A1 (50) + A2 (5); A3 descartado e A4 própria ficam fora, como na lista
+    assert lojas["loja_x"]["anuncios"] == 2 and lojas["loja_x"]["vendas"] == 55
+    assert lojas["loja_x"]["denuncias"] == 3 and lojas["loja_x"]["com_denuncia"] == 2
+    y = lojas["loja_y"]
+    assert (y["anuncios"], y["vendas"], y["nosso"], y["diversos"], y["no_ar"], y["fora_do_ar"]) == (
+        2, 1000, 1, 1, 1, 1)
+    assert [x["loja"] for x in j["itens"]][:2] == ["loja_y", "loja_x"]   # mais vendas primeiro
+    assert lojas["sem id"]["chave"] == "_sem"
+    assert j["numeros"]["total"] == 5 and j["total"] == 3
+    # abrir a loja: a lista de sempre filtrada por ela
+    def ids(r):
+        return sorted(x["id"] for x in r.json()["itens"])
+    assert ids(await client.get("/api/denuncia/anuncios", params={"loja": "222"})) == ["B1", "B2"]
+    assert ids(await client.get("/api/denuncia/anuncios", params={"loja": "_sem"})) == ["C1"]
+    # os filtros de cima valem: só o Nosso
+    j = (await client.get("/api/denuncia/anuncios/lojas", params={"grupo": "GRUPO 1"})).json()
+    assert {x["loja"]: x["anuncios"] for x in j["itens"]} == {"loja_x": 2, "loja_y": 1}
+
+
+async def test_denuncias_por_loja(client, make_user, auth_as):
+    await _carga(client)
+    await client.post(
+        "/api/denuncia/sync/denuncias",
+        json={"linhas": [
+            {"id": 4, "anuncio_id": "A2", "canal": "Mercado Livre", "protocolo": None,
+             "data": "2026-09-30", "situacao": "Improcedente", "resultado": "Improcedente",
+             "tipo": "normal"},
+            {"id": 5, "anuncio_id": "A1", "canal": "Mercado Livre", "protocolo": None,
+             "data": "2026-10-01", "situacao": "Procedente", "resultado": "Anúncio removido",
+             "tipo": "normal"},
+        ]},
+        headers=H,
+    )
+    auth_as(await make_user(permissions={"denuncia": {"view": True}}))
+    j = (await client.get("/api/denuncia/denuncias/lojas")).json()
+    assert j["total"] == 1
+    x = j["itens"][0]
+    # P1 (Shopee, cobre A1 e A2) conta 1; Anatel SEI 1; ML 2
+    assert (x["loja"], x["denuncias"], x["removidas"], x["recusadas"], x["aguardando"]) == (
+        "loja_x", 4, 1, 1, 2)
+    assert x["canais"] == {"Shopee": 1, "Anatel SEI": 1, "Mercado Livre": 2}
+    assert x["anuncios"] == 2 and x["anuncios_no_ar"] == 1 and x["ultima"].startswith("2026-10-01")
+    j = (await client.get("/api/denuncia/denuncias/lojas",
+                          params={"canal": "Mercado Livre"})).json()
+    assert j["itens"][0]["denuncias"] == 2
+    j = (await client.get("/api/denuncia/denuncias", params={"loja": "111"})).json()
+    assert j["total"] == 4
+    r = await client.get("/api/denuncia/denuncias", params={"loja": "999"})
+    assert r.json()["total"] == 0

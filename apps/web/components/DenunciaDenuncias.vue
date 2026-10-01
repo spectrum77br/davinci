@@ -3,7 +3,11 @@
 // Cada denúncia feita (marketplace, Anatel, Anatel SEI…). Mesma regra do
 // sistema do mini: o mesmo canal + protocolo cobrindo vários anúncios é UMA
 // linha. Prazo vencido sem resposta fica em vermelho. Cópia só leitura.
+// 01/10 (Vinicius: "juntando por loja… por loja sempre na frente"): duas visões
+// com os mesmos filtros — "Por loja" (padrão; clicar abre as denúncias da loja)
+// e "Por denúncia".
 import { computed, onMounted, ref } from 'vue'
+import { ChevronDown, ChevronRight } from 'lucide-vue-next'
 import {
   type Prova, dataBr, numero, pillResultado, pillSituacaoAnuncio, pillSituacaoDenuncia, prazoVencido,
 } from '~/lib/denuncia'
@@ -26,6 +30,20 @@ type Grupo = {
   refazer: number | null
   anuncios: { id: string | null; loja: string | null; titulo: string | null; situacao: string | null }[]
 }
+type Loja = {
+  marketplace: string | null
+  shop_id: string | null
+  chave: string
+  loja: string | null
+  denuncias: number
+  removidas: number
+  recusadas: number
+  aguardando: number
+  canais: Record<string, number>
+  anuncios: number
+  anuncios_no_ar: number
+  ultima: string | null
+}
 type Resposta = {
   total: number
   itens: Grupo[]
@@ -40,6 +58,11 @@ type Detalhe = {
 }
 
 const { api } = useApi()
+const visao = ref<'loja' | 'denuncia'>('loja')
+const lojas = ref<Loja[]>([])
+const lojaAberta = ref<string | null>(null)
+const denunciasDaLoja = ref<Grupo[]>([])
+const carregandoLoja = ref(false)
 const itens = ref<Grupo[]>([])
 const total = ref(0)
 const resumo = ref<Resposta['resumo']>({})
@@ -68,20 +91,37 @@ function dicaCanal(r: Record<string, number>): string {
     .join(' · ')
 }
 
+function filtros(): URLSearchParams {
+  const qs = new URLSearchParams()
+  if (canal.value) qs.set('canal', canal.value)
+  if (situacao.value) qs.set('situacao', situacao.value)
+  if (tipo.value) qs.set('tipo', tipo.value)
+  if (q.value.trim()) qs.set('q', q.value.trim())
+  return qs
+}
+
+function chaveLoja(l: Loja): string {
+  return `${l.marketplace || ''}|${l.chave}`
+}
+
 async function carregar() {
   carregando.value = true
   erro.value = null
   try {
-    const qs = new URLSearchParams()
-    if (canal.value) qs.set('canal', canal.value)
-    if (situacao.value) qs.set('situacao', situacao.value)
-    if (tipo.value) qs.set('tipo', tipo.value)
-    if (q.value.trim()) qs.set('q', q.value.trim())
-    const r = await api<Resposta>(`/api/denuncia/denuncias?${qs}`)
-    itens.value = r.itens
-    total.value = r.total
-    resumo.value = r.resumo
-    opcoes.value = r.opcoes
+    if (visao.value === 'loja') {
+      const r = await api<Omit<Resposta, 'itens'> & { itens: Loja[] }>(`/api/denuncia/denuncias/lojas?${filtros()}`)
+      lojas.value = r.itens
+      total.value = r.total
+      resumo.value = r.resumo
+      opcoes.value = r.opcoes
+      if (lojaAberta.value && !r.itens.some((l) => chaveLoja(l) === lojaAberta.value)) lojaAberta.value = null
+    } else {
+      const r = await api<Resposta>(`/api/denuncia/denuncias?${filtros()}`)
+      itens.value = r.itens
+      total.value = r.total
+      resumo.value = r.resumo
+      opcoes.value = r.opcoes
+    }
   } catch (e: any) {
     erro.value = e?.data?.detail?.code || e?.message || 'erro'
   } finally {
@@ -89,9 +129,41 @@ async function carregar() {
   }
 }
 
+async function abrirLoja(l: Loja) {
+  const k = chaveLoja(l)
+  if (lojaAberta.value === k) {
+    lojaAberta.value = null
+    return
+  }
+  lojaAberta.value = k
+  denunciasDaLoja.value = []
+  carregandoLoja.value = true
+  try {
+    const qs = filtros()
+    qs.set('loja', l.chave)
+    const r = await api<Resposta>(`/api/denuncia/denuncias?${qs}`)
+    if (lojaAberta.value === k) denunciasDaLoja.value = r.itens
+  } catch (e: any) {
+    erro.value = e?.data?.detail?.code || e?.message || 'erro'
+  } finally {
+    carregandoLoja.value = false
+  }
+}
+
+function trocarVisao(v: 'loja' | 'denuncia') {
+  if (visao.value === v) return
+  visao.value = v
+  void carregar()
+}
+
+function canaisTxt(c: Record<string, number>): string {
+  return Object.entries(c).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k} ${v}`).join(' · ')
+}
+
 
 function porCanal(c: string) {
   canal.value = canal.value === c ? '' : c
+  lojaAberta.value = null
   void carregar()
 }
 
@@ -137,8 +209,21 @@ defineExpose({ carregar })
 
     <div v-if="erro" class="rounded-md border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700">{{ erro }}</div>
 
+    <div class="flex items-center gap-1 border-b border-border">
+      <button
+        v-for="v in [{ k: 'loja', t: 'Por loja' }, { k: 'denuncia', t: 'Por denúncia' }]"
+        :key="v.k"
+        type="button"
+        class="-mb-px inline-flex h-9 items-center border-b-2 px-3 text-sm font-medium transition-colors"
+        :class="visao === v.k ? 'border-primary text-foreground' : 'border-transparent text-muted-foreground hover:text-foreground'"
+        @click="trocarVisao(v.k as 'loja' | 'denuncia')"
+      >
+        {{ v.t }}
+      </button>
+    </div>
+
     <div class="flex flex-wrap gap-2 items-center">
-      <Input v-model="q" placeholder="protocolo, anúncio ou loja…" class="w-60" @keyup.enter="carregar" />
+      <Input v-model="q" placeholder="protocolo, anúncio ou loja…" class="w-60" @keyup.enter="lojaAberta = null; carregar()" />
       <select v-model="canal" class="h-9 rounded-md border bg-background px-2 text-sm" @change="carregar">
         <option value="">todos canais</option>
         <option v-for="c in opcoes.canais" :key="c" :value="c">{{ c }}</option>
@@ -154,7 +239,80 @@ defineExpose({ carregar })
       </select>
     </div>
 
-    <div class="table-card overflow-x-auto">
+    <!-- ══ Por loja ══ -->
+    <div v-if="visao === 'loja'" class="table-card overflow-x-auto">
+      <table class="w-full">
+        <thead>
+          <tr>
+            <th>Loja</th>
+            <th>Marketplace</th>
+            <th class="text-right">Denúncias</th>
+            <th>Resultado</th>
+            <th>Canais</th>
+            <th class="text-right">Anúncios</th>
+            <th>Última</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-if="carregando && lojas.length === 0">
+            <td colspan="7" class="text-center text-muted-foreground py-6">carregando…</td>
+          </tr>
+          <tr v-else-if="lojas.length === 0">
+            <td colspan="7" class="text-center text-muted-foreground py-6">nenhuma loja neste filtro</td>
+          </tr>
+          <template v-for="l in lojas" :key="chaveLoja(l)">
+            <tr class="cursor-pointer" @click="abrirLoja(l)">
+              <td class="max-w-[240px]">
+                <div class="flex items-center gap-1 min-w-0">
+                  <ChevronDown v-if="lojaAberta === chaveLoja(l)" class="size-3.5 shrink-0 text-muted-foreground" />
+                  <ChevronRight v-else class="size-3.5 shrink-0 text-muted-foreground" />
+                  <span class="truncate text-sm font-medium" :title="l.loja || ''">{{ l.loja || l.shop_id || 'sem loja' }}</span>
+                </div>
+                <div v-if="l.shop_id" class="pl-[18px] font-mono text-[11px] text-muted-foreground">{{ l.shop_id }}</div>
+              </td>
+              <td class="text-xs whitespace-nowrap">{{ l.marketplace || '—' }}</td>
+              <td class="text-right text-sm font-medium tabular-nums">{{ numero(l.denuncias) }}</td>
+              <td class="whitespace-nowrap">
+                <span v-if="l.removidas" class="pill-success mr-1">{{ l.removidas }} removido{{ l.removidas > 1 ? 's' : '' }}</span>
+                <span v-if="l.recusadas" class="pill-danger mr-1">{{ l.recusadas }} recusada{{ l.recusadas > 1 ? 's' : '' }}</span>
+                <span v-if="l.aguardando" class="pill-muted">{{ l.aguardando }} aguardando</span>
+              </td>
+              <td class="text-xs max-w-[220px] truncate" :title="canaisTxt(l.canais)">{{ canaisTxt(l.canais) }}</td>
+              <td class="text-right text-xs tabular-nums whitespace-nowrap">
+                {{ numero(l.anuncios) }}
+                <div class="text-[11px] text-muted-foreground">{{ numero(l.anuncios_no_ar) }} no ar</div>
+              </td>
+              <td class="text-xs tabular-nums whitespace-nowrap">{{ dataBr(l.ultima, false) }}</td>
+            </tr>
+            <tr v-if="lojaAberta === chaveLoja(l)">
+              <td colspan="7" class="bg-muted/30 p-0">
+                <div v-if="carregandoLoja" class="px-4 py-3 text-xs text-muted-foreground">carregando as denúncias da loja…</div>
+                <table v-else class="w-full">
+                  <tbody>
+                    <tr v-for="g in denunciasDaLoja" :key="g.id" class="cursor-pointer" @click="abrir(g)">
+                      <td class="pl-8 text-xs tabular-nums whitespace-nowrap">{{ dataBr(g.data, false) }} <span class="text-muted-foreground">{{ g.hora || '' }}</span></td>
+                      <td class="text-xs whitespace-nowrap">{{ g.canal }}<span v-if="g.tipo && g.tipo !== 'normal'" class="text-muted-foreground"> · {{ g.tipo }}</span></td>
+                      <td class="font-mono text-xs">{{ g.protocolo || '—' }}</td>
+                      <td class="text-xs max-w-[220px] truncate" :title="g.anuncios.map((x) => x.id).join(', ')">
+                        {{ g.anuncios.length === 1 ? g.anuncios[0].id : `${g.anuncios.length} anúncios` }}
+                      </td>
+                      <td class="whitespace-nowrap"><span :class="pillSituacaoDenuncia(g.situacao)">{{ g.situacao || '—' }}</span></td>
+                      <td><span v-if="g.resultado" :class="pillResultado(g.resultado)">{{ g.resultado }}</span></td>
+                    </tr>
+                    <tr v-if="!denunciasDaLoja.length">
+                      <td class="px-4 py-3 text-xs text-muted-foreground">nenhuma denúncia desta loja neste filtro</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </td>
+            </tr>
+          </template>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- ══ Por denúncia ══ -->
+    <div v-else class="table-card overflow-x-auto">
       <table class="w-full">
         <thead>
           <tr>
@@ -204,7 +362,8 @@ defineExpose({ carregar })
         </tbody>
       </table>
     </div>
-    <div class="text-sm text-muted-foreground">{{ numero(total) }} denúncias<span v-if="total > itens.length"> (mostrando as {{ itens.length }} mais recentes)</span></div>
+    <div v-if="visao === 'loja'" class="text-sm text-muted-foreground">{{ numero(total) }} lojas</div>
+    <div v-else class="text-sm text-muted-foreground">{{ numero(total) }} denúncias<span v-if="total > itens.length"> (mostrando as {{ itens.length }} mais recentes)</span></div>
 
     <DenunciaGaveta
       v-model:open="gavetaAberta"
