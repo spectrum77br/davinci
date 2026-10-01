@@ -1,4 +1,4 @@
-"""As migrations 0346+0347 criam EXATAMENTE o que o model declara — e o downgrade desfaz.
+"""As migrations 0346+0347+0353 criam EXATAMENTE o que o model declara — e o downgrade desfaz.
 
 O conftest monta o schema de teste pelo `create_all` do model, nunca pela
 migration. Sem este teste, uma coluna esquecida na 0346 (ou um índice parcial
@@ -10,6 +10,12 @@ FK com ON DELETE, UNIQUE) e índices (inclusive os parciais).
 A 0347 (30/09/2026, lojas do robô do Mac mini: Temu e AliExpress) mexe nas
 mesmas tabelas: roda em cima da 0346, e o catálogo que se compara com o model
 é o das duas juntas.
+
+A 0353 (01/10/2026, etiqueta = status atual e reclamações da plataforma) põe
+as colunas da etiqueta na conversa e cria `atendimento_etiquetas_historico` e
+`atendimento_reclamacoes`. Roda em cima das duas (as 0348–0352 do meio são da
+denúncia e não tocam em `atendimento_*`), e o downgrade DELA SÓ tem de voltar
+o catálogo exatamente ao que era depois da 0347.
 """
 
 # ruff: noqa: S608
@@ -29,6 +35,7 @@ from app.models import Base
 _VERSOES = Path(__file__).resolve().parent.parent / "alembic" / "versions"
 _MIGRATION = _VERSOES / "0346_atendimento.py"
 _MIGRATION_ROBO = _VERSOES / "0347_atendimento_robo.py"
+_MIGRATION_ETIQUETAS = _VERSOES / "0353_atendimento_etiquetas.py"
 TABELAS = sorted(t.name for t in Base.metadata.sorted_tables if t.name.startswith("atendimento_"))
 
 
@@ -107,13 +114,18 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
     robo = _carregar_migration(_MIGRATION_ROBO)
     assert robo.revision == "0347_atendimento_robo"
     assert robo.down_revision == "0346_atendimento"
+    etiq = _carregar_migration(_MIGRATION_ETIQUETAS)
+    assert etiq.revision == "0353_atendimento_etiquetas"
+    assert etiq.down_revision == "0352_nf_command_urgente"
     # 7 da primeira parte + 3 da parte 2 (categorias e os índices do cartão
-    # "Cliente").
-    assert len(TABELAS) == 10
+    # "Cliente") + 2 da 0353 (histórico da etiqueta e reclamações).
+    assert len(TABELAS) == 12
     assert {
         "atendimento_categorias",
         "atendimento_pedidos_comprador",
         "atendimento_avaliacoes_loja",
+        "atendimento_etiquetas_historico",
+        "atendimento_reclamacoes",
     } <= set(TABELAS)
 
     await db.execute(text(f'DROP SCHEMA IF EXISTS "{rascunho}" CASCADE'))
@@ -121,21 +133,30 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
     # Só o que as FKs da 0346 referenciam.
     await db.execute(text(f'CREATE TABLE "{rascunho}".users (id uuid PRIMARY KEY)'))
     await db.execute(text(f'CREATE TABLE "{rascunho}".integrations (id uuid PRIMARY KEY)'))
+    # A 0353 põe índice em `bling_orders.numeroloja` (o elo conversa → pedido).
+    await db.execute(
+        text(f'CREATE TABLE "{rascunho}".bling_orders (id uuid PRIMARY KEY, numeroloja text)')
+    )
     await db.commit()
 
-    def _rodar(conn, passo: str) -> None:
+    def _rodar(conn, passo: str, migrations) -> None:
         ctx = MigrationContext.configure(conn, opts={"target_metadata": Base.metadata})
-        # Na ordem de subida; a descida desfaz ao contrário (0347 antes da 0346).
-        ordem = (mod, robo) if passo == "upgrade" else (robo, mod)
+        # Quem chama passa na ordem certa: a subida 0346 → 0347 → 0353, a
+        # descida ao contrário.
         with Operations.context(ctx):
-            for m in ordem:
+            for m in migrations:
                 getattr(m, passo)()
 
     mod.SCHEMA = rascunho
     robo.SCHEMA = rascunho
+    etiq.SCHEMA = rascunho
     try:
         conn = await db.connection()
-        await conn.run_sync(_rodar, "upgrade")
+        await conn.run_sync(_rodar, "upgrade", (mod, robo))
+        await db.commit()
+        antes_da_0353 = await _catalogo(db, rascunho, rascunho)
+        conn = await db.connection()
+        await conn.run_sync(_rodar, "upgrade", (etiq,))
         await db.commit()
 
         da_migration = await _catalogo(db, rascunho, rascunho)
@@ -160,6 +181,14 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
             # 0347: o canal do robô (perfil do AdsPower, sem integração).
             "uq_atendimento_canais_robo_perfil_id",
             "ck_atendimento_canais_integracao_ou_robo",
+            # 0353: histórico da etiqueta (FK com nome à mão) e reclamações.
+            "pk_atendimento_etiquetas_historico",
+            "fk_atendimento_etiquetas_historico_conversa",
+            "fk_atendimento_etiquetas_historico_por_user_id_users",
+            "pk_atendimento_reclamacoes",
+            "uq_atendimento_reclamacoes_plataforma_externo_id",
+            "fk_atendimento_reclamacoes_conversa_id_atendimento_conversas",
+            "fk_atendimento_reclamacoes_integration_id_integrations",
         } <= nomes
         assert da_migration["colunas"] == do_model["colunas"]
         assert da_migration["constraints"] == do_model["constraints"]
@@ -185,6 +214,13 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
         assert "(integration_id, pedido)" in defs[
             "ix_atendimento_avaliacoes_loja_integration_id_pedido"
         ]
+        # 0353: a etiqueta filtra e conta; a linha do tempo lê por conversa
+        # em ordem; a reclamação vencendo, por (status, prazo).
+        assert "(etiqueta)" in defs["ix_atendimento_conversas_etiqueta"]
+        assert "(conversa_id, em)" in defs["ix_atendimento_etiquetas_historico_conversa_id_em"]
+        assert "(status, prazo_em)" in defs["ix_atendimento_reclamacoes_status_prazo_em"]
+        assert "(conversa_id)" in defs["ix_atendimento_reclamacoes_conversa_id"]
+        assert "(pedido_marketplace)" in defs["ix_atendimento_reclamacoes_pedido_marketplace"]
         # As colunas novas da regra (P7), com o default que deixa o manual
         # antigo como estava: tipo `categoria` sem categoria = geral.
         cols = {(c[0], c[1]): c for c in da_migration["colunas"]}
@@ -194,9 +230,37 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
         assert cols[("atendimento_regras", "prioridade")][5] == "100"
         assert cols[("atendimento_regras", "categoria")][4] == "YES"
         assert cols[("atendimento_modelos", "categoria")][4] == "YES"
+        # 0353: as conversas que já existem entram sem etiqueta (o motor
+        # calcula), sem troca à mão e com a lista de secundárias vazia.
+        assert cols[("atendimento_conversas", "etiqueta")][4] == "YES"
+        assert cols[("atendimento_conversas", "etiqueta_manual")][4:] == ("NO", "false")
+        assert cols[("atendimento_conversas", "etiquetas_secundarias")][4:] == (
+            "NO",
+            "'[]'::jsonb",
+        )
+        assert cols[("atendimento_reclamacoes", "encerrada_em")][4] == "YES"
+
+        # O índice do elo conversa → pedido, igual ao do model.
+        indice_bling = text(
+            "SELECT indexdef FROM pg_indexes WHERE schemaname = :s"
+            " AND indexname = 'ix_bling_orders_numeroloja'"
+        )
+        assert "(numeroloja)" in (
+            await db.execute(indice_bling, {"s": rascunho})
+        ).scalar_one()
+        assert "(numeroloja)" in (
+            await db.execute(indice_bling, {"s": schema_model})
+        ).scalar_one()
+
+        # O downgrade da 0353 volta EXATAMENTE ao catálogo de depois da 0347.
+        conn = await db.connection()
+        await conn.run_sync(_rodar, "downgrade", (etiq,))
+        await db.commit()
+        assert await _catalogo(db, rascunho, rascunho) == antes_da_0353
+        assert (await db.execute(indice_bling, {"s": rascunho})).first() is None
 
         conn = await db.connection()
-        await conn.run_sync(_rodar, "downgrade")
+        await conn.run_sync(_rodar, "downgrade", (robo, mod))
         await db.commit()
         depois = await _catalogo(db, rascunho, rascunho)
         assert depois["tabelas"] == []

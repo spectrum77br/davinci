@@ -999,6 +999,53 @@ class TikTokClient:
             f"/customer_service/202309/conversations/{conversation_id}/messages", corpo
         )
 
+    async def cs_upload_image(
+        self, filename: str, content: bytes, mime: str = "image/jpeg"
+    ) -> dict:
+        """Sobe a imagem que vai numa mensagem do chat (foto na resposta, 01/10/2026).
+
+            POST /customer_service/202309/images/upload   (multipart, campo `data`)
+
+        Devolve o `data` cru: `{url, width, height}` — o que a mensagem
+        `IMAGE` leva. Não fala com o comprador (só hospeda a imagem). Levanta
+        com o código da API. Formato pela documentação oficial (não medido
+        numa loja: as lojas ainda estão sem o escopo de envio) [confirmar]."""
+        resp = await self._post_multipart(
+            "/customer_service/202309/images/upload",
+            files={"data": (filename, content, mime)},
+        )
+        if resp.get("code") not in (0, None):
+            raise RuntimeError(
+                f"tiktok_cs_upload code={resp.get('code')} msg={str(resp.get('message'))[:200]}"
+            )
+        d = resp.get("data") or {}
+        if not d.get("url"):
+            raise RuntimeError("tiktok_cs_upload sem url")
+        return d
+
+    async def cs_send_image(
+        self, conversation_id: str, url: str, width: Any = None, height: Any = None
+    ) -> dict:
+        """Manda UMA imagem na conversa (a `url` do `cs_upload_image`).
+
+            POST /customer_service/202309/conversations/{conversation_id}/messages
+            body {"type": "IMAGE", "content": "{\\"url\\": ..., \\"width\\": .., \\"height\\": ..}"}
+
+        Como no texto, o `content` é JSON dentro do JSON. Devolve o corpo cru;
+        sucesso traz `data.message_id`."""
+
+        def _inteiro(v: Any) -> int:
+            try:
+                return int(v)
+            except (TypeError, ValueError):
+                return 0
+
+        conteudo = {"url": url, "width": _inteiro(width), "height": _inteiro(height)}
+        corpo = {"type": "IMAGE", "content": json.dumps(conteudo, ensure_ascii=False)}
+        return await self._post(
+            f"/customer_service/202309/conversations/{conversation_id}/messages", corpo
+        )
+
     async def update_stock(
         self,
         link: "ProductLink",

@@ -183,6 +183,7 @@ from app.services.atendimento.constantes import (
     ORIGEM_EXTERNO,
     ORIGEM_HUMANO,
     ORIGEM_IA,
+    ORIGEM_NOTA,
     PLATAFORMAS_CAIXA,
     PLATAFORMAS_SEM_AUTO,
     PRIORIDADE_REGRA_PADRAO,
@@ -1048,7 +1049,8 @@ async def _mensagens_recentes(
     """As últimas trocas, da mais antiga para a mais nova.
 
     Resposta da loja que FALHOU não entra: não chegou ao cliente, e o
-    modelo leria como se a loja já tivesse dito aquilo.
+    modelo leria como se a loja já tivesse dito aquilo. A NOTA INTERNA
+    também não (só a equipe vê; nunca vira fala na transcrição).
     """
     linhas = (
         (
@@ -1057,6 +1059,7 @@ async def _mensagens_recentes(
                 .where(
                     AtendimentoMensagem.conversa_id == conversa.id,
                     AtendimentoMensagem.status != MSG_FALHOU,
+                    AtendimentoMensagem.origem != ORIGEM_NOTA,
                 )
                 .order_by(_momento_col().desc(), AtendimentoMensagem.created_at.desc())
                 .limit(MAX_TROCAS)
@@ -2004,6 +2007,13 @@ def valores_das_lacunas(conversa: AtendimentoConversa, ctx: dict) -> dict[str, s
     }
 
 
+def _reclamacoes_abertas(ctx: dict) -> int:
+    """Quantas reclamações/devoluções da plataforma estão abertas (`ctx["reclamacoes"]`)."""
+    return sum(
+        1 for r in ctx.get("reclamacoes") or [] if isinstance(r, dict) and r.get("aberta")
+    )
+
+
 def _fatos_para_o_modelo(
     conversa: AtendimentoConversa, ctx: dict, valores: dict[str, str | None]
 ) -> dict:
@@ -2031,6 +2041,8 @@ def _fatos_para_o_modelo(
         else {"status": log.get("status"), "entregue": bool(log.get("entregue_em"))},
         "chamados_abertos": len(ctx.get("chamados") or []),
         "devolucoes": len(ctx.get("devolucoes") or []),
+        # Reclamação/mediação/devolução aberta NA PLATAFORMA (contexto.py).
+        "reclamacoes_abertas": _reclamacoes_abertas(ctx),
         "lacunas_disponiveis": ["{" + k + "}" for k, v in valores.items() if v],
         "lacunas_sem_dado": ["{" + k + "}" for k, v in valores.items() if not v],
     }
@@ -3198,6 +3210,8 @@ async def _gerar(
         motivos.append("pedido com chamado ou devolução")
     if reclamacao_aberta(conversa.dados):
         motivos.append("reclamação/mediação aberta no ML")
+    elif _reclamacoes_abertas(ctx):
+        motivos.append("reclamação ou devolução aberta na plataforma")
     if conversa.pedido_marketplace and ctx.get("pedido") is None:
         motivos.append("pedido não encontrado no sistema")
     elif categoria in _CATEGORIAS_DE_PEDIDO and ctx.get("pedido") is None:

@@ -19,7 +19,17 @@ do Bling e o resto:
      "devolucoes": [{"id", "status"}],
      "nota_fiscal": {"numero", "emitida_em"} | None,
      "outras_perguntas": [{"id", "texto", "situacao", "status", "respondida",
-                           "em", "data"}]}
+                           "em", "data"}],
+     "reclamacoes": [{"id", "plataforma", "numero", "tipo", "tipo_rotulo",
+                      "status", "aberta", "prazo_em", "acao_pendente",
+                      "encerrada_em"}]}
+
+`reclamacoes` = as reclamações, mediações e devoluções DA PLATAFORMA
+(`atendimento_reclamacoes`, a mesma ligação do cartão e da etiqueta), as
+abertas primeiro (prazo mais curto antes). Era a lacuna do 297840: com a
+mediação 5582543195 aberta no ML, o painel e a IA diziam "Devolução:
+nenhuma" porque só liam a aba Devoluções. Só o que a plataforma diz (tipo,
+status, prazo, ação esperada da loja) — nenhum texto do comprador.
 
 `outras_perguntas` é só da PERGUNTA do ML (uma conversa por pergunta): as
 últimas 5 perguntas do MESMO comprador no MESMO anúncio, lidas do nosso
@@ -70,6 +80,7 @@ MAX_ITENS = 20
 MAX_CHAMADOS = 10
 MAX_DEVOLUCOES = 5
 MAX_OUTRAS_PERGUNTAS = 5
+MAX_RECLAMACOES = 5
 # Uma linha por pergunta no painel.
 MAX_CHARS_PERGUNTA = 140
 
@@ -106,6 +117,7 @@ def vazio() -> dict:
         "devolucoes": [],
         "nota_fiscal": None,
         "outras_perguntas": [],
+        "reclamacoes": [],
     }
 
 
@@ -341,6 +353,37 @@ async def _nota_fiscal(
     return None
 
 
+# ── Reclamações da plataforma ─────────────────────────────────────────────
+
+
+async def _reclamacoes(session: AsyncSession, conversa: AtendimentoConversa) -> list[dict]:
+    """As reclamações/mediações/devoluções da plataforma ligadas à conversa (ver o topo)."""
+    # Import tardio: `reclamacoes` → `etiqueta_fatos` → este módulo.
+    from app.services.atendimento import reclamacoes as reclamacoes_svc
+
+    linhas = await reclamacoes_svc.reclamacoes_da_conversa(
+        session, conversa, limite=MAX_RECLAMACOES
+    )
+    saida = []
+    for r in linhas:
+        tela = reclamacoes_svc.para_tela(r)
+        saida.append(
+            {
+                "id": str(r.id),
+                "plataforma": tela["plataforma_nome"],
+                "numero": tela["numero"],
+                "tipo": tela["tipo"],
+                "tipo_rotulo": tela["tipo_rotulo"],
+                "status": tela["status_rotulo"],
+                "aberta": tela["aberta"],
+                "prazo_em": _iso(tela["prazo_em"]),
+                "acao_pendente": tela["acao_pendente"],
+                "encerrada_em": _iso(tela["encerrada_em"]),
+            }
+        )
+    return saida
+
+
 # ── Outras perguntas do mesmo comprador (ML) ───────────────────────────────
 
 
@@ -449,10 +492,25 @@ def _chaves_do_pedido(conversa: AtendimentoConversa) -> list[str]:
     Bling às vezes grava o PACK em `numeroloja`, e o adaptador grava o ORDER
     em `pedido_marketplace` — sem a segunda chave, a conversa abriria sem
     pedido e a IA mandaria tudo para pessoa ("pedido não encontrado").
+
+    E, no ML, o ORDER do retrato do pedido (`dados.pedido_mkt.pedido`, que o
+    enriquecimento acha pelo `/packs`): em produção (01/10/2026) o pack NUNCA
+    traz `order_id` à vista — as 147 conversas do pós-venda têm
+    `pedido_marketplace` = pack, e em 53 delas (carrinho) o order é outro
+    número. Sem esta chave, a reclamação do ML (gravada pelo ORDER) não
+    chegava à conversa do comprador, e em 14 delas o Bling (que só tinha o
+    order em `numeroloja`) nem ligava. No carrinho com vários pedidos o
+    retrato mostra o próprio pack (nada a acrescentar): aí a reclamação casa
+    pelo `pack_id` dela (`etiqueta_fatos.condicao_do_pedido`).
     """
     dados = conversa.dados if isinstance(conversa.dados, dict) else {}
+    brutos = [conversa.pedido_marketplace, dados.get("pack_id"), dados.get("order_id")]
+    if conversa.plataforma == "ml":
+        retrato = dados.get("pedido_mkt")
+        if isinstance(retrato, dict) and isinstance(retrato.get("pedido"), str | int):
+            brutos.append(retrato.get("pedido"))
     chaves: list[str] = []
-    for bruto in (conversa.pedido_marketplace, dados.get("pack_id"), dados.get("order_id")):
+    for bruto in brutos:
         chave = str(bruto or "").strip()
         if chave and chave not in chaves:
             chaves.append(chave)
@@ -499,5 +557,8 @@ async def contexto_da_conversa(session: AsyncSession, conversa: AtendimentoConve
     )
     ctx["nota_fiscal"] = await _seguro(
         session, "nota_fiscal", lambda: _nota_fiscal(session, numero_bling, numero_mkt), None, cid
+    )
+    ctx["reclamacoes"] = await _seguro(
+        session, "reclamacoes", lambda: _reclamacoes(session, conversa), [], cid
     )
     return ctx

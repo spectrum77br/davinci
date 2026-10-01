@@ -134,6 +134,10 @@ async def test_toda_tabela_de_negocio_tem_o_gatilho(db):
         # avaliação com o usuário e o texto do comprador).
         "atendimento_pedidos_comprador",
         "atendimento_avaliacoes_loja",
+        # 0353: a trilha da etiqueta já é ela mesma um histórico, e a
+        # reclamação é o espelho da plataforma regravado pela máquina.
+        "atendimento_etiquetas_historico",
+        "atendimento_reclamacoes",
     ):
         assert tabela not in com, tabela
 

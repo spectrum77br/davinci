@@ -40,7 +40,11 @@ export type Canal = {
 // `a_conferir` = respostas nossas que a plataforma não confirmou (status
 // `revisar`) e que alguém precisa marcar se saíram ou não. Opcional por nível:
 // o total vem no topo; por plataforma/loja, quando o backend separar.
-export type ResumoPlataforma = { plataforma: string; aguardando: number; vencendo: number; vencidas: number; a_conferir?: number }
+// `etiquetas` = conversas NÃO fechadas por etiqueta (status atual, 01/10/2026:
+// pre_venda, pos_venda, reclamacao, devolucao, ag_cancelamento) — os números
+// do menu Filtrar. Opcional: a API antiga não manda (o menu fica sem número).
+export type ContagemEtiquetas = Record<string, number>
+export type ResumoPlataforma = { plataforma: string; aguardando: number; vencendo: number; vencidas: number; a_conferir?: number; etiquetas?: ContagemEtiquetas }
 // `nao_lidas` = o número da PLATAFORMA (o mesmo contador vermelho do Duoke) e
 // `status_canal` = a saúde da leitura da loja (spec Duoke 2.4). Opcionais: a
 // API antiga não manda — a barra de lojas cai em `aguardando` e no status dos
@@ -57,6 +61,7 @@ export type ResumoLoja = {
   // `status_motivo` é o porquê, para o title da barra de lojas.
   status_canal?: string | null
   status_motivo?: string | null
+  etiquetas?: ContagemEtiquetas
 }
 export type Resumo = {
   plataformas: ResumoPlataforma[]
@@ -64,6 +69,8 @@ export type Resumo = {
   canais: Canal[]
   flags: Flags
   a_conferir?: number
+  // Total por etiqueta (somando as plataformas).
+  etiquetas?: ContagemEtiquetas
 }
 export type ConversaResumo = {
   id: string
@@ -97,7 +104,30 @@ export type ConversaResumo = {
   comprador_avatar?: string | null
   // texto|imagem|produto|pedido|outro — a prévia vira "[Pedido]", "[Imagem]".
   ultima_mensagem_tipo?: string | null
+  // Etiqueta = status atual (01/10/2026; cores e rótulos em
+  // AtendimentoEtiqueta.vue). null = ainda não calculada (e sempre no
+  // Instagram). `etiquetas_secundarias` = as outras abertas ao mesmo tempo
+  // (o indicador pequeno); `etiqueta_manual` = alguém trocou à mão (vale
+  // até o próximo acontecimento automático).
+  etiqueta?: string | null
+  etiqueta_desde?: string | null
+  etiquetas_secundarias?: string[]
+  etiqueta_manual?: boolean
 }
+// Uma mudança de etiqueta (a linha do tempo): `por_nome` null = o sistema.
+export type EtiquetaHistorico = {
+  id: string
+  de: string | null
+  para: string
+  de_rotulo: string | null
+  para_rotulo: string
+  motivo: string | null
+  por_user_id: string | null
+  por_nome: string | null
+  em: string | null
+}
+// Resposta do POST /conversas/{id}/etiqueta (troca à mão).
+export type EtiquetaTroca = { conversa: ConversaDetalhe; etiqueta_historico: EtiquetaHistorico[] }
 export type ConversaDetalhe = ConversaResumo & {
   comprador_id: string | null
   anuncio_id: string | null
@@ -333,6 +363,8 @@ export type Detalhe = {
   // O "atualizar" do painel Pedido passaria nos portões do POST agora?
   // (plataforma com retrato, loja conectada, leitura ligada, canal ligado)
   pedido_atualizavel?: boolean
+  // As mudanças de etiqueta, da mais antiga para a mais nova.
+  etiqueta_historico?: EtiquetaHistorico[]
 }
 // Tipo da regra do manual (parte 2, P7): `seguranca` vale para toda mensagem
 // e vem primeiro no prompt; `categoria` só entra quando a mensagem foi
@@ -542,9 +574,43 @@ export const CANAIS_ATENDIMENTO: { value: string; label: string; plataforma: str
   { value: 'chat', label: 'Chat', plataforma: 'temu' },
   { value: 'chat', label: 'Chat', plataforma: 'aliexpress' },
 ]
-const CANAL_LABEL: Record<string, string> = { chat: 'Chat', pergunta: 'Pergunta', pos_venda: 'Pós-venda', email: 'E-mail', sac: 'SAC', dm: 'Direct' }
+// `reclamacao` (01/10/2026): a conversa que a leitura das reclamações do ML
+// cria para cada reclamação (as mensagens do comprador, da loja e do
+// mediador). Não é caixa que se configura por loja — não entra em
+// CANAIS_ATENDIMENTO —, mas aparece na lista e no cabeçalho.
+const CANAL_LABEL: Record<string, string> = { chat: 'Chat', pergunta: 'Pergunta', pos_venda: 'Pós-venda', email: 'E-mail', sac: 'SAC', dm: 'Direct', reclamacao: 'Reclamação' }
 export function canalLabel(canal: string | null | undefined): string {
   return CANAL_LABEL[canal || ''] || canal || ''
+}
+
+// A ORDEM da lista, a mesma do backend (routers/atendimento.FILTROS_PELO_PRAZO,
+// 01/10/2026): a aba "Falta responder" vai pelo PRAZO — o mais curto primeiro,
+// sem prazo no fim, o id (como texto) desempata —; as outras, pela mensagem
+// mais recente. A atualização automática relê só a 1ª página e costura com o
+// que o "carregar mais" trouxe: fica o que vem DEPOIS do último item da 1ª
+// página nova, NA ORDEM DA ABA (comparar pela hora da mensagem na aba do
+// prazo jogava fora itens das páginas extras).
+export const FILTROS_PELO_PRAZO = ['aguardando']
+type ItemDaLista = Pick<ConversaResumo, 'id' | 'ultima_mensagem_em' | 'prazo_resposta_em'>
+function chaveDoPrazo(c: ItemDaLista): [number, number, string] {
+  const t = c.prazo_resposta_em ? new Date(c.prazo_resposta_em).getTime() : Number.NaN
+  return Number.isNaN(t) ? [1, 0, String(c.id)] : [0, t, String(c.id)]
+}
+// Dá para costurar a partir deste último item? (na ordem por recência, o
+// último sem hora não tem corte — a lista recomeça da 1ª página).
+export function podeCosturar(ultimo: ItemDaLista | null | undefined, filtro: string | null | undefined): boolean {
+  if (!ultimo) return false
+  return FILTROS_PELO_PRAZO.includes(filtro || '') || !!ultimo.ultima_mensagem_em
+}
+export function vemDepoisNaLista(c: ItemDaLista, ultimo: ItemDaLista, filtro: string | null | undefined): boolean {
+  if (FILTROS_PELO_PRAZO.includes(filtro || '')) {
+    const a = chaveDoPrazo(c)
+    const b = chaveDoPrazo(ultimo)
+    if (a[0] !== b[0]) return a[0] > b[0]
+    if (a[1] !== b[1]) return a[1] > b[1]
+    return a[2] > b[2]
+  }
+  return (c.ultima_mensagem_em || '') < (ultimo.ultima_mensagem_em || '')
 }
 export function canaisDa(plataforma: string | null | undefined): { value: string; label: string }[] {
   return CANAIS_ATENDIMENTO.filter((c) => c.plataforma === plataforma).map(({ value, label }) => ({ value, label }))
@@ -1320,6 +1386,8 @@ export const ERROS: Record<string, string> = {
   plataforma_invalida: 'Plataforma desconhecida.',
   canal_invalido: 'Caixa desconhecida para essa plataforma.',
   filtro_invalido: 'Filtro desconhecido.',
+  etiqueta_invalida: 'Etiqueta desconhecida — escolha uma da lista.',
+  cursor_invalido: 'A lista mudou de ordem — atualize para carregar de novo.',
   forbidden: 'Sem permissão para isso (peça ao admin a permissão do Atendimento).',
   admin_only: 'Só administrador pode fazer isso.',
   conversa_nao_encontrada: 'Conversa não encontrada (pode ter sido apagada).',

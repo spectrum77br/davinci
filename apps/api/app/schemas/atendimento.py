@@ -131,6 +131,17 @@ class ConversaResumoOut(BaseModel):
     # saído ou não. Continua contando como resposta (não se responde por
     # cima), mas alguém precisa conferir na plataforma — filtro "A conferir".
     envio_a_conferir: bool = False
+    # Etiqueta = status atual (RF1, 01/10/2026; `services/atendimento/
+    # etiqueta`): pre_venda | pos_venda | reclamacao | devolucao |
+    # ag_cancelamento (constantes.ETIQUETAS). None = ainda não calculada (e
+    # sempre no Instagram). `etiquetas_secundarias` = as outras abertas ao
+    # mesmo tempo, da mais urgente para a menos (o indicador pequeno);
+    # `etiqueta_manual` = um atendente trocou à mão (vale até o próximo
+    # acontecimento automático).
+    etiqueta: str | None = None
+    etiqueta_desde: datetime | None = None
+    etiquetas_secundarias: list[str] = Field(default_factory=list)
+    etiqueta_manual: bool = False
 
 
 class ConversaOut(ConversaResumoOut):
@@ -163,8 +174,11 @@ class ConversaOut(ConversaResumoOut):
 
 class ListaConversasOut(BaseModel):
     itens: list[ConversaResumoOut]
-    # `ultima_mensagem_em` do último item quando há mais página; None = fim.
-    proximo: datetime | None = None
+    # Cursor da página seguinte (volta em `antes_de`); None = fim. Opaco para
+    # a tela: na ordem por recência é a `ultima_mensagem_em` (ISO) do último
+    # item; na aba "Falta responder" (ordem pelo prazo mais curto,
+    # 01/10/2026) é `prazo:<prazo ISO ou vazio>|<id>`.
+    proximo: str | None = None
 
 
 class MensagemOut(BaseModel):
@@ -254,6 +268,25 @@ class SugestaoOut(BaseModel):
     resposta_real: RespostaRealOut | None = None
 
 
+class EtiquetaHistoricoOut(BaseModel):
+    """Uma mudança de etiqueta da conversa — o que a linha do tempo mostra (RF1).
+
+    "de Pós-venda para Reclamação" + o porquê. `por_user_id` None = sistema
+    (o motor); preenchido = troca à mão (`por_nome` = quem trocou).
+    """
+
+    id: UUID
+    de: str | None = None
+    para: str
+    # Os rótulos da tela ("Pós-venda", "Ag. cancelamento"), para quem só mostra.
+    de_rotulo: str | None = None
+    para_rotulo: str
+    motivo: str | None = None
+    por_user_id: UUID | None = None
+    por_nome: str | None = None
+    em: datetime | None = None
+
+
 class ConversaDetalheOut(BaseModel):
     conversa: ConversaOut
     mensagens: list[MensagemOut]
@@ -284,6 +317,9 @@ class ConversaDetalheOut(BaseModel):
     # desligado — os mesmos portões do POST /pedido/atualizar. False = a tela
     # esconde o botão em vez de mostrar o 409.
     pedido_atualizavel: bool = False
+    # As mudanças de etiqueta da conversa, da mais antiga para a mais nova
+    # (`etiqueta.historico_da_conversa`) — a linha do tempo da etiqueta.
+    etiqueta_historico: list[EtiquetaHistoricoOut] = Field(default_factory=list)
 
 
 class PedidoAtualizarOut(BaseModel):
@@ -302,6 +338,23 @@ class PedidoAtualizarOut(BaseModel):
 
 class ConversaUnicaOut(BaseModel):
     conversa: ConversaOut
+
+
+class EtiquetaIn(BaseModel):
+    """Troca à mão da etiqueta (POST /conversas/{id}/etiqueta).
+
+    Vale até o próximo acontecimento automático; escolher a mesma etiqueta
+    que o motor dá = voltar ao automático. `motivo` (opcional) vai para a
+    linha do tempo, depois de "Trocada à mão".
+    """
+
+    etiqueta: str = Field(min_length=1, max_length=24)
+    motivo: str | None = Field(default=None, max_length=200)
+
+
+class EtiquetaTrocaOut(BaseModel):
+    conversa: ConversaOut
+    etiqueta_historico: list[EtiquetaHistoricoOut] = Field(default_factory=list)
 
 
 class ResponderIn(BaseModel):
@@ -605,6 +658,10 @@ class PlataformaResumoOut(BaseModel):
     a_conferir: int = 0
     # Soma das não lidas das lojas da plataforma (o número da plataforma).
     nao_lidas: int = 0
+    # Conversas NÃO fechadas por etiqueta (`constantes.ETIQUETAS`) — os
+    # números do menu Filtrar. A ainda não calculada conta pela regra de
+    # pré/pós-venda (a mesma do filtro).
+    etiquetas: dict[str, int] = Field(default_factory=dict)
 
 
 class LojaResumoOut(BaseModel):
@@ -633,6 +690,8 @@ class LojaResumoOut(BaseModel):
     status_canal: str | None = None
     # O porquê, para o `title` da barra (texto de operação, sem dado pessoal).
     status_motivo: str | None = None
+    # Conversas NÃO fechadas da loja por etiqueta (ver PlataformaResumoOut).
+    etiquetas: dict[str, int] = Field(default_factory=dict)
 
 
 class FlagsOut(BaseModel):
@@ -652,6 +711,8 @@ class ResumoOut(BaseModel):
     plataformas: list[PlataformaResumoOut]
     # Total do filtro "A conferir" (todas as plataformas).
     a_conferir: int = 0
+    # Conversas NÃO fechadas por etiqueta, somando as plataformas.
+    etiquetas: dict[str, int] = Field(default_factory=dict)
     lojas: list[LojaResumoOut]
     canais: list[CanalOut]
     flags: FlagsOut

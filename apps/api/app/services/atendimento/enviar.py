@@ -58,6 +58,11 @@ saiu e não saiu é pior que "não saiu". `settings.atendimento_simulador_exceto
 verdade — é o teste de responder pela tela local a um e-mail real da Amazon
 com as outras lojas ainda no simulador.
 
+FOTO (01/10/2026): `enviar_foto` é o mesmo caminho para UMA imagem (Shopee,
+TikTok e pós-venda do ML; `foto.py`): mesmas travas, mesma linha em voo,
+mesma régua de resultado. O upload para a plataforma só acontece aqui —
+com o envio desligado, nada sobe.
+
 Texto de comprador (e o nosso) nunca vai para o log — só ids e estados.
 """
 
@@ -144,6 +149,12 @@ RECUSA_NAO_AGUARDA = "nao_aguarda"
 RECUSA_ENVIO_REPETIDO = "envio_repetido"
 RECUSA_CONVERSA_MUDOU = "conversa_mudou"
 RECUSA_CONVERSA_OCUPADA = "conversa_ocupada"
+# Foto na resposta (01/10/2026, `enviar_foto` e `foto.py`):
+#   foto_nao_suportada — a plataforma/caixa não aceita foto pelo DaVinci;
+#   foto_invalida      — o arquivo não serve (tipo, tamanho) ou a legenda
+#                        não cabe nesta plataforma (Shopee/TikTok: foto sozinha).
+RECUSA_FOTO_NAO_SUPORTADA = "foto_nao_suportada"
+RECUSA_FOTO_INVALIDA = "foto_invalida"
 
 # Temu/AliExpress (lidas pelo robô do Mac mini): nada sai pelo DaVinci.
 _NOME_SELLER_CENTER = {"temu": "Temu", "aliexpress": "AliExpress"}
@@ -580,6 +591,12 @@ async def _aplicar_resultado(
         mensagem.status = MSG_FALHOU
         mensagem.erro = (resultado.erro or resultado.bloqueio or "envio_falhou")[:500]
     mensagem.payload = payload
+    url = (resultado.payload or {}).get("imagem_url")
+    if resultado.ok and mensagem.tipo == "imagem" and isinstance(url, str) and url.startswith("https://"):
+        # A foto que saiu: o balão mostra a imagem pela URL da plataforma
+        # (a nossa cópia nunca é guardada).
+        primeiro = (mensagem.anexos or [{}])[0]
+        mensagem.anexos = [{**(primeiro if isinstance(primeiro, dict) else {}), "url": url}]
     if resultado.bloqueio:
         conversa.situacao = CONVERSA_BLOQUEADA
         conversa.bloqueio_motivo = resultado.bloqueio[:500]
@@ -1011,8 +1028,13 @@ async def _gravar_resultado(
     texto_digitado: str,
     user: User | None,
     origem: str,
+    avaliar: bool = True,
 ) -> None:
     """Passo 3: grava o que a plataforma disse. A mensagem JÁ SAIU (ou pode ter saído).
+
+    `avaliar=False` (a foto): a foto não é resposta escrita no lugar da
+    sugestão da IA — não vira avaliação "escreveu do zero" (o rascunho que
+    ela tornar velho sai da caixa pelo `recalcular_conversa`, como sempre).
 
     A ordem das travas é a do sync (`gravar`): primeiro a CONVERSA, depois a
     mensagem. O sync que traz a nossa resposta de volta trava a conversa e
@@ -1034,7 +1056,7 @@ async def _gravar_resultado(
             if rascunho is not None:
                 await session.refresh(rascunho)
             await _aplicar_resultado(session, conversa, mensagem, resultado)
-            if mensagem.status in (MSG_ENVIADA, MSG_REVISAR):
+            if avaliar and mensagem.status in (MSG_ENVIADA, MSG_REVISAR):
                 await _avaliar_rascunho(
                     session,
                     conversa,
@@ -1074,3 +1096,199 @@ async def _gravar_resultado(
                     except Exception:  # noqa: BLE001, S110 — sessão quebrada; o log já está
                         pass
                 return
+
+
+# ── Foto (01/10/2026) ─────────────────────────────────────────────────────
+# A foto sai pelo MESMO caminho do texto: as mesmas travas (`_destino`), a
+# mesma linha em voo commitada antes da plataforma, o mesmo "uma em voo por
+# conversa", a mesma régua de resultado (enviada / revisar / falhou). O que
+# muda: a plataforma (upload + mensagem com a imagem, `foto.enviar_imagem`),
+# a conferência de repetida (pela impressão digital da imagem, não pelo
+# texto) e a avaliação da sugestão da IA (foto não é resposta escrita).
+# Upload para a plataforma SÓ aqui — com o envio desligado, a trava
+# `envio_desligado` recusa antes de qualquer byte sair do DaVinci.
+
+TEMPO_MAXIMO_FOTO_S = 150
+
+
+async def _conferir_foto_repetida(
+    session: AsyncSession, conversa: AtendimentoConversa, sha256: str
+) -> None:
+    """A mesma imagem já saiu (ou está saindo) nesta conversa há pouco? → `envio_repetido`."""
+    repetida = await session.scalar(
+        select(AtendimentoMensagem.id)
+        .where(
+            AtendimentoMensagem.conversa_id == conversa.id,
+            AtendimentoMensagem.origem.in_(ORIGENS_DAVINCI),
+            AtendimentoMensagem.status.in_(_STATUS_QUE_SAIRAM),
+            AtendimentoMensagem.created_at >= datetime.now(UTC) - JANELA_REPETIDO,
+            AtendimentoMensagem.payload["foto"]["sha256"].astext == sha256,
+        )
+        .limit(1)
+    )
+    if repetida is not None:
+        raise EnvioRecusado(
+            RECUSA_ENVIO_REPETIDO,
+            "Esta mesma foto acabou de ser enviada nesta conversa (há menos de 2 minutos). "
+            "Ela não foi enviada de novo.",
+        )
+
+
+async def _preparar_foto(
+    session: AsyncSession,
+    conversa: AtendimentoConversa,
+    foto,
+    *,
+    legenda: str | None,
+    user: User | None,
+    ultima_vista_id: UUID | None,
+    confirmar: bool,
+) -> tuple[AtendimentoMensagem, _Destino, str | None]:
+    """Passos 0 e 1 da foto: trava, confere e grava a linha em voo (sem commit)."""
+    from app.services.atendimento import foto as foto_mod
+
+    await travar_conversa(session, conversa)
+    destino = await _destino(session, conversa, origem=ORIGEM_HUMANO)
+    motivo = foto_mod.motivo_sem_foto(conversa)
+    if motivo:
+        raise EnvioRecusado(RECUSA_FOTO_NAO_SUPORTADA, motivo)
+    legenda_ok: str | None = None
+    if foto_mod.legenda_obrigatoria(conversa):
+        # ML: a foto vai DENTRO de uma mensagem — o texto passa pelo validador
+        # como qualquer resposta (vazio = `texto_invalido`).
+        legenda_ok = _preparar_texto(legenda, conversa=conversa, origem=ORIGEM_HUMANO)
+    elif (legenda or "").strip():
+        raise EnvioRecusado(
+            RECUSA_FOTO_INVALIDA,
+            "Nesta plataforma a foto vai sozinha: mande o texto pela caixa de resposta.",
+        )
+    await _conferir_foto_repetida(session, conversa, foto.sha256)
+    if ultima_vista_id is not None and not confirmar:
+        await _conferir_mudou(session, conversa, ultima_vista_id)
+
+    await aposentar_envios_presos(session, conversa_id=conversa.id)
+    mensagem = AtendimentoMensagem(
+        conversa_id=conversa.id,
+        externo_id=None,
+        autor=AUTOR_LOJA,
+        origem=ORIGEM_HUMANO,
+        autor_user_id=user.id if user is not None else None,
+        tipo="imagem",
+        texto=legenda_ok,
+        # A URL só existe depois do upload (`_aplicar_resultado` põe).
+        anexos=[{"tipo": "imagem", "nome": foto.nome, "mime": foto.mime, "tamanho": foto.tamanho}],
+        enviada_em=None,
+        status=MSG_ENVIANDO,
+        rascunho_id=None,
+        payload={"foto": {"sha256": foto.sha256, "mime": foto.mime, "bytes": foto.tamanho}},
+    )
+    await session.flush()
+    try:
+        async with session.begin_nested():
+            session.add(mensagem)
+            await session.flush()
+    except IntegrityError as e:
+        if not is_unique_violation(e):
+            raise
+        raise EnvioRecusado(
+            RECUSA_ENVIO_EM_ANDAMENTO, "Há uma resposta sendo enviada nesta conversa."
+        ) from e
+    return mensagem, destino, legenda_ok
+
+
+async def _chamar_plataforma_foto(
+    session: AsyncSession,
+    conversa: AtendimentoConversa,
+    integration: Integration,
+    foto,
+    legenda: str | None,
+) -> ResultadoEnvio:
+    """Sobe a foto e manda a mensagem. Nunca levanta (como `_chamar_plataforma`)."""
+    from app.services.atendimento import foto as foto_mod
+
+    s = get_settings()
+    if s.atendimento_simulador and s.is_prod:
+        return ResultadoEnvio(ok=False, erro="simulador_em_producao")
+    if vai_para_o_simulador(conversa.plataforma):
+        return ResultadoEnvio(ok=True, externo_id=f"sim:{uuid4()}", payload={"simulador": True})
+    try:
+        cliente = await clientes.cliente_da_integracao(integration)
+    except Exception as e:  # noqa: BLE001
+        return ResultadoEnvio(ok=False, erro=f"cliente_indisponivel: {type(e).__name__}")
+    try:
+        return await asyncio.wait_for(
+            foto_mod.enviar_imagem(session, conversa, integration, cliente, foto, legenda),
+            timeout=TEMPO_MAXIMO_FOTO_S,
+        )
+    except TimeoutError:
+        return ResultadoEnvio(ok=False, ambiguo=True, erro="timeout")
+    except Exception as e:  # noqa: BLE001 — sem saber se saiu: ambíguo
+        return ResultadoEnvio(ok=False, ambiguo=True, erro=f"erro_inesperado: {type(e).__name__}")
+
+
+async def enviar_foto(
+    session: AsyncSession,
+    conversa: AtendimentoConversa,
+    foto,
+    *,
+    legenda: str | None = None,
+    user: User | None,
+    ultima_vista_id: UUID | None = None,
+    confirmar: bool = False,
+) -> AtendimentoMensagem:
+    """Envia UMA foto (já conferida: `foto.validar_foto`) na conversa; devolve a mensagem.
+
+    O mesmo contrato do `enviar_resposta`: `EnvioRecusado` = nada saiu (trava
+    nossa); erro da plataforma vira `falhou`/`revisar` na mensagem; COMMITA
+    antes de falar com a plataforma e depois. Só pessoa manda foto (a IA
+    nunca). `legenda` só no ML (obrigatória lá); Shopee/TikTok: foto sozinha.
+    """
+    ponto = await session.begin_nested()
+    try:
+        mensagem, destino, legenda_ok = await _preparar_foto(
+            session,
+            conversa,
+            foto,
+            legenda=legenda,
+            user=user,
+            ultima_vista_id=ultima_vista_id,
+            confirmar=confirmar,
+        )
+    except BaseException:
+        await ponto.rollback()
+        raise
+    await ponto.commit()
+    # Em voo já conta como resposta na fila (como o texto).
+    gravar.recalcular(conversa, [mensagem])
+    await session.commit()
+    logger.info(
+        "atendimento_foto_iniciada",
+        conversa_id=str(conversa.id),
+        mensagem_id=str(mensagem.id),
+        plataforma=conversa.plataforma,
+        bytes=foto.tamanho,
+        simulador=get_settings().atendimento_simulador,
+    )
+    resultado = await _chamar_plataforma_foto(
+        session, conversa, destino.integration, foto, legenda_ok
+    )
+    await _gravar_resultado(
+        session,
+        conversa,
+        mensagem,
+        resultado,
+        rascunho=None,
+        texto_digitado=legenda_ok or "",
+        user=user,
+        origem=ORIGEM_HUMANO,
+        avaliar=False,
+    )
+    logger.info(
+        "atendimento_foto_concluida",
+        conversa_id=str(conversa.id),
+        mensagem_id=str(mensagem.id),
+        plataforma=conversa.plataforma,
+        status=mensagem.status,
+        bloqueio=bool(resultado.bloqueio),
+    )
+    return mensagem

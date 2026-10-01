@@ -935,3 +935,32 @@ def test_status_efetivo_sem_sinal_e_com_evento_recente():
         }
     }
     assert robo.status_efetivo(canal)[0] == "ok"
+
+
+@pytest.mark.parametrize("com_nota", [False, True])
+async def test_previa_relida_depois_de_nota_interna_nao_duplica(client, db, com_nota):
+    """A NOTA INTERNA (Comunicador, 01/10/2026) não é "a última mensagem" da prévia.
+
+    Só a lista trouxe a mensagem do comprador (sem id e sem hora); a pessoa
+    escreve uma nota; a MESMA lista, servida depois, não pode gravar a
+    mensagem do comprador de novo (`robo._recentes` pula a nota).
+    """
+    from sqlalchemy import update
+
+    from app.services.atendimento import painel
+
+    r = await _ae(client, _lista_ae("s-n", "Where is my order?", servidor=59.5))
+    assert r["gravadas"] == 1
+    [conversa] = await _conversas(db)
+    if com_nota:
+        nota = await painel.criar_nota(db, conversa, "Cliente já ligou, ver rastreio", user_id=None)
+        await db.execute(
+            update(AtendimentoMensagem)
+            .where(AtendimentoMensagem.id == nota.id)
+            .values(enviada_em=AGORA - timedelta(minutes=30))
+        )
+        await db.commit()
+    await _ae(client, _lista_ae("s-n", "Where is my order?", servidor=0.1))
+    [conversa] = await _conversas(db)
+    do_cliente = [m for m in await _mensagens(db, conversa.id) if m.autor == "cliente"]
+    assert len(do_cliente) == 1

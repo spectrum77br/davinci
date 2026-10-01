@@ -52,9 +52,19 @@ Duas travas vivem NO BANCO, não na aplicação, pelo mesmo motivo do
   `uq_atendimento_rascunho_pendente` — um rascunho `pendente` por conversa.
 
 `autor` × `origem`: autor é QUEM escreveu na plataforma (cliente, loja,
-sistema); origem é POR ONDE saiu (pelo DaVinci por pessoa, pela IA, ou fora
-do DaVinci — Duoke, Seller Center, celular). É a origem `externo` que diz
+sistema, mediador; `equipe` na nota interna); origem é POR ONDE saiu
+(pelo DaVinci por pessoa, pela IA, ou fora do DaVinci — Duoke, Seller
+Center, celular). É a origem `externo` que diz
 "alguém já respondeu por fora, cale-se", e é ela que aposenta o rascunho.
+
+Etiqueta = status atual (01/10/2026, migration 0353): a conversa ganha
+`etiqueta` (+ desde, manual, secundárias, automática) e duas tabelas —
+
+  `atendimento_etiquetas_historico` — uma linha por mudança de etiqueta (a
+                                      linha do tempo), sistema ou pessoa.
+  `atendimento_reclamacoes`         — reclamação/mediação/devolução da
+                                      PLATAFORMA (ML, Shopee, TikTok), só
+                                      leitura, ligada à conversa do pedido.
 
 Os valores válidos das colunas de estado estão em
 `services/atendimento/constantes.py` — um lugar só, lido pelo model, pelo
@@ -253,6 +263,133 @@ class AtendimentoConversa(Base, TimestampMixin):
     dados: Mapped[dict] = mapped_column(
         JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
     )
+    # ── Etiqueta = status atual (RF1, migration 0353) ────────────────────
+    # Quem grava é `services/atendimento/etiqueta` (recalcular_etiqueta e a
+    # troca à mão) — NUNCA direto: a função aplica a prioridade e escreve o
+    # histórico. Valores em `constantes.ETIQUETAS`. NULL = ainda não calculada.
+    etiqueta: Mapped[str | None] = mapped_column(String(24), nullable=True, index=True)
+    etiqueta_desde: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # Um atendente trocou à mão. Vale até o PRÓXIMO acontecimento automático:
+    # quando a etiqueta que o motor calcula (`etiqueta_automatica`) mudar.
+    etiqueta_manual: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    # As outras etiquetas abertas ao mesmo tempo, da mais urgente para a
+    # menos (o indicador pequeno da lista). Nunca traz a de base
+    # (pré/pós-venda) nem a própria `etiqueta`.
+    etiquetas_secundarias: Mapped[list] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
+    # O que o MOTOR calculou da última vez, valendo ou não. Com a troca à
+    # mão ligada, é por ela que se sabe se "aconteceu algo" desde a troca.
+    etiqueta_automatica: Mapped[str | None] = mapped_column(String(24), nullable=True)
+
+
+class AtendimentoEtiquetaHistorico(Base):
+    """Uma mudança de etiqueta da conversa — o que a linha do tempo mostra.
+
+    "Etiqueta mudou de Pós-venda para Reclamação". Escrita só por
+    `services/atendimento/etiqueta`. `por_user_id` NULL = sistema (o motor);
+    preenchido = troca à mão. A primeira classificação da conversa (de NULL
+    para alguma) não vira linha: não é mudança.
+    """
+
+    __tablename__ = "atendimento_etiquetas_historico"
+    __table_args__ = (
+        # A linha do tempo de UMA conversa, em ordem.
+        Index("ix_atendimento_etiquetas_historico_conversa_id_em", "conversa_id", "em"),
+    )
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    # Nome à mão: pela convenção passaria dos 63 caracteres do Postgres.
+    conversa_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey(
+            "atendimento_conversas.id",
+            ondelete="CASCADE",
+            name="fk_atendimento_etiquetas_historico_conversa",
+        ),
+        nullable=False,
+    )
+    de: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    para: Mapped[str] = mapped_column(String(24), nullable=False)
+    # O acontecimento ("Reclamação 5582543195 aberta no ML", "Trocada à mão").
+    # Texto de operação, sem dado pessoal.
+    motivo: Mapped[str | None] = mapped_column(Text, nullable=True)
+    por_user_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    em: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class AtendimentoReclamacao(Base, TimestampMixin):
+    """Reclamação, mediação ou devolução da PLATAFORMA (ML, Shopee, TikTok).
+
+    O espelho do que a plataforma diz (RF2): lido por
+    `services/atendimento/reclamacoes.py` (ML, claims) e
+    `reclamacoes_devolucoes.py` (devoluções/disputas de Shopee e TikTok que a
+    Logística já lê). SÓ LEITURA na plataforma: nenhuma ação sai daqui.
+
+    ABERTA = `encerrada_em IS NULL`. O `status` é o da plataforma, cru — cada
+    uma tem o seu vocabulário —, e é o que a tela mostra. A etiqueta da
+    conversa (Reclamação/Devolução) sai daqui por `etiqueta_fatos`, casando
+    por `conversa_id` OU por (plataforma, `pedido_marketplace`).
+    """
+
+    __tablename__ = "atendimento_reclamacoes"
+    __table_args__ = (
+        # Idempotência da leitura: a mesma reclamação volta em toda rodada.
+        UniqueConstraint("plataforma", "externo_id"),
+        # "Abertas, por prazo" — a fila da reclamação vencendo.
+        Index("ix_atendimento_reclamacoes_status_prazo_em", "status", "prazo_em"),
+    )
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    # A conta da loja. SET NULL: desligar a loja não apaga a reclamação.
+    integration_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("integrations.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    # A conversa a que ela foi ligada (a do pedido, ou a conversa
+    # `canal = 'reclamacao'` criada para ela). SET NULL: a conversa some, a
+    # reclamação fica.
+    conversa_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("atendimento_conversas.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    plataforma: Mapped[str] = mapped_column(String(16), nullable=False)
+    # Id NA PLATAFORMA (claim_id do ML, return_sn da Shopee, return_id do TikTok).
+    externo_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    # reclamacao | mediacao | devolucao (constantes.TIPOS_RECLAMACAO)
+    tipo: Mapped[str] = mapped_column(String(16), nullable=False)
+    # Status da plataforma, cru (ML `opened`/`closed`, Shopee `REQUESTED`,
+    # TikTok `RETURN_OR_REFUND_REQUEST_PENDING`...).
+    status: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Motivo da plataforma (código/descrição do motivo), nunca texto do comprador.
+    motivo: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # O elo com a conversa e o resto do DaVinci (mesmo tamanho da conversa).
+    pedido_marketplace: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, index=True
+    )
+    # Até quando a LOJA tem de agir (o prazo que a plataforma dá). Relógio da
+    # plataforma.
+    prazo_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    aberta_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    encerrada_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # O resto do que a plataforma devolve (etapa, resolução, devolução física,
+    # quem precisa agir) — material da tela e de depuração.
+    dados: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
 
 
 class AtendimentoMensagem(Base, TimestampMixin):
@@ -273,9 +410,12 @@ class AtendimentoMensagem(Base, TimestampMixin):
         index=True,
     )
     externo_id: Mapped[str | None] = mapped_column(String(191), nullable=True)
-    # cliente | loja | sistema — QUEM escreveu na plataforma.
+    # cliente | loja | sistema | mediador | equipe — QUEM escreveu.
+    # `mediador` (0353): a plataforma falando na reclamação (o "Com Meli").
+    # `equipe` (0353): a NOTA INTERNA, escrita no DaVinci (constantes.AUTOR_EQUIPE).
     autor: Mapped[str] = mapped_column(String(16), nullable=False)
-    # cliente | davinci_humano | davinci_ia | externo | sistema — POR ONDE saiu.
+    # cliente | davinci_humano | davinci_ia | externo | sistema | davinci_nota
+    # — POR ONDE saiu. `davinci_nota` (0353) = NOTA INTERNA: nunca sai.
     origem: Mapped[str] = mapped_column(String(24), nullable=False)
     # Quem da equipe apertou "Enviar" (origem davinci_humano).
     autor_user_id: Mapped[UUID | None] = mapped_column(
@@ -283,7 +423,8 @@ class AtendimentoMensagem(Base, TimestampMixin):
         ForeignKey("users.id", ondelete="SET NULL"),
         nullable=True,
     )
-    # texto | imagem | video | produto | pedido | arquivo | outro
+    # texto | imagem | video | produto | pedido | arquivo | outro | nota
+    # (`nota` = nota interna, com a origem `davinci_nota`; constantes.TIPO_NOTA)
     tipo: Mapped[str] = mapped_column(
         String(16), nullable=False, default="texto", server_default=text("'texto'")
     )

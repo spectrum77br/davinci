@@ -14,6 +14,8 @@ from app.routers import adspower_agent as adspower_agent_router
 from app.routers import alerts as alerts_router
 from app.routers import aprovar_margem as aprovar_margem_router
 from app.routers import atendimento as atendimento_router
+from app.routers import atendimento_painel as atendimento_painel_router
+from app.routers import atendimento_reclamacoes as atendimento_reclamacoes_router
 from app.routers import atendimento_robo as atendimento_robo_router
 from app.routers import audit as audit_router
 from app.routers import auth as auth_router
@@ -132,7 +134,8 @@ _OPENAPI_TAGS = [
     {
         "name": "atendimento",
         "description": "Caixa única de conversas (Shopee, ML, TikTok, Amazon; Instagram só "
-        "leitura) com o rascunho da IA.",
+        "leitura) com o rascunho da IA, a etiqueta (status atual), as reclamações da "
+        "plataforma e o painel do pedido.",
     },
     {"name": "financeiro", "description": "Consórcio, suprimentos (certificações) e simulação de cotações de importação."},
     {"name": "importacao", "description": "Controle de pedidos de importação de malas — SKUs, lotes, resumo financeiro."},
@@ -240,6 +243,12 @@ app.include_router(chamados_router.router)
 app.include_router(devolutions_router.router)
 # Pós-venda › Atendimento (25/09/2026): caixa única das lojas + rascunho da IA.
 app.include_router(atendimento_router.router)
+# Comunicador (01/10/2026): o painel do pedido (estoque, margem, Observações
+# do Bling, links, AdsPower), a nota interna e a foto; e o cartão das
+# reclamações/devoluções da plataforma (só leitura). Mesmo prefixo e a mesma
+# trava (`_so_admin`) da caixa.
+app.include_router(atendimento_painel_router.router)
+app.include_router(atendimento_reclamacoes_router.router)
 # Temu/AliExpress (30/09/2026): o robô do Mac mini manda o que a página do
 # Seller Center recebe (token próprio; vazio = desligado).
 app.include_router(atendimento_robo_router.router)

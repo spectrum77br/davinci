@@ -1312,6 +1312,96 @@ class MercadoLivreClient:
         corpo = r.json()
         return corpo if isinstance(corpo, dict) else {}
 
+    # ── Atendimento: reclamações, mediações e devoluções (01/10/2026) ──
+    #
+    # A leitura das reclamações do pós-venda (services/atendimento/
+    # reclamacoes.py). SÓ LEITURA (GET): nenhuma ação na reclamação sai daqui
+    # — as ações (`open_claim_dispute`, `send_claim_message`...) moram acima
+    # e o atendimento não as usa. Formato medido em produção em 01/10/2026
+    # (conta aguiar): a busca é pelo dono do token, aceita `limit` até 100 e
+    # EXIGE `status` (ou `resource`+`resource_id`); `sort` só com `status`;
+    # `range` e `resource_id` sozinho dão 400.
+
+    async def buscar_reclamacoes(
+        self,
+        *,
+        status: str,
+        offset: int = 0,
+        limit: int = 50,
+        sort: str | None = None,
+    ) -> dict:
+        """Reclamações da conta (GET /post-purchase/v1/claims/search).
+
+        `status` = opened | closed (obrigatório); `sort` ex.
+        `last_updated:desc` (as encerradas mais recentes primeiro). Devolve
+        `{paging: {total, offset, limit}, data: [claim...]}` — cada claim já
+        traz `type`, `stage`, `status`, `reason_id`, `resource`/`resource_id`
+        (o pedido), `players[].available_actions` (com `due_date`) e
+        `resolution`. Levanta em não-2xx."""
+        params: dict[str, Any] = {
+            "status": status,
+            "offset": max(0, int(offset)),
+            "limit": max(1, min(int(limit), 100)),
+        }
+        if sort:
+            params["sort"] = sort
+        r = await self._request("GET", "/post-purchase/v1/claims/search", params=params)
+        r.raise_for_status()
+        corpo = r.json()
+        return corpo if isinstance(corpo, dict) else {}
+
+    async def mensagens_da_reclamacao(self, claim_id: str | int) -> list[dict]:
+        """As mensagens da reclamação (GET /post-purchase/v1/claims/{id}/messages).
+
+        Diferente de `get_claim_messages` (que devolve [] em erro, para o
+        acompanhamento dos chamados), esta LEVANTA em não-2xx: quem lê para
+        gravar não pode confundir "a API falhou" com "não há mensagem" e dar
+        a reclamação por lida. Cada mensagem: `sender_role`/`receiver_role`
+        (complainant | respondent | mediator), `message`, `date_created`,
+        `attachments`, `stage`, `status`, `message_moderation` e `hash` — o
+        ML não manda id de mensagem (medido em 01/10/2026)."""
+        r = await self._request("GET", f"/post-purchase/v1/claims/{claim_id}/messages")
+        r.raise_for_status()
+        corpo = r.json()
+        if isinstance(corpo, dict):
+            corpo = corpo.get("messages") or corpo.get("data") or []
+        return [m for m in corpo if isinstance(m, dict)] if isinstance(corpo, list) else []
+
+    async def motivo_de_reclamacao(self, reason_id: str) -> dict:
+        """O motivo da reclamação (GET /post-purchase/v1/claims/reasons/{id}):
+        `{id, flow, name, detail, parent_id, ...}` — texto do PRÓPRIO ML ("O
+        produto chegou com defeito"), nunca do comprador. Levanta em não-2xx."""
+        r = await self._request("GET", f"/post-purchase/v1/claims/reasons/{reason_id}")
+        r.raise_for_status()
+        corpo = r.json()
+        return corpo if isinstance(corpo, dict) else {}
+
+    async def reclamacao_afeta_reputacao(self, claim_id: str | int) -> dict | None:
+        """A reclamação afeta a reputação? (GET /post-purchase/v1/claims/{id}/affects-reputation)
+        → `{affects_reputation: 'affected' | 'not_affected' | ..., has_incentive,
+        due_date}`; None em 404. Levanta nos outros não-2xx."""
+        r = await self._request(
+            "GET", f"/post-purchase/v1/claims/{claim_id}/affects-reputation"
+        )
+        if r.status_code == 404:
+            return None
+        r.raise_for_status()
+        corpo = r.json()
+        return corpo if isinstance(corpo, dict) else None
+
+    async def devolucao_da_reclamacao(self, claim_id: str | int) -> dict | None:
+        """A devolução ligada à reclamação (GET /post-purchase/v2/claims/{id}/returns),
+        ou None quando não há (404). Mesmo recurso do `get_claim_returns`,
+        sem levantar no "não tem devolução". Traz `status`, `status_money`,
+        `refund_at`, `shipments[].status` — e o endereço do comprador, que
+        quem chama NÃO guarda. Levanta nos outros não-2xx."""
+        r = await self._request("GET", f"/post-purchase/v2/claims/{claim_id}/returns")
+        if r.status_code == 404:
+            return None
+        r.raise_for_status()
+        corpo = r.json()
+        return corpo if isinstance(corpo, dict) else None
+
 
 # ---------------------------------------------------------------- helpers
 #

@@ -184,6 +184,10 @@ ACOES: dict[tuple[str, str], str] = {
     ("POST", "/api/nfse/prestadores/{company_id}/nfeio/integrar"): "integrou a empresa na NFE.io",
     ("POST", "/api/nfse/prestadores/{company_id}/nfeio/atualizar"): "atualizou a empresa da NFE.io",
     ("POST", "/api/nfse/nfeio/sincronizar"): "sincronizou as empresas com a NFE.io",
+    # Atendimento (01/10/2026): o botão AdsPower abre o perfil da loja no
+    # computador de quem clicou — o DaVinci só fica sabendo pelo aviso da tela
+    # (nada muda no banco). O corpo leva só conversa, resultado e código.
+    ("POST", "/api/atendimento/adspower/aberto"): "abriu o perfil da loja no AdsPower",
 }
 
 # Só a frase (o evento fica se o banco mudou): GET que carimba e retorno de

@@ -321,7 +321,8 @@ async def test_lista_filtros_e_paginacao(client, db, make_user, pessoa):
         assert resposta.status_code == 200
         return _ids(resposta)
 
-    assert await filtro("aguardando") == [ids["aguardando"], ids["vencendo"], ids["vencida"]]
+    # "Falta responder" pelo PRAZO mais curto (01/10/2026), não pela recência.
+    assert await filtro("aguardando") == [ids["vencida"], ids["vencendo"], ids["aguardando"]]
     assert await filtro("vencendo") == [ids["vencendo"]]
     assert await filtro("vencidas") == [ids["vencida"]]
     assert await filtro("com_rascunho") == [ids["aguardando"]]
@@ -341,6 +342,23 @@ async def test_lista_filtros_e_paginacao(client, db, make_user, pessoa):
     r2 = await client.get(f"{URL}/conversas", params={"limite": 2, "antes_de": proximo})
     assert _ids(r2) == [ids["vencendo"], ids["vencida"]]
     assert r2.json()["proximo"] is None
+
+    # "Falta responder": a página seguinte vem pelo cursor do PRAZO.
+    p1 = await client.get(f"{URL}/conversas", params={"filtro": "aguardando", "limite": 2})
+    assert _ids(p1) == [ids["vencida"], ids["vencendo"]]
+    cursor = p1.json()["proximo"]
+    assert cursor.startswith("prazo:") and cursor.endswith(f"|{ids['vencendo']}")
+    p2 = await client.get(
+        f"{URL}/conversas", params={"filtro": "aguardando", "limite": 2, "antes_de": cursor}
+    )
+    assert (_ids(p2), p2.json()["proximo"]) == ([ids["aguardando"]], None)
+    # Cursor da outra ordem (ou lixo) não vira página errada: 422.
+    for errado in (proximo, "prazo:lixo|x", "prazo:", "ontem"):
+        r = await client.get(
+            f"{URL}/conversas",
+            params={"filtro": "aguardando" if errado == proximo else "todas", "antes_de": errado},
+        )
+        assert (r.status_code, r.json()["detail"]["code"]) == (422, "cursor_invalido"), errado
 
     r = await client.get(f"{URL}/conversas", params={"filtro": "qualquer"})
     assert (r.status_code, r.json()["detail"]["code"]) == (422, "filtro_invalido")
@@ -427,6 +445,7 @@ async def test_contexto_que_falha_nao_esconde_a_conversa(
         "devolucoes": [],
         "nota_fiscal": None,
         "outras_perguntas": [],
+        "reclamacoes": [],
     }
 
 
@@ -772,6 +791,23 @@ async def test_instagram_aparece_so_leitura(client, db, make_user, pessoa):
     r = await client.patch(f"{URL}/conversas/{ig}", json={"situacao": "fechada"})
     assert (r.status_code, r.json()["detail"]["code"]) == (409, "somente_leitura")
 
+    # "Falta responder" pelo prazo: a DM (24 h desde a mensagem de 2 h atrás)
+    # entra depois das da Shopee (12 h), em qualquer página.
+    fila_prazo = [str(fila[k].id) for k in ("vencida", "vencendo", "aguardando")] + [ig]
+    assert _ids(await client.get(f"{URL}/conversas", params={"filtro": "aguardando"})) == (
+        fila_prazo
+    )
+    p1 = await client.get(f"{URL}/conversas", params={"filtro": "aguardando", "limite": 3})
+    assert _ids(p1) == fila_prazo[:3]
+    p2 = await client.get(
+        f"{URL}/conversas",
+        params={"filtro": "aguardando", "limite": 3, "antes_de": p1.json()["proximo"]},
+    )
+    assert (_ids(p2), p2.json()["proximo"]) == ([ig], None)
+    # DM não tem etiqueta: some dos filtros por etiqueta.
+    for params in ({"filtro": "pre_venda"}, {"etiqueta": "pre_venda"}):
+        assert ig not in _ids(await client.get(f"{URL}/conversas", params=params)), params
+
     resumo = (await client.get(f"{URL}/resumo")).json()
     assert {
         "plataforma": "instagram",
@@ -780,6 +816,7 @@ async def test_instagram_aparece_so_leitura(client, db, make_user, pessoa):
         "vencidas": 0,
         "a_conferir": 0,
         "nao_lidas": 0,
+        "etiquetas": {},
     } in resumo["plataformas"]
 
 

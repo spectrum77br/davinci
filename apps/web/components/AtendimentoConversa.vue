@@ -1,3 +1,50 @@
+<script lang="ts">
+// Por que a plataforma não deixa responder (`conversa.bloqueio_motivo`): o ML
+// manda o código cru do `conversation_status.substatus` ("blocked_by_…") —
+// bom para o suporte, ruim para quem atende. Valores vistos em produção em
+// 01/10/2026 (cancelled_order, claim, mediation, conversation_initiated_by_
+// seller_limited) + os da documentação de mensagens pós-venda do ML.
+export const MOTIVOS_BLOQUEIO: Record<string, string> = {
+  blocked_by_cancelled_order: 'o pedido foi cancelado — o Mercado Livre fecha a conversa',
+  blocked_by_claim: 'há uma reclamação aberta — a conversa com o comprador passa pela reclamação',
+  blocked_by_mediation: 'a reclamação está em mediação — quem conversa agora é o mediador do Mercado Livre',
+  blocked_by_time: 'acabou o prazo para mandar mensagens neste pedido',
+  blocked_by_buyer: 'o comprador bloqueou as mensagens',
+  blocked_by_payment: 'o pagamento do pedido ainda não foi aprovado',
+  blocked_by_fulfillment: 'pedido do Full — o Mercado Livre não deixa mandar mensagem por aqui',
+  blocked_by_conversation_initiated_by_seller_limited: 'a loja já mandou as mensagens que pode sem o comprador responder — espere ele escrever',
+  blocked: 'a plataforma bloqueou a conversa',
+  deleted: 'a pergunta foi apagada no Mercado Livre',
+}
+export function bloqueioLegivel(motivo: string | null | undefined): string {
+  const m = (motivo || '').trim()
+  if (!m) return ''
+  const frase = MOTIVOS_BLOQUEIO[m.toLowerCase()]
+  if (frase) return frase
+  if (/^blocked_by_[a-z_]+$/i.test(m)) return `a plataforma bloqueou a conversa (${m})`
+  return m
+}
+
+// A mudança de etiqueta na linha do tempo da conversa (RF1, 01/10/2026):
+// "Etiqueta mudou de Pós-venda para Reclamação" e, embaixo, o porquê que o
+// backend gravou (o acontecimento, ou "Trocada à mão: …") e quem trocou.
+// A primeira classificação não vira linha no histórico (não é mudança);
+// sem `de`, a frase não inventa um "de".
+export type MudancaDeEtiqueta = {
+  de_rotulo: string | null
+  para_rotulo: string
+  motivo: string | null
+  por_nome: string | null
+}
+export function frasesDaEtiqueta(h: MudancaDeEtiqueta): { titulo: string; detalhe: string } {
+  const para = (h.para_rotulo || '').trim() || 'sem etiqueta'
+  const de = (h.de_rotulo || '').trim()
+  const titulo = de ? `Etiqueta mudou de ${de} para ${para}` : `Etiqueta: ${para}`
+  const detalhe = [(h.motivo || '').trim(), h.por_nome ? `por ${h.por_nome}` : ''].filter(Boolean).join(' · ')
+  return { titulo, detalhe }
+}
+</script>
+
 <script setup lang="ts">
 // Coluna do meio da Caixa (Atendimento, 25/09/2026): a conversa com o
 // comprador e a caixa de resposta — e, à direita, o pedido (AtendimentoPedido,
@@ -49,6 +96,27 @@
 //   depois de um await (envio de até 90 s, sugestão, descarte, PATCH) guarda o
 //   id da conversa de origem e só mexe na tela se ela ainda estiver aberta;
 //   senão o resultado vai para o que fica guardado daquela conversa.
+// - Item 3 do Comunicador (01/10/2026):
+//   · o PAINEL do pedido (GET /conversas/{id}/painel: estoque, margem,
+//     Observações do Bling, links, perfil do AdsPower) é buscado aqui, ao
+//     abrir a conversa, e vai para o AtendimentoPedido; o cabeçalho ganha o
+//     botão AdsPower (AtendimentoAdsPower);
+//   · a caixa ganha a aba NOTA INTERNA (AtendimentoNota: amarela, só a equipe
+//     vê, funciona até no modo observação) e o botão FOTO (uma imagem pelo
+//     POST /conversas/{id}/foto; desligado, com o porquê, quando o envio não
+//     pode sair);
+//   · resposta que a plataforma recusou ganha "tentar de novo" (só com o
+//     envio ligado), e o bloqueio do ML ("blocked_by_…") vira frase.
+// - Itens 1 e 2 do Comunicador (01/10/2026):
+//   · a ETIQUETA (status atual) no cabeçalho, logo depois do nome
+//     (AtendimentoEtiqueta): clicar troca à mão (POST /conversas/{id}/etiqueta,
+//     vale até o próximo acontecimento automático); a resposta volta para o
+//     detalhe e para a linha da lista. Cada mudança de etiqueta entra na
+//     linha do tempo das mensagens, na hora em que aconteceu;
+//   · o CARTÃO DA RECLAMAÇÃO (AtendimentoReclamacao) entre as faixas e as
+//     mensagens, só quando a conversa (ou o pedido dela) tem reclamação,
+//     mediação ou devolução da plataforma — só leitura. Relido no "atualizar"
+//     e junto com o painel (a cada 2 min).
 import {
   Archive,
   ArrowLeft,
@@ -59,6 +127,7 @@ import {
   Copy,
   ExternalLink,
   Hash,
+  ImagePlus,
   Loader2,
   Lock,
   MailX,
@@ -71,6 +140,7 @@ import {
   Send,
   ShieldCheck,
   Sparkles,
+  StickyNote,
   ThumbsDown,
   ThumbsUp,
   Trash2,
@@ -80,6 +150,10 @@ import {
   UserPlus,
   X,
 } from 'lucide-vue-next'
+import { eNota } from '~/components/AtendimentoNota.vue'
+import { etiquetaInfo } from '~/components/AtendimentoEtiqueta.vue'
+import type { Painel } from '~/components/AtendimentoPedido.vue'
+import type { ReclamacoesResposta } from '~/components/AtendimentoReclamacao.vue'
 import { PopoverContent, PopoverPortal, PopoverRoot, PopoverTrigger } from 'reka-ui'
 import { onKeyStroke, useMediaQuery } from '@vueuse/core'
 import {
@@ -135,6 +209,8 @@ import {
   type ConversaResumo,
   type CorrecaoEmCurso,
   type Detalhe,
+  type EtiquetaHistorico,
+  type EtiquetaTroca,
   type Flags,
   type Mensagem,
   type Modelo,
@@ -335,29 +411,52 @@ usePollingVisivel(async () => {
 }, 15_000)
 
 // ─── linha do tempo ─────────────────────────────────────────────────────────
-type Linha = { tipo: 'dia'; chave: string; texto: string } | { tipo: 'msg'; chave: string; m: Mensagem }
-function ts(m: Mensagem) {
-  const t = m.enviada_em ? new Date(m.enviada_em).getTime() : NaN
+// As mensagens e as MUDANÇAS DE ETIQUETA (`detalhe.etiqueta_historico`), pela
+// hora; no empate, a mensagem antes (quase sempre foi ela que mudou o status).
+type Linha =
+  | { tipo: 'dia'; chave: string; texto: string }
+  | { tipo: 'msg'; chave: string; m: Mensagem }
+  | { tipo: 'etiqueta'; chave: string; h: EtiquetaHistorico }
+function tsIso(iso: string | null | undefined) {
+  const t = iso ? new Date(iso).getTime() : NaN
   return Number.isNaN(t) ? Number.POSITIVE_INFINITY : t
 }
+function ts(m: Mensagem) {
+  return tsIso(m.enviada_em)
+}
 const linhas = computed<Linha[]>(() => {
-  const ms = [...(detalhe.value?.mensagens || [])].sort((a, b) => ts(a) - ts(b))
+  type Item = { t: number; iso: string | null; linha: Linha }
+  const itens: Item[] = [
+    ...(detalhe.value?.mensagens || []).map((m): Item => ({ t: ts(m), iso: m.enviada_em, linha: { tipo: 'msg', chave: m.id, m } })),
+    ...(detalhe.value?.etiqueta_historico || []).map((h): Item => ({ t: tsIso(h.em), iso: h.em, linha: { tipo: 'etiqueta', chave: `etiqueta-${h.id}`, h } })),
+  ]
+  // `sort` é estável: no empate fica a ordem acima (mensagens primeiro).
+  itens.sort((a, b) => (a.t === b.t ? 0 : a.t - b.t))
   const out: Linha[] = []
   let dia = ''
-  for (const m of ms) {
-    if (m.enviada_em) {
-      const d = new Date(m.enviada_em).toDateString()
+  for (const it of itens) {
+    if (it.iso && Number.isFinite(it.t)) {
+      const d = new Date(it.iso).toDateString()
       if (d !== dia) {
-        out.push({ tipo: 'dia', chave: `dia-${d}`, texto: rotuloDia(m.enviada_em, agora.value) })
+        out.push({ tipo: 'dia', chave: `dia-${d}`, texto: rotuloDia(it.iso, agora.value) })
         dia = d
       }
     }
-    out.push({ tipo: 'msg', chave: m.id, m })
+    out.push(it.linha)
   }
   return out
 })
+// A bolinha da mudança de etiqueta: a cor da etiqueta nova (Pós-venda, cinza).
+function pontoDaEtiqueta(h: EtiquetaHistorico) {
+  return etiquetaInfo(h.para)?.ponto || 'bg-muted-foreground/50'
+}
 
-function lado(m: Mensagem): 'cliente' | 'loja' | 'sistema' {
+function lado(m: Mensagem): 'cliente' | 'loja' | 'sistema' | 'nota' | 'mediador' {
+  // Nota interna primeiro: o autor dela é `equipe`, que cairia em "loja".
+  if (eNota(m)) return 'nota'
+  // O mediador da plataforma na reclamação (o "Com Meli"; autor `mediador`):
+  // à esquerda, com o rótulo — não é o comprador nem a loja.
+  if (m.autor === 'mediador') return 'mediador'
   if (m.autor === 'sistema' || m.origem === 'sistema') return 'sistema'
   return m.autor === 'cliente' ? 'cliente' : 'loja'
 }
@@ -369,6 +468,7 @@ function balaoCls(m: Mensagem) {
   if (lado(m) === 'cliente') {
     return (soCartao(m) ? 'rounded-tl-sm bg-muted/80' : 'rounded-tl-sm border border-border/70 bg-background') + falhou
   }
+  if (lado(m) === 'mediador') return 'rounded-tl-sm border border-violet-300/70 bg-violet-50 dark:border-violet-800/60 dark:bg-violet-900/25'
   return 'rounded-tr-sm bg-sky-100 dark:bg-sky-900/45' + falhou
 }
 function autorCls(m: Mensagem) {
@@ -730,7 +830,11 @@ const bloqueioEnvio = computed(() => {
   const codigo = d.envio.codigo || ''
   // Bloqueio: a frase do backend traz o porquê do caso (janela fechou,
   // comprador bloqueou…). Nos outros, a frase simples da tela.
-  if (codigo === 'conversa_bloqueada') return d.envio.motivo || ERROS.conversa_bloqueada
+  if (codigo === 'conversa_bloqueada') {
+    // O motivo do ML vem cru ("blocked_by_cancelled_order"): vira frase.
+    const porque = bloqueioLegivel(d.envio.motivo)
+    return porque && porque !== d.envio.motivo ? `${ERROS.conversa_bloqueada.replace(/\.$/, '')}: ${porque}.` : (d.envio.motivo || ERROS.conversa_bloqueada)
+  }
   // Envio desligado no servidor vem antes: escolher a conta não resolveria.
   if (codigo !== 'envio_desligado' && semConta.value) return 'Esta conversa da Amazon ainda não está ligada a uma conta. Escolha a conta acima para poder responder.'
   if (codigo && ERROS[codigo]) return ERROS[codigo]
@@ -1278,6 +1382,244 @@ function inserirModelo(m: Modelo) {
   buscaModelo.value = ''
 }
 
+// ─── etiqueta: troca à mão (item 2) ─────────────────────────────────────────
+// O AtendimentoEtiqueta faz o POST e devolve a conversa e a linha do tempo
+// novas: entram no detalhe (se a conversa ainda for esta) e na linha da lista
+// (a página relê as contagens do menu Filtrar).
+function aoTrocarEtiqueta(r: EtiquetaTroca) {
+  const c = r?.conversa
+  if (!c) return
+  const d = detalhe.value
+  if (d && d.conversa.id === c.id) {
+    detalhe.value = {
+      ...d,
+      conversa: { ...d.conversa, ...c },
+      etiqueta_historico: r.etiqueta_historico ?? d.etiqueta_historico,
+    }
+    emit('mudou', detalhe.value.conversa)
+  } else {
+    emit('mudou', c)
+  }
+  const nova = etiquetaInfo(c.etiqueta)
+  toasts.success(nova ? `Etiqueta: ${nova.label}` : 'Etiqueta trocada', 'Vale até o próximo acontecimento automático (reclamação, devolução, Bling).')
+}
+
+// ─── reclamação da plataforma (item 1) ──────────────────────────────────────
+// O cartão (AtendimentoReclamacao) busca sozinho o GET /conversas/{id}/reclamacoes
+// e avisa quantas há (`carregado`); a faixa só aparece quando há alguma.
+const reclamacaoRef = ref<{ carregar: () => Promise<void> } | null>(null)
+const reclamacoesQtd = ref(0)
+function aoCarregarReclamacoes(r: ReclamacoesResposta) {
+  reclamacoesQtd.value = r?.itens?.length || 0
+}
+const temCartaoReclamacao = computed(() => {
+  const c = conversa.value
+  return !!c && !c.id.startsWith('ig:') && !c.somente_leitura
+})
+
+// ─── painel do pedido: estoque, margem, observações, links, AdsPower ────────
+// GET /conversas/{id}/painel (item 3, 01/10/2026). Separado do detalhe: o
+// Bling (Observações ao vivo) pode demorar, e a conversa não espera por ele.
+// Relê ao abrir a conversa, no "atualizar" do cabeçalho e a cada 2 min.
+const painelDados = ref<Painel | null>(null)
+const painelCarregando = ref(false)
+const painelErro = ref<string | null>(null)
+let geracaoPainel = 0
+async function carregarPainel(id: string, atualizar = false) {
+  if (!id || id.startsWith('ig:')) {
+    painelDados.value = null
+    return
+  }
+  const g = ++geracaoPainel
+  painelCarregando.value = true
+  try {
+    const p = await api<Painel>(`/api/atendimento/conversas/${encodeURIComponent(id)}/painel${atualizar ? '?atualizar=1' : ''}`)
+    if (g !== geracaoPainel || id !== props.conversaId) return
+    painelDados.value = p
+    painelErro.value = null
+  } catch (e: any) {
+    if (g !== geracaoPainel || id !== props.conversaId) return
+    // 404 sem código = a rota ainda não está no servidor: o painel some quieto.
+    const semRota = statusDoErro(e) === 404 && !e?.data?.detail?.code
+    painelErro.value = semRota ? null : erroDaApi(e, 'Não consegui ler estoque, margem e observações agora').texto
+  } finally {
+    if (g === geracaoPainel) painelCarregando.value = false
+  }
+}
+usePollingVisivel(async () => {
+  if (!props.conversaId || props.ativa === false) return
+  // As reclamações mudam no ritmo do cron (10 min): relidas junto com o painel.
+  void reclamacaoRef.value?.carregar()
+  await carregarPainel(props.conversaId)
+}, 120_000)
+function atualizarTudo() {
+  void carregar(props.conversaId)
+  void carregarPainel(props.conversaId, true)
+  void reclamacaoRef.value?.carregar()
+}
+
+// ─── caixa: Responder × Nota interna ────────────────────────────────────────
+// A nota interna funciona SEMPRE (até no modo observação): ela não sai para
+// ninguém. A escolha volta para "Responder" ao trocar de conversa.
+const modoCaixa = ref<'responder' | 'nota'>('responder')
+function aoCriarNota(m: Mensagem) {
+  const d = detalhe.value
+  if (d && !d.mensagens.some((x) => x.id === m.id)) {
+    d.mensagens = [...d.mensagens, m]
+    rolarProFim()
+  }
+}
+
+// ─── foto na resposta (Shopee, TikTok, pós-venda do ML) ────────────────────
+// Uma imagem por vez, pelo POST /conversas/{id}/foto (caminho único de saída
+// no backend: as mesmas travas do texto). A foto só sobe para a plataforma no
+// envio; escolher e desistir não manda nada a lugar nenhum. No ML ela vai
+// junto de um texto (obrigatório lá); na Shopee e no TikTok, sozinha.
+const envioFoto = computed(() => painelDados.value?.envio_foto ?? null)
+const TIPOS_FOTO = ['image/jpeg', 'image/png']
+const MAX_FOTO = 10 * 1024 * 1024
+const motivoSemFoto = computed(() => {
+  const d = detalhe.value
+  if (!d) return ''
+  if (!props.canEdit) return 'Falta a permissão de editar o Atendimento.'
+  if (d.conversa.somente_leitura || sellerCenterDe(d.conversa.plataforma)) return bloqueioEnvio.value || 'Esta conversa é só de leitura aqui.'
+  const ef = envioFoto.value
+  if (!ef) return painelCarregando.value ? 'Conferindo se a foto pode sair…' : 'Não consegui conferir se a foto pode sair agora.'
+  if (ef.pode) return ''
+  if (ef.codigo && ERROS[ef.codigo]) return ERROS[ef.codigo]
+  return ef.motivo ? bloqueioLegivel(motivoLegivel(ef.motivo)) : 'A foto não pode sair por aqui agora.'
+})
+const fotoInput = ref<HTMLInputElement | null>(null)
+const foto = ref<{ arquivo: File; previa: string } | null>(null)
+const legendaFoto = ref('')
+const enviandoFoto = ref(false)
+function descartarFoto() {
+  if (foto.value) URL.revokeObjectURL(foto.value.previa)
+  foto.value = null
+  legendaFoto.value = ''
+}
+onBeforeUnmount(descartarFoto)
+function escolherFoto() {
+  if (motivoSemFoto.value) return
+  fotoInput.value?.click()
+}
+function aoEscolherFoto(ev: Event) {
+  const alvo = ev.target as HTMLInputElement
+  const f = alvo.files?.[0]
+  alvo.value = ''
+  if (!f) return
+  const max = envioFoto.value?.max_bytes || MAX_FOTO
+  if (!TIPOS_FOTO.includes(f.type)) {
+    toasts.error('Só dá para mandar foto JPG ou PNG.')
+    return
+  }
+  if (f.size > max) {
+    toasts.error(`A foto passa de ${Math.round(max / (1024 * 1024))} MB — escolha uma menor.`)
+    return
+  }
+  descartarFoto()
+  foto.value = { arquivo: f, previa: URL.createObjectURL(f) }
+}
+async function enviarFoto(opcoes?: { confirmar?: boolean }) {
+  const d = detalhe.value
+  const f = foto.value
+  if (!d || !f || enviandoFoto.value || motivoSemFoto.value) return
+  const legenda = legendaFoto.value.trim()
+  if (envioFoto.value?.legenda_obrigatoria && !legenda) {
+    toasts.error('No Mercado Livre a foto vai junto de um texto', 'Escreva uma frase para acompanhar a foto.')
+    return
+  }
+  const id = d.conversa.id
+  const fd = new FormData()
+  fd.append('arquivo', f.arquivo, f.arquivo.name)
+  if (legenda && envioFoto.value?.legenda_permitida) fd.append('legenda', legenda)
+  const vista = ultimaVista(d)
+  if (vista) fd.append('ultima_vista_id', vista)
+  if (opcoes?.confirmar === true) fd.append('confirmar', 'true')
+  enviandoFoto.value = true
+  enviandoIds.add(id)
+  try {
+    const r = await api<{ mensagem: Mensagem }>(`/api/atendimento/conversas/${encodeURIComponent(id)}/foto`, { method: 'POST', body: fd })
+    const m = r?.mensagem
+    if (m && detalhe.value?.conversa.id === id && !detalhe.value.mensagens.some((x) => x.id === m.id)) {
+      detalhe.value.mensagens = [...detalhe.value.mensagens, m]
+      rolarProFim()
+    }
+    if (m?.status === 'falhou') {
+      toasts.error('A plataforma recusou a foto — ela NÃO chegou ao comprador', erroEnvioLegivel(m.erro))
+    } else {
+      if (aberta(id)) descartarFoto()
+      if (m?.status === 'revisar') toasts.warning('Não deu para confirmar o envio da foto', 'Pode ter saído. Confira na plataforma e marque no balão se saiu.')
+      else toasts.success('Foto enviada', envioSimulado(m, props.flags, d.conversa.plataforma) ? 'simulador: não chegou ao comprador' : undefined)
+    }
+    if (aberta(id)) await carregar(id, true)
+  } catch (e: any) {
+    const code = e?.data?.detail?.code
+    const st = statusDoErro(e)
+    if (!code && (!st || st >= 500)) {
+      toasts.warning('Não deu para confirmar o envio da foto — pode ter saído', 'Espere a conversa atualizar antes de mandar de novo.')
+    } else {
+      const er = erroDaApi(e, 'Não consegui mandar a foto')
+      if (code === 'conversa_mudou' && aberta(id) && confirm(`${er.texto}\n\n${er.motivos.join('\n')}\n\nMandar a foto mesmo assim?`)) {
+        enviandoFoto.value = false
+        enviandoIds.delete(id)
+        await enviarFoto({ confirmar: true })
+        return
+      }
+      toasts.error(er.texto, er.motivos)
+    }
+    if (aberta(id)) await carregar(id, true)
+  } finally {
+    enviandoFoto.value = false
+    enviandoIds.delete(id)
+  }
+}
+
+// ─── "tentar de novo" na resposta que a plataforma recusou ──────────────────
+// Só texto, só com o envio ligado (a mesma caixa que enviaria agora), e só na
+// última tentativa: se depois dela saiu outra resposta da loja, não aparece.
+// Foto recusada: a pessoa anexa de novo (a imagem não fica guardada).
+const tentandoId = ref<string | null>(null)
+function podeTentarDeNovo(m: Mensagem): boolean {
+  const d = detalhe.value
+  if (!d || !props.canEdit || observacao.value || !d.envio.pode_enviar) return false
+  if (m.status !== 'falhou' || lado(m) !== 'loja' || !m.texto || m.tipo === 'imagem') return false
+  if (m.origem !== 'davinci_humano' && m.origem !== 'davinci_ia') return false
+  if (enviando.value || incertos.has(d.conversa.id)) return false
+  const t = ts(m)
+  return !d.mensagens.some((x) => x.id !== m.id && lado(x) === 'loja' && x.status !== 'falhou' && ts(x) >= t)
+}
+async function tentarDeNovo(m: Mensagem) {
+  const d = detalhe.value
+  if (!d || !m.texto || tentandoId.value || !podeTentarDeNovo(m)) return
+  if (!confirm('Mandar de novo esta resposta?\n\nA plataforma recusou da primeira vez — ela NÃO chegou ao comprador.')) return
+  const id = d.conversa.id
+  const body: Record<string, unknown> = { texto: m.texto }
+  const vista = ultimaVista(d)
+  if (vista) body.ultima_vista_id = vista
+  tentandoId.value = m.id
+  enviandoIds.add(id)
+  try {
+    const r = await api<{ mensagem: Mensagem }>(`/api/atendimento/conversas/${encodeURIComponent(id)}/responder`, { method: 'POST', body })
+    const nova = r?.mensagem
+    if (nova?.status === 'falhou') toasts.error('A plataforma recusou de novo', erroEnvioLegivel(nova.erro))
+    else if (nova?.status === 'revisar') toasts.warning('Não deu para confirmar o envio', 'Pode ter saído. Confira na plataforma e marque no balão se saiu.')
+    else toasts.success('Resposta enviada')
+  } catch (e: any) {
+    const code = e?.data?.detail?.code
+    const st = statusDoErro(e)
+    if (!code && (!st || st >= 500)) toasts.warning('Não deu para confirmar o envio — pode ter saído', 'Espere a conversa atualizar antes de tentar de novo.')
+    else {
+      const er = erroDaApi(e, 'Não consegui mandar de novo')
+      toasts.error(er.texto, er.motivos)
+    }
+  } finally {
+    enviandoIds.delete(id)
+    tentandoId.value = null
+  }
+  if (aberta(id)) await carregar(id, true)
+}
+
 // ─── painel do pedido ───────────────────────────────────────────────────────
 // Tela larga (≥ 1400 px): coluna fixa, recolhível (lembrado no navegador).
 // Tela menor: abre por cima, como gaveta.
@@ -1332,6 +1674,14 @@ watch(() => props.conversaId, (novo, velho) => {
   contaEscolhida.value = ''
   imagemAberta.value = null
   destacadaId.value = null
+  // Item 3: o painel e a foto são DESTA conversa; a nota em escrita fica
+  // guardada no AtendimentoNota (por conversa).
+  painelDados.value = null
+  painelErro.value = null
+  // O cartão da reclamação relê sozinho (watch do conversaId dele).
+  reclamacoesQtd.value = 0
+  modoCaixa.value = 'responder'
+  descartarFoto()
   limparAval()
   const av = avaliacoesGuardadas.get(novo)
   if (av) {
@@ -1346,7 +1696,10 @@ watch(() => props.conversaId, (novo, velho) => {
   rejeitadaId.value = g?.rejeitada || null
   // Só no navegador: no servidor a resposta chegaria depois de a página já
   // ter sido desenhada (e o navegador busca de novo de qualquer jeito).
-  if (import.meta.client) void carregar(novo)
+  if (import.meta.client) {
+    void carregar(novo)
+    void carregarPainel(novo)
+  }
 }, { immediate: true })
 </script>
 
@@ -1379,6 +1732,19 @@ watch(() => props.conversaId, (novo, velho) => {
             <div class="min-w-[12rem] flex-1">
               <div class="flex flex-wrap items-center gap-x-2 gap-y-0.5">
                 <h2 class="min-w-0 truncate text-[15px] font-semibold leading-6">{{ titulo(conversa) }}</h2>
+                <!-- Etiqueta = status atual (item 2): clicar troca à mão. O Instagram
+                     (só leitura) não tem etiqueta. -->
+                <AtendimentoEtiqueta
+                  v-if="!conversa.somente_leitura"
+                  :etiqueta="conversa.etiqueta"
+                  :secundarias="conversa.etiquetas_secundarias"
+                  :manual="conversa.etiqueta_manual"
+                  :desde="conversa.etiqueta_desde"
+                  :editavel="canEdit"
+                  :conversa-id="conversa.id"
+                  :historico="detalhe.etiqueta_historico"
+                  @trocada="aoTrocarEtiqueta"
+                />
                 <span class="hidden h-4 w-px bg-border sm:block" aria-hidden="true" />
                 <span class="inline-flex min-w-0 items-center gap-1 text-[13px]" :title="`${plataformaInfo(conversa.plataforma).nome} · ${conversa.conta || ''}`">
                   <AtendimentoIconePlataforma :plataforma="conversa.plataforma" :tamanho="15" />
@@ -1570,7 +1936,16 @@ watch(() => props.conversaId, (novo, velho) => {
                 <span class="ml-1 2xl:hidden">Portal</span>
                 <span class="ml-1 hidden 2xl:inline">Abrir no portal</span>
               </Button>
-              <Button size="sm" variant="ghost" class="h-7 px-2" :disabled="carregando" title="atualizar a conversa" aria-label="atualizar a conversa" @click="carregar(conversaId)">
+              <!-- 🖥 AdsPower: o perfil da loja desta conversa, no computador de quem
+                   clicou (RF11). Desligado com o porquê quando não há perfil. -->
+              <AtendimentoAdsPower
+                v-if="!conversa.somente_leitura"
+                :conversa-id="conversa.id"
+                :perfil="painelDados?.adspower ?? null"
+                :carregando="painelCarregando"
+                :can-edit="canEdit"
+              />
+              <Button size="sm" variant="ghost" class="h-7 px-2" :disabled="carregando" title="atualizar a conversa (e o painel do pedido)" aria-label="atualizar a conversa" @click="atualizarTudo">
                 <RotateCcw class="size-3.5" :class="{ 'animate-spin': carregando }" />
               </Button>
               <Button size="sm" :variant="pedidoVisivel ? 'secondary' : 'outline'" class="h-7 px-2 text-xs" :title="pedidoVisivel ? 'esconder o pedido' : 'mostrar o pedido'" @click="alternarPedido">
@@ -1584,7 +1959,7 @@ watch(() => props.conversaId, (novo, velho) => {
 
         <!-- faixas: bloqueio, janela, fechada, não precisa -->
         <div v-if="conversa.situacao === 'bloqueada'" class="shrink-0 border-b border-red-500/30 bg-red-500/10 px-3 py-1.5 text-xs text-red-700 dark:text-red-300">
-          <Lock class="mr-1 inline size-3.5" />A plataforma não deixa mais responder esta conversa<template v-if="conversa.bloqueio_motivo">: {{ conversa.bloqueio_motivo }}</template>.
+          <Lock class="mr-1 inline size-3.5" />A plataforma não deixa mais responder esta conversa<template v-if="conversa.bloqueio_motivo">: <span :title="conversa.bloqueio_motivo">{{ bloqueioLegivel(conversa.bloqueio_motivo) }}</span></template>.
           <!-- Reabrir à mão vale para a bloqueada também (a plataforma liberou). -->
           <button v-if="canEdit && !conversa.somente_leitura" type="button" class="ml-1 underline disabled:opacity-50" :disabled="!!acao" @click="patch({ situacao: 'aberta' }, 'fechar', 'Conversa reaberta')">a plataforma liberou? reabrir</button>
         </div>
@@ -1630,12 +2005,38 @@ watch(() => props.conversaId, (novo, velho) => {
           </template>
         </div>
 
+        <!-- Cartão da reclamação/mediação/devolução da plataforma (item 1): nº,
+             motivo, status e prazo; só leitura. Montado sempre (ele mesmo busca);
+             a faixa só aparece quando há alguma. Rola sozinho se forem várias. -->
+        <div
+          v-if="temCartaoReclamacao"
+          v-show="reclamacoesQtd > 0"
+          class="max-h-[38vh] shrink-0 overflow-y-auto border-b px-3 py-2"
+        >
+          <AtendimentoReclamacao ref="reclamacaoRef" :conversa-id="conversa.id" @carregado="aoCarregarReclamacoes" />
+        </div>
+
         <!-- mensagens -->
         <div ref="rolagem" class="min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-contain bg-muted/40 px-3 py-3 dark:bg-muted/20">
           <div v-if="!linhas.length" class="py-10 text-center text-sm text-muted-foreground">Sem mensagens gravadas ainda.</div>
           <template v-for="l in linhas" :key="l.chave">
             <div v-if="l.tipo === 'dia'" class="flex justify-center py-1">
               <span class="rounded-full bg-background px-2.5 py-0.5 text-[10px] font-medium text-muted-foreground shadow-sm">{{ l.texto }}</span>
+            </div>
+            <!-- mudança de etiqueta: no meio, como o aviso do sistema, com a cor da nova -->
+            <div v-else-if="l.tipo === 'etiqueta'" class="flex justify-center" data-etiqueta-mudou>
+              <div class="max-w-[85%] px-3 py-0.5 text-center text-[11px] text-muted-foreground" :title="fmtDataHora(l.h.em)">
+                <div class="inline-flex items-center gap-1.5 font-medium text-foreground/80">
+                  <span class="inline-block size-2 shrink-0 rounded-full" :class="pontoDaEtiqueta(l.h)" aria-hidden="true" />
+                  {{ frasesDaEtiqueta(l.h).titulo }}
+                  <span class="font-normal text-muted-foreground">· {{ fmtDiaHora(l.h.em) }}</span>
+                </div>
+                <div v-if="frasesDaEtiqueta(l.h).detalhe" class="break-words">{{ frasesDaEtiqueta(l.h).detalhe }}</div>
+              </div>
+            </div>
+            <!-- nota interna: amarela, só a equipe vê -->
+            <div v-else-if="lado(l.m) === 'nota'" :data-msg-id="l.m.id">
+              <AtendimentoNota :mensagem="l.m" />
             </div>
             <div
               v-else-if="lado(l.m) === 'sistema'"
@@ -1644,9 +2045,10 @@ watch(() => props.conversaId, (novo, velho) => {
             >
               <div class="max-w-[85%] whitespace-pre-wrap break-words px-3 py-1 text-center text-xs text-muted-foreground" :title="fmtDataHora(l.m.enviada_em)">{{ l.m.texto || TIPO_LABEL[l.m.tipo] || '' }}</div>
             </div>
-            <div v-else class="flex flex-col" :class="lado(l.m) === 'cliente' ? 'items-start' : 'items-end'" :data-msg-id="l.m.id">
+            <div v-else class="flex flex-col" :class="lado(l.m) === 'cliente' || lado(l.m) === 'mediador' ? 'items-start' : 'items-end'" :data-msg-id="l.m.id">
+              <div v-if="lado(l.m) === 'mediador'" class="mb-0.5 px-1 text-[11px] font-medium text-violet-700 dark:text-violet-300" title="a plataforma falando na reclamação (mediação)">Mediador · {{ plataformaInfo(conversa.plataforma).nome }}</div>
               <!-- por onde a resposta da loja saiu (o Duoke mostra o atendente aqui) -->
-              <div v-if="lado(l.m) === 'loja'" class="mb-0.5 flex max-w-[85%] items-center gap-1 px-1 text-[11px] md:max-w-[75%]" :class="autorCls(l.m)" :title="origemHint(l.m)">
+              <div v-else-if="lado(l.m) === 'loja'" class="mb-0.5 flex max-w-[85%] items-center gap-1 px-1 text-[11px] md:max-w-[75%]" :class="autorCls(l.m)" :title="origemHint(l.m)">
                 <Bot v-if="l.m.origem === 'davinci_ia'" class="size-3 shrink-0" />
                 <span class="truncate">{{ origemLabel(l.m, conversa.plataforma) }}</span>
               </div>
@@ -1678,7 +2080,21 @@ watch(() => props.conversaId, (novo, velho) => {
                   </template>
                 </div>
                 <!-- A frase diz o que fazer; o código cru (para o suporte) fica no title. -->
-                <div v-if="l.m.status === 'falhou'" class="mt-1 rounded bg-red-500/10 px-1.5 py-0.5 text-[11px] text-red-700 dark:text-red-300" :title="l.m.erro || ''">{{ erroEnvioLegivel(l.m.erro) }}</div>
+                <div v-if="l.m.status === 'falhou'" class="mt-1 rounded bg-red-500/10 px-1.5 py-0.5 text-[11px] text-red-700 dark:text-red-300" :title="l.m.erro || ''">
+                  {{ erroEnvioLegivel(l.m.erro) }}
+                  <!-- Só com o envio ligado e só na última tentativa (não reenvia sozinho). -->
+                  <button
+                    v-if="podeTentarDeNovo(l.m)"
+                    type="button"
+                    class="ml-1 inline-flex items-center gap-0.5 rounded border border-red-500/40 bg-background px-1.5 py-px font-medium hover:bg-red-500/10 disabled:opacity-50"
+                    :disabled="!!tentandoId"
+                    title="mandar o mesmo texto de novo (pede confirmação)"
+                    @click="tentarDeNovo(l.m)"
+                  >
+                    <Loader2 v-if="tentandoId === l.m.id" class="size-3 animate-spin" /><RotateCcw v-else class="size-3" /> tentar de novo
+                  </button>
+                  <span v-else-if="l.m.tipo === 'imagem' && lado(l.m) === 'loja' && l.m.origem === 'davinci_humano'" class="ml-1 opacity-80">— anexe a foto de novo para tentar outra vez.</span>
+                </div>
                 <div v-if="l.m.status === 'revisar' && lado(l.m) === 'loja'" class="mt-1 space-y-1 rounded bg-amber-500/10 px-1.5 py-1 text-[11px] text-amber-900 dark:text-amber-200">
                   <div class="font-medium">Não sabemos se chegou ao comprador.</div>
                   <div>A plataforma não confirmou o envio. Confira lá e marque aqui — o DaVinci não manda de novo sozinho.</div>
@@ -1735,9 +2151,78 @@ watch(() => props.conversaId, (novo, velho) => {
         <div class="shrink-0 space-y-2 border-t bg-background p-2">
           <div v-if="atualizacaoFalhou" class="text-[11px] text-muted-foreground">Não consegui atualizar agora — tento de novo em instantes.</div>
 
+          <!-- Responder × Nota interna (a nota vale até no modo observação: não sai
+               para ninguém) e o botão de foto -->
+          <div v-if="!conversa.somente_leitura" class="flex items-center gap-1 text-xs" role="tablist" aria-label="caixa de resposta">
+            <button
+              type="button"
+              role="tab"
+              :aria-selected="modoCaixa === 'responder'"
+              class="rounded-md px-2 py-1"
+              :class="modoCaixa === 'responder' ? 'bg-muted font-medium text-foreground' : 'text-muted-foreground hover:bg-muted/60'"
+              @click="modoCaixa = 'responder'"
+            >Responder</button>
+            <button
+              type="button"
+              role="tab"
+              :aria-selected="modoCaixa === 'nota'"
+              class="inline-flex items-center gap-1 rounded-md px-2 py-1"
+              :class="modoCaixa === 'nota' ? 'bg-amber-100 font-medium text-amber-900 dark:bg-amber-900/30 dark:text-amber-200' : 'text-muted-foreground hover:bg-muted/60'"
+              title="recado para a equipe — não vai para o comprador"
+              @click="modoCaixa = 'nota'"
+            ><StickyNote class="size-3.5" /> Nota interna</button>
+            <template v-if="modoCaixa === 'responder'">
+              <input ref="fotoInput" type="file" accept="image/jpeg,image/png" class="hidden" aria-hidden="true" tabindex="-1" @change="aoEscolherFoto" />
+              <Button
+                size="sm"
+                variant="outline"
+                class="ml-auto h-7 px-2 text-xs"
+                :disabled="!!motivoSemFoto || enviandoFoto || !!foto"
+                :title="motivoSemFoto || (foto ? 'já há uma foto anexada — envie ou descarte' : 'anexar uma foto (JPG ou PNG) para mandar ao comprador')"
+                aria-label="anexar foto"
+                @click="escolherFoto"
+              >
+                <ImagePlus class="size-3.5" /><span class="ml-1">Foto</span>
+              </Button>
+            </template>
+          </div>
+
+          <!-- foto anexada: prévia, texto (ML) e enviar/descartar -->
+          <div v-if="modoCaixa === 'responder' && foto" class="flex items-start gap-2 rounded-md border bg-muted/40 p-2 text-xs">
+            <img :src="foto.previa" alt="foto anexada" class="size-16 shrink-0 rounded border object-cover" />
+            <div class="min-w-0 flex-1 space-y-1">
+              <div class="truncate font-medium" :title="foto.arquivo.name">{{ foto.arquivo.name }}</div>
+              <div class="text-muted-foreground">{{ (foto.arquivo.size / 1024).toFixed(0) }} KB · {{ envioFoto?.legenda_permitida ? 'vai junto do texto abaixo' : 'vai sozinha (o texto vai pela caixa, separado)' }}</div>
+              <input
+                v-if="envioFoto?.legenda_permitida"
+                v-model="legendaFoto"
+                :maxlength="limite || 350"
+                class="h-7 w-full rounded-md border bg-background px-2 text-xs"
+                :placeholder="envioFoto?.legenda_obrigatoria ? 'Texto que vai junto da foto (obrigatório no Mercado Livre)' : 'Texto que vai junto da foto'"
+                aria-label="texto que vai junto da foto"
+              />
+              <div v-if="motivoSemFoto" class="text-amber-800 dark:text-amber-300">{{ motivoSemFoto }}</div>
+            </div>
+            <div class="flex shrink-0 flex-col gap-1">
+              <Button size="sm" class="h-7 px-2 text-xs" :disabled="!!motivoSemFoto || enviandoFoto || (!!envioFoto?.legenda_obrigatoria && !legendaFoto.trim())" title="mandar a foto ao comprador" @click="enviarFoto()">
+                <Loader2 v-if="enviandoFoto" class="mr-1 size-3.5 animate-spin" /><Send v-else class="mr-1 size-3.5" /> Enviar foto
+              </Button>
+              <Button size="sm" variant="ghost" class="h-7 px-2 text-xs" :disabled="enviandoFoto" title="descartar a foto (nada foi enviado)" @click="descartarFoto"><X class="mr-1 size-3.5" /> Descartar</Button>
+            </div>
+          </div>
+
+          <!-- nota interna (só a equipe vê) -->
+          <AtendimentoNota
+            v-if="modoCaixa === 'nota' && !conversa.somente_leitura"
+            caixa
+            :conversa-id="conversa.id"
+            :can-edit="canEdit"
+            @criada="aoCriarNota"
+          />
+
           <!-- modo observação: quem responde é o Duoke; aqui, o que a IA responderia -->
           <AtendimentoObservacao
-            v-if="observacao"
+            v-else-if="observacao"
             :sugestao="sugestaoAtual"
             :can-edit="canEdit"
             :pode-sugerir="podeSugerir"
@@ -1945,9 +2430,13 @@ watch(() => props.conversaId, (novo, velho) => {
         :cliente="cliente"
         :leitura-ativa="flags?.leitura_ativa !== false"
         :atualizavel="detalhe.pedido_atualizavel ?? null"
+        :painel="painelDados"
+        :painel-carregando="painelCarregando"
+        :painel-erro="painelErro"
         @fechar="alternarPedido"
         @atualizado="aoAtualizarPedido"
         @ir-para="irPara"
+        @recarregar-painel="(atualizar: boolean) => carregarPainel(detalhe!.conversa.id, atualizar)"
       />
     </aside>
 

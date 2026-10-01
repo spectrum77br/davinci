@@ -1,9 +1,125 @@
 <script lang="ts">
+import type { PerfilAdsPower } from '~/components/AtendimentoAdsPower.vue'
+
 // Hora do último "atualizar" por conversa, fora do componente: o painel é
 // remontado a cada troca de conversa, e a trava de 60 s (a mesma do backend)
 // não pode zerar só porque a pessoa foi e voltou.
 const ultimaAtualizacao = new Map<string, number>()
 const TRAVA_MS = 60_000
+
+// ─── painel do pedido (01/10/2026, item 3 do Comunicador) ───────────────────
+// GET /api/atendimento/conversas/{id}/painel (routers/atendimento_painel.py):
+// estoque por item, margem (a da aba Margem), Observações do Bling (ao vivo,
+// 5 min de memória), links e o perfil do AdsPower. Quem busca é a conversa
+// (AtendimentoConversa) — o cabeçalho usa o AdsPower daqui. Cada bloco pode
+// vir vazio com o porquê: a tela desenha o que vier.
+export type LotePainel = {
+  lote: string
+  sku: string
+  saldo: number | null
+  atualizado_em: string | null
+  de_venda: boolean
+  rotulo: string | null
+  proprio: boolean
+  ativo: boolean
+}
+export type ComponentePainel = {
+  sku: string | null
+  nome: string | null
+  existe: boolean
+  quantidade_por_kit: number
+  necessario: number | null
+  saldo: number | null
+  atualizado_em: string | null
+  cobre: boolean | null
+}
+export type ItemEstoque = {
+  sku: string | null
+  descricao: string | null
+  nome: string | null
+  existe: boolean | null
+  ativo: boolean
+  quantidade: number | null
+  saldo: number | null
+  atualizado_em: string | null
+  cobre: boolean | null
+  lote: string | null
+  lotes: LotePainel[]
+  saldo_outros_lotes: number
+  kit: boolean
+  componentes: ComponentePainel[]
+  falhou: boolean
+}
+export type ItemMargem = {
+  sku: string | null
+  produto: string | null
+  quantidade: number | null
+  margem: number | null
+  margem_minima: number | null
+  abaixo_da_minima: boolean | null
+  status: string | null
+  data_especial: boolean
+  aguardando_repasse: boolean
+  lucro?: number | null
+  custo?: number | null
+}
+export type MargemPainel = {
+  na_margem: boolean
+  status: string | null
+  margem: number | null
+  margem_minima: number | null
+  abaixo_da_minima: boolean | null
+  lucro?: number | null
+  itens: ItemMargem[]
+  aviso: string | null
+  falhou: boolean
+}
+export type ObservacoesBling = {
+  observacoes: string | null
+  observacoes_internas: string | null
+  lido_em: string | null
+  do_cache: boolean
+  erro: string | null
+  codigo: string | null
+}
+export type EnvioFoto = {
+  pode: boolean
+  motivo: string | null
+  codigo: string | null
+  tipos: string[]
+  max_bytes: number
+  legenda_obrigatoria: boolean
+  legenda_permitida: boolean
+}
+export type Painel = {
+  pedido: { numero_bling: string; bling_id: number | null; numeroloja: string | null; situacao_id: string | null; situacao: string | null } | null
+  estoque: { itens: ItemEstoque[]; fonte: string; falhou: boolean }
+  margem: MargemPainel | null
+  ve_margem: boolean
+  observacoes_bling: ObservacoesBling | null
+  links: { bling: string | null; plataforma: { url: string; rotulo: string } | null }
+  // O tipo mora no botão (AtendimentoAdsPower.vue).
+  adspower: PerfilAdsPower
+  envio_foto: EnvioFoto
+  gerado_em: string | null
+}
+
+// Margem em fração (0.165) → "16,5%" (como a aba Margem).
+export function pct(v: number | null | undefined): string {
+  if (v === null || v === undefined || Number.isNaN(Number(v))) return '—'
+  return `${(Number(v) * 100).toFixed(1).replace('.', ',')}%`
+}
+
+// O saldo do lote comprado contra a quantidade: verde cobre, vermelho não
+// cobre, cinza sem dado. O saldo é o disponível no Bling (já sem o que está
+// reservado para pedidos em aberto).
+export function situacaoDoSaldo(it: Pick<ItemEstoque, 'existe' | 'saldo' | 'quantidade' | 'cobre'>): { nivel: 'cobre' | 'falta' | 'sem_dado'; texto: string } {
+  if (it.existe === false) return { nivel: 'sem_dado', texto: 'SKU fora do catálogo do DaVinci' }
+  if (it.saldo === null || it.saldo === undefined) return { nivel: 'sem_dado', texto: 'sem saldo lido' }
+  if (it.cobre === true) return { nivel: 'cobre', texto: `cobre ${it.quantidade ?? ''}`.trim() }
+  if (it.cobre === false) return { nivel: 'falta', texto: `não cobre ${it.quantidade ?? ''}`.trim() }
+  return { nivel: 'sem_dado', texto: '' }
+}
 </script>
 
 <script setup lang="ts">
@@ -24,15 +140,23 @@ const TRAVA_MS = 60_000
 // - Cupom: desenhada, "em breve" (ainda não liga com a plataforma).
 // - Em cima das abas (parte 2, P5), o cartão "Cliente" (AtendimentoCliente):
 //   quem é este comprador para a loja, em duas linhas, e a linha do tempo.
+// - Painel do pedido (01/10/2026, item 3): na aba Pedido, "Abrir no Bling" /
+//   "Abrir na plataforma" no topo e, depois do retrato, Estoque (lote
+//   comprado, lotes irmãos, kit), Margem (a da aba Margem) e Observações do
+//   Bling (só leitura). Vem em `painel` (a conversa busca).
 import {
   CheckCircle2,
   ChevronDown,
   ChevronRight,
   Copy,
   ExternalLink,
+  Layers,
+  Loader2,
   MessageCircleQuestion,
   MessagesSquare,
+  NotebookPen,
   Package,
+  Percent,
   RotateCcw,
   Store,
   Ticket,
@@ -81,13 +205,20 @@ const props = withDefaults(defineProps<{
   // conectada, canal não desligado, leitura ligada). `false` esconde o
   // "atualizar"; ausente (API antiga), vale o resto das condições.
   atualizavel?: boolean | null
-}>(), { cliente: null, leituraAtiva: true, atualizavel: null })
+  // Painel do pedido (GET /conversas/{id}/painel): estoque, margem,
+  // Observações do Bling, links. null enquanto carrega (ou se falhou).
+  painel?: Painel | null
+  painelCarregando?: boolean
+  painelErro?: string | null
+}>(), { cliente: null, leituraAtiva: true, atualizavel: null, painel: null, painelCarregando: false, painelErro: null })
 const emit = defineEmits<{
   (e: 'fechar'): void
   (e: 'atualizado', r: { pedido_mkt: PedidoMkt | null; produto: CartaoProduto | null }): void
   // Clique num item da linha do tempo que não é o pedido desta conversa: a
   // conversa decide (rolar até a mensagem, abrir outra conversa).
   (e: 'irPara', ev: EventoCliente): void
+  // Reler o painel; `true` = reler as Observações no Bling na hora.
+  (e: 'recarregarPainel', atualizar: boolean): void
 }>()
 const { api } = useApi()
 const toasts = useToasts()
@@ -299,6 +430,36 @@ function nfStatus(s: string | null | undefined): string {
   const cod = (s || '').trim()
   return NF_STATUS[cod.toLowerCase()] || cod
 }
+
+// ─── painel do pedido: estoque, margem, observações, links ──────────────────
+const pnl = computed(() => props.painel)
+const linksPedido = computed(() => pnl.value?.links ?? { bling: null, plataforma: null })
+const itensEstoque = computed(() => pnl.value?.estoque?.itens ?? [])
+const margemPedido = computed(() => pnl.value?.margem ?? null)
+const obsBling = computed(() => pnl.value?.observacoes_bling ?? null)
+const NIVEL_SALDO_CLS = {
+  cobre: 'bg-emerald-500/15 text-emerald-800 dark:text-emerald-300',
+  falta: 'bg-red-500/15 text-red-700 dark:text-red-300',
+  sem_dado: 'bg-muted text-muted-foreground',
+} as const
+function lotesIrmaos(it: ItemEstoque) {
+  return (it.lotes || []).filter((l) => !l.proprio)
+}
+const STATUS_MARGEM_CLS: Record<string, string> = {
+  Aprovado: 'bg-emerald-500/15 text-emerald-800 dark:text-emerald-300',
+  Pendente: 'bg-amber-500/20 text-amber-800 dark:text-amber-300',
+  Reprovado: 'bg-red-500/15 text-red-700 dark:text-red-300',
+}
+function margemCls(m: number | null | undefined, minima: number | null | undefined) {
+  if (m === null || m === undefined) return 'text-muted-foreground'
+  return m >= (minima ?? 0) ? 'text-emerald-700 dark:text-emerald-400' : 'text-red-600 dark:text-red-400'
+}
+// A Margem só mostra o lucro a admin; aqui vem só quando a API manda.
+const temLucro = computed(() => margemPedido.value?.lucro !== undefined && margemPedido.value?.lucro !== null)
+const linkMargem = computed(() => {
+  const n = pnl.value?.pedido?.numero_bling
+  return n ? `/margem?pedido=${encodeURIComponent(n)}` : '/margem'
+})
 </script>
 
 <template>
@@ -329,6 +490,34 @@ function nfStatus(s: string | null | undefined): string {
     <div class="min-h-0 flex-1 overflow-y-auto overscroll-contain text-sm">
       <!-- ═══ PEDIDO ═══ -->
       <div v-if="aba === 'pedido'" class="space-y-4 px-3 py-3">
+        <!-- nº do Bling e os botões "Abrir no Bling" / "Abrir na plataforma" -->
+        <div v-if="pnl?.pedido || linksPedido.bling || linksPedido.plataforma" class="flex flex-wrap items-center gap-1.5 text-xs">
+          <span v-if="pnl?.pedido" class="inline-flex min-w-0 items-center gap-1" :title="pnl.pedido.situacao ? `situação no Bling: ${pnl.pedido.situacao}` : ''">
+            <span class="text-muted-foreground">Bling</span>
+            <span class="font-mono">{{ pnl.pedido.numero_bling }}</span>
+            <button type="button" class="rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground" title="copiar nº do Bling" aria-label="copiar nº do Bling" @click="copiarTexto(pnl.pedido.numero_bling, 'Nº do Bling')"><Copy class="size-3" /></button>
+            <span v-if="pnl.pedido.situacao" class="truncate rounded bg-muted px-1.5 py-px text-[11px]">{{ pnl.pedido.situacao }}</span>
+          </span>
+          <span class="ml-auto flex flex-wrap items-center gap-1">
+            <a
+              v-if="linksPedido.bling"
+              :href="linksPedido.bling"
+              target="_blank"
+              rel="noopener noreferrer"
+              class="inline-flex items-center gap-0.5 rounded border px-1.5 py-0.5 hover:bg-muted"
+              title="abrir o pedido no Bling (outra aba) — aqui é só leitura"
+            >Abrir no Bling<ExternalLink class="size-3" /></a>
+            <a
+              v-if="linksPedido.plataforma"
+              :href="linksPedido.plataforma.url"
+              target="_blank"
+              rel="noopener noreferrer"
+              class="inline-flex items-center gap-0.5 rounded border px-1.5 py-0.5 hover:bg-muted"
+              title="abrir o pedido no painel do vendedor (outra aba; se pedir login, use o botão AdsPower do cabeçalho)"
+            >{{ linksPedido.plataforma.rotulo }}<ExternalLink class="size-3" /></a>
+          </span>
+        </div>
+
         <template v-if="pm">
           <section class="space-y-1">
             <div class="flex items-center gap-2">
@@ -476,6 +665,131 @@ function nfStatus(s: string | null | undefined): string {
             <RotateCcw class="size-3.5" :class="{ 'animate-spin': atualizando }" /> buscar na plataforma
           </button>
         </div>
+
+        <!-- painel do pedido: carregando / falhou -->
+        <div v-if="painelCarregando && !pnl" class="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+          <Loader2 class="size-3.5 animate-spin" /> lendo estoque, margem e observações…
+        </div>
+        <div v-else-if="painelErro && !pnl" class="flex items-center gap-1.5 rounded-md border border-dashed px-2.5 py-1.5 text-[11px] text-muted-foreground">
+          <TriangleAlert class="size-3.5 shrink-0" />
+          <span class="flex-1">{{ painelErro }}</span>
+          <button type="button" class="underline hover:text-foreground" @click="emit('recarregarPainel', false)">tentar de novo</button>
+        </div>
+
+        <!-- ESTOQUE do que o comprador comprou (products.stock: o disponível no Bling) -->
+        <section v-if="itensEstoque.length" class="space-y-1.5">
+          <div class="flex items-center gap-1.5 text-[13px] font-semibold">
+            <Layers class="size-4 text-muted-foreground" /> Estoque
+            <span class="text-[11px] font-normal text-muted-foreground" title="saldo disponível no Bling (já sem o que está reservado para pedidos em aberto). Para confirmar uma troca, vale o saldo ao vivo do Bling.">· disponível no Bling</span>
+            <button v-if="pnl" type="button" class="ml-auto rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-50" :disabled="painelCarregando" title="ler o estoque de novo" aria-label="ler o estoque de novo" @click="emit('recarregarPainel', false)">
+              <RotateCcw class="size-3.5" :class="{ 'animate-spin': painelCarregando }" />
+            </button>
+          </div>
+          <ul class="space-y-2">
+            <li v-for="(it, i) in itensEstoque" :key="`${it.sku}-${i}`" class="rounded-md border px-2.5 py-2 text-xs">
+              <div class="flex items-start gap-2">
+                <div class="min-w-0 flex-1">
+                  <div class="line-clamp-2 text-[12px]" :title="it.descricao || it.nome || ''">{{ it.descricao || it.nome || 'Produto' }}</div>
+                  <div class="mt-0.5 flex items-center gap-1.5 text-muted-foreground">
+                    <span class="font-mono">{{ it.sku }}</span>
+                    <span v-if="it.kit" class="rounded bg-muted px-1 text-[10px]">kit</span>
+                    <span v-if="it.quantidade" class="tabular-nums">× {{ it.quantidade }}</span>
+                  </div>
+                </div>
+                <div class="shrink-0 text-right">
+                  <div class="rounded px-1.5 py-0.5 font-semibold tabular-nums" :class="NIVEL_SALDO_CLS[situacaoDoSaldo(it).nivel]" :title="situacaoDoSaldo(it).texto">
+                    {{ it.saldo ?? '—' }}<span class="ml-1 font-normal">em estoque</span>
+                  </div>
+                  <div v-if="situacaoDoSaldo(it).texto" class="mt-0.5 text-[10px]" :class="situacaoDoSaldo(it).nivel === 'falta' ? 'text-red-700 dark:text-red-300' : 'text-muted-foreground'">{{ situacaoDoSaldo(it).texto }}</div>
+                </div>
+              </div>
+              <div v-if="it.atualizado_em" class="mt-1 text-[10px] text-muted-foreground">atualizado em {{ fmtDataHora(it.atualizado_em) }}</div>
+              <div v-if="it.falhou" class="mt-1 text-[10px] text-amber-800 dark:text-amber-300">Não consegui ler o saldo deste item agora.</div>
+              <!-- lotes irmãos: o mesmo produto em outro estoque -->
+              <div v-if="lotesIrmaos(it).length" class="mt-1.5 flex flex-wrap items-center gap-1 text-[11px]">
+                <span class="text-muted-foreground">Outros lotes:</span>
+                <span
+                  v-for="l in lotesIrmaos(it)"
+                  :key="l.sku"
+                  class="rounded border px-1 py-px tabular-nums"
+                  :class="[!l.de_venda ? 'border-dashed text-muted-foreground' : '', (l.saldo ?? 0) > 0 && l.de_venda ? 'border-emerald-500/40' : '']"
+                  :title="`${l.sku}${l.rotulo ? ` — ${l.rotulo}` : ''}${l.ativo ? '' : ' (inativo no Bling)'}${l.atualizado_em ? ` · atualizado em ${fmtDataHora(l.atualizado_em)}` : ''}`"
+                >.{{ l.lote }} {{ l.saldo ?? '—' }}</span>
+              </div>
+              <div v-if="it.cobre === false && it.saldo_outros_lotes > 0" class="mt-1 text-[11px] text-emerald-800 dark:text-emerald-300">
+                Há {{ it.saldo_outros_lotes }} em outros lotes de venda.
+              </div>
+              <!-- kit: cada componente com o que o pedido precisa -->
+              <ul v-if="it.componentes?.length" class="mt-1.5 space-y-0.5 border-t pt-1.5 text-[11px]">
+                <li v-for="(c, j) in it.componentes" :key="`${c.sku}-${j}`" class="flex items-center gap-1.5">
+                  <span class="min-w-0 truncate font-mono" :title="c.nome || ''">{{ c.sku || 'componente fora do catálogo' }}</span>
+                  <span v-if="c.necessario" class="text-muted-foreground">precisa {{ c.necessario }}</span>
+                  <span class="ml-auto rounded px-1 tabular-nums" :class="c.cobre === true ? NIVEL_SALDO_CLS.cobre : c.cobre === false ? NIVEL_SALDO_CLS.falta : NIVEL_SALDO_CLS.sem_dado">{{ c.saldo ?? '—' }}</span>
+                </li>
+              </ul>
+            </li>
+          </ul>
+        </section>
+
+        <!-- ENCAIXE (item 4, outro dev): o cartão de Ag. cancelamento e o botão
+             "Sugerir troca" entram AQUI, logo abaixo do estoque (contrato:
+             davinci-atendimento-nomes-para-o-dev.md §4 "Lugar reservado"). -->
+
+        <!-- MARGEM (a mesma da aba Margem) -->
+        <section v-if="pnl && pnl.pedido && !pnl.ve_margem" class="text-[11px] text-muted-foreground">
+          <Percent class="mr-1 inline size-3.5" />A margem aparece para quem tem acesso à aba Margem.
+        </section>
+        <section v-else-if="margemPedido" class="space-y-1.5">
+          <div class="flex items-center gap-1.5 text-[13px] font-semibold">
+            <Percent class="size-4 text-muted-foreground" /> Margem
+            <span v-if="margemPedido.status" class="rounded px-1.5 py-px text-[10px] font-medium" :class="STATUS_MARGEM_CLS[margemPedido.status] || 'bg-muted'">{{ margemPedido.status }}</span>
+            <NuxtLink :to="linkMargem" target="_blank" class="ml-auto inline-flex items-center gap-0.5 text-[11px] font-normal text-muted-foreground hover:text-foreground hover:underline" title="abrir na aba Margem (outra aba)">abrir <ExternalLink class="size-3" /></NuxtLink>
+          </div>
+          <div v-if="margemPedido.falhou" class="text-[11px] text-amber-800 dark:text-amber-300">Não consegui ler a margem agora.</div>
+          <template v-else-if="margemPedido.na_margem">
+            <dl class="grid grid-cols-[1fr_auto] gap-x-3 gap-y-1 text-xs">
+              <dt class="text-muted-foreground">Margem do pedido</dt>
+              <dd class="text-right font-semibold tabular-nums" :class="margemCls(margemPedido.margem, margemPedido.margem_minima)">{{ pct(margemPedido.margem) }}</dd>
+              <template v-if="margemPedido.margem_minima !== null">
+                <dt class="text-muted-foreground">Mínima</dt>
+                <dd class="text-right tabular-nums text-muted-foreground">{{ pct(margemPedido.margem_minima) }}</dd>
+              </template>
+              <template v-if="temLucro">
+                <dt class="text-muted-foreground">Lucro</dt>
+                <dd class="text-right tabular-nums" :class="margemCls(margemPedido.margem, margemPedido.margem_minima)">{{ fmtDinheiro(margemPedido.lucro ?? null, 'BRL') }}</dd>
+              </template>
+            </dl>
+            <ul v-if="margemPedido.itens.length > 1" class="space-y-0.5 text-[11px]">
+              <li v-for="(mi, k) in margemPedido.itens" :key="`${mi.sku}-${k}`" class="flex items-center gap-1.5">
+                <span class="min-w-0 truncate font-mono text-muted-foreground">{{ mi.sku }}</span>
+                <span class="ml-auto tabular-nums" :class="margemCls(mi.margem, mi.margem_minima)">{{ pct(mi.margem) }}</span>
+              </li>
+            </ul>
+            <p v-if="margemPedido.aviso" class="text-[11px] text-muted-foreground">{{ margemPedido.aviso }}</p>
+          </template>
+          <p v-else class="text-[11px] text-muted-foreground">{{ margemPedido.aviso }}</p>
+        </section>
+
+        <!-- OBSERVAÇÕES DO BLING (GET ao vivo do pedido, só leitura) -->
+        <section v-if="obsBling" class="space-y-1.5">
+          <div class="flex items-center gap-1.5 text-[13px] font-semibold">
+            <NotebookPen class="size-4 text-muted-foreground" /> Observações do Bling
+            <span class="text-[11px] font-normal text-muted-foreground">· só leitura</span>
+            <button type="button" class="ml-auto rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-50" :disabled="painelCarregando" title="ler de novo no Bling agora" aria-label="ler as observações de novo no Bling" @click="emit('recarregarPainel', true)">
+              <RotateCcw class="size-3.5" :class="{ 'animate-spin': painelCarregando }" />
+            </button>
+          </div>
+          <div v-if="obsBling.erro" class="rounded-md border border-dashed px-2.5 py-1.5 text-[11px] text-muted-foreground">{{ obsBling.erro }}</div>
+          <template v-else>
+            <div v-if="obsBling.observacoes" class="max-h-48 overflow-y-auto whitespace-pre-wrap break-words rounded-md bg-muted/50 px-2.5 py-1.5 text-xs">{{ obsBling.observacoes }}</div>
+            <div v-else class="text-[11px] text-muted-foreground">Sem observações no pedido.</div>
+            <div v-if="obsBling.observacoes_internas" class="space-y-0.5">
+              <div class="text-[11px] text-muted-foreground">Observações internas</div>
+              <div class="max-h-32 overflow-y-auto whitespace-pre-wrap break-words rounded-md bg-muted/50 px-2.5 py-1.5 text-xs">{{ obsBling.observacoes_internas }}</div>
+            </div>
+          </template>
+          <div v-if="obsBling.lido_em" class="text-[10px] text-muted-foreground">lido no Bling em {{ fmtDataHora(obsBling.lido_em) }}<template v-if="obsBling.do_cache"> (guardado por até 5 min)</template></div>
+        </section>
 
         <!-- No DaVinci -->
         <section class="rounded-md border">

@@ -42,6 +42,20 @@ CANAL_EMAIL = "email"
 # (`due_date`) e a Magalu mediando. Não é o "pós-venda" do ML (outra API,
 # outro limite, outra regra de bloqueio).
 CANAL_SAC = "sac"
+# Reclamação/mediação/devolução da plataforma (RF2, 01/10/2026): a conversa
+# que nasce da reclamação do ML (as mensagens do comprador e do mediador, o
+# "Com Meli"), com `externo_id` = id da reclamação. NÃO entra em
+# `CANAIS_POR_PLATAFORMA`: não é uma caixa lida pelo cron do sync
+# (`sync.garantir_canais` criaria um canal por conta ML e o adaptador de chat
+# tentaria lê-lo) — quem a escreve é `services/atendimento/reclamacoes.py`.
+CANAL_RECLAMACAO = "reclamacao"
+
+# Canais que são SEMPRE depois da compra, com ou sem número de pedido gravado
+# na conversa: pós-venda do ML (pack), SAC da Magalu, e-mail da Amazon e a
+# reclamação. Nos demais (chat), o que decide é o pedido ligado; a pergunta
+# no anúncio é sempre antes. É a regra dos filtros Pré-venda/Pós-venda da
+# lista e da etiqueta (`etiqueta_fatos.e_pos_venda`) — um lugar só.
+CANAIS_SEMPRE_POS_VENDA = (CANAL_POS_VENDA, CANAL_SAC, CANAL_EMAIL, CANAL_RECLAMACAO)
 
 # O ML tem DUAS caixas por conta, com API, prazo e limite diferentes:
 # pergunta pré-venda (pública, no anúncio) e mensagem pós-venda (por pack).
@@ -156,16 +170,39 @@ LIMITE_PADRAO_CARACTERES = 1000
 AUTOR_CLIENTE = "cliente"
 AUTOR_LOJA = "loja"
 AUTOR_SISTEMA = "sistema"
-AUTORES = (AUTOR_CLIENTE, AUTOR_LOJA, AUTOR_SISTEMA)
+# A plataforma falando NA reclamação (o mediador do ML, o "Com Meli"; 01/10/2026).
+# Não é o comprador nem a loja: não conta como fala do cliente na fila nem
+# como resposta da loja.
+AUTOR_MEDIADOR = "mediador"
+AUTORES = (AUTOR_CLIENTE, AUTOR_LOJA, AUTOR_SISTEMA, AUTOR_MEDIADOR)
+# Quem escreveu a NOTA INTERNA (01/10/2026): a equipe, no DaVinci — não é
+# autor de plataforma (fica fora de AUTORES: a nota não passa pelo
+# `gravar_mensagem`). NÃO é `sistema`: o SAC da Magalu usa a última
+# mensagem `sistema` para decidir de quem é a vez e para quem vai a
+# resposta — uma nota `sistema` mandaria a resposta ao lugar errado.
+AUTOR_EQUIPE = "equipe"
 
 ORIGEM_CLIENTE = "cliente"
 ORIGEM_HUMANO = "davinci_humano"
 ORIGEM_IA = "davinci_ia"
 ORIGEM_EXTERNO = "externo"
 ORIGEM_SISTEMA = "sistema"
+# NOTA INTERNA (01/10/2026): escrita pela equipe no DaVinci, só a equipe vê.
+# Nunca é enviada, não conta como resposta, fica fora da pendência e não vai
+# para a IA como fala do comprador. Vem com `tipo = TIPO_NOTA`.
+ORIGEM_NOTA = "davinci_nota"
 # As que NÓS mandamos: só elas podem ser "adotadas" quando o sync traz de
-# volta a mensagem que acabamos de enviar.
+# volta a mensagem que acabamos de enviar. A nota NÃO entra: ela não sai.
 ORIGENS_DAVINCI = (ORIGEM_HUMANO, ORIGEM_IA)
+
+# Tipo da mensagem da nota interna (os outros tipos vêm da plataforma:
+# texto, imagem, video, produto, pedido, arquivo, outro).
+TIPO_NOTA = "nota"
+
+
+def e_nota(origem: str | None, tipo: str | None = None) -> bool:
+    """A mensagem é NOTA INTERNA? Quem monta fila, prévia, pendência e prompt pula ela."""
+    return origem == ORIGEM_NOTA or tipo == TIPO_NOTA
 
 # ── Estados da mensagem ───────────────────────────────────────────────────
 # Entrada: `recebida`. Saída: enviando → enviada | falhou | revisar.
@@ -182,6 +219,67 @@ CONVERSA_ABERTA = "aberta"
 CONVERSA_RESPONDIDA = "respondida"
 CONVERSA_FECHADA = "fechada"
 CONVERSA_BLOQUEADA = "bloqueada"
+
+# ── Etiqueta = status atual da conversa (RF1, decidido em 01/10/2026) ─────
+# UMA etiqueta por conversa, que muda sozinha quando o status muda
+# (PÓS-VENDA → RECLAMAÇÃO). Quem calcula e grava é
+# `services/atendimento/etiqueta.recalcular_etiqueta` — ninguém grava a
+# coluna direto. CANAL NUNCA É ETIQUETA: e-mail, Zap e a própria reclamação
+# são `canal`; a etiqueta é o status do pedido.
+ETIQUETA_PRE_VENDA = "pre_venda"
+ETIQUETA_POS_VENDA = "pos_venda"
+ETIQUETA_RECLAMACAO = "reclamacao"
+ETIQUETA_DEVOLUCAO = "devolucao"
+ETIQUETA_AG_CANCELAMENTO = "ag_cancelamento"
+# Da MAIS urgente para a menos: duas coisas abertas ao mesmo tempo, vale a
+# primeira e a outra vira o indicador pequeno (`etiquetas_secundarias`).
+# As que vêm depois entram NO LUGAR CERTO desta ordem quando a fonte existir:
+# `avaliacao` e `carrinho` entre Devolução e Pré-venda; `sac`, `atacado`,
+# `duvidas_sugestoes` (sites) e `midia` (redes) ainda sem lugar decidido.
+PRIORIDADE_ETIQUETAS: tuple[str, ...] = (
+    ETIQUETA_RECLAMACAO,
+    ETIQUETA_AG_CANCELAMENTO,
+    ETIQUETA_DEVOLUCAO,
+    ETIQUETA_PRE_VENDA,
+    ETIQUETA_POS_VENDA,
+)
+ETIQUETAS = PRIORIDADE_ETIQUETAS
+# A etiqueta de BASE (sem nada aberto): pelo pedido ligado. Nunca aparece
+# como indicador secundário — toda conversa tem uma das duas.
+ETIQUETAS_BASE = (ETIQUETA_PRE_VENDA, ETIQUETA_POS_VENDA)
+# Como a tela escreve (o histórico também: "de Pós-venda para Reclamação").
+ROTULO_ETIQUETA: dict[str, str] = {
+    ETIQUETA_PRE_VENDA: "Pré-venda",
+    ETIQUETA_POS_VENDA: "Pós-venda",
+    ETIQUETA_RECLAMACAO: "Reclamação",
+    ETIQUETA_DEVOLUCAO: "Devolução",
+    ETIQUETA_AG_CANCELAMENTO: "Ag. cancelamento",
+}
+
+
+def rotulo_etiqueta(etiqueta: str | None) -> str:
+    """"Reclamação", "Pós-venda"... — o id cru para etiqueta que ainda não tem nome."""
+    if not etiqueta:
+        return "—"
+    return ROTULO_ETIQUETA.get(etiqueta, etiqueta)
+
+
+# ── Reclamações, mediações e devoluções da plataforma (RF2) ──────────────
+# `atendimento_reclamacoes.tipo`. A reclamação do ML que subiu para a
+# plataforma decidir é `mediacao`; Shopee/TikTok: disputa = `reclamacao`,
+# pedido de devolução/reembolso = `devolucao`.
+RECLAMACAO_TIPO_RECLAMACAO = "reclamacao"
+RECLAMACAO_TIPO_MEDIACAO = "mediacao"
+RECLAMACAO_TIPO_DEVOLUCAO = "devolucao"
+TIPOS_RECLAMACAO = (
+    RECLAMACAO_TIPO_RECLAMACAO,
+    RECLAMACAO_TIPO_MEDIACAO,
+    RECLAMACAO_TIPO_DEVOLUCAO,
+)
+# Os tipos que viram a etiqueta RECLAMAÇÃO (o resto, DEVOLUÇÃO). ABERTA =
+# `encerrada_em IS NULL` — o `status` é o da plataforma, cru (cada uma tem o
+# seu vocabulário), e não decide nada sozinho.
+TIPOS_QUE_SAO_RECLAMACAO = (RECLAMACAO_TIPO_RECLAMACAO, RECLAMACAO_TIPO_MEDIACAO)
 
 # ── Estados do rascunho da IA ─────────────────────────────────────────────
 # substituido = alguém respondeu sem usar a sugestão (pelo DaVinci ou por fora)
@@ -399,9 +497,13 @@ def limite_caracteres(plataforma: str, canal: str) -> int:
 def reclamacao_aberta(dados: object) -> bool:
     """A conversa tem reclamação/mediação aberta no ML (`dados.claim_ids`)?
 
-    O adaptador do ML regrava `claim_ids` a cada leitura do pack (vazio
-    quando a reclamação acaba). Com ela aberta, quem responde é pessoa: o
-    que se diz ali entra na mediação.
+    O adaptador do ML regrava `claim_ids` a cada leitura do pack. Com ela
+    aberta, quem responde é pessoa: o que se diz ali entra na mediação.
+
+    Medido em produção (01/10/2026): o ML NÃO esvazia `claim_ids` quando a
+    reclamação acaba (nem tira a de cancelamento). Aqui isso só deixa a IA e
+    o envio mais cautelosos (pessoa responde); a ETIQUETA usa a regra estrita
+    de `etiqueta_fatos._claims_do_pack` (chat bloqueado pela reclamação).
     """
     return isinstance(dados, dict) and bool(dados.get("claim_ids"))
 

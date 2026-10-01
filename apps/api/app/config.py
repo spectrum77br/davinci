@@ -412,6 +412,17 @@ class Settings(BaseSettings):
     # Cron que lê as conversas de cada loja (consulta periódica). Enquanto o
     # Duoke estiver ligado, o DaVinci NUNCA marca nada como lido.
     atendimento_leitura_ativa: bool = False
+    # Comunicador (01/10/2026): os dois crons novos têm interruptor PRÓPRIO,
+    # além da leitura (os dois precisam estar ligados). Com a leitura já
+    # ligada em produção, sem isto o deploy ligaria sozinho:
+    #   • `atendimento_reclamacoes` (:06…): GET nas reclamações de todas as
+    #     contas do ML (busca, mensagens, devolução, reputação) e as conversas
+    #     `reclamacao` com prazo — que entram em "Falta responder";
+    #   • `atendimento_etiquetas` (:08…): grava etiqueta e histórico em ~3.700
+    #     conversas a cada 10 min.
+    # Desligado aqui = só aquele cron fica parado; a leitura das caixas segue.
+    atendimento_reclamacoes_ativa: bool = False
+    atendimento_etiquetas_ativa: bool = False
     # Permite enviar — inclusive a pessoa pela tela. Desligado, o botão
     # "Enviar" recusa com `envio_desligado`; o canal ainda precisa estar em
     # humano/copiloto/auto.

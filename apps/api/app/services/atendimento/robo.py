@@ -73,6 +73,7 @@ from app.services.atendimento.constantes import (
     MSG_RECEBIDA,
     ORIGEM_CLIENTE,
     ORIGEM_EXTERNO,
+    ORIGEM_NOTA,
     ORIGEM_SISTEMA,
     PLATAFORMAS_ROBO,
     STATUS_CANAL_PARADO,
@@ -475,11 +476,20 @@ async def _ja_tem_o_id(session: AsyncSession, conversa_id, previa_id: str) -> bo
 
 
 async def _recentes(session: AsyncSession, conversa_id, n: int) -> list[AtendimentoMensagem]:
+    """As `n` últimas mensagens da conversa — sem a NOTA INTERNA.
+
+    A nota não veio da plataforma: como "última mensagem", a prévia repetida
+    da lista (só com a hora servida) seria comparada com ela e a mensagem do
+    comprador que já estava gravada entraria de novo.
+    """
     return list(
         (
             await session.execute(
                 select(AtendimentoMensagem)
-                .where(AtendimentoMensagem.conversa_id == conversa_id)
+                .where(
+                    AtendimentoMensagem.conversa_id == conversa_id,
+                    AtendimentoMensagem.origem != ORIGEM_NOTA,
+                )
                 .order_by(_momento().desc(), AtendimentoMensagem.created_at.desc())
                 .limit(n)
             )

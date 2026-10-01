@@ -24,6 +24,14 @@ coisas que ninguém pode esquecer ficam num lugar só:
    nossa resposta e o envio que grava o resultado dela não se travam um ao
    outro (deadlock), e ninguém deriva a fila de um retrato velho da conversa.
 
+5. A ETIQUETA (status atual, 01/10/2026) — recalculada AQUI quando a leitura
+   traz o que a decide: conversa nova, pedido ligado ou trocado, o pack/order
+   do ML, as reclamações do pack (`claim_ids`); e na primeira mensagem nova
+   de uma conversa que ainda não tem etiqueta. Mensagem comum não muda o
+   status: não recalcula (o sync passa por milhares delas). Quem calcula é
+   `etiqueta.recalcular_etiqueta`; o que muda fora da leitura (Bling,
+   Margem, reclamações) é com o cron (`etiqueta_cron`).
+
 Nada aqui commita: quem chama decide a transação (o sync commita no fim da
 rodada do canal; o envio commita antes e depois de chamar a plataforma).
 
@@ -51,10 +59,12 @@ from app.models import (
     AtendimentoRascunho,
     Integration,
 )
+from app.services.atendimento import etiqueta as etiqueta_svc
 from app.services.atendimento import lojas
 from app.services.atendimento.constantes import (
     AUTOR_CLIENTE,
     AUTOR_LOJA,
+    AUTOR_MEDIADOR,
     AUTOR_SISTEMA,
     AUTORES,
     AVALIACAO_OBSERVOU,
@@ -72,10 +82,12 @@ from app.services.atendimento.constantes import (
     MSG_REVISAR,
     ORIGEM_CLIENTE,
     ORIGEM_EXTERNO,
+    ORIGEM_NOTA,
     ORIGEM_SISTEMA,
     ORIGENS_DAVINCI,
     RASCUNHO_PENDENTE,
     RASCUNHO_SUBSTITUIDO,
+    e_nota,
     e_resposta_automatica,
     sla_horas,
 )
@@ -308,6 +320,49 @@ async def travar_linha(session: AsyncSession, obj, *, espera: str | None = None)
 
 # ── Conversa ──────────────────────────────────────────────────────────────
 
+# O acontecimento que vai entre parênteses na linha do tempo da etiqueta.
+MOTIVO_ETIQUETA_LEITURA = "leitura da plataforma"
+MOTIVO_ETIQUETA_MENSAGEM = "mensagem nova"
+
+
+def _o_que_decide_a_etiqueta(conversa: AtendimentoConversa) -> tuple:
+    """O que a LEITURA grava e muda a etiqueta: canal, pedido, pack/order, claims e substatus do ML.
+
+    Se nada disto mudou numa leitura, a etiqueta também não mudou por causa
+    dela — e o sync não paga o recálculo (3 consultas) a cada conversa.
+    """
+    dados = conversa.dados if isinstance(conversa.dados, dict) else {}
+    claims = dados.get("claim_ids")
+    return (
+        conversa.plataforma,
+        conversa.canal,
+        (conversa.pedido_marketplace or "").strip(),
+        str(dados.get("pack_id") or ""),
+        str(dados.get("order_id") or ""),
+        tuple(str(c) for c in claims) if isinstance(claims, list) else (),
+        # O chat bloqueado pela reclamação é o que liga a reserva dos claims
+        # (`etiqueta_fatos._claims_do_pack`).
+        str(dados.get("substatus_ml") or ""),
+    )
+
+
+async def _recalcular_etiqueta(
+    session: AsyncSession, conversa: AtendimentoConversa, *, motivo: str, travar: bool
+) -> None:
+    """A etiqueta da conversa pelos fatos de agora. Nunca derruba a gravação.
+
+    `travar` = trava (e relê) a conversa antes: uma troca à mão feita na tela
+    enquanto a leitura rodava não pode ser sobrescrita por um retrato velho
+    de `etiqueta_manual`. A conversa recém-criada não precisa (ninguém a viu).
+    Um fato que não se lê deixa a etiqueta como está (`recalcular_etiqueta`
+    roda os fatos num SAVEPOINT).
+    """
+    if travar:
+        await travar_linha(session, conversa)
+    await etiqueta_svc.recalcular_etiqueta(session, conversa, motivo=motivo)
+    # Como o resto do gravar: sai daqui gravado (flush), sem nada pendente.
+    await session.flush()
+
 
 async def _nome_da_loja(session: AsyncSession, integration: Integration | None) -> str | None:
     """O `conta` de quando o adaptador não mandou um: o nome da LOJA (parte 2, P2).
@@ -391,6 +446,9 @@ async def upsert_conversa(
     o que uma leitura anterior achou. `dados` é MESCLADO (chave a chave).
     `comprador_avatar` passa por `url_avatar` (URL que não serve para `<img>`
     conta como None). Nunca commita (só flush).
+
+    Recalcula a ETIQUETA na conversa nova e quando a leitura muda o que a
+    decide (`_o_que_decide_a_etiqueta`) — ou quando ela ainda não tem.
     """
     externo_id = _cabe(sem_nul(str(externo_id)), 191)
     conta = sem_nul(conta)
@@ -461,8 +519,12 @@ async def upsert_conversa(
             if conversa is None:
                 raise
         else:
+            await _recalcular_etiqueta(
+                session, nova, motivo=MOTIVO_ETIQUETA_LEITURA, travar=False
+            )
             return nova, True
 
+    decide_antes = _o_que_decide_a_etiqueta(conversa)
     if canal is not None and conversa.canal_id != canal.id:
         conversa.canal_id = canal.id
     if conta is not None:
@@ -480,6 +542,10 @@ async def upsert_conversa(
         # voltar a bater com as mensagens: aberta × respondida é derivada.
         recalcular(conversa)
     await session.flush()
+    if conversa.etiqueta is None or _o_que_decide_a_etiqueta(conversa) != decide_antes:
+        await _recalcular_etiqueta(
+            session, conversa, motivo=MOTIVO_ETIQUETA_LEITURA, travar=True
+        )
     return conversa, False
 
 
@@ -629,7 +695,9 @@ async def gravar_mensagem(
     if origem is None:
         if autor == AUTOR_CLIENTE:
             origem = ORIGEM_CLIENTE
-        elif autor == AUTOR_SISTEMA:
+        elif autor in (AUTOR_SISTEMA, AUTOR_MEDIADOR):
+            # O mediador (a plataforma na reclamação, 0353) é como o sistema:
+            # não é resposta da loja — nada de adotar nem de `externo`.
             origem = ORIGEM_SISTEMA
         else:
             nossa = await _nossa_para_adotar(session, conversa, texto, enviada_em)
@@ -689,6 +757,12 @@ async def gravar_mensagem(
         # mensagem que a sugestão responde deixa a sugestão para trás.
         await _aposentar_rascunho(session, conversa, mensagem)
     await session.flush()
+    if conversa.etiqueta is None:
+        # Conversa de antes da etiqueta (ainda sem): ganha a dela na primeira
+        # mensagem nova. Já está travada (acima).
+        await _recalcular_etiqueta(
+            session, conversa, motivo=MOTIVO_ETIQUETA_MENSAGEM, travar=False
+        )
     return mensagem, True
 
 
@@ -786,8 +860,13 @@ def recalcular(
     cima de uma que pode ter saído é o pior erro, e a tela mostra o
     `revisar`. Para refazer tudo do zero (status mudou, mensagem sumiu), use
     `recalcular_conversa`.
+
+    NOTA INTERNA (`constantes.e_nota`) não conta para nada: não é a última
+    mensagem da lista, nem fala do cliente, nem resposta da loja.
     """
     for m in mensagens_recentes:
+        if e_nota(m.origem, m.tipo):
+            continue
         quando = _quando(m)
         ultima = _utc(conversa.ultima_mensagem_em)
         if ultima is None or quando >= ultima:
@@ -819,7 +898,11 @@ async def recalcular_conversa(session: AsyncSession, conversa: AtendimentoConver
     válida da loja —, não a conversa inteira. Nunca commita.
     """
     momento = func.coalesce(AtendimentoMensagem.enviada_em, AtendimentoMensagem.created_at)
-    base = select(AtendimentoMensagem).where(AtendimentoMensagem.conversa_id == conversa.id)
+    # A nota interna fica de fora (não é a "última mensagem" da conversa).
+    base = select(AtendimentoMensagem).where(
+        AtendimentoMensagem.conversa_id == conversa.id,
+        AtendimentoMensagem.origem != ORIGEM_NOTA,
+    )
 
     async def _uma(q) -> AtendimentoMensagem | None:
         return (await session.execute(q.limit(1))).scalar_one_or_none()

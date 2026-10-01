@@ -43,6 +43,15 @@ pedido tem o que fazer; o manual ganha tipo/categoria/prioridade, e a API
 não deixa nascer regra batendo com regra (`manual.conflitos_da_regra` →
 409 `regra_conflitante`). Esses três módulos também entram na hora de usar,
 pelo nome: sem eles o router sobe e a tela cai no que já tinha.
+
+Etiqueta = status atual (RF1, 01/10/2026; `services/atendimento/etiqueta`):
+a lista e o detalhe trazem a etiqueta, o menu Filtrar filtra por ela
+(`filtro=reclamacao|devolucao|ag_cancelamento|pre_venda|pos_venda` ou
+`?etiqueta=`, que junta com qualquer filtro) e o /resumo conta as abertas
+por etiqueta. A troca à mão é o POST /conversas/{id}/etiqueta (fica na
+linha do tempo, `etiqueta_historico` do detalhe). A aba "Falta responder"
+vem pelo prazo mais curto (cursor `prazo:`), e a busca acha também pelo nº
+do Bling e pelo SKU.
 """
 
 from __future__ import annotations
@@ -59,7 +68,7 @@ from uuid import UUID
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from fastapi.encoders import jsonable_encoder
-from sqlalchemy import and_, case, exists, false, func, or_, select, text, true
+from sqlalchemy import String, and_, case, cast, exists, false, func, or_, select, text, true
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
@@ -77,6 +86,7 @@ from app.models import (
     AtendimentoModelo,
     AtendimentoRascunho,
     AtendimentoRegra,
+    BlingOrder,
     Integration,
     User,
     UserRole,
@@ -98,6 +108,9 @@ from app.schemas.atendimento import (
     ConversaUnicaOut,
     DescartarIn,
     EnvioOut,
+    EtiquetaHistoricoOut,
+    EtiquetaIn,
+    EtiquetaTrocaOut,
     FlagsOut,
     ListaConversasOut,
     ListaRegrasOut,
@@ -124,26 +137,30 @@ from app.schemas.atendimento import (
     SugestaoOut,
 )
 from app.services.atendimento import acesso, clientes, enviar, gravar, instagram, robo
+from app.services.atendimento import etiqueta as etiqueta_svc
 from app.services.atendimento.constantes import (
     ACAO_OBSERVOU,
     AUTOR_CLIENTE,
     AUTOR_LOJA,
     CANAIS_POR_PLATAFORMA,
+    CANAIS_SEMPRE_POS_VENDA,
     CANAL_EMAIL,
     CANAL_PERGUNTA,
-    CANAL_POS_VENDA,
-    CANAL_SAC,
     CATEGORIAS,
     CATEGORIAS_INFO,
     CATEGORIAS_SO_HUMANO,
     CONVERSA_ABERTA,
     CONVERSA_FECHADA,
+    ETIQUETA_POS_VENDA,
+    ETIQUETA_PRE_VENDA,
+    ETIQUETAS,
     MODO_AUTO,
     MODO_OBSERVAR,
     MSG_ENVIADA,
     MSG_FALHOU,
     MSG_REVISAR,
     ORIGEM_HUMANO,
+    ORIGEM_NOTA,
     ORIGENS_DAVINCI,
     PLATAFORMAS,
     PLATAFORMAS_CAIXA,
@@ -157,8 +174,10 @@ from app.services.atendimento.constantes import (
     RASCUNHO_SUBSTITUIDO,
     STATUS_CANAL_PARADO,
     STATUS_CANAL_SESSAO_CAIU,
+    TIPO_NOTA,
     TIPO_REGRA_CATEGORIA,
     limite_caracteres,
+    rotulo_etiqueta,
     sla_horas,
 )
 from app.services.atendimento.enviar import EnvioRecusado
@@ -206,11 +225,31 @@ FILTROS = (
     "fechadas",
     # 01/10/2026 (menu Filtrar, como o do Duoke):
     "automatica",
+    # Etiqueta = status atual (RF1, 01/10/2026): o menu filtra também pela
+    # etiqueta, com os códigos de `constantes.ETIQUETAS` (pré/pós-venda já
+    # eram filtro e passaram a ser a etiqueta).
     "pre_venda",
     "pos_venda",
+    "reclamacao",
+    "devolucao",
+    "ag_cancelamento",
 )
 # "Vencendo" = prazo da plataforma em menos de 2 h (e ainda não vencido).
 VENCENDO = timedelta(hours=2)
+# A aba "Falta responder" vem pelo PRAZO mais curto (sem prazo no fim), não
+# pela recência (decisão de 01/10/2026): a conversa que vence primeiro é a
+# primeira da fila. A página seguinte vem por este cursor (`prazo:` + o
+# prazo e o id do último item), em vez da `ultima_mensagem_em`.
+FILTROS_PELO_PRAZO = ("aguardando",)
+_CURSOR_PRAZO = "prazo:"
+# As DMs do Instagram esperando entram na mesma ordem pelo prazo: o
+# Instagram não pagina por prazo, então vêm todas (até este teto) e o
+# cursor é aplicado aqui.
+MAX_INSTAGRAM_PELO_PRAZO = 500
+# Busca por SKU (`bling_orders.item_codigo`): só pedidos deste período, e só
+# a partir de 3 letras (o espelho tem ~100 mil linhas-item).
+JANELA_BUSCA_SKU = timedelta(days=365)
+MIN_BUSCA_SKU = 3
 MAX_MENSAGENS_DETALHE = 300
 
 # Botão "Sincronizar": um pedido por minuto basta — o cron já lê a cada 2.
@@ -499,11 +538,111 @@ def _ultimo_tipo():
     momento = func.coalesce(AtendimentoMensagem.enviada_em, AtendimentoMensagem.created_at)
     return (
         select(AtendimentoMensagem.tipo)
-        .where(AtendimentoMensagem.conversa_id == AtendimentoConversa.id)
+        .where(
+            AtendimentoMensagem.conversa_id == AtendimentoConversa.id,
+            # A nota interna (só a equipe vê) não é a "última mensagem" da
+            # prévia — como em `gravar.recalcular` (`constantes.e_nota`).
+            AtendimentoMensagem.origem != ORIGEM_NOTA,
+            AtendimentoMensagem.tipo != TIPO_NOTA,
+        )
         .order_by(momento.desc(), AtendimentoMensagem.created_at.desc())
         .limit(1)
         .correlate(AtendimentoConversa)
         .scalar_subquery()
+    )
+
+
+def _etiqueta_efetiva():
+    """A etiqueta da conversa; a ainda não calculada (NULL) pela regra de pré/pós-venda.
+
+    É por ela que o menu Filtrar filtra e conta (01/10/2026): a conversa que
+    o motor ainda não classificou (antes do preenchimento, ou do primeiro
+    recálculo) não some do Pré-venda/Pós-venda. A regra é a mesma base do
+    motor (`etiqueta_fatos.e_pos_venda`): pós-venda/SAC/e-mail/reclamação
+    sempre depois da compra; pergunta, sempre antes; chat, pelo pedido.
+    """
+    pedido = func.coalesce(func.btrim(AtendimentoConversa.pedido_marketplace), "")
+    pos = or_(
+        AtendimentoConversa.canal.in_(CANAIS_SEMPRE_POS_VENDA),
+        and_(AtendimentoConversa.canal != CANAL_PERGUNTA, pedido != ""),
+    )
+    return func.coalesce(
+        AtendimentoConversa.etiqueta,
+        case((pos, ETIQUETA_POS_VENDA), else_=ETIQUETA_PRE_VENDA),
+    )
+
+
+def _cursor(antes_de: str | None, *, pelo_prazo: bool) -> tuple[datetime | None, str | None, bool]:
+    """O cursor da página (`antes_de`) → (momento, id, sem_prazo). Inválido → 422.
+
+    Ordem por recência: ISO da `ultima_mensagem_em` → (momento, None, False).
+    Ordem pelo prazo: `prazo:<ISO ou vazio>|<id>` → (prazo, id, prazo vazio).
+    """
+    bruto = (antes_de or "").strip()
+    if not bruto:
+        return None, None, False
+    invalido = HTTPException(422, detail={"code": "cursor_invalido"})
+    if pelo_prazo != bruto.startswith(_CURSOR_PRAZO):
+        raise invalido
+    if pelo_prazo:
+        prazo_txt, sep, ident = bruto[len(_CURSOR_PRAZO) :].partition("|")
+        if not sep or not ident.strip():
+            raise invalido
+        if not prazo_txt.strip():
+            return None, ident.strip(), True
+        bruto = prazo_txt
+    else:
+        ident = None
+    texto = bruto.strip().replace("Z", "+00:00")
+    if "T" in texto:
+        # O "+" do fuso que chegou sem escape na URL vira espaço.
+        texto = texto.replace(" ", "+")
+    try:
+        momento = datetime.fromisoformat(texto)
+    except ValueError as e:
+        raise invalido from e
+    return _utc(momento), (ident.strip() if ident else None), False
+
+
+def _cursor_do_prazo(item: dict[str, Any]) -> str:
+    prazo = item.get("prazo_resposta_em")
+    return f"{_CURSOR_PRAZO}{prazo.isoformat() if prazo else ''}|{item['id']}"
+
+
+def _chave_do_prazo(item: dict[str, Any]) -> tuple:
+    """Ordem da aba "Falta responder": prazo mais curto primeiro, sem prazo no fim, id no empate."""
+    prazo = item.get("prazo_resposta_em")
+    return (prazo is None, prazo.timestamp() if prazo else 0.0, str(item["id"]))
+
+
+def _depois_do_cursor(item: dict[str, Any], prazo: datetime | None, ident: str | None,
+                      sem_prazo: bool) -> bool:
+    """O item vem DEPOIS do cursor na ordem pelo prazo? (o mesmo corte do SQL)."""
+    if ident is None:
+        return True
+    return _chave_do_prazo(item) > (sem_prazo, prazo.timestamp() if prazo else 0.0, ident)
+
+
+def _busca_no_bling(termo: str):
+    """Os nº na plataforma dos pedidos do Bling com este nº do Bling ou com este SKU.
+
+    A busca da lista (01/10/2026) acha a conversa também pelo nº do Bling
+    (`bling_orders.numero`, exato) e pelo SKU do item (`item_codigo`, pedaço,
+    nos pedidos do último ano). CTE: o Postgres lê o espelho uma vez para as
+    três colunas que casam (pedido, pack e order do ML).
+    """
+    conds = [BlingOrder.numero == termo]
+    if len(termo) >= MIN_BUSCA_SKU:
+        conds.append(
+            and_(
+                BlingOrder.data >= datetime.now(UTC) - JANELA_BUSCA_SKU,
+                BlingOrder.item_codigo.ilike(f"%{_escapar_like(termo)}%", escape="\\"),
+            )
+        )
+    return (
+        select(BlingOrder.numeroloja)
+        .where(or_(*conds), BlingOrder.numeroloja.is_not(None))
+        .cte("atd_busca_bling")
     )
 
 
@@ -629,6 +768,13 @@ def _resumo_dict(
         "sem_resposta_necessaria": c.sem_resposta_necessaria,
         "somente_leitura": False,
         "envio_a_conferir": bool(a_conferir),
+        # Etiqueta = status atual: quem grava é `services/atendimento/etiqueta`.
+        "etiqueta": c.etiqueta,
+        "etiqueta_desde": _utc(c.etiqueta_desde),
+        "etiquetas_secundarias": [
+            e for e in (c.etiquetas_secundarias or []) if isinstance(e, str)
+        ],
+        "etiqueta_manual": bool(c.etiqueta_manual),
     }
 
 
@@ -698,7 +844,8 @@ def _mensagem_out(
 ) -> MensagemOut:
     if m.autor == AUTOR_CLIENTE:
         autor_nome = conversa.comprador_nome
-    elif m.origem == ORIGEM_HUMANO:
+    elif m.origem in (ORIGEM_HUMANO, ORIGEM_NOTA):
+        # Quem da equipe enviou — ou escreveu a nota interna.
         autor_nome = nomes.get(m.autor_user_id) if m.autor_user_id else None
     else:
         autor_nome = None
@@ -864,6 +1011,14 @@ async def resumo(
     cond = _clausula_escopo(scope, AtendimentoConversa.integration_id)
 
     nao_lidas = func.coalesce(func.sum(AtendimentoConversa.nao_lidas), 0)
+    # Conversas NÃO fechadas por etiqueta (o menu Filtrar), na mesma ordem de
+    # `ETIQUETAS`; a ainda não calculada conta pela regra de pré/pós-venda.
+    aberta = AtendimentoConversa.situacao != CONVERSA_FECHADA
+    efetiva = _etiqueta_efetiva()
+    por_etiqueta = [func.count().filter(aberta, efetiva == e) for e in ETIQUETAS]
+
+    def _etiquetas(contagens) -> dict[str, int]:
+        return {e: int(n or 0) for e, n in zip(ETIQUETAS, contagens, strict=True)}
 
     q_plat = select(
         AtendimentoConversa.plataforma,
@@ -872,6 +1027,7 @@ async def resumo(
         func.count().filter(vencidas),
         func.count().filter(_a_conferir_existe()),
         nao_lidas,
+        *por_etiqueta,
     ).group_by(AtendimentoConversa.plataforma)
     if cond is not None:
         q_plat = q_plat.where(cond)
@@ -883,8 +1039,9 @@ async def resumo(
             vencidas=x or 0,
             a_conferir=r or 0,
             nao_lidas=int(n or 0),
+            etiquetas=_etiquetas(etq),
         )
-        for p, a, v, x, r, n in (await session.execute(q_plat)).all()
+        for p, a, v, x, r, n, *etq in (await session.execute(q_plat)).all()
     }
     canais = await _canais(session, scope)
     # As do robô (Temu/AliExpress) só quando existem: loja com canal ou conversa.
@@ -928,6 +1085,7 @@ async def resumo(
         func.count().filter(aguardando),
         func.count().filter(vencidas),
         nao_lidas,
+        *por_etiqueta,
     ).group_by(AtendimentoConversa.integration_id, AtendimentoConversa.plataforma, canal_robo)
     if cond is not None:
         q_loja = q_loja.where(cond)
@@ -940,8 +1098,9 @@ async def resumo(
             nao_lidas=int(n or 0),
             aguardando=a or 0,
             vencidas=x or 0,
+            etiquetas=_etiquetas(etq),
         )
-        for i, p, rc, conta, a, x, n in (await session.execute(q_loja)).all()
+        for i, p, rc, conta, a, x, n, *etq in (await session.execute(q_loja)).all()
     }
     canais_da_loja: dict[tuple[UUID | None, str, UUID | None], list[CanalOut]] = {}
     for c in canais:
@@ -979,6 +1138,7 @@ async def resumo(
     return ResumoOut(
         plataformas=plataformas,
         a_conferir=sum(p.a_conferir for p in plataformas),
+        etiquetas={e: sum(p.etiquetas.get(e, 0) for p in plataformas) for e in ETIQUETAS},
         lojas=sorted(
             lojas.values(),
             key=lambda lj: (
@@ -1014,9 +1174,10 @@ async def _listar_marketplace(
     canal: str | None,
     filtro: str,
     q: str | None,
-    antes_de: datetime | None,
+    antes_de: str | None,
     limite: int,
     canal_id: UUID | None = None,
+    etiqueta: str | None = None,
 ) -> list[dict[str, Any]]:
     agora = datetime.now(UTC)
     tem = _pendente_existe()
@@ -1064,22 +1225,21 @@ async def _listar_marketplace(
         # Esperando, mas a ÚLTIMA mensagem é da loja: só a resposta automática
         # (robô do Duoke, campanha) falou depois do comprador.
         consulta = consulta.where(aguardando, AtendimentoConversa.ultima_autor == AUTOR_LOJA)
-    elif filtro in ("pre_venda", "pos_venda"):
-        # Pergunta = antes da compra; Pós-venda/SAC/e-mail (Amazon) = depois.
-        # Chat (Shopee, TikTok, Magalu, Temu, AliExpress): pelo pedido ligado.
-        pos = or_(
-            AtendimentoConversa.canal.in_((CANAL_POS_VENDA, CANAL_SAC, CANAL_EMAIL)),
-            and_(
-                AtendimentoConversa.canal != CANAL_PERGUNTA,
-                AtendimentoConversa.pedido_marketplace.is_not(None),
-            ),
-        )
+    elif filtro in ETIQUETAS:
+        # Pela ETIQUETA (status atual): Pré-venda, Pós-venda, Reclamação,
+        # Devolução, Ag. cancelamento — as abertas (a fechada sai, como em
+        # "todas"). A ainda não calculada vale pela regra de pré/pós-venda
+        # (`_etiqueta_efetiva`).
         consulta = consulta.where(
-            AtendimentoConversa.situacao != CONVERSA_FECHADA,
-            pos if filtro == "pos_venda" else ~pos,
+            AtendimentoConversa.situacao != CONVERSA_FECHADA, _etiqueta_efetiva() == filtro
         )
+    if etiqueta:
+        # `?etiqueta=` junto de qualquer filtro (ex.: Falta responder + Reclamação).
+        consulta = consulta.where(_etiqueta_efetiva() == etiqueta)
     if q and q.strip():
-        termo = f"%{_escapar_like(q.strip())}%"
+        termo_exato = q.strip()
+        termo = f"%{_escapar_like(termo_exato)}%"
+        no_bling = select(_busca_no_bling(termo_exato).c.numeroloja)
         consulta = consulta.where(
             or_(
                 *(
@@ -1092,15 +1252,38 @@ async def _listar_marketplace(
                         AtendimentoConversa.externo_id,
                         AtendimentoConversa.ultima_mensagem_resumo,
                     )
-                )
+                ),
+                # O nº do Bling e o SKU (01/10/2026): o pedido achado no
+                # espelho do Bling, pelo nº na plataforma (ou o pack/order do ML).
+                AtendimentoConversa.pedido_marketplace.in_(no_bling),
+                AtendimentoConversa.dados["pack_id"].astext.in_(no_bling),
+                AtendimentoConversa.dados["order_id"].astext.in_(no_bling),
             )
         )
-    if antes_de is not None:
-        consulta = consulta.where(AtendimentoConversa.ultima_mensagem_em < antes_de)
-    consulta = consulta.order_by(
-        AtendimentoConversa.ultima_mensagem_em.desc().nulls_last(),
-        AtendimentoConversa.id.desc(),
-    ).limit(limite)
+    if filtro in FILTROS_PELO_PRAZO:
+        # Prazo mais curto primeiro, sem prazo no fim; o id (como texto, a
+        # mesma ordem das DMs do Instagram) desempata e é o cursor.
+        momento, ident, sem_prazo = _cursor(antes_de, pelo_prazo=True)
+        id_txt = cast(AtendimentoConversa.id, String)
+        if sem_prazo:
+            consulta = consulta.where(prazo.is_(None), id_txt > ident)
+        elif ident is not None:
+            consulta = consulta.where(
+                or_(
+                    prazo > momento,
+                    and_(prazo == momento, id_txt > ident),
+                    prazo.is_(None),
+                )
+            )
+        consulta = consulta.order_by(prazo.asc().nulls_last(), id_txt.asc())
+    else:
+        momento, _ident, _sem = _cursor(antes_de, pelo_prazo=False)
+        if momento is not None:
+            consulta = consulta.where(AtendimentoConversa.ultima_mensagem_em < momento)
+        consulta = consulta.order_by(
+            AtendimentoConversa.ultima_mensagem_em.desc().nulls_last(),
+            AtendimentoConversa.id.desc(),
+        )
     return [
         _resumo_dict(
             c,
@@ -1110,7 +1293,9 @@ async def _listar_marketplace(
             ultimo_tipo=tipo,
             pendentes=pend,
         )
-        for c, tem_r, r, tipo, pend, u in (await session.execute(consulta)).all()
+        for c, tem_r, r, tipo, pend, u in (
+            await session.execute(consulta.limit(limite))
+        ).all()
     ]
 
 
@@ -1123,23 +1308,34 @@ async def listar_conversas(
     canal: Annotated[str | None, Query()] = None,
     filtro: Annotated[str, Query()] = "todas",
     q: Annotated[str | None, Query(max_length=200)] = None,
-    antes_de: Annotated[datetime | None, Query()] = None,
+    antes_de: Annotated[str | None, Query(max_length=120)] = None,
     limite: Annotated[int, Query(ge=1, le=200)] = 50,
     canal_id: Annotated[UUID | None, Query()] = None,
+    etiqueta: Annotated[str | None, Query(max_length=24)] = None,
 ) -> ListaConversasOut:
     """A fila, mais recente primeiro; página seguinte com `antes_de=<proximo>`.
 
     `canal_id` filtra uma loja do robô do Mac mini (Temu/AliExpress), que não
     tem integração (o `canal_id` vem da barra de lojas do /resumo).
+    `etiqueta` filtra pela etiqueta (status atual), junto de qualquer filtro;
+    os filtros `pre_venda`/`pos_venda`/`reclamacao`/`devolucao`/
+    `ag_cancelamento` são a mesma coisa vinda do menu Filtrar. A aba
+    "Falta responder" (`aguardando`) vem pelo PRAZO mais curto, sem prazo no
+    fim — e o cursor (`proximo`) é o do prazo.
     """
     plataforma = (plataforma or "").strip().lower() or None
     canal = (canal or "").strip().lower() or None
     filtro = (filtro or "todas").strip().lower()
+    etiqueta = (etiqueta or "").strip().lower() or None
     if plataforma and plataforma not in (*PLATAFORMAS_CAIXA, instagram.PLATAFORMA):
         raise HTTPException(422, detail={"code": "plataforma_invalida"})
     if filtro not in FILTROS:
         raise HTTPException(422, detail={"code": "filtro_invalido"})
-    antes_de = _utc(antes_de)
+    if etiqueta and etiqueta not in ETIQUETAS:
+        raise HTTPException(422, detail={"code": "etiqueta_invalida"})
+    pelo_prazo = filtro in FILTROS_PELO_PRAZO
+    # Cursor inválido (ou da outra ordem) → 422 antes de ir ao banco.
+    momento, ident, sem_prazo = _cursor(antes_de, pelo_prazo=pelo_prazo)
     scope = await resolve_team_scope(session, user)
 
     itens: list[dict[str, Any]] = []
@@ -1156,6 +1352,7 @@ async def listar_conversas(
             antes_de=antes_de,
             limite=limite + 1,
             canal_id=canal_id,
+            etiqueta=etiqueta,
         )
     quer_instagram = (
         plataforma in (None, instagram.PLATAFORMA)
@@ -1163,19 +1360,35 @@ async def listar_conversas(
         and canal_id is None
         and canal in (None, instagram.CANAL)
         and scope.unrestricted
+        # DM do Instagram não tem etiqueta (nem pedido).
+        and etiqueta is None
+        and filtro not in ETIQUETAS
     )
-    if quer_instagram:
+    if quer_instagram and pelo_prazo:
+        # O Instagram pagina por recência: vêm as DMs esperando (até o teto)
+        # e o corte do cursor de prazo é feito aqui.
+        dms = await instagram.listar_conversas(
+            session, limite=MAX_INSTAGRAM_PELO_PRAZO, q=q, filtro=filtro, user_id=user.id
+        )
+        itens += [i for i in dms if _depois_do_cursor(i, momento, ident, sem_prazo)]
+    elif quer_instagram:
         itens += await instagram.listar_conversas(
             session,
-            antes_de=antes_de,
+            antes_de=momento,
             limite=limite + 1,
             q=q,
             filtro=filtro,
             user_id=user.id,
         )
-    piso = datetime.min.replace(tzinfo=UTC)
-    itens.sort(key=lambda i: i["ultima_mensagem_em"] or piso, reverse=True)
-    pagina, proximo = _paginar(itens, limite)
+    if pelo_prazo:
+        itens.sort(key=_chave_do_prazo)
+        pagina = itens[:limite]
+        proximo = _cursor_do_prazo(pagina[-1]) if len(itens) > limite and pagina else None
+    else:
+        piso = datetime.min.replace(tzinfo=UTC)
+        itens.sort(key=lambda i: i["ultima_mensagem_em"] or piso, reverse=True)
+        pagina, ultima = _paginar(itens, limite)
+        proximo = ultima.isoformat() if ultima is not None else None
     # Só as da página: no máximo uma consulta de nome por loja que aparece.
     await _com_nome_da_loja(session, pagina)
     return ListaConversasOut(itens=pagina, proximo=proximo)
@@ -1215,6 +1428,7 @@ async def _contexto(session: AsyncSession, conversa: AtendimentoConversa) -> dic
         "devolucoes": [],
         "nota_fiscal": None,
         "outras_perguntas": [],
+        "reclamacoes": [],
     }
     try:
         from app.services.atendimento import contexto as contexto_svc
@@ -1467,6 +1681,7 @@ async def detalhe_conversa(
         "produto": _do_dados(c, "produto"),
         "sugestoes": await _sugestoes(session, c.id),
         "pedido_atualizavel": await _pedido_atualizavel(session, c),
+        "etiqueta_historico": await _historico_etiqueta(session, c.id),
     }
     # Por ÚLTIMO: o cartão pode ir à loja (ML ao vivo, com cache) e, se
     # falhar, nada depois dele depende da sessão.
@@ -1474,7 +1689,76 @@ async def detalhe_conversa(
     return ConversaDetalheOut(**detalhe)
 
 
+async def _historico_etiqueta(
+    session: AsyncSession, conversa_id: UUID
+) -> list[EtiquetaHistoricoOut]:
+    """A linha do tempo da etiqueta (de → para, o porquê, quem trocou à mão)."""
+    linhas = await etiqueta_svc.historico_da_conversa(session, conversa_id)
+    nomes = await _nomes(session, {h.por_user_id for h in linhas})
+    return [
+        EtiquetaHistoricoOut(
+            id=h.id,
+            de=h.de,
+            para=h.para,
+            de_rotulo=rotulo_etiqueta(h.de) if h.de else None,
+            para_rotulo=rotulo_etiqueta(h.para),
+            motivo=h.motivo,
+            por_user_id=h.por_user_id,
+            por_nome=nomes.get(h.por_user_id) if h.por_user_id else None,
+            em=_utc(h.em),
+        )
+        for h in linhas
+    ]
+
+
 # ── Ações na conversa ─────────────────────────────────────────────────────
+
+
+@router.post("/conversas/{conversa_id}/etiqueta", response_model=EtiquetaTrocaOut)
+async def trocar_etiqueta(
+    conversa_id: str,
+    body: EtiquetaIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(_edit)],
+) -> EtiquetaTrocaOut:
+    """Troca à mão da etiqueta (RF1). Fica no histórico com o nome de quem trocou.
+
+    Vale até o próximo acontecimento automático (a etiqueta que o motor
+    calcula mudar); escolher a mesma que o motor dá = voltar ao automático.
+    Só muda o DaVinci: nada sai para a plataforma nem para o Bling.
+    """
+    if instagram.e_instagram(conversa_id):
+        raise HTTPException(
+            409,
+            detail={"code": "somente_leitura", "detail": "DM do Instagram não tem etiqueta."},
+        )
+    escolhida = (body.etiqueta or "").strip().lower()
+    if escolhida not in ETIQUETAS:
+        raise HTTPException(422, detail={"code": "etiqueta_invalida"})
+    scope = await resolve_team_scope(session, user)
+    c = await _conversa_ou_404(session, conversa_id, scope)
+    # Trava e relê: o recálculo do sync/cron não passa por cima desta troca
+    # (e esta não passa por cima do que ele acabou de gravar).
+    await _travar_ou_409(session, c, "conversa_ocupada")
+    de = c.etiqueta
+    mudou = await etiqueta_svc.trocar_etiqueta_manual(
+        session, c, escolhida, user_id=user.id, motivo=body.motivo
+    )
+    await session.commit()
+    logger.info(
+        "atendimento_etiqueta_trocada",
+        conversa_id=str(c.id),
+        de=de,
+        para=c.etiqueta,
+        manual=bool(c.etiqueta_manual),
+        mudou=mudou,
+        user_id=str(user.id),
+    )
+    return EtiquetaTrocaOut(
+        conversa=await _conversa_out(session, c),
+        etiqueta_historico=await _historico_etiqueta(session, c.id),
+    )
+
 
 
 @router.post("/conversas/{conversa_id}/responder", response_model=ResponderOut)

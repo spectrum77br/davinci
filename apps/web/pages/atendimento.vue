@@ -6,9 +6,11 @@ import {
   categoriasDe,
   comoLista,
   erroDaApi,
+  podeCosturar,
   registrarCategorias,
   useRelogio,
   usePollingVisivel,
+  vemDepoisNaLista,
   type ConversaResumo,
   type Modelo,
   type Resumo,
@@ -169,12 +171,14 @@ async function atualizarLista() {
     if (g !== geracao) return
     const novos = r.itens || []
     const ids = new Set(novos.map((c) => c.id))
-    const ultimo = novos[novos.length - 1]?.ultima_mensagem_em || null
+    const ultimo = novos[novos.length - 1] ?? null
+    const filtro = filtros.value.filtro || 'todas'
     // Sem `proximo` na 1ª página nova, ela já tem tudo: as páginas extras
-    // viraram velhas e saem.
-    const manter = temPaginasExtras && !!ultimo && !!r.proximo
-    const resto = manter
-      ? itens.value.filter((c) => !ids.has(c.id) && (c.ultima_mensagem_em || '') < (ultimo || ''))
+    // viraram velhas e saem. O corte é na ORDEM DA ABA ("Falta responder"
+    // vai pelo prazo, as outras pela mensagem mais recente).
+    const manter = temPaginasExtras && !!ultimo && podeCosturar(ultimo, filtro) && !!r.proximo
+    const resto = manter && ultimo
+      ? itens.value.filter((c) => !ids.has(c.id) && vemDepoisNaLista(c, ultimo, filtro))
       : []
     itens.value = [...novos, ...resto]
     if (!manter) {
@@ -213,7 +217,9 @@ function aoMudarConversa(c: ConversaResumo) {
   const i = itens.value.findIndex((x) => x.id === c.id)
   const antes = i >= 0 ? itens.value[i] : null
   if (i >= 0) itens.value[i] = { ...itens.value[i], ...c }
-  if (antes && (antes.aguardando_resposta !== c.aguardando_resposta || !!antes.envio_a_conferir !== !!c.envio_a_conferir)) {
+  // A etiqueta também (troca à mão): as contagens do menu Filtrar acompanham.
+  if (antes && (antes.aguardando_resposta !== c.aguardando_resposta || !!antes.envio_a_conferir !== !!c.envio_a_conferir
+    || (c.etiqueta !== undefined && (antes.etiqueta ?? null) !== (c.etiqueta ?? null)))) {
     void carregarResumo()
   }
 }

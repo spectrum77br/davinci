@@ -974,6 +974,67 @@ async def atendimento_indexar_pedidos(ctx: dict) -> dict | None:
     return resumo
 
 
+# Comunicador (01/10/2026): os dois crons ficam em minutos PARES, a cada
+# 10 min — fora dos ímpares da leitura das caixas (que também lê o ML), do
+# :00/:30 dos crons de token (o refresh token do ML é de uso único e o cron
+# de token renova sem a trava do atendimento) e do {4,14,…} do preço da
+# Amazon e do espelho de NF-e. As reclamações no :06…; a etiqueta 2 min
+# depois, no :08…, já com o que a leitura das reclamações gravou.
+_ATENDIMENTO_RECLAMACOES_MINUTOS = {6, 16, 26, 36, 46, 56}
+_ATENDIMENTO_ETIQUETAS_MINUTOS = {8, 18, 28, 38, 48, 58}
+
+
+async def atendimento_reclamacoes(ctx: dict) -> dict | None:
+    """A cada 10 min (:06…): reclamações, mediações e devoluções da plataforma.
+
+    Lê as reclamações de cada conta do ML (só GET: busca das abertas e das
+    encerradas recentes; mensagens só da que mexeu, com teto por conta) e
+    liga as devoluções/disputas de Shopee e TikTok que a Logística já leu
+    (sem chamada nova). Grava em `atendimento_reclamacoes`, cria a conversa
+    `reclamacao` do ML (bloqueada: só leitura) e recalcula a etiqueta — ver
+    services/atendimento/reclamacoes.py. Nada sai para a plataforma; nada é
+    marcado como lido. Uma rodada por vez (trava no Redis, 9 min).
+
+    Interruptor próprio: só roda com `atendimento_reclamacoes_ativa` E
+    `atendimento_leitura_ativa` (os dois nascem desligados). Com a leitura
+    já ligada em produção, é o `ATENDIMENTO_RECLAMACOES_ATIVA=true` no .env
+    que liga esta rodada — o deploy sozinho não.
+    """
+    if not (_settings.atendimento_leitura_ativa and _settings.atendimento_reclamacoes_ativa):
+        return None
+    from app.services.atendimento import reclamacoes as _atendimento_reclamacoes
+
+    try:
+        return await _atendimento_reclamacoes.atendimento_reclamacoes(ctx)
+    except Exception as e:  # noqa: BLE001 — o serviço já não levanta; cinto
+        logger.error("atendimento_reclamacoes_falhou", err=type(e).__name__)
+        return None
+
+
+async def atendimento_etiquetas(ctx: dict) -> dict | None:
+    """A cada 10 min (:08…): a etiqueta (status atual) do que mudou fora da leitura.
+
+    O Bling (83955 Aguardando Cancelamento, 83957 Aguardando Devolução), a
+    trilha do robô da Margem e as reclamações abrem e fecham etiqueta sem
+    passar pelo sync. Só banco: escolhe as conversas que podem ter mudado
+    (mensagem nos últimos 7 dias, etiqueta urgente ou trocada à mão, pedido
+    em 83955/83957, reclamação aberta) e recalcula em lotes de 200 — ver
+    services/atendimento/etiqueta_cron.py. Uma rodada por vez (trava no
+    Redis). Interruptor próprio: só roda com `atendimento_etiquetas_ativa` E
+    `atendimento_leitura_ativa` (os dois nascem desligados) — o deploy
+    sozinho não liga.
+    """
+    if not (_settings.atendimento_leitura_ativa and _settings.atendimento_etiquetas_ativa):
+        return None
+    from app.services.atendimento import etiqueta_cron as _atendimento_etiqueta_cron
+
+    try:
+        return await _atendimento_etiqueta_cron.atendimento_etiquetas(ctx)
+    except Exception as e:  # noqa: BLE001 — o serviço já não levanta; cinto
+        logger.error("atendimento_etiquetas_falhou", err=type(e).__name__)
+        return None
+
+
 async def atendimento_importar_historico(
     ctx: dict,
     dias: int = 90,
@@ -3980,6 +4041,10 @@ class WorkerSettings:
         atendimento_rascunhos,
         atendimento_prazos,
         func(atendimento_indexar_pedidos, timeout=1200),
+        # Comunicador (01/10/2026): reclamações da plataforma e etiqueta. Aqui
+        # também para dar para enfileirar uma rodada à mão.
+        func(atendimento_reclamacoes, timeout=540),
+        func(atendimento_etiquetas, timeout=600),
         # Importação do histórico (28/09/2026): SÓ aqui, nunca em `cron_jobs` —
         # roda uma vez, à mão, depois da aprovação. Uma tentativa só: é
         # retomável, e quem decide rodar de novo é pessoa.
@@ -4255,6 +4320,22 @@ class WorkerSettings:
         # Índice de pedidos/avaliações da Shopee para o cartão "Cliente": de
         # hora em hora, janela de 2 h (uma rodada que falha não deixa buraco).
         cron(atendimento_indexar_pedidos, minute={22}, run_at_startup=False, timeout=1200),
+        # Comunicador (01/10/2026): reclamações/devoluções da plataforma no
+        # :06… e a etiqueta no :08… (ver _ATENDIMENTO_RECLAMACOES_MINUTOS).
+        # `timeout=540` = a trava da rodada das reclamações (9 min): o job
+        # morto pelo arq não deixa a trava viva por cima da próxima rodada.
+        cron(
+            atendimento_reclamacoes,
+            minute=_ATENDIMENTO_RECLAMACOES_MINUTOS,
+            run_at_startup=False,
+            timeout=540,
+        ),
+        cron(
+            atendimento_etiquetas,
+            minute=_ATENDIMENTO_ETIQUETAS_MINUTOS,
+            run_at_startup=False,
+            timeout=600,
+        ),
         # Reconciliação a cada 10 min, no :05 (longe do congestionamento do
         # :00): postagem presa é CONSULTADA, nunca retentada.
         cron(

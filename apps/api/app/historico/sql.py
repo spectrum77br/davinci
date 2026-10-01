@@ -47,6 +47,10 @@ TETO_POR_PEDIDO = 200
 # loja` guarda o usuário e o texto da avaliação do comprador, e os dois
 # (`atendimento_pedidos_comprador` junto) são escritos pela MÁQUINA a cada
 # hora: no Histórico seriam milhares de linhas que ninguém mudou.
+# Etiqueta (01/10/2026, migration 0353): `atendimento_etiquetas_historico` JÁ
+# é a trilha da etiqueta (de, para, motivo, quem — a troca à mão grava a
+# pessoa), escrita junto com a mudança; e `atendimento_reclamacoes` é o
+# espelho da plataforma, regravado pela máquina a cada leitura. Fora as duas.
 EXCLUIDAS = re.compile(
     r"^(historico_(evento|alteracao)$|sync_logs|background_job|alembic_version$|auth_codes$"
     r"|oauth_states$|pricing_push_idempotency$|pricing_push_confirmacao$"
@@ -56,7 +60,7 @@ EXCLUIDAS = re.compile(
     r"|bling_envio_evento$|bling_envio_correcao$|prioridade_estoque_movimentos$|nfse_chamada$"
     # texto de comprador (atendimento) e os índices que a máquina escreve
     r"|atendimento_(mensagens|rascunhos|avaliacoes|conversas|avaliacoes_loja"
-    r"|pedidos_comprador)$)"
+    r"|pedidos_comprador|etiquetas_historico|reclamacoes)$)"
     r"|(_bak|bkp|backup)",
     re.I,
 )

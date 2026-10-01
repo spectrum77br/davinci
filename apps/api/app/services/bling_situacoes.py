@@ -59,3 +59,19 @@ def eh_enviado_etiqueta(situacao: int | str | None) -> bool:
     if situacao is None:
         return False
     return str(situacao).strip() in SITUACOES_ENVIADO_ETIQUETA_STR
+
+# --- pós-venda (customizadas do Bling) ---------------------------------------
+# Atendimento (01/10/2026, etiqueta = status): o pedido em "Aguardando
+# Cancelamento" vira a etiqueta Ag. cancelamento (MENOS a trava do robô da
+# Margem — `services/atendimento/etiqueta_fatos.ag_cancelamento_visivel`), e
+# o em "Aguardando Devolução", a etiqueta Devolução. Os módulos antigos que
+# ainda declaram 83955/83957 localmente (nf, margens, margem_auto_hold,
+# aprovar_margem, estoque, devolutions, bling_orders, devolucao_rastreio_sync)
+# continuam como estão; código NOVO usa estas.
+SITUACAO_AGUARDANDO_CANCELAMENTO = 83955
+SITUACAO_AGUARDANDO_DEVOLUCAO = 83957
+# Versões em texto (bling_orders.situacao é TEXT no banco).
+SITUACAO_AGUARDANDO_CANCELAMENTO_STR = str(SITUACAO_AGUARDANDO_CANCELAMENTO)
+SITUACAO_AGUARDANDO_DEVOLUCAO_STR = str(SITUACAO_AGUARDANDO_DEVOLUCAO)
+NOME_AGUARDANDO_CANCELAMENTO = "Aguardando Cancelamento"
+NOME_AGUARDANDO_DEVOLUCAO = "Aguardando Devolução"

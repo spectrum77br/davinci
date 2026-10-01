@@ -38,6 +38,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.models import (
+    AtendimentoReclamacao,
     BlingOrder,
     Chamado,
     ChamadoMensagem,
@@ -634,6 +635,69 @@ def _resumo_status_plataforma(meli: dict | None) -> str:
     return ", ".join(partes) or "sem status"
 
 
+# Teto de reclamações da plataforma por consulta (as abertas primeiro).
+_MAX_RECLAMACOES_PLATAFORMA = 5
+
+
+async def _reclamacoes_da_plataforma(
+    session: AsyncSession, numeros: set[str], pedido_bling: str
+) -> list[str]:
+    """As reclamações, mediações e devoluções DA PLATAFORMA do pedido, uma linha cada.
+
+    `atendimento_reclamacoes` (lida pelo cron do atendimento: claims do ML,
+    devoluções/disputas de Shopee e TikTok da Logística). Casa pelo nº na
+    plataforma (o ORDER, no ML), pelo pack do ML e pelo nº do Bling que a
+    Logística grava. Sem isto o 297840 saía "Chamados: nenhum · Devolução:
+    nenhuma" com a mediação 5582543195 aberta no ML. Só o que a plataforma
+    diz (tipo, status, motivo, prazo) — nenhum texto do comprador.
+    """
+    from app.services.atendimento import reclamacoes as reclamacoes_svc
+
+    chaves = sorted(n for n in numeros if n)
+    conds = [AtendimentoReclamacao.dados["pedido_bling"].astext == pedido_bling]
+    if chaves:
+        conds += [
+            AtendimentoReclamacao.pedido_marketplace.in_(chaves),
+            AtendimentoReclamacao.dados["pack_id"].astext.in_(chaves),
+        ]
+    linhas = (
+        (
+            await session.execute(
+                select(AtendimentoReclamacao)
+                .where(or_(*conds))
+                .order_by(
+                    AtendimentoReclamacao.encerrada_em.is_(None).desc(),
+                    AtendimentoReclamacao.prazo_em.asc().nulls_last(),
+                    AtendimentoReclamacao.aberta_em.desc().nulls_last(),
+                )
+                .limit(_MAX_RECLAMACOES_PLATAFORMA)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    saida = []
+    for r in linhas:
+        t = reclamacoes_svc.para_tela(r)
+        nome = t["tipo_rotulo"] + (f" {t['numero']}" if t["numero"] else "")
+        partes = [
+            f"{nome} no {t['plataforma_nome']} (pedido {r.pedido_marketplace or '?'})",
+            "ABERTA" if t["aberta"] else f"ENCERRADA em {_d(r.encerrada_em)}",
+        ]
+        if t["status_rotulo"]:
+            partes.append(t["status_rotulo"])
+        if t["motivo"]:
+            partes.append(f"motivo: {t['motivo'][:200]}")
+        if t["acao_pendente"]:
+            partes.append(f"a plataforma espera da loja: {t['acao_pendente']}")
+        if t["prazo_em"]:
+            partes.append(f"prazo para responder: {_d(t['prazo_em'])}")
+        if r.aberta_em:
+            partes.append(f"aberta em {_d(r.aberta_em)}")
+        saida.append(" · ".join(partes))
+    return saida
+
+
 async def consultar_pedido(session: AsyncSession, *, dono: User, args: dict[str, Any]) -> str:
     if dono.role != UserRole.ADMIN:
         raise TarefaInvalidaError(
@@ -712,6 +776,12 @@ async def consultar_pedido(session: AsyncSession, *, dono: User, args: dict[str,
         linhas.append("Logística: " + " · ".join(partes))
     else:
         linhas.append("Logística: pedido não está no painel de Logística.")
+
+    # Reclamação/devolução NA PLATAFORMA antes dos chamados e das devoluções
+    # internas: é ela que tem prazo correndo.
+    na_plataforma = await _reclamacoes_da_plataforma(session, {pedido, mkt or ""}, num)
+    for linha in na_plataforma:
+        linhas.append("Na plataforma: " + linha)
 
     cond = [Chamado.pedido_bling == num]
     if mkt:
@@ -793,7 +863,11 @@ async def consultar_pedido(session: AsyncSession, *, dono: User, args: dict[str,
             f"Devolução desde {_d(bo.aguardando_devolucao_data)})."
         )
     elif rastreio is None:
-        linhas.append("Devolução: nenhuma.")
+        linhas.append(
+            "Devolução: nenhuma lançada na aba Devoluções (ver a reclamação na plataforma acima)."
+            if na_plataforma
+            else "Devolução: nenhuma."
+        )
     if rastreio is not None:
         loc = rastreio.localizacao or rastreio.localizacao_auto
         quando = rastreio.localizacao_data or rastreio.localizacao_auto_data

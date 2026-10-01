@@ -31,7 +31,11 @@ class BlingOrder(Base, TimestampMixin):
     )
     bling_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     numero: Mapped[str | None] = mapped_column(Text, nullable=True)
-    numeroloja: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Nº do pedido NA PLATAFORMA. Índice (migration 0353, 01/10/2026): o
+    # atendimento casa a conversa com o pedido por `numero` OU `numeroloja`
+    # (`chamados.lookup_pedido`, `atendimento/etiqueta_fatos.pedido_bling`) —
+    # sem ele, cada busca era uma varredura de ~100 mil linhas (~250 ms).
+    numeroloja: Mapped[str | None] = mapped_column(Text, nullable=True, index=True)
     numero_documento: Mapped[str | None] = mapped_column(Text, nullable=True)
     data: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     totalprodutos: Mapped[float | None] = mapped_column(Numeric, nullable=True)

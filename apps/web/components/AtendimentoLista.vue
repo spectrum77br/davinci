@@ -23,10 +23,19 @@ export const FILTROS_MENU: OpcaoFiltro[] = [
   // Alguém precisa olhar na plataforma e marcar — o DaVinci não reenvia.
   { value: 'a_conferir', label: 'A conferir', hint: 'resposta enviada pelo DaVinci que a plataforma não confirmou — confira se chegou ao comprador' },
   { value: 'minhas', label: 'Minhas', hint: 'conversas atribuídas a você' },
-  { value: 'pre_venda', label: 'Pré-venda', hint: 'perguntas e conversas sem pedido ligado' },
-  { value: 'pos_venda', label: 'Pós-venda', hint: 'conversas de um pedido, pós-venda, SAC e e-mail da Amazon' },
   { value: 'fechadas', label: 'Fechadas', hint: 'fechadas por alguém da equipe' },
+  // Pela ETIQUETA (status atual, 01/10/2026), da mais urgente para a menos —
+  // os mesmos códigos da API (`filtro=reclamacao`…). Pré-venda e Pós-venda
+  // passaram a ser a etiqueta: a conversa com reclamação aberta está em
+  // Reclamação, não em Pós-venda.
+  { value: 'reclamacao', label: 'Reclamação', hint: 'reclamação ou mediação aberta na plataforma' },
+  { value: 'ag_cancelamento', label: 'Ag. cancelamento', hint: 'pedido em Aguardando Cancelamento no Bling (fora a trava do robô da Margem)' },
+  { value: 'devolucao', label: 'Devolução', hint: 'devolução aberta na plataforma ou pedido em Aguardando Devolução no Bling' },
+  { value: 'pre_venda', label: 'Pré-venda', hint: 'perguntas e conversas sem pedido ligado' },
+  { value: 'pos_venda', label: 'Pós-venda', hint: 'conversa de um pedido sem nada aberto (sem reclamação, devolução nem Ag. cancelamento)' },
 ]
+// Os filtros do menu que são ETIQUETA (contam pelo /resumo `etiquetas`).
+export const FILTROS_ETIQUETA = new Set(['reclamacao', 'ag_cancelamento', 'devolucao', 'pre_venda', 'pos_venda'])
 export const FILTROS_RAPIDOS: OpcaoFiltro[] = [...ABAS_LISTA, ...FILTROS_MENU]
 </script>
 
@@ -44,6 +53,7 @@ export const FILTROS_RAPIDOS: OpcaoFiltro[] = [...ABAS_LISTA, ...FILTROS_MENU]
 // tela estreita, onde a barra some, voltam os dois seletores aqui.
 import { onClickOutside } from '@vueuse/core'
 import { Bot, Check, Inbox, ListFilter, Loader2, Lock, PauseCircle, RotateCcw, Search, Sparkles, TriangleAlert, UserRound, X } from 'lucide-vue-next'
+import { ETIQUETAS_INFO, faixaDaEtiqueta, secundariasDe } from '~/components/AtendimentoEtiqueta.vue'
 import {
   PLATAFORMAS_ATENDIMENTO,
   canaisDa,
@@ -99,6 +109,14 @@ onBeforeUnmount(() => { if (buscaTimer) clearTimeout(buscaTimer) })
 // ─── contadores (do /resumo) ────────────────────────────────────────────────
 // Loja escolhida → números da loja (o resumo por loja não separa "vencendo");
 // plataforma → da plataforma; nada → soma de tudo.
+// Etiquetas (Reclamação, Devolução…): conversas abertas com aquela etiqueta,
+// do `etiquetas` do /resumo no mesmo nível. A API antiga não manda: sem número.
+function porEtiqueta(contagens: (Record<string, number> | undefined)[]): Record<string, number | null> {
+  const out: Record<string, number | null> = {}
+  const tem = contagens.length > 0 && contagens.every((c) => !!c && typeof c === 'object')
+  for (const e of FILTROS_ETIQUETA) out[e] = tem ? contagens.reduce((s, c) => s + (Number(c?.[e]) || 0), 0) : null
+  return out
+}
 const contagem = computed((): Record<string, number | null> => {
   const r = props.resumo
   if (!r) return {}
@@ -107,7 +125,13 @@ const contagem = computed((): Record<string, number | null> => {
   // backend separar — sem o número certo, melhor não mostrar número nenhum.
   if (f.integration_id) {
     const l = r.lojas.find((x) => x.integration_id === f.integration_id)
-    return { aguardando: l?.aguardando ?? 0, vencidas: l?.vencidas ?? 0, vencendo: null, a_conferir: l?.a_conferir ?? null }
+    return {
+      aguardando: l?.aguardando ?? 0,
+      vencidas: l?.vencidas ?? 0,
+      vencendo: null,
+      a_conferir: l?.a_conferir ?? null,
+      ...porEtiqueta(l ? [l.etiquetas] : []),
+    }
   }
   const ps = f.plataforma ? r.plataformas.filter((p) => p.plataforma === f.plataforma) : r.plataformas
   const porPlataforma = ps.length > 0 && ps.every((p) => typeof p.a_conferir === 'number')
@@ -116,12 +140,19 @@ const contagem = computed((): Record<string, number | null> => {
     vencendo: ps.reduce((s, p) => s + (p.vencendo || 0), 0),
     vencidas: ps.reduce((s, p) => s + (p.vencidas || 0), 0),
     a_conferir: porPlataforma ? ps.reduce((s, p) => s + (p.a_conferir || 0), 0) : (f.plataforma ? null : (r.a_conferir ?? null)),
+    // Sem plataforma escolhida, o total do topo; com ela, o da plataforma
+    // (a que não tem conversa não manda `etiquetas`: conta zero).
+    ...(f.plataforma
+      ? porEtiqueta(ps.length ? ps.map((p) => p.etiquetas || {}) : [])
+      : porEtiqueta([r.etiquetas])),
   }
 })
 function contadorCls(value: string, n: number | null | undefined) {
   if (!n) return 'bg-muted text-muted-foreground'
   if (value === 'vencidas') return 'bg-red-500 text-white'
   if (value === 'vencendo' || value === 'a_conferir') return 'bg-amber-500 text-white'
+  // Etiqueta: a cor dela (Reclamação vermelho, Devolução roxo…).
+  if (FILTROS_ETIQUETA.has(value)) return ETIQUETAS_INFO[value]?.cls || 'bg-primary/15 text-primary'
   return 'bg-primary/15 text-primary'
 }
 
@@ -202,8 +233,13 @@ function previa(c: ConversaResumo) {
   if (!corpo) return c.anuncio_titulo || ''
   return c.ultima_autor === 'loja' ? `Loja: ${corpo}` : corpo
 }
+// A etiqueta na linha: selo só das que pedem atenção (Pós-venda sem
+// destaque), mais o indicador das secundárias e a mão da troca manual.
+function temEtiqueta(c: ConversaResumo) {
+  return !!(faixaDaEtiqueta(c.etiqueta) || secundariasDe(c.etiqueta, c.etiquetas_secundarias).length)
+}
 function temSelos(c: ConversaResumo) {
-  return !!(c.envio_a_conferir || c.tem_rascunho || c.atribuido_a || c.ia_pausada || c.somente_leitura || c.sem_resposta_necessaria || c.situacao === 'bloqueada' || c.situacao === 'fechada')
+  return !!(temEtiqueta(c) || c.envio_a_conferir || c.tem_rascunho || c.atribuido_a || c.ia_pausada || c.somente_leitura || c.sem_resposta_necessaria || c.situacao === 'bloqueada' || c.situacao === 'fechada')
 }
 // Na linha escolhida (fundo azul) os selos coloridos viram translúcidos —
 // âmbar/violeta em cima do azul não se lê.
@@ -216,6 +252,9 @@ const VAZIO: Record<string, string> = {
   automatica: 'Nenhuma conversa só com a resposta automática.',
   pre_venda: 'Nenhuma conversa de pré-venda com esses filtros.',
   pos_venda: 'Nenhuma conversa de pós-venda com esses filtros.',
+  reclamacao: 'Nenhuma reclamação aberta com esses filtros.',
+  devolucao: 'Nenhuma devolução aberta com esses filtros.',
+  ag_cancelamento: 'Nenhum pedido em Aguardando Cancelamento com esses filtros.',
   vencendo: 'Nenhuma conversa perto de vencer.',
   vencidas: 'Nenhuma conversa vencida.',
   com_rascunho: 'Nenhuma sugestão da IA esperando conferência.',
@@ -258,7 +297,7 @@ function mover(delta: number) {
         <input
           v-model="busca"
           class="h-8 w-full rounded-md border bg-background pl-8 pr-7 text-sm"
-          placeholder="buscar comprador, pedido, anúncio…"
+          placeholder="buscar comprador, pedido, nº do Bling, SKU…"
           aria-label="buscar conversas"
         />
         <button v-if="busca" type="button" class="absolute right-1.5 top-1/2 -translate-y-1/2 rounded p-0.5 text-muted-foreground hover:bg-muted" title="limpar busca" @click="busca = ''">
@@ -340,25 +379,30 @@ function mover(delta: number) {
             aria-label="filtrar conversas"
             class="absolute right-0 z-30 mt-1 w-60 rounded-md border bg-background p-1 shadow-lg"
           >
-            <button
-              v-for="f in FILTROS_MENU"
-              :key="f.value"
-              type="button"
-              role="menuitemradio"
-              :aria-checked="filtros.filtro === f.value"
-              class="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs hover:bg-muted"
-              :class="filtros.filtro === f.value ? 'font-medium text-primary' : ''"
-              :title="f.hint"
-              @click="escolherDoMenu(f.value)"
-            >
-              <span class="min-w-0 flex-1 truncate">{{ f.label }}</span>
-              <span
-                v-if="contagem[f.value] !== undefined && contagem[f.value] !== null"
-                class="min-w-[18px] rounded-full px-1 text-center text-[10px] font-semibold tabular-nums"
-                :class="contadorCls(f.value, contagem[f.value])"
-              >{{ contagem[f.value] }}</span>
-              <Check v-if="filtros.filtro === f.value" class="size-3.5 shrink-0" />
-            </button>
+            <template v-for="(f, i) in FILTROS_MENU" :key="f.value">
+              <div
+                v-if="FILTROS_ETIQUETA.has(f.value) && (i === 0 || !FILTROS_ETIQUETA.has(FILTROS_MENU[i - 1].value))"
+                role="separator"
+                class="mx-2 mt-1 border-t pt-1 text-[10px] uppercase tracking-wide text-muted-foreground"
+              >Etiqueta</div>
+              <button
+                type="button"
+                role="menuitemradio"
+                :aria-checked="filtros.filtro === f.value"
+                class="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs hover:bg-muted"
+                :class="filtros.filtro === f.value ? 'font-medium text-primary' : ''"
+                :title="f.hint"
+                @click="escolherDoMenu(f.value)"
+              >
+                <span class="min-w-0 flex-1 truncate">{{ f.label }}</span>
+                <span
+                  v-if="contagem[f.value] !== undefined && contagem[f.value] !== null"
+                  class="min-w-[18px] rounded-full px-1 text-center text-[10px] font-semibold tabular-nums"
+                  :class="contadorCls(f.value, contagem[f.value])"
+                >{{ contagem[f.value] }}</span>
+                <Check v-if="filtros.filtro === f.value" class="size-3.5 shrink-0" />
+              </button>
+            </template>
           </div>
         </div>
       </div>
@@ -415,13 +459,23 @@ function mover(delta: number) {
             tabindex="-1"
             :aria-selected="c.id === selecionada"
             :data-conversa="c.id"
-            class="flex w-full items-start gap-2.5 rounded-lg px-2 py-2 text-left transition-colors"
+            class="relative flex w-full items-start gap-2.5 rounded-lg px-2 py-2 text-left transition-colors"
             :class="[
               c.id === selecionada ? 'bg-primary text-primary-foreground shadow-sm' : 'hover:bg-muted/70',
               c.situacao === 'fechada' && c.id !== selecionada ? 'opacity-60' : '',
             ]"
+            :data-etiqueta="c.etiqueta || undefined"
             @click="emit('selecionar', c.id)"
           >
+            <!-- Faixa da etiqueta (Reclamação vermelho, Ag. cancelamento laranja,
+                 Devolução roxo, Pré-venda azul; Pós-venda sem destaque). -->
+            <span
+              v-if="faixaDaEtiqueta(c.etiqueta)"
+              class="absolute inset-y-1.5 left-0 w-1 rounded-full"
+              :class="faixaDaEtiqueta(c.etiqueta)"
+              aria-hidden="true"
+              data-faixa
+            />
             <AtendimentoAvatar
               class="mt-0.5"
               :nome="c.comprador_nome || c.pedido_marketplace"
@@ -461,6 +515,15 @@ function mover(delta: number) {
                 >{{ prazoDe(c, agora)!.texto }}</span>
               </span>
               <span v-if="temSelos(c)" class="mt-1 flex flex-wrap items-center gap-1 text-[10px]">
+                <AtendimentoEtiqueta
+                  v-if="temEtiqueta(c)"
+                  :etiqueta="c.etiqueta"
+                  :secundarias="c.etiquetas_secundarias"
+                  :manual="c.etiqueta_manual"
+                  :desde="c.etiqueta_desde"
+                  :selecionada="c.id === selecionada"
+                  esconder-pos-venda
+                />
                 <span
                   v-if="c.envio_a_conferir"
                   class="inline-flex items-center gap-0.5 rounded px-1.5 py-px font-medium"
