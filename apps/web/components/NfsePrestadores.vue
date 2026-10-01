@@ -4,7 +4,7 @@
 // por tela.abrirEmpresa) tem o cartão da NFE.io e o serviço prestado.
 //
 // 28/09/2026 (Eduardo: "to achando simples e bagunçado"): reescrita sem
-// props — resumo clicável em cima, busca + Em uso/Todas, tabela enxuta com
+// props — resumo clicável em cima, busca + filtro, tabela enxuta com
 // "O que falta" num popover que leva direto ao conserto.
 //
 // 29/09 (Eduardo: "a porcentagem de cada empresa que temos"): a % padrão das
@@ -23,6 +23,10 @@
 // contar a empresa com loja cadastrada (em operação) e cada linha pendente ganha
 // o botão "Integrar na NFE.io" / "Completar integração" (diálogo
 // NfseIntegrarDialog, montado pela página). O "Sem NFE.io" agora conta de verdade.
+//
+// 01/10/2026 tarde (Eduardo: "somente deixar todas, e um filtro com a opção de
+// ver pendentes ou prontas que no caso são em uso"): abre em "Todas" e o filtro
+// é Todas | Prontas (integradas na NFE.io) | Pendentes. O "Em uso" saiu.
 import { computed, onMounted, ref } from 'vue'
 import { PopoverContent, PopoverPortal, PopoverRoot, PopoverTrigger } from 'reka-ui'
 import {
@@ -56,14 +60,14 @@ const esqueleto = computed(() => !carregado.value && (carregando.value || !monta
 type Cartao = 'prontas' | 'pendencia' | 'certificado' | 'nao_ligadas'
 
 const busca = ref('')
-type Escopo = 'uso' | 'pendentes' | 'todas'
-const escopo = ref<Escopo>('uso')
+type Escopo = 'todas' | 'prontas' | 'pendentes'
+const escopo = ref<Escopo>('todas')
 const cartao = ref<Cartao | null>(null)
 
 const escopoModel = computed({
   get: () => escopo.value as string,
   set: (v: string) => {
-    escopo.value = v === 'todas' || v === 'pendentes' ? v : 'uso'
+    escopo.value = v === 'prontas' || v === 'pendentes' ? v : 'todas'
   },
 })
 
@@ -71,11 +75,17 @@ const escopoModel = computed({
 function pendenteIntegracao(p: Prestador): boolean {
   return p.integracao !== 'ok'
 }
-// Conta em TODAS as empresas (não só nas em uso): é o que falta integrar.
+// "Prontas" no filtro = integradas na NFE.io (o antigo "Em uso").
+function integrada(p: Prestador): boolean {
+  return p.integracao === 'ok'
+}
+// Contam em TODAS as empresas.
 const nPendentes = computed(() => prestadores.value.filter(pendenteIntegracao).length)
+const nProntas = computed(() => prestadores.value.filter(integrada).length)
 
 const OPCOES_ESCOPO = computed(() => [
-  { id: 'uso', rotulo: 'Em uso', dica: 'Integradas na NFE.io, com loja cadastrada, já configuradas ou usadas em nota fixa' },
+  { id: 'todas', rotulo: 'Todas' },
+  { id: 'prontas', rotulo: 'Prontas', contador: nProntas.value, dica: 'Integradas na NFE.io' },
   {
     id: 'pendentes',
     rotulo: 'Pendentes',
@@ -83,7 +93,6 @@ const OPCOES_ESCOPO = computed(() => [
     tomContador: 'atencao' as const,
     dica: 'Ainda não integradas na NFE.io (ou com a integração incompleta)',
   },
-  { id: 'todas', rotulo: 'Todas' },
 ])
 
 // Notas fixas ativas por empresa (quem emite).
@@ -99,12 +108,6 @@ function usoDe(p: Prestador): number {
   return notasFixas.value.get(p.company_id) ?? 0
 }
 
-// Empresa usada em nota fixa ativa entra sempre, mesmo sem NFE.io: é
-// justamente a que trava o Emitir do mês (e o selo da aba). 01/10: e a que tem
-// loja cadastrada (em operação), mesmo sem NFE.io — é a que falta integrar.
-function emUso(p: Prestador): boolean {
-  return !!p.nfeio || !!p.fiscal || usoDe(p) > 0 || p.em_operacao
-}
 // Certificado na NFE.io vencido ou vencendo (em Teste ele é opcional).
 function certificadoAtencao(p: Prestador): boolean {
   if (!p.nfeio || p.nfeio.teste) return false
@@ -119,9 +122,9 @@ const CRITERIO: Record<Cartao, (p: Prestador) => boolean> = {
   nao_ligadas: pendenteIntegracao,
 }
 
-// Base do resumo: o escopo escolhido (padrão "Em uso"), sem busca nem cartão.
+// Base do resumo: o escopo escolhido (padrão "Todas"), sem busca nem cartão.
 const base = computed(() => {
-  if (escopo.value === 'uso') return prestadores.value.filter(emUso)
+  if (escopo.value === 'prontas') return prestadores.value.filter(integrada)
   if (escopo.value === 'pendentes') return prestadores.value.filter(pendenteIntegracao)
   return prestadores.value
 })
@@ -201,10 +204,6 @@ const temFiltro = computed(() => !!busca.value.trim() || !!cartao.value)
 
 function mostrarTodas() {
   escopo.value = 'todas'
-}
-
-function mostrarEmUso() {
-  escopo.value = 'uso'
 }
 
 // "Integrar na NFE.io" / "Completar integração": o diálogo da página cuida do
@@ -458,9 +457,9 @@ async function sincronizar() {
     <!-- 1ª carga -->
     <NfseSkeletonTabela v-if="esqueleto" :linhas="6" :colunas="6" />
 
-    <!-- Nenhuma empresa em uso ainda -->
+    <!-- Nenhuma empresa integrada ainda -->
     <EmptyState
-      v-else-if="carregado && escopo === 'uso' && !base.length"
+      v-else-if="carregado && escopo === 'prontas' && !base.length"
       :icon="Building2"
       title="Nenhuma empresa ligada à NFE.io ainda"
       description="Ligue cada empresa à NFE.io (pela gaveta da empresa ou, se você for administrador, em Sincronizar com a NFE.io)."
@@ -480,7 +479,7 @@ async function sincronizar() {
       title="Todas as empresas estão integradas na NFE.io"
       description="Nenhuma empresa pendente de integração."
     >
-      <Button size="sm" variant="outline" @click="mostrarEmUso">ver em uso</Button>
+      <Button size="sm" variant="outline" @click="mostrarTodas">ver todas</Button>
     </EmptyState>
 
     <!-- Filtro sem resultado -->
