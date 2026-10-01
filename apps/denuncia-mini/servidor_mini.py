@@ -129,6 +129,9 @@ def robo():
     if not os.path.exists(caminho):
         return
     marca = os.path.getmtime(caminho)
+    desp = os.path.join(ROBO, "despertador.json")
+    if os.path.exists(desp):
+        marca = max(marca, os.path.getmtime(desp))
     if marca == _robo["enviado"]:
         return  # status_mac.py parado: o DaVinci acusa "sem notícia" sozinho
     with open(caminho, encoding="utf-8") as f:
@@ -136,6 +139,12 @@ def robo():
     with open(os.path.expanduser("~/.davinci_denuncia.json")) as f:
         cfg = json.load(f)
     corpo = {"quando": resumo.get("quando"), "itens": resumo.get("itens") or []}
+    try:  # 01/10: despertador desligado = modo manual (a aba Robô não acusa rodada que não começou)
+        with open(os.path.join(ROBO, "despertador.json"), encoding="utf-8") as f:
+            d = json.load(f)
+        corpo["despertador"] = {"ligado": d.get("ligado", True), "rodadas": d.get("rodadas")}
+    except (OSError, ValueError):
+        pass
     req = urllib.request.Request(
         cfg["url"].rstrip("/") + "/api/denuncia/sync/robo",
         data=json.dumps(corpo, ensure_ascii=False).encode("utf-8"),

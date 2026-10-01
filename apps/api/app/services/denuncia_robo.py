@@ -135,7 +135,7 @@ def _passos_da_rodada(tarefas: list[dict], janela: str) -> list[dict]:
     return passos
 
 
-def _estado_rodada(passos: list[dict], hora: datetime, agora: datetime) -> str:
+def _estado_rodada(passos: list[dict], hora: datetime, agora: datetime, manual: bool) -> str:
     if any(p["acao"] in NUCLEO for p in passos):
         st = {p["status"] for p in passos}
         if "rodando" in st:
@@ -143,6 +143,8 @@ def _estado_rodada(passos: list[dict], hora: datetime, agora: datetime) -> str:
         if "fila" in st:
             return "na_fila"
         return "com_erro" if "erro" in st else "feita"
+    if manual:
+        return "manual"   # ninguém pede sozinho: rodada sem passo não é alarme
     if agora < hora - CHECAGEM_ANTES:
         return "futura"
     if agora < hora + TOLERANCIA_INICIO:
@@ -156,6 +158,9 @@ def montar_painel(resumo: dict | None, recebido_em: datetime | None, agora: date
     itens = {i.get("chave"): i for i in resumo.get("itens") or [] if isinstance(i, dict)}
     tarefas = [i for k, i in itens.items() if str(k).startswith("tarefa_")]
     quando = _quando(resumo.get("quando"))
+    # 01/10 (Vinicius: "disparamos o passo 1, acompanhamos… depois o passo 2"):
+    # despertador desligado = modo manual; o mini manda o despertador.json junto.
+    manual = (resumo.get("despertador") or {}).get("ligado") is False
     recebido = recebido_em.astimezone(FUSO) if recebido_em else None
     conectado = bool(recebido and agora - recebido <= SEM_NOTICIA)
 
@@ -231,7 +236,7 @@ def montar_painel(resumo: dict | None, recebido_em: datetime | None, agora: date
         hora = datetime(hoje.year, hoje.month, hoje.day, h, tzinfo=FUSO)
         janela = f"{hoje.isoformat()}_{h:02d}h"
         passos = _passos_da_rodada(tarefas, janela)
-        estado = _estado_rodada(passos, hora, agora)
+        estado = _estado_rodada(passos, hora, agora, manual)
         if estado == "nao_comecou":
             junta(precisa, f"A rodada das {h:02d}h não começou",
                   "Nenhuma varredura foi pedida para esta rodada.",
@@ -247,6 +252,7 @@ def montar_painel(resumo: dict | None, recebido_em: datetime | None, agora: date
     ]
 
     return {
+        "modo": "manual" if manual else "automatico",
         "recebido_em": _iso(recebido),
         "quando": _iso(quando),
         "conectado": conectado,

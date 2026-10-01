@@ -34,6 +34,7 @@ type Frente = {
 }
 type Aviso = { titulo: string; detalhe: string; o_que_fazer: string; desde: string | null }
 type Painel = {
+  modo: 'manual' | 'automatico'
   recebido_em: string | null
   conectado: boolean
   agente: { estado: string; detalhe: string; versao: string | null; desde: string | null }
@@ -93,6 +94,7 @@ const RODADA: Record<string, [string, string]> = {
   nao_comecou: ['não começou', 'pill-danger'],
   aguardando: ['vai começar', 'pill-warning'],
   futura: ['mais tarde', 'pill-muted'],
+  manual: ['sem rodada (modo manual)', 'pill-muted'],
 }
 const PASSO: Record<string, [string, string]> = {
   concluida: ['feito', 'pill-success'],
@@ -131,6 +133,11 @@ const totalHoje = computed(() => (painel.value?.denuncias_hoje || []).reduce((s,
       <div class="flex flex-wrap items-center gap-2 text-sm">
         <Bot class="size-4 text-muted-foreground" />
         <span v-if="situacao" :class="situacao.cls">{{ situacao.txt }}</span>
+        <span
+          v-if="painel.modo === 'manual'"
+          class="pill-info"
+          title="O despertador do robô está desligado (despertador.json no Mac mini): nada começa sozinho, cada passo é disparado à mão."
+        >modo manual</span>
         <span class="text-xs text-muted-foreground">
           notícia do Mac mini {{ haQuanto(painel.recebido_em) }}
           <template v-if="painel.agente.versao"> · robô v{{ painel.agente.versao }}</template>
@@ -190,7 +197,8 @@ const totalHoje = computed(() => (painel.value?.denuncias_hoje || []).reduce((s,
             Nenhuma varredura foi pedida para esta rodada.<template v-if="r.passos.length"> Abaixo, só o que o robô roda sozinho pelo relógio.</template>
           </div>
           <div v-else-if="!r.passos.length" class="border-t px-4 py-3 text-xs text-muted-foreground">
-            O robô pede a checagem 15 min antes e o resto na hora cheia.
+            <template v-if="painel.modo === 'manual'">Modo manual: o robô só roda o passo que for pedido.</template>
+            <template v-else>O robô pede a checagem 15 min antes e o resto na hora cheia.</template>
           </div>
           <ul v-if="r.passos.length" class="divide-y border-t">
             <li v-for="p in r.passos" :key="p.acao" class="px-4 py-2 text-sm">

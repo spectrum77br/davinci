@@ -441,3 +441,18 @@ async def test_prova_teto_apaga_a_aberta_ha_mais_tempo(
     assert locais[30] is None and locais[31]
     auth_as(await make_user(permissions={"denuncia": {"view": True}}))
     assert (await client.post("/api/denuncia/provas/30/preparar")).json()["pronto"] is False
+
+
+def test_painel_modo_manual_nao_acusa_rodada():
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from app.services.denuncia_robo import montar_painel
+
+    agora = datetime(2026, 10, 1, 19, 0, tzinfo=ZoneInfo("America/Sao_Paulo"))
+    resumo = dict(_resumo(_tarefa("varredura_mercadolivre", "2026-10-01_12h", "concluida")),
+                  despertador={"ligado": False, "rodadas": [6, 12, 18]})
+    p = montar_painel(resumo, agora, agora)
+    assert p["modo"] == "manual"
+    assert [r["estado"] for r in p["rodadas"]] == ["manual", "feita", "manual"]
+    assert not any("não começou" in x["titulo"] for x in p["precisa"])
