@@ -272,6 +272,23 @@ def test_pendencias_da_empresa():
     }
     _p, a = svc_empresas.pendencias_e_avisos(c, f, hoje=hoje)
     assert any("1207" in x for x in a)
+    # 01/10/2026: sem certificado na NFE.io é pendência em produção E em teste
+    # (é o que sobra quando a integração para no meio).
+    f.nfeio_cert_status, f.nfeio_cert_expira = None, None
+    for amb in ("Production", "Development"):
+        f.nfeio_ambiente = amb
+        p, _a = svc_empresas.pendencias_e_avisos(c, f, hoje=hoje)
+        assert svc_empresas.PEND_SEM_CERTIFICADO in p, amb
+    assert svc_empresas.situacao_integracao(f) == "incompleta"
+    f.nfeio_cert_status, f.nfeio_cert_expira = "Active", date(2027, 1, 1)
+    f.nfeio_resumo = {"inscricoes": []}
+    p, _a = svc_empresas.pendencias_e_avisos(c, f, hoje=hoje)
+    assert svc_empresas.PEND_SEM_INSCRICAO in p
+    f.nfeio_resumo = None  # nunca lido: não dá para dizer que falta
+    p, _a = svc_empresas.pendencias_e_avisos(c, f, hoje=hoje)
+    assert svc_empresas.PEND_SEM_INSCRICAO not in p and not p
+    assert svc_empresas.situacao_integracao(f) == "ok"
+    assert svc_empresas.situacao_integracao(None) == "nao_integrada"
 
 
 # --- rotas (banco + NFE.io falsa) ------------------------------------------------------

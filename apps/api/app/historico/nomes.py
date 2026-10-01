@@ -181,6 +181,7 @@ ACOES: dict[tuple[str, str], str] = {
     ("POST", "/api/nfse/emissoes/lote/arquivos"): "baixou notas de serviço em lote (PDF/XML)",
     ("POST", "/api/nfse/emissoes/lote/imprimir"): "imprimiu notas de serviço em lote",
     ("POST", "/api/nfse/prestadores/{company_id}/nfeio/ligar"): "ligou a empresa na NFE.io",
+    ("POST", "/api/nfse/prestadores/{company_id}/nfeio/integrar"): "integrou a empresa na NFE.io",
     ("POST", "/api/nfse/prestadores/{company_id}/nfeio/atualizar"): "atualizou a empresa da NFE.io",
     ("POST", "/api/nfse/nfeio/sincronizar"): "sincronizou as empresas com a NFE.io",
 }

@@ -16,16 +16,23 @@
 // tabela mostra o ambiente de cada uma (Teste × Produção) e o admin tem o
 // "Sincronizar com a NFE.io", que liga pelo CNPJ e mostra o que sobrou dos dois
 // lados. Nada é emitido nem mudado na NFE.io: só leitura lá.
+//
+// 01/10/2026 (Eduardo: "algumas empresas nossas não estão integradas no nfe.io,
+// precisa integrar ... com filtro para ver só os pendentes"): 3º escopo
+// "Pendentes" (não integradas ou com a integração incompleta), "Em uso" passa a
+// contar a empresa com loja cadastrada (em operação) e cada linha pendente ganha
+// o botão "Integrar na NFE.io" / "Completar integração" (diálogo
+// NfseIntegrarDialog, montado pela página). O "Sem NFE.io" agora conta de verdade.
 import { computed, onMounted, ref } from 'vue'
 import { PopoverContent, PopoverPortal, PopoverRoot, PopoverTrigger } from 'reka-ui'
 import {
-  AlertCircle, AlertTriangle, Building2, CheckCircle2, ExternalLink, KeyRound, Loader2, RefreshCw, Search, SearchX,
-  Settings2, Unplug, X,
+  AlertCircle, AlertTriangle, Building2, CheckCircle2, ExternalLink, KeyRound, Loader2, PlugZap, RefreshCw, Search,
+  SearchX, Settings2, Unplug, X,
 } from 'lucide-vue-next'
 import { Button } from '~/components/ui/button'
 import {
   erroApi, fmtDoc, fmtHora, fmtPct, pctPositivo, pendenciaTexto, plural, regimeTexto, situacaoCertificado,
-  situacaoFiscalTexto, soDigitos, TOM_TEXTO, useNfseTela,
+  situacaoFiscalTexto, soDigitos, textoCertificadoGuardado, TOM_TEXTO, useNfseTela,
   type AmbienteNfeio, type ChecklistItem, type Prestador, type Sincronizacao,
   useNfseApi,
 } from '~/lib/nfse'
@@ -49,20 +56,35 @@ const esqueleto = computed(() => !carregado.value && (carregando.value || !monta
 type Cartao = 'prontas' | 'pendencia' | 'certificado' | 'nao_ligadas'
 
 const busca = ref('')
-const escopo = ref<'uso' | 'todas'>('uso')
+type Escopo = 'uso' | 'pendentes' | 'todas'
+const escopo = ref<Escopo>('uso')
 const cartao = ref<Cartao | null>(null)
 
 const escopoModel = computed({
   get: () => escopo.value as string,
   set: (v: string) => {
-    escopo.value = v === 'todas' ? 'todas' : 'uso'
+    escopo.value = v === 'todas' || v === 'pendentes' ? v : 'uso'
   },
 })
 
-const OPCOES_ESCOPO = [
-  { id: 'uso', rotulo: 'Em uso', dica: 'Ligadas à NFE.io, já configuradas ou usadas em nota fixa' },
+// Ainda não integrada na NFE.io, ou ligada mas sem certificado/inscrição lá.
+function pendenteIntegracao(p: Prestador): boolean {
+  return p.integracao !== 'ok'
+}
+// Conta em TODAS as empresas (não só nas em uso): é o que falta integrar.
+const nPendentes = computed(() => prestadores.value.filter(pendenteIntegracao).length)
+
+const OPCOES_ESCOPO = computed(() => [
+  { id: 'uso', rotulo: 'Em uso', dica: 'Integradas na NFE.io, com loja cadastrada, já configuradas ou usadas em nota fixa' },
+  {
+    id: 'pendentes',
+    rotulo: 'Pendentes',
+    contador: nPendentes.value,
+    tomContador: 'atencao' as const,
+    dica: 'Ainda não integradas na NFE.io (ou com a integração incompleta)',
+  },
   { id: 'todas', rotulo: 'Todas' },
-]
+])
 
 // Notas fixas ativas por empresa (quem emite).
 const notasFixas = computed(() => {
@@ -78,9 +100,10 @@ function usoDe(p: Prestador): number {
 }
 
 // Empresa usada em nota fixa ativa entra sempre, mesmo sem NFE.io: é
-// justamente a que trava o Emitir do mês (e o selo da aba).
+// justamente a que trava o Emitir do mês (e o selo da aba). 01/10: e a que tem
+// loja cadastrada (em operação), mesmo sem NFE.io — é a que falta integrar.
 function emUso(p: Prestador): boolean {
-  return !!p.nfeio || !!p.fiscal || usoDe(p) > 0
+  return !!p.nfeio || !!p.fiscal || usoDe(p) > 0 || p.em_operacao
 }
 // Certificado na NFE.io vencido ou vencendo (em Teste ele é opcional).
 function certificadoAtencao(p: Prestador): boolean {
@@ -93,11 +116,15 @@ const CRITERIO: Record<Cartao, (p: Prestador) => boolean> = {
   prontas: (p) => p.pronto,
   pendencia: (p) => !p.pronto,
   certificado: certificadoAtencao,
-  nao_ligadas: (p) => !p.nfeio,
+  nao_ligadas: pendenteIntegracao,
 }
 
 // Base do resumo: o escopo escolhido (padrão "Em uso"), sem busca nem cartão.
-const base = computed(() => (escopo.value === 'uso' ? prestadores.value.filter(emUso) : prestadores.value))
+const base = computed(() => {
+  if (escopo.value === 'uso') return prestadores.value.filter(emUso)
+  if (escopo.value === 'pendentes') return prestadores.value.filter(pendenteIntegracao)
+  return prestadores.value
+})
 
 const resumo = computed(() => {
   const b = base.value
@@ -135,7 +162,7 @@ const cartoes = computed(() => [
     icone: Unplug,
     tom: 'warning' as const,
     valor: resumo.value.naoLigadas,
-    hint: 'ainda não ligadas',
+    hint: 'não integradas ou incompletas',
   },
 ])
 
@@ -162,13 +189,29 @@ const lista = computed(() => {
       if (`${p.apelido} ${p.razao_social}`.toLowerCase().includes(q)) return true
       return qd.length >= 2 && soDigitos(p.cnpj).includes(qd)
     })
-    .sort((a, b) => ordem(a) - ordem(b) || a.apelido.localeCompare(b.apelido, 'pt-BR', { sensitivity: 'base' }))
+    .sort(
+      (a, b) =>
+        ordem(a) - ordem(b) ||
+        Number(b.em_operacao) - Number(a.em_operacao) ||
+        a.apelido.localeCompare(b.apelido, 'pt-BR', { sensitivity: 'base' }),
+    )
 })
 
 const temFiltro = computed(() => !!busca.value.trim() || !!cartao.value)
 
 function mostrarTodas() {
   escopo.value = 'todas'
+}
+
+function mostrarEmUso() {
+  escopo.value = 'uso'
+}
+
+// "Integrar na NFE.io" / "Completar integração": o diálogo da página cuida do
+// aviso (toast) e de recarregar a lista.
+async function integrar(p: Prestador) {
+  popoverDe.value = null
+  await tela.integrarEmpresa(p)
 }
 
 function limparFiltros() {
@@ -270,8 +313,9 @@ async function sincronizar() {
   <section class="space-y-4">
     <div class="flex flex-wrap items-start gap-x-4 gap-y-2">
       <p class="min-w-0 flex-1 text-sm text-muted-foreground">
-        Para emitir, a empresa precisa estar ligada à NFE.io (lá ficam o certificado, o regime e a inscrição
-        municipal) e ter o serviço prestado. O CNPJ se cadastra em
+        Para emitir, a empresa precisa estar integrada na NFE.io (lá ficam o certificado, o regime e a inscrição
+        municipal) e ter o serviço prestado. Empresa ainda não integrada: use Integrar na NFE.io (o DaVinci manda os
+        dados da Receita e o certificado guardado). O CNPJ se cadastra em
         <NuxtLink
           v-if="podeAbrirCadastroEmpresa"
           to="/companies"
@@ -429,6 +473,16 @@ async function sincronizar() {
       </div>
     </EmptyState>
 
+    <!-- Nenhuma pendente de integração -->
+    <EmptyState
+      v-else-if="carregado && escopo === 'pendentes' && !base.length"
+      :icon="CheckCircle2"
+      title="Todas as empresas estão integradas na NFE.io"
+      description="Nenhuma empresa pendente de integração."
+    >
+      <Button size="sm" variant="outline" @click="mostrarEmUso">ver em uso</Button>
+    </EmptyState>
+
     <!-- Filtro sem resultado -->
     <EmptyState
       v-else-if="carregado && !lista.length"
@@ -482,6 +536,10 @@ async function sincronizar() {
             <td>
               <div class="flex flex-wrap items-center gap-1.5">
                 <NfseAmbienteBadge tamanho="sm" :ambiente="p.nfeio?.ambiente" :ligada="!!p.nfeio" />
+                <span v-if="p.integracao === 'incompleta'" class="pill-warning whitespace-nowrap">integração incompleta</span>
+              </div>
+              <div v-if="!p.nfeio" class="mt-1">
+                <span class="text-xs text-muted-foreground">{{ p.em_operacao ? 'com loja cadastrada' : 'sem loja cadastrada' }}</span>
               </div>
               <div v-if="p.nfeio" class="mt-1 text-xs">
                 <span :class="TOM_TEXTO[situacaoFiscalTexto(p.nfeio.status_fiscal).tom]">
@@ -502,7 +560,9 @@ async function sincronizar() {
             <!-- Certificado (na NFE.io) -->
             <td class="hidden whitespace-nowrap lg:table-cell">
               <NfseNfeioChip v-if="p.nfeio" :prestador="p" />
-              <span v-else class="text-xs text-muted-foreground">—</span>
+              <span v-else class="text-xs" :class="TOM_TEXTO[textoCertificadoGuardado(p).tom]">
+                {{ textoCertificadoGuardado(p).rotulo }}
+              </span>
             </td>
 
             <!-- Situação -->
@@ -571,7 +631,17 @@ async function sincronizar() {
 
             <!-- Ação -->
             <td class="col-acoes w-px whitespace-nowrap text-right">
-              <Button size="sm" variant="outline" class="h-8 px-2.5" @click.stop="abrir(p)">
+              <Button
+                v-if="canEdit && p.integracao !== 'ok'"
+                size="sm"
+                :variant="p.integracao === 'nao_integrada' ? 'default' : 'outline'"
+                class="h-8 px-2.5"
+                @click.stop="integrar(p)"
+              >
+                <PlugZap class="mr-1.5 size-4" aria-hidden="true" />
+                {{ p.integracao === 'nao_integrada' ? 'Integrar na NFE.io' : 'Completar integração' }}
+              </Button>
+              <Button v-else size="sm" variant="outline" class="h-8 px-2.5" @click.stop="abrir(p)">
                 <Settings2 class="mr-1.5 size-4" aria-hidden="true" />
                 {{ canEdit ? 'configurar' : 'ver' }}
               </Button>

@@ -23,6 +23,14 @@ Lote (30/09/2026): `POST /emissoes/lote/arquivos` (.zip de PDFs ou XMLs) e
 `POST /emissoes/lote/imprimir` (um PDF só) ficam no router trancado — a tela
 manda a chave no cabeçalho — e nunca terminam em /pdf ou /xml (essas são as
 do link de 60 s). E-mail da nota: sai pelo DaVinci, nunca mais pela NFE.io.
+
+Integrar empresa (01/10/2026, Eduardo: "algumas empresas nossas não estão
+integradas no nfe.io, precisa integrar"): `GET /prestadores/{id}/nfeio/integrar`
+mostra o que vai (Receita + NFE.io + certificado guardado, só leitura) e
+`POST` cria a empresa na NFE.io (ou acha pelo CNPJ), manda o certificado
+guardado, cadastra a Inscrição Municipal em TESTE e liga. Pede `edit` + a senha
+extra, e o POST só sai com ENV=production E NFSE_INTEGRAR_LIBERADO=true (o
+.env do localhost tem a chave real: lá dá 403 antes de qualquer chamada).
 """
 
 from __future__ import annotations
@@ -55,11 +63,15 @@ from app.schemas.companies import DesbloqueioIn, DesbloqueioOut
 from app.schemas.nfse import (
     AtualizarIn,
     CancelarIn,
+    CertificadoGuardadoOut,
     EmailNotaIn,
     EmissaoOut,
     EmitirIn,
     FiscalIn,
     FiscalOut,
+    IntegrarIn,
+    IntegrarOut,
+    IntegrarPreviaOut,
     ItemIn,
     LigarIn,
     LoteArquivosIn,
@@ -76,12 +88,14 @@ from app.schemas.nfse import (
 )
 from app.security import senha_extra
 from app.security.senha_extra import require_nfse_unlock
+from app.services.nfse import ambiente, municipios, nfeio, receita
 from app.services.nfse import contas_bling as svc_contas_bling
 from app.services.nfse import emissao as svc
 from app.services.nfse import empresas as svc_empresas
 from app.services.nfse import faturamento as svc_faturamento
+from app.services.nfse import integracao as svc_integracao
 from app.services.nfse import lote_arquivos as svc_lote
-from app.services.nfse import municipios, nfeio, receita
+from app.services.nfse import texto as T  # noqa: N812
 from app.services.nfse.ambiente import eh_teste, producao_liberada
 
 logger = structlog.get_logger()
@@ -136,6 +150,7 @@ async def status_(_u: Annotated[User, Depends(_view)]) -> dict:
         "provedor": "nfeio",
         "chave_configurada": nfeio.chave_configurada(),
         "producao_liberada": producao_liberada(),
+        "integrar_liberado": ambiente.integrar_liberado(),
     }
 
 
@@ -177,7 +192,13 @@ def _nfeio_out(f: CompanyFiscal | None) -> NfeioOut | None:
     )
 
 
-def _prestador_out(c: Company, f: CompanyFiscal | None) -> PrestadorOut:
+def _prestador_out(
+    c: Company,
+    f: CompanyFiscal | None,
+    *,
+    em_operacao: bool = False,
+    cert: dict | None = None,
+) -> PrestadorOut:
     pend, avisos = svc_empresas.pendencias_e_avisos(c, f)
     return PrestadorOut(
         company_id=c.id,
@@ -190,7 +211,15 @@ def _prestador_out(c: Company, f: CompanyFiscal | None) -> PrestadorOut:
         pronto=not pend,
         pendencias=pend,
         avisos=avisos,
+        em_operacao=em_operacao,
+        integracao=svc_empresas.situacao_integracao(f),
+        certificado_guardado=CertificadoGuardadoOut(**(cert or {})),
     )
+
+
+def _em_operacao(c: Company, com_loja: set[str]) -> bool:
+    doc = T.normalizar_documento(c.cnpj)
+    return bool(doc) and doc in com_loja
 
 
 async def _prestador(session: AsyncSession, company_id: UUID) -> PrestadorOut:
@@ -202,7 +231,8 @@ async def _prestador(session: AsyncSession, company_id: UUID) -> PrestadorOut:
     f = await session.get(CompanyFiscal, company_id)
     if f is not None:
         await session.refresh(f)
-    return _prestador_out(c, f)
+    com_loja, certs = await svc_empresas.contexto_lista(session, [company_id])
+    return _prestador_out(c, f, em_operacao=_em_operacao(c, com_loja), cert=certs.get(company_id))
 
 
 @router.get("/faturamento")
@@ -227,7 +257,13 @@ async def listar_prestadores(
 ) -> list[PrestadorOut]:
     empresas = (await session.execute(select(Company).order_by(Company.apelido))).scalars().all()
     fiscais = {f.company_id: f for f in (await session.execute(select(CompanyFiscal))).scalars()}
-    return [_prestador_out(c, fiscais.get(c.id)) for c in empresas]
+    com_loja, certs = await svc_empresas.contexto_lista(session)
+    return [
+        _prestador_out(
+            c, fiscais.get(c.id), em_operacao=_em_operacao(c, com_loja), cert=certs.get(c.id)
+        )
+        for c in empresas
+    ]
 
 
 @router.put("/prestadores/{company_id}/fiscal", response_model=PrestadorOut)
@@ -288,6 +324,33 @@ async def atualizar_ligadas_nfeio(session: Sess, _u: Annotated[User, Depends(_ed
             return await svc_empresas.atualizar_ligadas(session, cli)
         except svc.NfseError as e:
             raise _http(e) from e
+
+
+@router.get("/prestadores/{company_id}/nfeio/integrar", response_model=IntegrarPreviaOut)
+async def previa_integrar(
+    company_id: UUID, session: Sess, _u: Annotated[User, Depends(_edit)]
+) -> IntegrarPreviaOut:
+    """Mostra o que vai para a NFE.io. Só LÊ (Receita, NFE.io e o certificado guardado):
+    nada é enviado."""
+    async with _nfeio() as cli:
+        try:
+            return IntegrarPreviaOut(**await svc_integracao.previa(session, company_id, cli))
+        except svc.NfseError as e:
+            raise _http(e) from e
+
+
+@router.post("/prestadores/{company_id}/nfeio/integrar", response_model=IntegrarOut)
+async def integrar_nfeio(
+    company_id: UUID, body: IntegrarIn, session: Sess, user: Annotated[User, Depends(_edit)]
+) -> IntegrarOut:
+    """Cria a empresa na NFE.io (ou acha pelo CNPJ), manda o certificado guardado, cadastra a
+    inscrição municipal (em TESTE) e liga. Nunca repete POST; nunca cria em dobro."""
+    async with _nfeio() as cli:
+        try:
+            r = await svc_integracao.integrar(session, company_id, body, user.id, cli)
+        except svc.NfseError as e:
+            raise _http(e) from e
+    return IntegrarOut(**r, prestador=await _prestador(session, company_id))
 
 
 @router.post("/nfeio/sincronizar")

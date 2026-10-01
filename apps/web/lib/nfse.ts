@@ -34,7 +34,9 @@ export type Fiscal = {
 export type RetencaoIr = 'auto' | 'sempre' | 'nunca'
 
 export type AmbienteNfeio = 'Production' | 'Development' | 'Staging'
-export type RegimeNfeio = 'SimplesNacional' | 'LucroPresumido' | 'LucroReal'
+export type RegimeNfeio =
+  | 'SimplesNacional' | 'LucroPresumido' | 'LucroReal'
+  | 'MicroempreendedorIndividual' | 'SimplesNacionalExcessoSublimite' | 'Isento'
 
 // A empresa como está cadastrada na NFE.io (só leitura aqui).
 export type Nfeio = {
@@ -67,13 +69,95 @@ export type Prestador = {
   // notas de percentual que a empresa emite, cadastrada em Cadastros › Empresas.
   // "0.5000" = 0,5%; null = a empresa não tem (cada nota fixa precisa da sua).
   percentual_servico: string | null
+  // 01/10/2026 (Eduardo: "com filtro para ver só os pendentes"):
+  em_operacao: boolean // tem loja (Cadastros › Lojas, não arquivada) com o CNPJ dela
+  integracao: Integracao
+  // Certificado A1 guardado em Cadastros › Empresas (o que vai para a NFE.io
+  // ao integrar). Só o resumo: nunca o arquivo nem a senha.
+  certificado_guardado: { situacao: 'ok' | 'vencido' | 'sem_senha' | 'nenhum'; expira: string | null }
 }
+
+// 'incompleta' = ligada, mas a NFE.io está sem certificado ou sem inscrição municipal.
+export type Integracao = 'ok' | 'nao_integrada' | 'incompleta'
 
 // GET /api/nfse/status
 export type StatusNfse = {
   provedor: 'nfeio'
   chave_configurada: boolean // a chave de acesso da NFE.io está no servidor
   producao_liberada: boolean // false = só empresas em Teste emitem daqui
+  integrar_liberado: boolean // false = este servidor não cadastra empresa na NFE.io
+}
+
+// --- Integrar empresa na NFE.io (01/10/2026) --------------------------------
+// GET/POST /api/nfse/prestadores/{id}/nfeio/integrar
+
+export type RegimeIntegrar = 'SimplesNacional' | 'LucroPresumido' | 'LucroReal' | 'MicroempreendedorIndividual'
+
+export type EnderecoIntegrar = {
+  logradouro: string | null
+  numero: string | null
+  complemento: string | null
+  bairro: string | null
+  cep: string | null // só dígitos
+  cmun_ibge: string | null // código IBGE, 7 dígitos
+  municipio_nome?: string | null // só na prévia
+  uf?: string | null
+}
+
+export type DadosIntegrar = {
+  razao_social: string | null
+  nome_fantasia: string | null
+  regime: RegimeIntegrar | null
+  natureza_juridica: string | null
+  endereco: EnderecoIntegrar
+  inscricao_municipal: string | null
+  email: string | null
+}
+
+export type PassoIntegracao = {
+  id: 'criar_empresa' | 'certificado' | 'inscricao' | 'ligar'
+  titulo: string
+  situacao: 'fazer' | 'pular' | 'feito' | 'ja_estava' | 'falhou' | 'nao_feito'
+  detalhe: string | null
+  erros: Msg[] | null
+}
+
+export type IntegrarPrevia = {
+  company_id: string
+  apelido: string
+  cnpj: string | null
+  modo: 'criar' | 'completar'
+  na_nfeio: {
+    nfeio_id: string
+    nome: string
+    ambiente: string | null
+    tem_certificado: boolean
+    tem_inscricao: boolean | null
+  } | null
+  dados: DadosIntegrar
+  regime_motivo: string | null
+  natureza_texto: string | null // "2062 · Sociedade Empresária Limitada" (veio da Receita)
+  receita_ok: boolean
+  certificado: {
+    id: string
+    filename: string
+    validade: string | null
+    validade_conferida: boolean // aberto no servidor (senha e validade conferidas)
+    cnpj_confere: boolean | null
+  } | null
+  passos: PassoIntegracao[]
+  bloqueios: string[]
+  avisos: string[]
+  liberado: boolean // false = este servidor não pode confirmar
+}
+
+export type IntegrarForm = DadosIntegrar & { certificado_id?: string | null }
+
+export type IntegrarResultado = {
+  ok: boolean
+  mensagem: string
+  passos: PassoIntegracao[]
+  prestador: Prestador
 }
 
 // POST /api/nfse/nfeio/sincronizar (admin)
@@ -444,6 +528,8 @@ export interface NfseTela {
   cancelar(e: Emissao): Promise<Emissao | null>
   // 30/09: envio MANUAL pelo DaVinci (janela com o "Para" editável). true = enviado.
   enviarEmail(e: Emissao): Promise<boolean>
+  // 01/10: "Integrar na NFE.io" / "Completar integração". true = mudou algo.
+  integrarEmpresa(p: Prestador): Promise<boolean>
 }
 
 export const NFSE_TELA: InjectionKey<NfseTela> = Symbol('nfse-tela')
@@ -533,6 +619,10 @@ export type EmailApi = {
   enviar(e: Emissao): Promise<boolean> // true = enviado
   ocupado(): boolean // e-mail saindo (a senha que vence espera)
 }
+export type IntegrarApi = {
+  abrir(p: Prestador): Promise<boolean> // true = mudou algo (integrou, mesmo que pela metade)
+  ocupado(): boolean // integrando (a senha que vence espera)
+}
 export type ModeloApi = { abrir(o?: AbrirModeloOpts): Promise<Modelo | null> }
 export type TomadorApi = { abrir(o?: AbrirTomadorOpts): Promise<Tomador | null> }
 export type EmpresaApi = { abrir(companyId: string, foco?: SecaoEmpresa): Promise<boolean> }
@@ -546,6 +636,30 @@ export const REGIMES_NFEIO: Record<RegimeNfeio, string> = {
   SimplesNacional: 'Simples Nacional',
   LucroPresumido: 'Lucro Presumido',
   LucroReal: 'Lucro Real',
+  MicroempreendedorIndividual: 'MEI',
+  SimplesNacionalExcessoSublimite: 'Simples Nacional (excesso de sublimite)',
+  Isento: 'Isento',
+}
+
+// Os regimes que o "Integrar na NFE.io" deixa escolher (01/10/2026).
+export const REGIMES_INTEGRAR: Record<RegimeIntegrar, string> = {
+  SimplesNacional: 'Simples Nacional',
+  LucroPresumido: 'Lucro Presumido',
+  LucroReal: 'Lucro Real',
+  MicroempreendedorIndividual: 'MEI',
+}
+
+// Natureza jurídica (nome da NFE.io → texto) quando a Receita não disse.
+export const NATUREZAS_INTEGRAR: Record<string, string> = {
+  SociedadeEmpresariaLimitada: 'Sociedade limitada (LTDA)',
+  Empresario: 'Empresário individual',
+  SociedadeSimplesLimitada: 'Sociedade simples limitada',
+  SociedadeSimplesPura: 'Sociedade simples pura',
+  SociedadeAnonimaFechada: 'S.A. fechada',
+  SociedadeAnonimaAberta: 'S.A. aberta',
+  EireliNaturezaEmpresaria: 'EIRELI (empresária)',
+  EireliNaturezaSimples: 'EIRELI (simples)',
+  Cooperativa: 'Cooperativa',
 }
 
 export function regimeTexto(r: string | null | undefined): string {
@@ -751,7 +865,7 @@ export const MENSAGENS_ERRO: Record<string, string> = {
   ja_emitida: 'Essa nota fixa já tem nota neste mês.',
   nao_reenviavel: 'Só nota recusada pode ser reenviada.',
   producao_bloqueada: 'Esta empresa está em Produção na NFE.io e a emissão em produção está travada neste servidor.',
-  nao_ligada: 'A empresa ainda não está ligada à NFE.io (aba Empresas).',
+  nao_ligada: 'A empresa ainda não está integrada na NFE.io (aba Empresas › Integrar na NFE.io).',
   chave_nfeio: 'A chave de acesso da NFE.io não está configurada ou não vale. Fale com o administrador.',
   avulsa_incompleta: 'A nota avulsa precisa de empresa, tomador, descrição e valor.',
   sem_percentual: 'Falta a porcentagem: defina na nota fixa ou na empresa (Cadastros › Empresas).',
@@ -759,6 +873,23 @@ export const MENSAGENS_ERRO: Record<string, string> = {
   sem_arquivo: 'Nenhuma das notas marcadas tem PDF ou XML disponível na NFE.io.',
   email_falhou: 'O serviço de e-mail não aceitou o envio. Tente de novo em alguns minutos.',
   email_nao_configurado: 'O envio de e-mail não está configurado neste servidor. Fale com o administrador do DaVinci.',
+  // Integrar empresa na NFE.io (01/10)
+  integrar_travado: 'Neste servidor a integração com a NFE.io está travada.',
+  ja_integrada: 'A empresa já está integrada na NFE.io.',
+  integracao_em_andamento: 'Alguém está integrando esta empresa agora. Espere um minuto.',
+  integracao_sem_trava: 'Não deu para começar a integração agora. Tente de novo em alguns minutos.',
+  cnpj_invalido: 'A empresa não tem CNPJ brasileiro válido (Cadastros › Empresas).',
+  sem_certificado_guardado: 'Não há certificado digital guardado no DaVinci para esta empresa.',
+  certificado_sem_senha: 'O certificado guardado não tem a senha.',
+  certificado_vencido: 'O certificado guardado venceu.',
+  certificado_outro_cnpj: 'O certificado guardado é de outro CNPJ.',
+  dados_incompletos: 'Faltam dados para integrar: confira os campos marcados.',
+  nfeio_recusou_empresa: 'A NFE.io recusou o cadastro da empresa.',
+  nfeio_incerta: 'A NFE.io não respondeu. Espere 1 minuto e tente de novo: não cria em dobro.',
+  nfeio_empresa_inativa: 'Na NFE.io existe uma empresa com este CNPJ, mas desativada.',
+  nfeio_cnpj_duplicado: 'Há mais de uma empresa com este CNPJ na NFE.io.',
+  nfeio_ligada_sumiu: 'A empresa ligada não foi achada na NFE.io: confira no painel antes de integrar de novo.',
+  certificado_invalido: 'O certificado escolhido não é desta empresa. Feche e abra de novo.',
 }
 
 // Pendência do backend (já em texto para ler) → onde se resolve. CNPJ se
@@ -1292,12 +1423,12 @@ function diasAte(data: string): number {
 // Teste o certificado é opcional: vencido ou ausente não impede.
 export function situacaoCertificado(p: Prestador): { rotulo: string; tom: Tom; dias: number | null; vencido: boolean } {
   const n = p?.nfeio
-  if (!n) return { rotulo: 'empresa não ligada', tom: 'neutro', dias: null, vencido: false }
+  if (!n) return { rotulo: 'empresa não integrada', tom: 'neutro', dias: null, vencido: false }
   const exp = n.cert_expira
-  if (!exp && !n.cert_status) {
-    return n.teste
-      ? { rotulo: 'sem certificado (opcional no teste)', tom: 'neutro', dias: null, vencido: false }
-      : { rotulo: 'sem certificado na NFE.io', tom: 'perigo', dias: null, vencido: true }
+  // 01/10/2026: sem certificado nenhum é pendência também em teste (é o que
+  // sobra quando a integração para no meio). Vencido em teste segue opcional.
+  if (!exp && (!n.cert_status || (n.cert_status as string) === 'None')) {
+    return { rotulo: 'sem certificado na NFE.io', tom: 'perigo', dias: null, vencido: true }
   }
   const dias = exp ? diasAte(exp) : null
   const vencido = n.cert_status === 'Overdue' || (dias != null && dias < 0)
@@ -1310,6 +1441,22 @@ export function situacaoCertificado(p: Prestador): { rotulo: string; tom: Tom; d
   if (dias === 0) return { rotulo: 'vence hoje', tom: 'atencao', dias, vencido: false }
   if (dias <= 30) return { rotulo: `vence em ${plural(dias, 'dia', 'dias')}`, tom: 'atencao', dias, vencido: false }
   return { rotulo: `vence ${fmtData(exp)}`, tom: 'neutro', dias, vencido: false }
+}
+
+// Certificado guardado no DaVinci (Cadastros › Empresas) de empresa ainda não
+// integrada: é ele que vai para a NFE.io ao integrar (01/10/2026).
+export function textoCertificadoGuardado(p: Prestador): { rotulo: string; tom: Tom } {
+  const c = p?.certificado_guardado
+  switch (c?.situacao) {
+    case 'ok':
+      return { rotulo: c.expira ? `no DaVinci: vence ${fmtData(c.expira)}` : 'no DaVinci: válido', tom: 'neutro' }
+    case 'vencido':
+      return { rotulo: `no DaVinci: venceu ${fmtData(c.expira)}`, tom: 'perigo' }
+    case 'sem_senha':
+      return { rotulo: 'no DaVinci: sem a senha', tom: 'atencao' }
+    default:
+      return { rotulo: 'sem certificado no DaVinci', tom: 'perigo' }
+  }
 }
 
 // A empresa está em Teste na NFE.io (nota simulada)? null = não ligada.

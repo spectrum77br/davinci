@@ -10,8 +10,12 @@ com a prefeitura (ou o Emissor Nacional) e guarda o PDF/XML. Aqui:
   emissão não é idempotente e, depois de um timeout, repetir é tentar emitir a
   mesma nota duas vezes. Na dúvida quem decide é o GET pelo `externalId`.
 - Notas pela v3 (`federalTaxNumber` como texto, aceita CNPJ alfanumérico);
-  empresas pela v1 (`/v1/companies`) e Inscrições Municipais pela
+  leitura de empresas pela v1 (`/v1/companies`) e Inscrições Municipais pela
   `api.nfse.io/v2`. Na v1 o CNPJ vem como NÚMERO (sem o zero da frente).
+- 01/10/2026 (Eduardo: "precisa integrar"): escrita de empresa pela v2
+  (`api.nfse.io`): criar a empresa, mandar o certificado e cadastrar a
+  Inscrição Municipal — sempre POST sem repetição (`_uma`). Quem decide se
+  pode é `services/nfse/integracao.py` (com a trava `NFSE_INTEGRAR_LIBERADO`).
 - `TRANSPORTE`: gancho dos testes (httpx falso no lugar da NFE.io).
 """
 
@@ -76,6 +80,33 @@ def _campo(d: Mapping[str, Any], *nomes: str) -> str:
             if v in d and d[v] not in (None, ""):
                 return str(d[v])
     return ""
+
+
+def envelope(corpo: Any, *chaves: str) -> dict:
+    """O objeto dentro do envelope da NFE.io (`{"company": {...}}`,
+    `{"companies": {...}}`), com a chave como veio ou com a inicial maiúscula.
+    Sem envelope: o próprio corpo (se for objeto); senão `{}`."""
+    if isinstance(corpo, Mapping):
+        for chave in chaves:
+            for v in (chave, chave[:1].upper() + chave[1:]):
+                if isinstance(corpo.get(v), Mapping):
+                    return dict(corpo[v])
+        return dict(corpo)
+    return {}
+
+
+def chaves_camel(obj: Any) -> Any:
+    """01/10/2026: a doc da v2 mostra a empresa em PascalCase (`Id`, `Address`)
+    e a conta real responde em camelCase. Aqui tudo vira camelCase (inicial
+    minúscula), em qualquer nível, pra ler a v2 igual à v1."""
+    if isinstance(obj, Mapping):
+        return {
+            (k[:1].lower() + k[1:] if isinstance(k, str) else k): chaves_camel(v)
+            for k, v in obj.items()
+        }
+    if isinstance(obj, list):
+        return [chaves_camel(x) for x in obj]
+    return obj
 
 
 def mensagens(corpo: Any) -> list[dict]:
@@ -250,7 +281,7 @@ class ClienteNfeio:
     def _si(self, cid: str, resto: str = "") -> str:
         return f"{self.base}/v3/companies/{quote(cid, safe='')}/serviceinvoices{resto}"
 
-    # --- empresas (só leitura) ---------------------------------------------
+    # --- empresas ------------------------------------------------------------
 
     async def listar_empresas(self) -> tuple[Resposta, list[dict]]:
         """Todas as empresas da conta (v1). Pagina até a página vir incompleta."""
@@ -280,6 +311,65 @@ class ClienteNfeio:
             f"{self.base_nfse}/v2/companies/{quote(cid, safe='')}/municipaltaxes",
         )
         return r, _pagina(r.corpo, "municipalTaxes") if r.ok else []
+
+    # 01/10/2026: leitura de empresa também pela v2 — quem cria é a v2, e a v1
+    # (adaptador) não garante mostrar na hora uma empresa nova ainda sem IM.
+    # Medido na conta (01/10): mesmos ids e CNPJs nas duas listagens.
+
+    async def empresa_v2(self, cid: str) -> Resposta:
+        """GET /v2/companies/{id}. 200 {"company": {...}}; 404 se não existe."""
+        return await self._get("empresa_v2", f"{self.base_nfse}/v2/companies/{quote(cid, safe='')}")
+
+    async def listar_empresas_v2(self) -> tuple[Resposta, list[dict]]:
+        """Todas as empresas da conta (v2, cursor `startingAfter`), em camelCase."""
+        todas: list[dict] = []
+        r = Resposta("listar_empresas_v2", None)
+        depois: str | None = None
+        for _ in range(20):
+            params: dict[str, Any] = {"limit": POR_PAGINA_MAX}
+            if depois:
+                params["startingAfter"] = depois
+            r = await self._get(
+                "listar_empresas_v2", f"{self.base_nfse}/v2/companies", params=params
+            )
+            if not r.ok:
+                return r, todas
+            corpo = chaves_camel(r.corpo) if isinstance(r.corpo, Mapping) else {}
+            itens = _pagina(corpo, "companies")
+            todas.extend(itens)
+            depois = _campo(itens[-1], "id") if itens else ""
+            if not corpo.get("hasMore") or not depois:
+                break
+        return r, todas
+
+    # 01/10/2026: escrita de empresa pela v2. NENHUM destes repete (`_uma`):
+    # depois de um timeout quem decide é a listagem pelo CNPJ.
+
+    async def criar_empresa(self, corpo: dict) -> Resposta:
+        """POST /v2/companies. NUNCA repete. 200 {"company": {..., "id"}}."""
+        return await self._uma(
+            "criar_empresa", "POST", f"{self.base_nfse}/v2/companies", json=corpo
+        )
+
+    async def enviar_certificado(self, cid: str, pfx: bytes, senha: str, nome: str) -> Resposta:
+        """POST multipart /v2/companies/{id}/certificates (File + Password). NUNCA repete.
+        Mandar de novo SUBSTITUI o anterior. O corpo nunca vai pra log/banco."""
+        return await self._uma(
+            "enviar_certificado",
+            "POST",
+            f"{self.base_nfse}/v2/companies/{quote(cid, safe='')}/certificates",
+            files={"File": (nome, pfx, "application/x-pkcs12")},
+            data={"Password": senha},
+        )
+
+    async def criar_inscricao(self, cid: str, corpo: dict) -> Resposta:
+        """POST /v2/companies/{id}/municipaltaxes. NUNCA repete. Nasce em Development."""
+        return await self._uma(
+            "criar_inscricao",
+            "POST",
+            f"{self.base_nfse}/v2/companies/{quote(cid, safe='')}/municipaltaxes",
+            json=corpo,
+        )
 
     # --- notas --------------------------------------------------------------
 

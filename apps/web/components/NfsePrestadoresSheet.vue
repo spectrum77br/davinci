@@ -18,10 +18,16 @@
 //
 // Pendências (impedem a emissão) e avisos (não impedem) vêm do servidor, já em
 // texto para ler, no topo da gaveta.
+//
+// 01/10/2026 (Eduardo: "precisa integrar"): empresa sem NFE.io ganha o botão
+// "Integrar na NFE.io" (cria lá com os dados da Receita e o certificado
+// guardado; diálogo NfseIntegrarDialog). Os botões de procurar/colar viram o
+// caminho secundário ("Já existe na NFE.io?"). Ligada mas sem certificado ou
+// sem inscrição municipal lá: aviso + "Completar integração".
 import { computed, nextTick, ref } from 'vue'
 import {
-  AlertTriangle, Briefcase, Check, CheckCircle2, ClipboardPaste, ExternalLink, Eye, Loader2, Percent, Plug, RefreshCw,
-  Save, Search, XCircle,
+  AlertTriangle, Briefcase, Check, CheckCircle2, ClipboardPaste, ExternalLink, Eye, Loader2, Percent, Plug, PlugZap,
+  RefreshCw, Save, Search, XCircle,
 } from 'lucide-vue-next'
 import { Button } from '~/components/ui/button'
 import {
@@ -259,6 +265,14 @@ async function ligar(ref: string, acao: 'cnpj' | 'link') {
   }
 }
 
+// "Integrar na NFE.io" / "Completar integração": o diálogo avisa e recarrega.
+async function integrar() {
+  const alvo = p.value
+  if (!alvo || !canEdit.value || nfeioAcao.value) return
+  const mudou = await tela.integrarEmpresa(alvo)
+  if (mudou) salvouAlgo = true
+}
+
 function procurarPeloCnpj() {
   void ligar('', 'cnpj')
 }
@@ -470,13 +484,20 @@ defineExpose({ abrir })
         <!-- Não ligada -->
         <div v-if="!n" class="space-y-3 rounded-md border border-dashed p-3">
           <p class="text-sm">
-            <span class="font-medium">Esta empresa ainda não está ligada à NFE.io.</span>
+            <span class="font-medium">Esta empresa ainda não está integrada na NFE.io.</span>
             <span class="text-muted-foreground"> Sem isso ela não emite.</span>
           </p>
-          <div v-if="canEdit" class="flex flex-wrap gap-2">
+          <div v-if="canEdit">
+            <Button type="button" size="sm" :disabled="!!nfeioAcao" @click="integrar">
+              <PlugZap class="mr-1.5 size-4" aria-hidden="true" />
+              Integrar na NFE.io
+            </Button>
+          </div>
+          <div v-if="canEdit" class="flex flex-wrap items-center gap-2 border-t pt-3">
+            <span class="text-xs text-muted-foreground">Já existe na NFE.io?</span>
             <NfseDica :texto="p.cnpj ? 'Procura na NFE.io a empresa com o mesmo CNPJ.' : 'A empresa está sem CNPJ: cadastre em Cadastros › Empresas.'">
               <span class="inline-flex" :tabindex="p.cnpj ? undefined : 0">
-                <Button type="button" size="sm" :disabled="!p.cnpj || !!nfeioAcao" @click="procurarPeloCnpj">
+                <Button type="button" size="sm" variant="outline" :disabled="!p.cnpj || !!nfeioAcao" @click="procurarPeloCnpj">
                   <Loader2
                     v-if="nfeioAcao === 'cnpj'"
                     class="mr-1.5 size-4 animate-spin motion-reduce:animate-none"
@@ -496,6 +517,16 @@ defineExpose({ abrir })
 
         <!-- Ligada -->
         <div v-else class="space-y-3 rounded-md border p-3">
+          <NfseAviso v-if="p.integracao === 'incompleta' && canEdit" tom="atencao">
+            A integração ficou incompleta (falta certificado ou inscrição municipal na NFE.io, ou a
+            NFE.io ainda não respondeu se a inscrição está lá).
+            <template #acoes>
+              <Button type="button" size="sm" :disabled="!!nfeioAcao" @click="integrar">
+                <PlugZap class="mr-1.5 size-4" aria-hidden="true" />
+                Completar integração
+              </Button>
+            </template>
+          </NfseAviso>
           <dl class="grid grid-cols-[140px_1fr] gap-x-4 gap-y-2 text-sm sm:grid-cols-[170px_1fr]">
             <dt class="text-muted-foreground">Ambiente</dt>
             <dd class="flex flex-wrap items-center gap-1.5">

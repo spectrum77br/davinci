@@ -8,6 +8,10 @@ BrasilAPI (https://brasilapi.com.br/api/cnpj/v1/{cnpj}) é pública, sem chave,
 e repassa os dados abertos do CNPJ da Receita Federal. Campos usados:
 `razao_social`, `municipio`, `uf`, `codigo_municipio_ibge` (número),
 `opcao_pelo_simples` e `opcao_pelo_mei` (true/false/null).
+
+01/10/2026 (Eduardo: "precisa integrar"): também o endereço, a natureza
+jurídica, o e-mail, a situação cadastral e o regime do ano mais recente
+(`regime_tributario`), que viram a sugestão do "Integrar na NFE.io".
 """
 
 from __future__ import annotations
@@ -48,6 +52,48 @@ def regime_sugerido(simples: bool | None, mei: bool | None) -> int | None:
     return None
 
 
+def _txt(v: Any) -> str | None:
+    t = re.sub(r"\s+", " ", str(v or "")).strip()
+    return t or None
+
+
+def logradouro(tipo: Any, nome: Any) -> str | None:
+    """ "RUA" + "EXEMPLO" → "RUA EXEMPLO"; não repete o tipo quando o
+    logradouro já começa com ele ("RUA RUA EXEMPLO" nunca)."""
+    t, n = _txt(tipo), _txt(nome)
+    if not n:
+        return t
+    if t and not n.upper().startswith(t.upper() + " ") and n.upper() != t.upper():
+        return f"{t} {n}"
+    return n
+
+
+def numero(v: Any) -> str:
+    n = _txt(v)
+    if not n or n.upper().replace(" ", "") in ("SN", "S/N"):
+        return "S/N"
+    return n
+
+
+def _regime_mais_recente(dados: dict) -> tuple[str | None, int | None]:
+    itens = [
+        it
+        for it in (dados.get("regime_tributario") or [])
+        if isinstance(it, dict) and it.get("forma_de_tributacao")
+    ]
+    if not itens:
+        return None, None
+
+    def ano(it: dict) -> int:
+        try:
+            return int(it.get("ano") or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    it = max(itens, key=ano)
+    return _txt(it.get("forma_de_tributacao")), (ano(it) or None)
+
+
 def mapear(cnpj: str, dados: dict) -> dict:
     cod = re.sub(r"\D", "", str(dados.get("codigo_municipio_ibge") or ""))
     cmun = cod if len(cod) == 7 else None
@@ -59,6 +105,10 @@ def mapear(cnpj: str, dados: dict) -> dict:
         nome, uf = oficial
     simples = _bool(dados.get("opcao_pelo_simples"))
     mei = _bool(dados.get("opcao_pelo_mei"))
+    nat = re.sub(r"\D", "", str(dados.get("codigo_natureza_juridica") or ""))
+    email = (str(dados.get("email") or "").strip().lower()) or None
+    situacao = _txt(dados.get("descricao_situacao_cadastral"))
+    regime, ano = _regime_mais_recente(dados)
     return {
         "cnpj": cnpj,
         "razao_social": (str(dados.get("razao_social") or "").strip()) or None,
@@ -69,6 +119,25 @@ def mapear(cnpj: str, dados: dict) -> dict:
         "mei": mei,
         "op_simp_nac_sugerido": regime_sugerido(simples, mei),
         "fonte": FONTE,
+        "nome_fantasia": _txt(dados.get("nome_fantasia")),
+        "situacao_cadastral": situacao.upper() if situacao else None,
+        "email": email,
+        "natureza_juridica_codigo": nat.zfill(4) if nat and len(nat) <= 4 else None,
+        "natureza_juridica": _txt(dados.get("natureza_juridica")),
+        "regime_tributario_receita": regime.upper() if regime else None,
+        "regime_tributario_ano": ano,
+        "endereco": {
+            "logradouro": logradouro(
+                dados.get("descricao_tipo_de_logradouro"), dados.get("logradouro")
+            ),
+            "numero": numero(dados.get("numero")),
+            "complemento": _txt(dados.get("complemento")),
+            "bairro": _txt(dados.get("bairro")),
+            "cep": re.sub(r"\D", "", str(dados.get("cep") or "")) or None,
+            "cmun_ibge": cmun,
+            "municipio_nome": nome,
+            "uf": uf,
+        },
     }
 
 

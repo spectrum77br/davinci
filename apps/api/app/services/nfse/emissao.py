@@ -39,15 +39,14 @@ from app.models.nfse import (
     STATUS_EM_ANDAMENTO,
     STATUS_VIVOS,
     CompanyFiscal,
-    NfseChamada,
     NfseEmissao,
     NfseEvento,
     NfseModelo,
     NfseTomador,
 )
 from app.services import email as email_svc
+from app.services.nfse import chamadas, municipios, nfeio
 from app.services.nfse import empresas as E  # noqa: N812
-from app.services.nfse import municipios, nfeio
 from app.services.nfse import texto as T  # noqa: N812
 from app.services.nfse.ambiente import MSG_PRODUCAO_BLOQUEADA, eh_teste, pode_emitir
 from app.services.nfse.erros import NfseError, explicar, explicar_texto
@@ -733,22 +732,9 @@ def _log(
     emissao_id: UUID | None,
     ambiente: str | None,
 ) -> None:
-    """Uma linha por ida à NFE.io: operação, HTTP, códigos e tempo. Nunca a
-    chave, o corpo ou dado do tomador."""
-    if r is None:
-        return
-    session.add(
-        NfseChamada(
-            company_id=company_id,
-            emissao_id=emissao_id,
-            operacao=r.operacao,
-            ambiente=ambiente,
-            http_status=r.status,
-            codigos=r.codigos or None,
-            erro=r.erro_rede,
-            duracao_ms=r.duracao_ms,
-        )
-    )
+    """Uma linha por ida à NFE.io (01/10/2026: o corpo foi para
+    `chamadas.registrar`, que a integração de empresas também usa)."""
+    chamadas.registrar(session, r, company_id, emissao_id, ambiente)
 
 
 @asynccontextmanager

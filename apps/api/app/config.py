@@ -645,6 +645,9 @@ class Settings(BaseSettings):
     # Empresa em Production na NFE.io (nota real) só emite com isto E
     # ENV=production. No localhost fica false: nenhuma nota real sai daqui.
     nfse_producao_liberada: bool = False
+    # 01/10/2026 (Eduardo: "precisa integrar"): criar empresa/mandar certificado na
+    # NFE.io só com ENV=production E isto. No localhost (chave real no .env) fica false.
+    nfse_integrar_liberado: bool = False
 
     @property
     def is_prod(self) -> bool:

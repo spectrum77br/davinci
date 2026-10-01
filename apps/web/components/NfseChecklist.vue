@@ -36,23 +36,28 @@ function estadoLido(ok: boolean | null) {
     <p v-if="titulo" class="text-xs font-medium text-muted-foreground">{{ titulo }}</p>
 
     <ul v-if="variante === 'lista'" class="space-y-0.5">
-      <li v-for="it in itens" :key="it.chave" class="flex items-center gap-1">
+      <li v-for="it in itens" :key="it.chave" class="flex items-start gap-1">
         <button
           type="button"
-          class="flex min-w-0 flex-1 items-center gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-muted/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-default disabled:hover:bg-transparent"
+          class="flex min-w-0 flex-1 items-start gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-muted/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-default disabled:hover:bg-transparent"
           :disabled="disabled"
           @click="emit('ir', it.chave)"
         >
-          <component :is="icone(it.ok)" class="size-4 shrink-0" :class="cor(it.ok)" aria-hidden="true" />
+          <component :is="icone(it.ok)" class="mt-0.5 size-4 shrink-0" :class="cor(it.ok)" aria-hidden="true" />
           <span class="sr-only">{{ estadoLido(it.ok) }}:</span>
-          <span class="shrink-0" :class="it.ok === true && 'text-muted-foreground'">{{ it.titulo }}</span>
-          <span v-if="it.detalhe" class="min-w-0 truncate text-xs text-muted-foreground">{{ it.detalhe }}</span>
-          <span v-if="it.naoSalvo" class="shrink-0 text-xs text-amber-600 dark:text-amber-400">(não salvo)</span>
+          <!-- 01/10/2026: o título quebra linha (nome de certificado e pendência
+               compridos vazavam do diálogo e do popover "O que falta"); o
+               detalhe vai na linha de baixo. -->
+          <span class="min-w-0 flex-1 break-words">
+            <span :class="it.ok === true && 'text-muted-foreground'">{{ it.titulo }}</span>
+            <span v-if="it.naoSalvo" class="ml-1 text-xs text-amber-600 dark:text-amber-400">(não salvo)</span>
+            <span v-if="it.detalhe" class="block text-xs text-muted-foreground">{{ it.detalhe }}</span>
+          </span>
         </button>
         <Button
           v-if="it.acao && !disabled"
           variant="link"
-          class="ml-auto h-auto shrink-0 px-2 py-0 text-xs"
+          class="ml-auto mt-1.5 h-auto shrink-0 px-2 py-0 text-xs"
           @click="emit('acao', it.chave)"
         >{{ it.acao }}</Button>
       </li>

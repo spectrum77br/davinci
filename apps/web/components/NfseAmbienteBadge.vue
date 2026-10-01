@@ -20,8 +20,8 @@ const selo = computed(() => {
     return {
       classe: 'pill-muted',
       icone: Unplug,
-      texto: sm ? 'NÃO LIGADA' : 'Não ligada',
-      dica: 'A empresa ainda não está ligada à NFE.io: não emite.',
+      texto: sm ? 'NÃO INTEGRADA' : 'Não integrada',
+      dica: 'A empresa ainda não está integrada na NFE.io: não emite.',
     }
   }
   if (props.ambiente === 'Production') {

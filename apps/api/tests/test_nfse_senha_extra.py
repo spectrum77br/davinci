@@ -150,6 +150,7 @@ async def test_sem_chave_nada_sai_nem_entra(client, make_user, auth_as, trava_de
         "enviar-email",
         "arquivos",  # lote: .zip de PDFs/XMLs (30/09)
         "imprimir",  # lote: PDF juntado (30/09)
+        "integrar",  # cria a empresa na NFE.io (01/10)
     } <= caminhos
     for metodo, caminho in rotas:
         r = await client.request(metodo, caminho, json={})

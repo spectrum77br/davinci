@@ -162,6 +162,14 @@ class NfeioOut(BaseModel):
     sincronizado_em: datetime | None
 
 
+class CertificadoGuardadoOut(BaseModel):
+    """Resumo do certificado A1 guardado em Cadastros › Empresas (01/10/2026).
+    Nunca o nome do arquivo, o id ou a senha: só se dá para integrar."""
+
+    situacao: Literal["ok", "vencido", "sem_senha", "nenhum"] = "nenhum"
+    expira: date | None = None
+
+
 class PrestadorOut(BaseModel):
     company_id: UUID
     apelido: str
@@ -175,6 +183,11 @@ class PrestadorOut(BaseModel):
     pronto: bool
     pendencias: list[str]
     avisos: list[str]
+    # 01/10/2026 (Eduardo: "com filtro para ver só os pendentes"): tem loja não
+    # arquivada com o CNPJ dela; situação da integração na NFE.io; certificado guardado.
+    em_operacao: bool = False
+    integracao: Literal["ok", "nao_integrada", "incompleta"] = "nao_integrada"
+    certificado_guardado: CertificadoGuardadoOut = Field(default_factory=CertificadoGuardadoOut)
 
 
 class LigarIn(BaseModel):
@@ -470,6 +483,130 @@ class EmissaoOut(BaseModel):
     tomador_nome: str | None = None
 
 
+# --- integrar empresa na NFE.io (01/10/2026) ------------------------------------------
+
+
+def _texto_ou_none(v: object) -> object:
+    if isinstance(v, str):
+        v = re.sub(r"\s+", " ", v).strip()
+        return v or None
+    return v
+
+
+class EnderecoIntegrar(BaseModel):
+    # Limites de tamanho ficam no serviço (`integracao.validar`, só no passo que
+    # cria a empresa): aqui um 422 do pydantic sairia em inglês e sem campo.
+    logradouro: str | None = None
+    numero: str | None = None
+    complemento: str | None = None
+    bairro: str | None = None
+    cep: str | None = None
+    cmun_ibge: str | None = None
+    # Só saída (prévia): o nome do município e a UF do código IBGE.
+    municipio_nome: str | None = None
+    uf: str | None = None
+
+    @field_validator("logradouro", "numero", "complemento", "bairro", mode="before")
+    @classmethod
+    def _textos(cls, v: object) -> object:
+        return _texto_ou_none(v)
+
+    @field_validator("cep", "cmun_ibge", mode="before")
+    @classmethod
+    def _so_digitos(cls, v: object) -> object:
+        return _digitos(v) if isinstance(v, str) else v
+
+
+class DadosIntegrar(BaseModel):
+    razao_social: str | None = None
+    nome_fantasia: str | None = None
+    regime: (
+        Literal["SimplesNacional", "LucroPresumido", "LucroReal", "MicroempreendedorIndividual"]
+        | None
+    ) = None
+    natureza_juridica: str | None = None
+    endereco: EnderecoIntegrar = Field(default_factory=EnderecoIntegrar)
+    inscricao_municipal: str | None = None
+    email: str | None = None
+
+
+class IntegrarIn(DadosIntegrar):
+    """O que a pessoa conferiu na tela. Obrigatoriedade é no serviço (depende
+    dos passos que vão acontecer)."""
+
+    # 01/10/2026: sem max_length aqui — o limite de 60 da NFE.io é conferido em
+    # `integracao.validar` só quando a empresa vai ser criada (no "completar"
+    # esses campos nem são usados) e volta em PT-BR no campo certo.
+    certificado_id: UUID | None = None
+
+    @field_validator("razao_social", "nome_fantasia", "natureza_juridica", mode="before")
+    @classmethod
+    def _textos(cls, v: object) -> object:
+        return _texto_ou_none(v)
+
+    @field_validator("inscricao_municipal", mode="before")
+    @classmethod
+    def _im(cls, v: object) -> object:
+        if isinstance(v, str):
+            return re.sub(r"[.\-/\s]", "", v).upper() or None
+        return v
+
+    @field_validator("email", mode="before")
+    @classmethod
+    def _email(cls, v: object) -> object:
+        if isinstance(v, str):
+            return v.strip() or None
+        return v
+
+
+class PassoOut(BaseModel):
+    id: Literal["criar_empresa", "certificado", "inscricao", "ligar"]
+    titulo: str
+    situacao: Literal["fazer", "pular", "feito", "ja_estava", "falhou", "nao_feito"]
+    detalhe: str | None = None
+    erros: list[dict] | None = None
+
+
+class CertificadoEscolhidoOut(BaseModel):
+    id: UUID
+    filename: str
+    validade: date | None
+    validade_conferida: bool
+    cnpj_confere: bool | None
+
+
+class NaNfeioOut(BaseModel):
+    nfeio_id: str
+    nome: str
+    ambiente: str | None
+    tem_certificado: bool
+    tem_inscricao: bool | None
+
+
+class IntegrarPreviaOut(BaseModel):
+    company_id: UUID
+    apelido: str
+    cnpj: str | None
+    modo: Literal["criar", "completar"]
+    na_nfeio: NaNfeioOut | None
+    dados: DadosIntegrar
+    regime_motivo: str | None
+    natureza_texto: str | None
+    receita_ok: bool
+    certificado: CertificadoEscolhidoOut | None
+    passos: list[PassoOut]
+    bloqueios: list[str]
+    avisos: list[str]
+    liberado: bool
+
+
+class IntegrarOut(BaseModel):
+    ok: bool
+    mensagem: str
+    passos: list[PassoOut]
+    prestador: PrestadorOut
+
+
 class ReceitaOut(BaseModel):
     """O que a Receita (via BrasilAPI) diz da empresa — só sugestão, nada é gravado."""
 
@@ -483,6 +620,15 @@ class ReceitaOut(BaseModel):
     # 2 MEI · 3 Simples (não MEI) · 1 nenhum dos dois · None = não dá pra saber.
     op_simp_nac_sugerido: Literal[1, 2, 3] | None
     fonte: str
+    # 01/10/2026: o que o "Integrar na NFE.io" sugere.
+    nome_fantasia: str | None = None
+    situacao_cadastral: str | None = None
+    email: str | None = None
+    natureza_juridica_codigo: str | None = None
+    natureza_juridica: str | None = None
+    regime_tributario_receita: str | None = None
+    regime_tributario_ano: int | None = None
+    endereco: dict | None = None
 
 
 class MunicipioOut(BaseModel):

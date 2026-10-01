@@ -37,7 +37,7 @@ import {
   erroApi, fmtMes, itemReenvio, MAX_LOTE_ARQUIVOS, mesAtual, mesValido, NFSE_API, NFSE_TELA, plural, prestadorPorId,
   STATUS_PARA_RESOLVER,
   type AbaId, type AbrirModeloOpts, type AbrirTomadorOpts, type AvulsaApi, type CancelarApi, type ConfirmApi,
-  type ConfirmarOpts, type EmailApi, type Emissao, type EmpresaApi, type ItemLote, type LoteApi, type Modelo, type ModeloApi,
+  type ConfirmarOpts, type EmailApi, type Emissao, type EmpresaApi, type IntegrarApi, type ItemLote, type LoteApi, type Modelo, type ModeloApi,
   type NfseApi, type NfseTela, type NotaApi, type NotaDoLote, type Prestador, type ResultadoArquivos, type ResultadoLote,
   type SecaoEmpresa, type StatusNfse, type Tomador, type TomadorApi,
 } from '~/lib/nfse'
@@ -119,6 +119,8 @@ const emailRef = ref<EmailApi | null>(null)
 const modeloRef = ref<ModeloApi | null>(null)
 const tomadorRef = ref<TomadorApi | null>(null)
 const empresaRef = ref<EmpresaApi | null>(null)
+// 01/10/2026: "Integrar na NFE.io" (NfseIntegrarDialog).
+const integrarRef = ref<IntegrarApi | null>(null)
 
 // --- Senha extra -------------------------------------------------------------
 // A mesma senha de Empresas e do Valuation, com desbloqueio próprio (a chave de
@@ -141,10 +143,15 @@ function emailOcupado(): boolean {
   const m = emailRef.value as Partial<EmailApi> | null
   return !!(m && typeof m.ocupado === 'function' && m.ocupado())
 }
+// Integrando empresa na NFE.io (pode levar até 2 minutos): a senha que vence espera.
+function integrarOcupado(): boolean {
+  const m = integrarRef.value as Partial<IntegrarApi> | null
+  return !!(m && typeof m.ocupado === 'function' && m.ocupado())
+}
 // Imprimir/baixar em lote em andamento (100 PDFs levam uns 20 s na NFE.io).
 const arquivosOcupado = ref(false)
 function algoOcupado(): boolean {
-  return loteOcupado() || cancelamentoOcupado() || emailOcupado() || arquivosOcupado.value
+  return loteOcupado() || cancelamentoOcupado() || emailOcupado() || integrarOcupado() || arquivosOcupado.value
 }
 // A janela de envio aberta (conferindo, esperando a prefeitura ou no fim)
 // fecha do jeito normal antes do cadeado: mostra o resumo e devolve o resultado.
@@ -770,6 +777,13 @@ async function enviarEmail(e: Emissao): Promise<boolean> {
   return j ? j.enviar(e) : false
 }
 
+// 01/10/2026 (Eduardo: "precisa integrar"): cria a empresa na NFE.io (ou
+// completa o que falta) pela janela NfseIntegrarDialog. true = mudou algo.
+async function integrarEmpresa(p: Prestador): Promise<boolean> {
+  const j = janela(integrarRef, 'abrir')
+  return j ? j.abrir(p) : false
+}
+
 const tela: NfseTela = {
   status,
   erroStatus,
@@ -802,6 +816,7 @@ const tela: NfseTela = {
   reenviar,
   cancelar,
   enviarEmail,
+  integrarEmpresa,
 }
 provide(NFSE_TELA, tela)
 
@@ -1068,6 +1083,7 @@ onBeforeRouteLeave(() => {
       <NfseModelosSheet ref="modeloRef" />
       <NfseTomadoresSheet ref="tomadorRef" />
       <NfsePrestadoresSheet ref="empresaRef" />
+      <NfseIntegrarDialog ref="integrarRef" />
       </template>
     </div>
   </TooltipProvider>
