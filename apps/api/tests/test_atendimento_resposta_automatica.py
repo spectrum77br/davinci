@@ -33,6 +33,11 @@ def test_reconhece_os_modelos_do_duoke():
     )
     assert e_resposta_automatica("OLA,  a sua mensagem foi RECEBIDA. Há mais mensagens…")
     assert e_resposta_automatica("Descreva sua dúvida que assim que um atendente estiver livre")
+    # Campanhas automáticas que no TikTok chegam como mensagem da loja.
+    assert e_resposta_automatica("Oi! Recebemos seu pedido e já estamos preparando pra envio.")
+    assert e_resposta_automatica("Ficou alguma dúvida sobre o produto? Estou aqui pra te ajudar")
+    assert e_resposta_automatica("Oi! Seu produto ainda está no carrinho 🛒 Finalize agora")
+    assert e_resposta_automatica("Oi! Tudo bem? 😊 Confirmamos a entrega do seu pedido! Por se")
     # Resposta de pessoa (mesmo as prontas do Duoke) continua contando.
     assert not e_resposta_automatica("A entrega é feita pela Shopee, não temos acesso")
     assert not e_resposta_automatica("bom dia tudo bem ?")

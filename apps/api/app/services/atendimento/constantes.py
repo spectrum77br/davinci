@@ -422,9 +422,23 @@ PLATAFORMAS_SEM_AUTO = frozenset({"amazon", *PLATAFORMAS_ROBO})
 # Começo do texto, sem acento e em minúsculas; medido em 13 lojas Shopee
 # (2.499 / 638 / 259 envios). Modelo novo do Duoke = acrescentar aqui.
 RESPOSTAS_AUTOMATICAS: tuple[str, ...] = (
+    # Robô de atendimento do Duoke (Shopee, ML e TikTok).
     "ola, por favor selecione sua duvida",
     "ola, a sua mensagem foi recebida",
     "descreva sua duvida que assim que um atendente",
+    # Campanhas automáticas (pedido, entrega, carrinho, "ficou alguma
+    # dúvida?"). Na Shopee chegam como `sistema`; no TikTok, como da LOJA.
+    # Nenhuma responde o que o comprador perguntou.
+    "oi! recebemos seu pedido e ja estamos preparando",
+    "ficou alguma duvida sobre o produto? estou aqui pra te ajuda",
+    "tudo bem? caso ainda esteja em duvida, posso te explicar",
+    "bom dia! ficou alguma duvida em que eu possa te ajudar",
+    "oi! seu produto ainda esta no carrinho",
+    "oi! tudo bem? 😊 confirmamos a entrega do seu pedido",
+    "oi! so passando para saber se esta tudo certo com o seu prod",
+    "oi! passando rapidinho pra saber se esta tudo certo",
+    "oi! 👋 notamos que voce deixou alguns itens no carrinho",
+    "oi! vi que voce fez o pedido mas o pagamento ainda nao foi",
 )
 
 
