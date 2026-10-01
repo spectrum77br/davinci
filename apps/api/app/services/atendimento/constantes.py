@@ -412,3 +412,31 @@ def reclamacao_aberta(dados: object) -> bool:
 # Temu e AliExpress: nada sai pelo DaVinci (a pessoa responde no Seller
 # Center) — o automático nunca vale para elas.
 PLATAFORMAS_SEM_AUTO = frozenset({"amazon", *PLATAFORMAS_ROBO})
+
+
+# ── Resposta automática da loja (Duoke) ───────────────────────────────────
+# O robô do Duoke responde sozinho ("selecione sua dúvida", "sua mensagem foi
+# recebida"...) pela mesma API da pessoa, então chega como mensagem DA LOJA.
+# Ela não responde o comprador: a conversa continua esperando uma pessoa
+# (01/10/2026: a Shopee ATV tinha 7 conversas esperando e a Caixa mostrava 2).
+# Começo do texto, sem acento e em minúsculas; medido em 13 lojas Shopee
+# (2.499 / 638 / 259 envios). Modelo novo do Duoke = acrescentar aqui.
+RESPOSTAS_AUTOMATICAS: tuple[str, ...] = (
+    "ola, por favor selecione sua duvida",
+    "ola, a sua mensagem foi recebida",
+    "descreva sua duvida que assim que um atendente",
+)
+
+
+def normalizar_inicio(texto: str | None) -> str:
+    import unicodedata
+
+    base = unicodedata.normalize("NFKD", texto or "")
+    sem_acento = "".join(ch for ch in base if not unicodedata.combining(ch))
+    return " ".join(sem_acento.lower().split())
+
+
+def e_resposta_automatica(texto: str | None) -> bool:
+    """A mensagem da loja é a resposta automática do Duoke (não conta como resposta)."""
+    inicio = normalizar_inicio(texto)
+    return bool(inicio) and inicio.startswith(RESPOSTAS_AUTOMATICAS)

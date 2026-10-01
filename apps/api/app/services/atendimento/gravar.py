@@ -76,6 +76,7 @@ from app.services.atendimento.constantes import (
     ORIGENS_DAVINCI,
     RASCUNHO_PENDENTE,
     RASCUNHO_SUBSTITUIDO,
+    e_resposta_automatica,
     sla_horas,
 )
 
@@ -797,7 +798,12 @@ def recalcular(
             atual = _utc(conversa.ultima_do_cliente_em)
             if atual is None or quando > atual:
                 conversa.ultima_do_cliente_em = quando
-        elif m.autor == AUTOR_LOJA and m.status != MSG_FALHOU:
+        elif (
+            m.autor == AUTOR_LOJA
+            and m.status != MSG_FALHOU
+            # A resposta automática do Duoke não responde o comprador.
+            and not e_resposta_automatica(m.texto)
+        ):
             atual = _utc(conversa.ultima_da_loja_em)
             if atual is None or quando > atual:
                 conversa.ultima_da_loja_em = quando
@@ -824,12 +830,23 @@ async def recalcular_conversa(session: AsyncSession, conversa: AtendimentoConver
     do_cliente = await _uma(
         base.where(AtendimentoMensagem.autor == AUTOR_CLIENTE).order_by(momento.desc())
     )
-    da_loja = await _uma(
-        base.where(
-            AtendimentoMensagem.autor == AUTOR_LOJA,
-            AtendimentoMensagem.status != MSG_FALHOU,
-        ).order_by(momento.desc())
+    # A última resposta da loja que NÃO é a automática do Duoke (o filtro é
+    # por texto, em Python: olha as 20 últimas da loja, que é de sobra).
+    candidatas = (
+        (
+            await session.execute(
+                base.where(
+                    AtendimentoMensagem.autor == AUTOR_LOJA,
+                    AtendimentoMensagem.status != MSG_FALHOU,
+                )
+                .order_by(momento.desc())
+                .limit(20)
+            )
+        )
+        .scalars()
+        .all()
     )
+    da_loja = next((m for m in candidatas if not e_resposta_automatica(m.texto)), None)
 
     conversa.ultima_mensagem_em = None
     conversa.ultima_mensagem_resumo = None
