@@ -23,7 +23,8 @@ Uma janela faz quatro coisas:
 6. (01/10) as provas sob demanda: a cada 5 s pergunta ao DaVinci se alguém
    clicou numa prova que não está lá e sobe só aquele arquivo;
 7. (01/10) os botões da aba Robô: a cada 5 s busca os comandos (ligar/desligar
-   a rotina automática, rodar um passo agora), executa e responde.
+   a rotina automática, rodar um passo agora, "tratado" numa ocorrência),
+   executa e responde.
 Mais o backup diário local do banco em `data/backups` (guarda 30), como fazia
 o `run.py` no servidor.
 
@@ -272,6 +273,18 @@ def _passo(acao, por):
     return True, "pedido ao robô (%s)" % nome
 
 
+def _resolver(chave, por):
+    """"Tratado" na aba Robô: grava a resolução no _canal/PROBLEMAS.jsonl do
+    robô (o status_mac.py tira da lista quem tem {"chave": X, "resolvido": …})."""
+    if not chave:
+        return False, "sem chave"
+    linha = json.dumps({"chave": chave, "resolvido": datetime.datetime.now().isoformat(timespec="seconds"),
+                        "por": "DaVinci (%s)" % por}, ensure_ascii=False)
+    with open(os.path.join(ROBO, "_canal", "PROBLEMAS.jsonl"), "a", encoding="utf-8") as f:
+        f.write(linha + "\n")
+    return True, "problema %s marcado como resolvido no robô" % chave
+
+
 def comandos():
     """Botões da aba Robô do DaVinci."""
     env = _env()
@@ -284,6 +297,8 @@ def comandos():
                 ok, res = _automatico(bool(dados.get("ligado")), por)
             elif c.get("tipo") == "passo":
                 ok, res = _passo(dados.get("acao"), por)
+            elif c.get("tipo") == "resolver":
+                ok, res = _resolver(dados.get("chave"), por)
             else:
                 ok, res = False, "comando desconhecido: %s" % c.get("tipo")
         except Exception as e:  # noqa: BLE001

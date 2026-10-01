@@ -180,6 +180,19 @@ class DenunciaRoboComando(Base):
     resultado: Mapped[str | None] = mapped_column(Text)
 
 
+class DenunciaRoboTratada(Base):
+    """Ocorrência da aba Robô marcada como tratada (sai da lista)."""
+
+    __tablename__ = "denuncia_robo_tratadas"
+
+    chave: Mapped[str] = mapped_column(Text, primary_key=True)
+    titulo: Mapped[str | None] = mapped_column(Text)
+    tratada_por: Mapped[str | None] = mapped_column(Text)
+    tratada_em: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
 class DenunciaRemetente(Base):
     """Quem pode mandar a cópia (o Mac mini da Makisa). Só o sha256 do token
     fica aqui — o token mora em `~/.davinci_denuncia.json` no mini. Guarda

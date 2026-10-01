@@ -1,45 +1,42 @@
 <script setup lang="ts">
 // ── Ouvidoria › Denúncia › aba Robô (01/10/2026) ───────────────────────────────
-// Vinicius: "como eu vou saber em que passo ele está, o que está fazendo".
-// O robô do Mac mini da Makisa manda a cada 60 s o estado dele; aqui aparece
-// o que precisa de alguém, o que cada frente faz agora e os passos das
-// rodadas de hoje (06h, 12h, 18h). Regras em services/denuncia_robo.py.
-// Botões (01/10, Vinicius: "disparamos o passo 1, acompanhamos… depois o passo
-// 2" e "um botão para ligar rotinas automáticas e desligar"): o DaVinci grava o
-// comando e a janela do sistema no mini busca a cada 5 s e executa.
+// Vinicius: "como eu vou saber em que passo ele está, o que está fazendo" e,
+// depois, "tá meio bagunçado… igual fizemos no robô da Ouvidoria, tem as
+// ocorrências". Mesmo desenho do Ouvidoria › Robôs: resumo no topo e três
+// abas — Passos (os 12 passos com a última vez de hoje e "Rodar"),
+// Ocorrências (o que precisa de alguém; "Tratado" tira da lista) e Pedidos ao
+// robô (os cliques e a resposta do Mac mini).
+// O robô do Mac mini manda o estado a cada 60 s; os botões viram comando que
+// a janela do sistema no mini busca a cada 5 s. Regras em services/denuncia_robo.py.
 import { computed, onMounted, onUnmounted, ref } from 'vue'
-import { Bot, Globe, Landmark, Mail, Hand, TriangleAlert, Play, Power, Loader2 } from 'lucide-vue-next'
+import { AlertCircle, Bot, ChevronDown, ChevronRight, Flag, Loader2, Play, Power, Check } from 'lucide-vue-next'
 import { haQuanto, numero } from '~/lib/denuncia'
 
-type Passo = {
-  acao: string
-  nome: string
+type Ultima = {
   status: 'rodando' | 'fila' | 'concluida' | 'erro' | string
   inicio: string | null
   fim: string | null
   progresso: string
   erro: string
   log: string
-  tentativas: number
+  vezes: number
 }
-type Rodada = { hora: number; janela: string; estado: string; passos: Passo[] }
-type Frente = {
-  fila: string
-  nome: string
-  faz: string
-  estado: string
-  fazendo: string | null
-  desde: string | null
-  progresso: string
-  n_proximos: number
-  proximos: string[]
-  presa: boolean
+type PassoLinha = { acao: string; ordem: number; nome: string; onde: string; faz: string; ultima: Ultima | null }
+type Frente = { fila: string; nome: string; fazendo: string | null; acao: string | null; desde: string | null; progresso: string }
+type Ocorrencia = {
+  chave: string
+  titulo: string
+  detalhe: string
+  o_que_fazer: string
+  quando: string | null
+  tipo: 'pessoa' | 'aviso'
+  origem: 'agora' | 'robo'
+  robo_chave: string | null
 }
-type Aviso = { titulo: string; detalhe: string; o_que_fazer: string; desde: string | null }
 type Comando = {
   id: number
-  tipo: 'automatico' | 'passo' | string
-  dados: { ligado?: boolean; acao?: string }
+  tipo: 'automatico' | 'passo' | 'resolver' | string
+  dados: { ligado?: boolean; acao?: string; chave?: string }
   pedido_por: string | null
   pedido_em: string
   entregue_em: string | null
@@ -53,17 +50,18 @@ type Painel = {
   conectado: boolean
   agente: { estado: string; detalhe: string; versao: string | null; desde: string | null }
   frentes: Frente[]
-  precisa: Aviso[]
-  avisos: Aviso[]
-  rodadas: Rodada[]
+  passos: PassoLinha[]
+  ocorrencias: Ocorrencia[]
   denuncias_hoje: { canal: string; enviadas: number; refeitas: number }[]
   comandos: Comando[]
-  passos_disponiveis: { acao: string; nome: string; ordem: number }[]
 }
+type Aba = 'passos' | 'ocorrencias' | 'pedidos'
 
 const { api } = useApi()
 const painel = ref<Painel | null>(null)
 const erro = ref<string | null>(null)
+const aba = ref<Aba>('passos')
+const aberto = ref<string | null>(null)
 
 async function carregar() {
   try {
@@ -74,7 +72,6 @@ async function carregar() {
   }
 }
 
-// o mini manda a cada 60 s; a tela relê a cada 30 s
 let timer: ReturnType<typeof setInterval> | null = null
 onMounted(() => {
   void carregar()
@@ -85,7 +82,50 @@ onUnmounted(() => {
 })
 defineExpose({ carregar })
 
-// ── botões ────────────────────────────────────────────────────────────────
+// ── formatos ─────────────────────────────────────────────────────────────────
+const hojeBr = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo' }).format(new Date())
+
+/** ISO ou "2026-09-30 12:26" → "12:26" (hoje) ou "30/09 12:26". */
+function quando(v: string | null | undefined): string {
+  if (!v) return ''
+  const s = String(v)
+  if (/[T ]\d{2}:\d{2}/.test(s) && /[+-]\d{2}:\d{2}$|Z$/.test(s)) {
+    const d = new Date(s)
+    if (!Number.isNaN(d.getTime())) {
+      const dia = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo' }).format(d)
+      const h = d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Sao_Paulo' })
+      return dia === hojeBr() ? h : `${dia.slice(8, 10)}/${dia.slice(5, 7)} ${h}`
+    }
+  }
+  const m = /^(\d{4})-(\d{2})-(\d{2})[ T_](\d{2}):?(\d{2})?/.exec(s)
+  if (!m) return s
+  const h = m[5] ? `${m[4]}:${m[5]}` : `${m[4]}h`
+  return `${m[1]}-${m[2]}-${m[3]}` === hojeBr() ? h : `${m[3]}/${m[2]} ${h}`
+}
+
+const STATUS: Record<string, [string, string]> = {
+  concluida: ['feito', 'pill-success'],
+  rodando: ['rodando', 'pill-info'],
+  fila: ['na fila', 'pill-muted'],
+  erro: ['erro', 'pill-danger'],
+}
+
+// ── resumo do topo ──────────────────────────────────────────────────────────
+const situacao = computed(() => {
+  const p = painel.value
+  if (!p || !p.recebido_em) return { txt: 'sem notícia', tone: 'danger' as const }
+  if (!p.conectado) return { txt: 'sem notícia', tone: 'danger' as const }
+  if (p.agente.estado === 'erro') return { txt: 'parado', tone: 'danger' as const }
+  return { txt: 'ligado', tone: 'success' as const }
+})
+const rodando = computed(() => (painel.value?.frentes || []).filter((f) => f.fazendo))
+const pessoa = computed(() => (painel.value?.ocorrencias || []).filter((o) => o.tipo === 'pessoa').length)
+const totalHoje = computed(() => (painel.value?.denuncias_hoje || []).reduce((s, c) => s + c.enviadas, 0))
+const porCanalHoje = computed(() =>
+  (painel.value?.denuncias_hoje || []).filter((c) => c.enviadas).map((c) => `${c.canal} ${c.enviadas}`).join(' · ') || 'nenhuma ainda',
+)
+
+// ── botões ──────────────────────────────────────────────────────────────────
 const podeMandar = useCan('denuncia', 'edit')
 const mandando = ref<string | null>(null)
 
@@ -94,7 +134,7 @@ async function mandar(chave: string, url: string, corpo: Record<string, unknown>
   try {
     await api(url, { method: 'POST', body: corpo })
     await carregar()
-    // o mini pega em até 5 s: relê logo pra mostrar "recebido"
+    // o mini pega em até 5 s: relê pra mostrar a resposta
     setTimeout(carregar, 7000)
     setTimeout(carregar, 15000)
   } catch (e: any) {
@@ -103,6 +143,8 @@ async function mandar(chave: string, url: string, corpo: Record<string, unknown>
     mandando.value = null
   }
 }
+
+const automaticoPendente = computed(() => (painel.value?.comandos || []).some((c) => c.tipo === 'automatico' && !c.entregue_em && !c.caducou))
 
 function alternarAutomatico() {
   const ligar = painel.value?.modo === 'manual'
@@ -113,273 +155,295 @@ function alternarAutomatico() {
   void mandar('automatico', '/api/denuncia/robo/automatico', { ligado: ligar })
 }
 
-function rodarPasso(acao: string, nome: string) {
-  if (!window.confirm(`Rodar agora: ${nome}?`)) return
-  void mandar(acao, '/api/denuncia/robo/passo', { acao })
-}
-
-/** Último estado do passo hoje (a rodada mais recente em que ele aparece). */
-function ultimoDoPasso(acao: string): Passo | null {
-  let achado: Passo | null = null
-  for (const r of painel.value?.rodadas || []) {
-    const p = r.passos.find((x) => x.acao === acao)
-    if (p) achado = p
-  }
-  return achado
-}
-
-function pendente(acao: string): boolean {
+function passoPendente(acao: string): boolean {
   return (painel.value?.comandos || []).some((c) => c.tipo === 'passo' && c.dados.acao === acao && !c.entregue_em && !c.caducou)
 }
 
-const automaticoPendente = computed(() => (painel.value?.comandos || []).some((c) => c.tipo === 'automatico' && !c.entregue_em && !c.caducou))
+function podeRodar(p: PassoLinha): boolean {
+  return !mandando.value && !passoPendente(p.acao) && !['rodando', 'fila'].includes(p.ultima?.status || '')
+}
+
+function rodar(p: PassoLinha) {
+  if (!window.confirm(`Rodar agora: ${p.ordem} · ${p.nome}?\n${p.faz}`)) return
+  void mandar(p.acao, '/api/denuncia/robo/passo', { acao: p.acao })
+}
+
+// "Tratado": o que o robô registrou e o que é de conta/fila. O estado crítico do
+// momento (mini sem notícia, robô parado, SEI esperando, rodada que não
+// começou) só sai quando o problema some.
+function podeTratar(o: Ocorrencia): boolean {
+  if (o.origem === 'robo') return true
+  return !['agora:mini', 'agora:agente', 'agora:sei'].includes(o.chave) && !o.chave.startsWith('agora:rodada')
+}
+
+function tratar(o: Ocorrencia) {
+  void mandar(o.chave, '/api/denuncia/robo/ocorrencias/tratar', { chave: o.chave, titulo: o.titulo, robo_chave: o.robo_chave })
+}
 
 function nomeComando(c: Comando): string {
   if (c.tipo === 'automatico') return c.dados.ligado ? 'Ligar a rotina automática' : 'Desligar a rotina automática'
-  const p = painel.value?.passos_disponiveis.find((x) => x.acao === c.dados.acao)
-  return `Rodar: ${p?.nome || c.dados.acao}`
+  if (c.tipo === 'resolver') return `Tratado: ${c.dados.chave}`
+  const p = painel.value?.passos.find((x) => x.acao === c.dados.acao)
+  return p ? `Rodar ${p.ordem} · ${p.nome}` : `Rodar ${c.dados.acao}`
 }
 
-const ICONE: Record<string, any> = { M: Globe, S: Landmark, E: Mail }
-
-/** "2026-10-01T12:07:00-03:00" → "12:07" (Brasília). */
-function hora(iso: string | null | undefined): string {
-  if (!iso) return ''
-  const d = new Date(iso)
-  if (Number.isNaN(d.getTime())) return String(iso).slice(11, 16)
-  return d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Sao_Paulo' })
+function alternarLinha(acao: string) {
+  aberto.value = aberto.value === acao ? null : acao
 }
-
-/** "2026-10-01 12:05" ou ISO → "01/10 12:05". */
-function quando(v: string | null | undefined): string {
-  if (!v) return ''
-  const m = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})/.exec(String(v))
-  return m ? `${m[3]}/${m[2]} ${m[4]}:${m[5]}` : ''
-}
-
-const RODADA: Record<string, [string, string]> = {
-  feita: ['feita', 'pill-success'],
-  rodando: ['rodando', 'pill-info'],
-  na_fila: ['na fila', 'pill-info'],
-  com_erro: ['terminou com erro', 'pill-danger'],
-  nao_comecou: ['não começou', 'pill-danger'],
-  aguardando: ['vai começar', 'pill-warning'],
-  futura: ['mais tarde', 'pill-muted'],
-  manual: ['sem rodada (modo manual)', 'pill-muted'],
-}
-const PASSO: Record<string, [string, string]> = {
-  concluida: ['feito', 'pill-success'],
-  rodando: ['rodando', 'pill-info'],
-  fila: ['na fila', 'pill-muted'],
-  erro: ['erro', 'pill-danger'],
-}
-
-// rodada em andamento (ou a última que teve passos) aparece aberta
-const rodadaAberta = computed(() => {
-  const rs = painel.value?.rodadas || []
-  const ativa = rs.find((r) => r.estado === 'rodando' || r.estado === 'na_fila')
-  if (ativa) return ativa.janela
-  const comPassos = rs.filter((r) => r.passos.length)
-  return comPassos.length ? comPassos[comPassos.length - 1].janela : ''
-})
-
-const situacao = computed(() => {
-  const p = painel.value
-  if (!p) return null
-  if (!p.recebido_em) return { txt: 'sem notícia do Mac mini', cls: 'pill-danger' }
-  if (!p.conectado) return { txt: `sem notícia do Mac mini ${haQuanto(p.recebido_em)}`, cls: 'pill-danger' }
-  if (p.agente.estado === 'erro') return { txt: 'robô parado', cls: 'pill-danger' }
-  return { txt: 'robô ligado', cls: 'pill-success' }
-})
-
-const totalHoje = computed(() => (painel.value?.denuncias_hoje || []).reduce((s, c) => s + c.enviadas, 0))
 </script>
 
 <template>
-  <div class="space-y-5">
+  <div class="space-y-4">
     <div v-if="erro" class="rounded-md border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700">{{ erro }}</div>
     <div v-if="!painel && !erro" class="text-sm text-muted-foreground">carregando…</div>
 
     <template v-if="painel">
-      <div class="flex flex-wrap items-center gap-2 text-sm">
-        <Bot class="size-4 text-muted-foreground" />
-        <span v-if="situacao" :class="situacao.cls">{{ situacao.txt }}</span>
-        <span
-          v-if="painel.modo === 'manual'"
-          class="pill-info"
-          title="O despertador do robô está desligado (despertador.json no Mac mini): nada começa sozinho, cada passo é disparado à mão."
-        >modo manual</span>
-        <span class="text-xs text-muted-foreground">
-          notícia do Mac mini {{ haQuanto(painel.recebido_em) }}
-          <template v-if="painel.agente.versao"> · robô v{{ painel.agente.versao }}</template>
-          <template v-if="painel.denuncias_hoje.length"> · {{ numero(totalHoje) }} denúncia(s) enviada(s) hoje</template>
-        </span>
-      </div>
-
-      <section class="rounded-lg border bg-card">
-        <div class="flex flex-wrap items-center gap-3 px-4 py-3">
-          <Power class="size-4 text-muted-foreground" />
-          <div class="min-w-0 flex-1">
-            <div class="text-sm font-medium">
-              Rotina automática:
-              <span :class="painel.modo === 'manual' ? 'text-muted-foreground' : 'text-emerald-700 dark:text-emerald-400'">
-                {{ painel.modo === 'manual' ? 'desligada (modo manual)' : 'ligada' }}
-              </span>
-            </div>
-            <div class="text-xs text-muted-foreground">
-              <template v-if="painel.modo === 'manual'">O robô só roda o passo que for pedido abaixo.</template>
-              <template v-else>Rodadas às 06h, 12h e 18h (checagem 15 min antes) e ciclo de e-mails a cada 3 h.</template>
-            </div>
+      <!-- resumo -->
+      <div class="grid grid-cols-2 gap-2 md:grid-cols-3 xl:grid-cols-5">
+        <StatCard
+          compact
+          label="Robô"
+          :value="situacao!.txt"
+          :tone="situacao!.tone"
+          :icon="Bot"
+          :hint="`${painel.agente.versao ? 'v' + painel.agente.versao + ' · ' : ''}notícia ${haQuanto(painel.recebido_em)}`"
+        />
+        <div class="flex flex-col gap-0.5 rounded-lg border bg-card px-3 py-2">
+          <div class="flex items-center gap-1.5">
+            <Power class="size-3.5 text-muted-foreground" />
+            <span class="truncate text-[10px] font-medium uppercase tracking-wider text-muted-foreground">Rotina automática</span>
           </div>
-          <Button
-            v-if="podeMandar"
-            size="sm"
-            :variant="painel.modo === 'manual' ? 'default' : 'outline'"
-            :disabled="!!mandando || automaticoPendente"
-            @click="alternarAutomatico"
-          >
-            <Loader2 v-if="mandando === 'automatico' || automaticoPendente" class="mr-1.5 size-4 animate-spin" />
-            {{ painel.modo === 'manual' ? 'Ligar' : 'Desligar' }}
-          </Button>
-        </div>
-        <details v-if="podeMandar" class="border-t" :open="painel.modo === 'manual'">
-          <summary class="cursor-pointer px-4 py-2 text-sm">Rodar um passo agora</summary>
-          <ul class="divide-y border-t">
-            <li v-for="p in painel.passos_disponiveis" :key="p.acao" class="flex items-center gap-2 px-4 py-1.5 text-sm">
-              <span class="w-6 text-right text-xs tabular-nums text-muted-foreground">{{ p.ordem }}</span>
-              <span class="flex-1">{{ p.nome }}</span>
-              <template v-if="ultimoDoPasso(p.acao)">
-                <span class="text-xs" :class="(PASSO[ultimoDoPasso(p.acao)!.status] || ['', 'pill-muted'])[1]">
-                  {{ (PASSO[ultimoDoPasso(p.acao)!.status] || [ultimoDoPasso(p.acao)!.status])[0] }}
-                </span>
-                <span class="w-[86px] text-xs tabular-nums text-muted-foreground">
-                  {{ hora(ultimoDoPasso(p.acao)!.fim || ultimoDoPasso(p.acao)!.inicio) }}
-                </span>
-              </template>
-              <span v-else class="w-[86px] text-xs text-muted-foreground">não rodou hoje</span>
-              <Button
-                size="sm"
-                variant="outline"
-                class="h-7"
-                :disabled="!!mandando || pendente(p.acao) || ['rodando', 'fila'].includes(ultimoDoPasso(p.acao)?.status || '')"
-                @click="rodarPasso(p.acao, p.nome)"
-              >
-                <Loader2 v-if="mandando === p.acao || pendente(p.acao)" class="mr-1 size-3.5 animate-spin" />
-                <Play v-else class="mr-1 size-3.5" /> Rodar agora
-              </Button>
-            </li>
-          </ul>
-        </details>
-        <div v-if="painel.comandos.length" class="border-t px-4 py-2">
-          <div class="mb-1 text-xs font-medium text-muted-foreground">Pedidos ao robô</div>
-          <ul class="space-y-0.5 text-xs">
-            <li v-for="c in painel.comandos.slice(0, 5)" :key="c.id" class="flex flex-wrap gap-x-2">
-              <span class="tabular-nums text-muted-foreground">{{ hora(c.pedido_em) }}</span>
-              <span>{{ nomeComando(c) }}</span>
-              <span class="text-muted-foreground">· {{ c.pedido_por }}</span>
-              <span v-if="c.entregue_em" :class="c.ok ? 'text-emerald-700 dark:text-emerald-400' : 'text-red-700 dark:text-red-400'">
-                · {{ c.ok ? 'Mac mini recebeu' : 'não deu' }} às {{ hora(c.entregue_em) }}<template v-if="c.resultado"> — {{ c.resultado }}</template>
-              </span>
-              <span v-else-if="c.caducou" class="text-red-700 dark:text-red-400">· o Mac mini não pegou em 1 h</span>
-              <span v-else class="text-amber-700 dark:text-amber-400">· aguardando o Mac mini…</span>
-            </li>
-          </ul>
-        </div>
-      </section>
-
-      <section
-        v-if="painel.precisa.length"
-        class="rounded-lg border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-800 dark:border-red-900 dark:bg-red-950/30 dark:text-red-300"
-      >
-        <h3 class="font-semibold flex items-center gap-1.5 mb-2">
-          <Hand class="size-4" /> Precisa de alguém ({{ painel.precisa.length }})
-        </h3>
-        <ul class="space-y-2">
-          <li v-for="(p, i) in painel.precisa" :key="i">
-            <div class="font-medium">
-              {{ p.titulo }}
-              <span v-if="quando(p.desde)" class="font-normal text-xs opacity-75"> · {{ quando(p.desde) }}</span>
-            </div>
-            <div v-if="p.detalhe" class="text-xs opacity-90">{{ p.detalhe }}</div>
-            <div v-if="p.o_que_fazer" class="text-xs"><span class="font-medium">O que fazer:</span> {{ p.o_que_fazer }}</div>
-          </li>
-        </ul>
-      </section>
-
-      <div class="grid gap-3 sm:grid-cols-3">
-        <div v-for="f in painel.frentes" :key="f.fila" class="rounded-lg border bg-card px-4 py-3">
-          <div class="flex items-center gap-1.5 text-xs text-muted-foreground">
-            <component :is="ICONE[f.fila]" class="size-3.5" /> {{ f.nome }}
-          </div>
-          <div class="mt-1 text-sm font-medium" :class="f.estado === 'erro' ? 'text-red-700 dark:text-red-400' : ''">
-            {{ f.fazendo || 'parado' }}
-            <span v-if="f.fazendo && f.desde" class="font-normal text-xs text-muted-foreground"> desde {{ hora(f.desde) }}</span>
-          </div>
-          <div v-if="f.progresso" class="text-xs text-muted-foreground truncate" :title="f.progresso">{{ f.progresso }}</div>
-          <div v-if="f.n_proximos" class="text-xs text-muted-foreground">depois: {{ f.proximos.join(', ') }}<template v-if="f.n_proximos > f.proximos.length"> …</template></div>
-          <div v-else-if="!f.fazendo" class="text-xs text-muted-foreground">{{ f.faz }}</div>
-        </div>
-      </div>
-
-      <div class="space-y-3">
-        <details
-          v-for="r in painel.rodadas"
-          :key="r.janela"
-          class="rounded-lg border bg-card"
-          :open="r.janela === rodadaAberta"
-        >
-          <summary class="flex cursor-pointer items-center gap-2 px-4 py-2.5 text-sm">
-            <span class="font-medium">Rodada das {{ String(r.hora).padStart(2, '0') }}h</span>
-            <span :class="(RODADA[r.estado] || ['', 'pill-muted'])[1]">{{ (RODADA[r.estado] || [r.estado])[0] }}</span>
-            <span v-if="r.passos.length" class="text-xs text-muted-foreground">
-              {{ r.passos.filter((p) => p.status === 'concluida').length }} de {{ r.passos.length }} passos feitos
+          <div class="flex items-center justify-between gap-2">
+            <span class="text-lg font-semibold leading-6" :class="painel.modo === 'manual' ? '' : 'text-emerald-600 dark:text-emerald-400'">
+              {{ painel.modo === 'manual' ? 'manual' : 'ligada' }}
             </span>
-          </summary>
-          <div v-if="r.estado === 'nao_comecou'" class="border-t px-4 py-3 text-xs text-red-700 dark:text-red-400">
-            Nenhuma varredura foi pedida para esta rodada.<template v-if="r.passos.length"> Abaixo, só o que o robô roda sozinho pelo relógio.</template>
+            <Button
+              v-if="podeMandar"
+              size="sm"
+              variant="outline"
+              class="h-6 px-2 text-xs"
+              :disabled="!!mandando || automaticoPendente"
+              @click="alternarAutomatico"
+            >
+              <Loader2 v-if="mandando === 'automatico' || automaticoPendente" class="mr-1 size-3 animate-spin" />
+              {{ painel.modo === 'manual' ? 'ligar' : 'desligar' }}
+            </Button>
           </div>
-          <div v-else-if="!r.passos.length" class="border-t px-4 py-3 text-xs text-muted-foreground">
-            <template v-if="painel.modo === 'manual'">Modo manual: o robô só roda o passo que for pedido.</template>
-            <template v-else>O robô pede a checagem 15 min antes e o resto na hora cheia.</template>
+          <div class="truncate text-[11px] leading-4 text-muted-foreground">
+            {{ painel.modo === 'manual' ? 'só roda o passo pedido' : 'rodadas 06h, 12h e 18h' }}
           </div>
-          <ul v-if="r.passos.length" class="divide-y border-t">
-            <li v-for="p in r.passos" :key="p.acao" class="px-4 py-2 text-sm">
-              <div class="flex flex-wrap items-center gap-2">
-                <span class="w-[86px] shrink-0 text-center" :class="(PASSO[p.status] || ['', 'pill-muted'])[1]">
-                  {{ (PASSO[p.status] || [p.status])[0] }}
-                </span>
-                <span class="flex-1 min-w-[140px]">{{ p.nome }}</span>
-                <span class="text-xs text-muted-foreground tabular-nums">
-                  <template v-if="p.inicio">{{ hora(p.inicio) }}<template v-if="p.fim && p.status !== 'rodando'">–{{ hora(p.fim) }}</template></template>
-                  <template v-if="p.tentativas > 1"> · {{ p.tentativas }} tentativas</template>
-                </span>
-              </div>
-              <div v-if="p.status === 'rodando' && p.progresso" class="mt-0.5 pl-[94px] text-xs text-muted-foreground">{{ p.progresso }}</div>
-              <div v-if="p.erro" class="mt-0.5 pl-[94px] text-xs text-red-700 dark:text-red-400">{{ p.erro }}</div>
-              <details v-if="p.log" class="mt-1 pl-[94px]">
-                <summary class="cursor-pointer text-xs text-muted-foreground">ver o fim do log</summary>
-                <pre class="mt-1 max-h-64 overflow-auto whitespace-pre-wrap rounded bg-muted p-2 text-[11px] leading-snug">{{ p.log }}</pre>
-              </details>
-            </li>
-          </ul>
-        </details>
+        </div>
+        <StatCard
+          compact
+          label="Rodando agora"
+          :value="rodando.length ? rodando.map((f) => f.fazendo).join(' + ') : 'nada'"
+          :icon="Play"
+          :hint="rodando.length ? [rodando[0].desde ? 'desde ' + quando(rodando[0].desde) : '', rodando[0].progresso].filter(Boolean).join(' · ') : 'robô livre'"
+        />
+        <StatCard
+          compact
+          label="Ocorrências"
+          :value="painel.ocorrencias.length"
+          :tone="pessoa ? 'danger' : 'default'"
+          :icon="AlertCircle"
+          :hint="pessoa ? `${pessoa} precisa${pessoa > 1 ? 'm' : ''} de pessoa` : 'nada precisa de pessoa'"
+        />
+        <StatCard compact label="Denúncias hoje" :value="numero(totalHoje)" :icon="Flag" :hint="porCanalHoje" />
       </div>
 
-      <details v-if="painel.avisos.length" class="rounded-lg border bg-card">
-        <summary class="flex cursor-pointer items-center gap-1.5 px-4 py-2.5 text-sm">
-          <TriangleAlert class="size-4 text-amber-600" /> Avisos ({{ painel.avisos.length }}) — não param o robô
-        </summary>
-        <ul class="divide-y border-t">
-          <li v-for="(a, i) in painel.avisos" :key="i" class="px-4 py-2 text-sm">
-            <div class="font-medium">
-              {{ a.titulo }}
-              <span v-if="quando(a.desde)" class="font-normal text-xs text-muted-foreground"> · {{ quando(a.desde) }}</span>
-            </div>
-            <div v-if="a.detalhe" class="text-xs text-muted-foreground">{{ a.detalhe }}</div>
-            <div v-if="a.o_que_fazer" class="text-xs">{{ a.o_que_fazer }}</div>
-          </li>
-        </ul>
-      </details>
+      <!-- abas -->
+      <div class="flex items-center gap-1 border-b border-border">
+        <button
+          type="button"
+          class="-mb-px inline-flex h-9 items-center gap-1.5 border-b-2 px-3 text-sm font-medium transition-colors"
+          :class="aba === 'passos' ? 'border-primary text-foreground' : 'border-transparent text-muted-foreground hover:text-foreground'"
+          @click="aba = 'passos'"
+        >
+          Passos
+        </button>
+        <button
+          type="button"
+          class="-mb-px inline-flex h-9 items-center gap-1.5 border-b-2 px-3 text-sm font-medium transition-colors"
+          :class="aba === 'ocorrencias' ? 'border-primary text-foreground' : 'border-transparent text-muted-foreground hover:text-foreground'"
+          @click="aba = 'ocorrencias'"
+        >
+          Ocorrências
+          <span
+            v-if="painel.ocorrencias.length"
+            class="rounded-full px-1.5 text-[11px] font-semibold tabular-nums"
+            :class="pessoa ? 'bg-red-100 text-red-700 dark:bg-red-950/50 dark:text-red-300' : 'bg-muted text-muted-foreground'"
+          >{{ painel.ocorrencias.length }}</span>
+        </button>
+        <button
+          type="button"
+          class="-mb-px inline-flex h-9 items-center gap-1.5 border-b-2 px-3 text-sm font-medium transition-colors"
+          :class="aba === 'pedidos' ? 'border-primary text-foreground' : 'border-transparent text-muted-foreground hover:text-foreground'"
+          @click="aba = 'pedidos'"
+        >
+          Pedidos ao robô
+        </button>
+      </div>
+
+      <!-- ══ Passos ══ -->
+      <div v-if="aba === 'passos'" class="table-card overflow-x-auto">
+        <table class="w-full min-w-[860px]">
+          <thead>
+            <tr>
+              <th class="w-[44px]">#</th>
+              <th>Passo</th>
+              <th class="w-[150px]">Onde roda</th>
+              <th class="w-[100px]">Última vez</th>
+              <th>Resultado</th>
+              <th class="w-[96px]" />
+            </tr>
+          </thead>
+          <tbody>
+            <template v-for="p in painel.passos" :key="p.acao">
+              <tr class="cursor-pointer" @click="alternarLinha(p.acao)">
+                <td class="text-xs tabular-nums text-muted-foreground">
+                  <span class="inline-flex items-center gap-0.5">
+                    <ChevronDown v-if="aberto === p.acao" class="size-3" />
+                    <ChevronRight v-else class="size-3" />
+                    {{ p.ordem }}
+                  </span>
+                </td>
+                <td>
+                  <div class="text-sm font-medium">{{ p.nome }}</div>
+                  <div class="max-w-[360px] truncate text-[11px] text-muted-foreground" :title="p.faz">{{ p.faz }}</div>
+                </td>
+                <td class="text-xs text-muted-foreground">{{ p.onde }}</td>
+                <td class="text-xs tabular-nums whitespace-nowrap">
+                  <template v-if="p.ultima">{{ quando(p.ultima.fim && p.ultima.status !== 'rodando' ? p.ultima.fim : p.ultima.inicio) || '—' }}</template>
+                  <span v-else class="text-muted-foreground">—</span>
+                </td>
+                <td class="text-xs">
+                  <div v-if="p.ultima" class="flex min-w-0 items-center gap-2">
+                    <span class="shrink-0" :class="(STATUS[p.ultima.status] || ['', 'pill-muted'])[1]">{{ (STATUS[p.ultima.status] || [p.ultima.status])[0] }}</span>
+                    <span
+                      class="truncate"
+                      :class="p.ultima.status === 'erro' ? 'text-red-700 dark:text-red-400' : 'text-muted-foreground'"
+                      :title="p.ultima.erro || p.ultima.progresso"
+                    >{{ p.ultima.erro || p.ultima.progresso }}</span>
+                  </div>
+                  <span v-else class="text-muted-foreground">não rodou hoje</span>
+                </td>
+                <td class="text-right" @click.stop>
+                  <Button
+                    v-if="podeMandar"
+                    size="sm"
+                    variant="outline"
+                    class="h-7"
+                    :disabled="!podeRodar(p)"
+                    :title="podeRodar(p) ? 'pedir este passo ao robô agora' : 'já está na fila ou rodando'"
+                    @click="rodar(p)"
+                  >
+                    <Loader2 v-if="mandando === p.acao || passoPendente(p.acao)" class="mr-1 size-3.5 animate-spin" />
+                    <Play v-else class="mr-1 size-3.5" /> Rodar
+                  </Button>
+                </td>
+              </tr>
+              <tr v-if="aberto === p.acao">
+                <td />
+                <td colspan="5" class="bg-muted/30">
+                  <div class="space-y-1 py-1 text-xs">
+                    <div class="text-muted-foreground">{{ p.faz }}</div>
+                    <template v-if="p.ultima">
+                      <div>
+                        Hoje: {{ p.ultima.vezes }} vez{{ p.ultima.vezes > 1 ? 'es' : '' }} ·
+                        última de {{ quando(p.ultima.inicio) || '—' }}<template v-if="p.ultima.fim && p.ultima.status !== 'rodando'"> a {{ quando(p.ultima.fim) }}</template>
+                      </div>
+                      <pre v-if="p.ultima.log" class="max-h-72 overflow-auto whitespace-pre-wrap rounded border bg-background p-2 text-[11px] leading-snug">{{ p.ultima.log }}</pre>
+                      <div v-else class="text-muted-foreground">sem log ainda</div>
+                    </template>
+                    <div v-else class="text-muted-foreground">Não rodou hoje.</div>
+                  </div>
+                </td>
+              </tr>
+            </template>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- ══ Ocorrências ══ -->
+      <div v-else-if="aba === 'ocorrencias'" class="table-card overflow-x-auto">
+        <table class="w-full min-w-[860px]">
+          <thead>
+            <tr>
+              <th class="w-[100px]">Quando</th>
+              <th>O que aconteceu</th>
+              <th>O que fazer</th>
+              <th class="w-[90px]">Tipo</th>
+              <th class="w-[110px]" />
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-if="!painel.ocorrencias.length">
+              <td colspan="5" class="py-6 text-center text-sm text-muted-foreground">Nenhuma ocorrência aberta.</td>
+            </tr>
+            <tr v-for="o in painel.ocorrencias" :key="o.chave">
+              <td class="text-xs tabular-nums whitespace-nowrap">{{ quando(o.quando) || 'agora' }}</td>
+              <td class="max-w-[380px]">
+                <div class="text-sm font-medium">{{ o.titulo }}</div>
+                <div v-if="o.detalhe" class="line-clamp-2 text-[11px] text-muted-foreground" :title="o.detalhe">{{ o.detalhe }}</div>
+              </td>
+              <td class="max-w-[360px] text-xs">
+                <div class="line-clamp-2" :title="o.o_que_fazer">{{ o.o_que_fazer || '—' }}</div>
+              </td>
+              <td>
+                <span :class="o.tipo === 'pessoa' ? 'pill-danger' : 'pill-warning'">{{ o.tipo === 'pessoa' ? 'pessoa' : 'aviso' }}</span>
+              </td>
+              <td class="text-right">
+                <Button
+                  v-if="podeMandar && podeTratar(o)"
+                  size="sm"
+                  variant="outline"
+                  class="h-7"
+                  :disabled="!!mandando"
+                  title="já resolvido: tira da lista"
+                  @click="tratar(o)"
+                >
+                  <Loader2 v-if="mandando === o.chave" class="mr-1 size-3.5 animate-spin" />
+                  <Check v-else class="mr-1 size-3.5" /> Tratado
+                </Button>
+                <span v-else-if="!podeTratar(o)" class="text-[11px] text-muted-foreground">sai sozinha</span>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- ══ Pedidos ao robô ══ -->
+      <div v-else class="table-card overflow-x-auto">
+        <table class="w-full min-w-[760px]">
+          <thead>
+            <tr>
+              <th class="w-[100px]">Quando</th>
+              <th>Pedido</th>
+              <th class="w-[140px]">Quem</th>
+              <th>Resposta do Mac mini</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-if="!painel.comandos.length">
+              <td colspan="4" class="py-6 text-center text-sm text-muted-foreground">Nenhum pedido ainda.</td>
+            </tr>
+            <tr v-for="c in painel.comandos" :key="c.id">
+              <td class="text-xs tabular-nums whitespace-nowrap">{{ quando(c.pedido_em) }}</td>
+              <td class="text-sm">{{ nomeComando(c) }}</td>
+              <td class="text-xs text-muted-foreground">{{ c.pedido_por }}</td>
+              <td class="text-xs">
+                <span v-if="c.entregue_em" :class="c.ok ? 'text-emerald-700 dark:text-emerald-400' : 'text-red-700 dark:text-red-400'">
+                  {{ c.ok ? 'recebido' : 'não deu' }} às {{ quando(c.entregue_em) }}<template v-if="c.resultado"> — {{ c.resultado }}</template>
+                </span>
+                <span v-else-if="c.caducou" class="text-red-700 dark:text-red-400">o Mac mini não pegou em 1 h</span>
+                <span v-else class="inline-flex items-center gap-1 text-amber-700 dark:text-amber-400">
+                  <Loader2 class="size-3 animate-spin" /> aguardando o Mac mini…
+                </span>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
     </template>
   </div>
 </template>

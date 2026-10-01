@@ -43,6 +43,7 @@ from app.models.denuncia import (
     DenunciaRemetente,
     DenunciaRoboComando,
     DenunciaRoboStatus,
+    DenunciaRoboTratada,
     DenunciaVerificacao,
 )
 from app.models.devolucao_anexo import DevolucaoAnexo
@@ -286,6 +287,7 @@ __all__ = [
     "DenunciaRemetente",
     "DenunciaRoboComando",
     "DenunciaRoboStatus",
+    "DenunciaRoboTratada",
     "DenunciaVerificacao",
     "DevolucaoAnexo",
     "DevolucaoMensagemComprador",

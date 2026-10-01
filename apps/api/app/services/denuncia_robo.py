@@ -11,15 +11,19 @@ problemas — e o mini manda pra cá. Aqui vira o que a tela mostra:
   aconteceu em 30/09 18h e 01/10 06h: ninguém pediu a rodada e ninguém viu;
 - **frentes**: o que cada fila do robô está fazendo agora (navegador do
   perfil 50, Anatel/SEI no Safari, escritório);
-- **precisa**: o que só uma pessoa resolve (captcha, assinatura no SEI,
-  código que não chegou, robô parado, mini sem dar notícia); **avisos**: o
-  resto, que não para nada.
+- **passos** (01/10, desenho da Ouvidoria › Robôs): os 12 passos com onde
+  rodam, o que fazem e a última vez de hoje (status, progresso, fim do log);
+- **ocorrências**: o que só uma pessoa resolve (tipo "pessoa": captcha,
+  assinatura no SEI, código que não chegou, robô parado, mini sem notícia) e
+  os avisos. As de origem "agora" somem sozinhas; as do robô (PROBLEMAS.jsonl)
+  a pessoa marca "Tratado" (`tratadas`).
 
 Função pura (sem banco) pra ser testada com o resumo de verdade.
 """
 
 from __future__ import annotations
 
+import hashlib
 from datetime import datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -39,20 +43,28 @@ NUCLEO = {
     "varredura_amazon", "anatel",
 }
 
-# passo da rodada → (ordem na tela, nome)
-PASSOS: dict[str, tuple[int, str]] = {
-    "checagem": (0, "Checagem antes da rodada"),
-    "ciclo_emails": (1, "E-mails das plataformas"),
-    "varredura_mercadolivre": (2, "Mercado Livre"),
-    "varredura_shopee": (3, "Shopee"),
-    "varredura_tiktok": (4, "TikTok"),
-    "varredura_amazon": (5, "Amazon"),
-    "conferencia": (6, 'Conferência e "saiu do ar?"'),
-    "anatel": (7, "Anatel / SEI"),
-    "compras": (8, "Compras de prova"),
-    "juridico": (9, "Jurídico"),
-    "relatorio": (10, "Relatório"),
-    "capa_perguntas": (11, "Perguntas nos anúncios disfarçados"),
+# passo → (ordem na tela, nome, onde roda, o que faz)
+PASSOS: dict[str, tuple[int, str, str, str]] = {
+    "checagem": (0, "Checagem antes da rodada", "perfil 50 + Safari",
+                 "confere logins, AdsPower, captcha, Safari e Tuta — não muda nada"),
+    "ciclo_emails": (1, "E-mails das plataformas", "escritório",
+                     "aplica nas denúncias as respostas que as plataformas mandaram"),
+    "varredura_mercadolivre": (2, "Mercado Livre", "perfil 50",
+                               "procura anúncios novos e denuncia (Nosso e Diversos)"),
+    "varredura_shopee": (3, "Shopee", "perfil 50",
+                         "procura anúncios novos e denuncia (Nosso e Diversos)"),
+    "varredura_tiktok": (4, "TikTok", "perfil 50 + celular",
+                         "procura no site; denuncia pelo app no celular na nuvem"),
+    "varredura_amazon": (5, "Amazon", "perfil 50", "procura e registra (ainda não denuncia)"),
+    "conferencia": (6, 'Conferência e "saiu do ar?"', "perfil 50",
+                    "print no ato, resultados da Shopee, refação e quem saiu do ar"),
+    "anatel": (7, "Anatel / SEI", "Safari",
+               "lê o andamento das antigas e peticiona as novas no SEI"),
+    "compras": (8, "Compras de prova", "perfil 50", "atualiza os pedidos da conta compradora"),
+    "juridico": (9, "Jurídico", "escritório", "monta a pasta do caso pro advogado (não envia)"),
+    "relatorio": (10, "Relatório", "escritório", "denunciados × responderam × resolvidos"),
+    "capa_perguntas": (11, "Perguntas nos anúncios disfarçados", "perfil 50",
+                       "pergunta ao vendedor de capa/tablet se vende o aparelho"),
 }
 FRENTES = (
     ("M", "Navegador (perfil 50)", "Mercado Livre, Shopee, TikTok, Amazon e conferências"),
@@ -115,7 +127,7 @@ def _passos_da_rodada(tarefas: list[dict], janela: str) -> list[dict]:
         if ja and pedido < ja["_pedido"]:
             ja["tentativas"] = tentativas
             continue
-        ordem, nome = PASSOS.get(acao, (50, d.get("nome") or acao.replace("_", " ")))
+        ordem, nome = PASSOS.get(acao, (50, d.get("nome") or acao.replace("_", " "), "", ""))[:2]
         por_acao[acao] = {
             "acao": acao,
             "nome": nome,
@@ -152,9 +164,50 @@ def _estado_rodada(passos: list[dict], hora: datetime, agora: datetime, manual: 
     return "nao_comecou"
 
 
-def montar_painel(resumo: dict | None, recebido_em: datetime | None, agora: datetime) -> dict:
+def _ultimas_de_hoje(tarefas: list[dict]) -> dict[str, dict]:
+    """Última vez de cada passo hoje (qualquer janela) + quantas vezes rodou."""
+    por_acao: dict[str, dict] = {}
+    for t in tarefas:
+        d = t.get("dados") or {}
+        acao = str(d.get("acao") or "")
+        pedido = str(d.get("pedido_em") or "")
+        ja = por_acao.get(acao)
+        vezes = (ja["vezes"] + 1) if ja else 1
+        if ja and pedido < ja["_pedido"]:
+            ja["vezes"] = vezes
+            continue
+        por_acao[acao] = {
+            "status": d.get("status") or "fila",
+            "inicio": d.get("inicio"),
+            "fim": d.get("fim"),
+            "progresso": d.get("progresso") or "",
+            "erro": d.get("erro") or "",
+            "log": (d.get("log") or "")[-4000:],
+            "vezes": vezes,
+            "_pedido": pedido,
+        }
+    for v in por_acao.values():
+        v.pop("_pedido")
+    return por_acao
+
+
+def _chave_problema(p: dict) -> tuple[str, str | None]:
+    """Chave estável da ocorrência que veio do robô (_canal/PROBLEMAS.jsonl):
+    a dele, quando tem (aí o "Tratado" também resolve lá no mini), senão um
+    hash de quando + tarefa + problema."""
+    if p.get("chave"):
+        return "prob:" + str(p["chave"]), str(p["chave"])
+    base = "|".join(str(p.get(k) or "") for k in ("quando", "tarefa", "problema"))
+    return "prob:" + hashlib.sha256(base.encode()).hexdigest()[:16], None
+
+
+def montar_painel(
+    resumo: dict | None, recebido_em: datetime | None, agora: datetime,
+    tratadas: set[str] | None = None,
+) -> dict:
     agora = agora.astimezone(FUSO)
     resumo = resumo or {}
+    tratadas = tratadas or set()
     itens = {i.get("chave"): i for i in resumo.get("itens") or [] if isinstance(i, dict)}
     tarefas = [i for k, i in itens.items() if str(k).startswith("tarefa_")]
     quando = _quando(resumo.get("quando"))
@@ -164,27 +217,33 @@ def montar_painel(resumo: dict | None, recebido_em: datetime | None, agora: date
     recebido = recebido_em.astimezone(FUSO) if recebido_em else None
     conectado = bool(recebido and agora - recebido <= SEM_NOTICIA)
 
-    precisa: list[dict] = []
-    avisos: list[dict] = []
+    # Ocorrências (como em Ouvidoria › Robôs): "agora" = estado do momento,
+    # some sozinha quando o problema some; "robo" = o que o robô registrou em
+    # PROBLEMAS.jsonl (fica 24 h lá) — a pessoa marca como tratada.
+    ocorrencias: list[dict] = []
 
-    def junta(
-        lista: list[dict], titulo: str, detalhe: str = "", fazer: str = "", desde: Any = None
-    ) -> None:
-        lista.append({"titulo": titulo, "detalhe": detalhe, "o_que_fazer": fazer, "desde": desde})
+    def ocorre(chave: str, titulo: str, detalhe: str = "", fazer: str = "", quando_: Any = None,
+               tipo: str = "pessoa", origem: str = "agora", robo_chave: str | None = None) -> None:
+        if chave in tratadas:
+            return
+        ocorrencias.append({
+            "chave": chave, "titulo": titulo, "detalhe": detalhe, "o_que_fazer": fazer,
+            "quando": quando_, "tipo": tipo, "origem": origem, "robo_chave": robo_chave,
+        })
 
     if not recebido:
-        junta(precisa, "O Mac mini nunca mandou o estado do robô",
-              fazer='Conferir no mini se a janela "00 - Sistema no Mac mini" está aberta')
+        ocorre("agora:mini", "O Mac mini nunca mandou o estado do robô",
+               fazer='Conferir no mini se a janela "00 - Sistema no Mac mini" está aberta')
     elif not conectado:
         minutos = int((agora - recebido).total_seconds() // 60)
-        junta(precisa, f"O Mac mini não dá notícia há {minutos} min",
-              "Mini desligado, sem internet ou a janela do sistema fechada.",
-              'Conferir o Mac mini e a janela "00 - Sistema no Mac mini"', _iso(recebido))
+        ocorre("agora:mini", f"O Mac mini não dá notícia há {minutos} min",
+               "Mini desligado, sem internet ou a janela do sistema fechada.",
+               'Conferir o Mac mini e a janela "00 - Sistema no Mac mini"', _iso(recebido))
 
     ag = itens.get("agente") or {}
     ag_dados = ag.get("dados") or {}
     if ag.get("estado") == "erro":
-        junta(precisa, "Robô parado", ag.get("detalhe") or "", ag.get("o_que_fazer") or "")
+        ocorre("agora:agente", "Robô parado", ag.get("detalhe") or "", ag.get("o_que_fazer") or "")
 
     def nome_passo(x: dict) -> str:
         return PASSOS.get(x.get("acao"), (0, x.get("nome")))[1]
@@ -200,6 +259,7 @@ def montar_painel(resumo: dict | None, recebido_em: datetime | None, agora: date
             "faz": faz,
             "estado": it.get("estado") or "desconhecido",
             "fazendo": nome_passo(rod) if rod else None,
+            "acao": rod.get("acao") if rod else None,
             "desde": rod.get("desde") if rod else None,
             "progresso": (rod or {}).get("progresso") or "",
             "n_proximos": d.get("n_proximos") or 0,
@@ -207,41 +267,58 @@ def montar_painel(resumo: dict | None, recebido_em: datetime | None, agora: date
             "presa": bool(d.get("presa")),
         })
         if it.get("estado") == "erro":
-            titulo = f"{nome}: {it.get('detalhe') or 'com erro'}"
-            junta(precisa, titulo, "", it.get("o_que_fazer") or "")
+            ocorre(f"agora:fila_{fila}", f"{nome}: {it.get('detalhe') or 'com erro'}", "",
+                   it.get("o_que_fazer") or "")
     shopee = itens.get("fila_shopee") or {}
     if shopee.get("estado") == "erro":
-        junta(precisa, shopee.get("detalhe") or "Shopee com verificação", "",
-              shopee.get("o_que_fazer") or "")
+        ocorre("agora:muro_shopee", shopee.get("detalhe") or "Shopee com verificação", "",
+               shopee.get("o_que_fazer") or "")
 
     sei = itens.get("sei_assinatura") or {}
     if sei.get("estado") not in (None, "ok"):
-        junta(precisa, "SEI esperando a assinatura da titular", sei.get("detalhe") or "",
-              sei.get("o_que_fazer") or "Assinar no Safari do Mac mini (senha SEI da titular)")
+        ocorre("agora:sei", "SEI esperando a assinatura da titular", sei.get("detalhe") or "",
+               sei.get("o_que_fazer") or "Assinar no Safari do Mac mini (senha SEI da titular)")
 
     for chave, nome in CONTAS.items():
         it = itens.get(chave) or {}
-        if it.get("estado") == "erro":
-            junta(precisa, nome, it.get("detalhe") or "", it.get("o_que_fazer") or "")
-        elif it.get("estado") == "atencao":
-            junta(avisos, nome, it.get("detalhe") or "", it.get("o_que_fazer") or "")
+        if it.get("estado") in ("erro", "atencao"):
+            ocorre(f"agora:{chave}", nome, it.get("detalhe") or "", it.get("o_que_fazer") or "",
+                   tipo="pessoa" if it.get("estado") == "erro" else "aviso")
 
     for p in ((itens.get("problemas") or {}).get("dados") or {}).get("lista") or []:
-        junta(precisa if p.get("bloqueia") else avisos, p.get("tarefa") or "Problema",
-              p.get("problema") or "", p.get("pergunta") or "", p.get("quando"))
+        chave, robo_chave = _chave_problema(p)
+        ocorre(chave, p.get("tarefa") or "Problema", p.get("problema") or "",
+               p.get("pergunta") or "", p.get("quando"),
+               tipo="pessoa" if p.get("bloqueia") else "aviso", origem="robo",
+               robo_chave=robo_chave)
 
     hoje = agora.date()
     rodadas = []
     for h in RODADAS:
         hora = datetime(hoje.year, hoje.month, hoje.day, h, tzinfo=FUSO)
         janela = f"{hoje.isoformat()}_{h:02d}h"
-        passos = _passos_da_rodada(tarefas, janela)
-        estado = _estado_rodada(passos, hora, agora, manual)
+        passos_rodada = _passos_da_rodada(tarefas, janela)
+        estado = _estado_rodada(passos_rodada, hora, agora, manual)
         if estado == "nao_comecou":
-            junta(precisa, f"A rodada das {h:02d}h não começou",
-                  "Nenhuma varredura foi pedida para esta rodada.",
-                  'Conferir se o "6 - Agente da varredura" está aberto no Mac mini', janela)
-        rodadas.append({"hora": h, "janela": janela, "estado": estado, "passos": passos})
+            ocorre(f"agora:rodada_{janela}", f"A rodada das {h:02d}h não começou",
+                   "Nenhuma varredura foi pedida para esta rodada.",
+                   'Conferir se o "6 - Agente da varredura" está aberto no Mac mini', janela)
+        rodadas.append({"hora": h, "janela": janela, "estado": estado, "passos": passos_rodada})
+
+    ultimas = _ultimas_de_hoje(tarefas)
+    passos = [
+        {"acao": acao, "ordem": ordem, "nome": nome, "onde": onde, "faz": faz,
+         "ultima": ultimas.get(acao)}
+        for acao, (ordem, nome, onde, faz) in sorted(PASSOS.items(), key=lambda x: x[1][0])
+    ]
+
+    # quem precisa de gente primeiro; dentro do tipo, as do momento na ordem
+    # em que entraram (mini sem notícia e robô parado no topo) e depois as do
+    # robô, da mais nova pra mais velha
+    agora_ = [o for o in ocorrencias if o["origem"] == "agora"]
+    do_robo = sorted((o for o in ocorrencias if o["origem"] != "agora"),
+                     key=lambda o: str(o["quando"] or ""), reverse=True)
+    ocorrencias = sorted(agora_ + do_robo, key=lambda o: o["tipo"] != "pessoa")
 
     canais = ((itens.get("denuncias_hoje") or {}).get("dados") or {}).get("canais") or {}
     denuncias_hoje = [
@@ -263,8 +340,8 @@ def montar_painel(resumo: dict | None, recebido_em: datetime | None, agora: date
             "desde": ag_dados.get("desde"),
         },
         "frentes": frentes,
-        "precisa": precisa,
-        "avisos": avisos,
+        "passos": passos,
+        "ocorrencias": ocorrencias,
         "rodadas": rodadas,
         "denuncias_hoje": denuncias_hoje,
     }

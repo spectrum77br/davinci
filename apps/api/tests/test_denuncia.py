@@ -16,7 +16,7 @@ H = {"Authorization": f"Bearer {TOKEN}"}
 _TABELAS = (
     "denuncia_anuncios", "denuncia_lojas", "denuncia_denuncias", "denuncia_casos",
     "denuncia_compras", "denuncia_provas", "denuncia_verificacoes", "denuncia_remetentes",
-    "denuncia_robo_status", "denuncia_robo_comandos",
+    "denuncia_robo_status", "denuncia_robo_comandos", "denuncia_robo_tratadas",
 )
 
 
@@ -322,11 +322,24 @@ def test_painel_rodadas_frentes_e_alarme():
     assert m["fazendo"] == "Mercado Livre" and m["progresso"] == "denunciando 3 de 9"
     assert m["proximos"] == ["Shopee"]
 
-    titulos = [x["titulo"] for x in p["precisa"]]
-    assert "SEI esperando a assinatura da titular" in titulos
-    assert "código do sei" in titulos
-    assert "A rodada das 06h não começou" in titulos
-    assert [x["titulo"] for x in p["avisos"]] == ["ML 429"]
+    # aba Passos: os 12, com a última vez de hoje
+    passos = {x["acao"]: x for x in p["passos"]}
+    assert len(p["passos"]) == 12 and p["passos"][0]["acao"] == "checagem"
+    assert passos["varredura_mercadolivre"]["ultima"]["status"] == "rodando"
+    assert passos["varredura_shopee"]["ultima"]["vezes"] == 2
+    assert passos["varredura_amazon"]["ultima"] is None
+
+    pessoa = [x["titulo"] for x in p["ocorrencias"] if x["tipo"] == "pessoa"]
+    assert "SEI esperando a assinatura da titular" in pessoa
+    assert "código do sei" in pessoa
+    assert "A rodada das 06h não começou" in pessoa
+    assert [x["titulo"] for x in p["ocorrencias"] if x["tipo"] == "aviso"] == ["ML 429"]
+    # "Tratado" tira da lista (só a marcada)
+    sei_cod = next(x for x in p["ocorrencias"] if x["titulo"] == "código do sei")
+    assert sei_cod["origem"] == "robo" and sei_cod["chave"].startswith("prob:")
+    p2 = montar_painel(resumo, agora, agora, tratadas={sei_cod["chave"]})
+    assert "código do sei" not in [x["titulo"] for x in p2["ocorrencias"]]
+    assert len(p2["ocorrencias"]) == len(p["ocorrencias"]) - 1
 
 
 def test_painel_mini_sem_noticia_e_nunca():
@@ -338,9 +351,9 @@ def test_painel_mini_sem_noticia_e_nunca():
     agora = datetime(2026, 10, 1, 9, 0, tzinfo=ZoneInfo("America/Sao_Paulo"))
     p = montar_painel(_resumo(), agora - timedelta(minutes=12), agora)
     assert p["conectado"] is False
-    assert p["precisa"][0]["titulo"] == "O Mac mini não dá notícia há 12 min"
+    assert p["ocorrencias"][0]["titulo"] == "O Mac mini não dá notícia há 12 min"
     p = montar_painel(None, None, agora)
-    assert p["precisa"][0]["titulo"] == "O Mac mini nunca mandou o estado do robô"
+    assert p["ocorrencias"][0]["titulo"] == "O Mac mini nunca mandou o estado do robô"
     assert [r["estado"] for r in p["rodadas"]] == ["nao_comecou", "futura", "futura"]
 
 
@@ -363,7 +376,7 @@ async def test_robo_sync_e_tela(client, make_user, auth_as):
     j = (await client.get("/api/denuncia/robo")).json()
     assert j["conectado"] is True
     assert len(j["rodadas"]) == 3 and len(j["frentes"]) == 3
-    assert any(x["titulo"] == "Robô parado" for x in j["precisa"])
+    assert any(x["titulo"] == "Robô parado" for x in j["ocorrencias"])
 
 
 # ───────────────────────────────── provas sob demanda (01/10/2026)
@@ -455,7 +468,7 @@ def test_painel_modo_manual_nao_acusa_rodada():
     p = montar_painel(resumo, agora, agora)
     assert p["modo"] == "manual"
     assert [r["estado"] for r in p["rodadas"]] == ["manual", "feita", "manual"]
-    assert not any("não começou" in x["titulo"] for x in p["precisa"])
+    assert not any("não começou" in x["titulo"] for x in p["ocorrencias"])
 
 
 
@@ -488,4 +501,39 @@ async def test_robo_botoes_ligar_e_rodar_passo(client, make_user, auth_as):
     j = (await client.get("/api/denuncia/robo")).json()
     assert [c["tipo"] for c in j["comandos"]] == ["passo", "automatico"]
     assert j["comandos"][1]["ok"] is True and j["comandos"][1]["entregue_em"]
-    assert len(j["passos_disponiveis"]) == 12
+    assert len(j["passos"]) == 12
+
+
+
+async def test_robo_tratado_some_e_resolve_no_mini(client, make_user, auth_as):
+    problema = {"chave": "problemas", "estado": "erro", "detalhe": "", "o_que_fazer": "",
+                "dados": {"lista": [
+        {"quando": "2026-09-30 12:26", "tarefa": "código do sei", "problema": "não chegou",
+         "pergunta": "encaminhar", "bloqueia": True, "chave": "codigo_sei"},
+        {"quando": "2026-09-30 12:00", "tarefa": "Shopee parou", "problema": "modal",
+         "pergunta": "conferir", "bloqueia": False, "chave": None},
+    ]}}
+    resumo = _resumo()
+    resumo["itens"].append(problema)
+    assert (await client.post("/api/denuncia/sync/robo", json=resumo, headers=H)).status_code == 200
+
+    auth_as(await make_user(permissions={"denuncia": {"view": True}}))
+    oc = (await client.get("/api/denuncia/robo")).json()["ocorrencias"]
+    sei = next(o for o in oc if o["titulo"] == "código do sei")
+    shopee = next(o for o in oc if o["titulo"] == "Shopee parou")
+    r = await client.post("/api/denuncia/robo/ocorrencias/tratar", json={"chave": sei["chave"]})
+    assert r.status_code == 403
+
+    auth_as(await make_user(permissions={"denuncia": {"view": True, "edit": True}}))
+    r = await client.post("/api/denuncia/robo/ocorrencias/tratar", json={"chave": "rm -rf"})
+    assert r.status_code == 422
+    for o in (sei, shopee):
+        r = await client.post("/api/denuncia/robo/ocorrencias/tratar",
+                              json={"chave": o["chave"], "titulo": o["titulo"],
+                                    "robo_chave": o["robo_chave"]})
+        assert r.status_code == 200, r.text
+    j = (await client.get("/api/denuncia/robo")).json()
+    assert not [o for o in j["ocorrencias"] if o["origem"] == "robo"]
+    # só o que tem chave própria no robô vira comando pro mini
+    cmds = (await client.get("/api/denuncia/sync/robo/comandos", headers=H)).json()["comandos"]
+    assert [(c["tipo"], c["dados"]) for c in cmds] == [("resolver", {"chave": "codigo_sei"})]

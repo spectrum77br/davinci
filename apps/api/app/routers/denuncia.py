@@ -50,6 +50,7 @@ from app.models.denuncia import (
     DenunciaRemetente,
     DenunciaRoboComando,
     DenunciaRoboStatus,
+    DenunciaRoboTratada,
     DenunciaVerificacao,
 )
 from app.models.user import User
@@ -245,6 +246,9 @@ async def sync_robo(
 # Botões da aba Robô (01/10): o mini busca os comandos pendentes a cada 5 s.
 # Comando que ninguém pegou em 1 h (mini desligado) não vale mais.
 COMANDO_VALE = timedelta(hours=1)
+# "Tratado" vale 3 dias — o robô guarda o problema 24 h; a ocorrência "agora"
+# que voltar depois disso é problema novo.
+TRATADA_VALE = timedelta(days=3)
 
 
 @sync_router.get("/robo/comandos")
@@ -534,11 +538,20 @@ async def robo(
             select(DenunciaRoboStatus).order_by(DenunciaRoboStatus.recebido_em.desc()).limit(1)
         )
     ).scalar_one_or_none()
+    tratadas = set(
+        (
+            await session.execute(
+                select(DenunciaRoboTratada.chave).where(
+                    DenunciaRoboTratada.tratada_em >= datetime.now(UTC) - TRATADA_VALE
+                )
+            )
+        ).scalars().all()
+    )
     painel = montar_painel(st.dados if st else None, st.recebido_em if st else None,
-                           datetime.now(UTC))
+                           datetime.now(UTC), tratadas=tratadas)
     comandos = (
         await session.execute(
-            select(DenunciaRoboComando).order_by(DenunciaRoboComando.id.desc()).limit(10)
+            select(DenunciaRoboComando).order_by(DenunciaRoboComando.id.desc()).limit(30)
         )
     ).scalars().all()
     painel["comandos"] = [
@@ -547,9 +560,6 @@ async def robo(
          "resultado": c.resultado,
          "caducou": c.entregue_em is None and datetime.now(UTC) - c.pedido_em > COMANDO_VALE}
         for c in comandos
-    ]
-    painel["passos_disponiveis"] = [
-        {"acao": a, "nome": nome, "ordem": ordem} for a, (ordem, nome) in PASSOS.items()
     ]
     return painel
 
@@ -575,6 +585,34 @@ async def robo_automatico(
     if not isinstance(corpo.get("ligado"), bool):
         raise HTTPException(422, detail={"code": "denuncia_robo_ligado_invalido"})
     return await _comando(session, u, "automatico", {"ligado": corpo["ligado"]})
+
+
+@router.post("/robo/ocorrencias/tratar")
+async def robo_tratar(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    u: Annotated[User, Depends(_editar)],
+    corpo: Annotated[dict, Body()],
+) -> dict:
+    """"Tratado" numa ocorrência do robô: some da lista. Se o problema tem
+    chave própria no robô, o mini também grava a resolução lá."""
+    chave = corpo.get("chave")
+    if not isinstance(chave, str) or not chave.startswith(("prob:", "agora:")) or len(chave) > 300:
+        raise HTTPException(422, detail={"code": "denuncia_ocorrencia_invalida"})
+    stmt = pg_insert(DenunciaRoboTratada).values(
+        chave=chave, titulo=str(corpo.get("titulo") or "")[:300], tratada_por=u.name or u.email,
+        tratada_em=datetime.now(UTC),
+    )
+    await session.execute(stmt.on_conflict_do_update(
+        index_elements=["chave"],
+        set_={"tratada_por": stmt.excluded.tratada_por, "tratada_em": stmt.excluded.tratada_em},
+    ))
+    robo_chave = corpo.get("robo_chave")
+    if isinstance(robo_chave, str) and robo_chave and chave == f"prob:{robo_chave}":
+        session.add(DenunciaRoboComando(
+            tipo="resolver", dados={"chave": robo_chave}, pedido_por=u.name or u.email
+        ))
+    await session.commit()
+    return {"ok": True}
 
 
 @router.post("/robo/passo")
