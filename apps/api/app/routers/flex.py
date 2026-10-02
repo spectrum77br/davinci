@@ -477,9 +477,10 @@ def _emergencias_visiveis(user: User, escopo: frozenset[UUID] | None):
     return None if escopo is None else FlexEmergencia.por == user.id
 
 
-# Uma emergência "na fila"/"rodando" há mais que isto é de um job que morreu:
-# o botão volta a criar outra.
-_EMERGENCIA_VALE = timedelta(hours=1)
+# Uma emergência "na fila" há mais que isto, ou "rodando" sem andamento
+# gravado há mais que isto (o job grava a cada poucos segundos), é de um job
+# que morreu (worker reiniciado no meio): o botão volta a criar outra.
+_EMERGENCIA_VALE = timedelta(minutes=10)
 
 
 @router.post("/emergencia", response_model=FlexEmergenciaOut)
@@ -499,9 +500,12 @@ async def emergencia(session: Sessao, user: Agir) -> FlexEmergenciaOut:
         user_id=str(user.id),
         contas_escopo=None if escopo is None else len(escopo),
     )
+    corte = datetime.now(UTC) - _EMERGENCIA_VALE
     filtros = [
-        FlexEmergencia.status.in_(("na_fila", "rodando")),
-        FlexEmergencia.pedido_em >= datetime.now(UTC) - _EMERGENCIA_VALE,
+        or_(
+            and_(FlexEmergencia.status == "na_fila", FlexEmergencia.pedido_em >= corte),
+            and_(FlexEmergencia.status == "rodando", FlexEmergencia.atualizado_em >= corte),
+        )
     ]
     if (f := _emergencias_visiveis(user, escopo)) is not None:
         filtros.append(f)

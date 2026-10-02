@@ -2785,7 +2785,11 @@ async def _executar_emergencia(
     )
     resumo["alvos"] = len(alvos)
     resumo["ligados_conhecidos"] = sum(1 for a in alvos if a.observado == LIGADO)
+    resumo["restantes"] = len(alvos)
     lote = alvos[:_TETO_EMERGENCIA]
+    # A conferência das contas e a descoberta podem levar um tempo: a tela já
+    # vê quantos alvos há (e que o job está vivo) antes da primeira escrita.
+    await _gravar_andamento(emergencia_id, resumo)
 
     shopee_escreve = bool(get_settings().flex_shopee_escrita)
     logs: list[FlexLog] = []

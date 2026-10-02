@@ -513,7 +513,7 @@ async def test_aprovar_shopee_so_leitura_e_409(
 
 @pytest.mark.asyncio
 async def test_emergencia_em_andamento_nao_cria_outra(
-    client: AsyncClient, cena, auth_as: Callable, monkeypatch
+    client: AsyncClient, cena, db: AsyncSession, auth_as: Callable, monkeypatch
 ):
     monkeypatch.setattr(cena["cfg"], "flex_modo", "piloto")
     auth_as(cena["admin"])
@@ -526,6 +526,16 @@ async def test_emergencia_em_andamento_nao_cria_outra(
     ultima = (await client.get("/api/flex/emergencia/ultima")).json()
     assert ultima["id"] == r1["id"]
     assert (await client.get("/api/flex/emergencia/999999")).status_code == 404
+    # O job morreu no meio (worker reiniciado): "rodando" sem andamento há
+    # mais de 10 min não segura o botão — o clique cria outra.
+    await db.execute(
+        text("UPDATE flex_emergencia SET status = 'rodando',"
+             " atualizado_em = now() - interval '11 minutes' WHERE id = :i"),
+        {"i": r1["id"]},
+    )
+    await db.commit()
+    r3 = (await client.post("/api/flex/emergencia")).json()
+    assert r3["id"] != r1["id"] and r3["ja_em_andamento"] is False
 
 
 @pytest.mark.asyncio
