@@ -190,21 +190,35 @@ if (!perfil || !cmd) {
 // 02/10 (296985): perfil de FlowerBrowser (Firefox, ex. 110 "JLAS 2 - ml") não fala
 // CDP — o AdsPower devolve `ws://…/session` e o connect padrão morre em
 // "Browser.getVersion"; ele fala WebDriver BiDi. SunBrowser (Chrome) segue no CDP.
+let bidi = false;
 async function conectar(url) {
-  const bidi = { browserWSEndpoint: url, defaultViewport: null, protocol: "webDriverBiDi" };
-  if (/\/session\/?$/.test(url)) return puppeteer.connect(bidi);
-  try {
-    return await puppeteer.connect({ browserWSEndpoint: url, defaultViewport: null });
-  } catch (e) {
-    return puppeteer.connect(bidi);
+  const opcoes = { browserWSEndpoint: url, defaultViewport: null, protocol: "webDriverBiDi" };
+  if (!/\/session\/?$/.test(url)) {
+    try {
+      return await puppeteer.connect({ browserWSEndpoint: url, defaultViewport: null });
+    } catch (e) {
+      /* não é Chrome: tenta o BiDi */
+    }
   }
+  bidi = true;
+  return puppeteer.connect(opcoes);
+}
+
+// No BiDi o puppeteer devolve como "página" também cada iframe da página (a da
+// venda no ML tem ~45, todos about:blank 0×0) — e a última, a escolhida por
+// padrão, era um iframe: print e clique morriam em "0 x 0". Só aba de verdade.
+async function abas() {
+  const todas = (await browser.pages()).filter((p) => !/^(chrome|moz)-extension:/.test(p.url()));
+  if (!bidi) return todas;
+  const topo = await Promise.all(
+    todas.map((p) => p.evaluate(() => window.top === window).catch(() => false)),
+  );
+  return todas.filter((_p, i) => topo[i]);
 }
 
 const browser = await conectar(await ws());
 try {
-  const paginas = (await browser.pages()).filter(
-    (p) => !/^(chrome|moz)-extension:/.test(p.url()),
-  );
+  const paginas = await abas();
   let n = fs.existsSync(ABA) ? Number(fs.readFileSync(ABA, "utf8")) : -1;
   if (!(n >= 0 && n < paginas.length)) n = paginas.length - 1;
   const page = paginas[n];
