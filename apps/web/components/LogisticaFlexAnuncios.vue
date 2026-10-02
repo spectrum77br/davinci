@@ -14,6 +14,10 @@
 //   • vê os pedidos Flex que o robô não conseguiu passar para o .sp.
 // Nada aqui chama o ML/Shopee direto: tudo passa pelo motor no servidor, que
 // respeita o modo (em "observar" nada é escrito nas plataformas).
+// Revisão de 02/10/2026 (fatos das contas): cada conta mostra se PODE ter
+// Flex (assinatura do ML / Entrega Direta ligada na loja Shopee) e quantos
+// anúncios dela o DaVinci não conhecia; o anúncio pausado aparece marcado;
+// a emergência vira um job com andamento na tela.
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { RefreshCw, Search, X, PowerOff, Check, ExternalLink, TriangleAlert, ChevronLeft, ChevronRight } from 'lucide-vue-next'
 
@@ -28,7 +32,25 @@ const emit = defineEmits<{
 const { api } = useApi()
 const toasts = useToasts()
 
-type FlexConta = { id: string; nome: string | null; plataforma: string | null; existe: boolean }
+type FlexConta = {
+  id: string
+  nome: string | null
+  plataforma: string | null
+  existe: boolean
+  // O Flex DA CONTA (o motor confere de hora em hora): true = pode ter Flex;
+  // false = não pode (motivo em flex_motivo); null = ainda não conferida.
+  flex_ativo: boolean | null
+  flex_status: string | null
+  flex_motivo: string | null
+  flex_lido_em: string | null
+  flex_erro: string | null
+  // Descoberta (ML): todos os anúncios da conta, e os que o DaVinci não conhecia.
+  descoberta_em: string | null
+  descoberta_ok: boolean | null
+  descoberta_total: number | null
+  descoberta_novos: number | null
+  descoberta_erro: string | null
+}
 type FlexConfig = {
   modo: 'desligado' | 'observar' | 'piloto' | 'ativo' | string
   pode_escrever: boolean
@@ -63,6 +85,10 @@ type FlexAnuncio = {
   recusa: string | null
   saldo_sp: number | null
   familias: string | null
+  leitura_falhas: number
+  proxima_leitura: string | null
+  // Status do anúncio na plataforma (active, paused, under_review, inactive, closed).
+  status_anuncio: string | null
   atualizado_em: string
 }
 type FlexResumo = { avaliados: number; ligados: number; aguardando: number; desligar: number; nao_lidos: number }
@@ -213,11 +239,13 @@ function tick() {
 }
 onMounted(() => {
   carregarTudo()
+  retomarEmergencia()
   timer = setInterval(tick, 60000)
 })
 onBeforeUnmount(() => {
   if (timer) clearInterval(timer)
   if (buscaTimer) clearTimeout(buscaTimer)
+  if (emergenciaTimer) clearTimeout(emergenciaTimer)
   recargas.forEach((t) => clearTimeout(t))
 })
 
@@ -261,11 +289,37 @@ function nomePlataforma(p: string | null | undefined): string {
   return p || '—'
 }
 const contasPermitidas = computed(() => new Set((config.value?.contas || []).filter((c) => c.existe).map((c) => c.id)))
-const contasTexto = computed(() =>
-  (config.value?.contas || []).map((c) =>
-    c.existe ? `${c.nome || c.id} (${nomePlataforma(c.plataforma)})` : `${c.id.slice(0, 8)}… (conta não encontrada)`,
-  ),
+// Contas que a plataforma diz que NÃO podem ter Flex: ninguém aprova lá.
+const contasSemFlex = computed(
+  () => new Set((config.value?.contas || []).filter((c) => c.flex_ativo === false).map((c) => c.id)),
 )
+function flexDaConta(c: FlexConta): { texto: string; cls: string; title: string } {
+  const loja = c.plataforma === 'shopee'
+  if (c.flex_ativo === true)
+    return {
+      texto: loja ? 'Entrega Direta ligada na loja' : 'Flex ativo na conta',
+      cls: 'text-emerald-700 dark:text-emerald-400',
+      title: `Conferido ${fmtDesde(c.flex_lido_em)}.`,
+    }
+  if (c.flex_ativo === false)
+    return {
+      texto: loja ? 'Entrega Direta desligada na loja' : `sem Flex no ML (${c.flex_status || '?'})`,
+      cls: 'text-rose-700 dark:text-rose-400 font-medium',
+      title:
+        (c.flex_motivo || '') +
+        (loja ? ' Ligue no Seller Center primeiro.' : ' Enquanto isso o sistema não mexe nos anúncios dela.'),
+    }
+  return {
+    texto: c.flex_erro ? 'Flex da conta não conferido (erro)' : 'Flex da conta ainda não conferido',
+    cls: 'text-amber-700 dark:text-amber-400',
+    title: c.flex_erro || 'O sistema confere na próxima rodada. Até lá não mexe nos anúncios dela.',
+  }
+}
+function descobertaTexto(c: FlexConta): string {
+  if (!c.descoberta_em || c.descoberta_total === null) return ''
+  const novos = c.descoberta_novos ? `, ${c.descoberta_novos} fora do DaVinci (o sistema desliga)` : ''
+  return `${c.descoberta_total} anúncio(s) na conta${novos} — lidos ${fmtDesde(c.descoberta_em)}${c.descoberta_ok === false ? ' (leitura incompleta)' : ''}`
+}
 const regraTexto = computed(() => {
   const c = config.value
   if (!c) return ''
@@ -315,13 +369,37 @@ function linkAnuncio(a: FlexAnuncio): string | null {
   const m = /^MLB(\d+)$/i.exec(a.external_id.trim())
   return m ? `https://produto.mercadolivre.com.br/MLB-${m[1]}` : null
 }
+// Aprovado, mas ainda não ligou (o Bling não confirmou o saldo, a rodada
+// estava ocupada…): o botão vira "Tentar agora" — antes ficava só o rótulo,
+// sem como pedir de novo.
+function aprovadoSemLigar(a: FlexAnuncio): boolean {
+  return !!a.aprovado_em && a.desejado === 'ligado' && a.observado !== 'ligado'
+}
 function podeAprovar(a: FlexAnuncio): boolean {
   return (
     props.canEdit &&
     !modoDesligado.value &&
     contasPermitidas.value.has(a.integration_id) &&
-    (a.aguardando_aprovacao || !!a.recusa)
+    !contasSemFlex.value.has(a.integration_id) &&
+    // Na Shopee só se confere (sem flex_shopee_escrita): aprovar não ligaria nada.
+    !(a.plataforma === 'shopee' && !config.value?.shopee_escrita) &&
+    (a.aguardando_aprovacao || !!a.recusa || (aprovadoSemLigar(a) && !!config.value?.pode_escrever))
   )
+}
+function rotuloAprovar(a: FlexAnuncio): string {
+  if (a.recusa) return 'Tentar de novo'
+  if (aprovadoSemLigar(a)) return 'Tentar agora'
+  return 'Aprovar'
+}
+const STATUS_ANUNCIO: Record<string, string> = {
+  paused: 'pausado',
+  under_review: 'em revisão',
+  inactive: 'inativo',
+  closed: 'encerrado',
+}
+// Só o que NÃO está ativo ganha selo (ativo é o normal).
+function statusTexto(a: FlexAnuncio): string | null {
+  return a.status_anuncio ? STATUS_ANUNCIO[a.status_anuncio] || null : null
 }
 // A recusa da plataforma em linha própria — menos quando o motivo já é ela
 // (a regra marca "não pode ter Flex" pela recusa): não repete a frase.
@@ -375,6 +453,8 @@ const ERRO_APROVAR: Record<string, string> = {
   conta_nao_permitida: 'Esta conta não está liberada para o Flex automático.',
   nao_avaliado: 'O sistema ainda não conferiu este anúncio.',
   nao_elegivel: 'Este anúncio não pode ligar o Flex agora.',
+  conta_sem_flex: 'Esta conta não tem o Flex ativo na plataforma.',
+  shopee_so_leitura: 'Na Shopee o sistema só confere: ligue a Entrega Direta à mão no Seller Center.',
 }
 
 // ---- Ações ----
@@ -412,25 +492,38 @@ async function aprovar(a: FlexAnuncio) {
     ? `Tentar ligar o Flex de novo no anúncio ${a.external_id} (${conta})?\n\nA plataforma recusou antes: ${a.recusa}`
     : `Ligar o Flex no anúncio ${a.external_id} (${conta})?\n\nPeças livres em São Bernardo: ${a.saldo_sp ?? '—'}.`
   const aviso = c?.pode_escrever
-    ? '\n\nO sistema liga agora na plataforma.'
+    ? '\n\nO sistema confere o anúncio e o saldo no Bling e liga em seguida. Se ele estiver no meio de uma conferência, a ligação entra na fila e sai em 1–2 minutos.'
     : '\n\nModo "só observando": a aprovação fica registrada, mas nada muda na plataforma.'
   if (!confirm(pergunta + aviso)) return
   const k = chave(a)
   aprovando.value = new Set([...aprovando.value, k])
   try {
-    const r = await api<{ aprovado: boolean; modo: string; aplicado: boolean; estado: FlexAnuncio | null }>(
-      `/api/flex/anuncios/${a.integration_id}/${encodeURIComponent(a.external_id)}/aprovar`,
-      { method: 'POST' },
-    )
+    const r = await api<{
+      aprovado: boolean
+      modo: string
+      aplicado: boolean
+      na_fila: boolean
+      estado: FlexAnuncio | null
+    }>(`/api/flex/anuncios/${a.integration_id}/${encodeURIComponent(a.external_id)}/aprovar`, { method: 'POST' })
     if (r.estado) {
       const i = itens.value.findIndex((x) => chave(x) === k)
       if (i >= 0) itens.value.splice(i, 1, r.estado)
     }
     if (r.aplicado) toasts.success('Flex ligado', `Anúncio ${a.external_id}.`)
-    else if (r.modo === 'piloto' || r.modo === 'ativo')
+    else if (r.estado?.observado === 'ligado')
+      toasts.success('O Flex já estava ligado', `Anúncio ${a.external_id}: nada a fazer.`)
+    else if (r.na_fila) {
+      toasts.info(
+        'Aprovado — na fila para ligar',
+        'O sistema estava no meio de uma conferência: a ligação entrou na fila e sai em 1–2 minutos. A lista atualiza sozinha.',
+      )
+      for (const ms of [45000, 120000]) recargas.push(setTimeout(() => carregarAnuncios(), ms))
+    } else if (r.modo === 'piloto' || r.modo === 'ativo')
       toasts.warning(
         'Aprovado, mas ainda não ligou',
-        r.estado?.ultimo_erro || r.estado?.motivo_claro || 'Veja o motivo na linha do anúncio; o sistema tenta de novo na próxima rodada.',
+        r.estado?.ultimo_erro ||
+          r.estado?.motivo_claro ||
+          'Veja o motivo na linha do anúncio. A aprovação continua valendo: o sistema tenta de novo na próxima conferência, ou clique em "Tentar agora".',
       )
     else toasts.info('Aprovação registrada', 'Só observando: nada mudou na plataforma.')
     emit('mudou')
@@ -451,8 +544,92 @@ async function aprovar(a: FlexAnuncio) {
   }
 }
 
+// ---- Emergência (job no servidor, com andamento) ----
+// O botão só tira as aprovações e põe o job na fila; o servidor desliga em
+// paralelo e grava o andamento, que a tela consulta a cada 2 s (também
+// depois de recarregar a página: a última emergência em andamento continua
+// aparecendo aqui).
+type FlexEmergencia = {
+  id: number | null
+  status: 'na_fila' | 'rodando' | 'concluida' | 'falhou' | null
+  modo: string
+  escreve: boolean
+  erro: string | null
+  ja_em_andamento: boolean
+  resumo: Record<string, any>
+}
+const emergenciaAtual = ref<FlexEmergencia | null>(null)
+let emergenciaTimer: ReturnType<typeof setTimeout> | null = null
+const emergenciaAndando = computed(
+  () => !!emergenciaAtual.value && ['na_fila', 'rodando'].includes(emergenciaAtual.value.status || ''),
+)
+
+function avisoEmergenciaFinal(e: FlexEmergencia) {
+  const r = e.resumo || {}
+  if (e.status === 'falhou') {
+    toasts.error('A emergência parou no meio', [e.erro || 'erro', 'Aperte de novo para continuar.'])
+    return
+  }
+  if (!e.escreve) {
+    const naoLidos = Math.max(0, (r.alvos || 0) - (r.ligados_conhecidos || 0))
+    toasts.info('Simulação da emergência (nada mudou)', [
+      `${r.ligados_conhecidos || 0} anúncio(s) com Flex ligado seriam desligados.`,
+      naoLidos ? `${naoLidos} anúncio(s) ainda não conferidos também seriam desligados por segurança.` : '',
+      r.contas_sem_flex ? `${r.contas_sem_flex} conta(s) sem Flex na plataforma ficariam de fora.` : '',
+      r.aprovacoes ? `${r.aprovacoes} aprovação(ões) seriam retiradas — continuam valendo, nada foi retirado.` : '',
+    ].filter(Boolean))
+    return
+  }
+  const linhas = [
+    `${r.desligados || 0} anúncio(s) desligados.`,
+    r.ja_desligados ? `${r.ja_desligados} já estavam desligados.` : '',
+    r.aprovacoes ? `${r.aprovacoes} aprovação(ões) retiradas.` : '',
+    r.falhas ? `${r.falhas} falharam — veja o erro na linha do anúncio.` : '',
+    r.ocupados ? `${r.ocupados} estavam sendo mexidos pelo sistema naquele instante e NÃO foram desligados.` : '',
+    r.sem_cliente ? `${r.sem_cliente} são de conta sem acesso à plataforma: desligue à mão no painel da plataforma.` : '',
+    r.shopee_so_leitura
+      ? `${r.shopee_so_leitura} da Shopee NÃO foram mexidos (o sistema só lê a Shopee): desligue à mão no Seller Center.`
+      : '',
+    r.contas_sem_flex ? `${r.contas_sem_flex} conta(s) sem Flex na plataforma ficaram de fora (não há o que desligar).` : '',
+    r.restantes ? `Ainda faltam ${r.restantes}: aperte de novo para continuar.` : '',
+  ].filter(Boolean)
+  if (r.falhas || r.restantes || r.ocupados || r.sem_cliente || r.shopee_so_leitura)
+    toasts.warning('Emergência: desligamento parcial', linhas)
+  else toasts.success('Emergência: Flex desligado', linhas)
+}
+
+async function acompanharEmergencia(id: number, avisar = true) {
+  if (emergenciaTimer) clearTimeout(emergenciaTimer)
+  try {
+    const e = await api<FlexEmergencia>(`/api/flex/emergencia/${id}`)
+    emergenciaAtual.value = e
+    if (e.status === 'na_fila' || e.status === 'rodando') {
+      emergenciaTimer = setTimeout(() => acompanharEmergencia(id, avisar), 2000)
+      return
+    }
+    if (avisar) avisoEmergenciaFinal(e)
+    emit('mudou')
+    await carregarTudo()
+  } catch {
+    // Falha de rede passageira: tenta de novo um pouco depois.
+    emergenciaTimer = setTimeout(() => acompanharEmergencia(id, avisar), 5000)
+  }
+}
+
+async function retomarEmergencia() {
+  try {
+    const e = await api<FlexEmergencia | null>('/api/flex/emergencia/ultima')
+    if (e && e.id && (e.status === 'na_fila' || e.status === 'rodando')) {
+      emergenciaAtual.value = e
+      acompanharEmergencia(e.id)
+    }
+  } catch {
+    // Informativo: sem isso a tela continua funcionando.
+  }
+}
+
 async function emergencia() {
-  if (!props.canEdit || emergenciaRodando.value) return
+  if (!props.canEdit || emergenciaRodando.value || emergenciaAndando.value) return
   const c = config.value
   const simulacao = !c?.pode_escrever
   // Simulação de verdade: nada muda, nem as aprovações (o servidor só conta).
@@ -461,51 +638,44 @@ async function emergencia() {
       ? 'SIMULAR a emergência?\n\nO modo atual não mexe nas plataformas: o sistema só mostra o que faria — ' +
           'quantos anúncios desligaria e quantas aprovações retiraria. Nada muda, nem as aprovações.'
       : 'DESLIGAR O FLEX DE TODOS os anúncios das contas liberadas?\n\n' +
-          'Também retira todas as aprovações AGORA: nada volta a ligar sem uma pessoa aprovar de novo.',
+          'Também retira todas as aprovações AGORA: nada volta a ligar sem uma pessoa aprovar de novo. ' +
+          'O desligamento roda no servidor e o andamento aparece aqui (pode fechar a página).',
   )
   if (!ok) return
   emergenciaRodando.value = true
   try {
-    const r = await api<Record<string, any>>('/api/flex/emergencia', { method: 'POST' })
-    if (r.motivo) {
-      toasts.warning('Nada a desligar', motivoServidor(r.motivo))
-    } else if (!r.escreve) {
-      const naoLidos = Math.max(0, (r.alvos || 0) - (r.ligados_conhecidos || 0))
-      toasts.info('Simulação da emergência (nada mudou)', [
-        `${r.ligados_conhecidos || 0} anúncio(s) com Flex ligado seriam desligados.`,
-        naoLidos ? `${naoLidos} anúncio(s) ainda não conferidos também seriam desligados por segurança.` : '',
-        r.aprovacoes
-          ? `${r.aprovacoes} aprovação(ões) seriam retiradas — continuam valendo, nada foi retirado.`
-          : '',
-      ].filter(Boolean))
-    } else {
-      const linhas = [
-        `${r.desligados || 0} anúncio(s) desligados.`,
-        r.ja_desligados ? `${r.ja_desligados} já estavam desligados.` : '',
-        r.aprovacoes ? `${r.aprovacoes} aprovação(ões) retiradas.` : '',
-        r.falhas ? `${r.falhas} falharam — veja o erro na linha do anúncio.` : '',
-        r.ocupados
-          ? `${r.ocupados} estavam sendo mexidos pelo sistema naquele instante e NÃO foram desligados.`
-          : '',
-        r.sem_cliente
-          ? `${r.sem_cliente} são de conta sem acesso à plataforma: desligue à mão no painel da plataforma.`
-          : '',
-        r.shopee_so_leitura
-          ? `${r.shopee_so_leitura} da Shopee NÃO foram mexidos (o sistema só lê a Shopee): desligue à mão no Seller Center.`
-          : '',
-        r.restantes ? `Ainda faltam ${r.restantes}: clique de novo para continuar.` : '',
-      ].filter(Boolean)
-      if (r.falhas || r.restantes || r.ocupados || r.sem_cliente || r.shopee_so_leitura)
-        toasts.warning('Emergência: desligamento parcial', linhas)
-      else toasts.success('Emergência: Flex desligado', linhas)
+    const r = await api<FlexEmergencia>('/api/flex/emergencia', { method: 'POST' })
+    if (!r.id) {
+      toasts.warning('Nada a desligar', motivoServidor(r.resumo?.motivo))
+      return
     }
+    emergenciaAtual.value = r
+    if (r.ja_em_andamento) toasts.info('Já há uma emergência em andamento', 'Acompanhe o andamento abaixo dos botões.')
+    else if (r.escreve && r.resumo?.aprovacoes)
+      toasts.info('Aprovações retiradas', `${r.resumo.aprovacoes} aprovação(ões) retiradas agora. Desligando…`)
     emit('mudou')
-    await carregarTudo()
+    acompanharEmergencia(r.id)
   } catch (e: any) {
-    toasts.error('A emergência falhou', e?.data?.detail?.code || e?.message || 'erro')
+    const d = e?.data?.detail
+    toasts.error(
+      'A emergência não começou',
+      (typeof d === 'object' && d ? d.detalhe || d.code : null) || e?.message || 'erro',
+    )
   } finally {
     emergenciaRodando.value = false
   }
+}
+
+function andamentoTexto(e: FlexEmergencia): string {
+  const r = e.resumo || {}
+  if (e.status === 'na_fila') return 'Na fila do servidor — começa em instantes.'
+  const total = Math.min(r.alvos || 0, 3000)
+  return (
+    `${e.escreve ? 'Desligando' : 'Simulando'}: ${r.processados || 0} de ${total || '…'} anúncio(s)` +
+    (e.escreve ? ` · ${r.desligados || 0} desligados` : '') +
+    (r.falhas ? ` · ${r.falhas} falhas` : '') +
+    (r.ocupados ? ` · ${r.ocupados} ocupados` : '')
+  )
 }
 
 // Pedido Flex que saiu sem passar pelo .sp: a pessoa diz que acertou o
@@ -559,7 +729,17 @@ defineExpose({ recarregar: carregarTudo })
       <div>{{ modoInfo.texto }}</div>
       <div v-if="config">
         <span class="font-medium">Contas liberadas:</span>
-        {{ contasTexto.length ? contasTexto.join(' · ') : 'nenhuma — o sistema não mexe em nenhuma conta.' }}
+        <template v-if="!config.contas.length"> nenhuma — o sistema não mexe em nenhuma conta.</template>
+        <ul v-else class="mt-0.5 space-y-0.5">
+          <li v-for="c in config.contas" :key="c.id" class="text-xs">
+            <template v-if="c.existe">
+              <span class="font-medium">{{ c.nome || c.id }}</span> ({{ nomePlataforma(c.plataforma) }}) —
+              <span :class="flexDaConta(c).cls" :title="flexDaConta(c).title">{{ flexDaConta(c).texto }}</span>
+              <span v-if="descobertaTexto(c)" class="opacity-80"> · {{ descobertaTexto(c) }}</span>
+            </template>
+            <template v-else>{{ c.id.slice(0, 8) }}… (conta não encontrada)</template>
+          </li>
+        </ul>
       </div>
       <div v-if="config" class="text-xs opacity-90">
         {{ regraTexto }}
@@ -596,14 +776,24 @@ defineExpose({ recarregar: carregarTudo })
         size="sm"
         variant="destructive"
         class="ml-auto"
-        :disabled="emergenciaRodando || modoDesligado"
+        :disabled="emergenciaRodando || emergenciaAndando || modoDesligado"
         :title="modoDesligado
           ? 'O Flex automático está desligado — não há o que desligar.'
           : 'Desliga o Flex de TODOS os anúncios das contas liberadas e retira todas as aprovações. Pede confirmação.'"
         @click="emergencia"
       >
-        <PowerOff class="size-4 mr-1" :class="emergenciaRodando ? 'animate-pulse' : ''" /> Desligar tudo (emergência)
+        <PowerOff class="size-4 mr-1" :class="emergenciaRodando || emergenciaAndando ? 'animate-pulse' : ''" /> Desligar tudo (emergência)
       </Button>
+    </div>
+
+    <!-- Andamento da emergência (o job roda no servidor) -->
+    <div
+      v-if="emergenciaAtual && emergenciaAndando"
+      class="rounded-md border border-rose-300 bg-rose-50 px-3 py-2 text-sm text-rose-900 dark:border-rose-700 dark:bg-rose-950/40 dark:text-rose-200"
+      role="status"
+    >
+      <span class="font-semibold">Emergência em andamento.</span>
+      {{ andamentoTexto(emergenciaAtual) }}
     </div>
 
     <!-- Resumo: cada número filtra a lista. -->
@@ -751,6 +941,11 @@ defineExpose({ recarregar: carregarTudo })
                 ><ExternalLink class="size-3" /></a>
               </div>
               <div v-if="a.titulo" class="text-xs truncate" :title="a.titulo">{{ a.titulo }}</div>
+              <span
+                v-if="statusTexto(a)"
+                class="mt-0.5 inline-block rounded border border-zinc-300 px-1.5 text-[10px] text-zinc-700 dark:border-zinc-600 dark:text-zinc-300"
+                title="Status do anúncio na plataforma: anúncio que não está ativo não ocupa vaga da família e não pede aprovação"
+              >{{ statusTexto(a) }}</span>
             </td>
             <td class="px-3 py-2 text-xs font-mono">{{ familiasTexto(a) }}</td>
             <td class="px-3 py-2 text-right tabular-nums" :class="saldoCls(a)">{{ a.saldo_sp ?? '—' }}</td>
@@ -773,11 +968,15 @@ defineExpose({ recarregar: carregarTudo })
                 type="button"
                 class="inline-flex items-center gap-1 rounded border border-emerald-400 px-2 py-1 text-xs font-medium text-emerald-800 hover:bg-emerald-50 disabled:opacity-50 dark:border-emerald-700 dark:text-emerald-300 dark:hover:bg-emerald-950/40"
                 :disabled="aprovando.has(chave(a))"
-                :title="a.recusa ? 'Tentar ligar o Flex de novo neste anúncio' : 'Aprovar: ligar o Flex neste anúncio'"
+                :title="a.recusa
+                  ? 'Tentar ligar o Flex de novo neste anúncio'
+                  : aprovadoSemLigar(a)
+                    ? 'Aprovado em ' + fmtDataHora(a.aprovado_em) + ', mas ainda não ligou: tentar agora'
+                    : 'Aprovar: ligar o Flex neste anúncio'"
                 @click="aprovar(a)"
               >
                 <Check class="size-3.5" :class="aprovando.has(chave(a)) ? 'animate-pulse' : ''" />
-                {{ a.recusa ? 'Tentar de novo' : 'Aprovar' }}
+                {{ rotuloAprovar(a) }}
               </button>
               <span v-else-if="a.aguardando_aprovacao" class="text-amber-700 dark:text-amber-400">esperando aprovação</span>
               <span
@@ -795,6 +994,7 @@ defineExpose({ recarregar: carregarTudo })
               <div v-if="a.ultimo_erro" class="mt-0.5 text-rose-700 dark:text-rose-400">
                 Último erro: {{ a.ultimo_erro }}
                 <template v-if="a.proxima_tentativa"> · tenta de novo {{ fmtCurto(a.proxima_tentativa) }}</template>
+                <template v-else-if="a.proxima_leitura"> · confere de novo {{ fmtCurto(a.proxima_leitura) }}</template>
               </div>
             </td>
             <td class="px-3 py-2 whitespace-nowrap text-xs" :title="fmtDataHora(a.atualizado_em)">
@@ -822,7 +1022,9 @@ defineExpose({ recarregar: carregarTudo })
           <div class="flex-1 min-w-0">
             <div class="font-mono">{{ a.external_id }}</div>
             <div v-if="a.titulo" class="truncate">{{ a.titulo }}</div>
-            <div class="text-muted-foreground">{{ nomePlataforma(a.plataforma) }} · {{ a.conta || '—' }}</div>
+            <div class="text-muted-foreground">
+              {{ nomePlataforma(a.plataforma) }} · {{ a.conta || '—' }}<template v-if="statusTexto(a)"> · {{ statusTexto(a) }}</template>
+            </div>
           </div>
           <span class="shrink-0 px-1.5 py-0.5 rounded border text-[10px]" :class="desejadoInfo(a).cls">{{ desejadoInfo(a).texto }}</span>
         </div>
@@ -845,7 +1047,7 @@ defineExpose({ recarregar: carregarTudo })
           :disabled="aprovando.has(chave(a))"
           @click="aprovar(a)"
         >
-          <Check class="size-3.5" /> {{ a.recusa ? 'Tentar de novo' : 'Aprovar' }}
+          <Check class="size-3.5" /> {{ rotuloAprovar(a) }}
         </button>
       </div>
       <div v-if="!loading && itens.length === 0" class="text-center text-sm text-muted-foreground py-6 border rounded-md">
