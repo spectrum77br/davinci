@@ -126,7 +126,7 @@ assert.match(conversa, /v-if="moderacao && podeDigitar"[\s\S]{0,200}AVISO_MODERA
 assert.match(conversa, /envio\.limite_caracteres \|\| limiteDe\(/)
 assert.match(conversa, /passaPelaModeracao\(plataforma\) \? MODERACAO_MAGALU_ENVIADA/)
 assert.match(conversa, /:canal="conversa\?\.canal"/)
-assert.match(conversa, /variasCaixas\(conversa\.plataforma\) \|\| conversa\.plataforma === 'amazon'/)
+assert.match(conversa, /variasCaixas\(c\.plataforma\) \|\| c\.plataforma === 'amazon'/)
 // O Temu/AliExpress continua antes (a ordem do v-else-if importa).
 assert.ok(conversa.indexOf('v-else-if="sellerCenter"') < conversa.indexOf('v-else-if="portal"'))
 
@@ -137,12 +137,12 @@ assert.match(obs, /v-else-if="portal"[\s\S]{0,120}:href="portal\.url"/)
 
 // Barra de lojas: a Magalu vem depois da Amazon, antes das lojas do robô.
 const lojas = fs.readFileSync(path.resolve(__dirname, '../components/AtendimentoLojas.vue'), 'utf8')
-assert.match(lojas, /const ORDEM = \['shopee', 'tiktok', 'ml', 'amazon', 'magalu', 'temu', 'aliexpress'\]/)
+assert.match(lojas, /const ORDEM = \['shopee', 'tiktok', 'ml', 'amazon', 'magalu', 'temu', 'aliexpress', 'site', 'instagram', 'facebook'\]/)
 
 // Lista: canal na linha (variasCaixas) e a Magalu no filtro só com o /resumo.
 const lista = fs.readFileSync(path.resolve(__dirname, '../components/AtendimentoLista.vue'), 'utf8')
 assert.match(lista, /return variasCaixas\(c\.plataforma\) \?/)
-assert.match(lista, /const SO_COM_RESUMO = new Set\(\['instagram', 'magalu'\]\)/)
+assert.match(lista, /const SO_COM_RESUMO = new Set\(\['instagram', 'magalu', 'site', 'facebook'\]\)/)
 
 // Painel do pedido: sem retrato pela API (enriquecer só tem Shopee e ML), e
 // pergunta de pré-venda não finge que "falta a API".

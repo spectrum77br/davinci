@@ -8,11 +8,15 @@ Reclamação"). Filtros e contadores da lista usam a etiqueta atual.
 
 Duas coisas abertas ao mesmo tempo: vale a mais urgente
 (`PRIORIDADE_ETIQUETAS`: Reclamação > Ag. cancelamento > Devolução >
-Avaliação > Pré-venda > Pós-venda) e as outras abertas vão para
-`etiquetas_secundarias` (o indicador pequeno). A base — pré ou pós-venda —
-nunca é secundária. AVALIAÇÃO (02/10/2026) vale enquanto a avaliação do
-pedido estiver PENDENTE (sem resposta da loja); respondida ou tratada, o
+Avaliação > Carrinho > Pré-venda > Pós-venda) e as outras abertas vão para
+`etiquetas_secundarias` (o indicador pequeno). A base — pré ou pós-venda, ou
+Mídia — nunca é secundária. AVALIAÇÃO (02/10/2026) vale enquanto a avaliação
+do pedido estiver PENDENTE (sem resposta da loja); respondida ou tratada, o
 motor devolve o que os outros fatos dão — "volta ao status anterior".
+CARRINHO (02/10/2026, RF9) vale enquanto o carrinho abandonado do lojista
+estiver aberto; recuperado (finalizado pelo WhatsApp) a base vira PÓS-VENDA
+("virou pedido"), não recuperado/resolvido volta a PRÉ-VENDA. MÍDIA
+(02/10/2026, RF7) é a BASE das conversas de comentário e menção das redes.
 
 Três partes, de propósito:
   • `calcular(fatos)` — PURA: a tabela de acontecimentos do RF1 e a
@@ -59,7 +63,9 @@ from app.models import AtendimentoConversa, AtendimentoEtiquetaHistorico
 from app.services.atendimento.constantes import (
     ETIQUETA_AG_CANCELAMENTO,
     ETIQUETA_AVALIACAO,
+    ETIQUETA_CARRINHO,
     ETIQUETA_DEVOLUCAO,
+    ETIQUETA_MIDIA,
     ETIQUETA_POS_VENDA,
     ETIQUETA_PRE_VENDA,
     ETIQUETA_RECLAMACAO,
@@ -79,7 +85,9 @@ __all__ = [
     "ETIQUETAS_BASE",
     "ETIQUETA_AG_CANCELAMENTO",
     "ETIQUETA_AVALIACAO",
+    "ETIQUETA_CARRINHO",
     "ETIQUETA_DEVOLUCAO",
+    "ETIQUETA_MIDIA",
     "ETIQUETA_POS_VENDA",
     "ETIQUETA_PRE_VENDA",
     "ETIQUETA_RECLAMACAO",
@@ -110,6 +118,9 @@ _SAIDA = {
     # Respondida (de fora ou pelo DaVinci) ou marcada como tratada: o
     # acontecimento entre parênteses diz qual.
     ETIQUETA_AVALIACAO: "avaliação resolvida",
+    # Recuperado, não recuperado ou resolvido à mão: o acontecimento entre
+    # parênteses (e a base nova) diz qual.
+    ETIQUETA_CARRINHO: "carrinho encerrado",
 }
 
 
@@ -141,6 +152,13 @@ class FatosEtiqueta:
     motivo_avaliacao: str | None = None
     # A pior nota entre as pendentes (o selo com as estrelas).
     estrelas_avaliacao: int | None = None
+    # Carrinho abandonado ABERTO do lojista (RF9) ligado à conversa.
+    carrinho_aberto: bool = False
+    motivo_carrinho: str | None = None
+    # Conversa de comentário/menção das redes (RF7): a base é MÍDIA, não
+    # pré/pós-venda (não há pedido).
+    midia: bool = False
+    motivo_midia: str | None = None
     # O nº do pedido no Bling, quando achado (só informativo).
     numero_bling: str | None = None
 
@@ -181,6 +199,8 @@ def _abertas(fatos: FatosEtiqueta) -> list[tuple[str, str]]:
         abertas.append(
             (ETIQUETA_AVALIACAO, fatos.motivo_avaliacao or "avaliação sem resposta da loja")
         )
+    if fatos.carrinho_aberto:
+        abertas.append((ETIQUETA_CARRINHO, fatos.motivo_carrinho or "carrinho abandonado no site"))
     return sorted(abertas, key=lambda par: _ordem(par[0]))
 
 
@@ -193,7 +213,9 @@ def calcular(fatos: FatosEtiqueta) -> Calculo:
         devolução aberta                   → DEVOLUÇÃO
         Bling em Ag. cancelamento          → AG. CANCELAMENTO
         avaliação sem resposta da loja     → AVALIAÇÃO
-        o que estava aberto acabou         → volta à base (pré/pós-venda)
+        carrinho abandonado aberto         → CARRINHO
+        comentário/menção nas redes        → MÍDIA (a base dessas conversas)
+        o que estava aberto acabou         → volta à base (pré/pós-venda, Mídia)
 
     Várias abertas: a mais urgente vale, as outras vão para `secundarias`.
     """
@@ -201,6 +223,8 @@ def calcular(fatos: FatosEtiqueta) -> Calculo:
     if abertas:
         principal, motivo = abertas[0]
         return Calculo(principal, [e for e, _ in abertas[1:]], motivo)
+    if fatos.midia:
+        return Calculo(ETIQUETA_MIDIA, [], fatos.motivo_midia or "comentário nas redes")
     if fatos.tem_pedido:
         return Calculo(ETIQUETA_POS_VENDA, [], fatos.motivo_pedido or "pedido ligado")
     return Calculo(ETIQUETA_PRE_VENDA, [], fatos.motivo_pedido or "sem pedido ligado")

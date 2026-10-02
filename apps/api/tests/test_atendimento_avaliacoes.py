@@ -412,13 +412,17 @@ def test_opiniao_do_ml_no_formato_medido():
 
 
 def test_etiqueta_avaliacao_na_prioridade_e_volta_ao_status_anterior():
+    # 02/10/2026: o Carrinho (sites) entra entre Avaliação e Pré-venda e a
+    # Mídia (redes, uma base) no fim.
     assert PRIORIDADE_ETIQUETAS == (
         "reclamacao",
         "ag_cancelamento",
         "devolucao",
         "avaliacao",
+        "carrinho",
         "pre_venda",
         "pos_venda",
+        "midia",
     )
     pendente = FatosEtiqueta(
         tem_pedido=True, avaliacao_pendente=True, motivo_avaliacao="Avaliação 2★"

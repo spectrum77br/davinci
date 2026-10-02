@@ -111,7 +111,7 @@ const avisosAbertos = ref(false)
 // ─── lista ──────────────────────────────────────────────────────────────────
 const FILTROS_KEY = 'davinci.atendimento.filtros'
 // Abre em "Todas", como o All do Duoke (01/10/2026); "Falta responder" é a aba ao lado.
-const filtros = ref<FiltrosLista>({ plataforma: '', integration_id: '', canal: '', filtro: 'todas', q: '' })
+const filtros = ref<FiltrosLista>({ plataforma: '', integration_id: '', canal: '', filtro: 'todas', q: '', externo_ref: '', rede_social_id: '' })
 const itens = ref<ConversaResumo[]>([])
 const proximo = ref<string | null>(null)
 const carregando = ref(false)
@@ -132,6 +132,9 @@ function params(antesDe?: string | null) {
   const f = filtros.value
   if (f.plataforma) p.set('plataforma', f.plataforma)
   if (f.integration_id) p.set('integration_id', f.integration_id)
+  // Linhas da barra sem integração (02/10/2026): o site e a conta de rede.
+  if (f.externo_ref) p.set('externo_ref', f.externo_ref)
+  if (f.rede_social_id) p.set('rede_social_id', f.rede_social_id)
   if (f.canal) p.set('canal', f.canal)
   p.set('filtro', f.filtro || 'todas')
   if (f.q) p.set('q', f.q)
@@ -290,7 +293,7 @@ onMounted(() => {
         const f = { ...filtros.value }
         // A aba (`filtro`) não volta: abre sempre em "Todas", como o Duoke
         // (01/10/2026). Loja e plataforma escolhidas, sim.
-        for (const k of ['plataforma', 'integration_id', 'canal'] as const) {
+        for (const k of ['plataforma', 'integration_id', 'canal', 'externo_ref', 'rede_social_id'] as const) {
           if (typeof salvo[k] === 'string') f[k] = salvo[k]
         }
         if (JSON.stringify(f) !== JSON.stringify(filtros.value)) filtros.value = f

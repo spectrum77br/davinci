@@ -11,8 +11,12 @@
 // maioria — destacar tudo é não destacar nada). Avaliação (RF8, 02/10/2026)
 // amarela, com as estrelas da pior nota pendente (`avaliacao_estrelas` da
 // lista) e a nota 1–3 em destaque (amarelo cheio, estrelas em vermelho).
-// Etiqueta nova (Carrinho, SAC…): acrescente aqui, no lugar certo da
-// PRIORIDADE.
+// Carrinho (RF9, 02/10/2026) verde-azulado (o laranja já é do Ag.
+// cancelamento): carrinho abandonado do lojista no site, entre Avaliação e
+// Pré-venda. Mídia (RF7, 02/10/2026) ROSA: a etiqueta própria das conversas
+// de comentário, menção e Direct das redes — é uma BASE, como pré/pós-venda
+// (nunca vira indicador). Etiqueta nova (SAC…): acrescente aqui, no lugar
+// certo da PRIORIDADE.
 //
 // Canal nunca é etiqueta: e-mail, Zap e o próprio canal "reclamação" são o
 // CANAL da conversa (AtendimentoPlataforma.canalLabel); a etiqueta é o status.
@@ -64,6 +68,15 @@ export const ETIQUETAS_INFO: Record<string, EtiquetaInfo> = {
     ponto: 'bg-yellow-400',
     destaque: true,
   },
+  carrinho: {
+    value: 'carrinho',
+    label: 'Carrinho',
+    hint: 'carrinho abandonado do lojista no site (parado há mais de 24 h, sem finalizar pelo WhatsApp)',
+    cls: 'bg-teal-500/15 text-teal-700 dark:text-teal-300',
+    faixa: 'bg-teal-500',
+    ponto: 'bg-teal-500',
+    destaque: true,
+  },
   pre_venda: {
     value: 'pre_venda',
     label: 'Pré-venda',
@@ -82,12 +95,22 @@ export const ETIQUETAS_INFO: Record<string, EtiquetaInfo> = {
     ponto: 'bg-muted-foreground/50',
     destaque: false,
   },
+  midia: {
+    value: 'midia',
+    label: 'Mídia',
+    hint: 'comentário, menção ou Direct nas redes sociais da marca',
+    cls: 'bg-pink-500/15 text-pink-700 dark:text-pink-300',
+    faixa: 'bg-pink-500',
+    ponto: 'bg-pink-500',
+    destaque: true,
+  },
 }
 // Da MAIS urgente para a menos (constantes.PRIORIDADE_ETIQUETAS): duas abertas
 // ao mesmo tempo, vale a primeira; a outra vira o indicador.
-export const PRIORIDADE_ETIQUETAS = ['reclamacao', 'ag_cancelamento', 'devolucao', 'avaliacao', 'pre_venda', 'pos_venda']
-// Toda conversa tem uma das duas: nunca entram no indicador.
-const BASE = new Set(['pre_venda', 'pos_venda'])
+export const PRIORIDADE_ETIQUETAS = ['reclamacao', 'ag_cancelamento', 'devolucao', 'avaliacao', 'carrinho', 'pre_venda', 'pos_venda', 'midia']
+// Toda conversa tem uma delas (pré/pós-venda; Mídia nas das redes): nunca
+// entram no indicador.
+const BASE = new Set(['pre_venda', 'pos_venda', 'midia'])
 
 // ─── as estrelas do selo Avaliação (RF8) ────────────────────────────────────
 // Nota "baixa" = 1–3, a mesma régua do backend (constantes.NOTA_BAIXA_AVALIACAO).

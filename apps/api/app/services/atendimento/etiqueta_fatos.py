@@ -41,6 +41,14 @@ COMO LIGAR CONVERSA → PEDIDO DO BLING (o mesmo caminho do painel do pedido,
      `condicao_avaliacao_do_pedido`). A opinião do ML vem pelo ORDER; a
      conversa do pack de carrinho só tem o pack.
 
+  6. Carrinho abandonado do site (`atendimento_carrinhos`, 02/10/2026): só
+     pela `conversa_id` (a conversa `carrinho` do lojista; o site não tem
+     pedido no Bling). O episódio MAIS RECENTE da conversa decide: aberto →
+     CARRINHO; recuperado → a base vira pós-venda ("virou pedido");
+     não recuperado / resolvido → pré-venda.
+  7. Mídia (02/10/2026): a conversa `comentario` (comentário ou menção nas
+     redes) tem a base MÍDIA — nenhuma consulta: é o canal que diz.
+
   Produção, 01/10/2026: pedido ligado em 2.373 de 3.477 conversas Shopee, 244
   de 515 TikTok e 146 de 146 do pós-venda do ML; a pergunta do ML nunca tem
   pedido. 86 conversas ligadas a pedido em 83957 e 5 a pedido em 83955.
@@ -106,6 +114,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
     AtendimentoAvaliacaoLoja,
+    AtendimentoCarrinho,
     AtendimentoConversa,
     AtendimentoReclamacao,
     BlingOrder,
@@ -115,8 +124,14 @@ from app.models import (
 from app.services.atendimento.constantes import (
     CANAIS_SEMPRE_POS_VENDA,
     CANAL_AVALIACAO,
+    CANAL_CARRINHO,
+    CANAL_COMENTARIO,
     CANAL_PERGUNTA,
     CANAL_RECLAMACAO,
+    CARRINHO_ABERTO,
+    CARRINHO_RECUPERADO,
+    NOME_SITE,
+    PUBLICACAO_MENCAO,
     RECLAMACAO_TIPO_DEVOLUCAO,
     TIPOS_QUE_SAO_RECLAMACAO,
     reclamacao_aberta,
@@ -165,6 +180,8 @@ _NOME_PLATAFORMA = {
     "magalu": "Magalu",
     "temu": "Temu",
     "aliexpress": "AliExpress",
+    "instagram": "Instagram",
+    "facebook": "Facebook",
 }
 _NOME_TIPO = {
     "reclamacao": "Reclamação",
@@ -606,6 +623,50 @@ def _motivo_avaliacao(a: AtendimentoAvaliacaoLoja) -> str:
     return f"Avaliação {a.estrelas}★ {onde} ainda não tratada"
 
 
+# ── Carrinho abandonado do site (RF9) ────────────────────────────────────
+
+
+async def carrinhos_das_conversas(
+    session: AsyncSession, ids: Sequence[UUID]
+) -> list[AtendimentoCarrinho]:
+    """Os carrinhos ligados a estas conversas, o MAIS RECENTE primeiro (por conversa)."""
+    lista = sorted({i for i in ids if i is not None}, key=str)
+    if not lista:
+        return []
+    return list(
+        (
+            await session.execute(
+                select(AtendimentoCarrinho)
+                .where(AtendimentoCarrinho.conversa_id.in_(lista))
+                .order_by(
+                    AtendimentoCarrinho.conversa_id,
+                    AtendimentoCarrinho.detectado_em.desc(),
+                    AtendimentoCarrinho.created_at.desc(),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+
+def _fmt_dia(quando: datetime | None) -> str:
+    """'30/09' no fuso de São Paulo (o motivo vai para a linha do tempo)."""
+    if quando is None:
+        return "—"
+    from zoneinfo import ZoneInfo
+
+    return quando.astimezone(ZoneInfo("America/Sao_Paulo")).strftime("%d/%m")
+
+
+def _motivo_carrinho(c: AtendimentoCarrinho) -> str:
+    """Ex.: "Carrinho parado desde 30/09 com 3 peças no site Charlots" — sem dado do lojista."""
+    site = NOME_SITE.get(c.site, c.site)
+    pecas = int(c.quantidade_total or 0)
+    texto = f"{pecas} peça{'s' if pecas != 1 else ''}"
+    return f"Carrinho parado desde {_fmt_dia(c.parado_desde)} com {texto} no site {site}"
+
+
 # ── Fatos ─────────────────────────────────────────────────────────────────
 
 
@@ -653,6 +714,7 @@ def _montar_fatos(
     abertas: Sequence[AtendimentoReclamacao],
     conhecidos: frozenset[str] = frozenset(),
     avaliacoes: Sequence[AtendimentoAvaliacaoLoja] = (),
+    carrinhos: Sequence[AtendimentoCarrinho] = (),
 ) -> FatosEtiqueta:
     """Os fatos de UMA conversa a partir do que já foi lido. PURA.
 
@@ -660,7 +722,8 @@ def _montar_fatos(
     as reclamações abertas dela, a mais urgente primeiro; `conhecidos` =
     os `claim_ids` do pack que já são linha em `atendimento_reclamacoes` (a
     tabela decide o tipo e se está aberta — o pack só vale para o resto);
-    `avaliacoes` = as avaliações PENDENTES dela, a pior primeiro.
+    `avaliacoes` = as avaliações PENDENTES dela, a pior primeiro;
+    `carrinhos` = os carrinhos do site ligados a ela, o mais recente primeiro.
     """
     # Pré × pós-venda: a regra dos filtros da lista.
     tem_pedido = e_pos_venda(conversa.canal, conversa.pedido_marketplace)
@@ -670,6 +733,25 @@ def _montar_fatos(
         motivo_pedido = f"pedido {conversa.pedido_marketplace.strip()} ligado"
     else:
         motivo_pedido = "conversa depois da compra"
+
+    # Carrinho do site: o episódio mais recente decide (aberto = CARRINHO;
+    # recuperado = "virou pedido", a base vira pós-venda).
+    ultimo_carrinho = carrinhos[0] if carrinhos else None
+    carrinho_aberto = ultimo_carrinho is not None and ultimo_carrinho.situacao == CARRINHO_ABERTO
+    if ultimo_carrinho is not None and ultimo_carrinho.situacao == CARRINHO_RECUPERADO:
+        tem_pedido = True
+        motivo_pedido = "carrinho recuperado: o lojista finalizou o pedido pelo WhatsApp"
+    elif ultimo_carrinho is not None and not carrinho_aberto and not tem_pedido:
+        motivo_pedido = "carrinho encerrado sem pedido"
+
+    # Comentário/menção nas redes: a base é MÍDIA.
+    midia = conversa.canal == CANAL_COMENTARIO
+    motivo_midia = None
+    if midia:
+        rede = _NOME_PLATAFORMA.get(conversa.plataforma, conversa.plataforma)
+        dados = conversa.dados if isinstance(conversa.dados, dict) else {}
+        o_que = "Menção" if dados.get("tipo") == PUBLICACAO_MENCAO else "Comentário"
+        motivo_midia = f"{o_que} no {rede}"
 
     # Bling: 83955 (Ag. cancelamento, filtrando a trava da Margem) e 83957.
     ag_cancelamento = ag_cancelamento_visivel(pedido)
@@ -715,6 +797,10 @@ def _montar_fatos(
         avaliacao_pendente=pior is not None,
         motivo_avaliacao=_motivo_avaliacao(pior) if pior is not None else None,
         estrelas_avaliacao=int(pior.estrelas) if pior is not None else None,
+        carrinho_aberto=carrinho_aberto,
+        motivo_carrinho=_motivo_carrinho(ultimo_carrinho) if carrinho_aberto else None,
+        midia=midia,
+        motivo_midia=motivo_midia,
         numero_bling=pedido.numero if pedido is not None else None,
     )
 
@@ -742,6 +828,10 @@ async def fatos_em_lote(
         session, (i for c in conversas for i in _claims_do_pack(c))
     )
     pendentes = await avaliacoes_pendentes_de(session, [c.id for c in conversas], todas)
+    # Carrinhos do site: só as conversas `carrinho` (nenhuma consulta sem elas).
+    carrinhos = await carrinhos_das_conversas(
+        session, [c.id for c in conversas if c.canal == CANAL_CARRINHO]
+    )
     fatos: dict[UUID, FatosEtiqueta] = {}
     for c in conversas:
         base = pedidos[c.id]
@@ -751,7 +841,8 @@ async def fatos_em_lote(
             key=_mais_urgente_primeiro,
         )
         avaliacoes = pendentes_da_conversa(c, chaves[c.id], pendentes)
-        fatos[c.id] = _montar_fatos(c, pedido, da_conversa, conhecidos, avaliacoes)
+        do_carrinho = [k for k in carrinhos if k.conversa_id == c.id]
+        fatos[c.id] = _montar_fatos(c, pedido, da_conversa, conhecidos, avaliacoes, do_carrinho)
     return fatos
 
 

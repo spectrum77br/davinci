@@ -459,7 +459,8 @@ async def upsert_conversa(
     integration_id = (
         integration.id if integration is not None else (canal.integration_id if canal else None)
     )
-    # Canal sem integração só existe para as lojas do robô (migration 0347).
+    # Canal sem integração: as lojas do robô (migration 0347) e os canais
+    # externos — sites e redes sociais (0362). A chave da conversa é o canal.
     canal_robo_id = canal.id if canal is not None and integration_id is None else None
     campos = {
         "comprador_id": None if comprador_id is None else _cabe(sem_nul(str(comprador_id)), 128),

@@ -68,7 +68,7 @@ from uuid import UUID
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from fastapi.encoders import jsonable_encoder
-from sqlalchemy import String, and_, case, cast, exists, false, func, or_, select, text, true
+from sqlalchemy import String, and_, case, cast, exists, false, func, not_, or_, select, text, true
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
@@ -136,7 +136,15 @@ from app.schemas.atendimento import (
     SincronizarOut,
     SugestaoOut,
 )
-from app.services.atendimento import acesso, clientes, enviar, gravar, instagram, robo
+from app.services.atendimento import (
+    acesso,
+    canais_externos,
+    clientes,
+    enviar,
+    gravar,
+    instagram,
+    robo,
+)
 from app.services.atendimento import etiqueta as etiqueta_svc
 from app.services.atendimento.constantes import (
     ACAO_OBSERVOU,
@@ -144,6 +152,7 @@ from app.services.atendimento.constantes import (
     AUTOR_LOJA,
     CANAIS_POR_PLATAFORMA,
     CANAIS_SEMPRE_POS_VENDA,
+    CANAL_COMENTARIO,
     CANAL_EMAIL,
     CANAL_PERGUNTA,
     CATEGORIAS,
@@ -152,19 +161,24 @@ from app.services.atendimento.constantes import (
     CONVERSA_ABERTA,
     CONVERSA_FECHADA,
     ETIQUETA_AVALIACAO,
+    ETIQUETA_MIDIA,
     ETIQUETA_POS_VENDA,
     ETIQUETA_PRE_VENDA,
     ETIQUETAS,
     MODO_AUTO,
     MODO_OBSERVAR,
+    MODOS_QUE_ENVIAM,
     MSG_ENVIADA,
     MSG_FALHOU,
     MSG_REVISAR,
     ORIGEM_HUMANO,
     ORIGEM_NOTA,
     ORIGENS_DAVINCI,
+    PLATAFORMA_SITE,
     PLATAFORMAS,
-    PLATAFORMAS_CAIXA,
+    PLATAFORMAS_EXTERNAS,
+    PLATAFORMAS_LISTA,
+    PLATAFORMAS_REDE,
     PLATAFORMAS_ROBO,
     PRIORIDADE_REGRA_PADRAO,
     RASCUNHO_BLOQUEADO,
@@ -174,6 +188,7 @@ from app.services.atendimento.constantes import (
     RASCUNHO_PENDENTE,
     RASCUNHO_SUBSTITUIDO,
     STATUS_CANAL_PARADO,
+    STATUS_CANAL_SEM_ENDPOINT,
     STATUS_CANAL_SESSAO_CAIU,
     TIPO_NOTA,
     TIPO_REGRA_CATEGORIA,
@@ -236,6 +251,10 @@ FILTROS = (
     "ag_cancelamento",
     # Avaliação de venda sem resposta da loja (RF8, 02/10/2026).
     "avaliacao",
+    # Carrinho abandonado dos sites (RF9) e Mídia — comentário, menção e
+    # Direct das redes (RF7), 02/10/2026.
+    "carrinho",
+    "midia",
 )
 # "Vencendo" = prazo da plataforma em menos de 2 h (e ainda não vencido).
 VENCENDO = timedelta(hours=2)
@@ -245,6 +264,15 @@ VENCENDO = timedelta(hours=2)
 # prazo e o id do último item), em vez da `ultima_mensagem_em`.
 FILTROS_PELO_PRAZO = ("aguardando",)
 _CURSOR_PRAZO = "prazo:"
+# "Pergunta vai para o topo" (RF7, 02/10/2026) — só ordena, não tira nada da
+# fila. No "Falta responder", o comentário COMUM das redes (elogio, emoji:
+# sem pergunta) vai para o FIM, depois de tudo o que pede resposta; no filtro
+# Mídia, a pergunta pendente vem PRIMEIRO e o resto pela recência. O cursor
+# leva o grupo: `prazo:comum:<prazo>|<id>` (já nos comentários comuns) e
+# `pergunta:<ISO>` (ainda nas perguntas do Mídia).
+_CURSOR_COMUM = "comum:"
+_CURSOR_PERGUNTA = "pergunta:"
+FILTROS_PERGUNTA_PRIMEIRO = ("midia",)
 # As DMs do Instagram esperando entram na mesma ordem pelo prazo: o
 # Instagram não pagina por prazo, então vêm todas (até este teto) e o
 # cursor é aplicado aqui.
@@ -295,6 +323,9 @@ _GRAVIDADE_STATUS = (
     STATUS_CANAL_PARADO,
     STATUS_CANAL_SESSAO_CAIU,
     "sem_escopo",
+    # Só do site: a rota do carrinho ainda não está publicada (o site não é
+    # lido até o pacote subir) — tão grave quanto o erro.
+    STATUS_CANAL_SEM_ENDPOINT,
     "erro",
     "desligado",
     "novo",
@@ -305,6 +336,8 @@ _ROTULO_CANAL = {
     "pergunta": "Perguntas",
     "pos_venda": "Pós-venda",
     "email": "E-mail",
+    "carrinho": "Carrinho",
+    "comentario": "Comentários",
 }
 
 # Botão "atualizar" do painel Pedido: uma ida à loja por conversa por minuto.
@@ -564,7 +597,8 @@ def _etiqueta_efetiva():
     o motor ainda não classificou (antes do preenchimento, ou do primeiro
     recálculo) não some do Pré-venda/Pós-venda. A regra é a mesma base do
     motor (`etiqueta_fatos.e_pos_venda`): pós-venda/SAC/e-mail/reclamação
-    sempre depois da compra; pergunta, sempre antes; chat, pelo pedido.
+    sempre depois da compra; pergunta, sempre antes; chat, pelo pedido. O
+    comentário/menção das redes (02/10/2026) é sempre Mídia.
     """
     pedido = func.coalesce(func.btrim(AtendimentoConversa.pedido_marketplace), "")
     pos = or_(
@@ -573,31 +607,48 @@ def _etiqueta_efetiva():
     )
     return func.coalesce(
         AtendimentoConversa.etiqueta,
-        case((pos, ETIQUETA_POS_VENDA), else_=ETIQUETA_PRE_VENDA),
+        case(
+            (AtendimentoConversa.canal == CANAL_COMENTARIO, ETIQUETA_MIDIA),
+            (pos, ETIQUETA_POS_VENDA),
+            else_=ETIQUETA_PRE_VENDA,
+        ),
     )
 
 
-def _cursor(antes_de: str | None, *, pelo_prazo: bool) -> tuple[datetime | None, str | None, bool]:
-    """O cursor da página (`antes_de`) → (momento, id, sem_prazo). Inválido → 422.
+def _cursor(
+    antes_de: str | None, *, pelo_prazo: bool
+) -> tuple[datetime | None, str | None, bool, int]:
+    """O cursor da página (`antes_de`) → (momento, id, sem_prazo, grupo). Inválido → 422.
 
-    Ordem por recência: ISO da `ultima_mensagem_em` → (momento, None, False).
-    Ordem pelo prazo: `prazo:<ISO ou vazio>|<id>` → (prazo, id, prazo vazio).
+    Ordem por recência: ISO da `ultima_mensagem_em` → (momento, None, False,
+    1); `pergunta:<ISO>` (Mídia, ainda nas perguntas) → grupo 0.
+    Ordem pelo prazo: `prazo:<ISO ou vazio>|<id>` → (prazo, id, prazo vazio,
+    0); `prazo:comum:…` (já nos comentários comuns) → grupo 1.
+    Sem cursor: o começo (grupo 0).
     """
     bruto = (antes_de or "").strip()
     if not bruto:
-        return None, None, False
+        return None, None, False, 0
     invalido = HTTPException(422, detail={"code": "cursor_invalido"})
     if pelo_prazo != bruto.startswith(_CURSOR_PRAZO):
         raise invalido
+    grupo = 0
     if pelo_prazo:
         prazo_txt, sep, ident = bruto[len(_CURSOR_PRAZO) :].partition("|")
+        if prazo_txt.startswith(_CURSOR_COMUM):
+            grupo = 1
+            prazo_txt = prazo_txt[len(_CURSOR_COMUM) :]
         if not sep or not ident.strip():
             raise invalido
         if not prazo_txt.strip():
-            return None, ident.strip(), True
+            return None, ident.strip(), True, grupo
         bruto = prazo_txt
     else:
         ident = None
+        if bruto.startswith(_CURSOR_PERGUNTA):
+            bruto = bruto[len(_CURSOR_PERGUNTA) :]
+        else:
+            grupo = 1
     texto = bruto.strip().replace("Z", "+00:00")
     if "T" in texto:
         # O "+" do fuso que chegou sem escape na URL vira espaço.
@@ -606,26 +657,64 @@ def _cursor(antes_de: str | None, *, pelo_prazo: bool) -> tuple[datetime | None,
         momento = datetime.fromisoformat(texto)
     except ValueError as e:
         raise invalido from e
-    return _utc(momento), (ident.strip() if ident else None), False
+    return _utc(momento), (ident.strip() if ident else None), False, grupo
+
+
+def _grupo_do_prazo(item: dict[str, Any]) -> int:
+    """No "Falta responder": 1 = comentário comum das redes (vai para o fim), 0 = o resto."""
+    return int(item.get("canal") == CANAL_COMENTARIO and not item.get("eh_pergunta"))
 
 
 def _cursor_do_prazo(item: dict[str, Any]) -> str:
     prazo = item.get("prazo_resposta_em")
-    return f"{_CURSOR_PRAZO}{prazo.isoformat() if prazo else ''}|{item['id']}"
+    grupo = _CURSOR_COMUM if _grupo_do_prazo(item) else ""
+    return f"{_CURSOR_PRAZO}{grupo}{prazo.isoformat() if prazo else ''}|{item['id']}"
 
 
 def _chave_do_prazo(item: dict[str, Any]) -> tuple:
-    """Ordem da aba "Falta responder": prazo mais curto primeiro, sem prazo no fim, id no empate."""
+    """Ordem da aba "Falta responder": o comentário comum das redes no fim; dentro de
+    cada grupo, prazo mais curto primeiro, sem prazo no fim, id no empate."""
     prazo = item.get("prazo_resposta_em")
-    return (prazo is None, prazo.timestamp() if prazo else 0.0, str(item["id"]))
+    return (
+        _grupo_do_prazo(item),
+        prazo is None,
+        prazo.timestamp() if prazo else 0.0,
+        str(item["id"]),
+    )
 
 
-def _depois_do_cursor(item: dict[str, Any], prazo: datetime | None, ident: str | None,
-                      sem_prazo: bool) -> bool:
+def _depois_do_cursor(
+    item: dict[str, Any],
+    prazo: datetime | None,
+    ident: str | None,
+    sem_prazo: bool,
+    grupo: int = 0,
+) -> bool:
     """O item vem DEPOIS do cursor na ordem pelo prazo? (o mesmo corte do SQL)."""
     if ident is None:
         return True
-    return _chave_do_prazo(item) > (sem_prazo, prazo.timestamp() if prazo else 0.0, ident)
+    return _chave_do_prazo(item) > (grupo, sem_prazo, prazo.timestamp() if prazo else 0.0, ident)
+
+
+def _pergunta_pendente():
+    """SQL: conversa de comentário com pergunta ainda sem resposta da marca (RF7).
+
+    `dados.eh_pergunta` é de `redes.atualizar_pergunta`. Sempre verdadeiro ou
+    falso (nunca NULL): o NOT do cursor não perde linha.
+    """
+    return and_(
+        AtendimentoConversa.aguardando_resposta.is_(True),
+        AtendimentoConversa.canal == CANAL_COMENTARIO,
+        AtendimentoConversa.dados["eh_pergunta"].as_boolean().is_(True),
+    )
+
+
+def _comentario_comum():
+    """SQL: conversa de comentário das redes que NÃO é pergunta (o fim do "Falta responder")."""
+    return and_(
+        AtendimentoConversa.canal == CANAL_COMENTARIO,
+        AtendimentoConversa.dados["eh_pergunta"].as_boolean().is_not(True),
+    )
 
 
 def _busca_no_bling(termo: str):
@@ -771,6 +860,14 @@ def _resumo_dict(
         "atribuido_a_nome": atribuido_nome,
         "ia_pausada": c.ia_pausada,
         "sem_resposta_necessaria": c.sem_resposta_necessaria,
+        # Comentário das redes com pergunta ainda sem resposta (RF7): o selo
+        # "pergunta" na lista e a frente da fila no Mídia/"Falta responder".
+        "eh_pergunta": bool(
+            c.canal == CANAL_COMENTARIO
+            and c.aguardando_resposta
+            and isinstance(c.dados, dict)
+            and c.dados.get("eh_pergunta") is True
+        ),
         "somente_leitura": False,
         "envio_a_conferir": bool(a_conferir),
         # Etiqueta = status atual: quem grava é `services/atendimento/etiqueta`.
@@ -938,10 +1035,17 @@ def _canal_out(
         status_canal, ultimo_erro = robo.status_efetivo(canal)
         conta = conta or robo.nome_da_loja(canal)
         integracao = integracao or f"robô do Mac mini · perfil {canal.robo_perfil_id}"
+    elif canais_externos.eh_externo(canal):
+        # Site ou rede social (0362): o nome vem do leitor (`cursor`), e "por
+        # onde lê" é a origem externa.
+        conta = conta or canais_externos.nome_do_canal(canal)
+        integracao = integracao or canais_externos.descricao_da_origem(canal)
     return CanalOut(
         id=canal.id,
         integration_id=canal.integration_id,
         robo_perfil_id=canal.robo_perfil_id,
+        externo_ref=canal.externo_ref,
+        rede_social_id=canal.rede_social_id,
         plataforma=canal.plataforma,
         canal=canal.canal,
         conta=conta,
@@ -961,8 +1065,9 @@ def _canal_out(
 async def _canais(session: AsyncSession, scope: TeamScope) -> list[CanalOut]:
     """Os canais do escopo, com o nome da LOJA (e o da integração ao lado).
 
-    OUTER join: o canal das lojas do robô (Temu/AliExpress) não tem integração
-    — e, como a conversa sem integração, só aparece para quem vê tudo.
+    OUTER join: o canal das lojas do robô (Temu/AliExpress) e o EXTERNO
+    (sites e redes) não têm integração — e, como a conversa sem integração,
+    só aparecem para quem vê tudo.
     """
     consulta = select(AtendimentoCanal, Integration.name).outerjoin(
         Integration, Integration.id == AtendimentoCanal.integration_id
@@ -1014,11 +1119,30 @@ def _motivo_do_status(canal: CanalOut) -> str | None:
     erro = (canal.ultimo_erro or "").strip()[:200]
     if canal.status == "ok":
         return None
-    if canal.status == "sem_escopo":
+    if canal.status == "sem_escopo" and canal.plataforma in PLATAFORMAS_REDE:
+        # Rede social (02/10/2026): o token do usuário de sistema do "DaVinci
+        # Publicador" sem o escopo de comentários (o `ultimo_erro` diz qual).
+        texto = (
+            "Sem permissão no token do DaVinci Publicador (falta o escopo de comentários: "
+            "gere o token novo)"
+        )
+    elif canal.status == "sem_escopo" and canal.plataforma == PLATAFORMA_SITE:
+        # 401: o token não confere OU a hospedagem cortou o cabeçalho (o
+        # `ultimo_erro` diz qual — carrinhos._falha_http).
+        texto = "O site recusou o token do DaVinci"
+    elif canal.status == "sem_escopo":
         texto = (
             "Sem permissão de atendimento na plataforma (reautorize a loja com o escopo "
             "de mensagens)"
         )
+    elif canal.status == STATUS_CANAL_SEM_ENDPOINT:
+        # Site (02/10/2026): o 404 da rota de leitura do carrinho.
+        texto = (
+            "O site ainda não tem a rota de carrinhos: publicar o pacote do carrinho "
+            "abandonado na Hostinger"
+        )
+    elif canal.status == "desligado" and canal.plataforma == PLATAFORMA_SITE:
+        texto = "O DaVinci não tem o token deste site (SITES_ESTOQUE_TOKENS): o site não é lido"
     elif canal.status == "desligado":
         texto = "Leitura desligada para esta loja"
     elif canal.status == STATUS_CANAL_PARADO:
@@ -1039,6 +1163,102 @@ def _saude_da_loja(canais: list[CanalOut]) -> tuple[str, str | None]:
     if motivo and len(canais) > 1:
         motivo = f"{_ROTULO_CANAL.get(pior.canal, pior.canal)}: {motivo}"
     return pior.status, motivo
+
+
+def _juntar_externas(
+    lojas: list[LojaResumoOut],
+    canais_da_loja: dict[tuple[UUID | None, str, UUID | None], list[CanalOut]],
+) -> list[LojaResumoOut]:
+    """Uma linha por ORIGEM externa: as caixas do mesmo site viram uma loja só.
+
+    Hoje cada site tem uma caixa (o carrinho) e cada conta de rede uma (os
+    comentários); quando o site ganhar outra (o SAC), a barra continua com
+    UMA linha "Charlots", com o pior estado entre as caixas — e o filtro é
+    pela origem (`externo_ref`), não pelo canal.
+    """
+    saida: list[LojaResumoOut] = []
+    por_ref: dict[str, LojaResumoOut] = {}
+    canais_da_ref: dict[str, list[CanalOut]] = {}
+    for chave, cs in canais_da_loja.items():
+        for c in cs:
+            if c.externo_ref and chave[0] is None:
+                canais_da_ref.setdefault(c.externo_ref, []).append(c)
+    for lj in lojas:
+        ref = lj.externo_ref
+        if not ref or lj.integration_id is not None:
+            saida.append(lj)
+            continue
+        alvo = por_ref.get(ref)
+        if alvo is None:
+            por_ref[ref] = lj
+            saida.append(lj)
+            continue
+        alvo.aguardando += lj.aguardando
+        alvo.vencidas += lj.vencidas
+        alvo.nao_lidas += lj.nao_lidas
+        alvo.etiquetas = {
+            e: alvo.etiquetas.get(e, 0) + lj.etiquetas.get(e, 0)
+            for e in {*alvo.etiquetas, *lj.etiquetas}
+        }
+        # A linha é da ORIGEM (todas as caixas): o filtro vai pelo `externo_ref`.
+        alvo.canal_id = None
+    for ref, alvo in por_ref.items():
+        cs = canais_da_ref.get(ref) or []
+        if len(cs) > 1:
+            alvo.status_canal, alvo.status_motivo = _saude_da_loja(cs)
+    return saida
+
+
+def _com_direct(lojas: list[LojaResumoOut], contas: list[dict]) -> list[LojaResumoOut]:
+    """O Direct de cada conta do Instagram na linha DA CONTA (02/10/2026).
+
+    Antes era uma linha "Direct" juntando 7buyers, Charlots e Uranyx. Agora a
+    conta que tem a caixa de comentários soma o Direct na mesma linha
+    (`rede_social_id`); a que só tem Direct (7buyers) ganha a linha dela,
+    sem canal (o adaptador só lê `dm_conversas`). O nome é o @ do cadastro
+    (`instagram.contar_por_conta`); as DMs de conta que saiu do cadastro
+    ficam numa linha "Direct (conta fora do cadastro)", sem `rede_social_id`
+    (não há por onde filtrar a conta: a barra mostra a linha, e clicar nela
+    filtra o Instagram inteiro — a soma das linhas bate com o número da
+    plataforma). `direct_aguardando` separa, no
+    title, o Direct dos comentários — e diz à tela que a linha continua
+    lendo o Direct mesmo com a caixa de comentários sem permissão.
+    """
+    saida = list(lojas)
+    for d in contas:
+        if not d.get("total"):
+            continue
+        rs = d.get("rede_social_id")
+        alvo = next(
+            (
+                lj
+                for lj in saida
+                if rs is not None
+                and lj.plataforma == instagram.PLATAFORMA
+                and lj.rede_social_id == rs
+            ),
+            None,
+        )
+        if alvo is None:
+            alvo = LojaResumoOut(
+                plataforma=instagram.PLATAFORMA,
+                rede_social_id=rs,
+                conta=d.get("conta") or "Direct",
+                integracao="Direct do Instagram (só leitura)",
+                aguardando=0,
+                vencidas=0,
+                etiquetas=dict.fromkeys(ETIQUETAS, 0),
+            )
+            saida.append(alvo)
+        alvo.aguardando += int(d.get("aguardando") or 0)
+        alvo.vencidas += int(d.get("vencidas") or 0)
+        alvo.direct_aguardando += int(d.get("aguardando") or 0)
+        alvo.direct_total += int(d.get("total") or 0)
+        alvo.etiquetas = {
+            **alvo.etiquetas,
+            ETIQUETA_MIDIA: alvo.etiquetas.get(ETIQUETA_MIDIA, 0) + int(d.get("abertas") or 0),
+        }
+    return saida
 
 
 @router.get("/resumo", response_model=ResumoOut)
@@ -1089,49 +1309,64 @@ async def resumo(
         for p, a, v, x, r, n, *etq in (await session.execute(q_plat)).all()
     }
     canais = await _canais(session, scope)
-    # As do robô (Temu/AliExpress) só quando existem: loja com canal ou conversa.
-    com_robo = {c.plataforma for c in canais} | set(por_plataforma)
+    # As do robô (Temu/AliExpress) e as externas (sites, redes — 02/10/2026)
+    # só quando existem: loja com canal ou conversa. O Direct do Instagram
+    # (adaptador só leitura) só para quem vê todas as equipes.
+    existem = {c.plataforma for c in canais} | set(por_plataforma)
+    # Uma consulta só para o Direct: por conta (a barra) e o total (a
+    # plataforma) é a soma das contas.
+    contas_ig = await instagram.contar_por_conta(session) if scope.unrestricted else []
+    ig = instagram.somar(contas_ig) if scope.unrestricted else None
+    if ig and ig["total"]:
+        existem.add(instagram.PLATAFORMA)
     plataformas = [
         por_plataforma.get(p)
         or PlataformaResumoOut(plataforma=p, aguardando=0, vencendo=0, vencidas=0)
-        for p in (*PLATAFORMAS, *(p for p in PLATAFORMAS_ROBO if p in com_robo))
+        for p in (
+            *PLATAFORMAS,
+            *(p for p in (*PLATAFORMAS_ROBO, *PLATAFORMAS_EXTERNAS) if p in existem),
+        )
     ]
-    if scope.unrestricted:
-        ig = await instagram.contar(session)
-        if ig["total"]:
-            plataformas.append(
-                PlataformaResumoOut(
-                    plataforma=instagram.PLATAFORMA,
-                    aguardando=ig["aguardando"],
-                    vencendo=ig["vencendo"],
-                    vencidas=ig["vencidas"],
-                )
-            )
+    if ig and ig["total"]:
+        # O Direct soma com os comentários do Instagram (a caixa) numa linha
+        # só da plataforma; as DMs não fechadas contam na etiqueta MÍDIA.
+        p_ig = next(p for p in plataformas if p.plataforma == instagram.PLATAFORMA)
+        p_ig.aguardando += ig["aguardando"]
+        p_ig.vencendo += ig["vencendo"]
+        p_ig.vencidas += ig["vencidas"]
+        p_ig.etiquetas = {
+            **p_ig.etiquetas,
+            ETIQUETA_MIDIA: p_ig.etiquetas.get(ETIQUETA_MIDIA, 0) + ig["abertas"],
+        }
 
-    # A loja do robô (Temu/AliExpress) não tem integração: ela é o CANAL. Sem
-    # esta chave, as quatro lojas Temu virariam uma só linha na barra.
+    # A loja SEM integração é o CANAL: a do robô (Temu/AliExpress) e a
+    # externa (site, conta de rede). Sem esta chave, as quatro lojas Temu
+    # virariam uma só linha na barra. A conversa sem integração e sem canal
+    # (Amazon sem conta) fica com a chave nula, como sempre.
     # Rótulo: o GROUP BY vai pelo nome (a expressão repetida teria outros
     # parâmetros e o Postgres não a reconheceria como a mesma).
-    canal_robo = case(
+    canal_sem_integracao = case(
         (
             and_(
                 AtendimentoConversa.integration_id.is_(None),
-                AtendimentoConversa.plataforma.in_(PLATAFORMAS_ROBO),
+                AtendimentoConversa.canal_id.is_not(None),
             ),
             AtendimentoConversa.canal_id,
         ),
         else_=None,
-    ).label("canal_robo")
+    ).label("canal_sem_integracao")
     q_loja = select(
         AtendimentoConversa.integration_id,
         AtendimentoConversa.plataforma,
-        canal_robo,
+        canal_sem_integracao,
         func.max(AtendimentoConversa.conta),
         func.count().filter(aguardando),
         func.count().filter(vencidas),
         nao_lidas,
         *por_etiqueta,
-    ).group_by(AtendimentoConversa.integration_id, AtendimentoConversa.plataforma, canal_robo)
+    ).group_by(
+        AtendimentoConversa.integration_id, AtendimentoConversa.plataforma, canal_sem_integracao
+    )
     if cond is not None:
         q_loja = q_loja.where(cond)
     lojas: dict[tuple[UUID | None, str, UUID | None], LojaResumoOut] = {
@@ -1149,7 +1384,7 @@ async def resumo(
     }
     canais_da_loja: dict[tuple[UUID | None, str, UUID | None], list[CanalOut]] = {}
     for c in canais:
-        chave_canal = c.id if c.robo_perfil_id else None
+        chave_canal = c.id if c.integration_id is None else None
         canais_da_loja.setdefault((c.integration_id, c.plataforma, chave_canal), []).append(c)
     for chave, da_loja in canais_da_loja.items():
         # Loja conectada sem conversa ainda também aparece na barra — com zero.
@@ -1166,6 +1401,8 @@ async def resumo(
         else:
             loja.conta = da_loja[0].conta or loja.conta
         loja.integracao = da_loja[0].integracao
+        loja.externo_ref = da_loja[0].externo_ref
+        loja.rede_social_id = da_loja[0].rede_social_id
         loja.status_canal, loja.status_motivo = _saude_da_loja(da_loja)
     # O nome da LOJA (P2): o dos canais já veio de `lojas.nome_da_loja`; a
     # loja que só tem conversa (canal apagado) pede o dela aqui — a
@@ -1179,13 +1416,16 @@ async def resumo(
     for lj in lojas.values():
         if lj.integration_id in sem_canal:
             lj.conta = nomes.get(lj.integration_id) or lj.conta
+    barra = _juntar_externas(list(lojas.values()), canais_da_loja)
+    if scope.unrestricted:
+        barra = _com_direct(barra, contas_ig)
     s = get_settings()
     return ResumoOut(
         plataformas=plataformas,
         a_conferir=sum(p.a_conferir for p in plataformas),
         etiquetas={e: sum(p.etiquetas.get(e, 0) for p in plataformas) for e in ETIQUETAS},
         lojas=sorted(
-            lojas.values(),
+            barra,
             key=lambda lj: (
                 lj.plataforma,
                 (lj.conta or "").lower(),
@@ -1223,6 +1463,9 @@ async def _listar_marketplace(
     limite: int,
     canal_id: UUID | None = None,
     etiqueta: str | None = None,
+    externo_ref: str | None = None,
+    rede_social_id: UUID | None = None,
+    perguntas_primeiro: bool = False,
 ) -> list[dict[str, Any]]:
     agora = datetime.now(UTC)
     tem = _pendente_existe()
@@ -1245,6 +1488,23 @@ async def _listar_marketplace(
     if canal_id:
         # Uma loja do robô (Temu/AliExpress): sem integração, ela é o canal.
         consulta = consulta.where(AtendimentoConversa.canal_id == canal_id)
+    if externo_ref:
+        # Um site (todas as caixas dele): a origem externa do canal.
+        consulta = consulta.where(
+            AtendimentoConversa.canal_id.in_(
+                select(AtendimentoCanal.id).where(AtendimentoCanal.externo_ref == externo_ref)
+            )
+        )
+    if rede_social_id:
+        # Uma conta de rede social: os comentários dela (o Direct vem do
+        # adaptador, com o mesmo filtro).
+        consulta = consulta.where(
+            AtendimentoConversa.canal_id.in_(
+                select(AtendimentoCanal.id).where(
+                    AtendimentoCanal.rede_social_id == rede_social_id
+                )
+            )
+        )
     if canal:
         consulta = consulta.where(AtendimentoConversa.canal == canal)
     aguardando = AtendimentoConversa.aguardando_resposta.is_(True)
@@ -1306,29 +1566,51 @@ async def _listar_marketplace(
             )
         )
     if filtro in FILTROS_PELO_PRAZO:
-        # Prazo mais curto primeiro, sem prazo no fim; o id (como texto, a
-        # mesma ordem das DMs do Instagram) desempata e é o cursor.
-        momento, ident, sem_prazo = _cursor(antes_de, pelo_prazo=True)
+        # O comentário comum das redes no fim (RF7: a pergunta passa à
+        # frente); dentro de cada grupo, prazo mais curto primeiro, sem prazo
+        # no fim; o id (como texto, a mesma ordem das DMs do Instagram)
+        # desempata e é o cursor.
+        momento, ident, sem_prazo, grupo = _cursor(antes_de, pelo_prazo=True)
         id_txt = cast(AtendimentoConversa.id, String)
-        if sem_prazo:
-            consulta = consulta.where(prazo.is_(None), id_txt > ident)
-        elif ident is not None:
-            consulta = consulta.where(
-                or_(
+        comum = _comentario_comum()
+        if ident is not None:
+            if sem_prazo:
+                depois = and_(prazo.is_(None), id_txt > ident)
+            else:
+                depois = or_(
                     prazo > momento,
                     and_(prazo == momento, id_txt > ident),
                     prazo.is_(None),
                 )
-            )
-        consulta = consulta.order_by(prazo.asc().nulls_last(), id_txt.asc())
-    else:
-        momento, _ident, _sem = _cursor(antes_de, pelo_prazo=False)
-        if momento is not None:
-            consulta = consulta.where(AtendimentoConversa.ultima_mensagem_em < momento)
+            if grupo == 0:
+                consulta = consulta.where(or_(and_(not_(comum), depois), comum))
+            else:
+                consulta = consulta.where(comum, depois)
         consulta = consulta.order_by(
-            AtendimentoConversa.ultima_mensagem_em.desc().nulls_last(),
-            AtendimentoConversa.id.desc(),
+            case((comum, 1), else_=0), prazo.asc().nulls_last(), id_txt.asc()
         )
+    else:
+        momento, _ident, _sem, grupo = _cursor(antes_de, pelo_prazo=False)
+        ultima = AtendimentoConversa.ultima_mensagem_em
+        if perguntas_primeiro:
+            # Mídia (RF7): a pergunta pendente primeiro; depois, pela recência.
+            pergunta = _pergunta_pendente()
+            if momento is not None and grupo == 0:
+                consulta = consulta.where(or_(and_(pergunta, ultima < momento), not_(pergunta)))
+            elif momento is not None:
+                consulta = consulta.where(not_(pergunta), ultima < momento)
+            consulta = consulta.order_by(
+                case((pergunta, 0), else_=1),
+                ultima.desc().nulls_last(),
+                AtendimentoConversa.id.desc(),
+            )
+        else:
+            if momento is not None:
+                consulta = consulta.where(ultima < momento)
+            consulta = consulta.order_by(
+                ultima.desc().nulls_last(),
+                AtendimentoConversa.id.desc(),
+            )
     return [
         _resumo_dict(
             c,
@@ -1357,11 +1639,16 @@ async def listar_conversas(
     limite: Annotated[int, Query(ge=1, le=200)] = 50,
     canal_id: Annotated[UUID | None, Query()] = None,
     etiqueta: Annotated[str | None, Query(max_length=24)] = None,
+    externo_ref: Annotated[str | None, Query(max_length=191)] = None,
+    rede_social_id: Annotated[UUID | None, Query()] = None,
 ) -> ListaConversasOut:
     """A fila, mais recente primeiro; página seguinte com `antes_de=<proximo>`.
 
     `canal_id` filtra uma loja do robô do Mac mini (Temu/AliExpress), que não
     tem integração (o `canal_id` vem da barra de lojas do /resumo).
+    `externo_ref` filtra um site ("site:charlots" — todas as caixas dele) e
+    `rede_social_id` uma conta de rede social: os comentários E o Direct da
+    conta (02/10/2026; os dois vêm da barra de lojas do /resumo).
     `etiqueta` filtra pela etiqueta (status atual), junto de qualquer filtro;
     os filtros `pre_venda`/`pos_venda`/`reclamacao`/`devolucao`/
     `ag_cancelamento`/`avaliacao` são a mesma coisa vinda do menu Filtrar.
@@ -1373,19 +1660,25 @@ async def listar_conversas(
     canal = (canal or "").strip().lower() or None
     filtro = (filtro or "todas").strip().lower()
     etiqueta = (etiqueta or "").strip().lower() or None
-    if plataforma and plataforma not in (*PLATAFORMAS_CAIXA, instagram.PLATAFORMA):
+    externo_ref = (externo_ref or "").strip() or None
+    if plataforma and plataforma not in PLATAFORMAS_LISTA:
         raise HTTPException(422, detail={"code": "plataforma_invalida"})
+    if externo_ref and canais_externos.partes(externo_ref) is None:
+        raise HTTPException(422, detail={"code": "externo_ref_invalido"})
     if filtro not in FILTROS:
         raise HTTPException(422, detail={"code": "filtro_invalido"})
     if etiqueta and etiqueta not in ETIQUETAS:
         raise HTTPException(422, detail={"code": "etiqueta_invalida"})
     pelo_prazo = filtro in FILTROS_PELO_PRAZO
+    perguntas_primeiro = filtro in FILTROS_PERGUNTA_PRIMEIRO
     # Cursor inválido (ou da outra ordem) → 422 antes de ir ao banco.
-    momento, ident, sem_prazo = _cursor(antes_de, pelo_prazo=pelo_prazo)
+    momento, ident, sem_prazo, grupo = _cursor(antes_de, pelo_prazo=pelo_prazo)
     scope = await resolve_team_scope(session, user)
 
     itens: list[dict[str, Any]] = []
-    if plataforma != instagram.PLATAFORMA:
+    # A caixa (marketplaces, sites e os COMENTÁRIOS das redes) — menos quando
+    # o pedido é só o Direct do Instagram (`canal=dm`).
+    if not (plataforma == instagram.PLATAFORMA and canal == instagram.CANAL):
         itens += await _listar_marketplace(
             session,
             scope=scope,
@@ -1399,32 +1692,47 @@ async def listar_conversas(
             limite=limite + 1,
             canal_id=canal_id,
             etiqueta=etiqueta,
+            externo_ref=externo_ref,
+            rede_social_id=rede_social_id,
+            perguntas_primeiro=perguntas_primeiro,
         )
     quer_instagram = (
         plataforma in (None, instagram.PLATAFORMA)
         and integration_id is None
         and canal_id is None
+        and externo_ref is None
         and canal in (None, instagram.CANAL)
         and scope.unrestricted
-        # DM do Instagram não tem etiqueta (nem pedido).
-        and etiqueta is None
-        and filtro not in ETIQUETAS
+        # O DM do Instagram não tem etiqueta gravada nem pedido: só entra na
+        # MÍDIA (RF7: a mensagem privada das redes é Mídia).
+        and etiqueta in (None, ETIQUETA_MIDIA)
+        and (filtro not in ETIQUETAS or filtro == ETIQUETA_MIDIA)
     )
+    # No filtro Mídia, o DM vale como "todas" (as não silenciadas).
+    filtro_dm = "todas" if filtro == ETIQUETA_MIDIA else filtro
     if quer_instagram and pelo_prazo:
         # O Instagram pagina por recência: vêm as DMs esperando (até o teto)
         # e o corte do cursor de prazo é feito aqui.
         dms = await instagram.listar_conversas(
-            session, limite=MAX_INSTAGRAM_PELO_PRAZO, q=q, filtro=filtro, user_id=user.id
+            session,
+            limite=MAX_INSTAGRAM_PELO_PRAZO,
+            q=q,
+            filtro=filtro_dm,
+            user_id=user.id,
+            rede_social_id=rede_social_id,
         )
-        itens += [i for i in dms if _depois_do_cursor(i, momento, ident, sem_prazo)]
+        itens += [i for i in dms if _depois_do_cursor(i, momento, ident, sem_prazo, grupo)]
     elif quer_instagram:
         itens += await instagram.listar_conversas(
             session,
-            antes_de=momento,
+            # No Mídia o Direct é do grupo de baixo (nunca é pergunta): com a
+            # página ainda nas perguntas, ele vem do começo.
+            antes_de=None if perguntas_primeiro and grupo == 0 else momento,
             limite=limite + 1,
             q=q,
-            filtro=filtro,
+            filtro=filtro_dm,
             user_id=user.id,
+            rede_social_id=rede_social_id,
         )
     if pelo_prazo:
         itens.sort(key=_chave_do_prazo)
@@ -1433,35 +1741,57 @@ async def listar_conversas(
     else:
         piso = datetime.min.replace(tzinfo=UTC)
         itens.sort(key=lambda i: i["ultima_mensagem_em"] or piso, reverse=True)
-        pagina, ultima = _paginar(itens, limite)
-        proximo = ultima.isoformat() if ultima is not None else None
+        chave = None
+        if perguntas_primeiro:
+            # A pergunta pendente na frente (sort estável: a recência fica).
+            itens.sort(key=_grupo_da_pergunta)
+            chave = _chave_da_pergunta
+        pagina, ultima = _paginar(itens, limite, chave=chave)
+        proximo = None
+        if ultima is not None and ultima["ultima_mensagem_em"] is not None:
+            proximo = ultima["ultima_mensagem_em"].isoformat()
+            if perguntas_primeiro and _grupo_da_pergunta(ultima) == 0:
+                proximo = f"{_CURSOR_PERGUNTA}{proximo}"
     # Só as da página: no máximo uma consulta de nome por loja que aparece.
     await _com_nome_da_loja(session, pagina)
     await _com_estrelas_da_avaliacao(session, pagina)
     return ListaConversasOut(itens=pagina, proximo=proximo)
 
 
+def _grupo_da_pergunta(item: dict[str, Any]) -> int:
+    """No Mídia: 0 = pergunta pendente (vem primeiro), 1 = o resto."""
+    return 0 if item.get("eh_pergunta") else 1
+
+
+def _chave_da_pergunta(item: dict[str, Any]) -> tuple:
+    """O que é EMPATE no corte da página do Mídia: o mesmo grupo e o mesmo horário."""
+    return (_grupo_da_pergunta(item), item["ultima_mensagem_em"])
+
+
 def _paginar(
-    itens: list[dict[str, Any]], limite: int
-) -> tuple[list[dict[str, Any]], datetime | None]:
-    """Corta a página sem partir um EMPATE de horário ao meio.
+    itens: list[dict[str, Any]], limite: int, *, chave=None
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+    """Corta a página sem partir um EMPATE de horário ao meio → (página, último item).
 
     O relógio da Shopee é em segundos: duas conversas com a última mensagem
     no mesmo segundo são comuns. Se o corte caísse no meio delas, a próxima
     página (`< antes_de`) pularia a segunda — conversa sumindo da fila sem
     erro nenhum. Então as empatadas com a primeira que ficou de fora vão
     TODAS para a página seguinte (salvo se a página inteira for um empate só).
+    `chave` diz o que é empate (padrão: o horário; no Mídia, grupo + horário).
     """
+    chave = chave or (lambda i: i["ultima_mensagem_em"])
     pagina = itens[:limite]
     if len(itens) <= limite or not pagina:
         return pagina, None
-    corte = itens[limite]["ultima_mensagem_em"]
+    corte = chave(itens[limite])
+    sem_horario = itens[limite]["ultima_mensagem_em"] is None
     aparada = list(pagina)
-    while len(aparada) > 1 and corte is not None and aparada[-1]["ultima_mensagem_em"] == corte:
+    while len(aparada) > 1 and not sem_horario and chave(aparada[-1]) == corte:
         aparada.pop()
-    if aparada[-1]["ultima_mensagem_em"] != corte:
+    if chave(aparada[-1]) != corte:
         pagina = aparada
-    return pagina, pagina[-1]["ultima_mensagem_em"]
+    return pagina, pagina[-1]
 
 
 async def _contexto(session: AsyncSession, conversa: AtendimentoConversa) -> dict[str, Any]:
@@ -1863,6 +2193,17 @@ async def pedir_rascunho(
         )
     scope = await resolve_team_scope(session, user)
     c = await _conversa_ou_404(session, conversa_id, scope)
+    if c.plataforma in PLATAFORMAS_EXTERNAS:
+        # Carrinho do site e comentário das redes (02/10/2026): o prompt e o
+        # validador da IA são de marketplace — nada de gastar o provedor com
+        # o "carrinho parado" nem com resposta PÚBLICA de rede social.
+        raise HTTPException(
+            409,
+            detail={
+                "code": "canal_sem_ia",
+                "detail": "A IA não sugere resposta para carrinho de site nem comentário de rede.",
+            },
+        )
     from app.services.atendimento import ia as ia_svc
 
     r = await ia_svc.gerar_rascunho(session, c, forcar=True)
@@ -2473,6 +2814,20 @@ async def editar_canal(
     await _travar_ou_409(session, canal, "canal_ocupado")
     eh_admin = user.role == UserRole.ADMIN
     campos = body.model_fields_set
+    if canais_externos.eh_externo(canal) and (
+        ("modo" in campos and not canais_externos.modo_permitido(canal.plataforma, body.modo))
+        or ("auto_categorias" in campos and body.auto_categorias)
+    ):
+        # Site (sem por onde responder) e rede social (a resposta é pela tela,
+        # sempre por pessoa): nem copiloto nem automático.
+        raise HTTPException(
+            422,
+            detail={
+                "code": "modo_invalido_externo",
+                "detail": "Site: só observar. Rede social: observar ou humano "
+                "(a resposta é sempre de uma pessoa).",
+            },
+        )
     if canal.plataforma in PLATAFORMAS_ROBO and (
         ("modo" in campos and not robo.modo_permitido(canal.plataforma, body.modo))
         or ("auto_categorias" in campos and body.auto_categorias)
@@ -2490,6 +2845,17 @@ async def editar_canal(
     if "modo" in campos and body.modo is not None and body.modo != canal.modo:
         if body.modo == MODO_AUTO and not eh_admin:
             raise HTTPException(403, detail={"code": "so_admin"})
+        if canais_externos.eh_externo(canal) and body.modo in MODOS_QUE_ENVIAM and not eh_admin:
+            # Rede social em `humano` = responder e ocultar EM PÚBLICO como a
+            # marca (com o envio ligado no servidor): só admin liga, como o
+            # automático. Voltar para observar qualquer um pode.
+            raise HTTPException(
+                403,
+                detail={
+                    "code": "so_admin",
+                    "detail": "Só admin libera responder em público pela conta da marca.",
+                },
+            )
         canal.modo = body.modo
     if (
         "auto_categorias" in campos

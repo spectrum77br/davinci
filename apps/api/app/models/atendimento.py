@@ -69,6 +69,18 @@ Etiqueta = status atual (01/10/2026, migration 0353): a conversa ganha
                                       PLATAFORMA (ML, Shopee, TikTok), só
                                       leitura, ligada à conversa do pedido.
 
+Carrinho e redes (02/10/2026, migration 0362): o canal ganha a origem
+EXTERNA (`externo_ref`, `rede_social_id`) e entram três tabelas —
+
+  `atendimento_carrinhos`   — o carrinho abandonado do lojista nos sites
+                              (Charlots, Uranyx), por episódio, até o desfecho
+                              (recuperado / não recuperado / resolvido).
+  `atendimento_publicacoes` — a mídia do Instagram/Facebook (própria ou a que
+                              marcou a marca) por trás das conversas de
+                              comentário: o cartão "Detalhes da publicação".
+  `atendimento_comentarios` — cada comentário lido, ligado à conversa da
+                              pessoa naquela publicação.
+
 Os valores válidos das colunas de estado estão em
 `services/atendimento/constantes.py` — um lugar só, lido pelo model, pelo
 sync, pela IA e pela tela.
@@ -110,6 +122,12 @@ class AtendimentoCanal(Base, TimestampMixin):
     robô do Mac mini (um perfil do AdsPower por loja) e o canal é
     (`robo_perfil_id` × canal), SEM integração. O cron do sync nunca o vê
     (junta com `integrations`); quem o escreve é `services/atendimento/robo.py`.
+
+    Sites e redes (02/10/2026, migration 0362) também não têm integração nem
+    robô: o canal EXTERNO é identificado por `externo_ref` ("site:charlots",
+    "rede:instagram:<ig_user_id>", "rede:facebook:<page_id>") — ver
+    `services/atendimento/canais_externos.py`. O cron do sync também nunca o
+    vê; quem o escreve é o leitor de cada um (`carrinhos.py`, `redes.py`).
     """
 
     __tablename__ = "atendimento_canais"
@@ -117,10 +135,15 @@ class AtendimentoCanal(Base, TimestampMixin):
         UniqueConstraint("integration_id", "canal"),
         # Um canal por perfil do AdsPower (loja lida pelo robô do Mac mini).
         UniqueConstraint("robo_perfil_id"),
-        # Todo canal tem por onde ler: a integração (API da loja) OU o robô.
+        # Um canal por (origem externa, caixa): o site pode ganhar outra caixa
+        # (o SAC) com a mesma referência.
+        UniqueConstraint("externo_ref", "canal"),
+        # Todo canal tem por onde ler: a integração (API da loja), o robô OU
+        # a origem externa (site, rede social).
         CheckConstraint(
-            "integration_id IS NOT NULL OR robo_perfil_id IS NOT NULL",
-            name="integracao_ou_robo",
+            "integration_id IS NOT NULL OR robo_perfil_id IS NOT NULL"
+            " OR externo_ref IS NOT NULL",
+            name="tem_origem",
         ),
     )
 
@@ -139,6 +162,18 @@ class AtendimentoCanal(Base, TimestampMixin):
     # aberto no chat da loja. É a identidade da loja do robô: o nome da loja e
     # o último sinal ficam em `cursor["robo"]` (services/atendimento/robo.py).
     robo_perfil_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # A origem EXTERNA (0362): "site:<site>" | "rede:<plataforma>:<id da conta
+    # na rede>". O nome que a tela mostra fica em `cursor["externo"]["nome"]`.
+    externo_ref: Mapped[str | None] = mapped_column(String(191), nullable=True)
+    # A conta do cadastro Redes Sociais por trás do canal de rede (0362): é
+    # por ela que a barra de lojas junta o Direct (`dm_conversas.
+    # rede_social_id`) e os comentários da MESMA conta numa linha só. SET
+    # NULL: apagar a conta do cadastro não apaga a caixa nem o histórico.
+    rede_social_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("redes_sociais.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     plataforma: Mapped[str] = mapped_column(String(16), nullable=False)
     canal: Mapped[str] = mapped_column(String(16), nullable=False)
     # Toda loja nasce em `observar` (só lê). Enquanto o Duoke estiver ligado,
@@ -843,6 +878,240 @@ class AtendimentoAvaliacaoLoja(Base):
     # CONFLICT) não dispara o `onupdate` do ORM: quem grava põe `now()`.
     atualizado_em: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+
+class AtendimentoCarrinho(Base, TimestampMixin):
+    """Um carrinho ABANDONADO de lojista num site (RF9, 02/10/2026, migration 0362).
+
+    Charlots e Uranyx (PHP próprio) são atacado: o carrinho é do lojista
+    logado (`adm_carrinho` do site) e termina "pelo WhatsApp". O DaVinci lê,
+    servidor a servidor, os carrinhos parados há mais de
+    `atendimento_carrinho_horas` e os EVENTOS de finalização
+    (`adm_carrinho_eventos` do site) — quem lê e decide é
+    `services/atendimento/carrinhos.py`. Uma linha por EPISÓDIO (o carrinho
+    que parou, até o desfecho): o mesmo lojista pode ter vários ao longo do
+    tempo, mas só UM aberto por site (índice único parcial).
+
+      aberto          — parado, sem desfecho: etiqueta CARRINHO na conversa;
+      recuperado      — o lojista finalizou pelo WhatsApp depois de parar
+                        ("virou pedido": a etiqueta volta para PÓS-VENDA);
+      nao_recuperado  — 7 dias sem finalizar, ou o carrinho foi esvaziado;
+      resolvido       — alguém marcou como resolvido na tela.
+
+    `lojista` e `itens` são o RETRATO da última leitura (o site é a verdade);
+    o estoque mostrado na tela é o ATUAL do DaVinci, lido na hora pelo SKU
+    (`painel.saldo_do_item`), nunca guardado aqui.
+    """
+
+    __tablename__ = "atendimento_carrinhos"
+    __table_args__ = (
+        # Só um carrinho ABERTO por lojista por site: a leitura de 30 em 30
+        # minutos atualiza o mesmo, nunca abre outro em cima.
+        Index(
+            "uq_atendimento_carrinhos_aberto",
+            "site",
+            "lojista_id",
+            unique=True,
+            postgresql_where=text("situacao = 'aberto'"),
+        ),
+        # "Os carrinhos deste lojista" (o histórico no painel).
+        Index("ix_atendimento_carrinhos_site_lojista_id", "site", "lojista_id"),
+    )
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    # `constantes.SITES` (o nome do token em `sites_estoque_tokens`).
+    site: Mapped[str] = mapped_column(String(32), nullable=False)
+    # O canal `carrinho` do site. SET NULL: o carrinho fica sem a caixa.
+    canal_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("atendimento_canais.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    # A conversa do lojista no canal (`externo_id = "lojista:<id>"`).
+    conversa_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("atendimento_conversas.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    # `adm_clientes.id` do site, em texto.
+    lojista_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    # Retrato do lojista: {nome, empresa, email, telefone, cidade, estado,
+    # status, cnpj?}. Dado pessoal — esta tabela fica FORA do Histórico.
+    lojista: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+    # Retrato dos itens (o formato do contrato com o site: produto_id,
+    # titulo, cor, cor_rotulo, quantidade, skus, url, imagem, preco).
+    itens: Mapped[list] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
+    quantidade_total: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    # O último mexido no carrinho, relógio do SITE (MAX de
+    # `adm_carrinho.atualizado_em`, em UTC).
+    parado_desde: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # Quando o DaVinci viu o carrinho parado pela primeira vez (o prazo de 7
+    # dias para "não recuperado" conta daqui).
+    detectado_em: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    # A última leitura em que o carrinho ainda estava no site.
+    visto_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # aberto | recuperado | nao_recuperado | resolvido (constantes.SITUACOES_CARRINHO)
+    situacao: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="aberto", server_default=text("'aberto'")
+    )
+    encerrado_em: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # finalizado_whatsapp | esvaziado | prazo | marcado_resolvido
+    motivo_fim: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # A hora da finalização pelo WhatsApp (relógio do site).
+    recuperado_em: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # "Marcar como resolvido": quem e quando.
+    tratado_por: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    tratado_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # O resto: o evento do site que fechou (`evento_id`, `itens_enviados`),
+    # o motivo escrito por quem resolveu. Material da tela e de depuração.
+    dados: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+
+
+class AtendimentoPublicacao(Base, TimestampMixin):
+    """Uma publicação de rede social lida pelo atendimento (RF7, 02/10/2026, migration 0362).
+
+    A mídia da PRÓPRIA conta (Instagram/Página do Facebook), cujos
+    comentários viram conversa, ou a de outra pessoa que MARCOU a marca (IG
+    `/tags`: a menção). É o cartão "Detalhes da publicação" da tela:
+    miniatura, legenda, link, curtidas e comentários. Quem lê e escreve é
+    `services/atendimento/redes.py`.
+
+    A URL da miniatura da Graph API EXPIRA (CDN assinada): fica guardada com
+    a hora em que foi lida (`miniatura_lida_em`) e o leitor a renova; a tela
+    não confia numa URL velha.
+    """
+
+    __tablename__ = "atendimento_publicacoes"
+    __table_args__ = (
+        # Idempotência da leitura. A conta entra na chave: a mesma mídia de
+        # terceiro pode marcar duas marcas nossas.
+        UniqueConstraint("plataforma", "conta_id", "externo_id"),
+    )
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    # O canal `comentario` da conta. SET NULL: a publicação fica.
+    canal_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("atendimento_canais.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    # instagram | facebook
+    plataforma: Mapped[str] = mapped_column(String(16), nullable=False)
+    # A conta da MARCA que foi lida (`ig_user_id` / `page_id`).
+    conta_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    # O id da mídia na rede (IG media id; FB `<page>_<post>`).
+    externo_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    # propria | mencao (constantes.TIPOS_PUBLICACAO)
+    tipo: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="propria", server_default=text("'propria'")
+    )
+    # O formato cru da rede (IMAGE, VIDEO, CAROUSEL_ALBUM, REELS, STORY…).
+    formato: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    # Quem publicou (na menção, a pessoa que marcou; na própria, o @ da marca).
+    autor_username: Mapped[str | None] = mapped_column(Text, nullable=True)
+    legenda: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # O permalink ("Abrir na rede").
+    link: Mapped[str | None] = mapped_column(Text, nullable=True)
+    miniatura_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    miniatura_lida_em: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # Relógio da rede.
+    publicada_em: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    curtidas: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    comentarios: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    dados: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+
+
+class AtendimentoComentario(Base, TimestampMixin):
+    """Um comentário (ou resposta) numa publicação lida (RF7, 02/10/2026, migration 0362).
+
+    Cada comentário de uma PESSOA entra na conversa `comentario` dela naquela
+    publicação (`conversa_id`) e vira mensagem lá (`externo_id` = o id do
+    comentário). O comentário da PRÓPRIA marca (`da_marca`) é a resposta —
+    entra como mensagem da loja na conversa de quem foi respondido, nunca
+    como conversa nova. Esta tabela é o que o cartão da publicação lista
+    ("os outros comentários, com o desta conversa em destaque") e guarda o
+    que a mensagem não tem: o pai, o oculto, a pergunta.
+    """
+
+    __tablename__ = "atendimento_comentarios"
+    __table_args__ = (
+        UniqueConstraint("plataforma", "externo_id"),
+        # Os comentários de UMA publicação, em ordem (o cartão).
+        Index("ix_atendimento_comentarios_publicacao_id_criado_em", "publicacao_id", "criado_em"),
+    )
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    # CASCADE: comentário sem a publicação não tem contexto. Nome à mão: pela
+    # convenção passaria dos 63 caracteres do Postgres.
+    publicacao_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey(
+            "atendimento_publicacoes.id",
+            ondelete="CASCADE",
+            name="fk_atendimento_comentarios_publicacao",
+        ),
+        nullable=False,
+    )
+    # A conversa (pessoa × publicação). SET NULL: a conversa some, o
+    # comentário fica no cartão.
+    conversa_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("atendimento_conversas.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    plataforma: Mapped[str] = mapped_column(String(16), nullable=False)
+    # O id do comentário na rede.
+    externo_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    # Resposta a outro comentário: o id do pai (o fio).
+    pai_externo_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # A pessoa na rede (IG `from.id`/`username`; FB `from.id`/`name`).
+    autor_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    autor_username: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Comentário da própria conta da marca = RESPOSTA, não conversa nova.
+    da_marca: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    texto: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Relógio da rede.
+    criado_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    curtidas: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Oculto na rede (pela marca, ou pelo filtro da própria rede).
+    oculto: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    # `constantes.e_pergunta`: só ordena a fila (RF7).
+    eh_pergunta: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    dados: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
     )
 
 

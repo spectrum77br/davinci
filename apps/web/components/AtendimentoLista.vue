@@ -6,6 +6,11 @@ export type FiltrosLista = {
   canal: string
   filtro: string
   q: string
+  // Linhas da barra de lojas SEM integração (02/10/2026): o site
+  // ("site:charlots" — todas as caixas dele) e a conta de rede social (o
+  // Direct e os comentários da mesma conta). Opcionais: '' = sem filtro.
+  externo_ref?: string
+  rede_social_id?: string
 }
 type OpcaoFiltro = { value: string; label: string; hint: string }
 // Como o Duoke (01/10/2026): duas abas em cima — "Todas" (o All, onde a lista
@@ -35,11 +40,15 @@ export const FILTROS_MENU: OpcaoFiltro[] = [
   // resposta passada a carência (1 h na nota 1–3, 24 h na 4–5); Mercado Livre
   // com nota 1–3 ainda não tratada. O selo da linha leva as estrelas.
   { value: 'avaliacao', label: 'Avaliação', hint: 'avaliação de venda sem resposta da loja (Shopee) ou com nota 1–3 sem tratar (Mercado Livre)' },
+  // Carrinho abandonado dos sites (RF9, 02/10/2026).
+  { value: 'carrinho', label: 'Carrinho', hint: 'carrinho abandonado do lojista no site (Charlots, Uranyx), ainda sem finalizar' },
   { value: 'pre_venda', label: 'Pré-venda', hint: 'perguntas e conversas sem pedido ligado' },
   { value: 'pos_venda', label: 'Pós-venda', hint: 'conversa de um pedido sem nada aberto (sem reclamação, devolução nem Ag. cancelamento)' },
+  // Mídia das redes sociais (RF7, 02/10/2026): comentário, menção e Direct.
+  { value: 'midia', label: 'Mídia', hint: 'comentários, menções e Direct das redes sociais das marcas' },
 ]
 // Os filtros do menu que são ETIQUETA (contam pelo /resumo `etiquetas`).
-export const FILTROS_ETIQUETA = new Set(['reclamacao', 'ag_cancelamento', 'devolucao', 'avaliacao', 'pre_venda', 'pos_venda'])
+export const FILTROS_ETIQUETA = new Set(['reclamacao', 'ag_cancelamento', 'devolucao', 'avaliacao', 'carrinho', 'midia', 'pre_venda', 'pos_venda'])
 export const FILTROS_RAPIDOS: OpcaoFiltro[] = [...ABAS_LISTA, ...FILTROS_MENU]
 </script>
 
@@ -95,6 +104,14 @@ function mudar<K extends keyof FiltrosLista>(k: K, v: FiltrosLista[K]) {
   if (k === 'plataforma') {
     novo.integration_id = ''
     novo.canal = ''
+    novo.externo_ref = ''
+    novo.rede_social_id = ''
+  }
+  // Escolheu a loja no seletor (só as com integração): sai a linha sem
+  // integração (site, conta de rede) que estivesse escolhida na barra.
+  if (k === 'integration_id') {
+    novo.externo_ref = ''
+    novo.rede_social_id = ''
   }
   filtros.value = novo
 }
@@ -127,6 +144,22 @@ const contagem = computed((): Record<string, number | null> => {
   const f = filtros.value
   // "A conferir": o total vem no topo do resumo; por loja/plataforma só se o
   // backend separar — sem o número certo, melhor não mostrar número nenhum.
+  // Linha sem integração escolhida na barra (site, conta de rede): os
+  // números dela, como os da loja.
+  const semIntegracao = f.externo_ref
+    ? r.lojas.find((x) => !x.integration_id && x.externo_ref === f.externo_ref)
+    : f.rede_social_id
+      ? r.lojas.find((x) => !x.integration_id && x.rede_social_id === f.rede_social_id)
+      : null
+  if (semIntegracao) {
+    return {
+      aguardando: semIntegracao.aguardando ?? 0,
+      vencidas: semIntegracao.vencidas ?? 0,
+      vencendo: null,
+      a_conferir: semIntegracao.a_conferir ?? null,
+      ...porEtiqueta([semIntegracao.etiquetas]),
+    }
+  }
   if (f.integration_id) {
     const l = r.lojas.find((x) => x.integration_id === f.integration_id)
     return {
@@ -183,7 +216,9 @@ function aguardandoDaPlataforma(p: string): number | null {
 // levava a uma lista vazia (ou recusada pela API). A Magalu (30/09/2026)
 // também: o backend que ainda não lê a Magalu recusa o filtro
 // (`plataforma_invalida`); o que já lê manda a plataforma no /resumo.
-const SO_COM_RESUMO = new Set(['instagram', 'magalu'])
+// Site e Facebook (02/10/2026: carrinho e comentários) também: só existem
+// quando o leitor deles abriu o canal.
+const SO_COM_RESUMO = new Set(['instagram', 'magalu', 'site', 'facebook'])
 const plataformasDoFiltro = computed(() =>
   PLATAFORMAS_ATENDIMENTO.filter((p) =>
     (!SO_COM_RESUMO.has(p.value) && !viaRobo(p.value))
@@ -192,18 +227,62 @@ const plataformasDoFiltro = computed(() =>
     || ((viaRobo(p.value) || SO_COM_RESUMO.has(p.value)) && !!props.resumo?.lojas.some((l) => l.plataforma === p.value))),
 )
 
+// O seletor de loja (tela estreita, onde a barra some): as lojas com
+// integração e, como na barra (02/10/2026), as linhas sem integração que
+// filtram — o site (`externo_ref`) e a conta de rede (`rede_social_id`: o
+// Direct e os comentários dela). A chave diz qual filtro a opção liga.
+type ResumoLojaLista = NonNullable<Resumo['lojas']>[number]
+function chaveDaLoja(l: Pick<ResumoLojaLista, 'integration_id' | 'externo_ref' | 'rede_social_id'>): string {
+  if (l.integration_id) return `i:${l.integration_id}`
+  if (l.rede_social_id) return `r:${l.rede_social_id}`
+  if (l.externo_ref) return `e:${l.externo_ref}`
+  return ''
+}
 const lojas = computed(() => {
   const ls = props.resumo?.lojas || []
   const f = filtros.value.plataforma
   // Conversa de loja que saiu do DaVinci fica sem integration_id: não dá
-  // para filtrar por ela (aparece em "todas lojas").
+  // para filtrar por ela (aparece em "todas lojas"). A loja do robô sem
+  // integração também não (só a plataforma inteira).
   return ls
-    .filter((l): l is typeof l & { integration_id: string } => !!l.integration_id)
+    .map((l) => ({ ...l, chave: chaveDaLoja(l) }))
+    .filter((l) => !!l.chave)
     .filter((l) => !f || l.plataforma === f)
-    .slice()
     .sort((a, b) => a.plataforma.localeCompare(b.plataforma) || (a.conta || '').localeCompare(b.conta || '', 'pt-BR'))
 })
-const canais = computed(() => canaisDa(filtros.value.plataforma))
+const lojaEscolhida = computed(() => chaveDaLoja({
+  integration_id: filtros.value.integration_id || null,
+  externo_ref: filtros.value.externo_ref || null,
+  rede_social_id: filtros.value.rede_social_id || null,
+}))
+function escolherLoja(chave: string) {
+  const l = lojas.value.find((x) => x.chave === chave)
+  // Loja com integração (ou "todas lojas"): o caminho de sempre.
+  if (!l || l.integration_id) {
+    mudar('integration_id', l?.integration_id || '')
+    return
+  }
+  // Site e conta de rede: como o clique na barra (AtendimentoLojas).
+  filtros.value = {
+    ...filtros.value,
+    plataforma: l.plataforma,
+    integration_id: '',
+    canal: '',
+    externo_ref: l.rede_social_id ? '' : l.externo_ref || '',
+    rede_social_id: l.rede_social_id || '',
+  }
+}
+// O Instagram tem duas caixas na mesma conta quando os comentários estão
+// sendo lidos (02/10/2026): o Direct (só leitura) e os comentários. Aí a
+// lista diz de qual caixa é a conversa, e o seletor de caixa aparece.
+const CAIXAS_INSTAGRAM = [
+  { value: 'dm', label: 'Direct' },
+  { value: 'comentario', label: 'Comentários' },
+]
+const instagramComComentarios = computed(() => !!props.resumo?.canais?.some((c) => c.plataforma === 'instagram' && c.canal === 'comentario'))
+const canais = computed(() =>
+  filtros.value.plataforma === 'instagram' && instagramComComentarios.value ? CAIXAS_INSTAGRAM : canaisDa(filtros.value.plataforma),
+)
 
 // ─── itens ──────────────────────────────────────────────────────────────────
 function titulo(c: ConversaResumo) {
@@ -211,6 +290,8 @@ function titulo(c: ConversaResumo) {
 }
 function loja(c: ConversaResumo) {
   const nome = c.conta || plataformaInfo(c.plataforma).nome
+  // Conta do Instagram com Direct e comentários: "@charlots_br · Direct".
+  if (c.plataforma === 'instagram' && instagramComComentarios.value) return `${nome} · ${canalLabel(c.canal)}`
   // Só onde a loja tem mais de uma caixa o canal ajuda (ML: Pergunta ×
   // Pós-venda; Magalu: Pergunta × Chat × SAC); nos outros é sempre o mesmo.
   return variasCaixas(c.plataforma) ? `${nome} · ${canalLabel(c.canal)}` : nome
@@ -244,7 +325,7 @@ function temEtiqueta(c: ConversaResumo) {
   return !!(faixaDaEtiqueta(c.etiqueta) || secundariasDe(c.etiqueta, c.etiquetas_secundarias).length)
 }
 function temSelos(c: ConversaResumo) {
-  return !!(temEtiqueta(c) || c.envio_a_conferir || c.tem_rascunho || c.atribuido_a || c.ia_pausada || c.somente_leitura || c.sem_resposta_necessaria || c.situacao === 'bloqueada' || c.situacao === 'fechada')
+  return !!(temEtiqueta(c) || c.eh_pergunta || c.envio_a_conferir || c.tem_rascunho || c.atribuido_a || c.ia_pausada || c.somente_leitura || c.sem_resposta_necessaria || c.situacao === 'bloqueada' || c.situacao === 'fechada')
 }
 // Na linha escolhida (fundo azul) os selos coloridos viram translúcidos —
 // âmbar/violeta em cima do azul não se lê.
@@ -325,14 +406,14 @@ function mover(delta: number) {
           </option>
         </select>
         <select
-          :value="filtros.integration_id"
+          :value="lojaEscolhida"
           class="h-8 min-w-0 flex-1 rounded-md border bg-background px-1.5 text-xs lg:hidden"
           aria-label="loja"
-          :disabled="filtros.plataforma === 'instagram'"
-          @change="mudar('integration_id', ($event.target as HTMLSelectElement).value)"
+          :disabled="!!filtros.plataforma && !lojas.length"
+          @change="escolherLoja(($event.target as HTMLSelectElement).value)"
         >
           <option value="">todas lojas</option>
-          <option v-for="l in lojas" :key="l.integration_id" :value="l.integration_id">
+          <option v-for="l in lojas" :key="l.chave" :value="l.chave">
             {{ filtros.plataforma ? '' : `${plataformaInfo(l.plataforma).curto} · ` }}{{ l.conta || 'sem nome' }}<template v-if="l.aguardando"> ({{ l.aguardando }})</template>
           </option>
         </select>
@@ -531,6 +612,17 @@ function mover(delta: number) {
                   :selecionada="c.id === selecionada"
                   esconder-pos-venda
                 />
+                <!-- RF7: comentário com pergunta ainda sem resposta da marca — vem
+                     primeiro no filtro Mídia e em "Falta responder". -->
+                <span
+                  v-if="c.eh_pergunta"
+                  class="inline-flex items-center gap-0.5 rounded px-1.5 py-px font-medium"
+                  :class="selo(c.id === selecionada, 'bg-pink-500/15 text-pink-700 dark:text-pink-300')"
+                  title="pergunta sem resposta da marca: vem primeiro no filtro Mídia e em Falta responder"
+                  data-selo-pergunta
+                >
+                  <span class="font-bold" aria-hidden="true">?</span> pergunta
+                </span>
                 <span
                   v-if="c.envio_a_conferir"
                   class="inline-flex items-center gap-0.5 rounded px-1.5 py-px font-medium"

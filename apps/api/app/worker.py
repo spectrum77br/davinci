@@ -987,6 +987,14 @@ _ATENDIMENTO_ETIQUETAS_MINUTOS = {8, 18, 28, 38, 48, 58}
 # leitura das caixas, do {4,14,…}, do :22 do índice de pedidos e das
 # reclamações/etiquetas acima.
 _ATENDIMENTO_AVALIACOES_MINUTOS = {12, 42}
+# Carrinho dos sites e redes sociais (02/10/2026). O carrinho a cada 30 min,
+# no :14/:44 (só chama os dois sites, na Hostinger); as redes a cada 15 min,
+# no :09/:24/:39/:54 — fora do :00/:30, das reclamações (:06…), das
+# etiquetas (:08…), das avaliações (:12/:42) e do carrinho, e longe do
+# :05/:15… da reconciliação das postagens, do :02 da autopostagem e do :47
+# das métricas, que também falam com a Graph API da Meta.
+_ATENDIMENTO_CARRINHOS_MINUTOS = {14, 44}
+_ATENDIMENTO_REDES_MINUTOS = {9, 24, 39, 54}
 
 
 async def atendimento_reclamacoes(ctx: dict) -> dict | None:
@@ -1066,6 +1074,54 @@ async def atendimento_avaliacoes(ctx: dict) -> dict | None:
         return await _atendimento_avaliacoes.atendimento_avaliacoes(ctx)
     except Exception as e:  # noqa: BLE001 — o serviço já não levanta; cinto
         logger.error("atendimento_avaliacoes_falhou", err=type(e).__name__)
+        return None
+
+
+async def atendimento_carrinhos(ctx: dict) -> dict | None:
+    """A cada 30 min (:14/:44): o carrinho abandonado dos sites Charlots e Uranyx.
+
+    Um GET por site na rota de leitura dele (`/api/davinci/carrinhos`, com o
+    mesmo token do estoque): o carrinho de lojista parado há mais de
+    `atendimento_carrinho_horas` vira a conversa `carrinho` com a etiqueta
+    CARRINHO; a finalização pelo WhatsApp fecha como recuperado, 7 dias sem
+    ela como não recuperado — ver services/atendimento/carrinhos.py. Nada é
+    mandado ao lojista.
+
+    Interruptor próprio: só roda com `atendimento_carrinhos_ativa` E
+    `atendimento_leitura_ativa` (os dois nascem desligados) — o deploy
+    sozinho não liga.
+    """
+    if not (_settings.atendimento_leitura_ativa and _settings.atendimento_carrinhos_ativa):
+        return None
+    from app.services.atendimento import carrinhos as _atendimento_carrinhos
+
+    try:
+        return await _atendimento_carrinhos.atendimento_carrinhos(ctx)
+    except Exception as e:  # noqa: BLE001 — o serviço já não levanta; cinto
+        logger.error("atendimento_carrinhos_falhou", err=type(e).__name__)
+        return None
+
+
+async def atendimento_redes(ctx: dict) -> dict | None:
+    """A cada 15 min (:09/:24/:39/:54): comentários e menções do Instagram e do Facebook.
+
+    Só GET na Graph API, com o token do "DaVinci Publicador": as mídias dos
+    últimos 30 dias da Charlots e da Uranyx, os comentários e as menções viram
+    conversas `comentario` com a etiqueta MÍDIA — ver
+    services/atendimento/redes.py. Sem o escopo de comentários no token, o
+    canal fica `sem_escopo` na aba Lojas. Nada é respondido aqui.
+
+    Interruptor próprio: só roda com `atendimento_redes_ativa` E
+    `atendimento_leitura_ativa` (os dois nascem desligados).
+    """
+    if not (_settings.atendimento_leitura_ativa and _settings.atendimento_redes_ativa):
+        return None
+    from app.services.atendimento import redes as _atendimento_redes
+
+    try:
+        return await _atendimento_redes.atendimento_redes(ctx)
+    except Exception as e:  # noqa: BLE001 — o serviço já não levanta; cinto
+        logger.error("atendimento_redes_falhou", err=type(e).__name__)
         return None
 
 
@@ -4080,6 +4136,9 @@ class WorkerSettings:
         func(atendimento_reclamacoes, timeout=540),
         func(atendimento_etiquetas, timeout=600),
         func(atendimento_avaliacoes, timeout=1500),
+        # Carrinho dos sites e redes sociais (02/10/2026).
+        func(atendimento_carrinhos, timeout=600),
+        func(atendimento_redes, timeout=840),
         # Importação do histórico (28/09/2026): SÓ aqui, nunca em `cron_jobs` —
         # roda uma vez, à mão, depois da aprovação. Uma tentativa só: é
         # retomável, e quem decide rodar de novo é pessoa.
@@ -4379,6 +4438,23 @@ class WorkerSettings:
             minute=_ATENDIMENTO_AVALIACOES_MINUTOS,
             run_at_startup=False,
             timeout=1500,
+        ),
+        # Carrinho dos sites (:14/:44) e redes sociais (:09/:24/:39/:54),
+        # 02/10/2026. Os dois saem na hora com o seu interruptor desligado.
+        # `timeout` = a trava da rodada no Redis (carrinho 9 min < 10; redes
+        # 14 min < 15): o job morto pelo arq não deixa a trava viva por cima
+        # da próxima rodada.
+        cron(
+            atendimento_carrinhos,
+            minute=_ATENDIMENTO_CARRINHOS_MINUTOS,
+            run_at_startup=False,
+            timeout=600,
+        ),
+        cron(
+            atendimento_redes,
+            minute=_ATENDIMENTO_REDES_MINUTOS,
+            run_at_startup=False,
+            timeout=840,
         ),
         # Reconciliação a cada 10 min, no :05 (longe do congestionamento do
         # :00): postagem presa é CONSULTADA, nunca retentada.

@@ -17,10 +17,19 @@
 // alguns minutos, o backend marca a loja como "leitura parada" e ela apaga
 // aqui com o ícone de tomada solta — o Seller Center continua recebendo, só
 // não chega ao DaVinci.
+// Sites e redes (02/10/2026): o grupo "Sites" (Charlots e Uranyx — o
+// carrinho abandonado), e o Instagram/Facebook com UMA linha por conta (antes
+// era uma linha "Direct" juntando 7buyers, Charlots e Uranyx): a linha da
+// conta soma o Direct e os comentários dela. Nenhuma tem integração: a linha
+// filtra a lista pela origem (`externo_ref`) ou pela conta
+// (`rede_social_id`). A conta com Direct esperando fica ACESA mesmo com a
+// caixa de comentários sem permissão (token sem o escopo novo): o Direct
+// continua sendo lido — apagar a linha esconderia a bolinha dele.
 import { ChevronsLeft, ChevronsRight, Inbox, Lock, TriangleAlert, Unplug } from 'lucide-vue-next'
 import type { FiltrosLista } from '~/components/AtendimentoLista.vue'
 import {
   leituraParada,
+  nomeDoGrupo,
   plataformaInfo,
   sellerCenterDe,
   semLeitura,
@@ -36,15 +45,29 @@ const recolhida = defineModel<boolean>('recolhida', { default: false })
 
 // Ordem do Duoke: Shopee, TikTok, Mercado Livre; depois as que o Duoke não
 // tem — Amazon, Magalu (por API, como as de cima), as lojas do robô (Temu,
-// AliExpress) — e o Direct do Instagram (só leitura).
-const ORDEM = ['shopee', 'tiktok', 'ml', 'amazon', 'magalu', 'temu', 'aliexpress']
+// AliExpress) —, os sites e as redes (Instagram com o Direct, Facebook).
+const ORDEM = ['shopee', 'tiktok', 'ml', 'amazon', 'magalu', 'temu', 'aliexpress', 'site', 'instagram', 'facebook']
 
 type LojaBarra = {
   // Chave da linha: o integration_id; a loja do robô que vier sem integração
-  // (o robô conhece a loja pelo perfil do AdsPower) usa plataforma + nome.
+  // (o robô conhece a loja pelo perfil do AdsPower) usa plataforma + nome; o
+  // site, a origem externa; a conta de rede, a conta do cadastro.
   chave: string
-  // '' = loja sem integração: a lista não filtra por ela, só pela plataforma.
+  // '' = loja sem integração: a lista filtra pela origem/conta abaixo, ou
+  // (loja do robô) só pela plataforma.
   integration_id: string
+  // Site: "site:charlots" (todas as caixas do site).
+  externo_ref: string
+  // Conta de rede social: o Direct e os comentários dela.
+  rede_social_id: string
+  // Quantas das esperando são do Direct (só no title).
+  direct: number
+  // Quantas conversas de Direct a conta tem (qualquer situação): com alguma,
+  // a linha fica acesa mesmo com a caixa de comentários sem leitura.
+  direct_total: number
+  // A conta tem caixa de comentários (canal no /resumo) — sem ela, a linha é
+  // só o Direct (7buyers).
+  comentarios: boolean
   plataforma: string
   conta: string
   // A bolinha: conversas esperando resposta (= `aguardando`).
@@ -69,20 +92,35 @@ const lojas = computed<LojaBarra[]>(() => {
   if (!r) return []
   const mapa = new Map<string, LojaBarra>()
   const statusDosCanais = new Map<string, string[]>()
+  // As contas de rede que têm caixa de comentários (o canal externo dela).
+  const contasComCaixa = new Set<string>()
   for (const c of r.canais || []) {
+    if (!c.integration_id && c.rede_social_id) contasComCaixa.add(c.rede_social_id)
     if (!c.integration_id) continue
     statusDosCanais.set(c.integration_id, [...(statusDosCanais.get(c.integration_id) || []), c.status])
   }
   for (const l of r.lojas || []) {
-    // Sem integração só entra a loja do robô (tem nome e sinal próprio); a
-    // conversa de loja que saiu do DaVinci ou da Amazon sem conta não vira
-    // linha — não há o que filtrar por ela.
+    // Sem integração só entram a loja do robô (tem nome e sinal próprio), o
+    // site e a conta de rede (têm por onde filtrar) e o Direct de conta que
+    // saiu do cadastro ("Direct (conta fora do cadastro)": clicar filtra o
+    // Instagram inteiro — sem a linha, a soma das contas não batia com o
+    // número da plataforma). A conversa de loja que saiu do DaVinci ou da
+    // Amazon sem conta não vira linha — não há o que filtrar por ela.
     const semId = !l.integration_id
-    if (semId && !(viaRobo(l.plataforma) && l.conta)) continue
-    const chave = l.integration_id || `robo:${l.plataforma}:${l.conta}`
+    const rede = semId ? l.rede_social_id || '' : ''
+    const externo = semId && !rede ? l.externo_ref || '' : ''
+    const directSemConta = semId && !rede && !externo && l.plataforma === 'instagram' && (Number(l.direct_total) > 0 || Number(l.direct_aguardando) > 0)
+    if (semId && !rede && !externo && !directSemConta && !(viaRobo(l.plataforma) && l.conta)) continue
+    const chave = l.integration_id
+      || (rede ? `rede:${rede}` : externo ? `ext:${externo}` : `semid:${l.plataforma}:${l.conta}`)
     mapa.set(chave, {
       chave,
       integration_id: l.integration_id || '',
+      externo_ref: externo,
+      rede_social_id: rede,
+      direct: Number(l.direct_aguardando) || 0,
+      direct_total: Number(l.direct_total) || 0,
+      comentarios: !!rede && contasComCaixa.has(rede),
       plataforma: l.plataforma,
       conta: l.conta || 'sem nome',
       nao_lidas: l.aguardando || 0,
@@ -100,6 +138,11 @@ const lojas = computed<LojaBarra[]>(() => {
     mapa.set(c.integration_id, {
       chave: c.integration_id,
       integration_id: c.integration_id,
+      externo_ref: '',
+      rede_social_id: '',
+      direct: 0,
+      direct_total: 0,
+      comentarios: false,
       plataforma: c.plataforma,
       conta: c.conta || 'sem nome',
       nao_lidas: 0,
@@ -122,6 +165,15 @@ const lojas = computed<LojaBarra[]>(() => {
     // que o canal diga outra coisa.
     l.apagada = leituraParada(l.status) || (sts.length ? sts.every((s) => semLeitura(s)) : semLeitura(l.status))
     l.parcial = !l.apagada && (semLeitura(l.status) || sts.some((s) => semLeitura(s)))
+    // Conta do Instagram: o status é o da caixa de COMENTÁRIOS; o Direct é
+    // outra leitura (o adaptador só lê o que o robô de DM grava) e continua.
+    // Com Direct (esperando ou não), a linha fica acesa com o alerta, e a
+    // bolinha conta. `direct_total` é do /resumo novo; o antigo só tinha o
+    // `direct_aguardando`.
+    if (l.apagada && l.rede_social_id && (l.direct > 0 || l.direct_total > 0)) {
+      l.apagada = false
+      l.parcial = true
+    }
   }
   return [...mapa.values()]
 })
@@ -135,19 +187,22 @@ const grupos = computed<Grupo[]>(() => {
     .filter((p) => porPlat.has(p))
     .map((p) => {
       const ls = (porPlat.get(p) || []).slice().sort((a, b) => a.conta.localeCompare(b.conta, 'pt-BR'))
-      return { plataforma: p, nome: plataformaInfo(p).nome, lojas: ls, nao_lidas: ls.reduce((s, l) => s + (l.apagada ? 0 : l.nao_lidas), 0) }
+      return { plataforma: p, nome: nomeDoGrupo(p), lojas: ls, nao_lidas: ls.reduce((s, l) => s + (l.apagada ? 0 : l.nao_lidas), 0) }
     })
 })
 const total = computed(() => grupos.value.reduce((s, g) => s + g.nao_lidas, 0))
-// O Direct do Instagram não tem loja nem não lidas no resumo: aparece como
-// uma linha só, com o "aguardando" da plataforma. Só quando o /resumo traz a
-// plataforma — o backend só a manda para quem vê todas as equipes e havendo
-// DM; sem essa condição, quem tem escopo restrito via "Direct" e, ao clicar,
-// uma lista sempre vazia. Com o filtro já no Instagram (lembrado no
-// navegador) a linha fica, para a pessoa ver o que está escolhido e sair.
+// API ANTIGA (sem uma linha por conta): o Direct do Instagram não tem loja
+// no resumo e aparece como uma linha só, com o "aguardando" da plataforma.
+// Só quando o /resumo traz a plataforma — o backend só a manda para quem vê
+// todas as equipes e havendo DM; sem essa condição, quem tem escopo restrito
+// via "Direct" e, ao clicar, uma lista sempre vazia. Com o filtro já no
+// Instagram (lembrado no navegador) a linha fica, para a pessoa ver o que
+// está escolhido e sair. A API nova manda as contas em `lojas` (grupo
+// Instagram, acima) e esta linha some.
 const plataformaInstagram = computed(() => props.resumo?.plataformas?.find((p) => p.plataforma === 'instagram') ?? null)
+const temContasInstagram = computed(() => grupos.value.some((g) => g.plataforma === 'instagram'))
 const instagram = computed(() => plataformaInstagram.value?.aguardando ?? 0)
-const mostrarInstagram = computed(() => !!props.resumo && (!!plataformaInstagram.value || filtros.value.plataforma === 'instagram'))
+const mostrarInstagram = computed(() => !!props.resumo && !temContasInstagram.value && (!!plataformaInstagram.value || filtros.value.plataforma === 'instagram'))
 
 function contador(n: number) {
   return n > 99 ? '99+' : String(n)
@@ -166,20 +221,44 @@ function motivo(l: LojaBarra): string {
   }
   const sc = sellerCenterDe(l.plataforma)
   if (sc) partes.push(`Lida pelo robô do Mac mini (AdsPower) — a resposta é no ${sc.nome}`)
-  // Sem integração a lista não separa esta loja das outras da plataforma.
-  if (!l.integration_id && (grupos.value.find((g) => g.plataforma === l.plataforma)?.lojas.length ?? 0) > 1) {
+  if (l.plataforma === 'instagram' && !l.integration_id && !l.rede_social_id) {
+    partes.push(`Direct de conta que não está em Cadastros › Redes Sociais: ${l.direct} esperando (só leitura)`)
+  }
+  if (l.plataforma === 'instagram' && l.rede_social_id) {
+    partes.push(
+      l.comentarios
+        ? `Direct: ${l.direct} esperando (só leitura) · comentários: ${Math.max(0, l.aguardando - l.direct)} esperando`
+        : `Direct: ${l.direct} esperando (só leitura) — a conta não tem leitura de comentários`,
+    )
+  }
+  if (l.plataforma === 'site') partes.push('Carrinho abandonado do lojista no site (lido do site, servidor a servidor)')
+  // Sem integração nem origem, a lista não separa esta loja das outras da plataforma.
+  if (!l.integration_id && !l.externo_ref && !l.rede_social_id && (grupos.value.find((g) => g.plataforma === l.plataforma)?.lojas.length ?? 0) > 1) {
     partes.push(`Clicar mostra as conversas de todas as lojas ${plataformaInfo(l.plataforma).nome}`)
   }
   return partes.join('\n')
 }
 
 function escolherTodas() {
-  filtros.value = { ...filtros.value, plataforma: '', integration_id: '', canal: '' }
+  filtros.value = { ...filtros.value, plataforma: '', integration_id: '', canal: '', externo_ref: '', rede_social_id: '' }
 }
 function escolherPlataforma(p: string) {
-  filtros.value = { ...filtros.value, plataforma: p, integration_id: '', canal: filtros.value.plataforma === p ? filtros.value.canal : '' }
+  filtros.value = { ...filtros.value, plataforma: p, integration_id: '', externo_ref: '', rede_social_id: '', canal: filtros.value.plataforma === p ? filtros.value.canal : '' }
 }
 function escolherLoja(l: LojaBarra) {
+  // Site e conta de rede: a lista filtra pela origem (todas as caixas do
+  // site) ou pela conta (o Direct e os comentários dela).
+  if (!l.integration_id && (l.rede_social_id || l.externo_ref)) {
+    filtros.value = {
+      ...filtros.value,
+      plataforma: l.plataforma,
+      integration_id: '',
+      canal: '',
+      externo_ref: l.rede_social_id ? '' : l.externo_ref,
+      rede_social_id: l.rede_social_id,
+    }
+    return
+  }
   // Loja do robô sem integração: o GET /conversas só filtra por integração,
   // então o que dá é a plataforma inteira.
   if (!l.integration_id) {
@@ -190,15 +269,19 @@ function escolherLoja(l: LojaBarra) {
     ...filtros.value,
     plataforma: l.plataforma,
     integration_id: l.integration_id,
+    externo_ref: '',
+    rede_social_id: '',
     // Mesma plataforma: a caixa escolhida (Pergunta/Pós-venda do ML) continua.
     canal: filtros.value.plataforma === l.plataforma ? filtros.value.canal : '',
   }
 }
 const ativaTodas = computed(() => !filtros.value.plataforma)
 function ativaPlataforma(p: string) {
-  return filtros.value.plataforma === p && !filtros.value.integration_id
+  return filtros.value.plataforma === p && !filtros.value.integration_id && !filtros.value.externo_ref && !filtros.value.rede_social_id
 }
 function ativaLoja(l: LojaBarra) {
+  if (l.rede_social_id) return filtros.value.rede_social_id === l.rede_social_id
+  if (!l.integration_id && l.externo_ref) return filtros.value.externo_ref === l.externo_ref
   if (!l.integration_id) return ativaPlataforma(l.plataforma)
   return filtros.value.integration_id === l.integration_id
 }
@@ -290,7 +373,7 @@ function ativaLoja(l: LojaBarra) {
         </button>
       </template>
 
-      <!-- Instagram (Direct, só leitura) -->
+      <!-- Instagram (Direct, só leitura) — só com a API antiga, sem as contas -->
       <template v-if="mostrarInstagram">
         <div v-if="recolhida" class="mx-2 mt-1.5 border-t pt-1.5" />
         <div v-else class="mx-1 mt-2 px-2 py-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Instagram</div>

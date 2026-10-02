@@ -138,6 +138,11 @@ async def test_toda_tabela_de_negocio_tem_o_gatilho(db):
         # reclamação é o espelho da plataforma regravado pela máquina.
         "atendimento_etiquetas_historico",
         "atendimento_reclamacoes",
+        # 0362: o retrato do lojista (carrinho), o comentário público e o
+        # espelho da publicação, regravados pela máquina a cada leitura.
+        "atendimento_carrinhos",
+        "atendimento_publicacoes",
+        "atendimento_comentarios",
     ):
         assert tabela not in com, tabela
 

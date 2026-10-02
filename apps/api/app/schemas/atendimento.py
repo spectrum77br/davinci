@@ -126,6 +126,9 @@ class ConversaResumoOut(BaseModel):
     atribuido_a_nome: str | None = None
     ia_pausada: bool = False
     sem_resposta_necessaria: bool = False
+    # Comentário das redes com pergunta ainda sem resposta da marca (RF7,
+    # 02/10/2026): selo "pergunta" e frente da fila no Mídia/"Falta responder".
+    eh_pergunta: bool = False
     somente_leitura: bool = False
     # Há resposta NOSSA em `revisar` (timeout, envio interrompido): pode ter
     # saído ou não. Continua contando como resposta (não se responde por
@@ -146,6 +149,10 @@ class ConversaResumoOut(BaseModel):
     # nota (1–5) — o selo "AVALIAÇÃO ★★" da lista; 1–3 em destaque. Só vem
     # quando a etiqueta (ou o indicador) é `avaliacao`; senão None.
     avaliacao_estrelas: int | None = None
+    # A conta do cadastro Redes Sociais (02/10/2026): no Direct do Instagram
+    # (`dm_conversas.rede_social_id`) — a barra de lojas separa por conta.
+    # None nas outras.
+    rede_social_id: UUID | None = None
 
 
 class ConversaOut(ConversaResumoOut):
@@ -458,6 +465,10 @@ class CanalOut(BaseModel):
     integration_id: UUID | None = None
     # O perfil do AdsPower que o robô mantém aberto nessa loja.
     robo_perfil_id: str | None = None
+    # Canal EXTERNO (0362): "site:charlots", "rede:instagram:<ig_user_id>"…
+    # e a conta do cadastro Redes Sociais (só nas redes).
+    externo_ref: str | None = None
+    rede_social_id: UUID | None = None
     plataforma: str
     canal: str
     # Nome da LOJA (apelido da loja ligada à integração, sem o prefixo da
@@ -675,6 +686,19 @@ class LojaResumoOut(BaseModel):
     # Loja do robô do Mac mini (Temu/AliExpress, sem integração): o id do
     # canal dela, que filtra a lista (`/conversas?canal_id=`).
     canal_id: UUID | None = None
+    # Site (02/10/2026): a origem externa da linha ("site:charlots"), que
+    # filtra a lista (`/conversas?externo_ref=`) — todas as caixas do site.
+    externo_ref: str | None = None
+    # Conta de rede social (Instagram/Facebook, 02/10/2026): a linha junta o
+    # Direct e os comentários da MESMA conta e filtra a lista
+    # (`/conversas?rede_social_id=`).
+    rede_social_id: UUID | None = None
+    # Quantas das `aguardando` são do Direct (o resto, comentários) — title.
+    direct_aguardando: int = 0
+    # Quantas conversas de Direct a conta tem (qualquer situação): a tela
+    # deixa a linha ACESA quando a conta tem Direct, mesmo com a caixa de
+    # comentários sem permissão (o Direct é outra leitura e continua).
+    direct_total: int = 0
     plataforma: str
     # Nome da LOJA ("Marquezini", não "Shopee Marquezini" nem o apelido da
     # integração) — o mesmo que o Duoke mostra (`lojas.nome_da_loja`).

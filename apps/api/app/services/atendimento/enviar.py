@@ -118,6 +118,8 @@ from app.services.atendimento.constantes import (
     ORIGEM_HUMANO,
     ORIGEM_IA,
     ORIGENS_DAVINCI,
+    PLATAFORMA_SITE,
+    PLATAFORMAS_REDE,
     PLATAFORMAS_RESPONDEM_AVALIACAO,
     PLATAFORMAS_ROBO,
     PLATAFORMAS_SEM_AUTO,
@@ -148,6 +150,15 @@ ADAPTADORES: dict[str, str] = {
 
 # ── Códigos de recusa (estáveis: a tela traduz, o router devolve 409/422) ──
 RECUSA_SOMENTE_LEITURA = "somente_leitura"
+# Os canais de fora dos marketplaces (02/10/2026): a frase da caixa de baixo.
+MOTIVO_CARRINHO_SO_LEITURA = (
+    "Carrinho do site: nada é mandado ao lojista pelo DaVinci. Fale com ele pelo "
+    "contato do cartão e marque como resolvido."
+)
+MOTIVO_COMENTARIO_PELO_CARTAO = (
+    "Comentário de rede social: responda pelo cartão da publicação (comentário "
+    "público ou Direct), não por esta caixa."
+)
 RECUSA_ENVIO_DESLIGADO = "envio_desligado"
 RECUSA_CONVERSA_BLOQUEADA = "conversa_bloqueada"
 RECUSA_SEM_INTEGRACAO = "sem_integracao"
@@ -269,6 +280,14 @@ async def _destino(
         # marcaria a conversa como lida e desligaria o robô da Temu). A
         # sugestão da IA fica na tela para copiar.
         raise EnvioRecusado(RECUSA_SOMENTE_LEITURA, motivo_seller_center(conversa.plataforma))
+    if conversa.plataforma == PLATAFORMA_SITE:
+        # Carrinho abandonado do site (02/10/2026): nada vai ao lojista pelo
+        # DaVinci (sem lembrete por Zap/e-mail por enquanto).
+        raise EnvioRecusado(RECUSA_SOMENTE_LEITURA, MOTIVO_CARRINHO_SO_LEITURA)
+    if conversa.plataforma in PLATAFORMAS_REDE:
+        # Comentário das redes (02/10/2026): a resposta é pelo cartão da
+        # publicação (routers/atendimento_redes.py), não pela caixa do chat.
+        raise EnvioRecusado(RECUSA_SOMENTE_LEITURA, MOTIVO_COMENTARIO_PELO_CARTAO)
     if conversa.plataforma not in ADAPTADORES:
         raise EnvioRecusado(
             RECUSA_SOMENTE_LEITURA,

@@ -817,7 +817,8 @@ async def test_instagram_aparece_so_leitura(client, db, make_user, pessoa):
         "vencidas": 0,
         "a_conferir": 0,
         "nao_lidas": 0,
-        "etiquetas": {},
+        # 02/10/2026: o Direct é Mídia (RF7) — a DM não silenciada conta nela.
+        "etiquetas": {"midia": 1},
     } in resumo["plataformas"]
 
 

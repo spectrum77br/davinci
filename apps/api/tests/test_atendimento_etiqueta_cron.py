@@ -419,8 +419,10 @@ async def test_preencher_seco_nao_grava_e_gravar_preenche_sem_historico(db):
         "ag_cancelamento": 0,
         "devolucao": 1,
         "avaliacao": 0,
+        "carrinho": 0,
         "pre_venda": 1,
         "pos_venda": 1,
+        "midia": 0,
     }
     assert (
         await db.execute(
@@ -435,8 +437,10 @@ async def test_preencher_seco_nao_grava_e_gravar_preenche_sem_historico(db):
         "ag_cancelamento": 0,
         "devolucao": 1,
         "avaliacao": 0,
+        "carrinho": 0,
         "pre_venda": 1,
         "pos_venda": 1,
+        "midia": 0,
         "sem": 0,
     }
     # A primeira classificação não é mudança: nenhuma linha no histórico.

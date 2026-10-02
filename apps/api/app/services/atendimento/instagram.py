@@ -16,6 +16,15 @@ Aqui só se LÊ aquelas tabelas e se apresenta no formato da tela:
 O "prazo" do Instagram é a janela de 24 h da Meta: passou dela, não se
 responde mais por mensagem comum.
 
+Por CONTA (02/10/2026): a barra de lojas mostra uma linha por conta (a
+7buyers, a Charlots, a Uranyx — `dm_conversas.rede_social_id`), com a
+contagem de cada uma (`contar_por_conta`), e a lista filtra por ela
+(`listar_conversas(rede_social_id=...)`). A conta vai sempre com o @
+(`arroba`: "@charlots_br", o mesmo nome da linha da barra e da caixa de
+comentários da conta). A conversa leva a etiqueta MÍDIA (RF7: "toda
+mensagem privada" é Mídia) — só para a tela; o DM não tem etiqueta gravada
+nem troca à mão.
+
 Só conta como mensagem da conversa o que existe na plataforma: a entrada, o
 eco e a resposta do robô que saiu (ou pode ter saído). `seco` (o que o robô
 TERIA dito), `descartada`, `pendente` e `falhou` não aparecem na lista; no
@@ -30,7 +39,7 @@ from uuid import UUID
 from sqlalchemy import and_, case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import DmConversa, DmMensagem, User
+from app.models import DmConversa, DmMensagem, RedeSocial, User
 from app.models.instagram_dm import (
     CONVERSA_SILENCIADA,
     DIRECAO_ECO,
@@ -48,6 +57,7 @@ from app.services.atendimento.constantes import (
     CONVERSA_ABERTA,
     CONVERSA_FECHADA,
     CONVERSA_RESPONDIDA,
+    ETIQUETA_MIDIA,
     MODO_OBSERVAR,
     ORIGEM_CLIENTE,
     ORIGEM_EXTERNO,
@@ -64,6 +74,9 @@ VENCENDO = timedelta(hours=2)
 LIMITE_CARACTERES = 1000
 # Detalhe: as últimas N mensagens (conversa de DM raramente passa disso).
 MAX_MENSAGENS_DETALHE = 300
+# A linha da barra das DMs cuja conta saiu do cadastro (`rede_social_id`
+# vira NULL — SET NULL): ficam juntas, sem filtro próprio.
+NOME_SEM_CADASTRO = "Direct (conta fora do cadastro)"
 
 # Linha que EXISTE no Instagram: a entrada, o eco, e a resposta do robô que
 # saiu (ou pode ter saído — `revisar`).
@@ -93,6 +106,19 @@ def uuid_do_id(conversa_id: str) -> UUID | None:
         return UUID(str(conversa_id)[len(PREFIXO_ID) :])
     except ValueError:
         return None
+
+
+def arroba(conta: str | None) -> str | None:
+    """'charlots_br' → '@charlots_br': o @ da conta, como a barra e a lista mostram."""
+    nome = (conta or "").strip()
+    if not nome:
+        return None
+    return nome if nome.startswith("@") else f"@{nome}"
+
+
+def _like(texto: str) -> str:
+    """Termo do ILIKE com `%`, `_` e `\\` escapados (escape="\\")."""
+    return "%" + texto.replace("\\", "\\\\").replace("%", r"\%").replace("_", r"\_") + "%"
 
 
 def _utc(quando: datetime | None) -> datetime | None:
@@ -182,7 +208,7 @@ def _resumo(
         "id": id_textual(conversa.id),
         "plataforma": PLATAFORMA,
         "canal": CANAL,
-        "conta": conversa.conta,
+        "conta": arroba(conversa.conta),
         "integration_id": None,
         "comprador_nome": conversa.participante_nome,
         # A Graph API não dá a foto do participante na DM: iniciais na tela.
@@ -210,6 +236,9 @@ def _resumo(
         "ia_pausada": not conversa.auto,
         "sem_resposta_necessaria": False,
         "somente_leitura": True,
+        # A conta (a linha da barra de lojas) e a etiqueta MÍDIA (RF7).
+        "rede_social_id": conversa.rede_social_id,
+        "etiqueta": ETIQUETA_MIDIA,
     }
 
 
@@ -251,11 +280,13 @@ async def listar_conversas(
     q: str | None = None,
     filtro: str | None = None,
     user_id: UUID | None = None,
+    rede_social_id: UUID | None = None,
 ) -> list[dict]:
     """Conversas do Instagram no formato ConversaResumo, mais novas primeiro.
 
     Mesma paginação da lista do marketplace (`ultima_mensagem_em < antes_de`),
-    para o router intercalar as duas fontes numa página só.
+    para o router intercalar as duas fontes numa página só. `rede_social_id`
+    = só as da conta (a linha da barra de lojas).
     """
     agora = datetime.now(UTC)
     ult = _ultimas()
@@ -267,14 +298,17 @@ async def listar_conversas(
         .join(ult, ult.c.cid == DmConversa.id)
         .where(DmConversa.plataforma == PLATAFORMA, cond)
     )
+    if rede_social_id is not None:
+        consulta = consulta.where(DmConversa.rede_social_id == rede_social_id)
     if antes_de is not None:
         consulta = consulta.where(ult.c.em < antes_de)
     if q and q.strip():
-        termo = "%" + q.strip().replace("\\", "\\\\").replace("%", r"\%").replace("_", r"\_") + "%"
+        # A conta aparece com o @ na tela ("@charlots_br") e fica gravada sem
+        # ele: buscar "@charlots" também acha.
         consulta = consulta.where(
             or_(
-                DmConversa.participante_nome.ilike(termo, escape="\\"),
-                DmConversa.conta.ilike(termo, escape="\\"),
+                DmConversa.participante_nome.ilike(_like(q.strip()), escape="\\"),
+                DmConversa.conta.ilike(_like(q.strip().lstrip("@") or q.strip()), escape="\\"),
             )
         )
     linhas = (
@@ -295,33 +329,91 @@ async def listar_conversas(
     ]
 
 
-async def contar(session: AsyncSession) -> dict[str, int]:
-    """aguardando / vencendo / vencidas do Instagram, para o /resumo."""
-    agora = datetime.now(UTC)
-    ult = _ultimas()
+def _contagens(ult, agora: datetime) -> tuple:
+    """As colunas do /resumo: aguardando, vencendo, vencidas, total e abertas."""
     aguardando = _aguardando(ult)
-    linha = (
-        await session.execute(
-            select(
-                func.count().filter(aguardando),
-                func.count().filter(
-                    aguardando,
-                    ult.c.do_cliente >= agora - JANELA,
-                    ult.c.do_cliente < agora - JANELA + VENCENDO,
-                ),
-                func.count().filter(aguardando, ult.c.do_cliente < agora - JANELA),
-                func.count(),
-            )
-            .select_from(DmConversa)
-            .join(ult, ult.c.cid == DmConversa.id)
-            .where(DmConversa.plataforma == PLATAFORMA)
-        )
-    ).one()
+    return (
+        func.count().filter(aguardando),
+        func.count().filter(
+            aguardando,
+            ult.c.do_cliente >= agora - JANELA,
+            ult.c.do_cliente < agora - JANELA + VENCENDO,
+        ),
+        func.count().filter(aguardando, ult.c.do_cliente < agora - JANELA),
+        func.count(),
+        # Não silenciadas: as que contam na etiqueta MÍDIA (como a conversa
+        # não fechada da caixa).
+        func.count().filter(DmConversa.status != CONVERSA_SILENCIADA),
+    )
+
+
+def _numeros(linha) -> dict[str, int]:
     return {
         "aguardando": int(linha[0] or 0),
         "vencendo": int(linha[1] or 0),
         "vencidas": int(linha[2] or 0),
         "total": int(linha[3] or 0),
+        "abertas": int(linha[4] or 0),
+    }
+
+
+async def contar(session: AsyncSession) -> dict[str, int]:
+    """aguardando / vencendo / vencidas / total / abertas do Instagram, para o /resumo."""
+    agora = datetime.now(UTC)
+    ult = _ultimas()
+    linha = (
+        await session.execute(
+            select(*_contagens(ult, agora))
+            .select_from(DmConversa)
+            .join(ult, ult.c.cid == DmConversa.id)
+            .where(DmConversa.plataforma == PLATAFORMA)
+        )
+    ).one()
+    return _numeros(linha)
+
+
+async def contar_por_conta(session: AsyncSession) -> list[dict]:
+    """As mesmas contagens de `contar`, uma por CONTA (a linha da barra de lojas).
+
+    `conta` = o @ do CADASTRO (`redes_sociais.conta`, o atual: a conversa
+    guarda o @ do dia em que nasceu), ou o da conversa se o cadastro não
+    tiver. `rede_social_id` None = conversas de conta que saiu do cadastro:
+    ficam numa linha só (`NOME_SEM_CADASTRO`). Contas mais conhecidas
+    primeiro (pelo @), a sem cadastro no fim.
+    """
+    agora = datetime.now(UTC)
+    ult = _ultimas()
+    linhas = (
+        await session.execute(
+            select(
+                DmConversa.rede_social_id,
+                func.max(RedeSocial.conta),
+                func.max(DmConversa.conta),
+                *_contagens(ult, agora),
+            )
+            .select_from(DmConversa)
+            .join(ult, ult.c.cid == DmConversa.id)
+            .outerjoin(RedeSocial, RedeSocial.id == DmConversa.rede_social_id)
+            .where(DmConversa.plataforma == PLATAFORMA)
+            .group_by(DmConversa.rede_social_id)
+        )
+    ).all()
+    contas = [
+        {
+            "rede_social_id": rs,
+            "conta": (arroba(cadastro) or arroba(da_conversa)) if rs else NOME_SEM_CADASTRO,
+            **_numeros(resto),
+        }
+        for rs, cadastro, da_conversa, *resto in linhas
+    ]
+    return sorted(contas, key=lambda c: (c["rede_social_id"] is None, (c["conta"] or "").lower()))
+
+
+def somar(contas: list[dict]) -> dict[str, int]:
+    """O total do Instagram (o `contar`) a partir das contas — uma consulta só no /resumo."""
+    return {
+        k: sum(int(c.get(k) or 0) for c in contas)
+        for k in ("aguardando", "vencendo", "vencidas", "total", "abertas")
     }
 
 

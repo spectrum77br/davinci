@@ -9,6 +9,8 @@
 // branco no quadrado laranja; AliExpress = "Ae" branco no quadrado vermelho
 // (30/09/2026 — só a cor e a inicial, nada do logo das marcas); Magalu = "M"
 // branco no quadrado azul (30/09/2026, idem: o azul da marca e a inicial).
+// Facebook = "f" branco no círculo azul; Site = globo branco no quadrado
+// verde-azulado (02/10/2026: os sites Charlots e Uranyx — não é marca).
 import { computed, useId } from 'vue'
 
 // Nome para o leitor de tela. Cópia curta de propósito: importar de
@@ -22,6 +24,8 @@ const NOMES: Record<string, string> = {
   temu: 'Temu',
   aliexpress: 'AliExpress',
   instagram: 'Instagram',
+  facebook: 'Facebook',
+  site: 'Site',
 }
 
 const props = withDefaults(defineProps<{
@@ -126,6 +130,22 @@ const letra = computed(() => (cod.value[0] || '?').toUpperCase())
       <rect x="6.4" y="6.4" width="11.2" height="11.2" rx="3.4" fill="none" stroke="#fff" stroke-width="1.7" />
       <circle cx="12" cy="12" r="2.7" fill="none" stroke="#fff" stroke-width="1.7" />
       <circle cx="15.5" cy="8.5" r="0.95" fill="#fff" />
+    </template>
+
+    <!-- Facebook: "f" branco no círculo azul -->
+    <template v-else-if="cod === 'facebook'">
+      <circle cx="12" cy="12" r="10" fill="#1877F2" />
+      <path d="M13.4 21.9v-7h2.3l.4-2.8h-2.7v-1.8c0-.8.3-1.4 1.4-1.4h1.4V6.4a17 17 0 0 0-2.1-.1c-2.1 0-3.5 1.3-3.5 3.6v2.2H8.3v2.8h2.3v7" fill="#fff" />
+    </template>
+
+    <!-- Site (Charlots, Uranyx): globo branco no quadrado verde-azulado -->
+    <template v-else-if="cod === 'site'">
+      <rect x="2" y="2" width="20" height="20" rx="5" fill="#0D9488" />
+      <g fill="none" stroke="#fff" stroke-width="1.5">
+        <circle cx="12" cy="12" r="6.2" />
+        <ellipse cx="12" cy="12" rx="2.6" ry="6.2" />
+        <path d="M5.8 12h12.4" stroke-linecap="round" />
+      </g>
     </template>
 
     <!-- Desconhecida: bolinha cinza com a inicial -->

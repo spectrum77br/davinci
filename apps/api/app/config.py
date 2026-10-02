@@ -433,6 +433,30 @@ class Settings(BaseSettings):
     # os pedidos). A RESPOSTA (pública, no anúncio) segue o envio
     # (`atendimento_envio_ativo`), não este interruptor.
     atendimento_avaliacoes_ativa: bool = False
+    # Carrinho abandonado dos sites (RF9, 02/10/2026): o cron
+    # `atendimento_carrinhos` chama, servidor a servidor, a rota de LEITURA
+    # de cada site (`GET <site>/api/davinci/carrinhos`, com o MESMO token do
+    # estoque — `sites_estoque_tokens`), abre a conversa `carrinho` do
+    # lojista com a etiqueta CARRINHO e fecha como recuperado/não recuperado
+    # (services/atendimento/carrinhos.py). Só GET no site; nada é mandado ao
+    # lojista. Mesmo esquema dos de cima: interruptor próprio E a leitura.
+    atendimento_carrinhos_ativa: bool = False
+    # Carrinho parado há mais que isto (horas, desde o último mexido) vira
+    # conversa. Atacado decide devagar: o padrão do levantamento é 24 h.
+    atendimento_carrinho_horas: int = 24
+    # Endereço de cada site ("charlots=https://...,uranyx=https://..."). Vazio
+    # = os de produção (`constantes.URL_SITE`); o ensaio local aponta para o
+    # PHP no localhost. Só https (http só para localhost/127.0.0.1).
+    atendimento_sites_urls: str = ""
+    # Comentários e menções das redes (RF7, 02/10/2026): o cron
+    # `atendimento_redes` lê, só com GET na Graph API e o token do usuário de
+    # sistema do "DaVinci Publicador" (`redes_sociais_tokens`), as mídias dos
+    # últimos 30 dias, os comentários e as menções do Instagram e da Página
+    # do Facebook da Charlots e da Uranyx (services/atendimento/redes.py). Sem
+    # o escopo de comentários no token, o canal fica `sem_escopo` na aba
+    # Lojas. Responder/ocultar seguem o envio (`atendimento_envio_ativo`),
+    # não este interruptor. Interruptor próprio E a leitura.
+    atendimento_redes_ativa: bool = False
     # Permite enviar — inclusive a pessoa pela tela. Desligado, o botão
     # "Enviar" recusa com `envio_desligado`; o canal ainda precisa estar em
     # humano/copiloto/auto.

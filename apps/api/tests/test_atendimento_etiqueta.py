@@ -101,12 +101,13 @@ def test_tabela_de_acontecimentos_do_rf1(acontecimento, fatos, esperada):
     assert calcular(fatos).etiqueta == esperada, acontecimento
 
 
-URGENTES = ("reclamacao", "ag_cancelamento", "devolucao", "avaliacao")
+URGENTES = ("reclamacao", "ag_cancelamento", "devolucao", "avaliacao", "carrinho")
 _CAMPO = {
     "reclamacao": "reclamacao_aberta",
     "ag_cancelamento": "ag_cancelamento",
     "devolucao": "devolucao_aberta",
     "avaliacao": "avaliacao_pendente",
+    "carrinho": "carrinho_aberto",
 }
 
 
@@ -130,9 +131,11 @@ def test_prioridade_vale_a_mais_urgente_e_as_outras_viram_indicador(abertas, tem
 
 def test_ordem_da_prioridade_e_canal_nunca_e_etiqueta():
     assert PRIORIDADE_ETIQUETAS == (
-        "reclamacao", "ag_cancelamento", "devolucao", "avaliacao", "pre_venda", "pos_venda"
+        "reclamacao", "ag_cancelamento", "devolucao", "avaliacao", "carrinho",
+        "pre_venda", "pos_venda", "midia",
     )
-    assert set(ETIQUETAS_BASE) == {"pre_venda", "pos_venda"}
+    # 02/10/2026: a Mídia (conversa de rede) é base, como pré/pós-venda.
+    assert set(ETIQUETAS_BASE) == {"pre_venda", "pos_venda", "midia"}
     # E-mail, Zap, chat, pergunta, SAC: canal, não status.
     for canal in ("email", "zap", "chat", "pergunta", "sac"):
         assert canal not in ETIQUETAS

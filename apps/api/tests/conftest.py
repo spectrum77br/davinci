@@ -388,6 +388,11 @@ _CLEANUP_TABLES = (
     "atendimento_reclamacoes",
     # 0358: a avaliação ganhou FK → conversas e users (SET NULL): antes delas.
     "atendimento_avaliacoes_loja",
+    # 0362: carrinho (FK → canais/conversas/users), comentário (FK →
+    # publicação CASCADE, conversas) e publicação (FK → canais): antes delas.
+    "atendimento_carrinhos",
+    "atendimento_comentarios",
+    "atendimento_publicacoes",
     "atendimento_avaliacoes",
     "atendimento_rascunhos",
     "atendimento_mensagens",

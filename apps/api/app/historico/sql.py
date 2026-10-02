@@ -55,6 +55,12 @@ TETO_POR_PEDIDO = 200
 # ganhou a pendência, a mídia e a opinião do ML — continua fora (já estava):
 # é texto de comprador regravado pela máquina a cada 30 min. O "marcar como
 # tratada" da pessoa fica na própria linha (`tratada_por`/`tratada_em`).
+# Carrinho e redes (02/10/2026, migration 0362): `atendimento_carrinhos`
+# guarda o retrato do LOJISTA (nome, e-mail, telefone) e é regravado pela
+# máquina a cada leitura do site; `atendimento_comentarios` é texto de
+# pessoa (o comentário público) e `atendimento_publicacoes` o espelho da rede,
+# os dois regravados pelo leitor das redes. Fora as três. O "marcar como
+# resolvido" do carrinho fica na própria linha (`tratado_por`/`tratado_em`).
 EXCLUIDAS = re.compile(
     r"^(historico_(evento|alteracao)$|sync_logs|background_job|alembic_version$|auth_codes$"
     r"|oauth_states$|pricing_push_idempotency$|pricing_push_confirmacao$"
@@ -64,7 +70,7 @@ EXCLUIDAS = re.compile(
     r"|bling_envio_evento$|bling_envio_correcao$|prioridade_estoque_movimentos$|nfse_chamada$"
     # texto de comprador (atendimento) e os índices que a máquina escreve
     r"|atendimento_(mensagens|rascunhos|avaliacoes|conversas|avaliacoes_loja"
-    r"|pedidos_comprador|etiquetas_historico|reclamacoes)$)"
+    r"|pedidos_comprador|etiquetas_historico|reclamacoes|carrinhos|publicacoes|comentarios)$)"
     r"|(_bak|bkp|backup)",
     re.I,
 )

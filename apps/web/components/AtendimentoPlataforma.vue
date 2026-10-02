@@ -24,6 +24,10 @@ export type Flags = {
 export type Canal = {
   id: string
   integration_id: string
+  // Canal EXTERNO (02/10/2026, sem integração nem robô): "site:charlots",
+  // "rede:instagram:<id>"; e a conta do cadastro Redes Sociais (só redes).
+  externo_ref?: string | null
+  rede_social_id?: string | null
   plataforma: string
   canal: string
   // Nome da integração (loja). O backend manda junto para a tabela não ter
@@ -51,6 +55,19 @@ export type ResumoPlataforma = { plataforma: string; aguardando: number; vencend
 // canais do próprio /resumo.
 export type ResumoLoja = {
   integration_id: string | null
+  // Loja do robô (Temu/AliExpress): o canal dela (sem integração).
+  canal_id?: string | null
+  // Site (02/10/2026): a origem externa ("site:charlots") — o filtro da
+  // lista é por ela (`?externo_ref=`), todas as caixas do site.
+  externo_ref?: string | null
+  // Conta de rede social (02/10/2026): o Direct e os comentários da MESMA
+  // conta numa linha só — o filtro é `?rede_social_id=`.
+  rede_social_id?: string | null
+  // Quantas das `aguardando` são do Direct (o resto, comentários).
+  direct_aguardando?: number
+  // Quantas conversas de Direct a conta tem (qualquer situação).
+  direct_total?: number
+  integracao?: string | null
   plataforma: string
   conta: string | null
   aguardando: number
@@ -96,6 +113,9 @@ export type ConversaResumo = {
   atribuido_a_nome: string | null
   ia_pausada: boolean
   sem_resposta_necessaria: boolean
+  // Comentário das redes com pergunta ainda sem resposta da marca (RF7): o
+  // selo "pergunta" e a frente da fila no Mídia e em "Falta responder".
+  eh_pergunta?: boolean
   somente_leitura: boolean
   // Tem resposta nossa em `revisar`: não se sabe se chegou ao comprador.
   envio_a_conferir?: boolean
@@ -117,6 +137,8 @@ export type ConversaResumo = {
   // nota (1–5), para as estrelas do selo Avaliação. Só vem quando a etiqueta
   // (ou o indicador) é `avaliacao`; a API antiga não manda.
   avaliacao_estrelas?: number | null
+  // A conta do cadastro Redes Sociais no Direct do Instagram (02/10/2026).
+  rede_social_id?: string | null
 }
 // Uma mudança de etiqueta (a linha do tempo): `por_nome` null = o sistema.
 export type EtiquetaHistorico = {
@@ -448,6 +470,9 @@ export type PlataformaInfo = { value: string; nome: string; curto: string; cor: 
 // `sellerCenterDe` abaixo): têm loja e canal, mas nunca envio pelo DaVinci.
 // Magalu (30/09/2026) é lida e respondida por API, como Shopee e ML (ver
 // `portalMagaluDe` abaixo). A cor é o azul da marca, só a cor.
+// Site e Facebook (02/10/2026) são canais EXTERNOS: o carrinho abandonado
+// dos sites Charlots e Uranyx (lido do site) e os comentários da Página
+// (como os do Instagram). Têm canal na aba Lojas, mas não manual nem modelo.
 export const PLATAFORMAS_ATENDIMENTO: PlataformaInfo[] = [
   { value: 'shopee', nome: 'Shopee', curto: 'Shopee', cor: 'bg-orange-600', de: 'da Shopee' },
   { value: 'ml', nome: 'Mercado Livre', curto: 'ML', cor: 'bg-yellow-400 ring-1 ring-yellow-500/70', de: 'do Mercado Livre' },
@@ -457,9 +482,27 @@ export const PLATAFORMAS_ATENDIMENTO: PlataformaInfo[] = [
   { value: 'temu', nome: 'Temu', curto: 'Temu', cor: 'bg-orange-500', de: 'da Temu' },
   { value: 'aliexpress', nome: 'AliExpress', curto: 'AliExpress', cor: 'bg-red-600', de: 'do AliExpress' },
   { value: 'instagram', nome: 'Instagram', curto: 'Insta', cor: 'bg-pink-500', de: 'do Instagram' },
+  { value: 'facebook', nome: 'Facebook', curto: 'Face', cor: 'bg-[#1877F2]', de: 'do Facebook' },
+  { value: 'site', nome: 'Site', curto: 'Site', cor: 'bg-teal-600', de: 'do site' },
 ]
-// As que têm canal/modo/manual (o Instagram fica de fora).
-export const PLATAFORMAS_COM_CANAL = PLATAFORMAS_ATENDIMENTO.filter((p) => p.value !== 'instagram')
+// Só na tela/aba Lojas: as redes e o site não têm manual da IA nem modelo
+// (o Instagram também tem o Direct, só leitura).
+export const PLATAFORMAS_EXTERNAS = ['instagram', 'facebook', 'site']
+// As que têm canal/modo/manual (as externas ficam de fora).
+export const PLATAFORMAS_COM_CANAL = PLATAFORMAS_ATENDIMENTO.filter((p) => !PLATAFORMAS_EXTERNAS.includes(p.value))
+// O nome do GRUPO na barra de lojas ("Sites", no plural: Charlots e Uranyx).
+const NOME_GRUPO: Record<string, string> = { site: 'Sites' }
+export function nomeDoGrupo(plataforma: string | null | undefined): string {
+  const cod = (plataforma || '').trim().toLowerCase()
+  return NOME_GRUPO[cod] || plataformaInfo(cod).nome
+}
+// O modo que a aba Lojas aceita no canal externo (constantes.MODOS_EXTERNOS):
+// o site não tem por onde responder; a rede, só por pessoa.
+export const MODOS_EXTERNOS: Record<string, string[]> = {
+  site: ['observar'],
+  instagram: ['observar', 'humano'],
+  facebook: ['observar', 'humano'],
+}
 
 export function plataformaInfo(codigo: string | null | undefined): PlataformaInfo {
   const cod = (codigo || '').trim().toLowerCase()
@@ -601,7 +644,9 @@ export const CANAIS_ATENDIMENTO: { value: string; label: string; plataforma: str
 // `avaliacao` (02/10/2026, RF8): a conversa que nasce quando uma avaliação
 // de venda fica sem resposta da loja (services/atendimento/avaliacoes.py).
 // Também não é caixa configurável; a resposta dela é PÚBLICA.
-const CANAL_LABEL: Record<string, string> = { chat: 'Chat', pergunta: 'Pergunta', pos_venda: 'Pós-venda', email: 'E-mail', sac: 'SAC', dm: 'Direct', reclamacao: 'Reclamação', avaliacao: 'Avaliação' }
+// `carrinho` e `comentario` (02/10/2026): o carrinho abandonado do site e o
+// comentário/menção das redes — também não são caixas que se configuram.
+const CANAL_LABEL: Record<string, string> = { chat: 'Chat', pergunta: 'Pergunta', pos_venda: 'Pós-venda', email: 'E-mail', sac: 'SAC', dm: 'Direct', reclamacao: 'Reclamação', avaliacao: 'Avaliação', carrinho: 'Carrinho', comentario: 'Comentário' }
 export function canalLabel(canal: string | null | undefined): string {
   return CANAL_LABEL[canal || ''] || canal || ''
 }
@@ -723,6 +768,9 @@ export const STATUS_CANAL: Record<string, { label: string; hint: string; cls: st
   sem_escopo: { label: 'Sem permissão', hint: 'a plataforma recusou por falta de permissão do app (não é passageiro — precisa liberar lá)', cls: 'bg-amber-500/15 text-amber-700 dark:text-amber-300' },
   erro: { label: 'Com erro', hint: 'a última leitura falhou — o DaVinci tenta de novo na próxima rodada', cls: 'bg-red-500/15 text-red-700 dark:text-red-300' },
   desligado: { label: 'Desligado', hint: 'leitura desligada para este canal (Amazon sem caixa de e-mail configurada, por exemplo)', cls: 'bg-muted text-muted-foreground' },
+  // Só do site (02/10/2026): a rota de leitura do carrinho ainda não está no
+  // site (404) — o pacote do carrinho abandonado não foi publicado na Hostinger.
+  sem_endpoint: { label: 'Rota não publicada', hint: 'o site ainda não tem a rota de carrinhos — publicar o pacote do carrinho abandonado na Hostinger; até lá o site não é lido', cls: 'bg-amber-500/15 text-amber-700 dark:text-amber-300' },
   // Temu/AliExpress: o backend marca a loja sem sinal (pulso) do robô do Mac
   // mini há mais de ATENDIMENTO_ROBO_PARADO_MIN minutos. O Seller Center
   // continua recebendo: a mensagem existe, só não chega aqui — a loja fica
@@ -757,7 +805,7 @@ export function statusCanalInfo(status: string | null | undefined): { label: str
   return STATUS_CANAL[statusCanalCodigo(status)] ?? null
 }
 // Estados em que o DaVinci NÃO está lendo a loja (a barra apaga a loja).
-const STATUS_SEM_LEITURA = new Set(['sem_escopo', 'erro', 'desligado', 'parado', 'sessao_caiu'])
+const STATUS_SEM_LEITURA = new Set(['sem_escopo', 'erro', 'desligado', 'parado', 'sessao_caiu', 'sem_endpoint'])
 export function semLeitura(status: string | null | undefined): boolean {
   return STATUS_SEM_LEITURA.has(statusCanalCodigo(status))
 }
@@ -1381,6 +1429,8 @@ export const ERROS: Record<string, string> = {
   mensagem_nao_revisar: 'Essa mensagem já foi conferida.',
   somente_leitura: 'Esta conversa é só de leitura aqui.',
   ia_desligada: 'A IA está desligada no servidor — sem sugestão por enquanto.',
+  // Carrinho do site e comentário das redes (02/10/2026): a IA é de marketplace.
+  canal_sem_ia: 'A IA não sugere resposta para carrinho de site nem comentário de rede social.',
   so_admin: 'Só um administrador liga o modo Automático ou muda as categorias dele.',
   auto_desligado: 'O envio automático está desligado para esta loja.',
   categoria_so_humano: 'Essa categoria nunca sai sozinha (dinheiro, troca, reclamação…) — fica sempre com uma pessoa.',

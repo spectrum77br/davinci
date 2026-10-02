@@ -34,6 +34,33 @@ PLATAFORMAS_ROBO = ("temu", "aliexpress")
 # Tudo o que aparece na caixa (lista, resumo, manual da IA, cron da IA).
 PLATAFORMAS_CAIXA = PLATAFORMAS + PLATAFORMAS_ROBO
 
+# Lidas por um CANAL EXTERNO (02/10/2026): nem integração de marketplace nem
+# robô do Mac mini. O canal é identificado por `atendimento_canais.externo_ref`
+# (migration 0362, `services/atendimento/canais_externos.py`):
+#   site      — Charlots e Uranyx (PHP próprio na Hostinger): o carrinho
+#               abandonado do lojista logado, lido do site servidor a
+#               servidor com o MESMO token do estoque (`sites_estoque_tokens`);
+#               `externo_ref = "site:<site>"`;
+#   instagram — comentários e menções da conta (RF7), pelo token do usuário
+#               de sistema do app "DaVinci Publicador"
+#               (`redes_sociais_tokens`); `externo_ref =
+#               "rede:instagram:<ig_user_id>"`. O Direct continua no adaptador
+#               só leitura (`instagram.py`, sobre `dm_conversas`);
+#   facebook  — comentários dos posts da Página; `externo_ref =
+#               "rede:facebook:<page_id>"`.
+# FORA de `PLATAFORMAS_CAIXA` de propósito: o cron do sync, o da IA (que só
+# sugere no clique aqui) e o manual não as veem. Nada sai pelo DaVinci por
+# elas enquanto o envio estiver desligado (`enviar` não tem adaptador delas:
+# recusa como somente leitura).
+PLATAFORMA_SITE = "site"
+PLATAFORMA_INSTAGRAM = "instagram"
+PLATAFORMA_FACEBOOK = "facebook"
+PLATAFORMAS_REDE = (PLATAFORMA_INSTAGRAM, PLATAFORMA_FACEBOOK)
+PLATAFORMAS_EXTERNAS = (PLATAFORMA_SITE, *PLATAFORMAS_REDE)
+# O que o filtro `?plataforma=` da lista aceita (a caixa + as externas; o
+# Instagram também traz as DMs do adaptador).
+PLATAFORMAS_LISTA = PLATAFORMAS_CAIXA + PLATAFORMAS_EXTERNAS
+
 CANAL_CHAT = "chat"
 CANAL_PERGUNTA = "pergunta"
 CANAL_POS_VENDA = "pos_venda"
@@ -56,6 +83,24 @@ CANAL_RECLAMACAO = "reclamacao"
 # sync): quem a escreve é `services/atendimento/avaliacoes.py`. A resposta
 # dela é PÚBLICA (aparece no anúncio), por outro endpoint que o chat.
 CANAL_AVALIACAO = "avaliacao"
+# Carrinho abandonado do site (RF9, 02/10/2026): UMA conversa por lojista
+# por site (`externo_id = "lojista:<id do site>"`), no canal do site; cada
+# carrinho parado vira uma linha de `atendimento_carrinhos` e uma mensagem
+# nela. Quem escreve é `services/atendimento/carrinhos.py`.
+CANAL_CARRINHO = "carrinho"
+# Comentário e menção nas redes (RF7, 02/10/2026): UMA conversa por (pessoa,
+# publicação) no canal da conta; cada comentário é uma linha de
+# `atendimento_comentarios` e uma mensagem nela. O comentário da própria
+# marca é a RESPOSTA (autor loja), nunca conversa nova. Quem escreve é
+# `services/atendimento/redes.py`.
+CANAL_COMENTARIO = "comentario"
+# Os canais de cada plataforma externa (NÃO entram em
+# `CANAIS_POR_PLATAFORMA`: o sync não lê nenhum deles).
+CANAIS_EXTERNOS: dict[str, tuple[str, ...]] = {
+    PLATAFORMA_SITE: (CANAL_CARRINHO,),
+    PLATAFORMA_INSTAGRAM: (CANAL_COMENTARIO,),
+    PLATAFORMA_FACEBOOK: (CANAL_COMENTARIO,),
+}
 
 # Canais que são SEMPRE depois da compra, com ou sem número de pedido gravado
 # na conversa: pós-venda do ML (pack), SAC da Magalu, e-mail da Amazon, a
@@ -102,12 +147,25 @@ MODOS_QUE_ENVIAM = (MODO_HUMANO, MODO_COPILOTO, MODO_AUTO)
 # aqui) e `auto` (a IA envia) não fazem sentido. Observar = só lê; copiloto =
 # a IA escreve a sugestão sozinha (cron) e a pessoa cola no Seller Center.
 MODOS_ROBO = (MODO_OBSERVAR, MODO_COPILOTO)
+# Canal EXTERNO (site, redes — `CANAIS_EXTERNOS`): o modo que cada um aceita
+# na aba Lojas. O site não tem por onde responder (sem Zap/e-mail por
+# enquanto): só observar. As redes podem chegar a `humano` (a resposta
+# pública/privada sai pela tela, com o envio ligado); IA sozinha, nunca.
+MODOS_EXTERNOS: dict[str, tuple[str, ...]] = {
+    PLATAFORMA_SITE: (MODO_OBSERVAR,),
+    PLATAFORMA_INSTAGRAM: (MODO_OBSERVAR, MODO_HUMANO),
+    PLATAFORMA_FACEBOOK: (MODO_OBSERVAR, MODO_HUMANO),
+}
 
 # Saúde da leitura do canal. `sem_escopo` = a plataforma disse "sem
 # permissão" (TikTok sem `seller.customer_service`, ML com 403 de política,
 # Magalu sem o escopo da caixa no token — reautorizar a loja): não é erro
 # passageiro, não adianta insistir a cada rodada.
-STATUS_CANAL = ("novo", "ok", "sem_escopo", "erro", "desligado")
+# `sem_endpoint` (02/10/2026) = só do canal do SITE: a rota de leitura do
+# carrinho ainda não está publicada no site (404) — publicar o pacote do
+# carrinho na Hostinger; até lá o site não é lido.
+STATUS_CANAL_SEM_ENDPOINT = "sem_endpoint"
+STATUS_CANAL = ("novo", "ok", "sem_escopo", "erro", "desligado", STATUS_CANAL_SEM_ENDPOINT)
 # Só das lojas do robô:
 #   parado      — o robô não dá sinal (pulso) há mais de
 #                 `atendimento_robo_parado_min` minutos: o Mac mini, o
@@ -138,6 +196,14 @@ SLA_HORAS: dict[tuple[str, str], int] = {
     # PROTOCOLO (`due_date`), que o adaptador guarda em
     # `dados[CHAVE_PRAZO_PLATAFORMA]` e o `gravar` usa no lugar deste número;
     # sem `due_date`, o padrão.
+    # Externas (02/10/2026): o carrinho parado e o comentário entram na fila
+    # "Falta responder" com o prazo padrão — escrito aqui para ninguém achar
+    # que foi esquecido. A pergunta no comentário só ordena (RF7: "isso só
+    # ordena; não tira nada da fila"), pelo prazo próprio que o leitor das
+    # redes pode gravar em `dados[CHAVE_PRAZO_PLATAFORMA]`.
+    (PLATAFORMA_SITE, CANAL_CARRINHO): 24,
+    (PLATAFORMA_INSTAGRAM, CANAL_COMENTARIO): 24,
+    (PLATAFORMA_FACEBOOK, CANAL_COMENTARIO): 24,
 }
 SLA_PADRAO_HORAS = 24
 
@@ -176,6 +242,10 @@ LIMITE_CARACTERES: dict[tuple[str, str], int] = {
     # Resposta PÚBLICA à avaliação da Shopee (`reply_comment`): 500, o teto
     # do campo no Seller Center (a confirmar na documentação da API).
     ("shopee", CANAL_AVALIACAO): 500,
+    # Resposta PÚBLICA a comentário (RF7): o Instagram corta em 2.200 (o
+    # mesmo teto da legenda); a Página do Facebook aceita bem mais, 8.000.
+    (PLATAFORMA_INSTAGRAM, CANAL_COMENTARIO): 2200,
+    (PLATAFORMA_FACEBOOK, CANAL_COMENTARIO): 8000,
 }
 LIMITE_PADRAO_CARACTERES = 1000
 
@@ -253,23 +323,37 @@ ETIQUETA_AG_CANCELAMENTO = "ag_cancelamento"
 # (`atendimento_avaliacoes_loja.pendente_desde`), e quando ela acaba o motor
 # devolve a etiqueta que os outros fatos dão (a base ou a urgente de antes).
 ETIQUETA_AVALIACAO = "avaliacao"
+# Carrinho abandonado do site (RF9, 02/10/2026): CARRINHO enquanto o
+# carrinho do lojista estiver aberto (`atendimento_carrinhos.situacao =
+# 'aberto'`). Recuperado (o lojista finalizou pelo WhatsApp) → PÓS-VENDA
+# ("virou pedido"); não recuperado em 7 dias ou resolvido à mão → a base
+# (pré-venda: não há pedido).
+ETIQUETA_CARRINHO = "carrinho"
+# Mídia (RF7, 02/10/2026): a etiqueta PRÓPRIA das conversas de comentário e
+# menção das redes. É uma BASE (como pré/pós-venda): não é "algo aberto" num
+# pedido, é o que a conversa é — nunca vira indicador secundário. Rosa na tela.
+ETIQUETA_MIDIA = "midia"
 # Da MAIS urgente para a menos: duas coisas abertas ao mesmo tempo, vale a
 # primeira e a outra vira o indicador pequeno (`etiquetas_secundarias`).
 # As que vêm depois entram NO LUGAR CERTO desta ordem quando a fonte existir:
-# `carrinho` entre Avaliação e Pré-venda; `sac`, `atacado`,
-# `duvidas_sugestoes` (sites) e `midia` (redes) ainda sem lugar decidido.
+# `sac`, `atacado` e `duvidas_sugestoes` (sites) ainda sem lugar decidido.
+# A Mídia fica por último: é a base das conversas de rede (nada de pedido
+# compete com ela) e só aparece na ordem para o menu Filtrar e a troca à mão.
 PRIORIDADE_ETIQUETAS: tuple[str, ...] = (
     ETIQUETA_RECLAMACAO,
     ETIQUETA_AG_CANCELAMENTO,
     ETIQUETA_DEVOLUCAO,
     ETIQUETA_AVALIACAO,
+    ETIQUETA_CARRINHO,
     ETIQUETA_PRE_VENDA,
     ETIQUETA_POS_VENDA,
+    ETIQUETA_MIDIA,
 )
 ETIQUETAS = PRIORIDADE_ETIQUETAS
-# A etiqueta de BASE (sem nada aberto): pelo pedido ligado. Nunca aparece
-# como indicador secundário — toda conversa tem uma das duas.
-ETIQUETAS_BASE = (ETIQUETA_PRE_VENDA, ETIQUETA_POS_VENDA)
+# A etiqueta de BASE (sem nada aberto): pelo pedido ligado — e a Mídia nas
+# conversas de comentário/menção. Nunca aparece como indicador secundário:
+# toda conversa tem uma delas.
+ETIQUETAS_BASE = (ETIQUETA_PRE_VENDA, ETIQUETA_POS_VENDA, ETIQUETA_MIDIA)
 # Como a tela escreve (o histórico também: "de Pós-venda para Reclamação").
 ROTULO_ETIQUETA: dict[str, str] = {
     ETIQUETA_PRE_VENDA: "Pré-venda",
@@ -278,6 +362,8 @@ ROTULO_ETIQUETA: dict[str, str] = {
     ETIQUETA_DEVOLUCAO: "Devolução",
     ETIQUETA_AG_CANCELAMENTO: "Ag. cancelamento",
     ETIQUETA_AVALIACAO: "Avaliação",
+    ETIQUETA_CARRINHO: "Carrinho",
+    ETIQUETA_MIDIA: "Mídia",
 }
 
 
@@ -313,6 +399,89 @@ PLATAFORMAS_AVALIACAO = ("shopee", "ml")
 PLATAFORMAS_RESPONDEM_AVALIACAO = frozenset({"shopee"})
 # Nota "baixa" (1–3): o destaque na lista e, no ML, o que vira pendência.
 NOTA_BAIXA_AVALIACAO = 3
+
+# ── Sites: carrinho abandonado (RF9, 02/10/2026) ──────────────────────────
+# Os sites lidos (o nome é o do token em `sites_estoque_tokens`, o mesmo do
+# GET /api/sites/estoque) e o endereço de produção de cada um. O endereço
+# pode ser trocado sem deploy de código por `atendimento_sites_urls` (o
+# ensaio local aponta para o PHP no localhost).
+SITES = ("charlots", "uranyx")
+NOME_SITE: dict[str, str] = {"charlots": "Charlots", "uranyx": "Uranyx"}
+URL_SITE: dict[str, str] = {
+    "charlots": "https://charlots.com.br",
+    "uranyx": "https://uranyx.com.br",
+}
+# A rota de LEITURA que cada site expõe ao DaVinci (o contrato exato está no
+# topo de `services/atendimento/carrinhos.py` e no LEIA-ME do pacote do site):
+# GET, `Authorization: Bearer <token do site>`.
+ROTA_CARRINHOS_DO_SITE = "/api/davinci/carrinhos"
+# `atendimento_carrinhos.situacao`. ABERTO = parado há mais de
+# `atendimento_carrinho_horas` e ainda sem desfecho. Só um aberto por
+# (site, lojista) — índice único parcial no banco.
+CARRINHO_ABERTO = "aberto"
+# O lojista finalizou pelo WhatsApp depois de o carrinho ficar parado (o
+# evento `finalizado` do site): "virou pedido".
+CARRINHO_RECUPERADO = "recuperado"
+# Passou `CARRINHO_DIAS_RECUPERACAO` sem finalizar, ou o lojista esvaziou o
+# carrinho sem pedir.
+CARRINHO_NAO_RECUPERADO = "nao_recuperado"
+# Alguém da equipe marcou como resolvido na tela (sem lembrete por enquanto).
+CARRINHO_RESOLVIDO = "resolvido"
+SITUACOES_CARRINHO = (
+    CARRINHO_ABERTO,
+    CARRINHO_RECUPERADO,
+    CARRINHO_NAO_RECUPERADO,
+    CARRINHO_RESOLVIDO,
+)
+# Por que o carrinho saiu de aberto (`atendimento_carrinhos.motivo_fim`).
+FIM_CARRINHO_FINALIZADO = "finalizado_whatsapp"
+FIM_CARRINHO_ESVAZIADO = "esvaziado"
+FIM_CARRINHO_PRAZO = "prazo"
+FIM_CARRINHO_RESOLVIDO = "marcado_resolvido"
+# RF9: "sem compra depois de um prazo [sugestão: 7 dias] → não recuperado".
+CARRINHO_DIAS_RECUPERACAO = 7
+
+# ── Redes: comentários e menções (RF7, 02/10/2026) ────────────────────────
+# Só as publicações dos últimos N dias são lidas (mídia mais velha raramente
+# ganha comentário novo, e cada uma custa uma chamada à Graph API).
+MIDIA_DIAS_LEITURA = 30
+# `atendimento_publicacoes.tipo`: a publicação da PRÓPRIA conta (os
+# comentários dela viram conversa) ou a de outra pessoa que MARCOU a marca
+# (IG `/tags`: a menção vira conversa com a legenda dela).
+PUBLICACAO_PROPRIA = "propria"
+PUBLICACAO_MENCAO = "mencao"
+TIPOS_PUBLICACAO = (PUBLICACAO_PROPRIA, PUBLICACAO_MENCAO)
+# Resposta privada a um comentário ("Responder no Direct"): uma mensagem,
+# até 7 dias depois do comentário (regra da Meta para o Instagram).
+RESPOSTA_PRIVADA_DIAS = 7
+# RF7: "Perguntas vão para o topo: comentário com '?' ou palavras como ..."
+# Só ORDENA (o leitor das redes dá à pergunta um prazo mais curto); não tira
+# nada da fila. Sem acento e minúsculas (comparação por palavra inteira,
+# depois de `normalizar_inicio`).
+PALAVRAS_PERGUNTA: tuple[str, ...] = (
+    "quanto",
+    "qual",
+    "quais",
+    "quando",
+    "onde",
+    "como",
+    "tem",
+    "vende",
+    "vendem",
+    "entrega",
+    "entregam",
+    "frete",
+    "prazo",
+    "preco",
+    "valor",
+    "link",
+    "cupom",
+    "disponivel",
+    "aluga",
+    "alugam",
+)
+# A pergunta no comentário ganha este prazo (horas) em vez do padrão.
+SLA_PERGUNTA_COMENTARIO_HORAS = 4
 
 # ── Estados do rascunho da IA ─────────────────────────────────────────────
 # substituido = alguém respondeu sem usar a sugestão (pelo DaVinci ou por fora)
@@ -589,3 +758,17 @@ def e_resposta_automatica(texto: str | None) -> bool:
     """A mensagem da loja é a resposta automática do Duoke (não conta como resposta)."""
     inicio = normalizar_inicio(texto)
     return bool(inicio) and inicio.startswith(RESPOSTAS_AUTOMATICAS)
+
+
+def e_pergunta(texto: str | None) -> bool:
+    """O comentário é PERGUNTA (RF7)? Tem "?" ou uma das `PALAVRAS_PERGUNTA`.
+
+    Palavra inteira, sem acento e sem diferenciar maiúscula ("Preço?",
+    "qual o valor", "TEM no azul"). Só ordena a fila — não decide pendência.
+    """
+    import re
+
+    if "?" in (texto or ""):
+        return True
+    palavras = set(re.findall(r"[a-z0-9]+", normalizar_inicio(texto)))
+    return not palavras.isdisjoint(PALAVRAS_PERGUNTA)

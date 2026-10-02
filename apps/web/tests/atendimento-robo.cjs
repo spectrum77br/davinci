@@ -105,7 +105,7 @@ assert.match(obs, /:href="sellerCenter\.url"/)
 // A barra de lojas apaga a loja parada e aceita loja do robô sem integração.
 const lojas = fs.readFileSync(path.resolve(__dirname, '../components/AtendimentoLojas.vue'), 'utf8')
 assert.match(lojas, /l\.apagada = leituraParada\(l\.status\) \|\|/)
-assert.match(lojas, /if \(semId && !\(viaRobo\(l\.plataforma\) && l\.conta\)\) continue/)
+assert.match(lojas, /if \(semId && !rede && !externo && !directSemConta && !\(viaRobo\(l\.plataforma\) && l\.conta\)\) continue/)
 
 // O ícone tem desenho próprio para as duas (não cai na bolinha cinza).
 const icone = fs.readFileSync(path.resolve(__dirname, '../components/AtendimentoIconePlataforma.vue'), 'utf8')

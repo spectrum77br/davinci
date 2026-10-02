@@ -53,6 +53,7 @@ from app.schemas.atendimento_painel import (
     PainelOut,
 )
 from app.services.atendimento import enviar, foto, instagram, painel
+from app.services.atendimento.constantes import PLATAFORMA_SITE, PLATAFORMAS_EXTERNAS
 from app.services.atendimento.enviar import EnvioRecusado
 
 logger = structlog.get_logger()
@@ -77,6 +78,26 @@ def _painel_do_instagram() -> PainelOut:
     )
 
 
+def _painel_externo(plataforma: str) -> PainelOut:
+    """Carrinho do site e comentário das redes (02/10/2026): o cartão é outro.
+
+    Não há pedido no Bling nem perfil de loja no AdsPower, e nada sai pela
+    caixa (`enviar` recusa): o painel não procura nada disso.
+    """
+    origem = "Carrinho do site" if plataforma == PLATAFORMA_SITE else "Comentário de rede social"
+    return PainelOut(
+        adspower={
+            "motivo": f"{origem}: não há perfil de loja no AdsPower.",
+            "codigo": "sem_perfil",
+        },
+        envio_foto={
+            "pode": False,
+            "motivo": f"{origem}: nada sai pela caixa do DaVinci.",
+            "codigo": "somente_leitura",
+        },
+    )
+
+
 @router.get("/conversas/{conversa_id}/painel", response_model=PainelOut)
 async def painel_do_pedido(
     conversa_id: str,
@@ -92,6 +113,8 @@ async def painel_do_pedido(
         return _painel_do_instagram()
     scope = await resolve_team_scope(session, user)
     c = await _conversa_ou_404(session, conversa_id, scope)
+    if c.plataforma in PLATAFORMAS_EXTERNAS:
+        return _painel_externo(c.plataforma)
     dados = await painel.painel_da_conversa(session, c, user=user, forcar_observacoes=atualizar)
     # Só leitura: nada a gravar (os blocos rodaram em SAVEPOINTs).
     await session.rollback()

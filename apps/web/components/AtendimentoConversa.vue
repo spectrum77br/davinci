@@ -127,6 +127,15 @@ export function frasesDaEtiqueta(h: MudancaDeEtiqueta): { titulo: string; detalh
 //   cada envio (`confirmaSePublica`); a faixa de cima diz isso (no ML, que a
 //   opinião não tem resposta pela API). O mesmo GET alimenta a seção
 //   Avaliação do painel do pedido.
+// - Carrinho abandonado dos sites (RF9) e comentários das redes (RF7),
+//   02/10/2026: nessas conversas não há pedido, IA nem AdsPower. O CARTÃO
+//   (AtendimentoCarrinho / AtendimentoPublicacao) fica no TOPO, como o da
+//   reclamação — sempre à vista, recolhível pelo botão do cabeçalho —, e o
+//   painel da direita não abre. A faixa diz o que vale ali (carrinho: só
+//   leitura, nada vai ao lojista; comentário: a resposta é PÚBLICA e sai
+//   pelo cartão). A caixa de baixo fica só com a NOTA INTERNA e um aviso de
+//   onde se trata a conversa. O selo do canal no cabeçalho diz Carrinho,
+//   Comentário, Menção ou Direct.
 import {
   Archive,
   ArrowLeft,
@@ -145,11 +154,14 @@ import {
   MessageSquareText,
   PanelRightClose,
   PanelRightOpen,
+  PanelTopClose,
+  PanelTopOpen,
   Pause,
   Play,
   RotateCcw,
   Send,
   ShieldCheck,
+  ShoppingCart,
   Sparkles,
   StickyNote,
   ThumbsDown,
@@ -1153,7 +1165,12 @@ function naoPrecisa() {
   const c = conversa.value
   if (!c) return
   const marcar = !c.sem_resposta_necessaria
-  if (marcar && !confirm('Marcar como "não precisa de resposta"?\n\nA conversa sai da fila de aguardando. Na Amazon, clique também em "Não é necessária resposta" no Seller Central — senão a Amazon conta como atrasada.')) return
+  // Comentário/menção das redes (RF7): elogio, emoji — não pede resposta; a
+  // conversa continua no Mídia, só sai do "Falta responder".
+  const aviso = c.plataforma === 'amazon'
+    ? 'A conversa sai da fila de aguardando. Na Amazon, clique também em "Não é necessária resposta" no Seller Central — senão a Amazon conta como atrasada.'
+    : 'A conversa sai da fila de aguardando (continua na lista e no filtro Mídia). Nada é publicado na rede.'
+  if (marcar && !confirm(`Marcar como "não precisa de resposta"?\n\n${aviso}`)) return
   return patch({ sem_resposta_necessaria: marcar }, 'nao_precisa', marcar ? 'Marcada: não precisa de resposta' : 'Voltou para a fila')
 }
 // O <a> do balão segue o caminho normal do navegador (abre a Amazon); aqui só
@@ -1456,9 +1473,35 @@ const reclamacoesQtd = ref(0)
 function aoCarregarReclamacoes(r: ReclamacoesResposta) {
   reclamacoesQtd.value = r?.itens?.length || 0
 }
+// Carrinho do site e comentário das redes (02/10/2026) não têm pedido de
+// plataforma: nem reclamação nem avaliação para buscar.
+const CANAIS_SEM_PEDIDO = new Set(['carrinho', 'comentario'])
 const temCartaoReclamacao = computed(() => {
   const c = conversa.value
-  return !!c && !c.id.startsWith('ig:') && !c.somente_leitura
+  return !!c && !c.id.startsWith('ig:') && !c.somente_leitura && !CANAIS_SEM_PEDIDO.has(c.canal)
+})
+// O canal de fora dos marketplaces desta conversa ('carrinho' | 'comentario'),
+// ou null. Nele o cartão vai no topo, sem IA, sem AdsPower e sem painel.
+const canalExterno = computed<'carrinho' | 'comentario' | null>(() => {
+  const c = conversa.value?.canal
+  return c === 'carrinho' || c === 'comentario' ? c : null
+})
+// O cartão do topo, aberto (padrão) ou recolhido. Recolher só esconde
+// (v-show): o texto que estava sendo escrito na resposta não se perde.
+const cartaoExternoAberto = ref(true)
+// "Menção" (alguém marcou a marca) × "Comentário" — a origem vem no título
+// ("menção · Foto 30/09", redes.origem_da_publicacao).
+const ehMencao = computed(() => /^menção/i.test(conversa.value?.anuncio_titulo || ''))
+// O selo do canal ao lado da loja: só onde ele diz algo (a loja com várias
+// caixas, a Amazon, a avaliação, os canais de fora e o Direct).
+const seloCanal = computed(() => {
+  const c = conversa.value
+  if (!c) return ''
+  if (c.id.startsWith('ig:')) return 'Direct'
+  if (c.canal === 'comentario') return ehMencao.value ? 'Menção' : 'Comentário'
+  if (c.canal === 'carrinho') return 'Carrinho'
+  if (variasCaixas(c.plataforma) || c.plataforma === 'amazon' || c.canal === 'avaliacao') return canalLabel(c.canal)
+  return ''
 })
 
 // ─── avaliação de venda (RF8, 02/10/2026) ───────────────────────────────────
@@ -1480,6 +1523,11 @@ const avaliacaoDaConversa = computed(() => {
   return (avaliacoesDados.value?.itens || []).find((a) => a.conversa_id === c.id) ?? null
 })
 function aoMudarAvaliacao() {
+  if (props.conversaId) void carregar(props.conversaId, true)
+}
+// O painel do carrinho/da publicação (02/10/2026) mudou a conversa
+// ("marcar como resolvido", resposta, ocultar): relê, como a avaliação.
+function aoMudarPainelExterno() {
   if (props.conversaId) void carregar(props.conversaId, true)
 }
 // Mensagem nova na conversa (a resposta da loja chegou, a marca de tratada,
@@ -1770,6 +1818,7 @@ watch(() => props.conversaId, (novo, velho) => {
   const g = guardados.get(novo)
   texto.value = g?.texto || ''
   prefill.value = g?.prefill || ''
+  cartaoExternoAberto.value = true
   baseRascunhoId.value = g?.base || null
   rejeitadaId.value = g?.rejeitada || null
   // Só no navegador: no servidor a resposta chegaria depois de a página já
@@ -1828,7 +1877,7 @@ watch(() => props.conversaId, (novo, velho) => {
                 <span class="inline-flex min-w-0 items-center gap-1 text-[13px]" :title="`${plataformaInfo(conversa.plataforma).nome} · ${conversa.conta || ''}`">
                   <AtendimentoIconePlataforma :plataforma="conversa.plataforma" :tamanho="15" />
                   <span class="truncate">{{ conversa.conta || plataformaInfo(conversa.plataforma).nome }}</span>
-                  <span v-if="variasCaixas(conversa.plataforma) || conversa.plataforma === 'amazon' || conversa.canal === 'avaliacao'" class="rounded bg-muted px-1 text-[10px] text-muted-foreground">{{ canalLabel(conversa.canal) }}</span>
+                  <span v-if="seloCanal" class="rounded bg-muted px-1 text-[10px] text-muted-foreground" data-selo-canal>{{ seloCanal }}</span>
                 </span>
                 <button
                   v-if="conversa.pedido_marketplace"
@@ -1852,14 +1901,22 @@ watch(() => props.conversaId, (novo, velho) => {
                   <TriangleAlert v-if="SINAIS_CLIENTE[sn].alerta" class="size-3" aria-hidden="true" />{{ SINAIS_CLIENTE[sn].label }}
                 </span>
                 <!-- Sem loja (Amazon sem conta) não há modo: nada de "Observar" inventado. -->
-                <span v-if="!conversa.somente_leitura && detalhe.envio.modo" class="rounded px-1.5 py-px text-[10px] font-medium" :class="modo.cls" :title="`modo da loja: ${modo.hint}`">{{ modo.label }}</span>
+                <span v-if="!conversa.somente_leitura && detalhe.envio.modo && canalExterno !== 'carrinho'" class="rounded px-1.5 py-px text-[10px] font-medium" :class="modo.cls" :title="`modo da loja: ${modo.hint}`">{{ modo.label }}</span>
+                <!-- O Direct do Instagram e o carrinho do site: nada sai daqui (não
+                     é modo de loja que se troca — é o canal). -->
+                <span
+                  v-if="conversa.somente_leitura || canalExterno === 'carrinho'"
+                  class="inline-flex items-center gap-0.5 rounded bg-muted px-1.5 py-px text-[10px] font-medium"
+                  :title="canalExterno === 'carrinho' ? 'carrinho do site: o DaVinci só lê — nada é mandado ao lojista' : 'Direct do Instagram: o DaVinci só lê — responda pela caixa de entrada do Instagram'"
+                  data-selo-so-leitura
+                ><Lock class="size-3" aria-hidden="true" /> só leitura</span>
                 <span v-if="prazo" class="rounded px-1.5 py-px font-medium" :class="prazo.cls" :title="prazo.titulo">{{ prazo.texto }}</span>
                 <!-- "Não precisa" não é "respondida": ninguém respondeu, alguém decidiu que não precisava. -->
                 <span v-else-if="conversa.sem_resposta_necessaria" class="inline-flex items-center gap-0.5 rounded bg-muted px-1.5 py-px"><MailX class="size-3.5" /> não precisa de resposta</span>
                 <span v-else-if="conversa.situacao === 'respondida'" class="inline-flex items-center gap-0.5 text-emerald-700 dark:text-emerald-300"><CheckCheck class="size-3.5" /> respondida</span>
                 <span v-if="conversa.atribuido_a" class="rounded bg-sky-500/15 px-1.5 py-px text-sky-700 dark:text-sky-300">com {{ atribuidaAMim ? 'você' : (conversa.atribuido_a_nome || 'alguém') }}</span>
                 <span v-if="conversa.ia_pausada" class="inline-flex items-center gap-1 rounded bg-muted px-1.5 py-px"><Bot class="size-3" /> IA pausada</span>
-                <span v-if="conversa.anuncio_titulo" class="min-w-0 max-w-full truncate" :title="conversa.anuncio_titulo">Anúncio: {{ conversa.anuncio_titulo }}</span>
+                <span v-if="conversa.anuncio_titulo" class="min-w-0 max-w-full truncate" :title="conversa.anuncio_titulo">{{ canalExterno === 'comentario' ? 'Publicação' : 'Anúncio' }}: {{ conversa.anuncio_titulo }}</span>
               </div>
             </div>
             <div class="ml-auto flex max-w-full flex-wrap items-center justify-end gap-1">
@@ -1879,6 +1936,7 @@ watch(() => props.conversaId, (novo, velho) => {
                   <span class="ml-1 hidden 2xl:inline">{{ atribuidaAMim ? 'Soltar' : 'Atribuir a mim' }}</span>
                 </Button>
                 <Button
+                  v-if="!canalExterno"
                   size="sm"
                   variant="outline"
                   class="h-7 px-2 text-xs"
@@ -1932,12 +1990,12 @@ watch(() => props.conversaId, (novo, velho) => {
                   </PopoverPortal>
                 </PopoverRoot>
                 <Button
-                  v-else-if="conversa.plataforma === 'amazon'"
+                  v-else-if="conversa.plataforma === 'amazon' || canalExterno === 'comentario'"
                   size="sm"
                   variant="outline"
                   class="h-7 px-2 text-xs"
                   :disabled="!!acao"
-                  :title="conversa.sem_resposta_necessaria ? 'desfazer: volta para a fila' : 'não precisa de resposta (lembre de marcar também no Seller Central)'"
+                  :title="conversa.sem_resposta_necessaria ? 'desfazer: volta para a fila' : (conversa.plataforma === 'amazon' ? 'não precisa de resposta (lembre de marcar também no Seller Central)' : 'não precisa de resposta (elogio, emoji): sai do Falta responder, continua no Mídia')"
                   :aria-label="conversa.sem_resposta_necessaria ? 'precisa de resposta' : 'não precisa de resposta'"
                   @click="naoPrecisa"
                 >
@@ -2018,7 +2076,7 @@ watch(() => props.conversaId, (novo, velho) => {
               <!-- 🖥 AdsPower: o perfil da loja desta conversa, no computador de quem
                    clicou (RF11). Desligado com o porquê quando não há perfil. -->
               <AtendimentoAdsPower
-                v-if="!conversa.somente_leitura"
+                v-if="!conversa.somente_leitura && !canalExterno"
                 :conversa-id="conversa.id"
                 :perfil="painelDados?.adspower ?? null"
                 :carregando="painelCarregando"
@@ -2027,7 +2085,23 @@ watch(() => props.conversaId, (novo, velho) => {
               <Button size="sm" variant="ghost" class="h-7 px-2" :disabled="carregando" title="atualizar a conversa (e o painel do pedido)" aria-label="atualizar a conversa" @click="atualizarTudo">
                 <RotateCcw class="size-3.5" :class="{ 'animate-spin': carregando }" />
               </Button>
-              <Button size="sm" :variant="pedidoVisivel ? 'secondary' : 'outline'" class="h-7 px-2 text-xs" :title="pedidoVisivel ? 'esconder o pedido' : 'mostrar o pedido'" @click="alternarPedido">
+              <!-- Carrinho/comentário: não há pedido — o botão recolhe e mostra o
+                   cartão do topo. -->
+              <Button
+                v-if="canalExterno"
+                size="sm"
+                :variant="cartaoExternoAberto ? 'secondary' : 'outline'"
+                class="h-7 px-2 text-xs"
+                :title="cartaoExternoAberto ? 'recolher o cartão' : 'mostrar o cartão'"
+                :aria-expanded="cartaoExternoAberto"
+                data-alternar-cartao
+                @click="cartaoExternoAberto = !cartaoExternoAberto"
+              >
+                <PanelTopClose v-if="cartaoExternoAberto" class="size-3.5" />
+                <PanelTopOpen v-else class="size-3.5" />
+                <span class="ml-1">{{ canalExterno === 'carrinho' ? 'Carrinho' : 'Publicação' }}</span>
+              </Button>
+              <Button v-else size="sm" :variant="pedidoVisivel ? 'secondary' : 'outline'" class="h-7 px-2 text-xs" :title="pedidoVisivel ? 'esconder o pedido' : 'mostrar o pedido'" @click="alternarPedido">
                 <PanelRightClose v-if="pedidoVisivel" class="size-3.5" />
                 <PanelRightOpen v-else class="size-3.5" />
                 <span class="ml-1">Pedido</span>
@@ -2053,6 +2127,16 @@ watch(() => props.conversaId, (novo, velho) => {
           <template v-else>
             <Globe class="mr-1 inline size-3.5" />Avaliação de venda: a resposta é PÚBLICA — aparece no anúncio, para qualquer comprador.
           </template>
+        </div>
+        <!-- Carrinho abandonado do site (RF9): só leitura POR ESCOLHA — nada vai
+             ao lojista pelo DaVinci (sem lembrete por enquanto). -->
+        <div v-else-if="canalExterno === 'carrinho'" class="shrink-0 border-b border-teal-500/30 bg-teal-500/10 px-3 py-1.5 text-xs text-teal-900 dark:text-teal-200" data-faixa-carrinho>
+          <Lock class="mr-1 inline size-3.5" />Carrinho abandonado no site {{ conversa.conta || '' }}: só leitura — nada é mandado ao lojista pelo DaVinci. Fale com ele pelo contato do cartão e, depois, marque como resolvido.
+        </div>
+        <!-- Comentário/menção das redes (RF7): a resposta é PÚBLICA e sai pelo
+             cartão da publicação (atrás do envio, como a avaliação). -->
+        <div v-else-if="canalExterno === 'comentario'" class="shrink-0 border-b border-pink-500/30 bg-pink-500/10 px-3 py-1.5 text-xs text-pink-900 dark:text-pink-200" data-faixa-comentario>
+          <Globe class="mr-1 inline size-3.5" />{{ ehMencao ? 'Menção' : 'Comentário' }} no {{ plataformaInfo(conversa.plataforma).nome }}: a resposta é PÚBLICA — aparece na publicação, para qualquer pessoa. Responda pelo cartão da publicação ("Direct" manda uma mensagem privada).<template v-if="flags && !flags.envio_ativo"> Por enquanto o envio pelo DaVinci está desligado: responda pelo app do {{ plataformaInfo(conversa.plataforma).nome }}.</template>
         </div>
         <div v-else-if="conversa.situacao === 'bloqueada'" class="shrink-0 border-b border-red-500/30 bg-red-500/10 px-3 py-1.5 text-xs text-red-700 dark:text-red-300">
           <Lock class="mr-1 inline size-3.5" />A plataforma não deixa mais responder esta conversa<template v-if="conversa.bloqueio_motivo">: <span :title="conversa.bloqueio_motivo">{{ bloqueioLegivel(conversa.bloqueio_motivo) }}</span></template>.
@@ -2092,7 +2176,7 @@ watch(() => props.conversaId, (novo, velho) => {
           Confira<template v-if="amazon.caso"> <a :href="amazon.caso" target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-0.5 underline hover:text-foreground">no Seller Central<ExternalLink class="size-3" /></a></template><template v-else> no Seller Central</template>: se esta já foi respondida, marque "não precisa de resposta".
         </div>
         <div v-if="conversa.sem_resposta_necessaria" class="shrink-0 border-b bg-muted/50 px-3 py-1.5 text-xs text-muted-foreground">
-          Marcada como "não precisa de resposta".<template v-if="conversa.plataforma === 'amazon'">
+          Marcada como "não precisa de resposta".<template v-if="canalExterno === 'comentario' && ehMencao"> A menção chega assim: a Meta não deixa o DaVinci ler os comentários do post de outra pessoa, então a resposta da marca pelo app não volta para cá. Se precisar de atenção, use "Precisa de resposta".</template><template v-if="conversa.plataforma === 'amazon'">
             <!-- O link fica aqui também: a aba pode ter sido fechada antes de a Amazon confirmar. -->
             <template v-if="amazon.semResposta"> Se ainda não marcou na Amazon:
               <a :href="amazon.semResposta" target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-0.5 underline hover:text-foreground">abrir "Não é necessária resposta"<ExternalLink class="size-3" /></a>
@@ -2131,6 +2215,40 @@ watch(() => props.conversaId, (novo, velho) => {
             @mudou="aoMudarAvaliacao"
             @abrir-imagem="abrirImagem"
             @abrir-conversa="(id: string) => emit('abrirConversa', id)"
+          />
+        </div>
+
+        <!-- Cartão do carrinho do site (RF9) ou da publicação das redes (RF7),
+             02/10/2026: no topo, como o da reclamação. Cada um busca o seu (GET
+             /conversas/{id}/carrinho | /publicacao), rola por dentro e avisa
+             `mudou` quando uma ação muda a conversa (a etiqueta, a fila).
+             Recolher só esconde: a resposta em digitação não se perde. -->
+        <div
+          v-if="canalExterno"
+          v-show="cartaoExternoAberto"
+          class="flex max-h-[62vh] min-h-0 shrink-0 flex-col border-b bg-card"
+          data-cartao-externo
+        >
+          <AtendimentoCarrinho
+            v-if="canalExterno === 'carrinho'"
+            :key="`carrinho-${conversa.id}`"
+            :conversa="conversa"
+            :can-edit="canEdit"
+            topo
+            @fechar="cartaoExternoAberto = false"
+            @mudou="aoMudarPainelExterno"
+            @abrir-imagem="abrirImagem"
+          />
+          <AtendimentoPublicacao
+            v-else
+            :key="`publicacao-${conversa.id}`"
+            :conversa="conversa"
+            :can-edit="canEdit"
+            topo
+            @fechar="cartaoExternoAberto = false"
+            @mudou="aoMudarPainelExterno"
+            @resolver="patch({ situacao: 'fechada' }, 'fechar', 'Marcada como resolvida')"
+            @abrir-imagem="abrirImagem"
           />
         </div>
 
@@ -2289,7 +2407,7 @@ watch(() => props.conversaId, (novo, velho) => {
               title="recado para a equipe — não vai para o comprador"
               @click="modoCaixa = 'nota'"
             ><StickyNote class="size-3.5" /> Nota interna</button>
-            <template v-if="modoCaixa === 'responder'">
+            <template v-if="modoCaixa === 'responder' && !canalExterno">
               <input ref="fotoInput" type="file" accept="image/jpeg,image/png" class="hidden" aria-hidden="true" tabindex="-1" @change="aoEscolherFoto" />
               <Button
                 size="sm"
@@ -2337,6 +2455,23 @@ watch(() => props.conversaId, (novo, velho) => {
             :can-edit="canEdit"
             @criada="aoCriarNota"
           />
+
+          <!-- Carrinho/comentário: nada sai por esta caixa (nem a IA sugere) —
+               o aviso de onde se trata; a nota interna continua na outra aba. -->
+          <div
+            v-else-if="canalExterno"
+            class="flex items-start gap-1.5 rounded-md border border-dashed px-2.5 py-1.5 text-xs text-muted-foreground"
+            data-caixa-externa
+          >
+            <ShoppingCart v-if="canalExterno === 'carrinho'" class="mt-0.5 size-3.5 shrink-0" aria-hidden="true" />
+            <Globe v-else class="mt-0.5 size-3.5 shrink-0" aria-hidden="true" />
+            <span class="flex-1">
+              <template v-if="canalExterno === 'carrinho'">Nada é mandado ao lojista por aqui (sem lembrete por WhatsApp ou e-mail por enquanto). O contato dele está no cartão do carrinho, acima; quando tratar, use "Marcar como resolvido".</template>
+              <template v-else>Responda pelo cartão da publicação, acima: "Comentário (público)" ou "Direct (privado)".</template>
+              Recado para a equipe: aba Nota interna.
+            </span>
+            <button v-if="!cartaoExternoAberto" type="button" class="shrink-0 underline hover:text-foreground" @click="cartaoExternoAberto = true">mostrar o cartão</button>
+          </div>
 
           <!-- modo observação: quem responde é o Duoke; aqui, o que a IA responderia -->
           <AtendimentoObservacao
@@ -2537,9 +2672,10 @@ watch(() => props.conversaId, (novo, velho) => {
     </div>
 
     <!-- pedido -->
-    <div v-if="gaveta && !telaLarga" class="fixed inset-0 z-40 bg-black/40" @click="gaveta = false" />
+    <div v-if="gaveta && !telaLarga && !canalExterno" class="fixed inset-0 z-40 bg-black/40" @click="gaveta = false" />
+    <!-- Carrinho/comentário (02/10/2026): sem pedido — o cartão deles é o do topo. -->
     <aside
-      v-if="detalhe && pedidoVisivel"
+      v-if="detalhe && pedidoVisivel && !canalExterno"
       class="flex min-h-0 flex-col border-l bg-card"
       :class="telaLarga ? 'w-[340px] shrink-0' : 'fixed inset-y-0 right-0 z-50 w-[min(380px,92vw)] shadow-2xl'"
     >

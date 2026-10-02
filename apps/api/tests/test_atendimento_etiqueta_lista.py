@@ -245,8 +245,10 @@ async def test_resumo_conta_por_etiqueta(client, db, make_user, pessoa):
         "ag_cancelamento": 1,
         "devolucao": 1,
         "avaliacao": 0,
+        "carrinho": 0,
         "pre_venda": 1,
         "pos_venda": 2,
+        "midia": 0,
     }
     shopee = next(p for p in r["plataformas"] if p["plataforma"] == "shopee")
     assert shopee["etiquetas"] == {
@@ -254,8 +256,10 @@ async def test_resumo_conta_por_etiqueta(client, db, make_user, pessoa):
         "ag_cancelamento": 1,
         "devolucao": 1,
         "avaliacao": 0,
+        "carrinho": 0,
         "pre_venda": 1,
         "pos_venda": 1,
+        "midia": 0,
     }
     loja_ml = next(lj for lj in r["lojas"] if lj["integration_id"] == str(c["pack"].integration_id))
     assert loja_ml["etiquetas"]["pos_venda"] == 1

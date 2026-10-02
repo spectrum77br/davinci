@@ -8,6 +8,8 @@ A base foi a leitura do código e contagens com `SELECT` no banco de produção.
 Quando o spec precisa ser corrigido **e** ainda há trabalho, a linha traz os dois: ✏️❌ = corrigir o spec, nada feito; ✏️🟡 = corrigir o spec, parte pronta; ✏️✅ = só o spec está errado.
 A conferência de completude (01/10, à tarde) está no §6.
 
+**Atualização de 02/10/2026 (pronto no `main` local, sem commit nem deploy):** comentários e menções do Instagram e do Facebook (RF7), carrinho abandonado dos sites Charlots e Uranyx (RF9) e o Direct do Instagram separado por conta. O status novo está no §2.5, §3.11 e §3.13 (linhas marcadas "02/10").
+
 ---
 
 ## 1. Resumo
@@ -123,6 +125,7 @@ A conferência de completude (01/10, à tarde) está no §6.
   - O ✈ da Uranyx também vale para o TikTok, que publica pelo AdsPower, sem token.
   - A Locagil não tem nenhuma conexão.
 - **Os tokens servem só para publicar.** Faltam os escopos de leitura de comentários e insights, e o YouTube precisa do escopo `youtube.force-ssl` para responder.
+- **Medido em 02/10/2026 (sondas só GET, no container):** são **3 tokens diferentes** (Páginas; IG Charlots e Uranyx; IG 7buyers), todos SYSTEM_USER do "DaVinci Publicador", sem vencimento e com os mesmos 13 escopos. O Instagram lê mídias e comentários, mas o comentário vem **sem o autor**, e as menções (`/tags`) são negadas (#10). O Facebook lê os posts só com o token da Página e nega as menções da Página (`/tagged`, #100). Faltam 4 escopos no token novo: `instagram_manage_comments`, `pages_read_user_content`, `pages_manage_engagement` e `pages_messaging` (`pages_manage_metadata` é opcional, só para webhook). Volume: Uranyx 4 comentários em 38 mídias; Charlots 3 em 50, nenhuma mídia nos últimos 30 dias; Páginas sem comentário.
 - **A conexão da Meta não é por OAuth:** cola-se um token de System User. O token do **Direct vence em 16/11/2026** e não se renova sozinho.
 - **TikTok de conteúdo:** o app foi recusado em duas auditorias, então só daria por robô no AdsPower.
 - **Volume real de mídia é baixo:** as 69 publicações automáticas somam cerca de 1 comentário. O Direct teve 9 conversas desde 17/09, a última em 23/09; vale conferir se o webhook da Meta continua assinado.
@@ -132,6 +135,7 @@ A conferência de completude (01/10, à tarde) está no §6.
   - **Correção (02/10/2026, medido só com GET):** a avaliação da venda do ML (`/orders/{id}/feedback`) está **morta** — 0 de 60 pedidos de 7 a 30 dias atrás com avaliação (404 em todos), e `order.feedback = {buyer: null, seller: null}` nos 100 pedidos mais recentes. O que liga ao pedido hoje é a **opinião do produto** (`/reviews/item/{id}`, 1–5 estrelas, texto e fotos), que traz o `order_id` em 100%. Ela é do PRODUTO (anúncios irmãos, até de outra conta nossa, devolvem as mesmas), não vem por data, e o ML **não deixa responder pela API**. É ela que o atendimento lê (`services/atendimento/avaliacoes.py`), com "marcar como tratada" no lugar da resposta.
 - **Carrinho:**
   - Charlots e Uranyx são **atacado**: o carrinho é do lojista logado e termina "pelo WhatsApp", sem checkout, frete, cupom, etapa nem link de recuperação. Quando o lojista confirma o envio, o site **apaga** o carrinho sem histórico.
+  - **02/10/2026 (pacotes na Mesa, não publicados):** o site passa a gravar o "Sim, enviei" e o "Esvaziar" em `adm_carrinho_eventos` e ganha a rota de leitura `GET /api/davinci/carrinhos` (mesmo token do estoque, servidor a servidor). O DaVinci lê a cada 30 min (`ATENDIMENTO_CARRINHOS_ATIVA`, desligado de fábrica). Visitante sem login continua fora (não há contato).
   - A 7buyers (Shopify) tem API de checkouts abandonados.
 - **Zap:**
   - Não há nenhuma integração de WhatsApp. O "Fone/WhatsApp" é `marcas.sac_fone`, preenchido em 4 de 9 marcas.
@@ -340,18 +344,29 @@ A conferência de completude (01/10, à tarde) está no §6.
 | Contas por marca e rede | ✅ | `redes_sociais` (20 linhas, os @ batem com o spec) | Não criar `conta_rede` | — | — |
 | ✈ / conexão oficial existente | ✏️🟡 | 7 tokens de publicação; ✈ = `postagem_auto` + token | Regerar os tokens com escopos de leitura | P | App Review da Meta |
 | Conexão por OAuth | ✏️🟡 | Meta = token de System User colado; YouTube = OAuth; Direct = 3º token que **vence em 16/11/2026** | Renovação automática do token do Direct; tela "Conectar" | M | App id/secret da Meta no servidor; prazo 16/11 |
-| Todo comentário vira conversa (uma por pessoa por publicação, incluindo anúncios, Q14) | ❌ | O webhook só trata `object=instagram` e `messaging` (`webhooks.py:836-845`); cerca de 1 comentário em 69 publicações | Campos de webhook comments/feed, permissões, tabelas, leitura inicial, 2 segredos de assinatura | G | App Review; volume quase nulo |
-| Toda menção vira conversa | ❌ | `story_mention` gravado como anexo genérico | Tratar menção + baixar a mídia (some em 24 h); campo `mentions` | M | Permissões |
+| Todo comentário vira conversa (uma por pessoa por publicação, incluindo anúncios, Q14) | 🟡 | **02/10:** leitura por consulta, só GET (`services/atendimento/redes.py`, cron a cada 15 min, `ATENDIMENTO_REDES_ATIVA`): mídias de 30 dias do IG e posts da Página, uma conversa `comentario` por (pessoa, publicação). Sem o escopo novo, o canal fica `sem_escopo` | Token novo com os 4 escopos; anúncios (dark posts) e webhook ficam para depois | — | Token novo |
+| (antes de 02/10) | ❌ | O webhook só trata `object=instagram` e `messaging` (`webhooks.py:836-845`); cerca de 1 comentário em 69 publicações | Campos de webhook comments/feed, permissões, tabelas, leitura inicial, 2 segredos de assinatura | G | App Review; volume quase nulo |
+| Toda menção vira conversa | 🟡 | **02/10:** só a MARCAÇÃO na foto/vídeo do IG (`/{ig}/tags`) vira conversa "menção · Foto 30/09". Como a resposta da marca no post de outra pessoa não volta (a Meta não deixa ler aqueles comentários), a menção nasce "não precisa de resposta", menos a que é pergunta | O @ na legenda do post de outra pessoa, a menção em story e o @ em comentário de outro post (só por webhook: campo `mentions`, `pages_manage_metadata`, app assinado); menções da Página (`/tagged`) | M | Token novo; webhook |
+| (antes de 02/10) | ❌ | `story_mention` gravado como anexo genérico | Tratar menção + baixar a mídia (some em 24 h); campo `mentions` | M | Permissões |
 | Direct, Messenger e outras mensagens privadas | 🟡 | Direct no /atendimento só leitura (9 conversas); robô de DM com `dm_auto` | Direct da Locagil; Messenger; conferir a assinatura do webhook; decidir sobre o `dm_auto` | M | Decisão do dono |
-| Pendente até responder; ocultar e resolver | 🟡 | Direct fica "aguardando" até a resposta | Ocultar comentário + resolver auditado | P | Comentários |
-| Perguntas no topo | ❌ | — | `eh_pergunta` + lista configurável | P | Comentários |
-| Resposta da marca não abre conversa | 🟡 | Eco do Direct = autor loja | Mesma regra nos comentários | P | Comentários |
-| Lista: etiqueta MÍDIA, origem, 24 h, filtros | 🟡 | Logo IG, janela de 24 h com contagem; uma linha "Direct" sem separar por marca; só para quem vê todas as equipes | Etiqueta, texto de origem, grupo por marca, filtros, escopo restrito | M | Etiqueta (RF1) |
-| Conversa ③ da mídia: cabeçalho (@ da pessoa, rede + marca), cartão "comentário público" com Ver publicação, Ocultar e Resolver, aviso de interação anterior, abas Comentário · Direct, modelos rápidos | ❌ | Só o Direct aparece, como conversa comum só leitura | Cartão, abas e ações; modelos curtos (agradecer elogio) em `atendimento_modelos` | M | Comentários; envio |
-| Responder em público ou no Direct pelo /atendimento | 🟡 | Direct recusa com `somente_leitura` (`routers/atendimento.py:1492`); a fila de envio do robô já existe (`instagram_dm.py`, `responder_dm`) | Ligar a caixa do Direct à fila existente (P/M); resposta pública e privada a comentário | M | Envio desligado; permissões |
-| Detalhes da publicação (foto ou vídeo com player, legenda, métricas, comentários com o da conversa em destaque, produto com preço e estoque por cor, miniatura própria, imagem do story) | 🟡 | `marketing_postagens` + métricas + criativo → produto (só o que o DaVinci publicou) | Posts externos, lista de comentários, painel ④, preço e estoque do produto, guardar a miniatura e a imagem do story | M | Comentários |
-| Instagram (API) | 🟡 | Webhook de mensagens, publicação, métricas | Comentários, menções, ocultar, resposta privada | G | App Review |
-| Facebook (Página) | ❌ | Só publicação de Reels (Charlots, Uranyx) | Permissões de página, webhook `object=page`, Messenger, conectar 7buyers e Locagil | G | App Review |
+| Pendente até responder; ocultar e resolver | 🟡 | **02/10:** pendente até a resposta da marca (a menção comum, não: ver acima); "Ocultar/mostrar" no cartão (registra quem), atrás do envio; "Marcar como resolvido" no cartão (fecha a conversa, nada vai à rede) e "Não precisa de resposta" no cabeçalho | — | — | Envio |
+| (antes de 02/10) | 🟡 | Direct fica "aguardando" até a resposta | Ocultar comentário + resolver auditado | P | Comentários |
+| Perguntas no topo | ✅ | **02/10:** `e_pergunta` (palavras do RF7, palavra inteira, ou "?") e prazo de 4 h na pergunta; na lista, selo "? pergunta", a pergunta primeiro no filtro Mídia e o comentário comum no fim do "Falta responder" (só ordena) | Lista configurável na tela | P | — |
+| (antes de 02/10) | ❌ | — | `eh_pergunta` + lista configurável | P | Comentários |
+| Resposta da marca não abre conversa | ✅ | **02/10:** o comentário da própria conta vira mensagem da LOJA na conversa de quem foi respondido | — | — | — |
+| (antes de 02/10) | 🟡 | Eco do Direct = autor loja | Mesma regra nos comentários | P | Comentários |
+| Lista: etiqueta MÍDIA, origem, 24 h, filtros | ✅ | **02/10:** etiqueta Mídia (rosa, base), origem ("Reels 28/09"), SLA 24 h, filtro Mídia (com o Direct), **uma linha por conta** na barra (o Direct + os comentários da conta; a 7buyers só com o Direct), filtro por conta | Escopo por equipe (hoje só quem vê todas as equipes) | P | — |
+| (antes de 02/10) | 🟡 | Logo IG, janela de 24 h com contagem; uma linha "Direct" sem separar por marca; só para quem vê todas as equipes | Etiqueta, texto de origem, grupo por marca, filtros, escopo restrito | M | Etiqueta (RF1) |
+| Conversa ③ da mídia: cabeçalho (@ da pessoa, rede + marca), cartão "comentário público" com Ver publicação, Ocultar e Resolver, aviso de interação anterior, abas Comentário · Direct, modelos rápidos | 🟡 | **02/10:** cartão da publicação no TOPO da conversa (`AtendimentoPublicacao.vue`): "Abrir na rede", Ocultar, aviso de interação anterior, abas "Comentário (público)" · "Direct (privado)"; selo Comentário/Menção/Direct no cabeçalho | Modelos rápidos para comentário | P | — |
+| (antes de 02/10) | ❌ | Só o Direct aparece, como conversa comum só leitura | Cartão, abas e ações; modelos curtos (agradecer elogio) em `atendimento_modelos` | M | Comentários; envio |
+| Responder em público ou no Direct pelo /atendimento | 🟡 | **02/10:** resposta pública, resposta privada (1 por comentário, até 7 dias) e ocultar implementados (`routers/atendimento_redes.py`), **bloqueados** com `ATENDIMENTO_ENVIO_ATIVO=false` (409 `envio_desligado`), com confirmação "Responder em PÚBLICO?" e a conta em modo humano. Nunca chamados em produção | Primeiro uso acompanhado; o Direct (DM) continua só leitura | M | Envio; token novo |
+| (antes de 02/10) | 🟡 | Direct recusa com `somente_leitura` (`routers/atendimento.py:1492`); a fila de envio do robô já existe (`instagram_dm.py`, `responder_dm`) | Ligar a caixa do Direct à fila existente (P/M); resposta pública e privada a comentário | M | Envio desligado; permissões |
+| Detalhes da publicação (foto ou vídeo com player, legenda, métricas, comentários com o da conversa em destaque, produto com preço e estoque por cor, miniatura própria, imagem do story) | 🟡 | **02/10:** `atendimento_publicacoes` (miniatura renovada depois de 6 h, legenda, link, curtidas, comentários) e `atendimento_comentarios`; o cartão mostra os da conversa em destaque | Produto da publicação com preço e estoque; imagem do story | M | — |
+| (antes de 02/10) | 🟡 | `marketing_postagens` + métricas + criativo → produto (só o que o DaVinci publicou) | Posts externos, lista de comentários, painel ④, preço e estoque do produto, guardar a miniatura e a imagem do story | M | Comentários |
+| Instagram (API) | 🟡 | **02/10:** comentários, menções, ocultar e resposta privada pela Graph (leitura só GET) | Token novo com `instagram_manage_comments` | P | Token novo |
+| (antes de 02/10) | 🟡 | Webhook de mensagens, publicação, métricas | Comentários, menções, ocultar, resposta privada | G | App Review |
+| Facebook (Página) | 🟡 | **02/10:** comentários dos posts da Página (token da Página), responder e ocultar atrás do envio | Messenger; menções (`/tagged`); 7buyers e Locagil | M | Token novo |
+| (antes de 02/10) | ❌ | Só publicação de Reels (Charlots, Uranyx) | Permissões de página, webhook `object=page`, Messenger, conectar 7buyers e Locagil | G | App Review |
 | YouTube | 🟡 | 2 canais conectados com `youtube.readonly`, escopo que já permite ler `commentThreads`. Nenhum código lê comentários hoje (`marketing/metricas.py` só lê estatísticas) | Job de leitura; `force-ssl` para responder; conectar 7buyers e Locagil | M | Reautorização por canal |
 | TikTok (conteúdo) | ✏️❌ | App recusado 2×; postagem pelo AdsPower | Só por robô no AdsPower | G | Risco de bloqueio da conta |
 | X | ❌ | Nada | Levantar o custo, depois OAuth + leitura e envio | G | Custo da API |
@@ -375,12 +390,18 @@ A conferência de completude (01/10, à tarde) está no §6.
 
 | Item | Status | O que já existe (onde) | O que falta | Esforço | Depende de |
 |---|---|---|---|---|---|
-| Origem: API da plataforma de loja virtual (marketplaces não mostram o carrinho) | ✏️❌ | Charlots e Uranyx em PHP próprio (`adm_carrinho`, lojista logado); 7buyers Shopify; Locagil fora do ar | O site manda os carrinhos ao DaVinci (como `/api/sites/estoque`); 7buyers pela Admin API | M | Deploy nos sites; token Shopify |
-| Quando abre (1 h); uma conversa por carrinho; entra na conversa aberta do mesmo cliente na loja | ❌ | Todo carrinho persistido é de lojista identificado | Tabela + regra de tempo (sugestão para atacado: 24 h); juntar à conversa aberta do cliente | M | Decisão do dono |
-| Detalhes (itens com estoque, frete, cupom, etapa, link, cliente, compras e carrinhos anteriores) | ✏️❌ | Estoque viável (o DaVinci alimenta o site); frete, cupom e etapa não existem | Itens, estoque, preço de atacado e cliente para os PHP | M | — |
-| Item sem estoque → sugerir parecido | ❌ | `avisoEstoque` no site | Reaproveitar o RF4 | P | RF4 |
-| Ações: lembrete por Zap ou e-mail, copiar o link, marcar como resolvido | ❌ | — | Lembrete pelo modelo aprovado (Zap) ou pelo e-mail da marca; resolver com registro | M | RF10, RF6 |
-| Recuperado ou não recuperado; taxa | ✏️❌ | O site apaga o carrinho sem histórico ao confirmar o envio | O site registrar o evento; definir "recuperado" | M | Mudança no site; decisão |
+| Origem: API da plataforma de loja virtual (marketplaces não mostram o carrinho) | ✏️🟡 | **02/10:** rota de leitura no PHP dos sites (`GET /api/davinci/carrinhos`, mesmo token do estoque) + leitor no DaVinci (`services/atendimento/carrinhos.py`, cron a cada 30 min). Pacotes na Mesa | Publicar os pacotes; 7buyers (Shopify) fora desta versão | P | Publicar na Hostinger |
+| (antes de 02/10) | ✏️❌ | Charlots e Uranyx em PHP próprio (`adm_carrinho`, lojista logado); 7buyers Shopify; Locagil fora do ar | O site manda os carrinhos ao DaVinci (como `/api/sites/estoque`); 7buyers pela Admin API | M | Deploy nos sites; token Shopify |
+| Quando abre (1 h); uma conversa por carrinho; entra na conversa aberta do mesmo cliente na loja | ✅ | **02/10:** parado há mais de 24 h (`ATENDIMENTO_CARRINHO_HORAS`); uma conversa por lojista e site, um episódio por carrinho (`atendimento_carrinhos`), etiqueta CARRINHO | — | — | — |
+| (antes de 02/10) | ❌ | Todo carrinho persistido é de lojista identificado | Tabela + regra de tempo (sugestão para atacado: 24 h); juntar à conversa aberta do cliente | M | Decisão do dono |
+| Detalhes (itens com estoque, frete, cupom, etapa, link, cliente, compras e carrinhos anteriores) | ✏️🟡 | **02/10:** cartão no topo (`AtendimentoCarrinho.vue`): itens com foto, link, preço de atacado e o **estoque atual do DaVinci** por SKU, lojista, carrinhos anteriores, taxa do site | Frete, cupom e etapa não existem no site | — | — |
+| (antes de 02/10) | ✏️❌ | Estoque viável (o DaVinci alimenta o site); frete, cupom e etapa não existem | Itens, estoque, preço de atacado e cliente para os PHP | M | — |
+| Item sem estoque → sugerir parecido | 🟡 | **02/10:** aviso de item sem estoque e "há N em outros lotes de venda" | Sugestão de parecido (RF4) | P | RF4 |
+| (antes de 02/10) | ❌ | `avisoEstoque` no site | Reaproveitar o RF4 | P | RF4 |
+| Ações: lembrete por Zap ou e-mail, copiar o link, marcar como resolvido | 🟡 | **02/10:** "Marcar como resolvido" (com motivo) e e-mail/telefone para copiar; nada é mandado ao lojista (decisão de 02/10) | Lembrete por Zap ou e-mail | M | RF10, RF6 |
+| (antes de 02/10) | ❌ | — | Lembrete pelo modelo aprovado (Zap) ou pelo e-mail da marca; resolver com registro | M | RF10, RF6 |
+| Recuperado ou não recuperado; taxa | ✅ | **02/10:** evento `finalizado` → recuperado (Pós-venda); `esvaziado` ou 7 dias → não recuperado; taxa de 30 dias no cartão | — | — | Publicar os pacotes |
+| (antes de 02/10) | ✏️❌ | O site apaga o carrinho sem histórico ao confirmar o envio | O site registrar o evento; definir "recuperado" | M | Mudança no site; decisão |
 | Opt-in (LGPD) | 🟡 | `privacidade_em`, newsletter | Opt-in de contato por WhatsApp | P | Jurídico ou dono |
 
 ### 3.14 RF10 Zap

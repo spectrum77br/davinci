@@ -7,6 +7,9 @@
 //    do backend (constantes.PRIORIDADE_ETIQUETAS);
 //  - a Avaliação (RF8, 02/10/2026): amarela, entre Devolução e Pré-venda, com
 //    as estrelas da pior nota pendente e a nota 1–3 em destaque;
+//  - o Carrinho (RF9, 02/10/2026): verde-azulado, entre Avaliação e
+//    Pré-venda; a Mídia (RF7): rosa, a BASE das conversas das redes (nunca
+//    vira indicador), no fim da ordem;
 //  - o indicador das secundárias (sem a base, sem repetir, na prioridade);
 //  - a lista: faixa colorida à esquerda, selo (sem o de Pós-venda), menu
 //    Filtrar com Reclamação/Devolução/Ag. cancelamento e as contagens do /resumo
@@ -53,7 +56,7 @@ const prioridadeApi = (constantes.match(/PRIORIDADE_ETIQUETAS: tuple\[str, \.\.\
 assert.ok(prioridadeApi, 'PRIORIDADE_ETIQUETAS no backend')
 const ordemApi = prioridadeApi.split(',').map((s) => s.trim()).filter(Boolean).map((n) => nomes[n])
 assert.deepEqual(E.PRIORIDADE_ETIQUETAS, ordemApi, 'a tela e o backend com a mesma prioridade')
-assert.deepEqual(ordemApi, ['reclamacao', 'ag_cancelamento', 'devolucao', 'avaliacao', 'pre_venda', 'pos_venda'])
+assert.deepEqual(ordemApi, ['reclamacao', 'ag_cancelamento', 'devolucao', 'avaliacao', 'carrinho', 'pre_venda', 'pos_venda', 'midia'])
 assert.deepEqual(Object.keys(E.ETIQUETAS_INFO).sort(), [...ordemApi].sort(), 'toda etiqueta do backend tem cor')
 
 const router = fs.readFileSync(path.resolve(__dirname, '../../api/app/routers/atendimento.py'), 'utf8')
@@ -74,7 +77,15 @@ assert.equal(E.faixaDaEtiqueta(null), '')
 assert.equal(E.faixaDaEtiqueta(' Reclamacao '), 'bg-red-500')
 assert.equal(E.etiquetaInfo(''), null)
 // Etiqueta nova no backend que a tela ainda não conhece: neutra, com o código.
-assert.deepEqual([E.etiquetaInfo('carrinho').label, E.etiquetaInfo('carrinho').destaque], ['carrinho', false])
+assert.deepEqual([E.etiquetaInfo('sac').label, E.etiquetaInfo('sac').destaque], ['sac', false])
+// Carrinho (RF9): verde-azulado (o laranja é do Ag. cancelamento), com destaque.
+assert.equal(cor('carrinho').label, 'Carrinho')
+assert.equal(E.faixaDaEtiqueta('carrinho'), 'bg-teal-500')
+assert.notEqual(cor('carrinho').faixa, cor('ag_cancelamento').faixa)
+// Mídia (RF7): rosa, com destaque.
+assert.equal(cor('midia').label, 'Mídia')
+assert.match(cor('midia').cls, /pink-/)
+assert.equal(E.faixaDaEtiqueta('midia'), 'bg-pink-500')
 // Avaliação (RF8): amarela, com destaque e faixa.
 assert.equal(cor('avaliacao').label, 'Avaliação')
 assert.match(cor('avaliacao').cls, /yellow-/)
@@ -101,6 +112,10 @@ assert.deepEqual(sec('reclamacao', ['devolucao', 'ag_cancelamento']), ['ag_cance
 assert.deepEqual(sec('pos_venda', ['reclamacao', 'reclamacao', 'pos_venda', 'pre_venda']), ['reclamacao'], 'sem repetir e sem a base')
 assert.deepEqual(sec('devolucao', ['devolucao']), [], 'nunca a própria')
 assert.deepEqual(sec('reclamacao', null), [])
+// A Mídia é base (como pré/pós-venda): nunca vira indicador; o Carrinho vira.
+assert.deepEqual(sec('reclamacao', ['midia', 'carrinho']), ['carrinho'])
+const bases = (constantes.match(/^ETIQUETAS_BASE = \(([^)]*)\)/m) || [])[1] || ''
+assert.deepEqual(bases.split(',').map((x) => nomes[x.trim()]).filter(Boolean), ['pre_venda', 'pos_venda', 'midia'], 'as bases do backend')
 const titulo = E.tituloDaEtiqueta('pos_venda', { manual: true, secundarias: ['reclamacao'], desde: '2026-10-01T12:00:00Z' })
 assert.match(titulo, /^Pós-venda/)
 assert.match(titulo, /trocada à mão/)
