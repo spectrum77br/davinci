@@ -136,6 +136,19 @@ export function frasesDaEtiqueta(h: MudancaDeEtiqueta): { titulo: string; detalh
 //   pelo cartão). A caixa de baixo fica só com a NOTA INTERNA e um aviso de
 //   onde se trata a conversa. O selo do canal no cabeçalho diz Carrinho,
 //   Comentário, Menção ou Direct.
+// - ABAS (RF2, 02/10/2026; AtendimentoAbas): embaixo das mensagens, como o
+//   "Com o comprador / Com Meli" do Duoke — Pré-venda · Pós-venda ·
+//   Reclamação · Mediador · E-mail · Zap · Avaliação, com a contagem, só as
+//   que têm conteúdo (GET /conversas/{id}/abas: tudo do mesmo comprador e
+//   pedido, na mesma loja). A ativa começa na da conversa aberta; nela a
+//   linha do tempo é a de sempre, sem as mensagens desta conversa que moram
+//   em outra aba e com as das outras conversas daquela aba (com o divisor
+//   "de onde veio", que abre a conversa de origem). Nas outras abas, as
+//   mensagens daquela parte, sem sair da conversa. A caixa responde no canal
+//   da aba ativa: a conversa que responde é a aberta → a caixa de sempre;
+//   é outra → a caixa da aba (AtendimentoAbaResposta, com as travas daquela
+//   conversa); Mediador → só leitura. Sem a rota (ou se ela falhar), a
+//   conversa fica como sempre foi.
 import {
   Archive,
   ArrowLeft,
@@ -174,6 +187,16 @@ import {
   X,
 } from 'lucide-vue-next'
 import { eNota } from '~/components/AtendimentoNota.vue'
+import {
+  abaInicial,
+  abasVisiveis,
+  conversaDaAba,
+  manterAntigas,
+  mesclarPagina,
+  respondeOutra,
+  rotuloDaOrigem,
+  type AbasResposta,
+} from '~/components/AtendimentoAbas.vue'
 import { etiquetaInfo } from '~/components/AtendimentoEtiqueta.vue'
 import type { Painel } from '~/components/AtendimentoPedido.vue'
 import { abrirEm, type ReclamacoesResposta } from '~/components/AtendimentoReclamacao.vue'
@@ -434,12 +457,116 @@ usePollingVisivel(async () => {
   await carregar(props.conversaId, true)
 }, 15_000)
 
+// ─── abas (RF2): tudo do mesmo comprador e pedido ───────────────────────────
+// GET /conversas/{id}/abas, relido ao abrir a conversa, quando chega mensagem
+// nela, a cada 2 min (com o painel), no "atualizar" e depois de uma resposta
+// pela caixa da aba. Falhou (ou a rota ainda não está no servidor): a
+// conversa fica como sempre foi, sem a barra. A releitura mantém as mais
+// antigas que a pessoa já carregou (`manterAntigas`).
+const abasDados = ref<AbasResposta | null>(null)
+const abaAtiva = ref<string | null>(null)
+let geracaoAbas = 0
+let abasLidasEm = 0
+// A PRIMEIRA leitura das abas desta conversa ainda não voltou: sem ela não se
+// sabe o que desta conversa mora em outra aba (o mediador da reclamação, o
+// pré-venda do chat) — mostrado agora, sumiria logo depois. A linha do tempo
+// espera, no máximo ESPERA_ABAS_MS; falhou (ou a rota não está no
+// servidor), segue como sempre foi.
+const abasPendentes = ref(false)
+const ESPERA_ABAS_MS = 2500
+let esperaAbas: ReturnType<typeof setTimeout> | null = null
+function esperarAbas(id: string) {
+  if (esperaAbas) clearTimeout(esperaAbas)
+  esperaAbas = null
+  abasPendentes.value = !!id && !id.startsWith('ig:')
+  if (abasPendentes.value) esperaAbas = setTimeout(() => liberarAbas(id), ESPERA_ABAS_MS)
+}
+function liberarAbas(id: string) {
+  if (id !== props.conversaId || !abasPendentes.value) return
+  if (esperaAbas) clearTimeout(esperaAbas)
+  esperaAbas = null
+  abasPendentes.value = false
+  rolarProFim()
+}
+onBeforeUnmount(() => { if (esperaAbas) clearTimeout(esperaAbas) })
+// Só espera onde a conversa pode ter mensagem em outra aba: o chat (antes e
+// depois da compra) e a que tem fala do mediador.
+const esperandoAbas = computed(() => {
+  const d = detalhe.value
+  if (!abasPendentes.value || !d?.mensagens?.length) return false
+  return d.conversa.canal === 'chat' || d.mensagens.some((m) => m.autor === 'mediador')
+})
+async function carregarAbas(id: string) {
+  if (!id || id.startsWith('ig:')) {
+    abasDados.value = null
+    return
+  }
+  const g = ++geracaoAbas
+  try {
+    const r = await api<AbasResposta>(`/api/atendimento/conversas/${encodeURIComponent(id)}/abas`)
+    if (g !== geracaoAbas || id !== props.conversaId) return
+    abasDados.value = manterAntigas(r, abasDados.value)
+    abasLidasEm = Date.now()
+    abaAtiva.value = abaInicial(r, abaAtiva.value)
+  } catch {
+    // As abas são ajuda: sem elas, a conversa segue como sempre (e o
+    // próximo tique tenta de novo).
+  } finally {
+    if (g === geracaoAbas) liberarAbas(id)
+  }
+}
+const abasDaBarra = computed(() => abasVisiveis(abasDados.value))
+const abaDaConversa = computed(() => abasDados.value?.aba_da_conversa ?? null)
+const abaAtual = computed(() => abasDaBarra.value.find((a) => a.chave === abaAtiva.value) ?? null)
+// Na aba da conversa aberta (ou sem abas): a vista de sempre.
+const naAbaDaConversa = computed(() => !abaAtual.value || abaAtual.value.chave === abaDaConversa.value)
+// A caixa responde por OUTRA conversa (ou por nenhuma: Mediador) nesta aba.
+const respondePorOutra = computed(() => respondeOutra(abaAtual.value, conversa.value?.id))
+function trocarAba(chave: string) {
+  if (chave === abaAtiva.value) return
+  abaAtiva.value = chave
+  rolarProFim()
+  // Mensagem nova nas OUTRAS conversas só chega com a releitura das abas.
+  if (Date.now() - abasLidasEm > 30_000 && props.conversaId) void carregarAbas(props.conversaId)
+}
+// "carregar mais antigas" da aba ativa (a rota pagina por aba).
+const carregandoAntigas = ref(false)
+async function carregarAntigas() {
+  const r = abasDados.value
+  const aba = abaAtual.value
+  const id = props.conversaId
+  if (!r || !aba?.proximo || carregandoAntigas.value || !id) return
+  const chave = aba.chave
+  carregandoAntigas.value = true
+  try {
+    const p = await api<AbasResposta>(`/api/atendimento/conversas/${encodeURIComponent(id)}/abas?aba=${encodeURIComponent(chave)}&antes_de=${encodeURIComponent(aba.proximo)}`)
+    // A página é da leitura que estava na tela: relida no meio, descarta.
+    if (id !== props.conversaId || abasDados.value !== r) return
+    const pagina = (p?.abas || []).find((a) => a.chave === chave)
+    if (pagina) abasDados.value = { ...r, abas: r.abas.map((a) => (a.chave === chave ? mesclarPagina(a, pagina) : a)) }
+  } catch (e: any) {
+    const er = erroDaApi(e, 'Não consegui carregar as mensagens mais antigas')
+    toasts.error(er.texto, er.motivos)
+  } finally {
+    carregandoAntigas.value = false
+  }
+}
+function aoResponderPelaAba() {
+  if (!props.conversaId) return
+  void carregarAbas(props.conversaId)
+  void carregar(props.conversaId, true)
+}
+
 // ─── linha do tempo ─────────────────────────────────────────────────────────
 // As mensagens e as MUDANÇAS DE ETIQUETA (`detalhe.etiqueta_historico`), pela
 // hora; no empate, a mensagem antes (quase sempre foi ela que mudou o status).
+// Com as abas (RF2): `de` = a conversa de origem da mensagem que é de OUTRA
+// conversa (sem ações nela: conferir, tentar de novo e a IA são desta); o
+// divisor `origem` marca onde muda a conversa de origem.
 type Linha =
   | { tipo: 'dia'; chave: string; texto: string }
-  | { tipo: 'msg'; chave: string; m: Mensagem }
+  | { tipo: 'origem'; chave: string; id: string; texto: string; aberta: boolean }
+  | { tipo: 'msg'; chave: string; m: Mensagem; de: string | null }
   | { tipo: 'etiqueta'; chave: string; h: EtiquetaHistorico }
 function tsIso(iso: string | null | undefined) {
   const t = iso ? new Date(iso).getTime() : NaN
@@ -450,21 +577,51 @@ function ts(m: Mensagem) {
 }
 const linhas = computed<Linha[]>(() => {
   type Item = { t: number; iso: string | null; linha: Linha }
-  const itens: Item[] = [
-    ...(detalhe.value?.mensagens || []).map((m): Item => ({ t: ts(m), iso: m.enviada_em, linha: { tipo: 'msg', chave: m.id, m } })),
-    ...(detalhe.value?.etiqueta_historico || []).map((h): Item => ({ t: tsIso(h.em), iso: h.em, linha: { tipo: 'etiqueta', chave: `etiqueta-${h.id}`, h } })),
-  ]
+  const d = detalhe.value
+  const propria = d?.conversa?.id ?? ''
+  const aba = abaAtual.value
+  let itens: Item[]
+  if (naAbaDaConversa.value) {
+    // A vista de sempre — sem o que desta conversa mora em outra aba, e com
+    // as mensagens das OUTRAS conversas desta aba.
+    const fora = abasDados.value?.fora_da_aba || {}
+    itens = [
+      ...(d?.mensagens || []).filter((m) => !fora[m.id]).map((m): Item => ({ t: ts(m), iso: m.enviada_em, linha: { tipo: 'msg', chave: m.id, m, de: null } })),
+      ...(d?.etiqueta_historico || []).map((h): Item => ({ t: tsIso(h.em), iso: h.em, linha: { tipo: 'etiqueta', chave: `etiqueta-${h.id}`, h } })),
+      ...(aba?.mensagens || []).filter((m) => m.conversa_id !== propria).map((m): Item => ({ t: ts(m), iso: m.enviada_em, linha: { tipo: 'msg', chave: `aba-${m.id}`, m, de: m.conversa_id } })),
+    ]
+  } else {
+    // Outra aba: as mensagens daquela parte. As desta conversa vêm na versão
+    // do detalhe (relida a cada 15 s), com as ações de sempre.
+    const minhas = new Map((d?.mensagens || []).map((m) => [m.id, m]))
+    itens = (aba?.mensagens || []).map((m): Item => {
+      const daAberta = m.conversa_id === propria
+      const mm = (daAberta && minhas.get(m.id)) || m
+      return { t: ts(mm), iso: mm.enviada_em, linha: { tipo: 'msg', chave: daAberta ? mm.id : `aba-${m.id}`, m: mm, de: daAberta ? null : m.conversa_id } }
+    })
+  }
   // `sort` é estável: no empate fica a ordem acima (mensagens primeiro).
   itens.sort((a, b) => (a.t === b.t ? 0 : a.t - b.t))
   const out: Linha[] = []
   let dia = ''
+  // A conversa de origem da última mensagem (undefined = nenhuma ainda).
+  let origem: string | null | undefined
   for (const it of itens) {
     if (it.iso && Number.isFinite(it.t)) {
-      const d = new Date(it.iso).toDateString()
-      if (d !== dia) {
-        out.push({ tipo: 'dia', chave: `dia-${d}`, texto: rotuloDia(it.iso, agora.value) })
-        dia = d
+      const dd = new Date(it.iso).toDateString()
+      if (dd !== dia) {
+        out.push({ tipo: 'dia', chave: `dia-${dd}`, texto: rotuloDia(it.iso, agora.value) })
+        dia = dd
       }
+    }
+    if (it.linha.tipo === 'msg') {
+      const de = it.linha.de
+      // Divisor quando a origem muda (e no começo, se a primeira é de outra).
+      if (origem === undefined ? de !== null : de !== origem) {
+        const c = de ? conversaDaAba(abasDados.value, de) : null
+        out.push({ tipo: 'origem', chave: `origem-${it.linha.chave}`, id: de || propria, texto: de ? rotuloDaOrigem(c) : 'Esta conversa', aberta: !de })
+      }
+      origem = de
     }
     out.push(it.linha)
   }
@@ -668,10 +825,15 @@ function irPara(ev: EventoCliente) {
   // Em tela menor o painel é gaveta por cima da conversa: sai da frente.
   if (!telaLarga.value) gaveta.value = false
   if (d.mensagens.some((m) => m.id === ref)) {
+    // A mensagem pode morar em outra aba (o pré-venda do chat, o mediador):
+    // a aba dela vem antes de rolar até ela.
+    const aba = abasDados.value?.fora_da_aba?.[ref] || abaDaConversa.value
+    if (aba && aba !== abaAtiva.value) abaAtiva.value = aba
     void nextTick(() => mostrarMensagem(ref))
     return
   }
   if (ref === d.conversa.id) {
+    if (abaDaConversa.value) abaAtiva.value = abaDaConversa.value
     rolarProFim()
     return
   }
@@ -1535,6 +1697,11 @@ function aoMudarPainelExterno() {
 watch(() => detalhe.value?.mensagens?.length, (n, antes) => {
   if (n !== undefined && antes !== undefined && n !== antes) void avaliacaoRef.value?.carregar()
 })
+// Mensagem nova nesta conversa: as abas (contagem, o que mora em outra aba)
+// acompanham.
+watch(() => detalhe.value?.mensagens?.length, (n, antes) => {
+  if (n !== undefined && antes !== undefined && n !== antes && props.conversaId) void carregarAbas(props.conversaId)
+})
 
 // ─── painel do pedido: estoque, margem, observações, links, AdsPower ────────
 // GET /conversas/{id}/painel (item 3, 01/10/2026). Separado do detalhe: o
@@ -1571,6 +1738,8 @@ usePollingVisivel(async () => {
   void reclamacaoRef.value?.carregar()
   // As avaliações também (o cron delas roda a cada 30 min).
   void avaliacaoRef.value?.carregar()
+  // As abas também: as OUTRAS conversas do comprador só chegam por elas.
+  void carregarAbas(props.conversaId)
   await carregarPainel(props.conversaId)
 }, 120_000)
 function atualizarTudo() {
@@ -1578,6 +1747,7 @@ function atualizarTudo() {
   void carregarPainel(props.conversaId, true)
   void reclamacaoRef.value?.carregar()
   void avaliacaoRef.value?.carregar()
+  void carregarAbas(props.conversaId)
 }
 
 // ─── caixa: Responder × Nota interna ────────────────────────────────────────
@@ -1806,6 +1976,10 @@ watch(() => props.conversaId, (novo, velho) => {
   reclamacoesQtd.value = 0
   // O da avaliação também; o que ele trouxe era da conversa anterior.
   avaliacoesDados.value = null
+  // As abas são da conversa: a nova começa na aba DELA.
+  abasDados.value = null
+  abaAtiva.value = null
+  abasPendentes.value = false
   modoCaixa.value = 'responder'
   descartarFoto()
   limparAval()
@@ -1826,6 +2000,8 @@ watch(() => props.conversaId, (novo, velho) => {
   if (import.meta.client) {
     void carregar(novo)
     void carregarPainel(novo)
+    esperarAbas(novo)
+    void carregarAbas(novo)
   }
 }, { immediate: true })
 </script>
@@ -2254,8 +2430,16 @@ watch(() => props.conversaId, (novo, velho) => {
 
         <!-- mensagens -->
         <div ref="rolagem" class="min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-contain bg-muted/40 px-3 py-3 dark:bg-muted/20">
-          <div v-if="!linhas.length" class="py-10 text-center text-sm text-muted-foreground">Sem mensagens gravadas ainda.</div>
-          <template v-for="l in linhas" :key="l.chave">
+          <!-- Abas (RF2): a página das mais antigas daquela aba -->
+          <div v-if="abaAtual?.tem_mais" class="flex justify-center" data-abas-mais-antigas>
+            <button type="button" class="inline-flex items-center gap-1 rounded-full bg-background px-2.5 py-0.5 text-[11px] text-muted-foreground shadow-sm hover:text-foreground disabled:opacity-60" :disabled="carregandoAntigas" @click="carregarAntigas">
+              <Loader2 v-if="carregandoAntigas" class="size-3 animate-spin" />
+              carregar mensagens mais antigas{{ naAbaDaConversa ? ' das outras conversas' : '' }} desta aba
+            </button>
+          </div>
+          <div v-if="esperandoAbas" class="flex justify-center py-10 text-muted-foreground" data-abas-pendentes aria-label="separando as mensagens por aba"><Loader2 class="size-4 animate-spin" /></div>
+          <div v-else-if="!linhas.length" class="py-10 text-center text-sm text-muted-foreground">{{ abasDaBarra.length > 1 && detalhe.mensagens.length ? 'Nada nesta parte — as mensagens desta conversa estão nas outras abas, embaixo.' : 'Sem mensagens gravadas ainda.' }}</div>
+          <template v-for="l in (esperandoAbas ? [] : linhas)" :key="l.chave">
             <div v-if="l.tipo === 'dia'" class="flex justify-center py-1">
               <span class="rounded-full bg-background px-2.5 py-0.5 text-[10px] font-medium text-muted-foreground shadow-sm">{{ l.texto }}</span>
             </div>
@@ -2269,6 +2453,13 @@ watch(() => props.conversaId, (novo, velho) => {
                 </div>
                 <div v-if="frasesDaEtiqueta(l.h).detalhe" class="break-words">{{ frasesDaEtiqueta(l.h).detalhe }}</div>
               </div>
+            </div>
+            <!-- Abas (RF2): de qual conversa vêm as mensagens daqui para baixo -->
+            <div v-else-if="l.tipo === 'origem'" class="flex items-center gap-2 py-0.5 text-[11px] text-muted-foreground" data-origem-aba>
+              <span class="h-px flex-1 bg-border" aria-hidden="true" />
+              <span class="max-w-[75%] truncate" :title="l.texto">{{ l.aberta ? l.texto : `De: ${l.texto}` }}</span>
+              <button v-if="!l.aberta" type="button" class="shrink-0 underline hover:text-foreground" title="abrir esta conversa" @click="emit('abrirConversa', l.id)">abrir</button>
+              <span class="h-px flex-1 bg-border" aria-hidden="true" />
             </div>
             <!-- nota interna: amarela, só a equipe vê -->
             <div v-else-if="lado(l.m) === 'nota'" :data-msg-id="l.m.id">
@@ -2320,7 +2511,7 @@ watch(() => props.conversaId, (novo, velho) => {
                   {{ erroEnvioLegivel(l.m.erro) }}
                   <!-- Só com o envio ligado e só na última tentativa (não reenvia sozinho). -->
                   <button
-                    v-if="podeTentarDeNovo(l.m)"
+                    v-if="!l.de && podeTentarDeNovo(l.m)"
                     type="button"
                     class="ml-1 inline-flex items-center gap-0.5 rounded border border-red-500/40 bg-background px-1.5 py-px font-medium hover:bg-red-500/10 disabled:opacity-50"
                     :disabled="!!tentandoId"
@@ -2331,7 +2522,7 @@ watch(() => props.conversaId, (novo, velho) => {
                   </button>
                   <span v-else-if="l.m.tipo === 'imagem' && lado(l.m) === 'loja' && l.m.origem === 'davinci_humano'" class="ml-1 opacity-80">— anexe a foto de novo para tentar outra vez.</span>
                 </div>
-                <div v-if="l.m.status === 'revisar' && lado(l.m) === 'loja'" class="mt-1 space-y-1 rounded bg-amber-500/10 px-1.5 py-1 text-[11px] text-amber-900 dark:text-amber-200">
+                <div v-if="l.m.status === 'revisar' && lado(l.m) === 'loja' && !l.de" class="mt-1 space-y-1 rounded bg-amber-500/10 px-1.5 py-1 text-[11px] text-amber-900 dark:text-amber-200">
                   <div class="font-medium">Não sabemos se chegou ao comprador.</div>
                   <div>A plataforma não confirmou o envio. Confira lá e marque aqui — o DaVinci não manda de novo sozinho.</div>
                   <div v-if="canEdit" class="flex flex-wrap gap-1 pt-0.5">
@@ -2372,7 +2563,7 @@ watch(() => props.conversaId, (novo, velho) => {
             </div>
           </template>
           <!-- comparações cuja resposta real não está na tela (não somem) -->
-          <div v-if="comparacoes.soltas.length" class="flex flex-col items-end gap-1">
+          <div v-if="comparacoes.soltas.length && naAbaDaConversa" class="flex flex-col items-end gap-1">
             <AtendimentoIaTeria
               v-for="sg in comparacoes.soltas"
               :key="sg.id"
@@ -2382,6 +2573,16 @@ watch(() => props.conversaId, (novo, velho) => {
             />
           </div>
         </div>
+
+        <!-- Abas (RF2): Pré-venda · Pós-venda · Reclamação · Mediador · E-mail ·
+             Zap · Avaliação do mesmo comprador e pedido (só as com conteúdo) -->
+        <AtendimentoAbas
+          v-if="abasDaBarra.length"
+          :abas="abasDaBarra"
+          :ativa="abaAtiva"
+          :da-conversa="abaDaConversa"
+          @trocar="trocarAba"
+        />
 
         <!-- resposta -->
         <div class="shrink-0 space-y-2 border-t bg-background p-2">
@@ -2408,6 +2609,8 @@ watch(() => props.conversaId, (novo, velho) => {
               @click="modoCaixa = 'nota'"
             ><StickyNote class="size-3.5" /> Nota interna</button>
             <template v-if="modoCaixa === 'responder' && !canalExterno">
+              <!-- Na aba em que responde OUTRA conversa, a foto não sai (ela é desta). -->
+              <template v-if="!respondePorOutra">
               <input ref="fotoInput" type="file" accept="image/jpeg,image/png" class="hidden" aria-hidden="true" tabindex="-1" @change="aoEscolherFoto" />
               <Button
                 size="sm"
@@ -2420,11 +2623,12 @@ watch(() => props.conversaId, (novo, velho) => {
               >
                 <ImagePlus class="size-3.5" /><span class="ml-1">Foto</span>
               </Button>
+              </template>
             </template>
           </div>
 
           <!-- foto anexada: prévia, texto (ML) e enviar/descartar -->
-          <div v-if="modoCaixa === 'responder' && foto" class="flex items-start gap-2 rounded-md border bg-muted/40 p-2 text-xs">
+          <div v-if="modoCaixa === 'responder' && foto && !respondePorOutra" class="flex items-start gap-2 rounded-md border bg-muted/40 p-2 text-xs">
             <img :src="foto.previa" alt="foto anexada" class="size-16 shrink-0 rounded border object-cover" />
             <div class="min-w-0 flex-1 space-y-1">
               <div class="truncate font-medium" :title="foto.arquivo.name">{{ foto.arquivo.name }}</div>
@@ -2454,6 +2658,19 @@ watch(() => props.conversaId, (novo, velho) => {
             :conversa-id="conversa.id"
             :can-edit="canEdit"
             @criada="aoCriarNota"
+          />
+
+          <!-- Abas (RF2): nesta aba quem responde é OUTRA conversa (ou ninguém:
+               Mediador) — a caixa da aba, com as travas daquela conversa. -->
+          <AtendimentoAbaResposta
+            v-else-if="respondePorOutra && abaAtual"
+            :key="`aba-${abaAtual.chave}`"
+            :aba="abaAtual"
+            :can-edit="canEdit"
+            :plataforma="conversa.plataforma"
+            :aviso-publica="avaliacoesDados?.aviso ?? null"
+            @enviada="aoResponderPelaAba"
+            @abrir-conversa="(id: string) => emit('abrirConversa', id)"
           />
 
           <!-- Carrinho/comentário: nada sai por esta caixa (nem a IA sugere) —

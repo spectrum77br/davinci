@@ -94,6 +94,17 @@ CANAL_CARRINHO = "carrinho"
 # marca é a RESPOSTA (autor loja), nunca conversa nova. Quem escreve é
 # `services/atendimento/redes.py`.
 CANAL_COMENTARIO = "comentario"
+# WhatsApp (RF10, o outro dev; 02/10/2026 só o NOME): a conversa do Zap entra
+# na mesma `atendimento_conversas` com `canal = 'zap'` e vira a aba "Zap" da
+# conversa do pedido (`services/atendimento/abas.py`). Ainda sem leitor.
+CANAL_ZAP = "zap"
+# E-mail do TUTA (RF5, o outro dev; 02/10/2026 só o NOME): `canal = 'email'`
+# com `dados.fonte = 'tuta'`. Na Amazon o canal `email` é o da PLATAFORMA (o
+# comprador escrevendo pela Amazon, `amazon_email.py`); é esta marca que
+# separa o e-mail do Tuta de uma venda Amazon do e-mail da Amazon — nas abas
+# (`abas.e_contato`: aba E-mail × Pós-venda) e no envio (o `enviar.py` vai
+# rotear por ela: o Tuta responde pelo Tuta, nunca pelo SMTP da Amazon).
+FONTE_TUTA = "tuta"
 # Os canais de cada plataforma externa (NÃO entram em
 # `CANAIS_POR_PLATAFORMA`: o sync não lê nenhum deles).
 CANAIS_EXTERNOS: dict[str, tuple[str, ...]] = {

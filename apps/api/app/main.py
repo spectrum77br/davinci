@@ -14,6 +14,7 @@ from app.routers import adspower_agent as adspower_agent_router
 from app.routers import alerts as alerts_router
 from app.routers import aprovar_margem as aprovar_margem_router
 from app.routers import atendimento as atendimento_router
+from app.routers import atendimento_abas as atendimento_abas_router
 from app.routers import atendimento_avaliacoes as atendimento_avaliacoes_router
 from app.routers import atendimento_carrinhos as atendimento_carrinhos_router
 from app.routers import atendimento_painel as atendimento_painel_router
@@ -263,6 +264,10 @@ app.include_router(atendimento_avaliacoes_router.router)
 # 02/10/2026: os cartões e as ações (as das redes atrás do envio).
 app.include_router(atendimento_carrinhos_router.router)
 app.include_router(atendimento_redes_router.router)
+# As ABAS da conversa aberta (RF2, 02/10/2026): Pré-venda · Pós-venda ·
+# Reclamação · Mediador · E-mail · Zap · Avaliação do mesmo comprador e
+# pedido, na mesma loja (só leitura; a caixa responde pela conversa de origem).
+app.include_router(atendimento_abas_router.router)
 # Temu/AliExpress (30/09/2026): o robô do Mac mini manda o que a página do
 # Seller Center recebe (token próprio; vazio = desligado).
 app.include_router(atendimento_robo_router.router)

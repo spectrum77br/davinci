@@ -94,8 +94,12 @@ const setup = conversaSfc.scriptSetup.content
 {
   const js = trecho(setup, 'type Linha =', '// A bolinha da mudança de etiqueta') + '\nreturn linhas'
   const detalhe = Vue.ref(null)
-  const linhas = new Function('computed', 'detalhe', 'agora', 'rotuloDia', js)(
+  // Sem as abas (RF2, 02/10/2026; atendimento-abas.cjs cobre com elas): a
+  // linha do tempo de sempre.
+  const AB = exportsDe(sfc('../components/AtendimentoAbas.vue'))
+  const linhas = new Function('computed', 'detalhe', 'agora', 'rotuloDia', 'abasDados', 'abaAtual', 'naAbaDaConversa', 'conversaDaAba', 'rotuloDaOrigem', js)(
     Vue.computed, detalhe, Vue.ref(Date.parse('2026-10-01T15:00:00Z')), (iso) => `dia ${iso.slice(0, 10)}`,
+    Vue.ref(null), Vue.computed(() => null), Vue.computed(() => true), AB.conversaDaAba, AB.rotuloDaOrigem,
   )
   const msg = (id, em) => ({ id, enviada_em: em, autor: 'cliente', origem: 'cliente', tipo: 'texto', texto: id, anexos: [], status: 'recebida' })
   const etq = (id, em, de, para) => ({ id, em, de, para, de_rotulo: de, para_rotulo: para, motivo: null, por_user_id: null, por_nome: null })

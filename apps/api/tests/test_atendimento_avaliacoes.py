@@ -274,7 +274,9 @@ async def _mensagens(db: AsyncSession, conversa_id: UUID) -> list[AtendimentoMen
             await db.execute(
                 select(AtendimentoMensagem)
                 .where(AtendimentoMensagem.conversa_id == conversa_id)
-                .order_by(AtendimentoMensagem.enviada_em)
+                # A versão editada da avaliação tem a MESMA hora (a da
+                # avaliação): sem o desempate, a ordem era a do Postgres.
+                .order_by(AtendimentoMensagem.enviada_em, AtendimentoMensagem.created_at)
             )
         )
         .scalars()
