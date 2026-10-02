@@ -692,6 +692,8 @@ async def test_painel_junta_anuncios_e_denuncias(client, make_user, auth_as):
     assert j["numeros"]["processos"] == 1 and j["numeros"]["na_loja"]["recusou"] == 1
     # loja_x: A1 com denúncia Shopee "Enviada" → aguardando; o SEI da carga não tem protocolo
     assert lojas["loja_x"]["na_loja"]["aguardando"] == 2
+    # o caso da carga (CASO-001, anúncio A1) aparece na loja
+    assert [k["codigo"] for k in lojas["loja_x"]["casos"]] == ["CASO-001"]
     # por anúncio, filtrando o que está na fila da Anatel
     j = (await client.get("/api/denuncia/painel",
                           params={"visao": "anuncios", "na_anatel": "fila"})).json()

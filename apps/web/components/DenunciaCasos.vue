@@ -3,7 +3,7 @@
 // Casos jurídicos (CASO-00N): o anúncio, a compra de prova (pedido, NF-e,
 // entrega), as provas obrigatórias e o envio ao advogado. Cópia só leitura
 // do sistema de Fiscalização do Mac mini da Makisa.
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import {
   type Prova, dataBr, dinheiro, numero, pillResultado, pillSituacaoAnuncio, pillSituacaoDenuncia,
   pillStatusCaso, pillStatusCompra,
@@ -87,7 +87,19 @@ function verAnuncio(id: string | null | undefined) {
   anuncioAberto.value = id
 }
 
-onMounted(carregar)
+// 01/10: a coluna "Caso" da aba Anúncios e denúncias chega aqui com o caso a abrir
+const props = defineProps<{ abrirCaso?: number | null }>()
+const emit = defineEmits<{ (e: 'aberto'): void }>()
+function abrirPedido() {
+  if (!props.abrirCaso) return
+  void abrir({ id: props.abrirCaso } as Caso)
+  emit('aberto')
+}
+watch(() => props.abrirCaso, abrirPedido)
+onMounted(async () => {
+  await carregar()
+  abrirPedido()
+})
 // o botão "recarregar" do topo do painel chama isto na aba aberta
 defineExpose({ carregar })
 </script>

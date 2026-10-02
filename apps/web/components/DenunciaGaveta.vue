@@ -23,7 +23,7 @@ const emit = defineEmits<{ (e: 'update:open', v: boolean): void }>()
         <div class="flex items-start gap-3 border-b px-5 py-4">
           <div class="min-w-0 flex-1">
             <div class="flex flex-wrap items-center gap-2">
-              <DialogTitle class="text-base font-semibold leading-tight">{{ titulo }}</DialogTitle>
+              <DialogTitle class="text-base font-semibold leading-tight line-clamp-2" :title="titulo">{{ titulo }}</DialogTitle>
               <slot name="cabecalho-extra" />
             </div>
             <DialogDescription v-if="subtitulo" class="mt-0.5 text-xs text-muted-foreground">

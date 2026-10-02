@@ -179,3 +179,92 @@ export function pillStatusCompra(s: string | null | undefined): string {
 export function urlProva(id: number, baixar = false): string {
   return `/api/denuncia/provas/${id}/arquivo${baixar ? '?baixar=1' : ''}`
 }
+
+// ── aba "Anúncios e denúncias" (01/10/2026) — o que a loja fez com a nossa denúncia ("Na loja") e onde o
+// anúncio está no caminho da Anatel ("Na Anatel"), calculados na API (services/denuncia_painel).
+export type PainelCaso = { id: number; codigo: string | null; status: string | null }
+// o que a ficha do anúncio conta para quem a abriu (título da gaveta)
+export type InfoAnuncio = { titulo: string; subtitulo: string; grupo: string | null }
+export type PainelStatus = {
+  chave: string
+  rotulo: string
+  tom: string
+  data?: string | null
+  tentativas?: number
+  protocolo?: string | null
+  consumidor?: string | null
+}
+export type PainelAnuncio = {
+  id: string
+  marketplace: string | null
+  shop_id: string | null
+  loja: string | null
+  titulo: string | null
+  url: string | null
+  hom: string | null
+  inmetro: string | null
+  grupo: string | null
+  vendas: number
+  situacao: string | null
+  visto_primeiro: string | null
+  loja_st: PainelStatus
+  anatel_st: PainelStatus
+  casos: PainelCaso[]
+  nden: number
+}
+export type PainelLoja = {
+  marketplace: string | null
+  shop_id: string | null
+  chave: string
+  loja: string | null
+  anuncios: number
+  no_ar: number
+  fora_do_ar: number
+  vendas: number
+  nosso: number
+  diversos: number
+  outros: number
+  na_loja: Record<string, number>
+  na_anatel: Record<string, number>
+  processos: string[]
+  casos: PainelCaso[]
+  ultimo_achado: string | null
+}
+
+// "9 removidos · 21 recusadas · 36 aguardando" — a ordem e o texto de cada etiqueta
+export const ETIQ_LOJA: [string, string, string, string][] = [
+  ['removido', 'pill-success', 'removido', 'removidos'],
+  ['recusou', 'pill-danger', 'recusada', 'recusadas'],
+  ['aguardando', 'pill-muted', 'aguardando', 'aguardando'],
+  ['nao', 'pill-muted', 'sem denúncia', 'sem denúncia'],
+]
+export const ETIQ_ANATEL: [string, string, string, string][] = [
+  ['processo', 'pill-info', 'com processo', 'com processo'],
+  ['fila', 'pill-warning', 'na fila', 'na fila'],
+  ['falta_print', 'pill-warning', 'falta o print', 'falta o print'],
+  ['esperando_recusa', 'pill-muted', 'esperando recusa', 'esperando recusa'],
+  ['falta_loja', 'pill-muted', 'falta denunciar na loja', 'falta denunciar na loja'],
+]
+export function etiquetas(cont: Record<string, number>, tabela: [string, string, string, string][]) {
+  return tabela
+    .filter(([k]) => cont[k])
+    .map(([k, cls, um, varios]) => ({ k, cls, texto: `${cont[k]} ${cont[k] > 1 ? varios : um}` }))
+}
+const TOM_PILL: Record<string, string> = {
+  success: 'pill-success', danger: 'pill-danger', warning: 'pill-warning', info: 'pill-info', muted: 'pill-muted',
+}
+export function pillTom(t: string | undefined): string {
+  return TOM_PILL[t || 'muted'] || 'pill-muted'
+}
+
+// 01/10 (Vinicius): "troca 'no ar' pelo nome Ativo, sim ou não" (o robô grava "ativo" / "fora do ar")
+export function ativoSimNao(s: string | null | undefined): string {
+  if (s === 'ativo') return 'Sim'
+  if (s === 'fora do ar') return 'Não'
+  return '—'
+}
+export function pillAtivo(s: string | null | undefined): string {
+  if (s === 'ativo') return 'pill-warning'
+  if (s === 'fora do ar') return 'pill-success'
+  return 'pill-muted'
+}

@@ -1004,9 +1004,19 @@ async def _status_dos_anuncios(
                 )
             ).scalars()
         )
+    # 01/10 (Vinicius): coluna "Caso" — o número do caso e um botão que leva direto a ele
+    casos: dict[str, list[dict]] = defaultdict(list)
+    if ids:
+        for k in (
+            await session.execute(
+                select(DenunciaCaso).where(DenunciaCaso.anuncio_id.in_(ids)).order_by(DenunciaCaso.id)
+            )
+        ).scalars():
+            casos[k.anuncio_id].append({"id": k.id, "codigo": k.codigo, "status": k.status})
     out = []
     for a in anuncios:
         base = _anuncio_base(a)
+        base["casos"] = casos.get(a.id, [])
         ds = dens.get(a.id, [])
         lst = painel.status_loja(ds)
         base["loja_st"] = painel.rotular(lst, painel.LOJA)

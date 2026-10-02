@@ -10,52 +10,10 @@
 import { computed, onMounted, ref } from 'vue'
 import { ChevronDown, ChevronLeft, ChevronRight, ExternalLink } from 'lucide-vue-next'
 import {
-  type DenunciaEnviada, dataBr, nomeGrupo, numero, pillGrupo, pillSituacaoAnuncio,
+  type DenunciaEnviada, type PainelAnuncio as Anuncio, type PainelLoja as Loja, ETIQ_ANATEL, ETIQ_LOJA,
+  ativoSimNao, dataBr, etiquetas, nomeGrupo, numero, pillAtivo, pillGrupo, pillTom,
 } from '~/lib/denuncia'
 
-type Status = {
-  chave: string
-  rotulo: string
-  tom: string
-  data?: string | null
-  tentativas?: number
-  protocolo?: string | null
-  consumidor?: string | null
-}
-type Anuncio = {
-  id: string
-  marketplace: string | null
-  shop_id: string | null
-  loja: string | null
-  titulo: string | null
-  url: string | null
-  hom: string | null
-  inmetro: string | null
-  grupo: string | null
-  vendas: number
-  situacao: string | null
-  visto_primeiro: string | null
-  loja_st: Status
-  anatel_st: Status
-  nden: number
-}
-type Loja = {
-  marketplace: string | null
-  shop_id: string | null
-  chave: string
-  loja: string | null
-  anuncios: number
-  no_ar: number
-  fora_do_ar: number
-  vendas: number
-  nosso: number
-  diversos: number
-  outros: number
-  na_loja: Record<string, number>
-  na_anatel: Record<string, number>
-  processos: string[]
-  ultimo_achado: string | null
-}
 type Numeros = {
   lojas: number
   anuncios: number
@@ -102,39 +60,17 @@ const carregandoLoja = ref(false)
 
 // ficha do anúncio (tudo junto); foco = a denúncia clicada em "Denúncias enviadas"
 const aberto = ref<string | null>(null)
+// 01/10 (Vinicius: "tem que clicar na loja e depois no anúncio"): clicar na loja abre a ficha dela
+const lojaFicha = ref<Loja | null>(null)
+// coluna Caso: o número do caso leva direto a ele (aba Casos)
+const emit = defineEmits<{ (e: 'caso', id: number): void }>()
+function irCaso(id: number) {
+  lojaFicha.value = null
+  aberto.value = null
+  emit('caso', id)
+}
 const foco = ref<number | null>(null)
 const enviadas = ref<{ carregar: () => Promise<void> } | null>(null)
-
-// "9 removidos · 21 recusadas · 36 aguardando" — a ordem e o texto de cada etiqueta
-const ETIQ_LOJA: [string, string, string, string][] = [
-  ['removido', 'pill-success', 'removido', 'removidos'],
-  ['recusou', 'pill-danger', 'recusada', 'recusadas'],
-  ['aguardando', 'pill-muted', 'aguardando', 'aguardando'],
-  ['nao', 'pill-muted', 'sem denúncia', 'sem denúncia'],
-]
-const ETIQ_ANATEL: [string, string, string, string][] = [
-  ['processo', 'pill-info', 'com processo', 'com processo'],
-  ['fila', 'pill-warning', 'na fila', 'na fila'],
-  ['falta_print', 'pill-warning', 'falta o print', 'falta o print'],
-  ['esperando_recusa', 'pill-muted', 'esperando recusa', 'esperando recusa'],
-  ['falta_loja', 'pill-muted', 'falta denunciar na loja', 'falta denunciar na loja'],
-]
-function etiquetas(cont: Record<string, number>, tabela: [string, string, string, string][]) {
-  return tabela
-    .filter(([k]) => cont[k])
-    .map(([k, cls, um, varios]) => ({ k, cls, texto: `${cont[k]} ${cont[k] > 1 ? varios : um}` }))
-}
-const TOM: Record<string, string> = {
-  success: 'pill-success', danger: 'pill-danger', warning: 'pill-warning', info: 'pill-info', muted: 'pill-muted',
-}
-function pillTom(t: string | undefined): string {
-  return TOM[t || 'muted'] || 'pill-muted'
-}
-
-// "ativo" é como o robô grava; na tela fica "no ar"
-function textoSituacao(s: string | null): string {
-  return s === 'ativo' ? 'no ar' : s || '—'
-}
 
 function chaveLoja(l: Loja): string {
   return `${l.marketplace || ''}|${l.chave}`
@@ -259,10 +195,10 @@ defineExpose({ carregar })
     <div v-if="n" class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
       <StatCard compact label="Lojas" :value="numero(n.lojas)" :hint="`${numero(n.anuncios)} anúncios`" />
       <button type="button" class="text-left rounded-lg" :class="situacao === 'ativo' ? 'ring-2 ring-primary' : ''" title="filtrar os que estão no ar" @click="porCartao('situacao', 'ativo')">
-        <StatCard compact label="No ar" :value="numero(n.no_ar)" tone="warning" hint="ainda vendendo" />
+        <StatCard compact label="Ativos" :value="numero(n.no_ar)" tone="warning" hint="ainda vendendo" />
       </button>
       <button type="button" class="text-left rounded-lg" :class="situacao === 'fora do ar' ? 'ring-2 ring-primary' : ''" title="filtrar os que saíram do ar" @click="porCartao('situacao', 'fora do ar')">
-        <StatCard compact label="Fora do ar" :value="numero(n.fora_do_ar)" tone="success" hint="saíram depois de vistos" />
+        <StatCard compact label="Não ativos" :value="numero(n.fora_do_ar)" tone="success" hint="saíram do ar depois de vistos" />
       </button>
       <button type="button" class="text-left rounded-lg" :class="naLoja === 'recusou' ? 'ring-2 ring-primary' : ''" title="filtrar os que a loja recusou" @click="porCartao('naLoja', 'recusou')">
         <StatCard
@@ -310,9 +246,9 @@ defineExpose({ carregar })
           <option v-for="g in opcoes.grupos" :key="g" :value="g">certificado: {{ nomeGrupo(g).toLowerCase() }}</option>
         </select>
         <select v-model="situacao" class="h-9 rounded-md border bg-background px-2 text-sm" @change="filtrar">
-          <option value="">no ar e fora do ar</option>
-          <option value="ativo">no ar</option>
-          <option value="fora do ar">fora do ar</option>
+          <option value="">ativo: todos</option>
+          <option value="ativo">ativo: sim</option>
+          <option value="fora do ar">ativo: não</option>
           <option value="desconhecido">desconhecido</option>
         </select>
         <select v-model="naLoja" class="h-9 rounded-md border bg-background px-2 text-sm" @change="filtrar">
@@ -350,42 +286,51 @@ defineExpose({ carregar })
           <colgroup>
             <col class="w-[108px]">
             <col>
-            <col class="w-[150px]">
-            <col class="w-[92px]">
-            <col class="w-[92px]">
+            <col class="w-[140px]">
+            <col class="w-[96px]">
+            <col class="w-[96px]">
             <col class="w-[210px]">
-            <col class="w-[230px]">
-            <col class="w-[120px]">
+            <col class="w-[220px]">
+            <col class="w-[92px]">
+            <col class="w-[110px]">
           </colgroup>
           <thead>
             <tr class="[&>th]:whitespace-nowrap">
               <th title="Quando o robô achou o anúncio mais novo desta loja">Último achado</th>
               <th>Loja</th>
               <th>Certificado</th>
-              <th class="text-right">Anúncios</th>
-              <th class="text-right">Vendas</th>
+              <th class="text-center">Anúncios</th>
+              <th class="text-center">Vendas</th>
               <th>Na loja</th>
               <th>Na Anatel</th>
-              <th>Resultado</th>
+              <th title="Ainda vendendo? (anúncios no ar / total)">Ativo</th>
+              <th>Caso</th>
             </tr>
           </thead>
           <tbody>
             <tr v-if="carregando && lojas.length === 0">
-              <td colspan="8" class="text-center text-muted-foreground py-6">carregando…</td>
+              <td colspan="9" class="text-center text-muted-foreground py-6">carregando…</td>
             </tr>
             <tr v-else-if="lojas.length === 0">
-              <td colspan="8" class="text-center text-muted-foreground py-6">nenhuma loja neste filtro</td>
+              <td colspan="9" class="text-center text-muted-foreground py-6">nenhuma loja neste filtro</td>
             </tr>
             <template v-for="l in lojas" :key="chaveLoja(l)">
-              <tr class="cursor-pointer [&>td]:align-middle" :class="lojaAberta === chaveLoja(l) ? 'bg-muted/40' : ''" @click="abrirLoja(l)">
+              <tr class="cursor-pointer [&>td]:align-middle" :class="lojaAberta === chaveLoja(l) ? 'bg-muted/40' : ''" @click="lojaFicha = l">
                 <td class="text-xs tabular-nums whitespace-nowrap" :title="l.ultimo_achado || ''">
                   <div>{{ dataBr(l.ultimo_achado, false) }}</div>
                   <div class="text-[11px] text-muted-foreground">{{ l.ultimo_achado && l.ultimo_achado.length >= 16 ? l.ultimo_achado.slice(11, 16) : '' }}</div>
                 </td>
                 <td>
                   <div class="flex items-center gap-1 min-w-0">
-                    <ChevronDown v-if="lojaAberta === chaveLoja(l)" class="size-3.5 shrink-0 text-muted-foreground" />
-                    <ChevronRight v-else class="size-3.5 shrink-0 text-muted-foreground" />
+                    <button
+                      type="button"
+                      class="-ml-1 rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground"
+                      :title="lojaAberta === chaveLoja(l) ? 'fechar os anúncios' : 'ver os anúncios aqui'"
+                      @click.stop="abrirLoja(l)"
+                    >
+                      <ChevronDown v-if="lojaAberta === chaveLoja(l)" class="size-3.5" />
+                      <ChevronRight v-else class="size-3.5" />
+                    </button>
                     <span class="truncate text-sm font-medium" :title="l.loja || ''">{{ l.loja || l.shop_id || 'sem loja' }}</span>
                   </div>
                   <div class="pl-[18px] text-[11px] text-muted-foreground truncate">
@@ -399,11 +344,8 @@ defineExpose({ carregar })
                     <span v-if="l.outros" class="pill-muted">outros {{ l.outros }}</span>
                   </div>
                 </td>
-                <td class="text-right tabular-nums">
-                  <div class="text-sm">{{ numero(l.anuncios) }}</div>
-                  <div class="text-[11px] text-muted-foreground whitespace-nowrap">{{ numero(l.no_ar) }} no ar</div>
-                </td>
-                <td class="text-right text-sm font-medium tabular-nums">{{ numero(l.vendas) }}</td>
+                <td class="text-center text-sm tabular-nums">{{ numero(l.anuncios) }}</td>
+                <td class="text-center text-sm font-medium tabular-nums">{{ numero(l.vendas) }}</td>
                 <td>
                   <div class="flex flex-wrap gap-1">
                     <span v-for="e in etiquetas(l.na_loja, ETIQ_LOJA)" :key="e.k" :class="e.cls">{{ e.texto }}</span>
@@ -416,16 +358,22 @@ defineExpose({ carregar })
                   </div>
                 </td>
                 <td>
-                  <span v-if="l.fora_do_ar" class="pill-success">{{ l.fora_do_ar }} fora do ar</span>
+                  <span :class="l.no_ar ? 'pill-warning' : 'pill-success'">{{ l.no_ar ? 'Sim' : 'Não' }}</span>
+                  <div class="text-[11px] text-muted-foreground mt-0.5 tabular-nums whitespace-nowrap">{{ numero(l.no_ar) }} de {{ numero(l.anuncios) }}</div>
+                </td>
+                <td>
+                  <div v-if="l.casos.length" class="flex flex-wrap gap-1">
+                    <button v-for="c in l.casos" :key="c.id" type="button" class="pill-info hover:underline" :title="`abrir o ${c.codigo} (${c.status})`" @click.stop="emit('caso', c.id)">{{ c.codigo }}</button>
+                  </div>
                   <span v-else class="text-xs text-muted-foreground">—</span>
                 </td>
               </tr>
               <template v-if="lojaAberta === chaveLoja(l)">
                 <tr v-if="carregandoLoja">
-                  <td colspan="8" class="bg-muted/20 text-xs text-muted-foreground">carregando os anúncios da loja…</td>
+                  <td colspan="9" class="bg-muted/20 text-xs text-muted-foreground">carregando os anúncios da loja…</td>
                 </tr>
                 <tr v-else-if="!anunciosDaLoja.length">
-                  <td colspan="8" class="bg-muted/20 text-xs text-muted-foreground">nenhum anúncio desta loja neste filtro</td>
+                  <td colspan="9" class="bg-muted/20 text-xs text-muted-foreground">nenhum anúncio desta loja neste filtro</td>
                 </tr>
                 <tr
                   v-for="a in anunciosDaLoja"
@@ -447,7 +395,7 @@ defineExpose({ carregar })
                   </td>
                   <td><span v-if="a.grupo" :class="pillGrupo(a.grupo)">{{ nomeGrupo(a.grupo) }}</span></td>
                   <td />
-                  <td class="text-right text-xs tabular-nums">{{ numero(a.vendas) }}</td>
+                  <td class="text-center text-xs tabular-nums">{{ numero(a.vendas) }}</td>
                   <td>
                     <span :class="pillTom(a.loja_st.tom)">{{ a.loja_st.rotulo }}</span>
                     <div v-if="a.loja_st.data" class="text-[11px] text-muted-foreground mt-0.5 whitespace-nowrap">{{ dataBr(a.loja_st.data, false) }}<template v-if="(a.loja_st.tentativas || 0) > 1"> · {{ a.loja_st.tentativas }} tentativas</template></div>
@@ -456,7 +404,13 @@ defineExpose({ carregar })
                     <span :class="pillTom(a.anatel_st.tom)">{{ a.anatel_st.rotulo }}</span>
                     <div v-if="a.anatel_st.protocolo" class="font-mono text-[11px] text-muted-foreground mt-0.5 truncate">{{ a.anatel_st.protocolo }}</div>
                   </td>
-                  <td><span :class="pillSituacaoAnuncio(a.situacao)">{{ textoSituacao(a.situacao) }}</span></td>
+                  <td><span :class="pillAtivo(a.situacao)">{{ ativoSimNao(a.situacao) }}</span></td>
+                  <td>
+                    <div v-if="a.casos.length" class="flex flex-wrap gap-1">
+                      <button v-for="c in a.casos" :key="c.id" type="button" class="pill-info hover:underline" :title="`abrir o ${c.codigo} (${c.status})`" @click.stop="emit('caso', c.id)">{{ c.codigo }}</button>
+                    </div>
+                    <span v-else class="text-xs text-muted-foreground">—</span>
+                  </td>
                 </tr>
               </template>
             </template>
@@ -472,9 +426,10 @@ defineExpose({ carregar })
             <col>
             <col class="w-[180px]">
             <col class="w-[110px]">
-            <col class="w-[92px]">
+            <col class="w-[96px]">
             <col class="w-[200px]">
             <col class="w-[220px]">
+            <col class="w-[80px]">
             <col class="w-[110px]">
           </colgroup>
           <thead>
@@ -483,10 +438,11 @@ defineExpose({ carregar })
               <th>Anúncio</th>
               <th>Loja</th>
               <th>Certificado</th>
-              <th class="text-right">Vendas</th>
+              <th class="text-center">Vendas</th>
               <th>Na loja</th>
               <th>Na Anatel</th>
-              <th>Situação</th>
+              <th title="Ainda vendendo?">Ativo</th>
+              <th>Caso</th>
             </tr>
           </thead>
           <tbody>
@@ -515,7 +471,7 @@ defineExpose({ carregar })
                 <div class="text-[11px] text-muted-foreground truncate">{{ a.marketplace || '' }}</div>
               </td>
               <td><span v-if="a.grupo" :class="pillGrupo(a.grupo)">{{ nomeGrupo(a.grupo) }}</span></td>
-              <td class="text-right text-xs tabular-nums">{{ numero(a.vendas) }}</td>
+              <td class="text-center text-xs tabular-nums">{{ numero(a.vendas) }}</td>
               <td>
                 <span :class="pillTom(a.loja_st.tom)">{{ a.loja_st.rotulo }}</span>
                 <div v-if="a.loja_st.data" class="text-[11px] text-muted-foreground mt-0.5 whitespace-nowrap">{{ dataBr(a.loja_st.data, false) }}<template v-if="(a.loja_st.tentativas || 0) > 1"> · {{ a.loja_st.tentativas }} tentativas</template></div>
@@ -524,7 +480,13 @@ defineExpose({ carregar })
                 <span :class="pillTom(a.anatel_st.tom)">{{ a.anatel_st.rotulo }}</span>
                 <div v-if="a.anatel_st.protocolo" class="font-mono text-[11px] text-muted-foreground mt-0.5 truncate">{{ a.anatel_st.protocolo }}</div>
               </td>
-              <td><span :class="pillSituacaoAnuncio(a.situacao)">{{ textoSituacao(a.situacao) }}</span></td>
+              <td><span :class="pillAtivo(a.situacao)">{{ ativoSimNao(a.situacao) }}</span></td>
+              <td>
+                <div v-if="a.casos.length" class="flex flex-wrap gap-1">
+                  <button v-for="c in a.casos" :key="c.id" type="button" class="pill-info hover:underline" :title="`abrir o ${c.codigo} (${c.status})`" @click.stop="emit('caso', c.id)">{{ c.codigo }}</button>
+                </div>
+                <span v-else class="text-xs text-muted-foreground">—</span>
+              </td>
             </tr>
           </tbody>
         </table>
@@ -547,6 +509,7 @@ defineExpose({ carregar })
       </div>
     </template>
 
-    <DenunciaAnuncioGaveta :anuncio-id="aberto" :foco-denuncia="foco" @fechar="aberto = null; foco = null" />
+    <DenunciaLojaGaveta :loja="lojaFicha" :propria="propria" @fechar="lojaFicha = null" @caso="irCaso" />
+    <DenunciaAnuncioGaveta :anuncio-id="aberto" :foco-denuncia="foco" @fechar="aberto = null; foco = null" @caso="irCaso" />
   </div>
 </template>
