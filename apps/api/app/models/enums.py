@@ -22,6 +22,7 @@ class Marketplace(StrEnum):
     SHEIN = "shein"
     MAGALU = "magalu"
     CARREFOUR = "carrefour"
+    NETSHOES = "netshoes"
     SITE = "site"
 
 

@@ -120,6 +120,7 @@ const PLATFORMS = [
   { value: 'shein', label: 'Shein' },
   { value: 'site', label: 'Site' },
   { value: 'carrefour', label: 'Carrefour' },
+  { value: 'netshoes', label: 'Netshoes' },
 ].sort((a, b) => a.label.localeCompare(b.label, 'pt-BR'))
 
 function platformLabel(p: string) {
@@ -699,10 +700,12 @@ function fatTiposDefinidos(row: StoreInfo): string[] {
   return fatTipos(row).filter((d) => row.nf_faturador_por_tipo?.[d])
 }
 
-async function toggleDepartment(row: StoreInfo, slug: string, checked: boolean) {
+async function toggleDepartment(row: StoreInfo, slug: string, input: HTMLInputElement) {
   const key = `${row.id}:${slug}`
   if (tipoBusy.value.has(key)) return
+  const checked = input.checked
   tipoBusy.value.add(key)
+  error.value = null
   try {
     if (checked) {
       await api(`/api/pricing/store-info/${row.id}/department`, {
@@ -718,7 +721,13 @@ async function toggleDepartment(row: StoreInfo, slug: string, checked: boolean) 
     flash(row.id, 'department')
     await load()
   } catch (e: any) {
-    error.value = e?.data?.detail?.code || e?.message || 'erro'
+    input.checked = row.departments.includes(slug)
+    const code = e?.data?.detail?.code
+    error.value = code === 'store_info_platform_unsupported'
+      ? 'Esta plataforma ainda não permite configurar o tipo da loja.'
+      : code === 'invalid_department'
+        ? 'Tipo de loja inválido.'
+        : code || e?.message || 'Não foi possível salvar o tipo da loja.'
   } finally {
     tipoBusy.value.delete(key)
   }
@@ -1300,8 +1309,7 @@ async function copyText(text: string) {
                 {{ row.observation || '—' }}
               </span>
             </td>
-            <!-- Tipo (badges from linked pricing_accounts; catálogo excluded;
-                 click to open the bind/unbind popover) -->
+            <!-- Tipo: classificação da loja; clique para selecionar os tipos. -->
             <td
               class="border border-border px-1 py-1 text-center relative"
               :class="{ 'ring-2 ring-blue-500 ring-inset bg-background': tipoPopoverFor === row.id }"
@@ -1337,7 +1345,7 @@ async function copyText(text: string) {
                     type="checkbox"
                     :checked="row.departments.includes(opt.slug)"
                     :disabled="tipoBusy.has(`${row.id}:${opt.slug}`)"
-                    @change="(e) => toggleDepartment(row, opt.slug, (e.target as HTMLInputElement).checked)"
+                    @change="(e) => toggleDepartment(row, opt.slug, e.target as HTMLInputElement)"
                   />
                   <span>{{ opt.label }}</span>
                 </label>

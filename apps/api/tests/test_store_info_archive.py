@@ -30,6 +30,7 @@ from app.models import (
 )
 
 PERM = {
+    "lojas_info": {"view": True, "edit": True, "delete": True},
     "tabela_precos": {"view": True, "edit": True, "delete": True},
     "tabela_precos_contas": {"view": True, "edit": True, "delete": True},
     "produtos": {"view": True, "edit": True, "delete": True},

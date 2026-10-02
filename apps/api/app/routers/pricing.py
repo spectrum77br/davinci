@@ -1979,6 +1979,16 @@ _STORE_TO_PRICING_PLATFORM = {
     "shein": "shein",
 }
 
+# These platforms are supported as store registrations only. Choosing a
+# product type must not create a pricing account with invented fee rules.
+_MANUAL_DEPARTMENT_PLATFORMS = frozenset({"site", "carrefour", "netshoes"})
+
+
+def _manual_store_departments(row: StoreInfo) -> set[str]:
+    if (row.platform or "").strip().lower() not in _MANUAL_DEPARTMENT_PLATFORMS:
+        return set()
+    return set(row.manual_departments or [])
+
 
 # Sufixos de modalidade no nome da conta de preço ("kfa classico", "kfa premium").
 _SUFIXOS_MODALIDADE = {"classico", "clássico", "premium"}
@@ -2196,7 +2206,7 @@ async def _compute_store_info_badges(
                 has_integ = True
                 break
 
-    return sorted(depts), bool(depts), has_integ
+    return sorted(depts | _manual_store_departments(row)), bool(depts), has_integ
 
 
 def _store_info_out(
@@ -2207,11 +2217,10 @@ def _store_info_out(
 ) -> StoreInfoOut:
     out = StoreInfoOut.model_validate(row)
     out.has_password = bool(row.password_enc)
-    out.departments = sorted(departments or [])
-    # `has_pricing` is the strict-equality flag (an exact name+platform match
-    # in pricing_accounts). Falls back to "any department was matched" so
-    # callers that don't compute the strict variant still get a sensible value.
-    out.has_pricing = bool(has_pricing) if has_pricing is not None else bool(out.departments)
+    out.departments = sorted(set(departments or []) | _manual_store_departments(row))
+    # Manual tags classify a store without creating a price table. Only
+    # departments derived from pricing accounts contribute to this badge.
+    out.has_pricing = bool(has_pricing) if has_pricing is not None else bool(departments)
     # `has_integration` is the strict (lower(name), platform) match against the
     # `integrations` table. Falls back to the legacy FK if the caller didn't
     # compute the strict variant.
@@ -2530,7 +2539,10 @@ async def reveal_store_info_password(
     return {"password": decrypt(row.password_enc)}
 
 
-@router.post("/store-info/{store_info_id}/department", response_model=PricingAccountOut)
+@router.post(
+    "/store-info/{store_info_id}/department",
+    response_model=PricingAccountOut | StoreInfoOut,
+)
 async def set_store_info_department(
     store_info_id: UUID,
     body: AccountSetDepartmentIn,
@@ -2538,8 +2550,9 @@ async def set_store_info_department(
     user: Annotated[
         User, Depends(require_permission("lojas_info", "edit"))
     ],
-) -> PricingAccountOut:
-    """Bind a department to a store_info. SSH parity:
+) -> PricingAccountOut | StoreInfoOut:
+    """Bind a department to a store_info. Registration-only platforms retain
+    the type on the store, independently of pricing. Existing pricing flow:
       1. Map StoreInfo.platform (short code "ml", "shein", …) into a
          PricingPlatform value via `_STORE_TO_PRICING_PLATFORM`. Direct
          `PricingPlatform(info.platform)` would crash on "ml"/"shein" because
@@ -2561,13 +2574,23 @@ async def set_store_info_department(
                     StoreInfo.id == store_info_id,
                     user_scope(StoreInfo, user),
                 )
-            )
+            ).with_for_update().execution_options(populate_existing=True)
         )
     ).scalar_one_or_none()
     if info is None:
         raise HTTPException(404, detail={"code": "store_info_not_found"})
 
     raw_platform = (info.platform or "").strip().lower()
+    if raw_platform in _MANUAL_DEPARTMENT_PLATFORMS:
+        info.manual_departments = sorted(
+            set(info.manual_departments or []) | {body.department}
+        )
+        await session.commit()
+        await session.refresh(info)
+        depts, has_pricing, has_integ = await _compute_store_info_badges(session, user, info)
+        return _store_info_out(
+            info, departments=depts, has_pricing=has_pricing, has_integration=has_integ
+        )
     pricing_value = _STORE_TO_PRICING_PLATFORM.get(raw_platform)
     if not pricing_value:
         raise HTTPException(400, detail={"code": "store_info_platform_unsupported"})
@@ -2682,11 +2705,16 @@ async def unbind_store_info_department(
         await session.execute(
             select(StoreInfo).where(
                 and_(StoreInfo.id == store_info_id, user_scope(StoreInfo, user))
-            )
+            ).with_for_update().execution_options(populate_existing=True)
         )
     ).scalar_one_or_none()
     if info is None:
         raise HTTPException(404, detail={"code": "store_info_not_found"})
+
+    # Clear stored manual tags as well, including a tag selected before a
+    # platform change, so it cannot reappear if the platform changes back.
+    if slug in (info.manual_departments or []):
+        info.manual_departments = sorted(set(info.manual_departments or []) - {slug}) or None
 
     sname = (info.account_name or "").strip().lower()
     splat_alias = _STORE_TO_PRICING_PLATFORM.get(

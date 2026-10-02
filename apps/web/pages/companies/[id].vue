@@ -106,7 +106,7 @@ const MK_TO_INTEGRATION_PLATFORM: Record<string, 'bling' | 'ml' | 'shopee' | 'am
   temu: 'temu',
   magalu: 'magalu',
   // Bling is multi-channel and lives at the company level — we surface it separately.
-  site: null, aliexpress: null, shein: null, carrefour: null,
+  site: null, aliexpress: null, shein: null, carrefour: null, netshoes: null,
 }
 
 type IntegrationRef = { id: string; platform: string; name: string; store_id: string | null }
