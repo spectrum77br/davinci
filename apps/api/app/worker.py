@@ -2174,22 +2174,31 @@ async def logistica_sweep_amazon(ctx: dict) -> dict[str, int]:
     return await _sweep_de(ctx, "amazon")
 
 
-_AMAZON_DEVOLUCOES_TESTE_KEY = "amazon_devolucoes_teste:rodou"
+_AMAZON_DEVOLUCOES_TESTE_FEITO = "amazon_devolucoes_teste:feito"
+_AMAZON_DEVOLUCOES_TESTE_RODANDO = "amazon_devolucoes_teste:rodando"
 
 
 async def amazon_devolucoes_teste(ctx: dict) -> dict[str, int]:
     """TESTE (02/10): o relatório de devoluções da Amazon vem pras nossas
-    contas? Ver `services/amazon_devolucoes`. Roda quando o worker sobe (o
-    deploy é o gatilho) e 1×/dia, no máximo 1× a cada 3 h (se precisar corrigir
-    e publicar de novo, não espera meio dia); o resultado fica no log
-    (`amazon_devolucoes_teste`)."""
+    contas? Ver `services/amazon_devolucoes`; o resultado fica no log
+    (`amazon_devolucoes_teste`). Tenta ao subir o worker e de hora em hora até
+    TERMINAR uma vez (a 1ª, das 12:07 UTC, morreu numa publicação no meio e a
+    trava antiga, posta no começo, ainda barrava por 3 h); depois de terminar,
+    descansa 20 h."""
     redis = ctx.get("redis")
-    if redis is not None and not await redis.set(
-        _AMAZON_DEVOLUCOES_TESTE_KEY, "1", nx=True, ex=3 * 3600
-    ):
-        return {"pulado": 1}
-    async with session_scope() as s:
-        r = await amazon_devolucoes.testar_relatorio(s)
+    if redis is not None:
+        if await redis.exists(_AMAZON_DEVOLUCOES_TESTE_FEITO):
+            return {"pulado_ja_feito": 1}
+        if not await redis.set(_AMAZON_DEVOLUCOES_TESTE_RODANDO, "1", nx=True, ex=1800):
+            return {"pulado_rodando": 1}
+    try:
+        async with session_scope() as s:
+            r = await amazon_devolucoes.testar_relatorio(s)
+        if redis is not None:
+            await redis.set(_AMAZON_DEVOLUCOES_TESTE_FEITO, "1", ex=20 * 3600)
+    finally:
+        if redis is not None:
+            await redis.delete(_AMAZON_DEVOLUCOES_TESTE_RODANDO)
     return {"contas": len(r), "ok": sum(1 for x in r if x["ok"])}
 
 
@@ -4075,7 +4084,7 @@ class WorkerSettings:
         # Tick horário e startup recuperam consultas perdidas durante reinícios.
         cron(certificacoes_anatel_sync, minute=35, run_at_startup=True, timeout=240),
         # TESTE 02/10: relatório de devoluções da Amazon (resultado só no log).
-        cron(amazon_devolucoes_teste, hour=12, minute=5, run_at_startup=True, timeout=1800),
+        cron(amazon_devolucoes_teste, minute=5, run_at_startup=True, timeout=1800),
         cron(certificacoes_inmetro_sync, minute=45, run_at_startup=True, timeout=240),
         cron(auth_codes_cleanup, hour=6, minute=15, run_at_startup=False),
         # 06:00 UTC = 03:00 BRT — quiet window, also the daily-sync mass enqueue trigger.

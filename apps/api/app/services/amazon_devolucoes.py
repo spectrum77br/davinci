@@ -20,6 +20,7 @@ de pedido/datas/status/motivo/rastreio/valores (nada de nome, endereço, e-mail)
 
 from __future__ import annotations
 
+import asyncio
 import csv
 import io
 from datetime import UTC, datetime, timedelta
@@ -68,9 +69,10 @@ def resumir(tsv: str) -> dict:
 
 
 async def testar_relatorio(session: AsyncSession) -> list[dict]:
-    """Pede o relatório de devoluções dos últimos 30 dias a cada conta Amazon
-    e loga o resultado (`amazon_devolucoes_teste`). Uma conta falhar não para
-    as outras."""
+    """Pede o relatório de devoluções dos últimos 30 dias a cada conta Amazon,
+    TODAS AO MESMO TEMPO (02/10: em fila, a 1ª rodada levou 7 min e uma
+    publicação matou no meio), e loga cada conta assim que ela responde
+    (`amazon_devolucoes_teste`). Uma conta falhar não para as outras."""
     contas = (
         await session.execute(
             select(Integration)
@@ -83,18 +85,22 @@ async def testar_relatorio(session: AsyncSession) -> list[dict]:
     ).scalars().all()
     fim = datetime.now(UTC).replace(microsecond=0)
     inicio = fim - timedelta(days=JANELA_DIAS)
-    saida: list[dict] = []
-    for integ in contas:
+    logger.info("amazon_devolucoes_teste_inicio", contas=[c.name for c in contas])
+    trava = asyncio.Lock()  # token renovado: um flush por vez na mesma sessão
+
+    async def _uma(integ: Integration) -> dict:
         conta = (integ.name or "").strip().lower() or str(integ.id)
         try:
-            client = _build_amazon_client(session, integ)
+            client = _build_amazon_client(session, integ, lock=trava)
             tsv = await client.baixar_relatorio(
                 RELATORIO, data_inicio=inicio, data_fim=fim, max_poll_attempts=60
             )
             r = {"conta": conta, "ok": True, **resumir(tsv)}
         except Exception as e:  # noqa: BLE001 — o teste quer o motivo de cada conta
             r = {"conta": conta, "ok": False, "erro": str(e)[:400]}
-        await session.commit()  # token renovado pelo client fica gravado
         logger.info("amazon_devolucoes_teste", **r)
-        saida.append(r)
+        return r
+
+    saida = list(await asyncio.gather(*(_uma(i) for i in contas)))
+    await session.commit()  # token renovado pelo client fica gravado
     return saida

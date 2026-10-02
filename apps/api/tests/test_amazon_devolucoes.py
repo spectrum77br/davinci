@@ -146,7 +146,7 @@ async def test_conta_recusada_nao_para_as_outras(db, make_user, monkeypatch):
             return TSV
 
     monkeypatch.setattr(
-        amazon_devolucoes, "_build_amazon_client", lambda s, integ: _Cliente(integ.name)
+        amazon_devolucoes, "_build_amazon_client", lambda s, integ, **kw: _Cliente(integ.name)
     )
     r = await amazon_devolucoes.testar_relatorio(db)
     assert [(x["conta"], x["ok"]) for x in r] == [("kfa", False), ("kia", True)]
