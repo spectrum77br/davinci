@@ -1,9 +1,9 @@
 export type Marketplace =
   | 'ml' | 'shopee' | 'amazon' | 'aliexpress'
-  | 'temu' | 'tiktok' | 'shein' | 'magalu' | 'site'
+  | 'temu' | 'tiktok' | 'shein' | 'magalu' | 'carrefour' | 'site'
 
 export const MARKETPLACES: Marketplace[] = [
-  'ml', 'shopee', 'amazon', 'aliexpress', 'temu', 'tiktok', 'shein', 'magalu', 'site',
+  'ml', 'shopee', 'amazon', 'aliexpress', 'temu', 'tiktok', 'shein', 'magalu', 'carrefour', 'site',
 ]
 
 export const MARKETPLACE_LABELS: Record<Marketplace, string> = {
@@ -15,12 +15,13 @@ export const MARKETPLACE_LABELS: Record<Marketplace, string> = {
   tiktok: 'TikTok',
   shein: 'Shein',
   magalu: 'Magalu',
+  carrefour: 'Carrefour',
   site: 'Site',
 }
 
 export const MARKETPLACE_SHORT: Record<Marketplace, string> = {
   ml: 'ML', shopee: 'Shopee', amazon: 'Amazon', aliexpress: 'Aliexpress',
-  temu: 'Temu', tiktok: 'Tik tok', shein: 'Shein', magalu: 'Magalu', site: 'Site',
+  temu: 'Temu', tiktok: 'Tik tok', shein: 'Shein', magalu: 'Magalu', carrefour: 'Carrefour', site: 'Site',
 }
 
 export type StoreStatus =

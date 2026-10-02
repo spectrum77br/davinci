@@ -113,11 +113,12 @@ class Company(Base, TimestampMixin):
         ARRAY(Text),
         nullable=False,
         server_default=text(
-            "ARRAY['ml','shopee','amazon','aliexpress','temu','tiktok','shein','magalu','site']::text[]"
+            "ARRAY['ml','shopee','amazon','aliexpress','temu','tiktok','shein',"
+            "'magalu','carrefour','site']::text[]"
         ),
         default=lambda: [
             "ml", "shopee", "amazon", "aliexpress",
-            "temu", "tiktok", "shein", "magalu", "site",
+            "temu", "tiktok", "shein", "magalu", "carrefour", "site",
         ],
     )
 

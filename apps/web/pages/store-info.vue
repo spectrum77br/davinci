@@ -119,6 +119,7 @@ const PLATFORMS = [
   { value: 'magalu', label: 'Magalu' },
   { value: 'shein', label: 'Shein' },
   { value: 'site', label: 'Site' },
+  { value: 'carrefour', label: 'Carrefour' },
 ]
 
 function platformLabel(p: string) {

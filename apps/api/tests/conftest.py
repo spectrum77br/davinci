@@ -91,7 +91,7 @@ async def _setup_schema():
         "user_status": ("pending", "active", "suspended"),
         "marketplace": (
             "ml", "shopee", "amazon", "aliexpress",
-            "temu", "tiktok", "shein", "magalu", "site",
+            "temu", "tiktok", "shein", "magalu", "carrefour", "site",
         ),
         "store_status": (
             "active", "inactive", "closing", "banned", "pending", "under_review",

@@ -21,6 +21,7 @@ class Marketplace(StrEnum):
     TIKTOK = "tiktok"
     SHEIN = "shein"
     MAGALU = "magalu"
+    CARREFOUR = "carrefour"
     SITE = "site"
 
 
