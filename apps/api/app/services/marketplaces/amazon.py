@@ -391,32 +391,38 @@ class AmazonClient:
                 break
             await asyncio.sleep(self._ORDERS_PAUSA_ENTRE_PAGINAS_S)
 
-    async def list_listings(
+    async def baixar_relatorio(
         self,
+        report_type: str,
         *,
+        data_inicio: datetime | None = None,
+        data_fim: datetime | None = None,
         max_poll_attempts: int = 30,
         poll_interval: float = 5.0,
-    ) -> AsyncIterator[dict]:
-        """Yields one normalized listing dict per row of the
-        GET_MERCHANT_LISTINGS_ALL_DATA report. Mirrors SSH's getInventory:
+    ) -> str:
+        """Pede um relatório da Reports API e devolve o texto (TSV) já
+        decodificado:
 
           1. POST /reports/2021-06-30/reports         → reportId
           2. Poll /reports/2021-06-30/reports/{id}    → reportDocumentId
           3. GET  /reports/2021-06-30/documents/{id}  → url + compressionAlgorithm
           4. Download (possibly GZIP) and decode (UTF-8/UTF-16/Latin1)
-          5. Parse TSV (columns: seller-sku, item-name, asin1, quantity,
-             status, price)
-        """
+
+        `data_inicio`/`data_fim` = dataStartTime/dataEndTime (relatórios por
+        período, ex. devoluções). Falha levanta RuntimeError com o status —
+        `amazon_create_report_failed status=403` é falta de papel no app."""
         if not self.marketplace_id or not self.seller_id:
             raise RuntimeError("amazon_missing_creds: seller_id or marketplace_id")
+        pedido: dict = {"reportType": report_type, "marketplaceIds": [self.marketplace_id]}
+        if data_inicio is not None:
+            pedido["dataStartTime"] = data_inicio.isoformat()
+        if data_fim is not None:
+            pedido["dataEndTime"] = data_fim.isoformat()
 
         create_r = await self._request(
             "POST",
             "/reports/2021-06-30/reports",
-            json={
-                "reportType": "GET_MERCHANT_LISTINGS_ALL_DATA",
-                "marketplaceIds": [self.marketplace_id],
-            },
+            json=pedido,
         )
         if create_r.status_code not in (200, 202):
             raise RuntimeError(
@@ -425,7 +431,9 @@ class AmazonClient:
         report_id = (create_r.json() or {}).get("reportId")
         if not report_id:
             raise RuntimeError("amazon_create_report_no_id")
-        logger.info("amazon_report_created", report_id=report_id)
+        logger.info(
+            "amazon_report_created", report_id=report_id, report_type=report_type
+        )
 
         report_document_id: str | None = None
         last_status = "IN_QUEUE"
@@ -476,7 +484,22 @@ class AmazonClient:
 
         text = _decode_amazon_report(raw)
         logger.info("amazon_report_downloaded", bytes=len(raw), chars=len(text))
+        return text
 
+    async def list_listings(
+        self,
+        *,
+        max_poll_attempts: int = 30,
+        poll_interval: float = 5.0,
+    ) -> AsyncIterator[dict]:
+        """Yields one normalized listing dict per row of the
+        GET_MERCHANT_LISTINGS_ALL_DATA report (TSV columns: seller-sku,
+        item-name, asin1, quantity, status, price). Mirrors SSH's getInventory."""
+        text = await self.baixar_relatorio(
+            "GET_MERCHANT_LISTINGS_ALL_DATA",
+            max_poll_attempts=max_poll_attempts,
+            poll_interval=poll_interval,
+        )
         for row in _parse_amazon_listings_tsv(text):
             yield row
 

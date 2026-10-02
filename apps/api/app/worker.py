@@ -35,6 +35,7 @@ from app.models import (
 from app.redis_client import redis
 from app.security.cipher import decrypt_json, encrypt_json
 from app.services import (
+    amazon_devolucoes,
     chamados_devolucao,
     chamados_devolucao_sync,
     chamados_pendencias,
@@ -2173,6 +2174,25 @@ async def logistica_sweep_amazon(ctx: dict) -> dict[str, int]:
     return await _sweep_de(ctx, "amazon")
 
 
+_AMAZON_DEVOLUCOES_TESTE_KEY = "amazon_devolucoes_teste:rodou"
+
+
+async def amazon_devolucoes_teste(ctx: dict) -> dict[str, int]:
+    """TESTE (02/10): o relatório de devoluções da Amazon vem pras nossas
+    contas? Ver `services/amazon_devolucoes`. Roda quando o worker sobe (o
+    deploy é o gatilho) e 1×/dia, no máximo 1× a cada 3 h (se precisar corrigir
+    e publicar de novo, não espera meio dia); o resultado fica no log
+    (`amazon_devolucoes_teste`)."""
+    redis = ctx.get("redis")
+    if redis is not None and not await redis.set(
+        _AMAZON_DEVOLUCOES_TESTE_KEY, "1", nx=True, ex=3 * 3600
+    ):
+        return {"pulado": 1}
+    async with session_scope() as s:
+        r = await amazon_devolucoes.testar_relatorio(s)
+    return {"contas": len(r), "ok": sum(1 for x in r if x["ok"])}
+
+
 # Quanto tempo sem sucesso antes de avisar, por job. Motor: 5 min de cron +
 # folga pra uma rodada longa e um deploy no meio. Varreduras: 1×/h cada.
 _LOGISTICA_VIGIA_LIMITES_MIN = {
@@ -4054,6 +4074,8 @@ class WorkerSettings:
         # A consulta bem-sucedida agenda a próxima em 24h; falhas tentam de novo em 1h.
         # Tick horário e startup recuperam consultas perdidas durante reinícios.
         cron(certificacoes_anatel_sync, minute=35, run_at_startup=True, timeout=240),
+        # TESTE 02/10: relatório de devoluções da Amazon (resultado só no log).
+        cron(amazon_devolucoes_teste, hour=12, minute=5, run_at_startup=True, timeout=1800),
         cron(certificacoes_inmetro_sync, minute=45, run_at_startup=True, timeout=240),
         cron(auth_codes_cleanup, hour=6, minute=15, run_at_startup=False),
         # 06:00 UTC = 03:00 BRT — quiet window, also the daily-sync mass enqueue trigger.
