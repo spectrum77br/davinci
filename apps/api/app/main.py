@@ -42,6 +42,7 @@ from app.routers import faturamento as faturamento_router
 from app.routers import faturas as faturas_router
 from app.routers import historico as historico_router
 from app.routers import financeiro as financeiro_router
+from app.routers import flex as flex_router
 from app.routers import imagens as imagens_router
 from app.routers import importacao as importacao_router
 from app.routers import informar as informar_router
@@ -241,6 +242,8 @@ app.include_router(tarefas_router.router)
 app.include_router(faturas_router.router)
 app.include_router(automacoes_router.router)
 app.include_router(logistica_router.router)
+# Flex por anúncio (projeto Flex, etapa 3): a aba Flex › Anúncios da Logística.
+app.include_router(flex_router.router)
 app.include_router(logistica_track_router.router)
 app.include_router(informar_router.router)
 app.include_router(refunds_router.router)

@@ -17,7 +17,10 @@ O que muda (só aditivo):
     external_id) — desejado × observado, aprovação, fila de escrita.
   • `flex_log`: trilha só de inserção (antes/depois, modo, resultado). Também
     guarda o pedido Flex levado ao .sp pelo robô de prioridade (`bling_id`,
-    ações `pedido_sp` / `pedido_sem_sp` — etapa 2).
+    ações `pedido_sp` / `pedido_sem_sp` — etapa 2). Etapa 3 (motor por
+    anúncio): ação `decidir`, `motivo` (o porquê em texto) e `por` (a pessoa
+    que aprovou/apertou a emergência; NULL = robô); e `flex_anuncio_estado.
+    recusa` (a plataforma recusou ligar — não tenta de novo sozinho).
 
 Valores fechados em TEXT com CHECK (nada de enum do Postgres). As três tabelas
 ficam FORA do Histórico (historico/sql.EXCLUIDAS): são da máquina.
@@ -55,6 +58,7 @@ _DESEJADO = ("ligado", "desligado", "inelegivel")
 _OBSERVADO = ("ligado", "desligado")
 _MODOS = ("desligado", "observar", "piloto", "ativo")
 _ACOES = (
+    "decidir",
     "ligar",
     "desligar",
     "pedir_aprovacao",
@@ -140,6 +144,7 @@ def upgrade() -> None:
         sa.Column("tentativas", sa.Integer(), server_default=sa.text("0"), nullable=False),
         sa.Column("proxima_tentativa", sa.DateTime(timezone=True), nullable=True),
         sa.Column("ultimo_erro", sa.Text(), nullable=True),
+        sa.Column("recusa", sa.Text(), nullable=True),
         sa.Column("saldo_sp", sa.Integer(), nullable=True),
         sa.Column("familias", sa.Text(), nullable=True),
         sa.Column(
@@ -196,6 +201,8 @@ def upgrade() -> None:
         sa.Column("modo", sa.Text(), nullable=False),
         sa.Column("resultado", sa.Text(), nullable=False),
         sa.Column("erro", sa.Text(), nullable=True),
+        sa.Column("motivo", sa.Text(), nullable=True),
+        sa.Column("por", pg.UUID(as_uuid=True), nullable=True),
         sa.CheckConstraint(_in("plataforma", _PLATAFORMAS), name=op.f("ck_flex_log_plataforma")),
         sa.CheckConstraint(_in("acao", _ACOES), name=op.f("ck_flex_log_acao")),
         sa.CheckConstraint(_in("estado_antes", _DESEJADO), name=op.f("ck_flex_log_estado_antes")),

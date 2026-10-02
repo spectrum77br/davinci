@@ -40,6 +40,8 @@ from app.services import (
     chamados_pendencias,
     devolucao_mensagem_comprador,
     estoque_familia,
+    flex_config,
+    flex_motor,
     threema,
 )
 from app.services.advisory_lock import release_stale_sync_locks, try_user_sync_lock
@@ -3171,6 +3173,60 @@ async def vigia_estoque_familia_tick(ctx: dict) -> None:
         logger.info("vigia_estoque_familia_ok", **summary)
 
 
+# ── Flex por anúncio (projeto Flex, etapa 3 — services/flex_motor) ──────
+
+
+def _minutos_flex() -> set[int]:
+    """Minutos do cron do Flex: de `flex_intervalo_min` em `flex_intervalo_min`
+    a partir de :12 (fora do bloco pesado de :00/:05/:10). Lido na SUBIDA do
+    worker — mudar o intervalo no .env pede reiniciar o worker. Intervalo que
+    não divide 60 só encurta a última volta da hora."""
+    intervalo = max(1, min(60, int(_settings.flex_intervalo_min or 15)))
+    return set(range(12 % intervalo, 60, intervalo))
+
+
+async def flex_motor_tick(ctx: dict) -> None:
+    """Varredura do Flex por anúncio. `flex_modo=desligado` (o padrão) sai na
+    hora, sem tocar no banco além da leitura da configuração. Nos outros
+    modos o motor decide, lê o estado real e — só em piloto/ativo — desliga
+    sozinho e liga o que uma pessoa aprovou. Uma rodada de cada vez (trava
+    no banco): se o botão "Sincronizar" estiver rodando, esta sai."""
+    if flex_config.modo() == flex_config.MODO_DESLIGADO:
+        logger.debug("flex_motor_desligado")
+        return
+    try:
+        resumo = await flex_motor.rodar_motor(origem="cron")
+    except Exception:  # noqa: BLE001
+        logger.exception("flex_motor_unhandled")
+        return
+    if resumo.get("ocupado"):
+        logger.info("flex_motor_ocupado")
+
+
+async def flex_motor_run(ctx: dict, por: str | None = None) -> dict:
+    """Botão "Sincronizar" da tela Flex (POST /api/flex/sincronizar): a mesma
+    rodada do cron, agora, com quem pediu na trilha."""
+    try:
+        quem = UUID(por) if por else None
+    except ValueError:
+        quem = None
+    return await flex_motor.rodar_motor(origem="manual", por=quem)
+
+
+async def flex_reavaliar_run(ctx: dict) -> dict:
+    """Gancho do pedido Flex: o shipment check acabou de registrar pedido Flex
+    novo (services/marketplace_shipment_check._registrar_flex) e o saldo da
+    família caiu. Passe BARATO: só banco, sem ler a plataforma, e só DESLIGA
+    (pelo último estado lido) o que o novo saldo pede — não espera os 15 min
+    da varredura para fechar a torneira. Ligar continua com a varredura +
+    aprovação. Se a rodada inteira estiver em andamento, tenta de novo em 1
+    min (o saldo dela pode ser de antes do pedido)."""
+    resumo = await flex_motor.rodar_motor(ler=False, so_desligar=True, origem="evento")
+    if resumo.get("ocupado"):
+        raise Retry(defer=60)
+    return resumo
+
+
 async def vigia_importacao_tick(ctx: dict) -> None:
     """Vigia de importação (robô da Ouvidoria): pedido PAGO no ML / Shopee /
     TikTok / Amazon que não caiu no Bling → ocorrência + aviso Threema pra
@@ -4193,6 +4249,12 @@ class WorkerSettings:
         nf_recuperar_tick,
         prioridade_estoque_tick,
         prioridade_estoque_estorno_tick,
+        # Flex por anúncio (etapa 3): varredura, botão "Sincronizar" e o
+        # gancho do pedido Flex. 15 min de teto: até 400 leituras do ML + as
+        # escritas da rodada, uma de cada vez.
+        func(flex_motor_tick, timeout=900),
+        func(flex_motor_run, timeout=900),
+        func(flex_reavaliar_run, timeout=300),
         vigia_importacao_tick,
         vigia_estoque_familia_tick,
         # Os 6 robôs da Ouvidoria de 22/09 (cada um sai na hora se o modo da
@@ -4663,6 +4725,12 @@ class WorkerSettings:
         # Manutenção das compensações de kit (retry, estorno de cancelado,
         # aviso): 2×/hora em :16/:46, minutos livres. Sem pendência = SELECTs.
         cron(prioridade_estoque_estorno_tick, minute={16, 46}, run_at_startup=False),
+        # Flex por anúncio (projeto Flex, etapa 3): de flex_intervalo_min em
+        # flex_intervalo_min (padrão 15 → :12/:27/:42/:57). Com
+        # flex_modo=desligado (o padrão) o tick sai na hora. O critério "o .sp
+        # zerou → Flex desligado em até X min" é este intervalo; o gancho do
+        # pedido Flex (flex_reavaliar_run) só acelera o desligar.
+        cron(flex_motor_tick, minute=_minutos_flex(), run_at_startup=False, timeout=900),
         # Vigia de importação (robô da Ouvidoria: pedido pago no ML/Shopee/
         # TikTok/Amazon que não caiu no Bling → ocorrência + Threema). 1×/hora
         # em :09 (minuto livre) — Vinicius, 22/09: de 30 em 30 min era mais

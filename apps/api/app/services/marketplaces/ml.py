@@ -41,6 +41,7 @@ import httpx
 import structlog
 
 from app.config import get_settings
+from app.services.marketplaces import flex_api
 from app.services.marketplaces.base import SyncResult, SyncStatus, TestResult
 from app.services.vinculo_saude import norm_sku
 
@@ -1437,6 +1438,62 @@ class MercadoLivreClient:
         r.raise_for_status()
         corpo = r.json()
         return corpo if isinstance(corpo, dict) else None
+
+    # ── Flex por anúncio (projeto Flex, etapa 3 — 02/10/2026) ──
+    #
+    # GET/POST/DELETE /flex/sites/MLB/items/{id}/v2 (página oficial do Flex,
+    # 22/09/2026). Os três NUNCA levantam: devolvem um `ResultadoFlex` já
+    # classificado (flex_api.classificar_ml) — o motor (services/flex_motor)
+    # decide o que fazer com cada caso e grava em flex_anuncio_estado, nunca
+    # no `product_links.last_sync_status`.
+    #
+    # Leitura usa o `_request` (repete 429/5xx com espera: ler duas vezes não
+    # muda nada). Escrita usa o `_request_uma_vez` (só repete o 401 depois do
+    # refresh): um 5xx/429 volta para o motor marcar "tentar depois" na
+    # próxima rodada, em vez de bater de novo no mesmo segundo — o ML responde
+    # 409 a pedidos simultâneos no mesmo anúncio.
+
+    def _caminho_flex(self, item_id: str | int) -> str:
+        return f"/flex/sites/{flex_api.ML_SITE}/items/{str(item_id).strip()}/v2"
+
+    async def ler_flex(self, item_id: str | int) -> flex_api.ResultadoFlex:
+        """O anúncio está com Flex? (`has_flex`)."""
+        try:
+            r = await self._request("GET", self._caminho_flex(item_id))
+        except Exception as exc:  # noqa: BLE001 — rede/refresh: classificado
+            return flex_api.erro_de_rede(exc)
+        return flex_api.classificar_ml("ler", r)
+
+    async def ligar_flex(self, item_id: str | int) -> flex_api.ResultadoFlex:
+        """Liga o Flex no anúncio (POST, sem corpo). 400 "already in flex" é
+        sucesso. Só o motor chama, depois da aprovação de uma pessoa."""
+        try:
+            r = await self._request_uma_vez("POST", self._caminho_flex(item_id))
+        except Exception as exc:  # noqa: BLE001
+            return flex_api.erro_de_rede(exc)
+        return flex_api.classificar_ml("ligar", r)
+
+    async def desligar_flex(self, item_id: str | int) -> flex_api.ResultadoFlex:
+        """Desliga o Flex no anúncio (DELETE).
+
+        O retorno do DELETE num anúncio JÁ desligado não está documentado:
+        num 400 a confirmação é uma leitura — se o GET diz `has_flex=false`, o
+        que se queria já está feito (sucesso); senão fica o erro do DELETE."""
+        try:
+            r = await self._request_uma_vez("DELETE", self._caminho_flex(item_id))
+        except Exception as exc:  # noqa: BLE001
+            return flex_api.erro_de_rede(exc)
+        res = flex_api.classificar_ml("desligar", r)
+        if r.status_code == 400:
+            lido = await self.ler_flex(item_id)
+            if lido.ok and lido.has_flex is False:
+                return flex_api.ResultadoFlex(
+                    flex_api.OK,
+                    has_flex=False,
+                    status_http=400,
+                    detalhe=f"já estava desligado ({res.detalhe})".strip(),
+                )
+        return res
 
 
 # ---------------------------------------------------------------- helpers

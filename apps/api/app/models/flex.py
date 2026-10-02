@@ -53,7 +53,10 @@ FLEX_OBSERVADO = ("ligado", "desligado")
 FLEX_MODOS = ("desligado", "observar", "piloto", "ativo")
 # `pedido_sp` / `pedido_sem_sp`: o robô de prioridade levou o pedido Flex para
 # o .sp / o .sp não cobria e ficou o aviso (etapa 2, services/prioridade_estoque).
+# `decidir`: a regra mudou o que quer para o anúncio (etapa 3, flex_motor) —
+# só a MUDANÇA vira linha, não cada rodada.
 FLEX_ACOES = (
+    "decidir",
     "ligar",
     "desligar",
     "pedir_aprovacao",
@@ -165,6 +168,11 @@ class FlexAnuncioEstado(Base):
         DateTime(timezone=True), nullable=True
     )
     ultimo_erro: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # A plataforma RECUSOU ligar (ML 403 "item down" / 404; Shopee sem o canal
+    # no anúncio): o motor não tenta ligar de novo — a regra vira `inelegivel`
+    # com este motivo até uma pessoa aprovar outra vez (aprovar limpa). Só
+    # trava o LIGAR: desligar segue valendo (é o lado seguro).
+    recusa: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Menor saldo Flex entre as famílias do anúncio e quais famílias são
     # (texto, "dg053,dg054") — o que a tela mostra ao lado da decisão.
     saldo_sp: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -207,3 +215,8 @@ class FlexLog(Base):
     modo: Mapped[str] = mapped_column(Text, nullable=False)
     resultado: Mapped[str] = mapped_column(Text, nullable=False)
     erro: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # O porquê da decisão (`decidir`) ou da escrita, em texto para a tela.
+    motivo: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Quem fez: a pessoa (aprovar, emergência, sincronizar pela tela). NULL =
+    # o robô. Sem FK, como a conta: o log sobrevive ao usuário apagado.
+    por: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True), nullable=True)

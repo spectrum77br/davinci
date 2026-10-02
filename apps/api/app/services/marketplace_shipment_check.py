@@ -47,7 +47,7 @@ from app.db import session_scope
 from app.models import BlingOrder, Integration, IntegrationPlatform
 from app.models.company import Store
 from app.security.cipher import decrypt_json, encrypt_json
-from app.services import flex_envio
+from app.services import flex_config, flex_envio
 from app.services.advisory_lock import SYNC_NAMESPACE
 from app.services.amazon_shipment_status import (
     AMAZON_EASYSHIP_SAIU,
@@ -645,6 +645,27 @@ async def _registrar_flex(lidos: list[flex_envio.EnvioLido], summary: dict[str, 
         summary["flex_logistica"] = res["logistica"]
     except Exception as e:  # noqa: BLE001
         logger.warning("shipment_check_flex_falhou", lidos=len(lidos), err=str(e)[:200])
+        return
+    if res["flex_pedidos"]:
+        await _reavaliar_flex()
+
+
+async def _reavaliar_flex() -> None:
+    """Pedido Flex novo (ou que mudou) = saldo Flex da família menor: pede ao
+    worker default o passe barato do motor (`flex_reavaliar_run` — só banco,
+    só DESLIGA). Um por minuto no máximo (id do job pelo minuto). Com
+    `flex_modo=desligado` nem enfileira. Falha aqui não atrapalha nada: a
+    varredura de 15 em 15 min cobre."""
+    if flex_config.modo() == flex_config.MODO_DESLIGADO:
+        return
+    try:
+        from app.worker_pool import get_arq_pool
+
+        pool = await get_arq_pool()
+        minuto = datetime.now(UTC).strftime("%Y%m%d%H%M")
+        await pool.enqueue_job("flex_reavaliar_run", _job_id=f"flex_reavaliar:{minuto}")
+    except Exception as e:  # noqa: BLE001
+        logger.warning("shipment_check_flex_reavaliar_falhou", err=str(e)[:200])
 
 
 # ─── candidate loading ─────────────────────────────────────────────

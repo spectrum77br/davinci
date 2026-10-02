@@ -30,7 +30,7 @@ import asyncio
 import hashlib
 import hmac
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Collection
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlencode
@@ -39,6 +39,7 @@ import httpx
 import structlog
 
 from app.config import get_settings
+from app.services.marketplaces import flex_api
 from app.services.marketplaces.base import SyncResult, SyncStatus, TestResult
 
 if TYPE_CHECKING:
@@ -89,6 +90,16 @@ def _corpo_json(r: httpx.Response, what: str) -> dict:
             f"{what} HTTP {r.status_code} resposta não-JSON: {r.text[:120].strip()}"
         ) from exc
     return body if isinstance(body, dict) else {}
+
+
+def _corpo_ou_none(r: httpx.Response) -> dict | None:
+    """Corpo JSON como dict, ou None quando não é JSON (o Flex classifica,
+    não levanta)."""
+    try:
+        corpo = r.json()
+    except ValueError:
+        return None
+    return corpo if isinstance(corpo, dict) else None
 
 
 class ShopeeClient:
@@ -1022,6 +1033,99 @@ class ShopeeClient:
             params={"item_id": int(item_id)},
             what="shopee_model_list",
         )
+
+    # ---- Flex por anúncio: Shopee Entrega Direta (projeto Flex, etapa 3) ----
+    #
+    # O canal é por ANÚNCIO (`logistic_info` do item; as variações não têm
+    # campo de logística). Os dois métodos NUNCA levantam: devolvem
+    # `ResultadoFlex` (flex_api) — o motor decide o que fazer.
+
+    async def ler_canais_flex(
+        self, item_ids: list[int | str], canais_flex: Collection[str]
+    ) -> dict[str, flex_api.ResultadoFlex]:
+        """Estado do canal Flex de até 50 anúncios por chamada
+        (`get_item_base_info`). Cada resultado leva a lista `logistic_info`
+        inteira em `canais` — a escrita é montada a partir dela.
+
+        Anúncio que a Shopee não devolveu: fica de fora do dict. Erro da
+        chamada inteira: todos os pedidos recebem o mesmo resultado de erro."""
+        ids: list[str] = []
+        for x in item_ids:
+            try:
+                ids.append(str(int(x)))
+            except (TypeError, ValueError):
+                continue
+        out: dict[str, flex_api.ResultadoFlex] = {}
+        for inicio in range(0, len(ids), 50):
+            lote = ids[inicio : inicio + 50]
+            try:
+                itens = await self.get_item_base_info(lote)
+            except Exception as exc:  # noqa: BLE001 — erro de API/rede
+                texto = str(exc)[:300]
+                tipo = (
+                    flex_api.REPETIR
+                    if isinstance(exc, httpx.HTTPError) or "429" in texto
+                    else flex_api.ERRO
+                )
+                falha = flex_api.ResultadoFlex(tipo, detalhe=texto)
+                out.update(dict.fromkeys(lote, falha))
+                continue
+            for it in itens:
+                iid = str(it.get("item_id") or "").strip()
+                if not iid:
+                    continue
+                bruto = it.get("logistic_info")
+                canais = (
+                    tuple(dict(e) for e in bruto if isinstance(e, dict))
+                    if isinstance(bruto, list)
+                    else None
+                )
+                ligado = flex_api.flex_nos_canais(canais, canais_flex)
+                if ligado is None:
+                    out[iid] = flex_api.ResultadoFlex(
+                        flex_api.ERRO, detalhe="a Shopee não mandou logistic_info"
+                    )
+                else:
+                    out[iid] = flex_api.ResultadoFlex(flex_api.OK, has_flex=ligado, canais=canais)
+        return out
+
+    async def atualizar_canal_flex(
+        self,
+        item_id: int | str,
+        logistic_info: list[dict] | tuple[dict, ...],
+        *,
+        ligar: bool,
+        canais_flex: Collection[str],
+    ) -> flex_api.ResultadoFlex:
+        """Liga/desliga o canal Flex do anúncio pelo `update_item`, mandando a
+        lista COMPLETA de canais (`logistic_info` lida antes), só com o
+        `enabled` do canal Flex trocado. Nunca lista parcial: a doc não diz
+        se canal ausente é desligado. Quem chama confere com nova leitura."""
+        try:
+            payload = flex_api.payload_canais(logistic_info, canais_flex, ligar)
+        except ValueError as exc:
+            if not ligar and "canal Flex não aparece" in str(exc):
+                # Desligar um canal que o anúncio nem tem: já está como se quer.
+                return flex_api.ResultadoFlex(flex_api.OK, has_flex=False, detalhe=str(exc))
+            return flex_api.ResultadoFlex(flex_api.INELEGIVEL, detalhe=str(exc))
+        try:
+            corpo_req = {"item_id": int(item_id), "logistic_info": payload}
+        except (TypeError, ValueError):
+            return flex_api.ResultadoFlex(flex_api.ERRO, detalhe=f"item_id inválido: {item_id!r}")
+        path = "/api/v2/product/update_item"
+        try:
+            r = await self._request("POST", path, json=corpo_req)
+            corpo = _corpo_ou_none(r)
+            if corpo is not None and corpo.get("error") in _AUTH_CODES:
+                await self.refresh()
+                r = await self._request("POST", path, json=corpo_req)
+                corpo = _corpo_ou_none(r)
+        except Exception as exc:  # noqa: BLE001
+            return flex_api.erro_de_rede(exc)
+        falha = flex_api.classificar_shopee(r, corpo)
+        if falha is not None:
+            return falha
+        return flex_api.ResultadoFlex(flex_api.OK, has_flex=bool(ligar), status_http=r.status_code)
 
     # ---- índice de pedidos e avaliações do comprador (atendimento, 28/09/2026) --
     #

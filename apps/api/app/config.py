@@ -677,7 +677,10 @@ class Settings(BaseSettings):
     #   shopee_escrita  a escrita por anúncio (`logistic_info` no update_item)
     #               saiu da lista de parâmetros da doc atual da Shopee: até um
     #               teste num item provar que funciona, a Shopee só é lida.
-    #   intervalo_min  de quantos em quantos minutos a varredura roda.
+    #   intervalo_min  de quantos em quantos minutos a varredura roda (cron
+    #               do worker, lido na SUBIDA dele — mudou, reinicia o worker).
+    # O motor (etapa 3) é services/flex_motor; a tela usa /api/flex/*
+    # (routers/flex.py): aprovar o ligar, sincronizar agora e a emergência.
     flex_modo: str = "desligado"
     flex_contas: str = ""
     flex_n_liga: int = 3
