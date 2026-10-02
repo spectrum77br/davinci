@@ -106,6 +106,10 @@ type PedidoRow = {
   // antes de Obs (grão de pedido: as linhas do mesmo pedido mostram igual).
   pede_video: boolean
   video: PedidoVideo | null
+  // Envio Flex (ML Envios Flex / Shopee Entrega Direta, 02/10/2026): sai de
+  // São Bernardo (lote .sp) e é entregue no mesmo dia ou no seguinte — selo
+  // "Flex" ao lado da loja. Grão de pedido (todas as linhas iguais).
+  flex?: boolean
 }
 type PedidoVideo = { link: string; salvo_em: string | null; salvo_por: string | null }
 type EnvioRow = {
@@ -2923,6 +2927,11 @@ async function conferirTodos() {
             <td class="font-mono text-[11px]">{{ row.pedido_marketplace || '—' }}</td>
             <td>
               {{ row.loja || '—' }}
+              <span
+                v-if="row.flex"
+                class="ml-1 inline-block px-1.5 py-px rounded border border-violet-300 bg-violet-50 text-[9px] font-semibold text-violet-800 dark:border-violet-700 dark:bg-violet-950/40 dark:text-violet-300"
+                title="Envio Flex: sai de São Bernardo (estoque .sp) e é entregue no mesmo dia ou no dia seguinte. Separe a peça do .sp."
+              >Flex</span>
               <!-- Horário de corte ("despachar até" do marketplace). Só em
                    pedido não enviado; some sozinho quando o envio confirma. -->
               <div

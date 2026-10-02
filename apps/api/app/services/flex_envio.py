@@ -318,3 +318,35 @@ async def registrar_envios(session: AsyncSession, lidos: Iterable[EnvioLido]) ->
         )
         out["logistica"] += res.rowcount or 0
     return out
+
+
+async def bling_ids_flex(session: AsyncSession, pedidos: Mapping[int, str | None]) -> set[int]:
+    """Quais destes pedidos do Bling (bling_id → número) são Flex — o selo
+    "Flex" do Controle de Estoque (etapa 4).
+
+    As mesmas duas fontes do robô de prioridade (etapa 2), basta uma:
+    `flex_pedido` (o shipment check, de minuto em minuto) OU a Logística com
+    `envio_flex` (o enriquecimento de hora em hora pode ter visto antes). Na
+    Logística só vale ML/Shopee: é onde existe Flex."""
+    ids = {int(b) for b in pedidos if b is not None}
+    if not ids:
+        return set()
+    out = {
+        int(b)
+        for b in (
+            await session.execute(select(FlexPedido.bling_id).where(FlexPedido.bling_id.in_(ids)))
+        ).scalars()
+    }
+    bling_de = {
+        str(n): int(b) for b, n in pedidos.items() if b is not None and n and int(b) not in out
+    }
+    if bling_de:
+        rows = await session.execute(
+            select(Logistica.pedido_bling, Logistica.plataforma).where(
+                Logistica.envio_flex.is_(True), Logistica.pedido_bling.in_(list(bling_de))
+            )
+        )
+        for numero, plataforma in rows.all():
+            if plataforma_flex(plataforma) is not None and str(numero) in bling_de:
+                out.add(bling_de[str(numero)])
+    return out

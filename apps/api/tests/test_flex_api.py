@@ -128,7 +128,7 @@ async def test_anuncios_com_filtros(client: AsyncClient, cena, auth_as: Callable
     r = await client.get("/api/flex/anuncios?desejado=inelegivel&plataforma=ml")
     assert [i["external_id"] for i in r.json()["itens"]] == ["MLB2"]
     r = await client.get(f"/api/flex/anuncios?integration_id={uuid.uuid4()}")
-    assert r.json() == {"total": 0, "itens": []}
+    assert (r.json()["total"], r.json()["itens"]) == (0, [])
     assert (await client.get("/api/flex/anuncios?desejado=talvez")).status_code == 422
 
 

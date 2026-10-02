@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class FlexContaOut(BaseModel):
@@ -45,6 +45,9 @@ class FlexAnuncioOut(BaseModel):
     titulo: str | None = None
     desejado: str
     motivo: str | None = None
+    # O mesmo motivo numa frase para o dono (services/flex_textos) — o
+    # `motivo` cru continua aqui para quem confere a trilha.
+    motivo_claro: str | None = None
     observado: str | None = None
     observado_em: datetime | None = None
     aguardando_aprovacao: bool
@@ -60,9 +63,21 @@ class FlexAnuncioOut(BaseModel):
     atualizado_em: datetime
 
 
+class FlexResumoOut(BaseModel):
+    """Contagem de TODOS os anúncios avaliados (sem os filtros da lista) —
+    o quadro do topo da tela."""
+
+    avaliados: int = 0
+    ligados: int = 0  # a plataforma diz que o Flex está ligado
+    aguardando: int = 0  # esperando uma pessoa aprovar o ligar
+    desligar: int = 0  # ligado na plataforma, mas a regra quer desligado
+    nao_lidos: int = 0  # o DaVinci ainda não leu o estado na plataforma
+
+
 class FlexAnunciosOut(BaseModel):
     total: int
     itens: list[FlexAnuncioOut]
+    resumo: FlexResumoOut = Field(default_factory=FlexResumoOut)
 
 
 class FlexAprovarOut(BaseModel):

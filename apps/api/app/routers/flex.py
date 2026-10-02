@@ -5,13 +5,15 @@ Projeto Flex, etapa 3 (services/flex_motor). Mesmo recurso da Logística:
 emergência); admin passa sempre (`require_permission`).
 
   GET  /api/flex/config        modo, contas, números (nada de segredo)
-  GET  /api/flex/anuncios      estado por anúncio (filtros)
+  GET  /api/flex/anuncios      estado por anúncio (filtros, busca e o resumo
+                               do topo da tela)
   POST /api/flex/sincronizar   roda o motor agora (job no worker), no modo atual
   POST /api/flex/anuncios/{conta}/{anuncio}/aprovar   aprova LIGAR
   POST /api/flex/emergencia    desliga tudo das contas permitidas
                                (observar/desligado: só simula)
   GET  /api/flex/log           últimas linhas da trilha
-  GET  /api/flex/pedidos       pedidos Flex detectados (com o aviso do .sp)
+  GET  /api/flex/pedidos       pedidos Flex detectados (com o aviso do .sp;
+                               `abertos=true` tira os que já saíram)
 """
 
 from __future__ import annotations
@@ -23,7 +25,7 @@ from uuid import UUID
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import and_, case, func, select
+from sqlalchemy import and_, case, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import worker_pool
@@ -48,9 +50,10 @@ from app.schemas.flex import (
     FlexContaOut,
     FlexLogOut,
     FlexPedidoOut,
+    FlexResumoOut,
     FlexSincronizarOut,
 )
-from app.services import flex_config, flex_envio, flex_motor
+from app.services import flex_config, flex_envio, flex_motor, flex_textos
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/api/flex", tags=["flex"])
@@ -115,7 +118,32 @@ def _anuncio_out(est: FlexAnuncioEstado, conta: str | None, titulo: str | None) 
     out = FlexAnuncioOut.model_validate(est)
     out.conta = conta
     out.titulo = titulo
+    out.motivo_claro = flex_textos.motivo_claro(est.motivo)
     return out
+
+
+async def _resumo(session: AsyncSession) -> FlexResumoOut:
+    """O quadro do topo da tela: todos os anúncios avaliados, sem os filtros
+    da lista (o dono vê de cara quantos esperam por ele)."""
+    est = FlexAnuncioEstado
+    row = (
+        await session.execute(
+            select(
+                func.count(),
+                func.count().filter(est.observado == "ligado"),
+                func.count().filter(est.aguardando_aprovacao.is_(True)),
+                func.count().filter(est.observado == "ligado", est.desejado != "ligado"),
+                func.count().filter(est.observado.is_(None)),
+            ).select_from(est)
+        )
+    ).one()
+    return FlexResumoOut(
+        avaliados=int(row[0] or 0),
+        ligados=int(row[1] or 0),
+        aguardando=int(row[2] or 0),
+        desligar=int(row[3] or 0),
+        nao_lidos=int(row[4] or 0),
+    )
 
 
 @router.get("/anuncios", response_model=FlexAnunciosOut)
@@ -125,7 +153,15 @@ async def anuncios(
     integration_id: UUID | None = None,
     plataforma: Literal["ml", "shopee"] | None = None,
     desejado: Literal["ligado", "desligado", "inelegivel"] | None = None,
+    # O que a plataforma disse da última leitura; `nao_lido` = ainda não leu.
+    observado: Literal["ligado", "desligado", "nao_lido"] | None = None,
     aguardando: bool | None = None,
+    # `desligar=true`: ligado na plataforma, mas a regra não quer — o mesmo
+    # número do resumo ("ligados que deveriam desligar").
+    desligar: bool = False,
+    # Busca da tela: id do anúncio, família ou título (sem curinga: `%`/`_`
+    # digitados são letras).
+    busca: Annotated[str | None, Query(max_length=100)] = None,
     limit: Annotated[int, Query(ge=1, le=1000)] = 200,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> FlexAnunciosOut:
@@ -136,8 +172,28 @@ async def anuncios(
         filtros.append(FlexAnuncioEstado.plataforma == plataforma)
     if desejado is not None:
         filtros.append(FlexAnuncioEstado.desejado == desejado)
+    if observado == "nao_lido":
+        filtros.append(FlexAnuncioEstado.observado.is_(None))
+    elif observado is not None:
+        filtros.append(FlexAnuncioEstado.observado == observado)
     if aguardando is not None:
         filtros.append(FlexAnuncioEstado.aguardando_aprovacao.is_(aguardando))
+    if desligar:
+        filtros.append(FlexAnuncioEstado.observado == "ligado")
+        filtros.append(FlexAnuncioEstado.desejado != "ligado")
+    termo = (busca or "").strip()
+    if termo:
+        filtros.append(
+            or_(
+                FlexAnuncioEstado.external_id.icontains(termo, autoescape=True),
+                FlexAnuncioEstado.familias.icontains(termo, autoescape=True),
+                exists().where(
+                    ProductLink.integration_id == FlexAnuncioEstado.integration_id,
+                    ProductLink.external_id == FlexAnuncioEstado.external_id,
+                    ProductLink.listing_title.icontains(termo, autoescape=True),
+                ),
+            )
+        )
     total = int(
         await session.scalar(select(func.count()).select_from(FlexAnuncioEstado).where(*filtros))
         or 0
@@ -160,6 +216,7 @@ async def anuncios(
     return FlexAnunciosOut(
         total=total,
         itens=[_anuncio_out(est, nome, titulo) for est, nome, titulo in rows.all()],
+        resumo=await _resumo(session),
     )
 
 
@@ -281,6 +338,10 @@ async def pedidos(
     session: Sessao,
     _user: Ver,
     so_alerta: bool = False,
+    # Só os que ainda esperam alguém: some o pedido que no Bling já saiu (em
+    # andamento), foi atendido, cancelado ou excluído — a régua do saldo Flex.
+    # Pedido que o espelho ainda não tem continua (não se sabe: mostra).
+    abertos: bool = False,
     dias: Annotated[int, Query(ge=1, le=90)] = 30,
     limit: Annotated[int, Query(ge=1, le=1000)] = 300,
 ) -> list[FlexPedidoOut]:
@@ -290,6 +351,13 @@ async def pedidos(
     filtros = [FlexPedido.detectado_em >= corte]
     if so_alerta:
         filtros.append(FlexPedido.alerta.is_not(None))
+    if abertos:
+        filtros.append(
+            ~exists().where(
+                BlingOrder.bling_id == FlexPedido.bling_id,
+                BlingOrder.situacao.in_(flex_motor.SITUACOES_FECHADAS),
+            )
+        )
     rows = await session.execute(
         select(FlexPedido, Integration.name)
         .outerjoin(Integration, Integration.id == FlexPedido.integration_id)

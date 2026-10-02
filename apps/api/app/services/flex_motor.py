@@ -128,6 +128,10 @@ _SITUACOES_FECHADAS = (
     str(SITUACAO_EM_ANDAMENTO),
     "excluido",
 )
+# A tela usa a mesma régua na lista "Pedidos Flex sem peça em SP"
+# (routers/flex.py, `abertos=true`): pedido que já saiu, foi atendido,
+# cancelado ou excluído não espera mais ninguém.
+SITUACOES_FECHADAS = _SITUACOES_FECHADAS
 # Recusa da plataforma ao DESLIGAR (403/404): não adianta repetir já.
 _ESPERA_RECUSA = timedelta(hours=24)
 _ESPERA_MAXIMA = timedelta(hours=6)
