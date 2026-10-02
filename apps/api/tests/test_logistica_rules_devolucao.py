@@ -127,8 +127,10 @@ def test_data_entrada_estimada_pelo_carimbo_do_sinal():
 def test_sem_devolucao_ou_plataforma_desconhecida():
     assert devolucao_status_pt("Shopee", {}) is None
     assert devolucao_status_pt("Shopee", None) is None
-    assert devolucao_status_pt("Amazon", {"return_status": "X"}) is None
+    assert devolucao_status_pt("Magalu", {"return_status": "X"}) is None
     assert devolucao_status_pt(None, {"return_status": "PROCESSING"}) is None
+    # 02/10: a Amazon passou a ter devolução (relatório de devoluções da SP-API)
+    assert devolucao_status_pt("Amazon", {"return_status": "PENDING"}) == "Devolução solicitada"
 
 
 def test_ml_retorno_em_transito():

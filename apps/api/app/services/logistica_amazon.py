@@ -264,6 +264,14 @@ async def enrich_row(
         for campo in _CAMPOS_CANCELAMENTO:
             if velho.get(campo) and campo not in enr["meli_status"]:
                 enr["meli_status"][campo] = velho[campo]
+    # Devolução do cliente (02/10): vem do RELATÓRIO de devoluções
+    # (`amazon_devolucoes`), não do getOrder — sem isto a releitura apagaria a
+    # 4ª parte da assinatura a cada rodada e a regra da aba Status giraria.
+    velho = row.meli_status or {}
+    for campo in logistica_rules.AMAZON_DEVOLUCAO_CAMPOS:
+        if velho.get(campo) and campo not in enr["meli_status"]:
+            enr["meli_status"][campo] = velho[campo]
+    devolucao = bool(enr["meli_status"].get("return_status"))
     # Antes de trocar o status: o carimbo compara o valor velho com o novo.
     row.status_datas = logistica_datas.aplicar(row, enr["meli_status"], enr.get("datas"))
     antes = ((row.meli_status or {}).get("order_status") or "").strip()
@@ -273,14 +281,19 @@ async def enrich_row(
         row.rastreio = enr["rastreio"]
     # Envio por Correios com evento real do 17track (`localizacao_at`) não é
     # sobrescrito pelo proxy da plataforma — o físico é melhor que a estimativa.
-    if enr.get("localizacao") and not (
-        logistica_track.is_correios(row.rastreio) and row.localizacao_at
-    ):
-        row.localizacao = enr["localizacao"]
-    # Divergência Amazon: order_status comercial × easyship físico.
-    row.divergencia = logistica_rules.detectar_divergencia_amazon(
-        row.meli_status, row.localizacao
-    )
+    # Com devolução, a coluna descreve a VOLTA (quem escreve é o
+    # `amazon_devolucoes`) e a divergência do envio de ida não vale mais.
+    if devolucao:
+        row.divergencia = None
+    else:
+        if enr.get("localizacao") and not (
+            logistica_track.is_correios(row.rastreio) and row.localizacao_at
+        ):
+            row.localizacao = enr["localizacao"]
+        # Divergência Amazon: order_status comercial × easyship físico.
+        row.divergencia = logistica_rules.detectar_divergencia_amazon(
+            row.meli_status, row.localizacao
+        )
     # Projeto Amazon (15/09/2026): data máxima de entrega, canal e entrega.
     if enr.get("prazo_entrega"):
         row.prazo_entrega_amazon = enr["prazo_entrega"]

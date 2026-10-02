@@ -592,7 +592,9 @@ _LOGISTICA_ULTIMA_MOVIMENTACAO_SQL = (
 )
 
 
-_FONTE_PLATAFORMA = {"tiktok": "tiktok", "shopee": "shopee", "ml": "mercado livre"}
+_FONTE_PLATAFORMA = {
+    "tiktok": "tiktok", "shopee": "shopee", "ml": "mercado livre", "amazon": "amazon",
+}
 
 # Dia do backfill da migration 0236: TODOS os pedidos que já estavam em 83957
 # ganharam esta data (Eduardo 03/09: "em devolução desde todas as datas estão
@@ -638,6 +640,7 @@ def _data_entrada(
 _STATUS_AUTO_CHEGOU = {
     "ml": {"DELIVERED"},
     "tiktok": {"RETURN_OR_REFUND_REQUEST_SUCCESS", "RETURN_OR_REFUND_REQUEST_COMPLETE"},
+    "amazon": {"DELIVERED"},  # relatório de devoluções (02/10)
 }
 # `return_type` em que NÃO vem pacote (TikTok REFUND; Shopee needs_logistics
 # = false e mediação do ML sem devolução também gravam "REFUND"): o caso fecha

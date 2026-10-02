@@ -68,6 +68,8 @@ def _plataforma_key(plataforma: str | None) -> str | None:
         return "shopee"
     if p in logistica_rules._TIKTOK_PLATAFORMAS:
         return "tiktok"
+    if p in logistica_rules._AMAZON_PLATAFORMAS:
+        return "amazon"
     return None
 
 
@@ -98,6 +100,9 @@ async def _fetch_por_marketplace(
             from app.services import logistica_tiktok as mod
         elif key == "shopee":
             from app.services import logistica_shopee as mod
+        elif key == "amazon":
+            # 02/10: lê o que o relatório de devoluções gravou na Logística.
+            from app.services import amazon_devolucoes as mod
         else:
             from app.services import logistica_meli as mod
         fn = getattr(mod, "returns_por_pedido", None)

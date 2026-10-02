@@ -724,6 +724,7 @@ _SHIP_SUBSTATUS_CHEGOU = frozenset({"returned"})
 _RETURN_STATUS_CHEGOU: dict[str, frozenset[str]] = {
     "ml": frozenset({"DELIVERED"}),
     "tiktok": frozenset(_TIKTOK_RETURN_CONCLUIDO),
+    "amazon": frozenset({"DELIVERED"}),  # relatório de devoluções / 17track da volta
 }
 
 
@@ -753,6 +754,8 @@ def data_retorno_concluido(
         chave = "ml"
     elif p in _TIKTOK_PLATAFORMAS:
         chave = "tiktok"
+    elif p in _AMAZON_PLATAFORMAS:
+        chave = "amazon"
     else:
         return None
     ms = status or {}
@@ -790,7 +793,7 @@ def devolucao_no_galpao(status: dict[str, str] | None) -> bool:
 
 
 def devolucao_status_pt(plataforma: str | None, status: dict[str, str] | None) -> str | None:
-    """Texto em PT do caso VIVO de pós-venda de Shopee/TikTok/ML, ou None
+    """Texto em PT do caso VIVO de pós-venda de Shopee/TikTok/ML/Amazon, ou None
     quando não há caso aberto (sem `return_status`, ou encerrado — cancelado/
     recusado). Status vivo sem tradução vira "Devolução: <STATUS>" (nunca
     esconde). No TikTok, caso só-reembolso (`return_type` REFUND) tem texto
@@ -815,6 +818,8 @@ def devolucao_status_pt(plataforma: str | None, status: dict[str, str] | None) -
         if devolucao_no_galpao(status) and ret in _ML_RETURN_LABELS_GALPAO_PT:
             return _ML_RETURN_LABELS_GALPAO_PT[ret]
         return _ML_RETURN_LABELS_PT.get(ret, f"Devolução: {ret}")
+    if p in _AMAZON_PLATAFORMAS:
+        return AMAZON_DEVOLUCAO_LABELS_PT.get(ret, f"Devolução: {ret}")
     return None
 
 
@@ -846,6 +851,7 @@ _SINAL_DEVOLUCAO = {
             "RETURNING", "RETURNED",
         },
         "order_status": {"CANCELED", "CANCELLED"},
+        "return_status": None,  # devolução do cliente (relatório, 02/10)
     },
 }
 
@@ -936,6 +942,38 @@ AMAZON_CANCELAMENTO_PEDIDO = "Requested"
 AMAZON_CANCELAMENTO_LABELS_PT: dict[str, str] = {
     "REQUESTED": "Cliente pediu cancelamento",
 }
+# DEVOLUÇÃO pedida pelo cliente (Vinicius, 02/10/2026 — 701-7824777-7251447:
+# "Entregue ao cliente" no Seller Central e a mala de volta no galpão). A API de
+# pedidos não mostra devolução; quem mostra é o relatório de devoluções
+# (`services/amazon_devolucoes`), que grava `return_status` com estes códigos
+# (os mesmos do retorno do ML: pending/shipped/delivered) e os detalhes
+# `return_*` abaixo. Vira a 4ª parte da assinatura — "Enviado | Devolução
+# solicitada" — e a troca no Bling fica pela regra da aba Status (escolha dele).
+AMAZON_DEVOLUCAO_PEDIDA = "PENDING"
+AMAZON_DEVOLUCAO_A_CAMINHO = "SHIPPED"
+AMAZON_DEVOLUCAO_RECEBIDA = "DELIVERED"
+AMAZON_DEVOLUCAO_SEM_PACOTE = "REFUND_ONLY"
+AMAZON_DEVOLUCAO_LABELS_PT: dict[str, str] = {
+    AMAZON_DEVOLUCAO_PEDIDA: "Devolução solicitada",
+    AMAZON_DEVOLUCAO_A_CAMINHO: "Devolução a caminho",
+    AMAZON_DEVOLUCAO_RECEBIDA: "Devolução recebida",
+    # Reembolso sem devolução (`Returnless`): o cliente fica com o produto.
+    AMAZON_DEVOLUCAO_SEM_PACOTE: "Reembolso sem devolução",
+}
+# Detalhes da devolução no `meli_status` (fora da assinatura, só no balão). O
+# enrich da SP-API troca o `meli_status` inteiro e não os conhece — tem que
+# trazê-los da leitura anterior (logistica_amazon.enrich_row).
+AMAZON_DEVOLUCAO_CAMPOS = (
+    "return_status",
+    "return_reason",
+    "return_resolution",
+    "return_tracking",
+    "return_carrier",
+    "return_label_payer",
+    "return_refunded",
+    "return_requested_at",
+    "return_delivered_at",
+)
 
 
 def _amz_label(mapping: dict[str, str], value: str | None) -> str:
@@ -947,13 +985,14 @@ def _amz_label(mapping: dict[str, str], value: str | None) -> str:
 
 def assinatura_amazon(status: dict[str, str] | None) -> str:
     """Assinatura em PT da Amazon = OrderStatus + EasyShipShipmentStatus +
-    pedido de cancelamento do cliente, traduzidos e juntados por " | " (omite
-    os ausentes)."""
+    pedido de cancelamento + devolução do cliente, traduzidos e juntados por
+    " | " (omite os ausentes)."""
     m = status or {}
     partes = [
         _amz_label(AMAZON_ORDER_LABELS_PT, m.get("order_status")),
         _amz_label(AMAZON_EASYSHIP_LABELS_PT, m.get("easyship_status")),
         _amz_label(AMAZON_CANCELAMENTO_LABELS_PT, m.get("buyer_cancel")),
+        _amz_label(AMAZON_DEVOLUCAO_LABELS_PT, m.get("return_status")),
     ]
     return " | ".join(p for p in partes if p)
 
@@ -996,17 +1035,30 @@ _CAMPOS_POR_PLATAFORMA: dict[str, tuple[list[str], dict[str, str], dict[str, dic
         },
     ),
     "amazon": (
-        ["order_status", "easyship_status", "buyer_cancel", "buyer_cancel_reason"],
+        [
+            "order_status", "easyship_status", "buyer_cancel", "buyer_cancel_reason",
+            *AMAZON_DEVOLUCAO_CAMPOS,
+        ],
         {
             "order_status": "Status do pedido",
             "easyship_status": "Status do envio",
             "buyer_cancel": "Cancelamento",
             "buyer_cancel_reason": "Motivo do cliente",
+            "return_status": "Devolução",
+            "return_reason": "Motivo da devolução",
+            "return_resolution": "Reembolso",
+            "return_tracking": "Rastreio da volta",
+            "return_carrier": "Transportadora da volta",
+            "return_label_payer": "Etiqueta da volta paga por",
+            "return_refunded": "Valor reembolsado",
+            "return_requested_at": "Devolução pedida em",
+            "return_delivered_at": "Devolução entregue em",
         },
         {
             "order_status": AMAZON_ORDER_LABELS_PT,
             "easyship_status": AMAZON_EASYSHIP_LABELS_PT,
             "buyer_cancel": AMAZON_CANCELAMENTO_LABELS_PT,
+            "return_status": AMAZON_DEVOLUCAO_LABELS_PT,
         },
     ),
 }

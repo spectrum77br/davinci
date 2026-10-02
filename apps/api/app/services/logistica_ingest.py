@@ -28,6 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.models import Logistica, LogisticaStatus
 from app.services import (
+    amazon_devolucoes,
     logistica_amazon,
     logistica_amazon_bling,
     logistica_bling,
@@ -732,6 +733,16 @@ async def sweeps_pos_venda(
     alvo: dict[str, list[UUID]] = {k: [] for k in ("ml", "shopee", "tiktok", "amazon")}
     for nome, sweep in varreduras.items():
         alvo[nome] = list((await sweep(session))["ids"])
+    if "amazon" in varreduras:
+        # Devolução pedida pelo cliente (02/10): a API de pedidos não mostra —
+        # vem do relatório de devoluções. Quem mudou passa nas regras da aba
+        # Status junto com o resto da varredura. Falha não derruba a varredura.
+        try:
+            dev = await amazon_devolucoes.sincronizar(session)
+            alvo["amazon"] = list(dict.fromkeys([*alvo["amazon"], *dev["ids"]]))
+        except Exception as e:  # noqa: BLE001
+            await session.rollback()
+            logger.warning("amazon_devolucoes_sync_falhou", erro=str(e)[:300])
     logger.info(
         "logistica_sweeps_inicio",
         **{f"sweep_{k}": len(v) for k, v in alvo.items()},
