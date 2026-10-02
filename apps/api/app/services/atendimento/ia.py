@@ -482,6 +482,38 @@ def _espera_pedida(valor: str | None) -> float | None:
     return max(0.0, segundos)
 
 
+# OpenAI direto (api.openai.com, 02/10/2026): os modelos de raciocínio dela
+# (o*, gpt-5*) recusam `max_tokens` (pedem `max_completion_tokens`) e
+# `temperature` diferente do padrão — com o corpo do Groq a chamada voltaria
+# 400 e a IA calaria. E o raciocínio gasta do mesmo teto: com os 300/900 do
+# Groq a resposta sairia vazia. Groq e outros compatíveis seguem como sempre.
+TETO_OPENAI = 8000
+
+
+def e_openai(base_url: str | None) -> bool:
+    from urllib.parse import urlparse
+
+    host = (urlparse(base_url or "").hostname or "").lower()
+    return host == "api.openai.com" or host.endswith(".openai.azure.com")
+
+
+def corpo_compativel(p: Provedor, sistema: str, usuario: str, *, max_tokens: int) -> dict:
+    """O corpo do POST {base}/chat/completions para o provedor da vez."""
+    corpo: dict = {
+        "model": p.modelo,
+        "messages": [
+            {"role": "system", "content": sistema},
+            {"role": "user", "content": usuario},
+        ],
+    }
+    if e_openai(p.base_url):
+        corpo["max_completion_tokens"] = max(TETO_OPENAI, max_tokens)
+        return corpo
+    corpo["temperature"] = 0.2
+    corpo["max_tokens"] = max_tokens
+    return corpo
+
+
 async def _chamar_modelo(
     sistema: str, usuario: str, *, max_tokens: int = MAX_TOKENS_RESPOSTA
 ) -> tuple[str, dict]:
@@ -503,15 +535,7 @@ async def _chamar_modelo(
             resp = await c.post(
                 f"{p.base_url.rstrip('/')}/chat/completions",
                 headers={"Authorization": f"Bearer {p.chave}"},
-                json={
-                    "model": p.modelo,
-                    "messages": [
-                        {"role": "system", "content": sistema},
-                        {"role": "user", "content": usuario},
-                    ],
-                    "temperature": 0.2,
-                    "max_tokens": max_tokens,
-                },
+                json=corpo_compativel(p, sistema, usuario, max_tokens=max_tokens),
             )
     except httpx.HTTPError as e:
         raise ErroProvedor(f"falha de rede ({type(e).__name__})") from e
