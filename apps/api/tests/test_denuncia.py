@@ -632,6 +632,12 @@ def test_painel_status_na_loja_e_na_anatel():
     assert loja(rec, rem)["chave"] == "removido"   # removido vale mesmo com recusa antes
     # Anatel não é loja
     assert loja({"canal": "Anatel SEI", "data": "2026-09-30"})["chave"] == "nao"
+    # a resposta já chegou e o robô confere o anúncio; no Diversos a denúncia velha é "antiga"
+    conf = {**pend, "resultado_nota": "ML respondeu em 2026-09-21 18:33: 'não identificamos…' — conferindo"}
+    assert p.status_loja([conf])["chave"] == "conferindo"
+    assert p.status_loja([pend], "GRUPO 2")["chave"] == "antiga"
+    assert p.status_loja([rec], "GRUPO 2")["chave"] == "recusou"   # desfecho continua valendo
+    assert p.status_anatel(nosso, [conf], p.status_loja([conf]), True)["chave"] == "esperando_recusa"
 
     def anatel(a, ds, tem_print=True):
         return p.status_anatel(a, ds, p.status_loja(ds), tem_print)["chave"]

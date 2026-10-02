@@ -5,7 +5,7 @@
 // do sistema de Fiscalização do Mac mini da Makisa.
 import { computed, onMounted, ref, watch } from 'vue'
 import {
-  type Prova, dataBr, dinheiro, numero, pillResultado, pillSituacaoAnuncio, pillSituacaoDenuncia,
+  type Prova, ativoSimNao, dataBr, dinheiro, numero, pillAtivo, pillResultado, pillSituacaoDenuncia,
   pillStatusCaso, pillStatusCompra,
 } from '~/lib/denuncia'
 
@@ -62,9 +62,13 @@ async function carregar() {
 }
 
 
-async function abrir(c: Caso) {
+type AbaCaso = 'resumo' | 'juridico' | 'compra' | 'provas' | 'denuncias'
+const abaCaso = ref<AbaCaso>('resumo')
+
+async function abrir(c: Caso, focoJuridico = false) {
   aberto.value = c.id
   detalhe.value = null
+  abaCaso.value = focoJuridico ? 'juridico' : 'resumo'
   try {
     detalhe.value = await api<Detalhe>(`/api/denuncia/casos/${c.id}`)
   } catch (e: any) {
@@ -79,6 +83,35 @@ const gavetaAberta = computed({
   },
 })
 const k = computed(() => detalhe.value?.caso || {})
+
+// 01/10 (Vinicius: "quais são os itens obrigatórios para enviar ao jurídico?") — as mesmas listas do
+// sistema do mini: para ABRIR o caso (db.DOCS_CASO) e o "pronto para o advogado" (modelos.CHECKLIST_ADVOGADO).
+// O certificado (PDF do nº declarado) o robô confere na hora de montar o pacote.
+const checklist = computed(() => {
+  const d = detalhe.value
+  if (!d) return []
+  const tem = (...tipos: string[]) => d.provas.filter((p) => p.tipo && tipos.includes(p.tipo)).length
+  const devolucao = d.compras.some((c) => c.devolucao_pedida_em || c.status === 'Devolvido')
+    || d.provas.some((p) => /devolu/i.test(`${p.tipo} ${p.nome} ${p.obs || ''}`))
+  return [
+    { grupo: 'para abrir o caso', nome: 'Tela do anúncio (print)', n: tem('Captura no ato', 'Print', 'PDF do anúncio') },
+    { grupo: 'para abrir o caso', nome: 'Tela do pedido (compra de prova)', n: tem('Tela do pedido') },
+    { grupo: 'para abrir o caso', nome: 'Comprovante na fatura do cartão', n: tem('Fatura do cartão') },
+    { grupo: 'quando o produto chega', nome: 'Vídeo da embalagem sendo aberta', n: tem('Vídeo') },
+    { grupo: 'quando o produto chega', nome: 'Fotos do produto (com o selo Anatel)', n: tem('Foto') },
+    { grupo: 'quando o produto chega', nome: 'NF-e da compra (PDF)', n: tem('NF-e') },
+    { grupo: 'quando o produto chega', nome: 'Devolução pedida na loja', n: devolucao ? 1 : 0 },
+    { grupo: 'denúncias', nome: 'Comprovantes das denúncias', n: tem('Captura no ato', 'Registro da denúncia', 'Protocolo') || d.denuncias.length },
+  ]
+})
+const faltam = computed(() => checklist.value.filter((x) => !x.n))
+const abasCaso = computed(() => [
+  { k: 'resumo' as AbaCaso, t: 'Resumo' },
+  { k: 'juridico' as AbaCaso, t: faltam.value.length ? `Jurídico (falta ${faltam.value.length})` : 'Jurídico' },
+  { k: 'compra' as AbaCaso, t: `Compra de prova (${detalhe.value?.compras.length || 0})` },
+  { k: 'provas' as AbaCaso, t: `Provas (${detalhe.value?.provas.length || 0})` },
+  { k: 'denuncias' as AbaCaso, t: `Denúncias (${detalhe.value?.denuncias.length || 0})` },
+])
 const an = computed(() => detalhe.value?.anuncio || null)
 
 function verAnuncio(id: string | null | undefined) {
@@ -128,19 +161,18 @@ defineExpose({ carregar })
           <tr>
             <th>Caso</th>
             <th>Anúncio</th>
-            <th>Status</th>
-            <th>Aberto em</th>
-            <th>Jurídico</th>
-            <th class="text-right">Compras</th>
-            <th class="text-right">Provas</th>
+            <th class="text-center">Status</th>
+            <th class="text-center">Aberto em</th>
+            <th class="text-center">Jurídico</th>
+            <th class="text-center">Compras</th>
           </tr>
         </thead>
         <tbody>
           <tr v-if="carregando && itens.length === 0">
-            <td colspan="7" class="text-center text-muted-foreground py-6">carregando…</td>
+            <td colspan="6" class="text-center text-muted-foreground py-6">carregando…</td>
           </tr>
           <tr v-else-if="visiveis.length === 0">
-            <td colspan="7" class="text-center text-muted-foreground py-6">nenhum caso</td>
+            <td colspan="6" class="text-center text-muted-foreground py-6">nenhum caso</td>
           </tr>
           <tr v-for="c in visiveis" :key="c.id" class="cursor-pointer" @click="abrir(c)">
             <td>
@@ -151,64 +183,120 @@ defineExpose({ carregar })
               <div class="truncate" :title="c.titulo_anuncio || ''">{{ c.loja || '—' }} — {{ c.titulo_anuncio || c.anuncio_id }}</div>
               <div class="text-[11px] text-muted-foreground font-mono">{{ c.marketplace }} · {{ c.anuncio_id }}</div>
             </td>
-            <td><span :class="pillStatusCaso(c.status)">{{ c.status || '—' }}</span></td>
-            <td class="text-xs tabular-nums whitespace-nowrap">{{ dataBr(c.aberto_em, false) }}</td>
-            <td class="text-xs whitespace-nowrap">
-              <template v-if="c.juridico_enviado_em">enviado {{ dataBr(c.juridico_enviado_em, false) }}</template>
-              <span v-else class="text-muted-foreground">não enviado</span>
+            <td class="text-center"><span :class="pillStatusCaso(c.status)">{{ c.status || '—' }}</span></td>
+            <td class="text-center text-xs tabular-nums whitespace-nowrap">{{ dataBr(c.aberto_em, false) }}</td>
+            <td class="text-center text-xs tabular-nums whitespace-nowrap">
+              <!-- 01/10 (Vinicius): enviado = só a data; sem envio = botão "enviar" (abre o que falta) -->
+              <template v-if="c.juridico_enviado_em">{{ dataBr(c.juridico_enviado_em, false) }}</template>
+              <Button v-else size="sm" variant="outline" class="h-7 px-2.5 text-xs" @click.stop="abrir(c, true)">enviar</Button>
             </td>
-            <td class="text-right text-xs tabular-nums">{{ c.ncompras || '—' }}</td>
-            <td class="text-right text-xs tabular-nums">{{ c.nprovas || '—' }}</td>
+            <td class="text-center text-xs tabular-nums">{{ c.ncompras || '—' }}</td>
           </tr>
         </tbody>
       </table>
     </div>
 
+    <!-- 01/10 (Vinicius: "deixa padrãozinho igual fizemos na aba Anúncios e denúncias"): a ficha do caso
+         com 4 quadrinhos em cima (Status · Compra de prova · Jurídico · Anúncio ativo) e abas embaixo -->
     <DenunciaGaveta
       v-model:open="gavetaAberta"
       :titulo="[k.codigo, k.titulo].filter(Boolean).join(' — ') || 'Caso'"
       :subtitulo="k.aberto_em ? `aberto em ${dataBr(k.aberto_em, false)}` : undefined"
     >
-      <template #cabecalho-extra>
-        <span v-if="k.status" :class="pillStatusCaso(k.status)">{{ k.status }}</span>
-      </template>
       <div v-if="!detalhe" class="text-sm text-muted-foreground">carregando…</div>
-      <template v-else>
-        <section v-if="an">
-          <h3 class="text-sm font-semibold mb-2">Anúncio</h3>
-          <button type="button" class="w-full text-left rounded-md border px-3 py-2 text-sm hover:border-primary/50" @click="verAnuncio(an.id)">
-            <div class="flex items-center gap-2">
-              <span class="font-mono text-xs">{{ an.id }}</span>
-              <span class="text-xs text-muted-foreground">{{ an.marketplace }} · {{ an.loja }}</span>
-              <span class="ml-auto" :class="pillSituacaoAnuncio(an.situacao)">{{ an.situacao }}</span>
-            </div>
-            <div class="truncate mt-0.5">{{ an.titulo }}</div>
+      <div v-else class="space-y-5">
+        <div class="grid grid-cols-2 sm:grid-cols-4 gap-2">
+          <div class="rounded-lg border px-3 py-2 space-y-1 min-w-0">
+            <div class="text-[10px] uppercase tracking-wider text-muted-foreground">Status</div>
+            <span :class="pillStatusCaso(k.status)">{{ k.status || '—' }}</span>
+          </div>
+          <div class="rounded-lg border px-3 py-2 space-y-1 min-w-0">
+            <div class="text-[10px] uppercase tracking-wider text-muted-foreground">Compra de prova</div>
+            <template v-if="detalhe.compras.length">
+              <span :class="pillStatusCompra(detalhe.compras[0].status)">{{ detalhe.compras[0].status }}</span>
+              <div class="text-[11px] text-muted-foreground truncate">pedido {{ detalhe.compras[0].pedido || `#${detalhe.compras[0].id}` }}</div>
+            </template>
+            <span v-else class="text-sm text-muted-foreground">—</span>
+          </div>
+          <div class="rounded-lg border px-3 py-2 space-y-1 min-w-0">
+            <div class="text-[10px] uppercase tracking-wider text-muted-foreground">Jurídico</div>
+            <template v-if="k.juridico_enviado_em">
+              <span class="pill-success">enviado</span>
+              <div class="text-[11px] text-muted-foreground tabular-nums">{{ dataBr(k.juridico_enviado_em, false) }}</div>
+            </template>
+            <template v-else>
+              <span :class="faltam.length ? 'pill-warning' : 'pill-success'">{{ faltam.length ? `falta${faltam.length > 1 ? 'm' : ''} ${faltam.length}` : 'pronto' }}</span>
+              <div class="text-[11px] text-muted-foreground">não enviado</div>
+            </template>
+          </div>
+          <div class="rounded-lg border px-3 py-2 space-y-1 min-w-0">
+            <div class="text-[10px] uppercase tracking-wider text-muted-foreground">Anúncio ativo</div>
+            <span :class="pillAtivo(an?.situacao)">{{ ativoSimNao(an?.situacao) }}</span>
+          </div>
+        </div>
+
+        <div class="flex items-center gap-1 border-b border-border overflow-x-auto">
+          <button
+            v-for="x in abasCaso"
+            :key="x.k"
+            type="button"
+            class="-mb-px inline-flex h-8 items-center whitespace-nowrap border-b-2 px-2.5 text-xs font-medium transition-colors"
+            :class="abaCaso === x.k ? 'border-primary text-foreground' : 'border-transparent text-muted-foreground hover:text-foreground'"
+            @click="abaCaso = x.k"
+          >
+            {{ x.t }}
           </button>
-        </section>
+        </div>
 
-        <section v-if="k.resumo || k.ciencia_autoria">
-          <h3 class="text-sm font-semibold mb-2">Resumo</h3>
+        <!-- Resumo -->
+        <section v-if="abaCaso === 'resumo'" class="space-y-4">
+          <button v-if="an" type="button" class="w-full text-left rounded-lg border px-3 py-2 text-sm hover:border-primary/50 hover:bg-muted/30" @click="verAnuncio(an.id)">
+            <div class="flex items-center gap-2 min-w-0">
+              <span class="truncate flex-1">{{ an.titulo }}</span>
+              <span class="shrink-0" :class="pillAtivo(an.situacao)">ativo: {{ ativoSimNao(an.situacao) }}</span>
+            </div>
+            <div class="font-mono text-[11px] text-muted-foreground mt-0.5">{{ an.marketplace }} · {{ an.loja }} · {{ an.id }}</div>
+          </button>
           <p v-if="k.resumo" class="text-sm whitespace-pre-wrap">{{ k.resumo }}</p>
-          <p v-if="k.ciencia_autoria" class="text-xs text-muted-foreground mt-1">Ciência da autoria: {{ k.ciencia_autoria }}</p>
+          <p v-if="k.ciencia_autoria" class="text-xs text-muted-foreground">Ciência da autoria: {{ k.ciencia_autoria }}</p>
+          <p v-if="k.obs" class="text-xs text-muted-foreground whitespace-pre-wrap rounded-md border bg-muted/30 px-3 py-2">{{ k.obs }}</p>
         </section>
 
-        <section>
-          <h3 class="text-sm font-semibold mb-2">Jurídico</h3>
+        <!-- Jurídico -->
+        <section v-else-if="abaCaso === 'juridico'" class="space-y-3">
+          <div class="rounded-lg border px-3 py-2.5 space-y-2">
+            <div class="flex items-center gap-2 text-sm">
+              <span class="font-medium">Pronto para enviar ao advogado?</span>
+              <span v-if="!faltam.length" class="pill-success">sim, está tudo aqui</span>
+              <span v-else class="pill-warning">falta{{ faltam.length > 1 ? 'm' : '' }} {{ faltam.length }}</span>
+            </div>
+            <template v-for="g in ['para abrir o caso', 'quando o produto chega', 'denúncias']" :key="g">
+              <div class="text-[10px] uppercase tracking-wider text-muted-foreground pt-1">{{ g }}</div>
+              <ul class="grid gap-x-4 gap-y-1 sm:grid-cols-2 text-xs">
+                <li v-for="x in checklist.filter((c) => c.grupo === g)" :key="x.nome" class="flex items-center gap-1.5">
+                  <span :class="x.n ? 'text-emerald-600' : 'text-amber-600'">{{ x.n ? '✓' : '○' }}</span>
+                  <span :class="x.n ? '' : 'text-muted-foreground'">{{ x.nome }}</span>
+                  <span v-if="x.n > 1" class="text-muted-foreground">({{ x.n }})</span>
+                </li>
+              </ul>
+            </template>
+          </div>
           <dl class="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
-            <div><dt class="text-[11px] uppercase tracking-wider text-muted-foreground">Advogado</dt><dd>{{ k.juridico || '—' }}</dd></div>
-            <div><dt class="text-[11px] uppercase tracking-wider text-muted-foreground">Enviado em</dt><dd>{{ dataBr(k.juridico_enviado_em) }}</dd></div>
-            <div v-if="k.juridico_email" class="col-span-2"><dt class="text-[11px] uppercase tracking-wider text-muted-foreground">E-mail</dt><dd class="truncate">{{ k.juridico_email }}</dd></div>
+            <div><dt class="text-[10px] uppercase tracking-wider text-muted-foreground">Advogado</dt><dd>{{ k.juridico || '—' }}</dd></div>
+            <div><dt class="text-[10px] uppercase tracking-wider text-muted-foreground">Enviado em</dt><dd>{{ dataBr(k.juridico_enviado_em) }}</dd></div>
+            <div v-if="k.juridico_email" class="col-span-2"><dt class="text-[10px] uppercase tracking-wider text-muted-foreground">E-mail</dt><dd class="truncate">{{ k.juridico_email }}</dd></div>
           </dl>
         </section>
 
-        <section>
-          <h3 class="text-sm font-semibold mb-2">Compra de prova ({{ detalhe.compras.length }})</h3>
+        <!-- Compra de prova -->
+        <section v-else-if="abaCaso === 'compra'" class="space-y-2">
           <div v-if="detalhe.compras.length === 0" class="text-sm text-muted-foreground">Nenhuma compra registrada.</div>
-          <div v-for="c in detalhe.compras" :key="c.id" class="rounded-lg border px-3 py-2 space-y-2 mb-2">
+          <div v-for="c in detalhe.compras" :key="c.id" class="rounded-lg border px-3 py-2 space-y-2">
             <div class="flex flex-wrap items-center gap-2 text-sm">
               <span class="font-medium">Pedido {{ c.pedido || `#${c.id}` }}</span>
-              <span :class="pillStatusCompra(c.status)">{{ c.status }}</span>
               <span class="text-xs text-muted-foreground">comprado {{ dataBr(c.data, false) }}<template v-if="c.entregue_em"> · entregue {{ dataBr(c.entregue_em, false) }}</template></span>
+              <span class="flex-1" />
+              <span :class="pillStatusCompra(c.status)">{{ c.status }}</span>
             </div>
             <dl class="grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-1 text-xs">
               <div><dt class="text-muted-foreground">Valor pago</dt><dd>{{ dinheiro(c.valor_pago) }}</dd></div>
@@ -223,26 +311,25 @@ defineExpose({ carregar })
           </div>
         </section>
 
-        <section>
-          <h3 class="text-sm font-semibold mb-2">Provas ({{ detalhe.provas.length }})</h3>
-          <DenunciaProvas :provas="detalhe.provas" />
+        <!-- Provas -->
+        <section v-else-if="abaCaso === 'provas'">
+          <div v-if="!detalhe.provas.length" class="text-sm text-muted-foreground">Nenhuma prova guardada.</div>
+          <DenunciaProvas v-else :provas="detalhe.provas" />
         </section>
 
-        <section v-if="detalhe.denuncias.length">
-          <h3 class="text-sm font-semibold mb-2">Denúncias do anúncio ({{ detalhe.denuncias.length }})</h3>
-          <ul class="space-y-1 text-xs">
-            <li v-for="d in detalhe.denuncias" :key="d.id" class="flex flex-wrap items-center gap-2">
-              <span class="tabular-nums text-muted-foreground w-16">{{ dataBr(d.data, false) }}</span>
-              <span>{{ d.canal }}</span>
-              <span class="font-mono">{{ d.protocolo || '—' }}</span>
-              <span :class="pillSituacaoDenuncia(d.situacao)">{{ d.situacao }}</span>
-              <span v-if="d.resultado" :class="pillResultado(d.resultado)">{{ d.resultado }}</span>
-            </li>
-          </ul>
+        <!-- Denúncias do anúncio -->
+        <section v-else class="space-y-1.5">
+          <div v-if="!detalhe.denuncias.length" class="text-sm text-muted-foreground">Nenhuma denúncia.</div>
+          <div v-for="d in detalhe.denuncias" :key="d.id" class="rounded-lg border px-3 py-2 flex items-center gap-2 text-xs">
+            <span class="tabular-nums text-muted-foreground whitespace-nowrap">{{ dataBr(d.data, false) }}</span>
+            <span class="font-medium whitespace-nowrap">{{ d.canal }}</span>
+            <span class="font-mono truncate">{{ d.protocolo || '' }}</span>
+            <span class="flex-1" />
+            <span v-if="d.resultado && d.resultado !== 'Aguardando'" :class="pillResultado(d.resultado)">{{ d.resultado }}</span>
+            <span v-else :class="pillSituacaoDenuncia(d.situacao)">{{ d.situacao }}</span>
+          </div>
         </section>
-
-        <p v-if="k.obs" class="text-xs text-muted-foreground whitespace-pre-wrap">{{ k.obs }}</p>
-      </template>
+      </div>
     </DenunciaGaveta>
 
     <DenunciaAnuncioGaveta :anuncio-id="anuncioAberto" @fechar="anuncioAberto = null" />

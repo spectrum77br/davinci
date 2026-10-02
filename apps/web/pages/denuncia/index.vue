@@ -38,12 +38,9 @@ watch(aba, (a) => {
   void router.replace({ query: { ...route.query, aba: a === 'anuncios' ? undefined : a } })
 })
 
-// coluna/quadrinho "Caso" (01/10): vai para a aba Casos já com o caso aberto
-const casoPedido = ref<number | null>(null)
-function irCaso(id: number) {
-  casoPedido.value = id
-  aba.value = 'casos'
-}
+// coluna/quadrinho "Caso" (01/10): abre /denuncia?aba=casos&caso=<id> numa nova aba do navegador —
+// aqui a aba Casos já abre com o caso
+const casoPedido = ref<number | null>(Number(route.query.caso || 0) || null)
 
 const copia = ref<{ carregar: () => Promise<void> } | null>(null)
 const atual = ref<{ carregar: () => Promise<void> } | null>(null)
@@ -80,7 +77,7 @@ function recarregar() {
       </button>
     </div>
 
-    <DenunciaPainel v-if="aba === 'anuncios'" ref="atual" @caso="irCaso" />
+    <DenunciaPainel v-if="aba === 'anuncios'" ref="atual" />
     <DenunciaCasos v-else-if="aba === 'casos'" ref="atual" :abrir-caso="casoPedido" @aberto="casoPedido = null" />
     <DenunciaRobo v-else-if="aba === 'robo'" ref="atual" />
     <ChamadosPainel v-else-if="aba === 'juridico'" modo="juridico" />

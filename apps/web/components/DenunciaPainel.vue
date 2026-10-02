@@ -62,12 +62,9 @@ const carregandoLoja = ref(false)
 const aberto = ref<string | null>(null)
 // 01/10 (Vinicius: "tem que clicar na loja e depois no anúncio"): clicar na loja abre a ficha dela
 const lojaFicha = ref<Loja | null>(null)
-// coluna Caso: o número do caso leva direto a ele (aba Casos)
-const emit = defineEmits<{ (e: 'caso', id: number): void }>()
+// coluna Caso: o número do caso abre o caso numa NOVA aba do navegador (Vinicius, 01/10: "não trocar a aba atual")
 function irCaso(id: number) {
-  lojaFicha.value = null
-  aberto.value = null
-  emit('caso', id)
+  window.open(`/denuncia?aba=casos&caso=${id}`, '_blank', 'noopener')
 }
 const foco = ref<number | null>(null)
 const enviadas = ref<{ carregar: () => Promise<void> } | null>(null)
@@ -203,7 +200,7 @@ defineExpose({ carregar })
       <button type="button" class="text-left rounded-lg" :class="naLoja === 'recusou' ? 'ring-2 ring-primary' : ''" title="filtrar os que a loja recusou" @click="porCartao('naLoja', 'recusou')">
         <StatCard
           compact label="Loja recusou" :value="numero(n.na_loja.recusou)" tone="danger"
-          :hint="`${numero(n.na_loja.aguardando)} aguardando · ${numero(n.na_loja.removido)} removidos`"
+          :hint="`${numero(n.na_loja.conferindo)} conferindo · ${numero(n.na_loja.aguardando)} aguardando · ${numero(n.na_loja.removido)} removidos`"
         />
       </button>
       <button type="button" class="text-left rounded-lg" :class="naAnatel === 'processo' ? 'ring-2 ring-primary' : ''" title="filtrar os que já têm processo na Anatel" @click="porCartao('naAnatel', 'processo')">
@@ -363,7 +360,7 @@ defineExpose({ carregar })
                 </td>
                 <td>
                   <div v-if="l.casos.length" class="flex flex-wrap gap-1">
-                    <button v-for="c in l.casos" :key="c.id" type="button" class="pill-info hover:underline" :title="`abrir o ${c.codigo} (${c.status})`" @click.stop="emit('caso', c.id)">{{ c.codigo }}</button>
+                    <button v-for="c in l.casos" :key="c.id" type="button" class="pill-info hover:underline" :title="`abrir o ${c.codigo} (${c.status})`" @click.stop="irCaso(c.id)">{{ c.codigo }}</button>
                   </div>
                   <span v-else class="text-xs text-muted-foreground">—</span>
                 </td>
@@ -407,7 +404,7 @@ defineExpose({ carregar })
                   <td><span :class="pillAtivo(a.situacao)">{{ ativoSimNao(a.situacao) }}</span></td>
                   <td>
                     <div v-if="a.casos.length" class="flex flex-wrap gap-1">
-                      <button v-for="c in a.casos" :key="c.id" type="button" class="pill-info hover:underline" :title="`abrir o ${c.codigo} (${c.status})`" @click.stop="emit('caso', c.id)">{{ c.codigo }}</button>
+                      <button v-for="c in a.casos" :key="c.id" type="button" class="pill-info hover:underline" :title="`abrir o ${c.codigo} (${c.status})`" @click.stop="irCaso(c.id)">{{ c.codigo }}</button>
                     </div>
                     <span v-else class="text-xs text-muted-foreground">—</span>
                   </td>
@@ -483,7 +480,7 @@ defineExpose({ carregar })
               <td><span :class="pillAtivo(a.situacao)">{{ ativoSimNao(a.situacao) }}</span></td>
               <td>
                 <div v-if="a.casos.length" class="flex flex-wrap gap-1">
-                  <button v-for="c in a.casos" :key="c.id" type="button" class="pill-info hover:underline" :title="`abrir o ${c.codigo} (${c.status})`" @click.stop="emit('caso', c.id)">{{ c.codigo }}</button>
+                  <button v-for="c in a.casos" :key="c.id" type="button" class="pill-info hover:underline" :title="`abrir o ${c.codigo} (${c.status})`" @click.stop="irCaso(c.id)">{{ c.codigo }}</button>
                 </div>
                 <span v-else class="text-xs text-muted-foreground">—</span>
               </td>

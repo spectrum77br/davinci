@@ -235,7 +235,11 @@ export type PainelLoja = {
 export const ETIQ_LOJA: [string, string, string, string][] = [
   ['removido', 'pill-success', 'removido', 'removidos'],
   ['recusou', 'pill-danger', 'recusada', 'recusadas'],
+  // 01/10: a loja já respondeu e o robô está conferindo o anúncio (vira recusada ou removido)
+  ['conferindo', 'pill-muted', 'respondeu · conferindo', 'responderam · conferindo'],
   ['aguardando', 'pill-muted', 'aguardando', 'aguardando'],
+  // Diversos: desde 01/10 não é mais denunciado nas lojas — a denúncia velha sem desfecho não é pendência
+  ['antiga', 'pill-muted', 'denúncia antiga', 'denúncias antigas'],
   ['nao', 'pill-muted', 'sem denúncia', 'sem denúncia'],
 ]
 export const ETIQ_ANATEL: [string, string, string, string][] = [

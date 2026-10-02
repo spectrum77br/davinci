@@ -1018,7 +1018,7 @@ async def _status_dos_anuncios(
         base = _anuncio_base(a)
         base["casos"] = casos.get(a.id, [])
         ds = dens.get(a.id, [])
-        lst = painel.status_loja(ds)
+        lst = painel.status_loja(ds, a.grupo)
         base["loja_st"] = painel.rotular(lst, painel.LOJA)
         ana = painel.status_anatel(base, ds, lst, a.id in com_print)
         base["anatel_st"] = painel.rotular(ana, painel.ANATEL)

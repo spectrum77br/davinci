@@ -31,9 +31,16 @@ RESOLVEU = ("Anúncio removido", "Anúncio ajustado", "Loja suspensa")
 LOJA = {
     "removido": ("removido", "success"),
     "recusou": ("recusou", "danger"),
+    # 01/10 (Vinicius): "aguardando" separado — a loja já respondeu e o robô está conferindo o anúncio
+    # (o e-mail chegou; vira "recusou" ou "removido" depois do print) × sem resposta nenhuma
+    "conferindo": ("respondeu · conferindo", "muted"),
     "aguardando": ("aguardando", "muted"),
+    # desde 01/10 o Diversos não é mais denunciado nas lojas: a denúncia velha sem desfecho não é
+    # pendência (ele vai à Anatel de qualquer jeito) e não entra na conta do "aguardando"
+    "antiga": ("denúncia antiga", "muted"),
     "nao": ("não denunciado", "muted"),
 }
+_RESPONDEU = ("respondeu", "não identific", "provável", "medidas cab")
 ANATEL = {
     "processo": ("processo aberto", "info"),
     "fila": ("na fila", "warning"),
@@ -48,9 +55,11 @@ def _quando(d: dict) -> tuple:
     return (d.get("data") or "", d.get("hora") or "", d.get("id") or 0)
 
 
-def status_loja(dens: list[dict]) -> dict:
+def status_loja(dens: list[dict], grupo: str | None = None) -> dict:
     """Denúncias do anúncio nos marketplaces → o que a loja fez. Removido vale mesmo
-    que uma tentativa anterior tenha sido recusada; senão manda a mais recente."""
+    que uma tentativa anterior tenha sido recusada; senão manda a mais recente.
+    Sem desfecho: "conferindo" se a resposta já chegou (nota do resultado), senão
+    "aguardando" — e, no Diversos (grupo GRUPO 2), "antiga"."""
     dens = [d for d in dens if d.get("canal") in CANAIS_LOJA]
     if not dens:
         return {"chave": "nao", "data": None, "tentativas": 0, "canal": None}
@@ -62,7 +71,10 @@ def status_loja(dens: list[dict]) -> dict:
     elif "improcedente" in f"{ult.get('situacao') or ''} {ult.get('resultado') or ''}".lower():
         chave = "recusou"
     else:
-        chave = "aguardando"
+        nota = (ult.get("resultado_nota") or "").lower()
+        chave = "conferindo" if any(x in nota for x in _RESPONDEU) else "aguardando"
+        if grupo == "GRUPO 2":
+            chave = "antiga"
     return {"chave": chave, "data": ult.get("data"), "tentativas": len(dens),
             "canal": ult.get("canal")}
 
@@ -85,7 +97,7 @@ def status_anatel(anuncio: dict, dens: list[dict], loja: dict, tem_print: bool) 
             return {"chave": "nada", **extra}
         if loja["chave"] == "nao":
             return {"chave": "falta_loja", **extra}
-        if loja["chave"] == "aguardando":
+        if loja["chave"] in ("aguardando", "conferindo"):
             return {"chave": "esperando_recusa", **extra}
     elif grupo == "GRUPO 2":
         # 01/10: o Diversos vai sem denúncia na loja — com nº declarado (ou TikTok sem nº)
