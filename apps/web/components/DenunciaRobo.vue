@@ -336,17 +336,17 @@ function alternarLinha(acao: string) {
       </div>
 
       <!-- ══ Passos ══ -->
-      <div v-if="aba === 'passos'" class="table-card overflow-x-auto">
+      <div v-if="aba === 'passos'" class="table-card w-fit max-w-full overflow-x-auto">
         <!-- table-fixed: um erro comprido fica cortado (inteiro ao abrir a linha) e o "Rodar" não sai da tela -->
-        <!-- a sobra de largura fica no Passo (texto inteiro); Resultado tem largura fixa e o
-             "Rodar" fica logo ao lado dele, não lá no canto da tela -->
-        <table class="w-full min-w-[980px] table-fixed">
+        <!-- 02/10 (Vinicius): sem buracos — cada coluna com a sua largura e a tabela (e o quadro)
+             do tamanho delas; texto comprido do Passo fica com "…" (inteiro no title e ao abrir) -->
+        <table class="table-fixed" style="width: 1310px">
           <colgroup>
             <col class="w-[44px]">
-            <col>
+            <col class="w-[540px]">
             <col class="w-[72px]">
             <col class="w-[150px]">
-            <col class="w-[84px]">
+            <col class="w-[92px]">
             <col class="w-[320px]">
             <col class="w-[92px]">
           </colgroup>
@@ -356,7 +356,7 @@ function alternarLinha(acao: string) {
               <th>Passo</th>
               <th>Ligado</th>
               <th class="text-center">Horários</th>
-              <th>Última vez</th>
+              <th class="whitespace-nowrap">Última vez</th>
               <th>Resultado</th>
               <th />
             </tr>
