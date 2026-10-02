@@ -787,3 +787,113 @@ async def test_caso_extra_compra_e_processo(client, make_user, auth_as):
     assert (await client.put("/api/denuncia/casos/7/extra",
                              json={"processo_link": "jusbrasil.com"})).status_code == 422
     assert (await client.put("/api/denuncia/casos/99/extra", json={})).status_code == 404
+
+
+Y = {"lojas": [{"marketplace": "Shopee", "shop_id": "222"}]}
+
+
+async def test_criar_caso_por_loja_e_excluir(client, make_user, auth_as):
+    """01/10: "criar" / "enviar para caso" pede ao mini um caso por loja (todos os anúncios dela);
+    a lixeira estorna — a loja volta a ficar sem caso."""
+    await _carga(client)  # loja_x (111): A1 já tem o CASO-001
+    await client.post(
+        "/api/denuncia/sync/anuncios",
+        json={"linhas": [
+            _anuncio("B1", shop_id="222", loja="loja_y", vendas=300),
+            _anuncio("B2", shop_id="222", loja="loja_y", vendas=700, situacao="fora do ar"),
+            _anuncio("B3", shop_id="222", loja="loja_y", vendas=5),
+            _anuncio("B4", shop_id="222", loja="loja_y", propria=1),
+        ]},
+        headers=H,
+    )
+    auth_as(await make_user(permissions={"denuncia": {"view": True}}))
+    r = await client.post("/api/denuncia/casos/criar", json={"lojas": [{"shop_id": "222"}]})
+    assert r.status_code == 403
+
+    auth_as(await make_user(permissions={"denuncia": {"view": True, "edit": True}}))
+    assert (await client.post("/api/denuncia/casos/criar", json={"lojas": []})).status_code == 422
+    r = await client.post("/api/denuncia/casos/criar", json={"lojas": [
+        *Y["lojas"], {"marketplace": "Shopee", "shop_id": "111"}]})
+    assert r.status_code == 200, r.text
+    j = r.json()
+    assert j["criados"] == [{"loja": "loja_y", "shop_id": "222", "anuncios": 3}]
+    assert j["pulados"][0]["motivo"].startswith("já tem caso (CASO-001")
+
+    # o mini recebe o pedido: principal = o mais vendido NO AR; a loja própria fica de fora
+    cmds = (await client.get("/api/denuncia/sync/robo/comandos", headers=H)).json()["comandos"]
+    assert [(c["tipo"], c["dados"]["anuncio_ids"]) for c in cmds] == [
+        ("criar_caso", ["B1", "B3", "B2"])]
+    # enquanto isso a loja aparece "criando…" e não deixa pedir de novo
+    lojas = {x["loja"]: x for x in (await client.get("/api/denuncia/painel")).json()["itens"]}
+    assert lojas["loja_y"]["caso_pendente"] is True
+    assert lojas["loja_y"]["casos"] == []
+    r = await client.post("/api/denuncia/casos/criar", json=Y)
+    assert r.json()["pulados"][0]["motivo"] == "o caso já está sendo criado"
+
+    # o mini abre o Caso 008 da loja e a cópia traz: vale para TODOS os anúncios da loja
+    await client.post(f"/api/denuncia/sync/robo/comandos/{cmds[0]['id']}",
+                      json={"ok": True, "resultado": "Caso 008 aberto"}, headers=H)
+    await client.post(
+        "/api/denuncia/sync/casos",
+        json={"linhas": [
+            {"id": 7, "codigo": "CASO-001", "anuncio_id": "A1", "titulo": "Caso 1",
+             "status": "Com jurídico", "aberto_em": "2026-09-15"},
+            {"id": 8, "codigo": "Caso 008", "anuncio_id": "B1", "titulo": "loja_y · 3 anúncios",
+             "status": "Aberto", "aberto_em": "2026-10-01", "shop_id": "222",
+             "marketplace": "Shopee", "anuncios": '["B1", "B3", "B2"]'},
+        ]},
+        headers=H,
+    )
+    j = (await client.get("/api/denuncia/painel",
+                          params={"visao": "anuncios", "loja": "222"})).json()
+    assert {x["id"]: [k["codigo"] for k in x["casos"]] for x in j["itens"]} == {
+        "B1": ["Caso 008"], "B2": ["Caso 008"], "B3": ["Caso 008"]}
+    lojas = {x["loja"]: x for x in (await client.get("/api/denuncia/painel")).json()["itens"]}
+    assert [k["codigo"] for k in lojas["loja_y"]["casos"]] == ["Caso 008"]
+    assert lojas["loja_y"]["caso_pendente"] is False
+    casos = (await client.get("/api/denuncia/casos")).json()["itens"]
+    c8 = next(c for c in casos if c["id"] == 8)
+    assert (c8["n_anuncios"], c8["por_loja"], c8["loja"]) == (3, True, "loja_y")
+    d = (await client.get("/api/denuncia/casos/8")).json()
+    assert [x["id"] for x in d["anuncios_do_caso"]] == ["B1", "B3", "B2"]
+    f = (await client.get("/api/denuncia/anuncios/B3")).json()
+    assert f["casos"][0]["codigo"] == "Caso 008"
+
+    # lixeira: some na hora; o mini recebe o pedido
+    r = await client.post("/api/denuncia/casos/8/excluir", json={})
+    assert r.status_code == 200, r.text
+    assert [c["id"] for c in (await client.get("/api/denuncia/casos")).json()["itens"]] == [7]
+    lojas = {x["loja"]: x for x in (await client.get("/api/denuncia/painel")).json()["itens"]}
+    assert lojas["loja_y"]["casos"] == []
+    cmds = (await client.get("/api/denuncia/sync/robo/comandos", headers=H)).json()["comandos"]
+    assert [(c["tipo"], c["dados"]["caso_id"]) for c in cmds] == [("excluir_caso", 8)]
+    # o mini estorna (status Excluído, sem anúncio) e a cópia traz: continua fora, sem apagar
+    await client.post(f"/api/denuncia/sync/robo/comandos/{cmds[0]['id']}",
+                      json={"ok": True, "resultado": "Caso 008 excluído"}, headers=H)
+    await client.post(
+        "/api/denuncia/sync/casos",
+        json={"linhas": [{"id": 8, "codigo": "Caso 008", "anuncio_id": None, "status": "Excluído",
+                          "excluido_anuncio_id": "B1", "shop_id": "222", "anuncios": '["B1"]'}]},
+        headers=H,
+    )
+    assert [c["id"] for c in (await client.get("/api/denuncia/casos")).json()["itens"]] == [7]
+    assert (await client.post("/api/denuncia/casos/8/excluir", json={})).status_code == 409
+    # e a loja pode ganhar caso de novo
+    r = await client.post("/api/denuncia/casos/criar", json=Y)
+    assert r.json()["criados"][0]["anuncios"] == 3
+
+
+async def test_criar_caso_que_falhou_aparece(client, make_user, auth_as):
+    await _carga(client)
+    await client.post("/api/denuncia/sync/anuncios",
+                      json={"linhas": [_anuncio("B1", shop_id="222", loja="loja_y")]}, headers=H)
+    auth_as(await make_user(permissions={"denuncia": {"view": True, "edit": True}}))
+    await client.post("/api/denuncia/casos/criar", json=Y)
+    cmd = (await client.get("/api/denuncia/sync/robo/comandos", headers=H)).json()["comandos"][0]
+    await client.post(f"/api/denuncia/sync/robo/comandos/{cmd['id']}",
+                      json={"ok": False, "resultado": "erro: 404 sem anúncio"}, headers=H)
+    j = (await client.get("/api/denuncia/painel")).json()
+    assert j["falhas_caso"][0]["texto"] == "criar o caso da loja loja_y"
+    assert "404" in j["falhas_caso"][0]["resultado"]
+    lojas = {x["loja"]: x for x in j["itens"]}
+    assert lojas["loja_y"]["caso_pendente"] is False

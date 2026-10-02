@@ -20,6 +20,7 @@ Fora do openapi a porta do sync (é o mini, não uma tela).
 from __future__ import annotations
 
 import hashlib
+import json
 import mimetypes
 import os
 import re
@@ -1024,9 +1025,7 @@ async def ver_anuncio(
             .limit(60)
         )
     ).scalars().all()
-    casos = (
-        await session.execute(select(DenunciaCaso).where(DenunciaCaso.anuncio_id == anuncio_id))
-    ).scalars().all()
+    casos = _cobertura(await _casos_ativos(session))(a)
     compras = (
         await session.execute(
             select(DenunciaCompra).where(DenunciaCompra.anuncio_id == anuncio_id)
@@ -1086,6 +1085,116 @@ def _anuncio_base(a: DenunciaAnuncio) -> dict:
     }
 
 
+# ── caso por loja e lixeira (01/10/2026) ──────────────────────────────────────────────────────
+# Vinicius: "o caso vai ser por loja informando todos os anúncios da loja" e "faz um botão excluir
+# caso… ele estorna tudo e a loja volta a ficar zerada". Quem cria/exclui é o sistema do mini (o
+# DaVinci só pede, pelo mesmo canal dos botões do Robô); até a cópia trazer o resultado, a tela já
+# mostra "criando…" / esconde o caso. Excluído no mini nunca é apagado: status "Excluído".
+CASO_EXCLUIDO = "Excluído"
+# pedido entregue ao mini, mas a cópia (a cada 5 min — o mini também manda na hora) ainda não chegou
+PEDIDO_CASO_VALE = timedelta(minutes=15)
+FALHA_CASO_VALE = timedelta(hours=24)
+
+
+def _anuncios_do_caso(k: DenunciaCaso) -> list[str]:
+    """O anúncio principal e, no caso por loja, a lista que o mini guardou (JSON em `anuncios`)."""
+    bruto = (k.dados or {}).get("anuncios")
+    try:
+        lista = json.loads(bruto) if isinstance(bruto, str) else (bruto or [])
+    except ValueError:
+        lista = []
+    ids = [k.anuncio_id] if k.anuncio_id else []
+    for x in lista if isinstance(lista, list) else []:
+        if x and str(x) not in ids:
+            ids.append(str(x))
+    return ids
+
+
+def _loja_do_caso(k: DenunciaCaso) -> tuple[str | None, str | None]:
+    d = k.dados or {}
+    return (_txt(d.get("marketplace")), _txt(d.get("shop_id")))
+
+
+async def _pedidos_de_caso(session: AsyncSession) -> dict:
+    """criar/excluir caso pedidos ao mini que a cópia ainda não mostra, e os que deram errado."""
+    agora = datetime.now(UTC)
+    rows = (
+        await session.execute(
+            select(DenunciaRoboComando)
+            .where(
+                DenunciaRoboComando.tipo.in_(("criar_caso", "excluir_caso")),
+                DenunciaRoboComando.pedido_em >= agora - FALHA_CASO_VALE,
+            )
+            .order_by(DenunciaRoboComando.id)
+        )
+    ).scalars().all()
+    # o caso novo já chegou na cópia (linha da loja recebida depois do pedido)? sai do "criando…"
+    chegou: dict[str, datetime] = {}
+    if any(c.tipo == "criar_caso" for c in rows):
+        for k in (await session.execute(select(DenunciaCaso))).scalars():
+            shop = _loja_do_caso(k)[1]
+            if shop and (shop not in chegou or k.recebido_em > chegou[shop]):
+                chegou[shop] = k.recebido_em
+    criando: set[tuple[str | None, str]] = set()
+    excluindo: set[int] = set()
+    falhas: list[dict] = []
+    for c in rows:
+        d = c.dados or {}
+        no_ar = (c.entregue_em is None and agora - c.pedido_em <= COMANDO_VALE) or (
+            c.ok and c.entregue_em is not None and agora - c.entregue_em <= PEDIDO_CASO_VALE
+        )
+        if no_ar and c.tipo == "criar_caso" and c.entregue_em is not None:
+            veio = chegou.get(str(d.get("shop_id") or ""))
+            no_ar = not (veio and veio > c.pedido_em)
+        if no_ar:
+            if c.tipo == "criar_caso" and d.get("shop_id"):
+                criando.add((d.get("marketplace"), str(d["shop_id"])))
+            elif c.tipo == "excluir_caso" and d.get("caso_id") is not None:
+                excluindo.add(int(d["caso_id"]))
+            continue
+        if c.entregue_em is None or c.ok is False:
+            o_que = (
+                f"criar o caso da loja {d.get('loja') or d.get('shop_id')}"
+                if c.tipo == "criar_caso" else f"excluir o {d.get('codigo') or 'caso'}"
+            )
+            falhas.append({
+                "id": c.id, "tipo": c.tipo, "texto": o_que, "pedido_em": c.pedido_em,
+                "por": c.pedido_por,
+                "resultado": c.resultado if c.entregue_em
+                else "o robô do mini não pegou o pedido em 1 h (Mac desligado?)",
+            })
+    return {"criando": criando, "excluindo": excluindo, "falhas": falhas}
+
+
+async def _casos_ativos(session: AsyncSession, pedidos: dict | None = None) -> list[DenunciaCaso]:
+    """Casos que valem nas telas: sem os excluídos (e os que estão sendo excluídos agora)."""
+    pedidos = pedidos if pedidos is not None else await _pedidos_de_caso(session)
+    casos = (await session.execute(select(DenunciaCaso).order_by(DenunciaCaso.id))).scalars().all()
+    return [k for k in casos if k.status != CASO_EXCLUIDO and k.id not in pedidos["excluindo"]]
+
+
+def _cobertura(casos: list[DenunciaCaso]) -> Any:
+    """Índice "casos de um anúncio": ele é o principal ou está na lista do caso, ou o caso é da
+    loja dele (o caso por loja cobre também anúncio achado depois). Devolve f(anúncio) → casos."""
+    por_anuncio: dict[str, list[DenunciaCaso]] = defaultdict(list)
+    por_loja: dict[str, list[tuple[str | None, DenunciaCaso]]] = defaultdict(list)
+    for k in casos:
+        for i in _anuncios_do_caso(k):
+            por_anuncio[i].append(k)
+        mp, shop = _loja_do_caso(k)
+        if shop:
+            por_loja[shop].append((mp, k))
+
+    def de(a: Any) -> list[DenunciaCaso]:
+        out = {k.id: k for k in por_anuncio.get(a.id, [])}
+        for mp, k in por_loja.get(a.shop_id or "", []):
+            if not mp or not a.marketplace or mp == a.marketplace:
+                out[k.id] = k
+        return [out[i] for i in sorted(out)]
+
+    return de
+
+
 async def _status_dos_anuncios(
     session: AsyncSession, anuncios: list[DenunciaAnuncio],
 ) -> list[dict]:
@@ -1111,19 +1220,17 @@ async def _status_dos_anuncios(
                 )
             ).scalars()
         )
-    # 01/10 (Vinicius): coluna "Caso" — o número do caso e um botão que leva direto a ele
-    casos: dict[str, list[dict]] = defaultdict(list)
-    if ids:
-        for k in (
-            await session.execute(
-                select(DenunciaCaso).where(DenunciaCaso.anuncio_id.in_(ids)).order_by(DenunciaCaso.id)
-            )
-        ).scalars():
-            casos[k.anuncio_id].append({"id": k.id, "codigo": k.codigo, "status": k.status})
+    # 01/10 (Vinicius): coluna "Caso" — o número do caso e um botão que leva direto a ele. O caso
+    # por loja cobre todos os anúncios dela; "criando…" enquanto o mini não devolve o caso novo.
+    pedidos = await _pedidos_de_caso(session)
+    casos_de = _cobertura(await _casos_ativos(session, pedidos) if ids else [])
     out = []
     for a in anuncios:
         base = _anuncio_base(a)
-        base["casos"] = casos.get(a.id, [])
+        base["casos"] = [{"id": k.id, "codigo": k.codigo, "status": k.status} for k in casos_de(a)]
+        base["caso_pendente"] = not base["casos"] and bool(a.shop_id) and (
+            (a.marketplace, a.shop_id) in pedidos["criando"] or (None, a.shop_id) in pedidos["criando"]
+        )
         ds = dens.get(a.id, [])
         lst = painel.status_loja(ds, a.grupo)
         base["loja_st"] = painel.rotular(lst, painel.LOJA)
@@ -1168,6 +1275,7 @@ async def painel_anuncios_e_denuncias(
     marketplaces = (await session.execute(select(A.marketplace).distinct())).scalars().all()
     grupos = (await session.execute(select(A.grupo).distinct())).scalars().all()
     resp: dict[str, Any] = {
+        "falhas_caso": (await _pedidos_de_caso(session))["falhas"],
         "numeros": painel.numeros(itens, lojas),
         "opcoes": {
             "marketplaces": sorted(m for m in marketplaces if m),
@@ -1444,13 +1552,16 @@ async def listar_casos(
     _u: Annotated[User, Depends(_ver)],
 ) -> dict:
     C, A = DenunciaCaso, DenunciaAnuncio
+    pedidos = await _pedidos_de_caso(session)
     rows = (
         await session.execute(
             select(C, A.loja, A.titulo, A.marketplace, A.dados, A.vendas, A.shop_id)
             .outerjoin(A, A.id == C.anuncio_id)
+            .where(or_(C.status.is_(None), C.status != CASO_EXCLUIDO))
             .order_by(C.id.desc())
         )
     ).all()
+    rows = [r for r in rows if r[0].id not in pedidos["excluindo"]]
     # a compra de prova do caso: ligada pelo caso OU pelo anúncio (as de 29/09 vieram só com o
     # anúncio — a tabela mostrava "—" para os casos 004–006); vale a mais recente
     compras_por_caso: dict[int, dict] = {}
@@ -1490,7 +1601,9 @@ async def listar_casos(
                 "url": ad.get("url"),
                 "hom": ad.get("hom"),
                 "vendas": vendas,
-                "shop_id": shop_id,
+                "shop_id": shop_id or _loja_do_caso(c)[1],
+                "n_anuncios": len(_anuncios_do_caso(c)),
+                "por_loja": bool(_loja_do_caso(c)[1]),
                 "compra": compra,
                 "extra": _extra_dict(extras.get(c.id)),
             }
@@ -1498,7 +1611,92 @@ async def listar_casos(
     por_status: dict[str, int] = {}
     for i in itens:
         por_status[i["status"] or "—"] = por_status.get(i["status"] or "—", 0) + 1
-    return {"total": len(itens), "itens": itens, "por_status": por_status}
+    return {"total": len(itens), "itens": itens, "por_status": por_status,
+            "falhas_caso": pedidos["falhas"]}
+
+
+@router.post("/casos/criar")
+async def criar_casos(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    u: Annotated[User, Depends(_editar)],
+    corpo: Annotated[dict, Body()],
+) -> dict:
+    """Aba Anúncios e denúncias: "criar" (uma loja) ou "enviar para caso" (as marcadas). Um caso
+    por loja com TODOS os anúncios dela (concorrentes) — o mais vendido no ar é o principal. Loja
+    que já tem caso (ou pedido em andamento) fica de fora.
+    Corpo: {lojas: [{marketplace, shop_id}]}."""
+    lojas = corpo.get("lojas")
+    if not isinstance(lojas, list) or not lojas or len(lojas) > 200:
+        raise HTTPException(422, detail={"code": "denuncia_lojas_invalidas"})
+    pedidos = await _pedidos_de_caso(session)
+    casos_de = _cobertura(await _casos_ativos(session, pedidos))
+    A = DenunciaAnuncio  # noqa: N806 — mesmo apelido das outras consultas daqui
+    criados: list[dict] = []
+    pulados: list[dict] = []
+    vistos: set[tuple] = set()
+    for item in lojas:
+        if not isinstance(item, dict):
+            raise HTTPException(422, detail={"code": "denuncia_lojas_invalidas"})
+        shop = _txt(item.get("shop_id"))
+        mp = _txt(item.get("marketplace"))
+        if not shop:
+            pulados.append({"loja": item.get("loja"), "motivo": "sem o código da loja"})
+            continue
+        if (mp, shop) in vistos:
+            continue
+        vistos.add((mp, shop))
+        conds = [A.shop_id == shop, A.propria == 0]
+        if mp:
+            conds.append(A.marketplace == mp)
+        anuncios = (await session.execute(select(A).where(*conds))).scalars().all()
+        nome = next((a.loja for a in anuncios if a.loja), None) or shop
+        if not anuncios:
+            pulados.append({"loja": nome, "motivo": "nenhum anúncio de concorrente nesta loja"})
+            continue
+        if (mp, shop) in pedidos["criando"] or (None, shop) in pedidos["criando"]:
+            pulados.append({"loja": nome, "motivo": "o caso já está sendo criado"})
+            continue
+        ja = {k.codigo for a in anuncios for k in casos_de(a)}
+        if ja:
+            codigos = ", ".join(sorted(c or "?" for c in ja))
+            pulados.append({"loja": nome, "motivo": f"já tem caso ({codigos})"})
+            continue
+        ordem = sorted(anuncios, key=lambda a: (a.situacao != "ativo", -(a.vendas or 0), a.id))
+        dados = {"shop_id": shop, "marketplace": mp or ordem[0].marketplace, "loja": nome,
+                 "anuncio_ids": [a.id for a in ordem]}
+        session.add(
+            DenunciaRoboComando(tipo="criar_caso", dados=dados, pedido_por=u.name or u.email)
+        )
+        criados.append({"loja": nome, "shop_id": shop, "anuncios": len(ordem)})
+    await session.commit()
+    logger.info("denuncia_criar_casos", criados=len(criados), pulados=len(pulados), por=u.email)
+    return {"criados": criados, "pulados": pulados}
+
+
+@router.post("/casos/{caso_id}/excluir")
+async def excluir_caso(
+    caso_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    u: Annotated[User, Depends(_editar)],
+    corpo: Annotated[dict | None, Body()] = None,
+) -> dict:
+    """Lixeira da aba Casos: pede ao mini para estornar o caso (lá ele vira "Excluído" — nada é
+    apagado) e a loja volta a ficar sem caso. A tela já esconde o caso enquanto o mini faz."""
+    c = await session.get(DenunciaCaso, caso_id)
+    if c is None:
+        raise HTTPException(404, detail={"code": "denuncia_caso_nao_encontrado"})
+    if c.status == CASO_EXCLUIDO:
+        raise HTTPException(409, detail={"code": "denuncia_caso_ja_excluido"})
+    if caso_id in (await _pedidos_de_caso(session))["excluindo"]:
+        return {"ok": True, "ja_pedido": True}
+    motivo = str((corpo or {}).get("motivo") or "").strip()[:500]
+    session.add(DenunciaRoboComando(
+        tipo="excluir_caso", dados={"caso_id": caso_id, "codigo": c.codigo, "motivo": motivo},
+        pedido_por=u.name or u.email,
+    ))
+    await session.commit()
+    logger.info("denuncia_excluir_caso", caso=c.codigo, por=u.email)
+    return {"ok": True}
 
 
 _CAMPOS_EXTRA_TEXTO = ("compra_loja", "compra_pedido", "processo_numero", "processo_link",
@@ -1571,17 +1769,34 @@ async def ver_caso(
             .order_by(DenunciaProva.id.desc())
         )
     ).scalars().all()
+    # caso por loja: a lista de anúncios dela e as denúncias de todos
+    excluido = (c.dados or {}).get("excluido_anuncio_id")
+    ids = _anuncios_do_caso(c) or ([excluido] if excluido else [])
     dens = []
-    if c.anuncio_id:
+    if ids:
         dens = (
             await session.execute(
                 select(DenunciaDenuncia)
-                .where(DenunciaDenuncia.anuncio_id == c.anuncio_id)
+                .where(DenunciaDenuncia.anuncio_id.in_(ids))
                 .order_by(DenunciaDenuncia.data.desc(), DenunciaDenuncia.id.desc())
             )
         ).scalars().all()
+    do_caso = []
+    if len(ids) > 1:
+        por_id = {
+            a.id: a for a in (
+                await session.execute(select(DenunciaAnuncio).where(DenunciaAnuncio.id.in_(ids)))
+            ).scalars()
+        }
+        do_caso = [
+            {"id": i, "titulo": por_id[i].titulo, "situacao": por_id[i].situacao,
+             "vendas": por_id[i].vendas, "grupo": por_id[i].grupo,
+             "url": (por_id[i].dados or {}).get("url")}
+            for i in ids if i in por_id
+        ]
     return {
         "caso": c.dados,
+        "anuncios_do_caso": do_caso,
         "anuncio": anuncio.dados if anuncio else None,
         "compras": [x.dados for x in compras],
         "provas": [_prova_resumo(p) for p in provas],

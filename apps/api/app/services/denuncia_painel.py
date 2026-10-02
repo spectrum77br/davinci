@@ -129,7 +129,8 @@ def somar_lojas(itens: list[dict]) -> list[dict]:
                 "anuncios": 0, "no_ar": 0, "fora_do_ar": 0, "vendas": 0,
                 "nosso": 0, "diversos": 0, "outros": 0,
                 "na_loja": dict.fromkeys(LOJA, 0), "na_anatel": dict.fromkeys(ANATEL, 0),
-                "processos": set(), "casos": {}, "ultimo_achado": "", "ultima_denuncia": "",
+                "processos": set(), "casos": {}, "caso_pendente": False,
+                "ultimo_achado": "", "ultima_denuncia": "",
             }
         lj["loja"] = lj["loja"] or a.get("loja")
         lj["anuncios"] += 1
@@ -144,12 +145,14 @@ def somar_lojas(itens: list[dict]) -> list[dict]:
             lj["processos"].add(a["anatel_st"]["protocolo"])
         for k in a.get("casos") or []:
             lj["casos"][k["id"]] = k
+        lj["caso_pendente"] = lj["caso_pendente"] or bool(a.get("caso_pendente"))
         lj["ultimo_achado"] = max(lj["ultimo_achado"], a.get("visto_primeiro") or "")
         lj["ultima_denuncia"] = max(lj["ultima_denuncia"], a.get("ultima_denuncia") or "")
     out = []
     for lj in lojas.values():
         lj["processos"] = sorted(lj["processos"])
         lj["casos"] = sorted(lj["casos"].values(), key=lambda k: k["id"])
+        lj["caso_pendente"] = lj["caso_pendente"] and not lj["casos"]
         lj["ultimo_achado"] = lj["ultimo_achado"] or None
         lj["ultima_denuncia"] = lj["ultima_denuncia"] or None
         out.append(lj)

@@ -4,9 +4,9 @@
 // entrega), as provas obrigatórias e o envio ao advogado. Cópia só leitura
 // do sistema de Fiscalização do Mac mini da Makisa.
 import { computed, onMounted, ref, watch } from 'vue'
-import { ExternalLink } from 'lucide-vue-next'
+import { ExternalLink, Trash2 } from 'lucide-vue-next'
 import {
-  type Prova, ativoSimNao, dataBr, dinheiro, numero, pillAtivo, pillResultado, pillSituacaoDenuncia,
+  type FalhaCaso, type Prova, ativoSimNao, dataBr, dinheiro, numero, pillAtivo, pillResultado, pillSituacaoDenuncia,
   pillStatusCaso, pillStatusCompra,
 } from '~/lib/denuncia'
 
@@ -28,6 +28,9 @@ type Caso = {
   hom: string | null
   vendas: number | null
   shop_id: string | null
+  // 01/10: caso por loja (todos os anúncios dela)
+  n_anuncios?: number
+  por_loja?: boolean
   compra: {
     pedido: string | null; status: string | null; valor_pago: number | null; data: string | null
     entregue_em: string | null; comprador: string | null
@@ -48,7 +51,7 @@ type CasoExtra = {
   mov_status: string | null
   atualizado_por: string | null
 }
-type Resposta = { total: number; itens: Caso[]; por_status: Record<string, number> }
+type Resposta = { total: number; itens: Caso[]; por_status: Record<string, number>; falhas_caso?: FalhaCaso[] }
 type Anexo = {
   id: number
   tipo: string
@@ -63,6 +66,7 @@ type Anexo = {
   resultado: string | null
 }
 type Detalhe = {
+  anuncios_do_caso?: { id: string; titulo: string | null; situacao: string | null; vendas: number | null; grupo: string | null; url: string | null }[]
   extra?: CasoExtra
   status_tela?: string
   anexos?: Anexo[]
@@ -148,6 +152,37 @@ function baixarLista() {
   URL.revokeObjectURL(a.href)
 }
 
+// ── 01/10 (Vinicius: "um botão excluir caso, vai que faço errado — clico na lixeira, ele estorna
+// tudo e a loja volta a ficar zerada"): o sistema do mini marca o caso como Excluído (nada é
+// apagado; a compra e as provas continuam no anúncio). Aqui ele some na hora.
+const falhas = ref<FalhaCaso[]>([])
+const excluindo = ref<number | null>(null)
+async function excluir(c: Caso) {
+  const linhas = [
+    `Excluir o ${c.codigo} (${c.loja || c.anuncio_id})?`,
+    '',
+    'Ele sai da aba Casos e a loja volta a ficar sem caso em Anúncios e denúncias.',
+    'Nada é apagado: a compra e as provas continuam guardadas no anúncio.',
+  ]
+  if (c.juridico_enviado_em) linhas.push('', `ATENÇÃO: este caso já foi enviado ao jurídico em ${dataBr(c.juridico_enviado_em, false)}.`)
+  if (c.compra || c.extra.compra_pedido) linhas.push('', 'ATENÇÃO: este caso já tem compra de prova registrada.')
+  if (!window.confirm(linhas.join('\n'))) return
+  excluindo.value = c.id
+  try {
+    await api(`/api/denuncia/casos/${c.id}/excluir`, { method: 'POST', body: {} })
+    itens.value = itens.value.filter((x) => x.id !== c.id)
+    const s = new Set(selecionados.value)
+    s.delete(c.id)
+    selecionados.value = s
+    useToasts().push({ kind: 'success', title: `${c.codigo} excluído`, lines: 'A loja volta a ficar sem caso em Anúncios e denúncias.' })
+    await carregar()
+  } catch (e: any) {
+    useToasts().push({ kind: 'error', title: `Não deu para excluir o ${c.codigo}`, lines: e?.data?.detail?.code || e?.message || 'erro' })
+  } finally {
+    excluindo.value = null
+  }
+}
+
 async function carregar() {
   carregando.value = true
   erro.value = null
@@ -155,6 +190,7 @@ async function carregar() {
     const r = await api<Resposta>('/api/denuncia/casos')
     itens.value = r.itens
     porStatus.value = r.por_status
+    falhas.value = r.falhas_caso || []
   } catch (e: any) {
     erro.value = e?.data?.detail?.code || e?.message || 'erro'
   } finally {
@@ -388,6 +424,11 @@ defineExpose({ carregar })
 
     <div v-if="erro" class="rounded-md border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700">{{ erro }}</div>
 
+    <div v-if="falhas.length" class="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900 dark:border-amber-700 dark:bg-amber-900/20 dark:text-amber-200">
+      <div class="font-medium">O robô do Mac mini não conseguiu:</div>
+      <div v-for="f in falhas" :key="f.id" class="text-xs">• {{ f.texto }} — {{ f.resultado || 'sem resposta' }}</div>
+    </div>
+
     <div class="flex items-center justify-between gap-2">
       <div class="text-xs text-muted-foreground">compra e jurídico: clique no campo para escrever — salva ao sair</div>
       <div class="flex items-center gap-2">
@@ -403,14 +444,15 @@ defineExpose({ carregar })
          apertado"): largura fixa por coluna (rola para o lado), Compra e Jurídico centralizados e
          os campos de texto no balão (ObservacaoPopover) — a linha não muda de altura. -->
     <div class="table-card overflow-x-auto">
-      <table class="w-full min-w-[1906px] table-fixed text-xs">
+      <table class="w-full min-w-[1970px] table-fixed text-xs">
         <!-- larguras fixas; só a coluna Caso (o produto) estica quando a tela é maior -->
         <colgroup>
           <col class="w-[40px]">
           <col class="w-[88px]">
           <col>
           <col class="w-[170px]">
-          <col class="w-[156px]">
+          <col class="w-[176px]">
+          <col class="w-[44px]">
           <col class="w-[132px]">
           <col class="w-[140px]">
           <col class="w-[150px]">
@@ -423,7 +465,7 @@ defineExpose({ carregar })
         </colgroup>
         <thead>
           <tr>
-            <th class="!py-1.5 text-[11px] font-semibold" colspan="5">Caso</th>
+            <th class="!py-1.5 text-[11px] font-semibold" colspan="6">Caso</th>
             <th class="!py-1.5 !text-center text-[11px] font-semibold border-l-[3px] border-l-gray-400 dark:border-l-gray-600 !bg-amber-50 dark:!bg-amber-900/20" colspan="4">Compra</th>
             <th class="!py-1.5 !text-center text-[11px] font-semibold border-l-[3px] border-l-gray-400 dark:border-l-gray-600 !bg-emerald-50 dark:!bg-emerald-900/20" colspan="5">Jurídico</th>
           </tr>
@@ -433,6 +475,7 @@ defineExpose({ carregar })
             <th>Caso</th>
             <th>Loja</th>
             <th class="!text-center">Status</th>
+            <th class="!px-0" />
             <th class="!text-center !bg-amber-50 dark:!bg-amber-900/20 border-l-[3px] border-l-gray-400 dark:border-l-gray-600">Data</th>
             <th class="!text-center !bg-amber-50 dark:!bg-amber-900/20">Loja</th>
             <th class="!text-center !bg-amber-50 dark:!bg-amber-900/20">Pedido</th>
@@ -446,24 +489,37 @@ defineExpose({ carregar })
         </thead>
         <tbody>
           <tr v-if="carregando && itens.length === 0">
-            <td colspan="14" class="text-center text-muted-foreground py-6">carregando…</td>
+            <td colspan="15" class="text-center text-muted-foreground py-6">carregando…</td>
           </tr>
           <tr v-else-if="visiveis.length === 0">
-            <td colspan="14" class="text-center text-muted-foreground py-6">nenhum caso</td>
+            <td colspan="15" class="text-center text-muted-foreground py-6">nenhum caso</td>
           </tr>
-          <tr v-for="c in visiveis" :key="c.id" class="cursor-pointer [&>td]:align-middle" :class="selecionados.has(c.id) ? 'bg-primary/5' : ''" @click="abrir(c)">
+          <tr v-for="c in visiveis" :key="c.id" class="cursor-pointer [&>td]:align-middle [&>td]:!py-1.5" :class="selecionados.has(c.id) ? 'bg-primary/5' : ''" @click="abrir(c)">
             <td class="!px-0 text-center" @click.stop><input type="checkbox" class="size-4 align-middle" :checked="selecionados.has(c.id)" @change="marcar(c.id)"></td>
             <td class="tabular-nums whitespace-nowrap">{{ dataBr(c.aberto_em, false) }}</td>
             <td>
               <div class="font-medium text-sm whitespace-nowrap">{{ c.codigo }}</div>
-              <div class="text-[11px] text-muted-foreground truncate" :title="c.titulo_anuncio || ''">{{ c.titulo_anuncio || c.anuncio_id }}</div>
+              <div v-if="c.por_loja && (c.n_anuncios || 0) > 1" class="text-[11px] text-muted-foreground truncate" :title="c.titulo_anuncio || ''">{{ c.n_anuncios }} anúncios da loja</div>
+              <div v-else class="text-[11px] text-muted-foreground truncate" :title="c.titulo_anuncio || ''">{{ c.titulo_anuncio || c.anuncio_id }}</div>
             </td>
             <td>
               <div class="truncate text-sm" :title="c.loja || ''">{{ c.loja || '—' }}</div>
               <div class="text-[11px] text-muted-foreground truncate">{{ c.marketplace || '—' }}<span v-if="c.shop_id" class="font-mono"> · {{ c.shop_id }}</span></div>
             </td>
             <td class="!px-2 text-center">
-              <span class="whitespace-nowrap" :class="pillStatusCaso(c.status)" :title="c.status_mini && c.status_mini !== c.status ? `no sistema do mini: ${c.status_mini}` : ''">{{ c.status || '—' }}</span>
+              <span class="whitespace-nowrap !px-2.5 !text-xs" :class="pillStatusCaso(c.status)" :title="c.status_mini && c.status_mini !== c.status ? `no sistema do mini: ${c.status_mini}` : ''">{{ c.status || '—' }}</span>
+            </td>
+            <td class="!px-0 text-center" @click.stop>
+              <button
+                v-if="podeAnexar"
+                type="button"
+                class="rounded p-1 text-muted-foreground hover:bg-red-50 hover:text-red-600 disabled:opacity-40 dark:hover:bg-red-900/20"
+                :disabled="excluindo === c.id"
+                :title="`excluir o ${c.codigo} (estorna: a loja volta a ficar sem caso)`"
+                @click="excluir(c)"
+              >
+                <Trash2 class="size-4" />
+              </button>
             </td>
             <!-- Compra -->
             <td class="!px-2 bg-amber-50/40 dark:bg-amber-900/10 border-l-[3px] border-l-gray-400 dark:border-l-gray-600" @click.stop>
@@ -638,7 +694,21 @@ defineExpose({ carregar })
             </div>
             <div class="font-mono text-[11px] text-muted-foreground mt-0.5">{{ an.marketplace }} · {{ an.loja }} · {{ an.id }}</div>
           </button>
-          <p v-if="k.resumo" class="text-sm whitespace-pre-wrap">{{ k.resumo }}</p>
+          <div v-if="detalhe?.anuncios_do_caso?.length" class="rounded-lg border">
+            <div class="border-b px-3 py-1.5 text-xs font-medium text-muted-foreground">Anúncios da loja neste caso ({{ detalhe.anuncios_do_caso.length }})</div>
+            <button
+              v-for="x in detalhe.anuncios_do_caso"
+              :key="x.id"
+              type="button"
+              class="flex w-full items-center gap-2 border-b px-3 py-1.5 text-left text-xs last:border-b-0 hover:bg-muted/30"
+              @click="verAnuncio(x.id)"
+            >
+              <span class="truncate flex-1" :title="x.titulo || ''">{{ x.titulo || x.id }}</span>
+              <span class="shrink-0 tabular-nums text-muted-foreground">{{ numero(x.vendas || 0) }} vendas</span>
+              <span class="shrink-0" :class="pillAtivo(x.situacao)">{{ ativoSimNao(x.situacao) }}</span>
+            </button>
+          </div>
+          <p v-if="k.resumo && !detalhe?.anuncios_do_caso?.length" class="text-sm whitespace-pre-wrap">{{ k.resumo }}</p>
           <p v-if="k.ciencia_autoria" class="text-xs text-muted-foreground">Ciência da autoria: {{ k.ciencia_autoria }}</p>
           <p v-if="k.obs" class="text-xs text-muted-foreground whitespace-pre-wrap rounded-md border bg-muted/30 px-3 py-2">{{ k.obs }}</p>
         </section>

@@ -289,8 +289,37 @@ def _resolver(chave, por):
     return True, "problema %s marcado como resolvido no robô" % chave
 
 
+def _sistema(metodo, rota, corpo):
+    """A API do sistema daqui (a mesma do robô: ~/.fiscalizacao.json)."""
+    if ROBO not in sys.path:
+        sys.path.insert(0, ROBO)
+    from fiscalizacao_api import Fiscalizacao  # noqa: E402
+
+    return Fiscalizacao()._req(metodo, rota, corpo, timeout=60)
+
+
+def _criar_caso(dados, por):
+    """Botão "criar" / "enviar para caso" da aba Anúncios e denúncias (01/10): um caso por loja."""
+    corpo = {k: dados.get(k) for k in ("shop_id", "marketplace", "loja", "anuncio_ids")}
+    corpo["por"] = "DaVinci (%s)" % por
+    r = _sistema("POST", "/api/v1/casos/por-loja", corpo)
+    if r.get("ja_existia"):
+        return True, "a loja já tinha o %s — não abri outro" % r.get("caso")
+    return True, "%s aberto (%s, %s anúncio%s)" % (
+        r.get("caso"), dados.get("loja") or dados.get("shop_id"), r.get("anuncios"), "s" if (r.get("anuncios") or 0) > 1 else "")
+
+
+def _excluir_caso(dados, por):
+    """Lixeira da aba Casos (01/10): estorna o caso — nada é apagado no sistema daqui."""
+    r = _sistema("POST", "/api/v1/casos/%d/excluir" % int(dados.get("caso_id")),
+                 {"por": "DaVinci (%s)" % por, "motivo": dados.get("motivo") or ""})
+    if r.get("ja_estava"):
+        return True, "%s já estava excluído" % r.get("caso")
+    return True, "%s excluído (estornado)" % r.get("caso")
+
+
 def comandos():
-    """Botões da aba Robô do DaVinci."""
+    """Botões da aba Robô do DaVinci (e o criar/excluir caso das abas Anúncios e Casos)."""
     env = _env()
     cfg = env.ler_config()
     r = _perguntar(env, cfg, "/api/denuncia/sync/robo/comandos")
@@ -303,6 +332,10 @@ def comandos():
                 ok, res = _passo(dados.get("acao"), por)
             elif c.get("tipo") == "resolver":
                 ok, res = _resolver(dados.get("chave"), por)
+            elif c.get("tipo") == "criar_caso":
+                ok, res = _criar_caso(dados, por)
+            elif c.get("tipo") == "excluir_caso":
+                ok, res = _excluir_caso(dados, por)
             else:
                 ok, res = False, "comando desconhecido: %s" % c.get("tipo")
         except Exception as e:  # noqa: BLE001
@@ -312,6 +345,8 @@ def comandos():
                   corpo={"ok": ok, "resultado": res}, timeout=30)
         if c.get("tipo") == "automatico":
             robo()   # a aba Robô já mostra ligada/desligada, sem esperar o minuto
+        elif c.get("tipo") in ("criar_caso", "excluir_caso") and ok:
+            davinci()   # o caso novo (ou a exclusão) aparece no DaVinci já, sem esperar os 5 min da cópia
 
 
 _anexos = {"falhou": {}}

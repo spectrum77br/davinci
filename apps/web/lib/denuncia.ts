@@ -214,6 +214,8 @@ export type PainelAnuncio = {
   loja_st: PainelStatus
   anatel_st: PainelStatus
   casos: PainelCaso[]
+  // 01/10: "criar" pedido ao mini e o caso ainda não chegou na cópia
+  caso_pendente?: boolean
   nden: number
 }
 export type PainelLoja = {
@@ -232,7 +234,17 @@ export type PainelLoja = {
   na_anatel: Record<string, number>
   processos: string[]
   casos: PainelCaso[]
+  caso_pendente?: boolean
   ultimo_achado: string | null
+}
+// criar/excluir caso que o robô do mini não conseguiu fazer (últimas 24 h)
+export type FalhaCaso = {
+  id: number
+  tipo: string
+  texto: string
+  resultado: string | null
+  pedido_em: string
+  por: string | null
 }
 
 // "9 removidos · 21 recusadas · 36 aguardando" — a ordem e o texto de cada etiqueta

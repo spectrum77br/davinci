@@ -7,10 +7,10 @@
 // Sub-abas: Por loja (padrão, sempre na frente) · Por anúncio · Denúncias enviadas (o
 // histórico). Clicar num anúncio — ou numa denúncia enviada — abre a ficha com tudo junto.
 // Cópia só leitura do sistema do Mac mini; os status vêm de services/denuncia_painel (API).
-import { computed, onMounted, ref } from 'vue'
-import { ChevronDown, ChevronLeft, ChevronRight, ExternalLink } from 'lucide-vue-next'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { ChevronDown, ChevronLeft, ChevronRight, ExternalLink, Loader2 } from 'lucide-vue-next'
 import {
-  type DenunciaEnviada, type PainelAnuncio as Anuncio, type PainelLoja as Loja, ETIQ_ANATEL, ETIQ_LOJA,
+  type DenunciaEnviada, type FalhaCaso, type PainelAnuncio as Anuncio, type PainelLoja as Loja, ETIQ_ANATEL, ETIQ_LOJA,
   ativoSimNao, dataBr, etiquetas, nomeGrupo, numero, pillAtivo, pillGrupo, pillTom,
 } from '~/lib/denuncia'
 
@@ -29,7 +29,7 @@ type Opcoes = {
   na_loja: { chave: string; rotulo: string }[]
   na_anatel: { chave: string; rotulo: string }[]
 }
-type Resposta<T> = { total: number; itens: T[]; numeros: Numeros; opcoes: Opcoes }
+type Resposta<T> = { total: number; itens: T[]; numeros: Numeros; opcoes: Opcoes; falhas_caso?: FalhaCaso[] }
 
 const { api } = useApi()
 const LIMITE = 100
@@ -101,6 +101,7 @@ async function carregar() {
       total.value = r.total
       numeros.value = r.numeros
       opcoes.value = r.opcoes
+      falhas.value = r.falhas_caso || []
       if (lojaAberta.value && !r.itens.some((l) => chaveLoja(l) === lojaAberta.value)) lojaAberta.value = null
     } else {
       qs.set('visao', 'anuncios')
@@ -112,13 +113,91 @@ async function carregar() {
       total.value = r.total
       numeros.value = r.numeros
       opcoes.value = r.opcoes
+      falhas.value = r.falhas_caso || []
     }
   } catch (e: any) {
     erro.value = e?.data?.detail?.code || e?.message || 'erro'
   } finally {
     carregando.value = false
+    vigiarPendentes()
   }
 }
+
+// ── 01/10 (Vinicius): "selecionar e enviar para caso, igual a lista de compra" e um "criar" na
+// coluna Caso — um caso por loja, com todos os anúncios dela. Quem abre é o sistema do Mac mini
+// (alguns segundos): enquanto isso a loja mostra "criando…" e a tela se atualiza sozinha.
+const podeEditar = useCan('denuncia', 'edit')
+const falhas = ref<FalhaCaso[]>([])
+const marcadas = ref<Set<string>>(new Set())
+const criando = ref(false)
+function podeCriar(x: { shop_id: string | null; casos: unknown[]; caso_pendente?: boolean }): boolean {
+  return podeEditar.value && !!x.shop_id && !x.casos.length && !x.caso_pendente
+}
+const marcaveis = computed(() => lojas.value.filter(podeCriar))
+const todasMarcadas = computed(() => marcaveis.value.length > 0 && marcaveis.value.every((l) => marcadas.value.has(chaveLoja(l))))
+function marcar(l: Loja) {
+  const s = new Set(marcadas.value)
+  const k = chaveLoja(l)
+  if (s.has(k)) s.delete(k)
+  else s.add(k)
+  marcadas.value = s
+}
+function marcarTodas() {
+  marcadas.value = todasMarcadas.value ? new Set() : new Set(marcaveis.value.map(chaveLoja))
+}
+async function criarCasos(alvos: { marketplace: string | null; shop_id: string | null; loja: string | null; anuncios?: number }[]) {
+  const validos = alvos.filter((x) => x.shop_id)
+  if (!validos.length || criando.value) return
+  const nomes = validos.map((x) => `• ${x.loja || x.shop_id}${x.anuncios ? ` (${x.anuncios} anúncio${x.anuncios > 1 ? 's' : ''})` : ''}`)
+  const texto = validos.length === 1
+    ? `Criar o caso da loja ${validos[0].loja || validos[0].shop_id}?\nO caso leva todos os anúncios da loja.`
+    : `Criar ${validos.length} casos — um por loja, com todos os anúncios de cada uma?\n\n${nomes.slice(0, 15).join('\n')}${nomes.length > 15 ? `\n… e mais ${nomes.length - 15}` : ''}`
+  if (!window.confirm(texto)) return
+  criando.value = true
+  try {
+    const r = await api<{ criados: { loja: string }[]; pulados: { loja: string; motivo: string }[] }>(
+      '/api/denuncia/casos/criar',
+      { method: 'POST', body: { lojas: validos.map((x) => ({ marketplace: x.marketplace, shop_id: x.shop_id })) } },
+    )
+    const t = useToasts()
+    if (r.criados.length) {
+      t.push({
+        kind: 'success',
+        title: r.criados.length === 1 ? 'Caso pedido ao robô' : `${r.criados.length} casos pedidos ao robô`,
+        lines: ['Aparece em alguns segundos (a tela atualiza sozinha).', ...r.pulados.map((p) => `${p.loja}: ${p.motivo}`)],
+      })
+    } else {
+      t.push({ kind: 'error', title: 'Nenhum caso criado', lines: r.pulados.map((p) => `${p.loja}: ${p.motivo}`) })
+    }
+    marcadas.value = new Set()
+    await carregar()
+  } catch (e: any) {
+    useToasts().push({ kind: 'error', title: 'Não deu para pedir o caso', lines: e?.data?.detail?.code || e?.message || 'erro' })
+  } finally {
+    criando.value = false
+  }
+}
+function criarDoAnuncio(a: Anuncio) {
+  void criarCasos([{ marketplace: a.marketplace, shop_id: a.shop_id, loja: a.loja }])
+}
+// enquanto houver "criando…" na tela, recarrega de 8 em 8 s (até 3 min)
+let vigia: ReturnType<typeof setTimeout> | null = null
+let vigiaDesde = 0
+function vigiarPendentes() {
+  if (vigia) clearTimeout(vigia)
+  vigia = null
+  const pendente = visao.value === 'loja' ? lojas.value.some((l) => l.caso_pendente) : itens.value.some((a) => a.caso_pendente)
+  if (!pendente) {
+    vigiaDesde = 0
+    return
+  }
+  vigiaDesde = vigiaDesde || Date.now()
+  if (Date.now() - vigiaDesde > 180_000) return
+  vigia = setTimeout(() => void carregar(), 8000)
+}
+onBeforeUnmount(() => {
+  if (vigia) clearTimeout(vigia)
+})
 
 async function abrirLoja(l: Loja) {
   const k = chaveLoja(l)
@@ -232,6 +311,10 @@ defineExpose({ carregar })
     <DenunciaEnviadas v-if="visao === 'enviadas'" ref="enviadas" @abrir="abrirEnviada" />
 
     <template v-else>
+      <div v-if="falhas.length" class="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900 dark:border-amber-700 dark:bg-amber-900/20 dark:text-amber-200">
+        <div class="font-medium">O robô do Mac mini não conseguiu:</div>
+        <div v-for="f in falhas" :key="f.id" class="text-xs">• {{ f.texto }} — {{ f.resultado || 'sem resposta' }}</div>
+      </div>
       <div class="flex flex-wrap gap-2 items-center">
         <Input v-model="q" placeholder="anúncio, loja, título, nº Anatel…" class="w-60" @keyup.enter="filtrar" />
         <select v-model="marketplace" class="h-9 rounded-md border bg-background px-2 text-sm" @change="filtrar">
@@ -274,13 +357,28 @@ defineExpose({ carregar })
           <option value="recentes">achados mais recentes</option>
           <option value="loja">por loja</option>
         </select>
+        <div v-if="visao === 'loja' && podeEditar" class="ml-auto flex items-center gap-2">
+          <Button v-if="marcadas.size" size="sm" variant="ghost" class="h-8 text-xs" @click="marcadas = new Set()">limpar</Button>
+          <Button
+            size="sm"
+            variant="outline"
+            class="h-8 text-xs"
+            :disabled="!marcadas.size || criando"
+            title="marque as lojas na tabela — um caso por loja, com todos os anúncios dela"
+            @click="criarCasos(lojas.filter((l) => marcadas.has(chaveLoja(l))))"
+          >
+            <Loader2 v-if="criando" class="mr-1 size-3.5 animate-spin" />
+            enviar para caso{{ marcadas.size ? ` (${marcadas.size})` : '' }}
+          </Button>
+        </div>
       </div>
 
       <!-- ══ Por loja ══ — 01/10 (Vinicius: "tudo desalinhado"): colunas de largura fixa e os
            anúncios da loja aberta como linhas da MESMA tabela (antes era uma tabela dentro da outra) -->
       <div v-if="visao === 'loja'" class="table-card overflow-x-auto">
-        <table class="w-full min-w-[1080px] table-fixed">
+        <table class="w-full min-w-[1120px] table-fixed">
           <colgroup>
+            <col class="w-[40px]">
             <col class="w-[108px]">
             <col>
             <col class="w-[140px]">
@@ -293,6 +391,9 @@ defineExpose({ carregar })
           </colgroup>
           <thead>
             <tr class="[&>th]:whitespace-nowrap">
+              <th class="!px-0 !text-center">
+                <input v-if="podeEditar && marcaveis.length" type="checkbox" class="size-4 align-middle" :checked="todasMarcadas" title="marcar todas as lojas sem caso" @change="marcarTodas">
+              </th>
               <th title="Quando o robô achou o anúncio mais novo desta loja">Último achado</th>
               <th>Loja</th>
               <th>Certificado</th>
@@ -306,13 +407,20 @@ defineExpose({ carregar })
           </thead>
           <tbody>
             <tr v-if="carregando && lojas.length === 0">
-              <td colspan="9" class="text-center text-muted-foreground py-6">carregando…</td>
+              <td colspan="10" class="text-center text-muted-foreground py-6">carregando…</td>
             </tr>
             <tr v-else-if="lojas.length === 0">
-              <td colspan="9" class="text-center text-muted-foreground py-6">nenhuma loja neste filtro</td>
+              <td colspan="10" class="text-center text-muted-foreground py-6">nenhuma loja neste filtro</td>
             </tr>
             <template v-for="l in lojas" :key="chaveLoja(l)">
-              <tr class="cursor-pointer [&>td]:align-middle" :class="lojaAberta === chaveLoja(l) ? 'bg-muted/40' : ''" @click="lojaFicha = l">
+              <tr
+                class="cursor-pointer [&>td]:align-middle"
+                :class="marcadas.has(chaveLoja(l)) ? 'bg-primary/5' : lojaAberta === chaveLoja(l) ? 'bg-muted/40' : ''"
+                @click="lojaFicha = l"
+              >
+                <td class="!px-0 text-center" @click.stop>
+                  <input v-if="podeCriar(l)" type="checkbox" class="size-4 align-middle" :checked="marcadas.has(chaveLoja(l))" title="marcar para enviar para caso" @change="marcar(l)">
+                </td>
                 <td class="text-xs tabular-nums whitespace-nowrap" :title="l.ultimo_achado || ''">
                   <div>{{ dataBr(l.ultimo_achado, false) }}</div>
                   <div class="text-[11px] text-muted-foreground">{{ l.ultimo_achado && l.ultimo_achado.length >= 16 ? l.ultimo_achado.slice(11, 16) : '' }}</div>
@@ -358,19 +466,21 @@ defineExpose({ carregar })
                   <span :class="l.no_ar ? 'pill-warning' : 'pill-success'">{{ l.no_ar ? 'Sim' : 'Não' }}</span>
                   <div class="text-[11px] text-muted-foreground mt-0.5 tabular-nums whitespace-nowrap">{{ numero(l.no_ar) }} de {{ numero(l.anuncios) }}</div>
                 </td>
-                <td>
+                <td @click.stop>
                   <div v-if="l.casos.length" class="flex flex-wrap gap-1">
                     <button v-for="c in l.casos" :key="c.id" type="button" class="pill-info hover:underline" :title="`abrir o ${c.codigo} (${c.status})`" @click.stop="irCaso(c.id)">{{ c.codigo }}</button>
                   </div>
+                  <span v-else-if="l.caso_pendente" class="pill-muted whitespace-nowrap" title="pedido ao robô do Mac mini — aparece em alguns segundos"><Loader2 class="size-3 animate-spin" /> criando…</span>
+                  <Button v-else-if="podeCriar(l)" size="sm" variant="outline" class="h-7 px-2.5 text-xs" :disabled="criando" title="criar o caso desta loja (todos os anúncios dela)" @click="criarCasos([l])">criar</Button>
                   <span v-else class="text-xs text-muted-foreground">—</span>
                 </td>
               </tr>
               <template v-if="lojaAberta === chaveLoja(l)">
                 <tr v-if="carregandoLoja">
-                  <td colspan="9" class="bg-muted/20 text-xs text-muted-foreground">carregando os anúncios da loja…</td>
+                  <td colspan="10" class="bg-muted/20 text-xs text-muted-foreground">carregando os anúncios da loja…</td>
                 </tr>
                 <tr v-else-if="!anunciosDaLoja.length">
-                  <td colspan="9" class="bg-muted/20 text-xs text-muted-foreground">nenhum anúncio desta loja neste filtro</td>
+                  <td colspan="10" class="bg-muted/20 text-xs text-muted-foreground">nenhum anúncio desta loja neste filtro</td>
                 </tr>
                 <tr
                   v-for="a in anunciosDaLoja"
@@ -378,6 +488,7 @@ defineExpose({ carregar })
                   class="cursor-pointer bg-muted/20 [&>td]:align-middle"
                   @click="abrirAnuncio(a.id)"
                 >
+                  <td />
                   <td class="text-xs tabular-nums whitespace-nowrap text-muted-foreground">{{ dataBr(a.visto_primeiro, false) }}</td>
                   <td>
                     <div class="pl-[18px] border-l-2 border-border ml-1.5">
@@ -407,6 +518,7 @@ defineExpose({ carregar })
                     <div v-if="a.casos.length" class="flex flex-wrap gap-1">
                       <button v-for="c in a.casos" :key="c.id" type="button" class="pill-info hover:underline" :title="`abrir o ${c.codigo} (${c.status})`" @click.stop="irCaso(c.id)">{{ c.codigo }}</button>
                     </div>
+                    <span v-else-if="a.caso_pendente || l.caso_pendente" class="text-xs text-muted-foreground">criando…</span>
                     <span v-else class="text-xs text-muted-foreground">—</span>
                   </td>
                 </tr>
@@ -445,10 +557,10 @@ defineExpose({ carregar })
           </thead>
           <tbody>
             <tr v-if="carregando && itens.length === 0">
-              <td colspan="8" class="text-center text-muted-foreground py-6">carregando…</td>
+              <td colspan="9" class="text-center text-muted-foreground py-6">carregando…</td>
             </tr>
             <tr v-else-if="itens.length === 0">
-              <td colspan="8" class="text-center text-muted-foreground py-6">nenhum anúncio neste filtro</td>
+              <td colspan="9" class="text-center text-muted-foreground py-6">nenhum anúncio neste filtro</td>
             </tr>
             <tr v-for="a in itens" :key="a.id" class="cursor-pointer [&>td]:align-middle" @click="abrirAnuncio(a.id)">
               <td class="text-xs tabular-nums whitespace-nowrap">
@@ -480,10 +592,12 @@ defineExpose({ carregar })
                 <div v-if="a.anatel_st.protocolo" class="font-mono text-[11px] text-muted-foreground mt-0.5 truncate">{{ a.anatel_st.protocolo }}</div>
               </td>
               <td><span :class="pillAtivo(a.situacao)">{{ ativoSimNao(a.situacao) }}</span></td>
-              <td>
+              <td @click.stop>
                 <div v-if="a.casos.length" class="flex flex-wrap gap-1">
                   <button v-for="c in a.casos" :key="c.id" type="button" class="pill-info hover:underline" :title="`abrir o ${c.codigo} (${c.status})`" @click.stop="irCaso(c.id)">{{ c.codigo }}</button>
                 </div>
+                <span v-else-if="a.caso_pendente" class="pill-muted whitespace-nowrap" title="pedido ao robô do Mac mini — aparece em alguns segundos"><Loader2 class="size-3 animate-spin" /> criando…</span>
+                <Button v-else-if="podeCriar(a)" size="sm" variant="outline" class="h-7 px-2.5 text-xs" :disabled="criando" :title="`criar o caso da loja ${a.loja || ''} (todos os anúncios dela)`" @click="criarDoAnuncio(a)">criar</Button>
                 <span v-else class="text-xs text-muted-foreground">—</span>
               </td>
             </tr>

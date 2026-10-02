@@ -36,7 +36,7 @@ type Ocorrencia = {
 type Comando = {
   id: number
   tipo: 'automatico' | 'passo' | 'resolver' | string
-  dados: { ligado?: boolean; acao?: string; chave?: string }
+  dados: { ligado?: boolean; acao?: string; chave?: string; loja?: string; shop_id?: string; codigo?: string }
   pedido_por: string | null
   pedido_em: string
   entregue_em: string | null
@@ -183,6 +183,8 @@ function tratar(o: Ocorrencia) {
 function nomeComando(c: Comando): string {
   if (c.tipo === 'automatico') return c.dados.ligado ? 'Ligar a rotina automática' : 'Desligar a rotina automática'
   if (c.tipo === 'resolver') return `Tratado: ${c.dados.chave}`
+  if (c.tipo === 'criar_caso') return `Criar o caso da loja ${c.dados.loja || c.dados.shop_id}`
+  if (c.tipo === 'excluir_caso') return `Excluir o ${c.dados.codigo || 'caso'}`
   const p = painel.value?.passos.find((x) => x.acao === c.dados.acao)
   return p ? `Rodar ${p.ordem} · ${p.nome}` : `Rodar ${c.dados.acao}`
 }
