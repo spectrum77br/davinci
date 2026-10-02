@@ -11,20 +11,19 @@
 // Anúncios + Denúncias viraram uma aba só, "Anúncios e denúncias" (DenunciaPainel). Link
 // antigo ?aba=denuncias cai nela.
 import { computed, ref, watch } from 'vue'
-import { ScanSearch, Briefcase, Scale, RefreshCw, Bot } from 'lucide-vue-next'
+import { ScanSearch, Briefcase, RefreshCw, Bot } from 'lucide-vue-next'
 
 definePageMeta({ middleware: ['permission'], permission: { resource: 'denuncia', action: 'view' } })
 
-type Aba = 'anuncios' | 'casos' | 'juridico' | 'robo'
+type Aba = 'anuncios' | 'casos' | 'robo'
 
 const route = useRoute()
 const router = useRouter()
-const podeJuridico = useCan('chamados', 'view')
 
 const ABAS = computed(() => [
   { key: 'anuncios' as Aba, label: 'Anúncios e denúncias', icon: ScanSearch },
   { key: 'casos' as Aba, label: 'Casos', icon: Briefcase },
-  ...(podeJuridico.value ? [{ key: 'juridico' as Aba, label: 'Jurídico', icon: Scale }] : []),
+  // 01/10 (Vinicius): "a aba Jurídico pode tirar por enquanto — vamos acompanhar pelos casos"
   { key: 'robo' as Aba, label: 'Robô', icon: Bot },
 ])
 
@@ -57,8 +56,8 @@ function recarregar() {
       description="Fiscalização da marca: anúncios que usam a nossa homologação ou a marca Uranyx, as denúncias feitas, os casos e o jurídico."
     >
       <template #actions>
-        <DenunciaCopia v-if="aba !== 'juridico'" ref="copia" />
-        <Button v-if="aba !== 'juridico'" size="sm" variant="outline" @click="recarregar">
+        <DenunciaCopia ref="copia" />
+        <Button size="sm" variant="outline" @click="recarregar">
           <RefreshCw class="size-4 mr-1.5" /> recarregar
         </Button>
       </template>
@@ -80,6 +79,5 @@ function recarregar() {
     <DenunciaPainel v-if="aba === 'anuncios'" ref="atual" />
     <DenunciaCasos v-else-if="aba === 'casos'" ref="atual" :abrir-caso="casoPedido" @aberto="casoPedido = null" />
     <DenunciaRobo v-else-if="aba === 'robo'" ref="atual" />
-    <ChamadosPainel v-else-if="aba === 'juridico'" modo="juridico" />
   </div>
 </template>

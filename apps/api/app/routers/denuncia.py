@@ -55,6 +55,7 @@ from app.models.denuncia import (
     DenunciaAnexo,
     DenunciaAnuncio,
     DenunciaCaso,
+    DenunciaCasoExtra,
     DenunciaCompra,
     DenunciaDenuncia,
     DenunciaLoja,
@@ -1410,52 +1411,75 @@ async def ver_denuncia(
     }
 
 
+# 01/10 (Vinicius: "o caso 2 aparece com jurídico mas não foi enviado"): o status na tela sai do
+# que aconteceu — enviado ao advogado = "Com jurídico"; compra entregue = "Produto recebido"; compra
+# feita = "Aguardando produto"; sem compra = "Aberto". "Ajuizado" e "Encerrado" (marcados à mão no
+# sistema do mini) valem como estão. O status gravado lá vai junto em "status_mini".
+def _status_caso(status: str | None, enviado_em: Any, compra: dict | None) -> str:
+    if status in ("Ajuizado", "Encerrado"):
+        return status
+    if enviado_em:
+        return "Com jurídico"
+    if compra and (compra.get("entregue_em") or str(compra.get("status") or "").lower().startswith("receb")):
+        return "Produto recebido"
+    if compra:
+        return "Aguardando produto"
+    return "Aberto"
+
+
+def _extra_dict(x: DenunciaCasoExtra | None) -> dict:
+    campos = ("compra_loja", "compra_pedido", "compra_previsao", "processo_numero", "processo_link",
+              "mov_data", "mov_texto", "mov_status", "atualizado_por")
+    if x is None:
+        return dict.fromkeys(campos)
+    out = {k: getattr(x, k) for k in campos}
+    for k in ("compra_previsao", "mov_data"):
+        out[k] = out[k].isoformat() if out[k] else None
+    return out
+
+
 @router.get("/casos")
 async def listar_casos(
     session: Annotated[AsyncSession, Depends(get_session)],
     _u: Annotated[User, Depends(_ver)],
 ) -> dict:
     C, A = DenunciaCaso, DenunciaAnuncio
-    ncompras = (
-        select(func.count())
-        .select_from(DenunciaCompra)
-        .where(DenunciaCompra.caso_id == C.id)
-        .correlate(C)
-        .scalar_subquery()
-    )
-    nprovas = (
-        select(func.count())
-        .select_from(DenunciaProva)
-        .where(or_(DenunciaProva.caso_id == C.id, DenunciaProva.anuncio_id == C.anuncio_id))
-        .correlate(C)
-        .scalar_subquery()
-    )
     rows = (
         await session.execute(
-            select(C, A.loja, A.titulo, A.marketplace, ncompras, nprovas, A.dados, A.vendas, A.shop_id)
+            select(C, A.loja, A.titulo, A.marketplace, A.dados, A.vendas, A.shop_id)
             .outerjoin(A, A.id == C.anuncio_id)
             .order_by(C.id.desc())
         )
     ).all()
-    # 01/10 (Vinicius: "selecionar os casos e gerar lista de compra — loja, anúncio, valor, produto"):
-    # a compra mais recente de cada caso (valor pago, pedido) vai junto
-    compra: dict[int, dict] = {}
-    for k in (
-        await session.execute(select(DenunciaCompra).order_by(DenunciaCompra.id))
-    ).scalars():
+    # a compra de prova do caso: ligada pelo caso OU pelo anúncio (as de 29/09 vieram só com o
+    # anúncio — a tabela mostrava "—" para os casos 004–006); vale a mais recente
+    compras_por_caso: dict[int, dict] = {}
+    compras_por_anuncio: dict[str, dict] = {}
+    for k in (await session.execute(select(DenunciaCompra).order_by(DenunciaCompra.id))).scalars():
+        d = {**(k.dados or {}), "status": k.status}
         if k.caso_id is not None:
-            compra[k.caso_id] = k.dados or {}
+            compras_por_caso[k.caso_id] = d
+        if k.anuncio_id:
+            compras_por_anuncio[k.anuncio_id] = d
+    extras = {
+        x.caso_id: x for x in (await session.execute(select(DenunciaCasoExtra))).scalars()
+    }
     itens = []
-    for c, loja, titulo_anuncio, mp, n_compras, n_provas, ad, vendas, shop_id in rows:
+    for c, loja, titulo_anuncio, mp, ad, vendas, shop_id in rows:
         d = c.dados or {}
         ad = ad or {}
-        cp = compra.get(c.id) or {}
+        cp = compras_por_caso.get(c.id) or compras_por_anuncio.get(c.anuncio_id or "")
+        compra = (
+            {k: cp.get(k) for k in ("pedido", "status", "valor_pago", "data", "entregue_em", "comprador")}
+            if cp else None
+        )
         itens.append(
             {
                 "id": c.id,
                 "codigo": c.codigo,
                 "titulo": d.get("titulo"),
-                "status": c.status,
+                "status": _status_caso(c.status, d.get("juridico_enviado_em"), compra),
+                "status_mini": c.status,
                 "anuncio_id": c.anuncio_id,
                 "loja": loja,
                 "titulo_anuncio": titulo_anuncio,
@@ -1463,19 +1487,60 @@ async def listar_casos(
                 "aberto_em": d.get("aberto_em"),
                 "juridico": d.get("juridico"),
                 "juridico_enviado_em": d.get("juridico_enviado_em"),
-                "ncompras": n_compras,
-                "nprovas": n_provas,
                 "url": ad.get("url"),
                 "hom": ad.get("hom"),
                 "vendas": vendas,
                 "shop_id": shop_id,
-                "compra": {k: cp.get(k) for k in ("pedido", "status", "valor_pago", "data")} if cp else None,
+                "compra": compra,
+                "extra": _extra_dict(extras.get(c.id)),
             }
         )
     por_status: dict[str, int] = {}
     for i in itens:
         por_status[i["status"] or "—"] = por_status.get(i["status"] or "—", 0) + 1
     return {"total": len(itens), "itens": itens, "por_status": por_status}
+
+
+_CAMPOS_EXTRA_TEXTO = ("compra_loja", "compra_pedido", "processo_numero", "processo_link",
+                       "mov_texto", "mov_status")
+_CAMPOS_EXTRA_DATA = ("compra_previsao", "mov_data")
+
+
+@router.put("/casos/{caso_id}/extra")
+async def editar_caso_extra(
+    caso_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    u: Annotated[User, Depends(_editar)],
+    corpo: Annotated[dict, Body()],
+) -> dict:
+    """Onde comprou / pedido / previsão de entrega e o processo (nº, link do Jusbrasil, última
+    movimentação). Só os campos enviados mudam; "" apaga."""
+    c = (
+        await session.execute(select(DenunciaCaso).where(DenunciaCaso.id == caso_id))
+    ).scalar_one_or_none()
+    if c is None:
+        raise HTTPException(404, detail={"code": "denuncia_caso_nao_encontrado"})
+    x = await session.get(DenunciaCasoExtra, caso_id)
+    if x is None:
+        x = DenunciaCasoExtra(caso_id=caso_id)
+        session.add(x)
+    for k in _CAMPOS_EXTRA_TEXTO:
+        if k in corpo:
+            v = str(corpo[k] or "").strip()[:2000]
+            setattr(x, k, v or None)
+    for k in _CAMPOS_EXTRA_DATA:
+        if k in corpo:
+            v = str(corpo[k] or "").strip()
+            try:
+                setattr(x, k, datetime.strptime(v[:10], "%Y-%m-%d").date() if v else None)
+            except ValueError:
+                raise HTTPException(422, detail={"code": "denuncia_data_invalida", "campo": k}) from None
+    link = x.processo_link or ""
+    if link and not link.startswith(("https://", "http://")):
+        raise HTTPException(422, detail={"code": "denuncia_link_invalido"})
+    x.atualizado_por = u.name or u.email
+    await session.commit()
+    return {"ok": True, "extra": _extra_dict(x)}
 
 
 @router.get("/casos/{caso_id}")
@@ -1522,6 +1587,11 @@ async def ver_caso(
         "provas": [_prova_resumo(p) for p in provas],
         "denuncias": [d.dados for d in dens],
         "anexos": await _anexos_do_caso(session, caso_id),
+        "extra": _extra_dict(await session.get(DenunciaCasoExtra, caso_id)),
+        "status_tela": _status_caso(
+            c.status, (c.dados or {}).get("juridico_enviado_em"),
+            {**(compras[-1].dados or {}), "status": compras[-1].status} if compras else None,
+        ),
         "tipos_anexo": [{"chave": k, "nome": v[1]} for k, v in TIPOS_ANEXO.items()],
     }
 

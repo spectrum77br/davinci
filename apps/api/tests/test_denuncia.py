@@ -17,6 +17,7 @@ _TABELAS = (
     "denuncia_anuncios", "denuncia_lojas", "denuncia_denuncias", "denuncia_casos",
     "denuncia_compras", "denuncia_provas", "denuncia_verificacoes", "denuncia_remetentes",
     "denuncia_robo_status", "denuncia_robo_comandos", "denuncia_robo_tratadas", "denuncia_anexos",
+    "denuncia_casos_extra",
 )
 
 
@@ -164,7 +165,9 @@ async def test_tela_casos(client, make_user, auth_as):
     auth_as(await make_user(role=UserRole.ADMIN))
     j = (await client.get("/api/denuncia/casos")).json()
     assert j["itens"][0]["codigo"] == "CASO-001"
-    assert j["itens"][0]["ncompras"] == 1 and j["itens"][0]["loja"] == "loja_x"
+    assert j["itens"][0]["compra"]["status"] == "Recebido" and j["itens"][0]["loja"] == "loja_x"
+    # status pelos fatos (01/10): não enviado ao advogado + compra recebida = "Produto recebido"
+    assert j["itens"][0]["status"] == "Produto recebido" and j["itens"][0]["status_mini"] == "Com jurídico"
     # lista de compra (01/10): link do anúncio e a compra do caso vão juntos
     assert j["itens"][0]["url"] == "https://shopee.com.br/p/A1"
     assert j["itens"][0]["compra"]["valor_pago"] == 99.9
@@ -759,3 +762,26 @@ async def test_anexar_prova_no_caso_e_o_mini_entrega(client, make_user, auth_as,
     r = await client.post("/api/denuncia/casos/7/anexos", data={"tipo": "nfe"},
                           files={"arquivo": ("nf.pdf", b"x", "application/pdf")})
     assert r.status_code == 403
+
+
+async def test_caso_extra_compra_e_processo(client, make_user, auth_as):
+    """01/10 (Vinicius): onde comprou, pedido, previsão de entrega; nº do processo, link do
+    Jusbrasil e a última movimentação — preenchidos na ficha do caso."""
+    await _carga(client)
+    auth_as(await make_user(permissions={"denuncia": {"view": True, "edit": True}}))
+    r = await client.put("/api/denuncia/casos/7/extra", json={
+        "compra_loja": "loja_x (Shopee)", "compra_pedido": "2609ABC", "compra_previsao": "2026-10-05",
+        "processo_numero": "1001234-56.2026.8.26.0100",
+        "processo_link": "https://www.jusbrasil.com.br/processos/123",
+        "mov_data": "2026-10-01", "mov_texto": "Distribuído", "mov_status": "Em andamento"})
+    assert r.status_code == 200, r.text
+    e = (await client.get("/api/denuncia/casos")).json()["itens"][0]["extra"]
+    assert e["compra_previsao"] == "2026-10-05" and e["processo_numero"].startswith("1001234")
+    assert (await client.get("/api/denuncia/casos/7")).json()["extra"]["mov_status"] == "Em andamento"
+    # só o que vem muda; "" apaga
+    r = await client.put("/api/denuncia/casos/7/extra", json={"mov_status": ""})
+    assert r.json()["extra"]["mov_status"] is None and r.json()["extra"]["mov_texto"] == "Distribuído"
+    assert (await client.put("/api/denuncia/casos/7/extra", json={"mov_data": "01/10"})).status_code == 422
+    assert (await client.put("/api/denuncia/casos/7/extra",
+                             json={"processo_link": "jusbrasil.com"})).status_code == 422
+    assert (await client.put("/api/denuncia/casos/99/extra", json={})).status_code == 404

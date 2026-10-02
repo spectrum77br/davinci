@@ -19,10 +19,10 @@ passa a mostrar quando alguém quiser.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import BigInteger, Boolean, DateTime, Index, Integer, Text, func
+from sqlalchemy import BigInteger, Boolean, Date, DateTime, Index, Integer, Text, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -204,6 +204,28 @@ class DenunciaAnexo(Base):
     entregue_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     ok: Mapped[bool | None] = mapped_column(Boolean)
     resultado: Mapped[str | None] = mapped_column(Text)
+
+
+class DenunciaCasoExtra(Base):
+    """O que a pessoa acompanha do caso no DaVinci (01/10/2026): onde a compra de prova foi
+    feita, o pedido e a previsão de entrega; o processo (nº, link do Jusbrasil) e a última
+    movimentação. O robô do mini não tem esses dados — não vem na cópia."""
+
+    __tablename__ = "denuncia_casos_extra"
+
+    caso_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
+    compra_loja: Mapped[str | None] = mapped_column(Text)
+    compra_pedido: Mapped[str | None] = mapped_column(Text)
+    compra_previsao: Mapped[date | None] = mapped_column(Date)
+    processo_numero: Mapped[str | None] = mapped_column(Text)
+    processo_link: Mapped[str | None] = mapped_column(Text)
+    mov_data: Mapped[date | None] = mapped_column(Date)
+    mov_texto: Mapped[str | None] = mapped_column(Text)
+    mov_status: Mapped[str | None] = mapped_column(Text)
+    atualizado_por: Mapped[str | None] = mapped_column(Text)
+    atualizado_em: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
 
 
 class DenunciaRoboTratada(Base):

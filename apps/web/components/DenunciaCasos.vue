@@ -22,13 +22,29 @@ type Caso = {
   aberto_em: string | null
   juridico: string | null
   juridico_enviado_em: string | null
-  ncompras: number
-  nprovas: number
+  status_mini: string | null
   url: string | null
   hom: string | null
   vendas: number | null
   shop_id: string | null
-  compra: { pedido: string | null; status: string | null; valor_pago: number | null; data: string | null } | null
+  compra: {
+    pedido: string | null; status: string | null; valor_pago: number | null; data: string | null
+    entregue_em: string | null; comprador: string | null
+  } | null
+  extra: CasoExtra
+}
+// 01/10 (Vinicius): o que a gente acompanha do caso no DaVinci (o robô não tem): onde comprou,
+// pedido e previsão; o processo (nº, link do Jusbrasil) e a última movimentação
+type CasoExtra = {
+  compra_loja: string | null
+  compra_pedido: string | null
+  compra_previsao: string | null
+  processo_numero: string | null
+  processo_link: string | null
+  mov_data: string | null
+  mov_texto: string | null
+  mov_status: string | null
+  atualizado_por: string | null
 }
 type Resposta = { total: number; itens: Caso[]; por_status: Record<string, number> }
 type Anexo = {
@@ -45,6 +61,8 @@ type Anexo = {
   resultado: string | null
 }
 type Detalhe = {
+  extra?: CasoExtra
+  status_tela?: string
   anexos?: Anexo[]
   tipos_anexo?: { chave: string; nome: string }[]
   caso: Record<string, any>
@@ -93,7 +111,9 @@ const lista = computed(() =>
       produto: c.titulo_anuncio || '',
       url: c.url || '',
       valor: c.compra?.valor_pago ?? null,
-      comprado: c.compra ? `${c.compra.status || 'comprado'}${c.compra.pedido ? ` · pedido ${c.compra.pedido}` : ''}` : 'não',
+      comprado: c.compra || c.extra?.compra_pedido
+        ? `${c.compra?.status || 'comprado'}${(c.extra?.compra_pedido || c.compra?.pedido) ? ` · pedido ${c.extra?.compra_pedido || c.compra?.pedido}` : ''}`
+        : 'não',
     })),
 )
 const COLUNAS: [keyof (typeof lista.value)[number], string][] = [
@@ -238,6 +258,43 @@ function situacaoAnexo(x: Anexo): { texto: string; cls: string } {
   return { texto: 'erro', cls: 'pill-danger' }
 }
 
+const VAZIO_EXTRA: CasoExtra = {
+  compra_loja: null, compra_pedido: null, compra_previsao: null, processo_numero: null, processo_link: null,
+  mov_data: null, mov_texto: null, mov_status: null, atualizado_por: null,
+}
+const extraForm = ref<Record<keyof CasoExtra, string>>(Object.fromEntries(Object.keys(VAZIO_EXTRA).map((k) => [k, ''])) as any)
+watch(detalhe, (d) => {
+  const e = d?.extra || VAZIO_EXTRA
+  extraForm.value = Object.fromEntries(Object.keys(VAZIO_EXTRA).map((k) => [k, (e as any)[k] || ''])) as any
+  extraSalvo.value = false
+  extraErro.value = null
+})
+const salvandoExtra = ref(false)
+const extraSalvo = ref(false)
+const extraErro = ref<string | null>(null)
+const ERROS_EXTRA: Record<string, string> = {
+  denuncia_link_invalido: 'O link precisa começar com https://',
+  denuncia_data_invalida: 'Data inválida.',
+}
+async function salvarExtra() {
+  if (!aberto.value) return
+  salvandoExtra.value = true
+  extraErro.value = null
+  try {
+    const { atualizado_por: _x, ...corpo } = extraForm.value
+    const r = await api<{ extra: CasoExtra }>(`/api/denuncia/casos/${aberto.value}/extra`, { method: 'PUT', body: corpo })
+    if (detalhe.value) detalhe.value.extra = r.extra
+    const item = itens.value.find((c) => c.id === aberto.value)
+    if (item) item.extra = r.extra
+    extraSalvo.value = true
+  } catch (e: any) {
+    const code = e?.data?.detail?.code
+    extraErro.value = ERROS_EXTRA[code] || code || e?.message || 'erro'
+  } finally {
+    salvandoExtra.value = false
+  }
+}
+
 const abasCaso = computed(() => [
   { k: 'resumo' as AbaCaso, t: 'Resumo' },
   { k: 'juridico' as AbaCaso, t: faltam.value.length ? `Jurídico (falta ${faltam.value.length})` : 'Jurídico' },
@@ -288,10 +345,11 @@ defineExpose({ carregar })
 
     <div v-if="erro" class="rounded-md border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700">{{ erro }}</div>
 
-    <div class="flex items-center gap-3">
-      <span class="text-sm text-muted-foreground">{{ selecionados.size ? `${selecionados.size} caso${selecionados.size > 1 ? 's' : ''} selecionado${selecionados.size > 1 ? 's' : ''}` : 'marque os casos para montar a lista de compra' }}</span>
-      <Button size="sm" :disabled="!selecionados.size" @click="listaAberta = true">Gerar lista de compra</Button>
-      <Button v-if="selecionados.size" size="sm" variant="ghost" @click="selecionados = new Set()">limpar</Button>
+    <div class="flex items-center justify-end gap-2">
+      <Button v-if="selecionados.size" size="sm" variant="ghost" class="h-8 text-xs" @click="selecionados = new Set()">limpar</Button>
+      <Button size="sm" variant="outline" class="h-8 text-xs" :disabled="!selecionados.size" title="marque os casos na tabela" @click="listaAberta = true">
+        lista de compra{{ selecionados.size ? ` (${selecionados.size})` : '' }}
+      </Button>
     </div>
 
     <div class="table-card overflow-x-auto">
@@ -299,12 +357,12 @@ defineExpose({ carregar })
         <thead>
           <tr>
             <th class="w-10"><input type="checkbox" class="size-4 align-middle" :checked="todosMarcados" title="marcar todos" @change="marcarTodos"></th>
+            <th class="w-24">Aberto em</th>
             <th>Caso</th>
-            <th>Anúncio</th>
+            <th>Loja</th>
             <th class="text-center">Status</th>
-            <th class="text-center">Aberto em</th>
+            <th class="text-center">Compra</th>
             <th class="text-center">Jurídico</th>
-            <th class="text-center">Compras</th>
           </tr>
         </thead>
         <tbody>
@@ -316,22 +374,38 @@ defineExpose({ carregar })
           </tr>
           <tr v-for="c in visiveis" :key="c.id" class="cursor-pointer" :class="selecionados.has(c.id) ? 'bg-primary/5' : ''" @click="abrir(c)">
             <td @click.stop><input type="checkbox" class="size-4 align-middle" :checked="selecionados.has(c.id)" @change="marcar(c.id)"></td>
+            <td class="text-xs tabular-nums whitespace-nowrap">{{ dataBr(c.aberto_em, false) }}</td>
             <td>
               <div class="font-medium text-sm whitespace-nowrap">{{ c.codigo }}</div>
-              <div class="text-[11px] text-muted-foreground max-w-[220px] truncate" :title="c.titulo || ''">{{ c.titulo }}</div>
+              <div class="text-[11px] text-muted-foreground max-w-[260px] truncate" :title="c.titulo_anuncio || ''">{{ c.titulo_anuncio || c.anuncio_id }}</div>
             </td>
-            <td class="text-xs max-w-[280px]">
-              <div class="truncate" :title="c.titulo_anuncio || ''">{{ c.loja || '—' }} — {{ c.titulo_anuncio || c.anuncio_id }}</div>
-              <div class="text-[11px] text-muted-foreground font-mono">{{ c.marketplace }} · {{ c.anuncio_id }}</div>
+            <td class="max-w-[240px]">
+              <div class="truncate text-sm" :title="c.loja || ''">{{ c.loja || '—' }}</div>
+              <div class="text-[11px] text-muted-foreground truncate">{{ c.marketplace || '—' }}<span v-if="c.shop_id" class="font-mono"> · {{ c.shop_id }}</span></div>
             </td>
-            <td class="text-center"><span :class="pillStatusCaso(c.status)">{{ c.status || '—' }}</span></td>
-            <td class="text-center text-xs tabular-nums whitespace-nowrap">{{ dataBr(c.aberto_em, false) }}</td>
+            <td class="text-center">
+              <span :class="pillStatusCaso(c.status)" :title="c.status_mini && c.status_mini !== c.status ? `no sistema do mini: ${c.status_mini}` : ''">{{ c.status || '—' }}</span>
+            </td>
+            <td class="text-center text-xs whitespace-nowrap">
+              <template v-if="c.compra || c.extra.compra_pedido">
+                <div class="font-mono">{{ c.extra.compra_pedido || c.compra?.pedido || '—' }}</div>
+                <div class="text-[11px] text-muted-foreground">
+                  <template v-if="c.compra?.entregue_em">entregue {{ dataBr(c.compra.entregue_em, false) }}</template>
+                  <template v-else-if="c.extra.compra_previsao">previsão {{ dataBr(c.extra.compra_previsao, false) }}</template>
+                  <template v-else>{{ c.compra?.status || 'comprado' }}</template>
+                </div>
+              </template>
+              <span v-else class="text-muted-foreground">—</span>
+            </td>
             <td class="text-center text-xs tabular-nums whitespace-nowrap">
-              <!-- 01/10 (Vinicius): enviado = só a data; sem envio = botão "enviar" (abre o que falta) -->
-              <template v-if="c.juridico_enviado_em">{{ dataBr(c.juridico_enviado_em, false) }}</template>
+              <!-- 01/10 (Vinicius): enviado = só a data (+ o processo); sem envio = botão "enviar" (abre o que falta) -->
+              <template v-if="c.juridico_enviado_em">
+                <div>{{ dataBr(c.juridico_enviado_em, false) }}</div>
+                <div v-if="c.extra.processo_numero" class="font-mono text-[11px] text-muted-foreground">{{ c.extra.processo_numero }}</div>
+                <span v-if="c.extra.mov_status" class="pill-info mt-0.5" :title="c.extra.mov_texto || ''">{{ c.extra.mov_status }}</span>
+              </template>
               <Button v-else size="sm" variant="outline" class="h-7 px-2.5 text-xs" @click.stop="abrir(c, true)">enviar</Button>
             </td>
-            <td class="text-center text-xs tabular-nums">{{ c.ncompras || '—' }}</td>
           </tr>
         </tbody>
       </table>
@@ -374,7 +448,7 @@ defineExpose({ carregar })
         <div class="grid grid-cols-2 sm:grid-cols-4 gap-2">
           <div class="rounded-lg border px-3 py-2 space-y-1 min-w-0">
             <div class="text-[10px] uppercase tracking-wider text-muted-foreground">Status</div>
-            <span :class="pillStatusCaso(k.status)">{{ k.status || '—' }}</span>
+            <span :class="pillStatusCaso(detalhe.status_tela || k.status)">{{ detalhe.status_tela || k.status || '—' }}</span>
           </div>
           <div class="rounded-lg border px-3 py-2 space-y-1 min-w-0">
             <div class="text-[10px] uppercase tracking-wider text-muted-foreground">Compra de prova</div>
@@ -387,8 +461,9 @@ defineExpose({ carregar })
           <div class="rounded-lg border px-3 py-2 space-y-1 min-w-0">
             <div class="text-[10px] uppercase tracking-wider text-muted-foreground">Jurídico</div>
             <template v-if="k.juridico_enviado_em">
-              <span class="pill-success">enviado</span>
-              <div class="text-[11px] text-muted-foreground tabular-nums">{{ dataBr(k.juridico_enviado_em, false) }}</div>
+              <span class="pill-success">enviado {{ dataBr(k.juridico_enviado_em, false) }}</span>
+              <div v-if="detalhe.extra?.processo_numero" class="font-mono text-[11px] text-muted-foreground truncate" :title="detalhe.extra.processo_numero">{{ detalhe.extra.processo_numero }}</div>
+              <div v-else class="text-[11px] text-muted-foreground">sem nº de processo</div>
             </template>
             <template v-else>
               <span :class="faltam.length ? 'pill-warning' : 'pill-success'">{{ faltam.length ? `falta${faltam.length > 1 ? 'm' : ''} ${faltam.length}` : 'pronto' }}</span>
@@ -430,6 +505,37 @@ defineExpose({ carregar })
 
         <!-- Jurídico -->
         <section v-else-if="abaCaso === 'juridico'" class="space-y-3">
+          <!-- 01/10 (Vinicius): "nº do processo, última movimentação, status, link de consulta — vamos logar no Jusbrasil" -->
+          <div class="rounded-lg border px-3 py-2.5 space-y-2">
+            <div class="flex items-center gap-2 text-sm">
+              <span class="font-medium">Processo</span>
+              <span v-if="k.juridico_enviado_em" class="text-xs text-muted-foreground">enviado ao advogado em {{ dataBr(k.juridico_enviado_em, false) }}</span>
+              <span class="flex-1" />
+              <a v-if="extraForm.processo_link" :href="extraForm.processo_link" target="_blank" rel="noopener noreferrer" class="text-xs text-primary hover:underline">consultar no Jusbrasil</a>
+            </div>
+            <div class="grid gap-2 sm:grid-cols-2">
+              <label class="text-[11px] text-muted-foreground space-y-0.5">Nº do processo
+                <Input v-model="extraForm.processo_numero" :disabled="!podeAnexar" placeholder="0000000-00.0000.0.00.0000" class="font-mono" />
+              </label>
+              <label class="text-[11px] text-muted-foreground space-y-0.5">Link de consulta (Jusbrasil)
+                <Input v-model="extraForm.processo_link" :disabled="!podeAnexar" placeholder="https://www.jusbrasil.com.br/…" />
+              </label>
+              <label class="text-[11px] text-muted-foreground space-y-0.5">Última movimentação (data)
+                <Input v-model="extraForm.mov_data" :disabled="!podeAnexar" type="date" />
+              </label>
+              <label class="text-[11px] text-muted-foreground space-y-0.5">Status da última movimentação
+                <Input v-model="extraForm.mov_status" :disabled="!podeAnexar" placeholder="ex.: em andamento, audiência marcada" />
+              </label>
+              <label class="text-[11px] text-muted-foreground space-y-0.5 sm:col-span-2">O que aconteceu
+                <Input v-model="extraForm.mov_texto" :disabled="!podeAnexar" placeholder="ex.: petição inicial distribuída" />
+              </label>
+            </div>
+            <div v-if="podeAnexar" class="flex items-center gap-2">
+              <Button size="sm" :disabled="salvandoExtra" @click="salvarExtra">{{ salvandoExtra ? 'salvando…' : 'salvar' }}</Button>
+              <span v-if="extraSalvo" class="text-xs text-emerald-600">salvo ✓</span>
+              <span v-if="extraErro" class="text-xs text-red-600">{{ extraErro }}</span>
+            </div>
+          </div>
           <div class="rounded-lg border px-3 py-2.5 space-y-2">
             <div class="flex items-center gap-2 text-sm">
               <span class="font-medium">Pronto para enviar ao advogado?</span>
@@ -487,7 +593,27 @@ defineExpose({ carregar })
 
         <!-- Compra de prova -->
         <section v-else-if="abaCaso === 'compra'" class="space-y-2">
-          <div v-if="detalhe.compras.length === 0" class="text-sm text-muted-foreground">Nenhuma compra registrada.</div>
+          <!-- 01/10 (Vinicius): "por onde compramos, qual loja, número do pedido, previsão de entrega" -->
+          <div class="rounded-lg border px-3 py-2.5 space-y-2">
+            <div class="text-sm font-medium">Compra de prova</div>
+            <div class="grid gap-2 sm:grid-cols-3">
+              <label class="text-[11px] text-muted-foreground space-y-0.5">Comprado em (loja)
+                <Input v-model="extraForm.compra_loja" :disabled="!podeAnexar" :placeholder="an?.loja ? `${an.loja} (${an.marketplace})` : 'loja / marketplace'" />
+              </label>
+              <label class="text-[11px] text-muted-foreground space-y-0.5">Nº do pedido
+                <Input v-model="extraForm.compra_pedido" :disabled="!podeAnexar" :placeholder="detalhe.compras.at(-1)?.pedido || ''" class="font-mono" />
+              </label>
+              <label class="text-[11px] text-muted-foreground space-y-0.5">Previsão de entrega
+                <Input v-model="extraForm.compra_previsao" :disabled="!podeAnexar" type="date" />
+              </label>
+            </div>
+            <div v-if="podeAnexar" class="flex items-center gap-2">
+              <Button size="sm" :disabled="salvandoExtra" @click="salvarExtra">{{ salvandoExtra ? 'salvando…' : 'salvar' }}</Button>
+              <span v-if="extraSalvo" class="text-xs text-emerald-600">salvo ✓</span>
+              <span v-if="extraErro" class="text-xs text-red-600">{{ extraErro }}</span>
+            </div>
+          </div>
+          <div v-if="detalhe.compras.length === 0" class="text-sm text-muted-foreground">O robô ainda não registrou a compra deste caso.</div>
           <div v-for="c in detalhe.compras" :key="c.id" class="rounded-lg border px-3 py-2 space-y-2">
             <div class="flex flex-wrap items-center gap-2 text-sm">
               <span class="font-medium">Pedido {{ c.pedido || `#${c.id}` }}</span>

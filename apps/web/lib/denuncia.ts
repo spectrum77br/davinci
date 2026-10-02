@@ -155,12 +155,16 @@ export function prazoVencido(prazo: string | null | undefined, situacao: string 
   return !!prazo && ABERTAS.includes(situacao || '') && prazo.slice(0, 10) < hojeBr()
 }
 
+// 01/10: o status do caso na tela sai dos fatos (API _status_caso): Aberto (sem compra) → Aguardando
+// produto → Produto recebido → Com jurídico (enviado ao advogado) → Ajuizado / Encerrado
 export function pillStatusCaso(s: string | null | undefined): string {
   switch (s) {
     case 'Aberto':
-      return 'pill-info'
+      return 'pill-muted'
     case 'Aguardando produto':
       return 'pill-warning'
+    case 'Produto recebido':
+      return 'pill-info'
     case 'Com jurídico':
       return 'pill-success'
     case 'Ajuizado':
