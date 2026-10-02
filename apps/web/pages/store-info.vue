@@ -120,7 +120,7 @@ const PLATFORMS = [
   { value: 'shein', label: 'Shein' },
   { value: 'site', label: 'Site' },
   { value: 'carrefour', label: 'Carrefour' },
-]
+].sort((a, b) => a.label.localeCompare(b.label, 'pt-BR'))
 
 function platformLabel(p: string) {
   return PLATFORMS.find((x) => x.value === normPlatform(p))?.label ?? p

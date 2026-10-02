@@ -13,6 +13,10 @@ import {
   type StoreStatus,
 } from '~/composables/useMarketplaces'
 
+const marketplaceOptions = [...MARKETPLACES].sort((a, b) =>
+  MARKETPLACE_SHORT[a].localeCompare(MARKETPLACE_SHORT[b], 'pt-BR'),
+)
+
 definePageMeta({ middleware: ['permission'], permission: { resource: 'empresa', action: 'view' } })
 
 type GridStoreCell = {
@@ -1333,7 +1337,7 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
         <Input v-model="filterUf" placeholder="UF" class="w-20" />
         <select v-model="filterMk" class="border rounded px-2 text-sm bg-background">
           <option value="">todos marketplaces</option>
-          <option v-for="mk in MARKETPLACES" :key="mk" :value="mk">{{ MARKETPLACE_SHORT[mk] }}</option>
+          <option v-for="mk in marketplaceOptions" :key="mk" :value="mk">{{ MARKETPLACE_SHORT[mk] }}</option>
         </select>
         <select v-model="filterResponsavel" class="border rounded px-2 text-sm bg-background">
           <option value="">todos responsáveis</option>
