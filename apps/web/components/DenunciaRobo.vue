@@ -338,22 +338,24 @@ function alternarLinha(acao: string) {
       <!-- ══ Passos ══ -->
       <div v-if="aba === 'passos'" class="table-card overflow-x-auto">
         <!-- table-fixed: um erro comprido fica cortado (inteiro ao abrir a linha) e o "Rodar" não sai da tela -->
+        <!-- a sobra de largura fica no Passo (texto inteiro); Resultado tem largura fixa e o
+             "Rodar" fica logo ao lado dele, não lá no canto da tela -->
         <table class="w-full min-w-[980px] table-fixed">
           <colgroup>
             <col class="w-[44px]">
-            <col class="w-[30%]">
-            <col class="w-[78px]">
-            <col class="w-[200px]">
-            <col class="w-[92px]">
             <col>
-            <col class="w-[96px]">
+            <col class="w-[72px]">
+            <col class="w-[150px]">
+            <col class="w-[84px]">
+            <col class="w-[320px]">
+            <col class="w-[92px]">
           </colgroup>
           <thead>
             <tr>
               <th>#</th>
               <th>Passo</th>
               <th>Ligado</th>
-              <th>Horários</th>
+              <th class="text-center">Horários</th>
               <th>Última vez</th>
               <th>Resultado</th>
               <th />
@@ -396,46 +398,46 @@ function alternarLinha(acao: string) {
                   </div>
                 </td>
                 <td class="text-xs" @click.stop>
-                  <div class="flex flex-wrap items-center gap-1">
+                  <div class="flex flex-wrap items-center justify-center gap-1">
                     <span
                       v-for="h in p.agenda.horarios"
                       :key="h"
-                      class="inline-flex items-center gap-0.5 rounded border px-1.5 py-0.5 tabular-nums"
-                      :class="p.agenda.ligado ? 'border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300' : 'text-muted-foreground'"
+                      class="tabular-nums"
+                      :class="p.agenda.ligado ? 'pill-success' : 'pill-muted'"
                     >
                       {{ h }}
                       <button
                         v-if="podeMandar"
                         type="button"
-                        class="rounded hover:text-red-600"
+                        class="-mr-0.5 rounded-full opacity-60 hover:text-red-600 hover:opacity-100"
                         :disabled="mudandoAgenda === p.acao"
                         :title="`tirar ${h}`"
                         @click="tirarHorario(p, h)"
-                      ><X class="size-3" /></button>
+                      ><X class="size-2.5" /></button>
                     </span>
                     <template v-if="podeMandar">
                       <span v-if="adicionando === p.acao" class="inline-flex items-center gap-1">
                         <input
                           v-model="novoHorario[p.acao]"
                           type="time"
-                          class="h-6 w-[84px] rounded border bg-background px-1 text-xs tabular-nums"
+                          class="h-6 w-[76px] rounded-full border bg-background px-2 text-[11px] tabular-nums"
                           @keydown.enter="adicionarHorario(p)"
                           @keydown.esc="adicionando = null"
                         >
-                        <Button size="sm" variant="outline" class="h-6 px-1.5 text-xs" :disabled="!novoHorario[p.acao]" @click="adicionarHorario(p)">ok</Button>
+                        <Button size="sm" variant="outline" class="h-6 rounded-full px-2 text-[11px]" :disabled="!novoHorario[p.acao]" @click="adicionarHorario(p)">ok</Button>
                       </span>
                       <button
                         v-else
                         type="button"
-                        class="inline-flex items-center rounded border border-dashed px-1 py-0.5 text-muted-foreground hover:text-foreground"
+                        class="inline-flex size-5 items-center justify-center rounded-full border border-dashed text-muted-foreground hover:text-foreground"
                         :disabled="mudandoAgenda === p.acao"
                         title="adicionar um horário"
                         @click="adicionando = p.acao"
-                      ><Plus class="size-3" /></button>
+                      ><Plus class="size-2.5" /></button>
                     </template>
                     <span v-if="!p.agenda.horarios.length && !podeMandar" class="text-muted-foreground">—</span>
                   </div>
-                  <div v-if="p.agenda.no_robo === false" class="mt-0.5 inline-flex items-center gap-1 text-[10px] text-amber-700 dark:text-amber-400">
+                  <div v-if="p.agenda.no_robo === false" class="mt-0.5 flex items-center justify-center gap-1 text-[10px] text-amber-700 dark:text-amber-400">
                     <Loader2 class="size-2.5 animate-spin" /> esperando o robô aplicar
                   </div>
                 </td>
