@@ -44,6 +44,18 @@ se nenhum item tem prioridade cadastrada ganha quem tem mais estoque";
 "quando nenhum estoque tem tudo deixa como está" (= a regra de sempre, item a
 item). Ver `_plano_estoque_unico`. Liga/desliga por
 PRIORIDADE_PEDIDO_ESTOQUE_UNICO (ligado por padrão).
+PEDIDO FLEX (projeto Flex, 02/10/2026 — procedimento-flex.md e
+relatorios/Flex_analise_02-10-2026.md, críticas C1 e "problema 2"): o pedido
+que sai pelo Flex (ML Envios Flex / Shopee Entrega Direta, registrado em
+`flex_pedido` pelo shipment check ou marcado `envio_flex` na Logística) sai
+FISICAMENTE de São Bernardo. Por isso a regra dele é OBRIGATÓRIA e vem antes
+de todas: cada item vai para o lote .sp da mesma base (`sku_alvo(..., "sp")`),
+sem olhar o mapa de prioridades, a trava anti-volta nem o pedido num estoque
+só. Se o .sp não cobre (saldo virtual do Bling na hora, mesma régua de
+`_lote_com_saldo`), o robô NÃO leva o pedido para outro lote: grava o
+`flex_pedido.alerta`, a trilha em `flex_log` e um aviso no sino dos admins —
+a decisão (separar em SP, transferir peça, cancelar) é de uma pessoa. Ver
+`_decidir_flex`. Liga/desliga por FLEX_PEDIDO_NO_SP (ligado por padrão).
 Toda troca vira linha no margem_audit (acao='sku',
 origem='prioridade_estoque', mudado_por=None = robô) E linha datada nas
 Observações do pedido no Bling ("dd/mm - SKU trocado pela prioridade de
@@ -57,18 +69,34 @@ contrato do record_margem_audit) — o sweep próprio comita via session_scope.
 from __future__ import annotations
 
 from collections import Counter
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from uuid import UUID
 
 import httpx
 import structlog
-from sqlalchemy import select, text, update
+from sqlalchemy import func, select, text, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.db import session_scope
-from app.models import BlingOrder, MargemAudit, PricingProduct, Product
-from app.services import estoque_familia, nf_emissao_gerar
+from app.models import (
+    AlertSeverity,
+    AlertType,
+    BlingOrder,
+    FlexLog,
+    FlexPedido,
+    Logistica,
+    MargemAudit,
+    PricingProduct,
+    Product,
+    User,
+    UserRole,
+)
+from app.services import estoque_familia, flex_config, flex_envio, nf_emissao_gerar
 from app.services.advisory_lock import SYNC_NAMESPACE
+from app.services.alerts import emit_alert
 from app.services.logistica_bling import build_observacoes_put_body, compose_observacoes
 from app.services.margem_audit import record_margem_audit
 from app.services.marketplaces.bling import BlingCloudflareError
@@ -720,6 +748,291 @@ async def _decidir_pedido(
     return trocas
 
 
+# ---- Pedido Flex: sai SEMPRE do .sp ------------------------------------------
+
+_LOTE_FLEX = "sp"
+_ROTULO_PLATAFORMA = {
+    flex_envio.PLATAFORMA_ML: "Mercado Livre",
+    flex_envio.PLATAFORMA_SHOPEE: "Shopee",
+}
+
+
+@dataclass
+class _PedidoFlex:
+    """O que o robô sabe do pedido Flex: a linha de `flex_pedido` ou, quando ela
+    ainda não existe, o que a Logística marcou."""
+
+    bling_id: int
+    plataforma: str  # 'ml' | 'shopee'
+    integration_id: UUID | None = None
+    numeroloja: str | None = None
+    envio_tipo: str | None = None
+    existe: bool = False  # já tem linha em flex_pedido
+    no_sp: bool = False
+    alerta: str | None = None
+
+
+async def _pedidos_flex(
+    session: AsyncSession, por_pedido: dict[str, list]
+) -> dict[str, _PedidoFlex]:
+    """numero → pedido Flex, entre os pedidos desta rodada.
+
+    Duas fontes, basta uma dizer Flex: `flex_pedido` (o shipment check registra
+    de minuto em minuto, com o envio que já lê) e a Logística com `envio_flex`
+    (o enriquecimento de hora em hora pode ter visto o envio antes)."""
+    bling_de = {numero: int(itens[0].bling_id) for numero, itens in por_pedido.items()}
+    if not bling_de:
+        return {}
+    numero_de = {b: n for n, b in bling_de.items()}
+    out: dict[str, _PedidoFlex] = {}
+    rows = await session.execute(
+        select(
+            FlexPedido.bling_id,
+            FlexPedido.plataforma,
+            FlexPedido.integration_id,
+            FlexPedido.numeroloja,
+            FlexPedido.envio_tipo,
+            FlexPedido.no_sp,
+            FlexPedido.alerta,
+        ).where(FlexPedido.bling_id.in_(list(numero_de)))
+    )
+    for r in rows.all():
+        out[numero_de[int(r.bling_id)]] = _PedidoFlex(
+            bling_id=int(r.bling_id),
+            plataforma=r.plataforma,
+            integration_id=r.integration_id,
+            numeroloja=r.numeroloja,
+            envio_tipo=r.envio_tipo,
+            existe=True,
+            no_sp=bool(r.no_sp),
+            alerta=r.alerta,
+        )
+    faltam = [n for n in bling_de if n not in out]
+    if faltam:
+        rows = await session.execute(
+            select(
+                Logistica.pedido_bling,
+                Logistica.plataforma,
+                Logistica.pedido_marketplace,
+                Logistica.envio_tipo,
+            ).where(Logistica.envio_flex.is_(True), Logistica.pedido_bling.in_(faltam))
+        )
+        for r in rows.all():
+            numero = str(r.pedido_bling)
+            plataforma = flex_envio.plataforma_flex(r.plataforma)
+            if plataforma is None or numero in out or numero not in bling_de:
+                continue
+            out[numero] = _PedidoFlex(
+                bling_id=bling_de[numero],
+                plataforma=plataforma,
+                numeroloja=r.pedido_marketplace,
+                envio_tipo=r.envio_tipo,
+            )
+    return out
+
+
+def _n(valor: float | None) -> str:
+    """Saldo para o texto do aviso: 3 e não 3.0."""
+    if valor is None:
+        return "?"
+    return str(int(valor)) if float(valor).is_integer() else f"{valor:g}"
+
+
+async def _decidir_flex(client, cache: dict, *, qtd_por_codigo: dict[str, int]) -> dict:
+    """Planeja o pedido Flex (sem PUT): TODOS os itens com lote vão para o .sp,
+    ou nenhum vai.
+
+    Devolve {"trocas", "consumo", "faltas"}. Com `faltas` vazia, `trocas` leva
+    o pedido inteiro para o .sp (lista vazia = já está todo lá, com peça). Com
+    `faltas`, nada é trocado e o caller avisa. Tudo ou nada pelo mesmo motivo
+    do pedido num estoque só: pedido partido aparece para duas equipes — e o
+    pedido Flex sem peça em SP é decisão de uma pessoa (D2 da análise), trocar
+    metade só atrapalharia quem vai decidir.
+
+    Cada item:
+      * sem lote no SKU (malas `b…`, eletro `u…`) ou `fake.`: não existe .sp
+        para ele — fica como está e não decide;
+      * lote fora dos de venda (`.us` usado, `.cd`) ou kit com lotes
+        misturados: falta. `sku_alvo` viraria o usado em novo (a017.us →
+        a017.sp) — é o filtro por LOTES_DE_VENDA que a análise pede;
+      * já no .sp: saldo >= 0 (o virtual já desconta a reserva deste pedido);
+        indo para o .sp: saldo >= quantidade, com a peça que dois kits do
+        pedido dividem (o fone a001.sp) conferida pela soma — a régua de
+        `_lote_com_saldo`/`_cobertura`, que é quem calcula.
+    Consulta ao Bling que falha levanta `_ConsultaFalhouError`: o pedido fica
+    para a próxima rodada, como qualquer outro."""
+    itens: list[tuple[str, str, str, int]] = []
+    faltas: list[str] = []
+    for cod, qtd in qtd_por_codigo.items():
+        low = (cod or "").strip().lower()
+        pedacos = [p.strip() for p in low.split("+") if p.strip()]
+        if low.startswith("fake.") or not any(_tag_de(p) for p in pedacos):
+            continue
+        info = analisa_codigo(cod)
+        if info is None:
+            faltas.append(f"{cod}: kit com lotes misturados — trocar à mão")
+            continue
+        base, tag = info
+        if tag not in estoque_familia.LOTES_DE_VENDA:
+            faltas.append(f"{cod}: o lote .{tag} não tem .sp equivalente — trocar à mão")
+            continue
+        itens.append((cod, base, tag, int(qtd)))
+    if faltas or not itens:
+        return {"trocas": [], "consumo": {}, "faltas": faltas}
+
+    plano = await _cobertura(client, cache, itens, _LOTE_FLEX)
+    if plano is not None:
+        trocas: list[dict] = []
+        for t in plano["trocas"]:
+            t = {k: v for k, v in t.items() if k != "estoque_unico"}
+            # Obrigatória: para a trava anti-volta e para o "adia se o PUT
+            # falhar de passagem", vale como a saída de um lote negativo.
+            t["necessaria"] = True
+            t["flex"] = True
+            trocas.append(t)
+        return {"trocas": trocas, "consumo": plano["consumo"], "faltas": []}
+
+    # Não cobre: diz o quê, item a item, para quem vai decidir.
+    demanda: Counter = Counter()
+    for cod, _b, tag, qtd in itens:
+        if tag != _LOTE_FLEX:
+            demanda[sku_alvo(cod, tag, _LOTE_FLEX)] += qtd
+    for cod, _b, tag, _qtd in itens:
+        if tag == _LOTE_FLEX:
+            prod = await _produto_exato(client, cache, cod)
+            saldo = _saldo(prod)
+            if prod is None:
+                faltas.append(f"{cod}: não existe ativo no Bling")
+            elif saldo is None or saldo < 0:
+                faltas.append(f"{cod}: o .sp está com saldo {_n(saldo)} (já contando este pedido)")
+            continue
+        alvo = sku_alvo(cod, tag, _LOTE_FLEX)
+        prod = await _produto_exato(client, cache, alvo)
+        saldo = _saldo(prod)
+        if prod is None:
+            faltas.append(f"{cod}: o {alvo} não existe ativo no Bling")
+        elif saldo is None or saldo < demanda[alvo]:
+            faltas.append(
+                f"{cod}: o {alvo} tem {_n(saldo)} livre e o pedido precisa de {demanda[alvo]}"
+            )
+    if not faltas:
+        faltas.append("a peça que os kits do pedido dividem não cobre todos juntos no .sp")
+    return {"trocas": [], "consumo": {}, "faltas": faltas}
+
+
+async def _flex_gravar_estado(
+    session: AsyncSession, pf: _PedidoFlex, *, no_sp: bool, alerta: str | None
+) -> None:
+    """`flex_pedido.no_sp`/`alerta`, só quando mudou: o sweep passa pelo mesmo
+    pedido a cada rodada. Pedido marcado só pela Logística ganha a linha aqui
+    (o shipment check completa conta/prazo quando ler o envio)."""
+    if pf.existe and pf.no_sp == no_sp and pf.alerta == alerta:
+        return
+    if not pf.existe and not no_sp and alerta is None:
+        return  # nada a registrar
+    stmt = pg_insert(FlexPedido).values(
+        bling_id=pf.bling_id,
+        plataforma=pf.plataforma,
+        integration_id=pf.integration_id,
+        numeroloja=pf.numeroloja,
+        envio_tipo=pf.envio_tipo,
+        no_sp=no_sp,
+        alerta=alerta,
+    )
+    stmt = stmt.on_conflict_do_update(
+        index_elements=[FlexPedido.bling_id],
+        set_={
+            "no_sp": stmt.excluded.no_sp,
+            "alerta": stmt.excluded.alerta,
+            "atualizado_em": func.now(),
+        },
+    )
+    await session.execute(stmt)
+
+
+async def _flex_avisar_pessoas(
+    session: AsyncSession, pf: _PedidoFlex, *, numero: str, faltas: list[str]
+) -> int:
+    """Sino dos admins (o mesmo dos outros robôs; sem Threema e sem Telegram).
+    Um aviso por pedido: o dedupe segura a repetição a cada rodada."""
+    admins = (
+        (await session.execute(select(User.id).where(User.role == UserRole.ADMIN))).scalars().all()
+    )
+    rotulo = _ROTULO_PLATAFORMA.get(pf.plataforma, pf.plataforma)
+    loja = f"{rotulo} {pf.numeroloja}" if pf.numeroloja else rotulo
+    mensagem = (
+        f"O pedido {numero} ({loja}) sai pelo Flex, de São Bernardo, mas o estoque "
+        f"SP não cobre: {'; '.join(faltas)}. O robô NÃO trocou o lote. Decida: "
+        "separar em SP, transferir a peça para o .sp ou cancelar o pedido."
+    )
+    avisados = 0
+    for uid in admins:
+        criado = await emit_alert(
+            session,
+            user_id=uid,
+            type=AlertType.GENERIC,
+            severity=AlertSeverity.ERROR,
+            title=f"Pedido Flex {numero} sem peça no .sp",
+            message=mensagem,
+            payload={
+                "pedido_bling": numero,
+                "bling_id": pf.bling_id,
+                "plataforma": pf.plataforma,
+                "numeroloja": pf.numeroloja,
+                "faltas": faltas,
+            },
+            dedupe_key=f"flex_sem_sp:{pf.bling_id}",
+            notify_telegram=False,
+        )
+        avisados += criado is not None
+    return avisados
+
+
+async def _flex_registrar(
+    session: AsyncSession,
+    pf: _PedidoFlex,
+    *,
+    numero: str,
+    no_sp: bool,
+    alerta: str | None = None,
+    faltas: list[str] | None = None,
+    acao: str | None = None,
+    resultado: str = "ok",
+    sku: str | None = None,
+    erro: str | None = None,
+) -> None:
+    """Estado do pedido Flex + trilha (`flex_log`) + aviso, quando o alerta é
+    NOVO. Num SAVEPOINT: o registro nunca desfaz o que já foi feito no Bling
+    nem o espelho e a auditoria da mesma transação (commit é do caller)."""
+    alerta_novo = alerta is not None and alerta != pf.alerta
+    try:
+        async with session.begin_nested():
+            await _flex_gravar_estado(session, pf, no_sp=no_sp, alerta=alerta)
+            # O aviso repetido a cada rodada não vira linha nova na trilha.
+            if acao and (acao != "pedido_sem_sp" or alerta_novo):
+                session.add(
+                    FlexLog(
+                        integration_id=pf.integration_id,
+                        plataforma=pf.plataforma,
+                        bling_id=pf.bling_id,
+                        sku=sku,
+                        acao=acao,
+                        modo=flex_config.modo(),
+                        resultado=resultado,
+                        erro=erro if erro is not None else alerta,
+                    )
+                )
+            if alerta_novo:
+                await _flex_avisar_pessoas(session, pf, numero=numero, faltas=faltas or [])
+    except Exception as exc:  # noqa: BLE001 — registro é best-effort
+        logger.warning(
+            "prioridade_estoque_flex_registro_falhou", pedido=numero, erro=str(exc)[:200]
+        )
+        return
+    pf.existe = pf.existe or no_sp or alerta is not None
+    pf.no_sp, pf.alerta = no_sp, alerta
+
+
 async def aplicar_prioridade_estoque(
     session: AsyncSession, numeros: list[str] | None = None
 ) -> dict:
@@ -744,8 +1057,9 @@ async def aplicar_prioridade_estoque(
         return summary
     substituir_item = bool(get_settings().prioridade_substitui_item)
     estoque_unico = bool(getattr(get_settings(), "prioridade_pedido_estoque_unico", True))
+    flex_ligado = bool(getattr(get_settings(), "flex_pedido_no_sp", True))
     mapa = await _mapa_prioridades(session)
-    if not mapa and not estoque_unico:
+    if not mapa and not estoque_unico and not flex_ligado:
         return summary  # ninguém preencheu Prioridade — no-op barato
 
     q = select(
@@ -774,6 +1088,15 @@ async def aplicar_prioridade_estoque(
         por_pedido.setdefault(r.numero, []).append(r)
     if not por_pedido:
         return summary
+
+    # Pedido Flex: regra própria, obrigatória (ver `_decidir_flex`). Sem
+    # prioridade cadastrada e sem o pedido num estoque só, só ele tem o que
+    # decidir — os outros nem consultam o Bling.
+    flex = await _pedidos_flex(session, por_pedido) if flex_ligado else {}
+    if not mapa and not estoque_unico:
+        por_pedido = {n: itens for n, itens in por_pedido.items() if n in flex}
+        if not por_pedido:
+            return summary
 
     client = await nf_emissao_gerar._bling_client_opt(session)
     if client is None:
@@ -805,19 +1128,34 @@ async def aplicar_prioridade_estoque(
                 it.item_quantidade or 1
             )
 
+        pf = flex.get(numero)
         descontos = _Descontos()
+        faltas_flex: list[str] = []
         try:
-            trocas = await _decidir_pedido(
-                client,
-                alvo_cache,
-                numero=numero,
-                qtd_por_codigo=qtd_por_codigo,
-                mapa=mapa,
-                estoque_unico=estoque_unico,
-                summary=summary,
-                descontos=descontos,
-                existentes=existentes,
-            )
+            if pf is not None:
+                # Pedido Flex: o mapa, o estoque único e os irmãos não entram.
+                summary["flex_pedidos"] = summary.get("flex_pedidos", 0) + 1
+                plano_flex = await _decidir_flex(
+                    client, alvo_cache, qtd_por_codigo=qtd_por_codigo
+                )
+                faltas_flex = plano_flex["faltas"]
+                trocas = plano_flex["trocas"]
+                for chave, qtd in plano_flex["consumo"].items():
+                    prod = alvo_cache.get(_chave(chave))
+                    if prod and prod.get("stock") is not None:
+                        descontos.descontar(prod, qtd)
+            else:
+                trocas = await _decidir_pedido(
+                    client,
+                    alvo_cache,
+                    numero=numero,
+                    qtd_por_codigo=qtd_por_codigo,
+                    mapa=mapa,
+                    estoque_unico=estoque_unico,
+                    summary=summary,
+                    descontos=descontos,
+                    existentes=existentes,
+                )
         except _ConsultaFalhouError as exc:
             descontos.devolver()
             summary["consulta_falhou"] = summary.get("consulta_falhou", 0) + 1
@@ -825,11 +1163,39 @@ async def aplicar_prioridade_estoque(
             logger.info("prioridade_estoque_pedido_adiado", pedido=numero, sku=str(exc))
             continue
 
+        if pf is not None and (faltas_flex or not trocas):
+            # Nada a trocar no Bling: ou o .sp não cobre (aviso, e o pedido fica
+            # no lote em que está — nunca vai para outro), ou já está todo no
+            # .sp com peça (apaga o aviso de uma rodada anterior, se houver).
+            no_sp = all(flex_envio.item_no_sp(c) for c in qtd_por_codigo)
+            if faltas_flex:
+                summary["flex_sem_sp"] = summary.get("flex_sem_sp", 0) + 1
+                logger.warning("prioridade_estoque_flex_sem_sp", pedido=numero, faltas=faltas_flex)
+                await _flex_registrar(
+                    session,
+                    pf,
+                    numero=numero,
+                    no_sp=no_sp,
+                    alerta=(
+                        "O .sp não cobre este pedido Flex e ele NÃO foi trocado de lote: "
+                        + "; ".join(faltas_flex)
+                    ),
+                    faltas=faltas_flex,
+                    acao="pedido_sem_sp",
+                    resultado="pendente",
+                    sku=", ".join(qtd_por_codigo),
+                )
+            else:
+                await _flex_registrar(session, pf, numero=numero, no_sp=no_sp)
+            continue
+
         # A trava só segura troca OPCIONAL (o lote atual atende): sair de lote
         # negativo nunca espera — senão o check de estoque do enfileirar mandaria
-        # o pedido para Aguardando Cancelamento com peça no irmão.
+        # o pedido para Aguardando Cancelamento com peça no irmão. Pedido Flex
+        # nunca espera: ir para o .sp é obrigação.
         if (
             trocas
+            and pf is None
             and not any(t.get("necessaria") for t in trocas)
             and await _desfaz_troca_recente(session, numero, trocas)
         ):
@@ -872,12 +1238,15 @@ async def aplicar_prioridade_estoque(
             # campo observação". compose_observacoes põe "dd/mm - " na frente
             # e não duplica a mesma linha no mesmo dia.
             nota = "; ".join(f"{t['antigo']} -> {t['alvo']}" for t in aplicadas)
-            unico = next((t["estoque_unico"] for t in aplicadas if t.get("estoque_unico")), None)
-            onde = f" (pedido todo no estoque {unico.upper()})" if unico else ""
-            body["observacoes"] = compose_observacoes(
-                order.get("observacoes"),
-                f"SKU trocado pela prioridade de estoque{onde}: {nota}",
-            )
+            if pf is not None:
+                linha = f"SKU trocado para o estoque SP (pedido Flex): {nota}"
+            else:
+                unico = next(
+                    (t["estoque_unico"] for t in aplicadas if t.get("estoque_unico")), None
+                )
+                onde = f" (pedido todo no estoque {unico.upper()})" if unico else ""
+                linha = f"SKU trocado pela prioridade de estoque{onde}: {nota}"
+            body["observacoes"] = compose_observacoes(order.get("observacoes"), linha)
             await client.update_order(int(bling_id), body)
         except Exception as exc:  # noqa: BLE001 — PUT revalida a venda inteira
             descontos.devolver()
@@ -892,6 +1261,20 @@ async def aplicar_prioridade_estoque(
                 pedido=numero,
                 erro=str(exc),
             )
+            if pf is not None:
+                # A trilha guarda a tentativa: o pedido Flex ainda está fora do
+                # .sp e a próxima rodada tenta de novo.
+                await _flex_registrar(
+                    session,
+                    pf,
+                    numero=numero,
+                    no_sp=pf.no_sp,
+                    alerta=pf.alerta,
+                    acao="pedido_sp",
+                    resultado="erro",
+                    sku="; ".join(f"{t['antigo']} -> {t['alvo']}" for t in trocas),
+                    erro=str(exc)[:500],
+                )
             continue
 
         _esquecer(alvo_cache, [t["antigo"] for t in aplicadas] + [t["alvo"] for t in aplicadas])
@@ -945,6 +1328,26 @@ async def aplicar_prioridade_estoque(
                 pedido=numero,
                 de=t["antigo"],
                 para=t["alvo"],
+                flex=pf is not None,
+            )
+
+        if pf is not None:
+            # O pedido Flex agora reserva no .sp: `no_sp` sai do saldo Flex da
+            # família e o aviso de uma rodada anterior, se houver, apaga. Mesma
+            # régua do shipment check (flex_envio.item_no_sp), que recalcula do
+            # espelho a cada minuto — os dois concordam.
+            novo_de = {t["antigo"]: t["alvo"] for t in aplicadas}
+            finais = [novo_de.get(c, c) for c in qtd_por_codigo]
+            summary["flex_trocados"] = summary.get("flex_trocados", 0) + 1
+            await _flex_registrar(
+                session,
+                pf,
+                numero=numero,
+                no_sp=all(flex_envio.item_no_sp(c) for c in finais),
+                alerta=None,
+                acao="pedido_sp",
+                resultado="ok",
+                sku=nota,
             )
 
     return summary

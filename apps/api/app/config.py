@@ -688,6 +688,15 @@ class Settings(BaseSettings):
     flex_shopee_canais: str = "90022"
     flex_shopee_escrita: bool = False
     flex_intervalo_min: int = 15
+    # Pedido Flex SEMPRE sai do .sp (etapa 2, services/prioridade_estoque): o
+    # robô de prioridade leva cada item do pedido Flex para o lote .sp, acima
+    # do mapa de prioridades, da trava anti-volta e do pedido num estoque só;
+    # sem peça no .sp, não troca e avisa. NÃO depende do `flex_modo`: o modo
+    # manda no Flex dos ANÚNCIOS (escrever na plataforma); o pedido Flex
+    # existe mesmo com o modo desligado (conta com Flex ligado no painel) e
+    # sai fisicamente de São Bernardo. Chave de emergência:
+    # FLEX_PEDIDO_NO_SP=false no .env volta ao robô de antes.
+    flex_pedido_no_sp: bool = True
 
     # Threema IDs (vírgula) avisados quando o sweep move um pedido pra
     # Aguardando Cancelamento por estoque negativo. Vazio = aviso desligado

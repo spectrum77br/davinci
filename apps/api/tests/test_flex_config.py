@@ -20,6 +20,8 @@ def test_padroes_das_decisoes_de_02_10(monkeypatch):
     assert padrao["flex_shopee_canais"] == "90022"
     assert padrao["flex_shopee_escrita"] is False
     assert padrao["flex_intervalo_min"] == 15
+    # Pedido Flex vai para o .sp (etapa 2) — ligado, independe do modo.
+    assert padrao["flex_pedido_no_sp"] is True
     # Com o padrão: não faz nada e não escreve em conta nenhuma.
     monkeypatch.setattr(get_settings(), "flex_modo", padrao["flex_modo"])
     monkeypatch.setattr(get_settings(), "flex_contas", padrao["flex_contas"])

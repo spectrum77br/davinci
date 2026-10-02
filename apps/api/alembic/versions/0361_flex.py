@@ -15,7 +15,9 @@ O que muda (só aditivo):
     `marketplace_shipment_check` com o envio que ele já lê de minuto em minuto.
   • `flex_anuncio_estado`: estado do Flex por anúncio (integration_id,
     external_id) — desejado × observado, aprovação, fila de escrita.
-  • `flex_log`: trilha só de inserção (antes/depois, modo, resultado).
+  • `flex_log`: trilha só de inserção (antes/depois, modo, resultado). Também
+    guarda o pedido Flex levado ao .sp pelo robô de prioridade (`bling_id`,
+    ações `pedido_sp` / `pedido_sem_sp` — etapa 2).
 
 Valores fechados em TEXT com CHECK (nada de enum do Postgres). As três tabelas
 ficam FORA do Histórico (historico/sql.EXCLUIDAS): são da máquina.
@@ -52,7 +54,16 @@ _PLATAFORMAS = ("ml", "shopee")
 _DESEJADO = ("ligado", "desligado", "inelegivel")
 _OBSERVADO = ("ligado", "desligado")
 _MODOS = ("desligado", "observar", "piloto", "ativo")
-_ACOES = ("ligar", "desligar", "pedir_aprovacao", "aprovar", "emergencia", "ler")
+_ACOES = (
+    "ligar",
+    "desligar",
+    "pedir_aprovacao",
+    "aprovar",
+    "emergencia",
+    "ler",
+    "pedido_sp",
+    "pedido_sem_sp",
+)
 _RESULTADOS = ("ok", "erro", "simulado", "pendente", "ignorado")
 
 
@@ -176,6 +187,7 @@ def upgrade() -> None:
         sa.Column("integration_id", pg.UUID(as_uuid=True), nullable=True),
         sa.Column("external_id", sa.Text(), nullable=True),
         sa.Column("plataforma", sa.Text(), nullable=True),
+        sa.Column("bling_id", sa.BigInteger(), nullable=True),
         sa.Column("sku", sa.Text(), nullable=True),
         sa.Column("saldo_sp", sa.Integer(), nullable=True),
         sa.Column("acao", sa.Text(), nullable=False),

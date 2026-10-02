@@ -51,7 +51,18 @@ FLEX_PLATAFORMAS = ("ml", "shopee")
 FLEX_DESEJADO = ("ligado", "desligado", "inelegivel")
 FLEX_OBSERVADO = ("ligado", "desligado")
 FLEX_MODOS = ("desligado", "observar", "piloto", "ativo")
-FLEX_ACOES = ("ligar", "desligar", "pedir_aprovacao", "aprovar", "emergencia", "ler")
+# `pedido_sp` / `pedido_sem_sp`: o robô de prioridade levou o pedido Flex para
+# o .sp / o .sp não cobria e ficou o aviso (etapa 2, services/prioridade_estoque).
+FLEX_ACOES = (
+    "ligar",
+    "desligar",
+    "pedir_aprovacao",
+    "aprovar",
+    "emergencia",
+    "ler",
+    "pedido_sp",
+    "pedido_sem_sp",
+)
 FLEX_RESULTADOS = ("ok", "erro", "simulado", "pendente", "ignorado")
 
 
@@ -90,12 +101,14 @@ class FlexPedido(Base):
     )
     # Todos os itens do pedido já estão no lote .sp (o Bling baixa de São
     # Bernardo). Falso = o pedido ainda reserva em outro lote e tem que ser
-    # descontado do saldo Flex.
+    # descontado do saldo Flex. Escrito pelo shipment check (a partir do
+    # espelho) e pelo robô de prioridade logo depois de trocar para o .sp.
     no_sp: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default=text("false")
     )
-    # Aviso para a operação (ex.: ".sp não cobre o pedido Flex"). Etapas
-    # seguintes.
+    # Aviso para a operação: o .sp não cobre o pedido Flex e o robô de
+    # prioridade NÃO o trocou de lote (services/prioridade_estoque). Volta a
+    # NULL quando o pedido vai para o .sp.
     alerta: Mapped[str | None] = mapped_column(Text, nullable=True)
     atualizado_em: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
@@ -184,6 +197,8 @@ class FlexLog(Base):
     integration_id: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True), nullable=True)
     external_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     plataforma: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Pedido do Bling (as ações `pedido_*`): sem FK, como a conta.
+    bling_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     sku: Mapped[str | None] = mapped_column(Text, nullable=True)
     saldo_sp: Mapped[int | None] = mapped_column(Integer, nullable=True)
     acao: Mapped[str] = mapped_column(Text, nullable=False)
