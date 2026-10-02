@@ -17,7 +17,7 @@ _TABELAS = (
     "denuncia_anuncios", "denuncia_lojas", "denuncia_denuncias", "denuncia_casos",
     "denuncia_compras", "denuncia_provas", "denuncia_verificacoes", "denuncia_remetentes",
     "denuncia_robo_status", "denuncia_robo_comandos", "denuncia_robo_tratadas", "denuncia_anexos",
-    "denuncia_casos_extra",
+    "denuncia_casos_extra", "denuncia_robo_agenda",
 )
 
 
@@ -286,7 +286,7 @@ def _resumo(*tarefas, **itens):
     return {"quando": "2026-10-01T12:30:00-03:00", "itens": base}
 
 
-def test_painel_rodadas_frentes_e_alarme():
+def test_painel_frentes_agenda_e_alarme():
     from datetime import datetime
     from zoneinfo import ZoneInfo
 
@@ -310,19 +310,19 @@ def test_painel_rodadas_frentes_e_alarme():
              "pergunta": "nada", "bloqueia": False},
         ]}},
     )
-    # 06h: só e-mails e conferência (rodam pelo relógio do robô) — não é rodada
     resumo["itens"].append(_tarefa("ciclo_emails", "2026-10-01_06h", "concluida"))
-    p = montar_painel(resumo, agora, agora)
+    # 02/10: agenda por passo (a tabela do DaVinci) — some o horário fixo 06/12/18h
+    agenda = {
+        "checagem": {"ligado": True, "horarios": ["11:45"]},
+        "procura": {"ligado": True, "horarios": ["06:00", "12:00"]},
+        "anatel": {"ligado": True, "horarios": ["12:00"]},
+        "compras": {"ligado": False, "horarios": ["06:00"]},   # desligado: não é alarme
+        "juridico": {"ligado": True, "horarios": ["12:15"]},   # ainda nos 20 min de folga
+    }
+    p = montar_painel(resumo, agora, agora, agenda=agenda)
 
     assert p["conectado"] is True and p["agente"]["versao"] == "20"
-    r6, r12, r18 = p["rodadas"]
-    assert r6["estado"] == "nao_comecou" and r18["estado"] == "futura"
-    assert [x["acao"] for x in r6["passos"]] == ["ciclo_emails"]
-    assert r12["estado"] == "rodando"
-    acoes = [x["acao"] for x in r12["passos"]]
-    assert acoes == ["checagem", "procura", "denuncias"]
-    den = r12["passos"][2]
-    assert den["status"] == "fila" and den["tentativas"] == 2  # vale a retomada mais nova
+    assert "rodadas" not in p
 
     m = next(f for f in p["frentes"] if f["fila"] == "M")
     assert m["fazendo"] == "Procurar anúncios novos" and m["progresso"] == "Shopee pág 3 de 17"
@@ -330,23 +330,29 @@ def test_painel_rodadas_frentes_e_alarme():
 
     # aba Passos (02/10): 0 a 9, com a última vez de hoje; os antigos não têm botão
     passos = {x["acao"]: x for x in p["passos"]}
-    assert [x["ordem"] for x in p["passos"]] == list(range(10))
+    assert [x["ordem"] for x in p["passos"]] == [0, 1, 2, 3, 4, 5, 6, 8, 9]   # 7 saiu (02/10)
     assert p["passos"][0]["acao"] == "checagem" and p["passos"][-1]["acao"] == "ativos_inativos"
     assert [x["acao"] for x in p["passos"][2:5]] == ["procura", "denuncias", "anatel"]
     assert "varredura_mercadolivre" not in passos and "conferencia" not in passos
     assert passos["procura"]["ultima"]["status"] == "rodando"
     assert passos["denuncias"]["ultima"]["vezes"] == 2
     assert passos["compras"]["ultima"] is None
+    assert passos["procura"]["agenda"] == {"ligado": True, "horarios": ["06:00", "12:00"], "no_robo": None}
+    assert passos["denuncias"]["agenda"] == {"ligado": False, "horarios": [], "no_robo": None}
 
     pessoa = [x["titulo"] for x in p["ocorrencias"] if x["tipo"] == "pessoa"]
     assert "SEI esperando a assinatura da titular" in pessoa
     assert "código do sei" in pessoa
-    assert "A rodada das 06h não começou" in pessoa
+    # procura das 06:00 nunca pedida e anatel das 12:00 sem tarefa: alarme; o das 12:00 da
+    # procura rodou, a checagem foi pedida, compras está desligado e o jurídico ainda tem folga
+    nao = sorted(x["titulo"] for x in p["ocorrencias"] if "não começou" in x["titulo"])
+    assert nao == ["2 · Procurar anúncios novos das 06:00 não começou",
+                   "4 · Anatel / SEI das 12:00 não começou"]
     assert [x["titulo"] for x in p["ocorrencias"] if x["tipo"] == "aviso"] == ["ML 429"]
     # "Tratado" tira da lista (só a marcada)
     sei_cod = next(x for x in p["ocorrencias"] if x["titulo"] == "código do sei")
     assert sei_cod["origem"] == "robo" and sei_cod["chave"].startswith("prob:")
-    p2 = montar_painel(resumo, agora, agora, tratadas={sei_cod["chave"]})
+    p2 = montar_painel(resumo, agora, agora, tratadas={sei_cod["chave"]}, agenda=agenda)
     assert "código do sei" not in [x["titulo"] for x in p2["ocorrencias"]]
     assert len(p2["ocorrencias"]) == len(p["ocorrencias"]) - 1
 
@@ -361,9 +367,10 @@ def test_painel_mini_sem_noticia_e_nunca():
     p = montar_painel(_resumo(), agora - timedelta(minutes=12), agora)
     assert p["conectado"] is False
     assert p["ocorrencias"][0]["titulo"] == "O Mac mini não dá notícia há 12 min"
-    p = montar_painel(None, None, agora)
+    p = montar_painel(None, None, agora, agenda={"procura": {"ligado": True, "horarios": ["06:00"]}})
     assert p["ocorrencias"][0]["titulo"] == "O Mac mini nunca mandou o estado do robô"
-    assert [r["estado"] for r in p["rodadas"]] == ["nao_comecou", "futura", "futura"]
+    # sem notícia do mini o alarme é o de cima, não "não começou"
+    assert not any("não começou" in x["titulo"] for x in p["ocorrencias"])
 
 
 async def test_robo_sync_e_tela(client, make_user, auth_as):
@@ -384,7 +391,7 @@ async def test_robo_sync_e_tela(client, make_user, auth_as):
     auth_as(await make_user(permissions={"denuncia": {"view": True}}))
     j = (await client.get("/api/denuncia/robo")).json()
     assert j["conectado"] is True
-    assert len(j["rodadas"]) == 3 and len(j["frentes"]) == 3
+    assert "rodadas" not in j and len(j["frentes"]) == 3
     assert any(x["titulo"] == "Robô parado" for x in j["ocorrencias"])
 
 
@@ -466,16 +473,21 @@ async def test_prova_teto_apaga_a_aberta_ha_mais_tempo(
 
 
 def test_painel_passos_antigos_ganham_nome():
-    """Até 02/10 os passos 2–6 eram por site; rodada que ainda os tem mostra o nome e conta."""
-    from app.services.denuncia_robo import _passos_da_rodada
+    """Até 02/10 os passos 2–6 eram por site (e havia o 7, Relatório): sem botão, mas com nome."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
 
-    j = "2026-10-02_06h"
-    tarefas = [_tarefa("varredura_tiktok", j, "concluida"), _tarefa("conferencia", j, "concluida"),
-               _tarefa("checagem", j, "concluida")]
-    passos = _passos_da_rodada(tarefas, j)
-    assert [(x["acao"], x["nome"], x["ordem"]) for x in passos] == [
-        ("checagem", "Checagem antes da rodada", 0), ("varredura_tiktok", "TikTok (antigo)", 2),
-        ("conferencia", "Conferência e recusadas (antigo)", 3)]
+    from app.services.denuncia_robo import montar_painel
+
+    agora = datetime(2026, 10, 1, 12, 30, tzinfo=ZoneInfo("America/Sao_Paulo"))
+    resumo = _resumo()
+    m = next(i for i in resumo["itens"] if i["chave"] == "fila_M")
+    m["dados"] = {"rodando": {"acao": "varredura_tiktok", "nome": "varredura tiktok"},
+                  "proximos": [{"acao": "relatorio", "nome": "relatorio"}]}
+    p = montar_painel(resumo, agora, agora)
+    f = next(x for x in p["frentes"] if x["fila"] == "M")
+    assert f["fazendo"] == "TikTok (antigo)" and f["proximos"] == ["Relatório (fora da rotina)"]
+    assert "relatorio" not in {x["acao"] for x in p["passos"]}
 
 
 def test_painel_modo_manual_nao_acusa_rodada():
@@ -485,12 +497,19 @@ def test_painel_modo_manual_nao_acusa_rodada():
     from app.services.denuncia_robo import montar_painel
 
     agora = datetime(2026, 10, 1, 19, 0, tzinfo=ZoneInfo("America/Sao_Paulo"))
+    # o mini manda a agenda que o despertador dele está seguindo
     resumo = dict(_resumo(_tarefa("procura", "2026-10-01_12h", "concluida")),
-                  despertador={"ligado": False, "rodadas": [6, 12, 18]})
-    p = montar_painel(resumo, agora, agora)
+                  despertador={"ligado": False, "agenda": {
+                      "procura": {"ligado": True, "horarios": ["06:00"]}}})
+    agenda = {"procura": {"ligado": True, "horarios": ["06:00"]},
+              "anatel": {"ligado": True, "horarios": ["06:00"]}}
+    p = montar_painel(resumo, agora, agora, agenda=agenda)
     assert p["modo"] == "manual"
-    assert [r["estado"] for r in p["rodadas"]] == ["manual", "feita", "manual"]
     assert not any("não começou" in x["titulo"] for x in p["ocorrencias"])
+    passos = {x["acao"]: x for x in p["passos"]}
+    assert passos["procura"]["agenda"]["no_robo"] is True     # o robô já segue
+    assert passos["anatel"]["agenda"]["no_robo"] is False     # ainda não chegou lá
+    assert passos["compras"]["agenda"]["no_robo"] is True     # desligado nos dois
 
 
 
@@ -525,7 +544,41 @@ async def test_robo_botoes_ligar_e_rodar_passo(client, make_user, auth_as):
     j = (await client.get("/api/denuncia/robo")).json()
     assert [c["tipo"] for c in j["comandos"]] == ["passo", "automatico"]
     assert j["comandos"][1]["ok"] is True and j["comandos"][1]["entregue_em"]
-    assert len(j["passos"]) == 10  # 02/10: passos 0 a 9
+    assert len(j["passos"]) == 9  # 02/10: passos 0 a 9, sem o 7
+
+
+async def test_robo_agenda_salva_e_mini_puxa(client, make_user, auth_as):
+    auth_as(await make_user(permissions={"denuncia": {"view": True}}))
+    r = await client.put("/api/denuncia/robo/agenda/procura", json={"ligado": True})
+    assert r.status_code == 403
+
+    auth_as(await make_user(permissions={"denuncia": {"view": True, "edit": True}}))
+    r = await client.put("/api/denuncia/robo/agenda/procura",
+                         json={"ligado": True, "horarios": ["06:00", "05:30", "06:00"]})
+    assert r.status_code == 200, r.text
+    assert r.json() == {"acao": "procura", "ligado": True, "horarios": ["05:30", "06:00"]}
+    # só a chave: os horários ficam
+    r = await client.put("/api/denuncia/robo/agenda/procura", json={"ligado": False})
+    assert r.json()["horarios"] == ["05:30", "06:00"] and r.json()["ligado"] is False
+    r = await client.put("/api/denuncia/robo/agenda/ativos_inativos", json={"ligado": True, "horarios": ["23:00"]})
+    assert r.status_code == 200
+    for corpo, acao in (({"horarios": ["25:00"]}, "procura"), ({"horarios": "06:00"}, "procura"),
+                        ({"ligado": "sim"}, "procura"), ({}, "procura"), ({"ligado": True}, "relatorio")):
+        assert (await client.put(f"/api/denuncia/robo/agenda/{acao}", json=corpo)).status_code == 422
+
+    # o mini puxa a agenda inteira (e recebe o comando "agenda" pra puxar na hora)
+    assert (await client.get("/api/denuncia/sync/robo/agenda")).status_code == 401
+    ag = (await client.get("/api/denuncia/sync/robo/agenda", headers=H)).json()["agenda"]
+    assert ag == {"procura": {"ligado": False, "horarios": ["05:30", "06:00"]},
+                  "ativos_inativos": {"ligado": True, "horarios": ["23:00"]}}
+    cmds = (await client.get("/api/denuncia/sync/robo/comandos", headers=H)).json()["comandos"]
+    assert [(c["tipo"], c["dados"]["acao"], c["dados"]["ligado"]) for c in cmds] == [
+        ("agenda", "procura", True), ("agenda", "procura", False), ("agenda", "ativos_inativos", True)]
+
+    j = (await client.get("/api/denuncia/robo")).json()
+    passos = {x["acao"]: x for x in j["passos"]}
+    assert passos["ativos_inativos"]["agenda"]["ligado"] is True
+    assert passos["procura"]["agenda"]["horarios"] == ["05:30", "06:00"]
 
 
 

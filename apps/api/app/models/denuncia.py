@@ -229,6 +229,21 @@ class DenunciaCasoExtra(Base):
     )
 
 
+class DenunciaRoboAgenda(Base):
+    """Liga/desliga e horários de cada passo do robô (02/10/2026): a agenda que o despertador do
+    agente no mini segue — vai pra lá por comando "agenda" a cada mudança. Uma linha por passo."""
+
+    __tablename__ = "denuncia_robo_agenda"
+
+    acao: Mapped[str] = mapped_column(Text, primary_key=True)
+    ligado: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    horarios: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    atualizado_por: Mapped[str | None] = mapped_column(Text)
+    atualizado_em: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+
 class DenunciaRoboTratada(Base):
     """Ocorrência da aba Robô marcada como tratada (sai da lista)."""
 

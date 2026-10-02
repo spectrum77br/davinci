@@ -6,9 +6,11 @@ resumo com uma lista de `itens` ({chave, estado, detalhe, o_que_fazer,
 dados}) — agente, filas M/S/E, uma `tarefa_*` por gatilho de hoje, contas,
 problemas — e o mini manda pra cá. Aqui vira o que a tela mostra:
 
-- **rodadas** de hoje (06h, 12h, 18h), cada uma com os passos e o estado
-  (feita, rodando, com erro, não começou…). "Não começou" é o alarme do que
-  aconteceu em 30/09 18h e 01/10 06h: ninguém pediu a rodada e ninguém viu;
+- **agenda** (02/10): cada passo tem chave liga/desliga e horários (tabela
+  `denuncia_robo_agenda`, o despertador do mini segue); passo ligado que não
+  começou 20 min depois do horário vira ocorrência — o alarme do que
+  aconteceu em 30/09 18h e 01/10 06h (ninguém pediu e ninguém viu). Até 02/10
+  eram rodadas fixas 06/12/18h com todos os passos juntos;
 - **frentes**: o que cada fila do robô está fazendo agora (navegador do
   perfil 50, Anatel/SEI no Safari, escritório);
 - **passos** (01/10, desenho da Ouvidoria › Robôs): os passos com onde
@@ -24,25 +26,16 @@ Função pura (sem banco) pra ser testada com o resumo de verdade.
 from __future__ import annotations
 
 import hashlib
+import re
 from datetime import datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
 FUSO = ZoneInfo("America/Sao_Paulo")
-RODADAS = (6, 12, 18)
-CHECAGEM_ANTES = timedelta(minutes=15)
-# rodada sem nenhuma tarefa este tempo depois da hora cheia = não começou
+# passo ligado sem tarefa este tempo depois do horário da agenda = não começou
 TOLERANCIA_INICIO = timedelta(minutes=20)
 # o mini manda a cada 60 s; passou disso, ele (ou a janela do sistema) parou
 SEM_NOTICIA = timedelta(minutes=5)
-# passos que só existem quando a rodada foi pedida. E-mails e conferência
-# também rodam pelo relógio do robô (a cada 3 h) — sozinhos não são rodada:
-# em 01/10 06h eles rodaram e nenhuma varredura foi pedida.
-NUCLEO = {
-    "checagem", "procura", "denuncias", "anatel",
-    # passos antigos (até 02/10): ainda contam se alguém pedir
-    "varredura_mercadolivre", "varredura_shopee", "varredura_tiktok", "varredura_amazon",
-}
 
 # passo → (ordem na tela, nome, onde roda, o que faz)
 # 02/10 (Vinicius, agente v27 no mini): os passos 2 a 6 viraram dois — 2 procura nos
@@ -67,7 +60,7 @@ PASSOS: dict[str, tuple[int, str, str, str]] = {
                "— só depois dos passos 2 e 3"),
     "compras": (5, "Compras de prova", "perfil 50", "atualiza os pedidos da conta compradora"),
     "juridico": (6, "Jurídico", "escritório", "monta a pasta do caso pro advogado (não envia)"),
-    "relatorio": (7, "Relatório", "escritório", "denunciados × responderam × resolvidos"),
+    # 02/10 (Vinicius): o 7 (Relatório) saiu da rotina — ninguém lia; o programa fica no mini
     "capa_perguntas": (8, "Perguntas nos anúncios disfarçados", "perfil 50",
                        "pergunta ao vendedor de capa/tablet se vende o aparelho"),
     # 01/10 (Vinicius): o "saiu do ar?" levava 3–4 h e virou o último passo, feito com o
@@ -83,6 +76,7 @@ ANTIGOS: dict[str, tuple[int, str]] = {
     "varredura_tiktok": (2, "TikTok (antigo)"),
     "varredura_amazon": (2, "Amazon (antigo)"),
     "conferencia": (3, "Conferência e recusadas (antigo)"),
+    "relatorio": (7, "Relatório (fora da rotina)"),
 }
 
 
@@ -138,56 +132,37 @@ def _iso(d: datetime | None) -> str | None:
     return d.isoformat(timespec="seconds") if d else None
 
 
-def _passos_da_rodada(tarefas: list[dict], janela: str) -> list[dict]:
-    """Um passo por ação. A mesma ação pedida de novo na janela (retomada à
-    mão, `_r1609`) conta como tentativa — vale a mais nova."""
-    por_acao: dict[str, dict] = {}
+HORARIO = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
+
+
+def normalizar_horarios(valor: Any) -> list[str] | None:
+    """Lista de "HH:MM" sem repetir, em ordem; None se algum não for horário."""
+    if not isinstance(valor, list):
+        return None
+    out = set()
+    for h in valor:
+        if not isinstance(h, str) or not HORARIO.match(h.strip()):
+            return None
+        out.add(h.strip())
+    return sorted(out)
+
+
+def _atendido(tarefas: list[dict], acao: str, desde: datetime, ate: datetime | None) -> bool:
+    """O horário [desde, ate) da agenda foi atendido: o robô pediu ou começou o passo nesse
+    intervalo, ou ele já estava rodando/na fila (o despertador não duplica)."""
     for t in tarefas:
         d = t.get("dados") or {}
-        if d.get("janela") != janela:
+        if str(d.get("acao") or "") != acao:
             continue
-        acao = str(d.get("acao") or "")
-        pedido = str(d.get("pedido_em") or "")
-        ja = por_acao.get(acao)
-        tentativas = (ja["tentativas"] + 1) if ja else 1
-        if ja and pedido < ja["_pedido"]:
-            ja["tentativas"] = tentativas
-            continue
-        ordem, nome = _ordem_nome(acao, d.get("nome"))
-        por_acao[acao] = {
-            "acao": acao,
-            "nome": nome,
-            "ordem": ordem,
-            "status": d.get("status") or "fila",
-            "inicio": d.get("inicio"),
-            "fim": d.get("fim"),
-            "progresso": d.get("progresso") or "",
-            "erro": d.get("erro") or "",
-            "log": (d.get("log") or "")[-3000:] if d.get("status") in ("rodando", "erro") else "",
-            "tentativas": tentativas,
-            "_pedido": pedido,
-        }
-    passos = sorted(por_acao.values(), key=lambda p: (p["ordem"], p["_pedido"]))
-    for p in passos:
-        p.pop("_pedido")
-    return passos
-
-
-def _estado_rodada(passos: list[dict], hora: datetime, agora: datetime, manual: bool) -> str:
-    if any(p["acao"] in NUCLEO for p in passos):
-        st = {p["status"] for p in passos}
-        if "rodando" in st:
-            return "rodando"
-        if "fila" in st:
-            return "na_fila"
-        return "com_erro" if "erro" in st else "feita"
-    if manual:
-        return "manual"   # ninguém pede sozinho: rodada sem passo não é alarme
-    if agora < hora - CHECAGEM_ANTES:
-        return "futura"
-    if agora < hora + TOLERANCIA_INICIO:
-        return "aguardando"
-    return "nao_comecou"
+        pedido, inicio, fim = (_quando(d.get(k)) for k in ("pedido_em", "inicio", "fim"))
+        for q in (pedido, inicio):
+            if q and q >= desde and (ate is None or q < ate):
+                return True
+        comeco = inicio or pedido
+        seguia = d.get("status") in ("rodando", "fila") or (fim and fim >= desde)
+        if comeco and comeco < desde and seguia:
+            return True
+    return False
 
 
 def _ultimas_de_hoje(tarefas: list[dict]) -> dict[str, dict]:
@@ -229,17 +204,22 @@ def _chave_problema(p: dict) -> tuple[str, str | None]:
 
 def montar_painel(
     resumo: dict | None, recebido_em: datetime | None, agora: datetime,
-    tratadas: set[str] | None = None,
+    tratadas: set[str] | None = None, agenda: dict[str, dict] | None = None,
 ) -> dict:
+    """`agenda`: acao → {"ligado", "horarios"} da tabela denuncia_robo_agenda."""
     agora = agora.astimezone(FUSO)
     resumo = resumo or {}
     tratadas = tratadas or set()
+    agenda = agenda or {}
     itens = {i.get("chave"): i for i in resumo.get("itens") or [] if isinstance(i, dict)}
     tarefas = [i for k, i in itens.items() if str(k).startswith("tarefa_")]
     quando = _quando(resumo.get("quando"))
     # 01/10 (Vinicius: "disparamos o passo 1, acompanhamos… depois o passo 2"):
-    # despertador desligado = modo manual; o mini manda o despertador.json junto.
-    manual = (resumo.get("despertador") or {}).get("ligado") is False
+    # despertador desligado = modo manual; o mini manda o despertador.json junto
+    # (02/10: com a agenda que ele está seguindo — None = agente antigo, sem agenda).
+    desp = resumo.get("despertador") or {}
+    manual = desp.get("ligado") is False
+    agenda_no_robo = desp.get("agenda") if isinstance(desp.get("agenda"), dict) else None
     recebido = recebido_em.astimezone(FUSO) if recebido_em else None
     conectado = bool(recebido and agora - recebido <= SEM_NOTICIA)
 
@@ -318,23 +298,45 @@ def montar_painel(
                tipo="pessoa" if p.get("bloqueia") else "aviso", origem="robo",
                robo_chave=robo_chave)
 
+    # 02/10: passo ligado na agenda que não foi pedido 20 min depois do horário (só com a
+    # rotina automática ligada e o mini dando notícia — senão o alarme é outro)
     hoje = agora.date()
-    rodadas = []
-    for h in RODADAS:
-        hora = datetime(hoje.year, hoje.month, hoje.day, h, tzinfo=FUSO)
-        janela = f"{hoje.isoformat()}_{h:02d}h"
-        passos_rodada = _passos_da_rodada(tarefas, janela)
-        estado = _estado_rodada(passos_rodada, hora, agora, manual)
-        if estado == "nao_comecou":
-            ocorre(f"agora:rodada_{janela}", f"A rodada das {h:02d}h não começou",
-                   "Nenhuma varredura foi pedida para esta rodada.",
-                   'Conferir se o "6 - Agente da varredura" está aberto no Mac mini', janela)
-        rodadas.append({"hora": h, "janela": janela, "estado": estado, "passos": passos_rodada})
+    if not manual and conectado:
+        for acao, (ordem, nome, _onde, _faz) in PASSOS.items():
+            a = agenda.get(acao) or {}
+            if not a.get("ligado"):
+                continue
+            horas = sorted(
+                datetime(hoje.year, hoje.month, hoje.day, int(m[1]), int(m[2]), tzinfo=FUSO)
+                for m in (HORARIO.match(str(h)) for h in a.get("horarios") or []) if m
+            )
+            for i, hora in enumerate(horas):
+                h = hora.strftime("%H:%M")
+                ate = horas[i + 1] - timedelta(minutes=5) if i + 1 < len(horas) else None
+                if agora < hora + TOLERANCIA_INICIO:
+                    continue
+                if _atendido(tarefas, acao, hora - timedelta(minutes=5), ate):
+                    continue
+                ocorre(f"agora:agenda_{acao}_{h.replace(':', '')}",
+                       f"{ordem} · {nome} das {h} não começou",
+                       "O despertador do robô não pediu este passo no horário da agenda.",
+                       'Conferir se o "6 - Agente da varredura" está aberto no Mac mini',
+                       _iso(hora))
 
     ultimas = _ultimas_de_hoje(tarefas)
+    def _agenda(acao: str) -> dict:
+        a = agenda.get(acao) or {}
+        ag = {"ligado": bool(a.get("ligado")), "horarios": list(a.get("horarios") or [])}
+        # o robô já está seguindo esta agenda? (None = agente antigo, que não manda a dele)
+        r = (agenda_no_robo or {}).get(acao) or {"ligado": False, "horarios": []}
+        igual = (bool(r.get("ligado")) == ag["ligado"]
+                 and sorted(r.get("horarios") or []) == ag["horarios"])
+        ag["no_robo"] = None if agenda_no_robo is None else igual
+        return ag
+
     passos = [
         {"acao": acao, "ordem": ordem, "nome": nome, "onde": onde, "faz": faz,
-         "ultima": ultimas.get(acao)}
+         "ultima": ultimas.get(acao), "agenda": _agenda(acao)}
         for acao, (ordem, nome, onde, faz) in sorted(PASSOS.items(), key=lambda x: x[1][0])
     ]
 
@@ -368,6 +370,5 @@ def montar_painel(
         "frentes": frentes,
         "passos": passos,
         "ocorrencias": ocorrencias,
-        "rodadas": rodadas,
         "denuncias_hoje": denuncias_hoje,
     }

@@ -8,8 +8,11 @@
 // robô (os cliques e a resposta do Mac mini).
 // O robô do Mac mini manda o estado a cada 60 s; os botões viram comando que
 // a janela do sistema no mini busca a cada 5 s. Regras em services/denuncia_robo.py.
+// 02/10 (Vinicius): cada passo com a chave liga/desliga (a dos Robôs da Ouvidoria)
+// e os seus horários — "6 da manhã roda passo 1, 2 e 3… passo 9 às 23 horas".
+// Some o horário fixo das rodadas (06/12/18h): o despertador do mini segue esta agenda.
 import { computed, onMounted, onUnmounted, ref } from 'vue'
-import { AlertCircle, Bot, ChevronDown, ChevronRight, Flag, Loader2, Play, Power, Check } from 'lucide-vue-next'
+import { AlertCircle, Bot, ChevronDown, ChevronRight, Flag, Loader2, Play, Plus, Power, Check, X } from 'lucide-vue-next'
 import { haQuanto, numero } from '~/lib/denuncia'
 
 type Ultima = {
@@ -21,7 +24,8 @@ type Ultima = {
   log: string
   vezes: number
 }
-type PassoLinha = { acao: string; ordem: number; nome: string; onde: string; faz: string; ultima: Ultima | null }
+type Agenda = { ligado: boolean; horarios: string[]; no_robo: boolean | null }
+type PassoLinha = { acao: string; ordem: number; nome: string; onde: string; faz: string; ultima: Ultima | null; agenda: Agenda }
 type Frente = { fila: string; nome: string; fazendo: string | null; acao: string | null; desde: string | null; progresso: string }
 type Ocorrencia = {
   chave: string
@@ -35,8 +39,8 @@ type Ocorrencia = {
 }
 type Comando = {
   id: number
-  tipo: 'automatico' | 'passo' | 'resolver' | string
-  dados: { ligado?: boolean; acao?: string; chave?: string; loja?: string; shop_id?: string; codigo?: string }
+  tipo: 'automatico' | 'passo' | 'resolver' | 'agenda' | string
+  dados: { ligado?: boolean; acao?: string; chave?: string; loja?: string; shop_id?: string; codigo?: string; horarios?: string[] }
   pedido_por: string | null
   pedido_em: string
   entregue_em: string | null
@@ -149,8 +153,8 @@ const automaticoPendente = computed(() => (painel.value?.comandos || []).some((c
 function alternarAutomatico() {
   const ligar = painel.value?.modo === 'manual'
   const msg = ligar
-    ? 'Ligar a rotina automática? O robô volta a rodar sozinho às 06h, 12h e 18h (checagem 15 min antes) e o ciclo de e-mails a cada 3 h.'
-    : 'Desligar a rotina automática? O robô para de começar rodadas sozinho e só roda o passo que for pedido aqui.'
+    ? 'Ligar a rotina automática? O robô volta a rodar sozinho os passos ligados, nos horários de cada um.'
+    : 'Desligar a rotina automática? O robô para de começar passos sozinho (a agenda fica guardada) e só roda o que for pedido aqui.'
   if (!window.confirm(msg)) return
   void mandar('automatico', '/api/denuncia/robo/automatico', { ligado: ligar })
 }
@@ -173,7 +177,48 @@ function rodar(p: PassoLinha) {
 // começou) só sai quando o problema some.
 function podeTratar(o: Ocorrencia): boolean {
   if (o.origem === 'robo') return true
-  return !['agora:mini', 'agora:agente', 'agora:sei'].includes(o.chave) && !o.chave.startsWith('agora:rodada')
+  return !['agora:mini', 'agora:agente', 'agora:sei'].includes(o.chave) && !o.chave.startsWith('agora:agenda')
+}
+
+// ── agenda (02/10): chave liga/desliga e horários de cada passo ────────────
+const mudandoAgenda = ref<string | null>(null)
+const novoHorario = ref<Record<string, string>>({})
+const adicionando = ref<string | null>(null)
+
+async function salvarAgenda(p: PassoLinha, corpo: { ligado?: boolean; horarios?: string[] }) {
+  mudandoAgenda.value = p.acao
+  try {
+    const r = await api<{ ligado: boolean; horarios: string[] }>(`/api/denuncia/robo/agenda/${p.acao}`, { method: 'PUT', body: corpo })
+    p.agenda = { ...p.agenda, ...r, no_robo: false }   // até o mini confirmar
+    setTimeout(carregar, 7000)
+    setTimeout(carregar, 70000)   // o mini manda o estado a cada minuto
+  } catch (e: any) {
+    const code = e?.data?.detail?.code
+    useToasts().push({ kind: 'error', title: 'Não deu para salvar a agenda', lines: code === 'denuncia_robo_horario_invalido' ? 'horário inválido (use HH:MM)' : code || e?.message || 'erro' })
+  } finally {
+    mudandoAgenda.value = null
+  }
+}
+
+function alternarLigado(p: PassoLinha) {
+  const ligar = !p.agenda.ligado
+  if (!ligar && !window.confirm(`Desligar ${p.ordem} · ${p.nome}?\n\nEle para de rodar sozinho nos horários (os horários ficam guardados). O "Rodar" continua funcionando.`)) return
+  if (ligar && !p.agenda.horarios.length && !window.confirm(`Ligar ${p.ordem} · ${p.nome} sem horário?\n\nSem horário ele não roda sozinho — adicione um horário em seguida.`)) return
+  void salvarAgenda(p, { ligado: ligar })
+}
+
+function adicionarHorario(p: PassoLinha) {
+  const h = (novoHorario.value[p.acao] || '').slice(0, 5)
+  if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(h)) return
+  adicionando.value = null
+  novoHorario.value[p.acao] = ''
+  if (p.agenda.horarios.includes(h)) return
+  void salvarAgenda(p, { horarios: [...p.agenda.horarios, h].sort() })
+}
+
+function tirarHorario(p: PassoLinha, h: string) {
+  if (!window.confirm(`Tirar o horário ${h} de ${p.ordem} · ${p.nome}?`)) return
+  void salvarAgenda(p, { horarios: p.agenda.horarios.filter((x) => x !== h) })
 }
 
 function tratar(o: Ocorrencia) {
@@ -186,6 +231,10 @@ function nomeComando(c: Comando): string {
   if (c.tipo === 'criar_caso') return `Criar o caso da loja ${c.dados.loja || c.dados.shop_id}`
   if (c.tipo === 'excluir_caso') return `Excluir o ${c.dados.codigo || 'caso'}`
   const p = painel.value?.passos.find((x) => x.acao === c.dados.acao)
+  if (c.tipo === 'agenda') {
+    const nome = p ? `${p.ordem} · ${p.nome}` : c.dados.acao
+    return `Agenda: ${nome} — ${c.dados.ligado ? 'ligado' : 'desligado'}${(c.dados.horarios || []).length ? ' às ' + (c.dados.horarios || []).join(', ') : ', sem horário'}`
+  }
   return p ? `Rodar ${p.ordem} · ${p.nome}` : `Rodar ${c.dados.acao}`
 }
 
@@ -232,7 +281,7 @@ function alternarLinha(acao: string) {
             </Button>
           </div>
           <div class="truncate text-[11px] leading-4 text-muted-foreground">
-            {{ painel.modo === 'manual' ? 'só roda o passo pedido' : 'rodadas 06h, 12h e 18h' }}
+            {{ painel.modo === 'manual' ? 'só roda o passo pedido' : 'segue a agenda de cada passo' }}
           </div>
         </div>
         <StatCard
@@ -289,12 +338,13 @@ function alternarLinha(acao: string) {
       <!-- ══ Passos ══ -->
       <div v-if="aba === 'passos'" class="table-card overflow-x-auto">
         <!-- table-fixed: um erro comprido fica cortado (inteiro ao abrir a linha) e o "Rodar" não sai da tela -->
-        <table class="w-full min-w-[860px] table-fixed">
+        <table class="w-full min-w-[980px] table-fixed">
           <colgroup>
             <col class="w-[44px]">
-            <col class="w-[34%]">
-            <col class="w-[150px]">
-            <col class="w-[100px]">
+            <col class="w-[30%]">
+            <col class="w-[78px]">
+            <col class="w-[200px]">
+            <col class="w-[92px]">
             <col>
             <col class="w-[96px]">
           </colgroup>
@@ -302,7 +352,8 @@ function alternarLinha(acao: string) {
             <tr>
               <th>#</th>
               <th>Passo</th>
-              <th>Onde roda</th>
+              <th>Ligado</th>
+              <th>Horários</th>
               <th>Última vez</th>
               <th>Resultado</th>
               <th />
@@ -319,10 +370,75 @@ function alternarLinha(acao: string) {
                   </span>
                 </td>
                 <td>
-                  <div class="text-sm font-medium">{{ p.nome }}</div>
+                  <div class="text-sm font-medium" :class="p.agenda.ligado ? '' : 'text-muted-foreground'">{{ p.nome }}</div>
                   <div class="truncate text-[11px] text-muted-foreground" :title="p.faz">{{ p.faz }}</div>
                 </td>
-                <td class="text-xs text-muted-foreground">{{ p.onde }}</td>
+                <!-- chave liga/desliga: o mesmo desenho dos Robôs da Ouvidoria (verde = ligado) -->
+                <td @click.stop>
+                  <div class="flex flex-col items-start gap-0.5">
+                    <button
+                      type="button"
+                      role="switch"
+                      :aria-checked="p.agenda.ligado"
+                      :aria-label="`${p.agenda.ligado ? 'Desligar' : 'Ligar'} ${p.nome}`"
+                      :disabled="!podeMandar || mudandoAgenda === p.acao"
+                      :title="p.agenda.ligado ? 'Ligado: roda sozinho nos horários' : 'Desligado: só roda pelo Rodar'"
+                      class="relative h-5 w-9 shrink-0 rounded-full transition-colors disabled:cursor-default"
+                      :class="[p.agenda.ligado ? 'bg-emerald-500' : 'bg-gray-300 dark:bg-gray-600', mudandoAgenda === p.acao ? 'animate-pulse' : '', podeMandar ? 'cursor-pointer' : 'opacity-60']"
+                      @click="alternarLigado(p)"
+                    >
+                      <span
+                        class="pointer-events-none absolute top-0.5 left-0 inline-block size-4 rounded-full bg-white shadow transition-transform"
+                        :class="p.agenda.ligado ? 'translate-x-[18px]' : 'translate-x-0.5'"
+                      />
+                    </button>
+                    <span class="text-[11px] text-muted-foreground whitespace-nowrap">{{ p.agenda.ligado ? 'ligado' : 'desligado' }}</span>
+                  </div>
+                </td>
+                <td class="text-xs" @click.stop>
+                  <div class="flex flex-wrap items-center gap-1">
+                    <span
+                      v-for="h in p.agenda.horarios"
+                      :key="h"
+                      class="inline-flex items-center gap-0.5 rounded border px-1.5 py-0.5 tabular-nums"
+                      :class="p.agenda.ligado ? 'border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300' : 'text-muted-foreground'"
+                    >
+                      {{ h }}
+                      <button
+                        v-if="podeMandar"
+                        type="button"
+                        class="rounded hover:text-red-600"
+                        :disabled="mudandoAgenda === p.acao"
+                        :title="`tirar ${h}`"
+                        @click="tirarHorario(p, h)"
+                      ><X class="size-3" /></button>
+                    </span>
+                    <template v-if="podeMandar">
+                      <span v-if="adicionando === p.acao" class="inline-flex items-center gap-1">
+                        <input
+                          v-model="novoHorario[p.acao]"
+                          type="time"
+                          class="h-6 w-[84px] rounded border bg-background px-1 text-xs tabular-nums"
+                          @keydown.enter="adicionarHorario(p)"
+                          @keydown.esc="adicionando = null"
+                        >
+                        <Button size="sm" variant="outline" class="h-6 px-1.5 text-xs" :disabled="!novoHorario[p.acao]" @click="adicionarHorario(p)">ok</Button>
+                      </span>
+                      <button
+                        v-else
+                        type="button"
+                        class="inline-flex items-center rounded border border-dashed px-1 py-0.5 text-muted-foreground hover:text-foreground"
+                        :disabled="mudandoAgenda === p.acao"
+                        title="adicionar um horário"
+                        @click="adicionando = p.acao"
+                      ><Plus class="size-3" /></button>
+                    </template>
+                    <span v-if="!p.agenda.horarios.length && !podeMandar" class="text-muted-foreground">—</span>
+                  </div>
+                  <div v-if="p.agenda.no_robo === false" class="mt-0.5 inline-flex items-center gap-1 text-[10px] text-amber-700 dark:text-amber-400">
+                    <Loader2 class="size-2.5 animate-spin" /> esperando o robô aplicar
+                  </div>
+                </td>
                 <td class="text-xs tabular-nums whitespace-nowrap">
                   <template v-if="p.ultima">{{ quando(p.ultima.fim && p.ultima.status !== 'rodando' ? p.ultima.fim : p.ultima.inicio) || '—' }}</template>
                   <span v-else class="text-muted-foreground">—</span>
@@ -355,9 +471,9 @@ function alternarLinha(acao: string) {
               </tr>
               <tr v-if="aberto === p.acao">
                 <td />
-                <td colspan="5" class="bg-muted/30">
+                <td colspan="6" class="bg-muted/30">
                   <div class="space-y-1 py-1 text-xs">
-                    <div class="text-muted-foreground">{{ p.faz }}</div>
+                    <div class="text-muted-foreground">{{ p.faz }} · roda em: {{ p.onde }}</div>
                     <template v-if="p.ultima">
                       <div v-if="p.ultima.erro" class="whitespace-pre-wrap break-words text-red-700 dark:text-red-400">{{ p.ultima.erro }}</div>
                       <div>

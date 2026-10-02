@@ -148,7 +148,9 @@ def robo():
     try:  # 01/10: despertador desligado = modo manual (a aba Robô não acusa rodada que não começou)
         with open(os.path.join(ROBO, "despertador.json"), encoding="utf-8") as f:
             d = json.load(f)
-        corpo["despertador"] = {"ligado": d.get("ligado", True), "rodadas": d.get("rodadas")}
+        # 02/10: + a agenda que o despertador está seguindo (a aba Robô mostra "esperando o robô aplicar")
+        corpo["despertador"] = {"ligado": d.get("ligado", True), "rodadas": d.get("rodadas"),
+                                "agenda": d.get("agenda")}
     except (OSError, ValueError):
         pass
     req = urllib.request.Request(
@@ -255,6 +257,33 @@ def _automatico(ligado, por):
     return True, "rotina automática %s" % ("ligada" if ligado else "desligada")
 
 
+def agenda(por=None):
+    """02/10 (Vinicius): a agenda dos passos (liga/desliga e horários) mora no DaVinci; a cada minuto
+    (e na hora, pelo comando "agenda") vem pra cá e vai pro despertador.json — o agente relê a cada
+    30 s. Só grava se mudou. Devolve (ok, texto)."""
+    env = _env()
+    cfg = env.ler_config()
+    r = _perguntar(env, cfg, "/api/denuncia/sync/robo/agenda")
+    if r is None or not isinstance(r.get("agenda"), dict):
+        return False, "não consegui ler a agenda do DaVinci"
+    nova = {a: {"ligado": bool(v.get("ligado")), "horarios": sorted(v.get("horarios") or [])}
+            for a, v in r["agenda"].items() if isinstance(v, dict)}
+    p = os.path.join(ROBO, "despertador.json")
+    with open(p, encoding="utf-8") as f:
+        d = json.load(f)
+    ligados = ", ".join("%s %s" % (a, "/".join(v["horarios"]) or "sem horário")
+                        for a, v in sorted(nova.items()) if v["ligado"]) or "nenhum passo ligado"
+    if d.get("agenda") == nova:
+        return True, "agenda já estava aplicada (%s)" % ligados
+    d["agenda"] = nova
+    d["_agenda"] = ("02/10/2026: agenda dos passos vinda do DaVinci (aba Robô) — o despertador segue isto "
+                    "em vez das rodadas fixas; mudar lá, não aqui. Atualizada em %s%s."
+                    % (time.strftime("%d/%m %H:%M"), " por %s" % por if por else ""))
+    _gravar(p, json.dumps(d, ensure_ascii=False, indent=1) + "\n")
+    log("agenda do DaVinci aplicada no despertador: %s" % ligados)
+    return True, "agenda aplicada (%s)" % ligados
+
+
 def _passo(acao, por):
     """O mesmo gatilho que o pedir_tarefa.py <acao> --retomar grava."""
     if acao not in ORDEM_PASSO:
@@ -332,6 +361,8 @@ def comandos():
                 ok, res = _automatico(bool(dados.get("ligado")), por)
             elif c.get("tipo") == "passo":
                 ok, res = _passo(dados.get("acao"), por)
+            elif c.get("tipo") == "agenda":
+                ok, res = agenda(por)
             elif c.get("tipo") == "resolver":
                 ok, res = _resolver(dados.get("chave"), por)
             elif c.get("tipo") == "criar_caso":
@@ -345,8 +376,8 @@ def comandos():
         log("comando %s do DaVinci (%s, %s): %s" % (c.get("id"), por, dados, res))
         env.pedir(cfg, "POST", "/api/denuncia/sync/robo/comandos/%d" % c["id"],
                   corpo={"ok": ok, "resultado": res}, timeout=30)
-        if c.get("tipo") == "automatico":
-            robo()   # a aba Robô já mostra ligada/desligada, sem esperar o minuto
+        if c.get("tipo") in ("automatico", "agenda"):
+            robo()   # a aba Robô já mostra ligada/desligada (e a agenda aplicada), sem esperar o minuto
         elif c.get("tipo") in ("criar_caso", "excluir_caso") and ok:
             davinci()   # o caso novo (ou a exclusão) aparece no DaVinci já, sem esperar os 5 min da cópia
 
@@ -450,6 +481,7 @@ def main():
     a_cada(60, "robo", robo)
     a_cada(5, "provas", provas_pedidas)
     a_cada(5, "comandos", comandos)
+    a_cada(60, "agenda", agenda)
     a_cada(30, "anexos", anexos)
     threading.Thread(target=status_mac, name="status_mac", daemon=True).start()
 

@@ -62,6 +62,7 @@ from app.models.denuncia import (
     DenunciaLoja,
     DenunciaProva,
     DenunciaRemetente,
+    DenunciaRoboAgenda,
     DenunciaRoboComando,
     DenunciaRoboStatus,
     DenunciaRoboTratada,
@@ -69,7 +70,7 @@ from app.models.denuncia import (
 )
 from app.models.user import User
 from app.services import denuncia_painel as painel
-from app.services.denuncia_robo import PASSOS, montar_painel
+from app.services.denuncia_robo import PASSOS, montar_painel, normalizar_horarios
 
 logger = structlog.get_logger()
 
@@ -300,6 +301,24 @@ async def sync_robo_comandos(
     return {"comandos": [
         {"id": c.id, "tipo": c.tipo, "dados": c.dados, "pedido_por": c.pedido_por} for c in rows
     ]}
+
+
+async def _agenda(session: AsyncSession) -> dict[str, dict]:
+    """A agenda dos passos (tabela denuncia_robo_agenda): acao → {ligado, horarios}.
+    Só os passos atuais."""
+    rows = (await session.execute(select(DenunciaRoboAgenda))).scalars().all()
+    return {r.acao: {"ligado": bool(r.ligado), "horarios": list(r.horarios or [])}
+            for r in rows if r.acao in PASSOS}
+
+
+@sync_router.get("/robo/agenda")
+async def sync_robo_agenda(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _r: Annotated[DenunciaRemetente, Depends(_remetente)],
+) -> dict:
+    """02/10: o mini puxa a agenda a cada minuto e grava no despertador.json do agente (o comando
+    "agenda" só adianta o puxão). Passo fora da tabela = desligado."""
+    return {"agenda": await _agenda(session)}
 
 
 @sync_router.post("/robo/comandos/{comando_id}")
@@ -657,7 +676,7 @@ async def robo(
         ).scalars().all()
     )
     painel = montar_painel(st.dados if st else None, st.recebido_em if st else None,
-                           datetime.now(UTC), tratadas=tratadas)
+                           datetime.now(UTC), tratadas=tratadas, agenda=await _agenda(session))
     comandos = (
         await session.execute(
             select(DenunciaRoboComando).order_by(DenunciaRoboComando.id.desc()).limit(30)
@@ -736,6 +755,41 @@ async def robo_passo(
     if acao not in PASSOS:
         raise HTTPException(422, detail={"code": "denuncia_robo_passo_invalido", "acao": acao})
     return await _comando(session, u, "passo", {"acao": acao})
+
+
+@router.put("/robo/agenda/{acao}")
+async def robo_agenda(
+    acao: str,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    u: Annotated[User, Depends(_editar)],
+    corpo: Annotated[dict, Body()],
+) -> dict:
+    """02/10 (Vinicius): liga/desliga um passo e/ou troca os horários dele. O despertador do mini
+    passa a seguir na hora (comando "agenda"; e o mini relê a agenda a cada minuto)."""
+    if acao not in PASSOS:
+        raise HTTPException(422, detail={"code": "denuncia_robo_passo_invalido", "acao": acao})
+    if "ligado" in corpo and not isinstance(corpo["ligado"], bool):
+        raise HTTPException(422, detail={"code": "denuncia_robo_ligado_invalido"})
+    horarios = None
+    if "horarios" in corpo:
+        horarios = normalizar_horarios(corpo["horarios"])
+        if horarios is None:
+            raise HTTPException(422, detail={"code": "denuncia_robo_horario_invalido"})
+    if "ligado" not in corpo and horarios is None:
+        raise HTTPException(422, detail={"code": "denuncia_robo_agenda_vazia"})
+    row = await session.get(DenunciaRoboAgenda, acao)
+    if row is None:
+        row = DenunciaRoboAgenda(acao=acao, ligado=False, horarios=[])
+        session.add(row)
+    if "ligado" in corpo:
+        row.ligado = corpo["ligado"]
+    if horarios is not None:
+        row.horarios = horarios
+    row.atualizado_por = u.name or u.email
+    await session.flush()
+    dados = {"acao": acao, "ligado": row.ligado, "horarios": list(row.horarios or [])}
+    await _comando(session, u, "agenda", dados)   # commita a linha junto
+    return dados
 
 
 _ORDEM_ANUNCIOS = {
