@@ -52,10 +52,10 @@ PASSOS: dict[str, tuple[int, str, str, str]] = {
     # 01/10 (Vinicius): nas lojas o robô denuncia só o "Nosso", pela conta da MAKISA
     # (config.json → denunciar_nas_lojas no mini); o "Diversos" só é salvo. 02/10: até 40
     # prints por rodada — 1º recusadas do Nosso, 2º os da Anatel, 3º o resto.
-    "denuncias": (3, "Denúncias", "perfil 50 + celular",
+    "denuncias": (3, "Denúncias Lojas", "perfil 50 + celular",
                   "prints (até 40, Nosso primeiro) → resultados da Shopee → recusadas de novo "
                   "→ novas (ML, Shopee e TikTok; só o Nosso; Amazon ainda não)"),
-    "anatel": (4, "Anatel / SEI", "Safari",
+    "anatel": (4, "Denúncias Anatel", "Safari (SEI)",
                "lê o andamento das antigas e peticiona as novas no SEI "
                "— só depois dos passos 2 e 3"),
     "compras": (5, "Compras de prova", "perfil 50", "atualiza os pedidos da conta compradora"),

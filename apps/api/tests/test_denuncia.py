@@ -326,7 +326,7 @@ def test_painel_frentes_agenda_e_alarme():
 
     m = next(f for f in p["frentes"] if f["fila"] == "M")
     assert m["fazendo"] == "Procurar anúncios novos" and m["progresso"] == "Shopee pág 3 de 17"
-    assert m["proximos"] == ["Denúncias"]
+    assert m["proximos"] == ["Denúncias Lojas"]
 
     # aba Passos (02/10): 0 a 9, com a última vez de hoje; os antigos não têm botão
     passos = {x["acao"]: x for x in p["passos"]}
@@ -347,7 +347,7 @@ def test_painel_frentes_agenda_e_alarme():
     # procura rodou, a checagem foi pedida, compras está desligado e o jurídico ainda tem folga
     nao = sorted(x["titulo"] for x in p["ocorrencias"] if "não começou" in x["titulo"])
     assert nao == ["2 · Procurar anúncios novos das 06:00 não começou",
-                   "4 · Anatel / SEI das 12:00 não começou"]
+                   "4 · Denúncias Anatel das 12:00 não começou"]
     assert [x["titulo"] for x in p["ocorrencias"] if x["tipo"] == "aviso"] == ["ML 429"]
     # "Tratado" tira da lista (só a marcada)
     sei_cod = next(x for x in p["ocorrencias"] if x["titulo"] == "código do sei")
