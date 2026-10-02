@@ -1629,8 +1629,15 @@ async def listar_casos(
     extras = {
         x.caso_id: x for x in (await session.execute(select(DenunciaCasoExtra))).scalars()
     }
+    # 02/10 (Vinicius: "ver se tá com certificado nosso ou diversos igual tem na aba anúncios"):
+    # o grupo de cada anúncio do caso — no caso por loja, quantos de cada
+    ids_casos = {i for r in rows for i in _anuncios_do_caso(r[0])}
+    grupo_de = dict(
+        (await session.execute(select(A.id, A.grupo).where(A.id.in_(ids_casos)))).all()
+    ) if ids_casos else {}
     itens = []
     for c, loja, titulo_anuncio, mp, ad, vendas, shop_id in rows:
+        grupos = [grupo_de.get(i) for i in _anuncios_do_caso(c)]
         d = c.dados or {}
         ad = ad or {}
         cp = compras_por_caso.get(c.id) or compras_por_anuncio.get(c.anuncio_id or "")
@@ -1661,6 +1668,9 @@ async def listar_casos(
                 "shop_id": shop_id or _loja_do_caso(c)[1],
                 "n_anuncios": len(_anuncios_do_caso(c)),
                 "por_loja": bool(_loja_do_caso(c)[1]),
+                "grupo": ad.get("grupo"),
+                "nosso": grupos.count("GRUPO 1"),
+                "diversos": grupos.count("GRUPO 2"),
                 "compra": compra,
                 "extra": _extra_dict(extras.get(c.id)),
             }

@@ -6,8 +6,8 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { ExternalLink, Trash2 } from 'lucide-vue-next'
 import {
-  type FalhaCaso, type Prova, ativoSimNao, dataBr, dinheiro, numero, pillAtivo, pillResultado, pillSituacaoDenuncia,
-  pillStatusCaso, pillStatusCompra,
+  type FalhaCaso, type Prova, ativoSimNao, dataBr, dinheiro, nomeGrupo, numero, pillAtivo, pillGrupo, pillResultado,
+  pillSituacaoDenuncia, pillStatusCaso, pillStatusCompra,
 } from '~/lib/denuncia'
 
 
@@ -34,6 +34,11 @@ type Caso = {
   // 01/10: caso por loja (todos os anúncios dela)
   n_anuncios?: number
   por_loja?: boolean
+  // 02/10: certificado do anúncio principal (GRUPO 1 = Nosso, GRUPO 2 = Diversos) e, no caso por
+  // loja, quantos anúncios de cada
+  grupo?: string | null
+  nosso?: number
+  diversos?: number
   compra: {
     pedido: string | null; status: string | null; valor_pago: number | null; data: string | null
     entregue_em: string | null; comprador: string | null
@@ -450,13 +455,14 @@ defineExpose({ carregar })
          apertado"): largura fixa por coluna (rola para o lado), Compra e Jurídico centralizados e
          os campos de texto no balão (ObservacaoPopover) — a linha não muda de altura. -->
     <div class="table-card overflow-x-auto">
-      <table class="w-full min-w-[1970px] table-fixed text-xs">
+      <table class="w-full min-w-[2070px] table-fixed text-xs">
         <!-- larguras fixas; só a coluna Caso (o produto) estica quando a tela é maior -->
         <colgroup>
           <col class="w-[40px]">
           <col class="w-[88px]">
           <col>
           <col class="w-[170px]">
+          <col class="w-[100px]">
           <col class="w-[176px]">
           <col class="w-[44px]">
           <col class="w-[132px]">
@@ -471,7 +477,7 @@ defineExpose({ carregar })
         </colgroup>
         <thead>
           <tr>
-            <th class="!py-1.5 text-[11px] font-semibold" colspan="6">Caso</th>
+            <th class="!py-1.5 text-[11px] font-semibold" colspan="7">Caso</th>
             <th class="!py-1.5 !text-center text-[11px] font-semibold border-l-[3px] border-l-gray-400 dark:border-l-gray-600 !bg-amber-50 dark:!bg-amber-900/20" colspan="4">Compra</th>
             <th class="!py-1.5 !text-center text-[11px] font-semibold border-l-[3px] border-l-gray-400 dark:border-l-gray-600 !bg-emerald-50 dark:!bg-emerald-900/20" colspan="5">Jurídico</th>
           </tr>
@@ -480,6 +486,7 @@ defineExpose({ carregar })
             <th>Aberto em</th>
             <th>Caso</th>
             <th>Loja</th>
+            <th class="!text-center" title="Nosso = o anúncio usa a nossa homologação; Diversos = nº de outra empresa, sem nº ou nº inválido">Certificado</th>
             <th class="!text-center">Status</th>
             <th class="!px-0" />
             <th class="!text-center !bg-amber-50 dark:!bg-amber-900/20 border-l-[3px] border-l-gray-400 dark:border-l-gray-600">Data</th>
@@ -495,10 +502,10 @@ defineExpose({ carregar })
         </thead>
         <tbody>
           <tr v-if="carregando && itens.length === 0">
-            <td colspan="15" class="text-center text-muted-foreground py-6">carregando…</td>
+            <td colspan="16" class="text-center text-muted-foreground py-6">carregando…</td>
           </tr>
           <tr v-else-if="visiveis.length === 0">
-            <td colspan="15" class="text-center text-muted-foreground py-6">nenhum caso</td>
+            <td colspan="16" class="text-center text-muted-foreground py-6">nenhum caso</td>
           </tr>
           <tr v-for="c in visiveis" :key="c.id" class="cursor-pointer [&>td]:align-middle [&>td]:!py-1.5" :class="selecionados.has(c.id) ? 'bg-primary/5' : ''" @click="abrir(c)">
             <td class="!px-0 text-center" @click.stop><input type="checkbox" class="size-4 align-middle" :checked="selecionados.has(c.id)" @change="marcar(c.id)"></td>
@@ -511,6 +518,16 @@ defineExpose({ carregar })
             <td>
               <div class="truncate text-sm" :title="c.loja || ''">{{ c.loja || '—' }}</div>
               <div class="text-[11px] text-muted-foreground truncate">{{ c.marketplace || '—' }}<span v-if="c.shop_id" class="font-mono"> · {{ c.shop_id }}</span></div>
+            </td>
+            <!-- 02/10 (Vinicius: "ver se tá com certificado nosso ou diversos igual tem na aba anúncios");
+                 caso por loja com mais de um anúncio = quantos de cada, como no "Por loja" -->
+            <td class="!px-1 text-center">
+              <div v-if="(c.n_anuncios || 0) > 1 && (c.nosso || c.diversos)" class="flex flex-wrap justify-center gap-1">
+                <span v-if="c.nosso" class="pill-danger whitespace-nowrap">Nosso {{ c.nosso }}</span>
+                <span v-if="c.diversos" class="pill-warning whitespace-nowrap">Diversos {{ c.diversos }}</span>
+              </div>
+              <span v-else-if="c.grupo" :class="pillGrupo(c.grupo)">{{ nomeGrupo(c.grupo) }}</span>
+              <span v-else class="text-muted-foreground">—</span>
             </td>
             <td class="!px-2 text-center">
               <span class="whitespace-nowrap !px-2.5 !text-xs" :class="pillStatusCaso(c.status)" :title="c.status_mini && c.status_mini !== c.status ? `no sistema do mini: ${c.status_mini}` : ''">{{ c.status || '—' }}</span>
@@ -697,6 +714,7 @@ defineExpose({ carregar })
           <button v-if="an" type="button" class="w-full text-left rounded-lg border px-3 py-2 text-sm hover:border-primary/50 hover:bg-muted/30" @click="verAnuncio(an.id)">
             <div class="flex items-center gap-2 min-w-0">
               <span class="truncate flex-1">{{ an.titulo }}</span>
+              <span v-if="an.grupo" class="shrink-0" :class="pillGrupo(an.grupo)">{{ nomeGrupo(an.grupo) }}</span>
               <span class="shrink-0" :class="pillAtivo(an.situacao)">ativo: {{ ativoSimNao(an.situacao) }}</span>
             </div>
             <div class="font-mono text-[11px] text-muted-foreground mt-0.5">{{ an.marketplace }} · {{ an.loja }} · {{ an.id }}</div>
@@ -711,6 +729,7 @@ defineExpose({ carregar })
               @click="verAnuncio(x.id)"
             >
               <span class="truncate flex-1" :title="x.titulo || ''">{{ x.titulo || x.id }}</span>
+              <span v-if="x.grupo" class="shrink-0" :class="pillGrupo(x.grupo)">{{ nomeGrupo(x.grupo) }}</span>
               <span v-if="x.preco" class="shrink-0 tabular-nums">{{ dinheiro(x.preco) }}</span>
               <span class="shrink-0 tabular-nums text-muted-foreground">{{ numero(x.vendas || 0) }} vendas</span>
               <span class="shrink-0" :class="pillAtivo(x.situacao)">{{ ativoSimNao(x.situacao) }}</span>

@@ -171,6 +171,7 @@ async def test_tela_casos(client, make_user, auth_as):
     # lista de compra (01/10): link do anúncio e a compra do caso vão juntos
     assert j["itens"][0]["url"] == "https://shopee.com.br/p/A1"
     assert j["itens"][0]["compra"]["valor_pago"] == 99.9
+    assert (j["itens"][0]["grupo"], j["itens"][0]["nosso"], j["itens"][0]["diversos"]) == ("GRUPO 1", 1, 0)
     c = (await client.get("/api/denuncia/casos/7")).json()
     assert c["compras"][0]["valor_pago"] == 99.9
     assert {d["id"] for d in c["denuncias"]} == {1, 3}
@@ -872,7 +873,7 @@ async def test_criar_caso_por_loja_e_excluir(client, make_user, auth_as):
             _anuncio("B1", shop_id="222", loja="loja_y", vendas=300, preco=999.9,
                      preco_em="2026-10-01 10:00:00"),
             _anuncio("B2", shop_id="222", loja="loja_y", vendas=700, situacao="fora do ar"),
-            _anuncio("B3", shop_id="222", loja="loja_y", vendas=5),
+            _anuncio("B3", shop_id="222", loja="loja_y", vendas=5, grupo="GRUPO 2"),
             _anuncio("B4", shop_id="222", loja="loja_y", propria=1),
         ]},
         headers=H,
@@ -925,6 +926,8 @@ async def test_criar_caso_por_loja_e_excluir(client, make_user, auth_as):
     casos = (await client.get("/api/denuncia/casos")).json()["itens"]
     c8 = next(c for c in casos if c["id"] == 8)
     assert (c8["n_anuncios"], c8["por_loja"], c8["loja"]) == (3, True, "loja_y")
+    # 02/10: certificado na aba Casos — no caso por loja, quantos de cada
+    assert (c8["grupo"], c8["nosso"], c8["diversos"]) == ("GRUPO 1", 2, 1)
     assert (c8["preco"], c8["preco_em"]) == (999.9, "2026-10-01 10:00:00")  # lista de compra
     d = (await client.get("/api/denuncia/casos/8")).json()
     assert [x["id"] for x in d["anuncios_do_caso"]] == ["B1", "B3", "B2"]
