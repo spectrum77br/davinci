@@ -36,6 +36,7 @@ from app.models.claude_conector import ClaudeConector
 from app.models.company import Cadastro, CadastroStore, Company, Store
 from app.models.company_certificate import CompanyCertificate
 from app.models.denuncia import (
+    DenunciaAnexo,
     DenunciaAnuncio,
     DenunciaCaso,
     DenunciaCompra,
@@ -291,6 +292,7 @@ __all__ = [
     "DenunciaRemetente",
     "DenunciaRoboComando",
     "DenunciaRoboStatus",
+    "DenunciaAnexo",
     "DenunciaRoboTratada",
     "DenunciaVerificacao",
     "DevolucaoAnexo",

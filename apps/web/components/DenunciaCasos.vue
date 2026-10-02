@@ -31,7 +31,22 @@ type Caso = {
   compra: { pedido: string | null; status: string | null; valor_pago: number | null; data: string | null } | null
 }
 type Resposta = { total: number; itens: Caso[]; por_status: Record<string, number> }
+type Anexo = {
+  id: number
+  tipo: string
+  tipo_nome: string
+  nome: string | null
+  link: string | null
+  obs: string | null
+  enviado_por: string | null
+  enviado_em: string | null
+  entregue_em: string | null
+  ok: boolean | null
+  resultado: string | null
+}
 type Detalhe = {
+  anexos?: Anexo[]
+  tipos_anexo?: { chave: string; nome: string }[]
   caso: Record<string, any>
   anuncio: Record<string, any> | null
   compras: Record<string, any>[]
@@ -169,6 +184,60 @@ const checklist = computed(() => {
   ]
 })
 const faltam = computed(() => checklist.value.filter((x) => !x.n))
+// ── 01/10 (Vinicius: "chegou o produto, onde eu vou colocar as provas?"): anexa aqui; o robô do mini
+// busca (a cada 30 s), guarda no sistema de lá e no MEGA, e a prova volta na cópia em até 5 min.
+const podeAnexar = useCan('denuncia', 'edit')
+const anexoTipo = ref('foto')
+const anexoLink = ref('')
+const anexoObs = ref('')
+const anexoArquivo = ref<File | null>(null)
+const anexando = ref(false)
+const anexoErro = ref<string | null>(null)
+const ERROS_ANEXO: Record<string, string> = {
+  denuncia_anexo_video_so_link_mega: 'Vídeo só como link do MEGA, com a chave (…#…).',
+  denuncia_anexo_sem_arquivo: 'Escolha o arquivo.',
+  denuncia_anexo_grande_demais: 'Arquivo grande demais (até 30 MB). Vídeo vai como link do MEGA.',
+}
+const podeEnviarAnexo = computed(() =>
+  anexoTipo.value === 'video' ? /^https:\/\/mega\.nz\/\S+#\S+$/.test(anexoLink.value.trim()) : !!anexoArquivo.value,
+)
+async function anexar() {
+  if (!aberto.value || !podeEnviarAnexo.value) return
+  anexando.value = true
+  anexoErro.value = null
+  try {
+    const fd = new FormData()
+    fd.append('tipo', anexoTipo.value)
+    fd.append('obs', anexoObs.value)
+    if (anexoTipo.value === 'video') fd.append('link', anexoLink.value.trim())
+    else if (anexoArquivo.value) fd.append('arquivo', anexoArquivo.value)
+    const r = await api<{ anexos: Anexo[] }>(`/api/denuncia/casos/${aberto.value}/anexos`, { method: 'POST', body: fd })
+    if (detalhe.value) detalhe.value.anexos = r.anexos
+    anexoLink.value = ''
+    anexoObs.value = ''
+    anexoArquivo.value = null
+    const campo = document.getElementById('anexo-arquivo') as HTMLInputElement | null
+    if (campo) campo.value = ''
+  } catch (e: any) {
+    const code = e?.data?.detail?.code
+    anexoErro.value = ERROS_ANEXO[code] || code || e?.message || 'erro'
+  } finally {
+    anexando.value = false
+  }
+}
+// enviado_em vem em UTC (é do DaVinci, não do mini) → hora de Brasília
+function quando(iso: string | null): string {
+  if (!iso) return ''
+  return new Date(iso).toLocaleString('pt-BR', {
+    timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit',
+  })
+}
+function situacaoAnexo(x: Anexo): { texto: string; cls: string } {
+  if (!x.entregue_em) return { texto: 'indo para o robô', cls: 'pill-muted' }
+  if (x.ok) return { texto: 'guardado no sistema', cls: 'pill-success' }
+  return { texto: 'erro', cls: 'pill-danger' }
+}
+
 const abasCaso = computed(() => [
   { k: 'resumo' as AbaCaso, t: 'Resumo' },
   { k: 'juridico' as AbaCaso, t: faltam.value.length ? `Jurídico (falta ${faltam.value.length})` : 'Jurídico' },
@@ -377,6 +446,37 @@ defineExpose({ carregar })
                 </li>
               </ul>
             </template>
+          </div>
+          <div v-if="podeAnexar" class="rounded-lg border px-3 py-2.5 space-y-2">
+            <div class="text-sm font-medium">Anexar prova</div>
+            <div class="flex flex-wrap items-center gap-2">
+              <select v-model="anexoTipo" class="h-9 rounded-md border bg-background px-2 text-sm">
+                <option v-for="tp in detalhe.tipos_anexo || []" :key="tp.chave" :value="tp.chave">{{ tp.nome }}</option>
+              </select>
+              <Input v-if="anexoTipo === 'video'" v-model="anexoLink" placeholder="link do MEGA (com a chave #…)" class="w-72" />
+              <input
+                v-else
+                id="anexo-arquivo"
+                type="file"
+                class="text-xs file:mr-2 file:rounded-md file:border file:bg-background file:px-2 file:py-1 file:text-xs"
+                @change="(e) => (anexoArquivo = (e.target as HTMLInputElement).files?.[0] || null)"
+              >
+            </div>
+            <div class="flex flex-wrap items-center gap-2">
+              <Input v-model="anexoObs" placeholder="observação (opcional)" class="flex-1 min-w-[200px]" />
+              <Button size="sm" :disabled="anexando || !podeEnviarAnexo" @click="anexar">{{ anexando ? 'enviando…' : 'anexar' }}</Button>
+            </div>
+            <p v-if="anexoErro" class="text-xs text-red-600">{{ anexoErro }}</p>
+            <p class="text-[11px] text-muted-foreground">O robô do mini guarda no sistema e no MEGA; a prova aparece em "Provas" em até 5 min. Vídeo: só o link do MEGA.</p>
+            <ul v-if="detalhe.anexos?.length" class="space-y-1 pt-1">
+              <li v-for="x in detalhe.anexos" :key="x.id" class="flex items-center gap-2 text-xs min-w-0">
+                <span class="font-medium whitespace-nowrap">{{ x.tipo_nome }}</span>
+                <span class="truncate text-muted-foreground" :title="x.nome || x.link || ''">{{ x.nome || x.link }}</span>
+                <span class="text-muted-foreground whitespace-nowrap tabular-nums">{{ quando(x.enviado_em) }}</span>
+                <span class="flex-1" />
+                <span :class="situacaoAnexo(x).cls" :title="x.resultado || ''">{{ situacaoAnexo(x).texto }}</span>
+              </li>
+            </ul>
           </div>
           <dl class="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
             <div><dt class="text-[10px] uppercase tracking-wider text-muted-foreground">Advogado</dt><dd>{{ k.juridico || '—' }}</dd></div>

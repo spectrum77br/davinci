@@ -31,7 +31,18 @@ from pathlib import Path
 from typing import Annotated, Any
 
 import structlog
-from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query, Request
+from fastapi import (
+    APIRouter,
+    Body,
+    Depends,
+    File,
+    Form,
+    Header,
+    HTTPException,
+    Query,
+    Request,
+    UploadFile,
+)
 from fastapi.responses import FileResponse
 from sqlalchemy import case, delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -41,6 +52,7 @@ from app.config import get_settings
 from app.db import get_session
 from app.deps.auth import require_permission
 from app.models.denuncia import (
+    DenunciaAnexo,
     DenunciaAnuncio,
     DenunciaCaso,
     DenunciaCompra,
@@ -67,6 +79,22 @@ _editar = require_permission("denuncia", "edit")
 
 # Pasta das provas dentro de `uploads_dir` (volume compartilhado api/worker).
 PASTA_PROVAS = "denuncia/provas"
+# "Anexar prova" da ficha do caso (01/10): o arquivo espera aqui até o mini buscar
+PASTA_ANEXOS = "denuncia/anexos"
+TETO_ANEXO_BYTES = 30 * 1024 * 1024
+# tipo na tela → (tipo de prova no sistema do mini, nome na tela). Os tipos do mini são os que o
+# checklist do advogado procura (modelos.CHECKLIST_ADVOGADO / db.DOCS_CASO); a devolução vai como
+# "Outro" com "Devolução" na observação (o checklist procura "devolu"). Vídeo só como link do MEGA.
+TIPOS_ANEXO: dict[str, tuple[str, str]] = {
+    "video": ("Vídeo", "Vídeo da embalagem sendo aberta (link do MEGA)"),
+    "foto": ("Foto", "Foto do produto / selo Anatel"),
+    "nfe": ("NF-e", "NF-e da compra (PDF)"),
+    "fatura": ("Fatura do cartão", "Comprovante na fatura do cartão"),
+    "pedido": ("Tela do pedido", "Tela do pedido (compra de prova)"),
+    "devolucao": ("Outro", "Comprovante do pedido de devolução"),
+    "print": ("Print", "Print do anúncio"),
+    "outro": ("Outro", "Outro documento"),
+}
 # Um lote do sync: o mini manda de 500 em 500.
 MAX_LINHAS_LOTE = 2000
 # Provas sob demanda (01/10): pedido que o mini não atendeu em 10 min caduca
@@ -289,6 +317,84 @@ async def sync_robo_comando_feito(
     c.entregue_em = datetime.now(UTC)
     c.ok = bool(corpo.get("ok"))
     c.resultado = str(corpo.get("resultado") or "")[:1000]
+    await session.commit()
+    return {"ok": True}
+
+
+def _pasta_anexos() -> Path:
+    p = Path(get_settings().uploads_dir) / PASTA_ANEXOS
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def _anexo_resumo(x: DenunciaAnexo) -> dict:
+    tipo_mini, nome_tipo = TIPOS_ANEXO.get(x.tipo, ("Outro", x.tipo))
+    return {
+        "id": x.id, "caso_id": x.caso_id, "anuncio_id": x.anuncio_id, "tipo": x.tipo,
+        "tipo_nome": nome_tipo, "tipo_prova": tipo_mini, "nome": x.nome, "tamanho": x.tamanho,
+        "sha256": x.sha256, "link": x.link, "obs": x.obs, "tem_arquivo": bool(x.arquivo_local),
+        "enviado_por": x.enviado_por,
+        "enviado_em": x.enviado_em.isoformat() if x.enviado_em else None,
+        "entregue_em": x.entregue_em.isoformat() if x.entregue_em else None,
+        "ok": x.ok, "resultado": x.resultado,
+    }
+
+
+@sync_router.get("/anexos")
+async def sync_anexos(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _r: Annotated[DenunciaRemetente, Depends(_remetente)],
+) -> dict:
+    """Provas anexadas no DaVinci que o mini ainda não entregou ao sistema de lá (sem prazo:
+    mini desligado na hora = entrega quando voltar)."""
+    rows = (
+        await session.execute(
+            select(DenunciaAnexo)
+            .where(DenunciaAnexo.entregue_em.is_(None))
+            .order_by(DenunciaAnexo.id)
+            .limit(20)
+        )
+    ).scalars().all()
+    return {"anexos": [_anexo_resumo(x) for x in rows]}
+
+
+@sync_router.get("/anexos/{anexo_id}/arquivo")
+async def sync_anexo_arquivo(
+    anexo_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _r: Annotated[DenunciaRemetente, Depends(_remetente)],
+) -> FileResponse:
+    x = (
+        await session.execute(select(DenunciaAnexo).where(DenunciaAnexo.id == anexo_id))
+    ).scalar_one_or_none()
+    if x is None or not x.arquivo_local:
+        raise HTTPException(404, detail={"code": "denuncia_anexo_sem_arquivo"})
+    caminho = Path(get_settings().uploads_dir) / x.arquivo_local
+    if not caminho.is_file():
+        raise HTTPException(404, detail={"code": "denuncia_anexo_sem_arquivo"})
+    return FileResponse(caminho, filename=x.nome or caminho.name)
+
+
+@sync_router.post("/anexos/{anexo_id}")
+async def sync_anexo_entregue(
+    anexo_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _r: Annotated[DenunciaRemetente, Depends(_remetente)],
+    corpo: Annotated[dict, Body()],
+) -> dict:
+    """O mini entregou (ou não) ao sistema de lá. Entregue com sucesso: o arquivo daqui some
+    (a prova volta na cópia, e o original fica no mini e no MEGA)."""
+    x = (
+        await session.execute(select(DenunciaAnexo).where(DenunciaAnexo.id == anexo_id))
+    ).scalar_one_or_none()
+    if x is None:
+        raise HTTPException(404, detail={"code": "denuncia_anexo_nao_encontrado"})
+    x.entregue_em = datetime.now(UTC)
+    x.ok = bool(corpo.get("ok"))
+    x.resultado = str(corpo.get("resultado") or "")[:1000]
+    if x.ok and x.arquivo_local:
+        (Path(get_settings().uploads_dir) / x.arquivo_local).unlink(missing_ok=True)
+        x.arquivo_local = None
     await session.commit()
     return {"ok": True}
 
@@ -1065,7 +1171,9 @@ async def painel_anuncios_e_denuncias(
         "opcoes": {
             "marketplaces": sorted(m for m in marketplaces if m),
             "grupos": sorted(g for g in grupos if g),
-            "na_loja": [{"chave": k, "rotulo": v[0]} for k, v in painel.LOJA.items() if k != "vazio"],
+            "na_loja": [
+                {"chave": k, "rotulo": v[0]} for k, v in painel.LOJA.items() if k != "vazio"
+            ],
             "na_anatel": [
                 {"chave": k, "rotulo": v[0]} for k, v in painel.ANATEL.items() if k != "nada"
             ],
@@ -1413,7 +1521,75 @@ async def ver_caso(
         "compras": [x.dados for x in compras],
         "provas": [_prova_resumo(p) for p in provas],
         "denuncias": [d.dados for d in dens],
+        "anexos": await _anexos_do_caso(session, caso_id),
+        "tipos_anexo": [{"chave": k, "nome": v[1]} for k, v in TIPOS_ANEXO.items()],
     }
+
+
+async def _anexos_do_caso(session: AsyncSession, caso_id: int) -> list[dict]:
+    rows = (
+        await session.execute(
+            select(DenunciaAnexo)
+            .where(DenunciaAnexo.caso_id == caso_id)
+            .order_by(DenunciaAnexo.id.desc())
+        )
+    ).scalars().all()
+    return [_anexo_resumo(x) for x in rows]
+
+
+@router.post("/casos/{caso_id}/anexos")
+async def anexar_ao_caso(
+    caso_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    u: Annotated[User, Depends(_editar)],
+    tipo: Annotated[str, Form()],
+    obs: Annotated[str, Form()] = "",
+    link: Annotated[str, Form()] = "",
+    arquivo: Annotated[UploadFile | None, File()] = None,
+) -> dict:
+    """Vinicius, 01/10: "chegou o produto, onde eu vou colocar as provas?" — anexa aqui; o mini
+    busca e entrega ao sistema de lá (que guarda e sobe pro MEGA). Vídeo só como link do MEGA."""
+    c = (
+        await session.execute(select(DenunciaCaso).where(DenunciaCaso.id == caso_id))
+    ).scalar_one_or_none()
+    if c is None or not c.anuncio_id:
+        raise HTTPException(404, detail={"code": "denuncia_caso_nao_encontrado"})
+    if tipo not in TIPOS_ANEXO:
+        raise HTTPException(422, detail={"code": "denuncia_anexo_tipo_invalido"})
+    link = (link or "").strip()
+    if tipo == "video":
+        if not re.match(r"^https://mega\.nz/\S+#\S+$", link):
+            raise HTTPException(422, detail={"code": "denuncia_anexo_video_so_link_mega"})
+        arquivo = None
+    elif arquivo is None or not arquivo.filename:
+        raise HTTPException(422, detail={"code": "denuncia_anexo_sem_arquivo"})
+    x = DenunciaAnexo(
+        caso_id=caso_id, anuncio_id=c.anuncio_id, tipo=tipo, link=link or None,
+        obs=(obs or "").strip()[:1000] or None, enviado_por=u.name or u.email,
+        nome=(arquivo.filename if arquivo else None),
+    )
+    session.add(x)
+    await session.flush()
+    if arquivo is not None:
+        ext = os.path.splitext(arquivo.filename or "")[1].lower()
+        if not _EXT_OK.match(ext):
+            ext = ".bin"
+        destino = _pasta_anexos() / f"{x.id}{ext}"
+        h, total = hashlib.sha256(), 0
+        try:
+            with open(destino, "wb") as f:
+                while chunk := await arquivo.read(1024 * 1024):
+                    total += len(chunk)
+                    if total > TETO_ANEXO_BYTES:
+                        raise HTTPException(413, detail={"code": "denuncia_anexo_grande_demais"})
+                    h.update(chunk)
+                    f.write(chunk)
+        except HTTPException:
+            destino.unlink(missing_ok=True)
+            raise
+        x.arquivo_local, x.tamanho, x.sha256 = f"{PASTA_ANEXOS}/{x.id}{ext}", total, h.hexdigest()
+    await session.commit()
+    return {"ok": True, "anexos": await _anexos_do_caso(session, caso_id)}
 
 
 @router.post("/provas/{prova_id}/preparar")

@@ -180,6 +180,32 @@ class DenunciaRoboComando(Base):
     resultado: Mapped[str | None] = mapped_column(Text)
 
 
+class DenunciaAnexo(Base):
+    """Prova anexada pelo DaVinci na ficha do caso (01/10/2026): o arquivo fica aqui
+    (`arquivo_local`, em uploads) ou é só um link (vídeo no MEGA); o mini busca, entrega
+    ao sistema de lá e marca `entregue_em` + `ok`/`resultado`."""
+
+    __tablename__ = "denuncia_anexos"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    caso_id: Mapped[int | None] = mapped_column(BigInteger)
+    anuncio_id: Mapped[str] = mapped_column(Text, nullable=False)
+    tipo: Mapped[str] = mapped_column(Text, nullable=False)
+    nome: Mapped[str | None] = mapped_column(Text)
+    tamanho: Mapped[int | None] = mapped_column(BigInteger)
+    sha256: Mapped[str | None] = mapped_column(Text)
+    arquivo_local: Mapped[str | None] = mapped_column(Text)
+    link: Mapped[str | None] = mapped_column(Text)
+    obs: Mapped[str | None] = mapped_column(Text)
+    enviado_por: Mapped[str | None] = mapped_column(Text)
+    enviado_em: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    entregue_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    ok: Mapped[bool | None] = mapped_column(Boolean)
+    resultado: Mapped[str | None] = mapped_column(Text)
+
+
 class DenunciaRoboTratada(Base):
     """Ocorrência da aba Robô marcada como tratada (sai da lista)."""
 

@@ -25,6 +25,9 @@ Uma janela faz quatro coisas:
 7. (01/10) os botões da aba Robô: a cada 5 s busca os comandos (ligar/desligar
    a rotina automática, rodar um passo agora, "tratado" numa ocorrência),
    executa e responde.
+8. (01/10) o "Anexar prova" da ficha do caso no DaVinci: a cada 30 s busca os
+   anexos, baixa o arquivo (ou pega o link do vídeo no MEGA) e entrega ao
+   sistema daqui (POST /api/v1/provas, que guarda e sobe pro MEGA).
 Mais o backup diário local do banco em `data/backups` (guarda 30), como fazia
 o `run.py` no servidor.
 
@@ -311,6 +314,71 @@ def comandos():
             robo()   # a aba Robô já mostra ligada/desligada, sem esperar o minuto
 
 
+_anexos = {"falhou": {}}
+
+
+def _baixar(cfg, rota, destino):
+    req = urllib.request.Request(cfg["url"] + rota, headers={
+        "Authorization": "Bearer " + cfg["token"], "User-Agent": "denuncia-mini/1"})
+    with urllib.request.urlopen(req, timeout=300) as r, open(destino, "wb") as f:
+        while True:
+            bloco = r.read(1024 * 1024)
+            if not bloco:
+                break
+            f.write(bloco)
+
+
+def _entregar_anexo(cfg, x, pasta):
+    """Entrega um anexo ao sistema daqui. Devolve o texto do resultado; erro sobe (tenta de novo)."""
+    if ROBO not in sys.path:
+        sys.path.insert(0, ROBO)
+    from fiscalizacao_api import Fiscalizacao  # noqa: E402  (só biblioteca padrão, ~/.fiscalizacao.json)
+
+    partes = ["Anexado pelo DaVinci (%s) — %s" % (x.get("enviado_por") or "?", x.get("tipo_nome") or x.get("tipo"))]
+    if x.get("tipo") == "devolucao":
+        partes.append("Devolução pedida")   # o checklist do advogado procura "devolu"
+    if x.get("obs"):
+        partes.append(x["obs"])
+    if x.get("link"):
+        partes.append(x["link"])
+    obs = " · ".join(partes)
+    if x.get("tem_arquivo"):
+        nome = os.path.basename(x.get("nome") or "") or "anexo_%d.bin" % x["id"]
+        caminho = os.path.join(pasta, "%d_%s" % (x["id"], nome))
+        _baixar(cfg, "/api/denuncia/sync/anexos/%d/arquivo" % x["id"], caminho)
+    else:   # vídeo: só o link do MEGA (regra do DaVinci) — vira um .txt com o link
+        caminho = os.path.join(pasta, "video_link_%d.txt" % x["id"])
+        with open(caminho, "w", encoding="utf-8") as f:
+            f.write("%s\n%s\n" % (x.get("link") or "", obs))
+    r = Fiscalizacao().enviar_prova(x["anuncio_id"], caminho, tipo=x.get("tipo_prova") or "Outro", obs=obs)
+    arqs = r.get("arquivos") or []
+    dup = any(a.get("duplicado") for a in arqs)
+    return "prova guardada no sistema do mini (%s)%s" % (x.get("tipo_prova"), " — já estava lá" if dup else "")
+
+
+def anexos():
+    """"Anexar prova" da ficha do caso no DaVinci."""
+    env = _env()
+    cfg = env.ler_config()
+    r = _perguntar(env, cfg, "/api/denuncia/sync/anexos")
+    pend = [x for x in (r or {}).get("anexos") or []
+            if time.time() - _anexos["falhou"].get(x["id"], 0) > 600]
+    if not pend:
+        return
+    import tempfile
+    with tempfile.TemporaryDirectory(prefix="anexos_") as pasta:
+        for x in pend:
+            try:
+                res, ok = _entregar_anexo(cfg, x, pasta), True
+            except (OSError, RuntimeError, SystemExit) as e:   # rede, sistema fora do ar: tenta de novo em 10 min
+                log("anexo %s (%s) não entregue — %s" % (x["id"], x.get("tipo"), e))
+                _anexos["falhou"][x["id"]] = time.time()
+                continue
+            log("anexo %s do DaVinci (%s, caso %s): %s" % (x["id"], x.get("tipo"), x.get("caso_id"), res))
+            env.pedir(cfg, "POST", "/api/denuncia/sync/anexos/%d" % x["id"],
+                      corpo={"ok": ok, "resultado": res}, timeout=30)
+
+
 def status_mac():
     """Mantém o status_mac.py do robô vivo (ele mesmo roda em laço)."""
     py = "/usr/local/bin/python3" if os.path.exists("/usr/local/bin/python3") else "/usr/bin/python3"
@@ -345,6 +413,7 @@ def main():
     a_cada(60, "robo", robo)
     a_cada(5, "provas", provas_pedidas)
     a_cada(5, "comandos", comandos)
+    a_cada(30, "anexos", anexos)
     threading.Thread(target=status_mac, name="status_mac", daemon=True).start()
 
     from waitress import serve

@@ -16,7 +16,7 @@ H = {"Authorization": f"Bearer {TOKEN}"}
 _TABELAS = (
     "denuncia_anuncios", "denuncia_lojas", "denuncia_denuncias", "denuncia_casos",
     "denuncia_compras", "denuncia_provas", "denuncia_verificacoes", "denuncia_remetentes",
-    "denuncia_robo_status", "denuncia_robo_comandos", "denuncia_robo_tratadas",
+    "denuncia_robo_status", "denuncia_robo_comandos", "denuncia_robo_tratadas", "denuncia_anexos",
 )
 
 
@@ -719,3 +719,43 @@ async def test_painel_junta_anuncios_e_denuncias(client, make_user, auth_as):
     assert f["status"]["na_anatel"]["chave"] == "processo"
     assert [x["id"] for x in f["junto"]["Anatel SEI|53500.1/2026-1"]] == ["B3"]
     assert f["denuncias"][0]["id"] == 11
+
+
+async def test_anexar_prova_no_caso_e_o_mini_entrega(client, make_user, auth_as, pasta_uploads):
+    """01/10 (Vinicius: "chegou o produto, onde eu vou colocar as provas?"): anexa na ficha do
+    caso; o mini busca, baixa e marca entregue (o arquivo daqui some)."""
+    await _carga(client)
+    auth_as(await make_user(permissions={"denuncia": {"view": True, "edit": True}}))
+    r = await client.post("/api/denuncia/casos/7/anexos", data={"tipo": "nfe", "obs": "NF da compra"},
+                          files={"arquivo": ("nf.pdf", b"%PDF-1.4 nota", "application/pdf")})
+    assert r.status_code == 200, r.text
+    a = r.json()["anexos"][0]
+    assert (a["tipo_prova"], a["anuncio_id"], a["tem_arquivo"], a["entregue_em"]) == ("NF-e", "A1", True, None)
+    # vídeo só como link do MEGA (com a chave)
+    r = await client.post("/api/denuncia/casos/7/anexos", data={"tipo": "video", "link": "https://youtu.be/x"})
+    assert r.status_code == 422
+    r = await client.post("/api/denuncia/casos/7/anexos",
+                          data={"tipo": "video", "link": "https://mega.nz/file/AbC#chave"})
+    assert r.status_code == 200 and r.json()["anexos"][0]["link"].startswith("https://mega.nz/")
+    r = await client.post("/api/denuncia/casos/7/anexos", data={"tipo": "foto"})
+    assert r.status_code == 422   # foto sem arquivo
+    # a ficha do caso mostra os anexos e os tipos
+    f = (await client.get("/api/denuncia/casos/7")).json()
+    assert len(f["anexos"]) == 2 and any(t["chave"] == "devolucao" for t in f["tipos_anexo"])
+    # o mini: pendentes, baixa o arquivo e responde
+    pend = (await client.get("/api/denuncia/sync/anexos", headers=H)).json()["anexos"]
+    assert [x["tipo"] for x in pend] == ["nfe", "video"]
+    nf = pend[0]
+    r = await client.get(f"/api/denuncia/sync/anexos/{nf['id']}/arquivo", headers=H)
+    assert r.status_code == 200 and r.content == b"%PDF-1.4 nota"
+    r = await client.post(f"/api/denuncia/sync/anexos/{nf['id']}", json={"ok": True, "resultado": "prova #900"},
+                          headers=H)
+    assert r.status_code == 200
+    pend = (await client.get("/api/denuncia/sync/anexos", headers=H)).json()["anexos"]
+    assert [x["tipo"] for x in pend] == ["video"]
+    assert not list((pasta_uploads / "denuncia" / "anexos").glob(f"{nf['id']}.*"))
+    # sem permissão de editar não anexa
+    auth_as(await make_user(permissions={"denuncia": {"view": True}}))
+    r = await client.post("/api/denuncia/casos/7/anexos", data={"tipo": "nfe"},
+                          files={"arquivo": ("nf.pdf", b"x", "application/pdf")})
+    assert r.status_code == 403
