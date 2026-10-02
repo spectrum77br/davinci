@@ -2217,3 +2217,24 @@ def test_copia_de_uma_linha_com_fim_desconhecido_nao_grava_o_rodape():
         f"{_T} Encerrar mensagem {_T}"
     )
     assert amazon_email.extrair_mensagem(corpo) == "Oi\n-----\nPara o setor\n-----\nobg"
+
+
+def test_aviso_da_amazon_vai_pro_log_com_remetente_e_assunto():
+    """02/10 (701-7824777-7251447): a caixa contava "1 ignorado" sem dizer o
+    que era. Aviso automático da Amazon passa a sair no log (remetente,
+    assunto, pedido, "+conta"); e-mail de gente continua só contado."""
+    bruto = _email(
+        de="Amazon Seller Central <seller-notification@amazon.com.br>",
+        assunto="Solicitação de devolução autorizada: pedido 701-7824777-7251447",
+        texto="Um cliente solicitou a devolução.",
+        marcadores=False,
+    )
+    assert amazon_email.interpretar_email(bruto) is None  # não é mensagem de comprador
+    assert amazon_email.aviso_da_amazon(bruto) == {
+        "remetente": "seller-notification@amazon.com.br",
+        "assunto": "Solicitação de devolução autorizada: pedido 701-7824777-7251447",
+        "pedido": "701-7824777-7251447",
+        "tag": "kfa",
+    }
+    de_gente = _email(de="Fulano <fulano@gmail.com>", assunto="oi", marcadores=False)
+    assert amazon_email.aviso_da_amazon(de_gente) is None

@@ -877,6 +877,30 @@ def _eh_da_amazon_sem_resposta(endereco: str) -> bool:
     return da_amazon and local.startswith(_LOCAIS_SEM_RESPOSTA)
 
 
+def aviso_da_amazon(bruto: bytes) -> dict | None:
+    """Remetente e assunto de um aviso AUTOMÁTICO da Amazon (domínio amazon.*,
+    não retransmissão de comprador), pro log; None pra e-mail de gente.
+
+    02/10/2026 (701-7824777-7251447): a devolução pedida pela cliente não chegou
+    ao DaVinci — e a caixa conta "1 ignorado" sem dizer o que era. Antes de
+    ler aviso de devolução, é preciso saber QUAIS avisos a Amazon manda pra
+    esta caixa (Vinicius: "tudo vem no e-mail mesmo")."""
+    msg = message_from_bytes(bruto, policy=politica_email.default)
+    remetentes = _enderecos(msg, "From")
+    endereco = remetentes[0][1].strip().lower() if remetentes else ""
+    dominio = endereco.rpartition("@")[2]
+    if not any(dominio == d or dominio.endswith(f".{d}") for d in _DOMINIOS_AMAZON):
+        return None
+    assunto = " ".join(str(msg.get("Subject", "") or "").split())
+    achado = RE_PEDIDO.search(assunto)
+    return {
+        "remetente": endereco,
+        "assunto": assunto[:200],
+        "pedido": achado.group(0) if achado else None,
+        "tag": _tag_do_destinatario(msg),
+    }
+
+
 def _texto_da_parte(parte: Message) -> str:
     """O texto cru de uma parte, para achar ids e o status da entrega.
 
@@ -2240,6 +2264,12 @@ async def _gravar_leitura(session: AsyncSession, leitura: LeituraCaixa) -> Resul
             continue
         if interpretado is None:
             ignorados += 1
+            try:
+                aviso = aviso_da_amazon(bruto)
+            except Exception:  # noqa: BLE001 — é só log
+                aviso = None
+            if aviso is not None:
+                logger.info("atendimento_amazon_email_aviso", uid=uid, **aviso)
             continue
         emails.append(interpretado)
     emails.sort(key=_ordem)
