@@ -1,4 +1,4 @@
-"""Flex (ML Envios Flex / Shopee Entrega Direta) — migration 0361.
+"""Flex (ML Envios Flex / Shopee Entrega Direta) — migration 0364.
 
 Procedimento: /Users/admmarketing/Downloads/procedimento-flex.md; análise com
 os fatos das APIs: relatorios/Flex_analise_02-10-2026.md.
@@ -46,7 +46,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base
 
-# Valores fechados (espelhados nos CHECK da migration 0361).
+# Valores fechados (espelhados nos CHECK da migration 0364).
 FLEX_PLATAFORMAS = ("ml", "shopee")
 FLEX_DESEJADO = ("ligado", "desligado", "inelegivel")
 FLEX_OBSERVADO = ("ligado", "desligado")

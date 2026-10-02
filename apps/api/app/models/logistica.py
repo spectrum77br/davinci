@@ -48,7 +48,7 @@ class Logistica(Base, TimestampMixin):
         ),
         # Aba Flex (GET /api/logistica?envio=flex): parcial pelo mesmo motivo —
         # quase nenhuma linha é Flex (02/10: 1 self_service em 388 pedidos ML).
-        # Migração 0361.
+        # Migração 0364.
         Index(
             "ix_logistica_envio_flex",
             "envio_flex",
@@ -138,7 +138,7 @@ class Logistica(Base, TimestampMixin):
     # data de saída e previsão de entrega (dataSaida + prazoEntregaPrevisto em
     # dias úteis — é a "Data de entrega" que o Bling mostra na cotação).
     servico_envio: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # ---- Flex (migration 0361, ver services/flex_envio) ----
+    # ---- Flex (migration 0364, ver services/flex_envio) ----
     # Tipo de envio CRU que a plataforma informou: ML `logistic.type` (formato
     # novo) ou `logistic_type` (antigo) — self_service, cross_docking,
     # drop_off…; Shopee "90022 · Shopee Entrega Direta" (canal · transportadora).

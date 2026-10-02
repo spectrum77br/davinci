@@ -1,7 +1,7 @@
-"""A migration 0361 (Flex) cria EXATAMENTE o que o model declara — e o downgrade desfaz.
+"""A migration 0364 (Flex) cria EXATAMENTE o que o model declara — e o downgrade desfaz.
 
 O conftest monta o schema de teste pelo `create_all` do model, nunca pela
-migration. Aqui a 0361 roda de verdade num schema descartável e o catálogo
+migration. Aqui a 0364 roda de verdade num schema descartável e o catálogo
 do Postgres dos dois lados é comparado: as três tabelas `flex_*` (colunas,
 CHECK, FK com ON DELETE, PK, índices) e as duas colunas novas da
 `logistica` com o índice parcial da aba Flex.
@@ -25,19 +25,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.historico import sql as hsql
 from app.models import Base
 
-_MIGRATION = Path(__file__).resolve().parent.parent / "alembic" / "versions" / "0361_flex.py"
+_MIGRATION = Path(__file__).resolve().parent.parent / "alembic" / "versions" / "0364_flex.py"
 TABELAS = ["flex_anuncio_estado", "flex_log", "flex_pedido"]
 
 
 def _carregar():
-    spec = importlib.util.spec_from_file_location("migration_0361_flex", _MIGRATION)
+    spec = importlib.util.spec_from_file_location("migration_0364_flex", _MIGRATION)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
 
 
 async def _catalogo(db: AsyncSession, schema: str) -> dict[str, list]:
-    """Colunas, constraints e índices das tabelas flex_* e do que a 0361 põe
+    """Colunas, constraints e índices das tabelas flex_* e do que a 0364 põe
     na `logistica`."""
 
     def limpo(s: str | None) -> str | None:
@@ -98,14 +98,14 @@ async def _catalogo(db: AsyncSession, schema: str) -> dict[str, list]:
 @pytest.mark.asyncio
 async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession):
     schema_model = Base.metadata.schema
-    rascunho = f"{schema_model}_mig0361"
+    rascunho = f"{schema_model}_mig0364"
     mod = _carregar()
-    assert mod.revision == "0361_flex"
-    assert mod.down_revision == "0360_marketplace_netshoes"
+    assert mod.revision == "0364_flex"
+    assert mod.down_revision == "0363_denuncia_robo_agenda_diversos"
 
     await db.execute(text(f'DROP SCHEMA IF EXISTS "{rascunho}" CASCADE'))
     await db.execute(text(f'CREATE SCHEMA "{rascunho}"'))
-    # Só o que a 0361 toca/referencia.
+    # Só o que a 0364 toca/referencia.
     await db.execute(text(f'CREATE TABLE "{rascunho}".users (id uuid PRIMARY KEY)'))
     await db.execute(text(f'CREATE TABLE "{rascunho}".integrations (id uuid PRIMARY KEY)'))
     await db.execute(text(f'CREATE TABLE "{rascunho}".logistica (id uuid PRIMARY KEY)'))
@@ -179,7 +179,7 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
             )
         await db.rollback()
 
-        # O downgrade tira tudo o que a 0361 pôs.
+        # O downgrade tira tudo o que a 0364 pôs.
         conn = await db.connection()
         await conn.run_sync(_rodar, "downgrade")
         await db.commit()
@@ -194,3 +194,20 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
 def test_historico_fica_fora_das_tabelas_do_flex():
     nomes = [*TABELAS, "logistica"]
     assert hsql.a_cobrir(nomes) == ["logistica"]
+
+
+def test_alembic_tem_uma_ponta_so():
+    """`alembic upgrade head` (scripts/migrate.sh) para com "Multiple head
+    revisions" se duas migrations apontam para o mesmo pai — o git junta os
+    arquivos sem conflito (nomes diferentes) e ninguém percebe até o deploy.
+    A 0364 nasceu 0361 em cima da 0360 enquanto o main ganhava a 0361/0362/
+    0363; aqui a árvore inteira tem de terminar numa ponta só."""
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    raiz = Path(__file__).resolve().parent.parent
+    cfg = Config(str(raiz / "alembic.ini"))
+    cfg.set_main_option("script_location", str(raiz / "alembic"))
+    pontas = ScriptDirectory.from_config(cfg).get_heads()
+    # Uma ponta só (não necessariamente a 0364: o main vai ganhar outras).
+    assert len(pontas) == 1, pontas
