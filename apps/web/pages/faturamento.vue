@@ -2,6 +2,7 @@
 import { computed, ref } from 'vue'
 import { ChevronLeft, ChevronRight, Loader2, RefreshCw } from 'lucide-vue-next'
 import { isoToday, isoDaysAgo } from '~/lib/date'
+import { MARKETPLACE_LABELS, type Marketplace } from '~/composables/useMarketplaces'
 
 definePageMeta({
   middleware: ['permission'],
@@ -16,6 +17,7 @@ type FaturamentoLinha = {
   store_id: string
   loja: string | null
   tipo: string | null
+  departments: string[]
   pedidos: number
   faturamento: number
   ticket_medio: number
@@ -60,6 +62,22 @@ const data = ref<FaturamentoOut | null>(null)
 // aparece quando o backend devolve mais de uma equipe (admin ou multi-equipe).
 const team = ref<number | null>(null)
 const teams = computed(() => data.value?.teams ?? [])
+const department = ref('')
+const departmentOptions = [
+  { value: 'catalogo', label: 'Catálogo' },
+  { value: 'celular', label: 'Celular' },
+  { value: 'eletro', label: 'Eletro' },
+  { value: 'mala', label: 'Mala' },
+  { value: 'shein', label: 'Shein' },
+]
+function departmentLabel(slug: string): string {
+  return departmentOptions.find((option) => option.value === slug)?.label ?? slug
+}
+function platformLabel(value: string | null): string {
+  if (!value) return '—'
+  const platform = value === 'mercadolivre' ? 'ml' : value
+  return MARKETPLACE_LABELS[platform as Marketplace] ?? value
+}
 
 function periodoParams(): { start: string; end: string } {
   if (mode.value === 'custom') {
@@ -82,6 +100,7 @@ async function load() {
     const { start, end } = periodoParams()
     const qs = new URLSearchParams({ start, end })
     if (team.value != null) qs.set('team', String(team.value))
+    if (isAdmin.value && department.value) qs.set('department', department.value)
     data.value = await api<FaturamentoOut>(`/api/faturamento?${qs.toString()}`)
   } catch (e: any) {
     error.value = e?.data?.detail?.code || e?.message || 'erro'
@@ -192,7 +211,26 @@ function fmtInt(n: number | null | undefined): string {
           <option v-for="t in teams" :key="t" :value="t">Equipe {{ t }}</option>
         </select>
       </template>
+
+      <template v-if="isAdmin">
+        <label for="faturamento-tipo" class="ml-2 text-xs text-muted-foreground">Tipo:</label>
+        <select
+          id="faturamento-tipo"
+          v-model="department"
+          class="h-7 border rounded px-2 bg-background text-xs"
+          @change="load"
+        >
+          <option value="">Todos os tipos</option>
+          <option v-for="option in departmentOptions" :key="option.value" :value="option.value">
+            {{ option.label }}
+          </option>
+        </select>
+      </template>
     </div>
+
+    <p v-if="isAdmin && department" class="text-xs text-muted-foreground">
+      Mostrando o faturamento total das lojas classificadas como {{ departmentLabel(department) }}.
+    </p>
 
     <div v-if="error" class="text-sm text-destructive">{{ error }}</div>
 
@@ -201,6 +239,7 @@ function fmtInt(n: number | null | undefined): string {
         <thead class="bg-muted/50 text-xs uppercase tracking-wide">
           <tr>
             <th class="text-left px-3 py-2 font-medium">Loja</th>
+            <th class="text-left px-3 py-2 font-medium">Plataforma</th>
             <th class="text-left px-3 py-2 font-medium">Tipo</th>
             <th class="text-right px-3 py-2 font-medium">Pedidos</th>
             <th class="text-right px-3 py-2 font-medium">Faturamento</th>
@@ -209,12 +248,12 @@ function fmtInt(n: number | null | undefined): string {
         </thead>
         <tbody>
           <tr v-if="loading && !data">
-            <td colspan="5" class="text-center py-6 text-muted-foreground">
+            <td colspan="6" class="text-center py-6 text-muted-foreground">
               <Loader2 class="inline h-4 w-4 animate-spin" /> carregando…
             </td>
           </tr>
           <tr v-else-if="!data?.itens.length">
-            <td colspan="5" class="text-center py-8 text-muted-foreground">
+            <td colspan="6" class="text-center py-8 text-muted-foreground">
               Nenhum faturamento no período.
               <span v-if="!isAdmin">
                 <br />Você vê apenas lojas das suas equipes de vendas.
@@ -227,7 +266,17 @@ function fmtInt(n: number | null | undefined): string {
             class="border-t hover:bg-muted/20"
           >
             <td class="px-3 py-1.5">{{ r.loja || '—' }}</td>
-            <td class="px-3 py-1.5">{{ r.tipo || '—' }}</td>
+            <td class="px-3 py-1.5">{{ platformLabel(r.tipo) }}</td>
+            <td class="px-3 py-1.5">
+              <div v-if="r.departments?.length" class="flex flex-wrap gap-1">
+                <span
+                  v-for="slug in r.departments"
+                  :key="slug"
+                  class="inline-block rounded border border-border bg-muted px-1.5 py-0.5 text-xs text-muted-foreground"
+                >{{ departmentLabel(slug) }}</span>
+              </div>
+              <span v-else class="text-muted-foreground">—</span>
+            </td>
             <td class="px-3 py-1.5 text-right tabular-nums">{{ fmtInt(r.pedidos) }}</td>
             <td class="px-3 py-1.5 text-right tabular-nums font-medium">{{ fmtBRL(r.faturamento) }}</td>
             <td class="px-3 py-1.5 text-right tabular-nums">{{ fmtBRL(r.ticket_medio) }}</td>
@@ -235,7 +284,7 @@ function fmtInt(n: number | null | undefined): string {
         </tbody>
         <tfoot v-if="data?.itens.length" class="bg-muted/30 font-semibold">
           <tr class="border-t">
-            <td class="px-3 py-2" colspan="2">Total</td>
+            <td class="px-3 py-2" colspan="3">Total</td>
             <td class="px-3 py-2 text-right tabular-nums">{{ fmtInt(data?.total_pedidos) }}</td>
             <td class="px-3 py-2 text-right tabular-nums">{{ fmtBRL(data?.total_faturamento) }}</td>
             <td class="px-3 py-2"></td>

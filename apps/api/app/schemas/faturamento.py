@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class FaturamentoLinha(BaseModel):
@@ -14,6 +14,9 @@ class FaturamentoLinha(BaseModel):
     store_id: str
     loja: str | None = None
     tipo: str | None = None
+    # Classificação de produtos da loja. `tipo` segue sendo a plataforma
+    # legada para preservar os consumidores existentes da API.
+    departments: list[str] = Field(default_factory=list)
     pedidos: int
     faturamento: float
     ticket_medio: float

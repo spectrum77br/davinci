@@ -78,6 +78,16 @@ from app.services.pricing.audit import (
 from app.services.pricing.calc import calculate
 from app.services.pricing.competitor import search_competitors
 from app.services.pricing.push import push_one
+from app.services.store_departments import (
+    MANUAL_DEPARTMENT_PLATFORMS as _MANUAL_DEPARTMENT_PLATFORMS,
+)
+from app.services.store_departments import (
+    STORE_TO_PRICING_PLATFORM as _STORE_TO_PRICING_PLATFORM,
+)
+from app.services.store_departments import (
+    manual_store_departments as _manual_store_departments,
+)
+from app.services.store_departments import resolve_store_departments
 from app.services.telegram import TelegramClient, TelegramConfigError
 from app.worker_pool import get_arq_pool
 
@@ -1959,37 +1969,6 @@ PRICING_TO_INTEG_PLATFORM = {
     "magalu": IntegrationPlatform.MAGALU,
 }
 
-# `store_info.platform` uses short codes (ml, …); `pricing_accounts.platform`
-# uses the long form (mercadolivre, …). Used by `list_store_info` to wire
-# Tipo / Tab. Preço badges across the two tables.
-_STORE_TO_PRICING_PLATFORM = {
-    "ml": "mercadolivre",
-    "mercadolivre": "mercadolivre",
-    "shopee": "shopee",
-    "amazon": "amazon",
-    "tiktok": "tiktok",
-    "temu": "temu",
-    "aliexpress": "aliexpress",
-    "magalu": "magalu",
-    # Shein is its OWN pricing platform (PricingPlatform.SHEIN — already in the
-    # code enum and the prod DB enum). It used to be collapsed into "shopee"
-    # for SSH parity, but that made Shein and Shopee rows sharing an
-    # account_name (e.g. "kia") share departments and price columns. Shein now
-    # gets its own pricing accounts, columns and price table.
-    "shein": "shein",
-}
-
-# These platforms are supported as store registrations only. Choosing a
-# product type must not create a pricing account with invented fee rules.
-_MANUAL_DEPARTMENT_PLATFORMS = frozenset({"site", "carrefour", "netshoes"})
-
-
-def _manual_store_departments(row: StoreInfo) -> set[str]:
-    if (row.platform or "").strip().lower() not in _MANUAL_DEPARTMENT_PLATFORMS:
-        return set()
-    return set(row.manual_departments or [])
-
-
 # Sufixos de modalidade no nome da conta de preço ("kfa classico", "kfa premium").
 _SUFIXOS_MODALIDADE = {"classico", "clássico", "premium"}
 
@@ -2151,49 +2130,12 @@ async def _compute_store_info_badges(
     session: AsyncSession, user: User, row: StoreInfo
 ) -> tuple[list[str], bool, bool]:
     """Recompute the (departments, has_pricing, has_integration) triple for a
-    single StoreInfo row. Mirrors the loop list_store_info runs, factored out
-    so PATCH/POST responses don't return stale "Tab.Preço = Não" / "Integração
+    single StoreInfo row. Shares type resolution with Lojas/Faturamento so
+    PATCH/POST responses don't return stale "Tab.Preço = Não" / "Integração
     = Não" badges when the user edits an unrelated field."""
-    roots_by_id, _, _ = await _segment_index(session)
-    acc_rows = (
-        await session.execute(
-            select(
-                PricingAccount.name,
-                PricingAccount.platform,
-                PricingAccount.segment_id,
-                PricingAccount.store_info_id,
-            ).where(user_scope(PricingAccount, user))
-        )
-    ).all()
+    classification = (await resolve_store_departments(session, user, [row]))[row.id]
     sname = (row.account_name or "").strip().lower()
-    splat_alias = _STORE_TO_PRICING_PLATFORM.get(
-        (row.platform or "").strip().lower(),
-        (row.platform or "").strip().lower(),
-    )
     splat = (row.platform or "").strip().lower()
-    depts: set[str] = set()
-    for name, plat, seg_id, sinfo_id in acc_rows:
-        slug = roots_by_id.get(seg_id)
-        if not slug:
-            continue
-        # FK is authoritative: an account already wired to a store_info
-        # (store_info_id set) contributes its department ONLY to that exact
-        # row. Name/platform matching is a fallback for legacy FK-less
-        # accounts (e.g. SSH-seeded ML rows). Without this gate, Shein and
-        # Shopee rows that share account_name collide, because
-        # `_STORE_TO_PRICING_PLATFORM` collapses Shein → Shopee.
-        if sinfo_id is not None:
-            if sinfo_id == row.id:
-                depts.add(slug)
-            continue
-        if not sname:
-            continue
-        plat_val = plat.value if hasattr(plat, "value") else str(plat)
-        pname = (name or "").strip().lower()
-        if not pname or plat_val.lower() != splat_alias:
-            continue
-        if pname == sname or pname.startswith(sname + " "):
-            depts.add(slug)
 
     integ_rows = (
         await session.execute(select(Integration.name, Integration.platform))
@@ -2206,7 +2148,7 @@ async def _compute_store_info_badges(
                 has_integ = True
                 break
 
-    return sorted(depts | _manual_store_departments(row)), bool(depts), has_integ
+    return classification.departments, classification.has_pricing, has_integ
 
 
 def _store_info_out(
@@ -2252,40 +2194,7 @@ async def list_store_info(
             .order_by(StoreInfo.sort_order, StoreInfo.platform)
         )
     ).scalars().all()
-    # Badge wiring is FK-first: when `pricing_accounts.store_info_id` is set the
-    # account belongs to exactly that store_info row. Only FK-less rows (legacy
-    # SSH-seeded data) fall back to *(platform, account_name)* matching. This
-    # FK gate is what stops Shein and Shopee rows sharing an account_name from
-    # cross-contaminating — `_STORE_TO_PRICING_PLATFORM` collapses Shein →
-    # Shopee, so without it `(shopee, "kia")` would match both.
-    #
-    # Per-platform fallback rules (FK-less rows, mirrors SSH):
-    #   * Tipo            (`departments`)  — same platform AND
-    #                                         (exact OR prefix `<sname> `)
-    #   * Tab. Preço      (`has_pricing`)  — same platform AND exact match
-    #
-    # store_info platforms use short codes (`ml`, …); pricing_accounts uses
-    # the longer `mercadolivre`. Normalize both sides via PRICING_PLATFORM_ALIAS.
-    roots_by_id, _, _ = await _segment_index(session)
-    acc_rows = (
-        await session.execute(
-            select(
-                PricingAccount.name,
-                PricingAccount.platform,
-                PricingAccount.segment_id,
-                PricingAccount.store_info_id,
-            ).where(user_scope(PricingAccount, user))
-        )
-    ).all()
-    accs_normalized: list[tuple[str, str, str, UUID | None]] = []
-    for name, plat, seg_id, sinfo_id in acc_rows:
-        slug = roots_by_id.get(seg_id)
-        if not slug:
-            continue
-        plat_val = plat.value if hasattr(plat, "value") else str(plat)
-        accs_normalized.append(
-            ((name or "").strip().lower(), plat_val.lower(), slug, sinfo_id)
-        )
+    classifications = await resolve_store_departments(session, user, rows)
 
     # has_integration: strict (lower(name), platform) match against integrations.
     # Both store_info.platform and integrations.platform use short codes (ml,
@@ -2302,30 +2211,14 @@ async def list_store_info(
     out_list: list[StoreInfoOut] = []
     for r in rows:
         sname = (r.account_name or "").strip().lower()
-        splat_alias = _STORE_TO_PRICING_PLATFORM.get(
-            (r.platform or "").strip().lower(), (r.platform or "").strip().lower()
-        )
         splat = (r.platform or "").strip().lower()
-        depts: set[str] = set()
-        for pname, pplat, pdept, psinfo_id in accs_normalized:
-            # FK authoritative (see _compute_store_info_badges): a wired
-            # account counts only for its own store_info row; name matching is
-            # the FK-less fallback.
-            if psinfo_id is not None:
-                if psinfo_id == r.id:
-                    depts.add(pdept)
-                continue
-            if not sname or pplat != splat_alias or not pname:
-                continue
-            # SSH semantics: exact OR prefix `<sname> ` both count for
-            # has_pricing. So "barbosa" matches "barbosa classico" /
-            # "barbosa premium" — even when no exact "barbosa" pricing
-            # account exists for that platform.
-            if pname == sname or pname.startswith(sname + " "):
-                depts.add(pdept)
+        classification = classifications[r.id]
         has_integ = bool(sname and (sname, splat) in integ_keys)
         out_list.append(
-            _store_info_out(r, list(depts), has_pricing=bool(depts), has_integration=has_integ)
+            _store_info_out(
+                r, classification.departments,
+                has_pricing=classification.has_pricing, has_integration=has_integ,
+            )
         )
     return out_list
 

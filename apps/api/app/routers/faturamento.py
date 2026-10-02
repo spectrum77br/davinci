@@ -30,8 +30,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
 from app.deps.auth import require_permission, user_scope
-from app.models import BlingOrder, StoreInfo, User, UserRole
+from app.models import BlingOrder, Segment, StoreInfo, User, UserRole
 from app.schemas.faturamento import FaturamentoLinha, FaturamentoOut
+from app.services.store_departments import resolve_store_departments
 
 router = APIRouter(prefix="/api/faturamento", tags=["faturamento"])
 
@@ -50,6 +51,7 @@ async def list_faturamento(
     start: datetime | None = Query(None),
     end: datetime | None = Query(None),
     team: int | None = Query(None),
+    department: str | None = Query(None),
 ) -> FaturamentoOut:
     """Resumo por loja, no período, dos pedidos entregues.
 
@@ -58,6 +60,17 @@ async def list_faturamento(
     loja sem cadastro entra como "Sem cadastro" só na visão sem escopo.
     user_scope(StoreInfo, user) + `team` aplicam o filtro de equipe.
     """
+    if department is not None:
+        if user.role != UserRole.ADMIN:
+            raise HTTPException(403, detail={"code": "department_not_allowed"})
+        root_id = await session.scalar(
+            select(Segment.id).where(
+                Segment.parent_id.is_(None), Segment.slug == department,
+            )
+        )
+        if root_id is None:
+            raise HTTPException(400, detail={"code": "invalid_department"})
+
     if end is None:
         end = datetime.now(UTC)
     if start is None:
@@ -82,6 +95,20 @@ async def list_faturamento(
     scope_clauses = [user_scope(StoreInfo, user)]
     if team is not None:
         scope_clauses.append(StoreInfo.commercial_team == team)
+
+    # A classificação vem da mesma regra de Lojas, carregada em lote.
+    # O filtro afunila o roster antes de montar linhas e somar seus totais.
+    stores = (
+        await session.execute(select(StoreInfo).where(*scope_clauses))
+    ).scalars().all()
+    departments_by_store = await resolve_store_departments(session, user, stores)
+    selected_store_ids = [
+        store_id for store_id, classification in departments_by_store.items()
+        if department is None or department in classification.departments
+    ]
+    # Keep the roster consistent with the batch just classified even when
+    # another request creates a store between these two queries.
+    scope_clauses.append(StoreInfo.id.in_(selected_store_ids))
 
     # ETAPA 1 — pedidos do período: dedup por bling_id (bling_orders tem uma
     # linha por item, `total` repete) e agrega por loja Bling (pedidos +
@@ -150,6 +177,7 @@ async def list_faturamento(
             store_id=str(r.store_uuid),
             loja=loja_label,
             tipo=r.tipo,
+            departments=departments_by_store[r.store_uuid].departments,
             pedidos=ped,
             faturamento=round(fat, 2),
             ticket_medio=round(fat / ped, 2) if ped else 0.0,
@@ -158,12 +186,12 @@ async def list_faturamento(
         total_faturamento += fat
 
     # ETAPA 3 — pedidos órfãos (loja sem cadastro em store_info). Só na visão
-    # SEM escopo (admin/usuário sem equipe) e SEM filtro de equipe: órfão não
-    # tem equipe, então some quando se restringe a uma. Mantém a receita órfã
+    # SEM escopo (admin/usuário sem equipe) e SEM filtro de equipe ou tipo:
+    # órfão não tem essas classificações. Mantém a receita órfã
     # no total sem furar o escopo de quem é limitado a equipes.
     teams = user.sales_teams or []
     unscoped = user.role == UserRole.ADMIN or not teams
-    if team is None and unscoped:
+    if team is None and department is None and unscoped:
         orphan_stmt = (
             select(
                 agg_cte.c.bling_store_id.label("bling_store_id"),
