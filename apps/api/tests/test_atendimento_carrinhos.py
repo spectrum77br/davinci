@@ -612,12 +612,14 @@ async def test_esvaziado_nao_recupera(site, db):
 
 
 async def test_prazo_de_7_dias_e_so_reabre_quando_o_lojista_mexe(site, db):
+    # 02/10/2026: os 7 dias contam da ÚLTIMA MEXIDA do lojista (o parado_desde),
+    # não de quando o DaVinci viu o carrinho.
     site.responde("charlots", carrinhos_=[carrinho()])
     await rodada(site)
-    # Ainda dentro dos 7 dias.
-    await rodada(site, T0 + timedelta(days=6, hours=23))
+    # Ainda dentro dos 7 dias desde a última mexida.
+    await rodada(site, PARADO + timedelta(days=6, hours=23))
     assert (await _carrinhos(db))[0].situacao == CARRINHO_ABERTO
-    r = await rodada(site, T0 + timedelta(days=7, minutes=1))
+    r = await rodada(site, PARADO + timedelta(days=7, minutes=1))
     assert r["prazo"]["vencidos"] == 1
     [c] = await _carrinhos(db)
     assert (c.situacao, c.motivo_fim) == (CARRINHO_NAO_RECUPERADO, FIM_CARRINHO_PRAZO)
@@ -647,8 +649,9 @@ async def test_evento_atrasado_corrige_o_prazo(site, db):
     await rodada(site, T0 + timedelta(days=7, minutes=5))
     [c] = await _carrinhos(db)
     assert (c.situacao, c.motivo_fim) == (CARRINHO_NAO_RECUPERADO, FIM_CARRINHO_PRAZO)
-    # Voltou, com a finalização do dia 6: foi recuperado, sim.
-    site.responde("charlots", eventos=[evento(criado=T0 + timedelta(days=6))])
+    # Voltou, com a finalização do dia 5 (dentro dos 7 dias desde a última
+    # mexida): foi recuperado, sim.
+    site.responde("charlots", eventos=[evento(criado=T0 + timedelta(days=5))])
     r = await rodada(site, T0 + timedelta(days=7, hours=2))
     assert r["charlots"]["corrigidos"] == 1
     [c] = await _carrinhos(db)
@@ -658,7 +661,7 @@ async def test_evento_atrasado_corrige_o_prazo(site, db):
     ids = [m.externo_id for m in await _mensagens(db, conversa.id)]
     assert f"carrinho:{c.id}:fim:recuperado" in ids
     # Finalização DEPOIS dos 7 dias não corrige (é outra compra).
-    site.responde("charlots", carrinhos_=[carrinho(99)])
+    site.responde("charlots", carrinhos_=[carrinho(99, parado=T0 + timedelta(days=7))])
     await rodada(site, T0 + timedelta(days=8))
     site.respostas["charlots"] = httpx.Response(503)
     await rodada(site, T0 + timedelta(days=15, minutes=5))
@@ -865,7 +868,7 @@ async def test_cartao_com_o_estoque_atual_do_davinci(client, db, pessoa, site):
         "Charlots",
         "https://charlots.com.br",
     )
-    assert k["prazo_em"].startswith("2026-10-09T12:00")
+    assert k["prazo_em"].startswith("2026-10-08T06:00")  # 7 dias da última mexida (PARADO)
     # Um item sem preço: sem total (não inventa).
     assert k["valor_total"] is None
     est = [i["estoque"] for i in k["itens"]]
@@ -969,3 +972,23 @@ async def test_permissao_e_escopo_por_equipe(client, db, make_user, auth_as, sit
     assert (r.status_code, r.json()["detail"]["code"]) == (404, "carrinho_nao_encontrado")
     [c] = await _carrinhos(db)
     assert c.situacao == CARRINHO_ABERTO
+
+
+async def test_mexer_de_novo_empurra_o_prazo_e_carrinho_ja_vencido_nao_abre(site, db):
+    """02/10/2026: o prazo corre da última mexida — inclusive a dos `ativos`."""
+    site.responde("charlots", carrinhos_=[carrinho()])
+    await rodada(site)
+    # O lojista mexeu no 6º dia (aparece nos ativos): o prazo recomeça.
+    mexido = PARADO + timedelta(days=6)
+    site.responde("charlots", ativos=[{"lojista_id": 123, "atualizado_em": _z(mexido)}])
+    await rodada(site, mexido + timedelta(minutes=10))
+    r = await rodada(site, PARADO + timedelta(days=7, hours=1))
+    assert r["prazo"]["vencidos"] == 0
+    assert (await _carrinhos(db))[0].situacao == CARRINHO_ABERTO
+    r = await rodada(site, mexido + timedelta(days=7, minutes=1))
+    assert r["prazo"]["vencidos"] == 1
+    # Carrinho que já chega parado há mais de 7 dias não vira conversa.
+    site.responde("uranyx", carrinhos_=[carrinho(555, parado=T0 - timedelta(days=9))])
+    r = await rodada(site)
+    assert r["uranyx"]["novos"] == 0 and r["uranyx"]["ignorados"] == 1
+    assert await _carrinhos(db, "555") == []

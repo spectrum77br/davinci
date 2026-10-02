@@ -144,8 +144,11 @@ lojista logado, em vez de só apagar — é assim que o DaVinci sabe
                        evento atrasado — site fora do ar — ainda corrige o
                        "não recuperado" por prazo, se cair dentro dos 7 dias);
       não recuperado — evento `esvaziado` posterior ao `parado_desde`, ou 7
-                       dias desde `detectado_em` (o prazo corre mesmo com o
-                       site fora do ar);
+                       dias desde a ÚLTIMA MEXIDA do lojista (`ultima_mexida`:
+                       o `parado_desde` ou o `dados.mexido_em`, o mais novo —
+                       Eduardo, 02/10/2026; o prazo corre mesmo com o site
+                       fora do ar). Carrinho que já chega parado há mais de 7
+                       dias não abre episódio (já seria "não recuperado");
       resolvido      — "Marcar como resolvido" na tela.
     O carrinho que SOME da lista sem evento (o lojista voltou a mexer, ou
     saiu da janela de 30 dias) fica aberto com `dados.fora_da_lista_desde`
@@ -909,6 +912,20 @@ async def _garantir_conversa(
     return conversa, criada
 
 
+def ultima_mexida(c: AtendimentoCarrinho) -> datetime | None:
+    """A última vez que o lojista mexeu no carrinho: o `parado_desde` (o site o
+    atualiza a cada mexida) ou o `dados.mexido_em` (o site o lista em `ativos`),
+    o mais novo. É daí que correm os 7 dias do "não recuperado" (02/10/2026)."""
+    marcos = [m for m in (_utc(c.parado_desde), _data((c.dados or {}).get("mexido_em"))) if m]
+    return max(marcos) if marcos else _utc(c.detectado_em)
+
+
+def vence_em(c: AtendimentoCarrinho) -> datetime | None:
+    """Quando o carrinho aberto vira "não recuperado" (7 dias da última mexida)."""
+    base = ultima_mexida(c)
+    return base + timedelta(days=CARRINHO_DIAS_RECUPERACAO) if base else None
+
+
 async def _abrir(
     session: AsyncSession, canal: AtendimentoCanal, site: str, lido: CarrinhoLido, agora: datetime
 ) -> AtendimentoCarrinho:
@@ -1247,8 +1264,8 @@ async def processar(
         c = await _travado(session, cid)
         if c is None or c.situacao != CARRINHO_NAO_RECUPERADO or c.motivo_fim != FIM_CARRINHO_PRAZO:
             return None
-        detectado = _utc(c.detectado_em) or agora
-        if not (_utc(c.parado_desde) < ev.criado_em <= detectado + prazo):
+        limite = vence_em(c) or agora
+        if not (_utc(c.parado_desde) < ev.criado_em <= limite):
             return None
         await encerrar(
             session,
@@ -1291,6 +1308,10 @@ async def processar(
         )
         if marco is not None and lido.parado_desde <= marco:
             # Nada de novo desde o último desfecho (ou é a sobra de um pedido).
+            return "ignorados"
+        if lido.parado_desde + prazo <= agora:
+            # Parado há mais de 7 dias desde a última mexida: já nasceria
+            # "não recuperado" (a 1ª leitura olha 30 dias para trás).
             return "ignorados"
         try:
             async with session.begin_nested():
@@ -1350,7 +1371,7 @@ async def processar(
 
 
 async def fechar_vencidos(*, agora: datetime | None = None) -> dict:
-    """O prazo (7 dias desde `detectado_em`): aberto vira não recuperado. Só banco.
+    """O prazo (7 dias desde a última mexida do lojista): aberto vira não recuperado. Só banco.
 
     Roda mesmo com o site fora do ar (o prazo é de relógio); o evento que
     chegar atrasado ainda corrige para recuperado (`processar`).
@@ -1361,13 +1382,18 @@ async def fechar_vencidos(*, agora: datetime | None = None) -> dict:
         ids = await _ids(
             session,
             AtendimentoCarrinho.situacao == CARRINHO_ABERTO,
-            AtendimentoCarrinho.detectado_em <= agora - timedelta(days=CARRINHO_DIAS_RECUPERACAO),
+            # Pré-filtro: a última mexida nunca é anterior ao `parado_desde`;
+            # a conta exata (com o `mexido_em`) é feita na linha travada.
+            AtendimentoCarrinho.parado_desde <= agora - timedelta(days=CARRINHO_DIAS_RECUPERACAO),
         )
 
         async def _vencer(cid: UUID) -> str | None:
             c = await _travado(session, cid)
             if c is None or c.situacao != CARRINHO_ABERTO:
                 return None
+            limite = vence_em(c)
+            if limite is not None and limite > agora:
+                return None  # o lojista mexeu depois: o prazo recomeçou
             await encerrar(
                 session,
                 c,
@@ -1817,7 +1843,7 @@ def para_tela(
         "visto_em": _utc(c.visto_em),
         "fora_da_lista_desde": _data(dados.get("fora_da_lista_desde")),
         "mexido_em": _data(dados.get("mexido_em")),
-        "prazo_em": (detectado + timedelta(days=CARRINHO_DIAS_RECUPERACAO) if detectado else None),
+        "prazo_em": vence_em(c),
         "encerrado_em": _utc(c.encerrado_em),
         "recuperado_em": _utc(c.recuperado_em),
         "itens_enviados": [i for i in (dados.get("itens_enviados") or []) if isinstance(i, dict)][
