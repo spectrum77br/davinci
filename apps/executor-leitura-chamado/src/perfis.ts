@@ -47,6 +47,12 @@ export function lojaMl(conta: string | null | undefined): string {
  *  robô antigo tratava "victor mei" como "victor"). */
 const APELIDO_ML: Record<string, string> = { zorvex: "zortex", victormei: "victor" };
 
+/** Loja do ML que usa um perfil de outro nome — pelo `user_id` do perfil (o mesmo
+ *  fixo da IA de Chamado, `ferramentas/adspower.py` PERFIL_FIXO, que abre a
+ *  consulta: ler e responder têm que entrar na mesma conta). Vinicius 02/10
+ *  (296985): jlas2 = perfil 110 "JLAS 2 - ml", não o 32 "JLAS 2 - Mercado Livre". */
+const PERFIL_FIXO_ML: Record<string, string> = { jlas2: "k1bhpx2w" };
+
 const GRUPOS_OPERACAO = new Set(["lojas", "israel", "marrocos", "contas"]);
 
 /** Perfis dedicados do ML ("Forpaper - Mercado Livre"), pela chave da loja. Com
@@ -56,7 +62,8 @@ export async function mapaMl(
   perfis?: adspower.AdsPowerProfile[]
 ): Promise<Map<string, Perfil>> {
   const out = new Map<string, Perfil & { operacao: boolean }>();
-  for (const p of perfis ?? (await adspower.list())) {
+  const todos = perfis ?? (await adspower.list());
+  for (const p of todos) {
     const m = /^(.+?)\s*-\s*mercado\s*livre\s*$/i.exec(p.name.trim());
     if (!m) continue;
     const chave = lojaMl(m[1]);
@@ -68,6 +75,10 @@ export async function mapaMl(
   }
   const final = new Map<string, Perfil>();
   for (const [k, v] of out) final.set(k, { userId: v.userId, nome: v.nome });
+  for (const [chave, userId] of Object.entries(PERFIL_FIXO_ML)) {
+    const p = todos.find((x) => x.user_id === userId);
+    if (p) final.set(chave, { userId: p.user_id, nome: p.name });
+  }
   return final;
 }
 

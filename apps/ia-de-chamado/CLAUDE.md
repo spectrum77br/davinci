@@ -229,7 +229,9 @@ consulta.
 6. `ferramentas/tela <perfil> campos`. Na caixa da descrição, o `texto` da
    abertura como está (só fatos; não invente nada). Na caixa "número da venda
    (Opcional)", o `pedido_marketplace`. Fotos: `anexos --id <chamado_id> --pasta
-   tmp/<pedido>` e `anexar` **só as da abertura** (`da_abertura: true`).
+   tmp/<pedido>` e `anexar` **só as da abertura** (`da_abertura: true`) e as da
+   própria tarefa (`mensagem_id` igual ao da tarefa — quando a abertura falhou e
+   uma pessoa mandou o texto de novo pelo "Enfileirar pro robô").
 7. `ferramentas/tela <perfil> foto tmp/abrir-<pedido>.png` e confira o print.
    - **TESTE — pare aqui.** Não clique "Continuar". Registre:
      `python3 ferramentas/davinci_chamados.py abrir-ml teste --mensagem <mensagem_id> --print tmp/abrir-<pedido>.png --nota "<o que o assistente disse e o que você preencheu>"`

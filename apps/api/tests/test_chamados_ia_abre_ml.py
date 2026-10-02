@@ -246,3 +246,74 @@ async def test_parado_no_captcha_avisa_e_vai_pra_pessoa(client, db, monkeypatch)
     assert r.status_code == 200 and r.json()["status"] == "falhou", r.text
     assert r.json()["erro"].startswith("humano: parou na tela (captcha)")
     assert avisos == [("298394", "captcha")]
+
+
+async def _abertura_que_falhou_no_eduardo(db) -> ChamadoMensagem:
+    """296985 (jlas2): a abertura falhou 3× no robô do Eduardo em 24/09."""
+    m = await _abertura(db, pedido="296985")
+    m.status = "falhou"
+    m.erro = "não consegui selecionar E-mail no formulário"
+    await db.commit()
+    return m
+
+
+async def test_replica_manual_sem_consulta_e_a_abertura_da_ia(client, db, make_user, auth_as):
+    """02/10 (296985): o Cairo mandou o texto de novo pelo "Enfileirar pro robô"
+    num chamado do ML que nunca foi aberto. Isso grava RÉPLICA — e ninguém pegava
+    (a IA só via "abertura"; o Eduardo já não recebe ML)."""
+    velha = await _abertura_que_falhou_no_eduardo(db)
+    await _assumir(client)
+    auth_as(await make_user(permissions={"chamados": {"view": True, "edit": True}}))
+    r = await client.post(
+        f"/api/chamados/{velha.chamado_id}/mensagens", data={"texto": "Olá, preciso de ajuda"}
+    )
+    assert r.status_code == 201 and r.json()["status"] == "pendente", r.text
+    nova = r.json()["id"]
+    assert r.json()["tipo"] == "replica"
+
+    (t,) = await _fila_ia(client)
+    assert t["mensagem_id"] == nova and t["tipo"] == "abrir"
+    assert t["texto"] == "Olá, preciso de ajuda"
+    assert await _lease_antigo(client) == []
+
+    r = await client.post(
+        "/api/chamados/agent/abrir-ml/pegar", headers=IA, json={"mensagem_id": nova}
+    )
+    assert r.status_code == 200, r.text
+    r = await client.post(
+        "/api/chamados/agent/abrir-ml/resultado",
+        headers=IA,
+        json={"mensagem_id": nova, "ok": True, "consulta": "486000123"},
+    )
+    assert r.status_code == 200 and r.json()["status"] == "enviada", r.text
+    ch = await db.get(Chamado, velha.chamado_id)
+    await db.refresh(ch)
+    assert ch.chamado == "486000123" and chamados_leitura.e_consulta_ml(ch)
+    await db.refresh(velha)
+    assert velha.status == "falhou"  # a abertura antiga fica como estava
+    assert await _fila_ia(client) == []
+
+
+async def test_replica_de_consulta_ja_aberta_nao_e_da_ia(client, db):
+    """Com a consulta aberta, a réplica é das mãos do ML (responder) — a IA não
+    abre outra consulta nem marca a réplica."""
+    m = await _abertura(db)
+    ch = await db.get(Chamado, m.chamado_id)
+    ch.chamado = "485999001"
+    rep = svc.nova_mensagem(
+        ch, texto="Retomando", tipo="replica", direcao="enviada", autor_nome="cairo sa",
+        status="pendente",
+    )
+    rep.canal = "robo"
+    db.add(rep)
+    await db.commit()
+    await _assumir(client)
+    assert await _fila_ia(client) == []
+    r = await client.post(
+        "/api/chamados/agent/abrir-ml/resultado",
+        headers=IA,
+        json={"mensagem_id": str(rep.id), "ok": False, "erro": "x"},
+    )
+    assert r.status_code == 409 and r.json()["detail"]["code"] == "abertura_fora_da_ia"
+    await db.refresh(rep)
+    assert rep.status == "pendente"

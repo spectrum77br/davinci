@@ -62,6 +62,9 @@ PERFIL_FIXO = {
     ("marquezini", "shopee"): "160",
     # "Loja 206081932" (TikTok) = JLAS — "esse que mandou é o 123 jlas tiktok"
     ("206081932", "tiktok"): "123",
+    # 02/10 (296985): "fica o 110" = "JLAS 2 - ml" (Contabilidade), não o 32
+    # "JLAS 2 - Mercado Livre" (Lojas) que o nome escolheria.
+    ("jlas 2", "ml"): "110",
 }
 PALAVRAS_PLATAFORMA = {p for s in APELIDOS.values() for p in s} | {
     "mercadolivre", "loja", "tiktok shop",

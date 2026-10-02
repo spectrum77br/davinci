@@ -1692,12 +1692,19 @@ def _plataforma_ml_sql():
     return func.lower(func.trim(func.coalesce(Chamado.plataforma, ""))).in_(_PLATAFORMA_ML)
 
 
+# 02/10 (296985): a abertura falhou no robô do Eduardo e o Cairo mandou o texto de
+# novo pelo "Enfileirar pro robô" — isso grava RÉPLICA. Sem consulta aberta, a
+# réplica manual É a abertura (o lease antigo também entregava como "abrir");
+# sem ela aqui, ninguém pegava: a IA só via "abertura" e o Eduardo já não recebe ML.
+_TIPOS_ABERTURA_ML = ("abertura", "replica")
+
+
 def _condicoes_abrir_ml(agora: datetime) -> list:
     """Abertura de chamado do ML ainda sem consulta, na fila do robô (canal robô)."""
     return [
         *_condicoes_da_fila(agora),
         _SEM_PROTOCOLO,
-        ChamadoMensagem.tipo == "abertura",
+        ChamadoMensagem.tipo.in_(_TIPOS_ABERTURA_ML),
         _plataforma_ml_sql(),
     ]
 
@@ -2156,10 +2163,13 @@ async def agent_abrir_ml_resultado(
         raise HTTPException(404, detail={"code": "chamado_mensagem_not_found"})
     ch = await _get(session, m.chamado_id)
     if not (
-        m.tipo == "abertura"
+        m.tipo in _TIPOS_ABERTURA_ML
         and (m.canal or "") == "robo"
         and (ch.plataforma or "").strip().lower() in _PLATAFORMA_ML
     ):
+        raise HTTPException(409, detail={"code": "abertura_fora_da_ia"})
+    # réplica de consulta JÁ aberta é das mãos do ML (responder), não da IA
+    if m.tipo == "replica" and m.status != "enviada" and (ch.chamado or "").strip():
         raise HTTPException(409, detail={"code": "abertura_fora_da_ia"})
     if body.ok and (ch.chamado or "").strip() and ch.chamado.strip() != body.consulta:
         raise HTTPException(409, detail={"code": "chamado_ja_tem_protocolo", "chamado": ch.chamado})
