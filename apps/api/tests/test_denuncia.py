@@ -770,13 +770,15 @@ async def test_caso_extra_compra_e_processo(client, make_user, auth_as):
     await _carga(client)
     auth_as(await make_user(permissions={"denuncia": {"view": True, "edit": True}}))
     r = await client.put("/api/denuncia/casos/7/extra", json={
-        "compra_loja": "loja_x (Shopee)", "compra_pedido": "2609ABC", "compra_previsao": "2026-10-05",
+        "compra_data": "2026-09-29", "compra_loja": "loja_x (Shopee)", "compra_pedido": "2609ABC",
+        "compra_previsao": "2026-10-05",
         "processo_numero": "1001234-56.2026.8.26.0100",
         "processo_link": "https://www.jusbrasil.com.br/processos/123",
         "mov_data": "2026-10-01", "mov_texto": "Distribuído", "mov_status": "Em andamento"})
     assert r.status_code == 200, r.text
     e = (await client.get("/api/denuncia/casos")).json()["itens"][0]["extra"]
     assert e["compra_previsao"] == "2026-10-05" and e["processo_numero"].startswith("1001234")
+    assert e["compra_data"] == "2026-09-29"
     assert (await client.get("/api/denuncia/casos/7")).json()["extra"]["mov_status"] == "Em andamento"
     # só o que vem muda; "" apaga
     r = await client.put("/api/denuncia/casos/7/extra", json={"mov_status": ""})

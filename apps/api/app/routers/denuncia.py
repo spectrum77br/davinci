@@ -1428,12 +1428,12 @@ def _status_caso(status: str | None, enviado_em: Any, compra: dict | None) -> st
 
 
 def _extra_dict(x: DenunciaCasoExtra | None) -> dict:
-    campos = ("compra_loja", "compra_pedido", "compra_previsao", "processo_numero", "processo_link",
-              "mov_data", "mov_texto", "mov_status", "atualizado_por")
+    campos = ("compra_data", "compra_loja", "compra_pedido", "compra_previsao", "processo_numero",
+              "processo_link", "mov_data", "mov_texto", "mov_status", "atualizado_por")
     if x is None:
         return dict.fromkeys(campos)
     out = {k: getattr(x, k) for k in campos}
-    for k in ("compra_previsao", "mov_data"):
+    for k in ("compra_data", "compra_previsao", "mov_data"):
         out[k] = out[k].isoformat() if out[k] else None
     return out
 
@@ -1503,7 +1503,7 @@ async def listar_casos(
 
 _CAMPOS_EXTRA_TEXTO = ("compra_loja", "compra_pedido", "processo_numero", "processo_link",
                        "mov_texto", "mov_status")
-_CAMPOS_EXTRA_DATA = ("compra_previsao", "mov_data")
+_CAMPOS_EXTRA_DATA = ("compra_data", "compra_previsao", "mov_data")
 
 
 @router.put("/casos/{caso_id}/extra")

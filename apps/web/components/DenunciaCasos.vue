@@ -4,6 +4,7 @@
 // entrega), as provas obrigatórias e o envio ao advogado. Cópia só leitura
 // do sistema de Fiscalização do Mac mini da Makisa.
 import { computed, onMounted, ref, watch } from 'vue'
+import { ExternalLink } from 'lucide-vue-next'
 import {
   type Prova, ativoSimNao, dataBr, dinheiro, numero, pillAtivo, pillResultado, pillSituacaoDenuncia,
   pillStatusCaso, pillStatusCompra,
@@ -36,6 +37,7 @@ type Caso = {
 // 01/10 (Vinicius): o que a gente acompanha do caso no DaVinci (o robô não tem): onde comprou,
 // pedido e previsão; o processo (nº, link do Jusbrasil) e a última movimentação
 type CasoExtra = {
+  compra_data: string | null
   compra_loja: string | null
   compra_pedido: string | null
   compra_previsao: string | null
@@ -259,7 +261,7 @@ function situacaoAnexo(x: Anexo): { texto: string; cls: string } {
 }
 
 const VAZIO_EXTRA: CasoExtra = {
-  compra_loja: null, compra_pedido: null, compra_previsao: null, processo_numero: null, processo_link: null,
+  compra_data: null, compra_loja: null, compra_pedido: null, compra_previsao: null, processo_numero: null, processo_link: null,
   mov_data: null, mov_texto: null, mov_status: null, atualizado_por: null,
 }
 const extraForm = ref<Record<keyof CasoExtra, string>>(Object.fromEntries(Object.keys(VAZIO_EXTRA).map((k) => [k, ''])) as any)
@@ -292,6 +294,22 @@ async function salvarExtra() {
     extraErro.value = ERROS_EXTRA[code] || code || e?.message || 'erro'
   } finally {
     salvandoExtra.value = false
+  }
+}
+
+// células da tabela (mesmo jeito do painel Devoluções): salva ao sair do campo, só se mudou
+const celula = 'h-7 w-full rounded-none border-0 bg-transparent px-1 text-xs focus:bg-background focus:outline-none focus:ring-1 focus:ring-primary disabled:cursor-default disabled:opacity-70'
+async function salvarCampo(c: Caso, campo: keyof CasoExtra, valor: string) {
+  const v = (valor || '').trim()
+  const atual = (c.extra[campo] || '') as string
+  if (v === atual) return
+  try {
+    const r = await api<{ extra: CasoExtra }>(`/api/denuncia/casos/${c.id}/extra`, { method: 'PUT', body: { [campo]: v } })
+    c.extra = r.extra
+    if (detalhe.value && aberto.value === c.id) detalhe.value.extra = r.extra
+  } catch (e: any) {
+    const code = e?.data?.detail?.code
+    erro.value = `${c.codigo}: ${ERROS_EXTRA[code] || code || e?.message || 'não salvou'}`
   }
 }
 
@@ -352,59 +370,90 @@ defineExpose({ carregar })
       </Button>
     </div>
 
+    <!-- 01/10 (Vinicius: "assim como no painel Devoluções"): grupos Compra e Jurídico com as colunas
+         separadas; os campos que o robô não tem a pessoa preenche aqui mesmo — salvam ao sair do campo -->
+    <div class="text-right text-xs text-muted-foreground -mb-3">compra e jurídico salvam ao sair do campo</div>
     <div class="table-card overflow-x-auto">
-      <table class="w-full">
+      <table class="w-full min-w-[1500px] text-xs">
         <thead>
           <tr>
+            <th class="!py-1 text-[11px] font-semibold" colspan="5">Caso</th>
+            <th class="!py-1 text-center text-[11px] font-semibold border-l-[3px] border-gray-400 dark:border-gray-600 bg-amber-50 dark:bg-amber-900/20" colspan="4">Compra</th>
+            <th class="!py-1 text-center text-[11px] font-semibold border-l-[3px] border-gray-400 dark:border-gray-600 bg-emerald-50 dark:bg-emerald-900/20" colspan="5">Jurídico</th>
+          </tr>
+          <tr class="[&>th]:whitespace-nowrap">
             <th class="w-10"><input type="checkbox" class="size-4 align-middle" :checked="todosMarcados" title="marcar todos" @change="marcarTodos"></th>
             <th class="w-24">Aberto em</th>
             <th>Caso</th>
             <th>Loja</th>
             <th class="text-center">Status</th>
-            <th class="text-center">Compra</th>
-            <th class="text-center">Jurídico</th>
+            <th class="w-[130px] bg-amber-50 dark:bg-amber-900/20 border-l-[3px] border-gray-400 dark:border-gray-600">Data</th>
+            <th class="w-[170px] bg-amber-50 dark:bg-amber-900/20">Loja</th>
+            <th class="w-[160px] bg-amber-50 dark:bg-amber-900/20">Pedido</th>
+            <th class="w-[130px] bg-amber-50 dark:bg-amber-900/20">Previsão entrega</th>
+            <th class="w-[100px] bg-emerald-50 dark:bg-emerald-900/20 border-l-[3px] border-gray-400 dark:border-gray-600" title="Quando o caso foi enviado ao advogado">Data</th>
+            <th class="w-[210px] bg-emerald-50 dark:bg-emerald-900/20" title="Nº do processo">Protocolo</th>
+            <th class="w-[130px] bg-emerald-50 dark:bg-emerald-900/20">Últ. movimentação</th>
+            <th class="w-[190px] bg-emerald-50 dark:bg-emerald-900/20">Último status</th>
+            <th class="w-[150px] bg-emerald-50 dark:bg-emerald-900/20" title="Link de consulta do processo no Jusbrasil">Jusbrasil</th>
           </tr>
         </thead>
         <tbody>
           <tr v-if="carregando && itens.length === 0">
-            <td colspan="7" class="text-center text-muted-foreground py-6">carregando…</td>
+            <td colspan="14" class="text-center text-muted-foreground py-6">carregando…</td>
           </tr>
           <tr v-else-if="visiveis.length === 0">
-            <td colspan="7" class="text-center text-muted-foreground py-6">nenhum caso</td>
+            <td colspan="14" class="text-center text-muted-foreground py-6">nenhum caso</td>
           </tr>
-          <tr v-for="c in visiveis" :key="c.id" class="cursor-pointer" :class="selecionados.has(c.id) ? 'bg-primary/5' : ''" @click="abrir(c)">
+          <tr v-for="c in visiveis" :key="c.id" class="cursor-pointer [&>td]:align-middle" :class="selecionados.has(c.id) ? 'bg-primary/5' : ''" @click="abrir(c)">
             <td @click.stop><input type="checkbox" class="size-4 align-middle" :checked="selecionados.has(c.id)" @change="marcar(c.id)"></td>
-            <td class="text-xs tabular-nums whitespace-nowrap">{{ dataBr(c.aberto_em, false) }}</td>
+            <td class="tabular-nums whitespace-nowrap">{{ dataBr(c.aberto_em, false) }}</td>
             <td>
               <div class="font-medium text-sm whitespace-nowrap">{{ c.codigo }}</div>
-              <div class="text-[11px] text-muted-foreground max-w-[260px] truncate" :title="c.titulo_anuncio || ''">{{ c.titulo_anuncio || c.anuncio_id }}</div>
+              <div class="text-[11px] text-muted-foreground max-w-[220px] truncate" :title="c.titulo_anuncio || ''">{{ c.titulo_anuncio || c.anuncio_id }}</div>
             </td>
-            <td class="max-w-[240px]">
+            <td class="max-w-[200px]">
               <div class="truncate text-sm" :title="c.loja || ''">{{ c.loja || '—' }}</div>
               <div class="text-[11px] text-muted-foreground truncate">{{ c.marketplace || '—' }}<span v-if="c.shop_id" class="font-mono"> · {{ c.shop_id }}</span></div>
             </td>
             <td class="text-center">
               <span :class="pillStatusCaso(c.status)" :title="c.status_mini && c.status_mini !== c.status ? `no sistema do mini: ${c.status_mini}` : ''">{{ c.status || '—' }}</span>
             </td>
-            <td class="text-center text-xs whitespace-nowrap">
-              <template v-if="c.compra || c.extra.compra_pedido">
-                <div class="font-mono">{{ c.extra.compra_pedido || c.compra?.pedido || '—' }}</div>
-                <div class="text-[11px] text-muted-foreground">
-                  <template v-if="c.compra?.entregue_em">entregue {{ dataBr(c.compra.entregue_em, false) }}</template>
-                  <template v-else-if="c.extra.compra_previsao">previsão {{ dataBr(c.extra.compra_previsao, false) }}</template>
-                  <template v-else>{{ c.compra?.status || 'comprado' }}</template>
-                </div>
-              </template>
-              <span v-else class="text-muted-foreground">—</span>
+            <!-- Compra -->
+            <td class="!px-1 bg-amber-50/40 dark:bg-amber-900/10 border-l-[3px] border-gray-400 dark:border-gray-600" @click.stop>
+              <input type="date" :value="c.extra.compra_data || c.compra?.data || ''" :disabled="!podeAnexar" :class="celula" @change="(e) => salvarCampo(c, 'compra_data', (e.target as HTMLInputElement).value)">
             </td>
-            <td class="text-center text-xs tabular-nums whitespace-nowrap">
-              <!-- 01/10 (Vinicius): enviado = só a data (+ o processo); sem envio = botão "enviar" (abre o que falta) -->
-              <template v-if="c.juridico_enviado_em">
-                <div>{{ dataBr(c.juridico_enviado_em, false) }}</div>
-                <div v-if="c.extra.processo_numero" class="font-mono text-[11px] text-muted-foreground">{{ c.extra.processo_numero }}</div>
-                <span v-if="c.extra.mov_status" class="pill-info mt-0.5" :title="c.extra.mov_texto || ''">{{ c.extra.mov_status }}</span>
-              </template>
-              <Button v-else size="sm" variant="outline" class="h-7 px-2.5 text-xs" @click.stop="abrir(c, true)">enviar</Button>
+            <td class="!px-1 bg-amber-50/40 dark:bg-amber-900/10" @click.stop>
+              <input :value="c.extra.compra_loja || ''" :disabled="!podeAnexar" :class="celula" :placeholder="c.compra ? (c.loja || 'loja') : 'onde comprou'" @keydown.enter="(e) => (e.target as HTMLInputElement).blur()" @blur="(e) => salvarCampo(c, 'compra_loja', (e.target as HTMLInputElement).value)">
+            </td>
+            <td class="!px-1 bg-amber-50/40 dark:bg-amber-900/10" @click.stop>
+              <input :value="c.extra.compra_pedido || c.compra?.pedido || ''" :disabled="!podeAnexar" :class="[celula, 'font-mono']" placeholder="nº do pedido" @keydown.enter="(e) => (e.target as HTMLInputElement).blur()" @blur="(e) => salvarCampo(c, 'compra_pedido', (e.target as HTMLInputElement).value)">
+            </td>
+            <td class="!px-1 bg-amber-50/40 dark:bg-amber-900/10" @click.stop>
+              <span v-if="c.compra?.entregue_em" class="px-1 text-emerald-700 dark:text-emerald-400 whitespace-nowrap">entregue {{ dataBr(c.compra.entregue_em, false) }}</span>
+              <input v-else type="date" :value="c.extra.compra_previsao || ''" :disabled="!podeAnexar" :class="celula" @change="(e) => salvarCampo(c, 'compra_previsao', (e.target as HTMLInputElement).value)">
+            </td>
+            <!-- Jurídico -->
+            <td class="!px-1 bg-emerald-50/40 dark:bg-emerald-900/10 border-l-[3px] border-gray-400 dark:border-gray-600 whitespace-nowrap tabular-nums" @click.stop>
+              <span v-if="c.juridico_enviado_em" class="px-1">{{ dataBr(c.juridico_enviado_em, false) }}</span>
+              <Button v-else size="sm" variant="outline" class="h-7 px-2.5 text-xs" @click="abrir(c, true)">enviar</Button>
+            </td>
+            <td class="!px-1 bg-emerald-50/40 dark:bg-emerald-900/10" @click.stop>
+              <input :value="c.extra.processo_numero || ''" :disabled="!podeAnexar" :class="[celula, 'font-mono']" placeholder="nº do processo" @keydown.enter="(e) => (e.target as HTMLInputElement).blur()" @blur="(e) => salvarCampo(c, 'processo_numero', (e.target as HTMLInputElement).value)">
+            </td>
+            <td class="!px-1 bg-emerald-50/40 dark:bg-emerald-900/10" @click.stop>
+              <input type="date" :value="c.extra.mov_data || ''" :disabled="!podeAnexar" :class="celula" @change="(e) => salvarCampo(c, 'mov_data', (e.target as HTMLInputElement).value)">
+            </td>
+            <td class="!px-1 bg-emerald-50/40 dark:bg-emerald-900/10" @click.stop>
+              <input :value="c.extra.mov_status || ''" :disabled="!podeAnexar" :class="celula" :title="c.extra.mov_texto || ''" placeholder="ex.: em andamento" @keydown.enter="(e) => (e.target as HTMLInputElement).blur()" @blur="(e) => salvarCampo(c, 'mov_status', (e.target as HTMLInputElement).value)">
+            </td>
+            <td class="!px-1 bg-emerald-50/40 dark:bg-emerald-900/10" @click.stop>
+              <div class="flex items-center gap-1">
+                <input :value="c.extra.processo_link || ''" :disabled="!podeAnexar" :class="celula" placeholder="colar o link" @keydown.enter="(e) => (e.target as HTMLInputElement).blur()" @blur="(e) => salvarCampo(c, 'processo_link', (e.target as HTMLInputElement).value)">
+                <a v-if="c.extra.processo_link" :href="c.extra.processo_link" target="_blank" rel="noopener noreferrer" class="shrink-0 text-primary" title="abrir no Jusbrasil">
+                  <ExternalLink class="size-3.5" />
+                </a>
+              </div>
             </td>
           </tr>
         </tbody>

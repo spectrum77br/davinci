@@ -214,6 +214,7 @@ class DenunciaCasoExtra(Base):
     __tablename__ = "denuncia_casos_extra"
 
     caso_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
+    compra_data: Mapped[date | None] = mapped_column(Date)
     compra_loja: Mapped[str | None] = mapped_column(Text)
     compra_pedido: Mapped[str | None] = mapped_column(Text)
     compra_previsao: Mapped[date | None] = mapped_column(Date)
