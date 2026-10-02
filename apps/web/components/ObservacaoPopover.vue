@@ -15,7 +15,10 @@ const props = withDefaults(defineProps<{
   placeholder?: string
   titulo?: string
   dica?: string
-}>(), { disabled: false, placeholder: '', titulo: 'Observação', dica: '' })
+  // 02/10 (aba Casos da Denúncia): texto centralizado na célula / número (pedido, processo) em fonte mono
+  centro?: boolean
+  mono?: boolean
+}>(), { disabled: false, placeholder: '', titulo: 'Observação', dica: '', centro: false, mono: false })
 
 const emit = defineEmits<{
   (e: 'update:modelValue', value: string): void
@@ -48,7 +51,8 @@ function focarCaixa(e: Event) {
     <PopoverTrigger as-child>
       <button
         type="button"
-        class="block h-7 w-full truncate rounded-none px-1 text-left text-xs hover:bg-background focus:outline-none focus:ring-1 focus:ring-primary"
+        class="block h-7 w-full truncate rounded-none px-1 text-xs hover:bg-background focus:outline-none focus:ring-1 focus:ring-primary"
+        :class="[centro ? 'text-center' : 'text-left', mono && modelValue ? 'font-mono' : '']"
         :title="modelValue || (disabled ? '' : 'clique pra escrever')"
       >
         <span v-if="modelValue">{{ modelValue }}</span>

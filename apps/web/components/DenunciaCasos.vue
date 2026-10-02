@@ -298,7 +298,28 @@ async function salvarExtra() {
 }
 
 // células da tabela (mesmo jeito do painel Devoluções): salva ao sair do campo, só se mudou
-const celula = 'h-7 w-full rounded-none border-0 bg-transparent px-1 text-xs focus:bg-background focus:outline-none focus:ring-1 focus:ring-primary disabled:cursor-default disabled:opacity-70'
+const celula = 'h-7 w-full rounded-none border-0 bg-transparent px-1 text-center text-xs focus:bg-background focus:outline-none focus:ring-1 focus:ring-primary disabled:cursor-default disabled:opacity-70'
+// 02/10 (Vinicius: "coloca balãozinho igual fez nos outros painéis"): os campos de texto abrem um
+// balão; o que se digita fica no rascunho da célula até o balão fechar (aí salva, se mudou)
+type CampoTexto = 'compra_loja' | 'compra_pedido' | 'processo_numero' | 'mov_status' | 'processo_link'
+const rascunhos = ref<Record<string, string>>({})
+function valorCampo(c: Caso, campo: CampoTexto): string {
+  const r = rascunhos.value[`${c.id}:${campo}`]
+  if (r !== undefined) return r
+  if (campo === 'compra_pedido') return c.extra.compra_pedido || c.compra?.pedido || ''
+  return c.extra[campo] || ''
+}
+function rascunhar(c: Caso, campo: CampoTexto, v: string) {
+  rascunhos.value = { ...rascunhos.value, [`${c.id}:${campo}`]: v }
+}
+async function salvarRascunho(c: Caso, campo: CampoTexto) {
+  const chave = `${c.id}:${campo}`
+  const v = rascunhos.value[chave]
+  if (v === undefined) return
+  await salvarCampo(c, campo, campo === 'mov_status' ? v : v.replace(/\s*\n\s*/g, ' '))
+  const { [chave]: _x, ...resto } = rascunhos.value
+  rascunhos.value = resto
+}
 async function salvarCampo(c: Caso, campo: keyof CasoExtra, valor: string) {
   const v = (valor || '').trim()
   const atual = (c.extra[campo] || '') as string
@@ -348,7 +369,11 @@ defineExpose({ carregar })
 <template>
   <div class="space-y-5">
 
-    <div v-if="Object.keys(porStatus).length" class="grid grid-cols-2 sm:grid-cols-4 gap-2">
+    <!-- resumo no topo: o total e cada status (clicar filtra a tabela) -->
+    <div v-if="Object.keys(porStatus).length" class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
+      <button type="button" class="text-left rounded-lg" :class="status === '' ? 'ring-2 ring-primary' : ''" @click="status = ''">
+        <StatCard compact label="Todos os casos" :value="numero(itens.length)" />
+      </button>
       <button
         v-for="(n, s) in porStatus"
         :key="s"
@@ -363,39 +388,60 @@ defineExpose({ carregar })
 
     <div v-if="erro" class="rounded-md border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700">{{ erro }}</div>
 
-    <div class="flex items-center justify-end gap-2">
-      <Button v-if="selecionados.size" size="sm" variant="ghost" class="h-8 text-xs" @click="selecionados = new Set()">limpar</Button>
-      <Button size="sm" variant="outline" class="h-8 text-xs" :disabled="!selecionados.size" title="marque os casos na tabela" @click="listaAberta = true">
-        lista de compra{{ selecionados.size ? ` (${selecionados.size})` : '' }}
-      </Button>
+    <div class="flex items-center justify-between gap-2">
+      <div class="text-xs text-muted-foreground">compra e jurídico: clique no campo para escrever — salva ao sair</div>
+      <div class="flex items-center gap-2">
+        <Button v-if="selecionados.size" size="sm" variant="ghost" class="h-8 text-xs" @click="selecionados = new Set()">limpar</Button>
+        <Button size="sm" variant="outline" class="h-8 text-xs" :disabled="!selecionados.size" title="marque os casos na tabela" @click="listaAberta = true">
+          lista de compra{{ selecionados.size ? ` (${selecionados.size})` : '' }}
+        </Button>
+      </div>
     </div>
 
     <!-- 01/10 (Vinicius: "assim como no painel Devoluções"): grupos Compra e Jurídico com as colunas
-         separadas; os campos que o robô não tem a pessoa preenche aqui mesmo — salvam ao sair do campo -->
-    <div class="text-right text-xs text-muted-foreground -mb-3">compra e jurídico salvam ao sair do campo</div>
+         separadas; os campos que o robô não tem a pessoa preenche aqui mesmo. 02/10 ("ficou tudo
+         apertado"): largura fixa por coluna (rola para o lado), Compra e Jurídico centralizados e
+         os campos de texto no balão (ObservacaoPopover) — a linha não muda de altura. -->
     <div class="table-card overflow-x-auto">
-      <table class="w-full min-w-[1500px] text-xs">
+      <table class="w-full min-w-[1906px] table-fixed text-xs">
+        <!-- larguras fixas; só a coluna Caso (o produto) estica quando a tela é maior -->
+        <colgroup>
+          <col class="w-[40px]">
+          <col class="w-[88px]">
+          <col>
+          <col class="w-[170px]">
+          <col class="w-[156px]">
+          <col class="w-[132px]">
+          <col class="w-[140px]">
+          <col class="w-[150px]">
+          <col class="w-[132px]">
+          <col class="w-[96px]">
+          <col class="w-[200px]">
+          <col class="w-[132px]">
+          <col class="w-[160px]">
+          <col class="w-[130px]">
+        </colgroup>
         <thead>
           <tr>
-            <th class="!py-1 text-[11px] font-semibold" colspan="5">Caso</th>
-            <th class="!py-1 text-center text-[11px] font-semibold border-l-[3px] border-gray-400 dark:border-gray-600 bg-amber-50 dark:bg-amber-900/20" colspan="4">Compra</th>
-            <th class="!py-1 text-center text-[11px] font-semibold border-l-[3px] border-gray-400 dark:border-gray-600 bg-emerald-50 dark:bg-emerald-900/20" colspan="5">Jurídico</th>
+            <th class="!py-1.5 text-[11px] font-semibold" colspan="5">Caso</th>
+            <th class="!py-1.5 !text-center text-[11px] font-semibold border-l-[3px] border-l-gray-400 dark:border-l-gray-600 !bg-amber-50 dark:!bg-amber-900/20" colspan="4">Compra</th>
+            <th class="!py-1.5 !text-center text-[11px] font-semibold border-l-[3px] border-l-gray-400 dark:border-l-gray-600 !bg-emerald-50 dark:!bg-emerald-900/20" colspan="5">Jurídico</th>
           </tr>
           <tr class="[&>th]:whitespace-nowrap">
-            <th class="w-10"><input type="checkbox" class="size-4 align-middle" :checked="todosMarcados" title="marcar todos" @change="marcarTodos"></th>
-            <th class="w-24">Aberto em</th>
+            <th class="!px-0 !text-center"><input type="checkbox" class="size-4 align-middle" :checked="todosMarcados" title="marcar todos" @change="marcarTodos"></th>
+            <th>Aberto em</th>
             <th>Caso</th>
             <th>Loja</th>
-            <th class="text-center">Status</th>
-            <th class="w-[130px] bg-amber-50 dark:bg-amber-900/20 border-l-[3px] border-gray-400 dark:border-gray-600">Data</th>
-            <th class="w-[170px] bg-amber-50 dark:bg-amber-900/20">Loja</th>
-            <th class="w-[160px] bg-amber-50 dark:bg-amber-900/20">Pedido</th>
-            <th class="w-[130px] bg-amber-50 dark:bg-amber-900/20">Previsão entrega</th>
-            <th class="w-[100px] bg-emerald-50 dark:bg-emerald-900/20 border-l-[3px] border-gray-400 dark:border-gray-600" title="Quando o caso foi enviado ao advogado">Data</th>
-            <th class="w-[210px] bg-emerald-50 dark:bg-emerald-900/20" title="Nº do processo">Protocolo</th>
-            <th class="w-[130px] bg-emerald-50 dark:bg-emerald-900/20">Últ. movimentação</th>
-            <th class="w-[190px] bg-emerald-50 dark:bg-emerald-900/20">Último status</th>
-            <th class="w-[150px] bg-emerald-50 dark:bg-emerald-900/20" title="Link de consulta do processo no Jusbrasil">Jusbrasil</th>
+            <th class="!text-center">Status</th>
+            <th class="!text-center !bg-amber-50 dark:!bg-amber-900/20 border-l-[3px] border-l-gray-400 dark:border-l-gray-600">Data</th>
+            <th class="!text-center !bg-amber-50 dark:!bg-amber-900/20">Loja</th>
+            <th class="!text-center !bg-amber-50 dark:!bg-amber-900/20">Pedido</th>
+            <th class="!text-center !bg-amber-50 dark:!bg-amber-900/20">Previsão entrega</th>
+            <th class="!text-center !bg-emerald-50 dark:!bg-emerald-900/20 border-l-[3px] border-l-gray-400 dark:border-l-gray-600" title="Quando o caso foi enviado ao advogado">Data</th>
+            <th class="!text-center !bg-emerald-50 dark:!bg-emerald-900/20" title="Nº do processo">Protocolo</th>
+            <th class="!text-center !bg-emerald-50 dark:!bg-emerald-900/20">Últ. movimentação</th>
+            <th class="!text-center !bg-emerald-50 dark:!bg-emerald-900/20">Último status</th>
+            <th class="!text-center !bg-emerald-50 dark:!bg-emerald-900/20" title="Link de consulta do processo no Jusbrasil">Jusbrasil</th>
           </tr>
         </thead>
         <tbody>
@@ -406,50 +452,95 @@ defineExpose({ carregar })
             <td colspan="14" class="text-center text-muted-foreground py-6">nenhum caso</td>
           </tr>
           <tr v-for="c in visiveis" :key="c.id" class="cursor-pointer [&>td]:align-middle" :class="selecionados.has(c.id) ? 'bg-primary/5' : ''" @click="abrir(c)">
-            <td @click.stop><input type="checkbox" class="size-4 align-middle" :checked="selecionados.has(c.id)" @change="marcar(c.id)"></td>
+            <td class="!px-0 text-center" @click.stop><input type="checkbox" class="size-4 align-middle" :checked="selecionados.has(c.id)" @change="marcar(c.id)"></td>
             <td class="tabular-nums whitespace-nowrap">{{ dataBr(c.aberto_em, false) }}</td>
             <td>
               <div class="font-medium text-sm whitespace-nowrap">{{ c.codigo }}</div>
-              <div class="text-[11px] text-muted-foreground max-w-[220px] truncate" :title="c.titulo_anuncio || ''">{{ c.titulo_anuncio || c.anuncio_id }}</div>
+              <div class="text-[11px] text-muted-foreground truncate" :title="c.titulo_anuncio || ''">{{ c.titulo_anuncio || c.anuncio_id }}</div>
             </td>
-            <td class="max-w-[200px]">
+            <td>
               <div class="truncate text-sm" :title="c.loja || ''">{{ c.loja || '—' }}</div>
               <div class="text-[11px] text-muted-foreground truncate">{{ c.marketplace || '—' }}<span v-if="c.shop_id" class="font-mono"> · {{ c.shop_id }}</span></div>
             </td>
-            <td class="text-center">
-              <span :class="pillStatusCaso(c.status)" :title="c.status_mini && c.status_mini !== c.status ? `no sistema do mini: ${c.status_mini}` : ''">{{ c.status || '—' }}</span>
+            <td class="!px-2 text-center">
+              <span class="whitespace-nowrap" :class="pillStatusCaso(c.status)" :title="c.status_mini && c.status_mini !== c.status ? `no sistema do mini: ${c.status_mini}` : ''">{{ c.status || '—' }}</span>
             </td>
             <!-- Compra -->
-            <td class="!px-1 bg-amber-50/40 dark:bg-amber-900/10 border-l-[3px] border-gray-400 dark:border-gray-600" @click.stop>
+            <td class="!px-2 bg-amber-50/40 dark:bg-amber-900/10 border-l-[3px] border-l-gray-400 dark:border-l-gray-600" @click.stop>
               <input type="date" :value="c.extra.compra_data || c.compra?.data || ''" :disabled="!podeAnexar" :class="celula" @change="(e) => salvarCampo(c, 'compra_data', (e.target as HTMLInputElement).value)">
             </td>
-            <td class="!px-1 bg-amber-50/40 dark:bg-amber-900/10" @click.stop>
-              <input :value="c.extra.compra_loja || ''" :disabled="!podeAnexar" :class="celula" :placeholder="c.compra ? (c.loja || 'loja') : 'onde comprou'" @keydown.enter="(e) => (e.target as HTMLInputElement).blur()" @blur="(e) => salvarCampo(c, 'compra_loja', (e.target as HTMLInputElement).value)">
+            <td class="!px-2 bg-amber-50/40 dark:bg-amber-900/10" @click.stop>
+              <ObservacaoPopover
+                :model-value="valorCampo(c, 'compra_loja')"
+                :disabled="!podeAnexar"
+                :titulo="`Onde comprou · ${c.codigo}`"
+                placeholder="onde comprou"
+                centro
+                @update:model-value="(v) => rascunhar(c, 'compra_loja', v)"
+                @save="salvarRascunho(c, 'compra_loja')"
+              />
             </td>
-            <td class="!px-1 bg-amber-50/40 dark:bg-amber-900/10" @click.stop>
-              <input :value="c.extra.compra_pedido || c.compra?.pedido || ''" :disabled="!podeAnexar" :class="[celula, 'font-mono']" placeholder="nº do pedido" @keydown.enter="(e) => (e.target as HTMLInputElement).blur()" @blur="(e) => salvarCampo(c, 'compra_pedido', (e.target as HTMLInputElement).value)">
+            <td class="!px-2 bg-amber-50/40 dark:bg-amber-900/10" @click.stop>
+              <ObservacaoPopover
+                :model-value="valorCampo(c, 'compra_pedido')"
+                :disabled="!podeAnexar"
+                :titulo="`Nº do pedido · ${c.codigo}`"
+                placeholder="nº do pedido"
+                centro
+                mono
+                @update:model-value="(v) => rascunhar(c, 'compra_pedido', v)"
+                @save="salvarRascunho(c, 'compra_pedido')"
+              />
             </td>
-            <td class="!px-1 bg-amber-50/40 dark:bg-amber-900/10" @click.stop>
-              <span v-if="c.compra?.entregue_em" class="px-1 text-emerald-700 dark:text-emerald-400 whitespace-nowrap">entregue {{ dataBr(c.compra.entregue_em, false) }}</span>
+            <td class="!px-2 bg-amber-50/40 dark:bg-amber-900/10 text-center" @click.stop>
+              <span v-if="c.compra?.entregue_em" class="text-emerald-700 dark:text-emerald-400 whitespace-nowrap">entregue {{ dataBr(c.compra.entregue_em, false) }}</span>
               <input v-else type="date" :value="c.extra.compra_previsao || ''" :disabled="!podeAnexar" :class="celula" @change="(e) => salvarCampo(c, 'compra_previsao', (e.target as HTMLInputElement).value)">
             </td>
             <!-- Jurídico -->
-            <td class="!px-1 bg-emerald-50/40 dark:bg-emerald-900/10 border-l-[3px] border-gray-400 dark:border-gray-600 whitespace-nowrap tabular-nums" @click.stop>
-              <span v-if="c.juridico_enviado_em" class="px-1">{{ dataBr(c.juridico_enviado_em, false) }}</span>
-              <Button v-else size="sm" variant="outline" class="h-7 px-2.5 text-xs" @click="abrir(c, true)">enviar</Button>
+            <td class="!px-2 bg-emerald-50/40 dark:bg-emerald-900/10 border-l-[3px] border-l-gray-400 dark:border-l-gray-600 text-center whitespace-nowrap tabular-nums" @click.stop>
+              <span v-if="c.juridico_enviado_em">{{ dataBr(c.juridico_enviado_em, false) }}</span>
+              <Button v-else size="sm" variant="outline" class="h-7 px-3 text-xs" @click="abrir(c, true)">enviar</Button>
             </td>
-            <td class="!px-1 bg-emerald-50/40 dark:bg-emerald-900/10" @click.stop>
-              <input :value="c.extra.processo_numero || ''" :disabled="!podeAnexar" :class="[celula, 'font-mono']" placeholder="nº do processo" @keydown.enter="(e) => (e.target as HTMLInputElement).blur()" @blur="(e) => salvarCampo(c, 'processo_numero', (e.target as HTMLInputElement).value)">
+            <td class="!px-2 bg-emerald-50/40 dark:bg-emerald-900/10" @click.stop>
+              <ObservacaoPopover
+                :model-value="valorCampo(c, 'processo_numero')"
+                :disabled="!podeAnexar"
+                :titulo="`Nº do processo · ${c.codigo}`"
+                placeholder="nº do processo"
+                centro
+                mono
+                @update:model-value="(v) => rascunhar(c, 'processo_numero', v)"
+                @save="salvarRascunho(c, 'processo_numero')"
+              />
             </td>
-            <td class="!px-1 bg-emerald-50/40 dark:bg-emerald-900/10" @click.stop>
+            <td class="!px-2 bg-emerald-50/40 dark:bg-emerald-900/10" @click.stop>
               <input type="date" :value="c.extra.mov_data || ''" :disabled="!podeAnexar" :class="celula" @change="(e) => salvarCampo(c, 'mov_data', (e.target as HTMLInputElement).value)">
             </td>
-            <td class="!px-1 bg-emerald-50/40 dark:bg-emerald-900/10" @click.stop>
-              <input :value="c.extra.mov_status || ''" :disabled="!podeAnexar" :class="celula" :title="c.extra.mov_texto || ''" placeholder="ex.: em andamento" @keydown.enter="(e) => (e.target as HTMLInputElement).blur()" @blur="(e) => salvarCampo(c, 'mov_status', (e.target as HTMLInputElement).value)">
+            <td class="!px-2 bg-emerald-50/40 dark:bg-emerald-900/10" @click.stop>
+              <ObservacaoPopover
+                :model-value="valorCampo(c, 'mov_status')"
+                :disabled="!podeAnexar"
+                :titulo="`Último status · ${c.codigo}`"
+                :dica="c.extra.mov_texto || ''"
+                placeholder="ex.: em andamento"
+                centro
+                @update:model-value="(v) => rascunhar(c, 'mov_status', v)"
+                @save="salvarRascunho(c, 'mov_status')"
+              />
             </td>
-            <td class="!px-1 bg-emerald-50/40 dark:bg-emerald-900/10" @click.stop>
-              <div class="flex items-center gap-1">
-                <input :value="c.extra.processo_link || ''" :disabled="!podeAnexar" :class="celula" placeholder="colar o link" @keydown.enter="(e) => (e.target as HTMLInputElement).blur()" @blur="(e) => salvarCampo(c, 'processo_link', (e.target as HTMLInputElement).value)">
+            <td class="!px-2 bg-emerald-50/40 dark:bg-emerald-900/10" @click.stop>
+              <div class="flex items-center gap-1 min-w-0">
+                <div class="min-w-0 flex-1">
+                  <ObservacaoPopover
+                    :model-value="valorCampo(c, 'processo_link')"
+                    :disabled="!podeAnexar"
+                    :titulo="`Link do Jusbrasil · ${c.codigo}`"
+                    placeholder="colar o link"
+                    centro
+                    @update:model-value="(v) => rascunhar(c, 'processo_link', v)"
+                    @save="salvarRascunho(c, 'processo_link')"
+                  />
+                </div>
                 <a v-if="c.extra.processo_link" :href="c.extra.processo_link" target="_blank" rel="noopener noreferrer" class="shrink-0 text-primary" title="abrir no Jusbrasil">
                   <ExternalLink class="size-3.5" />
                 </a>
