@@ -244,6 +244,7 @@ async def test_resumo_conta_por_etiqueta(client, db, make_user, pessoa):
         "reclamacao": 1,
         "ag_cancelamento": 1,
         "devolucao": 1,
+        "avaliacao": 0,
         "pre_venda": 1,
         "pos_venda": 2,
     }
@@ -252,6 +253,7 @@ async def test_resumo_conta_por_etiqueta(client, db, make_user, pessoa):
         "reclamacao": 1,
         "ag_cancelamento": 1,
         "devolucao": 1,
+        "avaliacao": 0,
         "pre_venda": 1,
         "pos_venda": 1,
     }

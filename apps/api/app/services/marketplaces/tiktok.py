@@ -869,6 +869,28 @@ class TikTokClient:
         lista = d.get("records") or d.get("return_records") or []
         return [r for r in lista if isinstance(r, dict)]
 
+    async def get_return_records_strict(
+        self, return_id: str, *, locale: str = "pt-BR"
+    ) -> list[dict]:
+        """A mesma linha do tempo do `get_return_records`, mas LEVANTA em erro
+        da API (aquele devolve [] e não separa "sem eventos" de "falhou"). Só
+        leitura (GET). É de onde o atendimento tira o MOTIVO do caso
+        (`atendimento.reclamacoes_devolucoes`): a TikTok não tem GET do
+        detalhe da devolução (`returns/{id}` = 404, medido em 02/10/2026), e o
+        evento do comprador que abre o caso (`ORDER_RETURN`/`ORDER_REFUND`)
+        traz o `reason_text` — o rótulo da TikTok, em pt-BR com o `locale`."""
+        resp = await self._get(
+            f"/return_refund/202309/returns/{return_id}/records", {"locale": locale}
+        )
+        if resp.get("code") not in (0, None):
+            raise RuntimeError(
+                f"tiktok_return_records code={resp.get('code')} "
+                f"msg={str(resp.get('message'))[:200]}"
+            )
+        d = resp.get("data") or {}
+        lista = d.get("records") or d.get("return_records") or []
+        return [r for r in lista if isinstance(r, dict)]
+
     async def get_reject_reasons(self, return_id: str, *, locale: str = "pt-BR") -> list[dict]:
         """Motivos de recusa válidos pra ESSA devolução no estado atual
         (GET /return_refund/202309/reject_reasons?return_or_cancel_id=…) →

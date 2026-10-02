@@ -446,6 +446,7 @@ async def test_contexto_que_falha_nao_esconde_a_conversa(
         "nota_fiscal": None,
         "outras_perguntas": [],
         "reclamacoes": [],
+        "avaliacoes": [],
     }
 
 

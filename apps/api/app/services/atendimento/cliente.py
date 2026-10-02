@@ -9,10 +9,13 @@ entram no contexto da IA (avaliou mal ou reclamação aberta → pessoa confere)
 De onde vem cada coisa, por plataforma:
 
 - MERCADO LIVRE: os pedidos do comprador AO VIVO (`/orders/search?buyer=`, o
-  ML filtra — medido em 28/09) e a avaliação dos 5 pedidos mais recentes
-  (`/orders/{id}/feedback`, 404 = sem avaliação). Cache de 2 h no Redis por
-  comprador: a tela relê a conversa aberta a cada 15 s. Falha também fica em
-  cache (10 min), para a API da loja não levar uma chamada a cada 15 s.
+  ML filtra — medido em 28/09). Cache de 2 h no Redis por comprador: a tela
+  relê a conversa aberta a cada 15 s. Falha também fica em cache (10 min),
+  para a API da loja não levar uma chamada a cada 15 s. As avaliações, do
+  índice (`atendimento_avaliacoes_loja`, a OPINIÃO do produto que o cron das
+  avaliações lê, com o `order_id` e o id do comprador — 02/10/2026): a
+  avaliação da VENDA (`/orders/{id}/feedback`) que o cartão lia ao vivo está
+  morta (404 em 60 de 60 pedidos) — eram 5 GET à toa por cartão.
 - SHOPEE: pelo índice próprio (`indice.py`: pedidos por `buyer_user_id`,
   avaliações por pedido e pelo apelido do comprador na loja), que o job de
   hora em hora e a importação do histórico alimentam. Sem a marca de
@@ -94,9 +97,8 @@ SINAL_PRIMEIRA_COMPRA = "primeira_compra"
 # Os que pedem PESSOA na resposta (a IA marca precisa_humano).
 SINAIS_DE_CUIDADO = frozenset({SINAL_AVALIOU_MAL, SINAL_RECLAMACAO_ABERTA})
 
-# Até 2 estrelas é avaliação ruim (o "negative" do ML vale 1; o "neutral", 3).
+# Até 2 estrelas é avaliação ruim.
 NOTA_RUIM = 2
-ESTRELAS_ML = {"positive": 5, "neutral": 3, "negative": 1}
 
 # Status de pedido (em minúsculas; ML e Shopee juntos).
 CANCELADOS = frozenset({"cancelled", "in_cancel", "invalid"})
@@ -115,17 +117,16 @@ CACHE_FALHA_S = 10 * 60
 # do ML — e a busca termina em segundo plano e deixa o cache pronto.
 TEMPO_MAX_API_S = 6.0
 MAX_PEDIDOS_ML = 50
-MAX_FEEDBACKS = 5
 _CHAVE_ML = "atendimento:cliente:ml:{}:{}"
 # Uma busca por comprador de cada vez: enquanto o cache não é gravado, a
 # tela (a cada 15 s, por atendente) e a IA abririam uma busca NOVA cada uma.
-# O TTL passa do pior caso da busca (3 tentativas de 30 s no 429, pedidos e
-# feedbacks): processo morto solta sozinho.
+# O TTL passa do pior caso da busca (3 tentativas de 30 s no 429): processo
+# morto solta sozinho.
 _CHAVE_ML_EM_ANDAMENTO = "atendimento:cliente:ml:andamento:{}:{}"
 EM_ANDAMENTO_TTL_S = 300
-# Teto de buscas por loja por minuto (cada uma = 1 /orders/search + até 5
-# /feedback), na mesma cota que os robôs de pedido usam — o mesmo número do
-# botão "atualizar" do painel Pedido.
+# Teto de buscas por loja por minuto (cada uma = 1 /orders/search), na mesma
+# cota que os robôs de pedido usam — o mesmo número do botão "atualizar" do
+# painel Pedido.
 LIMITE_ML_POR_LOJA = 10
 JANELA_LIMITE_ML_S = 60
 _CHAVE_ML_LIMITE = "atendimento:cliente:ml:limite:{}"
@@ -272,42 +273,6 @@ def _pedido_ml(o: dict) -> dict | None:
     }
 
 
-def _avaliacao_ml(corpo: dict, pedido: str, seller: str, comprador: str) -> dict | None:
-    """A avaliação que o COMPRADOR deu à venda, no corpo do `/orders/{id}/feedback`.
-
-    O corpo traz dois lados (`sale`, `purchase`). Vale o que veio do comprador
-    (`from.id`) ou foi para a loja (`to.id`); o que a loja escreveu sobre o
-    comprador nunca entra. Sem `from`/`to`, o `sale` (a venda avaliada).
-    """
-    lados = [x for x in (corpo.get("sale"), corpo.get("purchase")) if isinstance(x, dict)]
-
-    def de(lado: dict, chave: str) -> str:
-        return _id(_dict(lado.get(chave)).get("id"))
-
-    escolhido = next((x for x in lados if comprador and de(x, "from") == comprador), None)
-    escolhido = escolhido or next((x for x in lados if seller and de(x, "to") == seller), None)
-    if escolhido is None and isinstance(corpo.get("sale"), dict):
-        escolhido = corpo["sale"]
-    if escolhido is None or (seller and de(escolhido, "from") == seller):
-        return None
-    estrelas = ESTRELAS_ML.get(_id(escolhido.get("rating")).lower())
-    if estrelas is None:
-        return None
-    resposta = escolhido.get("reply")
-    if isinstance(resposta, dict):
-        resposta = resposta.get("text") or resposta.get("message")
-    mensagem = escolhido.get("message")
-    return {
-        "estrelas": estrelas,
-        "texto": (
-            _curto(mensagem, indice.TEXTO_AVALIACAO_MAX) if isinstance(mensagem, str) else None
-        ),
-        "pedido": pedido,
-        "criado_em": _iso(indice.de_iso(escolhido.get("date_created"))),
-        "respondida": bool(isinstance(resposta, str) and resposta.strip()),
-    }
-
-
 async def _cache_ler(chave: str) -> dict | None:
     try:
         bruto = await redis.get(chave)
@@ -330,7 +295,7 @@ async def _cache_gravar(chave: str, valor: dict, ttl: int) -> None:
 
 
 async def _buscar_ml(integration: Integration, comprador: str) -> dict:
-    """Os pedidos do comprador e a avaliação dos mais recentes, direto do ML."""
+    """Os pedidos do comprador, direto do ML (as avaliações vêm do índice: ver o topo)."""
     cliente = await clientes.cliente_da_integracao(integration)
     corpo = await cliente.pedidos_do_comprador(comprador, limit=MAX_PEDIDOS_ML)
     corpo = _dict(corpo)
@@ -339,17 +304,7 @@ async def _buscar_ml(integration: Integration, comprador: str) -> dict:
     ]
     pedidos.sort(key=lambda p: p["criado_em"] or "", reverse=True)
     total = int(_valor(_dict(corpo.get("paging")).get("total")) or len(pedidos))
-    seller = _id(_dict(getattr(cliente, "creds", None)).get("user_id"))
-    recentes = pedidos[:MAX_FEEDBACKS]
-    respostas = await asyncio.gather(
-        *(cliente.feedback_do_pedido(p["pedido"]) for p in recentes), return_exceptions=True
-    )
-    avaliacoes = [
-        a
-        for p, r in zip(recentes, respostas, strict=True)
-        if isinstance(r, dict) and (a := _avaliacao_ml(r, p["pedido"], seller, comprador))
-    ]
-    return {"pedidos": pedidos, "total": max(total, len(pedidos)), "avaliacoes": avaliacoes}
+    return {"pedidos": pedidos, "total": max(total, len(pedidos)), "avaliacoes": []}
 
 
 async def _buscar_e_guardar(
@@ -477,23 +432,6 @@ def _compras_do_ml(dados: dict) -> list[_Compra]:
     ]
 
 
-def _avaliacoes_do_ml(dados: dict) -> list[_Avaliacao]:
-    saida = []
-    for a in dados.get("avaliacoes") or []:
-        if not isinstance(a, dict) or not isinstance(a.get("estrelas"), int):
-            continue
-        saida.append(
-            _Avaliacao(
-                estrelas=a["estrelas"],
-                texto=a.get("texto"),
-                pedido=a.get("pedido"),
-                criado_em=indice.de_iso(a.get("criado_em")),
-                respondida=bool(a.get("respondida")),
-            )
-        )
-    return saida
-
-
 # ── Shopee (pelo índice) ──────────────────────────────────────────────────
 
 
@@ -527,15 +465,21 @@ async def _compras_do_indice(
 
 
 async def _avaliacoes_do_indice(
-    session: AsyncSession, conversa: AtendimentoConversa, pedidos: list[str]
+    session: AsyncSession,
+    conversa: AtendimentoConversa,
+    pedidos: list[str],
+    comprador: str | None = None,
 ) -> list[_Avaliacao]:
-    """Pelas compras dele e pelo apelido na loja (`buyer_username` = `to_name` do chat)."""
+    """Pelas compras dele, pelo id dele (`comprador_id`, o ML grava) e, na
+    Shopee, pelo apelido na loja (`buyer_username` = `to_name` do chat)."""
     a = AtendimentoAvaliacaoLoja
     condicoes = []
     if pedidos:
         condicoes.append(a.pedido.in_(pedidos))
+    if comprador:
+        condicoes.append(a.comprador_id == comprador)
     nome = (conversa.comprador_nome or "").strip()
-    if nome:
+    if nome and conversa.plataforma == "shopee":
         condicoes.append(a.comprador_nome_loja == nome)
     if not condicoes:
         return []
@@ -867,8 +811,13 @@ async def _cartao(session: AsyncSession, conversa: AtendimentoConversa) -> dict:
             ao_vivo = await _ml_ao_vivo(session, conversa, comprador)
             if ao_vivo is not None:
                 compras = _compras_do_ml(ao_vivo)
-                avaliacoes = _avaliacoes_do_ml(ao_vivo)
                 completo = int(ao_vivo.get("total") or 0) <= len(compras)
+            avaliacoes = await _avaliacoes_do_indice(
+                session,
+                conversa,
+                [c.pedido for c in compras] + [c.pedido for c in das_conversas],
+                comprador,
+            )
         elif conversa.plataforma == "shopee":
             compras = await _compras_do_indice(session, conversa, comprador)
             avaliacoes = await _avaliacoes_do_indice(

@@ -151,6 +151,7 @@ from app.services.atendimento.constantes import (
     CATEGORIAS_SO_HUMANO,
     CONVERSA_ABERTA,
     CONVERSA_FECHADA,
+    ETIQUETA_AVALIACAO,
     ETIQUETA_POS_VENDA,
     ETIQUETA_PRE_VENDA,
     ETIQUETAS,
@@ -233,6 +234,8 @@ FILTROS = (
     "reclamacao",
     "devolucao",
     "ag_cancelamento",
+    # Avaliação de venda sem resposta da loja (RF8, 02/10/2026).
+    "avaliacao",
 )
 # "Vencendo" = prazo da plataforma em menos de 2 h (e ainda não vencido).
 VENCENDO = timedelta(hours=2)
@@ -327,6 +330,8 @@ _CANAL_DESLIGADO = "desligado"
 # inteiro em `sys.modules`.
 _LOJAS = "app.services.atendimento.lojas"
 _CLIENTE = "app.services.atendimento.cliente"
+# As avaliações de venda (RF8): a pior nota pendente no selo da lista.
+_AVALIACOES = "app.services.atendimento.avaliacoes"
 _MANUAL = "app.services.atendimento.manual"
 # Trava da TRANSAÇÃO de quem grava regra: a conferência de conflito e o
 # INSERT/UPDATE ficam juntos. Sem ela, dois "Salvar" ao mesmo tempo (duas
@@ -825,7 +830,47 @@ async def _conversa_out(session: AsyncSession, c: AtendimentoConversa) -> Conver
     # O cabeçalho com o nome da loja (lido DEPOIS dos atributos: ver
     # `_nomes_das_lojas`).
     await _com_nome_da_loja(session, [base])
+    await _com_estrelas_da_avaliacao(session, [base])
     return ConversaOut(**base)
+
+
+async def _com_estrelas_da_avaliacao(session: AsyncSession, itens: list[dict[str, Any]]) -> None:
+    """`avaliacao_estrelas` (a pior nota PENDENTE) nos itens com a etiqueta Avaliação.
+
+    O selo "AVALIAÇÃO ★★" da lista (RF8). Só os itens com a etiqueta (ou o
+    indicador) de avaliação — uma consulta de conversas e uma de avaliações
+    para a página toda. Enfeite: um erro aqui deixa o selo sem as estrelas,
+    nunca derruba a lista (SAVEPOINT).
+    """
+    alvo = [
+        i
+        for i in itens
+        if not i.get("somente_leitura")
+        and (
+            i.get("etiqueta") == ETIQUETA_AVALIACAO
+            or ETIQUETA_AVALIACAO in (i.get("etiquetas_secundarias") or [])
+        )
+    ]
+    if not alvo:
+        return
+    try:
+        ids = [UUID(str(i["id"])) for i in alvo]
+        async with session.begin_nested():
+            conversas = (
+                (
+                    await session.execute(
+                        select(AtendimentoConversa).where(AtendimentoConversa.id.in_(ids))
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            estrelas = await _modulo(_AVALIACOES).estrelas_pendentes_em_lote(session, conversas)
+    except Exception as e:  # noqa: BLE001 — o selo fica sem estrelas
+        logger.warning("atendimento_lista_estrelas_falhou", erro=type(e).__name__)
+        return
+    for i in alvo:
+        i["avaliacao_estrelas"] = estrelas.get(UUID(str(i["id"])))
 
 
 def _simulado(m: AtendimentoMensagem) -> bool:
@@ -1319,7 +1364,8 @@ async def listar_conversas(
     tem integração (o `canal_id` vem da barra de lojas do /resumo).
     `etiqueta` filtra pela etiqueta (status atual), junto de qualquer filtro;
     os filtros `pre_venda`/`pos_venda`/`reclamacao`/`devolucao`/
-    `ag_cancelamento` são a mesma coisa vinda do menu Filtrar. A aba
+    `ag_cancelamento`/`avaliacao` são a mesma coisa vinda do menu Filtrar.
+    Na etiqueta Avaliação, `avaliacao_estrelas` traz a pior nota pendente. A aba
     "Falta responder" (`aguardando`) vem pelo PRAZO mais curto, sem prazo no
     fim — e o cursor (`proximo`) é o do prazo.
     """
@@ -1391,6 +1437,7 @@ async def listar_conversas(
         proximo = ultima.isoformat() if ultima is not None else None
     # Só as da página: no máximo uma consulta de nome por loja que aparece.
     await _com_nome_da_loja(session, pagina)
+    await _com_estrelas_da_avaliacao(session, pagina)
     return ListaConversasOut(itens=pagina, proximo=proximo)
 
 
@@ -1429,6 +1476,7 @@ async def _contexto(session: AsyncSession, conversa: AtendimentoConversa) -> dic
         "nota_fiscal": None,
         "outras_perguntas": [],
         "reclamacoes": [],
+        "avaliacoes": [],
     }
     try:
         from app.services.atendimento import contexto as contexto_svc

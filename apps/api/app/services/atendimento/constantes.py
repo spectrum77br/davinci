@@ -49,13 +49,27 @@ CANAL_SAC = "sac"
 # (`sync.garantir_canais` criaria um canal por conta ML e o adaptador de chat
 # tentaria lê-lo) — quem a escreve é `services/atendimento/reclamacoes.py`.
 CANAL_RECLAMACAO = "reclamacao"
+# Avaliação de venda PENDENTE (RF8, 02/10/2026): a conversa que nasce quando
+# uma avaliação fica sem resposta da loja (Shopee) ou com nota 1–3 sem
+# tratar (ML), com `externo_id` = id da avaliação na plataforma. Como a
+# reclamação, NÃO entra em `CANAIS_POR_PLATAFORMA` (não é caixa lida pelo
+# sync): quem a escreve é `services/atendimento/avaliacoes.py`. A resposta
+# dela é PÚBLICA (aparece no anúncio), por outro endpoint que o chat.
+CANAL_AVALIACAO = "avaliacao"
 
 # Canais que são SEMPRE depois da compra, com ou sem número de pedido gravado
-# na conversa: pós-venda do ML (pack), SAC da Magalu, e-mail da Amazon e a
-# reclamação. Nos demais (chat), o que decide é o pedido ligado; a pergunta
-# no anúncio é sempre antes. É a regra dos filtros Pré-venda/Pós-venda da
-# lista e da etiqueta (`etiqueta_fatos.e_pos_venda`) — um lugar só.
-CANAIS_SEMPRE_POS_VENDA = (CANAL_POS_VENDA, CANAL_SAC, CANAL_EMAIL, CANAL_RECLAMACAO)
+# na conversa: pós-venda do ML (pack), SAC da Magalu, e-mail da Amazon, a
+# reclamação e a avaliação. Nos demais (chat), o que decide é o pedido
+# ligado; a pergunta no anúncio é sempre antes. É a regra dos filtros
+# Pré-venda/Pós-venda da lista e da etiqueta (`etiqueta_fatos.e_pos_venda`)
+# — um lugar só.
+CANAIS_SEMPRE_POS_VENDA = (
+    CANAL_POS_VENDA,
+    CANAL_SAC,
+    CANAL_EMAIL,
+    CANAL_RECLAMACAO,
+    CANAL_AVALIACAO,
+)
 
 # O ML tem DUAS caixas por conta, com API, prazo e limite diferentes:
 # pergunta pré-venda (pública, no anúncio) e mensagem pós-venda (por pack).
@@ -159,6 +173,9 @@ LIMITE_CARACTERES: dict[tuple[str, str], int] = {
     # não tem limite documentado: fica o padrão da caixa.
     ("magalu", CANAL_CHAT): 2200,
     ("magalu", CANAL_SAC): 3000,
+    # Resposta PÚBLICA à avaliação da Shopee (`reply_comment`): 500, o teto
+    # do campo no Seller Center (a confirmar na documentação da API).
+    ("shopee", CANAL_AVALIACAO): 500,
 }
 LIMITE_PADRAO_CARACTERES = 1000
 
@@ -231,15 +248,21 @@ ETIQUETA_POS_VENDA = "pos_venda"
 ETIQUETA_RECLAMACAO = "reclamacao"
 ETIQUETA_DEVOLUCAO = "devolucao"
 ETIQUETA_AG_CANCELAMENTO = "ag_cancelamento"
+# Avaliação de venda SEM resposta da loja (RF8, 02/10/2026): "AVALIAÇÃO até
+# ser respondida; depois volta ao status anterior" — a pendência é o fato
+# (`atendimento_avaliacoes_loja.pendente_desde`), e quando ela acaba o motor
+# devolve a etiqueta que os outros fatos dão (a base ou a urgente de antes).
+ETIQUETA_AVALIACAO = "avaliacao"
 # Da MAIS urgente para a menos: duas coisas abertas ao mesmo tempo, vale a
 # primeira e a outra vira o indicador pequeno (`etiquetas_secundarias`).
 # As que vêm depois entram NO LUGAR CERTO desta ordem quando a fonte existir:
-# `avaliacao` e `carrinho` entre Devolução e Pré-venda; `sac`, `atacado`,
+# `carrinho` entre Avaliação e Pré-venda; `sac`, `atacado`,
 # `duvidas_sugestoes` (sites) e `midia` (redes) ainda sem lugar decidido.
 PRIORIDADE_ETIQUETAS: tuple[str, ...] = (
     ETIQUETA_RECLAMACAO,
     ETIQUETA_AG_CANCELAMENTO,
     ETIQUETA_DEVOLUCAO,
+    ETIQUETA_AVALIACAO,
     ETIQUETA_PRE_VENDA,
     ETIQUETA_POS_VENDA,
 )
@@ -254,6 +277,7 @@ ROTULO_ETIQUETA: dict[str, str] = {
     ETIQUETA_RECLAMACAO: "Reclamação",
     ETIQUETA_DEVOLUCAO: "Devolução",
     ETIQUETA_AG_CANCELAMENTO: "Ag. cancelamento",
+    ETIQUETA_AVALIACAO: "Avaliação",
 }
 
 
@@ -280,6 +304,15 @@ TIPOS_RECLAMACAO = (
 # `encerrada_em IS NULL` — o `status` é o da plataforma, cru (cada uma tem o
 # seu vocabulário), e não decide nada sozinho.
 TIPOS_QUE_SAO_RECLAMACAO = (RECLAMACAO_TIPO_RECLAMACAO, RECLAMACAO_TIPO_MEDIACAO)
+
+# ── Avaliações de venda (RF8, 02/10/2026) ─────────────────────────────────
+# As plataformas lidas (`services/atendimento/avaliacoes.py`). TikTok,
+# Magalu e Amazon ficam de fora: sem API de avaliação para o vendedor.
+PLATAFORMAS_AVALIACAO = ("shopee", "ml")
+# As que deixam a LOJA responder pela API (resposta pública, no anúncio).
+PLATAFORMAS_RESPONDEM_AVALIACAO = frozenset({"shopee"})
+# Nota "baixa" (1–3): o destaque na lista e, no ML, o que vira pendência.
+NOTA_BAIXA_AVALIACAO = 3
 
 # ── Estados do rascunho da IA ─────────────────────────────────────────────
 # substituido = alguém respondeu sem usar a sugestão (pelo DaVinci ou por fora)

@@ -1,4 +1,4 @@
-"""As migrations 0346+0347+0353 criam EXATAMENTE o que o model declara — e o downgrade desfaz.
+"""As migrations 0346+0347+0353+0358 criam EXATAMENTE o que o model declara — e o downgrade desfaz.
 
 O conftest monta o schema de teste pelo `create_all` do model, nunca pela
 migration. Sem este teste, uma coluna esquecida na 0346 (ou um índice parcial
@@ -16,6 +16,12 @@ as colunas da etiqueta na conversa e cria `atendimento_etiquetas_historico` e
 `atendimento_reclamacoes`. Roda em cima das duas (as 0348–0352 do meio são da
 denúncia e não tocam em `atendimento_*`), e o downgrade DELA SÓ tem de voltar
 o catálogo exatamente ao que era depois da 0347.
+
+A 0358 (02/10/2026, avaliações de venda — RF8) estende
+`atendimento_avaliacoes_loja` (mídia, resposta, pendência, conversa, ML) e
+roda em cima das três (as 0354–0357 do meio são da denúncia e do Carrefour); o downgrade
+dela volta o catálogo ao de depois da 0353. A linha que já existia (Shopee)
+ganha `pode_responder = true`.
 """
 
 # ruff: noqa: S608
@@ -36,6 +42,7 @@ _VERSOES = Path(__file__).resolve().parent.parent / "alembic" / "versions"
 _MIGRATION = _VERSOES / "0346_atendimento.py"
 _MIGRATION_ROBO = _VERSOES / "0347_atendimento_robo.py"
 _MIGRATION_ETIQUETAS = _VERSOES / "0353_atendimento_etiquetas.py"
+_MIGRATION_AVALIACOES = _VERSOES / "0358_atendimento_avaliacoes.py"
 TABELAS = sorted(t.name for t in Base.metadata.sorted_tables if t.name.startswith("atendimento_"))
 
 
@@ -117,6 +124,11 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
     etiq = _carregar_migration(_MIGRATION_ETIQUETAS)
     assert etiq.revision == "0353_atendimento_etiquetas"
     assert etiq.down_revision == "0352_nf_command_urgente"
+    aval = _carregar_migration(_MIGRATION_AVALIACOES)
+    assert aval.revision == "0358_atendimento_avaliacoes"
+    # Depois do último head do origin quando foi escrita (0354–0356: denúncia;
+    # 0357: Carrefour).
+    assert aval.down_revision == "0357_marketplace_carrefour"
     # 7 da primeira parte + 3 da parte 2 (categorias e os índices do cartão
     # "Cliente") + 2 da 0353 (histórico da etiqueta e reclamações).
     assert len(TABELAS) == 12
@@ -150,6 +162,7 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
     mod.SCHEMA = rascunho
     robo.SCHEMA = rascunho
     etiq.SCHEMA = rascunho
+    aval.SCHEMA = rascunho
     try:
         conn = await db.connection()
         await conn.run_sync(_rodar, "upgrade", (mod, robo))
@@ -157,6 +170,37 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
         antes_da_0353 = await _catalogo(db, rascunho, rascunho)
         conn = await db.connection()
         await conn.run_sync(_rodar, "upgrade", (etiq,))
+        await db.commit()
+        antes_da_0358 = await _catalogo(db, rascunho, rascunho)
+        # Uma avaliação de antes (Shopee, do job de hora em hora): a 0358 dá a
+        # ela o `pode_responder` (a Shopee responde pela API).
+        integ = "00000000-0000-0000-0000-000000000001"
+        await db.execute(
+            text(f'INSERT INTO "{rascunho}".integrations (id) VALUES (:i)'), {"i": integ}
+        )
+        await db.execute(
+            text(
+                f'INSERT INTO "{rascunho}".atendimento_avaliacoes_loja '
+                "(id, integration_id, plataforma, comentario_id, estrelas) "
+                "VALUES (gen_random_uuid(), :i, 'shopee', '1', 5)"
+            ),
+            {"i": integ},
+        )
+        await db.commit()
+        conn = await db.connection()
+        await conn.run_sync(_rodar, "upgrade", (aval,))
+        await db.commit()
+        linha = (
+            await db.execute(
+                text(
+                    f'SELECT pode_responder, midia, dados, pendente_desde FROM "{rascunho}"'
+                    ".atendimento_avaliacoes_loja"
+                )
+            )
+        ).one()
+        assert tuple(linha) == (True, [], {}, None)
+        await db.execute(text(f'DELETE FROM "{rascunho}".atendimento_avaliacoes_loja'))
+        await db.execute(text(f'DELETE FROM "{rascunho}".integrations'))
         await db.commit()
 
         da_migration = await _catalogo(db, rascunho, rascunho)
@@ -189,6 +233,9 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
             "uq_atendimento_reclamacoes_plataforma_externo_id",
             "fk_atendimento_reclamacoes_conversa_id_atendimento_conversas",
             "fk_atendimento_reclamacoes_integration_id_integrations",
+            # 0358: a avaliação ligada à conversa (FK com nome à mão) e quem tratou.
+            "fk_atendimento_avaliacoes_loja_conversa",
+            "fk_atendimento_avaliacoes_loja_tratada_por_users",
         } <= nomes
         assert da_migration["colunas"] == do_model["colunas"]
         assert da_migration["constraints"] == do_model["constraints"]
@@ -221,6 +268,18 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
         assert "(status, prazo_em)" in defs["ix_atendimento_reclamacoes_status_prazo_em"]
         assert "(conversa_id)" in defs["ix_atendimento_reclamacoes_conversa_id"]
         assert "(pedido_marketplace)" in defs["ix_atendimento_reclamacoes_pedido_marketplace"]
+        # 0358: a etiqueta lê só as pendentes (parcial); a aba ★ casa por
+        # plataforma + pedido; o cartão "Cliente" do ML, pelo comprador.
+        assert "(plataforma, pedido)" in defs["ix_atendimento_avaliacoes_loja_pendentes"]
+        assert (
+            "WHERE (pendente_desde IS NOT NULL)"
+            in defs["ix_atendimento_avaliacoes_loja_pendentes"]
+        )
+        assert "(plataforma, pedido)" in defs["ix_atendimento_avaliacoes_loja_plataforma_pedido"]
+        assert "(integration_id, comprador_id)" in defs[
+            "ix_atendimento_avaliacoes_loja_integration_id_comprador_id"
+        ]
+        assert "(conversa_id)" in defs["ix_atendimento_avaliacoes_loja_conversa_id"]
         # As colunas novas da regra (P7), com o default que deixa o manual
         # antigo como estava: tipo `categoria` sem categoria = geral.
         cols = {(c[0], c[1]): c for c in da_migration["colunas"]}
@@ -239,6 +298,10 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
             "'[]'::jsonb",
         )
         assert cols[("atendimento_reclamacoes", "encerrada_em")][4] == "YES"
+        # 0358: nasce sem pendência, sem mídia e sem resposta pela API.
+        assert cols[("atendimento_avaliacoes_loja", "pendente_desde")][4] == "YES"
+        assert cols[("atendimento_avaliacoes_loja", "pode_responder")][4:] == ("NO", "false")
+        assert cols[("atendimento_avaliacoes_loja", "midia")][4:] == ("NO", "'[]'::jsonb")
 
         # O índice do elo conversa → pedido, igual ao do model.
         indice_bling = text(
@@ -251,6 +314,12 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
         assert "(numeroloja)" in (
             await db.execute(indice_bling, {"s": schema_model})
         ).scalar_one()
+
+        # O downgrade da 0358 volta EXATAMENTE ao catálogo de depois da 0353.
+        conn = await db.connection()
+        await conn.run_sync(_rodar, "downgrade", (aval,))
+        await db.commit()
+        assert await _catalogo(db, rascunho, rascunho) == antes_da_0358
 
         # O downgrade da 0353 volta EXATAMENTE ao catálogo de depois da 0347.
         conn = await db.connection()

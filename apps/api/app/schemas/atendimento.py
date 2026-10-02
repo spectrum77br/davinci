@@ -142,6 +142,10 @@ class ConversaResumoOut(BaseModel):
     etiqueta_desde: datetime | None = None
     etiquetas_secundarias: list[str] = Field(default_factory=list)
     etiqueta_manual: bool = False
+    # Avaliação de venda PENDENTE ligada à conversa (RF8, 02/10/2026): a pior
+    # nota (1–5) — o selo "AVALIAÇÃO ★★" da lista; 1–3 em destaque. Só vem
+    # quando a etiqueta (ou o indicador) é `avaliacao`; senão None.
+    avaliacao_estrelas: int | None = None
 
 
 class ConversaOut(ConversaResumoOut):

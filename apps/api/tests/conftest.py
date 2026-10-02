@@ -386,6 +386,8 @@ _CLEANUP_TABLES = (
     # 0353: histórico da etiqueta e reclamações (FK → conversas/users/integrations).
     "atendimento_etiquetas_historico",
     "atendimento_reclamacoes",
+    # 0358: a avaliação ganhou FK → conversas e users (SET NULL): antes delas.
+    "atendimento_avaliacoes_loja",
     "atendimento_avaliacoes",
     "atendimento_rascunhos",
     "atendimento_mensagens",
@@ -396,7 +398,6 @@ _CLEANUP_TABLES = (
     # Parte 2: índices do cartão "Cliente" (FK CASCADE → integrations) e a
     # lista de assuntos do manual (sem FK).
     "atendimento_pedidos_comprador",
-    "atendimento_avaliacoes_loja",
     "atendimento_categorias",
     "dm_mensagens",  # FK -> dm_conversas: antes dela
     "dm_contas",  # FK -> redes_sociais

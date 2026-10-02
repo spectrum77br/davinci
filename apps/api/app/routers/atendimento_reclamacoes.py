@@ -56,6 +56,8 @@ class ReclamacaoOut(BaseModel):
     aberta: bool
     # O motivo da PLATAFORMA (nunca texto do comprador).
     motivo: str | None
+    # O que o comprador pede (Shopee/TikTok: "Devolução + reembolso", "Só reembolso").
+    solucao: str | None = None
     pedido_marketplace: str | None
     # Até quando a loja tem de agir (só das abertas).
     prazo_em: datetime | None

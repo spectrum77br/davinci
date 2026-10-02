@@ -57,8 +57,9 @@ não são reclamação nem devolução (são o pedido de cancelamento, assunto d
 Ag. cancelamento — item 4).
 
 As devoluções e disputas da Shopee e da TikTok, que a Logística já lê, entram
-por `reclamacoes_devolucoes.ligar_devolucoes` (sem chamada nova à API); o cron
-daqui roda as duas.
+por `reclamacoes_devolucoes.ligar_devolucoes` (o caso e o status pela
+Logística; o motivo do comprador e, para a aberta sem chat, o comprador da
+conversa da devolução por GET, com cota própria); o cron daqui roda as duas.
 """
 
 from __future__ import annotations
@@ -189,6 +190,23 @@ PREFIXO_SEM_ID = "pedido "
 
 # Motivo (`reason_id` → nome do ML) por processo: são poucas dezenas.
 _MOTIVOS: dict[str, str] = {}
+# O `name` do ML é um código ("not_working_item") e o `detail` às vezes não
+# serve ("Chegou bem" para produto que não funciona) — medido em 02/10/2026.
+# Mesma tabela de apps/web/components/AtendimentoReclamacao.vue (MOTIVOS_ML).
+MOTIVOS_ML: dict[str, str] = {
+    "repentant_buyer": "Desistiu da compra (chegou bem, não quer mais)",
+    "bought_by_mistake": "Comprou por engano",
+    "different_than_published": "Diferente do anúncio",
+    "different_color_or_size": "Cor, tamanho ou modelo diferente",
+    "different_item_other": "Recebeu outro produto",
+    "not_working_item": "Produto não funciona",
+    "broken_item": "Produto quebrado ou com defeito",
+    "damaged_package_broken_item": "Embalagem danificada e produto quebrado",
+    "missing_accessories": "Faltam acessórios",
+    "missing_item": "Falta produto no pacote",
+    "delivered_but_not_receive_package": "Consta entregue, mas não recebeu",
+    "not_received": "Não recebeu o produto",
+}
 
 FabricaCliente = Callable[[Integration], Awaitable[Any]]
 
@@ -527,7 +545,9 @@ async def _motivo(session: AsyncSession, cliente: Any, reason_id: str | None) ->
         )
         .limit(1)
     )
-    if salvo:
+    if salvo and not salvo.replace("_", "").isalnum():
+        # Já traduzido antes. O código cru ("not_working_item", gravado antes de
+        # 02/10) não serve de cache: relê e traduz.
         _MOTIVOS[reason_id] = salvo
         return salvo
     try:
@@ -535,7 +555,8 @@ async def _motivo(session: AsyncSession, cliente: Any, reason_id: str | None) ->
     except Exception as exc:  # noqa: BLE001 — o motivo é enfeite: o código fica
         logger.info("atendimento_reclamacao_motivo_falhou", reason_id=reason_id, erro=_erro(exc))
         return None
-    nome = _id(_dict(corpo).get("name")) or _id(_dict(corpo).get("detail"))
+    codigo = _id(_dict(corpo).get("name"))
+    nome = MOTIVOS_ML.get(codigo) or codigo or _id(_dict(corpo).get("detail"))
     if nome:
         _MOTIVOS[reason_id] = nome[:300]
         return _MOTIVOS[reason_id]
@@ -1214,12 +1235,17 @@ async def atendimento_reclamacoes(
         resumo: dict[str, Any] = {
             "ml": await sincronizar_todas_ml(fabrica_cliente=fabrica_cliente, agora=agora)
         }
-        from app.services.atendimento import reclamacoes_devolucoes
+        from app.services.atendimento import clientes, reclamacoes_devolucoes
 
         try:
             async with _db.SessionLocal() as session:
                 resumo["devolucoes"] = await reclamacoes_devolucoes.ligar_devolucoes(
-                    session, agora=agora, commit_a_cada=COMMIT_DEVOLUCOES_A_CADA
+                    session,
+                    agora=agora,
+                    commit_a_cada=COMMIT_DEVOLUCOES_A_CADA,
+                    # O motivo do comprador e o comprador da conversa nova: só
+                    # GET, com a cota de `reclamacoes_devolucoes`.
+                    fabrica_cliente=fabrica_cliente or clientes.cliente_da_integracao,
                 )
                 await session.commit()
         except Exception as exc:  # noqa: BLE001 — o ML já foi gravado
@@ -1306,8 +1332,19 @@ _STATUS_ML = {
 
 
 def status_para_tela(r: AtendimentoReclamacao) -> str | None:
-    """O status em português ("Em mediação no Mercado Livre", "Devolução aceita")."""
+    """O status em português ("Em mediação no Mercado Livre", "Loja contestou").
+
+    Shopee/TikTok pela tabela de `reclamacoes_devolucoes.STATUS_TELA` (a
+    mesma do cartão), lida na hora: a linha gravada antes da tabela já sai
+    com o texto novo.
+    """
     dados = r.dados or {}
+    if r.plataforma in ("shopee", "tiktok"):
+        from app.services.atendimento import reclamacoes_devolucoes
+
+        texto = reclamacoes_devolucoes.status_tela(r.plataforma, r.status, dados.get("tipo_caso"))
+        if texto:
+            return texto
     if r.plataforma == "ml":
         if r.encerrada_em is not None:
             res = _dict(dados.get("resolucao"))
@@ -1326,8 +1363,24 @@ def status_para_tela(r: AtendimentoReclamacao) -> str | None:
 
 
 def para_tela(r: AtendimentoReclamacao) -> dict[str, Any]:
-    """A reclamação no formato do cartão (`AtendimentoReclamacao.vue`). Sem texto de comprador."""
+    """A reclamação no formato do cartão (`AtendimentoReclamacao.vue`). Sem texto de comprador.
+
+    `motivo` = o que o comprador alegou, em português (código do ML/Shopee
+    traduzido); `solucao` = o que ele PEDIU na Shopee/TikTok ("Devolução +
+    reembolso") — até 02/10/2026 esse texto ia no `motivo`, e a linha antiga
+    ainda não relida é lida assim.
+    """
+    from app.services.atendimento import reclamacoes_devolucoes
+
     dados = r.dados or {}
+    motivo = r.motivo
+    solucao = _id(dados.get("solucao")) or None
+    if (
+        r.plataforma in reclamacoes_devolucoes.PLATAFORMAS_LIGADAS
+        and motivo in reclamacoes_devolucoes.SOLUCOES_PT.values()
+        and not dados.get("motivo_lido_em")
+    ):
+        solucao, motivo = solucao or motivo, None
     numero = _id(r.externo_id)
     if numero.startswith(PREFIXO_SEM_ID):
         numero = ""  # sem o id da plataforma (a Logística ainda não o tinha)
@@ -1346,7 +1399,9 @@ def para_tela(r: AtendimentoReclamacao) -> dict[str, Any]:
         "status": r.status,
         "status_rotulo": status_para_tela(r),
         "aberta": r.encerrada_em is None,
-        "motivo": r.motivo or (f"Motivo {dados['reason_id']}" if dados.get("reason_id") else None),
+        "motivo": reclamacoes_devolucoes.motivo_legivel(motivo)
+        or (f"Motivo {dados['reason_id']}" if dados.get("reason_id") else None),
+        "solucao": solucao,
         "pedido_marketplace": r.pedido_marketplace,
         "prazo_em": r.prazo_em if r.encerrada_em is None else None,
         "aberta_em": r.aberta_em,

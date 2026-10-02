@@ -423,6 +423,16 @@ class Settings(BaseSettings):
     # Desligado aqui = só aquele cron fica parado; a leitura das caixas segue.
     atendimento_reclamacoes_ativa: bool = False
     atendimento_etiquetas_ativa: bool = False
+    # Avaliações de venda (RF8, 02/10/2026): o cron `atendimento_avaliacoes`
+    # (:12/:42) lê as avaliações da Shopee (`get_comment`, toda rodada) e as
+    # opiniões do produto do ML (`/reviews/item`, a cada 4 h), marca as SEM
+    # resposta como pendentes (com carência) e abre a conversa `avaliacao`
+    # com a etiqueta AVALIAÇÃO. Só GET. Mesmo esquema dos dois de cima:
+    # interruptor próprio E a leitura. Ligado, ele também passa a ser quem lê
+    # as avaliações da Shopee (o `atendimento_indexar_pedidos` fica só com
+    # os pedidos). A RESPOSTA (pública, no anúncio) segue o envio
+    # (`atendimento_envio_ativo`), não este interruptor.
+    atendimento_avaliacoes_ativa: bool = False
     # Permite enviar — inclusive a pessoa pela tela. Desligado, o botão
     # "Enviar" recusa com `envio_desligado`; o canal ainda precisa estar em
     # humano/copiloto/auto.

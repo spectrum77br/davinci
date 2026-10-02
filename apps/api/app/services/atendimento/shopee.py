@@ -1062,3 +1062,79 @@ async def enviar_texto(
     # Sem `message_id` na resposta a mensagem saiu do mesmo jeito: a próxima
     # leitura a traz de volta e `gravar` a adota pelo texto.
     return ResultadoEnvio(ok=True, externo_id=message_id or None, payload=resp)
+
+
+# ── Resposta à avaliação (RF8, 02/10/2026) ────────────────────────────────
+
+
+async def responder_avaliacao(
+    session: AsyncSession,
+    conversa: AtendimentoConversa,
+    integration: Integration | None,
+    cliente: Any,
+    texto: str,
+) -> ResultadoEnvio:
+    """Responde a avaliação da conversa `avaliacao` (`reply_comment`). Nunca levanta.
+
+    A resposta é PÚBLICA (aparece no anúncio). Quem chama é o `enviar`, com
+    as mesmas travas do chat (envio ligado, loja fora de `observar`, uma em
+    voo, validador). O `externo_id` devolvido é o mesmo que a leitura das
+    avaliações grava para a resposta da loja (`resposta:<comment_id>`): a
+    resposta que saiu daqui não volta duplicada. Timeout/erro sem código =
+    ambíguo (`revisar`, nunca se retenta).
+    """
+    comentario = str(conversa.externo_id or "").strip()
+    if not comentario.isdigit():
+        return ResultadoEnvio(ok=False, erro="shopee avaliacao_sem_id")
+    if not (texto or "").strip():
+        return ResultadoEnvio(ok=False, erro="shopee texto_vazio")
+    try:
+        resp = await cliente.reply_comment(comentario, texto)
+    except httpx.HTTPStatusError as exc:
+        # Só a renovação do token faz `raise_for_status` neste caminho: falhou
+        # ANTES de a resposta sair.
+        return ResultadoEnvio(ok=False, erro=f"shopee token_http_{exc.response.status_code}")
+    except httpx.HTTPError as exc:
+        return ResultadoEnvio(ok=False, ambiguo=True, erro=_erro_operacao(exc))
+    except ValueError:
+        return ResultadoEnvio(ok=False, erro="shopee envio_invalido")
+    except RuntimeError as exc:
+        codigo = _codigo_shopee(exc)
+        if codigo and not any(p in codigo for p in _PISTAS_AMBIGUAS):
+            return ResultadoEnvio(ok=False, erro=f"shopee {codigo}")
+        if "refresh_token" in str(exc):
+            return ResultadoEnvio(ok=False, erro="shopee sem_refresh_token")
+        return ResultadoEnvio(ok=False, ambiguo=True, erro=_erro_operacao(exc))
+    except Exception as exc:  # noqa: BLE001 — envio nunca levanta; sem saber, é ambíguo
+        logger.warning(
+            "atendimento_shopee_avaliacao_inesperado",
+            conversa_id=str(conversa.id),
+            erro=type(exc).__name__,
+        )
+        return ResultadoEnvio(ok=False, ambiguo=True, erro=f"shopee {type(exc).__name__}")
+
+    resp = resp if isinstance(resp, dict) else {}
+    resultado = next(
+        (
+            r
+            for r in resp.get("result_list") or []
+            if isinstance(r, dict) and str(r.get("comment_id") or "").strip() == comentario
+        ),
+        None,
+    )
+    avisos = resp.get("warning")
+    payload = {
+        "comment_id": comentario,
+        "avisos": len(avisos) if isinstance(avisos, list) else 0,
+    }
+    if resultado is None:
+        # Sem erro e sem o resultado da avaliação: pode ter saído. A leitura
+        # seguinte (a resposta aparece no `get_comment`) tira a dúvida.
+        return ResultadoEnvio(
+            ok=False, ambiguo=True, erro="shopee resposta_sem_resultado", payload=payload
+        )
+    falha = str(resultado.get("fail_error") or "").strip()
+    if falha:
+        # Só o código: a mensagem da Shopee pode repetir pedaço do texto.
+        return ResultadoEnvio(ok=False, erro=f"shopee {falha[:80]}", payload=payload)
+    return ResultadoEnvio(ok=True, externo_id=f"resposta:{comentario}", payload=payload)

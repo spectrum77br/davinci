@@ -14,6 +14,7 @@ from app.routers import adspower_agent as adspower_agent_router
 from app.routers import alerts as alerts_router
 from app.routers import aprovar_margem as aprovar_margem_router
 from app.routers import atendimento as atendimento_router
+from app.routers import atendimento_avaliacoes as atendimento_avaliacoes_router
 from app.routers import atendimento_painel as atendimento_painel_router
 from app.routers import atendimento_reclamacoes as atendimento_reclamacoes_router
 from app.routers import atendimento_robo as atendimento_robo_router
@@ -249,6 +250,9 @@ app.include_router(atendimento_router.router)
 # trava (`_so_admin`) da caixa.
 app.include_router(atendimento_painel_router.router)
 app.include_router(atendimento_reclamacoes_router.router)
+# Avaliações de venda (02/10/2026): a aba ★ Avaliação (Shopee e ML), o
+# "responder em público" (atrás do envio) e o "marcar como tratada".
+app.include_router(atendimento_avaliacoes_router.router)
 # Temu/AliExpress (30/09/2026): o robô do Mac mini manda o que a página do
 # Seller Center recebe (token próprio; vazio = desligado).
 app.include_router(atendimento_robo_router.router)

@@ -12,7 +12,11 @@ em que a conversa abre, sem varrer a loja. Então, de hora em hora
      → `atendimento_pedidos_comprador`. Janela de 2 h num job de 1 h: uma
      rodada que atrasa ou falha não deixa buraco.
   2. `get_comment` do mais novo para trás, só até alcançar avaliações que o
-     índice já tem → `atendimento_avaliacoes_loja`.
+     índice já tem → `atendimento_avaliacoes_loja`. Com o cron das
+     avaliações ligado (`atendimento_avaliacoes_ativa`, 02/10/2026), esta
+     parte fica com ELE (`avaliacoes.py`, a cada 30 min, que também relê as
+     sem resposta): aqui ficam só os pedidos — duas leituras da mesma
+     página por hora seriam cota gasta à toa.
 
 Por que cada cuidado:
 
@@ -146,6 +150,7 @@ async def indexar_avaliacoes(
     desde: datetime | None = None,
     parar_nas_conhecidas: bool = True,
     cursor: str = "",
+    page_size: int = PAGINA_AVALIACOES,
 ) -> LeituraAvaliacoes:
     """Avaliações da loja, da mais nova para trás → índice.
 
@@ -160,7 +165,7 @@ async def indexar_avaliacoes(
     paginas = 0
     novas = 0
     while paginas < max_paginas:
-        resp = await cliente.get_comments(cursor=cursor, page_size=PAGINA_AVALIACOES)
+        resp = await cliente.get_comments(cursor=cursor, page_size=page_size)
         paginas += 1
         resp = resp if isinstance(resp, dict) else {}
         linhas = [
@@ -227,9 +232,13 @@ async def indexar_loja(
             )
 
         try:
-            leitura = await indexar_avaliacoes(session, integration, cliente)
-            await session.commit()
-            resumo["avaliacoes"] = leitura.novas
+            if get_settings().atendimento_avaliacoes_ativa:
+                # O cron das avaliações lê (e relê) as avaliações: ver o topo.
+                leitura = None
+            else:
+                leitura = await indexar_avaliacoes(session, integration, cliente)
+                await session.commit()
+            resumo["avaliacoes"] = leitura.novas if leitura is not None else 0
         except Exception as exc:  # noqa: BLE001
             await _desfazer(session, integration)
             resumo["erros"] += 1

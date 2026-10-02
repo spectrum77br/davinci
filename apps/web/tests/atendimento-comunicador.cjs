@@ -65,7 +65,7 @@ const setup = conversaSfc.scriptSetup.content
   const cartao = (tpl.match(/<div\s+v-if="temCartaoReclamacao"[\s\S]*?<\/div>/) || [])[0]
   assert.ok(cartao, 'o cartão da reclamação está na conversa')
   assert.match(cartao, /v-show="reclamacoesQtd > 0"/, 'a faixa só aparece com reclamação')
-  assert.match(cartao, /<AtendimentoReclamacao ref="reclamacaoRef" :conversa-id="conversa\.id" @carregado="aoCarregarReclamacoes"/)
+  assert.match(cartao, /<AtendimentoReclamacao ref="reclamacaoRef" :conversa-id="conversa\.id" :perfil="painelDados\?\.adspower \?\? null" @carregado="aoCarregarReclamacoes"/)
   // Entre as faixas e as mensagens.
   assert.ok(tpl.indexOf('temCartaoReclamacao') > tpl.indexOf('sem_resposta_necessaria" class="shrink-0'))
   assert.ok(tpl.indexOf('temCartaoReclamacao') < tpl.indexOf('ref="rolagem"'))

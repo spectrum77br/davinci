@@ -2,7 +2,9 @@
 // Reclamação/mediação/devolução da plataforma no topo da conversa, SÓ
 // LEITURA: cores da etiqueta (vermelho/roxo), contagem regressiva do prazo,
 // título com o nº (ou o pedido), ordem (abertas por prazo, depois as
-// encerradas), "Abrir no/na" e nenhum botão de ação na plataforma.
+// encerradas), "Abrir no/na" e nenhum botão de ação na plataforma. Desde
+// 02/10/2026: status e motivo da Shopee/TikTok/ML em português (tabela; o
+// código cru nunca aparece) e o "Pede: …" da Shopee/TikTok.
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
@@ -23,8 +25,10 @@ const {
   PRAZO_VENCENDO_MS,
   abrirEm,
   corDoTipo,
+  motivoLegivel,
   ordenarReclamacoes,
   prazoReclamacao,
+  statusLegivel,
   tempo,
   tituloReclamacao,
 } = mod.exports
@@ -89,6 +93,48 @@ for (const proibido of ['Aceitar devolução', 'Oferecer solução', 'Pedir medi
   assert.ok(!fonte.includes(proibido), proibido)
 }
 // O link da plataforma abre em aba nova, sem dar acesso à janela de cá.
-assert.match(fonte, /target="_blank"\s+rel="noopener noreferrer"/)
+// O link da plataforma passa pelo AdsPower da loja (02/10/2026) e, sem perfil,
+// abre em aba nova sem dar acesso à janela de cá.
+assert.match(fonte, /<AtendimentoAbrirPlataforma[\s\S]*?:perfil="perfil"/)
+const abrir = fs.readFileSync(path.join(__dirname, '..', 'components', 'AtendimentoAbrirPlataforma.vue'), 'utf8')
+assert.match(abrir, /target="_blank" rel="noopener noreferrer"/)
+assert.match(abrir, /abrirPaginaNoPerfil/)
+assert.match(abrir, /ev\.ctrlKey \|\| ev\.metaKey/) // Ctrl/⌘+clique: navegador comum
+
+// O motivo do ML chega como código (02/10/2026): vira texto em português.
+assert.equal(motivoLegivel('not_working_item'), 'Produto não funciona')
+assert.equal(motivoLegivel('repentant_buyer'), 'Desistiu da compra (chegou bem, não quer mais)')
+assert.equal(motivoLegivel('wrong_size_xyz'), 'Wrong size xyz') // desconhecido: legível, não some
+assert.equal(motivoLegivel('Produto com defeito'), 'Produto com defeito') // já traduzido
+assert.equal(motivoLegivel(null), '')
+
+// O motivo da Shopee chega como código (02/10/2026): tabela; desconhecido, legível.
+assert.equal(motivoLegivel('FUNCTIONAL_DMG'), 'Produto com defeito (não funciona)')
+assert.equal(motivoLegivel('CHANGE_MIND'), 'Mudou de ideia (desistiu da compra)')
+assert.equal(motivoLegivel('ITEM_NOT_IN_THE_LIST'), 'Item not in the list')
+assert.equal(motivoLegivel('Item com defeito'), 'Item com defeito') // rótulo da TikTok
+
+// O status: o do backend (já em português) vale; cru ou vazio, a tabela.
+const st = (plataforma, status, status_rotulo = null) => statusLegivel({ plataforma, status, status_rotulo })
+assert.equal(st('shopee', 'JUDGING', 'Em análise pela Shopee (disputa)'), 'Em análise pela Shopee (disputa)')
+assert.equal(st('ml', 'opened', 'Em mediação no Mercado Livre'), 'Em mediação no Mercado Livre')
+assert.equal(st('shopee', 'JUDGING'), 'Em análise pela Shopee (disputa)')
+assert.equal(st('shopee', 'JUDGING', 'JUDGING'), 'Em análise pela Shopee (disputa)')
+assert.equal(st('shopee', 'PROCESSING'), 'Em andamento')
+assert.equal(st('shopee', 'SELLER_DISPUTE'), 'Loja contestou')
+assert.equal(st('shopee', 'REQUESTED'), 'Pedido de devolução aberto')
+assert.equal(st('tiktok', 'AWAITING_BUYER_SHIP'), 'Esperando o comprador enviar')
+assert.equal(st('tiktok', 'BUYER_SHIPPED_ITEM'), 'Comprador enviou o produto')
+assert.equal(st('tiktok', 'REJECT_RECEIVE_PACKAGE'), 'Recebimento recusado')
+assert.equal(st('tiktok', 'RETURN_OR_REFUND_REQUEST_PENDING'), 'Pedido de devolução/reembolso pendente')
+assert.equal(st('ml', 'opened'), 'Aberta')
+assert.equal(st('ml', 'closed'), 'Encerrada')
+assert.equal(st('tiktok', 'SOMETHING_NEW'), 'Something new') // desconhecido: legível
+assert.equal(st('shopee', null, null), '')
+
+// O cartão mostra o status pela função, o motivo traduzido e o "Pede: …".
+assert.match(fonte, /\{\{ statusLegivel\(r\) \}\}/)
+assert.match(fonte, /Pede: \{\{ r\.solucao \}\}/)
+assert.doesNotMatch(fonte, /\{\{ r\.status_rotulo \}\}/)
 
 console.log('atendimento-reclamacao: ok')

@@ -178,6 +178,7 @@ from app.services.atendimento.constantes import (
     MODO_AUTO,
     MODOS,
     MSG_FALHOU,
+    NOTA_BAIXA_AVALIACAO,
     NOTA_ERRO,
     NOTA_OK,
     ORIGEM_EXTERNO,
@@ -2038,6 +2039,15 @@ def _reclamacoes_abertas(ctx: dict) -> int:
     )
 
 
+def _avaliacoes_pendentes(ctx: dict) -> list[int]:
+    """As notas das avaliações de venda PENDENTES do pedido (`ctx["avaliacoes"]`, RF8)."""
+    return sorted(
+        int(a["estrelas"])
+        for a in ctx.get("avaliacoes") or []
+        if isinstance(a, dict) and a.get("pendente") and isinstance(a.get("estrelas"), int)
+    )
+
+
 def _fatos_para_o_modelo(
     conversa: AtendimentoConversa, ctx: dict, valores: dict[str, str | None]
 ) -> dict:
@@ -2067,6 +2077,9 @@ def _fatos_para_o_modelo(
         "devolucoes": len(ctx.get("devolucoes") or []),
         # Reclamação/mediação/devolução aberta NA PLATAFORMA (contexto.py).
         "reclamacoes_abertas": _reclamacoes_abertas(ctx),
+        # Avaliação de venda deste comprador ainda sem resposta da loja (só a
+        # nota — o texto dela não vai para o modelo).
+        "avaliacao_pendente_estrelas": (_avaliacoes_pendentes(ctx) or [None])[0],
         "lacunas_disponiveis": ["{" + k + "}" for k, v in valores.items() if v],
         "lacunas_sem_dado": ["{" + k + "}" for k, v in valores.items() if not v],
     }
@@ -3236,6 +3249,8 @@ async def _gerar(
         motivos.append("reclamação/mediação aberta no ML")
     elif _reclamacoes_abertas(ctx):
         motivos.append("reclamação ou devolução aberta na plataforma")
+    if any(n <= NOTA_BAIXA_AVALIACAO for n in _avaliacoes_pendentes(ctx)):
+        motivos.append("avaliação de nota baixa (1–3) sem resposta da loja")
     if conversa.pedido_marketplace and ctx.get("pedido") is None:
         motivos.append("pedido não encontrado no sistema")
     elif categoria in _CATEGORIAS_DE_PEDIDO and ctx.get("pedido") is None:

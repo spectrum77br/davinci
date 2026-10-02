@@ -51,6 +51,10 @@ TETO_POR_PEDIDO = 200
 # é a trilha da etiqueta (de, para, motivo, quem — a troca à mão grava a
 # pessoa), escrita junto com a mudança; e `atendimento_reclamacoes` é o
 # espelho da plataforma, regravado pela máquina a cada leitura. Fora as duas.
+# Avaliações (02/10/2026, migration 0358): `atendimento_avaliacoes_loja`
+# ganhou a pendência, a mídia e a opinião do ML — continua fora (já estava):
+# é texto de comprador regravado pela máquina a cada 30 min. O "marcar como
+# tratada" da pessoa fica na própria linha (`tratada_por`/`tratada_em`).
 EXCLUIDAS = re.compile(
     r"^(historico_(evento|alteracao)$|sync_logs|background_job|alembic_version$|auth_codes$"
     r"|oauth_states$|pricing_push_idempotency$|pricing_push_confirmacao$"

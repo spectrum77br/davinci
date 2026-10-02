@@ -1312,6 +1312,42 @@ class MercadoLivreClient:
         corpo = r.json()
         return corpo if isinstance(corpo, dict) else {}
 
+    # ── Atendimento: opiniões do produto (avaliações, 02/10/2026) ──
+    #
+    # A avaliação da VENDA (`/orders/{id}/feedback`) está morta (0 de 60
+    # pedidos de 7 a 30 dias atrás, 404 em todos): o que liga a avaliação ao
+    # pedido hoje é a OPINIÃO do produto, que traz o `order_id`. SÓ LEITURA:
+    # o ML não tem resposta do vendedor para a opinião pela API.
+
+    async def opinioes_do_anuncio(
+        self, item_id: str, *, limit: int = 50, offset: int = 0
+    ) -> dict:
+        """As opiniões do PRODUTO do anúncio (GET /reviews/item/{item_id}).
+
+        Formato medido em produção em 02/10/2026 (contas aguiar, jlas2,
+        marquezini, aguiar2; só GET): `{paging: {total, limit, offset,
+        total_pageable}, reviews: [...], rating_average, stars,
+        rating_levels: {one_star..five_star}, helpful_reviews,
+        quali_attributes, cross_site_enabled, user_product_id}`. Cada opinião:
+        `id`, `reviewable_object: {id (o anúncio), type: product}`,
+        `date_created` (ISO com Z), `status` (published), `title`, `content`,
+        `rate` (1–5), `media` [{id, status, type, url, thumbnail,
+        preview_url, alt, duration_ms}], `order_id` (100%), `buying_date`,
+        `variation_id`... — e NENHUM id do comprador nem resposta.
+
+        Cuidados medidos: a lista é do PRODUTO (`user_product_id`), não do
+        anúncio — anúncios irmãos (inclusive de outra conta nossa) devolvem
+        as mesmas opiniões; a ordem NÃO é por data; `total_pageable` <
+        `total` (as que não paginam não vêm). Levanta em não-2xx."""
+        r = await self._request(
+            "GET",
+            f"/reviews/item/{item_id}",
+            params={"limit": max(1, min(int(limit), 50)), "offset": max(0, int(offset))},
+        )
+        r.raise_for_status()
+        corpo = r.json()
+        return corpo if isinstance(corpo, dict) else {}
+
     # ── Atendimento: reclamações, mediações e devoluções (01/10/2026) ──
     #
     # A leitura das reclamações do pós-venda (services/atendimento/

@@ -8,8 +8,11 @@ Reclamação"). Filtros e contadores da lista usam a etiqueta atual.
 
 Duas coisas abertas ao mesmo tempo: vale a mais urgente
 (`PRIORIDADE_ETIQUETAS`: Reclamação > Ag. cancelamento > Devolução >
-Pré-venda > Pós-venda) e as outras abertas vão para `etiquetas_secundarias`
-(o indicador pequeno). A base — pré ou pós-venda — nunca é secundária.
+Avaliação > Pré-venda > Pós-venda) e as outras abertas vão para
+`etiquetas_secundarias` (o indicador pequeno). A base — pré ou pós-venda —
+nunca é secundária. AVALIAÇÃO (02/10/2026) vale enquanto a avaliação do
+pedido estiver PENDENTE (sem resposta da loja); respondida ou tratada, o
+motor devolve o que os outros fatos dão — "volta ao status anterior".
 
 Três partes, de propósito:
   • `calcular(fatos)` — PURA: a tabela de acontecimentos do RF1 e a
@@ -55,6 +58,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models import AtendimentoConversa, AtendimentoEtiquetaHistorico
 from app.services.atendimento.constantes import (
     ETIQUETA_AG_CANCELAMENTO,
+    ETIQUETA_AVALIACAO,
     ETIQUETA_DEVOLUCAO,
     ETIQUETA_POS_VENDA,
     ETIQUETA_PRE_VENDA,
@@ -74,6 +78,7 @@ __all__ = [
     "ETIQUETAS",
     "ETIQUETAS_BASE",
     "ETIQUETA_AG_CANCELAMENTO",
+    "ETIQUETA_AVALIACAO",
     "ETIQUETA_DEVOLUCAO",
     "ETIQUETA_POS_VENDA",
     "ETIQUETA_PRE_VENDA",
@@ -102,6 +107,9 @@ _SAIDA = {
     ETIQUETA_RECLAMACAO: "reclamação encerrada",
     ETIQUETA_DEVOLUCAO: "devolução encerrada",
     ETIQUETA_AG_CANCELAMENTO: "pedido saiu de Aguardando Cancelamento",
+    # Respondida (de fora ou pelo DaVinci) ou marcada como tratada: o
+    # acontecimento entre parênteses diz qual.
+    ETIQUETA_AVALIACAO: "avaliação resolvida",
 }
 
 
@@ -127,6 +135,12 @@ class FatosEtiqueta:
     # (`etiqueta_fatos.ag_cancelamento_visivel`).
     ag_cancelamento: bool = False
     motivo_ag_cancelamento: str | None = None
+    # Avaliação de venda PENDENTE (sem resposta da loja; no ML, nota 1–3 sem
+    # tratar) ligada à conversa ou ao pedido dela.
+    avaliacao_pendente: bool = False
+    motivo_avaliacao: str | None = None
+    # A pior nota entre as pendentes (o selo com as estrelas).
+    estrelas_avaliacao: int | None = None
     # O nº do pedido no Bling, quando achado (só informativo).
     numero_bling: str | None = None
 
@@ -163,6 +177,10 @@ def _abertas(fatos: FatosEtiqueta) -> list[tuple[str, str]]:
         )
     if fatos.devolucao_aberta:
         abertas.append((ETIQUETA_DEVOLUCAO, fatos.motivo_devolucao or "devolução aberta"))
+    if fatos.avaliacao_pendente:
+        abertas.append(
+            (ETIQUETA_AVALIACAO, fatos.motivo_avaliacao or "avaliação sem resposta da loja")
+        )
     return sorted(abertas, key=lambda par: _ordem(par[0]))
 
 
@@ -174,6 +192,7 @@ def calcular(fatos: FatosEtiqueta) -> Calculo:
         reclamação/mediação aberta         → RECLAMAÇÃO
         devolução aberta                   → DEVOLUÇÃO
         Bling em Ag. cancelamento          → AG. CANCELAMENTO
+        avaliação sem resposta da loja     → AVALIAÇÃO
         o que estava aberto acabou         → volta à base (pré/pós-venda)
 
     Várias abertas: a mais urgente vale, as outras vão para `secundarias`.

@@ -30,6 +30,9 @@ async function main() {
     ADSPOWER_API,
     MENSAGENS_ADSPOWER,
     abrirNoAdsPower,
+    abrirPaginaNoPerfil,
+    destinoPermitido,
+    urlIniciarNaPagina,
     classificarRespostaAdsPower,
     urlIniciar,
   } = ads
@@ -143,6 +146,45 @@ async function main() {
     const fetch = (u, init) => new Promise((_, rej) => init.signal.addEventListener('abort', () => rej(new Error('abort'))))
     const r = await abrirNoAdsPower(url, { ...semEspera, fetch, prazoMs: 20, prazoStartMs: 20 })
     assert.equal(r.codigo, 'adspower_fechado')
+  }
+  // Abrir já na página da plataforma (perfil fechado): launch_args com o link,
+  // só https de domínio de plataforma (02/10/2026, medido com o perfil 72).
+  {
+    const p = { perfil: '72' }
+    const u = urlIniciarNaPagina(p, 'https://www.mercadolivre.com.br/vendas/2000018464125672/detalhe')
+    assert.ok(u.startsWith('http://127.0.0.1:50325/api/v1/browser/start?serial_number=72&launch_args='))
+    assert.deepEqual(JSON.parse(decodeURIComponent(u.split('launch_args=')[1])), ['https://www.mercadolivre.com.br/vendas/2000018464125672/detalhe'])
+    assert.ok(destinoPermitido('https://seller.shopee.com.br/portal/sale/order/123'))
+    assert.ok(destinoPermitido('https://seller-br.tiktok.com/order/detail?order_no=1'))
+    assert.equal(destinoPermitido('http://www.mercadolivre.com.br/x'), null) // só https
+    assert.equal(destinoPermitido('https://mercadolivre.com.br.golpe.com/x'), null) // domínio de fora
+    assert.equal(destinoPermitido('javascript:alert(1)'), null)
+    // Destino recusado: abre só o perfil (sem launch_args).
+    assert.equal(urlIniciarNaPagina(p, 'https://golpe.com/x'), 'http://127.0.0.1:50325/api/v1/browser/start?serial_number=72')
+  }
+  // O clique "Abrir no ML" pelo perfil: copia o link e manda o start com ele.
+  {
+    const feitos = []
+    const copias = []
+    const fetch = async (u) => { feitos.push(u); return { ok: false, status: 0, type: 'opaque' } }
+    const r = await abrirPaginaNoPerfil({ perfil: '72' }, 'https://www.mercadolivre.com.br/vendas/1/detalhe', {
+      ...semEspera, fetch, copiar: async (x) => { copias.push(x) },
+    })
+    assert.equal(r.status, 'enviado')
+    assert.equal(r.copiado, true)
+    assert.deepEqual(copias, ['https://www.mercadolivre.com.br/vendas/1/detalhe'])
+    assert.ok(feitos.some((u) => u.includes('launch_args=')))
+    assert.equal(await abrirPaginaNoPerfil({ perfil: null }, 'https://www.mercadolivre.com.br/x', { ...semEspera, fetch }), null)
+  }
+  // 5. A sondagem respondeu e o start demorou (o perfil leva mais de 20 s para
+  //    subir): é "enviado", nunca "não está aberto" (02/10/2026).
+  {
+    const fetch = (u, init) => (u.endsWith('/status')
+      ? Promise.resolve({ ok: false, status: 0, type: 'opaque' })
+      : new Promise((_, rej) => init.signal.addEventListener('abort', () => rej(new Error('abort')))))
+    const r = await abrirNoAdsPower(url, { ...semEspera, fetch, prazoMs: 20, prazoStartMs: 20 })
+    assert.equal(r.status, 'enviado')
+    assert.equal(r.codigo, null)
   }
   // O intervalo entre a sondagem e o start respeita o limite do AdsPower.
   {

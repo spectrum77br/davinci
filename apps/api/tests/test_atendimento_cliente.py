@@ -327,6 +327,7 @@ class MLFalso:
         return {"results": self.pedidos, "paging": {"total": len(self.pedidos), "limit": limit}}
 
     async def feedback_do_pedido(self, order_id):
+        # Morto desde 02/10/2026 (0 de 60 com avaliação): o cartão não chama mais.
         self.chamadas.append(("feedback_do_pedido", str(order_id)))
         return self.feedbacks.get(str(order_id))  # None = 404 (sem avaliação)
 
@@ -365,18 +366,6 @@ async def test_ml_com_a_leitura_desligada_nao_fala_com_a_loja(
     assert "primeira_compra" not in cartao["sinais"]
 
 
-def _feedback(rating: str, *, de: str, para: str, mensagem: str, reply: Any = None) -> dict:
-    return {
-        "rating": rating,
-        "message": mensagem,
-        "reply": reply,
-        "date_created": (AGORA - timedelta(days=1)).isoformat(),
-        "from": {"id": int(de)},
-        "to": {"id": int(para)},
-        "fulfilled": True,
-    }
-
-
 async def test_ml_ao_vivo_compra_e_carrinho_avaliacao_do_comprador_e_cache(
     db: AsyncSession, make_user, redis_falso, ml_falso
 ):
@@ -397,18 +386,29 @@ async def test_ml_ao_vivo_compra_e_carrinho_avaliacao_do_comprador_e_cache(
         _pedido_ml(13, None, 40, 80.0),
         _pedido_ml(14, None, 60, 70.0, status="cancelled"),
     ]
-    # No 11, os DOIS lados: o comprador avaliou mal; a loja avaliou bem o comprador.
-    ml_falso.feedbacks = {
-        "11": {
-            "sale": _feedback("negative", de=COMPRADOR_ML, para=SELLER, mensagem="demorou"),
-            "purchase": _feedback("positive", de=SELLER, para=COMPRADOR_ML, mensagem="ótimo"),
-        },
-        "13": {
-            "sale": _feedback(
-                "positive", de=COMPRADOR_ML, para=SELLER, mensagem="top", reply={"text": "Obrigado"}
-            )
-        },
-    }
+    # As avaliações do ML vêm do ÍNDICE (a opinião do produto, que o cron das
+    # avaliações lê — 02/10/2026): pelo pedido (11) e pelo comprador (13). A
+    # de outro comprador, não. A avaliação da venda (`/feedback`) está morta.
+    for comentario_id, pedido, comprador, estrelas in (
+        ("r11", "11", None, 1),
+        ("r13", "13", COMPRADOR_ML, 5),
+        ("r99", "99", "outro", 2),
+    ):
+        await indice.registrar_avaliacao(
+            db,
+            integration_id=integ.id,
+            plataforma="ml",
+            comentario_id=comentario_id,
+            pedido=pedido,
+            comprador_nome_loja=None,
+            comprador_id=comprador,
+            item_id="MLB1",
+            estrelas=estrelas,
+            texto="demorou" if estrelas <= 2 else "top",
+            resposta_loja=None,
+            criado_em=AGORA - timedelta(days=1),
+        )
+    await db.commit()
 
     cartao = await cliente.cartao_cliente(db, conversa)
 
@@ -418,8 +418,7 @@ async def test_ml_ao_vivo_compra_e_carrinho_avaliacao_do_comprador_e_cache(
     assert cartao["historico_completo"] is True
     assert set(cartao["sinais"]) == {"recorrente", "avaliou_mal", "reclamacao_aberta"}
     estrelas = sorted((a["pedido"], a["estrelas"], a["respondida"]) for a in cartao["avaliacoes"])
-    assert estrelas == [("11", 1, False), ("13", 5, True)]
-    assert "ótimo" not in json.dumps(cartao, ensure_ascii=False)  # o que a LOJA escreveu
+    assert estrelas == [("11", 1, False), ("13", 5, False)]
     # Nada de nome/apelido do comprador — nem no cartão, nem no cache.
     for proibido in ("APELIDO_SECRETO", "Fulana", "De Tal"):
         assert proibido not in json.dumps(cartao, ensure_ascii=False)
@@ -435,8 +434,8 @@ async def test_ml_ao_vivo_compra_e_carrinho_avaliacao_do_comprador_e_cache(
     de_novo = await cliente.cartao_cliente(db, conversa)
     assert len(ml_falso.chamadas) == feitas
     assert de_novo["compras"] == 2
-    # Feedback só dos 5 mais recentes (aqui, os 4).
-    assert sum(1 for n, _ in ml_falso.chamadas if n == "feedback_do_pedido") == 4
+    # A avaliação da venda (`/orders/{id}/feedback`) não é mais chamada.
+    assert sum(1 for n, _ in ml_falso.chamadas if n == "feedback_do_pedido") == 0
 
 
 async def test_ml_perguntas_pre_venda_das_outras_conversas(
@@ -510,17 +509,6 @@ async def test_ml_demorado_nao_segura_a_tela_e_termina_em_segundo_plano(
     await asyncio.gather(*list(cliente._EM_SEGUNDO_PLANO))
     depois = await cliente.cartao_cliente(db, conversa)
     assert depois["compras"] == 1  # a busca terminou e deixou o cache pronto
-
-
-def test_avaliacao_do_ml_e_a_do_comprador():
-    lado_loja = _feedback("positive", de=SELLER, para=COMPRADOR_ML, mensagem="bom comprador")
-    assert cliente._avaliacao_ml({"purchase": lado_loja}, "1", SELLER, COMPRADOR_ML) is None
-    lado_cliente = _feedback("neutral", de=COMPRADOR_ML, para=SELLER, mensagem="ok")
-    a = cliente._avaliacao_ml(
-        {"sale": lado_cliente, "purchase": lado_loja}, "1", SELLER, COMPRADOR_ML
-    )
-    assert (a["estrelas"], a["texto"], a["respondida"]) == (3, "ok", False)
-    assert cliente._avaliacao_ml({"sale": {"rating": "???"}}, "1", SELLER, COMPRADOR_ML) is None
 
 
 # ─────────────── TikTok/Amazon, vazio, nunca levanta ───────────────

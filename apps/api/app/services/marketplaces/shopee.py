@@ -1086,6 +1086,24 @@ class ShopeeClient:
             "GET", "/api/v2/product/get_comment", params=params, what="shopee_comentarios"
         )
 
+    async def reply_comment(self, comment_id: int | str, texto: str) -> dict:
+        """RESPONDE uma avaliação (POST /api/v2/product/reply_comment) — resposta PÚBLICA.
+
+        Avaliações no atendimento (RF8, 02/10/2026). ESCREVE na Shopee: só o
+        envio do atendimento chama (`services/atendimento/shopee.
+        responder_avaliacao`), atrás de `atendimento_envio_ativo`, do modo da
+        loja e do validador. Uma avaliação por chamada (a API aceita até 100
+        em `comment_list`): o resultado é de UMA resposta, como o chat.
+
+        Devolve o `response` como veio — `{result_list: [{comment_id,
+        fail_error, fail_message}], warning}` pela documentação (nunca
+        chamado em produção até aqui). Levanta em `error` não vazio
+        (`RuntimeError`) e em erro HTTP."""
+        corpo = {"comment_list": [{"comment_id": int(comment_id), "comment": str(texto)}]}
+        return await self._call(
+            "POST", "/api/v2/product/reply_comment", json=corpo, what="shopee_responder_avaliacao"
+        )
+
     async def update_stock(
         self,
         link: "ProductLink",

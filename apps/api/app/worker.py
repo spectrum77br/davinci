@@ -983,6 +983,11 @@ async def atendimento_indexar_pedidos(ctx: dict) -> dict | None:
 # depois, no :08…, já com o que a leitura das reclamações gravou.
 _ATENDIMENTO_RECLAMACOES_MINUTOS = {6, 16, 26, 36, 46, 56}
 _ATENDIMENTO_ETIQUETAS_MINUTOS = {8, 18, 28, 38, 48, 58}
+# Avaliações (02/10/2026): a cada 30 min, no :12 e no :42 — par, fora do
+# :00/:30 dos crons de token (a rodada também lê o ML), dos ímpares da
+# leitura das caixas, do {4,14,…}, do :22 do índice de pedidos e das
+# reclamações/etiquetas acima.
+_ATENDIMENTO_AVALIACOES_MINUTOS = {12, 42}
 
 
 async def atendimento_reclamacoes(ctx: dict) -> dict | None:
@@ -1033,6 +1038,35 @@ async def atendimento_etiquetas(ctx: dict) -> dict | None:
         return await _atendimento_etiqueta_cron.atendimento_etiquetas(ctx)
     except Exception as e:  # noqa: BLE001 — o serviço já não levanta; cinto
         logger.error("atendimento_etiquetas_falhou", err=type(e).__name__)
+        return None
+
+
+async def atendimento_avaliacoes(ctx: dict) -> dict | None:
+    """A cada 30 min (:12/:42): as avaliações de venda da Shopee e do ML.
+
+    Shopee em toda rodada (a primeira de cada loja importa 30 dias; depois a
+    página do topo e a releitura, pelo id, das sem resposta que passaram da
+    carência); ML a cada 4 h (a opinião do produto, que traz o pedido). A
+    avaliação SEM resposta da loja vira pendência: a conversa `avaliacao` e
+    a etiqueta AVALIAÇÃO no pedido, até ser respondida ou tratada — ver
+    services/atendimento/avaliacoes.py. Só GET na plataforma; nada é
+    respondido aqui. Uma rodada por vez (trava no Redis, 25 min).
+
+    Interruptor próprio: só roda com `atendimento_avaliacoes_ativa` E
+    `atendimento_leitura_ativa` (os dois nascem desligados). Com a leitura
+    já ligada em produção, é o `ATENDIMENTO_AVALIACOES_ATIVA=true` no .env
+    que liga esta rodada — o deploy sozinho não. Ligada, ela assume as
+    avaliações da Shopee e o `atendimento_indexar_pedidos` fica só com os
+    pedidos.
+    """
+    if not (_settings.atendimento_leitura_ativa and _settings.atendimento_avaliacoes_ativa):
+        return None
+    from app.services.atendimento import avaliacoes as _atendimento_avaliacoes
+
+    try:
+        return await _atendimento_avaliacoes.atendimento_avaliacoes(ctx)
+    except Exception as e:  # noqa: BLE001 — o serviço já não levanta; cinto
+        logger.error("atendimento_avaliacoes_falhou", err=type(e).__name__)
         return None
 
 
@@ -4074,6 +4108,7 @@ class WorkerSettings:
         # também para dar para enfileirar uma rodada à mão.
         func(atendimento_reclamacoes, timeout=540),
         func(atendimento_etiquetas, timeout=600),
+        func(atendimento_avaliacoes, timeout=1500),
         # Importação do histórico (28/09/2026): SÓ aqui, nunca em `cron_jobs` —
         # roda uma vez, à mão, depois da aprovação. Uma tentativa só: é
         # retomável, e quem decide rodar de novo é pessoa.
@@ -4366,6 +4401,15 @@ class WorkerSettings:
             minute=_ATENDIMENTO_ETIQUETAS_MINUTOS,
             run_at_startup=False,
             timeout=600,
+        ),
+        # Avaliações (02/10/2026) no :12/:42. `timeout=1500` = a trava da
+        # rodada (25 min): o job morto pelo arq não deixa a trava viva por
+        # cima da próxima rodada.
+        cron(
+            atendimento_avaliacoes,
+            minute=_ATENDIMENTO_AVALIACOES_MINUTOS,
+            run_at_startup=False,
+            timeout=1500,
         ),
         # Reconciliação a cada 10 min, no :05 (longe do congestionamento do
         # :00): postagem presa é CONSULTADA, nunca retentada.

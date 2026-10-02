@@ -31,11 +31,15 @@ export const FILTROS_MENU: OpcaoFiltro[] = [
   { value: 'reclamacao', label: 'Reclamação', hint: 'reclamação ou mediação aberta na plataforma' },
   { value: 'ag_cancelamento', label: 'Ag. cancelamento', hint: 'pedido em Aguardando Cancelamento no Bling (fora a trava do robô da Margem)' },
   { value: 'devolucao', label: 'Devolução', hint: 'devolução aberta na plataforma ou pedido em Aguardando Devolução no Bling' },
+  // Avaliação de venda sem resposta da loja (RF8, 02/10/2026): Shopee sem
+  // resposta passada a carência (1 h na nota 1–3, 24 h na 4–5); Mercado Livre
+  // com nota 1–3 ainda não tratada. O selo da linha leva as estrelas.
+  { value: 'avaliacao', label: 'Avaliação', hint: 'avaliação de venda sem resposta da loja (Shopee) ou com nota 1–3 sem tratar (Mercado Livre)' },
   { value: 'pre_venda', label: 'Pré-venda', hint: 'perguntas e conversas sem pedido ligado' },
   { value: 'pos_venda', label: 'Pós-venda', hint: 'conversa de um pedido sem nada aberto (sem reclamação, devolução nem Ag. cancelamento)' },
 ]
 // Os filtros do menu que são ETIQUETA (contam pelo /resumo `etiquetas`).
-export const FILTROS_ETIQUETA = new Set(['reclamacao', 'ag_cancelamento', 'devolucao', 'pre_venda', 'pos_venda'])
+export const FILTROS_ETIQUETA = new Set(['reclamacao', 'ag_cancelamento', 'devolucao', 'avaliacao', 'pre_venda', 'pos_venda'])
 export const FILTROS_RAPIDOS: OpcaoFiltro[] = [...ABAS_LISTA, ...FILTROS_MENU]
 </script>
 
@@ -222,7 +226,8 @@ const PREVIA_TIPO: Record<string, string> = {
   outro: '[Mensagem]',
 }
 function previa(c: ConversaResumo) {
-  let t = (c.ultima_mensagem_resumo || '').trim()
+  // Sem os ** do markdown do assistente do ML (mediação) na prévia.
+  let t = (c.ultima_mensagem_resumo || '').replace(/\*\*/g, '').trim()
   const tipo = (c.ultima_mensagem_tipo || '').toLowerCase()
   // Mensagem sem texto: o backend guarda o tipo cru no resumo ("[pedido]",
   // gravar.recalcular) — vira o rótulo do Duoke ("[Pedido]").
@@ -255,6 +260,7 @@ const VAZIO: Record<string, string> = {
   reclamacao: 'Nenhuma reclamação aberta com esses filtros.',
   devolucao: 'Nenhuma devolução aberta com esses filtros.',
   ag_cancelamento: 'Nenhum pedido em Aguardando Cancelamento com esses filtros.',
+  avaliacao: 'Nenhuma avaliação sem resposta com esses filtros.',
   vencendo: 'Nenhuma conversa perto de vencer.',
   vencidas: 'Nenhuma conversa vencida.',
   com_rascunho: 'Nenhuma sugestão da IA esperando conferência.',
@@ -521,6 +527,7 @@ function mover(delta: number) {
                   :secundarias="c.etiquetas_secundarias"
                   :manual="c.etiqueta_manual"
                   :desde="c.etiqueta_desde"
+                  :estrelas="c.avaliacao_estrelas"
                   :selecionada="c.id === selecionada"
                   esconder-pos-venda
                 />
@@ -542,7 +549,8 @@ function mover(delta: number) {
                   <PauseCircle class="size-3" /><Bot class="size-3" /> pausada
                 </span>
                 <span v-if="c.sem_resposta_necessaria" class="rounded px-1.5 py-px" :class="selo(c.id === selecionada, 'bg-muted text-muted-foreground')">não precisa de resposta</span>
-                <span v-if="c.situacao === 'bloqueada'" class="rounded px-1.5 py-px" :class="selo(c.id === selecionada, 'bg-red-500/15 text-red-700 dark:text-red-300')">bloqueada</span>
+                <span v-if="c.situacao === 'bloqueada' && c.canal === 'avaliacao'" class="rounded px-1.5 py-px" :class="selo(c.id === selecionada, 'bg-muted text-muted-foreground')" title="a plataforma não deixa responder esta avaliação pela API — trate e use “Marcar como tratada” no cartão">sem resposta pela API</span>
+                <span v-else-if="c.situacao === 'bloqueada'" class="rounded px-1.5 py-px" :class="selo(c.id === selecionada, 'bg-red-500/15 text-red-700 dark:text-red-300')">bloqueada</span>
                 <span v-if="c.situacao === 'fechada'" class="rounded px-1.5 py-px" :class="selo(c.id === selecionada, 'bg-muted text-muted-foreground')">fechada</span>
                 <span v-if="c.somente_leitura" class="inline-flex items-center gap-0.5 rounded px-1.5 py-px" :class="selo(c.id === selecionada, 'bg-muted text-muted-foreground')" title="só leitura no Atendimento">
                   <Lock class="size-3" /> só leitura

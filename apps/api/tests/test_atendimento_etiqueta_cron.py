@@ -418,6 +418,7 @@ async def test_preencher_seco_nao_grava_e_gravar_preenche_sem_historico(db):
         "reclamacao": 0,
         "ag_cancelamento": 0,
         "devolucao": 1,
+        "avaliacao": 0,
         "pre_venda": 1,
         "pos_venda": 1,
     }
@@ -433,6 +434,7 @@ async def test_preencher_seco_nao_grava_e_gravar_preenche_sem_historico(db):
         "reclamacao": 1,
         "ag_cancelamento": 0,
         "devolucao": 1,
+        "avaliacao": 0,
         "pre_venda": 1,
         "pos_venda": 1,
         "sem": 0,

@@ -6,9 +6,14 @@
 // GET /api/atendimento/conversas/{id}/reclamacoes (ML pelas reclamações da
 // conta; Shopee e TikTok pela Logística).
 //
-// SÓ LEITURA: nº, tipo, motivo, status e o PRAZO com contagem regressiva
-// (até quando a loja tem de agir na plataforma), o que a plataforma espera e
-// o "Abrir na plataforma". Nenhuma ação na plataforma sai daqui (aceitar
+// SÓ LEITURA: nº, tipo, status, o motivo do COMPRADOR, o que ele pede
+// ("Pede: Devolução + reembolso", Shopee/TikTok) e o PRAZO com contagem
+// regressiva (até quando a loja tem de agir na plataforma), o que a
+// plataforma espera e o "Abrir na plataforma". Status e motivo chegam em
+// português do backend; as tabelas daqui (as mesmas de
+// services/atendimento/reclamacoes_devolucoes.py) são a rede para o código
+// cru que escapar — nunca aparece "JUDGING" nem "CHANGE_MIND" na tela.
+// Nenhuma ação na plataforma sai daqui (aceitar
 // devolução, oferecer solução, pedir mediação ficam para depois, com
 // confirmação e auditoria).
 //
@@ -30,7 +35,12 @@ export interface Reclamacao {
   status: string | null
   status_rotulo: string | null
   aberta: boolean
+  // O que o comprador alegou (em português).
   motivo: string | null
+  // O que ele pediu na Shopee/TikTok ("Devolução + reembolso", "Só
+  // reembolso (produto fica com o cliente)"); opcional: a resposta antiga
+  // não traz.
+  solucao?: string | null
   pedido_marketplace: string | null
   prazo_em: string | null
   aberta_em: string | null
@@ -53,6 +63,112 @@ export interface ReclamacoesResposta {
 // comprador): "vencendo" é faltar menos de 24 h — o selo de 2 h da lista é
 // para a mensagem de chat.
 export const PRAZO_VENCENDO_MS = 24 * 3600 * 1000
+
+// O motivo do ML vem como código ("not_working_item"); o `detail` do próprio
+// ML às vezes não serve ("Chegou bem" para produto que não funciona). Medido
+// em produção em 02/10/2026: estes são os que aparecem. Código desconhecido
+// vira texto legível ("wrong item" → "Wrong item"), nunca some.
+export const MOTIVOS_ML: Record<string, string> = {
+  repentant_buyer: 'Desistiu da compra (chegou bem, não quer mais)',
+  bought_by_mistake: 'Comprou por engano',
+  different_than_published: 'Diferente do anúncio',
+  different_color_or_size: 'Cor, tamanho ou modelo diferente',
+  different_item_other: 'Recebeu outro produto',
+  not_working_item: 'Produto não funciona',
+  broken_item: 'Produto quebrado ou com defeito',
+  damaged_package_broken_item: 'Embalagem danificada e produto quebrado',
+  missing_accessories: 'Faltam acessórios',
+  missing_item: 'Falta produto no pacote',
+  delivered_but_not_receive_package: 'Consta entregue, mas não recebeu',
+  not_received: 'Não recebeu o produto',
+}
+// O motivo da Shopee (`reason` do detalhe da devolução), medido em produção
+// em 02/10/2026 (os seis primeiros) + os da documentação. A TikTok já manda
+// o rótulo em português ("Item com defeito"): passa como veio.
+export const MOTIVOS_SHOPEE: Record<string, string> = {
+  CHANGE_MIND: 'Mudou de ideia (desistiu da compra)',
+  FUNCTIONAL_DMG: 'Produto com defeito (não funciona)',
+  WRONG_ITEM: 'Recebeu produto errado',
+  ITEM_MISSING: 'Falta produto no pacote',
+  NOT_RECEIPT: 'Não recebeu o produto',
+  SUSPICIOUS_PARCEL: 'Pacote vazio ou violado',
+  MISSING_ITEM: 'Falta produto no pacote',
+  PHYSICAL_DMG: 'Produto danificado (avaria)',
+  ITEM_DAMAGED: 'Produto danificado',
+  DIFFERENT_DESCRIPTION: 'Diferente do anúncio',
+  NOT_AS_DESCRIBED: 'Diferente do anúncio',
+  ITEM_FAKE: 'Produto falsificado',
+  EXPECTATION_FAILED: 'Não atendeu à expectativa',
+  ITEM_NOT_FIT: 'Não serviu (tamanho ou modelo)',
+  MUTUAL_AGREE: 'Acordo entre comprador e loja',
+  OTHER: 'Outro motivo',
+}
+// Parece código da plataforma (não texto de gente)? "not_working_item",
+// "CHANGE_MIND", "opened".
+function ehCodigo(t: string): boolean {
+  if (/^[a-z0-9]+$/.test(t)) return true
+  return /^[A-Za-z0-9_]+$/.test(t) && (t.includes('_') || (/[A-Z]/.test(t) && t === t.toUpperCase()))
+}
+// "ITEM_NOT_FIT" / "wrong_size" → "Item not fit" / "Wrong size".
+function legivel(codigo: string): string {
+  const texto = codigo.replace(/_/g, ' ').trim().toLowerCase()
+  return texto.charAt(0).toUpperCase() + texto.slice(1)
+}
+export function motivoLegivel(motivo: string | null | undefined): string {
+  const m = String(motivo ?? '').trim()
+  if (!m) return ''
+  if (MOTIVOS_ML[m]) return MOTIVOS_ML[m]
+  if (MOTIVOS_SHOPEE[m.toUpperCase()]) return MOTIVOS_SHOPEE[m.toUpperCase()]
+  if (ehCodigo(m)) return legivel(m)
+  return m
+}
+
+// O status do caso em português, por plataforma (a mesma tabela de
+// reclamacoes_devolucoes.STATUS_TELA; o ML pelo status do claim). Conferido
+// com a Logística: Shopee JUDGING = a Shopee julgando a disputa,
+// SELLER_DISPUTE = a loja contestou; TikTok AWAITING_BUYER_SHIP = aprovada,
+// esperando o comprador postar; REJECT_RECEIVE_PACKAGE = a loja recusou o
+// pacote recebido.
+export const STATUS_PLATAFORMA: Record<string, Record<string, string>> = {
+  shopee: {
+    REQUESTED: 'Pedido de devolução aberto',
+    PROCESSING: 'Em andamento',
+    JUDGING: 'Em análise pela Shopee (disputa)',
+    SELLER_DISPUTE: 'Loja contestou',
+    ACCEPTED: 'Aceita — reembolso pago ao comprador',
+    REFUND_PAID: 'Reembolso pago ao comprador',
+    CANCELLED: 'Cancelada',
+    CLOSED: 'Encerrada pela Shopee',
+  },
+  tiktok: {
+    RETURN_OR_REFUND_REQUEST_PENDING: 'Pedido de devolução/reembolso pendente',
+    AWAITING_BUYER_SHIP: 'Esperando o comprador enviar',
+    BUYER_SHIPPED_ITEM: 'Comprador enviou o produto',
+    AWAITING_BUYER_RESPONSE: 'Esperando resposta do comprador',
+    REJECT_RECEIVE_PACKAGE: 'Recebimento recusado',
+    RETURN_OR_REFUND_REQUEST_SUCCESS: 'Concluída — reembolso pago',
+    RETURN_OR_REFUND_REQUEST_COMPLETE: 'Concluída — reembolso pago',
+    RETURN_OR_REFUND_REQUEST_CANCEL: 'Cancelada pelo comprador',
+    RETURN_OR_REFUND_REQUEST_REJECT: 'Recusada pela loja',
+    REFUND_OR_RETURN_REQUEST_REJECT: 'Recusada pela loja',
+  },
+  ml: {
+    opened: 'Aberta',
+    closed: 'Encerrada',
+  },
+}
+// O status que o cartão mostra: o do backend (já em português, e mais rico
+// no ML: "Em mediação no Mercado Livre"); se ele vier vazio ou cru
+// ("JUDGING"), a tabela; código desconhecido, legível.
+export function statusLegivel(r: Pick<Reclamacao, 'plataforma' | 'status' | 'status_rotulo'>): string {
+  const rotulo = String(r.status_rotulo ?? '').trim()
+  const cru = String(r.status ?? '').trim()
+  if (rotulo && rotulo !== cru && !ehCodigo(rotulo)) return rotulo
+  const codigo = rotulo || cru
+  if (!codigo) return ''
+  const tabela = STATUS_PLATAFORMA[String(r.plataforma ?? '').trim().toLowerCase()] || {}
+  return tabela[codigo] || tabela[codigo.toUpperCase()] || tabela[codigo.toLowerCase()] || legivel(codigo)
+}
 
 // Reclamação/Mediação = vermelho; Devolução = roxo (as cores da etiqueta).
 export function corDoTipo(tipo: string | null | undefined): { selo: string; borda: string } {
@@ -132,11 +248,14 @@ export function ordenarReclamacoes(itens: Reclamacao[]): Reclamacao[] {
 
 <script setup lang="ts">
 import { ChevronDown, ChevronRight, Copy, ExternalLink, Scale, TriangleAlert, Undo2 } from 'lucide-vue-next'
+import type { PerfilAdsPower } from '~/components/AtendimentoAdsPower.vue'
 import { copiar, fmtDataHora, useRelogio } from '~/components/AtendimentoPlataforma.vue'
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   conversaId: string
-}>()
+  // O perfil do AdsPower da loja (painel da conversa): "Abrir no …" abre nele.
+  perfil?: PerfilAdsPower | null
+}>(), { perfil: null })
 const emit = defineEmits<{
   // Para quem monta a conversa: quantas abertas e o prazo mais curto (o selo
   // do cabeçalho, se quiser).
@@ -221,24 +340,25 @@ async function copiarNumero(r: Reclamacao) {
         >{{ prazoReclamacao(r, agora)!.texto }}</span>
       </div>
 
-      <div v-if="r.status_rotulo" class="mt-1">{{ r.status_rotulo }}</div>
-      <div v-if="r.motivo" class="text-muted-foreground">Motivo: {{ r.motivo }}</div>
+      <div v-if="statusLegivel(r)" class="mt-1" :title="r.status || undefined">{{ statusLegivel(r) }}</div>
+      <div v-if="r.motivo" class="text-muted-foreground" :title="r.motivo">Motivo: {{ motivoLegivel(r.motivo) }}</div>
+      <div v-if="r.solucao" class="text-muted-foreground">Pede: {{ r.solucao }}</div>
       <div v-if="r.acao_pendente" class="mt-1 font-medium">
         {{ r.acao_pendente }}<span v-if="r.prazo_em" class="font-normal text-muted-foreground"> — até {{ fmtDataHora(r.prazo_em) }}</span>
       </div>
       <div class="mt-1 flex flex-wrap items-center gap-1.5 text-xs">
         <span v-if="r.reputacao_afetada" class="rounded border border-red-500/50 px-1.5 py-px text-red-700 dark:text-red-300">Reputação afetada</span>
         <span v-if="r.aberta_em" class="text-muted-foreground">aberta em {{ fmtDataHora(r.aberta_em) }}</span>
-        <a
+        <AtendimentoAbrirPlataforma
           v-if="r.url_plataforma"
           :href="r.url_plataforma"
-          target="_blank"
-          rel="noopener noreferrer"
+          :perfil="perfil"
+          :conversa-id="conversaId"
           class="ml-auto inline-flex items-center gap-1 rounded border bg-background px-2 py-0.5 hover:bg-muted"
         >
           <ExternalLink class="size-3.5" aria-hidden="true" />
           {{ abrirEm(r.plataforma, r.plataforma_nome) }}
-        </a>
+        </AtendimentoAbrirPlataforma>
       </div>
       <div class="mt-1 text-xs text-muted-foreground">Só leitura aqui: responda e aja pela plataforma.</div>
     </div>
@@ -258,18 +378,18 @@ async function copiarNumero(r: Reclamacao) {
         <li v-for="r in encerradas" :key="r.id" class="flex flex-wrap items-center gap-1.5 px-2 py-1.5">
           <span class="rounded px-1 py-px font-medium" :class="corDoTipo(r.tipo).selo">{{ r.tipo_rotulo }}</span>
           <span class="break-all">{{ r.numero ? `nº ${r.numero}` : tituloReclamacao(r) }}</span>
-          <span v-if="r.status_rotulo" class="text-muted-foreground">· {{ r.status_rotulo }}</span>
+          <span v-if="statusLegivel(r)" class="text-muted-foreground">· {{ statusLegivel(r) }}</span>
           <span v-if="r.encerrada_em" class="text-muted-foreground">· {{ fmtDataHora(r.encerrada_em) }}</span>
-          <a
+          <AtendimentoAbrirPlataforma
             v-if="r.url_plataforma"
             :href="r.url_plataforma"
-            target="_blank"
-            rel="noopener noreferrer"
+            :perfil="perfil"
+            :conversa-id="conversaId"
+            :titulo="abrirEm(r.plataforma, r.plataforma_nome)"
             class="ml-auto inline-flex items-center gap-1 hover:underline"
-            :title="abrirEm(r.plataforma, r.plataforma_nome)"
           >
             <ExternalLink class="size-3.5" aria-hidden="true" />
-          </a>
+          </AtendimentoAbrirPlataforma>
         </li>
       </ul>
     </div>

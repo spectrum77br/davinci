@@ -34,6 +34,13 @@ COMO LIGAR CONVERSA → PEDIDO DO BLING (o mesmo caminho do painel do pedido,
      a conversa do pack só tem o PACK. Assim a conversa do pack e a conversa
      `reclamacao` do mesmo pedido ganham a mesma etiqueta (e o mesmo cartão).
 
+  5. Avaliações de venda PENDENTES (`atendimento_avaliacoes_loja.
+     pendente_desde`, 02/10/2026): do mesmo jeito que a reclamação — pela
+     `conversa_id` (a conversa `avaliacao` criada para ela) OU por
+     (plataforma, `pedido` ou `dados.pack_id` da avaliação ∈ chaves —
+     `condicao_avaliacao_do_pedido`). A opinião do ML vem pelo ORDER; a
+     conversa do pack de carrinho só tem o pack.
+
   Produção, 01/10/2026: pedido ligado em 2.373 de 3.477 conversas Shopee, 244
   de 515 TikTok e 146 de 146 do pós-venda do ML; a pergunta do ML nunca tem
   pedido. 86 conversas ligadas a pedido em 83957 e 5 a pedido em 83955.
@@ -60,7 +67,12 @@ O que JÁ é fonte (01/10/2026):
     devolução do ML, `returns`, também vem em `claim_ids` e é Devolução; a
     encerrada na tabela não reabre por um `claim_ids` velho do pack);
   • reclamação/devolução encerrada (`encerrada_em` preenchido, ou o Bling
-    saiu de 83957): o fato some e a etiqueta volta à base (pós-venda).
+    saiu de 83957): o fato some e a etiqueta volta à base (pós-venda);
+  • Avaliação (02/10/2026): avaliação de venda PENDENTE — sem resposta da
+    loja depois da carência (Shopee) ou nota 1–3 sem tratar (ML). Quem
+    decide a pendência é `services/atendimento/avaliacoes.py`; aqui só se
+    lê `pendente_desde`. Respondida ou tratada, o fato some e a etiqueta
+    volta ao que os outros fatos dão.
 A LOGÍSTICA ENTRA PELA TABELA: `reclamacoes.sincronizar_reclamacoes_ml` e
   `reclamacoes_devolucoes.ligar_devolucoes` (frente A) gravam em
   `atendimento_reclamacoes` a devolução e a disputa de Shopee/TikTok que a
@@ -74,7 +86,7 @@ TODO(item 4, outro dev): a classificação do motivo do 83955 troca a regra
 
 DUAS PORTAS, A MESMA REGRA: `fatos_da_conversa` (uma conversa — o gancho do
 sync, a troca à mão) e `fatos_em_lote` (o cron e o preenchimento, centenas
-por vez em 3 ou 4 consultas). As duas montam os fatos com as mesmas funções
+por vez em 4 ou 5 consultas). As duas montam os fatos com as mesmas funções
 puras (`_pedido_das_linhas`, `_montar_fatos`); a de uma conversa é o lote
 de um.
 
@@ -93,6 +105,7 @@ from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
+    AtendimentoAvaliacaoLoja,
     AtendimentoConversa,
     AtendimentoReclamacao,
     BlingOrder,
@@ -101,6 +114,7 @@ from app.models import (
 )
 from app.services.atendimento.constantes import (
     CANAIS_SEMPRE_POS_VENDA,
+    CANAL_AVALIACAO,
     CANAL_PERGUNTA,
     CANAL_RECLAMACAO,
     RECLAMACAO_TIPO_DEVOLUCAO,
@@ -506,6 +520,92 @@ def _motivo_reclamacao(r: AtendimentoReclamacao) -> str:
     return f"{tipo} {r.externo_id} aberta no {plataforma}"
 
 
+# ── Avaliações de venda pendentes (RF8) ──────────────────────────────────
+
+# "na Shopee", "no Mercado Livre" — o lugar, com a preposição certa.
+_NA_PLATAFORMA = {"ml": "no Mercado Livre", "shopee": "na Shopee"}
+
+
+def pedidos_da_avaliacao(a: AtendimentoAvaliacaoLoja) -> set[str]:
+    """Os números pelos quais a avaliação casa com um pedido: o dela e, no ML, o pack.
+
+    A opinião do ML vem com o ORDER (`order_id`); a conversa do pack de
+    carrinho guarda o PACK. O leitor grava o pack em `dados.pack_id`.
+    """
+    numeros = {str(a.pedido).strip()} if a.pedido else set()
+    dados = a.dados if isinstance(a.dados, dict) else {}
+    pack = str(dados.get("pack_id") or "").strip()
+    if pack:
+        numeros.add(pack)
+    numeros.discard("")
+    return numeros
+
+
+def condicao_avaliacao_do_pedido(chaves: Sequence[str]):
+    """SQL de `pedidos_da_avaliacao`: o pedido da avaliação OU o pack dela está nas chaves."""
+    return or_(
+        AtendimentoAvaliacaoLoja.pedido.in_(list(chaves)),
+        AtendimentoAvaliacaoLoja.dados["pack_id"].astext.in_(list(chaves)),
+    )
+
+
+def avaliacao_e_da_conversa(
+    a: AtendimentoAvaliacaoLoja, conversa: AtendimentoConversa, chaves: Sequence[str]
+) -> bool:
+    """A avaliação é desta conversa? Pela `conversa_id` OU pelo pedido, na mesma plataforma."""
+    if a.conversa_id is not None and a.conversa_id == conversa.id:
+        return True
+    return a.plataforma == conversa.plataforma and bool(pedidos_da_avaliacao(a) & set(chaves))
+
+
+def pior_primeiro(a: AtendimentoAvaliacaoLoja) -> tuple:
+    """A nota mais baixa primeiro; empate: a pendente há mais tempo."""
+    desde = a.pendente_desde
+    return (int(a.estrelas or 0), desde is None, desde.timestamp() if desde else 0.0)
+
+
+async def avaliacoes_pendentes_de(
+    session: AsyncSession, ids: Sequence[UUID], chaves: Iterable[str]
+) -> list[AtendimentoAvaliacaoLoja]:
+    """As PENDENTES (`pendente_desde IS NOT NULL`) ligadas a estas conversas ou pedidos."""
+    lista = sorted({c for c in chaves if c})
+    conds = [AtendimentoAvaliacaoLoja.conversa_id.in_(list(ids))] if ids else []
+    if lista:
+        conds.append(condicao_avaliacao_do_pedido(lista))
+    if not conds:
+        return []
+    return list(
+        (
+            await session.execute(
+                select(AtendimentoAvaliacaoLoja).where(
+                    AtendimentoAvaliacaoLoja.pendente_desde.is_not(None), or_(*conds)
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+
+def pendentes_da_conversa(
+    conversa: AtendimentoConversa,
+    chaves: Sequence[str],
+    pendentes: Iterable[AtendimentoAvaliacaoLoja],
+) -> list[AtendimentoAvaliacaoLoja]:
+    """Das pendentes lidas em lote, as desta conversa — a pior primeiro. PURA."""
+    return sorted(
+        (a for a in pendentes if avaliacao_e_da_conversa(a, conversa, chaves)), key=pior_primeiro
+    )
+
+
+def _motivo_avaliacao(a: AtendimentoAvaliacaoLoja) -> str:
+    """Ex.: "Avaliação 2★ sem resposta da loja na Shopee" — nota e plataforma, sem o texto."""
+    onde = _NA_PLATAFORMA.get(a.plataforma, f"no {a.plataforma}")
+    if a.pode_responder:
+        return f"Avaliação {a.estrelas}★ sem resposta da loja {onde}"
+    return f"Avaliação {a.estrelas}★ {onde} ainda não tratada"
+
+
 # ── Fatos ─────────────────────────────────────────────────────────────────
 
 
@@ -552,13 +652,15 @@ def _montar_fatos(
     pedido: PedidoBling | None,
     abertas: Sequence[AtendimentoReclamacao],
     conhecidos: frozenset[str] = frozenset(),
+    avaliacoes: Sequence[AtendimentoAvaliacaoLoja] = (),
 ) -> FatosEtiqueta:
     """Os fatos de UMA conversa a partir do que já foi lido. PURA.
 
     `pedido` = o pedido do Bling dela (com a origem do 83955); `abertas` =
     as reclamações abertas dela, a mais urgente primeiro; `conhecidos` =
     os `claim_ids` do pack que já são linha em `atendimento_reclamacoes` (a
-    tabela decide o tipo e se está aberta — o pack só vale para o resto).
+    tabela decide o tipo e se está aberta — o pack só vale para o resto);
+    `avaliacoes` = as avaliações PENDENTES dela, a pior primeiro.
     """
     # Pré × pós-venda: a regra dos filtros da lista.
     tem_pedido = e_pos_venda(conversa.canal, conversa.pedido_marketplace)
@@ -600,6 +702,7 @@ def _montar_fatos(
     elif devolucao_bling and pedido is not None:
         motivo_devolucao = f"pedido {pedido.numero} em Aguardando Devolução no Bling"
 
+    pior = avaliacoes[0] if avaliacoes else None
     return FatosEtiqueta(
         tem_pedido=tem_pedido,
         motivo_pedido=motivo_pedido,
@@ -609,6 +712,9 @@ def _montar_fatos(
         motivo_devolucao=motivo_devolucao,
         ag_cancelamento=ag_cancelamento,
         motivo_ag_cancelamento=motivo_ag,
+        avaliacao_pendente=pior is not None,
+        motivo_avaliacao=_motivo_avaliacao(pior) if pior is not None else None,
+        estrelas_avaliacao=int(pior.estrelas) if pior is not None else None,
         numero_bling=pedido.numero if pedido is not None else None,
     )
 
@@ -616,13 +722,13 @@ def _montar_fatos(
 async def fatos_em_lote(
     session: AsyncSession, conversas: Sequence[AtendimentoConversa]
 ) -> dict[UUID, FatosEtiqueta]:
-    """Os fatos de VÁRIAS conversas, lidos do banco em 3 a 5 consultas. Não escreve nada.
+    """Os fatos de VÁRIAS conversas, lidos do banco em 4 a 6 consultas. Não escreve nada.
 
     O espelho do Bling (uma consulta para as chaves de todas), a trilha da
-    Margem (só os pedidos em 83955) e as reclamações abertas (pela conversa
-    ou pelo pedido). É o caminho do cron e do preenchimento: centenas de
-    conversas sem uma consulta por conversa. Pode levantar (erro de banco):
-    quem chama roda num SAVEPOINT.
+    Margem (só os pedidos em 83955), as reclamações abertas e as avaliações
+    pendentes (pela conversa ou pelo pedido). É o caminho do cron e do
+    preenchimento: centenas de conversas sem uma consulta por conversa. Pode
+    levantar (erro de banco): quem chama roda num SAVEPOINT.
     """
     if not conversas:
         return {}
@@ -635,6 +741,7 @@ async def fatos_em_lote(
     conhecidos = await _claims_conhecidos(
         session, (i for c in conversas for i in _claims_do_pack(c))
     )
+    pendentes = await avaliacoes_pendentes_de(session, [c.id for c in conversas], todas)
     fatos: dict[UUID, FatosEtiqueta] = {}
     for c in conversas:
         base = pedidos[c.id]
@@ -643,7 +750,8 @@ async def fatos_em_lote(
             (r for r in abertas if _da_conversa(r, c, chaves[c.id])),
             key=_mais_urgente_primeiro,
         )
-        fatos[c.id] = _montar_fatos(c, pedido, da_conversa, conhecidos)
+        avaliacoes = pendentes_da_conversa(c, chaves[c.id], pendentes)
+        fatos[c.id] = _montar_fatos(c, pedido, da_conversa, conhecidos, avaliacoes)
     return fatos
 
 
@@ -692,7 +800,9 @@ async def conversas_do_pedido(
     if plat:
         consulta = consulta.where(AtendimentoConversa.plataforma == plat)
     consulta = consulta.order_by(
-        (AtendimentoConversa.canal == CANAL_RECLAMACAO).asc(),
+        # As conversas com o comprador primeiro; as que nasceram de uma
+        # reclamação ou de uma avaliação, depois.
+        AtendimentoConversa.canal.in_((CANAL_RECLAMACAO, CANAL_AVALIACAO)).asc(),
         AtendimentoConversa.ultima_mensagem_em.desc().nulls_last(),
         AtendimentoConversa.created_at.desc(),
     )

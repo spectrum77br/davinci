@@ -8,8 +8,11 @@
 //
 // Cores (decididas em 01/10/2026): Reclamação vermelho, Devolução roxo,
 // Pré-venda azul, Ag. cancelamento laranja; Pós-venda SEM destaque (é a
-// maioria — destacar tudo é não destacar nada). Etiqueta nova (Avaliação,
-// Carrinho, SAC…): acrescente aqui, no lugar certo da PRIORIDADE.
+// maioria — destacar tudo é não destacar nada). Avaliação (RF8, 02/10/2026)
+// amarela, com as estrelas da pior nota pendente (`avaliacao_estrelas` da
+// lista) e a nota 1–3 em destaque (amarelo cheio, estrelas em vermelho).
+// Etiqueta nova (Carrinho, SAC…): acrescente aqui, no lugar certo da
+// PRIORIDADE.
 //
 // Canal nunca é etiqueta: e-mail, Zap e o próprio canal "reclamação" são o
 // CANAL da conversa (AtendimentoPlataforma.canalLabel); a etiqueta é o status.
@@ -52,6 +55,15 @@ export const ETIQUETAS_INFO: Record<string, EtiquetaInfo> = {
     ponto: 'bg-purple-500',
     destaque: true,
   },
+  avaliacao: {
+    value: 'avaliacao',
+    label: 'Avaliação',
+    hint: 'avaliação de venda sem resposta da loja (Shopee) ou com nota 1–3 sem tratar (Mercado Livre)',
+    cls: 'bg-yellow-400/25 text-yellow-800 dark:text-yellow-300',
+    faixa: 'bg-yellow-400',
+    ponto: 'bg-yellow-400',
+    destaque: true,
+  },
   pre_venda: {
     value: 'pre_venda',
     label: 'Pré-venda',
@@ -73,9 +85,31 @@ export const ETIQUETAS_INFO: Record<string, EtiquetaInfo> = {
 }
 // Da MAIS urgente para a menos (constantes.PRIORIDADE_ETIQUETAS): duas abertas
 // ao mesmo tempo, vale a primeira; a outra vira o indicador.
-export const PRIORIDADE_ETIQUETAS = ['reclamacao', 'ag_cancelamento', 'devolucao', 'pre_venda', 'pos_venda']
+export const PRIORIDADE_ETIQUETAS = ['reclamacao', 'ag_cancelamento', 'devolucao', 'avaliacao', 'pre_venda', 'pos_venda']
 // Toda conversa tem uma das duas: nunca entram no indicador.
 const BASE = new Set(['pre_venda', 'pos_venda'])
+
+// ─── as estrelas do selo Avaliação (RF8) ────────────────────────────────────
+// Nota "baixa" = 1–3, a mesma régua do backend (constantes.NOTA_BAIXA_AVALIACAO).
+export const NOTA_BAIXA_AVALIACAO = 3
+// A nota como estrelas cheias e vazias ("★★☆☆☆"); fora de 1–5 (ou sem nota), ''.
+export function estrelasDaNota(n: number | null | undefined): string {
+  const v = Number(n)
+  if (!Number.isInteger(v) || v < 1 || v > 5) return ''
+  return '★'.repeat(v) + '☆'.repeat(5 - v)
+}
+export function notaBaixa(n: number | null | undefined): boolean {
+  return !!estrelasDaNota(n) && Number(n) <= NOTA_BAIXA_AVALIACAO
+}
+// Nota 1–3 em destaque: amarelo cheio com contorno vermelho (o resto da
+// Avaliação fica no amarelo translúcido).
+export const CLS_AVALIACAO_NOTA_BAIXA = 'bg-yellow-400 text-yellow-950 ring-1 ring-red-500/70 dark:bg-yellow-400/80'
+// O fundo/texto do selo: o da etiqueta; na Avaliação com nota baixa, o destaque.
+export function clsDoSelo(etiqueta: string | null | undefined, estrelas?: number | null): string {
+  const info = etiquetaInfo(etiqueta)
+  if (!info) return ''
+  return info.value === 'avaliacao' && notaBaixa(estrelas) ? CLS_AVALIACAO_NOTA_BAIXA : info.cls
+}
 
 export function etiquetaInfo(etiqueta: string | null | undefined): EtiquetaInfo | null {
   const e = (etiqueta || '').trim().toLowerCase()
@@ -112,11 +146,14 @@ export const OPCOES_ETIQUETA: EtiquetaInfo[] = PRIORIDADE_ETIQUETAS.map((e) => E
 // O title do selo: o que é, desde quando e se foi trocada à mão.
 export function tituloDaEtiqueta(
   etiqueta: string | null | undefined,
-  { desde, manual, secundarias }: { desde?: string | null; manual?: boolean; secundarias?: string[] | null } = {},
+  { desde, manual, secundarias, estrelas }: { desde?: string | null; manual?: boolean; secundarias?: string[] | null; estrelas?: number | null } = {},
 ): string {
   const info = etiquetaInfo(etiqueta)
   if (!info) return ''
   const partes = [info.hint ? `${info.label}: ${info.hint}` : info.label]
+  if (info.value === 'avaliacao' && estrelasDaNota(estrelas)) {
+    partes.push(`pior nota sem resposta: ${estrelas} de 5${notaBaixa(estrelas) ? ' (nota baixa)' : ''}`)
+  }
   if (desde) {
     const d = new Date(desde)
     if (!Number.isNaN(d.getTime())) partes.push(`desde ${d.toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}`)
@@ -150,6 +187,9 @@ const props = withDefaults(defineProps<{
   editavel?: boolean
   conversaId?: string | null
   historico?: EtiquetaHistorico[] | null
+  // Avaliação (RF8): a pior nota pendente (`avaliacao_estrelas`) — as
+  // estrelas no selo; 1–3 em destaque. Só vale quando a etiqueta é Avaliação.
+  estrelas?: number | null
 }>(), {
   secundarias: () => [],
   manual: false,
@@ -159,14 +199,23 @@ const props = withDefaults(defineProps<{
   editavel: false,
   conversaId: null,
   historico: null,
+  estrelas: null,
 })
 const emit = defineEmits<{ (e: 'trocada', r: EtiquetaTroca): void }>()
 
 const info = computed(() => etiquetaInfo(props.etiqueta))
 const mostrarSelo = computed(() => !!info.value && !(props.esconderPosVenda && !info.value.destaque))
 const outras = computed(() => secundariasDe(props.etiqueta, props.secundarias))
-const titulo = computed(() => tituloDaEtiqueta(props.etiqueta, { desde: props.desde, manual: props.manual, secundarias: props.secundarias }))
-const clsSelo = computed(() => (props.selecionada ? 'bg-white/20 text-current' : info.value?.cls || ''))
+const titulo = computed(() => tituloDaEtiqueta(props.etiqueta, { desde: props.desde, manual: props.manual, secundarias: props.secundarias, estrelas: props.estrelas }))
+const clsSelo = computed(() => (props.selecionada ? 'bg-white/20 text-current' : clsDoSelo(props.etiqueta, props.estrelas)))
+// As estrelas só no selo da Avaliação (com outra etiqueta na frente, a
+// Avaliação é o indicador pequeno e a nota vai no title dele).
+const estrelasSelo = computed(() => (info.value?.value === 'avaliacao' ? estrelasDaNota(props.estrelas) : ''))
+const seloNotaBaixa = computed(() => !!estrelasSelo.value && notaBaixa(props.estrelas))
+function tituloSecundaria(o: EtiquetaInfo) {
+  const nota = o.value === 'avaliacao' && estrelasDaNota(props.estrelas) ? ` (pior nota ${props.estrelas} de 5)` : ''
+  return `também aberta: ${o.label}${nota}`
+}
 const podeEditar = computed(() => props.editavel && !!props.conversaId)
 
 // ─── troca à mão ────────────────────────────────────────────────────────────
@@ -229,6 +278,13 @@ const linhaDoTempo = computed(() => (props.historico || []).slice().reverse())
       @click.stop="abrir"
     >
       {{ info ? info.label : 'sem etiqueta' }}
+      <span
+        v-if="estrelasSelo"
+        class="tracking-tighter"
+        :class="seloNotaBaixa && !selecionada ? 'font-semibold text-red-700 dark:text-red-800' : ''"
+        :aria-label="`nota ${estrelas} de 5`"
+        data-estrelas
+      >{{ estrelasSelo }}</span>
       <Hand v-if="manual" class="size-3" aria-label="trocada à mão" />
     </component>
     <!-- O indicador pequeno: as outras abertas ao mesmo tempo. -->
@@ -237,8 +293,8 @@ const linhaDoTempo = computed(() => (props.historico || []).slice().reverse())
       :key="o.value"
       class="inline-block size-2 rounded-full ring-1 ring-background"
       :class="o.ponto"
-      :title="`também aberta: ${o.label}`"
-      :aria-label="`também aberta: ${o.label}`"
+      :title="tituloSecundaria(o)"
+      :aria-label="tituloSecundaria(o)"
       data-secundaria
     />
 

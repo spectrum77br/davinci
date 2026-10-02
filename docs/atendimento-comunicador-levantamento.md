@@ -129,6 +129,7 @@ A conferência de completude (01/10, à tarde) está no §6.
 - **Avaliações:**
   - Na Shopee, 92,5% das 3.741 já têm resposta da loja feita por fora. Nos últimos 30 dias foram 1.720 avaliações, 55 com nota de 1 a 3 e só 3 dessas sem resposta. A regra "todas pendentes" criaria cerca de 57 pendências por dia já respondidas.
   - No ML, o que se prende ao pedido é a avaliação da **venda** (positivo/neutro/negativo), não estrelas.
+  - **Correção (02/10/2026, medido só com GET):** a avaliação da venda do ML (`/orders/{id}/feedback`) está **morta** — 0 de 60 pedidos de 7 a 30 dias atrás com avaliação (404 em todos), e `order.feedback = {buyer: null, seller: null}` nos 100 pedidos mais recentes. O que liga ao pedido hoje é a **opinião do produto** (`/reviews/item/{id}`, 1–5 estrelas, texto e fotos), que traz o `order_id` em 100%. Ela é do PRODUTO (anúncios irmãos, até de outra conta nossa, devolvem as mesmas), não vem por data, e o ML **não deixa responder pela API**. É ela que o atendimento lê (`services/atendimento/avaliacoes.py`), com "marcar como tratada" no lugar da resposta.
 - **Carrinho:**
   - Charlots e Uranyx são **atacado**: o carrinho é do lojista logado e termina "pelo WhatsApp", sem checkout, frete, cupom, etapa nem link de recuperação. Quando o lojista confirma o envio, o site **apaga** o carrinho sem histórico.
   - A 7buyers (Shopify) tem API de checkouts abandonados.
@@ -365,7 +366,7 @@ A conferência de completude (01/10, à tarde) está no §6.
 | Responder pela tela (resposta pública, com aviso na caixa; onde não pode, o motivo) | ❌ | Sem chamada de resposta; 92,5% já respondidas por fora | Shopee `reply_comment`; ML [confirmar]; aviso de resposta pública; descobrir quem responde hoje | M | Envio desligado; permissão por loja |
 | Etiqueta AVALIAÇÃO na lista | ❌ | Só o selo "avaliou mal" | Etiqueta + destaque | P | RF1-Et |
 | Painel: nota, fotos, prazo, histórico | 🟡 | Cartão Cliente com a mais recente e a pior | Fotos, prazo, "respondida" | P | — |
-| ML (estrelas do produto) | ✏️🟡 | O que liga ao pedido é a avaliação da venda (positivo, neutro, negativo) | Corrigir o spec; gravar no índice | M | Docs ML |
+| ML (estrelas do produto) | 🟡 | **Corrigido em 02/10/2026:** o que liga ao pedido é a OPINIÃO do produto (`/reviews/item`, com `order_id`); a avaliação da venda (`/orders/{id}/feedback`) está morta (0 de 60) | Lida pelo cron das avaliações (`avaliacoes.py`), sem resposta pela API ("marcar como tratada") | M | — |
 | Shopee | 🟡 | Leitura nas 14 lojas | Resposta e conversa | M | Permissão de produto |
 | TikTok e Amazon | ❌ | Nada | [confirmar] APIs; Amazon só por relatório | G | Docs e permissões |
 | Sites (e Magalu, Temu, Ali) | ✏️ | Charlots e Uranyx só têm depoimentos; 7buyers por app Shopify | Tirar do RF8 os sites próprios; decidir sobre Magalu, Temu e Ali | — | Decisão do dono |

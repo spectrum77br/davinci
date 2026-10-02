@@ -1,7 +1,8 @@
 """Etiqueta = status atual da conversa (RF1, 01/10/2026).
 
 - `calcular` (PURA): a tabela de acontecimentos do RF1 e a prioridade
-  Reclamação > Ag. cancelamento > Devolução > Pré-venda > Pós-venda, com as
+  Reclamação > Ag. cancelamento > Devolução > Avaliação > Pré-venda >
+  Pós-venda (a Avaliação entrou em 02/10/2026, RF8), com as
   outras abertas no indicador pequeno (secundárias) e a base nunca nele;
 - `ag_cancelamento_visivel`: 83955 vira etiqueta, MENOS a trava do robô da
   Margem (o encaixe do item 4);
@@ -100,11 +101,12 @@ def test_tabela_de_acontecimentos_do_rf1(acontecimento, fatos, esperada):
     assert calcular(fatos).etiqueta == esperada, acontecimento
 
 
-URGENTES = ("reclamacao", "ag_cancelamento", "devolucao")
+URGENTES = ("reclamacao", "ag_cancelamento", "devolucao", "avaliacao")
 _CAMPO = {
     "reclamacao": "reclamacao_aberta",
     "ag_cancelamento": "ag_cancelamento",
     "devolucao": "devolucao_aberta",
+    "avaliacao": "avaliacao_pendente",
 }
 
 
@@ -128,7 +130,7 @@ def test_prioridade_vale_a_mais_urgente_e_as_outras_viram_indicador(abertas, tem
 
 def test_ordem_da_prioridade_e_canal_nunca_e_etiqueta():
     assert PRIORIDADE_ETIQUETAS == (
-        "reclamacao", "ag_cancelamento", "devolucao", "pre_venda", "pos_venda"
+        "reclamacao", "ag_cancelamento", "devolucao", "avaliacao", "pre_venda", "pos_venda"
     )
     assert set(ETIQUETAS_BASE) == {"pre_venda", "pos_venda"}
     # E-mail, Zap, chat, pergunta, SAC: canal, não status.

@@ -43,7 +43,10 @@ Parte 2 (28/09/2026):
                                    anota cada pedido que já vê passar.
   `atendimento_avaliacoes_loja`  — as avaliações que o comprador deixou na
                                    loja (Shopee `get_comment`), casadas com ele
-                                   pelo pedido e pelo usuário.
+                                   pelo pedido e pelo usuário. Desde a 0358
+                                   (02/10/2026) também a opinião do produto
+                                   do ML, a mídia, a resposta e a PENDÊNCIA
+                                   (avaliações no atendimento, RF8).
 
 Duas travas vivem NO BANCO, não na aplicação, pelo mesmo motivo do
 `uq_dm_resposta_em_voo`: dois workers (ou duas abas) podem tentar, só um grava.
@@ -717,12 +720,29 @@ class AtendimentoPedidoComprador(Base):
 
 
 class AtendimentoAvaliacaoLoja(Base):
-    """Uma avaliação que o comprador deixou na loja (Shopee `get_comment`).
+    """Uma avaliação que o comprador deixou na venda (Shopee e Mercado Livre).
 
     O cartão "Cliente" mostra as estrelas e o sinal `avaliou_mal`; a IA manda
     para pessoa quem avaliou mal. Casa com o comprador pelo pedido
     (`order_sn`) e pelo usuário da loja (`buyer_username` = `to_name` da
     conversa). O texto vai cortado em 500 caracteres: é o que a tela mostra.
+
+    Avaliações no atendimento (RF8, 02/10/2026, migration 0358 — o nome
+    `atendimento_avaliacoes` já é a nota da pessoa sobre a sugestão da IA):
+    a mesma tabela passa a guardar também a OPINIÃO do produto do Mercado
+    Livre (`/reviews/item`, com o `order_id`), a mídia, a hora e a
+    visibilidade da resposta da loja, e a PENDÊNCIA. Quem lê e decide é
+    `services/atendimento/avaliacoes.py`:
+
+      pendente (`pendente_desde` preenchido) = SEM resposta da loja, depois
+      da carência (Shopee: nota 1–3 há mais de 1 h, 4–5 há mais de 24 h — o
+      robô de fora responde em 1 a 3 h); no ML, que não deixa responder pela
+      API, nota 1–3 ainda não tratada. Resolve com a resposta (de fora ou do
+      DaVinci) ou com o "marcar como tratada" (`tratada_em`/`tratada_por`).
+
+    Só a pendente ganha conversa própria (`canal = 'avaliacao'`, em
+    `conversa_id`) e a etiqueta AVALIAÇÃO; a já respondida aparece na aba ★
+    das conversas do mesmo pedido/comprador, lida daqui.
     """
 
     __tablename__ = "atendimento_avaliacoes_loja"
@@ -730,6 +750,22 @@ class AtendimentoAvaliacaoLoja(Base):
         # Idempotência do job: o cursor do get_comment pode trazer de novo.
         UniqueConstraint("integration_id", "comentario_id"),
         Index("ix_atendimento_avaliacoes_loja_integration_id_pedido", "integration_id", "pedido"),
+        # 0358: o elo com a conversa de QUALQUER loja da plataforma (a
+        # etiqueta e a aba ★ casam por plataforma + pedido) e o cartão
+        # "Cliente" do ML (pelo id do comprador).
+        Index("ix_atendimento_avaliacoes_loja_plataforma_pedido", "plataforma", "pedido"),
+        Index(
+            "ix_atendimento_avaliacoes_loja_integration_id_comprador_id",
+            "integration_id",
+            "comprador_id",
+        ),
+        # As pendentes (poucas): o fato da etiqueta lê só elas, a cada recálculo.
+        Index(
+            "ix_atendimento_avaliacoes_loja_pendentes",
+            "plataforma",
+            "pedido",
+            postgresql_where=text("pendente_desde IS NOT NULL"),
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
@@ -748,6 +784,66 @@ class AtendimentoAvaliacaoLoja(Base):
     texto: Mapped[str | None] = mapped_column(Text, nullable=True)
     resposta_loja: Mapped[str | None] = mapped_column(Text, nullable=True)
     criado_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # ── 0358: avaliações no atendimento (RF8) ─────────────────────────────
+    # O título da opinião (ML); a Shopee não tem.
+    titulo: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Fotos e vídeos: [{"tipo": "imagem"|"video", "url", "miniatura"?}] — só
+    # o endereço https da plataforma, nunca o arquivo.
+    midia: Mapped[list] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
+    # Quando a loja respondeu (relógio da plataforma) e se a resposta está
+    # oculta (Shopee `comment_reply.hidden`).
+    resposta_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    resposta_oculta: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # A edição pelo COMPRADOR, crua (Shopee `editable`: EDITABLE |
+    # HAVE_EDITED_ONCE | EXPIRED — ele pode mudar a nota uma vez).
+    editavel: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # A variação avaliada (Shopee `model_id`, ML `variation_id`).
+    modelo_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # A plataforma deixa responder pela API? (Shopee sim; ML não.) Sem, o
+    # porquê que a tela mostra no lugar da caixa de resposta.
+    pode_responder: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    motivo_sem_resposta: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # PENDENTE desde quando (NULL = não pendente). Ver a regra no topo da classe.
+    pendente_desde: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # "Marcar como tratada" (o ML, que não deixa responder): quem e quando.
+    tratada_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    tratada_por: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    # A conversa `canal = 'avaliacao'` criada quando ela ficou pendente.
+    # Nome à mão: pela convenção passaria dos 63 caracteres do Postgres.
+    conversa_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey(
+            "atendimento_conversas.id",
+            ondelete="SET NULL",
+            name="fk_atendimento_avaliacoes_loja_conversa",
+        ),
+        nullable=True,
+        index=True,
+    )
+    # O id do comprador NA PLATAFORMA (Shopee `buyer_user_id` pelo índice de
+    # pedidos; ML `buyer.id` do pedido) — id, não dado pessoal.
+    comprador_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # O resto: o pack do ML (`pack_id`), o anúncio, quando foi conferida,
+    # a fonte. Material da tela e de depuração.
+    dados: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+    # Quando o DaVinci gravou/mexeu na linha. O upsert (INSERT ... ON
+    # CONFLICT) não dispara o `onupdate` do ORM: quem grava põe `now()`.
+    atualizado_em: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
 
 
 # UMA resposta em voo por conversa — declarado no model (create_all dos testes)

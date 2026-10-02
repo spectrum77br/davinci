@@ -117,6 +117,16 @@ export function frasesDaEtiqueta(h: MudancaDeEtiqueta): { titulo: string; detalh
 //     mensagens, só quando a conversa (ou o pedido dela) tem reclamação,
 //     mediação ou devolução da plataforma — só leitura. Relido no "atualizar"
 //     e junto com o painel (a cada 2 min).
+// - Avaliações de venda (RF8, 02/10/2026): o CARTÃO DA AVALIAÇÃO
+//   (AtendimentoAvaliacao) logo abaixo do da reclamação, só quando o pedido
+//   da conversa tem avaliação (Shopee e Mercado Livre): estrelas, texto,
+//   fotos, a resposta da loja e a caixa "Responder em público" (desabilitada
+//   com o porquê enquanto o envio estiver desligado). Na conversa da própria
+//   avaliação (canal `avaliacao`) quem responde é a caixa de baixo, com o
+//   aviso de que a resposta é PÚBLICA e a mesma confirmação do cartão antes de
+//   cada envio (`confirmaSePublica`); a faixa de cima diz isso (no ML, que a
+//   opinião não tem resposta pela API). O mesmo GET alimenta a seção
+//   Avaliação do painel do pedido.
 import {
   Archive,
   ArrowLeft,
@@ -126,6 +136,7 @@ import {
   ChevronDown,
   Copy,
   ExternalLink,
+  Globe,
   Hash,
   ImagePlus,
   Loader2,
@@ -153,7 +164,8 @@ import {
 import { eNota } from '~/components/AtendimentoNota.vue'
 import { etiquetaInfo } from '~/components/AtendimentoEtiqueta.vue'
 import type { Painel } from '~/components/AtendimentoPedido.vue'
-import type { ReclamacoesResposta } from '~/components/AtendimentoReclamacao.vue'
+import { abrirEm, type ReclamacoesResposta } from '~/components/AtendimentoReclamacao.vue'
+import { AVISO_RESPOSTA_PUBLICA, perguntaRespostaPublica, type AvaliacoesResposta } from '~/components/AtendimentoAvaliacao.vue'
 import { PopoverContent, PopoverPortal, PopoverRoot, PopoverTrigger } from 'reka-ui'
 import { onKeyStroke, useMediaQuery } from '@vueuse/core'
 import {
@@ -511,17 +523,33 @@ const TIPO_LABEL: Record<string, string> = {
 // Links no texto viram clicáveis (igual Chamados, sem v-html: o texto vem da
 // plataforma e é sempre renderizado como texto; só a URL vira <a>).
 const RE_URL = /(https?:\/\/[^\s|]+)/g
-function partesComLink(t: string | null): { t: 'txt' | 'url'; v: string }[] {
-  const s = t || ''
-  const out: { t: 'txt' | 'url'; v: string }[] = []
+// O assistente do ML (mediação) escreve em markdown: `**Devolução total**`.
+// Vira negrito — ainda como texto (sem v-html), só o trecho entre ** muda.
+const RE_NEGRITO = /\*\*([^*\n][^*]*?)\*\*/g
+type Parte = { t: 'txt' | 'url' | 'b'; v: string }
+function comNegrito(s: string): Parte[] {
+  const out: Parte[] = []
   let ultimo = 0
-  for (const m of s.matchAll(RE_URL)) {
+  for (const m of s.matchAll(RE_NEGRITO)) {
     const i = m.index ?? 0
     if (i > ultimo) out.push({ t: 'txt', v: s.slice(ultimo, i) })
-    out.push({ t: 'url', v: m[0] })
+    out.push({ t: 'b', v: m[1] })
     ultimo = i + m[0].length
   }
   if (ultimo < s.length) out.push({ t: 'txt', v: s.slice(ultimo) })
+  return out
+}
+function partesComLink(t: string | null): Parte[] {
+  const s = t || ''
+  const out: Parte[] = []
+  let ultimo = 0
+  for (const m of s.matchAll(RE_URL)) {
+    const i = m.index ?? 0
+    if (i > ultimo) out.push(...comNegrito(s.slice(ultimo, i)))
+    out.push({ t: 'url', v: m[0] })
+    ultimo = i + m[0].length
+  }
+  if (ultimo < s.length) out.push(...comNegrito(s.slice(ultimo)))
   return out
 }
 
@@ -577,6 +605,10 @@ function soCartao(m: Mensagem) {
 // Foto do cliente aberta grande (Esc ou clique fora fecha).
 const imagemAberta = ref<{ url: string; nome: string } | null>(null)
 onKeyStroke('Escape', () => { imagemAberta.value = null })
+// As fotos da avaliação (cartão e painel) abrem no mesmo visor.
+function abrirImagem(i: { url: string; nome: string }) {
+  imagemAberta.value = i
+}
 
 // ─── retrato do pedido, produtos e sugestões (spec Duoke 2.4) ───────────────
 const pedidoMkt = computed(() => pedidoMktDe(detalhe.value))
@@ -826,6 +858,9 @@ const bloqueioEnvio = computed(() => {
       : ERROS.somente_leitura
   }
   if (!props.canEdit) return 'Você pode ler, mas não responder: falta a permissão de editar o Atendimento.'
+  // Conversa da avaliação (RF8) já respondida: a caixa de baixo não manda
+  // uma segunda resposta PÚBLICA (o backend do chat não confere isso).
+  if (avaliacaoDaConversa.value?.respondida) return 'Esta avaliação já foi respondida — a resposta pública da loja já está no anúncio.'
   if (d.envio.pode_enviar) return ''
   const codigo = d.envio.codigo || ''
   // Bloqueio: a frase do backend traz o porquê do caso (janela fechou,
@@ -988,6 +1023,10 @@ async function enviar(opcoes?: { confirmar?: boolean }) {
     if (d && lacunas.value.length) erroEnvio.value = { texto: `Troque ${lacunas.value.join(', ')} pelo dado antes de enviar.`, motivos: [] }
     return
   }
+  // Conversa da avaliação (RF8): a caixa de baixo publica no ANÚNCIO — a
+  // mesma pergunta do cartão, por qualquer caminho (botão, Ctrl+Enter,
+  // "enviar mesmo assim", sugestão da IA usada). Desistiu: nada sai, o texto fica.
+  if (!confirmaSePublica(d.conversa.canal, texto.value.trim())) return
   const id = d.conversa.id
   const nome = titulo(d.conversa)
   const body: { texto: string; rascunho_id?: string; ultima_vista_id?: string; confirmar?: boolean } = { texto: texto.value.trim() }
@@ -1033,6 +1072,11 @@ async function enviar(opcoes?: { confirmar?: boolean }) {
   } finally {
     enviandoIds.delete(id)
   }
+}
+// Só a conversa `avaliacao` pergunta (resposta pública); o chat segue direto.
+function confirmaSePublica(canal: string | null | undefined, t: string): boolean {
+  if (canal !== 'avaliacao') return true
+  return confirm(perguntaRespostaPublica(avaliacoesDados.value?.aviso, t))
 }
 function aoTeclar(e: KeyboardEvent) {
   if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
@@ -1417,6 +1461,33 @@ const temCartaoReclamacao = computed(() => {
   return !!c && !c.id.startsWith('ig:') && !c.somente_leitura
 })
 
+// ─── avaliação de venda (RF8, 02/10/2026) ───────────────────────────────────
+// O cartão (AtendimentoAvaliacao) busca sozinho o GET /conversas/{id}/avaliacoes
+// e devolve o que veio (`carregado`): a faixa só aparece com avaliação DO
+// PEDIDO, e o painel do pedido usa a mesma resposta (as anteriores do
+// comprador ficam lá). Respondeu/tratou pelo cartão (`mudou`): a conversa é
+// relida (a etiqueta volta ao status anterior) e a linha da lista acompanha.
+const avaliacaoRef = ref<{ carregar: () => Promise<void> } | null>(null)
+const avaliacoesDados = ref<AvaliacoesResposta | null>(null)
+function aoCarregarAvaliacoes(r: AvaliacoesResposta) {
+  avaliacoesDados.value = r
+}
+const avaliacoesDoPedidoQtd = computed(() => (avaliacoesDados.value?.itens || []).filter((a) => a.do_pedido).length)
+// A avaliação DESTA conversa (canal `avaliacao`): é a ela que a caixa de baixo responde.
+const avaliacaoDaConversa = computed(() => {
+  const c = conversa.value
+  if (!c || c.canal !== 'avaliacao') return null
+  return (avaliacoesDados.value?.itens || []).find((a) => a.conversa_id === c.id) ?? null
+})
+function aoMudarAvaliacao() {
+  if (props.conversaId) void carregar(props.conversaId, true)
+}
+// Mensagem nova na conversa (a resposta da loja chegou, a marca de tratada,
+// o envio pela caixa de baixo): a avaliação pode ter mudado — relê o cartão.
+watch(() => detalhe.value?.mensagens?.length, (n, antes) => {
+  if (n !== undefined && antes !== undefined && n !== antes) void avaliacaoRef.value?.carregar()
+})
+
 // ─── painel do pedido: estoque, margem, observações, links, AdsPower ────────
 // GET /conversas/{id}/painel (item 3, 01/10/2026). Separado do detalhe: o
 // Bling (Observações ao vivo) pode demorar, e a conversa não espera por ele.
@@ -1450,12 +1521,15 @@ usePollingVisivel(async () => {
   if (!props.conversaId || props.ativa === false) return
   // As reclamações mudam no ritmo do cron (10 min): relidas junto com o painel.
   void reclamacaoRef.value?.carregar()
+  // As avaliações também (o cron delas roda a cada 30 min).
+  void avaliacaoRef.value?.carregar()
   await carregarPainel(props.conversaId)
 }, 120_000)
 function atualizarTudo() {
   void carregar(props.conversaId)
   void carregarPainel(props.conversaId, true)
   void reclamacaoRef.value?.carregar()
+  void avaliacaoRef.value?.carregar()
 }
 
 // ─── caixa: Responder × Nota interna ────────────────────────────────────────
@@ -1593,6 +1667,8 @@ async function tentarDeNovo(m: Mensagem) {
   const d = detalhe.value
   if (!d || !m.texto || tentandoId.value || !podeTentarDeNovo(m)) return
   if (!confirm('Mandar de novo esta resposta?\n\nA plataforma recusou da primeira vez — ela NÃO chegou ao comprador.')) return
+  // Avaliação: a de novo também sai em PÚBLICO.
+  if (!confirmaSePublica(d.conversa.canal, m.texto)) return
   const id = d.conversa.id
   const body: Record<string, unknown> = { texto: m.texto }
   const vista = ultimaVista(d)
@@ -1680,6 +1756,8 @@ watch(() => props.conversaId, (novo, velho) => {
   painelErro.value = null
   // O cartão da reclamação relê sozinho (watch do conversaId dele).
   reclamacoesQtd.value = 0
+  // O da avaliação também; o que ele trouxe era da conversa anterior.
+  avaliacoesDados.value = null
   modoCaixa.value = 'responder'
   descartarFoto()
   limparAval()
@@ -1740,6 +1818,7 @@ watch(() => props.conversaId, (novo, velho) => {
                   :secundarias="conversa.etiquetas_secundarias"
                   :manual="conversa.etiqueta_manual"
                   :desde="conversa.etiqueta_desde"
+                  :estrelas="conversa.avaliacao_estrelas"
                   :editavel="canEdit"
                   :conversa-id="conversa.id"
                   :historico="detalhe.etiqueta_historico"
@@ -1749,7 +1828,7 @@ watch(() => props.conversaId, (novo, velho) => {
                 <span class="inline-flex min-w-0 items-center gap-1 text-[13px]" :title="`${plataformaInfo(conversa.plataforma).nome} · ${conversa.conta || ''}`">
                   <AtendimentoIconePlataforma :plataforma="conversa.plataforma" :tamanho="15" />
                   <span class="truncate">{{ conversa.conta || plataformaInfo(conversa.plataforma).nome }}</span>
-                  <span v-if="variasCaixas(conversa.plataforma) || conversa.plataforma === 'amazon'" class="rounded bg-muted px-1 text-[10px] text-muted-foreground">{{ canalLabel(conversa.canal) }}</span>
+                  <span v-if="variasCaixas(conversa.plataforma) || conversa.plataforma === 'amazon' || conversa.canal === 'avaliacao'" class="rounded bg-muted px-1 text-[10px] text-muted-foreground">{{ canalLabel(conversa.canal) }}</span>
                 </span>
                 <button
                   v-if="conversa.pedido_marketplace"
@@ -1958,7 +2037,24 @@ watch(() => props.conversaId, (novo, velho) => {
         </div>
 
         <!-- faixas: bloqueio, janela, fechada, não precisa -->
-        <div v-if="conversa.situacao === 'bloqueada'" class="shrink-0 border-b border-red-500/30 bg-red-500/10 px-3 py-1.5 text-xs text-red-700 dark:text-red-300">
+        <!-- Conversa da reclamação/mediação (canal 'reclamacao'): só leitura POR
+             ESCOLHA nossa (por enquanto) — não é a plataforma que bloqueou, e
+             "reabrir" não faz sentido aqui (02/10/2026). -->
+        <div v-if="conversa.canal === 'reclamacao'" class="shrink-0 border-b border-red-500/30 bg-red-500/10 px-3 py-1.5 text-xs text-red-700 dark:text-red-300">
+          <Lock class="mr-1 inline size-3.5" />Reclamação: por enquanto, só leitura no DaVinci — responda e faça as ações {{ abrirEm(conversa.plataforma, plataformaInfo(conversa.plataforma).nome).replace(/^Abrir /, '') }} (botão "{{ abrirEm(conversa.plataforma, plataformaInfo(conversa.plataforma).nome) }}" no cartão abre no perfil da loja).
+        </div>
+        <!-- Conversa da avaliação de venda (canal 'avaliacao', RF8): a resposta é
+             PÚBLICA; no ML ela nasce bloqueada porque a opinião não tem resposta
+             pela API — não é a plataforma que fechou, e "reabrir" não serve. -->
+        <div v-else-if="conversa.canal === 'avaliacao'" class="shrink-0 border-b border-yellow-500/40 bg-yellow-400/15 px-3 py-1.5 text-xs text-yellow-900 dark:text-yellow-200" data-faixa-avaliacao>
+          <template v-if="conversa.situacao === 'bloqueada'">
+            <Lock class="mr-1 inline size-3.5" />Avaliação {{ plataformaInfo(conversa.plataforma).de }} — {{ conversa.bloqueio_motivo || 'a plataforma não deixa responder a avaliação pela API.' }} O botão fica no cartão acima; se for o caso, fale com o comprador pelo pós-venda.
+          </template>
+          <template v-else>
+            <Globe class="mr-1 inline size-3.5" />Avaliação de venda: a resposta é PÚBLICA — aparece no anúncio, para qualquer comprador.
+          </template>
+        </div>
+        <div v-else-if="conversa.situacao === 'bloqueada'" class="shrink-0 border-b border-red-500/30 bg-red-500/10 px-3 py-1.5 text-xs text-red-700 dark:text-red-300">
           <Lock class="mr-1 inline size-3.5" />A plataforma não deixa mais responder esta conversa<template v-if="conversa.bloqueio_motivo">: <span :title="conversa.bloqueio_motivo">{{ bloqueioLegivel(conversa.bloqueio_motivo) }}</span></template>.
           <!-- Reabrir à mão vale para a bloqueada também (a plataforma liberou). -->
           <button v-if="canEdit && !conversa.somente_leitura" type="button" class="ml-1 underline disabled:opacity-50" :disabled="!!acao" @click="patch({ situacao: 'aberta' }, 'fechar', 'Conversa reaberta')">a plataforma liberou? reabrir</button>
@@ -2013,7 +2109,29 @@ watch(() => props.conversaId, (novo, velho) => {
           v-show="reclamacoesQtd > 0"
           class="max-h-[38vh] shrink-0 overflow-y-auto border-b px-3 py-2"
         >
-          <AtendimentoReclamacao ref="reclamacaoRef" :conversa-id="conversa.id" @carregado="aoCarregarReclamacoes" />
+          <AtendimentoReclamacao ref="reclamacaoRef" :conversa-id="conversa.id" :perfil="painelDados?.adspower ?? null" @carregado="aoCarregarReclamacoes" />
+        </div>
+
+        <!-- Cartão da avaliação de venda (RF8): estrelas, texto, fotos, resposta
+             da loja e "Responder em público". Montado sempre (ele mesmo busca); a
+             faixa só aparece quando o pedido tem avaliação. -->
+        <div
+          v-if="temCartaoReclamacao"
+          v-show="avaliacoesDoPedidoQtd > 0"
+          class="max-h-[34vh] shrink-0 overflow-y-auto border-b px-3 py-2"
+          data-cartao-avaliacao
+        >
+          <AtendimentoAvaliacao
+            ref="avaliacaoRef"
+            :perfil="painelDados?.adspower ?? null"
+            :conversa-id="conversa.id"
+            :canal-conversa="conversa.canal"
+            :can-edit="canEdit"
+            @carregado="aoCarregarAvaliacoes"
+            @mudou="aoMudarAvaliacao"
+            @abrir-imagem="abrirImagem"
+            @abrir-conversa="(id: string) => emit('abrirConversa', id)"
+          />
         </div>
 
         <!-- mensagens -->
@@ -2060,7 +2178,7 @@ watch(() => props.conversaId, (novo, velho) => {
                     {{ STATUS_MSG[l.m.status].label }}
                   </span>
                 </div>
-                <div v-if="l.m.texto" class="whitespace-pre-wrap break-words text-sm leading-relaxed"><template v-for="(p, i) in partesComLink(l.m.texto)" :key="i"><a v-if="p.t === 'url'" :href="p.v" target="_blank" rel="noopener noreferrer" class="break-all underline">{{ p.v }}</a><template v-else>{{ p.v }}</template></template></div>
+                <div v-if="l.m.texto" class="whitespace-pre-wrap break-words text-sm leading-relaxed"><template v-for="(p, i) in partesComLink(l.m.texto)" :key="i"><a v-if="p.t === 'url'" :href="p.v" target="_blank" rel="noopener noreferrer" class="break-all underline">{{ p.v }}</a><strong v-else-if="p.t === 'b'" class="font-semibold">{{ p.v }}</strong><template v-else>{{ p.v }}</template></template></div>
                 <div v-else-if="!pecasDaMsg(l.m).length" class="text-sm italic text-muted-foreground">[{{ TIPO_LABEL[l.m.tipo] || 'sem texto' }}]</div>
                 <div v-if="pecasDaMsg(l.m).length" class="flex flex-wrap gap-2" :class="l.m.texto ? 'mt-2' : ''">
                   <template v-for="pc in pecasDaMsg(l.m)" :key="pc.chave">
@@ -2310,6 +2428,12 @@ watch(() => props.conversaId, (novo, velho) => {
             </div>
           </div>
 
+          <!-- Avaliação (RF8): a resposta sai no anúncio, para qualquer comprador. -->
+          <div v-if="conversa.canal === 'avaliacao' && podeDigitar" class="flex items-start gap-1.5 px-0.5 text-[11px] leading-4 text-amber-800 dark:text-amber-300" data-aviso-publica>
+            <Globe class="mt-px size-3.5 shrink-0" aria-hidden="true" />
+            <span>{{ avaliacoesDados?.aviso || AVISO_RESPOSTA_PUBLICA }}</span>
+          </div>
+
           <!-- Magalu: a resposta não chega direto — a moderação decide. -->
           <div v-if="moderacao && podeDigitar" class="flex items-start gap-1.5 px-0.5 text-[11px] leading-4 text-sky-800 dark:text-sky-300">
             <ShieldCheck class="mt-px size-3.5 shrink-0" aria-hidden="true" />
@@ -2322,7 +2446,7 @@ watch(() => props.conversaId, (novo, velho) => {
             rows="3"
             :disabled="!podeDigitar || enviando"
             class="block max-h-[40vh] min-h-[76px] w-full resize-y rounded-md border bg-background px-2.5 py-2 text-sm [field-sizing:content] focus:outline-none focus:ring-1 focus:ring-primary disabled:cursor-not-allowed disabled:opacity-60"
-            :placeholder="podeDigitar ? 'Escreva a resposta… (Ctrl+Enter envia)' : 'Resposta desabilitada nesta conversa'"
+            :placeholder="podeDigitar ? (conversa.canal === 'avaliacao' ? 'Escreva a resposta PÚBLICA à avaliação… (Ctrl+Enter envia)' : 'Escreva a resposta… (Ctrl+Enter envia)') : 'Resposta desabilitada nesta conversa'"
             aria-label="resposta ao comprador"
             @keydown="aoTeclar"
           />
@@ -2433,9 +2557,11 @@ watch(() => props.conversaId, (novo, velho) => {
         :painel="painelDados"
         :painel-carregando="painelCarregando"
         :painel-erro="painelErro"
+        :avaliacoes="avaliacoesDados"
         @fechar="alternarPedido"
         @atualizado="aoAtualizarPedido"
         @ir-para="irPara"
+        @abrir-imagem="abrirImagem"
         @recarregar-painel="(atualizar: boolean) => carregarPainel(detalhe!.conversa.id, atualizar)"
       />
     </aside>

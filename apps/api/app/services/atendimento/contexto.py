@@ -22,7 +22,10 @@ do Bling e o resto:
                            "em", "data"}],
      "reclamacoes": [{"id", "plataforma", "numero", "tipo", "tipo_rotulo",
                       "status", "aberta", "prazo_em", "acao_pendente",
-                      "encerrada_em"}]}
+                      "encerrada_em"}],
+     "avaliacoes": [{"id", "plataforma", "estrelas", "pedido", "do_pedido",
+                     "criado_em", "respondida", "pendente", "tratada",
+                     "pode_responder"}]}
 
 `reclamacoes` = as reclamações, mediações e devoluções DA PLATAFORMA
 (`atendimento_reclamacoes`, a mesma ligação do cartão e da etiqueta), as
@@ -30,6 +33,11 @@ abertas primeiro (prazo mais curto antes). Era a lacuna do 297840: com a
 mediação 5582543195 aberta no ML, o painel e a IA diziam "Devolução:
 nenhuma" porque só liam a aba Devoluções. Só o que a plataforma diz (tipo,
 status, prazo, ação esperada da loja) — nenhum texto do comprador.
+
+`avaliacoes` = as avaliações de venda do pedido e as anteriores do mesmo
+comprador (`services/atendimento/avaliacoes.py`, RF8 — 02/10/2026): a nota,
+se foi respondida e se está PENDENTE. Nunca o texto da avaliação (é texto do
+comprador: a aba ★ da tela lê da rota própria).
 
 `outras_perguntas` é só da PERGUNTA do ML (uma conversa por pergunta): as
 últimas 5 perguntas do MESMO comprador no MESMO anúncio, lidas do nosso
@@ -81,6 +89,7 @@ MAX_CHAMADOS = 10
 MAX_DEVOLUCOES = 5
 MAX_OUTRAS_PERGUNTAS = 5
 MAX_RECLAMACOES = 5
+MAX_AVALIACOES = 5
 # Uma linha por pergunta no painel.
 MAX_CHARS_PERGUNTA = 140
 
@@ -118,6 +127,7 @@ def vazio() -> dict:
         "nota_fiscal": None,
         "outras_perguntas": [],
         "reclamacoes": [],
+        "avaliacoes": [],
     }
 
 
@@ -384,6 +394,17 @@ async def _reclamacoes(session: AsyncSession, conversa: AtendimentoConversa) -> 
     return saida
 
 
+# ── Avaliações de venda (RF8) ─────────────────────────────────────────────
+
+
+async def _avaliacoes(session: AsyncSession, conversa: AtendimentoConversa) -> list[dict]:
+    """As avaliações da conversa: nota e estado, SEM o texto (ver o topo)."""
+    # Import tardio: `avaliacoes` → `etiqueta_fatos` → este módulo.
+    from app.services.atendimento import avaliacoes as avaliacoes_svc
+
+    return (await avaliacoes_svc.resumo_para_contexto(session, conversa))[:MAX_AVALIACOES]
+
+
 # ── Outras perguntas do mesmo comprador (ML) ───────────────────────────────
 
 
@@ -530,6 +551,11 @@ async def contexto_da_conversa(session: AsyncSession, conversa: AtendimentoConve
         ctx["outras_perguntas"] = await _seguro(
             session, "outras_perguntas", lambda: _outras_perguntas(session, conversa), [],
             conversa.id,
+        )
+    if conversa.plataforma in ("shopee", "ml") and conversa.canal != "pergunta":
+        # Pelo pedido OU pelo comprador: entra também sem pedido na conversa.
+        ctx["avaliacoes"] = await _seguro(
+            session, "avaliacoes", lambda: _avaliacoes(session, conversa), [], conversa.id
         )
     if not (conversa.pedido_marketplace or "").strip():
         return ctx

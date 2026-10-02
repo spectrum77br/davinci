@@ -144,6 +144,11 @@ export function situacaoDoSaldo(it: Pick<ItemEstoque, 'existe' | 'saldo' | 'quan
 //   "Abrir na plataforma" no topo e, depois do retrato, Estoque (lote
 //   comprado, lotes irmãos, kit), Margem (a da aba Margem) e Observações do
 //   Bling (só leitura). Vem em `painel` (a conversa busca).
+// - Avaliação (RF8, 02/10/2026), na aba Pedido: a nota, a data, as fotos, se
+//   foi respondida (ou o prazo interno, se está pendente) e as avaliações
+//   anteriores do mesmo cliente. Vem em `avaliacoes` (a mesma resposta do
+//   cartão da conversa, AtendimentoAvaliacao); sem ela, o resumo do
+//   `contexto.avaliacoes` (nota e estado, sem texto nem foto).
 import {
   CheckCircle2,
   ChevronDown,
@@ -157,7 +162,9 @@ import {
   NotebookPen,
   Package,
   Percent,
+  Play,
   RotateCcw,
+  Star,
   Store,
   Ticket,
   TriangleAlert,
@@ -165,6 +172,16 @@ import {
   Undo2,
   X,
 } from 'lucide-vue-next'
+import {
+  corDaNota,
+  doContexto,
+  estrelasDe,
+  midiaSegura,
+  prazoAvaliacao,
+  situacaoAvaliacao,
+  type AvaliacaoLoja,
+  type AvaliacoesResposta,
+} from '~/components/AtendimentoAvaliacao.vue'
 import {
   cartaoProdutoDe,
   copiar,
@@ -177,6 +194,7 @@ import {
   plataformaInfo,
   retratoDe,
   statusPedidoCls,
+  useRelogio,
   type Anexo,
   type CartaoProduto,
   type Cliente,
@@ -210,7 +228,10 @@ const props = withDefaults(defineProps<{
   painel?: Painel | null
   painelCarregando?: boolean
   painelErro?: string | null
-}>(), { cliente: null, leituraAtiva: true, atualizavel: null, painel: null, painelCarregando: false, painelErro: null })
+  // As avaliações de venda (GET /conversas/{id}/avaliacoes, que o cartão da
+  // conversa busca). null = ainda não veio (ou falhou): vale o contexto.
+  avaliacoes?: AvaliacoesResposta | null
+}>(), { cliente: null, leituraAtiva: true, atualizavel: null, painel: null, painelCarregando: false, painelErro: null, avaliacoes: null })
 const emit = defineEmits<{
   (e: 'fechar'): void
   (e: 'atualizado', r: { pedido_mkt: PedidoMkt | null; produto: CartaoProduto | null }): void
@@ -219,6 +240,8 @@ const emit = defineEmits<{
   (e: 'irPara', ev: EventoCliente): void
   // Reler o painel; `true` = reler as Observações no Bling na hora.
   (e: 'recarregarPainel', atualizar: boolean): void
+  // Foto da avaliação: a conversa abre grande (o mesmo visor das fotos do chat).
+  (e: 'abrirImagem', i: { url: string; nome: string }): void
 }>()
 const { api } = useApi()
 const toasts = useToasts()
@@ -460,6 +483,14 @@ const linkMargem = computed(() => {
   const n = pnl.value?.pedido?.numero_bling
   return n ? `/margem?pedido=${encodeURIComponent(n)}` : '/margem'
 })
+
+// ─── avaliação de venda (RF8) ───────────────────────────────────────────────
+const agora = useRelogio()
+const avaliacoesPainel = computed<AvaliacaoLoja[]>(() =>
+  props.avaliacoes ? props.avaliacoes.itens : (props.contexto?.avaliacoes ?? []).map(doContexto))
+const avaliacoesDoPedido = computed(() => avaliacoesPainel.value.filter((a) => a.do_pedido))
+const avaliacoesAnteriores = computed(() => avaliacoesPainel.value.filter((a) => !a.do_pedido))
+const avaliacoesPendentes = computed(() => avaliacoesDoPedido.value.filter((a) => a.pendente).length)
 </script>
 
 <template>
@@ -507,14 +538,14 @@ const linkMargem = computed(() => {
               class="inline-flex items-center gap-0.5 rounded border px-1.5 py-0.5 hover:bg-muted"
               title="abrir o pedido no Bling (outra aba) — aqui é só leitura"
             >Abrir no Bling<ExternalLink class="size-3" /></a>
-            <a
+            <AtendimentoAbrirPlataforma
               v-if="linksPedido.plataforma"
               :href="linksPedido.plataforma.url"
-              target="_blank"
-              rel="noopener noreferrer"
+              :perfil="pnl?.adspower ?? null"
+              :conversa-id="conversa?.id ?? null"
+              titulo="abrir o pedido no painel do vendedor (outra aba)"
               class="inline-flex items-center gap-0.5 rounded border px-1.5 py-0.5 hover:bg-muted"
-              title="abrir o pedido no painel do vendedor (outra aba; se pedir login, use o botão AdsPower do cabeçalho)"
-            >{{ linksPedido.plataforma.rotulo }}<ExternalLink class="size-3" /></a>
+            >{{ linksPedido.plataforma.rotulo }}<ExternalLink class="size-3" /></AtendimentoAbrirPlataforma>
           </span>
         </div>
 
@@ -789,6 +820,70 @@ const linkMargem = computed(() => {
             </div>
           </template>
           <div v-if="obsBling.lido_em" class="text-[10px] text-muted-foreground">lido no Bling em {{ fmtDataHora(obsBling.lido_em) }}<template v-if="obsBling.do_cache"> (guardado por até 5 min)</template></div>
+        </section>
+
+        <!-- AVALIAÇÃO de venda (RF8): nota, data, fotos, respondida ou não, e as
+             anteriores do mesmo cliente. Responder fica no cartão da conversa. -->
+        <section v-if="avaliacoesPainel.length" class="space-y-1.5" data-painel-avaliacao>
+          <div class="flex items-center gap-1.5 text-[13px] font-semibold">
+            <Star class="size-4 text-yellow-500" /> Avaliação
+            <span
+              v-if="avaliacoesPendentes"
+              class="ml-auto rounded-full bg-yellow-400/30 px-1.5 text-[10px] font-semibold text-yellow-900 dark:text-yellow-200"
+              title="avaliação sem resposta da loja — fica com a etiqueta Avaliação até ser respondida ou tratada"
+            >{{ avaliacoesPendentes }} sem resposta</span>
+          </div>
+          <ul v-if="avaliacoesDoPedido.length" class="space-y-1.5">
+            <li
+              v-for="a in avaliacoesDoPedido"
+              :key="a.id"
+              class="rounded-md border px-2.5 py-2 text-xs"
+              :class="a.pendente && a.nota_baixa ? 'border-red-500/40' : ''"
+            >
+              <div class="flex flex-wrap items-center gap-1.5">
+                <span class="text-sm leading-4 tracking-tight" :class="corDaNota(a.estrelas)" :aria-label="`nota ${a.estrelas} de 5`">{{ estrelasDe(a.estrelas) }}</span>
+                <span class="font-medium tabular-nums">{{ a.estrelas }}/5</span>
+                <span class="rounded px-1.5 py-px text-[10px]" :class="situacaoAvaliacao(a).cls" :title="situacaoAvaliacao(a).dica">{{ situacaoAvaliacao(a).rotulo }}</span>
+                <span v-if="a.criado_em" class="ml-auto tabular-nums text-muted-foreground" :title="fmtDataHora(a.criado_em)">{{ fmtData(a.criado_em) }}</span>
+              </div>
+              <div v-if="a.anuncio_titulo" class="mt-0.5 truncate text-muted-foreground" :title="a.anuncio_titulo">{{ a.anuncio_titulo }}</div>
+              <div v-if="midiaSegura(a.midia).length" class="mt-1 flex flex-wrap gap-1">
+                <template v-for="(m, i) in midiaSegura(a.midia)" :key="m.url">
+                  <button
+                    v-if="m.tipo === 'imagem'"
+                    type="button"
+                    class="overflow-hidden rounded border bg-background"
+                    :title="`abrir a foto ${i + 1} da avaliação`"
+                    @click="emit('abrirImagem', { url: m.url, nome: `foto ${i + 1} da avaliação ${a.estrelas}★` })"
+                  >
+                    <img :src="m.url" alt="" loading="lazy" referrerpolicy="no-referrer" class="size-10 object-cover" />
+                  </button>
+                  <a v-else :href="m.url" target="_blank" rel="noopener noreferrer" class="flex size-10 items-center justify-center rounded border bg-muted text-muted-foreground hover:text-foreground" title="abrir o vídeo do comprador (outra aba)">
+                    <Play class="size-4" /><span class="sr-only">vídeo</span>
+                  </a>
+                </template>
+              </div>
+              <div v-if="a.respondida && a.resposta_em" class="mt-1 text-emerald-700 dark:text-emerald-300">respondida em {{ fmtDataHora(a.resposta_em) }}</div>
+              <div
+                v-else-if="prazoAvaliacao(a, agora)"
+                class="mt-1 inline-block rounded px-1.5 py-px tabular-nums"
+                :class="prazoAvaliacao(a, agora)!.cls"
+                :title="prazoAvaliacao(a, agora)!.titulo"
+              >prazo interno: {{ prazoAvaliacao(a, agora)!.texto }}</div>
+            </li>
+          </ul>
+          <div v-else class="text-[11px] text-muted-foreground">Este pedido ainda não tem avaliação.</div>
+          <div v-if="avaliacoesAnteriores.length" class="space-y-0.5">
+            <div class="text-[11px] text-muted-foreground">Anteriores deste cliente</div>
+            <ul class="space-y-0.5 text-[11px]">
+              <li v-for="a in avaliacoesAnteriores" :key="a.id" class="flex items-center gap-1.5">
+                <span class="tracking-tight" :class="corDaNota(a.estrelas)" :aria-label="`nota ${a.estrelas} de 5`">{{ estrelasDe(a.estrelas) }}</span>
+                <span class="rounded px-1 py-px text-[10px]" :class="situacaoAvaliacao(a).cls">{{ situacaoAvaliacao(a).rotulo }}</span>
+                <span v-if="a.pedido" class="min-w-0 truncate font-mono text-muted-foreground" :title="`pedido ${a.pedido}`">{{ a.pedido }}</span>
+                <span v-if="a.criado_em" class="ml-auto shrink-0 tabular-nums text-muted-foreground">{{ fmtData(a.criado_em) }}</span>
+              </li>
+            </ul>
+          </div>
         </section>
 
         <!-- No DaVinci -->

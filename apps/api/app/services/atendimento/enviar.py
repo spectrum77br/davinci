@@ -58,6 +58,15 @@ saiu e não saiu é pior que "não saiu". `settings.atendimento_simulador_exceto
 verdade — é o teste de responder pela tela local a um e-mail real da Amazon
 com as outras lojas ainda no simulador.
 
+AVALIAÇÃO (RF8, 02/10/2026): a conversa `canal = 'avaliacao'` responde a
+avaliação da venda — resposta PÚBLICA, no anúncio — pelo MESMO caminho
+(travas, linha em voo, validador, régua de resultado); muda a chamada
+(`responder_avaliacao` do adaptador, hoje só a Shopee `reply_comment`) e
+três travas: o envio desligado diz "resposta pública"; a IA nunca responde
+avaliação sozinha; e a loja vem da integração da conversa (ela não tem
+canal próprio), com o modo do canal da loja. Saiu: a avaliação é dada por
+respondida na hora (`avaliacoes.depois_da_resposta`).
+
 FOTO (01/10/2026): `enviar_foto` é o mesmo caminho para UMA imagem (Shopee,
 TikTok e pós-venda do ML; `foto.py`): mesmas travas, mesma linha em voo,
 mesma régua de resultado. O upload para a plataforma só acontece aqui —
@@ -96,6 +105,7 @@ from app.services.atendimento import clientes, gravar
 from app.services.atendimento.constantes import (
     AUTOR_LOJA,
     AVALIACAO_OBSERVOU,
+    CANAL_AVALIACAO,
     CONVERSA_BLOQUEADA,
     CONVERSA_FECHADA,
     MODO_AUTO,
@@ -108,6 +118,7 @@ from app.services.atendimento.constantes import (
     ORIGEM_HUMANO,
     ORIGEM_IA,
     ORIGENS_DAVINCI,
+    PLATAFORMAS_RESPONDEM_AVALIACAO,
     PLATAFORMAS_ROBO,
     PLATAFORMAS_SEM_AUTO,
     RASCUNHO_EDITADO,
@@ -155,6 +166,10 @@ RECUSA_CONVERSA_OCUPADA = "conversa_ocupada"
 #                        não cabe nesta plataforma (Shopee/TikTok: foto sozinha).
 RECUSA_FOTO_NAO_SUPORTADA = "foto_nao_suportada"
 RECUSA_FOTO_INVALIDA = "foto_invalida"
+# Avaliação (RF8, 02/10/2026): a avaliação da conversa `avaliacao` já tem
+# resposta da loja (de fora ou do DaVinci) — a mesma recusa da rota
+# POST /avaliacoes/{id}/responder, para a caixa de baixo não responder duas vezes.
+RECUSA_AVALIACAO_JA_RESPONDIDA = "ja_respondida"
 
 # Temu/AliExpress (lidas pelo robô do Mac mini): nada sai pelo DaVinci.
 _NOME_SELLER_CENTER = {"temu": "Temu", "aliexpress": "AliExpress"}
@@ -168,6 +183,15 @@ def motivo_seller_center(plataforma: str) -> str:
         "Mac mini) e mostra a sugestão da IA para copiar."
     )
 
+
+# A resposta à avaliação é PÚBLICA (RF8): o envio desligado diz isso.
+MOTIVO_AVALIACAO_ENVIO_DESLIGADO = (
+    "Resposta pública (aparece no anúncio): o envio pelo DaVinci está desligado "
+    "(ATENDIMENTO_ENVIO_ATIVO)."
+)
+MOTIVO_AVALIACAO_SO_PESSOA = (
+    "A resposta à avaliação é pública: só pessoa responde (a IA não envia)."
+)
 
 # Amazon cujo e-mail não disse a conta: a pessoa escolhe a conta na tela
 # (PATCH /conversas/{id} com `integration_id`), e aí dá para responder.
@@ -263,7 +287,9 @@ async def _destino(
     if not settings.atendimento_envio_ativo:
         raise EnvioRecusado(
             RECUSA_ENVIO_DESLIGADO,
-            "O envio pelo DaVinci está desligado (ATENDIMENTO_ENVIO_ATIVO).",
+            MOTIVO_AVALIACAO_ENVIO_DESLIGADO
+            if conversa.canal == CANAL_AVALIACAO
+            else "O envio pelo DaVinci está desligado (ATENDIMENTO_ENVIO_ATIVO).",
         )
     if conversa.situacao == CONVERSA_BLOQUEADA:
         raise EnvioRecusado(
@@ -279,6 +305,8 @@ async def _destino(
             RECUSA_CONVERSA_BLOQUEADA,
             "A janela de resposta da plataforma para esta conversa já fechou.",
         )
+    if conversa.canal == CANAL_AVALIACAO:
+        return await _destino_avaliacao(session, conversa, origem=origem)
     if conversa.plataforma == "amazon" and conversa.integration_id is None:
         raise EnvioRecusado(RECUSA_SEM_INTEGRACAO, MOTIVO_AMAZON_SEM_CONTA)
     canal = (
@@ -312,6 +340,60 @@ async def _destino(
         motivo = _motivo_ia_sem_vez(conversa)
         if motivo:
             raise EnvioRecusado(RECUSA_NAO_AGUARDA, motivo)
+    return _Destino(canal=canal, integration=integration)
+
+
+async def _destino_avaliacao(
+    session: AsyncSession, conversa: AtendimentoConversa, *, origem: str
+) -> _Destino:
+    """As travas da resposta à AVALIAÇÃO (a conversa não tem canal próprio).
+
+    Só pessoa (a resposta é pública); só onde a plataforma deixa responder
+    pela API; a loja é a integração da conversa, e o modo é o do canal da
+    loja (em `observar`, quem responde é o de fora — como no chat).
+    """
+    if origem == ORIGEM_IA:
+        raise EnvioRecusado(RECUSA_AUTO_DESLIGADO, MOTIVO_AVALIACAO_SO_PESSOA)
+    if conversa.plataforma not in PLATAFORMAS_RESPONDEM_AVALIACAO:
+        raise EnvioRecusado(
+            RECUSA_SOMENTE_LEITURA,
+            conversa.bloqueio_motivo
+            or "Esta plataforma não deixa responder a avaliação pela API.",
+        )
+    from app.services.atendimento import avaliacoes
+
+    avaliacao = await avaliacoes.avaliacao_da_conversa(session, conversa)
+    if avaliacao is not None and avaliacao.resposta_loja:
+        raise EnvioRecusado(RECUSA_AVALIACAO_JA_RESPONDIDA, "Esta avaliação já foi respondida.")
+    integration = (
+        await session.get(Integration, conversa.integration_id, populate_existing=True)
+        if conversa.integration_id is not None
+        else None
+    )
+    if integration is None or integration.archived_at is not None:
+        raise EnvioRecusado(
+            RECUSA_SEM_INTEGRACAO,
+            "A loja desta avaliação não está mais conectada ao DaVinci.",
+        )
+    canais = (
+        (
+            await session.execute(
+                select(AtendimentoCanal)
+                .where(AtendimentoCanal.integration_id == integration.id)
+                .order_by(AtendimentoCanal.canal)
+                .execution_options(populate_existing=True)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    canal = next((c for c in canais if c.modo in MODOS_QUE_ENVIAM), None)
+    if canal is None:
+        raise EnvioRecusado(
+            RECUSA_CANAL_EM_OBSERVACAO,
+            "Esta loja está em modo observar: quem responde a avaliação é o de fora "
+            "(Seller Center ou o robô da loja).",
+        )
     return _Destino(canal=canal, integration=integration)
 
 
@@ -526,6 +608,15 @@ async def _chamar_plataforma(
         return ResultadoEnvio(ok=False, erro=f"cliente_indisponivel: {type(e).__name__}")
     try:
         modulo = adaptador(conversa.plataforma)
+        if conversa.canal == CANAL_AVALIACAO:
+            # A resposta PÚBLICA à avaliação (RF8): outro endpoint que o chat.
+            responder = getattr(modulo, "responder_avaliacao", None)
+            if responder is None:
+                return ResultadoEnvio(ok=False, erro="sem_resposta_de_avaliacao")
+            return await asyncio.wait_for(
+                responder(session, conversa, integration, cliente, texto),
+                timeout=TEMPO_MAXIMO_ENVIO_S,
+            )
         return await asyncio.wait_for(
             modulo.enviar_texto(session, conversa, integration, cliente, texto),
             timeout=TEMPO_MAXIMO_ENVIO_S,
@@ -1009,7 +1100,36 @@ async def enviar_resposta(
         status=mensagem.status,
         bloqueio=bool(resultado.bloqueio),
     )
+    if conversa.canal == CANAL_AVALIACAO and mensagem.status == MSG_ENVIADA:
+        await _avaliacao_respondida(session, conversa, mensagem)
     return mensagem
+
+
+async def _avaliacao_respondida(
+    session: AsyncSession, conversa: AtendimentoConversa, mensagem: AtendimentoMensagem
+) -> None:
+    """A resposta à avaliação SAIU: a avaliação sai da pendência agora (não na próxima leitura).
+
+    A resposta já foi; um erro aqui só atrasa até a leitura seguinte (que
+    acha a resposta no `get_comment`) — nunca vira erro do envio.
+    """
+    from app.services.atendimento import avaliacoes
+
+    try:
+        await avaliacoes.depois_da_resposta(session, conversa, mensagem)
+    except Exception as e:  # noqa: BLE001
+        await session.rollback()
+        logger.warning(
+            "atendimento_avaliacao_pos_envio_falhou",
+            conversa_id=str(conversa.id),
+            mensagem_id=str(mensagem.id),
+            err=type(e).__name__,
+        )
+        for obj in (conversa, mensagem):
+            try:
+                await session.refresh(obj)
+            except Exception:  # noqa: BLE001, S110 — a sessão quebrada já foi logada
+                pass
 
 
 def _sqlstate(e: BaseException) -> str | None:

@@ -40,13 +40,14 @@ from typing import Any
 from uuid import UUID, uuid4
 
 import structlog
-from sqlalchemy import func, select
+from sqlalchemy import Text, case, func, literal, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import AtendimentoAvaliacaoLoja, AtendimentoPedidoComprador
 from app.redis_client import redis
+from app.services.atendimento.constantes import PLATAFORMAS_RESPONDEM_AVALIACAO
 
 logger = structlog.get_logger()
 
@@ -61,6 +62,18 @@ ITEM_MAX = 64
 # o que o cliente achou.
 TEXTO_AVALIACAO_MAX = 500
 ITENS_RESUMO_MAX = 300
+TITULO_AVALIACAO_MAX = 200
+EDITAVEL_MAX = 32
+MODELO_MAX = 64
+# Fotos/vídeos guardados por avaliação (só o endereço; a tela mostra poucos).
+MAX_MIDIA = 10
+URL_MAX = 1000
+
+# O que a tela mostra no lugar da caixa de resposta quando a plataforma não
+# deixa responder a avaliação pela API (RF8: "mostrar o motivo").
+MOTIVO_SEM_RESPOSTA = {
+    "ml": "O Mercado Livre não permite responder a opinião pela API: use “Marcar como tratada”.",
+}
 
 # Desde quando o índice de uma loja tem o histórico INTEIRO (a importação
 # grava o começo da janela que leu). Sem essa marca, "1 compra" pode ser só
@@ -88,6 +101,10 @@ def _texto(valor: Any, tamanho: int) -> str | None:
     if not texto:
         return None
     return texto if len(texto) <= tamanho else texto[: tamanho - 1].rstrip() + "…"
+
+
+# Para quem grava fora do índice (a resposta que saiu pelo DaVinci).
+texto_curto = _texto
 
 
 def _valor(bruto: Any) -> float | None:
@@ -182,8 +199,42 @@ def pedido_shopee(o: dict, *, comprador_id: str | None = None) -> dict | None:
     }
 
 
+def _url(bruto: Any) -> str | None:
+    """Só endereço https (o `<img>`/`<video>` da tela), sem NUL, até `URL_MAX`."""
+    if not isinstance(bruto, str):
+        return None
+    url = bruto.replace("\x00", "").strip()
+    if not url.startswith("https://") or len(url) > URL_MAX:
+        return None
+    return url
+
+
+def midia_shopee(bruto: Any) -> list[dict]:
+    """`media` do `get_comment` (`{image_url_list, video_url_list}`) → a lista da coluna `midia`.
+
+    Medido em 02/10/2026 (ATV): `{}` sem mídia, `{"video_url_list": [url]}`
+    com vídeo; as URLs são https da própria Shopee.
+    """
+    m = bruto if isinstance(bruto, dict) else {}
+    saida: list[dict] = []
+    for chave, tipo in (("image_url_list", "imagem"), ("video_url_list", "video")):
+        lista = m.get(chave)
+        for u in lista if isinstance(lista, list) else []:
+            url = _url(u)
+            if url:
+                saida.append({"tipo": tipo, "url": url})
+    return saida[:MAX_MIDIA]
+
+
 def avaliacao_shopee(c: dict) -> dict | None:
-    """Item do `get_comment` → argumentos de `registrar_avaliacao` (sem sessão/integração)."""
+    """Item do `get_comment` → argumentos de `registrar_avaliacao` (sem sessão/integração).
+
+    Formato medido em 02/10/2026 (14 chaves): `comment_id`, `comment`,
+    `buyer_username`, `order_sn`, `item_id`, `model_id`, `model_id_list`,
+    `create_time` (s), `rating_star`, `editable`, `hidden`, `media` e
+    `comment_reply` `{reply, hidden, create_time}` — este só quando há
+    resposta.
+    """
     if not isinstance(c, dict):
         return None
     comentario = _curto(c.get("comment_id"), COMENTARIO_MAX)
@@ -191,6 +242,11 @@ def avaliacao_shopee(c: dict) -> dict | None:
     if not comentario or estrelas is None:
         return None
     resposta = c.get("comment_reply") if isinstance(c.get("comment_reply"), dict) else {}
+    texto_resposta = _texto(resposta.get("reply"), TEXTO_AVALIACAO_MAX)
+    oculta = resposta.get("hidden")
+    modelo = _curto(c.get("model_id"), MODELO_MAX)
+    if modelo == "0":
+        modelo = None
     return {
         "plataforma": "shopee",
         "comentario_id": comentario,
@@ -199,8 +255,15 @@ def avaliacao_shopee(c: dict) -> dict | None:
         "item_id": _curto(c.get("item_id"), ITEM_MAX),
         "estrelas": max(1, min(5, estrelas)),
         "texto": _texto(c.get("comment"), TEXTO_AVALIACAO_MAX),
-        "resposta_loja": _texto(resposta.get("reply"), TEXTO_AVALIACAO_MAX),
+        "resposta_loja": texto_resposta,
         "criado_em": de_epoch(c.get("create_time")),
+        "midia": midia_shopee(c.get("media")),
+        "resposta_em": de_epoch(resposta.get("create_time")) if texto_resposta else None,
+        "resposta_oculta": oculta if isinstance(oculta, bool) and texto_resposta else None,
+        "editavel": _curto(c.get("editable"), EDITAVEL_MAX),
+        "modelo_id": modelo,
+        # A avaliação inteira escondida pela Shopee (moderação).
+        "oculta": c.get("hidden") is True,
     }
 
 
@@ -279,6 +342,22 @@ async def registrar_pedido(
     )
 
 
+def _midia_valida(midia: Any) -> list[dict]:
+    """A lista da coluna `midia` limpa: `{"tipo", "url", "miniatura"?}` com https."""
+    saida: list[dict] = []
+    for m in midia if isinstance(midia, list) else []:
+        if not isinstance(m, dict) or m.get("tipo") not in ("imagem", "video"):
+            continue
+        url = _url(m.get("url"))
+        if not url:
+            continue
+        item = {"tipo": m["tipo"], "url": url}
+        if miniatura := _url(m.get("miniatura")):
+            item["miniatura"] = miniatura
+        saida.append(item)
+    return saida[:MAX_MIDIA]
+
+
 async def registrar_avaliacao(
     session: AsyncSession,
     *,
@@ -292,21 +371,40 @@ async def registrar_avaliacao(
     texto: str | None,
     resposta_loja: str | None,
     criado_em: datetime | None,
-) -> None:
+    titulo: str | None = None,
+    midia: list | None = None,
+    resposta_em: datetime | None = None,
+    resposta_oculta: bool | None = None,
+    editavel: str | None = None,
+    modelo_id: str | None = None,
+    comprador_id: str | None = None,
+    dados: dict | None = None,
+    oculta: bool | None = None,
+) -> bool:
     """Grava (ou atualiza) a avaliação no índice. Nunca commita, nunca levanta.
 
     A mesma avaliação volta com a resposta da loja (ou editada pelo cliente):
-    estrelas, texto e resposta são regravados; o que vier vazio não apaga.
+    estrelas, texto e resposta são regravados; o que vier vazio não apaga
+    (a mídia só é trocada quando vem alguma). `pode_responder` e o motivo
+    saem da plataforma (Shopee responde pela API; ML não). `dados` é
+    MESCLADO no que já havia (sem `sumiu`/`vazias`: se a plataforma a
+    devolveu, ela não sumiu); `oculta` (a avaliação escondida pela
+    plataforma) vai para `dados.oculta`. True = gravou.
     """
     comentario = _curto(comentario_id, COMENTARIO_MAX)
     nota = _inteiro(estrelas)
     if integration_id is None or not comentario or nota is None:
-        return
+        return False
+    plat = _curto(plataforma, PLATAFORMA_MAX) or ""
+    extra = dict(dados or {})
+    if oculta is not None:
+        extra["oculta"] = bool(oculta)
+    lista_midia = _midia_valida(midia)
     tabela = AtendimentoAvaliacaoLoja.__table__
     stmt = pg_insert(AtendimentoAvaliacaoLoja).values(
         id=uuid4(),
         integration_id=integration_id,
-        plataforma=_curto(plataforma, PLATAFORMA_MAX) or "",
+        plataforma=plat,
         comentario_id=comentario,
         pedido=_curto(pedido, PEDIDO_MAX),
         comprador_nome_loja=_curto(comprador_nome_loja, 255),
@@ -315,6 +413,17 @@ async def registrar_avaliacao(
         texto=_texto(texto, TEXTO_AVALIACAO_MAX),
         resposta_loja=_texto(resposta_loja, TEXTO_AVALIACAO_MAX),
         criado_em=de_iso(criado_em) if criado_em is not None else None,
+        titulo=_texto(titulo, TITULO_AVALIACAO_MAX),
+        midia=lista_midia,
+        resposta_em=de_iso(resposta_em) if resposta_em is not None else None,
+        resposta_oculta=resposta_oculta if isinstance(resposta_oculta, bool) else None,
+        editavel=_curto(editavel, EDITAVEL_MAX),
+        modelo_id=_curto(modelo_id, MODELO_MAX),
+        comprador_id=_curto(comprador_id, COMPRADOR_MAX),
+        pode_responder=plat in PLATAFORMAS_RESPONDEM_AVALIACAO,
+        motivo_sem_resposta=MOTIVO_SEM_RESPOSTA.get(plat),
+        dados=extra,
+        atualizado_em=datetime.now(UTC),
     )
     novo = stmt.excluded
     stmt = stmt.on_conflict_do_update(
@@ -329,9 +438,26 @@ async def registrar_avaliacao(
             "texto": func.coalesce(novo.texto, tabela.c.texto),
             "resposta_loja": func.coalesce(novo.resposta_loja, tabela.c.resposta_loja),
             "criado_em": func.coalesce(novo.criado_em, tabela.c.criado_em),
+            "titulo": func.coalesce(novo.titulo, tabela.c.titulo),
+            "midia": case(
+                (func.jsonb_array_length(novo.midia) > 0, novo.midia), else_=tabela.c.midia
+            ),
+            "resposta_em": func.coalesce(novo.resposta_em, tabela.c.resposta_em),
+            "resposta_oculta": func.coalesce(novo.resposta_oculta, tabela.c.resposta_oculta),
+            "editavel": func.coalesce(novo.editavel, tabela.c.editavel),
+            "modelo_id": func.coalesce(novo.modelo_id, tabela.c.modelo_id),
+            "comprador_id": func.coalesce(novo.comprador_id, tabela.c.comprador_id),
+            "pode_responder": novo.pode_responder,
+            "motivo_sem_resposta": novo.motivo_sem_resposta,
+            # A avaliação voltou da plataforma: sai a marca de "sumiu" (e a
+            # contagem de leituras vazias) que a releitura pelo id tinha posto.
+            "dados": tabela.c.dados.op("-")(literal("sumiu", Text))
+            .op("-")(literal("vazias", Text))
+            .op("||")(novo.dados),
+            "atualizado_em": novo.atualizado_em,
         },
     )
-    await _upsert(
+    return await _upsert(
         session,
         stmt,
         evento="atendimento_indice_avaliacao_falhou",

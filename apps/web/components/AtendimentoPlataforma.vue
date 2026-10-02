@@ -113,6 +113,10 @@ export type ConversaResumo = {
   etiqueta_desde?: string | null
   etiquetas_secundarias?: string[]
   etiqueta_manual?: boolean
+  // Avaliação de venda PENDENTE ligada à conversa (RF8, 02/10/2026): a pior
+  // nota (1–5), para as estrelas do selo Avaliação. Só vem quando a etiqueta
+  // (ou o indicador) é `avaliacao`; a API antiga não manda.
+  avaliacao_estrelas?: number | null
 }
 // Uma mudança de etiqueta (a linha do tempo): `por_nome` null = o sistema.
 export type EtiquetaHistorico = {
@@ -197,6 +201,22 @@ export type Contexto = {
   // ML pergunta: cada pergunta é uma conversa; as outras do mesmo comprador
   // no mesmo anúncio vêm aqui só para a pessoa ter o contexto.
   outras_perguntas?: OutraPergunta[]
+  // Avaliações de venda do pedido e as anteriores do comprador (RF8,
+  // 02/10/2026): nota e estado, NUNCA o texto (o texto e as fotos vêm do
+  // GET /conversas/{id}/avaliacoes, no cartão). A API antiga não manda.
+  avaliacoes?: AvaliacaoContexto[]
+}
+export type AvaliacaoContexto = {
+  id: string
+  plataforma: string
+  estrelas: number
+  pedido: string | null
+  do_pedido: boolean
+  criado_em: string | null
+  respondida: boolean
+  pendente: boolean
+  tratada: boolean
+  pode_responder: boolean
 }
 export type OutraPergunta = { texto: string | null; status: string | null; respondida: boolean; data: string | null }
 export type Envio = {
@@ -578,7 +598,10 @@ export const CANAIS_ATENDIMENTO: { value: string; label: string; plataforma: str
 // cria para cada reclamação (as mensagens do comprador, da loja e do
 // mediador). Não é caixa que se configura por loja — não entra em
 // CANAIS_ATENDIMENTO —, mas aparece na lista e no cabeçalho.
-const CANAL_LABEL: Record<string, string> = { chat: 'Chat', pergunta: 'Pergunta', pos_venda: 'Pós-venda', email: 'E-mail', sac: 'SAC', dm: 'Direct', reclamacao: 'Reclamação' }
+// `avaliacao` (02/10/2026, RF8): a conversa que nasce quando uma avaliação
+// de venda fica sem resposta da loja (services/atendimento/avaliacoes.py).
+// Também não é caixa configurável; a resposta dela é PÚBLICA.
+const CANAL_LABEL: Record<string, string> = { chat: 'Chat', pergunta: 'Pergunta', pos_venda: 'Pós-venda', email: 'E-mail', sac: 'SAC', dm: 'Direct', reclamacao: 'Reclamação', avaliacao: 'Avaliação' }
 export function canalLabel(canal: string | null | undefined): string {
   return CANAL_LABEL[canal || ''] || canal || ''
 }
@@ -1363,6 +1386,9 @@ export const ERROS: Record<string, string> = {
   categoria_so_humano: 'Essa categoria nunca sai sozinha (dinheiro, troca, reclamação…) — fica sempre com uma pessoa.',
   fila_indisponivel: 'A fila do servidor não respondeu — tente de novo em instantes.',
   rascunho_nao_pendente: 'Essa sugestão já foi usada, descartada ou substituída.',
+  // Avaliações de venda (RF8, 02/10/2026): POST /avaliacoes/{id}/responder e /tratada.
+  ja_respondida: 'Esta avaliação já foi respondida — a resposta da loja já está na plataforma.',
+  avaliacao_nao_encontrada: 'Avaliação não encontrada (atualize a conversa).',
   // POST /conversas/{id}/pedido/atualizar (trava de 60 s por conversa)
   sem_pedido_na_plataforma: 'Esta plataforma ainda não entrega o pedido pela API — veja o que o DaVinci sabe em "No DaVinci".',
   trava_indisponivel: 'O servidor não conseguiu reservar a conversa agora — tente de novo em instantes.',

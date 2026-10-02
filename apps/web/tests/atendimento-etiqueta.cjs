@@ -5,6 +5,8 @@
 //  - as cores decididas (Reclamação vermelho, Devolução roxo, Pré-venda azul,
 //    Ag. cancelamento laranja; Pós-venda sem destaque) e a prioridade igual à
 //    do backend (constantes.PRIORIDADE_ETIQUETAS);
+//  - a Avaliação (RF8, 02/10/2026): amarela, entre Devolução e Pré-venda, com
+//    as estrelas da pior nota pendente e a nota 1–3 em destaque;
 //  - o indicador das secundárias (sem a base, sem repetir, na prioridade);
 //  - a lista: faixa colorida à esquerda, selo (sem o de Pós-venda), menu
 //    Filtrar com Reclamação/Devolução/Ag. cancelamento e as contagens do /resumo
@@ -51,7 +53,7 @@ const prioridadeApi = (constantes.match(/PRIORIDADE_ETIQUETAS: tuple\[str, \.\.\
 assert.ok(prioridadeApi, 'PRIORIDADE_ETIQUETAS no backend')
 const ordemApi = prioridadeApi.split(',').map((s) => s.trim()).filter(Boolean).map((n) => nomes[n])
 assert.deepEqual(E.PRIORIDADE_ETIQUETAS, ordemApi, 'a tela e o backend com a mesma prioridade')
-assert.deepEqual(ordemApi, ['reclamacao', 'ag_cancelamento', 'devolucao', 'pre_venda', 'pos_venda'])
+assert.deepEqual(ordemApi, ['reclamacao', 'ag_cancelamento', 'devolucao', 'avaliacao', 'pre_venda', 'pos_venda'])
 assert.deepEqual(Object.keys(E.ETIQUETAS_INFO).sort(), [...ordemApi].sort(), 'toda etiqueta do backend tem cor')
 
 const router = fs.readFileSync(path.resolve(__dirname, '../../api/app/routers/atendimento.py'), 'utf8')
@@ -72,7 +74,25 @@ assert.equal(E.faixaDaEtiqueta(null), '')
 assert.equal(E.faixaDaEtiqueta(' Reclamacao '), 'bg-red-500')
 assert.equal(E.etiquetaInfo(''), null)
 // Etiqueta nova no backend que a tela ainda não conhece: neutra, com o código.
-assert.deepEqual([E.etiquetaInfo('avaliacao').label, E.etiquetaInfo('avaliacao').destaque], ['avaliacao', false])
+assert.deepEqual([E.etiquetaInfo('carrinho').label, E.etiquetaInfo('carrinho').destaque], ['carrinho', false])
+// Avaliação (RF8): amarela, com destaque e faixa.
+assert.equal(cor('avaliacao').label, 'Avaliação')
+assert.match(cor('avaliacao').cls, /yellow-/)
+assert.equal(E.faixaDaEtiqueta('avaliacao'), 'bg-yellow-400')
+assert.equal(cor('avaliacao').destaque, true)
+// A nota 1–3 da backend (NOTA_BAIXA_AVALIACAO) é a mesma régua da tela.
+assert.equal(Number((constantes.match(/^NOTA_BAIXA_AVALIACAO = (\d+)$/m) || [])[1]), E.NOTA_BAIXA_AVALIACAO)
+assert.equal(E.estrelasDaNota(2), '★★☆☆☆')
+assert.equal(E.estrelasDaNota(5), '★★★★★')
+for (const fora of [0, 6, null, undefined, 2.5, 'x']) assert.equal(E.estrelasDaNota(fora), '', `sem estrelas para ${fora}`)
+assert.deepEqual([1, 2, 3, 4, 5, null].map(E.notaBaixa), [true, true, true, false, false, false])
+assert.equal(E.clsDoSelo('avaliacao', 2), E.CLS_AVALIACAO_NOTA_BAIXA, 'nota baixa em destaque')
+assert.match(E.CLS_AVALIACAO_NOTA_BAIXA, /bg-yellow-400 .*ring-red/)
+assert.equal(E.clsDoSelo('avaliacao', 5), cor('avaliacao').cls, 'nota alta: o amarelo de sempre')
+assert.equal(E.clsDoSelo('avaliacao', null), cor('avaliacao').cls)
+assert.equal(E.clsDoSelo('reclamacao', 1), cor('reclamacao').cls, 'as estrelas só mexem na Avaliação')
+assert.match(E.tituloDaEtiqueta('avaliacao', { estrelas: 2 }), /pior nota sem resposta: 2 de 5 \(nota baixa\)/)
+assert.doesNotMatch(E.tituloDaEtiqueta('reclamacao', { estrelas: 2 }), /nota/)
 assert.deepEqual(E.OPCOES_ETIQUETA.map((o) => o.value), ordemApi, 'troca à mão na ordem da prioridade')
 
 // ------------------------------------------------ indicador das secundárias
@@ -93,6 +113,7 @@ assert.match(titulo, /desde \d\d\/\d\d/)
   assert.match(tpl, /v-if="faixaDaEtiqueta\(c\.etiqueta\)"[\s\S]{0,200}data-faixa/, 'faixa à esquerda')
   assert.match(tpl, /<AtendimentoEtiqueta[\s\S]{0,600}esconder-pos-venda/, 'selo sem o de Pós-venda')
   assert.match(tpl, /:secundarias="c\.etiquetas_secundarias"/)
+  assert.match(tpl, /<AtendimentoEtiqueta[\s\S]{0,600}:estrelas="c\.avaliacao_estrelas"/, 'as estrelas da avaliação no selo da linha')
   assert.match(tpl, />Etiqueta<\/div>/, 'o menu separa os filtros de etiqueta')
   assert.match(tpl, /placeholder="buscar comprador, pedido, nº do Bling, SKU…"/)
   const menu = L.FILTROS_MENU.map((f) => f.value)
@@ -124,6 +145,9 @@ assert.match(titulo, /desde \d\d\/\d\d/)
   const base = { plataforma: '', integration_id: '', canal: '', filtro: 'todas', q: '' }
   const tudo = contagemPara(resumo, base)
   assert.deepEqual([tudo.reclamacao, tudo.devolucao, tudo.ag_cancelamento, tudo.pos_venda], [3, 2, 1, 40])
+  // Avaliação (RF8): o número do menu vem do mesmo `etiquetas` do /resumo.
+  assert.equal(tudo.avaliacao, 0, 'resumo sem a chave: zero')
+  assert.equal(contagemPara({ ...resumo, etiquetas: { ...resumo.etiquetas, avaliacao: 4 } }, base).avaliacao, 4)
   const ml = contagemPara(resumo, { ...base, plataforma: 'ml' })
   assert.deepEqual([ml.reclamacao, ml.pre_venda], [1, 1])
   // Plataforma sem conversa (sem `etiquetas`): zero, não "sem número".
@@ -138,19 +162,19 @@ assert.match(titulo, /desde \d\d\/\d\d/)
 // ------------------------------------------------ o selo e a troca à mão (script setup)
 async function testarSelo() {
   const src = etiquetaSfc.scriptSetup.content.replace(/^import[\s\S]*?from\s+'[^']+'\s*$/gm, '')
-  const js = transpile(src) + '\nreturn { info, mostrarSelo, outras, clsSelo, podeEditar, aberto, escolhida, motivo, salvando, erro, abrir, salvar, linhaDoTempo }'
+  const js = transpile(src) + '\nreturn { info, mostrarSelo, outras, clsSelo, estrelasSelo, seloNotaBaixa, tituloSecundaria, podeEditar, aberto, escolhida, motivo, salvando, erro, abrir, salvar, linhaDoTempo }'
   function montar(props, apiFalsa) {
     const emitidos = []
     const chamadas = []
     const api = async (url, opts) => { chamadas.push({ url, opts }); return apiFalsa(url, opts) }
     const vm = new Function(
       'ref', 'computed', 'withDefaults', 'defineProps', 'defineEmits', 'useApi', 'onClickOutside', 'erroDaApi',
-      'etiquetaInfo', 'secundariasDe', 'tituloDaEtiqueta', 'OPCOES_ETIQUETA',
+      'etiquetaInfo', 'secundariasDe', 'tituloDaEtiqueta', 'OPCOES_ETIQUETA', 'clsDoSelo', 'estrelasDaNota', 'notaBaixa',
       js,
     )(
       Vue.ref, Vue.computed, (p, d) => ({ ...d, ...p }), () => props, () => (n, v) => emitidos.push([n, v]),
       () => ({ api }), () => {}, plataforma.erroDaApi,
-      E.etiquetaInfo, E.secundariasDe, E.tituloDaEtiqueta, E.OPCOES_ETIQUETA,
+      E.etiquetaInfo, E.secundariasDe, E.tituloDaEtiqueta, E.OPCOES_ETIQUETA, E.clsDoSelo, E.estrelasDaNota, E.notaBaixa,
     )
     return { vm, emitidos, chamadas }
   }
@@ -163,6 +187,23 @@ async function testarSelo() {
   assert.equal(vm.mostrarSelo.value, true)
   assert.equal(vm.clsSelo.value, 'bg-white/20 text-current', 'na linha azul, translúcido')
   assert.equal(vm.podeEditar.value, false)
+  assert.equal(vm.estrelasSelo.value, '', 'estrelas só no selo da Avaliação')
+
+  // Avaliação com a pior nota pendente: estrelas no selo, 1–3 em destaque.
+  ;({ vm } = montar({ etiqueta: 'avaliacao', estrelas: 2 }, nada))
+  assert.equal(vm.estrelasSelo.value, '★★☆☆☆')
+  assert.equal(vm.seloNotaBaixa.value, true)
+  assert.equal(vm.clsSelo.value, E.CLS_AVALIACAO_NOTA_BAIXA)
+  ;({ vm } = montar({ etiqueta: 'avaliacao', estrelas: 5 }, nada))
+  assert.equal(vm.seloNotaBaixa.value, false)
+  assert.equal(vm.clsSelo.value, cor('avaliacao').cls)
+  ;({ vm } = montar({ etiqueta: 'avaliacao', estrelas: null }, nada))
+  assert.equal(vm.estrelasSelo.value, '', 'API antiga: o selo sem estrelas')
+  // Reclamação na frente: a Avaliação vira o indicador, com a nota no title.
+  ;({ vm } = montar({ etiqueta: 'reclamacao', secundarias: ['avaliacao'], estrelas: 1 }, nada))
+  assert.equal(vm.estrelasSelo.value, '')
+  assert.deepEqual(vm.outras.value.map((o) => o.value), ['avaliacao'])
+  assert.equal(vm.tituloSecundaria(vm.outras.value[0]), 'também aberta: Avaliação (pior nota 1 de 5)')
   vm.abrir()
   assert.equal(vm.aberto.value, false, 'sem `editavel` não abre')
 
@@ -198,7 +239,7 @@ async function testarSelo() {
 // ------------------------------------------------ tipos do contrato
 {
   const tipos = fs.readFileSync(path.resolve(__dirname, '../components/AtendimentoPlataforma.vue'), 'utf8')
-  for (const campo of ['etiqueta?: string | null', 'etiquetas_secundarias?: string[]', 'etiqueta_manual?: boolean', 'etiqueta_historico?: EtiquetaHistorico[]', 'etiquetas?: ContagemEtiquetas']) {
+  for (const campo of ['etiqueta?: string | null', 'etiquetas_secundarias?: string[]', 'etiqueta_manual?: boolean', 'etiqueta_historico?: EtiquetaHistorico[]', 'etiquetas?: ContagemEtiquetas', 'avaliacao_estrelas?: number | null']) {
     assert.ok(tipos.includes(campo), campo)
   }
   assert.match(plataforma.ERROS.etiqueta_invalida, /Etiqueta desconhecida/)

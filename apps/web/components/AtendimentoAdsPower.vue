@@ -107,6 +107,35 @@ export function urlIniciar(p: PerfilAdsPower | null | undefined, base = ADSPOWER
   return null
 }
 
+// "Abrir no Mercado Livre/Shopee/TikTok…" DENTRO do perfil da loja (02/10/2026,
+// medido no AdsPower do Mac mini com o perfil 72): o start aceita
+// `launch_args` com o endereço e o perfil FECHADO abre já nessa página (o
+// Chrome abre a URL passada na linha de comando). Com o perfil JÁ ABERTO o
+// AdsPower só devolve o que está aberto e ignora o endereço — por isso quem
+// chama também copia o link (dá para colar na barra do perfil).
+// Só páginas das plataformas (https e domínio conhecido): nada arbitrário vai
+// para a linha de comando do navegador da loja.
+const DOMINIOS_PLATAFORMA = [
+  'mercadolivre.com.br', 'mercadolibre.com', 'shopee.com.br', 'tiktok.com', 'tiktokshop.com',
+  'amazon.com.br', 'magalu.com', 'magazineluiza.com.br', 'temu.com', 'aliexpress.com',
+]
+export function destinoPermitido(destino: string | null | undefined): string | null {
+  try {
+    const u = new URL(String(destino || ''))
+    if (u.protocol !== 'https:') return null
+    const host = u.hostname.toLowerCase()
+    return DOMINIOS_PLATAFORMA.some((d) => host === d || host.endsWith(`.${d}`)) ? u.toString() : null
+  } catch {
+    return null
+  }
+}
+export function urlIniciarNaPagina(p: PerfilAdsPower | null | undefined, destino: string | null | undefined, base = ADSPOWER_API): string | null {
+  const inicio = urlIniciar(p, base)
+  const pagina = destinoPermitido(destino)
+  if (!inicio || !pagina) return inicio
+  return `${inicio}&launch_args=${encodeURIComponent(JSON.stringify([pagina]))}`
+}
+
 function resultado(status: StatusAdsPower, codigo: string | null, msg?: string): ResultadoAdsPower {
   if (status === 'aberto') return { status, codigo: null, titulo: 'Perfil aberto no AdsPower', detalhe: '' }
   if (status === 'enviado') return { status, codigo: null, ...ENVIADO }
@@ -158,7 +187,9 @@ async function comPrazo<T>(p: (sinal: AbortSignal) => Promise<T>, ms: number): P
 export async function abrirNoAdsPower(url: string, opcoes: Opcoes = {}): Promise<ResultadoAdsPower> {
   const f: Busca = opcoes.fetch ?? ((u, i) => globalThis.fetch(u, i))
   const esperar = opcoes.esperar ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)))
-  const prazo = opcoes.prazoMs ?? 3000
+  // 20 s na sondagem: na 1ª vez o Chrome segura o pedido até a pessoa
+  // responder "acessar a rede local" — 3 s davam "fechado" com ele aberto.
+  const prazo = opcoes.prazoMs ?? 20000
   const prazoStart = opcoes.prazoStartMs ?? 20000
   let base: string
   try {
@@ -200,10 +231,48 @@ export async function abrirNoAdsPower(url: string, opcoes: Opcoes = {}): Promise
   await esperar(INTERVALO_ADSPOWER_MS)
   try {
     await comPrazo((signal) => f(url, { mode: 'no-cors', cache: 'no-store', signal }), prazoStart)
-    return resultado('enviado', null)
   } catch {
-    return resultado('erro', 'adspower_fechado')
+    // A sondagem respondeu: o AdsPower ESTÁ aberto. O start só devolve quando
+    // o navegador do perfil termina de subir (pode passar de 20 s) e o perfil
+    // continua abrindo depois que desistimos de esperar (02/10/2026: dizia
+    // "não está aberto" e o perfil abria logo em seguida).
   }
+  return resultado('enviado', null)
+}
+
+// O clique de "Abrir no Mercado Livre/Shopee/TikTok…": copia o link ANTES
+// (a cópia precisa do gesto do clique, que expira depois de esperar o
+// AdsPower) e pede ao AdsPower para abrir o perfil da loja já na página.
+// Perfil fechado → abre na página; já aberto → vem para frente e a pessoa cola
+// o link (o texto do resultado diz isso). Sem perfil cadastrado → null (quem
+// chama cai no link comum).
+export async function abrirPaginaNoPerfil(
+  p: PerfilAdsPower | null | undefined,
+  destino: string,
+  opcoes: Opcoes & { copiar?: (texto: string) => Promise<void> } = {},
+): Promise<(ResultadoAdsPower & { copiado: boolean }) | null> {
+  const url = urlIniciarNaPagina(p, destino)
+  if (!url) return null
+  const copiar = opcoes.copiar ?? ((texto: string) => globalThis.navigator.clipboard.writeText(texto))
+  let copiado = false
+  try {
+    await copiar(destino)
+    copiado = true
+  } catch {
+    copiado = false
+  }
+  const r = await abrirNoAdsPower(url, opcoes)
+  if (r.status !== 'erro') {
+    return {
+      ...r,
+      copiado,
+      titulo: 'Abrindo no perfil da loja (AdsPower)',
+      detalhe: copiado
+        ? 'Se o perfil estava fechado, ele abre já nesta página. Se já estava aberto, ele só vem para frente: o link foi copiado — cole na barra de endereço do perfil.'
+        : 'Se o perfil estava fechado, ele abre já nesta página. Se já estava aberto, ele só vem para frente: use "abrir numa aba" para copiar o endereço.',
+    }
+  }
+  return { ...r, copiado }
 }
 </script>
 
