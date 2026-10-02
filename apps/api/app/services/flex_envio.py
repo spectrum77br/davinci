@@ -249,53 +249,70 @@ async def registrar_envios(session: AsyncSession, lidos: Iterable[EnvioLido]) ->
     existir (a aba Flex mostra o pedido sem esperar o enriquecimento).
 
     Só regrava quando algo mudou — o shipment check roda de minuto em minuto
-    sobre os mesmos pedidos em aberto. Não faz commit: quem chama decide."""
+    sobre os mesmos pedidos em aberto. Não faz commit: quem chama decide.
+    O shipment check chama as duas metades em transações diferentes (ver
+    `registrar_pedidos_flex`)."""
     lidos = list(lidos)
-    out = {"flex_pedidos": 0, "logistica": 0}
-    if not lidos:
-        return out
+    return {
+        "flex_pedidos": await registrar_pedidos_flex(session, lidos),
+        "logistica": await registrar_logistica(session, lidos),
+    }
 
+
+async def registrar_pedidos_flex(session: AsyncSession, lidos: Iterable[EnvioLido]) -> int:
+    """Upsert dos pedidos Flex em `flex_pedido` (só o que mudou). Devolve
+    quantas linhas mudaram.
+
+    O shipment check chama isto na MESMA transação em que grava o prazo de
+    despacho do pedido: o robô de prioridade (e a NF automática) espera o
+    pedido ML/Shopee novo até ter o prazo OU o tipo de envio — com as duas
+    gravações juntas, "tem prazo e não tem `flex_pedido`" quer dizer "não é
+    Flex" de verdade, nunca "ainda não gravou"."""
     flex = {e.bling_id: e for e in lidos if e.envio_flex}
-    if flex:
-        no_sp = await _no_sp_por_pedido(session, flex.keys())
-        valores = [
-            {
-                "bling_id": e.bling_id,
-                "plataforma": e.plataforma,
-                "integration_id": e.integration_id,
-                "numeroloja": e.numeroloja,
-                "envio_tipo": e.envio_tipo,
-                "prazo": e.prazo,
-                "no_sp": no_sp.get(e.bling_id, False),
-            }
-            for e in flex.values()
-        ]
-        stmt = pg_insert(FlexPedido).values(valores)
-        novo = stmt.excluded
-        # Leitura que veio sem um campo (ex.: o ML só lê o prazo uma vez) não
-        # apaga o que já estava gravado.
-        mudar = {
-            "plataforma": novo.plataforma,
-            "integration_id": func.coalesce(novo.integration_id, FlexPedido.integration_id),
-            "numeroloja": func.coalesce(novo.numeroloja, FlexPedido.numeroloja),
-            "envio_tipo": func.coalesce(novo.envio_tipo, FlexPedido.envio_tipo),
-            "prazo": func.coalesce(novo.prazo, FlexPedido.prazo),
-            "no_sp": novo.no_sp,
+    if not flex:
+        return 0
+    no_sp = await _no_sp_por_pedido(session, flex.keys())
+    valores = [
+        {
+            "bling_id": e.bling_id,
+            "plataforma": e.plataforma,
+            "integration_id": e.integration_id,
+            "numeroloja": e.numeroloja,
+            "envio_tipo": e.envio_tipo,
+            "prazo": e.prazo,
+            "no_sp": no_sp.get(e.bling_id, False),
         }
-        stmt = stmt.on_conflict_do_update(
-            index_elements=[FlexPedido.bling_id],
-            set_={**mudar, "atualizado_em": func.now()},
-            where=or_(
-                *(getattr(FlexPedido, col).is_distinct_from(expr) for col, expr in mudar.items())
-            ),
-        )
-        res = await session.execute(stmt)
-        out["flex_pedidos"] = res.rowcount or 0
+        for e in flex.values()
+    ]
+    stmt = pg_insert(FlexPedido).values(valores)
+    novo = stmt.excluded
+    # Leitura que veio sem um campo (ex.: o ML só lê o prazo uma vez) não
+    # apaga o que já estava gravado.
+    mudar = {
+        "plataforma": novo.plataforma,
+        "integration_id": func.coalesce(novo.integration_id, FlexPedido.integration_id),
+        "numeroloja": func.coalesce(novo.numeroloja, FlexPedido.numeroloja),
+        "envio_tipo": func.coalesce(novo.envio_tipo, FlexPedido.envio_tipo),
+        "prazo": func.coalesce(novo.prazo, FlexPedido.prazo),
+        "no_sp": novo.no_sp,
+    }
+    stmt = stmt.on_conflict_do_update(
+        index_elements=[FlexPedido.bling_id],
+        set_={**mudar, "atualizado_em": func.now()},
+        where=or_(
+            *(getattr(FlexPedido, col).is_distinct_from(expr) for col, expr in mudar.items())
+        ),
+    )
+    res = await session.execute(stmt)
+    return res.rowcount or 0
 
-    # Linha da Logística que já existe: grava o tipo (as novas recebem no
-    # enriquecimento da importação de hora em hora). Um UPDATE por tipo de
-    # envio (são poucos: self_service, cross_docking, o canal da Shopee…),
-    # não um por pedido.
+
+async def registrar_logistica(session: AsyncSession, lidos: Iterable[EnvioLido]) -> int:
+    """Linha da Logística que já existe: grava o tipo (as novas recebem no
+    enriquecimento da importação de hora em hora). Um UPDATE por tipo de
+    envio (são poucos: self_service, cross_docking, o canal da Shopee…),
+    não um por pedido. Devolve quantas linhas mudaram."""
+    total = 0
     grupos: dict[tuple[str, bool, str | None], list[str]] = defaultdict(list)
     for e in lidos:
         if e.numero:
@@ -316,8 +333,8 @@ async def registrar_envios(session: AsyncSession, lidos: Iterable[EnvioLido]) ->
             # Sessão própria do registro: nada carregado para sincronizar.
             .execution_options(synchronize_session=False)
         )
-        out["logistica"] += res.rowcount or 0
-    return out
+        total += res.rowcount or 0
+    return total
 
 
 async def bling_ids_flex(session: AsyncSession, pedidos: Mapping[int, str | None]) -> set[int]:

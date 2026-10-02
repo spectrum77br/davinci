@@ -21,6 +21,11 @@ O que muda (só aditivo):
     anúncio): ação `decidir`, `motivo` (o porquê em texto) e `por` (a pessoa
     que aprovou/apertou a emergência; NULL = robô); e `flex_anuncio_estado.
     recusa` (a plataforma recusou ligar — não tenta de novo sozinho).
+    Etapa 5 (correções): `flex_pedido.sp_em` (o robô levou o pedido ao .sp —
+    o motor desconta até o produto .sp ser atualizado depois disso),
+    `acertado_em`/`acertado_por` (pedido Flex que saiu sem passar pelo .sp:
+    desconta até uma pessoa dizer que acertou o estoque no Bling) e a ação
+    `acertar_estoque` na trilha.
 
 Valores fechados em TEXT com CHECK (nada de enum do Postgres). As três tabelas
 ficam FORA do Histórico (historico/sql.EXCLUIDAS): são da máquina.
@@ -67,6 +72,7 @@ _ACOES = (
     "ler",
     "pedido_sp",
     "pedido_sem_sp",
+    "acertar_estoque",
 )
 _RESULTADOS = ("ok", "erro", "simulado", "pendente", "ignorado")
 
@@ -111,6 +117,9 @@ def upgrade() -> None:
         ),
         sa.Column("no_sp", sa.Boolean(), server_default=sa.text("false"), nullable=False),
         sa.Column("alerta", sa.Text(), nullable=True),
+        sa.Column("sp_em", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("acertado_em", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("acertado_por", pg.UUID(as_uuid=True), nullable=True),
         sa.Column(
             "atualizado_em", sa.DateTime(timezone=True), server_default=_agora(), nullable=False
         ),
@@ -119,6 +128,12 @@ def upgrade() -> None:
             ["integration_id"],
             [f"{SCHEMA}.integrations.id"],
             name=op.f("fk_flex_pedido_integration_id_integrations"),
+            ondelete="SET NULL",
+        ),
+        sa.ForeignKeyConstraint(
+            ["acertado_por"],
+            [f"{SCHEMA}.users.id"],
+            name=op.f("fk_flex_pedido_acertado_por_users"),
             ondelete="SET NULL",
         ),
         sa.PrimaryKeyConstraint("bling_id", name=op.f("pk_flex_pedido")),

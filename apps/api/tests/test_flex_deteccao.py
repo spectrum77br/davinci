@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import time
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import httpx
@@ -371,8 +371,9 @@ async def test_sweep_shopee_classifica_as_linhas_da_janela_sem_chamada_a_mais(
 class _FakeMLAberto:
     """Pedido pago, envio Flex ainda não despachado (passe 2 lê o envio)."""
 
-    def __init__(self, envio: dict):
+    def __init__(self, envio: dict, sla: str = "2026-10-02T13:00:00.000-03:00"):
         self.envio = envio
+        self.sla = sla
         self.chamadas: list[str] = []
 
     async def get_order(self, order_id):
@@ -385,7 +386,7 @@ class _FakeMLAberto:
 
     async def get_shipment_sla(self, shipment_id):
         self.chamadas.append("sla")
-        return {"expected_date": "2026-10-02T13:00:00.000-03:00"}
+        return {"expected_date": self.sla}
 
 
 @pytest.mark.asyncio
@@ -408,6 +409,33 @@ async def test_ml_shipped_for_registra_o_tipo_sem_chamada_extra():
     res = await check._ml_shipped_for(client, o, {}, envios=envios)
     assert res is not None
     assert envios[501]["envio_flex"] is True
+
+
+@pytest.mark.asyncio
+async def test_prazo_do_flex_do_ml_nao_ganha_o_dia_da_agencia():
+    """Achado da revisão: SLA 23:59 de hoje é lido como "agência" e ganha +1
+    dia (a operação leva os pacotes à agência na manhã seguinte). O Flex não
+    passa por agência — sai de São Bernardo no dia: o prazo fica como veio."""
+    check._ml_pack_real_order.clear()
+    check._not_found_until.clear()
+    hoje = datetime.now(check._BRT).date()
+    sla = f"{hoje.isoformat()}T23:59:59.000-03:00"
+    esperado = datetime.fromisoformat(sla).astimezone(UTC)
+    o = SimpleNamespace(numeroloja="2000002", bling_id=502, marketplace_ship_deadline=None)
+
+    flex = _FakeMLAberto({**_ML_NOVO_FLEX, "status": "ready_to_ship", "substatus": "printed"},
+                         sla=sla)
+    prazos: dict[int, datetime] = {}
+    await check._ml_shipped_for(flex, o, prazos)  # sem `envios`: vale igual
+    assert prazos[502] == esperado
+
+    agencia = _FakeMLAberto(
+        {"logistic": {"type": "cross_docking"}, "status": "ready_to_ship", "substatus": "printed"},
+        sla=sla,
+    )
+    prazos = {}
+    await check._ml_shipped_for(agencia, o, prazos)
+    assert prazos[502] == esperado + timedelta(days=1)
 
 
 @pytest.mark.asyncio
@@ -527,8 +555,8 @@ async def test_registrar_envios_grava_flex_pedido_e_a_linha_da_logistica(db: Asy
 # ─── a varredura inteira (uma loja ML) ───────────────────────────────────────
 
 
-@pytest.mark.asyncio
-async def test_sweep_de_envio_registra_o_pedido_flex(db: AsyncSession, monkeypatch):
+async def _loja_ml_com_pedido_flex(db: AsyncSession, monkeypatch) -> Integration:
+    """Uma loja ML com o pedido 9201 em aberto (dg053.ci) cujo envio é Flex."""
     dono = User(
         open_id=f"email:fx-{uuid.uuid4().hex[:6]}@davinci-test.com",
         email=f"fx-{uuid.uuid4().hex[:6]}@davinci-test.com",
@@ -576,7 +604,12 @@ async def test_sweep_de_envio_registra_o_pedido_flex(db: AsyncSession, monkeypat
     monkeypatch.setattr(check, "MercadoLivreClient", lambda creds, on_token_refresh=None: fake)
     check._ml_pack_real_order.clear()
     check._not_found_until.clear()
+    return integ
 
+
+@pytest.mark.asyncio
+async def test_sweep_de_envio_registra_o_pedido_flex(db: AsyncSession, monkeypatch):
+    integ = await _loja_ml_com_pedido_flex(db, monkeypatch)
     summary = await check.run_check_marketplace_shipped_orders()
     assert summary["flex_pedidos"] == 1
     assert summary["flex_logistica"] == 1
@@ -592,3 +625,31 @@ async def test_sweep_de_envio_registra_o_pedido_flex(db: AsyncSession, monkeypat
         await db.execute(select(Logistica).where(Logistica.pedido_bling == "9201"))
     ).scalar_one()
     assert linha.envio_flex is True
+
+
+
+@pytest.mark.asyncio
+async def test_pedido_flex_gravado_junto_com_o_prazo(db: AsyncSession, monkeypatch):
+    """Achado da revisão: o `flex_pedido` era gravado só no FIM da varredura,
+    numa transação separada da do prazo — no meio, o robô de prioridade (e a
+    NF automática) via o pedido com prazo e sem `flex_pedido`: "não é Flex".
+    Agora os dois vão na mesma transação; a parte da Logística continua
+    separada (aqui ela nem roda) e o pedido Flex já está lá com o prazo."""
+    await _loja_ml_com_pedido_flex(db, monkeypatch)
+    reavaliou: list[bool] = []
+
+    async def _so_logistica(lidos, summary):
+        reavaliou.append(bool(summary.get("flex_pedidos")))
+
+    monkeypatch.setattr(check, "_registrar_flex", _so_logistica)
+    await check.run_check_marketplace_shipped_orders()
+    db.expire_all()
+    p = (await db.execute(select(FlexPedido))).scalar_one()
+    assert p.bling_id == 9201 and p.prazo == datetime(2026, 10, 2, 16, 0, tzinfo=UTC)
+    prazo = (
+        await db.execute(
+            select(BlingOrder.marketplace_ship_deadline).where(BlingOrder.bling_id == 9201)
+        )
+    ).scalar_one()
+    assert prazo == p.prazo
+    assert reavaliou == [True]  # o fim da varredura sabe que o pedido Flex mudou

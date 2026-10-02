@@ -75,7 +75,11 @@ type FlexPedido = {
   prazo: string | null
   detectado_em: string
   alerta: string | null
+  situacao: string | null
   skus: string[]
+  // Saiu sem passar pelo .sp: o saldo Flex segue descontando até alguém
+  // marcar que acertou o estoque no Bling.
+  acerto_pendente: boolean
 }
 
 const config = ref<FlexConfig | null>(null)
@@ -451,10 +455,13 @@ async function emergencia() {
   if (!props.canEdit || emergenciaRodando.value) return
   const c = config.value
   const simulacao = !c?.pode_escrever
+  // Simulação de verdade: nada muda, nem as aprovações (o servidor só conta).
   const ok = confirm(
-    'DESLIGAR O FLEX DE TODOS os anúncios das contas liberadas?\n\n' +
-      'Também retira todas as aprovações: nada volta a ligar sem uma pessoa aprovar de novo.' +
-      (simulacao ? '\n\nModo atual não mexe nas plataformas: será só uma SIMULAÇÃO (mostra o que faria).' : ''),
+    simulacao
+      ? 'SIMULAR a emergência?\n\nO modo atual não mexe nas plataformas: o sistema só mostra o que faria — ' +
+          'quantos anúncios desligaria e quantas aprovações retiraria. Nada muda, nem as aprovações.'
+      : 'DESLIGAR O FLEX DE TODOS os anúncios das contas liberadas?\n\n' +
+          'Também retira todas as aprovações AGORA: nada volta a ligar sem uma pessoa aprovar de novo.',
   )
   if (!ok) return
   emergenciaRodando.value = true
@@ -464,21 +471,32 @@ async function emergencia() {
       toasts.warning('Nada a desligar', motivoServidor(r.motivo))
     } else if (!r.escreve) {
       const naoLidos = Math.max(0, (r.alvos || 0) - (r.ligados_conhecidos || 0))
-      toasts.info('Simulação da emergência (nada mudou nas plataformas)', [
+      toasts.info('Simulação da emergência (nada mudou)', [
         `${r.ligados_conhecidos || 0} anúncio(s) com Flex ligado seriam desligados.`,
         naoLidos ? `${naoLidos} anúncio(s) ainda não conferidos também seriam desligados por segurança.` : '',
-        'As aprovações que existiam foram retiradas.',
+        r.aprovacoes
+          ? `${r.aprovacoes} aprovação(ões) seriam retiradas — continuam valendo, nada foi retirado.`
+          : '',
       ].filter(Boolean))
     } else {
       const linhas = [
         `${r.desligados || 0} anúncio(s) desligados.`,
+        r.ja_desligados ? `${r.ja_desligados} já estavam desligados.` : '',
+        r.aprovacoes ? `${r.aprovacoes} aprovação(ões) retiradas.` : '',
         r.falhas ? `${r.falhas} falharam — veja o erro na linha do anúncio.` : '',
+        r.ocupados
+          ? `${r.ocupados} estavam sendo mexidos pelo sistema naquele instante e NÃO foram desligados.`
+          : '',
+        r.sem_cliente
+          ? `${r.sem_cliente} são de conta sem acesso à plataforma: desligue à mão no painel da plataforma.`
+          : '',
         r.shopee_so_leitura
           ? `${r.shopee_so_leitura} da Shopee NÃO foram mexidos (o sistema só lê a Shopee): desligue à mão no Seller Center.`
           : '',
         r.restantes ? `Ainda faltam ${r.restantes}: clique de novo para continuar.` : '',
       ].filter(Boolean)
-      if (r.falhas || r.restantes || r.shopee_so_leitura) toasts.warning('Emergência: desligamento parcial', linhas)
+      if (r.falhas || r.restantes || r.ocupados || r.sem_cliente || r.shopee_so_leitura)
+        toasts.warning('Emergência: desligamento parcial', linhas)
       else toasts.success('Emergência: Flex desligado', linhas)
     }
     emit('mudou')
@@ -489,6 +507,41 @@ async function emergencia() {
     emergenciaRodando.value = false
   }
 }
+
+// Pedido Flex que saiu sem passar pelo .sp: a pessoa diz que acertou o
+// estoque no Bling (transferência para o .sp) — o saldo Flex para de descontar.
+const acertando = ref<Set<number>>(new Set())
+async function marcarAcertado(p: FlexPedido) {
+  if (!props.canEdit || acertando.value.has(p.bling_id)) return
+  const ok = confirm(
+    `Pedido ${p.numero || p.bling_id}: você já acertou o estoque no Bling?\n\n` +
+      'Ele saiu de São Bernardo, mas o Bling baixou outro lote. Confirme só depois de transferir ' +
+      'a peça para o .sp no Bling — até lá o sistema desconta o pedido das peças livres em SP.',
+  )
+  if (!ok) return
+  acertando.value = new Set([...acertando.value, p.bling_id])
+  try {
+    await api(`/api/flex/pedidos/${p.bling_id}/acertado`, { method: 'POST' })
+    toasts.success('Estoque acertado', `Pedido ${p.numero || p.bling_id}.`)
+    emit('mudou')
+    await carregarPedidos()
+  } catch (e: any) {
+    const d = e?.data?.detail
+    toasts.error(
+      'Não foi possível marcar',
+      (typeof d === 'object' && d ? d.detalhe || d.code : null) || e?.message || 'erro',
+    )
+    await carregarPedidos()
+  } finally {
+    const s = new Set(acertando.value)
+    s.delete(p.bling_id)
+    acertando.value = s
+  }
+}
+
+// Conferidos de verdade na plataforma (o resto a regra avaliou, mas o
+// Mercado Livre / a Shopee ainda não foi lido).
+const conferidos = computed(() => Math.max(0, resumo.value.avaliados - resumo.value.nao_lidos))
 
 // Clique num número do resumo = filtra a lista por aquilo.
 function filtrarPor(s: Situacao) {
@@ -561,7 +614,8 @@ defineExpose({ recarregar: carregarTudo })
         :class="filtroSituacao === '' ? 'border-primary' : ''"
         @click="filtroSituacao = ''"
       >
-        <strong>{{ resumo.avaliados }}</strong> anúncios conferidos
+        <strong>{{ resumo.avaliados }}</strong> anúncios avaliados pela regra
+        <span class="text-muted-foreground">({{ conferidos }} já conferidos na plataforma)</span>
       </button>
       <button
         type="button"
@@ -749,7 +803,7 @@ defineExpose({ recarregar: carregarTudo })
           </tr>
           <tr v-if="!loading && itens.length === 0">
             <td colspan="9" class="px-3 py-6 text-center text-muted-foreground">
-              {{ resumo.avaliados === 0 ? 'Nenhum anúncio conferido ainda.' : 'Nenhum anúncio com esses filtros.' }}
+              {{ resumo.avaliados === 0 ? 'Nenhum anúncio avaliado ainda.' : 'Nenhum anúncio com esses filtros.' }}
             </td>
           </tr>
         </tbody>
@@ -795,7 +849,7 @@ defineExpose({ recarregar: carregarTudo })
         </button>
       </div>
       <div v-if="!loading && itens.length === 0" class="text-center text-sm text-muted-foreground py-6 border rounded-md">
-        {{ resumo.avaliados === 0 ? 'Nenhum anúncio conferido ainda.' : 'Nenhum anúncio com esses filtros.' }}
+        {{ resumo.avaliados === 0 ? 'Nenhum anúncio avaliado ainda.' : 'Nenhum anúncio com esses filtros.' }}
       </div>
     </div>
 
@@ -820,6 +874,8 @@ defineExpose({ recarregar: carregarTudo })
       <p class="text-sm text-muted-foreground">
         Pedidos Flex saem de São Bernardo. Nestes, o estoque .sp não tinha a peça e o sistema NÃO trocou o lote.
         Decida: separar em São Bernardo, transferir a peça para o .sp ou cancelar o pedido.
+        Os que já <strong>saíram</strong> sem passar pelo .sp ficam aqui até alguém acertar o estoque no Bling
+        (o Bling baixou outro lote): até lá o sistema desconta o pedido das peças livres em SP.
       </p>
       <div v-if="pedidosSemSp.length" class="border rounded-md overflow-x-auto">
         <table class="w-full text-sm min-w-[900px] border-collapse [&_th]:border [&_td]:border [&_th]:border-border [&_td]:border-border">
@@ -832,6 +888,7 @@ defineExpose({ recarregar: carregarTudo })
               <th class="px-3 py-2">SKU</th>
               <th class="px-3 py-2" title="Prazo para despachar dado pela plataforma">Despachar até</th>
               <th class="px-3 py-2">O que falta</th>
+              <th v-if="canEdit" class="px-3 py-2">Ação</th>
             </tr>
           </thead>
           <tbody>
@@ -858,7 +915,26 @@ defineExpose({ recarregar: carregarTudo })
                 {{ p.prazo ? fmtCurto(p.prazo) : '—' }}
                 <div v-if="prazoVencido(p)" class="text-[11px]">prazo vencido</div>
               </td>
-              <td class="px-3 py-2 text-xs max-w-[380px]">{{ p.alerta || '—' }}</td>
+              <td class="px-3 py-2 text-xs max-w-[380px]">
+                <div v-if="p.acerto_pendente" class="font-medium text-rose-700 dark:text-rose-400">
+                  Já saiu de São Bernardo sem passar pelo .sp — acerte o estoque no Bling (transferência para o .sp).
+                </div>
+                <div v-if="p.alerta">{{ p.alerta }}</div>
+                <span v-if="!p.alerta && !p.acerto_pendente">—</span>
+              </td>
+              <td v-if="canEdit" class="px-3 py-2 whitespace-nowrap text-xs">
+                <button
+                  v-if="p.acerto_pendente"
+                  type="button"
+                  class="inline-flex items-center gap-1 rounded border border-emerald-400 px-2 py-1 font-medium text-emerald-800 hover:bg-emerald-50 disabled:opacity-50 dark:border-emerald-700 dark:text-emerald-300 dark:hover:bg-emerald-950/40"
+                  :disabled="acertando.has(p.bling_id)"
+                  title="Já transferi a peça para o .sp no Bling: parar de descontar este pedido"
+                  @click="marcarAcertado(p)"
+                >
+                  <Check class="size-3.5" /> Estoque acertado
+                </button>
+                <span v-else class="text-muted-foreground">—</span>
+              </td>
             </tr>
           </tbody>
         </table>

@@ -14,6 +14,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 import pytest_asyncio
 from httpx import AsyncClient
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import worker_pool
@@ -25,6 +26,7 @@ from app.models import (
     FlexPedido,
     Integration,
     IntegrationPlatform,
+    StoreInfo,
     UserRole,
 )
 from app.security.cipher import encrypt_json
@@ -172,6 +174,12 @@ async def test_aprovar_em_piloto_liga_na_hora(
         return ML()
 
     monkeypatch.setattr(flex_motor, "montar_cliente", _montar)
+
+    # Antes de ligar, o saldo do .sp é conferido no Bling (de mentira aqui).
+    async def _saldos_bling(skus):
+        return dict.fromkeys(skus, 5)
+
+    monkeypatch.setattr(flex_motor, "saldos_bling", _saldos_bling)
     # O motor recalcula com o saldo de agora: precisa do .sp no banco.
     from app.models import Product, ProductLink
 
@@ -259,6 +267,117 @@ async def test_log_e_pedidos(client: AsyncClient, cena, auth_as: Callable):
     assert pedidos[0]["situacao"] == "6"
     r = await client.get("/api/flex/pedidos?so_alerta=true")
     assert [p["bling_id"] for p in r.json()] == [5001]
+
+
+@pytest_asyncio.fixture
+async def equipe(db: AsyncSession, cena, make_user):
+    """Uma segunda conta liberada (da equipe 7) e um usuário só da equipe 7
+    com logistica:view+edit. A conta "vita" do `cena` NÃO é da equipe dele."""
+    admin = cena["admin"]
+    loja7 = Integration(user_id=admin.id, platform=IntegrationPlatform.ML, name="loja7",
+                        credentials=encrypt_json({"access_token": "t"}))
+    db.add(loja7)
+    await db.flush()
+    db.add(StoreInfo(user_id=admin.id, platform="ml", account_name="loja7", sales_team=7,
+                     integration_id=loja7.id, bling_store_id="77"))
+    agora = datetime.now(UTC)
+    db.add_all([
+        FlexAnuncioEstado(integration_id=loja7.id, external_id="MLB70", plataforma="ml",
+                          desejado="ligado", motivo="saldo Flex 5", observado="desligado",
+                          observado_em=agora, aguardando_aprovacao=True, tentativas=0),
+        FlexLog(integration_id=loja7.id, external_id="MLB70", plataforma="ml", acao="decidir",
+                modo="observar", resultado="ok"),
+        BlingOrder(numero="7701", bling_id=7701, loja="77", item_index=0,
+                   item_codigo="dg053.ci", item_quantidade=1, situacao="6", data=agora),
+        # Pedido marcado só pela Logística: sem conta, casa pela loja do Bling.
+        FlexPedido(bling_id=7701, plataforma="ml", no_sp=False, alerta="o .sp não cobre"),
+    ])
+    await db.commit()
+    membro = await make_user(permissions={"logistica": {"view": True, "edit": True}})
+    membro.sales_teams = [7]
+    await db.commit()
+    return {"loja7": loja7.id, "membro": membro}
+
+
+@pytest.mark.asyncio
+async def test_telas_do_flex_respeitam_a_equipe(
+    client: AsyncClient, cena, equipe, auth_as: Callable, monkeypatch
+):
+    """Achado da revisão: /api/flex/* não aplicava o escopo por equipe — o
+    usuário da equipe 7 via anúncios, trilha e pedidos de todas as contas,
+    aprovava anúncio de outra equipe e a emergência desligava tudo."""
+    monkeypatch.setattr(cena["cfg"], "flex_contas", f"{cena['conta_id']}, {equipe['loja7']}")
+    auth_as(equipe["membro"])
+    corpo = (await client.get("/api/flex/anuncios")).json()
+    assert [i["external_id"] for i in corpo["itens"]] == ["MLB70"]
+    assert corpo["resumo"]["avaliados"] == 1 and corpo["resumo"]["aguardando"] == 1
+    assert [x["external_id"] for x in (await client.get("/api/flex/log")).json()] == ["MLB70"]
+    assert [p["bling_id"] for p in (await client.get("/api/flex/pedidos")).json()] == [7701]
+    assert [c["id"] for c in (await client.get("/api/flex/config")).json()["contas"]] == [
+        str(equipe["loja7"])
+    ]
+    r = await client.post(f"/api/flex/anuncios/{cena['conta_id']}/MLB1/aprovar")
+    assert (r.status_code, r.json()["detail"]["code"]) == (403, "fora_do_escopo")
+    r = await client.post(f"/api/flex/anuncios/{equipe['loja7']}/MLB70/aprovar")
+    assert r.status_code == 200
+    # Emergência: só as contas da equipe (a "vita" tem o MLB2 ligado).
+    r = await client.post("/api/flex/emergencia")
+    corpo = r.json()
+    assert corpo["alvos"] == 0 and corpo["simulados"] == 0
+
+    # O admin continua vendo tudo.
+    auth_as(cena["admin"])
+    assert (await client.get("/api/flex/anuncios")).json()["total"] == 4
+    assert (await client.post("/api/flex/emergencia")).json()["simulados"] == 1
+
+
+@pytest.mark.asyncio
+async def test_aguardando_so_conta_contas_liberadas(
+    client: AsyncClient, cena, db: AsyncSession, auth_as: Callable, monkeypatch
+):
+    """Achado da revisão: a conta saiu de flex_contas com anúncios esperando
+    aprovação — o motor não regrava conta fora da lista e a bolinha "1
+    esperando sua aprovação" ficava para sempre, sem botão para limpar."""
+    auth_as(cena["admin"])
+    r = (await client.get("/api/flex/anuncios")).json()
+    assert r["resumo"]["aguardando"] == 1
+    monkeypatch.setattr(cena["cfg"], "flex_contas", "")
+    r = (await client.get("/api/flex/anuncios")).json()
+    assert r["resumo"]["aguardando"] == 0
+    mlb1 = next(i for i in r["itens"] if i["external_id"] == "MLB1")
+    assert mlb1["aguardando_aprovacao"] is False
+    r = (await client.get("/api/flex/anuncios?aguardando=true")).json()
+    assert r["itens"] == []
+    monkeypatch.setattr(cena["cfg"], "flex_contas", str(cena["conta_id"]))
+    assert (await client.get("/api/flex/anuncios")).json()["resumo"]["aguardando"] == 1
+    # Conta arquivada também sai (o motor não mexe mais nela).
+    await db.execute(text("UPDATE integrations SET archived_at = now() WHERE id = :i"),
+                     {"i": cena["conta_id"]})
+    await db.commit()
+    assert (await client.get("/api/flex/anuncios")).json()["resumo"]["aguardando"] == 0
+
+
+@pytest.mark.asyncio
+async def test_pedido_que_saiu_sem_sp_espera_o_acerto(
+    client: AsyncClient, cena, db: AsyncSession, auth_as: Callable
+):
+    """Achado da revisão: o pedido Flex que saiu (15) sem passar pelo .sp
+    continua na lista (e no desconto do saldo Flex) até alguém marcar que
+    acertou o estoque no Bling."""
+    await db.execute(text("UPDATE bling_orders SET situacao = '15' WHERE bling_id = 5001"))
+    await db.commit()
+    auth_as(cena["admin"])
+    r = (await client.get("/api/flex/pedidos?so_alerta=true&abertos=true")).json()
+    assert [(p["bling_id"], p["acerto_pendente"]) for p in r] == [(5001, True)]
+    r = await client.post("/api/flex/pedidos/5002/acertado")  # não saiu: nada a acertar
+    assert (r.status_code, r.json()["detail"]["code"]) == (409, "sem_acerto_pendente")
+    r = await client.post("/api/flex/pedidos/5001/acertado")
+    assert r.status_code == 200
+    assert (await client.get("/api/flex/pedidos?so_alerta=true&abertos=true")).json() == []
+    linhas = (await client.get("/api/flex/log?acao=acertar_estoque")).json()
+    assert [(x["bling_id"], x["por"]) for x in linhas] == [(5001, str(cena["admin"].id))]
+    r = await client.post("/api/flex/pedidos/5001/acertado")
+    assert r.status_code == 409
 
 
 @pytest.mark.asyncio

@@ -54,7 +54,34 @@ def _claro(motivo: str) -> str:
     ("anuncio", "saldos", "espera"),
     [
         (_an(), {}, "não está ligado a nenhum produto"),
-        (_an("dg053.ci", estoques=[0]), {}, "Nenhuma variação"),
+        (_an("dg053.ci", estoques=[0]), _sp(dg053_sp=5), "Nenhuma variação"),
+        (
+            _an("dg053.ci", "dg060.ci", estoques=[5, 0]),
+            _sp(dg053_sp=5),
+            "A variação dg060.ci está sem estoque agora, mas não pode ter Flex (o produto "
+            "dg060.sp não existe (ou está inativo) no DaVinci). Quando o estoque voltar",
+        ),
+        (
+            _an("dg053.ci", "dg053.ci+a001.ci", estoques=[5, 0]),
+            _sp(dg053_sp=5),
+            "não pode ter Flex (o produto dg053.ci+a001.ci é um kit",
+        ),
+        (
+            Anuncio(CONTA, "MLB1", "ml", variacoes=(
+                Variacao(sku="dg053.ci"),
+                Variacao(sku="x777.ci", vinculo=fm.VINCULO_MORTO, ref="2"),
+            )),
+            _sp(dg053_sp=5),
+            "A variação x777.ci do anúncio não recebe mais o estoque do DaVinci",
+        ),
+        (
+            Anuncio(CONTA, "MLB1", "ml", variacoes=(
+                Variacao(sku="dg053.ci"),
+                Variacao(sku=None, vinculo=fm.VINCULO_SEM, ref="333"),
+            )),
+            _sp(dg053_sp=5),
+            "A variação id 333 do anúncio não está ligada a nenhum produto do DaVinci",
+        ),
         (_an("dg053.ci", ativo=False), {}, "O produto dg053.ci está inativo"),
         (_an(None), {}, "Uma variação do anúncio não tem produto"),
         (_an("b009"), {}, "não é de um lote de venda"),

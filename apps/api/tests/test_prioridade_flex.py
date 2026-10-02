@@ -18,7 +18,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
@@ -29,6 +29,8 @@ from app.models import (
     FlexPedido,
     Logistica,
     MargemAudit,
+    NfFaturamento,
+    StoreInfo,
     User,
     UserRole,
     UserStatus,
@@ -395,3 +397,150 @@ async def test_flex_marcado_so_pela_logistica_e_sem_prioridade(
     fp = await _flex(db, "770001")
     assert fp is not None and fp.no_sp is True and fp.plataforma == "ml"
     assert fp.numeroloja == "2000770001"
+
+
+# ---- revisão de 02/10/2026 ---------------------------------------------------
+
+
+async def _admin_id(db: AsyncSession):
+    return (await db.execute(select(User.id).limit(1))).scalar_one()
+
+
+@pytest.mark.asyncio
+async def test_flex_vem_antes_do_pedido_normal_mais_antigo(db: AsyncSession, cenario, monkeypatch):
+    """Achado da revisão: o laço seguia o número do pedido. Com dg053.sp = 1
+    e prioridade .sp para dg053, o normal 780001 (que pode sair do CI) pegava
+    a última peça de São Bernardo e o Flex 780002 ficava sem ela."""
+    async def _mapa_sp(session):
+        return {"dg053": "sp"}
+
+    bling = await cenario(
+        {"dg053.ci": 10, "dg053.sp": 1},
+        {"780001": [("dg053.ci", 1)], "780002": [("dg053.ci", 1)]},
+        flex=["780002"],
+    )
+    monkeypatch.setattr(prio, "_mapa_prioridades", _mapa_sp)
+    resumo = await prio.aplicar_prioridade_estoque(db, numeros=["780001", "780002"])
+    await db.commit()
+    assert bling.puts == [("780002", ["dg053.sp"])]
+    assert resumo["flex_trocados"] == 1
+    fp = await _flex(db, "780002")
+    assert fp.no_sp is True and fp.alerta is None
+
+
+@pytest.mark.asyncio
+async def test_sp_segurado_para_o_flex_sem_peca(db: AsyncSession, cenario, monkeypatch):
+    """O Flex 790002 precisa de 2 e o .sp só tem 1: ele não troca (a pessoa
+    decide). A peça de São Bernardo fica segurada para ele — o pedido normal
+    com prioridade .sp não a leva (fica no CI, que tem peça)."""
+    async def _mapa_sp(session):
+        return {"dg053": "sp"}
+
+    bling = await cenario(
+        {"dg053.ci": 10, "dg053.sp": 1},
+        {"790001": [("dg053.ci", 1)], "790002": [("dg053.ci", 2)]},
+        flex=["790002"],
+    )
+    monkeypatch.setattr(prio, "_mapa_prioridades", _mapa_sp)
+    resumo = await prio.aplicar_prioridade_estoque(db, numeros=["790001", "790002"])
+    await db.commit()
+    assert bling.puts == []
+    assert resumo["flex_sem_sp"] == 1
+    # O gancho do enfileirar só com o pedido normal: o Flex sem peça (com o
+    # aviso gravado) continua segurando o .sp.
+    resumo = await prio.aplicar_prioridade_estoque(db, numeros=["790001"])
+    await db.commit()
+    assert bling.puts == []
+    # Chegou peça bastante no .sp: o Flex vai primeiro e o normal leva o resto.
+    bling.fisico["dg053.sp"] = 3
+    await prio.aplicar_prioridade_estoque(db, numeros=["790001", "790002"])
+    await db.commit()
+    assert bling.puts == [("790002", ["dg053.sp"]), ("790001", ["dg053.sp"])]
+
+
+@pytest.mark.asyncio
+async def test_troca_para_o_sp_grava_quando(db: AsyncSession, cenario):
+    """`flex_pedido.sp_em`: o motor do Flex segue descontando o pedido até o
+    produto .sp ser atualizado depois disso (o webhook pode não vir)."""
+    antes = datetime.now(UTC)
+    await cenario({"dg053.ci": 10, "dg053.sp": 5}, {"791001": [("dg053.ci", 1)]}, flex=["791001"])
+    await prio.aplicar_prioridade_estoque(db, numeros=["791001"])
+    await db.commit()
+    fp = await _flex(db, "791001")
+    assert fp.no_sp is True
+    assert fp.sp_em is not None and fp.sp_em >= antes
+
+
+@pytest.mark.asyncio
+async def test_pedido_ml_novo_espera_o_tipo_de_envio(db: AsyncSession, cenario):
+    """Achado da revisão: a NF automática (minutos pares) pegava o pedido ML/
+    Shopee antes de o shipment check dizer se é Flex — o robô o tratava como
+    normal (podia tirá-lo do .sp) e a planilha saía com o lote errado. Agora
+    o pedido recém-chegado sem prazo nem tipo de envio fica para depois."""
+    bling = await cenario(
+        {"dg053.ci": 10, "dg053.sp": 5},
+        {"792001": [("dg053.sp", 1)], "792002": [("dg053.sp", 1)], "792003": [("dg053.sp", 1)]},
+    )
+    db.add(StoreInfo(user_id=await _admin_id(db), platform="ml", bling_store_id="5001"))
+    await db.commit()
+    resumo = await prio.aplicar_prioridade_estoque(db, numeros=["792001", "792002", "792003"])
+    await db.commit()
+    assert bling.puts == []
+    assert sorted(resumo["adiados"]) == ["792001", "792002", "792003"]
+    assert sorted(resumo["adiados_envio"]) == ["792001", "792002", "792003"]
+
+    # 792001: o shipment check leu (gravou o prazo) e não é Flex → segue a
+    # prioridade CI de sempre. 792002: a Logística já sabe o tipo. 792003:
+    # passou da espera sem ninguém ler (conta sem acesso) → segue.
+    await db.execute(text("UPDATE bling_orders SET marketplace_ship_deadline = now()"
+                          " WHERE numero = '792001'"))
+    db.add(Logistica(pedido_bling="792002", plataforma="Mercado Livre", envio_flex=False,
+                     envio_tipo="cross_docking"))
+    await db.execute(text("UPDATE bling_orders SET created_at = now() - interval '11 minutes'"
+                          " WHERE numero = '792003'"))
+    await db.commit()
+    resumo = await prio.aplicar_prioridade_estoque(db, numeros=["792001", "792002", "792003"])
+    await db.commit()
+    assert "adiados_envio" not in resumo
+    assert sorted(n for n, _ in bling.puts) == ["792001", "792002", "792003"]
+
+
+@pytest.mark.asyncio
+async def test_pedido_novo_de_outra_plataforma_nao_espera(db: AsyncSession, cenario, monkeypatch):
+    """Sem Flex na plataforma (TikTok, Amazon…) ou com a espera zerada: nada muda."""
+    bling = await cenario(
+        {"dg053.ci": 10, "dg053.sp": 5},
+        {"793001": [("dg053.sp", 1)], "793002": [("dg053.sp", 1)]},
+    )
+    db.add(StoreInfo(user_id=await _admin_id(db), platform="tiktok", bling_store_id="5001"))
+    await db.commit()
+    await prio.aplicar_prioridade_estoque(db, numeros=["793001"])
+    await db.commit()
+    assert bling.puts == [("793001", ["dg053.ci"])]
+    # Loja ML, mas a espera zerada na configuração: segue na hora.
+    await db.execute(text("UPDATE store_info SET platform = 'ml'"))
+    await db.commit()
+    monkeypatch.setattr(get_settings(), "flex_espera_envio_min", 0)
+    await prio.aplicar_prioridade_estoque(db, numeros=["793002"])
+    await db.commit()
+    assert bling.puts[-1] == ("793002", ["dg053.ci"])
+
+
+@pytest.mark.asyncio
+async def test_flex_reconhecido_depois_da_fila_da_nf_nao_troca(db: AsyncSession, cenario):
+    """O tipo de envio chegou além da espera e o pedido já foi para a fila da
+    NF (planilha com o lote antigo): trocar agora deixaria a NF com um SKU e o
+    pedido com outro. O robô não troca e avisa uma pessoa."""
+    bling = await cenario({"dg053.ci": 10, "dg053.sp": 5}, {"794001": [("dg053.ci", 1)]},
+                          flex=["794001"])
+    db.add(NfFaturamento(pedido_bling="794001", status_faturamento="processando"))
+    await db.commit()
+    resumo = await prio.aplicar_prioridade_estoque(db, numeros=["794001"])
+    await db.commit()
+    assert bling.puts == []
+    assert resumo["flex_na_fila_da_nf"] == 1
+    fp = await _flex(db, "794001")
+    assert fp.no_sp is False
+    assert "fila da NF" in fp.alerta and "refaça a NF" in fp.alerta
+    alertas = await _alertas(db)
+    assert len(alertas) == 1 and "DEPOIS de entrar na fila da NF" in alertas[0].message

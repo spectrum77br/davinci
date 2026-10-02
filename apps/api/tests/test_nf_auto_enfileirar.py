@@ -88,6 +88,15 @@ class _FakeBlingSituacao:
         return body
 
 
+@pytest.fixture(autouse=True)
+def _sem_espera_do_tipo_de_envio(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Os pedidos destes testes acabaram de cair e ninguém leu o envio: com a
+    espera do Flex ligada (flex_espera_envio_min, prioridade_estoque) eles
+    ficariam para a próxima rodada. As regras do enfileirar são testadas sem
+    ela; a espera tem teste próprio (test_sweep_espera_o_tipo_de_envio)."""
+    monkeypatch.setattr(get_settings(), "flex_espera_envio_min", 0)
+
+
 @pytest_asyncio.fixture
 async def admin(db: AsyncSession) -> User:
     email = f"adm-{uuid.uuid4().hex[:6]}@davinci-test.com"
@@ -284,6 +293,46 @@ async def test_sweep_enfileira_com_estoque(db: AsyncSession, admin: User):
     db.expire_all()
     cmds2 = (await db.execute(select(NfCommand))).scalars().all()
     assert len(cmds2) == len(cmds)
+
+
+@pytest.mark.asyncio
+async def test_sweep_espera_o_tipo_de_envio(
+    db: AsyncSession, admin: User, monkeypatch: pytest.MonkeyPatch
+):
+    """Projeto Flex (revisão de 02/10/2026): o pedido Shopee que acabou de cair
+    e ainda não teve o envio lido pelo shipment check (sem prazo, sem tipo de
+    envio) não vai para a NF agora — pode ser Flex (sai do .sp). Volta na
+    rodada seguinte, já lido. TikTok não tem Flex: segue na hora."""
+    monkeypatch.setattr(get_settings(), "flex_espera_envio_min", 10)
+    monkeypatch.setattr(nf_emissao_gerar, "_bling_client_opt", lambda s: _async_return(None))
+    await _seed_loja(db, admin, plataforma="shopee", bling_store_id="930001")
+    await _seed_loja(db, admin, plataforma="tiktok", bling_store_id="930002")
+    await _seed_pedido(db, numero="830001", loja="930001", sku="a1", bling_id=700001)
+    await _seed_pedido(db, numero="830002", loja="930002", sku="a2", bling_id=700002)
+    db.add(Product(user_id=admin.id, sku="a1", name="A1", stock=3))
+    db.add(Product(user_id=admin.id, sku="a2", name="A2", stock=1))
+    await db.commit()
+
+    summary = await run_auto_enfileirar_nf()
+    assert summary["adiados_prioridade"] == 1
+    db.expire_all()
+    cmds = (await db.execute(select(NfCommand))).scalars().all()
+    assert sorted(n for c in cmds for n in c.numeros) == ["830002"]
+    fats = (await db.execute(select(NfFaturamento.pedido_bling))).scalars().all()
+    assert "830001" not in fats  # nem conta a tentativa única
+
+    # O shipment check leu o envio (gravou o prazo; não é Flex): entra.
+    await db.execute(
+        BlingOrder.__table__.update()
+        .where(BlingOrder.numero == "830001")
+        .values(marketplace_ship_deadline=datetime.now(UTC) + timedelta(days=1))
+    )
+    await db.commit()
+    summary = await run_auto_enfileirar_nf()
+    assert summary.get("adiados_prioridade", 0) == 0
+    db.expire_all()
+    cmds = (await db.execute(select(NfCommand))).scalars().all()
+    assert sorted(n for c in cmds for n in c.numeros) == ["830001", "830002"]
 
 
 @pytest.mark.asyncio

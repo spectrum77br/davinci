@@ -38,6 +38,12 @@ def _cap(texto: str) -> str:
     return texto[:1].upper() + texto[1:]
 
 
+def _sem_ponto(texto: str) -> str:
+    """Frase traduzida dentro de parênteses: sem o ponto final e em minúscula."""
+    t = texto.strip().rstrip(".")
+    return t[:1].lower() + t[1:]
+
+
 def _anuncios(m: int) -> str:
     return "1 anúncio" if m == 1 else f"{m} anúncios"
 
@@ -88,6 +94,36 @@ _REGRAS: list[tuple[re.Pattern[str], Callable[[re.Match[str]], str]]] = [
         lambda m: (
             f"O produto {m['sku']} não existe (ou está inativo) no DaVinci — sem saber quanto "
             f"há em {_SP}, o Flex não liga."
+        ),
+    ),
+    (
+        re.compile(r"^(?P<sku>\S+) não existe ativo$"),
+        lambda m: f"o produto {m['sku']} não existe (ou está inativo) no DaVinci",
+    ),
+    (
+        re.compile(r"^variação (?P<v>.+) com vínculo morto no DaVinci$"),
+        lambda m: (
+            f"A variação {m['v']} do anúncio não recebe mais o estoque do DaVinci (vínculo "
+            f"desfeito). Com Flex ela também sairia de {_SP}, sem peça garantida — o Flex "
+            "fica desligado."
+        ),
+    ),
+    (
+        re.compile(r"^variação (?P<v>.+) sem vínculo com produto do DaVinci$"),
+        lambda m: (
+            f"A variação {m['v']} do anúncio não está ligada a nenhum produto do DaVinci. Com "
+            f"Flex ela também sairia de {_SP}, sem peça garantida — o Flex fica desligado."
+        ),
+    ),
+    (
+        re.compile(
+            r"^variação (?P<v>.+?) parada sem \.sp \((?P<x>.+)\) — volta a vender quando o "
+            r"estoque for publicado$"
+        ),
+        lambda m: (
+            f"A variação {m['v']} está sem estoque agora, mas não pode ter Flex "
+            f"({_sem_ponto(motivo_claro(m['x']) or m['x'])}). Quando o estoque voltar, ela "
+            f"venderia pelo Flex sem peça em {_SP} — o Flex fica desligado."
         ),
     ),
     (

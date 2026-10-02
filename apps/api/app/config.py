@@ -700,6 +700,12 @@ class Settings(BaseSettings):
     # sai fisicamente de São Bernardo. Chave de emergência:
     # FLEX_PEDIDO_NO_SP=false no .env volta ao robô de antes.
     flex_pedido_no_sp: bool = True
+    # Pedido ML/Shopee que acabou de cair espera o shipment check ler o tipo
+    # de envio (Flex ou não) antes de o robô de prioridade e a NF automática
+    # mexerem nele — senão o pedido Flex sai com o lote errado. Teto da espera
+    # em minutos, contado de quando o pedido entrou no espelho do Bling (conta
+    # sem acesso à API não segura o pedido para sempre). 0 = não espera.
+    flex_espera_envio_min: int = 10
 
     # Threema IDs (vírgula) avisados quando o sweep move um pedido pra
     # Aguardando Cancelamento por estoque negativo. Vazio = aviso desligado

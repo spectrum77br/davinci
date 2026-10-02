@@ -10,6 +10,7 @@ leitura. Nenhuma chamada externa: clientes falsos ou respx.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -209,11 +210,39 @@ async def mundo(db: AsyncSession, monkeypatch):
         return fake
 
     monkeypatch.setattr(flex_motor, "montar_cliente", _montar)
+    # Bling de mentira para a conferência antes de LIGAR: por padrão concorda
+    # com o banco (o `products.stock` do .sp); `bling["dg053.sp"] = n` muda o
+    # que ele diz; `bling["fora"] = True` = o Bling não respondeu.
+    bling: dict[str, Any] = {}
+    consultas_bling: list[list[str]] = []
+
+    async def _saldos_bling(skus):
+        consultas_bling.append(sorted(skus))
+        if bling.get("fora"):
+            return None
+        out = {}
+        async with flex_motor.session_scope() as s:
+            for sku in skus:
+                if sku in bling:
+                    out[sku] = bling[sku]
+                    continue
+                v = (
+                    await s.execute(
+                        text("SELECT min(stock) FROM products WHERE lower(sku) = :s"), {"s": sku}
+                    )
+                ).scalar()
+                if v is None:
+                    return None
+                out[sku] = int(v)
+        return out
+
+    monkeypatch.setattr(flex_motor, "saldos_bling", _saldos_bling)
     # Ids guardados à parte: o `expire_all` dos testes faria o ORM recarregar
     # o objeto fora do contexto assíncrono.
     return {"conta_id": conta.id, "outra_id": outra.id, "dono_id": dono.id, "ml": fake,
             "montados": montados, "sp_bling_id": prods["dg053.sp"].bling_product_id,
-            "b009_id": prods["b009"].id, "cfg": cfg}
+            "b009_id": prods["b009"].id, "cfg": cfg, "bling": bling,
+            "consultas_bling": consultas_bling, "sp_id": prods["dg053.sp"].id}
 
 
 async def _estados(db: AsyncSession) -> dict[str, FlexAnuncioEstado]:
@@ -411,9 +440,9 @@ async def test_saldo_flex_histerese_e_pedidos_flex(db, mundo, monkeypatch):
     assert est["MLB2"].aguardando_aprovacao is False
     assert ml.escritas == []
 
-    # Pedido fechado (Atendido) ou já no .sp não desconta; outro Flex aberto
-    # de 2 zera o saldo → desliga sozinho.
-    await _pedido_flex(db, 900002, "dg053.ci", 9, situacao="9")
+    # Pedido cancelado (a peça não saiu) ou já no .sp não desconta; outro
+    # Flex aberto de 2 zera o saldo → desliga sozinho.
+    await _pedido_flex(db, 900002, "dg053.ci", 9, situacao="12")
     await _pedido_flex(db, 900003, "dg053.sp", 9, no_sp=True)
     await _pedido_flex(db, 900004, "dg053.ra", 2)
     await flex_motor.rodar_motor()
@@ -421,6 +450,179 @@ async def test_saldo_flex_histerese_e_pedidos_flex(db, mundo, monkeypatch):
     assert (est["MLB1"].desejado, est["MLB1"].saldo_sp) == ("desligado", 0)
     assert ("desligar", "MLB1") in ml.escritas
     assert ml.estado["MLB1"] is False
+
+
+async def _saldo(db, sku="dg053.sp") -> flex_motor.SaldoSp:
+    db.expire_all()
+    return (await flex_motor.calcular_saldos(db, [sku]))[sku]
+
+
+@pytest.mark.asyncio
+async def test_pedido_flex_que_saiu_sem_sp_desconta_ate_o_acerto(db, mundo):
+    """Achado da revisão: o pedido Flex que SAI (em andamento/atendido) sem ter
+    ido ao .sp é baixado pelo Bling no .ci, mas a peça sai de São Bernardo —
+    o .sp do Bling fica com 3 peças a mais. Antes, ao passar para a situação
+    15 o desconto sumia (o saldo voltava de 2 para 5 para sempre)."""
+    await _pedido_flex(db, 905001, "dg053.ci", 3)
+    assert (await _saldo(db)).saldo == 2
+    await db.execute(text("UPDATE bling_orders SET situacao = '15' WHERE bling_id = 905001"))
+    await db.commit()
+    assert (await _saldo(db)).saldo == 2  # saiu, mas o .sp não foi acertado
+    await db.execute(text("UPDATE bling_orders SET situacao = '9' WHERE bling_id = 905001"))
+    # Velho também: depois de sair, o desconto não tem janela de dias.
+    await db.execute(
+        text("UPDATE flex_pedido SET detectado_em = now() - interval '60 days'"
+             " WHERE bling_id = 905001")
+    )
+    await db.commit()
+    assert (await _saldo(db)).saldo == 2
+    # A pessoa acertou o estoque no Bling: para de descontar.
+    await db.execute(text("UPDATE flex_pedido SET acertado_em = now() WHERE bling_id = 905001"))
+    await db.commit()
+    assert (await _saldo(db)).saldo == 5
+    # Cancelado nunca desconta (a peça não saiu).
+    await _pedido_flex(db, 905002, "dg053.ci", 4, situacao="12")
+    assert (await _saldo(db)).saldo == 5
+
+
+@pytest.mark.asyncio
+async def test_pedido_levado_ao_sp_desconta_ate_o_produto_ser_atualizado(db, mundo):
+    """Achado da revisão: o robô leva o pedido Flex ao .sp e grava `no_sp`; o
+    `products.stock` do .sp só cai quando o webhook do Bling chega (e o da
+    reserva às vezes não vem). Antes, o desconto sumia na hora e o saldo
+    voltava de 2 para 5 com só 2 peças de verdade."""
+    await _pedido_flex(db, 906001, "dg053.ci", 3)
+    assert (await _saldo(db)).saldo == 2
+    # O robô trocou para o .sp agora (o produto foi atualizado ANTES disso).
+    await db.execute(text("UPDATE products SET updated_at = now() - interval '1 hour'"
+                          " WHERE lower(sku) = 'dg053.sp'"))
+    await db.execute(text("UPDATE bling_orders SET item_codigo = 'dg053.sp'"
+                          " WHERE bling_id = 906001"))
+    await db.execute(text("UPDATE flex_pedido SET no_sp = true, sp_em = now()"
+                          " WHERE bling_id = 906001"))
+    await db.commit()
+    s = await _saldo(db)
+    assert (s.estoque, s.pendentes, s.movidos, s.saldo) == (5, 0, 3, 2)
+    # O webhook do Bling chegou: o produto foi atualizado depois da troca e o
+    # estoque já traz a reserva — não desconta duas vezes.
+    await db.execute(text("UPDATE products SET stock = 2, updated_at = now() + interval '1 second'"
+                          " WHERE lower(sku) = 'dg053.sp'"))
+    await db.commit()
+    s = await _saldo(db)
+    assert (s.estoque, s.movidos, s.saldo) == (2, 0, 2)
+
+
+@pytest.mark.asyncio
+async def test_ligar_confere_o_saldo_no_bling(db, mundo, monkeypatch):
+    """Achado da revisão: antes de LIGAR, o saldo do .sp é conferido no Bling.
+    O banco diz 5 (webhook que não veio); o Bling diz 1 → não liga, fica a
+    falha com espera e a aprovação continua. Bling fora do ar: também não."""
+    monkeypatch.setattr(mundo["cfg"], "flex_modo", "piloto")
+    ml = mundo["ml"]
+    await flex_motor.rodar_motor()
+    mundo["bling"]["dg053.sp"] = 1
+    res = await flex_motor.aprovar(mundo["conta_id"], "MLB1", por=None)
+    assert res["aplicado"] is False
+    assert ("ligar", "MLB1") not in ml.chamadas
+    assert ["dg053.sp"] in mundo["consultas_bling"]
+    est = (await _estados(db))["MLB1"]
+    assert est.observado == "desligado"
+    assert est.aprovado_em is not None  # a aprovação continua
+    assert est.proxima_tentativa is not None
+    assert "o Bling mostra só 1 peça(s) livre(s) em dg053.sp" in est.ultimo_erro
+    assert ("ligar", "erro") in await _trilha(db, "MLB1")
+
+    # Bling fora do ar: desconhecido não liga.
+    mundo["bling"].clear()
+    mundo["bling"]["fora"] = True
+    await db.execute(text("UPDATE flex_anuncio_estado SET proxima_tentativa = NULL"))
+    await db.commit()
+    await flex_motor.rodar_motor()
+    assert ("ligar", "MLB1") not in ml.chamadas
+    assert "não deu para conferir" in (await _estados(db))["MLB1"].ultimo_erro
+
+    # O Bling confirma: liga.
+    mundo["bling"].clear()
+    await db.execute(text("UPDATE flex_anuncio_estado SET proxima_tentativa = NULL"))
+    await db.commit()
+    await flex_motor.rodar_motor()
+    assert ("ligar", "MLB1") in ml.chamadas
+    assert (await _estados(db))["MLB1"].observado == "ligado"
+
+
+@pytest.mark.asyncio
+async def test_variacao_sem_vinculo_vivo_deixa_o_anuncio_inelegivel(db, mundo):
+    """Achado da revisão (cenário dos revisores): o MLB1 vende a preta
+    (dg053.ci, vínculo vivo, dg053.sp com 5) e a azul (x777.ci, sem .sp). A
+    azul teve o vínculo marcado morto — ou nunca foi vinculada e só aparece
+    nas variações do anúncio importado. Antes, a regra só via a preta e
+    pedia aprovação para ligar ("saldo Flex 5 em dg053.sp")."""
+    db.add(Product(user_id=mundo["dono_id"], sku="x777.ci", name="azul", stock=50,
+                   situacao="A"))
+    await db.flush()
+    azul = (await db.execute(select(Product.id).where(Product.sku == "x777.ci"))).scalar_one()
+    await db.execute(
+        text("UPDATE product_links SET variation_id = '111' WHERE external_id = 'MLB1'")
+    )
+    db.add(ProductLink(user_id=mundo["dono_id"], product_id=azul,
+                       integration_id=mundo["conta_id"], platform=IntegrationPlatform.ML,
+                       external_id="MLB1", variation_id="222", stock=50,
+                       morto_desde=datetime.now(UTC), morto_motivo="anúncio encerrado"))
+    await db.commit()
+    await flex_motor.rodar_motor()
+    est = (await _estados(db))["MLB1"]
+    assert est.desejado == "inelegivel"
+    assert est.motivo == "variação x777.ci com vínculo morto no DaVinci"
+    assert est.aguardando_aprovacao is False
+
+    # Vínculo morto DUPLICADO (outro vínculo vivo cobre a mesma variação) não pesa.
+    await db.execute(text("UPDATE product_links SET morto_motivo = 'duplicado: anúncio inteiro'"
+                          " WHERE variation_id = '222'"))
+    await db.commit()
+    await flex_motor.rodar_motor()
+    est = (await _estados(db))["MLB1"]
+    # Volta à regra do saldo (aqui perde a vaga da família para MLB2/MLB3,
+    # que ficaram com o Flex enquanto ele estava fora).
+    assert est.desejado != "inelegivel"
+    assert "vínculo" not in est.motivo
+
+    # A azul nunca vinculada, mas à venda no anúncio importado (raw_data do ML).
+    db.add(Listing(
+        user_id=mundo["dono_id"], integration_id=mundo["conta_id"],
+        platform=IntegrationPlatform.ML, external_id="MLB1", title="mala",
+        raw_data={"id": "MLB1", "variations": [
+            {"id": 111, "available_quantity": 10,
+             "attributes": [{"id": "SELLER_SKU", "value_name": "dg053.ci"}]},
+            {"id": 333, "available_quantity": 50, "seller_custom_field": "x888.ci"},
+        ]},
+    ))
+    await db.commit()
+    await flex_motor.rodar_motor()
+    est = (await _estados(db))["MLB1"]
+    assert est.desejado == "inelegivel"
+    assert est.motivo == "variação x888.ci sem vínculo com produto do DaVinci"
+
+
+@pytest.mark.asyncio
+async def test_variacoes_da_plataforma_ml_e_shopee():
+    raw_ml = {"variations": [
+        {"id": 1, "available_quantity": 4,
+         "attributes": [{"id": "SELLER_SKU", "value_name": "dg053.ci"}],
+         "seller_custom_field": "velho"},
+        {"id": 2, "available_quantity": 0, "sku": "dg054.ci"},
+        {"id": 3},
+        {"sem": "id"},
+    ]}
+    assert flex_motor.variacoes_da_plataforma("ml", raw_ml) == [
+        ("1", "dg053.ci", 4), ("2", "dg054.ci", 0), ("3", None, None)
+    ]
+    assert flex_motor.variacoes_da_plataforma("ml", {"variations": []}) == []
+    raw_sh = {"item": {"item_id": 9}, "model": {
+        "model_id": 77, "model_sku": "dg053.ci",
+        "stock_info_v2": {"summary_info": {"total_available_stock": 6}}}}
+    assert flex_motor.variacoes_da_plataforma("shopee", raw_sh) == [("77", "dg053.ci", 6)]
+    assert flex_motor.variacoes_da_plataforma("shopee", {"item_id": 9}) == []
+    assert flex_motor.variacoes_da_plataforma("ml", None) == []
 
 
 @pytest.mark.asyncio
@@ -567,15 +769,24 @@ async def test_trava_por_anuncio_e_da_rodada(db, mundo, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_emergencia_em_observar_so_simula(db, mundo):
+    """Simulação de verdade: a tela promete "só uma SIMULAÇÃO (mostra o que
+    faria)" — a aprovação dada na fase observar NÃO pode sumir (antes sumia:
+    o UPDATE rodava antes do `if not escreve`)."""
     await flex_motor.rodar_motor()
     await flex_motor.aprovar(mundo["conta_id"], "MLB1", por=None)
     resumo = await flex_motor.emergencia(por=mundo["dono_id"])
     assert resumo["escreve"] is False
     assert resumo["simulados"] == 2  # MLB9 e MLB77 (os ligados conhecidos)
+    assert resumo["aprovacoes"] == 1  # diz quantas sairiam
     assert mundo["ml"].escritas == []
     est = await _estados(db)
-    assert est["MLB1"].aprovado_em is None  # a aprovação some mesmo em observar
+    assert est["MLB1"].aprovado_em is not None  # nada mudou
     assert ("emergencia", "simulado") in await _trilha(db)
+    # A rodada seguinte não pede a aprovação de novo: ela continua valendo.
+    await flex_motor.rodar_motor()
+    est = await _estados(db)
+    assert est["MLB1"].aprovado_em is not None
+    assert est["MLB1"].aguardando_aprovacao is False
 
 
 @pytest.mark.asyncio
@@ -602,6 +813,72 @@ async def test_emergencia_em_piloto_desliga_tudo_das_contas_permitidas(db, mundo
     await flex_motor.rodar_motor()
     assert not [c for c in ml.escritas if c[0] == "ligar"]
     assert (await _estados(db))["MLB1"].aguardando_aprovacao is True
+
+
+@pytest.mark.asyncio
+async def test_emergencia_anuncio_ocupado_nao_conta_como_desligado(db, mundo, monkeypatch):
+    """Achado da revisão: com a trava do MLB9 com outro processo além da
+    espera, a resposta dizia desligados=1, ocupados=1, restantes=0 — e a tela
+    mostrava "Flex desligado" com o MLB9 ainda ligado. Ocupado é RESTANTE."""
+    monkeypatch.setattr(mundo["cfg"], "flex_modo", "piloto")
+    monkeypatch.setattr(flex_motor, "_ESPERA_TRAVA_EMERGENCIA", 0.3)
+    await flex_motor.rodar_motor()  # desliga MLB9 e MLB77 (inelegíveis)
+    await db.execute(text("UPDATE flex_anuncio_estado SET observado = 'ligado'"
+                          " WHERE external_id IN ('MLB9', 'MLB77')"))
+    await db.commit()
+    mundo["ml"].estado.update({"MLB9": True, "MLB77": True})
+    mundo["ml"].chamadas.clear()
+    async with flex_motor.session_scope() as outro:
+        await outro.execute(
+            text("SELECT pg_advisory_xact_lock(:ns, :k)"),
+            {"ns": SYNC_NAMESPACE, "k": flex_motor._chave_trava(mundo["conta_id"], "MLB9")},
+        )
+        resumo = await flex_motor.emergencia(por=None)
+    assert (resumo["desligados"], resumo["ocupados"], resumo["restantes"]) == (1, 1, 1)
+    assert mundo["ml"].estado["MLB9"] is True
+    # Clicar de novo continua.
+    resumo = await flex_motor.emergencia(por=None)
+    assert resumo["restantes"] == 0
+    assert mundo["ml"].estado["MLB9"] is False
+
+
+@pytest.mark.asyncio
+async def test_emergencia_pega_o_que_a_rodada_ligou_durante_ela(db, mundo, monkeypatch):
+    """Achado da revisão: a rodada está no meio de LIGAR o MLB1 (aprovado,
+    lido desligado — não era alvo) quando a emergência começa. A emergência
+    agora (1) tira a aprovação antes de escrever, (2) inclui o anúncio que
+    tinha aprovação, (3) espera a trava dele e relê: o que foi ligado no meio
+    é desligado em seguida."""
+    monkeypatch.setattr(mundo["cfg"], "flex_modo", "piloto")
+    await flex_motor.rodar_motor()
+    await db.execute(text("UPDATE flex_anuncio_estado SET aprovado_em = now()"
+                          " WHERE external_id = 'MLB1'"))
+    await db.commit()
+    ml = mundo["ml"]
+    ml.chamadas.clear()
+    async with flex_motor.session_scope() as rodada:
+        await rodada.execute(
+            text("SELECT pg_advisory_xact_lock(:ns, :k)"),
+            {"ns": SYNC_NAMESPACE, "k": flex_motor._chave_trava(mundo["conta_id"], "MLB1")},
+        )
+        tarefa = asyncio.create_task(flex_motor.emergencia(por=None))
+        await asyncio.sleep(0.5)
+        # A rodada termina de ligar o MLB1 (leu a aprovação antes da emergência).
+        ml.estado["MLB1"] = True
+        await rodada.execute(text("UPDATE flex_anuncio_estado SET observado = 'ligado'"
+                                  " WHERE external_id = 'MLB1'"))
+    resumo = await tarefa
+    assert ("desligar", "MLB1") in ml.chamadas
+    assert ml.estado["MLB1"] is False
+    assert resumo["ocupados"] == 0 and resumo["restantes"] == 0
+    est = (await _estados(db))["MLB1"]
+    assert (est.observado, est.aprovado_em) == ("desligado", None)
+    # E um LIGAR que chegue depois da emergência não liga: a aprovação saiu.
+    tipo = await flex_motor._escrever(
+        ml, integration_id=mundo["conta_id"], external_id="MLB1", plataforma="ml",
+        acao="ligar", modo="piloto", por=None, skus_sp=("dg053.sp",),
+    )
+    assert tipo == "mudou"
 
 
 @pytest.mark.asyncio

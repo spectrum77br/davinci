@@ -463,13 +463,22 @@ async function carregarResumoFlex() {
   if (!flexMontado || !['ml', 'shopee', 'flex'].includes(tab.value)) return
   try {
     const [pedidos, anuncios] = await Promise.all([
-      api<Array<{ numero: string | null; alerta: string | null }>>('/api/flex/pedidos?so_alerta=true&abertos=true'),
+      api<Array<{ numero: string | null; alerta: string | null; acerto_pendente?: boolean }>>(
+        '/api/flex/pedidos?so_alerta=true&abertos=true',
+      ),
       tab.value === 'flex'
         ? api<{ resumo?: { aguardando: number } }>('/api/flex/anuncios?limit=1')
         : Promise.resolve(null),
     ])
     const mapa: Record<string, string> = {}
-    for (const p of pedidos || []) if (p.numero && p.alerta) mapa[p.numero] = p.alerta
+    for (const p of pedidos || []) {
+      if (!p.numero) continue
+      if (p.acerto_pendente)
+        mapa[p.numero] =
+          'Saiu de São Bernardo sem passar pelo .sp: o Bling baixou outro lote. Acerte o estoque no Bling ' +
+          '(transferência para o .sp) e marque em Flex › Anúncios Flex.'
+      else if (p.alerta) mapa[p.numero] = p.alerta
+    }
     flexAlertas.value = mapa
     if (anuncios) flexAguardando.value = anuncios.resumo?.aguardando || 0
   } catch {
@@ -1161,7 +1170,11 @@ async function refreshStatus() {
 // Plataforma de uma regra: escolhida numa lista, com os MESMOS rótulos que o
 // backend grava em `logistica.plataforma` (o casador compara sem maiúscula, então
 // "mercado livre" antigo casa igual). Vazio = geral (vale pra todas).
-const STATUS_PLATAFORMA_OPCOES: string[] = PLATAFORMA_TABS.map((t) => t.label)
+// Só as abas que são marketplace: "Flex" é uma visão (ML + Shopee) e nunca vem
+// em `logistica.plataforma` — uma regra com Plataforma = Flex nunca casaria.
+const STATUS_PLATAFORMA_OPCOES: string[] = PLATAFORMA_TABS.filter((t) => t.key !== 'flex').map(
+  (t) => t.label,
+)
 function plataformaCanonica(v: string | null | undefined): string {
   const p = (v || '').trim()
   return STATUS_PLATAFORMA_OPCOES.find((o) => o.toLowerCase() === p.toLowerCase()) || p

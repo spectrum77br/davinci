@@ -54,7 +54,9 @@ FLEX_MODOS = ("desligado", "observar", "piloto", "ativo")
 # `pedido_sp` / `pedido_sem_sp`: o robô de prioridade levou o pedido Flex para
 # o .sp / o .sp não cobria e ficou o aviso (etapa 2, services/prioridade_estoque).
 # `decidir`: a regra mudou o que quer para o anúncio (etapa 3, flex_motor) —
-# só a MUDANÇA vira linha, não cada rodada.
+# só a MUDANÇA vira linha, não cada rodada. `acertar_estoque`: uma pessoa
+# disse que acertou no Bling o estoque de um pedido Flex que saiu de São
+# Bernardo sem passar pelo .sp (routers/flex.py).
 FLEX_ACOES = (
     "decidir",
     "ligar",
@@ -65,6 +67,7 @@ FLEX_ACOES = (
     "ler",
     "pedido_sp",
     "pedido_sem_sp",
+    "acertar_estoque",
 )
 FLEX_RESULTADOS = ("ok", "erro", "simulado", "pendente", "ignorado")
 
@@ -113,6 +116,21 @@ class FlexPedido(Base):
     # prioridade NÃO o trocou de lote (services/prioridade_estoque). Volta a
     # NULL quando o pedido vai para o .sp.
     alerta: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Quando o robô de prioridade levou o pedido para o .sp. O `products.stock`
+    # do .sp só cai quando o webhook de estoque do Bling chega (e o da reserva
+    # às vezes não chega): até o produto ser atualizado DEPOIS deste instante,
+    # o motor continua descontando o pedido do saldo Flex (flex_motor).
+    sp_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Pedido Flex que SAIU (em andamento/atendido) sem ter ido ao .sp: o Bling
+    # baixou o outro lote, mas a peça saiu de São Bernardo — o .sp do Bling fica
+    # com peça a mais. O motor segue descontando até uma pessoa dizer que
+    # acertou o estoque no Bling (transferência para o .sp) — este carimbo.
+    acertado_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    acertado_por: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     atualizado_em: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

@@ -11,6 +11,12 @@ valem para o anúncio inteiro.
 REGRA (função pura `decidir`, testada em tabela):
   • liga só se TODAS as variações vendáveis do anúncio são de famílias com
     produto .sp ATIVO e, para cada família, saldo Flex >= flex_n_liga;
+  • TODAS as variações do anúncio entram, não só as de vínculo vivo: a que
+    só tem vínculo morto, ou que o anúncio tem na plataforma e nenhum
+    vínculo cobre, deixa o anúncio inelegível (o Flex vale para o anúncio
+    inteiro — ela também sairia de São Bernardo); a variação parada
+    (estoque publicado 0) só fica fora da conta se tiver .sp ativo — sem
+    .sp, volta a vender pelo Flex quando o estoque for republicado;
   • desliga quando qualquer família fica < flex_n_desliga; entre os dois,
     mantém o que está (histerese, pelo estado OBSERVADO na plataforma, ou a
     decisão anterior quando ainda não foi lido) — sem isso o Flex pisca a
@@ -28,7 +34,11 @@ SALDO FLEX (por SKU .sp): `products.stock` do .sp (saldo virtual do Bling,
 ativo, gêmeos de SKU contados uma vez) MENOS os pedidos Flex ainda em aberto
 que não foram baixados no .sp (`flex_pedido.no_sp = false`) — a venda Flex
 reserva no lote do anúncio (.ci/.ra/.pi) até o robô de prioridade levá-la ao
-.sp (etapa 2), mas a peça sai de São Bernardo. O .sp é montado com
+.sp (etapa 2), mas a peça sai de São Bernardo —, MENOS os que já saíram sem
+passar pelo .sp e esperam o acerto do estoque (`acertado_em`), MENOS os que
+o robô levou ao .sp e o `products.stock` ainda não mostra (`sp_em`; ver
+`calcular_saldos`). Antes de LIGAR, o saldo é conferido no Bling
+(`_conferir_no_bling`): sem confirmação, não liga. O .sp é montado com
 `prioridade_estoque.sku_alvo` e filtrado por LOTES_DE_VENDA (NÃO com
 `estoque_familia.irmaos`: para `dg053.ci+x1` ele monta `dg053.sp+x1.sp`, que
 não existe).
@@ -61,8 +71,10 @@ barato, sem leitura, que só DESLIGA — ver worker).
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import re
+import time
 from collections import Counter, defaultdict
 from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass, field, replace
@@ -71,7 +83,7 @@ from typing import Any
 from uuid import UUID
 
 import structlog
-from sqlalchemy import func, select, text, update
+from sqlalchemy import and_, func, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
@@ -98,6 +110,7 @@ from app.services.bling_situacoes import (
 from app.services.estoque_familia import LOTES_DE_VENDA, chave_familia, lote_de
 from app.services.marketplaces import flex_api
 from app.services.prioridade_estoque import analisa_codigo, sku_alvo
+from app.services.vinculo_saude import eh_duplicado
 
 logger = structlog.get_logger()
 
@@ -119,6 +132,9 @@ _TETO_LEITURAS_SHOPEE = 2000
 # Emergência: escritas por clique (o resto fica em `restantes`; clicar de
 # novo continua). Abaixo dos 1000/min do ML.
 _TETO_EMERGENCIA = 300
+# Emergência: quanto espera (s) a trava de um anúncio que a rodada está
+# lendo ou escrevendo — uma chamada à plataforma leva poucos segundos.
+_ESPERA_TRAVA_EMERGENCIA = 10.0
 # Pedido Flex que ainda desconta do saldo: aberto no Bling e detectado há no
 # máximo isso (a mesma janela do shipment check que o registra).
 _JANELA_PEDIDOS = timedelta(days=30)
@@ -130,8 +146,14 @@ _SITUACOES_FECHADAS = (
 )
 # A tela usa a mesma régua na lista "Pedidos Flex sem peça em SP"
 # (routers/flex.py, `abertos=true`): pedido que já saiu, foi atendido,
-# cancelado ou excluído não espera mais ninguém.
+# cancelado ou excluído não espera mais ninguém — menos o que SAIU sem ter
+# ido ao .sp (abaixo), que espera o acerto do estoque.
 SITUACOES_FECHADAS = _SITUACOES_FECHADAS
+# Pedido que saiu (o Bling baixou o estoque dele). Se saiu pelo Flex SEM ter
+# ido ao .sp, o Bling baixou o outro lote (.ci/.ra/.pi) mas a peça saiu de
+# São Bernardo: o .sp do Bling fica com peça a mais até alguém transferir.
+# O desconto continua até a pessoa marcar `flex_pedido.acertado_em`.
+SITUACOES_SAIU = (str(SITUACAO_EM_ANDAMENTO), str(SITUACAO_ATENDIDO))
 # Recusa da plataforma ao DESLIGAR (403/404): não adianta repetir já.
 _ESPERA_RECUSA = timedelta(hours=24)
 _ESPERA_MAXIMA = timedelta(hours=6)
@@ -175,15 +197,27 @@ class ConfigFlex:
         )
 
 
+# De onde veio a variação (ver `montar_anuncios`).
+VINCULO_VIVO = "vivo"  # vínculo vivo: o DaVinci manda o estoque dela
+VINCULO_MORTO = "morto"  # só vínculo morto: o DaVinci parou de mandar estoque
+VINCULO_SEM = "sem"  # a plataforma tem a variação e o DaVinci nunca a vinculou
+
+
 @dataclass(frozen=True)
 class Variacao:
-    """Uma variação (= um vínculo vivo) do anúncio."""
+    """Uma variação do anúncio: a de um vínculo vivo — ou, para a regra NEGAR
+    o Flex, a que o DaVinci não controla (vínculo morto, ou a variação que o
+    anúncio tem na plataforma e nenhum vínculo cobre)."""
 
     sku: str | None  # products.sku do vínculo (None = produto não achado)
     ativo: bool = True  # products.situacao == 'A'
     # product_links.stock: o último número enviado ao anúncio. 0 = a variação
     # não está à venda agora; None = nunca enviado (não se sabe: conta).
     estoque_publicado: int | None = None
+    vinculo: str = VINCULO_VIVO
+    # Id da variação na plataforma (ML variation id, Shopee model_id) — só
+    # para o motivo dizer QUAL variação, quando ela não tem SKU.
+    ref: str | None = None
 
 
 @dataclass(frozen=True)
@@ -212,11 +246,18 @@ class SaldoSp:
 
     sku_sp: str
     estoque: int | None  # products.stock do .sp ativo; None = não existe ativo
-    pendentes: int = 0  # pedidos Flex em aberto ainda fora do .sp
+    # Pedidos Flex fora do .sp: os em aberto e os que já SAÍRAM sem passar pelo
+    # .sp e ainda esperam o acerto do estoque (ver `calcular_saldos`).
+    pendentes: int = 0
+    # Pedidos Flex que o robô levou ao .sp, mas cuja reserva ainda não chegou
+    # ao `products.stock` (o produto não foi atualizado depois da troca).
+    movidos: int = 0
 
     @property
     def saldo(self) -> int | None:
-        return None if self.estoque is None else self.estoque - self.pendentes
+        if self.estoque is None:
+            return None
+        return self.estoque - self.pendentes - self.movidos
 
 
 @dataclass(frozen=True)
@@ -257,14 +298,47 @@ def _estado_atual(anuncio: Anuncio) -> str:
     return LIGADO if anuncio.desejado_anterior == LIGADO else DESLIGADO
 
 
+def _nome_variacao(v: Variacao) -> str:
+    sku = (v.sku or "").strip().lower()
+    if sku:
+        return sku
+    return f"id {v.ref}" if v.ref else "sem SKU"
+
+
 def decidir(anuncio: Anuncio, saldos: Mapping[str, SaldoSp], cfg: ConfigFlex) -> Decisao:
     """O que a regra quer para UM anúncio (sem o limite por família — ver
     `decidir_lote`). Pura: nada de banco, nada de API."""
     if not anuncio.variacoes:
         return Decisao(INELEGIVEL, "anúncio sem vínculo vivo com produto do DaVinci")
-    vendaveis = [
-        v for v in anuncio.variacoes if v.estoque_publicado is None or v.estoque_publicado > 0
-    ]
+    # Variação que o DaVinci não controla: o Flex vale para o anúncio INTEIRO,
+    # então ela também sairia de São Bernardo — e o DaVinci não sabe se há
+    # peça. Vale mesmo com estoque 0 (o estoque dela não é mandado por aqui).
+    for v in anuncio.variacoes:
+        if v.vinculo == VINCULO_MORTO:
+            return Decisao(
+                INELEGIVEL, f"variação {_nome_variacao(v)} com vínculo morto no DaVinci"
+            )
+        if v.vinculo == VINCULO_SEM:
+            return Decisao(
+                INELEGIVEL, f"variação {_nome_variacao(v)} sem vínculo com produto do DaVinci"
+            )
+    # Variação parada (estoque publicado 0) só fica fora da conta quando o
+    # .sp dela existe: quando o estoque voltar a ser publicado, ela volta a
+    # vender pelo Flex sem passar pelo motor — sem .sp não há peça em SP.
+    vendaveis: list[Variacao] = []
+    for v in anuncio.variacoes:
+        if v.estoque_publicado is not None and v.estoque_publicado <= 0:
+            r = analisar_sku(v.sku, kits=cfg.kits)
+            sp = None if isinstance(r, str) else saldos.get(r[1])
+            if sp is not None and sp.estoque is not None:
+                continue
+            falta = r if isinstance(r, str) else f"{r[1]} não existe ativo"
+            return Decisao(
+                INELEGIVEL,
+                f"variação {_nome_variacao(v)} parada sem .sp ({falta}) — volta a vender "
+                "quando o estoque for publicado",
+            )
+        vendaveis.append(v)
     if not vendaveis:
         return Decisao(DESLIGADO, "nenhuma variação com estoque publicado")
 
@@ -416,6 +490,68 @@ def _plataforma_de(integ: Integration) -> str | None:
     return flex_envio.plataforma_flex(integ.platform)
 
 
+def _chave_variacao(variation_id: Any) -> str:
+    """Id da variação para casar vínculo × variação da plataforma. Anúncio sem
+    variação: ML grava NULL, Shopee "0" — os dois viram ""."""
+    v = str(variation_id if variation_id is not None else "").strip()
+    return "" if v in ("", "0", "None") else v
+
+
+def _sku_ml_variacao(variacao: Mapping[str, Any]) -> str | None:
+    """SKU da variação do ML no `listings.raw_data` — a mesma ordem da
+    importação (ml._iter_ml_variants): SELLER_SKU, seller_custom_field, sku."""
+    for attr in variacao.get("attributes") or []:
+        if isinstance(attr, Mapping) and str(attr.get("id") or "").upper() == "SELLER_SKU":
+            sku = str(attr.get("value_name") or attr.get("value") or "").strip()
+            if sku:
+                return sku
+    for campo in ("seller_custom_field", "sku"):
+        sku = str(variacao.get(campo) or "").strip()
+        if sku:
+            return sku
+    return None
+
+
+def _int_ou_none(v: Any) -> int | None:
+    try:
+        return None if v is None else int(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def variacoes_da_plataforma(plataforma: str, raw: Any) -> list[tuple[str, str | None, int | None]]:
+    """As variações que o anúncio tinha na plataforma na última importação
+    (`listings.raw_data`): [(id da variação, SKU, estoque)].
+
+    ML: o item inteiro, com `variations[]` (cada uma com SELLER_SKU e
+    `available_quantity`); item sem variação não entra (o vínculo do anúncio
+    o cobre). Shopee: a importação guarda UM modelo por linha (`{"item",
+    "model"}`) — a lista completa só existe somando as linhas de `item_model`;
+    o que a linha tiver entra."""
+    if not isinstance(raw, Mapping):
+        return []
+    out: list[tuple[str, str | None, int | None]] = []
+    if plataforma == flex_envio.PLATAFORMA_ML:
+        for v in raw.get("variations") or []:
+            if not isinstance(v, Mapping):
+                continue
+            ref = _chave_variacao(v.get("id"))
+            if ref:
+                out.append((ref, _sku_ml_variacao(v), _int_ou_none(v.get("available_quantity"))))
+        return out
+    if plataforma == flex_envio.PLATAFORMA_SHOPEE:
+        modelo = raw.get("model")
+        if isinstance(modelo, Mapping):
+            ref = _chave_variacao(modelo.get("model_id"))
+            if ref:
+                estoque = ((modelo.get("stock_info_v2") or {}).get("summary_info") or {}).get(
+                    "total_available_stock"
+                )
+                sku = str(modelo.get("model_sku") or "").strip() or None
+                out.append((ref, sku, _int_ou_none(estoque)))
+    return out
+
+
 async def montar_anuncios(
     session: AsyncSession, integracoes: Mapping[UUID, Integration]
 ) -> list[Anuncio]:
@@ -426,28 +562,42 @@ async def montar_anuncios(
     ligação anúncio → família é refeita a cada rodada (o SKU pode ter sido
     trocado no marketplace — crítica C4).
 
+    O Flex vale para o anúncio INTEIRO, então a regra precisa ver TODAS as
+    variações dele, não só as que o DaVinci controla. Entram também, para a
+    regra NEGAR o Flex (revisão de 02/10/2026):
+      • a variação que só tem vínculo MORTO (o DaVinci parou de mandar o
+        estoque dela; o duplicado da 0333 não conta — outro vínculo vivo
+        cobre a mesma variação);
+      • a variação que o anúncio tem na plataforma (`listings.raw_data`, a
+        foto da última importação) e nenhum vínculo vivo cobre — a cor que
+        nunca foi vinculada continua vendendo.
+
     Negação por padrão: anúncio importado (`listings`, não encerrado) da conta
-    que não tem vínculo vivo entra SEM variações — a regra o dá como
+    que não tem vínculo vivo entra SEM variações vivas — a regra o dá como
     inelegível e, se o Flex estiver ligado nele, desliga."""
     if not integracoes:
         return []
     ids = list(integracoes)
     plataforma = {iid: _plataforma_de(i) for iid, i in integracoes.items()}
     variacoes: dict[tuple[UUID, str], list[Variacao]] = defaultdict(list)
+    cobertas: dict[tuple[UUID, str], set[str]] = defaultdict(set)
+    mortas: dict[tuple[UUID, str], dict[str, Variacao]] = defaultdict(dict)
     desde: dict[tuple[UUID, str], datetime] = {}
     rows = await session.execute(
         select(
             ProductLink.integration_id,
             ProductLink.external_id,
+            ProductLink.variation_id,
             ProductLink.stock,
             ProductLink.created_at,
+            ProductLink.morto_desde,
+            ProductLink.morto_motivo,
             Product.sku,
             Product.situacao,
         )
         .join(Product, Product.id == ProductLink.product_id)
         .where(
             ProductLink.integration_id.in_(ids),
-            ProductLink.morto_desde.is_(None),
             ProductLink.platform.in_([IntegrationPlatform.ML, IntegrationPlatform.SHOPEE]),
         )
     )
@@ -457,27 +607,73 @@ async def montar_anuncios(
         if p is None or not ext:
             continue
         chave = (r.integration_id, ext)
+        ref = _chave_variacao(r.variation_id)
+        if r.morto_desde is not None:
+            if not eh_duplicado(r.morto_motivo):
+                mortas[chave].setdefault(
+                    ref,
+                    Variacao(
+                        sku=r.sku,
+                        ativo=(r.situacao or "") == "A",
+                        estoque_publicado=r.stock,
+                        vinculo=VINCULO_MORTO,
+                        ref=ref or None,
+                    ),
+                )
+            continue
+        cobertas[chave].add(ref)
         variacoes[chave].append(
             Variacao(
                 sku=r.sku,
                 ativo=(r.situacao or "") == "A",
                 estoque_publicado=r.stock,
+                ref=ref or None,
             )
         )
         if r.created_at is not None and (chave not in desde or r.created_at < desde[chave]):
             desde[chave] = r.created_at
 
+    # Vínculo morto de uma variação que outro vínculo vivo cobre (o vínculo foi
+    # refeito) não pesa; o resto entra como variação sem controle. Só nos
+    # anúncios que ainda têm vínculo vivo: o anúncio todo morto (excluído ou
+    # encerrado na plataforma) não gasta leitura — se estiver na importação
+    # ou já tiver estado gravado, a regra já o nega por não ter vínculo vivo.
+    for chave, por_ref in mortas.items():
+        if chave not in cobertas:
+            continue
+        for ref, v in por_ref.items():
+            if ref not in cobertas[chave]:
+                variacoes[chave].append(v)
+
+    # Só os pedaços do `raw_data` que importam (as variações do ML, o modelo
+    # da Shopee) — o item inteiro tem fotos, atributos e descrição, e a
+    # rodada lê todos os anúncios das contas a cada 15 min.
     importados = await session.execute(
-        select(Listing.integration_id, Listing.external_id)
-        .where(Listing.integration_id.in_(ids), Listing.status != ListingStatus.CLOSED)
-        .distinct()
+        select(
+            Listing.integration_id,
+            Listing.external_id,
+            Listing.raw_data["variations"].label("variations"),
+            Listing.raw_data["model"].label("model"),
+        ).where(Listing.integration_id.in_(ids), Listing.status != ListingStatus.CLOSED)
     )
-    for iid, ext_bruto in importados.all():
+    vistas: dict[tuple[UUID, str], set[str]] = defaultdict(set)
+    for iid, ext_bruto, ml_variacoes, shopee_modelo in importados.all():
         p = plataforma.get(iid)
         ext = _id_anuncio(p or "", ext_bruto)
         if p is None or not ext:
             continue
-        variacoes.setdefault((iid, ext), [])
+        chave = (iid, ext)
+        variacoes.setdefault(chave, [])
+        raw = {"variations": ml_variacoes, "model": shopee_modelo}
+        for ref, sku, estoque in variacoes_da_plataforma(p, raw):
+            if ref in cobertas.get(chave, set()) or ref in vistas[chave]:
+                continue
+            if ref in mortas.get(chave, {}):
+                continue  # já entrou como vínculo morto
+            vistas[chave].add(ref)
+            variacoes[chave].append(
+                Variacao(sku=sku, estoque_publicado=estoque, vinculo=VINCULO_SEM, ref=ref)
+            )
 
     return [
         Anuncio(
@@ -510,6 +706,17 @@ def _demanda_por_peca(itens: Iterable[tuple[str | None, Any]]) -> Counter[str]:
     return demanda
 
 
+def acerto_pendente(
+    situacao: str | None, no_sp: bool, acertado_em: datetime | None, skus: Iterable[str | None]
+) -> bool:
+    """O pedido Flex SAIU (em andamento/atendido) sem ter ido ao .sp e ainda
+    espera alguém acertar o estoque no Bling? Só conta quem tem peça com lote
+    de venda fora do .sp (é o que o saldo Flex desconta)."""
+    if no_sp or acertado_em is not None or str(situacao or "") not in SITUACOES_SAIU:
+        return False
+    return bool(_demanda_por_peca((s, 1) for s in skus))
+
+
 def _pendentes(sku_sp: str, demanda: Mapping[str, int]) -> int:
     """Quanto o .sp deve aos pedidos Flex: no kit, a peça mais pedida (o
     estoque do kit .sp já é o da peça mais escassa — conservador)."""
@@ -521,6 +728,22 @@ def _pendentes(sku_sp: str, demanda: Mapping[str, int]) -> int:
     return max((int(demanda.get(p, 0)) for p in pecas), default=0)
 
 
+def _demanda_no_sp(itens: Iterable[tuple[str | None, Any]]) -> Counter[str]:
+    """Peças (SKU .sp, minúsculo) que os pedidos Flex JÁ levados ao .sp
+    reservam: cada pedaço do item que está no lote .sp."""
+    demanda: Counter[str] = Counter()
+    for codigo, qtd in itens:
+        try:
+            q = int(qtd or 1)
+        except (TypeError, ValueError):
+            q = 1
+        for pedaco in (codigo or "").lower().split("+"):
+            p = pedaco.strip()
+            if p and lote_de(p) == _LOTE_FLEX:
+                demanda[p] += q
+    return demanda
+
+
 async def calcular_saldos(session: AsyncSession, skus_sp: Collection[str]) -> dict[str, SaldoSp]:
     """Saldo Flex de cada SKU .sp pedido.
 
@@ -528,7 +751,17 @@ async def calcular_saldos(session: AsyncSession, skus_sp: Collection[str]) -> di
     reservas) do produto ATIVO com aquele SKU. SKU não é único em `products`:
     gêmeos do mesmo produto do Bling (`bling_product_id`) contam uma vez; dois
     produtos do Bling diferentes com o mesmo SKU valem o MENOR (nunca soma).
-    Sem produto ativo: estoque None — desconhecido nunca liga."""
+    Sem produto ativo: estoque None — desconhecido nunca liga.
+
+    Descontos (revisão de 02/10/2026):
+      • pedido Flex FORA do .sp (`no_sp = false`) ainda em aberto — reserva no
+        outro lote, mas a peça sai de São Bernardo;
+      • pedido Flex que SAIU (em andamento/atendido) sem ter ido ao .sp e
+        ainda sem `acertado_em`: o Bling baixou o outro lote e o .sp ficou
+        com peça a mais — sem janela de dias: vale até alguém acertar;
+      • pedido Flex que o robô LEVOU ao .sp (`sp_em`), em aberto, enquanto o
+        produto .sp não foi atualizado depois da troca: a reserva só chega
+        ao `products.stock` pelo webhook do Bling, que às vezes não vem."""
     alvos = sorted({s.strip().lower() for s in skus_sp if s and s.strip()})
     if not alvos:
         return {}
@@ -546,16 +779,54 @@ async def calcular_saldos(session: AsyncSession, skus_sp: Collection[str]) -> di
         por_sku[r.sku][chave] = int(r.stock or 0)
 
     corte = _agora() - _JANELA_PEDIDOS
+    situacao = func.coalesce(BlingOrder.situacao, "")
     itens = await session.execute(
         select(BlingOrder.item_codigo, BlingOrder.item_quantidade)
         .join(FlexPedido, FlexPedido.bling_id == BlingOrder.bling_id)
         .where(
             FlexPedido.no_sp.is_(False),
-            FlexPedido.detectado_em >= corte,
-            func.coalesce(BlingOrder.situacao, "").notin_(_SITUACOES_FECHADAS),
+            or_(
+                and_(FlexPedido.detectado_em >= corte, situacao.notin_(_SITUACOES_FECHADAS)),
+                and_(situacao.in_(SITUACOES_SAIU), FlexPedido.acertado_em.is_(None)),
+            ),
         )
     )
     demanda = _demanda_por_peca(itens.all())
+
+    # Levados ao .sp pelo robô e ainda não vistos no `products.stock`.
+    movidos_rows = (
+        await session.execute(
+            select(BlingOrder.item_codigo, BlingOrder.item_quantidade, FlexPedido.sp_em)
+            .join(FlexPedido, FlexPedido.bling_id == BlingOrder.bling_id)
+            .where(
+                FlexPedido.no_sp.is_(True),
+                FlexPedido.sp_em.is_not(None),
+                FlexPedido.detectado_em >= corte,
+                situacao.notin_(_SITUACOES_FECHADAS),
+            )
+        )
+    ).all()
+    movidos: Counter[str] = Counter()
+    if movidos_rows:
+        pecas = set()
+        for codigo, _q, _em in movidos_rows:
+            pecas.update(_demanda_no_sp([(codigo, 1)]))
+        # O produto foi atualizado DEPOIS da troca (webhook/sincronização do
+        # Bling): o estoque dele já traz a reserva. Gêmeos: vale o mais velho.
+        atualizado: dict[str, datetime] = {}
+        for sku, quando in (
+            await session.execute(
+                select(func.lower(Product.sku), func.min(Product.updated_at))
+                .where(func.lower(Product.sku).in_(sorted(pecas)), Product.situacao == "A")
+                .group_by(func.lower(Product.sku))
+            )
+        ).all():
+            atualizado[sku] = quando
+        for codigo, qtd, sp_em in movidos_rows:
+            for peca, q in _demanda_no_sp([(codigo, qtd)]).items():
+                visto = atualizado.get(peca)
+                if visto is None or visto <= sp_em:
+                    movidos[peca[: -(len(_LOTE_FLEX) + 1)]] += q
 
     out: dict[str, SaldoSp] = {}
     for sku in alvos:
@@ -563,7 +834,12 @@ async def calcular_saldos(session: AsyncSession, skus_sp: Collection[str]) -> di
         estoque = min(estoques.values()) if estoques else None
         if estoques and len(estoques) > 1:
             logger.info("flex_sku_sp_duplicado", sku=sku, produtos=len(estoques))
-        out[sku] = SaldoSp(sku_sp=sku, estoque=estoque, pendentes=_pendentes(sku, demanda))
+        out[sku] = SaldoSp(
+            sku_sp=sku,
+            estoque=estoque,
+            pendentes=_pendentes(sku, demanda),
+            movidos=_pendentes(sku, movidos),
+        )
     return out
 
 
@@ -837,6 +1113,8 @@ class _Acao:
     acao: str  # ligar | desligar
     mudou: bool  # o estado mudou nesta rodada (o simulado só vira log aí)
     antes: str | None
+    # Os .sp do anúncio: o LIGAR confere o saldo deles no Bling antes.
+    skus_sp: tuple[str, ...] = ()
 
 
 def _log(
@@ -1041,7 +1319,15 @@ async def _gravar(
                 and est.aprovado_em is not None
             ):
                 acoes.append(
-                    _Acao(a.integration_id, a.external_id, a.plataforma, "ligar", mudou, DESLIGADO)
+                    _Acao(
+                        a.integration_id,
+                        a.external_id,
+                        a.plataforma,
+                        "ligar",
+                        mudou,
+                        DESLIGADO,
+                        d.skus_sp,
+                    )
                 )
     resumo["avaliados"] = resumo.get("avaliados", 0) + len(lista)
     for d in (decisoes[a.chave] for a in lista):
@@ -1133,6 +1419,123 @@ def _aplicar_resultado(
     est.atualizado_em = agora
 
 
+async def montar_bling(session: AsyncSession) -> Any:
+    """Cliente do Bling — o mesmo do robô de prioridade. Os testes trocam esta
+    função (nenhuma chamada real ao Bling)."""
+    from app.services import nf_emissao_gerar
+
+    return await nf_emissao_gerar._bling_client_opt(session)
+
+
+def _virtual_do_saldo(linha: Mapping[str, Any]) -> int | None:
+    """Saldo VIRTUAL de uma linha do /estoques/saldos (a mesma leitura do botão
+    "Atualizar do Bling", routers/estoque.py): a soma dos depósitos, ou o
+    total quando a linha não traz depósitos."""
+    depositos = linha.get("depositos") or []
+    if depositos:
+        return sum(int(float(d.get("saldoVirtual") or 0)) for d in depositos)
+    total = linha.get("saldoVirtualTotal")
+    return None if total is None else int(float(total))
+
+
+async def saldos_bling(skus_sp: Collection[str]) -> dict[str, int] | None:
+    """Saldo VIRTUAL de cada .sp lido AGORA no Bling (`GET /estoques/saldos`,
+    pelo id do produto no Bling). None = não deu para confirmar (Bling fora,
+    SKU sem produto ativo com id do Bling, produto que o Bling não devolveu):
+    quem chama trata como desconhecido — e desconhecido não liga."""
+    alvos = sorted({x.strip().lower() for x in skus_sp if x and x.strip()})
+    if not alvos:
+        return None
+    ids: dict[str, set[int]] = defaultdict(set)
+    async with session_scope() as s:
+        for sku, bid in (
+            await s.execute(
+                select(func.lower(Product.sku), Product.bling_product_id).where(
+                    func.lower(Product.sku).in_(alvos),
+                    Product.situacao == "A",
+                    Product.bling_product_id.is_not(None),
+                )
+            )
+        ).all():
+            ids[sku].add(int(bid))
+        if any(not ids.get(sku) for sku in alvos):
+            return None
+        try:
+            cliente = await montar_bling(s)
+        except Exception as exc:  # noqa: BLE001 — sem Bling: não confirma
+            logger.warning("flex_bling_cliente_falhou", erro=str(exc)[:200])
+            return None
+    if cliente is None:
+        return None
+    todos = sorted({b for v in ids.values() for b in v})
+    virtual: dict[int, int] = {}
+    try:
+        for inicio in range(0, len(todos), 50):
+            r = await cliente._request(
+                "GET",
+                "/estoques/saldos",
+                params=[("idsProdutos[]", str(b)) for b in todos[inicio : inicio + 50]],
+            )
+            r.raise_for_status()
+            for linha in (r.json() or {}).get("data") or []:
+                try:
+                    pid = int((linha.get("produto") or {}).get("id") or 0)
+                except (TypeError, ValueError):
+                    continue
+                v = _virtual_do_saldo(linha)
+                if pid and v is not None:
+                    virtual[pid] = v
+    except Exception as exc:  # noqa: BLE001 — 429/timeout/5xx: não confirma
+        logger.warning("flex_bling_saldos_falhou", skus=alvos, erro=str(exc)[:200])
+        return None
+    out: dict[str, int] = {}
+    for sku in alvos:
+        if any(b not in virtual for b in ids[sku]):
+            return None
+        out[sku] = min(virtual[b] for b in ids[sku])  # gêmeos: o menor, como no banco
+    return out
+
+
+async def _conferir_no_bling(session: AsyncSession, skus_sp: Collection[str]) -> str | None:
+    """Antes de LIGAR: o saldo Flex de cada .sp com o saldo virtual lido AGORA
+    no Bling, e não o `products.stock` (que só muda quando o webhook do Bling
+    chega — e o da reserva às vezes não vem). Devolve None quando o Bling
+    confirma; senão, o porquê de não ligar agora.
+
+    O Bling já traz a reserva dos pedidos que o robô levou ao .sp; os pedidos
+    Flex FORA do .sp continuam descontados (a reserva deles está no outro
+    lote, mas a peça sai de São Bernardo)."""
+    skus = sorted({x.strip().lower() for x in skus_sp if x and x.strip()})
+    if not skus:
+        return "o anúncio não tem .sp para conferir no Bling"
+    bling = await saldos_bling(skus)
+    if bling is None:
+        return "não deu para conferir o saldo do .sp no Bling agora"
+    banco = await calcular_saldos(session, skus)
+    cfg = ConfigFlex.das_configuracoes()
+    for sku in skus:
+        pendentes = banco[sku].pendentes if sku in banco else 0
+        livre = bling[sku] - pendentes
+        if livre < cfg.n_liga:
+            return (
+                f"o Bling mostra só {max(livre, 0)} peça(s) livre(s) em {sku} — "
+                f"precisa de {cfg.n_liga} para ligar"
+            )
+    return None
+
+
+async def _travar_esperando(session: AsyncSession, chave: int, espera: float) -> bool:
+    """A trava do anúncio, esperando até `espera` segundos que o outro
+    processo (a rodada lendo ou escrevendo nele) termine."""
+    fim = time.monotonic() + max(0.0, espera)
+    while True:
+        if await _travar(session, chave):
+            return True
+        if time.monotonic() >= fim:
+            return False
+        await asyncio.sleep(0.2)
+
+
 async def _escrever(
     cliente: Any,
     *,
@@ -1142,15 +1545,27 @@ async def _escrever(
     acao: str,
     modo: str,
     por: UUID | None,
+    skus_sp: Collection[str] = (),
+    esperar_trava: float = 0.0,
 ) -> str:
     """Uma escrita, serializada por anúncio: trava → relê o estado → confere
     se ainda é preciso → chama → grava estado + trilha (commit solta a trava).
 
-    Devolve o tipo do resultado, "ocupado" (outro processo está no anúncio)
-    ou "mudou" (o estado relido já não pede a escrita)."""
+    LIGAR confere antes o saldo do .sp no Bling (`_conferir_no_bling`): sem
+    confirmação, não liga — fica a falha com espera, e a aprovação continua.
+
+    Devolve o tipo do resultado, "ocupado" (outro processo está no anúncio),
+    "mudou" (o estado relido já não pede a escrita) ou, na emergência,
+    "ja_desligado" (relido dentro da trava: nada a desligar)."""
     agora = _agora()
     async with session_scope() as s:
-        if not await _travar(s, _chave_trava(integration_id, external_id)):
+        chave = _chave_trava(integration_id, external_id)
+        travou = (
+            await _travar_esperando(s, chave, esperar_trava)
+            if esperar_trava > 0
+            else await _travar(s, chave)
+        )
+        if not travou:
             return "ocupado"
         est = await s.get(FlexAnuncioEstado, (integration_id, external_id))
         if acao == "emergencia":
@@ -1169,6 +1584,12 @@ async def _escrever(
             est.aguardando_aprovacao = False
             est.aprovado_em = None
             est.aprovado_por = None
+            if est.observado == DESLIGADO:
+                # Relido DENTRO da trava: a plataforma está desligada (a
+                # rodada que segurava a trava não chegou a ligar). Nada a
+                # chamar — a aprovação já saiu, nada volta a ligar sozinho.
+                est.atualizado_em = agora
+                return "ja_desligado"
         elif est is None:
             return "mudou"
         elif acao == "ligar" and not (
@@ -1178,6 +1599,29 @@ async def _escrever(
         elif acao == "desligar" and not (est.desejado != LIGADO and est.observado == LIGADO):
             return "mudou"
         antes = est.observado
+        if acao == "ligar":
+            porque = await _conferir_no_bling(s, skus_sp)
+            if porque is not None:
+                res = flex_api.ResultadoFlex(flex_api.REPETIR, detalhe=porque)
+                _aplicar_resultado(est, res, acao, agora)
+                s.add(
+                    _log(
+                        acao=acao,
+                        modo=modo,
+                        resultado="erro",
+                        integration_id=integration_id,
+                        external_id=external_id,
+                        plataforma=plataforma,
+                        estado_antes=antes,
+                        estado_depois=antes,
+                        saldo_sp=est.saldo_sp,
+                        sku=",".join(sorted(skus_sp)) or None,
+                        motivo=est.motivo,
+                        erro=porque,
+                        por=por,
+                    )
+                )
+                return res.tipo
         try:
             res = await _chamar(cliente, plataforma, external_id, ligar=(acao == "ligar"))
         except Exception as exc:  # noqa: BLE001 — os clientes classificam; isto é defesa
@@ -1271,6 +1715,7 @@ async def _aplicar(
             acao=a.acao,
             modo=modo,
             por=por,
+            skus_sp=a.skus_sp,
         )
         if tipo in ("ocupado", "mudou"):
             resumo[tipo] = resumo.get(tipo, 0) + 1
@@ -1455,14 +1900,29 @@ async def aprovar(integration_id: UUID, external_id: str, *, por: UUID | None) -
     return out
 
 
-async def emergencia(*, por: UUID | None) -> dict:
+async def emergencia(
+    *, por: UUID | None, contas_escopo: Collection[UUID] | None = None
+) -> dict:
     """Botão de emergência: desliga o Flex de TUDO nas contas permitidas.
 
     Tira toda aprovação (nada volta a ligar sem uma pessoa aprovar de novo) e
     desliga o que está ligado — ou que nunca foi lido — até
-    `_TETO_EMERGENCIA` por clique (`restantes` diz quanto falta). Em
-    observar/desligado só SIMULA. Shopee sem `flex_shopee_escrita`: não
-    escreve (fica em `shopee_so_leitura`)."""
+    `_TETO_EMERGENCIA` por clique (`restantes` diz quanto falta: os que o
+    teto cortou e os que outro processo segurava). Shopee sem
+    `flex_shopee_escrita`: não escreve (fica em `shopee_so_leitura`).
+
+    Em observar/desligado só SIMULA, sem efeito nenhum: nem as aprovações
+    saem (`aprovacoes` diz quantas sairiam) — a tela promete uma simulação.
+
+    Corrida com a rodada (revisão de 02/10/2026): a rodada pode estar no meio
+    de um LIGAR aprovado. Por isso (1) as aprovações saem ANTES de qualquer
+    escrita — o `_escrever(ligar)` relê o estado dentro da trava do anúncio e
+    não liga mais; (2) o anúncio que tinha aprovação também é alvo, mesmo
+    lido desligado; (3) a emergência ESPERA a trava do anúncio (até
+    `_ESPERA_TRAVA_EMERGENCIA` s) e relê o estado dentro dela — o que a rodada
+    acabou de ligar é desligado em seguida.
+
+    `contas_escopo`: só estas contas (usuário com equipe — routers/flex)."""
     m = flex_config.modo()
     escreve = flex_config.pode_escrever(m)
     resumo: dict[str, Any] = {
@@ -1470,11 +1930,16 @@ async def emergencia(*, por: UUID | None) -> dict:
         "escreve": escreve,
         "alvos": 0,
         "desligados": 0,
+        "ja_desligados": 0,
         "falhas": 0,
+        "ocupados": 0,
         "simulados": 0,
         "restantes": 0,
+        "aprovacoes": 0,
     }
     contas = flex_config.contas()
+    if contas_escopo is not None:
+        contas = frozenset(contas) & frozenset(contas_escopo)
     if not contas:
         resumo["motivo"] = "nenhuma conta em flex_contas"
         return resumo
@@ -1484,20 +1949,33 @@ async def emergencia(*, por: UUID | None) -> dict:
         if not integracoes:
             resumo["motivo"] = "nenhuma conta permitida ativa (ML/Shopee)"
             return resumo
-        await s.execute(
-            update(FlexAnuncioEstado)
-            .where(
-                FlexAnuncioEstado.integration_id.in_(list(integracoes)),
-                FlexAnuncioEstado.aprovado_em.is_not(None),
-            )
-            .values(aprovado_em=None, aprovado_por=None, atualizado_em=agora)
+        com_aprovacao = (
+            FlexAnuncioEstado.integration_id.in_(list(integracoes)),
+            FlexAnuncioEstado.aprovado_em.is_not(None),
         )
+        if escreve:
+            r = await s.execute(
+                update(FlexAnuncioEstado)
+                .where(*com_aprovacao)
+                .values(aprovado_em=None, aprovado_por=None, atualizado_em=agora)
+                .returning(FlexAnuncioEstado.integration_id, FlexAnuncioEstado.external_id)
+            )
+        else:
+            r = await s.execute(
+                select(FlexAnuncioEstado.integration_id, FlexAnuncioEstado.external_id).where(
+                    *com_aprovacao
+                )
+            )
+        aprovados = {(iid, ext) for iid, ext in r.all()}
+        resumo["aprovacoes"] = len(aprovados)
         estados = await _fotos_dos_estados(s, integracoes.keys())
         anuncios = _com_estado(await montar_anuncios(s, integracoes), estados)
+    # As aprovações já saíram (commit acima) antes da primeira escrita.
     alvos = [
         a
         for a in anuncios
-        if a.integration_id in integracoes and a.observado in (LIGADO, None)
+        if a.integration_id in integracoes
+        and (a.observado in (LIGADO, None) or (escreve and a.chave in aprovados))
     ]
     alvos.sort(
         key=lambda a: (0 if a.observado == LIGADO else 1, str(a.integration_id), a.external_id)
@@ -1508,10 +1986,12 @@ async def emergencia(*, por: UUID | None) -> dict:
     clientes: dict[UUID, Any] = {}
     shopee_escreve = bool(get_settings().flex_shopee_escrita)
     feitos = 0
+    processados = 0
     logs: list[FlexLog] = []
     for a in alvos:
         if feitos >= _TETO_EMERGENCIA:
             break
+        processados += 1
         if not escreve:
             feitos += 1
             resumo["simulados"] += 1
@@ -1538,7 +2018,6 @@ async def emergencia(*, por: UUID | None) -> dict:
         if cli is None:
             resumo["sem_cliente"] = resumo.get("sem_cliente", 0) + 1
             continue
-        feitos += 1
         tipo = await _escrever(
             cli,
             integration_id=a.integration_id,
@@ -1547,14 +2026,22 @@ async def emergencia(*, por: UUID | None) -> dict:
             acao="emergencia",
             modo=m,
             por=por,
+            esperar_trava=_ESPERA_TRAVA_EMERGENCIA,
         )
+        if tipo == "ocupado":
+            # Outro processo segurou o anúncio além da espera: NÃO foi
+            # desligado — conta em `restantes` (clicar de novo continua).
+            resumo["ocupados"] += 1
+            continue
+        if tipo == "ja_desligado":
+            resumo["ja_desligados"] += 1
+            continue
+        feitos += 1
         if tipo == flex_api.OK:
             resumo["desligados"] += 1
-        elif tipo == "ocupado":
-            resumo["ocupados"] = resumo.get("ocupados", 0) + 1
         else:
             resumo["falhas"] += 1
-    resumo["restantes"] = max(0, len(alvos) - feitos - resumo.get("shopee_so_leitura", 0))
+    resumo["restantes"] = (len(alvos) - processados) + resumo["ocupados"]
     async with session_scope() as s:
         s.add_all(logs)
         s.add(
@@ -1564,8 +2051,10 @@ async def emergencia(*, por: UUID | None) -> dict:
                 resultado="ok" if escreve else "simulado",
                 motivo=(
                     f"emergência: {resumo['alvos']} alvo(s), {resumo['desligados']} desligado(s), "
-                    f"{resumo['falhas']} falha(s), {resumo['simulados']} simulado(s), "
-                    f"{resumo['restantes']} restante(s)"
+                    f"{resumo['falhas']} falha(s), {resumo['ocupados']} ocupado(s), "
+                    f"{resumo['simulados']} simulado(s), {resumo['restantes']} restante(s), "
+                    f"{resumo['aprovacoes']} aprovação(ões) "
+                    + ("retirada(s)" if escreve else "que sairia(m)")
                 ),
                 por=por,
             )

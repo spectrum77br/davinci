@@ -67,6 +67,8 @@ class FlexResumoOut(BaseModel):
     """Contagem de TODOS os anúncios avaliados (sem os filtros da lista) —
     o quadro do topo da tela."""
 
+    # Anúncios que a regra avaliou (tem linha de estado) — inclui os que a
+    # plataforma ainda não leu (`nao_lidos`): conferidos = avaliados − nao_lidos.
     avaliados: int = 0
     ligados: int = 0  # a plataforma diz que o Flex está ligado
     aguardando: int = 0  # esperando uma pessoa aprovar o ligar
@@ -132,3 +134,13 @@ class FlexPedidoOut(BaseModel):
     alerta: str | None = None
     situacao: str | None = None
     skus: list[str] = []
+    # Saiu (em andamento/atendido) sem ter ido ao .sp: o Bling baixou o outro
+    # lote e a peça saiu de São Bernardo — o saldo Flex segue descontando até
+    # uma pessoa marcar que acertou o estoque no Bling.
+    acerto_pendente: bool = False
+    acertado_em: datetime | None = None
+
+
+class FlexAcertoOut(BaseModel):
+    bling_id: int
+    acertado_em: datetime

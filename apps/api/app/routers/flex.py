@@ -13,7 +13,15 @@ emergência); admin passa sempre (`require_permission`).
                                (observar/desligado: só simula)
   GET  /api/flex/log           últimas linhas da trilha
   GET  /api/flex/pedidos       pedidos Flex detectados (com o aviso do .sp;
-                               `abertos=true` tira os que já saíram)
+                               `abertos=true` tira os que já saíram — menos
+                               os que saíram sem passar pelo .sp e esperam o
+                               acerto do estoque)
+  POST /api/flex/pedidos/{bling_id}/acertado   a pessoa acertou o estoque
+                               no Bling (o saldo Flex para de descontar)
+
+Escopo por equipe (deps/team_scope): usuário com equipe só vê e só mexe nas
+contas da equipe — anúncios, resumo, trilha, pedidos, aprovar e emergência
+(admin e quem não tem equipe: tudo), como a Logística (`?envio=flex`).
 """
 
 from __future__ import annotations
@@ -25,13 +33,14 @@ from uuid import UUID
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import and_, case, exists, func, or_, select
+from sqlalchemy import and_, case, exists, false, func, not_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import worker_pool
 from app.config import get_settings
 from app.db import get_session
 from app.deps.auth import require_permission
+from app.deps.team_scope import resolve_team_scope
 from app.models import (
     BlingOrder,
     FlexAnuncioEstado,
@@ -43,6 +52,7 @@ from app.models import (
 )
 from app.models.flex import FLEX_ACOES
 from app.schemas.flex import (
+    FlexAcertoOut,
     FlexAnuncioOut,
     FlexAnunciosOut,
     FlexAprovarOut,
@@ -69,11 +79,36 @@ def _plataforma_txt(integ: Integration | None) -> str | None:
     return getattr(integ.platform, "value", str(integ.platform))
 
 
+async def _escopo(session: AsyncSession, user: User) -> frozenset[UUID] | None:
+    """Contas (integration_id) que o usuário enxerga; None = todas (admin ou
+    sem equipe). A mesma régua das outras telas (deps/team_scope)."""
+    scope = await resolve_team_scope(session, user)
+    return None if scope.unrestricted else frozenset(scope.integration_ids)
+
+
+def _no_escopo(coluna, escopo: frozenset[UUID] | None):
+    """Filtro da coluna de conta pelo escopo (None = sem filtro)."""
+    if escopo is None:
+        return None
+    return coluna.in_(list(escopo)) if escopo else false()
+
+
+async def _permitidas(session: AsyncSession) -> frozenset[UUID]:
+    """As contas em que o motor mexe AGORA (flex_contas, ativas, ML/Shopee).
+    Conta que saiu da lista fica com o estado antigo no banco — o "esperando
+    aprovação" dela não vale mais (o motor não regrava conta fora da lista)."""
+    ids = flex_config.contas()
+    return frozenset((await flex_motor.integracoes_permitidas(session, ids)).keys())
+
+
 @router.get("/config", response_model=FlexConfigOut)
-async def config(session: Sessao, _user: Ver) -> FlexConfigOut:
+async def config(session: Sessao, user: Ver) -> FlexConfigOut:
     s = get_settings()
     cfg = flex_motor.ConfigFlex.das_configuracoes()
-    ids = sorted(flex_config.contas(), key=str)
+    escopo = await _escopo(session, user)
+    ids = sorted(
+        (i for i in flex_config.contas() if escopo is None or i in escopo), key=str
+    )
     permitidas = await flex_motor.integracoes_permitidas(session, ids)
     contas = [
         FlexContaOut(
@@ -114,29 +149,49 @@ def _titulo_subq():
     )
 
 
-def _anuncio_out(est: FlexAnuncioEstado, conta: str | None, titulo: str | None) -> FlexAnuncioOut:
+def _anuncio_out(
+    est: FlexAnuncioEstado,
+    conta: str | None,
+    titulo: str | None,
+    permitidas: frozenset[UUID] | None = None,
+) -> FlexAnuncioOut:
     out = FlexAnuncioOut.model_validate(est)
     out.conta = conta
     out.titulo = titulo
     out.motivo_claro = flex_textos.motivo_claro(est.motivo)
+    if permitidas is not None and est.integration_id not in permitidas:
+        # Conta fora de flex_contas: ninguém aprova (nem o motor regrava) —
+        # "esperando aprovação" ali seria um aviso que nada limpa.
+        out.aguardando_aprovacao = False
     return out
 
 
-async def _resumo(session: AsyncSession) -> FlexResumoOut:
-    """O quadro do topo da tela: todos os anúncios avaliados, sem os filtros
-    da lista (o dono vê de cara quantos esperam por ele)."""
+def _aguardando(permitidas: frozenset[UUID]):
+    """Esperando aprovação DE VERDADE: só nas contas em que o motor mexe."""
     est = FlexAnuncioEstado
-    row = (
-        await session.execute(
-            select(
-                func.count(),
-                func.count().filter(est.observado == "ligado"),
-                func.count().filter(est.aguardando_aprovacao.is_(True)),
-                func.count().filter(est.observado == "ligado", est.desejado != "ligado"),
-                func.count().filter(est.observado.is_(None)),
-            ).select_from(est)
-        )
-    ).one()
+    if not permitidas:
+        return false()
+    return and_(est.aguardando_aprovacao.is_(True), est.integration_id.in_(list(permitidas)))
+
+
+async def _resumo(
+    session: AsyncSession, escopo: frozenset[UUID] | None, permitidas: frozenset[UUID]
+) -> FlexResumoOut:
+    """O quadro do topo da tela: todos os anúncios avaliados, sem os filtros
+    da lista (o dono vê de cara quantos esperam por ele) — dentro do escopo
+    da equipe."""
+    est = FlexAnuncioEstado
+    q = select(
+        func.count(),
+        func.count().filter(est.observado == "ligado"),
+        func.count().filter(_aguardando(permitidas)),
+        func.count().filter(est.observado == "ligado", est.desejado != "ligado"),
+        func.count().filter(est.observado.is_(None)),
+    ).select_from(est)
+    filtro = _no_escopo(est.integration_id, escopo)
+    if filtro is not None:
+        q = q.where(filtro)
+    row = (await session.execute(q)).one()
     return FlexResumoOut(
         avaliados=int(row[0] or 0),
         ligados=int(row[1] or 0),
@@ -149,7 +204,7 @@ async def _resumo(session: AsyncSession) -> FlexResumoOut:
 @router.get("/anuncios", response_model=FlexAnunciosOut)
 async def anuncios(
     session: Sessao,
-    _user: Ver,
+    user: Ver,
     integration_id: UUID | None = None,
     plataforma: Literal["ml", "shopee"] | None = None,
     desejado: Literal["ligado", "desligado", "inelegivel"] | None = None,
@@ -165,7 +220,11 @@ async def anuncios(
     limit: Annotated[int, Query(ge=1, le=1000)] = 200,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> FlexAnunciosOut:
+    escopo = await _escopo(session, user)
+    permitidas = await _permitidas(session)
     filtros = []
+    if (f := _no_escopo(FlexAnuncioEstado.integration_id, escopo)) is not None:
+        filtros.append(f)
     if integration_id is not None:
         filtros.append(FlexAnuncioEstado.integration_id == integration_id)
     if plataforma is not None:
@@ -176,8 +235,10 @@ async def anuncios(
         filtros.append(FlexAnuncioEstado.observado.is_(None))
     elif observado is not None:
         filtros.append(FlexAnuncioEstado.observado == observado)
-    if aguardando is not None:
-        filtros.append(FlexAnuncioEstado.aguardando_aprovacao.is_(aguardando))
+    if aguardando is True:
+        filtros.append(_aguardando(permitidas))
+    elif aguardando is False:
+        filtros.append(not_(_aguardando(permitidas)))
     if desligar:
         filtros.append(FlexAnuncioEstado.observado == "ligado")
         filtros.append(FlexAnuncioEstado.desejado != "ligado")
@@ -204,7 +265,7 @@ async def anuncios(
         .where(*filtros)
         # Quem espera uma pessoa primeiro; depois o que está/quer ligado.
         .order_by(
-            FlexAnuncioEstado.aguardando_aprovacao.desc(),
+            case((_aguardando(permitidas), 0), else_=1),
             case((FlexAnuncioEstado.observado == "ligado", 0), else_=1),
             case((FlexAnuncioEstado.desejado == "ligado", 0), else_=1),
             FlexAnuncioEstado.atualizado_em.desc(),
@@ -215,8 +276,8 @@ async def anuncios(
     )
     return FlexAnunciosOut(
         total=total,
-        itens=[_anuncio_out(est, nome, titulo) for est, nome, titulo in rows.all()],
-        resumo=await _resumo(session),
+        itens=[_anuncio_out(est, nome, titulo, permitidas) for est, nome, titulo in rows.all()],
+        resumo=await _resumo(session, escopo, permitidas),
     )
 
 
@@ -256,7 +317,7 @@ async def _estado_out(session: AsyncSession, integration_id: UUID, external_id: 
     if row is None:
         return None
     est, nome, titulo = row
-    return _anuncio_out(est, nome, titulo)
+    return _anuncio_out(est, nome, titulo, await _permitidas(session))
 
 
 _ERRO_HTTP = {
@@ -274,7 +335,13 @@ async def aprovar(
     """Aprova LIGAR o Flex neste anúncio (a orientação do ML é que a ativação
     seja decisão deliberada do vendedor). Em piloto/ativo o motor aplica na
     hora; em observar fica registrada. Depois de uma recusa da plataforma,
-    é também o "tente de novo"."""
+    é também o "tente de novo". Conta fora da equipe do usuário: 403."""
+    escopo = await _escopo(session, user)
+    if escopo is not None and integration_id not in escopo:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            detail={"code": "fora_do_escopo", "detalhe": "a conta não é da sua equipe"},
+        )
     try:
         res = await flex_motor.aprovar(integration_id, external_id.strip(), por=user.id)
     except flex_motor.FlexRegraError as exc:
@@ -293,17 +360,23 @@ async def aprovar(
 
 
 @router.post("/emergencia")
-async def emergencia(user: Agir) -> dict:
+async def emergencia(session: Sessao, user: Agir) -> dict:
     """Desliga o Flex de tudo nas contas permitidas e tira toda aprovação.
-    Em observar (ou desligado) só simula — a resposta diz o que faria."""
-    logger.warning("flex_emergencia_pedida", user_id=str(user.id))
-    return await flex_motor.emergencia(por=user.id)
+    Em observar (ou desligado) só simula — sem efeito nenhum; a resposta diz
+    o que faria. Usuário com equipe: só as contas da equipe."""
+    escopo = await _escopo(session, user)
+    logger.warning(
+        "flex_emergencia_pedida",
+        user_id=str(user.id),
+        contas_escopo=None if escopo is None else len(escopo),
+    )
+    return await flex_motor.emergencia(por=user.id, contas_escopo=escopo)
 
 
 @router.get("/log", response_model=list[FlexLogOut])
 async def log(
     session: Sessao,
-    _user: Ver,
+    user: Ver,
     limit: Annotated[int, Query(ge=1, le=1000)] = 200,
     integration_id: UUID | None = None,
     external_id: str | None = None,
@@ -312,6 +385,8 @@ async def log(
     if acao is not None and acao not in FLEX_ACOES:
         raise HTTPException(422, detail={"code": "acao_invalida"})
     filtros = []
+    if (f := _no_escopo(FlexLog.integration_id, await _escopo(session, user))) is not None:
+        filtros.append(f)
     if integration_id is not None:
         filtros.append(FlexLog.integration_id == integration_id)
     if external_id:
@@ -333,29 +408,70 @@ async def log(
     return out
 
 
+def _pedido_no_escopo(scope):
+    """Pedido Flex da equipe: pela conta gravada OU pela loja do pedido no
+    Bling (o pedido marcado só pela Logística ainda não tem conta)."""
+    if scope.unrestricted:
+        return None
+    ors = []
+    if scope.integration_ids:
+        ors.append(FlexPedido.integration_id.in_(list(scope.integration_ids)))
+    if scope.bling_store_ids:
+        ors.append(
+            exists().where(
+                BlingOrder.bling_id == FlexPedido.bling_id,
+                BlingOrder.loja.in_(list(scope.bling_store_ids)),
+            )
+        )
+    return or_(*ors) if ors else false()
+
+
+def _saiu_sem_sp():
+    """Saiu (em andamento/atendido) sem ter ido ao .sp e sem o acerto do
+    estoque: continua na lista (e no desconto do saldo Flex). Filtro largo do
+    banco — a conferência pelos SKUs (só conta peça com lote fora do .sp) é
+    `flex_motor.acerto_pendente`, na resposta."""
+    return and_(
+        FlexPedido.no_sp.is_(False),
+        FlexPedido.acertado_em.is_(None),
+        exists().where(
+            BlingOrder.bling_id == FlexPedido.bling_id,
+            BlingOrder.situacao.in_(flex_motor.SITUACOES_SAIU),
+        ),
+    )
+
+
 @router.get("/pedidos", response_model=list[FlexPedidoOut])
 async def pedidos(
     session: Sessao,
-    _user: Ver,
+    user: Ver,
     so_alerta: bool = False,
     # Só os que ainda esperam alguém: some o pedido que no Bling já saiu (em
     # andamento), foi atendido, cancelado ou excluído — a régua do saldo Flex.
-    # Pedido que o espelho ainda não tem continua (não se sabe: mostra).
+    # Pedido que o espelho ainda não tem continua (não se sabe: mostra). O que
+    # SAIU sem passar pelo .sp continua até o acerto do estoque.
     abertos: bool = False,
     dias: Annotated[int, Query(ge=1, le=90)] = 30,
     limit: Annotated[int, Query(ge=1, le=1000)] = 300,
 ) -> list[FlexPedidoOut]:
     """Pedidos Flex detectados nos últimos `dias`, os com aviso (o .sp não
-    cobre — etapa 2) primeiro, depois pelo prazo de despacho."""
+    cobre — etapa 2) primeiro, depois pelo prazo de despacho. `so_alerta`:
+    os com aviso E os que saíram sem passar pelo .sp (acerto pendente) —
+    estes, sem o corte de dias: valem até alguém acertar."""
     corte = datetime.now(UTC) - timedelta(days=dias)
-    filtros = [FlexPedido.detectado_em >= corte]
+    filtros = [or_(FlexPedido.detectado_em >= corte, _saiu_sem_sp())]
+    if (f := _pedido_no_escopo(await resolve_team_scope(session, user))) is not None:
+        filtros.append(f)
     if so_alerta:
-        filtros.append(FlexPedido.alerta.is_not(None))
+        filtros.append(or_(FlexPedido.alerta.is_not(None), _saiu_sem_sp()))
     if abertos:
         filtros.append(
-            ~exists().where(
-                BlingOrder.bling_id == FlexPedido.bling_id,
-                BlingOrder.situacao.in_(flex_motor.SITUACOES_FECHADAS),
+            or_(
+                ~exists().where(
+                    BlingOrder.bling_id == FlexPedido.bling_id,
+                    BlingOrder.situacao.in_(flex_motor.SITUACOES_FECHADAS),
+                ),
+                _saiu_sem_sp(),
             )
         )
     rows = await session.execute(
@@ -390,21 +506,86 @@ async def pedidos(
             )
             if r.item_codigo:
                 d["skus"].append(r.item_codigo)
-    return [
-        FlexPedidoOut(
-            bling_id=fp.bling_id,
-            numero=itens.get(fp.bling_id, {}).get("numero"),
-            plataforma=fp.plataforma,
-            integration_id=fp.integration_id,
-            conta=nome,
-            numeroloja=fp.numeroloja,
-            envio_tipo=fp.envio_tipo,
-            prazo=fp.prazo,
-            detectado_em=fp.detectado_em,
-            no_sp=fp.no_sp,
-            alerta=fp.alerta,
-            situacao=itens.get(fp.bling_id, {}).get("situacao"),
-            skus=itens.get(fp.bling_id, {}).get("skus", []),
+    out: list[FlexPedidoOut] = []
+    for fp, nome in linhas:
+        info = itens.get(fp.bling_id, {})
+        skus = info.get("skus", [])
+        pendente = flex_motor.acerto_pendente(info.get("situacao"), fp.no_sp, fp.acertado_em, skus)
+        # O banco trouxe largo (`_saiu_sem_sp`); aqui só fica o que espera
+        # mesmo o acerto — o resto segue as réguas de sempre.
+        if not pendente:
+            if fp.detectado_em < corte:
+                continue
+            if so_alerta and fp.alerta is None:
+                continue
+            if abertos and info.get("situacao") in flex_motor.SITUACOES_FECHADAS:
+                continue
+        out.append(
+            FlexPedidoOut(
+                bling_id=fp.bling_id,
+                numero=info.get("numero"),
+                plataforma=fp.plataforma,
+                integration_id=fp.integration_id,
+                conta=nome,
+                numeroloja=fp.numeroloja,
+                envio_tipo=fp.envio_tipo,
+                prazo=fp.prazo,
+                detectado_em=fp.detectado_em,
+                no_sp=fp.no_sp,
+                alerta=fp.alerta,
+                situacao=info.get("situacao"),
+                skus=skus,
+                acerto_pendente=pendente,
+                acertado_em=fp.acertado_em,
+            )
         )
-        for fp, nome in linhas
-    ]
+    return out
+
+
+@router.post("/pedidos/{bling_id}/acertado", response_model=FlexAcertoOut)
+async def acertado(bling_id: int, session: Sessao, user: Agir) -> FlexAcertoOut:
+    """A pessoa acertou no Bling o estoque do pedido Flex que saiu de São
+    Bernardo sem passar pelo .sp (a transferência do lote vendido para o .sp):
+    o saldo Flex para de descontar o pedido. Só para pedido que saiu."""
+    escopo = await resolve_team_scope(session, user)
+    filtros = [FlexPedido.bling_id == bling_id]
+    if (f := _pedido_no_escopo(escopo)) is not None:
+        filtros.append(f)
+    fp = (await session.execute(select(FlexPedido).where(*filtros))).scalar_one_or_none()
+    if fp is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail={"code": "pedido_nao_encontrado"})
+    itens = (
+        await session.execute(
+            select(BlingOrder.situacao, BlingOrder.item_codigo).where(
+                BlingOrder.bling_id == bling_id
+            )
+        )
+    ).all()
+    situacao = itens[0][0] if itens else None
+    if not flex_motor.acerto_pendente(situacao, fp.no_sp, fp.acertado_em, [c for _, c in itens]):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail={
+                "code": "sem_acerto_pendente",
+                "detalhe": "o pedido não saiu sem passar pelo .sp (ou já foi acertado)",
+            },
+        )
+    agora = datetime.now(UTC)
+    fp.acertado_em = agora
+    fp.acertado_por = user.id
+    fp.atualizado_em = agora
+    session.add(
+        FlexLog(
+            integration_id=fp.integration_id,
+            plataforma=fp.plataforma,
+            bling_id=fp.bling_id,
+            sku=", ".join(c for _, c in itens if c) or None,
+            acao="acertar_estoque",
+            modo=flex_config.modo(),
+            resultado="ok",
+            motivo="estoque do pedido Flex acertado no Bling (saiu sem passar pelo .sp)",
+            por=user.id,
+        )
+    )
+    await session.commit()
+    return FlexAcertoOut(bling_id=bling_id, acertado_em=agora)

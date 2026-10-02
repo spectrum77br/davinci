@@ -56,6 +56,14 @@ só. Se o .sp não cobre (saldo virtual do Bling na hora, mesma régua de
 `flex_pedido.alerta`, a trilha em `flex_log` e um aviso no sino dos admins —
 a decisão (separar em SP, transferir peça, cancelar) é de uma pessoa. Ver
 `_decidir_flex`. Liga/desliga por FLEX_PEDIDO_NO_SP (ligado por padrão).
+Revisão de 02/10/2026: (1) os pedidos Flex da rodada vêm ANTES de todos os
+normais — um normal mais antigo com prioridade .sp não leva a última peça de
+São Bernardo; (2) o .sp que um pedido Flex sem peça precisa fica segurado
+para os normais (`_reserva_flex`); (3) pedido ML/Shopee recém-chegado sem o
+tipo de envio lido espera (`_esperando_tipo_envio`, até
+`flex_espera_envio_min`) — sem isso a NF automática o pegava como normal;
+(4) pedido Flex reconhecido depois de entrar na fila da NF não é trocado
+(aviso para uma pessoa).
 Toda troca vira linha no margem_audit (acao='sku',
 origem='prioridade_estoque', mudado_por=None = robô) E linha datada nas
 Observações do pedido no Bling ("dd/mm - SKU trocado pela prioridade de
@@ -89,8 +97,10 @@ from app.models import (
     FlexPedido,
     Logistica,
     MargemAudit,
+    NfFaturamento,
     PricingProduct,
     Product,
+    StoreInfo,
     User,
     UserRole,
 )
@@ -232,6 +242,7 @@ async def _lote_com_saldo(
     qtd: int,
     redirecionar: bool,
     existentes: set[str] | None = None,
+    reserva: dict[str, int] | None = None,
 ) -> tuple[str | None, dict | None]:
     """De qual lote a peça vai sair, de verdade.
 
@@ -250,6 +261,10 @@ async def _lote_com_saldo(
     pedido); lote para onde o item MUDA precisa de saldo >= quantidade. Se a
     consulta de um lote que vem antes na ordem falhar, levanta
     `_ConsultaFalhouError` — sem saber se a prioridade tem peça, não troca nada.
+
+    `reserva`: peças do .sp seguradas para pedidos Flex sem peça (ver
+    `_reserva_flex`) — o lote para onde o item MUDA precisa cobrir a
+    quantidade E o que está segurado. O lote atual não muda de régua.
     """
     atual = (codigo or "").strip().lower()
 
@@ -275,7 +290,7 @@ async def _lote_com_saldo(
         if (prod.get("sku") or "").strip().lower() != alvo.strip().lower():
             continue
         saldo = prod.get("stock")
-        minimo = 0 if alvo.strip().lower() == atual else qtd
+        minimo = 0 if alvo.strip().lower() == atual else qtd + _reservado(alvo, reserva)
         if saldo is None or float(saldo) < minimo:
             continue
         return alvo, prod
@@ -300,7 +315,9 @@ def _saldo(prod: dict | None) -> float | None:
     return float(prod["stock"])
 
 
-async def _cobertura(client, cache: dict, itens: list[tuple], estoque: str) -> dict | None:
+async def _cobertura(
+    client, cache: dict, itens: list[tuple], estoque: str, reserva: dict[str, int] | None = None
+) -> dict | None:
     """O estoque `estoque` consegue atender o pedido INTEIRO? Devolve o plano
     (trocas, quanto estoque tem, o que consome) ou None se falta alguma coisa.
 
@@ -312,6 +329,8 @@ async def _cobertura(client, cache: dict, itens: list[tuple], estoque: str) -> d
     Dois kits que mudam juntos e usam a mesma peça (o fone a001.sp) somam:
     o Bling mostra o kit pelo componente mais escasso, então 1 fone aparece
     como 1 em cada kit — a peça é conferida pela soma.
+    `reserva`: peças do .sp seguradas para pedidos Flex sem peça (só para o
+    item que MUDA de estoque — ver `_reserva_flex`).
     """
     total = 0.0
     demanda: dict[str, int] = {}
@@ -333,7 +352,7 @@ async def _cobertura(client, cache: dict, itens: list[tuple], estoque: str) -> d
     for alvo, qtd in demanda.items():
         prod = await _produto_exato(client, cache, alvo)
         saldo = _saldo(prod)
-        if saldo is None or saldo < qtd:
+        if saldo is None or saldo < qtd + _reservado(alvo, reserva):
             return None
         total += saldo
         produtos[alvo] = prod
@@ -351,7 +370,7 @@ async def _cobertura(client, cache: dict, itens: list[tuple], estoque: str) -> d
         if len(fontes[peca]) < 2:
             continue  # peça de um kit só: o saldo do kit já cobre
         saldo = _saldo(await _produto_exato(client, cache, peca))
-        if saldo is None or saldo < qtd:
+        if saldo is None or saldo < qtd + _reservado(peca, reserva):
             return None
         consumo[peca] = qtd
 
@@ -378,6 +397,7 @@ async def _plano_estoque_unico(
     mapa: dict[str, str],
     redireciona,
     existentes: set[str] | None = None,
+    reserva: dict[str, int] | None = None,
 ) -> dict | None:
     """Põe o pedido INTEIRO num estoque só (Vinicius, 23/09/2026).
 
@@ -437,7 +457,7 @@ async def _plano_estoque_unico(
 
     async def cobre(estoque: str) -> dict | None:
         if estoque not in avaliado:
-            avaliado[estoque] = await _cobertura(client, cache, itens, estoque)
+            avaliado[estoque] = await _cobertura(client, cache, itens, estoque, reserva)
         return avaliado[estoque]
 
     def melhor(opcoes: list[dict]) -> dict:
@@ -633,9 +653,11 @@ async def _decidir_pedido(
     summary: dict,
     descontos: _Descontos,
     existentes: set[str] | None = None,
+    reserva: dict[str, int] | None = None,
 ) -> list[dict]:
     """Planeja as trocas de UM pedido (sem PUT). Pode levantar
     `_ConsultaFalhouError` — aí o caller devolve os descontos e adia o pedido.
+    `reserva`: o .sp segurado para pedidos Flex sem peça (`_reserva_flex`).
 
     Pedido num estoque só: decide o pedido INTEIRO antes do item a item. Os
     itens que o plano cobre não passam pela regra item a item (senão duas
@@ -650,6 +672,7 @@ async def _decidir_pedido(
             mapa=mapa,
             redireciona=_redireciona,
             existentes=existentes,
+            reserva=reserva,
         )
         if plano and plano.get("estoque"):
             decididos = set(plano["itens"])
@@ -706,6 +729,7 @@ async def _decidir_pedido(
             qtd=qtd,
             redirecionar=redirecionar,
             existentes=existentes,
+            reserva=reserva,
         )
         if alvo is None:
             summary["sem_saldo_alvo"] += 1
@@ -751,10 +775,133 @@ async def _decidir_pedido(
 # ---- Pedido Flex: sai SEMPRE do .sp ------------------------------------------
 
 _LOTE_FLEX = "sp"
+_FALTA_NA_FILA_DA_NF = (
+    "a planilha da NF já saiu com o lote antigo — troque o item para o .sp à mão e refaça a NF"
+)
 _ROTULO_PLATAFORMA = {
     flex_envio.PLATAFORMA_ML: "Mercado Livre",
     flex_envio.PLATAFORMA_SHOPEE: "Shopee",
 }
+
+
+def _reservado(sku: str, reserva: dict[str, int] | None) -> int:
+    """Quanto do `sku` (lote de DESTINO) está segurado para pedidos Flex sem
+    peça. Kit: a peça mais segurada (o saldo do kit já é o da mais escassa)."""
+    if not reserva:
+        return 0
+    pecas = [p.strip() for p in (sku or "").lower().split("+") if p.strip()]
+    return max((int(reserva.get(p, 0)) for p in pecas), default=0)
+
+
+def _reserva_flex(qtd_por_codigo: dict[str, int]) -> Counter:
+    """As peças do .sp que um pedido Flex SEM peça suficiente precisa (cada
+    pedaço com lote de venda que ainda não está no .sp, pela quantidade).
+
+    Ficam seguradas na rodada: o pedido normal não vai para o .sp com elas.
+    A decisão do pedido Flex sem peça é de uma pessoa ("separar em SP,
+    transferir a peça para o .sp ou cancelar") — se a última peça de São
+    Bernardo for para um pedido que podia sair do CI, separar em SP deixa de
+    ser opção."""
+    reserva: Counter = Counter()
+    for cod, qtd in qtd_por_codigo.items():
+        for pedaco in (cod or "").lower().split("+"):
+            p = pedaco.strip()
+            tag = _tag_de(p) if p else None
+            if tag in estoque_familia.LOTES_DE_VENDA and tag != _LOTE_FLEX:
+                reserva[f"{p[: -(len(tag) + 1)]}.{_LOTE_FLEX}"] += int(qtd or 1)
+    return reserva
+
+
+async def _reserva_flex_fora_da_rodada(session: AsyncSession, numeros: set[str]) -> Counter:
+    """O .sp segurado pelos pedidos Flex sem peça que NÃO estão nesta rodada
+    (o gancho do enfileirar só traz os seus pedidos): os que estão em aberto
+    com o aviso gravado (`flex_pedido.alerta`) e ainda fora do .sp."""
+    rows = await session.execute(
+        select(BlingOrder.numero, BlingOrder.item_codigo, BlingOrder.item_quantidade)
+        .join(FlexPedido, FlexPedido.bling_id == BlingOrder.bling_id)
+        .where(
+            FlexPedido.alerta.is_not(None),
+            FlexPedido.no_sp.is_(False),
+            BlingOrder.situacao == _SITUACAO_EM_ABERTO,
+            BlingOrder.item_codigo.is_not(None),
+        )
+    )
+    por_pedido: dict[str, dict[str, int]] = {}
+    for numero, cod, qtd in rows.all():
+        if numero in numeros:
+            continue
+        itens = por_pedido.setdefault(numero, {})
+        itens[cod] = itens.get(cod, 0) + int(qtd or 1)
+    reserva: Counter = Counter()
+    for itens in por_pedido.values():
+        reserva.update(_reserva_flex(itens))
+    return reserva
+
+
+async def _na_fila_da_nf(session: AsyncSession, numeros: list[str]) -> set[str]:
+    """Pedidos já na fila da NF (planilha gerada, importação pendente:
+    `nf_faturamento.status_faturamento = 'processando'`). Trocar o item agora
+    deixaria a NF com o SKU antigo e o pedido com o novo."""
+    if not numeros:
+        return set()
+    rows = await session.execute(
+        select(NfFaturamento.pedido_bling).where(
+            NfFaturamento.pedido_bling.in_(numeros),
+            NfFaturamento.status_faturamento == "processando",
+        )
+    )
+    return {str(n) for (n,) in rows.all()}
+
+
+# Plataformas em que existe pedido Flex (código de `store_info.platform`).
+_PLATAFORMAS_COM_FLEX = ("ml", "shopee")
+
+
+async def _esperando_tipo_envio(
+    session: AsyncSession, numeros: list[str], agora: datetime
+) -> set[str]:
+    """Pedidos ML/Shopee que acabaram de cair e cujo tipo de envio (Flex ou
+    não) ainda ninguém leu — ficam para a próxima rodada.
+
+    Quem reconhece o Flex é o shipment check (de minuto em minuto, ver
+    services/flex_envio). Sem esta espera, a NF automática (minutos pares)
+    pega o pedido Flex antes dele: o trata como normal, pode tirá-lo do .sp
+    e gera a planilha com o lote errado. Lido = tem o prazo de despacho
+    gravado (o shipment check grava o prazo e o `flex_pedido` na MESMA
+    transação, a partir da mesma leitura) ou a Logística já tem o tipo.
+    A espera tem teto (`flex_espera_envio_min`, contado de quando o pedido
+    entrou no espelho): conta sem acesso à API não segura pedido para sempre."""
+    minutos = int(getattr(get_settings(), "flex_espera_envio_min", 0) or 0)
+    if minutos <= 0 or not numeros:
+        return set()
+    corte = agora - timedelta(minutes=minutos)
+    rows = await session.execute(
+        select(BlingOrder.numero)
+        .join(StoreInfo, StoreInfo.bling_store_id == BlingOrder.loja)
+        .where(
+            BlingOrder.numero.in_(numeros),
+            func.lower(StoreInfo.platform).in_(_PLATAFORMAS_COM_FLEX),
+        )
+        .group_by(BlingOrder.numero)
+        .having(
+            func.min(BlingOrder.created_at) >= corte,
+            func.bool_and(BlingOrder.marketplace_ship_deadline.is_(None)),
+        )
+    )
+    novos = {str(n) for (n,) in rows.all()}
+    if not novos:
+        return set()
+    lidos = {
+        str(n)
+        for (n,) in (
+            await session.execute(
+                select(Logistica.pedido_bling).where(
+                    Logistica.pedido_bling.in_(list(novos)), Logistica.envio_flex.is_not(None)
+                )
+            )
+        ).all()
+    }
+    return novos - lidos
 
 
 @dataclass
@@ -921,37 +1068,53 @@ async def _decidir_flex(client, cache: dict, *, qtd_por_codigo: dict[str, int]) 
 
 
 async def _flex_gravar_estado(
-    session: AsyncSession, pf: _PedidoFlex, *, no_sp: bool, alerta: str | None
+    session: AsyncSession,
+    pf: _PedidoFlex,
+    *,
+    no_sp: bool,
+    alerta: str | None,
+    sp_em: datetime | None = None,
 ) -> None:
     """`flex_pedido.no_sp`/`alerta`, só quando mudou: o sweep passa pelo mesmo
     pedido a cada rodada. Pedido marcado só pela Logística ganha a linha aqui
-    (o shipment check completa conta/prazo quando ler o envio)."""
-    if pf.existe and pf.no_sp == no_sp and pf.alerta == alerta:
+    (o shipment check completa conta/prazo quando ler o envio). `sp_em`: o
+    robô ACABOU de levar o pedido ao .sp — o motor do Flex segue descontando
+    o pedido até o produto .sp ser atualizado depois disso (o webhook do
+    Bling que traz a reserva às vezes não vem)."""
+    if pf.existe and pf.no_sp == no_sp and pf.alerta == alerta and sp_em is None:
         return
     if not pf.existe and not no_sp and alerta is None:
         return  # nada a registrar
-    stmt = pg_insert(FlexPedido).values(
-        bling_id=pf.bling_id,
-        plataforma=pf.plataforma,
-        integration_id=pf.integration_id,
-        numeroloja=pf.numeroloja,
-        envio_tipo=pf.envio_tipo,
-        no_sp=no_sp,
-        alerta=alerta,
-    )
-    stmt = stmt.on_conflict_do_update(
-        index_elements=[FlexPedido.bling_id],
-        set_={
-            "no_sp": stmt.excluded.no_sp,
-            "alerta": stmt.excluded.alerta,
-            "atualizado_em": func.now(),
-        },
-    )
+    valores = {
+        "bling_id": pf.bling_id,
+        "plataforma": pf.plataforma,
+        "integration_id": pf.integration_id,
+        "numeroloja": pf.numeroloja,
+        "envio_tipo": pf.envio_tipo,
+        "no_sp": no_sp,
+        "alerta": alerta,
+    }
+    if sp_em is not None:
+        valores["sp_em"] = sp_em
+    stmt = pg_insert(FlexPedido).values(**valores)
+    mudar = {
+        "no_sp": stmt.excluded.no_sp,
+        "alerta": stmt.excluded.alerta,
+        "atualizado_em": func.now(),
+    }
+    if sp_em is not None:
+        mudar["sp_em"] = stmt.excluded.sp_em
+    stmt = stmt.on_conflict_do_update(index_elements=[FlexPedido.bling_id], set_=mudar)
     await session.execute(stmt)
 
 
 async def _flex_avisar_pessoas(
-    session: AsyncSession, pf: _PedidoFlex, *, numero: str, faltas: list[str]
+    session: AsyncSession,
+    pf: _PedidoFlex,
+    *,
+    numero: str,
+    faltas: list[str],
+    na_fila_da_nf: bool = False,
 ) -> int:
     """Sino dos admins (o mesmo dos outros robôs; sem Threema e sem Telegram).
     Um aviso por pedido: o dedupe segura a repetição a cada rodada."""
@@ -960,11 +1123,19 @@ async def _flex_avisar_pessoas(
     )
     rotulo = _ROTULO_PLATAFORMA.get(pf.plataforma, pf.plataforma)
     loja = f"{rotulo} {pf.numeroloja}" if pf.numeroloja else rotulo
-    mensagem = (
-        f"O pedido {numero} ({loja}) sai pelo Flex, de São Bernardo, mas o estoque "
-        f"SP não cobre: {'; '.join(faltas)}. O robô NÃO trocou o lote. Decida: "
-        "separar em SP, transferir a peça para o .sp ou cancelar o pedido."
-    )
+    if na_fila_da_nf:
+        mensagem = (
+            f"O pedido {numero} ({loja}) sai pelo Flex, de São Bernardo, mas só foi reconhecido "
+            "como Flex DEPOIS de entrar na fila da NF — a planilha saiu com o lote antigo. O robô "
+            "NÃO trocou o lote. Troque o item para o .sp à mão e refaça a NF (ou separe em SP e "
+            "acerte o estoque no Bling depois)."
+        )
+    else:
+        mensagem = (
+            f"O pedido {numero} ({loja}) sai pelo Flex, de São Bernardo, mas o estoque "
+            f"SP não cobre: {'; '.join(faltas)}. O robô NÃO trocou o lote. Decida: "
+            "separar em SP, transferir a peça para o .sp ou cancelar o pedido."
+        )
     avisados = 0
     for uid in admins:
         criado = await emit_alert(
@@ -1000,6 +1171,8 @@ async def _flex_registrar(
     resultado: str = "ok",
     sku: str | None = None,
     erro: str | None = None,
+    sp_em: datetime | None = None,
+    na_fila_da_nf: bool = False,
 ) -> None:
     """Estado do pedido Flex + trilha (`flex_log`) + aviso, quando o alerta é
     NOVO. Num SAVEPOINT: o registro nunca desfaz o que já foi feito no Bling
@@ -1007,7 +1180,7 @@ async def _flex_registrar(
     alerta_novo = alerta is not None and alerta != pf.alerta
     try:
         async with session.begin_nested():
-            await _flex_gravar_estado(session, pf, no_sp=no_sp, alerta=alerta)
+            await _flex_gravar_estado(session, pf, no_sp=no_sp, alerta=alerta, sp_em=sp_em)
             # O aviso repetido a cada rodada não vira linha nova na trilha.
             if acao and (acao != "pedido_sem_sp" or alerta_novo):
                 session.add(
@@ -1023,7 +1196,9 @@ async def _flex_registrar(
                     )
                 )
             if alerta_novo:
-                await _flex_avisar_pessoas(session, pf, numero=numero, faltas=faltas or [])
+                await _flex_avisar_pessoas(
+                    session, pf, numero=numero, faltas=faltas or [], na_fila_da_nf=na_fila_da_nf
+                )
     except Exception as exc:  # noqa: BLE001 — registro é best-effort
         logger.warning(
             "prioridade_estoque_flex_registro_falhou", pedido=numero, erro=str(exc)[:200]
@@ -1093,10 +1268,36 @@ async def aplicar_prioridade_estoque(
     # prioridade cadastrada e sem o pedido num estoque só, só ele tem o que
     # decidir — os outros nem consultam o Bling.
     flex = await _pedidos_flex(session, por_pedido) if flex_ligado else {}
+    if flex_ligado:
+        # Pedido ML/Shopee recém-chegado sem o tipo de envio lido: pode ser
+        # Flex — fica para a próxima rodada (o enfileirar também o segura).
+        esperando = await _esperando_tipo_envio(
+            session, [n for n in por_pedido if n not in flex], datetime.now(UTC)
+        )
+        if esperando:
+            for n in sorted(esperando):
+                summary.setdefault("adiados", []).append(n)
+                summary.setdefault("adiados_envio", []).append(n)
+                por_pedido.pop(n, None)
+            logger.info("prioridade_estoque_esperando_tipo_envio", pedidos=sorted(esperando))
     if not mapa and not estoque_unico:
         por_pedido = {n: itens for n, itens in por_pedido.items() if n in flex}
-        if not por_pedido:
-            return summary
+    if not por_pedido:
+        return summary
+    # Pedido Flex PRIMEIRO, todos, antes de qualquer pedido normal (a ordem
+    # do número vale dentro de cada grupo): a regra dele é obrigatória, e um
+    # pedido normal mais antigo com prioridade .sp pegaria a última peça de
+    # São Bernardo que o Flex precisa — o normal pode sair do CI, o Flex não.
+    por_pedido = dict(sorted(por_pedido.items(), key=lambda kv: kv[0] not in flex))
+    # O .sp que os pedidos Flex sem peça precisam fica segurado para os
+    # pedidos normais (ver `_reserva_flex`): os desta rodada entram no laço;
+    # os de fora (o gancho do enfileirar só traz os seus) vêm do banco.
+    reserva: Counter = Counter()
+    if flex_ligado:
+        reserva.update(await _reserva_flex_fora_da_rodada(session, set(por_pedido)))
+    # Pedido Flex reconhecido DEPOIS de entrar na fila da NF (o tipo de envio
+    # chegou além da espera — ver `_esperando_tipo_envio`): não troca, avisa.
+    flex_na_fila = await _na_fila_da_nf(session, [n for n in por_pedido if n in flex])
 
     client = await nf_emissao_gerar._bling_client_opt(session)
     if client is None:
@@ -1132,7 +1333,16 @@ async def aplicar_prioridade_estoque(
         descontos = _Descontos()
         faltas_flex: list[str] = []
         try:
-            if pf is not None:
+            if pf is not None and numero in flex_na_fila and not all(
+                flex_envio.item_no_sp(c) for c in qtd_por_codigo
+            ):
+                # A planilha da NF já saiu com o lote antigo: trocar agora
+                # deixaria a NF e o pedido com SKUs diferentes. Uma pessoa
+                # decide (troca à mão e refaz a NF, ou acerta o estoque).
+                summary["flex_pedidos"] = summary.get("flex_pedidos", 0) + 1
+                faltas_flex = [_FALTA_NA_FILA_DA_NF]
+                trocas = []
+            elif pf is not None:
                 # Pedido Flex: o mapa, o estoque único e os irmãos não entram.
                 summary["flex_pedidos"] = summary.get("flex_pedidos", 0) + 1
                 plano_flex = await _decidir_flex(
@@ -1155,6 +1365,7 @@ async def aplicar_prioridade_estoque(
                     summary=summary,
                     descontos=descontos,
                     existentes=existentes,
+                    reserva=dict(reserva),
                 )
         except _ConsultaFalhouError as exc:
             descontos.devolver()
@@ -1169,7 +1380,11 @@ async def aplicar_prioridade_estoque(
             # .sp com peça (apaga o aviso de uma rodada anterior, se houver).
             no_sp = all(flex_envio.item_no_sp(c) for c in qtd_por_codigo)
             if faltas_flex:
+                na_fila = faltas_flex == [_FALTA_NA_FILA_DA_NF]
                 summary["flex_sem_sp"] = summary.get("flex_sem_sp", 0) + 1
+                if na_fila:
+                    summary["flex_na_fila_da_nf"] = summary.get("flex_na_fila_da_nf", 0) + 1
+                reserva.update(_reserva_flex(qtd_por_codigo))
                 logger.warning("prioridade_estoque_flex_sem_sp", pedido=numero, faltas=faltas_flex)
                 await _flex_registrar(
                     session,
@@ -1177,13 +1392,17 @@ async def aplicar_prioridade_estoque(
                     numero=numero,
                     no_sp=no_sp,
                     alerta=(
-                        "O .sp não cobre este pedido Flex e ele NÃO foi trocado de lote: "
+                        "Pedido Flex reconhecido depois de entrar na fila da NF e ele NÃO foi "
+                        "trocado de lote: " + _FALTA_NA_FILA_DA_NF
+                        if na_fila
+                        else "O .sp não cobre este pedido Flex e ele NÃO foi trocado de lote: "
                         + "; ".join(faltas_flex)
                     ),
                     faltas=faltas_flex,
                     acao="pedido_sem_sp",
                     resultado="pendente",
                     sku=", ".join(qtd_por_codigo),
+                    na_fila_da_nf=na_fila,
                 )
             else:
                 await _flex_registrar(session, pf, numero=numero, no_sp=no_sp)
@@ -1248,6 +1467,9 @@ async def aplicar_prioridade_estoque(
                 linha = f"SKU trocado pela prioridade de estoque{onde}: {nota}"
             body["observacoes"] = compose_observacoes(order.get("observacoes"), linha)
             await client.update_order(int(bling_id), body)
+            # Depois do PUT: o que o produto .sp receber do Bling a partir
+            # daqui já traz a reserva deste pedido (ver flex_motor).
+            trocado_em = datetime.now(UTC)
         except Exception as exc:  # noqa: BLE001 — PUT revalida a venda inteira
             descontos.devolver()
             # Timeout/504 pode ter sido processado pelo Bling: o próximo pedido
@@ -1339,15 +1561,17 @@ async def aplicar_prioridade_estoque(
             novo_de = {t["antigo"]: t["alvo"] for t in aplicadas}
             finais = [novo_de.get(c, c) for c in qtd_por_codigo]
             summary["flex_trocados"] = summary.get("flex_trocados", 0) + 1
+            no_sp_final = all(flex_envio.item_no_sp(c) for c in finais)
             await _flex_registrar(
                 session,
                 pf,
                 numero=numero,
-                no_sp=all(flex_envio.item_no_sp(c) for c in finais),
+                no_sp=no_sp_final,
                 alerta=None,
                 acao="pedido_sp",
                 resultado="ok",
                 sku=nota,
+                sp_em=trocado_em if no_sp_final else None,
             )
 
     return summary

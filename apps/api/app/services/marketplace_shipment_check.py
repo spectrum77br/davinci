@@ -353,9 +353,11 @@ async def run_check_marketplace_shipped_orders() -> dict[str, int]:
         "bling_updated": 0, "local_updated": 0, "deadlines_updated": 0,
         "errors": 0,
     }
-    # Tipo de envio (Flex) lido de carona nas consultas abaixo — gravado no
-    # fim, numa transação própria (ver _registrar_flex).
+    # Tipo de envio (Flex) lido de carona nas consultas abaixo. O pedido Flex
+    # (`flex_pedido`) é gravado junto com o prazo, na transação da varredura;
+    # a Logística, no fim, numa transação própria (ver _registrar_flex).
     envios_lidos: list[flex_envio.EnvioLido] = []
+    flex_mudaram = 0
     async with session_scope() as session:
         # Lock transacional: com o cron a cada 1 min (era 5) um tick lento
         # ainda pode estar rodando quando o próximo dispara. Sem o lock os
@@ -440,9 +442,24 @@ async def run_check_marketplace_shipped_orders() -> dict[str, int]:
                 continue
             summary["shipped_found"] += len(shipped_bling_ids)
             summary["errors"] += len(query_errors)
-            envios_lidos.extend(
-                _envios_lidos(integration, envios, cand_by_id, deadlines)
-            )
+            lidos_loja = _envios_lidos(integration, envios, cand_by_id, deadlines)
+            envios_lidos.extend(lidos_loja)
+            # Pedido Flex na MESMA transação do prazo logo abaixo: o robô de
+            # prioridade e a NF automática esperam o pedido ML/Shopee novo até
+            # ele ter prazo ou tipo de envio (prioridade_estoque.
+            # _esperando_tipo_envio) — com os dois juntos, "tem prazo e não
+            # está em flex_pedido" é "não é Flex", nunca "ainda não gravou".
+            # Num SAVEPOINT: falha aqui não derruba a varredura de envio.
+            if lidos_loja:
+                try:
+                    async with session.begin_nested():
+                        flex_mudaram += await flex_envio.registrar_pedidos_flex(
+                            session, lidos_loja
+                        )
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(
+                        "shipment_check_flex_pedido_falhou", loja=loja, err=str(e)[:200]
+                    )
 
             # Prazo de despacho ("despachar até") capturado nas MESMAS
             # consultas acima — carimba mesmo quando nada foi enviado (é
@@ -584,6 +601,7 @@ async def run_check_marketplace_shipped_orders() -> dict[str, int]:
                     await _enfileirar_financeiro_amazon(int(bling_id))
 
     if envios_lidos:
+        summary["flex_pedidos"] = flex_mudaram
         await _registrar_flex(envios_lidos, summary)
 
     # `situacoes` no log denuncia worker com imagem velha. Em 04/09 o
@@ -632,21 +650,20 @@ def _envios_lidos(
 
 
 async def _registrar_flex(lidos: list[flex_envio.EnvioLido], summary: dict[str, int]) -> None:
-    """Grava os pedidos Flex (`flex_pedido`) e o tipo de envio nas linhas da
-    Logística, numa transação PRÓPRIA e curta: a do sweep segura o lock e as
-    chamadas ao Bling por segundos — escrever na `logistica` dentro dela
-    prenderia a linha que o motor de 5 em 5 min quer atualizar. Falha aqui
-    não derruba a varredura de envio (o minuto seguinte lê de novo)."""
+    """Grava o tipo de envio nas linhas da Logística, numa transação PRÓPRIA
+    e curta: a do sweep segura o lock e as chamadas ao Bling por segundos —
+    escrever na `logistica` dentro dela prenderia a linha que o motor de 5 em
+    5 min quer atualizar. Falha aqui não derruba a varredura de envio (o
+    minuto seguinte lê de novo). Os pedidos Flex (`flex_pedido`) já foram
+    gravados na transação da varredura, junto com o prazo; mudou algum, o
+    motor do Flex é avisado."""
+    summary["flex_lidos"] = len(lidos)
     try:
         async with session_scope() as session:
-            res = await flex_envio.registrar_envios(session, lidos)
-        summary["flex_lidos"] = len(lidos)
-        summary["flex_pedidos"] = res["flex_pedidos"]
-        summary["flex_logistica"] = res["logistica"]
+            summary["flex_logistica"] = await flex_envio.registrar_logistica(session, lidos)
     except Exception as e:  # noqa: BLE001
         logger.warning("shipment_check_flex_falhou", lidos=len(lidos), err=str(e)[:200])
-        return
-    if res["flex_pedidos"]:
+    if summary.get("flex_pedidos"):
         await _reavaliar_flex()
 
 
@@ -1096,10 +1113,13 @@ async def _ml_shipped_for(
             numeroloja=o.numeroloja, shipment_id=shipment_id, err=str(e)[:200],
         )
         return None
-    if envios is not None and o.bling_id:
-        campos = flex_envio.campos_envio(flex_envio.PLATAFORMA_ML, ship_data)
-        if campos:
-            envios[int(o.bling_id)] = campos
+    campos = flex_envio.campos_envio(flex_envio.PLATAFORMA_ML, ship_data)
+    if envios is not None and o.bling_id and campos:
+        envios[int(o.bling_id)] = campos
+    # Flex não passa por agência: sai de São Bernardo no dia (ou no seguinte,
+    # pelo corte que o próprio ML dá). O "+1 dia" de _ml_corte_agencia é só
+    # para o pedido que a operação leva à agência na manhã seguinte.
+    eh_flex = campos.get("envio_flex") is True
     substatus = str(ship_data.get("substatus") or "").lower()
     ship_status2 = str(ship_data.get("status") or "").lower()
     if ship_status2 in _ML_SHIPPED or (
@@ -1113,14 +1133,14 @@ async def _ml_shipped_for(
     # NÃO enviado — aproveita que já temos o shipment em mãos pra capturar
     # o "despachar até" (/sla.expected_date = horário de corte: 13:00 em
     # coleta, 23:59 em agência — este ganha +1 dia quando cai no próprio
-    # dia, ver _ml_corte_agencia). Só quando ainda NULL no banco: custa 1
+    # dia, ver _ml_corte_agencia; o Flex nunca). Só quando ainda NULL no banco: custa 1
     # request extra por pedido, e o ML raramente muda o prazo depois.
     if deadlines is not None and o.marketplace_ship_deadline is None:
         try:
             sla = await client.get_shipment_sla(str(shipment_id))
             dl = _iso_to_utc_dt(sla.get("expected_date"))
             if dl is not None:
-                deadlines[int(o.bling_id)] = _ml_corte_agencia(dl)
+                deadlines[int(o.bling_id)] = dl if eh_flex else _ml_corte_agencia(dl)
         except Exception as e:  # noqa: BLE001
             logger.info(
                 "shipment_check_ml_sla_failed",

@@ -176,17 +176,60 @@ def test_todas_as_variacoes_vendaveis_precisam_de_sp():
     assert "dg054.sp" in d.motivo
 
 
-def test_variacao_sem_estoque_publicado_nao_conta():
+def test_variacao_sem_estoque_publicado():
+    """Revisão de 02/10/2026: a variação parada (estoque publicado 0) volta a
+    vender quando o estoque é republicado — sem passar pelo motor. Ela só
+    fica fora da conta quando TEM .sp ativo; sem .sp, o anúncio inteiro fica
+    inelegível (antes: "a cor zerada não impede o Flex das outras")."""
     saldos = _saldos(dg053_sp=5)
-    # A cor zerada (sem .sp) não está à venda: não impede o Flex das outras.
+    # A cor zerada SEM .sp: quando voltar, venderia pelo Flex sem peça em SP.
     d = decidir(_anuncio("dg053.ci", "dg060.ci", estoques=[10, 0]), saldos, CFG)
-    assert d.desejado == "ligado"
+    assert d.desejado == "inelegivel"
+    assert d.motivo == (
+        "variação dg060.ci parada sem .sp (dg060.sp não existe ativo) — volta a vender "
+        "quando o estoque for publicado"
+    )
+    # Zerada de kit (kits fora): idem.
+    d = decidir(_anuncio("dg053.ci", "dg053.ci+a001.ci", estoques=[10, 0]), saldos, CFG)
+    assert d.desejado == "inelegivel" and "kit" in d.motivo
+    # A cor zerada COM .sp ativo: fica fora da conta (a conta volta quando o
+    # estoque dela voltar) — mesmo com o .sp dela zerado.
+    d = decidir(
+        _anuncio("dg053.ci", "dg060.ci", estoques=[10, 0]), _saldos(dg053_sp=5, dg060_sp=0), CFG
+    )
+    assert (d.desejado, d.familias) == ("ligado", ("dg053",))
     # Estoque nunca enviado (None) conta como à venda — não se sabe.
     d = decidir(_anuncio("dg053.ci", "dg060.ci", estoques=[10, None]), saldos, CFG)
     assert d.desejado == "inelegivel"
-    # Nada à venda: desliga (o Flex não teria o que vender).
+    # Nada à venda (e com .sp): desliga (o Flex não teria o que vender).
     d = decidir(_anuncio("dg053.ci", estoques=[0]), saldos, CFG)
     assert (d.desejado, d.motivo) == ("desligado", "nenhuma variação com estoque publicado")
+
+
+def test_variacao_que_o_davinci_nao_controla_nega_o_flex():
+    """Revisão de 02/10/2026: a variação só com vínculo morto, ou que a
+    plataforma tem e nenhum vínculo cobre, deixa o anúncio inelegível — o
+    Flex vale para o anúncio inteiro. Vale mesmo com estoque 0 (o estoque
+    dela não é o DaVinci que manda)."""
+    saldos = _saldos(dg053_sp=9)
+    viva = Variacao(sku="dg053.ci", estoque_publicado=10)
+    for extra, motivo in [
+        (
+            Variacao(sku="x777.ci", estoque_publicado=0, vinculo=fm.VINCULO_MORTO, ref="2"),
+            "variação x777.ci com vínculo morto no DaVinci",
+        ),
+        (
+            Variacao(sku=None, estoque_publicado=50, vinculo=fm.VINCULO_SEM, ref="333"),
+            "variação id 333 sem vínculo com produto do DaVinci",
+        ),
+        (
+            Variacao(sku="dg053.ci", estoque_publicado=5, vinculo=fm.VINCULO_SEM, ref="4"),
+            "variação dg053.ci sem vínculo com produto do DaVinci",
+        ),
+    ]:
+        a = Anuncio(CONTA, "MLB1", "ml", variacoes=(viva, extra))
+        d = decidir(a, saldos, CFG)
+        assert (d.desejado, d.motivo) == ("inelegivel", motivo)
 
 
 def test_variacao_com_produto_inativo_ou_sem_produto():
