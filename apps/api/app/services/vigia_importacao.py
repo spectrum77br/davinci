@@ -91,7 +91,7 @@ from app.models import (
     StoreInfo,
 )
 from app.security.cipher import decrypt_json, encrypt_json
-from app.services import bling_orders, ouvidoria
+from app.services import bling_orders, links_shopee, ouvidoria
 from app.services.advisory_lock import SYNC_NAMESPACE
 from app.services.marketplaces.amazon import AmazonClient
 from app.services.marketplaces.factory import client_for
@@ -193,7 +193,9 @@ class Candidato:
         if self.plataforma == "ml":
             return f"https://www.mercadolivre.com.br/vendas/{self.pack or self.numero}/detalhe"
         if self.plataforma == "shopee":
-            return f"https://seller.shopee.com.br/portal/sale/order/{self.numero}"
+            # A página do pedido só abre com o order_id INTERNO, que a API de
+            # pedidos não devolve: a lista de pedidos buscando o order_sn.
+            return links_shopee.url_pedido_shopee(self.numero)
         if self.plataforma == "tiktok":
             return f"https://seller-br.tiktok.com/order/detail?order_no={self.numero}"
         if self.plataforma == "amazon":

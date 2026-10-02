@@ -86,7 +86,7 @@ from app.models import (
     IntegrationPlatform,
 )
 from app.redis_client import redis
-from app.services import logistica_rules
+from app.services import links_shopee, logistica_rules
 from app.services.atendimento import etiqueta, etiqueta_fatos, gravar, lojas
 from app.services.atendimento.constantes import (
     AUTOR_CLIENTE,
@@ -1305,23 +1305,54 @@ async def reclamacoes_da_conversa(
     )
 
 
-def url_na_plataforma(r: AtendimentoReclamacao) -> str | None:
-    """O "Abrir na plataforma": a página da VENDA, onde a reclamação aparece.
+def return_sn_shopee(r: AtendimentoReclamacao) -> str | None:
+    """O return_sn da devolução Shopee (`dados.return_id`, senão o id do caso)."""
+    if r.plataforma != "shopee":
+        return None
+    numero = _id((r.dados or {}).get("return_id")) or _id(r.externo_id)
+    return None if not numero or numero.startswith(PREFIXO_SEM_ID) else numero
+
+
+def url_na_plataforma(
+    r: AtendimentoReclamacao, ids_shopee: links_shopee.IdsShopee | None = None
+) -> str | None:
+    """O "Abrir na plataforma": onde a reclamação aparece.
 
     ML: a venda (pelo pack, quando conhecido — é a página que o Seller
-    Central abre); Shopee e TikTok: o pedido no Seller Center. Os mesmos
-    endereços que o DaVinci já usa (`vigia_importacao`).
+    Central abre); TikTok: o pedido no Seller Center. Shopee
+    (`links_shopee`): a página da DEVOLUÇÃO (com o return_id interno achado
+    com segurança; senão a lista de devoluções buscando o return_sn); sem
+    return_sn, o pedido (order_id interno ou a busca pelo order_sn).
+    `ids_shopee` vem de `ids_shopee_das` (uma consulta para a lista).
     """
     pedido = _id(r.pedido_marketplace)
     dados = r.dados or {}
     if r.plataforma == "ml":
         alvo = _id(dados.get("pack_id")) or pedido
         return f"https://www.mercadolivre.com.br/vendas/{alvo}/detalhe" if alvo else None
-    if r.plataforma == "shopee" and pedido:
-        return f"https://seller.shopee.com.br/portal/sale/order/{pedido}"
+    if r.plataforma == "shopee":
+        return_sn = return_sn_shopee(r)
+        return_id = ids_shopee.devolucao(r.conversa_id, return_sn) if ids_shopee else None
+        devolucao = links_shopee.url_devolucao_shopee(return_sn, return_id)
+        if devolucao:
+            return devolucao
+        order_id = ids_shopee.pedido(r.integration_id, pedido) if ids_shopee else None
+        return links_shopee.url_pedido_shopee(pedido, order_id) if pedido else None
     if r.plataforma == "tiktok" and pedido:
         return f"https://seller-br.tiktok.com/order/detail?order_no={pedido}"
     return None
+
+
+async def ids_shopee_das(
+    session: AsyncSession, linhas: Iterable[AtendimentoReclamacao]
+) -> links_shopee.IdsShopee:
+    """Os ids internos (return_id, order_id) das reclamações Shopee — uma consulta."""
+    shopee = [r for r in linhas if r.plataforma == "shopee"]
+    return await links_shopee.ids_shopee(
+        session,
+        pedidos=[(r.integration_id, r.pedido_marketplace) for r in shopee],
+        devolucoes=[(r.conversa_id, r.pedido_marketplace, return_sn_shopee(r)) for r in shopee],
+    )
 
 
 _STATUS_ML = {
@@ -1362,7 +1393,9 @@ def status_para_tela(r: AtendimentoReclamacao) -> str | None:
     return _id(r.status) or None
 
 
-def para_tela(r: AtendimentoReclamacao) -> dict[str, Any]:
+def para_tela(
+    r: AtendimentoReclamacao, ids_shopee: links_shopee.IdsShopee | None = None
+) -> dict[str, Any]:
     """A reclamação no formato do cartão (`AtendimentoReclamacao.vue`). Sem texto de comprador.
 
     `motivo` = o que o comprador alegou, em português (código do ML/Shopee
@@ -1413,5 +1446,5 @@ def para_tela(r: AtendimentoReclamacao) -> dict[str, Any]:
         ),
         "devolucao_status": _id(devolucao.get("status")) or None,
         "conversa_id": r.conversa_id,
-        "url_plataforma": url_na_plataforma(r),
+        "url_plataforma": url_na_plataforma(r, ids_shopee),
     }

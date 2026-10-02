@@ -160,7 +160,9 @@ const base = {
   respondida: false, resposta_loja: null, resposta_em: null, resposta_oculta: null, pode_responder: false,
   motivo_sem_resposta: 'Resposta pública (aparece no anúncio): o envio pelo DaVinci está desligado (ATENDIMENTO_ENVIO_ATIVO).',
   pendente: false, pendente_desde: null, tratada_em: null, tratada_por_nome: null, conversa_id: null, do_pedido: true,
-  url_plataforma: 'https://seller.shopee.com.br/portal/sale/order/251001ABC',
+  // Sem o order_id interno a Shopee abre a lista de pedidos buscando o order_sn
+  // (`/portal/sale/order/<order_sn>` não abre o pedido — 02/10/2026).
+  url_plataforma: 'https://seller.shopee.com.br/portal/sale/order?search=251001ABC',
 }
 function av(x) {
   return { ...base, ...x }

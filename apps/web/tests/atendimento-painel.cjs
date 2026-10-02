@@ -154,7 +154,13 @@ async function main() {
     const u = urlIniciarNaPagina(p, 'https://www.mercadolivre.com.br/vendas/2000018464125672/detalhe')
     assert.ok(u.startsWith('http://127.0.0.1:50325/api/v1/browser/start?serial_number=72&launch_args='))
     assert.deepEqual(JSON.parse(decodeURIComponent(u.split('launch_args=')[1])), ['https://www.mercadolivre.com.br/vendas/2000018464125672/detalhe'])
-    assert.ok(destinoPermitido('https://seller.shopee.com.br/portal/sale/order/123'))
+    // Shopee: a página do pedido (order_id interno, só dígitos) e as buscas
+    // pelo order_sn / return_sn — a query string chega inteira ao perfil.
+    assert.equal(destinoPermitido('https://seller.shopee.com.br/portal/sale/order/244141571124463'), 'https://seller.shopee.com.br/portal/sale/order/244141571124463')
+    assert.equal(destinoPermitido('https://seller.shopee.com.br/portal/sale/order?search=26092743U4QU7F'), 'https://seller.shopee.com.br/portal/sale/order?search=26092743U4QU7F')
+    const busca = 'https://seller.shopee.com.br/portal/sale/returnrefundcancel?keyword=2609280ABCDEFGH&keywordType=return_sn'
+    assert.equal(destinoPermitido(busca), busca)
+    assert.deepEqual(JSON.parse(decodeURIComponent(urlIniciarNaPagina(p, busca).split('launch_args=')[1])), [busca])
     assert.ok(destinoPermitido('https://seller-br.tiktok.com/order/detail?order_no=1'))
     assert.equal(destinoPermitido('http://www.mercadolivre.com.br/x'), null) // só https
     assert.equal(destinoPermitido('https://mercadolivre.com.br.golpe.com/x'), null) // domínio de fora

@@ -281,6 +281,9 @@ async def test_regra_shopee_unpaid_e_cancelamento_ficam_fora():
     for st in ("READY_TO_SHIP", "PROCESSED", "SHIPPED", "COMPLETED", "INVOICE_PENDING"):
         c = vigia.candidato_shopee({"order_sn": "2509SN1", "order_status": st})
         assert c is not None and c.chave == "shopee:2509SN1" and c.pago_em is None
+        # A API de pedidos não traz o order_id interno (o único que a página
+        # do pedido aceita): a lista de pedidos buscando o order_sn.
+        assert c.link == "https://seller.shopee.com.br/portal/sale/order?search=2509SN1"
     for st in ("UNPAID", "CANCELLED", "IN_CANCEL"):
         assert vigia.candidato_shopee({"order_sn": "2509SN1", "order_status": st}) is None
     assert vigia.candidato_shopee({"order_sn": "", "order_status": "SHIPPED"}) is None

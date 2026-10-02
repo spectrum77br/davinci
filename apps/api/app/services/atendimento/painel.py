@@ -38,7 +38,9 @@ O contrato com o outro dev (`davinci-atendimento-nomes-para-o-dev.md`):
 
 E o que a tela usa por aqui:
 
-  links_do_pedido(conversa, pedido)   "Abrir no Bling" e "Abrir na plataforma"
+  links_do_pedido(conversa, pedido, ids_shopee=None)
+      "Abrir no Bling" e "Abrir na plataforma" (Shopee: o order_id interno
+      de `links_shopee`, lido em `ids_shopee_do_painel`; sem ele, a busca)
   perfil_adspower(session, conversa)  o perfil (campo Servidor do store-info)
   painel_da_conversa(session, conversa, *, user)
       monta o GET /conversas/{id}/painel; cada bloco falha SOZINHO (num
@@ -96,6 +98,7 @@ from app.models import (
     User,
     UserRole,
 )
+from app.services import links_shopee
 from app.services.atendimento.constantes import (
     AUTOR_EQUIPE,
     MSG_RECEBIDA,
@@ -837,13 +840,19 @@ async def observacoes_bling(
 _RE_NUMERO_URL = re.compile(r"^[A-Za-z0-9-]{3,64}$")
 # A tela do pedido no Bling (o id interno do pedido, `bling_orders.bling_id`).
 URL_PEDIDO_BLING = "https://www.bling.com.br/vendas.php#edit/{}"
-# As mesmas páginas da Logística (`vigia_importacao.Pedido.link`).
+# As mesmas páginas da Logística (`vigia_importacao.Pedido.link`). A Shopee
+# não está aqui: a página do pedido só abre com o order_id INTERNO, que vem
+# de `links_shopee` (sem ele, a busca pelo order_sn).
 URL_PEDIDO_PLATAFORMA = {
     "ml": "https://www.mercadolivre.com.br/vendas/{}/detalhe",
-    "shopee": "https://seller.shopee.com.br/portal/sale/order/{}",
     "tiktok": "https://seller-br.tiktok.com/order/detail?order_no={}",
 }
-_ROTULO_PLATAFORMA = {"ml": "Mercado Livre", "shopee": "Shopee", "tiktok": "TikTok"}
+_PLATAFORMAS_COM_LINK = ("ml", "shopee", "tiktok")
+_ROTULO_PLATAFORMA = {
+    "ml": "Abrir no Mercado Livre",
+    "shopee": "Abrir na Shopee",
+    "tiktok": "Abrir no TikTok",
+}
 
 
 def link_bling(bling_id: Any) -> str | None:
@@ -856,32 +865,60 @@ def _numero_seguro(valor: Any) -> str | None:
     return s if _RE_NUMERO_URL.match(s) else None
 
 
-def links_do_pedido(conversa: AtendimentoConversa, pedido: PedidoBling | None) -> dict:
-    """`{bling, plataforma: {url, rotulo} | None}` — só https e só nº limpo.
+def numero_na_plataforma(conversa: AtendimentoConversa, pedido: PedidoBling | None) -> str | None:
+    """O nº do pedido que vai no "Abrir na plataforma" (só nº limpo), ou None.
 
     ML: o pack (pedido de carrinho) quando a conversa tem; senão o pedido.
-    Amazon, Magalu, Temu e AliExpress já têm o botão na conversa (o caso no
-    Seller Central, o portal, o Seller Center): aqui não repete.
+    Shopee e TikTok: o pedido da conversa, senão o numeroLoja do Bling.
+    """
+    if conversa.plataforma not in _PLATAFORMAS_COM_LINK:
+        return None
+    dados = conversa.dados if isinstance(conversa.dados, dict) else {}
+    candidatos = [conversa.pedido_marketplace]
+    if conversa.plataforma == "ml":
+        candidatos = [dados.get("pack_id"), conversa.pedido_marketplace, dados.get("order_id")]
+    if pedido is not None:
+        candidatos.append(pedido.numeroloja)
+    return next((n for n in (_numero_seguro(c) for c in candidatos) if n), None)
+
+
+def links_do_pedido(
+    conversa: AtendimentoConversa,
+    pedido: PedidoBling | None,
+    ids_shopee: links_shopee.IdsShopee | None = None,
+) -> dict:
+    """`{bling, plataforma: {url, rotulo} | None}` — só https e só nº limpo.
+
+    Shopee (`links_shopee`): a página do pedido só com o order_id interno
+    achado com segurança (`ids_shopee`); sem ele, a lista de pedidos
+    buscando o order_sn. Amazon, Magalu, Temu e AliExpress já têm o botão na
+    conversa (o caso no Seller Central, o portal, o Seller Center): aqui não
+    repete.
     """
     plataforma = None
-    formato = URL_PEDIDO_PLATAFORMA.get(conversa.plataforma)
-    if formato:
-        dados = conversa.dados if isinstance(conversa.dados, dict) else {}
-        candidatos = [conversa.pedido_marketplace]
-        if conversa.plataforma == "ml":
-            candidatos = [dados.get("pack_id"), conversa.pedido_marketplace, dados.get("order_id")]
-        if pedido is not None:
-            candidatos.append(pedido.numeroloja)
-        numero = next((n for n in (_numero_seguro(c) for c in candidatos) if n), None)
-        if numero:
-            plataforma = {
-                "url": formato.format(numero),
-                "rotulo": f"Abrir no {_ROTULO_PLATAFORMA[conversa.plataforma]}",
-            }
+    numero = numero_na_plataforma(conversa, pedido)
+    if numero:
+        if conversa.plataforma == "shopee":
+            order_id = ids_shopee.pedido(conversa.integration_id, numero) if ids_shopee else None
+            url = links_shopee.url_pedido_shopee(numero, order_id)
+        else:
+            url = URL_PEDIDO_PLATAFORMA[conversa.plataforma].format(numero)
+        if url:
+            plataforma = {"url": url, "rotulo": _ROTULO_PLATAFORMA[conversa.plataforma]}
     return {
         "bling": link_bling(pedido.bling_id) if pedido is not None else None,
         "plataforma": plataforma,
     }
+
+
+async def ids_shopee_do_painel(
+    session: AsyncSession, conversa: AtendimentoConversa, pedido: PedidoBling | None
+) -> links_shopee.IdsShopee | None:
+    """O order_id interno do pedido da conversa Shopee (uma consulta), ou None."""
+    numero = numero_na_plataforma(conversa, pedido)
+    if conversa.plataforma != "shopee" or not numero:
+        return None
+    return await links_shopee.ids_shopee(session, pedidos=[(conversa.integration_id, numero)])
 
 
 # ── AdsPower (RF11) ───────────────────────────────────────────────────────
@@ -1181,6 +1218,10 @@ async def painel_da_conversa(
     envio_foto, _ = await _seguro(
         session, "foto", lambda: situacao_da_foto(session, conversa), None, cid
     )
+    # Falhou a leitura do order_id interno: o link sai com a busca pelo order_sn.
+    ids_shopee, _ = await _seguro(
+        session, "link_shopee", lambda: ids_shopee_do_painel(session, conversa, pedido), None, cid
+    )
 
     return {
         "pedido": (
@@ -1206,7 +1247,7 @@ async def painel_da_conversa(
         ),
         "ve_margem": ve_margem(user),
         "observacoes_bling": observacoes,
-        "links": links_do_pedido(conversa, pedido),
+        "links": links_do_pedido(conversa, pedido, ids_shopee),
         "adspower": adspower,
         "envio_foto": envio_foto
         if envio_foto is not None

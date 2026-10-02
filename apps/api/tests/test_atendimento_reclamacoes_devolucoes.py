@@ -209,7 +209,12 @@ async def test_devolucao_shopee_liga_a_conversa_com_prazo_e_etiqueta(db, make_us
     assert tela["numero"] == "RSN123" and tela["tipo_rotulo"] == "Devolução"
     assert tela["status_rotulo"] == "Pedido de devolução aberto"
     assert (tela["motivo"], tela["solucao"]) == (None, "Devolução + reembolso")
-    assert tela["url_plataforma"] == f"https://seller.shopee.com.br/portal/sale/order/{SN}"
+    # A devolução tem return_sn: a lista de devoluções buscando por ele (sem
+    # o return_id interno, que só os cartões rr do chat trazem).
+    assert tela["url_plataforma"] == (
+        "https://seller.shopee.com.br/portal/sale/returnrefundcancel"
+        "?keyword=RSN123&keywordType=return_sn"
+    )
 
     # Rodada repetida sem novidade: nada muda, nada é recalculado.
     resumo = await _ligar(db, T0 + timedelta(minutes=10))

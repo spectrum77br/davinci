@@ -157,6 +157,7 @@ async def _saida(
             do_pedido=do_pedido,
             envio_ativo=get_settings().atendimento_envio_ativo,
             nomes=nomes,
+            ids_shopee=await avaliacoes.ids_shopee_das(session, [a]),
         )
     )
 
@@ -193,9 +194,17 @@ async def avaliacoes_da_conversa(
     conversa = await _conversa_ou_404(session, conversa_id, scope)
     linhas = await avaliacoes.avaliacoes_da_conversa(session, conversa)
     nomes = await _nomes(session, {a.tratada_por for a, _ in linhas})
+    # O "Abrir na Shopee" com o order_id interno: uma consulta para a lista.
+    ids_shopee = await avaliacoes.ids_shopee_das(session, [a for a, _ in linhas])
     itens = [
         AvaliacaoLojaOut(
-            **avaliacoes.para_tela(a, do_pedido=do_pedido, envio_ativo=envio_ativo, nomes=nomes)
+            **avaliacoes.para_tela(
+                a,
+                do_pedido=do_pedido,
+                envio_ativo=envio_ativo,
+                nomes=nomes,
+                ids_shopee=ids_shopee,
+            )
         )
         for a, do_pedido in linhas
     ]

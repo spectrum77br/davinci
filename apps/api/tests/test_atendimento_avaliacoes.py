@@ -1089,7 +1089,12 @@ async def test_aba_avaliacao_e_responder_desligado(
     assert primeira["texto"] == "não gostei" and primeira["pendente"] is True
     assert primeira["pode_responder"] is False
     assert "Resposta pública" in primeira["motivo_sem_resposta"]
-    assert primeira["url_plataforma"].endswith(f"/portal/sale/order/{SN}")
+    # Sem o order_id interno (nenhum cartão do chat o traz): a lista de
+    # pedidos buscando o order_sn — `/portal/sale/order/<order_sn>` não abre
+    # o pedido (a rota do Seller Center só aceita o número interno).
+    assert primeira["url_plataforma"] == (
+        f"https://seller.shopee.com.br/portal/sale/order?search={SN}"
+    )
     assert (anterior["comentario_id"], anterior["do_pedido"], anterior["respondida"]) == (
         "9302",
         False,

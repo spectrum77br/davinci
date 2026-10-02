@@ -91,6 +91,7 @@ from app.models import (
     User,
 )
 from app.redis_client import redis
+from app.services import links_shopee
 from app.services.atendimento import etiqueta_fatos, gravar, indexar, indice, reclamacoes
 from app.services.atendimento.constantes import (
     AUTOR_CLIENTE,
@@ -1582,15 +1583,33 @@ async def avaliacoes_da_conversa(
     ]
 
 
-def url_na_plataforma(a: AtendimentoAvaliacaoLoja) -> str | None:
-    """O "Abrir na plataforma": a página da VENDA (os mesmos endereços da reclamação)."""
+def url_na_plataforma(
+    a: AtendimentoAvaliacaoLoja, ids_shopee: links_shopee.IdsShopee | None = None
+) -> str | None:
+    """O "Abrir na plataforma": a página da VENDA (os mesmos endereços da reclamação).
+
+    Shopee: a página do pedido só com o order_id INTERNO, quando
+    `links_shopee.ids_shopee` o achou com segurança; senão a lista de pedidos
+    buscando o order_sn (`links_shopee`).
+    """
     pedido = _id(a.pedido)
     if a.plataforma == ML:
         alvo = _id(_dict(a.dados).get("pack_id")) or pedido
         return f"https://www.mercadolivre.com.br/vendas/{alvo}/detalhe" if alvo else None
     if a.plataforma == SHOPEE and pedido:
-        return f"https://seller.shopee.com.br/portal/sale/order/{pedido}"
+        order_id = ids_shopee.pedido(a.integration_id, pedido) if ids_shopee else None
+        return links_shopee.url_pedido_shopee(pedido, order_id)
     return None
+
+
+async def ids_shopee_das(
+    session: AsyncSession, avaliacoes: Iterable[AtendimentoAvaliacaoLoja]
+) -> links_shopee.IdsShopee:
+    """Os order_id internos das avaliações Shopee da tela — uma consulta para a lista."""
+    return await links_shopee.ids_shopee(
+        session,
+        pedidos=[(a.integration_id, a.pedido) for a in avaliacoes if a.plataforma == SHOPEE],
+    )
 
 
 def motivo_sem_resposta(a: AtendimentoAvaliacaoLoja, *, envio_ativo: bool) -> str | None:
@@ -1610,8 +1629,13 @@ def para_tela(
     do_pedido: bool,
     envio_ativo: bool,
     nomes: dict[UUID, str | None] | None = None,
+    ids_shopee: links_shopee.IdsShopee | None = None,
 ) -> dict[str, Any]:
-    """A avaliação no formato da aba ★ (o texto do comprador vai para a TELA, nunca para o log)."""
+    """A avaliação no formato da aba ★ (o texto do comprador vai para a TELA, nunca para o log).
+
+    `ids_shopee` (de `ids_shopee_das`): o order_id interno para o "Abrir na
+    Shopee"; sem ele, o link é a busca pelo order_sn.
+    """
     motivo = motivo_sem_resposta(a, envio_ativo=envio_ativo)
     return {
         "id": a.id,
@@ -1640,7 +1664,7 @@ def para_tela(
         "tratada_por_nome": (nomes or {}).get(a.tratada_por) if a.tratada_por else None,
         "conversa_id": a.conversa_id,
         "do_pedido": do_pedido,
-        "url_plataforma": url_na_plataforma(a),
+        "url_plataforma": url_na_plataforma(a, ids_shopee),
     }
 
 

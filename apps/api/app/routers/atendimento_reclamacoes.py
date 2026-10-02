@@ -95,7 +95,9 @@ async def reclamacoes_da_conversa(
     scope = await resolve_team_scope(session, user)
     conversa = await _conversa_ou_404(session, conversa_id, scope)
     linhas = await reclamacoes.reclamacoes_da_conversa(session, conversa)
-    itens = [ReclamacaoOut(**reclamacoes.para_tela(r)) for r in linhas]
+    # O "Abrir na Shopee" com o id interno (devolução/pedido): uma consulta.
+    ids_shopee = await reclamacoes.ids_shopee_das(session, linhas)
+    itens = [ReclamacaoOut(**reclamacoes.para_tela(r, ids_shopee)) for r in linhas]
     prazos = [i.prazo_em for i in itens if i.aberta and i.prazo_em is not None]
     return ReclamacoesOut(
         itens=itens,

@@ -45,6 +45,7 @@ from app.models import (
 from app.routers import atendimento as rota
 from app.routers import atendimento_painel
 from app.security.cipher import encrypt_json
+from app.services import links_shopee
 from app.services.atendimento import gravar, ia, painel
 from app.services.atendimento.constantes import e_nota
 
@@ -591,10 +592,23 @@ async def test_links_do_pedido(db, make_user):
     pedido = painel.PedidoBling(numero="297840", numeroloja="250925ABC", bling_id=9001)
     links = painel.links_do_pedido(conversa, pedido)
     assert links["bling"] == "https://www.bling.com.br/vendas.php#edit/9001"
+    # Sem o order_id interno: a lista de pedidos buscando o order_sn (a
+    # página `/portal/sale/order/<x>` só abre com o número interno).
     assert links["plataforma"] == {
-        "url": "https://seller.shopee.com.br/portal/sale/order/250925ABC",
-        "rotulo": "Abrir no Shopee",
+        "url": "https://seller.shopee.com.br/portal/sale/order?search=250925ABC",
+        "rotulo": "Abrir na Shopee",
     }
+    # Com o order_id interno achado com segurança (`links_shopee`): a página do pedido.
+    ids = links_shopee.IdsShopee(pedidos={(integ.id, "250925ABC"): "244141571124463"})
+    assert painel.links_do_pedido(conversa, pedido, ids)["plataforma"] == {
+        "url": "https://seller.shopee.com.br/portal/sale/order/244141571124463",
+        "rotulo": "Abrir na Shopee",
+    }
+    # O número de OUTRA loja não serve.
+    outra = links_shopee.IdsShopee(pedidos={(uuid4(), "250925ABC"): "244141571124463"})
+    assert painel.links_do_pedido(conversa, pedido, outra)["plataforma"]["url"].endswith(
+        "?search=250925ABC"
+    )
     # Nº que mexeria na URL não entra.
     conversa.pedido_marketplace = "250925?x=1"
     assert painel.links_do_pedido(conversa, None) == {"bling": None, "plataforma": None}
@@ -613,7 +627,10 @@ async def test_link_do_ml_usa_o_pack(db, make_user):
         dados={"pack_id": "2000009999"},
     )
     links = painel.links_do_pedido(conversa, None)
-    assert links["plataforma"]["url"] == "https://www.mercadolivre.com.br/vendas/2000009999/detalhe"
+    assert links["plataforma"] == {
+        "url": "https://www.mercadolivre.com.br/vendas/2000009999/detalhe",
+        "rotulo": "Abrir no Mercado Livre",
+    }
 
 
 # ─────────────── AdsPower ───────────────
@@ -774,7 +791,44 @@ async def test_painel_sem_pedido_no_bling_usa_o_retrato(db, client, admin, make_
     assert p["pedido"] is None and p["observacoes_bling"] is None
     assert p["estoque"]["fonte"] == "plataforma"
     assert p["estoque"]["itens"][0]["sku"] == "dg053.pi"
-    assert p["links"]["plataforma"]["url"].endswith("/250925QQQ")
+    assert p["links"]["plataforma"]["url"].endswith("/portal/sale/order?search=250925QQQ")
+
+
+async def test_painel_shopee_abre_o_pedido_pelo_order_id_interno(db, client, admin, make_user):
+    """O caso da Vortan (02/10/2026): o cartão "avalie o pedido" do chat traz o
+    order_id interno; com o par conferido (1 pedido na conversa, data e hora
+    batendo com a criação do pedido), o botão abre a página do pedido."""
+    dono = await make_user()
+    integ, canal = await _loja(db, dono)
+    conversa = await _conversa(
+        db,
+        integ,
+        canal,
+        pedido="26092743U4QU7F",
+        dados={
+            "pedido_mkt": {"pedido": "26092743U4QU7F", "criado_em": "2026-09-27T01:06:11+08:00"}
+        },
+    )
+    db.add(
+        AtendimentoMensagem(
+            conversa_id=conversa.id,
+            externo_id="crm-1",
+            autor="loja",
+            origem="externo",
+            tipo="outro",
+            payload={
+                "message_type": "crm_order_rate",
+                "content": {"unrated_order_reminder": {"order_id": 244141571124463}},
+            },
+        )
+    )
+    await db.commit()
+    r = await client.get(f"{URL}/conversas/{conversa.id}/painel")
+    assert r.status_code == 200, r.text
+    assert r.json()["links"]["plataforma"] == {
+        "url": "https://seller.shopee.com.br/portal/sale/order/244141571124463",
+        "rotulo": "Abrir na Shopee",
+    }
 
 
 async def test_painel_do_instagram_e_vazio(client, admin):
