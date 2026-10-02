@@ -165,6 +165,9 @@ async def test_tela_casos(client, make_user, auth_as):
     j = (await client.get("/api/denuncia/casos")).json()
     assert j["itens"][0]["codigo"] == "CASO-001"
     assert j["itens"][0]["ncompras"] == 1 and j["itens"][0]["loja"] == "loja_x"
+    # lista de compra (01/10): link do anúncio e a compra do caso vão juntos
+    assert j["itens"][0]["url"] == "https://shopee.com.br/p/A1"
+    assert j["itens"][0]["compra"]["valor_pago"] == 99.9
     c = (await client.get("/api/denuncia/casos/7")).json()
     assert c["compras"][0]["valor_pago"] == 99.9
     assert {d["id"] for d in c["denuncias"]} == {1, 3}
@@ -635,7 +638,9 @@ def test_painel_status_na_loja_e_na_anatel():
     # a resposta já chegou e o robô confere o anúncio; no Diversos a denúncia velha é "antiga"
     conf = {**pend, "resultado_nota": "ML respondeu em 2026-09-21 18:33: 'não identificamos…' — conferindo"}
     assert p.status_loja([conf])["chave"] == "conferindo"
-    assert p.status_loja([pend], "GRUPO 2")["chave"] == "antiga"
+    # Diversos (não é mais denunciado nas lojas): resposta de recusa = recusou; pendente = em branco
+    assert p.status_loja([pend], "GRUPO 2")["chave"] == "vazio"
+    assert p.status_loja([conf], "GRUPO 2")["chave"] == "recusou"
     assert p.status_loja([rec], "GRUPO 2")["chave"] == "recusou"   # desfecho continua valendo
     assert p.status_anatel(nosso, [conf], p.status_loja([conf]), True)["chave"] == "esperando_recusa"
 

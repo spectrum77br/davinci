@@ -1065,7 +1065,7 @@ async def painel_anuncios_e_denuncias(
         "opcoes": {
             "marketplaces": sorted(m for m in marketplaces if m),
             "grupos": sorted(g for g in grupos if g),
-            "na_loja": [{"chave": k, "rotulo": v[0]} for k, v in painel.LOJA.items()],
+            "na_loja": [{"chave": k, "rotulo": v[0]} for k, v in painel.LOJA.items() if k != "vazio"],
             "na_anatel": [
                 {"chave": k, "rotulo": v[0]} for k, v in painel.ANATEL.items() if k != "nada"
             ],
@@ -1324,14 +1324,24 @@ async def listar_casos(
     )
     rows = (
         await session.execute(
-            select(C, A.loja, A.titulo, A.marketplace, ncompras, nprovas)
+            select(C, A.loja, A.titulo, A.marketplace, ncompras, nprovas, A.dados, A.vendas, A.shop_id)
             .outerjoin(A, A.id == C.anuncio_id)
             .order_by(C.id.desc())
         )
     ).all()
+    # 01/10 (Vinicius: "selecionar os casos e gerar lista de compra — loja, anúncio, valor, produto"):
+    # a compra mais recente de cada caso (valor pago, pedido) vai junto
+    compra: dict[int, dict] = {}
+    for k in (
+        await session.execute(select(DenunciaCompra).order_by(DenunciaCompra.id))
+    ).scalars():
+        if k.caso_id is not None:
+            compra[k.caso_id] = k.dados or {}
     itens = []
-    for c, loja, titulo_anuncio, mp, n_compras, n_provas in rows:
+    for c, loja, titulo_anuncio, mp, n_compras, n_provas, ad, vendas, shop_id in rows:
         d = c.dados or {}
+        ad = ad or {}
+        cp = compra.get(c.id) or {}
         itens.append(
             {
                 "id": c.id,
@@ -1347,6 +1357,11 @@ async def listar_casos(
                 "juridico_enviado_em": d.get("juridico_enviado_em"),
                 "ncompras": n_compras,
                 "nprovas": n_provas,
+                "url": ad.get("url"),
+                "hom": ad.get("hom"),
+                "vendas": vendas,
+                "shop_id": shop_id,
+                "compra": {k: cp.get(k) for k in ("pedido", "status", "valor_pago", "data")} if cp else None,
             }
         )
     por_status: dict[str, int] = {}

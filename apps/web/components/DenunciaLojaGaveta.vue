@@ -137,7 +137,7 @@ const subtitulo = computed(() =>
               <div class="mt-1 flex flex-wrap items-center gap-1.5">
                 <span class="font-mono text-[11px] text-muted-foreground mr-1">{{ a.id }} · {{ a.hom || 'sem nº' }} · {{ numero(a.vendas) }} vendas</span>
                 <span v-if="a.grupo" :class="pillGrupo(a.grupo)">{{ nomeGrupo(a.grupo) }}</span>
-                <span :class="pillTom(a.loja_st.tom)" title="na loja">loja: {{ a.loja_st.rotulo }}</span>
+                <span v-if="a.loja_st.chave !== 'vazio'" :class="pillTom(a.loja_st.tom)" title="na loja">loja: {{ a.loja_st.rotulo }}</span>
                 <span :class="pillTom(a.anatel_st.tom)" title="na Anatel">Anatel: {{ a.anatel_st.rotulo === '—' ? 'não vai' : a.anatel_st.rotulo }}</span>
                 <span :class="pillAtivo(a.situacao)">ativo: {{ ativoSimNao(a.situacao) }}</span>
               </div>

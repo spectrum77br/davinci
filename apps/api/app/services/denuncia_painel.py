@@ -35,12 +35,14 @@ LOJA = {
     # (o e-mail chegou; vira "recusou" ou "removido" depois do print) × sem resposta nenhuma
     "conferindo": ("respondeu · conferindo", "muted"),
     "aguardando": ("aguardando", "muted"),
-    # desde 01/10 o Diversos não é mais denunciado nas lojas: a denúncia velha sem desfecho não é
-    # pendência (ele vai à Anatel de qualquer jeito) e não entra na conta do "aguardando"
-    "antiga": ("denúncia antiga", "muted"),
     "nao": ("não denunciado", "muted"),
+    # 01/10 (Vinicius: "o que tava pendente e não vai mais abrir pode excluir, deixa sem informação
+    # nenhuma"): Diversos com denúncia velha sem desfecho — desde 01/10 ele não é mais denunciado nas
+    # lojas; fica em branco e fora das contas
+    "vazio": ("—", "muted"),
 }
 _RESPONDEU = ("respondeu", "não identific", "provável", "medidas cab")
+_RECUSOU = ("não identific", "continua ativo", "improcedente")
 ANATEL = {
     "processo": ("processo aberto", "info"),
     "fila": ("na fila", "warning"),
@@ -59,7 +61,8 @@ def status_loja(dens: list[dict], grupo: str | None = None) -> dict:
     """Denúncias do anúncio nos marketplaces → o que a loja fez. Removido vale mesmo
     que uma tentativa anterior tenha sido recusada; senão manda a mais recente.
     Sem desfecho: "conferindo" se a resposta já chegou (nota do resultado), senão
-    "aguardando" — e, no Diversos (grupo GRUPO 2), "antiga"."""
+    "aguardando". No Diversos (GRUPO 2): a resposta que já chegou e é recusa conta como
+    "recusou" ("o que tinha denúncia e perdeu coloca recusada"); o resto fica "vazio"."""
     dens = [d for d in dens if d.get("canal") in CANAIS_LOJA]
     if not dens:
         return {"chave": "nao", "data": None, "tentativas": 0, "canal": None}
@@ -74,7 +77,7 @@ def status_loja(dens: list[dict], grupo: str | None = None) -> dict:
         nota = (ult.get("resultado_nota") or "").lower()
         chave = "conferindo" if any(x in nota for x in _RESPONDEU) else "aguardando"
         if grupo == "GRUPO 2":
-            chave = "antiga"
+            chave = "recusou" if chave == "conferindo" and any(x in nota for x in _RECUSOU) else "vazio"
     return {"chave": chave, "data": ult.get("data"), "tentativas": len(dens),
             "canal": ult.get("canal")}
 

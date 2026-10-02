@@ -394,8 +394,9 @@ defineExpose({ carregar })
                   <td />
                   <td class="text-center text-xs tabular-nums">{{ numero(a.vendas) }}</td>
                   <td>
-                    <span :class="pillTom(a.loja_st.tom)">{{ a.loja_st.rotulo }}</span>
-                    <div v-if="a.loja_st.data" class="text-[11px] text-muted-foreground mt-0.5 whitespace-nowrap">{{ dataBr(a.loja_st.data, false) }}<template v-if="(a.loja_st.tentativas || 0) > 1"> · {{ a.loja_st.tentativas }} tentativas</template></div>
+                    <span v-if="a.loja_st.chave === 'vazio'" class="text-xs text-muted-foreground">—</span>
+                    <span v-else :class="pillTom(a.loja_st.tom)">{{ a.loja_st.rotulo }}</span>
+                    <div v-if="a.loja_st.data && a.loja_st.chave !== 'vazio'" class="text-[11px] text-muted-foreground mt-0.5 whitespace-nowrap">{{ dataBr(a.loja_st.data, false) }}<template v-if="(a.loja_st.tentativas || 0) > 1"> · {{ a.loja_st.tentativas }} tentativas</template></div>
                   </td>
                   <td>
                     <span :class="pillTom(a.anatel_st.tom)">{{ a.anatel_st.rotulo }}</span>
@@ -470,8 +471,9 @@ defineExpose({ carregar })
               <td><span v-if="a.grupo" :class="pillGrupo(a.grupo)">{{ nomeGrupo(a.grupo) }}</span></td>
               <td class="text-center text-xs tabular-nums">{{ numero(a.vendas) }}</td>
               <td>
-                <span :class="pillTom(a.loja_st.tom)">{{ a.loja_st.rotulo }}</span>
-                <div v-if="a.loja_st.data" class="text-[11px] text-muted-foreground mt-0.5 whitespace-nowrap">{{ dataBr(a.loja_st.data, false) }}<template v-if="(a.loja_st.tentativas || 0) > 1"> · {{ a.loja_st.tentativas }} tentativas</template></div>
+                <span v-if="a.loja_st.chave === 'vazio'" class="text-xs text-muted-foreground">—</span>
+                    <span v-else :class="pillTom(a.loja_st.tom)">{{ a.loja_st.rotulo }}</span>
+                <div v-if="a.loja_st.data && a.loja_st.chave !== 'vazio'" class="text-[11px] text-muted-foreground mt-0.5 whitespace-nowrap">{{ dataBr(a.loja_st.data, false) }}<template v-if="(a.loja_st.tentativas || 0) > 1"> · {{ a.loja_st.tentativas }} tentativas</template></div>
               </td>
               <td>
                 <span :class="pillTom(a.anatel_st.tom)">{{ a.anatel_st.rotulo }}</span>

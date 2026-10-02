@@ -24,6 +24,11 @@ type Caso = {
   juridico_enviado_em: string | null
   ncompras: number
   nprovas: number
+  url: string | null
+  hom: string | null
+  vendas: number | null
+  shop_id: string | null
+  compra: { pedido: string | null; status: string | null; valor_pago: number | null; data: string | null } | null
 }
 type Resposta = { total: number; itens: Caso[]; por_status: Record<string, number> }
 type Detalhe = {
@@ -46,6 +51,65 @@ const detalhe = ref<Detalhe | null>(null)
 const anuncioAberto = ref<string | null>(null)
 
 const visiveis = computed(() => (status.value ? itens.value.filter((c) => (c.status || '—') === status.value) : itens.value))
+
+// ── 01/10 (Vinicius: "um botão para selecionar os casos e gerar lista de compra — loja, anúncio,
+// valor, produto"): marca os casos e monta a lista para quem vai comprar (copiar ou baixar CSV).
+// O robô não guarda o preço do anúncio: o valor aparece quando a compra já foi registrada.
+const selecionados = ref<Set<number>>(new Set())
+function marcar(id: number) {
+  const s = new Set(selecionados.value)
+  if (s.has(id)) s.delete(id)
+  else s.add(id)
+  selecionados.value = s
+}
+const todosMarcados = computed(() => visiveis.value.length > 0 && visiveis.value.every((c) => selecionados.value.has(c.id)))
+function marcarTodos() {
+  selecionados.value = todosMarcados.value ? new Set() : new Set(visiveis.value.map((c) => c.id))
+}
+const listaAberta = ref(false)
+const lista = computed(() =>
+  itens.value
+    .filter((c) => selecionados.value.has(c.id))
+    .map((c) => ({
+      caso: c.codigo || `#${c.id}`,
+      loja: c.loja || '—',
+      marketplace: c.marketplace || '',
+      anuncio: c.anuncio_id || '',
+      produto: c.titulo_anuncio || '',
+      url: c.url || '',
+      valor: c.compra?.valor_pago ?? null,
+      comprado: c.compra ? `${c.compra.status || 'comprado'}${c.compra.pedido ? ` · pedido ${c.compra.pedido}` : ''}` : 'não',
+    })),
+)
+const COLUNAS: [keyof (typeof lista.value)[number], string][] = [
+  ['caso', 'Caso'], ['loja', 'Loja'], ['marketplace', 'Marketplace'], ['anuncio', 'Anúncio'],
+  ['produto', 'Produto'], ['valor', 'Valor'], ['comprado', 'Comprado?'], ['url', 'Link'],
+]
+function textoLista(sep: string): string {
+  const esc = (v: unknown) => {
+    const s = v === null || v === undefined ? '' : typeof v === 'number' ? v.toFixed(2).replace('.', ',') : String(v)
+    return sep === ';' && /[;"\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
+  }
+  return [COLUNAS.map(([, n]) => n).join(sep), ...lista.value.map((l) => COLUNAS.map(([k]) => esc(l[k])).join(sep))].join('\n')
+}
+const copiado = ref(false)
+async function copiarLista() {
+  try {
+    await navigator.clipboard.writeText(textoLista('\t'))
+    copiado.value = true
+    setTimeout(() => (copiado.value = false), 2000)
+  } catch {
+    erro.value = 'não consegui copiar — use "baixar planilha"'
+  }
+}
+function baixarLista() {
+  const blob = new Blob(['\ufeff' + textoLista(';')], { type: 'text/csv;charset=utf-8' })
+  const a = document.createElement('a')
+  a.href = URL.createObjectURL(blob)
+  a.download = `lista-de-compra-${new Date().toISOString().slice(0, 10)}.csv`
+  a.click()
+  URL.revokeObjectURL(a.href)
+}
 
 async function carregar() {
   carregando.value = true
@@ -155,10 +219,17 @@ defineExpose({ carregar })
 
     <div v-if="erro" class="rounded-md border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700">{{ erro }}</div>
 
+    <div class="flex items-center gap-3">
+      <span class="text-sm text-muted-foreground">{{ selecionados.size ? `${selecionados.size} caso${selecionados.size > 1 ? 's' : ''} selecionado${selecionados.size > 1 ? 's' : ''}` : 'marque os casos para montar a lista de compra' }}</span>
+      <Button size="sm" :disabled="!selecionados.size" @click="listaAberta = true">Gerar lista de compra</Button>
+      <Button v-if="selecionados.size" size="sm" variant="ghost" @click="selecionados = new Set()">limpar</Button>
+    </div>
+
     <div class="table-card overflow-x-auto">
       <table class="w-full">
         <thead>
           <tr>
+            <th class="w-10"><input type="checkbox" class="size-4 align-middle" :checked="todosMarcados" title="marcar todos" @change="marcarTodos"></th>
             <th>Caso</th>
             <th>Anúncio</th>
             <th class="text-center">Status</th>
@@ -169,12 +240,13 @@ defineExpose({ carregar })
         </thead>
         <tbody>
           <tr v-if="carregando && itens.length === 0">
-            <td colspan="6" class="text-center text-muted-foreground py-6">carregando…</td>
+            <td colspan="7" class="text-center text-muted-foreground py-6">carregando…</td>
           </tr>
           <tr v-else-if="visiveis.length === 0">
-            <td colspan="6" class="text-center text-muted-foreground py-6">nenhum caso</td>
+            <td colspan="7" class="text-center text-muted-foreground py-6">nenhum caso</td>
           </tr>
-          <tr v-for="c in visiveis" :key="c.id" class="cursor-pointer" @click="abrir(c)">
+          <tr v-for="c in visiveis" :key="c.id" class="cursor-pointer" :class="selecionados.has(c.id) ? 'bg-primary/5' : ''" @click="abrir(c)">
+            <td @click.stop><input type="checkbox" class="size-4 align-middle" :checked="selecionados.has(c.id)" @change="marcar(c.id)"></td>
             <td>
               <div class="font-medium text-sm whitespace-nowrap">{{ c.codigo }}</div>
               <div class="text-[11px] text-muted-foreground max-w-[220px] truncate" :title="c.titulo || ''">{{ c.titulo }}</div>
@@ -195,6 +267,31 @@ defineExpose({ carregar })
         </tbody>
       </table>
     </div>
+
+    <DenunciaGaveta v-model:open="listaAberta" titulo="Lista de compra" :subtitulo="`${lista.length} caso${lista.length > 1 ? 's' : ''} selecionado${lista.length > 1 ? 's' : ''}`">
+      <div class="flex flex-wrap items-center gap-2">
+        <Button size="sm" @click="copiarLista">{{ copiado ? 'copiado ✓' : 'copiar (cola no WhatsApp ou na planilha)' }}</Button>
+        <Button size="sm" variant="outline" @click="baixarLista">baixar planilha</Button>
+      </div>
+      <p class="text-xs text-muted-foreground">O robô não guarda o preço do anúncio: o valor aparece quando a compra já foi registrada no caso.</p>
+      <div class="space-y-2">
+        <div v-for="l in lista" :key="l.caso" class="rounded-lg border px-3 py-2 space-y-1">
+          <div class="flex items-center gap-2 text-sm">
+            <span class="font-medium">{{ l.loja }}</span>
+            <span class="text-xs text-muted-foreground">{{ l.marketplace }}</span>
+            <span class="flex-1" />
+            <span class="text-xs text-muted-foreground">{{ l.caso }}</span>
+          </div>
+          <div class="text-sm truncate" :title="l.produto">{{ l.produto }}</div>
+          <div class="flex flex-wrap items-center gap-x-3 text-xs text-muted-foreground">
+            <span class="font-mono">{{ l.anuncio }}</span>
+            <span>valor: {{ l.valor !== null ? dinheiro(l.valor) : '—' }}</span>
+            <span>comprado: {{ l.comprado }}</span>
+            <a v-if="l.url" :href="l.url" target="_blank" rel="noopener noreferrer" class="text-primary hover:underline">abrir o anúncio</a>
+          </div>
+        </div>
+      </div>
+    </DenunciaGaveta>
 
     <!-- 01/10 (Vinicius: "deixa padrãozinho igual fizemos na aba Anúncios e denúncias"): a ficha do caso
          com 4 quadrinhos em cima (Status · Compra de prova · Jurídico · Anúncio ativo) e abas embaixo -->

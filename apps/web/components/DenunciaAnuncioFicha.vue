@@ -131,7 +131,8 @@ const abas = computed(() => [
     <div class="grid grid-cols-2 sm:grid-cols-4 gap-2">
       <div class="rounded-lg border px-3 py-2 space-y-1 min-w-0">
         <div class="text-[10px] uppercase tracking-wider text-muted-foreground">Na loja</div>
-        <span v-if="ficha.status" :class="pillTom(ficha.status.na_loja.tom)">{{ ficha.status.na_loja.rotulo }}</span>
+        <span v-if="ficha.status && ficha.status.na_loja.chave !== 'vazio'" :class="pillTom(ficha.status.na_loja.tom)">{{ ficha.status.na_loja.rotulo }}</span>
+        <span v-else class="text-sm text-muted-foreground">—</span>
         <div v-if="naLoja.length" class="text-[11px] text-muted-foreground">
           {{ naLoja.length }} tentativa{{ naLoja.length > 1 ? 's' : '' }} · última {{ dataBr(naLoja[0].data, false) }}
         </div>
