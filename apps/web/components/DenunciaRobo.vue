@@ -286,15 +286,24 @@ function alternarLinha(acao: string) {
 
       <!-- ══ Passos ══ -->
       <div v-if="aba === 'passos'" class="table-card overflow-x-auto">
-        <table class="w-full min-w-[860px]">
+        <!-- table-fixed: um erro comprido fica cortado (inteiro ao abrir a linha) e o "Rodar" não sai da tela -->
+        <table class="w-full min-w-[860px] table-fixed">
+          <colgroup>
+            <col class="w-[44px]">
+            <col class="w-[34%]">
+            <col class="w-[150px]">
+            <col class="w-[100px]">
+            <col>
+            <col class="w-[96px]">
+          </colgroup>
           <thead>
             <tr>
-              <th class="w-[44px]">#</th>
+              <th>#</th>
               <th>Passo</th>
-              <th class="w-[150px]">Onde roda</th>
-              <th class="w-[100px]">Última vez</th>
+              <th>Onde roda</th>
+              <th>Última vez</th>
               <th>Resultado</th>
-              <th class="w-[96px]" />
+              <th />
             </tr>
           </thead>
           <tbody>
@@ -309,7 +318,7 @@ function alternarLinha(acao: string) {
                 </td>
                 <td>
                   <div class="text-sm font-medium">{{ p.nome }}</div>
-                  <div class="max-w-[360px] truncate text-[11px] text-muted-foreground" :title="p.faz">{{ p.faz }}</div>
+                  <div class="truncate text-[11px] text-muted-foreground" :title="p.faz">{{ p.faz }}</div>
                 </td>
                 <td class="text-xs text-muted-foreground">{{ p.onde }}</td>
                 <td class="text-xs tabular-nums whitespace-nowrap">
@@ -320,7 +329,7 @@ function alternarLinha(acao: string) {
                   <div v-if="p.ultima" class="flex min-w-0 items-center gap-2">
                     <span class="shrink-0" :class="(STATUS[p.ultima.status] || ['', 'pill-muted'])[1]">{{ (STATUS[p.ultima.status] || [p.ultima.status])[0] }}</span>
                     <span
-                      class="truncate"
+                      class="min-w-0 truncate"
                       :class="p.ultima.status === 'erro' ? 'text-red-700 dark:text-red-400' : 'text-muted-foreground'"
                       :title="p.ultima.erro || p.ultima.progresso"
                     >{{ p.ultima.erro || p.ultima.progresso }}</span>
@@ -348,6 +357,7 @@ function alternarLinha(acao: string) {
                   <div class="space-y-1 py-1 text-xs">
                     <div class="text-muted-foreground">{{ p.faz }}</div>
                     <template v-if="p.ultima">
+                      <div v-if="p.ultima.erro" class="whitespace-pre-wrap break-words text-red-700 dark:text-red-400">{{ p.ultima.erro }}</div>
                       <div>
                         Hoje: {{ p.ultima.vezes }} vez{{ p.ultima.vezes > 1 ? 'es' : '' }} ·
                         última de {{ quando(p.ultima.inicio) || '—' }}<template v-if="p.ultima.fim && p.ultima.status !== 'rodando'"> a {{ quando(p.ultima.fim) }}</template>
