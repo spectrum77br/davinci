@@ -221,9 +221,11 @@ def provas_pedidas():
 
 
 # ordem de cada passo na fila do agente (ORDEM_ACAO do agente_varredura.py)
-ORDEM_PASSO = {"checagem": 0, "ciclo_emails": 1, "varredura_mercadolivre": 2, "varredura_shopee": 3,
-               "varredura_tiktok": 4, "varredura_amazon": 5, "anatel": 6, "conferencia": 6,
-               "compras": 7, "juridico": 8, "relatorio": 9, "capa_perguntas": 10,
+# 02/10 (agente v27): 2 procura e 3 denúncias no lugar de varredura_<canal> (2–5) e conferência (6)
+ORDEM_PASSO = {"checagem": 0, "ciclo_emails": 1, "procura": 2, "denuncias": 3,
+               "varredura_mercadolivre": 2, "varredura_shopee": 2, "varredura_tiktok": 2,
+               "varredura_amazon": 2, "conferencia": 3, "anatel": 4,
+               "compras": 5, "juridico": 6, "relatorio": 7, "capa_perguntas": 8,
                "ativos_inativos": 20}   # 01/10: o "saiu do ar?" virou passo próprio (agente v23)
 
 

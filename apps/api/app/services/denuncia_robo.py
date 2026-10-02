@@ -39,41 +39,59 @@ SEM_NOTICIA = timedelta(minutes=5)
 # também rodam pelo relógio do robô (a cada 3 h) — sozinhos não são rodada:
 # em 01/10 06h eles rodaram e nenhuma varredura foi pedida.
 NUCLEO = {
-    "checagem", "varredura_mercadolivre", "varredura_shopee", "varredura_tiktok",
-    "varredura_amazon", "anatel",
+    "checagem", "procura", "denuncias", "anatel",
+    # passos antigos (até 02/10): ainda contam se alguém pedir
+    "varredura_mercadolivre", "varredura_shopee", "varredura_tiktok", "varredura_amazon",
 }
 
 # passo → (ordem na tela, nome, onde roda, o que faz)
+# 02/10 (Vinicius, agente v27 no mini): os passos 2 a 6 viraram dois — 2 procura nos
+# quatro sites e 3 denúncias (prints, resultados da Shopee, recusadas de novo e novas).
 PASSOS: dict[str, tuple[int, str, str, str]] = {
     "checagem": (0, "Checagem antes da rodada", "perfil 50 + Safari",
                  "confere logins, AdsPower, captcha, Safari e Tuta — não muda nada"),
     # 01/10: o robô lê o Tuta sozinho (o leitor do Claude do mini parou em 17/09).
     "ciclo_emails": (1, "E-mails das plataformas", "escritório + Tuta",
                      "lê no Tuta as respostas das plataformas e aplica nas denúncias"),
-    # 01/10 (Vinicius): nos passos 2 a 6 o robô denuncia no marketplace só o "Nosso", pela
-    # conta da MAKISA (config.json → denunciar_nas_lojas no mini); o "Diversos" só é salvo.
-    "varredura_mercadolivre": (2, "Mercado Livre", "perfil 50",
-                               "procura anúncios novos, salva e denuncia só o Nosso"),
-    "varredura_shopee": (3, "Shopee", "perfil 50",
-                         "procura anúncios novos, salva e denuncia só o Nosso"),
-    "varredura_tiktok": (4, "TikTok", "perfil 50 + celular",
-                         "procura no site, salva e denuncia só o Nosso (app no celular)"),
-    "varredura_amazon": (5, "Amazon", "perfil 50", "procura e registra (ainda não denuncia)"),
-    # 01/10 (Vinicius): o "saiu do ar?" levava 3–4 h dentro do passo 6 e virou o último passo,
-    # feito com o robô parado (para quando a rodada chega e continua depois).
-    "conferencia": (6, "Conferência e denúncias rejeitadas", "perfil 50",
-                    "print no ato, resultados da Shopee e denunciar de novo as recusadas do Nosso (ML e Shopee)"),
-    "anatel": (7, "Anatel / SEI", "Safari",
-               "lê o andamento das antigas e peticiona as novas no SEI"),
-    "compras": (8, "Compras de prova", "perfil 50", "atualiza os pedidos da conta compradora"),
-    "juridico": (9, "Jurídico", "escritório", "monta a pasta do caso pro advogado (não envia)"),
-    "relatorio": (10, "Relatório", "escritório", "denunciados × responderam × resolvidos"),
-    "capa_perguntas": (11, "Perguntas nos anúncios disfarçados", "perfil 50",
+    "procura": (2, "Procurar anúncios novos", "perfil 50",
+                "Mercado Livre → Shopee → TikTok → Amazon, salva no sistema e confere no "
+                "UpSeller quais lojas são nossas"),
+    # 01/10 (Vinicius): nas lojas o robô denuncia só o "Nosso", pela conta da MAKISA
+    # (config.json → denunciar_nas_lojas no mini); o "Diversos" só é salvo. 02/10: até 40
+    # prints por rodada — 1º recusadas do Nosso, 2º os da Anatel, 3º o resto.
+    "denuncias": (3, "Denúncias", "perfil 50 + celular",
+                  "prints (até 40, Nosso primeiro) → resultados da Shopee → recusadas de novo "
+                  "→ novas (ML, Shopee e TikTok; só o Nosso; Amazon ainda não)"),
+    "anatel": (4, "Anatel / SEI", "Safari",
+               "lê o andamento das antigas e peticiona as novas no SEI "
+               "— só depois dos passos 2 e 3"),
+    "compras": (5, "Compras de prova", "perfil 50", "atualiza os pedidos da conta compradora"),
+    "juridico": (6, "Jurídico", "escritório", "monta a pasta do caso pro advogado (não envia)"),
+    "relatorio": (7, "Relatório", "escritório", "denunciados × responderam × resolvidos"),
+    "capa_perguntas": (8, "Perguntas nos anúncios disfarçados", "perfil 50",
                        "pergunta ao vendedor de capa/tablet se vende o aparelho"),
-    "ativos_inativos": (12, "Conferência de anúncios ativos/inativos", "perfil 50",
+    # 01/10 (Vinicius): o "saiu do ar?" levava 3–4 h e virou o último passo, feito com o
+    # robô parado (para quando a rodada chega e continua depois).
+    "ativos_inativos": (9, "Conferência de anúncios ativos/inativos", "perfil 50",
                         "abre um por um os anúncios que acompanhamos e vê quem saiu do ar; "
                         "roda com o robô parado, para se a rodada chegar e continua depois"),
 }
+# passos de antes de 02/10: só pra dar nome às rodadas que ainda os têm (não têm botão)
+ANTIGOS: dict[str, tuple[int, str]] = {
+    "varredura_mercadolivre": (2, "Mercado Livre (antigo)"),
+    "varredura_shopee": (2, "Shopee (antigo)"),
+    "varredura_tiktok": (2, "TikTok (antigo)"),
+    "varredura_amazon": (2, "Amazon (antigo)"),
+    "conferencia": (3, "Conferência e recusadas (antigo)"),
+}
+
+
+def _ordem_nome(acao: str, nome: str | None) -> tuple[int, str]:
+    if acao in PASSOS:
+        return PASSOS[acao][0], PASSOS[acao][1]
+    if acao in ANTIGOS:
+        return ANTIGOS[acao]
+    return 50, nome or acao.replace("_", " ")
 FRENTES = (
     ("M", "Navegador (perfil 50)", "Mercado Livre, Shopee, TikTok, Amazon e conferências"),
     ("S", "Anatel / SEI (Safari)", "denúncias à Anatel e leitura das antigas"),
@@ -135,7 +153,7 @@ def _passos_da_rodada(tarefas: list[dict], janela: str) -> list[dict]:
         if ja and pedido < ja["_pedido"]:
             ja["tentativas"] = tentativas
             continue
-        ordem, nome = PASSOS.get(acao, (50, d.get("nome") or acao.replace("_", " "), "", ""))[:2]
+        ordem, nome = _ordem_nome(acao, d.get("nome"))
         por_acao[acao] = {
             "acao": acao,
             "nome": nome,
@@ -254,7 +272,7 @@ def montar_painel(
         ocorre("agora:agente", "Robô parado", ag.get("detalhe") or "", ag.get("o_que_fazer") or "")
 
     def nome_passo(x: dict) -> str:
-        return PASSOS.get(x.get("acao"), (0, x.get("nome")))[1]
+        return _ordem_nome(str(x.get("acao") or ""), x.get("nome"))[1]
 
     frentes = []
     for fila, nome, faz in FRENTES:

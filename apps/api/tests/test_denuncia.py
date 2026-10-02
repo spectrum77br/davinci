@@ -273,10 +273,10 @@ def _resumo(*tarefas, **itens):
         {"chave": "agente", "estado": "ok", "detalhe": "v20 no ar", "o_que_fazer": "",
          "dados": {"versao": "20", "desde": "2026-10-01T10:13:56-03:00"}},
         {"chave": "fila_M", "estado": "ok", "detalhe": "rodando: Mercado Livre", "o_que_fazer": "",
-         "dados": {"rodando": {"acao": "varredura_mercadolivre", "nome": "Mercado Livre",
+         "dados": {"rodando": {"acao": "procura", "nome": "procurar anúncios novos",
                                "desde": "2026-10-01T12:07:00-03:00",
-                               "progresso": "denunciando 3 de 9"},
-                   "proximos": [{"acao": "varredura_shopee", "nome": "Shopee"}], "n_proximos": 1}},
+                               "progresso": "Shopee pág 3 de 17"},
+                   "proximos": [{"acao": "denuncias", "nome": "denúncias"}], "n_proximos": 1}},
         *({"chave": f"fila_{f}", "estado": "ok", "detalhe": "livre", "o_que_fazer": "",
            "dados": {"rodando": None}} for f in ("S", "E")),
         *tarefas,
@@ -297,10 +297,10 @@ def test_painel_rodadas_frentes_e_alarme():
     j = "2026-10-01_12h"
     resumo = _resumo(
         _tarefa("checagem", j, "concluida", pedido_em="2026-10-01T11:45:00-03:00"),
-        _tarefa("varredura_mercadolivre", j, "rodando", progresso="denunciando 3 de 9"),
-        _tarefa("varredura_shopee", j, "erro", pedido_em="2026-10-01T12:00:00-03:00",
+        _tarefa("procura", j, "rodando", progresso="Shopee pág 3 de 17"),
+        _tarefa("denuncias", j, "erro", pedido_em="2026-10-01T12:00:00-03:00",
                 erro="captcha"),
-        _tarefa("varredura_shopee", j, "fila", pedido_em="2026-10-01T12:20:00-03:00"),
+        _tarefa("denuncias", j, "fila", pedido_em="2026-10-01T12:20:00-03:00"),
         sei_assinatura={"estado": "atencao", "detalhe": "loja X aguardando assinatura desde 12:10",
                         "o_que_fazer": "Assinar no Safari", "dados": {}},
         problemas={"estado": "erro", "detalhe": "", "o_que_fazer": "", "dados": {"lista": [
@@ -320,21 +320,23 @@ def test_painel_rodadas_frentes_e_alarme():
     assert [x["acao"] for x in r6["passos"]] == ["ciclo_emails"]
     assert r12["estado"] == "rodando"
     acoes = [x["acao"] for x in r12["passos"]]
-    assert acoes == ["checagem", "varredura_mercadolivre", "varredura_shopee"]
-    shopee = r12["passos"][2]
-    assert shopee["status"] == "fila" and shopee["tentativas"] == 2  # vale a retomada mais nova
+    assert acoes == ["checagem", "procura", "denuncias"]
+    den = r12["passos"][2]
+    assert den["status"] == "fila" and den["tentativas"] == 2  # vale a retomada mais nova
 
     m = next(f for f in p["frentes"] if f["fila"] == "M")
-    assert m["fazendo"] == "Mercado Livre" and m["progresso"] == "denunciando 3 de 9"
-    assert m["proximos"] == ["Shopee"]
+    assert m["fazendo"] == "Procurar anúncios novos" and m["progresso"] == "Shopee pág 3 de 17"
+    assert m["proximos"] == ["Denúncias"]
 
-    # aba Passos: os 12, com a última vez de hoje
+    # aba Passos (02/10): 0 a 9, com a última vez de hoje; os antigos não têm botão
     passos = {x["acao"]: x for x in p["passos"]}
-    assert len(p["passos"]) == 13 and p["passos"][0]["acao"] == "checagem"
-    assert p["passos"][-1]["acao"] == "ativos_inativos"
-    assert passos["varredura_mercadolivre"]["ultima"]["status"] == "rodando"
-    assert passos["varredura_shopee"]["ultima"]["vezes"] == 2
-    assert passos["varredura_amazon"]["ultima"] is None
+    assert [x["ordem"] for x in p["passos"]] == list(range(10))
+    assert p["passos"][0]["acao"] == "checagem" and p["passos"][-1]["acao"] == "ativos_inativos"
+    assert [x["acao"] for x in p["passos"][2:5]] == ["procura", "denuncias", "anatel"]
+    assert "varredura_mercadolivre" not in passos and "conferencia" not in passos
+    assert passos["procura"]["ultima"]["status"] == "rodando"
+    assert passos["denuncias"]["ultima"]["vezes"] == 2
+    assert passos["compras"]["ultima"] is None
 
     pessoa = [x["titulo"] for x in p["ocorrencias"] if x["tipo"] == "pessoa"]
     assert "SEI esperando a assinatura da titular" in pessoa
@@ -463,6 +465,19 @@ async def test_prova_teto_apaga_a_aberta_ha_mais_tempo(
     assert (await client.post("/api/denuncia/provas/30/preparar")).json()["pronto"] is False
 
 
+def test_painel_passos_antigos_ganham_nome():
+    """Até 02/10 os passos 2–6 eram por site; rodada que ainda os tem mostra o nome e conta."""
+    from app.services.denuncia_robo import _passos_da_rodada
+
+    j = "2026-10-02_06h"
+    tarefas = [_tarefa("varredura_tiktok", j, "concluida"), _tarefa("conferencia", j, "concluida"),
+               _tarefa("checagem", j, "concluida")]
+    passos = _passos_da_rodada(tarefas, j)
+    assert [(x["acao"], x["nome"], x["ordem"]) for x in passos] == [
+        ("checagem", "Checagem antes da rodada", 0), ("varredura_tiktok", "TikTok (antigo)", 2),
+        ("conferencia", "Conferência e recusadas (antigo)", 3)]
+
+
 def test_painel_modo_manual_nao_acusa_rodada():
     from datetime import datetime
     from zoneinfo import ZoneInfo
@@ -470,7 +485,7 @@ def test_painel_modo_manual_nao_acusa_rodada():
     from app.services.denuncia_robo import montar_painel
 
     agora = datetime(2026, 10, 1, 19, 0, tzinfo=ZoneInfo("America/Sao_Paulo"))
-    resumo = dict(_resumo(_tarefa("varredura_mercadolivre", "2026-10-01_12h", "concluida")),
+    resumo = dict(_resumo(_tarefa("procura", "2026-10-01_12h", "concluida")),
                   despertador={"ligado": False, "rodadas": [6, 12, 18]})
     p = montar_painel(resumo, agora, agora)
     assert p["modo"] == "manual"
@@ -492,13 +507,15 @@ async def test_robo_botoes_ligar_e_rodar_passo(client, make_user, auth_as):
     r = await client.post("/api/denuncia/robo/automatico", json={"ligado": False})
     assert r.status_code == 200
     r = await client.post("/api/denuncia/robo/passo", json={"acao": "varredura_mercadolivre"})
+    assert r.status_code == 422  # passo antigo (até 02/10) não tem mais botão
+    r = await client.post("/api/denuncia/robo/passo", json={"acao": "procura"})
     assert r.status_code == 200, r.text
 
     # o mini busca os pendentes, executa e responde
     assert (await client.get("/api/denuncia/sync/robo/comandos")).status_code == 401
     cmds = (await client.get("/api/denuncia/sync/robo/comandos", headers=H)).json()["comandos"]
     assert [(c["tipo"], c["dados"]) for c in cmds] == [
-        ("automatico", {"ligado": False}), ("passo", {"acao": "varredura_mercadolivre"})]
+        ("automatico", {"ligado": False}), ("passo", {"acao": "procura"})]
     r = await client.post(f"/api/denuncia/sync/robo/comandos/{cmds[0]['id']}",
                           json={"ok": True, "resultado": "rotina automática desligada"}, headers=H)
     assert r.status_code == 200
@@ -508,7 +525,7 @@ async def test_robo_botoes_ligar_e_rodar_passo(client, make_user, auth_as):
     j = (await client.get("/api/denuncia/robo")).json()
     assert [c["tipo"] for c in j["comandos"]] == ["passo", "automatico"]
     assert j["comandos"][1]["ok"] is True and j["comandos"][1]["entregue_em"]
-    assert len(j["passos"]) == 13
+    assert len(j["passos"]) == 10  # 02/10: passos 0 a 9
 
 
 

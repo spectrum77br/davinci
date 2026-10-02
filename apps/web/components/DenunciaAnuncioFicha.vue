@@ -107,8 +107,8 @@ function etiquetaDen(d: Record<string, any>): { texto: string; cls: string } {
 }
 // sem processo na Anatel: o que falta para ir (mesmas regras de 01/10 do robô)
 const EXPLICA_ANATEL: Record<string, string> = {
-  fila: 'Está na fila: vai no próximo passo 7 (Anatel / SEI).',
-  falta_print: 'Falta o print da página do anúncio — o robô tira no passo 6; depois entra na fila.',
+  fila: 'Está na fila: vai no próximo passo 4 (Anatel / SEI).',
+  falta_print: 'Falta o print da página do anúncio — o robô tira no passo 3; depois entra na fila.',
   esperando_recusa: 'Nosso: só vai à Anatel depois que a loja recusar a nossa denúncia.',
   falta_loja: 'Nosso: primeiro denunciamos na loja; se ela recusar, vai à Anatel.',
   nada: 'Não vai à Anatel: fora do ar, já resolvido ou fora das regras (sem nº declarado).',
