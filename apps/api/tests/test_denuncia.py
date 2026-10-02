@@ -799,7 +799,8 @@ async def test_criar_caso_por_loja_e_excluir(client, make_user, auth_as):
     await client.post(
         "/api/denuncia/sync/anuncios",
         json={"linhas": [
-            _anuncio("B1", shop_id="222", loja="loja_y", vendas=300),
+            _anuncio("B1", shop_id="222", loja="loja_y", vendas=300, preco=999.9,
+                     preco_em="2026-10-01 10:00:00"),
             _anuncio("B2", shop_id="222", loja="loja_y", vendas=700, situacao="fora do ar"),
             _anuncio("B3", shop_id="222", loja="loja_y", vendas=5),
             _anuncio("B4", shop_id="222", loja="loja_y", propria=1),
@@ -854,6 +855,7 @@ async def test_criar_caso_por_loja_e_excluir(client, make_user, auth_as):
     casos = (await client.get("/api/denuncia/casos")).json()["itens"]
     c8 = next(c for c in casos if c["id"] == 8)
     assert (c8["n_anuncios"], c8["por_loja"], c8["loja"]) == (3, True, "loja_y")
+    assert (c8["preco"], c8["preco_em"]) == (999.9, "2026-10-01 10:00:00")  # lista de compra
     d = (await client.get("/api/denuncia/casos/8")).json()
     assert [x["id"] for x in d["anuncios_do_caso"]] == ["B1", "B3", "B2"]
     f = (await client.get("/api/denuncia/anuncios/B3")).json()

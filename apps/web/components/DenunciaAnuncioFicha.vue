@@ -189,7 +189,7 @@ const abas = computed(() => [
           abrir no marketplace <ExternalLink class="size-3.5" />
         </a>
         <span class="text-xs text-muted-foreground">
-          {{ numero(a.vendas) }} vendas · visto de {{ dataBr(a.visto_primeiro, false) }} a {{ dataBr(a.visto_ultimo) }}
+          <template v-if="a.preco">{{ dinheiro(a.preco) }}<template v-if="a.preco_em"> (lido em {{ dataBr(a.preco_em, false) }})</template> · </template>{{ numero(a.vendas) }} vendas · visto de {{ dataBr(a.visto_primeiro, false) }} a {{ dataBr(a.visto_ultimo) }}
         </span>
       </div>
       <dl class="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">

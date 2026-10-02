@@ -1600,6 +1600,9 @@ async def listar_casos(
                 "juridico_enviado_em": d.get("juridico_enviado_em"),
                 "url": ad.get("url"),
                 "hom": ad.get("hom"),
+                # 02/10: o preço que a varredura leu no anúncio principal (lista de compra)
+                "preco": ad.get("preco"),
+                "preco_em": ad.get("preco_em"),
                 "vendas": vendas,
                 "shop_id": shop_id or _loja_do_caso(c)[1],
                 "n_anuncios": len(_anuncios_do_caso(c)),
@@ -1791,7 +1794,7 @@ async def ver_caso(
         do_caso = [
             {"id": i, "titulo": por_id[i].titulo, "situacao": por_id[i].situacao,
              "vendas": por_id[i].vendas, "grupo": por_id[i].grupo,
-             "url": (por_id[i].dados or {}).get("url")}
+             "url": (por_id[i].dados or {}).get("url"), "preco": (por_id[i].dados or {}).get("preco")}
             for i in ids if i in por_id
         ]
     return {

@@ -26,6 +26,9 @@ type Caso = {
   status_mini: string | null
   url: string | null
   hom: string | null
+  // 02/10: preço que a varredura leu no anúncio (e quando)
+  preco?: number | null
+  preco_em?: string | null
   vendas: number | null
   shop_id: string | null
   // 01/10: caso por loja (todos os anúncios dela)
@@ -66,7 +69,7 @@ type Anexo = {
   resultado: string | null
 }
 type Detalhe = {
-  anuncios_do_caso?: { id: string; titulo: string | null; situacao: string | null; vendas: number | null; grupo: string | null; url: string | null }[]
+  anuncios_do_caso?: { id: string; titulo: string | null; situacao: string | null; vendas: number | null; grupo: string | null; url: string | null; preco?: number | null }[]
   extra?: CasoExtra
   status_tela?: string
   anexos?: Anexo[]
@@ -116,6 +119,8 @@ const lista = computed(() =>
       anuncio: c.anuncio_id || '',
       produto: c.titulo_anuncio || '',
       url: c.url || '',
+      preco: c.preco ?? null,
+      preco_em: c.preco_em ? dataBr(c.preco_em, false) : '',
       valor: c.compra?.valor_pago ?? null,
       comprado: c.compra || c.extra?.compra_pedido
         ? `${c.compra?.status || 'comprado'}${(c.extra?.compra_pedido || c.compra?.pedido) ? ` · pedido ${c.extra?.compra_pedido || c.compra?.pedido}` : ''}`
@@ -124,7 +129,8 @@ const lista = computed(() =>
 )
 const COLUNAS: [keyof (typeof lista.value)[number], string][] = [
   ['caso', 'Caso'], ['loja', 'Loja'], ['marketplace', 'Marketplace'], ['anuncio', 'Anúncio'],
-  ['produto', 'Produto'], ['valor', 'Valor'], ['comprado', 'Comprado?'], ['url', 'Link'],
+  ['produto', 'Produto'], ['preco', 'Preço no anúncio'], ['preco_em', 'Preço visto em'], ['valor', 'Valor pago'],
+  ['comprado', 'Comprado?'], ['url', 'Link'],
 ]
 function textoLista(sep: string): string {
   const esc = (v: unknown) => {
@@ -612,7 +618,7 @@ defineExpose({ carregar })
         <Button size="sm" @click="copiarLista">{{ copiado ? 'copiado ✓' : 'copiar (cola no WhatsApp ou na planilha)' }}</Button>
         <Button size="sm" variant="outline" @click="baixarLista">baixar planilha</Button>
       </div>
-      <p class="text-xs text-muted-foreground">O robô não guarda o preço do anúncio: o valor aparece quando a compra já foi registrada no caso.</p>
+      <p class="text-xs text-muted-foreground">Preço = o que a varredura leu no anúncio (pode ter mudado; confira antes de comprar). Valor pago aparece quando a compra já foi registrada.</p>
       <div class="space-y-2">
         <div v-for="l in lista" :key="l.caso" class="rounded-lg border px-3 py-2 space-y-1">
           <div class="flex items-center gap-2 text-sm">
@@ -624,7 +630,8 @@ defineExpose({ carregar })
           <div class="text-sm truncate" :title="l.produto">{{ l.produto }}</div>
           <div class="flex flex-wrap items-center gap-x-3 text-xs text-muted-foreground">
             <span class="font-mono">{{ l.anuncio }}</span>
-            <span>valor: {{ l.valor !== null ? dinheiro(l.valor) : '—' }}</span>
+            <span class="text-foreground font-medium">preço: {{ l.preco !== null ? dinheiro(l.preco) : '—' }}<span v-if="l.preco_em" class="font-normal text-muted-foreground"> (visto em {{ l.preco_em }})</span></span>
+            <span v-if="l.valor !== null">pago: {{ dinheiro(l.valor) }}</span>
             <span>comprado: {{ l.comprado }}</span>
             <a v-if="l.url" :href="l.url" target="_blank" rel="noopener noreferrer" class="text-primary hover:underline">abrir o anúncio</a>
           </div>
@@ -704,6 +711,7 @@ defineExpose({ carregar })
               @click="verAnuncio(x.id)"
             >
               <span class="truncate flex-1" :title="x.titulo || ''">{{ x.titulo || x.id }}</span>
+              <span v-if="x.preco" class="shrink-0 tabular-nums">{{ dinheiro(x.preco) }}</span>
               <span class="shrink-0 tabular-nums text-muted-foreground">{{ numero(x.vendas || 0) }} vendas</span>
               <span class="shrink-0" :class="pillAtivo(x.situacao)">{{ ativoSimNao(x.situacao) }}</span>
             </button>
