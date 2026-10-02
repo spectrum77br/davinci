@@ -68,6 +68,7 @@ from app.routers import redes_sociais as redes_sociais_router
 from app.routers import refunds as refunds_router
 from app.routers import segments as segments_router
 from app.routers import settings as settings_router
+from app.routers import sites_custos as sites_custos_router
 from app.routers import sites_estoque as sites_estoque_router
 from app.routers import sites_midia as sites_midia_router
 from app.routers import stores as stores_router
@@ -201,6 +202,9 @@ app.include_router(products_router.router)
 # Estoque só leitura para os sites Charlots/Uranyx (30/09/2026). Fecha
 # sozinha se SITES_ESTOQUE_TOKENS estiver vazio; fora do openapi.
 app.include_router(sites_estoque_router.router)
+# Custo "Kit 1" da Tabela de Preços para o preço de atacado dos mesmos sites
+# (02/10/2026): mesmo Bearer do estoque, recorte pela pasta de fotos; fora do openapi.
+app.include_router(sites_custos_router.router)
 # Fotos e vídeos com marca d'água para os mesmos sites (01/10/2026): mesmo
 # Bearer do estoque; os bytes saem por link cifrado no PATH, fora do access log.
 app.include_router(sites_midia_router.router)
