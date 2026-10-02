@@ -32,6 +32,16 @@ canais lida antes, mudando só o `enabled` do canal Flex. A doc atual tirou
 uma lista parcial pode desligar a Shopee Express do anúncio, e a Entrega
 Direta não pode ser o único canal. Por isso a escrita Shopee só acontece com
 `flex_shopee_escrita=True` (configuração) e é conferida com nova leitura.
+
+A CONTA (revisão de 02/10/2026, com os fatos lidos nas contas): antes de ler
+ou escrever qualquer anúncio, o motor confere se a conta PODE ter Flex —
+`AssinaturaFlex`:
+  ML     GET /flex/sites/MLB/users/{user_id}/subscriptions/v1 → lista de
+         assinaturas com `status` "in" / "pending" / "out". Só "in" tem Flex;
+         algumas contas respondem 404 ou 403 (sem Flex).
+  Shopee GET /api/v2/logistics/get_channel_list → o canal 90022 tem de estar
+         `enabled` NA LOJA (e com `mask_channel_id` 0). Em 02/10/2026 ele
+         existe nas 14 lojas e está desligado em todas.
 """
 
 from __future__ import annotations
@@ -71,6 +81,10 @@ class ResultadoFlex:
     status_http: int | None = None
     detalhe: str = ""
     canais: tuple[dict, ...] | None = field(default=None, compare=False)
+    # Status do anúncio que veio na MESMA leitura (Shopee: `item_status` do
+    # get_item_base_info), já nos nomes da importação — ver `status_shopee`.
+    # None = a leitura não diz (o GET do Flex do ML só traz `has_flex`).
+    status_anuncio: str | None = field(default=None, compare=False)
 
     @property
     def ok(self) -> bool:
@@ -80,6 +94,56 @@ class ResultadoFlex:
         """Para `ultimo_erro` / `flex_log.erro`: "403 item down"."""
         partes = [str(self.status_http) if self.status_http else "", self.detalhe]
         return " ".join(p for p in partes if p).strip()[:500] or self.tipo
+
+
+@dataclass(frozen=True)
+class AssinaturaFlex:
+    """A conta pode ter Flex? `ativo`: True = sim; False = não (a plataforma
+    respondeu que não: out/pending/404/403, canal desligado na loja); None =
+    não deu para saber agora (rede, 429, 5xx) — vale a resposta anterior.
+    `status`: o que veio, cru ("in", "pending", "out", "http_404",
+    "sem_assinatura", "sem_canal")."""
+
+    ativo: bool | None
+    status: str | None = None
+    detalhe: str = ""
+
+
+@dataclass(frozen=True)
+class ListagemConta:
+    """Ids dos anúncios de UMA conta com um status (descoberta). `completo`:
+    leu até o fim sem buraco; `erro`: o porquê de ter parado antes."""
+
+    ids: tuple[str, ...] = ()
+    completo: bool = False
+    erro: str | None = None
+
+
+# Status do anúncio nos nomes da importação (models.enums.ListingStatus).
+STATUS_ATIVO = "active"
+STATUS_ANUNCIO = ("active", "paused", "under_review", "inactive", "closed")
+# Shopee `item_status` → status da importação.
+_STATUS_SHOPEE = {
+    "NORMAL": "active",
+    "UNLIST": "paused",
+    "REVIEWING": "under_review",
+    "BANNED": "inactive",
+    "DELETED": "closed",
+    "SELLER_DELETE": "closed",
+    "SHOPEE_DELETE": "closed",
+}
+
+
+def status_shopee(item_status: Any) -> str | None:
+    """`item_status` da Shopee nos nomes da importação; desconhecido = None."""
+    return _STATUS_SHOPEE.get(str(item_status or "").strip().upper())
+
+
+def status_ml(status: Any) -> str | None:
+    """`status` do item do ML (active, paused, closed, under_review,
+    inactive); desconhecido = None."""
+    s = str(status or "").strip().lower()
+    return s if s in STATUS_ANUNCIO else None
 
 
 # ---- Mercado Livre -------------------------------------------------------------
@@ -130,6 +194,47 @@ def classificar_ml(acao: str, r: httpx.Response) -> ResultadoFlex:
     return ResultadoFlex(ERRO, status_http=st, detalhe=msg)
 
 
+def _lista_de_assinaturas(corpo: Any) -> list[Mapping[str, Any]]:
+    """A resposta do subscriptions/v1 é uma LISTA; aceita também o envelope
+    `{"results": [...]}` (o formato não está na página oficial)."""
+    if isinstance(corpo, Mapping):
+        for chave in ("results", "subscriptions", "data"):
+            if isinstance(corpo.get(chave), list):
+                corpo = corpo[chave]
+                break
+        else:
+            corpo = [corpo] if corpo.get("status") is not None else []
+    if not isinstance(corpo, list):
+        return []
+    return [x for x in corpo if isinstance(x, Mapping)]
+
+
+def classificar_assinatura_ml(r: httpx.Response) -> AssinaturaFlex:
+    """A conta do ML tem o Flex? Só a assinatura "in" vale ("pending" ainda
+    não; "out" saiu). 401/403/404: a conta não tem Flex (fato: eron, mega e
+    dream2 respondem 404; nexus, 403). 429/5xx: não deu para saber."""
+    st = r.status_code
+    if 200 <= st < 300:
+        try:
+            corpo = r.json()
+        except ValueError:
+            return AssinaturaFlex(None, None, "resposta não-JSON")
+        statuses = [
+            str(x.get("status") or "").strip().lower() for x in _lista_de_assinaturas(corpo)
+        ]
+        statuses = [x for x in statuses if x]
+        if "in" in statuses:
+            return AssinaturaFlex(True, "in", "assinatura do Flex ativa")
+        if not statuses:
+            return AssinaturaFlex(False, "sem_assinatura", "a conta não tem assinatura do Flex")
+        # "pending" diz mais que "out" (a assinatura está a caminho).
+        status = "pending" if "pending" in statuses else statuses[0]
+        return AssinaturaFlex(False, status, f"assinatura do Flex: {status}")
+    if st == 429 or st >= 500:
+        return AssinaturaFlex(None, None, f"{st} {_texto_ml(r)}".strip())
+    return AssinaturaFlex(False, f"http_{st}", f"{st} {_texto_ml(r)}".strip())
+
+
 def erro_de_rede(exc: BaseException) -> ResultadoFlex:
     """Timeout / conexão caída / refresh que falhou: tentar depois. O refresh
     recusado (RuntimeError `ml_refresh_failed`) é de pessoa."""
@@ -141,7 +246,43 @@ def erro_de_rede(exc: BaseException) -> ResultadoFlex:
     return ResultadoFlex(ERRO, detalhe=texto)
 
 
+def assinatura_erro(exc: BaseException) -> AssinaturaFlex:
+    """Conferência da conta que não chegou a ter resposta (rede, refresh do
+    token): não se sabe — vale a anterior."""
+    return AssinaturaFlex(None, None, str(exc)[:300])
+
+
 # ---- Shopee --------------------------------------------------------------------
+
+
+def classificar_canal_loja_shopee(
+    resp: Mapping[str, Any] | None, canais_flex: Collection[str]
+) -> AssinaturaFlex:
+    """O canal Flex (Entrega Direta, 90022) está ligado NA LOJA? A guia
+    "Product creation preparation": no produto só vale canal com
+    `enabled=true` E `mask_channel_id=0` no `get_channel_list`."""
+    alvo = {str(c).strip() for c in canais_flex}
+    lista = (resp or {}).get("logistics_channel_list")
+    if not isinstance(lista, list):
+        return AssinaturaFlex(None, None, "a Shopee não mandou logistics_channel_list")
+    achados = [
+        c
+        for c in lista
+        if isinstance(c, Mapping) and str(c.get("logistics_channel_id") or "").strip() in alvo
+    ]
+    if not achados:
+        return AssinaturaFlex(
+            False, "sem_canal", "a loja não tem o canal Entrega Direta na Shopee"
+        )
+    for c in achados:
+        try:
+            mascara = int(c.get("mask_channel_id") or 0)
+        except (TypeError, ValueError):
+            mascara = -1
+        if c.get("enabled") is True and mascara == 0:
+            return AssinaturaFlex(True, "in", "Entrega Direta ligada na loja")
+    return AssinaturaFlex(False, "out", "Entrega Direta desligada na loja")
+
 
 
 def _id_canal(entrada: Mapping[str, Any]) -> str:

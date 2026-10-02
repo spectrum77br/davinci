@@ -59,14 +59,39 @@ MODOS (`flex_modo`):
 ESCRITA: uma de cada vez por anúncio — `pg_try_advisory_xact_lock` no
 namespace SYNC do projeto, com o estado relido DENTRO da trava; só escreve com
 o estado observado fresco (lido há pouco); falha passageira espera
-(`proxima_tentativa`, com espera crescente); recusa da plataforma (403 "item
-down", 404) não se repete sozinha (`recusa`). Toda decisão que MUDA e toda
-escrita viram linha em `flex_log` com o antes e o depois.
+(`proxima_tentativa`, com espera crescente); recusa da plataforma ao LIGAR
+(403 "item down", 404) não se repete sozinha (`recusa`); ao DESLIGAR tenta de
+novo em 1 h (anúncio pausado que volta a ficar ativo não pode ficar vendendo
+Flex por um dia). Toda decisão que MUDA e toda escrita viram linha em
+`flex_log` com o antes e o depois.
+
+FATOS DAS CONTAS (revisão de 02/10/2026) — o que o motor confere antes:
+  • a CONTA pode ter Flex? (`flex_conta`, relido de hora em hora) — ML: só a
+    assinatura "in" de subscriptions/v1 (há contas "out", "pending", 404 e
+    403); Shopee: a Entrega Direta (90022) ligada NA LOJA (está desligada nas
+    14). Conta que não pode não tem leitura nem escrita por anúncio, e os
+    anúncios dela ficam "não pode ter Flex" com o motivo da conta, sem pedir
+    aprovação;
+  • aprovação só se pede para anúncio LIDO desligado (o Flex já está ligado
+    na maioria dos anúncios das contas "in"); a aprovação é para UMA
+    ligação: lido já ligado, ela some — o motor nunca religa sozinho com uma
+    aprovação velha;
+  • o anúncio que não está ativo (pausado, em revisão, inativo, encerrado)
+    não ocupa vaga da família, nunca pede aprovação e, com Flex ligado, é
+    desligado — o status vem do mais novo entre a descoberta da conta, a
+    leitura da Shopee e a importação (sem chamada extra por anúncio);
+  • o anúncio que o DaVinci não conhece: uma vez por dia o motor lista TODOS
+    os ids da conta do ML (ativos e pausados) e o que não tem vínculo nem
+    importação entra no estado como "fora do DaVinci" — desligado;
+  • a fila de leituras anda em rodízio entre as contas e pela última
+    tentativa: leitura que falha espera (crescente) e uma conta com 403 não
+    toma as vagas das outras.
 
 QUEM CHAMA: o cron do worker (`flex_motor_tick`, de flex_intervalo_min em
 flex_intervalo_min), o botão "Sincronizar" da tela (job), a aprovação (só o
-anúncio aprovado) e o gancho do pedido Flex (`flex_reavaliar_run`: passe
-barato, sem leitura, que só DESLIGA — ver worker).
+anúncio aprovado; com a rodada ocupada, um job que tenta de novo), o gancho do
+pedido Flex (`flex_reavaliar_run`: passe barato, sem leitura, que só DESLIGA
+— ver worker) e a emergência (job `flex_emergencia_run`).
 """
 
 from __future__ import annotations
@@ -91,6 +116,8 @@ from app.db import session_scope
 from app.models import (
     BlingOrder,
     FlexAnuncioEstado,
+    FlexConta,
+    FlexEmergencia,
     FlexLog,
     FlexPedido,
     Integration,
@@ -100,6 +127,7 @@ from app.models import (
     Product,
     ProductLink,
 )
+from app.models.flex import FLEX_STATUS_ANUNCIO
 from app.services import flex_config, flex_envio
 from app.services.advisory_lock import SYNC_NAMESPACE
 from app.services.bling_situacoes import (
@@ -126,15 +154,38 @@ _MOTOR_LOCK_KEY = 0x666C6578
 # Leituras por rodada. ML: 1 GET por anúncio (o limite do Flex é 1000/min por
 # aplicação, somando ligar/desligar e o Turbo) — 400 a cada 15 min fica longe
 # dele; com mais anúncios, a fila anda pelos mais velhos/mais urgentes
-# primeiro. Shopee: 50 por chamada.
+# primeiro, em rodízio entre as contas. Shopee: 50 por chamada.
 _TETO_LEITURAS_ML = 400
 _TETO_LEITURAS_SHOPEE = 2000
-# Emergência: escritas por clique (o resto fica em `restantes`; clicar de
-# novo continua). Abaixo dos 1000/min do ML.
-_TETO_EMERGENCIA = 300
+# Leitura do ML com 403 sem "item down" (SEM_PERMISSAO): um anúncio isolado
+# (de outro vendedor, vínculo trocado de conta) não interrompe a conta; só
+# 401/refresh recusado ou esta quantidade seguida.
+_SEM_PERMISSAO_SEGUIDOS = 3
+# Emergência (job do worker): escritas por job — o resto fica em `restantes`
+# e apertar de novo continua. Com `_EMERGENCIA_PARALELO` chamadas ao mesmo
+# tempo (cada uma num anúncio diferente) fica perto de 200–250/min, abaixo
+# dos 1000/min do ML: a maior conta (≈2.000 anúncios) sai num job só.
+_TETO_EMERGENCIA = 3000
+_EMERGENCIA_PARALELO = 4
+# Andamento da emergência gravado no banco (a tela consulta) de tanto em tanto.
+_EMERGENCIA_PROGRESSO_S = 2.0
 # Emergência: quanto espera (s) a trava de um anúncio que a rodada está
 # lendo ou escrevendo — uma chamada à plataforma leva poucos segundos.
 _ESPERA_TRAVA_EMERGENCIA = 10.0
+# A conta pode ter Flex? (assinatura do ML / canal da loja Shopee): vale por
+# 1 h — a assinatura muda raramente e é uma chamada por conta.
+_VALIDADE_CONTA = timedelta(hours=1)
+# Descoberta dos anúncios da conta (ML): uma vez por dia (e no primeiro uso);
+# a que falhou tenta de novo em 1 h. Até 100 páginas de 100 ids por status e
+# no máximo 3 contas por rodada (a rodada não pode ficar presa nisso).
+_DESCOBERTA_A_CADA = timedelta(hours=24)
+_DESCOBERTA_FALHOU_ESPERA = timedelta(hours=1)
+_DESCOBERTA_MAX_PAGINAS = 100
+_DESCOBERTA_CONTAS_POR_RODADA = 3
+# A emergência redescobre a conta se a última descoberta tiver mais que isto:
+# "desligar tudo" tem de ver o anúncio novo que o DaVinci não conhece.
+_DESCOBERTA_EMERGENCIA = timedelta(hours=1)
+MOTIVO_FORA_DO_DAVINCI = "anúncio fora do DaVinci — sem vínculo"
 # Pedido Flex que ainda desconta do saldo: aberto no Bling e detectado há no
 # máximo isso (a mesma janela do shipment check que o registra).
 _JANELA_PEDIDOS = timedelta(days=30)
@@ -154,8 +205,11 @@ SITUACOES_FECHADAS = _SITUACOES_FECHADAS
 # São Bernardo: o .sp do Bling fica com peça a mais até alguém transferir.
 # O desconto continua até a pessoa marcar `flex_pedido.acertado_em`.
 SITUACOES_SAIU = (str(SITUACAO_EM_ANDAMENTO), str(SITUACAO_ATENDIDO))
-# Recusa da plataforma ao DESLIGAR (403/404): não adianta repetir já.
-_ESPERA_RECUSA = timedelta(hours=24)
+# Recusa da plataforma ao DESLIGAR (403 "item down"/404 — o anúncio pausado
+# pode responder assim): tenta de novo em 1 h. Antes eram 24 h, e o anúncio
+# que o DaVinci reativava (estoque republicado) voltava a vender pelo Flex sem
+# .sp até o dia seguinte.
+_ESPERA_RECUSA_DESLIGAR = timedelta(hours=1)
 _ESPERA_MAXIMA = timedelta(hours=6)
 
 
@@ -234,6 +288,20 @@ class Anuncio:
     aprovado: bool = False
     # Vínculo mais antigo do anúncio: desempate do limite por família.
     desde: datetime | None = None
+    # A CONTA não pode ter Flex (ML sem assinatura "in", Shopee com a Entrega
+    # Direta desligada na loja) — o porquê; None = a conta pode.
+    bloqueio: str | None = None
+    # O DaVinci conhece o anúncio (vínculo ou importação)? False = só existe
+    # no estado — achado pela descoberta da conta, ou o vínculo morreu e saiu
+    # da importação.
+    conhecido: bool = True
+    # Status na plataforma (active, paused, under_review, inactive, closed) e
+    # quando foi visto; None = não se sabe (vale como ativo).
+    status: str | None = None
+    status_em: datetime | None = None
+    # O motor consegue LIGAR o Flex aqui? Shopee com `flex_shopee_escrita`
+    # desligado: não — pedir aprovação seria um botão que não faz nada.
+    pode_ligar: bool = True
 
     @property
     def chave(self) -> tuple[UUID, str]:
@@ -305,11 +373,42 @@ def _nome_variacao(v: Variacao) -> str:
     return f"id {v.ref}" if v.ref else "sem SKU"
 
 
+_STATUS_TEXTO = {
+    "paused": "pausado",
+    "under_review": "em revisão",
+    "inactive": "inativo",
+    "closed": "encerrado",
+}
+# Shopee sem `flex_shopee_escrita`: o motor só confere; ligar é à mão.
+_SHOPEE_SO_LEITURA = "Shopee só leitura (flex_shopee_escrita)"
+
+
+def ativo_na_plataforma(status: str | None) -> bool:
+    """Status desconhecido vale como ativo (o anúncio do vínculo vivo que
+    nunca foi importado nem descoberto) — a leitura e a regra seguem."""
+    return status in (None, "", flex_api.STATUS_ATIVO)
+
+
 def decidir(anuncio: Anuncio, saldos: Mapping[str, SaldoSp], cfg: ConfigFlex) -> Decisao:
     """O que a regra quer para UM anúncio (sem o limite por família — ver
     `decidir_lote`). Pura: nada de banco, nada de API."""
+    if anuncio.bloqueio:
+        # A conta não pode ter Flex: nada por anúncio adianta (nem pedir
+        # aprovação — a aprovação não ligaria nada).
+        return Decisao(INELEGIVEL, anuncio.bloqueio)
     if not anuncio.variacoes:
+        if not anuncio.conhecido:
+            return Decisao(DESLIGADO, MOTIVO_FORA_DO_DAVINCI)
         return Decisao(INELEGIVEL, "anúncio sem vínculo vivo com produto do DaVinci")
+    if not ativo_na_plataforma(anuncio.status):
+        # Pausado/em revisão/inativo: não vende agora — não ocupa vaga da
+        # família e não pede aprovação. Com Flex ligado, desliga: quando for
+        # reativado (o DaVinci republica o estoque e o ML reativa sozinho), não
+        # pode voltar vendendo pelo Flex sem a regra ter olhado o saldo.
+        rotulo = _STATUS_TEXTO.get(anuncio.status or "", anuncio.status or "")
+        return Decisao(
+            DESLIGADO, f"anúncio {rotulo} na plataforma — o Flex fica desligado até reativar"
+        )
     # Variação que o DaVinci não controla: o Flex vale para o anúncio INTEIRO,
     # então ela também sairia de São Bernardo — e o DaVinci não sabe se há
     # peça. Vale mesmo com estoque 0 (o estoque dela não é mandado por aqui).
@@ -404,6 +503,11 @@ def decidir(anuncio: Anuncio, saldos: Mapping[str, SaldoSp], cfg: ConfigFlex) ->
         return replace(
             d, desejado=INELEGIVEL, motivo=f"a plataforma recusou ligar: {anuncio.recusa}"
         )
+    if d.desejado == LIGADO and not anuncio.pode_ligar and anuncio.observado != LIGADO:
+        # O motor não liga aqui (Shopee só leitura): não pede aprovação nem
+        # toma a vaga da família de um anúncio que ele consegue ligar. Ligado
+        # à mão (observado ligado) continua contando — ele vende pelo Flex.
+        return replace(d, desejado=DESLIGADO, motivo=f"{_SHOPEE_SO_LEITURA} — {d.motivo}")
     return d
 
 
@@ -552,6 +656,11 @@ def variacoes_da_plataforma(plataforma: str, raw: Any) -> list[tuple[str, str | 
     return out
 
 
+def _mais_novo(a: datetime | None, b: datetime | None) -> bool:
+    """`a` é pelo menos tão novo quanto `b`? (sem data nunca ganha de data)."""
+    return a is not None and (b is None or a >= b)
+
+
 async def montar_anuncios(
     session: AsyncSession, integracoes: Mapping[UUID, Integration]
 ) -> list[Anuncio]:
@@ -574,7 +683,12 @@ async def montar_anuncios(
 
     Negação por padrão: anúncio importado (`listings`, não encerrado) da conta
     que não tem vínculo vivo entra SEM variações vivas — a regra o dá como
-    inelegível e, se o Flex estiver ligado nele, desliga."""
+    inelegível e, se o Flex estiver ligado nele, desliga.
+
+    Status (revisão de 02/10/2026): o `listings.status` da última importação
+    (com `imported_at`) vai para o anúncio — inclusive o encerrado que ainda
+    tem vínculo vivo. `_com_estado` troca pelo do estado quando o do estado
+    for mais novo (descoberta da conta, leitura da Shopee)."""
     if not integracoes:
         return []
     ids = list(integracoes)
@@ -652,17 +766,27 @@ async def montar_anuncios(
         select(
             Listing.integration_id,
             Listing.external_id,
+            Listing.status,
+            Listing.imported_at,
             Listing.raw_data["variations"].label("variations"),
             Listing.raw_data["model"].label("model"),
-        ).where(Listing.integration_id.in_(ids), Listing.status != ListingStatus.CLOSED)
+        ).where(Listing.integration_id.in_(ids))
     )
     vistas: dict[tuple[UUID, str], set[str]] = defaultdict(set)
-    for iid, ext_bruto, ml_variacoes, shopee_modelo in importados.all():
+    status: dict[tuple[UUID, str], tuple[str, datetime | None]] = {}
+    for iid, ext_bruto, st, quando, ml_variacoes, shopee_modelo in importados.all():
         p = plataforma.get(iid)
         ext = _id_anuncio(p or "", ext_bruto)
         if p is None or not ext:
             continue
         chave = (iid, ext)
+        valor = getattr(st, "value", st)
+        # Shopee: uma linha por modelo — vale a importação mais nova.
+        anterior = status.get(chave)
+        if valor and (anterior is None or _mais_novo(quando, anterior[1])):
+            status[chave] = (str(valor), quando)
+        if st == ListingStatus.CLOSED:
+            continue  # encerrado não entra pela importação (só o status, acima)
         variacoes.setdefault(chave, [])
         raw = {"variations": ml_variacoes, "model": shopee_modelo}
         for ref, sku, estoque in variacoes_da_plataforma(p, raw):
@@ -682,6 +806,8 @@ async def montar_anuncios(
             plataforma=plataforma[iid] or "",
             variacoes=tuple(vs),
             desde=desde.get((iid, ext)),
+            status=status[(iid, ext)][0] if (iid, ext) in status else None,
+            status_em=status[(iid, ext)][1] if (iid, ext) in status else None,
         )
         for (iid, ext), vs in variacoes.items()
     ]
@@ -853,6 +979,11 @@ class _Estado:
     observado_em: datetime | None
     recusa: str | None
     aprovado: bool = False
+    # Fila de leitura (ver `_escolher_leituras`).
+    leitura_em: datetime | None = None
+    proxima_leitura: datetime | None = None
+    status_anuncio: str | None = None
+    status_em: datetime | None = None
 
 
 async def _fotos_dos_estados(
@@ -871,6 +1002,10 @@ async def _fotos_dos_estados(
             observado_em=e.observado_em,
             recusa=e.recusa,
             aprovado=e.aprovado_em is not None,
+            leitura_em=e.leitura_em,
+            proxima_leitura=e.proxima_leitura,
+            status_anuncio=e.status_anuncio,
+            status_em=e.status_em,
         )
         for e in rows.scalars().all()
     }
@@ -880,8 +1015,10 @@ def _com_estado(
     anuncios: Iterable[Anuncio], estados: Mapping[tuple[UUID, str], _Estado]
 ) -> list[Anuncio]:
     """Junta o estado gravado em cada anúncio — e põe na lista o anúncio que
-    só existe no estado (vínculo morreu, saiu da importação): sem variações,
-    a regra o desliga (negação por padrão)."""
+    só existe no estado (achado pela descoberta da conta, ou o vínculo morreu
+    e saiu da importação): o DaVinci não o conhece, a regra o desliga
+    (negação por padrão). O status do anúncio é o mais novo entre o da
+    importação e o do estado."""
     out: list[Anuncio] = []
     vistos: set[tuple[UUID, str]] = set()
     for a in anuncios:
@@ -895,6 +1032,8 @@ def _com_estado(
                 recusa=e.recusa,
                 aprovado=e.aprovado,
             )
+            if e.status_anuncio and _mais_novo(e.status_em, a.status_em):
+                a = replace(a, status=e.status_anuncio, status_em=e.status_em)
         out.append(a)
     for chave, e in estados.items():
         if chave in vistos:
@@ -908,6 +1047,9 @@ def _com_estado(
                 desejado_anterior=e.desejado,
                 recusa=e.recusa,
                 aprovado=e.aprovado,
+                conhecido=False,
+                status=e.status_anuncio,
+                status_em=e.status_em,
             )
         )
     return out
@@ -984,8 +1126,356 @@ def _espera(tentativas: int) -> timedelta:
 
 
 # =============================================================================
+# Conta: pode ter Flex? E a descoberta dos anúncios dela
+# =============================================================================
+
+
+@dataclass(frozen=True)
+class ContaFlex:
+    """O que se sabe da conta (`flex_conta`). `ativo`: True = pode ter Flex;
+    False = não pode; None = ainda não deu para saber."""
+
+    plataforma: str
+    ativo: bool | None = None
+    status: str | None = None
+    detalhe: str | None = None
+    lido_em: datetime | None = None
+    erro: str | None = None
+
+
+def bloqueio_da_conta(plataforma: str, conta: ContaFlex | None) -> str | None:
+    """O porquê de a conta não ter leitura nem escrita por anúncio (vira o
+    motivo de cada anúncio dela); None = a conta pode ter Flex.
+
+    Sem resposta da plataforma (nunca conferida, ou só erro de rede) também
+    bloqueia: negação por padrão — sem saber se a conta tem Flex, o motor não
+    pede aprovação nem escreve. O erro fica em `flex_conta.erro` (a tela)."""
+    ml = plataforma == flex_envio.PLATAFORMA_ML
+    if conta is None or conta.ativo is None:
+        if ml:
+            return "não deu para conferir a assinatura do Flex da conta no ML"
+        return "não deu para conferir a Entrega Direta da loja na Shopee"
+    if conta.ativo:
+        return None
+    if ml:
+        return f"conta sem Flex ativo no ML (status {conta.status or '?'})"
+    if conta.status == "sem_canal":
+        return "a loja não tem o canal Entrega Direta na Shopee"
+    return "Entrega Direta desligada na loja — ligue no Seller Center primeiro"
+
+
+async def _perguntar_conta(cli: Any, plataforma: str) -> flex_api.AssinaturaFlex:
+    """Uma chamada: a assinatura do Flex (ML) ou o canal da loja (Shopee)."""
+    if cli is None:
+        return flex_api.AssinaturaFlex(None, None, "sem acesso à conta (credencial)")
+    nome = (
+        "ler_assinatura_flex" if plataforma == flex_envio.PLATAFORMA_ML else "ler_canal_loja_flex"
+    )
+    metodo = getattr(cli, nome, None)
+    if metodo is None:
+        return flex_api.AssinaturaFlex(None, None, "o cliente não confere a conta")
+    try:
+        if plataforma == flex_envio.PLATAFORMA_ML:
+            return await metodo()
+        return await metodo(_canais_shopee())
+    except Exception as exc:  # noqa: BLE001 — os clientes classificam; isto é defesa
+        return flex_api.assinatura_erro(exc)
+
+
+async def _conferir_contas(
+    integracoes: Mapping[UUID, Integration],
+    clientes: dict[UUID, Any],
+    agora: datetime,
+    resumo: dict,
+    *,
+    perguntar: bool,
+) -> dict[UUID, ContaFlex]:
+    """A conta pode ter Flex? Vale o que está em `flex_conta` por até
+    `_VALIDADE_CONTA`; depois disso (ou nunca conferida) pergunta à
+    plataforma — uma chamada por conta. `perguntar=False` (o passe barato do
+    pedido Flex): só o banco, qualquer idade.
+
+    Resposta "não sei" (rede, 5xx) não apaga a anterior: fica o erro e a
+    próxima rodada pergunta de novo."""
+    if not integracoes:
+        return {}
+    async with session_scope() as s:
+        linhas = {
+            c.integration_id: c
+            for c in (
+                await s.execute(
+                    select(FlexConta).where(FlexConta.integration_id.in_(list(integracoes)))
+                )
+            )
+            .scalars()
+            .all()
+        }
+        out: dict[UUID, ContaFlex] = {}
+        for iid, integ in integracoes.items():
+            plat = _plataforma_de(integ) or ""
+            c = linhas.get(iid)
+            out[iid] = ContaFlex(
+                plataforma=plat,
+                ativo=c.flex_ativo if c else None,
+                status=c.status if c else None,
+                detalhe=c.detalhe if c else None,
+                lido_em=c.lido_em if c else None,
+                erro=c.erro if c else None,
+            )
+    if perguntar:
+        respostas: dict[UUID, flex_api.AssinaturaFlex] = {}
+        for iid, integ in integracoes.items():
+            atual = out[iid]
+            if (
+                atual.ativo is not None
+                and atual.lido_em is not None
+                and atual.lido_em >= agora - _VALIDADE_CONTA
+            ):
+                continue
+            cli = await _cliente(integ, clientes)
+            respostas[iid] = await _perguntar_conta(cli, atual.plataforma)
+            resumo["contas_conferidas"] = resumo.get("contas_conferidas", 0) + 1
+        if respostas:
+            async with session_scope() as s:
+                for iid, r in respostas.items():
+                    c = await s.get(FlexConta, iid)
+                    if c is None:
+                        c = FlexConta(integration_id=iid, plataforma=out[iid].plataforma)
+                        s.add(c)
+                    if r.ativo is None:
+                        # Não deu para saber: vale a resposta anterior.
+                        c.erro = (r.detalhe or "sem resposta")[:500]
+                    else:
+                        c.flex_ativo = r.ativo
+                        c.status = r.status
+                        c.detalhe = (r.detalhe or None) and r.detalhe[:500]
+                        c.lido_em = agora
+                        c.erro = None
+                    c.atualizado_em = agora
+                    out[iid] = ContaFlex(
+                        plataforma=out[iid].plataforma,
+                        ativo=c.flex_ativo,
+                        status=c.status,
+                        detalhe=c.detalhe,
+                        lido_em=c.lido_em,
+                        erro=c.erro,
+                    )
+                    if r.ativo is not None and r.ativo != (
+                        linhas[iid].flex_ativo if iid in linhas else None
+                    ):
+                        logger.info(
+                            "flex_conta_mudou",
+                            integration_id=str(iid),
+                            ativo=r.ativo,
+                            status=r.status,
+                        )
+    resumo["contas_sem_flex"] = sum(1 for c in out.values() if not c.ativo)
+    return out
+
+
+def _com_contas(
+    anuncios: Iterable[Anuncio], contas: Mapping[UUID, ContaFlex], *, shopee_escreve: bool
+) -> list[Anuncio]:
+    """Põe em cada anúncio o bloqueio da conta e se o motor consegue ligar."""
+    out: list[Anuncio] = []
+    for a in anuncios:
+        conta = contas.get(a.integration_id)
+        out.append(
+            replace(
+                a,
+                bloqueio=bloqueio_da_conta(a.plataforma, conta),
+                pode_ligar=shopee_escreve or a.plataforma != flex_envio.PLATAFORMA_SHOPEE,
+            )
+        )
+    return out
+
+
+async def _chaves_conhecidas(session: AsyncSession, iid: UUID, plataforma: str) -> set[str]:
+    """Anúncios da conta que o DaVinci já conhece: vínculo vivo, importação
+    não encerrada ou estado do Flex (ids normalizados)."""
+    conhecidos: set[str] = set()
+    for (ext,) in (
+        await session.execute(
+            select(ProductLink.external_id).where(
+                ProductLink.integration_id == iid, ProductLink.morto_desde.is_(None)
+            )
+        )
+    ).all():
+        conhecidos.add(_id_anuncio(plataforma, ext))
+    for (ext,) in (
+        await session.execute(
+            select(Listing.external_id).where(
+                Listing.integration_id == iid, Listing.status != ListingStatus.CLOSED
+            )
+        )
+    ).all():
+        conhecidos.add(_id_anuncio(plataforma, ext))
+    for (ext,) in (
+        await session.execute(
+            select(FlexAnuncioEstado.external_id).where(FlexAnuncioEstado.integration_id == iid)
+        )
+    ).all():
+        conhecidos.add(ext)
+    conhecidos.discard("")
+    return conhecidos
+
+
+async def _descobrir(
+    integracoes: Mapping[UUID, Integration],
+    contas: Mapping[UUID, ContaFlex],
+    clientes: dict[UUID, Any],
+    agora: datetime,
+    resumo: dict,
+    *,
+    modo: str,
+    idade: timedelta = _DESCOBERTA_A_CADA,
+    maximo_contas: int | None = _DESCOBERTA_CONTAS_POR_RODADA,
+) -> dict[tuple[UUID, str], str]:
+    """Descoberta (ML): TODOS os ids da conta, ativos e pausados
+    (`ids_da_conta`, busca por scroll), uma vez por `idade` — e no primeiro
+    uso. O anúncio que o DaVinci não conhece (criado depois da última
+    importação, SKU que não casa, vínculo morto) entra em `flex_anuncio_estado`
+    como "fora do DaVinci — sem vínculo", desejado DESLIGADO: nas contas "in"
+    quase todo anúncio nasce com Flex, e sem isto ele nunca seria lido nem
+    desligado (nem pela emergência).
+
+    Só contas do ML que podem ter Flex. Devolve o status visto de cada
+    anúncio da conta — o motor usa como o status mais novo."""
+    candidatas = [
+        iid
+        for iid, integ in integracoes.items()
+        if _plataforma_de(integ) == flex_envio.PLATAFORMA_ML
+        and (contas.get(iid) or ContaFlex("")).ativo
+    ]
+    if not candidatas:
+        return {}
+    async with session_scope() as s:
+        linhas = {
+            c.integration_id: c
+            for c in (
+                await s.execute(select(FlexConta).where(FlexConta.integration_id.in_(candidatas)))
+            )
+            .scalars()
+            .all()
+        }
+    minimo = datetime.min.replace(tzinfo=UTC)
+    vencidas: list[tuple[datetime, UUID]] = []
+    for iid in candidatas:
+        c = linhas.get(iid)
+        quando = c.descoberta_em if c else None
+        if quando is None:
+            vencidas.append((minimo, iid))
+        elif c is not None and c.descoberta_ok is False:
+            if quando <= agora - min(idade, _DESCOBERTA_FALHOU_ESPERA):
+                vencidas.append((quando, iid))
+        elif quando <= agora - idade:
+            vencidas.append((quando, iid))
+    vencidas.sort(key=lambda par: (par[0], str(par[1])))
+    if maximo_contas is not None:
+        vencidas = vencidas[:maximo_contas]
+
+    vistos: dict[tuple[UUID, str], str] = {}
+    for _quando, iid in vencidas:
+        cli = await _cliente(integracoes[iid], clientes)
+        listar = getattr(cli, "ids_da_conta", None) if cli is not None else None
+        if listar is None:
+            continue
+        por_id: dict[str, str] = {}
+        erros: list[str] = []
+        for status in ("active", "paused"):
+            try:
+                res = await listar(status, max_paginas=_DESCOBERTA_MAX_PAGINAS)
+            except Exception as exc:  # noqa: BLE001 — o cliente não levanta; defesa
+                res = flex_api.ListagemConta(erro=str(exc)[:300])
+            for ext in res.ids:
+                por_id.setdefault(str(ext).strip(), status)
+            if not res.completo:
+                erros.append(f"{status}: {res.erro or 'incompleta'}")
+        por_id.pop("", None)
+        novos = 0
+        async with session_scope() as s:
+            conhecidos = await _chaves_conhecidas(s, iid, flex_envio.PLATAFORMA_ML)
+            for ext, status in por_id.items():
+                vistos[(iid, ext)] = status
+                if ext in conhecidos:
+                    continue
+                novos += 1
+                s.add(
+                    FlexAnuncioEstado(
+                        integration_id=iid,
+                        external_id=ext,
+                        plataforma=flex_envio.PLATAFORMA_ML,
+                        desejado=DESLIGADO,
+                        motivo=MOTIVO_FORA_DO_DAVINCI,
+                        aguardando_aprovacao=False,
+                        tentativas=0,
+                        leitura_falhas=0,
+                        status_anuncio=status,
+                        status_em=agora,
+                        atualizado_em=agora,
+                    )
+                )
+                s.add(
+                    _log(
+                        acao="decidir",
+                        modo=modo,
+                        resultado="ok",
+                        integration_id=iid,
+                        external_id=ext,
+                        plataforma=flex_envio.PLATAFORMA_ML,
+                        estado_depois=DESLIGADO,
+                        motivo=f"{MOTIVO_FORA_DO_DAVINCI} (achado na conta do ML)",
+                    )
+                )
+            c = await s.get(FlexConta, iid)
+            if c is None:
+                c = FlexConta(integration_id=iid, plataforma=flex_envio.PLATAFORMA_ML)
+                s.add(c)
+            c.descoberta_em = agora
+            c.descoberta_ok = not erros
+            c.descoberta_total = len(por_id)
+            c.descoberta_novos = novos
+            c.descoberta_erro = "; ".join(erros)[:500] or None
+            c.atualizado_em = agora
+        resumo["contas_descobertas"] = resumo.get("contas_descobertas", 0) + 1
+        resumo["descobertos"] = resumo.get("descobertos", 0) + len(por_id)
+        if novos:
+            resumo["fora_do_davinci_novos"] = resumo.get("fora_do_davinci_novos", 0) + novos
+            logger.info("flex_descoberta_novos", integration_id=str(iid), novos=novos)
+    return vistos
+
+
+def _com_status(
+    anuncios: Iterable[Anuncio], vistos: Mapping[tuple[UUID, str], str], agora: datetime
+) -> list[Anuncio]:
+    """O status que a descoberta acabou de ver (o mais novo de todos)."""
+    if not vistos:
+        return list(anuncios)
+    return [
+        replace(a, status=vistos[a.chave], status_em=agora) if a.chave in vistos else a
+        for a in anuncios
+    ]
+
+
+# =============================================================================
 # Leitura do estado real
 # =============================================================================
+
+
+def _rodizio(lista: list[Anuncio]) -> list[Anuncio]:
+    """Intercala as contas: o 1º de cada conta, depois o 2º de cada uma…
+    (a ordem dentro da conta e a das contas — pela melhor posição — ficam)."""
+    filas: dict[UUID, list[Anuncio]] = {}
+    for a in lista:
+        filas.setdefault(a.integration_id, []).append(a)
+    out: list[Anuncio] = []
+    posicao = 0
+    while len(out) < len(lista):
+        for fila in filas.values():
+            if posicao < len(fila):
+                out.append(fila[posicao])
+        posicao += 1
+    return out
 
 
 def _escolher_leituras(
@@ -993,27 +1483,56 @@ def _escolher_leituras(
     decisoes: Mapping[tuple[UUID, str], Decisao],
     estados: Mapping[tuple[UUID, str], _Estado],
     alvo: set[tuple[UUID, str]] | None,
+    agora: datetime,
 ) -> list[Anuncio]:
-    """Quem é lido nesta rodada. Primeiro quem nunca foi lido ou onde a regra
-    discorda do que foi lido (é ali que pode haver escrita), depois os lidos
-    há mais tempo — dentro do teto de leituras."""
+    """A ordem de leitura desta rodada (o teto é aplicado em `_ler`).
+
+    Fila justa (revisão de 02/10/2026): antes a ordem era (precisa,
+    observado_em) e a leitura que falhava não gravava data nenhuma — o
+    anúncio que nunca era lido (404, conta com 403, token quebrado) ficava em
+    1º lugar em TODA rodada e tomava as 400 vagas; as outras contas nunca eram
+    relidas e nada desligava. Agora:
+      • conta que não pode ter Flex não é lida (`bloqueio`);
+      • leitura que falhou espera `proxima_leitura` (crescente);
+      • ordem: aprovados por uma pessoa (o LIGAR espera a leitura fresca),
+        depois quem pode precisar de escrita, depois pela última TENTATIVA
+        de leitura (deu certo ou não) — e as contas em rodízio."""
     if alvo is not None:
-        return [a for a in anuncios if a.chave in alvo]
+        return [a for a in anuncios if a.chave in alvo and not a.bloqueio]
     minimo = datetime.min.replace(tzinfo=UTC)
 
     def prioridade(a: Anuncio) -> tuple:
         e = estados.get(a.chave)
         obs = e.observado if e else None
-        quando = e.observado_em if e else None
+        quando = (e.leitura_em or e.observado_em) if e else None
         quer = decisoes[a.chave].desejado == LIGADO
-        precisa = obs is None or quando is None or quer != (obs == LIGADO)
-        return (0 if precisa else 1, quando or minimo, str(a.integration_id), a.external_id)
+        precisa = obs is None or quer != (obs == LIGADO)
+        return (
+            0 if (e is not None and e.aprovado) else 1,
+            0 if precisa else 1,
+            quando or minimo,
+            str(a.integration_id),
+            a.external_id,
+        )
 
-    ml = sorted((a for a in anuncios if a.plataforma == flex_envio.PLATAFORMA_ML), key=prioridade)
-    sh = sorted(
-        (a for a in anuncios if a.plataforma == flex_envio.PLATAFORMA_SHOPEE), key=prioridade
+    candidatos = []
+    for a in anuncios:
+        if a.bloqueio:
+            continue
+        e = estados.get(a.chave)
+        if e is not None and e.proxima_leitura is not None and e.proxima_leitura > agora:
+            continue
+        candidatos.append(a)
+    ml = _rodizio(
+        sorted((a for a in candidatos if a.plataforma == flex_envio.PLATAFORMA_ML), key=prioridade)
     )
-    return ml[:_TETO_LEITURAS_ML] + sh[:_TETO_LEITURAS_SHOPEE]
+    sh = _rodizio(
+        sorted(
+            (a for a in candidatos if a.plataforma == flex_envio.PLATAFORMA_SHOPEE),
+            key=prioridade,
+        )
+    )
+    return ml + sh
 
 
 async def _ler(
@@ -1022,14 +1541,16 @@ async def _ler(
     clientes: dict[UUID, Any],
     resumo: dict,
 ) -> dict[tuple[UUID, str], flex_api.ResultadoFlex]:
-    """Lê o Flex dos anúncios escolhidos, conta por conta. Só LEITURA.
+    """Lê o Flex dos anúncios escolhidos, na ordem dada, até o teto de cada
+    plataforma. Só LEITURA.
 
     A leitura também passa pela trava do anúncio: nenhuma chamada ao mesmo
     anúncio ao mesmo tempo (a emergência e a aprovação escrevem fora da
-    rodada). Anúncio travado fica para a próxima rodada."""
-    por_conta: dict[UUID, list[Anuncio]] = defaultdict(list)
-    for a in escolhidos:
-        por_conta[a.integration_id].append(a)
+    rodada). Anúncio travado fica para a próxima rodada.
+
+    Conta interrompida (429, token recusado, `_SEM_PERMISSAO_SEGUIDOS` 403
+    seguidos, sem cliente) sai da fila desta rodada SEM gastar vaga: as
+    vagas dela vão para as outras contas."""
     out: dict[tuple[UUID, str], flex_api.ResultadoFlex] = {}
 
     def _contar(r: flex_api.ResultadoFlex) -> None:
@@ -1037,32 +1558,73 @@ async def _ler(
         if not r.ok:
             resumo["leituras_falhas"] = resumo.get("leituras_falhas", 0) + 1
 
-    for iid, lista in por_conta.items():
+    interrompidas: set[UUID] = set()
+
+    def _interromper(iid: UUID) -> None:
+        if iid not in interrompidas:
+            interrompidas.add(iid)
+            resumo["contas_interrompidas"] = resumo.get("contas_interrompidas", 0) + 1
+
+    async def _cli(iid: UUID) -> Any:
         integ = integracoes.get(iid)
         if integ is None:
-            continue
+            interrompidas.add(iid)
+            return None
         cli = await _cliente(integ, clientes)
         if cli is None:
+            interrompidas.add(iid)
             resumo["contas_sem_cliente"] = resumo.get("contas_sem_cliente", 0) + 1
+        return cli
+
+    # ---- ML: um GET por anúncio, em rodízio, até o teto -------------------
+    lidas = 0
+    seguidos: Counter[UUID] = Counter()
+    for a in (x for x in escolhidos if x.plataforma == flex_envio.PLATAFORMA_ML):
+        if lidas >= _TETO_LEITURAS_ML:
+            resumo["leituras_adiadas"] = resumo.get("leituras_adiadas", 0) + 1
             continue
-        if _plataforma_de(integ) == flex_envio.PLATAFORMA_ML:
-            for a in lista:
-                async with session_scope() as s:
-                    if not await _travar(s, _chave_trava(a.integration_id, a.external_id)):
-                        resumo["leituras_ocupadas"] = resumo.get("leituras_ocupadas", 0) + 1
-                        continue
-                    r = await cli.ler_flex(a.external_id)
-                out[a.chave] = r
-                _contar(r)
-                # Limite estourado ou token recusado: as próximas leituras da
-                # conta só bateriam no mesmo muro. Fica para a próxima rodada.
-                if (r.tipo == flex_api.REPETIR and r.status_http == 429) or (
-                    r.tipo == flex_api.SEM_PERMISSAO
-                ):
-                    resumo["contas_interrompidas"] = resumo.get("contas_interrompidas", 0) + 1
-                    break
+        iid = a.integration_id
+        if iid in interrompidas:
             continue
-        # Shopee: 50 anúncios por chamada, cada um com a sua trava.
+        cli = await _cli(iid)
+        if cli is None:
+            continue
+        async with session_scope() as s:
+            if not await _travar(s, _chave_trava(iid, a.external_id)):
+                resumo["leituras_ocupadas"] = resumo.get("leituras_ocupadas", 0) + 1
+                continue
+            r = await cli.ler_flex(a.external_id)
+        lidas += 1
+        out[a.chave] = r
+        _contar(r)
+        if r.tipo == flex_api.REPETIR and r.status_http == 429:
+            # Limite estourado: as próximas leituras da conta só bateriam no
+            # mesmo muro. Fica para a próxima rodada.
+            _interromper(iid)
+        elif r.tipo == flex_api.SEM_PERMISSAO:
+            # 401 / refresh recusado: é o token da conta. 403 sem "item
+            # down" pode ser UM anúncio (de outro vendedor) — só interrompe
+            # quando se repete.
+            seguidos[iid] += 1
+            if r.status_http in (None, 401) or seguidos[iid] >= _SEM_PERMISSAO_SEGUIDOS:
+                _interromper(iid)
+        else:
+            seguidos[iid] = 0
+
+    # ---- Shopee: 50 anúncios por chamada, cada um com a sua trava ---------
+    shopee = [x for x in escolhidos if x.plataforma == flex_envio.PLATAFORMA_SHOPEE]
+    if len(shopee) > _TETO_LEITURAS_SHOPEE:
+        resumo["leituras_adiadas"] = (
+            resumo.get("leituras_adiadas", 0) + len(shopee) - _TETO_LEITURAS_SHOPEE
+        )
+        shopee = shopee[:_TETO_LEITURAS_SHOPEE]
+    por_conta: dict[UUID, list[Anuncio]] = defaultdict(list)
+    for a in shopee:
+        por_conta[a.integration_id].append(a)
+    for iid, lista in por_conta.items():
+        cli = await _cli(iid)
+        if cli is None:
+            continue
         for inicio in range(0, len(lista), 50):
             lote = lista[inicio : inicio + 50]
             async with session_scope() as s:
@@ -1086,11 +1648,16 @@ async def _ler(
 
 
 def _com_leituras(
-    anuncios: list[Anuncio], leituras: Mapping[tuple[UUID, str], flex_api.ResultadoFlex]
+    anuncios: list[Anuncio],
+    leituras: Mapping[tuple[UUID, str], flex_api.ResultadoFlex],
+    agora: datetime,
 ) -> list[Anuncio]:
     out: list[Anuncio] = []
     for a in anuncios:
         r = leituras.get(a.chave)
+        if r is not None and r.status_anuncio:
+            # O status que veio na mesma leitura (Shopee) é o mais novo.
+            a = replace(a, status=r.status_anuncio, status_em=agora)
         if r is not None and r.ok and r.has_flex is not None:
             obs = LIGADO if r.has_flex else DESLIGADO
             # A plataforma mostra o Flex ligado: o anúncio pode ter Flex, a
@@ -1188,6 +1755,7 @@ async def _gravar(
                     desejado=d.desejado,
                     aguardando_aprovacao=False,
                     tentativas=0,
+                    leitura_falhas=0,
                 )
                 s.add(est)
             desejado_antes = None if novo else est.desejado
@@ -1197,6 +1765,8 @@ async def _gravar(
             lido = leituras.get(a.chave)
             mudou_obs = False
             if lido is not None:
+                # A tentativa conta para o rodízio da fila, dando certo ou não.
+                est.leitura_em = agora
                 if lido.ok and lido.has_flex is not None:
                     est.observado = LIGADO if lido.has_flex else DESLIGADO
                     est.observado_em = agora
@@ -1205,10 +1775,25 @@ async def _gravar(
                         est.recusa = None
                     if (est.ultimo_erro or "").startswith("leitura:"):
                         est.ultimo_erro = None
+                    est.leitura_falhas = 0
+                    est.proxima_leitura = None
                     mudou_algo = True
                 else:
+                    # Falhou: espera crescente antes de ler de novo — não volta
+                    # ao topo da fila tomando a vaga dos outros.
                     est.ultimo_erro = f"leitura: {lido.texto()}"[:500]
+                    est.leitura_falhas = int(est.leitura_falhas or 0) + 1
+                    est.proxima_leitura = agora + _espera(est.leitura_falhas)
                     mudou_algo = True
+            if (
+                a.status
+                and a.status_em is not None
+                and (a.status, a.status_em) != (est.status_anuncio, est.status_em)
+                and _mais_novo(a.status_em, est.status_em)
+            ):
+                est.status_anuncio = a.status if a.status in FLEX_STATUS_ANUNCIO else None
+                est.status_em = a.status_em
+                mudou_algo = True
 
             familias = ",".join(d.familias) or None
             if (est.desejado, est.motivo, est.saldo_sp, est.familias) != (
@@ -1230,7 +1815,21 @@ async def _gravar(
                 est.aprovado_em = None
                 est.aprovado_por = None
                 mudou_algo = True
-            precisa = d.desejado == LIGADO and est.observado != LIGADO and est.aprovado_em is None
+            if est.observado == LIGADO and (est.aprovado_em is not None or est.aprovado_por):
+                # Lido JÁ ligado: a aprovação foi usada (ou nem era preciso —
+                # alguém ligou no painel). Se ficasse, quando o vendedor
+                # desligasse no painel a rodada seguinte RELIGARIA sozinha com
+                # uma aprovação velha (cenário do cético: aprovar um anúncio não
+                # lido → lido ligado → vendedor desliga → religava).
+                est.aprovado_em = None
+                est.aprovado_por = None
+                mudou_algo = True
+            # Pede aprovação só de quem foi LIDO desligado: sem leitura não se
+            # sabe (nas contas "in" o Flex já está ligado na maioria) — pedir
+            # ali era um aviso falso, e aprovar deixava a aprovação pendurada.
+            precisa = (
+                d.desejado == LIGADO and est.observado == DESLIGADO and est.aprovado_em is None
+            )
             pediu_agora = precisa and not est.aguardando_aprovacao
             if est.aguardando_aprovacao != precisa:
                 est.aguardando_aprovacao = precisa
@@ -1296,7 +1895,10 @@ async def _gravar(
                     )
                 )
 
-            # Escrita possível nesta rodada?
+            # Escrita possível nesta rodada? Conta que não pode ter Flex: nada
+            # por anúncio (nem desligar — não há Flex na conta para tirar).
+            if a.bloqueio:
+                continue
             if est.proxima_tentativa is not None and est.proxima_tentativa > agora:
                 if (est.observado == LIGADO and d.desejado != LIGADO) or (
                     d.desejado == LIGADO and est.observado == DESLIGADO
@@ -1413,7 +2015,10 @@ def _aplicar_resultado(
             est.aprovado_por = None
             est.proxima_tentativa = None
         else:
-            est.proxima_tentativa = agora + _ESPERA_RECUSA
+            # Desligar recusado (pausado responde "item down"?): tenta de novo
+            # em 1 h — com o anúncio reativado, ele não pode ficar o dia
+            # inteiro vendendo pelo Flex sem .sp.
+            est.proxima_tentativa = agora + _ESPERA_RECUSA_DESLIGAR
     else:
         est.proxima_tentativa = agora + _espera(est.tentativas)
     est.atualizado_em = agora
@@ -1661,7 +2266,11 @@ async def _aplicar(
     resumo: dict,
 ) -> None:
     """Faz (ou simula) as escritas da rodada. Desligar antes de ligar (é o
-    lado seguro quando o teto corta a rodada)."""
+    lado seguro quando o teto corta a rodada) — mas com uma parte do teto
+    GUARDADA para os LIGAR aprovados (1/5, no mínimo 1): no primeiro dia a
+    fila de desligar passa de mil anúncios, e o anúncio que uma pessoa
+    aprovou esperava horas por ela. Vaga guardada que sobra volta para os
+    desligar na rodada seguinte."""
     if not acoes:
         return
     acoes = sorted(acoes, key=lambda a: (0 if a.acao == "desligar" else 1, str(a.integration_id)))
@@ -1693,36 +2302,48 @@ async def _aplicar(
     teto = max(0, int(get_settings().flex_teto_escritas_por_rodada or 0))
     escritas = 0
     ignoradas: list[_Acao] = []
-    for a in acoes:
-        if a.plataforma == flex_envio.PLATAFORMA_SHOPEE and not shopee_escreve:
-            resumo["shopee_so_leitura"] = resumo.get("shopee_so_leitura", 0) + 1
-            if a.mudou:
-                ignoradas.append(a)
-            continue
-        if escritas >= teto:
-            resumo["adiados_teto"] = resumo.get("adiados_teto", 0) + 1
-            continue
-        integ = integracoes.get(a.integration_id)
-        cli = await _cliente(integ, clientes) if integ is not None else None
-        if cli is None:
-            resumo["sem_cliente"] = resumo.get("sem_cliente", 0) + 1
-            continue
-        tipo = await _escrever(
-            cli,
-            integration_id=a.integration_id,
-            external_id=a.external_id,
-            plataforma=a.plataforma,
-            acao=a.acao,
-            modo=modo,
-            por=por,
-            skus_sp=a.skus_sp,
-        )
-        if tipo in ("ocupado", "mudou"):
-            resumo[tipo] = resumo.get(tipo, 0) + 1
-            continue
-        escritas += 1
-        chave = f"{a.acao}_{'ok' if tipo == flex_api.OK else 'falhou'}"
-        resumo[chave] = resumo.get(chave, 0) + 1
+
+    def _so_leitura(a: _Acao) -> bool:
+        return a.plataforma == flex_envio.PLATAFORMA_SHOPEE and not shopee_escreve
+
+    ligar = [a for a in acoes if a.acao == "ligar" and not _so_leitura(a)]
+    reserva = min(len(ligar), max(1, teto // 5)) if teto else 0
+
+    async def _fazer(lista: list[_Acao], limite: int) -> None:
+        nonlocal escritas
+        for a in lista:
+            if _so_leitura(a):
+                resumo["shopee_so_leitura"] = resumo.get("shopee_so_leitura", 0) + 1
+                if a.mudou:
+                    ignoradas.append(a)
+                continue
+            if escritas >= limite:
+                resumo["adiados_teto"] = resumo.get("adiados_teto", 0) + 1
+                continue
+            integ = integracoes.get(a.integration_id)
+            cli = await _cliente(integ, clientes) if integ is not None else None
+            if cli is None:
+                resumo["sem_cliente"] = resumo.get("sem_cliente", 0) + 1
+                continue
+            tipo = await _escrever(
+                cli,
+                integration_id=a.integration_id,
+                external_id=a.external_id,
+                plataforma=a.plataforma,
+                acao=a.acao,
+                modo=modo,
+                por=por,
+                skus_sp=a.skus_sp,
+            )
+            if tipo in ("ocupado", "mudou"):
+                resumo[tipo] = resumo.get(tipo, 0) + 1
+                continue
+            escritas += 1
+            chave = f"{a.acao}_{'ok' if tipo == flex_api.OK else 'falhou'}"
+            resumo[chave] = resumo.get(chave, 0) + 1
+
+    await _fazer([a for a in acoes if a.acao == "desligar"], teto - reserva)
+    await _fazer([a for a in acoes if a.acao == "ligar"], teto)
     resumo["escritas"] = resumo.get("escritas", 0) + escritas
     if ignoradas:
         async with session_scope() as s:
@@ -1813,24 +2434,34 @@ async def _rodada(
     agora = _agora()
     async with session_scope() as s:
         integracoes = await integracoes_permitidas(s, contas)
-        if not integracoes:
-            resumo["motivo"] = "nenhuma conta permitida ativa (ML/Shopee)"
-            return
+    if not integracoes:
+        resumo["motivo"] = "nenhuma conta permitida ativa (ML/Shopee)"
+        return
+    clientes: dict[UUID, Any] = {}
+    # A conta pode ter Flex? (cache de 1 h; o passe barato só lê o banco.)
+    contas_flex = await _conferir_contas(integracoes, clientes, agora, resumo, perguntar=ler)
+    vistos: dict[tuple[UUID, str], str] = {}
+    if ler and alvo is None:
+        vistos = await _descobrir(integracoes, contas_flex, clientes, agora, resumo, modo=modo)
+    async with session_scope() as s:
         estados = await _fotos_dos_estados(s, integracoes.keys())
         anuncios = _com_estado(await montar_anuncios(s, integracoes), estados)
         anuncios = [a for a in anuncios if a.integration_id in integracoes]
+        anuncios = _com_status(anuncios, vistos, agora)
+        anuncios = _com_contas(
+            anuncios, contas_flex, shopee_escreve=bool(get_settings().flex_shopee_escrita)
+        )
         saldos = await calcular_saldos(s, _skus_sp(anuncios, cfg))
     resumo["contas"] = len(integracoes)
     resumo["anuncios"] = len(anuncios)
 
     decisoes = decidir_lote(anuncios, saldos, cfg)
-    clientes: dict[UUID, Any] = {}
     leituras: dict[tuple[UUID, str], flex_api.ResultadoFlex] = {}
     if ler:
-        escolhidos = _escolher_leituras(anuncios, decisoes, estados, alvo)
+        escolhidos = _escolher_leituras(anuncios, decisoes, estados, alvo, agora)
         leituras = await _ler(escolhidos, integracoes, clientes, resumo)
         if leituras:
-            anuncios = _com_leituras(anuncios, leituras)
+            anuncios = _com_leituras(anuncios, leituras, agora)
             decisoes = decidir_lote(anuncios, saldos, cfg)
 
     acoes = await _gravar(
@@ -1852,7 +2483,11 @@ async def aprovar(integration_id: UUID, external_id: str, *, por: UUID | None) -
     na hora só para ele (relê o estado, recalcula com o saldo de agora e
     liga se ainda for o caso); em observar fica só a aprovação.
 
-    Também é o "tente de novo" depois de uma recusa da plataforma."""
+    Também é o "tente de novo" depois de uma recusa da plataforma — e depois
+    de uma aprovação que ainda não ligou (Bling sem confirmar, rodada
+    ocupada). Com a rodada ocupada, `ocupado=True`: quem chama (a tela)
+    põe na fila um job que tenta de novo em seguida (worker
+    `flex_aprovado_run`) — a aprovação continua valendo."""
     m = flex_config.modo()
     if m == flex_config.MODO_DESLIGADO:
         raise FlexRegraError("flex_desligado", "o Flex está com flex_modo=desligado")
@@ -1863,6 +2498,24 @@ async def aprovar(integration_id: UUID, external_id: str, *, por: UUID | None) -
         est = await s.get(FlexAnuncioEstado, (integration_id, external_id))
         if est is None:
             raise FlexRegraError("nao_avaliado", "o motor ainda não avaliou este anúncio")
+        shopee = est.plataforma == flex_envio.PLATAFORMA_SHOPEE
+        if shopee and not get_settings().flex_shopee_escrita:
+            # Aprovar não ligaria nada (e a aprovação ficaria pendurada até
+            # alguém ligar a escrita da Shopee — aí dispararia sozinha).
+            raise FlexRegraError(
+                "shopee_so_leitura",
+                "na Shopee o DaVinci só confere: ligue a Entrega Direta à mão no Seller Center",
+            )
+        conta = await s.get(FlexConta, integration_id)
+        if conta is not None and conta.flex_ativo is False:
+            raise FlexRegraError(
+                "conta_sem_flex",
+                bloqueio_da_conta(
+                    est.plataforma,
+                    ContaFlex(est.plataforma, conta.flex_ativo, conta.status, conta.detalhe),
+                )
+                or "a conta não pode ter Flex",
+            )
         if est.desejado != LIGADO and not est.recusa:
             raise FlexRegraError("nao_elegivel", est.motivo or "a regra não quer o Flex ligado")
         recusa_antes = est.recusa
@@ -1890,45 +2543,39 @@ async def aprovar(integration_id: UUID, external_id: str, *, por: UUID | None) -
                 por=por,
             )
         )
-    out: dict[str, Any] = {"aprovado": True, "modo": m, "aplicado": False}
+    out: dict[str, Any] = {"aprovado": True, "modo": m, "aplicado": False, "ocupado": False}
     if flex_config.pode_escrever(m):
-        resumo = await rodar_motor(
-            modo=m, somente={(integration_id, external_id)}, por=por, origem="aprovacao"
-        )
-        out["motor"] = resumo
-        out["aplicado"] = bool(resumo.get("ligar_ok"))
+        out.update(await aplicar_aprovado(integration_id, external_id, por=por, modo=m))
     return out
 
 
-async def emergencia(
-    *, por: UUID | None, contas_escopo: Collection[UUID] | None = None
+async def aplicar_aprovado(
+    integration_id: UUID, external_id: str, *, por: UUID | None, modo: str | None = None
 ) -> dict:
-    """Botão de emergência: desliga o Flex de TUDO nas contas permitidas.
+    """Roda o motor só para o anúncio aprovado (a aprovação e o job que tenta
+    de novo quando a rodada estava ocupada)."""
+    resumo = await rodar_motor(
+        modo=modo, somente={(integration_id, external_id)}, por=por, origem="aprovacao"
+    )
+    return {
+        "motor": resumo,
+        "aplicado": bool(resumo.get("ligar_ok")),
+        "ocupado": bool(resumo.get("ocupado")),
+    }
 
-    Tira toda aprovação (nada volta a ligar sem uma pessoa aprovar de novo) e
-    desliga o que está ligado — ou que nunca foi lido — até
-    `_TETO_EMERGENCIA` por clique (`restantes` diz quanto falta: os que o
-    teto cortou e os que outro processo segurava). Shopee sem
-    `flex_shopee_escrita`: não escreve (fica em `shopee_so_leitura`).
 
-    Em observar/desligado só SIMULA, sem efeito nenhum: nem as aprovações
-    saem (`aprovacoes` diz quantas sairiam) — a tela promete uma simulação.
+# =============================================================================
+# Emergência (job do worker)
+# =============================================================================
 
-    Corrida com a rodada (revisão de 02/10/2026): a rodada pode estar no meio
-    de um LIGAR aprovado. Por isso (1) as aprovações saem ANTES de qualquer
-    escrita — o `_escrever(ligar)` relê o estado dentro da trava do anúncio e
-    não liga mais; (2) o anúncio que tinha aprovação também é alvo, mesmo
-    lido desligado; (3) a emergência ESPERA a trava do anúncio (até
-    `_ESPERA_TRAVA_EMERGENCIA` s) e relê o estado dentro dela — o que a rodada
-    acabou de ligar é desligado em seguida.
 
-    `contas_escopo`: só estas contas (usuário com equipe — routers/flex)."""
-    m = flex_config.modo()
-    escreve = flex_config.pode_escrever(m)
-    resumo: dict[str, Any] = {
-        "modo": m,
+def _resumo_emergencia(modo: str, escreve: bool) -> dict[str, Any]:
+    return {
+        "modo": modo,
         "escreve": escreve,
         "alvos": 0,
+        "ligados_conhecidos": 0,
+        "processados": 0,
         "desligados": 0,
         "ja_desligados": 0,
         "falhas": 0,
@@ -1936,19 +2583,38 @@ async def emergencia(
         "simulados": 0,
         "restantes": 0,
         "aprovacoes": 0,
+        "contas_sem_flex": 0,
     }
+
+
+async def preparar_emergencia(
+    *, por: UUID | None, contas_escopo: Collection[UUID] | None = None
+) -> dict:
+    """O que o botão faz DENTRO do pedido HTTP (rápido, só banco): tira toda
+    aprovação das contas (em piloto/ativo — nada volta a ligar sem uma pessoa
+    aprovar de novo) e cria a linha da `flex_emergencia` que o job
+    (`executar_emergencia`, worker `flex_emergencia_run`) vai cumprir.
+
+    Em observar/desligado não tira nada (a tela promete uma simulação):
+    `aprovacoes` diz quantas sairiam. Sem conta: devolve `motivo` e nenhuma
+    linha (`id` None).
+
+    `contas_escopo`: só estas contas (usuário com equipe — routers/flex)."""
+    m = flex_config.modo()
+    escreve = flex_config.pode_escrever(m)
+    resumo = _resumo_emergencia(m, escreve)
     contas = flex_config.contas()
     if contas_escopo is not None:
         contas = frozenset(contas) & frozenset(contas_escopo)
     if not contas:
         resumo["motivo"] = "nenhuma conta em flex_contas"
-        return resumo
+        return {"id": None, **resumo}
     agora = _agora()
     async with session_scope() as s:
         integracoes = await integracoes_permitidas(s, contas)
         if not integracoes:
             resumo["motivo"] = "nenhuma conta permitida ativa (ML/Shopee)"
-            return resumo
+            return {"id": None, **resumo}
         com_aprovacao = (
             FlexAnuncioEstado.integration_id.in_(list(integracoes)),
             FlexAnuncioEstado.aprovado_em.is_not(None),
@@ -1966,82 +2632,233 @@ async def emergencia(
                     *com_aprovacao
                 )
             )
-        aprovados = {(iid, ext) for iid, ext in r.all()}
+        aprovados = sorted({(str(iid), ext) for iid, ext in r.all()})
         resumo["aprovacoes"] = len(aprovados)
+        linha = FlexEmergencia(
+            por=por,
+            escopo=None if contas_escopo is None else sorted(str(c) for c in contas),
+            modo=m,
+            status="na_fila",
+            aprovados=[list(par) for par in aprovados],
+            resumo=resumo,
+            atualizado_em=agora,
+        )
+        s.add(linha)
+        await s.flush()
+        emergencia_id = int(linha.id)
+    logger.warning(
+        "flex_emergencia_pedida_job", id=emergencia_id, por=str(por) if por else None,
+        aprovacoes=resumo["aprovacoes"], modo=m,
+    )
+    return {"id": emergencia_id, **resumo}
+
+
+async def _gravar_andamento(
+    emergencia_id: int, resumo: dict, *, status: str | None = None, erro: str | None = None
+) -> None:
+    agora = _agora()
+    async with session_scope() as s:
+        linha = await s.get(FlexEmergencia, emergencia_id)
+        if linha is None:
+            return
+        linha.resumo = dict(resumo)
+        linha.atualizado_em = agora
+        if status is not None:
+            linha.status = status
+            if status == "rodando" and linha.iniciado_em is None:
+                linha.iniciado_em = agora
+            if status in ("concluida", "falhou"):
+                linha.terminado_em = agora
+        if erro is not None:
+            linha.erro = erro[:500]
+
+
+async def executar_emergencia(emergencia_id: int) -> dict:
+    """O job da emergência: desliga o Flex de tudo nas contas da linha.
+
+    Alvos: o que está ligado — ou que nunca foi lido — e o que tinha
+    aprovação quando o botão foi apertado (a rodada pode estar no meio de
+    ligá-lo), até `_TETO_EMERGENCIA` (`restantes` diz quanto falta: os que o
+    teto cortou e os que outro processo segurava; apertar de novo continua).
+    Primeiro os ligados conhecidos, os ativos antes dos pausados. Conta que
+    a plataforma diz que não tem Flex (assinatura out/pending/404/403, canal
+    desligado na loja) fica de fora — não há Flex lá para tirar, e eram
+    centenas de DELETE inúteis. Conta que não deu para conferir entra (na
+    dúvida, a emergência tenta). A descoberta da conta roda antes se tiver
+    mais de 1 h: o anúncio que o DaVinci não conhece também desliga.
+
+    Shopee sem `flex_shopee_escrita`: não escreve (fica em
+    `shopee_so_leitura`). Em observar/desligado só SIMULA, sem efeito nenhum.
+
+    Corrida com a rodada (revisão de 02/10/2026): (1) as aprovações saíram
+    ANTES, no pedido HTTP — o `_escrever(ligar)` relê o estado dentro da trava
+    do anúncio e não liga mais; (2) o anúncio que tinha aprovação também é
+    alvo, mesmo lido desligado; (3) a emergência ESPERA a trava do anúncio
+    (até `_ESPERA_TRAVA_EMERGENCIA` s) e relê o estado dentro dela — o que a
+    rodada acabou de ligar é desligado em seguida.
+
+    Andamento: `flex_emergencia.resumo`, regravado a cada
+    `_EMERGENCIA_PROGRESSO_S` s (a tela consulta)."""
+    async with session_scope() as s:
+        linha = await s.get(FlexEmergencia, emergencia_id)
+        if linha is None:
+            return {"motivo": "emergência não encontrada"}
+        if linha.status in ("concluida", "falhou"):
+            return dict(linha.resumo or {})
+        m = linha.modo
+        por = linha.por
+        escopo = None if linha.escopo is None else {UUID(str(x)) for x in linha.escopo}
+        aprovados = {(UUID(str(iid)), str(ext)) for iid, ext in (linha.aprovados or [])}
+        resumo: dict[str, Any] = {**_resumo_emergencia(m, False), **(linha.resumo or {})}
+    # Escreve só se o modo do pedido E o de agora deixam (o modo pode ter
+    # mudado entre o clique e o job — vale o lado seguro).
+    escreve = flex_config.pode_escrever(m) and flex_config.pode_escrever()
+    resumo["escreve"] = escreve
+    try:
+        await _gravar_andamento(emergencia_id, resumo, status="rodando")
+        await _executar_emergencia(
+            emergencia_id, resumo, modo=m, escreve=escreve, por=por, escopo=escopo,
+            aprovados=aprovados,
+        )
+    except Exception as exc:  # noqa: BLE001 — a tela tem de ver que parou
+        logger.exception("flex_emergencia_falhou", id=emergencia_id)
+        await _gravar_andamento(emergencia_id, resumo, status="falhou", erro=str(exc))
+        raise
+    await _gravar_andamento(emergencia_id, resumo, status="concluida")
+    logger.warning("flex_emergencia", id=emergencia_id, por=str(por) if por else None, **resumo)
+    return resumo
+
+
+async def _executar_emergencia(
+    emergencia_id: int,
+    resumo: dict,
+    *,
+    modo: str,
+    escreve: bool,
+    por: UUID | None,
+    escopo: set[UUID] | None,
+    aprovados: set[tuple[UUID, str]],
+) -> None:
+    m = modo
+    contas = flex_config.contas()
+    if escopo is not None:
+        contas = frozenset(contas) & frozenset(escopo)
+    agora = _agora()
+    async with session_scope() as s:
+        integracoes = await integracoes_permitidas(s, contas)
+    if not integracoes:
+        resumo["motivo"] = "nenhuma conta permitida ativa (ML/Shopee)"
+        return
+    clientes: dict[UUID, Any] = {}
+    contas_flex = await _conferir_contas(integracoes, clientes, agora, {}, perguntar=True)
+    sem_flex = {iid for iid, c in contas_flex.items() if c.ativo is False}
+    resumo["contas_sem_flex"] = len(sem_flex)
+    vistos = await _descobrir(
+        integracoes,
+        contas_flex,
+        clientes,
+        agora,
+        {},
+        modo=m,
+        idade=_DESCOBERTA_EMERGENCIA,
+        maximo_contas=None,
+    )
+    async with session_scope() as s:
         estados = await _fotos_dos_estados(s, integracoes.keys())
-        anuncios = _com_estado(await montar_anuncios(s, integracoes), estados)
-    # As aprovações já saíram (commit acima) antes da primeira escrita.
+        anuncios = _com_status(
+            _com_estado(await montar_anuncios(s, integracoes), estados), vistos, agora
+        )
     alvos = [
         a
         for a in anuncios
         if a.integration_id in integracoes
+        and a.integration_id not in sem_flex
         and (a.observado in (LIGADO, None) or (escreve and a.chave in aprovados))
     ]
     alvos.sort(
-        key=lambda a: (0 if a.observado == LIGADO else 1, str(a.integration_id), a.external_id)
+        key=lambda a: (
+            0 if a.observado == LIGADO else 1,
+            0 if ativo_na_plataforma(a.status) else 1,
+            str(a.integration_id),
+            a.external_id,
+        )
     )
     resumo["alvos"] = len(alvos)
     resumo["ligados_conhecidos"] = sum(1 for a in alvos if a.observado == LIGADO)
+    lote = alvos[:_TETO_EMERGENCIA]
 
-    clientes: dict[UUID, Any] = {}
     shopee_escreve = bool(get_settings().flex_shopee_escrita)
-    feitos = 0
-    processados = 0
     logs: list[FlexLog] = []
-    for a in alvos:
-        if feitos >= _TETO_EMERGENCIA:
-            break
-        processados += 1
-        if not escreve:
-            feitos += 1
-            resumo["simulados"] += 1
-            if a.observado == LIGADO:
-                logs.append(
-                    _log(
-                        acao="emergencia",
-                        modo=m,
-                        resultado="simulado",
-                        integration_id=a.integration_id,
-                        external_id=a.external_id,
-                        plataforma=a.plataforma,
-                        estado_antes=LIGADO,
-                        estado_depois=DESLIGADO,
-                        motivo=f"modo {m}: não escreve na plataforma",
-                        por=por,
+    trava_andamento = asyncio.Lock()
+    ultimo = [time.monotonic()]
+
+    async def _andamento(forcar: bool = False) -> None:
+        if not forcar and time.monotonic() - ultimo[0] < _EMERGENCIA_PROGRESSO_S:
+            return
+        async with trava_andamento:
+            ultimo[0] = time.monotonic()
+            resumo["restantes"] = (len(alvos) - resumo["processados"]) + resumo["ocupados"]
+            await _gravar_andamento(emergencia_id, resumo)
+
+    # Os clientes antes (um por conta, sem corrida entre as tarefas).
+    if escreve:
+        for iid in sorted({a.integration_id for a in lote}, key=str):
+            await _cliente(integracoes[iid], clientes)
+
+    paralelo = asyncio.Semaphore(_EMERGENCIA_PARALELO)
+
+    async def _um(a: Anuncio) -> None:
+        async with paralelo:
+            resumo["processados"] += 1
+            if not escreve:
+                resumo["simulados"] += 1
+                if a.observado == LIGADO:
+                    logs.append(
+                        _log(
+                            acao="emergencia",
+                            modo=m,
+                            resultado="simulado",
+                            integration_id=a.integration_id,
+                            external_id=a.external_id,
+                            plataforma=a.plataforma,
+                            estado_antes=LIGADO,
+                            estado_depois=DESLIGADO,
+                            motivo=f"modo {m}: não escreve na plataforma",
+                            por=por,
+                        )
                     )
-                )
-            continue
-        if a.plataforma == flex_envio.PLATAFORMA_SHOPEE and not shopee_escreve:
-            resumo["shopee_so_leitura"] = resumo.get("shopee_so_leitura", 0) + 1
-            continue
-        cli = await _cliente(integracoes[a.integration_id], clientes)
-        if cli is None:
-            resumo["sem_cliente"] = resumo.get("sem_cliente", 0) + 1
-            continue
-        tipo = await _escrever(
-            cli,
-            integration_id=a.integration_id,
-            external_id=a.external_id,
-            plataforma=a.plataforma,
-            acao="emergencia",
-            modo=m,
-            por=por,
-            esperar_trava=_ESPERA_TRAVA_EMERGENCIA,
-        )
-        if tipo == "ocupado":
-            # Outro processo segurou o anúncio além da espera: NÃO foi
-            # desligado — conta em `restantes` (clicar de novo continua).
-            resumo["ocupados"] += 1
-            continue
-        if tipo == "ja_desligado":
-            resumo["ja_desligados"] += 1
-            continue
-        feitos += 1
-        if tipo == flex_api.OK:
-            resumo["desligados"] += 1
-        else:
-            resumo["falhas"] += 1
-    resumo["restantes"] = (len(alvos) - processados) + resumo["ocupados"]
+                return
+            if a.plataforma == flex_envio.PLATAFORMA_SHOPEE and not shopee_escreve:
+                resumo["shopee_so_leitura"] = resumo.get("shopee_so_leitura", 0) + 1
+                return
+            cli = clientes.get(a.integration_id)
+            if cli is None:
+                resumo["sem_cliente"] = resumo.get("sem_cliente", 0) + 1
+                return
+            tipo = await _escrever(
+                cli,
+                integration_id=a.integration_id,
+                external_id=a.external_id,
+                plataforma=a.plataforma,
+                acao="emergencia",
+                modo=m,
+                por=por,
+                esperar_trava=_ESPERA_TRAVA_EMERGENCIA,
+            )
+            if tipo == "ocupado":
+                # Outro processo segurou o anúncio além da espera: NÃO foi
+                # desligado — conta em `restantes` (apertar de novo continua).
+                resumo["ocupados"] += 1
+            elif tipo == "ja_desligado":
+                resumo["ja_desligados"] += 1
+            elif tipo == flex_api.OK:
+                resumo["desligados"] += 1
+            else:
+                resumo["falhas"] += 1
+        await _andamento()
+
+    await asyncio.gather(*(_um(a) for a in lote))
+    resumo["restantes"] = (len(alvos) - resumo["processados"]) + resumo["ocupados"]
     async with session_scope() as s:
         s.add_all(logs)
         s.add(
@@ -2053,11 +2870,22 @@ async def emergencia(
                     f"emergência: {resumo['alvos']} alvo(s), {resumo['desligados']} desligado(s), "
                     f"{resumo['falhas']} falha(s), {resumo['ocupados']} ocupado(s), "
                     f"{resumo['simulados']} simulado(s), {resumo['restantes']} restante(s), "
+                    f"{resumo['contas_sem_flex']} conta(s) sem Flex, "
                     f"{resumo['aprovacoes']} aprovação(ões) "
                     + ("retirada(s)" if escreve else "que sairia(m)")
                 ),
                 por=por,
             )
         )
-    logger.warning("flex_emergencia", por=str(por) if por else None, **resumo)
-    return resumo
+
+
+async def emergencia(
+    *, por: UUID | None, contas_escopo: Collection[UUID] | None = None
+) -> dict:
+    """A emergência inteira de uma vez (preparar + executar) — o que o job
+    faz, sem a fila. A tela usa `preparar_emergencia` + o job."""
+    prep = await preparar_emergencia(por=por, contas_escopo=contas_escopo)
+    if prep.get("id") is None:
+        return prep
+    resumo = await executar_emergencia(int(prep["id"]))
+    return {"id": prep["id"], **resumo}

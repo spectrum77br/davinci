@@ -1495,6 +1495,77 @@ class MercadoLivreClient:
                 )
         return res
 
+    async def _id_vendedor(self) -> str | None:
+        """`user_id` da conta (gravado no primeiro /users/me); sem ele, pergunta
+        ao ML e guarda — o mesmo caminho do `list_listings`."""
+        uid = self.creds.get("user_id")
+        if uid:
+            return str(uid)
+        r = await self._request("GET", "/users/me")
+        if r.status_code != 200:
+            return None
+        uid = (r.json() or {}).get("id")
+        if uid and self.creds.get("user_id") != uid:
+            self.creds["user_id"] = uid
+            if self._on_refresh:
+                await self._on_refresh(self.creds)
+        return str(uid) if uid else None
+
+    async def ler_assinatura_flex(self) -> flex_api.AssinaturaFlex:
+        """A conta tem o Flex? (`/flex/sites/MLB/users/{id}/subscriptions/v1`).
+        Nunca levanta: `AssinaturaFlex.ativo` None = não deu para saber."""
+        try:
+            uid = await self._id_vendedor()
+            if not uid:
+                return flex_api.AssinaturaFlex(None, None, "conta sem user_id")
+            r = await self._request(
+                "GET", f"/flex/sites/{flex_api.ML_SITE}/users/{uid}/subscriptions/v1"
+            )
+        except Exception as exc:  # noqa: BLE001 — rede/refresh: classificado
+            return flex_api.assinatura_erro(exc)
+        return flex_api.classificar_assinatura_ml(r)
+
+    async def ids_da_conta(
+        self, status: str, *, max_paginas: int = 100, pausa: float = 0.3
+    ) -> flex_api.ListagemConta:
+        """Ids de TODOS os anúncios da conta com esse `status` ("active" ou
+        "paused") — a descoberta do Flex (projeto Flex, revisão de 02/10/2026):
+        o anúncio criado depois da última importação, ou sem vínculo, também
+        pode estar com o Flex ligado (nas contas "in" quase todos estão).
+
+        `GET /users/{id}/items/search?search_type=scan&status=…`, 100 por
+        página pelo `scroll_id` (a paginação por offset para nos 1.000), com
+        `pausa` entre as páginas e no máximo `max_paginas` (o resto fica para a
+        próxima, `completo=False`). Nunca levanta."""
+        ids: list[str] = []
+        try:
+            uid = await self._id_vendedor()
+            if not uid:
+                return flex_api.ListagemConta(erro="conta sem user_id")
+            scroll_id: str | None = None
+            for pagina in range(max_paginas):
+                params: dict[str, Any] = {"search_type": "scan", "limit": 100, "status": status}
+                if scroll_id:
+                    params["scroll_id"] = scroll_id
+                r = await self._request("GET", f"/users/{uid}/items/search", params=params)
+                if r.status_code != 200:
+                    return flex_api.ListagemConta(
+                        ids=tuple(ids), erro=f"busca {r.status_code} {r.text[:200]}".strip()
+                    )
+                data = r.json() or {}
+                scroll_id = data.get("scroll_id") or scroll_id
+                lote = [str(x).strip() for x in (data.get("results") or []) if str(x).strip()]
+                if not lote:
+                    return flex_api.ListagemConta(ids=tuple(ids), completo=True)
+                ids.extend(lote)
+                if pausa and pagina < max_paginas - 1:
+                    await asyncio.sleep(pausa)
+        except Exception as exc:  # noqa: BLE001 — rede/refresh: o que veio vale
+            return flex_api.ListagemConta(ids=tuple(ids), erro=str(exc)[:300])
+        return flex_api.ListagemConta(
+            ids=tuple(ids), erro=f"parou no limite de {max_paginas} página(s)"
+        )
+
 
 # ---------------------------------------------------------------- helpers
 #

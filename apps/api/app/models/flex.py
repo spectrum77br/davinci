@@ -3,7 +3,7 @@
 Procedimento: /Users/admmarketing/Downloads/procedimento-flex.md; análise com
 os fatos das APIs: relatorios/Flex_analise_02-10-2026.md.
 
-Três tabelas, todas escritas pela MÁQUINA (por isso fora do Histórico, ver
+Cinco tabelas, todas escritas pela MÁQUINA (por isso fora do Histórico, ver
 historico/sql.EXCLUIDAS):
 
   • `flex_pedido` — o pedido que a plataforma diz que sai pelo Flex. Nasce no
@@ -20,6 +20,13 @@ historico/sql.EXCLUIDAS):
     do canal por uma semana).
   • `flex_log` — só inserção: cada decisão/escrita com o estado de antes e o
     de depois, para poder desfazer (como a troca de SKU).
+  • `flex_conta` — a conta PODE ter Flex? (ML: assinatura do Flex em
+    `/flex/sites/MLB/users/{id}/subscriptions/v1`; Shopee: o canal Entrega
+    Direta ligado na LOJA, `get_channel_list`) — guardado ~1 h para não
+    perguntar a cada rodada — e a última descoberta dos anúncios da conta
+    (todos os ids do ML, para achar o anúncio que o DaVinci não conhece).
+  • `flex_emergencia` — o botão "Desligar tudo" vira um job do worker; a
+    linha guarda o andamento que a tela consulta.
 
 Os valores fechados são TEXT com CHECK — nada de enum do Postgres (valor novo
 em enum pede migration e não volta atrás).
@@ -41,6 +48,7 @@ from sqlalchemy import (
     func,
     text,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -70,6 +78,10 @@ FLEX_ACOES = (
     "acertar_estoque",
 )
 FLEX_RESULTADOS = ("ok", "erro", "simulado", "pendente", "ignorado")
+# Status do anúncio na plataforma, nos nomes da importação (ListingStatus):
+# o da Shopee (NORMAL, UNLIST…) é traduzido para estes (flex_api).
+FLEX_STATUS_ANUNCIO = ("active", "paused", "under_review", "inactive", "closed")
+FLEX_EMERGENCIA_STATUS = ("na_fila", "rodando", "concluida", "falhou")
 
 
 def _in(coluna: str, valores: tuple[str, ...]) -> str:
@@ -144,6 +156,7 @@ class FlexAnuncioEstado(Base):
         CheckConstraint(_in("plataforma", FLEX_PLATAFORMAS), name="plataforma"),
         CheckConstraint(_in("desejado", FLEX_DESEJADO), name="desejado"),
         CheckConstraint(_in("observado", FLEX_OBSERVADO), name="observado"),
+        CheckConstraint(_in("status_anuncio", FLEX_STATUS_ANUNCIO), name="status_anuncio"),
         # A tela lista só os que esperam uma pessoa: índice minúsculo.
         Index(
             "ix_flex_anuncio_estado_aguardando",
@@ -195,6 +208,112 @@ class FlexAnuncioEstado(Base):
     # (texto, "dg053,dg054") — o que a tela mostra ao lado da decisão.
     saldo_sp: Mapped[int | None] = mapped_column(Integer, nullable=True)
     familias: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Fila de leitura justa (revisão de 02/10/2026): a última TENTATIVA de ler
+    # o Flex na plataforma, tenha dado certo ou não — a fila anda em rodízio
+    # por ela. Leitura que falha (404, 403, token quebrado) não volta ao topo
+    # da fila: espera `proxima_leitura`, que cresce com `leitura_falhas`
+    # seguidas — antes um anúncio que nunca era lido ficava em 1º lugar em
+    # TODA rodada e tomava as vagas de leitura das outras contas.
+    leitura_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    leitura_falhas: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    proxima_leitura: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # Status do anúncio na plataforma (active | paused | under_review |
+    # inactive | closed) e quando foi visto: pela descoberta da conta (ML,
+    # busca por status), pela leitura da Shopee (`item_status`) ou pela
+    # importação (`listings.status`) — vale o mais novo. Anúncio que não está
+    # ativo não ocupa vaga da família e não pede aprovação; com Flex ligado,
+    # desliga (ao ser reativado não volta vendendo Flex sem controle).
+    status_anuncio: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    atualizado_em: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class FlexConta(Base):
+    """A conta PODE ter Flex? E a última descoberta dos anúncios dela.
+
+    ML: `GET /flex/sites/MLB/users/{user_id}/subscriptions/v1` — lista de
+    assinaturas com `status` "in"/"pending"/"out" (algumas contas respondem
+    404/403). Só "in" tem Flex. Shopee: `get_channel_list` da LOJA — o canal
+    Entrega Direta (90022) precisa estar `enabled` (e sem `mask_channel_id`)
+    na loja; em 02/10/2026 ele existe nas 14 lojas e está desligado em todas.
+    Conta que não pode ter Flex não tem leitura nem escrita por anúncio: os
+    anúncios dela ficam "não pode ter Flex" com o motivo da conta, sem pedir
+    aprovação (antes cada um pedia, e a aprovação não ligava nada)."""
+
+    __tablename__ = "flex_conta"
+    __table_args__ = (CheckConstraint(_in("plataforma", FLEX_PLATAFORMAS), name="plataforma"),)
+
+    integration_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("integrations.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    plataforma: Mapped[str] = mapped_column(Text, nullable=False)
+    # True = pode ter Flex; False = não pode (out/pending/404/403, canal
+    # desligado na loja); NULL = ainda não deu para saber.
+    flex_ativo: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # O que a plataforma respondeu, cru: "in", "pending", "out", "http_404",
+    # "sem_assinatura" (ML); "in", "out", "sem_canal" (Shopee).
+    status: Mapped[str | None] = mapped_column(Text, nullable=True)
+    detalhe: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Última conferência que trouxe resposta (a "validade" de ~1 h conta
+    # daqui) e o erro da última que não trouxe (rede, 5xx) — nesse caso vale
+    # a resposta anterior e a próxima rodada pergunta de novo.
+    lido_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    erro: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Descoberta (ML): todos os ids da conta (ativos e pausados) — o anúncio
+    # que o DaVinci não conhece entra no estado para ser desligado.
+    descoberta_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    descoberta_ok: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    descoberta_total: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    descoberta_novos: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    descoberta_erro: Mapped[str | None] = mapped_column(Text, nullable=True)
+    atualizado_em: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class FlexEmergencia(Base):
+    """Um clique no "Desligar tudo (emergência)". O pedido HTTP só tira as
+    aprovações (na hora: nada volta a ligar) e põe o job na fila; o worker
+    desliga e vai gravando o andamento em `resumo`, que a tela consulta."""
+
+    __tablename__ = "flex_emergencia"
+    __table_args__ = (
+        CheckConstraint(_in("status", FLEX_EMERGENCIA_STATUS), name="status"),
+        CheckConstraint(_in("modo", FLEX_MODOS), name="modo"),
+        Index("ix_flex_emergencia_pedido_em", "pedido_em"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(always=False), primary_key=True)
+    pedido_em: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    # Quem pediu (sem FK, como o log: sobrevive ao usuário apagado).
+    por: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True), nullable=True)
+    # Contas da equipe de quem pediu (texto dos ids); NULL = todas as de
+    # `flex_contas` (admin ou usuário sem equipe).
+    escopo: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    modo: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    # Anúncios que tinham aprovação quando o botão foi apertado ([conta,
+    # anúncio]): também são alvo, mesmo lidos desligados — a rodada pode
+    # estar no meio de ligá-los.
+    aprovados: Mapped[list] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb")
+    )
+    resumo: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    iniciado_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    terminado_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    erro: Mapped[str | None] = mapped_column(Text, nullable=True)
     atualizado_em: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

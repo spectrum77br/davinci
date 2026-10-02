@@ -70,9 +70,12 @@ TETO_POR_PEDIDO = 200
 # exatamente o que o Histórico serve para mostrar.
 # Flex (02/10/2026, migration 0364): `flex_pedido` (o shipment check regrava a
 # cada minuto), `flex_anuncio_estado` (a varredura recalcula toda rodada) e
-# `flex_log` (já É a trilha: antes/depois, modo e resultado) são da máquina.
-# A aprovação de uma pessoa fica na própria linha (`aprovado_por`) e no log. A
-# tabela de override manual, quando existir, fica COM o gatilho.
+# `flex_log` (já É a trilha: antes/depois, modo e resultado) são da máquina,
+# como `flex_conta` (a assinatura relida de hora em hora) e `flex_emergencia`
+# (o andamento do job, regravado a cada poucos segundos — quem apertou fica na
+# própria linha e na trilha). A aprovação de uma pessoa fica na própria linha
+# (`aprovado_por`) e no log. A tabela de override manual, quando existir, fica
+# COM o gatilho.
 EXCLUIDAS = re.compile(
     r"^(historico_(evento|alteracao)$|sync_logs|background_job|alembic_version$|auth_codes$"
     r"|oauth_states$|pricing_push_idempotency$|pricing_push_confirmacao$"
@@ -81,7 +84,7 @@ EXCLUIDAS = re.compile(
     r"|products_audit$|product_links_audit$|audit_em_andamento_data$|margem_audit$"
     r"|bling_envio_evento$|bling_envio_correcao$|prioridade_estoque_movimentos$|nfse_chamada$"
     # Flex: estado e trilha escritos pela máquina
-    r"|flex_(pedido|anuncio_estado|log)$"
+    r"|flex_(pedido|anuncio_estado|log|conta|emergencia)$"
     # texto de comprador (atendimento) e os índices que a máquina escreve
     r"|atendimento_(mensagens|rascunhos|avaliacoes|conversas|avaliacoes_loja"
     r"|pedidos_comprador|etiquetas_historico|reclamacoes|carrinhos|publicacoes|comentarios"

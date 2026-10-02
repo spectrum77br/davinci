@@ -34,8 +34,52 @@ from app.services import flex_motor
 from app.services.marketplaces import flex_api
 
 
+class _Fila:
+    """Pool do arq de mentira: guarda o que seria enfileirado (nada vai para o
+    Redis de verdade — um worker local pegaria o job)."""
+
+    def __init__(self) -> None:
+        self.jobs: list[tuple[str, tuple, dict]] = []
+
+    async def enqueue_job(self, nome, *args, **kw):
+        self.jobs.append((nome, args, kw))
+        return object()
+
+
+class _SoLeitura:
+    """Cliente que só confere a conta: qualquer escrita estoura."""
+
+    def __init__(self) -> None:
+        self.chamadas: list[str] = []
+
+    async def ler_assinatura_flex(self):
+        self.chamadas.append("assinatura")
+        return flex_api.AssinaturaFlex(True, "in")
+
+    async def ids_da_conta(self, status, *, max_paginas=100):
+        self.chamadas.append(f"descoberta:{status}")
+        return flex_api.ListagemConta(completo=True)
+
+    async def desligar_flex(self, item):
+        raise AssertionError("observar não escreve")
+
+    ligar_flex = desligar_flex
+
+
 @pytest_asyncio.fixture
 async def cena(db: AsyncSession, make_user, monkeypatch):
+    fila = _Fila()
+
+    async def _pool():
+        return fila
+
+    monkeypatch.setattr(worker_pool, "get_arq_pool", _pool)
+
+    # Nenhuma chamada de verdade ao ML: o cliente padrão só confere a conta.
+    async def _so_leitura(integ):
+        return _SoLeitura()
+
+    monkeypatch.setattr(flex_motor, "montar_cliente", _so_leitura)
     cfg = get_settings()
     monkeypatch.setattr(cfg, "flex_modo", "observar")
     monkeypatch.setattr(cfg, "flex_shopee_escrita", False)
@@ -75,7 +119,28 @@ async def cena(db: AsyncSession, make_user, monkeypatch):
         ]
     )
     await db.commit()
-    return {"admin": admin, "conta_id": conta.id, "fantasma": fantasma, "cfg": cfg}
+    return {"admin": admin, "conta_id": conta.id, "fantasma": fantasma, "cfg": cfg, "fila": fila}
+
+
+async def _emergencia(client: AsyncClient, cena) -> dict:
+    """Aperta o botão e roda o job (o que o worker faria) — devolve o
+    andamento final que a tela leria."""
+    from app import worker
+
+    r = await client.post("/api/flex/emergencia")
+    assert r.status_code == 200, r.text
+    corpo = r.json()
+    if corpo["id"] is None:
+        return corpo
+    assert corpo["status"] == "na_fila"
+    nome, args, kw = cena["fila"].jobs[-1]
+    assert (nome, args, kw["_job_id"]) == (
+        "flex_emergencia_run", (corpo["id"],), f"flex_emergencia:{corpo['id']}"
+    )
+    await worker.flex_emergencia_run({}, corpo["id"])
+    r = await client.get(f"/api/flex/emergencia/{corpo['id']}")
+    assert r.status_code == 200, r.text
+    return r.json()
 
 
 @pytest.mark.asyncio
@@ -90,6 +155,11 @@ async def test_config_sem_segredo(client: AsyncClient, cena, auth_as: Callable):
     contas = {x["id"]: x for x in c["contas"]}
     assert contas[str(cena["conta_id"])] == {
         "id": str(cena["conta_id"]), "nome": "vita", "plataforma": "ml", "existe": True,
+        # Ainda não conferida pelo motor: tudo vazio (a tela diz "não conferida").
+        "flex_ativo": None, "flex_status": None, "flex_detalhe": None, "flex_motivo": None,
+        "flex_lido_em": None, "flex_erro": None, "descoberta_em": None,
+        "descoberta_ok": None, "descoberta_total": None, "descoberta_novos": None,
+        "descoberta_erro": None,
     }
     assert contas[str(cena["fantasma"])]["existe"] is False
     assert "token" not in r.text and "credentials" not in r.text
@@ -162,6 +232,9 @@ async def test_aprovar_em_piloto_liga_na_hora(
     chamadas: list[tuple[str, str]] = []
 
     class ML:
+        async def ler_assinatura_flex(self):
+            return flex_api.AssinaturaFlex(True, "in")
+
         async def ler_flex(self, item):
             chamadas.append(("ler", item))
             return flex_api.ResultadoFlex(flex_api.OK, has_flex=False)
@@ -232,17 +305,21 @@ async def test_sincronizar_enfileira_no_modo_atual(
 @pytest.mark.asyncio
 async def test_emergencia_em_observar_simula(client: AsyncClient, cena, auth_as: Callable,
                                              monkeypatch):
+    cli = _SoLeitura()
+
     async def _montar(integ):
-        raise AssertionError("observar não monta cliente para escrever")
+        return cli
 
     monkeypatch.setattr(flex_motor, "montar_cliente", _montar)
     auth_as(cena["admin"])
-    r = await client.post("/api/flex/emergencia")
-    assert r.status_code == 200
-    corpo = r.json()
-    assert (corpo["modo"], corpo["escreve"]) == ("observar", False)
+    andamento = await _emergencia(client, cena)
+    assert andamento["status"] == "concluida"
+    assert (andamento["modo"], andamento["escreve"]) == ("observar", False)
+    corpo = andamento["resumo"]
     assert corpo["simulados"] == 1  # MLB2 é o único ligado
     assert corpo["desligados"] == 0
+    # Só leitura: a conta conferida e descoberta, nenhuma escrita.
+    assert cli.chamadas == ["assinatura", "descoberta:active", "descoberta:paused"]
     r = await client.get("/api/flex/log?acao=emergencia")
     linhas = r.json()
     assert {x["resultado"] for x in linhas} == {"simulado"}
@@ -321,14 +398,16 @@ async def test_telas_do_flex_respeitam_a_equipe(
     r = await client.post(f"/api/flex/anuncios/{equipe['loja7']}/MLB70/aprovar")
     assert r.status_code == 200
     # Emergência: só as contas da equipe (a "vita" tem o MLB2 ligado).
-    r = await client.post("/api/flex/emergencia")
-    corpo = r.json()
+    corpo = (await _emergencia(client, cena))["resumo"]
     assert corpo["alvos"] == 0 and corpo["simulados"] == 0
+    # A emergência do membro é dele: o andamento não aparece para outro.
+    ultima = (await client.get("/api/flex/emergencia/ultima")).json()
+    assert ultima["resumo"]["alvos"] == 0
 
     # O admin continua vendo tudo.
     auth_as(cena["admin"])
     assert (await client.get("/api/flex/anuncios")).json()["total"] == 4
-    assert (await client.post("/api/flex/emergencia")).json()["simulados"] == 1
+    assert (await _emergencia(client, cena))["resumo"]["simulados"] == 1
 
 
 @pytest.mark.asyncio
@@ -385,3 +464,80 @@ async def test_sem_login_nao_entra(client: AsyncClient, auth_as: Callable):
     auth_as(None)
     assert (await client.get("/api/flex/config")).status_code == 401
 
+
+
+@pytest.mark.asyncio
+async def test_config_mostra_o_flex_de_cada_conta(
+    client: AsyncClient, cena, db: AsyncSession, auth_as: Callable
+):
+    """A conta conferida pelo motor (`flex_conta`): a tela mostra se ela pode
+    ter Flex e por quê não — sem chamar a plataforma."""
+    from app.models import FlexConta
+
+    agora = datetime.now(UTC)
+    db.add(FlexConta(integration_id=cena["conta_id"], plataforma="ml", flex_ativo=False,
+                     status="pending", detalhe="assinatura do Flex: pending", lido_em=agora,
+                     descoberta_em=agora, descoberta_ok=True, descoberta_total=1545,
+                     descoberta_novos=12))
+    await db.commit()
+    auth_as(cena["admin"])
+    contas = {x["id"]: x for x in (await client.get("/api/flex/config")).json()["contas"]}
+    c = contas[str(cena["conta_id"])]
+    assert (c["flex_ativo"], c["flex_status"]) == (False, "pending")
+    assert c["flex_motivo"] == "conta sem Flex ativo no ML (status pending)"
+    assert (c["descoberta_total"], c["descoberta_novos"], c["descoberta_ok"]) == (1545, 12, True)
+
+    # E aprovar um anúncio dela: a conta não pode (409), nada é gravado.
+    r = await client.post(f"/api/flex/anuncios/{cena['conta_id']}/MLB1/aprovar")
+    assert (r.status_code, r.json()["detail"]["code"]) == (409, "conta_sem_flex")
+
+
+@pytest.mark.asyncio
+async def test_aprovar_shopee_so_leitura_e_409(
+    client: AsyncClient, cena, db: AsyncSession, auth_as: Callable, monkeypatch
+):
+    loja = Integration(user_id=cena["admin"].id, platform=IntegrationPlatform.SHOPEE,
+                       name="loja", credentials=encrypt_json({"access_token": "t"}))
+    db.add(loja)
+    await db.flush()
+    loja_id = loja.id
+    db.add(FlexAnuncioEstado(integration_id=loja_id, external_id="777", plataforma="shopee",
+                             desejado="ligado", motivo="saldo Flex 5", observado="desligado",
+                             aguardando_aprovacao=False, tentativas=0))
+    await db.commit()
+    monkeypatch.setattr(cena["cfg"], "flex_contas", f"{cena['conta_id']},{loja_id}")
+    auth_as(cena["admin"])
+    r = await client.post(f"/api/flex/anuncios/{loja_id}/777/aprovar")
+    assert (r.status_code, r.json()["detail"]["code"]) == (409, "shopee_so_leitura")
+
+
+@pytest.mark.asyncio
+async def test_emergencia_em_andamento_nao_cria_outra(
+    client: AsyncClient, cena, auth_as: Callable, monkeypatch
+):
+    monkeypatch.setattr(cena["cfg"], "flex_modo", "piloto")
+    auth_as(cena["admin"])
+    r1 = (await client.post("/api/flex/emergencia")).json()
+    assert r1["status"] == "na_fila" and r1["escreve"] is True
+    # O job ainda não rodou: o segundo clique devolve a mesma (sem outro job).
+    r2 = (await client.post("/api/flex/emergencia")).json()
+    assert (r2["id"], r2["ja_em_andamento"]) == (r1["id"], True)
+    assert [j[0] for j in cena["fila"].jobs] == ["flex_emergencia_run"]
+    ultima = (await client.get("/api/flex/emergencia/ultima")).json()
+    assert ultima["id"] == r1["id"]
+    assert (await client.get("/api/flex/emergencia/999999")).status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_emergencia_sem_fila_avisa_e_marca_falhou(
+    client: AsyncClient, cena, auth_as: Callable, monkeypatch
+):
+    async def _sem_redis():
+        raise ConnectionError("redis fora")
+
+    monkeypatch.setattr(worker_pool, "get_arq_pool", _sem_redis)
+    auth_as(cena["admin"])
+    r = await client.post("/api/flex/emergencia")
+    assert (r.status_code, r.json()["detail"]["code"]) == (503, "fila_indisponivel")
+    ultima = (await client.get("/api/flex/emergencia/ultima")).json()
+    assert ultima["status"] == "falhou" and "fila" in ultima["erro"]

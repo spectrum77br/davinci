@@ -3227,6 +3227,33 @@ async def flex_reavaliar_run(ctx: dict) -> dict:
     return resumo
 
 
+async def flex_aprovado_run(
+    ctx: dict, integration_id: str, external_id: str, por: str | None = None
+) -> dict:
+    """Aprovação de LIGAR que chegou com a rodada do motor em andamento
+    (POST /api/flex/anuncios/…/aprovar): roda o motor só para aquele anúncio
+    assim que a rodada soltar a trava — antes ficava para "a próxima rodada",
+    atrás da fila inteira de desligar. Ocupado de novo: tenta em 1 min (até
+    `max_tries`; esgotado, a varredura liga — a aprovação continua valendo e
+    os aprovados são lidos primeiro)."""
+    try:
+        iid = UUID(integration_id)
+        quem = UUID(por) if por else None
+    except ValueError:
+        return {"motivo": "id inválido"}
+    res = await flex_motor.aplicar_aprovado(iid, external_id, por=quem)
+    if res.get("ocupado"):
+        raise Retry(defer=60)
+    return res
+
+
+async def flex_emergencia_run(ctx: dict, emergencia_id: int) -> dict:
+    """Botão "Desligar tudo (emergência)": o job que desliga o Flex das
+    contas (POST /api/flex/emergencia já tirou as aprovações e criou a
+    linha). O andamento fica em `flex_emergencia.resumo` — a tela consulta."""
+    return await flex_motor.executar_emergencia(int(emergencia_id))
+
+
 async def vigia_importacao_tick(ctx: dict) -> None:
     """Vigia de importação (robô da Ouvidoria): pedido PAGO no ML / Shopee /
     TikTok / Amazon que não caiu no Bling → ocorrência + aviso Threema pra
@@ -4255,6 +4282,13 @@ class WorkerSettings:
         func(flex_motor_tick, timeout=900),
         func(flex_motor_run, timeout=900),
         func(flex_reavaliar_run, timeout=300),
+        # Aprovação com a rodada ocupada: tenta de minuto em minuto (a rodada
+        # segura a trava de 4 a 8 min) — 10 vezes cobre uma rodada longa.
+        func(flex_aprovado_run, timeout=300, max_tries=10),
+        # Emergência: até 3.000 anúncios, 4 de cada vez (~12 min) — e a
+        # descoberta das contas antes. Uma tentativa só: o job relido de novo
+        # não sabe o que já fez pela metade (apertar o botão de novo continua).
+        func(flex_emergencia_run, timeout=1800, max_tries=1),
         vigia_importacao_tick,
         vigia_estoque_familia_tick,
         # Os 6 robôs da Ouvidoria de 22/09 (cada um sai na hora se o modo da

@@ -57,6 +57,12 @@ class FakeML:
         self.chamadas: list[tuple[str, str]] = []
         self.ligar_resposta: dict[str, ResultadoFlex] = {}
         self.desligar_resposta: dict[str, ResultadoFlex] = {}
+        # A conta tem o Flex (subscriptions/v1 "in") — o padrão dos cenários.
+        self.assinatura = flex_api.AssinaturaFlex(True, "in", "assinatura do Flex ativa")
+        self.assinaturas_lidas = 0
+        # Descoberta: {id: "active" | "paused"} que a busca da conta devolve.
+        self.conta_itens: dict[str, str] = {}
+        self.descobertas: list[str] = []
 
     @property
     def escritas(self) -> list[tuple[str, str]]:
@@ -65,6 +71,16 @@ class FakeML:
     @property
     def leituras(self) -> list[str]:
         return [i for a, i in self.chamadas if a == "ler"]
+
+    async def ler_assinatura_flex(self):
+        self.assinaturas_lidas += 1
+        return self.assinatura
+
+    async def ids_da_conta(self, status, *, max_paginas=100):
+        self.descobertas.append(status)
+        return flex_api.ListagemConta(
+            ids=tuple(i for i, st in self.conta_itens.items() if st == status), completo=True
+        )
 
     async def ler_flex(self, item):
         self.chamadas.append(("ler", item))
@@ -94,6 +110,13 @@ class FakeShopee:
     def __init__(self, canais: dict[str, list[dict]]) -> None:
         self.canais = {k: [dict(c) for c in v] for k, v in canais.items()}
         self.chamadas: list[tuple[str, Any]] = []
+        # O canal Entrega Direta NA LOJA (get_channel_list); o padrão é ligado.
+        self.loja = flex_api.AssinaturaFlex(True, "in", "Entrega Direta ligada na loja")
+        # item_status de cada anúncio (get_item_base_info); padrão NORMAL.
+        self.status: dict[str, str] = {}
+
+    async def ler_canal_loja_flex(self, canais_flex):
+        return self.loja
 
     @property
     def escritas(self):
@@ -110,6 +133,7 @@ class FakeShopee:
                 flex_api.OK,
                 has_flex=flex_api.flex_nos_canais(lista, canais_flex),
                 canais=tuple(dict(c) for c in lista),
+                status_anuncio=flex_api.status_shopee(self.status.get(str(i), "NORMAL")),
             )
         return out
 
@@ -334,6 +358,15 @@ async def test_observar_com_cliente_de_verdade_nao_chama_post_nem_delete(db, mun
 
     monkeypatch.setattr(flex_motor, "montar_cliente", cliente_da_integracao)
     with respx.mock(base_url=ML_API_BASE, assert_all_called=False) as router:
+        # A conta: quem é (user_id), a assinatura do Flex ("in") e a
+        # descoberta (busca dos ids — vazia aqui). Tudo GET.
+        router.get("/users/me").mock(return_value=httpx.Response(200, json={"id": 4242}))
+        router.get("/flex/sites/MLB/users/4242/subscriptions/v1").mock(
+            return_value=httpx.Response(200, json=[{"status": "in"}])
+        )
+        router.get("/users/4242/items/search").mock(
+            return_value=httpx.Response(200, json={"results": [], "scroll_id": "s1"})
+        )
         for item, flex in {"MLB1": False, "MLB2": False, "MLB3": False, "MLB9": True,
                            "MLB77": True}.items():
             router.get(f"/flex/sites/MLB/items/{item}/v2").mock(

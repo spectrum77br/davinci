@@ -466,6 +466,8 @@ _CLEANUP_TABLES = (
     "background_job_details",
     "background_jobs",
     # Flex (0364): FK → integrations (CASCADE/SET NULL) e users (SET NULL).
+    "flex_emergencia",
+    "flex_conta",
     "flex_log",
     "flex_anuncio_estado",
     "flex_pedido",

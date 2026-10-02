@@ -1081,13 +1081,33 @@ class ShopeeClient:
                     else None
                 )
                 ligado = flex_api.flex_nos_canais(canais, canais_flex)
+                # O status do anúncio vem de graça na mesma chamada: anúncio
+                # não ativo não ocupa vaga da família nem pede aprovação.
+                status = flex_api.status_shopee(it.get("item_status"))
                 if ligado is None:
                     out[iid] = flex_api.ResultadoFlex(
-                        flex_api.ERRO, detalhe="a Shopee não mandou logistic_info"
+                        flex_api.ERRO,
+                        detalhe="a Shopee não mandou logistic_info",
+                        status_anuncio=status,
                     )
                 else:
-                    out[iid] = flex_api.ResultadoFlex(flex_api.OK, has_flex=ligado, canais=canais)
+                    out[iid] = flex_api.ResultadoFlex(
+                        flex_api.OK, has_flex=ligado, canais=canais, status_anuncio=status
+                    )
         return out
+
+    async def ler_canal_loja_flex(self, canais_flex: Collection[str]) -> flex_api.AssinaturaFlex:
+        """O canal Flex (Entrega Direta) está ligado NA LOJA?
+        (`GET /api/v2/logistics/get_channel_list`). Sem ele ligado na loja,
+        ligar o canal no anúncio não adianta — quem liga é a pessoa, no Seller
+        Center. Nunca levanta: erro = `ativo` None (vale a resposta anterior)."""
+        try:
+            resp = await self._call(
+                "GET", "/api/v2/logistics/get_channel_list", what="shopee_channel_list"
+            )
+        except Exception as exc:  # noqa: BLE001 — erro de API/rede: não se sabe
+            return flex_api.assinatura_erro(exc)
+        return flex_api.classificar_canal_loja_shopee(resp, canais_flex)
 
     async def atualizar_canal_flex(
         self,

@@ -8,6 +8,7 @@ mudar a frase) sem tradução, o teste avisa — a tela mostraria texto técnico
 from __future__ import annotations
 
 import uuid
+from dataclasses import replace
 
 import pytest
 
@@ -96,6 +97,54 @@ def _claro(motivo: str) -> str:
             "continua até ficar com menos de 1",
         ),
         (_an("dg053.ci", recusa="403 item down"), _sp(dg053_sp=5), "não aceitou ligar"),
+        # Revisão de 02/10/2026: a conta, o status do anúncio, o anúncio que o
+        # DaVinci não conhece e a Shopee só leitura.
+        (
+            replace(_an("dg053.ci"), bloqueio=fm.bloqueio_da_conta(
+                "ml", fm.ContaFlex("ml", False, "out"))),
+            _sp(dg053_sp=5),
+            "A conta não tem o Flex ativo no Mercado Livre (assinatura: out)",
+        ),
+        (
+            replace(_an("dg053.ci"), bloqueio=fm.bloqueio_da_conta("ml", None)),
+            _sp(dg053_sp=5),
+            "Ainda não deu para conferir se a conta tem o Flex",
+        ),
+        (
+            replace(_an("dg053.ci"), plataforma="shopee", bloqueio=fm.bloqueio_da_conta(
+                "shopee", fm.ContaFlex("shopee", False, "out"))),
+            _sp(dg053_sp=5),
+            "A Entrega Direta está desligada na loja. Ligue no Seller Center primeiro",
+        ),
+        (
+            replace(_an("dg053.ci"), plataforma="shopee", bloqueio=fm.bloqueio_da_conta(
+                "shopee", fm.ContaFlex("shopee", False, "sem_canal"))),
+            _sp(dg053_sp=5),
+            "A loja não tem o canal Entrega Direta",
+        ),
+        (
+            replace(_an("dg053.ci"), plataforma="shopee", bloqueio=fm.bloqueio_da_conta(
+                "shopee", None)),
+            _sp(dg053_sp=5),
+            "Ainda não deu para conferir se a loja tem a Entrega Direta",
+        ),
+        (replace(_an(), conhecido=False), {}, "não está ligado a nenhum produto do DaVinci"),
+        (
+            replace(_an("dg053.ci"), status="paused"),
+            _sp(dg053_sp=5),
+            "O anúncio está pausado na plataforma — o Flex fica desligado",
+        ),
+        (
+            replace(_an("dg053.ci"), status="under_review"),
+            _sp(dg053_sp=5),
+            "O anúncio está em revisão na plataforma",
+        ),
+        (
+            replace(_an("dg053.ci"), plataforma="shopee", pode_ligar=False),
+            _sp(dg053_sp=5),
+            "Na Shopee o sistema só confere: ligar a Entrega Direta é à mão no Seller Center. "
+            "5 peças livres em São Bernardo",
+        ),
     ],
 )
 def test_cada_ramo_da_regra_vira_frase_clara(anuncio, saldos, espera):

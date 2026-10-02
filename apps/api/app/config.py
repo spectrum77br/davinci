@@ -661,7 +661,10 @@ class Settings(BaseSettings):
     #               Desligar é automático; LIGAR fica aguardando aprovação na
     #               tela (o ML pede para não automatizar a ativação).
     #   contas      integration_id das contas permitidas, separados por
-    #               vírgula. Vazio = NENHUMA (negação por padrão).
+    #               vírgula. Vazio = NENHUMA (negação por padrão). Estar na
+    #               lista não basta: o motor confere de hora em hora se a
+    #               conta PODE ter Flex (ML: assinatura "in"; Shopee: Entrega
+    #               Direta ligada na loja) e, se não puder, não mexe nela.
     #   n_liga/n_desliga  histerese por família: liga com saldo Flex (.sp livre
     #               menos pedidos Flex ainda fora do .sp) >= n_liga e só
     #               desliga abaixo de n_desliga — sem isso o Flex pisca a cada
@@ -670,7 +673,9 @@ class Settings(BaseSettings):
     #   max_anuncios_por_familia  quantos anúncios com Flex ligado por
     #               família: o mesmo .sp aparece em N anúncios (clássico,
     #               premium, várias contas) e cada um pode vender tudo.
-    #   teto_escritas_por_rodada  máximo de chamadas de escrita por rodada.
+    #   teto_escritas_por_rodada  máximo de chamadas de escrita por rodada
+    #               (1/5 dele, no mínimo 1, fica guardado para os LIGAR que
+    #               uma pessoa aprovou — não esperam a fila de desligar).
     #   shopee_canais  logistics_channel_id da Shopee Entrega Direta (vírgula).
     #               90022 pelo guia 290 da Open Platform; a confirmar num
     #               pedido real — por isso fica em configuração.

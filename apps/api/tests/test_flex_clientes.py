@@ -375,3 +375,158 @@ async def test_shopee_escrita_renova_token_e_repete_uma_vez():
     assert auth.call_count == 1
     assert rota.call_count == 2
     assert rota.calls[1].request.url.params["access_token"] == "t2"  # noqa: S105
+
+
+# ---- A conta: assinatura do Flex (ML) e canal da loja (Shopee) — 02/10/2026 ----
+
+ASSINATURA = "/flex/sites/MLB/users/1/subscriptions/v1"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "corpo", "ativo", "esperado"),
+    [
+        # Fato das contas: lista com status "in" / "pending" / "out".
+        (200, [{"status": "in", "origin": {"zip_code": "09750"}}], True, "in"),
+        (200, [{"status": "out"}, {"status": "in"}], True, "in"),
+        (200, [{"status": "pending"}], False, "pending"),
+        (200, [{"status": "out"}], False, "out"),
+        (200, [{"status": "out"}, {"status": "pending"}], False, "pending"),
+        (200, [], False, "sem_assinatura"),
+        (200, {"results": [{"status": "in"}]}, True, "in"),
+        # Algumas contas respondem 404 (eron, mega, dream2) ou 403 (nexus).
+        (404, {"message": "not found"}, False, "http_404"),
+        (403, {"message": "forbidden"}, False, "http_403"),
+        # Não deu para saber: vale a anterior.
+        (500, {}, None, None),
+    ],
+)
+async def test_ml_assinatura_flex(sem_espera, status, corpo, ativo, esperado):
+    with respx.mock(base_url=ML_API_BASE) as router:
+        rota = router.get(ASSINATURA).mock(return_value=httpx.Response(status, json=corpo))
+        r = await _ml().ler_assinatura_flex()
+    assert (r.ativo, r.status) == (ativo, esperado)
+    assert rota.called
+
+
+@pytest.mark.asyncio
+async def test_ml_assinatura_sem_user_id_pergunta_quem_e():
+    with respx.mock(base_url=ML_API_BASE) as router:
+        router.get("/users/me").mock(return_value=httpx.Response(200, json={"id": 77}))
+        router.get("/flex/sites/MLB/users/77/subscriptions/v1").mock(
+            return_value=httpx.Response(200, json=[{"status": "in"}])
+        )
+        cli = _ml(user_id=None)
+        r = await cli.ler_assinatura_flex()
+    assert r.ativo is True and cli.creds["user_id"] == 77
+
+
+@pytest.mark.asyncio
+async def test_ml_assinatura_rede_caida_nao_sabe():
+    with respx.mock(base_url=ML_API_BASE) as router:
+        router.get(ASSINATURA).mock(side_effect=httpx.ConnectTimeout("timeout"))
+        r = await _ml().ler_assinatura_flex()
+    assert (r.ativo, r.status) == (None, None)
+
+
+@pytest.mark.asyncio
+async def test_ml_ids_da_conta_le_todas_as_paginas_pelo_scroll(sem_espera):
+    """Descoberta: `search_type=scan` com `scroll_id`, 100 por página, o
+    status pedido em toda página, uma pausa entre as páginas, até vir vazia."""
+    paginas = [
+        {"results": [f"MLB{i}" for i in range(100)], "scroll_id": "s1"},
+        {"results": ["MLB100", "MLB101"], "scroll_id": "s2"},
+        {"results": [], "scroll_id": "s3"},
+    ]
+    with respx.mock(base_url=ML_API_BASE) as router:
+        rota = router.get("/users/1/items/search").mock(
+            side_effect=[httpx.Response(200, json=p) for p in paginas]
+        )
+        r = await _ml().ids_da_conta("paused")
+    assert r.completo is True and r.erro is None
+    assert len(r.ids) == 102 and r.ids[-1] == "MLB101"
+    params = [dict(c.request.url.params) for c in rota.calls]
+    assert [p.get("scroll_id") for p in params] == [None, "s1", "s2"]
+    assert {(p["search_type"], p["status"], p["limit"]) for p in params} == {
+        ("scan", "paused", "100")
+    }
+    assert sem_espera == [0.3, 0.3]  # ritmo entre as páginas
+
+
+@pytest.mark.asyncio
+async def test_ml_ids_da_conta_para_no_limite_e_no_erro(sem_espera):
+    with respx.mock(base_url=ML_API_BASE) as router:
+        router.get("/users/1/items/search").mock(
+            side_effect=[
+                httpx.Response(200, json={"results": ["MLB1"], "scroll_id": "s1"}),
+                httpx.Response(200, json={"results": ["MLB2"], "scroll_id": "s2"}),
+            ]
+        )
+        r = await _ml().ids_da_conta("active", max_paginas=2)
+    assert (r.ids, r.completo) == (("MLB1", "MLB2"), False)
+    assert "limite" in r.erro
+    with respx.mock(base_url=ML_API_BASE) as router:
+        router.get("/users/1/items/search").mock(
+            side_effect=[
+                httpx.Response(200, json={"results": ["MLB1"], "scroll_id": "s1"}),
+                httpx.Response(400, json={"message": "invalid scroll"}),
+            ]
+        )
+        r = await _ml().ids_da_conta("active")
+    assert (r.ids, r.completo) == (("MLB1",), False)
+    assert r.erro.startswith("busca 400")
+
+
+def _canais_loja(*canais):
+    return {"error": "", "message": "", "response": {"logistics_channel_list": list(canais)}}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("canal", "ativo", "status"),
+    [
+        # Fato: o 90022 existe nas 14 lojas (mask 0), mas desligado NA LOJA.
+        ({"logistics_channel_id": 90022, "enabled": False, "mask_channel_id": 0}, False, "out"),
+        ({"logistics_channel_id": 90022, "enabled": True, "mask_channel_id": 0}, True, "in"),
+        # Ligado, mas mascarado por outro canal: não serve para o produto.
+        ({"logistics_channel_id": 90022, "enabled": True, "mask_channel_id": 90001},
+         False, "out"),
+        (None, False, "sem_canal"),
+    ],
+)
+async def test_shopee_canal_flex_da_loja(canal, ativo, status):
+    outros = {"logistics_channel_id": 90001, "enabled": True, "mask_channel_id": 0}
+    lista = [outros] + ([canal] if canal else [])
+    with respx.mock(base_url=SHOPEE_LIVE_BASE) as router:
+        rota = router.get("/api/v2/logistics/get_channel_list").mock(
+            return_value=httpx.Response(200, json=_canais_loja(*lista))
+        )
+        r = await _shopee().ler_canal_loja_flex({"90022"})
+    assert (r.ativo, r.status) == (ativo, status)
+    assert rota.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_shopee_canal_da_loja_com_erro_nao_sabe():
+    with respx.mock(base_url=SHOPEE_LIVE_BASE) as router:
+        router.get("/api/v2/logistics/get_channel_list").mock(
+            return_value=httpx.Response(200, json={"error": "error_server", "message": "x"})
+        )
+        r = await _shopee().ler_canal_loja_flex({"90022"})
+    assert r.ativo is None
+
+
+@pytest.mark.asyncio
+async def test_shopee_leitura_traz_o_status_do_anuncio():
+    with respx.mock(base_url=SHOPEE_LIVE_BASE) as router:
+        router.get("/api/v2/product/get_item_base_info").mock(
+            return_value=httpx.Response(
+                200,
+                json=_base_info(
+                    {"item_id": 1, "item_status": "UNLIST", "logistic_info": CANAIS},
+                    {"item_id": 2, "item_status": "NORMAL", "logistic_info": CANAIS},
+                ),
+            )
+        )
+        res = await _shopee().ler_canais_flex([1, 2], {"90022"})
+    assert (res["1"].status_anuncio, res["2"].status_anuncio) == ("paused", "active")

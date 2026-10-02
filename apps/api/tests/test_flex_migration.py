@@ -2,11 +2,11 @@
 
 O conftest monta o schema de teste pelo `create_all` do model, nunca pela
 migration. Aqui a 0364 roda de verdade num schema descartável e o catálogo
-do Postgres dos dois lados é comparado: as três tabelas `flex_*` (colunas,
+do Postgres dos dois lados é comparado: as cinco tabelas `flex_*` (colunas,
 CHECK, FK com ON DELETE, PK, índices) e as duas colunas novas da
 `logistica` com o índice parcial da aba Flex.
 
-E o Histórico: as três tabelas são da máquina (fora do gatilho); a
+E o Histórico: as cinco tabelas são da máquina (fora do gatilho); a
 `logistica` continua coberta.
 """
 
@@ -26,7 +26,7 @@ from app.historico import sql as hsql
 from app.models import Base
 
 _MIGRATION = Path(__file__).resolve().parent.parent / "alembic" / "versions" / "0364_flex.py"
-TABELAS = ["flex_anuncio_estado", "flex_log", "flex_pedido"]
+TABELAS = ["flex_anuncio_estado", "flex_conta", "flex_emergencia", "flex_log", "flex_pedido"]
 
 
 def _carregar():
@@ -141,6 +141,11 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
             "fk_flex_pedido_integration_id_integrations",
             "fk_flex_anuncio_estado_integration_id_integrations",
             "fk_flex_anuncio_estado_aprovado_por_users",
+            "ck_flex_anuncio_estado_status_anuncio",
+            "pk_flex_conta",
+            "fk_flex_conta_integration_id_integrations",
+            "pk_flex_emergencia",
+            "ck_flex_emergencia_status",
         } <= nomes
         assert da_migration["colunas"] == do_model["colunas"]
         assert da_migration["constraints"] == do_model["constraints"]

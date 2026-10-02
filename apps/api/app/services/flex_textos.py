@@ -53,6 +53,62 @@ _SALDO = r"saldo Flex (?P<n>-?\d+) em (?P<sku>\S+)"
 # (padrão, frase). A ordem importa: o "limite" carrega outro motivo no fim e
 # é traduzido primeiro (o resto passa por motivo_claro de novo).
 _REGRAS: list[tuple[re.Pattern[str], Callable[[re.Match[str]], str]]] = [
+    # A CONTA não pode ter Flex (revisão de 02/10/2026 — flex_motor.bloqueio_da_conta).
+    (
+        re.compile(r"^conta sem Flex ativo no ML \(status (?P<s>.+)\)$"),
+        lambda m: (
+            f"A conta não tem o Flex ativo no Mercado Livre (assinatura: {m['s']}). "
+            "Enquanto não tiver, o sistema não mexe nos anúncios dela."
+        ),
+    ),
+    (
+        re.compile(r"^não deu para conferir a assinatura do Flex da conta no ML$"),
+        lambda m: (
+            "Ainda não deu para conferir se a conta tem o Flex no Mercado Livre — o sistema "
+            "não mexe nos anúncios dela até conferir."
+        ),
+    ),
+    (
+        re.compile(r"^não deu para conferir a Entrega Direta da loja na Shopee$"),
+        lambda m: (
+            "Ainda não deu para conferir se a loja tem a Entrega Direta ligada na Shopee — o "
+            "sistema não mexe nos anúncios dela até conferir."
+        ),
+    ),
+    (
+        re.compile(r"^a loja não tem o canal Entrega Direta na Shopee$"),
+        lambda m: "A loja não tem o canal Entrega Direta na Shopee.",
+    ),
+    (
+        re.compile(r"^Entrega Direta desligada na loja — ligue no Seller Center primeiro$"),
+        lambda m: (
+            "A Entrega Direta está desligada na loja. Ligue no Seller Center primeiro — sem "
+            "ela, ligar no anúncio não adianta."
+        ),
+    ),
+    (
+        re.compile(r"^anúncio fora do DaVinci — sem vínculo$"),
+        lambda m: (
+            "O anúncio existe na conta, mas não está ligado a nenhum produto do DaVinci — o "
+            "Flex fica desligado."
+        ),
+    ),
+    (
+        re.compile(
+            r"^anúncio (?P<st>.+?) na plataforma — o Flex fica desligado até reativar$"
+        ),
+        lambda m: (
+            f"O anúncio está {m['st']} na plataforma — o Flex fica desligado. Quando ele "
+            "voltar a ficar ativo, o sistema confere de novo."
+        ),
+    ),
+    (
+        re.compile(r"^Shopee só leitura \(flex_shopee_escrita\) — (?P<resto>.+)$"),
+        lambda m: (
+            "Na Shopee o sistema só confere: ligar a Entrega Direta é à mão no Seller Center. "
+            f"{motivo_claro(m['resto'])}"
+        ),
+    ),
     (
         re.compile(
             r"^limite de (?P<m>\d+) anúncio\(s\) com Flex na família (?P<f>\S+) — (?P<resto>.+)$"

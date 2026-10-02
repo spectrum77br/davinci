@@ -4,13 +4,19 @@ Projeto Flex, etapa 3 (services/flex_motor). Mesmo recurso da Logística:
 `logistica:view` para ver, `logistica:edit` para agir (sincronizar, aprovar,
 emergência); admin passa sempre (`require_permission`).
 
-  GET  /api/flex/config        modo, contas, números (nada de segredo)
+  GET  /api/flex/config        modo, contas (com o Flex DA CONTA: assinatura
+                               do ML / canal da loja Shopee, e a descoberta),
+                               números (nada de segredo)
   GET  /api/flex/anuncios      estado por anúncio (filtros, busca e o resumo
                                do topo da tela)
   POST /api/flex/sincronizar   roda o motor agora (job no worker), no modo atual
-  POST /api/flex/anuncios/{conta}/{anuncio}/aprovar   aprova LIGAR
-  POST /api/flex/emergencia    desliga tudo das contas permitidas
+  POST /api/flex/anuncios/{conta}/{anuncio}/aprovar   aprova LIGAR (rodada
+                               ocupada: a ligação vai para a fila do worker)
+  POST /api/flex/emergencia    tira as aprovações e põe na fila o job que
+                               desliga tudo das contas permitidas
                                (observar/desligado: só simula)
+  GET  /api/flex/emergencia/ultima   a última emergência (andamento)
+  GET  /api/flex/emergencia/{id}     o andamento de uma emergência
   GET  /api/flex/log           últimas linhas da trilha
   GET  /api/flex/pedidos       pedidos Flex detectados (com o aviso do .sp;
                                `abertos=true` tira os que já saíram — menos
@@ -44,9 +50,12 @@ from app.deps.team_scope import resolve_team_scope
 from app.models import (
     BlingOrder,
     FlexAnuncioEstado,
+    FlexConta,
+    FlexEmergencia,
     FlexLog,
     FlexPedido,
     Integration,
+    Listing,
     ProductLink,
     User,
 )
@@ -58,6 +67,7 @@ from app.schemas.flex import (
     FlexAprovarOut,
     FlexConfigOut,
     FlexContaOut,
+    FlexEmergenciaOut,
     FlexLogOut,
     FlexPedidoOut,
     FlexResumoOut,
@@ -110,15 +120,49 @@ async def config(session: Sessao, user: Ver) -> FlexConfigOut:
         (i for i in flex_config.contas() if escopo is None or i in escopo), key=str
     )
     permitidas = await flex_motor.integracoes_permitidas(session, ids)
-    contas = [
-        FlexContaOut(
-            id=i,
-            nome=permitidas[i].name if i in permitidas else None,
-            plataforma=_plataforma_txt(permitidas.get(i)),
-            existe=i in permitidas,
+    # O Flex de cada conta como o motor deixou (a tela não chama a plataforma).
+    linhas = (
+        {
+            c.integration_id: c
+            for c in (
+                await session.execute(select(FlexConta).where(FlexConta.integration_id.in_(ids)))
+            )
+            .scalars()
+            .all()
+        }
+        if ids
+        else {}
+    )
+    contas = []
+    for i in ids:
+        integ = permitidas.get(i)
+        c = linhas.get(i)
+        plataforma = _plataforma_txt(integ)
+        motivo = None
+        if c is not None and c.flex_ativo is False:
+            motivo = flex_motor.bloqueio_da_conta(
+                c.plataforma,
+                flex_motor.ContaFlex(c.plataforma, c.flex_ativo, c.status, c.detalhe),
+            )
+        contas.append(
+            FlexContaOut(
+                id=i,
+                nome=integ.name if integ is not None else None,
+                plataforma=plataforma,
+                existe=integ is not None,
+                flex_ativo=c.flex_ativo if c else None,
+                flex_status=c.status if c else None,
+                flex_detalhe=c.detalhe if c else None,
+                flex_motivo=motivo,
+                flex_lido_em=c.lido_em if c else None,
+                flex_erro=c.erro if c else None,
+                descoberta_em=c.descoberta_em if c else None,
+                descoberta_ok=c.descoberta_ok if c else None,
+                descoberta_total=c.descoberta_total if c else None,
+                descoberta_novos=c.descoberta_novos if c else None,
+                descoberta_erro=c.descoberta_erro if c else None,
+            )
         )
-        for i in ids
-    ]
     m = flex_config.modo()
     return FlexConfigOut(
         modo=m,
@@ -136,9 +180,28 @@ async def config(session: Sessao, user: Ver) -> FlexConfigOut:
     )
 
 
+def _importado_do_estado():
+    """O anúncio importado (`listings`) da linha do estado. Na Shopee a
+    importação às vezes grava `item_model` (um por modelo) — o anúncio é a
+    primeira parte (o mesmo `_id_anuncio` do motor)."""
+    est = FlexAnuncioEstado
+    return and_(
+        Listing.integration_id == est.integration_id,
+        or_(
+            Listing.external_id == est.external_id,
+            and_(
+                est.plataforma == flex_envio.PLATAFORMA_SHOPEE,
+                func.split_part(Listing.external_id, "_", 1) == est.external_id,
+            ),
+        ),
+    )
+
+
 def _titulo_subq():
-    """Título do anúncio (o primeiro vínculo que tiver) — a tela mostra."""
-    return (
+    """Título do anúncio — o do primeiro vínculo que tiver; sem vínculo (o
+    anúncio só importado, que o motor desliga), o da importação. Antes o só
+    importado vinha sem título e a busca pelo nome não o achava."""
+    do_vinculo = (
         select(func.min(ProductLink.listing_title))
         .where(
             ProductLink.integration_id == FlexAnuncioEstado.integration_id,
@@ -147,6 +210,13 @@ def _titulo_subq():
         .correlate(FlexAnuncioEstado)
         .scalar_subquery()
     )
+    da_importacao = (
+        select(func.min(Listing.title))
+        .where(_importado_do_estado())
+        .correlate(FlexAnuncioEstado)
+        .scalar_subquery()
+    )
+    return func.coalesce(do_vinculo, da_importacao)
 
 
 def _anuncio_out(
@@ -253,6 +323,10 @@ async def anuncios(
                     ProductLink.external_id == FlexAnuncioEstado.external_id,
                     ProductLink.listing_title.icontains(termo, autoescape=True),
                 ),
+                exists().where(
+                    _importado_do_estado(),
+                    Listing.title.icontains(termo, autoescape=True),
+                ),
             )
         )
     total = int(
@@ -349,28 +423,152 @@ async def aprovar(
             _ERRO_HTTP.get(exc.codigo, status.HTTP_409_CONFLICT),
             detail={"code": exc.codigo, "detalhe": exc.detalhe},
         ) from exc
+    na_fila = False
+    if res.get("ocupado"):
+        # A rodada do motor estava no meio (segura a trava de 4 a 8 min a cada
+        # 15): em vez de "tenta na próxima rodada" — que esperava a fila
+        # inteira de desligar —, um job tenta de novo daqui a pouco, só para
+        # este anúncio. Um pedido por anúncio (o id do job).
+        ext = external_id.strip()
+        try:
+            pool = await worker_pool.get_arq_pool()
+            job = await pool.enqueue_job(
+                "flex_aprovado_run",
+                str(integration_id),
+                ext,
+                str(user.id),
+                _job_id=f"flex_aprovado:{integration_id}:{ext}",
+                _defer_by=30,
+            )
+            na_fila = True
+            if job is None:
+                logger.info("flex_aprovado_ja_na_fila", external_id=ext)
+        except Exception as exc:  # noqa: BLE001 — sem fila: a varredura liga
+            logger.warning("flex_aprovado_fila_falhou", erro=str(exc)[:200])
     session.expire_all()
     return FlexAprovarOut(
         aprovado=bool(res.get("aprovado")),
         modo=str(res.get("modo")),
         aplicado=bool(res.get("aplicado")),
         motor=res.get("motor"),
+        na_fila=na_fila,
         estado=await _estado_out(session, integration_id, external_id.strip()),
     )
 
 
-@router.post("/emergencia")
-async def emergencia(session: Sessao, user: Agir) -> dict:
+def _emergencia_out(linha: FlexEmergencia, *, ja_em_andamento: bool = False) -> FlexEmergenciaOut:
+    resumo = dict(linha.resumo or {})
+    return FlexEmergenciaOut(
+        id=linha.id,
+        status=linha.status,
+        modo=linha.modo,
+        escreve=bool(resumo.get("escreve")),
+        pedido_em=linha.pedido_em,
+        iniciado_em=linha.iniciado_em,
+        terminado_em=linha.terminado_em,
+        erro=linha.erro,
+        ja_em_andamento=ja_em_andamento,
+        resumo=resumo,
+    )
+
+
+def _emergencias_visiveis(user: User, escopo: frozenset[UUID] | None):
+    """Admin e quem não tem equipe vê todas; usuário com equipe, as que pediu."""
+    return None if escopo is None else FlexEmergencia.por == user.id
+
+
+# Uma emergência "na fila"/"rodando" há mais que isto é de um job que morreu:
+# o botão volta a criar outra.
+_EMERGENCIA_VALE = timedelta(hours=1)
+
+
+@router.post("/emergencia", response_model=FlexEmergenciaOut)
+async def emergencia(session: Sessao, user: Agir) -> FlexEmergenciaOut:
     """Desliga o Flex de tudo nas contas permitidas e tira toda aprovação.
-    Em observar (ou desligado) só simula — sem efeito nenhum; a resposta diz
-    o que faria. Usuário com equipe: só as contas da equipe."""
+
+    O pedido HTTP só tira as aprovações (na hora — nada volta a ligar) e põe
+    na fila o job do worker (`flex_emergencia_run`) que desliga. Antes as
+    escritas rodavam aqui dentro, em série, até 300 por clique: minutos com o
+    botão girando e 7 cliques numa conta grande. A tela consulta o andamento
+    em GET /emergencia/{id}. Em observar (ou desligado) só simula — sem
+    efeito nenhum. Usuário com equipe: só as contas da equipe. Já há uma
+    emergência na fila ou rodando: devolve ela (não cria outra)."""
     escopo = await _escopo(session, user)
     logger.warning(
         "flex_emergencia_pedida",
         user_id=str(user.id),
         contas_escopo=None if escopo is None else len(escopo),
     )
-    return await flex_motor.emergencia(por=user.id, contas_escopo=escopo)
+    filtros = [
+        FlexEmergencia.status.in_(("na_fila", "rodando")),
+        FlexEmergencia.pedido_em >= datetime.now(UTC) - _EMERGENCIA_VALE,
+    ]
+    if (f := _emergencias_visiveis(user, escopo)) is not None:
+        filtros.append(f)
+    andamento = (
+        await session.execute(
+            select(FlexEmergencia)
+            .where(*filtros)
+            .order_by(FlexEmergencia.pedido_em.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if andamento is not None:
+        return _emergencia_out(andamento, ja_em_andamento=True)
+
+    prep = await flex_motor.preparar_emergencia(por=user.id, contas_escopo=escopo)
+    if prep.get("id") is None:
+        resumo = {k: v for k, v in prep.items() if k != "id"}
+        return FlexEmergenciaOut(
+            modo=str(prep.get("modo")), escreve=bool(prep.get("escreve")), resumo=resumo
+        )
+    emergencia_id = int(prep["id"])
+    try:
+        pool = await worker_pool.get_arq_pool()
+        await pool.enqueue_job(
+            "flex_emergencia_run", emergencia_id, _job_id=f"flex_emergencia:{emergencia_id}"
+        )
+    except Exception as exc:  # noqa: BLE001 — sem fila: avisa (as aprovações já saíram)
+        logger.error("flex_emergencia_fila_falhou", id=emergencia_id, erro=str(exc)[:200])
+        linha = await session.get(FlexEmergencia, emergencia_id)
+        if linha is not None:
+            linha.status = "falhou"
+            linha.erro = f"não deu para pôr o job na fila: {str(exc)[:300]}"
+            linha.terminado_em = datetime.now(UTC)
+            await session.commit()
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "code": "fila_indisponivel",
+                "detalhe": "as aprovações já saíram, mas o desligamento não começou",
+            },
+        ) from exc
+    linha = await session.get(FlexEmergencia, emergencia_id)
+    return _emergencia_out(linha)
+
+
+@router.get("/emergencia/ultima", response_model=FlexEmergenciaOut | None)
+async def emergencia_ultima(session: Sessao, user: Ver) -> FlexEmergenciaOut | None:
+    """A última emergência que o usuário pode ver — a tela retoma o
+    andamento depois de recarregar a página."""
+    q = select(FlexEmergencia).order_by(FlexEmergencia.pedido_em.desc()).limit(1)
+    if (f := _emergencias_visiveis(user, await _escopo(session, user))) is not None:
+        q = q.where(f)
+    linha = (await session.execute(q)).scalar_one_or_none()
+    return None if linha is None else _emergencia_out(linha)
+
+
+@router.get("/emergencia/{emergencia_id}", response_model=FlexEmergenciaOut)
+async def emergencia_andamento(
+    emergencia_id: int, session: Sessao, user: Ver
+) -> FlexEmergenciaOut:
+    q = select(FlexEmergencia).where(FlexEmergencia.id == emergencia_id)
+    if (f := _emergencias_visiveis(user, await _escopo(session, user))) is not None:
+        q = q.where(f)
+    linha = (await session.execute(q)).scalar_one_or_none()
+    if linha is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail={"code": "emergencia_nao_encontrada"})
+    return _emergencia_out(linha)
 
 
 @router.get("/log", response_model=list[FlexLogOut])

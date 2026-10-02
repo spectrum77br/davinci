@@ -27,6 +27,8 @@ from app.models import (
     FlexPedido,
     Integration,
     IntegrationPlatform,
+    Listing,
+    ListingStatus,
     Logistica,
     Product,
     ProductLink,
@@ -166,6 +168,49 @@ async def test_anuncios_busca(client: AsyncClient, cena, auth_as: Callable):
     assert await ids("100%") == ["MLB1"]
     assert await ids("%") == ["MLB1"]
     assert await ids("_") == []
+
+
+@pytest.mark.asyncio
+async def test_anuncio_so_importado_mostra_o_titulo_e_e_achado_pela_busca(
+    client: AsyncClient, cena, db: AsyncSession, auth_as: Callable
+):
+    """Achado da revisão: o anúncio só importado (sem vínculo — o motor o
+    desliga) vinha sem título e a busca pelo nome não o achava. Na Shopee a
+    importação grava `item_model`: o título vale para o anúncio (a 1ª parte)."""
+    conta = cena["conta_id"]
+    admin = cena["admin"]
+    loja = Integration(user_id=admin.id, platform=IntegrationPlatform.SHOPEE, name="loja",
+                       credentials=encrypt_json({"access_token": "t"}))
+    db.add(loja)
+    await db.flush()
+    loja_id = loja.id
+    base = {"tentativas": 0, "aguardando_aprovacao": False, "desejado": "inelegivel",
+            "motivo": "anúncio sem vínculo vivo com produto do DaVinci"}
+    db.add_all([
+        Listing(user_id=admin.id, integration_id=conta, platform=IntegrationPlatform.ML,
+                external_id="MLB4", title="Mochila Executiva Importada",
+                status=ListingStatus.PAUSED),
+        Listing(user_id=admin.id, integration_id=loja_id, platform=IntegrationPlatform.SHOPEE,
+                external_id="777_55", title="Bolsa da Shopee"),
+        FlexAnuncioEstado(integration_id=conta, external_id="MLB4", plataforma="ml",
+                          status_anuncio="paused", **base),
+        FlexAnuncioEstado(integration_id=loja_id, external_id="777", plataforma="shopee",
+                          **base),
+    ])
+    await db.commit()
+    auth_as(admin)
+    itens = {i["external_id"]: i for i in (await client.get("/api/flex/anuncios")).json()["itens"]}
+    assert itens["MLB4"]["titulo"] == "Mochila Executiva Importada"
+    assert itens["MLB4"]["status_anuncio"] == "paused"
+    assert itens["777"]["titulo"] == "Bolsa da Shopee"
+    assert itens["MLB1"]["titulo"] == "Mala de bordo 10kg 100%"  # o do vínculo continua
+
+    async def ids(busca: str) -> list[str]:
+        r = await client.get("/api/flex/anuncios", params={"busca": busca})
+        return sorted(i["external_id"] for i in r.json()["itens"])
+
+    assert await ids("mochila") == ["MLB4"]
+    assert await ids("bolsa da") == ["777"]
 
 
 # ---- Controle de Estoque › Pedidos: o selo "Flex" ---------------------------------

@@ -9,12 +9,32 @@ from pydantic import BaseModel, ConfigDict, Field
 
 class FlexContaOut(BaseModel):
     """Uma conta de `flex_contas`. `existe=False`: o id não é de uma conta
-    ML/Shopee ativa (digitado errado, arquivada, outra plataforma)."""
+    ML/Shopee ativa (digitado errado, arquivada, outra plataforma).
+
+    O Flex DA CONTA (`flex_conta`, conferido pelo motor de hora em hora — a
+    tela não chama a plataforma): `flex_ativo` True = pode ter Flex (ML:
+    assinatura "in"; Shopee: Entrega Direta ligada na loja), False = não
+    pode, None = ainda não conferida. `flex_status` é o valor cru ("in",
+    "out", "pending", "http_404", "sem_canal"…) e `flex_motivo` a frase que
+    os anúncios dela mostram quando a conta não pode."""
 
     id: UUID
     nome: str | None = None
     plataforma: str | None = None
     existe: bool = True
+    flex_ativo: bool | None = None
+    flex_status: str | None = None
+    flex_detalhe: str | None = None
+    flex_motivo: str | None = None
+    flex_lido_em: datetime | None = None
+    flex_erro: str | None = None
+    # Descoberta dos anúncios da conta (ML): quando, se leu tudo, quantos
+    # ids e quantos o DaVinci não conhecia.
+    descoberta_em: datetime | None = None
+    descoberta_ok: bool | None = None
+    descoberta_total: int | None = None
+    descoberta_novos: int | None = None
+    descoberta_erro: str | None = None
 
 
 class FlexConfigOut(BaseModel):
@@ -60,6 +80,14 @@ class FlexAnuncioOut(BaseModel):
     recusa: str | None = None
     saldo_sp: int | None = None
     familias: str | None = None
+    # Fila de leitura: leitura que falhou espera (`proxima_leitura`).
+    leitura_em: datetime | None = None
+    leitura_falhas: int = 0
+    proxima_leitura: datetime | None = None
+    # Status do anúncio na plataforma (active, paused, under_review,
+    # inactive, closed) e quando foi visto.
+    status_anuncio: str | None = None
+    status_em: datetime | None = None
     atualizado_em: datetime
 
 
@@ -88,6 +116,29 @@ class FlexAprovarOut(BaseModel):
     aplicado: bool
     estado: FlexAnuncioOut | None = None
     motor: dict[str, Any] | None = None
+    # A rodada do motor estava em andamento: a ligação foi para a fila do
+    # worker (tenta de novo em seguida) — a aprovação continua valendo.
+    na_fila: bool = False
+
+
+class FlexEmergenciaOut(BaseModel):
+    """Um "Desligar tudo": o job e o andamento (a tela consulta até
+    `status` ser "concluida" ou "falhou"). `resumo`: alvos, desligados,
+    restantes… — e `motivo` quando não havia o que fazer (sem job, `id`
+    None)."""
+
+    id: int | None = None
+    status: str | None = None
+    modo: str
+    escreve: bool
+    pedido_em: datetime | None = None
+    iniciado_em: datetime | None = None
+    terminado_em: datetime | None = None
+    erro: str | None = None
+    # Já havia uma emergência na fila/rodando: a resposta é ela (não cria
+    # outra).
+    ja_em_andamento: bool = False
+    resumo: dict[str, Any] = Field(default_factory=dict)
 
 
 class FlexSincronizarOut(BaseModel):
