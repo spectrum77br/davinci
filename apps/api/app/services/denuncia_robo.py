@@ -60,7 +60,12 @@ PASSOS: dict[str, tuple[int, str, str, str]] = {
                "— só depois dos passos 2 e 3"),
     "compras": (5, "Compras de prova", "perfil 50", "atualiza os pedidos da conta compradora"),
     "juridico": (6, "Jurídico", "escritório", "monta a pasta do caso pro advogado (não envia)"),
-    # 02/10 (Vinicius): o 7 (Relatório) saiu da rotina — ninguém lia; o programa fica no mini
+    # 02/10 (Vinicius): o 7 (Relatório) saiu da rotina — ninguém lia; o programa fica no mini —
+    # e o número ficou com o Diversos: denunciar na loja uma vez só e tirar os prints, de noite,
+    # antes do 9
+    "diversos": (7, "Denúncias Diversos", "perfil 50 + celular",
+                 "denúncia nova do Diversos no ML, Shopee e TikTok (uma vez só, sem denunciar de "
+                 "novo) e os prints que sobraram; para quando o próximo passo chega"),
     "capa_perguntas": (8, "Perguntas nos anúncios disfarçados", "perfil 50",
                        "pergunta ao vendedor de capa/tablet se vende o aparelho"),
     # 01/10 (Vinicius): o "saiu do ar?" levava 3–4 h e virou o último passo, feito com o

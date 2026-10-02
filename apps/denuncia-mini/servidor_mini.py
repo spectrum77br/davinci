@@ -227,7 +227,7 @@ def provas_pedidas():
 ORDEM_PASSO = {"checagem": 0, "ciclo_emails": 1, "procura": 2, "denuncias": 3,
                "varredura_mercadolivre": 2, "varredura_shopee": 2, "varredura_tiktok": 2,
                "varredura_amazon": 2, "conferencia": 3, "anatel": 4,
-               "compras": 5, "juridico": 6, "relatorio": 7, "capa_perguntas": 8,
+               "compras": 5, "juridico": 6, "relatorio": 7, "diversos": 7, "capa_perguntas": 8,
                "ativos_inativos": 20}   # 01/10: o "saiu do ar?" virou passo próprio (agente v23)
 
 
