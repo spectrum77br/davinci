@@ -187,9 +187,24 @@ if (!perfil || !cmd) {
   process.exit(1);
 }
 
-const browser = await puppeteer.connect({ browserWSEndpoint: await ws(), defaultViewport: null });
+// 02/10 (296985): perfil de FlowerBrowser (Firefox, ex. 110 "JLAS 2 - ml") não fala
+// CDP — o AdsPower devolve `ws://…/session` e o connect padrão morre em
+// "Browser.getVersion"; ele fala WebDriver BiDi. SunBrowser (Chrome) segue no CDP.
+async function conectar(url) {
+  const bidi = { browserWSEndpoint: url, defaultViewport: null, protocol: "webDriverBiDi" };
+  if (/\/session\/?$/.test(url)) return puppeteer.connect(bidi);
+  try {
+    return await puppeteer.connect({ browserWSEndpoint: url, defaultViewport: null });
+  } catch (e) {
+    return puppeteer.connect(bidi);
+  }
+}
+
+const browser = await conectar(await ws());
 try {
-  const paginas = (await browser.pages()).filter((p) => !p.url().startsWith("chrome-extension"));
+  const paginas = (await browser.pages()).filter(
+    (p) => !/^(chrome|moz)-extension:/.test(p.url()),
+  );
   let n = fs.existsSync(ABA) ? Number(fs.readFileSync(ABA, "utf8")) : -1;
   if (!(n >= 0 && n < paginas.length)) n = paginas.length - 1;
   const page = paginas[n];
@@ -352,4 +367,6 @@ try {
   }
 } finally {
   await browser.disconnect();
+  // no BiDi (Firefox) o socket segura o processo depois do disconnect
+  setTimeout(() => process.exit(), 1000).unref();
 }
