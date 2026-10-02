@@ -2691,7 +2691,13 @@ async def _item_do_cerebro(session: AsyncSession, ch: Chamado) -> AgentChamadoAn
         ).scalars()
         if a.mensagem_id is None or a.mensagem_id in visiveis
     ]
-    tem_foto = any((a.content_type or "").lower().startswith("image/") for a in todos)
+    # 02/10 (293090): o print que a IA guarda na análise dela não é foto do caso —
+    # contava como "já tem foto" e escondia as da devolução no Upload Evidence.
+    analises = {m.id for m in msgs if m.tipo == "analise"}
+    tem_foto = any(
+        (a.content_type or "").lower().startswith("image/") and a.mensagem_id not in analises
+        for a in todos
+    )
     fotos_dev = [] if tem_foto else await _fotos_da_devolucao(session, ch)
     pend = _instrucao_pendente(msgs)
     _m, bloq = _bloqueio_de(msgs)

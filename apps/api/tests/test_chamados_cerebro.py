@@ -562,6 +562,27 @@ async def test_caso_sem_foto_ve_as_da_devolucao(client, db, cenario):
     r = await client.get(f"/api/chamados/agent/anexos/{alheia.id}", headers=hermes)
     assert r.status_code == 404
 
+    # 02/10 (293090): o print que a IA guarda na análise dela não esconde as fotos
+    # da devolução — senão o Upload Evidence fica sem o que mandar.
+    r = await client.post(
+        "/api/chamados/agent/analise", headers=hermes,
+        json={"chamado_id": str(ch.id), "classe": "x", "resumo": "y", "acao": "esperar"},
+    )
+    assert r.status_code == 200, r.text
+    msgs = (await client.get(f"/api/chamados/{ch.id}/mensagens")).json()
+    analise = next(m["id"] for m in msgs if m["tipo"] == "analise")
+    r = await client.post(
+        "/api/chamados/agent/anexo", headers=hermes,
+        data={"chamado_id": str(ch.id), "mensagem_id": analise},
+        files={"file": ("chat14.png", b"\x89PNG\r\n\x1a\nprint", "image/png")},
+    )
+    assert r.status_code == 201, r.text
+    caso = (
+        await client.post("/api/chamados/agent/caso", headers=hermes,
+                          json={"pedido_bling": "294654"})
+    ).json()["chamados"][0]
+    assert [a["filename"] for a in caso["anexos"]] == ["chat14.png", "tela.jpg"]
+
     db.add(ChamadoAnexo(chamado_id=ch.id, filename="print.png", content_type="image/png",
                         size_bytes=3, blob=b"png"))
     await db.commit()
@@ -569,4 +590,4 @@ async def test_caso_sem_foto_ve_as_da_devolucao(client, db, cenario):
         await client.post("/api/chamados/agent/caso", headers=hermes,
                           json={"pedido_bling": "294654"})
     ).json()["chamados"][0]
-    assert [a["filename"] for a in caso["anexos"]] == ["print.png"]
+    assert [a["filename"] for a in caso["anexos"]] == ["chat14.png", "print.png"]
