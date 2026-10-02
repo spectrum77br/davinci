@@ -108,6 +108,7 @@ from app.models.financeiro import (
     FinanceiroSuprimentos,
     NCMCache,
 )
+from app.models.flex import FlexAnuncioEstado, FlexLog, FlexPedido
 from app.models.imagem_publica import ImagemPublica
 from app.models.importacao import (
     CotacaoFabricante,
@@ -341,6 +342,9 @@ __all__ = [
     "ListingRequest",
     "ListingRequestStatus",
     "ListingStatus",
+    "FlexAnuncioEstado",
+    "FlexLog",
+    "FlexPedido",
     "Logistica",
     "LogisticaMensagemCliente",
     "LogisticaMensagemTemplate",

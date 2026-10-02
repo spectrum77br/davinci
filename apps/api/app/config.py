@@ -648,6 +648,47 @@ class Settings(BaseSettings):
     # PRIORIDADE_PEDIDO_ESTOQUE_UNICO=false no .env.
     prioridade_pedido_estoque_unico: bool = True
 
+    # Flex por anúncio (procedimento-flex.md + Flex_analise_02-10-2026.md):
+    # o Flex (ML Envios Flex / Shopee Entrega Direta) só fica ligado no
+    # anúncio que tem peça em São Bernardo (.sp). Tudo desligado por padrão —
+    # quem liga é o dono, conta por conta, depois de ver o modo "observar".
+    #   modo        desligado (não faz nada) | observar (calcula, lê o estado
+    #               real e grava estado+log, mas NUNCA escreve na plataforma) |
+    #               piloto / ativo (escreve só nas contas de flex_contas).
+    #               Valor desconhecido vale como "desligado"
+    #               (services/flex_config) — um erro de digitação no .env não
+    #               pode derrubar a api.
+    #               Desligar é automático; LIGAR fica aguardando aprovação na
+    #               tela (o ML pede para não automatizar a ativação).
+    #   contas      integration_id das contas permitidas, separados por
+    #               vírgula. Vazio = NENHUMA (negação por padrão).
+    #   n_liga/n_desliga  histerese por família: liga com saldo Flex (.sp livre
+    #               menos pedidos Flex ainda fora do .sp) >= n_liga e só
+    #               desliga abaixo de n_desliga — sem isso o Flex pisca a cada
+    #               venda (o ML desaconselha trocas em sequência).
+    #   kits        kit (SKU com '+') entra na regra? Fase 1: não.
+    #   max_anuncios_por_familia  quantos anúncios com Flex ligado por
+    #               família: o mesmo .sp aparece em N anúncios (clássico,
+    #               premium, várias contas) e cada um pode vender tudo.
+    #   teto_escritas_por_rodada  máximo de chamadas de escrita por rodada.
+    #   shopee_canais  logistics_channel_id da Shopee Entrega Direta (vírgula).
+    #               90022 pelo guia 290 da Open Platform; a confirmar num
+    #               pedido real — por isso fica em configuração.
+    #   shopee_escrita  a escrita por anúncio (`logistic_info` no update_item)
+    #               saiu da lista de parâmetros da doc atual da Shopee: até um
+    #               teste num item provar que funciona, a Shopee só é lida.
+    #   intervalo_min  de quantos em quantos minutos a varredura roda.
+    flex_modo: str = "desligado"
+    flex_contas: str = ""
+    flex_n_liga: int = 3
+    flex_n_desliga: int = 1
+    flex_kits: bool = False
+    flex_max_anuncios_por_familia: int = 2
+    flex_teto_escritas_por_rodada: int = 50
+    flex_shopee_canais: str = "90022"
+    flex_shopee_escrita: bool = False
+    flex_intervalo_min: int = 15
+
     # Threema IDs (vírgula) avisados quando o sweep move um pedido pra
     # Aguardando Cancelamento por estoque negativo. Vazio = aviso desligado
     # (o sweep segue funcionando normal). Set via

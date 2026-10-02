@@ -68,6 +68,11 @@ TETO_POR_PEDIDO = 200
 # (`atendimento_automacao_regras`: o modo da loja, o texto, o horário) fica
 # COM o gatilho: quem ligou o envio de qual automação em qual loja é
 # exatamente o que o Histórico serve para mostrar.
+# Flex (02/10/2026, migration 0364): `flex_pedido` (o shipment check regrava a
+# cada minuto), `flex_anuncio_estado` (a varredura recalcula toda rodada) e
+# `flex_log` (já É a trilha: antes/depois, modo e resultado) são da máquina.
+# A aprovação de uma pessoa fica na própria linha (`aprovado_por`) e no log. A
+# tabela de override manual, quando existir, fica COM o gatilho.
 EXCLUIDAS = re.compile(
     r"^(historico_(evento|alteracao)$|sync_logs|background_job|alembic_version$|auth_codes$"
     r"|oauth_states$|pricing_push_idempotency$|pricing_push_confirmacao$"
@@ -75,6 +80,8 @@ EXCLUIDAS = re.compile(
     # trilhas que o próprio sistema já grava junto com a mudança da pessoa
     r"|products_audit$|product_links_audit$|audit_em_andamento_data$|margem_audit$"
     r"|bling_envio_evento$|bling_envio_correcao$|prioridade_estoque_movimentos$|nfse_chamada$"
+    # Flex: estado e trilha escritos pela máquina
+    r"|flex_(pedido|anuncio_estado|log)$"
     # texto de comprador (atendimento) e os índices que a máquina escreve
     r"|atendimento_(mensagens|rascunhos|avaliacoes|conversas|avaliacoes_loja"
     r"|pedidos_comprador|etiquetas_historico|reclamacoes|carrinhos|publicacoes|comentarios"

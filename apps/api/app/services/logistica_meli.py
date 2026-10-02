@@ -44,7 +44,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Integration, IntegrationPlatform, Logistica
 from app.security.cipher import decrypt_json, encrypt_json
-from app.services import logistica_datas, logistica_enrich, logistica_rules, logistica_track
+from app.services import (
+    flex_envio,
+    logistica_datas,
+    logistica_enrich,
+    logistica_rules,
+    logistica_track,
+)
 from app.services.devolucao_returns import ReturnInfo, iso_to_dt
 from app.services.marketplaces.ml import MercadoLivreClient
 
@@ -282,7 +288,9 @@ async def build_enrichment(client: MercadoLivreClient, order_id: str) -> dict[st
     """Puxa do ML tudo que a Logística consome de um pedido: a assinatura de 8
     campos (`meli_status`) + o número de rastreio (`rastreio`, vem do shipment).
 
-    Retorna `{"meli_status": {...}, "rastreio": str|None, "datas": {...}}`.
+    Retorna `{"meli_status": {...}, "rastreio": str|None, "datas": {...}}`,
+    mais `envio_tipo`/`envio_flex` quando o envio disse o tipo de logística
+    (`self_service` = Flex; ver services/flex_envio).
     Best-effort: falha em shipment/claim/returns deixa aqueles campos de fora,
     mas mantém os que já resolveram. Levanta só se nem order nem pack existirem.
 
@@ -297,6 +305,9 @@ async def build_enrichment(client: MercadoLivreClient, order_id: str) -> dict[st
     previsao: str | None = None
     loc_devolucao: str | None = None
     dev_tipo: str | None = None
+    # Tipo de envio (Flex = self_service), lido do MESMO envio — sem chamada a
+    # mais. Vazio quando o envio não respondeu: "não sei" não vira "não é Flex".
+    envio: dict[str, Any] = {}
     order = await _fetch_order(client, str(order_id))
 
     cancel_detail = order.get("cancel_detail") or {}
@@ -364,6 +375,7 @@ async def build_enrichment(client: MercadoLivreClient, order_id: str) -> dict[st
         tn = (sh.get("tracking_number") or "").strip()
         if tn:
             rastreio = tn
+        envio = flex_envio.campos_envio(flex_envio.PLATAFORMA_ML, sh)
         destino = _ship_destino(sh)
         previsao = await _ship_previsao(client, sh, str(ship_id))
     else:
@@ -449,6 +461,8 @@ async def build_enrichment(client: MercadoLivreClient, order_id: str) -> dict[st
         # True = a localização descreve a devolução (não o envio de ida).
         "localizacao_devolucao": bool(loc_devolucao),
         "datas": datas,
+        # `envio_tipo`/`envio_flex` só quando o envio disse (aba Flex).
+        **envio,
     }
 
 
@@ -536,6 +550,7 @@ async def enrich_row(
     row.status_datas = logistica_datas.aplicar(row, enr["meli_status"], enr.get("datas"))
     row.meli_status = enr["meli_status"]
     row.status_lido_em = datetime.now(UTC)
+    flex_envio.aplicar_na_linha(row, enr)
     if enr.get("rastreio"):
         row.rastreio = enr["rastreio"]
     # Localização: pra Correios (...BR) o físico do 17track manda — não deixa o

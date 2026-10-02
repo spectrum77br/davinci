@@ -305,13 +305,22 @@ class ShopeeClient:
 
         Endpoint: GET /api/v2/order/get_order_detail with `order_sn_list`
         (comma-separated). Returns `{order_sn: {"status": str_upper,
-        "update_time": int | None}}` for every order Shopee returned;
+        "update_time": int | None, "ship_by_date": int | None,
+        "logistics_channel_id": int | None, "package_list": [...],
+        "shipping_carrier": str | None}}` for every order Shopee returned;
         orders Shopee didn't return are simply absent from the map.
 
         `update_time` is the unix-epoch (UTC) at which the order last
         changed state on Shopee's side — used by the shipment sweep to
         stamp em_andamento_data with the actual ship date instead of
         "today" (matters when the sweep runs days late after a weekend).
+
+        Canal e transportadora (Flex, 02/10/2026): a "Shopee Entrega Direta"
+        se reconhece pelo `package_list[].logistics_channel_id` (90022) ou pelo
+        `shipping_carrier` — vêm na MESMA chamada, pedindo os dois campos
+        opcionais. `logistics_channel_id` é o do primeiro pacote que tiver;
+        `package_list` guarda só o canal de cada pacote (ver
+        services/flex_envio).
         """
         if not order_sns:
             return {}
@@ -324,7 +333,10 @@ class ShopeeClient:
                 "order_sn_list": ",".join(chunk),
                 # ship_by_date = "despachar até" (epoch UTC) — vira o horário
                 # de corte do pedido na aba Pedidos do Controle de Estoque.
-                "response_optional_fields": "order_status,update_time,ship_by_date",
+                # package_list + shipping_carrier = o canal de envio (Flex).
+                "response_optional_fields": (
+                    "order_status,update_time,ship_by_date,package_list,shipping_carrier"
+                ),
             }
             try:
                 r = await self._request("GET", path, params=params)
@@ -351,10 +363,26 @@ class ShopeeClient:
                 sn = o.get("order_sn")
                 status = o.get("order_status")
                 if sn and status:
+                    pacotes = [
+                        {"logistics_channel_id": p.get("logistics_channel_id")}
+                        for p in (o.get("package_list") or [])
+                        if isinstance(p, dict)
+                    ]
+                    canal = next(
+                        (
+                            p["logistics_channel_id"]
+                            for p in pacotes
+                            if p["logistics_channel_id"] not in (None, "", 0)
+                        ),
+                        None,
+                    )
                     out[str(sn)] = {
                         "status": str(status).upper(),
                         "update_time": o.get("update_time"),
                         "ship_by_date": o.get("ship_by_date"),
+                        "logistics_channel_id": canal,
+                        "package_list": pacotes,
+                        "shipping_carrier": o.get("shipping_carrier") or None,
                     }
         return out
 

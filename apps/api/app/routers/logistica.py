@@ -16,7 +16,7 @@ Gated pelo recurso `logistica`.
 
 import hashlib
 from datetime import UTC, datetime
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID
 
 import httpx
@@ -298,6 +298,8 @@ def _to_out(
         amazon_canal=canal,
         amazon_canal_label=logistica_amazon_canal.CANAL_LABELS_PT.get(canal or "", ""),
         servico_envio=c.servico_envio,
+        envio_tipo=c.envio_tipo,
+        envio_flex=c.envio_flex,
         postagem_data=c.postagem_data,
         previsao_correios=c.previsao_correios,
         prazo_entrega_amazon=c.prazo_entrega_amazon,
@@ -800,11 +802,23 @@ def _team_scope_clause(scope: TeamScope):
     return or_(*ors)
 
 
+# Aba Flex (02/10/2026): rótulos de `logistica.plataforma` que têm Flex — o
+# Flex existe no Mercado Livre (Envios Flex) e na Shopee (Entrega Direta).
+_PLATAFORMAS_FLEX = tuple(
+    sorted(logistica_rules._ML_PLATAFORMAS | logistica_rules._SHOPEE_PLATAFORMAS)
+)
+
+
 @router.get("", response_model=list[LogisticaOut])
 async def list_logistica(
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[User, Depends(require_permission("logistica", "view"))],
     plataforma: Annotated[str | None, Query()] = None,
+    # `envio=flex`: a aba Flex. É uma visão A MAIS — o pedido continua nas
+    # abas ML/Shopee (com o selo); aqui junta os dois marketplaces. Valor
+    # desconhecido é 422, não "sem filtro" (a tela nunca pode achar que está
+    # vendo só Flex quando está vendo tudo).
+    envio: Annotated[Literal["flex"] | None, Query()] = None,
 ) -> list[LogisticaOut]:
     # Mais recentes primeiro (data desc, depois criação desc).
     stmt = select(Logistica).order_by(
@@ -813,6 +827,11 @@ async def list_logistica(
     if plataforma:
         label = _PLATAFORMA_LABELS.get(plataforma.strip().lower(), plataforma)
         stmt = stmt.where(Logistica.plataforma == label)
+    if envio == "flex":
+        stmt = stmt.where(
+            Logistica.envio_flex.is_(True),
+            func.lower(func.trim(Logistica.plataforma)).in_(_PLATAFORMAS_FLEX),
+        )
     # Escopo por equipe: não-admin com equipe(s) só vê as linhas das lojas da
     # sua equipe (admin / sem-equipe = irrestrito).
     team_clause = _team_scope_clause(await resolve_team_scope(session, user))

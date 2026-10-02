@@ -46,6 +46,14 @@ class Logistica(Base, TimestampMixin):
             "problema_correios_em",
             postgresql_where=text("problema_correios_em IS NOT NULL"),
         ),
+        # Aba Flex (GET /api/logistica?envio=flex): parcial pelo mesmo motivo —
+        # quase nenhuma linha é Flex (02/10: 1 self_service em 388 pedidos ML).
+        # Migração 0361.
+        Index(
+            "ix_logistica_envio_flex",
+            "envio_flex",
+            postgresql_where=text("envio_flex IS TRUE"),
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
@@ -130,6 +138,16 @@ class Logistica(Base, TimestampMixin):
     # data de saída e previsão de entrega (dataSaida + prazoEntregaPrevisto em
     # dias úteis — é a "Data de entrega" que o Bling mostra na cotação).
     servico_envio: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # ---- Flex (migration 0361, ver services/flex_envio) ----
+    # Tipo de envio CRU que a plataforma informou: ML `logistic.type` (formato
+    # novo) ou `logistic_type` (antigo) — self_service, cross_docking,
+    # drop_off…; Shopee "90022 · Shopee Entrega Direta" (canal · transportadora).
+    # `envio_flex`: True/False quando a plataforma disse; NULL = ainda não lido.
+    # Fica FORA de `plataforma` (a aba Flex é uma visão a mais: o pedido segue
+    # nas abas ML/Shopee, com o selo) e fora do `meli_status` (salvar o
+    # formulário apaga chave desconhecida de lá).
+    envio_tipo: Mapped[str | None] = mapped_column(Text, nullable=True)
+    envio_flex: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     postagem_data: Mapped[date | None] = mapped_column(Date, nullable=True)
     previsao_correios: Mapped[date | None] = mapped_column(Date, nullable=True)
     # LatestDeliveryDate da SP-API = "Prazo para entrega" do Seller Central
