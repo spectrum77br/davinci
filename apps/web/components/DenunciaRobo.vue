@@ -343,7 +343,8 @@ function alternarLinha(acao: string) {
         <table class="table-fixed" style="width: 1310px">
           <colgroup>
             <col class="w-[44px]">
-            <col class="w-[540px]">
+            <col class="w-[400px]">
+            <col class="w-[140px]">
             <col class="w-[72px]">
             <col class="w-[150px]">
             <col class="w-[92px]">
@@ -354,6 +355,7 @@ function alternarLinha(acao: string) {
             <tr>
               <th>#</th>
               <th>Passo</th>
+              <th class="whitespace-nowrap">Onde roda</th>
               <th>Ligado</th>
               <th class="text-center">Horários</th>
               <th class="whitespace-nowrap">Última vez</th>
@@ -375,6 +377,8 @@ function alternarLinha(acao: string) {
                   <div class="text-sm font-medium" :class="p.agenda.ligado ? '' : 'text-muted-foreground'">{{ p.nome }}</div>
                   <div class="truncate text-[11px] text-muted-foreground" :title="p.faz">{{ p.faz }}</div>
                 </td>
+                <!-- 03/10 (Vinicius): a coluna "Onde roda" voltou (perfil 50 + 148 + celular…) -->
+                <td class="text-xs text-muted-foreground">{{ p.onde }}</td>
                 <!-- chave liga/desliga: o mesmo desenho dos Robôs da Ouvidoria (verde = ligado) -->
                 <td @click.stop>
                   <div class="flex flex-col items-start gap-0.5">
@@ -473,7 +477,7 @@ function alternarLinha(acao: string) {
               </tr>
               <tr v-if="aberto === p.acao">
                 <td />
-                <td colspan="6" class="bg-muted/30">
+                <td colspan="7" class="bg-muted/30">
                   <div class="space-y-1 py-1 text-xs">
                     <div class="text-muted-foreground">{{ p.faz }} · roda em: {{ p.onde }}</div>
                     <template v-if="p.ultima">

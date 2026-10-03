@@ -41,12 +41,12 @@ SEM_NOTICIA = timedelta(minutes=5)
 # 02/10 (Vinicius, agente v27 no mini): os passos 2 a 6 viraram dois — 2 procura nos
 # quatro sites e 3 denúncias (prints, resultados da Shopee, recusadas de novo e novas).
 PASSOS: dict[str, tuple[int, str, str, str]] = {
-    "checagem": (0, "Checagem antes da rodada", "perfil 50 + Safari",
+    "checagem": (0, "Checagem antes da rodada", "perfil 50 + 148 + Safari",
                  "confere logins, AdsPower, captcha, Safari e Tuta — não muda nada"),
     # 01/10: o robô lê o Tuta sozinho (o leitor do Claude do mini parou em 17/09).
     "ciclo_emails": (1, "E-mails das plataformas", "escritório + Tuta",
                      "lê no Tuta as respostas das plataformas e aplica nas denúncias"),
-    "procura": (2, "Procurar anúncios novos", "perfil 50",
+    "procura": (2, "Procurar anúncios novos", "perfil 50 + 148",
                 "Mercado Livre → Shopee → TikTok → Amazon, salva no sistema e confere no "
                 "UpSeller quais lojas são nossas"),
     # 01/10 (Vinicius): nas lojas o robô denuncia só o "Nosso", pela conta da MAKISA
@@ -73,7 +73,8 @@ PASSOS: dict[str, tuple[int, str, str, str]] = {
                        "pergunta ao vendedor de capa/tablet se vende o aparelho"),
     # 01/10 (Vinicius): o "saiu do ar?" levava 3–4 h e virou o último passo, feito com o
     # robô parado (para quando a rodada chega e continua depois).
-    "ativos_inativos": (9, "Conferência de anúncios ativos/inativos", "perfil 50",
+    "ativos_inativos": (9, "Conferência de anúncios ativos/inativos",
+                        "perfil 50 + 148",
                         "abre um por um os anúncios que acompanhamos e vê quem saiu do ar; "
                         "roda com o robô parado, para se a rodada chegar e continua depois"),
 }
