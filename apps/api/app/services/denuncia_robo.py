@@ -51,8 +51,10 @@ PASSOS: dict[str, tuple[int, str, str, str]] = {
                 "UpSeller quais lojas são nossas"),
     # 01/10 (Vinicius): nas lojas o robô denuncia só o "Nosso", pela conta da MAKISA
     # (config.json → denunciar_nas_lojas no mini); o "Diversos" só é salvo. 02/10: até 40
-    # prints por rodada — 1º recusadas do Nosso, 2º os da Anatel, 3º o resto.
-    "denuncias": (3, "Denúncias Lojas", "perfil 50 + celular",
+    # prints por rodada — 1º recusadas do Nosso, 2º os da Anatel, 3º o resto. 03/10: vira
+    # "Denúncias Nossos"; a denúncia do Nosso nas lojas está parada por enquanto (grupos = []
+    # no mini) — ligado, o passo só tira prints e lê os resultados da Shopee.
+    "denuncias": (3, "Denúncias Nossos", "perfil 50 + celular",
                   "prints (até 40, Nosso primeiro) → resultados da Shopee → recusadas de novo "
                   "→ novas (ML, Shopee e TikTok; só o Nosso; Amazon ainda não)"),
     "anatel": (4, "Denúncias Anatel", "Safari (SEI)",
@@ -65,7 +67,8 @@ PASSOS: dict[str, tuple[int, str, str, str]] = {
     # antes do 9
     "diversos": (7, "Denúncias Diversos", "perfil 50 + celular",
                  "denúncia nova do Diversos no ML, Shopee e TikTok (uma vez só, sem denunciar de "
-                 "novo) e os prints que sobraram; para quando o próximo passo chega"),
+                 "novo) → resultados da Shopee → prints (até 200, Nosso → Anatel → Diversos); "
+                 "para quando o próximo passo chega"),
     "capa_perguntas": (8, "Perguntas nos anúncios disfarçados", "perfil 50",
                        "pergunta ao vendedor de capa/tablet se vende o aparelho"),
     # 01/10 (Vinicius): o "saiu do ar?" levava 3–4 h e virou o último passo, feito com o

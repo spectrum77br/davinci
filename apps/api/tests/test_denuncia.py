@@ -327,7 +327,7 @@ def test_painel_frentes_agenda_e_alarme():
 
     m = next(f for f in p["frentes"] if f["fila"] == "M")
     assert m["fazendo"] == "Procurar anúncios novos" and m["progresso"] == "Shopee pág 3 de 17"
-    assert m["proximos"] == ["Denúncias Lojas"]
+    assert m["proximos"] == ["Denúncias Nossos"]
 
     # aba Passos (02/10): 0 a 9, com a última vez de hoje; os antigos não têm botão
     passos = {x["acao"]: x for x in p["passos"]}
