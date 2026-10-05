@@ -32,13 +32,32 @@ const canInformarAmazon = computed(() => {
 
 // Abas por marketplace + a aba Status (playbook único, compartilhado). A chave
 // (Status Plataforma) é a mesma pra todas — só o ML enriquece a assinatura hoje.
+// "Flex" (02/10/2026) não é um marketplace: é uma VISÃO A MAIS que junta os
+// pedidos Flex do ML (Envios Flex) e da Shopee (Entrega Direta) — eles
+// continuam nas abas ML/Shopee com o selo "Flex" (backend: ?envio=flex).
 const PLATAFORMA_TABS = [
   { key: 'ml', label: 'Mercado Livre' },
   { key: 'shopee', label: 'Shopee' },
   { key: 'amazon', label: 'Amazon' },
   { key: 'tiktok', label: 'TikTok' },
+  { key: 'flex', label: 'Flex' },
 ] as const
 type PlataformaTab = (typeof PLATAFORMA_TABS)[number]['key']
+// Quem vê o Flex (`flex_usuarios` no .env, 05/10/2026: só heisenberg e
+// thorfinn por enquanto). /api/flex/acesso responde 200 só para eles; para os
+// outros a aba Flex não aparece e o selo/aviso "Flex" some dos pedidos (a API
+// da Logística também já manda a linha sem o tipo de envio).
+const podeVerFlex = ref(false)
+const ABAS_VISIVEIS = computed(() => PLATAFORMA_TABS.filter((t) => t.key !== 'flex' || podeVerFlex.value))
+async function verificarFlex(): Promise<boolean> {
+  try {
+    await api('/api/flex/acesso')
+    podeVerFlex.value = true
+  } catch {
+    podeVerFlex.value = false
+  }
+  return podeVerFlex.value
+}
 const tab = ref<PlataformaTab | 'status'>('ml')
 
 // Aba Amazon: a Amazon trata "Delivery by Amazon" (DBA) e "Envio próprio" como
@@ -52,6 +71,14 @@ const amazonSub = ref<AmazonSub>('dba')
 function amazonSubDe(c: { amazon_canal?: string | null }): AmazonSub {
   return c.amazon_canal === 'proprio' ? 'proprio' : 'dba'
 }
+
+// Aba Flex: duas sub-abas, no mesmo padrão da Amazon. "Pedidos Flex" é a
+// lista de sempre (mesmas colunas, filtros e ações); "Anúncios Flex" é a tela
+// do Flex por anúncio (components/LogisticaFlexAnuncios: modo, aprovação,
+// sincronizar, emergência e os pedidos Flex sem peça em SP).
+type FlexSub = 'pedidos' | 'anuncios'
+const flexSub = ref<FlexSub>('pedidos')
+const flexAnuncios = computed(() => tab.value === 'flex' && flexSub.value === 'anuncios')
 
 type MeliStatus = Record<string, string>
 
@@ -111,6 +138,11 @@ type Logistica = {
   amazon_canal?: 'dba' | 'proprio' | 'fba' | null
   amazon_canal_label?: string
   servico_envio?: string | null
+  // ---- Flex (02/10/2026) ----
+  // Tipo de envio cru da plataforma (ML `self_service`; Shopee "90022 · Shopee
+  // Entrega Direta") e se é Flex. null = ainda não lido. Selo "Flex".
+  envio_tipo?: string | null
+  envio_flex?: boolean | null
   postagem_data?: string | null
   // Previsão dos Correios (Bling) e data máxima da Amazon (LatestDeliveryDate).
   previsao_correios?: string | null
@@ -172,8 +204,12 @@ async function refresh() {
   try {
     // Cada aba de marketplace filtra server-side pela plataforma. A aba Status
     // usa outro carregador (refreshStatus); aqui caímos em ML só por garantia.
+    // A aba Flex pede só os pedidos Flex (ML + Shopee); o filtro Plataforma
+    // dela é na tela, sobre a lista já carregada.
     const plat = tab.value === 'status' ? 'ml' : tab.value
-    rows.value = await api<Logistica[]>(`/api/logistica?plataforma=${plat}`)
+    const url = plat === 'flex' ? '/api/logistica?envio=flex' : `/api/logistica?plataforma=${plat}`
+    carregarResumoFlex()
+    rows.value = await api<Logistica[]>(url)
   } catch (e: any) {
     error.value = e?.data?.detail?.code || e?.message || 'erro'
   } finally {
@@ -345,6 +381,8 @@ const contaFilter = ref('all')
 const statusBlingFilter = ref('all')
 const dataInicioFilter = ref('')
 const dataFimFilter = ref('')
+// Só na aba Flex (ela junta ML e Shopee): '' = as duas.
+const flexPlataformaFilter = ref<'' | 'ml' | 'shopee'>('')
 
 const contas = computed(() =>
   [...new Set(rows.value.map((c) => c.conta).filter((v): v is string => !!v))].sort((a, b) =>
@@ -368,6 +406,9 @@ const filteredRows = computed(() => {
     if (!mostrarTudo.value && c.acao_resolvido && !c.acao_monitorar) return false
     // Aba Amazon: só a sub-aba escolhida (DBA / Envio próprio / sem classificação).
     if (tab.value === 'amazon' && amazonSubDe(c) !== amazonSub.value) return false
+    // Aba Flex: filtro Plataforma (mesmos rótulos que o backend aceita).
+    if (tab.value === 'flex' && flexPlataformaFilter.value === 'ml' && !isMl(c)) return false
+    if (tab.value === 'flex' && flexPlataformaFilter.value === 'shopee' && !isShopee(c)) return false
     if (contaFilter.value !== 'all' && (c.conta || '') !== contaFilter.value) return false
     if (statusBlingFilter.value !== 'all' && (c.status_bling || '') !== statusBlingFilter.value) return false
     if (di && (!c.data || c.data < di)) return false
@@ -403,6 +444,7 @@ function limparFiltros() {
   statusBlingFilter.value = 'all'
   dataInicioFilter.value = ''
   dataFimFilter.value = ''
+  flexPlataformaFilter.value = ''
 }
 
 // Contadores das sub-abas da Amazon (mesma base do painel: respeita "Mostrar tudo").
@@ -414,6 +456,64 @@ const amazonCounts = computed(() => {
   }
   return n
 })
+// Contador da sub-aba "Pedidos Flex" (mesma base: respeita "Mostrar tudo").
+const flexPedidosCount = computed(() =>
+  tab.value !== 'flex'
+    ? 0
+    : rows.value.filter((c) => mostrarTudo.value || !c.acao_resolvido || c.acao_monitorar).length,
+)
+
+// ---- Flex: avisos que vêm da tela de anúncios (02/10/2026) ----
+// Pedido Flex sem peça em SP (o robô de prioridade não trocou o lote): a
+// linha mostra o aviso embaixo do selo, em qualquer aba. E quantos anúncios
+// esperam aprovação para ligar o Flex — vai no rótulo da sub-aba. Só leitura;
+// se a API do Flex falhar, a Logística segue normal sem os avisos.
+const flexAlertas = ref<Record<string, string>>({})
+const flexAguardando = ref(0)
+// Só depois de montar: o refresh() também roda no setup (SSR e de novo na
+// hidratação) e um aviso chegando no meio da hidratação deixaria o HTML do
+// servidor diferente do navegador. O onMounted liga e chama a primeira vez.
+let flexMontado = false
+async function carregarResumoFlex() {
+  if (!flexMontado || !podeVerFlex.value || !['ml', 'shopee', 'flex'].includes(tab.value)) return
+  try {
+    const [pedidos, anuncios] = await Promise.all([
+      api<Array<{ numero: string | null; alerta: string | null; acerto_pendente?: boolean }>>(
+        '/api/flex/pedidos?so_alerta=true&abertos=true',
+      ),
+      tab.value === 'flex'
+        ? api<{ resumo?: { aguardando: number } }>('/api/flex/anuncios?limit=1')
+        : Promise.resolve(null),
+    ])
+    const mapa: Record<string, string> = {}
+    for (const p of pedidos || []) {
+      if (!p.numero) continue
+      if (p.acerto_pendente)
+        mapa[p.numero] =
+          'Saiu de São Bernardo sem passar pelo .sp: o Bling baixou outro lote. Acerte o estoque no Bling ' +
+          '(transferência para o .sp) e marque em Flex › Anúncios Flex.'
+      else if (p.alerta) mapa[p.numero] = p.alerta
+    }
+    flexAlertas.value = mapa
+    if (anuncios) flexAguardando.value = anuncios.resumo?.aguardando || 0
+  } catch {
+    // informativo — sem os avisos a tela continua funcionando
+  }
+}
+function flexAlerta(c: Logistica): string | null {
+  return (c.pedido_bling && flexAlertas.value[c.pedido_bling]) || null
+}
+const FLEX_SELO_TITULO =
+  'Envio Flex: sai de São Bernardo (estoque .sp) e é entregue no mesmo dia ou no dia seguinte (Mercado Livre Envios Flex / Shopee Entrega Direta).'
+function flexSeloTitulo(c: Logistica): string {
+  return c.envio_tipo ? `${FLEX_SELO_TITULO}\nTipo de envio na plataforma: ${c.envio_tipo}` : FLEX_SELO_TITULO
+}
+// Clique num pedido da lista "sem peça em SP" (sub-aba Anúncios Flex): volta
+// para "Pedidos Flex" já buscando o pedido.
+function buscarPedidoFlex(numero: string) {
+  flexSub.value = 'pedidos'
+  search.value = numero
+}
 
 // ---- Prazos da Amazon (só leitura) ----
 // Datas "YYYY-MM-DD" comparadas em dia local (sem fuso): quantos dias faltam.
@@ -487,7 +587,7 @@ function goToPage(p: number) {
   page.value = Math.min(Math.max(1, p), totalPages.value)
 }
 // Filtros mudaram → volta pra 1ª página.
-watch([search, contaFilter, statusBlingFilter, dataInicioFilter, dataFimFilter, amazonSub], () => {
+watch([search, contaFilter, statusBlingFilter, dataInicioFilter, dataFimFilter, amazonSub, flexPlataformaFilter], () => {
   page.value = 1
 })
 // Recarregou dados / página ficou fora do intervalo → corrige.
@@ -501,7 +601,8 @@ const filtrosAtivos = computed(
     contaFilter.value !== 'all' ||
     statusBlingFilter.value !== 'all' ||
     !!dataInicioFilter.value ||
-    !!dataFimFilter.value,
+    !!dataFimFilter.value ||
+    (tab.value === 'flex' && !!flexPlataformaFilter.value),
 )
 
 async function loadOpcoes() {
@@ -1084,7 +1185,11 @@ async function refreshStatus() {
 // Plataforma de uma regra: escolhida numa lista, com os MESMOS rótulos que o
 // backend grava em `logistica.plataforma` (o casador compara sem maiúscula, então
 // "mercado livre" antigo casa igual). Vazio = geral (vale pra todas).
-const STATUS_PLATAFORMA_OPCOES: string[] = PLATAFORMA_TABS.map((t) => t.label)
+// Só as abas que são marketplace: "Flex" é uma visão (ML + Shopee) e nunca vem
+// em `logistica.plataforma` — uma regra com Plataforma = Flex nunca casaria.
+const STATUS_PLATAFORMA_OPCOES: string[] = PLATAFORMA_TABS.filter((t) => t.key !== 'flex').map(
+  (t) => t.label,
+)
 function plataformaCanonica(v: string | null | undefined): string {
   const p = (v || '').trim()
   return STATUS_PLATAFORMA_OPCOES.find((o) => o.toLowerCase() === p.toLowerCase()) || p
@@ -1197,15 +1302,24 @@ onMounted(() => {
   const query = useRoute().query
   const tabQuery = typeof query.tab === 'string' ? query.tab : ''
   const buscaQuery = typeof query.q === 'string' ? query.q : ''
-  if (tabQuery === 'status' || PLATAFORMA_TABS.some((t) => t.key === tabQuery)) {
+  // A aba Flex só abre pelo link depois de saber se a pessoa vê o Flex.
+  if (tabQuery === 'status' || PLATAFORMA_TABS.some((t) => t.key === tabQuery && t.key !== 'flex')) {
     tab.value = tabQuery as PlataformaTab | 'status'
   }
   if (buscaQuery) search.value = buscaQuery
   // `&sub=proprio`: a ocorrência do "Vigia Robô Melhor Envio" é de Envio
   // próprio — sem isto a aba Amazon abriria no DBA e o pedido não apareceria.
   if (query.sub === 'proprio' || query.sub === 'dba') amazonSub.value = query.sub
+  // `?tab=flex&sub=anuncios`: abre direto a tela dos anúncios Flex.
+  if (query.sub === 'anuncios' || query.sub === 'pedidos') flexSub.value = query.sub
   if (!statusLoaded) refreshStatus()
   carregarStatusCorreios()
+  flexMontado = true
+  verificarFlex().then((ve) => {
+    if (!ve) return
+    if (tabQuery === 'flex') tab.value = 'flex'
+    else carregarResumoFlex()
+  })
   autoRefreshTimer = setInterval(autoRefreshTick, AUTO_REFRESH_MS)
 })
 
@@ -1890,7 +2004,7 @@ async function aplicarStatusBling(c: Logistica) {
     <!-- Tabs -->
     <div class="flex flex-wrap gap-1 border-b">
       <button
-        v-for="t in PLATAFORMA_TABS"
+        v-for="t in ABAS_VISIVEIS"
         :key="t.key"
         type="button"
         class="px-4 py-2 text-sm font-medium border-b-2 -mb-px"
@@ -1919,8 +2033,53 @@ async function aplicarStatusBling(c: Logistica) {
       </Button>
     </div>
 
-    <!-- ============ ABAS DE MARKETPLACE (ML/Shopee/Amazon/TikTok) ============ -->
-    <template v-if="tab !== 'status'">
+    <!-- ============ ABA FLEX: sub-abas Pedidos × Anúncios ============ -->
+    <div v-if="tab === 'flex'" class="flex flex-wrap items-center gap-3">
+      <div class="flex items-center rounded-md border overflow-hidden text-sm" role="tablist">
+        <button
+          type="button"
+          class="px-3 py-1.5"
+          :class="flexSub === 'pedidos' ? 'bg-primary text-primary-foreground' : 'hover:bg-muted/40'"
+          title="Pedidos Flex do Mercado Livre e da Shopee (também aparecem nas abas de cada plataforma, com o selo Flex)"
+          @click="flexSub = 'pedidos'"
+        >
+          Pedidos Flex <span class="opacity-70">({{ flexPedidosCount }})</span>
+        </button>
+        <button
+          type="button"
+          class="px-3 py-1.5 border-l"
+          :class="flexSub === 'anuncios' ? 'bg-primary text-primary-foreground' : 'hover:bg-muted/40'"
+          title="Em quais anúncios o Flex está ligado, o que o sistema quer e o porquê — aprovar, sincronizar e emergência"
+          @click="flexSub = 'anuncios'"
+        >
+          Anúncios Flex
+          <span
+            v-if="flexAguardando"
+            class="ml-1 rounded-full bg-amber-400 px-1.5 text-[11px] font-semibold text-amber-950"
+            :title="`${flexAguardando} anúncio(s) esperando sua aprovação para ligar o Flex`"
+          >{{ flexAguardando }}</span>
+        </button>
+      </div>
+      <!-- Pedido Flex sem peça em SP: aviso fixo (o robô NÃO trocou o lote). -->
+      <button
+        v-if="Object.keys(flexAlertas).length && flexSub === 'pedidos'"
+        type="button"
+        class="inline-flex items-center gap-1 rounded-md border border-rose-300 bg-rose-50 px-2.5 py-1 text-sm text-rose-800 hover:bg-rose-100 dark:border-rose-700 dark:bg-rose-950/40 dark:text-rose-300"
+        title="Ver a lista dos pedidos Flex sem peça em São Bernardo (na sub-aba Anúncios Flex)"
+        @click="flexSub = 'anuncios'"
+      >
+        {{ Object.keys(flexAlertas).length }} pedido(s) Flex sem peça em São Bernardo
+      </button>
+    </div>
+    <LogisticaFlexAnuncios
+      v-if="flexAnuncios"
+      :can-edit="canEdit"
+      @buscar-pedido="buscarPedidoFlex"
+      @mudou="carregarResumoFlex"
+    />
+
+    <!-- ============ ABAS DE MARKETPLACE (ML/Shopee/Amazon/TikTok/Flex) ============ -->
+    <template v-if="tab !== 'status' && !flexAnuncios">
       <div class="flex flex-wrap items-center gap-3">
         <Button size="sm" variant="ghost" :disabled="loading || statusLoading || recarregando" @click="recarregar">
           <RefreshCw class="size-4 mr-1" :class="loading || statusLoading || recarregando ? 'animate-spin' : ''" /> recarregar
@@ -1935,8 +2094,9 @@ async function aplicarStatusBling(c: Logistica) {
         </Button>
         <!-- O robô já faz isso de 15 em 15 min; o botão é pra quando o operador
              não quer esperar (ou acabou de cadastrar um rastreio na mão). -->
+        <!-- Some na aba Flex: o Flex não passa pelos Correios. -->
         <Button
-          v-if="canEdit"
+          v-if="canEdit && tab !== 'flex'"
           size="sm"
           variant="outline"
           :disabled="atualizandoRastreio"
@@ -1987,7 +2147,13 @@ async function aplicarStatusBling(c: Logistica) {
             <Mail class="size-4 mr-1" /> Mensagens ao cliente
           </Button>
         </template>
-        <Button v-if="canEdit" size="sm" class="ml-auto" @click="openNew">
+        <Button
+          v-if="canEdit"
+          size="sm"
+          class="ml-auto"
+          :title="tab === 'flex' ? 'O caso criado à mão aparece na aba da plataforma (Mercado Livre ou Shopee), não na aba Flex.' : undefined"
+          @click="openNew"
+        >
           <Plus class="size-4 mr-1" /> Novo caso
         </Button>
       </div>
@@ -2007,7 +2173,12 @@ async function aplicarStatusBling(c: Logistica) {
         (entrar na conta → Quota).
       </div>
 
-      <p class="text-sm text-muted-foreground">
+      <p v-if="tab === 'flex'" class="text-sm text-muted-foreground">
+        Pedidos Flex do Mercado Livre (Envios Flex) e da Shopee (Entrega Direta): saem de São Bernardo
+        (estoque .sp) e são entregues no mesmo dia ou no dia seguinte. Eles continuam aparecendo também nas
+        abas Mercado Livre e Shopee, com o selo Flex.
+      </p>
+      <p v-else class="text-sm text-muted-foreground">
         Casos de pós-venda a acompanhar. Preencha os status do Meli no caso e o sistema
         sugere os Status Bling que a planilha já viu pra aquela combinação — a decisão final é sua.
       </p>
@@ -2022,6 +2193,14 @@ async function aplicarStatusBling(c: Logistica) {
             placeholder="buscar pedido, produto, SKU, conta, rastreio…"
           />
         </div>
+        <label v-if="tab === 'flex'" class="flex items-center gap-1.5 text-sm text-muted-foreground">
+          Plataforma:
+          <select v-model="flexPlataformaFilter" class="h-9 rounded-md border bg-background px-2 text-sm text-foreground">
+            <option value="">Mercado Livre e Shopee</option>
+            <option value="ml">Mercado Livre</option>
+            <option value="shopee">Shopee</option>
+          </select>
+        </label>
         <select v-model="contaFilter" class="h-9 rounded-md border bg-background px-2 text-sm">
           <option value="all">todas contas</option>
           <option v-for="c in contas" :key="c" :value="c">{{ c }}</option>
@@ -2095,7 +2274,20 @@ async function aplicarStatusBling(c: Logistica) {
               <td class="px-3 py-2 whitespace-nowrap">{{ fmtDate(c.data) }}</td>
               <td class="px-3 py-2 whitespace-nowrap font-medium">{{ c.pedido_bling || '—' }}</td>
               <td class="px-3 py-2 whitespace-nowrap">{{ c.pedido_marketplace || '—' }}</td>
-              <td class="px-3 py-2 whitespace-nowrap">{{ c.plataforma || '—' }}</td>
+              <td class="px-3 py-2 whitespace-nowrap">
+                {{ c.plataforma || '—' }}
+                <span
+                  v-if="c.envio_flex && podeVerFlex && tab !== 'flex'"
+                  class="ml-1 text-[10px] px-1.5 py-0.5 rounded border border-violet-300 bg-violet-50 font-semibold text-violet-800 dark:border-violet-700 dark:bg-violet-950/40 dark:text-violet-300"
+                  :title="flexSeloTitulo(c)"
+                >Flex</span>
+                <!-- O robô não conseguiu passar o pedido Flex para o .sp. -->
+                <div
+                  v-if="flexAlerta(c)"
+                  class="mt-0.5 max-w-[200px] whitespace-normal text-[11px] font-medium text-rose-700 dark:text-rose-400"
+                  :title="flexAlerta(c) || ''"
+                >sem peça em São Bernardo</div>
+              </td>
               <td class="px-3 py-2 text-xs max-w-[240px]">
                 <template v-if="c.produtos && c.produtos.length">
                   <div
@@ -2421,7 +2613,18 @@ async function aplicarStatusBling(c: Logistica) {
           <div class="flex items-start gap-2">
             <div class="flex-1 min-w-0">
               <div class="font-medium truncate">{{ c.pedido_bling || '—' }}</div>
-              <div class="text-xs text-muted-foreground truncate">{{ c.plataforma || '—' }} · {{ c.conta || '—' }}</div>
+              <div class="text-xs text-muted-foreground truncate">
+                {{ c.plataforma || '—' }}
+                <span
+                  v-if="c.envio_flex && podeVerFlex && tab !== 'flex'"
+                  class="text-[10px] px-1 py-px rounded border border-violet-300 bg-violet-50 font-semibold text-violet-800 dark:border-violet-700 dark:bg-violet-950/40 dark:text-violet-300"
+                  :title="flexSeloTitulo(c)"
+                >Flex</span>
+                · {{ c.conta || '—' }}
+              </div>
+              <div v-if="flexAlerta(c)" class="text-[11px] font-medium text-rose-700 dark:text-rose-400">
+                Flex sem peça em São Bernardo: {{ flexAlerta(c) }}
+              </div>
               <div v-if="c.produtos && c.produtos.length" class="text-xs mt-0.5 space-y-0.5">
                 <div v-for="(p, pi) in c.produtos" :key="pi" class="min-w-0">
                   <span class="block truncate" :title="p.nome || ''">
@@ -2597,7 +2800,7 @@ async function aplicarStatusBling(c: Logistica) {
     </template>
 
     <!-- ============ ABA STATUS ============ -->
-    <template v-else>
+    <template v-else-if="tab === 'status'">
       <div class="flex flex-wrap items-center gap-3">
         <Button size="sm" variant="ghost" :disabled="statusLoading" @click="refreshStatus">
           <RefreshCw class="size-4 mr-1" /> recarregar

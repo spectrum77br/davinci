@@ -200,6 +200,15 @@ VALUE_LABELS_PT: dict[str, dict[str, str]] = {
         "returning_to_sender": "Retornando ao remetente",
         "soon_to_be_returned": "Em devolução",
         "soon_deliver": "A caminho",
+        # Substatus próprios do Flex (doc ML "Estados e subestados Flex",
+        # 02/10/2026) que ainda não tinham tradução: apareciam em inglês e
+        # pintavam a linha de vermelho como chave sem regra. Os outros do
+        # Flex (out_for_delivery, soon_deliver, receiver_absent, bad_address,
+        # refused_delivery) já estavam aqui — não mudam, senão as chaves já
+        # cadastradas na aba Status deixariam de casar.
+        "buyer_rescheduled": "Comprador reagendou",
+        "delivery_blocked": "Entregue longe do endereço (aguarda confirmação)",
+        "waiting_for_confirmation": "Marcado entregue após o prazo (aguarda confirmação)",
     },
     "cancel_group": {
         "buyer": "Comprador",

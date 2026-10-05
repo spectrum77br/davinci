@@ -1399,19 +1399,26 @@ async def enfileirar_importacao(
     # SKU pra tag prioritária ANTES do check de estoque — o check abaixo e a
     # NF já enxergam o SKU novo. Falha aqui nunca trava o enfileiramento.
     adiados: set[str] = set()
+    adiados_envio: set[str] = set()
     if body.numeros:
         try:
             prio = await aplicar_prioridade_estoque(session, body.numeros)
             adiados = set(prio.get("adiados") or [])
+            adiados_envio = set(prio.get("adiados_envio") or [])
         except Exception:  # noqa: BLE001
             logger.exception("enfileirar_prioridade_falhou")
     # O Bling não respondeu sobre o estoque destes: ficam de fora desta vez
-    # (sem passar pelo check que mandaria para Aguardando Cancelamento).
+    # (sem passar pelo check que mandaria para Aguardando Cancelamento). Os
+    # ML/Shopee recém-chegados esperam a plataforma dizer se o envio é Flex
+    # (pedido Flex sai do .sp — a NF não pode sair antes com o lote errado).
     pulados_adiados = [
         {
             "numero": n,
             "motivo": (
-                "o Bling não respondeu à consulta de estoque — tente de novo em alguns minutos"
+                "aguardando a plataforma informar o tipo de envio (Flex ou não)"
+                " — tente de novo em alguns minutos"
+                if n in adiados_envio
+                else "o Bling não respondeu à consulta de estoque — tente de novo em alguns minutos"
             ),
         }
         for n in body.numeros

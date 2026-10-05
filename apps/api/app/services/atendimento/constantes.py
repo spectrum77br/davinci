@@ -329,9 +329,18 @@ ORIGEM_SISTEMA = "sistema"
 # Nunca é enviada, não conta como resposta, fica fora da pendência e não vai
 # para a IA como fala do comprador. Vem com `tipo = TIPO_NOTA`.
 ORIGEM_NOTA = "davinci_nota"
+# MENSAGEM AUTOMÁTICA DO DAVINCI (05/10/2026, docs/atendimento-automacoes.md):
+# o motor de automações (`services/atendimento/automacoes.py`) — menu,
+# respostas das opções, "aguarde", convite, "ficou alguma dúvida", pedido
+# recebido, entregue e pós-conclusão — no lugar do Duoke. A linha nasce com
+# `payload.automacao` ({"codigo", "registro_id", "regra_versao", "parte"}),
+# e é por essa marca que a régua (`e_mensagem_automatica`), a fila, a
+# métrica e a IA sabem que ninguém da equipe escreveu.
+ORIGEM_AUTO = "davinci_auto"
 # As que NÓS mandamos: só elas podem ser "adotadas" quando o sync traz de
-# volta a mensagem que acabamos de enviar. A nota NÃO entra: ela não sai.
-ORIGENS_DAVINCI = (ORIGEM_HUMANO, ORIGEM_IA)
+# volta a mensagem que acabamos de enviar (e só elas vão para "A conferir"
+# quando o envio fica ambíguo). A nota NÃO entra: ela não sai.
+ORIGENS_DAVINCI = (ORIGEM_HUMANO, ORIGEM_IA, ORIGEM_AUTO)
 
 # Tipo da mensagem da nota interna (os outros tipos vêm da plataforma:
 # texto, imagem, video, produto, pedido, arquivo, outro).
@@ -781,15 +790,28 @@ RESPOSTAS_AUTOMATICAS: tuple[str, ...] = (
     "ola, por favor selecione sua duvida",
     "ola, a sua mensagem foi recebida",
     "descreva sua duvida que assim que um atendente",
+    # As respostas das opções 1, 2, 3 e 5 do robô (05/10/2026). Contavam como
+    # "a loja respondeu", mas são o robô: medido em produção (14 dias), na
+    # Shopee 125 das 152 saíram exatamente 12 h depois do menu (o ciclo do
+    # robô), nenhuma entre 5 min e 12 h, e as outras em ciclos seguintes; no
+    # ML, o mesmo. A opção 1 do ML tem texto próprio.
+    "a entrega e feita pela shopee, nao temos acesso ao transporte",
+    "a entrega e feita pelo mercado livre, nao temos acesso ao transporte",
+    "todos nossos produtos sao enviados com nota fiscal",
+    "o pedido pode ser encerrado a qualquer momento antes do envio",
+    "por favor, descreva qual e o defeito do produto",
     # Campanhas automáticas (pedido, entrega, carrinho, "ficou alguma
     # dúvida?"). Na Shopee chegam como `sistema`; no TikTok, como da LOJA.
-    # Nenhuma responde o que o comprador perguntou.
+    # Nenhuma responde o que o comprador perguntou. O "bom dia! ficou alguma
+    # dúvida em que eu possa te ajudar" SAIU em 05/10/2026: é pessoa (medido
+    # em 14 dias: nenhuma a 12 h do menu, das 7 h às 13 h, espaçamento de
+    # gente) — contando como automática, escondia uma resposta da equipe.
     "oi! recebemos seu pedido e ja estamos preparando",
     "ficou alguma duvida sobre o produto? estou aqui pra te ajuda",
     "tudo bem? caso ainda esteja em duvida, posso te explicar",
-    "bom dia! ficou alguma duvida em que eu possa te ajudar",
     "oi! seu produto ainda esta no carrinho",
     "oi! tudo bem? 😊 confirmamos a entrega do seu pedido",
+    "oi! 🧳✨ que alegria saber que sua mala ja chegou",
     "oi! so passando para saber se esta tudo certo com o seu prod",
     "oi! passando rapidinho pra saber se esta tudo certo",
     "oi! 👋 notamos que voce deixou alguns itens no carrinho",
@@ -843,6 +865,19 @@ MENSAGENS_DAVINCI_FORA: tuple[str, ...] = (
     r"^ola, .*(foi postado nos correios em"
     r"|a transportadora registrou (uma ocorrencia no transporte|a entrega) do seu pedido"
     r"|a previsao de entrega da transportadora para o seu pedido)",
+    # O motor de automações (05/10/2026, `automacoes_catalogo`): os textos
+    # padrão que MUDAM em relação ao Duoke — o "aguarde" em português do
+    # Brasil e o nome do comprador DENTRO do entregue e do pós-conclusão
+    # ("Oi, fulana! …"), e o convite sem o nome ("Já segue…"). A mensagem
+    # que o motor manda já é reconhecida pela marca no payload
+    # (`e_automatica_pelo_payload`); o texto é a rede para quando a leitura
+    # não adota a nossa linha (a plataforma devolveu o texto diferente) e a
+    # mensagem volta como `externo` sem a marca.
+    r"^ola! recebemos sua mensagem\. estamos com muitos atendimentos",
+    r"^oi, .*(confirmamos a entrega do seu pedido"
+    r"|que alegria saber que sua mala ja chegou"
+    r"|so passando para saber se esta tudo certo com o seu produto)",
+    r"^ja segue nossa loja aqui",
 )
 # Campanhas do Duoke que começam pelo USUÁRIO do comprador, sem saudação
 # ("fulana.123 já segue nossa loja aqui no TikTok? …"). No TikTok chegam como
@@ -998,22 +1033,73 @@ FONTES_SHOPEE_DA_PLATAFORMA: tuple[str, ...] = ("server", "crm")
 FONTE_SHOPEE_API = "openapi"
 TIPO_SHOPEE_FIGURINHA = "sticker"
 FIGURINHA_CAMPANHA_DUOKE = "0007"
+# O CARTÃO DO PEDIDO que a LOJA manda pela API (05/10/2026): é o "pedido
+# recebido" e o "entregue" das campanhas do Duoke — o cartão vai 1 s antes do
+# texto. Medido em produção (7 dias): na Shopee (`message_type` "order",
+# `source` "openapi") 1.934 dos 1.935 vieram a até 15 s de um texto de
+# campanha; no TikTok (`type` "ORDER_CARD", papel `CUSTOMER_SERVICE`), 157 de
+# 157. Contando como resposta de pessoa, o cartão calava a IA por 24 h
+# (`ia._humano_respondeu_recente`) e fechava a vez do comprador. O cartão
+# que a PRÓPRIA TikTok põe (papel `ROBOT`) já é `sistema`.
+TIPO_SHOPEE_CARTAO_PEDIDO = "order"
+TIPO_TIKTOK_CARTAO_PEDIDO = "ORDER_CARD"
+PAPEL_TIKTOK_ATENDIMENTO = "CUSTOMER_SERVICE"
+# A marca do motor de automações do DaVinci no payload (`ORIGEM_AUTO`).
+CHAVE_AUTOMACAO = "automacao"
+# As partes da mensagem automática do DaVinci que FECHAM o turno em que o
+# comprador só mandou cartão (`gravar._fechava_a_vez`) — as mesmas que, vindas
+# do Duoke, a régua antiga contava como resposta: o "já segue" do TikTok
+# (loja), a figurinha 0007 do "caso ainda esteja em dúvida" e o cartão do
+# pedido das campanhas. O resto (menu, opções, "aguarde", os textos das
+# campanhas) nunca fechou a vez, e continua não fechando: depois da troca, a
+# fila fica IGUAL à de hoje. (codigo da automação, tipo da parte).
+AUTOMACOES_QUE_FECHAM_A_VEZ: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("tiktok_convite", "texto"),
+        ("shopee_duvida_26h", "figurinha"),
+        ("shopee_pedido_recebido", "cartao_pedido"),
+        ("shopee_entregue", "cartao_pedido"),
+    }
+)
+
+
+def marca_automacao(payload: object) -> dict | None:
+    """A marca do motor de automações (`payload.automacao`), ou None. PURA."""
+    if not isinstance(payload, dict):
+        return None
+    marca = payload.get(CHAVE_AUTOMACAO)
+    return marca if isinstance(marca, dict) else None
 
 
 def e_automatica_pelo_payload(payload: object) -> bool:
-    """O item cru é cartão da Shopee ou a figurinha da campanha do Duoke? PURA.
+    """O item cru é automático: cartão da Shopee, figurinha ou cartão de pedido da
+    campanha, ou a marca do motor de automações do DaVinci? PURA.
 
     O SQL é `gravar.mensagem_automatica_sql(texto, payload)`; o teste compara.
+    Só vale para mensagem da LOJA (quem chama já filtra o autor): o cartão de
+    pedido do COMPRADOR é outra coisa (`e_cartao_do_comprador`).
     """
     if not isinstance(payload, dict):
         return False
+    if isinstance(payload.get(CHAVE_AUTOMACAO), dict):
+        return True
     fonte = payload.get("source")
     if fonte in FONTES_SHOPEE_DA_PLATAFORMA:
         return True
     conteudo = payload.get("content")
+    tipo = payload.get("message_type")
+    if fonte == FONTE_SHOPEE_API and tipo == TIPO_SHOPEE_CARTAO_PEDIDO:
+        return True
+    remetente = payload.get("sender")
+    if (
+        payload.get("type") == TIPO_TIKTOK_CARTAO_PEDIDO
+        and isinstance(remetente, dict)
+        and remetente.get("role") == PAPEL_TIKTOK_ATENDIMENTO
+    ):
+        return True
     return (
         fonte == FONTE_SHOPEE_API
-        and payload.get("message_type") == TIPO_SHOPEE_FIGURINHA
+        and tipo == TIPO_SHOPEE_FIGURINHA
         and isinstance(conteudo, dict)
         and conteudo.get("sticker_id") == FIGURINHA_CAMPANHA_DUOKE
     )

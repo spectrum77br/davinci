@@ -154,6 +154,12 @@ const loading = ref(false)
 const error = ref<string | null>(null)
 const filterPlatform = ref<string>('all')
 const search = ref('')
+const mobileTableView = ref(false)
+async function openStoreTable(row: StoreInfo) {
+  mobileTableView.value = true
+  await nextTick()
+  document.getElementById(`store-row-${row.id}`)?.scrollIntoView({ block: 'center', inline: 'start' })
+}
 // false = Lojas ativas (default); true = aba "Arquivadas" (contas suspensas
 // tiradas de circulação, com botão "Ativar" pra reverter).
 const archivedView = ref(false)
@@ -778,21 +784,22 @@ async function copyText(text: string) {
 </script>
 
 <template>
-  <div class="space-y-4">
+  <div class="stores-page min-w-0 space-y-4">
     <RouteTabs :tabs="TABS_CADASTROS" />
     <PageHeader
       title="Lojas"
-      description="Cadastros completos das lojas — clique em qualquer célula para editar"
+      :description="mobileTableView ? 'Cadastros completos das lojas — clique em qualquer célula para editar' : 'Cadastros completos das lojas'"
     >
       <template #actions>
-        <select v-model="filterPlatform" class="border rounded px-2 py-1 text-sm bg-background">
+        <select v-model="filterPlatform" aria-label="Filtrar plataforma das lojas" class="border rounded px-2 py-1 text-sm bg-background">
           <option value="all">Todas plataformas</option>
           <option v-for="p in PLATFORMS" :key="p.value" :value="p.value">{{ p.label }}</option>
         </select>
         <input
           v-model="search"
           placeholder="buscar conta, CPF, e-mail, CNPJ…"
-          class="border rounded px-2 py-1 text-sm bg-background w-64"
+          aria-label="Buscar loja"
+          class="border rounded px-2 py-1 text-sm bg-background w-full sm:w-64"
         />
         <Button size="sm" variant="ghost" :disabled="loading" @click="load">
           <RefreshCw class="size-4 mr-1" :class="{ 'animate-spin': loading }" /> recarregar
@@ -805,7 +812,7 @@ async function copyText(text: string) {
         >
           <Archive class="size-4 mr-1" /> {{ archivedView ? 'Ativas' : 'Arquivadas' }}
         </Button>
-        <Button v-if="canEdit && !archivedView" size="sm" :disabled="showAdd" @click="openAdd">
+        <Button v-if="canEdit && !archivedView" size="sm" :disabled="showAdd" @click="mobileTableView = true; openAdd()">
           <Plus class="size-4 mr-1" /> Nova loja
         </Button>
       </template>
@@ -815,7 +822,65 @@ async function copyText(text: string) {
       <AlertCircle class="h-4 w-4" /> {{ error }}
     </div>
 
-    <div class="border rounded-lg overflow-auto max-h-[calc(100vh-220px)]">
+    <div class="flex flex-wrap items-center justify-between gap-2 lg:hidden">
+      <p class="text-xs text-muted-foreground">{{ sorted.length }} loja{{ sorted.length === 1 ? '' : 's' }}{{ archivedView ? ' arquivada' + (sorted.length === 1 ? '' : 's') : '' }}</p>
+      <div class="inline-flex rounded-lg border p-1" aria-label="Visualização das lojas">
+        <button type="button" class="rounded-md px-3 py-2 text-xs" :class="!mobileTableView ? 'bg-primary text-primary-foreground' : 'text-muted-foreground'" :aria-pressed="!mobileTableView" @click="mobileTableView = false">Cartões</button>
+        <button type="button" class="rounded-md px-3 py-2 text-xs" :class="mobileTableView ? 'bg-primary text-primary-foreground' : 'text-muted-foreground'" :aria-pressed="mobileTableView" @click="mobileTableView = true">Tabela</button>
+      </div>
+    </div>
+    <section v-if="!mobileTableView" class="space-y-4 lg:hidden" aria-label="Lojas por plataforma" :aria-busy="loading">
+      <p v-if="loading && !items.length" class="text-sm text-muted-foreground" role="status">Carregando lojas…</p>
+      <p v-else-if="!sorted.length" class="rounded-lg border p-4 text-sm text-muted-foreground">Nenhuma loja encontrada.</p>
+      <div v-for="group in groups" :key="group.platform" class="space-y-2">
+        <h2 class="text-xs font-semibold uppercase tracking-wide text-muted-foreground">{{ platformLabel(group.platform) }} · {{ group.count }} conta{{ group.count === 1 ? '' : 's' }}</h2>
+        <div class="store-cards grid min-w-0 gap-3">
+          <article v-for="row in group.rows" :key="row.id" class="store-card min-w-0 rounded-xl border bg-card p-3">
+            <div class="flex items-start justify-between gap-2">
+              <div class="min-w-0"><h3 class="break-words text-sm font-semibold">{{ row.account_name || 'Sem nome de conta' }}</h3><p class="mt-1 text-xs text-muted-foreground">{{ platformLabel(row.platform) }} · {{ row.commercial_team == null ? 'Sem equipe' : `Equipe ${row.commercial_team}` }}</p></div>
+              <span v-if="archivedView" class="rounded-md border bg-muted px-2 py-1 text-xs">Arquivada</span>
+            </div>
+            <div class="mt-3 flex flex-wrap gap-1.5" aria-label="Tipos da loja"><span v-for="d in row.departments" :key="d" class="rounded-md border bg-muted/40 px-2 py-1 text-xs">{{ DEPARTMENTS.find(x => x.value === d)?.label || d }}</span><span v-if="!row.departments.length" class="text-xs text-muted-foreground">Sem tipo</span></div>
+            <dl class="store-card-data mt-3 grid grid-cols-2 gap-3 text-xs">
+              <div><dt>Responsável</dt><dd>{{ row.cpf_name || '—' }}</dd></div>
+              <div><dt>Servidor</dt><dd>{{ row.server || '—' }}</dd></div>
+              <div><dt>Integração</dt><dd :class="row.has_integration ? 'text-emerald-600' : 'text-muted-foreground'">{{ row.has_integration ? 'Sim' : 'Não' }}</dd></div>
+              <div><dt>Tabela de preços</dt><dd :class="row.has_pricing ? 'text-emerald-600' : 'text-muted-foreground'">{{ row.has_pricing ? 'Sim' : 'Não' }}</dd></div>
+            </dl>
+            <details class="mt-3 border-t pt-2">
+              <summary class="cursor-pointer py-2 text-xs font-medium">Ver detalhes da loja</summary>
+              <dl class="store-card-data grid gap-3 pt-2 text-xs">
+                <div><dt>CNPJ</dt><dd>{{ row.cnpj || '—' }}</dd></div>
+                <div><dt>E-mail</dt><dd>{{ row.email || '—' }}</dd></div>
+                <div><dt>Fone</dt><dd>{{ row.phone || '—' }}</dd></div>
+                <div><dt>Senha</dt><dd>{{ row.has_password ? (revealed.has(row.id) ? revealedPasswords.get(row.id) || '••••' : '••••••••') : 'Não cadastrada' }}</dd><div v-if="row.has_password" class="mt-1 flex flex-wrap gap-2"><Button size="sm" variant="outline" @click="toggleReveal(row.id)">{{ revealed.has(row.id) ? 'Ocultar senha' : 'Mostrar senha' }}</Button><Button size="sm" variant="outline" @click="copyPassword(row.id)">{{ copiedId === row.id ? 'Copiada' : 'Copiar senha' }}</Button></div></div>
+                <div><dt>Faturador</dt><dd>{{ nfLabel(faturadores, row.nf_faturador_id) }}</dd><dd v-for="d in fatTiposDefinidos(row)" :key="d">{{ DEPT_BADGE[d]?.label || d }}: {{ nfLabel(faturadores, row.nf_faturador_por_tipo?.[d] || null) }}</dd></div>
+                <div><dt>Faturador produto</dt><dd>{{ nfLabel(faturadores, row.nf_faturador_produto_id) }}</dd></div>
+                <div><dt>Etiqueta</dt><dd>{{ nfLabel(etiquetas, row.nf_etiqueta_id) }}</dd></div>
+                <div><dt>Horários da etiqueta</dt><dd>{{ row.etiqueta_horarios || 'Contínuo' }}</dd><dd v-if="row.etiqueta_sabado_horario">Sábado: {{ row.etiqueta_sabado_horario }}{{ row.etiqueta_sabado_tags ? ' · ' + row.etiqueta_sabado_tags : '' }}</dd></div>
+                <div><dt>Impressão</dt><dd>{{ nfLabel(impressoes, row.nf_impressao_id) }}</dd></div>
+                <div><dt>Endereço de envio</dt><dd class="whitespace-pre-wrap">{{ row.shipping_address || '—' }}</dd></div>
+                <div><dt>Endereço de devolução</dt><dd class="whitespace-pre-wrap">{{ row.return_address || '—' }}</dd></div>
+                <div><dt>Observação</dt><dd class="whitespace-pre-wrap">{{ row.observation || '—' }}</dd></div>
+                <div><dt>Integração vinculada</dt><dd>{{ integrationFor(row)?.name || (row.integration_id ? 'Vinculada' : 'Nenhuma') }}</dd></div>
+                <div><dt>Bling ID</dt><dd>{{ row.bling_store_id || '—' }}</dd></div>
+                <div><dt>Upseller</dt><dd>{{ labelTriBool(row.upseseller) }}</dd></div>
+                <div><dt>Duoke</dt><dd>{{ labelTriBool(row.duoker) }}</dd></div>
+                <div><dt>Restrições de UF</dt><dd>{{ row.uf_restrictions?.join(', ') || 'Nenhuma' }}</dd></div>
+                <div><dt>Exceções</dt><dd v-for="(regra, idx) in row.excecoes || []" :key="idx">{{ excecaoLabel(regra) }}</dd><dd v-if="!row.excecoes?.length">Nenhuma</dd></div>
+              </dl>
+              <div v-if="canEdit || canDelete" class="mt-3 flex flex-wrap gap-2">
+                <Button v-if="canEdit" size="sm" variant="outline" @click="openStoreTable(row)">Editar na tabela</Button>
+                <Button v-if="canEdit" size="sm" variant="outline" :disabled="archiveBusy.has(row.id)" @click="archivedView ? unarchiveRow(row) : archiveRow(row)">{{ archivedView ? 'Ativar loja' : 'Arquivar' }}</Button>
+                <Button v-if="canDelete" size="sm" variant="ghost" @click="remove(row)">Excluir</Button>
+              </div>
+            </details>
+          </article>
+        </div>
+      </div>
+    </section>
+    <p v-if="mobileTableView" class="text-xs text-muted-foreground lg:hidden">Modo tabela: deslize para acessar todas as colunas de edição.</p>
+    <div class="border rounded-lg overflow-auto max-h-[65dvh] lg:max-h-[calc(100vh-220px)]" :class="mobileTableView ? 'block' : 'hidden lg:block'" role="region" aria-label="Dados das lojas" tabindex="0">
       <table class="w-full text-sm border-collapse">
         <thead class="sticky top-0 bg-muted z-10">
           <tr>
@@ -898,7 +963,7 @@ async function copyText(text: string) {
                 </span>
               </td>
             </tr>
-          <tr v-for="row in group.rows" :key="row.id" class="hover:bg-accent/30">
+          <tr v-for="row in group.rows" :id="`store-row-${row.id}`" :key="row.id" class="hover:bg-accent/30">
             <!-- platform -->
             <td
               class="border border-border px-2 py-1.5 text-xs cursor-pointer"
@@ -1502,10 +1567,10 @@ async function copyText(text: string) {
          close. -->
     <div
       v-if="openUfRow"
-      class="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
+      class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-3"
       @click.self="openUfRowId = null"
     >
-      <div class="bg-background border rounded-lg shadow-xl p-4 w-80">
+      <div class="bg-background border rounded-lg shadow-xl p-4 w-80 max-w-full max-h-[calc(100dvh-2rem)] overflow-y-auto">
         <div class="flex items-center justify-between mb-2">
           <div class="text-sm font-semibold">
             UF — {{ openUfRow.platform }} / {{ openUfRow.account_name || '—' }}
@@ -1552,10 +1617,10 @@ async function copyText(text: string) {
          Lista vazia = contínuo (imprime quando a NF fecha). -->
     <div
       v-if="openHorRow"
-      class="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
+      class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-3"
       @click.self="openHorRowId = null"
     >
-      <div class="bg-background border rounded-lg shadow-xl p-4 w-80 max-h-[85vh] overflow-y-auto">
+      <div class="bg-background border rounded-lg shadow-xl p-4 w-80 max-w-full max-h-[calc(100dvh-2rem)] overflow-y-auto">
         <div class="flex items-center justify-between mb-1">
           <div class="text-sm font-semibold">
             Horário Etiqueta — {{ openHorRow.platform }} / {{ openHorRow.account_name || '—' }}
@@ -1659,10 +1724,10 @@ async function copyText(text: string) {
          Pedido que casa vai pra Aguardando Cancelamento no sweep de NF. -->
     <div
       v-if="openExcRow"
-      class="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
+      class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-3"
       @click.self="openExcRowId = null"
     >
-      <div class="bg-background border rounded-lg shadow-xl p-4 w-[26rem]">
+      <div class="bg-background border rounded-lg shadow-xl p-4 w-[26rem] max-w-full max-h-[calc(100dvh-2rem)] overflow-y-auto">
         <div class="flex items-center justify-between mb-2">
           <div class="text-sm font-semibold">
             Exceções — {{ openExcRow.platform }} / {{ openExcRow.account_name || '—' }}
@@ -1738,3 +1803,16 @@ async function copyText(text: string) {
     </div>
   </div>
 </template>
+
+<style scoped>
+.store-card { overflow-wrap: anywhere; }
+.store-card-data > div { min-width: 0; }
+.store-card-data dt { color: hsl(var(--muted-foreground)); }
+.store-card-data dd { margin-top: .25rem; overflow-wrap: anywhere; }
+@media (min-width: 640px) and (max-width: 1023px) {
+  .store-cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 1023px) {
+  .store-card summary, .store-card :deep(button) { min-height: 2.5rem; }
+}
+</style>

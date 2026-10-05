@@ -290,8 +290,8 @@ function close() {
 </script>
 
 <template>
-  <div v-if="open" class="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4" @click.self="close">
-    <div class="bg-background border rounded-lg w-full max-w-lg p-5 space-y-4 max-h-[90vh] overflow-y-auto">
+  <div v-if="open" class="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-3 sm:p-4" @click.self="close">
+    <div class="bg-background border rounded-lg w-full max-w-lg p-4 sm:p-5 space-y-4 max-h-[calc(100dvh-2rem)] overflow-y-auto">
       <div class="flex items-start">
         <div>
           <h2 class="text-lg font-semibold">{{ isEdit ? 'Editar Integração' : 'Nova Integração' }}</h2>
@@ -301,7 +301,7 @@ function close() {
               : 'Configure as credenciais de acesso à API do marketplace.' }}
           </p>
         </div>
-        <Button class="ml-auto" size="sm" variant="ghost" @click="close">
+        <Button class="ml-auto shrink-0" size="sm" variant="ghost" aria-label="Fechar integração" @click="close">
           <X class="size-4" />
         </Button>
       </div>

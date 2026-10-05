@@ -1,17 +1,60 @@
 <script setup lang="ts">
-import { computed, onMounted, onScopeDispose, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onScopeDispose, ref, watch } from 'vue'
 import {
   LayoutDashboard, Rocket, Plug, ContactRound, Users,
   Package, Megaphone, DollarSign, Undo2,
   Receipt, TrendingUp, Settings, BarChart3,
   ClipboardList, ChevronDown, ChevronLeft, ChevronRight, Warehouse,
   Coins, FileText, Calculator, FlaskConical, Ship, Landmark, Headset,
-  ReceiptText, MessagesSquare, Radar, History, Flag, Inbox,
+  ReceiptText, MessagesSquare, Radar, History, Flag, Inbox, X,
 } from 'lucide-vue-next'
 import { allowedTabs, TABS_CADASTROS, TABS_NF, TABS_SISTEMA } from '~/lib/navGroups'
 
-const props = defineProps<{ collapsed: boolean }>()
-const emit = defineEmits<{ (e: 'toggle'): void }>()
+const props = withDefaults(defineProps<{ collapsed: boolean; mobile?: boolean; mobileOpen?: boolean }>(), {
+  mobile: false,
+  mobileOpen: false,
+})
+const emit = defineEmits<{ (e: 'toggle'): void; (e: 'close'): void }>()
+const compact = computed(() => props.collapsed && !props.mobile)
+const sidebarElement = ref<HTMLElement | null>(null)
+const closeButton = ref<HTMLButtonElement | null>(null)
+let previousFocus: HTMLElement | null = null
+
+watch(() => props.mobileOpen, async (open) => {
+  if (open) {
+    previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    await nextTick()
+    closeButton.value?.focus()
+  } else {
+    await nextTick()
+    if (previousFocus?.isConnected && previousFocus.getClientRects().length) previousFocus.focus()
+    previousFocus = null
+  }
+})
+
+function onMenuKeydown(event: KeyboardEvent) {
+  if (!props.mobileOpen) return
+  if (event.key === 'Escape') {
+    event.preventDefault()
+    event.stopPropagation()
+    emit('close')
+    return
+  }
+  if (event.key !== 'Tab') return
+  const elements = Array.from(sidebarElement.value?.querySelectorAll<HTMLElement>(
+    'a[href], button:not([disabled]), [tabindex]:not([tabindex="-1"])',
+  ) ?? []).filter((element) => element.getClientRects().length > 0)
+  const first = elements[0]
+  const last = elements[elements.length - 1]
+  if (!first || !last) return
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault()
+    last.focus()
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault()
+    first.focus()
+  }
+}
 
 const auth = useAuthStore()
 const route = useRoute()
@@ -324,45 +367,65 @@ watch(() => route.path, (p) => openSectionOf(p))
 
 <template>
   <aside
-    class="shrink-0 border-r bg-[hsl(var(--sidebar))] text-[hsl(var(--sidebar-foreground))] transition-[width] duration-200 flex flex-col h-screen sticky top-0"
-    :class="props.collapsed ? 'w-[68px]' : 'w-[248px]'"
+    id="davinci-navigation"
+    ref="sidebarElement"
+    class="app-sidebar shrink-0 border-r bg-[hsl(var(--sidebar))] text-[hsl(var(--sidebar-foreground))] transition-[width] duration-200 flex-col fixed inset-y-0 left-0 z-50 lg:sticky lg:top-0 lg:bottom-auto lg:left-auto lg:z-30 lg:h-screen"
+    :class="[compact ? 'w-[68px]' : 'w-[248px]', props.mobileOpen ? 'flex' : 'hidden lg:flex']"
+    :role="props.mobileOpen ? 'dialog' : undefined"
+    :aria-modal="props.mobileOpen ? true : undefined"
+    :aria-label="props.mobileOpen ? 'Menu principal' : undefined"
+    @keydown="onMenuKeydown"
   >
-    <div class="h-14 flex items-center gap-2 px-4 border-b">
+    <div class="sidebar-heading h-14 shrink-0 flex items-center gap-2 px-4 border-b">
       <LogoMark class="size-7 shrink-0" />
-      <strong v-if="!props.collapsed" class="text-[15px] font-extrabold tracking-tight">DaVinci</strong>
+      <strong v-if="!compact" class="text-[15px] font-extrabold tracking-tight">DaVinci</strong>
       <button
-        class="ml-auto rounded-md p-1 text-muted-foreground hover:text-foreground hover:bg-muted"
+        ref="closeButton"
+        type="button"
+        class="ml-auto size-11 grid place-items-center rounded-md text-muted-foreground hover:text-foreground hover:bg-muted lg:hidden"
+        aria-label="Fechar menu"
+        @click="emit('close')"
+      >
+        <X class="size-5" />
+      </button>
+      <button
+        type="button"
+        class="ml-auto hidden lg:block rounded-md p-1 text-muted-foreground hover:text-foreground hover:bg-muted"
+        :aria-label="compact ? 'Expandir menu' : 'Recolher menu'"
         @click="emit('toggle')"
       >
-        <ChevronLeft v-if="!props.collapsed" class="size-4" />
+        <ChevronLeft v-if="!compact" class="size-4" />
         <ChevronRight v-else class="size-4" />
       </button>
     </div>
 
-    <nav class="flex-1 overflow-y-auto py-2 space-y-1.5">
+    <nav aria-label="Navegação principal" class="flex-1 min-h-0 overflow-y-auto overscroll-contain py-2 space-y-1.5">
       <div v-for="(section, idx) in visibleSections" :key="idx">
         <button
-          v-if="section.label && !props.collapsed"
+          v-if="section.label && !compact"
           type="button"
-          class="w-full flex items-center px-4 py-1 text-[10px] uppercase tracking-[0.12em] font-semibold text-[hsl(var(--sidebar-muted))] hover:text-foreground transition-colors"
+          class="w-full flex items-center min-h-10 lg:min-h-0 px-4 py-1 text-[10px] uppercase tracking-[0.12em] font-semibold text-[hsl(var(--sidebar-muted))] hover:text-foreground transition-colors"
+          :aria-expanded="isGroupOpen(section)"
           @click="toggleGroup(section.label)"
         >
           <span>{{ section.label }}</span>
           <ChevronDown v-if="isGroupOpen(section)" class="size-3 ml-auto" />
           <ChevronRight v-else class="size-3 ml-auto" />
         </button>
-        <ul v-show="props.collapsed || isGroupOpen(section)" class="px-2 space-y-px">
+        <ul v-show="compact || isGroupOpen(section)" class="px-2 space-y-px">
           <li v-for="it in section.items" :key="it.to">
             <NuxtLink
               :to="it.to"
-              :title="props.collapsed ? it.label : undefined"
-              class="group relative flex items-center gap-2.5 rounded-md px-2.5 h-8 text-[13px] font-medium transition-colors"
+              :title="compact ? it.label : undefined"
+              class="group relative flex items-center gap-2.5 rounded-md px-2.5 h-11 lg:h-8 text-[13px] font-medium transition-colors"
+              :aria-current="isActive(it) ? 'page' : undefined"
+              @click="props.mobileOpen && emit('close')"
               :class="isActive(it)
                 ? 'bg-[hsl(var(--sidebar-active-bg))] text-[hsl(var(--sidebar-active-fg))]'
                 : 'text-[hsl(var(--sidebar-foreground))] hover:bg-muted'"
             >
               <component :is="it.icon" class="size-4 shrink-0" />
-              <span v-if="!props.collapsed" class="truncate">{{ it.label }}</span>
+              <span v-if="!compact" class="truncate">{{ it.label }}</span>
               <!-- Solid red dot when this user has pending tarefas.
                    Static (no animation) — the pulsing version was too
                    visually noisy. Expanded layout: right-aligned next
@@ -371,14 +434,14 @@ watch(() => route.path, (p) => openSectionOf(p))
                    item Usuários (que contém a aba Tarefas via `match`). -->
               <span
                 v-if="(it.to === '/tarefas' || (it.match?.includes('/tarefas') ?? false)) && pendingTarefasCount > 0"
-                :class="props.collapsed
+                :class="compact
                   ? 'absolute top-1 right-1 inline-block size-2.5 rounded-full bg-red-500'
                   : 'ml-auto inline-block size-2.5 rounded-full bg-red-500'"
                 :title="`${pendingTarefasCount} tarefa${pendingTarefasCount === 1 ? '' : 's'} pendente${pendingTarefasCount === 1 ? '' : 's'}`"
               />
               <span
                 v-if="it.to === '/faturas' && pendingFaturasCount > 0"
-                :class="props.collapsed
+                :class="compact
                   ? 'absolute top-1 right-1 inline-block size-2.5 rounded-full bg-red-500'
                   : 'ml-auto inline-block size-2.5 rounded-full bg-red-500'"
                 :title="`${pendingFaturasCount} fatura${pendingFaturasCount === 1 ? '' : 's'} vencendo`"
@@ -389,9 +452,32 @@ watch(() => route.path, (p) => openSectionOf(p))
       </div>
     </nav>
 
-    <div v-if="!props.collapsed" class="border-t p-3 text-[11px] text-muted-foreground">
+    <div v-if="!compact" class="sidebar-account shrink-0 border-t p-3 text-[11px] text-muted-foreground">
       <div class="font-medium text-foreground truncate">{{ auth.user?.name || auth.user?.email }}</div>
-      <div class="truncate">{{ auth.user?.email }}</div>
+      <div class="sidebar-account-email truncate">{{ auth.user?.email }}</div>
     </div>
   </aside>
 </template>
+
+<style scoped>
+@media (max-width: 1023px) {
+  .app-sidebar {
+    width: min(20rem, calc(100vw - 3rem));
+    height: 100vh;
+    height: 100dvh;
+    padding-top: env(safe-area-inset-top);
+    padding-left: env(safe-area-inset-left);
+  }
+  .sidebar-account {
+    padding-bottom: max(0.75rem, env(safe-area-inset-bottom));
+  }
+}
+@media (max-width: 1023px) and (max-height: 500px) and (orientation: landscape) {
+  .sidebar-heading { height: 3rem; }
+  .sidebar-account {
+    padding-top: 0.5rem;
+    padding-bottom: max(0.5rem, env(safe-area-inset-bottom));
+  }
+  .sidebar-account-email { display: none; }
+}
+</style>

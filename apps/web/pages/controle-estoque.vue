@@ -106,6 +106,10 @@ type PedidoRow = {
   // antes de Obs (grão de pedido: as linhas do mesmo pedido mostram igual).
   pede_video: boolean
   video: PedidoVideo | null
+  // Envio Flex (ML Envios Flex / Shopee Entrega Direta, 02/10/2026): sai de
+  // São Bernardo (lote .sp) e é entregue no mesmo dia ou no seguinte — selo
+  // "Flex" ao lado da loja. Grão de pedido (todas as linhas iguais).
+  flex?: boolean
 }
 type PedidoVideo = { link: string; salvo_em: string | null; salvo_por: string | null }
 type EnvioRow = {
@@ -371,6 +375,19 @@ const lojaFilter = ref('')
 const plataformaFilter = ref('')
 const conferidoFilter = ref<'all' | 'conferidos' | 'nao_conferidos'>('all')
 const search = ref('')
+// Busca e período ficam à mão; os demais filtros podem ser abertos no celular.
+const mobileFiltersOpen = ref(false)
+const mobileTable = ref(false)
+const mobileActiveFilters = computed(() => {
+  let count = tagsSelecionadas.value.length ? 1 : 0
+  if (tab.value === 'estoque' && estoqueFilter.value !== 'all') count += 1
+  if (tab.value === 'pedidos') {
+    count += Number(statusFilter.value !== 'all') + Number(etiquetaFilter.value !== 'all')
+    count += Number(Boolean(plataformaFilter.value)) + Number(Boolean(lojaFilter.value))
+  }
+  if (tab.value === 'envios' && conferidoFilter.value !== 'all') count += 1
+  return count
+})
 
 // Data
 const produtos = ref<ProdutoRow[]>([])
@@ -1490,6 +1507,21 @@ const pedidosFilteredGrouped = computed<PedidoRowWithGroup[]>(() => {
   return out
 })
 
+// Usa a mesma lista ordenada/filtrada da planilha. Itens do mesmo pedido
+// ficam juntos no cartão; linhas sem número continuam identificadas pelo ID.
+const pedidosMobile = computed(() => {
+  const groups: { key: string; row: PedidoRowWithGroup; itens: PedidoRowWithGroup[] }[] = []
+  for (const row of pedidosFilteredGrouped.value) {
+    const current = groups[groups.length - 1]
+    if (!current || row._isFirstOfGroup || !row.pedido_bling) {
+      groups.push({ key: row.pedido_bling || row.id, row, itens: [row] })
+    } else {
+      current.itens.push(row)
+    }
+  }
+  return groups
+})
+
 // ── Chamados de ATRASO NA POSTAGEM em lote (Eduardo, 15/09) ─────────────
 // "Selecionar todos os pedidos e o sistema abre um chamado em cada loja —
 // pode juntar: todos ML Aguiar num único chamado". Mesmas caixinhas da
@@ -1699,6 +1731,9 @@ function chamadoAtrasoLabel(info: ChamadoAtrasoInfo): string {
     return 'robô'
   }
   return 'abrir na mão'
+}
+function chamadoAtrasoMotivo(info: ChamadoAtrasoInfo): string {
+  return ATRASO_MOTIVO_LABEL[info.motivo as AtrasoMotivo] || info.motivo || 'Não informado'
 }
 
 // ── Abrir chamado do pedido parado (Eduardo, 09/09: "um botão de abrir
@@ -2027,10 +2062,10 @@ async function conferirTodos() {
 </script>
 
 <template>
-  <div class="controle-estoque space-y-3 p-4">
+  <div class="controle-estoque min-w-0 space-y-3 p-4" :class="{ 'stock-as-table': mobileTable }">
     <!-- Header + tabs -->
-    <div class="flex flex-wrap items-center gap-3">
-      <div class="flex items-center gap-2">
+    <div class="stock-header flex flex-wrap items-center gap-3">
+      <div class="stock-title flex items-center gap-2">
         <Boxes class="h-5 w-5 text-primary" />
         <h1 class="text-xl font-semibold">Controle de Estoque</h1>
       </div>
@@ -2071,10 +2106,11 @@ async function conferirTodos() {
         <Megaphone class="size-3.5" />
         Informar
       </button>
-      <div class="flex gap-1 rounded-md bg-muted/40 p-1 w-fit flex-wrap">
+      <div class="stock-tabs flex gap-1 rounded-md bg-muted/40 p-1 w-fit flex-wrap" aria-label="Áreas do controle de estoque">
         <button
           v-for="t in visibleTabs"
           :key="t"
+          :aria-pressed="tab === t"
           class="px-3 py-1.5 rounded text-sm transition-colors inline-flex items-center gap-1.5"
           :class="tab === t ? 'bg-background shadow-sm font-medium' : 'hover:bg-background/60 text-muted-foreground'"
           @click="tab = t"
@@ -2094,11 +2130,12 @@ async function conferirTodos() {
     </div>
 
     <!-- Filters bar -->
-    <div class="flex flex-wrap items-center gap-2 bg-muted/30 border rounded-md px-3 py-2 text-xs">
+    <div class="stock-filters flex flex-wrap items-center gap-2 bg-muted/30 border rounded-md px-3 py-2 text-xs">
       <input
         v-model="search"
         type="search"
         placeholder="Buscar SKU, nome, pedido…"
+        aria-label="Buscar SKU, nome ou pedido"
         class="h-7 border rounded px-2 bg-background min-w-[200px]"
       />
       <template v-if="tab === 'pedidos'">
@@ -2145,6 +2182,19 @@ async function conferirTodos() {
           </select>
         </label>
       </template>
+      <button
+        v-if="tab !== 'upload-nf' || canUseTagFilter"
+        type="button"
+        class="stock-filter-toggle items-center justify-center gap-1.5 rounded-md border bg-background px-3 text-xs font-medium"
+        :aria-expanded="mobileFiltersOpen"
+        aria-controls="stock-extra-filters"
+        @click="mobileFiltersOpen = !mobileFiltersOpen"
+      >
+        {{ mobileFiltersOpen ? 'Ocultar filtros' : 'Mais filtros' }}
+        <span v-if="mobileActiveFilters" class="rounded bg-primary px-1.5 py-0.5 text-primary-foreground">{{ mobileActiveFilters }}</span>
+        <ChevronDown class="size-3.5" :class="{ 'rotate-180': mobileFiltersOpen }" />
+      </button>
+      <div id="stock-extra-filters" class="stock-extra-filters" :class="{ 'is-open': mobileFiltersOpen }">
       <div
         v-if="canUseTagFilter || (isGerenteEtiquetas && tab === 'pedidos')"
         class="inline-flex items-center gap-1"
@@ -2297,16 +2347,27 @@ async function conferirTodos() {
           <ArrowDown v-else class="size-3.5" />
         </button>
       </label>
-      <div class="ml-auto inline-flex items-center gap-2 text-muted-foreground">
+      </div>
+      <div class="stock-filter-status ml-auto inline-flex items-center gap-2 text-muted-foreground" role="status">
         <Loader2 v-if="loading" class="size-3 animate-spin" />
         <span v-if="errorText" class="text-destructive">{{ errorText }}</span>
       </div>
     </div>
 
+    <div v-if="tab !== 'upload-nf'" class="stock-mobile-view items-center justify-between gap-2 text-xs">
+      <span class="text-muted-foreground">{{ mobileTable ? 'Tabela completa' : tab === 'pedidos' ? 'Pedidos completos' : 'Visualização compacta' }}</span>
+      <button type="button" class="rounded-md border px-3 py-2 font-medium" :aria-pressed="mobileTable" @click="mobileTable = !mobileTable">
+        {{ mobileTable ? 'Ver cartões' : 'Tabela completa' }}
+      </button>
+    </div>
+    <p v-if="mobileTable && tab !== 'upload-nf'" class="stock-scroll-hint text-xs text-muted-foreground">
+      Deslize a tabela para os lados para ver todos os detalhes.
+    </p>
+
     <!-- TAB: ESTOQUE ────────────────────────────────────────────────── -->
     <!-- Barra de progresso + "Conferir todos". Botão sempre visível
          (sem mínimo de %); ao 100% troca pro badge verde. -->
-    <div v-if="tab === 'estoque' && produtos.length > 0" class="flex items-center gap-3 text-xs">
+    <div v-if="tab === 'estoque' && produtos.length > 0" class="flex flex-wrap items-center gap-3 text-xs">
       <template v-if="conferidoPercent < 100">
         <button
           class="px-3 py-1.5 bg-emerald-600 text-white text-[11px] font-medium rounded hover:bg-emerald-700"
@@ -2322,7 +2383,47 @@ async function conferirTodos() {
         ✓ Estoque 100% conferido
       </span>
     </div>
-    <div v-if="tab === 'estoque'" class="border rounded-md overflow-x-auto">
+    <section v-if="tab === 'estoque'" class="stock-mobile-cards" aria-label="Produtos em estoque" :aria-busy="loading">
+      <p v-if="!produtosFiltered.length" class="stock-card-empty rounded-lg border p-5 text-center text-sm text-muted-foreground">
+        {{ loading ? 'Carregando estoque…' : 'Nenhum produto para esse filtro.' }}
+      </p>
+      <article v-for="row in produtosFiltered" :key="row.sku" class="stock-mobile-card rounded-lg border bg-background p-3">
+        <div class="flex flex-wrap items-center justify-between gap-2">
+          <p class="font-mono text-xs text-muted-foreground">{{ row.sku }}</p>
+          <label class="inline-flex min-h-10 cursor-pointer items-center gap-2 text-xs" :class="row.conferido ? 'text-emerald-700 dark:text-emerald-300' : 'text-muted-foreground'">
+            <input type="checkbox" :checked="row.conferido" :aria-label="`Conferido: ${row.sku}`" @change="toggleProduto(row)" />
+            {{ row.conferido ? 'Conferido' : 'Conferir' }}
+          </label>
+        </div>
+        <h2 class="mt-1 text-sm font-semibold leading-relaxed">{{ row.nome }}</h2>
+        <dl class="mt-3 grid grid-cols-3 gap-2 rounded-md bg-muted/30 p-2 text-xs">
+          <div><dt class="text-muted-foreground">Atual</dt><dd class="mt-1 text-lg font-semibold tabular-nums" :class="row.saldo_fisico <= 0 ? 'text-red-600' : ''">{{ row.saldo_fisico }}</dd></div>
+          <div><dt class="text-muted-foreground">Reserva</dt><dd class="mt-1 text-lg font-semibold tabular-nums" :class="row.reserva < 0 ? 'text-amber-700' : ''">{{ row.reserva }}</dd></div>
+          <div><dt class="text-muted-foreground">Disponível</dt><dd class="mt-1 text-lg font-semibold tabular-nums" :class="row.saldo_virtual <= 0 ? 'text-red-600' : 'text-emerald-700 dark:text-emerald-300'">{{ row.saldo_virtual }}</dd></div>
+        </dl>
+        <details class="stock-card-details mt-3 border-t pt-1">
+          <summary class="cursor-pointer py-3 text-xs font-medium">Entradas e saídas</summary>
+          <div class="space-y-3 pb-1 text-xs">
+            <p v-if="row.reserva < 0" class="text-amber-700 dark:text-amber-300">Reserva negativa: entrada prevista no Bling, já considerada no saldo disponível.</p>
+            <div>
+              <h3 class="font-medium">Entradas</h3>
+              <p v-if="!row.entradas.length" class="mt-1 text-muted-foreground">Nenhuma entrada no dia.</p>
+              <ul v-else class="mt-1 space-y-2">
+                <li v-for="entry in row.entradas" :key="entry.movement_id"><span class="font-semibold">{{ entry.qty }} un.</span><span v-if="entry.obs" class="ml-1 text-muted-foreground">— {{ entry.obs }}</span></li>
+              </ul>
+            </div>
+            <div>
+              <h3 class="font-medium">Saídas: {{ row.saida_qty_total }} un.</h3>
+              <p v-if="!row.saidas.length" class="mt-1 text-muted-foreground">{{ row.saida_origens || 'Nenhuma saída no dia.' }}</p>
+              <ul v-else class="mt-1 space-y-2">
+                <li v-for="exit in row.saidas" :key="exit.movement_id"><span class="font-semibold">{{ exit.qty }} un.</span><span v-if="exit.origem" class="ml-1 text-muted-foreground">— {{ exit.origem }}</span></li>
+              </ul>
+            </div>
+          </div>
+        </details>
+      </article>
+    </section>
+    <div v-if="tab === 'estoque'" class="stock-table stock-products border rounded-md overflow-x-auto" tabindex="0" role="region" aria-label="Tabela de estoque">
       <table class="grid-table w-full text-xs border-collapse">
         <colgroup>
           <col style="width: 80px" />   <!-- SKU -->
@@ -2428,7 +2529,7 @@ async function conferirTodos() {
          da cerca dele (e o admin) vê a mesma lista só como aviso. -->
     <div
       v-if="tab === 'pedidos' && videosPendentes.length"
-      class="border rounded-md overflow-x-auto"
+      class="stock-pending-videos border rounded-md overflow-x-auto"
       :class="canAccessPedidos ? 'border-amber-400' : ''"
     >
       <div class="px-4 text-center space-y-1" :class="canAccessPedidos ? 'py-3' : 'py-6'">
@@ -2465,9 +2566,9 @@ async function conferirTodos() {
             <tr
               v-for="(it, i) in p.itens"
               :key="`${p.pedido_bling}-${i}`"
-              :class="{ 'border-t-2 border-t-muted-foreground/30': i === 0 }"
+              :class="{ 'border-t-2 border-t-muted-foreground/30': i === 0, 'stock-video-continuation': i > 0 }"
             >
-              <td class="whitespace-nowrap text-[11px] align-top">
+              <td data-label="Solicitado" class="whitespace-nowrap text-[11px] align-top">
                 <template v-if="i === 0">
                   {{ fmtVideoQuando(p.solicitado_em) }}
                   <span
@@ -2485,14 +2586,14 @@ async function conferirTodos() {
                   </div>
                 </template>
               </td>
-              <td class="font-mono text-[11px] align-top">{{ i === 0 ? p.pedido_bling : '' }}</td>
-              <td class="font-mono text-[11px] align-top">{{ i === 0 ? (p.pedido_marketplace || '—') : '' }}</td>
-              <td class="align-top">{{ i === 0 ? (p.loja || '—') : '' }}</td>
-              <td class="truncate max-w-[160px] align-top" :title="p.cliente || ''">{{ i === 0 ? (p.cliente || '—') : '' }}</td>
-              <td class="font-mono text-[11px] align-top">{{ it.sku || '—' }}</td>
-              <td class="truncate max-w-[280px] align-top" :title="it.produto || ''">{{ it.produto || '—' }}</td>
-              <td class="text-right align-top">{{ it.quantidade }}</td>
-              <td class="text-center align-top">
+              <td data-label="Pedido Bling" class="font-mono text-[11px] align-top">{{ i === 0 ? p.pedido_bling : '' }}</td>
+              <td data-label="Marketplace" class="font-mono text-[11px] align-top">{{ i === 0 ? (p.pedido_marketplace || '—') : '' }}</td>
+              <td data-label="Loja" class="align-top">{{ i === 0 ? (p.loja || '—') : '' }}</td>
+              <td data-label="Cliente" class="truncate max-w-[160px] align-top" :title="p.cliente || ''">{{ i === 0 ? (p.cliente || '—') : '' }}</td>
+              <td data-label="SKU" class="font-mono text-[11px] align-top">{{ it.sku || '—' }}</td>
+              <td data-label="Produto" class="truncate max-w-[280px] align-top" :title="it.produto || ''">{{ it.produto || '—' }}</td>
+              <td data-label="Quantidade" class="text-right align-top">{{ it.quantidade }}</td>
+              <td data-label="Etiqueta" class="text-center align-top">
                 <a
                   v-if="i === 0 && p.etiqueta_disponivel"
                   :href="etiquetaVideoUrl(p)"
@@ -2510,7 +2611,7 @@ async function conferirTodos() {
                   title="Etiqueta não guardada (pedido anterior a 03/08)"
                 >—</span>
               </td>
-              <td class="align-top">
+              <td data-label="Link do vídeo" class="align-top">
                 <template v-if="i === 0">
                   <div class="flex items-center gap-1">
                     <input
@@ -2572,7 +2673,7 @@ async function conferirTodos() {
       </table>
       <p v-if="videoErro" class="px-4 py-2 text-xs text-red-500">{{ videoErro }}</p>
     </div>
-    <div v-if="tab === 'pedidos' && canAccessPedidos" class="flex flex-wrap items-center gap-2 text-xs">
+    <div v-if="tab === 'pedidos' && canAccessPedidos" class="stock-order-actions flex flex-wrap items-center gap-2 text-xs">
       <span class="inline-flex items-center gap-1.5 rounded-md bg-primary text-primary-foreground px-2.5 py-1 font-semibold">
         Total: {{ totalPedidos }} pedidos
       </span>
@@ -2687,7 +2788,71 @@ async function conferirTodos() {
         Abrir chamados de atraso ({{ selecionadosCount }})
       </button>
     </div>
-    <div v-if="tab === 'pedidos' && canAccessPedidos" class="border rounded-md overflow-x-auto">
+    <section v-if="tab === 'pedidos' && canAccessPedidos" class="stock-mobile-cards" aria-label="Pedidos por loja" :aria-busy="loading">
+      <label v-if="pedidosComEtiqueta.length" class="stock-card-empty flex min-h-11 cursor-pointer items-center gap-2 text-xs">
+        <input type="checkbox" class="size-4" :checked="todasSelecionadas" @change="toggleTodasEtiquetas" />
+        Selecionar todos os pedidos com etiqueta
+      </label>
+      <p v-if="!pedidosMobile.length" class="stock-card-empty rounded-lg border p-5 text-center text-sm text-muted-foreground">
+        {{ loading ? 'Carregando pedidos…' : 'Nenhum pedido nesse período.' }}
+      </p>
+      <article v-for="group in pedidosMobile" :key="group.key" class="stock-mobile-card rounded-lg border bg-background p-3">
+        <div class="flex flex-wrap items-center justify-between gap-2">
+          <p class="text-xs font-medium text-muted-foreground">{{ group.row.loja || 'Loja não informada' }}</p>
+          <span class="rounded px-2 py-1 text-xs font-medium" :class="group.row.status === 'enviado' ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300' : group.row.status === 'previsao' ? 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-300' : 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300'">
+            {{ group.row.status === 'enviado' ? 'Enviado' : group.row.status === 'previsao' ? (previsaoDia(group.row) === 'amanha' ? 'Previsão · amanhã' : 'Previsão · hoje') : 'Não enviado' }}
+          </span>
+        </div>
+        <p class="mt-3 text-[11px] text-muted-foreground">Pedido no marketplace</p>
+        <h2 class="font-mono text-sm font-semibold">{{ group.row.pedido_marketplace || '—' }}</h2>
+        <p class="mt-1 text-xs text-muted-foreground">Pedido Bling: <span class="font-mono text-foreground">{{ group.row.pedido_bling || '—' }}</span></p>
+        <p class="mt-2 text-xs"><span class="text-muted-foreground">Cliente: </span>{{ group.row.cliente || 'Não informado' }}</p>
+        <p v-if="corteInfo(group.row)" class="mt-2 text-xs" :class="corteInfo(group.row)!.cls">{{ corteInfo(group.row)!.label }}</p>
+        <ul class="mt-3 space-y-3 border-t pt-3">
+          <li v-for="item in group.itens" :key="item.id" class="flex items-start justify-between gap-3">
+            <div class="min-w-0"><p class="text-sm leading-relaxed">{{ item.produto || 'Produto não informado' }}</p><p class="mt-1 font-mono text-xs text-muted-foreground">{{ item.sku || 'SKU não informado' }}</p></div>
+            <span class="shrink-0 rounded bg-muted px-2 py-1 text-xs font-semibold tabular-nums">{{ item.quantidade }} un.</span>
+          </li>
+        </ul>
+        <div class="mt-3 border-t pt-3">
+          <dl class="stock-order-facts grid grid-cols-2 gap-x-3 gap-y-3 text-xs">
+            <div><dt>Data de envio</dt><dd>{{ group.row.data_envio ? _isoBR(group.row.data_envio.slice(0, 10)) : '—' }}</dd></div>
+            <div><dt>Etiqueta recebida</dt><dd>{{ etiquetaHora(group.row) || '—' }}</dd></div>
+            <div><dt>Etiqueta impressa</dt><dd>{{ impressaHora(group.row) || '—' }}</dd></div>
+            <div><dt>Envio confirmado</dt><dd>{{ group.row.status === 'enviado' ? (envioHora(group.row) || 'Enviado') : 'Ainda não enviado' }}</dd></div>
+            <div v-if="group.row.previsao_impressa_em"><dt>Previsão impressa</dt><dd>{{ previsaoImpressaHora(group.row) }}</dd></div>
+            <div v-if="!group.row.etiqueta_disponivel"><dt>Arquivo da etiqueta</dt><dd>Ainda não disponível</dd></div>
+            <div v-if="!group.row.chamado_atraso && !(group.row.pedido_bling && podeChamado(group.row))"><dt>Chamado</dt><dd>—</dd></div>
+          </dl>
+          <div class="mt-3 flex flex-wrap gap-2">
+            <a v-if="group.row.etiqueta_disponivel" :href="etiquetaUrl(group.row)" target="_blank" rel="noopener" class="inline-flex items-center justify-center gap-1 rounded-md bg-primary px-3 py-2 text-xs text-primary-foreground" @click="confirmarCompartilhado(group.row, $event)">
+              <Printer class="size-4" /> Imprimir etiqueta
+              <Package v-if="group.row.nf_caixa" class="size-4" aria-label="a última página vai dentro da caixa" />
+            </a>
+            <a v-if="group.row.video" :href="group.row.video.link" target="_blank" rel="noopener" :title="videoTitulo(group.row)" class="inline-flex items-center justify-center gap-1 rounded-md border px-3 py-2 text-xs"><Video class="size-4" /> Ver vídeo</a>
+            <button type="button" class="inline-flex items-center justify-center gap-1 rounded-md border px-3 py-2 text-xs" :class="group.row.pede_video && !group.row.video ? 'border-rose-400 text-rose-700 dark:text-rose-300' : ''" @click="abrirVideo(group.row)">
+              <Video class="size-4" /> {{ group.row.video ? 'Editar vídeo' : group.row.pede_video ? 'Vídeo obrigatório' : 'Adicionar vídeo' }}
+            </button>
+            <NuxtLink v-if="group.row.chamado_atraso" :to="{ path: '/chamados', query: group.row.pedido_bling ? { search: group.row.pedido_bling } : {} }" class="inline-flex items-center gap-1 rounded-md border px-3 py-2 text-xs"><LifeBuoy class="size-4" /> Chamado: {{ chamadoAtrasoLabel(group.row.chamado_atraso) }}</NuxtLink>
+            <button v-else-if="group.row.pedido_bling && podeChamado(group.row)" type="button" :disabled="chamadoEnviando.has(group.row.pedido_bling) || chamadoAberto.has(group.row.pedido_bling)" class="inline-flex items-center gap-1 rounded-md border px-3 py-2 text-xs disabled:opacity-50" @click="abrirChamado(group.row)"><LifeBuoy class="size-4" /> {{ chamadoAberto.has(group.row.pedido_bling) ? 'Chamado aberto' : 'Abrir chamado' }}</button>
+          </div>
+          <p v-if="group.row.video" class="mt-2 text-xs text-muted-foreground">Vídeo salvo em {{ fmtDataHoraBrt(group.row.video.salvo_em) }}<template v-if="group.row.video.salvo_por"> por {{ group.row.video.salvo_por }}</template>.</p>
+          <p v-if="group.row.chamado_atraso" class="mt-2 text-xs text-muted-foreground">Motivo do chamado: {{ chamadoAtrasoMotivo(group.row.chamado_atraso) }}.</p>
+          <p v-if="group.row.nf_caixa" class="mt-2 text-xs text-muted-foreground">A última página da impressão (NF de 100%) vai dentro da caixa.</p>
+          <label v-if="group.row.etiqueta_disponivel && group.row.pedido_bling" class="mt-2 flex min-h-11 cursor-pointer items-center gap-2 text-xs">
+            <input type="checkbox" :checked="etiquetasSel.has(group.row.pedido_bling)" @change="toggleEtiquetaSel(group.row.pedido_bling)" /> Selecionar para impressão em lote
+          </label>
+          <label v-else-if="group.row.status === 'previsao' && group.row.pedido_bling" class="mt-2 flex min-h-11 cursor-pointer items-center gap-2 text-xs">
+            <input type="checkbox" :checked="previsoesSel.has(group.row.pedido_bling)" @change="togglePrevisaoSel(group.row.pedido_bling)" /> Selecionar previsão para impressão
+          </label>
+          <label v-for="item in group.itens" :key="`obs-${item.id}`" class="mt-3 block text-xs">
+            <span class="mb-1 block text-muted-foreground">Observação{{ group.itens.length > 1 ? ` · ${item.sku || 'item'}` : '' }}</span>
+            <input :value="item.observacao || ''" class="w-full min-w-0 rounded-md border bg-background px-2 py-2" placeholder="Adicionar observação" @blur="(e) => patchPedidoObs(item, (e.target as HTMLInputElement).value)" />
+          </label>
+        </div>
+      </article>
+    </section>
+    <div v-if="tab === 'pedidos' && canAccessPedidos" class="stock-table stock-orders border rounded-md overflow-x-auto" tabindex="0" role="region" aria-label="Tabela de pedidos">
       <table class="grid-table w-full text-xs border-collapse">
         <thead>
           <tr class="bg-muted/30 text-[10px] uppercase tracking-wide">
@@ -2762,6 +2927,11 @@ async function conferirTodos() {
             <td class="font-mono text-[11px]">{{ row.pedido_marketplace || '—' }}</td>
             <td>
               {{ row.loja || '—' }}
+              <span
+                v-if="row.flex"
+                class="ml-1 inline-block px-1.5 py-px rounded border border-violet-300 bg-violet-50 text-[9px] font-semibold text-violet-800 dark:border-violet-700 dark:bg-violet-950/40 dark:text-violet-300"
+                title="Envio Flex: sai de São Bernardo (estoque .sp) e é entregue no mesmo dia ou no dia seguinte. Separe a peça do .sp."
+              >Flex</span>
               <!-- Horário de corte ("despachar até" do marketplace). Só em
                    pedido não enviado; some sozinho quando o envio confirma. -->
               <div
@@ -2937,7 +3107,24 @@ async function conferirTodos() {
         Ir para Estoque
       </button>
     </div>
-    <div v-else-if="tab === 'envios'" class="border rounded-md overflow-x-auto">
+    <section v-if="tab === 'envios' && canAccessEnvios" class="stock-mobile-cards" aria-label="Envios por dia" :aria-busy="loading">
+      <div v-if="envios.items.length" class="stock-card-empty grid grid-cols-2 gap-2 rounded-lg border bg-muted/30 p-3 text-xs">
+        <div><p class="text-muted-foreground">Envios conferidos</p><p class="mt-1 text-lg font-semibold">{{ envios.total }}</p></div>
+        <div><p class="text-muted-foreground">Total de envios</p><p class="mt-1 text-lg font-semibold">{{ envios.total_envios }}</p></div>
+      </div>
+      <p v-if="!envios.items.length" class="stock-card-empty rounded-lg border p-5 text-center text-sm text-muted-foreground">{{ loading ? 'Carregando envios…' : 'Nenhum envio no período.' }}</p>
+      <article v-for="row in envios.items" :key="row.data" class="stock-mobile-card rounded-lg border bg-background p-3">
+        <div class="flex flex-wrap items-center justify-between gap-2"><h2 class="text-sm font-semibold">{{ formatDateBR(row.data) }}</h2><span class="rounded bg-muted px-2 py-1 text-xs font-medium">{{ row.envios }} envio(s)</span></div>
+        <dl class="stock-card-facts mt-3 space-y-2 text-xs">
+          <div><dt>Conferência do estoque</dt><dd>{{ row.conferencia_estoque === 'total' ? 'Total' : row.conferencia_estoque === 'parcial' ? 'Parcial' : 'Não conferido' }}</dd></div>
+          <div><dt>Vídeos</dt><dd>{{ row.videos.status === 'nenhum' ? 'Nenhum necessário' : `${row.videos.feitos}/${row.videos.necessarios} feitos` }}</dd></div>
+        </dl>
+        <details v-if="row.videos.pendentes.length" class="stock-card-details mt-3 border-t"><summary class="cursor-pointer py-3 text-xs font-medium">Pedidos com vídeo pendente</summary><ul class="space-y-1 text-xs"><li v-for="pedido in row.videos.pendentes" :key="pedido" class="font-mono">{{ pedido }}</li></ul></details>
+        <label v-if="isAdmin" class="mt-3 flex min-h-11 cursor-pointer items-center gap-2 border-t pt-2 text-xs"><input type="checkbox" :checked="row.conferido" @change="toggleEnvio(row)" /> {{ row.conferido ? 'Envios conferidos' : 'Conferir envios' }}</label>
+        <p v-else class="mt-3 border-t pt-2 text-xs" :class="row.conferido ? 'text-emerald-700 dark:text-emerald-300' : 'text-muted-foreground'">{{ row.conferido ? 'Envios conferidos' : 'Envios não conferidos' }}</p>
+      </article>
+    </section>
+    <div v-if="tab === 'envios' && canAccessEnvios" class="stock-table stock-shipments border rounded-md overflow-x-auto" tabindex="0" role="region" aria-label="Tabela de envios">
       <table class="grid-table w-full text-xs border-collapse">
         <thead>
           <tr class="bg-muted/30 text-[10px] uppercase tracking-wide">
@@ -3427,6 +3614,305 @@ async function conferirTodos() {
 </template>
 
 <style scoped>
+.stock-filter-toggle,
+.stock-scroll-hint,
+.stock-mobile-view,
+.stock-mobile-cards {
+  display: none;
+}
+.stock-extra-filters {
+  display: contents;
+}
+
+@media (max-width: 1023px) {
+  .controle-estoque {
+    padding: 0.75rem;
+  }
+  .stock-mobile-view {
+    display: flex;
+  }
+  .stock-mobile-cards {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0.75rem;
+    align-items: start;
+  }
+  .stock-mobile-card {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+  .stock-card-empty {
+    grid-column: 1 / -1;
+  }
+  .stock-mobile-card input[type='checkbox'] {
+    width: 1.125rem;
+    height: 1.125rem;
+    flex-shrink: 0;
+  }
+  .stock-mobile-card button,
+  .stock-mobile-card a,
+  .stock-mobile-card input:not([type='checkbox']) {
+    min-height: 2.75rem;
+    max-width: 100%;
+  }
+  .stock-mobile-card input:not([type='checkbox']) {
+    font-size: 1rem;
+  }
+  .stock-card-facts > div {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 0.5rem;
+  }
+  .stock-card-facts dt {
+    color: hsl(var(--muted-foreground));
+  }
+  .stock-card-facts dd {
+    text-align: right;
+  }
+  .stock-card-details > summary {
+    min-height: 2.75rem;
+  }
+  .stock-order-facts dt {
+    color: hsl(var(--muted-foreground));
+    font-size: 0.6875rem;
+  }
+  .stock-order-facts dd {
+    margin-top: 0.25rem;
+    font-weight: 500;
+  }
+  .stock-table {
+    display: none;
+  }
+  .stock-as-table .stock-table {
+    display: block;
+  }
+  .stock-as-table .stock-mobile-cards {
+    display: none;
+  }
+  .controle-estoque:not(.stock-as-table) .stock-pending-videos table,
+  .controle-estoque:not(.stock-as-table) .stock-pending-videos tbody {
+    display: block;
+    width: 100%;
+  }
+  .controle-estoque:not(.stock-as-table) .stock-pending-videos thead {
+    display: none;
+  }
+  .controle-estoque:not(.stock-as-table) .stock-pending-videos tr {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.5rem;
+    padding: 0.75rem;
+    border-top: 1px solid hsl(var(--border));
+  }
+  .controle-estoque:not(.stock-as-table) .stock-pending-videos td {
+    display: block;
+    min-width: 0;
+    max-width: none;
+    padding: 0;
+    border: 0;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    text-align: left;
+  }
+  .controle-estoque:not(.stock-as-table) .stock-pending-videos td::before {
+    content: attr(data-label);
+    display: block;
+    margin-bottom: 0.25rem;
+    font-size: 0.6875rem;
+    color: hsl(var(--muted-foreground));
+  }
+  .controle-estoque:not(.stock-as-table) .stock-pending-videos td:last-child {
+    grid-column: 1 / -1;
+  }
+  .controle-estoque:not(.stock-as-table) .stock-pending-videos td:last-child .flex {
+    flex-wrap: wrap;
+  }
+  .controle-estoque:not(.stock-as-table) .stock-pending-videos input {
+    min-width: 0;
+    min-height: 2.75rem;
+    flex-basis: 100%;
+    font-size: 1rem;
+  }
+  .controle-estoque:not(.stock-as-table) .stock-pending-videos button,
+  .controle-estoque:not(.stock-as-table) .stock-pending-videos a {
+    min-height: 2.75rem;
+  }
+  .controle-estoque:not(.stock-as-table) .stock-pending-videos .stock-video-continuation td:nth-child(-n+5),
+  .controle-estoque:not(.stock-as-table) .stock-pending-videos .stock-video-continuation td:nth-last-child(-n+2) {
+    display: none;
+  }
+  .stock-header {
+    gap: 0.5rem;
+  }
+  .stock-title {
+    flex-basis: 100%;
+  }
+  .stock-title h1 {
+    font-size: 1.125rem;
+  }
+  .stock-header > button {
+    flex: 1 1 auto;
+    min-height: 2.75rem;
+    margin-left: 0;
+    padding: 0.5rem;
+    justify-content: center;
+    font-size: 0.75rem;
+  }
+  .stock-header > span {
+    width: 100%;
+    overflow-wrap: anywhere;
+  }
+  .stock-tabs {
+    display: grid;
+    width: 100%;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+  .stock-tabs > button {
+    min-width: 0;
+    min-height: 3.25rem;
+    flex-direction: column;
+    justify-content: center;
+    gap: 0.25rem;
+    padding: 0.375rem 0.125rem;
+    font-size: 0.6875rem;
+    white-space: nowrap;
+  }
+  .stock-filters {
+    gap: 0.5rem;
+    padding: 0.625rem;
+  }
+  .stock-filters > input[type='search'] {
+    width: 100%;
+    min-width: 0;
+  }
+  .stock-filters > label {
+    flex: 1 1 100%;
+    min-width: 0;
+  }
+  .stock-filters > label > input,
+  .stock-filters > label > select {
+    flex: 1;
+    min-width: 0;
+  }
+  .stock-filters input:not([type='checkbox']),
+  .stock-filters select {
+    min-height: 2.75rem;
+    max-width: 100%;
+    font-size: 1rem;
+  }
+  .stock-filter-toggle {
+    display: flex;
+    width: 100%;
+    min-height: 2.75rem;
+  }
+  .stock-extra-filters {
+    display: none;
+  }
+  .stock-extra-filters.is-open {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0.625rem;
+    width: 100%;
+    border-top: 1px solid hsl(var(--border));
+    padding-top: 0.625rem;
+  }
+  .stock-extra-filters > label,
+  .stock-extra-filters > div {
+    min-width: 0;
+    width: 100%;
+  }
+  .stock-extra-filters select,
+  .stock-extra-filters > div > button {
+    flex: 1;
+    min-width: 0;
+    width: 0;
+    max-width: none;
+  }
+  .stock-extra-filters button {
+    min-height: 2.75rem;
+  }
+  .stock-extra-filters label > button {
+    min-width: 2.75rem;
+    justify-content: center;
+  }
+  .stock-filter-status {
+    width: 100%;
+    overflow-wrap: anywhere;
+  }
+  .stock-filter-status:empty {
+    display: none;
+  }
+  .stock-scroll-hint {
+    display: block;
+  }
+  .stock-table {
+    max-width: 100%;
+    overscroll-behavior-x: contain;
+    -webkit-overflow-scrolling: touch;
+  }
+  .stock-products > table {
+    min-width: 760px;
+  }
+  .stock-orders > table {
+    min-width: 1280px;
+  }
+  .stock-shipments > table {
+    min-width: 520px;
+  }
+  .stock-table .grid-table th,
+  .stock-table .grid-table td {
+    padding: 0.5rem;
+    font-size: 0.75rem;
+  }
+  .stock-table input[type='checkbox'] {
+    width: 1.25rem;
+    height: 1.25rem;
+  }
+  .stock-table button,
+  .stock-table a {
+    min-height: 2.5rem;
+  }
+  .stock-order-actions > button {
+    min-height: 2.75rem;
+    margin-left: 0;
+    flex: 1 1 auto;
+    justify-content: center;
+  }
+  .controle-estoque > .fixed > div {
+    max-height: calc(100dvh - 2rem);
+    overflow-y: auto;
+  }
+  .controle-estoque > .fixed > div > .border-t {
+    flex-wrap: wrap;
+  }
+  .controle-estoque > .fixed button {
+    min-height: 2.75rem;
+  }
+}
+
+/* Landscape uses the extra width without reintroducing a wide spreadsheet. */
+@media (min-width: 640px) and (max-width: 1023px) {
+  .stock-mobile-cards {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .stock-title {
+    flex: 1 1 auto;
+  }
+  .stock-filters > input[type='search'] {
+    flex: 1 1 14rem;
+    width: auto;
+  }
+  .stock-filters > label {
+    flex: 1 1 auto;
+  }
+  .stock-filter-toggle {
+    width: auto;
+  }
+  .stock-extra-filters.is-open {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
 /* Full-grid borders on every cell — spreadsheet look. Padding kept tight
    so the row count visible on screen stays high. */
 .grid-table th,

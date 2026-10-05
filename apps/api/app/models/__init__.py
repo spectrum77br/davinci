@@ -1,5 +1,7 @@
 from app.models.alert import Alert
 from app.models.atendimento import (
+    AtendimentoAutomacaoRegistro,
+    AtendimentoAutomacaoRegra,
     AtendimentoAvaliacao,
     AtendimentoAvaliacaoLoja,
     AtendimentoCanal,
@@ -106,6 +108,7 @@ from app.models.financeiro import (
     FinanceiroSuprimentos,
     NCMCache,
 )
+from app.models.flex import FlexAnuncioEstado, FlexConta, FlexEmergencia, FlexLog, FlexPedido
 from app.models.imagem_publica import ImagemPublica
 from app.models.importacao import (
     CotacaoFabricante,
@@ -242,6 +245,8 @@ __all__ = [
     "NfseModelo",
     "NfseTomador",
     "Alert",
+    "AtendimentoAutomacaoRegistro",
+    "AtendimentoAutomacaoRegra",
     "AtendimentoAvaliacao",
     "AtendimentoAvaliacaoLoja",
     "AtendimentoCanal",
@@ -337,6 +342,11 @@ __all__ = [
     "ListingRequest",
     "ListingRequestStatus",
     "ListingStatus",
+    "FlexAnuncioEstado",
+    "FlexConta",
+    "FlexEmergencia",
+    "FlexLog",
+    "FlexPedido",
     "Logistica",
     "LogisticaMensagemCliente",
     "LogisticaMensagemTemplate",

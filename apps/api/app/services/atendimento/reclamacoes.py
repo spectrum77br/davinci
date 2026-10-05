@@ -133,6 +133,14 @@ CONCORRENCIA_CONTAS = 3
 # A leitura que falhou (404 numa reclamação antiga, 5xx) não é repetida a
 # cada rodada: só depois disto, ou quando a reclamação mexer de novo.
 RETENTAR_FALHA = timedelta(hours=1)
+# A ABERTA é relida mesmo sem mexer o `last_updated` (05/10/2026): mensagem
+# nova do comprador ou da loja nem sempre muda essa data — na reclamação
+# 5586923869 (Kia) a do comprador de 02/10 14:06 só entrou em 04/10 09:46.
+# Menor que o intervalo do cron (10 min): toda rodada relê as abertas (18 em
+# 05/10), com cota PRÓPRIA por conta (`MAX_RELEITURAS_RODADA`): a releitura
+# nunca toma a vez da primeira leitura de uma reclamação nova.
+RELER_ABERTA = timedelta(minutes=9)
+MAX_RELEITURAS_RODADA = 20
 
 # ── A rodada ──────────────────────────────────────────────────────────────
 # Menor que o intervalo do cron (10 min): se o processo morrer, a próxima roda.
@@ -508,15 +516,22 @@ def mensagens_do_sistema(
 
 @dataclass
 class _Cota:
-    """Reclamações que ainda podem ser LIDAS nesta rodada, nesta conta."""
+    """Reclamações que ainda podem ser LIDAS nesta rodada, nesta conta.
+
+    `releituras` é a cota à parte da aberta relida só pelo tempo (RELER_ABERTA).
+    """
 
     restantes: int
+    releituras: int = 0
 
-    def pode(self) -> bool:
-        return self.restantes > 0
+    def pode(self, *, releitura: bool = False) -> bool:
+        return (self.releituras if releitura else self.restantes) > 0
 
-    def gastar(self) -> None:
-        self.restantes -= 1
+    def gastar(self, *, releitura: bool = False) -> None:
+        if releitura:
+            self.releituras -= 1
+        else:
+            self.restantes -= 1
 
 
 @dataclass
@@ -591,12 +606,26 @@ async def _pack_do_pedido(session: AsyncSession, cliente: Any, order_id: str | N
     return pack if pack and pack != order_id else None
 
 
-async def _ler(session: AsyncSession, cliente: Any, claim: dict, *, buscar_pack: bool) -> _Leitura:
+async def _ler(
+    session: AsyncSession,
+    cliente: Any,
+    claim: dict,
+    *,
+    buscar_pack: bool,
+    so_mensagens: bool = False,
+) -> _Leitura:
     """As chamadas de UMA reclamação. As mensagens levantam (sem elas não há
-    leitura); devolução, reputação e pack são enfeite: falhou, fica sem."""
+    leitura); devolução, reputação e pack são enfeite: falhou, fica sem.
+
+    `so_mensagens`: a releitura só pelo tempo (RELER_ABERTA) busca SÓ as
+    mensagens — a devolução e a reputação só mudam com o `last_updated`, e
+    buscá-las a cada rodada estourava o limite do ML (/returns com HTTP 429
+    em toda rodada, 05/10/2026)."""
     cid = _id(claim.get("id"))
     mensagens = await cliente.mensagens_da_reclamacao(cid)
     leitura = _Leitura(mensagens=mensagens)
+    if so_mensagens:
+        return leitura
     try:
         leitura.devolucao = _devolucao(await cliente.devolucao_da_reclamacao(cid))
     except Exception as exc:  # noqa: BLE001
@@ -684,6 +713,14 @@ async def _linha(session: AsyncSession, cid: str) -> AtendimentoReclamacao | Non
             )
         )
     ).scalar_one_or_none()
+
+
+def _reler_aberta(claim: dict, anteriores: dict, agora: datetime) -> bool:
+    """A aberta já lida volta a ser lida depois de RELER_ABERTA (sem `lido_em`: já)."""
+    if _id(claim.get("status")) != STATUS_ML_ABERTA:
+        return False
+    lido_em = data_ml(anteriores.get("lido_em"))
+    return lido_em is None or agora - lido_em >= RELER_ABERTA
 
 
 def _falhou_ha_pouco(
@@ -887,6 +924,9 @@ async def processar_reclamacao(
     anteriores = dict((linha.dados if linha is not None else None) or {})
     mexeu = linha is None or anteriores.get("last_updated") != last_updated
     lida = anteriores.get("lido_ate") == last_updated and linha is not None and linha.conversa_id
+    releitura = bool(lida) and not mexeu and _reler_aberta(claim, anteriores, agora)
+    if releitura:
+        lida = False  # aberta e lida há mais que RELER_ABERTA: relê as mensagens
     if not mexeu and lida:
         return  # nada mudou desde a última leitura: nem escrita, nem chamada
 
@@ -912,12 +952,22 @@ async def processar_reclamacao(
 
     leitura: _Leitura | None = None
     if not lida and not _falhou_ha_pouco(linha, last_updated, agora):
-        if cota.pode():
-            cota.gastar()
+        if cota.pode(releitura=releitura):
+            cota.gastar(releitura=releitura)
             try:
                 leitura = await _ler(
-                    session, cliente, claim, buscar_pack="pack_conferido" not in anteriores
+                    session,
+                    cliente,
+                    claim,
+                    buscar_pack="pack_conferido" not in anteriores,
+                    so_mensagens=releitura,
                 )
+                if releitura:
+                    # O que não foi buscado fica como estava (a devolução dá o
+                    # anúncio da conversa: sem ela, o upsert o apagaria).
+                    anterior = anteriores.get("devolucao")
+                    leitura.devolucao = anterior if isinstance(anterior, dict) else None
+                    leitura.reputacao = _id(anteriores.get("reputacao")) or None
             except Exception as exc:  # noqa: BLE001 — a linha entra; a conversa, depois
                 resumo.erros += 1
                 dados["leitura_falhou"] = {"em": _iso(agora), "last_updated": last_updated}
@@ -949,7 +999,7 @@ async def processar_reclamacao(
             session, integration, claim, linha, leitura, agora
         )
         linha.conversa_id = conversa.id
-        linha.dados = {**dados, "lido_ate": last_updated}
+        linha.dados = {**dados, "lido_ate": last_updated, "lido_em": _iso(agora)}
         resumo.mensagens += novas
         if criada:
             resumo.conversas_novas += 1
@@ -1073,7 +1123,7 @@ async def sincronizar_reclamacoes_ml(
             except Exception as exc:  # noqa: BLE001
                 resumo.erros += 1
                 logger.info("atendimento_reclamacao_conferir_falhou", claim_id=cid, erro=_erro(exc))
-        cota = _Cota(MAX_LEITURAS_RODADA)
+        cota = _Cota(MAX_LEITURAS_RODADA, MAX_RELEITURAS_RODADA)
         feitas: set[str] = set()
         # As abertas primeiro: são elas que têm prazo (e a cota pode acabar).
         for claim in [*abertas, *conferidas, *encerradas]:

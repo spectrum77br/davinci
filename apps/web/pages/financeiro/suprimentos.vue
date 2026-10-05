@@ -82,7 +82,7 @@ type Row = {
   nome_comercial: string | null
   certificado: string | null
   numero: string | null
-  valor: number | null
+  valor: number | string | null
   inicio: string | null  // YYYY-MM-DD
   fim: string | null
   tem_pdf: boolean
@@ -98,6 +98,7 @@ type Row = {
 }
 
 const rows = ref<Row[]>([])
+const mobileTableMode = ref(false)
 const loading = ref(false)
 const errorText = ref<string | null>(null)
 const exporting = ref(false)
@@ -524,7 +525,40 @@ const totalRows = computed(() => rows.value.length)
     <p v-if="inmetroSyncError" role="alert" class="text-sm text-destructive">{{ inmetroSyncError }}</p>
     <div v-if="errorText" role="alert" class="text-sm text-destructive">{{ errorText }}</div>
 
-    <div class="border overflow-x-auto">
+    <div class="flex justify-end lg:hidden">
+      <button class="rounded-lg border px-3 py-2 text-xs" :aria-pressed="mobileTableMode" @click="mobileTableMode = !mobileTableMode">{{ mobileTableMode ? 'Ver cartões' : 'Ver tabela' }}</button>
+    </div>
+    <section v-if="!mobileTableMode" class="grid gap-3 sm:grid-cols-2 lg:hidden" aria-label="Certificações por produto">
+      <article v-for="row in rows" :key="row.id" class="min-w-0 rounded-xl border p-3" :class="rowStatusClass(row)">
+        <div class="flex flex-wrap items-start justify-between gap-2">
+          <div class="min-w-0"><h2 class="break-words text-sm font-semibold">{{ row.produto || 'Produto não informado' }}</h2><p class="mt-1 break-words text-xs text-muted-foreground">{{ row.modelo || 'Modelo não informado' }}</p></div>
+          <span class="rounded-md bg-muted px-2 py-1 text-xs uppercase">{{ row.certificado || 'Não informado' }}</span>
+        </div>
+        <dl class="mt-3 space-y-2 text-xs">
+          <div class="flex justify-between gap-3"><dt class="text-muted-foreground">Validade</dt><dd class="text-right font-medium">{{ formatDate(row.fim) }}</dd></div>
+          <div class="flex justify-between gap-3"><dt class="text-muted-foreground">Situação oficial</dt><dd class="text-right" :class="officialSituationClass(row)">{{ officialSituation(row) }}</dd></div>
+        </dl>
+        <p v-if="isMissingSource(row)" class="mt-2 text-xs text-amber-700 dark:text-amber-400">Não localizado na última consulta · dados anteriores</p>
+        <details class="mt-3 border-t pt-2 text-xs">
+          <summary class="cursor-pointer py-2 text-muted-foreground">Mais detalhes</summary>
+          <dl class="space-y-2 pt-2">
+            <div><dt class="text-muted-foreground">Nome comercial</dt><dd class="break-words">{{ row.nome_comercial || '—' }}</dd></div>
+            <div><dt class="text-muted-foreground">Número</dt><dd class="break-all">{{ row.numero || '—' }}</dd></div>
+            <div><dt class="text-muted-foreground">Início</dt><dd>{{ formatDate(row.inicio) }}</dd></div>
+            <div><dt class="text-muted-foreground">Valor</dt><dd>{{ row.valor == null ? '—' : Number(row.valor).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' }) }}</dd></div>
+          </dl>
+          <p v-if="officialAlerts(row).length" class="mt-2 text-amber-700 dark:text-amber-400">Confira as observações nos dados oficiais.</p>
+        </details>
+        <div class="mt-2 flex flex-wrap items-center gap-2">
+          <button v-if="isLinked(row)" class="rounded-lg border px-3 py-2 text-xs" @click="openDetails(row)">Dados oficiais</button>
+          <button v-if="row.tem_pdf" class="inline-flex items-center gap-1 rounded-lg border px-3 py-2 text-xs" :disabled="busy || rowBusy[row.id]" @click="downloadCertificate(row)"><Download class="size-3.5" /> Baixar PDF</button>
+          <span v-else class="text-xs text-muted-foreground">Sem PDF</span>
+          <button v-if="canEdit" class="rounded-lg px-3 py-2 text-xs text-primary" @click="mobileTableMode = true">Editar na tabela</button>
+        </div>
+      </article>
+      <p v-if="!loading && !rows.length" class="py-6 text-center text-sm text-muted-foreground">Nenhuma certificação cadastrada.</p>
+    </section>
+    <div class="border overflow-x-auto" :class="mobileTableMode ? '' : 'hidden lg:block'">
       <table class="grid-table w-full text-xs border-collapse">
         <thead>
           <tr class="bg-emerald-800 text-white text-[10px] uppercase tracking-wide">

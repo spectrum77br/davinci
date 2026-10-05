@@ -566,8 +566,9 @@ async def test_sem_mudanca_nao_chama_de_novo_e_nao_duplica(db, make_user, ml):
     await _sync(integ)
     ml.chamadas.clear()
 
-    resumo = await _sync(integ, T0 + timedelta(minutes=10))
-    # Só as duas buscas: a reclamação não mexeu, nada é relido nem escrito.
+    resumo = await _sync(integ, T0 + timedelta(minutes=5))
+    # Só as duas buscas: a reclamação não mexeu e foi lida há menos de
+    # RELER_ABERTA — nada é relido nem escrito.
     assert [p for _, p, _ in ml.chamadas] == ["/post-purchase/v1/claims/search"] * 2
     assert resumo["lidas"] == 0 and resumo["atualizadas"] == 0
 
@@ -585,8 +586,73 @@ async def test_sem_mudanca_nao_chama_de_novo_e_nao_duplica(db, make_user, ml):
     assert len(ml.chamadas_de("/claims/reasons/")) == 0
 
 
+async def test_aberta_e_relida_mesmo_sem_mudar_last_updated(db, make_user, ml):
+    """05/10/2026: mensagem nova nem sempre muda o `last_updated` da reclamação
+    (a do comprador na 5586923869 da Kia entrou 43 h depois). A ABERTA é
+    relida a cada RELER_ABERTA; a encerrada que não mexeu, não."""
+    integ = await _conta(db, await make_user())
+    c = ml.conta()
+    c["abertas"] = [_claim(last_updated="2026-10-01T10:00:00.000-04:00")]
+    c["mensagens"][RECLAMACAO_ML] = [
+        _msg(1, "complainant", "respondent", "oi", "2026-10-01T09:00:00.000-04:00")
+    ]
+    await _sync(integ)
+    # Mensagem nova do comprador SEM mudar o last_updated.
+    c["mensagens"][RECLAMACAO_ML].append(
+        _msg(2, "complainant", "respondent", "e aí?", "2026-10-01T14:30:00.000-04:00")
+    )
+    ml.chamadas.clear()
+
+    resumo = await _sync(integ, T0 + reclamacoes.RELER_ABERTA)
+    assert resumo["lidas"] == 1 and resumo["mensagens"] == 1
+    assert ml.chamadas_de(f"/claims/{RECLAMACAO_ML}/messages")
+    # Só as mensagens: devolução e reputação só quando o last_updated muda
+    # (buscá-las a cada rodada dava HTTP 429 no /returns).
+    assert [p for _, p, _ in ml.chamadas if "/claims/search" not in p] == [
+        f"/post-purchase/v1/claims/{RECLAMACAO_ML}/messages"
+    ]
+    db.expire_all()
+    conversa = await _conversa_da_reclamacao(db)
+    assert [m.autor for m in await _mensagens(db, conversa)].count("cliente") == 2
+    linha = await _linha(db)
+    assert data_ml(linha.dados["lido_em"]) == T0 + reclamacoes.RELER_ABERTA
+
+    # Logo depois: não relê de novo (nem duplica).
+    ml.chamadas.clear()
+    resumo = await _sync(integ, T0 + reclamacoes.RELER_ABERTA + timedelta(minutes=1))
+    assert resumo["lidas"] == 0
+    assert [p for _, p, _ in ml.chamadas] == ["/post-purchase/v1/claims/search"] * 2
+
+
+async def test_releitura_nao_toma_a_vez_da_reclamacao_nova(db, make_user, ml, monkeypatch):
+    monkeypatch.setattr(reclamacoes, "MAX_LEITURAS_RODADA", 1)
+    integ = await _conta(db, await make_user())
+    c = ml.conta()
+    c["abertas"] = [_claim("1001", order="2001")]
+    await _sync(integ)
+    # Chega outra aberta; a 1001 já pede releitura pelo tempo.
+    c["abertas"] = [_claim("1001", order="2001"), _claim("1002", order="2002")]
+    resumo = await _sync(integ, T0 + reclamacoes.RELER_ABERTA)
+    assert resumo["lidas"] == 2 and resumo["adiadas"] == 0
+    db.expire_all()
+    assert await _conversa_da_reclamacao(db, "1002") is not None
+
+
+async def test_encerrada_sem_mudar_nao_e_relida(db, make_user, ml):
+    integ = await _conta(db, await make_user())
+    c = ml.conta()
+    c["encerradas"] = [_encerrada_297840()]
+    await _sync(integ)
+    ml.chamadas.clear()
+    resumo = await _sync(integ, T0 + timedelta(hours=1))
+    assert resumo["lidas"] == 0
+    assert not ml.chamadas_de("/messages")
+
+
 async def test_cota_por_conta_espalha_a_leitura(db, make_user, ml, monkeypatch):
     monkeypatch.setattr(reclamacoes, "MAX_LEITURAS_RODADA", 1)
+    # Só a cota da PRIMEIRA leitura aqui (a releitura das abertas tem a sua).
+    monkeypatch.setattr(reclamacoes, "MAX_RELEITURAS_RODADA", 0)
     integ = await _conta(db, await make_user())
     c = ml.conta()
     c["abertas"] = [_claim("1001", order="2001"), _claim("1002", order="2002")]

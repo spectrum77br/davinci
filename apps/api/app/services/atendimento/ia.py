@@ -2057,14 +2057,27 @@ async def _sinais_do_cliente(session: AsyncSession, conversa: AtendimentoConvers
 
 
 async def _humano_respondeu_recente(session: AsyncSession, conversa: AtendimentoConversa) -> bool:
-    """Alguém da equipe (pelo DaVinci ou por fora) falou nas últimas 24 h?"""
+    """Alguém da equipe (pelo DaVinci ou por fora) falou nas últimas 24 h?
+
+    Mensagem automática não é pessoa (05/10/2026, `gravar.mensagem_automatica_sql`):
+    o robô e as campanhas do Duoke (o menu, o "aguarde", o "já segue", o
+    cartão do pedido da campanha), a figurinha 0007, os cartões da Shopee, a
+    senha da devolução e o que o próprio motor de automações manda
+    (`davinci_auto`, que já fica de fora pela origem). Antes, qualquer
+    mensagem `externo` contava: medido em produção, 89 das 104 conversas
+    esperando resposta tinham a IA calada só por mensagem automática. Nem
+    a resposta que FALHOU (o comprador não recebeu).
+    """
     desde = datetime.now(UTC) - JANELA_HUMANO
     n = await session.scalar(
         select(func.count())
         .select_from(AtendimentoMensagem)
         .where(
             AtendimentoMensagem.conversa_id == conversa.id,
+            AtendimentoMensagem.autor == AUTOR_LOJA,
+            AtendimentoMensagem.status != MSG_FALHOU,
             AtendimentoMensagem.origem.in_((ORIGEM_EXTERNO, ORIGEM_HUMANO)),
+            ~gravar.mensagem_automatica_sql(AtendimentoMensagem.texto, AtendimentoMensagem.payload),
             _momento_col() >= desde,
         )
     )

@@ -128,6 +128,29 @@ const selected = ref<Set<string>>(new Set())
 const selectedLinks = ref<Set<string>>(new Set())
 const loading = ref(false)
 const error = ref<string | null>(null)
+const mobileProductView = ref<'cards' | 'table'>('cards')
+const mobileProductTools = ref(false)
+const mobileProductFilters = ref(false)
+const mobileProductExpanded = ref<Set<string>>(new Set())
+function setMobileProductDetails(id: string, event: Event) {
+  const open = (event.target as HTMLDetailsElement).open
+  if (mobileProductExpanded.value.has(id) === open) return
+  const next = new Set(mobileProductExpanded.value)
+  if (open) next.add(id)
+  else next.delete(id)
+  mobileProductExpanded.value = next
+}
+
+// The mobile overview follows the selected account just like table link columns.
+function mobileLinksFor(product: Product): ProductLink[] {
+  return filtroIntegration.value
+    ? product.links.filter((link) => link.integration_id === filtroIntegration.value)
+    : product.links
+}
+const mobilePlatformLabels: Record<string, string> = {
+  bling: 'Bling', ml: 'Mercado Livre', shopee: 'Shopee', amazon: 'Amazon',
+  tiktok: 'TikTok', magalu: 'Magalu', temu: 'Temu', aliexpress: 'AliExpress',
+}
 
 // Busca por ID do anúncio (estado declarado aqui em cima porque `refreshAll`
 // — chamada no setup — consulta `anuncioAberto`). Detalhes lá embaixo, na
@@ -1622,9 +1645,13 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="space-y-5">
+  <div class="products-page min-w-0 space-y-5">
     <PageHeader title="Produtos" description="SKUs do Bling, custos e links por canal.">
       <template #actions>
+        <Button v-if="canEdit" size="sm" variant="outline" class="lg:hidden" :aria-expanded="mobileProductTools" aria-controls="product-tools" @click="mobileProductTools = !mobileProductTools">
+          Gerenciar produtos <ChevronDown class="ml-1.5 size-4" :class="mobileProductTools ? 'rotate-180' : ''" />
+        </Button>
+        <div id="product-tools" class="flex-wrap items-center gap-2 min-w-0" :class="mobileProductTools ? 'flex' : 'hidden lg:flex'">
         <label
           v-if="canEdit"
           class="flex items-center gap-2 text-xs px-3 py-1.5 rounded-md border bg-background cursor-pointer select-none"
@@ -1679,6 +1706,7 @@ onUnmounted(() => {
         <Button v-if="canEdit" size="sm" @click="showNewProduct = true">
           <Plus class="size-4 mr-1.5" /> Novo Produto
         </Button>
+        </div>
       </template>
     </PageHeader>
 
@@ -1686,8 +1714,8 @@ onUnmounted(() => {
       {{ error }}
     </div>
 
-    <div class="flex flex-wrap gap-3 items-center">
-      <div class="relative flex-1 min-w-[260px]">
+    <div class="product-filters flex flex-wrap gap-3 items-center" :class="{ 'product-filters-open': mobileProductFilters }">
+      <div class="relative w-full min-w-0 sm:flex-1 sm:min-w-[260px]">
         <Search class="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
         <Input v-model="search" placeholder="Buscar por nome, SKU ou ID do anúncio..." class="pl-9" @keyup.enter="onBuscaEnter" />
       </div>
@@ -1707,9 +1735,12 @@ onUnmounted(() => {
         <option value="ok">Estoque OK</option>
         <option value="zero">Sem estoque</option>
       </select>
+      <Button class="lg:hidden" size="sm" variant="outline" :aria-expanded="mobileProductFilters" @click="mobileProductFilters = !mobileProductFilters">
+        Filtros <span v-if="filtroVinculos || filtroIntegration || filtroSegment" class="ml-1.5 size-2 rounded-full bg-primary" aria-label="Filtros ativos" />
+      </Button>
       <select
         v-model="filtroVinculos"
-        class="h-9 w-[240px] rounded-md border bg-background px-2 text-sm"
+        class="product-filter-extra h-9 w-[240px] rounded-md border bg-background px-2 text-sm"
         title="Vínculos com problema: anúncio encerrado/excluído (morto), anúncio com SKU diferente do produto, ou erro no envio de estoque"
         @change="page = 1; refreshAll()"
       >
@@ -1718,13 +1749,13 @@ onUnmounted(() => {
         <option value="sku">Vínculos: SKU do anúncio diferente ({{ saude.sku_divergente }})</option>
         <option value="erro">Vínculos: com erro no envio ({{ saude.erro }})</option>
       </select>
-      <select v-model="filtroIntegration" class="h-9 w-[220px] rounded-md border bg-background px-2 text-sm" @change="refreshAll">
+      <select v-model="filtroIntegration" class="product-filter-extra h-9 w-[220px] rounded-md border bg-background px-2 text-sm" @change="refreshAll">
         <option value="">Todas as contas</option>
         <optgroup v-for="g in integrationGroups" :key="g.platform" :label="g.platform">
           <option v-for="i in g.items" :key="i.id" :value="i.id">[{{ i.platform }}] {{ i.name }}</option>
         </optgroup>
       </select>
-      <select v-model="filtroSegment" class="h-9 w-[200px] rounded-md border bg-background px-2 text-sm">
+      <select v-model="filtroSegment" class="product-filter-extra h-9 w-[200px] rounded-md border bg-background px-2 text-sm">
         <option value="">Todos segmentos</option>
         <option value="__none__">— sem segmento</option>
         <option v-for="s in segmentFilterOptions" :key="s.id" :value="s.id">{{ s.label }}</option>
@@ -1887,7 +1918,89 @@ onUnmounted(() => {
       </div>
     </div>
 
-    <div class="table-card">
+    <div class="flex items-center justify-between gap-3 lg:hidden">
+      <p class="text-xs text-muted-foreground">{{ filteredItems.length }} produtos nesta página</p>
+      <div class="flex rounded-lg border bg-muted/30 p-0.5" role="group" aria-label="Visualização dos produtos">
+        <button type="button" class="rounded-md px-3 py-1.5 text-xs font-medium" :class="mobileProductView === 'cards' ? 'bg-background shadow-sm' : 'text-muted-foreground'" :aria-pressed="mobileProductView === 'cards'" @click="mobileProductView = 'cards'; closeSyncPopover(); closeSegPicker()">Resumo</button>
+        <button type="button" class="rounded-md px-3 py-1.5 text-xs font-medium" :class="mobileProductView === 'table' ? 'bg-background shadow-sm' : 'text-muted-foreground'" :aria-pressed="mobileProductView === 'table'" @click="mobileProductView = 'table'">Tabela</button>
+      </div>
+    </div>
+
+    <section v-if="mobileProductView === 'cards'" class="product-mobile-cards grid min-w-0 grid-cols-1 gap-3 sm:grid-cols-2 lg:hidden" aria-label="Resumo dos produtos" :aria-busy="loading">
+      <article v-for="p in filteredItems" :key="p.id" class="product-mobile-card min-w-0 self-start rounded-xl border bg-card p-3">
+        <div class="flex items-start gap-2.5">
+          <img v-if="p.image_url" :src="p.image_url" alt="" loading="lazy" class="size-11 shrink-0 rounded-md border bg-white object-contain" />
+          <div class="min-w-0 flex-1">
+            <div class="font-mono text-[11px] text-muted-foreground">{{ p.sku }}</div>
+            <h2 class="mt-0.5 text-sm font-semibold leading-snug">{{ p.name }}</h2>
+          </div>
+          <label v-if="canEdit || canDelete" class="flex size-10 shrink-0 cursor-pointer items-center justify-center rounded-md hover:bg-muted">
+            <input type="checkbox" :checked="selected.has(p.id)" :aria-label="`Selecionar produto ${p.sku}`" @change="toggleSelect(p.id)" />
+          </label>
+        </div>
+        <dl class="mt-3 grid grid-cols-3 gap-2 rounded-lg bg-muted/40 px-2.5 py-2">
+          <div>
+            <dt class="text-[10px] text-muted-foreground">Estoque Bling</dt>
+            <dd class="text-lg font-semibold tabular-nums" :class="p.stock === 0 ? 'text-red-600' : p.stock < p.min_stock ? 'text-amber-600' : ''">{{ p.stock.toLocaleString('pt-BR') }}</dd>
+          </div>
+          <div>
+            <dt class="text-[10px] text-muted-foreground">Mínimo</dt>
+            <dd class="text-lg font-semibold tabular-nums">{{ p.min_stock.toLocaleString('pt-BR') }}</dd>
+          </div>
+          <div>
+            <dt class="text-[10px] text-muted-foreground">Vínculos</dt>
+            <dd class="text-lg font-semibold tabular-nums">{{ mobileLinksFor(p).length }}</dd>
+          </div>
+        </dl>
+        <div class="mt-2 flex flex-wrap items-center gap-1.5">
+          <span class="pill text-[10px]" :class="p.stock === 0 ? 'pill-danger' : p.stock < p.min_stock ? 'pill-warning' : 'pill-success'">{{ p.stock === 0 ? 'Sem estoque' : p.stock < p.min_stock ? 'Estoque baixo' : 'Estoque OK' }}</span>
+          <span v-if="p.segment_path" class="text-[11px] text-muted-foreground">{{ p.segment_path }}</span>
+        </div>
+        <details class="mt-2 border-t pt-1" :open="mobileProductExpanded.has(p.id)" @toggle="setMobileProductDetails(p.id, $event)">
+          <summary class="flex min-h-10 cursor-pointer list-none items-center justify-between gap-2 text-xs font-medium text-primary">
+            Detalhes e vínculos <ChevronDown class="size-4 shrink-0" />
+          </summary>
+          <template v-if="mobileProductExpanded.has(p.id)">
+          <dl class="grid grid-cols-2 gap-x-3 gap-y-2 pb-3 text-xs">
+            <div><dt class="text-muted-foreground">Bling ID</dt><dd>{{ p.bling_product_id || '—' }}</dd></div>
+            <div><dt class="text-muted-foreground">Atualizado</dt><dd>{{ fmtQuando(p.updated_at) }}</dd></div>
+            <div v-if="p.observation" class="col-span-2"><dt class="text-muted-foreground">Observação</dt><dd>{{ p.observation }}</dd></div>
+            <div v-if="p.observation2" class="col-span-2"><dt class="text-muted-foreground">Observação 2</dt><dd>{{ p.observation2 }}</dd></div>
+            <div v-if="p.observation3" class="col-span-2"><dt class="text-muted-foreground">Observação 3</dt><dd>{{ p.observation3 }}</dd></div>
+          </dl>
+          <p v-if="mobileLinksFor(p).length === 0" class="pb-2 text-xs text-muted-foreground">Nenhum vínculo{{ filtroIntegration ? ' nesta conta' : '' }}.</p>
+          <div v-else class="space-y-2">
+            <div v-for="link in mobileLinksFor(p)" :key="link.id" class="rounded-lg border p-2.5 text-xs">
+              <div class="flex flex-wrap items-start justify-between gap-2">
+                <div class="min-w-0">
+                  <span :class="platformBadgeClass(link.platform)">{{ mobilePlatformLabels[link.platform] || link.platform }}</span>
+                  <div class="mt-1 font-medium">{{ integrationById[link.integration_id]?.name || link.platform }}</div>
+                </div>
+                <div class="text-right"><div class="text-[10px] text-muted-foreground">Estoque no canal</div><strong class="tabular-nums" :class="link.morto_desde ? 'line-through text-muted-foreground' : ''">{{ link.stock ?? '—' }}</strong></div>
+              </div>
+              <div v-if="link.listing_title" class="mt-2">{{ link.listing_title }}</div>
+              <dl class="mt-2 space-y-1 text-[11px]">
+                <div><dt class="inline text-muted-foreground">ID: </dt><dd class="inline font-mono">{{ link.external_id }}</dd></div>
+                <div v-if="link.external_sku"><dt class="inline text-muted-foreground">SKU: </dt><dd class="inline font-mono" :class="skuDiferente(p, link) ? 'text-purple-700 font-semibold' : ''">{{ link.external_sku }}</dd></div>
+                <div v-if="link.variation_id"><dt class="inline text-muted-foreground">Variação: </dt><dd class="inline">{{ link.variation_id }}</dd></div>
+                <div><dt class="inline text-muted-foreground">Último envio: </dt><dd class="inline">{{ fmtQuando(link.last_sync_at) }}</dd></div>
+              </dl>
+              <div class="mt-2 flex flex-wrap gap-1">
+                <span v-if="link.morto_desde" class="pill pill-danger">Anúncio encerrado</span>
+                <span v-else class="pill" :class="link.last_sync_status === 'ok' ? 'pill-success' : link.last_sync_status === 'fatal' ? 'pill-danger' : 'pill-muted'">{{ link.last_sync_status === 'ok' ? 'Sincronizado' : link.last_sync_status === 'fatal' ? 'Falha no envio' : link.last_sync_status || 'Aguardando' }}</span>
+                <span v-if="skuDiferente(p, link)" class="pill pill-warning">SKU diferente</span>
+              </div>
+              <p v-if="link.morto_desde && link.morto_motivo" class="mt-2 text-red-700">{{ link.morto_motivo }}</p>
+              <p v-else-if="link.last_error" class="mt-2 text-amber-700">{{ link.last_error }}</p>
+            </div>
+          </div>
+          </template>
+        </details>
+      </article>
+      <p v-if="!filteredItems.length" class="rounded-xl border bg-card px-4 py-8 text-center text-sm text-muted-foreground sm:col-span-2">{{ loading ? 'Carregando produtos…' : 'Nenhum produto encontrado com estes filtros.' }}</p>
+    </section>
+
+    <div class="table-card" :class="mobileProductView === 'cards' ? 'hidden lg:block' : 'block'">
       <table class="w-full">
         <thead>
           <tr>
@@ -2198,8 +2311,8 @@ onUnmounted(() => {
       </table>
     </div>
 
-    <div class="flex justify-between items-center text-sm">
-      <div class="flex gap-1 items-center">
+    <div class="flex flex-wrap sm:flex-nowrap justify-between items-center gap-y-2 text-sm">
+      <div class="flex flex-wrap sm:flex-nowrap gap-1 items-center">
         <Button size="sm" variant="outline" :disabled="page <= 1" title="Primeira página" @click="page = 1; refreshAll()">«</Button>
         <Button size="sm" variant="outline" :disabled="page <= 1" title="Página anterior" @click="page--; refreshAll()">‹</Button>
         <span class="px-2 py-1">página {{ page }} de {{ totalPages }}</span>
@@ -2281,7 +2394,7 @@ onUnmounted(() => {
     >
       <div
         v-if="selected.size > 0"
-        class="fixed bottom-4 left-1/2 -translate-x-1/2 z-40 rounded-lg border bg-background shadow-xl px-4 py-3 flex items-center gap-3"
+        class="product-selection-actions fixed bottom-4 left-1/2 -translate-x-1/2 z-40 rounded-lg border bg-background shadow-xl px-4 py-3 flex items-center gap-3"
       >
         <span class="text-sm font-medium">
           ☑ {{ selected.size }} produto(s) selecionado(s)
@@ -2317,7 +2430,7 @@ onUnmounted(() => {
 
     <!-- Import modal -->
     <div v-if="showImport" class="fixed inset-0 z-50 grid place-items-center bg-black/40" @click.self="showImport = false">
-      <div class="bg-background rounded-lg shadow-lg w-[min(900px,95vw)] max-h-[90vh] flex flex-col">
+      <div class="product-dialog bg-background rounded-lg shadow-lg w-[min(900px,95vw)] max-h-[90vh] flex flex-col">
         <div class="flex items-center justify-between border-b p-3">
           <h3 class="font-semibold">Importar produtos do Bling</h3>
           <button @click="showImport = false"><X class="size-4" /></button>
@@ -2465,7 +2578,7 @@ onUnmounted(() => {
 
     <!-- Vincular Automático dialog (SSH-style) -->
     <div v-if="showAutoLink" class="fixed inset-0 z-50 grid place-items-center bg-black/40" @click.self="showAutoLink = false">
-      <div class="bg-background rounded-lg shadow-lg w-[min(560px,95vw)] max-h-[85vh] flex flex-col">
+      <div class="product-dialog bg-background rounded-lg shadow-lg w-[min(560px,95vw)] max-h-[85vh] flex flex-col">
         <div class="flex items-center justify-between border-b p-4">
           <div>
             <h3 class="font-semibold flex items-center gap-2">
@@ -2644,7 +2757,7 @@ onUnmounted(() => {
 
     <!-- Sincronizar Todos dialog (SSH-style) -->
     <div v-if="showSyncAll" class="fixed inset-0 z-50 grid place-items-center bg-black/40" @click.self="showSyncAll = false">
-      <div class="bg-background rounded-lg shadow-lg w-[min(560px,95vw)] max-h-[85vh] flex flex-col">
+      <div class="product-dialog bg-background rounded-lg shadow-lg w-[min(560px,95vw)] max-h-[85vh] flex flex-col">
         <div class="flex items-center justify-between border-b p-4">
           <div>
             <h3 class="font-semibold flex items-center gap-2">
@@ -2829,7 +2942,7 @@ onUnmounted(() => {
 
     <!-- Refresh Bling stock modal -->
     <div v-if="showRefreshStock" class="fixed inset-0 z-50 grid place-items-center bg-black/40" @click.self="showRefreshStock = false">
-      <div class="bg-background rounded-lg shadow-lg w-[min(720px,95vw)]">
+      <div class="product-dialog bg-background rounded-lg shadow-lg w-[min(720px,95vw)]">
         <div class="flex items-center justify-between border-b p-3">
           <h3 class="font-semibold">Atualizar estoque do Bling</h3>
           <button @click="showRefreshStock = false"><X class="size-4" /></button>
@@ -2868,7 +2981,7 @@ onUnmounted(() => {
 
     <!-- CSV Import modal -->
     <div v-if="showImportCsv" class="fixed inset-0 z-50 grid place-items-center bg-black/40" @click.self="showImportCsv = false">
-      <div class="bg-background rounded-lg shadow-lg w-[min(600px,95vw)] flex flex-col">
+      <div class="product-dialog bg-background rounded-lg shadow-lg w-[min(600px,95vw)] flex flex-col">
         <div class="flex items-center justify-between border-b p-3">
           <h3 class="font-semibold">Importar Produtos via CSV</h3>
           <button @click="showImportCsv = false"><X class="size-4" /></button>
@@ -2899,7 +3012,7 @@ onUnmounted(() => {
 
     <!-- Bulk segment assign modal -->
     <div v-if="showBulkSegment" class="fixed inset-0 z-50 grid place-items-center bg-black/40" @click.self="showBulkSegment = false">
-      <div class="bg-background rounded-lg shadow-lg w-[min(520px,95vw)]">
+      <div class="product-dialog bg-background rounded-lg shadow-lg w-[min(520px,95vw)]">
         <div class="flex items-center justify-between border-b p-3">
           <h3 class="font-semibold flex items-center gap-2">
             <Tags class="size-5 text-emerald-600" />
@@ -2928,7 +3041,7 @@ onUnmounted(() => {
 
     <!-- New product modal (Feature 2) -->
     <div v-if="showNewProduct" class="fixed inset-0 z-50 grid place-items-center bg-black/40" @click.self="showNewProduct = false">
-      <div class="bg-background rounded-lg shadow-lg w-[min(600px,95vw)] flex flex-col">
+      <div class="product-dialog bg-background rounded-lg shadow-lg w-[min(600px,95vw)] flex flex-col">
         <div class="flex items-center justify-between border-b p-3">
           <h3 class="font-semibold">Novo Produto</h3>
           <button @click="showNewProduct = false"><X class="size-4" /></button>
@@ -2994,3 +3107,36 @@ onUnmounted(() => {
     </div>
   </div>
 </template>
+
+<style scoped>
+.product-mobile-card { overflow-wrap: anywhere; }
+.product-mobile-card summary::-webkit-details-marker { display: none; }
+.product-mobile-card details[open] > summary :deep(svg) { transform: rotate(180deg); }
+@media (max-width: 1023px) {
+  .product-filter-extra { display: none; }
+  .product-filters-open .product-filter-extra {
+    display: block;
+    flex: 1 1 calc(50% - 0.75rem);
+    width: 100%;
+    min-width: 0;
+  }
+  #product-tools > * { flex: 1 1 auto; }
+}
+@media (max-width: 639px) {
+  .product-selection-actions {
+    width: calc(100vw - 1.5rem);
+    max-height: calc(100dvh - 2rem);
+    overflow-y: auto;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: .5rem;
+    padding: .75rem;
+    bottom: max(.75rem, env(safe-area-inset-bottom));
+  }
+  .product-selection-actions > span { flex-basis: 100%; text-align: center; }
+  .product-selection-actions > .w-px { display: none; }
+  .product-selection-actions :deep(button) { white-space: normal; }
+  .product-dialog { max-height: calc(100dvh - 2rem); overflow-y: auto; }
+  .product-dialog > .border-t { flex-wrap: wrap; }
+}
+</style>

@@ -71,6 +71,28 @@ avaliação sozinha; e a loja vem da integração da conversa (ela não tem
 canal próprio), com o modo do canal da loja. Saiu: a avaliação é dada por
 respondida na hora (`avaliacoes.depois_da_resposta`).
 
+MENSAGEM AUTOMÁTICA (05/10/2026, docs/atendimento-automacoes.md):
+`enviar_automatica` é o mesmo caminho para uma PARTE de texto do motor de
+automações (`automacoes.py`): mesma trava da conversa, mesma linha em voo
+commitada antes da plataforma, mesmo validador (as regras de todos, não as
+da IA: o texto fixo é da loja), mesma conferência de repetida, mesma régua
+de resultado. A linha nasce `origem = davinci_auto` com a marca
+`payload.automacao`. Travas próprias, além das que não dependem de quem
+escreve (canal sem envio, somente leitura, simulador em produção, conversa
+bloqueada, sem integração):
+       envio_desligado            — o FREIO ÚNICO `atendimento_envio_ativo`
+                                    (desligado, nada sai: pessoa, IA ou automação);
+       automacoes_envio_desligado — `atendimento_automacoes_envio` desligado;
+       shopee_mensagens_desligadas — `shopee_mensagens_comprador` desligado
+                                    (o freio de mão da mensagem proativa na Shopee);
+       regra_nao_envia            — a regra da loja, RELIDA aqui, não está em `enviar`;
+       campanha_sem_auto_reply    — campanha da Shopee sem o `auto_reply`
+                                    confirmado (`atendimento_automacoes_shopee_auto_reply`).
+Só TEXTO: o cartão do pedido e a figurinha ainda não têm adaptador (o motor
+manda só as partes de texto).
+O canal em `observar` NÃO segura a automática (de propósito: a equipe segue
+no Duoke enquanto ela sai por aqui), nem as travas da IA (automático, vez).
+
 FOTO (01/10/2026): `enviar_foto` é o mesmo caminho para UMA imagem (Shopee,
 TikTok e pós-venda do ML; `foto.py`): mesmas travas, mesma linha em voo,
 mesma régua de resultado. O upload para a plataforma só acontece aqui —
@@ -97,6 +119,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.db import is_unique_violation
 from app.models import (
+    AtendimentoAutomacaoRegra,
     AtendimentoAvaliacao,
     AtendimentoCanal,
     AtendimentoConversa,
@@ -118,6 +141,7 @@ from app.services.atendimento.constantes import (
     MSG_ENVIANDO,
     MSG_FALHOU,
     MSG_REVISAR,
+    ORIGEM_AUTO,
     ORIGEM_EXTERNO,
     ORIGEM_HUMANO,
     ORIGEM_IA,
@@ -186,6 +210,15 @@ RECUSA_CONVERSA_OCUPADA = "conversa_ocupada"
 #                        não cabe nesta plataforma (Shopee/TikTok: foto sozinha).
 RECUSA_FOTO_NAO_SUPORTADA = "foto_nao_suportada"
 RECUSA_FOTO_INVALIDA = "foto_invalida"
+# Mensagem automática do motor (05/10/2026, `enviar_automatica`).
+RECUSA_AUTOMACOES_ENVIO_DESLIGADO = "automacoes_envio_desligado"
+RECUSA_SHOPEE_MENSAGENS_DESLIGADAS = "shopee_mensagens_desligadas"
+RECUSA_REGRA_NAO_ENVIA = "regra_nao_envia"
+RECUSA_CAMPANHA_SEM_AUTO_REPLY = "campanha_sem_auto_reply"
+# Só estas plataformas têm automação (e adaptador de texto em conversa).
+PLATAFORMAS_AUTOMACAO = ("shopee", "tiktok", "ml")
+# Recusa que passa sozinha: a próxima rodada tenta de novo (até a validade).
+RECUSAS_TEMPORARIAS = ("conversa_ocupada", "envio_em_andamento")
 # Avaliação (RF8, 02/10/2026): a avaliação da conversa `avaliacao` já tem
 # resposta da loja (de fora ou do DaVinci) — a mesma recusa da rota
 # POST /avaliacoes/{id}/responder, para a caixa de baixo não responder duas vezes.
@@ -967,6 +1000,8 @@ async def _conferir_mudou(
         quem = (autor.name or autor.email or "Alguém da equipe") if autor else "Alguém da equipe"
     elif outra.origem == ORIGEM_IA:
         quem = "A IA"
+    elif outra.origem == ORIGEM_AUTO:
+        quem = "A mensagem automática do DaVinci"
     elif outra.origem == ORIGEM_EXTERNO:
         quem = "Alguém fora do DaVinci (Duoke/Seller Center)"
     else:
@@ -1443,6 +1478,197 @@ async def enviar_foto(
         conversa_id=str(conversa.id),
         mensagem_id=str(mensagem.id),
         plataforma=conversa.plataforma,
+        status=mensagem.status,
+        bloqueio=bool(resultado.bloqueio),
+    )
+    return mensagem
+
+
+# ── Mensagem automática (05/10/2026) ──────────────────────────────────────
+# O motor de automações (`automacoes.py`) manda cada PARTE de texto por aqui.
+# Só sai com TUDO ligado: o freio único (`atendimento_envio_ativo`), a chave
+# nova (`atendimento_automacoes_envio`) e a regra da loja em `enviar`, relida
+# do banco agora. O modo seco nunca chega aqui (o motor nem importa este
+# módulo nele); o teste prova.
+
+
+async def _destino_automatica(
+    session: AsyncSession, conversa: AtendimentoConversa, *, codigo: str
+) -> _Destino:
+    """As travas da mensagem automática; levanta `EnvioRecusado`."""
+    from app.services.atendimento import automacoes_catalogo as catalogo
+
+    motivo_sem_envio = motivo_canal_sem_envio(conversa.canal, conversa.plataforma, conversa.dados)
+    if motivo_sem_envio:
+        raise EnvioRecusado(RECUSA_CANAL_SEM_ENVIO, motivo_sem_envio)
+    if conversa.plataforma not in PLATAFORMAS_AUTOMACAO or conversa.plataforma not in ADAPTADORES:
+        raise EnvioRecusado(
+            RECUSA_SOMENTE_LEITURA, "Mensagem automática só na Shopee, no TikTok e no ML."
+        )
+    settings = get_settings()
+    if settings.atendimento_simulador and settings.is_prod:
+        logger.error("atendimento_simulador_em_producao", conversa_id=str(conversa.id))
+        raise EnvioRecusado(
+            RECUSA_SIMULADOR_EM_PRODUCAO,
+            "O simulador de envio (só para teste local) está ligado em produção.",
+        )
+    if not settings.atendimento_envio_ativo:
+        raise EnvioRecusado(
+            RECUSA_ENVIO_DESLIGADO,
+            "O envio pelo DaVinci está desligado (ATENDIMENTO_ENVIO_ATIVO): nada sai, "
+            "nem as mensagens automáticas.",
+        )
+    if not settings.atendimento_automacoes_envio:
+        raise EnvioRecusado(
+            RECUSA_AUTOMACOES_ENVIO_DESLIGADO,
+            "O envio das mensagens automáticas está desligado (ATENDIMENTO_AUTOMACOES_ENVIO).",
+        )
+    if conversa.plataforma == "shopee" and not settings.shopee_mensagens_comprador:
+        raise EnvioRecusado(
+            RECUSA_SHOPEE_MENSAGENS_DESLIGADAS,
+            "As mensagens automáticas para o comprador da Shopee estão desligadas "
+            "(SHOPEE_MENSAGENS_COMPRADOR).",
+        )
+    aut = catalogo.automacao(codigo)
+    if aut is None or aut.plataforma != conversa.plataforma or aut.canal != conversa.canal:
+        raise EnvioRecusado(RECUSA_REGRA_NAO_ENVIA, "Automação desconhecida para esta conversa.")
+    if aut.campanha and not settings.atendimento_automacoes_shopee_auto_reply:
+        raise EnvioRecusado(
+            RECUSA_CAMPANHA_SEM_AUTO_REPLY,
+            "Campanha da Shopee: só sai com a resposta automática (auto_reply) confirmada.",
+        )
+    if conversa.situacao == CONVERSA_BLOQUEADA:
+        raise EnvioRecusado(
+            RECUSA_CONVERSA_BLOQUEADA,
+            conversa.bloqueio_motivo or "A plataforma não deixa mais responder nesta conversa.",
+        )
+    limite = conversa.pode_enviar_ate
+    if limite is not None and limite.tzinfo is None:
+        limite = limite.replace(tzinfo=UTC)
+    if limite is not None and datetime.now(UTC) > limite:
+        raise EnvioRecusado(
+            RECUSA_CONVERSA_BLOQUEADA,
+            "A janela de resposta da plataforma para esta conversa já fechou.",
+        )
+    canal = (
+        await session.get(AtendimentoCanal, conversa.canal_id, populate_existing=True)
+        if conversa.canal_id is not None
+        else None
+    )
+    integration = (
+        await session.get(Integration, canal.integration_id, populate_existing=True)
+        if canal is not None and canal.integration_id is not None
+        else None
+    )
+    if canal is None or integration is None or integration.archived_at is not None:
+        raise EnvioRecusado(
+            RECUSA_SEM_INTEGRACAO, "A loja desta conversa não está mais conectada ao DaVinci."
+        )
+    regra = (
+        await session.execute(
+            select(AtendimentoAutomacaoRegra)
+            .where(
+                AtendimentoAutomacaoRegra.automacao == codigo,
+                AtendimentoAutomacaoRegra.integration_id == integration.id,
+            )
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+    if regra is None or regra.modo != catalogo.MODO_ENVIAR:
+        raise EnvioRecusado(
+            RECUSA_REGRA_NAO_ENVIA, "A regra desta automação nesta loja não está em enviar."
+        )
+    return _Destino(canal=canal, integration=integration)
+
+
+async def enviar_automatica(
+    session: AsyncSession,
+    conversa: AtendimentoConversa,
+    *,
+    codigo: str,
+    texto: str,
+    registro_id: UUID | None,
+    regra_versao: int | None,
+    indice: int = 0,
+) -> AtendimentoMensagem:
+    """Envia UMA parte de texto da mensagem automática; devolve a mensagem gravada.
+
+    O contrato do `enviar_resposta`: `EnvioRecusado` = nada saiu (trava
+    nossa; `RECUSAS_TEMPORARIAS` passam sozinhas); erro da plataforma vira
+    `falhou`/`revisar` na mensagem; COMMITA antes de falar com a plataforma e
+    depois. A mensagem nasce `davinci_auto` com `payload.automacao`, que a
+    régua reconhece (não fecha a vez do comprador, a IA não aprende com ela)
+    e a leitura adota quando a plataforma a devolve.
+    """
+    ponto = await session.begin_nested()
+    try:
+        await travar_conversa(session, conversa)
+        destino = await _destino_automatica(session, conversa, codigo=codigo)
+        normalizado = _preparar_texto(texto, conversa=conversa, origem=ORIGEM_AUTO)
+        await _conferir_repetido(session, conversa, normalizado)
+        await aposentar_envios_presos(session, conversa_id=conversa.id)
+        mensagem = AtendimentoMensagem(
+            conversa_id=conversa.id,
+            externo_id=None,
+            autor=AUTOR_LOJA,
+            origem=ORIGEM_AUTO,
+            tipo="texto",
+            texto=normalizado,
+            anexos=[],
+            enviada_em=None,
+            status=MSG_ENVIANDO,
+            payload={
+                "automacao": {
+                    "codigo": codigo,
+                    "registro_id": str(registro_id) if registro_id else None,
+                    "regra_versao": regra_versao,
+                    "parte": "texto",
+                    "indice": indice,
+                }
+            },
+        )
+        await session.flush()
+        try:
+            async with session.begin_nested():
+                session.add(mensagem)
+                await session.flush()
+        except IntegrityError as e:
+            if not is_unique_violation(e):
+                raise
+            raise EnvioRecusado(
+                RECUSA_ENVIO_EM_ANDAMENTO, "Há uma resposta sendo enviada nesta conversa."
+            ) from e
+    except BaseException:
+        await ponto.rollback()
+        raise
+    await ponto.commit()
+    gravar.recalcular(conversa, [mensagem])
+    await session.commit()
+    logger.info(
+        "atendimento_automatica_iniciada",
+        conversa_id=str(conversa.id),
+        mensagem_id=str(mensagem.id),
+        plataforma=conversa.plataforma,
+        automacao=codigo,
+        registro_id=str(registro_id) if registro_id else None,
+    )
+    resultado = await _chamar_plataforma(session, conversa, destino.integration, normalizado)
+    await _gravar_resultado(
+        session,
+        conversa,
+        mensagem,
+        resultado,
+        rascunho=None,
+        texto_digitado=normalizado,
+        user=None,
+        origem=ORIGEM_AUTO,
+        avaliar=False,
+    )
+    logger.info(
+        "atendimento_automatica_concluida",
+        conversa_id=str(conversa.id),
+        mensagem_id=str(mensagem.id),
+        automacao=codigo,
         status=mensagem.status,
         bloqueio=bool(resultado.bloqueio),
     )

@@ -159,6 +159,12 @@ class LogisticaOut(BaseModel):
     amazon_canal: str | None = None
     amazon_canal_label: str = ""
     servico_envio: str | None = None
+    # ---- Flex (02/10/2026) ----
+    # Tipo de envio cru da plataforma (ML `self_service`, `cross_docking`…;
+    # Shopee "90022 · Shopee Entrega Direta") e se é Flex. NULL = ainda não
+    # lido. Alimenta a aba Flex e o selo "Flex" nas abas ML/Shopee. Só leitura.
+    envio_tipo: str | None = None
+    envio_flex: bool | None = None
     postagem_data: date | None = None
     # Previsão de entrega dos Correios (objeto de postagem do Bling) e data
     # máxima de entrega da Amazon (LatestDeliveryDate). Só leitura.

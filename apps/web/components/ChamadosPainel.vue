@@ -1596,7 +1596,7 @@ async function confirmarExcluir() {
 </script>
 
 <template>
-  <div class="space-y-5">
+  <div class="chamados-panel min-w-0 space-y-5">
     <PageHeader v-if="modo !== 'juridico'" title="Chamados" description="Todos os chamados abertos nas plataformas — Margem, Logística, Devolução e Vendas — num lugar só.">
       <template #actions>
         <Button size="sm" variant="outline" :disabled="loading" @click="load">
@@ -1611,12 +1611,12 @@ async function confirmarExcluir() {
     </PageHeader>
 
     <!-- 30/09: a aba Jurídico saiu daqui — mora em Ouvidoria › Denúncia (modo="juridico") -->
-    <div v-if="modo !== 'juridico'" class="flex gap-1 border-b">
+    <div v-if="modo !== 'juridico'" class="flex flex-wrap sm:flex-nowrap gap-1 border-b">
       <button type="button" class="px-3 py-2 text-sm border-b-2 -mb-px" :class="tab === 'chamados' ? 'border-primary font-medium' : 'border-transparent text-muted-foreground hover:text-foreground'" @click="tab = 'chamados'">Chamados</button>
       <button type="button" class="px-3 py-2 text-sm border-b-2 -mb-px inline-flex items-center gap-1.5" :class="tab === 'ia' ? 'border-primary font-medium' : 'border-transparent text-muted-foreground hover:text-foreground'" @click="tab = 'ia'">
         <Bot class="size-4" /> IA de Chamado
       </button>
-      <div v-if="tab === 'ia' && podeAvisoIa" class="ml-auto flex items-center gap-2 pb-1">
+      <div v-if="tab === 'ia' && podeAvisoIa" class="ml-auto w-full sm:w-auto min-w-0 flex flex-wrap sm:flex-nowrap items-center gap-2 pb-1">
         <span class="text-xs text-muted-foreground">Se a IA parar num "não sou robô" ou login, avisa no Threema.</span>
         <Button size="sm" variant="outline" @click="avisoIaCfgOpen = true">quem recebe o aviso</Button>
       </div>
@@ -1640,13 +1640,13 @@ async function confirmarExcluir() {
     <!-- novo chamado -->
     <div v-if="addOpen" class="rounded-md border bg-background">
       <div class="flex flex-wrap items-end gap-3 border-b px-3 py-3">
-        <label class="space-y-1">
+        <label class="min-w-0 w-full sm:w-auto space-y-1">
           <span class="text-[11px] font-medium text-muted-foreground">Pedido</span>
           <div class="relative">
             <Search class="absolute left-2.5 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
             <input
               v-model="lookupPedido"
-              class="h-9 w-72 rounded-md border bg-background pl-8 pr-3 text-sm"
+              class="h-9 w-full sm:w-72 rounded-md border bg-background pl-8 pr-3 text-sm"
               placeholder="nº Bling ou marketplace"
               @keydown.enter.prevent="lookupOrder"
             />
@@ -1751,9 +1751,9 @@ async function confirmarExcluir() {
     <template v-if="tab !== 'ia'">
     <!-- filtros -->
     <div class="flex flex-wrap items-center gap-2">
-      <div class="relative">
+      <div class="relative min-w-0 w-full sm:w-auto">
         <Search class="absolute left-2.5 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
-        <input v-model="search" class="h-9 w-72 rounded-md border bg-background pl-8 pr-3 text-sm" placeholder="buscar pedido, conta, produto, chamado…" />
+        <input v-model="search" class="h-9 w-full sm:w-72 rounded-md border bg-background pl-8 pr-3 text-sm" placeholder="buscar pedido, conta, produto, chamado…" />
       </div>
       <select v-model="origemFilter" class="h-9 rounded-md border bg-background px-2 text-sm">
         <option value="all">todas origens</option>
@@ -1995,7 +1995,7 @@ async function confirmarExcluir() {
       </table>
     </div>
 
-    <div v-if="total > PAGE_SIZE" class="flex items-center justify-between gap-2">
+    <div v-if="total > PAGE_SIZE" class="flex flex-wrap sm:flex-nowrap items-center justify-between gap-2">
       <span class="text-xs text-muted-foreground">página {{ page }} de {{ totalPages }} · {{ PAGE_SIZE }}/página</span>
       <div class="flex items-center gap-1">
         <Button size="sm" variant="outline" :disabled="page <= 1 || loading" @click="page = 1">«</Button>
@@ -2010,7 +2010,7 @@ async function confirmarExcluir() {
 
     <!-- modal: encaminhar ao jurídico -->
     <div v-if="juridico.open && juridico.row" class="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 p-4" @click.self="closeJuridico">
-      <div class="w-full max-w-lg rounded-lg border bg-background p-5 shadow-xl space-y-4">
+      <div class="chamado-dialog w-full max-w-lg rounded-lg border bg-background p-5 shadow-xl space-y-4">
         <div class="flex items-start justify-between gap-3">
           <div>
             <div class="text-sm font-semibold inline-flex items-center gap-1.5"><Scale class="size-4 text-violet-600" /> Encaminhar ao jurídico</div>
@@ -2053,7 +2053,7 @@ async function confirmarExcluir() {
 
     <!-- modal: histórico + réplica -->
     <div v-if="hist.open && hist.row" class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" @click.self="closeHistorico">
-      <div class="w-full max-w-3xl max-h-[90vh] flex flex-col rounded-lg border bg-background shadow-xl">
+      <div class="chamado-dialog w-full max-w-3xl max-h-[90vh] flex flex-col rounded-lg border bg-background shadow-xl">
         <div class="shrink-0 flex items-start justify-between gap-3 border-b px-4 py-3">
           <div>
             <!-- 21/09 (Vinicius): o pedido do marketplace junto do Bling — é o número
@@ -2413,7 +2413,7 @@ async function confirmarExcluir() {
 
     <!-- modal: resolver (z-[60]: 19/09 também abre por cima do histórico, que é z-50) -->
     <div v-if="resolver.open && resolver.row" class="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 p-4" @click.self="closeResolver">
-      <div class="w-full max-w-md rounded-lg border bg-background shadow-xl">
+      <div class="chamado-dialog w-full max-w-md rounded-lg border bg-background shadow-xl">
         <div class="flex items-start justify-between gap-3 border-b px-4 py-3">
           <div>
             <div class="text-sm font-semibold">Resolver chamado · pedido {{ resolver.row.pedido_bling || resolver.row.pedido_marketplace }}</div>
@@ -2542,7 +2542,7 @@ async function confirmarExcluir() {
          validação de situação do resolver; os lançamentos de devolução do pedido
          entram por caixinha, e o texto embaixo diz o que acontece com o estoque. -->
     <div v-if="excluir.open && excluir.row" class="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 p-4" @click.self="closeExcluir">
-      <div class="w-full max-w-lg rounded-lg border bg-background shadow-xl">
+      <div class="chamado-dialog w-full max-w-lg rounded-lg border bg-background shadow-xl">
         <div class="flex items-start justify-between gap-3 border-b px-4 py-3">
           <div>
             <div class="text-sm font-semibold inline-flex items-center gap-1.5">
@@ -2623,3 +2623,11 @@ async function confirmarExcluir() {
     </div>
   </div>
 </template>
+
+<style scoped>
+@media (max-width: 639px) {
+  .chamado-dialog { max-height: calc(100dvh - 2rem); overflow-y: auto; }
+  .chamado-dialog > .border-t { flex-wrap: wrap; }
+  .chamado-dialog > div:first-child > div { min-width: 0; overflow-wrap: anywhere; }
+}
+</style>

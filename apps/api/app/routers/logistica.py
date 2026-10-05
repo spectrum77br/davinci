@@ -15,8 +15,9 @@ Gated pelo recurso `logistica`.
 """
 
 import hashlib
+from contextvars import ContextVar
 from datetime import UTC, datetime
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID
 
 import httpx
@@ -28,7 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.db import get_session
-from app.deps.auth import require_permission
+from app.deps.auth import get_current_user, require_permission
 from app.deps.team_scope import TeamScope, resolve_team_scope
 from app.models import (
     BlingOrder,
@@ -101,12 +102,27 @@ from app.services import (
     logistica_tiktok,
     logistica_track,
     logistica_track_sync,
+    flex_config,
     threema,
 )
 from app.worker_pool import get_arq_marketplace_pool
 
 logger = structlog.get_logger()
-router = APIRouter(prefix="/api/logistica", tags=["logistica"])
+
+# Quem vê o Flex (`flex_usuarios`, 05/10/2026): para os outros a linha sai sem
+# `envio_tipo`/`envio_flex` (sem selo "Flex") e `?envio=flex` é 404. Marcado
+# uma vez por pedido (dependência do router, async: roda na mesma tarefa da
+# rota) e lido em `_to_out` — que tem muitos chamadores e nenhum usuário.
+_ver_flex: ContextVar[bool] = ContextVar("logistica_ver_flex", default=False)
+
+
+async def _marca_quem_ve_flex(user: Annotated[User | None, Depends(get_current_user)]) -> None:
+    _ver_flex.set(flex_config.pode_ver(user))
+
+
+router = APIRouter(
+    prefix="/api/logistica", tags=["logistica"], dependencies=[Depends(_marca_quem_ve_flex)]
+)
 
 # Chave canônica -> rótulo gravado em `logistica.plataforma` (o filtro da aba por
 # marketplace manda a chave; futuras abas Shopee/Amazon só trocam o valor).
@@ -298,6 +314,8 @@ def _to_out(
         amazon_canal=canal,
         amazon_canal_label=logistica_amazon_canal.CANAL_LABELS_PT.get(canal or "", ""),
         servico_envio=c.servico_envio,
+        envio_tipo=c.envio_tipo if _ver_flex.get() else None,
+        envio_flex=c.envio_flex if _ver_flex.get() else None,
         postagem_data=c.postagem_data,
         previsao_correios=c.previsao_correios,
         prazo_entrega_amazon=c.prazo_entrega_amazon,
@@ -800,11 +818,23 @@ def _team_scope_clause(scope: TeamScope):
     return or_(*ors)
 
 
+# Aba Flex (02/10/2026): rótulos de `logistica.plataforma` que têm Flex — o
+# Flex existe no Mercado Livre (Envios Flex) e na Shopee (Entrega Direta).
+_PLATAFORMAS_FLEX = tuple(
+    sorted(logistica_rules._ML_PLATAFORMAS | logistica_rules._SHOPEE_PLATAFORMAS)
+)
+
+
 @router.get("", response_model=list[LogisticaOut])
 async def list_logistica(
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[User, Depends(require_permission("logistica", "view"))],
     plataforma: Annotated[str | None, Query()] = None,
+    # `envio=flex`: a aba Flex. É uma visão A MAIS — o pedido continua nas
+    # abas ML/Shopee (com o selo); aqui junta os dois marketplaces. Valor
+    # desconhecido é 422, não "sem filtro" (a tela nunca pode achar que está
+    # vendo só Flex quando está vendo tudo).
+    envio: Annotated[Literal["flex"] | None, Query()] = None,
 ) -> list[LogisticaOut]:
     # Mais recentes primeiro (data desc, depois criação desc).
     stmt = select(Logistica).order_by(
@@ -813,6 +843,13 @@ async def list_logistica(
     if plataforma:
         label = _PLATAFORMA_LABELS.get(plataforma.strip().lower(), plataforma)
         stmt = stmt.where(Logistica.plataforma == label)
+    if envio == "flex":
+        if not flex_config.pode_ver(user):
+            raise HTTPException(404, detail="Not Found")
+        stmt = stmt.where(
+            Logistica.envio_flex.is_(True),
+            func.lower(func.trim(Logistica.plataforma)).in_(_PLATAFORMAS_FLEX),
+        )
     # Escopo por equipe: não-admin com equipe(s) só vê as linhas das lojas da
     # sua equipe (admin / sem-equipe = irrestrito).
     team_clause = _team_scope_clause(await resolve_team_scope(session, user))

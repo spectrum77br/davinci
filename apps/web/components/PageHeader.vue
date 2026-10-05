@@ -7,13 +7,21 @@ defineProps<{
 </script>
 
 <template>
-  <div class="flex flex-wrap items-end gap-3 mb-5">
+  <div class="page-header flex flex-wrap items-end gap-3 mb-4 sm:mb-5">
     <div class="min-w-0">
-      <h1 class="text-[22px] font-semibold tracking-tight leading-tight">{{ title }}</h1>
-      <p v-if="description" class="text-sm text-muted-foreground mt-0.5">{{ description }}</p>
+      <h1 class="page-header-title text-xl sm:text-[22px] font-semibold tracking-tight leading-tight">{{ title }}</h1>
+      <p v-if="description" class="page-header-description text-sm text-muted-foreground mt-0.5">{{ description }}</p>
     </div>
-    <div class="ml-auto flex flex-wrap items-center gap-2">
+    <div v-if="$slots.actions" class="w-full sm:w-auto sm:ml-auto flex flex-wrap items-center gap-2 min-w-0">
       <slot name="actions" />
     </div>
   </div>
 </template>
+
+<style scoped>
+@media (max-width: 1023px) and (max-height: 500px) and (orientation: landscape) {
+  .page-header { gap: 0.5rem; margin-bottom: 0.75rem; }
+  .page-header-title { font-size: 1.125rem; }
+  .page-header-description { font-size: 0.75rem; line-height: 1.4; }
+}
+</style>

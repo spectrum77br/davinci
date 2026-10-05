@@ -66,6 +66,7 @@ from app.models import (
 from app.services.atendimento import etiqueta as etiqueta_svc
 from app.services.atendimento import lojas
 from app.services.atendimento.constantes import (
+    AUTOMACOES_QUE_FECHAM_A_VEZ,
     AUTOR_CLIENTE,
     AUTOR_LOJA,
     AUTOR_MEDIADOR,
@@ -74,6 +75,7 @@ from app.services.atendimento.constantes import (
     AVALIACAO_OBSERVOU,
     CARTOES_DO_COMPRADOR_SHOPEE,
     CARTOES_DO_COMPRADOR_TIKTOK,
+    CHAVE_AUTOMACAO,
     CHAVE_PRAZO_LIDO_EM,
     CHAVE_PRAZO_PLATAFORMA,
     CHAVE_VEZ_DA_LOJA,
@@ -98,14 +100,18 @@ from app.services.atendimento.constantes import (
     ORIGENS_DAVINCI,
     PADRAO_MENSAGEM_AUTOMATICA,
     PADRAO_RESPOSTA_AUTOMATICA,
+    PAPEL_TIKTOK_ATENDIMENTO,
     PRIMEIRAS_LETRAS_AUTOMATICA,
     RASCUNHO_PENDENTE,
     RASCUNHO_SUBSTITUIDO,
+    TIPO_SHOPEE_CARTAO_PEDIDO,
     TIPO_SHOPEE_FIGURINHA,
+    TIPO_TIKTOK_CARTAO_PEDIDO,
     TRECHOS_CAMPANHA_COM_USUARIO,
     e_mensagem_automatica,
     e_nota,
     e_resposta_automatica,
+    marca_automacao,
     sla_horas,
 )
 
@@ -233,7 +239,19 @@ def automatica_pelo_payload_sql(payload: Any) -> Any:
     fonte = payload["source"].astext
     return func.coalesce(
         or_(
+            # A marca do motor de automações: um objeto em `automacao`.
+            # `->` (e não o subscrito): sobre um valor com cast o subscrito vira
+            # sintaxe errada (o teste compara com o Python sobre literais).
+            func.jsonb_typeof(payload.op("->")(CHAVE_AUTOMACAO)) == "object",
             fonte.in_(FONTES_SHOPEE_DA_PLATAFORMA),
+            and_(
+                fonte == FONTE_SHOPEE_API,
+                payload["message_type"].astext == TIPO_SHOPEE_CARTAO_PEDIDO,
+            ),
+            and_(
+                payload["type"].astext == TIPO_TIKTOK_CARTAO_PEDIDO,
+                payload[("sender", "role")].astext == PAPEL_TIKTOK_ATENDIMENTO,
+            ),
             and_(
                 fonte == FONTE_SHOPEE_API,
                 payload["message_type"].astext == TIPO_SHOPEE_FIGURINHA,
@@ -1006,14 +1024,43 @@ def _fechava_a_vez(m: AtendimentoMensagem) -> bool:
 
     Da loja, não falhou, automática pela régua nova e não pela antiga (o
     robô e as campanhas do Duoke nunca fecharam a vez): a figurinha 0007, os
-    cartões `server`/`crm` da Shopee, a campanha "já segue nossa loja" e a
-    senha da devolução. Só ela pode fechar o turno só de cartão.
+    cartões `server`/`crm` da Shopee, o cartão de pedido da campanha, a
+    campanha "já segue nossa loja" e a senha da devolução. Só ela pode fechar
+    o turno só de cartão. A do motor de automações do DaVinci (05/10/2026)
+    só nas partes equivalentes às do Duoke que fechavam
+    (`constantes.AUTOMACOES_QUE_FECHAM_A_VEZ`): a fila fica igual depois da
+    troca. O SQL é o `fechou` de `recalcular_conversa`.
     """
+    payload = getattr(m, "payload", None)
+    marca = marca_automacao(payload)
+    if marca is not None:
+        if (marca.get("codigo"), marca.get("parte")) not in AUTOMACOES_QUE_FECHAM_A_VEZ:
+            return False
     return (
         m.autor == AUTOR_LOJA
         and m.status != MSG_FALHOU
-        and e_mensagem_automatica(m.texto, getattr(m, "payload", None))
+        and e_mensagem_automatica(m.texto, payload)
         and not e_resposta_automatica(m.texto)
+    )
+
+
+def _marca_fecha_a_vez_sql(payload: Any) -> Any:
+    """A parte do `_fechava_a_vez` sobre a marca do motor, em SQL — nunca NULL.
+
+    Sem a marca: vale (decide o resto). Com ela: só as partes de
+    `AUTOMACOES_QUE_FECHAM_A_VEZ`.
+    """
+    tem_marca = func.coalesce(
+        func.jsonb_typeof(payload.op("->")(CHAVE_AUTOMACAO)) == "object", false()
+    )
+    chave = func.concat(
+        payload[(CHAVE_AUTOMACAO, "codigo")].astext,
+        ":",
+        payload[(CHAVE_AUTOMACAO, "parte")].astext,
+    )
+    return or_(
+        ~tem_marca,
+        chave.in_(sorted(f"{c}:{p}" for c, p in AUTOMACOES_QUE_FECHAM_A_VEZ)),
     )
 
 
@@ -1069,6 +1116,7 @@ async def recalcular_conversa(session: AsyncSession, conversa: AtendimentoConver
         AtendimentoMensagem.status != MSG_FALHOU,
         mensagem_automatica_sql(AtendimentoMensagem.texto, AtendimentoMensagem.payload),
         ~resposta_automatica_sql(AtendimentoMensagem.texto),
+        _marca_fecha_a_vez_sql(AtendimentoMensagem.payload),
     )
     if da_loja is not None:
         escreveu = escreveu.where(momento > _quando(da_loja))

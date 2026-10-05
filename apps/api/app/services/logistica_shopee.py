@@ -32,7 +32,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Integration, IntegrationPlatform, Logistica
 from app.security.cipher import decrypt_json, encrypt_json
-from app.services import logistica_datas, logistica_enrich, logistica_rules, logistica_track
+from app.services import (
+    flex_envio,
+    logistica_datas,
+    logistica_enrich,
+    logistica_rules,
+    logistica_track,
+)
 from app.services.devolucao_returns import ReturnInfo, epoch_to_dt
 from app.services.marketplaces.shopee import ShopeeClient
 
@@ -54,7 +60,11 @@ async def build_enrichment(client: ShopeeClient, order_sn: str) -> dict:
     que a Shopee não devolver ficam de fora / None.
 
     `datas` = quando cada campo mudou (ver logistica_datas). A Shopee data as
-    duas pontas: `update_time` do pedido e o horário do último evento da SPX."""
+    duas pontas: `update_time` do pedido e o horário do último evento da SPX.
+
+    Mais `envio_tipo`/`envio_flex` quando o pedido trouxe canal/transportadora
+    (Flex = Shopee Entrega Direta; ver services/flex_envio) — vêm na mesma
+    chamada do order_status."""
     order_sn = str(order_sn)
     status_map = await client.get_order_status_map([order_sn])
     info = status_map.get(order_sn) or {}
@@ -99,6 +109,7 @@ async def build_enrichment(client: ShopeeClient, order_sn: str) -> dict:
         "rastreio": rastreio or None,
         "localizacao": localizacao,
         "datas": {f: datas[f] for f in meli if f in datas},
+        **flex_envio.campos_envio(flex_envio.PLATAFORMA_SHOPEE, info),
     }
 
 
@@ -216,6 +227,7 @@ async def enrich_row(
     row.status_datas = logistica_datas.aplicar(row, meli, enr.get("datas"))
     row.meli_status = meli
     row.status_lido_em = datetime.now(UTC)
+    flex_envio.aplicar_na_linha(row, enr)
     if enr.get("rastreio"):
         row.rastreio = enr["rastreio"]
     # Envio por Correios com evento real do 17track (`localizacao_at`) não é
@@ -305,6 +317,14 @@ async def sweep_pos_venda(session: AsyncSession) -> dict:
         smap = await client.get_order_status_map(sns)
         for r in linhas:
             info = smap.get((r.pedido_marketplace or "").strip()) or {}
+            # Canal de envio (Flex) de carona no mesmo lote: preenche a aba
+            # Flex nos 45 dias da janela sem chamada a mais. Não conta como
+            # "mudou" — não há regra de status a aplicar por isso.
+            envio = flex_envio.campos_envio(flex_envio.PLATAFORMA_SHOPEE, info)
+            if envio and (
+                r.envio_flex != envio["envio_flex"] or r.envio_tipo != envio["envio_tipo"]
+            ):
+                flex_envio.aplicar_na_linha(r, envio)
             st = (info.get("status") or "").strip().upper()
             atual = ((r.meli_status or {}).get("order_status") or "").strip().upper()
             if st and st != atual:

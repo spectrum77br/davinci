@@ -163,7 +163,7 @@ const onboardingComplete = computed(() => {
 </script>
 
 <template>
-  <div class="space-y-6">
+  <div class="dashboard-page min-w-0 space-y-4 sm:space-y-6">
     <PageHeader title="Dashboard" description="Visão geral do catálogo, integrações e sincronizações.">
       <template #actions>
         <Button size="sm" variant="outline" :disabled="pending" @click="refresh()">
@@ -192,13 +192,13 @@ const onboardingComplete = computed(() => {
       </div>
     </NuxtLink>
 
-    <div class="grid grid-cols-2 lg:grid-cols-4 gap-3">
+    <div class="dashboard-kpis grid grid-cols-2 lg:grid-cols-4 gap-2 sm:gap-3">
       <StatCard v-for="k in kpis" :key="k.label" v-bind="k" />
     </div>
 
     <div class="grid lg:grid-cols-3 gap-4">
-      <div class="lg:col-span-2 rounded-xl border bg-card p-5">
-        <div class="flex items-center mb-4">
+      <div class="min-w-0 lg:col-span-2 rounded-xl border bg-card p-3 sm:p-5">
+        <div class="flex flex-wrap items-center gap-2 mb-4">
           <h2 class="font-semibold">Anúncios por canal</h2>
           <NuxtLink to="/anuncios" class="ml-auto text-xs text-primary inline-flex items-center hover:underline">
             ver anúncios <ArrowUpRight class="size-3 ml-0.5" />
@@ -210,10 +210,10 @@ const onboardingComplete = computed(() => {
         </div>
         <div v-else class="space-y-4">
           <div v-for="c in channels" :key="c.platform" class="space-y-1.5">
-            <div class="flex items-center text-sm">
-              <span class="font-medium">{{ c.label }}</span>
-              <span class="ml-auto tabular-nums text-muted-foreground">{{ c.linked }}/{{ c.listings }} vinculados</span>
-              <span class="ml-3 tabular-nums font-semibold w-12 text-right">{{ c.share }}%</span>
+            <div class="channel-summary text-sm">
+              <span class="channel-name font-medium">{{ c.label }}</span>
+              <span class="channel-count tabular-nums text-muted-foreground">{{ c.linked }}/{{ c.listings }} vinculados</span>
+              <span class="channel-share tabular-nums font-semibold text-right">{{ c.share }}%</span>
             </div>
             <div class="h-2 rounded-full bg-muted overflow-hidden">
               <div class="h-full rounded-full" :class="c.color" :style="{ width: c.share + '%' }" />
@@ -222,7 +222,7 @@ const onboardingComplete = computed(() => {
         </div>
       </div>
 
-      <div class="rounded-xl border bg-card p-5 space-y-3">
+      <div class="min-w-0 rounded-xl border bg-card p-3 sm:p-5 space-y-3">
         <div class="flex items-center">
           <AlertTriangle class="size-4 text-amber-500 mr-1.5" />
           <h2 class="font-semibold">Alertas</h2>
@@ -232,8 +232,8 @@ const onboardingComplete = computed(() => {
           <li v-for="a in alerts" :key="a.id" class="flex gap-3">
             <span :class="alertClass(a.severity)">{{ alertGlyph(a.severity) }}</span>
             <div class="min-w-0">
-              <div class="text-sm font-medium leading-tight">{{ a.title }}</div>
-              <div v-if="a.message" class="text-xs text-muted-foreground">{{ a.message }}</div>
+              <div class="break-words text-sm font-medium leading-tight">{{ a.title }}</div>
+              <div v-if="a.message" class="break-words text-xs text-muted-foreground">{{ a.message }}</div>
             </div>
           </li>
         </ul>
@@ -254,7 +254,7 @@ const onboardingComplete = computed(() => {
     </div>
 
     <div class="rounded-xl border bg-card overflow-hidden">
-      <div class="flex items-center px-5 py-3 border-b">
+      <div class="flex flex-wrap items-center gap-y-2 px-3 sm:px-5 py-3 border-b">
         <Truck class="size-4 text-muted-foreground mr-1.5" />
         <h2 class="font-semibold">Sincronizações recentes</h2>
         <NuxtLink to="/sincronizacoes" class="ml-auto text-xs text-primary inline-flex items-center hover:underline">
@@ -264,38 +264,55 @@ const onboardingComplete = computed(() => {
       <div v-if="recentSyncs.length === 0" class="p-6 text-center text-sm text-muted-foreground">
         Nenhuma sincronização ainda.
       </div>
-      <table v-else class="w-full text-sm">
-        <thead>
-          <tr class="bg-muted/40 text-left text-xs text-muted-foreground">
-            <th class="px-5 py-2 font-medium">Tipo</th>
-            <th class="px-3 py-2 font-medium">Status</th>
-            <th class="px-3 py-2 font-medium text-right">Processados</th>
-            <th class="px-3 py-2 font-medium text-right">Total</th>
-            <th class="px-3 py-2 font-medium">Duração</th>
-            <th class="px-5 py-2 font-medium text-right">Quando</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-for="r in recentSyncs" :key="r.id" class="border-t hover:bg-muted/30">
-            <td class="px-5 py-2.5 font-medium">{{ syncTypeLabel(r.type) }}</td>
-            <td class="px-3 py-2.5">
-              <span
-                class="text-xs px-1.5 py-0.5 rounded"
-                :class="{
-                  'bg-emerald-500/10 text-emerald-600': r.status === 'success',
-                  'bg-red-500/10 text-red-600': r.status === 'failed',
-                  'bg-amber-500/10 text-amber-600': r.status === 'running',
-                  'bg-muted text-muted-foreground': !['success', 'failed', 'running'].includes(r.status),
-                }"
-              >{{ r.status }}</span>
-            </td>
-            <td class="px-3 py-2.5 text-right tabular-nums">{{ r.processed }}</td>
-            <td class="px-3 py-2.5 text-right tabular-nums text-muted-foreground">{{ r.total }}</td>
-            <td class="px-3 py-2.5 text-muted-foreground">{{ formatDuration(r) }}</td>
-            <td class="px-5 py-2.5 text-right text-muted-foreground">{{ formatRelative(r.started_at) }} atrás</td>
-          </tr>
-        </tbody>
-      </table>
+      <div v-else>
+        <p class="px-3 pt-2 text-xs text-muted-foreground sm:hidden">Deslize a tabela para ver todos os detalhes.</p>
+        <div class="overflow-x-auto overscroll-x-contain" role="region" aria-label="Sincronizações recentes" tabindex="0">
+          <table class="w-full min-w-[36rem] text-sm">
+            <thead>
+              <tr class="bg-muted/40 text-left text-xs text-muted-foreground">
+                <th class="px-5 py-2 font-medium">Tipo</th>
+                <th class="px-3 py-2 font-medium">Status</th>
+                <th class="px-3 py-2 font-medium text-right">Processados</th>
+                <th class="px-3 py-2 font-medium text-right">Total</th>
+                <th class="px-3 py-2 font-medium">Duração</th>
+                <th class="px-5 py-2 font-medium text-right">Quando</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="r in recentSyncs" :key="r.id" class="border-t hover:bg-muted/30">
+                <td class="px-5 py-2.5 font-medium">{{ syncTypeLabel(r.type) }}</td>
+                <td class="px-3 py-2.5">
+                  <span
+                    class="text-xs px-1.5 py-0.5 rounded"
+                    :class="{
+                      'bg-emerald-500/10 text-emerald-600': r.status === 'success',
+                      'bg-red-500/10 text-red-600': r.status === 'failed',
+                      'bg-amber-500/10 text-amber-600': r.status === 'running',
+                      'bg-muted text-muted-foreground': !['success', 'failed', 'running'].includes(r.status),
+                    }"
+                  >{{ r.status }}</span>
+                </td>
+                <td class="px-3 py-2.5 text-right tabular-nums">{{ r.processed }}</td>
+                <td class="px-3 py-2.5 text-right tabular-nums text-muted-foreground">{{ r.total }}</td>
+                <td class="px-3 py-2.5 text-muted-foreground">{{ formatDuration(r) }}</td>
+                <td class="px-5 py-2.5 text-right text-muted-foreground">{{ formatRelative(r.started_at) }} atrás</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
     </div>
   </div>
 </template>
+
+<style scoped>
+.channel-summary { display: flex; align-items: center; }
+.channel-count { margin-left: auto; }
+.channel-share { width: 3rem; margin-left: .75rem; }
+@media (max-width: 639px) {
+  .channel-summary { display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: .5rem; }
+  .channel-name { min-width: 0; overflow-wrap: anywhere; }
+  .channel-count { grid-column: 1; grid-row: 2; margin-left: 0; font-size: .75rem; }
+  .channel-share { grid-column: 2; grid-row: 1 / span 2; width: auto; margin-left: 0; }
+}
+</style>

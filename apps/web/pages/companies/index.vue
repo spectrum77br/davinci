@@ -3,7 +3,7 @@ import { TABS_CADASTROS } from '~/lib/navGroups'
 import { fmtPct } from '~/lib/nfse'
 import { PCT_EMPRESA_DICA, lerPctEmpresa, pctNormal, pctParaCampo } from '~/lib/percentualEmpresa'
 import { ref, computed, reactive, watch, nextTick } from 'vue'
-import { Plus, RefreshCw, X, ExternalLink, Trash2, Lock, ShieldCheck, KeyRound, Download, Pencil, Upload, Eye, EyeOff } from 'lucide-vue-next'
+import { Plus, RefreshCw, X, ExternalLink, Trash2, Lock, SlidersHorizontal, ShieldCheck, KeyRound, Download, Pencil, Upload, Eye, EyeOff } from 'lucide-vue-next'
 import {
   MARKETPLACES,
   MARKETPLACE_SHORT,
@@ -116,6 +116,16 @@ const filterContabilidade = ref<string>('')
 // string vazia colidiria com a opção "todas".
 const SEM_CONTABILIDADE = '__sem__'
 const search = ref<string>('')
+const showMobileFilters = ref(false)
+const mobileTableView = ref(false)
+function mobileStoreStatus(status: StoreStatus): string {
+  return { active: 'Ativa', inactive: 'Inativa', closing: 'Fechar', banned: 'Banida', pending: 'Pendente', under_review: 'Em análise' }[status]
+}
+async function openCompanyTable(row: GridRow) {
+  mobileTableView.value = true
+  await nextTick()
+  document.getElementById(`company-row-${row.company.id}`)?.scrollIntoView({ block: 'center', inline: 'start' })
+}
 const showNew = ref(false)
 
 const canEdit = useCan('empresa', 'edit')
@@ -1425,36 +1435,42 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
 </script>
 
 <template>
-  <div class="space-y-4">
+  <div class="companies-page min-w-0 space-y-4">
     <RouteTabs :tabs="TABS_CADASTROS" />
     <SenhaExtraTrava v-if="!trava.token.value" titulo="Empresas" :trava="trava" />
     <template v-else>
-    <div class="flex items-center gap-3 flex-wrap">
-      <h1 class="text-2xl font-semibold">Empresas</h1>
+    <div class="flex items-center gap-2 lg:gap-3 flex-wrap">
+      <h1 class="text-xl lg:text-2xl font-semibold">Empresas</h1>
       <Button size="sm" variant="ghost" :disabled="loading" @click="refresh">
         <RefreshCw class="size-4 mr-1" /> recarregar
       </Button>
       <Button size="sm" variant="ghost" title="tranca a página de novo nesta aba" @click="bloquear">
         <Lock class="size-4 mr-1" /> bloquear
       </Button>
-      <div class="ml-auto flex gap-2 flex-wrap">
-        <Input v-model="search" placeholder="razão social / apelido / CNPJ / responsável / contabilidade" class="w-64" />
-        <Input v-model="filterUf" placeholder="UF" class="w-20" />
-        <select v-model="filterMk" class="border rounded px-2 text-sm bg-background">
-          <option value="">todos marketplaces</option>
-          <option v-for="mk in marketplaceOptions" :key="mk" :value="mk">{{ MARKETPLACE_SHORT[mk] }}</option>
-        </select>
-        <select v-model="filterResponsavel" class="border rounded px-2 text-sm bg-background">
-          <option value="">todos responsáveis</option>
-          <option v-for="r in responsaveisOpts" :key="r" :value="r">{{ r }}</option>
-        </select>
-        <select v-model="filterContabilidade" class="border rounded px-2 text-sm bg-background">
-          <option value="">todas contabilidades</option>
-          <option v-for="c in contabilidadeOpts" :key="c.valor" :value="c.valor">
-            {{ c.valor === SEM_CONTABILIDADE ? 'sem contabilidade' : c.valor }} ({{ c.total }})
-          </option>
-        </select>
-        <Button v-if="canEdit" size="sm" @click="showNew = true">
+      <div class="company-filters ml-auto grid w-full grid-cols-[minmax(0,1fr)_auto] gap-2 lg:flex lg:w-auto lg:flex-wrap">
+        <Input v-model="search" aria-label="Buscar empresa" placeholder="Buscar empresa, conta ou CNPJ" class="min-w-0 w-full lg:w-64" />
+        <Button size="sm" variant="outline" class="lg:hidden" :aria-expanded="showMobileFilters" aria-controls="company-filter-fields" @click="showMobileFilters = !showMobileFilters">
+          <SlidersHorizontal class="size-4 mr-1" /> Filtros
+          <span v-if="filterUf || filterMk || filterResponsavel || filterContabilidade" class="ml-1 size-2 rounded-full bg-primary" aria-label="Filtros ativos" />
+        </Button>
+        <div id="company-filter-fields" class="company-filter-fields col-span-2 grid grid-cols-2 gap-2 lg:contents" :class="{ 'hidden': !showMobileFilters }">
+          <Input v-model="filterUf" aria-label="Filtrar por UF" placeholder="UF" class="min-w-0 w-full lg:w-20" />
+          <select v-model="filterMk" aria-label="Filtrar por marketplace" class="min-w-0 border rounded px-2 text-sm bg-background">
+            <option value="">todos marketplaces</option>
+            <option v-for="mk in marketplaceOptions" :key="mk" :value="mk">{{ MARKETPLACE_SHORT[mk] }}</option>
+          </select>
+          <select v-model="filterResponsavel" aria-label="Filtrar por responsável" class="min-w-0 border rounded px-2 text-sm bg-background">
+            <option value="">todos responsáveis</option>
+            <option v-for="r in responsaveisOpts" :key="r" :value="r">{{ r }}</option>
+          </select>
+          <select v-model="filterContabilidade" aria-label="Filtrar por contabilidade" class="min-w-0 border rounded px-2 text-sm bg-background">
+            <option value="">todas contabilidades</option>
+            <option v-for="c in contabilidadeOpts" :key="c.valor" :value="c.valor">
+              {{ c.valor === SEM_CONTABILIDADE ? 'sem contabilidade' : c.valor }} ({{ c.total }})
+            </option>
+          </select>
+        </div>
+        <Button v-if="canEdit" size="sm" class="col-span-2" @click="showNew = true">
           <Plus class="size-4 mr-1" /> Nova empresa
         </Button>
       </div>
@@ -1462,7 +1478,56 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
 
     <div v-if="error" class="text-sm text-red-500">erro: {{ error }}</div>
 
-    <div class="border rounded-md overflow-auto max-h-[calc(100vh-220px)]">
+    <div class="flex flex-wrap items-center justify-between gap-2 lg:hidden">
+      <p class="text-xs text-muted-foreground">{{ filteredRows.length }} empresa{{ filteredRows.length === 1 ? '' : 's' }}</p>
+      <div class="inline-flex rounded-lg border p-1" aria-label="Visualização das empresas">
+        <button type="button" class="rounded-md px-3 py-2 text-xs" :class="!mobileTableView ? 'bg-primary text-primary-foreground' : 'text-muted-foreground'" :aria-pressed="!mobileTableView" @click="mobileTableView = false">Cartões</button>
+        <button type="button" class="rounded-md px-3 py-2 text-xs" :class="mobileTableView ? 'bg-primary text-primary-foreground' : 'text-muted-foreground'" :aria-pressed="mobileTableView" @click="mobileTableView = true">Tabela</button>
+      </div>
+    </div>
+    <section v-if="!mobileTableView" class="company-cards grid min-w-0 gap-3 lg:hidden" aria-label="Empresas" :aria-busy="loading">
+      <p v-if="loading && !grid" class="text-sm text-muted-foreground" role="status">Carregando empresas…</p>
+      <p v-else-if="!filteredRows.length" class="rounded-lg border p-4 text-sm text-muted-foreground">Nenhuma empresa encontrada.</p>
+      <article v-for="row in filteredRows" :key="row.company.id" class="registry-card min-w-0 rounded-xl border bg-card p-3">
+        <div class="flex items-start justify-between gap-2">
+          <div class="min-w-0">
+            <h2 class="break-words text-sm font-semibold">{{ row.company.apelido || row.company.razao_social }}</h2>
+            <p class="mt-1 break-words text-xs text-muted-foreground">{{ row.company.razao_social }}</p>
+          </div>
+          <NuxtLink :to="`/companies/${row.company.id}`" class="inline-flex shrink-0 items-center gap-1 rounded-md border px-2.5 py-2 text-xs" :aria-label="`Abrir empresa ${row.company.apelido}`">Abrir <ExternalLink class="size-3.5" /></NuxtLink>
+        </div>
+        <dl class="registry-card-data mt-3 grid grid-cols-2 gap-3 text-xs">
+          <div><dt>Responsável</dt><dd>{{ row.company.responsavel_nome || '—' }}</dd></div>
+          <div><dt>UF</dt><dd>{{ row.company.uf || '—' }}</dd></div>
+          <div><dt>CNPJ</dt><dd>{{ row.company.cnpj || '—' }}</dd></div>
+          <div><dt>Contabilidade</dt><dd>{{ row.company.contabilidade || '—' }}</dd></div>
+        </dl>
+        <div class="mt-3 flex flex-wrap gap-1.5" aria-label="Contas da empresa">
+          <span v-for="mk in MARKETPLACES.filter(m => row.stores[m])" :key="mk" class="rounded-md border bg-muted/30 px-2 py-1 text-xs" :class="STORE_STATUS_CLASSES[row.stores[mk]!.status]">{{ MARKETPLACE_SHORT[mk] }} · {{ mobileStoreStatus(row.stores[mk]!.status) }}</span>
+          <span v-if="!MARKETPLACES.some(m => row.stores[m])" class="text-xs text-muted-foreground">Nenhuma conta vinculada.</span>
+        </div>
+        <details class="mt-3 border-t pt-2">
+          <summary class="cursor-pointer py-2 text-xs font-medium">Ver detalhes da empresa</summary>
+          <dl class="registry-card-data grid gap-3 pt-2 text-xs">
+            <div><dt>Inscrição estadual</dt><dd>{{ row.company.inscricao_estadual || '—' }}</dd></div>
+            <div><dt>Operação</dt><dd>{{ row.company.operacao || '—' }}</dd></div>
+            <div><dt>Porcentagem de serviço</dt><dd>{{ fmtPct(row.company.percentual_servico) }}</dd></div>
+            <div><dt>Site</dt><dd>{{ row.company.site_url || '—' }}</dd></div>
+            <div><dt>IP</dt><dd :class="{ 'text-red-600': ipRepetido(row) }">{{ row.company.ip || '—' }}{{ ipRepetido(row) ? ' · repetido' : '' }}</dd><dd v-if="situacaoAdspower(row.company)" :class="situacaoAdspower(row.company)!.classe">{{ situacaoAdspower(row.company)!.texto }}</dd></div>
+            <div><dt>Observação</dt><dd class="whitespace-pre-wrap">{{ row.company.obs || '—' }}</dd></div>
+            <div><dt>Marketplaces</dt><dd class="mt-1 space-y-1"><div v-for="mk in MARKETPLACES" :key="mk">{{ MARKETPLACE_SHORT[mk] }}: {{ row.stores[mk] ? mobileStoreStatus(row.stores[mk]!.status) : (row.company.enabled_marketplaces || []).includes(mk) ? 'Sem conta' : 'Bloqueado' }}</div></dd></div>
+            <div v-if="isAdmin"><dt>Certificado digital</dt><dd>{{ row.certificado ? row.certificado.filename : 'Nenhum cadastrado' }}</dd><dd v-if="row.certificado">{{ row.certificado.has_password ? 'Com senha' : 'Sem senha' }}<span v-if="vencimentoCertificado(row.certificado)"> · {{ vencimentoCertificado(row.certificado)!.vencido ? 'Venceu' : 'Vence' }} {{ vencimentoCertificado(row.certificado)!.texto }}</span></dd></div>
+          </dl>
+          <div class="mt-3 flex flex-wrap gap-2">
+            <Button v-if="isAdmin" size="sm" variant="outline" @click="alternarCertificado(row)">Certificados</Button>
+            <Button v-if="isAdmin" size="sm" variant="outline" @click="abrirProxy(row)">Proxy</Button>
+            <Button v-if="canEdit" size="sm" variant="outline" @click="openCompanyTable(row)">Editar na tabela</Button>
+          </div>
+        </details>
+      </article>
+    </section>
+    <p v-if="mobileTableView" class="text-xs text-muted-foreground lg:hidden">Modo tabela: deslize para acessar todas as colunas de edição.</p>
+    <div class="companies-table min-w-0 border rounded-md overflow-auto overscroll-x-contain max-h-[calc(100vh-220px)]" :class="mobileTableView ? 'block' : 'hidden lg:block'" role="region" aria-label="Empresas e marketplaces" tabindex="0">
       <table class="w-full text-sm">
         <thead class="bg-muted text-left sticky top-0 z-10 shadow-[inset_0_-1px_0_var(--border)]">
           <tr>
@@ -1484,7 +1549,7 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
           </tr>
         </thead>
         <tbody>
-          <tr v-for="row in filteredRows" :key="row.company.id" class="border-t hover:bg-muted/20">
+          <tr v-for="row in filteredRows" :id="`company-row-${row.company.id}`" :key="row.company.id" class="border-t hover:bg-muted/20">
             <td
               class="px-3 py-2 sticky left-0 z-10 bg-background"
               :class="{ 'cursor-pointer hover:bg-accent/30': canEdit && !isEditingCell(row, 'razao_social') }"
@@ -1502,12 +1567,12 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
                 @keydown.escape.prevent="cancelEditCell"
               />
               <div v-else class="flex items-center gap-1 group">
-                <span class="font-medium flex-1 truncate" :title="row.company.razao_social">
+                <span class="company-name min-w-0 font-medium flex-1 truncate" :title="row.company.razao_social">
                   {{ row.company.razao_social }}
                 </span>
                 <NuxtLink
                   :to="`/companies/${row.company.id}`"
-                  class="opacity-0 group-hover:opacity-100 shrink-0 p-0.5 hover:bg-muted rounded"
+                  class="company-row-action opacity-100 sm:opacity-0 group-hover:opacity-100 shrink-0 p-1.5 sm:p-0.5 hover:bg-muted rounded"
                   title="Abrir empresa"
                   @click.stop
                 >
@@ -1515,7 +1580,7 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
                 </NuxtLink>
                 <button
                   v-if="canDelete"
-                  class="opacity-0 group-hover:opacity-100 shrink-0 p-0.5 hover:bg-destructive/10 rounded"
+                  class="company-row-action opacity-100 sm:opacity-0 group-hover:opacity-100 shrink-0 p-1.5 sm:p-0.5 hover:bg-destructive/10 rounded"
                   title="Excluir empresa"
                   @click.stop="deleteCompany(row)"
                 >
@@ -1781,7 +1846,7 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
                 role="dialog"
                 aria-modal="true"
                 :aria-label="`Certificado digital de ${row.company.apelido}`"
-                class="flex w-full max-w-lg max-h-[calc(100vh-2rem)] flex-col rounded-xl border bg-background text-left text-sm shadow-xl whitespace-normal"
+                class="company-dialog flex w-full max-w-lg max-h-[calc(100vh-2rem)] flex-col rounded-xl border bg-background text-left text-sm shadow-xl whitespace-normal"
               >
                 <!-- cabeçalho -->
                 <div class="flex items-start gap-3 border-b px-5 py-4">
@@ -1811,7 +1876,7 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
                 <!-- certificados -->
                 <div
                   v-if="certErro || certificadosDoPainel(row).length || !certNovoAberto"
-                  class="flex-1 space-y-3 overflow-y-auto px-5 py-4"
+                  class="min-h-0 flex-1 space-y-3 overflow-y-auto px-3 sm:px-5 py-4"
                 >
                   <div
                     v-if="certErro"
@@ -2176,15 +2241,16 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
       class="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4"
       @click.self="closeNewAccount"
     >
-      <div class="bg-background border rounded-lg w-full max-w-md p-5 space-y-4">
+      <div class="company-dialog bg-background border rounded-lg w-full max-w-md p-4 sm:p-5 space-y-4"
+        role="dialog" aria-modal="true" aria-labelledby="new-account-title">
         <div class="flex items-center">
           <div>
-            <h2 class="text-lg font-semibold">Nova conta</h2>
+            <h2 id="new-account-title" class="text-lg font-semibold">Nova conta</h2>
             <p class="text-xs text-muted-foreground">
               {{ newAccountFor.company.apelido }} · {{ MARKETPLACE_SHORT[newAccountFor.mk] }}
             </p>
           </div>
-          <Button class="ml-auto" size="sm" variant="ghost" :disabled="newAccountSaving" @click="closeNewAccount">
+          <Button class="ml-auto" size="sm" variant="ghost" aria-label="Fechar nova conta" :disabled="newAccountSaving" @click="closeNewAccount">
             <X class="size-4" />
           </Button>
         </div>
@@ -2268,10 +2334,10 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
     </div>
 
     <div v-if="showNew" class="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4" @click.self="showNew = false">
-      <div class="bg-background border rounded-lg w-full max-w-lg p-5 space-y-4">
+      <div class="company-dialog bg-background border rounded-lg w-full max-w-lg p-4 sm:p-5 space-y-4" role="dialog" aria-modal="true" aria-labelledby="new-company-title">
         <div class="flex items-center">
-          <h2 class="text-lg font-semibold">Nova empresa</h2>
-          <Button class="ml-auto" size="sm" variant="ghost" @click="showNew = false">
+          <h2 id="new-company-title" class="text-lg font-semibold">Nova empresa</h2>
+          <Button class="ml-auto" size="sm" variant="ghost" aria-label="Fechar nova empresa" @click="showNew = false">
             <X class="size-4" />
           </Button>
         </div>
@@ -2280,7 +2346,7 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
             <Label>Razão social *</Label>
             <Input v-model="draft.razao_social" required />
           </div>
-          <div class="grid grid-cols-2 gap-3">
+          <div class="grid grid-cols-1 min-[400px]:grid-cols-2 gap-3">
             <div>
               <Label>Apelido *</Label>
               <Input v-model="draft.apelido" required />
@@ -2302,7 +2368,7 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
             <Label>Site</Label>
             <Input v-model="draft.site_url" />
           </div>
-          <div class="grid grid-cols-2 gap-3">
+          <div class="grid grid-cols-1 min-[400px]:grid-cols-2 gap-3">
             <div>
               <Label>Operação</Label>
               <Input v-model="draft.operacao" />
@@ -2357,7 +2423,7 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
           role="dialog"
           aria-modal="true"
           :aria-label="`Proxy de ${proxyLinha?.company.apelido || ''}`"
-          class="flex w-full max-w-lg max-h-[calc(100vh-2rem)] flex-col rounded-xl border bg-background text-left text-sm font-sans shadow-xl whitespace-normal"
+          class="company-dialog flex w-full max-w-lg max-h-[calc(100vh-2rem)] flex-col rounded-xl border bg-background text-left text-sm font-sans shadow-xl whitespace-normal"
         >
           <div class="flex items-start gap-3 border-b px-5 py-4">
             <div class="rounded-lg bg-primary/10 p-2 text-primary">
@@ -2383,7 +2449,7 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
             </button>
           </div>
 
-          <div class="flex-1 space-y-4 overflow-y-auto px-5 py-4">
+          <div class="min-h-0 flex-1 space-y-4 overflow-y-auto px-3 sm:px-5 py-4">
             <div
               v-if="proxyErro"
               role="alert"
@@ -2513,3 +2579,24 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
     <option v-for="n in responsaveisOpts" :key="n" :value="n" />
   </datalist>
 </template>
+
+<style scoped>
+.company-dialog { max-height: calc(100dvh - 2rem); overflow-y: auto; overscroll-behavior: contain; }
+@media (min-width: 640px) and (max-width: 1023px) {
+  .company-cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+.registry-card { overflow-wrap: anywhere; }
+.registry-card-data > div { min-width: 0; }
+.registry-card-data dt { color: hsl(var(--muted-foreground)); }
+.registry-card-data dd { margin-top: .25rem; overflow-wrap: anywhere; }
+@media (max-width: 1023px) {
+  .company-filters :deep(input), .company-filters select, .company-filters :deep(button) { min-height: 2.5rem; }
+  .companies-table { max-height: 65dvh; }
+  .companies-table > table { min-width: 90rem; }
+  .companies-table :is(th, td):first-child { width: 10.5rem; min-width: 10.5rem; max-width: 10.5rem; padding-inline: .5rem; }
+  .company-name { white-space: normal; overflow-wrap: anywhere; font-size: .75rem; line-height: 1.2rem; }
+  .company-row-action { padding: .375rem; }
+  .company-dialog :deep(input), .company-dialog select { min-width: 0; max-width: 100%; }
+  .company-dialog :deep(button) { min-height: 2.5rem; }
+}
+</style>

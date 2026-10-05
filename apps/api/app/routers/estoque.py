@@ -829,6 +829,21 @@ async def list_estoque_pedidos(
     chamado_atraso_por_pedido = await _chamados_atraso.chamados_por_pedido(
         session, [o.numero for o in orders if o.numero]
     )
+    # Pedido Flex (projeto Flex, 02/10/2026): sai de São Bernardo (.sp) e é
+    # entregue no mesmo dia ou no seguinte — a tela põe o selo "Flex" para a
+    # separação não pegar a peça de outro lugar. Uma consulta por fonte, por
+    # bling_id (grão de pedido: todas as linhas do pedido mostram igual).
+    # Só para quem vê o Flex (`flex_usuarios`); os outros não veem o selo.
+    from app.services import flex_config as _flex_config
+    from app.services import flex_envio as _flex_envio
+
+    flex_bling_ids = (
+        await _flex_envio.bling_ids_flex(
+            session, {o.bling_id: o.numero for o in orders if o.bling_id}
+        )
+        if _flex_config.pode_ver(user)
+        else set()
+    )
     result: list[dict[str, Any]] = []
     for o in orders:
         check = checks_map.get(str(o.id), {"conferido": False, "observacao": None})
@@ -891,6 +906,8 @@ async def list_estoque_pedidos(
             "estoque_compartilhado": (
                 bool(o.numero) and o.numero in compartilhado_por_pedido
             ),
+            # Envio Flex (ML Envios Flex / Shopee Entrega Direta): selo na tela.
+            "flex": bool(o.bling_id) and o.bling_id in flex_bling_ids,
             # Pede vídeo da embalagem (mais de 1 unidade no pedido) e o link
             # já salvo (null = ainda sem vídeo). Grão de pedido: todas as
             # linhas do mesmo pedido mostram o mesmo.

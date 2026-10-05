@@ -15,6 +15,7 @@ from app.routers import alerts as alerts_router
 from app.routers import aprovar_margem as aprovar_margem_router
 from app.routers import atendimento as atendimento_router
 from app.routers import atendimento_abas as atendimento_abas_router
+from app.routers import atendimento_automacoes as atendimento_automacoes_router
 from app.routers import atendimento_avaliacoes as atendimento_avaliacoes_router
 from app.routers import atendimento_carrinhos as atendimento_carrinhos_router
 from app.routers import atendimento_painel as atendimento_painel_router
@@ -41,6 +42,7 @@ from app.routers import faturamento as faturamento_router
 from app.routers import faturas as faturas_router
 from app.routers import historico as historico_router
 from app.routers import financeiro as financeiro_router
+from app.routers import flex as flex_router
 from app.routers import imagens as imagens_router
 from app.routers import importacao as importacao_router
 from app.routers import informar as informar_router
@@ -240,6 +242,8 @@ app.include_router(tarefas_router.router)
 app.include_router(faturas_router.router)
 app.include_router(automacoes_router.router)
 app.include_router(logistica_router.router)
+# Flex por anúncio (projeto Flex, etapa 3): a aba Flex › Anúncios da Logística.
+app.include_router(flex_router.router)
 app.include_router(logistica_track_router.router)
 app.include_router(informar_router.router)
 app.include_router(refunds_router.router)
@@ -268,6 +272,9 @@ app.include_router(atendimento_redes_router.router)
 # Reclamação · Mediador · E-mail · Zap · Avaliação do mesmo comprador e
 # pedido, na mesma loja (só leitura; a caixa responde pela conversa de origem).
 app.include_router(atendimento_abas_router.router)
+# Mensagens automáticas (05/10/2026): a aba "Automáticas" — as regras por
+# loja (modo seco até a troca), o registro sem texto e a conta com o Duoke.
+app.include_router(atendimento_automacoes_router.router)
 # Temu/AliExpress (30/09/2026): o robô do Mac mini manda o que a página do
 # Seller Center recebe (token próprio; vazio = desligado).
 app.include_router(atendimento_robo_router.router)

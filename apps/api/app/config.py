@@ -468,6 +468,36 @@ class Settings(BaseSettings):
     # Envio AUTOMÁTICO. Só vale para canal em modo `auto` e categoria liberada
     # nele — os três precisam concordar.
     atendimento_auto_ativo: bool = False
+    # MENSAGENS AUTOMÁTICAS (05/10/2026, docs/atendimento-automacoes.md): o
+    # motor que recria no DaVinci as automações que o Duoke manda hoje (menu
+    # e respostas das opções, "aguarde", convite para seguir, "ficou alguma
+    # dúvida", pedido recebido, entregue, pós-conclusão). Começa em MODO SECO:
+    # registra o que mandaria, para quem e quando, e compara com o que o Duoke
+    # mandou de verdade — nada sai.
+    #   • `atendimento_automacoes_ativa`: o cron `atendimento_automacoes` roda
+    #     (descobre, decide, registra e compara). Também exige a leitura
+    #     (`atendimento_leitura_ativa`). Desligado = nada é simulado.
+    #   • `atendimento_automacoes_envio`: sem ela, NENHUMA regra envia — a regra
+    #     em `enviar` vira simulação com o motivo `envio_desligado`, e a tela
+    #     recusa pôr regra em `enviar`. Mesmo ligada, a mensagem só sai com o
+    #     interruptor geral `atendimento_envio_ativo` (o FREIO ÚNICO: desligado,
+    #     nada sai pelo DaVinci — pessoa, IA ou automação) e a regra da loja em
+    #     `enviar`. O modo `observar` do canal NÃO segura as automáticas: a
+    #     equipe segue respondendo pelo Duoke enquanto elas saem por aqui.
+    #   • `atendimento_automacoes_teto_dia`: teto de mensagens automáticas por
+    #     loja e por família (as que respondem conversa × as do pedido), em
+    #     24 h corridas. No modo seco, passar dele vira diferença combinada.
+    #   • `atendimento_automacoes_shopee_auto_reply`: o teste de permissão do
+    #     `send_autoreply_message` passou (só com o OK do Eduardo). Sem ele, as
+    #     campanhas da Shopee (pedido recebido, entregue, pós-conclusão, convite
+    #     e "ficou alguma dúvida") não vão para `enviar`: sairiam como mensagem
+    #     normal, que conta como resposta da loja e entra no limite de mensagens
+    #     por comprador da Shopee (a FAQ do Chat API proíbe "proactive order
+    #     updates" — ver `shopee_mensagens_comprador`).
+    atendimento_automacoes_ativa: bool = False
+    atendimento_automacoes_envio: bool = False
+    atendimento_automacoes_teto_dia: int = 400
+    atendimento_automacoes_shopee_auto_reply: bool = False
     # Aviso no Telegram de conversa com prazo vencendo/vencido.
     atendimento_alerta_telegram: bool = False
     # SÓ LOCAL: o envio vai para um simulador que finge sucesso (externo_id
@@ -617,6 +647,81 @@ class Settings(BaseSettings):
     # tudo, fica a regra item a item. Ligado por padrão; desliga com
     # PRIORIDADE_PEDIDO_ESTOQUE_UNICO=false no .env.
     prioridade_pedido_estoque_unico: bool = True
+
+    # Flex por anúncio (procedimento-flex.md + Flex_analise_02-10-2026.md):
+    # o Flex (ML Envios Flex / Shopee Entrega Direta) só fica ligado no
+    # anúncio que tem peça em São Bernardo (.sp). Tudo desligado por padrão —
+    # quem liga é o dono, conta por conta, depois de ver o modo "observar".
+    #   modo        desligado (não faz nada) | observar (calcula, lê o estado
+    #               real e grava estado+log, mas NUNCA escreve na plataforma) |
+    #               piloto / ativo (escreve só nas contas de flex_contas).
+    #               Valor desconhecido vale como "desligado"
+    #               (services/flex_config) — um erro de digitação no .env não
+    #               pode derrubar a api.
+    #               Desligar é automático; LIGAR fica aguardando aprovação na
+    #               tela (o ML pede para não automatizar a ativação).
+    #   contas      integration_id das contas permitidas, separados por
+    #               vírgula. Vazio = NENHUMA (negação por padrão). Estar na
+    #               lista não basta: o motor confere de hora em hora se a
+    #               conta PODE ter Flex (ML: assinatura "in"; Shopee: Entrega
+    #               Direta ligada na loja) e, se não puder, não mexe nela.
+    #   n_liga/n_desliga  histerese por família: liga com saldo Flex (.sp livre
+    #               menos pedidos Flex ainda fora do .sp) >= n_liga e só
+    #               desliga abaixo de n_desliga — sem isso o Flex pisca a cada
+    #               venda (o ML desaconselha trocas em sequência).
+    #   kits        kit (SKU com '+') entra na regra? Fase 1: não.
+    #   max_anuncios_por_familia  quantos anúncios com Flex ligado por
+    #               família: o mesmo .sp aparece em N anúncios (clássico,
+    #               premium, várias contas) e cada um pode vender tudo.
+    #   teto_escritas_por_rodada  máximo de chamadas de escrita por rodada
+    #               (1/5 dele, no mínimo 1, fica guardado para os LIGAR que
+    #               uma pessoa aprovou — não esperam a fila de desligar).
+    #   shopee_canais  logistics_channel_id da Shopee Entrega Direta (vírgula).
+    #               90022 pelo guia 290 da Open Platform; a confirmar num
+    #               pedido real — por isso fica em configuração.
+    #   shopee_escrita  a escrita por anúncio (`logistic_info` no update_item)
+    #               saiu da lista de parâmetros da doc atual da Shopee: até um
+    #               teste num item provar que funciona, a Shopee só é lida.
+    #   intervalo_min  de quantos em quantos minutos a varredura roda (cron
+    #               do worker, lido na SUBIDA dele — mudou, reinicia o worker).
+    # O motor (etapa 3) é services/flex_motor; a tela usa /api/flex/*
+    # (routers/flex.py): aprovar o ligar, sincronizar agora e a emergência.
+    flex_modo: str = "desligado"
+    flex_contas: str = ""
+    flex_n_liga: int = 3
+    flex_n_desliga: int = 1
+    flex_kits: bool = False
+    flex_max_anuncios_por_familia: int = 2
+    flex_teto_escritas_por_rodada: int = 50
+    flex_shopee_canais: str = "90022"
+    flex_shopee_escrita: bool = False
+    flex_intervalo_min: int = 15
+    # Quem VÊ o Flex (Eduardo, 05/10/2026: "por enquanto somente os usuários
+    # heisenberg e o thorfinn podem ver"): nomes de usuário (users.name),
+    # separados por vírgula, sem diferença de maiúscula. Para os outros —
+    # inclusive admin — /api/flex/* responde o 404 de rota que não existe, a
+    # aba Flex some da Logística e o selo "Flex" some dos pedidos (Logística e
+    # Controle de Estoque). Vazio = ninguém vê.
+    flex_usuarios: str = ""
+    # Pedido Flex SEMPRE sai do .sp (etapa 2, services/prioridade_estoque): o
+    # robô de prioridade leva cada item do pedido Flex para o lote .sp, acima
+    # do mapa de prioridades, da trava anti-volta e do pedido num estoque só;
+    # sem peça no .sp, não troca e avisa. NÃO depende do `flex_modo`: o modo
+    # manda no Flex dos ANÚNCIOS (escrever na plataforma); o pedido Flex
+    # existe mesmo com o modo desligado (conta com Flex ligado no painel) e
+    # sai fisicamente de São Bernardo. DESLIGADO de fábrica (05/10/2026): o
+    # Flex entrou só para heisenberg/thorfinn verem, sem mudar a rotina da
+    # equipe — liga com FLEX_PEDIDO_NO_SP=true no .env quando o Flex for de
+    # todos (desligado = o robô de antes, sem aviso de Flex no sino).
+    flex_pedido_no_sp: bool = False
+    # Pedido ML/Shopee que acabou de cair espera o shipment check ler o tipo
+    # de envio (Flex ou não) antes de o robô de prioridade e a NF automática
+    # mexerem nele — senão o pedido Flex sai com o lote errado. Teto da espera
+    # em minutos, contado de quando o pedido entrou no espelho do Bling (conta
+    # sem acesso à API não segura o pedido para sempre). 0 = não espera.
+    # 0 de fábrica (05/10/2026), pelo mesmo motivo do `flex_pedido_no_sp`: a
+    # espera vale para TODO pedido ML/Shopee; volta a 10 junto com ele.
+    flex_espera_envio_min: int = 0
 
     # Threema IDs (vírgula) avisados quando o sweep move um pedido pra
     # Aguardando Cancelamento por estoque negativo. Vazio = aviso desligado

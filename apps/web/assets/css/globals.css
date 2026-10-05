@@ -136,3 +136,21 @@
   .btn-destructive { @apply bg-destructive text-destructive-foreground border-destructive hover:bg-destructive/90 hover:text-destructive-foreground; }
   .btn-ghost       { @apply border-transparent bg-transparent hover:bg-accent; }
 }
+
+/* Phone controls stay readable without triggering Safari's input zoom.
+   Dense spreadsheets keep their own scrolling and existing cell sizing. */
+@media (max-width: 1023px) {
+  .table-card { overflow-x: auto; }
+  .btn:not(table *) { min-height: 2.5rem; }
+  input:not([type="checkbox"]):not([type="radio"]):not([type="file"]),
+  select, textarea { font-size: 16px; }
+  :where(main) :where(input, select, textarea) { max-width: 100%; }
+  :where(main) :where(button, input:not([type="checkbox"]):not([type="radio"]), select):not(table *) {
+    min-height: 2.5rem;
+  }
+  :where(main) > .p-4 { padding: 0; }
+  :where(main) :where(.overflow-auto, .overflow-x-auto) {
+    max-width: 100%;
+    overscroll-behavior-x: contain;
+  }
+}
