@@ -44,8 +44,8 @@ roda esta migration num schema descartável e compara o catálogo com o model.
 O downgrade apaga as cinco tabelas (o estado e o log do Flex se perdem) e as
 duas colunas da Logística (a aba Flex fica vazia até reclassificar).
 
-Revision ID: 0364_flex
-Revises: 0363_denuncia_robo_agenda_diversos
+Revision ID: 0366_flex
+Revises: 0365_marca_emails
 """
 
 from collections.abc import Sequence
@@ -55,8 +55,8 @@ from sqlalchemy.dialects import postgresql as pg
 
 from alembic import op
 
-revision: str = "0364_flex"
-down_revision: str | None = "0363_denuncia_robo_agenda_diversos"
+revision: str = "0366_flex"
+down_revision: str | None = "0365_marca_emails"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

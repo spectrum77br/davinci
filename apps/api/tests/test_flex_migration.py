@@ -25,12 +25,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.historico import sql as hsql
 from app.models import Base
 
-_MIGRATION = Path(__file__).resolve().parent.parent / "alembic" / "versions" / "0364_flex.py"
+_MIGRATION = Path(__file__).resolve().parent.parent / "alembic" / "versions" / "0366_flex.py"
 TABELAS = ["flex_anuncio_estado", "flex_conta", "flex_emergencia", "flex_log", "flex_pedido"]
 
 
 def _carregar():
-    spec = importlib.util.spec_from_file_location("migration_0364_flex", _MIGRATION)
+    spec = importlib.util.spec_from_file_location("migration_0366_flex", _MIGRATION)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
@@ -100,8 +100,8 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
     schema_model = Base.metadata.schema
     rascunho = f"{schema_model}_mig0364"
     mod = _carregar()
-    assert mod.revision == "0364_flex"
-    assert mod.down_revision == "0363_denuncia_robo_agenda_diversos"
+    assert mod.revision == "0366_flex"
+    assert mod.down_revision == "0365_marca_emails"
 
     await db.execute(text(f'DROP SCHEMA IF EXISTS "{rascunho}" CASCADE'))
     await db.execute(text(f'CREATE SCHEMA "{rascunho}"'))
