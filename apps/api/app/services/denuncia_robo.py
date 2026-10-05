@@ -48,8 +48,8 @@ PASSOS: dict[str, tuple[int, str, str, str]] = {
                  "perfil 50 + 148 + Safari + contas da Réplica (ML 93 e 78 · Shopee 155 e 146 · "
                  "TikTok 137 e 131)",
                  "confere logins, AdsPower, captcha, Safari e Tuta; e se as 6 contas da Réplica "
-                 "estão logadas (a Shopee só na 1ª checagem do dia, pra não pedir captcha) — não "
-                 "muda nada"),
+                 "estão logadas (a Shopee só na 1ª checagem do dia, pra não pedir captcha; com "
+                 "captcha ou deslogada, o perfil fica ABERTO pra resolver) — não muda nada"),
     # 01/10: o robô lê o Tuta sozinho (o leitor do Claude do mini parou em 17/09).
     # 05/10 (Vinicius: "e se colocar tudo no passo 1?"): o 1 vira a conferência das respostas
     # inteira, em três filas ao mesmo tempo — e-mails (Tuta), resultados da Shopee no perfil 50
@@ -60,7 +60,8 @@ PASSOS: dict[str, tuple[int, str, str, str]] = {
     "ciclo_emails": (1, "Conferência das respostas", "Tuta + perfil 50 + Safari",
                      "e-mails das plataformas (Tuta) · resultados da Shopee no perfil 50, antes da "
                      "procura · Anatel Consumidor e SEI (intimações e andamento dos processos) no "
-                     "Safari"),
+                     "Safari. As respostas das réplicas: ML por e-mail encaminhado das contas das "
+                     "lojas; Shopee lidas no passo 6, na conta de cada loja"),
     # 05/10: o TikTok também pelo app do celular (Cloud Phone), ao mesmo tempo (agente v33)
     "procura": (2, "Procurar anúncios novos", "perfil 50 + 148 + celular",
                 "Mercado Livre → Shopee → TikTok → Amazon (TikTok também pelo app do celular, ao "
@@ -70,7 +71,7 @@ PASSOS: dict[str, tuple[int, str, str, str]] = {
     # prints por rodada — 1º recusadas do Nosso, 2º os da Anatel, 3º o resto. 03/10: vira
     # "Denúncias Nossos"; a denúncia do Nosso nas lojas está parada por enquanto (grupos = []
     # no mini) — ligado, o passo só tira prints e lê os resultados da Shopee.
-    "denuncias": (3, "Denúncias Nossos", "perfil 50 + celular",
+    "denuncias": (3, "Denúncias Nossos", "perfil 50 + 148 (prints da Shopee) + celular",
                   "prints (até 40, Nosso primeiro) → recusadas de novo "
                   "→ novas (ML, Shopee e TikTok; só o Nosso; Amazon ainda não)"),
     # 05/10: só envia — o andamento das antigas é lido no passo 1
@@ -82,7 +83,7 @@ PASSOS: dict[str, tuple[int, str, str, str]] = {
     # ficaram em sequência. Os programas ficam no mini; a chave de cada passo não muda (agenda e
     # "Rodar" seguem valendo). A "Réplica Denúncias Diversos" (planejada) entra depois do Diversos.
     # 02/10 (Vinicius): denunciar na loja uma vez só e tirar os prints, de noite
-    "diversos": (5, "Denúncias Diversos", "perfil 50 + celular",
+    "diversos": (5, "Denúncias Diversos", "perfil 50 + 148 (prints da Shopee) + celular",
                  "denúncia nova do Diversos no ML, Shopee e TikTok (uma vez só, sem denunciar de "
                  "novo) → prints (até 200, Nosso → Anatel → Diversos); "
                  "para quando o próximo passo chega"),
@@ -96,8 +97,9 @@ PASSOS: dict[str, tuple[int, str, str, str]] = {
                          "TikTok 131",
                          "Diversos recusado na loja e já com processo na Anatel: outra empresa "
                          "denuncia de novo citando o processo SEI (grupo da loja; a 2ª réplica "
-                         "pelo outro grupo). Hoje envia no Mercado Livre; Shopee e TikTok ainda "
-                         "não enviam"),
+                         "pelo outro grupo). Mercado Livre e Shopee (a conta da Shopee abre uma "
+                         "vez por dia: lê as respostas das réplicas dela e envia as novas); TikTok "
+                         "sem Diversos ativo. Captcha ou login: o perfil fica ABERTO pra resolver"),
     # 01/10 (Vinicius): o "saiu do ar?" levava 3–4 h e virou passo próprio, feito com o
     # robô parado (para quando a rodada chega e continua depois).
     "ativos_inativos": (7, "Conferência de anúncios ativos/inativos",
@@ -109,9 +111,14 @@ PASSOS: dict[str, tuple[int, str, str, str]] = {
     # atrasados (sem print não vai pra Anatel) e a conferência de ativos/inativos pela metade.
     # Desiste se o próximo passo do perfil 50 vem em menos de 30 min e para 15 min antes dele.
     # No mini: ação extra aproveitar_parado (aproveitar_parado.py).
-    "aproveitar_parado": (8, "Tempo parado: prints e ativos/inativos", "perfil 50",
-                          "nos buracos da agenda: tira os prints atrasados e retoma a conferência "
-                          "de ativos/inativos; para 15 min antes do próximo passo do perfil 50"),
+    # v34 do agente (05/10): o print SÓ da Shopee roda no perfil 148, ao lado (vale também nos
+    # passos 3 e 5); 148 ocupado → vai pro 50 como antes.
+    "aproveitar_parado": (8, "Tempo parado: prints e ativos/inativos",
+                          "perfil 50 (ML) + 148 (Shopee)",
+                          "nos buracos da agenda: tira os prints atrasados — ML no perfil 50 e "
+                          "Shopee no 148, ao mesmo tempo — e retoma a conferência de "
+                          "ativos/inativos (50 + 148); para 15 min antes do próximo passo do "
+                          "perfil 50"),
     "juridico": (9, "Jurídico", "escritório", "monta a pasta do caso pro advogado (não envia)"),
 }
 # passos de antes de 02/10: só pra dar nome às rodadas que ainda os têm (não têm botão)
