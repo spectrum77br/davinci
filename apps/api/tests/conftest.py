@@ -383,6 +383,10 @@ _CLEANUP_TABLES = (
     "marketing_personagens",
     # Atendimento unificado: filhas antes das mães, todas antes de
     # integrations e users (FKs CASCADE/SET NULL para os dois).
+    # 0366: o registro das automáticas (FK → regras/conversas/mensagens) e
+    # as regras (FK → integrations/users): antes de todas.
+    "atendimento_automacao_registros",
+    "atendimento_automacao_regras",
     # 0353: histórico da etiqueta e reclamações (FK → conversas/users/integrations).
     "atendimento_etiquetas_historico",
     "atendimento_reclamacoes",

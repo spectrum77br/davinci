@@ -606,12 +606,26 @@ async def _pack_do_pedido(session: AsyncSession, cliente: Any, order_id: str | N
     return pack if pack and pack != order_id else None
 
 
-async def _ler(session: AsyncSession, cliente: Any, claim: dict, *, buscar_pack: bool) -> _Leitura:
+async def _ler(
+    session: AsyncSession,
+    cliente: Any,
+    claim: dict,
+    *,
+    buscar_pack: bool,
+    so_mensagens: bool = False,
+) -> _Leitura:
     """As chamadas de UMA reclamação. As mensagens levantam (sem elas não há
-    leitura); devolução, reputação e pack são enfeite: falhou, fica sem."""
+    leitura); devolução, reputação e pack são enfeite: falhou, fica sem.
+
+    `so_mensagens`: a releitura só pelo tempo (RELER_ABERTA) busca SÓ as
+    mensagens — a devolução e a reputação só mudam com o `last_updated`, e
+    buscá-las a cada rodada estourava o limite do ML (/returns com HTTP 429
+    em toda rodada, 05/10/2026)."""
     cid = _id(claim.get("id"))
     mensagens = await cliente.mensagens_da_reclamacao(cid)
     leitura = _Leitura(mensagens=mensagens)
+    if so_mensagens:
+        return leitura
     try:
         leitura.devolucao = _devolucao(await cliente.devolucao_da_reclamacao(cid))
     except Exception as exc:  # noqa: BLE001
@@ -942,8 +956,18 @@ async def processar_reclamacao(
             cota.gastar(releitura=releitura)
             try:
                 leitura = await _ler(
-                    session, cliente, claim, buscar_pack="pack_conferido" not in anteriores
+                    session,
+                    cliente,
+                    claim,
+                    buscar_pack="pack_conferido" not in anteriores,
+                    so_mensagens=releitura,
                 )
+                if releitura:
+                    # O que não foi buscado fica como estava (a devolução dá o
+                    # anúncio da conversa: sem ela, o upsert o apagaria).
+                    anterior = anteriores.get("devolucao")
+                    leitura.devolucao = anterior if isinstance(anterior, dict) else None
+                    leitura.reputacao = _id(anteriores.get("reputacao")) or None
             except Exception as exc:  # noqa: BLE001 — a linha entra; a conversa, depois
                 resumo.erros += 1
                 dados["leitura_falhou"] = {"em": _iso(agora), "last_updated": last_updated}

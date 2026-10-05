@@ -32,12 +32,21 @@ de lojas, da Netshoes e da agenda do robô de denúncia); o canal que já
 existia passa no CHECK novo, o externo nasce sem integração nem robô, e o
 downgrade dela volta o catálogo ao
 de depois da 0358 (apagando o canal externo; a conversa fica, sem canal).
+
+A 0366 (05/10/2026, mensagens automáticas — docs/atendimento-automacoes.md)
+cria `atendimento_automacao_regras` e `atendimento_automacao_registros` e
+SEMEIA as regras do catálogo em cada loja Shopee/TikTok/ML ativa: `simular`
+onde o Duoke manda hoje (pelo nome da integração), `desligado` no resto.
+Roda em cima das cinco (as 0363–0365 do meio são da denúncia e dos e-mails da
+marca, sem `atendimento_*`); o downgrade dela volta o catálogo ao de depois da
+0362.
 """
 
 # ruff: noqa: S608
 from __future__ import annotations
 
 import importlib.util
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -54,6 +63,7 @@ _MIGRATION_ROBO = _VERSOES / "0347_atendimento_robo.py"
 _MIGRATION_ETIQUETAS = _VERSOES / "0353_atendimento_etiquetas.py"
 _MIGRATION_AVALIACOES = _VERSOES / "0358_atendimento_avaliacoes.py"
 _MIGRATION_CARRINHO_REDES = _VERSOES / "0362_atendimento_carrinho_redes.py"
+_MIGRATION_AUTOMACOES = _VERSOES / "0366_atendimento_automacoes.py"
 TABELAS = sorted(t.name for t in Base.metadata.sorted_tables if t.name.startswith("atendimento_"))
 
 
@@ -146,10 +156,17 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
     # agenda do robô de denúncia). Esta nasceu 0361 e foi renumerada para
     # 0362 em 02/10, quando a da denúncia chegou ao origin primeiro.
     assert externo.down_revision == "0361_denuncia_robo_agenda"
+    automacoes = _carregar_migration(_MIGRATION_AUTOMACOES)
+    assert automacoes.revision == "0366_atendimento_automacoes"
+    # Depois do último head do origin (0364: relatórios da denúncia; 0365:
+    # e-mails da marca). Esta nasceu 0364 e foi renumerada para 0366 em 05/10,
+    # quando as duas chegaram ao origin primeiro.
+    assert automacoes.down_revision == "0365_marca_emails"
     # 7 da primeira parte + 3 da parte 2 (categorias e os índices do cartão
     # "Cliente") + 2 da 0353 (histórico da etiqueta e reclamações) + 3 da
-    # 0362 (carrinhos, publicações e comentários).
-    assert len(TABELAS) == 15
+    # 0362 (carrinhos, publicações e comentários) + 2 da 0366 (regras e
+    # registro das mensagens automáticas).
+    assert len(TABELAS) == 17
     assert {
         "atendimento_categorias",
         "atendimento_pedidos_comprador",
@@ -159,13 +176,21 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
         "atendimento_carrinhos",
         "atendimento_publicacoes",
         "atendimento_comentarios",
+        "atendimento_automacao_regras",
+        "atendimento_automacao_registros",
     } <= set(TABELAS)
 
     await db.execute(text(f'DROP SCHEMA IF EXISTS "{rascunho}" CASCADE'))
     await db.execute(text(f'CREATE SCHEMA "{rascunho}"'))
     # Só o que as FKs da 0346 referenciam.
     await db.execute(text(f'CREATE TABLE "{rascunho}".users (id uuid PRIMARY KEY)'))
-    await db.execute(text(f'CREATE TABLE "{rascunho}".integrations (id uuid PRIMARY KEY)'))
+    # A 0366 semeia as regras pelo nome e pela plataforma da integração.
+    await db.execute(
+        text(
+            f'CREATE TABLE "{rascunho}".integrations (id uuid PRIMARY KEY, name text, '
+            "platform text, archived_at timestamptz)"
+        )
+    )
     # A 0353 põe índice em `bling_orders.numeroloja` (o elo conversa → pedido).
     await db.execute(
         text(f'CREATE TABLE "{rascunho}".bling_orders (id uuid PRIMARY KEY, numeroloja text)')
@@ -187,6 +212,7 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
     etiq.SCHEMA = rascunho
     aval.SCHEMA = rascunho
     externo.SCHEMA = rascunho
+    automacoes.SCHEMA = rascunho
     try:
         conn = await db.connection()
         await conn.run_sync(_rodar, "upgrade", (mod, robo))
@@ -266,6 +292,73 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
             )
         )
         await db.commit()
+        antes_da_0366 = await _catalogo(db, rascunho, rascunho)
+
+        # Lojas para a semente da 0366: a Barbosa (Shopee, o Duoke manda o
+        # menu), a Aguiar (Shopee, não manda), a ATV (só o "aguarde" e as
+        # campanhas), a Mini do TikTok, a Inova (mala: o entregue de mala), a
+        # Bling (fora) e uma Shopee arquivada (fora).
+        lojas = {
+            "barbosa": ("00000000-0000-0000-0000-0000000000b1", "shopee", None),
+            "aguiar": ("00000000-0000-0000-0000-0000000000a1", "shopee", None),
+            "atv": ("00000000-0000-0000-0000-0000000000a2", "shopee", None),
+            "inova": ("00000000-0000-0000-0000-0000000000a3", "shopee", None),
+            "mini": ("00000000-0000-0000-0000-0000000000c1", "tiktok", None),
+            "bling": ("00000000-0000-0000-0000-0000000000d1", "bling", None),
+            "velha": (
+                "00000000-0000-0000-0000-0000000000e1",
+                "shopee",
+                datetime(2026, 1, 1, tzinfo=UTC),
+            ),
+        }
+        for nome, (i, plat, arq) in lojas.items():
+            await db.execute(
+                text(
+                    f'INSERT INTO "{rascunho}".integrations (id, name, platform, archived_at) '
+                    "VALUES (CAST(:i AS uuid), :n, :p, :a)"
+                ),
+                {
+                    "i": i,
+                    "n": f" {nome.upper()} " if nome == "barbosa" else nome,
+                    "p": plat,
+                    "a": arq,
+                },
+            )
+        await db.commit()
+        conn = await db.connection()
+        await conn.run_sync(_rodar, "upgrade", (automacoes,))
+        await db.commit()
+        semente = {
+            (r[0], r[1]): (r[2], r[3], r[4])
+            for r in (
+                await db.execute(
+                    text(
+                        "SELECT i.name, r.automacao, r.modo, r.ligada_desde IS NOT NULL, "
+                        "r.partes::text FROM "
+                        f'"{rascunho}".atendimento_automacao_regras r '
+                        f'JOIN "{rascunho}".integrations i ON i.id = r.integration_id'
+                    )
+                )
+            ).all()
+        }
+        barbosa = " BARBOSA "
+        assert semente[(barbosa, "shopee_menu")][:2] == ("simular", True)
+        assert semente[(barbosa, "shopee_opcao_4")][:2] == ("desligado", False)
+        assert semente[(barbosa, "shopee_aguarde")][0] == "desligado"
+        assert semente[("aguiar", "shopee_menu")][0] == "desligado"
+        assert semente[("atv", "shopee_aguarde")][0] == "simular"
+        assert semente[("atv", "shopee_menu")][0] == "desligado"
+        assert semente[("atv", "shopee_pedido_recebido")][0] == "simular"
+        assert semente[("mini", "tiktok_convite")][0] == "simular"
+        # O entregue com o texto do tipo da loja (celular × mala), nome dentro.
+        assert "Confirmamos a entrega" in semente[(barbosa, "shopee_entregue")][2]
+        assert "sua mala já chegou" in semente[("inova", "shopee_entregue")][2]
+        assert not any(nome in ("bling", "velha") for nome, _ in semente)
+        # Uma regra por automação da plataforma em cada loja.
+        assert sum(1 for nome, _ in semente if nome == "mini") == 4
+        await db.execute(text(f'DELETE FROM "{rascunho}".atendimento_automacao_regras'))
+        await db.execute(text(f'DELETE FROM "{rascunho}".integrations'))
+        await db.commit()
 
         da_migration = await _catalogo(db, rascunho, rascunho)
         do_model = await _catalogo(db, schema_model, schema_model)
@@ -311,6 +404,16 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
             "uq_atendimento_publicacoes_plataforma_conta_id_externo_id",
             "uq_atendimento_comentarios_plataforma_externo_id",
             "fk_atendimento_comentarios_publicacao",
+            # 0366: regras (uma por automação × loja) e o registro (a chave
+            # única, as FKs com nome à mão e o CHECK do estado).
+            "uq_atendimento_automacao_regras_automacao_integration_id",
+            "ck_atendimento_automacao_regras_modo",
+            "uq_atendimento_automacao_registros_chave",
+            "ck_atendimento_automacao_registros_estado",
+            "fk_atendimento_automacao_registros_regra",
+            "fk_atendimento_automacao_registros_conversa",
+            "fk_atendimento_automacao_registros_gatilho",
+            "fk_atendimento_automacao_registros_duoke",
         } <= nomes
         assert "ck_atendimento_canais_integracao_ou_robo" not in nomes
         assert da_migration["colunas"] == do_model["colunas"]
@@ -419,6 +522,25 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
         assert "(numeroloja)" in (
             await db.execute(indice_bling, {"s": schema_model})
         ).scalar_one()
+
+        # 0366: a fila do decidir e a do comparador (parciais) e "uma mensagem
+        # do Duoke casa com uma linha só".
+        assert "WHERE ((estado)::text = 'agendado'::text)" in defs[
+            "ix_atendimento_automacao_registros_agendados"
+        ]
+        assert "WHERE ((duoke)::text = 'pendente'::text)" in defs[
+            "ix_atendimento_automacao_registros_comparar"
+        ]
+        assert "UNIQUE" in defs["uq_atendimento_automacao_registros_duoke"]
+        assert "(integration_id, automacao, devido_em)" in defs[
+            "ix_atendimento_automacao_registros_tela"
+        ]
+
+        # O downgrade da 0366 volta EXATAMENTE ao catálogo de depois da 0362.
+        conn = await db.connection()
+        await conn.run_sync(_rodar, "downgrade", (automacoes,))
+        await db.commit()
+        assert await _catalogo(db, rascunho, rascunho) == antes_da_0366
 
         # O downgrade da 0362 volta EXATAMENTE ao catálogo de depois da 0358 —
         # o canal externo some, a conversa dele fica (sem canal).

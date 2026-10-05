@@ -1129,6 +1129,34 @@ async def atendimento_carrinhos(ctx: dict) -> dict | None:
         return None
 
 
+# Mensagens automáticas (05/10/2026): nos minutos PARES, logo depois da
+# leitura das caixas (ímpares) — o menu sai de 1 a 4 min depois da mensagem.
+_ATENDIMENTO_AUTOMACOES_MINUTOS = set(range(0, 60, 2))
+
+
+async def atendimento_automacoes(ctx: dict) -> dict | None:
+    """Minutos pares: o motor das mensagens automáticas (modo seco até a troca).
+
+    Descobre os gatilhos (mensagem do comprador, pedido pago no Bling,
+    entregue/concluído na Logística), decide as que venceram e compara com o
+    que o Duoke mandou — ver services/atendimento/automacoes.py. Com a regra
+    em `simular` (todas, na semente da 0366) NADA sai: só registra. Uma
+    rodada por vez (trava no Redis, 110 s).
+
+    Interruptor próprio: só roda com `atendimento_automacoes_ativa` E
+    `atendimento_leitura_ativa` (os dois nascem desligados) — o deploy
+    sozinho não liga. Enviar de verdade ainda exige
+    `atendimento_automacoes_envio`, o envio geral e a regra em `enviar`.
+    """
+    from app.services.atendimento import automacoes as _atendimento_automacoes
+
+    try:
+        return await _atendimento_automacoes.atendimento_automacoes(ctx)
+    except Exception as e:  # noqa: BLE001 — o serviço já não levanta; cinto
+        logger.error("atendimento_automacoes_falhou", err=type(e).__name__)
+        return None
+
+
 async def atendimento_redes(ctx: dict) -> dict | None:
     """A cada 15 min (:09/:24/:39/:54): comentários e menções do Instagram e do Facebook.
 
@@ -4190,6 +4218,9 @@ class WorkerSettings:
         # Carrinho dos sites e redes sociais (02/10/2026).
         func(atendimento_carrinhos, timeout=600),
         func(atendimento_redes, timeout=840),
+        # Mensagens automáticas (05/10/2026): em `functions` para dar para
+        # enfileirar uma rodada à mão.
+        func(atendimento_automacoes, timeout=110),
         # Importação do histórico (28/09/2026): SÓ aqui, nunca em `cron_jobs` —
         # roda uma vez, à mão, depois da aprovação. Uma tentativa só: é
         # retomável, e quem decide rodar de novo é pessoa.
@@ -4512,6 +4543,16 @@ class WorkerSettings:
             minute=_ATENDIMENTO_REDES_MINUTOS,
             run_at_startup=False,
             timeout=840,
+        ),
+        # Mensagens automáticas (05/10/2026) nos minutos pares. `timeout=110`
+        # = a trava da rodada no Redis: o job morto pelo arq não deixa a
+        # trava viva por cima da próxima. Sai na hora com o interruptor
+        # (`ATENDIMENTO_AUTOMACOES_ATIVA`) desligado.
+        cron(
+            atendimento_automacoes,
+            minute=_ATENDIMENTO_AUTOMACOES_MINUTOS,
+            run_at_startup=False,
+            timeout=110,
         ),
         # Reconciliação a cada 10 min, no :05 (longe do congestionamento do
         # :00): postagem presa é CONSULTADA, nunca retentada.

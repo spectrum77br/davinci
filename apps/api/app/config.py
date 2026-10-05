@@ -468,6 +468,36 @@ class Settings(BaseSettings):
     # Envio AUTOMÁTICO. Só vale para canal em modo `auto` e categoria liberada
     # nele — os três precisam concordar.
     atendimento_auto_ativo: bool = False
+    # MENSAGENS AUTOMÁTICAS (05/10/2026, docs/atendimento-automacoes.md): o
+    # motor que recria no DaVinci as automações que o Duoke manda hoje (menu
+    # e respostas das opções, "aguarde", convite para seguir, "ficou alguma
+    # dúvida", pedido recebido, entregue, pós-conclusão). Começa em MODO SECO:
+    # registra o que mandaria, para quem e quando, e compara com o que o Duoke
+    # mandou de verdade — nada sai.
+    #   • `atendimento_automacoes_ativa`: o cron `atendimento_automacoes` roda
+    #     (descobre, decide, registra e compara). Também exige a leitura
+    #     (`atendimento_leitura_ativa`). Desligado = nada é simulado.
+    #   • `atendimento_automacoes_envio`: sem ela, NENHUMA regra envia — a regra
+    #     em `enviar` vira simulação com o motivo `envio_desligado`, e a tela
+    #     recusa pôr regra em `enviar`. Mesmo ligada, a mensagem só sai com o
+    #     interruptor geral `atendimento_envio_ativo` (o FREIO ÚNICO: desligado,
+    #     nada sai pelo DaVinci — pessoa, IA ou automação) e a regra da loja em
+    #     `enviar`. O modo `observar` do canal NÃO segura as automáticas: a
+    #     equipe segue respondendo pelo Duoke enquanto elas saem por aqui.
+    #   • `atendimento_automacoes_teto_dia`: teto de mensagens automáticas por
+    #     loja e por família (as que respondem conversa × as do pedido), em
+    #     24 h corridas. No modo seco, passar dele vira diferença combinada.
+    #   • `atendimento_automacoes_shopee_auto_reply`: o teste de permissão do
+    #     `send_autoreply_message` passou (só com o OK do Eduardo). Sem ele, as
+    #     campanhas da Shopee (pedido recebido, entregue, pós-conclusão, convite
+    #     e "ficou alguma dúvida") não vão para `enviar`: sairiam como mensagem
+    #     normal, que conta como resposta da loja e entra no limite de mensagens
+    #     por comprador da Shopee (a FAQ do Chat API proíbe "proactive order
+    #     updates" — ver `shopee_mensagens_comprador`).
+    atendimento_automacoes_ativa: bool = False
+    atendimento_automacoes_envio: bool = False
+    atendimento_automacoes_teto_dia: int = 400
+    atendimento_automacoes_shopee_auto_reply: bool = False
     # Aviso no Telegram de conversa com prazo vencendo/vencido.
     atendimento_alerta_telegram: bool = False
     # SÓ LOCAL: o envio vai para um simulador que finge sucesso (externo_id

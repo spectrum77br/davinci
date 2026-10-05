@@ -81,12 +81,24 @@ EXTERNA (`externo_ref`, `rede_social_id`) e entram três tabelas —
   `atendimento_comentarios` — cada comentário lido, ligado à conversa da
                               pessoa naquela publicação.
 
+Mensagens automáticas (05/10/2026, migration 0366 — docs/atendimento-automacoes.md):
+o DaVinci recria as automações que o Duoke manda hoje, começando em MODO
+SECO (registra o que mandaria e compara com o Duoke; nada sai) —
+
+  `atendimento_automacao_regras`    — automação × loja: o modo (desligado,
+                                      simular, enviar), o texto em partes, o
+                                      atraso, o horário e as condições.
+  `atendimento_automacao_registros` — uma linha por alvo × automação (pedido,
+                                      conversa, comprador ou mensagem): quando
+                                      sairia, o que o motor decidiu e por quê,
+                                      e o que o Duoke fez. Sem texto nenhum.
+
 Os valores válidos das colunas de estado estão em
 `services/atendimento/constantes.py` — um lugar só, lido pelo model, pelo
 sync, pela IA e pela tela.
 """
 
-from datetime import datetime
+from datetime import datetime, time
 from uuid import UUID, uuid4
 
 from sqlalchemy import (
@@ -106,7 +118,7 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
-from sqlalchemy.types import DateTime
+from sqlalchemy.types import DateTime, Time
 
 from app.models.base import Base, TimestampMixin
 
@@ -1113,6 +1125,242 @@ class AtendimentoComentario(Base, TimestampMixin):
     dados: Mapped[dict] = mapped_column(
         JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
     )
+
+
+class AtendimentoAutomacaoRegra(Base, TimestampMixin):
+    """Uma automação numa loja (05/10/2026, migration 0366): como e se ela roda.
+
+    `automacao` é o código do catálogo (`services/atendimento/
+    automacoes_catalogo.py`, ex. `shopee_menu`). Loja SEM linha = automação
+    desligada. A 0366 semeia as lojas onde o Duoke manda hoje em `simular` e
+    as outras em `desligado`, com os textos padrão do catálogo.
+
+    `modo`: `desligado` (nada), `simular` (o motor decide e registra o que
+    mandaria; nada sai) e `enviar` (sai de verdade — só com
+    `ATENDIMENTO_AUTOMACOES_ENVIO` e o envio geral ligados; sem a chave, vira
+    simulação com o motivo `envio_desligado`). `ligada_desde` = quando saiu de
+    `desligado`: o motor só descobre acontecimentos a partir dali.
+    `enviar_desde` = quando foi para `enviar` (o disjuntor só olha o Duoke
+    DEPOIS disso). `disjuntor_em`/`disjuntor_motivo`: o motor voltou a regra
+    sozinho para `simular` (o Duoke ainda mandou — "Duoke ainda ligado?").
+
+    `partes`: a mensagem em ordem — `{"tipo": "texto", "texto": "Oi,
+    {comprador}! …"}`, `{"tipo": "cartao_pedido"}`, `{"tipo": "figurinha",
+    "figurinha": "0007", "pacote": "br_shoppito"}`. `versao` sobe a cada
+    mudança de partes ou condições; o registro guarda qual valeu.
+    """
+
+    __tablename__ = "atendimento_automacao_regras"
+    __table_args__ = (
+        UniqueConstraint("automacao", "integration_id"),
+        CheckConstraint("modo IN ('desligado', 'simular', 'enviar')", name="modo"),
+    )
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    automacao: Mapped[str] = mapped_column(String(48), nullable=False)
+    # CASCADE: regra de uma loja desconectada não tem para quem valer.
+    integration_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("integrations.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    plataforma: Mapped[str] = mapped_column(String(16), nullable=False)
+    modo: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="desligado", server_default=text("'desligado'")
+    )
+    ligada_desde: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    enviar_desde: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    partes: Mapped[list] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
+    atraso_min: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Horário de São Paulo; os dois NULL = 24 h.
+    janela_inicio: Mapped[time | None] = mapped_column(Time(), nullable=True)
+    janela_fim: Mapped[time | None] = mapped_column(Time(), nullable=True)
+    # Os interruptores da automação, com as chaves do catálogo.
+    condicoes: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+    # Teto próprio em 24 h (além do da loja, `atendimento_automacoes_teto_dia`).
+    teto_dia: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    versao: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default=text("1")
+    )
+    disjuntor_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    disjuntor_motivo: Mapped[str | None] = mapped_column(String(48), nullable=True)
+    atualizado_por: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+
+class AtendimentoAutomacaoRegistro(Base, TimestampMixin):
+    """Um alvo × automação: o que o motor decidiu e o que o Duoke fez (migration 0366).
+
+    UMA linha por (automação, loja, `chave`) — a trava contra duplicar é o
+    UNIQUE, e a descoberta grava com `INSERT … ON CONFLICT DO NOTHING`. A
+    `chave` depende da automação: `pedido:<sn>`, `conversa:<id>`,
+    `conversa:<id>:msg:<id>`, `conversa:<id>:ciclo:<id>`, `comprador:<id>`, e
+    `duoke:<mensagem>` nas linhas `so_duoke` (o Duoke mandou e o DaVinci não
+    teria mandado).
+
+    `estado`: agendado → simulado (modo seco) | enviando → enviado | pulado
+    (+`motivo`) | falhou | revisar (envio ambíguo: NUNCA se retenta) |
+    so_duoke. O comparador preenche `duoke` (pendente → mandou | nao_mandou),
+    a mensagem do Duoke que casou e a diferença de horário; `divergencia` é a
+    diferença combinada de propósito (fica fora da conta da %); `alerta`, o
+    erro que trava a troca (a mensagem iria para quem devolveu ou cancelou).
+
+    SEM TEXTO NENHUM, nem do comprador nem o renderizado (o renderizado leva
+    o usuário dele): só loja, alvo, horários, estado e códigos. Fora do
+    Histórico (`historico/sql.EXCLUIDAS`): é escrito pela máquina, ~1.500
+    linhas por dia.
+    """
+
+    __tablename__ = "atendimento_automacao_registros"
+    __table_args__ = (
+        UniqueConstraint(
+            "automacao",
+            "integration_id",
+            "chave",
+            name="uq_atendimento_automacao_registros_chave",
+        ),
+        CheckConstraint(
+            "estado IN ('agendado', 'simulado', 'enviando', 'enviado', 'pulado',"
+            " 'falhou', 'revisar', 'so_duoke')",
+            name="estado",
+        ),
+        # As contagens e a % da tela, por loja × automação.
+        Index(
+            "ix_atendimento_automacao_registros_tela",
+            "integration_id",
+            "automacao",
+            "devido_em",
+        ),
+        # "Já mandou nas últimas 12 h" e o registro da conversa.
+        Index(
+            "ix_atendimento_automacao_registros_conversa",
+            "conversa_id",
+            "automacao",
+            "devido_em",
+        ),
+        Index(
+            "ix_atendimento_automacao_registros_pedido",
+            "integration_id",
+            "pedido",
+            postgresql_where=text("pedido IS NOT NULL"),
+        ),
+        # A fila do decidir.
+        Index(
+            "ix_atendimento_automacao_registros_agendados",
+            "devido_em",
+            postgresql_where=text("estado = 'agendado'"),
+        ),
+        # A fila do comparador.
+        Index(
+            "ix_atendimento_automacao_registros_comparar",
+            "devido_em",
+            postgresql_where=text("duoke = 'pendente'"),
+        ),
+        # Uma mensagem do Duoke casa com UMA linha só.
+        Index(
+            "uq_atendimento_automacao_registros_duoke",
+            "duoke_mensagem_id",
+            unique=True,
+            postgresql_where=text("duoke_mensagem_id IS NOT NULL"),
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    automacao: Mapped[str] = mapped_column(String(48), nullable=False)
+    # Nomes à mão: pela convenção passariam dos 63 caracteres do Postgres.
+    regra_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey(
+            "atendimento_automacao_regras.id",
+            ondelete="SET NULL",
+            name="fk_atendimento_automacao_registros_regra",
+        ),
+        nullable=True,
+    )
+    regra_versao: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    integration_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("integrations.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    plataforma: Mapped[str] = mapped_column(String(16), nullable=False)
+    # pedido | conversa | comprador | mensagem | duoke — o que a tela mostra.
+    alvo: Mapped[str] = mapped_column(String(16), nullable=False)
+    chave: Mapped[str] = mapped_column(String(191), nullable=False)
+    conversa_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey(
+            "atendimento_conversas.id",
+            ondelete="SET NULL",
+            name="fk_atendimento_automacao_registros_conversa",
+        ),
+        nullable=True,
+    )
+    # A mensagem do comprador que disparou.
+    gatilho_mensagem_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey(
+            "atendimento_mensagens.id",
+            ondelete="SET NULL",
+            name="fk_atendimento_automacao_registros_gatilho",
+        ),
+        nullable=True,
+    )
+    pedido: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Id da plataforma (não é dado pessoal).
+    comprador_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # O relógio do gatilho: a mensagem, o pago no Bling, o entregue ou o
+    # concluído na Shopee. O registro É o evento (o status anterior se perde).
+    evento_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    visto_em: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    # Quando sairia: o atraso, ajustado à janela de horário.
+    devido_em: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    decidido_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    estado: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="agendado", server_default=text("'agendado'")
+    )
+    # O modo que valeu na decisão.
+    modo: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # Código estável (a tela traduz): `automacoes_catalogo.MOTIVOS`.
+    motivo: Mapped[str | None] = mapped_column(String(48), nullable=True)
+    # Código da plataforma ou da recusa, nunca texto.
+    erro: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # As linhas de `atendimento_mensagens` criadas no envio, uma por parte.
+    mensagem_ids: Mapped[list] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
+    tentativas: Mapped[int] = mapped_column(
+        SmallInteger, nullable=False, default=0, server_default=text("0")
+    )
+    # pendente | mandou | nao_mandou | nao_se_aplica — o que o Duoke fez.
+    duoke: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    duoke_mensagem_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey(
+            "atendimento_mensagens.id",
+            ondelete="SET NULL",
+            name="fk_atendimento_automacao_registros_duoke",
+        ),
+        nullable=True,
+    )
+    duoke_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # duoke_em − devido_em, em segundos.
+    duoke_diferenca_s: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # A diferença combinada de propósito (fica fora da conta da %).
+    divergencia: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # O erro que trava a troca: `devolucao` | `cancelado` (só DaVinci para
+    # quem devolveu ou cancelou).
+    alerta: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    comparado_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 # UMA resposta em voo por conversa — declarado no model (create_all dos testes)

@@ -161,6 +161,21 @@ AUTOMATICAS = [
     " .ponto já segue nossa loja aqui",
     "Ícaro já segue nossa loja aqui",
     "ze ja segue nossa loja aqui",
+    # As respostas das opções 1, 2, 3 e 5 do robô (05/10/2026: saem 12 h
+    # depois do menu, o ciclo do robô — medido em 14 dias) e o entregue de mala.
+    "A entrega é feita pela Shopee, não temos acesso ao transporte, pode seguir o prazo",
+    "A entrega é feita pelo Mercado Livre, não temos acesso ao transporte, pode seguir",
+    "Todos nossos produtos são enviados com nota fiscal que vai anexada a caixa",
+    "O pedido pode ser encerrado a qualquer momento antes do envio pelo comprador.",
+    "Por favor, descreva qual é o defeito do produto e envie-nos uma foto.",
+    "Oi! 🧳✨ Que alegria saber que sua mala já chegou! Espero que tenha gostado",
+    # O que o motor de automações do DaVinci manda (o texto que MUDA em
+    # relação ao Duoke): a rede para quando a leitura não adota a nossa linha.
+    "Olá! Recebemos sua mensagem. Estamos com muitos atendimentos neste momento, mas já",
+    "Oi, maria.silva! Tudo bem? 😊 Confirmamos a entrega do seu pedido! Por se tratar",
+    "Oi, Ana Paula! 🧳✨ Que alegria saber que sua mala já chegou!",
+    "Oi, joao_22! Só passando para saber se está tudo certo com o seu produto. Se sim",
+    "Já segue nossa loja aqui na Shopee? Seguindo você recebe ofertas exclusivas",
 ]
 DE_PESSOA = [
     "A entrega é feita pela Shopee, não temos acesso",
@@ -179,6 +194,10 @@ DE_PESSOA = [
     "Que bom que você já segue nossa loja aqui na Shopee!",
     "fulana já segue a nossa loja aqui",
     "Obrigado! 😊",
+    # Saiu da régua em 05/10/2026: é pessoa (medido: nenhuma a 12 h do menu,
+    # das 7 h às 13 h, espaçamento de gente).
+    "bom dia! ficou alguma dúvida em que eu possa te ajudar?",
+    "Oi, tudo bem? Confirmamos o seu endereço",
     "",
     None,
 ]
@@ -234,6 +253,14 @@ def _figurinha(sticker_id, fonte="openapi") -> dict:
 # figurinha da campanha da figurinha que a pessoa mandou é o payload.
 PAYLOADS_AUTOMATICOS = [
     _figurinha("0007"),
+    # O cartão do pedido que a LOJA manda pela API — o do "pedido recebido" e
+    # do "entregue" da campanha (05/10/2026: 1.934 de 1.935 na Shopee e 157 de
+    # 157 no TikTok vieram com o texto da campanha).
+    {"source": "openapi", "message_type": "order", "content": {"order_sn": "x"}},
+    {"type": "ORDER_CARD", "sender": {"role": "CUSTOMER_SERVICE"}, "content": "{}"},
+    # A marca do motor de automações do DaVinci.
+    {"automacao": {"codigo": "shopee_menu", "registro_id": None}},
+    {"automacao": {}, "sync": {"source": "openapi", "message_type": "text"}},
     {"source": "server", "message_type": "voucher", "content": {"voucher_id": 1}},
     {"source": "server", "message_type": "logistics_card", "content": {}},
     {"source": "server", "message_type": "track_rr_status_card"},
@@ -252,8 +279,13 @@ PAYLOADS_DE_PESSOA = [
     _figurinha("0007", fonte="mini_webchat"),
     {"source": "openapi", "message_type": "text", "content": {"text": "x", "sticker_id": "0007"}},
     {"source": "openapi", "message_type": "sticker", "content": "0007"},
-    {"source": "openapi", "message_type": "order", "content": {"order_sn": "x"}},
     {"source": "openapi", "message_type": "voucher", "content": {"voucher_id": 1}},
+    {"source": "mini_webchat", "message_type": "order", "content": {"order_sn": "x"}},
+    {"type": "ORDER_CARD", "sender": {"role": "BUYER"}},
+    {"type": "ORDER_CARD", "sender": "CUSTOMER_SERVICE"},
+    {"type": "PRODUCT_CARD", "sender": {"role": "CUSTOMER_SERVICE"}},
+    {"automacao": "shopee_menu"},
+    {"automacao": ["shopee_menu"]},
     {"source": ["server"], "message_type": "voucher"},
     {"source": "SERVER", "message_type": "voucher"},
     {"message_type": "sticker", "content": {"sticker_id": "0007"}},

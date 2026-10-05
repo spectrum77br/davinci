@@ -606,6 +606,11 @@ async def test_aberta_e_relida_mesmo_sem_mudar_last_updated(db, make_user, ml):
     resumo = await _sync(integ, T0 + reclamacoes.RELER_ABERTA)
     assert resumo["lidas"] == 1 and resumo["mensagens"] == 1
     assert ml.chamadas_de(f"/claims/{RECLAMACAO_ML}/messages")
+    # Só as mensagens: devolução e reputação só quando o last_updated muda
+    # (buscá-las a cada rodada dava HTTP 429 no /returns).
+    assert [p for _, p, _ in ml.chamadas if "/claims/search" not in p] == [
+        f"/post-purchase/v1/claims/{RECLAMACAO_ML}/messages"
+    ]
     db.expire_all()
     conversa = await _conversa_da_reclamacao(db)
     assert [m.autor for m in await _mensagens(db, conversa)].count("cliente") == 2

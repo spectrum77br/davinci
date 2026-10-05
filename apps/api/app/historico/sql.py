@@ -61,6 +61,13 @@ TETO_POR_PEDIDO = 200
 # pessoa (o comentário público) e `atendimento_publicacoes` o espelho da rede,
 # os dois regravados pelo leitor das redes. Fora as três. O "marcar como
 # resolvido" do carrinho fica na própria linha (`tratado_por`/`tratado_em`).
+# Mensagens automáticas (05/10/2026, migration 0366): o REGISTRO
+# (`atendimento_automacao_registros`) é escrito pela máquina — ~1.500 linhas
+# por dia, cada uma inserida, decidida e comparada (4 a 5 mil "alterações"
+# por dia que ninguém fez), com o id do comprador e o pedido. Fora. A REGRA
+# (`atendimento_automacao_regras`: o modo da loja, o texto, o horário) fica
+# COM o gatilho: quem ligou o envio de qual automação em qual loja é
+# exatamente o que o Histórico serve para mostrar.
 EXCLUIDAS = re.compile(
     r"^(historico_(evento|alteracao)$|sync_logs|background_job|alembic_version$|auth_codes$"
     r"|oauth_states$|pricing_push_idempotency$|pricing_push_confirmacao$"
@@ -70,7 +77,8 @@ EXCLUIDAS = re.compile(
     r"|bling_envio_evento$|bling_envio_correcao$|prioridade_estoque_movimentos$|nfse_chamada$"
     # texto de comprador (atendimento) e os índices que a máquina escreve
     r"|atendimento_(mensagens|rascunhos|avaliacoes|conversas|avaliacoes_loja"
-    r"|pedidos_comprador|etiquetas_historico|reclamacoes|carrinhos|publicacoes|comentarios)$)"
+    r"|pedidos_comprador|etiquetas_historico|reclamacoes|carrinhos|publicacoes|comentarios"
+    r"|automacao_registros)$)"
     r"|(_bak|bkp|backup)",
     re.I,
 )
