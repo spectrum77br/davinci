@@ -5,7 +5,7 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from stdnum.br import cnpj as br_cnpj
 from stdnum.exceptions import ValidationError as StdValidationError
 
@@ -277,6 +277,22 @@ class StoreAccountCreate(BaseModel):
     phone_id: UUID
     email_id: UUID
     server_id: UUID
+
+
+class StoreAccountEmail(BaseModel):
+    """Troca do e-mail da conta pelo balão da loja em Empresas."""
+    company_id: UUID
+    marketplace: str
+    email: str = Field(min_length=1, max_length=256)  # store_info.email é String(256)
+
+
+class StoreAccountEmailOut(BaseModel):
+    email: str
+    anterior: str | None = None
+    # O e-mail novo está na lista de e-mails de Cadastros (e a conta foi
+    # vinculada a ele). False = só gravado na loja; não aparece em Cadastros.
+    em_cadastros: bool
+    lojas_atualizadas: int
 
 
 class StorePatch(BaseModel):

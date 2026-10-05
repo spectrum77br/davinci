@@ -9,9 +9,10 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
-from app.deps.auth import require_permission
+from app.deps.auth import require_permission, user_scope
 from app.models import (
     Cadastro,
+    CadastroStatus,
     CadastroStore,
     CadastroTipo,
     Company,
@@ -22,11 +23,20 @@ from app.models import (
     StoreStatus,
     User,
 )
-from app.schemas.companies import StoreAccountCreate, StoreCreate, StoreOut, StorePatch
+from app.schemas.companies import (
+    StoreAccountCreate,
+    StoreAccountEmail,
+    StoreAccountEmailOut,
+    StoreCreate,
+    StoreOut,
+    StorePatch,
+)
 from app.services.cadastro_availability import (
     available_cadastros,
+    chave_conta,
     normalize_cadastro_code,
     ocupacao_global,
+    quem_usa,
 )
 
 logger = structlog.get_logger()
@@ -200,6 +210,131 @@ async def create_store_account(
     await session.refresh(store)
     logger.info("store_account_created", id=str(store.id), marketplace=mk.value)
     return StoreOut.model_validate(store)
+
+
+def _plataformas(mk: Marketplace) -> tuple[str, ...]:
+    """Como o marketplace aparece em store_info.platform (ML tem apelidos)."""
+    return ("ml", "mercadolivre", "mercado livre") if mk == Marketplace.ML else (mk.value,)
+
+
+@router.put("/account/email", response_model=StoreAccountEmailOut)
+async def trocar_email_da_conta(
+    body: StoreAccountEmail,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(require_permission("empresa", "edit"))],
+    _cad: Annotated[User, Depends(require_permission("cadastro", "edit"))],
+    user: Annotated[User, Depends(require_permission("lojas_info", "edit"))],
+) -> StoreAccountEmailOut:
+    """Troca o e-mail da conta pelo balão da loja em Empresas.
+
+    O e-mail do balão É o da aba Lojas (store_info.email), então gravar aqui
+    já muda lá — e na vw_perfis, que os robôs do AdsPower leem. O vínculo do
+    e-mail velho em Cadastros passa para o novo, para a lista de livres soltar
+    o velho e não oferecer o novo para outra conta; outros e-mails ligados à
+    loja (ex.: de recuperação) ficam como estão. Mesmas permissões da criação
+    de conta, porque mexe nas três telas, e o mesmo escopo de equipe da aba
+    Lojas (quem não vê a loja lá não troca aqui).
+    """
+    mk = _to_marketplace(body.marketplace)
+    novo = body.email.strip()
+    if not novo:
+        raise HTTPException(422, detail={"code": "email_vazio"})
+    company = (await session.execute(
+        select(Company).where(Company.id == body.company_id)
+    )).scalar_one_or_none()
+    if company is None:
+        raise HTTPException(404, detail={"code": "company_not_found"})
+    conta = chave_conta(company.apelido)
+    infos = [
+        info for info in (await session.execute(
+            select(StoreInfo).where(
+                func.lower(func.trim(StoreInfo.platform)).in_(_plataformas(mk)),
+                func.regexp_replace(
+                    func.lower(StoreInfo.account_name), r"\s+", "", "g"
+                ) == conta,
+                StoreInfo.archived_at.is_(None),
+                user_scope(StoreInfo, user),
+            ).order_by(StoreInfo.created_at, StoreInfo.id).with_for_update()
+        )).scalars().all()
+        if chave_conta(info.account_name) == conta
+    ]
+    if not infos:
+        raise HTTPException(404, detail={"code": "store_info_not_found"})
+    codigo = normalize_cadastro_code(novo)
+    anterior = infos[0].email
+    velhos = {normalize_cadastro_code(i.email) for i in infos} - {"", codigo}
+
+    # Mesma ordem de travas da criação de conta (linhas de Cadastro primeiro,
+    # trava do código depois) — na ordem inversa as duas rotas se esperariam.
+    mesmos = (await session.execute(
+        select(Cadastro).where(
+            Cadastro.tipo == CadastroTipo.EMAIL,
+            func.lower(func.trim(Cadastro.codigo)) == codigo,
+        ).order_by(Cadastro.id).with_for_update()
+    )).scalars().all()
+    await session.execute(text(
+        "SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"
+    ), {"key": f"store-account:{mk.value}:{CadastroTipo.EMAIL.value}:{codigo}"})
+
+    novo_cadastro = next((c for c in mesmos if c.status == CadastroStatus.ACTIVE), None)
+    if mesmos and novo_cadastro is None:
+        raise HTTPException(409, detail={"code": "email_desativado", "codigo": mesmos[0].codigo})
+    store = (await session.execute(select(Store).where(
+        Store.company_id == company.id, Store.marketplace == mk,
+    ))).scalar_one_or_none()
+    outra = await quem_usa(
+        session, CadastroTipo.EMAIL, mk, novo,
+        conta=company.apelido, store_id=store.id if store else None,
+    )
+    if outra:
+        raise HTTPException(409, detail={"code": "email_em_uso", "conta": outra})
+
+    for info in infos:
+        info.email = novo
+
+    cadastros_velhos = [
+        c for c in (await session.execute(
+            select(Cadastro).where(Cadastro.tipo == CadastroTipo.EMAIL)
+        )).scalars().all()
+        if normalize_cadastro_code(c.codigo) in velhos
+    ]
+    if store is not None:
+        if cadastros_velhos:
+            await session.execute(sa_delete(CadastroStore).where(
+                CadastroStore.store_id == store.id,
+                CadastroStore.cadastro_id.in_([c.id for c in cadastros_velhos]),
+            ))
+        if novo_cadastro is not None and (await session.execute(
+            select(CadastroStore.cadastro_id).where(
+                CadastroStore.store_id == store.id,
+                CadastroStore.cadastro_id == novo_cadastro.id,
+            )
+        )).first() is None:
+            session.add(CadastroStore(
+                cadastro_id=novo_cadastro.id, store_id=store.id, alias=company.apelido,
+            ))
+    # Vínculo importado (planilha antiga) de e-mail velho apontando para esta
+    # conta neste marketplace também prenderia o velho: solta.
+    for cad in cadastros_velhos:
+        links = dict(cad.raw_links or {})
+        soltar = [
+            plat for plat, valor in links.items()
+            if isinstance(valor, str) and chave_conta(valor) == conta
+            and (plat or "").strip().lower() in _plataformas(mk)
+        ]
+        if soltar:
+            for plat in soltar:
+                links.pop(plat)
+            cad.raw_links = links
+    await session.commit()
+    logger.info(
+        "store_account_email_trocado", company_id=str(company.id),
+        marketplace=mk.value, lojas=len(infos), em_cadastros=novo_cadastro is not None,
+    )
+    return StoreAccountEmailOut(
+        email=novo, anterior=anterior,
+        em_cadastros=novo_cadastro is not None, lojas_atualizadas=len(infos),
+    )
 
 
 @router.patch("/{store_id}", response_model=StoreOut)

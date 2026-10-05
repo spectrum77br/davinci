@@ -2,7 +2,7 @@
 import { TABS_CADASTROS } from '~/lib/navGroups'
 import { fmtPct } from '~/lib/nfse'
 import { PCT_EMPRESA_DICA, lerPctEmpresa, pctNormal, pctParaCampo } from '~/lib/percentualEmpresa'
-import { ref, computed, reactive, watch } from 'vue'
+import { ref, computed, reactive, watch, nextTick } from 'vue'
 import { Plus, RefreshCw, X, ExternalLink, Trash2, Lock, ShieldCheck, KeyRound, Download, Pencil, Upload, Eye, EyeOff } from 'lucide-vue-next'
 import {
   MARKETPLACES,
@@ -1258,9 +1258,114 @@ function openCellPopover(companyId: string, mk: Marketplace) {
 }
 function closeCellPopover() { cellPopoverFor.value = null }
 
-const onDocClickCell = () => { cellPopoverFor.value = null }
-onMounted(() => document.addEventListener('click', onDocClickCell))
-onBeforeUnmount(() => document.removeEventListener('click', onDocClickCell))
+// ---------- troca do e-mail da conta (balão da loja) ----------
+// O e-mail do balão é o da aba Lojas (store_info): a API grava lá e move o
+// vínculo em Cadastros. Mesmas permissões da criação de conta.
+const canEditCadastro = useCan('cadastro', 'edit')
+const canEditLojas = useCan('lojas_info', 'edit')
+const podeTrocarEmail = computed(() => canEdit.value && canEditCadastro.value && canEditLojas.value)
+const emailEditFor = ref<string | null>(null) // `${companyId}:${mk}`
+const emailNovo = ref('')
+const emailsLivres = ref<CadastroLite[]>([])
+const emailSalvando = ref(false)
+const emailErro = ref<string | null>(null)
+const emailAviso = ref<{ key: string; texto: string } | null>(null)
+watch(cellPopoverFor, () => {
+  emailEditFor.value = null
+  emailErro.value = null
+  emailAviso.value = null
+})
+
+let emailsLivresReq = 0
+async function abrirTrocaEmail(row: GridRow, mk: Marketplace) {
+  const key = `${row.company.id}:${mk}`
+  const req = ++emailsLivresReq
+  emailEditFor.value = key
+  emailNovo.value = ''
+  emailErro.value = null
+  emailAviso.value = null
+  emailsLivres.value = []
+  // Nas últimas linhas o balão passa da borda da tabela: rola até o campo.
+  // Foco à mão: o atributo autofocus só vale uma vez por página.
+  nextTick(() => {
+    const box = document.querySelector('[data-troca-email]')
+    box?.scrollIntoView({ block: 'nearest' })
+    ;(box?.querySelector('input') as HTMLInputElement | null)?.focus()
+  })
+  try {
+    const lista = await apiE<CadastroLite[]>(`/api/cadastros/available?tipo=email&marketplace=${mk}`)
+    // Resposta atrasada de outra célula não vira sugestão desta.
+    if (req === emailsLivresReq && emailEditFor.value === key) emailsLivres.value = lista
+  } catch {
+    // Sugestões são só ajuda: dá para digitar o e-mail mesmo sem elas.
+  }
+}
+
+function fecharTrocaEmail() {
+  emailsLivresReq++
+  emailEditFor.value = null
+  emailErro.value = null
+}
+
+async function salvarEmail(row: GridRow, mk: Marketplace) {
+  const email = emailNovo.value.trim()
+  if (!email || emailSalvando.value) return
+  const key = `${row.company.id}:${mk}`
+  emailSalvando.value = true
+  emailErro.value = null
+  try {
+    const r = await apiE<{ email: string; em_cadastros: boolean }>('/api/stores/account/email', {
+      method: 'PUT',
+      body: { company_id: row.company.id, marketplace: mk, email },
+    })
+    const info = storeInfoFor(row, mk)
+    if (info) info.email = r.email
+    if (emailEditFor.value === key) emailEditFor.value = null
+    emailAviso.value = {
+      key,
+      texto: r.em_cadastros
+        ? `Trocado para ${r.email}. Lojas e Cadastros já estão com o novo.`
+        : `Trocado para ${r.email}. Lojas já está com o novo. Esse e-mail não está na lista de Cadastros.`,
+    }
+    // Recarrega só os dados das lojas, sem piscar a tabela.
+    apiE<StoreInfoLite[]>('/api/pricing/store-info').then((v) => { storeInfos.value = v }).catch(() => {})
+  } catch (e: any) {
+    if (emailEditFor.value !== key) return
+    const d = e?.data?.detail
+    if (d?.code === 'email_desativado') {
+      emailErro.value = `Esse e-mail está desativado em Cadastros (${d.codigo}). Reative lá para usar.`
+    } else if (d?.code === 'email_em_uso') {
+      emailErro.value = `Esse e-mail já está em uso na ${MARKETPLACE_SHORT[mk]}: ${d.conta}.`
+    } else if (d?.code === 'forbidden') {
+      emailErro.value = 'Para trocar, você precisa de permissão para editar Empresas, Cadastros e Lojas.'
+    } else if (d?.code === 'store_info_not_found') {
+      emailErro.value = 'Não achei os dados desta loja na aba Lojas. Recarregue a página.'
+    } else {
+      emailErro.value = d?.code || e?.message || 'Não foi possível trocar o e-mail.'
+    }
+  } finally {
+    emailSalvando.value = false
+  }
+}
+
+// Um clique que COMEÇOU dentro do balão (ex.: arrastar a seleção do campo de
+// e-mail e soltar fora) não fecha o balão nem perde o que foi digitado.
+let mousedownNoBalao = false
+const onDocMouseDownCell = (e: MouseEvent) => {
+  mousedownNoBalao = !!(e.target as Element | null)?.closest?.('[data-cell-popover]')
+}
+const onDocClickCell = () => {
+  if (mousedownNoBalao) { mousedownNoBalao = false; return }
+  cellPopoverFor.value = null
+}
+onMounted(() => {
+  document.addEventListener('mousedown', onDocMouseDownCell, true)
+  document.addEventListener('click', onDocClickCell)
+})
+onBeforeUnmount(() => {
+  document.removeEventListener('mousedown', onDocMouseDownCell, true)
+  document.removeEventListener('click', onDocClickCell)
+})
 
 function storeInfoFor(row: GridRow, mk: Marketplace): StoreInfoLite | undefined {
   const apelido = normConta(row.company.apelido)
@@ -1953,6 +2058,7 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
                 </span>
                 <div
                   v-if="cellPopoverFor === `${row.company.id}:${mk}`"
+                  data-cell-popover
                   class="absolute z-30 mt-1 left-1/2 -translate-x-1/2 w-56 rounded-md border bg-popover p-2 shadow-lg text-left text-xs"
                   @click.stop
                 >
@@ -1962,7 +2068,47 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
                     </div>
                     <template v-if="storeInfoFor(row, mk)">
                       <div><span class="text-muted-foreground">Fone:</span> {{ storeInfoFor(row, mk)!.phone || '—' }}</div>
-                      <div><span class="text-muted-foreground">Email:</span> {{ storeInfoFor(row, mk)!.email || '—' }}</div>
+                      <div class="flex items-center gap-1">
+                        <span class="text-muted-foreground">Email:</span>
+                        <span class="truncate">{{ storeInfoFor(row, mk)!.email || '—' }}</span>
+                        <button
+                          v-if="podeTrocarEmail && emailEditFor !== `${row.company.id}:${mk}`"
+                          class="ml-auto shrink-0 inline-flex items-center gap-0.5 text-primary hover:underline"
+                          title="Trocar o e-mail desta conta (muda também na aba Lojas)"
+                          @click="abrirTrocaEmail(row, mk)"
+                        ><Pencil class="w-3 h-3" />trocar</button>
+                      </div>
+                      <div v-if="emailEditFor === `${row.company.id}:${mk}`" data-troca-email class="py-1 space-y-1">
+                        <Input
+                          v-model="emailNovo"
+                          list="emails-livres-conta"
+                          placeholder="novo e-mail"
+                          class="h-7 text-xs"
+                          maxlength="256"
+                          @keydown.enter.prevent="salvarEmail(row, mk)"
+                          @keydown.esc.prevent="fecharTrocaEmail()"
+                        />
+                        <datalist id="emails-livres-conta">
+                          <option v-for="c in emailsLivres" :key="c.id" :value="c.codigo" />
+                        </datalist>
+                        <p class="text-[10px] text-muted-foreground leading-tight">
+                          Muda também na aba Lojas. As sugestões são os e-mails livres na {{ MARKETPLACE_SHORT[mk] }}.
+                        </p>
+                        <p v-if="emailErro" class="text-[10px] text-destructive leading-tight">{{ emailErro }}</p>
+                        <div class="flex justify-end gap-1">
+                          <Button size="sm" variant="ghost" class="h-6 px-2 text-xs" @click="fecharTrocaEmail()">Cancelar</Button>
+                          <Button
+                            size="sm"
+                            class="h-6 px-2 text-xs"
+                            :disabled="emailSalvando || !emailNovo.trim()"
+                            @click="salvarEmail(row, mk)"
+                          >{{ emailSalvando ? 'Salvando…' : 'Salvar' }}</Button>
+                        </div>
+                      </div>
+                      <p
+                        v-if="emailAviso && emailAviso.key === `${row.company.id}:${mk}`"
+                        class="text-[10px] text-green-600 leading-tight"
+                      >{{ emailAviso.texto }}</p>
                       <div><span class="text-muted-foreground">Servidor:</span> {{ storeInfoFor(row, mk)!.server || '—' }}</div>
                     </template>
                     <div v-else class="text-muted-foreground">Sem store_info vinculada.</div>

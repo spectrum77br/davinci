@@ -8,6 +8,7 @@ from app.models import (
     CadastroStatus,
     CadastroStore,
     CadastroTipo,
+    Company,
     Marketplace,
     Store,
     StoreInfo,
@@ -103,3 +104,72 @@ async def available_cadastros(
         and (code := normalize_cadastro_code(cadastro.codigo))
         and code not in busy_codes
     ]
+
+
+def chave_conta(nome: str | None) -> str:
+    """Nome de conta sem espaços e minúsculo ("dream 2" == "dream2") — mesmo
+    normalizador da matriz de Empresas e da criação de conta."""
+    return "".join((nome or "").split()).lower()
+
+
+async def quem_usa(
+    session: AsyncSession,
+    tipo: CadastroTipo,
+    marketplace: Marketplace,
+    codigo: str,
+    *,
+    conta: str,
+    store_id=None,
+) -> str | None:
+    """Nome da OUTRA conta que já usa `codigo` neste marketplace, ou None.
+
+    Mesmas fontes de ocupação de `available_cadastros` (vínculo importado,
+    vínculo em Cadastros e dados da loja), mas ignorando o que pertence à
+    própria conta — trocar o e-mail de uma conta não pode esbarrar nela mesma.
+    Cadastro desativado/excluído não entra aqui: quem chama decide (a troca de
+    e-mail responde `email_desativado`).
+    """
+    global_ = ocupacao_global(tipo)
+    alvo = normalize_cadastro_code(codigo)
+    minha = chave_conta(conta)
+
+    field = _STOREINFO_FIELD_FOR_TIPO.get(tipo)
+    if field is not None:
+        for platform, nome, valor in (
+            await session.execute(
+                select(StoreInfo.platform, StoreInfo.account_name, field).where(field.isnot(None))
+            )
+        ).all():
+            if normalize_cadastro_code(valor) != alvo or chave_conta(nome) == minha:
+                continue
+            if global_ or _normalize_platform(platform) == marketplace.value:
+                return nome or "outra conta"
+
+    cadastros = (
+        (await session.execute(select(Cadastro).where(Cadastro.tipo == tipo))).scalars().all()
+    )
+    mesmos = [c for c in cadastros if normalize_cadastro_code(c.codigo) == alvo]
+    for cadastro in mesmos:
+        for platform, valor in (cadastro.raw_links or {}).items():
+            if not (isinstance(valor, str) and valor.strip()) or chave_conta(valor) == minha:
+                continue
+            if global_ or _normalize_platform(platform) == marketplace.value:
+                return valor.strip()
+
+    if mesmos:
+        stmt = (
+            select(Company.apelido, Store.apelido_override)
+            .select_from(CadastroStore)
+            .join(Store, Store.id == CadastroStore.store_id)
+            .join(Company, Company.id == Store.company_id, isouter=True)
+            .where(CadastroStore.cadastro_id.in_([c.id for c in mesmos]))
+        )
+        if store_id is not None:
+            stmt = stmt.where(Store.id != store_id)
+        if not global_:
+            stmt = stmt.where(Store.marketplace == marketplace)
+        for apelido, override in (await session.execute(stmt)).all():
+            nome = apelido or override
+            if chave_conta(nome) != minha:
+                return nome or "outra conta"
+    return None
