@@ -182,6 +182,32 @@ async def test_pack_que_o_bling_separou_em_dois_pedidos_fica_com_a_fatia_do_prim
     assert ("discounts", IRMAO) not in client.calls
 
 
+async def test_pack_com_lote_trocado_pela_prioridade_ainda_casa_o_irmao():
+    # 05/10 (pedido 301386 / pack 2000015356005885): o anúncio do ML é `.ci`,
+    # o robô de prioridade trocou o pedido do Bling todo pra `.sp`. O irmão
+    # sumia (SKU exato não batia) e a Margem rateava só o primário nas duas
+    # linhas. A família (SKU sem o lote) casa.
+    client = _FakeMLClient()
+    client.orders[PRIMARIO]["order_items"][0]["item"]["seller_sku"] = "dg054.ci+a001.ci"
+    client.orders[IRMAO]["order_items"][0]["item"]["seller_sku"] = "dg053.ci+a001.ci"
+    snap = await _fetch_ml(client, PRIMARIO, bling_skus={"dg054.sp+a001.sp", "dg053.sp+a001.sp"})
+
+    assert snap.raw["pack_matched_order_ids"] == [PRIMARIO, IRMAO]
+    assert snap.gross_amount == Decimal("565.07")
+    assert snap.freight_amount == Decimal("135.75")
+
+
+async def test_pack_separado_no_bling_nao_casa_outro_produto_de_outro_lote():
+    # Família diferente (outro aparelho) continua de fora, mesmo com lote trocado.
+    client = _FakeMLClient()
+    client.orders[PRIMARIO]["order_items"][0]["item"]["seller_sku"] = "dg054.ci+a001.ci"
+    client.orders[IRMAO]["order_items"][0]["item"]["seller_sku"] = "dg053.ci+a001.ci"
+    snap = await _fetch_ml(client, PRIMARIO, bling_skus={"dg054.sp+a001.sp"})
+
+    assert snap.raw["pack_matched_order_ids"] == [PRIMARIO]
+    assert snap.gross_amount == Decimal("278.81")
+
+
 async def test_cupom_do_irmao_que_falha_nao_derruba_o_resto():
     client = _FakeMLClient(sibling_discounts_fail=True)
     snap = await _fetch_ml(client, PRIMARIO, bling_skus={"b021.24", "b001.24"})

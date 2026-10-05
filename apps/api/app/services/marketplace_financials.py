@@ -26,6 +26,7 @@ from app.models import (
 )
 from app.security.cipher import decrypt_json, encrypt_json
 from app.services.bling_situacoes import SITUACAO_CANCELADO
+from app.services.estoque_familia import chave_familia
 from app.services.marketplaces.amazon import AmazonClient
 from app.services.marketplaces.factory import client_for
 from app.services.marketplaces.ml import MercadoLivreClient
@@ -1224,6 +1225,22 @@ def _ml_order_item_skus(order: Any) -> set[str]:
     return skus
 
 
+def _ml_chaves_de_sku(skus: Iterable[str]) -> set[str]:
+    """SKUs + a família de cada um (sem o lote: `dg053.sp+a001.sp` → `dg053+a001`).
+
+    O robô de prioridade troca o lote no pedido do Bling (`.ci` → `.sp`, "pedido
+    todo no estoque SP") mas o anúncio do ML segue com o SKU original. Casando
+    só pelo SKU exato o irmão do pack sumia (pack 2000015356005885 / pedido
+    301386, 05/10: só o sub-pedido primário de R$ 824,50 entrou, rateado nas
+    duas linhas → Margem -38% e o robô reprovou um pedido de ~25%)."""
+    chaves = {s.lower() for s in skus}
+    for s in list(chaves):
+        familia = chave_familia(s)
+        if familia:
+            chaves.add(familia)
+    return chaves
+
+
 def _ml_coberto_pelo_ml(order: Any) -> bool:
     """`bpp_covered`: o ML pagou o comprador do próprio bolso — o estorno não
     saiu do nosso dinheiro (285250; ver chamados_pagamento_ml)."""
@@ -1401,7 +1418,7 @@ async def _fetch_ml(
     pack_error: str | None = None
     primary_id = _text_value(order.get("id")) if isinstance(order, dict) else None
     pack_id = _text_value(order.get("pack_id")) if isinstance(order, dict) else None
-    skus_filter = {s.lower() for s in bling_skus} if bling_skus else None
+    skus_filter = _ml_chaves_de_sku(bling_skus) if bling_skus else None
     if pack_id:
         try:
             pack = await client.get_pack(pack_id)
@@ -1419,7 +1436,9 @@ async def _fetch_ml(
                 sibling = await client.get_order(oid)
             except Exception:  # noqa: BLE001 — skip unreachable sibling, keep going
                 continue
-            if skus_filter is not None and not (_ml_order_item_skus(sibling) & skus_filter):
+            if skus_filter is not None and not (
+                _ml_chaves_de_sku(_ml_order_item_skus(sibling)) & skus_filter
+            ):
                 continue
             matched_orders.append(sibling)
 
