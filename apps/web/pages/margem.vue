@@ -916,7 +916,7 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
 </script>
 
 <template>
-  <div class="space-y-5">
+  <div class="margem-page min-w-0 space-y-5">
     <PageHeader title="Margem" description="Margem por pedido — conciliação marketplace (últimos 30 dias).">
       <template #actions>
         <div class="flex flex-wrap items-center gap-2">
@@ -930,7 +930,7 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
             <Megaphone class="size-4 mr-1.5" />
             Informar
           </Button>
-          <div v-if="isAdmin" class="flex items-center gap-1.5">
+          <div v-if="isAdmin" class="margem-export flex min-w-0 flex-wrap sm:flex-nowrap items-center gap-1.5">
             <input
               v-model="rentInicio"
               type="date"
@@ -1040,11 +1040,11 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
     </div>
 
     <div v-if="tab === 'list'" class="flex flex-wrap items-center gap-2">
-      <div class="relative">
+      <div class="relative min-w-0 w-full sm:w-auto">
         <Search class="absolute left-2.5 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
         <input
           v-model="search"
-          class="pl-8 pr-3 py-1.5 text-sm rounded-md border bg-background w-72"
+          class="pl-8 pr-3 py-1.5 text-sm rounded-md border bg-background w-full sm:w-72"
           placeholder="buscar pedido, sku, conta, pricing account…"
         />
       </div>
@@ -1098,11 +1098,11 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
     </div>
 
     <div v-else class="flex flex-wrap items-center gap-2">
-      <div class="relative">
+      <div class="relative min-w-0 w-full sm:w-auto">
         <Search class="absolute left-2.5 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
         <input
           v-model="lookupInput"
-          class="pl-8 pr-3 py-1.5 text-sm rounded-md border bg-background w-72"
+          class="pl-8 pr-3 py-1.5 text-sm rounded-md border bg-background w-full sm:w-72"
           placeholder="numero do pedido (Bling ou marketplace)"
           :disabled="historicoLoading"
           @keydown.enter="lookup(false)"
@@ -1445,7 +1445,7 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
     </div>
 
     <!-- Pagination -->
-    <div v-if="tab === 'list' && total > PAGE_SIZE" class="flex items-center justify-between gap-2">
+    <div v-if="tab === 'list' && total > PAGE_SIZE" class="flex flex-wrap sm:flex-nowrap items-center justify-between gap-2">
       <span class="text-xs text-muted-foreground">
         página {{ page }} de {{ totalPages }} · {{ PAGE_SIZE }}/página
       </span>
@@ -1512,3 +1512,10 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
     <MargemManualModal :open="manualOpen" @close="manualOpen = false" />
   </div>
 </template>
+
+<style scoped>
+@media (max-width: 639px) {
+  .margem-export { width: 100%; }
+  .margem-export input { min-width: 0; flex: 1 1 8rem; }
+}
+</style>

@@ -267,7 +267,7 @@ const tab = ref<'integracoes' | 'automacoes'>(
 </script>
 
 <template>
-  <div class="space-y-4">
+  <div class="integrations-page min-w-0 space-y-4">
     <RouteTabs :tabs="TABS_SISTEMA" />
     <h1 class="text-2xl font-semibold">Integrações</h1>
 
@@ -293,16 +293,17 @@ const tab = ref<'integracoes' | 'automacoes'>(
     </div>
 
     <template v-if="tab === 'integracoes'">
-    <div class="flex items-center gap-3 flex-wrap">
+    <div class="integration-toolbar grid grid-cols-2 items-center gap-2 sm:flex sm:flex-wrap sm:gap-3">
       <Button size="sm" variant="ghost" :disabled="loading" @click="refresh">
         <RefreshCw class="size-4 mr-1" /> recarregar
       </Button>
-      <div class="relative ml-auto w-full sm:w-72">
+      <div class="integration-search relative col-span-2 row-start-1 min-w-0 w-full sm:ml-auto sm:w-72">
         <Search class="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
         <input
           v-model="filter"
           type="search"
           placeholder="filtrar integrações…"
+          aria-label="Filtrar integrações"
           class="w-full h-9 rounded-lg border bg-muted/40 pl-9 pr-3 text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring focus:bg-background"
         />
       </div>
@@ -324,8 +325,8 @@ const tab = ref<'integracoes' | 'automacoes'>(
         </span>
       </h2>
       <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-        <div v-for="i in group.items" :key="i.id" class="border rounded-md p-3 space-y-2">
-          <div class="flex items-center gap-2">
+        <div v-for="i in group.items" :key="i.id" class="integration-card min-w-0 border rounded-md p-3 space-y-2">
+          <div class="flex flex-wrap items-center gap-2">
             <span class="text-xs uppercase font-mono">{{ PLATFORM_LABELS[i.platform] }}</span>
             <span
               v-if="i.vacation_mode"
@@ -339,8 +340,8 @@ const tab = ref<'integracoes' | 'automacoes'>(
                  : i.last_test_ok ? 'ok' : 'falhou' }}
             </span>
           </div>
-          <div class="font-medium">{{ i.name }}</div>
-          <div class="text-xs text-muted-foreground space-y-0.5">
+          <div class="break-words font-medium">{{ i.name }}</div>
+          <div class="break-words text-xs text-muted-foreground space-y-0.5">
             <div v-if="i.store_id">
               loja: <code>{{ storeById[i.store_id]?.marketplace }}</code> /
               {{ storeById[i.store_id]?.apelido_override
@@ -348,11 +349,11 @@ const tab = ref<'integracoes' | 'automacoes'>(
             </div>
             <div v-if="i.token_expires_at">token expira: {{ fmtDate(i.token_expires_at) }}</div>
             <div v-if="i.last_test_at">testada: {{ fmtDate(i.last_test_at) }}</div>
-            <div v-if="i.last_error" class="text-red-400 truncate" :title="i.last_error">
+            <div v-if="i.last_error" class="integration-error text-red-400 truncate" :title="i.last_error">
               erro: {{ i.last_error }}
             </div>
           </div>
-          <div class="flex gap-2 pt-1 flex-wrap">
+          <div class="integration-actions flex gap-2 pt-1 flex-wrap">
             <Button size="sm" variant="outline" :disabled="testingId === i.id || cooldownLeft(i.id) > 0" @click="testIntegration(i)">
               <Zap class="size-3 mr-1" /> {{ cooldownLeft(i.id) > 0
                 ? `Aguardando cooldown (${Math.ceil(cooldownLeft(i.id) / 60)}m)`
@@ -383,10 +384,10 @@ const tab = ref<'integracoes' | 'automacoes'>(
             >
               {{ vacationId === i.id ? '…' : (i.vacation_mode ? 'Férias ON' : 'Modo férias') }}
             </Button>
-            <Button v-if="canEdit" size="sm" variant="ghost" title="editar" @click="openEdit(i)">
+            <Button v-if="canEdit" size="sm" variant="ghost" :aria-label="`Editar integração ${i.name}`" title="editar" @click="openEdit(i)">
               <SquarePen class="size-4" />
             </Button>
-            <Button v-if="canDelete" size="sm" variant="ghost" @click="deleteIntegration(i)">
+            <Button v-if="canDelete" size="sm" variant="ghost" :aria-label="`Excluir integração ${i.name}`" @click="deleteIntegration(i)">
               <Trash2 class="size-3" />
             </Button>
           </div>
@@ -415,3 +416,12 @@ const tab = ref<'integracoes' | 'automacoes'>(
     <AutomacoesPanel v-else />
   </div>
 </template>
+
+<style scoped>
+@media (max-width: 639px) {
+  .integration-toolbar > button { min-width: 0; min-height: 2.5rem; }
+  .integration-actions :deep(button) { min-height: 2.5rem; height: auto; max-width: 100%; white-space: normal; }
+  .integration-actions :deep(button svg) { flex-shrink: 0; }
+  .integration-error { white-space: normal; overflow-wrap: anywhere; }
+}
+</style>

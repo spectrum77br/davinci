@@ -30,13 +30,13 @@ const corValor = computed(() => {
 </script>
 
 <template>
-  <div class="border bg-card flex flex-col" :class="compact ? 'rounded-lg px-3 py-2 gap-0.5' : 'rounded-xl p-4 gap-2'">
+  <div class="stat-card min-w-0 border bg-card flex flex-col" :class="compact ? 'stat-card--compact rounded-lg px-3 py-2 gap-0.5' : 'rounded-xl p-3 sm:p-4 gap-1 sm:gap-2'">
     <div class="flex items-center gap-1.5 min-w-0">
       <component :is="icon" v-if="icon" class="shrink-0 text-muted-foreground" :class="compact ? 'size-3.5' : 'size-[18px]'" />
-      <span class="uppercase tracking-wider font-medium text-muted-foreground truncate" :class="compact ? 'text-[10px]' : 'text-xs'" :title="label">{{ label }}</span>
+      <span class="stat-card-label uppercase tracking-wider font-medium text-muted-foreground sm:truncate" :class="compact ? 'text-[10px]' : 'text-xs'" :title="label">{{ label }}</span>
     </div>
-    <div class="flex items-end gap-2">
-      <div class="font-semibold tracking-tight tabular-nums" :class="[compact ? 'text-lg leading-6' : 'text-2xl', corValor]">{{ value }}</div>
+    <div class="flex flex-wrap items-end gap-2">
+      <div class="stat-card-value font-semibold tracking-tight tabular-nums" :class="[compact ? 'text-lg leading-6' : 'text-xl sm:text-2xl', corValor]">{{ value }}</div>
       <span
         v-if="delta !== undefined"
         class="inline-flex items-center gap-0.5 text-[11px] font-medium pb-1"
@@ -50,3 +50,18 @@ const corValor = computed(() => {
     <div v-if="hint" class="text-muted-foreground" :class="compact ? 'text-[11px] leading-4 truncate' : 'text-xs'" :title="hint">{{ hint }}</div>
   </div>
 </template>
+
+<style scoped>
+@media (max-width: 1023px) {
+  .stat-card-label,
+  .stat-card-value {
+    min-width: 0;
+    max-width: 100%;
+    overflow-wrap: anywhere;
+  }
+}
+@media (max-width: 1023px) and (max-height: 500px) and (orientation: landscape) {
+  .stat-card:not(.stat-card--compact) { padding: 0.625rem; gap: 0.25rem; }
+  .stat-card-value { font-size: 1.125rem; line-height: 1.4; }
+}
+</style>

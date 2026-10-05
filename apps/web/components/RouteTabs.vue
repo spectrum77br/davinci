@@ -18,17 +18,18 @@ function isActive(to: string) {
 </script>
 
 <template>
-  <div v-if="visible.length > 1" class="flex flex-wrap gap-1 rounded-md bg-muted/40 p-1 w-fit">
+  <nav v-if="visible.length > 1" aria-label="Seções desta área" class="flex max-w-full flex-nowrap overflow-x-auto gap-1 rounded-md bg-muted/40 p-1 sm:w-fit sm:flex-wrap">
     <NuxtLink
       v-for="t in visible"
       :key="t.to"
       :to="t.to"
-      class="inline-flex items-center gap-1.5 rounded px-3 py-1.5 text-sm transition-colors"
+      class="inline-flex shrink-0 items-center gap-1.5 rounded px-3 py-2.5 sm:py-1.5 text-sm whitespace-nowrap transition-colors"
+      :aria-current="isActive(t.to) ? 'page' : undefined"
       :class="isActive(t.to)
         ? 'bg-background shadow-sm'
         : 'text-muted-foreground hover:text-foreground'"
     >
       {{ t.label }}
     </NuxtLink>
-  </div>
+  </nav>
 </template>

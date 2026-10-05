@@ -19,7 +19,7 @@ new Function('exports', 'require', transpile(compiled.code))(rendered, require)
 const utilitySource = fs.readFileSync(path.join(__dirname, '../utils/certificacoesAutosave.ts'), 'utf8')
 const pageScript = descriptor.scriptSetup.content.replace(/^import .*$/gm, '').replace('await load()', '')
 const exportsForTest = `return {
-  rows, loading, errorText, statusError, syncMessage, exporting, adding, synchronizing,
+  rows, mobileTableMode, loading, errorText, statusError, syncMessage, exporting, adding, synchronizing,
   anatelStatus, selectedRow, detailsDialog, rowBusy, busy, hasBusyRow, canEdit, canDelete, canAttach,
   inmetroStatus, inmetroStatusError, inmetroSyncMessage, inmetroSyncError, synchronizingInmetro,
   CERT_OPTIONS, ANATEL_SOURCE_URL, INMETRO_SOURCE_URL, totalRows, scheduleSave, syncAnatel, syncInmetro,
