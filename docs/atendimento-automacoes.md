@@ -4,6 +4,13 @@ Eduardo, 05/10/2026: "queria também ... fazer uma pesquisa ali no Duoke pra sab
 as mensagens automáticas que são usadas lá hoje ... pra aplicarmos aí, daí tal dia
 manda tal mensagem" e "e sobre as respostas automáticas já fez também?".
 
+Eduardo, 05/10/2026 (à noite): "por enquanto deixe só pra mostrar que ele
+enviaria mesmo corretamente, mas não enviar essas mensagens padrão; quero todas
+do Duoke aqui também em todas as plataformas possíveis" e "quando terminar suba
+tudo em modo seco, sem escrever ou realmente enviar nada" — a **§15**: as que
+faltavam (pedido não pago com cupom, resposta da avaliação, "pedido recebido" do
+TikTok), **só em simulação**, e a prévia "como o cliente receberia" × o Duoke.
+
 Combinado com ele: o DaVinci recria as mensagens automáticas que o Duoke manda
 hoje, **começando em modo seco**. O DaVinci registra o que mandaria, para quem e
 quando, e **não envia nada**. Um comparador confere com o que o Duoke mandou de
@@ -39,11 +46,11 @@ Regras desta entrega:
 |---|---|
 | Modelo | 2 tabelas novas (migration `0366_atendimento_automacoes`). **Regras**: automação × loja, com modo `desligado`/`simular`/`enviar`, partes da mensagem com `{placeholders}`, atraso, horário, condições, o disjuntor e `enviar_desde`. **Registro**: alvo × automação, uma linha por pedido, conversa, comprador ou mensagem, conforme a automação. Estado `agendado` → `simulado`/`enviado`/`pulado`(+motivo)/`falhou`/`revisar`, `so_duoke`, e a comparação com o Duoke (com `divergencia` e `alerta`). A migration **semeia** as regras: `simular` nas lojas onde o Duoke manda hoje, `desligado` no resto. |
 | Motor | Cron `atendimento_automacoes` nos minutos pares, logo depois da leitura das caixas (minutos ímpares). Uma rodada por vez (trava no Redis). Em cada rodada: **descobrir** gatilhos (mensagem do comprador, pedido pago no Bling, entregue/concluído na varredura da Logística) → **decidir** os que venceram → **comparar** com o Duoke. |
-| Automações desta entrega | **Shopee:** menu + respostas 1, 2, 3, 5 e 6 **na hora**; "aguarde" da ATV; pedido recebido; entregue (celular/mala, em horário comercial); convite para seguir; "ficou alguma dúvida" 2 h e 26 h; pós-conclusão 4 h. **TikTok:** "aguarde", convite e "ficou alguma dúvida" 2 h e 24 h. **ML:** menu do pós-venda e respostas das opções, com até 350 caracteres. São cerca de 7.300 textos por semana hoje no Duoke. |
-| Fora desta entrega | Carrinho com cupom, resposta de avaliação e "pedido recebido" do TikTok (§5). |
+| Automações desta entrega | **Shopee:** menu + respostas 1, 2, 3, 5 e 6 **na hora**; "aguarde" da ATV; pedido recebido; entregue (celular/mala, em horário comercial); convite para seguir; "ficou alguma dúvida" 2 h e 26 h; pós-conclusão 4 h. **TikTok:** "aguarde", convite e "ficou alguma dúvida" 2 h e 24 h. **ML:** menu do pós-venda e respostas das opções, com até 350 caracteres. São cerca de 7.300 textos por semana hoje no Duoke. **Só simulação (05/10, noite, §15):** Shopee pedido não pago com cupom ("carrinho") e resposta da avaliação 4–5★ e 1–3★ (pública + chat); TikTok "pedido recebido" (cartão + texto). |
+| Fora desta entrega | Nenhuma automação do Duoke: as que não dá para enviar entram só em simulação (§15). Fora ficam as mensagens nativas da Shopee e da TikTok, as respostas rápidas que a equipe digita no Duoke e o que o próprio DaVinci já manda (§5, conferido por SELECT). |
 | Modo seco | O motor roda de verdade e grava "mandaria X às HH:MM" (`simulado`). O comparador procura a mesma automação do Duoke na mesma conversa ou pedido, pela assinatura do texto do modelo ou pelo payload, dentro de uma janela. O estado do robô (sessão do menu, intervalo do "aguarde", ciclo da dúvida) é medido **só com o que o DaVinci mandaria** (§6.1). A tela mostra, por automação × loja, a % que bateu (a menor entre precisão e cobertura) e o **critério da troca de cada loja** em 7 dias — é ele que diz quando dá para trocar. |
 | Envio | Só pelo `enviar.py` (função nova `enviar_automatica`), com origem própria `davinci_auto` e a marca `payload.automacao`. A régua `e_mensagem_automatica`, a fila, a métrica e a IA reconhecem as duas (e o cartão do pedido da campanha do Duoke). Teto por loja e família por dia, 3 mensagens normais por comprador sem resposta dele, chave única por alvo, linha em voo, nunca retenta o ambíguo; na troca, espera a leitura e não manda se o Duoke mandou depois do gatilho; o disjuntor volta a regra para `simular`. Entra junto a correção do `ia._humano_respondeu_recente`. |
-| Tela | Aba **"Automáticas"** no /atendimento, para quem já vê o /atendimento. API (§8.1) e tela (§8.2) implementadas. Mostra automação × loja: modo, texto editável, atraso e horário, simulados em 24 h e 7 dias, precisão, cobertura e % que bateu com o Duoke, o atraso real do DaVinci e o critério da troca **da loja** (o da automação só soma as lojas). Embaixo, o registro recente, sem texto de comprador. |
+| Tela | Aba **"Automáticas"** no /atendimento, para quem já vê o /atendimento. API (§8.1) e tela (§8.2) implementadas. Mostra automação × loja: modo, texto editável, atraso e horário, simulados em 24 h e 7 dias, precisão, cobertura e % que bateu com o Duoke, o atraso real do DaVinci e o critério da troca **da loja** (o da automação só soma as lojas). Embaixo, o registro recente, sem texto de comprador; em cada linha, a **prévia "como o cliente receberia"** (montada na hora, ao lado do que o Duoke mandou de verdade — §8.3). |
 
 ---
 
@@ -90,11 +97,18 @@ plataforma no modo seco: o motor só lê o banco.
 - Comprador do pedido (o `to_id` da Shopee): está no índice
   `atendimento_pedidos_comprador` em 1.054 de 1.067. Mas o índice roda de hora em
   hora (no :22, com janela de 2 h), então aos 5 min quase nunca está lá. O modo
-  seco não precisa dele. No envio, `ShopeeClient.get_order_buyer(order_sn)`, que
-  já existe.
-- Só 120 desses 1.067 compradores tinham conversa com mensagem no DaVinci antes
-  de pagar (11%). **O envio por pedido precisa funcionar sem conversa.** A Shopee
-  manda pelo `to_id` e devolve o `conversation_id` (§7.4).
+  seco não precisa dele. **No envio, sem chamada nova** (decisão desta leva,
+  §13.4): o `to_id` vem do que o DaVinci já tem — a conversa do pedido, o índice
+  (que a linha espera até 90 min) —, e o usuário do comprador (o `{comprador}`)
+  do escrow que o financeiro já grava.
+- Medido de novo em 05/10 (7 dias, 1.050 pedidos Shopee): aos 5 min do Bling,
+  **11–12%** têm conversa com a loja (120 achadas pelo usuário do escrow, 127
+  pelo comprador do índice de hoje); o escrow do financeiro
+  (`marketplace_order_financials.raw.escrow.buyer_user_name`) já está lá em
+  95% (1.002) e é o MESMO `to_name` da conversa (1.776 de 1.776 em 14 dias, sem
+  máscara) — mas o escrow NÃO traz o `buyer_user_id`. O índice acaba tendo o
+  comprador de 98,6% (1.035). **O envio por pedido precisa funcionar sem
+  conversa.** A Shopee manda pelo `to_id` e devolve o `conversation_id` (§7.4).
 
 ### 2.3 Entregue e concluído (varredura da Logística, Shopee no :09)
 
@@ -123,13 +137,24 @@ plataforma no modo seco: o motor só lê o banco.
   mesmo que o status mude depois. O motor não muda nada na varredura da
   Logística. Ele lê a `logistica` a cada 10 min, procurando o
   `status_lido_em` dos últimos 3 dias.
-- **Fora da Logística:** os pedidos Shopee na situação 545902 "Resolvido" do
-  Bling não estão na tabela `logistica` (de 10 a 30 dias atrás, 122 de ~2.860,
-  4%; 51 já concluídos no índice). O DaVinci não vê o entregue nem o concluído
-  deles. Nesta entrega fica aceito e medido: o "só Duoke" desses pedidos vira a
-  diferença combinada `sem_logistica`, fora da conta. Depois da troca, esses
-  compradores ficam sem o entregue e o pós (pendência: ler o status pelo índice
-  ou por `get_order_status_map` numa rotina própria).
+- **Fora da Logística** (refeito em 05/10, §13.4): a Logística não tem os pedidos
+  que foram para Cancelado, Resolvido ou Perdimento no Bling — nunca entram
+  (`logistica_ingest`) e o `cleanup_finalizados` tira os que viram isso depois.
+  O "122 de ~2.860 (4%)" da 1ª medição era um RETRATO de hoje: pedidos que
+  viraram Resolvido (545902 = devolução resolvida ou troca, posto pelo
+  `devolution_stock_return`) semanas DEPOIS de entregues. Como a linha só sai
+  da Logística quando o pedido vira Resolvido/Cancelado/Perdimento (ou passa de
+  90 dias entregue), e o Resolvido vem da devolução já processada, na hora do
+  entregue eles estavam lá (dedução pela regra; o histórico da Logística não
+  fica guardado). Medido (SELECT, 05/10): dos pedidos Shopee pagos na semana de
+  28/09 (1.063), **nenhum** não cancelado está fora da Logística; na de 21/09,
+  7 de 758, 6 deles com o entregue/concluído no índice. Em 21 dias, o Duoke
+  mandou o entregue para 12 pedidos que hoje estão fora (11 Resolvido) e o pós
+  para 3 (2 Resolvido). Mesmo assim o motor ganhou a fonte que faltava: o
+  **índice** (`descobrir_indice`, §13.4) dá o entregue e o concluído dos
+  pedidos fora da Logística (o que sobra sem fonte nenhuma: 0 a 1 pedido por
+  semana), e o Bling no fluxo de devolução (Aguardando Devolução, Manutenção,
+  Resolvido, Perdimento, Sucata) conta como devolução no entregue e no pós.
 - Hoje, 442 dos 447 pedidos entregues já têm conversa no DaVinci, porque o
   "pedido recebido" do Duoke abriu a conversa. Isso deixa de valer quando o
   Duoke parar.
@@ -199,7 +224,7 @@ outras do atendimento.
 | `plataforma` | varchar(16) NOT NULL | retrato (shopee, tiktok ou ml) |
 | `modo` | varchar(16) NOT NULL default `'desligado'` | CHECK em (`desligado`, `simular`, `enviar`) |
 | `ligada_desde` | timestamptz NULL | quando saiu de `desligado`. O motor só descobre eventos a partir daqui. Passar de `simular` para `enviar` **não** muda esse valor (§6.6). |
-| `partes` | jsonb NOT NULL default `'[]'` | em ordem: `{"tipo":"texto","texto":"Oi, {comprador}! …"}`, `{"tipo":"cartao_pedido"}`, `{"tipo":"figurinha","figurinha":"0007","pacote":"br_shoppito"}` |
+| `partes` | jsonb NOT NULL default `'[]'` | em ordem: `{"tipo":"texto","texto":"Oi, {comprador}! …"}`, `{"tipo":"cartao_pedido"}`, `{"tipo":"figurinha","figurinha":"0007","pacote":"br_shoppito"}` e — na resposta da avaliação, §15 — `{"tipo":"resposta_publica","texto":"…"}` (a resposta pública, validada com o limite dela: 500) |
 | `atraso_min` | integer NOT NULL | minutos depois do gatilho |
 | `janela_inicio`, `janela_fim` | time NULL | horário de São Paulo. Os dois NULL = 24 h. |
 | `condicoes` | jsonb NOT NULL default `'{}'` | os parâmetros da automação, com chaves do catálogo: `intervalo_h`, `nao_se_pessoa_respondeu`, `ciclo_dias`… |
@@ -207,13 +232,15 @@ outras do atendimento.
 | `versao` | integer NOT NULL default 1 | sobe a cada mudança de partes ou condições. O registro guarda qual versão valeu. |
 | `atualizado_por` | uuid NULL, FK `users` SET NULL | |
 | `enviar_desde` | timestamptz NULL | quando foi para `enviar` (o disjuntor só olha o Duoke DEPOIS disso) |
-| `disjuntor_em`, `disjuntor_motivo` | timestamptz / varchar(48) NULL | o motor voltou a regra sozinho para `simular` ("Duoke ainda ligado?") |
+| `disjuntor_em`, `disjuntor_motivo` | timestamptz / varchar(48) NULL | o motor voltou a regra sozinho para `simular`: `duoke_ainda_ligado` ("Duoke ainda ligado?"); desde a revisão de 05/10 (§13.5) também `parte_falhou` (a mensagem saiu pela metade) e `plataforma_recusou` (campanha da Shopee recusada pela plataforma já na 1ª parte) |
 | `created_at`, `updated_at` | | `TimestampMixin` |
 
 `UNIQUE (automacao, integration_id)`. `CHECK modo IN (desligado, simular, enviar)`.
 
 Loja **sem linha** = automação desligada, com os padrões do catálogo, como no
-`LogisticaMensagemTemplate`. **A migration semeia**: cada loja Shopee, TikTok e
+`LogisticaMensagemTemplate`. **A migration semeia** (a 0366, CONGELADA em 05/10 à
+noite nas automações daquela data — `CODIGOS`; as que vieram depois, a 0371,
+§15.6): cada loja Shopee, TikTok e
 ML ativa ganha uma linha por automação da plataforma, com os textos padrão
 (§4), em `simular` nas lojas onde o Duoke manda hoje e em `desligado` no resto
 (a opção 4 sempre `desligado`). A loja casa pelo nome da integração (`strip +
@@ -238,8 +265,8 @@ guarda o id do comprador e o pedido.
 | `regra_versao` | integer NULL | |
 | `integration_id` | uuid NOT NULL, FK `integrations` CASCADE | |
 | `plataforma` | varchar(16) NOT NULL | |
-| `alvo` | varchar(16) NOT NULL | `pedido`, `conversa`, `comprador`, `mensagem` ou `duoke`. É o que a tela mostra. |
-| `chave` | varchar(191) NOT NULL | a unicidade, conforme a automação (§4): `pedido:<sn>`, `conversa:<id>:msg:<id>`, `comprador:<id>`, `duoke:<mensagem_id>` |
+| `alvo` | varchar(16) NOT NULL | `pedido`, `conversa`, `comprador`, `mensagem`, `duoke` ou (§15) `avaliacao`. É o que a tela mostra. |
+| `chave` | varchar(191) NOT NULL | a unicidade, conforme a automação (§4): `pedido:<sn>`, `conversa:<id>:msg:<id>`, `comprador:<id>`, `avaliacao:<comentario_id>`, `duoke:<mensagem_id>` (`duoke:avaliacao:<comentario_id>` no "só Duoke" da avaliação) |
 | `conversa_id` | uuid NULL, FK `atendimento_conversas` SET NULL | |
 | `gatilho_mensagem_id` | uuid NULL, FK `atendimento_mensagens` SET NULL | a mensagem do comprador que disparou |
 | `pedido` | varchar(64) NULL | |
@@ -306,8 +333,13 @@ e no pós), `pedido_cancelado` (Bling 12 ou `excluido`, índice `CANCELLED`/`IN_
 rodada), `disputa_com_pessoa` (menu), `teto_dia`, `teto_comprador`,
 `texto_invalido`, `sem_conversa`, `duoke_mandou` (modo enviar: o Duoke mandou
 depois do gatilho), `campanha_sem_auto_reply`, `envio_recusado` e `parte_N` (a
-parte N de uma mensagem com várias partes falhou, e as anteriores já tinham
-saído). A lista com o texto da tela está em `automacoes_catalogo.MOTIVOS`.
+parte N de uma mensagem com várias partes não saiu; com as anteriores já
+saídas, a linha fica `revisar` e o disjuntor volta a regra para `simular` —
+§7.6, item 10). Da §15: `pedido_pago`, `abaixo_do_minimo` (celular abaixo de
+R$ 1.000, mala abaixo de R$ 150), `sem_valor` (o índice sem o total),
+`estrelas_mudaram` (o comprador mudou a nota) e `so_simulacao` (regra em
+`enviar` numa automação que só simula: vira `simulado` com ele). A lista com o
+texto da tela está em `automacoes_catalogo.MOTIVOS`.
 
 ---
 
@@ -426,6 +458,9 @@ teste não precisar de banco.
 | `tiktok_duvida_24h` | o 2 h saiu | +24 h | a chave do 2 h | texto | as mesmas | 24 |
 | `ml_menu` | mensagem do comprador no pack sem robô nas últimas 12 h | 1 min, 24 h | `conversa:<id>:msg:<id>` | texto (≤ 350, ISO-8859-1) | aguiar, barbosa, counhago, forpaper, injox, inova, jlas2, kfa, kfa2, kia, marquezini, mini, velasco, victor mei, zorvex (15) | 49 |
 | `ml_opcao_1/2/3/5/6` (e `ml_opcao_4` travada) | dígito N com o menu valendo | 1 min (**na hora**) | `conversa:<id>:msg:<id>` | texto | as 15 | 38 |
+| `shopee_nao_pago` (**só simulação**, §15.1) | pedido criado e não pago (o índice, de hora em hora) | 30 min da criação, 24 h | `pedido:<sn>` | cartão + texto com `{valor_cupom}` | as 13 menos a Kia (12) | 330 |
+| `shopee_avaliacao_boa` / `_ruim` (**só simulação**, §15.2) | avaliação 4–5★ / 1–3★ lida pelo DaVinci | 1 h, 24 h | `avaliacao:<comentario>` | resposta pública + texto no chat | 13 (não a Aguiar) | 442 + 23 públicas |
+| `tiktok_pedido_recebido` (**só simulação**, §15.3) | o aviso de pedido da TikTok ("Agradecemos pelo seu pedido!") | 5 min, 24 h | `conversa:<id>:msg:<aviso>` | cartão + texto | atv, barbosa, mini | 128 |
 
 O pedido só citava o menu do ML. As respostas das opções entram porque são o
 mesmo fluxo, com texto fixo e quase sem custo. Menu sem resposta da opção
@@ -650,13 +685,37 @@ conta como resposta. Ver §7.3. A Shopee barrou 8 por lista negra
 
 ## 5. Fora desta entrega, e por quê
 
-| Automação | Por que fica para depois |
-|---|---|
-| **Carrinho com cupom** (Shopee, 330/semana) | O cupom e as faixas (R$5/10 mala; R$20/25/30 celular) só existem no painel: não se sabe se é cupom da loja nem o código. O gatilho (pedido **não pago** + 30 min) não chega a tempo: o índice roda de hora em hora com janela de 2 h, e precisaria de um `get_order_list UNPAID` a cada 10 ou 15 min. A Shopee já manda sozinha um cupom 24 h depois (337/semana), e o comprador não pode receber dois. |
-| **Resposta de avaliação** (Shopee, 465 públicas + 419 no chat) | É resposta **pública**, no anúncio. Hoje o `enviar.py` proíbe resposta automática em avaliação (`_destino_avaliacao`: "só pessoa responde"), e mudar isso tem que ser uma decisão de propósito. Também mexe na carência de `avaliacoes.py`, que se baseia num `resposta_em` 59 min inflado. |
-| **"Pedido recebido" do TikTok** (157/semana) | Precisa abrir conversa (Create Conversation), mandar `ORDER_CARD` e saber o comprador de cada pedido do TikTok, e o DaVinci não tem nenhuma das três coisas. A própria TikTok já manda "Agradecemos pelo seu pedido!" na mesma hora. |
-| Nativas da Shopee e da TikTok (cupom de 24 h, "avalie para ganhar moedas", cartões de rastreio, robô `ROBOT` da TikTok) | Não são do Duoke (`source` `server`/`crm`, papel `ROBOT`) e continuam sem ele. |
-| Campanhas por evento no ML; qualquer coisa na Amazon/Magalu | O ML não deixa o vendedor puxar conversa livre. Na Amazon, só o que o DaVinci já manda por e-mail. Na Magalu, a loja só responde. |
+Até 05/10 (tarde), o carrinho com cupom, a resposta de avaliação e o "pedido
+recebido" do TikTok ficavam de fora. Desde 05/10 (noite) **as três estão no
+catálogo, só em simulação** (§15): o DaVinci mostra o que mandaria e compara com
+o Duoke, e não manda — o carrinho porque o cupom só existe no painel, a
+avaliação porque a resposta é pública (o envio continua proibido sem uma decisão
+de propósito), o TikTok porque enviar exigiria abrir a conversa e o cartão do
+pedido pela API. A opção 4 do menu continua sem texto (desligada, esperando o
+painel).
+
+**Nenhuma outra automação do Duoke ficou sem regra.** Conferido por SELECT (05/10,
+noite, só leitura, sem texto de comprador): todos os textos da LOJA de fora
+(`externo`/`sistema`, sem a marca do motor) repetidos 8 vezes ou mais nos últimos
+14 dias, nas 3 plataformas (89 modelos), um a um:
+
+| O quê | Exemplos (14 dias) | Por que não vira regra |
+|---|---|---|
+| Já no catálogo | Shopee: menu 2.945, pedido recebido 1.786, dúvida 2 h 1.400 e 26 h 1.273, pós 683, "aguarde" 618, entregue 591 + mala 387, carrinho 513, opções 6/1/2/5/3 278/71/50/19/12. TikTok: "aguarde" 322, pedido recebido 263, dúvida 52 + 48. ML: menu 99, opções 6/1/5 52/22/12 | — (o convite e a avaliação começam pelo usuário: cada texto é único, a assinatura casa por "contém") |
+| Nativas da plataforma | TikTok `ROBOT`/`SYSTEM`: "o bate-papo foi encerrado" 549, "[Outros]" 467, boas-vindas 322 + FAQ, "Customer Service… iniciou o bate-papo" 302, "atribuído" 296, "Agradecemos pelo seu pedido!" 269 (é o GATILHO do pedido recebido do TikTok), "pronto para entrega" 161, "enviamos seu pedido" 79. Shopee `server`: "[Resposta automática (FAQ)]" 151, "Olá. Bem-vindo!" 40 + 30 (a do OUTRO lado, §2.5) | Não são do Duoke: continuam sem ele |
+| Respostas rápidas da equipe (pessoa) | "bom dia tudo bem ?" 621 + 119 (TikTok) + 36 (ML), "você vai precisar entrar no chat de atendimento…" 138, "bom dia! ficou alguma dúvida…" 121, "neste chat você está falando com a loja…" 118, "pode seguir o prazo…" 74 + 19 + 9, "sem previsão!" 73, "boa noite tudo bem ?" 59, "de nada, tenha um bom dia!" 46… | Saem de 85% a 100% entre 7 h e 13 h (as noturnas, de 23 h a 0 h30), espaçadas: é a equipe com o atalho do Duoke. Viram modelo (Respostas prontas), não gatilho |
+| Do próprio DaVinci | "Devolução … aberta/encerrada no Mercado Livre", "Mediação…", "Devolução na Shopee: em andamento" (notas do sistema), a senha da devolução, os e-mails da Amazon | Já são do DaVinci |
+| Menu do TikTok e da ATV na Shopee | TikTok 8 (100% das 7 h às 13 h), ATV 79 em 6 dias (§10, item 17) | Pessoa usando o modelo (sem gatilho automático medido) |
+
+Também fora, como antes: as campanhas por evento no ML (o ML não deixa o
+vendedor puxar conversa livre — e não existe nenhuma hoje); Amazon e Magalu (só
+o que o DaVinci já faz). As regras antigas do Duoke ("pagamento pendente",
+"pedido enviado", o robô "sou a Inteligência Artificial", o "Passando
+rapidinho") não mandaram nada nos 14 dias: estão desligadas lá (§10, item 10).
+O "Oi! Seu produto ainda está no carrinho" apareceu 5 vezes (22/09), mas pelo
+DISPARO de marketing da própria Shopee (`source = crm`, com a vitrine
+`crm_item_list`) — e, antes, em 9 a 17/09, digitado no chat web do Seller Center
+(`mini_webchat`): pessoa, não automação do Duoke.
 
 ---
 
@@ -724,6 +783,9 @@ Duoke" falso quando a leitura voltasse.
 | pedido recebido | `oi! recebemos seu pedido e ja estamos preparando` | conversa da loja com `pedido_marketplace = sn` **ou** com cartão `message_type=order` e `content.order_sn = sn` a até 10 s do texto | evento até evento + 1 h |
 | entregue | contém `confirmamos a entrega do seu pedido` ou `que alegria saber que sua mala ja chegou` | o mesmo cartão `order_sn` | evento até evento + 36 h (lote da madrugada seguinte) |
 | pós-conclusão | `oi! so passando para saber se esta tudo certo` | conversa da loja com o comprador do pedido (índice) ou `pedido_marketplace = sn` | evento + 3 h a + 8 h |
+| pedido não pago, "carrinho" (§15.1) | contém `notamos que voce deixou alguns itens no carrinho` | o cartão do pedido a até 10 s (como no pedido recebido) | evento (criação) até + 3 h |
+| resposta da avaliação (§15.2) | a resposta PÚBLICA gravada na avaliação (`resposta_loja`) com as duas frases do modelo (`obrigado pela confianca` + `volte sempre que precisar`; `sentimos muito pela experiencia` + `nao foi o atendimento que buscamos`) e, junto, a mensagem do chat do Duoke na conversa do comprador | a própria avaliação (pelo comentário); o chat na conversa da linha | evento (avaliação) até + 24 h (o Duoke responde até ~18 h depois); `nao_mandou` só com a avaliação relida depois do fim da janela (ou respondida por pessoa) |
+| pedido recebido do TikTok (§15.3) | `oi! recebemos seu pedido e ja estamos preparando` | a MESMA conversa (o aviso da TikTok não traz o nº: `compara_na_conversa`) | evento (o aviso) até + 1 h |
 
 As assinaturas ficam no catálogo, junto com as constantes de
 `RESPOSTAS_AUTOMATICAS` (§7.5), e o teste confere uma contra a outra.
@@ -757,6 +819,7 @@ negativo do DaVinci.
 | `motor_atrasado` | `pulado: atrasado` (motor parado ou atrasado, passou da validade) | fora da conta (é operação, não regra) |
 | `teto_dia`, `teto_comprador` | só no modo seco: passou do teto | fora da conta |
 | `regra_desligada` | a regra foi desligada depois do gatilho | fora da conta |
+| `visto_de_hora_em_hora` | pedido não pago (§15.1): o Duoke mandou aos 30 min e o pedido foi pago ou cancelado antes de o DaVinci vê-lo (o índice é de hora em hora) — a linha `pulado` (`pedido_pago`/`status_mudou`/`pedido_cancelado`) com o Duoke `mandou`, ou o "só Duoke" cujo pedido (o do cartão; sem cartão, o do comprador no índice criado até 1 h antes do carrinho) foi **criado logo antes do carrinho**, **não tem linha nossa** e ficou **pago no Bling até 2 h depois da criação** ou está **cancelado** no índice (`automacoes_comparar.carrinhos_vistos_tarde`). Pedido antigo da conversa, pago tarde ou com linha nossa: "só Duoke" de verdade | fora da conta; o atraso fica no registro e no "atraso do DaVinci" |
 
 Sem diferença combinada (contam como erro, de propósito): o **"nunca comprou"
 com o índice curto** (até importar 90 dias, o "só DaVinci" do 2 h é erro: medido
@@ -878,7 +941,11 @@ por resposta automática, §7.3).
    que o Duoke manda às 6 h quando o nosso saiu às 4 h05; o entregue entregue às
    10 h, o nosso às 10 h, o lote do Duoke às 2 h) — o comparador pega e o
    disjuntor desliga, mas aquele comprador recebeu duas. Some se o Duoke parar
-   de verdade ao ser desligado (§10, item 13).
+   de verdade ao ser desligado (§10, item 13). O mesmo disjuntor (revisão de
+   05/10, §7.6 item 10) também volta a regra quando a mensagem sai pela METADE
+   (`parte_falhou`: o cartão saiu e o texto não) e quando a campanha da Shopee
+   é recusada pela plataforma já na 1ª parte (`plataforma_recusou`) — uma vez
+   por loja, não em todo pedido.
 4. Pendente do painel (§10): **desligar a regra no Duoke cancela o que ele já
    agendou** (o 26 h, o lote da madrugada, o pós de 4 h)? Se não cancelar, o
    disjuntor pega, mas depois de uma mensagem em dobro.
@@ -896,22 +963,36 @@ por resposta automática, §7.3).
 - `atendimento_automacoes_envio: bool = False`: sem ela, nenhuma regra envia.
   Uma regra em `enviar` vira simulação com `motivo = envio_desligado`.
 - `atendimento_automacoes_teto_dia: int = 400`: teto por loja **e por família**
-  (as que respondem conversa × as do pedido) em 24 h corridas. O envio conta só
-  `enviando`/`enviado`/`revisar` (o simulado não come o teto de quem envia); o
+  (as que respondem conversa × as do pedido) em 24 h corridas. O envio conta
+  `enviando`/`enviado`/`revisar` e o `falhou` que chegou a falar com a
+  plataforma (com mensagem; revisão de 05/10 — senão um erro repetido nunca
+  encostaria no teto); o simulado não come o teto de quem envia; o
   modo seco conta o `simulado` à parte e, passando, vira a diferença combinada
   `teto_dia` (fora da %). Dimensionado pelo pico: o 9.9 teve 4× a mediana na ATV
   e 5× na Barbosa; o pico medido do Duoke foi 224 textos/dia (mega).
 - `atendimento_automacoes_shopee_auto_reply: bool = False`: o teste de permissão
   do `send_autoreply_message` passou. **Sozinha não libera nada**: a campanha da
   Shopee só vai para `enviar` com ela **e** com o envio por resposta automática
-  no adaptador (`enviar_auto_reply` em `services/atendimento/shopee.py`, que
-  hoje não existe — `enviar.auto_reply_no_adaptador`). Sem os dois, a tela
-  recusa, o motor pula `campanha_sem_auto_reply` e o `enviar_automatica`
-  recusa; e quando puder sair, a campanha sai pelo `enviar_auto_reply`, nunca
-  pelo `enviar_texto` (mensagem normal). Na 1ª versão a chave sozinha
+  no adaptador (`enviar_parte(auto_reply=True)` em
+  `services/atendimento/shopee.py`, pelo `send_autoreply_message` — existe
+  desde a junção de 05/10, §14.5; `enviar.auto_reply_no_adaptador`). Sem os
+  dois, a tela recusa, o motor pula `campanha_sem_auto_reply` e o
+  `enviar_automatica` recusa; quando puder sair, a campanha sai pela
+  `enviar_parte(auto_reply=True)`, nunca pelo `enviar_texto` (mensagem normal).
+  Hoje (produção) a chave está desligada: a campanha não sai. Na 1ª versão a chave sozinha
   liberava, e a campanha sairia como mensagem normal — o que a trava existe
   para evitar (correção da revisão de 05/10). A API mostra as duas
   (`chaves.shopee_auto_reply` e `chaves.shopee_auto_reply_adaptador`).
+
+**As que só simulam** (§15: o pedido não pago com cupom, a resposta da
+avaliação, o "pedido recebido" do TikTok — `Automacao.so_simular`) nunca saem,
+com qualquer chave: o `PATCH` recusa `enviar` (409 `so_simulacao`, o primeiro
+do `por_que_nao_enviar` — e também qualquer mudança numa regra que já estivesse
+em `enviar`, direto no banco, que não a leve para simular ou desligado), o
+motor decide em `simular` mesmo com a regra em
+`enviar` (motivo `so_simulacao`) e o `enviar.py` recusa a automação
+(`EnvioRecusado("so_simulacao")`, nas travas gerais, antes de qualquer
+adaptador).
 
 Uma linha só sai para a plataforma se tudo isto valer: **o freio único**
 `ATENDIMENTO_ENVIO_ATIVO` (desligado, nada sai pelo DaVinci — pessoa, IA ou
@@ -943,31 +1024,52 @@ a régua de resultado (`enviada`/`revisar`/`falhou`) e a recusa vira
   `canal_em_observacao`. As travas da IA não entram: `auto_desligado`,
   `nao_aguarda`, `conversa_mudou`.
 - A linha nasce com `autor = 'loja'`, `origem = 'davinci_auto'` e
-  `payload = {"automacao": {"codigo", "registro_id", "regra_versao"}}`.
+  `payload = {"automacao": {"codigo", "registro_id", "regra_versao", "parte",
+  "indice"}}` — mais `"pedido"` no cartão e `"figurinha"`/`"pacote"` na
+  figurinha (é por eles que a leitura adota a parte sem texto, §7.4).
   `_gravar_resultado(…, avaliar=False)`: mensagem automática não é avaliação de
-  rascunho.
-- Cada parte é uma mensagem, em ordem: cartão, texto, figurinha. Se uma parte
-  falha, o registro vira `falhou` com `motivo = parte_N`, e as partes que já
-  saíram **não** são reenviadas. **Nesta entrega o envio é só das partes de
-  TEXTO numa conversa que já existe**: o cartão e a figurinha ficam de fora (o
-  adaptador ainda não manda), e a linha sem conversa vira `pulado: sem_conversa`.
-  A recusa temporária (`conversa_ocupada`, `envio_em_andamento`) volta a
-  `agendado` e tenta na rodada seguinte, até a validade; outra recusa vira
-  `pulado: envio_recusado` com o código em `erro`; a mensagem `falhou` vira
-  `falhou`, a `revisar` vira `revisar` — nunca retentadas.
+  rascunho. O cartão é gravado como a leitura grava (`tipo = 'pedido'`, o
+  cartão vazio do pedido nos anexos); a figurinha, `tipo = 'outro'`, "[Figurinha]".
+- Cada parte é uma mensagem, em ordem: cartão, texto, figurinha (como a regra
+  manda). Se uma parte não sai DEPOIS de outra ter saído (o cartão sem o
+  texto), o registro vira `revisar` com `motivo = parte_N` e o disjuntor volta a
+  regra para `simular` (§7.6, item 10); as partes que já saíram **não** são
+  reenviadas. **Desde 05/10 (§13.4) saem as
+  três partes**: o cartão e a figurinha só na Shopee (`parte_nao_suportada` nas
+  outras); o texto das campanhas da Shopee como resposta automática
+  (`send_autoreply_message`), o cartão e a figurinha como mensagem normal — os
+  dois exatamente como o Duoke manda (medido: 1.940 cartões e 969 figurinhas
+  `status=normal`; os textos das campanhas `auto_reply`, `message_option=129`).
+  Sem conversa, a 1ª parte sai pelo `to_id` (§7.4) e a conversa que a Shopee
+  devolve recebe as outras.
+  Na 1ª parte, a recusa temporária (`conversa_ocupada`, `envio_em_andamento`)
+  volta a `agendado` e tenta na rodada seguinte, até a validade; outra recusa
+  vira `pulado: envio_recusado` com o código em `erro`; a mensagem `falhou` vira
+  `falhou`, a `revisar` vira `revisar` — nunca retentadas. Da 2ª parte em diante
+  (já saiu alguma), a recusa temporária tenta de novo NA HORA (3 vezes, 2 s
+  entre elas: é a leitura gravando a conversa que o cartão acabou de abrir) e
+  só então desiste; o `envio_repetido` (a MESMA frase acabou de sair nesta
+  conversa: o mesmo comprador com dois pedidos na mesma rodada) conta como
+  entregue e segue; o resto é a mensagem pela metade (§7.6, item 10).
 
-O motor marca o registro como `enviando` e commita **antes** de chamar
+Antes de marcar `enviando`, a **reconferência** (§7.6, item 9) relê tudo do
+banco. O motor marca o registro como `enviando` e commita **antes** de chamar
 `enviar_automatica`. Com a `chave` única, essa é a segunda trava contra
 duplicar.
 
-### 7.3 Adaptadores: o que existe e o que falta
+### 7.3 Adaptadores: o que existe (feito em 05/10, §13.4)
 
 | Parte | Shopee | TikTok | ML |
 |---|---|---|---|
-| texto | existe (`chat_send_message(text=…)`) | existe (`cs_send_text`) | existe (pack) |
-| cartão do pedido | **falta**: `chat_send_message(order_sn=…)` → `{"message_type": "order", "content": {"order_sn": …}}` [conferir o formato na doc da Shopee] | fora (§5) | – |
-| figurinha | **falta**: `{"message_type": "sticker", "content": {"sticker_id": "0007", "sticker_package_id": "br_shoppito"}}` (o formato que o Duoke manda, visto no payload) | – | – |
-| como "resposta automática" (`auto_reply`) | **não se sabe**: `v2.sellerchat.send_autoreply_message` aparece na lista de operações, mas não foi testado. Conferir a permissão com corpo vazio (`param_error` = tem acesso; `error_permission`/`api_suspended` = não tem), como foi feito em 22/09 com o `send_message`. Só com o OK do Eduardo. | – | – |
+| texto | `chat_send_message(text=…)` | `cs_send_text` | pack |
+| cartão do pedido | `chat_send_message(order_sn=…)` → `{"message_type": "order", "content": {"order_sn": …}}` — o formato do Duoke (payload gravado: `content` com `order_sn`, `shop_id`, `card_source`; o `shop_id` e o `card_source` a Shopee completa) | fora (§5) | – |
+| figurinha | `chat_send_message(sticker_id=…, sticker_package_id=…)` → `{"message_type": "sticker", "content": {"sticker_id": "0007", "sticker_package_id": "br_shoppito"}}` | – | – |
+| como "resposta automática" (`auto_reply`) | `chat_send_autoreply_message(text=…)` → POST `v2.sellerchat.send_autoreply_message`, corpo como o do `send_message`. **A permissão não foi testada**: o roteiro 4a (corpo vazio, UMA chamada, sem renovar token) diz se há; só com o OK do Eduardo. Só é chamado com `ATENDIMENTO_AUTOMACOES_SHOPEE_AUTO_REPLY`. **O formato do corpo NÃO foi medido** (o 4a não o testa): o roteiro 4c (UM envio real para uma conta da equipe) confirma o formato e se o `message_id` devolvido é o que a leitura grava. Errado, a Shopee responde `error_param` e o TEXTO não sai — mas no pedido recebido e no entregue o cartão já saiu antes: a linha vira `revisar` (`parte_2`) e o disjuntor volta a regra para `simular` (`parte_falhou`), uma vez por loja (§7.6, item 10). | – | – |
+
+No adaptador do atendimento, `shopee.enviar_parte(…, parte, to_id=, pedido=,
+auto_reply=)` manda UMA parte — com conversa (o `to_id` é o comprador dela) ou
+sem (o `to_id` dado) — com a mesma régua de resultado do `enviar_texto` (recusa
+com código = não saiu; timeout/erro sem código = ambíguo, `revisar`).
 
 Sem `auto_reply`, as campanhas (pedido recebido, entregue, pós-conclusão,
 convite e dúvida) sairiam como mensagem **normal**: contariam como resposta na
@@ -979,35 +1081,69 @@ figurinha) — mais de 5 mensagens normais, e a mensagem da equipe (NF, rastreio
 poderia ficar travada para ele. E o `config.py` já anota que a FAQ do Chat API
 proíbe "proactive order updates". Por isso, **sem o `auto_reply` confirmado, as
 campanhas não vão para `enviar`** (§7.1) — e confirmado quer dizer a chave E o
-envio por `auto_reply` no adaptador: hoje o adaptador só manda texto normal, e
-a chave sozinha não basta. **Antes de liberar as campanhas** (pendência da
-revisão): a volta da nossa resposta automática pela leitura chega como
-`autor/origem = sistema` (`status = auto_reply`) e sem a marca; o comparador a
-aceitaria como "o Duoke mandou" (`_de_fora` aceita `sistema` sem a marca) — um
-acerto falso, e o disjuntor dispararia com "Duoke ainda ligado". A adoção
-dessa volta (pelo id da plataforma ou pelo texto, pondo a marca) tem que vir
-junto com o `enviar_auto_reply`, com um teste do comparador. Se der `auto_reply`, a mensagem volta
-na leitura como `autor = 'sistema'`, e a adoção precisa aceitar isso (§7.4).
+envio por `auto_reply` no adaptador (`enviar.auto_reply_no_adaptador`: a
+`enviar_parte(auto_reply=True)` do adaptador da Shopee, pelo
+`send_autoreply_message`, existe desde 05/10). Com a chave desligada a campanha
+não sai, com o adaptador pronto ou não; sem o envio por `auto_reply` no
+adaptador, também não — nunca como mensagem normal (`sem_auto_reply`). Com os
+dois, o texto volta na leitura como `autor = 'sistema'`, e a leitura o ADOTA
+(§7.4, item 4: pelo id ou pelo texto, pondo a marca) — o comparador não o conta
+como "o Duoke mandou" nem dispara o disjuntor. O cartão e a figurinha continuam
+normais, como no Duoke (contam no limite da Shopee como contam hoje).
 
-### 7.4 Sem conversa no DaVinci (pedido recebido, entregue, pós-conclusão) — pendente
+### 7.4 Sem conversa no DaVinci (pedido recebido, entregue, pós-conclusão) — feito em 05/10
 
-Nesta entrega, a linha sem conversa no modo enviar vira `pulado: sem_conversa`
-(e a decisão já acha a conversa pelo pedido ligado, pelo cartão do pedido dos
-últimos 45 dias ou pelo comprador do índice). O desenho abaixo é a próxima etapa:
+A linha do pedido acha a conversa, na descoberta e de novo na decisão, pelo
+pedido ligado, pelo cartão do pedido dos últimos 45 dias, pelo comprador do
+índice e — novo — pelo **usuário do comprador no escrow** (quem escreveu à loja
+antes de comprar: 11% dos pedidos aos 5 min). O nome é só a pista (revisão de
+05/10): a conversa achada por ele só vale se o comprador dela for o do pedido no
+índice ou, sem o índice ainda, se o nome for de UM comprador só na loja (dois =
+ambíguo, nenhuma). E na decisão, a linha do pedido cuja conversa é de OUTRO
+comprador que o do índice perde a conversa e segue pelo `to_id` (log
+`atendimento_automacoes_conversa_de_outro_comprador`). Medido (SELECT, 30 dias):
+2.941 de 2.941 casam, nenhum usuário com dois compradores na mesma loja —
+hoje é só a rede. Sem conversa, no modo enviar:
 
-1. Procura a conversa Shopee da loja com `comprador_id` = o comprador do pedido
-   (pelo índice ou pelo `get_order_buyer`, que só roda no modo enviar).
-2. Achou → `enviar_automatica(conversa, …)`.
-3. Não achou → o adaptador manda pelo `to_id` (`shopee.enviar_ao_comprador`), a
-   Shopee devolve `conversation_id` e `message_id`, e o motor faz
-   `gravar.upsert_conversa(externo_id=conversation_id, comprador_id, pedido_marketplace=sn)`
-   e grava as mensagens com `externo_id = message_id`, `origem = davinci_auto` e
-   `status = enviada`. A leitura seguinte acha o `externo_id` e não duplica.
-   Nesse caminho não há linha em voo da conversa, porque a conversa ainda não
-   existe; quem trava é o registro `enviando` com a chave única.
-4. A adoção pela leitura passa a aceitar `autor = 'sistema'` quando a linha
-   esperando é `davinci_auto`, para o caso do `auto_reply`. O primeiro critério
-   continua sendo o `externo_id`.
+1. O `to_id` é o comprador do pedido que o DaVinci **já tem**: o índice
+   (`atendimento_pedidos_comprador`), relido a cada rodada. **Nenhuma chamada
+   nova** — o `get_order_buyer` não é usado. Sem ele ainda, a linha **espera**
+   (`agendado`) até 90 min depois do `devido_em` (`ESPERA_COMPRADOR`: o índice
+   roda no :22 com janela de 2 h); passou, `pulado: sem_comprador`. Efeito: o
+   pedido recebido de quem nunca escreveu à loja (~88%) sai de 5 a ~65 min
+   depois do Bling (~30 min em média), não aos 5 min do Duoke. O que falta para
+   sair aos 5 min (decisão do Eduardo, §12 item 9): o índice rodar de 10 em 10
+   min para os pedidos novos (as mesmas chamadas de hoje, mais vezes) **ou** 1
+   `get_order_detail` por pedido na hora do envio (~150 por dia).
+2. `enviar.enviar_automatica_sem_conversa(integration_id, codigo, to_id, pedido,
+   parte, …)`: as mesmas travas (freio único, chave nova,
+   `shopee_mensagens_comprador`, `auto_reply` das campanhas, a regra RELIDA em
+   `enviar`), só Shopee e só as automações do pedido. Manda pelo `to_id`; a
+   Shopee devolve `conversation_id` e `message_id` (medido nos 9 envios da senha
+   da devolução: os dois sempre voltam, e são os mesmos ids que a leitura
+   grava). Com eles: `gravar.upsert_conversa(externo_id=conversation_id,
+   comprador_id, comprador_nome do escrow, pedido_marketplace=sn)` e a mensagem
+   com `externo_id = message_id`, `origem = davinci_auto`, a marca e `status =
+   enviada`. Se a leitura chegou antes (corrida), a mensagem dela é **adotada**
+   (ganha a origem e a marca). Sem `conversation_id` na resposta, ou com o banco
+   falhando ao gravar depois de a parte sair: saiu, mas não dá para ligar —
+   `revisar` (nunca retentada). Sem conversa não há linha em voo: quem trava é
+   o registro `enviando` com a chave única.
+3. As outras partes vão pela conversa que nasceu (`enviar_automatica`).
+4. A leitura reconhece o que saiu: pelo `externo_id` (o normal); sem ele,
+   **adota** a nossa linha — o texto pelo texto, inclusive quando volta como
+   `autor = 'sistema'` (o `auto_reply`; aí só uma linha `davinci_auto`, nunca a
+   resposta de uma pessoa); o cartão e a figurinha (sem texto) pelo pedido / pela
+   figurinha da marca (`gravar.parte_da_plataforma`). Assim nada volta sem a
+   marca — o comparador nunca confunde o nosso com o Duoke (nem dispara o
+   disjuntor) e a régua o vê como automático. **A conferir no 1º envio**: o id
+   que o `send_autoreply_message` devolve não foi medido (só o do
+   `send_message`). Se não for o mesmo da leitura, a volta do texto (autor
+   `sistema`) não é adotada — a adoção pelo texto só pega a nossa linha sem
+   `externo_id` —, fica sem a marca e o comparador a contaria como do Duoke e
+   dispararia o disjuntor: falha segura, mas tiraria a automação do ar à toa. O
+   roteiro 4c com `--conferir` mede isso antes de ligar.
+5. O `{comprador}` sem conversa vem do usuário do escrow (o mesmo `to_name`).
 
 ### 7.5 A régua reconhece a mensagem do DaVinci
 
@@ -1064,7 +1200,11 @@ Nesta entrega, a linha sem conversa no modo enviar vira `pulado: sem_conversa`
 
 1. `UNIQUE (automacao, integration_id, chave)` + `ON CONFLICT DO NOTHING`.
 2. Uma rodada por vez: trava `atendimento:automacoes:rodada` no Redis, TTL 110 s
-   com o cron a cada 2 min.
+   com o cron a cada 2 min. Nenhum envio NOVO começa depois de 50 s da rodada
+   (`ORCAMENTO_ENVIO_S`, revisão de 05/10): a linha fica `agendado` para a
+   próxima (log `atendimento_automacoes_envio_adiado`), para o timeout do arq
+   (110 s) não cortar um envio entre o cartão e o texto. O modo seco não tem
+   prazo.
 3. A condição "já mandado" é conferida de novo na decisão, não só na descoberta.
 4. O registro `enviando` é commitado antes da plataforma. Um `enviando` com mais
    de 10 min vira `revisar`, como o `aposentar_envios_presos`, e **nunca** se
@@ -1077,14 +1217,47 @@ Nesta entrega, a linha sem conversa no modo enviar vira `pulado: sem_conversa`
    espera a leitura da loja volta igual e seria escolhida de novo: sem o limite
    por regra, a fila parada de uma loja segurava o menu das outras até vencer);
    o resto fica para a próxima.
-7. Recusa temporária (`conversa_ocupada`, `envio_em_andamento`): continua
-   `agendado` e tenta na rodada seguinte, até a validade. Recusa com código da
-   plataforma → `falhou`, sem retentar.
+7. Recusa temporária (`conversa_ocupada`, `envio_em_andamento`) na 1ª parte:
+   continua `agendado` e tenta na rodada seguinte, até a validade; da 2ª em
+   diante, tenta de novo na hora (§7.2). Recusa com código da plataforma →
+   `falhou`, sem retentar.
 8. Operação: o INSERT de muitas linhas vai em lotes de 500 (a Logística
    reinsere ~600 pedidos de 3 dias a cada 10 min; o asyncpg recusa mais de
    32.767 parâmetros, ~1.700 linhas — a rodada inteira cairia); o registro
    guarda 90 dias (a limpeza roda às 3h30 de Brasília, 5.000 por vez, nunca
    `agendado`/`enviando`).
+9. **Reconferência na hora de enviar** (05/10, §13.4): logo antes de marcar
+   `enviando`, o motor commita e relê do banco TUDO o que a decisão usa, só
+   para aquela linha (`automacoes._contexto` + `_avaliar`, as mesmas funções do
+   lote): devolução/reclamação aberta OU encerrada, o Bling no fluxo de
+   devolução, o cancelamento, a pessoa que respondeu (onde a regra pede), o
+   Duoke que mandou depois do gatilho (conversa e — novo — pedido, pelo cartão
+   do Duoke), a janela da Shopee, a validade e o teto (recontado no banco).
+   Mudou → `pulado` com o motivo de sempre (e o disjuntor, se foi o Duoke); a
+   regra que saiu de `enviar` → `simulado`. O log `atendimento_automacoes_reconferencia`
+   diz o motivo. Entre a leitura do lote e o envio podem passar minutos (até
+   200 linhas por rodada, até 90 s por parte).
+10. **A mensagem pela metade** (revisão de 05/10): o pedido recebido e o
+   entregue são [cartão, texto] — o cartão sai como mensagem normal, o texto
+   como `auto_reply` (formato não medido). Se uma parte não sai DEPOIS de outra
+   ter saído (recusa da plataforma, ambíguo, recusa nossa como a conversa
+   bloqueada, a conversa ocupada depois das 3 tentativas, a Shopee que aceitou
+   sem `conversation_id`, o banco que falhou depois de a parte sair), o
+   comprador ficou só com o cartão: a linha vira `revisar` (`motivo = parte_N`,
+   o código em `erro`, a pessoa confere) e o **disjuntor** volta a regra para
+   `simular` (`parte_falhou`) — acontece UMA vez por loja, não em todo pedido.
+   As outras linhas da mesma rodada já veem a regra em `simular`. Exceção: o
+   operador desligando no meio (as chaves, a regra fora de `enviar`) dá
+   `revisar` sem disjuntor — nada mais sai mesmo. Na campanha da Shopee, a
+   recusa da plataforma que não passa sozinha (`error_param`,
+   `error_permission`, `api_suspended`, `error_forbidden`) já na 1ª parte (o
+   texto da dúvida 26 h, por exemplo) também dispara (`plataforma_recusou`):
+   nada saiu, mas todo comprador daria o mesmo erro. Na mensagem normal (menu,
+   opções, "aguarde") a 1ª parte recusada só vira `falhou`. O processo morto
+   entre as partes (deploy, kill) continua no item 4: `enviando` → `revisar`
+   depois de 10 min, sem disjuntor (é raro e não se repete por pedido; o prazo
+   do item 2 tira o corte pelo timeout da rodada). Na ativação, mesmo assim: o
+   4c antes, e a 1ª campanha em `enviar` numa loja só, olhando o 1º envio.
 
 ### 7.7 A correção do `ia._humano_respondeu_recente`
 
@@ -1133,8 +1306,10 @@ O mesmo `dependencies=[Depends(_so_admin)]` dos outros routers do atendimento
 (só os admins de `ATENDIMENTO_USUARIOS`; o `test_atendimento_so_admin` cobre as
 rotas novas sozinho), leitura com `_view`, mudança com `_edit`, escopo por
 equipe. Registrado no `main.py`. Nenhuma rota devolve texto de comprador; o
-texto que aparece é o da REGRA (o modelo da loja) e o da prévia com o nome de
-exemplo `maria.silva`.
+texto que aparece é o da REGRA (o modelo da loja), o da prévia com o nome de
+exemplo `maria.silva` e — só na prévia de UMA linha, que a pessoa abre (§8.3) —
+o texto que sairia com o usuário do comprador preenchido e as mensagens da LOJA
+que o Duoke mandou de verdade.
 
 **`GET /api/atendimento/automacoes?plataforma=shopee|tiktok|ml&dias=7`**
 
@@ -1166,6 +1341,11 @@ exemplo `maria.silva`.
   }]
 }
 ```
+
+Desde 05/10 (noite): cada automação traz também `so_simulacao` (o código do
+porquê, ou `null`) e `so_simulacao_texto` (a frase); os `placeholders` são os da
+automação (o carrinho tem `{valor_cupom}`); e o `por_que_nao_enviar` das que só
+simulam começa por `so_simulacao`.
 
 `CONTA` = `{total, simulado, enviado, pulado, falhou, agendado, pendente,
 bateu_mandou, bateu_nao_mandou, so_davinci, so_davinci_2d, so_duoke, combinada,
@@ -1202,7 +1382,8 @@ Respostas de erro (`detail.code`):
 - 409 ao pôr em `enviar`: `envio_desligado` (a chave `ATENDIMENTO_AUTOMACOES_ENVIO`),
   `envio_geral_desligado`, `campanha_sem_auto_reply`, `shopee_mensagens_desligadas`,
   `loja_sem_acesso`, `sem_texto` (com `motivos` = a lista toda);
-- 422: `confirmar_duoke` (falta "desliguei no Duoke"), `criterio_nao_passou`
+- 409 também `so_simulacao` (a automação só simula, §15 — o primeiro da lista);
+- 422: `parte_invalida` (a parte `resposta_publica` fora da resposta da avaliação), `confirmar_duoke` (falta "desliguei no Duoke"), `criterio_nao_passou`
   (o critério desta loja em 7 dias não passou e falta `troca_sem_criterio`; com
   `motivos` = o `por_que_nao` da loja), `texto_invalido` (com
   `motivos` do validador, renderizado com o nome de exemplo e sem ele),
@@ -1225,8 +1406,22 @@ mantidas}`.
 
 **`POST /api/atendimento/automacoes/previa`** `{automacao, integration_id?, partes?}`
 
-Renderiza com o nome de exemplo e devolve `{partes, sem_nome, motivos,
-comprador_exemplo}`. Não envia nada.
+Renderiza com o nome de exemplo (e o valor de exemplo das lacunas próprias:
+`{valor_cupom}` = 20) e devolve `{partes, sem_nome, motivos, comprador_exemplo}`.
+Não envia nada. As partes aceitam `resposta_publica` (a resposta da avaliação),
+validada com o limite dela (500).
+
+**`GET /api/atendimento/automacoes/registro/{registro_id}/previa`** (§8.3)
+
+`{linha (= a do registro), automacao {codigo, nome, plataforma, tipo,
+so_simulacao, so_simulacao_texto}, davinci {sairia, de_verdade, estado, motivo,
+motivo_texto, hora, hora_tipo (saiu|sairia|devido), comprador, valores, partes
+[PARTE], motivos_validador, versao_regra, versao_da_linha}, duoke {estado,
+comparacao (bateu|so_davinci|so_duoke|combinada|pendente|null), diferenca_s, em,
+janela_de, janela_ate, partes [PARTE]}}`, com `PARTE = {tipo
+(texto|cartao_pedido|figurinha|resposta_publica|outro), texto, pedido,
+figurinha, imagem_url, em, diferenca_s (− a nossa hora), principal, nota}`.
+Fora da equipe ou linha que não existe: 404 `registro_nao_encontrado`.
 
 ### 8.2 Tela (`components/AtendimentoAutomaticas.vue`; aba `automaticas` em `pages/atendimento.vue`) — implementada
 
@@ -1294,10 +1489,17 @@ comprador_exemplo}`. Não envia nada.
   de automação, loja, estado e comparação (bateu, só DaVinci, só Duoke, com
   alerta, diferença combinada, ainda conferindo). Sem filtro, mostra todas as
   plataformas (o chip diz qual). Cada linha: quando, automação e loja (com a
-  versão da regra), para quem (conversa, comprador ou pedido nº), o estado (e o
-  motivo), o que o Duoke fez (e quanto antes ou depois), a comparação, o
-  alerta e a diferença combinada — **nenhum texto**, nem do comprador nem o
-  renderizado. A conversa abre na Caixa.
+  versão da regra), para quem (conversa, comprador, avaliação ou pedido nº), o
+  estado (e o motivo), o que o Duoke fez (e quanto antes ou depois), a
+  comparação, o alerta e a diferença combinada — **nenhum texto**, nem do
+  comprador nem o renderizado. A conversa abre na Caixa; o olho abre a
+  **prévia** da linha (§8.3).
+- **Só simulação** (§15): o selo "só simulação" no cabeçalho da automação (o
+  porquê no title) e o Enviar travado com a frase do porquê em toda loja.
+- **Editor**: a resposta pública da avaliação é uma caixa de texto própria
+  ("Resposta pública (na avaliação)", limite 500), e o texto do chat vira
+  "Mensagem no chat"; o `{valor_cupom}` do carrinho aparece nas lacunas e é
+  contado com o valor de exemplo (20).
 - Carregando, erro ("tentar de novo"; erro da atualização automática não apaga
   a tela) e vazio (sem loja da plataforma; registro vazio diz se o motor está
   desligado). A conta se atualiza sozinha a cada 1 min com a aba visível; o
@@ -1311,7 +1513,7 @@ comprador_exemplo}`. Não envia nada.
   filtra a origem; a API aceita a nova); o "tentar de novo" à mão continua só
   para pessoa/IA — a automática é da regra, não de quem está na conversa.
 - **Teste** `apps/web/tests/atendimento-automaticas.cjs`: o contrato campo a
-  campo com o backend (as 6 rotas, cada saída, o corpo do PATCH, os códigos de
+  campo com o backend (as 7 rotas — a 7ª, a prévia da linha, desde 05/10 à noite —, cada saída, o corpo do PATCH, os códigos de
   erro e de "por que não enviar", estados, Duoke, gatilhos, condições, filtros
   do registro), as regras puras, a tela com a API falsa (o que ela chama e que
   nunca chama nada de envio, o modo e as três travas do Enviar, o editor com a
@@ -1324,6 +1526,46 @@ comprador_exemplo}`. Não envia nada.
   Typecheck e build numa cópia isolada: só os 7 erros antigos.
 
 ---
+
+### 8.3 A prévia da linha: "como o cliente receberia" × o Duoke (05/10, noite)
+
+Eduardo: "deixe só pra mostrar que ele enviaria mesmo corretamente". Em cada
+linha do registro, o olho abre, embaixo dela, um quadro com dois lados, no
+desenho da conversa (balão azul da loja à direita, o cartão do pedido branco
+dentro do balão, a figurinha como imagem, a resposta pública da avaliação num
+quadro próprio):
+
+- **DaVinci** — as partes EXATAS que sairiam, montadas pela API NA HORA
+  (`services/atendimento/automacoes_previa.py`): a regra de agora renderizada
+  como o motor renderiza (`automacoes_catalogo.renderizar`, o mesmo validador),
+  com o usuário do comprador (o da conversa; sem conversa, o do escrow do
+  financeiro; na avaliação, o da avaliação), o cupom pela faixa do valor do
+  pedido e o tipo da loja, o cartão com o nº do pedido (no TikTok, que não
+  numera o aviso, o da conversa — o que o DaVinci sabe — e, sem ele, o do
+  cartão do Duoke, com a nota) e a
+  figurinha (com a imagem que a Shopee mostra, quando o Duoke mandou a mesma).
+  A hora é a da decisão ("sairia"), a das mensagens que saíram ("saiu", no modo
+  enviar: aí as partes são as mensagens de verdade, `mensagem_ids`) ou a
+  prevista (linha agendada). A linha pulada mostra o porquê e, apagado, o que
+  sairia se a regra deixasse. Se a regra mudou depois da decisão, o selo diz as
+  duas versões.
+- **Duoke** — o que ele mandou DE VERDADE: a mensagem que o comparador casou e
+  as que ele mandou junto (a até 10 s, só da loja, de fora: o cartão do pedido,
+  o nome sozinho, a figurinha), cada uma com a hora e a diferença para a nossa
+  (o `content` do `ORDER_CARD` do TikTok vem como JSON EM TEXTO — 289 de 289 em
+  7 dias —, lido como o `tiktok._conteudo` lê; o nº sai dele);
+  na avaliação, também a resposta pública gravada (a hora é a da Shopee menos
+  os 59 min, com a nota). Sem mensagem: o porquê ("não mandou", com a janela
+  procurada; "ainda conferindo").
+- No topo, a comparação da linha (bateu / só DaVinci / só Duoke / combinada).
+
+**Nada é gravado**: a rota só lê (o registro continua sem texto nenhum — a
+prévia é montada a cada abertura), não chama plataforma e nunca devolve o texto
+do COMPRADOR (só mensagens da loja e a resposta da loja na avaliação; o texto da
+avaliação, que é do comprador, nunca sai). A mesma trava do /atendimento e o
+escopo da equipe (404 fora dela). A tela só pede quando a pessoa abre; a
+resposta atrasada de uma linha não sobrescreve a da linha aberta depois; trocar
+de plataforma fecha.
 
 ## 9. O motor no código (implementado)
 
@@ -1342,9 +1584,26 @@ comprador_exemplo}`. Não envia nada.
   `atendimento_automacoes` (trava no Redis por schema, 110 s; com o Redis fora,
   não roda). O log da rodada leva as contagens e a duração de cada fase (`ms`).
   "Desde quando o motor roda" fica no Redis (`motor_desde`); desligado, apaga.
+  Desde 05/10 (§13.4): `descobrir_indice` (o entregue/concluído fora da
+  Logística), `_contexto` (tudo o que a decisão lê, relido — o lote e a
+  reconferência usam o mesmo), `_avaliar` (a decisão sobre o contexto),
+  `_reconferir` (antes do envio; na junção, com o horário — §14.5), o Duoke
+  que mandou a automação do pedido (`automacoes_comparar.duoke_dos_pedidos`,
+  a régua do comparador, pelo `_contexto`), `_nomes_do_escrow`/`_conversas_pelo_nome`
+  (o usuário do comprador no escrow) e o `_enviar` de todas as partes, com e
+  sem conversa. Da revisão de 05/10 (§13.5): `_parou` (a parte que não saiu:
+  a mensagem pela metade vira `revisar` + disjuntor), a nova tentativa na hora
+  da 2ª parte, o prazo de envio da rodada (`ORCAMENTO_ENVIO_S`) e a conversa
+  conferida com o comprador do índice.
 - `services/atendimento/automacoes_comparar.py`: `comparar` (pendentes por
   conjunto, só Duoke, disjuntor), `estatisticas`, `resumir`, `somar`.
-- `services/atendimento/enviar.py`: `enviar_automatica` (§7.2).
+- `services/atendimento/enviar.py`: `enviar_automatica` (§7.2; desde 05/10 com
+  `parte` e `pedido`) e `enviar_automatica_sem_conversa` (§7.4).
+- `services/atendimento/shopee.py`: `enviar_parte` (texto, cartão, figurinha,
+  `auto_reply`, com ou sem conversa); `services/marketplaces/shopee.py`:
+  `chat_send_message(order_sn=…|sticker_id=…)` e `chat_send_autoreply_message`.
+- `services/atendimento/gravar.py`: a leitura adota a nossa parte sem texto
+  (`parte_da_plataforma`) e o `auto_reply` que volta como `sistema`.
 - `constantes.py` / `gravar.py`: `ORIGEM_AUTO`, a régua (marca, cartão da
   campanha, opções, textos novos, sem o "bom dia"), `_fechava_a_vez`.
 - `ia.py`: `_humano_respondeu_recente` (§7.7).
@@ -1352,6 +1611,19 @@ comprador_exemplo}`. Não envia nada.
 - `worker.py`: `atendimento_automacoes` em `functions` e no cron dos minutos
   pares, `timeout=110`.
 - `routers/atendimento_automacoes.py` + `main.py` (§8.1).
+- Desde 05/10 (noite, §15): no catálogo, `shopee_nao_pago`, `shopee_avaliacao_boa`,
+  `shopee_avaliacao_ruim` e `tiktok_pedido_recebido` (`so_simular`), a tabela do
+  cupom (`CUPOM_FAIXAS`, `valor_cupom`), a parte `resposta_publica`, as lacunas
+  próprias (`lacunas`, `placeholders_de`) e a assinatura da resposta de avaliação
+  (`assinatura_avaliacao`); no motor, `descobrir_nao_pagos`,
+  `descobrir_avaliacoes`, `descobrir_tiktok_pedidos` e os fatos novos
+  (`pedido_pago`, `total_pedido`, o carrinho do mesmo comprador, a avaliação de
+  agora); no comparador, `_comparar_avaliacoes`, `_so_duoke_avaliacoes` e a
+  diferença `visto_de_hora_em_hora` (`carrinhos_vistos_tarde`: o pedido do
+  carrinho do Duoke sem par e se o DaVinci nunca o viu não pago);
+  `services/atendimento/automacoes_previa.py`
+  (a prévia da linha, §8.3); `enviar.RECUSA_SO_SIMULACAO`; a migration
+  `0371_atendimento_automacoes_simulacao` (só a semente) e a 0366 congelada.
 
 ### 9.1 Testes (feitos)
 
@@ -1398,6 +1670,83 @@ comprador_exemplo}`. Não envia nada.
 - `test_atendimento_migration.py` (0366 × model, a semente e o downgrade),
   `test_atendimento_resposta_automatica.py` (opções, "bom dia", textos novos,
   cartões e marca — Python × SQL).
+- `tests/test_atendimento_automacoes_troca.py` (05/10, 53 — 40 da 2ª leva + 13
+  da revisão): o corpo de cada parte
+  no cliente (cartão, figurinha, texto, `auto_reply`) e o adaptador (`enviar_parte`
+  pelo `to_id`, parte inválida sem chamar, erro sem levantar); o motor mandando
+  sem conversa (cartão antes do texto, conversa nascida com o comprador, o
+  pedido e o usuário do escrow), a leitura que adota (pelo id; sem id, o
+  `auto_reply` como `sistema` e o cartão/figurinha pela marca; nunca a resposta
+  de uma pessoa), o comparador sem "só Duoke" nem disjuntor pelo nosso; espera
+  pelo comprador do índice e `sem_comprador`; a conversa achada pelo escrow; o
+  26 h com a figurinha; o entregue com o nome; sem `auto_reply` nada sai; as
+  travas do envio sem conversa; a corrida com a leitura; o banco que falha
+  depois de a parte sair (`revisar`, nunca de novo); a **reconferência**
+  (devolução encerrada, cancelado, Bling Resolvido, Duoke com disjuntor, teto,
+  pessoa que respondeu — e que, sem mudança, deixa sair); o **índice** como
+  fonte fora da Logística (o pós só de quem o motor viu entregue, a mesma
+  chave da Logística, pedido velho fora, Resolvido = devolução, `sem_logistica`
+  só sem o índice); e **simular nunca chama a plataforma** de novo, nas 5
+  combinações de chave × modo, com os caminhos novos — o envio sem conversa, o
+  `enviar_parte`, o cliente (`send_message`/`send_autoreply_message`) e o
+  `httpx` levantam se chamados, e não nasce mensagem NEM conversa. Da revisão
+  (§13.5): o `auto_reply` recusado depois do cartão (3 pedidos → UM cartão
+  sozinho, a linha `revisar`/`parte_2`, o disjuntor `parte_falhou`, as outras
+  simuladas, nada na rodada seguinte); a conversa ocupada na 2ª parte (passa na
+  nova tentativa; não passa → `revisar` + disjuntor); a Shopee que aceita sem
+  `conversation_id` e o banco que falha depois (não manda o resto, dispara); o
+  operador que desliga no meio (`revisar` sem disjuntor); a campanha recusada
+  na 1ª parte (`plataforma_recusou`) × a mensagem normal recusada (só `falhou`);
+  o mesmo comprador com dois pedidos na rodada (a frase repetida conta como
+  entregue, sem disjuntor); o prazo da rodada (fica `agendado`, sai na
+  próxima); o teto contando o `falhou` com mensagem; a conversa pelo nome de
+  outro comprador (nunca recebe, nem na descoberta), o nome de dois
+  compradores sem o índice (nenhuma) e a conversa gravada de outro comprador
+  (trocada pelo `to_id`).
+- **Da junção (§14.5)**: no motor (+2, 50), a campanha que NÃO sai com o
+  adaptador de verdade pronto e a chave do `auto_reply` desligada (nem com
+  conversa, nem sem; nada vai à plataforma; a tela mostra o adaptador pronto e
+  a chave desligada) e o `auto_reply` pedido a um adaptador sem a
+  `enviar_parte` que o aceite (`sem_auto_reply`, nunca o `enviar_texto`); o
+  falso da resposta automática passou a ser a `enviar_parte(auto_reply=…)`, e o
+  teste "a chave ligada sem o envio por `auto_reply`" usa um adaptador sem ela.
+  Na 2ª leva (+3, 56): a reconferência fora do horário (fica `agendado`, a
+  rodada seguinte anda para as 9h), a reconferência com o mesmo `motor_desde`
+  do lote e o lote medindo o DaVinci sozinho (o corte do modo seco no
+  `_contexto`). Conferido com 10 mutações da junção (todas pegas: o horário na
+  decisão e na reconferência, o `motor_desde` da reconferência, o corte no
+  `_contexto`, o `duoke_dos_pedidos`, a transição, a chave ignorada, o
+  adaptador que "sempre sabe", a trava `sem_auto_reply` e a campanha no motor).
+
+- **As que faltavam e a prévia (05/10, noite, §15)**:
+  `tests/test_atendimento_automacoes_simulacao.py` (12, com banco): o carrinho
+  (o índice como fonte, o cupom da faixa e o tipo da loja, celular abaixo de
+  R$ 1.000, o pago no Bling, sem valor, um por comprador em 24 h no mesmo lote
+  e pelo registro — o de 3 dias atrás não conta, o de 5 h conta —, a condição
+  da regra sobre o padrão, uma vez só), o comparador pelo cartão e o
+  `visto_de_hora_em_hora` (a linha pulada e o "só Duoke" — só com o pedido
+  criado logo antes, sem linha nossa e pago até 2 h depois ou cancelado; o
+  pedido antigo da conversa ou do cartão, o pago tarde e o com linha nossa
+  contam como "só Duoke"; sem cartão, o pedido do comprador no índice); a
+  avaliação (a conversa do comprador, a resposta de pessoa, o comparador pela
+  resposta pública e pelo chat, a resposta do Duoke 18 h depois dentro da
+  janela de 24 h, `nao_mandou` só com a avaliação relida, o "só Duoke" pela
+  avaliação); o pedido recebido do TikTok pelo aviso da TikTok (também o em
+  espanhol, com o "¡"), comparado na conversa, e a prévia dele com o nº do
+  cartão (o `content` em texto) e o pedido da conversa antes do do Duoke; **só
+  simula** com a regra em `enviar` e todas as chaves ligadas (o adaptador nunca
+  é chamado; o `enviar.py` recusa as quatro; o PATCH dá 409 — também na regra
+  que já estava em `enviar`, para qualquer mudança que não a tire de lá; a
+  lista mostra o porquê); a prévia da linha (as
+  partes exatas, o Duoke ao lado com o que vai junto, a figurinha com a imagem,
+  o entregue com o nome dentro, a versão que mudou, nada gravado, nada do
+  comprador, 404 fora da equipe). No catálogo (+): a tabela do cupom, a
+  renderização com o cupom e a lacuna sem valor barrada, a resposta pública com
+  o limite dela, as assinaturas (e que não pegam pessoa), as decisões, a
+  semente e o "só simula". Na migration: a 0366 congelada e a 0371 (só dado,
+  idempotente, não mexe no que existe, o downgrade apaga só as dela). Web: o
+  contrato da prévia campo a campo com o `automacoes_previa.py`, as regras puras
+  e a tela (só abre quando pedem, os balões, o erro, a resposta atrasada, fechar).
 
 ## 10. O que só o painel do Duoke fecha (pendente)
 
@@ -1446,10 +1795,34 @@ desligar nada:
     Se for pessoa usando o modelo, a régua conta essas respostas como
     automáticas (a fila e a IA erram nelas); se for automação, entra no
     catálogo.
+18. **Carrinho (pedido não pago, §15.1)**: de onde vêm os cupons de R$ 5 a 30
+    (cupom da loja? existe em cada loja?) — é a trava do "só simulação"; os
+    pisos que os dados não cercam: o de R$ 150 da mala (um caso só: 152,48 sem
+    cupom; o menor com cupom, 157,23) e o de R$ 2.000 do celular (entre 1.930,
+    R$ 25, e 2.020,88, R$ 30); por que a Kia não tem; e o "um por comprador"
+    (medido: 24 h — nenhum abaixo de 24 h, de novo a partir de 27,1 h; o corte
+    exato fica entre 24 e 27 h). Os ~13% dos celulares e ~30% das malas "sem
+    envio" eram da régua medida por SQL, sem o motor: com o motor de verdade e
+    o índice de hora em hora (a simulação de 7 dias, §15.1), sobram 3 "só
+    DaVinci" em 281 (1,1%). Parte do que a régua contava é o pedido
+    **cancelado antes da 1ª leitura do índice** (12 dos 41 celulares e 6 das 20
+    malas sem envio do Duoke em 14 dias), que o índice também não vê; o resto
+    (cancelado horas depois, pago depois dos 30 min) é do painel.
+19. **Resposta da avaliação (§15.2)**: o atraso configurado (medido ~1h20), se
+    a Aguiar está fora de propósito e se há exclusão (reclamação, devolução).
+20. **"Pedido recebido" do TikTok (§15.3)**: se a TikTok deixa desligar o
+    "Agradecemos pelo seu pedido!" nativo (o comprador recebe os dois) e se vale
+    recriar.
 
 Também pendente, mas fora do painel: o teste do `send_autoreply_message` (§7.3)
 e a importação de 90 dias de pedidos da Shopee (§2.4). As duas mexem em
-produção e só com o OK do Eduardo.
+produção e só com o OK do Eduardo. **Os roteiros estão prontos** (05/10, §13.4 e
+§13.5): `4a_teste_permissao_autoreply.py` (UMA chamada com corpo vazio, sem
+renovar token), `4c_envio_controlado_autoreply.py` (UM envio real para uma conta
+da equipe: o formato do corpo e o id; sem renovar token) e
+`4b_importar_pedidos_shopee_90d.py` (só a etapa de pedidos da importação que já
+existe, retomável e idempotente; renova token pelo caminho do worker), com o
+`LEIAME.md`.
 
 ---
 
@@ -1458,16 +1831,25 @@ produção e só com o OK do Eduardo.
 1. **Feito (05/10):** migration com a semente, models, catálogo, motor com
    descobrir/decidir/comparar, envio atrás das chaves, régua, correção da IA,
    API, tela e testes; as correções da revisão (§14). O backend da 1ª versão
-   já está em produção com o motor ligado em modo seco (§14.1); falta subir as
-   correções e a tela (§14.3).
+   já está em produção com o motor ligado em modo seco (§14.1); as correções e
+   a tela subiram em 15f48c90 (§14.3), também em modo seco.
 2. Uma semana de comparação. Ajustar condições e janelas pelo que só o Duoke ou
    só o DaVinci mandou, e fechar o §10 no painel.
-3. Adaptadores (cartão, figurinha, envio sem conversa, `enviar_auto_reply` se
-   der — com a adoção da volta como `sistema`, §7.3) e `enviar_automatica`,
-   ainda com `ATENDIMENTO_AUTOMACOES_ENVIO=false`.
+3. **Feito (05/10, §13.4):** adaptadores (cartão, figurinha, envio sem conversa,
+   `auto_reply` pela `enviar_parte(auto_reply=True)` — com a adoção da volta
+   como `sistema`, §7.3/§7.4), a reconferência na hora de enviar e o índice para
+   os pedidos fora da Logística, ainda com `ATENDIMENTO_AUTOMACOES_ENVIO=false`.
+   Falta, em produção: os roteiros 4a (permissão do `auto_reply`), 4c (UM envio
+   real para uma conta da equipe) e 4b (90 dias de pedidos), cada um com o OK do
+   Eduardo.
 4. A troca, uma automação e uma loja por vez (§6.6). Começar pelas que só
    respondem conversa: opções na hora, depois menu e "aguarde" da ATV. Depois o
    pedido recebido, o entregue e as campanhas.
+5. **Feito (05/10, noite, §15):** as que faltavam do Duoke — pedido não pago
+   com cupom, resposta da avaliação e "pedido recebido" do TikTok — SÓ EM
+   SIMULAÇÃO (nunca vão para `enviar`; as decisões da §12, itens 12 a 14, dizem
+   o que falta para um dia mandarem), a semente delas (0371) e a prévia "como o
+   cliente receberia" × o Duoke em cada linha do registro (§8.3).
 
 ---
 
@@ -1517,14 +1899,16 @@ produção e só com o OK do Eduardo.
    hora:
    - `ATENDIMENTO_AUTOMACOES_ATIVA=true` depois do deploy (modo seco);
    - a importação de 90 dias de pedidos da Shopee, para o "nunca comprou";
-   - o teste de permissão do `send_autoreply_message` com corpo vazio (e, se
-     passar, `ATENDIMENTO_AUTOMACOES_SHOPEE_AUTO_REPLY=true`);
+   - o teste de permissão do `send_autoreply_message` com corpo vazio (4a) e,
+     se passar, UM envio real para uma conta da equipe (4c: o formato e o id);
+     só com os dois, `ATENDIMENTO_AUTOMACOES_SHOPEE_AUTO_REPLY=true`;
    - mais tarde, `ATENDIMENTO_AUTOMACOES_ENVIO=true` **e** `ATENDIMENTO_ENVIO_ATIVO=true`
      (o freio único).
    - (05/10, revisão) o motor já está ligado em produção (§14.1): confirmar
      que o `ATENDIMENTO_AUTOMACOES_ATIVA=true` foi decisão dele; a
-     `ATENDIMENTO_AUTOMACOES_SHOPEE_AUTO_REPLY` sozinha não libera mais as
-     campanhas (falta o envio por `auto_reply` no adaptador); e rodar o
+     `ATENDIMENTO_AUTOMACOES_SHOPEE_AUTO_REPLY` é a única chave que falta para
+     as campanhas (o envio por `auto_reply` no adaptador já existe; desligada,
+     elas não saem); e rodar o
      `scripts.atendimento_fila_recalcular --gravar` (a fila com a régua nova,
      §7.5) só com o OK dele.
 8. **A sessão do menu depois da opção** (§13.3): quando o comprador volta entre
@@ -1533,6 +1917,42 @@ produção e só com o OK do Eduardo.
    responde a opção na hora) manda. Copiar a sessão do Duoke (e o "re-menu" de
    fim de sessão) ou manter o menu de novo? Hoje: menu de novo — é o que tira o
    menu da Shopee de 99% para 93% de precisão.
+9. **Pedido recebido de quem nunca escreveu à loja (~88%)**: sem chamada nova,
+   ele sai quando o índice traz o comprador — de 5 a ~65 min depois do Bling
+   (~30 min em média), não aos 5 min do Duoke (§7.4). Para sair aos 5 min: o
+   índice de 10 em 10 min para os pedidos novos (as mesmas chamadas, mais
+   vezes) **ou** 1 `get_order_detail` por pedido na hora do envio (~150 por
+   dia). Aceitar o atraso ou escolher um dos dois.
+10. **Cartão e figurinha como mensagem normal**: é como o Duoke manda (só o
+   texto das campanhas vai como `auto_reply`). Contam no limite de mensagens da
+   Shopee como contam hoje. Manter igual ao Duoke (o padrão do código)?
+11. **A mensagem pela metade volta a regra para simular** (revisão de 05/10,
+    §7.6 item 10): o cartão saiu e o texto não → `revisar` e o disjuntor
+    (`parte_falhou`), uma vez por loja. A regra só volta a `enviar` pela tela,
+    por pessoa. O padrão do código é esse (segurança antes de disponibilidade);
+    a alternativa seria insistir no texto na rodada seguinte — o que, com o
+    formato errado, mandaria um cartão sozinho a cada pedido.
+12. **Carrinho (pedido não pago com cupom, §15.1)**: hoje só simula. Para um
+    dia mandar: (a) confirmar no painel que o cupom de cada faixa existe em cada
+    loja (senão a mensagem promete um desconto que não existe); (b) aceitar que
+    o DaVinci sai de ~30 a ~60 min depois do Duoke (o índice de hora em hora) —
+    ou pôr o índice de 10 em 10 min para os pedidos não pagos (as mesmas
+    chamadas, mais vezes); (c) a Shopee já manda sozinha um cupom 24 h depois
+    (337 por semana): o comprador recebe os dois, como hoje.
+13. **Resposta da avaliação (§15.2)**: hoje só simula. Mandar exige liberar de
+    propósito a resposta PÚBLICA automática (hoje "só pessoa responde
+    avaliação"), só para os dois textos fixos — ou deixar a pública com a
+    pessoa e automatizar só o chat.
+14. **"Pedido recebido" do TikTok (§15.3)**: hoje só simula. Mandar exige abrir
+    a conversa e o cartão do pedido pela API da TikTok (o DaVinci não tem), e a
+    própria TikTok já manda o "Agradecemos pelo seu pedido!" na mesma hora:
+    vale recriar?
+15. **As regras medidas no carrinho** (§15.1): um por comprador em **24 h**
+    (com o anterior a menos de 24 h o Duoke não mandou — 0 de 16 —, a partir de
+    27,1 h mandou de novo — 26 vezes em 14 dias) e os pisos de R$ 150 na mala e
+    de R$ 2.000 no celular, que os dados não cercam (um caso só abaixo de
+    R$ 157; nenhum entre 1.930 e 2.020,88). Ficam assim até o painel dizer
+    outra coisa.
 
 ---
 
@@ -1544,7 +1964,7 @@ Tudo da §9: migration 0366 com a semente, models, catálogo puro, motor (cron
 nos minutos pares, trava no Redis, duração por fase no log), gatilhos das três
 fontes, registro, modo seco, comparador (com o "só Duoke", as diferenças
 combinadas, os alertas e o disjuntor), o envio atrás das chaves (`enviar_automatica`,
-só texto em conversa existente), a régua (marca `davinci_auto`, cartão da
+só texto em conversa existente — o resto veio na 2ª leva, §13.4), a régua (marca `davinci_auto`, cartão da
 campanha, opções, textos novos, sem o "bom dia"), a correção do
 `ia._humano_respondeu_recente`, o Histórico (registro fora, regras dentro) e a
 API da aba (§8.1). Os testes da §9.1 passam no Python 3.14 e no 3.12. A bateria
@@ -1707,6 +2127,181 @@ Bling 20 ms, Logística 26 ms a cada 10 min, decidir 22 ms); a passada do
 comparador, ~12 ms por rodada (a cada 30 min, na simulação). Em produção o log da rodada (`atendimento_automacoes_tick`) traz o `ms`
 de cada fase.
 
+### 13.4 Segunda leva (05/10, noite): o que faltava antes da troca
+
+Eduardo, 05/10: "então pode também fazer ali o que falta antes da troca; o fora
+desta leva por enquanto não". Fora desta leva: carrinho com cupom, resposta de
+avaliação, pedido recebido do TikTok e opção 4. Tudo atrás das chaves que já
+existem — nada sai com `ATENDIMENTO_AUTOMACOES_ENVIO` ou `ATENDIMENTO_ENVIO_ATIVO`
+desligadas (o teste de "simular nunca chama a plataforma" roda de novo com os
+caminhos novos). Produção só por SELECT, sem texto de comprador; nenhuma chamada
+a plataforma. **Sem migration**: o `to_id` vem do índice que já existe, a parte
+vai na marca do payload, e a fonte nova é o índice.
+
+**1. Envio da Shopee sem conversa e as partes que faltavam** (§7.2–§7.4).
+
+- Formatos, pela verdade dos payloads que o Duoke manda (7 dias, só as chaves):
+  cartão `message_type=order`, `source=openapi`, `status=normal`,
+  `content{order_sn, shop_id, card_source}` — 1.940; figurinha `sticker`,
+  `openapi`, `normal`, `content{sticker_id, sticker_package_id, image_url}` —
+  0007 805, 0028 158, 0012 6; os textos das campanhas `text`, `openapi`,
+  `auto_reply`, `message_option=129` (convite 1.190, pedido recebido 1.031,
+  dúvida 2 h 838, 26 h 806, entregue 632, pós 323); o menu `normal`,
+  `message_option=0`. O `send_message` devolve `conversation_id` e `message_id`
+  numéricos (9 de 9 envios da senha da devolução; os 2 da última semana casam
+  com a conversa e a mensagem que a leitura gravou).
+- Cliente: `chat_send_message(order_sn=…)` (cartão), `(sticker_id=…,
+  sticker_package_id=…)` (figurinha) e `chat_send_autoreply_message(text=…)`.
+  Adaptador: `shopee.enviar_parte` (uma parte, com ou sem conversa, a mesma
+  régua de resultado). `enviar.enviar_automatica` manda qualquer parte numa
+  conversa; `enviar.enviar_automatica_sem_conversa` manda pelo `to_id` e grava a
+  conversa e a mensagem que a Shopee devolve (adotando a da leitura, se ela
+  chegou antes). O texto das campanhas vai como `auto_reply`; o cartão e a
+  figurinha como mensagem normal — como o Duoke (§12, item 10).
+- Motor: `_enviar` manda TODAS as partes na ordem da regra (pedido recebido e
+  entregue: cartão → texto; dúvida 26 h: texto → figurinha). Sem conversa, a
+  1ª parte sai pelo `to_id`, a linha ganha a conversa nova e as outras partes
+  vão por ela. A linha que era `pulado: sem_conversa` agora decide com o `to_id`.
+- O `to_id`, de onde o DaVinci já tem (§2.2): a conversa do pedido (pedido
+  ligado, cartão, comprador do índice e — novo — o usuário do comprador no
+  escrow do financeiro, `marketplace_order_financials.raw.escrow.buyer_user_name`,
+  que é o `to_name` da conversa) ou o comprador do índice. **O que falta**: aos 5
+  min, só 11–12% têm conversa e o índice (de hora em hora) quase nunca tem o
+  comprador; sem chamada nova, a linha espera o índice até 90 min
+  (`ESPERA_COMPRADOR`) e passa a `pulado: sem_comprador` depois. O pedido
+  recebido de quem nunca escreveu sai, então, de 5 a ~65 min depois do Bling.
+  Para os 5 min: índice de 10 em 10 min para os pedidos novos, ou 1
+  `get_order_detail` por pedido no envio (§12, item 9). O `{comprador}` sem
+  conversa vem do escrow.
+- A janela da Shopee continua a mesma (o comprador falou em 7 dias ou o pedido
+  tem até 30 dias); sem conversa vale a do pedido.
+- A volta: pelo `externo_id`; sem ele, a leitura adota a nossa linha pelo texto
+  (o `auto_reply` volta como `sistema` — só linha `davinci_auto`, nunca a de uma
+  pessoa) e o cartão/figurinha pela marca (`gravar.parte_da_plataforma`). Tudo
+  volta como `davinci_auto` com a marca: a régua o vê como automático e o
+  comparador nunca o toma pelo Duoke (nem dispara o disjuntor) — o teste prova.
+
+**2. A reconferência na hora de enviar** (§7.6, item 9). Logo antes de marcar
+`enviando`, o motor commita e relê do banco, só para aquela linha, tudo o que a
+decisão usa (`_contexto` + `_avaliar`, as mesmas funções do lote): devolução ou
+reclamação aberta ou encerrada, o Bling no fluxo de devolução, cancelamento, a
+pessoa que respondeu (onde a regra pede), o Duoke que mandou, a janela, a
+validade e o teto (recontado). Mudou → `pulado` com o motivo; o Duoke → também o
+disjuntor. Achado e corrigido junto: **a linha do pedido (pedido recebido,
+entregue, pós) não conferia "o Duoke já mandou" no modo enviar** (o
+`duoke_depois` só vinha da conversa) — agora vem pelo cartão do Duoke ou pela
+conversa do pedido (na junção, a mesma régua do comparador:
+`automacoes_comparar.duoke_dos_pedidos`, §14.2 item 1 e §14.5), no lote e na
+reconferência; sem isso, o entregue rearmado
+na troca (§6.6) sairia em dobro com o lote da madrugada do Duoke. Sobre os 2
+alertas da simulação (entregue para quem devolveu, a devolução chegando depois
+da decisão): a reconferência pega o que muda entre a decisão e o envio, e o
+Bling no fluxo de devolução (Aguardando Devolução, Resolvido…) passou a contar;
+a devolução aberta DEPOIS do envio não tem como ser prevista — o entregue do
+DaVinci sai das 9h às 20h, e o do Duoke de madrugada, quando ela às vezes já
+existe. Continua sendo o caso a olhar no comparador antes de trocar o entregue.
+
+**3. Pedidos fora da Logística** (§2.3). Medido de novo: a perda de "4%" era o
+retrato de pedidos que viraram Resolvido depois de entregues; na semana de
+28/09, nenhum pedido não cancelado ficou fora da Logística. Ainda assim, a
+fonte existe agora: `descobrir_indice` (junto da Logística, a cada 10 min) cria
+o entregue (`TO_CONFIRM_RECEIVE`) e o pós (`COMPLETED`) dos pedidos que NÃO
+estão na Logística, pelo índice (`atendimento_pedidos_comprador`, linha
+atualizada nas últimas 6 h, pedido de até 30 dias). O evento é o
+`atualizado_em` do índice — a ÚLTIMA vez que o DaVinci gravou a linha (o job de
+hora em hora, a leitura de uma conversa, a importação/4b), não a hora em que o
+status mudou (medido na revisão, 214 pedidos nas duas fontes: só 11 a até 1 h
+da Logística, mediana 13,4 h); o pós só nasce de pedido que
+o motor já viu entregue (a linha do índice que a leitura de uma conversa
+reescreve semanas depois não vira pós velho); a mesma chave da Logística
+(`pedido:<sn>`) — nunca duas linhas. Na decisão, fora da Logística, o status é
+o do índice. O comparador só marca `sem_logistica` quando nem a Logística nem
+o índice têm o status. O que sobra sem fonte: 0 a 1 pedido por semana.
+
+**4. Os roteiros dos dois passos de produção** (prontos, NÃO executados; no
+scratchpad da sessão, `troca/roteiros/`, com o `LEIAME.md`):
+
+- `4a_teste_permissao_autoreply.py`: UMA chamada ao `send_autoreply_message` com
+  corpo vazio (sem `to_id`, não entrega a ninguém), de dentro do container da
+  api, com o cliente do código **sem renovar token** (sem o callback, sem o
+  `_request`/`_call`; token vencendo → para sem chamar). Diz "permissão ok, corpo
+  inválido" × "sem permissão" × "a operação não existe" × inconclusivo. Testado
+  aqui com a Shopee simulada.
+- `4b_importar_pedidos_shopee_90d.py`: só a etapa de pedidos da Shopee da
+  importação que já existe (`importar.py`), 90 dias, com o teto por minuto, a
+  trava de uma por vez, a retomada pelo Redis e a cobertura marcada; idempotente
+  (upsert) e com contagem (índice antes/depois por loja). Tamanho medido: 8.493
+  pedidos em 90 dias em 14 lojas, 3.119 já no índice; ~2.400 chamadas, ~40 min
+  a 60/min. Testado aqui contra a importação de verdade (banco de teste).
+
+**Testes**: `test_atendimento_automacoes_troca.py` (40, §9.1). A bateria
+`tests/test_atendimento_*.py` + `test_historico_*` + `test_shopee_client.py` +
+`test_devolucao_mensagem_comprador.py` passa inteira no Python 3.14 (2.079 =
+as 2.039 do `origin/main` puro, f4574e72, + as 40 novas) e no 3.12 (2.078; a
+única falha, `test_cliente_do_sdk_sem_nova_tentativa_e_sem_ler_o_ambiente`,
+falha igual no `origin/main` com o 3.12), sem falha nova. Testes de mutação: sem
+a reconferência, 6 dos 7 testes dela falham; sem a adoção, 2; sem o índice, 7;
+com o modo forçado para enviar, o "simular nunca chama" pega.
+
+**Limites desta leva**: o envio sem conversa é só da Shopee (no TikTok e no ML
+as automações respondem conversa, então sempre têm); o formato do
+`send_autoreply_message` se confirma com o roteiro 4c (o envio controlado,
+§13.5) — sem ele, no 1º pedido o cartão sai e o texto não (`revisar` e o
+disjuntor, uma vez por loja); o evento do índice é aproximado (a última vez
+que o DaVinci gravou a linha); o rótulo da origem `davinci_auto` na conversa
+(web) fica para a junção com a tela "Automáticas".
+
+### 13.5 Revisão da 2ª leva (05/10, noite): o envio que para no meio
+
+A revisão independente da 2ª leva achou um problema alto e alguns baixos.
+Corrigidos no mesmo worktree, sem migration, tudo atrás das mesmas chaves (o
+"simular nunca chama a plataforma" continua passando).
+
+1. **O cartão sozinho em todo pedido (alto).** O pedido recebido e o entregue
+   são [cartão, texto]: o cartão sai como mensagem normal, o texto como
+   `auto_reply` (formato não medido). Com o texto recusado (`error_param`), a
+   versão anterior fechava a linha como `falhou` e seguia — o próximo pedido
+   mandava outro cartão sozinho, sem disjuntor e sem contar no teto (a sonda
+   da revisão: 3 pedidos, 3 cartões sozinhos, com teto 1). Agora (§7.6 item 10):
+   a mensagem pela metade vira `revisar` e dispara o disjuntor (`parte_falhou`)
+   — UM cartão sozinho por loja, não um por pedido; a conversa ocupada na 2ª
+   parte tenta de novo na hora (3 × 2 s) antes de desistir; o `envio_repetido`
+   da 2ª parte (o mesmo comprador, dois pedidos na rodada) conta como entregue
+   em vez de virar mensagem pela metade; a campanha recusada pela plataforma já
+   na 1ª parte dispara também (`plataforma_recusou`); o `falhou` que falou com a
+   plataforma conta no teto; e nenhum envio novo começa depois de 50 s da
+   rodada (o timeout de 110 s não corta mais um envio entre o cartão e o texto).
+   O doc (§7.3), a docstring do `chat_send_autoreply_message` e o 4a diziam
+   "errado = `param_error`, nada sai" — corrigido: o cartão sai e o texto não.
+2. **O 4c (novo roteiro, não executado):** UM envio real do `auto_reply` para
+   uma conta de comprador da própria equipe, sem renovar token, confirma o
+   FORMATO do corpo; o `--conferir` (só banco) mostra se a leitura grava a
+   mensagem com o MESMO id que o envio devolveu (se não, a volta do texto
+   seria contada como do Duoke e o disjuntor dispararia à toa — §7.4 item 4).
+   Ordem na ativação: 4a → 4c → `ATENDIMENTO_AUTOMACOES_SHOPEE_AUTO_REPLY` → a
+   1ª campanha em `enviar` numa loja só, olhando o 1º envio.
+3. **A conversa pelo nome de outro comprador (baixo).** O nome do escrow só
+   vale com o comprador do índice (ou, sem ele, um comprador só com aquele
+   usuário na loja); na decisão, a conversa de outro comprador é trocada pelo
+   `to_id` (§7.4). Hoje não acontece (2.941 de 2.941 casam), é a rede.
+4. **Roteiros (baixos):** o 4a só dá "permissão ok" com o erro de parâmetro (o
+   "invalid" na mensagem de qualquer erro dava OK por engano), e o OK dele é
+   necessário, não suficiente (o 4c é a confirmação); o 4b PODE renovar token
+   (o caminho seguro do worker, com trava e gravação na hora) — dito no
+   roteiro e no LEIAME.
+5. **O evento do índice (baixo):** é a última vez que o DaVinci gravou a linha,
+   não "até ~1 h depois da Shopee" (medido: mediana 13,4 h depois da
+   Logística). O pós já só nasce de quem o motor viu entregue; o entregue pelo
+   índice de um pedido regravado depois (pelo 4b, por exemplo) sairia
+   atrasado — hoje 0 pedidos `TO_CONFIRM_RECEIVE` fora da Logística em 30 dias,
+   e um corte pela idade do pedido (p90 da entrega = 15 dias, p99 = 20 dias,
+   medido) tiraria entregues de verdade sem fechar o caso: ficou só registrado.
+
+**Testes**: 13 novos em `test_atendimento_automacoes_troca.py` (§9.1). Mutação:
+sem o disjuntor da mensagem pela metade, 4 falham; sem a nova tentativa, 2; sem
+o repetido como entregue, 1; sem o prazo, 1; sem o `falhou` no teto, 1; sem a
+troca da conversa de outro comprador, 1; sem o comprador no nome, 1; sem o
+`plataforma_recusou`, 1; com a metade virando `falhou` em vez de `revisar`, 5.
 
 ---
 
@@ -1765,6 +2360,11 @@ API sem a aba. A mudança da régua da parte 1 (§7.5) já vale em produção.
   pathspec, nunca `git stash -u` sem caminho, que levaria os `apps/api/_*.py` e
   a pasta `middleware/xml py`). **Sem migration nova** (a 0366 já está
   aplicada; nada nesta etapa mexe no banco).
+- **Migration nova (05/10, noite, §15.6)**: a `0371_atendimento_automacoes_simulacao`
+  só SEMEIA as regras das quatro automações que só simulam (nenhuma tabela nem
+  coluna): rodar `alembic upgrade head` depois que a api subir (regra 8). Sem
+  ela, nada muda (sem regra = desligado); a alternativa é o botão "simular nas
+  lojas do Duoke" de cada uma.
 - **`.env` de produção**: nada muda para subir. Hoje (lido no worker, 05/10,
   só os liga/desliga): `ATENDIMENTO_LEITURA_ATIVA=true`,
   `ATENDIMENTO_AUTOMACOES_ATIVA=true` (modo seco; confirmar que foi o Eduardo),
@@ -1772,8 +2372,9 @@ API sem a aba. A mudança da régua da parte 1 (§7.5) já vale em produção.
   `ATENDIMENTO_AUTOMACOES_SHOPEE_AUTO_REPLY=false`,
   `ATENDIMENTO_AUTOMACOES_TETO_DIA=400`, `SHOPEE_MENSAGENS_COMPRADOR=true`,
   `ATENDIMENTO_SIMULADOR=false`. Ligar qualquer chave de envio só depois de as
-  correções estarem no ar e, a campanha, só depois do `enviar_auto_reply`
-  existir.
+  correções estarem no ar e, a campanha, só depois dos roteiros 4a e 4c (a
+  `ATENDIMENTO_AUTOMACOES_SHOPEE_AUTO_REPLY`; o envio por `auto_reply` no
+  adaptador já existe desde a junção, §14.5).
 
 ### 14.4 Rodado de novo (05/10, tarde)
 
@@ -1799,3 +2400,348 @@ API sem a aba. A mudança da régua da parte 1 (§7.5) já vale em produção.
   (as 3 que falham falham igual no HEAD); typecheck numa cópia isolada só com
   os 7 erros antigos; `nuxi build` termina com exit 0.
 - **Simulação de 7 dias** de novo com o motor corrigido (§13).
+
+### 14.5 A junção (05/10, noite): a 2ª leva (§13.4–§13.5) em cima das correções
+
+A 2ª leva foi feita sobre o `f4574e72`; as correções da §14 subiram depois
+(`15f48c90`, em produção em modo seco) e mexeram nos mesmos arquivos. A junção
+fica com as duas metades e todas as travas:
+
+- **A decisão** é a da 2ª leva (`_contexto` + `_avaliar` puro + `_reconferir`
+  + `_enviar` parte a parte), com o que as correções puseram nela: o HORÁRIO na
+  decisão (`_validade_e_abertura`: fora da janela da regra, a linha espera a
+  próxima abertura ou vira `atrasado`) — no lote E na reconferência (o horário
+  que fecha no meio da rodada deixa a linha `agendado`); a espera da leitura e
+  do Duoke só na TRANSIÇÃO; o corte do modo seco (`cortes`, no `_contexto`, com
+  o mesmo `motor_desde` na reconferência); no máximo 50 por loja × automação;
+  INSERT em lotes; a limpeza diária; o disjuntor na hora (o resto do lote
+  decide em `simular`).
+- **O Duoke nas linhas do pedido**: uma régua só, a do comparador
+  (`automacoes_comparar.duoke_dos_pedidos`), chamada pelo `_contexto` — vale
+  para o lote e para a reconferência. O `_duoke_do_pedido` da 2ª leva (a mesma
+  ideia, a outra régua) saiu.
+- **A campanha da Shopee** só sai pela resposta automática e só com a chave:
+  `enviar.campanha_por_auto_reply` = `ATENDIMENTO_AUTOMACOES_SHOPEE_AUTO_REPLY`
+  **e** `enviar.auto_reply_no_adaptador` — que agora olha o envio que existe, a
+  `enviar_parte(auto_reply=True)` do adaptador (o mesmo `enviar.adaptador` que
+  manda). Com a chave desligada (produção), a campanha não sai, com o adaptador
+  pronto. Nas três travas (API/tela, motor, `enviar_automatica` e
+  `enviar_automatica_sem_conversa`) e no `_chamar_plataforma_automatica`: o
+  `auto_reply` sem a `enviar_parte` que o aceite é `sem_auto_reply` e nada sai —
+  nunca como mensagem normal. O `_chamar_plataforma(auto_reply=…)` das
+  correções (que chamava um `enviar_auto_reply` que nunca existiu) saiu: a
+  automática passa toda pelo `_chamar_plataforma_automatica`. A tela passa a
+  mostrar `shopee_auto_reply_adaptador = true`; o chip continua "Resposta
+  automática da Shopee não confirmada" enquanto a chave estiver desligada.
+- **Nada sai** sem `ATENDIMENTO_AUTOMACOES_ENVIO` e `ATENDIMENTO_ENVIO_ATIVO`
+  e a regra em `enviar` relida do banco; a reconferência na hora de enviar e o
+  critério da troca por loja (o `PATCH` exige `troca_sem_criterio` quando a loja
+  não passa) seguem como estavam. Sem migration (a última do `origin/main` é a
+  0370).
+- **Rodado** (bateria `tests/test_atendimento_*.py` + `test_historico_*` +
+  `test_shopee_client.py` + `test_devolucao_mensagem_comprador.py`): no 3.14,
+  2.118 passam e 0 falham (o `origin/main` puro, `15f48c90`: 2.060; a diferença
+  são as 56 da 2ª leva e as 2 novas do motor); no 3.12, 2.117 passam e 1 falha —
+  `test_atendimento_ia_claude::test_cliente_do_sdk_sem_nova_tentativa_e_sem_ler_o_ambiente`,
+  que falha igual no `origin/main` puro com o 3.12. Web: os `atendimento-*.cjs`
+  passam, menos o `atendimento-so-admin.cjs` (já falha no `origin/main`:
+  `withDefaults is not defined`); typecheck numa cópia isolada só com os 7 erros
+  antigos; `nuxi build` exit 0. A tela: o selo "disjuntor" mostra o motivo
+  (`duoke_ainda_ligado`, `parte_falhou`, `plataforma_recusou`). Produção (SELECT
+  só de leitura, 05/10 à noite): `15f48c90`, alembic 0370, nenhuma regra em
+  `enviar`, nenhuma mensagem `davinci_auto`, nenhum disjuntor.
+
+---
+
+## 15. As que faltavam do Duoke, só em simulação, e a prévia (05/10, noite)
+
+Eduardo, 05/10/2026 (à noite): "por enquanto deixe só pra mostrar que ele
+enviaria mesmo corretamente, mas não enviar essas mensagens padrão; quero todas
+do Duoke aqui também em todas as plataformas possíveis". Tudo desta seção é **só
+simulação**: as quatro automações novas têm `so_simular` (o PATCH recusa
+`enviar` com 409 `so_simulacao` — também na regra que já estivesse em `enviar`,
+direto no banco: qualquer mudança que não a leve para simular ou desligado é
+recusada; o motor decide em `simular` mesmo com a regra em `enviar`, motivo
+`so_simulacao`; o `enviar.py` recusa a automação antes de qualquer adaptador) —
+e, por cima, as chaves de envio continuam desligadas.
+Produção só por SELECT, em transação só de leitura, sem texto de comprador;
+nenhuma chamada a plataforma.
+
+### 15.1 Pedido não pago com cupom ("carrinho") — `shopee_nao_pago`
+
+**O Duoke, medido (SELECT, 14 dias até 05/10):**
+
+- 30 min depois da CRIAÇÃO do pedido (p10 = p50 = p90 = 30 min, contra o
+  `criado_em` do índice), o cartão do pedido + o texto, sempre o mesmo, com o
+  valor do cupom: "Oi! 👋 Notamos que você deixou alguns itens no carrinho… 💸
+  R${valor_cupom} OFF…". Sem o nome do comprador.
+- **A tabela do cupom**, tirada dos textos dele × o total do pedido no índice
+  (pelo cartão a até 10 s): celular **R$ 20** de 1.001,22 a 1.495,84 (211), **R$ 25**
+  de 1.500,47 a 1.930 (45), **R$ 30** a partir de 2.020,88 (97); mala **R$ 5** de
+  157,23 a 499,53 (50) e **R$ 10** de 507 a 804,60 (19). Celular abaixo de
+  R$ 1.000: nenhum (0 de 466 não pagos). Mala abaixo de R$ 150: nenhum (0 de 4).
+  No código: `automacoes_catalogo.CUPOM_FAIXAS` e `valor_cupom(loja, total)` —
+  celular a partir de 1.000/1.500/2.000 e mala a partir de 150/500, pelo tipo da
+  loja (mala = Inova, KFA, Minas, Poofy). Em 7 dias, 279 de 279 carrinhos do
+  Duoke com o cartão bateram com a tabela. Os pisos de R$ 1.000, R$ 1.500 e
+  R$ 500 estão cercados (999,40 sem cupom e 1.001,22 com R$ 20; 1.495,84 → 20 e
+  1.500,66 → 25; 499,53 → 5 e 507 → 10). **Não estão**: o de R$ 2.000 (o corte
+  está entre 1.930, R$ 25, e 2.020,88, R$ 30) e o de R$ 150 da mala (um caso
+  só: 152,48 sem cupom; o menor com cupom, 157,23) — os dois são do painel
+  (§12, item 15).
+- **Lojas**: 12 — as 13 do Duoke menos a **Kia** (0 de 22 não pagos dela); a
+  Aguiar também não.
+- **Quem recebe**: o pedido ainda não pago aos 30 min. Pago até os 30 min: 0 de
+  862. Pago depois: 32 de 53. Nunca pago: celular a partir de R$ 1.000, 309 de
+  370 (83%); mala 53 de 76 (70%). **Um por comprador em 24 h**: de dois não
+  pagos do mesmo comprador no mesmo dia, o Duoke mandou para um só (15 de 15).
+  Na mesma conversa, nenhum carrinho do Duoke a menos de 27,1 h do anterior; a
+  partir daí, mandou de novo 26 vezes em 14 dias (16 entre 27 e 48 h, 3 entre
+  48 e 72 h, 7 entre 72 h e 7 dias) — quando o pedido está no índice, sempre
+  um pedido novo do comprador, criado 30 min antes. Dos 16 não pagos com o
+  carrinho anterior a menos de 24 h, nenhum recebeu. O corte fica entre 24 e
+  27 h: a condição é `um_por_comprador_h = 24`
+  (`automacoes_catalogo.UM_POR_COMPRADOR_H`). O "0 de 392 em 7 dias" da versão
+  anterior não se confirmou — com 168 h, a simulação de 7 dias dava 14 "só
+  Duoke" a mais (15 contra 1). O 2º carrinho da conversa vem **sem o cartão**
+  gravado (em 7 dias, 60 de 338 carrinhos sem cartão a até 10 s; 33 deles, o
+  2º da conversa).
+
+**No DaVinci:**
+
+- **A fonte é o índice do cartão "Cliente"** (`atendimento_pedidos_comprador`,
+  status `UNPAID`, `descobrir_nao_pagos`), que roda de hora em hora (no :22,
+  janela de 2 h): o DaVinci vê o não pago **de 0 a ~60 min depois da criação**.
+  Não há fonte melhor sem chamada nova (a Shopee não manda push de pedido ao
+  DaVinci, e o Bling só recebe pedido pago). A linha nasce com o `devido_em` de 30
+  min depois da criação, como o Duoke, e é decidida quando o motor a vê
+  (validade de 3 h): o atraso fica no registro (o "atraso do DaVinci" da conta),
+  e é a **diferença combinada `visto_de_hora_em_hora`** (o selo da automação;
+  e, fora da %, a linha pulada porque o pedido foi pago ou cancelado entre os
+  30 min do Duoke e a hora em que o DaVinci viu, e o "só Duoke" de pedido que o
+  DaVinci nunca viu não pago — pago no Bling ou cancelado no índice).
+- **Decisão**: pago no Bling (`pedido_pago`), o status do índice mudou
+  (`status_mudou`), sem o total (`sem_valor`), abaixo do mínimo
+  (`abaixo_do_minimo`), um por comprador em 24 h — pelo registro E no mesmo
+  lote (`ja_recebeu`) —, e as exclusões das campanhas (cancelado, reclamação ou
+  devolução, etiqueta). O texto leva o `{valor_cupom}` da faixa
+  (`Automacao.lacunas`, preenchido pelo motor e pela prévia).
+- **Comparador**: pelo cartão do pedido do Duoke a até 10 s (como o pedido
+  recebido), janela da criação até + 3 h. O "só Duoke" sem linha nossa só é a
+  diferença combinada `visto_de_hora_em_hora` quando o DaVinci nunca viu o
+  pedido não pago por causa do índice: o pedido (o do cartão; sem cartão, o do
+  comprador no índice criado até 1 h antes do carrinho) foi criado logo antes,
+  não tem linha nossa e ficou pago no Bling até 2 h depois da criação ou está
+  cancelado (`automacoes_comparar.carrinhos_vistos_tarde`). Pedido antigo da
+  conversa, pago tarde ou com linha nossa conta como "só Duoke".
+- **A simulação de 7 dias com o motor** (o motor de verdade, o índice
+  reconstruído rodada a rodada, 28/09 a 05/10; §15.9): 272 bateram, 3 "só
+  DaVinci", 3 "só Duoke", 4 combinadas (2 `visto_de_hora_em_hora`, 2
+  `exclusao_disputa`) — **precisão 98,9%, cobertura 98,9%**, concordância 99,2%;
+  o DaVinci decide em mediana 33 min depois da criação (o atraso do índice), e
+  o Duoke sai 3 min antes dessa decisão. Os 3 "só Duoke": 2 carrinhos de 02/10
+  cujo pedido é um antigo da conversa (nenhum pedido do comprador criado logo
+  antes) e 1 de pedido fora do índice. Os 3 "só DaVinci": cancelado um dia
+  depois, cancelado aos 47 min (depois da 1ª leitura do índice) e pago aos
+  68 min. A régua por SQL (sem o motor) dava ~13% e ~30% "só DaVinci" no
+  celular e na mala; parte era o cancelado antes da 1ª leitura do índice, que
+  o motor também não vê (§10, item 18).
+- **Por que só simula** (`cupom_nao_confirmado`): o cupom só existe no painel —
+  sem confirmar que ele existe em cada loja, a mensagem prometeria um desconto
+  que talvez não exista (§12, item 12).
+
+### 15.2 Resposta da avaliação — `shopee_avaliacao_boa` (4–5★) e `shopee_avaliacao_ruim` (1–3★)
+
+**O Duoke, medido (SELECT, 14 dias):** responde a avaliação na própria Shopee
+("Obrigado pela confiança! 🙏 Volte sempre que precisar!" nas 4–5★; "Sentimos
+muito pela experiência 😔 Não foi o atendimento que buscamos oferecer…" nas
+1–3★) e manda junto uma mensagem no chat ("Obrigado pela confiança, {comprador}!
+…" e "{comprador} Sentimos muito…", como resposta automática). 5★: 783 de 811
+com o modelo; 4★: 30 de 30; 1–3★: 33 de 35 (e 4 respostas de pessoa). Por loja,
+as 13 em ~100%; a Aguiar, 0 de 2 (responde à mão). O chat sai de 10 a 220 min
+depois da avaliação (mediana ~80 min); o `resposta_em` gravado na avaliação fica
+**sempre 59 min depois** do chat (3.540 s) — a hora real da resposta pública é
+ele menos 59 min (`ATRASO_RESPOSTA_EM_SHOPEE`).
+
+**No DaVinci:** a fonte é a leitura das avaliações (`descobrir_avaliacoes`, a
+cada 30 min), a nota escolhe a automação, a linha é por avaliação
+(`avaliacao:<comentario>`), 1 h depois (validade 24 h). As partes: a resposta
+PÚBLICA (`resposta_publica`, validada com o limite dela, 500) + o texto do chat
+com o nome dentro, **no formato do Duoke**: nas 4–5★ "Obrigado pela confiança,
+maria.silva! …" (429 de 431 iguais em 7 dias) e nas 1–3★ o usuário, um espaço e
+o texto público, "maria.silva Sentimos muito…" (22 de 22 iguais — antes, com
+vírgula e "sentimos" minúsculo, 0 de 22); sem o nome, só o texto público. A
+conversa do comprador (para o chat) é a do pedido, a do comprador
+do índice ou a do usuário dele. Decisão: a nota mudou (`estrelas_mudaram`) ou
+uma PESSOA já respondeu (a resposta não é o modelo do Duoke: `pessoa_respondeu`);
+sem as exclusões das campanhas (o Duoke responde todas). O comparador é pela
+avaliação: a resposta pública com as duas frases do modelo (pessoa que escreve
+"obrigado pela confiança" não casa) e, junto, o chat do Duoke na conversa;
+`nao_mandou` só com a avaliação relida depois do fim da janela, que é de **24 h**
+(a resposta do Duoke chegou até 1.079 min depois na KFA e 588 na Inova em 7 dias;
+com 8 h, essas duas viravam "só DaVinci"). O "só Duoke" é a avaliação que o
+Duoke respondeu e que não tem linha nossa.
+
+**Por que só simula** (`avaliacao_publica`): a resposta é pública, e o envio
+automático de resposta de avaliação continua proibido ("só pessoa responde
+avaliação", `enviar._destino_avaliacao`) até uma decisão de propósito (§12, item 13).
+
+### 15.3 "Pedido recebido" do TikTok — `tiktok_pedido_recebido`
+
+**O Duoke, medido (SELECT, 14 dias):** 5 min depois do aviso de pedido da
+própria TikTok ("Agradecemos pelo seu pedido! Confirme se o seu endereço…",
+papel ROBOT), o cartão do pedido (`ORDER_CARD`) + "Oi! Recebemos seu pedido…",
+pela conta de atendimento. ATV 73 de 75, Barbosa 47 de 47, Mini 129 de 131 (p10
+302 s, p50 303 s, p90 305 s); Injox 0 de 18, JLAS 0 de 2, Eron nenhum.
+
+**No DaVinci:** o gatilho é o próprio aviso da TikTok, que a leitura da caixa
+grava (`descobrir_tiktok_pedidos`; nos últimos 3 dias, 97 de 97 lidos em até 5
+min — os lidos horas depois eram da importação), 5 min depois, uma linha por
+aviso (`conversa:<id>:msg:<aviso>`). Os avisos: "Agradecemos pelo seu
+pedido", "Agradecemos a tua encomenda", "Thanks for your order" e, em espanhol,
+"¡Gracias por tu pedido" e "¡Gracias por el pedido" (com o "¡";
+`automacoes.AVISOS_DE_PEDIDO_TIKTOK`). Dos 166 "pedido recebido" do Duoke em 7
+dias, 9 não tinham "Agradecemos pelo seu pedido" na hora antes: um tinha só o
+aviso em espanhol (agora gatilho); os outros, nenhum aviso — esses ficam "só
+Duoke" de verdade. O aviso não traz o nº do pedido: o comparador procura o
+Duoke NA CONVERSA (`compara_na_conversa`). Na prévia, o nosso cartão leva o
+pedido da conversa (o que o DaVinci sabe; sem ele, o do cartão do Duoke, com a
+nota) e o do Duoke, o nº do `ORDER_CARD` dele (o `content` vem como JSON em
+texto).
+
+**Por que só simula** (`tiktok_abrir_conversa`): mandar exigiria abrir a
+conversa pela API da TikTok (Create Conversation) e o cartão do pedido
+(`ORDER_CARD`), que o DaVinci não tem — e a TikTok já manda o dela (§12, item 14).
+
+### 15.4 A opção 4 do menu
+
+Continua sem texto, `desligado` e travada (o painel do Duoke, §10 item 1).
+
+### 15.5 Nenhuma outra (conferido por SELECT)
+
+A §5: os 89 textos da loja repetidos 8 vezes ou mais em 14 dias nas 3
+plataformas são do catálogo, nativos da plataforma, respostas rápidas da equipe
+ou do próprio DaVinci.
+
+### 15.6 A semente: a migration 0371 (só dado) e a 0366 congelada
+
+Inevitável para a semente sem clique: a 0366 já rodou em produção e semeia o
+catálogo de 05/10 (tarde). A **0366 ficou congelada** nas automações daquela data
+(`CODIGOS`: num banco novo ela semeia exatamente o que semeou em produção) e a
+**`0371_atendimento_automacoes_simulacao`** (acima da 0370, a última do
+`origin/main`) semeia as quatro novas: `simular` nas lojas onde o Duoke manda
+hoje, `desligado` no resto, `ON CONFLICT DO NOTHING` (a regra que exista não
+muda). Em produção (05/10, 14 lojas Shopee e 8 TikTok): 50 regras — carrinho 12
+em simular + 2 desligadas (Kia, Aguiar), com `um_por_comprador_h = 24` (a
+condição vem do catálogo na hora do `upgrade`: corrigida antes do deploy,
+§15.9), cada resposta de avaliação 13 + 1
+(Aguiar), o pedido recebido do TikTok 3 (ATV, Barbosa, Mini) + 5. Nenhuma tabela
+nem coluna; o downgrade apaga só as regras e as linhas destas quatro. O teste da
+migration confere tudo isso (e a ponta única do alembic).
+
+### 15.7 A prévia "como o cliente receberia" (§8.3)
+
+A rota `GET /api/atendimento/automacoes/registro/{id}/previa` e o quadro em cada
+linha do registro, DaVinci × Duoke — nada gravado.
+
+### 15.8 Rodado (05/10, noite)
+
+- **Bateria** (`tests/test_atendimento_*.py` + `test_historico_*` +
+  `test_shopee_client.py` + `test_devolucao_mensagem_comprador.py` +
+  `test_flex_migration.py`), de novo depois da revisão (§15.9): no 3.14,
+  **2.172 passam e 0 falham**; no 3.12, 2.171 passam e 1 falha — a mesma
+  `test_atendimento_ia_claude::test_cliente_do_sdk_sem_nova_tentativa_e_sem_ler_o_ambiente`
+  que falha no `origin/main` puro com o 3.12. O
+  `test_atendimento_robo::test_status_efetivo_sem_sinal_e_com_evento_recente`
+  depende do relógio (o `AGORA` é fixado na importação, o limite é de 5 min):
+  falha quando a bateria leva mais de ~4 min até chegar nele — igual no
+  `origin/main` (nem o `robo.py` nem o teste mudaram); sozinho, passa. Nas duas
+  rodadas acima, passou.
+- **Mutação**: 24 no backend (o "só simula" no motor, no `enviar.py` e na tela;
+  o cupom pelo tipo da loja e o mínimo do celular; o pago no Bling; um por
+  comprador no lote e pelo registro; só o `UNPAID`; o `visto_de_hora_em_hora` na
+  linha e no "só Duoke"; a pessoa que respondeu, a nota mudada, a resposta
+  pública sem o chat, o `nao_mandou` só com a leitura e os 59 min da avaliação;
+  o TikTok na conversa; a prévia sem o que vai junto, sem o nome, sem o cupom e
+  com a versão errada; a lacuna sem valor; a pública no canal do chat; a 0366
+  descongelada) e 13 na tela (fechar ao trocar de plataforma, a resposta
+  atrasada, abrir/fechar, o limite e o rótulo da pública, o exemplo do cupom, o
+  porquê e o selo do "só simulação", a versão, a janela do Duoke, o nº do
+  cartão, o nome, o tipo da parte) — todas pegas (5 escaparam na 1ª passada, 3
+  no backend e 2 na tela, e ganharam testes). O código voltou idêntico (sha256).
+  Depois da revisão (§15.9), 35 no backend (as 24 de antes, com o
+  `visto_de_hora_em_hora` novo, e 11 novas: 168 h no lugar de 24 h, o PATCH só
+  na transição, o `content` em texto, o pedido do Duoke antes do da conversa, o
+  chat com vírgula, a janela de 8 h, sem o aviso em espanhol, o pedido antigo,
+  a linha nossa, o pago tarde e o pedido do comprador sem cartão) — todas pegas
+  na 1ª passada; o código voltou idêntico (sha256).
+- **Web**: os `atendimento-*.cjs` passam (15 de 16), menos o
+  `atendimento-so-admin.cjs` (já falha no `origin/main`: `withDefaults is not
+  defined`); typecheck numa cópia isolada só com os 7 erros antigos (os
+  mesmos, linha a linha); `nuxi build` exit 0.
+- **Ruff**: sem lint novo. O `check` dos arquivos alterados acusa 5 avisos que
+  já existem no `origin/main` (S105 em `config.py`; E501 e 3 UP037 em
+  `marketplaces/shopee.py`), e o `format` reformataria os mesmos trechos antigos
+  (`enviar.py` 7, `gravar.py` 4, `atendimento/shopee.py` 1,
+  `marketplaces/shopee.py` 18, `test_atendimento_migration.py` 5) — nada nos
+  arquivos novos nem nas linhas mexidas.
+
+### 15.9 A revisão das que faltavam e a simulação de 7 dias com o motor (05/10, noite)
+
+**Corrigido** (todas antes do deploy; nada muda com as chaves de produção):
+
+1. **Carrinho: um por comprador em 24 h, não em 7 dias** (a única de gravidade
+   alta). O SELECT (§15.1) mostrou o Duoke mandando de novo a partir de 27,1 h
+   do anterior (26 vezes em 14 dias) e nenhum abaixo de 24 h; com 168 h, a
+   simulação dava 14 "só Duoke" a mais. A condição padrão é
+   `automacoes_catalogo.UM_POR_COMPRADOR_H = 24`; como a 0371 copia a condição
+   do catálogo para as regras, ela já nasce com 24 h (sem PATCH depois).
+2. **PATCH**: a automação que só simula recusa `enviar` também na regra que já
+   estivesse nele (mexida direto no banco) — qualquer mudança que não a leve
+   para simular ou desligado dá 409 `so_simulacao`. Antes, só a transição
+   para `enviar` era recusada (nada saía mesmo assim: o motor e o `enviar.py`
+   já travavam).
+3. **Prévia do TikTok**: o `content` do `ORDER_CARD` vem como JSON em texto
+   (289 de 289 em 7 dias) e o lado do Duoke saía "#—"; agora é lido como o
+   `tiktok._conteudo` lê. O nosso cartão leva o pedido da conversa (o que o
+   DaVinci sabe) e, sem ele, o do cartão do Duoke.
+4. **Avaliação 1–3★**: o chat no formato do Duoke (o usuário, um espaço e o
+   texto público; 22 de 22 iguais) — antes, com vírgula, 0 de 22.
+5. **Avaliação: a janela de comparação é de 24 h** (era 8 h): a resposta do
+   Duoke que chega 10 a 18 h depois deixava a linha como "só DaVinci" para
+   sempre (KFA e Inova, as duas da simulação).
+6. **Carrinho: o `visto_de_hora_em_hora` do "só Duoke"** só com o pedido criado
+   logo antes do carrinho, sem linha nossa e pago até 2 h depois da criação ou
+   cancelado (`carrinhos_vistos_tarde`); sem cartão, o pedido é o do
+   comprador no índice criado até 1 h antes. Antes, qualquer pedido da conversa
+   pago ou cancelado em qualquer data tirava o "só Duoke" da conta (2 dos 4 da
+   simulação eram carrinhos de 02/10 com um pedido de ontem, cancelado).
+7. **TikTok**: o aviso em espanhol ("¡Gracias por tu pedido!" / "¡Gracias por
+   el pedido!") também é gatilho.
+8. O teste `test_simular_nunca_chama_a_plataforma` do motor proíbe o mesmo que
+   os testes das que faltavam (o envio sem conversa, o `shopee.enviar_parte` e
+   os dois `chat_send_*` do cliente da Shopee).
+9. Doc: os pisos de R$ 2.000 e R$ 150 do cupom ficam como do painel (§12,
+   item 15); os números do carrinho são os do motor (abaixo), não os da régua
+   por SQL.
+
+**A simulação de 7 dias** (o roteiro da revisão, rodado de novo com o motor
+corrigido: 28/09 21h a 05/10 21h UTC exportados por SELECT, sem texto de
+comprador, num banco local; o relógio anda de 2 em 2 min; o índice de pedidos
+reconstruído rodada a rodada, com o status que o pedido tinha naquela hora; as
+avaliações lidas no :12/:42; o aviso em espanhol exportado junto). A conta é a
+da tela, de 30/09 até o fim da janela de cada automação:
+
+| Automação | Casos | Bateram (mandou / não) | Só DaVinci | Só Duoke | Combinadas | Precisão | Cobertura | Antes da correção |
+|---|---|---|---|---|---|---|---|---|
+| `shopee_nao_pago` | 779 | 272 / 501 | 3 | 3 | 4 | 98,9% | 98,9% | 168 h: 15 "só Duoke", cobertura 94,5% |
+| `shopee_avaliacao_boa` | 313 | 313 / 0 | 0 | 0 | 0 | 100% | 100% | 2 "só DaVinci" (a janela de 8 h) |
+| `shopee_avaliacao_ruim` | 15 | 15 / 0 | 0 | 0 | 0 | 100% | 100% | igual |
+| `tiktok_pedido_recebido` | 139 | 134 / 0 | 2 | 3 | 1 | 98,5% | 97,8% | 4 "só Duoke" |
+
+Na prévia das linhas da simulação: o texto do carrinho (com o cupom da tabela)
+igual ao do Duoke em 279 de 279; o chat das 1–3★ igual em 16 de 16 e o das
+4–5★ em 362 de 364; a resposta pública igual em todas; o cartão do TikTok com o
+nº nos dois lados, e o mesmo, em 139 de 139. Em 51 carrinhos o lado do Duoke
+tem só o texto: o cartão dele não foi gravado (em produção, 60 de 338 em 7
+dias, 33 deles o 2º carrinho da conversa).

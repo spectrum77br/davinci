@@ -90,12 +90,21 @@ bloqueada, sem integração):
                                     falta a chave confirmada
                                     (`atendimento_automacoes_shopee_auto_reply`, o
                                     teste de permissão passou) OU o envio por ela
-                                    no adaptador (`enviar_auto_reply`). Sem os
-                                    dois, a campanha sairia como mensagem NORMAL
-                                    — o que a trava existe para evitar.
-Só TEXTO: o cartão do pedido e a figurinha ainda não têm adaptador (o motor
-manda só as partes de texto). A campanha, quando puder sair, sai pelo
-`enviar_auto_reply` do adaptador, nunca pelo `enviar_texto`.
+                                    no adaptador (`enviar_parte(auto_reply=True)`,
+                                    `auto_reply_no_adaptador`). Sem os dois, a
+                                    campanha sairia como mensagem NORMAL — o que
+                                    a trava existe para evitar;
+       so_simulacao               — a automação SÓ SIMULA (o pedido não pago com
+                                    cupom, a resposta da avaliação, o "pedido
+                                    recebido" do TikTok — `Automacao.so_simular`):
+                                    nunca sai, com qualquer chave e regra.
+Cada PARTE é uma mensagem: o texto, o cartão do pedido e a figurinha (as duas
+últimas só na Shopee, no formato que o Duoke manda); o texto das campanhas da
+Shopee sai como resposta automática (`send_autoreply_message`, pela
+`enviar_parte(auto_reply=True)` do adaptador — nunca pelo `enviar_texto`).
+Sem conversa no DaVinci (o pedido recebido de quem nunca escreveu à loja),
+`enviar_automatica_sem_conversa` manda pelo `to_id` do comprador do pedido e
+grava a conversa que a Shopee devolve.
 O canal em `observar` NÃO segura a automática (de propósito: a equipe segue
 no Duoke enquanto ela sai por aqui), nem as travas da IA (automático, vez).
 
@@ -111,9 +120,11 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import inspect
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from types import ModuleType
+from typing import Any
 from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
@@ -221,6 +232,9 @@ RECUSA_AUTOMACOES_ENVIO_DESLIGADO = "automacoes_envio_desligado"
 RECUSA_SHOPEE_MENSAGENS_DESLIGADAS = "shopee_mensagens_desligadas"
 RECUSA_REGRA_NAO_ENVIA = "regra_nao_envia"
 RECUSA_CAMPANHA_SEM_AUTO_REPLY = "campanha_sem_auto_reply"
+# A automação que só simula (05/10/2026, à noite: "deixe só pra mostrar que ele
+# enviaria mesmo corretamente, mas não enviar"): nunca sai.
+RECUSA_SO_SIMULACAO = "so_simulacao"
 # Só estas plataformas têm automação (e adaptador de texto em conversa).
 PLATAFORMAS_AUTOMACAO = ("shopee", "tiktok", "ml")
 # Recusa que passa sozinha: a próxima rodada tenta de novo (até a validade).
@@ -299,21 +313,37 @@ def adaptador(plataforma: str) -> ModuleType:
     return importlib.import_module(ADAPTADORES[plataforma])
 
 
-def auto_reply_no_adaptador(plataforma: str = "shopee") -> bool:
-    """O adaptador sabe mandar como RESPOSTA AUTOMÁTICA (`enviar_auto_reply`)?
+def _sabe_auto_reply(enviar_parte: Any) -> bool:
+    """A `enviar_parte` do adaptador manda como RESPOSTA AUTOMÁTICA (o `auto_reply`)?"""
+    if not callable(enviar_parte):
+        return False
+    try:
+        return "auto_reply" in inspect.signature(enviar_parte).parameters
+    except (TypeError, ValueError):
+        return False
 
-    Só lê o módulo (nada vai à plataforma). Hoje nenhum sabe: a campanha da
-    Shopee não sai, com a chave ligada ou não (05/10/2026).
+
+def auto_reply_no_adaptador(plataforma: str = "shopee") -> bool:
+    """O adaptador sabe mandar como RESPOSTA AUTOMÁTICA (`enviar_parte(auto_reply=True)`)?
+
+    Só lê o módulo — o mesmo `adaptador` que manda (nada vai à plataforma). O
+    da Shopee sabe desde 05/10/2026 (`send_autoreply_message`); sem ele, a
+    campanha não sai nem com a chave ligada (nunca como mensagem normal).
     """
     try:
-        modulo = importlib.import_module(ADAPTADORES[plataforma])
+        modulo = adaptador(plataforma)
     except (KeyError, ImportError):
         return False
-    return callable(getattr(modulo, "enviar_auto_reply", None))
+    return _sabe_auto_reply(getattr(modulo, "enviar_parte", None))
 
 
 def campanha_por_auto_reply() -> bool:
-    """A campanha da Shopee pode sair: o `auto_reply` confirmado E o envio por ele."""
+    """A campanha da Shopee pode sair: o `auto_reply` confirmado E o envio por ele.
+
+    A CHAVE primeiro (`atendimento_automacoes_shopee_auto_reply`, o teste de
+    permissão passou): desligada, a campanha não sai — com o adaptador pronto
+    ou não.
+    """
     return bool(get_settings().atendimento_automacoes_shopee_auto_reply) and (
         auto_reply_no_adaptador("shopee")
     )
@@ -677,14 +707,11 @@ async def _chamar_plataforma(
     conversa: AtendimentoConversa,
     integration: Integration,
     texto: str,
-    *,
-    auto_reply: bool = False,
 ) -> ResultadoEnvio:
     """Fala com a plataforma. Nunca levanta: o que der errado vira resultado.
 
-    `auto_reply` (a campanha da Shopee, `enviar_automatica`): sai pelo
-    `enviar_auto_reply` do adaptador — sem ele, nada sai (nunca como
-    mensagem normal).
+    A mensagem automática não passa por aqui: `_chamar_plataforma_automatica`
+    (a parte, o `to_id`, o `auto_reply` da campanha).
     """
     s = get_settings()
     if s.atendimento_simulador and s.is_prod:
@@ -714,14 +741,6 @@ async def _chamar_plataforma(
             responder = getattr(modulo, "responder_avaliacao", None)
             if responder is None:
                 return ResultadoEnvio(ok=False, erro="sem_resposta_de_avaliacao")
-            return await asyncio.wait_for(
-                responder(session, conversa, integration, cliente, texto),
-                timeout=TEMPO_MAXIMO_ENVIO_S,
-            )
-        if auto_reply:
-            responder = getattr(modulo, "enviar_auto_reply", None)
-            if responder is None:
-                return ResultadoEnvio(ok=False, erro="sem_auto_reply")
             return await asyncio.wait_for(
                 responder(session, conversa, integration, cliente, texto),
                 timeout=TEMPO_MAXIMO_ENVIO_S,
@@ -1526,29 +1545,38 @@ async def enviar_foto(
 
 
 # ── Mensagem automática (05/10/2026) ──────────────────────────────────────
-# O motor de automações (`automacoes.py`) manda cada PARTE de texto por aqui.
-# Só sai com TUDO ligado: o freio único (`atendimento_envio_ativo`), a chave
-# nova (`atendimento_automacoes_envio`) e a regra da loja em `enviar`, relida
-# do banco agora. O modo seco nunca chega aqui (o motor nem importa este
-# módulo nele); o teste prova.
+# O motor de automações (`automacoes.py`) manda cada PARTE por aqui: o texto,
+# o cartão do pedido e a figurinha (Shopee). Só sai com TUDO ligado: o freio
+# único (`atendimento_envio_ativo`), a chave nova (`atendimento_automacoes_envio`)
+# e a regra da loja em `enviar`, relida do banco agora. O modo seco nunca
+# chega aqui (o motor nem importa este módulo nele); o teste prova.
+#
+# SEM CONVERSA no DaVinci (o pedido recebido de quem nunca escreveu à loja):
+# `enviar_automatica_sem_conversa` manda pelo `to_id` (o comprador do pedido),
+# a Shopee abre a conversa e devolve o `conversation_id` — a conversa e a
+# mensagem nascem aqui, já com a marca, e a leitura seguinte as acha pelo id.
+
+RECUSA_PARTE_NAO_SUPORTADA = "parte_nao_suportada"
+RECUSA_SEM_COMPRADOR = "sem_comprador"
+# As partes sem texto (cartão e figurinha) só existem na Shopee.
+PARTES_SO_SHOPEE = ("cartao_pedido", "figurinha")
 
 
-async def _destino_automatica(
-    session: AsyncSession, conversa: AtendimentoConversa, *, codigo: str
-) -> _Destino:
-    """As travas da mensagem automática; levanta `EnvioRecusado`."""
+def _automacao_do_codigo(codigo: str):
     from app.services.atendimento import automacoes_catalogo as catalogo
 
-    motivo_sem_envio = motivo_canal_sem_envio(conversa.canal, conversa.plataforma, conversa.dados)
-    if motivo_sem_envio:
-        raise EnvioRecusado(RECUSA_CANAL_SEM_ENVIO, motivo_sem_envio)
-    if conversa.plataforma not in PLATAFORMAS_AUTOMACAO or conversa.plataforma not in ADAPTADORES:
+    return catalogo.automacao(codigo)
+
+
+def _travas_gerais_automatica(plataforma: str, codigo: str, canal_nome: str):
+    """As travas que não dependem da conversa; devolve a automação do catálogo."""
+    if plataforma not in PLATAFORMAS_AUTOMACAO or plataforma not in ADAPTADORES:
         raise EnvioRecusado(
             RECUSA_SOMENTE_LEITURA, "Mensagem automática só na Shopee, no TikTok e no ML."
         )
     settings = get_settings()
     if settings.atendimento_simulador and settings.is_prod:
-        logger.error("atendimento_simulador_em_producao", conversa_id=str(conversa.id))
+        logger.error("atendimento_simulador_em_producao", automacao=codigo)
         raise EnvioRecusado(
             RECUSA_SIMULADOR_EM_PRODUCAO,
             "O simulador de envio (só para teste local) está ligado em produção.",
@@ -1564,21 +1592,57 @@ async def _destino_automatica(
             RECUSA_AUTOMACOES_ENVIO_DESLIGADO,
             "O envio das mensagens automáticas está desligado (ATENDIMENTO_AUTOMACOES_ENVIO).",
         )
-    if conversa.plataforma == "shopee" and not settings.shopee_mensagens_comprador:
+    if plataforma == "shopee" and not settings.shopee_mensagens_comprador:
         raise EnvioRecusado(
             RECUSA_SHOPEE_MENSAGENS_DESLIGADAS,
             "As mensagens automáticas para o comprador da Shopee estão desligadas "
             "(SHOPEE_MENSAGENS_COMPRADOR).",
         )
-    aut = catalogo.automacao(codigo)
-    if aut is None or aut.plataforma != conversa.plataforma or aut.canal != conversa.canal:
+    aut = _automacao_do_codigo(codigo)
+    if aut is None or aut.plataforma != plataforma or aut.canal != canal_nome:
         raise EnvioRecusado(RECUSA_REGRA_NAO_ENVIA, "Automação desconhecida para esta conversa.")
+    if aut.so_simular:
+        raise EnvioRecusado(
+            RECUSA_SO_SIMULACAO,
+            "Esta automação só simula (o DaVinci mostra o que mandaria): nada sai por ela.",
+        )
     if aut.campanha and not campanha_por_auto_reply():
         raise EnvioRecusado(
             RECUSA_CAMPANHA_SEM_AUTO_REPLY,
             "Campanha da Shopee: só sai como resposta automática (auto_reply) — falta a "
             "chave confirmada ou o envio por ela no adaptador.",
         )
+    return aut
+
+
+async def _regra_em_enviar(session: AsyncSession, codigo: str, integration_id: UUID) -> None:
+    """A regra da loja, RELIDA agora, está em `enviar`? Senão `regra_nao_envia`."""
+    from app.services.atendimento import automacoes_catalogo as catalogo
+
+    regra = (
+        await session.execute(
+            select(AtendimentoAutomacaoRegra)
+            .where(
+                AtendimentoAutomacaoRegra.automacao == codigo,
+                AtendimentoAutomacaoRegra.integration_id == integration_id,
+            )
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+    if regra is None or regra.modo != catalogo.MODO_ENVIAR:
+        raise EnvioRecusado(
+            RECUSA_REGRA_NAO_ENVIA, "A regra desta automação nesta loja não está em enviar."
+        )
+
+
+async def _destino_automatica(
+    session: AsyncSession, conversa: AtendimentoConversa, *, codigo: str
+) -> _Destino:
+    """As travas da mensagem automática; levanta `EnvioRecusado`."""
+    motivo_sem_envio = motivo_canal_sem_envio(conversa.canal, conversa.plataforma, conversa.dados)
+    if motivo_sem_envio:
+        raise EnvioRecusado(RECUSA_CANAL_SEM_ENVIO, motivo_sem_envio)
+    _travas_gerais_automatica(conversa.plataforma, codigo, conversa.canal)
     if conversa.situacao == CONVERSA_BLOQUEADA:
         raise EnvioRecusado(
             RECUSA_CONVERSA_BLOQUEADA,
@@ -1606,21 +1670,140 @@ async def _destino_automatica(
         raise EnvioRecusado(
             RECUSA_SEM_INTEGRACAO, "A loja desta conversa não está mais conectada ao DaVinci."
         )
-    regra = (
-        await session.execute(
-            select(AtendimentoAutomacaoRegra)
-            .where(
-                AtendimentoAutomacaoRegra.automacao == codigo,
-                AtendimentoAutomacaoRegra.integration_id == integration.id,
-            )
-            .execution_options(populate_existing=True)
-        )
-    ).scalar_one_or_none()
-    if regra is None or regra.modo != catalogo.MODO_ENVIAR:
-        raise EnvioRecusado(
-            RECUSA_REGRA_NAO_ENVIA, "A regra desta automação nesta loja não está em enviar."
-        )
+    await _regra_em_enviar(session, codigo, integration.id)
     return _Destino(canal=canal, integration=integration)
+
+
+def _parte_pronta(parte: dict | None, texto: str | None) -> dict:
+    """A parte a mandar: a de `parte`, ou um texto (o contrato antigo: só `texto`)."""
+    if isinstance(parte, dict) and parte.get("tipo"):
+        return dict(parte)
+    return {"tipo": "texto", "texto": texto or ""}
+
+
+def _marca(
+    codigo: str,
+    parte: dict,
+    *,
+    registro_id: UUID | None,
+    regra_versao: int | None,
+    indice: int,
+    pedido: str | None,
+) -> dict:
+    """A marca do motor (`payload.automacao`): a régua, a leitura e o comparador leem."""
+    marca = {
+        "codigo": codigo,
+        "registro_id": str(registro_id) if registro_id else None,
+        "regra_versao": regra_versao,
+        "parte": parte["tipo"],
+        "indice": indice,
+    }
+    if parte["tipo"] == "cartao_pedido":
+        marca["pedido"] = str(pedido or "")
+    elif parte["tipo"] == "figurinha":
+        marca["figurinha"] = str(parte.get("figurinha") or "")
+        marca["pacote"] = str(parte.get("pacote") or "")
+    return marca
+
+
+def _linha_da_parte(parte: dict, *, pedido: str | None) -> tuple[str, str | None, list]:
+    """(tipo, texto, anexos) da linha de `atendimento_mensagens` — como a leitura grava."""
+    from app.services.atendimento import enriquecer
+    from app.services.atendimento.constantes import rotulo_tipo_plataforma
+
+    if parte["tipo"] == "cartao_pedido":
+        return "pedido", None, [enriquecer.cartao_pedido_vazio(pedido or "")]
+    if parte["tipo"] == "figurinha":
+        return "outro", rotulo_tipo_plataforma("sticker"), []
+    return "texto", parte.get("texto"), []
+
+
+def _conferir_parte(plataforma: str, parte: dict, *, pedido: str | None) -> None:
+    """Cartão e figurinha só na Shopee; o cartão precisa do pedido."""
+    tipo = parte.get("tipo")
+    if tipo == "texto":
+        return
+    if tipo not in PARTES_SO_SHOPEE or plataforma != "shopee":
+        raise EnvioRecusado(
+            RECUSA_PARTE_NAO_SUPORTADA, f"Parte {tipo!r} não sai por esta plataforma."
+        )
+    if tipo == "cartao_pedido" and not str(pedido or "").strip():
+        raise EnvioRecusado(RECUSA_PARTE_NAO_SUPORTADA, "Cartão do pedido sem o número do pedido.")
+
+
+async def _chamar_plataforma_automatica(
+    session: AsyncSession,
+    conversa: AtendimentoConversa | None,
+    integration: Integration,
+    plataforma: str,
+    parte: dict,
+    *,
+    to_id: str | None = None,
+    pedido: str | None = None,
+    auto_reply: bool = False,
+) -> ResultadoEnvio:
+    """Fala com a plataforma para UMA parte. Nunca levanta (como `_chamar_plataforma`).
+
+    O texto comum de uma conversa sai pelo `enviar_texto` de sempre; o cartão,
+    a figurinha, a resposta automática e o envio sem conversa só pela
+    `enviar_parte` do adaptador (Shopee). A resposta automática (a campanha
+    da Shopee) só sai pela `enviar_parte(auto_reply=True)`: sem ela,
+    `sem_auto_reply` e nada sai — nunca como mensagem normal.
+    """
+    s = get_settings()
+    if s.atendimento_simulador and s.is_prod:
+        return ResultadoEnvio(ok=False, erro="simulador_em_producao")
+    if vai_para_o_simulador(plataforma):
+        return ResultadoEnvio(
+            ok=True,
+            externo_id=f"sim:{uuid4()}",
+            payload={"simulador": True, "conversation_id": f"sim:{uuid4()}"},
+        )
+    try:
+        cliente = await clientes.cliente_da_integracao(integration)
+    except Exception as e:  # noqa: BLE001
+        return ResultadoEnvio(ok=False, erro=f"cliente_indisponivel: {type(e).__name__}")
+    try:
+        modulo = adaptador(plataforma)
+        enviar_parte = getattr(modulo, "enviar_parte", None)
+        if auto_reply and not _sabe_auto_reply(enviar_parte):
+            return ResultadoEnvio(ok=False, erro="sem_auto_reply")
+        simples = parte.get("tipo") == "texto" and not auto_reply and conversa is not None
+        if simples and enviar_parte is None:
+            return await asyncio.wait_for(
+                modulo.enviar_texto(session, conversa, integration, cliente, parte["texto"]),
+                timeout=TEMPO_MAXIMO_ENVIO_S,
+            )
+        if enviar_parte is None:
+            return ResultadoEnvio(ok=False, erro=f"{plataforma} parte_nao_suportada")
+        return await asyncio.wait_for(
+            enviar_parte(
+                session,
+                conversa,
+                integration,
+                cliente,
+                parte,
+                to_id=to_id,
+                pedido=pedido,
+                auto_reply=auto_reply,
+            ),
+            timeout=TEMPO_MAXIMO_ENVIO_S,
+        )
+    except TimeoutError:
+        return ResultadoEnvio(ok=False, ambiguo=True, erro="timeout")
+    except Exception as e:  # noqa: BLE001
+        return ResultadoEnvio(ok=False, ambiguo=True, erro=f"erro_inesperado: {type(e).__name__}")
+
+
+def _vai_como_auto_reply(aut, plataforma: str, parte: dict) -> bool:
+    """O TEXTO da campanha da Shopee sai como resposta automática (como o Duoke).
+
+    O cartão e a figurinha vão como mensagem normal — também como o Duoke
+    (medido: 1.940 cartões e 969 figurinhas `status=normal` em 7 dias).
+    """
+    return bool(
+        aut is not None and aut.campanha and plataforma == "shopee" and parte["tipo"] == "texto"
+    )
 
 
 async def enviar_automatica(
@@ -1628,45 +1811,58 @@ async def enviar_automatica(
     conversa: AtendimentoConversa,
     *,
     codigo: str,
-    texto: str,
+    texto: str | None = None,
+    parte: dict | None = None,
+    pedido: str | None = None,
     registro_id: UUID | None,
     regra_versao: int | None,
     indice: int = 0,
 ) -> AtendimentoMensagem:
-    """Envia UMA parte de texto da mensagem automática; devolve a mensagem gravada.
+    """Envia UMA parte da mensagem automática na conversa; devolve a mensagem gravada.
+
+    A parte é `parte` (`{"tipo": "texto"|"cartao_pedido"|"figurinha", ...}`)
+    ou, no contrato antigo, o `texto`. O cartão leva o `pedido`.
 
     O contrato do `enviar_resposta`: `EnvioRecusado` = nada saiu (trava
     nossa; `RECUSAS_TEMPORARIAS` passam sozinhas); erro da plataforma vira
     `falhou`/`revisar` na mensagem; COMMITA antes de falar com a plataforma e
     depois. A mensagem nasce `davinci_auto` com `payload.automacao`, que a
     régua reconhece (não fecha a vez do comprador, a IA não aprende com ela)
-    e a leitura adota quando a plataforma a devolve.
+    e a leitura adota quando a plataforma a devolve (o texto pelo texto; o
+    cartão e a figurinha pela marca — `gravar.parte_da_plataforma`).
     """
+    pronta = _parte_pronta(parte, texto)
     ponto = await session.begin_nested()
     try:
         await travar_conversa(session, conversa)
         destino = await _destino_automatica(session, conversa, codigo=codigo)
-        normalizado = _preparar_texto(texto, conversa=conversa, origem=ORIGEM_AUTO)
-        await _conferir_repetido(session, conversa, normalizado)
+        _conferir_parte(conversa.plataforma, pronta, pedido=pedido)
+        if pronta["tipo"] == "texto":
+            pronta["texto"] = _preparar_texto(
+                pronta.get("texto"), conversa=conversa, origem=ORIGEM_AUTO
+            )
+            await _conferir_repetido(session, conversa, pronta["texto"])
         await aposentar_envios_presos(session, conversa_id=conversa.id)
+        tipo, texto_linha, anexos = _linha_da_parte(pronta, pedido=pedido)
         mensagem = AtendimentoMensagem(
             conversa_id=conversa.id,
             externo_id=None,
             autor=AUTOR_LOJA,
             origem=ORIGEM_AUTO,
-            tipo="texto",
-            texto=normalizado,
-            anexos=[],
+            tipo=tipo,
+            texto=texto_linha,
+            anexos=anexos,
             enviada_em=None,
             status=MSG_ENVIANDO,
             payload={
-                "automacao": {
-                    "codigo": codigo,
-                    "registro_id": str(registro_id) if registro_id else None,
-                    "regra_versao": regra_versao,
-                    "parte": "texto",
-                    "indice": indice,
-                }
+                "automacao": _marca(
+                    codigo,
+                    pronta,
+                    registro_id=registro_id,
+                    regra_versao=regra_versao,
+                    indice=indice,
+                    pedido=pedido,
+                )
             },
         )
         await session.flush()
@@ -1692,17 +1888,17 @@ async def enviar_automatica(
         mensagem_id=str(mensagem.id),
         plataforma=conversa.plataforma,
         automacao=codigo,
+        parte=pronta["tipo"],
         registro_id=str(registro_id) if registro_id else None,
     )
-    from app.services.atendimento import automacoes_catalogo as catalogo
-
-    aut = catalogo.automacao(codigo)
-    resultado = await _chamar_plataforma(
+    resultado = await _chamar_plataforma_automatica(
         session,
         conversa,
         destino.integration,
-        normalizado,
-        auto_reply=bool(aut is not None and aut.campanha),
+        conversa.plataforma,
+        pronta,
+        pedido=pedido,
+        auto_reply=_vai_como_auto_reply(_automacao_do_codigo(codigo), conversa.plataforma, pronta),
     )
     await _gravar_resultado(
         session,
@@ -1710,7 +1906,7 @@ async def enviar_automatica(
         mensagem,
         resultado,
         rascunho=None,
-        texto_digitado=normalizado,
+        texto_digitado=pronta.get("texto") or "",
         user=None,
         origem=ORIGEM_AUTO,
         avaliar=False,
@@ -1720,7 +1916,253 @@ async def enviar_automatica(
         conversa_id=str(conversa.id),
         mensagem_id=str(mensagem.id),
         automacao=codigo,
+        parte=pronta["tipo"],
         status=mensagem.status,
         bloqueio=bool(resultado.bloqueio),
     )
     return mensagem
+
+
+@dataclass
+class EnvioSemConversa:
+    """O que saiu (ou não) pelo `to_id`, sem conversa no DaVinci.
+
+    `status` é o da mensagem (`enviada`/`revisar`/`falhou`); com `enviada`,
+    `conversa_id` e `mensagem_id` são as linhas que nasceram (ou foram
+    adotadas) aqui. `saiu` = a Shopee ACEITOU a parte, mesmo sem a linha
+    gravada (`revisar` por falha do banco depois): o motor não manda as
+    partes seguintes e trata a mensagem como pela metade.
+    """
+
+    status: str
+    conversa_id: UUID | None = None
+    mensagem_id: UUID | None = None
+    erro: str | None = None
+    saiu: bool = False
+
+
+async def _destino_sem_conversa(
+    session: AsyncSession, *, integration_id: UUID, codigo: str
+) -> _Destino:
+    """As travas do envio pelo `to_id` (sem conversa); levanta `EnvioRecusado`."""
+    integration = await session.get(Integration, integration_id, populate_existing=True)
+    if integration is None or integration.archived_at is not None:
+        raise EnvioRecusado(RECUSA_SEM_INTEGRACAO, "A loja não está mais conectada ao DaVinci.")
+    plataforma = str(getattr(integration.platform, "value", integration.platform) or "").lower()
+    if plataforma != "shopee":
+        # Só a Shopee manda para o comprador sem conversa (pelo `to_id`).
+        raise EnvioRecusado(
+            RECUSA_SOMENTE_LEITURA, "Sem conversa, só a Shopee manda (pelo comprador do pedido)."
+        )
+    aut = _travas_gerais_automatica(plataforma, codigo, "chat")
+    if aut.alvo != "pedido":
+        raise EnvioRecusado(RECUSA_REGRA_NAO_ENVIA, "Sem conversa só saem as automações do pedido.")
+    canal = (
+        await session.execute(
+            select(AtendimentoCanal)
+            .where(
+                AtendimentoCanal.integration_id == integration_id,
+                AtendimentoCanal.canal == aut.canal,
+            )
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+    if canal is None:
+        raise EnvioRecusado(RECUSA_SEM_INTEGRACAO, "A loja não tem a caixa do chat no DaVinci.")
+    await _regra_em_enviar(session, codigo, integration_id)
+    return _Destino(canal=canal, integration=integration)
+
+
+async def _gravar_sem_conversa(
+    session: AsyncSession,
+    destino: _Destino,
+    *,
+    conversation_id: str,
+    externo_id: str | None,
+    to_id: str,
+    comprador_nome: str | None,
+    pedido: str | None,
+    pronta: dict,
+    marca: dict,
+    resposta: dict,
+) -> tuple[AtendimentoConversa, AtendimentoMensagem]:
+    """A conversa que a Shopee devolveu e a nossa mensagem nela (ou a da leitura, adotada)."""
+    conversa, _ = await gravar.upsert_conversa(
+        session,
+        canal=destino.canal,
+        integration=destino.integration,
+        plataforma="shopee",
+        canal_nome=destino.canal.canal,
+        externo_id=conversation_id,
+        comprador_id=to_id,
+        comprador_nome=comprador_nome or None,
+        pedido_marketplace=pedido or None,
+    )
+    await gravar.travar_linha(session, conversa)
+    existente = (
+        (
+            await session.execute(
+                select(AtendimentoMensagem).where(
+                    AtendimentoMensagem.conversa_id == conversa.id,
+                    AtendimentoMensagem.externo_id == externo_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if externo_id
+        else None
+    )
+    if existente is not None:
+        # A leitura trouxe a mensagem antes de nós: ela é a nossa.
+        existente.origem = ORIGEM_AUTO
+        existente.autor = AUTOR_LOJA
+        existente.status = MSG_ENVIADA
+        existente.payload = {**(existente.payload or {}), "automacao": marca, "envio": resposta}
+        mensagem = existente
+    else:
+        tipo, texto_linha, anexos = _linha_da_parte(pronta, pedido=pedido)
+        mensagem = AtendimentoMensagem(
+            conversa_id=conversa.id,
+            externo_id=externo_id,
+            autor=AUTOR_LOJA,
+            origem=ORIGEM_AUTO,
+            tipo=tipo,
+            texto=texto_linha,
+            anexos=anexos,
+            enviada_em=datetime.now(UTC),
+            status=MSG_ENVIADA,
+            payload={"automacao": marca, "envio": resposta},
+        )
+        session.add(mensagem)
+        await session.flush()
+    await gravar.recalcular_conversa(session, conversa)
+    await session.commit()
+    return conversa, mensagem
+
+
+async def enviar_automatica_sem_conversa(
+    session: AsyncSession,
+    *,
+    integration_id: UUID,
+    codigo: str,
+    to_id: str,
+    pedido: str | None,
+    parte: dict,
+    registro_id: UUID | None,
+    regra_versao: int | None,
+    indice: int = 0,
+    comprador_nome: str | None = None,
+) -> EnvioSemConversa:
+    """Envia UMA parte pelo `to_id` (Shopee), sem conversa no DaVinci.
+
+    As mesmas travas da `enviar_automatica` (freio único, chave nova,
+    `shopee_mensagens_comprador`, `auto_reply` das campanhas, a regra RELIDA
+    em `enviar`), mais: só Shopee, só as automações do pedido. Sem conversa
+    não há linha em voo: quem trava contra duplicar é o registro `enviando`
+    do motor (chave única), commitado antes daqui.
+
+    A Shopee devolve `conversation_id` e `message_id` (medido nos envios da
+    senha da devolução: os mesmos ids que a leitura grava). Com eles, a
+    conversa nasce (`gravar.upsert_conversa`, com o comprador e o pedido) e a
+    mensagem nasce `davinci_auto` com a marca e o `externo_id` — a leitura
+    seguinte acha as duas pelo id e não duplica. Se a leitura chegou antes
+    (corrida), a mensagem dela é ADOTADA: ganha a origem e a marca. Sem
+    `conversation_id` na resposta, saiu mas não dá para ligar: `revisar`.
+    `EnvioRecusado` = nada saiu.
+    """
+    pronta = _parte_pronta(parte, None)
+    destino = await _destino_sem_conversa(session, integration_id=integration_id, codigo=codigo)
+    destinatario = str(to_id or "").strip()
+    if not destinatario:
+        raise EnvioRecusado(RECUSA_SEM_COMPRADOR, "Sem o comprador do pedido.")
+    _conferir_parte("shopee", pronta, pedido=pedido)
+    if pronta["tipo"] == "texto":
+        alvo = _ConversaDaLoja(plataforma="shopee", canal=destino.canal.canal)
+        pronta["texto"] = _preparar_texto(pronta.get("texto"), conversa=alvo, origem=ORIGEM_AUTO)
+    marca = _marca(
+        codigo,
+        pronta,
+        registro_id=registro_id,
+        regra_versao=regra_versao,
+        indice=indice,
+        pedido=pedido,
+    )
+    await session.commit()
+    logger.info(
+        "atendimento_automatica_sem_conversa_iniciada",
+        integration_id=str(integration_id),
+        automacao=codigo,
+        parte=pronta["tipo"],
+        registro_id=str(registro_id) if registro_id else None,
+    )
+    resultado = await _chamar_plataforma_automatica(
+        session,
+        None,
+        destino.integration,
+        "shopee",
+        pronta,
+        to_id=destinatario,
+        pedido=pedido,
+        auto_reply=_vai_como_auto_reply(_automacao_do_codigo(codigo), "shopee", pronta),
+    )
+    if not resultado.ok:
+        status = MSG_REVISAR if resultado.ambiguo else MSG_FALHOU
+        erro = (resultado.erro or resultado.bloqueio or "envio_falhou")[:500]
+        logger.info(
+            "atendimento_automatica_sem_conversa_concluida",
+            integration_id=str(integration_id),
+            automacao=codigo,
+            status=status,
+        )
+        return EnvioSemConversa(status=status, erro=erro)
+    resposta = dict(resultado.payload or {})
+    conversation_id = str(resposta.get("conversation_id") or "").strip()
+    if not conversation_id:
+        logger.warning(
+            "atendimento_automatica_sem_conversation_id",
+            integration_id=str(integration_id),
+            automacao=codigo,
+        )
+        return EnvioSemConversa(status=MSG_REVISAR, erro="shopee sem_conversation_id", saiu=True)
+    try:
+        conversa, mensagem = await _gravar_sem_conversa(
+            session,
+            destino,
+            conversation_id=conversation_id,
+            externo_id=str(resultado.externo_id) if resultado.externo_id else None,
+            to_id=destinatario,
+            comprador_nome=comprador_nome,
+            pedido=pedido,
+            pronta=pronta,
+            marca=marca,
+            resposta=resposta,
+        )
+    except DBAPIError as e:
+        # A mensagem SAIU: não dá para dizer que não. Sem a linha gravada, vira
+        # `revisar` (nunca retentada) — e a conferência é de pessoa.
+        await session.rollback()
+        logger.error(
+            "atendimento_automatica_sem_conversa_nao_gravada",
+            integration_id=str(integration_id),
+            automacao=codigo,
+            err=type(e).__name__,
+        )
+        return EnvioSemConversa(
+            status=MSG_REVISAR, erro=f"gravar_falhou: {type(e).__name__}", saiu=True
+        )
+    logger.info(
+        "atendimento_automatica_sem_conversa_concluida",
+        integration_id=str(integration_id),
+        conversa_id=str(conversa.id),
+        mensagem_id=str(mensagem.id),
+        automacao=codigo,
+        status=MSG_ENVIADA,
+    )
+    return EnvioSemConversa(status=MSG_ENVIADA, conversa_id=conversa.id, mensagem_id=mensagem.id)
+
+
+@dataclass
+class _ConversaDaLoja:
+    """O bastante de uma conversa para o validador (plataforma e caixa)."""
+
+    plataforma: str
+    canal: str

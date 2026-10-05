@@ -12,7 +12,11 @@ começando em modo seco (docs/atendimento-automacoes.md). Aqui:
   menu valendo, "aguarde" com o 2º no mesmo turno, convite uma vez, ciclo
   do "ficou alguma dúvida", o TikTok contando da última mensagem);
 - cada CONDIÇÃO e EXCLUSÃO da decisão (`decidir`);
-- o horário (09h–20h) e a validade; a semente (simular nas lojas do Duoke).
+- o horário (09h–20h) e a validade; a semente (simular nas lojas do Duoke);
+- as que faltavam do Duoke (05/10/2026, à noite), SÓ SIMULAÇÃO: o pedido não
+  pago com o cupom pela faixa do valor (a tabela tirada dos textos do Duoke),
+  a resposta da avaliação (pública + chat, 4–5★ e 1–3★) e o "pedido recebido"
+  do TikTok — a assinatura, a decisão, a semente e o "só simula".
 """
 
 from __future__ import annotations
@@ -67,6 +71,24 @@ DUOKE = {
     (cat.TIPO_POS, None): (
         "Oi! Só passando para saber se está tudo certo com o seu produto. Se sim e puder"
     ),
+    (cat.TIPO_NAO_PAGO, None): (
+        "Oi! 👋 Notamos que você deixou alguns itens no carrinho e queremos te dar uma "
+        "ajudinha para finalizar sua compra 😄\n\nPreparamos cupons exclusivos para você "
+        "economizar:\n\n💸 R$20 OFF"
+    ),
+}
+# A resposta da avaliação do Duoke (a pública e a do chat, com o usuário).
+DUOKE_AVALIACAO = {
+    cat.TIPO_AVALIACAO_BOA: (
+        "Obrigado pela confiança! 🙏 Volte sempre que precisar!",
+        "Obrigado pela confiança, fulana.123! 🙏 Volte sempre que precisar!",
+    ),
+    cat.TIPO_AVALIACAO_RUIM: (
+        "Sentimos muito pela experiência 😔 Não foi o atendimento que buscamos oferecer. "
+        "Estamos disponíveis pelo chat",
+        "fulana.123 Sentimos muito pela experiência 😔 Não foi o atendimento que buscamos "
+        "oferecer.",
+    ),
 }
 
 
@@ -86,9 +108,10 @@ def test_todo_texto_padrao_passa_no_validador(aut, comprador):
             comprador=comprador,
             plataforma=aut.plataforma,
             canal=aut.canal,
+            valores=cat.valores_de_exemplo(aut),
         )
         assert motivos == [], (aut.codigo, comprador, motivos)
-        textos = [p["texto"] for p in partes if p["tipo"] == "texto"]
+        textos = [p["texto"] for p in partes if p["tipo"] in cat.TIPOS_COM_TEXTO]
         assert textos and all("{" not in t for t in textos)
         # O usuário que parece telefone sai do texto (o validador barraria).
         if comprador == "5511999998888":
@@ -149,8 +172,15 @@ def test_assinatura_nao_pega_pessoa_nem_o_nosso_aguarde():
 
 
 def test_todo_texto_que_o_motor_manda_e_automatico_pela_regua():
-    """A rede para quando a leitura não adota a nossa linha (volta como `externo`)."""
+    """A rede para quando a leitura não adota a nossa linha (volta como `externo`).
+
+    Só as que ENVIAM: as que só simulam (`so_simular`) nunca saem — a régua não
+    precisa delas (a resposta da avaliação de pessoa também diria "obrigado pela
+    confiança"); no dia em que uma sair, este teste a cobra.
+    """
     for aut in _automaticas():
+        if aut.so_simular:
+            continue
         for loja in ("barbosa", "inova"):
             for nome in ("maria.silva", None):
                 partes, _ = cat.renderizar(
@@ -158,6 +188,7 @@ def test_todo_texto_que_o_motor_manda_e_automatico_pela_regua():
                     comprador=nome,
                     plataforma=aut.plataforma,
                     canal=aut.canal,
+                    valores=cat.valores_de_exemplo(aut),
                 )
                 for p in partes:
                     if p["tipo"] == "texto":
@@ -794,6 +825,35 @@ def test_opcao_ja_respondida_na_sessao():
         ("ml_menu", {"via_agente": True}, "via_agente"),
         ("ml_menu", {"reclamacao_ml": True}, "reclamacao_aberta"),
         ("shopee_opcao_4", {}, "sem_texto"),
+        # O pedido não pago com cupom ("carrinho").
+        (
+            "shopee_nao_pago",
+            {"status_pedido": "UNPAID", "total_pedido": 1200, "valor_cupom": 20},
+            None,
+        ),
+        (
+            "shopee_nao_pago",
+            {"pedido_pago": True, "total_pedido": 1200, "valor_cupom": 20},
+            "pedido_pago",
+        ),
+        ("shopee_nao_pago", {"pedido_cancelado": True}, "pedido_cancelado"),
+        ("shopee_nao_pago", {"status_pedido": "READY_TO_SHIP"}, "status_mudou"),
+        ("shopee_nao_pago", {"status_pedido": "UNPAID"}, "sem_valor"),
+        ("shopee_nao_pago", {"status_pedido": "UNPAID", "total_pedido": 950}, "abaixo_do_minimo"),
+        (
+            "shopee_nao_pago",
+            {"total_pedido": 1200, "valor_cupom": 20, "ja_recebeu": True},
+            "ja_recebeu",
+        ),
+        ("shopee_nao_pago", {"etiqueta": "reclamacao", "total_pedido": 1200}, "reclamacao_aberta"),
+        # A resposta da avaliação: vai como o Duoke (sem as exclusões das campanhas).
+        ("shopee_avaliacao_boa", {}, None),
+        ("shopee_avaliacao_boa", {"reclamacao_aberta": True}, None),
+        ("shopee_avaliacao_boa", {"estrelas_mudaram": True}, "estrelas_mudaram"),
+        ("shopee_avaliacao_ruim", {"pessoa_respondeu": True}, "pessoa_respondeu"),
+        # O "pedido recebido" do TikTok: as exclusões das campanhas.
+        ("tiktok_pedido_recebido", {}, None),
+        ("tiktok_pedido_recebido", {"etiqueta": "devolucao"}, "devolucao"),
     ],
 )
 def test_decidir_condicoes_e_exclusoes(codigo, fatos, motivo):
@@ -867,3 +927,156 @@ def test_divergencia_do_motivo_operacional():
     assert cat.divergencia_do_motivo("teto_dia") == "teto_dia"
     assert cat.divergencia_do_motivo("ja_comprou") is None
     assert cat.divergencia_do_motivo(None) is None
+
+
+# ── As que faltavam do Duoke (05/10/2026, à noite): só simulação ──────────
+
+
+def test_cupom_pela_faixa_do_duoke():
+    """A tabela tirada dos textos do Duoke (o valor do texto × o total do pedido)."""
+    assert cat.valor_cupom("Barbosa", 999.99) is None, "celular abaixo de R$ 1.000 não ganha"
+    assert cat.valor_cupom("barbosa", 1000) == 20
+    assert cat.valor_cupom("barbosa", 1495.84) == 20
+    assert cat.valor_cupom("barbosa", 1500.47) == 25
+    assert cat.valor_cupom("barbosa", 1930) == 25
+    assert cat.valor_cupom("barbosa", 2020.88) == 30
+    assert cat.valor_cupom("vortan", 14712.88) == 30
+    assert cat.valor_cupom(" INOVA ", 157.23) == 5
+    assert cat.valor_cupom("inova", 149.99) is None, "mala abaixo de R$ 150 não ganha (0 de 4)"
+    assert cat.valor_cupom("kfa", 499.53) == 5
+    assert cat.valor_cupom("minas", 507) == 10
+    assert cat.valor_cupom("poofy", 804.6) == 10
+    assert cat.valor_cupom("barbosa", None) is None
+    assert cat.tipo_da_loja("Inova") == "mala" and cat.tipo_da_loja("mega") == "celular"
+
+
+def test_o_cupom_entra_no_texto_e_sem_valor_o_validador_barra():
+    aut = cat.CATALOGO["shopee_nao_pago"]
+    partes, motivos = cat.renderizar(
+        cat.partes_padrao(aut, "barbosa"),
+        comprador="maria.silva",
+        plataforma="shopee",
+        canal="chat",
+        valores={"valor_cupom": "25"},
+    )
+    assert motivos == []
+    assert partes[0] == {"tipo": "cartao_pedido"}
+    assert "💸 R$25 OFF" in partes[1]["texto"] and "{" not in partes[1]["texto"]
+    assert "maria.silva" not in partes[1]["texto"], "o do Duoke não leva o nome"
+    _, sem_valor = cat.renderizar(
+        cat.partes_padrao(aut, "barbosa"), comprador=None, plataforma="shopee", canal="chat"
+    )
+    assert any("lacuna" in m for m in sem_valor)
+    assert cat.placeholders_de(aut).keys() == {"comprador", "valor_cupom"}
+    assert cat.placeholders_de(cat.CATALOGO["shopee_menu"]).keys() == {"comprador"}
+
+
+def test_resposta_da_avaliacao_publica_mais_chat_com_o_nome():
+    boa = cat.CATALOGO["shopee_avaliacao_boa"]
+    partes, motivos = cat.renderizar(
+        cat.partes_padrao(boa), comprador="ana.paula", plataforma="shopee", canal="chat"
+    )
+    assert motivos == []
+    assert [p["tipo"] for p in partes] == ["resposta_publica", "texto"]
+    assert partes[0]["texto"] == "Obrigado pela confiança! 🙏 Volte sempre que precisar!"
+    assert partes[1]["texto"] == "Obrigado pela confiança, ana.paula! 🙏 Volte sempre que precisar!"
+    ruim = cat.CATALOGO["shopee_avaliacao_ruim"]
+    partes, _ = cat.renderizar(
+        cat.partes_padrao(ruim), comprador=None, plataforma="shopee", canal="chat"
+    )
+    assert partes[1]["texto"] == cat.TEXTO_AVALIACAO_RUIM_PUBLICA, "sem o nome: só o público"
+    # O chat do Duoke (22 de 22): o usuário, um espaço e o texto público, sem vírgula.
+    partes, _ = cat.renderizar(
+        cat.partes_padrao(ruim), comprador="ana.paula", plataforma="shopee", canal="chat"
+    )
+    assert partes[1]["texto"] == "ana.paula " + cat.TEXTO_AVALIACAO_RUIM_PUBLICA
+    assert partes[0]["texto"] == cat.TEXTO_AVALIACAO_RUIM_PUBLICA
+    # A resposta do Duoke chega até ~18 h depois: a janela de comparação é de 24 h.
+    for aut in (boa, ruim):
+        assert cat.janela_comparacao(aut, T0, T0 + timedelta(hours=1)) == (
+            T0,
+            T0 + timedelta(hours=24),
+        )
+    # A pública passa pelo limite da resposta de avaliação (500), não o do chat.
+    longa = [{"tipo": "resposta_publica", "texto": "x" * 600}, {"tipo": "texto", "texto": "Oi!"}]
+    _, motivos = cat.renderizar(longa, comprador=None, plataforma="shopee", canal="chat")
+    assert any("500" in m for m in motivos)
+    assert (boa.estrelas, ruim.estrelas) == ((4, 5), (1, 3))
+    assert [cat.estrelas_da_faixa(n) for n in (1, 2, 3, 4, 5, None)] == [
+        "shopee_avaliacao_ruim",
+        "shopee_avaliacao_ruim",
+        "shopee_avaliacao_ruim",
+        "shopee_avaliacao_boa",
+        "shopee_avaliacao_boa",
+        None,
+    ]
+
+
+@pytest.mark.parametrize("tipo", list(DUOKE_AVALIACAO))
+def test_assinatura_da_resposta_da_avaliacao(tipo):
+    publica, chat = DUOKE_AVALIACAO[tipo]
+    assert cat.assinatura_avaliacao(publica) == tipo
+    assert cat.assinatura_avaliacao(chat) == tipo
+    # Fora das assinaturas de MENSAGEM: o comparador dela é pela avaliação.
+    assert cat.assinatura(chat) is None
+
+
+def test_assinatura_da_avaliacao_nao_pega_pessoa():
+    for texto in (
+        "Obrigado pela confiança!",  # pessoa, sem o resto do modelo
+        "Sentimos muito, vamos resolver",
+        "Olá! Obrigado pela avaliação, volte sempre",
+        "",
+        None,
+    ):
+        assert cat.assinatura_avaliacao(texto) is None, texto
+
+
+def test_so_simulam_e_a_semente_das_novas():
+    novas = (
+        "shopee_nao_pago",
+        "shopee_avaliacao_boa",
+        "shopee_avaliacao_ruim",
+        "tiktok_pedido_recebido",
+    )
+    for codigo in novas:
+        aut = cat.CATALOGO[codigo]
+        assert aut.so_simular in cat.SO_SIMULAR, codigo
+    assert {a.codigo for a in cat.CATALOGO.values() if a.so_simular} == set(novas)
+    sem = cat.regra_semente
+    nao_pago = cat.CATALOGO["shopee_nao_pago"]
+    assert sem(nao_pago, "Barbosa")["modo"] == cat.MODO_SIMULAR
+    assert sem(nao_pago, "atv")["modo"] == cat.MODO_SIMULAR
+    assert sem(nao_pago, "inova")["modo"] == cat.MODO_SIMULAR
+    assert sem(nao_pago, "kia")["modo"] == cat.MODO_DESLIGADO, "a Kia não tem (0 de 22)"
+    assert sem(nao_pago, "aguiar")["modo"] == cat.MODO_DESLIGADO
+    # Um por comprador em 24 h (o Duoke: nada abaixo de 24 h, de novo a partir de 27 h).
+    assert sem(nao_pago, "barbosa")["condicoes"] == {"um_por_comprador_h": 24}
+    assert cat.UM_POR_COMPRADOR_H == 24
+    boa = cat.CATALOGO["shopee_avaliacao_boa"]
+    assert sem(boa, "kia")["modo"] == cat.MODO_SIMULAR
+    assert sem(boa, "aguiar")["modo"] == cat.MODO_DESLIGADO, "a Aguiar responde à mão"
+    tt = cat.CATALOGO["tiktok_pedido_recebido"]
+    assert [sem(tt, n)["modo"] for n in ("atv", "barbosa", "mini", "injox", "jlas", "eron")] == [
+        cat.MODO_SIMULAR,
+        cat.MODO_SIMULAR,
+        cat.MODO_SIMULAR,
+        cat.MODO_DESLIGADO,
+        cat.MODO_DESLIGADO,
+        cat.MODO_DESLIGADO,
+    ]
+    # O "pedido recebido" do TikTok compara na conversa (o aviso não traz o nº);
+    # o da Shopee, pelo pedido; a avaliação, pela avaliação.
+    assert tt.na_conversa and not cat.CATALOGO["shopee_pedido_recebido"].na_conversa
+    assert not boa.na_conversa and boa.alvo == cat.ALVO_AVALIACAO
+    assert cat.automacao_do_modelo(cat.TIPO_PEDIDO_RECEBIDO, None, "tiktok", "chat") == (
+        "tiktok_pedido_recebido"
+    )
+    assert cat.automacao_do_modelo(cat.TIPO_NAO_PAGO, None, "shopee", "chat") == "shopee_nao_pago"
+
+
+def test_divergencia_do_carrinho_e_campanha():
+    aut = cat.CATALOGO["shopee_nao_pago"]
+    assert cat.divergencia_do_motivo("devolucao", aut) == "exclusao_disputa"
+    assert "visto_de_hora_em_hora" in cat.DIVERGENCIAS
+    assert aut.diferenca_combinada == "visto_de_hora_em_hora"

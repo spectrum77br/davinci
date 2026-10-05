@@ -93,6 +93,7 @@ from app.services.atendimento.constantes import (
     MSG_FALHOU,
     MSG_RECEBIDA,
     MSG_REVISAR,
+    ORIGEM_AUTO,
     ORIGEM_CLIENTE,
     ORIGEM_EXTERNO,
     ORIGEM_NOTA,
@@ -668,31 +669,77 @@ async def _mensagem_por_externo(
     ).scalar_one_or_none()
 
 
+def parte_da_plataforma(payload: object) -> tuple[str, str] | None:
+    """O cartão do pedido / a figurinha que a plataforma devolve → (parte, chave). PURA.
+
+    É como a leitura acha a parte SEM texto que o motor de automações mandou
+    (05/10/2026): o cartão casa pelo número do pedido, a figurinha pelo id
+    dela — os mesmos campos que o motor guarda na marca (`payload.automacao`:
+    `parte` + `pedido`/`figurinha`). Só a Shopee manda essas partes.
+    """
+    if not isinstance(payload, dict):
+        return None
+    tipo = payload.get("message_type")
+    conteudo = payload.get("content") if isinstance(payload.get("content"), dict) else {}
+    if tipo == TIPO_SHOPEE_CARTAO_PEDIDO:
+        sn = str(conteudo.get("order_sn") or "").strip()
+        return ("cartao_pedido", sn) if sn else None
+    if tipo == TIPO_SHOPEE_FIGURINHA:
+        figurinha = str(conteudo.get("sticker_id") or "").strip()
+        return ("figurinha", figurinha) if figurinha else None
+    return None
+
+
+def _parte_da_marca(marca: dict | None) -> tuple[str, str] | None:
+    """A parte SEM texto da nossa mensagem automática → (parte, chave), pela marca."""
+    if not marca:
+        return None
+    parte = marca.get("parte")
+    if parte == "cartao_pedido":
+        chave = str(marca.get("pedido") or "").strip()
+    elif parte == "figurinha":
+        chave = str(marca.get("figurinha") or "").strip()
+    else:
+        return None
+    return (parte, chave) if chave else None
+
+
 async def _nossa_para_adotar(
     session: AsyncSession,
     conversa: AtendimentoConversa,
     texto: str | None,
     enviada_em: datetime | None,
+    *,
+    payload: dict | None = None,
+    so_automatica: bool = False,
 ) -> AtendimentoMensagem | None:
     """A resposta que NÓS mandamos e que o sync está trazendo de volta.
 
-    Linha nossa (pessoa ou IA), ainda sem id da plataforma, em voo / ambígua /
-    enviada, com o mesmo texto normalizado, a até 15 min da que chegou. A
-    mais antiga ganha: se mandamos a mesma frase duas vezes, cada volta do
-    sync adota uma.
+    Linha nossa (pessoa, IA ou automação), ainda sem id da plataforma, em voo /
+    ambígua / enviada, com o mesmo texto normalizado, a até 15 min da que
+    chegou. A mais antiga ganha: se mandamos a mesma frase duas vezes, cada
+    volta do sync adota uma.
+
+    O cartão do pedido e a figurinha do motor de automações (sem texto) casam
+    pelo pedido / pela figurinha da marca (`parte_da_plataforma`), nunca pelo
+    rótulo "[Figurinha]". `so_automatica`: só a linha do motor (`davinci_auto`)
+    — é a resposta automática (`auto_reply`) da Shopee, que volta como
+    `sistema` e não pode adotar a resposta de uma pessoa.
     """
+    parte = parte_da_plataforma(payload)
     alvo = normalizar_para_comparar(texto)
-    if not alvo:
+    if parte is None and not alvo:
         return None
     referencia = enviada_em or datetime.now(UTC)
     momento = func.coalesce(AtendimentoMensagem.enviada_em, AtendimentoMensagem.created_at)
+    origens = (ORIGEM_AUTO,) if (so_automatica or parte is not None) else ORIGENS_DAVINCI
     candidatas = (
         (
             await session.execute(
                 select(AtendimentoMensagem)
                 .where(
                     AtendimentoMensagem.conversa_id == conversa.id,
-                    AtendimentoMensagem.origem.in_(ORIGENS_DAVINCI),
+                    AtendimentoMensagem.origem.in_(origens),
                     AtendimentoMensagem.externo_id.is_(None),
                     AtendimentoMensagem.status.in_(_STATUS_ADOTAVEIS),
                     momento >= referencia - JANELA_ADOCAO,
@@ -705,9 +752,43 @@ async def _nossa_para_adotar(
         .all()
     )
     for m in candidatas:
+        if parte is not None:
+            if _parte_da_marca(marca_automacao(m.payload)) == parte:
+                return m
+            continue
         if normalizar_para_comparar(m.texto) == alvo:
             return m
     return None
+
+
+async def _adotar(
+    session: AsyncSession,
+    conversa: AtendimentoConversa,
+    nossa: AtendimentoMensagem,
+    *,
+    externo_id: str | None,
+    enviada_em: datetime | None,
+    payload: dict | None,
+) -> AtendimentoMensagem:
+    """A nossa linha ganha o id da plataforma e vira `enviada` (a leitura a trouxe)."""
+    nossa.externo_id = externo_id
+    nossa.status = MSG_ENVIADA
+    nossa.erro = None
+    if enviada_em is not None:
+        nossa.enviada_em = enviada_em
+    if payload:
+        nossa.payload = {**(nossa.payload or {}), "sync": payload}
+    recalcular(conversa, [nossa])
+    # O envio que adotamos pode ter morrido antes de avaliar a
+    # sugestão (deploy no meio): a que ficou pendente não vale mais.
+    await _aposentar_rascunho(session, conversa, nossa)
+    await session.flush()
+    logger.info(
+        "atendimento_mensagem_adotada",
+        conversa_id=str(conversa.id),
+        mensagem_id=str(nossa.id),
+    )
+    return nossa
 
 
 def sanear_mensagem(
@@ -799,26 +880,35 @@ async def gravar_mensagem(
         elif autor in (AUTOR_SISTEMA, AUTOR_MEDIADOR):
             # O mediador (a plataforma na reclamação, 0353) é como o sistema:
             # não é resposta da loja — nada de adotar nem de `externo`.
+            # MENOS a resposta automática do motor de automações (05/10/2026):
+            # a campanha que o DaVinci manda como `auto_reply` volta como
+            # `sistema` — adota a NOSSA linha (`davinci_auto`, só ela), senão
+            # ela voltaria sem a marca e o comparador a contaria como do Duoke.
+            if autor == AUTOR_SISTEMA:
+                nossa = await _nossa_para_adotar(
+                    session, conversa, texto, enviada_em, payload=payload, so_automatica=True
+                )
+                if nossa is not None:
+                    await _adotar(
+                        session,
+                        conversa,
+                        nossa,
+                        externo_id=externo_id,
+                        enviada_em=enviada_em,
+                        payload=payload,
+                    )
+                    return nossa, False
             origem = ORIGEM_SISTEMA
         else:
-            nossa = await _nossa_para_adotar(session, conversa, texto, enviada_em)
+            nossa = await _nossa_para_adotar(session, conversa, texto, enviada_em, payload=payload)
             if nossa is not None:
-                nossa.externo_id = externo_id
-                nossa.status = MSG_ENVIADA
-                nossa.erro = None
-                if enviada_em is not None:
-                    nossa.enviada_em = enviada_em
-                if payload:
-                    nossa.payload = {**(nossa.payload or {}), "sync": payload}
-                recalcular(conversa, [nossa])
-                # O envio que adotamos pode ter morrido antes de avaliar a
-                # sugestão (deploy no meio): a que ficou pendente não vale mais.
-                await _aposentar_rascunho(session, conversa, nossa)
-                await session.flush()
-                logger.info(
-                    "atendimento_mensagem_adotada",
-                    conversa_id=str(conversa.id),
-                    mensagem_id=str(nossa.id),
+                await _adotar(
+                    session,
+                    conversa,
+                    nossa,
+                    externo_id=externo_id,
+                    enviada_em=enviada_em,
+                    payload=payload,
                 )
                 return nossa, False
             origem = ORIGEM_EXTERNO

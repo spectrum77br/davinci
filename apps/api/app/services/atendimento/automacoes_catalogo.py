@@ -21,7 +21,11 @@ nenhum dos dois:
     Sai daqui sem texto nenhum: só o que a decisão precisa;
   • os GATILHOS que nascem de uma conversa (`gatilhos_da_conversa`) e a
     DECISÃO de cada linha (`decidir`) sobre um dicionário de fatos;
-  • a RENDERIZAÇÃO do texto (`{comprador}`) e o validador.
+  • a RENDERIZAÇÃO do texto (`{comprador}` e as lacunas próprias, como o
+    `{valor_cupom}` do "carrinho") e o validador;
+  • (05/10, noite) as automações que SÓ SIMULAM (`so_simular`: o pedido não
+    pago com cupom, a resposta da avaliação, o "pedido recebido" do TikTok) e
+    a tabela do cupom do Duoke (`CUPOM_FAIXAS`, `valor_cupom`).
 
 Texto de comprador nunca sai daqui: a classificação lê o texto e devolve só
 números e códigos.
@@ -103,6 +107,8 @@ ALVO_CONVERSA = "conversa"
 ALVO_COMPRADOR = "comprador"
 ALVO_PEDIDO = "pedido"
 ALVO_DUOKE = "duoke"
+# A avaliação do comprador (a chave é `avaliacao:<comentario_id>`).
+ALVO_AVALIACAO = "avaliacao"
 
 FAMILIA_CONVERSA = "conversa"
 FAMILIA_PEDIDO = "pedido"
@@ -117,6 +123,11 @@ TIPO_DUVIDA_2 = "duvida_2"
 TIPO_PEDIDO_RECEBIDO = "pedido_recebido"
 TIPO_ENTREGUE = "entregue"
 TIPO_POS = "pos"
+# As que faltavam do Duoke (05/10/2026, à noite): o pedido não pago com cupom
+# ("carrinho") e a resposta da avaliação (4–5★ e 1–3★).
+TIPO_NAO_PAGO = "nao_pago"
+TIPO_AVALIACAO_BOA = "avaliacao_boa"
+TIPO_AVALIACAO_RUIM = "avaliacao_ruim"
 
 # Os gatilhos (o "quando").
 GATILHO_MENSAGEM = "mensagem"
@@ -125,6 +136,12 @@ GATILHO_SEGUINTE = "seguinte"  # nasce da decisão da anterior (26 h / 24 h)
 GATILHO_PEDIDO_PAGO = "pedido_pago"
 GATILHO_ENTREGUE = "entregue"
 GATILHO_CONCLUIDO = "concluido"
+# O pedido criado e ainda não pago (o índice do cartão "Cliente", de hora em hora).
+GATILHO_NAO_PAGO = "pedido_nao_pago"
+# A avaliação do comprador (lida a cada 30 min, `atendimento_avaliacoes_loja`).
+GATILHO_AVALIACAO = "avaliacao"
+# O aviso de pedido da própria TikTok ("Agradecemos pelo seu pedido!", papel ROBOT).
+GATILHO_PEDIDO_TIKTOK = "pedido_tiktok"
 
 # Motivos estáveis (a tela traduz; o registro guarda o código).
 MOTIVOS: dict[str, str] = {
@@ -154,12 +171,23 @@ MOTIVOS: dict[str, str] = {
     "teto_dia": "Passou do teto do dia",
     "teto_comprador": "Passou do teto de mensagens para este comprador",
     "texto_invalido": "O texto não passa no validador",
-    "sem_comprador": "Sem o comprador do pedido",
-    "sem_conversa": "Sem conversa com o comprador (envio sem conversa ainda não existe)",
+    "sem_comprador": "Sem o comprador do pedido (o índice de pedidos ainda não o trouxe)",
+    "sem_conversa": "Sem conversa com o comprador",
     "disputa_com_pessoa": "Reclamação ou devolução com pessoa atendendo",
     "duoke_mandou": "O Duoke já mandou (Duoke ainda ligado?)",
     "campanha_sem_auto_reply": "Campanha da Shopee sem a resposta automática confirmada",
     "envio_recusado": "O envio recusou",
+    # A parte N não saiu: com as anteriores já saídas, `revisar` + disjuntor.
+    "parte_2": "A 2ª parte não saiu (a 1ª já tinha saído: a mensagem ficou pela metade)",
+    "parte_3": "A 3ª parte não saiu (as anteriores já tinham saído: ficou pela metade)",
+    # Pedido não pago com cupom.
+    "pedido_pago": "O pedido já foi pago",
+    "abaixo_do_minimo": "Pedido abaixo do valor que ganha cupom (celular R$ 1.000; mala R$ 150)",
+    "sem_valor": "Sem o valor do pedido (o índice ainda não o trouxe)",
+    # Resposta da avaliação.
+    "estrelas_mudaram": "O comprador mudou a nota da avaliação",
+    # Uma regra em ENVIAR numa automação que só simula (o PATCH recusa; é a rede).
+    "so_simulacao": "Só simulação: esta automação não envia",
 }
 
 # Diferenças combinadas de propósito: ficam FORA da conta da %.
@@ -182,6 +210,29 @@ DIVERGENCIAS: dict[str, str] = {
     "opcao_repetida": (
         "O Duoke repete a resposta da opção a cada 12 h; o DaVinci responde uma vez"
     ),
+    "visto_de_hora_em_hora": (
+        "Não pago: o pedido foi pago ou cancelado entre os 30 min do Duoke e a hora em que "
+        "o DaVinci o viu (o índice de pedidos é de hora em hora)"
+    ),
+}
+
+# Automações que SÓ SIMULAM (05/10/2026, à noite: "deixe só pra mostrar que ele
+# enviaria mesmo corretamente, mas não enviar"): o PATCH recusa `enviar` (409
+# `so_simulacao`), o motor decide em `simular` mesmo com a regra em `enviar` e o
+# `enviar.py` recusa a automação. O porquê de cada uma (a tela mostra).
+SO_SIMULAR: dict[str, str] = {
+    "cupom_nao_confirmado": (
+        "o cupom (R$ 5 a R$ 30) é o da loja no painel do Duoke/Shopee: falta confirmar que "
+        "ele existe em cada loja antes de o DaVinci prometê-lo no chat"
+    ),
+    "avaliacao_publica": (
+        "a resposta da avaliação é PÚBLICA, e o envio pelo DaVinci continua proibido "
+        "(só pessoa responde avaliação) até uma decisão de propósito"
+    ),
+    "tiktok_abrir_conversa": (
+        "o envio exigiria abrir a conversa pela API da TikTok (Create Conversation) e "
+        "mandar o cartão do pedido (ORDER_CARD), que o DaVinci não tem"
+    ),
 }
 
 # O que trava a troca (tolerância zero): só DaVinci para quem devolveu ou cancelou.
@@ -191,6 +242,13 @@ ALERTAS: dict[str, str] = {
     "reclamacao": "Mandaria com reclamação aberta",
 }
 
+# Bling: as situações do fluxo de DEVOLUÇÃO (`devolution_stock_return`,
+# `routers.devolutions`) — Aguardando Devolução, Manutenção, Resolvido
+# (devolução resolvida ou troca), Perdimento e Sucata. O entregue e o pós não
+# vão para quem está nelas (como qualquer devolução, aberta ou encerrada), e o
+# "só DaVinci" para elas é alerta.
+SITUACOES_BLING_DEVOLUCAO = ("83957", "84677", "545902", "83956", "545901")
+
 # O comprador escreveu SÓ o número da opção (o menu tem 1 a 6).
 _DIGITO = re.compile(r"^\s*(?:op[cç][aã]o\s*)?([1-6])\s*[.)\-]?\s*$", re.IGNORECASE)
 
@@ -198,6 +256,15 @@ PLACEHOLDER_COMPRADOR = "{comprador}"
 PLACEHOLDERS: dict[str, str] = {
     "comprador": "o usuário do comprador na plataforma (some se não houver)",
 }
+# As lacunas de UMA automação só (`Automacao.lacunas`): o motor preenche na hora.
+PLACEHOLDERS_EXTRA: dict[str, str] = {
+    "valor_cupom": (
+        "o valor do cupom pela faixa do pedido, como o Duoke: celular R$ 20 (de R$ 1.000), "
+        "25 (de R$ 1.500) e 30 (de R$ 2.000); mala R$ 5 (de R$ 150) e 10 (de R$ 500)"
+    ),
+}
+# O valor de exemplo de cada lacuna extra (a prévia da regra e o teste do texto).
+EXEMPLOS_EXTRA: dict[str, str] = {"valor_cupom": "20"}
 
 # ── Textos padrão (os do Duoke, em pt-BR, com o nome dentro) ──────────────
 
@@ -282,13 +349,45 @@ TEXTO_POS_CONCLUSAO = (
     "puder avaliar, agradeço muito! Se tiver qualquer problema, me avisa que eu resolvo."
 )
 
+# O "carrinho" do Duoke (na prática, o pedido criado e não pago), medido em
+# produção (14 dias, 05/10/2026): 30 min depois da criação, sempre o mesmo texto,
+# só muda o valor do cupom (`CUPOM_FAIXAS`). O nome do comprador não vai.
+TEXTO_NAO_PAGO = (
+    "Oi! 👋 Notamos que você deixou alguns itens no carrinho e queremos te dar uma ajudinha "
+    "para finalizar sua compra 😄\n\n"
+    "Preparamos cupons exclusivos para você economizar:\n\n"
+    "💸 R${valor_cupom} OFF\n\n"
+    "É só aplicar o cupom no checkout e garantir seu desconto! 🛒✨\n\n"
+    "E fico a disposição para tirar qualquer duvida sobre o produto!"
+)
+# A resposta da avaliação do Duoke: a PÚBLICA (na avaliação) e a do chat.
+TEXTO_AVALIACAO_BOA_PUBLICA = "Obrigado pela confiança! 🙏 Volte sempre que precisar!"
+TEXTO_AVALIACAO_BOA_CHAT = "Obrigado pela confiança, {comprador}! 🙏 Volte sempre que precisar!"
+TEXTO_AVALIACAO_RUIM_PUBLICA = (
+    "Sentimos muito pela experiência 😔 Não foi o atendimento que buscamos oferecer. "
+    "Estamos disponíveis pelo chat para entender o que aconteceu e melhorar. Agradecemos o "
+    "feedback, ele nos ajuda a evoluir!"
+)
+# O chat do Duoke é o usuário, um espaço e o texto público ("fulana Sentimos
+# muito…"; 22 de 22 iguais em 7 dias, 05/10/2026): o mesmo aqui (sem o nome,
+# "Sentimos muito…").
+TEXTO_AVALIACAO_RUIM_CHAT = "{comprador} " + TEXTO_AVALIACAO_RUIM_PUBLICA
+
 PARTE_CARTAO = {"tipo": "cartao_pedido"}
 PARTE_FIGURINHA = {"tipo": "figurinha", "figurinha": "0007", "pacote": "br_shoppito"}
-TIPOS_PARTE = ("texto", "cartao_pedido", "figurinha")
+# A resposta PÚBLICA da avaliação (o `reply_comment` da Shopee), não o chat.
+PARTE_RESPOSTA_PUBLICA = "resposta_publica"
+TIPOS_PARTE = ("texto", "cartao_pedido", "figurinha", PARTE_RESPOSTA_PUBLICA)
+# As partes que têm texto (o editor, o validador, a lacuna).
+TIPOS_COM_TEXTO = ("texto", PARTE_RESPOSTA_PUBLICA)
 
 
 def _texto(t: str) -> dict:
     return {"tipo": "texto", "texto": t}
+
+
+def _publica(t: str) -> dict:
+    return {"tipo": PARTE_RESPOSTA_PUBLICA, "texto": t}
 
 
 # ── As lojas onde o Duoke manda hoje (levantamento de 05/10/2026) ─────────
@@ -314,6 +413,13 @@ SHOPEE_MENU = frozenset(
 )
 SHOPEE_CAMPANHAS = SHOPEE_MENU | {"atv"}
 SHOPEE_MALA = frozenset({"inova", "kfa", "minas", "poofy"})
+# O "carrinho" (pedido não pago com cupom): as 13 menos a Kia (0 de 22 não
+# pagos dela, 14 dias). A Aguiar também não tem.
+SHOPEE_NAO_PAGO = SHOPEE_CAMPANHAS - {"kia"}
+# A resposta da avaliação: as 13 (a Aguiar responde à mão).
+SHOPEE_AVALIACAO = SHOPEE_CAMPANHAS
+# O "pedido recebido" do TikTok: só ATV, Barbosa e Mini (0 em Injox, JLAS e Eron).
+TIKTOK_PEDIDO = frozenset({"atv", "barbosa", "mini"})
 TIKTOK_AGUARDE = frozenset({"mini", "barbosa", "atv", "eron"})
 TIKTOK_CONVITE = frozenset({"atv", "barbosa", "mini", "injox", "jlas", "eron"})
 TIKTOK_DUVIDA = frozenset({"atv", "barbosa", "mini", "eron"})
@@ -341,6 +447,46 @@ ML_MENU = frozenset(
 def nome_normalizado(nome: str | None) -> str:
     """O nome da integração para casar com as listas acima."""
     return " ".join((nome or "").split()).lower()
+
+
+# ── O cupom do "carrinho" (pedido não pago) ───────────────────────────────
+# A tabela do Duoke, tirada dos textos que ele mandou (SELECT em produção, 14
+# dias até 05/10/2026, o valor do cupom do texto × o total do pedido no índice
+# pelo cartão que vai junto): celular R$ 20 de 1.001,22 a 1.495,84 (211),
+# R$ 25 de 1.500,47 a 1.930 (45), R$ 30 a partir de 2.020,88 (97) e nenhum
+# abaixo de R$ 1.000 (0 de 466 não pagos); mala R$ 5 de 157,23 a 499,53 (50) e
+# R$ 10 de 507 a 804,60 (19), e nenhum abaixo de R$ 150 (0 de 4 não pagos de
+# mala abaixo disso). (piso do total, valor), em ordem. Os pisos de R$ 1.000,
+# R$ 1.500 e R$ 500 estão cercados nos dados (999,40 sem cupom e 1.001,22 com
+# R$ 20; 1.495,84 → 20 e 1.500,66 → 25; 499,53 → 5 e 507 → 10). O de R$ 2.000
+# só está entre 1.930 (R$ 25) e 2.020,88 (R$ 30), e o de R$ 150 da mala tem um
+# caso só (152,48 sem cupom; o menor com cupom, 157,23): os dois são do painel
+# do Duoke (doc §12).
+CUPOM_FAIXAS: dict[str, tuple[tuple[float, int], ...]] = {
+    "celular": ((1000.0, 20), (1500.0, 25), (2000.0, 30)),
+    "mala": ((150.0, 5), (500.0, 10)),
+}
+# Um "carrinho" por comprador (e loja) a cada 24 h — o padrão da regra
+# (`condicoes.um_por_comprador_h`). Medido (14 dias, 05/10/2026): com o
+# carrinho anterior a menos de 24 h, o Duoke não mandou (0 de 16); a partir
+# de 27,1 h, mandou de novo (26 vezes em 14 dias). O corte fica entre 24 e 27 h.
+UM_POR_COMPRADOR_H = 24
+
+
+def tipo_da_loja(nome_loja: str | None) -> str:
+    """ "mala" (Inova, KFA, Minas, Poofy) ou "celular" (as outras). PURA."""
+    return "mala" if nome_normalizado(nome_loja) in SHOPEE_MALA else "celular"
+
+
+def valor_cupom(nome_loja: str | None, total: float | None) -> int | None:
+    """O cupom do "carrinho" para o pedido desta loja (None = não ganha). PURA."""
+    if total is None:
+        return None
+    valor = None
+    for piso, cupom in CUPOM_FAIXAS[tipo_da_loja(nome_loja)]:
+        if float(total) >= piso:
+            valor = cupom
+    return valor
 
 
 # ── O catálogo ────────────────────────────────────────────────────────────
@@ -394,10 +540,34 @@ class Automacao:
     # entregue: o Duoke sai de madrugada e nós às 9h) — antes disso, a
     # mensagem ainda vai casar com ela.
     so_duoke_espera: timedelta = timedelta(hours=1)
+    # SÓ SIMULA (o código do porquê em `SO_SIMULAR`): nunca vai para `enviar`.
+    so_simular: str | None = None
+    # As lacunas próprias desta automação (além do `{comprador}`).
+    lacunas: tuple[str, ...] = ()
+    # Do pedido, mas comparada com o Duoke NA CONVERSA (o TikTok: o aviso de
+    # pedido da TikTok não traz o nº, e a conversa é a do comprador).
+    compara_na_conversa: bool = False
+    # A resposta da avaliação: a faixa de estrelas (inclusive).
+    estrelas: tuple[int, int] | None = None
 
     @property
     def espera_padrao(self) -> timedelta:
         return timedelta(minutes=self.atraso_min)
+
+    @property
+    def na_conversa(self) -> bool:
+        """O comparador procura o Duoke na conversa (e não pelo pedido)."""
+        return self.alvo not in (ALVO_PEDIDO, ALVO_AVALIACAO) or self.compara_na_conversa
+
+
+def placeholders_de(aut: Automacao) -> dict[str, str]:
+    """As lacunas que valem no texto desta automação (a tela explica cada uma)."""
+    return {**PLACEHOLDERS, **{k: PLACEHOLDERS_EXTRA[k] for k in aut.lacunas}}
+
+
+def valores_de_exemplo(aut: Automacao) -> dict[str, str]:
+    """O valor de exemplo das lacunas próprias (a prévia da regra e os testes)."""
+    return {k: EXEMPLOS_EXTRA[k] for k in aut.lacunas}
 
 
 def _min(n: float) -> timedelta:
@@ -629,6 +799,93 @@ def _montar() -> dict[str, Automacao]:
             comparar=("evento", _h(3), _h(8)),
             atraso_max_duoke=_h(8),
         ),
+        # ── As que faltavam (05/10/2026, à noite), SÓ EM SIMULAÇÃO ─────────
+        Automacao(
+            codigo="shopee_nao_pago",
+            plataforma="shopee",
+            canal=CANAL_CHAT,
+            nome='Pedido não pago, com cupom ("carrinho")',
+            tipo=TIPO_NAO_PAGO,
+            gatilho=GATILHO_NAO_PAGO,
+            alvo=ALVO_PEDIDO,
+            familia=FAMILIA_PEDIDO,
+            descricao=(
+                "Pedido criado e ainda não pago → 30 min depois da criação, uma vez por pedido e "
+                "uma por comprador em 24 h, com o cupom da faixa do valor (celular a partir de "
+                "R$ 1.000). O DaVinci vê o não pago de hora em hora: sai mais tarde que o Duoke."
+            ),
+            partes=(dict(PARTE_CARTAO), _texto(TEXTO_NAO_PAGO)),
+            atraso_min=30,
+            # O índice de pedidos roda no :22 com janela de 2 h: o não pago chega
+            # de 0 a ~60 min depois da criação (mais o atraso da rodada).
+            validade=_h(3),
+            lojas_duoke=SHOPEE_NAO_PAGO,
+            # Um por comprador em 24 h (`UM_POR_COMPRADOR_H`). Medido (14 dias,
+            # 05/10/2026): com menos de 24 h do carrinho anterior da mesma loja,
+            # o Duoke não mandou nenhum (0 de 16); de 27 h a 7 dias, mandou de
+            # novo (26 vezes, o menor intervalo 27,1 h). Na simulação de 7 dias,
+            # 168 h dava 14 "só Duoke" a mais.
+            condicoes={"um_por_comprador_h": UM_POR_COMPRADOR_H},
+            campanha=True,
+            so_simular="cupom_nao_confirmado",
+            lacunas=("valor_cupom",),
+            comparar=("evento", timedelta(0), _h(3)),
+            atraso_max_duoke=_h(1),
+            diferenca_combinada="visto_de_hora_em_hora",
+            so_duoke_espera=_h(3),
+        ),
+        Automacao(
+            codigo="shopee_avaliacao_boa",
+            plataforma="shopee",
+            canal=CANAL_CHAT,
+            nome="Resposta da avaliação 4 e 5★ (pública + chat)",
+            tipo=TIPO_AVALIACAO_BOA,
+            gatilho=GATILHO_AVALIACAO,
+            alvo=ALVO_AVALIACAO,
+            familia=FAMILIA_PEDIDO,
+            descricao=(
+                "Avaliação de 4 ou 5 estrelas lida pelo DaVinci (a cada 30 min) → 1 h depois: a "
+                "resposta pública e a mensagem no chat (o Duoke: mediana de 1h20)."
+            ),
+            partes=(_publica(TEXTO_AVALIACAO_BOA_PUBLICA), _texto(TEXTO_AVALIACAO_BOA_CHAT)),
+            atraso_min=60,
+            validade=_h(24),
+            lojas_duoke=SHOPEE_AVALIACAO,
+            campanha=True,
+            so_simular="avaliacao_publica",
+            estrelas=(4, 5),
+            # A resposta do Duoke chega até ~18 h depois (KFA, 1.079 min, 7 dias
+            # até 05/10/2026): a janela é de 24 h para não dar "só DaVinci".
+            comparar=("evento", timedelta(0), _h(24)),
+            atraso_max_duoke=_h(24),
+            so_duoke_espera=_h(3),
+        ),
+        Automacao(
+            codigo="shopee_avaliacao_ruim",
+            plataforma="shopee",
+            canal=CANAL_CHAT,
+            nome="Resposta da avaliação 1 a 3★ (pública + chat)",
+            tipo=TIPO_AVALIACAO_RUIM,
+            gatilho=GATILHO_AVALIACAO,
+            alvo=ALVO_AVALIACAO,
+            familia=FAMILIA_PEDIDO,
+            descricao=(
+                "Avaliação de 1 a 3 estrelas lida pelo DaVinci (a cada 30 min) → 1 h depois: a "
+                "resposta pública (desculpas, chama no chat) e a mensagem no chat."
+            ),
+            partes=(_publica(TEXTO_AVALIACAO_RUIM_PUBLICA), _texto(TEXTO_AVALIACAO_RUIM_CHAT)),
+            atraso_min=60,
+            validade=_h(24),
+            lojas_duoke=SHOPEE_AVALIACAO,
+            campanha=True,
+            so_simular="avaliacao_publica",
+            estrelas=(1, 3),
+            # A resposta do Duoke chega até ~18 h depois (KFA, 1.079 min, 7 dias
+            # até 05/10/2026): a janela é de 24 h para não dar "só DaVinci".
+            comparar=("evento", timedelta(0), _h(24)),
+            atraso_max_duoke=_h(24),
+            so_duoke_espera=_h(3),
+        ),
         Automacao(
             codigo="tiktok_aguarde",
             plataforma="tiktok",
@@ -712,6 +969,29 @@ def _montar() -> dict[str, Automacao]:
             espera_duoke=_min(5),
             comparar=("devido", _min(-30), _min(45)),
             atraso_max_duoke=_h(27),
+        ),
+        Automacao(
+            codigo="tiktok_pedido_recebido",
+            plataforma="tiktok",
+            canal=CANAL_CHAT,
+            nome="Pedido recebido",
+            tipo=TIPO_PEDIDO_RECEBIDO,
+            gatilho=GATILHO_PEDIDO_TIKTOK,
+            alvo=ALVO_PEDIDO,
+            familia=FAMILIA_PEDIDO,
+            descricao=(
+                'O aviso de pedido da própria TikTok ("Agradecemos pelo seu pedido!") → 5 min: o '
+                "cartão do pedido e o texto, uma vez por aviso. Só simulação: enviar exigiria "
+                "abrir a conversa e o cartão do pedido pela API."
+            ),
+            partes=(dict(PARTE_CARTAO), _texto(TEXTO_PEDIDO_RECEBIDO)),
+            atraso_min=5,
+            validade=_h(6),
+            lojas_duoke=TIKTOK_PEDIDO,
+            so_simular="tiktok_abrir_conversa",
+            compara_na_conversa=True,
+            comparar=("evento", timedelta(0), _h(1)),
+            atraso_max_duoke=_h(1),
         ),
         Automacao(
             codigo="ml_menu",
@@ -809,7 +1089,23 @@ ASSINATURAS_DUOKE: tuple[tuple[str, int | None, str, str], ...] = (
     (TIPO_ENTREGUE, None, "contem", "confirmamos a entrega do seu pedido"),
     (TIPO_ENTREGUE, None, "contem", "que alegria saber que sua mala ja chegou"),
     (TIPO_POS, None, "contem", "so passando para saber se esta tudo certo com o seu produto"),
+    # O "carrinho" (pedido não pago): o cartão do pedido vai junto (a até 2 s).
+    (TIPO_NAO_PAGO, None, "contem", "notamos que voce deixou alguns itens no carrinho"),
 )
+
+# A resposta da avaliação do Duoke: a PÚBLICA (`atendimento_avaliacoes_loja.
+# resposta_loja`) e a do CHAT (que começa pelo usuário no 1–3★). Fora das
+# `ASSINATURAS_DUOKE` de propósito: o comparador dela é pela avaliação, não
+# pela mensagem (o "só Duoke" de mensagem não a conta duas vezes). As DUAS
+# frases têm de estar (pessoa que escreve só "obrigado pela confiança" não casa).
+ASSINATURAS_AVALIACAO: tuple[tuple[str, str, str], ...] = (
+    (TIPO_AVALIACAO_BOA, "obrigado pela confianca", "volte sempre que precisar"),
+    (TIPO_AVALIACAO_RUIM, "sentimos muito pela experiencia", "nao foi o atendimento que buscamos"),
+)
+# O `resposta_em` que a Shopee grava na avaliação fica 59 min DEPOIS do envio
+# real (medido em produção: 3.540 s em todas, contra a mensagem do chat que sai
+# junto). A hora da resposta do Duoke é ele menos isto.
+ATRASO_RESPOSTA_EM_SHOPEE = timedelta(minutes=59)
 
 
 def assinatura(texto: str | None) -> tuple[str, int | None] | None:
@@ -820,6 +1116,27 @@ def assinatura(texto: str | None) -> tuple[str, int | None] | None:
     for tipo, opcao, como, trecho in ASSINATURAS_DUOKE:
         if n.startswith(trecho) if como == "inicio" else trecho in n:
             return tipo, opcao
+    return None
+
+
+def assinatura_avaliacao(texto: str | None) -> str | None:
+    """A resposta de avaliação do Duoke (pública ou do chat): o tipo, ou None. PURA."""
+    n = normalizar_inicio((texto or "")[:600])
+    if not n:
+        return None
+    for tipo, frase, outra in ASSINATURAS_AVALIACAO:
+        if frase in n and outra in n:
+            return tipo
+    return None
+
+
+def estrelas_da_faixa(estrelas: int | None) -> str | None:
+    """A automação de resposta de avaliação pela nota (None = fora). PURA."""
+    if estrelas is None:
+        return None
+    for aut in CATALOGO.values():
+        if aut.estrelas and aut.estrelas[0] <= int(estrelas) <= aut.estrelas[1]:
+            return aut.codigo
     return None
 
 
@@ -1042,16 +1359,33 @@ def renderizar_texto(texto: str, comprador: str | None) -> str:
     return texto.replace(PLACEHOLDER_COMPRADOR, nome)
 
 
+def _preencher(texto: str, valores: dict[str, str] | None) -> str:
+    """As lacunas próprias da automação (`{valor_cupom}`); a que ficar, o validador barra."""
+    for chave, valor in (valores or {}).items():
+        if valor is not None:
+            texto = texto.replace("{" + chave + "}", str(valor))
+    return texto
+
+
 def renderizar(
-    partes: Iterable[dict], *, comprador: str | None, plataforma: str, canal: str
+    partes: Iterable[dict],
+    *,
+    comprador: str | None,
+    plataforma: str,
+    canal: str,
+    valores: dict[str, str] | None = None,
 ) -> tuple[list[dict], list[str]]:
     """As partes prontas para sair + os motivos do validador (vazio = pode).
 
     Com o nome, o texto que não passa no validador (o usuário do comprador
     parece telefone ou perfil) tenta de novo SEM o nome — o Duoke manda de
-    qualquer jeito, e a mensagem sem o nome continua a mesma.
+    qualquer jeito, e a mensagem sem o nome continua a mesma. `valores`
+    preenche as lacunas próprias da automação (o cupom do "carrinho"). A
+    resposta PÚBLICA da avaliação passa pelo validador do canal dela
+    (`avaliacao`: 500 caracteres na Shopee).
     """
     from app.services.atendimento import validador
+    from app.services.atendimento.constantes import CANAL_AVALIACAO
 
     saida: list[dict] = []
     motivos: list[str] = []
@@ -1060,22 +1394,23 @@ def renderizar(
             motivos.append("parte inválida")
             continue
         tipo = parte.get("tipo")
-        if tipo != "texto":
+        if tipo not in TIPOS_COM_TEXTO:
             if tipo not in TIPOS_PARTE:
                 motivos.append(f"parte desconhecida ({tipo})")
             saida.append(dict(parte))
             continue
-        bruto = str(parte.get("texto") or "")
+        canal_parte = CANAL_AVALIACAO if tipo == PARTE_RESPOSTA_PUBLICA else canal
+        bruto = _preencher(str(parte.get("texto") or ""), valores)
         tentativas = [renderizar_texto(bruto, comprador)]
         if comprador and PLACEHOLDER_COMPRADOR in bruto:
             tentativas.append(renderizar_texto(bruto, None))
         ultimo: list[str] = []
         pronto = None
         for t in tentativas:
-            normalizado = validador.normalizar(t, plataforma=plataforma, canal=canal)
+            normalizado = validador.normalizar(t, plataforma=plataforma, canal=canal_parte)
             ultimo = list(
                 validador.validar(
-                    normalizado, plataforma=plataforma, canal=canal, origem=ORIGEM_AUTO
+                    normalizado, plataforma=plataforma, canal=canal_parte, origem=ORIGEM_AUTO
                 )
             )
             if not ultimo:
@@ -1084,7 +1419,7 @@ def renderizar(
         if pronto is None:
             motivos.extend(ultimo or ["texto vazio"])
             continue
-        saida.append({"tipo": "texto", "texto": pronto})
+        saida.append({"tipo": tipo, "texto": pronto})
     if not any(p.get("tipo") == "texto" for p in saida) and not motivos:
         motivos.append("sem texto")
     return saida, list(dict.fromkeys(motivos))
@@ -1639,14 +1974,7 @@ def decidir(aut: Automacao, f: dict, regra: Any = None) -> str | None:
             return "via_agente"
         if f.get("reclamacao_ml"):
             return "reclamacao_aberta"
-    campanha = aut.tipo in (
-        TIPO_CONVITE,
-        TIPO_DUVIDA_1,
-        TIPO_DUVIDA_2,
-        TIPO_PEDIDO_RECEBIDO,
-        TIPO_ENTREGUE,
-        TIPO_POS,
-    )
+    campanha = aut.tipo in _TIPOS_CAMPANHA
     if campanha:
         if f.get("pedido_cancelado"):
             return "pedido_cancelado"
@@ -1714,6 +2042,27 @@ def decidir(aut: Automacao, f: dict, regra: Any = None) -> str | None:
             return "sem_conversa"
         if f.get("status_pedido") != "COMPLETED":
             return "status_mudou"
+    elif aut.tipo == TIPO_NAO_PAGO:
+        # O Duoke manda 30 min depois da criação se o pedido AINDA não foi pago;
+        # o DaVinci vê o não pago de hora em hora, e na hora de decidir confere
+        # de novo (o Bling só recebe pedido pago).
+        if f.get("pedido_pago"):
+            return "pedido_pago"
+        if f.get("status_pedido") not in (None, "UNPAID"):
+            return "status_mudou"
+        if f.get("total_pedido") is None:
+            return "sem_valor"
+        if f.get("valor_cupom") is None:
+            return "abaixo_do_minimo"
+        # Um por comprador em 24 h (`UM_POR_COMPRADOR_H`, medido no Duoke).
+        if f.get("ja_recebeu"):
+            return "ja_recebeu"
+    elif aut.tipo in (TIPO_AVALIACAO_BOA, TIPO_AVALIACAO_RUIM):
+        if f.get("estrelas_mudaram"):
+            return "estrelas_mudaram"
+        # A avaliação já respondida por PESSOA (a resposta não é a do Duoke).
+        if f.get("pessoa_respondeu"):
+            return "pessoa_respondeu"
     if aut.plataforma == "shopee" and f.get("janela_shopee_ok") is False:
         return "fora_da_janela_shopee"
     return None
@@ -1726,6 +2075,7 @@ _TIPOS_CAMPANHA = (
     TIPO_PEDIDO_RECEBIDO,
     TIPO_ENTREGUE,
     TIPO_POS,
+    TIPO_NAO_PAGO,
 )
 
 

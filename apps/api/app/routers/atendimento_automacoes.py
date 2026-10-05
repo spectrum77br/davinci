@@ -24,18 +24,27 @@ Esta é a aba "Automáticas" do /atendimento:
         RECUSADO (409) enquanto `ATENDIMENTO_AUTOMACOES_ENVIO` estiver
         desligada, sem o envio geral, na campanha da Shopee sem a resposta
         automática (a chave E o envio por ela no adaptador), na loja sem
-        acesso e na regra sem texto; e pede (422) a confirmação "desliguei no
-        Duoke" e, se o critério da troca não passou NESTA loja em 7 dias, a
-        confirmação de que a pessoa sabe disso (`troca_sem_criterio`). O texto
-        passa no validador (422 com os motivos). Sobe a versão, carimba
-        `ligada_desde`/`enviar_desde` e, na troca `simular → enviar`, rearma
-        as linhas ainda válidas.
+        acesso e na regra sem texto — e SEMPRE na automação que só simula
+        (`so_simulacao`, também na regra que já estivesse em `enviar`: qualquer
+        mudança nela tem de levá-la para simular ou desligado); e pede (422)
+        a confirmação "desliguei no Duoke" e, se o critério da troca não
+        passou NESTA loja em 7 dias, a confirmação de que a pessoa sabe disso
+        (`troca_sem_criterio`). O texto passa no validador (422 com os
+        motivos). Sobe a versão, carimba `ligada_desde`/`enviar_desde` e, na
+        troca `simular → enviar`, rearma as linhas ainda válidas.
   POST  /api/atendimento/automacoes/{automacao}/simular-nas-lojas-do-duoke
         Cria em `simular` a regra ausente e liga a `desligado` nas lojas onde
         o Duoke manda hoje. NUNCA mexe em regra em `simular` ou `enviar`.
   POST  /api/atendimento/automacoes/previa
         Renderiza as partes com o nome de exemplo e devolve os motivos do
         validador. Não envia nada.
+  GET   /api/atendimento/automacoes/registro/{registro_id}/previa
+        "Como o comprador receberia": as partes EXATAS que sairiam por aquela
+        linha (o cartão com o nº do pedido, o texto com o usuário do comprador
+        preenchido, a figurinha, a resposta pública), montadas NA HORA — nada é
+        gravado, e o registro continua sem texto —, e ao lado as mensagens da
+        LOJA que o Duoke mandou de verdade (hora, diferença, se bateu). Nunca o
+        texto do comprador (`services/atendimento/automacoes_previa.py`).
 
 A MESMA TRAVA do /atendimento (`_so_admin`: só os admins de
 ATENDIMENTO_USUARIOS), a mesma permissão (`_view` para ler, `_edit` para
@@ -68,7 +77,7 @@ from app.models import (
 from app.routers.atendimento import _clausula_escopo, _edit, _no_escopo, _so_admin, _view
 from app.services.atendimento import automacoes_catalogo as cat
 from app.services.atendimento import automacoes_comparar as comparar
-from app.services.atendimento import lojas
+from app.services.atendimento import automacoes_previa, lojas
 
 logger = structlog.get_logger()
 
@@ -192,6 +201,10 @@ def _por_que_nao_enviar(
 ) -> list[str]:
     """Os códigos que impedem pôr a regra em `enviar` agora (vazio = pode)."""
     motivos = []
+    if aut.so_simular:
+        # O pedido não pago com cupom, a resposta da avaliação e o "pedido
+        # recebido" do TikTok: só mostram o que mandariam (05/10/2026).
+        motivos.append("so_simulacao")
     if aut.travada:
         motivos.append("sem_texto")
     if not ch["envio_automacoes"]:
@@ -227,8 +240,11 @@ def _aut_out(aut: cat.Automacao) -> dict[str, Any]:
         "janela_inicio": _hhmm(inicio),
         "janela_fim": _hhmm(fim),
         "condicoes_padrao": dict(aut.condicoes),
-        "placeholders": dict(cat.PLACEHOLDERS),
+        "placeholders": cat.placeholders_de(aut),
         "seguinte": aut.seguinte,
+        # Só simula (o porquê, em português): a tela trava o Enviar com ele.
+        "so_simulacao": aut.so_simular,
+        "so_simulacao_texto": cat.SO_SIMULAR.get(aut.so_simular or ""),
     }
 
 
@@ -556,7 +572,7 @@ async def estatisticas(
 
 
 class ParteIn(BaseModel):
-    tipo: str = Field(pattern="^(texto|cartao_pedido|figurinha)$")
+    tipo: str = Field(pattern="^(texto|cartao_pedido|figurinha|resposta_publica)$")
     texto: str | None = Field(default=None, max_length=2000)
     figurinha: str | None = Field(default=None, max_length=16)
     pacote: str | None = Field(default=None, max_length=64)
@@ -583,8 +599,8 @@ class RegraIn(BaseModel):
 def _partes_limpas(partes: list[ParteIn]) -> list[dict]:
     saida = []
     for p in partes:
-        if p.tipo == "texto":
-            saida.append({"tipo": "texto", "texto": (p.texto or "").strip()})
+        if p.tipo in cat.TIPOS_COM_TEXTO:
+            saida.append({"tipo": p.tipo, "texto": (p.texto or "").strip()})
         elif p.tipo == "figurinha":
             saida.append(
                 {
@@ -726,6 +742,17 @@ async def mudar_regra(
         raise HTTPException(
             422, detail={"code": "sem_texto", "detail": "Esta opção ainda não tem texto."}
         )
+    if modo == cat.MODO_ENVIAR and aut.so_simular:
+        # A que só simula nunca fica em `enviar` — nem a regra que já estivesse
+        # nele (mexida direto no banco): só sai dele (simular ou desligado).
+        raise HTTPException(
+            409,
+            detail={
+                "code": "so_simulacao",
+                "motivos": ["so_simulacao"],
+                "detail": "Esta automação só simula: ponha a regra em simular ou desligado.",
+            },
+        )
     if modo == cat.MODO_ENVIAR and modo_antes != cat.MODO_ENVIAR:
         motivos = _por_que_nao_enviar(aut, canal, chaves())
         if motivos:
@@ -766,8 +793,17 @@ async def mudar_regra(
     mudou_versao = False
     if body.partes is not None:
         partes = _partes_limpas(body.partes)
+        if aut.alvo != cat.ALVO_AVALIACAO and any(
+            p["tipo"] == cat.PARTE_RESPOSTA_PUBLICA for p in partes
+        ):
+            # A resposta PÚBLICA só existe na resposta da avaliação.
+            raise HTTPException(422, detail={"code": "parte_invalida"})
         _, motivos = cat.renderizar(
-            partes, comprador=NOME_EXEMPLO, plataforma=aut.plataforma, canal=aut.canal
+            partes,
+            comprador=NOME_EXEMPLO,
+            plataforma=aut.plataforma,
+            canal=aut.canal,
+            valores=cat.valores_de_exemplo(aut),
         )
         if motivos:
             raise HTTPException(422, detail={"code": "texto_invalido", "motivos": motivos})
@@ -936,13 +972,48 @@ async def previa(
         if body.partes is not None
         else cat.partes_padrao(aut, nome_integ)
     )
+    valores = cat.valores_de_exemplo(aut)
     prontas, motivos = cat.renderizar(
-        partes, comprador=NOME_EXEMPLO, plataforma=aut.plataforma, canal=aut.canal
+        partes,
+        comprador=NOME_EXEMPLO,
+        plataforma=aut.plataforma,
+        canal=aut.canal,
+        valores=valores,
     )
-    sem_nome, _ = cat.renderizar(partes, comprador=None, plataforma=aut.plataforma, canal=aut.canal)
+    sem_nome, _ = cat.renderizar(
+        partes, comprador=None, plataforma=aut.plataforma, canal=aut.canal, valores=valores
+    )
     return {
         "partes": prontas,
         "sem_nome": sem_nome,
         "motivos": motivos,
         "comprador_exemplo": NOME_EXEMPLO,
+    }
+
+
+@router.get("/automacoes/registro/{registro_id}/previa")
+async def previa_do_registro(
+    registro_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(_view)],
+) -> dict[str, Any]:
+    """Como o comprador receberia ESTA linha, ao lado do que o Duoke mandou de verdade.
+
+    Monta na hora (nada é gravado; o registro continua sem texto). Fora da
+    equipe, ou linha que não existe: 404.
+    """
+    scope = await resolve_team_scope(session, user)
+    x = await session.get(_R, registro_id)
+    if x is None or not _no_escopo(scope, x.integration_id):
+        raise HTTPException(404, detail={"code": "registro_nao_encontrado"})
+    integ = await session.get(Integration, x.integration_id)
+    nomes = {x.integration_id: await lojas.nome_da_loja(session, integ)} if integ else {}
+    previa_linha = await automacoes_previa.montar(
+        session, x, nome_loja=integ.name if integ is not None else None
+    )
+    return {
+        "linha": _linha_out(x, nomes),
+        "automacao": previa_linha["automacao"],
+        "davinci": previa_linha["davinci"],
+        "duoke": previa_linha["duoke"],
     }

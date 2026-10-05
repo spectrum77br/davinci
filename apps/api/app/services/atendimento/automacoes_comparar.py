@@ -24,6 +24,11 @@ rodada do motor (`automacoes.rodada`), só lendo o banco:
   3. DISJUNTOR — o Duoke mandou numa regra que já está em `enviar` (depois
      da troca): a regra volta sozinha para `simular` e o log avisa.
 
+A resposta da avaliação (05/10, noite) compara pela própria AVALIAÇÃO
+(`_comparar_avaliacoes`: a resposta pública gravada, com o chat do Duoke junto)
+e tem o "só Duoke" dela (`_so_duoke_avaliacoes`); o pedido não pago visto
+tarde pelo índice de hora em hora é a diferença combinada `visto_de_hora_em_hora`.
+
 `estatisticas` é a conta que a tela mostra (precisão, cobertura e a % que
 bateu, separadas; a diferença para o Duoke e o atraso real do DaVinci) e o
 critério da troca. `duoke_dos_pedidos` é a mesma régua do pedido para o motor
@@ -51,6 +56,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models import (
     AtendimentoAutomacaoRegistro,
     AtendimentoAutomacaoRegra,
+    AtendimentoAvaliacaoLoja,
     AtendimentoCanal,
     AtendimentoConversa,
     AtendimentoMensagem,
@@ -88,6 +94,12 @@ SO_DUOKE_ESPERA = timedelta(hours=1)
 MENU_SEM_COMPRADOR = timedelta(minutes=3)
 # A resposta de opção repetida pelo Duoke (o ciclo de 12 h do robô).
 OPCAO_REPETIDA = timedelta(hours=36)
+# O "carrinho": o índice de pedidos vê o pedido na 1ª rodada (no :22, de 0 a
+# ~60 min depois da criação, mais a rodada). Pago no Bling até tanto depois da
+# criação = pago antes de o índice o ver não pago (`carrinhos_vistos_tarde`).
+VISTO_PELO_INDICE = timedelta(hours=2)
+# Bling no fluxo de devolução (Resolvido, Aguardando Devolução...).
+_SITUACOES_DEVOLUCAO_BLING = cat.SITUACOES_BLING_DEVOLUCAO
 # Critério da troca (proposta; decisão do Eduardo, §6.5 do doc).
 CRITERIO_MINIMO = 0.95
 CRITERIO_CASOS = 30
@@ -467,6 +479,123 @@ async def _comparar_pedidos(
     return mandou, nao
 
 
+async def chats_de_avaliacao(
+    session: AsyncSession, conversa_ids: list[UUID], ini: datetime, fim: datetime
+) -> dict[UUID, list[tuple[UUID, datetime, str]]]:
+    """A mensagem do CHAT que o Duoke manda junto com a resposta da avaliação.
+
+    Conversa → [(mensagem, hora, tipo)], só de FORA (sem a marca do motor), pelas
+    duas frases do modelo (`automacoes_catalogo.assinatura_avaliacao`).
+    """
+    if not conversa_ids:
+        return {}
+    minusculo = func.lower(func.left(_M.texto, 300))
+    linhas = (
+        await session.execute(
+            select(_M.id, _M.conversa_id, _momento(), func.left(_M.texto, 600)).where(
+                _M.conversa_id.in_(sorted(set(conversa_ids), key=str)),
+                _de_fora(),
+                _no_intervalo(ini, fim),
+                or_(
+                    minusculo.like(_trecho_like("obrigado pela confianca")),
+                    minusculo.like(_trecho_like("sentimos muito pela experiencia")),
+                ),
+            )
+        )
+    ).all()
+    saida: dict[UUID, list[tuple[UUID, datetime, str]]] = defaultdict(list)
+    for mid, cid, em, texto in linhas:
+        tipo = cat.assinatura_avaliacao(texto)
+        if tipo:
+            saida[cid].append((mid, _utc(em), tipo))
+    return saida
+
+
+def hora_da_resposta_publica(resposta_em: datetime | None) -> datetime | None:
+    """A hora REAL da resposta pública: o `resposta_em` da Shopee menos os 59 min a mais."""
+    em = _utc(resposta_em)
+    return em - cat.ATRASO_RESPOSTA_EM_SHOPEE if em is not None else None
+
+
+def _lida_em(av: Any) -> datetime | None:
+    """Quando a leitura das avaliações viu esta avaliação pela última vez."""
+    dados = av.dados if isinstance(getattr(av, "dados", None), dict) else {}
+    conferida = None
+    try:
+        conferida = _utc(
+            datetime.fromisoformat(str(dados.get("conferida_em")).replace("Z", "+00:00"))
+        )
+    except (TypeError, ValueError):
+        conferida = None
+    candidatas = [t for t in (_utc(getattr(av, "atualizado_em", None)), conferida) if t is not None]
+    return max(candidatas) if candidatas else None
+
+
+async def _comparar_avaliacoes(
+    session: AsyncSession, linhas: list[AtendimentoAutomacaoRegistro], *, agora: datetime
+) -> tuple[int, int]:
+    """As respostas de avaliação: pela resposta PÚBLICA que a avaliação já tem.
+
+    O Duoke responde na própria Shopee (`atendimento_avaliacoes_loja.
+    resposta_loja`, lida a cada 30 min) e manda uma mensagem no chat junto.
+    Casou o modelo dele → `mandou`, com a hora do chat (achado na conversa do
+    comprador) ou o `resposta_em` menos os 59 min que a Shopee grava a mais. Sem
+    a resposta do Duoke e com a avaliação relida depois do fim da janela (ou
+    respondida por pessoa) → `nao_mandou`; senão continua pendente.
+    """
+    if not linhas:
+        return 0, 0
+    from app.services.atendimento.automacoes import avaliacoes_das_linhas
+
+    avaliacoes = await avaliacoes_das_linhas(session, linhas)
+    janelas = {
+        x.id: cat.janela_comparacao(cat.CATALOGO[x.automacao], x.evento_em, x.devido_em)
+        for x in linhas
+    }
+    ini = min(j[0] for j in janelas.values())
+    fim = min(max(j[1] for j in janelas.values()), agora)
+    chats = await chats_de_avaliacao(
+        session, [x.conversa_id for x in linhas if x.conversa_id], ini, fim
+    )
+    usadas = await _usadas(session, [mid for lista in chats.values() for mid, _, _ in lista])
+    saidas = await _saidas(session, linhas)
+    mandou = nao = 0
+    for x in sorted(linhas, key=lambda y: y.devido_em):
+        aut = cat.CATALOGO[x.automacao]
+        av = avaliacoes.get(x.id)
+        if av is None:
+            continue
+        a, b = janelas[x.id]
+        resposta = (av.resposta_loja or "").strip()
+        tipo = cat.assinatura_avaliacao(resposta) if resposta else None
+        chat = next(
+            (
+                (mid, em)
+                for mid, em, t in chats.get(x.conversa_id, [])
+                if t == aut.tipo and a <= em <= b and mid not in usadas
+            ),
+            None,
+        )
+        if tipo == aut.tipo or chat is not None:
+            em = chat[1] if chat is not None else hora_da_resposta_publica(av.resposta_em)
+            x.duoke = cat.DUOKE_MANDOU
+            x.duoke_mensagem_id = chat[0] if chat is not None else None
+            x.duoke_em = em
+            base = saidas.get(x.id) or _utc(x.devido_em)
+            x.duoke_diferenca_s = int((em - base).total_seconds()) if em is not None else None
+            x.comparado_em = agora
+            if chat is not None:
+                usadas.add(chat[0])
+            mandou += 1
+            continue
+        lida = _lida_em(av)
+        if agora > b and ((lida is not None and lida > b) or (resposta and tipo is None)):
+            x.duoke = cat.DUOKE_NAO_MANDOU
+            x.comparado_em = agora
+            nao += 1
+    return mandou, nao
+
+
 async def duoke_dos_pedidos(
     session: AsyncSession, linhas: list[AtendimentoAutomacaoRegistro], *, agora: datetime
 ) -> dict[UUID, list[datetime]]:
@@ -509,18 +638,17 @@ async def _alertas_e_divergencias(
     concluido_em: dict[str, datetime] = {}
     conversas_recl: set[UUID] = set()
     if pedidos:
-        cancelados = set(
-            (
-                await session.execute(
-                    select(BlingOrder.numeroloja).where(
-                        BlingOrder.numeroloja.in_(pedidos),
-                        BlingOrder.situacao.in_(("12", "excluido")),
-                    )
+        for sn, situacao in (
+            await session.execute(
+                select(BlingOrder.numeroloja, BlingOrder.situacao).where(
+                    BlingOrder.numeroloja.in_(pedidos),
+                    BlingOrder.situacao.in_(("12", "excluido", *_SITUACOES_DEVOLUCAO_BLING)),
                 )
             )
-            .scalars()
-            .all()
-        )
+        ).all():
+            # Bling no fluxo de devolução (Aguardando Devolução, Resolvido...)
+            # também é "devolveu" — o mesmo do motor.
+            (devolvidos if situacao in _SITUACOES_DEVOLUCAO_BLING else cancelados).add(sn)
         for sn, status, retorno, em in (
             await session.execute(
                 select(
@@ -565,6 +693,16 @@ async def _alertas_e_divergencias(
                 x.alerta = "devolucao"
             elif aut.campanha and x.conversa_id in conversas_recl:
                 x.alerta = "reclamacao"
+        if (
+            aut.tipo == cat.TIPO_NAO_PAGO
+            and x.divergencia is None
+            and x.estado == cat.ESTADO_PULADO
+            and x.duoke == cat.DUOKE_MANDOU
+            and x.motivo in ("pedido_pago", "status_mudou", "pedido_cancelado")
+        ):
+            # O Duoke mandou aos 30 min, com o pedido ainda não pago; quando o
+            # DaVinci o viu (o índice é de hora em hora), já tinha pago ou cancelado.
+            x.divergencia = "visto_de_hora_em_hora"
         if aut.tipo == cat.TIPO_ENTREGUE and x.pedido in concluido_em and x.divergencia is None:
             concluiu = concluido_em[x.pedido]
             if so_davinci and concluiu > _utc(x.devido_em):
@@ -578,6 +716,116 @@ async def _alertas_e_divergencias(
                 and concluiu > _utc(x.duoke_em)
             ):
                 x.divergencia = "concluiu_entre_horarios"
+
+
+async def carrinhos_vistos_tarde(
+    session: AsyncSession,
+    carrinhos: list[tuple[cat.Msg, AtendimentoConversa, str | None]],
+) -> tuple[dict[UUID, str], set[UUID]]:
+    """Os "carrinhos" do Duoke sem par: (mensagem → pedido, as vistas tarde).
+
+    `carrinhos` é [(mensagem do Duoke, conversa, pedido do cartão ou None)]. O
+    pedido é o do cartão; sem cartão (o 2º carrinho da mesma conversa vem sem),
+    o do comprador da conversa no índice criado logo antes (até
+    `atraso_max_duoke`). É a diferença combinada `visto_de_hora_em_hora` SÓ
+    quando o DaVinci nunca o viu não pago por causa do índice de hora em hora:
+
+      • o pedido foi criado logo antes do carrinho (o Duoke sai aos 30 min) —
+        não um pedido antigo da conversa;
+      • o DaVinci não tem linha dele (se tivesse, o teria visto não pago);
+      • ele ficou pago (no Bling) até `VISTO_PELO_INDICE` depois da criação, ou
+        está cancelado no índice — mudou antes de o índice olhar.
+
+    Fora disso, o "só Duoke" conta (é falha de verdade).
+    """
+    aut = cat.CATALOGO.get("shopee_nao_pago")
+    if not carrinhos or aut is None:
+        return {}, set()
+    antes = aut.atraso_max_duoke
+    P = AtendimentoPedidoComprador  # noqa: N806
+    integs = sorted({c.integration_id for _, c, _ in carrinhos}, key=str)
+    sns = sorted({sn for _, _, sn in carrinhos if sn})
+    compradores = sorted({c.comprador_id for _, c, sn in carrinhos if not sn and c.comprador_id})
+    ini = min(_utc(m.em) for m, _, _ in carrinhos) - antes
+    fim = max(_utc(m.em) for m, _, _ in carrinhos)
+    filtros = []
+    if sns:
+        filtros.append(P.pedido.in_(sns))
+    if compradores:
+        filtros.append(
+            and_(P.comprador_id.in_(compradores), P.criado_em >= ini, P.criado_em <= fim)
+        )
+    if not filtros:
+        return {}, set()
+    indice = (
+        await session.execute(
+            select(P.integration_id, P.pedido, P.comprador_id, P.criado_em, P.status).where(
+                P.integration_id.in_(integs), or_(*filtros)
+            )
+        )
+    ).all()
+    por_pedido = {(r.integration_id, r.pedido): r for r in indice}
+    por_comprador: dict[tuple[UUID, str], list[Any]] = defaultdict(list)
+    for r in indice:
+        if r.comprador_id and r.criado_em is not None:
+            por_comprador[(r.integration_id, r.comprador_id)].append(r)
+    pedidos: dict[UUID, str] = {}
+    for m, c, sn in carrinhos:
+        em = _utc(m.em)
+        if sn:
+            pedidos[m.id] = sn
+            continue
+        logo_antes = [
+            r
+            for r in por_comprador.get((c.integration_id, c.comprador_id or ""), [])
+            if em - antes <= _utc(r.criado_em) <= em
+        ]
+        if logo_antes:
+            pedidos[m.id] = max(logo_antes, key=lambda r: _utc(r.criado_em)).pedido
+    escolhidos = sorted(set(pedidos.values()))
+    if not escolhidos:
+        return pedidos, set()
+    pago_em = {
+        sn: _utc(em)
+        for sn, em in (
+            await session.execute(
+                select(BlingOrder.numeroloja, func.min(BlingOrder.created_at))
+                .where(
+                    BlingOrder.numeroloja.in_(escolhidos),
+                    BlingOrder.situacao.not_in(("12", "excluido")),
+                )
+                .group_by(BlingOrder.numeroloja)
+            )
+        ).all()
+    }
+    com_linha = set(
+        (
+            await session.execute(
+                select(_R.integration_id, _R.pedido).where(
+                    _R.automacao == aut.codigo,
+                    _R.integration_id.in_(integs),
+                    _R.pedido.in_(escolhidos),
+                    _R.estado != cat.ESTADO_SO_DUOKE,
+                )
+            )
+        ).all()
+    )
+    vistos: set[UUID] = set()
+    for m, c, _ in carrinhos:
+        sn = pedidos.get(m.id)
+        r = por_pedido.get((c.integration_id, sn)) if sn else None
+        if r is None or r.criado_em is None or (c.integration_id, sn) in com_linha:
+            continue
+        criado = _utc(r.criado_em)
+        if not (_utc(m.em) - antes <= criado <= _utc(m.em)):
+            continue  # um pedido antigo da conversa: não é deste carrinho
+        pago = pago_em.get(sn)
+        if (pago is not None and pago <= criado + VISTO_PELO_INDICE) or r.status in (
+            "CANCELLED",
+            "IN_CANCEL",
+        ):
+            vistos.add(m.id)
+    return pedidos, vistos
 
 
 async def _so_duoke(
@@ -632,8 +880,11 @@ async def _so_duoke(
         )
     ).all():
         compradores[cid].append(_utc(em))
+    # O pedido que o DaVinci VÊ entregar/concluir: o da Logística e — fora
+    # dela — o do índice com o status (`automacoes.descobrir_indice`).
     com_logistica: set[str] = set()
     sns = {sn for lista in cartoes.values() for _, sn in lista}
+    sns |= {c.pedido_marketplace for c in conversas.values() if c.pedido_marketplace}
     if sns:
         com_logistica = set(
             (
@@ -646,6 +897,30 @@ async def _so_duoke(
             .scalars()
             .all()
         )
+        com_logistica |= set(
+            (
+                await session.execute(
+                    select(AtendimentoPedidoComprador.pedido).where(
+                        AtendimentoPedidoComprador.pedido.in_(sorted(sns)),
+                        AtendimentoPedidoComprador.status.in_(("TO_CONFIRM_RECEIVE", "COMPLETED")),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+    # O "carrinho" do Duoke sem par: o pedido dele (o do cartão; sem cartão, o
+    # do comprador criado logo antes) e se é a diferença combinada
+    # `visto_de_hora_em_hora` (o DaVinci nunca o viu não pago).
+    carrinhos = []
+    for cid, m in duoke:
+        c = conversas.get(cid)
+        if m.tipo_duoke == cat.TIPO_NAO_PAGO and c is not None and c.integration_id is not None:
+            cartao = next(
+                (sn for em, sn in cartoes.get(cid, []) if abs(em - m.em) <= CARTAO_JUNTO), None
+            )
+            carrinhos.append((m, c, cartao))
+    pedido_do_carrinho, vistos_tarde = await carrinhos_vistos_tarde(session, carrinhos)
     novas = []
     for cid, m in duoke:
         c = conversas.get(cid)
@@ -664,7 +939,11 @@ async def _so_duoke(
         pedido = next(
             (sn for em, sn in cartoes.get(cid, []) if abs(em - m.em) <= CARTAO_JUNTO), None
         )
-        pedido = pedido or (c.pedido_marketplace if aut.alvo == cat.ALVO_PEDIDO else None)
+        pedido = (
+            pedido
+            or pedido_do_carrinho.get(m.id)
+            or (c.pedido_marketplace if aut.alvo == cat.ALVO_PEDIDO else None)
+        )
         divergencia = None
         if aut.tipo == cat.TIPO_OPCAO and any(
             om.em < m.em <= om.em + OPCAO_REPETIDA
@@ -680,6 +959,8 @@ async def _so_duoke(
             aut.tipo in (cat.TIPO_ENTREGUE, cat.TIPO_POS) and pedido and pedido not in com_logistica
         ):
             divergencia = "sem_logistica"
+        elif aut.tipo == cat.TIPO_NAO_PAGO and m.id in vistos_tarde:
+            divergencia = "visto_de_hora_em_hora"
         novas.append(
             {
                 "id": uuid4(),
@@ -704,6 +985,114 @@ async def _so_duoke(
                 "duoke_em": m.em,
                 "duoke_diferenca_s": 0,
                 "divergencia": divergencia,
+                "comparado_em": agora,
+            }
+        )
+    criadas = 0
+    for i in range(0, len(novas), LOTE_INSERT):
+        resultado = await session.execute(
+            pg_insert(_R)
+            .values(novas[i : i + LOTE_INSERT])
+            .on_conflict_do_nothing()
+            .returning(_R.id)
+        )
+        criadas += len(resultado.all())
+    return criadas
+
+
+async def _so_duoke_avaliacoes(
+    session: AsyncSession,
+    *,
+    agora: datetime,
+    motor_desde: datetime,
+    regras: dict[tuple[str, UUID], AtendimentoAutomacaoRegra],
+) -> int:
+    """A avaliação que o Duoke respondeu (o modelo dele) sem linha nossa vira `so_duoke`.
+
+    Só as avaliações feitas depois de a regra e o motor estarem ligados, e só
+    depois de a resposta ter `so_duoke_espera` (a nossa linha pode chegar com a
+    leitura das avaliações). A chave é `duoke:avaliacao:<comentario>`.
+    """
+    ativas = {
+        k: r
+        for k, r in regras.items()
+        if r.modo != cat.MODO_DESLIGADO and cat.CATALOGO[k[0]].alvo == cat.ALVO_AVALIACAO
+    }
+    if not ativas:
+        return 0
+    por_tipo = {cat.CATALOGO[codigo].tipo: codigo for codigo, _ in ativas if codigo in cat.CATALOGO}
+    integs = sorted({i for _, i in ativas}, key=str)
+    A = AtendimentoAvaliacaoLoja  # noqa: N806
+    linhas = (
+        await session.execute(
+            select(
+                A.integration_id,
+                A.comentario_id,
+                A.pedido,
+                A.comprador_id,
+                A.resposta_loja,
+                A.resposta_em,
+                A.criado_em,
+            ).where(
+                A.integration_id.in_(integs),
+                A.plataforma == "shopee",
+                A.resposta_loja.is_not(None),
+                A.criado_em >= max(agora - SO_DUOKE_JANELA, motor_desde),
+                A.criado_em <= agora,
+            )
+        )
+    ).all()
+    candidatas = []
+    for r in linhas:
+        codigo = por_tipo.get(cat.assinatura_avaliacao(r.resposta_loja) or "")
+        regra = ativas.get((codigo, r.integration_id)) if codigo else None
+        if regra is None:
+            continue
+        aut = cat.CATALOGO[codigo]
+        ligada = max(_utc(regra.ligada_desde) or motor_desde, motor_desde)
+        duoke_em = hora_da_resposta_publica(r.resposta_em)
+        if _utc(r.criado_em) < ligada or duoke_em is None:
+            continue
+        if duoke_em > agora - aut.so_duoke_espera:
+            continue  # a nossa linha ainda pode chegar (a leitura das avaliações)
+        candidatas.append((codigo, regra, r, duoke_em))
+    if not candidatas:
+        return 0
+    chaves = {f"{cat.ALVO_AVALIACAO}:{r.comentario_id}" for _, _, r, _ in candidatas}
+    nossas = set(
+        (
+            await session.execute(
+                select(_R.integration_id, _R.chave).where(
+                    _R.integration_id.in_(integs), _R.chave.in_(sorted(chaves))
+                )
+            )
+        ).all()
+    )
+    novas = []
+    for codigo, regra, r, duoke_em in candidatas:
+        if (r.integration_id, f"{cat.ALVO_AVALIACAO}:{r.comentario_id}") in nossas:
+            continue
+        novas.append(
+            {
+                "id": uuid4(),
+                "automacao": codigo,
+                "regra_id": regra.id,
+                "regra_versao": regra.versao,
+                "integration_id": r.integration_id,
+                "plataforma": "shopee",
+                "alvo": cat.ALVO_DUOKE,
+                "chave": f"duoke:{cat.ALVO_AVALIACAO}:{r.comentario_id}",
+                "pedido": r.pedido,
+                "comprador_id": r.comprador_id,
+                "evento_em": _utc(r.criado_em),
+                "visto_em": agora,
+                "devido_em": duoke_em,
+                "decidido_em": agora,
+                "estado": cat.ESTADO_SO_DUOKE,
+                "modo": regra.modo,
+                "duoke": cat.DUOKE_MANDOU,
+                "duoke_em": duoke_em,
+                "duoke_diferenca_s": 0,
                 "comparado_em": agora,
             }
         )
@@ -785,20 +1174,35 @@ async def comparar(
         if ini <= agora:
             abertas.append(x)
     ultimo_ok = await _ultimo_ok(session)
-    de_conversa = [
-        x for x in abertas if x.conversa_id and cat.CATALOGO[x.automacao].alvo != cat.ALVO_PEDIDO
-    ]
+    # Na conversa: as que respondem conversa e as do pedido que a TikTok não
+    # numera (`compara_na_conversa`); pelo pedido: as do pedido da Shopee; pela
+    # avaliação: a resposta da avaliação.
+    de_conversa = [x for x in abertas if x.conversa_id and cat.CATALOGO[x.automacao].na_conversa]
     de_pedido = [
-        x for x in abertas if cat.CATALOGO[x.automacao].alvo == cat.ALVO_PEDIDO and x.pedido
+        x
+        for x in abertas
+        if cat.CATALOGO[x.automacao].alvo == cat.ALVO_PEDIDO
+        and not cat.CATALOGO[x.automacao].na_conversa
+        and x.pedido
     ]
+    de_avaliacao = [x for x in abertas if cat.CATALOGO[x.automacao].alvo == cat.ALVO_AVALIACAO]
     m1, n1 = await _comparar_conversas(session, de_conversa, agora=agora, ultimo_ok=ultimo_ok)
     m2, n2 = await _comparar_pedidos(session, de_pedido, agora=agora, ultimo_ok=ultimo_ok)
-    await _alertas_e_divergencias(session, de_conversa + de_pedido)
+    m3, n3 = await _comparar_avaliacoes(session, de_avaliacao, agora=agora)
+    await _alertas_e_divergencias(session, de_conversa + de_pedido + de_avaliacao)
     await session.flush()
     regras = await regras_por_chave(session, ativas=False)
     so = await _so_duoke(session, agora=agora, motor_desde=_utc(motor_desde), regras=regras)
+    so += await _so_duoke_avaliacoes(
+        session, agora=agora, motor_desde=_utc(motor_desde), regras=regras
+    )
     disjuntor = await _disjuntor(session, agora=agora, regras=regras)
-    return {"mandou": m1 + m2, "nao_mandou": n1 + n2, "so_duoke": so, "disjuntor": disjuntor}
+    return {
+        "mandou": m1 + m2 + m3,
+        "nao_mandou": n1 + n2 + n3,
+        "so_duoke": so,
+        "disjuntor": disjuntor,
+    }
 
 
 # ── A conta da tela ───────────────────────────────────────────────────────

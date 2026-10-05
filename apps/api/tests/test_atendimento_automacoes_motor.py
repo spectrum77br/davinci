@@ -61,7 +61,9 @@ from app.routers import atendimento_automacoes as rota_auto
 from app.security.cipher import encrypt_json
 from app.services.atendimento import automacoes, automacoes_comparar, clientes, enviar, gravar, ia
 from app.services.atendimento import automacoes_catalogo as cat
+from app.services.atendimento import shopee as shopee_atd
 from app.services.atendimento.constantes import ResultadoEnvio
+from app.services.marketplaces.shopee import ShopeeClient
 
 # 12h00 em São Paulo, minuto 0 (a rodada lê a Logística).
 T = datetime(2026, 10, 5, 15, 0, tzinfo=UTC)
@@ -143,7 +145,15 @@ def proibido(monkeypatch) -> list[str]:
 
     monkeypatch.setattr(enviar, "adaptador", _boom("adaptador"))
     monkeypatch.setattr(enviar, "enviar_automatica", _aboom("enviar_automatica"))
+    monkeypatch.setattr(
+        enviar, "enviar_automatica_sem_conversa", _aboom("enviar_automatica_sem_conversa")
+    )
     monkeypatch.setattr(enviar, "enviar_resposta", _aboom("enviar_resposta"))
+    monkeypatch.setattr(shopee_atd, "enviar_parte", _aboom("shopee.enviar_parte"))
+    monkeypatch.setattr(ShopeeClient, "chat_send_message", _aboom("chat_send_message"))
+    monkeypatch.setattr(
+        ShopeeClient, "chat_send_autoreply_message", _aboom("chat_send_autoreply_message")
+    )
     monkeypatch.setattr(clientes, "cliente_da_integracao", _aboom("cliente_da_integracao"))
     monkeypatch.setattr(httpx.AsyncClient, "send", _aboom("httpx"))
     return chamadas
@@ -749,26 +759,46 @@ class AdaptadorFalso:
 
 
 class AdaptadorComAutoReply(AdaptadorFalso):
-    """O adaptador que sabe mandar como resposta automática (o da Shopee ainda não sabe)."""
+    """O adaptador que manda cada parte e a resposta automática, como o da Shopee
+    (`enviar_parte(auto_reply=…)`): o texto da campanha em `auto_replies`, o texto
+    normal em `envios`, o cartão e a figurinha em `partes`."""
 
     def __init__(self) -> None:
         super().__init__()
         self.auto_replies: list[str] = []
+        self.partes: list[str] = []
 
-    async def enviar_auto_reply(self, session, conversa, integration, cliente, texto):
-        self.auto_replies.append(texto)
+    async def enviar_parte(
+        self,
+        session,
+        conversa,
+        integration,
+        cliente,
+        parte,
+        *,
+        to_id=None,
+        pedido=None,
+        auto_reply=False,
+    ):
+        if parte.get("tipo") != "texto":
+            self.partes.append(parte["tipo"])
+        elif auto_reply:
+            self.auto_replies.append(parte["texto"])
+        else:
+            self.envios.append(parte["texto"])
         return self.resultado
 
 
 @pytest.fixture
 def auto_reply_ligado(monkeypatch, _chaves) -> AdaptadorComAutoReply:
-    """Tudo ligado E o envio por resposta automática no adaptador (como seria depois)."""
+    """Tudo ligado E o envio por resposta automática no adaptador (o check de verdade,
+    `enviar.auto_reply_no_adaptador`, olha a `enviar_parte` deste adaptador)."""
     _chaves.atendimento_envio_ativo = True
     _chaves.atendimento_automacoes_envio = True
     _chaves.atendimento_automacoes_shopee_auto_reply = True
     falso = AdaptadorComAutoReply()
     monkeypatch.setattr(enviar, "adaptador", lambda _plataforma: falso)
-    monkeypatch.setattr(enviar, "auto_reply_no_adaptador", lambda _plataforma="shopee": True)
+    assert enviar.auto_reply_no_adaptador("shopee") is True
 
     async def _cliente(_integ):
         return object()
@@ -892,9 +922,10 @@ async def test_campanha_nao_sai_com_a_chave_ligada_sem_o_envio_por_auto_reply(
     db, envio_ligado, _chaves, client, pessoa
 ):
     """A chave do auto_reply sozinha NÃO libera a campanha: sem o envio por resposta
-    automática no adaptador (hoje não existe), ela sairia como mensagem normal."""
+    automática no adaptador (`enviar_parte(auto_reply=…)`), ela sairia como mensagem
+    normal. Aqui o adaptador (falso) só tem o `enviar_texto`."""
     _chaves.atendimento_automacoes_shopee_auto_reply = True
-    assert enviar.auto_reply_no_adaptador("shopee") is False  # o adaptador de verdade
+    assert enviar.auto_reply_no_adaptador("shopee") is False  # o adaptador sem o envio
     integ, canal = await _loja(db, pessoa)
     await _regra(db, integ, "shopee_convite", modo="enviar", enviar_desde=DESDE)
     conversa = await _conversa(db, integ, canal)
@@ -923,6 +954,104 @@ async def test_campanha_nao_sai_com_a_chave_ligada_sem_o_envio_por_auto_reply(
     assert "campanha_sem_auto_reply" in convite["lojas"][0]["por_que_nao_enviar"]
     menu = next(a for a in corpo["automacoes"] if a["codigo"] == "shopee_menu")
     assert "campanha_sem_auto_reply" not in menu["lojas"][0]["por_que_nao_enviar"]
+
+
+async def test_campanha_nao_sai_com_o_adaptador_de_verdade_e_a_chave_desligada(
+    db, monkeypatch, _chaves, client, pessoa
+):
+    """O adaptador da Shopee de verdade JÁ manda como resposta automática
+    (`enviar_parte(auto_reply=…)`, 05/10): com a chave do auto_reply desligada (a
+    produção), a campanha não sai — nem com conversa, nem sem — e nada vai à
+    plataforma."""
+    chamadas: list[str] = []
+
+    def _aboom(nome):
+        async def f(*_a, **_k):
+            chamadas.append(nome)
+            raise AssertionError(f"{nome} chamado com a chave do auto_reply desligada")
+
+        return f
+
+    monkeypatch.setattr(clientes, "cliente_da_integracao", _aboom("cliente_da_integracao"))
+    monkeypatch.setattr(ShopeeClient, "chat_send_message", _aboom("chat_send_message"))
+    monkeypatch.setattr(
+        ShopeeClient, "chat_send_autoreply_message", _aboom("chat_send_autoreply_message")
+    )
+    rede = httpx.AsyncClient.send
+    monkeypatch.setattr(httpx.AsyncClient, "send", _aboom("httpx"))
+    _chaves.atendimento_envio_ativo = True
+    _chaves.atendimento_automacoes_envio = True
+    assert _chaves.atendimento_automacoes_shopee_auto_reply is False
+    assert enviar.adaptador("shopee") is shopee_atd  # o adaptador de verdade
+    assert enviar.auto_reply_no_adaptador("shopee") is True
+    assert enviar.campanha_por_auto_reply() is False
+    integ, canal = await _loja(db, pessoa)
+    await _regra(db, integ, "shopee_convite", modo="enviar", enviar_desde=DESDE)
+    await _regra(db, integ, "shopee_pedido_recebido", modo="enviar", enviar_desde=DESDE)
+    conversa = await _conversa(db, integ, canal)
+    await _msg(db, conversa, em=T - timedelta(minutes=5))
+    await _rodada()
+    [linha] = await _linhas(db, automacao="shopee_convite")
+    assert (linha.estado, linha.motivo) == ("pulado", "campanha_sem_auto_reply")
+    with pytest.raises(enviar.EnvioRecusado) as e:
+        await enviar.enviar_automatica(
+            db,
+            conversa,
+            codigo="shopee_convite",
+            texto="Já segue?",
+            registro_id=None,
+            regra_versao=1,
+        )
+    assert e.value.code == "campanha_sem_auto_reply"
+    with pytest.raises(enviar.EnvioRecusado) as e:
+        await enviar.enviar_automatica_sem_conversa(
+            db,
+            integration_id=integ.id,
+            codigo="shopee_pedido_recebido",
+            to_id="555",
+            pedido=SN,
+            parte={"tipo": "texto", "texto": "Recebemos o seu pedido!"},
+            registro_id=None,
+            regra_versao=1,
+        )
+    assert e.value.code == "campanha_sem_auto_reply"
+    assert chamadas == []
+    assert (
+        await db.scalar(
+            select(func.count())
+            .select_from(AtendimentoMensagem)
+            .where(AtendimentoMensagem.origem == "davinci_auto")
+        )
+        == 0
+    )
+    # A tela: o adaptador pronto, a chave desligada — Enviar travado na campanha.
+    monkeypatch.setattr(httpx.AsyncClient, "send", rede)  # o cliente de teste da API
+    r = await client.get("/api/atendimento/automacoes", params={"plataforma": "shopee"})
+    corpo = r.json()
+    assert corpo["chaves"]["shopee_auto_reply"] is False
+    assert corpo["chaves"]["shopee_auto_reply_adaptador"] is True
+    convite = next(a for a in corpo["automacoes"] if a["codigo"] == "shopee_convite")
+    assert "campanha_sem_auto_reply" in convite["lojas"][0]["por_que_nao_enviar"]
+
+
+async def test_auto_reply_sem_o_envio_por_ele_nunca_sai_como_mensagem_normal(
+    db, envio_ligado, pessoa
+):
+    """A última trava (`_chamar_plataforma_automatica`): pedido o `auto_reply` a um
+    adaptador sem a `enviar_parte` que o aceite, nada sai — `sem_auto_reply`, e o
+    `enviar_texto` nunca é chamado."""
+    integ, canal = await _loja(db, pessoa)
+    conversa = await _conversa(db, integ, canal)
+    r = await enviar._chamar_plataforma_automatica(
+        db,
+        conversa,
+        integ,
+        "shopee",
+        {"tipo": "texto", "texto": "Já segue?"},
+        auto_reply=True,
+    )
+    assert (r.ok, r.erro) == (False, "sem_auto_reply")
+    assert envio_ligado.envios == []
 
 
 async def test_campanha_com_o_auto_reply_sai_por_ele_e_nunca_como_mensagem_normal(

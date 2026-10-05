@@ -53,6 +53,27 @@ depends_on: str | Sequence[str] | None = None
 SCHEMA = "davinci"
 REGRAS = "atendimento_automacao_regras"
 REGISTROS = "atendimento_automacao_registros"
+# As automações que ESTA migration semeia — congeladas como lista (05/10/2026,
+# à noite): o catálogo ganhou automações depois dela (o pedido não pago, a
+# resposta da avaliação e o "pedido recebido" do TikTok), e quem as semeia é a
+# 0371. Assim a 0366 semeia num banco novo exatamente o que semeou em produção.
+CODIGOS = (
+    "shopee_menu",
+    *(f"shopee_opcao_{n}" for n in range(1, 7)),
+    "shopee_aguarde",
+    "shopee_convite",
+    "shopee_duvida_2h",
+    "shopee_duvida_26h",
+    "shopee_pedido_recebido",
+    "shopee_entregue",
+    "shopee_pos_conclusao",
+    "tiktok_aguarde",
+    "tiktok_convite",
+    "tiktok_duvida_2h",
+    "tiktok_duvida_24h",
+    "ml_menu",
+    *(f"ml_opcao_{n}" for n in range(1, 7)),
+)
 
 
 def _uuid(nome: str, nullable: bool = True) -> sa.Column:
@@ -102,6 +123,8 @@ def _semear() -> int:
     n = 0
     for integ, plataforma, nome in lojas:
         for aut in cat.por_plataforma(cat.plataforma_da_integracao(plataforma)):
+            if aut.codigo not in CODIGOS:
+                continue  # é da 0371 (veja `CODIGOS`)
             r = cat.regra_semente(aut, nome)
             conn.execute(
                 inserir,

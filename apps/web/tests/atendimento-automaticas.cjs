@@ -15,7 +15,13 @@
 //    carregando, erro, vazio, a faixa, o "Enviar" travado, nenhum texto de
 //    comprador no registro, tema escuro e tela estreita;
 //  - a página (a aba entre "Respostas prontas" e "Métricas") e a conversa (o
-//    rótulo da mensagem automática do DaVinci).
+//    rótulo da mensagem automática do DaVinci);
+//  - (05/10 à noite) as automações que SÓ SIMULAM (o selo, o Enviar travado com
+//    o porquê) e a PRÉVIA de cada linha do registro, "como o cliente
+//    receberia" × o Duoke: o contrato campo a campo com
+//    services/atendimento/automacoes_previa.py, as regras puras e a tela (só
+//    abre quando a pessoa pede, balões e cartão como na conversa, a resposta
+//    pública da avaliação, a figurinha, o erro, fechar).
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
@@ -65,6 +71,7 @@ const catalogo = api('services/atendimento/automacoes_catalogo.py')
 const comparar = api('services/atendimento/automacoes_comparar.py')
 const mainPy = api('main.py')
 const constantes = api('services/atendimento/constantes.py')
+const previaPy = api('services/atendimento/automacoes_previa.py')
 
 // O corpo de uma função Python (até a próxima definição de topo).
 function corpoDef(fonte, nome) {
@@ -122,7 +129,10 @@ const constPy = (fonte, prefixo) => Object.fromEntries([...fonte.matchAll(new Re
     'PATCH /automacoes/{automacao}/{integration_id}',
     'POST /automacoes/{automacao}/simular-nas-lojas-do-duoke',
     'POST /automacoes/previa',
+    'GET /automacoes/registro/{registro_id}/previa',
   ], 'as rotas da aba')
+  assert.match(corpoDef(rota, 'previa_do_registro'), /user: Annotated\[User, Depends\(_view\)\]/, 'a prévia da linha: só leitura, a trava da aba')
+  assert.match(corpoDef(rota, 'previa_do_registro'), /if x is None or not _no_escopo\(scope, x\.integration_id\):/, 'fora da equipe: 404')
   // A tela chama exatamente estas (e nenhuma rota de envio).
   assert.ok(setupSrc.includes('`/api/atendimento/automacoes?plataforma=${encodeURIComponent(plataforma.value)}&dias=${dias.value}`'))
   assert.ok(setupSrc.includes('`/api/atendimento/automacoes/registro?${paramsRegistro(filtrosRegistro)}`'))
@@ -130,6 +140,7 @@ const constPy = (fonte, prefixo) => Object.fromEntries([...fonte.matchAll(new Re
   assert.equal((setupSrc.match(/`\/api\/atendimento\/automacoes\/\$\{encodeURIComponent\(aut\.codigo\)\}\/\$\{encodeURIComponent\(loja\.integration_id\)\}`, \{\n\s+method: 'PATCH',/g) || []).length, 2, 'modo e regra pelo PATCH')
   assert.ok(setupSrc.includes("`/api/atendimento/automacoes/${encodeURIComponent(aut.codigo)}/simular-nas-lojas-do-duoke`, { method: 'POST' }"))
   assert.ok(setupSrc.includes("'/api/atendimento/automacoes/previa', {\n      method: 'POST',"))
+  assert.ok(setupSrc.includes('`/api/atendimento/automacoes/registro/${encodeURIComponent(l.id)}/previa`'), 'a prévia da linha (GET)')
   for (const proibida of ['/responder', '/conversas/', '/mensagens/', '/conferir', 'send_', 'auto_reply_message']) {
     assert.ok(!autSfc.fonte.includes(proibida), `a aba não fala com envio (${proibida})`)
   }
@@ -152,6 +163,21 @@ const constPy = (fonte, prefixo) => Object.fromEntries([...fonte.matchAll(new Re
   igual(camposTs('RegraMudou'), chavesTopo(dictApos(corpoDef(rota, 'mudar_regra'), 'return {')), 'PATCH')
   igual(camposTs('SimularNasLojas'), chavesTopo(dictApos(corpoDef(rota, 'simular_nas_lojas_do_duoke'), 'return {')), 'simular nas lojas do Duoke')
   igual(camposTs('PreviaResposta'), chavesTopo(dictApos(corpoDef(rota, 'previa'), 'return {')), 'prévia')
+  // A prévia da LINHA (automacoes_previa.montar): os quatro blocos e cada um campo a campo.
+  igual(camposTs('PreviaRegistro'), chavesTopo(dictApos(corpoDef(rota, 'previa_do_registro'), 'return {')), 'prévia da linha')
+  const montar = corpoDef(previaPy, 'montar')
+  igual(camposTs('PreviaAutomacaoLinha'), chavesTopo(dictApos(montar, '"automacao": {')), 'a automação da prévia')
+  igual(camposTs('PreviaDavinci'), chavesTopo(dictApos(montar, '"davinci": {')), 'o lado do DaVinci')
+  igual(camposTs('PreviaDuoke'), chavesTopo(dictApos(montar, '"duoke": {')), 'o lado do Duoke')
+  igual(camposTs('ParteVista'), chavesTopo(dictApos(corpoDef(previaPy, '_parte'), 'return {')), 'a parte da prévia')
+  igual([...new Set([...corpoDef(previaPy, 'comparacao_da_linha').matchAll(/return "([a-z_]+)"/g)].map((m) => m[1]))], Object.keys(A.COMPARACOES), 'a comparação da prévia = a do registro')
+  const tiposVista = new Set([...previaPy.matchAll(/_parte\(\s*"([a-z_]+)"/g)].map((m) => m[1]))
+  for (const t of tiposVista) assert.ok(A.PARTES_VISTA[t], `parte ${t} tem nome`)
+  igual(Object.keys(A.HORA_DAVINCI), [...new Set([...corpoDef(previaPy, '_hora_nossa').matchAll(/"(saiu|sairia|devido)"/g)].map((m) => m[1]))], 'a hora da nossa')
+  // Só leitura: a prévia não grava, não envia e nunca lê o texto do comprador.
+  assert.doesNotMatch(previaPy, /session\.(add|commit|flush|delete)\b|\.execute\((insert|update|delete)|import enviar|enviar_automatica/, 'a prévia não escreve nem envia')
+  assert.match(previaPy, /principal is not None and principal\.autor != AUTOR_CLIENTE/, 'a do Duoke é da LOJA')
+  assert.match(previaPy, /_M\.autor != AUTOR_CLIENTE,/, 'as que vão junto também')
   igual(camposTs('CorpoRegra'), camposPy('RegraIn'), 'o corpo do PATCH = RegraIn')
   igual(camposTs('ParteAutomacao'), camposPy('ParteIn'), 'a parte = ParteIn')
   // A CONTA: as colunas do comparador + a mediana + os motivos + o resumo.
@@ -210,6 +236,22 @@ const constPy = (fonte, prefixo) => Object.fromEntries([...fonte.matchAll(new Re
   const combinadas = new Set([...catalogo.matchAll(/diferenca_combinada="([a-z_]+)"/g)].map((m) => m[1]))
   for (const c of combinadas) assert.ok(A.SELOS_COMBINADA[c], `selo ${c}`)
   assert.match(catalogo, /^PLACEHOLDERS: dict\[str, str\] = \{\n {4}"comprador": /m)
+  // As lacunas próprias (o cupom) e o exemplo delas; a resposta pública com o limite dela.
+  const exemplos = Object.fromEntries([...dictApos(catalogo, 'EXEMPLOS_EXTRA: dict[str, str] = {').matchAll(/"([a-z_]+)": "([^"]*)"/g)].map((m) => [m[1], m[2]]))
+  assert.deepEqual(A.EXEMPLOS_LACUNA, exemplos)
+  assert.equal(Number((constantes.match(/\("shopee", CANAL_AVALIACAO\): (\d+),/) || [])[1]), A.LIMITE_RESPOSTA_PUBLICA)
+  igual(A.TIPOS_COM_TEXTO, ['texto', 'resposta_publica'])
+  assert.match(catalogo, /^TIPOS_COM_TEXTO = \("texto", PARTE_RESPOSTA_PUBLICA\)$/m)
+  assert.match(rota, /tipo: str = Field\(pattern="\^\(texto\|cartao_pedido\|figurinha\|resposta_publica\)\$"\)/)
+  // O tipo da parte da tela = os do ParteIn (o padrão da API), um a um.
+  const tiposTs = ((autSfc.fonte.match(/export interface ParteAutomacao \{\n {2}tipo: ([^\n]+)/) || [])[1] || '').match(/'([a-z_]+)'/g).map((x) => x.slice(1, -1))
+  const tiposPy = ((rota.match(/class ParteIn\(BaseModel\):\n {4}tipo: str = Field\(pattern="\^\(([a-z_|]+)\)\$"\)/) || [])[1] || '').split('|')
+  igual(tiposTs, tiposPy, 'os tipos de parte')
+  // As que só simulam: o porquê de cada uma tem frase (vem da API).
+  const soSimular = [...dictApos(catalogo, 'SO_SIMULAR: dict[str, str] = {').matchAll(/^ {4}"([a-z_]+)":/gm)].map((m) => m[1])
+  igual(soSimular, [...new Set([...catalogo.matchAll(/so_simular="([a-z_]+)"/g)].map((m) => m[1]))], 'cada "só simulação" tem o porquê')
+  assert.match(corpoDef(rota, '_aut_out'), /"so_simulacao_texto": cat\.SO_SIMULAR\.get\(aut\.so_simular or ""\),/)
+  assert.match(corpoDef(rota, '_por_que_nao_enviar'), /if aut\.so_simular:\n\s+#[^\n]*\n\s+#[^\n]*\n\s+motivos\.append\("so_simulacao"\)/, 'o "só simulação" é o primeiro porquê')
 
   // Por que não enviar (a lista da API e o 409) e os códigos de erro.
   const porQue = [...corpoDef(rota, '_por_que_nao_enviar').matchAll(/motivos\.append\("([a-z_]+)"\)/g)].map((m) => m[1])
@@ -264,7 +306,7 @@ const aut = (o = {}) => ({
   codigo: 'shopee_menu', plataforma: 'shopee', canal: 'chat', nome: 'Menu "selecione sua dúvida"', descricao: 'Mensagem do comprador sem robô nas últimas 12 h → 1 min.',
   tipo: 'menu', gatilho: 'mensagem', alvo: 'conversa', familia: 'conversa', campanha: false, travada: false, diferenca_combinada: null,
   atraso_min: 1, validade_min: 30, janela_inicio: null, janela_fim: null, condicoes_padrao: { sessao_h: 12, pular_em_disputa_com_pessoa: true },
-  placeholders: { ...PLACEHOLDERS }, seguinte: null, total_24h: null, total_periodo: null, lojas: [loja()], ...o,
+  placeholders: { ...PLACEHOLDERS }, seguinte: null, so_simulacao: null, so_simulacao_texto: null, total_24h: null, total_periodo: null, lojas: [loja()], ...o,
 })
 const CHAVES = { leitura_ativa: true, motor_ativo: true, envio_automacoes: false, envio_geral: false, shopee_auto_reply: false, shopee_auto_reply_adaptador: false, shopee_mensagens_comprador: true, teto_dia: 400 }
 const FAIXA_SECO = 'Modo seco: o DaVinci registra o que mandaria e compara com o Duoke. Nada é enviado (ATENDIMENTO_AUTOMACOES_ENVIO desligada).'
@@ -384,6 +426,19 @@ const linhaReg = (o = {}) => ({
   // A opção sem texto não sai de Desligado.
   assert.deepEqual(A.opcoesDeModo(loja({ regra: regra({ modo: 'desligado' }) }), aut({ travada: true })).map((o) => o.disabled), [false, true, true])
   assert.equal(A.motivosEnviar(['campanha_sem_auto_reply', 'novo_codigo'])[1], 'novo_codigo', 'código novo aparece cru')
+  // O disjuntor: cada motivo que o motor e o comparador gravam tem a frase da
+  // tela, e o selo mostra o motivo (não mais sempre "o Duoke ainda mandou").
+  const fontesDisjuntor = api('services/atendimento/automacoes.py') + comparar
+  const gravados = new Set([
+    ...[...fontesDisjuntor.matchAll(/disparar_disjuntor\([^)]*motivo="(\w+)"/g)].map((x) => x[1]),
+    ...[...fontesDisjuntor.matchAll(/\bdisjuntor = "(\w+)"/g)].map((x) => x[1]),
+  ])
+  assert.deepEqual([...gravados].sort(), ['duoke_ainda_ligado', 'parte_falhou', 'plataforma_recusou'])
+  for (const m of gravados) assert.ok(A.DISJUNTOR_MOTIVOS[m], `disjuntor ${m} tem frase`)
+  assert.match(A.tituloDisjuntor('x', 'parte_falhou', '05/10 10:00'), /^O DaVinci voltou esta regra para Simular em 05\/10 10:00: a mensagem saiu pela metade/)
+  assert.match(A.tituloDisjuntor('x', null, '05/10 10:00'), /o Duoke ainda mandou \(Duoke ainda ligado\?\)$/)
+  assert.match(A.tituloDisjuntor('x', 'novo_motivo', '05/10 10:00'), /: novo_motivo$/, 'motivo novo aparece cru')
+  assert.match(tela, /:title="tituloDisjuntor\(loja\.regra\.disjuntor_em, loja\.regra\.disjuntor_motivo, fmtDataHora\(loja\.regra\.disjuntor_em\)\)">disjuntor<\/span>/)
   // ENVIAR com a chave desligada: o vermelho da linha.
   assert.equal(A.enviarSemChave(loja({ regra: regra({ modo: 'enviar' }) }), CHAVES), true)
   assert.equal(A.enviarSemChave(loja({ regra: regra({ modo: 'enviar' }) }), { ...CHAVES, envio_automacoes: true, envio_geral: true }), false)
@@ -538,6 +593,53 @@ const linhaReg = (o = {}) => ({
   assert.deepEqual(A.erroDaAutomacao({}, 'Não consegui'), P.erroDaApi({}, 'Não consegui'))
   assert.deepEqual(A.erroDaAutomacao({ statusCode: 403 }, 'x'), { texto: 'Sem permissão para isso.', motivos: [] })
   assert.equal(A.erroDaAutomacao({ data: { detail: { code: 'forbidden' } } }).texto, P.ERROS.forbidden)
+}
+
+// ------------------------------------------------ as que só simulam e a prévia da linha (regras puras)
+{
+  // O "só simulação" trava o Enviar com o porquê (primeiro da lista).
+  const so = A.opcoesDeModo(loja({ pode_enviar: false, por_que_nao_enviar: ['so_simulacao', ...TRAVADO] }), aut({ so_simulacao: 'cupom_nao_confirmado' }))
+  assert.equal(so[2].disabled, true)
+  assert.match(so[2].title, /^Travado: esta automação só simula/)
+  assert.equal(A.ERROS_AUTOMACAO.so_simulacao, `Não dá para pôr em Enviar: ${A.POR_QUE_NAO_ENVIAR.so_simulacao}.`)
+  assert.equal(A.erroDaAutomacao({ data: { detail: { code: 'registro_nao_encontrado' } } }).texto, A.ERROS_AUTOMACAO.registro_nao_encontrado)
+  // As partes de texto: o chat e a resposta pública da avaliação (com o limite dela).
+  const avaliacao = [{ tipo: 'resposta_publica', texto: 'Obrigado!' }, { tipo: 'texto', texto: 'Obrigado, {comprador}!' }]
+  assert.deepEqual(avaliacao.map((_, i) => A.rotuloParte(avaliacao, i)), ['Resposta pública (na avaliação)', 'Mensagem no chat'])
+  assert.deepEqual([{ tipo: 'texto' }, { tipo: 'texto' }].map((_, i, xs) => A.rotuloParte(xs, i)), ['Texto 1', 'Texto 2'])
+  assert.equal(A.rotuloParte([{ tipo: 'cartao_pedido' }, { tipo: 'texto' }], 1), 'Texto')
+  assert.equal(A.temTexto({ tipo: 'resposta_publica' }), true)
+  assert.equal(A.temTexto({ tipo: 'figurinha' }), false)
+  assert.equal(A.limiteDaParte(aut(), { tipo: 'resposta_publica' }), 500)
+  assert.equal(A.limiteDaParte(aut(), { tipo: 'texto' }), 1000)
+  const longa = A.formDaRegra(regra({ partes: [{ tipo: 'resposta_publica', texto: 'x'.repeat(501) }, { tipo: 'texto', texto: 'Oi!' }] }))
+  assert.deepEqual(A.problemasDoForm(longa, aut()), ['Resposta pública (na avaliação): passa de 500 caracteres (com o nome de exemplo)'])
+  // O corpo do PATCH leva a resposta pública como texto (aparado).
+  const r0 = regra({ partes: [{ tipo: 'resposta_publica', texto: 'Obrigado!' }, { tipo: 'texto', texto: 'Oi!' }] })
+  const f0 = A.formDaRegra(r0)
+  f0.partes[0].texto = '  Valeu! '
+  assert.deepEqual(A.corpoDaRegra(f0, r0, aut()).partes, [{ tipo: 'resposta_publica', texto: 'Valeu!' }, { tipo: 'texto', texto: 'Oi!' }])
+  // O cupom é lacuna da automação (a API diz quais): conta com o valor de exemplo.
+  assert.equal(A.tamanhoComExemplo('R${valor_cupom} OFF', 'shopee'), 'R$20 OFF'.length)
+  const carrinho = aut({ placeholders: { ...PLACEHOLDERS, valor_cupom: 'o valor do cupom' } })
+  assert.deepEqual(A.problemasDoForm(A.formDaRegra(regra({ partes: [{ tipo: 'texto', texto: 'R${valor_cupom} OFF' }] })), carrinho), [])
+  assert.deepEqual(A.problemasDoForm(A.formDaRegra(regra({ partes: [{ tipo: 'texto', texto: 'R${valor_cupom} OFF' }] })), aut()), ['Texto: {valor_cupom} não existe (as lacunas são: {comprador})'])
+  // A prévia da linha: a versão que mudou, o Duoke sem mensagem, o "não sairia".
+  assert.equal(A.versaoMudou({ versao_regra: 2, versao_da_linha: 1 }), true)
+  assert.equal(A.versaoMudou({ versao_regra: 1, versao_da_linha: 1 }), false)
+  assert.equal(A.versaoMudou({ versao_regra: null, versao_da_linha: 1 }), false)
+  const fmt = (v) => `[${v}]`
+  assert.equal(A.semDuoke({ estado: 'nao_mandou', janela_de: 'a', janela_ate: 'b' }, fmt), 'O Duoke não mandou (procurado de [a] a [b]).')
+  assert.match(A.semDuoke({ estado: 'pendente', janela_de: null, janela_ate: null }, fmt), /^Ainda conferindo/)
+  assert.equal(A.semDuoke({ estado: 'nao_se_aplica', janela_de: null, janela_ate: null }, fmt), 'Não se compara com o Duoke.')
+  assert.equal(A.porQueNaoSairia({ sairia: true, estado: 'simulado', motivo: null, motivo_texto: null }), null)
+  assert.equal(A.porQueNaoSairia({ sairia: false, estado: 'pulado', motivo: 'ja_mandado', motivo_texto: 'Já mandado dentro do intervalo' }), 'Não sairia: Já mandado dentro do intervalo. Abaixo, o que sairia se a regra deixasse.')
+  assert.match(A.porQueNaoSairia({ sairia: false, estado: 'so_duoke', motivo: null, motivo_texto: null }), /só o Duoke mandou/)
+  // As condições e os gatilhos novos têm nome; o selo do "visto de hora em hora".
+  assert.equal(A.rotuloCondicao('um_por_comprador_h'), 'Um por comprador a cada')
+  assert.match(A.GATILHOS.pedido_nao_pago, /de hora em hora/)
+  assert.match(A.SELOS_COMBINADA.visto_de_hora_em_hora, /de hora em hora/)
+  assert.equal(A.alvoDaLinha({ alvo: 'avaliacao', pedido: '2510' }), 'avaliação · pedido 2510')
 }
 
 // ------------------------------------------------ a tela com a API falsa
@@ -1106,6 +1208,116 @@ async function principal() {
     assert.doesNotMatch(html, /data-criterio-nao-passou/, 'a loja pronta não pede o "sei disso"')
     semSurpresa(m)
     semSurpresa(m2)
+  }
+
+  // 10. A prévia da linha do registro: só abre quando a pessoa pede; DaVinci
+  //     (montado agora) × Duoke (de verdade), com balões e cartão como na conversa.
+  {
+    const PREVIA = (id) => `GET /api/atendimento/automacoes/registro/${id}/previa`
+    const parte = (o = {}) => ({ tipo: 'texto', texto: null, pedido: null, figurinha: null, imagem_url: null, em: ISO, diferenca_s: null, principal: false, nota: null, ...o })
+    const IMG = 'https://cf.shopee.com.br/file/figurinha-0007.png'
+    const previaCarrinho = {
+      linha: linhaReg({ automacao: 'shopee_nao_pago', alvo: 'pedido', pedido: '2510050ABC' }),
+      automacao: { codigo: 'shopee_nao_pago', nome: 'Pedido não pago, com cupom ("carrinho")', plataforma: 'shopee', tipo: 'nao_pago', so_simulacao: 'cupom_nao_confirmado', so_simulacao_texto: 'o cupom é o da loja no painel do Duoke' },
+      davinci: {
+        sairia: true, de_verdade: false, estado: 'simulado', motivo: null, motivo_texto: null, hora: ISO, hora_tipo: 'sairia', comprador: NOME_COMPRADOR,
+        valores: { valor_cupom: '25' },
+        partes: [parte({ tipo: 'cartao_pedido', pedido: '2510050ABC', principal: true }), parte({ texto: 'Oi! 👋 Notamos que você deixou alguns itens no carrinho 💸 R$25 OFF' }), parte({ tipo: 'figurinha', figurinha: '0007', imagem_url: IMG, nota: 'pacote br_shoppito' })],
+        motivos_validador: [], versao_regra: 2, versao_da_linha: 1,
+      },
+      duoke: {
+        estado: 'mandou', comparacao: 'bateu', diferenca_s: -1199, em: ISO, janela_de: ISO, janela_ate: ISO,
+        partes: [parte({ tipo: 'cartao_pedido', pedido: '2510050ABC', diferenca_s: -1200 }), parte({ texto: 'Oi! 👋 Notamos que você deixou alguns itens no carrinho 💸 R$20 OFF', principal: true, diferenca_s: -1199 })],
+      },
+    }
+    const previaAvaliacao = {
+      linha: linhaReg({ id: 'l-3', automacao: 'shopee_avaliacao_ruim', alvo: 'avaliacao' }),
+      automacao: { codigo: 'shopee_avaliacao_ruim', nome: 'Resposta da avaliação 1 a 3★', plataforma: 'shopee', tipo: 'avaliacao_ruim', so_simulacao: 'avaliacao_publica', so_simulacao_texto: 'a resposta da avaliação é PÚBLICA' },
+      davinci: {
+        sairia: false, de_verdade: false, estado: 'pulado', motivo: 'pessoa_respondeu', motivo_texto: 'Alguém da equipe já respondeu', hora: ISO, hora_tipo: 'devido', comprador: null, valores: {},
+        partes: [parte({ tipo: 'resposta_publica', texto: 'Sentimos muito pela experiência 😔', principal: true }), parte({ texto: 'Sentimos muito pela experiência 😔' })],
+        motivos_validador: [], versao_regra: 1, versao_da_linha: 1,
+      },
+      duoke: { estado: 'nao_mandou', comparacao: 'bateu', diferenca_s: null, em: null, janela_de: ISO, janela_ate: ISO, partes: [] },
+    }
+    let soltarL3
+    const m = montar({
+      rotas: {
+        [GET_LISTA()]: cenario(),
+        [GET_REG()]: REGISTRO,
+        [PREVIA('l-1')]: previaCarrinho,
+        [PREVIA('l-2')]: () => { throw Object.assign(new Error('404'), { statusCode: 404, data: { detail: { code: 'registro_nao_encontrado' } } }) },
+        [PREVIA('l-3')]: () => new Promise((r) => { soltarL3 = r }),
+        [PREVIA('l-4')]: previaAvaliacao,
+        [GET_LISTA('tiktok')]: resposta(),
+      },
+    })
+    await tique()
+    let html = await render(m)
+    // O selo "só simulação" na automação (o porquê no title) e o Enviar travado com ele.
+    {
+      const ms = montar({ rotas: { [GET_LISTA()]: resposta({ automacoes: [aut({ codigo: 'shopee_nao_pago', so_simulacao: 'cupom_nao_confirmado', so_simulacao_texto: 'o cupom é o da loja', lojas: [loja({ por_que_nao_enviar: ['so_simulacao', ...TRAVADO] })] })] }), [GET_REG()]: { linhas: [], proximo: null } } })
+      await tique()
+      ms.vm.alternarAutomacao('shopee_nao_pago')
+      const h = await render(ms)
+      assert.match(h, /title="Só simulação: o cupom é o da loja"[^>]*data-so-simulacao>só simulação</)
+      assert.match(h, /<option value="enviar" disabled title="Travado: esta automação só simula/)
+      semSurpresa(ms)
+    }
+    // Fechada: nada do comprador, e um botão em cada linha.
+    assert.doesNotMatch(html, /data-previa-linha/)
+    assert.ok(!html.includes(NOME_COMPRADOR) && !html.includes('SEGREDO'))
+    assert.equal((html.match(/data-abrir-previa/g) || []).length, 4, 'uma por linha')
+    assert.equal((html.match(/abrir a conversa na Caixa/g) || []).length, 3)
+    // Aberta: o lado do DaVinci (o cartão com o nº, o cupom, a figurinha, o nome) e o do Duoke.
+    await m.vm.abrirPreviaDaLinha(m.vm.registro.value[0])
+    assert.equal(m.chamadas.at(-1).url, '/api/atendimento/automacoes/registro/l-1/previa')
+    html = await render(m)
+    const painel = html.slice(html.indexOf('data-previa-linha'))
+    assert.match(painel, /Como o cliente receberia/)
+    assert.match(painel, /só simulação/)
+    assert.match(painel, /data-previa-comparacao[^>]*>bateu</)
+    assert.match(painel, /data-previa-versao[^>]*>o texto mudou: esta é a regra de agora \(v2\); a linha foi decidida na v1</)
+    const dv = painel.slice(painel.indexOf('data-lado="davinci"'), painel.indexOf('data-lado="duoke"'))
+    const dk = painel.slice(painel.indexOf('data-lado="duoke"'))
+    assert.deepEqual([...dv.matchAll(/data-parte-davinci="([a-z_]+)"/g)].map((x) => x[1]), ['cartao_pedido', 'texto', 'figurinha'])
+    assert.match(dv, /ID do Pedido<span class="font-semibold">#2510050ABC<\/span>/)
+    assert.match(dv, /💸 R\$25 OFF/)
+    assert.ok(dv.includes(`src="${IMG}"`), 'a figurinha como a Shopee mostra')
+    assert.match(dv, /com o usuário do comprador: <span class="font-medium text-foreground">fulana\.secreta<\/span>/)
+    assert.match(dv, /cupom de R\$ 25 \(pela faixa do valor do pedido\)/)
+    assert.match(dv, /sairia/)
+    assert.deepEqual([...dk.matchAll(/data-parte-duoke="([a-z_]+)"/g)].map((x) => x[1]), ['cartao_pedido', 'texto'])
+    assert.match(dk, /R\$20 OFF/)
+    assert.match(dk, /20 min antes da nossa/)
+    assert.ok(!html.includes('SEGREDO'), 'o que o comprador escreveu nunca aparece')
+    // O mesmo botão fecha.
+    await m.vm.abrirPreviaDaLinha(m.vm.registro.value[0])
+    assert.equal(m.vm.previaAberta.value, null)
+    assert.doesNotMatch(await render(m), /data-previa-linha/)
+    // O erro da API (fora da equipe / linha que saiu do registro) fica no painel.
+    await m.vm.abrirPreviaDaLinha(m.vm.registro.value[1])
+    html = await render(m)
+    assert.match(html, /data-previa-linha[\s\S]*role="alert">Linha do registro não encontrada/)
+    // A resposta atrasada de uma linha não sobrescreve a da linha aberta depois.
+    const lenta = m.vm.abrirPreviaDaLinha(m.vm.registro.value[2])
+    await tique()
+    await m.vm.abrirPreviaDaLinha(m.vm.registro.value[3])
+    soltarL3(previaCarrinho)
+    await lenta
+    assert.equal(m.vm.previaAberta.value, 'l-4')
+    html = await render(m)
+    const p4 = html.slice(html.indexOf('data-previa-linha'))
+    // A avaliação: a resposta PÚBLICA num quadro próprio; não sairia (o porquê); o Duoke não mandou.
+    assert.match(p4, /data-parte-davinci="resposta_publica"[\s\S]*Resposta pública na avaliação/)
+    assert.match(p4, /data-nao-sairia[^>]*>Não sairia: Alguém da equipe já respondeu\./)
+    assert.match(p4, /data-sem-duoke[^>]*>O Duoke não mandou \(procurado de /)
+    assert.doesNotMatch(p4, /R\$20 OFF/, 'a resposta lenta da outra linha não entrou')
+    // Trocar de plataforma fecha a prévia.
+    m.vm.trocarPlataforma('tiktok')
+    assert.equal(m.vm.previaAberta.value, null)
+    await tique()
+    semSurpresa(m)
   }
 
   // 8. Plataforma e período lembrados neste navegador (sem armazenamento: o padrão).

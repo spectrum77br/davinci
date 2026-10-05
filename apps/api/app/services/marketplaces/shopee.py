@@ -689,18 +689,48 @@ class ShopeeClient:
         return {}
 
     async def chat_send_message(
-        self, to_id: int | str, *, text: str = "", image_url: str = ""
+        self,
+        to_id: int | str,
+        *,
+        text: str = "",
+        image_url: str = "",
+        order_sn: str = "",
+        sticker_id: str = "",
+        sticker_package_id: str = "",
     ) -> dict:
         """Manda UMA mensagem pro comprador no chat da loja
         (POST /api/v2/sellerchat/send_message). `text` → `message_type=text`;
-        `image_url` (vindo do `chat_upload_image`) → `message_type=image`.
+        `image_url` (vindo do `chat_upload_image`) → `message_type=image`;
+        `order_sn` → `message_type=order` (o CARTÃO do pedido); `sticker_id` +
+        `sticker_package_id` → `message_type=sticker` (a FIGURINHA).
         Devolve o corpo da Shopee, que traz `message_id` e `conversation_id` —
         o `conversation_id` é a ÚNICA forma de reler a conversa depois (a API
-        não busca conversa por comprador)."""
-        if bool(text) == bool(image_url):
-            raise ValueError("chat_send_message: mande texto OU imagem")
+        não busca conversa por comprador). Medido em produção (05/10/2026, os
+        envios da senha da devolução): os dois ids voltam numéricos e são os
+        mesmos que a leitura grava.
+
+        O cartão e a figurinha (05/10/2026, motor de automações) no formato que
+        o Duoke manda e a leitura grava (`atendimento_mensagens.payload`, 7
+        dias: 1.940 cartões `{"order_sn"}` e 969 figurinhas
+        `{"sticker_id": "0007", "sticker_package_id": "br_shoppito"}`, os dois
+        `source=openapi`, `status=normal`)."""
+        tipos = [bool(text), bool(image_url), bool(order_sn), bool(sticker_id)]
+        if sum(tipos) != 1:
+            raise ValueError("chat_send_message: mande texto OU imagem OU pedido OU figurinha")
         if image_url:
             corpo = {"message_type": "image", "content": {"image_url": image_url}}
+        elif order_sn:
+            corpo = {"message_type": "order", "content": {"order_sn": str(order_sn)}}
+        elif sticker_id:
+            if not sticker_package_id:
+                raise ValueError("chat_send_message: figurinha sem o pacote")
+            corpo = {
+                "message_type": "sticker",
+                "content": {
+                    "sticker_id": str(sticker_id),
+                    "sticker_package_id": str(sticker_package_id),
+                },
+            }
         else:
             corpo = {"message_type": "text", "content": {"text": text}}
         return await self._call(
@@ -708,6 +738,31 @@ class ShopeeClient:
             "/api/v2/sellerchat/send_message",
             json={"to_id": int(to_id), **corpo},
             what="shopee_chat_send",
+        )
+
+    async def chat_send_autoreply_message(self, to_id: int | str, *, text: str) -> dict:
+        """Manda um texto como RESPOSTA AUTOMÁTICA (`status=auto_reply`)
+        (POST /api/v2/sellerchat/send_autoreply_message).
+
+        É como o Duoke manda as campanhas (pedido recebido, entregue, pós,
+        convite, "ficou alguma dúvida"): medido em 05/10/2026, 7 dias, todas
+        `source=openapi`, `status=auto_reply`, `message_option=129` — não
+        contam como resposta da loja na Shopee. O formato do corpo é o mesmo do
+        `send_message` (`to_id`, `message_type`, `content`) — NÃO medido: a
+        permissão é o roteiro de produção 4a e o corpo só se confirma num envio
+        real (roteiro 4c, para uma conta da equipe). Só é chamado com
+        `ATENDIMENTO_AUTOMACOES_SHOPEE_AUTO_REPLY` ligado. Se o corpo estiver
+        errado, a Shopee responde `error_param` e ESTE texto não sai — mas no
+        pedido recebido e no entregue o cartão do pedido vai ANTES (mensagem
+        normal) e já saiu: o motor deixa a linha em `revisar` e o disjuntor
+        volta a regra para simular (uma vez por loja, não em todo pedido)."""
+        if not text:
+            raise ValueError("chat_send_autoreply_message: texto vazio")
+        return await self._call(
+            "POST",
+            "/api/v2/sellerchat/send_autoreply_message",
+            json={"to_id": int(to_id), "message_type": "text", "content": {"text": text}},
+            what="shopee_chat_autoreply",
         )
 
     async def chat_upload_image(

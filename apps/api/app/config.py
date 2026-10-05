@@ -491,9 +491,10 @@ class Settings(BaseSettings):
     #     `send_autoreply_message` passou (só com o OK do Eduardo). As campanhas
     #     da Shopee (pedido recebido, entregue, pós-conclusão, convite e "ficou
     #     alguma dúvida") só vão para `enviar` com ela E com o envio por resposta
-    #     automática no adaptador (`enviar_auto_reply` em
-    #     `services/atendimento/shopee.py` — hoje NÃO existe, então elas não
-    #     saem com a chave ligada ou não). Nunca saem como mensagem normal: ela
+    #     automática no adaptador (`enviar_parte(auto_reply=True)` em
+    #     `services/atendimento/shopee.py`, que manda pelo
+    #     `send_autoreply_message` — existe desde 05/10/2026; com a chave
+    #     desligada, elas não saem). Nunca saem como mensagem normal: ela
     #     conta como resposta da loja e entra no limite de mensagens por
     #     comprador da Shopee (a FAQ do Chat API proíbe "proactive order
     #     updates" — ver `shopee_mensagens_comprador`).

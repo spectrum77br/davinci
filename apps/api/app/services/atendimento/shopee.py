@@ -74,6 +74,7 @@ Texto de comprador nunca vai para o log — só ids e contagens.
 from __future__ import annotations
 
 import re
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -1010,25 +1011,16 @@ def _maior(base: int, visto: int | None) -> int:
 # ── Envio ─────────────────────────────────────────────────────────────────
 
 
-async def enviar_texto(
-    session: AsyncSession,
-    conversa: AtendimentoConversa,
-    integration: Integration | None,
-    cliente: Any,
-    texto: str,
+async def _envio(
+    chamada: Callable[[], Awaitable[Any]], *, conversa_id: Any = None
 ) -> ResultadoEnvio:
-    """Envia `texto` na conversa. Timeout/erro sem código = ambiguo. Nunca levanta.
+    """Faz UMA chamada de envio à Shopee e devolve o resultado. Nunca levanta.
 
-    A Shopee não responde "na conversa": manda para o comprador (`to_id`),
-    que é o `comprador_id` gravado pela leitura.
+    A régua do resultado é a de sempre: recusa com código = não saiu;
+    timeout/erro sem código = ambíguo (`revisar`, nunca se retenta).
     """
-    to_id = str(conversa.comprador_id or "").strip()
-    if not to_id:
-        return ResultadoEnvio(ok=False, erro="shopee sem_comprador")
-    if not (texto or "").strip():
-        return ResultadoEnvio(ok=False, erro="shopee texto_vazio")
     try:
-        resp = await cliente.chat_send_message(to_id, text=texto)
+        resp = await chamada()
     except httpx.HTTPStatusError as exc:
         # No caminho do envio só a renovação do token faz `raise_for_status`:
         # falhou ANTES de a mensagem sair.
@@ -1052,7 +1044,7 @@ async def enviar_texto(
     except Exception as exc:  # noqa: BLE001 — envio nunca levanta; sem saber, é ambíguo
         logger.warning(
             "atendimento_shopee_envio_inesperado",
-            conversa_id=str(conversa.id),
+            conversa_id=str(conversa_id) if conversa_id else None,
             erro=type(exc).__name__,
         )
         return ResultadoEnvio(ok=False, ambiguo=True, erro=f"shopee {type(exc).__name__}")
@@ -1060,8 +1052,104 @@ async def enviar_texto(
     resp = resp if isinstance(resp, dict) else {}
     message_id = str(resp.get("message_id") or "").strip()
     # Sem `message_id` na resposta a mensagem saiu do mesmo jeito: a próxima
-    # leitura a traz de volta e `gravar` a adota pelo texto.
+    # leitura a traz de volta e `gravar` a adota (pelo texto, ou — cartão e
+    # figurinha da automação — pelo pedido/figurinha da marca).
     return ResultadoEnvio(ok=True, externo_id=message_id or None, payload=resp)
+
+
+async def enviar_texto(
+    session: AsyncSession,
+    conversa: AtendimentoConversa,
+    integration: Integration | None,
+    cliente: Any,
+    texto: str,
+) -> ResultadoEnvio:
+    """Envia `texto` na conversa. Timeout/erro sem código = ambiguo. Nunca levanta.
+
+    A Shopee não responde "na conversa": manda para o comprador (`to_id`),
+    que é o `comprador_id` gravado pela leitura.
+    """
+    to_id = str(conversa.comprador_id or "").strip()
+    if not to_id:
+        return ResultadoEnvio(ok=False, erro="shopee sem_comprador")
+    if not (texto or "").strip():
+        return ResultadoEnvio(ok=False, erro="shopee texto_vazio")
+    return await _envio(
+        lambda: cliente.chat_send_message(to_id, text=texto), conversa_id=conversa.id
+    )
+
+
+# ── Partes da mensagem automática (05/10/2026) ────────────────────────────
+# O motor de automações (`automacoes.py`, pelo `enviar.enviar_automatica`)
+# manda cada PARTE por aqui: o texto, o CARTÃO do pedido e a FIGURINHA, no
+# formato que o Duoke manda e a leitura grava (payloads de produção, 7 dias:
+# cartão `{"message_type": "order", "content": {"order_sn"}}`, figurinha
+# `{"message_type": "sticker", "content": {"sticker_id", "sticker_package_id"}}`,
+# os dois `normal`; os textos das campanhas `auto_reply`). E manda SEM
+# conversa no DaVinci: o `to_id` é o comprador do pedido (o pedido recebido
+# de quem nunca escreveu à loja) — a Shopee abre a conversa e devolve o
+# `conversation_id`, que o `enviar` grava.
+
+PARTE_TEXTO = "texto"
+PARTE_CARTAO = "cartao_pedido"
+PARTE_FIGURINHA = "figurinha"
+
+
+async def enviar_parte(
+    session: AsyncSession,
+    conversa: AtendimentoConversa | None,
+    integration: Integration | None,
+    cliente: Any,
+    parte: dict,
+    *,
+    to_id: str | None = None,
+    pedido: str | None = None,
+    auto_reply: bool = False,
+) -> ResultadoEnvio:
+    """Envia UMA parte da mensagem automática. Nunca levanta.
+
+    `to_id` vale quando não há conversa (senão é o comprador da conversa);
+    `pedido` é o número do cartão; `auto_reply` manda o TEXTO como resposta
+    automática (`send_autoreply_message`) — só as campanhas, só com a chave
+    `atendimento_automacoes_shopee_auto_reply` (quem decide é o `enviar`).
+    O cartão e a figurinha vão como mensagem normal, como o Duoke manda.
+    """
+    destino = str(to_id or (conversa.comprador_id if conversa is not None else "") or "").strip()
+    if not destino:
+        return ResultadoEnvio(ok=False, erro="shopee sem_comprador")
+    tipo = parte.get("tipo") if isinstance(parte, dict) else None
+    conversa_id = conversa.id if conversa is not None else None
+    if tipo == PARTE_TEXTO:
+        texto = str(parte.get("texto") or "")
+        if not texto.strip():
+            return ResultadoEnvio(ok=False, erro="shopee texto_vazio")
+        if auto_reply:
+            return await _envio(
+                lambda: cliente.chat_send_autoreply_message(destino, text=texto),
+                conversa_id=conversa_id,
+            )
+        return await _envio(
+            lambda: cliente.chat_send_message(destino, text=texto), conversa_id=conversa_id
+        )
+    if tipo == PARTE_CARTAO:
+        numero = str(pedido or "").strip()
+        if not numero:
+            return ResultadoEnvio(ok=False, erro="shopee cartao_sem_pedido")
+        return await _envio(
+            lambda: cliente.chat_send_message(destino, order_sn=numero), conversa_id=conversa_id
+        )
+    if tipo == PARTE_FIGURINHA:
+        figurinha = str(parte.get("figurinha") or "").strip()
+        pacote = str(parte.get("pacote") or "").strip()
+        if not figurinha or not pacote:
+            return ResultadoEnvio(ok=False, erro="shopee figurinha_invalida")
+        return await _envio(
+            lambda: cliente.chat_send_message(
+                destino, sticker_id=figurinha, sticker_package_id=pacote
+            ),
+            conversa_id=conversa_id,
+        )
+    return ResultadoEnvio(ok=False, erro="shopee parte_desconhecida")
 
 
 # ── Resposta à avaliação (RF8, 02/10/2026) ────────────────────────────────

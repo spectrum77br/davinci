@@ -22,7 +22,17 @@
 //   prévia com o nome de exemplo, pelo validador do backend), o atraso, o
 //   horário, as condições do catálogo e o teto;
 // - o registro recente, SEM TEXTO NENHUM: loja, automação, alvo, horários,
-//   estado e o que o Duoke fez. A conversa abre na Caixa.
+//   estado e o que o Duoke fez. A conversa abre na Caixa;
+// - a PRÉVIA de cada linha do registro ("como o cliente receberia", 05/10 à
+//   noite): só quando a pessoa abre, a API monta na hora as partes EXATAS que
+//   sairiam (o cartão com o nº do pedido, o texto com o usuário do comprador,
+//   o cupom, a figurinha, a resposta pública) e mostra ao lado o que o Duoke
+//   mandou de verdade — balões como os da conversa, DaVinci × Duoke. Nada
+//   disso fica gravado (o registro continua sem texto).
+//
+// As automações que SÓ SIMULAM (o pedido não pago com cupom, a resposta da
+// avaliação, o "pedido recebido" do TikTok — `so_simulacao`) têm o Enviar
+// travado com o porquê, sempre.
 //
 // "Enviar" fica DESABILITADO, com o motivo, enquanto a API disser que não
 // pode (a chave ATENDIMENTO_AUTOMACOES_ENVIO desligada, o envio geral, a
@@ -81,7 +91,7 @@ export interface ContaAutomacao {
   por_que_nao: string[]
 }
 export interface ParteAutomacao {
-  tipo: 'texto' | 'cartao_pedido' | 'figurinha'
+  tipo: 'texto' | 'cartao_pedido' | 'figurinha' | 'resposta_publica'
   texto?: string | null
   figurinha?: string | null
   pacote?: string | null
@@ -148,6 +158,8 @@ export interface Automacao {
   condicoes_padrao: Record<string, boolean | number>
   placeholders: Record<string, string>
   seguinte: string | null
+  so_simulacao: string | null
+  so_simulacao_texto: string | null
   total_24h: ContaAutomacao | null
   total_periodo: ContaAutomacao | null
   lojas: LojaAutomacao[]
@@ -218,6 +230,57 @@ export interface PreviaResposta {
   motivos: string[]
   comprador_exemplo: string
 }
+// = GET /automacoes/registro/{id}/previa — "como o cliente receberia" (automacoes_previa.py).
+// Uma parte da prévia (o mesmo desenho dos dois lados: DaVinci e Duoke).
+export interface ParteVista {
+  tipo: 'texto' | 'cartao_pedido' | 'figurinha' | 'resposta_publica' | 'outro'
+  texto: string | null
+  pedido: string | null
+  figurinha: string | null
+  imagem_url: string | null
+  em: string | null
+  diferenca_s: number | null
+  principal: boolean
+  nota: string | null
+}
+export interface PreviaAutomacaoLinha {
+  codigo: string
+  nome: string
+  plataforma: string
+  tipo: string | null
+  so_simulacao: string | null
+  so_simulacao_texto: string | null
+}
+export interface PreviaDavinci {
+  sairia: boolean
+  de_verdade: boolean
+  estado: string
+  motivo: string | null
+  motivo_texto: string | null
+  hora: string | null
+  hora_tipo: 'saiu' | 'sairia' | 'devido'
+  comprador: string | null
+  valores: Record<string, string>
+  partes: ParteVista[]
+  motivos_validador: string[]
+  versao_regra: number | null
+  versao_da_linha: number | null
+}
+export interface PreviaDuoke {
+  estado: string
+  comparacao: Comparacao | null
+  diferenca_s: number | null
+  em: string | null
+  janela_de: string | null
+  janela_ate: string | null
+  partes: ParteVista[]
+}
+export interface PreviaRegistro {
+  linha: RegistroLinha
+  automacao: PreviaAutomacaoLinha
+  davinci: PreviaDavinci
+  duoke: PreviaDuoke
+}
 // = RegraIn (o corpo do PATCH: tudo opcional)
 export interface CorpoRegra {
   modo?: ModoAutomacao
@@ -235,6 +298,11 @@ export interface CorpoRegra {
 
 // O nome de exemplo da prévia (= NOME_EXEMPLO do router).
 export const NOME_EXEMPLO = 'maria.silva'
+// O valor de exemplo das lacunas próprias de uma automação (= EXEMPLOS_EXTRA do catálogo).
+export const EXEMPLOS_LACUNA: Record<string, string> = { valor_cupom: '20' }
+// A resposta PÚBLICA da avaliação da Shopee: 500 caracteres (= LIMITE_CARACTERES do
+// backend, ("shopee", "avaliacao")) — a mensagem do chat segue o limite da caixa.
+export const LIMITE_RESPOSTA_PUBLICA = 500
 // Quantas linhas do registro por página (a API aceita até 500).
 export const LIMITE_REGISTRO = 200
 export const PERIODOS = [7, 15, 30]
@@ -262,6 +330,9 @@ export const GATILHOS: Record<string, string> = {
   pedido_pago: 'pedido pago (Bling)',
   entregue: 'pedido entregue (Logística)',
   concluido: 'pedido concluído (Logística)',
+  pedido_nao_pago: 'pedido criado e não pago (o índice de pedidos, de hora em hora)',
+  avaliacao: 'avaliação do comprador (lida a cada 30 min)',
+  pedido_tiktok: 'aviso de pedido da TikTok',
 }
 // Para quem é a linha do registro (o `alvo`).
 export const ALVOS: Record<string, string> = {
@@ -270,10 +341,12 @@ export const ALVOS: Record<string, string> = {
   pedido: 'pedido',
   mensagem: 'mensagem',
   duoke: 'mensagem do Duoke',
+  avaliacao: 'avaliação',
 }
 
 // Por que "Enviar" não pode agora (_por_que_nao_enviar e o 409 do PATCH).
 export const POR_QUE_NAO_ENVIAR: Record<string, string> = {
+  so_simulacao: 'esta automação só simula (mostra o que o DaVinci mandaria): não vai para Enviar',
   sem_texto: 'esta opção ainda não tem texto (o painel do Duoke diz qual é)',
   envio_desligado: 'o envio das automáticas está desligado no servidor (ATENDIMENTO_AUTOMACOES_ENVIO)',
   envio_geral_desligado: 'o envio geral pelo DaVinci está desligado (ATENDIMENTO_ENVIO_ATIVO)',
@@ -285,6 +358,17 @@ export function motivosEnviar(codigos: string[] | null | undefined): string[] {
   return (codigos || []).map((c) => POR_QUE_NAO_ENVIAR[c] || c)
 }
 
+// Por que o DaVinci voltou a regra para Simular sozinho (`disjuntor_motivo`).
+export const DISJUNTOR_MOTIVOS: Record<string, string> = {
+  duoke_ainda_ligado: 'o Duoke ainda mandou (Duoke ainda ligado?)',
+  parte_falhou: 'a mensagem saiu pela metade (uma parte saiu e a seguinte não) — confira a linha em Revisar',
+  plataforma_recusou: 'a Shopee recusou a campanha (o formato ou a permissão da resposta automática)',
+}
+export function tituloDisjuntor(em: string, motivo: string | null | undefined, quando: string): string {
+  const porque = (motivo && DISJUNTOR_MOTIVOS[motivo]) || motivo || DISJUNTOR_MOTIVOS.duoke_ainda_ligado
+  return `O DaVinci voltou esta regra para Simular em ${quando || em}: ${porque}`
+}
+
 // Os `detail.code` das rotas da aba → a frase da tela.
 export const ERROS_AUTOMACAO: Record<string, string> = {
   ...Object.fromEntries(Object.entries(POR_QUE_NAO_ENVIAR).map(([k, v]) => [k, `Não dá para pôr em Enviar: ${v}.`])),
@@ -292,10 +376,12 @@ export const ERROS_AUTOMACAO: Record<string, string> = {
   confirmar_duoke: 'Marque que você já desligou esta automação desta loja no Duoke.',
   criterio_nao_passou: 'O critério da troca não passou nesta loja nos últimos 7 dias: marque que você sabe disso para trocar mesmo assim.',
   texto_invalido: 'O texto não passa no validador',
+  parte_invalida: 'A resposta pública só existe na resposta da avaliação.',
   janela_invalida: 'Horário inválido: o início tem que ser antes do fim (HH:MM).',
   condicao_desconhecida: 'Condição desconhecida para esta automação.',
   condicao_invalida: 'Valor inválido numa condição.',
   automacao_nao_encontrada: 'Automação não encontrada (atualize a tela).',
+  registro_nao_encontrado: 'Linha do registro não encontrada (fora da sua equipe, ou já saiu do registro).',
   loja_nao_encontrada: 'Loja não encontrada (fora da sua equipe ou de outra plataforma).',
 }
 
@@ -312,6 +398,7 @@ export const CONDICOES: Record<string, { label: string; unidade?: string; hint?:
   so_com_cartao_de_produto: { label: 'Só se o comprador mandou o cartão de um produto' },
   so_sem_avaliacao: { label: 'Só se o comprador ainda não avaliou' },
   so_com_conversa: { label: 'Só se já houver conversa com o comprador' },
+  um_por_comprador_h: { label: 'Um por comprador a cada', unidade: 'h', hint: 'como o Duoke: quem já recebeu um nas últimas 24 h não recebe outro (o Duoke manda de novo a partir de ~27 h)' },
 }
 export function rotuloCondicao(chave: string): string {
   return CONDICOES[chave]?.label || chave
@@ -321,6 +408,7 @@ export function rotuloCondicao(chave: string): string {
 export const SELOS_COMBINADA: Record<string, string> = {
   na_hora: 'Responde na hora (o Duoke responde 12 h depois do menu, e só se ninguém respondeu)',
   horario_comercial: 'Sai das 9h às 20h (o Duoke manda de madrugada)',
+  visto_de_hora_em_hora: 'O DaVinci vê o pedido não pago de hora em hora (o índice de pedidos): sai até ~1 h depois dos 30 min do Duoke',
 }
 
 // O estado da linha do registro (catalogo.ESTADOS).
@@ -592,9 +680,30 @@ export function placeholdersDoTexto(texto: string | null | undefined): string[] 
 export function placeholdersDesconhecidos(texto: string | null | undefined, conhecidos: string[]): string[] {
   return placeholdersDoTexto(texto).filter((p) => !conhecidos.includes(p))
 }
-// O tamanho como sai, com o nome de exemplo no lugar do {comprador}.
+// O tamanho como sai, com o nome de exemplo no lugar do {comprador} (e o valor
+// de exemplo nas lacunas próprias, como o {valor_cupom}).
 export function tamanhoComExemplo(texto: string | null | undefined, plataforma: string): number {
-  return tamanhoDoEnvio((texto || '').split('{comprador}').join(NOME_EXEMPLO), plataforma)
+  let t = (texto || '').split('{comprador}').join(NOME_EXEMPLO)
+  for (const [k, v] of Object.entries(EXEMPLOS_LACUNA)) t = t.split(`{${k}}`).join(v)
+  return tamanhoDoEnvio(t, plataforma)
+}
+// As partes que têm texto (o chat e a resposta pública da avaliação).
+export const TIPOS_COM_TEXTO = ['texto', 'resposta_publica']
+export function temTexto(p: Pick<ParteAutomacao, 'tipo'>): boolean {
+  return TIPOS_COM_TEXTO.includes(p.tipo)
+}
+// O limite da parte: a resposta pública da avaliação tem o dela.
+export function limiteDaParte(aut: Pick<Automacao, 'plataforma' | 'canal'>, p: Pick<ParteAutomacao, 'tipo'>): number | null {
+  if (p.tipo === 'resposta_publica') return LIMITE_RESPOSTA_PUBLICA
+  return limiteDe(aut.plataforma, aut.canal)
+}
+// O nome da parte de texto no editor: "Texto" (ou "Texto 2"), e na avaliação
+// "Resposta pública (na avaliação)" e "Mensagem no chat".
+export function rotuloParte(partes: Pick<ParteAutomacao, 'tipo'>[], i: number): string {
+  if (partes[i]?.tipo === 'resposta_publica') return 'Resposta pública (na avaliação)'
+  const textos = partes.filter((x) => x.tipo === 'texto').length
+  const base = partes.some((x) => x.tipo === 'resposta_publica') ? 'Mensagem no chat' : 'Texto'
+  return textos > 1 ? `${base} ${partes.slice(0, i + 1).filter((x) => x.tipo === 'texto').length}` : base
 }
 
 // ─── o formulário da regra ──────────────────────────────────────────────────
@@ -629,7 +738,7 @@ function numero(v: unknown): number | null {
   return Number.isFinite(n) ? n : null
 }
 function parteNormal(p: ParteAutomacao): ParteAutomacao {
-  if (p.tipo === 'texto') return { tipo: 'texto', texto: (p.texto || '').trim() }
+  if (temTexto(p)) return { tipo: p.tipo, texto: (p.texto || '').trim() }
   if (p.tipo === 'figurinha') return { tipo: 'figurinha', figurinha: p.figurinha ?? null, pacote: p.pacote ?? null }
   return { tipo: p.tipo }
 }
@@ -641,13 +750,10 @@ const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/
 export function problemasDoForm(f: FormRegra, aut: Pick<Automacao, 'plataforma' | 'canal' | 'placeholders' | 'condicoes_padrao'>): string[] {
   const out: string[] = []
   const conhecidos = Object.keys(aut.placeholders || {})
-  const textos = f.partes.filter((p) => p.tipo === 'texto').length
-  const limite = limiteDe(aut.plataforma, aut.canal)
-  let n = 0
-  for (const p of f.partes) {
-    if (p.tipo !== 'texto') continue
-    n += 1
-    const nome = textos > 1 ? `Texto ${n}` : 'Texto'
+  for (const [i, p] of f.partes.entries()) {
+    if (!temTexto(p)) continue
+    const nome = rotuloParte(f.partes, i)
+    const limite = limiteDaParte(aut, p)
     const t = (p.texto || '').trim()
     if (!t) out.push(`${nome}: escreva a mensagem`)
     if (t.length > 2000) out.push(`${nome}: no máximo 2000 caracteres`)
@@ -760,6 +866,36 @@ export function paramsRegistro(f: FiltrosRegistro, antes?: string | null): strin
   return p.toString()
 }
 
+// ─── a prévia da linha ("como o cliente receberia") ────────────────────────
+// O nome de cada parte (no balão e no title).
+export const PARTES_VISTA: Record<string, string> = {
+  texto: 'texto',
+  cartao_pedido: 'cartão do pedido',
+  figurinha: 'figurinha',
+  resposta_publica: 'resposta pública (na avaliação)',
+  outro: 'outra mensagem',
+}
+// A hora da nossa: a que saiu, a que sairia (a decisão do modo seco) ou a prevista.
+export const HORA_DAVINCI: Record<string, string> = { saiu: 'saiu', sairia: 'sairia', devido: 'prevista para' }
+// O texto da regra mudou depois que a linha foi decidida (a prévia é a de agora).
+export function versaoMudou(d: Pick<PreviaDavinci, 'versao_regra' | 'versao_da_linha'>): boolean {
+  return d.versao_regra !== null && d.versao_da_linha !== null && d.versao_regra !== d.versao_da_linha
+}
+// O lado do Duoke sem mensagem: por quê.
+export function semDuoke(d: Pick<PreviaDuoke, 'estado' | 'janela_de' | 'janela_ate'>, fmt: (v: string) => string): string {
+  const janela = d.janela_de && d.janela_ate ? ` (procurado de ${fmt(d.janela_de)} a ${fmt(d.janela_ate)})` : ''
+  if (d.estado === 'nao_mandou') return `O Duoke não mandou${janela}.`
+  if (d.estado === 'pendente') return `Ainda conferindo: a leitura da loja não passou da janela${janela}.`
+  if (d.estado === 'mandou') return 'O Duoke mandou, mas a mensagem não está mais na caixa do DaVinci.'
+  return 'Não se compara com o Duoke.'
+}
+// O DaVinci não mandaria (ou não mandou): o porquê, em português.
+export function porQueNaoSairia(d: Pick<PreviaDavinci, 'sairia' | 'estado' | 'motivo' | 'motivo_texto'>): string | null {
+  if (d.sairia) return null
+  if (d.estado === 'so_duoke') return 'O DaVinci não tinha esta linha: só o Duoke mandou.'
+  return `Não sairia: ${d.motivo_texto || d.motivo || ESTADOS_REGISTRO[d.estado]?.hint || d.estado}. Abaixo, o que sairia se a regra deixasse.`
+}
+
 // ─── erros ──────────────────────────────────────────────────────────────────
 // O `detail` das rotas da aba vem com `code` e, conforme o caso, `motivos`
 // (o 409: a lista toda; o 422 do texto: os do validador), `condicoes` ou
@@ -787,6 +923,7 @@ import {
   Check,
   ChevronRight,
   ExternalLink,
+  Eye,
   Info,
   Loader2,
   Lock,
@@ -861,6 +998,7 @@ function trocarPlataforma(p: PlataformaAutomacao) {
   abertas.value = []
   fecharEditor()
   pedindoEnviar.value = null
+  fecharPreviaDaLinha()
   salvarPreferencias()
   // O filtro do registro era de outra plataforma.
   Object.assign(filtrosRegistro, { automacao: '', integration_id: '' })
@@ -1204,6 +1342,40 @@ function abrirConversa(id: string | null) {
   if (id) emit('abrir-conversa', id)
 }
 
+// ─── a prévia de uma linha: "como o cliente receberia" × o Duoke ───────────
+// Só quando a pessoa abre (o registro em si não tem texto): a API monta na
+// hora as partes que sairiam e mostra o que o Duoke mandou de verdade.
+const previaAberta = ref<string | null>(null)
+const previaLinha = ref<PreviaRegistro | null>(null)
+const previaLinhaErro = ref<string | null>(null)
+const previaLinhaCarregando = ref(false)
+let geracaoPreviaLinha = 0
+function fecharPreviaDaLinha() {
+  geracaoPreviaLinha++
+  previaAberta.value = null
+  previaLinha.value = null
+  previaLinhaErro.value = null
+  previaLinhaCarregando.value = false
+}
+async function abrirPreviaDaLinha(l: RegistroLinha) {
+  if (previaAberta.value === l.id) return fecharPreviaDaLinha()
+  const g = ++geracaoPreviaLinha
+  previaAberta.value = l.id
+  previaLinha.value = null
+  previaLinhaErro.value = null
+  previaLinhaCarregando.value = true
+  try {
+    const r = await api<PreviaRegistro>(`/api/atendimento/automacoes/registro/${encodeURIComponent(l.id)}/previa`)
+    if (g !== geracaoPreviaLinha) return
+    previaLinha.value = r
+  } catch (e: any) {
+    if (g !== geracaoPreviaLinha) return
+    previaLinhaErro.value = erroDaAutomacao(e, 'Não consegui montar a prévia desta linha').texto
+  } finally {
+    if (g === geracaoPreviaLinha) previaLinhaCarregando.value = false
+  }
+}
+
 // ─── atualização ────────────────────────────────────────────────────────────
 // O motor roda a cada 2 min: a conta se atualiza sozinha a cada 1 min (só com
 // a aba visível). O registro, no "atualizar" e nos filtros (a página que a
@@ -1337,6 +1509,7 @@ onMounted(() => {
               <span v-if="aut.campanha" class="rounded bg-orange-500/15 px-1.5 py-px text-[11px] text-orange-800 dark:text-orange-300" title="campanha da Shopee: hoje o Duoke manda como resposta automática (auto_reply)">campanha</span>
               <span v-if="aut.diferenca_combinada" class="rounded bg-violet-500/15 px-1.5 py-px text-[11px] text-violet-700 dark:text-violet-300" :title="SELOS_COMBINADA[aut.diferenca_combinada] || dados.divergencias[aut.diferenca_combinada] || aut.diferenca_combinada" data-selo-combinada>diferença combinada</span>
               <span v-if="aut.travada" class="rounded bg-red-500/15 px-1.5 py-px text-[11px] text-red-700 dark:text-red-300" :title="POR_QUE_NAO_ENVIAR.sem_texto">sem texto</span>
+              <span v-if="aut.so_simulacao" class="rounded bg-violet-500/15 px-1.5 py-px text-[11px] text-violet-700 dark:text-violet-300" :title="`Só simulação: ${aut.so_simulacao_texto || aut.so_simulacao}`" data-so-simulacao>só simulação</span>
             </div>
             <p class="mt-0.5 text-xs text-muted-foreground">{{ aut.descricao }}</p>
           </div>
@@ -1417,7 +1590,7 @@ onMounted(() => {
                   <span v-if="loja.sem_acesso" class="rounded bg-red-500/15 px-1 py-px text-[10px] text-red-700 dark:text-red-300" :title="POR_QUE_NAO_ENVIAR.loja_sem_acesso">sem acesso</span>
                   <span v-if="loja.regra.padrao" class="rounded bg-muted px-1 py-px text-[10px] text-muted-foreground" title="sem regra salva: valem os padrões do catálogo">padrão</span>
                   <span v-if="enviarSemChave(loja, dados.chaves)" class="rounded bg-red-600 px-1 py-px text-[10px] font-semibold text-white" title="regra em ENVIAR com a chave de envio desligada: nada sai — se o Duoke já foi desligado aqui, o comprador fica sem" data-enviar-sem-chave>ENVIAR sem envio</span>
-                  <span v-if="loja.regra.disjuntor_em" class="rounded bg-amber-500/15 px-1 py-px text-[10px] text-amber-800 dark:text-amber-300" :title="`O DaVinci voltou esta regra para Simular em ${fmtDataHora(loja.regra.disjuntor_em)}: o Duoke ainda mandou (Duoke ainda ligado?)`">disjuntor</span>
+                  <span v-if="loja.regra.disjuntor_em" class="rounded bg-amber-500/15 px-1 py-px text-[10px] text-amber-800 dark:text-amber-300" :title="tituloDisjuntor(loja.regra.disjuntor_em, loja.regra.disjuntor_motivo, fmtDataHora(loja.regra.disjuntor_em))">disjuntor</span>
                   <span
                     v-if="loja.regra.modo === 'simular'"
                     class="rounded px-1 py-px text-[10px]"
@@ -1564,9 +1737,9 @@ onMounted(() => {
                 <!-- o texto -->
                 <div class="space-y-2">
                   <template v-for="(p, i) in form.partes" :key="i">
-                    <div v-if="p.tipo === 'texto'" class="space-y-1">
+                    <div v-if="temTexto(p)" class="space-y-1">
                       <label :for="`texto-${chaveLoja(aut, loja)}-${i}`" class="text-[11px] font-medium">
-                        Texto{{ form.partes.filter((x) => x.tipo === 'texto').length > 1 ? ` ${form.partes.slice(0, i + 1).filter((x) => x.tipo === 'texto').length}` : '' }}
+                        {{ rotuloParte(form.partes, i) }}
                       </label>
                       <textarea
                         :id="`texto-${chaveLoja(aut, loja)}-${i}`"
@@ -1582,9 +1755,9 @@ onMounted(() => {
                       />
                       <div class="flex justify-end text-[10px] tabular-nums text-muted-foreground">
                         <span
-                          :class="limiteDe(aut.plataforma, aut.canal) && tamanhoComExemplo(p.texto, aut.plataforma) > (limiteDe(aut.plataforma, aut.canal) || 0) ? 'font-semibold text-red-600 dark:text-red-400' : ''"
+                          :class="limiteDaParte(aut, p) && tamanhoComExemplo(p.texto, aut.plataforma) > (limiteDaParte(aut, p) || 0) ? 'font-semibold text-red-600 dark:text-red-400' : ''"
                           title="contado como sai, com o nome de exemplo no lugar do {comprador}"
-                        >{{ tamanhoComExemplo(p.texto, aut.plataforma) }}<template v-if="limiteDe(aut.plataforma, aut.canal)"> / {{ limiteDe(aut.plataforma, aut.canal) }}</template></span>
+                        >{{ tamanhoComExemplo(p.texto, aut.plataforma) }}<template v-if="limiteDaParte(aut, p)"> / {{ limiteDaParte(aut, p) }}</template></span>
                       </div>
                     </div>
                     <div v-else class="inline-flex items-center gap-1.5 rounded border border-dashed px-2 py-1 text-[11px] text-muted-foreground" :title="p.tipo === 'cartao_pedido' ? 'o cartão do pedido vai junto, como no Duoke' : `figurinha ${p.figurinha || ''} (${p.pacote || ''})`">
@@ -1620,12 +1793,15 @@ onMounted(() => {
                     <template v-if="previa">
                       <div v-for="(p, i) in previa.partes" :key="`p${i}`" class="flex justify-end">
                         <div v-if="p.tipo === 'texto'" class="max-w-[95%] whitespace-pre-wrap break-words rounded-lg rounded-tr-sm bg-sky-100 px-3 py-2 text-xs dark:bg-sky-900/45">{{ p.texto }}</div>
+                        <div v-else-if="p.tipo === 'resposta_publica'" class="w-full whitespace-pre-wrap break-words rounded-md border border-amber-500/40 bg-amber-500/5 px-3 py-2 text-xs">
+                          <div class="mb-0.5 text-[10px] font-medium text-amber-800 dark:text-amber-300">Resposta pública na avaliação</div>{{ p.texto }}
+                        </div>
                         <div v-else class="rounded border border-dashed px-2 py-1 text-[11px] text-muted-foreground">{{ p.tipo === 'cartao_pedido' ? 'cartão do pedido' : 'figurinha' }}</div>
                       </div>
                       <p v-if="!previa.partes.length" class="text-muted-foreground">sem texto</p>
                       <details v-if="semNomeDiferente" class="text-[11px] text-muted-foreground">
                         <summary class="cursor-pointer">sem o nome do comprador</summary>
-                        <div v-for="(p, i) in previa.sem_nome.filter((x) => x.tipo === 'texto')" :key="`s${i}`" class="mt-1 whitespace-pre-wrap break-words rounded bg-muted/50 px-2 py-1">{{ p.texto }}</div>
+                        <div v-for="(p, i) in previa.sem_nome.filter((x) => temTexto(x))" :key="`s${i}`" class="mt-1 whitespace-pre-wrap break-words rounded bg-muted/50 px-2 py-1">{{ p.texto }}</div>
                       </details>
                     </template>
                     <p v-else-if="previaErro" class="text-red-700 dark:text-red-300">{{ previaErro }}</p>
@@ -1715,7 +1891,7 @@ onMounted(() => {
       <header class="space-y-2 border-b px-3 py-2">
         <div class="flex flex-wrap items-baseline gap-x-2">
           <h3 id="registro-automaticas" class="text-sm font-medium">Registro recente</h3>
-          <span class="text-xs text-muted-foreground">o que o DaVinci mandaria (ou mandou), para qual pedido ou conversa, e o que o Duoke fez — sem o texto de ninguém</span>
+          <span class="text-xs text-muted-foreground">o que o DaVinci mandaria (ou mandou), para qual pedido ou conversa, e o que o Duoke fez — sem o texto de ninguém; o <Eye class="inline size-3" /> de cada linha mostra como o cliente receberia, montado na hora, ao lado do que o Duoke mandou</span>
         </div>
         <div class="flex flex-wrap items-center gap-2 text-xs">
           <select v-model="filtrosRegistro.automacao" class="h-8 w-full rounded-md border bg-background px-2 sm:w-auto sm:max-w-[16rem]" aria-label="automação">
@@ -1782,7 +1958,17 @@ onMounted(() => {
             <div v-if="l.alerta" class="mt-0.5 inline-flex items-center gap-1 rounded bg-red-500/15 px-1.5 py-px text-[11px] font-medium text-red-700 dark:text-red-300" :title="l.alerta_texto || l.alerta" data-alerta><ShieldAlert class="size-3" /> {{ l.alerta_texto || l.alerta }}</div>
             <div v-if="l.divergencia_texto" class="mt-0.5 text-[11px] text-muted-foreground">{{ l.divergencia_texto }}</div>
           </div>
-          <div class="text-right">
+          <div class="flex items-center justify-end gap-2 md:flex-col md:items-end md:gap-1">
+            <button
+              type="button"
+              class="inline-flex items-center gap-1 text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+              :class="previaAberta === l.id ? 'text-foreground' : ''"
+              :aria-expanded="previaAberta === l.id"
+              :aria-label="`como o cliente receberia ${l.automacao_nome} em ${l.loja || 'loja'}, ao lado do Duoke`"
+              title="como o cliente receberia (montado agora) × o que o Duoke mandou"
+              data-abrir-previa
+              @click="abrirPreviaDaLinha(l)"
+            ><Eye class="size-3.5" /><span class="md:hidden">como o cliente recebe</span></button>
             <button
               v-if="l.conversa_id"
               type="button"
@@ -1791,6 +1977,85 @@ onMounted(() => {
               title="abrir a conversa na Caixa"
               @click="abrirConversa(l.conversa_id)"
             ><ExternalLink class="size-3.5" /><span class="md:hidden">abrir conversa</span></button>
+          </div>
+
+          <!-- a prévia da linha: DaVinci (montado agora) × Duoke (de verdade) -->
+          <div
+            v-if="previaAberta === l.id"
+            class="col-span-2 mt-1 rounded-md border bg-muted/20 p-2 md:col-span-7"
+            role="region"
+            :aria-label="`como o cliente receberia ${l.automacao_nome}`"
+            data-previa-linha
+          >
+            <p v-if="previaLinhaCarregando" class="flex items-center gap-1.5 text-muted-foreground"><Loader2 class="size-3.5 animate-spin" /> montando a prévia…</p>
+            <p v-else-if="previaLinhaErro" class="text-red-700 dark:text-red-300" role="alert">{{ previaLinhaErro }}</p>
+            <template v-else-if="previaLinha">
+              <div class="mb-2 flex flex-wrap items-center gap-1.5 text-[11px]">
+                <span class="font-medium">Como o cliente receberia</span>
+                <span class="text-muted-foreground">— montado agora, nada fica gravado</span>
+                <span v-if="previaLinha.automacao.so_simulacao" class="rounded bg-violet-500/15 px-1.5 py-px text-violet-700 dark:text-violet-300" :title="previaLinha.automacao.so_simulacao_texto || ''">só simulação</span>
+                <span v-if="previaLinha.duoke.comparacao" class="rounded px-1.5 py-px" :class="COMPARACOES[previaLinha.duoke.comparacao]?.cls" :title="COMPARACOES[previaLinha.duoke.comparacao]?.hint" data-previa-comparacao>{{ COMPARACOES[previaLinha.duoke.comparacao]?.label || previaLinha.duoke.comparacao }}</span>
+                <span v-if="versaoMudou(previaLinha.davinci)" class="rounded bg-amber-500/15 px-1.5 py-px text-amber-800 dark:text-amber-300" data-previa-versao>o texto mudou: esta é a regra de agora (v{{ previaLinha.davinci.versao_regra }}); a linha foi decidida na v{{ previaLinha.davinci.versao_da_linha }}</span>
+                <button type="button" class="ml-auto inline-flex items-center gap-1 text-muted-foreground hover:text-foreground" aria-label="fechar a prévia" @click="fecharPreviaDaLinha"><X class="size-3.5" /> fechar</button>
+              </div>
+              <div class="grid gap-3 md:grid-cols-2">
+                <!-- DaVinci -->
+                <section class="min-w-0 space-y-1" data-lado="davinci">
+                  <div class="text-[11px] font-medium">
+                    DaVinci
+                    <span class="font-normal text-muted-foreground">· {{ previaLinha.davinci.de_verdade ? 'o que saiu' : 'o que sairia' }}<template v-if="previaLinha.davinci.hora"> · {{ HORA_DAVINCI[previaLinha.davinci.hora_tipo] || '' }} {{ fmtDataHora(previaLinha.davinci.hora) }}</template></span>
+                  </div>
+                  <p v-if="porQueNaoSairia(previaLinha.davinci)" class="rounded bg-muted px-2 py-1 text-[11px] text-muted-foreground" data-nao-sairia>{{ porQueNaoSairia(previaLinha.davinci) }}</p>
+                  <div class="space-y-1.5 rounded-md bg-background p-2" :class="previaLinha.davinci.sairia ? '' : 'opacity-60'">
+                    <div v-for="(pc, i) in previaLinha.davinci.partes" :key="`d${i}`" class="flex flex-col items-end" :data-parte-davinci="pc.tipo">
+                      <div v-if="pc.tipo === 'resposta_publica'" class="w-full whitespace-pre-wrap break-words rounded-md border border-amber-500/40 bg-amber-500/5 px-3 py-2 text-sm">
+                        <div class="mb-0.5 text-[10px] font-medium text-amber-800 dark:text-amber-300">Resposta pública na avaliação</div>{{ pc.texto }}
+                      </div>
+                      <div v-else-if="pc.tipo === 'cartao_pedido'" class="rounded-lg rounded-tr-sm bg-sky-100 p-2 dark:bg-sky-900/45">
+                        <div class="w-[240px] max-w-full rounded-md bg-background p-3 text-[13px] leading-5 shadow-sm">ID do Pedido<span class="font-semibold">#{{ pc.pedido || '—' }}</span><div class="text-[11px] text-muted-foreground">cartão do pedido</div></div>
+                      </div>
+                      <div v-else-if="pc.tipo === 'figurinha'" class="rounded-lg rounded-tr-sm bg-sky-100 p-2 dark:bg-sky-900/45">
+                        <img v-if="pc.imagem_url" :src="pc.imagem_url" :alt="`figurinha ${pc.figurinha || ''}`" loading="lazy" referrerpolicy="no-referrer" class="size-20 object-contain" />
+                        <span v-else class="text-xs text-muted-foreground">[figurinha {{ pc.figurinha || '' }}]</span>
+                      </div>
+                      <div v-else-if="pc.texto" class="max-w-[90%] whitespace-pre-wrap break-words rounded-lg rounded-tr-sm bg-sky-100 px-3 py-2 text-sm dark:bg-sky-900/45">{{ pc.texto }}</div>
+                      <div v-else class="rounded border border-dashed px-2 py-1 text-[11px] text-muted-foreground">{{ PARTES_VISTA[pc.tipo] || pc.tipo }}</div>
+                      <span v-if="pc.nota" class="mt-0.5 text-[10px] text-muted-foreground">{{ pc.nota }}</span>
+                    </div>
+                    <p v-if="!previaLinha.davinci.partes.length" class="text-muted-foreground">nada para mostrar</p>
+                  </div>
+                  <p v-if="previaLinha.davinci.comprador" class="text-[11px] text-muted-foreground">com o usuário do comprador: <span class="font-medium text-foreground">{{ previaLinha.davinci.comprador }}</span></p>
+                  <p v-if="previaLinha.davinci.valores.valor_cupom" class="text-[11px] text-muted-foreground">cupom de R$ {{ previaLinha.davinci.valores.valor_cupom }} (pela faixa do valor do pedido)</p>
+                  <ul v-if="previaLinha.davinci.motivos_validador.length" class="text-[11px] text-red-700 dark:text-red-300"><li v-for="m in previaLinha.davinci.motivos_validador" :key="m">· {{ m }}</li></ul>
+                </section>
+                <!-- Duoke -->
+                <section class="min-w-0 space-y-1" data-lado="duoke">
+                  <div class="text-[11px] font-medium">
+                    Duoke <span class="font-normal text-muted-foreground">· o que mandou de verdade</span>
+                  </div>
+                  <div class="space-y-1.5 rounded-md bg-background p-2">
+                    <div v-for="(pc, i) in previaLinha.duoke.partes" :key="`k${i}`" class="flex flex-col items-end" :data-parte-duoke="pc.tipo">
+                      <div v-if="pc.tipo === 'resposta_publica'" class="w-full whitespace-pre-wrap break-words rounded-md border border-amber-500/40 bg-amber-500/5 px-3 py-2 text-sm">
+                        <div class="mb-0.5 text-[10px] font-medium text-amber-800 dark:text-amber-300">Resposta pública na avaliação</div>{{ pc.texto }}
+                      </div>
+                      <div v-else-if="pc.tipo === 'cartao_pedido'" class="rounded-lg rounded-tr-sm bg-sky-100 p-2 dark:bg-sky-900/45">
+                        <div class="w-[240px] max-w-full rounded-md bg-background p-3 text-[13px] leading-5 shadow-sm">ID do Pedido<span class="font-semibold">#{{ pc.pedido || '—' }}</span><div class="text-[11px] text-muted-foreground">cartão do pedido</div></div>
+                      </div>
+                      <div v-else-if="pc.tipo === 'figurinha'" class="rounded-lg rounded-tr-sm bg-sky-100 p-2 dark:bg-sky-900/45">
+                        <img v-if="pc.imagem_url" :src="pc.imagem_url" :alt="`figurinha ${pc.figurinha || ''}`" loading="lazy" referrerpolicy="no-referrer" class="size-20 object-contain" />
+                        <span v-else class="text-xs text-muted-foreground">[figurinha {{ pc.figurinha || '' }}]</span>
+                      </div>
+                      <div v-else-if="pc.texto" class="max-w-[90%] whitespace-pre-wrap break-words rounded-lg rounded-tr-sm bg-sky-100 px-3 py-2 text-sm dark:bg-sky-900/45" :class="pc.principal ? '' : 'opacity-90'">{{ pc.texto }}</div>
+                      <div v-else class="rounded border border-dashed px-2 py-1 text-[11px] text-muted-foreground">{{ PARTES_VISTA[pc.tipo] || pc.tipo }}</div>
+                      <span class="mt-0.5 text-[10px] tabular-nums text-muted-foreground">
+                        <template v-if="pc.em">{{ fmtDataHora(pc.em) }}</template><template v-if="pc.diferenca_s !== null"> · {{ fmtDiferenca(pc.diferenca_s, false) }} da nossa</template><template v-if="pc.nota"> · {{ pc.nota }}</template>
+                      </span>
+                    </div>
+                    <p v-if="!previaLinha.duoke.partes.length" class="text-muted-foreground" data-sem-duoke>{{ semDuoke(previaLinha.duoke, fmtDataHora) }}</p>
+                  </div>
+                </section>
+              </div>
+            </template>
           </div>
         </li>
       </ul>

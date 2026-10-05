@@ -39,7 +39,11 @@ SEMEIA as regras do catálogo em cada loja Shopee/TikTok/ML ativa: `simular`
 onde o Duoke manda hoje (pelo nome da integração), `desligado` no resto.
 Roda em cima das cinco (as 0363–0365 do meio são da denúncia e dos e-mails da
 marca, sem `atendimento_*`); o downgrade dela volta o catálogo ao de depois da
-0362.
+0362. A semente da 0366 ficou CONGELADA nas automações daquela data
+(`CODIGOS`): as que o catálogo ganhou em 05/10 à noite (pedido não pago,
+resposta da avaliação, "pedido recebido" do TikTok — todas só simulação) são
+semeadas pela 0371, que só insere regras (nenhuma tabela) e cujo downgrade
+apaga só as dela.
 """
 
 # ruff: noqa: S608
@@ -56,6 +60,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Base
+from app.services.atendimento import automacoes_catalogo as cat
 
 _VERSOES = Path(__file__).resolve().parent.parent / "alembic" / "versions"
 _MIGRATION = _VERSOES / "0346_atendimento.py"
@@ -64,6 +69,7 @@ _MIGRATION_ETIQUETAS = _VERSOES / "0353_atendimento_etiquetas.py"
 _MIGRATION_AVALIACOES = _VERSOES / "0358_atendimento_avaliacoes.py"
 _MIGRATION_CARRINHO_REDES = _VERSOES / "0362_atendimento_carrinho_redes.py"
 _MIGRATION_AUTOMACOES = _VERSOES / "0366_atendimento_automacoes.py"
+_MIGRATION_SIMULACAO = _VERSOES / "0371_atendimento_automacoes_simulacao.py"
 TABELAS = sorted(t.name for t in Base.metadata.sorted_tables if t.name.startswith("atendimento_"))
 
 
@@ -162,6 +168,10 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
     # e-mails da marca). Esta nasceu 0364 e foi renumerada para 0366 em 05/10,
     # quando as duas chegaram ao origin primeiro.
     assert automacoes.down_revision == "0365_marca_emails"
+    simulacao = _carregar_migration(_MIGRATION_SIMULACAO)
+    assert simulacao.revision == "0371_atendimento_automacoes_simulacao"
+    # Depois do último head do origin em 05/10 à noite (0367: flex; 0368–0370: denúncia).
+    assert simulacao.down_revision == "0370_denuncia_robo_agenda_replica_19h"
     # 7 da primeira parte + 3 da parte 2 (categorias e os índices do cartão
     # "Cliente") + 2 da 0353 (histórico da etiqueta e reclamações) + 3 da
     # 0362 (carrinhos, publicações e comentários) + 2 da 0366 (regras e
@@ -213,6 +223,7 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
     aval.SCHEMA = rascunho
     externo.SCHEMA = rascunho
     automacoes.SCHEMA = rascunho
+    simulacao.SCHEMA = rascunho
     try:
         conn = await db.connection()
         await conn.run_sync(_rodar, "upgrade", (mod, robo))
@@ -354,8 +365,70 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
         assert "Confirmamos a entrega" in semente[(barbosa, "shopee_entregue")][2]
         assert "sua mala já chegou" in semente[("inova", "shopee_entregue")][2]
         assert not any(nome in ("bling", "velha") for nome, _ in semente)
-        # Uma regra por automação da plataforma em cada loja.
+        # Uma regra por automação da plataforma em cada loja — as da 0366 (a
+        # semente congelada: nada das automações que vieram depois).
         assert sum(1 for nome, _ in semente if nome == "mini") == 4
+        assert not any(c in simulacao.CODIGOS for _, c in semente)
+        assert set(automacoes.CODIGOS) | set(simulacao.CODIGOS) == set(cat.CATALOGO)
+
+        # A 0371 semeia as que faltavam (só simulação), sem tocar no que existe.
+        await db.execute(
+            text(
+                f"UPDATE \"{rascunho}\".atendimento_automacao_regras SET modo = 'enviar' "
+                "WHERE automacao = 'shopee_menu'"
+            )
+        )
+        await db.commit()
+        catalogo_antes_da_0371 = await _catalogo(db, rascunho, rascunho)
+        conn = await db.connection()
+        await conn.run_sync(_rodar, "upgrade", (simulacao,))
+        await db.commit()
+        assert await _catalogo(db, rascunho, rascunho) == catalogo_antes_da_0371, "só dado"
+        semente2 = {
+            (r[0], r[1]): (r[2], r[3], r[4])
+            for r in (
+                await db.execute(
+                    text(
+                        "SELECT i.name, r.automacao, r.modo, r.ligada_desde IS NOT NULL, "
+                        "r.partes::text FROM "
+                        f'"{rascunho}".atendimento_automacao_regras r '
+                        f'JOIN "{rascunho}".integrations i ON i.id = r.integration_id'
+                    )
+                )
+            ).all()
+        }
+        assert semente2[(barbosa, "shopee_menu")][0] == "enviar", "a regra que já existia fica"
+        assert semente2[(barbosa, "shopee_nao_pago")][:2] == ("simular", True)
+        assert "R${valor_cupom} OFF" in semente2[(barbosa, "shopee_nao_pago")][2]
+        assert semente2[("inova", "shopee_nao_pago")][0] == "simular"
+        assert semente2[("aguiar", "shopee_nao_pago")][0] == "desligado"
+        assert semente2[("atv", "shopee_avaliacao_boa")][0] == "simular"
+        assert semente2[("atv", "shopee_avaliacao_ruim")][0] == "simular"
+        assert '"resposta_publica"' in semente2[("atv", "shopee_avaliacao_boa")][2]
+        assert semente2[("aguiar", "shopee_avaliacao_boa")][0] == "desligado"
+        assert semente2[("mini", "tiktok_pedido_recebido")][:2] == ("simular", True)
+        assert sum(1 for nome, _ in semente2 if nome == "mini") == 5
+        assert not any(nome in ("bling", "velha") for nome, _ in semente2)
+        # Idempotente: rodar de novo não duplica nem muda.
+        conn = await db.connection()
+        await conn.run_sync(_rodar, "upgrade", (simulacao,))
+        await db.commit()
+        assert (
+            await db.scalar(text(f'SELECT count(*) FROM "{rascunho}".atendimento_automacao_regras'))
+        ) == len(semente2)
+        # O downgrade da 0371 apaga só as dela.
+        conn = await db.connection()
+        await conn.run_sync(_rodar, "downgrade", (simulacao,))
+        await db.commit()
+        restantes = {
+            r[0]
+            for r in (
+                await db.execute(
+                    text(f'SELECT automacao FROM "{rascunho}".atendimento_automacao_regras')
+                )
+            ).all()
+        }
+        assert restantes == {c for _, c in semente}
         await db.execute(text(f'DELETE FROM "{rascunho}".atendimento_automacao_regras'))
         await db.execute(text(f'DELETE FROM "{rascunho}".integrations'))
         await db.commit()
