@@ -44,7 +44,7 @@ from app.models import (
     User,
 )
 from app.security.cipher import encrypt_json
-from app.services import flex_motor
+from app.services import flex_config, flex_motor
 from app.services.advisory_lock import SYNC_NAMESPACE
 from app.services.marketplaces import flex_api
 from app.services.marketplaces.flex_api import AssinaturaFlex, ResultadoFlex
@@ -55,6 +55,13 @@ from tests.test_flex_motor import (  # noqa: F401 — fixtures
     mundo,
     shopee,
 )
+
+
+@pytest.fixture(autouse=True)
+def _flex_visivel(monkeypatch):
+    # Estes testes são do Flex em si; quem vê (`flex_usuarios`) tem teste
+    # próprio em test_flex_visibilidade.py.
+    monkeypatch.setattr(flex_config, "pode_ver", lambda user: True)
 
 
 async def _conta(db: AsyncSession, iid) -> FlexConta | None:

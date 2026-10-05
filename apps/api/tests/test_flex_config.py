@@ -20,10 +20,12 @@ def test_padroes_das_decisoes_de_02_10(monkeypatch):
     assert padrao["flex_shopee_canais"] == "90022"
     assert padrao["flex_shopee_escrita"] is False
     assert padrao["flex_intervalo_min"] == 15
-    # Pedido Flex vai para o .sp (etapa 2) — ligado, independe do modo.
-    assert padrao["flex_pedido_no_sp"] is True
-    # O pedido ML/Shopee novo espera até 10 min pelo tipo de envio (Flex?).
-    assert padrao["flex_espera_envio_min"] == 10
+    # 05/10/2026: o Flex entrou só para quem vê (flex_usuarios) — o lado do
+    # pedido (levar ao .sp e a espera da NF) vem DESLIGADO de fábrica, para a
+    # rotina da equipe não mudar; ninguém vê o Flex sem estar na lista.
+    assert padrao["flex_pedido_no_sp"] is False
+    assert padrao["flex_espera_envio_min"] == 0
+    assert padrao["flex_usuarios"] == ""
     # Com o padrão: não faz nada e não escreve em conta nenhuma.
     monkeypatch.setattr(get_settings(), "flex_modo", padrao["flex_modo"])
     monkeypatch.setattr(get_settings(), "flex_contas", padrao["flex_contas"])

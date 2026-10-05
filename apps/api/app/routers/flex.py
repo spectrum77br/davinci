@@ -25,6 +25,11 @@ emergência); admin passa sempre (`require_permission`).
   POST /api/flex/pedidos/{bling_id}/acertado   a pessoa acertou o estoque
                                no Bling (o saldo Flex para de descontar)
 
+Quem vê (`flex_usuarios`, 05/10/2026): só as pessoas da lista — para as
+outras, inclusive admin, TODA rota daqui responde o 404 de rota que não existe
+(como Sistema › Histórico) e o router fica fora da documentação (/api/docs).
+`GET /api/flex/acesso` é como a tela descobre se mostra a aba.
+
 Escopo por equipe (deps/team_scope): usuário com equipe só vê e só mexe nas
 contas da equipe — anúncios, resumo, trilha, pedidos, aprovar e emergência
 (admin e quem não tem equipe: tudo), como a Logística (`?envio=flex`).
@@ -45,7 +50,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app import worker_pool
 from app.config import get_settings
 from app.db import get_session
-from app.deps.auth import require_permission
+from app.deps.auth import get_current_user, require_permission
 from app.deps.team_scope import resolve_team_scope
 from app.models import (
     BlingOrder,
@@ -76,7 +81,21 @@ from app.schemas.flex import (
 from app.services import flex_config, flex_envio, flex_motor, flex_textos
 
 logger = structlog.get_logger()
-router = APIRouter(prefix="/api/flex", tags=["flex"])
+
+
+async def _so_quem_ve(user: Annotated[User | None, Depends(get_current_user)]) -> None:
+    # Igual ao 404 do FastAPI para rota desconhecida: quem não está na lista
+    # não descobre nem que o Flex existe.
+    if not flex_config.pode_ver(user):
+        raise HTTPException(404, detail="Not Found")
+
+
+router = APIRouter(
+    prefix="/api/flex",
+    tags=["flex"],
+    include_in_schema=False,
+    dependencies=[Depends(_so_quem_ve)],
+)
 
 Ver = Annotated[User, Depends(require_permission("logistica", "view"))]
 Agir = Annotated[User, Depends(require_permission("logistica", "edit"))]
@@ -109,6 +128,12 @@ async def _permitidas(session: AsyncSession) -> frozenset[UUID]:
     aprovação" dela não vale mais (o motor não regrava conta fora da lista)."""
     ids = flex_config.contas()
     return frozenset((await flex_motor.integracoes_permitidas(session, ids)).keys())
+
+
+@router.get("/acesso")
+async def acesso() -> dict[str, bool]:
+    """A tela mostra a aba Flex só quando isto responde 200."""
+    return {"ok": True}
 
 
 @router.get("/config", response_model=FlexConfigOut)

@@ -303,6 +303,8 @@ async def test_sweep_espera_o_tipo_de_envio(
     e ainda não teve o envio lido pelo shipment check (sem prazo, sem tipo de
     envio) não vai para a NF agora — pode ser Flex (sai do .sp). Volta na
     rodada seguinte, já lido. TikTok não tem Flex: segue na hora."""
+    # Desligados de fábrica desde 05/10/2026 (Flex só para quem vê): aqui ligados.
+    monkeypatch.setattr(get_settings(), "flex_pedido_no_sp", True)
     monkeypatch.setattr(get_settings(), "flex_espera_envio_min", 10)
     monkeypatch.setattr(nf_emissao_gerar, "_bling_client_opt", lambda s: _async_return(None))
     await _seed_loja(db, admin, plataforma="shopee", bling_store_id="930001")

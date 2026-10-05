@@ -472,11 +472,13 @@ async def test_troca_para_o_sp_grava_quando(db: AsyncSession, cenario):
 
 
 @pytest.mark.asyncio
-async def test_pedido_ml_novo_espera_o_tipo_de_envio(db: AsyncSession, cenario):
+async def test_pedido_ml_novo_espera_o_tipo_de_envio(db: AsyncSession, cenario, monkeypatch):
     """Achado da revisão: a NF automática (minutos pares) pegava o pedido ML/
     Shopee antes de o shipment check dizer se é Flex — o robô o tratava como
     normal (podia tirá-lo do .sp) e a planilha saía com o lote errado. Agora
     o pedido recém-chegado sem prazo nem tipo de envio fica para depois."""
+    # A espera vem desligada de fábrica desde 05/10/2026: aqui ligada.
+    monkeypatch.setattr(get_settings(), "flex_espera_envio_min", 10)
     bling = await cenario(
         {"dg053.ci": 10, "dg053.sp": 5},
         {"792001": [("dg053.sp", 1)], "792002": [("dg053.sp", 1)], "792003": [("dg053.sp", 1)]},

@@ -833,10 +833,16 @@ async def list_estoque_pedidos(
     # entregue no mesmo dia ou no seguinte — a tela põe o selo "Flex" para a
     # separação não pegar a peça de outro lugar. Uma consulta por fonte, por
     # bling_id (grão de pedido: todas as linhas do pedido mostram igual).
+    # Só para quem vê o Flex (`flex_usuarios`); os outros não veem o selo.
+    from app.services import flex_config as _flex_config
     from app.services import flex_envio as _flex_envio
 
-    flex_bling_ids = await _flex_envio.bling_ids_flex(
-        session, {o.bling_id: o.numero for o in orders if o.bling_id}
+    flex_bling_ids = (
+        await _flex_envio.bling_ids_flex(
+            session, {o.bling_id: o.numero for o in orders if o.bling_id}
+        )
+        if _flex_config.pode_ver(user)
+        else set()
     )
     result: list[dict[str, Any]] = []
     for o in orders:

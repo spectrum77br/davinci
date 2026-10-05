@@ -43,6 +43,21 @@ const PLATAFORMA_TABS = [
   { key: 'flex', label: 'Flex' },
 ] as const
 type PlataformaTab = (typeof PLATAFORMA_TABS)[number]['key']
+// Quem vê o Flex (`flex_usuarios` no .env, 05/10/2026: só heisenberg e
+// thorfinn por enquanto). /api/flex/acesso responde 200 só para eles; para os
+// outros a aba Flex não aparece e o selo/aviso "Flex" some dos pedidos (a API
+// da Logística também já manda a linha sem o tipo de envio).
+const podeVerFlex = ref(false)
+const ABAS_VISIVEIS = computed(() => PLATAFORMA_TABS.filter((t) => t.key !== 'flex' || podeVerFlex.value))
+async function verificarFlex(): Promise<boolean> {
+  try {
+    await api('/api/flex/acesso')
+    podeVerFlex.value = true
+  } catch {
+    podeVerFlex.value = false
+  }
+  return podeVerFlex.value
+}
 const tab = ref<PlataformaTab | 'status'>('ml')
 
 // Aba Amazon: a Amazon trata "Delivery by Amazon" (DBA) e "Envio próprio" como
@@ -460,7 +475,7 @@ const flexAguardando = ref(0)
 // servidor diferente do navegador. O onMounted liga e chama a primeira vez.
 let flexMontado = false
 async function carregarResumoFlex() {
-  if (!flexMontado || !['ml', 'shopee', 'flex'].includes(tab.value)) return
+  if (!flexMontado || !podeVerFlex.value || !['ml', 'shopee', 'flex'].includes(tab.value)) return
   try {
     const [pedidos, anuncios] = await Promise.all([
       api<Array<{ numero: string | null; alerta: string | null; acerto_pendente?: boolean }>>(
@@ -1287,7 +1302,8 @@ onMounted(() => {
   const query = useRoute().query
   const tabQuery = typeof query.tab === 'string' ? query.tab : ''
   const buscaQuery = typeof query.q === 'string' ? query.q : ''
-  if (tabQuery === 'status' || PLATAFORMA_TABS.some((t) => t.key === tabQuery)) {
+  // A aba Flex só abre pelo link depois de saber se a pessoa vê o Flex.
+  if (tabQuery === 'status' || PLATAFORMA_TABS.some((t) => t.key === tabQuery && t.key !== 'flex')) {
     tab.value = tabQuery as PlataformaTab | 'status'
   }
   if (buscaQuery) search.value = buscaQuery
@@ -1299,7 +1315,11 @@ onMounted(() => {
   if (!statusLoaded) refreshStatus()
   carregarStatusCorreios()
   flexMontado = true
-  carregarResumoFlex()
+  verificarFlex().then((ve) => {
+    if (!ve) return
+    if (tabQuery === 'flex') tab.value = 'flex'
+    else carregarResumoFlex()
+  })
   autoRefreshTimer = setInterval(autoRefreshTick, AUTO_REFRESH_MS)
 })
 
@@ -1984,7 +2004,7 @@ async function aplicarStatusBling(c: Logistica) {
     <!-- Tabs -->
     <div class="flex flex-wrap gap-1 border-b">
       <button
-        v-for="t in PLATAFORMA_TABS"
+        v-for="t in ABAS_VISIVEIS"
         :key="t.key"
         type="button"
         class="px-4 py-2 text-sm font-medium border-b-2 -mb-px"
@@ -2257,7 +2277,7 @@ async function aplicarStatusBling(c: Logistica) {
               <td class="px-3 py-2 whitespace-nowrap">
                 {{ c.plataforma || '—' }}
                 <span
-                  v-if="c.envio_flex && tab !== 'flex'"
+                  v-if="c.envio_flex && podeVerFlex && tab !== 'flex'"
                   class="ml-1 text-[10px] px-1.5 py-0.5 rounded border border-violet-300 bg-violet-50 font-semibold text-violet-800 dark:border-violet-700 dark:bg-violet-950/40 dark:text-violet-300"
                   :title="flexSeloTitulo(c)"
                 >Flex</span>
@@ -2596,7 +2616,7 @@ async function aplicarStatusBling(c: Logistica) {
               <div class="text-xs text-muted-foreground truncate">
                 {{ c.plataforma || '—' }}
                 <span
-                  v-if="c.envio_flex && tab !== 'flex'"
+                  v-if="c.envio_flex && podeVerFlex && tab !== 'flex'"
                   class="text-[10px] px-1 py-px rounded border border-violet-300 bg-violet-50 font-semibold text-violet-800 dark:border-violet-700 dark:bg-violet-950/40 dark:text-violet-300"
                   :title="flexSeloTitulo(c)"
                 >Flex</span>

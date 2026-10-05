@@ -13,6 +13,7 @@ from uuid import UUID
 import structlog
 
 from app.config import get_settings
+from app.models import UserStatus
 from app.models.flex import FLEX_MODOS
 
 logger = structlog.get_logger()
@@ -52,3 +53,16 @@ def contas(valor: str | None = None) -> frozenset[UUID]:
 def pode_escrever(modo_atual: str | None = None) -> bool:
     """O modo deixa escrever na plataforma? (observar/desligado: nunca)."""
     return modo(modo_atual) in MODOS_QUE_ESCREVEM
+
+
+def usuarios(valor: str | None = None) -> frozenset[str]:
+    """`flex_usuarios`: nomes (minúsculos) de quem vê o Flex. Vazio = ninguém."""
+    bruto = get_settings().flex_usuarios if valor is None else valor
+    return frozenset(p.strip().lower() for p in (bruto or "").split(",") if p.strip())
+
+
+def pode_ver(user) -> bool:
+    """O usuário está na lista de quem vê o Flex? (sem exceção para admin)"""
+    if user is None or getattr(user, "status", None) != UserStatus.ACTIVE:
+        return False
+    return (getattr(user, "name", None) or "").strip().lower() in usuarios()

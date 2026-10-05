@@ -696,21 +696,32 @@ class Settings(BaseSettings):
     flex_shopee_canais: str = "90022"
     flex_shopee_escrita: bool = False
     flex_intervalo_min: int = 15
+    # Quem VÊ o Flex (Eduardo, 05/10/2026: "por enquanto somente os usuários
+    # heisenberg e o thorfinn podem ver"): nomes de usuário (users.name),
+    # separados por vírgula, sem diferença de maiúscula. Para os outros —
+    # inclusive admin — /api/flex/* responde o 404 de rota que não existe, a
+    # aba Flex some da Logística e o selo "Flex" some dos pedidos (Logística e
+    # Controle de Estoque). Vazio = ninguém vê.
+    flex_usuarios: str = ""
     # Pedido Flex SEMPRE sai do .sp (etapa 2, services/prioridade_estoque): o
     # robô de prioridade leva cada item do pedido Flex para o lote .sp, acima
     # do mapa de prioridades, da trava anti-volta e do pedido num estoque só;
     # sem peça no .sp, não troca e avisa. NÃO depende do `flex_modo`: o modo
     # manda no Flex dos ANÚNCIOS (escrever na plataforma); o pedido Flex
     # existe mesmo com o modo desligado (conta com Flex ligado no painel) e
-    # sai fisicamente de São Bernardo. Chave de emergência:
-    # FLEX_PEDIDO_NO_SP=false no .env volta ao robô de antes.
-    flex_pedido_no_sp: bool = True
+    # sai fisicamente de São Bernardo. DESLIGADO de fábrica (05/10/2026): o
+    # Flex entrou só para heisenberg/thorfinn verem, sem mudar a rotina da
+    # equipe — liga com FLEX_PEDIDO_NO_SP=true no .env quando o Flex for de
+    # todos (desligado = o robô de antes, sem aviso de Flex no sino).
+    flex_pedido_no_sp: bool = False
     # Pedido ML/Shopee que acabou de cair espera o shipment check ler o tipo
     # de envio (Flex ou não) antes de o robô de prioridade e a NF automática
     # mexerem nele — senão o pedido Flex sai com o lote errado. Teto da espera
     # em minutos, contado de quando o pedido entrou no espelho do Bling (conta
     # sem acesso à API não segura o pedido para sempre). 0 = não espera.
-    flex_espera_envio_min: int = 10
+    # 0 de fábrica (05/10/2026), pelo mesmo motivo do `flex_pedido_no_sp`: a
+    # espera vale para TODO pedido ML/Shopee; volta a 10 junto com ele.
+    flex_espera_envio_min: int = 0
 
     # Threema IDs (vírgula) avisados quando o sweep move um pedido pra
     # Aguardando Cancelamento por estoque negativo. Vazio = aviso desligado

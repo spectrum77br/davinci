@@ -16,7 +16,14 @@ from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Logistica, User, UserRole, UserStatus
-from app.services import logistica_rules
+from app.services import flex_config, logistica_rules
+
+
+@pytest.fixture(autouse=True)
+def _flex_visivel(monkeypatch):
+    # Estes testes são do Flex em si; quem vê (`flex_usuarios`) tem teste
+    # próprio em test_flex_visibilidade.py.
+    monkeypatch.setattr(flex_config, "pode_ver", lambda user: True)
 
 
 @pytest_asyncio.fixture
