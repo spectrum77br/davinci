@@ -51,6 +51,14 @@ ANATEL = {
     "falta_loja": ("falta denunciar na loja", "muted"),
     "nada": ("—", "muted"),
 }
+# 05/10: fase do processo no SEI (status_anatel que o sistema do mini grava com a leitura do
+# passo 1)
+FASE_SEI = {
+    "Recebida": ("processo recebido", "info"),
+    "Em tratamento": ("na fiscalização", "info"),
+    "Respondida — analisar": ("Anatel respondeu", "success"),
+    "Exigência": ("Anatel pede complemento", "danger"),
+}
 
 
 def _quando(d: dict) -> tuple:
@@ -90,7 +98,12 @@ def status_anatel(anuncio: dict, dens: list[dict], loja: dict, tem_print: bool) 
     if sei:
         ult = max(sei, key=_quando)
         proc = ult.get("protocolo") or ult.get("sei_processo")
-        return {"chave": "processo", "protocolo": proc, "data": ult.get("data"), **extra}
+        # 05/10: o passo 1 lê o andamento do processo no SEI (status_anatel) — a etiqueta diz a
+        # fase; a chave continua "processo" (contas e filtros de "com processo" não mudam)
+        fase = FASE_SEI.get(ult.get("status_anatel") or "")
+        return {"chave": "processo", "protocolo": proc, "data": ult.get("data"),
+                "area": ult.get("status_anatel_area"), "desde": ult.get("status_anatel_em"),
+                **({"rotulo_fase": fase[0], "tom_fase": fase[1]} if fase else {}), **extra}
     if anuncio.get("situacao") != "ativo" or anuncio.get("propria"):
         return {"chave": "nada", **extra}
     grupo, hom = anuncio.get("grupo"), (anuncio.get("hom") or "").strip()
@@ -113,7 +126,7 @@ def status_anatel(anuncio: dict, dens: list[dict], loja: dict, tem_print: bool) 
 
 def rotular(st: dict, tabela: dict) -> dict:
     rotulo, tom = tabela[st["chave"]]
-    return {**st, "rotulo": rotulo, "tom": tom}
+    return {**st, "rotulo": st.get("rotulo_fase") or rotulo, "tom": st.get("tom_fase") or tom}
 
 
 def somar_lojas(itens: list[dict]) -> list[dict]:

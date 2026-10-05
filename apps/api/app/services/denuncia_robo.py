@@ -44,30 +44,41 @@ PASSOS: dict[str, tuple[int, str, str, str]] = {
     "checagem": (0, "Checagem antes da rodada", "perfil 50 + 148 + Safari",
                  "confere logins, AdsPower, captcha, Safari e Tuta — não muda nada"),
     # 01/10: o robô lê o Tuta sozinho (o leitor do Claude do mini parou em 17/09).
-    "ciclo_emails": (1, "E-mails das plataformas", "escritório + Tuta",
-                     "lê no Tuta as respostas das plataformas e aplica nas denúncias"),
-    "procura": (2, "Procurar anúncios novos", "perfil 50 + 148",
-                "Mercado Livre → Shopee → TikTok → Amazon, salva no sistema e confere no "
-                "UpSeller quais lojas são nossas"),
+    # 05/10 (Vinicius: "e se colocar tudo no passo 1?"): o 1 vira a conferência das respostas
+    # inteira, em três filas ao mesmo tempo — e-mails (Tuta), resultados da Shopee no perfil 50
+    # (antes da procura; antes nos passos 3 e 7) e, no Safari, o Anatel Consumidor + o SEI
+    # (intimações e andamento dos processos; antes no passo 4). A chave segue "ciclo_emails"
+    # (agenda e botão "Rodar" de antes valem); no mini são as ações ciclo_emails,
+    # conferencia_perfil50 e conferencia_safari (agente v33).
+    "ciclo_emails": (1, "Conferência das respostas", "Tuta + perfil 50 + Safari",
+                     "e-mails das plataformas (Tuta) · resultados da Shopee no perfil 50, antes da "
+                     "procura · Anatel Consumidor e SEI (intimações e andamento dos processos) no "
+                     "Safari"),
+    # 05/10: o TikTok também pelo app do celular (Cloud Phone), ao mesmo tempo (agente v33)
+    "procura": (2, "Procurar anúncios novos", "perfil 50 + 148 + celular",
+                "Mercado Livre → Shopee → TikTok → Amazon (TikTok também pelo app do celular, ao "
+                "mesmo tempo), salva no sistema e confere no UpSeller quais lojas são nossas"),
     # 01/10 (Vinicius): nas lojas o robô denuncia só o "Nosso", pela conta da MAKISA
     # (config.json → denunciar_nas_lojas no mini); o "Diversos" só é salvo. 02/10: até 40
     # prints por rodada — 1º recusadas do Nosso, 2º os da Anatel, 3º o resto. 03/10: vira
     # "Denúncias Nossos"; a denúncia do Nosso nas lojas está parada por enquanto (grupos = []
     # no mini) — ligado, o passo só tira prints e lê os resultados da Shopee.
     "denuncias": (3, "Denúncias Nossos", "perfil 50 + celular",
-                  "prints (até 40, Nosso primeiro) → resultados da Shopee → recusadas de novo "
+                  "prints (até 40, Nosso primeiro) → recusadas de novo "
                   "→ novas (ML, Shopee e TikTok; só o Nosso; Amazon ainda não)"),
+    # 05/10: só envia — o andamento das antigas é lido no passo 1
     "anatel": (4, "Denúncias Anatel", "Safari (SEI)",
-               "lê o andamento das antigas e peticiona as novas no SEI "
-               "— só depois dos passos 2 e 3"),
-    "compras": (5, "Compras de prova", "perfil 50", "atualiza os pedidos da conta compradora"),
+               "peticiona as novas no SEI — só depois dos passos 2 e 3 (as respostas são lidas "
+               "no passo 1)"),
+    # 05/10 (Vinicius): o 5 (Compras de prova, desligado e com o login quebrado desde 27/09) saiu da
+    # lista; o programa fica no mini. Os números dos outros passos não mudam.
     "juridico": (6, "Jurídico", "escritório", "monta a pasta do caso pro advogado (não envia)"),
     # 02/10 (Vinicius): o 7 (Relatório) saiu da rotina — ninguém lia; o programa fica no mini —
     # e o número ficou com o Diversos: denunciar na loja uma vez só e tirar os prints, de noite,
     # antes do 9
     "diversos": (7, "Denúncias Diversos", "perfil 50 + celular",
                  "denúncia nova do Diversos no ML, Shopee e TikTok (uma vez só, sem denunciar de "
-                 "novo) → resultados da Shopee → prints (até 200, Nosso → Anatel → Diversos); "
+                 "novo) → prints (até 200, Nosso → Anatel → Diversos); "
                  "para quando o próximo passo chega"),
     "capa_perguntas": (8, "Perguntas nos anúncios disfarçados", "perfil 50",
                        "pergunta ao vendedor de capa/tablet se vende o aparelho"),
@@ -86,7 +97,15 @@ ANTIGOS: dict[str, tuple[int, str]] = {
     "varredura_amazon": (2, "Amazon (antigo)"),
     "conferencia": (3, "Conferência e recusadas (antigo)"),
     "relatorio": (7, "Relatório (fora da rotina)"),
+    "compras": (5, "Compras de prova (fora da lista)"),
+    # 05/10: as partes do passo 1 que rodam no perfil 50 e no Safari (a de e-mail é o próprio
+    # ciclo_emails)
+    "conferencia_perfil50": (1, "Conferência — resultados da Shopee"),
+    "conferencia_safari": (1, "Conferência — Anatel e SEI"),
 }
+# 05/10: o passo 1 da tela junta as três partes (nome curto na coluna Resultado)
+PARTES_PASSO1 = (("ciclo_emails", "e-mails"), ("conferencia_perfil50", "Shopee"),
+                 ("conferencia_safari", "Anatel/SEI"))
 
 
 def _ordem_nome(acao: str, nome: str | None) -> tuple[int, str]:
@@ -97,7 +116,8 @@ def _ordem_nome(acao: str, nome: str | None) -> tuple[int, str]:
     return 50, nome or acao.replace("_", " ")
 FRENTES = (
     ("M", "Navegador (perfil 50)", "Mercado Livre, Shopee, TikTok, Amazon e conferências"),
-    ("S", "Anatel / SEI (Safari)", "denúncias à Anatel e leitura das antigas"),
+    ("S", "Anatel / SEI (Safari)",
+     "conferência da Anatel e do SEI (passo 1) e as petições (passo 4)"),
     ("E", "Escritório", "e-mails, jurídico e relatório"),
 )
 # itens do resumo que, com estado "erro", só uma pessoa resolve
@@ -199,6 +219,30 @@ def _ultimas_de_hoje(tarefas: list[dict]) -> dict[str, dict]:
     for v in por_acao.values():
         v.pop("_pedido")
     return por_acao
+
+
+def _juntar_passo1(ultimas: dict[str, dict]) -> dict | None:
+    """05/10: a última vez de hoje do passo 1 = as três partes (e-mails, Shopee, Anatel/SEI)
+    numa linha só. Rodando se alguma roda; erro se alguma deu erro; o resultado diz como foi
+    cada uma."""
+    partes = [(nome, ultimas.get(acao)) for acao, nome in PARTES_PASSO1]
+    partes = [(n, u) for n, u in partes if u]
+    if not partes:
+        return None
+    sts = [u["status"] for _, u in partes]
+    status = next((x for x in ("rodando", "fila", "erro") if x in sts), "concluida")
+    marca = {"concluida": "ok", "rodando": "rodando", "fila": "na fila", "erro": "erro"}
+    inicios = [u["inicio"] for _, u in partes if u.get("inicio")]
+    fins = [u["fim"] for _, u in partes if u.get("fim")]
+    return {
+        "status": status,
+        "inicio": min(inicios) if inicios else None,
+        "fim": max(fins) if fins and status not in ("rodando", "fila") else None,
+        "progresso": " · ".join(f"{n} {marca.get(u['status'], u['status'])}" for n, u in partes),
+        "erro": " · ".join(f"{n}: {u['erro']}" for n, u in partes if u.get("erro")),
+        "log": "\n\n".join(f"── {n} ──\n{u.get('log') or ''}" for n, u in partes)[-6000:],
+        "vezes": max(u.get("vezes") or 1 for _, u in partes),
+    }
 
 
 def _chave_problema(p: dict) -> tuple[str, str | None]:
@@ -333,6 +377,9 @@ def montar_painel(
                        _iso(hora))
 
     ultimas = _ultimas_de_hoje(tarefas)
+    passo1 = _juntar_passo1(ultimas)
+    if passo1:
+        ultimas["ciclo_emails"] = passo1
     def _agenda(acao: str) -> dict:
         a = agenda.get(acao) or {}
         ag = {"ligado": bool(a.get("ligado")), "horarios": list(a.get("horarios") or [])}

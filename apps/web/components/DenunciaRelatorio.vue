@@ -22,7 +22,12 @@ type Relatorio = {
   numeros: {
     achou: { total: number; lojas_proprias: number; descartados: number; por_site: Record<string, PorGrupo> }
     denunciou: { total: number; de_novo: number; por_site: Record<string, PorGrupo> }
-    anatel: { lojas: number; anuncios: number; consumidor: number; processos: Processo[] }
+    anatel: {
+      lojas: number; anuncios: number; consumidor: number; processos: Processo[]
+      // 05/10: andamento na Anatel (relatórios fechados antes não têm)
+      situacao?: Record<string, number>
+      movimentos?: { processo: string; situacao: string; area: string; loja: string; site: string }[]
+    }
     respostas: { total: number; por_site: Record<string, PorResposta> }
     sairam: { total: number; lista: Linha[] }
     prints: { capturas: number; anuncios: number; registros: number }
@@ -85,6 +90,14 @@ const subtitulo = computed(() => {
   return `Fechado em ${diaHm(r.fechado_em)}${lido}`
 })
 
+// status_anatel dos processos do SEI → nome na tela (a ordem é a do caminho)
+const SITUACOES: [string, string][] = [
+  ['Enviada', 'sem leitura'], ['Recebida', 'recebidos'], ['Em tratamento', 'na fiscalização'],
+  ['Respondida — analisar', 'respondidos'], ['Exigência', 'pedem complemento'],
+]
+const NOME_SITUACAO: Record<string, string> = {
+  Recebida: 'recebido', 'Em tratamento': 'na fiscalização', 'Respondida — analisar': 'Anatel respondeu', Exigência: 'pede complemento',
+}
 const SITES = ['Mercado Livre', 'Shopee', 'TikTok Shop', 'Amazon', 'Anatel']
 const NOME_SITE: Record<string, string> = { 'TikTok Shop': 'TikTok' }
 const porSite = computed(() => {
@@ -259,6 +272,23 @@ async function marcarLido() {
           </table>
         </div>
         <p v-else class="text-xs text-muted-foreground">Nenhuma petição no dia.</p>
+        <!-- 05/10: o andamento na Anatel (lido no SEI pelo passo 1) -->
+        <div v-if="rel.numeros.anatel.situacao" class="rounded-md border bg-muted/30 px-3 py-2 text-xs">
+          <div class="font-medium">Todos os processos no SEI</div>
+          <div class="mt-0.5 text-muted-foreground">
+            <template v-for="(k, i) in SITUACOES" :key="k[0]">
+              <span v-if="i"> · </span>{{ k[1] }} <span class="font-semibold text-foreground">{{ rel.numeros.anatel.situacao[k[0]] || 0 }}</span>
+            </template>
+          </div>
+          <div v-if="rel.numeros.anatel.movimentos?.length" class="mt-2 space-y-0.5">
+            <div class="font-medium">A Anatel mexeu em {{ rel.numeros.anatel.movimentos.length }} processo(s) no dia</div>
+            <div v-for="m in rel.numeros.anatel.movimentos" :key="m.processo" class="flex gap-2">
+              <span class="font-mono text-[11px]">{{ m.processo }}</span>
+              <span>{{ NOME_SITUACAO[m.situacao] || m.situacao }}<template v-if="m.area"> ({{ m.area }})</template></span>
+              <span class="truncate text-muted-foreground">{{ m.loja }}</span>
+            </div>
+          </div>
+        </div>
       </section>
 
       <!-- saíram do ar -->

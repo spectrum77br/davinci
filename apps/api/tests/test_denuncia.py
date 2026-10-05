@@ -331,13 +331,14 @@ def test_painel_frentes_agenda_e_alarme():
 
     # aba Passos (02/10): 0 a 9, com a última vez de hoje; os antigos não têm botão
     passos = {x["acao"]: x for x in p["passos"]}
-    assert [x["ordem"] for x in p["passos"]] == list(range(10))   # 7 = Diversos (02/10)
+    # 7 = Diversos (02/10); o 5 (Compras) saiu da lista em 05/10
+    assert [x["ordem"] for x in p["passos"]] == [0, 1, 2, 3, 4, 6, 7, 8, 9]
     assert p["passos"][0]["acao"] == "checagem" and p["passos"][-1]["acao"] == "ativos_inativos"
     assert [x["acao"] for x in p["passos"][2:5]] == ["procura", "denuncias", "anatel"]
     assert "varredura_mercadolivre" not in passos and "conferencia" not in passos
     assert passos["procura"]["ultima"]["status"] == "rodando"
     assert passos["denuncias"]["ultima"]["vezes"] == 2
-    assert passos["compras"]["ultima"] is None
+    assert "compras" not in passos and passos["juridico"]["ultima"] is None
     assert passos["procura"]["agenda"] == {"ligado": True, "horarios": ["06:00", "12:00"], "no_robo": None}
     assert passos["denuncias"]["agenda"] == {"ligado": False, "horarios": [], "no_robo": None}
 
@@ -510,7 +511,7 @@ def test_painel_modo_manual_nao_acusa_rodada():
     passos = {x["acao"]: x for x in p["passos"]}
     assert passos["procura"]["agenda"]["no_robo"] is True     # o robô já segue
     assert passos["anatel"]["agenda"]["no_robo"] is False     # ainda não chegou lá
-    assert passos["compras"]["agenda"]["no_robo"] is True     # desligado nos dois
+    assert passos["juridico"]["agenda"]["no_robo"] is True    # desligado nos dois
 
 
 
@@ -545,7 +546,7 @@ async def test_robo_botoes_ligar_e_rodar_passo(client, make_user, auth_as):
     j = (await client.get("/api/denuncia/robo")).json()
     assert [c["tipo"] for c in j["comandos"]] == ["passo", "automatico"]
     assert j["comandos"][1]["ok"] is True and j["comandos"][1]["entregue_em"]
-    assert len(j["passos"]) == 10  # 02/10: passos 0 a 9 (o 7 virou Denúncias Diversos)
+    assert len(j["passos"]) == 9  # 02/10: passos 0 a 9 (o 7 virou Denúncias Diversos); 05/10: sem o 5
 
 
 async def test_robo_agenda_salva_e_mini_puxa(client, make_user, auth_as):
@@ -732,6 +733,16 @@ def test_painel_status_na_loja_e_na_anatel():
     assert anatel({**diversos, "situacao": "fora do ar"}, []) == "nada"
     st = p.status_anatel(diversos, [pend, sei], p.status_loja([pend]), False)
     assert st["chave"] == "processo" and st["protocolo"] == "53500.144118/2026-11"
+    assert p.rotular(st, p.ANATEL)["rotulo"] == "processo aberto"
+    # 05/10: o passo 1 lê o andamento no SEI — a etiqueta diz a fase (a chave segue "processo")
+    fisc = {**sei, "status_anatel": "Em tratamento", "status_anatel_area": "GR07FI2 - Fiscalização",
+            "status_anatel_em": "2026-10-02"}
+    st = p.rotular(p.status_anatel(diversos, [fisc], p.status_loja([]), True), p.ANATEL)
+    assert (st["chave"], st["rotulo"], st["area"], st["desde"]) == (
+        "processo", "na fiscalização", "GR07FI2 - Fiscalização", "2026-10-02")
+    resp = {**fisc, "status_anatel": "Respondida — analisar"}
+    st = p.rotular(p.status_anatel(diversos, [resp], p.status_loja([]), True), p.ANATEL)
+    assert (st["rotulo"], st["tom"]) == ("Anatel respondeu", "success")
 
 
 async def test_painel_junta_anuncios_e_denuncias(client, make_user, auth_as):
@@ -1183,3 +1194,67 @@ async def test_relatorio_anotado_pelo_sync(client, db, make_user, auth_as):
     auth_as(await make_user(permissions={"denuncia": {"view": True}}))
     rel = (await client.get(f"/api/denuncia/relatorios/{hoje.date().isoformat()}")).json()
     assert rel["anotado"] is True and rel["passos"][0]["nome"] == "Procurar anúncios novos"
+
+
+def test_painel_passo1_junta_as_tres_partes():
+    """05/10 (Vinicius: "colocar tudo no passo 1"): e-mails, resultados da Shopee (perfil 50) e
+    Anatel/SEI (Safari) são três ações no mini e uma linha só na aba Passos."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from app.services.denuncia_robo import montar_painel
+
+    agora = datetime(2026, 10, 6, 6, 30, tzinfo=ZoneInfo("America/Sao_Paulo"))
+    j = "2026-10-06_06h"
+    resumo = _resumo(
+        _tarefa("ciclo_emails", j, "concluida", inicio="2026-10-06T06:00:02-03:00",
+                fim="2026-10-06T06:01:40-03:00"),
+        _tarefa("conferencia_perfil50", j, "concluida", inicio="2026-10-06T06:00:05-03:00",
+                fim="2026-10-06T06:12:00-03:00"),
+        _tarefa("conferencia_safari", j, "rodando", inicio="2026-10-06T06:00:06-03:00",
+                progresso="SEI 40/60"),
+    )
+    p = montar_painel(resumo, agora, agora)
+    passos = {x["acao"]: x for x in p["passos"]}
+    um = passos["ciclo_emails"]
+    assert um["nome"] == "Conferência das respostas" and um["ordem"] == 1
+    assert um["ultima"]["status"] == "rodando" and um["ultima"]["fim"] is None
+    assert um["ultima"]["inicio"] == "2026-10-06T06:00:02-03:00"
+    assert um["ultima"]["progresso"] == "e-mails ok · Shopee ok · Anatel/SEI rodando"
+    # as partes não viram passos soltos
+    assert "conferencia_safari" not in passos and "conferencia_perfil50" not in passos
+    resumo2 = _resumo(
+        _tarefa("ciclo_emails", j, "concluida", inicio="2026-10-06T06:00:02-03:00",
+                fim="2026-10-06T06:01:40-03:00"),
+        _tarefa("conferencia_safari", j, "erro", inicio="2026-10-06T06:00:06-03:00",
+                fim="2026-10-06T06:20:00-03:00", erro="SEI sem código"),
+    )
+    um = {x["acao"]: x for x in montar_painel(resumo2, agora, agora)["passos"]}["ciclo_emails"]
+    assert um["ultima"]["status"] == "erro" and um["ultima"]["erro"] == "Anatel/SEI: SEI sem código"
+    assert um["ultima"]["fim"] == "2026-10-06T06:20:00-03:00"
+
+
+async def test_relatorio_andamento_da_anatel(client, make_user, auth_as):
+    """05/10: o relatório traz a situação de todos os processos do SEI e os que a Anatel mexeu no dia."""
+    d = _ontem().isoformat()
+    await client.post("/api/denuncia/sync/anuncios", json={"linhas": [
+        _anuncio("S1", loja="loja_s1", grupo="GRUPO 2"), _anuncio("S2", loja="loja_s2", grupo="GRUPO 2"),
+        _anuncio("S3", loja="loja_s3", grupo="GRUPO 2"),
+    ]}, headers=H)
+    r = await client.post("/api/denuncia/sync/denuncias", json={"linhas": [
+        {"id": 1, "anuncio_id": "S1", "canal": "Anatel SEI", "sei_processo": "P-1", "data": "2026-09-24",
+         "status_anatel": "Em tratamento", "status_anatel_area": "GR07FI2 - Fiscalização",
+         "status_anatel_em": d},
+        {"id": 2, "anuncio_id": "S1", "canal": "Anatel SEI", "sei_processo": "P-1", "data": "2026-09-24",
+         "status_anatel": "Em tratamento", "status_anatel_em": d},
+        {"id": 3, "anuncio_id": "S2", "canal": "Anatel SEI", "sei_processo": "P-2", "data": "2026-09-25",
+         "status_anatel": "Recebida", "status_anatel_em": "2026-09-30"},
+        {"id": 4, "anuncio_id": "S3", "canal": "Anatel SEI", "sei_processo": "P-3", "data": "2026-10-01"},
+    ]}, headers=H)
+    assert r.status_code == 200, r.text
+    auth_as(await make_user(permissions={"denuncia": {"view": True}}))
+    an = (await client.get(f"/api/denuncia/relatorios/{d}")).json()["numeros"]["anatel"]
+    assert an["situacao"] == {"Enviada": 1, "Recebida": 1, "Em tratamento": 1,
+                              "Respondida — analisar": 0, "Exigência": 0}
+    assert an["movimentos"] == [{"processo": "P-1", "situacao": "Em tratamento",
+                                 "area": "GR07FI2 - Fiscalização", "loja": "loja_s1", "site": "Shopee"}]

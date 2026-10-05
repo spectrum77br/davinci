@@ -56,6 +56,16 @@ RESPOSTA_TIPO = {
     "Improcedente": "recusados",
 }
 RESPOSTAS = ("removidos", "recusados", "sem_resposta", "outras")
+_SITUACAO_NOME = {
+    "Enviada": "enviados (sem leitura do andamento ainda)",
+    "Recebida": "recebidos por uma unidade da Anatel",
+    "Em tratamento": "na fiscalização",
+    "Respondida — analisar": "Anatel respondeu / concluiu",
+    "Exigência": "Anatel pede complemento",
+}
+# 05/10: status_anatel dos processos do SEI (o sistema do mini grava com a leitura do passo 1);
+# "Enviada" = ainda sem leitura
+SITUACOES_ANATEL = ("Enviada", "Recebida", "Em tratamento", "Respondida — analisar", "Exigência")
 # dias pra trás que o fechamento confere (worker de hora em hora + a cada restart)
 DIAS_FECHAR = 7
 
@@ -291,6 +301,70 @@ async def calcular_numeros(session: AsyncSession, dia: date) -> dict:
     ).all()
     fora = {v[0] for v in verif if v[1] and v[1] != "ativo"}
 
+    # 4. (05/10) respostas da Anatel: o passo 1 lê o andamento dos processos no SEI e o sistema
+    # do mini grava status_anatel (+ área e a data do andamento em status_anatel_em) nas
+    # denúncias "Anatel SEI".
+    # Situação de TODOS os processos (foto do dia) e os que a Anatel mexeu no dia.
+    sei = (
+        await session.execute(
+            select(DenunciaDenuncia.anuncio_id, DenunciaDenuncia.dados).where(
+                DenunciaDenuncia.canal == "Anatel SEI"
+            )
+        )
+    ).all()
+    por_proc: dict[str, dict] = {}
+    for aid, dd in sei:
+        dd = dd or {}
+        proc = dd.get("sei_processo") or dd.get("protocolo")
+        if not proc or _sim(dd.get("teste")):
+            continue
+        p = por_proc.setdefault(
+            proc,
+            {
+                "processo": proc,
+                "situacao": dd.get("status_anatel") or "Enviada",
+                "area": dd.get("status_anatel_area") or "",
+                "desde": dd.get("status_anatel_em") or "",
+                "anuncio_id": aid,
+            },
+        )
+        if (dd.get("status_anatel_em") or "") > p["desde"]:
+            p.update(
+                situacao=dd.get("status_anatel") or p["situacao"],
+                area=dd.get("status_anatel_area") or p["area"],
+                desde=dd["status_anatel_em"],
+            )
+    situacao_anatel = Counter(p["situacao"] for p in por_proc.values())
+    movidos = [p for p in por_proc.values() if _dia(p["desde"]) == d]
+    if movidos:
+        ids_mov = {p["anuncio_id"] for p in movidos if p["anuncio_id"]} - set(anuncios)
+        if ids_mov:
+            anuncios.update(
+                {
+                    a.id: a
+                    for a in (
+                        await session.execute(
+                            select(DenunciaAnuncio).where(DenunciaAnuncio.id.in_(ids_mov))
+                        )
+                    )
+                    .scalars()
+                    .all()
+                }
+            )
+    movimentos = sorted(
+        (
+            {
+                "processo": p["processo"],
+                "situacao": p["situacao"],
+                "area": p["area"],
+                "loja": _anuncio_linha(anuncios.get(p["anuncio_id"]), p["anuncio_id"])["loja"],
+                "site": _anuncio_linha(anuncios.get(p["anuncio_id"]), p["anuncio_id"])["site"],
+            }
+            for p in movidos
+        ),
+        key=lambda m: (m["situacao"], m["processo"]),
+    )
+
     def _por_site(c: dict[str, Counter], chaves: Iterable[str]) -> dict:
         return {s: {k: int(c[s][k]) for k in chaves} for s in sorted(c)}
 
@@ -315,6 +389,9 @@ async def calcular_numeros(session: AsyncSession, dia: date) -> dict:
             "anuncios": sum(p["anuncios"] for p in processos.values()),
             "consumidor": consumidor,
             "processos": sorted(processos.values(), key=lambda p: (p["hora"], p["processo"])),
+            # 05/10: situação de todos os processos no SEI + os que a Anatel mexeu no dia
+            "situacao": {k: int(situacao_anatel.get(k, 0)) for k in SITUACOES_ANATEL},
+            "movimentos": movimentos,
         },
         "respostas": {
             "total": len(resp_lista),
@@ -708,6 +785,12 @@ def excel(rel: dict) -> BytesIO:
         ["Anatel (SEI): lojas peticionadas", an.get("lojas", 0)],
         ["Anatel (SEI): anúncios nas petições", an.get("anuncios", 0)],
         ["Anatel Consumidor: reclamações", an.get("consumidor", 0)],
+        *(
+            [f"Anatel (SEI): processos — {_SITUACAO_NOME[k]}", (an.get("situacao") or {}).get(k, 0)]
+            for k in SITUACOES_ANATEL
+            if an.get("situacao")
+        ),
+        ["Anatel (SEI): processos que a Anatel mexeu no dia", len(an.get("movimentos") or [])],
         ["Anúncios que saíram do ar", (n.get("sairam") or {}).get("total", 0)],
         ["Prints de anúncio (capturas)", pr.get("capturas", 0)],
         ["Anúncios conferidos (ativo/inativo)", co.get("anuncios", 0)],
@@ -785,6 +868,24 @@ def excel(rel: dict) -> BytesIO:
             for p in an.get("processos") or []
         ],
         [7, 24, 26, 14, 12, 9, 50],
+    )
+    # 05/10: o que a Anatel fez nos processos (lido no SEI pelo passo 1)
+    w_an = wb["Anatel"]
+    _tabela(
+        w_an,
+        w_an.max_row + 3,
+        ["Processo SEI", "Situação na Anatel", "Unidade", "Loja", "Site"],
+        [
+            [
+                m["processo"],
+                _SITUACAO_NOME.get(m["situacao"], m["situacao"]),
+                m["area"],
+                m["loja"],
+                m["site"],
+            ]
+            for m in an.get("movimentos") or []
+        ]
+        or [["(a Anatel não mexeu em nenhum processo no dia)"]],
     )
     aba(
         "Respostas",
