@@ -877,13 +877,25 @@ def _ajustes_escrow(esc: dict) -> list[dict]:
     return [a for a in ajustes if isinstance(a, dict)] if isinstance(ajustes, list) else []
 
 
-def _compensacoes_pagas(esc: dict) -> list[tuple[Decimal, str, str]]:
+# 18/09 (288439, 289142): o crédito também vem em PORTUGUÊS no escrow — "Outros -
+# Credito por item perdido ou danificado no envio…", "Compensação de
+# devolução/reembolso" — e só "compensation" deixava os dois de fora.
+_SH_CREDITO_MOTIVOS = ("compensa", "credito", "crédito", "ressarc")
+
+
+def _compensacoes_pagas(
+    esc: dict, *, desde: datetime | None = None
+) -> list[tuple[Decimal, str, str]]:
     """Compensação que a Shopee JÁ PAGOU ao vendedor: `order_adjustment` do escrow
-    com motivo "... Compensation" e valor positivo → [(valor, dd/mm, motivo)].
+    com motivo de compensação/crédito e valor positivo → [(valor, dd/mm, motivo)].
 
     Medido 17/09 (288567/290985/289899, disputas abertas À MÃO no Seller Center):
     o `get_return_detail` fica ACCEPTED com `seller_compensation_status` VAZIO para
     sempre — só o escrow mostra "Logistics Related Compensation" com valor e data.
+
+    `desde` (caso sem disputa, resolvido pelo atendente): vale também qualquer
+    ajuste positivo lançado depois dessa data que não seja do reembolso — o texto
+    do "ajuste positivo na carteira" do atendente ainda não foi visto no escrow.
     """
     out = []
     for a in _ajustes_escrow(esc):
@@ -892,7 +904,14 @@ def _compensacoes_pagas(esc: dict) -> list[tuple[Decimal, str, str]]:
             valor = Decimal(str(a.get("amount")))
         except (InvalidOperation, ValueError):
             continue
-        if "compensation" in motivo.lower() and valor > 0:
+        if valor <= 0:
+            continue
+        low = motivo.lower()
+        credito = any(k in low for k in _SH_CREDITO_MOTIVOS)
+        if not credito and desde is not None and "reembolso" not in low and "refund" not in low:
+            em = epoch_to_dt(a.get("date"))
+            credito = em is not None and em >= desde
+        if credito:
             out.append((valor, _fmt_dt(a.get("date")), motivo))
     return out
 
@@ -958,6 +977,8 @@ async def _sync_shopee(session: AsyncSession, ch: Chamado, dev: Devolution | Non
         novos += await _desfecho_shopee(
             session, ch, client, det, dev_q, status, quando, valor, comp_status=comp_status
         )
+    elif not tem_disputa and not ch.resolvido and ch.valor_sugerido is None:
+        novos += await _credito_sem_disputa_shopee(session, ch, client, det, dev_q, quando)
     if status in _SH_STATUS_TXT:
         txt, fim = _SH_STATUS_TXT[status]
         novos += await registrar_recebida(session, ch, cd.PLAT_SHOPEE, txt)
@@ -976,6 +997,45 @@ async def _disputa_registrada_em(session: AsyncSession, ch: Chamado) -> datetime
     if ab is None or ab.status != "enviada":
         return None
     return ab.enviada_at or ab.created_at
+
+
+async def _credito_sem_disputa_shopee(
+    session: AsyncSession, ch: Chamado, client, det: dict, dev_q: Devolution,
+    quando: datetime | None,
+) -> int:
+    """Caso contestado pelo ATENDENTE (Assistente do Vendedor), sem disputa no
+    return: o crédito pra loja só aparece no escrow do pedido.
+
+    05/10 (295935, fone que não voltou): o atendente respondeu "ajuste positivo na
+    carteira aprovado" sem dizer o valor, e o sync só lia o escrow com disputa —
+    a IA mandou conferir a carteira à mão. Ajuste positivo lançado depois da
+    abertura do chamado = crédito → ganhamos + valor sugerido (a pessoa conclui).
+    Escrow indisponível = não decide."""
+    oid = (dev_q.pedido_marketplace or ch.pedido_marketplace or det.get("order_sn") or "").strip()
+    if not oid:
+        return 0
+    try:
+        esc = await client.get_escrow_detail(oid) or {}
+    except Exception as e:  # noqa: BLE001 — escrow é apoio; o resto do sync vale
+        logger.info(
+            "chamado_devolucao_shopee_escrow_falhou", chamado_id=str(ch.id), err=str(e)[:120]
+        )
+        return 0
+    pagas = _compensacoes_pagas(esc, desde=ch.created_at)
+    if not pagas:
+        return 0
+    total = sum((v for v, _, _ in pagas), Decimal("0"))
+    partes = "; ".join(f"{_brl(v)}{(' em ' + d) if d else ''} ({m})" for v, d, m in pagas)
+    logger.info(
+        "chamado_devolucao_shopee_credito_sem_disputa", chamado_id=str(ch.id), partes=partes
+    )
+    novos = await registrar_recebida(
+        session, ch, cd.PLAT_SHOPEE,
+        f"Shopee CREDITOU a loja — ajuste positivo na carteira: {partes}.",
+    )
+    chamados_svc.set_status_plataforma(ch, chamados_svc.STATUS_GANHAMOS, quando)
+    await _encerrado_na_plataforma(session, ch, "shopee:credito_carteira", valor=total)
+    return novos
 
 
 async def _desfecho_shopee(

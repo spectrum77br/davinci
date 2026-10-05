@@ -6,6 +6,7 @@ lá, vai abrir o chamado automático … vai ter foto sim e vídeo"."""
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from uuid import UUID, uuid4
 
 import pytest
@@ -1333,6 +1334,57 @@ async def test_sync_shopee_br_ganha_pelo_valor_ou_sem_reembolso(client, make_use
     await db.refresh(ch2)
     assert ch2.status_plataforma == "ganhamos" and ch2.resolvido is False
     assert any("SEM reembolso" in t for t in await _recebidas(db, ch2.id))
+
+
+async def test_sync_shopee_credito_do_atendente_sem_disputa(client, make_user, auth_as, db, ml, monkeypatch):
+    """05/10 (295935): contestado pelo atendente, sem disputa no return. O
+    atendente aprovou "ajuste positivo na carteira" sem valor; o escrow mostra o
+    crédito. Ajuste positivo DEPOIS da abertura = ganhamos + valor sugerido;
+    ajuste antigo, reembolso e chamado já com valor não contam."""
+    import time
+
+    from app.services import chamados_devolucao_sync as sync
+
+    agora = int(time.time())
+    det = {"status": "ACCEPTED", "update_time": agora - 600, "dispute_reason": None,
+           "seller_compensation": {"seller_compensation_status": "", "compensation_amount": 0}}
+    escrow = {"seller_return_refund": -744,
+              "order_adjustment": [
+                  # antes do chamado e sem cara de crédito: não é a resposta
+                  {"adjustment_reason": "Ajuste de frete", "amount": 5.0, "date": agora - 30 * 86400},
+                  {"adjustment_reason": "Ajuste após reembolso aprovado", "amount": 12.0, "date": agora + 60},
+              ]}
+    ch = await _chamado_shopee_sync(client, make_user, auth_as, db, monkeypatch,
+                                    numero="295935", numeroloja="260910M25VQA4T", det=det, escrow=escrow)
+    s = await sync.sync_respostas(db)
+    assert s["encerrados"] == 0
+    await db.refresh(ch)
+    assert ch.status_plataforma is None and ch.valor_sugerido is None
+
+    escrow["order_adjustment"].append({"adjustment_reason": "Ajuste de carteira", "amount": 31.5, "date": agora + 120})
+    s = await sync.sync_respostas(db)
+    assert s["encerrados"] == 1
+    await db.refresh(ch)
+    assert ch.status_plataforma == "ganhamos" and ch.resolvido is False
+    assert float(ch.valor_sugerido) == 31.5
+    txts = await _recebidas(db, ch.id)
+    assert sum(1 for t in txts if "CREDITOU a loja" in t and "Ajuste de carteira" in t) == 1
+    assert any("shopee:credito_carteira" in t for t in await _sistema_txts(db, ch.id))
+
+
+def test_compensacao_em_portugues_conta():
+    """18/09 (288439, 289142): crédito e compensação parcial vêm em português."""
+    from app.services import chamados_devolucao_sync as sync
+
+    esc = {"order_income": {"order_adjustment": [
+        {"adjustment_reason": "Outros - Credito por item perdido ou danificado no envio", "amount": 7119.74, "date": 1},
+        {"adjustment_reason": "Compensação de devolução/reembolso", "amount": 189.75, "date": 1},
+        {"adjustment_reason": "Logistics Related Compensation", "amount": 173.23, "date": 1},
+        {"adjustment_reason": "Ajuste após reembolso aprovado", "amount": -632.49, "date": 1},
+    ]}}
+    assert [v for v, _, _ in sync._compensacoes_pagas(esc)] == [
+        Decimal("7119.74"), Decimal("189.75"), Decimal("173.23")
+    ]
 
 
 # ─── Shopee: prazo vencido, foto grande e réplica manual (07/09) ──────────────
