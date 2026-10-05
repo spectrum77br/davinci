@@ -41,8 +41,15 @@ SEM_NOTICIA = timedelta(minutes=5)
 # 02/10 (Vinicius, agente v27 no mini): os passos 2 a 6 viraram dois — 2 procura nos
 # quatro sites e 3 denúncias (prints, resultados da Shopee, recusadas de novo e novas).
 PASSOS: dict[str, tuple[int, str, str, str]] = {
-    "checagem": (0, "Checagem antes da rodada", "perfil 50 + 148 + Safari",
-                 "confere logins, AdsPower, captcha, Safari e Tuta — não muda nada"),
+    # 05/10 (Vinicius: "cadê os do Mercado Livre da réplica, cadê os da Shopee?"): a checagem já
+    # conferia as 6 contas da Réplica (checagem_pre_rodada.py → checar_perfis_replica), só a tela
+    # não dizia. A Shopee só na 1ª checagem do dia — abrir de novo o perfil pedia captcha.
+    "checagem": (0, "Checagem antes da rodada",
+                 "perfil 50 + 148 + Safari + contas da Réplica (ML 93 e 78 · Shopee 155 e 146 · "
+                 "TikTok 137 e 131)",
+                 "confere logins, AdsPower, captcha, Safari e Tuta; e se as 6 contas da Réplica "
+                 "estão logadas (a Shopee só na 1ª checagem do dia, pra não pedir captcha) — não "
+                 "muda nada"),
     # 01/10: o robô lê o Tuta sozinho (o leitor do Claude do mini parou em 17/09).
     # 05/10 (Vinicius: "e se colocar tudo no passo 1?"): o 1 vira a conferência das respostas
     # inteira, em três filas ao mesmo tempo — e-mails (Tuta), resultados da Shopee no perfil 50
@@ -84,10 +91,13 @@ PASSOS: dict[str, tuple[int, str, str, str]] = {
     # contas de lojas (1 = Mega/Aguiar/Atv, 2 = KIA/Vortan/Barbosa), divididos por loja; a 2ª
     # réplica sai pelo outro grupo. No mini é a ação extra replica_diversos (replica_diversos.py
     # --ml; Shopee e TikTok depois).
-    "replica_diversos": (6, "Réplica Denúncias Diversos", "perfis das lojas (ML 93 e 78)",
+    "replica_diversos": (6, "Réplica Denúncias Diversos",
+                         "grupo 1: ML 93 · Shopee 155 · TikTok 137 — grupo 2: ML 78 · Shopee 146 · "
+                         "TikTok 131",
                          "Diversos recusado na loja e já com processo na Anatel: outra empresa "
                          "denuncia de novo citando o processo SEI (grupo da loja; a 2ª réplica "
-                         "pelo outro grupo)"),
+                         "pelo outro grupo). Hoje envia no Mercado Livre; Shopee e TikTok ainda "
+                         "não enviam"),
     # 01/10 (Vinicius): o "saiu do ar?" levava 3–4 h e virou passo próprio, feito com o
     # robô parado (para quando a rodada chega e continua depois).
     "ativos_inativos": (7, "Conferência de anúncios ativos/inativos",
