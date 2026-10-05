@@ -61,6 +61,7 @@ from app.models.devolucao_rastreio import DevolucaoRastreio
 from app.models.devolution import Devolution
 from app.models.enums import (
     EMAIL_CONTEXTOS,
+    MARCA_EMAIL_TIPOS,
     MARCA_INPI_STATUS,
     MARKETPLACES,
     PLATFORMS,
@@ -81,6 +82,7 @@ from app.models.enums import (
     LinkSyncStatus,
     ListingRequestStatus,
     ListingStatus,
+    MarcaEmailTipo,
     MarcaInpiStatus,
     Marketplace,
     PricingPlatform,
@@ -136,7 +138,7 @@ from app.models.logistica import (
     LogisticaStatus,
     LogisticaStatusAnexo,
 )
-from app.models.marca import Marca, MarcaEmailAssinatura, MarcaEmailPadrao, RedeSocial
+from app.models.marca import Marca, MarcaEmail, MarcaEmailPadrao, RedeSocial
 from app.models.nfse import (
     CompanyFiscal,
     NfseChamada,
@@ -291,7 +293,9 @@ __all__ = [
     "DNPProduto",
     "DevolucaoRastreio",
     "EMAIL_CONTEXTOS",
+    "MARCA_EMAIL_TIPOS",
     "EmailContexto",
+    "MarcaEmailTipo",
     "DenunciaAnuncio",
     "DenunciaCaso",
     "DenunciaCompra",
@@ -342,7 +346,7 @@ __all__ = [
     "MARCA_INPI_STATUS",
     "MARKETPLACES",
     "Marca",
-    "MarcaEmailAssinatura",
+    "MarcaEmail",
     "MarcaEmailPadrao",
     "MarcaInpiStatus",
     "HistoricoAcesso",

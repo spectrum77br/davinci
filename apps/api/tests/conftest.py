@@ -410,7 +410,7 @@ _CLEANUP_TABLES = (
     "redes_sociais_tokens",
     "redes_sociais",  # FK CASCADE -> marcas: antes de marcas
     "marca_email_padroes",
-    "marca_email_assinaturas",
+    "marca_emails",
     "marcas",
     "tarefas",  # FK RESTRICT -> users
     "import_kit_marks",

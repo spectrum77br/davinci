@@ -1,4 +1,4 @@
-// node tests/email-padroes-sfc.cjs — compilação e fluxos de assinatura por canal.
+// node tests/email-padroes-sfc.cjs — compilação e fluxos dos e-mails do Tuta por marca.
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
@@ -8,131 +8,101 @@ const { parse, compileTemplate, compileScript } = require('vue/compiler-sfc')
 const filename = path.resolve(__dirname, '../pages/email-padroes.vue')
 const { descriptor, errors } = parse(fs.readFileSync(filename, 'utf8'), { filename })
 assert.deepEqual(errors, [])
-const template = compileTemplate({ source: descriptor.template.content, filename, id: 'assinaturas-check' })
+const template = compileTemplate({ source: descriptor.template.content, filename, id: 'marca-emails-check' })
 assert.deepEqual(template.errors, [])
-compileScript(descriptor, { id: 'assinaturas-check' })
-assert.match(descriptor.template.content, /sandbox=""/)
-assert.doesNotMatch(descriptor.template.content, /Enviar teste|Assunto \*|Corpo \*|Remetente \(/)
+compileScript(descriptor, { id: 'marca-emails-check' })
+// A matriz de assinaturas por canal saiu (Eduardo, 05/10/2026).
+assert.doesNotMatch(descriptor.template.content, /Configurar|Assinatura|Copiar assinatura|iframe/)
+assert.doesNotMatch(descriptor.scriptSetup.content, /email-assinaturas/)
 const script = descriptor.scriptSetup.content.replace(/^import.*$/gm, '')
 const transpiled = ts.transpileModule(script, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } }).outputText
 const factory = new Function('ref', 'computed', 'onMounted', 'definePageMeta', 'useCan', 'useApi',
-  'apiErrMsg', 'MARCAS_ERROS', 'EMAIL_CONTEXTO_LABELS', 'navigator', 'ClipboardItem', 'Blob',
-  transpiled + '\nreturn {grid,form,selected,preview,previewStale,saveError,success,load,openSignature,closeModal,updatePreview,save,rowMatches,copySignature,copied,copyError};')
-const marca = { id: 'm1', nome: 'Poofy', slug: 'poofy', empresa_razao_social: null, has_logo: false }
-const saved = { id: 'a1', marca_id: 'm1', contexto: 'sac', texto: 'Equipe SAC', incluir_logo: true, incluir_dados_marca: true, ativo: true }
-function page({ edit = true, fail = false, deferPreview = false, failCopy = false, noClipboard = false } = {}) {
-  const calls = [], pending = [], clipboardWrites = []
+  'apiErrMsg', 'MARCAS_ERROS', 'MARCA_EMAIL_TIPO_LABELS', 'navigator', 'confirm', 'setTimeout',
+  transpiled + '\nreturn {grid,rascunhos,error,success,load,salvar,preencher,podePreencher,sujo,sugestao,dominio,copiar,copiado};')
+const marca = (id, nome, site) => ({ id, nome, slug: nome, ativo: true, site, has_logo: false, updated_at: '2026-10-05' })
+function page({ edit = true, fail = false, confirma = true } = {}) {
+  const calls = [], copias = []
   const api = async (url, opts = {}) => {
-    calls.push({url, opts})
-    if (url.endsWith('/grid')) return {contextos: ['sac','ml'], rows: [{marca, cells: {sac: {...saved}, ml: null}}]}
-    if (url.endsWith('/preview')) {
-      const result = {html: `<div style="padding:24px">${opts.body.texto}<a href="https://wa.me/5511912345678"><img src="data:image/png;base64,aWNvbmU=" width="28" height="28">WhatsApp</a></div>`, text: opts.body.texto, avisos: []}
-      if (deferPreview) return new Promise(resolve => pending.push(() => resolve(result)))
-      return result
+    calls.push({ url, opts })
+    if (url === '/api/marca-emails') return {
+      tipos: ['sac', 'duvidas', 'atacado'],
+      rows: [
+        { marca: marca('m1', 'uranyx', 'https://www.uranyx.com.br/'), emails: { sac: 'sac@uranyx.com.br', duvidas: null, atacado: null } },
+        { marca: marca('m2', 'locagil', null), emails: { sac: null, duvidas: null, atacado: null } },
+      ],
     }
     if (opts.method === 'PUT') {
       if (fail) throw new Error('Falha ao salvar')
-      return {id: 'a2', marca_id: 'm1', contexto: url.split('/').pop(), ...opts.body}
+      return { marca: marca(url.split('/').pop(), 'x', null), emails: { ...opts.body } }
     }
     throw new Error(`Chamada inesperada: ${url}`)
   }
-  class ClipboardItemMock {
-    constructor(data) { this.data = data }
-    async getType(type) { return this.data[type] }
-  }
-  const navigator = {clipboard: noClipboard ? undefined : {write: async items => {
-    if (failCopy) throw new Error('NotAllowedError')
-    clipboardWrites.push(items)
-  }}}
-  const p = factory(Vue.ref, Vue.computed, () => {}, () => {}, () => Vue.ref(edit), () => ({api}),
-    e => e.message, {}, {sac: 'SAC', ml: 'ML'}, navigator, ClipboardItemMock, Blob)
-  return {p, calls, pending, clipboardWrites}
+  const navigator = { clipboard: { writeText: async t => { copias.push(t) } } }
+  const p = factory(Vue.ref, Vue.computed, () => {}, () => {}, () => Vue.ref(edit), () => ({ api }),
+    e => e.message, {}, { sac: 'SAC', duvidas: 'Dúvidas', atacado: 'Atacado' }, navigator, () => confirma, () => 0)
+  return { p, calls, copias }
 }
-async function tick() { await new Promise(resolve => setImmediate(resolve)) }
 ;(async () => {
   {
-    const {p,calls} = page()
+    const { p, calls } = page()
     await p.load()
-    const row = p.grid.value.rows[0]
-    p.openSignature(row, 'ml')
-    await tick()
-    assert.equal(p.form.value.texto, '')
-    p.form.value.texto = 'Atenciosamente,\nEquipe de marketplace'
-    assert.equal(p.previewStale.value, true)
-    await p.updatePreview()
-    assert.equal(p.previewStale.value, false)
-    assert.match(p.preview.value.text, /Equipe de marketplace/)
-    await p.save()
+    const [uranyx, locagil] = p.grid.value.rows
+    assert.equal(p.dominio('https://www.uranyx.com.br/'), 'uranyx.com.br')
+    assert.equal(p.sugestao(uranyx.marca, 'atacado'), 'atacado@uranyx.com.br')
+    assert.equal(p.rascunhos.value.m1.sac, 'sac@uranyx.com.br')
+    assert.equal(p.rascunhos.value.m1.duvidas, '')
+    assert.equal(p.sujo(uranyx), false)
+    // "padrão" só preenche os vazios e só quando a marca tem site.
+    assert.equal(p.podePreencher(uranyx), true)
+    assert.equal(p.podePreencher(locagil), false)
+    p.rascunhos.value.m1.sac = 'contato@uranyx.com.br'
+    p.preencher(uranyx)
+    assert.deepEqual({ ...p.rascunhos.value.m1 }, { sac: 'contato@uranyx.com.br', duvidas: 'duvidas@uranyx.com.br', atacado: 'atacado@uranyx.com.br' })
+    assert.equal(p.sujo(uranyx), true)
+    p.rascunhos.value.m1.sac = ' SAC@Uranyx.com.br '
+    p.rascunhos.value.m1.atacado = ''
+    await p.salvar(uranyx)
     const put = calls.find(c => c.opts.method === 'PUT')
-    assert.equal(put.url, '/api/email-assinaturas/m1/ml')
-    assert.deepEqual(Object.keys(put.opts.body).sort(), ['ativo','incluir_dados_marca','incluir_logo','texto'])
-    assert.equal(row.cells.sac.texto, 'Equipe SAC')
-    assert.match(row.cells.ml.texto, /Equipe de marketplace/)
-    assert.equal(p.selected.value, null)
-    assert.match(p.success.value, /salva/)
-    assert.equal(p.rowMatches(row, 'marketplace'), true)
-    assert.ok(calls.every(c => !c.url.includes('enviar-teste')))
+    assert.equal(put.url, '/api/marca-emails/m1')
+    assert.deepEqual(put.opts.body, { sac: 'sac@uranyx.com.br', duvidas: 'duvidas@uranyx.com.br', atacado: null })
+    assert.equal(uranyx.emails.duvidas, 'duvidas@uranyx.com.br')
+    assert.equal(p.sujo(uranyx), false)
+    assert.match(p.success.value, /uranyx/)
+    // Linha sem mudança não salva.
+    await p.salvar(locagil)
+    assert.equal(calls.filter(c => c.opts.method === 'PUT').length, 1)
   }
   {
-    const {p,calls} = page({edit:false})
-    await p.load(); p.openSignature(p.grid.value.rows[0], 'sac'); await tick()
-    await p.save()
+    const { p, calls } = page({ edit: false })
+    await p.load()
+    p.rascunhos.value.m2.sac = 'sac@locagil.com.br'
+    await p.salvar(p.grid.value.rows[1])
     assert.equal(calls.filter(c => c.opts.method === 'PUT').length, 0)
-    assert.equal(p.form.value.texto, 'Equipe SAC')
   }
   {
-    const {p} = page({fail:true})
-    await p.load(); p.openSignature(p.grid.value.rows[0], 'sac'); await tick()
-    p.form.value.texto = 'Rascunho preservado'
-    await p.save()
-    assert.equal(p.form.value.texto, 'Rascunho preservado')
-    assert.ok(p.selected.value)
-    assert.equal(p.saveError.value, 'Falha ao salvar')
-    assert.equal(p.grid.value.rows[0].cells.sac.texto, 'Equipe SAC')
+    const { p } = page({ fail: true })
+    await p.load()
+    const row = p.grid.value.rows[1]
+    p.rascunhos.value.m2.sac = 'sac@locagil.com.br'
+    await p.salvar(row)
+    assert.equal(p.rascunhos.value.m2.sac, 'sac@locagil.com.br')
+    assert.equal(row.emails.sac, null)
+    assert.match(p.error.value, /locagil: Falha ao salvar/)
   }
   {
-    const {p,pending} = page({deferPreview:true})
-    await p.load(); const row = p.grid.value.rows[0]
-    p.openSignature(row, 'sac')
-    p.openSignature(row, 'ml')
-    pending[1](); await tick()
-    assert.equal(p.preview.value.text, '')
-    pending[0](); await tick()
-    assert.equal(p.preview.value.text, '', 'prévia antiga não substitui o canal atual')
+    const { p, calls } = page({ confirma: false })
+    await p.load()
+    p.rascunhos.value.m2.sac = 'sac@locagil.com.br'
+    await p.load()
+    assert.equal(calls.filter(c => c.url === '/api/marca-emails').length, 1)
+    assert.equal(p.rascunhos.value.m2.sac, 'sac@locagil.com.br')
   }
   {
-    const {p, calls, clipboardWrites} = page({edit:false})
-    await p.load(); p.openSignature(p.grid.value.rows[0], 'sac'); await tick()
-    await p.copySignature()
-    assert.equal(clipboardWrites.length, 1)
-    const item = clipboardWrites[0][0]
-    const html = await (await item.getType('text/html')).text()
-    assert.equal(html, p.preview.value.html, 'copia a formatação e as imagens da prévia')
-    assert.match(html, /data:image\/png;base64,/)
-    assert.match(html, /href="https:\/\/wa.me\//)
-    assert.equal(await (await item.getType('text/plain')).text(), p.preview.value.text)
-    assert.equal(p.copied.value, true)
-    assert.equal(calls.filter(c => c.opts.method === 'PUT').length, 0, 'copiar não salva nem envia')
+    const { p, copias } = page()
+    await p.load()
+    await p.copiar('sac@uranyx.com.br')
+    assert.deepEqual(copias, ['sac@uranyx.com.br'])
+    assert.equal(p.copiado.value, 'sac@uranyx.com.br')
   }
-  {
-    const {p, clipboardWrites} = page()
-    await p.load(); p.openSignature(p.grid.value.rows[0], 'sac'); await tick()
-    p.form.value.texto = 'Nova assinatura'
-    await p.copySignature()
-    assert.equal(clipboardWrites.length, 0, 'não copia prévia desatualizada')
-    await p.updatePreview(); await p.copySignature()
-    assert.equal(await (await clipboardWrites[0][0].getType('text/plain')).text(), 'Nova assinatura')
-    p.openSignature(p.grid.value.rows[0], 'ml'); await tick()
-    assert.equal(p.copied.value, false, 'retorno de cópia não passa para outro canal')
-  }
-  for (const options of [{failCopy:true}, {noClipboard:true}]) {
-    const {p, clipboardWrites} = page(options)
-    await p.load(); p.openSignature(p.grid.value.rows[0], 'sac'); await tick()
-    await p.copySignature()
-    assert.equal(clipboardWrites.length, 0)
-    assert.equal(p.copied.value, false)
-    assert.match(p.copyError.value, /Não foi possível copiar com formatação/)
-    assert.ok(p.preview.value, 'falha na cópia preserva a prévia')
-  }
-  console.log('Assinaturas: compilação, gravação por canal, leitura, erros, prévia concorrente e cópia formatada OK')
-})().catch(e => {console.error(e);process.exitCode=1})
+  console.log('email-padroes-sfc: ok')
+})().catch(e => { console.error(e); process.exit(1) })

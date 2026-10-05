@@ -266,3 +266,16 @@ class EmailContexto(StrEnum):
 
 
 EMAIL_CONTEXTOS: tuple[str, ...] = tuple(c.value for c in EmailContexto)
+
+
+class MarcaEmailTipo(StrEnum):
+    """Caixa do Tuta de cada marca (Cadastros › E-mails): "o e-mail de sac, o
+    de atacado e o de dúvidas" (Eduardo, 05/10/2026) — sac@, duvidas@ e
+    atacado@ no domínio da marca. Tipo novo: acrescentar aqui e no front."""
+
+    SAC = "sac"
+    DUVIDAS = "duvidas"
+    ATACADO = "atacado"
+
+
+MARCA_EMAIL_TIPOS: tuple[str, ...] = tuple(t.value for t in MarcaEmailTipo)

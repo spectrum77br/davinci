@@ -217,29 +217,24 @@ class RedeSocial(Base, TimestampMixin):
     )
 
 
-class MarcaEmailAssinatura(Base, TimestampMixin):
-    """Rodapé independente do assunto/corpo, único por marca e canal."""
+class MarcaEmail(Base, TimestampMixin):
+    """Endereço do Tuta de uma marca por tipo (enums.MarcaEmailTipo: sac,
+    duvidas, atacado). Uma linha por (marca, tipo); apagar o e-mail na tela
+    apaga a linha. Substitui as assinaturas por canal (migration 0365): os
+    endereços são aliases da conta principal do Tuta, que tem UMA assinatura
+    para todos — rodapé por marca/canal não tinha onde ser usado."""
 
-    __tablename__ = "marca_email_assinaturas"
-    __table_args__ = (
-        UniqueConstraint("marca_id", "contexto", name="uq_marca_email_assinatura_canal"),
-    )
+    __tablename__ = "marca_emails"
+    __table_args__ = (UniqueConstraint("marca_id", "tipo", name="uq_marca_emails_tipo"),)
 
     id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
     marca_id: Mapped[UUID] = mapped_column(
-        PG_UUID(as_uuid=True), ForeignKey("marcas.id", ondelete="CASCADE"), nullable=False,
+        PG_UUID(as_uuid=True),
+        ForeignKey("marcas.id", ondelete="CASCADE"),
+        nullable=False,
     )
-    contexto: Mapped[str] = mapped_column(String(32), nullable=False)
-    texto: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
-    incluir_logo: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, default=True, server_default=text("true")
-    )
-    incluir_dados_marca: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, default=True, server_default=text("true")
-    )
-    ativo: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, default=True, server_default=text("true")
-    )
+    tipo: Mapped[str] = mapped_column(String(16), nullable=False)
+    email: Mapped[str] = mapped_column(Text, nullable=False)
 
 
 class MarcaEmailPadrao(Base, TimestampMixin):

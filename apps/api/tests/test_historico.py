@@ -10,6 +10,8 @@ Estes testes entram pelo login DE VERDADE (cookie de sessão), não pelo
 
 # ruff: noqa: S105, S106  (senhas de teste, nada real)
 
+import uuid
+
 import pytest
 from sqlalchemy import select, text
 
@@ -224,7 +226,7 @@ async def test_se_o_historico_falhar_a_mudanca_passa(db, make_user):
 async def test_pedido_sem_mudanca_nao_vira_evento(client, db, make_user):
     eu = await make_user(role=UserRole.ADMIN)
     _logar(client, eu)
-    await client.post("/api/email-assinaturas/preview", json={})
+    await client.put(f"/api/marca-emails/{uuid.uuid4()}", json={"sac": "sem-arroba"})
     assert await _eventos(db) == []
 
 

@@ -35,7 +35,6 @@ from app.routers import dashboard as dashboard_router
 from app.routers import dev as dev_router
 from app.routers import devolutions as devolutions_router
 from app.routers import discrepancies as discrepancies_router
-from app.routers import email_assinaturas as email_assinaturas_router
 from app.routers import email_padroes as email_padroes_router
 from app.routers import estoque as estoque_router
 from app.routers import faturamento as faturamento_router
@@ -50,6 +49,7 @@ from app.routers import jobs as jobs_router
 from app.routers import listings as listings_router
 from app.routers import logistica as logistica_router
 from app.routers import logistica_track as logistica_track_router
+from app.routers import marca_emails as marca_emails_router
 from app.routers import marcas as marcas_router
 from app.routers import nfse as nfse_router
 from app.routers import nfse_webhook as nfse_webhook_router
@@ -228,7 +228,7 @@ app.include_router(nfse_router.router_arquivos)  # PDF/XML: a chave OU o link de
 app.include_router(nfse_router.router)
 app.include_router(redes_sociais_router.router)
 app.include_router(email_padroes_router.router)
-app.include_router(email_assinaturas_router.router)
+app.include_router(marca_emails_router.router)
 app.include_router(audit_router.router)
 app.include_router(discrepancies_router.router)
 app.include_router(dashboard_router.router)

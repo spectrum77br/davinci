@@ -50,4 +50,5 @@ export const MARCAS_ERROS: Record<string, string> = {
   template_required: 'Assunto e corpo são obrigatórios',
   template_too_long: 'Template muito longo',
   email_invalido: 'E-mail inválido',
+  marca_sem_redes_sociais: 'Essa marca não tem conta em Redes Sociais',
 }

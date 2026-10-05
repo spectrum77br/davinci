@@ -1,6 +1,6 @@
 // Constantes das abas Cadastros › Redes Sociais / Marcas / E-mails.
 // Espelham app/models/enums.py (RedeSocialPlataforma, VerificacaoStatus,
-// EmailContexto, MarcaInpiStatus). Valor novo: acrescentar lá e aqui.
+// MarcaEmailTipo, MarcaInpiStatus). Valor novo: acrescentar lá e aqui.
 
 // As 5 redes da planilha do Eduardo, na ordem dela ("seguir bem a planilha").
 export type Plataforma = 'instagram' | 'facebook' | 'twitter' | 'tiktok' | 'youtube'
@@ -86,28 +86,14 @@ export function fmtFone(fone: string | null | undefined): string {
   return d
 }
 
-// Contextos dos padrões de e-mail (app/models/enums.py::EmailContexto):
-// SAC + os marketplaces do sistema (mesmos valores de useMarketplaces) + Geral.
-export type EmailContexto =
-  | 'sac' | 'ml' | 'shopee' | 'amazon' | 'aliexpress' | 'temu' | 'tiktok' | 'shein' | 'magalu'
-  | 'site' | 'geral'
+// E-mails do Tuta por marca (app/models/enums.py::MarcaEmailTipo), na ordem
+// do pedido do Eduardo (05/10/2026): sac@, duvidas@, atacado@.
+export type MarcaEmailTipo = 'sac' | 'duvidas' | 'atacado'
 
-export const EMAIL_CONTEXTOS: EmailContexto[] = [
-  'sac', 'ml', 'shopee', 'amazon', 'aliexpress', 'temu', 'tiktok', 'shein', 'magalu', 'site', 'geral',
-]
-
-export const EMAIL_CONTEXTO_LABELS: Record<EmailContexto, string> = {
+export const MARCA_EMAIL_TIPO_LABELS: Record<MarcaEmailTipo, string> = {
   sac: 'SAC',
-  ml: 'ML',
-  shopee: 'Shopee',
-  amazon: 'Amazon',
-  aliexpress: 'Aliexpress',
-  temu: 'Temu',
-  tiktok: 'Tik tok',
-  shein: 'Shein',
-  magalu: 'Magalu',
-  site: 'Site',
-  geral: 'Geral',
+  duvidas: 'Dúvidas',
+  atacado: 'Atacado',
 }
 
 // Placeholders dos templates (app/services/email_marca.py::PLACEHOLDERS).
