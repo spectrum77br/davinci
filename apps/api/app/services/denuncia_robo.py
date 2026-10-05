@@ -70,24 +70,22 @@ PASSOS: dict[str, tuple[int, str, str, str]] = {
     "anatel": (4, "Denúncias Anatel", "Safari (SEI)",
                "peticiona as novas no SEI — só depois dos passos 2 e 3 (as respostas são lidas "
                "no passo 1)"),
-    # 05/10 (Vinicius): o 5 (Compras de prova, desligado e com o login quebrado desde 27/09) saiu da
-    # lista; o programa fica no mini. Os números dos outros passos não mudam.
-    "juridico": (6, "Jurídico", "escritório", "monta a pasta do caso pro advogado (não envia)"),
-    # 02/10 (Vinicius): o 7 (Relatório) saiu da rotina — ninguém lia; o programa fica no mini —
-    # e o número ficou com o Diversos: denunciar na loja uma vez só e tirar os prints, de noite,
-    # antes do 9
-    "diversos": (7, "Denúncias Diversos", "perfil 50 + celular",
+    # 05/10 (Vinicius): saíram da lista o 5 (Compras de prova, desligado e com o login quebrado
+    # desde 27/09) e o 8 (Perguntas nos anúncios disfarçados); o Jurídico foi pro fim e os números
+    # ficaram em sequência. Os programas ficam no mini; a chave de cada passo não muda (agenda e
+    # "Rodar" seguem valendo). A "Réplica Denúncias Diversos" (planejada) entra depois do Diversos.
+    # 02/10 (Vinicius): denunciar na loja uma vez só e tirar os prints, de noite
+    "diversos": (5, "Denúncias Diversos", "perfil 50 + celular",
                  "denúncia nova do Diversos no ML, Shopee e TikTok (uma vez só, sem denunciar de "
                  "novo) → prints (até 200, Nosso → Anatel → Diversos); "
                  "para quando o próximo passo chega"),
-    "capa_perguntas": (8, "Perguntas nos anúncios disfarçados", "perfil 50",
-                       "pergunta ao vendedor de capa/tablet se vende o aparelho"),
-    # 01/10 (Vinicius): o "saiu do ar?" levava 3–4 h e virou o último passo, feito com o
+    # 01/10 (Vinicius): o "saiu do ar?" levava 3–4 h e virou passo próprio, feito com o
     # robô parado (para quando a rodada chega e continua depois).
-    "ativos_inativos": (9, "Conferência de anúncios ativos/inativos",
+    "ativos_inativos": (6, "Conferência de anúncios ativos/inativos",
                         "perfil 50 + 148",
                         "abre um por um os anúncios que acompanhamos e vê quem saiu do ar; "
                         "roda com o robô parado, para se a rodada chegar e continua depois"),
+    "juridico": (7, "Jurídico", "escritório", "monta a pasta do caso pro advogado (não envia)"),
 }
 # passos de antes de 02/10: só pra dar nome às rodadas que ainda os têm (não têm botão)
 ANTIGOS: dict[str, tuple[int, str]] = {
@@ -98,6 +96,7 @@ ANTIGOS: dict[str, tuple[int, str]] = {
     "conferencia": (3, "Conferência e recusadas (antigo)"),
     "relatorio": (7, "Relatório (fora da rotina)"),
     "compras": (5, "Compras de prova (fora da lista)"),
+    "capa_perguntas": (8, "Perguntas nos anúncios (fora da lista)"),
     # 05/10: as partes do passo 1 que rodam no perfil 50 e no Safari (a de e-mail é o próprio
     # ciclo_emails)
     "conferencia_perfil50": (1, "Conferência — resultados da Shopee"),

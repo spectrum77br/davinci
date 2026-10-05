@@ -331,9 +331,11 @@ def test_painel_frentes_agenda_e_alarme():
 
     # aba Passos (02/10): 0 a 9, com a última vez de hoje; os antigos não têm botão
     passos = {x["acao"]: x for x in p["passos"]}
-    # 7 = Diversos (02/10); o 5 (Compras) saiu da lista em 05/10
-    assert [x["ordem"] for x in p["passos"]] == [0, 1, 2, 3, 4, 6, 7, 8, 9]
-    assert p["passos"][0]["acao"] == "checagem" and p["passos"][-1]["acao"] == "ativos_inativos"
+    # 05/10: sem Compras e sem Perguntas; Jurídico no fim e os números em sequência
+    assert [x["ordem"] for x in p["passos"]] == list(range(8))
+    assert p["passos"][0]["acao"] == "checagem" and p["passos"][-1]["acao"] == "juridico"
+    assert [x["acao"] for x in p["passos"][5:7]] == ["diversos", "ativos_inativos"]
+    assert "capa_perguntas" not in [x["acao"] for x in p["passos"]]
     assert [x["acao"] for x in p["passos"][2:5]] == ["procura", "denuncias", "anatel"]
     assert "varredura_mercadolivre" not in passos and "conferencia" not in passos
     assert passos["procura"]["ultima"]["status"] == "rodando"
@@ -546,7 +548,7 @@ async def test_robo_botoes_ligar_e_rodar_passo(client, make_user, auth_as):
     j = (await client.get("/api/denuncia/robo")).json()
     assert [c["tipo"] for c in j["comandos"]] == ["passo", "automatico"]
     assert j["comandos"][1]["ok"] is True and j["comandos"][1]["entregue_em"]
-    assert len(j["passos"]) == 9  # 02/10: passos 0 a 9 (o 7 virou Denúncias Diversos); 05/10: sem o 5
+    assert len(j["passos"]) == 8  # 05/10: 0 a 7 (sem Compras e Perguntas; Jurídico no fim)
 
 
 async def test_robo_agenda_salva_e_mini_puxa(client, make_user, auth_as):
