@@ -332,9 +332,9 @@ def test_painel_frentes_agenda_e_alarme():
     # aba Passos (02/10): 0 a 9, com a última vez de hoje; os antigos não têm botão
     passos = {x["acao"]: x for x in p["passos"]}
     # 05/10: sem Compras e sem Perguntas; Jurídico no fim e os números em sequência
-    assert [x["ordem"] for x in p["passos"]] == list(range(8))
+    assert [x["ordem"] for x in p["passos"]] == list(range(9))   # 05/10: + Réplica no 6
     assert p["passos"][0]["acao"] == "checagem" and p["passos"][-1]["acao"] == "juridico"
-    assert [x["acao"] for x in p["passos"][5:7]] == ["diversos", "ativos_inativos"]
+    assert [x["acao"] for x in p["passos"][5:8]] == ["diversos", "replica_diversos", "ativos_inativos"]
     assert "capa_perguntas" not in [x["acao"] for x in p["passos"]]
     assert [x["acao"] for x in p["passos"][2:5]] == ["procura", "denuncias", "anatel"]
     assert "varredura_mercadolivre" not in passos and "conferencia" not in passos
@@ -548,7 +548,7 @@ async def test_robo_botoes_ligar_e_rodar_passo(client, make_user, auth_as):
     j = (await client.get("/api/denuncia/robo")).json()
     assert [c["tipo"] for c in j["comandos"]] == ["passo", "automatico"]
     assert j["comandos"][1]["ok"] is True and j["comandos"][1]["entregue_em"]
-    assert len(j["passos"]) == 8  # 05/10: 0 a 7 (sem Compras e Perguntas; Jurídico no fim)
+    assert len(j["passos"]) == 9  # 05/10: 0 a 8 (sem Compras e Perguntas; Réplica no 6; Jurídico no fim)
 
 
 async def test_robo_agenda_salva_e_mini_puxa(client, make_user, auth_as):
@@ -1031,6 +1031,8 @@ async def _dia_do_robo(client, d):
          "resultado": "Sem resposta (prazo vencido)", "resultado_em": f"{d} 23:00:00"},
         {"id": 8, "anuncio_id": "V2", "canal": "Shopee", "criado_em": ant, "data": "2026-09-01",
          "resultado": "Improcedente", "resultado_em": "2026-09-02 10:00:00"},
+        {"id": 9, "anuncio_id": "V2", "canal": "Mercado Livre", "criado_em": f"{d} 15:21:00", "data": d,
+         "tentativa": 2, "obs": "RÉPLICA 1 · grupo 2 · perfil 78 (KIA, conta KIA ARTI) · cita o processo SEI X"},
     ]}, headers=H)
     assert r.status_code == 200, r.text
     await client.post("/api/denuncia/sync/provas", json={"linhas": [
@@ -1064,7 +1066,9 @@ async def test_relatorio_conta_o_dia_e_sai_em_excel(client, make_user, auth_as):
     assert n["achou"]["lojas_proprias"] == 1 and n["achou"]["descartados"] == 1
     assert n["achou"]["por_site"] == {"Mercado Livre": {"Nosso": 1, "Diversos": 0, "Outros": 0},
                                       "Shopee": {"Nosso": 0, "Diversos": 1, "Outros": 0}}
-    assert n["denunciou"]["total"] == 2 and n["denunciou"]["de_novo"] == 1
+    # 05/10: a réplica conta nas denúncias do dia, separada das "de novo"
+    assert n["denunciou"]["total"] == 3 and n["denunciou"]["de_novo"] == 1
+    assert n["denunciou"]["replicas"] == 1
     assert n["anatel"]["lojas"] == 1 and n["anatel"]["anuncios"] == 2
     assert n["anatel"]["processos"][0]["processo"] == "53500.1/2026-17"
     assert n["anatel"]["processos"][0]["hora"] == "10:33"
@@ -1115,7 +1119,7 @@ async def test_relatorio_congela_e_lido_tira_das_ocorrencias(client, db, make_us
 
     rel = (await client.get("/api/denuncia/robo")).json()["relatorios"]
     assert [(x["dia"], x["achou"], x["denunciou"], x["anatel"], x["removidos"]) for x in rel] == [
-        (d.isoformat(), 2, 2, 1, 1)]
+        (d.isoformat(), 2, 3, 1, 1)]
     assert (await client.post(f"/api/denuncia/relatorios/{d.isoformat()}/lido")).status_code == 403
     auth_as(await make_user(permissions={"denuncia": {"view": True, "edit": True}}))
     assert (await client.post(f"/api/denuncia/relatorios/{d.isoformat()}/lido")).status_code == 200

@@ -203,7 +203,7 @@ async def calcular_numeros(session: AsyncSession, dia: date) -> dict:
             .all()
         }
 
-    den_lista, de_novo, consumidor = [], 0, 0
+    den_lista, de_novo, replicas, consumidor = [], 0, 0, 0
     den_site: dict[str, Counter] = defaultdict(Counter)
     processos: dict[str, dict] = {}
     for x in criadas:
@@ -240,7 +240,10 @@ async def calcular_numeros(session: AsyncSession, dia: date) -> dict:
             continue
         a = _anuncio_linha(anuncios.get(x.anuncio_id), x.anuncio_id)
         tentativa = int(dd.get("tentativa") or 1)
-        de_novo += tentativa > 1
+        # 05/10: a Réplica Denúncias Diversos (outra empresa, citando o processo SEI) marca a obs
+        replica = str(dd.get("obs") or "").startswith("RÉPLICA")
+        replicas += replica
+        de_novo += tentativa > 1 and not replica
         den_lista.append(
             a
             | {
@@ -248,6 +251,7 @@ async def calcular_numeros(session: AsyncSession, dia: date) -> dict:
                 "hora": _hora(dd.get("criado_em")),
                 "tentativa": tentativa,
                 "protocolo": x.protocolo or "",
+                "replica": str(dd.get("obs") or "").split(" · cita")[0] if replica else "",
             }
         )
         den_site[canal][a["grupo"]] += 1
@@ -381,6 +385,7 @@ async def calcular_numeros(session: AsyncSession, dia: date) -> dict:
         "denunciou": {
             "total": len(den_lista),
             "de_novo": de_novo,
+            "replicas": replicas,
             "por_site": _por_site(den_site, ("Nosso", "Diversos", "Outros")),
             "lista": sorted(den_lista, key=lambda r: (r["hora"], r["site"])),
         },
@@ -785,6 +790,8 @@ def excel(rel: dict) -> BytesIO:
         ["Anatel (SEI): lojas peticionadas", an.get("lojas", 0)],
         ["Anatel (SEI): anúncios nas petições", an.get("anuncios", 0)],
         ["Anatel Consumidor: reclamações", an.get("consumidor", 0)],
+        ["Réplicas Denúncias Diversos (outra empresa, citando o processo SEI)",
+         (n.get("denunciou") or {}).get("replicas", 0)],
         *(
             [f"Anatel (SEI): processos — {_SITUACAO_NOME[k]}", (an.get("situacao") or {}).get(k, 0)]
             for k in SITUACOES_ANATEL
@@ -836,7 +843,7 @@ def excel(rel: dict) -> BytesIO:
     )
     aba(
         "Denúncias nas lojas",
-        ["Hora", "Site", "Loja", "Anúncio", "Título", "Certificado", "Vez", "Protocolo"],
+        ["Hora", "Site", "Loja", "Anúncio", "Título", "Certificado", "Vez", "Protocolo", "Réplica"],
         [
             [
                 r["hora"],
@@ -847,10 +854,11 @@ def excel(rel: dict) -> BytesIO:
                 r["grupo"],
                 r["tentativa"],
                 r["protocolo"],
+                r.get("replica") or "",
             ]
             for r in (n.get("denunciou") or {}).get("lista") or []
         ],
-        [7, 14, 24, 18, 60, 12, 6, 18],
+        [7, 14, 24, 18, 60, 12, 6, 18, 48],
     )
     aba(
         "Anatel",

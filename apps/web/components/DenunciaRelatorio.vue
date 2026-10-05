@@ -21,7 +21,7 @@ type Relatorio = {
   anotado: boolean
   numeros: {
     achou: { total: number; lojas_proprias: number; descartados: number; por_site: Record<string, PorGrupo> }
-    denunciou: { total: number; de_novo: number; por_site: Record<string, PorGrupo> }
+    denunciou: { total: number; de_novo: number; replicas?: number; por_site: Record<string, PorGrupo> }
     anatel: {
       lojas: number; anuncios: number; consumidor: number; processos: Processo[]
       // 05/10: andamento na Anatel (relatórios fechados antes não têm)
@@ -193,7 +193,7 @@ async function marcarLido() {
         <StatCard compact label="Anúncios novos" :value="numero(rel.numeros.achou.total)" :icon="Search"
                   :hint="`Nosso ${total.achouNosso} · Diversos ${total.achouDiversos}`" />
         <StatCard compact label="Denúncias nas lojas" :value="numero(rel.numeros.denunciou.total)" :icon="Flag"
-                  :hint="rel.numeros.denunciou.de_novo ? `${rel.numeros.denunciou.de_novo} de novo` : `Nosso ${total.denNosso} · Diversos ${total.denDiversos}`" />
+                  :hint="rel.numeros.denunciou.replicas ? `${rel.numeros.denunciou.replicas} réplica(s) · Nosso ${total.denNosso} · Diversos ${total.denDiversos}` : rel.numeros.denunciou.de_novo ? `${rel.numeros.denunciou.de_novo} de novo` : `Nosso ${total.denNosso} · Diversos ${total.denDiversos}`" />
         <StatCard compact label="Anatel (lojas)" :value="numero(rel.numeros.anatel.lojas)" :icon="Landmark"
                   :hint="`${rel.numeros.anatel.anuncios} anúncio(s) nas petições`" />
         <StatCard compact label="Removidos" :value="numero(total.removidos)" tone="success" :icon="MailCheck"

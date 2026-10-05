@@ -79,13 +79,22 @@ PASSOS: dict[str, tuple[int, str, str, str]] = {
                  "denúncia nova do Diversos no ML, Shopee e TikTok (uma vez só, sem denunciar de "
                  "novo) → prints (até 200, Nosso → Anatel → Diversos); "
                  "para quando o próximo passo chega"),
+    # 05/10 (Vinicius): anúncio do Diversos recusado pela loja e já com processo na Anatel é
+    # denunciado de novo no marketplace por OUTRA empresa, citando o processo SEI. Dois grupos de
+    # contas de lojas (1 = Mega/Aguiar/Atv, 2 = KIA/Vortan/Barbosa), divididos por loja; a 2ª
+    # réplica sai pelo outro grupo. No mini é a ação extra replica_diversos (replica_diversos.py
+    # --ml; Shopee e TikTok depois).
+    "replica_diversos": (6, "Réplica Denúncias Diversos", "perfis das lojas (ML 93 e 78)",
+                         "Diversos recusado na loja e já com processo na Anatel: outra empresa "
+                         "denuncia de novo citando o processo SEI (grupo da loja; a 2ª réplica pelo "
+                         "outro grupo)"),
     # 01/10 (Vinicius): o "saiu do ar?" levava 3–4 h e virou passo próprio, feito com o
     # robô parado (para quando a rodada chega e continua depois).
-    "ativos_inativos": (6, "Conferência de anúncios ativos/inativos",
+    "ativos_inativos": (7, "Conferência de anúncios ativos/inativos",
                         "perfil 50 + 148",
                         "abre um por um os anúncios que acompanhamos e vê quem saiu do ar; "
                         "roda com o robô parado, para se a rodada chegar e continua depois"),
-    "juridico": (7, "Jurídico", "escritório", "monta a pasta do caso pro advogado (não envia)"),
+    "juridico": (8, "Jurídico", "escritório", "monta a pasta do caso pro advogado (não envia)"),
 }
 # passos de antes de 02/10: só pra dar nome às rodadas que ainda os têm (não têm botão)
 ANTIGOS: dict[str, tuple[int, str]] = {
