@@ -17,7 +17,7 @@ _TABELAS = (
     "denuncia_anuncios", "denuncia_lojas", "denuncia_denuncias", "denuncia_casos",
     "denuncia_compras", "denuncia_provas", "denuncia_verificacoes", "denuncia_remetentes",
     "denuncia_robo_status", "denuncia_robo_comandos", "denuncia_robo_tratadas", "denuncia_anexos",
-    "denuncia_casos_extra", "denuncia_robo_agenda",
+    "denuncia_casos_extra", "denuncia_robo_agenda", "denuncia_relatorios",
 )
 
 
@@ -972,3 +972,214 @@ async def test_criar_caso_que_falhou_aparece(client, make_user, auth_as):
     assert "404" in j["falhas_caso"][0]["resultado"]
     lojas = {x["loja"]: x for x in j["itens"]}
     assert lojas["loja_y"]["caso_pendente"] is False
+
+
+# ───────────────────────────────── relatório do dia (05/10/2026)
+
+
+def _ontem():
+    from datetime import UTC, datetime, timedelta
+    from zoneinfo import ZoneInfo
+
+    return (datetime.now(UTC).astimezone(ZoneInfo("America/Sao_Paulo")) - timedelta(days=1)).date()
+
+
+async def _dia_do_robo(client, d):
+    """Um dia com de tudo: 2 anúncios novos de concorrente (1 Nosso ML, 1 Diversos Shopee) + 1 de
+    loja própria + 1 capa descartada + 1 de outro dia; 2 denúncias nas lojas (uma de novo), 1
+    petição SEI com 2 anúncios, 3 respostas (removido, recusado, sem resposta) e o "Aguardando"
+    de nascença; 1 saiu do ar; 2 prints; 2 anúncios conferidos (1 fora do ar)."""
+    ant = "2026-09-01 10:00:00"
+    r = await client.post("/api/denuncia/sync/anuncios", json={"linhas": [
+        _anuncio("N1", marketplace="Mercado Livre", loja="ml_x", grupo="GRUPO 1",
+                 visto_primeiro=f"{d} 06:10:00"),
+        _anuncio("N2", loja="sh_y", grupo="GRUPO 2", visto_primeiro=f"{d} 07:00:00", preco=799.9),
+        _anuncio("N3", propria=1, visto_primeiro=f"{d} 07:00:00"),
+        _anuncio("N4", grupo="DESCARTADO", fora_escopo=1, visto_primeiro=f"{d} 07:00:00"),
+        _anuncio("V1", loja="velha", grupo="GRUPO 2", visto_primeiro=ant,
+                 situacao="fora do ar", saiu_em=f"{d} 23:31:07"),
+        _anuncio("V2", loja="velha", grupo="GRUPO 2", visto_primeiro=ant),
+    ]}, headers=H)
+    assert r.status_code == 200, r.text
+    r = await client.post("/api/denuncia/sync/denuncias", json={"linhas": [
+        {"id": 1, "anuncio_id": "N2", "canal": "Shopee", "criado_em": f"{d} 22:10:00", "data": d,
+         "resultado": "Aguardando", "resultado_em": f"{d} 22:10:00", "tentativa": 1},
+        {"id": 2, "anuncio_id": "V2", "canal": "Mercado Livre", "criado_em": f"{d} 21:01:00",
+         "data": d, "tentativa": 2},
+        {"id": 3, "anuncio_id": "V2", "canal": "Anatel SEI", "criado_em": f"{d} 10:33:00",
+         "data": d, "sei_peticionado_em": f"{d}T10:33:04", "sei_processo": "53500.1/2026-17"},
+        {"id": 4, "anuncio_id": "V1", "canal": "Anatel SEI", "criado_em": f"{d} 10:33:00",
+         "data": d, "sei_peticionado_em": f"{d}T10:33:04", "sei_processo": "53500.1/2026-17"},
+        {"id": 5, "anuncio_id": "V1", "canal": "Shopee", "criado_em": ant, "data": "2026-09-01",
+         "resultado": "Anúncio removido", "resultado_em": f"{d} 23:31:00"},
+        {"id": 6, "anuncio_id": "V2", "canal": "Mercado Livre", "criado_em": ant,
+         "data": "2026-09-01", "resultado": "Improcedente", "resultado_em": f"{d} 03:00:00"},
+        {"id": 7, "anuncio_id": "V2", "canal": "Shopee", "criado_em": ant, "data": "2026-09-01",
+         "resultado": "Sem resposta (prazo vencido)", "resultado_em": f"{d} 23:00:00"},
+        {"id": 8, "anuncio_id": "V2", "canal": "Shopee", "criado_em": ant, "data": "2026-09-01",
+         "resultado": "Improcedente", "resultado_em": "2026-09-02 10:00:00"},
+    ]}, headers=H)
+    assert r.status_code == 200, r.text
+    await client.post("/api/denuncia/sync/provas", json={"linhas": [
+        {"id": 1, "anuncio_id": "V2", "tipo": "Captura no ato", "enviado_em": f"{d} 01:00:00"},
+        {"id": 2, "anuncio_id": "V2", "tipo": "Captura no ato", "enviado_em": f"{d} 01:00:00"},
+        {"id": 3, "anuncio_id": "N2", "tipo": "Registro da denúncia",
+         "enviado_em": f"{d} 22:10:00"},
+        {"id": 4, "anuncio_id": "N2", "tipo": "Captura no ato", "enviado_em": ant},
+    ]}, headers=H)
+    await client.post("/api/denuncia/sync/verificacoes", json={"linhas": [
+        {"id": 1, "anuncio_id": "V1", "ts": f"{d} 03:10:00", "situacao": "fora do ar"},
+        {"id": 2, "anuncio_id": "V2", "ts": f"{d} 03:11:00", "situacao": "ativo"},
+        {"id": 3, "anuncio_id": "V2", "ts": f"{d} 03:40:00", "situacao": "ativo"},
+    ]}, headers=H)
+
+
+async def test_relatorio_conta_o_dia_e_sai_em_excel(client, make_user, auth_as):
+    from io import BytesIO
+
+    from openpyxl import load_workbook
+
+    d = _ontem().isoformat()
+    await _dia_do_robo(client, d)
+    auth_as(await make_user(permissions={}))
+    assert (await client.get(f"/api/denuncia/relatorios/{d}")).status_code == 403
+    auth_as(await make_user(permissions={"denuncia": {"view": True}}))
+    j = (await client.get(f"/api/denuncia/relatorios/{d}")).json()
+    n = j["numeros"]
+    assert j["parcial"] is False and j["fechado_em"]
+    assert n["achou"]["total"] == 2
+    assert n["achou"]["lojas_proprias"] == 1 and n["achou"]["descartados"] == 1
+    assert n["achou"]["por_site"] == {"Mercado Livre": {"Nosso": 1, "Diversos": 0, "Outros": 0},
+                                      "Shopee": {"Nosso": 0, "Diversos": 1, "Outros": 0}}
+    assert n["denunciou"]["total"] == 2 and n["denunciou"]["de_novo"] == 1
+    assert n["anatel"]["lojas"] == 1 and n["anatel"]["anuncios"] == 2
+    assert n["anatel"]["processos"][0]["processo"] == "53500.1/2026-17"
+    assert n["anatel"]["processos"][0]["hora"] == "10:33"
+    # o "Aguardando" que a denúncia ganha ao nascer não é resposta; a de outro dia também não
+    assert n["respostas"]["total"] == 3
+    assert n["respostas"]["por_site"]["Shopee"] == {
+        "removidos": 1, "recusados": 0, "sem_resposta": 1, "outras": 0}
+    assert n["respostas"]["por_site"]["Mercado Livre"]["recusados"] == 1
+    assert n["sairam"]["total"] == 1 and n["sairam"]["lista"][0]["anuncio_id"] == "V1"
+    assert n["prints"] == {"capturas": 2, "anuncios": 1, "registros": 1}
+    assert n["conferidos"] == {"anuncios": 2, "fora_do_ar": 1}
+
+    r = await client.get(f"/api/denuncia/relatorios/{d}/excel")
+    assert r.status_code == 200
+    assert f"robo-denuncia-{d}.xlsx" in r.headers["content-disposition"]
+    wb = load_workbook(BytesIO(r.content))
+    assert wb.sheetnames == ["Resumo", "Anúncios novos", "Denúncias nas lojas", "Anatel",
+                             "Respostas", "Saíram do ar", "Robô"]
+    assert wb["Anatel"]["B2"].value == "53500.1/2026-17"
+    resumo = {row[0]: row for row in wb["Resumo"].iter_rows(values_only=True) if row and row[0]}
+    nosso = resumo["Anúncios novos — Nosso"]
+    assert nosso[1:5] == (1, 0, 0, 0) and nosso[6] == 1
+    assert resumo["Anatel (SEI): lojas peticionadas"][1] == 1
+
+    # dia futuro ou muito velho não existe
+    assert (await client.get("/api/denuncia/relatorios/2030-01-01")).status_code == 404
+
+
+async def test_relatorio_congela_e_lido_tira_das_ocorrencias(client, db, make_user, auth_as):
+    from datetime import UTC, datetime
+
+    from app.services.denuncia_relatorio import fechar_pendentes
+
+    d = _ontem()
+    await _dia_do_robo(client, d.isoformat())
+    # o worker fecha ontem (cria a linha mesmo sem notícia do mini)
+    assert await fechar_pendentes(db, datetime.now(UTC)) == [d]
+    await db.commit()
+    assert await fechar_pendentes(db, datetime.now(UTC)) == []
+    # resposta que muda depois não mexe no dia que passou
+    await client.post("/api/denuncia/sync/denuncias", json={"linhas": [
+        {"id": 7, "anuncio_id": "V2", "canal": "Shopee", "criado_em": "2026-09-01 10:00:00",
+         "resultado": "Anúncio removido", "resultado_em": f"{d.isoformat()} 23:59:00"},
+    ]}, headers=H)
+    auth_as(await make_user(permissions={"denuncia": {"view": True}}))
+    j = (await client.get(f"/api/denuncia/relatorios/{d.isoformat()}")).json()
+    assert j["numeros"]["respostas"]["por_site"]["Shopee"]["sem_resposta"] == 1
+
+    rel = (await client.get("/api/denuncia/robo")).json()["relatorios"]
+    assert [(x["dia"], x["achou"], x["denunciou"], x["anatel"], x["removidos"]) for x in rel] == [
+        (d.isoformat(), 2, 2, 1, 1)]
+    assert (await client.post(f"/api/denuncia/relatorios/{d.isoformat()}/lido")).status_code == 403
+    auth_as(await make_user(permissions={"denuncia": {"view": True, "edit": True}}))
+    assert (await client.post(f"/api/denuncia/relatorios/{d.isoformat()}/lido")).status_code == 200
+    assert (await client.get("/api/denuncia/robo")).json()["relatorios"] == []
+    lista = (await client.get("/api/denuncia/relatorios")).json()
+    assert lista["dias"][0]["dia"] == d.isoformat() and lista["dias"][0]["lido_por"]
+    # hoje não fecha: sai ao vivo, parcial
+    hoje = lista["hoje"]
+    j = (await client.get(f"/api/denuncia/relatorios/{hoje}")).json()
+    assert j["parcial"] is True and j["fechado_em"] is None
+    assert (await client.post(f"/api/denuncia/relatorios/{hoje}/lido")).status_code == 404
+
+
+def test_relatorio_anota_passos_ocorrencias_e_buraco():
+    from datetime import date, datetime
+    from zoneinfo import ZoneInfo
+
+    from app.services.denuncia_relatorio import _ocorrencias, _passos, anotar
+    from app.services.denuncia_robo import montar_painel
+
+    br = ZoneInfo("America/Sao_Paulo")
+    dia = date(2026, 10, 5)
+    resumo = _resumo(
+        _tarefa("anatel", "2026-10-05_06h", "concluida", inicio="2026-10-05T10:23:41-03:00",
+                fim="2026-10-05T12:06:51-03:00", feito="concluido"),
+        _tarefa("diversos", "2026-10-05_01h", "concluida", inicio="2026-10-05T01:00:20-03:00",
+                fim="2026-10-05T03:00:41-03:00", feito="cedeu"),
+        # começou ontem: fica no relatório de ontem
+        _tarefa("diversos", "2026-10-04_21h", "concluida", inicio="2026-10-04T21:00:24-03:00",
+                fim="2026-10-05T00:17:51-03:00", feito="erro", erro="perfil 50 em espera"),
+        problemas={"estado": "erro", "detalhe": "", "o_que_fazer": "", "dados": {"lista": [
+            {"quando": "2026-10-05 01:03", "tarefa": "Captcha do ML", "problema": "verificação",
+             "pergunta": "resolver", "bloqueia": True},
+            {"quando": "2026-10-05 02:45", "tarefa": "perfil 50 (recuperação automática)",
+             "problema": "fechava ao abrir", "pergunta": "", "bloqueia": False},
+            {"quando": "2026-10-05 02:47", "tarefa": "perfil 50 (recuperação automática)",
+             "problema": "abriu depois", "pergunta": "", "bloqueia": False},
+            {"quando": "2026-10-04 23:00", "tarefa": "de ontem", "problema": "x",
+             "bloqueia": False},
+        ]}},
+    )
+    t1 = datetime(2026, 10, 5, 8, 0, tzinfo=br)
+    a = anotar({}, resumo, montar_painel(resumo, t1, t1), t1, dia)
+    passos = _passos(a)
+    assert [(p["nome"], p["situacao"]) for p in passos] == [
+        ("Denúncias Diversos", "parou pra outro passo"), ("Denúncias Anatel", "feito")]
+    assert passos[1]["minutos"] == 103
+    ocs = _ocorrencias(a)
+    assert ocs[0]["titulo"] == "Captcha do ML" and ocs[0]["tipo"] == "pessoa"
+    rec = next(o for o in ocs if o["titulo"].startswith("perfil 50"))
+    assert rec["vezes"] == 2
+    assert "de ontem" not in [o["titulo"] for o in ocs]
+    # o mini sumiu 40 min: vira buraco sem notícia; a 2ª olhada não duplica ocorrência
+    t2 = datetime(2026, 10, 5, 8, 40, tzinfo=br)
+    a2 = anotar(a, resumo, montar_painel(resumo, t2, t2), t2, dia)
+    assert a2["sem_noticia"] == [
+        {"de": "2026-10-05T08:00:00-03:00", "ate": "2026-10-05T08:40:00-03:00"}]
+    assert len(a2["ocorrencias"]) == len(a["ocorrencias"])
+    # ontem: só o passo que começou ontem
+    ontem = anotar({}, resumo, {}, t2, date(2026, 10, 4), so_passos=True)
+    assert [p["situacao"] for p in _passos(ontem)] == ["erro"] and "ocorrencias" not in ontem
+
+
+async def test_relatorio_anotado_pelo_sync(client, db, make_user, auth_as):
+    from datetime import UTC, datetime
+    from zoneinfo import ZoneInfo
+
+    from app.models import DenunciaRelatorio
+
+    hoje = datetime.now(UTC).astimezone(ZoneInfo("America/Sao_Paulo"))
+    j = hoje.strftime("%Y-%m-%d") + "_06h"
+    resumo = _resumo(_tarefa("procura", j, "concluida", inicio=hoje.isoformat(timespec="seconds"),
+                             feito="concluido"))
+    assert (await client.post("/api/denuncia/sync/robo", json=resumo, headers=H)).status_code == 200
+    row = await db.get(DenunciaRelatorio, hoje.date())
+    assert row is not None and row.anotacoes["ultimo_contato"]
+    assert [p["acao"] for p in row.anotacoes["passos"].values()] == ["procura"]
+    auth_as(await make_user(permissions={"denuncia": {"view": True}}))
+    rel = (await client.get(f"/api/denuncia/relatorios/{hoje.date().isoformat()}")).json()
+    assert rel["anotado"] is True and rel["passos"][0]["nome"] == "Procurar anúncios novos"

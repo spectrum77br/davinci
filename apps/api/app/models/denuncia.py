@@ -257,6 +257,28 @@ class DenunciaRoboTratada(Base):
     )
 
 
+class DenunciaRelatorio(Base):
+    """Relatório do dia do robô (05/10/2026, Vinicius: "um relatório no final do dia… quantos
+    anúncios ele achou, quantos denunciou na loja, quantos abriu reclamação na Anatel"). Um por
+    dia do calendário (0h–24h, Brasília). `anotacoes` vai sendo preenchida a cada resumo do mini
+    (passos que rodaram, ocorrências que apareceram, minutos sem notícia) — o DaVinci só guarda o
+    estado de agora, então o dia tem que ser anotado enquanto acontece. `numeros` são as contas
+    da cópia do banco, congeladas depois da meia-noite (`fechado_em`): resultado de denúncia que
+    muda depois não mexe no dia que passou. Aparece em Robô › Ocorrências até alguém marcar lido."""
+
+    __tablename__ = "denuncia_relatorios"
+
+    dia: Mapped[date] = mapped_column(Date, primary_key=True)
+    anotacoes: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    numeros: Mapped[dict | None] = mapped_column(JSONB)
+    fechado_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    lido_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    lido_por: Mapped[str | None] = mapped_column(Text)
+    atualizado_em: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+
 class DenunciaRemetente(Base):
     """Quem pode mandar a cópia (o Mac mini da Makisa). Só o sha256 do token
     fica aqui — o token mora em `~/.davinci_denuncia.json` no mini. Guarda

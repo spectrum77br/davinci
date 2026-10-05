@@ -11,8 +11,11 @@
 // 02/10 (Vinicius): cada passo com a chave liga/desliga (a dos Robôs da Ouvidoria)
 // e os seus horários — "6 da manhã roda passo 1, 2 e 3… passo 9 às 23 horas".
 // Some o horário fixo das rodadas (06/12/18h): o despertador do mini segue esta agenda.
+// 05/10 (Vinicius): "um relatório no final do dia… quantos anúncios ele achou, quantos denunciou na
+// loja, quantos abriu reclamação na Anatel" — vira linha nas Ocorrências depois da meia-noite (até
+// alguém marcar "Lido"); "Hoje até agora" e os dias anteriores abrem na gaveta (DenunciaRelatorio).
 import { computed, onMounted, onUnmounted, ref } from 'vue'
-import { AlertCircle, Bot, ChevronDown, ChevronRight, Flag, Loader2, Play, Plus, Power, Check, X } from 'lucide-vue-next'
+import { AlertCircle, Bot, ChevronDown, ChevronRight, FileText, Flag, Loader2, Play, Plus, Power, Check, X } from 'lucide-vue-next'
 import { haQuanto, numero } from '~/lib/denuncia'
 
 type Ultima = {
@@ -48,6 +51,8 @@ type Comando = {
   resultado: string | null
   caducou: boolean
 }
+// relatório do dia fechado e ainda não lido (05/10)
+type RelPendente = { dia: string; fechado_em: string | null; achou: number; denunciou: number; anatel: number; removidos: number }
 type Painel = {
   modo: 'manual' | 'automatico'
   recebido_em: string | null
@@ -58,6 +63,7 @@ type Painel = {
   ocorrencias: Ocorrencia[]
   denuncias_hoje: { canal: string; enviadas: number; refeitas: number }[]
   comandos: Comando[]
+  relatorios?: RelPendente[]
 }
 type Aba = 'passos' | 'ocorrencias' | 'pedidos'
 
@@ -241,6 +247,52 @@ function nomeComando(c: Comando): string {
 function alternarLinha(acao: string) {
   aberto.value = aberto.value === acao ? null : acao
 }
+
+// ── relatório do dia (05/10) ───────────────────────────────────────────────
+const relatorios = computed(() => painel.value?.relatorios || [])
+const totalOcorrencias = computed(() => (painel.value?.ocorrencias.length || 0) + relatorios.value.length)
+const relDia = ref<string | null>(null)
+const relAberto = ref(false)
+const anteriores = ref<{ dia: string; lido_em: string | null; achou: number; denunciou: number; anatel: number }[] | null>(null)
+const escolhido = ref('')
+const diaBr = (d: string) => `${d.slice(8, 10)}/${d.slice(5, 7)}`
+
+function abrirRelatorio(dia: string) {
+  relDia.value = dia
+  relAberto.value = true
+}
+
+async function carregarAnteriores() {
+  if (anteriores.value) return
+  try {
+    anteriores.value = (await api<{ dias: NonNullable<typeof anteriores.value> }>('/api/denuncia/relatorios')).dias
+  } catch {
+    anteriores.value = []
+  }
+}
+
+function escolherAnterior() {
+  if (escolhido.value) abrirRelatorio(escolhido.value)
+  escolhido.value = ''
+}
+
+async function marcarLido(r: RelPendente) {
+  mandando.value = `rel:${r.dia}`
+  try {
+    await api(`/api/denuncia/relatorios/${r.dia}/lido`, { method: 'POST' })
+    anteriores.value = null
+    await carregar()
+  } catch (e: any) {
+    useToasts().push({ kind: 'error', title: 'Não deu para marcar como lido', lines: e?.data?.detail?.code || e?.message || 'erro' })
+  } finally {
+    mandando.value = null
+  }
+}
+
+function relLido() {
+  anteriores.value = null
+  void carregar()
+}
 </script>
 
 <template>
@@ -320,10 +372,10 @@ function alternarLinha(acao: string) {
         >
           Ocorrências
           <span
-            v-if="painel.ocorrencias.length"
+            v-if="totalOcorrencias"
             class="rounded-full px-1.5 text-[11px] font-semibold tabular-nums"
             :class="pessoa ? 'bg-red-100 text-red-700 dark:bg-red-950/50 dark:text-red-300' : 'bg-muted text-muted-foreground'"
-          >{{ painel.ocorrencias.length }}</span>
+          >{{ totalOcorrencias }}</span>
         </button>
         <button
           type="button"
@@ -499,51 +551,111 @@ function alternarLinha(acao: string) {
       </div>
 
       <!-- ══ Ocorrências ══ -->
-      <div v-else-if="aba === 'ocorrencias'" class="table-card overflow-x-auto">
-        <table class="w-full min-w-[860px]">
-          <thead>
-            <tr>
-              <th class="w-[100px]">Quando</th>
-              <th>O que aconteceu</th>
-              <th>O que fazer</th>
-              <th class="w-[90px]">Tipo</th>
-              <th class="w-[110px]" />
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-if="!painel.ocorrencias.length">
-              <td colspan="5" class="py-6 text-center text-sm text-muted-foreground">Nenhuma ocorrência aberta.</td>
-            </tr>
-            <tr v-for="o in painel.ocorrencias" :key="o.chave">
-              <td class="text-xs tabular-nums whitespace-nowrap">{{ quando(o.quando) || 'agora' }}</td>
-              <td class="max-w-[380px]">
-                <div class="text-sm font-medium">{{ o.titulo }}</div>
-                <div v-if="o.detalhe" class="line-clamp-2 text-[11px] text-muted-foreground" :title="o.detalhe">{{ o.detalhe }}</div>
-              </td>
-              <td class="max-w-[360px] text-xs">
-                <div class="line-clamp-2" :title="o.o_que_fazer">{{ o.o_que_fazer || '—' }}</div>
-              </td>
-              <td>
-                <span :class="o.tipo === 'pessoa' ? 'pill-danger' : 'pill-warning'">{{ o.tipo === 'pessoa' ? 'pessoa' : 'aviso' }}</span>
-              </td>
-              <td class="text-right">
-                <Button
-                  v-if="podeMandar && podeTratar(o)"
-                  size="sm"
-                  variant="outline"
-                  class="h-7"
-                  :disabled="!!mandando"
-                  title="já resolvido: tira da lista"
-                  @click="tratar(o)"
-                >
-                  <Loader2 v-if="mandando === o.chave" class="mr-1 size-3.5 animate-spin" />
-                  <Check v-else class="mr-1 size-3.5" /> Tratado
-                </Button>
-                <span v-else-if="!podeTratar(o)" class="text-[11px] text-muted-foreground">sai sozinha</span>
-              </td>
-            </tr>
-          </tbody>
-        </table>
+      <div v-else-if="aba === 'ocorrencias'" class="space-y-2">
+        <!-- 05/10: relatório do dia — hoje ao vivo e os dias anteriores -->
+        <div class="flex flex-wrap items-center gap-2">
+          <Button size="sm" variant="outline" class="h-8" @click="abrirRelatorio(hojeBr())">
+            <FileText class="mr-1 size-3.5" /> Relatório de hoje (até agora)
+          </Button>
+          <select
+            v-model="escolhido"
+            class="h-8 rounded-md border bg-background px-2 text-sm"
+            aria-label="Relatórios anteriores"
+            @focus="carregarAnteriores"
+            @pointerdown="carregarAnteriores"
+            @change="escolherAnterior"
+          >
+            <option value="">Relatórios anteriores…</option>
+            <option v-if="anteriores && !anteriores.length" value="" disabled>nenhum ainda</option>
+            <option v-for="r in anteriores || []" :key="r.dia" :value="r.dia">
+              {{ diaBr(r.dia) }} — achou {{ r.achou }} · denunciou {{ r.denunciou }} · Anatel {{ r.anatel }}{{ r.lido_em ? '' : ' · não lido' }}
+            </option>
+          </select>
+          <!-- qualquer dia (antes de 05/10 sai só com os números: o robô não era anotado) -->
+          <input
+            type="date"
+            class="h-8 rounded-md border bg-background px-2 text-sm"
+            aria-label="Relatório de outro dia"
+            title="Relatório de outro dia"
+            min="2026-09-01"
+            :max="hojeBr()"
+            @change="(e) => { const v = (e.target as HTMLInputElement).value; if (v) abrirRelatorio(v) }"
+          >
+        </div>
+        <div class="table-card overflow-x-auto">
+          <table class="w-full min-w-[860px]">
+            <thead>
+              <tr>
+                <th class="w-[100px]">Quando</th>
+                <th>O que aconteceu</th>
+                <th>O que fazer</th>
+                <th class="w-[90px]">Tipo</th>
+                <th class="w-[110px]" />
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-if="!totalOcorrencias">
+                <td colspan="5" class="py-6 text-center text-sm text-muted-foreground">Nenhuma ocorrência aberta.</td>
+              </tr>
+              <tr v-for="r in relatorios" :key="`rel:${r.dia}`" class="cursor-pointer" @click="abrirRelatorio(r.dia)">
+                <td class="text-xs tabular-nums whitespace-nowrap">{{ quando(r.fechado_em) || diaBr(r.dia) }}</td>
+                <td class="max-w-[380px]">
+                  <div class="text-sm font-medium">Relatório do dia {{ diaBr(r.dia) }}</div>
+                  <div class="text-[11px] text-muted-foreground">
+                    achou {{ numero(r.achou) }} · denunciou {{ numero(r.denunciou) }} nas lojas · Anatel {{ numero(r.anatel) }} loja(s) · {{ numero(r.removidos) }} removido(s)
+                  </div>
+                </td>
+                <td class="text-xs">Abrir e conferir (tem Excel)</td>
+                <td><span class="pill-info">relatório</span></td>
+                <td class="text-right" @click.stop>
+                  <div class="flex justify-end gap-1">
+                    <Button size="sm" variant="outline" class="h-7" @click="abrirRelatorio(r.dia)">Abrir</Button>
+                    <Button
+                      v-if="podeMandar"
+                      size="sm"
+                      variant="outline"
+                      class="h-7"
+                      :disabled="!!mandando"
+                      title="já li: tira da lista (continua nos anteriores)"
+                      @click="marcarLido(r)"
+                    >
+                      <Loader2 v-if="mandando === `rel:${r.dia}`" class="mr-1 size-3.5 animate-spin" />
+                      <Check v-else class="mr-1 size-3.5" /> Lido
+                    </Button>
+                  </div>
+                </td>
+              </tr>
+              <tr v-for="o in painel.ocorrencias" :key="o.chave">
+                <td class="text-xs tabular-nums whitespace-nowrap">{{ quando(o.quando) || 'agora' }}</td>
+                <td class="max-w-[380px]">
+                  <div class="text-sm font-medium">{{ o.titulo }}</div>
+                  <div v-if="o.detalhe" class="line-clamp-2 text-[11px] text-muted-foreground" :title="o.detalhe">{{ o.detalhe }}</div>
+                </td>
+                <td class="max-w-[360px] text-xs">
+                  <div class="line-clamp-2" :title="o.o_que_fazer">{{ o.o_que_fazer || '—' }}</div>
+                </td>
+                <td>
+                  <span :class="o.tipo === 'pessoa' ? 'pill-danger' : 'pill-warning'">{{ o.tipo === 'pessoa' ? 'pessoa' : 'aviso' }}</span>
+                </td>
+                <td class="text-right">
+                  <Button
+                    v-if="podeMandar && podeTratar(o)"
+                    size="sm"
+                    variant="outline"
+                    class="h-7"
+                    :disabled="!!mandando"
+                    title="já resolvido: tira da lista"
+                    @click="tratar(o)"
+                  >
+                    <Loader2 v-if="mandando === o.chave" class="mr-1 size-3.5 animate-spin" />
+                    <Check v-else class="mr-1 size-3.5" /> Tratado
+                  </Button>
+                  <span v-else-if="!podeTratar(o)" class="text-[11px] text-muted-foreground">sai sozinha</span>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
       </div>
 
       <!-- ══ Pedidos ao robô ══ -->
@@ -579,5 +691,7 @@ function alternarLinha(acao: string) {
         </table>
       </div>
     </template>
+
+    <DenunciaRelatorio v-model:open="relAberto" :dia="relDia" :pode-marcar="podeMandar" @lido="relLido" />
   </div>
 </template>

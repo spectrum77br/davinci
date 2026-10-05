@@ -27,7 +27,7 @@ import re
 import secrets
 import tempfile
 from collections import OrderedDict, defaultdict
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -44,7 +44,7 @@ from fastapi import (
     Request,
     UploadFile,
 )
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy import case, delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -61,6 +61,7 @@ from app.models.denuncia import (
     DenunciaDenuncia,
     DenunciaLoja,
     DenunciaProva,
+    DenunciaRelatorio,
     DenunciaRemetente,
     DenunciaRoboAgenda,
     DenunciaRoboComando,
@@ -70,6 +71,7 @@ from app.models.denuncia import (
 )
 from app.models.user import User
 from app.services import denuncia_painel as painel
+from app.services import denuncia_relatorio as relatorio_dia
 from app.services.denuncia_robo import PASSOS, montar_painel, normalizar_horarios
 
 logger = structlog.get_logger()
@@ -258,12 +260,14 @@ async def sync_robo(
     corpo: Annotated[dict, Body()],
 ) -> dict:
     """O resumo do robô (`status_mac.py`, a cada 60 s) — a aba Robô. Guarda
-    só o último, por remetente."""
+    só o último, por remetente; e anota no relatório do dia (05/10) os passos e
+    as ocorrências, que o "último" esquece."""
     itens = corpo.get("itens")
     if not isinstance(itens, list) or len(itens) > MAX_ITENS_ROBO:
         raise HTTPException(422, detail={"code": "denuncia_robo_corpo_invalido"})
+    agora = datetime.now(UTC)
     stmt = pg_insert(DenunciaRoboStatus).values(
-        remetente=remetente.nome, dados=corpo, recebido_em=datetime.now(UTC)
+        remetente=remetente.nome, dados=corpo, recebido_em=agora
     )
     await session.execute(
         stmt.on_conflict_do_update(
@@ -272,6 +276,12 @@ async def sync_robo(
         )
     )
     await session.commit()
+    try:
+        await relatorio_dia.anotar_resumo(session, corpo, agora, await _agenda(session))
+        await session.commit()
+    except Exception:   # o relatório nunca derruba o estado do robô
+        await session.rollback()
+        logger.exception("denuncia_relatorio_anotar_falhou")
     return {"ok": True}
 
 
@@ -689,6 +699,8 @@ async def robo(
          "caducou": c.entregue_em is None and datetime.now(UTC) - c.pedido_em > COMANDO_VALE}
         for c in comandos
     ]
+    # 05/10: relatório do dia fechado e não lido = linha nas Ocorrências
+    painel["relatorios"] = await relatorio_dia.pendentes(session, datetime.now(UTC))
     return painel
 
 
@@ -790,6 +802,82 @@ async def robo_agenda(
     dados = {"acao": acao, "ligado": row.ligado, "horarios": list(row.horarios or [])}
     await _comando(session, u, "agenda", dados)   # commita a linha junto
     return dados
+
+
+# ───────────────────── relatório do dia (05/10/2026) — regras em services/denuncia_relatorio.py
+
+
+def _dia_valido(dia: date) -> date:
+    hoje = datetime.now(UTC).astimezone(relatorio_dia.FUSO).date()
+    if dia > hoje or dia < date(2026, 9, 1):
+        raise HTTPException(404, detail={"code": "denuncia_relatorio_dia_invalido"})
+    return dia
+
+
+@router.get("/relatorios")
+async def relatorios(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(_ver)],
+    limite: Annotated[int, Query(ge=1, le=120)] = 60,
+) -> dict:
+    """Os relatórios guardados (do mais novo pro mais velho), com os números da manchete. Hoje
+    não entra (ainda em andamento: abre por `/relatorios/{hoje}`)."""
+    rows = (await session.execute(
+        select(DenunciaRelatorio).where(DenunciaRelatorio.fechado_em.is_not(None))
+        .order_by(DenunciaRelatorio.dia.desc()).limit(limite)
+    )).scalars().all()
+    return {
+        "hoje": datetime.now(UTC).astimezone(relatorio_dia.FUSO).date().isoformat(),
+        "dias": [{"dia": r.dia.isoformat(), "lido_em": r.lido_em, "lido_por": r.lido_por,
+                  **relatorio_dia.manchete(r.numeros)} for r in rows],
+    }
+
+
+@router.get("/relatorios/{dia}")
+async def relatorio(
+    dia: date,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(_ver)],
+) -> dict:
+    """O relatório de um dia: hoje ao vivo; dia que passou congelado (congela na 1ª vez)."""
+    rel = await relatorio_dia.relatorio(session, _dia_valido(dia), datetime.now(UTC))
+    await session.commit()
+    return rel
+
+
+@router.get("/relatorios/{dia}/excel")
+async def relatorio_excel(
+    dia: date,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(_ver)],
+) -> StreamingResponse:
+    """Vinicius, 05/10: "esse relatório tem que sair em Excel" — abas Resumo, Anúncios novos,
+    Denúncias nas lojas, Anatel, Respostas, Saíram do ar e Robô (passos + ocorrências)."""
+    rel = await relatorio_dia.relatorio(session, _dia_valido(dia), datetime.now(UTC))
+    await session.commit()
+    return StreamingResponse(
+        relatorio_dia.excel(rel),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": f'attachment; filename="robo-denuncia-{dia.isoformat()}.xlsx"'
+        },
+    )
+
+
+@router.post("/relatorios/{dia}/lido")
+async def relatorio_lido(
+    dia: date,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    u: Annotated[User, Depends(_editar)],
+) -> dict:
+    """"Lido": o relatório sai das Ocorrências (continua na lista dos anteriores)."""
+    row = await session.get(DenunciaRelatorio, dia)
+    if row is None or row.fechado_em is None:
+        raise HTTPException(404, detail={"code": "denuncia_relatorio_nao_fechado"})
+    row.lido_em = datetime.now(UTC)
+    row.lido_por = u.name or u.email
+    await session.commit()
+    return {"ok": True}
 
 
 _ORDEM_ANUNCIOS = {

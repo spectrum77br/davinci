@@ -2622,6 +2622,18 @@ async def marketplace_financials_retry(ctx: dict) -> None:
     logger.info("marketplace_financials_retry_done", **result)
 
 
+async def denuncia_relatorio_fechar(ctx: dict) -> None:
+    """Robô de Denúncia (05/10/2026): congela o relatório do dia que passou (0h–24h de Brasília)
+    — ontem, mesmo sem notícia do mini, e qualquer dia anotado da última semana que ficou aberto.
+    De hora em hora e a cada restart: um deploy na virada do dia não deixa o dia sem relatório."""
+    from app.services.denuncia_relatorio import fechar_pendentes
+
+    async with session_scope() as s:
+        dias = await fechar_pendentes(s, datetime.now(UTC))
+    if dias:
+        logger.info("denuncia_relatorio_fechado", dias=[d.isoformat() for d in dias])
+
+
 async def tuta_devolucoes_tick(ctx: dict) -> None:
     """07:00 BRT — manda o robô do Mac ler a caixa do Tuta e avisa o thatcher
     no Threema com os códigos de devolução do dia.
@@ -4303,6 +4315,8 @@ class WorkerSettings:
         ),
         # 10:00 UTC = 07:00 BRT — leitura diária da caixa do Tuta.
         cron(tuta_devolucoes_tick, hour=10, minute=0, run_at_startup=False),
+        # Relatório do dia do robô de Denúncia: :07 de toda hora (o de ontem fecha 00:07 BRT).
+        cron(denuncia_relatorio_fechar, minute=7, run_at_startup=True, timeout=300),
         # Esteira lenta: backlog de falha de API. Fila e teto próprios pra não
         # competir com o retry dos pedidos do dia.
         cron(
