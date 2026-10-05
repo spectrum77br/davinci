@@ -14,8 +14,11 @@
 // 05/10 (Vinicius): "um relatório no final do dia… quantos anúncios ele achou, quantos denunciou na
 // loja, quantos abriu reclamação na Anatel" — vira linha nas Ocorrências depois da meia-noite (até
 // alguém marcar "Lido"); "Hoje até agora" e os dias anteriores abrem na gaveta (DenunciaRelatorio).
+// 05/10 (Cairo): "isso coloca para avisar no Threema… só o Cairo recebe" — captcha na tela, robô parado,
+// mini sem notícia e SEI pedindo código viram Threema (worker a cada 2 min, services/denuncia_robo_aviso);
+// "Quem recebe o aviso" nas Ocorrências escolhe quem (cadastro Informar `denuncia_robo`).
 import { computed, onMounted, onUnmounted, ref } from 'vue'
-import { AlertCircle, Bot, ChevronDown, ChevronRight, FileText, Flag, Loader2, Play, Plus, Power, Check, X } from 'lucide-vue-next'
+import { AlertCircle, Bell, Bot, ChevronDown, ChevronRight, FileText, Flag, Loader2, Play, Plus, Power, Check, X } from 'lucide-vue-next'
 import { haQuanto, numero } from '~/lib/denuncia'
 
 type Ultima = {
@@ -137,6 +140,15 @@ const porCanalHoje = computed(() =>
 
 // ── botões ──────────────────────────────────────────────────────────────────
 const podeMandar = useCan('denuncia', 'edit')
+// Quem recebe o aviso no Threema: admin ou o Cairo (espelho do backend: _EMAILS_EXTRAS["denuncia_robo"]
+// em routers/informar.py — mudou aqui, muda lá).
+const auth = useAuthStore()
+const AVISO_ROBO_USERS = ['sa.geral@tutamail.com']
+const podeAviso = computed(() => {
+  const email = (auth.user?.email || '').trim().toLowerCase()
+  return auth.user?.role === 'admin' || (!!email && AVISO_ROBO_USERS.includes(email))
+})
+const avisoAberto = ref(false)
 const mandando = ref<string | null>(null)
 
 async function mandar(chave: string, url: string, corpo: Record<string, unknown>) {
@@ -581,6 +593,9 @@ function relLido() {
             :max="hojeBr()"
             @change="(e) => { const v = (e.target as HTMLInputElement).value; if (v) abrirRelatorio(v) }"
           >
+          <Button v-if="podeAviso" size="sm" variant="outline" class="ml-auto h-8" @click="avisoAberto = true">
+            <Bell class="mr-1 size-3.5" /> Quem recebe o aviso
+          </Button>
         </div>
         <div class="table-card overflow-x-auto">
           <table class="w-full min-w-[860px]">
@@ -693,5 +708,12 @@ function relLido() {
     </template>
 
     <DenunciaRelatorio v-model:open="relAberto" :dia="relDia" :pode-marcar="podeMandar" @lido="relLido" />
+    <InformarThreemaModal
+      :open="avisoAberto"
+      contexto="denuncia_robo"
+      somente-cadastro
+      descricao="Quem está marcado recebe no Threema quando o robô de Denúncia precisa de alguém: captcha ('não sou robô') na tela do Mac mini — o robô espera uns 10 min —, robô parado, Mac mini sem notícia e SEI pedindo código ou assinatura. Uma mensagem por ocorrência, de dia e de noite. Sem ninguém salvo aqui, vale a lista da IA de Chamado. A seleção fica salva."
+      @close="avisoAberto = false"
+    />
   </div>
 </template>

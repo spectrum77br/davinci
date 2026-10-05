@@ -101,6 +101,10 @@ _CONTEXTOS = (
     # 30/09: IA de Chamado parada em "não sou robô"/login na tela da loja —
     # services/chamados_ia_aviso. Cadastro pela aba Chamados › IA de Chamado.
     "chamados_ia",
+    # 05/10: robô de Denúncia precisando de alguém (captcha na tela, robô parado,
+    # mini sem notícia, SEI pedindo código) — services/denuncia_robo_aviso.
+    # Cadastro pela aba Denúncia › Robô › Ocorrências.
+    "denuncia_robo",
 )
 _CONTEXTOS_ENVIO = ("logistica", "controle_estoque", "margem", "devolucoes", "logistica_amazon")
 
@@ -122,6 +126,10 @@ _EMAILS_EXTRAS: dict[str, frozenset[str]] = {
     # ele também escolhe quem recebe. Espelho no front: AVISO_IA_USERS em
     # pages/chamados.vue.
     "chamados_ia": _EMAILS_MARGEM,
+    # Robô de Denúncia: "só o Cairo recebe, que sou eu" (05/10) — ele também
+    # escolhe quem recebe. Espelho no front: AVISO_ROBO_USERS em
+    # components/DenunciaRobo.vue.
+    "denuncia_robo": _EMAILS_MARGEM,
 }
 
 

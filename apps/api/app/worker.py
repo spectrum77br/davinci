@@ -2634,6 +2634,18 @@ async def denuncia_relatorio_fechar(ctx: dict) -> None:
         logger.info("denuncia_relatorio_fechado", dias=[d.isoformat() for d in dias])
 
 
+async def denuncia_robo_aviso_tick(ctx: dict) -> None:
+    """Robô de Denúncia (05/10/2026, Cairo): Threema quando aparece captcha na tela, robô parado,
+    Mac mini sem notícia ou SEI pedindo código — regras em services/denuncia_robo_aviso. A cada
+    2 min: o robô espera 10 min com o captcha na tela, então o aviso chega com tempo de resolver."""
+    from app.services.denuncia_robo_aviso import rodar
+
+    async with session_scope() as s:
+        r = await rodar(s)
+    if r.get("avisadas") or r.get("erro"):
+        logger.info("denuncia_robo_aviso_tick", **r)
+
+
 async def tuta_devolucoes_tick(ctx: dict) -> None:
     """07:00 BRT — manda o robô do Mac ler a caixa do Tuta e avisa o thatcher
     no Threema com os códigos de devolução do dia.
@@ -4317,6 +4329,10 @@ class WorkerSettings:
         cron(tuta_devolucoes_tick, hour=10, minute=0, run_at_startup=False),
         # Relatório do dia do robô de Denúncia: :07 de toda hora (o de ontem fecha 00:07 BRT).
         cron(denuncia_relatorio_fechar, minute=7, run_at_startup=True, timeout=300),
+        # Aviso no Threema do robô de Denúncia (captcha, parado, mini sem notícia, SEI): 2 em 2 min.
+        cron(
+            denuncia_robo_aviso_tick, minute=set(range(0, 60, 2)), run_at_startup=False, timeout=120
+        ),
         # Esteira lenta: backlog de falha de API. Fila e teto próprios pra não
         # competir com o retry dos pedidos do dia.
         cron(
