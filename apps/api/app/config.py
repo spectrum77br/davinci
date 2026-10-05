@@ -488,11 +488,14 @@ class Settings(BaseSettings):
     #     loja e por família (as que respondem conversa × as do pedido), em
     #     24 h corridas. No modo seco, passar dele vira diferença combinada.
     #   • `atendimento_automacoes_shopee_auto_reply`: o teste de permissão do
-    #     `send_autoreply_message` passou (só com o OK do Eduardo). Sem ele, as
-    #     campanhas da Shopee (pedido recebido, entregue, pós-conclusão, convite
-    #     e "ficou alguma dúvida") não vão para `enviar`: sairiam como mensagem
-    #     normal, que conta como resposta da loja e entra no limite de mensagens
-    #     por comprador da Shopee (a FAQ do Chat API proíbe "proactive order
+    #     `send_autoreply_message` passou (só com o OK do Eduardo). As campanhas
+    #     da Shopee (pedido recebido, entregue, pós-conclusão, convite e "ficou
+    #     alguma dúvida") só vão para `enviar` com ela E com o envio por resposta
+    #     automática no adaptador (`enviar_auto_reply` em
+    #     `services/atendimento/shopee.py` — hoje NÃO existe, então elas não
+    #     saem com a chave ligada ou não). Nunca saem como mensagem normal: ela
+    #     conta como resposta da loja e entra no limite de mensagens por
+    #     comprador da Shopee (a FAQ do Chat API proíbe "proactive order
     #     updates" — ver `shopee_mensagens_comprador`).
     atendimento_automacoes_ativa: bool = False
     atendimento_automacoes_envio: bool = False

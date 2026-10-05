@@ -19,21 +19,37 @@ leitura das caixas nos ímpares; UMA por vez, trava no Redis):
          cada 10 min) — o próprio registro guarda o evento na hora em que o
          motor vê (o status anterior se perde).
      Grava `INSERT … ON CONFLICT DO NOTHING` pela chave única.
-  2. DECIDIR — as linhas que venceram (até 200 por rodada): validade,
-     condições (`automacoes_catalogo.decidir`), texto, teto. Regra em
-     `simular` → `simulado`; em `enviar` com as chaves desligadas →
+  2. DECIDIR — as linhas que venceram (até 200 por rodada, no máximo 50 da
+     mesma regra: a fila parada de uma loja não segura as outras): validade,
+     HORÁRIO (fora da janela da regra, a linha espera a próxima abertura — o
+     da descoberta não basta: a linha pode esperar a leitura, o motor parado,
+     o rearme), condições (`automacoes_catalogo.decidir`), texto, teto. Regra
+     em `simular` → `simulado`; em `enviar` com as chaves desligadas →
      `simulado` com `envio_desligado`; com tudo ligado → envia pelo
      `enviar.enviar_automatica`, uma parte de texto por vez.
+     O MODO SECO MEDE O DAVINCI SOZINHO: o estado do robô (sessão do menu,
+     intervalo do "aguarde", ciclo da dúvida) não conta a mensagem do Duoke
+     de uma automação que o DaVinci está simulando, depois do corte (a regra
+     ligada e o motor rodando) — vale a linha simulada dele
+     (`automacoes_catalogo.cortes_do_modo_seco`). Senão a paridade sai
+     inflada: a resposta da opção do Duoke, 12 h depois do menu, segurava o
+     menu do DaVinci.
   3. COMPARAR — `automacoes_comparar.comparar`.
 
 O ENVIO (só com `atendimento_envio_ativo` + `atendimento_automacoes_envio` +
 regra em `enviar`) tem as travas contra duplicar: a chave única, o registro
 `enviando` commitado ANTES da plataforma (preso há 10 min vira `revisar`,
 NUNCA retentado), "já mandado" conferido de novo na decisão — no modo enviar
-contando também a mensagem do Duoke DEPOIS do gatilho, com a leitura da loja
-já passando do `devido_em` (a troca não manda em dobro) — e o disjuntor:
-o Duoke mandou depois de a regra ir para `enviar` → a regra volta sozinha
-para `simular` ("Duoke ainda ligado?").
+contando também a mensagem do Duoke DEPOIS do gatilho: na conversa e, nas do
+PEDIDO (pedido recebido, entregue, pós), pela mesma régua do comparador
+(`automacoes_comparar.duoke_dos_pedidos`: o cartão do pedido do Duoke ou a
+conversa do pedido). Na TRANSIÇÃO (`TRANSICAO` depois de `enviar_desde`) a
+decisão ainda espera a leitura da loja passar do `devido_em` + a espera do
+Duoke; depois, não espera (só atrasaria o comprador). E o disjuntor: o Duoke
+mandou depois de a regra ir para `enviar` → a regra volta sozinha para
+`simular` ("Duoke ainda ligado?") NA HORA, e o resto do lote já decide em
+`simular`. Campanha da Shopee só sai como resposta automática (`auto_reply`):
+sem a chave confirmada E o envio por ela no adaptador, `campanha_sem_auto_reply`.
 
 O log leva só ids, contagens, códigos e a duração de cada fase. Texto de
 comprador nunca sai daqui: a classificação lê o texto e devolve só sinais.
@@ -49,7 +65,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 import structlog
-from sqlalchemy import and_, func, or_, select, update
+from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -101,6 +117,21 @@ HISTORICO_CONVERSA = timedelta(days=8)
 # A Logística a cada 10 min (a varredura da Shopee é de hora em hora).
 LOGISTICA_A_CADA_MIN = 10
 MAX_DECISOES = 200
+# No máximo tantas da MESMA regra (loja × automação) por rodada: a linha que
+# espera a leitura da loja volta igual e seria escolhida de novo, segurando
+# as das outras lojas.
+MAX_POR_REGRA = 50
+# Na troca, os primeiros dias depois de `enviar_desde`: a decisão espera a
+# leitura da loja e a espera do Duoke da automação (o que o Duoke agendou antes
+# de ser desligado ainda pode sair). Depois disso a espera só atrasaria o menu.
+TRANSICAO = timedelta(days=3)
+# INSERT de muitas linhas em lotes: o asyncpg recusa mais de 32.767 parâmetros
+# (a Logística reinsere ~600 pedidos de 3 dias a cada 10 min, 19 por linha).
+LOTE_INSERT = 500
+# O registro guarda 90 dias (a tela olha até 60); a limpeza roda uma vez por dia.
+GUARDA_REGISTRO = timedelta(days=90)
+LIMPEZA_LOTE = 5000
+HORA_LIMPEZA_UTC = 6  # 3h30 de Brasília
 # Uma rodada por vez (por schema). O cron é de 2 em 2 min com timeout 110 s.
 RODADA_TTL_S = 110
 _CHAVE_RODADA = "atendimento:automacoes:rodada:{}"
@@ -285,10 +316,10 @@ async def _gravar_candidatos(
 ) -> int:
     """INSERT … ON CONFLICT DO NOTHING (a chave única); devolve quantas nasceram."""
     novas = 0
-    if linhas:
+    for i in range(0, len(linhas), LOTE_INSERT):
         resultado = await session.execute(
             pg_insert(_R)
-            .values(linhas)
+            .values(linhas[i : i + LOTE_INSERT])
             .on_conflict_do_nothing(constraint="uq_atendimento_automacao_registros_chave")
             .returning(_R.id)
         )
@@ -359,12 +390,18 @@ async def descobrir_mensagens(
 ) -> int:
     """Os gatilhos das mensagens novas do comprador (menu, opções, aguarde, convite, dúvida)."""
     por_loja: dict[UUID, dict[str, AtendimentoAutomacaoRegra]] = defaultdict(dict)
+    todas_da_loja: dict[UUID, list[AtendimentoAutomacaoRegra]] = defaultdict(list)
     for (codigo, integ), regra in regras.items():
         aut = cat.CATALOGO[codigo]
+        todas_da_loja[integ].append(regra)
         if aut.gatilho in (cat.GATILHO_MENSAGEM, cat.GATILHO_OPCAO):
             por_loja[integ][codigo] = regra
     if not por_loja:
         return 0
+    # O modo seco mede o DaVinci sozinho (o estado sem o Duoke que ele simula).
+    cortes = {
+        integ: cat.cortes_do_modo_seco(lista, motor_desde) for integ, lista in todas_da_loja.items()
+    }
     piso = max(agora - LOOKBACK_MENSAGENS, motor_desde)
     conversas = (
         await session.execute(
@@ -407,7 +444,12 @@ async def descobrir_mensagens(
             plataforma=c.plataforma,
             canal=c.canal,
             comprador_id=c.comprador_id,
-            msgs=list(msgs.get(c.id, [])),
+            msgs=cat.sem_o_duoke_substituido(
+                msgs.get(c.id, []),
+                plataforma=c.plataforma,
+                canal=c.canal,
+                cortes=cortes.get(c.integration_id),
+            ),
             registro=registro.get(c.id, []),
             ativas=ativas,
             desde=piso,
@@ -688,6 +730,8 @@ class _Contexto:
     msgs: dict[UUID, list[cat.Msg]]
     registro: dict[UUID, list[cat.Linha]]
     contagem: dict[tuple[UUID, str, str], int]
+    # Loja → automação em `simular` → o corte do modo seco (`cortes_do_modo_seco`).
+    cortes: dict[UUID, dict[str, datetime]]
 
 
 async def aposentar_enviando_presos(session: AsyncSession, *, agora: datetime) -> int:
@@ -936,6 +980,12 @@ def _modo_efetivo(regra: AtendimentoAutomacaoRegra) -> tuple[str, str | None]:
     return cat.MODO_ENVIAR, None
 
 
+def _em_transicao(regra: AtendimentoAutomacaoRegra, agora: datetime) -> bool:
+    """Os primeiros dias da regra em `enviar` (`TRANSICAO`): o Duoke pode ainda mandar."""
+    desde = _utc(regra.enviar_desde)
+    return desde is None or agora - desde <= TRANSICAO
+
+
 def _teto(regra: AtendimentoAutomacaoRegra, aut: cat.Automacao, ctx: _Contexto, tipo: str) -> bool:
     """Passou do teto do dia (loja × família, e o da própria regra)?"""
     s = get_settings()
@@ -1002,7 +1052,10 @@ async def _seguinte(
     if regra is None or regra.modo == cat.MODO_DESLIGADO:
         return
     seguinte = cat.CATALOGO[aut.seguinte]
-    devido = _utc(linha.devido_em) + timedelta(minutes=regra.atraso_min)
+    devido = cat.ajustar_janela(
+        _utc(linha.devido_em) + timedelta(minutes=regra.atraso_min),
+        *(cat.janela_da_regra(regra, seguinte) or (None, None)),
+    )
     await _gravar_candidatos(
         session,
         [
@@ -1160,7 +1213,11 @@ async def _decidir_uma(
         )
         return linha.estado
     janela = cat.janela_da_regra(regra, aut)
-    if agora > cat.validade_ate(aut, linha.devido_em, janela):
+    validade = cat.validade_ate(aut, linha.devido_em, janela)
+    # Fora do horário da regra AGORA (a linha esperou a leitura, o motor
+    # parou, o PATCH rearmou): espera a próxima abertura, se ainda valer.
+    abre = cat.ajustar_janela(agora, *janela) if janela else agora
+    if agora > validade or abre > validade:
         _fechar(
             linha,
             estado=cat.ESTADO_PULADO,
@@ -1170,6 +1227,10 @@ async def _decidir_uma(
             regra=regra,
             divergencia="motor_atrasado",
         )
+        return linha.estado
+    if abre > agora:
+        linha.devido_em = abre
+        linha.updated_at = agora
         return linha.estado
     modo, motivo_simulado = _modo_efetivo(regra)
     fatos = _fatos_comuns(ctx, aut, linha)
@@ -1186,6 +1247,7 @@ async def _decidir_uma(
                 evento_em=linha.evento_em,
                 agora=agora,
                 regra=regra,
+                cortes=ctx.cortes.get(linha.integration_id),
             )
         )
     if aut.plataforma == "shopee":
@@ -1205,13 +1267,16 @@ async def _decidir_uma(
         return linha.estado  # a leitura da loja falhou agora: tenta na próxima rodada
     motivo = cat.decidir(aut, fatos, regra)
     if motivo is None and modo == cat.MODO_ENVIAR:
-        # A troca não manda em dobro: espera a leitura da loja passar do
-        # `devido_em` + a espera do Duoke, e confere se ele mandou DEPOIS do gatilho.
-        espera = _utc(linha.devido_em) + aut.espera_duoke
-        canal = ctx.canais.get((linha.integration_id, aut.canal))
-        lido = _utc(canal.ultimo_ok_em) if canal is not None else None
-        if agora < espera or lido is None or lido < espera:
-            return linha.estado
+        # A troca não manda em dobro: na transição, espera a leitura da loja
+        # passar do `devido_em` + a espera do Duoke; e confere se ele mandou
+        # DEPOIS do gatilho (na conversa, ou — nas do pedido — pelo cartão do
+        # pedido ou pela conversa do pedido: `duoke_dos_pedidos`).
+        if _em_transicao(regra, agora):
+            espera = _utc(linha.devido_em) + aut.espera_duoke
+            canal = ctx.canais.get((linha.integration_id, aut.canal))
+            lido = _utc(canal.ultimo_ok_em) if canal is not None else None
+            if agora < espera or lido is None or lido < espera:
+                return linha.estado
         duoke = fatos.get("duoke_depois") or []
         if duoke:
             depois_da_troca = regra.enviar_desde is not None and any(
@@ -1226,10 +1291,17 @@ async def _decidir_uma(
                 regra=regra,
             )
             if depois_da_troca:
+                # NA HORA: o resto do lote desta regra já decide em `simular`.
                 await disparar_disjuntor(session, regra, agora=agora, motivo="duoke_ainda_ligado")
             return linha.estado
-        if aut.campanha and not get_settings().atendimento_automacoes_shopee_auto_reply:
-            motivo = "campanha_sem_auto_reply"
+        if aut.campanha:
+            # Import TARDIO (o modo seco nunca carrega o envio): a campanha só
+            # sai como resposta automática — chave confirmada E o envio por
+            # ela no adaptador. Sem os dois, sairia como mensagem normal.
+            from app.services.atendimento import enviar as envio
+
+            if not envio.campanha_por_auto_reply():
+                motivo = "campanha_sem_auto_reply"
     if motivo is not None:
         _fechar(
             linha,
@@ -1311,16 +1383,30 @@ async def _decidir_uma(
     return linha.estado
 
 
-async def decidir_vencidas(session: AsyncSession, *, agora: datetime) -> dict[str, int]:
-    """As linhas `agendado` que venceram: até `MAX_DECISOES` por rodada, a mais velha primeiro."""
+async def decidir_vencidas(
+    session: AsyncSession, *, agora: datetime, motor_desde: datetime | None = None
+) -> dict[str, int]:
+    """As linhas `agendado` que venceram: até `MAX_DECISOES` por rodada, a mais
+    velha primeiro, no máximo `MAX_POR_REGRA` da mesma loja × automação."""
+    ordem = (
+        func.row_number()
+        .over(partition_by=(_R.integration_id, _R.automacao), order_by=(_R.devido_em, _R.id))
+        .label("n")
+    )
+    fila = (
+        select(_R.id.label("id"), ordem)
+        .where(_R.estado == cat.ESTADO_AGENDADO, _R.devido_em <= agora)
+        .subquery()
+    )
     linhas = list(
         (
             await session.execute(
                 select(_R)
-                .where(_R.estado == cat.ESTADO_AGENDADO, _R.devido_em <= agora)
+                .join(fila, fila.c.id == _R.id)
+                .where(fila.c.n <= MAX_POR_REGRA, _R.estado == cat.ESTADO_AGENDADO)
                 .order_by(_R.devido_em)
                 .limit(MAX_DECISOES)
-                .with_for_update(skip_locked=True)
+                .with_for_update(skip_locked=True, of=_R)
             )
         )
         .scalars()
@@ -1377,6 +1463,9 @@ async def decidir_vencidas(session: AsyncSession, *, agora: datetime) -> dict[st
         if conversa_ids
         else {}
     )
+    por_loja: dict[UUID, list[AtendimentoAutomacaoRegra]] = defaultdict(list)
+    for (_codigo, integ), regra in regras.items():
+        por_loja[integ].append(regra)
     ctx = _Contexto(
         agora=agora,
         regras=regras,
@@ -1385,9 +1474,34 @@ async def decidir_vencidas(session: AsyncSession, *, agora: datetime) -> dict[st
         msgs=await linha_do_tempo(session, conversa_ids, agora=agora),
         registro=await _registro_das_conversas(session, conversa_ids, agora=agora),
         contagem=await _contagens_do_dia(session, agora=agora),
+        cortes={
+            integ: cat.cortes_do_modo_seco(por_loja.get(integ, []), motor_desde)
+            for integ in {x.integration_id for x in linhas}
+        },
     )
     reclamacoes = await _fatos_de_reclamacao(session, linhas)
     pedidos = await _fatos_de_pedido(session, linhas, agora=agora)
+    # Modo enviar nas do PEDIDO: o Duoke já mandou para este pedido depois do
+    # gatilho? (A conversa tem o `duoke_depois` dela; o pedido, este.)
+    do_pedido_enviar = []
+    for x in linhas:
+        aut = cat.CATALOGO.get(x.automacao)
+        regra = regras.get((x.automacao, x.integration_id))
+        if (
+            aut is not None
+            and aut.alvo == cat.ALVO_PEDIDO
+            and x.pedido
+            and regra is not None
+            and _modo_efetivo(regra)[0] == cat.MODO_ENVIAR
+        ):
+            do_pedido_enviar.append(x)
+    duoke_dos_pedidos: dict[UUID, list[datetime]] = {}
+    if do_pedido_enviar:
+        from app.services.atendimento import automacoes_comparar
+
+        duoke_dos_pedidos = await automacoes_comparar.duoke_dos_pedidos(
+            session, do_pedido_enviar, agora=agora
+        )
     for linha in linhas:
         aut = cat.CATALOGO.get(linha.automacao)
         extras: dict[str, Any] = {}
@@ -1395,6 +1509,8 @@ async def decidir_vencidas(session: AsyncSession, *, agora: datetime) -> dict[st
         extras.update(pedidos.get(linha.id, {}))
         if extras.get("devolucao_logistica"):
             extras["devolucao_qualquer"] = True
+        if linha.id in duoke_dos_pedidos:
+            extras["duoke_depois"] = duoke_dos_pedidos[linha.id]
         conversa = conversas.get(linha.conversa_id) if linha.conversa_id else None
         if aut is not None and aut.tipo == cat.TIPO_CONVITE and linha.evento_em is not None:
             extras["ja_recebeu"] = await _ja_recebeu_convite(session, linha, conversa)
@@ -1406,6 +1522,26 @@ async def decidir_vencidas(session: AsyncSession, *, agora: datetime) -> dict[st
         contagem[estado] += 1
     await session.commit()
     return dict(contagem)
+
+
+async def limpar_registro(session: AsyncSession, *, agora: datetime) -> int:
+    """Apaga do registro o que passou de `GUARDA_REGISTRO` (em lotes; nunca o que ainda decide)."""
+    velhas = (
+        select(_R.id)
+        .where(
+            _R.devido_em < agora - GUARDA_REGISTRO,
+            _R.estado.not_in((cat.ESTADO_AGENDADO, cat.ESTADO_ENVIANDO)),
+        )
+        .limit(LIMPEZA_LOTE)
+        .scalar_subquery()
+    )
+    resultado = await session.execute(
+        delete(_R).where(_R.id.in_(velhas)).execution_options(synchronize_session=False)
+    )
+    n = int(resultado.rowcount or 0)
+    if n:
+        logger.info("atendimento_automacoes_registro_limpo", quantidade=n)
+    return n
 
 
 # ── A rodada ──────────────────────────────────────────────────────────────
@@ -1471,7 +1607,7 @@ async def rodada(*, agora: datetime | None = None, motor_desde: datetime | None 
         t0 = _time.monotonic()
         resumo["presos"] = await aposentar_enviando_presos(session, agora=agora)
         await session.commit()
-        resumo["decididas"] = await decidir_vencidas(session, agora=agora)
+        resumo["decididas"] = await decidir_vencidas(session, agora=agora, motor_desde=motor_desde)
         _marca("decidir", t0)
         t0 = _time.monotonic()
         resumo["comparadas"] = await automacoes_comparar.comparar(
@@ -1479,6 +1615,11 @@ async def rodada(*, agora: datetime | None = None, motor_desde: datetime | None 
         )
         await session.commit()
         _marca("comparar", t0)
+        if agora.hour == HORA_LIMPEZA_UTC and agora.minute in (30, 31):
+            t0 = _time.monotonic()
+            resumo["limpas"] = await limpar_registro(session, agora=agora)
+            await session.commit()
+            _marca("limpeza", t0)
     resumo["ms"] = ms
     return resumo
 

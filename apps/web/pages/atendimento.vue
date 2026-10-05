@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { BarChart3, BookOpen, Inbox, MessageSquareText, RotateCcw, Store, TriangleAlert } from 'lucide-vue-next'
+import { BarChart3, BookOpen, Bot, Inbox, MessageSquareText, RotateCcw, Store, TriangleAlert } from 'lucide-vue-next'
 import { useResizeObserver, useWindowSize } from '@vueuse/core'
 import {
   avisoSimulador,
@@ -47,13 +47,17 @@ definePageMeta({ middleware: ['admin', 'atendimento'] })
 //   saber) aparece AQUI, não na Ouvidoria: a faixa vermelha "N lojas sem
 //   ler" no topo da Caixa, com o link para "Lojas e modo", e a marca com a
 //   contagem na aba. Vem no /resumo e some sozinha quando a loja volta a ler.
+// - "Automáticas" (05/10/2026): as mensagens automáticas do Duoke recriadas
+//   no DaVinci, por loja, começando em modo seco (registra o que mandaria e
+//   compara com o Duoke; nada sai). Desenho em docs/atendimento-automacoes.md.
 
-type Aba = 'caixa' | 'lojas' | 'manual' | 'modelos' | 'metricas'
+type Aba = 'caixa' | 'lojas' | 'manual' | 'modelos' | 'automaticas' | 'metricas'
 const ABAS: { value: Aba; label: string; icon: any }[] = [
   { value: 'caixa', label: 'Caixa', icon: Inbox },
   { value: 'lojas', label: 'Lojas e modo', icon: Store },
   { value: 'manual', label: 'Manual da IA', icon: BookOpen },
   { value: 'modelos', label: 'Respostas prontas', icon: MessageSquareText },
+  { value: 'automaticas', label: 'Automáticas', icon: Bot },
   { value: 'metricas', label: 'Métricas', icon: BarChart3 },
 ]
 
@@ -344,6 +348,11 @@ function selecionar(id: string) {
 function abrirAba(a: string) {
   if (ABAS.some((x) => x.value === a)) aba.value = a as Aba
 }
+// O registro das Automáticas abre a conversa na Caixa.
+function abrirConversaNaCaixa(id: string) {
+  aba.value = 'caixa'
+  selecionar(id)
+}
 
 // A Caixa ocupa a altura da janela para as colunas rolarem cada uma por si,
 // como num app de mensagens. A altura sai do topo REAL da Caixa (medido), não
@@ -540,6 +549,7 @@ watch(selecionada, (id) => {
     <AtendimentoCanais v-if="aba === 'lojas'" :can-edit="canEdit" :is-admin="isAdmin" :lojas="resumo?.lojas || []" @mudou="carregarResumo" />
     <AtendimentoManual v-if="aba === 'manual'" :can-edit="canEdit" :can-delete="canDelete" />
     <AtendimentoModelos v-if="aba === 'modelos'" :can-edit="canEdit" :can-delete="canDelete" @mudou="(l: Modelo[]) => (modelos = l)" />
+    <AtendimentoAutomaticas v-if="aba === 'automaticas'" :can-edit="canEdit" @abrir-conversa="abrirConversaNaCaixa" />
     <AtendimentoMetricas v-if="aba === 'metricas'" />
   </div>
 </template>

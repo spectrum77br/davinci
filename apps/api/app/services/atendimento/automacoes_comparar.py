@@ -11,7 +11,9 @@ rodada do motor (`automacoes.rodada`), só lendo o banco:
      conversa, ou — nas do pedido — pelo cartão do pedido que o Duoke manda
      junto (`content.order_sn` a até 10 s do texto), pelo pedido ligado à
      conversa ou pelo comprador do índice. Achou → `mandou` (a mensagem, a
-     hora e a diferença). A janela fechou sem achar → `nao_mandou` — só se a
+     hora e a diferença: Duoke − a hora em que a NOSSA sairia — a decisão no
+     modo seco, a mensagem gravada no modo enviar; não o `devido_em`, que
+     escondia os 1 a 2 min da rodada). A janela fechou sem achar → `nao_mandou` — só se a
      LEITURA da loja já passou do fim da janela (`atendimento_canais.
      ultimo_ok_em`); com a leitura parada (deploy, token), continua pendente.
      Só conta mensagem de FORA (`externo`/`sistema`) e sem a marca do motor
@@ -23,7 +25,14 @@ rodada do motor (`automacoes.rodada`), só lendo o banco:
      da troca): a regra volta sozinha para `simular` e o log avisa.
 
 `estatisticas` é a conta que a tela mostra (precisão, cobertura e a % que
-bateu, separadas) e o critério da troca.
+bateu, separadas; a diferença para o Duoke e o atraso real do DaVinci) e o
+critério da troca. `duoke_dos_pedidos` é a mesma régua do pedido para o motor
+no modo enviar: o Duoke já mandou ESTA automação para ESTE pedido?
+
+As consultas em `atendimento_mensagens` levam também o `enviada_em` (tem
+índice; o `coalesce(enviada_em, created_at)` sozinho varria a tabela inteira a
+cada 2 min — medido em produção, 05/10: nenhuma mensagem de 30 dias sem
+`enviada_em`).
 """
 
 from __future__ import annotations
@@ -66,6 +75,9 @@ _C = AtendimentoConversa
 
 # Até quantas linhas pendentes por rodada (as mais velhas primeiro).
 MAX_PENDENTES = 3000
+# INSERT de muitas linhas em lotes: o asyncpg recusa mais de 32.767 parâmetros
+# (são 23 por linha do "só Duoke").
+LOTE_INSERT = 500
 # O cartão do pedido do Duoke vai 1 s antes do texto.
 CARTAO_JUNTO = timedelta(seconds=10)
 # O "só Duoke" olha só as últimas 48 h, e só depois de 1 h (o gatilho pode
@@ -106,6 +118,15 @@ def _momento():
     return func.coalesce(_M.enviada_em, _M.created_at)
 
 
+def _no_intervalo(ini: datetime, fim: datetime | None = None):
+    """`momento` no intervalo, com o `enviada_em` indexado na frente (a mesma conta)."""
+    momento = _momento()
+    filtro = [_M.enviada_em >= ini, momento >= ini]
+    if fim is not None:
+        filtro += [_M.enviada_em <= fim, momento <= fim]
+    return and_(*filtro)
+
+
 def _filtro_assinaturas():
     """Pré-filtro barato no SQL: o texto pode ser um modelo do Duoke (o Python confirma)."""
     minusculo = func.lower(func.left(_M.texto, 300))
@@ -140,8 +161,7 @@ async def _mensagens_do_duoke(
             ).where(
                 filtro,
                 _de_fora(),
-                momento >= ini,
-                momento <= fim,
+                _no_intervalo(ini, fim),
                 _filtro_assinaturas(),
             )
         )
@@ -174,8 +194,7 @@ async def _cartoes(
                 filtro,
                 _M.autor != AUTOR_CLIENTE,
                 _M.payload["message_type"].astext == "order",
-                momento >= ini - CARTAO_JUNTO,
-                momento <= fim + CARTAO_JUNTO,
+                _no_intervalo(ini - CARTAO_JUNTO, fim + CARTAO_JUNTO),
             )
         )
     ).all()
@@ -215,11 +234,51 @@ async def _usadas(session: AsyncSession, ids: list[UUID]) -> set[UUID]:
     )
 
 
-def _marcar_mandou(linha: AtendimentoAutomacaoRegistro, m: cat.Msg, agora: datetime) -> None:
+def _uuid(valor: Any) -> UUID | None:
+    try:
+        return valor if isinstance(valor, UUID) else UUID(str(valor))
+    except (TypeError, ValueError):
+        return None
+
+
+async def _saidas(
+    session: AsyncSession, linhas: list[AtendimentoAutomacaoRegistro]
+) -> dict[UUID, datetime]:
+    """Quando a NOSSA mensagem saiu (ou sairia): a 1ª parte gravada no modo
+    enviar; sem mensagem, a decisão (no modo seco é a hora em que ela sairia).
+    A linha que não manda (pulada) não tem hora de saída: fica o `devido_em`."""
+    ids = {u for x in linhas for i in (x.mensagem_ids or []) if (u := _uuid(i)) is not None}
+    momentos: dict[UUID, datetime] = {}
+    if ids:
+        for mid, em in (
+            await session.execute(select(_M.id, _momento()).where(_M.id.in_(sorted(ids, key=str))))
+        ).all():
+            momentos[mid] = _utc(em)
+    saida: dict[UUID, datetime] = {}
+    for x in linhas:
+        tempos = [
+            momentos[u]
+            for i in (x.mensagem_ids or [])
+            if (u := _uuid(i)) is not None and u in momentos
+        ]
+        if tempos:
+            saida[x.id] = min(tempos)
+        elif x.estado in _ESTADOS_QUE_MANDAM and x.decidido_em is not None:
+            saida[x.id] = _utc(x.decidido_em)
+        else:
+            saida[x.id] = _utc(x.devido_em)
+    return saida
+
+
+def _marcar_mandou(
+    linha: AtendimentoAutomacaoRegistro, m: cat.Msg, agora: datetime, saiu: datetime | None = None
+) -> None:
+    """Duoke mandou. A diferença é Duoke − a hora em que a NOSSA saiu (ou sairia)."""
     linha.duoke = cat.DUOKE_MANDOU
     linha.duoke_mensagem_id = m.id
     linha.duoke_em = m.em
-    linha.duoke_diferenca_s = int((m.em - _utc(linha.devido_em)).total_seconds())
+    base = saiu or _utc(linha.devido_em)
+    linha.duoke_diferenca_s = int((m.em - base).total_seconds())
     linha.comparado_em = agora
 
 
@@ -269,6 +328,7 @@ async def _comparar_conversas(
     for cid, m in duoke:
         if m.id not in usadas:
             por_conversa[cid].append(m)
+    saidas = await _saidas(session, linhas)
     mandou = nao = 0
     for x in sorted(linhas, key=lambda y: y.devido_em):
         aut = cat.CATALOGO[x.automacao]
@@ -279,7 +339,7 @@ async def _comparar_conversas(
         if candidatas:
             m = min(candidatas, key=lambda y: abs((y.em - _utc(x.devido_em)).total_seconds()))
             por_conversa[x.conversa_id].remove(m)
-            _marcar_mandou(x, m, agora)
+            _marcar_mandou(x, m, agora, saidas.get(x.id))
             mandou += 1
             continue
         lido = ultimo_ok.get((x.integration_id, aut.canal))
@@ -288,6 +348,75 @@ async def _comparar_conversas(
             x.comparado_em = agora
             nao += 1
     return mandou, nao
+
+
+_Candidata = tuple[cat.Msg, UUID | None, set[str], set[str]]
+
+
+async def _candidatas_de_pedido(
+    session: AsyncSession,
+    integs: list[UUID],
+    ini: datetime,
+    fim: datetime,
+    *,
+    agora: datetime,
+    excluir_usadas: bool,
+) -> list[_Candidata]:
+    """As mensagens do Duoke nas conversas das lojas, cada uma com os pedidos a que pode ser.
+
+    (mensagem, loja, pedidos pelo cartão a até 10 s, os outros pedidos da
+    conversa: o ligado, os do comprador no índice e os dos cartões de 45 dias).
+    """
+    da_loja = _M.conversa_id.in_(
+        select(_C.id).where(_C.integration_id.in_(integs), _C.canal == "chat")
+    )
+    duoke = await _mensagens_do_duoke(session, da_loja, ini, fim)
+    if excluir_usadas:
+        usadas = await _usadas(session, [m.id for _, m in duoke])
+        duoke = [(cid, m) for cid, m in duoke if m.id not in usadas]
+    if not duoke:
+        return []
+    cartoes = await _cartoes(session, da_loja, ini, fim)
+    conversa_ids = sorted({cid for cid, _ in duoke}, key=str)
+    conversas = {
+        c.id: c
+        for c in (await session.execute(select(_C).where(_C.id.in_(conversa_ids)))).scalars().all()
+    }
+    do_comprador = await _pedidos_do_comprador(session, conversas)
+    # Os pedidos de cada conversa pelos cartões (do comprador ou da campanha) dos
+    # últimos 45 dias: o pós do Duoke não traz cartão, mas a conversa dele é a
+    # que recebeu o "pedido recebido"/"entregue" daquele pedido.
+    sn = _M.payload[("content", "order_sn")].astext
+    for cid, pedido in (
+        await session.execute(
+            select(_M.conversa_id, sn).where(
+                _M.conversa_id.in_(conversa_ids),
+                _M.payload["message_type"].astext == "order",
+                _M.enviada_em >= agora - timedelta(days=45),
+            )
+        )
+    ).all():
+        if pedido:
+            do_comprador.setdefault(cid, set()).add(pedido.strip())
+    candidatas: list[_Candidata] = []
+    for cid, m in duoke:
+        pelo_cartao = {sn for em, sn in cartoes.get(cid, []) if abs(em - m.em) <= CARTAO_JUNTO}
+        outros = set(do_comprador.get(cid, set()))
+        c = conversas.get(cid)
+        if c is not None and c.pedido_marketplace:
+            outros.add(c.pedido_marketplace)
+        candidatas.append((m, c.integration_id if c is not None else None, pelo_cartao, outros))
+    return candidatas
+
+
+def _do_pedido(x: AtendimentoAutomacaoRegistro, aut: cat.Automacao, candidata: _Candidata) -> bool:
+    """A mensagem do Duoke é desta automação e deste pedido? (O cartão; sem ele, a conversa.)"""
+    m, integ, cartao, outros = candidata
+    return (
+        integ == x.integration_id
+        and _casa(aut, m)
+        and (x.pedido in cartao or (not cartao and x.pedido in outros))
+    )
 
 
 async def _comparar_pedidos(
@@ -307,65 +436,19 @@ async def _comparar_pedidos(
     ini = min(j[0] for j in janelas.values())
     fim = min(max(j[1] for j in janelas.values()), agora)
     integs = sorted({x.integration_id for x in linhas}, key=str)
-    da_loja = _M.conversa_id.in_(
-        select(_C.id).where(_C.integration_id.in_(integs), _C.canal == "chat")
+    candidatas = await _candidatas_de_pedido(
+        session, integs, ini, fim, agora=agora, excluir_usadas=True
     )
-    duoke = await _mensagens_do_duoke(session, da_loja, ini, fim)
-    usadas = await _usadas(session, [m.id for _, m in duoke])
-    duoke = [(cid, m) for cid, m in duoke if m.id not in usadas]
-    cartoes = await _cartoes(session, da_loja, ini, fim)
-    conversa_ids = sorted({cid for cid, _ in duoke}, key=str)
-    conversas = (
-        {
-            c.id: c
-            for c in (await session.execute(select(_C).where(_C.id.in_(conversa_ids))))
-            .scalars()
-            .all()
-        }
-        if conversa_ids
-        else {}
-    )
-    do_comprador = await _pedidos_do_comprador(session, conversas)
-    # Os pedidos de cada conversa pelos cartões (do comprador ou da campanha) dos
-    # últimos 45 dias: o pós do Duoke não traz cartão, mas a conversa dele é a
-    # que recebeu o "pedido recebido"/"entregue" daquele pedido.
-    if conversa_ids:
-        sn = _M.payload[("content", "order_sn")].astext
-        for cid, pedido in (
-            await session.execute(
-                select(_M.conversa_id, sn).where(
-                    _M.conversa_id.in_(conversa_ids),
-                    _M.payload["message_type"].astext == "order",
-                    _M.enviada_em >= agora - timedelta(days=45),
-                )
-            )
-        ).all():
-            if pedido:
-                do_comprador.setdefault(cid, set()).add(pedido.strip())
-    # Cada mensagem do Duoke → os pedidos a que ela pode ser.
-    candidatas: list[tuple[cat.Msg, UUID, set[str], set[str]]] = []
-    for cid, m in duoke:
-        pelo_cartao = {sn for em, sn in cartoes.get(cid, []) if abs(em - m.em) <= CARTAO_JUNTO}
-        outros = set(do_comprador.get(cid, set()))
-        c = conversas.get(cid)
-        if c is not None and c.pedido_marketplace:
-            outros.add(c.pedido_marketplace)
-        candidatas.append(
-            (m, conversas[cid].integration_id if cid in conversas else None, pelo_cartao, outros)
-        )
+    saidas = await _saidas(session, linhas)
     usadas_agora: set = set()
     mandou = nao = 0
     for x in sorted(linhas, key=lambda y: y.devido_em):
         aut = cat.CATALOGO[x.automacao]
         a, b = janelas[x.id]
         achadas = [
-            (0 if x.pedido in cartao else 1, m)
-            for m, integ, cartao, outros in candidatas
-            if m.id not in usadas_agora
-            and integ == x.integration_id
-            and _casa(aut, m)
-            and a <= m.em <= b
-            and (x.pedido in cartao or (not cartao and x.pedido in outros))
+            (0 if x.pedido in c[2] else 1, c[0])
+            for c in candidatas
+            if c[0].id not in usadas_agora and a <= c[0].em <= b and _do_pedido(x, aut, c)
         ]
         if achadas:
             _, m = min(
@@ -373,7 +456,7 @@ async def _comparar_pedidos(
                 key=lambda par: (par[0], abs((par[1].em - _utc(x.devido_em)).total_seconds())),
             )
             usadas_agora.add(m.id)
-            _marcar_mandou(x, m, agora)
+            _marcar_mandou(x, m, agora, saidas.get(x.id))
             mandou += 1
             continue
         lido = ultimo_ok.get((x.integration_id, aut.canal))
@@ -382,6 +465,36 @@ async def _comparar_pedidos(
             x.comparado_em = agora
             nao += 1
     return mandou, nao
+
+
+async def duoke_dos_pedidos(
+    session: AsyncSession, linhas: list[AtendimentoAutomacaoRegistro], *, agora: datetime
+) -> dict[UUID, list[datetime]]:
+    """Modo enviar: o Duoke já mandou ESTA automação para ESTE pedido depois do gatilho?
+
+    A mesma régua do comparador (`_comparar_pedidos`): o modelo pela assinatura,
+    o pedido pelo cartão do Duoke a até 10 s do texto ou, sem cartão, pela
+    conversa. Conta qualquer mensagem do Duoke, mesmo a que o comparador já
+    casou com outra linha: o comprador já recebeu. Linha → os horários.
+    """
+    alvo = [x for x in linhas if x.pedido and x.evento_em is not None]
+    if not alvo:
+        return {}
+    ini = min(_utc(x.evento_em) for x in alvo)
+    integs = sorted({x.integration_id for x in alvo}, key=str)
+    candidatas = await _candidatas_de_pedido(
+        session, integs, ini, agora, agora=agora, excluir_usadas=False
+    )
+    saida: dict[UUID, list[datetime]] = {}
+    for x in alvo:
+        aut = cat.CATALOGO.get(x.automacao)
+        if aut is None:
+            continue
+        evento = _utc(x.evento_em)
+        saida[x.id] = sorted(
+            c[0].em for c in candidatas if c[0].em >= evento and _do_pedido(x, aut, c)
+        )
+    return saida
 
 
 async def _alertas_e_divergencias(
@@ -467,23 +580,6 @@ async def _alertas_e_divergencias(
                 x.divergencia = "concluiu_entre_horarios"
 
 
-def _automacao_do_duoke(m: cat.Msg, plataforma: str, canal: str) -> str | None:
-    """O código da nossa automação para uma mensagem do Duoke (None = fora do catálogo)."""
-    tipo = m.tipo_duoke
-    if tipo == cat.TIPO_OPCAO:
-        codigo = f"{plataforma}_opcao_{m.opcao_duoke}"
-    else:
-        codigo = next(
-            (
-                a.codigo
-                for a in cat.CATALOGO.values()
-                if a.plataforma == plataforma and a.canal == canal and a.tipo == tipo
-            ),
-            None,
-        )
-    return codigo if codigo in cat.CATALOGO else None
-
-
 async def _so_duoke(
     session: AsyncSession,
     *,
@@ -531,8 +627,7 @@ async def _so_duoke(
             select(_M.conversa_id, momento).where(
                 _M.conversa_id.in_(conversa_ids),
                 _M.autor == AUTOR_CLIENTE,
-                momento >= ini - timedelta(hours=1),
-                momento <= fim,
+                _no_intervalo(ini - timedelta(hours=1), fim),
             )
         )
     ).all():
@@ -556,7 +651,7 @@ async def _so_duoke(
         c = conversas.get(cid)
         if c is None or c.integration_id is None:
             continue
-        codigo = _automacao_do_duoke(m, c.plataforma, c.canal)
+        codigo = cat.automacao_do_modelo(m.tipo_duoke, m.opcao_duoke, c.plataforma, c.canal)
         regra = ativas.get((codigo, c.integration_id)) if codigo else None
         if regra is None:
             continue
@@ -612,12 +707,16 @@ async def _so_duoke(
                 "comparado_em": agora,
             }
         )
-    if not novas:
-        return 0
-    resultado = await session.execute(
-        pg_insert(_R).values(novas).on_conflict_do_nothing().returning(_R.id)
-    )
-    return len(resultado.all())
+    criadas = 0
+    for i in range(0, len(novas), LOTE_INSERT):
+        resultado = await session.execute(
+            pg_insert(_R)
+            .values(novas[i : i + LOTE_INSERT])
+            .on_conflict_do_nothing()
+            .returning(_R.id)
+        )
+        criadas += len(resultado.all())
+    return criadas
 
 
 async def _disjuntor(
@@ -812,16 +911,27 @@ async def estatisticas(
         saida[(r.automacao, r.integration_id)] = contagem
     if not saida:
         return saida
-    diffs = (
+    # A diferença para o Duoke (Duoke − a nossa) e o atraso REAL do DaVinci
+    # (do gatilho até a hora em que a nossa sai, ou sairia no modo seco).
+    tempos = (
         await session.execute(
-            select(_R.automacao, _R.integration_id, _R.duoke_diferenca_s).where(
-                *filtro, _R.duoke == cat.DUOKE_MANDOU, mandam, _R.duoke_diferenca_s.is_not(None)
-            )
+            select(
+                _R.automacao,
+                _R.integration_id,
+                _R.duoke,
+                _R.duoke_diferenca_s,
+                _R.evento_em,
+                _R.decidido_em,
+            ).where(*filtro, mandam)
         )
     ).all()
     por_par: dict[tuple, list[int]] = defaultdict(list)
-    for codigo, integ, d in diffs:
-        por_par[(codigo, integ)].append(int(d))
+    atrasos: dict[tuple, list[int]] = defaultdict(list)
+    for codigo, integ, duoke, d, evento, decidido in tempos:
+        if duoke == cat.DUOKE_MANDOU and d is not None:
+            por_par[(codigo, integ)].append(int(d))
+        if evento is not None and decidido is not None:
+            atrasos[(codigo, integ)].append(int((_utc(decidido) - _utc(evento)).total_seconds()))
     motivos = (
         await session.execute(
             select(_R.automacao, _R.integration_id, _R.motivo, func.count())
@@ -835,8 +945,11 @@ async def estatisticas(
     for chave, contagem in saida.items():
         lista = por_par.get(chave, [])
         contagem["diferenca_mediana_s"] = int(median(lista)) if lista else None
-        # Para a soma das lojas (`somar`) refazer a mediana; a rota não devolve.
+        lista_atraso = atrasos.get(chave, [])
+        contagem["atraso_mediana_s"] = int(median(lista_atraso)) if lista_atraso else None
+        # Para a soma das lojas (`somar`) refazer as medianas; a rota não devolve.
         contagem["_diferencas"] = lista
+        contagem["_atrasos"] = lista_atraso
         contagem["motivos"] = dict(sorted(por_motivo.get(chave, {}).items(), key=lambda kv: -kv[1]))
         contagem.update(resumir(contagem, cat.CATALOGO.get(chave[0])))
     return saida
@@ -847,16 +960,23 @@ def somar(contagens: list[dict[str, Any]], aut: cat.Automacao | None) -> dict[st
     total: dict[str, Any] = defaultdict(int)
     motivos: dict[str, int] = defaultdict(int)
     diferencas: list[int] = []
+    atrasos: list[int] = []
     for c in contagens:
         for k, v in c.items():
-            if isinstance(v, int) and not isinstance(v, bool) and k != "diferenca_mediana_s":
+            if (
+                isinstance(v, int)
+                and not isinstance(v, bool)
+                and k not in ("diferenca_mediana_s", "atraso_mediana_s")
+            ):
                 total[k] += v
         for m, n in (c.get("motivos") or {}).items():
             motivos[m] += n
         diferencas += list(c.get("_diferencas") or [])
+        atrasos += list(c.get("_atrasos") or [])
     saida = dict(total)
     saida["motivos"] = dict(sorted(motivos.items(), key=lambda kv: -kv[1]))
     saida["diferenca_mediana_s"] = int(median(diferencas)) if diferencas else None
+    saida["atraso_mediana_s"] = int(median(atrasos)) if atrasos else None
     saida.update(resumir(saida, aut))
     return saida
 

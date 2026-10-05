@@ -579,6 +579,153 @@ def test_fatos_o_duoke_depois_do_gatilho_so_aparece_em_duoke_depois():
     assert f["duoke_depois"] == [duoke.em]
 
 
+# ── O modo seco mede o DaVinci sozinho (crítica de 05/10) ─────────────────
+
+
+def test_automacao_do_modelo_do_duoke():
+    assert cat.automacao_do_modelo(cat.TIPO_MENU, None, "shopee", "chat") == "shopee_menu"
+    assert cat.automacao_do_modelo(cat.TIPO_MENU, None, "ml", "pos_venda") == "ml_menu"
+    assert cat.automacao_do_modelo(cat.TIPO_OPCAO, 6, "shopee", "chat") == "shopee_opcao_6"
+    assert cat.automacao_do_modelo(cat.TIPO_AGUARDE, None, "tiktok", "chat") == "tiktok_aguarde"
+    assert cat.automacao_do_modelo(cat.TIPO_DUVIDA_2, None, "tiktok", "chat") == "tiktok_duvida_24h"
+    assert cat.automacao_do_modelo(cat.TIPO_OPCAO, 9, "shopee", "chat") is None
+    assert cat.automacao_do_modelo(None, None, "shopee", "chat") is None
+
+
+def test_cortes_do_modo_seco_so_das_regras_em_simular():
+    ligada = T0 - timedelta(days=3)
+    motor = T0 - timedelta(days=1)
+    regras = [
+        SimpleNamespace(automacao="shopee_menu", modo="simular", ligada_desde=ligada),
+        SimpleNamespace(automacao="shopee_opcao_6", modo="enviar", ligada_desde=ligada),
+        SimpleNamespace(automacao="shopee_aguarde", modo="desligado", ligada_desde=None),
+        SimpleNamespace(automacao="shopee_opcao_2", modo="simular", ligada_desde=None),
+    ]
+    # O mais tarde entre a regra ligada e o motor rodando (antes, o DaVinci não tinha linha).
+    assert cat.cortes_do_modo_seco(regras, motor) == {
+        "shopee_menu": motor,
+        "shopee_opcao_2": motor,
+    }
+    assert cat.cortes_do_modo_seco(regras) == {"shopee_menu": ligada}
+    assert cat.cortes_do_modo_seco([]) == {}
+
+
+def test_o_duoke_que_o_davinci_simula_sai_do_estado_depois_do_corte():
+    corte = T0 - timedelta(hours=1)
+    antes = _m(autor="loja", minutos=-120, texto=DUOKE[(cat.TIPO_MENU, None)])
+    depois = _m(autor="loja", minutos=0, texto=DUOKE[(cat.TIPO_MENU, None)])
+    opcao = _m(autor="loja", minutos=5, texto=DUOKE[(cat.TIPO_OPCAO, 6)])
+    convite = _m(autor="loja", minutos=6, texto=DUOKE[(cat.TIPO_CONVITE, None)])
+    nossa = _m(
+        autor="loja",
+        origem="davinci_auto",
+        minutos=7,
+        texto=cat.TEXTO_MENU,
+        payload={"automacao": {"codigo": "shopee_menu"}},
+    )
+    comprador = _m(minutos=8)
+    msgs = [antes, depois, opcao, convite, nossa, comprador]
+    estado = cat.sem_o_duoke_substituido(
+        msgs, plataforma="shopee", canal="chat", cortes={"shopee_menu": corte}
+    )
+    # Sai só o menu do Duoke DEPOIS do corte; a opção (regra não simulada aqui),
+    # o convite (fora dos tipos do robô), a nossa e a do comprador ficam.
+    assert estado == [antes, opcao, convite, nossa, comprador]
+    cortes = {"shopee_menu": corte, "shopee_opcao_6": corte, "shopee_convite": corte}
+    assert cat.sem_o_duoke_substituido(msgs, plataforma="shopee", canal="chat", cortes=cortes) == [
+        antes,
+        convite,
+        nossa,
+        comprador,
+    ]
+    assert cat.sem_o_duoke_substituido(msgs, plataforma="shopee", canal="chat", cortes={}) == msgs
+
+
+def test_a_opcao_tardia_do_duoke_nao_segura_o_menu_do_davinci():
+    """A contraprova da simulação: menu, dígito 6, a resposta do Duoke 12 h depois do
+    menu; o comprador escreve 13 h depois. O DaVinci respondeu a opção 1 min depois do
+    dígito — a sessão DELE acabou 12 h depois disso, e ele manda o menu. Com o Duoke no
+    estado, a resposta tardia segurava a sessão e o modo seco nem criava a linha."""
+    corte = T0 - timedelta(days=1)
+    menu = _m(autor="loja", minutos=0, texto=DUOKE[(cat.TIPO_MENU, None)])
+    digito = _m(minutos=1, texto="6", mid="d6")
+    tardia = _m(autor="loja", minutos=12 * 60, texto=DUOKE[(cat.TIPO_OPCAO, 6)])
+    volta = _m(minutos=13 * 60, mid="b13")
+    msgs = [menu, digito, tardia, volta]
+    # As linhas do DaVinci no registro: o menu (para a mensagem de antes) e a opção 6.
+    registro = [
+        cat.Linha(
+            "shopee_menu", "simulado", "conversa:c1:msg:b0", menu.em, menu.em + timedelta(minutes=1)
+        ),
+        cat.Linha(
+            "shopee_opcao_6",
+            "simulado",
+            "conversa:c1:msg:d6",
+            digito.em,
+            digito.em + timedelta(minutes=1),
+        ),
+    ]
+    ativas = ["shopee_menu", "shopee_opcao_6"]
+    cortes = {"shopee_menu": corte, "shopee_opcao_6": corte}
+    # Com o Duoke no estado (o modo seco de antes): nenhum menu para a volta.
+    dependente = _cands(_conv(msgs, ativas, registro=registro))
+    assert "conversa:c1:msg:b13" not in [c.chave for c in dependente]
+    # Sozinho: o menu do DaVinci sai para a volta do comprador.
+    estado = cat.sem_o_duoke_substituido(msgs, plataforma="shopee", canal="chat", cortes=cortes)
+    independente = _cands(_conv(estado, ativas, registro=registro))
+    assert [c.chave for c in independente if c.automacao == "shopee_menu"] == [
+        "conversa:c1:msg:b13"
+    ]
+    # E a decisão da linha vê o mesmo (o `duoke_depois` continua vendo tudo).
+    aut = cat.CATALOGO["shopee_menu"]
+    f = cat.fatos_da_conversa(
+        aut,
+        msgs=msgs,
+        registro=registro,
+        chave="conversa:c1:msg:b13",
+        evento_em=volta.em,
+        agora=volta.em + timedelta(minutes=1),
+        regra=_regra("shopee_menu"),
+        cortes=cortes,
+    )
+    assert f["ja_mandado"] is False
+    sem_corte = cat.fatos_da_conversa(
+        aut,
+        msgs=msgs,
+        registro=registro,
+        chave="conversa:c1:msg:b13",
+        evento_em=volta.em,
+        agora=volta.em + timedelta(minutes=1),
+        regra=_regra("shopee_menu"),
+    )
+    assert sem_corte["ja_mandado"] is True
+
+
+def test_opcao_ja_respondida_pelo_duoke_simulado_vale_a_linha_do_davinci():
+    aut = cat.CATALOGO["shopee_opcao_6"]
+    corte = T0 - timedelta(days=1)
+    menu = _m(autor="loja", minutos=0, texto=DUOKE[(cat.TIPO_MENU, None)])
+    d1 = _m(minutos=2, texto="6")
+    resposta = _m(autor="loja", minutos=3, texto=DUOKE[(cat.TIPO_OPCAO, 6)])
+    d2 = _m(minutos=10, texto="6")
+    tardia = _m(autor="loja", minutos=12 * 60, texto=DUOKE[(cat.TIPO_OPCAO, 6)])
+    f = cat.fatos_da_conversa(
+        aut,
+        msgs=[menu, d1, resposta, d2, tardia],
+        registro=[],
+        chave="k",
+        evento_em=d2.em,
+        agora=T0 + timedelta(minutes=11),
+        regra=_regra("shopee_opcao_6"),
+        cortes={"shopee_menu": corte, "shopee_opcao_6": corte},
+    )
+    # A resposta do Duoke (simulada aqui) não conta; o menu também não: sem
+    # linha do DaVinci, a 2ª vez do "6" é a 1ª resposta dele.
+    assert f["opcao_ja_respondida"] is False
+    # O "Duoke ainda ligado?" do modo enviar continua vendo as mensagens dele.
+    assert f["duoke_depois"] == [tardia.em]
+
+
 def test_opcao_ja_respondida_na_sessao():
     aut = cat.CATALOGO["shopee_opcao_6"]
     menu = _m(autor="loja", minutos=0, texto=DUOKE[(cat.TIPO_MENU, None)])

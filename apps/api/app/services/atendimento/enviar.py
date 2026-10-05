@@ -86,10 +86,16 @@ bloqueada, sem integração):
        shopee_mensagens_desligadas — `shopee_mensagens_comprador` desligado
                                     (o freio de mão da mensagem proativa na Shopee);
        regra_nao_envia            — a regra da loja, RELIDA aqui, não está em `enviar`;
-       campanha_sem_auto_reply    — campanha da Shopee sem o `auto_reply`
-                                    confirmado (`atendimento_automacoes_shopee_auto_reply`).
+       campanha_sem_auto_reply    — campanha da Shopee sem a resposta automática:
+                                    falta a chave confirmada
+                                    (`atendimento_automacoes_shopee_auto_reply`, o
+                                    teste de permissão passou) OU o envio por ela
+                                    no adaptador (`enviar_auto_reply`). Sem os
+                                    dois, a campanha sairia como mensagem NORMAL
+                                    — o que a trava existe para evitar.
 Só TEXTO: o cartão do pedido e a figurinha ainda não têm adaptador (o motor
-manda só as partes de texto).
+manda só as partes de texto). A campanha, quando puder sair, sai pelo
+`enviar_auto_reply` do adaptador, nunca pelo `enviar_texto`.
 O canal em `observar` NÃO segura a automática (de propósito: a equipe segue
 no Duoke enquanto ela sai por aqui), nem as travas da IA (automático, vez).
 
@@ -291,6 +297,26 @@ class EnvioRecusado(Exception):  # noqa: N818 — nome do contrato (spec seção
 def adaptador(plataforma: str) -> ModuleType:
     """O módulo adaptador da plataforma (import tardio pelo `ADAPTADORES`)."""
     return importlib.import_module(ADAPTADORES[plataforma])
+
+
+def auto_reply_no_adaptador(plataforma: str = "shopee") -> bool:
+    """O adaptador sabe mandar como RESPOSTA AUTOMÁTICA (`enviar_auto_reply`)?
+
+    Só lê o módulo (nada vai à plataforma). Hoje nenhum sabe: a campanha da
+    Shopee não sai, com a chave ligada ou não (05/10/2026).
+    """
+    try:
+        modulo = importlib.import_module(ADAPTADORES[plataforma])
+    except (KeyError, ImportError):
+        return False
+    return callable(getattr(modulo, "enviar_auto_reply", None))
+
+
+def campanha_por_auto_reply() -> bool:
+    """A campanha da Shopee pode sair: o `auto_reply` confirmado E o envio por ele."""
+    return bool(get_settings().atendimento_automacoes_shopee_auto_reply) and (
+        auto_reply_no_adaptador("shopee")
+    )
 
 
 @dataclass
@@ -651,8 +677,15 @@ async def _chamar_plataforma(
     conversa: AtendimentoConversa,
     integration: Integration,
     texto: str,
+    *,
+    auto_reply: bool = False,
 ) -> ResultadoEnvio:
-    """Fala com a plataforma. Nunca levanta: o que der errado vira resultado."""
+    """Fala com a plataforma. Nunca levanta: o que der errado vira resultado.
+
+    `auto_reply` (a campanha da Shopee, `enviar_automatica`): sai pelo
+    `enviar_auto_reply` do adaptador — sem ele, nada sai (nunca como
+    mensagem normal).
+    """
     s = get_settings()
     if s.atendimento_simulador and s.is_prod:
         # Cinto (o `_destino` já recusa): em produção o simulador NUNCA
@@ -681,6 +714,14 @@ async def _chamar_plataforma(
             responder = getattr(modulo, "responder_avaliacao", None)
             if responder is None:
                 return ResultadoEnvio(ok=False, erro="sem_resposta_de_avaliacao")
+            return await asyncio.wait_for(
+                responder(session, conversa, integration, cliente, texto),
+                timeout=TEMPO_MAXIMO_ENVIO_S,
+            )
+        if auto_reply:
+            responder = getattr(modulo, "enviar_auto_reply", None)
+            if responder is None:
+                return ResultadoEnvio(ok=False, erro="sem_auto_reply")
             return await asyncio.wait_for(
                 responder(session, conversa, integration, cliente, texto),
                 timeout=TEMPO_MAXIMO_ENVIO_S,
@@ -1532,10 +1573,11 @@ async def _destino_automatica(
     aut = catalogo.automacao(codigo)
     if aut is None or aut.plataforma != conversa.plataforma or aut.canal != conversa.canal:
         raise EnvioRecusado(RECUSA_REGRA_NAO_ENVIA, "Automação desconhecida para esta conversa.")
-    if aut.campanha and not settings.atendimento_automacoes_shopee_auto_reply:
+    if aut.campanha and not campanha_por_auto_reply():
         raise EnvioRecusado(
             RECUSA_CAMPANHA_SEM_AUTO_REPLY,
-            "Campanha da Shopee: só sai com a resposta automática (auto_reply) confirmada.",
+            "Campanha da Shopee: só sai como resposta automática (auto_reply) — falta a "
+            "chave confirmada ou o envio por ela no adaptador.",
         )
     if conversa.situacao == CONVERSA_BLOQUEADA:
         raise EnvioRecusado(
@@ -1652,7 +1694,16 @@ async def enviar_automatica(
         automacao=codigo,
         registro_id=str(registro_id) if registro_id else None,
     )
-    resultado = await _chamar_plataforma(session, conversa, destino.integration, normalizado)
+    from app.services.atendimento import automacoes_catalogo as catalogo
+
+    aut = catalogo.automacao(codigo)
+    resultado = await _chamar_plataforma(
+        session,
+        conversa,
+        destino.integration,
+        normalizado,
+        auto_reply=bool(aut is not None and aut.campanha),
+    )
     await _gravar_resultado(
         session,
         conversa,

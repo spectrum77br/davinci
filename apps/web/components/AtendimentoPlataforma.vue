@@ -962,6 +962,9 @@ export function origemLabel(m: Pick<Mensagem, 'autor' | 'origem' | 'autor_nome'>
   if (m.autor === 'cliente') return m.autor_nome || 'Cliente'
   if (m.origem === 'davinci_ia') return 'IA'
   if (m.origem === 'davinci_humano') return m.autor_nome ? `Equipe · ${m.autor_nome}` : 'Equipe · DaVinci'
+  // A mensagem automática do DaVinci (aba Automáticas, 05/10/2026): o menu,
+  // o "aguarde", o pedido recebido… — saiu sozinha, por regra da loja.
+  if (m.origem === 'davinci_auto') return 'Automática · DaVinci'
   if (respondidaNoSellerCentral(m, plataforma)) return 'Respondido no Seller Central'
   if (respondidaNoSellerCenter(m, plataforma)) return m.autor_nome ? `Respondido no Seller Center · ${m.autor_nome}` : 'Respondido no Seller Center'
   if (respondidaNoPortalMagalu(m, plataforma)) return m.autor_nome ? `Fora do DaVinci (portal da Magalu) · ${m.autor_nome}` : 'Fora do DaVinci (portal da Magalu)'

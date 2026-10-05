@@ -9,7 +9,8 @@ Esta é a aba "Automáticas" do /atendimento:
         padrão do catálogo, se não houver linha), o canal e o acesso, as
         contagens de 24 h e do período (simulado, enviado, pulado por motivo,
         só Duoke), a precisão, a cobertura e a % que bateu, o critério da
-        troca e o estado das chaves do `.env`.
+        troca DA LOJA (sempre em 7 dias: a troca é loja por loja; o total da
+        automação é só informação) e o estado das chaves do `.env`.
   GET   /api/atendimento/automacoes/registro?automacao=&integration_id=&estado=
         &duoke=&so=&limite=&antes=
         As linhas do registro, as mais novas primeiro. SEM TEXTO NENHUM —
@@ -21,11 +22,14 @@ Esta é a aba "Automáticas" do /atendimento:
         Muda o modo, o texto (partes), o atraso, o horário, as condições e o
         teto da regra da loja (cria a regra se não houver). `enviar` é
         RECUSADO (409) enquanto `ATENDIMENTO_AUTOMACOES_ENVIO` estiver
-        desligada, sem o envio geral, sem a confirmação "desliguei no Duoke",
-        na campanha da Shopee sem o `auto_reply` confirmado, na loja sem
-        acesso e na regra sem texto. O texto passa no validador (422 com os
-        motivos). Sobe a versão, carimba `ligada_desde`/`enviar_desde` e, na
-        troca `simular → enviar`, rearma as linhas ainda válidas.
+        desligada, sem o envio geral, na campanha da Shopee sem a resposta
+        automática (a chave E o envio por ela no adaptador), na loja sem
+        acesso e na regra sem texto; e pede (422) a confirmação "desliguei no
+        Duoke" e, se o critério da troca não passou NESTA loja em 7 dias, a
+        confirmação de que a pessoa sabe disso (`troca_sem_criterio`). O texto
+        passa no validador (422 com os motivos). Sobe a versão, carimba
+        `ligada_desde`/`enviar_desde` e, na troca `simular → enviar`, rearma
+        as linhas ainda válidas.
   POST  /api/atendimento/automacoes/{automacao}/simular-nas-lojas-do-duoke
         Cria em `simular` a regra ausente e liga a `desligado` nas lojas onde
         o Duoke manda hoje. NUNCA mexe em regra em `simular` ou `enviar`.
@@ -77,6 +81,8 @@ _G = AtendimentoAutomacaoRegra
 # O nome de exemplo da prévia e da validação do texto na tela.
 NOME_EXEMPLO = "maria.silva"
 LIMITE_REGISTRO = 500
+# O critério da troca é medido sempre nos últimos 7 dias, por loja (§6.5).
+CRITERIO_DIAS = 7
 
 
 # ── Chaves e faixa ────────────────────────────────────────────────────────
@@ -84,6 +90,8 @@ LIMITE_REGISTRO = 500
 
 def chaves() -> dict[str, Any]:
     """O estado das chaves do `.env` que a tela mostra na faixa."""
+    from app.services.atendimento import enviar
+
     s = get_settings()
     return {
         "leitura_ativa": bool(s.atendimento_leitura_ativa),
@@ -91,6 +99,9 @@ def chaves() -> dict[str, Any]:
         "envio_automacoes": bool(s.atendimento_automacoes_envio),
         "envio_geral": bool(s.atendimento_envio_ativo),
         "shopee_auto_reply": bool(s.atendimento_automacoes_shopee_auto_reply),
+        # O envio por resposta automática existe no adaptador da Shopee? Sem
+        # ele, a campanha não sai, com a chave ligada ou não.
+        "shopee_auto_reply_adaptador": enviar.auto_reply_no_adaptador("shopee"),
         "shopee_mensagens_comprador": bool(s.shopee_mensagens_comprador),
         "teto_dia": int(s.atendimento_automacoes_teto_dia or 0),
     }
@@ -187,7 +198,7 @@ def _por_que_nao_enviar(
         motivos.append("envio_desligado")
     if not ch["envio_geral"]:
         motivos.append("envio_geral_desligado")
-    if aut.campanha and not ch["shopee_auto_reply"]:
+    if aut.campanha and not (ch["shopee_auto_reply"] and ch["shopee_auto_reply_adaptador"]):
         motivos.append("campanha_sem_auto_reply")
     if aut.plataforma == "shopee" and not ch["shopee_mensagens_comprador"]:
         motivos.append("shopee_mensagens_desligadas")
@@ -290,6 +301,14 @@ async def listar_automacoes(
     )
     e24 = await comparar.estatisticas(session, desde=agora - timedelta(hours=24), ate=agora)
     eper = await comparar.estatisticas(session, desde=agora - timedelta(days=dias), ate=agora)
+    # O critério da troca é da LOJA, sempre em 7 dias (o período da tela muda a conta, não ele).
+    e7 = (
+        eper
+        if dias == CRITERIO_DIAS
+        else await comparar.estatisticas(
+            session, desde=agora - timedelta(days=CRITERIO_DIAS), ate=agora
+        )
+    )
     ultimos = (
         (
             await session.execute(
@@ -324,6 +343,7 @@ async def listar_automacoes(
             if per:
                 per_lista.append(per)
             motivos = _por_que_nao_enviar(aut, canal, ch)
+            criterio = e7.get((aut.codigo, integ.id)) or comparar.resumir({}, aut)
             linhas_lojas.append(
                 {
                     "integration_id": integ.id,
@@ -339,6 +359,8 @@ async def listar_automacoes(
                     "ultimo": ultimo.get((aut.codigo, integ.id)),
                     "pode_enviar": not motivos,
                     "por_que_nao_enviar": motivos,
+                    "pode_trocar": bool(criterio["pode_trocar"]),
+                    "por_que_nao_trocar": list(criterio["por_que_nao"]),
                 }
             )
         saida.append(
@@ -553,6 +575,9 @@ class RegraIn(BaseModel):
     sem_teto: bool = False
     # "Desliguei esta automação desta loja no Duoke" — obrigatório para `enviar`.
     desliguei_no_duoke: bool = False
+    # "Sei que o critério da troca não passou nesta loja e quero trocar mesmo
+    # assim" — obrigatório para `enviar` quando ele não passou (7 dias, §6.5).
+    troca_sem_criterio: bool = False
 
 
 def _partes_limpas(partes: list[ParteIn]) -> list[dict]:
@@ -621,8 +646,11 @@ async def rearmar(
 
     O caso típico é o entregue que o Duoke só mandaria na madrugada: com ele
     desligado, o comprador não fica sem. A decisão no modo enviar confere de
-    novo se o Duoke mandou depois do gatilho (com a leitura da loja em dia):
-    o rearmado nunca vira mensagem em dobro.
+    novo se o Duoke mandou depois do gatilho (na conversa e, nas do pedido,
+    pelo cartão ou pela conversa do pedido), com a leitura da loja em dia:
+    o que o Duoke já mandou não sai de novo. Só rearma o que ainda pode sair
+    dentro da validade — no HORÁRIO da regra (rearmado às 22h, o entregue
+    espera as 9h; a decisão também segura).
     """
     aut = cat.CATALOGO[regra.automacao]
     linhas = (
@@ -641,9 +669,10 @@ async def rearmar(
         .all()
     )
     janela = cat.janela_da_regra(regra, aut)
+    sai = cat.ajustar_janela(agora, *janela) if janela else agora
     n = 0
     for x in linhas:
-        if agora <= cat.validade_ate(aut, x.devido_em, janela):
+        if sai <= cat.validade_ate(aut, x.devido_em, janela):
             x.estado = cat.ESTADO_AGENDADO
             x.decidido_em = None
             x.modo = None
@@ -714,6 +743,24 @@ async def mudar_regra(
                 detail={
                     "code": "confirmar_duoke",
                     "detail": "Marque que desligou esta automação desta loja no Duoke.",
+                },
+            )
+        # A troca é LOJA por loja: o critério desta loja nos últimos 7 dias.
+        conta = await comparar.estatisticas(
+            session,
+            desde=agora - timedelta(days=CRITERIO_DIAS),
+            ate=agora,
+            automacao=aut.codigo,
+            integration_id=integ.id,
+        )
+        criterio = conta.get((aut.codigo, integ.id)) or comparar.resumir({}, aut)
+        if not criterio["pode_trocar"] and not body.troca_sem_criterio:
+            raise HTTPException(
+                422,
+                detail={
+                    "code": "criterio_nao_passou",
+                    "motivos": list(criterio["por_que_nao"]),
+                    "detail": "O critério da troca não passou nesta loja nos últimos 7 dias.",
                 },
             )
     mudou_versao = False
@@ -788,6 +835,7 @@ async def mudar_regra(
         para=modo,
         versao=regra.versao,
         rearmadas=rearmadas,
+        troca_sem_criterio=bool(modo == cat.MODO_ENVIAR and body.troca_sem_criterio),
         user_id=str(user.id),
     )
     return {

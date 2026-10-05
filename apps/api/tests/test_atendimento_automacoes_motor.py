@@ -57,6 +57,7 @@ from app.models import (
     User,
 )
 from app.routers import atendimento as rota
+from app.routers import atendimento_automacoes as rota_auto
 from app.security.cipher import encrypt_json
 from app.services.atendimento import automacoes, automacoes_comparar, clientes, enviar, gravar, ia
 from app.services.atendimento import automacoes_catalogo as cat
@@ -206,6 +207,9 @@ async def _regra(
 ) -> AtendimentoAutomacaoRegra:
     aut = cat.CATALOGO[codigo]
     semente = cat.regra_semente(aut, integ.name)
+    for campo in ("janela_inicio", "janela_fim", "atraso_min", "partes", "condicoes"):
+        if campo in campos:
+            semente[campo] = campos.pop(campo)
     r = AtendimentoAutomacaoRegra(
         automacao=codigo,
         integration_id=integ.id,
@@ -292,6 +296,63 @@ async def _linhas(db: AsyncSession, **filtro) -> list[AtendimentoAutomacaoRegist
 
 async def _n_mensagens(db: AsyncSession) -> int:
     return int(await db.scalar(select(func.count()).select_from(AtendimentoMensagem)))
+
+
+async def _agendada(
+    db: AsyncSession,
+    regra: AtendimentoAutomacaoRegra,
+    *,
+    evento: datetime,
+    devido: datetime,
+    pedido: str | None = None,
+    conversa: AtendimentoConversa | None = None,
+    chave: str | None = None,
+    **campos,
+) -> AtendimentoAutomacaoRegistro:
+    """Uma linha do registro já descoberta (o gatilho sem passar pela descoberta)."""
+    aut = cat.CATALOGO[regra.automacao]
+    x = AtendimentoAutomacaoRegistro(
+        automacao=regra.automacao,
+        regra_id=regra.id,
+        regra_versao=regra.versao,
+        integration_id=regra.integration_id,
+        plataforma=aut.plataforma,
+        alvo=aut.alvo,
+        chave=chave or (f"pedido:{pedido}" if pedido else f"k:{uuid4().hex}"),
+        pedido=pedido,
+        conversa_id=conversa.id if conversa is not None else None,
+        evento_em=evento,
+        visto_em=evento,
+        devido_em=devido,
+        estado=campos.pop("estado", "agendado"),
+        duoke=campos.pop("duoke", "pendente"),
+        **campos,
+    )
+    db.add(x)
+    await db.commit()
+    return x
+
+
+def _logistica(sn: str, status: str, em: datetime, conta: str = "barbosa") -> Logistica:
+    return Logistica(
+        pedido_marketplace=sn,
+        plataforma="shopee",
+        conta=conta,
+        data=em.date(),
+        meli_status={"order_status": status},
+        status_datas={"order_status": {"em": em.isoformat()}},
+        status_lido_em=em,
+    )
+
+
+# O cartão do pedido que o Duoke manda junto com o texto da campanha.
+def _cartao(sn: str) -> dict:
+    return {"source": "openapi", "message_type": "order", "content": {"order_sn": sn}}
+
+
+ENTREGUE_DUOKE = "Oi! Tudo bem? 😊 Confirmamos a entrega do seu pedido! Por se tratar de um produto"
+POS_DUOKE = "Oi! Só passando para saber se está tudo certo com o seu produto. Se sim e puder"
+RECEBIDO_DUOKE = "Oi! Recebemos seu pedido e já estamos preparando pra envio."
 
 
 # ── Fontes, uma vez só, validade ──────────────────────────────────────────
@@ -397,7 +458,8 @@ async def test_logistica_entregue_espera_as_9h_e_pos_conclusao_sem_avaliacao(db,
             status_lido_em=agora - timedelta(minutes=20),
         )
 
-    # Entregue às 21h de SP de 04/10 → saía às 9h de 05/10 (ainda vale: simula).
+    # Entregue às 21h de SP de 04/10 → saía às 9h de 05/10; a rodada é às 21h de
+    # 05/10, FORA do horário: espera as 9h de 06/10 (ainda vale até as 20h).
     db.add(_logi("251004ENTREGUE", "TO_CONFIRM_RECEIVE", datetime(2026, 10, 5, 0, 0, tzinfo=UTC)))
     # Entregue às 20h40 de SP de 05/10 (fora da janela) → 06/10 às 9h (agendado).
     db.add(_logi("251005NOITE000", "TO_CONFIRM_RECEIVE", datetime(2026, 10, 5, 23, 40, tzinfo=UTC)))
@@ -447,8 +509,8 @@ async def test_logistica_entregue_espera_as_9h_e_pos_conclusao_sem_avaliacao(db,
     )
     await _rodada(agora)
     entregue = {x.pedido: x for x in await _linhas(db, automacao="shopee_entregue")}
-    assert entregue["251004ENTREGUE"].devido_em == datetime(2026, 10, 5, 12, 0, tzinfo=UTC)
-    assert entregue["251004ENTREGUE"].estado == "simulado"
+    assert entregue["251004ENTREGUE"].estado == "agendado"
+    assert entregue["251004ENTREGUE"].devido_em == datetime(2026, 10, 6, 12, 0, tzinfo=UTC)
     noite = entregue["251005NOITE000"]
     assert noite.estado == "agendado"
     assert noite.evento_em == datetime(2026, 10, 5, 23, 40, tzinfo=UTC)
@@ -474,6 +536,10 @@ async def test_logistica_entregue_espera_as_9h_e_pos_conclusao_sem_avaliacao(db,
     await _rodada(datetime(2026, 10, 6, 12, 2, tzinfo=UTC))
     noite = (await _linhas(db, pedido="251005NOITE000", automacao="shopee_entregue"))[0]
     assert (noite.estado, noite.motivo) == ("pulado", "ja_concluido")
+    # E o que esperou a abertura sai às 9h02 (no horário).
+    cedo = (await _linhas(db, pedido="251004ENTREGUE", automacao="shopee_entregue"))[0]
+    assert cedo.estado == "simulado"
+    assert cedo.decidido_em == datetime(2026, 10, 6, 12, 2, tzinfo=UTC)
 
 
 async def test_passou_da_validade_vira_atrasado_fora_da_conta(db, proibido):
@@ -507,6 +573,73 @@ async def test_teto_do_dia_no_modo_seco_vira_diferenca_combinada(db, proibido, _
     await _rodada()
     estados = sorted((x.estado, x.motivo, x.divergencia) for x in await _linhas(db))
     assert estados == [("pulado", "teto_dia", "teto_dia"), ("simulado", None, None)]
+
+
+async def test_fila_de_uma_regra_nao_segura_as_outras(db, proibido, monkeypatch):
+    monkeypatch.setattr(automacoes, "MAX_DECISOES", 3)
+    monkeypatch.setattr(automacoes, "MAX_POR_REGRA", 2)
+    dono = await _dono(db)
+    a, _ = await _loja(db, dono, "barbosa")
+    b, _ = await _loja(db, dono, "kfa")
+    regra_a = await _regra(db, a, "shopee_menu")
+    regra_b = await _regra(db, b, "shopee_menu")
+    for i in range(4):  # as mais velhas, todas da mesma regra
+        await _agendada(
+            db, regra_a, evento=T - timedelta(minutes=20), devido=T - timedelta(minutes=19 - i)
+        )
+    nova = await _agendada(
+        db, regra_b, evento=T - timedelta(minutes=3), devido=T - timedelta(minutes=2)
+    )
+    contagem = await automacoes.decidir_vencidas(db, agora=T)
+    assert sum(contagem.values()) == 3
+    linhas = await _linhas(db)
+    assert {x.id: x.estado for x in linhas}[nova.id] != "agendado", "a outra loja entra na rodada"
+    assert sum(x.estado == "agendado" for x in linhas) == 2
+
+
+async def test_insert_em_lotes(db, monkeypatch):
+    monkeypatch.setattr(automacoes, "LOTE_INSERT", 2)
+    dono = await _dono(db)
+    integ, _ = await _loja(db, dono)
+    regra = await _regra(db, integ, "shopee_pedido_recebido")
+    aut = cat.CATALOGO["shopee_pedido_recebido"]
+    linhas = [
+        automacoes._linha_registro(
+            aut, regra, chave=f"pedido:{i}", agora=T, evento_em=T, devido_em=T, pedido=str(i)
+        )
+        for i in range(5)
+    ]
+    assert await automacoes._gravar_candidatos(db, linhas) == 5
+    assert await automacoes._gravar_candidatos(db, linhas) == 0  # a chave única segura
+    await db.commit()
+    assert len(await _linhas(db)) == 5
+
+
+async def test_limpeza_do_registro_guarda_90_dias_e_nunca_o_que_decide(db):
+    dono = await _dono(db)
+    integ, _ = await _loja(db, dono)
+    regra = await _regra(db, integ, "shopee_menu")
+    velho = T - timedelta(days=100)
+    apagar = await _agendada(db, regra, evento=velho, devido=velho, estado="simulado")
+    preso = await _agendada(db, regra, evento=velho, devido=velho)  # agendado: fica
+    novo = await _agendada(db, regra, evento=T, devido=T, estado="simulado")
+    assert await automacoes.limpar_registro(db, agora=T) == 1
+    await db.commit()
+    assert {x.id for x in await _linhas(db)} == {preso.id, novo.id}
+    assert apagar.id not in {x.id for x in await _linhas(db)}
+
+
+async def test_a_seguinte_nasce_no_horario_da_regra_dela(db, proibido):
+    dono = await _dono(db)
+    integ, _ = await _loja(db, dono)
+    regra = await _regra(db, integ, "shopee_duvida_2h")
+    await _regra(db, integ, "shopee_duvida_26h", janela_inicio=time(9), janela_fim=time(20))
+    # O 2 h sai às 21h de SP; o 26 h seria às 21h do dia seguinte: anda para as 9h.
+    devido = datetime(2026, 10, 6, 0, 0, tzinfo=UTC)
+    await _agendada(db, regra, evento=devido - timedelta(hours=2), devido=devido)
+    await automacoes.decidir_vencidas(db, agora=devido + timedelta(minutes=1))
+    [seguinte] = await _linhas(db, automacao="shopee_duvida_26h")
+    assert seguinte.devido_em == datetime(2026, 10, 7, 12, 0, tzinfo=UTC)
 
 
 # ── Simular NUNCA chama a plataforma ──────────────────────────────────────
@@ -613,6 +746,35 @@ class AdaptadorFalso:
     async def enviar_texto(self, session, conversa, integration, cliente, texto):
         self.envios.append(texto)
         return self.resultado
+
+
+class AdaptadorComAutoReply(AdaptadorFalso):
+    """O adaptador que sabe mandar como resposta automática (o da Shopee ainda não sabe)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.auto_replies: list[str] = []
+
+    async def enviar_auto_reply(self, session, conversa, integration, cliente, texto):
+        self.auto_replies.append(texto)
+        return self.resultado
+
+
+@pytest.fixture
+def auto_reply_ligado(monkeypatch, _chaves) -> AdaptadorComAutoReply:
+    """Tudo ligado E o envio por resposta automática no adaptador (como seria depois)."""
+    _chaves.atendimento_envio_ativo = True
+    _chaves.atendimento_automacoes_envio = True
+    _chaves.atendimento_automacoes_shopee_auto_reply = True
+    falso = AdaptadorComAutoReply()
+    monkeypatch.setattr(enviar, "adaptador", lambda _plataforma: falso)
+    monkeypatch.setattr(enviar, "auto_reply_no_adaptador", lambda _plataforma="shopee": True)
+
+    async def _cliente(_integ):
+        return object()
+
+    monkeypatch.setattr(clientes, "cliente_da_integracao", _cliente)
+    return falso
 
 
 @pytest.fixture
@@ -726,6 +888,203 @@ async def test_campanha_da_shopee_nao_sai_sem_o_auto_reply(db, envio_ligado):
     assert envio_ligado.envios == []
 
 
+async def test_campanha_nao_sai_com_a_chave_ligada_sem_o_envio_por_auto_reply(
+    db, envio_ligado, _chaves, client, pessoa
+):
+    """A chave do auto_reply sozinha NÃO libera a campanha: sem o envio por resposta
+    automática no adaptador (hoje não existe), ela sairia como mensagem normal."""
+    _chaves.atendimento_automacoes_shopee_auto_reply = True
+    assert enviar.auto_reply_no_adaptador("shopee") is False  # o adaptador de verdade
+    integ, canal = await _loja(db, pessoa)
+    await _regra(db, integ, "shopee_convite", modo="enviar", enviar_desde=DESDE)
+    conversa = await _conversa(db, integ, canal)
+    await _msg(db, conversa, em=T - timedelta(minutes=5))
+    await _rodada()
+    [linha] = await _linhas(db)
+    assert (linha.estado, linha.motivo) == ("pulado", "campanha_sem_auto_reply")
+    assert envio_ligado.envios == []
+    with pytest.raises(enviar.EnvioRecusado) as e:
+        await enviar.enviar_automatica(
+            db,
+            conversa,
+            codigo="shopee_convite",
+            texto="Já segue?",
+            registro_id=None,
+            regra_versao=1,
+        )
+    assert e.value.code == "campanha_sem_auto_reply"
+    assert envio_ligado.envios == []
+    # A tela: a chave ligada, o adaptador sem o envio — Enviar travado na campanha.
+    r = await client.get("/api/atendimento/automacoes", params={"plataforma": "shopee"})
+    corpo = r.json()
+    assert corpo["chaves"]["shopee_auto_reply"] is True
+    assert corpo["chaves"]["shopee_auto_reply_adaptador"] is False
+    convite = next(a for a in corpo["automacoes"] if a["codigo"] == "shopee_convite")
+    assert "campanha_sem_auto_reply" in convite["lojas"][0]["por_que_nao_enviar"]
+    menu = next(a for a in corpo["automacoes"] if a["codigo"] == "shopee_menu")
+    assert "campanha_sem_auto_reply" not in menu["lojas"][0]["por_que_nao_enviar"]
+
+
+async def test_campanha_com_o_auto_reply_sai_por_ele_e_nunca_como_mensagem_normal(
+    db, auto_reply_ligado
+):
+    dono = await _dono(db)
+    integ, canal = await _loja(db, dono)
+    regra = await _regra(db, integ, "shopee_pos_conclusao", modo="enviar", enviar_desde=DESDE)
+    await _conversa(db, integ, canal, pedido=SN)
+    db.add(_logistica(SN, "COMPLETED", T - timedelta(hours=4, minutes=10)))
+    await db.commit()
+    await _agendada(
+        db,
+        regra,
+        pedido=SN,
+        evento=T - timedelta(hours=4, minutes=10),
+        devido=T - timedelta(minutes=10),
+    )
+    await _rodada()
+    [linha] = await _linhas(db)
+    assert (linha.estado, linha.motivo) == ("enviado", None)
+    assert len(auto_reply_ligado.auto_replies) == 1
+    assert auto_reply_ligado.auto_replies[0].startswith("Oi, maria.silva! Só passando")
+    assert auto_reply_ligado.envios == [], "a campanha nunca vai pelo enviar_texto"
+
+
+@pytest.mark.parametrize("caso", ["entregue", "pedido_recebido", "pos"])
+async def test_enviar_do_pedido_nao_manda_se_o_duoke_mandou_depois_do_gatilho(
+    db, auto_reply_ligado, caso
+):
+    """Pedido recebido, entregue e pós: a mesma régua do comparador (o cartão do
+    pedido do Duoke, ou a conversa do pedido) antes de mandar. A 1ª que acha o
+    Duoke dispara o disjuntor NA HORA: o resto do lote já decide em simular."""
+    dono = await _dono(db)
+    integ, canal = await _loja(db, dono)
+    agora = datetime(2026, 10, 6, 12, 2, tzinfo=UTC)  # 9h02 em São Paulo
+    pedidos = [f"251006LOTE{i:04d}" for i in range(3)]
+    if caso == "entregue":
+        codigo, texto, evento, devido, duoke_em = (
+            "shopee_entregue",
+            ENTREGUE_DUOKE,
+            datetime(2026, 10, 6, 0, 30, tzinfo=UTC),  # entregue às 21h30 de SP
+            datetime(2026, 10, 6, 12, 0, tzinfo=UTC),  # o nosso: às 9h
+            datetime(2026, 10, 6, 5, 0, tzinfo=UTC),  # o lote do Duoke: 2h da manhã
+        )
+        status = "TO_CONFIRM_RECEIVE"
+    elif caso == "pedido_recebido":
+        codigo, texto, evento, devido, duoke_em = (
+            "shopee_pedido_recebido",
+            RECEBIDO_DUOKE,
+            agora - timedelta(minutes=10),
+            agora - timedelta(minutes=5),
+            agora - timedelta(minutes=5),  # o Duoke 5 min depois do Bling
+        )
+        status = None
+    else:
+        codigo, texto, evento, devido, duoke_em = (
+            "shopee_pos_conclusao",
+            POS_DUOKE,
+            agora - timedelta(hours=4, minutes=7),
+            agora - timedelta(minutes=7),
+            agora - timedelta(minutes=6),
+        )
+        status = "COMPLETED"
+    regra = await _regra(db, integ, codigo, modo="enviar", enviar_desde=agora - timedelta(hours=12))
+    for i, sn in enumerate(pedidos):
+        if status:
+            db.add(_logistica(sn, status, evento))
+        await db.commit()
+        if caso == "pos":
+            # Sem cartão: o pós do Duoke casa pela conversa do pedido.
+            conversa = await _conversa(db, integ, canal, comprador=f"c{i}", pedido=sn)
+        else:
+            conversa = await _conversa(db, integ, canal, comprador=f"c{i}")
+            await _msg(db, conversa, autor="loja", texto=None, em=duoke_em, payload=_cartao(sn))
+        await _msg(db, conversa, autor="sistema", texto=texto, em=duoke_em + timedelta(seconds=1))
+        await _agendada(db, regra, pedido=sn, evento=evento, devido=devido + timedelta(seconds=i))
+    await _rodada(agora)
+    linhas = sorted(await _linhas(db, automacao=codigo), key=lambda x: x.devido_em)
+    assert (linhas[0].estado, linhas[0].motivo) == ("pulado", "duoke_mandou")
+    # O disjuntor na hora: as outras duas do lote decidem em simular (nada sai).
+    assert [x.estado for x in linhas[1:]] == ["simulado", "simulado"]
+    assert auto_reply_ligado.envios == [] and auto_reply_ligado.auto_replies == []
+    await db.refresh(regra)
+    assert (regra.modo, regra.disjuntor_motivo) == ("simular", "duoke_ainda_ligado")
+
+
+async def test_enviar_fora_do_horario_espera_a_abertura_e_o_rearme_tambem(db, auto_reply_ligado):
+    """O horário vale na DECISÃO: o entregue rearmado às 22h não sai às 22h02 — espera
+    as 9h (dentro da validade) e sai, pela resposta automática."""
+    dono = await _dono(db)
+    integ, canal = await _loja(db, dono)
+    regra = await _regra(db, integ, "shopee_entregue")
+    await _conversa(db, integ, canal, pedido=SN)
+    evento = datetime(2026, 10, 5, 21, 0, tzinfo=UTC)  # entregue às 18h de SP
+    db.add(_logistica(SN, "TO_CONFIRM_RECEIVE", evento))
+    await db.commit()
+    await _agendada(
+        db,
+        regra,
+        pedido=SN,
+        evento=evento,
+        devido=evento,
+        estado="simulado",
+        duoke="nao_mandou",
+        decidido_em=evento,
+        modo="simular",
+    )
+    # A troca às 22h de SP: o PATCH põe em enviar e rearma.
+    regra.modo = "enviar"
+    regra.enviar_desde = datetime(2026, 10, 6, 1, 0, tzinfo=UTC)
+    await db.commit()
+    assert await rota_auto.rearmar(db, regra, agora=datetime(2026, 10, 6, 1, 0, tzinfo=UTC)) == 1
+    await db.commit()
+    await _rodada(datetime(2026, 10, 6, 1, 2, tzinfo=UTC))  # 22h02
+    [linha] = await _linhas(db)
+    assert linha.estado == "agendado" and linha.devido_em == datetime(
+        2026, 10, 6, 12, 0, tzinfo=UTC
+    )
+    assert auto_reply_ligado.auto_replies == []
+    await _rodada(datetime(2026, 10, 6, 6, 2, tzinfo=UTC))  # 3h02: ainda fechado
+    assert auto_reply_ligado.auto_replies == []
+    await _rodada(datetime(2026, 10, 6, 12, 2, tzinfo=UTC))  # 9h02
+    [linha] = await _linhas(db)
+    assert linha.estado == "enviado" and len(auto_reply_ligado.auto_replies) == 1
+
+
+async def test_rearme_so_do_que_ainda_sai_no_horario(db):
+    dono = await _dono(db)
+    integ, _ = await _loja(db, dono)
+    regra = await _regra(db, integ, "shopee_menu", janela_inicio=time(9), janela_fim=time(20))
+    # Menu (vale 30 min) simulado às 21h58 de SP; a troca às 22h: só sairia às 9h — não rearma.
+    await _agendada(
+        db,
+        regra,
+        evento=datetime(2026, 10, 6, 0, 57, tzinfo=UTC),
+        devido=datetime(2026, 10, 6, 0, 58, tzinfo=UTC),
+        estado="simulado",
+        duoke="nao_mandou",
+    )
+    assert await rota_auto.rearmar(db, regra, agora=datetime(2026, 10, 6, 1, 0, tzinfo=UTC)) == 0
+
+
+async def test_enviar_depois_da_transicao_nao_espera_a_leitura(db, envio_ligado):
+    """Passados os dias da transição, a espera do Duoke e da leitura só atrasaria o
+    menu: ele sai na rodada seguinte ao `devido_em`, mesmo com a leitura parada."""
+    dono = await _dono(db)
+    integ, canal = await _loja(db, dono, ultimo_ok=T - timedelta(minutes=10))
+    await _regra(
+        db,
+        integ,
+        "shopee_menu",
+        modo="enviar",
+        enviar_desde=T - automacoes.TRANSICAO - timedelta(hours=1),
+    )
+    conversa = await _conversa(db, integ, canal)
+    await _msg(db, conversa, em=T - timedelta(minutes=3))
+    await _rodada()
+    [linha] = await _linhas(db)
+    assert linha.estado == "enviado" and len(envio_ligado.envios) == 1
+
+
 async def test_regra_relida_no_envio_recusa_se_saiu_de_enviar(db, envio_ligado):
     dono = await _dono(db)
     integ, canal = await _loja(db, dono)
@@ -787,13 +1146,76 @@ async def test_comparador_mandou_nao_mandou_e_leitura_parada(db, proibido):
     linhas = {x.conversa_id: x for x in await _linhas(db, automacao="shopee_menu")}
     assert linhas[com_duoke.id].duoke == "mandou"
     assert linhas[com_duoke.id].duoke_mensagem_id == duoke.id
+    # A linha passou da validade (o motor viu tarde): não sairia — a diferença
+    # fica contra o `devido_em`.
+    assert linhas[com_duoke.id].estado == "pulado"
     assert linhas[com_duoke.id].duoke_diferenca_s == 20
     assert linhas[sem_duoke.id].duoke == "nao_mandou"
     # A leitura da loja parou antes do fim da janela: continua pendente.
     assert linhas[da_parada.id].duoke == "pendente"
 
 
-async def test_so_duoke_e_o_menu_de_fim_de_sessao(db, proibido):
+async def test_diferenca_e_da_hora_em_que_a_nossa_sairia_e_o_atraso_real(db, proibido):
+    """Medido do `devido_em`, o menu batia "na mesma hora" (0 s) que o Duoke; a nossa
+    sai na rodada (minutos pares) depois do `devido_em`: a diferença é da DECISÃO, e a
+    conta mostra o atraso real do DaVinci (do gatilho até a hora em que sairia)."""
+    dono = await _dono(db)
+    integ, canal = await _loja(db, dono, ultimo_ok=T + timedelta(hours=1))
+    await _regra(db, integ, "shopee_menu")
+    conversa = await _conversa(db, integ, canal)
+    await _msg(db, conversa, em=T - timedelta(minutes=3), visto=T - timedelta(minutes=2))
+    await _msg(db, conversa, autor="loja", texto=MENU, em=T - timedelta(minutes=2, seconds=-10))
+    await _rodada(motor_desde=T - timedelta(hours=1))
+    await _rodada(T + timedelta(minutes=30), motor_desde=T - timedelta(hours=1))
+    [linha] = await _linhas(db, automacao="shopee_menu")
+    assert (linha.estado, linha.decidido_em, linha.duoke) == ("simulado", T, "mandou")
+    # Duoke às T − 1 min 50 s; a nossa às T (o devido era T − 2 min).
+    assert linha.duoke_diferenca_s == -110
+    conta = await automacoes_comparar.estatisticas(
+        db, desde=T - timedelta(days=1), ate=T + timedelta(hours=1)
+    )
+    menu = conta[("shopee_menu", integ.id)]
+    assert (menu["diferenca_mediana_s"], menu["atraso_mediana_s"]) == (-110, 180)
+    total = automacoes_comparar.somar(list(conta.values()), cat.CATALOGO["shopee_menu"])
+    assert total["atraso_mediana_s"] == 180
+    assert "_atrasos" not in automacoes_comparar.sem_internos(total)
+
+
+async def test_diferenca_do_enviado_e_da_mensagem_que_saiu(db, proibido):
+    dono = await _dono(db)
+    integ, canal = await _loja(db, dono, ultimo_ok=T + timedelta(hours=1))
+    regra = await _regra(db, integ, "shopee_menu", modo="enviar", enviar_desde=DESDE)
+    conversa = await _conversa(db, integ, canal)
+    nossa = await _msg(
+        db,
+        conversa,
+        autor="loja",
+        origem="davinci_auto",
+        texto=cat.TEXTO_MENU,
+        em=T - timedelta(minutes=30),
+        payload={"automacao": {"codigo": "shopee_menu"}},
+    )
+    await _agendada(
+        db,
+        regra,
+        conversa=conversa,
+        evento=T - timedelta(minutes=32),
+        devido=T - timedelta(minutes=31),
+        estado="enviado",
+        modo="enviar",
+        decidido_em=T - timedelta(minutes=29),
+        mensagem_ids=[str(nossa.id)],
+    )
+    await _msg(db, conversa, autor="loja", texto=MENU, em=T - timedelta(minutes=29, seconds=30))
+    await automacoes_comparar.comparar(db, agora=T, motor_desde=T - timedelta(days=1))
+    await db.commit()
+    [linha] = await _linhas(db)
+    # Duoke − a NOSSA mensagem gravada (não o devido_em, nem a decisão).
+    assert (linha.duoke, linha.duoke_diferenca_s) == ("mandou", 30)
+
+
+async def test_so_duoke_e_o_menu_de_fim_de_sessao(db, proibido, monkeypatch):
+    monkeypatch.setattr(automacoes_comparar, "LOTE_INSERT", 1)  # em lotes, o mesmo resultado
     dono = await _dono(db)
     integ, canal = await _loja(db, dono)
     await _regra(db, integ, "shopee_menu", ligada_desde=T - timedelta(days=5))
@@ -1177,11 +1599,69 @@ async def test_patch_cria_regra_sobe_versao_e_rearma_na_troca(db, client, pessoa
     await db.commit()
     _chaves.atendimento_automacoes_envio = True
     _chaves.atendimento_envio_ativo = True
+    # O critério da troca não passou NESTA loja (1 caso): pede a confirmação.
     r = await client.patch(url, json={"modo": "enviar", "desliguei_no_duoke": True})
+    assert r.status_code == 422 and r.json()["detail"]["code"] == "criterio_nao_passou"
+    assert "poucos casos (1 de 30)" in r.json()["detail"]["motivos"]
+    r = await client.patch(
+        url, json={"modo": "enviar", "desliguei_no_duoke": True, "troca_sem_criterio": True}
+    )
     assert r.status_code == 200, r.text
     assert r.json()["rearmadas"] == 1 and r.json()["regra"]["enviar_desde"]
     [linha] = await _linhas(db)
     assert linha.estado == "agendado" and linha.decidido_em is None
+
+
+async def test_criterio_da_troca_e_da_loja_em_7_dias(db, client, pessoa, _chaves):
+    """O selo da automação soma as lojas; a troca é loja por loja: a lista traz o
+    critério de cada loja (sempre 7 dias), e o PATCH para enviar exige o da loja —
+    ou a confirmação explícita de quem troca sem ele."""
+    _chaves.atendimento_automacoes_envio = True
+    _chaves.atendimento_envio_ativo = True
+    boa, _ = await _loja(db, pessoa, "barbosa")
+    fraca, _ = await _loja(db, pessoa, "kfa")
+    agora = datetime.now(UTC)
+    for integ, n in ((boa, 40), (fraca, 3)):
+        regra = await _regra(db, integ, "shopee_menu")
+        for i in range(n):
+            await _agendada(
+                db,
+                regra,
+                evento=agora - timedelta(hours=3, minutes=i),
+                devido=agora - timedelta(hours=3, minutes=i) + timedelta(minutes=1),
+                estado="simulado",
+                modo="simular",
+                decidido_em=agora - timedelta(hours=3),
+                duoke="mandou",
+            )
+    r = await client.get("/api/atendimento/automacoes", params={"plataforma": "shopee", "dias": 30})
+    assert r.status_code == 200, r.text
+    menu = next(a for a in r.json()["automacoes"] if a["codigo"] == "shopee_menu")
+    por_loja = {x["integracao"]: x for x in menu["lojas"]}
+    assert (
+        por_loja["barbosa"]["pode_trocar"] is True
+        and por_loja["barbosa"]["por_que_nao_trocar"] == []
+    )
+    assert por_loja["kfa"]["pode_trocar"] is False
+    assert por_loja["kfa"]["por_que_nao_trocar"] == ["poucos casos (3 de 30)"]
+    # A soma das lojas passaria (43 casos) — e não vale para a loja fraca.
+    assert menu["total_periodo"]["pode_trocar"] is True
+    r = await client.patch(
+        f"/api/atendimento/automacoes/shopee_menu/{fraca.id}",
+        json={"modo": "enviar", "desliguei_no_duoke": True},
+    )
+    assert r.status_code == 422 and r.json()["detail"]["code"] == "criterio_nao_passou"
+    assert r.json()["detail"]["motivos"] == ["poucos casos (3 de 30)"]
+    r = await client.patch(
+        f"/api/atendimento/automacoes/shopee_menu/{boa.id}",
+        json={"modo": "enviar", "desliguei_no_duoke": True},
+    )
+    assert r.status_code == 200, r.text
+    r = await client.patch(
+        f"/api/atendimento/automacoes/shopee_menu/{fraca.id}",
+        json={"modo": "enviar", "desliguei_no_duoke": True, "troca_sem_criterio": True},
+    )
+    assert r.status_code == 200, r.text
 
 
 async def test_simular_nas_lojas_do_duoke_nunca_mexe_em_enviar(db, client, pessoa):
@@ -1221,3 +1701,34 @@ def test_janela_das_regras_e_time():
         type("R", (), {"janela_inicio": time(9), "janela_fim": time(20)})(),
         cat.CATALOGO["shopee_menu"],
     ) == (time(9), time(20))
+
+
+# ── O script que refaz a fila com a régua nova ────────────────────────────
+
+
+async def test_script_da_fila_seco_so_conta_e_gravar_grava(db):
+    from scripts import atendimento_fila_recalcular as script
+
+    dono = await _dono(db)
+    integ, canal = await _loja(db, dono)
+    conversa = await _conversa(db, integ, canal)
+    agora = datetime.now(UTC)
+    await _msg(db, conversa, em=agora - timedelta(hours=2))
+    # O cartão do pedido da campanha: a régua velha contava como resposta da loja.
+    await _msg(
+        db, conversa, autor="loja", texto=None, em=agora - timedelta(hours=1), payload=_cartao(SN)
+    )
+    conversa.aguardando_resposta = False
+    conversa.ultima_da_loja_em = agora - timedelta(hours=1)
+    conversa.ultima_mensagem_em = agora - timedelta(hours=1)
+    await db.commit()
+    seco = await script.recalcular(seco=True, agora=agora)
+    assert (seco["mudaram"], seco["entraram_na_fila"]) == (1, 1)
+    assert seco["mudaram_por_plataforma"] == {"shopee": 1}
+    await db.refresh(conversa)
+    assert conversa.aguardando_resposta is False, "o seco não grava"
+    gravou = await script.recalcular(seco=False, agora=agora)
+    assert gravou["entraram_na_fila"] == 1
+    await db.refresh(conversa)
+    assert conversa.aguardando_resposta is True
+    assert (await script.recalcular(seco=True, agora=agora))["mudaram"] == 0

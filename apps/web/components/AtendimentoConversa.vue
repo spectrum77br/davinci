@@ -430,11 +430,13 @@ function avisarRespostaAlheia(antes: Detalhe, d: Detalhe) {
   const ultima = alheias[alheias.length - 1]
   const quem = ultima.origem === 'davinci_ia'
     ? 'A IA'
-    : respondidaNoSellerCentral(ultima, d.conversa.plataforma)
-      ? 'Alguém pelo Seller Central'
-      : respondidaNoSellerCenter(ultima, d.conversa.plataforma)
-        ? 'Alguém pelo Seller Center'
-        : ultima.origem === 'externo' ? 'Alguém fora do DaVinci' : (ultima.autor_nome || 'Outra pessoa')
+    : ultima.origem === 'davinci_auto'
+      ? 'A mensagem automática do DaVinci'
+      : respondidaNoSellerCentral(ultima, d.conversa.plataforma)
+        ? 'Alguém pelo Seller Central'
+        : respondidaNoSellerCenter(ultima, d.conversa.plataforma)
+          ? 'Alguém pelo Seller Center'
+          : ultima.origem === 'externo' ? 'Alguém fora do DaVinci' : (ultima.autor_nome || 'Outra pessoa')
   toasts.warning(`${quem} respondeu esta conversa enquanto você escrevia`, ['Confira a resposta antes de enviar a sua — o comprador pode receber duas.'])
 }
 
@@ -655,11 +657,13 @@ function balaoCls(m: Mensagem) {
 function autorCls(m: Mensagem) {
   if (m.origem === 'davinci_ia') return 'text-violet-700 dark:text-violet-300'
   if (m.origem === 'davinci_humano') return 'text-emerald-700 dark:text-emerald-300'
+  if (m.origem === 'davinci_auto') return 'text-sky-700 dark:text-sky-300'
   return 'text-muted-foreground'
 }
 const ORIGEM_HINT: Record<string, string> = {
   davinci_humano: 'enviada por alguém da equipe pelo DaVinci',
   davinci_ia: 'enviada pela IA do DaVinci',
+  davinci_auto: 'mensagem automática do DaVinci (regra da loja na aba Automáticas)',
   externo: 'respondida fora do DaVinci (Duoke, central da loja, celular)',
 }
 function origemHint(m: Mensagem): string {

@@ -372,8 +372,10 @@ class Automacao:
     travada: bool = False
     # A automação que nasce da decisão desta (2 h → 26 h / 24 h).
     seguinte: str | None = None
-    # No modo enviar, quanto esperar depois do `devido_em` (e da leitura da
-    # loja passar dele) para ver se o Duoke ainda mandou: a troca não duplica.
+    # No modo enviar, NA TRANSIÇÃO (os primeiros dias depois de `enviar_desde`,
+    # `automacoes.TRANSICAO`), quanto esperar depois do `devido_em` (e da
+    # leitura da loja passar dele) para ver se o Duoke ainda mandou: a troca
+    # não duplica. Passada a transição, não espera (só atrasaria o comprador).
     espera_duoke: timedelta = timedelta(0)
     # A janela de comparação com o Duoke: (base, de, até) — base é
     # "devido" ou "evento".
@@ -622,6 +624,8 @@ def _montar() -> dict[str, Automacao]:
             lojas_duoke=SHOPEE_CAMPANHAS,
             condicoes={"so_sem_avaliacao": True, "so_com_conversa": True},
             campanha=True,
+            # O do Duoke sai perto das 4 h (mediana −17 s): na troca, espera 5 min.
+            espera_duoke=_min(5),
             comparar=("evento", _h(3), _h(8)),
             atraso_max_duoke=_h(8),
         ),
@@ -817,6 +821,26 @@ def assinatura(texto: str | None) -> tuple[str, int | None] | None:
         if n.startswith(trecho) if como == "inicio" else trecho in n:
             return tipo, opcao
     return None
+
+
+def automacao_do_modelo(
+    tipo: str | None, opcao: int | None, plataforma: str, canal: str
+) -> str | None:
+    """A nossa automação que faz o mesmo que este modelo do Duoke (None = fora). PURA."""
+    if not tipo:
+        return None
+    if tipo == TIPO_OPCAO:
+        codigo = f"{plataforma}_opcao_{opcao}"
+    else:
+        codigo = next(
+            (
+                a.codigo
+                for a in CATALOGO.values()
+                if a.plataforma == plataforma and a.canal == canal and a.tipo == tipo
+            ),
+            None,
+        )
+    return codigo if codigo in CATALOGO else None
 
 
 def digito_opcao(texto: str | None) -> int | None:
@@ -1133,6 +1157,66 @@ def janela_da_regra(regra: Any, aut: Automacao) -> tuple[time, time] | None:
     return _janela(regra, aut)
 
 
+# ── O modo seco mede o DaVinci SOZINHO ────────────────────────────────────
+# A crítica de 05/10 (a contraprova da simulação de 7 dias): o estado do robô —
+# a sessão de 12 h do menu, o intervalo do "aguarde", o ciclo do "ficou alguma
+# dúvida" — contava as mensagens que o Duoke mandou DE VERDADE. Depois da troca
+# esse estado vem só do DaVinci, e os dois não andam juntos: a resposta da opção
+# do Duoke sai 12 h depois do menu (a do DaVinci, 1 min depois do dígito), e a
+# sessão que ela abre segurava o menu do DaVinci no modo seco — o comparador
+# nunca via a diferença (o menu da Shopee caía de 99,1% para 93,3% de precisão
+# sem ela). Agora, numa regra em SIMULAR, a mensagem do Duoke daquela automação
+# depois do corte (a regra ligada e o motor rodando) sai do estado e vale a
+# linha simulada do DaVinci (o registro); antes do corte, o histórico do Duoke
+# (o DaVinci ainda não tinha linha). O comparador continua comparando com o
+# Duoke. Em `enviar` e em `desligado` a mensagem do Duoke fica: é a que o
+# comprador recebeu de verdade. O convite e as campanhas do pedido não entram:
+# o convite é uma vez por comprador (a chave) e sai no mesmo minuto nos dois.
+TIPOS_DO_ROBO = frozenset({TIPO_MENU, TIPO_OPCAO, TIPO_AGUARDE, TIPO_DUVIDA_1, TIPO_DUVIDA_2})
+
+
+def cortes_do_modo_seco(
+    regras: Iterable[Any], motor_desde: datetime | None = None
+) -> dict[str, datetime]:
+    """Automação em `simular` → desde quando o DaVinci responde pelo estado dela. PURA.
+
+    O corte é o mais tarde entre `ligada_desde` e o começo do motor: antes
+    disso o DaVinci não tinha linha, e o histórico do Duoke é o que vale.
+    """
+    saida: dict[str, datetime] = {}
+    for regra in regras:
+        if getattr(regra, "modo", None) != MODO_SIMULAR:
+            continue
+        marcos = [
+            _utc(x) for x in (getattr(regra, "ligada_desde", None), motor_desde) if x is not None
+        ]
+        if marcos:
+            saida[regra.automacao] = max(marcos)
+    return saida
+
+
+def sem_o_duoke_substituido(
+    msgs: Iterable[Msg], *, plataforma: str, canal: str, cortes: dict[str, datetime] | None
+) -> list[Msg]:
+    """As mensagens que valem para o ESTADO do robô (veja `TIPOS_DO_ROBO`). PURA.
+
+    Sai a mensagem do Duoke de uma automação que o DaVinci está simulando, a
+    partir do corte dela (`cortes_do_modo_seco`): no lugar dela vale a linha
+    simulada do DaVinci, que já está no registro da conversa.
+    """
+    if not cortes:
+        return list(msgs)
+    saida = []
+    for m in msgs:
+        if m.tipo_duoke in TIPOS_DO_ROBO and not m.nossa:
+            codigo = automacao_do_modelo(m.tipo_duoke, m.opcao_duoke, plataforma, canal)
+            corte = cortes.get(codigo) if codigo else None
+            if corte is not None and m.em >= corte:
+                continue
+        saida.append(m)
+    return saida
+
+
 def _envios(
     conv: Conversa, tipos: set[str], plataforma: str, *, do_duoke: bool = True
 ) -> list[datetime]:
@@ -1291,7 +1375,7 @@ def _opcao(conv: Conversa, plataforma: str) -> list[Candidato]:
     return saida
 
 
-def _loja_falou_por_ultimo(conv: Conversa, ate: datetime) -> bool:
+def _loja_falou_por_ultimo(msgs: Iterable[Msg], ate: datetime) -> bool:
     """A última fala (comprador ou loja; o sistema não conta) até `ate` é da loja?
 
     O "aguarde" do TikTok (`so_se_comprador_por_ultimo`), medido: o Duoke manda
@@ -1302,7 +1386,7 @@ def _loja_falou_por_ultimo(conv: Conversa, ate: datetime) -> bool:
     """
     falas = [
         m
-        for m in conv.msgs
+        for m in msgs
         if m.em <= ate
         and (m.do_comprador or (m.autor == AUTOR_LOJA and m.status != MSG_FALHOU))
         and m.tipo_auto != TIPO_AGUARDE
@@ -1442,10 +1526,20 @@ def fatos_da_conversa(
     agora: datetime,
     regra: Any,
     gatilho_id: Any = None,
+    cortes: dict[str, datetime] | None = None,
 ) -> dict:
-    """O que a linha de conversa precisa saber da própria conversa. PURA."""
+    """O que a linha de conversa precisa saber da própria conversa. PURA.
+
+    `cortes` (`cortes_do_modo_seco`): o estado do robô (sessão, intervalo,
+    opção já respondida) é medido sem as mensagens do Duoke que o DaVinci
+    está simulando — o `duoke_depois` (o "Duoke ainda ligado?" do modo
+    enviar) continua vendo todas.
+    """
     evento_em = _utc(evento_em)
     agora = _utc(agora)
+    estado = sem_o_duoke_substituido(
+        msgs, plataforma=aut.plataforma, canal=aut.canal, cortes=cortes
+    )
     pessoas = [m.em for m in msgs if m.pessoa_da_loja]
     outras = [linha for linha in registro if linha.chave != chave]
     fatos: dict = {
@@ -1466,7 +1560,7 @@ def fatos_da_conversa(
         plataforma=aut.plataforma,
         canal=aut.canal,
         comprador_id=None,
-        msgs=msgs,
+        msgs=estado,
         registro=outras,
         ativas={},
         desde=evento_em,
@@ -1482,13 +1576,14 @@ def fatos_da_conversa(
             agora - intervalo < t < evento_em for t in envios
         )
         if _cond(regra, aut, "so_se_comprador_por_ultimo", False):
-            fatos["loja_respondeu"] = _loja_falou_por_ultimo(conv, agora)
+            # A fala da loja é a que o comprador viu (o "já segue" do Duoke conta).
+            fatos["loja_respondeu"] = _loja_falou_por_ultimo(msgs, agora)
     elif aut.tipo == TIPO_OPCAO:
         menu_em = _menu_antes(conv, aut.plataforma, evento_em)
         if menu_em is not None:
             respondidas = [
                 m.em
-                for m in msgs
+                for m in estado
                 if not m.do_comprador
                 and m.tipo_auto == TIPO_OPCAO
                 and m.opcao_auto == aut.opcao
