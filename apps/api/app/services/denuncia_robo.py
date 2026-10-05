@@ -86,15 +86,23 @@ PASSOS: dict[str, tuple[int, str, str, str]] = {
     # --ml; Shopee e TikTok depois).
     "replica_diversos": (6, "Réplica Denúncias Diversos", "perfis das lojas (ML 93 e 78)",
                          "Diversos recusado na loja e já com processo na Anatel: outra empresa "
-                         "denuncia de novo citando o processo SEI (grupo da loja; a 2ª réplica pelo "
-                         "outro grupo)"),
+                         "denuncia de novo citando o processo SEI (grupo da loja; a 2ª réplica "
+                         "pelo outro grupo)"),
     # 01/10 (Vinicius): o "saiu do ar?" levava 3–4 h e virou passo próprio, feito com o
     # robô parado (para quando a rodada chega e continua depois).
     "ativos_inativos": (7, "Conferência de anúncios ativos/inativos",
                         "perfil 50 + 148",
                         "abre um por um os anúncios que acompanhamos e vê quem saiu do ar; "
                         "roda com o robô parado, para se a rodada chegar e continua depois"),
-    "juridico": (8, "Jurídico", "escritório", "monta a pasta do caso pro advogado (não envia)"),
+    # 05/10 (Vinicius perguntou se rodar 0→9 sem parar seria melhor): manter os horários e
+    # aproveitar o tempo em que o perfil 50 fica parado com o que trava o resultado — prints
+    # atrasados (sem print não vai pra Anatel) e a conferência de ativos/inativos pela metade.
+    # Desiste se o próximo passo do perfil 50 vem em menos de 30 min e para 15 min antes dele.
+    # No mini: ação extra aproveitar_parado (aproveitar_parado.py).
+    "aproveitar_parado": (8, "Tempo parado: prints e ativos/inativos", "perfil 50",
+                          "nos buracos da agenda: tira os prints atrasados e retoma a conferência "
+                          "de ativos/inativos; para 15 min antes do próximo passo do perfil 50"),
+    "juridico": (9, "Jurídico", "escritório", "monta a pasta do caso pro advogado (não envia)"),
 }
 # passos de antes de 02/10: só pra dar nome às rodadas que ainda os têm (não têm botão)
 ANTIGOS: dict[str, tuple[int, str]] = {
