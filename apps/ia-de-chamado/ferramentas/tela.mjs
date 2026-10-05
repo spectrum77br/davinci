@@ -100,8 +100,15 @@ function camposDaPagina() {
   const todos = [...document.querySelectorAll(sel)].filter(
     (e) => !e.disabled && !e.readOnly && e.name !== "g-recaptcha-response",
   );
-  // arquivo costuma ser um input invisível dentro da área "Selecionar arquivos"
-  const campos = todos.filter((e) => vis(e) || (e.type === "file" && e.parentElement && vis(e.parentElement)));
+  // arquivo costuma ser um input invisível dentro da área "Selecionar arquivos".
+  // 05/10 (296301, recurso da TikTok): no cartão de foto o input fica DUAS camadas
+  // abaixo do que aparece (pai display:none 0×0, avô 564×120) — sobe até 4.
+  const areaDoArquivo = (e) => {
+    let a = e.parentElement;
+    for (let i = 0; a && i < 4; i++, a = a.parentElement) if (vis(a)) return a;
+    return null;
+  };
+  const campos = todos.filter((e) => vis(e) || (e.type === "file" && areaDoArquivo(e)));
   document.querySelectorAll("[data-ia-campo]").forEach((e) => e.removeAttribute("data-ia-campo"));
   const eCampo = new Set(campos);
   const textoAntes = (el) => {
@@ -129,12 +136,29 @@ function camposDaPagina() {
     }
     return "";
   };
+  const rotuloDoArquivo = (el) => {
+    // O cartão só diz "Carregar (0/6)"; o nome que a pessoa lê ("Prova de danos ao
+    // produto") está no bloco logo acima da caixa inteira do cartão.
+    let a = areaDoArquivo(el);
+    if (!a) return [];
+    const caixa = a.getBoundingClientRect();
+    const mesmaCaixa = (x) => {
+      const b = x.getBoundingClientRect();
+      return b.width === caixa.width && b.height === caixa.height && b.top === caixa.top;
+    };
+    while (a.parentElement && mesmaCaixa(a.parentElement)) a = a.parentElement;
+    const bloco = a.parentElement;
+    if (!bloco || [...eCampo].some((o) => o !== el && bloco.contains(o))) return [];
+    const linhas = (bloco.innerText || "").replace(a.innerText || "", "").split("\n").map(norm).filter(Boolean);
+    return linhas.length ? [linhas[0], linhas.join(" ")] : [];
+  };
   return campos.map((e, i) => {
     const n = i + 1;
     e.setAttribute("data-ia-campo", String(n));
     const porId = (ids) =>
       norm((ids || "").split(/\s+/).map((id) => document.getElementById(id)?.innerText || "").join(" "));
     const textos = [
+      ...(e.type === "file" ? rotuloDoArquivo(e) : []),
       norm([...(e.labels || [])].map((l) => l.innerText).join(" ")),
       norm(e.getAttribute("aria-label")),
       porId(e.getAttribute("aria-labelledby")),
@@ -341,7 +365,21 @@ try {
         await h.uploadFile(...arquivos.map((a) => path.resolve(a)));
         await espera(3000);
         const nomes = await h.evaluate((e) => [...e.files].map((f) => f.name));
-        saida({ ok: true, campo: `#${r.campo.n} ${r.campo.rotulo}`, anexados: nomes, captcha: await captcha() });
+        // 05/10 (296301): o cartão de foto da TikTok limpa o input depois de ler o
+        // arquivo — `anexados` volta vazio com a foto no cartão. Quem confirma é o
+        // que aparece na área ("Carregar (1/6)" + miniatura).
+        const area = await h.evaluate((e) => {
+          let a = e.parentElement;
+          for (let i = 0; a && i < 6; i++, a = a.parentElement) {
+            const b = a.getBoundingClientRect();
+            if (b.width > 0 && b.height > 0) {
+              const texto = (a.innerText || "").replace(/\s+/g, " ").trim().slice(0, 120);
+              return { texto, miniaturas: a.querySelectorAll("img").length };
+            }
+          }
+          return null;
+        });
+        saida({ ok: true, campo: `#${r.campo.n} ${r.campo.rotulo}`, anexados: nomes, area, captcha: await captcha() });
       }
     }
   } else if (cmd === "captcha") {

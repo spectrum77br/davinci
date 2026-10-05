@@ -149,6 +149,11 @@ python3 ferramentas/adspower.py fechar <perfil>
   O `escrever` apaga o que já estava na caixa e confere: só siga com `confere:
   true` (com `aviso` de limite de caracteres, encurte o texto). Em caixa de uma
   linha os parágrafos viram uma linha só; Enter só com `enter` no fim (chat).
+- **Foto**: caixa de foto aparece no `campos` como tipo `arquivo`, com o nome do
+  bloco (no recurso da TikTok: "Prova de danos ao produto", "… de perto",
+  "Comprovante de envio"). Depois do `anexar`, confira pelo `area` (ex.: "Carregar
+  (2/6)" e `miniaturas`): no cartão da TikTok o `anexados` volta vazio mesmo com a
+  foto lá.
 - **Sempre feche o perfil no fim** — o executor de leitura pula perfil aberto.
 - O print sai em dobro do tamanho: coordenada do print ÷ 2 = coordenada do `ponto`.
 - Um chamado por perfil de cada vez. Confira loja, pedido e conversa antes de enviar.
