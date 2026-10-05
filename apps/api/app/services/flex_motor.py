@@ -156,6 +156,18 @@ _MOTOR_LOCK_KEY = 0x666C6578
 # dele; com mais anúncios, a fila anda pelos mais velhos/mais urgentes
 # primeiro, em rodízio entre as contas. Shopee: 50 por chamada.
 _TETO_LEITURAS_ML = 400
+# Revisão de 05/10/2026: leitura mais velha que isto volta para a frente da
+# fila mesmo com o Flex "batendo" com a regra — senão, com centenas de
+# anúncios esperando desligar (em observar nunca desligam), o anúncio já certo
+# nunca era relido e uma mudança feita no painel do ML não aparecia nunca.
+_RELER_NO_MAXIMO = timedelta(hours=6)
+# As leituras param aqui (contado do começo da rodada) para o `_gravar` rodar
+# dentro do timeout do job (900 s): com o ML lento, 400 leituras passavam de
+# 15 min, o arq cancelava e a rodada inteira se perdia (nada gravado).
+_PRAZO_LEITURAS_S = 540
+# 5xx/rede seguidos na mesma conta: o endpoint está ruim, para a conta nesta
+# rodada (como o 429) em vez de gastar o prazo com ela.
+_REPETIR_SEGUIDOS = 5
 _TETO_LEITURAS_SHOPEE = 2000
 # Leitura do ML com 403 sem "item down" (SEM_PERMISSAO): um anúncio isolado
 # (de outro vendedor, vínculo trocado de conta) não interrompe a conta; só
@@ -1098,6 +1110,14 @@ def _chave_trava(integration_id: UUID, external_id: str) -> int:
     return v - 2**32 if v >= 2**31 else v
 
 
+async def _travar_conta(session: AsyncSession, iid: UUID) -> None:
+    """Trava (esperando) a linha da conta em `flex_conta` até o commit."""
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(:ns, :k)"),
+        {"ns": SYNC_NAMESPACE, "k": _chave_trava(iid, "conta")},
+    )
+
+
 async def _travar(session: AsyncSession, chave: int) -> bool:
     r = await session.execute(
         text("SELECT pg_try_advisory_xact_lock(:ns, :k)"), {"ns": SYNC_NAMESPACE, "k": chave}
@@ -1237,7 +1257,10 @@ async def _conferir_contas(
             resumo["contas_conferidas"] = resumo.get("contas_conferidas", 0) + 1
         if respostas:
             async with session_scope() as s:
-                for iid, r in respostas.items():
+                for iid, r in sorted(respostas.items(), key=lambda kv: str(kv[0])):
+                    # A rodada e a emergência conferem/descobrem a mesma conta:
+                    # uma de cada vez (a 2ª enxerga a linha que a 1ª gravou).
+                    await _travar_conta(s, iid)
                     c = await s.get(FlexConta, iid)
                     if c is None:
                         c = FlexConta(integration_id=iid, plataforma=out[iid].plataforma)
@@ -1394,6 +1417,12 @@ async def _descobrir(
         por_id.pop("", None)
         novos = 0
         async with session_scope() as s:
+            # A rodada e a emergência podem descobrir a mesma conta ao mesmo
+            # tempo: uma de cada vez por conta (a 2ª vê o que a 1ª gravou).
+            await s.execute(
+                text("SELECT pg_advisory_xact_lock(:ns, :k)"),
+                {"ns": SYNC_NAMESPACE, "k": _chave_trava(iid, "descoberta")},
+            )
             conhecidos = await _chaves_conhecidas(s, iid, flex_envio.PLATAFORMA_ML)
             for ext, status in por_id.items():
                 vistos[(iid, ext)] = status
@@ -1427,6 +1456,7 @@ async def _descobrir(
                         motivo=f"{MOTIVO_FORA_DO_DAVINCI} (achado na conta do ML)",
                     )
                 )
+            await _travar_conta(s, iid)
             c = await s.get(FlexConta, iid)
             if c is None:
                 c = FlexConta(integration_id=iid, plataforma=flex_envio.PLATAFORMA_ML)
@@ -1506,7 +1536,12 @@ def _escolher_leituras(
         obs = e.observado if e else None
         quando = (e.leitura_em or e.observado_em) if e else None
         quer = decisoes[a.chave].desejado == LIGADO
-        precisa = obs is None or quer != (obs == LIGADO)
+        precisa = (
+            obs is None
+            or quer != (obs == LIGADO)
+            or quando is None
+            or quando < agora - _RELER_NO_MAXIMO
+        )
         return (
             0 if (e is not None and e.aprovado) else 1,
             0 if precisa else 1,
@@ -1540,9 +1575,12 @@ async def _ler(
     integracoes: Mapping[UUID, Integration],
     clientes: dict[UUID, Any],
     resumo: dict,
+    *,
+    prazo: float | None = None,
 ) -> dict[tuple[UUID, str], flex_api.ResultadoFlex]:
     """Lê o Flex dos anúncios escolhidos, na ordem dada, até o teto de cada
-    plataforma. Só LEITURA.
+    plataforma ou o `prazo` (time.monotonic) — o que vier primeiro; o resto
+    fica para a próxima rodada (`leituras_adiadas`). Só LEITURA.
 
     A leitura também passa pela trava do anúncio: nenhuma chamada ao mesmo
     anúncio ao mesmo tempo (a emergência e a aprovação escrevem fora da
@@ -1577,10 +1615,14 @@ async def _ler(
         return cli
 
     # ---- ML: um GET por anúncio, em rodízio, até o teto -------------------
+    def _estourou() -> bool:
+        return prazo is not None and time.monotonic() >= prazo
+
     lidas = 0
     seguidos: Counter[UUID] = Counter()
+    repetir: Counter[UUID] = Counter()
     for a in (x for x in escolhidos if x.plataforma == flex_envio.PLATAFORMA_ML):
-        if lidas >= _TETO_LEITURAS_ML:
+        if lidas >= _TETO_LEITURAS_ML or _estourou():
             resumo["leituras_adiadas"] = resumo.get("leituras_adiadas", 0) + 1
             continue
         iid = a.integration_id
@@ -1601,6 +1643,12 @@ async def _ler(
             # Limite estourado: as próximas leituras da conta só bateriam no
             # mesmo muro. Fica para a próxima rodada.
             _interromper(iid)
+        elif r.tipo == flex_api.REPETIR:
+            # 5xx / rede: um anúncio pode falhar sozinho; vários seguidos é o
+            # endpoint ruim — a conta para nesta rodada.
+            repetir[iid] += 1
+            if repetir[iid] >= _REPETIR_SEGUIDOS:
+                _interromper(iid)
         elif r.tipo == flex_api.SEM_PERMISSAO:
             # 401 / refresh recusado: é o token da conta. 403 sem "item
             # down" pode ser UM anúncio (de outro vendedor) — só interrompe
@@ -1608,7 +1656,9 @@ async def _ler(
             seguidos[iid] += 1
             if r.status_http in (None, 401) or seguidos[iid] >= _SEM_PERMISSAO_SEGUIDOS:
                 _interromper(iid)
-        else:
+        if r.tipo != flex_api.REPETIR:
+            repetir[iid] = 0
+        if r.tipo != flex_api.SEM_PERMISSAO:
             seguidos[iid] = 0
 
     # ---- Shopee: 50 anúncios por chamada, cada um com a sua trava ---------
@@ -1626,6 +1676,11 @@ async def _ler(
         if cli is None:
             continue
         for inicio in range(0, len(lista), 50):
+            if _estourou():
+                resumo["leituras_adiadas"] = (
+                    resumo.get("leituras_adiadas", 0) + len(lista) - inicio
+                )
+                break
             lote = lista[inicio : inicio + 50]
             async with session_scope() as s:
                 livres = [
@@ -2432,6 +2487,9 @@ async def _rodada(
     resumo: dict,
 ) -> None:
     agora = _agora()
+    # Conta desde o começo: a conferência das contas e a descoberta também
+    # gastam o tempo do job.
+    prazo = time.monotonic() + _PRAZO_LEITURAS_S
     async with session_scope() as s:
         integracoes = await integracoes_permitidas(s, contas)
     if not integracoes:
@@ -2459,7 +2517,7 @@ async def _rodada(
     leituras: dict[tuple[UUID, str], flex_api.ResultadoFlex] = {}
     if ler:
         escolhidos = _escolher_leituras(anuncios, decisoes, estados, alvo, agora)
-        leituras = await _ler(escolhidos, integracoes, clientes, resumo)
+        leituras = await _ler(escolhidos, integracoes, clientes, resumo, prazo=prazo)
         if leituras:
             anuncios = _com_leituras(anuncios, leituras, agora)
             decisoes = decidir_lote(anuncios, saldos, cfg)

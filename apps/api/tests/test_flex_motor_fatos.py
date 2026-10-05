@@ -21,6 +21,7 @@ Nenhuma chamada externa: os clientes falsos de tests/test_flex_motor.
 # ruff: noqa: F811
 from __future__ import annotations
 
+import time
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -615,3 +616,75 @@ async def test_emergencia_job_tira_aprovacoes_na_hora_e_grava_o_andamento(
     ml.chamadas.clear()
     await worker.flex_emergencia_run({}, prep["id"])
     assert ml.chamadas == []
+
+
+# ---- revisão de 05/10/2026 (antes de publicar em observar) ------------------------
+
+
+def test_leitura_velha_volta_para_a_fila_mesmo_batendo_com_a_regra():
+    """Em observar nada desliga: os anúncios lidos LIGADOS que a regra quer
+    desligados ficam "precisa" para sempre e tomam as 400 vagas. O anúncio já
+    certo (Z) nunca era relido — uma mudança no painel do ML não aparecia."""
+    agora = datetime(2026, 10, 5, 12, tzinfo=UTC)
+    a = uuid.UUID(int=1)
+    muitos = [_anuncio(a, f"L{i}") for i in range(1000)]
+    z = _anuncio(a, "Z")
+    anuncios = [*muitos, z]
+    decisoes = {x.chave: flex_motor.Decisao("desligado", "x") for x in anuncios}
+    lido = agora - timedelta(hours=1)
+
+    def est(obs, quando):
+        return flex_motor._Estado(plataforma="ml", desejado="desligado", observado=obs,
+                                  observado_em=quando, recusa=None, leitura_em=quando)
+
+    estados = {x.chave: est("ligado", lido) for x in muitos}
+    estados[z.chave] = est("desligado", agora - timedelta(hours=7))
+    ordem = [x.external_id for x in flex_motor._escolher_leituras(
+        anuncios, decisoes, estados, None, agora)]
+    assert ordem.index("Z") < flex_motor._TETO_LEITURAS_ML
+    # Lido há pouco e batendo com a regra: continua no fim da fila.
+    estados[z.chave] = est("desligado", lido)
+    ordem = [x.external_id for x in flex_motor._escolher_leituras(
+        anuncios, decisoes, estados, None, agora)]
+    assert ordem.index("Z") == 1000
+
+
+class _Integ:
+    def __init__(self, iid):
+        self.id = iid
+
+
+class _ML503(FakeML):
+    async def ler_flex(self, item):
+        self.chamadas.append(("ler", item))
+        return ResultadoFlex(flex_api.REPETIR, status_http=503, detalhe="503")
+
+
+@pytest.mark.asyncio
+async def test_ler_para_a_conta_depois_de_5_erros_seguidos(db):
+    a = uuid.UUID(int=11)
+    b = uuid.UUID(int=12)
+    ruim, boa = _ML503(), FakeML({f"B{i}": False for i in range(3)})
+    escolhidos = [_anuncio(a, f"A{i}") for i in range(20)]
+    escolhidos += [_anuncio(b, f"B{i}") for i in range(3)]
+    resumo: dict = {}
+    out = await flex_motor._ler(
+        escolhidos, {a: _Integ(a), b: _Integ(b)}, {a: ruim, b: boa}, resumo
+    )
+    assert len(ruim.leituras) == flex_motor._REPETIR_SEGUIDOS
+    assert boa.leituras == ["B0", "B1", "B2"]
+    assert resumo["contas_interrompidas"] == 1
+    assert {k[1] for k in out} == {"A0", "A1", "A2", "A3", "A4", "B0", "B1", "B2"}
+
+
+@pytest.mark.asyncio
+async def test_ler_respeita_o_prazo_e_deixa_o_resto_para_a_proxima(db):
+    a = uuid.UUID(int=21)
+    cli = FakeML({f"A{i}": False for i in range(5)})
+    escolhidos = [_anuncio(a, f"A{i}") for i in range(5)]
+    resumo: dict = {}
+    out = await flex_motor._ler(
+        escolhidos, {a: _Integ(a)}, {a: cli}, resumo, prazo=time.monotonic() - 1
+    )
+    assert out == {} and cli.leituras == []
+    assert resumo["leituras_adiadas"] == 5
