@@ -68,7 +68,7 @@ TETO_POR_PEDIDO = 200
 # (`atendimento_automacao_regras`: o modo da loja, o texto, o horário) fica
 # COM o gatilho: quem ligou o envio de qual automação em qual loja é
 # exatamente o que o Histórico serve para mostrar.
-# Flex (02/10/2026, migration 0364): `flex_pedido` (o shipment check regrava a
+# Flex (02/10/2026, migration 0367): `flex_pedido` (o shipment check regrava a
 # cada minuto), `flex_anuncio_estado` (a varredura recalcula toda rodada) e
 # `flex_log` (já É a trilha: antes/depois, modo e resultado) são da máquina,
 # como `flex_conta` (a assinatura relida de hora em hora) e `flex_emergencia`

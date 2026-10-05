@@ -54,7 +54,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base
 
-# Valores fechados (espelhados nos CHECK da migration 0364).
+# Valores fechados (espelhados nos CHECK da migration 0367).
 FLEX_PLATAFORMAS = ("ml", "shopee")
 FLEX_DESEJADO = ("ligado", "desligado", "inelegivel")
 FLEX_OBSERVADO = ("ligado", "desligado")
