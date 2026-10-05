@@ -17,7 +17,10 @@ coisas que ninguém pode esquecer ficam num lugar só:
 
 3. A FILA — `aguardando_resposta` e `prazo_resposta_em` são derivados das
    mensagens aqui (`recalcular`), para a lista ordenar e filtrar sem varrer
-   mensagem e para o alerta de prazo ter uma coluna só para olhar.
+   mensagem e para o alerta de prazo ter uma coluna só para olhar. Mensagem
+   automática (`constantes.e_mensagem_automatica`) não é resposta: não fecha
+   a vez do comprador (menos no turno em que ele só mandou cartão) nem
+   aposenta a sugestão da IA.
 
 4. A ORDEM DAS TRAVAS — quem muda mensagem trava a CONVERSA antes (sync,
    envio e a tela). Com a mesma ordem em todo lugar, o sync que adota a
@@ -45,9 +48,10 @@ import re
 import unicodedata
 from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import structlog
-from sqlalchemy import func, inspect, select, text
+from sqlalchemy import and_, case, false, func, inspect, or_, select, text
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -68,6 +72,8 @@ from app.services.atendimento.constantes import (
     AUTOR_SISTEMA,
     AUTORES,
     AVALIACAO_OBSERVOU,
+    CARTOES_DO_COMPRADOR_SHOPEE,
+    CARTOES_DO_COMPRADOR_TIKTOK,
     CHAVE_PRAZO_LIDO_EM,
     CHAVE_PRAZO_PLATAFORMA,
     CHAVE_VEZ_DA_LOJA,
@@ -75,6 +81,11 @@ from app.services.atendimento.constantes import (
     CONVERSA_BLOQUEADA,
     CONVERSA_FECHADA,
     CONVERSA_RESPONDIDA,
+    ESPACOS,
+    FIGURINHA_CAMPANHA_DUOKE,
+    FONTE_SHOPEE_API,
+    FONTES_SHOPEE_DA_PLATAFORMA,
+    INICIO_AUTOMATICA,
     MSG_ENVIADA,
     MSG_ENVIANDO,
     MSG_FALHOU,
@@ -85,8 +96,14 @@ from app.services.atendimento.constantes import (
     ORIGEM_NOTA,
     ORIGEM_SISTEMA,
     ORIGENS_DAVINCI,
+    PADRAO_MENSAGEM_AUTOMATICA,
+    PADRAO_RESPOSTA_AUTOMATICA,
+    PRIMEIRAS_LETRAS_AUTOMATICA,
     RASCUNHO_PENDENTE,
     RASCUNHO_SUBSTITUIDO,
+    TIPO_SHOPEE_FIGURINHA,
+    TRECHOS_CAMPANHA_COM_USUARIO,
+    e_mensagem_automatica,
     e_nota,
     e_resposta_automatica,
     sla_horas,
@@ -183,6 +200,71 @@ def normalizar_para_comparar(texto: str | None) -> str:
     sem_acento = "".join(ch for ch in decomposto if not unicodedata.combining(ch))
     so_palavras = re.sub(r"[\W_]+", " ", sem_acento.casefold())
     return " ".join(so_palavras.split())
+
+
+def mensagem_automatica_sql(texto: Any, payload: Any = None) -> Any:
+    """`constantes.e_mensagem_automatica` em SQL — nunca NULL (texto vazio = não).
+
+    Para quem conta ou escolhe mensagens no banco sem trazê-las ao Python (a
+    métrica de tempo de resposta, os exemplos da IA): o mesmo regex, sobre o
+    mesmo começo do texto em minúsculas, e — com a coluna `payload` — a
+    figurinha da campanha e os cartões da Shopee. O teste compara os dois lados.
+    """
+    inicio = func.left(func.coalesce(texto, ""), INICIO_AUTOMATICA)
+    minusculo = func.lower(inicio)
+    regex = minusculo.regexp_match(PADRAO_MENSAGEM_AUTOMATICA)
+    # Os pré-filtros são condição necessária do regex: o resultado é o mesmo,
+    # e só ~1/3 das mensagens paga o regex. A primeira letra depois dos
+    # espaços vale para todos, menos as campanhas que começam pelo usuário do
+    # comprador — essas, só se o texto tiver o trecho fixo delas.
+    primeira = func.left(func.ltrim(inicio, ESPACOS), 1)
+    pelo_texto = case(
+        (primeira.in_(sorted(PRIMEIRAS_LETRAS_AUTOMATICA)), regex),
+        (or_(*(minusculo.like(t) for t in TRECHOS_CAMPANHA_COM_USUARIO)), regex),
+        else_=false(),
+    )
+    if payload is None:
+        return pelo_texto
+    return or_(pelo_texto, automatica_pelo_payload_sql(payload))
+
+
+def automatica_pelo_payload_sql(payload: Any) -> Any:
+    """`constantes.e_automatica_pelo_payload` em SQL (a coluna JSONB `payload`)."""
+    fonte = payload["source"].astext
+    return func.coalesce(
+        or_(
+            fonte.in_(FONTES_SHOPEE_DA_PLATAFORMA),
+            and_(
+                fonte == FONTE_SHOPEE_API,
+                payload["message_type"].astext == TIPO_SHOPEE_FIGURINHA,
+                # Caminho (`#>>`), não `["content"]["sticker_id"]`: o subscrito
+                # do JSONB vira sintaxe errada sobre um valor com cast (o teste).
+                payload[("content", "sticker_id")].astext == FIGURINHA_CAMPANHA_DUOKE,
+            ),
+        ),
+        false(),
+    )
+
+
+def resposta_automatica_sql(texto: Any) -> Any:
+    """`constantes.e_resposta_automatica` (a régua ANTIGA) em SQL — nunca NULL.
+
+    Só o turno em que o comprador só mandou cartão usa (`recalcular_conversa`):
+    poucas linhas por conversa, sem pré-filtro. O teste compara com o Python.
+    """
+    inicio = func.left(func.coalesce(texto, ""), INICIO_AUTOMATICA)
+    return func.lower(inicio).regexp_match(PADRAO_RESPOSTA_AUTOMATICA)
+
+
+def cartao_do_comprador_sql(payload: Any) -> Any:
+    """`constantes.e_cartao_do_comprador` em SQL (a coluna JSONB `payload`) — nunca NULL."""
+    return func.coalesce(
+        or_(
+            payload["message_type"].astext.in_(CARTOES_DO_COMPRADOR_SHOPEE),
+            payload["type"].astext.in_(CARTOES_DO_COMPRADOR_TIKTOK),
+        ),
+        false(),
+    )
 
 
 # ── Relógio ───────────────────────────────────────────────────────────────
@@ -753,9 +835,15 @@ async def gravar_mensagem(
     if autor == AUTOR_CLIENTE:
         _reabrir_se_nova(conversa, mensagem)
     recalcular(conversa, [mensagem])
+    if _fechava_a_vez(mensagem):
+        # A automática que a régua antiga contava (a figurinha 0007, o cartão
+        # da Shopee, a campanha "já segue"): fecha a vez se o comprador só
+        # mandou cartão desde a última resposta de pessoa — só o banco sabe.
+        await recalcular_conversa(session, conversa)
     if autor == AUTOR_LOJA:
         # Qualquer resposta da loja (por fora ou pelo DaVinci) depois da
-        # mensagem que a sugestão responde deixa a sugestão para trás.
+        # mensagem que a sugestão responde deixa a sugestão para trás — menos
+        # a mensagem automática (o próprio `_aposentar_rascunho` confere).
         await _aposentar_rascunho(session, conversa, mensagem)
     await session.flush()
     if conversa.etiqueta is None:
@@ -852,6 +940,8 @@ def _derivar(conversa: AtendimentoConversa) -> None:
 def recalcular(
     conversa: AtendimentoConversa,
     mensagens_recentes: Iterable[AtendimentoMensagem] = (),
+    *,
+    fecham_a_vez: Iterable[AtendimentoMensagem] = (),
 ) -> None:
     """Dobra mensagens novas nos carimbos da conversa e rededuz a fila. Sem banco.
 
@@ -864,7 +954,24 @@ def recalcular(
 
     NOTA INTERNA (`constantes.e_nota`) não conta para nada: não é a última
     mensagem da lista, nem fala do cliente, nem resposta da loja.
+
+    MENSAGEM AUTOMÁTICA (`constantes.e_mensagem_automatica`, a mesma régua da
+    métrica de tempo de resposta — 05/10/2026) não é resposta: o robô e as
+    campanhas do Duoke (inclusive a "fulano já segue nossa loja aqui" do
+    TikTok), a figurinha 0007 da campanha e os cartões `server`/`crm` da
+    Shopee (pelo `payload`) e a senha da devolução que o DaVinci manda
+    sozinho. Ela continua sendo a última mensagem da lista; só não fecha a
+    vez do comprador.
+
+    TURNO SÓ DE CARTÃO (05/10/2026, `constantes.e_cartao_do_comprador`): se,
+    desde a última resposta de pessoa, o comprador só mandou o cartão do
+    produto/pedido, vale a régua de antes — a automática que ela contava
+    (tudo menos o robô do Duoke, `e_resposta_automatica`: a figurinha 0007
+    26 h depois, o cartão da Shopee, a campanha "já segue") fecha a vez. Só
+    o banco sabe o que o comprador mandou: quem decide é `recalcular_conversa`,
+    que passa essa mensagem em `fecham_a_vez` (a mesma instância da lista).
     """
+    fecham = tuple(fecham_a_vez)
     for m in mensagens_recentes:
         if e_nota(m.origem, m.tipo):
             continue
@@ -881,8 +988,12 @@ def recalcular(
         elif (
             m.autor == AUTOR_LOJA
             and m.status != MSG_FALHOU
-            # A resposta automática do Duoke não responde o comprador.
-            and not e_resposta_automatica(m.texto)
+            # A mensagem automática não responde o comprador (menos a que
+            # fecha o turno só de cartão).
+            and (
+                not e_mensagem_automatica(m.texto, getattr(m, "payload", None))
+                or any(m is f for f in fecham)
+            )
         ):
             atual = _utc(conversa.ultima_da_loja_em)
             if atual is None or quando > atual:
@@ -890,13 +1001,32 @@ def recalcular(
     _derivar(conversa)
 
 
+def _fechava_a_vez(m: AtendimentoMensagem) -> bool:
+    """Mensagem automática que a régua ANTIGA contava como resposta? PURA.
+
+    Da loja, não falhou, automática pela régua nova e não pela antiga (o
+    robô e as campanhas do Duoke nunca fecharam a vez): a figurinha 0007, os
+    cartões `server`/`crm` da Shopee, a campanha "já segue nossa loja" e a
+    senha da devolução. Só ela pode fechar o turno só de cartão.
+    """
+    return (
+        m.autor == AUTOR_LOJA
+        and m.status != MSG_FALHOU
+        and e_mensagem_automatica(m.texto, getattr(m, "payload", None))
+        and not e_resposta_automatica(m.texto)
+    )
+
+
 async def recalcular_conversa(session: AsyncSession, conversa: AtendimentoConversa) -> None:
     """Refaz os carimbos da conversa do zero, lendo as mensagens do banco.
 
     Para quem MUDA mensagem que já existia (o envio que virou `falhou`, a
-    pessoa que fechou/reabriu, o "não precisa de resposta"). Lê só as três
-    linhas que importam — a última, a última do cliente e a última resposta
-    válida da loja —, não a conversa inteira. Nunca commita.
+    pessoa que fechou/reabriu, o "não precisa de resposta") — e para a
+    mensagem automática nova que a régua antiga contava (`gravar_mensagem`):
+    só aqui se sabe se o comprador só mandou cartão. Lê só as linhas que
+    importam — a última, a última do cliente, a última resposta de pessoa
+    da loja e, no turno só de cartão, a automática que o fecha —, não a
+    conversa inteira. Nunca commita.
     """
     momento = func.coalesce(AtendimentoMensagem.enviada_em, AtendimentoMensagem.created_at)
     # A nota interna fica de fora (não é a "última mensagem" da conversa).
@@ -914,23 +1044,41 @@ async def recalcular_conversa(session: AsyncSession, conversa: AtendimentoConver
     do_cliente = await _uma(
         base.where(AtendimentoMensagem.autor == AUTOR_CLIENTE).order_by(momento.desc())
     )
-    # A última resposta da loja que NÃO é a automática do Duoke (o filtro é
-    # por texto, em Python: olha as 20 últimas da loja, que é de sobra).
-    candidatas = (
-        (
-            await session.execute(
-                base.where(
-                    AtendimentoMensagem.autor == AUTOR_LOJA,
-                    AtendimentoMensagem.status != MSG_FALHOU,
-                )
-                .order_by(momento.desc())
-                .limit(20)
-            )
-        )
-        .scalars()
-        .all()
+    # A última resposta da loja que NÃO é mensagem automática — no próprio
+    # SQL (`mensagem_automatica_sql`, a gêmea do Python que o `recalcular`
+    # usa): a figurinha da campanha e os cartões da Shopee chegam em fileira,
+    # e olhar só as N últimas da loja podia não achar a da pessoa.
+    da_loja = await _uma(
+        base.where(
+            AtendimentoMensagem.autor == AUTOR_LOJA,
+            AtendimentoMensagem.status != MSG_FALHOU,
+            ~mensagem_automatica_sql(AtendimentoMensagem.texto, AtendimentoMensagem.payload),
+        ).order_by(momento.desc(), AtendimentoMensagem.created_at.desc())
     )
-    da_loja = next((m for m in candidatas if not e_resposta_automatica(m.texto)), None)
+    # TURNO SÓ DE CARTÃO (`recalcular`): depois da resposta de pessoa, a
+    # última automática que a régua antiga contava (`_fechava_a_vez`, no
+    # SQL) ANTES da primeira mensagem do comprador que não é cartão — o que
+    # veio depois de ele escrever não fecha nada. É o mesmo que a gravação
+    # faz mensagem a mensagem.
+    escreveu = base.where(
+        AtendimentoMensagem.autor == AUTOR_CLIENTE,
+        ~cartao_do_comprador_sql(AtendimentoMensagem.payload),
+    )
+    fechou = base.where(
+        AtendimentoMensagem.autor == AUTOR_LOJA,
+        AtendimentoMensagem.status != MSG_FALHOU,
+        mensagem_automatica_sql(AtendimentoMensagem.texto, AtendimentoMensagem.payload),
+        ~resposta_automatica_sql(AtendimentoMensagem.texto),
+    )
+    if da_loja is not None:
+        escreveu = escreveu.where(momento > _quando(da_loja))
+        fechou = fechou.where(momento > _quando(da_loja))
+    primeira_escrita = await _uma(
+        escreveu.order_by(momento.asc(), AtendimentoMensagem.created_at.asc())
+    )
+    if primeira_escrita is not None:
+        fechou = fechou.where(momento < _quando(primeira_escrita))
+    so_cartao = await _uma(fechou.order_by(momento.desc(), AtendimentoMensagem.created_at.desc()))
 
     conversa.ultima_mensagem_em = None
     conversa.ultima_mensagem_resumo = None
@@ -938,7 +1086,11 @@ async def recalcular_conversa(session: AsyncSession, conversa: AtendimentoConver
     conversa.ultima_do_cliente_em = None
     conversa.ultima_da_loja_em = None
     # A última por último: em empate de horário, é ela que dá o resumo.
-    recalcular(conversa, [m for m in (do_cliente, da_loja, ultima) if m is not None])
+    recalcular(
+        conversa,
+        [m for m in (do_cliente, da_loja, so_cartao, ultima) if m is not None],
+        fecham_a_vez=() if so_cartao is None else (so_cartao,),
+    )
     if da_loja is not None:
         await _aposentar_rascunho(session, conversa, da_loja)
     await session.flush()
@@ -958,8 +1110,19 @@ async def _aposentar_rascunho(
     silêncio + a rodada do sync), e o Duoke pode ter respondido nesse meio —
     a resposta dele é "mais velha" que a sugestão, mas é posterior à
     pergunta. Resposta que falhou não conta (o cliente continua esperando).
+
+    Mensagem automática (`constantes.e_mensagem_automatica`, 05/10/2026)
+    também não: ela não responde o comprador — a conversa continua em
+    "Falta responder", e a sugestão continua valendo para a pessoa. Sem
+    isto, a figurinha 0007 da campanha (26 h depois) aposentava a sugestão:
+    em copiloto a IA escrevia de novo (o modelo pago duas vezes) e, em
+    observação, a avaliação virava "escreveu do zero" com "[Figurinha]".
+    Nem a que fecha o turno só de cartão: o comprador não perguntou nada, e
+    a sugestão continua lá se ele escrever.
     """
-    if resposta.status == MSG_FALHOU:
+    if resposta.status == MSG_FALHOU or e_mensagem_automatica(
+        resposta.texto, getattr(resposta, "payload", None)
+    ):
         return
     rascunho = (
         await session.execute(
@@ -1012,8 +1175,12 @@ async def _promover_observacao(
 
     Só resposta de FORA: a que saiu pelo DaVinci é avaliada pelo `enviar`
     (enviou igual/editou, com o que a pessoa escolheu) — promover aqui, na
-    adoção pelo sync, tomaria o lugar da avaliação certa.
+    adoção pelo sync, tomaria o lugar da avaliação certa. E só de PESSOA: a
+    mensagem automática não é "a equipe escreveu do zero" (a comparação IA ×
+    equipe registraria uma figurinha) — a mesma régua do `_aposentar_rascunho`.
     """
+    if e_mensagem_automatica(resposta.texto, getattr(resposta, "payload", None)):
+        return
     av = (
         await session.execute(
             select(AtendimentoAvaliacao).where(AtendimentoAvaliacao.rascunho_id == rascunho.id)

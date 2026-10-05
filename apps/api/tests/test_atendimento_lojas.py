@@ -9,14 +9,17 @@ A integração "mega" é a loja "Shopee Marquezini", e o Duoke mostra
   (`stores.integration_id` e `integrations.store_id`); sem loja, o nome da
   integração, como está;
 - o prefixo da plataforma sai ("Shopee Marquezini" → "Marquezini");
-- uma consulta por integração por sessão (cache da rodada);
+- a conta do cadastro de Lojas (`store_info`) LIGADA à integração com OUTRO
+  nome vale mais (Shopee "Jlas" → "Atlas", "Kia" → "Fiore", 05/10/2026); com
+  o mesmo nome da integração (as fichas do ML ligadas hoje) nada muda;
+- duas consultas por integração por sessão (cache da rodada);
 - os quatro adaptadores (Shopee, ML, TikTok, Amazon) gravam esse nome no
   `conta` da conversa — e o nome novo da loja vale na rodada seguinte.
 """
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import event, update
@@ -29,11 +32,12 @@ from app.models import (
     Integration,
     IntegrationPlatform,
     Store,
+    StoreInfo,
     User,
 )
 from app.models.enums import Marketplace
 from app.security.cipher import encrypt_json
-from app.services.atendimento import amazon_email, lojas
+from app.services.atendimento import amazon_email, gravar, lojas, painel
 from app.services.atendimento import ml as ml_atd
 from tests.test_atendimento_amazon_email import (
     CAIXA,
@@ -199,7 +203,7 @@ async def test_sem_loja_cai_no_nome_da_integracao_como_esta(db, make_user):
     assert await lojas.nome_da_loja(db, None) == ""
 
 
-async def test_cache_da_rodada_uma_consulta_por_integracao(db, make_user, contar_consultas):
+async def test_cache_da_rodada_duas_consultas_por_integracao(db, make_user, contar_consultas):
     integ = await _integ(db, await make_user(), "mega")
     loja = await _loja(db, empresa="Marquezini", marketplace=Marketplace.SHOPEE,
                        override="Shopee Marquezini", integration=integ)
@@ -207,7 +211,8 @@ async def test_cache_da_rodada_uma_consulta_por_integracao(db, make_user, contar
     antes = contar_consultas["n"]
     assert await lojas.nome_da_loja(db, integ) == "Marquezini"
     assert await lojas.nome_da_loja(db, integ) == "Marquezini"
-    assert contar_consultas["n"] - antes == 1
+    # Uma na Empresas, uma no cadastro de Lojas — e a segunda chamada, nenhuma.
+    assert contar_consultas["n"] - antes == 2
 
     # O cadastro muda no meio da rodada: a rodada segue com o nome que leu...
     async with _db.SessionLocal() as tela:
@@ -253,6 +258,134 @@ async def test_upsert_conversa_sem_conta_grava_o_nome_da_loja(db, make_user):
     assert c1.conta == "Outro nome"
 
 
+# ─────────────── o cadastro de Lojas ligado com outro nome (05/10/2026) ───────────────
+
+
+async def _ficha(
+    db: AsyncSession,
+    user: User,
+    conta: str,
+    *,
+    plataforma: str = "shopee",
+    integration: Integration | None = None,
+    arquivada: bool = False,
+    servidor: str | None = None,
+) -> StoreInfo:
+    """Uma linha do cadastro de Lojas (`store_info`), ligada ou não à integração."""
+    ficha = StoreInfo(
+        user_id=user.id,
+        platform=plataforma,
+        account_name=conta,
+        server=servidor,
+        integration_id=integration.id if integration is not None else None,
+        archived_at=datetime.now(UTC) if arquivada else None,
+    )
+    db.add(ficha)
+    await db.commit()
+    return ficha
+
+
+async def test_ficha_ligada_com_outro_nome_e_o_nome_da_loja(db, make_user):
+    """Shopee "Jlas" (integração e Empresas) é a loja "atlas" do cadastro de Lojas."""
+    user = await make_user()
+    jlas = await _integ(db, user, "Jlas")
+    await _loja(db, empresa="Jlas", marketplace=Marketplace.SHOPEE, override="Shopee Jlas",
+                integration=jlas)
+    ficha = await _ficha(db, user, "atlas")  # como está em produção: sem a ligação
+    assert await lojas.nome_da_loja(db, jlas) == "Jlas"
+
+    ficha.integration_id = jlas.id
+    await db.commit()
+    lojas.esquecer(db)
+    assert await lojas.nome_da_loja(db, jlas) == "Atlas"
+
+    # Sem loja na Empresas também vale; o prefixo da plataforma sai.
+    kia = await _integ(db, user, " Kia")
+    await _ficha(db, user, "Shopee fiore", integration=kia)
+    assert await lojas.nome_da_loja(db, kia) == "Fiore"
+
+
+async def test_ficha_com_o_mesmo_nome_da_integracao_nao_muda_nada(db, make_user):
+    """As fichas do ML ligadas hoje têm o nome da integração: fica a Empresas, como antes."""
+    user = await make_user()
+    eron = await _integ(db, user, "eron", IntegrationPlatform.ML)
+    await _loja(db, empresa="eron", marketplace=Marketplace.ML, override="ML Eroon",
+                integration=eron)
+    await _ficha(db, user, "eron", plataforma="ml", integration=eron)
+    marq = await _integ(db, user, " marquezini", IntegrationPlatform.ML)
+    await _loja(db, empresa="Marquezini", marketplace=Marketplace.ML,
+                override="ML Marquezini", integration=marq, vinculo="integracao")
+    await _ficha(db, user, "marquezini", plataforma="mercadolivre", integration=marq)
+    sem_empresa = await _integ(db, user, "kfa2", IntegrationPlatform.ML)
+    await _ficha(db, user, "KFA2", plataforma="ml", integration=sem_empresa)
+
+    assert await lojas.nome_da_loja(db, eron) == "Eroon"
+    assert await lojas.nome_da_loja(db, marq) == "Marquezini"
+    assert await lojas.nome_da_loja(db, sem_empresa) == "kfa2"
+
+
+async def test_ficha_com_o_nome_da_empresas_fica_a_grafia_da_empresas(db, make_user):
+    user = await make_user()
+    mega = await _integ(db, user, "mega")
+    await _loja(db, empresa="Marquezini", marketplace=Marketplace.SHOPEE,
+                override="Shopee Marquezini", integration=mega)
+    await _ficha(db, user, "marquezini", integration=mega)
+    assert await lojas.nome_da_loja(db, mega) == "Marquezini"
+
+
+async def test_ficha_que_nao_conta_deixa_o_nome_de_antes(db, make_user):
+    """Arquivada, de outra plataforma, ou duas fichas com nomes diferentes."""
+    user = await make_user()
+    arquivada = await _integ(db, user, "Jlas")
+    await _ficha(db, user, "atlas", integration=arquivada, arquivada=True)
+    outra_plataforma = await _integ(db, user, "Kia")
+    await _ficha(db, user, "fiore", plataforma="amazon", integration=outra_plataforma)
+    duas = await _integ(db, user, "mega")
+    await _ficha(db, user, "marquezini", integration=duas)
+    await _ficha(db, user, "outlet", integration=duas)
+    # A mesma conta escrita de dois jeitos não é dúvida: vale a grafia da primeira.
+    repetida = await _integ(db, user, "Vita")
+    await _ficha(db, user, "Vita Loja", integration=repetida)
+    await _ficha(db, user, " vita  loja", integration=repetida)
+
+    assert await lojas.nome_da_loja(db, arquivada) == "Jlas"
+    assert await lojas.nome_da_loja(db, outra_plataforma) == "Kia"
+    assert await lojas.nome_da_loja(db, duas) == "mega"
+    assert await lojas.nome_da_loja(db, repetida) == "Vita Loja"
+
+
+async def test_ligada_a_caixa_e_o_adspower_acham_a_loja(db, make_user):
+    """O cenário de produção: a conversa da integração "Jlas" ganha o nome "Atlas"
+    e o botão do AdsPower acha o perfil da ficha "atlas" (antes: sem cadastro)."""
+    user = await make_user()
+    jlas = await _integ(db, user, "Jlas")
+    await _loja(db, empresa="Jlas", marketplace=Marketplace.SHOPEE, override="Shopee Jlas",
+                integration=jlas)
+    ficha = await _ficha(db, user, "atlas", servidor="122")
+    conversa, _ = await gravar.upsert_conversa(
+        db, canal=None, integration=jlas, plataforma="shopee", canal_nome="chat",
+        externo_id="c-1",
+    )
+    await db.commit()
+    assert conversa.conta == "Jlas"
+    antes = await painel.perfil_adspower(db, conversa)
+    assert (antes["perfil"], antes["codigo"]) == (None, "sem_cadastro")
+
+    ficha.integration_id = jlas.id
+    await db.commit()
+    lojas.esquecer(db)
+    conversa, _ = await gravar.upsert_conversa(
+        db, canal=None, integration=jlas, plataforma="shopee", canal_nome="chat",
+        externo_id="c-1", conta=await lojas.nome_da_loja(db, jlas),
+    )
+    await db.commit()
+    assert conversa.conta == "Atlas"
+    depois = await painel.perfil_adspower(db, conversa)
+    assert (depois["perfil"], depois["fonte"], depois["store_info_id"]) == (
+        "122", "integracao", str(ficha.id)
+    )
+
+
 # ─────────────── os adaptadores gravam o nome da loja ───────────────
 
 
@@ -278,6 +411,19 @@ async def test_shopee_conta_e_o_nome_da_loja_e_acompanha_o_cadastro(db, make_use
     f.conversa("A", msg("A", AGORA - timedelta(minutes=5), texto="e aí?"))
     await _rodar_shopee(db, canal, integ, f)
     assert (await _conversas_shopee(db))["A"].conta == "Marquezini Outlet"
+
+
+async def test_shopee_grava_o_nome_da_ficha_ligada(db, make_user, teto):
+    user = await make_user()
+    integ, canal = await _canal_shopee(db, user)  # integração "Loja KFA"
+    await _loja(db, empresa="Jlas", marketplace=Marketplace.SHOPEE, override="Shopee Jlas",
+                integration=integ, vinculo="loja")
+    await _ficha(db, user, "atlas", integration=integ)
+    f = ShopeeFalso()
+    f.conversa("A", msg("A", AGORA - timedelta(hours=1), texto="cadê?"))
+
+    await _rodar_shopee(db, canal, integ, f)
+    assert (await _conversas_shopee(db))["A"].conta == "Atlas"
 
 
 async def test_ml_pergunta_conta_e_o_nome_da_loja(db, make_user, monkeypatch):

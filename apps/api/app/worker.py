@@ -997,6 +997,27 @@ _ATENDIMENTO_CARRINHOS_MINUTOS = {14, 44}
 _ATENDIMENTO_REDES_MINUTOS = {9, 24, 39, 54}
 
 
+async def _carimbar_rodada_atendimento(
+    rodada: str, resumo: dict | None, *, ligada: bool = True
+) -> None:
+    """Carimba no Redis a rodada de reclamações/avaliações — é daí que o
+    /atendimento (a faixa "lojas sem ler" da Caixa,
+    services/vigia_leitura_atendimento.py) sabe que ela parou: a rodada não tem
+    caixa em `atendimento_canais` com `ultimo_ok_em`. Ligada: a primeira vez
+    que rodou e o último sucesso. Desligada de propósito: apaga os dois — ao
+    religar, a carência recomeça e o carimbo velho não acusa "parada há 3
+    semanas". Nunca levanta: o carimbo é acessório."""
+    try:
+        from app.services.vigia_leitura_atendimento import carimbar_rodada, esquecer_rodada
+
+        if ligada:
+            await carimbar_rodada(rodada, resumo)
+        else:
+            await esquecer_rodada(rodada)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("atendimento_carimbo_falhou", rodada=rodada, err=type(e).__name__)
+
+
 async def atendimento_reclamacoes(ctx: dict) -> dict | None:
     """A cada 10 min (:06…): reclamações, mediações e devoluções da plataforma.
 
@@ -1014,14 +1035,17 @@ async def atendimento_reclamacoes(ctx: dict) -> dict | None:
     que liga esta rodada — o deploy sozinho não.
     """
     if not (_settings.atendimento_leitura_ativa and _settings.atendimento_reclamacoes_ativa):
+        await _carimbar_rodada_atendimento("reclamacoes", None, ligada=False)
         return None
     from app.services.atendimento import reclamacoes as _atendimento_reclamacoes
 
     try:
-        return await _atendimento_reclamacoes.atendimento_reclamacoes(ctx)
+        resumo = await _atendimento_reclamacoes.atendimento_reclamacoes(ctx)
     except Exception as e:  # noqa: BLE001 — o serviço já não levanta; cinto
         logger.error("atendimento_reclamacoes_falhou", err=type(e).__name__)
         return None
+    await _carimbar_rodada_atendimento("reclamacoes", resumo)
+    return resumo
 
 
 async def atendimento_etiquetas(ctx: dict) -> dict | None:
@@ -1067,14 +1091,17 @@ async def atendimento_avaliacoes(ctx: dict) -> dict | None:
     pedidos.
     """
     if not (_settings.atendimento_leitura_ativa and _settings.atendimento_avaliacoes_ativa):
+        await _carimbar_rodada_atendimento("avaliacoes", None, ligada=False)
         return None
     from app.services.atendimento import avaliacoes as _atendimento_avaliacoes
 
     try:
-        return await _atendimento_avaliacoes.atendimento_avaliacoes(ctx)
+        resumo = await _atendimento_avaliacoes.atendimento_avaliacoes(ctx)
     except Exception as e:  # noqa: BLE001 — o serviço já não levanta; cinto
         logger.error("atendimento_avaliacoes_falhou", err=type(e).__name__)
         return None
+    await _carimbar_rodada_atendimento("avaliacoes", resumo)
+    return resumo
 
 
 async def atendimento_carrinhos(ctx: dict) -> dict | None:

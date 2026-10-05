@@ -31,6 +31,7 @@ import json
 import re
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
@@ -60,9 +61,12 @@ from app.models import (
     UserRole,
 )
 from app.security.cipher import encrypt_json
+from app.services import devolucao_mensagem_comprador
 from app.services.atendimento import contexto, enviar, gravar, ia
 from app.services.atendimento import manual as manual_svc
 from app.services.atendimento.constantes import (
+    MOTIVO_TUTA_SEM_ENVIO,
+    MOTIVO_ZAP_SEM_ENVIO,
     ORIGEM_HUMANO,
     ORIGEM_IA,
     RASCUNHO_BLOQUEADO,
@@ -70,6 +74,7 @@ from app.services.atendimento.constantes import (
     RASCUNHO_ENVIADO,
     RASCUNHO_PENDENTE,
     RASCUNHO_SUBSTITUIDO,
+    motivo_canal_sem_envio,
 )
 
 PEDIDO_MKT = "250925ABCDEF12"
@@ -338,7 +343,7 @@ async def test_rascunho_ok_com_lacunas_preenchidas_pelo_codigo(
     assert r.mensagem_gatilho_id == gatilho.id
     assert (r.tokens_entrada, r.tokens_saida) == (812, 64)
     assert r.modelo == "modelo-falso"
-    assert r.prompt_versao == ia.PROMPT_VERSAO == "v4"
+    assert r.prompt_versao == ia.PROMPT_VERSAO == "v5"
     assert r.manual_hash is None  # sem regras cadastradas
     assert r.fatos["lacunas"]["rastreio"] == RASTREIO
     assert r.fatos["pedido"]["itens"][1] == {
@@ -1876,6 +1881,43 @@ async def test_resposta_da_loja_durante_o_modelo_nao_deixa_sugestao_na_caixa(
     assert "a loja respondeu enquanto a IA escrevia" in r.motivo
 
 
+async def test_mensagem_automatica_durante_o_modelo_nao_aposenta_nem_repete_a_chamada(
+    db: AsyncSession, make_user, ia_ligada, monkeypatch
+):
+    """O cartão `crm` da Shopee chega 0,3 min depois do comprador — enquanto
+    o modelo escreve (05/10/2026). Não é resposta: a conversa continua
+    esperando, a sugestão vai para a caixa (pendente) e a rodada seguinte do
+    cron não paga o modelo de novo (com o cartão contando, ela nascia
+    `substituido` e o cron a pedia outra vez a cada rodada)."""
+    import app.db as _db
+
+    conversa = await _conversa(db, make_user, pedido=None)
+    await _msg(db, conversa, "tem a azul?", ha=timedelta(minutes=10))
+    saida = _saida("Temos sim!", categoria="duvida_produto")
+    chamadas: list[int] = []
+
+    async def cartao_crm_no_meio(sistema, usuario, **_):
+        chamadas.append(1)
+        async with _db.SessionLocal() as sync:
+            c = await sync.get(AtendimentoConversa, conversa.id)
+            await gravar.gravar_mensagem(
+                sync, c, externo_id=f"crm-{len(chamadas)}", autor="loja", texto="[Mensagem]",
+                enviada_em=datetime.now(UTC),
+                payload={"source": "crm", "message_type": "crm_order_rate", "content": {}},
+            )
+            await sync.commit()
+        return json.dumps(saida), {"model": "falso"}
+
+    monkeypatch.setattr(ia, "_chamar_modelo", cartao_crm_no_meio)
+    r = await ia.gerar_rascunho(db, conversa)
+    assert r is not None and r.status == RASCUNHO_PENDENTE, r.motivo
+    await db.refresh(conversa)
+    assert conversa.aguardando_resposta is True
+    antes = len(chamadas)
+    assert await ia.gerar_pendentes(db) == 0
+    assert len(chamadas) == antes
+
+
 async def test_resposta_por_fora_que_falhou_devolve_a_conversa_para_a_ia(
     db: AsyncSession, make_user, ia_ligada, modelo
 ):
@@ -2251,11 +2293,11 @@ async def test_resposta_da_equipe_por_fora_vira_exemplo_da_equipe(
         db, c4, None, "LOJA DEPOIS DA LOJA: qualquer dúvida estamos à disposição aqui.",
         ha=timedelta(hours=3),
     )
-    # Pelo DaVinci (pessoa) não é "de fora": sem avaliação, não é exemplo.
+    # A IA (automático) não é a equipe: a IA não aprende com ela mesma.
     c5 = await _conversa_da_loja(db, integ, canal, "c5")
     await _troca(
-        db, c5, "é de couro?", "RESPOSTA PELO DAVINCI: a bolsa é de couro sintético.",
-        origem=ORIGEM_HUMANO,
+        db, c5, "é de couro?", "RESPOSTA DA IA: a bolsa é de couro sintético, viu?",
+        origem=ORIGEM_IA,
     )
     # Outra plataforma.
     ml = await _conversa(
@@ -2281,7 +2323,7 @@ async def test_resposta_da_equipe_por_fora_vira_exemplo_da_equipe(
         "Bom dia! Obrigada",
         "3 dias úteis",
         "LOJA DEPOIS DA LOJA",
-        "RESPOSTA PELO DAVINCI",
+        "RESPOSTA DA IA",
         "RESPOSTA DO ML",
         "RESPOSTA DESTA CONVERSA",
     ):
@@ -2315,6 +2357,156 @@ async def test_mensagem_automatica_da_loja_nao_vira_exemplo(
     s = modelo.usuario
     assert "Resposta da equipe: Oi! Conferi com o time e a bolsa é de couro sintético." in s
     assert "foi confirmado" not in s
+
+
+async def test_resposta_da_equipe_pelo_davinci_vira_exemplo_sem_repetir_o_aprovado(
+    db: AsyncSession, make_user, ia_ligada, modelo
+):
+    """05/10/2026: sem o Duoke, a equipe responde pelo DaVinci — e os exemplos
+    não podem secar. A escrita do zero entra como "da equipe"; a que saiu com
+    a sugestão já é aprovada (não entra duas vezes); a do 👎 e a que falhou não."""
+    integ, canal = await _loja(db, make_user)
+    zero = "Oi! Conferi com o estoque: a mala azul está esgotada, mas a preta tem."
+    c1 = await _conversa_da_loja(db, integ, canal, "zero")
+    await _troca(db, c1, "a mala azul volta?", zero, origem=ORIGEM_HUMANO)
+
+    async def _saiu_da_sugestao(externo_id: str, texto: str, nota: str | None):
+        c = await _conversa_da_loja(db, integ, canal, externo_id)
+        gatilho = await _msg(db, c, "tem a alça removível?", ha=timedelta(hours=2))
+        r = AtendimentoRascunho(
+            conversa_id=c.id, mensagem_gatilho_id=gatilho.id, texto=texto,
+            categoria="outro", status="enviado",
+        )
+        db.add(r)
+        await db.flush()
+        db.add(AtendimentoAvaliacao(rascunho_id=r.id, acao="editou", texto_final=texto, nota=nota))
+        m = await _msg(
+            db, c, texto, autor="loja", origem=ORIGEM_HUMANO, ha=timedelta(hours=1)
+        )
+        m.rascunho_id = r.id
+        await db.commit()
+
+    aprovada = "Tem sim! A alça é removível e vem junto na embalagem."
+    await _saiu_da_sugestao("aprovada", aprovada, None)
+    await _saiu_da_sugestao("ruim", "SAIU COM 👎: a alça é removível sim, pode confiar.", "erro")
+    # Pelo DaVinci, mas a plataforma recusou: não chegou ao comprador.
+    c4 = await _conversa_da_loja(db, integ, canal, "falhou")
+    await _troca(
+        db, c4, "vem com cadeado?", "NAO SAIU: vem com cadeado embutido na mala sim.",
+        origem=ORIGEM_HUMANO,
+    )
+    nao_saiu = (
+        await db.execute(
+            select(AtendimentoMensagem).where(AtendimentoMensagem.texto.startswith("NAO SAIU"))
+        )
+    ).scalar_one()
+    nao_saiu.status = "falhou"
+    await db.commit()
+    conversa = await _conversa_da_loja(db, integ, canal, "atual")
+    await _msg(db, conversa, "tem a vermelha?")
+
+    await ia.gerar_rascunho(db, conversa)
+
+    s = modelo.usuario
+    assert f"Resposta da equipe: {zero}" in s
+    assert "Cliente: a mala azul volta?" in s
+    assert s.count(aprovada) == 1 and f"Resposta aprovada: {aprovada}" in s
+    assert "SAIU COM 👎" not in s and "NAO SAIU" not in s
+    assert "COMO A EQUIPE RESPONDE (respostas reais da equipe;" in s
+    assert "fora do DaVinci" not in s + modelo.sistema
+
+
+async def test_mensagem_automatica_nao_vira_exemplo_nem_separa_o_par(
+    db: AsyncSession, make_user, ia_ligada, modelo
+):
+    """O robô/campanha do Duoke e a senha da devolução (o DaVinci mandando
+    sozinho) não são a equipe — nem quando aparecem numa conversa só. E a
+    resposta da equipe que vem DEPOIS deles (ou depois de uma nota interna)
+    responde o cliente que falou antes."""
+    integ, canal = await _loja(db, make_user)
+    c1 = await _conversa_da_loja(db, integ, canal, "robo")
+    await _troca(
+        db, c1, "a mala tem rodinha?",
+        "Ficou alguma dúvida sobre o produto? Estou aqui pra te ajudar com o que precisar",
+        ha=timedelta(hours=3),
+    )
+    depois_do_robo = "Oi! Conferi aqui e a mala tem rodinhas duplas e giratórias."
+    await _troca(db, c1, None, depois_do_robo, ha=timedelta(hours=2))
+    c2 = await _conversa_da_loja(db, integ, canal, "senha")
+    senha = devolucao_mensagem_comprador.texto_para(
+        SimpleNamespace(pedido_marketplace="", pedido_bling="", sku="B-MALA"), loja="Kfa"
+    )
+    await _troca(db, c2, "oi, tudo bem?", senha)
+    c3 = await _conversa_da_loja(db, integ, canal, "nota")
+    await _msg(db, c3, "tem garantia?", ha=timedelta(hours=3))
+    db.add(
+        AtendimentoMensagem(
+            conversa_id=c3.id, autor="equipe", origem="davinci_nota", tipo="nota",
+            texto="ver com o fornecedor antes", status="recebida",
+            enviada_em=datetime.now(UTC) - timedelta(hours=2, minutes=30), payload={},
+        )
+    )
+    await db.commit()
+    depois_da_nota = "Tem sim, a garantia cobre defeito de fabricação da mala."
+    await _troca(db, c3, None, depois_da_nota, ha=timedelta(hours=2))
+    # Correção de 05/10/2026: a campanha que começa pelo usuário, a figurinha
+    # 0007 da campanha e o cartão da Shopee (o "crm" tem texto comprido) entre
+    # o cliente e a equipe — nenhum vira exemplo, e o par fica inteiro.
+    c4 = await _conversa_da_loja(db, integ, canal, "campanhas")
+    await _msg(db, c4, "a alça é de couro?", ha=timedelta(hours=3))
+    await _msg(
+        db, c4, "_maria.s já segue nossa loja aqui na Shopee? Seguindo você ganha cupom",
+        autor="loja", origem="externo", ha=timedelta(hours=2, minutes=59),
+    )
+    for minutos, texto, payload in (
+        (58, "[Figurinha]", {
+            "source": "openapi", "message_type": "sticker",
+            "content": {"sticker_id": "0007", "sticker_package_id": "br_shoppito"},
+        }),
+        (57, "CARTAO CRM: conte para a gente como foi a sua experiência com a loja", {
+            "source": "crm", "message_type": "text", "content": {"text": "x"},
+        }),
+    ):
+        await gravar.gravar_mensagem(
+            db, c4, externo_id=f"m-{next(_seq)}", autor="loja", texto=texto,
+            enviada_em=datetime.now(UTC) - timedelta(hours=2, minutes=minutos),
+            tipo="outro", payload=payload,
+        )
+    await db.commit()
+    depois_das_campanhas = "Oi! A alça é de couro legítimo, com costura reforçada."
+    await _troca(db, c4, None, depois_das_campanhas, ha=timedelta(hours=2))
+    conversa = await _conversa_da_loja(db, integ, canal, "atual")
+    await _msg(db, conversa, "tem a azul?")
+
+    await ia.gerar_rascunho(db, conversa)
+
+    s = modelo.usuario
+    assert f"Cliente: a mala tem rodinha?\nResposta da equipe: {depois_do_robo}" in s
+    assert f"Cliente: tem garantia?\nResposta da equipe: {depois_da_nota}" in s
+    assert f"Cliente: a alça é de couro?\nResposta da equipe: {depois_das_campanhas}" in s
+    assert "Ficou alguma dúvida" not in s
+    assert "Recebemos de volta" not in s
+    assert "ver com o fornecedor" not in s
+    assert "segue nossa loja" not in s
+    assert "CARTAO CRM" not in s and "[Figurinha]" not in s
+
+
+async def test_resposta_pronta_pelo_davinci_repetida_continua_exemplo(
+    db: AsyncSession, make_user, ia_ligada, modelo
+):
+    """Texto de fora repetido em 5+ conversas é o modelo do Duoke; pelo DaVinci,
+    quem mandou foi uma pessoa (a resposta pronta) — entra, uma vez."""
+    integ, canal = await _loja(db, make_user)
+    pronta = "Oi! Obrigada pelo contato, a equipe já está verificando para você."
+    for i in range(5):
+        c = await _conversa_da_loja(db, integ, canal, f"pronta-{i}")
+        await _troca(db, c, "e o meu pedido?", pronta, origem=ORIGEM_HUMANO)
+    conversa = await _conversa_da_loja(db, integ, canal, "atual")
+    await _msg(db, conversa, "cadê meu pedido?")
+
+    await ia.gerar_rascunho(db, conversa)
+
+    assert modelo.usuario.count(f"Resposta da equipe: {pronta}") == 1
 
 
 async def test_modelos_automaticos_conta_conversas_diferentes_e_guarda_cache(
@@ -3104,7 +3296,7 @@ async def test_manual_base_classificacao_e_resposta_nos_tetos_e_max_tokens(
     assert falso.max_tokens == [300, 900]
     assert "Pedido postado: onde está, quando chega ou atraso." in sis_r  # regra do assunto
     assert "REGRAS DE SEGURANÇA DA LOJA" in sis_r
-    assert r.categoria == "rastreio" and r.prompt_versao == "v4"
+    assert r.categoria == "rastreio" and r.prompt_versao == "v5"
     assert r.fatos["categoria_classificada"] == "rastreio"
 
 
@@ -3452,3 +3644,122 @@ async def test_rodada_do_cron_para_no_limite_e_a_proxima_retoma(
     ia.esquecer_limites()
     modelo.erro = None
     assert await ia.gerar_pendentes(db) == 3
+
+
+# ─────────────── e-mail do Tuta e Zap: a IA não os pega (05/10/2026) ───────────────
+# O envio deles ainda não existe no DaVinci (o outro dev) e o prompt é de
+# marketplace: nem o cron, nem o "Sugerir", nem o automático.
+
+
+async def _contato(
+    db: AsyncSession,
+    da_loja: AtendimentoConversa,
+    *,
+    canal_nome: str,
+    externo_id: str,
+    dados: dict | None = None,
+    plataforma: str | None = None,
+) -> AtendimentoConversa:
+    """Conversa de CONTATO gravada como o outro dev vai gravar: a loja e o
+    CANAL da venda (o do chat da Shopee, no modo dele)."""
+    canal = await db.get(AtendimentoCanal, da_loja.canal_id)
+    integ = await db.get(Integration, da_loja.integration_id)
+    conversa, _ = await gravar.upsert_conversa(
+        db,
+        canal=canal,
+        integration=integ,
+        plataforma=plataforma or da_loja.plataforma,
+        canal_nome=canal_nome,
+        externo_id=externo_id,
+        comprador_id="contato@exemplo.com",
+        pedido_marketplace=da_loja.pedido_marketplace,
+        dados=dados,
+    )
+    await db.commit()
+    return conversa
+
+
+async def test_ia_nao_pega_email_do_tuta_nem_zap(
+    db: AsyncSession, make_user, ia_ligada, modelo, envios
+):
+    ia_ligada.atendimento_auto_ativo = True
+    await _pedido_completo(db)
+    da_loja = await _conversa(db, make_user, modo="auto", auto_categorias=["rastreio"])
+    tuta = await _contato(
+        db, da_loja, canal_nome="email", externo_id="t-1", dados={"fonte": "tuta"}
+    )
+    sem_marca = await _contato(db, da_loja, canal_nome="email", externo_id="t-2")
+    zap = await _contato(db, da_loja, canal_nome="zap", externo_id="z-1")
+    contatos = [
+        (tuta, MOTIVO_TUTA_SEM_ENVIO),
+        (sem_marca, MOTIVO_TUTA_SEM_ENVIO),
+        (zap, MOTIVO_ZAP_SEM_ENVIO),
+    ]
+    for c, _ in contatos:
+        await _msg(db, c, "cadê meu pedido?", ha=timedelta(minutes=10))
+
+    # O cron não os escolhe; o "Sugerir" (forçado) também não gera.
+    assert await ia.gerar_pendentes(db) == 0
+    for c, frase in contatos:
+        assert await ia.gerar_rascunho(db, c, forcar=True) is None
+        assert await ia.motivo_sem_rascunho(db, c) == frase
+        assert await _rascunhos(db, c) == []
+    assert modelo.chamadas == []
+
+    # O automático também não, mesmo com um rascunho pronto (cinto do `_talvez_enviar`).
+    rascunho = AtendimentoRascunho(
+        conversa_id=tuta.id,
+        texto="Seu pedido já foi enviado.",
+        categoria="rastreio",
+        confianca=0.95,
+        precisa_humano=False,
+        validador_ok=True,
+        status=RASCUNHO_PENDENTE,
+    )
+    db.add(rascunho)
+    await db.commit()
+    await ia._talvez_enviar(db, tuta, rascunho)
+    assert envios == []
+
+    # O chat da MESMA loja continua com a IA: o corte é do canal, não da loja.
+    await _msg(db, da_loja, "cadê meu pedido?", ha=timedelta(minutes=10))
+    assert await ia.gerar_pendentes(db) == 1
+    assert len(await _rascunhos(db, da_loja)) == 1
+
+
+async def test_corte_do_cron_bate_com_a_regua_pura(db: AsyncSession, make_user):
+    """O SQL do cron (`_sql_canal_sem_envio`) e a régua do envio
+    (`constantes.motivo_canal_sem_envio`) dizem o mesmo, conversa a conversa."""
+    da_loja = await _conversa(db, make_user)
+    casos = [
+        ("email", "amazon", {}),
+        ("email", "amazon", {"fonte": "tuta"}),
+        ("email", "amazon", {"fonte": " tuta "}),
+        ("email", "amazon", {"fonte": True}),
+        ("email", "amazon", {"fonte": "amazon"}),
+        ("email", "shopee", {}),
+        ("zap", "shopee", {}),
+        ("zap", "amazon", {}),
+        ("chat", "shopee", {"fonte": "tuta"}),
+        ("pos_venda", "ml", {}),
+    ]
+    esperado: dict = {da_loja.id: False}
+    for i, (canal_nome, plataforma, dados) in enumerate(casos):
+        c = await _contato(
+            db,
+            da_loja,
+            canal_nome=canal_nome,
+            externo_id=f"regua-{i}",
+            dados=dados,
+            plataforma=plataforma,
+        )
+        esperado[c.id] = motivo_canal_sem_envio(canal_nome, plataforma, dados) is not None
+    no_sql = set(
+        (
+            await db.execute(
+                select(AtendimentoConversa.id).where(ia._sql_canal_sem_envio())
+            )
+        ).scalars()
+    )
+    assert {i for i, sim in esperado.items() if sim} == no_sql
+    assert sum(esperado.values()) == 5

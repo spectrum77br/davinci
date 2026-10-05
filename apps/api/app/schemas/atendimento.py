@@ -735,6 +735,36 @@ class FlagsOut(BaseModel):
     alerta_telegram: bool
 
 
+class LeituraParadaOut(BaseModel):
+    """Uma linha da faixa "lojas sem ler" da Caixa (05/10/2026) — o retrato de
+    agora de `services/vigia_leitura_atendimento.leitura_parada`."""
+
+    # `loja:<integration_id>` | `canal:<id>` | `rodada:<nome>` | `geral:lojas` | `geral:robo`
+    chave: str
+    # `loja` (inclui a do robô, o site e a conta de rede), `geral` (a leitura
+    # inteira parada) ou `rodada` (reclamações/avaliações).
+    tipo: str
+    # O código da plataforma; "interno" na geral e nas rodadas.
+    plataforma: str
+    loja: str
+    # Curto, para a faixa ("sem permissão", "sessão caiu no AdsPower"…).
+    motivo: str
+    # O que fazer (o title da faixa).
+    acao: str
+    # A última leitura boa; sem nenhuma (`nunca_leu`), desde quando deveria
+    # estar lendo.
+    desde: datetime | None = None
+    nunca_leu: bool = False
+    minutos: int
+    limite_min: int
+    integration_id: UUID | None = None
+    canal_id: UUID | None = None
+    # As caixas paradas, quando a loja tem mais de uma (ML, Magalu).
+    caixas: list[str] = Field(default_factory=list)
+    # O erro de operação da caixa (código/HTTP), quando há.
+    detalhe: str | None = None
+
+
 class ResumoOut(BaseModel):
     plataformas: list[PlataformaResumoOut]
     # Total do filtro "A conferir" (todas as plataformas).
@@ -744,6 +774,10 @@ class ResumoOut(BaseModel):
     lojas: list[LojaResumoOut]
     canais: list[CanalOut]
     flags: FlagsOut
+    # Lojas/canais sem ler além do limite de cada leitura (05/10/2026): a
+    # faixa vermelha da Caixa e a marca da aba "Lojas e modo". Vazio = tudo
+    # lendo (ou nada a vigiar).
+    leitura_parada: list[LeituraParadaOut] = Field(default_factory=list)
 
 
 class SincronizarOut(BaseModel):

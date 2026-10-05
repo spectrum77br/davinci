@@ -88,6 +88,30 @@ export type Resumo = {
   a_conferir?: number
   // Total por etiqueta (somando as plataformas).
   etiquetas?: ContagemEtiquetas
+  // Lojas sem ler além do limite (05/10/2026): a faixa da Caixa e a marca
+  // da aba "Lojas e modo". Opcional: a API antiga não manda (sem faixa).
+  leitura_parada?: LeituraParada[]
+}
+// Uma linha da faixa "lojas sem ler" (LeituraParadaOut do backend,
+// services/vigia_leitura_atendimento.py). `tipo`: `loja` (inclui a do robô,
+// o site e a conta de rede), `geral` (a leitura inteira parada: o worker ou o
+// robô do Mac mini) ou `rodada` (reclamações/avaliações). `desde` = a última
+// leitura boa; com `nunca_leu`, desde quando deveria estar lendo.
+export type LeituraParada = {
+  chave: string
+  tipo: string
+  plataforma: string
+  loja: string
+  motivo: string
+  acao: string
+  desde: string | null
+  nunca_leu: boolean
+  minutos: number
+  limite_min: number
+  integration_id?: string | null
+  canal_id?: string | null
+  caixas?: string[]
+  detalhe?: string | null
 }
 export type ConversaResumo = {
   id: string
@@ -812,6 +836,62 @@ export function semLeitura(status: string | null | undefined): boolean {
 // O robô do Mac mini parou (sem pulso) — o ícone da barra é outro.
 export function leituraParada(status: string | null | undefined): boolean {
   return statusCanalCodigo(status) === 'parado'
+}
+
+// ─── lojas sem ler (05/10/2026) ─────────────────────────────────────────────
+// O aviso de leitura parada fica AQUI, no próprio /atendimento (Eduardo: "já
+// avisa ali no próprio atendimento"), não na Ouvidoria: a faixa vermelha da
+// Caixa (AtendimentoLeituraParada) e a marca com a contagem na aba "Lojas e
+// modo". É o retrato de agora que o /resumo traz: a loja que volta a ler sai
+// sozinha na recarga seguinte.
+export function leiturasParadas(r: Pick<Resumo, 'leitura_parada'> | null | undefined): LeituraParada[] {
+  const lista = r?.leitura_parada
+  return Array.isArray(lista) ? lista : []
+}
+function maiuscula(t: string): string {
+  return t ? t.charAt(0).toUpperCase() + t.slice(1) : t
+}
+// "3 lojas sem ler" — a leitura inteira parada e as rodadas à parte.
+export function tituloLeituraParada(itens: LeituraParada[]): string {
+  const partes = itens.filter((l) => l.tipo === 'geral').map((l) => maiuscula(l.motivo))
+  const lojas = itens.filter((l) => l.tipo !== 'geral' && l.tipo !== 'rodada').length
+  if (lojas) partes.push(`${lojas} ${lojas === 1 ? 'loja sem ler' : 'lojas sem ler'}`)
+  const rodadas = itens.filter((l) => l.tipo === 'rodada').length
+  if (rodadas) partes.push(`${rodadas} ${rodadas === 1 ? 'rodada parada' : 'rodadas paradas'}`)
+  return partes.join(' · ')
+}
+// "Atv (Temu)" — a geral e as rodadas não têm plataforma.
+export function ondeLeituraParada(l: LeituraParada): string {
+  const p = (l.plataforma || '').trim()
+  return p && p !== 'interno' ? `${l.loja} (${plataformaInfo(p).nome})` : l.loja
+}
+// "há 4 dias" pela última leitura boa (o relógio da tela anda entre uma
+// recarga e outra); sem ela, os minutos que o backend contou.
+function haQuantoParada(l: LeituraParada, agora: number): string {
+  const ha = haQuanto(l.desde, agora)
+  if (ha && ha !== 'agora') return ha
+  return `há ${duracao(l.minutos)}`
+}
+// Loja, plataforma, há quanto tempo e o motivo curto:
+//   "Atv (Temu) sem ler há 4 dias: sessão caiu no AdsPower"
+//   "Poofy (Mercado Livre) nunca leu: sem permissão"
+//   "Nenhuma loja lê há 40 min"
+export function linhaLeituraParada(l: LeituraParada, agora = Date.now()): string {
+  if (l.tipo === 'geral') return `${maiuscula(l.motivo)} ${haQuantoParada(l, agora)}`
+  const quando = l.nunca_leu
+    ? (l.tipo === 'rodada' ? 'nenhuma rodada leu' : 'nunca leu')
+    : `sem ler ${haQuantoParada(l, agora)}`
+  return `${ondeLeituraParada(l)} ${quando}: ${l.motivo}`
+}
+// O title: as caixas paradas, o erro de operação e o que fazer.
+export function dicaLeituraParada(l: LeituraParada): string {
+  const caixas = (l.caixas || []).filter(Boolean)
+  const partes = [
+    caixas.length > 1 ? `Caixas: ${caixas.join(', ')}` : '',
+    (l.detalhe || '').trim(),
+    l.acao ? `O que fazer: ${l.acao}` : '',
+  ]
+  return partes.filter(Boolean).join(' — ')
 }
 
 // ─── categorias da IA ───────────────────────────────────────────────────────

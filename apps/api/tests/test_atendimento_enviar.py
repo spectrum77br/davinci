@@ -38,7 +38,12 @@ from app.models import (
 from app.security.cipher import encrypt_json
 from app.services.atendimento import clientes, enviar, gravar, validador
 from app.services.atendimento import shopee as adaptador_shopee
-from app.services.atendimento.constantes import ResultadoEnvio
+from app.services.atendimento.constantes import (
+    MOTIVO_TUTA_SEM_ENVIO,
+    MOTIVO_ZAP_SEM_ENVIO,
+    ResultadoEnvio,
+    motivo_canal_sem_envio,
+)
 from app.services.atendimento.enviar import EnvioRecusado
 
 # ─────────────── falsos (contratos dos outros lotes) ───────────────
@@ -1205,3 +1210,142 @@ async def test_historico_nao_guarda_texto_do_comprador(
         "/api/atendimento/canais/x",
     ):
         assert not hnomes.SEM_CORPO.search(caminho), caminho
+
+
+# ─────────────── e-mail do Tuta e Zap: sem envio no DaVinci (05/10/2026) ───────────────
+# O envio deles ainda não existe (o outro dev, RF5/RF10). Gravados com a
+# plataforma da venda e o canal da loja, cairiam no adaptador do marketplace —
+# que mandaria o texto pelo chat da loja para o `comprador_id` (o e-mail ou o
+# telefone do contato). A trava vem antes de tudo e diz qual dos dois é.
+
+
+async def _contato(
+    db: AsyncSession,
+    da_loja: AtendimentoConversa,
+    *,
+    canal_nome: str,
+    dados: dict | None = None,
+    contato: str = "comprador@exemplo.com",
+) -> AtendimentoConversa:
+    """Conversa de CONTATO gravada como o outro dev vai gravar: a plataforma,
+    a loja e o CANAL da venda (aqui, o chat da Shopee)."""
+    canal = await db.get(AtendimentoCanal, da_loja.canal_id)
+    integ = await db.get(Integration, da_loja.integration_id)
+    conversa, _ = await gravar.upsert_conversa(
+        db,
+        canal=canal,
+        integration=integ,
+        plataforma=da_loja.plataforma,
+        canal_nome=canal_nome,
+        externo_id=f"{canal_nome}:{contato}",
+        comprador_id=contato,
+        pedido_marketplace=da_loja.pedido_marketplace,
+        dados=dados,
+    )
+    await gravar.gravar_mensagem(
+        db,
+        conversa,
+        externo_id=f"{canal_nome}-c-1",
+        autor="cliente",
+        texto="cadê meu pedido?",
+        enviada_em=T_CLIENTE,
+    )
+    await db.commit()
+    return conversa
+
+
+def test_regua_do_canal_sem_envio():
+    from app.services.atendimento import abas
+
+    casos = [
+        ("zap", "shopee", {}, MOTIVO_ZAP_SEM_ENVIO),
+        ("zap", "amazon", None, MOTIVO_ZAP_SEM_ENVIO),
+        ("email", "amazon", {"fonte": "tuta"}, MOTIVO_TUTA_SEM_ENVIO),
+        ("email", "amazon", {"fonte": " tuta "}, MOTIVO_TUTA_SEM_ENVIO),
+        # Só o Tuta grava e-mail fora da Amazon (mesmo sem a marca).
+        ("email", "shopee", {}, MOTIVO_TUTA_SEM_ENVIO),
+        ("email", "ml", None, MOTIVO_TUTA_SEM_ENVIO),
+        # O e-mail da Amazon (o canal da plataforma) continua saindo.
+        ("email", "amazon", {}, None),
+        ("email", "amazon", None, None),
+        ("email", "amazon", {"fonte": True}, None),
+        ("email", "amazon", {"fonte": "amazon"}, None),
+        ("chat", "shopee", {"fonte": "tuta"}, None),
+        ("pos_venda", "ml", {}, None),
+    ]
+    for canal, plat, dados, esperado in casos:
+        assert motivo_canal_sem_envio(canal, plat, dados) == esperado, (canal, plat, dados)
+        # A MESMA régua da aba E-mail/Zap (`abas.e_contato`): se uma mudar
+        # sozinha, a conversa que a aba diz ser do Tuta sairia pela Amazon.
+        conv = AtendimentoConversa(canal=canal, plataforma=plat, dados=dados or {})
+        assert abas.e_contato(conv) is (esperado is not None), (canal, plat, dados)
+
+
+async def test_email_do_tuta_e_zap_nunca_caem_no_adaptador_do_marketplace(
+    db, make_user, ligado, plataforma, monkeypatch
+):
+    da_loja, user = await _cenario(db, make_user)
+    tuta = await _contato(db, da_loja, canal_nome="email", dados={"fonte": "tuta"})
+    sem_marca = await _contato(db, da_loja, canal_nome="email", contato="outro@exemplo.com")
+    zap = await _contato(db, da_loja, canal_nome="zap", contato="5511999990000")
+    # O automático ligado nos dois lugares: a IA também não passa.
+    monkeypatch.setattr(get_settings(), "atendimento_auto_ativo", True)
+    await db.execute(update(AtendimentoCanal).values(modo="auto"))
+    await db.commit()
+
+    for conversa, frase in (
+        (tuta, MOTIVO_TUTA_SEM_ENVIO),
+        (sem_marca, MOTIVO_TUTA_SEM_ENVIO),
+        (zap, MOTIVO_ZAP_SEM_ENVIO),
+    ):
+        recusa = await enviar.motivo_para_nao_enviar(db, conversa)
+        assert recusa is not None
+        assert (recusa.code, recusa.detail) == ("canal_sem_envio", frase)
+        e = await _recusa(enviar.enviar_resposta(db, conversa, "Seu pedido saiu.", user=user))
+        assert (e.code, e.detail) == ("canal_sem_envio", frase)
+        e = await _recusa(
+            enviar.enviar_resposta(db, conversa, "Seu pedido saiu.", user=None, origem="davinci_ia")
+        )
+        assert e.code == "canal_sem_envio"
+        # A foto também: a trava vem antes de olhar o arquivo.
+        e = await _recusa(enviar.enviar_foto(db, conversa, object(), user=user))
+        assert e.code == "canal_sem_envio"
+        assert await _mensagens_da_loja(db, conversa.id) == []
+    assert plataforma.chamadas == []
+
+    # O chat da MESMA loja continua saindo (a trava é do canal, não da loja).
+    m = await enviar.enviar_resposta(db, da_loja, "Seu pedido saiu.", user=user)
+    assert m.status == "enviada"
+    assert plataforma.chamadas == ["Seu pedido saiu."]
+
+
+async def test_trava_do_tuta_e_zap_vem_antes_do_envio_desligado(db, make_user, plataforma):
+    """Com o envio desligado (produção hoje), a tela já diz o porquê de verdade:
+    ligar o ATENDIMENTO_ENVIO_ATIVO não faria o Tuta nem o Zap sair."""
+    da_loja, user = await _cenario(db, make_user)
+    tuta = await _contato(db, da_loja, canal_nome="email", dados={"fonte": "tuta"})
+    zap = await _contato(db, da_loja, canal_nome="zap", contato="5511999990000")
+    for conversa in (tuta, zap):
+        e = await _recusa(enviar.enviar_resposta(db, conversa, "Olá!", user=user))
+        assert e.code == "canal_sem_envio"
+    # A conversa da loja continua com a recusa de sempre.
+    e = await _recusa(enviar.enviar_resposta(db, da_loja, "Olá!", user=user))
+    assert e.code == "envio_desligado"
+    assert plataforma.chamadas == []
+
+
+async def test_email_da_amazon_continua_saindo_e_o_do_tuta_na_amazon_nao(
+    db, make_user, ligado, amazon
+):
+    conversa, user = await _cenario_amazon(db, make_user)
+    m = await enviar.enviar_resposta(db, conversa, "Tem sim, 12 meses.", user=user)
+    assert m.status == "enviada"
+    assert amazon.chamadas == [(RELAY, "Tem sim, 12 meses.")]
+
+    # O mesmo canal `email` + `amazon`, com a marca do Tuta: é o e-mail do
+    # Tuta de uma venda Amazon — nunca sai pelo SMTP da Amazon.
+    conversa.dados = {**(conversa.dados or {}), "fonte": "tuta"}
+    await db.commit()
+    e = await _recusa(enviar.enviar_resposta(db, conversa, "Outra resposta.", user=user))
+    assert (e.code, e.detail) == ("canal_sem_envio", MOTIVO_TUTA_SEM_ENVIO)
+    assert len(amazon.chamadas) == 1

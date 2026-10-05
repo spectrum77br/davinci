@@ -218,6 +218,11 @@ async def adspower_aberto(
             status.HTTP_403_FORBIDDEN,
             detail={"code": "forbidden", "resource": "lojas_info", "action": "view"},
         )
+    # O id ANTES do rollback abaixo: o `user` foi lido na MESMA sessão (o
+    # `get_current_user` usa a do pedido) e o rollback expira tudo — ler
+    # `user.id` depois disso é ida ao banco fora do greenlet (MissingGreenlet
+    # → 500 em todo clique; produção, 04/10/2026).
+    user_id = str(user.id)
     perfil = None
     store_info_id = None
     conversa_id = None
@@ -231,7 +236,7 @@ async def adspower_aberto(
     await session.rollback()
     logger.info(
         "atendimento_adspower_aberto",
-        user_id=str(user.id),
+        user_id=user_id,
         conversa_id=conversa_id,
         store_info_id=store_info_id,
         perfil=perfil,

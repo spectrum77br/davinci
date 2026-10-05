@@ -43,6 +43,7 @@ from app.redis_client import redis
 from app.routers import atendimento as rota
 from app.security.cipher import encrypt_json
 from app.services.atendimento import contexto, gravar, ia, validador
+from app.services.atendimento.constantes import MOTIVO_TUTA_SEM_ENVIO, MOTIVO_ZAP_SEM_ENVIO
 
 URL = "/api/atendimento"
 AGORA = datetime.now(UTC)
@@ -1143,6 +1144,66 @@ async def test_amazon_sem_conta_escolher_a_conta(client, db, make_user, pessoa, 
     assert (r.status_code, r.json()["detail"]["code"]) == (409, "integracao_fixa")
 
 
+async def test_email_do_tuta_e_zap_mostram_a_trava_na_tela(
+    client, db, make_user, pessoa, _chaves
+):
+    """05/10/2026: o envio do e-mail do Tuta e do Zap ainda não existe no
+    DaVinci. A tela recebe o código `canal_sem_envio` com a FRASE (sem tradução
+    própria na tela: ela mostra a do backend), fora do modo observação (a IA
+    não os pega, o Duoke não lê o Tuta); responder e "Sugerir" dão 409 — com
+    tudo ligado e a loja em `humano`."""
+    _chaves.atendimento_envio_ativo = True
+    _chaves.atendimento_ia_ativa = True
+    dono = await make_user()
+    integ, canal = await _loja(db, dono, modo="humano")
+    contatos = []
+    for canal_nome, dados, frase in (
+        ("email", {"fonte": "tuta"}, MOTIVO_TUTA_SEM_ENVIO),
+        ("zap", None, MOTIVO_ZAP_SEM_ENVIO),
+    ):
+        c, _ = await gravar.upsert_conversa(
+            db,
+            canal=canal,
+            integration=integ,
+            plataforma="shopee",
+            canal_nome=canal_nome,
+            externo_id=f"{canal_nome}-1",
+            comprador_id="contato@exemplo.com",
+            dados=dados,
+        )
+        await gravar.gravar_mensagem(
+            db, c, externo_id=f"{canal_nome}-c", autor="cliente", texto="cadê?",
+            enviada_em=AGORA - timedelta(hours=1),
+        )
+        contatos.append((c, frase))
+    # O e-mail do Tuta de uma venda Amazon sem conta: a trava, não "escolha a conta".
+    amz, _ = await gravar.upsert_conversa(
+        db, canal=None, integration=None, plataforma="amazon", canal_nome="email",
+        externo_id="tuta-amz", comprador_id="contato@exemplo.com", dados={"fonte": "tuta"},
+    )
+    await db.commit()
+    contatos.append((amz, MOTIVO_TUTA_SEM_ENVIO))
+
+    for c, frase in contatos:
+        d = (await client.get(f"{URL}/conversas/{c.id}")).json()
+        assert d["envio"]["pode_enviar"] is False
+        assert (d["envio"]["codigo"], d["envio"]["motivo"]) == ("canal_sem_envio", frase)
+        assert d["envio"]["modo_observacao"] is False
+        r = await client.post(f"{URL}/conversas/{c.id}/responder", json={"texto": "Saiu."})
+        assert r.status_code == 409
+        assert r.json()["detail"] == {"code": "canal_sem_envio", "detail": frase}
+        r = await client.post(f"{URL}/conversas/{c.id}/rascunho")
+        assert r.status_code == 409
+        assert r.json()["detail"] == {"code": "canal_sem_envio", "detail": frase}
+
+    # Envio desligado (produção hoje): a tela continua dizendo o porquê de verdade.
+    _chaves.atendimento_envio_ativo = False
+    c, frase = contatos[0]
+    d = (await client.get(f"{URL}/conversas/{c.id}")).json()
+    assert (d["envio"]["codigo"], d["envio"]["motivo"]) == ("canal_sem_envio", frase)
+    assert d["envio"]["modo_observacao"] is False
+
+
 async def test_regra_que_vale_para_loja_no_auto_so_admin(
     client, db, make_user, auth_as, pessoa, manual_sem_conflito
 ):
@@ -1210,6 +1271,80 @@ async def test_metricas_contam_vencida_e_ignoram_nao_precisa_de_resposta(
     await db.commit()
     (loja,) = (await client.get(f"{URL}/metricas", params={"dias": 7})).json()["lojas"]
     assert (loja["recebidas"], loja["pct_no_prazo"]) == (2, 50.0)
+
+
+async def test_metricas_nao_contam_mensagem_automatica_como_resposta(
+    client, db, make_user, pessoa
+):
+    """O robô do Duoke responde em 1 min e a equipe em 46: a primeira resposta
+    é a da equipe (a régua da fila "Falta responder"). A senha da devolução,
+    que o DaVinci manda sozinho, também não é resposta (05/10/2026). Nem a
+    campanha que começa pelo usuário ("fulano já segue nossa loja aqui"), a
+    figurinha 0007 da campanha e o cartão que a Shopee põe na conversa (pelo
+    payload) — a figurinha que a PESSOA manda continua sendo resposta."""
+    dono = await make_user()
+    integ, canal = await _loja(db, dono)
+
+    async def _loja_fala(
+        conversa, sufixo: str, texto: str, ha: timedelta, payload: dict | None = None
+    ) -> None:
+        await gravar.gravar_mensagem(
+            db,
+            conversa,
+            externo_id=f"{conversa.externo_id}-{sufixo}",
+            autor="loja",
+            texto=texto,
+            enviada_em=AGORA - ha,
+            tipo="texto" if payload is None else "outro",
+            payload=payload,
+        )
+
+    def _figurinha(sticker_id: str) -> dict:
+        return {
+            "source": "openapi",
+            "message_type": "sticker",
+            "content": {"sticker_id": sticker_id, "sticker_package_id": "br_shoppito"},
+        }
+
+    # Robô em 1 min, campanhas em 1–3 min, a equipe em 46 min.
+    c1 = await _conversa(db, integ, canal, "robo", cliente_ha=timedelta(minutes=100))
+    await _loja_fala(
+        c1, "r", "Olá, por favor selecione sua dúvida e logo um atendente irá te responder",
+        timedelta(minutes=99),
+    )
+    await _loja_fala(
+        c1, "u", "_fulana.123 já segue nossa loja aqui na Shopee? Seguindo você ganha",
+        timedelta(minutes=99),
+    )
+    await _loja_fala(
+        c1, "k", "Ficou alguma dúvida sobre o produto? Estou aqui pra te ajudar",
+        timedelta(minutes=98),
+    )
+    await _loja_fala(c1, "f", "[Figurinha]", timedelta(minutes=98), _figurinha("0007"))
+    await _loja_fala(
+        c1, "v", "[Cupom]", timedelta(minutes=97),
+        {"source": "server", "message_type": "voucher", "content": {"voucher_id": 1}},
+    )
+    await _loja_fala(c1, "e", "Oi! Já conferi: a mala tem 2 rodinhas.", timedelta(minutes=54))
+    # A figurinha de PESSOA (0028) é resposta: 10 min.
+    c3 = await _conversa(db, integ, canal, "figurinha", cliente_ha=timedelta(minutes=30))
+    await _loja_fala(c3, "f", "[Figurinha]", timedelta(minutes=20), _figurinha("0028"))
+    # Só a senha da devolução depois do cliente, há 13 h: turno VENCIDO sem resposta.
+    c2 = await _conversa(db, integ, canal, "senha", cliente_ha=timedelta(hours=13))
+    await _loja_fala(
+        c2,
+        "s",
+        "Olá! Aqui é a loja kfa. Recebemos de volta a mala do pedido 250930AB, mas o "
+        "cadeado está travado no segredo que você definiu.",
+        timedelta(hours=12, minutes=50),
+    )
+    await db.commit()
+
+    (loja,) = (await client.get(f"{URL}/metricas", params={"dias": 7})).json()["lojas"]
+    assert (loja["recebidas"], loja["respondidas"]) == (3, 2)
+    assert loja["mediana_primeira_resposta_min"] == pytest.approx(28.0, abs=0.2)
+    assert loja["p90_primeira_resposta_min"] == pytest.approx(46.0, abs=0.2)
+    assert loja["pct_no_prazo"] == pytest.approx(66.7, abs=0.1)
 
 
 async def test_metricas_com_mais_de_32767_conversas(client, db, make_user, pessoa):

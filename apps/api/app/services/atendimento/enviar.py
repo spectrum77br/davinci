@@ -11,6 +11,10 @@ Mensagem para comprador não se desenvia; por isso a ordem abaixo é rígida:
      gravando esta conversa — tente de novo).
 
   1. TRAVAS (`EnvioRecusado`, nada vai à plataforma):
+       canal_sem_envio     — e-mail do Tuta ou Zap (05/10/2026): o envio deles
+                             ainda não existe no DaVinci, e sem esta trava
+                             cairiam no adaptador do marketplace da venda
+                             (`constantes.motivo_canal_sem_envio`);
        somente_leitura     — plataforma sem adaptador de envio (Instagram) ou
                              lida pelo robô do Mac mini (Temu, AliExpress:
                              "responda no Seller Center");
@@ -128,6 +132,7 @@ from app.services.atendimento.constantes import (
     RASCUNHO_PENDENTE,
     RASCUNHO_SUBSTITUIDO,
     ResultadoEnvio,
+    motivo_canal_sem_envio,
     reclamacao_aberta,
 )
 
@@ -149,6 +154,10 @@ ADAPTADORES: dict[str, str] = {
 }
 
 # ── Códigos de recusa (estáveis: a tela traduz, o router devolve 409/422) ──
+# E-mail do Tuta e Zap (05/10/2026): sem frase própria na tela (`ERROS`) DE
+# PROPÓSITO — sem tradução, a tela mostra o `detail`, que diz qual dos dois e
+# onde responder (`constantes.motivo_canal_sem_envio`).
+RECUSA_CANAL_SEM_ENVIO = "canal_sem_envio"
 RECUSA_SOMENTE_LEITURA = "somente_leitura"
 # Os canais de fora dos marketplaces (02/10/2026): a frase da caixa de baixo.
 MOTIVO_CARRINHO_SO_LEITURA = (
@@ -275,6 +284,13 @@ async def _destino(
     minutos com a mesma sessão, e a loja posta em `observar` (ou a categoria
     tirada do automático) no meio disso tem que valer já.
     """
+    motivo_sem_envio = motivo_canal_sem_envio(conversa.canal, conversa.plataforma, conversa.dados)
+    if motivo_sem_envio:
+        # E-mail do Tuta e Zap (05/10/2026): a PRIMEIRA trava, antes até do
+        # envio desligado (a tela diz o porquê de verdade) e de qualquer
+        # adaptador — com a plataforma da venda e o canal da loja, a resposta
+        # iria pelo chat do marketplace para o e-mail/telefone do contato.
+        raise EnvioRecusado(RECUSA_CANAL_SEM_ENVIO, motivo_sem_envio)
     if conversa.plataforma in PLATAFORMAS_ROBO:
         # Temu/AliExpress: o robô do Mac mini só LÊ o Seller Center (enviar
         # marcaria a conversa como lida e desligaria o robô da Temu). A

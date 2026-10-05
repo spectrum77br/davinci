@@ -6,8 +6,10 @@ import {
   categoriasDe,
   comoLista,
   erroDaApi,
+  leiturasParadas,
   podeCosturar,
   registrarCategorias,
+  tituloLeituraParada,
   useRelogio,
   usePollingVisivel,
   vemDepoisNaLista,
@@ -40,7 +42,11 @@ definePageMeta({ middleware: ['admin', 'atendimento'] })
 // - nada aqui liga envio: cada loja nasce em Observar (só lê) e o servidor
 //   tem as chaves gerais (leitura, envio, IA). A faixa do topo diz o que está
 //   desligado, numa linha curta (a frase inteira em "o que isso quer dizer?"),
-//   para ninguém achar que a tela quebrou — sem roubar a altura da Caixa.
+//   para ninguém achar que a tela quebrou — sem roubar a altura da Caixa;
+// - loja que parou de ler (05/10/2026: a Temu ficou dias sem ler sem ninguém
+//   saber) aparece AQUI, não na Ouvidoria: a faixa vermelha "N lojas sem
+//   ler" no topo da Caixa, com o link para "Lojas e modo", e a marca com a
+//   contagem na aba. Vem no /resumo e some sozinha quando a loja volta a ler.
 
 type Aba = 'caixa' | 'lojas' | 'manual' | 'modelos' | 'metricas'
 const ABAS: { value: Aba; label: string; icon: any }[] = [
@@ -107,6 +113,9 @@ const avisos = computed(() => {
   return out
 })
 const avisosAbertos = ref(false)
+
+// Lojas sem ler além do limite de cada leitura (o retrato do /resumo).
+const semLer = computed(() => leiturasParadas(resumo.value))
 
 // ─── lista ──────────────────────────────────────────────────────────────────
 const FILTROS_KEY = 'davinci.atendimento.filtros'
@@ -253,6 +262,9 @@ onMounted(async () => {
 // Registrada antes do primeiro await (os ganchos de ciclo de vida precisam do
 // componente ainda montando).
 const polling = usePollingVisivel(async () => {
+  // Na aba "Lojas e modo", só o resumo: a faixa e a marca das lojas sem ler
+  // somem sozinhas quando a loja volta a ler.
+  if (aba.value === 'lojas') return carregarResumo()
   if (aba.value !== 'caixa') return
   await Promise.all([atualizarLista(), carregarResumo()])
 }, 30_000)
@@ -451,8 +463,24 @@ watch(selecionada, (id) => {
       >
         <component :is="a.icon" class="size-4" />
         {{ a.label }}
+        <span
+          v-if="a.value === 'lojas' && semLer.length"
+          class="ml-0.5 inline-flex min-w-4 items-center justify-center rounded-full bg-red-600 px-1 text-[10px] font-semibold leading-4 text-white"
+          :title="tituloLeituraParada(semLer)"
+          :aria-label="tituloLeituraParada(semLer)"
+          data-marca-leitura-parada
+        >{{ semLer.length }}</span>
       </button>
     </div>
+
+    <!-- lojas sem ler: no topo da Caixa (com o link para a aba) e na própria aba "Lojas e modo" -->
+    <AtendimentoLeituraParada
+      v-if="aba === 'caixa' || aba === 'lojas'"
+      :itens="semLer"
+      :agora="agora"
+      :link="aba === 'caixa'"
+      @abrir-lojas="aba = 'lojas'"
+    />
     </div>
 
     <!-- Caixa: lojas | fila | conversa + pedido -->

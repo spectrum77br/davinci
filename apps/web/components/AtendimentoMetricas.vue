@@ -148,7 +148,7 @@ const notas = computed(() => {
       <section class="space-y-2">
         <div class="flex flex-wrap items-baseline gap-2">
           <h3 class="text-sm font-semibold">Por loja</h3>
-          <span class="text-xs text-muted-foreground">{{ totais.recebidas }} vez(es) em que o comprador esperou resposta · {{ totais.respondidas }} respondida(s). Uma "vez" junta as mensagens seguidas do comprador até a loja responder — a mesma conversa pode contar mais de uma. Tempo = da primeira dessas mensagens até a primeira resposta da loja (por qualquer caminho).</span>
+          <span class="text-xs text-muted-foreground">{{ totais.recebidas }} vez(es) em que o comprador esperou resposta · {{ totais.respondidas }} respondida(s). Uma "vez" junta as mensagens seguidas do comprador até a loja responder — a mesma conversa pode contar mais de uma. Tempo = da primeira dessas mensagens até a primeira resposta da loja (pelo DaVinci ou por fora). Mensagem automática não é resposta: o robô e as campanhas do Duoke (inclusive o "já segue nossa loja" e a figurinha da campanha), os cartões que a própria Shopee põe na conversa (cupom, logística, pedido de avaliação) e o que o DaVinci manda sozinho (senha da devolução) não contam.</span>
         </div>
         <div class="overflow-x-auto rounded-lg border">
           <table class="w-full min-w-[720px] text-xs">

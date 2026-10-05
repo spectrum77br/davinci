@@ -7,6 +7,8 @@ bastaria para uma conversa sumir da fila sem erro nenhum.
 
 from __future__ import annotations
 
+import re
+import unicodedata
 from dataclasses import dataclass, field
 
 # ── Plataformas e canais ──────────────────────────────────────────────────
@@ -104,7 +106,45 @@ CANAL_ZAP = "zap"
 # separa o e-mail do Tuta de uma venda Amazon do e-mail da Amazon — nas abas
 # (`abas.e_contato`: aba E-mail × Pós-venda) e no envio (o `enviar.py` vai
 # rotear por ela: o Tuta responde pelo Tuta, nunca pelo SMTP da Amazon).
+# Até esse roteamento existir, o envio RECUSA (`motivo_canal_sem_envio`).
 FONTE_TUTA = "tuta"
+
+# Canais SEM envio no DaVinci (trava de 05/10/2026): o e-mail do Tuta e o Zap
+# ainda não têm adaptador (o outro dev, RF5/RF10). Gravados com a plataforma
+# da venda (shopee/ml/tiktok/magalu/amazon) e o `canal_id` da loja, eles
+# cairiam no adaptador do MARKETPLACE, que manda o texto para o
+# `comprador_id` — ali, o e-mail ou o telefone do contato — e só falharia
+# por acaso. O `enviar` recusa ANTES de qualquer adaptador (código
+# `canal_sem_envio`, com esta frase na tela) e a IA não os pega (nem o cron,
+# nem o "Sugerir", nem o automático). O e-mail da AMAZON sem a marca do
+# Tuta é o canal da plataforma (`amazon_email.py`, SMTP) e continua como está.
+MOTIVO_TUTA_SEM_ENVIO = (
+    "E-mail do Tuta: o envio do e-mail do Tuta ainda não existe no DaVinci. "
+    "Responda pelo próprio Tuta."
+)
+MOTIVO_ZAP_SEM_ENVIO = (
+    "Zap (WhatsApp): o envio do Zap ainda não existe no DaVinci. Responda pelo Duoke."
+)
+
+
+def motivo_canal_sem_envio(canal: str | None, plataforma: str | None, dados: object) -> str | None:
+    """A frase de por que esta conversa não sai pelo DaVinci (None = o canal tem envio). PURA.
+
+    A régua é a de `abas.e_contato`: o Zap sempre; o e-mail fora da Amazon
+    (só o Tuta grava e-mail fora dela) ou com a marca `dados.fonte = 'tuta'`.
+    O cron da IA filtra o mesmo no SQL (`ia._sql_canal_sem_envio`).
+    """
+    if canal == CANAL_ZAP:
+        return MOTIVO_ZAP_SEM_ENVIO
+    if canal != CANAL_EMAIL:
+        return None
+    fonte = dados.get("fonte") if isinstance(dados, dict) else None
+    marca = "" if fonte is None or isinstance(fonte, bool) else str(fonte).strip()
+    if plataforma != "amazon" or marca == FONTE_TUTA:
+        return MOTIVO_TUTA_SEM_ENVIO
+    return None
+
+
 # Os canais de cada plataforma externa (NÃO entram em
 # `CANAIS_POR_PLATAFORMA`: o sync não lê nenhum deles).
 CANAIS_EXTERNOS: dict[str, tuple[str, ...]] = {
@@ -766,9 +806,270 @@ def normalizar_inicio(texto: str | None) -> str:
 
 
 def e_resposta_automatica(texto: str | None) -> bool:
-    """A mensagem da loja é a resposta automática do Duoke (não conta como resposta)."""
+    """A mensagem da loja é a resposta automática do Duoke (só o começo do texto).
+
+    A régua ANTIGA (01/10/2026). Desde 05/10/2026 a fila "Falta responder"
+    (`gravar.recalcular`), a métrica e a IA usam `e_mensagem_automatica`, que
+    a contém inteira (o teste confere) e soma a campanha com o usuário, a
+    senha da devolução, a figurinha da campanha e os cartões da Shopee. Ela
+    só continua valendo no turno em que o comprador só mandou cartão
+    (`e_cartao_do_comprador`): ali, o que fecha a vez é o que ela não pega.
+    """
     inicio = normalizar_inicio(texto)
     return bool(inicio) and inicio.startswith(RESPOSTAS_AUTOMATICAS)
+
+
+# ── Mensagens que o PRÓPRIO DaVinci manda fora do /atendimento ────────────
+# Saem por outros módulos e voltam na caixa como resposta de FORA
+# (`externo`): ninguém da equipe escreveu, e nenhuma responde o que o
+# comprador perguntou. Medido em produção em 05/10/2026:
+#   - a senha da devolução travada (`devolucao_mensagem_comprador.texto_para`):
+#     Shopee pela API do app, TikTok pelo robô do AdsPower — 12 na caixa
+#     (4 Shopee, 8 TikTok);
+#   - os e-mails da logística ao comprador da Amazon
+#     (`logistica_cliente_mensagens`, os modelos padrão: rastreio, ocorrência,
+#     previsão vencida e entregue) — nenhum dos 43 voltou para a caixa (a
+#     Amazon só copia o que sai pelo Seller Central); fica reconhecido para o
+#     dia em que ela copiar;
+#   - o robô do Direct do Instagram NÃO entra: as DMs ficam em `dm_mensagens`
+#     e nunca viram `atendimento_mensagens`.
+# Escritos sobre o texto como o `normalizar_inicio` o deixa (sem acento,
+# minúsculas, espaço único) e começando por "^" + letra (o pré-filtro do SQL
+# conta com isso); quem casa é `PADRAO_MENSAGEM_AUTOMATICA`.
+MENSAGENS_DAVINCI_FORA: tuple[str, ...] = (
+    # "Olá! Aqui é a loja X. Recebemos de volta a mala/o aparelho do pedido…"
+    r"^ola! aqui e a loja .*recebemos de volta (a mala|o aparelho)",
+    # "Olá, Maria. Seu pedido 701-… foi postado nos Correios em…" (e os outros três)
+    r"^ola, .*(foi postado nos correios em"
+    r"|a transportadora registrou (uma ocorrencia no transporte|a entrega) do seu pedido"
+    r"|a previsao de entrega da transportadora para o seu pedido)",
+)
+# Campanhas do Duoke que começam pelo USUÁRIO do comprador, sem saudação
+# ("fulana.123 já segue nossa loja aqui no TikTok? …"). No TikTok chegam como
+# mensagem da LOJA (286 em 30 dias, 6 lojas; na Shopee, "…aqui na Shopee?",
+# chegam como `sistema` e não contam), menos de 1 min depois da fala do
+# comprador e a qualquer hora: fechavam 127 dos 133 turnos do TikTok
+# respondidos em menos de 2 min, e a mediana do TikTok caía para 2,4 min
+# (medido em produção em 05/10/2026). A frase fixa que vem DEPOIS do usuário
+# — uma palavra só, sem espaço (as 2.720 dos 30 dias, TikTok e Shopee) —,
+# escrita como as de cima. Pessoa que escrevesse "Você já segue nossa loja
+# aqui?" também casaria; nenhuma das 2.720 é de pessoa. O usuário começa por
+# qualquer caractere (número, "_", "."), então o pré-filtro da primeira letra
+# não vale para elas: o SQL testa antes o `TRECHOS_CAMPANHA_COM_USUARIO`.
+CAMPANHAS_COM_USUARIO: tuple[str, ...] = ("ja segue nossa loja aqui",)
+# Só o começo do texto conta (o `.*` acima não passa daqui, e o SQL não lê o
+# texto inteiro de cada mensagem): o mais longo, o e-mail de rastreio, cabe
+# com folga.
+INICIO_AUTOMATICA = 400
+# Tabela fixa de acentos (minúscula e maiúscula → letra sem acento). Para
+# estas letras dá o mesmo que o NFKD do `normalizar_inicio`.
+_ACENTOS = {
+    "a": "áàâãäå",
+    "e": "éèêë",
+    "i": "íìîï",
+    "o": "óòôõö",
+    "u": "úùûü",
+    "c": "ç",
+    "n": "ñ",
+    "y": "ýÿ",
+}
+ACENTOS_DE = "".join(v + v.upper() for v in _ACENTOS.values())
+ACENTOS_PARA = "".join(k * (2 * len(v)) for k, v in _ACENTOS.items())
+# Os espaços que o `normalizar_inicio` junta num só: os do `split()` e os que
+# o NFKD vira espaço (o inseparável). O `\s`/`[[:space:]]` do Python e o do
+# Postgres não concordam — a lista vai escrita.
+ESPACOS = "".join(
+    ch
+    for ch in map(chr, range(0x3001))
+    if ch.isspace() or unicodedata.normalize("NFKD", ch).isspace()
+)
+# Só estes são especiais nos dois (Python e o ARE do Postgres); com a barra
+# antes, os dois leem o caractere como ele é.
+_ESPECIAIS_REGEX = frozenset("\\^$.|?*+()[]{}")
+
+
+def _literal_regex(texto: str) -> str:
+    return "".join(f"\\{ch}" if ch in _ESPECIAIS_REGEX else ch for ch in texto)
+
+
+def _com_acento(letra: str) -> str:
+    """A letra e as formas dela com acento (minúsculas e maiúsculas: o `lower`
+    do Postgres pode não baixar acento, conforme o locale)."""
+    acentos = _ACENTOS.get(letra, "")
+    return letra + acentos + acentos.upper()
+
+
+def _sobre_o_texto_cru(padrao: str) -> str:
+    """O regex do texto normalizado → o mesmo regex sobre o texto CRU em minúsculas.
+
+    Normalizar no banco (`translate` dos acentos em cada mensagem) custava
+    mais que o próprio regex (medido em produção, 05/10/2026). A troca é
+    mecânica: o começo aceita espaço antes, espaço vira "um ou mais espaços"
+    e letra que tem acento vira a classe dela (á/Á contam como a). Os espaços
+    vão em `\\uXXXX`, que o Python e o Postgres leem igual.
+    """
+    espaco = "[" + "".join(f"\\u{ord(ch):04x}" for ch in ESPACOS) + "]"
+    saida: list[str] = []
+    i = 0
+    while i < len(padrao):
+        ch = padrao[i]
+        if ch == "\\":
+            saida.append(padrao[i : i + 2])
+            i += 2
+            continue
+        if ch == "^":
+            saida.append(f"^{espaco}*")
+        elif ch == " ":
+            saida.append(f"{espaco}+")
+        elif ch in _ACENTOS:
+            saida.append(f"[{_com_acento(ch)}]")
+        else:
+            saida.append(ch)
+        i += 1
+    return "".join(saida)
+
+
+# O regex que o Python (`e_mensagem_automatica`) e o SQL
+# (`gravar.mensagem_automatica_sql`) usam, sobre o começo do texto em
+# minúsculas — a MESMA string nos dois.
+PADRAO_MENSAGEM_AUTOMATICA = _sobre_o_texto_cru(
+    "|".join(
+        (
+            "^(" + "|".join(_literal_regex(p) for p in RESPOSTAS_AUTOMATICAS) + ")",
+            *MENSAGENS_DAVINCI_FORA,
+            # O usuário: uma palavra (`\S`, igual nos dois) antes da frase.
+            *(r"^\S+ " + _literal_regex(frase) for frase in CAMPANHAS_COM_USUARIO),
+        )
+    )
+)
+# DOTALL: no Postgres o `.` pega a quebra de linha (o e-mail da Amazon tem).
+_RE_MENSAGEM_AUTOMATICA = re.compile(PADRAO_MENSAGEM_AUTOMATICA, re.DOTALL)
+# A régua ANTIGA (`e_resposta_automatica`, só o robô e as campanhas do Duoke
+# pelo começo do texto) no mesmo molde, para o SQL do turno só de cartão
+# (`gravar.resposta_automatica_sql`; o teste compara com o Python).
+PADRAO_RESPOSTA_AUTOMATICA = _sobre_o_texto_cru(
+    "^(" + "|".join(_literal_regex(p) for p in RESPOSTAS_AUTOMATICAS) + ")"
+)
+# Pré-filtro do SQL, barato e exato: depois dos espaços, toda mensagem
+# automática começa por uma destas letras (em qualquer caixa e acento). Só ~1/3
+# das mensagens da loja passa e paga o regex (medido em produção, 05/10/2026).
+PRIMEIRAS_LETRAS_AUTOMATICA = frozenset(
+    "".join(
+        _com_acento(p.lstrip("^")[0]) + p.lstrip("^")[0].upper()
+        for p in (*RESPOSTAS_AUTOMATICAS, *MENSAGENS_DAVINCI_FORA)
+    )
+)
+
+
+def _trecho_like(frase: str) -> str:
+    """A frase (texto normalizado) → o LIKE que o texto CRU em minúsculas casa
+    sempre que o regex dela casa: letra que tem acento vira `_` (a classe do
+    regex é um caractere só) e espaço vira `%` (o regex pede um ou mais)."""
+    saida = []
+    for ch in frase:
+        if ch == " ":
+            saida.append("%")
+        elif ch in _ACENTOS:
+            saida.append("_")
+        else:
+            saida.append(f"\\{ch}" if ch in "%_\\" else ch)
+    return "%" + "".join(saida) + "%"
+
+
+# O pré-filtro das campanhas que começam pelo usuário (a primeira letra não
+# serve para elas): condição necessária do regex, então o resultado do SQL é
+# o mesmo do Python.
+TRECHOS_CAMPANHA_COM_USUARIO = tuple(_trecho_like(f) for f in CAMPANHAS_COM_USUARIO)
+
+# ── Mensagens da Shopee que não são de pessoa, pelo PAYLOAD ───────────────
+# O texto delas é só o rótulo ("[Figurinha]", "[Cupom]", "[Mensagem]"): o que
+# separa a da campanha da que a pessoa mandou é o item cru da Shopee
+# (`payload`). Medido em produção em 05/10/2026 (10 dias, mensagens da LOJA):
+#   - a figurinha 0007 mandada pela API (`source` "openapi") é a campanha do
+#     Duoke: 1.009 das 1.318 saíram entre 1555 e 1565 min depois da última
+#     fala do comprador (26 h), e fechavam 393 turnos da Shopee com o p90
+#     cravado em 1560 min. As outras figurinhas (0028, 0012, 0013, 0014) não
+#     têm esse relógio e continuam contando;
+#   - o que a PRÓPRIA Shopee põe na conversa em nome da loja: `source`
+#     "server" (cupom, cartão de logística, devolução) e "crm" (pedido de
+#     avaliação, vitrine, disparo) — o "crm" sai 0,3 min depois do comprador.
+# Só a Shopee grava `source` no payload (ML, TikTok, Amazon e AliExpress não).
+FONTES_SHOPEE_DA_PLATAFORMA: tuple[str, ...] = ("server", "crm")
+FONTE_SHOPEE_API = "openapi"
+TIPO_SHOPEE_FIGURINHA = "sticker"
+FIGURINHA_CAMPANHA_DUOKE = "0007"
+
+
+def e_automatica_pelo_payload(payload: object) -> bool:
+    """O item cru é cartão da Shopee ou a figurinha da campanha do Duoke? PURA.
+
+    O SQL é `gravar.mensagem_automatica_sql(texto, payload)`; o teste compara.
+    """
+    if not isinstance(payload, dict):
+        return False
+    fonte = payload.get("source")
+    if fonte in FONTES_SHOPEE_DA_PLATAFORMA:
+        return True
+    conteudo = payload.get("content")
+    return (
+        fonte == FONTE_SHOPEE_API
+        and payload.get("message_type") == TIPO_SHOPEE_FIGURINHA
+        and isinstance(conteudo, dict)
+        and conteudo.get("sticker_id") == FIGURINHA_CAMPANHA_DUOKE
+    )
+
+
+def e_mensagem_automatica(texto: str | None, payload: object = None) -> bool:
+    """Mensagem da loja que ninguém da equipe escreveu (05/10/2026).
+
+    A resposta automática do Duoke (`RESPOSTAS_AUTOMATICAS`), a campanha do
+    Duoke que começa pelo usuário do comprador (`CAMPANHAS_COM_USUARIO`), a
+    que o DaVinci manda sozinho fora do /atendimento (`MENSAGENS_DAVINCI_FORA`)
+    e, com o `payload`, a figurinha da campanha e os cartões da Shopee
+    (`e_automatica_pelo_payload`). Não é resposta ao comprador: não fecha a
+    vez dele na fila "Falta responder" (`gravar.recalcular` — menos no turno
+    em que ele só mandou cartão, `e_cartao_do_comprador`), não aposenta a
+    sugestão da IA (`gravar._aposentar_rascunho`) e a métrica de tempo de
+    resposta não conta. Nem exemplo de como a equipe responde (a IA não
+    aprende com ela). O SQL é `gravar.mensagem_automatica_sql`.
+    """
+    inicio = (texto or "")[:INICIO_AUTOMATICA].lower()
+    if _RE_MENSAGEM_AUTOMATICA.search(inicio) is not None:
+        return True
+    return e_automatica_pelo_payload(payload)
+
+
+# ── O cartão que o COMPRADOR manda sem escrever nada ──────────────────────
+# Quem abre o chat pela página do produto ou do pedido manda o cartão dele
+# (o item cru, no `payload`): na Shopee `message_type` "item",
+# "variation_card" ou "order"; no TikTok `type` "PRODUCT_CARD" ou
+# "ORDER_CARD". Medido em produção em 05/10/2026 (turnos do comprador nos
+# últimos 30 dias, Shopee): quando ele SÓ mandou cartão desde a última
+# resposta de pessoa, a equipe respondeu 47 de 710 (7%) e em 590 quem fechou
+# a vez foi a figurinha 0007 da campanha do Duoke, 26 h depois; quando ele
+# escreveu, a equipe respondeu 3.327 de 3.511 (95%). Com a régua nova sem
+# exceção, esses turnos só de cartão ficariam em "Falta responder" para
+# sempre, já vencidos (~375 por semana). Então o turno SÓ DE CARTÃO segue a
+# régua de antes de 05/10: a mensagem automática que ela já contava (tudo,
+# menos o robô e as campanhas do Duoke de `e_resposta_automatica`) fecha a
+# vez — `gravar.recalcular_conversa`. No TikTok foram 19 turnos assim.
+CARTOES_DO_COMPRADOR_SHOPEE: tuple[str, ...] = ("item", "variation_card", "order")
+CARTOES_DO_COMPRADOR_TIKTOK: tuple[str, ...] = ("PRODUCT_CARD", "ORDER_CARD")
+
+
+def e_cartao_do_comprador(payload: object) -> bool:
+    """A mensagem do comprador é só o cartão do produto/pedido? PURA.
+
+    Pelo item cru (`payload`) — o `tipo` não basta: o cartão de variação da
+    Shopee é gravado como `outro`. O SQL é `gravar.cartao_do_comprador_sql`;
+    o teste compara.
+    """
+    if not isinstance(payload, dict):
+        return False
+    return (
+        payload.get("message_type") in CARTOES_DO_COMPRADOR_SHOPEE
+        or payload.get("type") in CARTOES_DO_COMPRADOR_TIKTOK
+    )
 
 
 def e_pergunta(texto: str | None) -> bool:

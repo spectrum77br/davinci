@@ -22,14 +22,19 @@ O que estes testes seguram:
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from typing import Annotated
 from uuid import uuid4
 
 import httpx
 import pytest
+from fastapi import Depends
 from fastapi.routing import APIRoute
 from sqlalchemy import select, text
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
+from app.db import get_session
+from app.deps.auth import require_active_user, require_admin, require_user
 from app.main import app
 from app.models import (
     AtendimentoCanal,
@@ -40,6 +45,7 @@ from app.models import (
     IntegrationPlatform,
     Product,
     StoreInfo,
+    User,
     UserRole,
 )
 from app.routers import atendimento as rota
@@ -704,6 +710,54 @@ async def test_post_adspower_aberto_registra(db, client, admin, make_user):
     assert r.json() == {"registrado": True, "perfil": "84"}
     r = await client.post(f"{URL}/adspower/aberto", json={"resultado": "quebrou"})
     assert r.status_code == 422
+
+
+async def test_post_adspower_aberto_com_o_usuario_da_sessao_do_pedido(
+    db, client, admin, make_user
+):
+    """Produção, 04/10/2026: todo clique em "Abrir no AdsPower" devolvia 500.
+
+    Lá o `user` é lido na MESMA sessão da rota (`get_current_user` usa a do
+    pedido), e a rota faz rollback antes de registrar: ler `user.id` depois
+    disso era ida ao banco fora do greenlet (MissingGreenlet). O `auth_as`
+    devolve um `user` de OUTRA sessão (a do `db`) e escondia o erro — aqui o
+    usuário vem da sessão do pedido, como em produção.
+    """
+    dono = await make_user()
+    integ, canal = await _loja(db, dono)
+    conversa = await _conversa(db, integ, canal)
+    db.add(
+        StoreInfo(
+            user_id=dono.id,
+            platform="shopee",
+            account_name="kfa",
+            server="84",
+            integration_id=integ.id,
+        )
+    )
+    await db.commit()
+    admin_id = admin.id
+
+    async def _da_sessao_do_pedido(
+        session: Annotated[AsyncSession, Depends(get_session)],
+    ) -> User:
+        return await session.get(User, admin_id)
+
+    for dep in (require_user, require_active_user, require_admin):
+        app.dependency_overrides[dep] = _da_sessao_do_pedido
+
+    r = await client.post(
+        f"{URL}/adspower/aberto",
+        json={"conversa_id": str(conversa.id), "resultado": "aberto", "codigo": None},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json() == {"registrado": True, "perfil": "84"}
+    # Só o clique, sem conversa: o mesmo rollback, o mesmo registro.
+    r = await client.post(
+        f"{URL}/adspower/aberto", json={"resultado": "erro", "codigo": "sem_resposta"}
+    )
+    assert r.status_code == 200, r.text
+    assert r.json() == {"registrado": True, "perfil": None}
 
 
 # ─────────────── o painel inteiro ───────────────

@@ -59,6 +59,7 @@ from __future__ import annotations
 import importlib
 import re
 import statistics
+from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from math import ceil
 from typing import Annotated, Any
@@ -112,6 +113,7 @@ from app.schemas.atendimento import (
     EtiquetaIn,
     EtiquetaTrocaOut,
     FlagsOut,
+    LeituraParadaOut,
     ListaConversasOut,
     ListaRegrasOut,
     LojaResumoOut,
@@ -136,6 +138,7 @@ from app.schemas.atendimento import (
     SincronizarOut,
     SugestaoOut,
 )
+from app.services import vigia_leitura_atendimento
 from app.services.atendimento import (
     acesso,
     canais_externos,
@@ -193,6 +196,7 @@ from app.services.atendimento.constantes import (
     TIPO_NOTA,
     TIPO_REGRA_CATEGORIA,
     limite_caracteres,
+    motivo_canal_sem_envio,
     rotulo_etiqueta,
     sla_horas,
 )
@@ -1419,6 +1423,7 @@ async def resumo(
     barra = _juntar_externas(list(lojas.values()), canais_da_loja)
     if scope.unrestricted:
         barra = _com_direct(barra, contas_ig)
+    leitura_parada = await _leitura_parada(session, scope, canais)
     s = get_settings()
     return ResumoOut(
         plataformas=plataformas,
@@ -1443,7 +1448,37 @@ async def resumo(
             simulador_exceto=enviar.fora_do_simulador(),
             alerta_telegram=s.atendimento_alerta_telegram,
         ),
+        leitura_parada=leitura_parada,
     )
+
+
+async def _leitura_parada(
+    session: AsyncSession, scope: TeamScope, canais: list[CanalOut]
+) -> list[LeituraParadaOut]:
+    """A faixa "lojas sem ler" da Caixa (05/10/2026): o retrato de agora de
+    `vigia_leitura_atendimento.leitura_parada` (só leitura: banco + 2 HGETALL).
+
+    Decisão do Eduardo: o aviso de leitura parada fica aqui, no próprio
+    /atendimento, e não na Ouvidoria — só quem vê esta tela vê. Com o nome de
+    cada loja que o resumo já tem (`canais`). Quem não vê todas as equipes só
+    vê as lojas dele (a do robô, o site, as redes e as rodadas são de todas,
+    como o canal sem integração). A faixa nunca derruba o resumo: falhou, ela
+    some e o log diz por quê.
+    """
+    nomes = {c.integration_id: c.conta for c in canais if c.integration_id and c.conta}
+    try:
+        linhas = await vigia_leitura_atendimento.leitura_parada(session, nomes=nomes)
+    except Exception:  # noqa: BLE001 — a faixa é acessória; a Caixa não pode cair
+        logger.exception("atendimento_leitura_parada_falhou")
+        try:
+            await session.rollback()
+        except Exception:  # noqa: BLE001, S110 — só leitura; nada a desfazer
+            pass
+        return []
+    if not scope.unrestricted:
+        permitidas = set(scope.integration_ids or ())
+        linhas = [lp for lp in linhas if lp.integration_id in permitidas]
+    return [LeituraParadaOut(**asdict(lp)) for lp in linhas]
 
 
 # ── Lista e detalhe ───────────────────────────────────────────────────────
@@ -1527,8 +1562,9 @@ async def _listar_marketplace(
     elif filtro == "fechadas":
         consulta = consulta.where(AtendimentoConversa.situacao == CONVERSA_FECHADA)
     elif filtro == "automatica":
-        # Esperando, mas a ÚLTIMA mensagem é da loja: só a resposta automática
-        # (robô do Duoke, campanha) falou depois do comprador.
+        # Esperando, mas a ÚLTIMA mensagem é da loja: só a mensagem automática
+        # (robô ou campanha do Duoke, cartão da Shopee, senha da devolução —
+        # `constantes.e_mensagem_automatica`) falou depois do comprador.
         consulta = consulta.where(aguardando, AtendimentoConversa.ultima_autor == AUTOR_LOJA)
     elif filtro in ETIQUETAS:
         # Pela ETIQUETA (status atual): Pré-venda, Pós-venda, Reclamação,
@@ -1866,9 +1902,11 @@ async def _envio(session: AsyncSession, conversa: AtendimentoConversa) -> EnvioO
     # `observar` ou o envio desligado no servidor. A tela troca a caixa de
     # envio pelo "O que a IA responderia" (com 👍/👎 e "Copiar").
     envio_desligado = not get_settings().atendimento_envio_ativo
-    if conversa.plataforma == "amazon" and conversa.integration_id is None:
+    sem_envio = motivo_canal_sem_envio(conversa.canal, conversa.plataforma, conversa.dados)
+    if conversa.plataforma == "amazon" and conversa.integration_id is None and not sem_envio:
         # O e-mail não disse de qual conta Amazon é: antes de qualquer outra
-        # trava (envio desligado...), a tela precisa pedir a conta.
+        # trava (envio desligado...), a tela precisa pedir a conta. O e-mail
+        # do Tuta não: escolher a conta não o faria sair (`canal_sem_envio`).
         return EnvioOut(
             pode_enviar=False,
             motivo=enviar.MOTIVO_AMAZON_SEM_CONTA,
@@ -1895,8 +1933,12 @@ async def _envio(session: AsyncSession, conversa: AtendimentoConversa) -> EnvioO
         # Sem canal não há modo: "observar" diria que a loja existe e só lê.
         modo=canal.modo if canal is not None else None,
         sla_horas=sla_horas(conversa.plataforma, conversa.canal),
+        # E-mail do Tuta e Zap (05/10/2026): nem observação — a caixa dela é a
+        # sugestão da IA, que não os pega. A tela mostra a trava, com a frase
+        # dela (qual dos dois e onde responder).
         modo_observacao=(
-            envio_desligado or so_le or (canal is not None and canal.modo == MODO_OBSERVAR)
+            not sem_envio
+            and (envio_desligado or so_le or (canal is not None and canal.modo == MODO_OBSERVAR))
         ),
     )
 
@@ -1908,10 +1950,12 @@ async def _sugestoes(
 
     É o "IA × equipe" do modo observação: o Duoke responde, o DaVinci lê e
     guarda o que a IA teria dito. `resposta_real` é a primeira mensagem da
-    LOJA (qualquer origem, menos a que falhou) a partir da mensagem do
-    cliente que a sugestão responde — a mesma régua de `gravar.
-    _aposentar_rascunho`; sem gatilho (a mensagem sumiu), vale a hora da
-    sugestão. Uma consulta só (LATERAL), não uma por sugestão.
+    LOJA (qualquer origem, menos a que falhou e a mensagem automática —
+    `gravar.mensagem_automatica_sql`, 05/10/2026: a figurinha da campanha não
+    é "a equipe respondeu") a partir da mensagem do cliente que a sugestão
+    responde — a mesma régua de `gravar._aposentar_rascunho`; sem gatilho (a
+    mensagem sumiu), vale a hora da sugestão. Uma consulta só (LATERAL), não
+    uma por sugestão.
     `so_rascunho` = só aquela sugestão (a avaliação quer a resposta real dela).
     """
     gatilho = aliased(AtendimentoMensagem)
@@ -1932,6 +1976,7 @@ async def _sugestoes(
             resposta.autor == AUTOR_LOJA,
             resposta.status != MSG_FALHOU,
             momento >= referencia,
+            ~gravar.mensagem_automatica_sql(resposta.texto, resposta.payload),
         )
         .order_by(momento.asc(), resposta.created_at.asc())
         .limit(1)
@@ -2203,6 +2248,13 @@ async def pedir_rascunho(
                 "code": "canal_sem_ia",
                 "detail": "A IA não sugere resposta para carrinho de site nem comentário de rede.",
             },
+        )
+    sem_envio = motivo_canal_sem_envio(c.canal, c.plataforma, c.dados)
+    if sem_envio:
+        # E-mail do Tuta e Zap (05/10/2026): a IA não os pega (`ia._gerar`
+        # também corta). O mesmo código e a mesma frase da trava do envio.
+        raise HTTPException(
+            409, detail={"code": enviar.RECUSA_CANAL_SEM_ENVIO, "detail": sem_envio}
         )
     from app.services.atendimento import ia as ia_svc
 
@@ -3476,6 +3528,17 @@ async def _metricas_lojas(
     Conta o turno que COMEÇOU no período. `pct_no_prazo` é sobre os turnos
     já decididos: respondidos, e os sem resposta cujo prazo já venceu (o
     que ainda está no prazo não é nem acerto nem erro).
+
+    Mensagem automática não é resposta (05/10/2026) — a MESMA régua da fila
+    "Falta responder" (`gravar.recalcular`): o robô e as campanhas do Duoke,
+    a campanha que começa pelo usuário do comprador ("fulano já segue nossa
+    loja"), a figurinha da campanha e os cartões da Shopee (pelo `payload`) e
+    a que o DaVinci manda sozinho fora do /atendimento (senha da devolução,
+    e-mail de logística da Amazon): `gravar.mensagem_automatica_sql`, no
+    próprio SQL (nem chega ao Python). Medido em produção (7 dias): eram automáticas
+    1.921 das 2.648 primeiras respostas da Shopee, e a mediana de 1 min
+    escondia a de quem responde de verdade (com a régua inteira: Shopee
+    ~297 min e 48,6% no prazo; TikTok ~753 min e 88,8%).
     """
     filtro = [AtendimentoConversa.ultima_mensagem_em >= desde]
     cond = _clausula_escopo(scope, AtendimentoConversa.integration_id)
@@ -3510,6 +3573,9 @@ async def _metricas_lojas(
                     and_(
                         AtendimentoMensagem.autor == AUTOR_LOJA,
                         AtendimentoMensagem.status != MSG_FALHOU,
+                        ~gravar.mensagem_automatica_sql(
+                            AtendimentoMensagem.texto, AtendimentoMensagem.payload
+                        ),
                     ),
                 ),
             )

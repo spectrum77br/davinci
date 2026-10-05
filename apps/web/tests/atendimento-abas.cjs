@@ -211,6 +211,23 @@ const resposta = (o = {}) => ({
   assert.equal(R.bloqueioDaAba({ chave: 'avaliacao', responde: resp({ codigo: 'ja_respondida', motivo: 'x' }) }, true), P.ERROS.ja_respondida)
   assert.equal(R.bloqueioDaAba({ chave: 'pos_venda', responde: resp({ pode_enviar: true, codigo: null, motivo: null }) }, true), '')
   assert.equal(R.bloqueioDaAba(null, true), 'Esta aba é só de leitura.')
+
+  // E-mail do Tuta e Zap (05/10/2026): o envio deles ainda não existe no
+  // DaVinci. O código `canal_sem_envio` NÃO tem frase na tela de propósito:
+  // a caixa (da aba e da conversa) e o aviso do 409 mostram a frase do
+  // backend, que diz qual dos dois é e onde responder.
+  {
+    assert.match(api('services/atendimento/enviar.py'), /^RECUSA_CANAL_SEM_ENVIO = "canal_sem_envio"$/m)
+    assert.equal(P.ERROS.canal_sem_envio, undefined, 'sem tradução: a tela mostra a frase do backend')
+    for (const [nome, chave] of [['MOTIVO_TUTA_SEM_ENVIO', 'email'], ['MOTIVO_ZAP_SEM_ENVIO', 'zap']]) {
+      const bloco = (constantes.match(new RegExp(`^${nome} = \\(([\\s\\S]*?)^\\)`, 'm')) || [])[1] || ''
+      const frase = [...bloco.matchAll(/"([^"]*)"/g)].map((x) => x[1]).join('')
+      assert.match(frase, /ainda não existe no DaVinci/, nome)
+      assert.equal(R.bloqueioDaAba({ chave, responde: resp({ codigo: 'canal_sem_envio', motivo: frase }) }, true), frase)
+      assert.equal(P.motivoLegivel(frase), frase, 'a caixa da conversa: `motivoLegivel(envio.motivo)`')
+      assert.equal(P.erroDaApi({ data: { detail: { code: 'canal_sem_envio', detail: frase } } }).texto, frase, 'o 409 do responder e do "Sugerir"')
+    }
+  }
 }
 
 // ------------------------------------------------ a barra renderizada (Vue SSR)
