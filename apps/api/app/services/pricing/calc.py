@@ -28,6 +28,13 @@ Slot mapping (SSH semantics):
 calc returns `None` and the caller treats the cell as "not configured"
 (UI shows `—`/NA, push refuses).
 
+Catálogo ML (06/10/2026): a conta com `canal == 'catalogo'` (coluna de
+catálogo, "filha" de uma conta ML de kit) usa como custo o
+`product.preco_catalogo` e TODOS os outros números da conta base
+(`conta_base`: comissão, margem/frete do tipo, kit_number). Sem preço de
+catálogo (NULL ou 0) → `missing_inputs` com detail "sem_preco_catalogo" —
+nunca cai para o Kit 1.
+
 The result is a `Decimal` quantized to 2 decimals (cents-precision in BRL),
 ROUND_HALF_UP — closer to seller intuition than banker's rounding.
 """
@@ -96,11 +103,21 @@ def _account_pair(
     )
 
 
+def _preco_catalogo(product: PricingProduct) -> Decimal | None:
+    val = getattr(product, "preco_catalogo", None)
+    if val is None:
+        return None
+    d = Decimal(val) if not isinstance(val, Decimal) else val
+    return d if d > 0 else None
+
+
 def calculate(
     account: PricingAccount,
     product: PricingProduct,
     override: PricingOverride | None = None,
     product_type: int | None = None,
+    *,
+    conta_base: PricingAccount | None = None,
 ) -> CalcOutcome:
     if override is not None:
         raw = override.cell_status
@@ -120,7 +137,20 @@ def calculate(
                 source="override",
             )
 
-    kit = int(account.kit_number or 1)
+    catalogo = (getattr(account, "canal", None) or "kit") == "catalogo"
+    # Coluna de catálogo: os números são os da conta base (a filha não guarda).
+    params = account
+    if catalogo:
+        if conta_base is None:
+            return CalcOutcome(
+                price=None,
+                source="missing_inputs",
+                detail="sem_conta_base",
+                inputs={"canal": "catalogo"},
+            )
+        params = conta_base
+
+    kit = int(params.kit_number or 1)
     # Margin/shipping slot is the product type (Acessórios/Diversos/Regular/
     # Robusto/Apple). When the caller didn't resolve it, fall back to a
     # transient attr the API sets after the segment lookup; ultimate fallback
@@ -128,10 +158,13 @@ def calculate(
     if product_type is None:
         product_type = getattr(product, "_product_type", None) or kit
     slot = max(1, min(5, int(product_type)))
-    cost = _kit_value(product, kit) or _kit_value(product, 1)
-    margin, shipping = _account_pair(account, slot)
+    if catalogo:
+        cost = _preco_catalogo(product)
+    else:
+        cost = _kit_value(product, kit) or _kit_value(product, 1)
+    margin, shipping = _account_pair(params, slot)
     commission = (
-        Decimal(account.commission) if account.commission is not None else None
+        Decimal(params.commission) if params.commission is not None else None
     )
 
     inputs = {
@@ -142,6 +175,15 @@ def calculate(
         "margin": str(margin) if margin is not None else None,
         "shipping": str(shipping) if shipping is not None else None,
     }
+    if catalogo:
+        inputs["canal"] = "catalogo"
+        if cost is None:
+            return CalcOutcome(
+                price=None,
+                source="missing_inputs",
+                detail="sem_preco_catalogo",
+                inputs=inputs,
+            )
 
     if cost is None or commission is None or margin is None:
         return CalcOutcome(

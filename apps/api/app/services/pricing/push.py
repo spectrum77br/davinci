@@ -46,10 +46,17 @@ from app.services.marketplaces.shopee import ShopeeClient
 from app.services.marketplaces.amazon import AmazonClient
 from app.services.marketplaces.tiktok import TikTokClient
 from app.services.marketplaces.temu import TemuClient
+from app.services.pricing.anuncios import (
+    CANAL_CATALOGO,
+    CANAL_KIT,
+    Resolucao,
+    resolver_anuncios,
+    texto_bloqueio_envio,
+)
 from app.services.pricing.calc import CalcOutcome, calculate
-from app.services.pricing.sku_match import (
-    dedup_links_for_push,
+from app.services.pricing.sku_match import (  # noqa: F401 — reexporta p/ os testes
     ml_listing_type_for_account,
+    sku_casa_no_departamento,
     variants_of,
 )
 
@@ -165,50 +172,6 @@ async def _resolve_product_type(
     return int(leaf.sort_order or 0) + 1
 
 
-def sku_casa_no_departamento(
-    sku_do_anuncio: str,
-    *,
-    dept: str,
-    sku_full_set: set[str],
-    sku_base_set: set[str],
-) -> bool:
-    """O SKU vinculado ao anúncio pertence a esta célula da Tabela de Preços?
-
-    Estava embutida no laço do push e por isso nunca foi testada — foi assim
-    que passou despercebido que TODA coluna de kit da mala devolvia "no_link"
-    mesmo com o anúncio vinculado (Eduardo, 16/09/2026, Amazon kfa).
-
-    `sku_full_set` são os SKUs da célula inteiros; `sku_base_set`, a parte
-    antes do primeiro ponto. Ambos já em minúsculas.
-    """
-    sku = (sku_do_anuncio or "").lower()
-    if not sku:
-        return False
-
-    if dept == "catalogo":
-        # catálogo: só SKU simples e igualdade exata
-        return "+" not in sku and sku in sku_full_set
-
-    # mainSku = lado esquerdo do kit (descarta os acessórios do "+")
-    main_sku = sku.split("+", 1)[0]
-
-    if dept == "mala":
-        # Duas formas de casar:
-        # 1) IGUAL ao da célula, inclusive quando a célula é um kit. Era o que
-        #    faltava: a célula de kit tem SKU "b109.20+a075+bp003+a076", e
-        #    comparar só o lado esquerdo ("b109.20") contra esse conjunto nunca
-        #    casava.
-        # 2) Lado esquerdo do kit do ANÚNCIO contra um SKU simples da célula —
-        #    o comportamento que já existia.
-        # Exato primeiro, de propósito: dois kits do mesmo produto
-        # ("b109.20+a075" e "b109.20+a999") têm o mesmo lado esquerdo, então
-        # casar só por ele empurraria preço pro anúncio errado.
-        return sku in sku_full_set or main_sku in sku_full_set
-
-    # celular/eletro: casa pelo SKU base (parte antes do ".")
-    return main_sku.split(".", 1)[0] in sku_base_set
-
-
 async def enviar_preco_para_links(
     client: Any,
     platform: Any,
@@ -216,6 +179,7 @@ async def enviar_preco_para_links(
     preco: float,
     *,
     sku_by_product: dict[UUID, str],
+    canal_esperado: str | None = None,
 ) -> dict[UUID, Any]:
     """Manda o preço para cada anúncio e INSISTE no que recusou por limite de
     taxa, em rodadas com espera crescente.
@@ -232,6 +196,9 @@ async def enviar_preco_para_links(
     anúncio encerrado, credencial recusada) não é retentado.
     """
     resultados: dict[UUID, Any] = {}
+    # Só passa o canal quando há um (o despacho de quem não confere canal
+    # segue com a assinatura de antes).
+    canal_kw = {"canal_esperado": canal_esperado} if canal_esperado else {}
     pendentes = list(links)
     intervalo = 0.0
     for rodada, espera in enumerate((0.0, *_ESPERAS_LIMITE_S)):
@@ -254,6 +221,7 @@ async def enviar_preco_para_links(
                 await _dispatch_price_update_link(
                     client, platform, link, preco,
                     product_sku=sku_by_product.get(link.product_id),
+                    **canal_kw,
                 )
             )
             resultados[link.id] = result
@@ -273,14 +241,15 @@ _ESPERAS_LIMITE_S = (3.0, 8.0, 20.0, 45.0)
 _INTERVALO_APOS_LIMITE_S = 0.25
 
 
-async def _resolve_product_links_for_push(
+async def resolver_para_envio(
     session: AsyncSession,
     *,
     account: PricingAccount,
     pricing_product: PricingProduct,
     department: str | None,
     platform_str: str,
-) -> list[ProductLink]:
+    conta_base: PricingAccount | None = None,
+) -> Resolucao:
     """Resolução SSH-style: busca TODOS os product_links da integração
     primeiro e só depois filtra pelos SKUs do pricing_product.
 
@@ -289,39 +258,29 @@ async def _resolve_product_links_for_push(
     product_ids) sumia silenciosamente quando o prefix_index não pegava
     SKUs longos de mala (ex. "b005.12.18"); essa versão garante que
     nenhum link válido é descartado antes do filtro de SKU.
+
+    A regra em si (canal kit × catálogo) é a do resolvedor único
+    (`services/pricing/anuncios.py`), o mesmo do /grid e do /actual-prices.
+    No canal catálogo os vínculos são os da integração da conta BASE.
     """
-    if not pricing_product.sku:
-        return []
-
-    sku_list = variants_of(pricing_product.sku)
-    if not sku_list:
-        return []
-    sku_full_set = {s.lower() for s in sku_list}
-    sku_base_set = {s.split(".", 1)[0].lower() for s in sku_list}
-
-    dept = (department or "celular").lower()
-    is_mala = dept == "mala"
-    is_catalogo = dept == "catalogo"
+    if not pricing_product.sku or not variants_of(pricing_product.sku):
+        return Resolucao()
+    canal = account.canal or CANAL_KIT
+    if canal == CANAL_CATALOGO and ml_listing_type_for_account(account.listing_type) is None:
+        return Resolucao(sem_tipo=True)
+    dona = conta_base if canal == CANAL_CATALOGO else account
+    if dona is None or dona.integration_id is None:
+        return Resolucao()
 
     # 1. todos os links da integração — sem filtrar por produto ainda
-    links_q = select(ProductLink).where(
-        ProductLink.integration_id == account.integration_id
-    )
+    links_q = select(ProductLink).where(ProductLink.integration_id == dona.integration_id)
+    if canal == CANAL_CATALOGO:
+        links_q = links_q.where(ProductLink.catalog_listing.is_(True))
     all_links = list((await session.execute(links_q)).scalars().all())
     if not all_links:
-        return []
+        return Resolucao()
 
-    # 2. filtro de listing_type do ML (premium/classico) na frente
-    if platform_str == "ml":
-        wanted_listing_type = ml_listing_type_for_account(account.listing_type)
-        if wanted_listing_type:
-            all_links = [
-                lk for lk in all_links if (lk.listing_type or "") == wanted_listing_type
-            ]
-        if not all_links:
-            return []
-
-    # 3. mapa product_id -> SKU para tomar decisão de departamento
+    # 2. mapa product_id -> SKU para a regra de departamento
     product_ids_in_links = list({lk.product_id for lk in all_links})
     sku_rows = (
         await session.execute(
@@ -330,32 +289,36 @@ async def _resolve_product_links_for_push(
     ).all()
     product_map: dict[UUID, str] = {pid: sku for pid, sku in sku_rows if sku}
 
-    # 4. aplica a regra de SKU do departamento direto no SKU do produto
-    matched_links: list[ProductLink] = []
-    for link in all_links:
-        sku = product_map.get(link.product_id)
-        if not sku:
-            continue
-        sku_lc = sku.lower()
+    return resolver_anuncios(
+        all_links,
+        product_map,
+        pricing_sku=pricing_product.sku,
+        dept=department,
+        plataforma=platform_str,
+        canal=canal,
+        listing_type_conta=account.listing_type,
+    )
 
-        if not sku_casa_no_departamento(
-            sku_lc, dept=dept, sku_full_set=sku_full_set, sku_base_set=sku_base_set
-        ):
-            continue
 
-        matched_links.append(link)
-
-    # 5. ML celular: se houver kits, priorize só os kits (paridade SSH)
-    if not is_mala and not is_catalogo and platform_str == "ml":
-        has_kit = any("+" in (product_map.get(lk.product_id) or "") for lk in matched_links)
-        if has_kit:
-            matched_links = [
-                lk
-                for lk in matched_links
-                if "+" in (product_map.get(lk.product_id) or "")
-            ]
-
-    return dedup_links_for_push(platform_str, matched_links)
+async def _resolve_product_links_for_push(
+    session: AsyncSession,
+    *,
+    account: PricingAccount,
+    pricing_product: PricingProduct,
+    department: str | None,
+    platform_str: str,
+    conta_base: PricingAccount | None = None,
+) -> list[ProductLink]:
+    """Só os anúncios que recebem o preço (ver `resolver_para_envio`)."""
+    res = await resolver_para_envio(
+        session,
+        account=account,
+        pricing_product=pricing_product,
+        department=department,
+        platform_str=platform_str,
+        conta_base=conta_base,
+    )
+    return res.links
 
 
 async def _persist_cell_status(
@@ -464,6 +427,24 @@ async def push_one(
     if product is None:
         return PushOutcome(ok=False, code="product_not_found")
 
+    # Coluna de catálogo: os números e a integração são os da conta base.
+    canal = account.canal or CANAL_KIT
+    conta_base: PricingAccount | None = None
+    if canal == CANAL_CATALOGO:
+        conta_base = (
+            await session.execute(
+                select(PricingAccount).where(
+                    and_(
+                        PricingAccount.id == account.conta_base_id,
+                        user_scope(PricingAccount, user),
+                    )
+                )
+            )
+        ).scalar_one_or_none()
+        if conta_base is None:
+            return PushOutcome(ok=False, code="conta_base_nao_encontrada")
+    dona = conta_base or account
+
     override = (
         await session.execute(
             select(PricingOverride).where(
@@ -489,7 +470,9 @@ async def push_one(
         )
 
     product_type = await _resolve_product_type(session, product)
-    outcome: CalcOutcome = calculate(account, product, override, product_type)
+    outcome: CalcOutcome = calculate(
+        account, product, override, product_type, conta_base=conta_base
+    )
     if outcome.source in {"disabled", "locked"} and (
         outcome.source == "disabled" or outcome.price is None
     ):
@@ -500,6 +483,13 @@ async def push_one(
             price=outcome.price,
         )
     if outcome.price is None:
+        if outcome.detail == "sem_preco_catalogo":
+            return PushOutcome(
+                ok=False,
+                code="bloqueado",
+                detail="Produto sem preço de catálogo (coluna Catálogo em Produtos)",
+                payload={"bloqueio": "sem_preco_catalogo", "inputs": outcome.inputs or {}},
+            )
         return PushOutcome(
             ok=False,
             code="missing_inputs",
@@ -530,7 +520,7 @@ async def push_one(
                 payload=cached.get("payload") or {},
             )
 
-    if account.integration_id is None:
+    if dona.integration_id is None:
         return PushOutcome(
             ok=False,
             code="account_not_linked",
@@ -542,7 +532,7 @@ async def push_one(
         await session.execute(
             select(Integration).where(
                 and_(
-                    Integration.id == account.integration_id,
+                    Integration.id == dona.integration_id,
                     user_scope(Integration, user),
                 )
             )
@@ -580,14 +570,31 @@ async def push_one(
             price=outcome.price,
         )
 
-    department = await _account_department(session, account)
-    links = await _resolve_product_links_for_push(
+    department = await _account_department(session, dona)
+    resolucao = await resolver_para_envio(
         session,
         account=account,
         pricing_product=product,
         department=department,
         platform_str=integration.platform.value,
+        conta_base=conta_base,
     )
+    links = resolucao.links
+    if canal == CANAL_CATALOGO and not links:
+        # Célula de catálogo bloqueada (sem tipo, sem anúncio de catálogo, ou
+        # todos sincronizados/pausados): recusa ANTES de chamar o ML e não
+        # mexe no status da célula — é o estado normal dela, não erro.
+        bloqueio, texto = texto_bloqueio_envio(resolucao) or ("sem_anuncio", "")
+        return PushOutcome(
+            ok=False,
+            code="bloqueado",
+            detail=texto,
+            price=outcome.price,
+            payload={
+                "bloqueio": bloqueio,
+                "links": [_entrada_bloqueada(b) for b in resolucao.bloqueados],
+            },
+        )
     if not links:
         await _persist_cell_status(
             session,
@@ -655,7 +662,10 @@ async def push_one(
         links,
         float(outcome.price),
         sku_by_product=sku_by_product,
+        # Só o ML confere o canal no item vivo (o catálogo é só do ML).
+        canal_esperado=canal if integration.platform == IntegrationPlatform.ML else None,
     )
+    repausa_falhou: list[str] = []
 
     for link in links:
         if first_item is None:
@@ -668,6 +678,9 @@ async def push_one(
         # "encerrado/moderação"-like outcomes as warnings, not errors.
         if result.status == SyncStatus.OK:
             link_message = f"R${int(outcome.price)}"
+            if (result.payload or {}).get("repausa_falhou"):
+                repausa_falhou.append(link.external_id)
+                link_message += " — ATENÇÃO: o anúncio ficou ATIVO (a pausa não voltou)"
         elif result.error_detail:
             link_message = result.error_detail[:300]
         elif result.error_code:
@@ -740,6 +753,20 @@ async def push_one(
         agg_detail = last_error_detail
         post_status = CellStatus.ERROR
 
+    # Catálogo: os anúncios que casaram mas não recebem (sincronizado/pausado…)
+    # aparecem no resultado como pulados, com o motivo.
+    for b in resolucao.bloqueados:
+        per_link.append(_entrada_bloqueada(b))
+    if resolucao.bloqueados:
+        pulados = ", ".join(f"{b.link.external_id} ({b.motivo})" for b in resolucao.bloqueados)
+        agg_detail = "; ".join(p for p in (agg_detail, f"pulou {pulados}") if p)
+    if repausa_falhou:
+        aviso = (
+            "ATENÇÃO: a pausa não voltou e o anúncio ficou ATIVO: "
+            + ", ".join(repausa_falhou)
+        )
+        agg_detail = "; ".join(p for p in (agg_detail, aviso) if p)
+
     await _persist_cell_status(
         session,
         user_id=user.id,
@@ -769,6 +796,22 @@ async def push_one(
             response.to_dict(),
         )
     return response
+
+
+def _entrada_bloqueada(b) -> dict:  # b: anuncios.AnuncioBloqueado
+    """Linha do resultado por anúncio para um anúncio de catálogo que o
+    resolvedor bloqueou (não foi chamado no ML)."""
+    return {
+        "externalId": b.link.external_id,
+        "variationId": b.link.variation_id,
+        "success": False,
+        "skipped": True,
+        "message": f"não enviado: {b.motivo}",
+        "external_id": b.link.external_id,
+        "variation_id": b.link.variation_id,
+        "status": SyncStatus.SKIPPED.value,
+        "error_code": b.motivo,
+    }
 
 
 # SSH parity: marketplaces sometimes reject price changes because the listing
@@ -817,17 +860,22 @@ async def _dispatch_price_update_link(
     price: float,
     *,
     product_sku: str | None = None,
+    canal_esperado: str | None = None,
 ) -> SyncResult:
     """Route price update to the correct client method based on platform,
     using ProductLink as the source of (external_id, variation_id) and
     `product_sku` (the linked davinci.products.sku) for Amazon — which
-    addresses listings by seller SKU, NOT external_id."""
+    addresses listings by seller SKU, NOT external_id.
+
+    `canal_esperado` (só ML): o update_price confere no item vivo se o
+    anúncio é do canal da coluna (kit × catálogo) antes do PUT."""
     try:
         if platform == IntegrationPlatform.ML:
             return await client.update_price(
                 item_id=link.external_id,
                 price=price,
                 variation_id=link.variation_id,
+                canal_esperado=canal_esperado,
             )
         elif platform == IntegrationPlatform.SHOPEE:
             return await client.update_price(

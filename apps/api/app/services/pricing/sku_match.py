@@ -166,6 +166,55 @@ def filter_products_by_department(
 
 
 # =============================================================================
+# Regra de SKU por departamento usada no envio (e no resolvedor de anúncios).
+# =============================================================================
+
+
+def sku_casa_no_departamento(
+    sku_do_anuncio: str,
+    *,
+    dept: str,
+    sku_full_set: set[str],
+    sku_base_set: set[str],
+) -> bool:
+    """O SKU vinculado ao anúncio pertence a esta célula da Tabela de Preços?
+
+    Estava embutida no laço do push e por isso nunca foi testada — foi assim
+    que passou despercebido que TODA coluna de kit da mala devolvia "no_link"
+    mesmo com o anúncio vinculado (Eduardo, 16/09/2026, Amazon kfa).
+
+    `sku_full_set` são os SKUs da célula inteiros; `sku_base_set`, a parte
+    antes do primeiro ponto. Ambos já em minúsculas.
+    """
+    sku = (sku_do_anuncio or "").lower()
+    if not sku:
+        return False
+
+    if dept == "catalogo":
+        # catálogo: só SKU simples e igualdade exata
+        return "+" not in sku and sku in sku_full_set
+
+    # mainSku = lado esquerdo do kit (descarta os acessórios do "+")
+    main_sku = sku.split("+", 1)[0]
+
+    if dept == "mala":
+        # Duas formas de casar:
+        # 1) IGUAL ao da célula, inclusive quando a célula é um kit. Era o que
+        #    faltava: a célula de kit tem SKU "b109.20+a075+bp003+a076", e
+        #    comparar só o lado esquerdo ("b109.20") contra esse conjunto nunca
+        #    casava.
+        # 2) Lado esquerdo do kit do ANÚNCIO contra um SKU simples da célula —
+        #    o comportamento que já existia.
+        # Exato primeiro, de propósito: dois kits do mesmo produto
+        # ("b109.20+a075" e "b109.20+a999") têm o mesmo lado esquerdo, então
+        # casar só por ele empurraria preço pro anúncio errado.
+        return sku in sku_full_set or main_sku in sku_full_set
+
+    # celular/eletro: casa pelo SKU base (parte antes do ".")
+    return main_sku.split(".", 1)[0] in sku_base_set
+
+
+# =============================================================================
 # listingType bridge: SSH stores "ml classico"/"ml premium" on the account
 # but DaVinci's product_links.listing_type carries ML's raw values.
 # =============================================================================

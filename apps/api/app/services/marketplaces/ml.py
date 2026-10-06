@@ -43,6 +43,12 @@ import structlog
 from app.config import get_settings
 from app.services.marketplaces import flex_api
 from app.services.marketplaces.base import SyncResult, SyncStatus, TestResult
+from app.services.pricing.anuncios import (
+    CANAL_CATALOGO,
+    CANAL_KIT,
+    CATALOGO_SINCRONIZADO_BLOQUEIA,
+    motivo_por_status,
+)
 from app.services.vinculo_saude import norm_sku
 
 if TYPE_CHECKING:
@@ -760,6 +766,7 @@ class MercadoLivreClient:
         price: float,
         *,
         variation_id: str | None = None,
+        canal_esperado: str | None = None,
     ) -> SyncResult:
         """Push price to a single ML listing — SSH semantics.
 
@@ -772,8 +779,17 @@ class MercadoLivreClient:
              sending the same price in all the IDs for the variations".
              Sending only one variation is silently ignored or rejected.
           4. For items WITHOUT variations: PUT `{price: N}` directly.
-          5. If ML returns `item.price.not_modifiable` (paused listing):
-             activate → wait 2s → retry → re-pause regardless of retry result.
+          5. If ML returns `item.price.not_modifiable` on a PAUSED listing:
+             activate → wait 2s → retry → pause again, conferindo a resposta
+             da pausa (06/10/2026: antes reativava qualquer status e pausava
+             sem conferir; agora só mexe no que estava pausado).
+
+        `canal_esperado` (Catálogo ML, 06/10/2026) confere no item VIVO, antes
+        do PUT, se o anúncio é do canal da coluna: 'catalogo' só vai para
+        anúncio com catalog_listing=true, não sincronizado (item_relations
+        vazio), nem pausado/em revisão/encerrado; 'kit' nunca vai para anúncio
+        de catálogo. Fora do canal → SKIPPED sem chamar o PUT. None = sem
+        conferência (comportamento antigo).
         """
         rounded_price = int(round(price))
         if rounded_price <= 0:
@@ -806,6 +822,11 @@ class MercadoLivreClient:
         item_status = (item_info.get("status") or "").lower()
         sub_status = item_info.get("sub_status") or []
         variations = item_info.get("variations") or []
+
+        # 1b. O canal da coluna bate com o anúncio vivo? (Catálogo ML)
+        fora_do_canal = _conferir_canal_ml(item_id, item_info, canal_esperado)
+        if fora_do_canal is not None:
+            return fora_do_canal
 
         # 2. Bail cleanly on terminal states — don't fight ML's moderation/closure.
         if item_status == "closed":
@@ -863,12 +884,21 @@ class MercadoLivreClient:
                 },
             )
 
-        # 4. not_modifiable → activate → wait → push → re-pause.
+        # 3b. Automação de preço do ML ligada (desde 18/03/2026 o ML recusa
+        # troca de preço nesses anúncios) — erro claro, sem reativar nada.
+        if 400 <= status_code < 500 and _recusa_por_automacao(payload):
+            return _erro_automacao(item_id)
+
+        # 4. not_modifiable num anúncio PAUSADO → activate → wait → push →
+        # pausa de novo (e confere). Anúncio que não estava pausado não é
+        # reativado: a recusa dele cai no erro genérico abaixo.
         message = (payload.get("message") or "").lower() if isinstance(payload, dict) else ""
         cause_list = payload.get("cause") or [] if isinstance(payload, dict) else []
         cause_codes = " ".join(str(c.get("code", "")) for c in cause_list).lower()
 
-        if "not_modifiable" in message or "not_modifiable" in cause_codes:
+        if item_status == "paused" and (
+            "not_modifiable" in message or "not_modifiable" in cause_codes
+        ):
             try:
                 ar = await self._request(
                     "PUT", f"/items/{item_id}", json={"status": "active"}
@@ -881,18 +911,14 @@ class MercadoLivreClient:
                     )
                 await asyncio.sleep(2)
                 status_code2, payload2 = await _put_price()
-                # Re-pause regardless of retry outcome.
-                try:
-                    await self._request(
-                        "PUT", f"/items/{item_id}", json={"status": "paused"}
-                    )
-                except Exception:  # noqa: BLE001
-                    pass
+                # Pausa de novo qualquer que seja o resultado — e confere.
+                repausa_falhou = not await self._pausar_de_novo(item_id)
                 if status_code2 == -1:
                     return SyncResult(
                         status=SyncStatus.RETRYABLE,
                         error_code="ml_put_price_failed_after_unpause",
                         error_detail=str(payload2.get("_http_error", "unknown"))[:500],
+                        payload={"repausa_falhou": repausa_falhou},
                     )
                 if status_code2 < 400:
                     return SyncResult(
@@ -902,6 +928,7 @@ class MercadoLivreClient:
                             "variation_id": variation_id,
                             "price": rounded_price,
                             "via": "unpause_repause",
+                            "repausa_falhou": repausa_falhou,
                         },
                     )
                 # Fall through to the generic error mapping below using the
@@ -917,6 +944,8 @@ class MercadoLivreClient:
 
         # 5. Generic error mapping — inline, no _R shim (the previous version
         # built a fake response object that failed at `r.text` later on).
+        if 400 <= status_code < 500 and _recusa_por_automacao(payload):
+            return _erro_automacao(item_id)
         if status_code in {429, 502, 503, 504}:
             sync_status = SyncStatus.RETRYABLE
         else:
@@ -938,6 +967,25 @@ class MercadoLivreClient:
             error_code=f"ml_put_price_status_{status_code}",
             error_detail=error_detail,
         )
+
+    async def _pausar_de_novo(self, item_id: str) -> bool:
+        """Volta o anúncio para pausado depois da troca de preço e CONFERE a
+        resposta. False = a pausa não voltou (o anúncio ficou ATIVO) — vai
+        para o log como erro e para o resultado do envio."""
+        try:
+            r = await self._request("PUT", f"/items/{item_id}", json={"status": "paused"})
+        except Exception as e:  # noqa: BLE001
+            logger.error("ml_repausa_falhou", item_id=item_id, erro=str(e)[:300])
+            return False
+        if r.status_code >= 400:
+            logger.error(
+                "ml_repausa_falhou",
+                item_id=item_id,
+                status=r.status_code,
+                body=(r.text or "")[:300],
+            )
+            return False
+        return True
 
     async def list_listings(
         self,
@@ -1576,6 +1624,91 @@ class MercadoLivreClient:
 # layer — *not* at the ingestion edge. Earlier the mapping happened here, so
 # the auto-link path wrote display strings into product_links.listing_type
 # and push filtered by API values → 0 matches.
+
+
+def _conferir_canal_ml(
+    item_id: str, item_info: dict, canal_esperado: str | None
+) -> SyncResult | None:
+    """SKIPPED quando o item vivo não é do canal da coluna (Catálogo ML,
+    06/10/2026); None = pode enviar. Ver `update_price`."""
+    if canal_esperado not in (CANAL_KIT, CANAL_CATALOGO):
+        return None
+    eh_catalogo = item_info.get("catalog_listing") is True
+    if canal_esperado == CANAL_KIT:
+        if eh_catalogo:
+            return SyncResult(
+                status=SyncStatus.SKIPPED,
+                error_code="canal_errado",
+                error_detail=(
+                    f"Anúncio {item_id} é de catálogo no ML: a coluna de Kit não "
+                    "manda preço para anúncio de catálogo"
+                ),
+            )
+        return None
+    if not eh_catalogo:
+        return SyncResult(
+            status=SyncStatus.SKIPPED,
+            error_code="canal_errado",
+            error_detail=(
+                f"Anúncio {item_id} não é de catálogo no ML: a coluna Catálogo só "
+                "manda preço para anúncio de catálogo"
+            ),
+        )
+    status = (item_info.get("status") or "").lower()
+    motivo = motivo_por_status(status)
+    if motivo:
+        textos = {
+            "pausado": "pausado",
+            "em_revisao": "em revisão no Mercado Livre",
+            "encerrado": "encerrado",
+        }
+        return SyncResult(
+            status=SyncStatus.SKIPPED,
+            error_code=motivo,
+            error_detail=f"Anúncio de catálogo {item_id} {textos[motivo]} — não envia",
+        )
+    relacionados = [
+        str(r.get("id"))
+        for r in item_info.get("item_relations") or []
+        if isinstance(r, dict) and r.get("id")
+    ]
+    if CATALOGO_SINCRONIZADO_BLOQUEIA and relacionados:
+        return SyncResult(
+            status=SyncStatus.SKIPPED,
+            error_code="sincronizado",
+            error_detail=(
+                f"Anúncio de catálogo {item_id} sincronizado com o anúncio comum "
+                f"{', '.join(relacionados)} — o preço vem da coluna de Kit"
+            ),
+            payload={"sincronizado_com": relacionados},
+        )
+    return None
+
+
+def _erro_automacao(item_id: str) -> SyncResult:
+    return SyncResult(
+        status=SyncStatus.FATAL,
+        error_code="automacao_ml",
+        error_detail=(
+            f"O Mercado Livre recusou o preço do anúncio {item_id}: a automação "
+            "de preços do ML está ligada nele. Desligue a automação no anúncio "
+            "(Mercado Livre) para o DaVinci poder trocar o preço."
+        ),
+    )
+
+
+def _recusa_por_automacao(payload: Any) -> bool:
+    """A recusa do PUT de preço é a da automação de preços do ML? Procura
+    "automat" (automation/automatic/automática…) na mensagem, no erro e nas
+    causas da resposta."""
+    if not isinstance(payload, dict):
+        return False
+    partes = [str(payload.get("message") or ""), str(payload.get("error") or "")]
+    for c in payload.get("cause") or []:
+        if isinstance(c, dict):
+            partes.append(str(c.get("code") or ""))
+            partes.append(str(c.get("message") or ""))
+    return "automat" in " ".join(partes).lower()
 
 
 def _map_ml_listing_type(listing_type_id: str | None) -> str | None:

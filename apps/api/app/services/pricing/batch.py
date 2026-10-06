@@ -81,7 +81,11 @@ def _format_report(summary: dict, samples: list[dict], department: str | None = 
     """SSH-style Telegram report. Categorizes failures into
     "Pulados (encerrados)", "Sem vínculo", and "Erros" so the user can
     triage at a glance and see which SKUs need attention."""
-    closed_codes = {"ml_listing_closed", "ml_listing_paused", "ml_listing_under_review"}
+    # "bloqueado": célula de catálogo sem para onde enviar (sem anúncio,
+    # sincronizado, pausado…) — recusada antes de chamar o ML, é pulo e não erro.
+    closed_codes = {
+        "ml_listing_closed", "ml_listing_paused", "ml_listing_under_review", "bloqueado",
+    }
     no_link_codes = {"no_link", "listing_not_found"}
 
     skipped = []
