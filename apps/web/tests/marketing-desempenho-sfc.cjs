@@ -1,19 +1,22 @@
 // Run from apps/web: node tests/marketing-desempenho-sfc.cjs
 //
-// Tela de Desempenho v2 (Eduardo, 24/09/2026): components/MarketingDesempenho.vue,
-// MarketingDesempenhoVideos.vue, MarketingDesempenhoInvestir.vue e os helpers
+// Tela de Desempenho (Eduardo, 24/09/2026; v3 em 06/10/2026):
+// components/MarketingDesempenho.vue, MarketingDesempenhoMaisVistos.vue,
+// MarketingDesempenhoInvestir.vue, MarketingDesempenhoVideos.vue e os helpers
 // puros em utils/desempenho.ts.
 //
 // Trava as regras que mais fácil se perdem ao mexer na tela:
 //  - métrica que NINGUÉM reportou aparece como "—", nunca como 0 (o YouTube
 //    não mede salvamento; o Instagram só dá views com uma permissão que o
 //    token ainda não tem — escrever 0 afirmaria o que a gente não sabe);
-//  - a comparação é NA MESMA IDADE e contra o normal da conta, e cada célula
-//    sem número diz por quê (aguardando, cedo, sem views, falhou);
+//  - views são SOMADAS (a última leitura de cada post, por rede e por vídeo),
+//    sem índice "× o normal"; cada célula sem número diz por quê
+//    (aguardando, sem views, falhou);
+//  - semana e mês são os últimos 7 e 30 dias de calendário de Brasília;
 //  - leitura velha avisa; falha de hoje não apaga a leitura boa de ontem;
 //  - "Atualizar agora" respeita a trava de 10 min do servidor;
-//  - as ressalvas (venda não é medida, view não é igual entre redes, pouco
-//    dado) ficam NA TELA.
+//  - as ressalvas (venda não é medida, view não é igual entre redes) ficam
+//    NA TELA.
 // Só dados FALSOS aqui; nenhuma chamada de rede.
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
@@ -27,7 +30,7 @@ const transpile = (source, module = ts.ModuleKind.CommonJS) => ts.transpileModul
 }).outputText
 
 // ---------------------------------------------------------------- SFCs
-const SFCS = ['MarketingDesempenho', 'MarketingDesempenhoVideos', 'MarketingDesempenhoInvestir']
+const SFCS = ['MarketingDesempenho', 'MarketingDesempenhoMaisVistos', 'MarketingDesempenhoVideos', 'MarketingDesempenhoInvestir']
 const sfc = {}
 for (const nome of SFCS) {
   const filename = path.join(__dirname, '..', 'components', `${nome}.vue`)
@@ -73,27 +76,11 @@ assert.equal(H.sinal(0), '0')
 assert.equal(H.qtd(1, 'vídeo', 'vídeos'), '1 vídeo')
 assert.equal(H.qtd(2, 'vídeo', 'vídeos'), '2 vídeos')
 
-// Índice "× o normal da conta".
-assert.equal(H.fmtIndice(2.06), '2,1×')
-assert.equal(H.fmtIndice(1), '1,0×')
-assert.equal(H.fmtIndice(null), '—')
-assert.equal(H.tomIndice(1.3), 'alto')
-assert.equal(H.tomIndice(1), 'normal')
-assert.equal(H.tomIndice(0.5), 'baixo', 'fraco é "baixo", nunca "ruim"')
-assert.equal(H.tomIndice(null), null)
-
-// Barra divergente em log2: dobro e metade têm o mesmo tamanho.
-assert.deepEqual(H.barra(2), { lado: 'direita', pct: 25, tom: 'acima' })
-assert.deepEqual(H.barra(0.5), { lado: 'esquerda', pct: 25, tom: 'abaixo' })
-assert.equal(H.barra(10).pct, 50, 'viral fica preso em 4×')
-assert.equal(H.barra(0).pct, 50, 'zero fica preso em 0,25×')
-assert.equal(H.barra(1).lado, 'centro')
-assert.equal(H.barra(3, 'pouco_dado').tom, 'cinza', 'pouco dado nunca fica verde')
-assert.equal(H.barra(null), null)
-
-assert.match(H.rotuloLeitura('pouco_dado'), /pouco dado/)
-assert.equal(H.rotuloLeitura('indicio'), 'indício')
-assert.equal(H.rotuloLeitura('comparavel'), 'dá pra comparar')
+// Views: "—" quando a rede não deu número; zero medido é zero.
+assert.equal(H.fmtViews(8362), '8.362')
+assert.equal(H.fmtViews(0), '0', 'o Facebook mede 0 de verdade')
+assert.equal(H.fmtViews(null), '—')
+assert.equal(H.fmtViews(undefined), '—')
 
 assert.equal(H.pct(0.078), '7,8%')
 assert.equal(H.pct(null), '—')
@@ -113,42 +100,87 @@ assert.equal(H.frescor(null).tom, 'nenhuma')
 assert.equal(H.ddmm('2026-08-26'), '26/08', 'data pura não anda um dia pra trás no fuso')
 assert.equal(H.diaRelativo('2026-09-25T02:47:00Z', AGORA), 'hoje', 'a noturna das 23:47 de hoje')
 
-// Célula rede × vídeo: cada "sem número" diz por quê.
-assert.equal(H.celula(undefined, 3, AGORA).texto, 'não postado')
+// Célula rede × vídeo: a soma das views dos posts nesta rede; sem número, diz por quê.
+assert.equal(H.celula([], AGORA).texto, 'não postado')
+assert.equal(H.celula(undefined, AGORA).texto, 'não postado')
 // Saiu e foi apagado depois: dizer "não postado" seria mentira.
-assert.equal(H.celula(undefined, 3, AGORA, true).texto, 'apagado da rede')
-assert.equal(H.celula(undefined, 3, AGORA, true).estado, 'apagado')
-assert.equal(H.celula({ estado: 'aguardando' }, 3, AGORA).texto, 'aguardando 1ª leitura')
+assert.equal(H.celula([], AGORA, true).texto, 'apagado da rede')
+assert.equal(H.celula([], AGORA, true).estado, 'apagado')
+assert.equal(H.celula([{ estado: 'aguardando' }], AGORA).texto, 'aguardando 1ª leitura')
 {
-  const c = H.celula({ estado: 'aguardando', publicado_em: '2026-09-24T15:04:00Z', marco_pronto_em: '2026-09-28T02:47:00Z' }, 3, AGORA)
+  const c = H.celula([{ estado: 'aguardando', publicado_em: '2026-09-24T15:04:00Z', marco_pronto_em: '2026-09-28T02:47:00Z' }], AGORA)
   assert.equal(c.estado, 'aguardando')
-  assert.equal(c.dica, 'Publicado às 12:04. A primeira leitura sai em até 1 hora; a comparação de 3 dias fica pronta em 27/09.')
+  assert.equal(c.dica, 'Publicado às 12:04. A primeira leitura sai em até 1 hora.', 'sem "comparação de 3 dias"')
+  const velho = H.celula([{ estado: 'aguardando', publicado_em: '2026-09-21T22:04:00Z' }], AGORA)
+  assert.equal(velho.dica, 'Publicado em 21/09 às 19:04. A primeira leitura sai em até 1 hora.')
 }
 {
-  const cedo = { estado: 'ok', lido_em: '2026-09-24T02:47:00Z', views_marco: null, marco_motivo: 'cedo', acumulado: { views: 500 } }
-  assert.match(H.celula({ ...cedo, marco_pronto_em: '2026-09-27T02:47:00Z' }, 3, AGORA).texto, /faltam 2 dias/)
-  assert.equal(H.celula({ ...cedo, marco_pronto_em: '2026-09-25T02:47:00Z' }, 3, AGORA).texto, 'sai hoje à noite')
-  assert.equal(H.celula({ ...cedo, marco_pronto_em: '2026-09-27T02:47:00Z' }, 3, AGORA).detalhe, 'total 500 até agora')
+  // O número é o TOTAL da rede, desde o primeiro dia: nada de "faltam 2 dias".
+  const novo = H.celula([{ estado: 'ok', lido_em: '2026-09-24T02:47:00Z', acumulado: { views: 1202 } }], AGORA)
+  assert.equal(novo.estado, 'ok')
+  assert.equal(novo.texto, '1.202')
+  assert.equal(novo.detalhe, '', 'sem "total X" pequeno do lado')
+  assert.equal(novo.dica, '')
+  // Dois posts do vídeo na mesma rede: soma, e o "+1 post" diz isso.
+  const dois = H.celula([
+    { estado: 'ok', lido_em: 'x', acumulado: { views: 448 } },
+    { estado: 'ok', lido_em: 'x', acumulado: { views: 300 } },
+  ], AGORA)
+  assert.equal(dois.texto, '748')
+  assert.equal(dois.dica, 'soma de 2 postagens')
+  const umSem = H.celula([
+    { estado: 'aguardando', acumulado: {} },
+    { estado: 'ok', lido_em: 'x', acumulado: { views: 300 } },
+  ], AGORA)
+  assert.equal(umSem.texto, '300', 'o post novo ainda sem leitura não esconde o número do outro')
+  assert.equal(umSem.dica, 'soma de 1 postagem (1 ainda sem número)')
+  assert.equal(H.celula([{ estado: 'ok', lido_em: 'x', acumulado: { views: 0 } }], AGORA).texto, '0', 'zero medido aparece')
 }
 {
-  const ok = H.celula({ estado: 'ok', lido_em: 'x', views_marco: 1240, marco_motivo: null, acumulado: { views: 1900 } }, 3, AGORA)
-  assert.equal(ok.estado, 'ok')
-  assert.equal(ok.texto, '1.240', 'o número da célula é a view na idade comparada…')
-  assert.equal(ok.detalhe, 'total 1.900', '…e o total fica de apoio')
+  const sv = H.celula([{ estado: 'ok', lido_em: 'x', acumulado: { curtidas: 12 } }], AGORA)
+  assert.equal(sv.estado, 'sem_views')
+  assert.equal(sv.texto, 'sem views')
+  assert.equal(sv.detalhe, '12 curtidas · a conta não liberou insights')
 }
-assert.match(H.celula({ estado: 'ok', lido_em: 'x', views_marco: null, marco_motivo: 'sem_views', acumulado: { curtidas: 12 } }, 3, AGORA).texto, /sem views/)
-assert.equal(H.celula({ estado: 'ok', lido_em: 'x', views_marco: null, marco_motivo: 'buraco', acumulado: {} }, 3, AGORA).texto, 'sem leitura nessa idade')
 {
   // Falhou sem nunca ter lido: âmbar, com o erro no title.
-  const f = H.celula({ estado: 'falhou', lido_em: null, erro: 'HTTP 403', acumulado: {} }, 3, AGORA)
+  const f = H.celula([{ estado: 'falhou', lido_em: null, erro: 'HTTP 403', acumulado: {} }], AGORA)
   assert.equal(f.estado, 'falhou')
   assert.equal(f.texto, 'não consegui ler')
   assert.equal(f.dica, 'HTTP 403')
   // Falhou HOJE mas já tinha número: mostra o número bom e avisa de quando é.
-  const g = H.celula({ estado: 'falhou', lido_em: '2026-09-23T02:50:00Z', erro: 'timeout', views_marco: 800, acumulado: { views: 900 } }, 3, AGORA)
+  const g = H.celula([{ estado: 'falhou', lido_em: '2026-09-23T02:50:00Z', erro: 'timeout', acumulado: { views: 900 } }], AGORA)
   assert.equal(g.estado, 'ok')
-  assert.equal(g.texto, '800', 'falha de hoje não some com o número bom')
+  assert.equal(g.texto, '900', 'falha de hoje não some com o número bom')
   assert.equal(g.aviso, 'a leitura de hoje falhou — mostrando a de 22/09')
+}
+
+// Mais vistos: janela pela idade em dias de Brasília (semana 0–6, mês 0–29),
+// sem número fica de fora, empate vai pro mais novo, e corta em n.
+{
+  const v = (id, idade, total, pub = '2026-09-20T15:00:00Z') => ({
+    creative_id: id, idade_dias: idade, views: { total }, primeira_publicacao_em: pub,
+  })
+  const cs = [
+    v('a', 6, 500), v('b', 7, 9000), v('c', 0, null), v('d', 29, 700), v('e', 30, 99999),
+    v('f', 2, 500, '2026-09-22T15:00:00Z'), v('g', null, 50),
+  ]
+  assert.deepEqual(H.maisVistos(cs, 'semana').map((c) => c.creative_id), ['f', 'a'], '7 dias atrás já é fora da semana; empate: o mais novo')
+  assert.deepEqual(H.maisVistos(cs, 'mes').map((c) => c.creative_id), ['b', 'd', 'f', 'a'], '30 dias atrás é fora do mês; sem número fora')
+  assert.deepEqual(H.maisVistos(cs, 'mes', 2).map((c) => c.creative_id), ['b', 'd'])
+  assert.equal(H.maisVistos(cs, 'mes').length, 4)
+  assert.deepEqual(H.maisVistos([], 'mes'), [])
+}
+
+// Ordem dos grupos: "(sem …)" sempre no fim; sem número antes dele, no fim dos outros.
+{
+  const g = (chave, mes, semana, media) => ({ chave, semana: { views: semana }, mes: { views: mes, media } })
+  const lista = [g('a', 100, null, 50), g('nenhum', 99999, 99999, 99999), g('b', 300, 10, 100), g('c', null, null, null), g('d', 200, 400, 200)]
+  assert.deepEqual(H.ordenarGrupos(lista, 'servidor').map((x) => x.chave), ['a', 'b', 'c', 'd', 'nenhum'])
+  assert.deepEqual(H.ordenarGrupos(lista, 'mes').map((x) => x.chave), ['b', 'd', 'a', 'c', 'nenhum'])
+  assert.deepEqual(H.ordenarGrupos(lista, 'semana').map((x) => x.chave), ['d', 'b', 'a', 'c', 'nenhum'])
+  assert.deepEqual(H.ordenarGrupos(lista, 'por_video').map((x) => x.chave), ['d', 'b', 'a', 'c', 'nenhum'])
+  assert.equal(lista[0].chave, 'a', 'não mexe na lista de entrada')
 }
 
 // Mini-barras: null não desenha, negativo fica no chão, altura proporcional.
@@ -198,9 +230,17 @@ assert.deepEqual([...urls].sort(), [
   '/api/marketing/metricas/postagens/',
   '/api/marketing/metricas?',
 ], 'só fala com os endpoints de métricas')
-// Link pro post abre fora, sem dar window.opener pra rede social.
-for (const n of ['MarketingDesempenho', 'MarketingDesempenhoVideos']) {
+// Link pro post abre fora, sem dar window.opener pra rede social — e todo
+// target="_blank" leva o rel.
+for (const n of ['MarketingDesempenho', 'MarketingDesempenhoMaisVistos', 'MarketingDesempenhoVideos', 'MarketingDesempenhoInvestir']) {
   assert.match(sfc[n].tpl, /target="_blank" rel="noopener"/, `${n}: link do post com rel=noopener`)
+  assert.equal((sfc[n].tpl.match(/target="_blank"/g) || []).length, (sfc[n].tpl.match(/target="_blank" rel="noopener"/g) || []).length, `${n}: todo _blank com noopener`)
+}
+// O índice "× o normal" saiu da tela inteira (06/10/2026): nada de 1,7×,
+// "indício" nem "pouco dado".
+for (const n of SFCS) {
+  assert.ok(!/pouco dado|indício|dá pra comparar|normal da conta|×/.test(sfc[n].tpl), `${n}: a tela não fala em índice`)
+  assert.ok(!/\.indice_views|\.views_marco|fmtIndice|tomIndice|rotuloLeitura|\bbarra\(/.test(sfc[n].script), `${n}: não lê o índice`)
 }
 // O Tailwind não varre utils/: classe de cor lá sairia sem CSS.
 assert.ok(!/\b(bg|text|border)-(emerald|amber|red|muted|foreground)/.test(utils), 'utils não carrega classe do Tailwind')
@@ -212,7 +252,12 @@ for (const trecho of [
   'Fora do desempenho', // o que foi tirado continua à vista
   'não é medido', // venda por vídeo não é medida — a tela não finge
   'não conta igual em cada rede', // soma das redes é só tendência
-  'pouco dado', // amostra pequena avisa
+  'Vídeos mais vistos', // o ranking pedido em 06/10
+  'Onde vale investir',
+  'views ganhas na semana e no mês', // views da janela = ganhas nela, como no Resumo
+  'Todos os vídeos',
+  'publicados nos últimos 90 dias', // a lista não segue o período do topo — e diz
+  'vale pro resumo', // o seletor 7/30/90 é do Resumo (e dos "+" por marca)
 ]) {
   assert.ok(templates.includes(trecho), `texto na tela: ${trecho}`)
 }
@@ -234,11 +279,12 @@ function fabrica(nome, extras, retorno) {
   )
 }
 const telaFactory = fabrica('MarketingDesempenho', [], `
-  dias, marco, marcaId, dados, carregando, recarregando, erro, carregar, atualizarAgora, atualizando,
-  aindaRodando, podeAtualizarEm, cartoes, voltarAContar, nadaPublicado, leitura, filtrarMarca, semIndice`)
+  dias, marcaId, dados, carregando, recarregando, erro, carregar, atualizarAgora, atualizando,
+  aindaRodando, podeAtualizarEm, cartoes, voltarAContar, nadaPublicado, leitura, filtrarMarca, mostrarMarca`)
 const videosFactory = fabrica('MarketingDesempenhoVideos', [], `
   linhas, ordenadas, ordemEfetiva, ordem, abrirTirar, confirmarTirar, tirando, motivo, motivoErro, restantes`)
-const investirFactory = fabrica('MarketingDesempenhoInvestir', [], 'dim, lista, comIndice, porPostagem, linhas')
+const investirFactory = fabrica('MarketingDesempenhoInvestir', [], 'dim, ordem, lista, porPostagem, linhas, unidade, rodape')
+const maisVistosFactory = fabrica('MarketingDesempenhoMaisVistos', [], 'janela, linhas, restantes, mostrarMais, subtitulo, infoJanela')
 
 function relogioFalso() {
   let id = 0
@@ -277,18 +323,30 @@ function post(over = {}) {
 }
 function criativo(over = {}) {
   return {
-    creative_id: 'c1', titulo: 'Tecnologia que aguenta o teu dia', marca: 'Uranyx', marca_id: 'm1',
-    sku: 'dg017.pi', modelo: 'video 15s',
-    produto: { chave: 'prod:1', rotulo: 'Fone DG017' }, formato: { chave: '15s', rotulo: 'vídeo 15s' },
+    creative_id: 'c1', nome: 'Saque Rápido', titulo: 'Tecnologia que aguenta o teu dia', marca: 'Uranyx', marca_id: 'm1',
+    sku: 'dg017.pi', modelo: 'Saque Rápido',
+    produto: { chave: 'dev:fone dg017', rotulo: 'Fone DG017', skus: ['dg017.pi'], variantes: [] }, formato: { chave: '15s', rotulo: 'vídeo 15s' },
     agencia: { chave: 'nenhum', rotulo: '(sem agência)' }, roteiro: { chave: 'nenhum', rotulo: '(sem roteiro)' },
-    primeira_publicacao_em: '2026-09-20T15:04:00Z', indice_views: 2.1, indice_interacao: 1.3, n_indices: 1,
+    primeira_publicacao_em: '2026-09-20T15:04:00Z', idade_dias: 4,
+    views: { total: 1900, por_rede: { tiktok: 1900 }, postagens: 1, com_numero: 1 },
+    melhor_post: { plataforma: 'tiktok', postagem_id: 'p-tt', post_url: 'https://www.tiktok.com/@uranyx_br/video/1', views: 1900 },
+    indice_views: 2.1, indice_interacao: 1.3, n_indices: 1,
     postagens: { instagram: [], youtube: [], tiktok: ['p-tt'] }, ...over,
+  }
+}
+function grupo(over = {}) {
+  return {
+    chave: 'x', rotulo: 'x', detalhe: null, unidade: 'criativo',
+    semana: { views: null, videos: 0, com_numero: 0, views_dos_publicados: null, media: null, mediana: null },
+    mes: { views: 100, videos: 1, com_numero: 1, views_dos_publicados: 100, media: 100, mediana: 100 },
+    por_rede_mes: { tiktok: 100 }, melhor: null, ...over,
   }
 }
 function resposta(over = {}) {
   return {
     versao: 2, dias: 30, desde: '2026-08-26', ate: '2026-09-24', marco: 3, marca_id: null, gerado_em: '2026-09-24T18:02:11Z',
-    minimos: { base_conta: 5, views_taxa: 100, indicio: 3, comparavel: 8, tolerancia_h: 36 },
+    minimos: { base_conta: 5, views_taxa: 100, tolerancia_h: 36 },
+    janelas: { semana: { dias: 7, desde: '2026-09-18' }, mes: { dias: 30, desde: '2026-08-26' } },
     coleta: {
       ultima_leitura_em: new Date(Date.now() - 2 * 36e5).toISOString(), proxima_leitura_em: null,
       proxima_noturna_em: '2026-09-25T02:47:00Z', inicio_da_coleta: '2026-09-23', em_andamento: false,
@@ -345,7 +403,7 @@ async function videos(props, { patch } = {}) {
     calls.push({ url, opts })
     return patch ? patch(url, opts) : Promise.resolve({})
   }
-  const p = Vue.reactive({ marco: 3, minimos: resposta().minimos, canEdit: true, ...props })
+  const p = Vue.reactive({ canEdit: true, ...props })
   const s = await videosFactory(
     Vue.ref, Vue.computed, Vue.watch, Vue.nextTick, (fn) => fn(), () => {},
     () => ({ api }), () => toastsFalsos(toastLog), () => Vue.ref(true), apiError.apiErrMsg, {},
@@ -356,21 +414,22 @@ async function videos(props, { patch } = {}) {
 }
 
 async function run() {
-  // Carga: um GET só, com período e idade; marca e período trocados refazem.
+  // Carga: um GET só, com o período; marca e período trocados refazem.
   {
     const { s, calls } = await tela()
-    assert.equal(calls[0].url, '/api/marketing/metricas?dias=30&marco=3')
+    assert.equal(calls[0].url, '/api/marketing/metricas?dias=30', 'sem "marco": a tela não compara mais por idade')
     assert.equal(s.dados.value.postagens.length, 1)
+    assert.equal(s.mostrarMarca.value, true, 'todas as marcas: a linha do vídeo diz a marca')
     s.marcaId.value = 'm1'
     await Vue.nextTick(); await esperar()
-    assert.equal(calls.at(-1).url, '/api/marketing/metricas?dias=30&marco=3&marca_id=m1', 'marca filtra no servidor')
+    assert.equal(calls.at(-1).url, '/api/marketing/metricas?dias=30&marca_id=m1', 'marca filtra no servidor')
+    assert.equal(s.mostrarMarca.value, false)
     s.filtrarMarca('m1')
     await Vue.nextTick(); await esperar()
     assert.equal(s.marcaId.value, null, 'clicar de novo na marca tira o filtro')
-    s.marco.value = 7
     s.dias.value = 7
     await Vue.nextTick(); await esperar()
-    assert.equal(calls.at(-1).url, '/api/marketing/metricas?dias=7&marco=7')
+    assert.equal(calls.at(-1).url, '/api/marketing/metricas?dias=7')
 
     // Cartão da rede: hoje e dia estimado ficam mais claros e dizem por quê.
     const c = s.cartoes.value[0]
@@ -459,6 +518,24 @@ async function run() {
     assert.deepEqual(s.dados.value.resumo.redes, [])
     assert.deepEqual(s.dados.value.postagens, [])
     assert.equal(s.nadaPublicado.value, true)
+    assert.equal(s.dados.value.janelas.semana.dias, 7)
+  }
+  // Servidor com a API de 24/09 (grupos com índice, sem semana/mês; criativo
+  // sem views): o grupo velho some e o criativo ganha views vazias.
+  {
+    const velho = resposta({
+      janelas: undefined, ate: '2026-10-06',
+      grupos: { produto: [{ chave: 'a', rotulo: 'a', total: 3, n: 2, indice_views: 1.7, leitura: 'pouco_dado' }, grupo({ chave: 'b' })], formato: [], agencia: [], roteiro: [], horario: [] },
+      criativos: [{ creative_id: 'c9', titulo: 'legenda', postagens: {} }],
+    })
+    delete velho.janelas
+    const { s } = await tela({ get: () => Promise.resolve(velho) })
+    assert.deepEqual(s.dados.value.grupos.produto.map((g) => g.chave), ['b'])
+    const [c] = s.dados.value.criativos
+    assert.deepEqual(c.views, { total: null, por_rede: {}, postagens: 0, com_numero: 0 })
+    assert.equal(c.nome, 'legenda')
+    assert.equal(c.idade_dias, null)
+    assert.deepEqual(s.dados.value.janelas, { semana: { dias: 7, desde: '2026-09-30' }, mes: { dias: 30, desde: '2026-09-07' } })
   }
 
   // Atualizar agora: 202 → confere a cada 15 s até a rodada terminar.
@@ -533,40 +610,48 @@ async function run() {
     assert.ok(calls.length > gets + 1, 'recarrega depois')
   }
 
-  // Tabela de vídeos: célula por rede, "+1 post", motivo do índice nulo e ordem.
+  // Todos os vídeos: célula = soma da rede, "+1 post", total do vídeo e ordem.
   {
-    const ig1 = post({ postagem_id: 'p-ig1', plataforma: 'instagram', publicado_em: '2026-09-22T22:03:00Z', indice_views: null, indice_motivo: 'base_pequena' })
-    const ig2 = post({ postagem_id: 'p-ig2', plataforma: 'instagram', publicado_em: '2026-09-21T22:03:00Z' })
+    const ig1 = post({ postagem_id: 'p-ig1', plataforma: 'instagram', publicado_em: '2026-09-22T22:03:00Z', acumulado: { views: 6755 } })
+    const ig2 = post({ postagem_id: 'p-ig2', plataforma: 'instagram', publicado_em: '2026-09-21T22:03:00Z', acumulado: { views: 245 } })
     const novo = post({
-      postagem_id: 'p-novo', creative_id: 'c2', estado: 'aguardando', lido_em: null, views_marco: null,
-      marco_motivo: 'aguardando', indice_views: null, publicado_em: new Date().toISOString(),
+      postagem_id: 'p-novo', creative_id: 'c2', estado: 'aguardando', lido_em: null, acumulado: {},
+      publicado_em: new Date().toISOString(),
     })
+    const yt = post({ postagem_id: 'p-yt3', creative_id: 'c3', plataforma: 'youtube', acumulado: { views: 1159 }, publicado_em: '2026-09-23T15:00:00Z' })
     const { s } = await videos({
-      postagens: [post(), ig1, ig2, novo],
+      postagens: [post(), ig1, ig2, novo, yt],
       criativos: [
-        criativo({ postagens: { instagram: ['p-ig1', 'p-ig2'], youtube: [], tiktok: ['p-tt'] } }),
-        criativo({ creative_id: 'c2', titulo: 'novo', indice_views: null, n_indices: 0, primeira_publicacao_em: novo.publicado_em, postagens: { instagram: [], youtube: [], tiktok: ['p-novo'] } }),
+        criativo({ creative_id: 'c3', nome: 'Caiu do barco', titulo: 'Caiu do barco', views: { total: 1159, por_rede: { youtube: 1159 }, postagens: 1, com_numero: 1 }, postagens: { instagram: [], youtube: ['p-yt3'], tiktok: [] } }),
+        criativo({
+          views: { total: 8900, por_rede: { instagram: 7000, tiktok: 1900 }, postagens: 3, com_numero: 3 },
+          postagens: { instagram: ['p-ig1', 'p-ig2'], youtube: [], tiktok: ['p-tt'] },
+        }),
+        criativo({
+          creative_id: 'c2', nome: 'novo', titulo: 'novo', primeira_publicacao_em: novo.publicado_em,
+          views: { total: null, por_rede: {}, postagens: 1, com_numero: 0 }, postagens: { instagram: [], youtube: [], tiktok: ['p-novo'] },
+        }),
       ],
     })
-    const l1 = s.linhas.value[0]
+    const l1 = s.linhas.value[1]
     assert.deepEqual(l1.colunas.map((c) => c.rede), ['instagram', 'youtube', 'tiktok'])
-    assert.equal(l1.colunas[0].post.postagem_id, 'p-ig1', 'dois posts na mesma rede: mostra o mais novo')
+    assert.equal(l1.colunas[0].cel.texto, '7.000', 'dois posts na mesma rede: a soma')
     assert.equal(l1.colunas[0].extra, 1, '…e avisa "+1 post"')
+    assert.equal(l1.colunas[0].cel.dica, 'soma de 2 postagens')
     assert.equal(l1.colunas[1].cel.texto, 'não postado')
-    assert.equal(l1.meta, 'Fone DG017 · vídeo 15s · 20/09 12h', '"(sem agência)" não polui a linha')
-    const l2 = s.linhas.value[1]
+    assert.equal(l1.colunas[2].cel.texto, '1.900')
+    assert.equal(l1.meta, '“Tecnologia que aguenta o teu dia” · Fone DG017 · vídeo 15s · 20/09 12h', 'a legenda entra quando o nome é outro; "(sem agência)" não polui')
+    assert.equal(s.linhas.value[0].meta.startsWith('“'), false, 'legenda igual ao nome não repete')
+    const l2 = s.linhas.value[2]
     assert.equal(l2.colunas[2].cel.texto, 'aguardando 1ª leitura')
-    assert.equal(l2.semIndice, 'cedo demais', 'índice nulo diz por quê')
-    assert.equal(s.ordemEfetiva.value, 'novos', 'com menos de 3 índices, o padrão é "mais novos"')
+    assert.equal(s.ordemEfetiva.value, 'views', 'o padrão é sempre "mais views"')
+    assert.deepEqual(s.ordenadas.value.map((l) => l.c.creative_id), ['c1', 'c3', 'c2'], 'sem número vai pro fim')
+    s.ordem.value = 'novos'
     assert.equal(s.ordenadas.value[0].c.creative_id, 'c2')
-    s.ordem.value = 'indice'
-    assert.equal(s.ordenadas.value[0].c.creative_id, 'c1', 'por índice, nulo vai pro fim')
-  }
-  {
-    const cs = [1, 2, 3].map((i) => criativo({ creative_id: `c${i}`, indice_views: i }))
-    const { s } = await videos({ postagens: [post()], criativos: cs })
-    assert.equal(s.ordemEfetiva.value, 'indice', 'com 3 índices, o padrão é o índice')
-    assert.deepEqual(s.ordenadas.value.map((l) => l.c.creative_id), ['c3', 'c2', 'c1'])
+    s.ordem.value = 'youtube'
+    assert.deepEqual(s.ordenadas.value.map((l) => l.c.creative_id), ['c3', 'c1', 'c2'], 'por rede: as views daquela rede')
+    s.ordem.value = 'instagram'
+    assert.equal(s.ordenadas.value[0].c.creative_id, 'c1')
   }
 
   // Tirar do desempenho: exige motivo, manda o PATCH e pede pra tela recarregar.
@@ -601,31 +686,130 @@ async function run() {
     assert.ok(s.tirando.value, 'erro deixa o diálogo aberto')
   }
 
-  // Onde vale investir: conta criativos com índice; horário conta postagens.
+  // Onde vale investir: views GANHAS na semana e no mês (a conta do Resumo),
+  // vídeos publicados embaixo; horário conta postagens.
   {
-    const g = (over) => ({
-      chave: 'x', rotulo: 'x', unidade: 'criativo', total: 3, n: 2, indice_views: 1.8, indice_interacao: null,
-      leitura: 'pouco_dado', por_rede: { tiktok: { mediana: 1240, n: 2 }, instagram: { mediana: null, n: 0 } }, melhor: null, ...over,
-    })
-    const grupos = { produto: [g({ chave: 'a' }), g({ chave: 'b', n: 3, leitura: 'indicio' })], formato: [], agencia: [], roteiro: [], horario: [g({ chave: '12h', unidade: 'postagem' })] }
+    const melhor = { creative_id: 'saque', postagem_id: 'p1', nome: 'Saque Rápido', titulo: 'Aparelho que…', views: 8362, plataforma: 'instagram', post_url: 'https://ig/p1' }
+    const grupos = {
+      produto: [
+        grupo({
+          chave: 'dev:mala sorriso m6', rotulo: 'Mala Sorriso M6', detalhe: 'Branco tam. 24 · SKU b055.24',
+          semana: { views: 13335, videos: 6, com_numero: 6, views_dos_publicados: 13335, media: 2223, mediana: 2196 },
+          mes: { views: 13335, videos: 6, com_numero: 6, views_dos_publicados: 13335, media: 2223, mediana: 2196 },
+        }),
+        grupo({
+          chave: 'dev:uranyx f105 12.64', rotulo: 'Uranyx F105 12.64', detalhe: 'Preto + cartão 64GB · SKU dg019.ra, dg019.sp',
+          // Semana: 9.245 ganhas, mais do que os 8.362 do único vídeo publicado
+          // nela — o de 8 dias atrás continuou rendendo.
+          semana: { views: 9245, videos: 1, com_numero: 1, views_dos_publicados: 8362, media: 8362, mediana: 8362 },
+          mes: { views: 10212, videos: 3, com_numero: 2, views_dos_publicados: 10212, media: 5106, mediana: 5106 },
+          por_rede_mes: { instagram: 6997, youtube: 2209, tiktok: 1006, facebook: 0 }, melhor,
+        }),
+        // Agência/produto sem vídeo novo, mas que atraiu views na semana.
+        grupo({
+          chave: 'dev:uranyx wp53 24.128', rotulo: 'Uranyx WP53 24.128',
+          semana: { views: 35, videos: 0, com_numero: 0, views_dos_publicados: null, media: null, mediana: null },
+          mes: { views: 1321, videos: 1, com_numero: 1, views_dos_publicados: 1321, media: 1321, mediana: 1321 },
+        }),
+        grupo({ chave: 'nenhum', rotulo: '(sem produto)', mes: { views: 99999, videos: 9, com_numero: 9, views_dos_publicados: 99999, media: 11111, mediana: 1 } }),
+      ],
+      formato: [], agencia: [], roteiro: [],
+      horario: [grupo({ chave: '12h', rotulo: '12h', unidade: 'postagem', mes: { views: 33531, videos: 59, com_numero: 58, views_dos_publicados: 33500, media: 578, mediana: 248 } })],
+    }
     const s = await investirFactory(
       Vue.ref, Vue.computed, Vue.watch, Vue.nextTick, (fn) => fn(), () => {},
       () => ({}), () => ({}), () => Vue.ref(true), apiError.apiErrMsg, {},
-      () => Vue.reactive({ grupos, marco: 3, minimos: resposta().minimos }), () => () => {},
+      () => Vue.reactive({ grupos, janelas: resposta().janelas }), () => () => {},
       ...NOMES_H.map((n) => H[n]),
     )
-    assert.equal(s.comIndice.value, 5)
-    assert.equal(s.linhas.value[0].b.tom, 'cinza', 'pouco dado fica cinza')
-    assert.equal(s.linhas.value[0].redes, 'Instagram — (0) · TikTok 1.240 (2)', 'mediana por rede, na ordem das redes')
+    assert.deepEqual(s.lista.value.map((g) => g.chave), ['dev:mala sorriso m6', 'dev:uranyx f105 12.64', 'dev:uranyx wp53 24.128', 'nenhum'], 'mais views no mês; "(sem produto)" no fim')
+    const f105 = s.linhas.value[1]
+    assert.equal(f105.semana, '1 vídeo publicado')
+    assert.equal(f105.mes, '3 vídeos publicados')
+    assert.equal(s.linhas.value[2].semana, '0 vídeos publicados', 'sem vídeo novo, mas com views ganhas')
+    assert.equal(f105.redes, 'Instagram 6.997 · YouTube 2.209 · TikTok 1.006 · Facebook 0', 'por rede no mês, Facebook 0 medido aparece')
+    assert.equal(f105.dicaMedia, 'média das views até hoje de 2 vídeos publicados no mês (10.212 ÷ 2); mediana 5.106 (metade ficou acima) · 1 ainda sem número')
+    assert.equal(f105.melhorNome, 'Saque Rápido')
+    assert.equal(s.linhas.value[0].barra, 100, 'a barra é só o tamanho perto do maior')
+    assert.equal(f105.barra, 76.6)
+    assert.equal(s.linhas.value[3].barra, 0, '"(sem produto)" não puxa a escala')
+    s.ordem.value = 'por_video'
+    assert.deepEqual(s.lista.value.map((g) => g.chave), ['dev:uranyx f105 12.64', 'dev:mala sorriso m6', 'dev:uranyx wp53 24.128', 'nenhum'])
+    s.ordem.value = 'semana'
+    assert.deepEqual(s.lista.value.map((g) => g.chave), ['dev:mala sorriso m6', 'dev:uranyx f105 12.64', 'dev:uranyx wp53 24.128', 'nenhum'])
+    assert.equal(s.rodape.value, 'Semana = últimos 7 dias (desde 18/09); mês = últimos 30 dias (desde 26/08). '
+      + 'Views = as que todos os vídeos do grupo ganharam nesses dias, somando as redes (vídeo antigo que continua '
+      + 'rendendo conta) — a mesma conta do Resumo. Embaixo, quantos vídeos foram publicados nesses dias.')
     s.dim.value = 'horario'
     assert.equal(s.porPostagem.value, true)
+    assert.equal(s.unidade.value.varios, 'postagens')
     assert.equal(s.lista.value[0].chave, '12h')
+    assert.equal(s.linhas.value[0].mes, '59 postagens publicadas')
+    assert.match(s.linhas.value[0].dicaMedia, /de 58 postagens publicadas no mês .* · 1 ainda sem número$/)
+    assert.match(s.rodape.value, /Views = as que todas as postagens do grupo ganharam .*\(postagem antiga que continua rendendo conta\).* Embaixo, quantas postagens foram publicadas nesses dias\.$/)
+    // O cabeçalho diz o que o número mede.
+    assert.ok(sfc.MarketingDesempenhoInvestir.tpl.includes('ganhas nos últimos {{ diasSemana }} dias'))
+    assert.ok(sfc.MarketingDesempenhoInvestir.tpl.includes('{{ unidade.publicado }} no mês, até hoje'))
   }
 
-  console.log('PASS: 3 SFCs parseiam e compilam; helpers puros (— ≠ 0, índice, barra log2, BRT, célula por estado, barras); '
-    + 'higiene (credencial, 3 endpoints, noopener); textos travados; script setup com api falso '
-    + '(filtros, corrida, v1, Atualizar agora 202/429/503 e espera, parar ao desmontar, porcentagem de dias fechados, '
-    + 'voltar a contar, ordem da tabela, tirar do desempenho, grupos)')
+  // Vídeos mais vistos: Semana | Mês, chips por rede com o link do post mais visto.
+  {
+    const ig = post({ postagem_id: 'ig', plataforma: 'instagram', post_url: 'https://ig/1', acumulado: { views: 6755 }, publicado_em: '2026-10-02T15:04:00Z', horario: '12h' })
+    const tt1 = post({ postagem_id: 'tt1', post_url: 'https://tt/1', acumulado: { views: 148 }, publicado_em: '2026-10-03T15:04:00Z' })
+    const tt2 = post({ postagem_id: 'tt2', post_url: 'https://tt/2', acumulado: { views: 300 }, publicado_em: '2026-10-02T15:10:00Z' })
+    const saque = criativo({
+      creative_id: 'saque', nome: 'Saque Rápido', titulo: 'Aparelho que não pede carregador',
+      produto: { chave: 'dev:uranyx f105', rotulo: 'Uranyx F105', skus: ['dg019.ra'], variantes: ['Preto'] }, agencia: { chave: 'bill gates', rotulo: 'Bill Gates' },
+      primeira_publicacao_em: '2026-10-02T15:04:00Z', idade_dias: 4,
+      views: { total: 7203, por_rede: { instagram: 6755, tiktok: 448 }, postagens: 3, com_numero: 3 },
+      postagens: { instagram: ['ig'], youtube: [], tiktok: ['tt1', 'tt2'] },
+    })
+    const velhos = Array.from({ length: 14 }, (_, i) => criativo({
+      creative_id: `v${i}`, nome: `v${i}`, idade_dias: 10 + i, primeira_publicacao_em: `2026-09-${String(10 + i).padStart(2, '0')}T15:00:00Z`,
+      views: { total: 100 + i, por_rede: { youtube: 100 + i }, postagens: 1, com_numero: 1 }, postagens: {},
+    }))
+    const semNumero = criativo({ creative_id: 'novo', idade_dias: 0, views: { total: null, por_rede: {}, postagens: 1, com_numero: 0 } })
+    const props = Vue.reactive({
+      criativos: [saque, semNumero, ...velhos], postagens: [ig, tt1, tt2], janelas: resposta().janelas, mostrarMarca: true,
+    })
+    const s = await maisVistosFactory(
+      Vue.ref, Vue.computed, Vue.watch, Vue.nextTick, (fn) => fn(), () => {},
+      () => ({}), () => ({}), () => Vue.ref(true), apiError.apiErrMsg, {},
+      () => props, () => () => {},
+      ...NOMES_H.map((n) => H[n]),
+    )
+    assert.equal(s.janela.value, 'mes', 'abre no mês')
+    assert.equal(s.subtitulo.value, 'publicados nos últimos 30 dias (desde 26/08) · views até hoje')
+    assert.equal(s.linhas.value.length, 10, 'top 10')
+    assert.equal(s.restantes.value, 5)
+    const [l1] = s.linhas.value
+    assert.equal(l1.c.creative_id, 'saque')
+    assert.equal(l1.pos, 1)
+    assert.equal(l1.sub, '“Aparelho que não pede carregador” · Uranyx · Uranyx F105 · Bill Gates · 02/10 12h')
+    assert.deepEqual(l1.chips, [
+      { rede: 'instagram', views: 6755, url: 'https://ig/1' },
+      { rede: 'tiktok', views: 448, url: 'https://tt/2' },
+    ], 'um chip por rede com número; o link é o do post mais visto da rede')
+    assert.ok(!s.linhas.value.some((l) => l.c.creative_id === 'novo'), 'sem número não entra no ranking')
+    s.mostrarMais()
+    assert.equal(s.linhas.value.length, 15)
+    assert.equal(s.restantes.value, 0)
+    s.janela.value = 'semana'
+    await Vue.nextTick()
+    assert.equal(s.subtitulo.value, 'publicados nos últimos 7 dias (desde 18/09) · views até hoje')
+    assert.deepEqual(s.linhas.value.map((l) => l.c.creative_id), ['saque'], 'semana: só os de até 6 dias')
+    props.mostrarMarca = false
+    assert.equal(s.linhas.value[0].sub, '“Aparelho que não pede carregador” · Uranyx F105 · Bill Gates · 02/10 12h', 'marca filtrada: não repete a marca')
+    props.criativos = [velhos[0]]
+    assert.equal(s.linhas.value.length, 0)
+    assert.ok(sfc.MarketingDesempenhoMaisVistos.tpl.includes('Nenhum vídeo publicado nos últimos {{ infoJanela.dias }} dias tem views ainda.'))
+  }
+
+  console.log('PASS: 4 SFCs parseiam e compilam; helpers puros (— ≠ 0, views somadas, BRT, célula por estado, '
+    + 'mais vistos 7/30 dias, ordem dos grupos, barras); higiene (credencial, 3 endpoints, noopener, sem índice); '
+    + 'textos travados; script setup com api falso (filtros, corrida, v1 e API de 24/09, Atualizar agora 202/429/503 '
+    + 'e espera, parar ao desmontar, porcentagem de dias fechados, voltar a contar, ordem da tabela, tirar do '
+    + 'desempenho, onde vale investir semana/mês, mais vistos)')
 }
 
 run().catch((e) => {

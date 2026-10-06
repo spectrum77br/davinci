@@ -1,11 +1,19 @@
 // Marketing › Desempenho — tipos da resposta de GET /api/marketing/metricas
 // (versão 2) e os helpers puros das três telas que a usam.
 //
-// Os helpers saíram do SFC (Eduardo, 24/09/2026) porque agora são três
-// componentes lendo os mesmos números: a tela (MarketingDesempenho), a tabela
-// "qual vídeo rendeu mais" (MarketingDesempenhoVideos) e a de "onde vale
-// investir" (MarketingDesempenhoInvestir). Uma regra de "—" ou de fuso em cada
-// um acabaria divergindo.
+// Os helpers saíram do SFC (Eduardo, 24/09/2026) porque são vários
+// componentes lendo os mesmos números: a tela (MarketingDesempenho), os
+// "vídeos mais vistos" (MarketingDesempenhoMaisVistos), "todos os vídeos"
+// (MarketingDesempenhoVideos) e "onde vale investir"
+// (MarketingDesempenhoInvestir). Uma regra de "—" ou de fuso em cada um
+// acabaria divergindo.
+//
+// 06/10/2026: a tela fala em VIEWS SOMADAS (a última leitura de cada post,
+// somada por vídeo e por rede), em janelas de semana e mês. O índice
+// "× o normal da conta" saiu da tela — confundia mais do que ajudava. Em
+// "Onde vale investir", as views da semana/mês são as GANHAS nesses dias por
+// todos os vídeos do grupo (a mesma conta do Resumo); os "mais vistos" são os
+// vídeos PUBLICADOS na janela, pelas views até hoje.
 //
 // O teste (tests/marketing-desempenho-sfc.cjs) recorta o trecho entre os
 // marcadores e roda de verdade, sem nada em volta. Por isso o que está lá
@@ -16,7 +24,6 @@
 
 export type Metrica = 'views' | 'curtidas' | 'comentarios' | 'compartilhamentos' | 'salvamentos' | 'alcance'
 export type Numeros = Partial<Record<Metrica, number>>
-export type Leitura = 'pouco_dado' | 'indicio' | 'comparavel'
 export type Dimensao = 'produto' | 'formato' | 'agencia' | 'roteiro' | 'horario'
 
 export type PostagemDesempenho = {
@@ -54,36 +61,87 @@ export type PostagemDesempenho = {
 
 export type Rotulado = { chave: string; rotulo: string }
 
+/** Views de um vídeo: a soma da última leitura de cada post dele. */
+export type ViewsVideo = {
+  /** Nulo = nenhum post com número ainda (aguardando, sem views). Nunca 0 por falta. */
+  total: number | null
+  /** Só as redes que deram número, na ordem das redes. */
+  por_rede: Record<string, number>
+  postagens: number
+  com_numero: number
+}
+
 export type CriativoDesempenho = {
   creative_id: string
+  /** Como o vídeo é reconhecido: o título da ideia, senão a 1ª linha da legenda. */
+  nome: string
+  /** 1ª linha da legenda. */
   titulo: string
   marca: string | null
   marca_id: string | null
   sku: string | null
   modelo: string | null
-  produto: Rotulado
+  /** Produto = APARELHO (sem cor nem tamanho); `skus`/`variantes` dizem o que o vídeo mostra. */
+  produto: Rotulado & { skus?: string[]; variantes?: string[] }
   formato: Rotulado
   agencia: Rotulado
   roteiro: Rotulado
   primeira_publicacao_em: string | null
-  indice_views: number | null
-  indice_interacao: number | null
-  n_indices: number
+  /** Dias de calendário (Brasília) desde a 1ª publicação: 0 = hoje. */
+  idade_dias: number | null
+  views: ViewsVideo
+  /** O post mais visto do vídeo (o link dele). */
+  melhor_post: { plataforma: string; postagem_id: string; post_url: string | null; views: number } | null
+  // O índice continua na API (contrato de 24/09); a tela não lê mais.
+  indice_views?: number | null
+  indice_interacao?: number | null
+  n_indices?: number
   /** plataforma → ids das postagens, a mais nova primeiro. */
   postagens: Record<string, string[]>
+}
+
+export type JanelaGrupo = {
+  /**
+   * Views GANHAS na janela por todos os vídeos do grupo (o antigo que continua
+   * rendendo conta) — a mesma conta do Resumo. Nulo = nenhum ganho medido.
+   */
+  views: number | null
+  /** Vídeos (ou postagens, no Horário) publicados na janela. */
+  videos: number
+  /** Desses, quantos já têm views. */
+  com_numero: number
+  /** Views até hoje dos vídeos publicados na janela. */
+  views_dos_publicados?: number | null
+  /** views_dos_publicados ÷ com_numero: quanto rende um vídeo novo do grupo. */
+  media: number | null
+  mediana: number | null
 }
 
 export type GrupoDesempenho = {
   chave: string
   rotulo: string
+  /** Produto: as cores/tamanhos e os SKUs que o aparelho juntou ("Laranja, Prata · SKU dg088.ci, dg089.ci"). */
+  detalhe: string | null
   unidade: 'criativo' | 'postagem'
-  total: number
-  n: number
-  indice_views: number | null
-  indice_interacao: number | null
-  leitura: Leitura
-  por_rede: Record<string, { mediana: number | null; n: number }>
-  melhor: { creative_id: string; postagem_id: string | null; titulo: string; indice_views: number } | null
+  semana: JanelaGrupo
+  mes: JanelaGrupo
+  /** Views ganhas no mês, por rede. */
+  por_rede_mes: Record<string, number>
+  /** O vídeo publicado no mês com mais views até hoje, com o link do post mais visto dele. */
+  melhor: {
+    creative_id: string
+    postagem_id: string | null
+    nome: string
+    titulo: string
+    views: number
+    plataforma: string | null
+    post_url: string | null
+  } | null
+}
+
+export type Janelas = {
+  semana: { dias: number; desde: string }
+  mes: { dias: number; desde: string }
 }
 
 export type RedeResumo = {
@@ -144,8 +202,6 @@ export type LinhaMarca = {
 export type Minimos = {
   base_conta: number
   views_taxa: number
-  indicio: number
-  comparavel: number
   tolerancia_h: number
 }
 
@@ -175,6 +231,7 @@ export type RespostaDesempenho = {
   marca_id: string | null
   gerado_em: string
   minimos: Minimos
+  janelas: Janelas
   coleta: Coleta
   marcas_disponiveis: { id: string; nome: string }[]
   resumo: {
@@ -203,7 +260,7 @@ export type RespostaDesempenho = {
 }
 
 export type Celula = {
-  estado: 'nao_postado' | 'apagado' | 'aguardando' | 'cedo' | 'sem_views' | 'buraco' | 'falhou' | 'ok'
+  estado: 'nao_postado' | 'apagado' | 'aguardando' | 'sem_views' | 'falhou' | 'ok'
   texto: string
   detalhe: string
   /** Texto do title (passar o mouse). */
@@ -211,6 +268,9 @@ export type Celula = {
   /** A leitura de hoje falhou e a célula mostra a anterior — dito em âmbar. */
   aviso: string
 }
+
+export type Janela = 'semana' | 'mes'
+export type OrdemGrupos = 'servidor' | 'mes' | 'semana' | 'por_video'
 
 // ---------- helpers puros (travados em tests/marketing-desempenho-sfc.cjs)
 
@@ -270,47 +330,62 @@ export function qtd(n: number, um: string, varios: string): string {
   return `${n.toLocaleString('pt-BR')} ${n === 1 ? um : varios}`
 }
 
-/** Índice "× o normal da conta": 2,1×. */
-export function fmtIndice(v: number | null | undefined): string {
+/** Views da tela: "8.362"; nulo (a rede ainda não deu número) vira "—", nunca 0. */
+export function fmtViews(v: number | null | undefined): string {
   if (v === undefined || v === null) return '—'
-  return `${v.toLocaleString('pt-BR', { minimumFractionDigits: 1, maximumFractionDigits: 1 })}×`
+  return v.toLocaleString('pt-BR')
+}
+
+// Semana = hoje e os 6 dias antes; mês = hoje e os 29 antes (dias de
+// calendário em Brasília, como `idade_dias` vem da API).
+export const DIAS_JANELA: Record<string, number> = { semana: 7, mes: 30 }
+
+/**
+ * Os vídeos mais vistos publicados na janela (pela 1ª publicação). Vídeo
+ * ainda sem número fica de fora — não é "0 views". Empate: o mais novo.
+ */
+export function maisVistos<T extends { idade_dias: number | null; views: { total: number | null }; primeira_publicacao_em: string | null }>(
+  criativos: T[],
+  janela: string,
+  n = 10,
+): T[] {
+  const limite = (DIAS_JANELA[janela] ?? 30) - 1
+  return (criativos || [])
+    .filter((c) => c.idade_dias !== null && c.idade_dias !== undefined && c.idade_dias <= limite)
+    .filter((c) => c.views && c.views.total !== null && c.views.total !== undefined)
+    .sort((a, b) => ((b.views.total as number) - (a.views.total as number))
+      || ((Date.parse(b.primeira_publicacao_em || '') || 0) - (Date.parse(a.primeira_publicacao_em || '') || 0)))
+    .slice(0, n)
 }
 
 /**
- * Tom do chip do índice. Não existe "ruim": vídeo fraco é informação, não
- * erro — vermelho aqui faria o Eduardo cortar produto por causa de um post.
+ * Ordem de "Onde vale investir". 'servidor' mantém a do servidor (views no
+ * mês); as outras ordenam aqui. Sem número vai pro fim, e "(sem produto)",
+ * "(sem agência)"… sempre por último: eles juntam a maior parte dos vídeos.
  */
-export function tomIndice(v: number | null | undefined): 'alto' | 'normal' | 'baixo' | null {
-  if (v === undefined || v === null) return null
-  if (v >= 1.25) return 'alto'
-  if (v < 0.8) return 'baixo'
-  return 'normal'
-}
-
-/**
- * Barra divergente de "vs. o normal da conta". Escala log2 centrada em 1×:
- * 2× e 0,5× têm o mesmo tamanho (dobro e metade são a mesma distância do
- * normal). Presa entre 0,25× e 4× pra um viral não achatar o resto.
- * `pct` é a porcentagem da largura TOTAL (o lado vai até 50).
- */
-export function barra(
-  v: number | null | undefined,
-  leitura?: Leitura | null,
-): { lado: 'direita' | 'esquerda' | 'centro'; pct: number; tom: 'acima' | 'normal' | 'abaixo' | 'cinza' } | null {
-  if (v === undefined || v === null) return null
-  const lado = v > 1 ? 'direita' : v < 1 ? 'esquerda' : 'centro'
-  const pct = Math.round((Math.min(Math.abs(Math.log2(Math.max(v, 0.25))), 2) / 2) * 50 * 10) / 10
-  // Pouco dado fica cinza mesmo lá em cima: dois vídeos com sorte não são
-  // um produto campeão, e verde ali seria um veredito que o dado não dá.
-  const tom = leitura === 'pouco_dado' ? 'cinza' : v >= 1.25 ? 'acima' : v <= 0.8 ? 'abaixo' : 'normal'
-  return { lado, pct, tom }
-}
-
-export function rotuloLeitura(l: string | null | undefined): string {
-  if (l === 'pouco_dado') return 'pouco dado — não conclua ainda'
-  if (l === 'indicio') return 'indício'
-  if (l === 'comparavel') return 'dá pra comparar'
-  return ''
+export function ordenarGrupos<T extends { chave: string; semana: { views: number | null; media?: number | null }; mes: { views: number | null; media: number | null } }>(
+  lista: T[],
+  ordem: string,
+): T[] {
+  const valor = (g: T): number | null => {
+    if (ordem === 'semana') return g.semana?.views ?? null
+    if (ordem === 'por_video') return g.mes?.media ?? null
+    return g.mes?.views ?? null
+  }
+  const nenhum = (g: T) => (g.chave === 'nenhum' ? 1 : 0)
+  if (ordem === 'servidor' || !ordem) {
+    return [...(lista || [])].sort((a, b) => nenhum(a) - nenhum(b))
+  }
+  return [...(lista || [])].sort((a, b) => {
+    const n = nenhum(a) - nenhum(b)
+    if (n) return n
+    const va = valor(a)
+    const vb = valor(b)
+    if (va === null && vb === null) return 0
+    if (va === null) return 1
+    if (vb === null) return -1
+    return vb - va
+  })
 }
 
 /** Taxa de interação: 0,078 → "7,8%". */
@@ -403,23 +478,37 @@ export function frescor(
 }
 
 /**
- * Uma célula "rede × vídeo" da tabela de comparação. O número principal é
- * a view NA MESMA IDADE (D+marco), não o total: vídeo antigo não pode ganhar
- * só por ter tido mais tempo. Cada estado diz POR QUE não tem número, pra
- * "—" nunca ser ambíguo.
+ * Uma célula "rede × vídeo" da lista de vídeos: as views somadas dos posts
+ * do vídeo nesta rede (a última leitura de cada um). `posts` vem do mais novo
+ * pro mais velho. Sem número, a célula diz POR QUÊ — "—" sozinho é o que
+ * fazia o Eduardo perguntar "será que demora?".
  */
 export function celula(
-  p: PostagemDesempenho | undefined | null,
-  marco: number,
+  posts: PostagemDesempenho[] | undefined | null,
   agora: string | number | Date = new Date(),
   apagado = false,
 ): Celula {
   const vazio = { detalhe: '', dica: '', aviso: '' }
+  const ps = (posts || []).filter(Boolean)
   // Saiu e foi apagado depois: "não postado" seria mentira (24/09/2026).
-  if (!p && apagado) return { ...vazio, estado: 'apagado', texto: 'apagado da rede', dica: 'O vídeo saiu nesta rede e foi apagado depois — não conta mais.' }
-  if (!p) return { ...vazio, estado: 'nao_postado', texto: 'não postado' }
-  const dias = qtd(marco, 'dia', 'dias')
-  if (p.estado === 'aguardando' || (p.estado === 'ok' && p.marco_motivo === 'aguardando')) {
+  if (!ps.length && apagado) return { ...vazio, estado: 'apagado', texto: 'apagado da rede', dica: 'O vídeo saiu nesta rede e foi apagado depois — não conta mais.' }
+  if (!ps.length) return { ...vazio, estado: 'nao_postado', texto: 'não postado' }
+  // Falhou HOJE mas já tinha lido antes: mostra a leitura boa e avisa.
+  const falhaHoje = ps.find((p) => p.estado === 'falhou' && p.lido_em)
+  const aviso = falhaHoje ? `a leitura de hoje falhou — mostrando a de ${ddmm(falhaHoje.lido_em)}` : ''
+  const comViews = ps.filter((p) => (p.estado === 'ok' || p.estado === 'falhou')
+    && p.acumulado && p.acumulado.views !== null && p.acumulado.views !== undefined)
+  if (comViews.length) {
+    const soma = comViews.reduce((a, p) => a + (p.acumulado.views as number), 0)
+    let dica = ''
+    if (ps.length > 1) {
+      dica = `soma de ${qtd(comViews.length, 'postagem', 'postagens')}`
+      if (ps.length > comViews.length) dica += ` (${ps.length - comViews.length} ainda sem número)`
+    }
+    return { ...vazio, aviso, estado: 'ok', texto: soma.toLocaleString('pt-BR'), dica }
+  }
+  const p = ps[0]
+  if (p.estado === 'aguardando' || (p.estado === 'ok' && !p.lido_em)) {
     // Aguardar é o normal da primeira hora — cinza, nunca âmbar.
     // Post de outro dia ainda sem leitura (robô parado?) diz a data também —
     // "publicado às 12:04" de três dias atrás pareceria de hoje.
@@ -429,38 +518,18 @@ export function celula(
         ? `Publicado às ${hhmm(p.publicado_em)}. `
         : `Publicado em ${ddmm(p.publicado_em)} às ${hhmm(p.publicado_em)}. `
     }
-    dica += 'A primeira leitura sai em até 1 hora'
-    dica += p.marco_pronto_em
-      ? `; a comparação de ${dias} fica pronta em ${ddmm(p.marco_pronto_em)}.`
-      : '.'
+    dica += 'A primeira leitura sai em até 1 hora.'
     return { ...vazio, estado: 'aguardando', texto: 'aguardando 1ª leitura', dica }
   }
   // Falhou sem NENHUMA leitura boa antes: não há número pra mostrar.
   if (p.estado === 'falhou' && !p.lido_em) {
     return { ...vazio, estado: 'falhou', texto: 'não consegui ler', dica: p.erro || '' }
   }
-  // Falhou HOJE mas já tinha lido antes: mostra a leitura boa e avisa.
-  const aviso = p.estado === 'falhou' ? `a leitura de hoje falhou — mostrando a de ${ddmm(p.lido_em)}` : ''
-  const acumulado = p.acumulado || {}
-  const total = num(acumulado, 'views')
-  if (p.views_marco !== null && p.views_marco !== undefined) {
-    return { ...vazio, aviso, estado: 'ok', texto: p.views_marco.toLocaleString('pt-BR'), detalhe: `total ${total}` }
+  // Leu, mas a rede não deu views (o Instagram sem insights): as curtidas dizem algo.
+  return {
+    ...vazio, aviso, estado: 'sem_views', texto: 'sem views',
+    detalhe: `${num(p.acumulado || {}, 'curtidas')} curtidas · a conta não liberou insights`,
   }
-  if (p.marco_motivo === 'cedo') {
-    const k = p.marco_pronto_em ? diasEntre(partesBRT(agora).dia, partesBRT(p.marco_pronto_em).dia) : null
-    const texto = k === null
-      ? 'ainda cedo'
-      : k <= 0 ? 'sai hoje à noite' : k === 1 ? 'falta 1 dia' : `faltam ${k} dias`
-    return { ...vazio, aviso, estado: 'cedo', texto, detalhe: `total ${total} até agora` }
-  }
-  if (p.marco_motivo === 'sem_views') {
-    return {
-      ...vazio, aviso, estado: 'sem_views', texto: 'sem views',
-      detalhe: `${num(acumulado, 'curtidas')} curtidas · a conta não liberou insights`,
-    }
-  }
-  // 'buraco': a coleta pulou a idade do marco. NULL, não número inventado.
-  return { ...vazio, aviso, estado: 'buraco', texto: 'sem leitura nessa idade', detalhe: `total ${total}` }
 }
 
 /**
@@ -491,7 +560,7 @@ export function geomBarras(
 
 /**
  * Curva "views nos primeiros 14 dias" (pontos [dias, views], âncora 0,0
- * incluída), com as linhas tracejadas das idades comparadas (1d, 3d, 7d).
+ * incluída), com marcas tracejadas em 1, 3 e 7 dias de vida.
  */
 export function geomCurva(
   curva: [number, number][],

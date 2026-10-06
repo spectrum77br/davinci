@@ -14,6 +14,13 @@
  * vídeo (MarketingDesempenhoVideos), depois os grupos que dizem onde investir
  * (MarketingDesempenhoInvestir). A tabela por marca ficou no fim, como filtro.
  *
+ * v3 (06/10/2026): o índice "× o normal" e o "pouco dado / indício" confundiam
+ * mais do que ajudavam. A tela fala em VIEWS SOMADAS — quantas vezes o vídeo
+ * foi visto em cada rede, até a última leitura —, abre pelos vídeos mais
+ * vistos (MarketingDesempenhoMaisVistos), e "Onde vale investir" mostra, por
+ * produto, agência, formato, roteiro e horário, quantos vídeos e quantas
+ * views na semana e no mês. Depois vem a lista de todos os vídeos.
+ *
  * Três decisões de tela que nasceram de limitações reais, não de estética:
  *
  * 1. Métrica que ninguém reportou aparece como "—", nunca como 0. O YouTube
@@ -36,7 +43,8 @@ import {
   ERROS_DESEMPENHO, ROTULO_REDE, SIGLA_REDE,
   corRede, ddmm, deltaTxt, diaRelativo, frescor, ganho, geomBarras, hhmm,
   maisCompacto, num, qtd, redesDaTabela, sinal,
-  type Dimensao, type GrupoDesempenho, type LinhaMarca, type RespostaDesempenho,
+  type CriativoDesempenho, type Dimensao, type GrupoDesempenho, type Janelas, type LinhaMarca,
+  type RespostaDesempenho,
 } from '~/utils/desempenho'
 
 const { api } = useApi()
@@ -44,7 +52,6 @@ const toasts = useToasts()
 const canEdit = useCan('marketing_criativos', 'edit')
 
 const dias = ref(30)
-const marco = ref(3)
 const marcaId = ref<string | null>(null)
 const dados = ref<RespostaDesempenho | null>(null)
 // Primeira carga mostra esqueleto; troca de filtro mantém a tela anterior
@@ -56,13 +63,35 @@ const erro = ref<string | null>(null)
 // "Atualizar agora" dependem da hora, não só dos dados.
 const agora = ref(Date.now())
 
+// "AAAA-MM-DD" menos n dias (data pura, sem fuso).
+function diasAntes(dia: string, n: number): string {
+  const t = Date.parse(`${dia}T00:00:00Z`)
+  return Number.isNaN(t) ? '' : new Date(t - n * 864e5).toISOString().slice(0, 10)
+}
+
 // Servidor com a API v1 (deploy pela metade) não pode derrubar a aba: o que
-// faltar vira vazio, e a tela mostra "—" e listas vazias.
+// faltar vira vazio, e a tela mostra "—" e listas vazias. Grupo no formato de
+// antes (sem semana/mês) some, em vez de quebrar "Onde vale investir".
 function normalizar(r: Partial<RespostaDesempenho> | null): RespostaDesempenho {
   const x = (r ?? {}) as any
+  const ate = typeof x.ate === 'string' ? x.ate : ''
+  const janelas: Janelas = {
+    semana: { dias: 7, desde: ate ? diasAntes(ate, 6) : '', ...(x.janelas?.semana ?? {}) },
+    mes: { dias: 30, desde: ate ? diasAntes(ate, 29) : '', ...(x.janelas?.mes ?? {}) },
+  }
+  const grupos = { produto: [], formato: [], agencia: [], roteiro: [], horario: [], ...(x.grupos ?? {}) } as Record<Dimensao, GrupoDesempenho[]>
+  for (const k of Object.keys(grupos) as Dimensao[]) grupos[k] = (grupos[k] ?? []).filter((g: any) => g && g.mes)
+  const criativos: CriativoDesempenho[] = (x.criativos ?? []).map((c: any) => ({
+    ...c,
+    nome: c.nome ?? c.titulo ?? '',
+    idade_dias: c.idade_dias ?? null,
+    views: { total: null, por_rede: {}, postagens: 0, com_numero: 0, ...(c.views ?? {}) },
+    melhor_post: c.melhor_post ?? null,
+  }))
   return {
     ...x,
-    minimos: { base_conta: 5, views_taxa: 100, indicio: 3, comparavel: 8, tolerancia_h: 36, ...(x.minimos ?? {}) },
+    minimos: { base_conta: 5, views_taxa: 100, tolerancia_h: 36, ...(x.minimos ?? {}) },
+    janelas,
     coleta: {
       ultima_leitura_em: null, proxima_leitura_em: null, proxima_noturna_em: null, inicio_da_coleta: null,
       em_andamento: false, pode_atualizar_em: null, ultima_rodada: null, ...(x.coleta ?? {}),
@@ -75,8 +104,8 @@ function normalizar(r: Partial<RespostaDesempenho> | null): RespostaDesempenho {
     },
     serie_dias: x.serie_dias ?? [],
     postagens: x.postagens ?? [],
-    criativos: x.criativos ?? [],
-    grupos: { produto: [], formato: [], agencia: [], roteiro: [], horario: [], ...(x.grupos ?? {}) } as Record<Dimensao, GrupoDesempenho[]>,
+    criativos,
+    grupos,
     marcas: x.marcas ?? [],
     sem_video_no_ar: x.sem_video_no_ar ?? [],
     fora_do_ar: x.fora_do_ar ?? [],
@@ -94,7 +123,7 @@ async function carregar(silencioso = false) {
     else carregando.value = true
     erro.value = null
   }
-  const q = new URLSearchParams({ dias: String(dias.value), marco: String(marco.value) })
+  const q = new URLSearchParams({ dias: String(dias.value) })
   if (marcaId.value) q.set('marca_id', marcaId.value)
   try {
     const r = await api<RespostaDesempenho>(`/api/marketing/metricas?${q.toString()}`)
@@ -114,7 +143,7 @@ async function carregar(silencioso = false) {
     }
   }
 }
-watch([dias, marco, marcaId], () => carregar())
+watch([dias, marcaId], () => carregar())
 
 let relogio: number | undefined
 onMounted(() => {
@@ -257,11 +286,10 @@ const redesSemViews = computed(() =>
   (dados.value?.resumo.tendencia.redes_sem_views ?? []).map((r) => ROTULO_REDE[r] ?? r).join(' e '),
 )
 
-// ---------- comparação
+// ---------- vídeos mais vistos
 
-const semIndice = computed(() =>
-  !!dados.value?.postagens.length && !dados.value.postagens.some((p) => p.indice_views !== null && p.indice_views !== undefined),
-)
+// Sem marca escolhida, cada vídeo diz de que marca é.
+const mostrarMarca = computed(() => !marcaId.value)
 
 // ---------- por marca
 
@@ -353,7 +381,8 @@ const nadaPublicado = computed(() => {
           {{ m.nome }}
         </button>
       </div>
-      <div class="flex w-fit gap-1 rounded-md bg-muted/40 p-1">
+      <div class="flex w-fit items-center gap-1 rounded-md bg-muted/40 p-1" title="O período vale pro Resumo e pros “+” da tabela Por marca">
+        <span class="px-1.5 text-xs text-muted-foreground">Resumo:</span>
         <button
           v-for="d in [7, 30, 90]" :key="d"
           class="px-3 py-1 rounded text-sm transition-colors"
@@ -452,9 +481,15 @@ const nadaPublicado = computed(() => {
     >
       <!-- resumo do período: um cartão por rede + o de tendência -->
       <section class="space-y-2">
-        <h3 class="text-sm font-semibold">
-          Resumo do período <span class="font-normal text-muted-foreground">({{ ddmm(dados.desde) }} a {{ ddmm(dados.ate) }})</span>
-        </h3>
+        <div class="space-y-0.5">
+          <h3 class="text-sm font-semibold">
+            Resumo do período <span class="font-normal text-muted-foreground">({{ ddmm(dados.desde) }} a {{ ddmm(dados.ate) }})</span>
+          </h3>
+          <p class="text-[11px] text-muted-foreground">
+            Views ganhas nesses dias por todos os vídeos no ar. O período escolhido no topo vale pro resumo e pros “+”
+            da tabela Por marca; os blocos de baixo têm semana e mês próprios.
+          </p>
+        </div>
         <div class="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
           <div v-for="c in cartoes" :key="c.r.plataforma" class="min-w-0 space-y-2 rounded-xl border bg-card p-4">
             <div class="flex items-center gap-1.5 text-sm font-medium">
@@ -520,8 +555,8 @@ const nadaPublicado = computed(() => {
               {{ maisCompacto(dados.resumo.tendencia.views_no_periodo) }} <span class="text-sm font-normal text-muted-foreground">views</span>
             </p>
             <p class="text-[11px] text-muted-foreground">
-              “View” não conta igual em cada rede — este total serve só pra ver a direção. Pra comparar vídeos,
-              use as tabelas abaixo.
+              “View” não conta igual em cada rede — cada uma tem o seu critério de quanto tempo assistido vale
+              uma view. A soma mostra a direção; o número de cada rede está em cada vídeo abaixo.
             </p>
             <p v-if="redesSemViews" class="text-[11px] text-muted-foreground">
               {{ redesSemViews }} fora da soma: sem views.
@@ -530,67 +565,49 @@ const nadaPublicado = computed(() => {
         </div>
       </section>
 
-      <!-- cabeçalho da comparação (vale pras duas tabelas de baixo) -->
-      <section class="space-y-3">
-        <div class="flex flex-wrap items-center gap-2">
-          <span class="text-sm">Comparar vídeos na idade de:</span>
-          <div class="flex w-fit gap-1 rounded-md bg-muted/40 p-1">
-            <button
-              v-for="m in [1, 3, 7]" :key="m"
-              class="px-3 py-1 rounded text-sm transition-colors"
-              :class="marco === m ? 'bg-background shadow-sm font-medium' : 'hover:bg-background/60 text-muted-foreground'"
-              :aria-pressed="marco === m"
-              @click="marco = m"
-            >
-              {{ qtd(m, 'dia', 'dias') }}
-            </button>
-          </div>
-        </div>
-        <div class="flex items-start gap-2 rounded-md border bg-muted/30 px-3 py-2.5 text-xs text-muted-foreground">
-          <Info class="mt-0.5 size-3.5 shrink-0" />
-          <div class="space-y-1.5">
-            <p>
-              <strong class="font-medium text-foreground">Retorno, aqui, é atenção (views) e interesse (curtidas,
-              comentários, compartilhamentos e salvamentos).</strong> Quanto cada vídeo
-              <strong class="font-medium text-foreground">vendeu</strong> não é medido: os posts não levam link
-              rastreado nem cupom.
-            </p>
-            <p>
-              Todo vídeo é comparado <strong class="font-medium text-foreground">na mesma idade</strong>
-              (views com {{ qtd(marco, 'dia', 'dias') }} de publicado), pra vídeo antigo não ganhar só por ter tido
-              mais tempo.
-            </p>
-            <p>
-              “2,0×” = o dobro do <strong class="font-medium text-foreground">normal daquela conta naquela rede</strong>
-              (mediana dos outros vídeos dela nos últimos 90 dias). Assim conta pequena não perde só por ser
-              pequena, e Instagram nunca é comparado direto com TikTok.
-            </p>
-          </div>
-        </div>
-        <p v-if="semIndice" class="text-xs text-muted-foreground">
-          O índice aparece quando a conta tiver {{ dados.minimos.base_conta }} vídeos com
-          {{ qtd(marco, 'dia', 'dias') }} de vida. Por enquanto, compare as views dentro de cada coluna (mesma rede).
+      <!-- o que "views" quer dizer aqui, e o que não é medido -->
+      <div class="flex items-start gap-2 rounded-md border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+        <Info class="mt-0.5 size-3.5 shrink-0" />
+        <p>
+          <strong class="font-medium text-foreground">Views</strong> = quantas vezes o vídeo foi visto em cada rede,
+          somadas até a última leitura. Quanto cada vídeo <strong class="font-medium text-foreground">vendeu</strong>
+          não é medido: os posts não levam link rastreado nem cupom.
         </p>
-      </section>
+      </div>
 
-      <!-- vídeo a vídeo -->
+      <!-- os campeões: semana ou mês -->
       <section class="space-y-2">
-        <h3 class="text-sm font-semibold">Qual vídeo rendeu mais</h3>
-        <MarketingDesempenhoVideos
-          :postagens="dados.postagens"
+        <h3 class="text-sm font-semibold">
+          Vídeos mais vistos <span class="font-normal text-muted-foreground">(publicados na semana ou no mês)</span>
+        </h3>
+        <MarketingDesempenhoMaisVistos
           :criativos="dados.criativos"
-          :fora-do-ar="dados.fora_do_ar"
-          :marco="marco"
-          :minimos="dados.minimos"
-          :can-edit="canEdit"
-          @mudou="carregar()"
+          :postagens="dados.postagens"
+          :janelas="dados.janelas"
+          :mostrar-marca="mostrarMarca"
         />
       </section>
 
       <!-- grupos: onde vale investir -->
       <section class="space-y-2">
-        <h3 class="text-sm font-semibold">Onde vale investir</h3>
-        <MarketingDesempenhoInvestir :grupos="dados.grupos" :marco="marco" :minimos="dados.minimos" />
+        <h3 class="text-sm font-semibold">
+          Onde vale investir <span class="font-normal text-muted-foreground">(views ganhas na semana e no mês)</span>
+        </h3>
+        <MarketingDesempenhoInvestir :grupos="dados.grupos" :janelas="dados.janelas" />
+      </section>
+
+      <!-- vídeo a vídeo -->
+      <section class="space-y-2">
+        <h3 class="text-sm font-semibold">
+          Todos os vídeos <span class="font-normal text-muted-foreground">(publicados nos últimos 90 dias)</span>
+        </h3>
+        <MarketingDesempenhoVideos
+          :postagens="dados.postagens"
+          :criativos="dados.criativos"
+          :fora-do-ar="dados.fora_do_ar"
+          :can-edit="canEdit"
+          @mudou="carregar()"
+        />
       </section>
 
       <!-- por marca — virou filtro: clicar na marca filtra a tela toda -->

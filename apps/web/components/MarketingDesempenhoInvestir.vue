@@ -1,28 +1,36 @@
 <script setup lang="ts">
 /**
- * "Onde vale investir" — os vídeos agrupados por produto, formato, agência,
- * roteiro e horário, cada grupo contra o normal das contas (Eduardo,
- * 24/09/2026: "trackear o que cada vídeo deu de retorno pra saber o que
- * investir").
+ * "Onde vale investir" — os vídeos agrupados por produto (aparelho), formato,
+ * agência, roteiro e horário: quantas views cada grupo trouxe na semana e no
+ * mês, e quantos vídeos publicou nesses dias.
  *
- * O grupo conta CRIATIVOS, não posts: o mesmo vídeo em três redes é uma
- * decisão de produção, não três. E todo grupo diz com quantos vídeos a
- * conclusão foi tirada ("pouco dado", "indício", "dá pra comparar") — com
- * dois vídeos, 2,0× pode ser sorte, e a barra verde sozinha faria o Eduardo
- * gravar mais do mesmo por causa de um acaso. Por isso pouco dado fica cinza.
+ * Até 05/10 cada grupo vinha "contra o normal da conta" (1,7×, "indício",
+ * "pouco dado — não conclua ainda"), e isso confundia mais do que ajudava
+ * (Eduardo, 06/10/2026: trazer os produtos que mais trouxeram views, e
+ * quantos vídeos e views cada agência fez na semana e no mês). Agora são
+ * números planos: views somadas, quantos vídeos, views por vídeo e o vídeo
+ * campeão com o link.
+ *
+ * As views da semana/mês são as GANHAS nesses dias por todos os vídeos do
+ * grupo — o vídeo de três semanas que continua rendendo conta, e a soma fecha
+ * com o Resumo de 7/30 dias. Até 06/10 eram só as views dos vídeos publicados
+ * na janela, e a agência aparecia com menos views do que de fato atraiu.
+ * "Views por vídeo" é a média do que os vídeos publicados no mês têm até hoje.
+ *
+ * O grupo conta VÍDEOS (criativos), não posts: o mesmo vídeo em três redes é
+ * um vídeo só, com as views das três somadas. Só o Horário conta postagens.
  */
 import { computed, ref } from 'vue'
-import { Info } from 'lucide-vue-next'
+import { ExternalLink } from 'lucide-vue-next'
 import {
   ORDEM_REDES, ROTULO_REDE,
-  barra, fmtIndice, qtd, rotuloLeitura,
-  type Dimensao, type GrupoDesempenho, type Minimos,
+  ddmm, fmtViews, ordenarGrupos, qtd,
+  type Dimensao, type GrupoDesempenho, type JanelaGrupo, type Janelas,
 } from '~/utils/desempenho'
 
 const props = defineProps<{
   grupos: Record<Dimensao, GrupoDesempenho[]>
-  marco: number
-  minimos: Minimos
+  janelas: Janelas
 }>()
 
 const DIMENSOES: { chave: Dimensao; rotulo: string }[] = [
@@ -32,140 +40,193 @@ const DIMENSOES: { chave: Dimensao; rotulo: string }[] = [
   { chave: 'roteiro', rotulo: 'Roteiro' },
   { chave: 'horario', rotulo: 'Horário' },
 ]
-// Emerald é "acima do normal"; abaixo NÃO é vermelho — vídeo fraco é
-// informação, não erro. Cinza = pouco dado, não conclua.
-const TOM_BARRA: Record<string, string> = {
-  acima: 'bg-emerald-500 dark:bg-emerald-400',
-  normal: 'bg-foreground/40',
-  abaixo: 'bg-foreground/40',
-  cinza: 'bg-muted-foreground/30',
-}
-const TOM_LEITURA: Record<string, string> = {
-  comparavel: 'text-foreground',
-  indicio: 'text-foreground',
-  pouco_dado: 'text-muted-foreground',
-}
-const COLUNAS = 'lg:grid-cols-[minmax(0,1fr)_5.5rem_minmax(12rem,1.3fr)_10rem]'
+// 'mes' é a ordem do servidor (o sort é estável: o desempate dele fica).
+const ORDENS = [
+  { chave: 'mes', rotulo: 'views no mês' },
+  { chave: 'semana', rotulo: 'views na semana' },
+  { chave: 'por_video', rotulo: 'views por vídeo' },
+]
+const COLUNAS = 'lg:grid-cols-[minmax(0,1.5fr)_7.5rem_7.5rem_6.5rem_minmax(0,1fr)]'
 
 const dim = ref<Dimensao>('produto')
+const ordem = ref('mes')
 const rotuloDim = computed(() => DIMENSOES.find((d) => d.chave === dim.value)?.rotulo ?? '')
-const lista = computed(() => props.grupos?.[dim.value] ?? [])
 // Horário compara POSTAGENS (o mesmo vídeo sai às 12h numa rede e às 19h noutra).
 const porPostagem = computed(() => dim.value === 'horario')
-const comIndice = computed(() => lista.value.reduce((a, g) => a + (g.n || 0), 0))
+// Postagem é feminino: "todas as postagens", "postagem antiga", "quantas".
+const unidade = computed(() => (porPostagem.value
+  ? { um: 'postagem', varios: 'postagens', publicado: 'publicada', publicados: 'publicadas', todos: 'todas as', antigo: 'antiga', quantos: 'quantas' }
+  : { um: 'vídeo', varios: 'vídeos', publicado: 'publicado', publicados: 'publicados', todos: 'todos os', antigo: 'antigo', quantos: 'quantos' }))
+const diasSemana = computed(() => props.janelas?.semana?.dias ?? 7)
+const diasMes = computed(() => props.janelas?.mes?.dias ?? 30)
+
+const lista = computed(() => ordenarGrupos(props.grupos?.[dim.value] ?? [], ordem.value))
+// "(sem roteiro)" junta a maior parte dos vídeos: não entra na escala da barra,
+// senão achata todos os outros.
+const maxMes = computed(() => Math.max(0, ...lista.value.filter((g) => g.chave !== 'nenhum').map((g) => g.mes?.views ?? 0)))
+
+// Embaixo das views da janela: quantos vídeos o grupo PUBLICOU nela.
+function contagem(j: JanelaGrupo | undefined): string {
+  if (!j) return ''
+  const u = unidade.value
+  return qtd(j.videos, `${u.um} ${u.publicado}`, `${u.varios} ${u.publicados}`)
+}
+
+function dicaMedia(j: JanelaGrupo | undefined): string {
+  if (!j || j.media === null || j.media === undefined) return ''
+  const u = unidade.value
+  let t = `média das views até hoje de ${qtd(j.com_numero, `${u.um} ${u.publicado}`, `${u.varios} ${u.publicados}`)} no mês`
+  if (j.views_dos_publicados !== null && j.views_dos_publicados !== undefined) {
+    t += ` (${fmtViews(j.views_dos_publicados)} ÷ ${j.com_numero})`
+  }
+  t += `; mediana ${fmtViews(j.mediana)} (metade ficou acima)`
+  if (j.com_numero < j.videos) t += ` · ${j.videos - j.com_numero} ainda sem número`
+  return t
+}
 
 const linhas = computed(() => lista.value.map((g) => ({
   g,
-  b: barra(g.indice_views, g.leitura),
+  semana: contagem(g.semana),
+  mes: contagem(g.mes),
+  // Barra neutra: só o tamanho do mês perto dos outros. Sem verde, sem veredito.
+  barra: maxMes.value > 0 && g.chave !== 'nenhum' && g.mes?.views ? Math.round((g.mes.views / maxMes.value) * 1000) / 10 : 0,
   redes: ORDEM_REDES
-    .filter((r) => g.por_rede?.[r])
-    .map((r) => {
-      const x = g.por_rede[r]
-      const med = x.mediana === null || x.mediana === undefined ? '—' : x.mediana.toLocaleString('pt-BR')
-      return `${ROTULO_REDE[r] || r} ${med} (${x.n})`
-    })
+    .filter((r) => g.por_rede_mes?.[r] !== undefined && g.por_rede_mes?.[r] !== null)
+    .map((r) => `${ROTULO_REDE[r] || r} ${fmtViews(g.por_rede_mes[r])}`)
     .join(' · '),
+  dicaMedia: dicaMedia(g.mes),
+  melhorNome: g.melhor ? (g.melhor.nome || g.melhor.titulo || 'vídeo sem legenda') : '',
 })))
+
+const rodape = computed(() => {
+  const s = props.janelas?.semana?.desde
+  const m = props.janelas?.mes?.desde
+  const u = unidade.value
+  return `Semana = últimos ${diasSemana.value} dias${s ? ` (desde ${ddmm(s)})` : ''}; `
+    + `mês = últimos ${diasMes.value} dias${m ? ` (desde ${ddmm(m)})` : ''}. `
+    + `Views = as que ${u.todos} ${u.varios} do grupo ganharam nesses dias, somando as redes `
+    + `(${u.um} ${u.antigo} que continua rendendo conta) — a mesma conta do Resumo. `
+    + `Embaixo, ${u.quantos} ${u.varios} foram ${u.publicados} nesses dias.`
+})
 </script>
 
 <template>
   <div class="min-w-0 space-y-2">
-    <div class="flex max-w-full flex-wrap gap-1 rounded-md bg-muted/40 p-1 w-fit">
-      <button
-        v-for="d in DIMENSOES" :key="d.chave"
-        class="rounded px-3 py-1 text-sm transition-colors"
-        :class="dim === d.chave ? 'bg-background shadow-sm font-medium' : 'hover:bg-background/60 text-muted-foreground'"
-        :aria-pressed="dim === d.chave"
-        @click="dim = d.chave"
-      >
-        {{ d.rotulo }}
-      </button>
+    <div class="flex flex-wrap items-center gap-2">
+      <div class="flex max-w-full flex-wrap gap-1 rounded-md bg-muted/40 p-1 w-fit">
+        <button
+          v-for="d in DIMENSOES" :key="d.chave"
+          class="rounded px-3 py-1 text-sm transition-colors"
+          :class="dim === d.chave ? 'bg-background shadow-sm font-medium' : 'hover:bg-background/60 text-muted-foreground'"
+          :aria-pressed="dim === d.chave"
+          @click="dim = d.chave"
+        >
+          {{ d.rotulo }}
+        </button>
+      </div>
+      <div class="flex flex-wrap items-center gap-2 text-xs">
+        <span class="text-muted-foreground">Ordenar por:</span>
+        <div class="flex max-w-full flex-wrap gap-1 rounded-md bg-muted/40 p-1">
+          <button
+            v-for="o in ORDENS" :key="o.chave"
+            class="rounded px-2.5 py-0.5 transition-colors"
+            :class="ordem === o.chave ? 'bg-background shadow-sm font-medium' : 'hover:bg-background/60 text-muted-foreground'"
+            :aria-pressed="ordem === o.chave"
+            @click="ordem = o.chave"
+          >
+            {{ o.chave === 'por_video' ? `views por ${unidade.um}` : o.rotulo }}
+          </button>
+        </div>
+      </div>
     </div>
 
     <p v-if="porPostagem" class="text-[11px] text-muted-foreground">
-      Horário compara postagens, não criativos: o mesmo vídeo pode ter saído às 12h numa rede e às 19h noutra.
+      Horário compara postagens, não vídeos: o mesmo vídeo pode ter saído às 12h numa rede e às 19h noutra. Cada
+      postagem conta as views dela, na rede dela.
     </p>
 
-    <p v-if="!comIndice" class="rounded-md border p-6 text-center text-sm text-muted-foreground">
-      Ainda não há vídeos com {{ qtd(marco, 'dia', 'dias') }} de vida e base de comparação.
+    <p v-if="!linhas.length" class="rounded-md border p-6 text-center text-sm text-muted-foreground">
+      Nenhum vídeo publicado nem view ganha nos últimos {{ diasMes }} dias.
     </p>
 
     <template v-else>
-      <div
-        v-if="comIndice < 10"
-        class="flex items-start gap-2 rounded-md border bg-muted/30 px-3 py-2 text-xs text-muted-foreground"
-      >
-        <Info class="mt-0.5 size-3.5 shrink-0" />
-        <span>
-          Com {{ porPostagem ? qtd(comIndice, 'postagem comparável', 'postagens comparáveis') : qtd(comIndice, 'criativo comparável', 'criativos comparáveis') }},
-          a diferença ainda pode ser sorte. Use como pista, não como veredito.
-        </span>
-      </div>
-
       <div class="overflow-hidden rounded-xl border bg-card">
         <div class="hidden gap-x-4 border-b bg-muted/40 px-3 py-2 text-[11px] text-muted-foreground lg:grid" :class="COLUNAS">
           <span>{{ rotuloDim }}</span>
-          <span class="text-right">vídeos</span>
-          <span>
-            vs. o normal da conta
-            <span class="block text-[10px] opacity-80">← abaixo do normal · normal · acima do normal →</span>
-          </span>
-          <span>leitura</span>
+          <span class="text-right">Views na semana<span class="block text-[10px] opacity-80">ganhas nos últimos {{ diasSemana }} dias</span></span>
+          <span class="text-right">Views no mês<span class="block text-[10px] opacity-80">ganhas nos últimos {{ diasMes }} dias</span></span>
+          <span class="text-right">Views por {{ unidade.um }}<span class="block text-[10px] opacity-80">{{ unidade.publicado }} no mês, até hoje</span></span>
+          <span>{{ porPostagem ? 'Postagem' : 'Vídeo' }} com mais views<span class="block text-[10px] opacity-80">{{ unidade.publicado }} no mês</span></span>
         </div>
-        <p class="border-b px-3 py-1.5 text-[10px] text-muted-foreground lg:hidden">
-          vs. o normal da conta: ← abaixo do normal · normal · acima do normal →
-        </p>
 
-        <div v-for="l in linhas" :key="l.g.chave" class="space-y-1 border-b px-3 py-2.5 last:border-0">
-          <div class="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-4 gap-y-1.5" :class="COLUNAS">
-            <span class="min-w-0 truncate text-sm font-medium" :title="l.g.rotulo">{{ l.g.rotulo }}</span>
-            <span
-              class="text-right text-xs tabular-nums text-muted-foreground"
-              :title="`${l.g.n} com índice, de ${l.g.total} publicados`"
-            >
-              {{ l.g.n }} de {{ l.g.total }}
-            </span>
-            <!-- Barra divergente em log2: 2× e 0,5× têm o mesmo tamanho. -->
-            <div class="col-span-2 flex items-center gap-2 lg:col-span-1">
-              <div class="relative h-2.5 min-w-0 flex-1 rounded-sm bg-muted/50">
-                <span class="absolute inset-y-0 left-1/2 w-px bg-foreground/30" />
-                <span
-                  v-if="l.b && l.b.lado !== 'centro'"
-                  class="absolute inset-y-0"
-                  :class="[TOM_BARRA[l.b.tom], l.b.lado === 'direita' ? 'rounded-r-sm' : 'rounded-l-sm']"
-                  :style="l.b.lado === 'direita' ? { left: '50%', width: `${l.b.pct}%` } : { right: '50%', width: `${l.b.pct}%` }"
-                />
-              </div>
-              <span
-                class="w-10 shrink-0 text-right text-xs tabular-nums"
-                :class="l.g.leitura === 'pouco_dado' ? 'text-muted-foreground' : 'text-foreground'"
+        <div v-for="l in linhas" :key="l.g.chave" class="space-y-1.5 border-b px-3 py-2.5 last:border-0">
+          <div class="grid grid-cols-2 gap-x-4 gap-y-2" :class="COLUNAS">
+            <!-- o grupo: nome e, no produto, os SKUs que ele juntou -->
+            <div class="col-span-2 min-w-0 lg:col-span-1">
+              <p class="truncate text-sm font-medium" :title="l.g.rotulo">{{ l.g.rotulo }}</p>
+              <p
+                v-if="l.g.detalhe" class="truncate text-[11px] text-muted-foreground"
+                :title="`Cores, tamanhos e SKUs somados neste aparelho: ${l.g.detalhe}`"
               >
-                {{ fmtIndice(l.g.indice_views) }}
-              </span>
+                {{ l.g.detalhe }}
+              </p>
             </div>
-            <span class="col-span-2 text-[11px] lg:col-span-1" :class="TOM_LEITURA[l.g.leitura] || 'text-muted-foreground'">
-              {{ rotuloLeitura(l.g.leitura) }}
-            </span>
+
+            <!-- semana -->
+            <div class="min-w-0 lg:text-right">
+              <p class="text-[10px] text-muted-foreground lg:hidden">Views na semana · ganhas em {{ diasSemana }} dias</p>
+              <p class="text-base font-semibold tabular-nums">{{ fmtViews(l.g.semana?.views) }}</p>
+              <p class="text-[11px] text-muted-foreground">{{ l.semana }}</p>
+            </div>
+
+            <!-- mês -->
+            <div class="min-w-0 lg:text-right">
+              <p class="text-[10px] text-muted-foreground lg:hidden">Views no mês · ganhas em {{ diasMes }} dias</p>
+              <p class="text-base font-semibold tabular-nums">{{ fmtViews(l.g.mes?.views) }}</p>
+              <p class="text-[11px] text-muted-foreground">{{ l.mes }}</p>
+              <div v-if="l.barra" class="mt-1 h-1 rounded-full bg-muted/50">
+                <div class="h-1 rounded-full bg-foreground/30 lg:ml-auto" :style="{ width: `${l.barra}%` }" />
+              </div>
+            </div>
+
+            <!-- por vídeo -->
+            <div class="min-w-0 lg:text-right" :title="l.dicaMedia || undefined">
+              <p class="text-[10px] text-muted-foreground lg:hidden">Views por {{ unidade.um }} {{ unidade.publicado }} no mês</p>
+              <p class="text-sm font-medium tabular-nums">{{ fmtViews(l.g.mes?.media) }}</p>
+              <p v-if="l.g.mes?.mediana !== null && l.g.mes?.mediana !== undefined" class="text-[11px] text-muted-foreground">
+                mediana {{ fmtViews(l.g.mes.mediana) }}
+              </p>
+            </div>
+
+            <!-- o campeão do mês, com o link do post mais visto dele -->
+            <div class="min-w-0">
+              <p class="text-[10px] text-muted-foreground lg:hidden">
+                {{ porPostagem ? 'Postagem' : 'Vídeo' }} com mais views · {{ unidade.publicado }} no mês
+              </p>
+              <a
+                v-if="l.g.melhor && l.g.melhor.post_url"
+                :href="l.g.melhor.post_url" target="_blank" rel="noopener"
+                class="inline-flex max-w-full items-center gap-1 text-xs hover:underline"
+                :title="`${l.melhorNome} — ${fmtViews(l.g.melhor.views)} views${l.g.melhor.plataforma ? ` (abre o post no ${ROTULO_REDE[l.g.melhor.plataforma] || l.g.melhor.plataforma})` : ''}`"
+              >
+                <span class="truncate">{{ l.melhorNome }}</span>
+                <span class="shrink-0 tabular-nums text-muted-foreground">· {{ fmtViews(l.g.melhor.views) }}</span>
+                <ExternalLink class="size-3 shrink-0" />
+              </a>
+              <span v-else-if="l.g.melhor" class="inline-flex max-w-full items-center gap-1 text-xs" :title="l.melhorNome">
+                <span class="truncate">{{ l.melhorNome }}</span>
+                <span class="shrink-0 tabular-nums text-muted-foreground">· {{ fmtViews(l.g.melhor.views) }}</span>
+              </span>
+              <span v-else class="text-xs text-muted-foreground">—</span>
+            </div>
           </div>
-          <!-- A mediana esconde um acerto isolado: o melhor vai do lado. As
-               views cruas por rede só comparam dentro da mesma rede. -->
-          <p v-if="l.g.melhor || l.redes" class="text-[11px] text-muted-foreground">
-            <template v-if="l.g.melhor">
-              melhor: “<span class="break-words">{{ l.g.melhor.titulo || 'vídeo sem legenda' }}</span>”
-              {{ fmtIndice(l.g.melhor.indice_views) }}
-            </template>
-            <template v-if="l.g.melhor && l.redes"> · </template>
-            <span
-              v-if="l.redes"
-              :title="`mediana das views com ${qtd(marco, 'dia', 'dias')}, por rede (entre parênteses, quantos vídeos)`"
-            >{{ l.redes }}</span>
-          </p>
+          <p v-if="l.redes" class="text-[11px] text-muted-foreground">ganhas no mês: {{ l.redes }}</p>
         </div>
       </div>
 
       <p class="text-[11px] text-muted-foreground">
-        Leitura pelo tamanho da amostra: pouco dado (menos de {{ minimos.indicio }}), indício
-        ({{ minimos.indicio }} a {{ minimos.comparavel - 1 }}), dá pra comparar ({{ minimos.comparavel }} ou mais).
+        {{ rodape }} Um vídeo = o mesmo criativo postado em todas as redes. No Produto, cores e tamanhos do mesmo
+        aparelho são uma linha só (a linha cinza diz quais).
       </p>
     </template>
   </div>

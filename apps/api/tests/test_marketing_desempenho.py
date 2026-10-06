@@ -14,6 +14,12 @@ saber o que investir". O que estes testes defendem, e por quê:
     primeira leitura só é ganho se o vídeo foi lido desde o nascimento —
     senão vídeo antigo vira pico falso no dia em que a leitura começou.
   - GRUPO CONTA CRIATIVO. O mesmo vídeo em 3 redes é 1 decisão de produção.
+  - VIEWS SOMADAS, SEMANA E MÊS (06/10/2026). "Onde vale investir" mostra
+    as views que os vídeos de cada grupo GANHARAM na semana e no mês (dias de
+    calendário de Brasília; vídeo antigo que continua rendendo conta, e a soma
+    fecha com o Resumo) e quantos vídeos foram publicados nesses dias. O
+    produto agrupa por APARELHO: cores, tamanhos e cadastros do mesmo aparelho
+    viram uma linha, e o vídeo de várias cores conta no aparelho inteiro.
 """
 
 from __future__ import annotations
@@ -280,33 +286,22 @@ def test_indice_do_criativo_e_a_mediana_dos_posts():
 
 
 def test_grupo_conta_criativo_nao_postagem():
-    """Um vídeo em 3 redes é UM criativo: contar 3 faria o grupo parecer mais
-    testado do que é."""
-    posts, linhas = [], []
-    for rede in ("instagram", "youtube", "tiktok"):
-        p, lin = _conta(f"{rede}-", [100, 100, 100, 100], rede=rede, plataforma=rede)
-        posts += p
-        linhas += lin
-        pub = AGORA - timedelta(days=10)
-        pid = f"cx-{rede}"
-        posts.append(
-            _post(
-                pid,
-                pub=pub,
-                rede_social_id=rede,
-                plataforma=rede,
-                creative_id="cx",
-                modelo="video 15s",
-            )
-        )
-        linhas.append(_l(pub, 72, 200, postagem_id=pid))
+    """Um vídeo em 3 redes é UM vídeo, com as views das 3 somadas: contar 3
+    faria o grupo parecer mais testado do que é."""
+    posts, linhas = _juntos(
+        _video("cx", pub=AGORA - timedelta(days=10),
+               views={"instagram": 200, "youtube": 200, "tiktok": 200}, modelo="video 15s"),
+        _video("outro", pub=AGORA - timedelta(days=10), views={"tiktok": 100}, modelo="video 30s"),
+    )
     g = {x["chave"]: x for x in _montar(posts, linhas)["grupos"]["formato"]}
-    assert g["15s"]["total"] == 1
-    assert g["15s"]["n"] == 1
+    assert g["15s"]["mes"]["videos"] == 1
+    assert g["15s"]["mes"]["views"] == 600
+    assert g["15s"]["semana"]["videos"] == 0, "publicado há 10 dias: fora da semana"
+    assert g["15s"]["semana"]["views"] is None, "e não ganhou nada nela"
     assert g["15s"]["unidade"] == "criativo"
     assert g["15s"]["melhor"]["creative_id"] == "cx"
-    assert set(g["15s"]["por_rede"]) == {"instagram", "youtube", "tiktok"}
-    assert g["15s"]["por_rede"]["tiktok"] == {"mediana": 200, "n": 1}
+    assert g["15s"]["por_rede_mes"] == {"instagram": 200, "youtube": 200, "tiktok": 200}
+    assert list(g["15s"]["por_rede_mes"]) == ["instagram", "youtube", "tiktok"], "ordem das redes"
 
 
 def test_mediana_de_views_sai_inteira():
@@ -322,38 +317,291 @@ def test_mediana_de_views_sai_inteira():
         )
         linhas.append(_l(pub, 72, v, postagem_id=pid))
     g = {x["chave"]: x for x in _montar(posts, linhas)["grupos"]["formato"]}
-    med = g["15s"]["por_rede"]["tiktok"]["mediana"]
+    med = g["15s"]["mes"]["mediana"]
     assert med == 2050 and isinstance(med, int)
+    assert g["15s"]["mes"]["media"] == 2050 and isinstance(g["15s"]["mes"]["media"], int)
 
 
-def test_leitura_do_grupo_por_tamanho():
-    assert d.leitura_do_grupo(2) == "pouco_dado"
-    assert d.leitura_do_grupo(3) == "indicio"
-    assert d.leitura_do_grupo(7) == "indicio"
-    assert d.leitura_do_grupo(8) == "comparavel"
+def _video(cid: str, *, pub: datetime, views: dict[str, int | None], **kw):
+    """Um criativo com um post por rede; views None = aguardando a 1ª leitura."""
+    posts, linhas = [], []
+    for rede, v in views.items():
+        pid = f"{cid}-{rede}"
+        posts.append(
+            _post(pid, pub=pub, creative_id=cid, plataforma=rede, rede_social_id=rede,
+                  post_url=f"https://x/{pid}", **kw)
+        )
+        if v is not None:
+            linhas.append(_l(pub, 2, v, postagem_id=pid))
+    return posts, linhas
 
 
-def test_grupo_ordena_por_leitura_e_indice_nulos_por_ultimo():
-    """Primeiro o que dá pra comparar; dentro de cada leitura, o maior índice;
-    sem índice por último."""
+def _juntos(*videos):
+    return [p for ps, _ in videos for p in ps], [r for _, ls in videos for r in ls]
 
-    def g(chave, leitura, indice, total=1):
-        return {"chave": chave, "leitura": leitura, "indice_views": indice, "total": total}
 
-    grupos = [
-        g("pouco", "pouco_dado", 9.0),
-        g("ind-nulo", "indicio", None, total=9),
-        g("ind-baixo", "indicio", 0.8),
-        g("comp", "comparavel", 1.1),
-        g("ind-alto", "indicio", 1.9),
+def test_grupos_ordenam_por_views_do_mes_e_nenhum_por_ultimo():
+    """Mais views no mês primeiro. "(sem agência)" junta a maior parte dos
+    vídeos e, no topo, esconderia a resposta: vai sempre pro fim."""
+    pub = AGORA - timedelta(days=3)
+    posts, linhas = _juntos(
+        _video("a", pub=pub, views={"tiktok": 100}, equipe="Pequena"),
+        _video("b", pub=pub, views={"tiktok": 900}, equipe="Grande"),
+        _video("c", pub=pub, views={"tiktok": 5000}, equipe=None),
+        _video("d", pub=pub, views={"tiktok": None}, equipe="Nova"),
+        _video("e", pub=pub, views={"tiktok": 100}, equipe="Outra"),
+        _video("f", pub=pub, views={"tiktok": 0}, equipe="Outra"),
+    )
+    g = _montar(posts, linhas)["grupos"]["agencia"]
+    assert [x["rotulo"] for x in g] == ["Grande", "Outra", "Pequena", "Nova", "(sem agência)"]
+    outra = g[1]
+    assert outra["mes"] == {
+        "views": 100, "videos": 2, "com_numero": 2, "views_dos_publicados": 100,
+        "media": 50, "mediana": 50,
+    }
+    nova = g[3]
+    assert nova["mes"]["videos"] == 1 and nova["mes"]["views"] is None, "sem número: nulo, não 0"
+    assert nova["melhor"] is None
+
+
+def test_produto_dois_cadastros_do_mesmo_aparelho_viram_um_grupo():
+    """O F105 tem dois cadastros no Bling com o MESMO nome (dg019.ra e
+    dg019.sp) e aparecia duas vezes na tela (06/10/2026). Agrupado por
+    aparelho, é um produto só, e o grupo diz a cor e quais SKUs juntou."""
+    nome = "Uranyx F105 12.64 - Preto + cartão 64GB"
+    posts, linhas = _juntos(
+        _video("turismo", pub=AGORA - timedelta(days=8), views={"youtube": 1050, "tiktok": 800},
+               product_id="3aec", produto_nome=nome, produto_sku="dg019.sp", sku="dg019.sp",
+               modelo="Turismo Jurássico 2"),
+        _video("saque", pub=AGORA - timedelta(days=2), views={"instagram": 6755, "tiktok": 1607},
+               product_id="bc31", produto_nome=nome, produto_sku="dg019.ra", sku="dg019",
+               modelo="Saque Rápido"),
+    )
+    r = _montar(posts, linhas)
+    [g] = r["grupos"]["produto"]
+    assert g["chave"] == "dev:uranyx f105 12.64"
+    assert g["rotulo"] == "Uranyx F105 12.64"
+    assert g["detalhe"] == "Preto + cartão 64GB · SKU dg019.ra, dg019.sp"
+    assert g["mes"]["videos"] == 2 and g["mes"]["views"] == 10212
+    assert g["semana"]["videos"] == 1 and g["semana"]["views"] == 8362
+    assert g["melhor"]["nome"] == "Saque Rápido" and g["melhor"]["views"] == 8362
+    por_id = {c["creative_id"]: c for c in r["criativos"]}
+    assert por_id["saque"]["produto"] == {
+        "chave": "dev:uranyx f105 12.64",
+        "rotulo": "Uranyx F105 12.64",
+        "skus": ["dg019.ra"],
+        "variantes": ["Preto + cartão 64GB"],
+    }, '"dg019" digitado junto do produto dg019.ra é o mesmo cadastro'
+
+
+def test_criativo_so_com_sku_junta_no_produto_da_mesma_base():
+    """Criativo sem produto ligado, só com o SKU digitado ("dg046"), é o mesmo
+    aparelho do criativo ligado ao dg046.pi. O nome dele vem do produto ativo
+    com a mesma base (`nomes_por_base`, que o router busca)."""
+    nomes = {"dg046": ["Uranyx F110L 8.128 - Preto"], "dg017": "Uranyx F109S 24.256 - Preto"}
+    pub = AGORA - timedelta(days=1)
+    posts, linhas = _juntos(
+        _video("ligado", pub=pub - timedelta(days=5), views={"tiktok": 800},
+               product_id="u1", produto_nome="Uranyx F110L 8.128 - Preto", produto_sku="dg046.pi",
+               sku="dg046.sp"),
+        _video("solto", pub=pub, views={"tiktok": 1200}, sku="dg046"),
+        _video("so-sku", pub=pub, views={"tiktok": 300}, sku="dg017.pi"),
+        _video("sem-nome", pub=pub, views={"tiktok": 50}, sku="zz999.ci, zz998.ci"),
+    )
+    r = _montar(posts, linhas, nomes_por_base=nomes)
+    g = {x["chave"]: x for x in r["grupos"]["produto"]}
+    f110 = g["dev:uranyx f110l 8.128"]
+    assert f110["mes"]["videos"] == 2 and f110["mes"]["views"] == 2000
+    assert f110["rotulo"] == "Uranyx F110L 8.128"
+    assert f110["detalhe"] == "Preto · SKU dg046, dg046.pi, dg046.sp"
+    assert g["dev:uranyx f109s 24.256"]["rotulo"] == "Uranyx F109S 24.256", "nome pela base"
+    sem = g["sku:zz998+zz999"]
+    assert sem["rotulo"] == "SKU zz998, zz999 (sem produto ligado)"
+    assert sem["detalhe"] == "SKU zz998.ci, zz999.ci"
+    solto = next(c for c in r["criativos"] if c["creative_id"] == "solto")
+    assert solto["produto"]["rotulo"] == "Uranyx F110L 8.128"
+
+
+def test_janelas_sao_dias_de_calendario_em_brasilia():
+    """Semana = hoje e os 6 dias antes; mês = hoje e os 29 antes — em dias de
+    Brasília. Às 15h de 24/09, o vídeo das 23:30 de 17/09 (02:30 UTC de 18/09)
+    é PUBLICADO no mês e NÃO na semana; o das 00:10 de 18/09 é da semana.
+
+    As views da janela são as GANHAS nela: o das 23:30 de 17/09 foi lido às
+    01:30 de 18/09 com 10 views, e a leitura divide o ganho entre 17 e 18/09
+    — os 5 do dia 18 são da semana, mesmo ele não sendo publicado nela."""
+    def brt(*a):
+        return datetime(*a, tzinfo=d.BRT)
+
+    posts, linhas = _juntos(
+        _video("fora-semana", pub=brt(2026, 9, 17, 23, 30), views={"tiktok": 10}, equipe="A"),
+        _video("dentro-semana", pub=brt(2026, 9, 18, 0, 10), views={"tiktok": 20}, equipe="A"),
+        _video("limite-mes", pub=brt(2026, 8, 26, 0, 5), views={"tiktok": 40}, equipe="A"),
+        _video("fora-mes", pub=brt(2026, 8, 25, 23, 55), views={"tiktok": 80}, equipe="A"),
+    )
+    assert posts[0]["publicado_em"].astimezone(UTC).day == 18, "em UTC já é dia 18"
+    r = _montar(posts, linhas)
+    assert r["janelas"] == {
+        "semana": {"dias": 7, "desde": "2026-09-18"},
+        "mes": {"dias": 30, "desde": "2026-08-26"},
+    }
+    idade = {c["creative_id"]: c["idade_dias"] for c in r["criativos"]}
+    assert idade == {"fora-semana": 7, "dentro-semana": 6, "limite-mes": 29, "fora-mes": 30}
+    [g] = r["grupos"]["agencia"]
+    assert g["semana"]["videos"] == 1 and g["semana"]["views"] == 20 + 5
+    assert g["semana"]["views_dos_publicados"] == 20, "os publicados na semana têm 20 até hoje"
+    assert g["mes"]["videos"] == 3 and g["mes"]["views"] == 10 + 20 + 40 + 40
+    assert g["mes"]["views_dos_publicados"] == 70
+
+
+def test_grupo_sem_video_no_mes_nao_aparece():
+    posts, linhas = _juntos(
+        _video("velho", pub=AGORA - timedelta(days=45), views={"tiktok": 9000}, equipe="Antiga"),
+        _video("novo", pub=AGORA - timedelta(days=2), views={"tiktok": 10}, equipe="Atual"),
+    )
+    r = _montar(posts, linhas)
+    assert [g["rotulo"] for g in r["grupos"]["agencia"]] == ["Atual"]
+    assert {c["creative_id"] for c in r["criativos"]} == {"velho", "novo"}, "a lista tem os 90 dias"
+
+
+def test_video_aguardando_conta_como_video_e_nao_soma_views():
+    pub = AGORA - timedelta(hours=1)
+    posts, linhas = _juntos(
+        _video("lido", pub=pub, views={"tiktok": 300}, equipe="A"),
+        _video("novo", pub=pub, views={"tiktok": None, "youtube": None}, equipe="A"),
+    )
+    r = _montar(posts, linhas)
+    [g] = r["grupos"]["agencia"]
+    assert g["mes"] == {
+        "views": 300, "videos": 2, "com_numero": 1, "views_dos_publicados": 300,
+        "media": 300, "mediana": 300,
+    }
+    novo = next(c for c in r["criativos"] if c["creative_id"] == "novo")
+    assert novo["views"] == {"total": None, "por_rede": {}, "postagens": 2, "com_numero": 0}
+    assert novo["melhor_post"] is None
+    assert r["criativos"][-1]["creative_id"] == "novo", "sem número vai pro fim da lista"
+
+
+def test_post_apagado_e_tirado_do_desempenho_nao_contam():
+    pub = AGORA - timedelta(days=2)
+    posts, linhas = _juntos(
+        _video("c", pub=pub, views={"tiktok": 100, "youtube": 500, "instagram": 700}, equipe="A"),
+    )
+    quando = AGORA - timedelta(hours=1)
+    linhas.append({"postagem_id": "c-youtube", "dia": quando, "lido_em": None,
+                   "updated_at": quando, "erro": f"{REMOVIDO} saiu do ar", "views": None})
+    next(p for p in posts if p["id"] == "c-instagram")["fora_do_desempenho_em"] = quando
+    r = _montar(posts, linhas)
+    [c] = r["criativos"]
+    assert c["views"] == {
+        "total": 100, "por_rede": {"tiktok": 100}, "postagens": 1, "com_numero": 1
+    }
+    [g] = r["grupos"]["agencia"]
+    assert g["mes"]["views"] == 100 and g["por_rede_mes"] == {"tiktok": 100}
+
+
+def test_views_do_video_somam_todas_as_redes_e_posts_repetidos():
+    """Dois posts do mesmo vídeo no TikTok somam. O link do vídeo é o post
+    mais visto; empate, o mais novo."""
+    pub = AGORA - timedelta(days=4)
+    posts, linhas = _juntos(
+        _video("c", pub=pub, views={"instagram": 6755, "youtube": 1159, "facebook": 0}),
+    )
+    for pid, quando, v in (("tt1", pub, 300), ("tt2", pub + timedelta(days=1), 148)):
+        posts.append(_post(pid, pub=quando, creative_id="c", plataforma="tiktok",
+                           post_url=f"https://x/{pid}"))
+        linhas.append(_l(quando, 2, v, postagem_id=pid))
+    r = _montar(posts, linhas)
+    [c] = r["criativos"]
+    assert c["views"]["total"] == 8362
+    assert c["views"]["por_rede"] == {
+        "instagram": 6755, "youtube": 1159, "tiktok": 448, "facebook": 0
+    }
+    assert list(c["views"]["por_rede"]) == ["instagram", "youtube", "tiktok", "facebook"]
+    assert c["views"]["postagens"] == 5 and c["views"]["com_numero"] == 5
+    assert c["melhor_post"] == {"plataforma": "instagram", "postagem_id": "c-instagram",
+                                "post_url": "https://x/c-instagram", "views": 6755}
+    # Empate: o post mais novo.
+    posts2, linhas2 = _juntos(_video("e", pub=pub, views={"instagram": 50}))
+    posts2.append(_post("e2", pub=pub + timedelta(hours=5), creative_id="e", plataforma="youtube"))
+    linhas2.append(_l(pub + timedelta(hours=5), 2, 50, postagem_id="e2"))
+    [e] = _montar(posts2, linhas2)["criativos"]
+    assert e["melhor_post"]["postagem_id"] == "e2"
+
+
+def test_melhor_do_grupo_e_o_video_mais_visto_com_o_link_do_post_mais_visto():
+    pub = AGORA - timedelta(days=2)
+    posts, linhas = _juntos(
+        _video("fraco", pub=pub, views={"tiktok": 900}, equipe="A", modelo="Fraco"),
+        _video("forte", pub=pub, views={"tiktok": 400, "youtube": 1100}, equipe="A",
+               modelo="Forte", legenda="Legenda do forte"),
+    )
+    [g] = _montar(posts, linhas)["grupos"]["agencia"]
+    assert g["melhor"] == {
+        "creative_id": "forte", "postagem_id": "forte-youtube", "nome": "Forte",
+        "titulo": "Legenda do forte", "views": 1500, "plataforma": "youtube",
+        "post_url": "https://x/forte-youtube",
+    }
+
+
+def test_horario_conta_postagens_cada_uma_na_sua_janela():
+    """Horário é do POST: o mesmo vídeo saiu às 12h numa rede e às 19h noutra,
+    e cada post entra na janela pela data dele. As views da janela são as que
+    os posts daquele horário ganharam nela."""
+    def brt(*a):
+        return datetime(*a, tzinfo=d.BRT)
+
+    posts = [
+        _post("ig", pub=brt(2026, 9, 17, 12, 4), creative_id="c", plataforma="instagram",
+              post_url="https://x/ig"),
+        _post("tt", pub=brt(2026, 9, 18, 19, 3), creative_id="c", plataforma="tiktok",
+              post_url="https://x/tt"),
+        _post("yt", pub=brt(2026, 9, 24, 12, 10), creative_id="c", plataforma="youtube"),
     ]
-    assert [x["chave"] for x in d._ordena_grupos(grupos)] == [
-        "comp",
-        "ind-alto",
-        "ind-baixo",
-        "ind-nulo",
-        "pouco",
-    ]
+    # Lidos 30 h depois: o ganho se divide entre o dia da publicação e o seguinte.
+    linhas = [_l(posts[0]["publicado_em"], 30, 700, postagem_id="ig"),
+              _l(posts[1]["publicado_em"], 30, 90, postagem_id="tt")]
+    g = {x["chave"]: x for x in _montar(posts, linhas)["grupos"]["horario"]}
+    assert g["12h"]["unidade"] == "postagem"
+    assert g["12h"]["mes"]["videos"] == 2 and g["12h"]["mes"]["views"] == 700
+    assert g["12h"]["semana"] == {
+        "views": 350, "videos": 1, "com_numero": 0, "views_dos_publicados": None,
+        "media": None, "mediana": None,
+    }, "publicado na semana: só o do YouTube (aguardando); ganho na semana: o 18/09 do Instagram"
+    assert g["12h"]["melhor"]["post_url"] == "https://x/ig"
+    assert g["12h"]["melhor"]["postagem_id"] == "ig"
+    assert g["19h"]["semana"] == {
+        "views": 90, "videos": 1, "com_numero": 1, "views_dos_publicados": 90,
+        "media": 90, "mediana": 90,
+    }
+    assert g["19h"]["por_rede_mes"] == {"tiktok": 90}
+
+
+def test_nome_do_video():
+    """Desde 29/09 o `modelo` é o título da ideia. Quando é só a duração, o
+    nome cai pra legenda (1ª linha) e depois pro roteiro. Aspas saem."""
+    assert d.nome_do_video("Saque Rápido", "Aparelho que…", None) == "Saque Rápido"
+    assert d.nome_do_video('"Caiu do barco"', "x", None) == "Caiu do barco"
+    assert d.nome_do_video('Ninja Jiraya"', "x", None) == "Ninja Jiraya"
+    legenda = "Bateria que dura ⚡\nlinha 2"
+    assert d.nome_do_video("video 15s", legenda, "R") == "Bateria que dura ⚡"
+    assert d.nome_do_video("Vídeo de 30 segundos", "", "Roteiro X") == "Roteiro X"
+    assert d.nome_do_video("  “ ” ", None, None) == ""
+    assert d.nome_do_video("Próxima Parada: o Castelo (30 s, 9:16)", "x", None) == (
+        "Próxima Parada: o Castelo (30 s, 9:16)"
+    ), "duração no meio do título não é modelo genérico"
+    r = _montar(*_video("c", pub=AGORA - timedelta(days=1), views={"tiktok": 5},
+                        modelo="video 15s", legenda="Tecnologia que aguenta o teu dia 🔋"))
+    assert r["criativos"][0]["nome"] == "Tecnologia que aguenta o teu dia 🔋"
+
+
+def test_base_sku():
+    assert d.base_sku("dg019.ra") == "dg019"
+    assert d.base_sku(" DG089.ci, dg088.ci") == "dg089"
+    assert d.base_sku("dg019+ca064") == "dg019"
+    assert d.base_sku("b055.24") == "b055"
+    assert d.base_sku("  ") is None
+    assert d.base_sku(None) is None
 
 
 def test_formato_extrai_duracao_do_modelo():
@@ -365,12 +613,180 @@ def test_formato_extrai_duracao_do_modelo():
 
 
 def test_produto_cai_na_base_do_sku_sem_produto_ligado():
-    assert d.grupo_produto(None, None, "dg017.pi") == (
-        "sku:dg017",
-        "SKU dg017 (sem produto ligado)",
+    def gp(*a):
+        g = d.grupo_produto(*a)
+        return g["chave"], g["rotulo"], g["skus"], g["variantes"]
+
+    assert gp(None, None, None, "dg017.pi") == (
+        "sku:dg017", "SKU dg017 (sem produto ligado)", ["dg017.pi"], []
     )
-    assert d.grupo_produto("u1", "Fone DG017", "dg017.pi") == ("prod:u1", "Fone DG017")
-    assert d.grupo_produto(None, None, "  ") == ("nenhum", "(sem produto)")
+    assert gp(None, None, None, "dg017.pi", {"dg017": "Uranyx F109S - Preto"}) == (
+        "dev:uranyx f109s", "Uranyx F109S", ["dg017.pi"], ["Preto"]
+    )
+    # Ligado: o produto manda; SKU digitado que não é produto nenhum não abre linha.
+    assert gp("u1", "Fone DG017", "dg017.pi", "dg099.sp") == (
+        "dev:fone dg017", "Fone DG017", ["dg017.pi"], []
+    )
+    assert gp("u1", "Sem SKU", None, None) == ("dev:sem sku", "Sem SKU", [], [])
+    assert gp("u1", None, None, None) == ("prod:u1", "(produto sem nome)", [], [])
+    assert gp(None, None, None, "  ") == ("nenhum", "(sem produto)", [], [])
+    # Nem um SKU errado ao lado de um certo.
+    assert gp(None, None, None, "dg017.pi, zz1", {"dg017": ["Uranyx F109S - Preto"]})[0] == (
+        "dev:uranyx f109s"
+    )
+
+
+def test_aparelho_tira_cor_tamanho_e_codigo_do_fornecedor():
+    """O nome do Bling diz modelo + cor ("- Vermelho") e, na mala, o tamanho;
+    o aparelho é o que sobra. "- S5 Edition" não é cor e fica."""
+    casos = {
+        "Uranyx F112 Pro 5G 24.256 - Vermelho": ("Uranyx F112 Pro 5G 24.256", "Vermelho"),
+        "Uranyx A18 Pro Max - S5 Edition 16.128 - Prata": (
+            "Uranyx A18 Pro Max - S5 Edition 16.128", "Prata",
+        ),
+        "Uranyx F105 12.64 - Preto + cartão 64GB": ("Uranyx F105 12.64", "Preto + cartão 64GB"),
+        "Mala Sorriso M6 tamanho 24 - Branco (DT - DTLG115 - DT16)": (
+            "Mala Sorriso M6", "Branco tam. 24",
+        ),
+        "Mala Escudo P4 tamanho 24 - Verde Escuro (DT - PPDT803 - DT13)": (
+            "Mala Escudo P4", "Verde Escuro tam. 24",
+        ),
+        "Kit Malas Sorriso M6 tamanho 12.18 Polegadas - Branca": (
+            "Kit Malas Sorriso M6", "Branca tam. 12.18",
+        ),
+        "Uranyx Fossibot F109S 24.256 - KIT 2": ("Uranyx Fossibot F109S 24.256 - KIT 2", None),
+        "Fone sem cor": ("Fone sem cor", None),
+    }
+    for nome, esperado in casos.items():
+        assert d.aparelho(nome) == esperado, nome
+
+
+def test_video_de_varias_cores_conta_no_aparelho_inteiro():
+    """Na fila de 06/10 há 5 vídeos do F112 com "dg082, dg083, dg084, dg085,
+    dg086" (as 5 cores) e o A18 com "dg089.ci, dg088.ci". Contar tudo na
+    primeira cor inflava o F112 Vermelho e escondia as outras cores: o grupo é
+    o APARELHO, e a linha cinza diz as cores e os SKUs."""
+    f112 = "Uranyx F112 Pro 5G 24.256"
+    a18 = "Uranyx A18 Pro Max - S5 Edition 16.128"
+    por_base = {
+        "dg082": [f"{f112} - Vermelho"], "dg083": [f"{f112} - Azul"],
+        "dg088": [f"{a18} - Laranja"], "dg089": [f"{a18} - Prata"],
+    }
+    por_sku = {"dg082.ra": f"{f112} - Vermelho", "dg088.ci": f"{a18} - Laranja",
+               "dg089.ci": f"{a18} - Prata"}
+    pub = AGORA - timedelta(days=1)
+    posts, linhas = _juntos(
+        _video("vermelho", pub=pub, views={"tiktok": 500}, product_id="p82",
+               produto_nome=f"{f112} - Vermelho", produto_sku="dg082.ra", sku="dg082"),
+        _video("cores", pub=pub, views={"tiktok": 900}, sku="dg082, dg083"),
+        _video("a18-duas", pub=pub, views={"tiktok": 300}, product_id="p89",
+               produto_nome=f"{a18} - Prata", produto_sku="dg089.ci", sku="dg089.ci, dg088.ci"),
+        _video("a18-laranja", pub=pub, views={"tiktok": 100}, sku="dg088.ci"),
+    )
+    r = _montar(posts, linhas, nomes_por_base=por_base, nomes_por_sku=por_sku)
+    g = {x["chave"]: x for x in r["grupos"]["produto"]}
+    assert set(g) == {"dev:uranyx f112 pro 5g 24.256", "dev:uranyx a18 pro max - s5 edition 16.128"}
+    x = g["dev:uranyx f112 pro 5g 24.256"]
+    assert x["rotulo"] == f112
+    assert x["mes"]["videos"] == 2 and x["mes"]["views"] == 1400
+    assert x["detalhe"] == "Azul, Vermelho · SKU dg082, dg082.ra, dg083"
+    y = g["dev:uranyx a18 pro max - s5 edition 16.128"]
+    assert y["mes"]["videos"] == 2 and y["mes"]["views"] == 400
+    assert y["detalhe"] == "Laranja, Prata · SKU dg088.ci, dg089.ci"
+    cores = next(c for c in r["criativos"] if c["creative_id"] == "cores")
+    assert cores["produto"]["skus"] == ["dg082", "dg083"]
+    assert cores["produto"]["variantes"] == ["Azul", "Vermelho"]
+    # Dois aparelhos diferentes no mesmo vídeo: linha própria, sem contar em dobro.
+    dois = d.grupo_produto(None, None, None, "dg082, dg088.ci", por_base, por_sku)
+    assert dois["rotulo"] == f"{a18} + {f112}"
+    assert dois["chave"] == (
+        "dev:uranyx a18 pro max - s5 edition 16.128+dev:uranyx f112 pro 5g 24.256"
+    )
+
+
+def test_malas_de_tamanhos_diferentes_sao_a_mesma_mala_e_o_sku_exato_da_o_tamanho():
+    """A base b055 é a Mala Sorriso M6 em 5 tamanhos (e kits). O SKU exato diz
+    o tamanho ("b055.20" é a de 20, não a de 8, que é o nome mais curto da
+    base); pela base só, o tamanho não é afirmado. As duas malas são uma linha,
+    e a linha cinza lista os tamanhos."""
+    def mala(t):
+        return f"Mala Sorriso M6 tamanho {t} - Branco (DT - DTLG115 - DT16)"
+
+    por_base = {"b055": [mala(t) for t in (8, 12, 18, 20, 24)]}
+    por_sku = {"b055.20": mala(20), "b055.24": mala(24), "b055": "Kit 6 Malas Sorriso M6 - Branco"}
+    pub = AGORA - timedelta(days=1)
+    posts, linhas = _juntos(
+        _video("m24", pub=pub, views={"tiktok": 700}, product_id="p24",
+               produto_nome=mala(24), produto_sku="b055.24", sku="b055.24"),
+        _video("m20", pub=pub, views={"tiktok": 300}, sku="b055.20"),
+    )
+    r = _montar(posts, linhas, nomes_por_base=por_base, nomes_por_sku=por_sku)
+    [g] = r["grupos"]["produto"]
+    assert g["chave"] == "dev:mala sorriso m6" and g["rotulo"] == "Mala Sorriso M6"
+    assert g["mes"]["videos"] == 2 and g["mes"]["views"] == 1000
+    assert g["detalhe"] == "Branco tam. 20, Branco tam. 24 · SKU b055.20, b055.24"
+    # Sem o SKU exato: a mala, sem tamanho (a base tem 5).
+    so_base = d.grupo_produto(None, None, None, "b055.20", por_base)
+    assert (so_base["rotulo"], so_base["variantes"]) == ("Mala Sorriso M6", [])
+    # "b055" sozinho é a mala, não o kit que tem esse SKU exato.
+    assert d.grupo_produto(None, None, None, "b055", por_base, por_sku)["rotulo"] == (
+        "Mala Sorriso M6"
+    )
+
+
+def test_views_da_janela_sao_as_ganhas_nela_inclusive_por_video_antigo():
+    """Eduardo quer "quantas views cada agência atraiu na semana". Vídeo de 3
+    semanas que continua rendendo atrai views na semana — e somar só os vídeos
+    publicados na semana perdia isso (Bill Gates: 39.169 na tela contra 41.851
+    ganhas, 06/10/2026). Agora a semana soma o que TODOS os vídeos do grupo
+    ganharam nela, a mesma conta do Resumo: com 7 dias, os grupos fecham com o
+    Resumo. Até post mais velho que a tela (que a coleta ainda lia) entra."""
+    hoje = AGORA.astimezone(d.BRT).date()
+    pub_velho = AGORA - timedelta(days=20)
+    posts = [
+        _post("velho", pub=pub_velho, creative_id="cv", equipe="A", product_id="pf",
+              produto_nome="Uranyx F117 24.256 - Preto", produto_sku="dg048.ra"),
+        _post("novo", pub=AGORA - timedelta(days=2), creative_id="cn", equipe="A"),
+        _post("trimestre", pub=AGORA - timedelta(days=60), creative_id="ct", equipe="B"),
+    ]
+    linhas = [
+        # Lido desde o nascimento: 1.000 no dia em que saiu, parado até hoje-7,
+        # e +300 de hoje-6 a hoje-1 (50 por dia) — tudo dentro da semana.
+        _l(pub_velho, 2, 1000, postagem_id="velho"),
+        _noite(hoje - timedelta(days=7), 1000, "velho"),
+        _noite(hoje - timedelta(days=1), 1300, "velho"),
+        _l(posts[1]["publicado_em"], 2, 500, postagem_id="novo"),
+        # Lido só depois de velho (a 1ª leitura é base): +70 de hoje-9 a
+        # hoje-3, 10 por dia — 40 deles na semana.
+        _noite(hoje - timedelta(days=10), 4000, "trimestre"),
+        _noite(hoje - timedelta(days=3), 4070, "trimestre"),
+    ]
+    # Mais velho que a tela (95 dias): só soma, não vira linha. +40 de
+    # hoje-11 a hoje-5 (5,5,6,6,6,6,6) — 12 na semana.
+    antigo = _post("antigo", pub=AGORA - timedelta(days=95), creative_id="ca", equipe="B")
+    linhas += [_noite(hoje - timedelta(days=12), 9000, "antigo"),
+               _noite(hoje - timedelta(days=5), 9040, "antigo")]
+    r = _montar(posts, linhas, dias=7, posts_antigos=[antigo])
+    g = {x["rotulo"]: x for x in r["grupos"]["agencia"]}
+    a, b = g["A"], g["B"]
+    assert a["semana"]["views"] == 300 + 500, "o velho conta o que ganhou na semana"
+    assert a["semana"]["videos"] == 1 and a["semana"]["views_dos_publicados"] == 500
+    assert a["mes"]["views"] == 1300 + 500 and a["mes"]["videos"] == 2
+    assert a["mes"]["views_dos_publicados"] == 1800 and a["mes"]["media"] == 900
+    # B não publicou nada no mês, mas atraiu views nele: aparece, com 0 vídeos.
+    assert b["semana"] == {
+        "views": 40 + 12, "videos": 0, "com_numero": 0, "views_dos_publicados": None,
+        "media": None, "mediana": None,
+    }
+    assert b["mes"]["views"] == 70 + 40 and b["mes"]["videos"] == 0
+    assert b["melhor"] is None, "nenhum vídeo dele publicado no mês"
+    # A soma dos grupos na semana é o Resumo de 7 dias, em toda dimensão.
+    resumo = r["resumo"]["tendencia"]["views_no_periodo"]
+    assert resumo == 300 + 500 + 40 + 12
+    for dim in ("agencia", "produto", "formato", "roteiro", "horario"):
+        assert sum(x["semana"]["views"] or 0 for x in r["grupos"][dim]) == resumo, dim
+    f117 = next(x for x in r["grupos"]["produto"] if x["rotulo"] == "Uranyx F117 24.256")
+    assert f117["semana"]["videos"] == 0 and f117["semana"]["views"] == 300
 
 
 def test_faixa_de_horario_em_brt():

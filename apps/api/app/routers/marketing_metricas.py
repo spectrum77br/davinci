@@ -21,7 +21,11 @@ carrega o universo e se escreve. Três mudanças de 24/09 que valem dizer:
 
 E a ressalva que a tela carrega, não esconde em rodapé: "view" não quer dizer
 a mesma coisa nas três redes — o limiar de segundos é diferente em cada uma.
-Por isso o índice compara cada vídeo com o normal da PRÓPRIA conta.
+
+06/10/2026: a tela passou a mostrar views somadas (sem o índice "× o normal"),
+os vídeos mais vistos e, em "Onde vale investir", as views ganhas na semana e
+no mês. O produto é agrupado por aparelho, e cada SKU do criativo ganha o
+nome do produto pelo SKU exato ou, sem ele, pela base (`_nomes_dos_produtos`).
 """
 
 from __future__ import annotations
@@ -92,6 +96,52 @@ async def _estado_da_coleta(agora: datetime) -> dict[str, Any]:
     return out
 
 
+async def _nomes_dos_produtos(
+    session: AsyncSession, posts: list[dict[str, Any]]
+) -> tuple[dict[str, str], dict[str, list[str]]]:
+    """Os nomes que dão o APARELHO de cada SKU dos criativos (ver
+    `desempenho.grupo_produto`): (SKU exato → nome, base → nomes).
+
+    Exato: o produto ATIVO com aquele SKU (sem diferenciar maiúscula) — é o
+    que diz que "b055.20" é a mala de tamanho 20, e não a de 8. Base ("dg017"
+    de "dg017.pi"): os produtos ATIVOS e SIMPLES com essa base (kit, com "+"
+    no SKU ou formato E, não é o aparelho). Sem isso a tela dizia "SKU dg017
+    (sem produto ligado)"."""
+    skus: set[str] = set()
+    for p in posts:
+        skus.update(desempenho.skus_digitados(p["sku"]))
+        if p.get("produto_sku"):
+            skus.add(p["produto_sku"].strip().lower())
+    if not skus:
+        return {}, {}
+    bases = {b for t in skus if (b := desempenho.base_sku(t))}
+    sku_col = func.lower(Product.sku)
+    por_sku: dict[str, str] = {}
+    for sku, nome in (
+        await session.execute(
+            select(sku_col, Product.name).where(sku_col.in_(skus), Product.situacao == "A")
+        )
+    ).all():
+        atual = por_sku.get(sku)
+        if nome and (atual is None or (len(nome), nome) < (len(atual), atual)):
+            por_sku[sku] = nome
+    base_col = func.lower(func.split_part(Product.sku, ".", 1))
+    por_base: dict[str, set[str]] = {}
+    for base, nome in (
+        await session.execute(
+            select(base_col, Product.name).where(
+                base_col.in_(bases),
+                Product.situacao == "A",
+                ~Product.sku.contains("+"),
+                or_(Product.formato.is_(None), Product.formato == "S"),
+            )
+        )
+    ).all():
+        if nome:
+            por_base.setdefault(base, set()).add(nome)
+    return por_sku, {b: sorted(ns) for b, ns in por_base.items()}
+
+
 @router.get("")
 async def metricas(
     session: Annotated[AsyncSession, Depends(get_session)],
@@ -117,7 +167,9 @@ async def metricas(
     no_universo = (
         MarketingPostagem.status == STATUS_PUBLICADO,
         MarketingPostagem.publicado_em.isnot(None),
-        MarketingPostagem.publicado_em >= desempenho.corte_soma(agora, dias),
+        # O mês de "Onde vale investir" também soma o que post velho ganhou.
+        MarketingPostagem.publicado_em
+        >= desempenho.corte_soma(agora, max(dias, desempenho.MES_DIAS)),
         or_(
             MarketingPostagem.publicado_em >= corte,
             MarketingPostagem.fora_do_desempenho_em.is_(None),
@@ -130,6 +182,7 @@ async def metricas(
             MarketingCreative,
             Marca.nome,
             Product.name,
+            Product.sku,
             MarketingRoteiro.titulo,
             RedeSocial.conta,
         )
@@ -142,7 +195,7 @@ async def metricas(
     )
     posts: list[dict[str, Any]] = []
     posts_antigos: list[dict[str, Any]] = []
-    for p, c, marca_nome, produto_nome, roteiro_titulo, conta_atual in (
+    for p, c, marca_nome, produto_nome, produto_sku, roteiro_titulo, conta_atual in (
         await session.execute(posts_q)
     ).all():
         (posts if p.publicado_em >= corte else posts_antigos).append(
@@ -166,6 +219,7 @@ async def metricas(
                 "modelo": c.modelo,
                 "product_id": c.product_id,
                 "produto_nome": produto_nome,
+                "produto_sku": produto_sku,
                 "roteiro_id": c.roteiro_id,
                 "roteiro_titulo": roteiro_titulo,
             }
@@ -191,6 +245,7 @@ async def metricas(
     # Desde quando existe leitura: sem isto a tela compararia o período com um
     # "anterior" em que ninguém lia nada.
     inicio = (await session.execute(select(func.min(met.dia)))).scalar_one_or_none()
+    nomes_por_sku, nomes_por_base = await _nomes_dos_produtos(session, posts + posts_antigos)
 
     return desempenho.montar(
         posts,
@@ -203,6 +258,8 @@ async def metricas(
         inicio_da_coleta=inicio,
         coleta=await _estado_da_coleta(agora),
         posts_antigos=posts_antigos,
+        nomes_por_base=nomes_por_base,
+        nomes_por_sku=nomes_por_sku,
     )
 
 

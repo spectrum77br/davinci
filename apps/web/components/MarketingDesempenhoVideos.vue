@@ -1,13 +1,15 @@
 <script setup lang="ts">
 /**
- * "Qual vídeo rendeu mais" — um criativo (o vídeo produzido) por linha, e o
- * post dele em cada rede lado a lado (Eduardo, 24/09/2026).
+ * "Todos os vídeos" — um criativo (o vídeo produzido) por linha, e o post
+ * dele em cada rede lado a lado (Eduardo, 24/09/2026).
  *
  * A linha é o CRIATIVO, não o post, porque é nele que se investe: o mesmo
  * vídeo sai no Instagram, no YouTube e no TikTok, e a pergunta é se ELE
- * funcionou. O número de cada célula é a view NA MESMA IDADE (views com N
- * dias), nunca o total — senão o vídeo mais velho ganha sempre. E quando não
- * tem número, a célula diz o porquê (aguardando, cedo, sem views, falhou):
+ * funcionou. Cada célula é o total de views do vídeo naquela rede (a última
+ * leitura; dois posts na mesma rede somam), e a última coluna é a soma das
+ * redes. Até 05/10 a célula mostrava "views com 3 dias" e um índice "2,1×",
+ * e isso confundia (06/10/2026): agora é o número que a rede mostra. Quando
+ * não tem número, a célula diz o porquê (aguardando, sem views, falhou):
  * "—" sozinho é o que fazia o Eduardo perguntar "será que demora?".
  */
 import { computed, nextTick, ref } from 'vue'
@@ -15,8 +17,8 @@ import { AlertTriangle, ChevronRight, Clock, ExternalLink, EyeOff, Info, X } fro
 import { apiErrMsg } from '~/lib/apiError'
 import {
   ERROS_DESEMPENHO, ROTULO_REDE, SIGLA_REDE,
-  celula, corRede, ddmm, fmtIndice, frescor, geomCurva, hhmm, num, pct, qtd, redesDaTabela, sinal, tomIndice,
-  type Celula, type CriativoDesempenho, type Minimos, type PostagemDesempenho,
+  celula, corRede, ddmm, fmtViews, frescor, geomCurva, hhmm, num, pct, qtd, redesDaTabela, sinal,
+  type Celula, type CriativoDesempenho, type PostagemDesempenho,
 } from '~/utils/desempenho'
 
 const props = defineProps<{
@@ -24,23 +26,15 @@ const props = defineProps<{
   criativos: CriativoDesempenho[]
   /** Posts apagados das redes — só pra célula dizer "apagado" e não "não postado". */
   foraDoAr?: { creative_id?: string; plataforma: string }[]
-  marco: number
-  minimos: Minimos
   canEdit: boolean
 }>()
-// A tela-mãe recarrega tudo: tirar um vídeo muda as somas, as medianas e o
-// índice dos OUTROS vídeos da conta, não só esta linha.
+// A tela-mãe recarrega tudo: tirar um vídeo muda as somas, os grupos e os
+// mais vistos, não só esta linha.
 const emit = defineEmits<{ (e: 'mudou'): void }>()
 
 const { api } = useApi()
 const toasts = useToasts()
 
-// Tom do índice → classe. Vídeo fraco é informação, não erro: nada de vermelho.
-const CHIP: Record<string, string> = {
-  alto: 'pill-success tabular-nums',
-  normal: 'pill-muted tabular-nums',
-  baixo: 'text-[11px] text-muted-foreground tabular-nums',
-}
 const METRICAS = ['views', 'curtidas', 'comentarios', 'compartilhamentos', 'salvamentos'] as const
 
 const porId = computed(() => new Map(props.postagens.map((p) => [p.postagem_id, p])))
@@ -75,7 +69,6 @@ type Linha = {
   curvas: { p: PostagemDesempenho; g: ReturnType<typeof geomCurva> }[]
   meta: string
   ultimoPost: number
-  semIndice: string
 }
 
 const apagados = computed(() => new Set((props.foraDoAr ?? []).map((f) => `${f.creative_id}|${f.plataforma}`)))
@@ -91,26 +84,20 @@ const linhas = computed<Linha[]>(() => {
   return props.criativos.map((c) => {
     const colunas = redes.value.map((rede) => {
       const ps = postsDe(c, rede)
-      // Dois posts do mesmo vídeo na mesma rede: mostra o mais novo e avisa.
+      // Dois posts do mesmo vídeo na mesma rede: soma os dois e avisa "+1 post".
       const apagado = !ps.length && apagados.value.has(`${c.creative_id}|${rede}`)
-      return { rede, post: ps[0], extra: Math.max(ps.length - 1, 0), cel: celula(ps[0], props.marco, agora, apagado) }
+      return { rede, post: ps[0], extra: Math.max(ps.length - 1, 0), cel: celula(ps, agora, apagado) }
     })
     const posts = redes.value.flatMap((rede) => postsDe(c, rede))
     const primeiro = [...posts].sort((a, b) => Date.parse(a.publicado_em) - Date.parse(b.publicado_em))[0]
     const pub = c.primeira_publicacao_em || primeiro?.publicado_em || null
     const hora = primeiro ? (primeiro.horario === 'outro' ? hhmm(primeiro.publicado_em) : primeiro.horario) : ''
+    // A legenda se repete entre vídeos: só entra quando o nome é outro.
+    const meta: string[] = []
+    if (c.titulo && c.titulo !== c.nome) meta.push(`“${c.titulo}”`)
     // "(sem produto)", "(sem agência)"… não ajudam a reconhecer o vídeo; somem da linha.
-    const meta = [c.produto, c.formato, c.agencia]
-      .filter((x) => x && x.chave !== 'nenhum')
-      .map((x) => x.rotulo)
+    for (const x of [c.produto, c.formato, c.agencia]) if (x && x.chave !== 'nenhum') meta.push(x.rotulo)
     if (pub) meta.push(`${ddmm(pub)} ${hora}`.trim())
-    // Índice nulo precisa dizer POR QUÊ, senão parece vídeo ruim.
-    let semIndice = ''
-    if (c.indice_views === null || c.indice_views === undefined) {
-      const estados = posts.map((p) => celula(p, props.marco, agora).estado)
-      if (estados.length && estados.every((e) => e === 'cedo' || e === 'aguardando')) semIndice = 'cedo demais'
-      else if (posts.some((p) => p.indice_motivo === 'base_pequena')) semIndice = 'conta com poucos vídeos'
-    }
     return {
       c,
       colunas,
@@ -118,7 +105,6 @@ const linhas = computed<Linha[]>(() => {
       curvas: posts.filter((p) => (p.curva?.length ?? 0) > 1).map((p) => ({ p, g: geomCurva(p.curva) })),
       meta: meta.join(' · '),
       ultimoPost: Math.max(0, ...posts.map((p) => Date.parse(p.publicado_em) || 0)),
-      semIndice,
     }
   })
 })
@@ -126,15 +112,10 @@ const linhas = computed<Linha[]>(() => {
 // ---------- ordem
 
 const ordem = ref<string | null>(null)
-// Com menos de 3 índices, ordenar por índice é ordenar quase tudo por "—":
-// aí o padrão é "mais novos", que é o que o Eduardo procura logo depois de postar.
-const ordemEfetiva = computed(() => {
-  if (ordem.value) return ordem.value
-  const comIndice = props.criativos.filter((c) => c.indice_views !== null && c.indice_views !== undefined).length
-  return comIndice >= 3 ? 'indice' : 'novos'
-})
+// O padrão é sempre "mais views" (a soma das redes).
+const ordemEfetiva = computed(() => ordem.value || 'views')
 const opcoesOrdem = computed(() => [
-  { chave: 'indice', rotulo: 'índice' },
+  { chave: 'views', rotulo: 'mais views' },
   { chave: 'novos', rotulo: 'mais novos' },
   ...redes.value.map((r) => ({ chave: r, rotulo: ROTULO_REDE[r] || r })),
 ])
@@ -151,15 +132,14 @@ function nulosNoFim(a: number | null | undefined, b: number | null | undefined):
 const ordenadas = computed(() => {
   const arr = [...linhas.value]
   const porNovo = (a: Linha, b: Linha) => b.ultimoPost - a.ultimoPost
-  const porIndice = (a: Linha, b: Linha) => nulosNoFim(a.c.indice_views, b.c.indice_views) || porNovo(a, b)
+  const porViews = (a: Linha, b: Linha) => nulosNoFim(a.c.views?.total, b.c.views?.total) || porNovo(a, b)
   const o = ordemEfetiva.value
   if (o === 'novos') arr.sort(porNovo)
-  else if (o === 'indice') arr.sort(porIndice)
+  else if (o === 'views') arr.sort(porViews)
   else {
-    // Por rede: views na idade comparada daquela rede (mesma rede, então o
-    // número cru é honesto). Sem número vai pro fim.
-    const vm = (l: Linha) => l.colunas.find((x) => x.rede === o)?.post?.views_marco
-    arr.sort((a, b) => nulosNoFim(vm(a), vm(b)) || porIndice(a, b))
+    // Por rede: as views do vídeo naquela rede. Sem número vai pro fim.
+    const vr = (l: Linha) => l.c.views?.por_rede?.[o]
+    arr.sort((a, b) => nulosNoFim(vr(a), vr(b)) || porViews(a, b))
   }
   return arr
 })
@@ -175,11 +155,6 @@ function alternar(id: string) {
   abertos.value = s
 }
 
-function dicaIndicePost(p: PostagemDesempenho): string {
-  const med = p.base?.mediana
-  if (med === null || med === undefined) return ''
-  return `normal desta conta: ${med.toLocaleString('pt-BR')} views com ${qtd(props.marco, 'dia', 'dias')} (mediana de ${qtd(p.base.n, 'outro vídeo', 'outros vídeos')})`
-}
 function repetida(l: Linha, p: PostagemDesempenho): boolean {
   return l.posts.filter((x) => x.plataforma === p.plataforma).length > 1
 }
@@ -255,9 +230,9 @@ async function confirmarTirar() {
         <span>Vídeo</span>
         <span v-for="r in redes" :key="r" class="inline-flex items-center gap-1">
           <span class="inline-block size-2 shrink-0 rounded-full" :style="{ background: corRede(r) }" />
-          {{ ROTULO_REDE[r] || r }} · views com {{ marco }}d
+          {{ ROTULO_REDE[r] || r }}
         </span>
-        <span class="text-right">Índice</span>
+        <span class="text-right">Total</span>
       </div>
 
       <div v-for="l in visiveis" :key="l.c.creative_id" class="border-b last:border-0">
@@ -274,19 +249,16 @@ async function confirmarTirar() {
                   class="size-3.5 shrink-0 text-muted-foreground transition-transform"
                   :class="abertos.has(l.c.creative_id) && 'rotate-90'"
                 />
-                <span class="truncate" :title="l.c.titulo">{{ l.c.titulo || 'vídeo sem legenda' }}</span>
+                <span class="truncate" :title="l.c.nome || l.c.titulo">{{ l.c.nome || l.c.titulo || 'vídeo sem legenda' }}</span>
               </span>
               <span v-if="l.meta" class="block truncate pl-[18px] text-[11px] text-muted-foreground" :title="l.meta">
                 {{ l.meta }}
               </span>
             </button>
-            <!-- índice no topo do cartão (celular) -->
-            <span class="shrink-0 pt-0.5" :class="grade.celular">
-              <span
-                v-if="l.c.indice_views !== null && l.c.indice_views !== undefined"
-                :class="CHIP[tomIndice(l.c.indice_views) || 'normal']"
-                :title="`Mediana dos índices deste vídeo nas redes em que saiu (${l.c.n_indices})`"
-              >{{ fmtIndice(l.c.indice_views) }}</span>
+            <!-- total no topo do cartão (celular) -->
+            <span class="shrink-0 pt-0.5 text-right" :class="grade.celular">
+              <span class="text-sm font-semibold tabular-nums">{{ fmtViews(l.c.views?.total) }}</span>
+              <span class="text-[11px] text-muted-foreground"> views</span>
             </span>
           </div>
 
@@ -313,11 +285,6 @@ async function confirmarTirar() {
               </div>
               <div v-else-if="col.cel.estado === 'ok'" class="flex flex-wrap items-center gap-1.5">
                 <span class="text-sm font-medium tabular-nums">{{ col.cel.texto }}</span>
-                <span
-                  v-if="col.post && col.post.indice_views !== null && col.post.indice_views !== undefined"
-                  :class="CHIP[tomIndice(col.post.indice_views) || 'normal']"
-                  :title="dicaIndicePost(col.post)"
-                >{{ fmtIndice(col.post.indice_views) }}</span>
               </div>
               <div v-else class="text-xs" :class="(col.cel.estado === 'nao_postado' || col.cel.estado === 'apagado') && 'text-muted-foreground'" :title="col.cel.dica || undefined">
                 {{ col.cel.texto }}
@@ -326,24 +293,17 @@ async function confirmarTirar() {
               <div v-if="col.cel.aviso" class="text-[11px] text-amber-600 dark:text-amber-400" :title="col.post?.erro || ''">
                 {{ col.cel.aviso }}
               </div>
-              <span v-if="col.extra" class="pill-muted">+{{ qtd(col.extra, 'post', 'posts') }}</span>
+              <span v-if="col.extra" class="pill-muted" :title="col.cel.dica || undefined">+{{ qtd(col.extra, 'post', 'posts') }}</span>
             </div>
           </div>
 
-          <!-- índice do criativo (tela larga) -->
+          <!-- total do vídeo: a soma das redes (tela larga) -->
           <div class="text-right" :class="grade.tela">
             <span
-              v-if="l.c.indice_views !== null && l.c.indice_views !== undefined"
-              :class="CHIP[tomIndice(l.c.indice_views) || 'normal']"
-              :title="`Mediana dos índices deste vídeo nas redes em que saiu (${l.c.n_indices})`"
-            >{{ fmtIndice(l.c.indice_views) }}</span>
-            <template v-else>
-              <span class="text-sm text-muted-foreground">—</span>
-              <span
-                v-if="l.semIndice" class="block text-[10px] text-muted-foreground"
-                :title="`O índice precisa de ${minimos.base_conta} vídeos da mesma conta com ${qtd(marco, 'dia', 'dias')} de vida.`"
-              >{{ l.semIndice }}</span>
-            </template>
+              class="text-sm font-semibold tabular-nums"
+              :class="(l.c.views?.total === null || l.c.views?.total === undefined) && 'font-normal text-muted-foreground'"
+              :title="l.c.views && l.c.views.com_numero < l.c.views.postagens ? `${l.c.views.postagens - l.c.views.com_numero} de ${l.c.views.postagens} postagens ainda sem número` : undefined"
+            >{{ fmtViews(l.c.views?.total) }}</span>
           </div>
         </div>
 
@@ -400,7 +360,7 @@ async function confirmarTirar() {
                     :x1="g.PAD.l" :x2="g.W - g.PAD.r" :y1="g.H - g.PAD.b" :y2="g.H - g.PAD.b"
                     stroke="currentColor" stroke-opacity="0.08"
                   />
-                  <!-- As idades que a tabela compara (1d, 3d, 7d). -->
+                  <!-- Marcas de 1, 3 e 7 dias de vida. -->
                   <g v-for="m in g.marcos" :key="m.rotulo">
                     <line
                       :x1="m.x" :x2="m.x" :y1="g.PAD.t" :y2="g.H - g.PAD.b"

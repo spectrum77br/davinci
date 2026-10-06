@@ -1460,7 +1460,8 @@ async def test_fora_do_desempenho_some_de_tudo_e_aparece_no_rodape(
     assert [x["postagem_id"] for x in r["postagens"]] == [str(p.id)]
     assert [x["creative_id"] for x in r["criativos"]] == [str(p.creative_id)]
     for dim in ("produto", "formato", "agencia", "roteiro", "horario"):
-        assert sum(g["total"] for g in r["grupos"][dim]) == 1, dim
+        assert sum(g["mes"]["videos"] for g in r["grupos"][dim]) == 1, dim
+        assert sum(g["mes"]["views"] or 0 for g in r["grupos"][dim]) == 100, dim
     assert r["resumo"]["videos"]["fora_do_desempenho"] == 1
     assert r["resumo"]["videos"]["no_ar"] == 1
     assert r["resumo"]["redes"][0]["acumulado"]["views"] == 100
@@ -1708,6 +1709,63 @@ async def test_marco_e_indice_no_endpoint(client, db, make_user, auth_as):
     assert r["criativos"][0]["n_indices"] == 5
 
     assert (await client.get(API_M, params={"marco": 2})).status_code == 422
+
+
+async def test_produto_do_criativo_pelo_sku_exato_e_pela_base(client, db, make_user, auth_as):
+    """ "SKU dg017 (sem produto ligado)" não dizia nada pro Eduardo (06/10/2026).
+    Cada SKU digitado no criativo ganha o aparelho do produto ATIVO com o SKU
+    EXATO (sem diferenciar maiúscula) — é o que diz a cor, ou o tamanho da
+    mala. Sem exato ativo, cai nos produtos ATIVOS e SIMPLES com a mesma base:
+    o kit (com "+" ou formato E), o inativo e outra base não contam."""
+    from app.models import MarketingCreative, Product
+
+    u = await _ve(make_user, auth_as)
+    _, p = await _cenario(db)
+    c = (
+        await db.execute(select(MarketingCreative).where(MarketingCreative.id == p.creative_id))
+    ).scalar_one()
+    c.sku = "DG017.VD"
+    db.add_all(
+        [
+            Product(user_id=u.id, sku="dg017.pi", name="Uranyx F109S 24.256 - Preto",
+                    situacao="A", formato="S"),
+            Product(user_id=u.id, sku="DG017.ra", name="Uranyx F109S 24.256 - Preto (loja antiga)",
+                    situacao="A"),
+            Product(user_id=u.id, sku="dg017.vd", name="Uranyx F109S 24.256 - Verde",
+                    situacao="A", formato="S"),
+            Product(user_id=u.id, sku="dg017.pi+cp01", name="Kit", situacao="A", formato="S"),
+            Product(user_id=u.id, sku="dg017.ki", name="Kit2", situacao="A", formato="E"),
+            Product(user_id=u.id, sku="dg017.zz", name="Curto", situacao="I", formato="S"),
+            Product(user_id=u.id, sku="dg0171.pi", name="Outro", situacao="A", formato="S"),
+        ]
+    )
+    await db.commit()
+
+    r = (await client.get(API_M)).json()
+    [criativo] = r["criativos"]
+    assert criativo["produto"] == {
+        "chave": "dev:uranyx f109s 24.256",
+        "rotulo": "Uranyx F109S 24.256",
+        "skus": ["dg017.vd"],
+        "variantes": ["Verde"],
+    }
+    [g] = r["grupos"]["produto"]
+    assert g["rotulo"] == "Uranyx F109S 24.256"
+    assert g["detalhe"] == "Verde · SKU dg017.vd"
+    assert g["mes"]["videos"] == 1 and g["mes"]["views"] is None, "aguardando: vídeo sem número"
+    assert r["janelas"]["semana"]["dias"] == 7 and r["janelas"]["mes"]["dias"] == 30
+
+    # O exato INATIVO ("Curto") não vale: pela base, o aparelho — e sem cor,
+    # que a base tem Preto e Verde. Nem "Kit", "Kit2" ou "Outro".
+    c.sku = "dg017.zz"
+    await db.commit()
+    r = (await client.get(API_M)).json()
+    assert r["criativos"][0]["produto"] == {
+        "chave": "dev:uranyx f109s 24.256",
+        "rotulo": "Uranyx F109S 24.256",
+        "skus": ["dg017.zz"],
+        "variantes": [],
+    }
 
 
 # ---------- "Atualizar agora" e a trava da rodada ----------

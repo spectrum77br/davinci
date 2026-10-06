@@ -36,12 +36,46 @@ NULO nunca vira zero em lugar nenhum: nulo é "a rede não deu", zero é "deu, e
 O que NÃO é medido, e a tela diz: quanto cada vídeo VENDEU. Os posts não levam
 link rastreado, UTM nem cupom, então venda, receita e conversão por vídeo
 ficam pra quando levarem; custo por view, pra quando o criativo tiver custo.
+
+06/10/2026 — "Onde vale investir" e a lista de vídeos ficaram difíceis de
+ler: o "1,7×", o "indício" e o "pouco dado — não conclua ainda" confundiam
+mais do que ajudavam (Eduardo: "trazer os vídeos mais vistos", "quantos vídeos
+cada agência fez na semana e no mês, e quantas views"). A tela passou a falar
+em VIEWS SOMADAS, sem índice:
+
+  VIEWS          as views de um post são as da última leitura que tem views
+                 (`acumulado.views`); as de um vídeo (criativo) são a soma de
+                 todos os posts dele, em todas as redes.
+
+  SEMANA / MÊS   janelas móveis em dias de calendário de Brasília: semana =
+                 hoje e os 6 dias antes; mês = hoje e os 29 antes. Em "Onde
+                 vale investir", as VIEWS da janela são as que TODOS os vídeos
+                 do grupo GANHARAM nesses dias (vídeo de 3 semanas que continua
+                 rendendo conta) — a mesma regra de ganho do Resumo, então a
+                 soma das agências na semana fecha com o Resumo de 7 dias. Os
+                 VÍDEOS da janela são os publicados nela (pela 1ª publicação), e
+                 "views por vídeo" é a média do que esses vídeos têm até hoje.
+                 Os "mais vistos" (a tela) ranqueiam os vídeos publicados na
+                 janela pelas views até hoje, e dizem isso.
+
+  PRODUTO        agrupa por APARELHO: o nome do produto sem a cor e sem o
+                 tamanho ("Uranyx F112 Pro 5G 24.256 - Vermelho" e "- Azul"
+                 são o mesmo F112; "Mala Sorriso M6 tamanho 20" e "tamanho 24",
+                 a mesma mala). O criativo que mostra várias cores (SKU digitado
+                 "dg089.ci, dg088.ci") entra inteiro no aparelho, e o grupo diz
+                 quais cores/tamanhos e quais SKUs juntou. O nome de cada SKU
+                 vem do produto com aquele SKU exato; sem ele, do produto ativo
+                 com a mesma base ("dg019" de "dg019.ra").
+
+A mesma idade e o índice continuam calculados nas postagens e nos criativos
+(contrato e testes de 24/09); a tela só deixou de lê-los.
 """
 
 from __future__ import annotations
 
 import re
 import statistics
+import unicodedata
 from collections import defaultdict
 from collections.abc import Iterable
 from datetime import UTC, date, datetime, time, timedelta
@@ -68,9 +102,10 @@ TOL_H = 36
 MIN_OUTROS = 4
 # Abaixo disso a taxa de interação é ruído (3 curtidas em 20 views = 15%).
 MIN_VIEWS_TAXA = 100
-# Quantos criativos com índice um grupo precisa pra virar indício / comparável.
-INDICIO = 3
-COMPARAVEL = 8
+# As duas janelas de "Onde vale investir", em dias de calendário (BRT),
+# contando hoje: a semana é hoje e os 6 dias antes.
+SEMANA_DIAS = 7
+MES_DIAS = 30
 
 NUMEROS = ("views", "curtidas", "comentarios", "compartilhamentos", "salvamentos", "alcance")
 INTERACOES = ("curtidas", "comentarios", "compartilhamentos", "salvamentos")
@@ -187,15 +222,215 @@ def autor_diferente(post: dict[str, Any], leituras: list[dict[str, Any]]) -> str
 # A duração vem do `modelo` do criativo ("video 15s", "Vídeo de 30 segundos").
 # O lookbehind é o que impede "F109S 256 GB" (nome de celular) de virar 109 s.
 _RE_FORMATO = re.compile(r"(?<!\w)(\d{1,3})\s*(?:s|seg|segundos?)\b", re.I)
+# `modelo` que é só a duração ("video 15s") não é nome de vídeo.
+_RE_MODELO_GENERICO = re.compile(r"^\s*v[ií]deo\s+(?:de\s+)?\d{1,3}\s*(?:s|seg|segundos?)\b", re.I)
+_ASPAS = " \t\r\n\"“”'"
 
 
-def grupo_produto(product_id: Any, produto_nome: str | None, sku: str | None) -> tuple[str, str]:
-    if product_id is not None:
-        return f"prod:{product_id}", produto_nome or "(produto sem nome)"
-    base = re.split(r"[.,\s/]", (sku or "").strip())[0].lower()
-    if base:
-        return f"sku:{base}", f"SKU {base} (sem produto ligado)"
-    return "nenhum", "(sem produto)"
+def base_sku(s: str | None) -> str | None:
+    """ "dg019.ra" → "dg019". O sufixo depois do ponto é o cadastro (loja, cor
+    do anúncio, tamanho da mala); a base é o aparelho/modelo."""
+    b = re.split(r"[.,\s/+]", (s or "").strip())[0].lower()
+    return b or None
+
+
+def skus_digitados(s: str | None) -> list[str]:
+    """ "dg089.ci, DG088.ci" → ["dg089.ci", "dg088.ci"]: o criativo que mostra
+    várias cores tem vários SKUs digitados."""
+    out: list[str] = []
+    for t in re.split(r"[,;\s/]+", (s or "").strip().lower()):
+        if t and t not in out:
+            out.append(t)
+    return out
+
+
+def nome_do_video(modelo: str | None, legenda: str | None, roteiro_titulo: str | None) -> str:
+    """Como o Eduardo reconhece o vídeo. Desde 29/09 o `modelo` guarda o título
+    da ideia ("Saque Rápido", "Chinelo de Reserva"); a legenda se repete entre
+    vídeos ("Aparelho que não pede carregador…" saiu em 3 produtos), então
+    sozinha não identifica. `modelo` que é só duração ("video 15s") cai pra
+    legenda, depois pro roteiro."""
+    m = (modelo or "").strip(_ASPAS)
+    if m and not _RE_MODELO_GENERICO.search(m):
+        return m[:80]
+    return _primeira_linha(legenda) or (roteiro_titulo or "").strip()[:80] or ""
+
+
+# A cor é o " - X" do fim do nome no Bling ("Uranyx F112 Pro 5G 24.256 -
+# Vermelho"); o tamanho da mala vem no meio ("Mala Sorriso M6 tamanho 24 -
+# Branco"). Só corta o " - X" quando X começa por cor: "Uranyx A18 Pro Max -
+# S5 Edition 16.128 - Prata" perde só o "Prata".
+_CORES = frozenset(
+    (
+        "preto preta branco branca azul cinza verde prata roxo roxa dourado dourada "
+        "champanhe rosa rose laranja amarelo amarela bege bordo coral tiffany mostarda "
+        "marrom burgundy vermelho vermelha caqui grafite titanio lilas vinho nude pink "
+        "chumbo creme turquesa black white blue green gold silver red orange purple grey gray"
+    ).split()
+)
+_RE_PARENTESES = re.compile(r"\s*\([^()]*\)")
+_RE_TAMANHO = re.compile(r"\s+tamanho\s+(\d+(?:\.\d+)*)(?:\s+polegadas)?\b", re.I)
+_RE_PALAVRA = re.compile(r"[^\W\d_]+")
+
+
+def _sem_acento(s: str) -> str:
+    return "".join(ch for ch in unicodedata.normalize("NFKD", s) if not unicodedata.combining(ch))
+
+
+def aparelho(nome: str | None) -> tuple[str, str | None]:
+    """(aparelho, variante) do nome do produto no Bling.
+
+    "Uranyx F112 Pro 5G 24.256 - Vermelho" → ("Uranyx F112 Pro 5G 24.256", "Vermelho");
+    "Mala Sorriso M6 tamanho 24 - Branco (DT - DTLG115 - DT16)" →
+    ("Mala Sorriso M6", "Branco tam. 24"). O código do fornecedor entre
+    parênteses sai."""
+    n = (nome or "").strip()
+    while (sem := _RE_PARENTESES.sub("", n)) != n:
+        n = sem
+    partes = n.split(" - ")
+    cor = None
+    for i in range(len(partes) - 1, 0, -1):
+        m = _RE_PALAVRA.match(partes[i].strip())
+        if m and _sem_acento(m.group(0)).lower() in _CORES:
+            cor = " - ".join(x.strip() for x in partes[i:])
+            n = " - ".join(partes[:i])
+            break
+    tam = None
+    m = _RE_TAMANHO.search(n)
+    if m:
+        tam = f"tam. {m.group(1)}"
+        n = n[: m.start()] + n[m.end() :]
+    n = " ".join(n.split())
+    if not n:
+        return " ".join((nome or "").split()), None
+    return n, " ".join(x for x in (cor, tam) if x) or None
+
+
+def _chave_aparelho(nome: str) -> str:
+    return " ".join(_sem_acento(nome).lower().split())
+
+
+def _aparelho_do_sku(
+    t: str,
+    *,
+    ligado_sku: str | None,
+    ligado_nome: str | None,
+    por_sku: dict[str, str],
+    por_base: dict[str, str | list[str]],
+) -> tuple[str | None, str | None]:
+    """O aparelho de um SKU: o do produto LIGADO, se é ele; senão o produto
+    com o SKU EXATO; senão o produto ativo com a mesma BASE. Pela base a cor ou
+    o tamanho só valem quando todos os cadastros da base concordam — "b055" é
+    a mala em 5 tamanhos.
+
+    SKU digitado só com a base ("b055", "dg082") procura pela base ANTES do
+    exato: o cadastro com o SKU "b055" é o kit de 6 malas, e quem digita
+    "b055" quer dizer a mala."""
+    if ligado_nome and t == ligado_sku:
+        return aparelho(ligado_nome)
+    b = base_sku(t)
+    nomes = por_base.get(b) if b else None
+    lista = ([nomes] if isinstance(nomes, str) else [x for x in nomes if x]) if nomes else []
+
+    def pela_base() -> tuple[str | None, str | None]:
+        dev = aparelho(min(lista, key=lambda x: (len(x), x)))[0]
+        variantes = {aparelho(x)[1] for x in lista}
+        return dev, (variantes.pop() if len(variantes) == 1 else None)
+
+    if t == b and lista:
+        return pela_base()
+    if t in por_sku:
+        return aparelho(por_sku[t])
+    if lista:
+        return pela_base()
+    if ligado_nome and ligado_sku and base_sku(ligado_sku) == b:
+        return aparelho(ligado_nome)[0], None
+    return None, None
+
+
+def grupo_produto(
+    product_id: Any,
+    produto_nome: str | None,
+    produto_sku: str | None,
+    sku: str | None,
+    nomes_por_base: dict[str, str | list[str]] | None = None,
+    nomes_por_sku: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """O produto de um criativo, agrupado por APARELHO: {chave, rotulo, skus,
+    variantes}.
+
+    O F105 tem dois cadastros no Bling com o mesmo nome (dg019.ra e dg019.sp)
+    e aparecia duas vezes na tela (06/10/2026); o F112 tem um SKU por cor, e o
+    vídeo que mostra as 5 cores ("dg082, dg083, dg084, dg085, dg086") contava
+    todo numa cor só. Aqui todo SKU do criativo (o do produto ligado e os
+    digitados) vira aparelho; SKU digitado que não é produto nenhum só vira
+    "SKU x (sem produto ligado)" quando nada mais do criativo é produto — um
+    SKU errado não abre linha nova. Vídeo com dois aparelhos diferentes é uma
+    linha própria ("A + B"), pra soma das linhas continuar fechando."""
+    por_sku = {k.strip().lower(): v for k, v in (nomes_por_sku or {}).items() if v}
+    por_base = nomes_por_base or {}
+    ligado = product_id is not None
+    ligado_sku = (produto_sku or "").strip().lower() or None if ligado else None
+    tokens = ([ligado_sku] if ligado_sku else []) + [
+        t for t in skus_digitados(sku) if t != ligado_sku
+    ]
+    # "dg019" digitado junto do produto "dg019.ra" é o mesmo cadastro, mais vago.
+    tokens = [t for t in tokens if not any(u != t and base_sku(u) == t for u in tokens)]
+
+    aparelhos: dict[str, str] = {}
+    variantes: list[str] = []
+    skus: list[str] = []
+    soltos: list[str] = []
+    for t in tokens:
+        dev, var = _aparelho_do_sku(
+            t,
+            ligado_sku=ligado_sku,
+            ligado_nome=produto_nome if ligado else None,
+            por_sku=por_sku,
+            por_base=por_base,
+        )
+        if dev is None:
+            soltos.append(t)
+            continue
+        aparelhos.setdefault(_chave_aparelho(dev), dev)
+        skus.append(t)
+        if var and var not in variantes:
+            variantes.append(var)
+    if ligado and not aparelhos and produto_nome:
+        dev, var = aparelho(produto_nome)
+        aparelhos[_chave_aparelho(dev)] = dev
+        if var:
+            variantes.append(var)
+
+    partes = [(f"dev:{k}", rot) for k, rot in aparelhos.items()]
+    if soltos and not partes and not ligado:
+        bases = sorted({b for t in soltos if (b := base_sku(t))})
+        partes.append((f"sku:{'+'.join(bases)}", f"SKU {', '.join(bases)} (sem produto ligado)"))
+        skus += soltos
+    if not partes:
+        if ligado:
+            return {
+                "chave": f"prod:{product_id}",
+                "rotulo": produto_nome or "(produto sem nome)",
+                "skus": [],
+                "variantes": [],
+            }
+        return {"chave": "nenhum", "rotulo": "(sem produto)", "skus": [], "variantes": []}
+    partes.sort()
+    return {
+        "chave": "+".join(k for k, _ in partes),
+        "rotulo": " + ".join(r for _, r in partes),
+        "skus": sorted(set(skus)),
+        "variantes": sorted(variantes, key=str.lower),
+    }
+
+
+def detalhe_produto(variantes: Iterable[str], skus: Iterable[str]) -> str | None:
+    """A linha cinza do produto: as cores/tamanhos e os SKUs que ele juntou."""
+    v = sorted(set(variantes), key=str.lower)
+    k = sorted(set(skus))
+    partes = ([", ".join(v)] if v else []) + ([f"SKU {', '.join(k)}"] if k else [])
+    return " · ".join(partes) or None
 
 
 def grupo_formato(modelo: str | None) -> tuple[str, str]:
@@ -229,16 +464,6 @@ def faixa_horario(publicado_em: datetime) -> str:
     if 18 <= h <= 20:
         return "19h"
     return "outro"
-
-
-def leitura_do_grupo(n: int) -> str:
-    """Quanto dá pra confiar num grupo, pelo número de criativos com índice.
-    A mediana de 2 vídeos é sorte; a tela diz isso em vez de esconder."""
-    if n < INDICIO:
-        return "pouco_dado"
-    if n < COMPARAVEL:
-        return "indicio"
-    return "comparavel"
 
 
 # ─── o horário da coleta ────────────────────────────────────────────────
@@ -478,6 +703,17 @@ def _no_periodo(a: dict[str, Any], dias_janela: set[date]) -> tuple[dict[str, in
     return out, estimado
 
 
+def _fluxo(a: dict[str, Any], janelas: dict[str, set[date]]) -> dict[str, dict[str, int]]:
+    """Views que o post GANHOU em cada janela, na rede dele — a mesma regra do
+    Resumo. Sem dia de ganho na janela, a rede não aparece (nulo, não zero)."""
+    g = a["ganhos"]["views"][0]
+    out: dict[str, dict[str, int]] = {}
+    for nome, dias in janelas.items():
+        dentro = [v for d, v in g.items() if d in dias]
+        out[nome] = {a["p"]["plataforma"]: sum(dentro)} if dentro else {}
+    return out
+
+
 # ─── a resposta inteira ─────────────────────────────────────────────────
 
 
@@ -493,6 +729,8 @@ def montar(
     inicio_da_coleta: date | datetime | None = None,
     coleta: dict[str, Any] | None = None,
     posts_antigos: list[dict[str, Any]] | None = None,
+    nomes_por_base: dict[str, str | list[str]] | None = None,
+    nomes_por_sku: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """A resposta do GET /api/marketing/metricas (contrato "versao": 2).
 
@@ -506,6 +744,10 @@ def montar(
     durante a janela ou o período anterior (ver `corte_soma`), com os
     retratos deles também em `linhas`. Entram SÓ nas somas por rede — não
     viram linha de tabela, nem mexem na base da conta.
+
+    `nomes_por_sku` (SKU exato → nome do produto ativo) e `nomes_por_base`
+    (base → nomes dos produtos ativos e simples) dão o aparelho de cada SKU
+    do criativo (ver `grupo_produto` e o router).
     """
     agora = _utc(agora)
     coleta = coleta or {}
@@ -525,6 +767,11 @@ def montar(
     # dia dele. No dia exato do começo, o vídeo antigo ainda era só base.
     tem_anterior = inicio is not None and inicio < min(dias_anteriores)
     marca_filtro = str(marca_id) if marca_id is not None else None
+    # As janelas de "Onde vale investir" (dias de calendário em Brasília).
+    janelas_dias = {
+        nome: {hoje - timedelta(days=i) for i in range(n)}
+        for nome, n in (("semana", SEMANA_DIAS), ("mes", MES_DIAS))
+    }
 
     por_post: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for r in linhas:
@@ -539,6 +786,7 @@ def montar(
             marca_filtro is None or str(p.get("marca_id")) == marca_filtro
         )
         a["no_periodo"], a["no_periodo_estimado"] = _no_periodo(a, dias_janela)
+        a["fluxo"] = _fluxo(a, janelas_dias)
         return a
 
     info: dict[str, dict[str, Any]] = {str(p["id"]): _carrega(p) for p in posts}
@@ -600,21 +848,23 @@ def montar(
     por_criativo: dict[str, list[str]] = defaultdict(list)
     for pid in na_tela:
         por_criativo[str(info[pid]["p"]["creative_id"])].append(pid)
-    criativos_int = {cid: _criativo(cid, pids, info) for cid, pids in por_criativo.items()}
+    nomes = {"nomes_por_base": nomes_por_base, "nomes_por_sku": nomes_por_sku}
+    criativos_int = {
+        cid: _criativo(cid, pids, info, hoje=hoje, **nomes) for cid, pids in por_criativo.items()
+    }
+    # Os mais vistos primeiro; sem número (aguardando, sem views) no fim.
     criativos = sorted(
         criativos_int.values(),
         key=lambda c: (
-            c["indice_views"] is None,
-            -(c["indice_views"] or 0),
+            c["views"]["total"] is None,
+            -(c["views"]["total"] or 0),
             -c["_ultima_pub"].timestamp(),
         ),
     )[:300]
 
-    grupos = {
-        dim: _grupos_de_criativos(dim, criativos_int, info)
-        for dim in ("produto", "formato", "agencia", "roteiro")
-    }
-    grupos["horario"] = _grupos_de_horario(na_tela, info)
+    membros = _membros_criativos(criativos_int, info, antigos, hoje=hoje, **nomes)
+    grupos = {dim: _grupos_de_criativos(dim, membros) for dim in _DIMS_CRIATIVO}
+    grupos["horario"] = _grupos_de_horario(na_tela, info, antigos, criativos_int, hoje)
 
     resumo = _resumo(
         info,
@@ -682,9 +932,12 @@ def montar(
         "minimos": {
             "base_conta": MIN_OUTROS + 1,
             "views_taxa": MIN_VIEWS_TAXA,
-            "indicio": INDICIO,
-            "comparavel": COMPARAVEL,
             "tolerancia_h": TOL_H,
+        },
+        # As janelas de "Onde vale investir" e de "Vídeos mais vistos".
+        "janelas": {
+            nome: {"dias": n, "desde": (hoje - timedelta(days=n - 1)).isoformat()}
+            for nome, n in (("semana", SEMANA_DIAS), ("mes", MES_DIAS))
         },
         "coleta": {
             "ultima_leitura_em": _iso(max(lidos)) if lidos else None,
@@ -747,65 +1000,150 @@ def _postagem(pid: str, a: dict[str, Any], *, marco: int, agora: datetime) -> di
     }
 
 
-def _criativo(cid: str, pids: list[str], info: dict[str, dict[str, Any]]) -> dict[str, Any]:
+def _views_do_post(a: dict[str, Any]) -> int | None:
+    """As views de um post: as da última leitura que tem views. Só post no ar
+    (lido, ou com a leitura de hoje falhando); aguardando ainda não tem número."""
+    if a["estado"] not in _CONTADOS:
+        return None
+    return a["acumulado"].get("views")
+
+
+def _idade_dias(pub: datetime, hoje: date) -> int:
+    """Dias de calendário em Brasília entre a publicação e hoje (0 = hoje)."""
+    return (hoje - _utc(pub).astimezone(BRT).date()).days
+
+
+def _criativo(
+    cid: str,
+    pids: list[str],
+    info: dict[str, dict[str, Any]],
+    *,
+    hoje: date,
+    nomes_por_base: dict[str, str | list[str]] | None = None,
+    nomes_por_sku: dict[str, str] | None = None,
+) -> dict[str, Any]:
     """`pids` vem do mais novo pro mais velho."""
     p0 = info[pids[0]]["p"]
     idx_v = [info[q]["indice_views"] for q in pids if info[q]["indice_views"] is not None]
     idx_i = [info[q]["indice_interacao"] for q in pids if info[q]["indice_interacao"] is not None]
-    titulo = next((t for q in pids if (t := _primeira_linha(info[q]["p"].get("legenda")))), "")
-    titulo = titulo or p0.get("roteiro_titulo") or p0.get("modelo") or ""
+    legenda = next((lg for q in pids if _primeira_linha(lg := info[q]["p"].get("legenda"))), None)
+    titulo = _primeira_linha(legenda) or p0.get("roteiro_titulo") or p0.get("modelo") or ""
     redes: dict[str, list[str]] = {"instagram": [], "youtube": [], "tiktok": []}
     for q in pids:
         redes.setdefault(info[q]["p"]["plataforma"], []).append(q)
-    chave, rotulo = grupo_produto(p0.get("product_id"), p0.get("produto_nome"), p0.get("sku"))
-    fch, frot = grupo_formato(p0.get("modelo"))
-    ach, arot = grupo_agencia(p0.get("equipe"))
-    rch, rrot = grupo_roteiro(p0.get("roteiro_id"), p0.get("roteiro_titulo"))
+
+    # Views do vídeo = a soma dos posts dele, em todas as redes (dois posts na
+    # mesma rede somam). O mais visto é o link do vídeo; empate, o mais novo.
+    por_rede: dict[str, int] = {}
+    com_numero = 0
+    melhor: tuple[int, str] | None = None
+    for q in pids:
+        v = _views_do_post(info[q])
+        if v is None:
+            continue
+        com_numero += 1
+        rede = info[q]["p"]["plataforma"]
+        por_rede[rede] = por_rede.get(rede, 0) + v
+        if melhor is None or v > melhor[0]:
+            melhor = (v, q)
+    pub_min = min(info[q]["pub"] for q in pids)
+
+    chaves = _chaves(p0, nomes_por_base=nomes_por_base, nomes_por_sku=nomes_por_sku)
     return {
         "creative_id": cid,
+        "nome": nome_do_video(p0.get("modelo"), legenda, p0.get("roteiro_titulo")),
         "titulo": titulo[:80],
         "marca": p0.get("marca") or "(sem marca)",
         "marca_id": str(p0["marca_id"]) if p0.get("marca_id") is not None else None,
         "sku": p0.get("sku"),
         "modelo": p0.get("modelo"),
-        "produto": {"chave": chave, "rotulo": rotulo},
-        "formato": {"chave": fch, "rotulo": frot},
-        "agencia": {"chave": ach, "rotulo": arot},
-        "roteiro": {"chave": rch, "rotulo": rrot},
-        "primeira_publicacao_em": _iso(min(info[q]["pub"] for q in pids)),
+        **chaves,
+        "primeira_publicacao_em": _iso(pub_min),
+        "idade_dias": _idade_dias(pub_min, hoje),
+        "views": {
+            "total": sum(por_rede.values()) if com_numero else None,
+            "por_rede": dict(sorted(por_rede.items(), key=lambda x: _ordem_rede(x[0]))),
+            "postagens": len(pids),
+            "com_numero": com_numero,
+        },
+        "melhor_post": (
+            {
+                "plataforma": info[melhor[1]]["p"]["plataforma"],
+                "postagem_id": melhor[1],
+                "post_url": info[melhor[1]]["p"].get("post_url"),
+                "views": melhor[0],
+            }
+            if melhor
+            else None
+        ),
         "indice_views": round(statistics.median(idx_v), 2) if idx_v else None,
         "indice_interacao": round(statistics.median(idx_i), 2) if idx_i else None,
         "n_indices": len(idx_v),
         "postagens": redes,
         "_pids": pids,
+        "_pub": pub_min,
         "_ultima_pub": info[pids[0]]["pub"],
+        "_ligado": p0.get("product_id") is not None,
     }
 
 
-def _por_rede(pids: Iterable[str], info: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    """Views na idade, cruas, por rede — honesto só DENTRO de uma rede."""
-    por: dict[str, list[int]] = {}
-    for q in pids:
-        lst = por.setdefault(info[q]["p"]["plataforma"], [])
-        if info[q]["vm"] is not None:
-            lst.append(info[q]["vm"])
+_DIMS_CRIATIVO = ("produto", "formato", "agencia", "roteiro")
+
+
+def _chaves(
+    p: dict[str, Any],
+    *,
+    nomes_por_base: dict[str, str | list[str]] | None = None,
+    nomes_por_sku: dict[str, str] | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Em que produto, formato, agência e roteiro o criativo do post entra."""
+    fch, frot = grupo_formato(p.get("modelo"))
+    ach, arot = grupo_agencia(p.get("equipe"))
+    rch, rrot = grupo_roteiro(p.get("roteiro_id"), p.get("roteiro_titulo"))
     return {
-        rede: {"mediana": _limpo(_mediana(vs), 0), "n": len(vs)}
-        for rede, vs in sorted(por.items(), key=lambda x: _ordem_rede(x[0]))
+        "produto": grupo_produto(
+            p.get("product_id"),
+            p.get("produto_nome"),
+            p.get("produto_sku"),
+            p.get("sku"),
+            nomes_por_base,
+            nomes_por_sku,
+        ),
+        "formato": {"chave": fch, "rotulo": frot},
+        "agencia": {"chave": ach, "rotulo": arot},
+        "roteiro": {"chave": rch, "rotulo": rrot},
     }
 
 
-def _ordena_grupos(grupos: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    peso = {"comparavel": 0, "indicio": 1, "pouco_dado": 2}
-    return sorted(
-        grupos,
-        key=lambda g: (
-            peso[g["leitura"]],
-            g["indice_views"] is None,
-            -(g["indice_views"] or 0),
-            -g["total"],
-        ),
-    )
+# ─── onde vale investir ─────────────────────────────────────────────────
+
+
+def _janela(membros: list[dict[str, Any]], nome: str, n: int) -> dict[str, Any]:
+    """Os números de uma janela de `n` dias.
+
+    `views` é o que TODOS os membros GANHARAM na janela (o vídeo antigo que
+    continua rendendo conta). `videos` são os publicados na janela, e
+    `media`/`mediana` são das views ATÉ HOJE desses vídeos — "quanto rende um
+    vídeo novo deste grupo". `com_numero` < `videos` quer dizer vídeo ainda
+    sem leitura: ele conta como vídeo e não entra na média."""
+    publicados = [m for m in membros if m["idade"] <= n - 1]
+    vs = [m["views"] for m in publicados if m["views"] is not None]
+    fluxo: dict[str, int] = {}
+    for m in membros:
+        _soma(fluxo, m["fluxo"][nome])
+    return {
+        "views": sum(fluxo.values()) if fluxo else None,
+        "videos": len(publicados),
+        "com_numero": len(vs),
+        "views_dos_publicados": sum(vs) if vs else None,
+        "media": round(sum(vs) / len(vs)) if vs else None,
+        "mediana": _limpo(_mediana(vs), 0),
+    }
+
+
+def _no_mes(m: dict[str, Any]) -> bool:
+    """O membro conta no mês: foi publicado nele, ou ganhou views nele."""
+    return m["idade"] <= MES_DIAS - 1 or any(v for v in m["fluxo"]["mes"].values())
 
 
 def _grupo(
@@ -813,83 +1151,160 @@ def _grupo(
     rotulo: str,
     unidade: str,
     membros: list[dict[str, Any]],
-    pids_posts: list[str],
-    info: dict[str, dict[str, Any]],
+    *,
+    detalhe: str | None = None,
 ) -> dict[str, Any]:
-    """`membros`: {indice_views, indice_interacao, melhor} de cada membro."""
-    idx = [m["indice_views"] for m in membros if m["indice_views"] is not None]
-    idx_i = [m["indice_interacao"] for m in membros if m["indice_interacao"] is not None]
-    com_indice = [m for m in membros if m["indice_views"] is not None]
-    melhor = max(com_indice, key=lambda m: m["indice_views"]) if com_indice else None
+    """`membros` (só os que contam no mês): {idade, pub, views, fluxo, melhor}."""
+    fluxo_mes: dict[str, int] = {}
+    for m in membros:
+        _soma(fluxo_mes, m["fluxo"]["mes"])
+    com = [m for m in membros if m["idade"] <= MES_DIAS - 1 and m["views"] is not None]
+    melhor = min(com, key=lambda m: (-m["views"], -m["pub"].timestamp())) if com else None
     return {
         "chave": chave,
         "rotulo": rotulo,
+        "detalhe": detalhe,
         "unidade": unidade,
-        "total": len(membros),
-        "n": len(idx),
-        "indice_views": round(statistics.median(idx), 2) if idx else None,
-        "indice_interacao": round(statistics.median(idx_i), 2) if idx_i else None,
-        "leitura": leitura_do_grupo(len(idx)),
-        "por_rede": _por_rede(pids_posts, info),
-        # A mediana esconde o acerto isolado; o melhor vai do lado dela.
+        "semana": _janela(membros, "semana", SEMANA_DIAS),
+        "mes": _janela(membros, "mes", MES_DIAS),
+        "por_rede_mes": dict(sorted(fluxo_mes.items(), key=lambda x: _ordem_rede(x[0]))),
         "melhor": melhor["melhor"] if melhor else None,
     }
 
 
-def _grupos_de_criativos(
-    dim: str, criativos: dict[str, dict[str, Any]], info: dict[str, dict[str, Any]]
+def _ordena_grupos(grupos: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Mais views no mês primeiro. "(sem produto / agência / formato /
+    roteiro)" sempre no fim: hoje ele junta a maior parte dos vídeos e, no
+    topo, esconderia a resposta."""
+    return sorted(
+        grupos,
+        key=lambda g: (
+            g["chave"] == "nenhum",
+            g["mes"]["views"] is None,
+            -(g["mes"]["views"] or 0),
+            -g["mes"]["videos"],
+            g["rotulo"].lower(),
+        ),
+    )
+
+
+def _membros_criativos(
+    criativos: dict[str, dict[str, Any]],
+    info: dict[str, dict[str, Any]],
+    antigos: list[dict[str, Any]],
+    *,
+    hoje: date,
+    nomes_por_base: dict[str, str | list[str]] | None = None,
+    nomes_por_sku: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Membro = CRIATIVO, não post: o mesmo vídeo em 3 redes é 1 decisão de
-    produção, e contá-lo 3 vezes faria o grupo parecer mais testado do que é."""
-    por: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    rotulos: dict[str, str] = {}
-    for c in criativos.values():
-        por[c[dim]["chave"]].append(c)
-        rotulos[c[dim]["chave"]] = c[dim]["rotulo"]
-    saida = []
-    for chave, cs in por.items():
-        membros = [
-            {
-                "indice_views": c["indice_views"],
-                "indice_interacao": c["indice_interacao"],
-                "melhor": {
-                    "creative_id": c["creative_id"],
-                    "postagem_id": None,
-                    "titulo": c["titulo"],
-                    "indice_views": c["indice_views"],
-                },
+    """Um membro por CRIATIVO, não por post: o mesmo vídeo em 3 redes é 1
+    vídeo produzido, com as views das 3 somadas. O ganho nas janelas soma os
+    posts no ar do vídeo e também os mais velhos que a tela que a coleta ainda
+    lia (`antigos`) — senão o grupo perdia as views de vídeo antigo."""
+    membros: dict[str, dict[str, Any]] = {}
+    for cid, c in criativos.items():
+        fluxo: dict[str, dict[str, int]] = {"semana": {}, "mes": {}}
+        for q in c["_pids"]:
+            if info[q]["estado"] in _CONTADOS:
+                for j in fluxo:
+                    _soma(fluxo[j], info[q]["fluxo"][j])
+        mp = c["melhor_post"] or {}
+        membros[cid] = {
+            "chaves": {dim: c[dim] for dim in _DIMS_CRIATIVO},
+            "ligado": c["_ligado"],
+            "idade": c["idade_dias"],
+            "pub": c["_pub"],
+            "views": c["views"]["total"],
+            "fluxo": fluxo,
+            "melhor": {
+                "creative_id": cid,
+                "postagem_id": mp.get("postagem_id"),
+                "nome": c["nome"],
+                "titulo": c["titulo"],
+                "views": c["views"]["total"],
+                "plataforma": mp.get("plataforma"),
+                "post_url": mp.get("post_url"),
+            },
+        }
+    for a in antigos:
+        cid = str(a["p"]["creative_id"])
+        m = membros.get(cid)
+        if m is None:
+            m = membros[cid] = {
+                "chaves": _chaves(
+                    a["p"], nomes_por_base=nomes_por_base, nomes_por_sku=nomes_por_sku
+                ),
+                "ligado": a["p"].get("product_id") is not None,
+                "idade": _idade_dias(a["pub"], hoje),
+                "pub": a["pub"],
+                "views": None,
+                "fluxo": {"semana": {}, "mes": {}},
+                "melhor": None,
             }
-            for c in cs
-        ]
-        pids = [q for c in cs for q in c["_pids"]]
-        saida.append(_grupo(chave, rotulos[chave], "criativo", membros, pids, info))
+        for j in m["fluxo"]:
+            _soma(m["fluxo"][j], a["fluxo"][j])
+    return list(membros.values())
+
+
+def _grupos_de_criativos(dim: str, membros: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Grupo sem vídeo publicado no mês E sem views ganhas no mês não aparece."""
+    por: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for m in membros:
+        if _no_mes(m):
+            por[m["chaves"][dim]["chave"]].append(m)
+    saida = []
+    for chave, ms in por.items():
+        ms.sort(key=lambda m: m["pub"], reverse=True)
+        rotulo = ms[0]["chaves"][dim]["rotulo"]
+        detalhe = None
+        if dim == "produto":
+            # O nome é o do produto ligado ao vídeo mais novo; as cores, os
+            # tamanhos e os SKUs que o grupo juntou vão embaixo — é o que
+            # explica o F112 de 5 cores ser uma linha só.
+            rotulo = next((m for m in ms if m["ligado"]), ms[0])["chaves"]["produto"]["rotulo"]
+            detalhe = detalhe_produto(
+                (v for m in ms for v in m["chaves"]["produto"]["variantes"]),
+                (k for m in ms for k in m["chaves"]["produto"]["skus"]),
+            )
+        saida.append(_grupo(chave, rotulo, "criativo", ms, detalhe=detalhe))
     return _ordena_grupos(saida)
 
 
-def _grupos_de_horario(na_tela: list[str], info: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+def _grupos_de_horario(
+    na_tela: list[str],
+    info: dict[str, dict[str, Any]],
+    antigos: list[dict[str, Any]],
+    criativos: dict[str, dict[str, Any]],
+    hoje: date,
+) -> list[dict[str, Any]]:
     """Horário é do POST, não do criativo: o mesmo vídeo pode ter saído às
-    12h numa rede e às 19h noutra."""
-    por: dict[str, list[str]] = defaultdict(list)
-    for pid in na_tela:
-        por[faixa_horario(info[pid]["pub"])].append(pid)
-    saida = []
-    for chave, pids in por.items():
-        membros = [
-            {
-                "indice_views": info[q]["indice_views"],
-                "indice_interacao": info[q]["indice_interacao"],
-                "melhor": {
-                    "creative_id": str(info[q]["p"]["creative_id"]),
-                    "postagem_id": q,
-                    "titulo": _primeira_linha(info[q]["p"].get("legenda"))
-                    or info[q]["p"].get("modelo")
-                    or "",
-                    "indice_views": info[q]["indice_views"],
-                },
-            }
-            for q in pids
-        ]
-        saida.append(_grupo(chave, _ROTULO_HORARIO[chave], "postagem", membros, pids, info))
+    12h numa rede e às 19h noutra. A janela é pela data do próprio post."""
+    por: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for a in [info[pid] for pid in na_tela] + antigos:
+        p = a["p"]
+        pid = str(p["id"])
+        contado = a["estado"] in _CONTADOS
+        v = _views_do_post(a)
+        c = criativos.get(str(p["creative_id"])) or {}
+        titulo = _primeira_linha(p.get("legenda"))
+        m = {
+            "idade": _idade_dias(a["pub"], hoje),
+            "pub": a["pub"],
+            "views": v,
+            "fluxo": a["fluxo"] if contado else {"semana": {}, "mes": {}},
+            "melhor": {
+                "creative_id": str(p["creative_id"]),
+                "postagem_id": pid,
+                "nome": c.get("nome") or titulo,
+                "titulo": titulo or p.get("modelo") or "",
+                "views": v,
+                "plataforma": p["plataforma"],
+                "post_url": p.get("post_url"),
+            },
+        }
+        if _no_mes(m):
+            por[faixa_horario(a["pub"])].append(m)
+    saida = [_grupo(ch, _ROTULO_HORARIO[ch], "postagem", ms) for ch, ms in por.items()]
     return _ordena_grupos(saida)
 
 
