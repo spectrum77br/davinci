@@ -888,6 +888,25 @@ async def relatorio_excel_link(
     )
 
 
+@router.post("/relatorios/{dia}/threema/teste")
+async def relatorio_threema_teste(
+    dia: date,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(_editar)],
+    corpo: Annotated[dict, Body()],
+) -> dict:
+    """06/10 ("manda só no Cairo um teste… para eu aprovar"): a mensagem do relatório de um dia
+    pra UM destinatário do diretório do Threema ({"para": "M5TT27JA"}), sem marcar o dia como
+    enviado."""
+    from app.services.denuncia_relatorio_threema import enviar_teste
+
+    para = str(corpo.get("para") or "")
+    r = await enviar_teste(session, _dia_valido(dia), para, datetime.now(UTC))
+    if not r["enviado"]:
+        raise HTTPException(422, detail={"code": "denuncia_relatorio_teste", "motivo": r["motivo"]})
+    return r
+
+
 @router.post("/relatorios/{dia}/lido")
 async def relatorio_lido(
     dia: date,

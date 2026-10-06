@@ -118,6 +118,31 @@ async def destinatarios(session: AsyncSession) -> list[str]:
     return threema.parse_recipients(row.recipients if row else "")
 
 
+async def enviar_teste(session: AsyncSession, dia: date, para: str, agora: datetime) -> dict:
+    """06/10 ("manda só no Cairo um teste… para eu aprovar"): a mensagem de um dia fechado pra UM
+    destinatário do diretório do Threema. Não carimba o dia (o envio de verdade segue igual)."""
+    row = await session.get(DenunciaRelatorio, dia)
+    if row is None or row.numeros is None:
+        return {"enviado": False, "motivo": "relatório do dia ainda não fechado"}
+    rid = (para or "").strip().upper()
+    if rid not in {d["id"] for d in await threema.diretorio(session)}:
+        return {"enviado": False, "motivo": "destinatário fora do diretório do Threema"}
+    client = threema.ThreemaClient(contexto="chamados")
+    try:
+        r = await client.send_to_all(texto(dia, row.numeros, link_excel(dia, agora)), [rid])
+    except threema.ThreemaConfigError as e:
+        r = {"sent": [], "failed": [rid], "erro": str(e)}
+    logger.info(
+        "denuncia_relatorio_threema_teste",
+        dia=dia.isoformat(),
+        sent=r.get("sent"),
+        failed=r.get("failed"),
+    )
+    if not r.get("sent"):
+        return {"enviado": False, "motivo": "envio falhou"}
+    return {"enviado": True, "dia": dia.isoformat(), "sent": r["sent"]}
+
+
 async def enviar_pendente(session: AsyncSession, agora: datetime | None = None) -> dict:
     """O relatório de ontem, se já fechado, ainda não enviado e já passou das 7h. Commit fica com
     o caller (o worker roda dentro do session_scope)."""

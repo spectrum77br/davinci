@@ -192,3 +192,20 @@ async def test_cadastro_pelo_informar(db, client, make_user, auth_as):
     outro = await make_user(email="fulano@x.com")
     auth_as(outro)
     assert (await client.get("/api/informar/denuncia_relatorio")).status_code == 403
+
+
+async def test_teste_so_pra_um_e_nao_carimba(db, client, make_user, auth_as, enviados):
+    """06/10: "manda só no Cairo um teste… para eu aprovar"."""
+    await _dia(db)
+    cairo = await make_user(email="cairo@x.com", permissions={"denuncia": {"view": True, "edit": True}})
+    cairo.threema = "M5TT27JA"
+    await db.commit()
+    auth_as(cairo)
+    r = await client.post("/api/denuncia/relatorios/2026-10-05/threema/teste", json={"para": "m5tt27ja"})
+    assert r.status_code == 200, r.text
+    texto, alvos = enviados[0]
+    assert alvos == ["M5TT27JA"] and texto.startswith("📊 Relatório geral")
+    assert (await db.get(DenunciaRelatorio, ONTEM)).threema_enviado_em is None   # o de verdade segue
+    # fora do diretório não manda
+    r = await client.post("/api/denuncia/relatorios/2026-10-05/threema/teste", json={"para": "ZZZZ9999"})
+    assert r.status_code == 422 and len(enviados) == 1
