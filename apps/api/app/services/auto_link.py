@@ -551,6 +551,33 @@ def _saude_pelo_status(
     return None
 
 
+def _marca_catalogo_ml(link: ProductLink, listing: dict[str, Any]) -> None:
+    """Grava no vínculo a marca de catálogo do ML lida AGORA (Catálogo ML,
+    06/10/2026): o item cru (`raw`) que a varredura já baixou traz
+    catalog_listing, catalog_product_id, item_relations e listing_type_id —
+    nenhuma chamada nova ao ML. Sem a chave `catalog_listing` no item, a marca
+    fica como estava (NULL = não sabido). O status lido vai junto: é ele que
+    diz à Tabela de Preços que o anúncio de catálogo está pausado."""
+    raw = listing.get("raw")
+    raw = raw if isinstance(raw, dict) else {}
+    if "catalog_listing" in raw:
+        link.catalog_listing = raw.get("catalog_listing") is True
+        link.catalog_product_id = (str(raw.get("catalog_product_id") or "").strip() or None)
+        relacionados = [
+            str(r.get("id")).strip()
+            for r in raw.get("item_relations") or []
+            if isinstance(r, dict) and r.get("id")
+        ]
+        link.catalogo_relacionado = ",".join(relacionados) or None
+        link.catalogo_lido_em = _now()
+    status = (listing.get("status") or "").strip() or None
+    if status:
+        link.anuncio_status = status
+    listing_type = listing.get("listing_type")
+    if listing_type:
+        link.listing_type = listing_type
+
+
 async def _link_via_listings(
     session: AsyncSession,
     job_id: UUID,
@@ -672,6 +699,8 @@ async def _link_via_listings(
                 # o SKU novo não tem produto (fica visível como divergente).
                 if sku and platform != IntegrationPlatform.MAGALU:
                     existing_link.external_sku = sku
+                if platform == IntegrationPlatform.ML:
+                    _marca_catalogo_ml(existing_link, listing)
                 efeito = _saude_pelo_status(existing_link, platform, listing.get("status"))
                 mortos += efeito == "morto"
                 revividos += efeito == "revivido"
@@ -707,23 +736,24 @@ async def _link_via_listings(
             if key in existing_keys:
                 already += 1
                 continue
-            pending.append(
-                ProductLink(
-                    user_id=integ.user_id,
-                    product_id=local.id,
-                    integration_id=integ.id,
-                    store_id=integ.store_id,
-                    platform=platform,
-                    external_id=external_id,
-                    variation_id=variation_id,
-                    external_sku=sku,
-                    listing_title=listing.get("title"),
-                    listing_type=listing.get("listing_type"),
-                    stock=listing.get("stock"),
-                    last_sync_status=LinkSyncStatus.OK,
-                    last_sync_at=_now(),
-                )
+            novo = ProductLink(
+                user_id=integ.user_id,
+                product_id=local.id,
+                integration_id=integ.id,
+                store_id=integ.store_id,
+                platform=platform,
+                external_id=external_id,
+                variation_id=variation_id,
+                external_sku=sku,
+                listing_title=listing.get("title"),
+                listing_type=listing.get("listing_type"),
+                stock=listing.get("stock"),
+                last_sync_status=LinkSyncStatus.OK,
+                last_sync_at=_now(),
             )
+            if platform == IntegrationPlatform.ML:
+                _marca_catalogo_ml(novo, listing)
+            pending.append(novo)
             existing_keys.add(key)
             if len(pending) >= 100:
                 await _flush()
