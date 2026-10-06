@@ -227,6 +227,7 @@ async def test_batch_service_sends_telegram_when_chat_configured(
     db: AsyncSession,
     user_full: User,
     catalog_setup: dict[str, Any],
+    monkeypatch,
 ):
     from app.models import (
         BackgroundJob,
@@ -253,16 +254,27 @@ async def test_batch_service_sends_telegram_when_chat_configured(
     await db.commit()
     await db.refresh(job)
 
-    import os
-
-    # Force-overwrite — env_file may inject an empty value that setdefault honors.
-    os.environ["TELEGRAM_BOT_TOKEN"] = "fake-token"
+    # Token de mentira só durante ESTE teste: o monkeypatch devolve o ambiente
+    # e o cache das settings é limpo de novo no fim — antes ele vazava para
+    # os testes seguintes (test_telegram_client esperava token vazio).
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "fake-token")
     from app.config import get_settings
 
     get_settings.cache_clear()  # type: ignore[attr-defined]
 
     from app.services import telegram as tg_mod
 
+    try:
+        await _envia_lote_com_telegram(db, user_full, catalog_setup, job, tg_mod)
+    finally:
+        monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+        get_settings.cache_clear()  # type: ignore[attr-defined]
+
+    await db.refresh(job)
+    assert job.status == BackgroundJobStatus.SUCCEEDED
+
+
+async def _envia_lote_com_telegram(db, user_full, catalog_setup, job, tg_mod) -> None:
     with respx.mock() as router:
         _ml_item_ok(router)
         tg_route = router.post(
@@ -282,9 +294,6 @@ async def test_batch_service_sends_telegram_when_chat_configured(
             notify_telegram=True,
         )
         assert tg_route.called
-
-    await db.refresh(job)
-    assert job.status == BackgroundJobStatus.SUCCEEDED
 
 
 # =================================================== push-batch endpoint
