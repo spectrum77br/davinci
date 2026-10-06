@@ -800,6 +800,17 @@ async function _patchAccount(id: string, field: string, raw: string) {
     if (!raw) return
     payload.name = raw
   } else if (field === 'platform') {
+    if (!raw || raw === acc.platform) return
+    // Sair do ML apaga a coluna de catálogo da conta no servidor (e os preços
+    // fixados à mão nela): pede confirmação, igual ao Desligar.
+    if (
+      raw !== 'mercadolivre' &&
+      catalogoAtivo(acc) &&
+      !confirm(
+        `Trocar a plataforma de "${acc.name}"?\n\n` +
+          'O Catálogo ML desta conta sai da Tabela de Preços e os preços fixados à mão nele são apagados.',
+      )
+    ) return
     payload.platform = raw
   } else if (field === 'kit_number') {
     const n = parseInt(raw)
@@ -844,6 +855,12 @@ async function _patchAccount(id: string, field: string, raw: string) {
       body: payload,
     })
     Object.assign(acc, updated)
+    // O servidor apagou a coluna de catálogo (conta saiu do ML): tira ela da
+    // lista local, senão o controle continua "Ligado" quando a conta volta
+    // para o ML.
+    if (!updated.conta_catalogo_id) {
+      accounts.value = accounts.value.filter((x) => !(ehCatalogo(x) && x.conta_base_id === id))
+    }
     flash(id, field)
   } catch (e: any) {
     accountsErr.value = e?.data?.detail?.code ?? 'save_failed'
