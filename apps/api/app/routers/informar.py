@@ -105,6 +105,9 @@ _CONTEXTOS = (
     # mini sem notícia, SEI pedindo código) — services/denuncia_robo_aviso.
     # Cadastro pela aba Denúncia › Robô › Ocorrências.
     "denuncia_robo",
+    # 06/10: relatório do dia do robô de Denúncia, todo dia às 7h — services/
+    # denuncia_relatorio_threema. Cadastro pela aba Denúncia › Robô › Ocorrências.
+    "denuncia_relatorio",
 )
 _CONTEXTOS_ENVIO = ("logistica", "controle_estoque", "margem", "devolucoes", "logistica_amazon")
 
@@ -130,6 +133,7 @@ _EMAILS_EXTRAS: dict[str, frozenset[str]] = {
     # escolhe quem recebe. Espelho no front: AVISO_ROBO_USERS em
     # components/DenunciaRobo.vue.
     "denuncia_robo": _EMAILS_MARGEM,
+    "denuncia_relatorio": _EMAILS_MARGEM,
 }
 
 

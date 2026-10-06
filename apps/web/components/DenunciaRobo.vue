@@ -17,6 +17,8 @@
 // 05/10 (Cairo): "isso coloca para avisar no Threema… só o Cairo recebe" — captcha na tela, robô parado,
 // mini sem notícia e SEI pedindo código viram Threema (worker a cada 2 min, services/denuncia_robo_aviso);
 // "Quem recebe o aviso" nas Ocorrências escolhe quem (cadastro Informar `denuncia_robo`).
+// 06/10 (Vinicius): o relatório do dia também vai pelo Threema, às 7h (services/denuncia_relatorio_threema);
+// "Quem recebe o relatório" = cadastro `denuncia_relatorio` (nasce com Cairo, harry potter e Roma).
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { AlertCircle, Bell, Bot, ChevronDown, ChevronRight, FileText, Flag, Loader2, Play, Plus, Power, Check, X } from 'lucide-vue-next'
 import { haQuanto, numero } from '~/lib/denuncia'
@@ -86,9 +88,16 @@ async function carregar() {
 }
 
 let timer: ReturnType<typeof setInterval> | null = null
+const route = useRoute()
 onMounted(() => {
   void carregar()
   timer = setInterval(carregar, 30_000)
+  // 06/10: o link do relatório no Threema (?aba=robo&relatorio=AAAA-MM-DD) já abre a gaveta do dia
+  const rel = String(route.query.relatorio || '')
+  if (/^\d{4}-\d{2}-\d{2}$/.test(rel)) {
+    aba.value = 'ocorrencias'
+    abrirRelatorio(rel)
+  }
 })
 onUnmounted(() => {
   if (timer) clearInterval(timer)
@@ -149,6 +158,7 @@ const podeAviso = computed(() => {
   return auth.user?.role === 'admin' || (!!email && AVISO_ROBO_USERS.includes(email))
 })
 const avisoAberto = ref(false)
+const relatorioThreemaAberto = ref(false)
 const mandando = ref<string | null>(null)
 
 async function mandar(chave: string, url: string, corpo: Record<string, unknown>) {
@@ -593,7 +603,10 @@ function relLido() {
             :max="hojeBr()"
             @change="(e) => { const v = (e.target as HTMLInputElement).value; if (v) abrirRelatorio(v) }"
           >
-          <Button v-if="podeAviso" size="sm" variant="outline" class="ml-auto h-8" @click="avisoAberto = true">
+          <Button v-if="podeAviso" size="sm" variant="outline" class="ml-auto h-8" @click="relatorioThreemaAberto = true">
+            <FileText class="mr-1 size-3.5" /> Quem recebe o relatório
+          </Button>
+          <Button v-if="podeAviso" size="sm" variant="outline" class="h-8" @click="avisoAberto = true">
             <Bell class="mr-1 size-3.5" /> Quem recebe o aviso
           </Button>
         </div>
@@ -714,6 +727,13 @@ function relLido() {
       somente-cadastro
       descricao="Quem está marcado recebe no Threema quando o robô de Denúncia precisa de alguém: captcha ('não sou robô') na tela do Mac mini — o robô espera uns 10 min —, robô parado, Mac mini sem notícia e SEI pedindo código ou assinatura. Uma mensagem por ocorrência, de dia e de noite. Sem ninguém salvo aqui, vale a lista da IA de Chamado. A seleção fica salva."
       @close="avisoAberto = false"
+    />
+    <InformarThreemaModal
+      :open="relatorioThreemaAberto"
+      contexto="denuncia_relatorio"
+      somente-cadastro
+      descricao="Quem está marcado recebe no Threema, todo dia a partir das 7h, o relatório do dia anterior: anúncios achados, denúncias nas lojas, Anatel, respostas, prints e o que precisou de alguém — com o link do relatório completo e do Excel aqui no DaVinci. Uma mensagem por dia. Sem ninguém marcado, não vai para ninguém. A seleção fica salva."
+      @close="relatorioThreemaAberto = false"
     />
   </div>
 </template>

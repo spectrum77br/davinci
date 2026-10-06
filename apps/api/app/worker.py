@@ -2657,11 +2657,17 @@ async def denuncia_relatorio_fechar(ctx: dict) -> None:
     — ontem, mesmo sem notícia do mini, e qualquer dia anotado da última semana que ficou aberto.
     De hora em hora e a cada restart: um deploy na virada do dia não deixa o dia sem relatório."""
     from app.services.denuncia_relatorio import fechar_pendentes
+    from app.services.denuncia_relatorio_threema import enviar_pendente
 
     async with session_scope() as s:
         dias = await fechar_pendentes(s, datetime.now(UTC))
     if dias:
         logger.info("denuncia_relatorio_fechado", dias=[d.isoformat() for d in dias])
+    # 06/10 (Vinicius): o de ontem vai pelo Threema a partir das 7h — uma vez (carimbo no dia)
+    async with session_scope() as s:
+        r = await enviar_pendente(s, datetime.now(UTC))
+    if r.get("enviado"):
+        logger.info("denuncia_relatorio_threema_enviado", **r)
 
 
 async def denuncia_robo_aviso_tick(ctx: dict) -> None:

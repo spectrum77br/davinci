@@ -274,6 +274,9 @@ class DenunciaRelatorio(Base):
     fechado_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     lido_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     lido_por: Mapped[str | None] = mapped_column(Text)
+    # 06/10: o relatório também vai pelo Threema (uma vez, de manhã) —
+    # services/denuncia_relatorio_threema
+    threema_enviado_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     atualizado_em: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
     )
