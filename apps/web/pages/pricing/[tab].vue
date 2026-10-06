@@ -279,6 +279,12 @@ type Account = {
   slot3_segment_name: string | null
   slot4_segment_name: string | null
   slot5_segment_name: string | null
+  // Catálogo ML (06/10/2026): 'kit' = conta normal; 'catalogo' = coluna de
+  // catálogo ligada numa conta ML de kit ("filha", conta_base_id = a conta de
+  // kit). A filha herda comissão, margens, fretes e anotações da base na hora
+  // do cálculo — por isso a tela sempre lê esses números da base.
+  canal?: 'kit' | 'catalogo'
+  conta_base_id?: string | null
 }
 
 // Global toast feedback for push / auto-match outcomes. Rendered by
@@ -349,9 +355,35 @@ async function setAccountIntegration(acc: Account, integration_id: string | null
   }
 }
 
+// Conta de catálogo ("filha") não é conta própria: na aba Contas ela aparece
+// como o controle "Catálogo ML" na linha da conta de kit, e não entra nos
+// contadores. Na Tabela de Preços ela vira o grupo "ML Catálogo".
+function ehCatalogo(a: Account): boolean {
+  return a.canal === 'catalogo'
+}
+
+// conta de kit (id) → conta de catálogo dela
+const catalogoPorBase = computed(() => {
+  const m = new Map<string, Account>()
+  for (const a of accounts.value) {
+    if (ehCatalogo(a) && a.conta_base_id) m.set(a.conta_base_id, a)
+  }
+  return m
+})
+
+function catalogoAtivo(acc: Account): boolean {
+  return catalogoPorBase.value.has(acc.id)
+}
+
+// O Catálogo ML só existe em conta de kit do Mercado Livre.
+function podeTerCatalogo(acc: Account): boolean {
+  return acc.platform === 'mercadolivre' && !ehCatalogo(acc)
+}
+
 const accountsByDept = computed(() => {
   const m: Record<DeptKey, Account[]> = { celular: [], mala: [], eletro: [] }
   for (const a of accounts.value) {
+    if (ehCatalogo(a)) continue
     const k = a.department as DeptKey
     if (!m[k]) m[k] = []
     m[k].push(a)
@@ -433,6 +465,9 @@ type PricingProduct = {
   cost_kit6: string | number | null
   cost_kit7: string | number | null
   cost_kit8: string | number | null
+  // Preço base do anúncio de catálogo do ML (custo, como os kits). NULL =
+  // sem preço de catálogo: as colunas ML Catálogo mostram "—" e não enviam.
+  preco_catalogo: string | number | null
   description: string | null
   model: string | null
   ean: string | null
@@ -816,10 +851,11 @@ async function _patchAccount(id: string, field: string, raw: string) {
 }
 
 async function deleteAccount(a: Account) {
-  if (!confirm(`Excluir conta "${a.name}"?`)) return
+  const avisoCatalogo = catalogoAtivo(a) ? '\n\nO Catálogo ML desta conta também sai.' : ''
+  if (!confirm(`Excluir conta "${a.name}"?${avisoCatalogo}`)) return
   try {
     await api(`/api/pricing/accounts/${a.id}`, { method: 'DELETE' })
-    accounts.value = accounts.value.filter((x) => x.id !== a.id)
+    accounts.value = accounts.value.filter((x) => x.id !== a.id && x.conta_base_id !== a.id)
   } catch (e: any) {
     accountsErr.value = e?.data?.detail?.code ?? 'delete_failed'
   }
@@ -846,6 +882,70 @@ async function autoMatchAccounts() {
   } catch (e: any) {
     accountsErr.value = e?.data?.detail?.code ?? 'auto_match_failed'
     toast.error('Erro ao vincular integrações', accountsErr.value || undefined)
+  }
+}
+
+// =========================================================== tipo ML + Catálogo ML
+
+// Tipo do anúncio ML da conta (listing_type). Preenchido, a coluna só manda
+// preço para anúncios desse tipo (clássico = gold_special, premium =
+// gold_pro); vazio = manda para os dois. O Catálogo ML exige o tipo.
+const TIPOS_ML = [
+  { value: 'classico', label: 'Clássico' },
+  { value: 'premium', label: 'Premium' },
+]
+
+// Conta antiga com outro texto ("ml classico"…) continua aparecendo como está.
+function opcoesTipoMl(acc: Account): { value: string; label: string }[] {
+  const v = acc.listing_type
+  if (v && !TIPOS_ML.some((o) => o.value === v)) return [{ value: v, label: v }, ...TIPOS_ML]
+  return TIPOS_ML
+}
+
+function definirTipoMl(acc: Account, valor: string) {
+  if ((acc.listing_type || '') === valor) return
+  void _patchAccount(acc.id, 'listing_type', valor)
+}
+
+const catalogoBusy = ref<Set<string>>(new Set())
+// Erro do último liga/desliga, mostrado embaixo do controle da própria linha.
+const catalogoErro = ref<Record<string, string>>({})
+
+// POST /api/pricing/accounts/{id}/catalogo {ativo}: ligar cria a coluna de
+// catálogo da conta (filha); desligar apaga (e os preços fixados nela).
+async function alternarCatalogo(acc: Account) {
+  if (!canEditContas.value || catalogoBusy.value.has(acc.id)) return
+  const ativo = !catalogoAtivo(acc)
+  if (
+    !ativo &&
+    !confirm(
+      `Desligar o Catálogo ML de "${acc.name}"?\n\n` +
+        'As colunas de catálogo desta conta saem da Tabela de Preços e os preços fixados à mão nelas são apagados.',
+    )
+  ) return
+  catalogoBusy.value.add(acc.id)
+  const { [acc.id]: _limpo, ...outrosErros } = catalogoErro.value
+  catalogoErro.value = outrosErros
+  try {
+    await api(`/api/pricing/accounts/${acc.id}/catalogo`, {
+      method: 'POST',
+      body: { ativo },
+    })
+    await loadAccounts()
+    flash(acc.id, 'catalogo')
+    toast.success(
+      ativo ? 'Catálogo ML ligado' : 'Catálogo ML desligado',
+      ativo ? `${acc.name}: coluna nova no grupo ML Catálogo da Tabela de Preços` : acc.name,
+    )
+  } catch (e: any) {
+    const d = e?.data?.detail
+    const msg = d?.code === 'tipo_obrigatorio'
+      ? 'Preencha o tipo (clássico/premium) desta conta antes de ativar o catálogo'
+      : d?.message || d?.code || e?.message || 'Não foi possível salvar'
+    catalogoErro.value = { ...catalogoErro.value, [acc.id]: msg }
+    toast.error('Catálogo ML', msg)
+  } finally {
+    catalogoBusy.value.delete(acc.id)
   }
 }
 
@@ -1321,6 +1421,15 @@ async function _patchProduct(id: string, field: string, raw: string) {
       if (Number.isNaN(n)) return
       payload[field] = n.toFixed(2)
     }
+  } else if (field === 'preco_catalogo') {
+    // Coluna Catálogo: vazio = sem preço de catálogo (NULL), nunca 0.
+    if (!raw || raw === '-' || raw === '—') {
+      payload.preco_catalogo = null
+    } else {
+      const n = parseDec(raw)
+      if (Number.isNaN(n) || n < 0) return
+      payload.preco_catalogo = n > 0 ? n.toFixed(2) : null
+    }
   } else if (field === 'description' || field === 'model' || field === 'ean') {
     payload[field] = raw || null
   } else {
@@ -1333,7 +1442,8 @@ async function _patchProduct(id: string, field: string, raw: string) {
   Object.assign(p, payload)
   const gp0 = grid.value?.products.find((x) => x.id === id)
   if (gp0 && gp0 !== p) Object.assign(gp0, payload)
-  if (field.startsWith('cost_kit')) recomputeCellsForProduct(id)
+  const mudaPreco = field.startsWith('cost_kit') || field === 'preco_catalogo'
+  if (mudaPreco) recomputeCellsForProduct(id)
 
   try {
     const updated = await api<PricingProduct>(`/api/pricing/products/${id}`, {
@@ -1350,7 +1460,7 @@ async function _patchProduct(id: string, field: string, raw: string) {
     // prices. A full loadGrid() here used to occasionally overwrite the
     // freshly-saved value with stale data, producing the "I typed 20 and
     // it snapped back to 4000" bug.
-    if (field.startsWith('cost_kit')) recomputeCellsForProduct(id)
+    if (mudaPreco) recomputeCellsForProduct(id)
   } catch (e: any) {
     productsErr.value = e?.data?.detail?.code ?? 'save_failed'
     // Revert the optimistic update on failure by re-fetching.
@@ -1438,6 +1548,7 @@ const newProd = reactive({
   cost_kit6: '',
   cost_kit7: '',
   cost_kit8: '',
+  preco_catalogo: '',
   ean: '',
   description: '',
   model: '',
@@ -1456,6 +1567,7 @@ function openAddProd() {
   newProd.cost_kit6 = ''
   newProd.cost_kit7 = ''
   newProd.cost_kit8 = ''
+  newProd.preco_catalogo = ''
   newProd.ean = ''
   newProd.description = ''
   newProd.model = ''
@@ -1493,6 +1605,14 @@ async function submitNewProd() {
         return
       }
       body[`cost_kit${k}`] = n.toFixed(2)
+    }
+    if (newProd.preco_catalogo.trim()) {
+      const n = parseDec(newProd.preco_catalogo)
+      if (Number.isNaN(n) || n < 0) {
+        productsErr.value = `Catálogo: preço inválido ("${newProd.preco_catalogo}") — use só números, ex.: 674,50`
+        return
+      }
+      if (n > 0) body.preco_catalogo = n.toFixed(2)
     }
     if (newProd.ean) body.ean = newProd.ean
     if (newProd.description) body.description = newProd.description
@@ -1735,7 +1855,7 @@ function liveCellLabel(prod: any, acc: Account): string {
   if (
     editing.value
     && editing.value.id === prod.id
-    && editing.value.field.startsWith('cost_kit')
+    && (editing.value.field.startsWith('cost_kit') || editing.value.field === 'preco_catalogo')
   ) {
     const typed = parseDec(editValue.value)
     if (Number.isFinite(typed)) {
@@ -2710,6 +2830,14 @@ watch(department, async () => {
             <tr>
               <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[120px]">Nome</th>
               <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[100px]">Plataforma</th>
+              <th
+                class="text-center px-2 py-2 font-medium border-b border-border w-24"
+                title="Tipo do anúncio no Mercado Livre. Preenchido, a coluna só manda preço para anúncios desse tipo; vazio = manda para clássico e premium. O Catálogo ML exige o tipo."
+              >Tipo ML</th>
+              <th
+                class="text-center px-2 py-2 font-medium border-b border-border w-28"
+                title="Liga a tabela ML Catálogo desta conta: colunas próprias na Tabela de Preços, calculadas pela coluna Catálogo dos produtos (com a comissão, margens e fretes desta conta), que mandam preço só para o anúncio de catálogo."
+              >Catálogo ML</th>
               <th class="text-center px-2 py-2 font-medium border-b border-border w-12">Kit</th>
               <th class="text-center px-2 py-2 font-medium border-b border-border w-20">Comissão</th>
               <th
@@ -2733,12 +2861,12 @@ watch(department, async () => {
           </thead>
           <tbody>
             <tr v-if="accountsLoading && !accounts.length">
-              <td colSpan="15" class="text-center py-6 text-muted-foreground">
+              <td colSpan="30" class="text-center py-6 text-muted-foreground">
                 <Loader2 class="inline h-4 w-4 animate-spin" /> carregando…
               </td>
             </tr>
             <tr v-else-if="!accountsFiltered.length && !showAddAcc">
-              <td colSpan="20" class="text-center py-6 text-muted-foreground">
+              <td colSpan="30" class="text-center py-6 text-muted-foreground">
                 {{ accountsCurrent.length ? 'Nenhuma conta corresponde aos filtros.' : 'Nenhuma conta neste departamento.' }}
               </td>
             </tr>
@@ -2761,6 +2889,9 @@ watch(department, async () => {
                   <option v-for="p in PLATFORMS" :key="p.value" :value="p.value">{{ p.label }}</option>
                 </select>
               </td>
+              <!-- Tipo ML e Catálogo ML: definidos depois, na linha criada. -->
+              <td class="border border-border text-center text-xs text-muted-foreground">—</td>
+              <td class="border border-border text-center text-xs text-muted-foreground">—</td>
               <td class="border border-border px-1 py-1">
                 <input
                   v-model.number="newAcc.kit_number"
@@ -2795,7 +2926,7 @@ watch(department, async () => {
             <!-- data rows grouped by platform (SSH-style) -->
             <template v-for="group in accountsGrouped" :key="group.platform">
               <tr class="bg-muted/40">
-                <td colSpan="20" class="px-3 py-1.5 text-[11px] font-bold tracking-wider text-muted-foreground uppercase">
+                <td colSpan="30" class="px-3 py-1.5 text-[11px] font-bold tracking-wider text-muted-foreground uppercase">
                   {{ group.label }} · {{ group.rows.length }} CONTA(S)
                 </td>
               </tr>
@@ -2894,6 +3025,69 @@ watch(department, async () => {
                   <option v-for="p in PLATFORMS" :key="p.value" :value="p.value">{{ p.label }}</option>
                 </select>
                 <span v-else>{{ platformLabel(acc.platform) }}</span>
+              </td>
+              <!-- tipo ML (listing_type): select direto, só em conta do ML -->
+              <td
+                class="border border-border px-1 py-1 text-center"
+                :class="{ 'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(acc.id, 'listing_type') }"
+              >
+                <select
+                  v-if="acc.platform === 'mercadolivre' && canEditContas"
+                  class="text-xs border rounded px-1 py-0.5 bg-background cursor-pointer disabled:cursor-not-allowed disabled:opacity-60"
+                  :class="acc.listing_type ? '' : 'text-muted-foreground'"
+                  :value="acc.listing_type || ''"
+                  :disabled="catalogoAtivo(acc)"
+                  :title="catalogoAtivo(acc)
+                    ? 'Desligue o Catálogo ML desta conta antes de trocar o tipo (a coluna de catálogo usa o mesmo tipo)'
+                    : 'Tipo do anúncio ML desta conta'"
+                  @change="definirTipoMl(acc, ($event.target as HTMLSelectElement).value)"
+                >
+                  <option value="">— sem tipo</option>
+                  <option v-for="o in opcoesTipoMl(acc)" :key="o.value" :value="o.value">{{ o.label }}</option>
+                </select>
+                <span v-else-if="acc.platform === 'mercadolivre'" class="text-xs" :class="acc.listing_type ? '' : 'text-muted-foreground'">
+                  {{ acc.listing_type || '— sem tipo' }}
+                </span>
+                <span v-else class="text-xs text-muted-foreground">—</span>
+              </td>
+              <!-- Catálogo ML: liga/desliga a coluna de catálogo desta conta -->
+              <td
+                class="border border-border px-1 py-1 text-center"
+                :class="{ 'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(acc.id, 'catalogo') }"
+              >
+                <template v-if="podeTerCatalogo(acc)">
+                  <button
+                    type="button"
+                    role="switch"
+                    :aria-checked="catalogoAtivo(acc)"
+                    class="inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[11px] font-medium transition-colors disabled:cursor-not-allowed"
+                    :class="catalogoAtivo(acc)
+                      ? 'border-indigo-300 bg-indigo-50 text-indigo-800 dark:border-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-200'
+                      : 'border-border text-muted-foreground hover:bg-muted'"
+                    :disabled="!canEditContas || catalogoBusy.has(acc.id)"
+                    :title="catalogoAtivo(acc)
+                      ? 'Catálogo ML ligado — clique para desligar'
+                      : 'Catálogo ML desligado — clique para ligar (cria as colunas de catálogo desta conta na Tabela de Preços)'"
+                    @click="alternarCatalogo(acc)"
+                  >
+                    <Loader2 v-if="catalogoBusy.has(acc.id)" class="h-3 w-3 animate-spin" />
+                    <span
+                      v-else
+                      class="relative inline-block h-3 w-5 shrink-0 rounded-full transition-colors"
+                      :class="catalogoAtivo(acc) ? 'bg-indigo-500' : 'bg-muted-foreground/30'"
+                    >
+                      <span
+                        class="absolute top-0.5 h-2 w-2 rounded-full bg-white transition-all"
+                        :class="catalogoAtivo(acc) ? 'left-2.5' : 'left-0.5'"
+                      />
+                    </span>
+                    {{ catalogoAtivo(acc) ? 'Ligado' : 'Desligado' }}
+                  </button>
+                  <p v-if="catalogoErro[acc.id]" class="mt-1 max-w-[180px] mx-auto text-[10px] leading-tight text-destructive">
+                    {{ catalogoErro[acc.id] }}
+                  </p>
+                </template>
+                <span v-else class="text-xs text-muted-foreground">—</span>
               </td>
               <!-- kit -->
               <td
@@ -3246,6 +3440,10 @@ watch(department, async () => {
                 <span v-if="kitNome(k)" class="block text-[9px] font-normal text-muted-foreground leading-tight whitespace-normal">{{ kitNome(k) }}</span>
               </th>
               <th
+                class="text-right px-2 py-2 font-medium border-b border-border w-24"
+                title="Preço base do anúncio de catálogo do Mercado Livre (R$), um por linha. As colunas do grupo ML Catálogo da Tabela de Preços somam margem, frete e comissão da conta de kit sobre este valor. Vazio = sem preço de catálogo (não envia)."
+              >Catálogo</th>
+              <th
                 class="text-center px-2 py-2 font-medium border-b border-border w-28"
                 title="Fotos e vídeos do produto no MEGA. Clique na etiqueta para ver as fotos, enviar mais, baixar ou trocar a pasta."
               >Fotos</th>
@@ -3310,6 +3508,9 @@ watch(department, async () => {
               </template>
               <td v-for="k in kitCount" :key="`newkit-${k}`" class="border border-border px-1 py-1">
                 <input v-model="(newProd as any)[`cost_kit${k}`]" type="text" inputmode="decimal" :placeholder="k === 1 ? '0.00' : ''" class="w-full text-xs border rounded px-1.5 py-1 bg-background text-right" />
+              </td>
+              <td class="border border-border px-1 py-1">
+                <input v-model="newProd.preco_catalogo" type="text" inputmode="decimal" placeholder="—" title="Preço de catálogo (opcional)" class="w-full text-xs border rounded px-1.5 py-1 bg-background text-right" />
               </td>
               <!-- Fotos e Embalagens: enviadas depois, pelo painel da linha criada. -->
               <td class="border border-border px-1 py-1 text-center text-xs text-muted-foreground">—</td>
@@ -3438,6 +3639,25 @@ watch(department, async () => {
                   @blur="commitEditProduct" @keydown.enter.prevent="commitEditProduct" @keydown.escape.prevent="cancelEdit"
                 />
                 <span v-else>{{ fmtBRL((p as any)[`cost_kit${k}`]) }}</span>
+              </td>
+              <!-- Catálogo: preço base do anúncio de catálogo do ML; edita igual
+                   aos kits. Vazio = "—" (sem preço de catálogo). -->
+              <td
+                class="border border-border px-2 py-1.5 text-xs text-right cursor-pointer"
+                :class="{
+                  'ring-2 ring-blue-500 ring-inset bg-background': isEditing(p.id, 'preco_catalogo'),
+                  'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(p.id, 'preco_catalogo'),
+                }"
+                @click="!isEditing(p.id, 'preco_catalogo') && startEditProduct(p, 'preco_catalogo')"
+              >
+                <input
+                  v-if="isEditing(p.id, 'preco_catalogo')"
+                  :ref="setEditInputRef"
+                  v-model="editValue" type="text" inputmode="decimal"
+                  class="w-full text-xs bg-transparent outline-none text-right"
+                  @blur="commitEditProduct" @keydown.enter.prevent="commitEditProduct" @keydown.escape.prevent="cancelEdit"
+                />
+                <span v-else :class="{ 'text-muted-foreground': p.preco_catalogo == null || p.preco_catalogo === '' }">{{ fmtBRL(p.preco_catalogo) }}</span>
               </td>
               <!-- Fotos: etiqueta com texto (quantas fotos/vídeos, pasta vazia,
                    sem pasta). O clique abre o painel de mídias na aba Fotos —
