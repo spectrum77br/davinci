@@ -15,6 +15,9 @@ parecidas e não iguais.
   (clássico/premium, obrigatório), SKU simples (sem '+'); celular/eletro casam
   pelo código base, mala pelo SKU exato. Cada anúncio volta com o motivo de
   bloqueio, se houver (sincronizado/pausado/em_revisao/encerrado).
+  Anúncio de catálogo que casa com MAIS DE UMA linha que manda preço (código
+  base igual: uaf001m1 110/220 × 2L) fica de fora das duas — 'mesmo_anuncio'
+  (`separar_anuncios_disputados`): senão o último preço enviado vale.
 
 Módulo folha de propósito: `marketplaces/ml.py` importa daqui as mesmas regras
 de status para conferir o item vivo antes do PUT.
@@ -22,9 +25,10 @@ de status para conferir o item vivo antes do PUT.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections import defaultdict
+from collections.abc import Hashable, Iterable, Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from app.services.pricing.sku_match import (
@@ -56,11 +60,18 @@ _MOTIVO_POR_STATUS = {
     "closed": "encerrado",
 }
 
+# Anúncio de catálogo que receberia o preço de duas linhas da tabela.
+MOTIVO_MESMO_ANUNCIO = "mesmo_anuncio"
+
 # Quando todos os anúncios da célula estão bloqueados, o motivo mostrado é o
 # primeiro desta lista que aparecer (o mais "de regra" antes do "de estado").
-_ORDEM_BLOQUEIO = ("sincronizado", "pausado", "em_revisao", "encerrado")
+_ORDEM_BLOQUEIO = (MOTIVO_MESMO_ANUNCIO, "sincronizado", "pausado", "em_revisao", "encerrado")
 
 _TEXTO_MOTIVO = {
+    MOTIVO_MESMO_ANUNCIO: (
+        "também casa com a linha {outras} e receberia os dois preços — deixe o "
+        "preço de catálogo só na linha certa"
+    ),
     "sincronizado": "sincronizado com o anúncio comum {rel} — o preço vem da coluna de Kit",
     "pausado": "pausado — não envia",
     "em_revisao": "em revisão no Mercado Livre — não envia",
@@ -94,6 +105,8 @@ def motivo_bloqueio_catalogo(link: ProductLink) -> str | None:
 class AnuncioBloqueado:
     link: ProductLink
     motivo: str
+    # Só em 'mesmo_anuncio': as outras linhas (SKU) que também mandariam preço.
+    outras_linhas: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -189,6 +202,48 @@ def resolver_anuncios(
     return Resolucao(links=dedup_links_for_push(plataforma, casados))
 
 
+def celula_manda_preco(outcome: Any, override: Any = None) -> bool:
+    """A célula manda preço se for enviada? (tem preço e não é NA). É o que
+    faz uma linha disputar um anúncio de catálogo com outra."""
+    if getattr(outcome, "price", None) is None:
+        return False
+    if getattr(outcome, "source", None) == "disabled":
+        return False
+    cs = getattr(override, "cell_status", None) if override is not None else None
+    return getattr(cs, "value", cs) != "NA"
+
+
+def separar_anuncios_disputados(
+    resolucoes: Mapping[Hashable, Resolucao],
+    linhas: Mapping[Hashable, str],
+) -> None:
+    """Canal catálogo, UMA coluna: o anúncio que está em `links` de mais de
+    uma linha recebe o preço das duas, e fica o último enviado (Eletro: a
+    linha 2L, custo 60, mandaria o preço dela para o catálogo da 110V, custo
+    240). Esse anúncio sai das linhas envolvidas e vira bloqueado
+    'mesmo_anuncio', com as outras linhas. Muda as resoluções no lugar.
+
+    `resolucoes` = {linha: Resolucao} só das linhas que mandam preço
+    (`celula_manda_preco`); `linhas` = {linha: SKU da linha} para o texto."""
+    donos: dict[str, list[Hashable]] = defaultdict(list)
+    for chave, res in resolucoes.items():
+        for lk in res.links:
+            donos[lk.external_id].append(chave)
+    disputados = {ext: chaves for ext, chaves in donos.items() if len(chaves) > 1}
+    if not disputados:
+        return
+    for chave, res in resolucoes.items():
+        livres: list[ProductLink] = []
+        for lk in res.links:
+            chaves = disputados.get(lk.external_id)
+            if not chaves:
+                livres.append(lk)
+                continue
+            outras = sorted(linhas.get(c) or "?" for c in chaves if c != chave)
+            res.bloqueados.append(AnuncioBloqueado(lk, MOTIVO_MESMO_ANUNCIO, outras))
+        res.links = livres
+
+
 # ------------------------------------------------------------ célula do /grid
 
 TEXTO_BLOQUEIO = {
@@ -201,9 +256,10 @@ TEXTO_BLOQUEIO = {
 }
 
 
-def _texto_anuncio(link: ProductLink, motivo: str) -> str:
-    rel = ", ".join(relacionados_do_link(link)) or "?"
-    return f"{link.external_id} " + _TEXTO_MOTIVO[motivo].format(rel=rel)
+def _texto_anuncio(b: AnuncioBloqueado) -> str:
+    rel = ", ".join(relacionados_do_link(b.link)) or "?"
+    outras = ", ".join(b.outras_linhas) or "?"
+    return f"{b.link.external_id} " + _TEXTO_MOTIVO[b.motivo].format(rel=rel, outras=outras)
 
 
 def info_celula_catalogo(
@@ -214,8 +270,9 @@ def info_celula_catalogo(
 ) -> dict:
     """O campo `catalogo` de uma célula de conta de catálogo no /grid.
 
-    `bloqueio`: None | sem_tipo | sem_anuncio | sincronizado | pausado |
-    em_revisao | encerrado | sem_preco_catalogo; `texto` é a frase do tooltip.
+    `bloqueio`: None | sem_tipo | sem_anuncio | mesmo_anuncio | sincronizado |
+    pausado | em_revisao | encerrado | sem_preco_catalogo; `texto` é a frase
+    do tooltip.
     Com parte dos anúncios livres a célula envia (só para os livres) e o texto
     diz quais ficam de fora."""
     anuncios = [
@@ -249,8 +306,7 @@ def info_celula_catalogo(
         presentes = {b.motivo for b in resolucao.bloqueados}
         motivo = next(m for m in _ORDEM_BLOQUEIO if m in presentes)
         texto = "; ".join(
-            "Anúncio de catálogo " + _texto_anuncio(b.link, b.motivo)
-            for b in resolucao.bloqueados
+            "Anúncio de catálogo " + _texto_anuncio(b) for b in resolucao.bloqueados
         )
         return {"anuncios": anuncios, "bloqueio": motivo, "texto": texto}
     if sem_preco:
@@ -261,9 +317,7 @@ def info_celula_catalogo(
         }
     texto = "Envia para " + ", ".join(lk.external_id for lk in resolucao.links)
     if resolucao.bloqueados:
-        texto += "; pula " + "; ".join(
-            _texto_anuncio(b.link, b.motivo) for b in resolucao.bloqueados
-        )
+        texto += "; pula " + "; ".join(_texto_anuncio(b) for b in resolucao.bloqueados)
     return {"anuncios": anuncios, "bloqueio": None, "texto": texto}
 
 

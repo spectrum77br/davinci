@@ -1325,6 +1325,172 @@ async def test_envio_parcial_pula_o_bloqueado_e_avisa(
     assert [m for m, _ in ml_falso.puts_de_preco()] == ["MLB200"]
 
 
+# =========================================================== mesmo anúncio em duas linhas
+
+
+def test_dois_precos_no_mesmo_anuncio_tiram_ele_das_duas_linhas():
+    """Eletro casa pelo código base: as linhas 110/220 e 2L do uaf001m1 caem no
+    mesmo anúncio de catálogo — nenhuma das duas manda (senão vale o último)."""
+    e110, e2l, outro = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    skus = {e110: "uaf001m1.110", e2l: "uaf001m1.2l", outro: "uaf001m1.220"}
+    links = [_lk("CAT110", e110, cat=True), _lk("CAT220", outro, cat=True)]
+    kw = {"dept": "eletro", "plataforma": "ml", "canal": "catalogo",
+          "listing_type_conta": "classico"}
+    linha_110 = resolver_anuncios(links, skus, pricing_sku="uaf001m1.110,uaf001m1.220", **kw)
+    linha_2l = resolver_anuncios(links[:1], skus, pricing_sku="uaf001m1.2l", **kw)
+    assert [lk.external_id for lk in linha_2l.links] == ["CAT110"]
+
+    anuncios.separar_anuncios_disputados(
+        {"A": linha_110, "B": linha_2l},
+        {"A": "uaf001m1.110,uaf001m1.220", "B": "uaf001m1.2l"},
+    )
+    # A linha 110/220 continua mandando para o anúncio que é só dela.
+    assert [lk.external_id for lk in linha_110.links] == ["CAT220"]
+    assert [(b.link.external_id, b.motivo, b.outras_linhas) for b in linha_110.bloqueados] == [
+        ("CAT110", "mesmo_anuncio", ["uaf001m1.2l"])
+    ]
+    assert linha_2l.links == []
+    info = info_celula_catalogo(linha_2l, sem_preco=False)
+    assert info["bloqueio"] == "mesmo_anuncio"
+    assert "CAT110 também casa com a linha uaf001m1.110,uaf001m1.220" in info["texto"]
+    info = info_celula_catalogo(linha_110, sem_preco=False)
+    assert info["bloqueio"] is None
+    assert info["texto"].startswith("Envia para CAT220; pula CAT110 também casa")
+    # Sem disputa (uma linha só), nada muda.
+    sozinha = resolver_anuncios(links[:1], skus, pricing_sku="uaf001m1.2l", **kw)
+    anuncios.separar_anuncios_disputados({"B": sozinha}, {"B": "uaf001m1.2l"})
+    assert [lk.external_id for lk in sozinha.links] == ["CAT110"]
+
+
+def test_celula_manda_preco():
+    com_preco = SimpleNamespace(price=Decimal("10"), source="computed")
+    assert anuncios.celula_manda_preco(com_preco, None)
+    assert not anuncios.celula_manda_preco(SimpleNamespace(price=None, source="missing_inputs"))
+    na = SimpleNamespace(cell_status=SimpleNamespace(value="NA"))
+    assert not anuncios.celula_manda_preco(com_preco, na)
+    assert anuncios.celula_manda_preco(com_preco, SimpleNamespace(cell_status="manual"))
+
+
+@pytest_asyncio.fixture
+async def eletro(db: AsyncSession, dono: User, cenario) -> dict[str, Any]:
+    """Eletro na mesma integração: linhas uaf001m1.110,uaf001m1.220 (custo 240,
+    catálogo 260) e uaf001m1.2l (60 / 70); anúncios de catálogo MLB400 (110V)
+    e MLB401 (220V). Pelo código base, as DUAS linhas casam com os dois."""
+    seg = cenario["seg"]
+    p110 = Product(user_id=dono.id, sku="uaf001m1.110", name="Air fryer 110")
+    p220 = Product(user_id=dono.id, sku="uaf001m1.220", name="Air fryer 220")
+    db.add_all([p110, p220])
+    await db.flush()
+    db.add_all([
+        _link(dono, cenario["integ"], p110, "MLB400", listing_type="gold_special",
+              catalog_listing=True, anuncio_status="active"),
+        _link(dono, cenario["integ"], p220, "MLB401", listing_type="gold_special",
+              catalog_listing=True, anuncio_status="active"),
+    ])
+    conta = PricingAccount(
+        user_id=dono.id, name="zorvex", platform=PricingPlatform.ML,
+        listing_type="ml classico", segment_id=seg["eletro"].id, kit_number=1,
+        commission=Decimal("0.10"), margin1=Decimal("0.20"), shipping1=Decimal("5.00"),
+        integration_id=cenario["integ"].id,
+    )
+    l110 = PricingProduct(
+        user_id=dono.id, sku="uaf001m1.110,uaf001m1.220", name="Air fryer",
+        segment_id=seg["eletro_filhos"][0].id, cost_kit1=Decimal("240"),
+        preco_catalogo=Decimal("260"),
+    )
+    l2l = PricingProduct(
+        user_id=dono.id, sku="uaf001m1.2l", name="Air fryer 2L",
+        segment_id=seg["eletro_filhos"][0].id, cost_kit1=Decimal("60"),
+        preco_catalogo=Decimal("70"),
+    )
+    db.add_all([conta, l110, l2l])
+    await db.commit()
+    for o in (conta, l110, l2l):
+        await db.refresh(o)
+    return {"conta": conta, "l110": l110, "l2l": l2l}
+
+
+async def _celulas_eletro(client: AsyncClient, filha_id: str) -> dict[str, dict]:
+    corpo = (await client.get("/api/pricing/grid", params={"department": "eletro"})).json()
+    nomes = {p["id"]: p["sku"] for p in corpo["products"]}
+    return {
+        nomes[c["pricing_product_id"]]: c
+        for c in corpo["cells"]
+        if c["pricing_account_id"] == filha_id
+    }
+
+
+@pytest.mark.asyncio
+async def test_grid_e_envio_travam_o_anuncio_disputado_por_duas_linhas(
+    db: AsyncSession, client: AsyncClient, dono: User, cenario, eletro, auth_as: Callable,
+    ml_falso: MLFalso,
+):
+    auth_as(dono)
+    filha_id = (await _ligar(client, eletro["conta"].id)).json()["conta_catalogo"]["id"]
+    ml_falso.item("MLB400", catalog_listing=True)
+    ml_falso.item("MLB401", catalog_listing=True)
+
+    cel = await _celulas_eletro(client, filha_id)
+    c110, c2l = cel["uaf001m1.110,uaf001m1.220"], cel["uaf001m1.2l"]
+    # As duas linhas mandam preço e casam com os mesmos anúncios → as duas
+    # células travadas, cada uma citando a outra linha.
+    for cel_, outra in ((c2l, "uaf001m1.110,uaf001m1.220"), (c110, "uaf001m1.2l")):
+        assert cel_["price"] is not None
+        assert cel_["catalogo"]["bloqueio"] == "mesmo_anuncio", cel_
+        assert f"MLB400 também casa com a linha {outra}" in cel_["catalogo"]["texto"]
+        assert {a["external_id"]: a["bloqueio"] for a in cel_["catalogo"]["anuncios"]} == {
+            "MLB400": "mesmo_anuncio", "MLB401": "mesmo_anuncio",
+        }
+
+    # O servidor trava sozinho (sem depender da tela): nenhuma das duas chama o ML.
+    for linha, outra in ((eletro["l2l"], "uaf001m1.110,uaf001m1.220"),
+                         (eletro["l110"], "uaf001m1.2l")):
+        out = await _push(client, filha_id, linha.id)
+        assert (out["ok"], out["code"]) == (False, "bloqueado"), out
+        assert outra in out["detail"]
+    assert ml_falso.chamadas == []
+
+    # A 2L sem preço de catálogo não disputa mais: a 110/220 volta a mandar
+    # para o MLB400.
+    eletro["l2l"].preco_catalogo = None
+    db.add(eletro["l2l"])
+    await db.commit()
+    cel = await _celulas_eletro(client, filha_id)
+    assert cel["uaf001m1.2l"]["catalogo"]["bloqueio"] == "sem_preco_catalogo"
+    assert {a["external_id"]: a["bloqueio"]
+            for a in cel["uaf001m1.110,uaf001m1.220"]["catalogo"]["anuncios"]} == {
+        "MLB400": None, "MLB401": None,
+    }
+    ml_falso.chamadas.clear()
+    out = await _push(client, filha_id, eletro["l110"].id)
+    assert out["ok"] is True, out
+    assert sorted(m for m, _ in ml_falso.puts_de_preco()) == ["MLB400", "MLB401"]
+
+
+@pytest.mark.asyncio
+async def test_celula_na_nao_disputa_o_anuncio(
+    db: AsyncSession, client: AsyncClient, dono: User, cenario, eletro, auth_as: Callable,
+    ml_falso: MLFalso,
+):
+    from app.models import CellStatus
+
+    auth_as(dono)
+    filha_id = (await _ligar(client, eletro["conta"].id)).json()["conta_catalogo"]["id"]
+    db.add(PricingOverride(
+        user_id=dono.id, pricing_account_id=uuid.UUID(filha_id),
+        pricing_product_id=eletro["l2l"].id, cell_status=CellStatus.NA,
+    ))
+    await db.commit()
+    ml_falso.item("MLB400", catalog_listing=True)
+    ml_falso.item("MLB401", catalog_listing=True)
+    cel = await _celulas_eletro(client, filha_id)
+    assert cel["uaf001m1.110,uaf001m1.220"]["catalogo"]["bloqueio"] is None
+    assert {a["bloqueio"] for a in cel["uaf001m1.110,uaf001m1.220"]["catalogo"]["anuncios"]} == {None}
+    out = await _push(client, filha_id, eletro["l110"].id)
+    assert out["ok"] is True, out
+    assert sorted(m for m, _ in ml_falso.puts_de_preco()) == ["MLB400", "MLB401"]
+
+
 # =========================================================== /actual-prices
 
 

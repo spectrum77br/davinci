@@ -78,10 +78,13 @@ from app.services.pricing.audit import (
 from app.services.pricing.anuncios import (
     CANAL_CATALOGO,
     CANAL_KIT,
+    Resolucao,
+    celula_manda_preco,
     info_celula_catalogo,
     resolver_anuncios,
+    separar_anuncios_disputados,
 )
-from app.services.pricing.calc import calculate
+from app.services.pricing.calc import CalcOutcome, calculate
 from app.services.pricing.competitor import search_competitors
 from app.services.pricing.push import push_one
 from app.services.pricing.sku_match import ml_listing_type_for_account, variants_of
@@ -1210,7 +1213,12 @@ async def get_grid(
     # user-set flags persisted after a failed push (SSH semantics); the grid
     # never infers them. Cells without a calculable price render as "—" in
     # the UI via the cellLabel fallback, not as NA.
-    cells: list[PricingGridCell] = []
+    # 1ª passada: preço de cada célula e, nas colunas de catálogo, os anúncios.
+    outcomes: dict[tuple[UUID, UUID], CalcOutcome] = {}
+    resolucoes: dict[tuple[UUID, UUID], Resolucao] = {}
+    # coluna de catálogo → {linha: resolução} das linhas que mandam preço
+    # (do departamento da coluna): duas delas no mesmo anúncio = disputa.
+    disputa: dict[UUID, dict[UUID, Resolucao]] = defaultdict(dict)
     for prod in products:
         pair = leaves_by_id.get(prod.segment_id)
         prod_type = pair[1] if pair else None
@@ -1218,22 +1226,39 @@ async def get_grid(
             ovr = by_pair.get((prod.id, acc.id))
             base = contas_por_id.get(acc.conta_base_id) if acc.canal == CANAL_CATALOGO else None
             outcome = calculate(acc, prod, ovr, prod_type, conta_base=base)
+            outcomes[(prod.id, acc.id)] = outcome
+            if acc.canal != CANAL_CATALOGO:
+                continue
+            integ_id = base.integration_id if base is not None else None
+            dept_conta = _dept_da_conta(acc)
+            resolucao = resolver_anuncios(
+                links_catalogo.get(integ_id, ()) if integ_id else (),
+                sku_dos_links,
+                pricing_sku=prod.sku,
+                dept=dept_conta,
+                plataforma="ml",
+                canal=CANAL_CATALOGO,
+                listing_type_conta=acc.listing_type,
+            )
+            resolucoes[(prod.id, acc.id)] = resolucao
+            if celula_manda_preco(outcome, ovr) and (pair[0] if pair else None) == dept_conta:
+                disputa[acc.id][prod.id] = resolucao
+    skus_das_linhas = {prod.id: prod.sku or "?" for prod in products}
+    for por_linha in disputa.values():
+        separar_anuncios_disputados(por_linha, skus_das_linhas)
+
+    cells: list[PricingGridCell] = []
+    for prod in products:
+        for acc in accounts:
+            ovr = by_pair.get((prod.id, acc.id))
+            outcome = outcomes[(prod.id, acc.id)]
             catalogo = None
             if acc.canal == CANAL_CATALOGO:
-                integ_id = base.integration_id if base is not None else None
-                resolucao = resolver_anuncios(
-                    links_catalogo.get(integ_id, ()) if integ_id else (),
-                    sku_dos_links,
-                    pricing_sku=prod.sku,
-                    dept=_dept_da_conta(acc),
-                    plataforma="ml",
-                    canal=CANAL_CATALOGO,
-                    listing_type_conta=acc.listing_type,
-                )
+                base = contas_por_id.get(acc.conta_base_id)
                 catalogo = info_celula_catalogo(
-                    resolucao,
+                    resolucoes[(prod.id, acc.id)],
                     sem_preco=outcome.price is None and outcome.detail == "sem_preco_catalogo",
-                    sem_integracao=integ_id is None,
+                    sem_integracao=base is None or base.integration_id is None,
                 )
             cells.append(
                 PricingGridCell(

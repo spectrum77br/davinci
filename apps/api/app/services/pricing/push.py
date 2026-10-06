@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 import structlog
-from sqlalchemy import and_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
@@ -50,7 +50,9 @@ from app.services.pricing.anuncios import (
     CANAL_CATALOGO,
     CANAL_KIT,
     Resolucao,
+    celula_manda_preco,
     resolver_anuncios,
+    separar_anuncios_disputados,
     texto_bloqueio_envio,
 )
 from app.services.pricing.calc import CalcOutcome, calculate
@@ -292,7 +294,7 @@ async def resolver_para_envio(
     ).all()
     product_map: dict[UUID, str] = {pid: sku for pid, sku in sku_rows if sku}
 
-    return resolver_anuncios(
+    resolucao = resolver_anuncios(
         all_links,
         product_map,
         pricing_sku=pricing_product.sku,
@@ -301,6 +303,102 @@ async def resolver_para_envio(
         canal=canal,
         listing_type_conta=account.listing_type,
     )
+    if canal == CANAL_CATALOGO and resolucao.links:
+        await _separar_disputados(
+            session,
+            account=account,
+            conta_base=conta_base,
+            pricing_product=pricing_product,
+            department=department,
+            resolucao=resolucao,
+            all_links=all_links,
+            product_map=product_map,
+        )
+    return resolucao
+
+
+async def _separar_disputados(
+    session: AsyncSession,
+    *,
+    account: PricingAccount,
+    conta_base: PricingAccount | None,
+    pricing_product: PricingProduct,
+    department: str | None,
+    resolucao: Resolucao,
+    all_links: list[ProductLink],
+    product_map: dict[UUID, str],
+) -> None:
+    """Mesma trava do /grid ('mesmo_anuncio'), aqui no servidor para não
+    depender da tela: as outras linhas do departamento que mandam preço nesta
+    coluna de catálogo e casam com o mesmo anúncio tiram ele desta célula.
+
+    Candidatas: SKU contendo algum código base da linha (superconjunto — quem
+    decide é o resolvedor, com os mesmos vínculos já carregados)."""
+    if not department or conta_base is None:
+        return
+    raiz = (
+        await session.execute(
+            select(Segment).where(
+                Segment.slug == department, Segment.parent_id.is_(None)
+            )
+        )
+    ).scalars().first()
+    if raiz is None:
+        return
+    folhas = {
+        f.id: f
+        for f in (
+            await session.execute(select(Segment).where(Segment.parent_id == raiz.id))
+        ).scalars().all()
+    }
+    bases = {v.split(".", 1)[0].lower() for v in variants_of(pricing_product.sku)}
+    if not folhas or not bases:
+        return
+    outras = (
+        await session.execute(
+            select(PricingProduct).where(
+                PricingProduct.id != pricing_product.id,
+                PricingProduct.segment_id.in_(list(folhas)),
+                or_(
+                    *[
+                        func.lower(PricingProduct.sku).contains(b, autoescape=True)
+                        for b in bases
+                    ]
+                ),
+            )
+        )
+    ).scalars().all()
+    meus = {lk.external_id for lk in resolucao.links}
+    disputa: dict[UUID, Resolucao] = {pricing_product.id: resolucao}
+    linhas: dict[UUID, str] = {pricing_product.id: pricing_product.sku or "?"}
+    for outra in outras:
+        res = resolver_anuncios(
+            all_links,
+            product_map,
+            pricing_sku=outra.sku,
+            dept=department,
+            plataforma="ml",
+            canal=CANAL_CATALOGO,
+            listing_type_conta=account.listing_type,
+        )
+        if not meus & {lk.external_id for lk in res.links}:
+            continue
+        ovr = (
+            await session.execute(
+                select(PricingOverride).where(
+                    PricingOverride.pricing_account_id == account.id,
+                    PricingOverride.pricing_product_id == outra.id,
+                )
+            )
+        ).scalar_one_or_none()
+        folha = folhas.get(outra.segment_id)
+        tipo = int(folha.sort_order or 0) + 1 if folha is not None else None
+        outcome = calculate(account, outra, ovr, tipo, conta_base=conta_base)
+        if celula_manda_preco(outcome, ovr):
+            disputa[outra.id] = res
+            linhas[outra.id] = outra.sku or "?"
+    if len(disputa) > 1:
+        separar_anuncios_disputados(disputa, linhas)
 
 
 async def _resolve_product_links_for_push(
