@@ -355,15 +355,16 @@ class PricingGridCatalogoAnuncio(BaseModel):
     status: str | None = None  # active/paused/under_review/closed/inactive (lido na varredura)
     listing_type: str | None = None
     sincronizado_com: list[str] = []
-    # Motivo de ESTE anúncio não receber: sincronizado|pausado|em_revisao|encerrado.
+    # Motivo de ESTE anúncio não receber: mesmo_anuncio (outra linha da tabela
+    # também casa com ele) | sincronizado | pausado | em_revisao | encerrado.
     bloqueio: str | None = None
 
 
 class PricingGridCatalogo(BaseModel):
     """Célula de conta de catálogo: para onde vai o preço e, se não vai, por quê."""
     anuncios: list[PricingGridCatalogoAnuncio] = []
-    # None | sem_anuncio | sincronizado | pausado | em_revisao | encerrado |
-    # sem_tipo | sem_preco_catalogo
+    # None | sem_anuncio | mesmo_anuncio | sincronizado | pausado | em_revisao |
+    # encerrado | sem_tipo | sem_preco_catalogo
     bloqueio: str | None = None
     texto: str | None = None
 
