@@ -1662,14 +1662,15 @@ type CatalogoAnuncio = {
   listing_type: string | null
   // MLBs dos anúncios comuns presos a este anúncio de catálogo (item_relations)
   sincronizado_com: string[]
-  // Por que ESTE anúncio não recebe: 'sincronizado' | 'pausado' |
-  // 'em_revisao' | 'encerrado' (null = recebe o preço)
+  // Por que ESTE anúncio não recebe: 'mesmo_anuncio' (outra linha da tabela
+  // também casa com ele) | 'sincronizado' | 'pausado' | 'em_revisao' |
+  // 'encerrado' (null = recebe o preço)
   bloqueio?: string | null
 }
 type CatalogoCelula = {
   anuncios: CatalogoAnuncio[]
-  // null = pode enviar; 'sem_anuncio' | 'sincronizado' | 'pausado' |
-  // 'em_revisao' | 'encerrado' | 'sem_tipo' | 'sem_preco_catalogo'
+  // null = pode enviar; 'sem_anuncio' | 'mesmo_anuncio' | 'sincronizado' |
+  // 'pausado' | 'em_revisao' | 'encerrado' | 'sem_tipo' | 'sem_preco_catalogo'
   bloqueio: string | null
   texto: string | null
 }
@@ -2343,6 +2344,7 @@ function custoDaConta(prod: PricingProduct, acc: Account): number | null {
 // Frase de reserva caso o /grid não mande o `texto` do bloqueio.
 const MOTIVOS_BLOQUEIO: Record<string, string> = {
   sem_anuncio: 'Sem anúncio de catálogo vinculado nesta conta',
+  mesmo_anuncio: 'Outra linha da tabela manda preço para o mesmo anúncio de catálogo: deixe o preço de catálogo só na linha certa',
   sincronizado: 'Anúncio de catálogo preso ao anúncio comum: o preço dele vem da coluna de kit',
   pausado: 'Anúncio de catálogo pausado',
   em_revisao: 'Anúncio de catálogo em revisão no Mercado Livre',
@@ -2353,6 +2355,7 @@ const MOTIVOS_BLOQUEIO: Record<string, string> = {
 
 // Motivo curto por anúncio (campo `bloqueio` de cada anúncio do /grid).
 const MOTIVO_ANUNCIO: Record<string, string> = {
+  mesmo_anuncio: 'outra linha também manda preço',
   sincronizado: 'sincronizado',
   pausado: 'pausado',
   em_revisao: 'em revisão',
@@ -2388,8 +2391,8 @@ function tituloCelulaCatalogo(prodId: string, acc: Account): string | undefined 
 // Respostas do /push que querem dizer "célula bloqueada / anúncio de outro
 // canal", e não falha: contam como puladas, não como erro.
 const CODIGOS_BLOQUEIO = new Set([
-  'sem_anuncio', 'sincronizado', 'pausado', 'em_revisao', 'encerrado',
-  'sem_tipo', 'sem_preco_catalogo', 'canal_errado', 'bloqueado',
+  'sem_anuncio', 'mesmo_anuncio', 'sincronizado', 'pausado', 'em_revisao', 'encerrado',
+  'sem_tipo', 'sem_preco_catalogo', 'canal_errado', 'tipo_errado', 'bloqueado',
 ])
 function ehCodigoBloqueio(code: string): boolean {
   return CODIGOS_BLOQUEIO.has(code) || code.startsWith('catalogo_') || code.startsWith('bloqueado_')
