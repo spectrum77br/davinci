@@ -1,4 +1,5 @@
 from datetime import date, datetime
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field
@@ -514,3 +515,19 @@ class OpcoesOut(BaseModel):
     # Nomes das situações do Bling (davinci.situacao_bling), pra o dropdown de
     # "Alterar Status Bling" na aba Status.
     status_bling_options: list[str] = Field(default_factory=list)
+
+
+class ExportColunaIn(BaseModel):
+    titulo: str = Field(min_length=1, max_length=80)
+    # "data" = a célula vem "YYYY-MM-DD" e vira data de verdade no Excel.
+    tipo: Literal["texto", "data"] = "texto"
+
+
+class LogisticaExportIn(BaseModel):
+    """Botão "Excel" do painel: as linhas que a tela está mostrando (todas as
+    páginas, já filtradas) com o texto de cada coluna como aparece na tabela.
+    `aba` = nome da aba da planilha (ex. "Amazon Envio próprio")."""
+
+    aba: str = Field(max_length=60)
+    colunas: list[ExportColunaIn] = Field(min_length=1, max_length=40)
+    linhas: list[list[str | None]] = Field(max_length=50_000)

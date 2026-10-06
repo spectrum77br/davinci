@@ -51,6 +51,7 @@ from app.schemas.logistica import (
     EnviarThreemaIn,
     EnviarThreemaOut,
     LogisticaCreate,
+    LogisticaExportIn,
     LogisticaOut,
     LogisticaPatch,
     LogisticaProdutoOut,
@@ -94,6 +95,7 @@ from app.services import (
     logistica_bling,
     logistica_cliente_mensagens,
     logistica_datas,
+    logistica_export_xlsx,
     logistica_match,
     logistica_meli,
     logistica_robo,
@@ -887,6 +889,28 @@ async def list_logistica(
             )
         )
     return out
+
+
+@router.post("/export.xlsx")
+async def export_logistica(
+    body: LogisticaExportIn,
+    _user: Annotated[User, Depends(require_permission("logistica", "view"))],
+) -> Response:
+    """Botão "Excel" do painel: devolve o .xlsx das linhas que a tela está
+    mostrando. A tela manda as linhas já filtradas e formatadas (ver
+    services/logistica_export_xlsx) — nada é lido do banco aqui, então o
+    arquivo nunca traz pedido que a pessoa não via (escopo por equipe incluso)."""
+    conteudo = logistica_export_xlsx.montar_xlsx(
+        body.aba,
+        [(c.titulo, c.tipo) for c in body.colunas],
+        body.linhas,
+    )
+    logger.info("logistica_export_xlsx", aba=body.aba, linhas=len(body.linhas))
+    return Response(
+        content=conteudo,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="logistica.xlsx"'},
+    )
 
 
 @router.post("/mensagens-cliente/{evento}/enviar-agora", response_model=MensagemAgoraOut)

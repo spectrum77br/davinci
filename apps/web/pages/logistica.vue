@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
-import { Plus, RefreshCw, X, Trash2, Search, Send, ImagePlus, ChevronLeft, ChevronRight, Copy, NotebookPen, ArrowLeftRight, UserRound, MessageCircle, Eye, Megaphone, MapPin, Mail, Ban, ExternalLink, Combine } from 'lucide-vue-next'
+import { Plus, RefreshCw, X, Trash2, Search, Send, ImagePlus, ChevronLeft, ChevronRight, Copy, NotebookPen, ArrowLeftRight, UserRound, MessageCircle, Eye, Megaphone, MapPin, Mail, Ban, ExternalLink, Combine, Download } from 'lucide-vue-next'
+import { isoToday } from '~/lib/date'
 
 definePageMeta({
   middleware: ['permission'],
@@ -570,6 +571,123 @@ function mensagensResumo(c: Logistica): string {
   return ms
     .map((m) => (m.enviado_em ? `${m.evento_label} ${fmtQuando(m.enviado_em)}` : `${m.evento_label} (falhou)`))
     .join(' · ')
+}
+
+// ---- Botão "Excel" ----
+// Baixa as linhas que o painel está mostrando: TODAS as páginas, com os
+// filtros da tela (Mostrar tudo, sub-aba DBA × Envio próprio, conta, status
+// Bling, período, busca) e as mesmas colunas da tabela, na mesma ordem. O texto
+// de cada célula sai daqui (mesmas funções da tabela); o servidor só escreve o
+// .xlsx. Vazio na planilha = "—" na tela.
+type ExcelColuna = {
+  titulo: string
+  tipo?: 'data'
+  valor: (c: Logistica) => string | null | undefined
+}
+const exportandoExcel = ref(false)
+function emLinhas(...partes: Array<string | null | undefined>): string {
+  return partes.filter(Boolean).join('\n')
+}
+function excelColunas(): ExcelColuna[] {
+  const proprio = tab.value === 'amazon' && amazonSub.value === 'proprio'
+  const cols: ExcelColuna[] = [
+    { titulo: 'Data', tipo: 'data', valor: (c) => c.data },
+    { titulo: 'Pedido Bling', valor: (c) => c.pedido_bling },
+    { titulo: 'Pedido Marketplace', valor: (c) => c.pedido_marketplace },
+    { titulo: 'Plataforma', valor: (c) => `${c.plataforma || ''}${c.envio_flex && podeVerFlex.value ? ' · Flex' : ''}` },
+    {
+      titulo: 'Produto',
+      valor: (c) =>
+        emLinhas(...(c.produtos || []).map((p) => `${p.nome || '—'}${p.quantidade && p.quantidade > 1 ? ` ×${p.quantidade}` : ''}`)),
+    },
+    { titulo: 'SKU', valor: (c) => emLinhas(...(c.produtos || []).map((p) => p.sku || '—')) },
+    { titulo: 'Conta', valor: (c) => c.conta },
+    { titulo: 'Status Plataforma', valor: (c) => assinatura(c) },
+    {
+      // A data que aparece embaixo da chave (sem o "há X", que envelhece no arquivo).
+      titulo: 'Status desde',
+      valor: (c) => {
+        const top = statusUltimaData(c)
+        return top ? `${top.fonte && top.fonte !== 'plataforma' ? '~' : ''}${fmtDataHora(top.em)}` : ''
+      },
+    },
+    { titulo: 'Rastreio', valor: (c) => c.rastreio },
+    {
+      titulo: 'Localização',
+      valor: (c) => (proprioSemRastreio(c) && c.localizacao ? `Destino: ${c.localizacao}` : c.localizacao),
+    },
+  ]
+  if (proprio) {
+    cols.push(
+      {
+        titulo: 'Previsão transportadora',
+        valor: (c) => {
+          if (c.entregue_em) return `entregue ${fmtDataHora(c.entregue_em)}`
+          if (!c.previsao_correios) return ''
+          return emLinhas(fmtDia(c.previsao_correios), previsaoVencida(c) ? 'previsão vencida' : null)
+        },
+      },
+      {
+        titulo: 'Entregar até (Amazon)',
+        valor: (c) =>
+          emLinhas(
+            c.prazo_entrega_amazon ? fmtDia(c.prazo_entrega_amazon) : null,
+            c.prazo_entrega_amazon && !c.entregue_em ? prazoResumo(c) : null,
+            avisosResumo(c),
+            mensagensResumo(c) ? `✉ cliente: ${mensagensResumo(c)}` : null,
+          ),
+      },
+    )
+  }
+  cols.push(
+    { titulo: 'Divergência', valor: (c) => c.divergencia },
+    { titulo: 'Status Bling', valor: (c) => c.status_bling },
+  )
+  if (proprio) cols.push({ titulo: 'Suspensão', valor: (c) => suspensaoResumo(c) })
+  cols.push({
+    titulo: 'Chamado',
+    valor: (c) => emLinhas(chamadoAbaResumo(c)?.texto || c.chamado, chamadoAutoAviso(c)),
+  })
+  return cols
+}
+function excelAbaNome(): string {
+  if (tab.value === 'amazon') return amazonSub.value === 'proprio' ? 'Amazon Envio próprio' : 'Amazon DBA'
+  return PLATAFORMA_TABS.find((t) => t.key === tab.value)?.label || 'Logística'
+}
+async function exportarExcel() {
+  const linhas = filteredRows.value
+  if (exportandoExcel.value || !linhas.length) return
+  exportandoExcel.value = true
+  try {
+    const cols = excelColunas()
+    const aba = excelAbaNome()
+    const blob = await api<Blob>('/api/logistica/export.xlsx', {
+      method: 'POST',
+      body: {
+        aba,
+        colunas: cols.map((col) => ({ titulo: col.titulo, tipo: col.tipo || 'texto' })),
+        linhas: linhas.map((c) => cols.map((col) => col.valor(c) || null)),
+      },
+      responseType: 'blob' as any,
+    })
+    const nome = aba
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+    const href = URL.createObjectURL(blob as any)
+    const a = document.createElement('a')
+    a.href = href
+    a.download = `logistica_${nome}_${isoToday()}.xlsx`
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    URL.revokeObjectURL(href)
+  } catch (e: any) {
+    toasts.error('Não foi possível gerar o Excel', e?.data?.detail?.code || e?.message || 'erro')
+  } finally {
+    exportandoExcel.value = false
+  }
 }
 
 // ---- Paginação (client-side, 50 por página; muitas linhas travam o DOM) ----
@@ -2105,6 +2223,16 @@ async function aplicarStatusBling(c: Logistica) {
         >
           <MapPin class="size-4 mr-1" :class="atualizandoRastreio ? 'animate-pulse' : ''" />
           {{ atualizandoRastreio ? 'Buscando…' : 'Atualizar Correios' }}
+        </Button>
+        <Button
+          size="sm"
+          variant="outline"
+          :disabled="exportandoExcel || loading || !filteredRows.length"
+          :title="`Baixa em Excel os ${filteredRows.length} pedidos que estão aparecendo (todas as páginas, com os filtros da tela)`"
+          @click="exportarExcel"
+        >
+          <Download class="size-4 mr-1" :class="exportandoExcel ? 'animate-pulse' : ''" />
+          {{ exportandoExcel ? 'Gerando…' : 'Excel' }}
         </Button>
         <!-- Amazon: DBA × Envio próprio (dois painéis, como no Seller Central) -->
         <template v-if="tab === 'amazon'">
