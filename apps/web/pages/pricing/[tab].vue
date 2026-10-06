@@ -2130,6 +2130,8 @@ async function pushItemsBatch(
   let skipped = 0
   let recusadas = 0
   const errorDetails: string[] = []
+  // Motivo de cada célula em que NENHUM anúncio recebeu (all_skipped).
+  const puladosDetalhe: string[] = []
 
   function setCell(ck: string, st: PushCellState) {
     pushStates.value = new Map(pushStates.value).set(ck, st)
@@ -2167,8 +2169,11 @@ async function pushItemsBatch(
             setCell(ck, 'no_link')
             noLinks++
           } else if (result.code === 'all_skipped') {
-            setCell(ck, 'success')
+            // Nenhum anúncio recebeu (o ML vivo disse pausado, sincronizado,
+            // outro canal/tipo, encerrado…): cinza, não ✓ — o preço não foi.
+            setCell(ck, 'no_link')
             skipped++
+            puladosDetalhe.push(result.detail || 'anúncio pulado')
           } else if (ehCodigoBloqueio(result.code)) {
             // servidor recusou: célula de catálogo bloqueada / anúncio de outro canal
             setCell(ck, 'no_link')
@@ -2188,23 +2193,31 @@ async function pushItemsBatch(
 
     const totalBloq = bloqueadas + recusadas
     const txtBloq = totalBloq > 0 ? `${totalBloq} bloqueada(s) de catálogo pulada(s)` : ''
+    const txtPulados = skipped > 0 ? `${skipped} célula(s) não enviada(s) — anúncio pulado no ML:` : ''
     if (errors > 0) {
       toast.error(
-        `Envio: ${sent} ok, ${errors} erro(s)${noLinks > 0 ? `, ${noLinks} sem vínculo` : ''}${totalBloq > 0 ? `, ${totalBloq} bloqueada(s)` : ''}`,
-        errorDetails.slice(0, 5),
+        `Envio: ${sent} ok, ${errors} erro(s)${noLinks > 0 ? `, ${noLinks} sem vínculo` : ''}${totalBloq > 0 ? `, ${totalBloq} bloqueada(s)` : ''}${skipped > 0 ? `, ${skipped} pulada(s)` : ''}`,
+        [...errorDetails.slice(0, 5), ...puladosDetalhe.slice(0, 5)],
       )
-    } else if (sent === 0 && (noLinks > 0 || totalBloq > 0)) {
+    } else if (sent === 0 && (noLinks > 0 || totalBloq > 0 || skipped > 0)) {
       toast.warning(
         'Nenhum preço enviado',
-        [noLinks > 0 ? `${noLinks} célula(s) sem vínculo` : '', txtBloq].filter(Boolean),
+        [
+          noLinks > 0 ? `${noLinks} célula(s) sem vínculo` : '',
+          txtBloq,
+          txtPulados,
+          ...puladosDetalhe.slice(0, 5),
+        ].filter(Boolean),
+      )
+    } else if (skipped > 0) {
+      toast.warning(
+        `Envio: ${sent} preço(s) enviado(s), ${skipped} não enviado(s)`,
+        [txtBloq, txtPulados, ...puladosDetalhe.slice(0, 5)].filter(Boolean),
       )
     } else {
       toast.success(
         'Push concluído!',
-        [
-          `${sent} preço(s) enviado(s) com sucesso${skipped > 0 ? ` (${skipped} pulado(s))` : ''}`,
-          txtBloq,
-        ].filter(Boolean),
+        [`${sent} preço(s) enviado(s) com sucesso`, txtBloq].filter(Boolean),
       )
     }
 
