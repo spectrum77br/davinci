@@ -897,6 +897,63 @@ async def test_flag_d2_desligada_libera_o_sincronizado_no_item_vivo(
 
 
 @pytest.mark.asyncio
+async def test_update_price_confere_o_tipo_no_item_vivo(ml_falso: MLFalso):
+    """O vínculo diz clássico (varredura das 13h UTC), mas o vendedor passou o
+    anúncio para premium depois: o preço da coluna clássica não vai."""
+    cli = _cliente_ml()
+    ml_falso.item("MLB1", catalog_listing=True, listing_type_id="gold_pro")
+    ml_falso.item("MLB2", listing_type_id="gold_pro")
+    ml_falso.item("MLB3", listing_type_id="gold_premium")  # apelido antigo do gold_pro
+    ml_falso.item("MLB4")
+    del ml_falso.itens["MLB4"]["listing_type_id"]  # item sem o campo: não confere
+
+    for mlb, canal in (("MLB1", "catalogo"), ("MLB2", "kit")):
+        r = await cli.update_price(mlb, 120.0, canal_esperado=canal, tipo_esperado="gold_special")
+        assert (r.status, r.error_code) == (SyncStatus.SKIPPED, "tipo_errado"), (mlb, r)
+        assert "premium no ML e a coluna é clássico" in r.error_detail
+    assert ml_falso.puts_de_preco() == []
+
+    r = await cli.update_price("MLB1", 120.0, canal_esperado="catalogo", tipo_esperado="gold_pro")
+    assert r.status == SyncStatus.OK
+    r = await cli.update_price("MLB3", 90.0, canal_esperado="kit", tipo_esperado="gold_pro")
+    assert r.status == SyncStatus.OK
+    r = await cli.update_price("MLB4", 80.0, canal_esperado="kit", tipo_esperado="gold_special")
+    assert r.status == SyncStatus.OK
+    # Conta sem tipo (None): não confere — manda como antes.
+    r = await cli.update_price("MLB2", 70.0, canal_esperado="kit")
+    assert r.status == SyncStatus.OK
+    assert [m for m, _ in ml_falso.puts_de_preco()] == ["MLB1", "MLB3", "MLB4", "MLB2"]
+
+
+@pytest.mark.asyncio
+async def test_envio_pula_anuncio_que_mudou_de_tipo_depois_da_varredura(
+    db: AsyncSession, client: AsyncClient, dono: User, cenario, auth_as: Callable,
+    ml_falso: MLFalso,
+):
+    auth_as(dono)
+    base = cenario["base"]  # ml classico
+    filha_id = (await _ligar(client, base.id)).json()["conta_catalogo"]["id"]
+    # MLB200 gravado como gold_special (clássico), mas o vivo já é premium.
+    ml_falso.item("MLB200", catalog_listing=True, listing_type_id="gold_pro")
+    out = await _push(client, filha_id, cenario["a003"].id)
+    assert (out["ok"], out["code"]) == (False, "all_skipped"), out
+    assert "MLB200 (tipo_errado)" in out["detail"]
+    assert ml_falso.puts_de_preco() == []
+
+    # Coluna de kit da conta tipada: o mesmo (o kit MLB101 virou premium).
+    ml_falso.item("MLB101", listing_type_id="gold_pro")
+    out = await _push(client, base.id, cenario["a003"].id)
+    assert (out["ok"], out["code"]) == (False, "all_skipped"), out
+    assert "MLB101 (tipo_errado)" in out["detail"]
+    assert ml_falso.puts_de_preco() == []
+
+    # Conta sem tipo (eron, mesma integração): não confere o tipo.
+    out = await _push(client, cenario["sem_tipo"].id, cenario["a003"].id)
+    assert out["ok"] is True, out
+    assert [m for m, _ in ml_falso.puts_de_preco()] == ["MLB101"]
+
+
+@pytest.mark.asyncio
 async def test_update_price_automacao_do_ml_vira_erro_claro(ml_falso: MLFalso):
     ml_falso.item("MLB1", status="paused")
     ml_falso.recusa_automacao.add("MLB1")

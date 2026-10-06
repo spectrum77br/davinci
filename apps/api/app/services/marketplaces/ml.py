@@ -763,6 +763,7 @@ class MercadoLivreClient:
         *,
         variation_id: str | None = None,
         canal_esperado: str | None = None,
+        tipo_esperado: str | None = None,
     ) -> SyncResult:
         """Push price to a single ML listing — SSH semantics.
 
@@ -786,6 +787,12 @@ class MercadoLivreClient:
         vazio), nem pausado/em revisão/encerrado; 'kit' nunca vai para anúncio
         de catálogo. Fora do canal → SKIPPED sem chamar o PUT. None = sem
         conferência (comportamento antigo).
+
+        `tipo_esperado` ("gold_special"/"gold_pro", o tipo da conta): o
+        resolvedor escolhe o anúncio pelo tipo gravado no vínculo, que a
+        varredura só atualiza 1x/dia; se o anúncio VIVO mudou de tipo
+        (clássico ↔ premium), o preço calculado com a comissão da outra
+        coluna não vai — SKIPPED 'tipo_errado'. None = sem conferência.
         """
         rounded_price = int(round(price))
         if rounded_price <= 0:
@@ -823,6 +830,10 @@ class MercadoLivreClient:
         fora_do_canal = _conferir_canal_ml(item_id, item_info, canal_esperado)
         if fora_do_canal is not None:
             return fora_do_canal
+        # 1c. O tipo (clássico/premium) do anúncio vivo é o da coluna?
+        outro_tipo = _conferir_tipo_ml(item_id, item_info, tipo_esperado)
+        if outro_tipo is not None:
+            return outro_tipo
 
         # 2. Bail cleanly on terminal states — don't fight ML's moderation/closure.
         if item_status == "closed":
@@ -1683,6 +1694,30 @@ def _conferir_canal_ml(
             payload={"sincronizado_com": relacionados},
         )
     return None
+
+
+_NOME_TIPO_ML = {"gold_special": "clássico", "gold_pro": "premium"}
+
+
+def _conferir_tipo_ml(
+    item_id: str, item_info: dict, tipo_esperado: str | None
+) -> SyncResult | None:
+    """SKIPPED 'tipo_errado' quando o anúncio vivo não é do tipo da coluna;
+    None = pode enviar (ou não há tipo para conferir). Ver `update_price`."""
+    esperado = _map_ml_listing_type(tipo_esperado)
+    vivo = _map_ml_listing_type(item_info.get("listing_type_id"))
+    if not esperado or not vivo or vivo == esperado:
+        return None
+    return SyncResult(
+        status=SyncStatus.SKIPPED,
+        error_code="tipo_errado",
+        error_detail=(
+            f"Anúncio {item_id} é {_NOME_TIPO_ML.get(vivo, vivo)} no ML e a coluna é "
+            f"{_NOME_TIPO_ML.get(esperado, esperado)}: não envia (a varredura diária "
+            "corrige o vínculo)"
+        ),
+        payload={"tipo_vivo": vivo, "tipo_esperado": esperado},
+    )
 
 
 def _erro_automacao(item_id: str) -> SyncResult:

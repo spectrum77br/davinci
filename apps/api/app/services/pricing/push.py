@@ -180,6 +180,7 @@ async def enviar_preco_para_links(
     *,
     sku_by_product: dict[UUID, str],
     canal_esperado: str | None = None,
+    tipo_esperado: str | None = None,
 ) -> dict[UUID, Any]:
     """Manda o preço para cada anúncio e INSISTE no que recusou por limite de
     taxa, em rodadas com espera crescente.
@@ -196,9 +197,11 @@ async def enviar_preco_para_links(
     anúncio encerrado, credencial recusada) não é retentado.
     """
     resultados: dict[UUID, Any] = {}
-    # Só passa o canal quando há um (o despacho de quem não confere canal
+    # Só passa o canal/tipo quando há um (o despacho de quem não confere
     # segue com a assinatura de antes).
     canal_kw = {"canal_esperado": canal_esperado} if canal_esperado else {}
+    if tipo_esperado:
+        canal_kw["tipo_esperado"] = tipo_esperado
     pendentes = list(links)
     intervalo = 0.0
     for rodada, espera in enumerate((0.0, *_ESPERAS_LIMITE_S)):
@@ -664,8 +667,14 @@ async def push_one(
         links,
         float(outcome.price),
         sku_by_product=sku_by_product,
-        # Só o ML confere o canal no item vivo (o catálogo é só do ML).
+        # Só o ML confere o canal e o tipo no item vivo (o catálogo é só do
+        # ML; clássico/premium também). Conta sem tipo → None (não confere).
         canal_esperado=canal if integration.platform == IntegrationPlatform.ML else None,
+        tipo_esperado=(
+            ml_listing_type_for_account(account.listing_type)
+            if integration.platform == IntegrationPlatform.ML
+            else None
+        ),
     )
     repausa_falhou: list[str] = []
 
@@ -866,14 +875,16 @@ async def _dispatch_price_update_link(
     *,
     product_sku: str | None = None,
     canal_esperado: str | None = None,
+    tipo_esperado: str | None = None,
 ) -> SyncResult:
     """Route price update to the correct client method based on platform,
     using ProductLink as the source of (external_id, variation_id) and
     `product_sku` (the linked davinci.products.sku) for Amazon — which
     addresses listings by seller SKU, NOT external_id.
 
-    `canal_esperado` (só ML): o update_price confere no item vivo se o
-    anúncio é do canal da coluna (kit × catálogo) antes do PUT."""
+    `canal_esperado`/`tipo_esperado` (só ML): o update_price confere no item
+    vivo se o anúncio é do canal (kit × catálogo) e do tipo (clássico ×
+    premium) da coluna antes do PUT."""
     try:
         if platform == IntegrationPlatform.ML:
             return await client.update_price(
@@ -881,6 +892,7 @@ async def _dispatch_price_update_link(
                 price=price,
                 variation_id=link.variation_id,
                 canal_esperado=canal_esperado,
+                tipo_esperado=tipo_esperado,
             )
         elif platform == IntegrationPlatform.SHOPEE:
             return await client.update_price(
