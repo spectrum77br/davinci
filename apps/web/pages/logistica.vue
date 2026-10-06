@@ -1251,6 +1251,10 @@ type LogisticaStatus = {
   plataforma: string | null
   status_plataforma: string | null
   status_atual: string | null
+  // Condição: palavras (separadas por ";") que precisam aparecer na Localização
+  // do pedido. Vazio = sem condição. Com condição que casa, a regra passa na
+  // frente das regras sem condição da mesma chave (backend: logistica_match).
+  localizacao_contem: string | null
   alterar_status_bling: string | null
   monitoramento: boolean
   abrir_chamado: boolean
@@ -1277,6 +1281,7 @@ type Anexo = {
 type StatusTextField =
   | 'plataforma'
   | 'status_plataforma'
+  | 'localizacao_contem'
   | 'alterar_status_bling'
   | 'mensagem_chamado'
   | 'mensagem_bling'
@@ -1363,6 +1368,14 @@ const statusRowsFiltradas = computed(() => {
   if (q) rows = rows.filter((s) => (s.status_plataforma || '').toLowerCase().includes(q))
   return rows
 })
+
+// Palavras da condição "Localização contém" (mesmo separador do backend).
+function palavrasLocalizacao(v: string | null | undefined): string[] {
+  return (v || '').split(';').map((p) => p.trim()).filter(Boolean)
+}
+const LOCALIZACAO_CONTEM_TITLE =
+  'A regra só vale quando a Localização do pedido tem uma destas palavras (sem diferenciar maiúscula nem acento; separe por ";"). ' +
+  'Quando casa, ela passa na frente das regras sem condição do mesmo Status Plataforma. Vazio = sem condição.'
 
 watch(tab, (t) => {
   if (t === 'status') {
@@ -1527,6 +1540,7 @@ const statusForm = ref({
   plataforma: '',
   status_plataforma: '',
   status_atual: [] as string[],
+  localizacao_contem: '',
   alterar_status_bling: '',
   monitoramento: false,
   abrir_chamado: false,
@@ -1541,6 +1555,7 @@ function openStatusForm() {
     plataforma: '',
     status_plataforma: '',
     status_atual: [],
+    localizacao_contem: '',
     alterar_status_bling: '',
     monitoramento: false,
     abrir_chamado: false,
@@ -1563,6 +1578,7 @@ async function saveStatusForm() {
         plataforma: f.plataforma.trim() || null,
         status_plataforma: f.status_plataforma.trim() || null,
         status_atual: f.status_atual,
+        localizacao_contem: f.localizacao_contem.trim() || null,
         alterar_status_bling: f.alterar_status_bling.trim() || null,
         monitoramento: f.monitoramento,
         abrir_chamado: f.abrir_chamado,
@@ -1588,6 +1604,7 @@ type RepetidaLinha = { id: string; status_atual: string | null; acoes: string[] 
 type RepetidaGrupo = {
   plataforma: string | null
   status_plataforma: string | null
+  localizacao_contem: string | null
   manter_id: string
   apagar_ids: string[]
   status_atual_final: string
@@ -1597,6 +1614,7 @@ type RepetidaGrupo = {
 type RepetidaConflito = {
   plataforma: string | null
   status_plataforma: string | null
+  localizacao_contem: string | null
   linhas: RepetidaLinha[]
 }
 const juntarModal = ref<{
@@ -2966,6 +2984,8 @@ async function aplicarStatusBling(c: Logistica) {
       <p class="text-sm text-muted-foreground">
         Clique numa célula pra editar só aquele campo. Os campos ficam vazios pra o operador
         preencher à mão. Na "Mensagem do Chamado" dá pra anexar imagens no botão de foto (ou colar uma URL no texto).
+        "Localização contém" é opcional: com palavras ali (ex.: apreendido), a regra só vale pros pedidos
+        cuja Localização tem a palavra, e passa na frente das regras sem condição do mesmo Status Plataforma.
       </p>
 
       <div v-if="statusError" class="text-sm text-red-500">erro: {{ statusError }}</div>
@@ -2978,6 +2998,7 @@ async function aplicarStatusBling(c: Logistica) {
               <th class="px-3 py-2">Plataforma</th>
               <th class="px-3 py-2">Status Plataforma</th>
               <th class="px-3 py-2">Status Atual</th>
+              <th class="px-3 py-2" :title="LOCALIZACAO_CONTEM_TITLE">Localização contém</th>
               <th class="px-3 py-2">Alterar Status Bling</th>
               <th class="px-3 py-2">Monitoramento</th>
               <th class="px-3 py-2">Abrir Chamado</th>
@@ -3026,6 +3047,27 @@ async function aplicarStatusBling(c: Logistica) {
                   :disabled="!canEdit || statusBusy.has(s.id)"
                   @save="(v) => patchStatusField(s.id, { status_atual: v })"
                 />
+              </td>
+              <!-- Localização contém (condição opcional; palavras separadas por ";") -->
+              <td class="px-2 py-1 align-top" :title="LOCALIZACAO_CONTEM_TITLE" @click="startEdit(s, 'localizacao_contem')">
+                <input
+                  v-if="isEditing(s, 'localizacao_contem')"
+                  v-model="editValue"
+                  autofocus
+                  placeholder="ex.: apreendido; extraviado"
+                  class="w-52 rounded border bg-background px-1.5 py-1 text-sm"
+                  @blur="commitEdit(s)"
+                  @keydown.enter.prevent="commitEdit(s)"
+                  @keydown.esc="cancelEdit"
+                />
+                <div v-else-if="palavrasLocalizacao(s.localizacao_contem).length" class="flex flex-wrap gap-1" :class="canEdit ? 'cursor-text' : ''">
+                  <span
+                    v-for="w in palavrasLocalizacao(s.localizacao_contem)"
+                    :key="w"
+                    class="text-xs px-2 py-0.5 rounded border border-amber-400/70 bg-amber-50 text-amber-900 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-200"
+                  >{{ w }}</span>
+                </div>
+                <span v-else class="text-muted-foreground" :class="canEdit ? 'cursor-text' : ''">—</span>
               </td>
               <!-- Alterar Status Bling (dropdown com os status conhecidos do Bling) -->
               <td class="px-2 py-1 whitespace-nowrap align-top" @click="startEdit(s, 'alterar_status_bling')">
@@ -3171,7 +3213,7 @@ async function aplicarStatusBling(c: Logistica) {
               </td>
             </tr>
             <tr v-if="!statusLoading && statusRowsFiltradas.length === 0">
-              <td :colspan="canEdit ? 10 : 9" class="px-3 py-6 text-center text-muted-foreground">
+              <td :colspan="canEdit ? 11 : 10" class="px-3 py-6 text-center text-muted-foreground">
                 {{ statusRows.length ? 'nenhum status bate com o filtro' : 'nenhum status' }}
               </td>
             </tr>
@@ -3222,6 +3264,16 @@ async function aplicarStatusBling(c: Logistica) {
               :disabled="!canEdit || statusBusy.has(s.id)"
               bloco
               @save="(v) => patchStatusField(s.id, { status_atual: v })"
+            />
+          </div>
+          <div>
+            <label class="text-xs text-muted-foreground" :title="LOCALIZACAO_CONTEM_TITLE">Localização contém</label>
+            <input
+              :value="s.localizacao_contem || ''"
+              :disabled="!canEdit || statusBusy.has(s.id)"
+              placeholder="ex.: apreendido; extraviado"
+              class="w-full rounded border bg-background px-2 py-1 text-sm"
+              @change="patchStatusField(s.id, { localizacao_contem: ($event.target as HTMLInputElement).value.trim() || null })"
             />
           </div>
           <div>
@@ -3364,6 +3416,15 @@ async function aplicarStatusBling(c: Logistica) {
           </p>
         </div>
         <div>
+          <Label>Localização contém</Label>
+          <Input v-model="statusForm.localizacao_contem" placeholder="ex.: apreendido; extraviado" />
+          <p class="mt-1 text-xs text-muted-foreground">
+            Opcional. A regra só vale quando a Localização do pedido tem uma dessas palavras (separe por ";";
+            maiúscula e acento não importam). Quando vale, ela passa na frente das regras sem condição deste
+            Status Plataforma.
+          </p>
+        </div>
+        <div>
           <Label>Alterar Status Bling</Label>
           <select
             v-model="statusForm.alterar_status_bling"
@@ -3431,7 +3492,7 @@ async function aplicarStatusBling(c: Logistica) {
           </Button>
         </div>
         <p class="text-sm text-muted-foreground">
-          Só junta linhas com a mesma plataforma, o mesmo Status Plataforma e exatamente as mesmas ações
+          Só junta linhas com a mesma plataforma, o mesmo Status Plataforma, a mesma condição de Localização e exatamente as mesmas ações
           (Alterar Status Bling, Monitoramento, Abrir chamado, mensagens, destinatários e imagens). Cada grupo
           vira uma linha só com todos os Status Atual. Linha sem Status Atual nunca entra.
         </p>
@@ -3450,6 +3511,7 @@ async function aplicarStatusBling(c: Logistica) {
               <div class="text-sm">
                 <span class="text-muted-foreground">{{ plataformaCanonica(g.plataforma) || 'Geral' }} ·</span>
                 <span class="font-medium">{{ g.status_plataforma }}</span>
+                <span v-if="g.localizacao_contem" class="text-muted-foreground"> · Localização contém: {{ g.localizacao_contem }}</span>
               </div>
               <div class="flex flex-wrap items-center gap-1 text-xs">
                 <template v-for="(l, i) in g.linhas" :key="l.id">
@@ -3474,6 +3536,7 @@ async function aplicarStatusBling(c: Logistica) {
               <div class="text-sm">
                 <span class="text-muted-foreground">{{ plataformaCanonica(c.plataforma) || 'Geral' }} ·</span>
                 <span class="font-medium">{{ c.status_plataforma }}</span>
+                <span v-if="c.localizacao_contem" class="text-muted-foreground"> · Localização contém: {{ c.localizacao_contem }}</span>
               </div>
               <div v-for="l in c.linhas" :key="l.id" class="text-xs">
                 <span class="px-2 py-0.5 rounded border border-border">{{ l.status_atual }}</span>

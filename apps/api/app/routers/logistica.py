@@ -365,7 +365,7 @@ async def _match_rules(session: AsyncSession, c: Logistica) -> list[LogisticaSta
     rows = (await session.execute(select(LogisticaStatus))).scalars().all()
     assinatura = logistica_rules.assinatura_para(c.plataforma, c.meli_status or {})
     return logistica_match.find_matching_rules(
-        list(rows), assinatura=assinatura, plataforma=c.plataforma
+        list(rows), assinatura=assinatura, plataforma=c.plataforma, localizacao=c.localizacao
     )
 
 
@@ -375,6 +375,7 @@ def _to_status_out(s: LogisticaStatus) -> LogisticaStatusOut:
         plataforma=s.plataforma,
         status_plataforma=s.status_plataforma,
         status_atual=s.status_atual,
+        localizacao_contem=s.localizacao_contem,
         alterar_status_bling=s.alterar_status_bling,
         monitoramento=s.monitoramento,
         abrir_chamado=s.abrir_chamado,
@@ -488,6 +489,7 @@ async def create_status(
         plataforma=_clean(body.plataforma),
         status_plataforma=_clean(body.status_plataforma),
         status_atual=logistica_match.juntar_status_atual(body.status_atual),
+        localizacao_contem=logistica_match.juntar_localizacao_contem(body.localizacao_contem),
         alterar_status_bling=_clean(body.alterar_status_bling),
         monitoramento=bool(body.monitoramento),
         abrir_chamado=bool(body.abrir_chamado),
@@ -540,6 +542,7 @@ async def status_repetidas(
             StatusRepetidaGrupo(
                 plataforma=g.manter.plataforma,
                 status_plataforma=g.manter.status_plataforma,
+                localizacao_contem=g.manter.localizacao_contem,
                 manter_id=g.manter.id,
                 apagar_ids=[r.id for r in g.apagar],
                 status_atual_final=g.status_atual,
@@ -552,6 +555,7 @@ async def status_repetidas(
             StatusRepetidaConflito(
                 plataforma=c[0].plataforma,
                 status_plataforma=c[0].status_plataforma,
+                localizacao_contem=c[0].localizacao_contem,
                 linhas=[_linha_repetida(r) for r in c],
             )
             for c in conflitos
@@ -611,6 +615,10 @@ async def patch_status(
         s.status_plataforma = _clean(data["status_plataforma"])
     if "status_atual" in data:
         s.status_atual = logistica_match.juntar_status_atual(data["status_atual"])
+    if "localizacao_contem" in data:
+        s.localizacao_contem = logistica_match.juntar_localizacao_contem(
+            data["localizacao_contem"]
+        )
     if "alterar_status_bling" in data:
         s.alterar_status_bling = _clean(data["alterar_status_bling"])
     if "monitoramento" in data:
@@ -877,7 +885,7 @@ async def list_logistica(
     for c in rows:
         assinatura = logistica_rules.assinatura_para(c.plataforma, c.meli_status or {})
         cands = logistica_match.find_matching_rules(
-            status_rows, assinatura=assinatura, plataforma=c.plataforma
+            status_rows, assinatura=assinatura, plataforma=c.plataforma, localizacao=c.localizacao
         )
         out.append(
             _to_out(

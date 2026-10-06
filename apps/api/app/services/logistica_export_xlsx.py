@@ -83,7 +83,8 @@ def montar_xlsx(
             cell.alignment = quebra if "\n" in texto else topo
 
     for j, w in enumerate(larguras, start=1):
-        ws.column_dimensions[get_column_letter(j)].width = min(max(w + 2, _LARGURA_MIN), _LARGURA_MAX)
+        largura = min(max(w + 2, _LARGURA_MIN), _LARGURA_MAX)
+        ws.column_dimensions[get_column_letter(j)].width = largura
     ws.freeze_panes = "A2"
     ws.auto_filter.ref = f"A1:{get_column_letter(len(colunas))}{max(len(linhas) + 1, 1)}"
 

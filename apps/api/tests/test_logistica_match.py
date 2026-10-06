@@ -40,7 +40,9 @@ def _rule(**kw) -> LogisticaStatus:
 
 def test_match_por_chave_normalizada():
     rows = [_rule(status_plataforma="Pago | Entregue", alterar_status_bling="Em andamento")]
-    r = logistica_match.find_matching_rule(rows, assinatura="  pago | entregue ", plataforma=None)
+    r = logistica_match.find_matching_rule(
+        rows, assinatura="  pago | entregue ", plataforma=None, localizacao=None
+    )
     assert r is rows[0]
 
 
@@ -48,7 +50,7 @@ def test_match_prefere_especifica_sobre_geral():
     geral = _rule(status_plataforma="Pago | Entregue", plataforma=None)
     espec = _rule(status_plataforma="Pago | Entregue", plataforma="Mercado Livre")
     r = logistica_match.find_matching_rule(
-        [geral, espec], assinatura="Pago | Entregue", plataforma="Mercado Livre"
+        [geral, espec], assinatura="Pago | Entregue", plataforma="Mercado Livre", localizacao=None
     )
     assert r is espec
 
@@ -61,7 +63,7 @@ def test_find_matching_rules_devolve_todas_da_chave():
               alterar_status_bling="Entregue")
     outra = _rule(status_plataforma="Pago | Cancelado", alterar_status_bling="Cancelado")
     got = logistica_match.find_matching_rules(
-        [a, b, outra], assinatura="pago | entregue", plataforma=None
+        [a, b, outra], assinatura="pago | entregue", plataforma=None, localizacao=None
     )
     assert got == [a, b]
 
@@ -72,30 +74,34 @@ def test_find_matching_rules_prefere_especificas():
     espec = _rule(status_plataforma="Pago | Entregue", plataforma="Mercado Livre",
                   alterar_status_bling="Em andamento")
     got = logistica_match.find_matching_rules(
-        [geral, espec], assinatura="Pago | Entregue", plataforma="Mercado Livre"
+        [geral, espec], assinatura="Pago | Entregue", plataforma="Mercado Livre", localizacao=None
     )
     assert got == [espec]  # havendo específica, ignora a geral
 
 
 def test_find_matching_rules_vazio_sem_assinatura():
     a = _rule(status_plataforma="Pago | Entregue", alterar_status_bling="Entregue")
-    assert logistica_match.find_matching_rules([a], assinatura="", plataforma=None) == []
+    assert logistica_match.find_matching_rules([a], assinatura="", plataforma=None, localizacao=None) == []
 
 
 def test_match_cai_na_geral_quando_plataforma_nao_bate():
     geral = _rule(status_plataforma="Pago | Entregue", plataforma=None)
     outra = _rule(status_plataforma="Pago | Entregue", plataforma="Shopee")
     r = logistica_match.find_matching_rule(
-        [outra, geral], assinatura="Pago | Entregue", plataforma="Mercado Livre"
+        [outra, geral], assinatura="Pago | Entregue", plataforma="Mercado Livre", localizacao=None
     )
     assert r is geral
 
 
 def test_match_sem_regra_e_assinatura_vazia():
     rows = [_rule(status_plataforma="Pago | Enviado")]
-    assert logistica_match.find_matching_rule(rows, assinatura="Pago | Entregue", plataforma=None) is None
-    assert logistica_match.find_matching_rule(rows, assinatura="", plataforma=None) is None
-    assert logistica_match.find_matching_rule(rows, assinatura=None, plataforma=None) is None
+    for assinatura in ("Pago | Entregue", "", None):
+        assert (
+            logistica_match.find_matching_rule(
+                rows, assinatura=assinatura, plataforma=None, localizacao=None
+            )
+            is None
+        )
 
 
 # ---- resumo_acoes (sem DB) ----
@@ -623,3 +629,156 @@ async def test_list_sem_regra_acao_match_false(
     assert linha["acao_match"] is False
     assert linha["acao_status_id"] is None
     assert linha["acao_resumo"] == []
+
+
+# ---- Condição "Localização contém" (Vinicius 06/10, ML 300064) ----
+
+_APREENDIDO = "BR — Objeto apreendido por órgão de fiscalização"
+
+
+def _cands(rows, localizacao, plataforma="Mercado Livre", assinatura="Pago | Enviado"):
+    return logistica_match.find_matching_rules(
+        rows, assinatura=assinatura, plataforma=plataforma, localizacao=localizacao
+    )
+
+
+def test_localizacao_casa_sem_maiuscula_nem_acento():
+    r = _rule(status_plataforma="Pago | Enviado", localizacao_contem="Apreensão; EXTRAVIADO")
+    assert logistica_match.localizacao_casa(r, "Objeto em apreensao pela fiscalização")
+    assert logistica_match.localizacao_casa(r, "objeto extraviado")
+    assert not logistica_match.localizacao_casa(r, "Objeto em trânsito")
+    assert not logistica_match.localizacao_casa(r, None)
+    assert not logistica_match.localizacao_casa(r, "")
+    # Sem condição: vale sempre, até sem Localização.
+    assert logistica_match.localizacao_casa(_rule(status_plataforma="x"), None)
+
+
+def test_regra_com_condicao_passa_na_frente_da_normal():
+    normal = _rule(plataforma="Mercado Livre", status_plataforma="Pago | Enviado",
+                   status_atual="Em andamento")
+    apreendido = _rule(plataforma="Mercado Livre", status_plataforma="Pago | Enviado",
+                       status_atual="Em andamento", localizacao_contem="apreendido",
+                       monitoramento=True)
+    rows = [normal, apreendido]
+
+    cands = _cands(rows, _APREENDIDO)
+    assert cands == [apreendido]
+    assert logistica_match.regra_ativa(cands, "Em andamento") is apreendido
+    assert logistica_match.deve_monitorar(cands, "Em andamento") is True  # fica na tela
+
+    cands = _cands(rows, "Objeto em trânsito - por favor aguarde")
+    assert cands == [normal]
+    assert logistica_match.deve_monitorar(cands, "Em andamento") is False
+    assert logistica_match.estado_resolvido(cands, "Em andamento") is True  # some, como hoje
+
+
+def test_condicao_geral_vence_especifica_sem_condicao():
+    especifica = _rule(plataforma="Mercado Livre", status_plataforma="Pago | Enviado")
+    geral_cond = _rule(status_plataforma="Pago | Enviado", localizacao_contem="apreendido")
+    assert _cands([especifica, geral_cond], _APREENDIDO) == [geral_cond]
+    assert _cands([especifica, geral_cond], "Em trânsito") == [especifica]
+
+
+def test_condicao_especifica_vence_condicao_geral():
+    geral_cond = _rule(status_plataforma="Pago | Enviado", localizacao_contem="apreendido")
+    esp_cond = _rule(plataforma="Mercado Livre", status_plataforma="Pago | Enviado",
+                     localizacao_contem="fiscalização")
+    assert _cands([geral_cond, esp_cond], _APREENDIDO) == [esp_cond]
+    assert _cands([geral_cond, esp_cond], _APREENDIDO, plataforma="Shopee") == [geral_cond]
+
+
+def test_condicao_que_nao_casa_nao_conta():
+    # Regra da plataforma com condição que não casa não tira a geral do jogo.
+    esp_cond = _rule(plataforma="Mercado Livre", status_plataforma="Pago | Enviado",
+                     localizacao_contem="extraviado")
+    geral = _rule(status_plataforma="Pago | Enviado")
+    assert _cands([esp_cond, geral], _APREENDIDO) == [geral]
+    assert _cands([esp_cond], _APREENDIDO) == []
+    assert _cands([esp_cond], None) == []
+
+
+def test_estado_sem_regra_com_condicao_fica_vermelho():
+    # O pedido apreendido foi pra Problemas; só existe regra com condição pra
+    # "Em andamento". A normal da chave não decide em silêncio: sem regra pro
+    # estado, a linha fica visível (vermelha) pra cadastrar.
+    normal_problemas = _rule(plataforma="Mercado Livre", status_plataforma="Pago | Enviado",
+                             status_atual="Problemas")
+    apreendido = _rule(plataforma="Mercado Livre", status_plataforma="Pago | Enviado",
+                       status_atual="Em andamento", localizacao_contem="apreendido",
+                       monitoramento=True)
+    cands = _cands([normal_problemas, apreendido], _APREENDIDO)
+    assert cands == [apreendido]
+    assert logistica_match.regra_ativa(cands, "Problemas") is None
+    assert logistica_match.estado_resolvido(cands, "Problemas") is False
+
+
+def test_juntar_localizacao_contem_normaliza():
+    j = logistica_match.juntar_localizacao_contem
+    assert j("apreendido;  Apreendido ; extraviado;") == "apreendido; extraviado"
+    assert j(["Apreensão", "apreensao", " roubo  furtado "]) == "Apreensão; roubo furtado"
+    assert j("") is None
+    assert j(None) is None
+    assert j([" ", ";"]) is None
+
+
+def test_regras_repetidas_respeitam_a_condicao():
+    base = {"plataforma": "Mercado Livre", "status_plataforma": "Pago | Enviado",
+            "monitoramento": True}
+    sem = _rule(id=uuid.uuid4(), status_atual="Em aberto", **base)
+    com = _rule(id=uuid.uuid4(), status_atual="Em andamento", localizacao_contem="apreendido",
+                **base)
+    grupos, conflitos = logistica_match.regras_repetidas([sem, com])
+    assert grupos == [] and conflitos == []  # condições diferentes não se juntam
+
+    com2 = _rule(id=uuid.uuid4(), status_atual="Problemas", localizacao_contem="APREENDIDO",
+                 **base)
+    grupos, _ = logistica_match.regras_repetidas([sem, com, com2])
+    assert len(grupos) == 1
+    assert {grupos[0].manter.id, *(r.id for r in grupos[0].apagar)} == {com.id, com2.id}
+
+
+@pytest.mark.asyncio
+async def test_list_condicao_localizacao_mostra_o_apreendido(
+    client: AsyncClient, admin: User, auth_as: Callable[[User | None], None]
+):
+    auth_as(admin)
+    meli = {"order_status": "paid", "ship_status": "shipped"}
+    chave = logistica_rules.assinatura_pt(meli)
+
+    rn = await client.post(
+        "/api/logistica/status",
+        json={"plataforma": "Mercado Livre", "status_plataforma": chave,
+              "status_atual": ["Em andamento"]},
+    )
+    assert rn.status_code == 201, rn.text
+    rc = await client.post(
+        "/api/logistica/status",
+        json={"plataforma": "Mercado Livre", "status_plataforma": chave,
+              "status_atual": ["Em andamento"], "localizacao_contem": " apreendido ;",
+              "monitoramento": True},
+    )
+    assert rc.status_code == 201, rc.text
+    assert rc.json()["localizacao_contem"] == "apreendido"
+
+    for pedido, loc in (("300064", _APREENDIDO), ("300065", "Objeto em trânsito")):
+        r = await client.post(
+            "/api/logistica",
+            json={"plataforma": "Mercado Livre", "pedido_bling": pedido, "meli_status": meli,
+                  "localizacao": loc, "status_bling": "Em andamento"},
+        )
+        assert r.status_code == 201, r.text
+
+    lista = (await client.get("/api/logistica?plataforma=ml")).json()
+    linhas = {x["pedido_bling"]: x for x in lista}
+    assert linhas["300064"]["acao_status_id"] == rc.json()["id"]
+    assert linhas["300064"]["acao_monitorar"] is True
+    assert linhas["300065"]["acao_status_id"] == rn.json()["id"]
+    assert linhas["300065"]["acao_monitorar"] is False
+    assert linhas["300065"]["acao_resolvido"] is True
+
+    # Apagar a condição (texto vazio) volta a regra a ser "normal".
+    rp = await client.patch(
+        f"/api/logistica/status/{rc.json()['id']}", json={"localizacao_contem": ""}
+    )
+    assert rp.status_code == 200, rp.text
+    assert rp.json()["localizacao_contem"] is None

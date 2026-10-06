@@ -591,7 +591,7 @@ async def _ids_pendentes(
             continue
         assinatura = logistica_rules.assinatura_para(r.plataforma, r.meli_status or {})
         cands = logistica_match.find_matching_rules(
-            regras, assinatura=assinatura, plataforma=r.plataforma
+            regras, assinatura=assinatura, plataforma=r.plataforma, localizacao=r.localizacao
         )
         resolvido = logistica_match.estado_resolvido(
             cands, r.status_bling, threema_enviado=r.threema_enviado_at is not None

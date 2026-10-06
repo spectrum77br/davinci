@@ -9,10 +9,15 @@ chamado/reembolso, mensagens de chamado/Bling/Threema).
 linha da aba Status se aplica — prefere a regra ESPECÍFICA da plataforma e cai
 na regra GERAL (plataforma vazia). É a MESMA função que a automação vai chamar
 pra saber o que executar, então o que a UI mostra bate com o que o sistema fará.
+
+Regra pode ter condição na Localização (`localizacao_contem`, 06/10): quando a
+Localização do pedido tem a palavra, as regras com condição passam na frente
+das sem condição da mesma chave (ver `find_matching_rules`).
 """
 
 from __future__ import annotations
 
+import unicodedata
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from uuid import UUID
@@ -74,59 +79,117 @@ def juntar_status_atual(valor: str | list[str] | None) -> str | None:
     return f"{SEPARADOR_STATUS_ATUAL} ".join(out) or None
 
 
-def find_matching_rule(
-    rows: list[LogisticaStatus], *, assinatura: str | None, plataforma: str | None
-) -> LogisticaStatus | None:
-    """Regra da aba Status cuja chave casa com a assinatura do pedido.
+# ---- Condição na Localização (Vinicius 06/10) ----
+# O marketplace não sabe de tudo: o ML 300064 seguia "Pago | Enviado" com o
+# pacote "apreendido por órgão de fiscalização" nos Correios, e a regra dessa
+# chave (a mesma de milhares de pedidos normais) o escondia. A regra ganha uma
+# condição opcional: palavras que precisam aparecer na Localização.
+SEPARADOR_LOCALIZACAO = ";"
 
-    Casa por `status_plataforma` normalizado (trim + lower). Entre as que
-    casam, prefere a específica da plataforma; senão a geral (plataforma
-    vazia). None se nenhuma casar ou a assinatura estiver vazia.
-    """
-    chave = _norm(assinatura)
-    if not chave:
-        return None
-    plat = _norm(plataforma)
-    especifica: LogisticaStatus | None = None
-    geral: LogisticaStatus | None = None
-    for s in rows:
-        if _norm(s.status_plataforma) != chave:
-            continue
-        sp = _norm(s.plataforma)
-        if sp and sp == plat:
-            especifica = especifica or s
-        elif not sp:
-            geral = geral or s
-    return especifica or geral
+
+def _norm_texto(v: str | None) -> str:
+    """Minúsculo, sem acento e com espaços simples: "Apreensão" casa "apreensao"."""
+    sem_acento = "".join(
+        ch for ch in unicodedata.normalize("NFKD", v or "") if not unicodedata.combining(ch)
+    )
+    return " ".join(sem_acento.lower().split())
+
+
+def palavras_localizacao(valor: str | None) -> list[str]:
+    """As palavras da condição, na ordem gravada (vazias fora). Lista vazia =
+    regra sem condição."""
+    return [p.strip() for p in (valor or "").split(SEPARADOR_LOCALIZACAO) if p.strip()]
+
+
+def juntar_localizacao_contem(valor: str | list[str] | None) -> str | None:
+    """Normaliza o que chega da API pra gravar: lista ou texto com ";", sem
+    vazias nem repetidas (sem diferenciar maiúscula/acento). None = sem condição."""
+    itens = valor if isinstance(valor, list) else [valor]
+    partes = [p for item in itens for p in palavras_localizacao(item)]
+    out: list[str] = []
+    vistos: set[str] = set()
+    for p in partes:
+        p = " ".join((p or "").split())
+        if p and _norm_texto(p) not in vistos:
+            vistos.add(_norm_texto(p))
+            out.append(p)
+    return f"{SEPARADOR_LOCALIZACAO} ".join(out) or None
+
+
+def tem_condicao_localizacao(rule: LogisticaStatus) -> bool:
+    return bool(palavras_localizacao(rule.localizacao_contem))
+
+
+def localizacao_casa(rule: LogisticaStatus, localizacao: str | None) -> bool:
+    """A condição da regra vale pra essa Localização? Regra sem condição: sempre.
+    Com condição: basta UMA das palavras aparecer (sem maiúscula nem acento);
+    Localização vazia nunca casa uma condição."""
+    palavras = palavras_localizacao(rule.localizacao_contem)
+    if not palavras:
+        return True
+    texto = _norm_texto(localizacao)
+    return bool(texto) and any(_norm_texto(p) in texto for p in palavras)
+
+
+def find_matching_rule(
+    rows: list[LogisticaStatus],
+    *,
+    assinatura: str | None,
+    plataforma: str | None,
+    localizacao: str | None,
+) -> LogisticaStatus | None:
+    """A primeira de `find_matching_rules` (a que manda pra essa chave). None se
+    nenhuma casar ou a assinatura estiver vazia."""
+    regras = find_matching_rules(
+        rows, assinatura=assinatura, plataforma=plataforma, localizacao=localizacao
+    )
+    return regras[0] if regras else None
 
 
 def find_matching_rules(
-    rows: list[LogisticaStatus], *, assinatura: str | None, plataforma: str | None
+    rows: list[LogisticaStatus],
+    *,
+    assinatura: str | None,
+    plataforma: str | None,
+    localizacao: str | None,
 ) -> list[LogisticaStatus]:
-    """TODAS as regras da aba Status cuja chave casa com a assinatura do pedido.
+    """TODAS as regras da aba Status que valem pra chave do pedido.
 
     Como uma mesma assinatura do ML pode ter mais de uma linha (máquina de
     estados: a transição do Bling depende de onde o pedido está agora), isto
     devolve o conjunto de candidatas pra quem precisa desambiguar pela situação
-    atual do pedido (ex.: o executor de Alterar Status Bling). Prefere as
-    específicas da plataforma; se não houver nenhuma específica, cai nas gerais
-    (plataforma vazia). Lista vazia se a assinatura estiver vazia ou nada casar.
-    """
+    atual do pedido (ex.: o executor de Alterar Status Bling).
+
+    Precedência, do mais forte pro mais fraco — vale o primeiro grupo que tiver
+    alguma regra, e só ele:
+      1. com condição na Localização que casa, da plataforma do pedido;
+      2. com condição na Localização que casa, gerais (plataforma vazia);
+      3. sem condição, da plataforma do pedido;
+      4. sem condição, gerais.
+    Regra com condição que NÃO casa não conta pra nada (como se não existisse).
+    Quando um grupo com condição vale, as regras sem condição da chave ficam de
+    fora em TODOS os estados do Bling: estado sem regra com condição pinta a
+    linha de vermelho (combinação sem cadastro) — o operador cadastra, em vez
+    de a regra normal decidir em silêncio um pedido que ele marcou como especial.
+    Lista vazia se a assinatura estiver vazia ou nada casar."""
     chave = _norm(assinatura)
     if not chave:
         return []
     plat = _norm(plataforma)
-    especificas: list[LogisticaStatus] = []
-    gerais: list[LogisticaStatus] = []
+    grupos: tuple[list[LogisticaStatus], ...] = ([], [], [], [])
     for s in rows:
         if _norm(s.status_plataforma) != chave:
             continue
         sp = _norm(s.plataforma)
-        if sp and sp == plat:
-            especificas.append(s)
-        elif not sp:
-            gerais.append(s)
-    return especificas or gerais
+        if sp and sp != plat:
+            continue
+        geral = not sp
+        if tem_condicao_localizacao(s):
+            if localizacao_casa(s, localizacao):
+                grupos[1 if geral else 0].append(s)
+        else:
+            grupos[3 if geral else 2].append(s)
+    return next((g for g in grupos if g), [])
 
 
 def regras_aplicaveis(
@@ -357,7 +420,8 @@ def regras_repetidas(
     """Acha as linhas da aba Status que dá pra juntar numa só.
 
     Mesmo grupo = mesma plataforma + mesma chave (`status_plataforma`, como o
-    casador compara: sem maiúscula e sem espaço nas pontas) + as MESMAS ações
+    casador compara: sem maiúscula e sem espaço nas pontas) + a mesma condição
+    na Localização (as mesmas palavras, em qualquer ordem) + as MESMAS ações
     (`_acoes_da_regra`; `anexos` = hashes das imagens de cada regra). Só entram
     linhas com Status Atual: a curinga (vale de qualquer estado) nunca se junta
     — somar estados a ela mudaria o que ela cobre.
@@ -367,10 +431,18 @@ def regras_repetidas(
     estado cai nas duas e vale a primeira; juntar poderia trocar qual vale, então
     o grupo fica de fora e aparece como conflito pro operador decidir."""
     anexos = anexos or {}
-    por_chave: dict[tuple[str, str], list[LogisticaStatus]] = {}
+    # A condição na Localização faz parte da chave: regra com condição e regra
+    # sem nunca valem juntas pro mesmo pedido (`find_matching_rules`), então
+    # nem se juntam nem conflitam entre si.
+    por_chave: dict[tuple[str, str, tuple[str, ...]], list[LogisticaStatus]] = {}
     for r in rows:
         if _norm(r.status_plataforma):
-            por_chave.setdefault((_norm(r.plataforma), _norm(r.status_plataforma)), []).append(r)
+            condicao = tuple(
+                sorted({_norm_texto(p) for p in palavras_localizacao(r.localizacao_contem)})
+            )
+            por_chave.setdefault(
+                (_norm(r.plataforma), _norm(r.status_plataforma), condicao), []
+            ).append(r)
 
     grupos: list[GrupoRepetido] = []
     conflitos: list[list[LogisticaStatus]] = []

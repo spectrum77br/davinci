@@ -306,6 +306,9 @@ class LogisticaStatusOut(BaseModel):
     status_plataforma: str | None = None
     # Estados do Bling de onde a regra parte, separados por ";" (vazio = qualquer).
     status_atual: str | None = None
+    # Palavras que precisam aparecer na Localização, separadas por ";" (vazio =
+    # sem condição).
+    localizacao_contem: str | None = None
     alterar_status_bling: str | None = None
     monitoramento: bool = False
     abrir_chamado: bool = False
@@ -326,6 +329,8 @@ class LogisticaStatusCreate(BaseModel):
     # Um ou vários estados do Bling: lista ou texto separado por ";" (é como a
     # coluna guarda e o Out devolve). Vazio = vale de qualquer estado.
     status_atual: str | list[str] | None = None
+    # Condição na Localização: lista ou texto separado por ";". Vazio = nenhuma.
+    localizacao_contem: str | list[str] | None = None
     alterar_status_bling: str | None = None
     monitoramento: bool = False
     abrir_chamado: bool = False
@@ -340,6 +345,7 @@ class LogisticaStatusPatch(BaseModel):
     plataforma: str | None = None
     status_plataforma: str | None = None
     status_atual: str | list[str] | None = None
+    localizacao_contem: str | list[str] | None = None
     alterar_status_bling: str | None = None
     monitoramento: bool | None = None
     abrir_chamado: bool | None = None
@@ -362,6 +368,7 @@ class StatusRepetidaGrupo(BaseModel):
 
     plataforma: str | None = None
     status_plataforma: str | None = None
+    localizacao_contem: str | None = None
     manter_id: UUID
     apagar_ids: list[UUID]
     status_atual_final: str
@@ -374,6 +381,7 @@ class StatusRepetidaConflito(BaseModel):
 
     plataforma: str | None = None
     status_plataforma: str | None = None
+    localizacao_contem: str | None = None
     linhas: list[StatusRepetidaLinha]
 
 

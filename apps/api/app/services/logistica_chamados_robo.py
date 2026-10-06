@@ -136,7 +136,10 @@ async def abrir_chamados_em_lote(
             continue  # backlog antigo: não vira tarefa sozinho
         assinatura = logistica_rules.assinatura_para(row.plataforma, row.meli_status or {})
         cands = logistica_match.find_matching_rules(
-            status_rows, assinatura=assinatura, plataforma=row.plataforma
+            status_rows,
+            assinatura=assinatura,
+            plataforma=row.plataforma,
+            localizacao=row.localizacao,
         )
         aplicaveis = logistica_match.regras_aplicaveis(cands, row.status_bling)
         rule = next((r for r in aplicaveis if r.abrir_chamado), None)
