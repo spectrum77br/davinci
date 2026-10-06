@@ -1238,6 +1238,27 @@ async def test_produto_grava_preco_catalogo(
 
 
 @pytest.mark.asyncio
+async def test_importacao_sem_a_coluna_catalogo_nao_apaga_o_preco(
+    db: AsyncSession, client: AsyncClient, dono: User, cenario, auth_as: Callable,
+):
+    auth_as(dono)
+    item = {"sku": "a003", "name": "Fone a003", "department": "celular", "product_type": 1,
+            "cost_kit1": "41"}
+    r = await client.post("/api/pricing/products/import", json={"items": [item]})
+    assert r.status_code == 200, r.text
+    await db.refresh(cenario["a003"])
+    assert cenario["a003"].cost_kit1 == Decimal("41")
+    assert cenario["a003"].preco_catalogo == Decimal("55")
+    r = await client.post(
+        "/api/pricing/products/import",
+        json={"items": [{**item, "preco_catalogo": "60"}]},
+    )
+    assert r.status_code == 200
+    await db.refresh(cenario["a003"])
+    assert cenario["a003"].preco_catalogo == Decimal("60")
+
+
+@pytest.mark.asyncio
 async def test_lojas_recusa_catalogo_mas_deixa_tirar_o_antigo(
     db: AsyncSession, client: AsyncClient, dono: User, cenario, auth_as: Callable,
 ):

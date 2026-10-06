@@ -788,6 +788,10 @@ async def import_products(
             skipped += 1
             continue
         data = item.model_dump(exclude={"department", "product_type"})
+        # Linha de importação sem a coluna Catálogo não apaga o preço de
+        # catálogo que já existe.
+        if "preco_catalogo" not in item.model_fields_set:
+            data.pop("preco_catalogo", None)
         if data.get("segment_id") is None:
             sid = await _resolve_leaf_segment_id(
                 session,

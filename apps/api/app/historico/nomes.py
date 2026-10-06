@@ -357,6 +357,10 @@ CAMPOS: dict[str, str] = {
     "base_calculo": "Base de cálculo",
     # Porcentagem da empresa (Cadastros › Empresas, 29/09): % padrão da NFS-e.
     "percentual_servico": "Porcentagem (nota de serviço)",
+    # Catálogo ML (06/10/2026).
+    "preco_catalogo": "Catálogo (custo)",
+    "canal": "Canal (kit/catálogo)",
+    "conta_base_id": "Conta de kit (base do catálogo)",
 }
 for _i in range(1, 6):
     CAMPOS[f"margin{_i}"] = f"Margem {_i}"

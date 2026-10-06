@@ -47,7 +47,7 @@ ITEM_FKS: dict[str, tuple[str, ...]] = {
 PERCENTUAIS = {"commission", "min_margin", *(f"margin{i}" for i in range(1, 6))}
 DINHEIRO = {
     "price_override", "bling_cost_price", "valorbase", "taxacomissao", "custofrete",
-    "reembolso", "prejuizo",
+    "reembolso", "prejuizo", "preco_catalogo",
     *(f"cost_kit{i}" for i in range(1, 9)), *(f"shipping{i}" for i in range(1, 6)),
 }
 # "valor" só é dinheiro onde se sabe que é.
