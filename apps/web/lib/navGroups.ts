@@ -59,6 +59,10 @@ export const TABS_CADASTROS: RouteTab[] = [
   // Criativos. A permissão é a da tela dos criativos (`marketing_criativos`),
   // que é quem manda no robô de postagem.
   { to: '/legendas', label: 'Legendas', resource: 'marketing_criativos' },
+  // Imobilizado (06/10/2026): bens da empresa e quem responde por cada um.
+  // Sem `resource` de propósito: quem não tem a permissão vê só os itens de
+  // que é responsável (a tela e a API filtram). Admin/Gestor veem todos.
+  { to: '/imobilizado', label: 'Imobilizado' },
 ]
 
 export const TABS_NF: RouteTab[] = [

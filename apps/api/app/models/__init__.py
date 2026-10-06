@@ -110,6 +110,7 @@ from app.models.financeiro import (
 )
 from app.models.flex import FlexAnuncioEstado, FlexConta, FlexEmergencia, FlexLog, FlexPedido
 from app.models.imagem_publica import ImagemPublica
+from app.models.imobilizado import IMOBILIZADO_STATUS, Imobilizado, ImobilizadoHistorico
 from app.models.importacao import (
     CotacaoFabricante,
     CotacaoProduto,
@@ -440,6 +441,9 @@ __all__ = [
     "SyncLogAction",
     "Fatura",
     "Tarefa",
+    "IMOBILIZADO_STATUS",
+    "Imobilizado",
+    "ImobilizadoHistorico",
     "ThreemaInformarConfig",
     "User",
     "UserRole",

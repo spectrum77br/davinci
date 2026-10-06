@@ -21,11 +21,12 @@ from app.schemas.users import (
     UserListOut,
     UserOut,
     UserPatch,
-    _normalize_sales_teams,
     _normalize_marketing_teams,
+    _normalize_sales_teams,
     _normalize_stock_tags,
 )
 from app.security.password import hash_password
+from app.services import imobilizado as imobilizado_svc
 
 _settings = get_settings()
 
@@ -59,6 +60,32 @@ def _to_out(u: User) -> UserOut:
         created_at=getattr(u, "created_at", None),
         updated_at=getattr(u, "updated_at", None),
     )
+
+
+async def _avisar_imobilizado(session: AsyncSession, u: User, ignorar: bool) -> None:
+    """RN08 do Imobilizado: desativar quem ainda responde por bens ativos
+    devolve 409 com a lista, para a tela oferecer a transferência. A tela
+    repete o pedido com `ignorar_imobilizado=true` se a pessoa quiser seguir
+    sem transferir."""
+    if ignorar:
+        return
+    itens = await imobilizado_svc.itens_ativos_de(session, u.id)
+    if itens:
+        raise HTTPException(
+            409,
+            detail={
+                "code": "responsavel_imobilizado",
+                "itens": [
+                    {
+                        "id": i.id,
+                        "numero": i.numero,
+                        "descricao": i.descricao,
+                        "valor": imobilizado_svc.texto_valor(i.valor),
+                    }
+                    for i in itens
+                ],
+            },
+        )
 
 
 async def _count_active_admins(session: AsyncSession, exclude_id: UUID | None = None) -> int:
@@ -203,6 +230,7 @@ async def patch_user(
     body: UserPatch,
     session: Annotated[AsyncSession, Depends(get_session)],
     admin: Annotated[User, Depends(require_admin)],
+    ignorar_imobilizado: bool = False,
 ) -> UserOut:
     res = await session.execute(select(User).where(User.id == user_id))
     u = res.scalar_one_or_none()
@@ -226,6 +254,8 @@ async def patch_user(
             remaining = await _count_active_admins(session, exclude_id=u.id)
             if remaining == 0:
                 raise HTTPException(409, detail={"code": "last_admin"})
+        if u.status == UserStatus.ACTIVE and new_status != UserStatus.ACTIVE:
+            await _avisar_imobilizado(session, u, ignorar_imobilizado)
         u.status = new_status
 
     for field in ("name", "tuta", "upseller", "bling_login", "adspower", "duoke", "threema"):
@@ -320,6 +350,7 @@ async def delete_user(
     user_id: UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
     admin: Annotated[User, Depends(require_admin)],
+    ignorar_imobilizado: bool = False,
 ) -> None:
     if user_id == admin.id:
         raise HTTPException(409, detail={"code": "cannot_delete_self"})
@@ -336,6 +367,7 @@ async def delete_user(
         if remaining == 0:
             raise HTTPException(409, detail={"code": "last_admin"})
 
+    await _avisar_imobilizado(session, u, ignorar_imobilizado)
     u.disabled_at = datetime.now(UTC)
     u.status = UserStatus.SUSPENDED
     await session.commit()

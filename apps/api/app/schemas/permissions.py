@@ -50,6 +50,11 @@ Resource = Literal[
     "financeiro_suprimentos",
     "financeiro_simulacao",
     "financeiro_dnp",
+    # Cadastros › Imobilizado (06/10/2026): bens da empresa. view = vê todos
+    # (Gestor); edit = cadastra, edita e transfere; delete = dá baixa
+    # (Administrador de patrimônio). Sem view a pessoa vê só os itens de que é
+    # responsável. Mesmo nome no useCan.ts.
+    "imobilizado",
     # Legacy — Valuation virou admin-only (require_admin no router), o
     # resource não é mais usado em runtime. Mantido aqui pra JSONB salvo
     # antes da mudança não falhar na validação (mesmo precedente do

@@ -2,6 +2,7 @@
 import { computed, reactive, ref } from 'vue'
 import { ArrowLeft, Save, Trash2, X } from 'lucide-vue-next'
 import { ACTIONS, RESOURCES, RESOURCE_GROUPS, RESOURCE_LABELS, type Action, type Resource } from '~/composables/useCan'
+import { errosDaApi, formatBRL, type Pessoa } from '~/lib/imobilizado'
 
 definePageMeta({ middleware: ['admin'] })
 
@@ -338,7 +339,49 @@ async function setPassword() {
   }
 }
 
-async function saveCadastral() {
+// RN08 do Imobilizado (06/10/2026): desativar (status ou Excluir) quem ainda
+// responde por bens ativos volta 409 com a lista. A janela oferece passar
+// tudo para outra pessoa antes, ou seguir sem transferir.
+type ItemImob = { id: number; numero: string; descricao: string; valor: string }
+const imob = reactive({
+  itens: [] as ItemImob[],
+  acao: null as null | 'salvar' | 'excluir',
+  pessoas: [] as Pessoa[],
+  para_id: '',
+  enviando: false,
+  erro: '',
+})
+
+async function avisarImobilizado(e: any, acao: 'salvar' | 'excluir'): Promise<boolean> {
+  const det = e?.data?.detail
+  if (det?.code !== 'responsavel_imobilizado') return false
+  Object.assign(imob, { itens: det.itens || [], acao, para_id: '', erro: '' })
+  try {
+    const todas = await api<Pessoa[]>('/api/imobilizado/responsaveis')
+    imob.pessoas = todas.filter(p => p.ativo !== false && p.id !== userId)
+  } catch { imob.pessoas = [] }
+  return true
+}
+
+async function seguirImobilizado(transferir: boolean) {
+  const acao = imob.acao
+  if (!acao || imob.enviando) return
+  if (transferir && !imob.para_id) { imob.erro = 'Escolha quem vai receber os itens.'; return }
+  imob.enviando = true
+  imob.erro = ''
+  try {
+    if (transferir) {
+      await api('/api/imobilizado/transferir', { method: 'POST', body: { de_id: userId, para_id: imob.para_id } })
+    }
+    imob.acao = null
+    if (acao === 'salvar') await saveCadastral(!transferir)
+    else await removeUser(!transferir, true)
+  } catch (e) {
+    imob.erro = errosDaApi(e).geral || Object.values(errosDaApi(e).campos)[0] || 'erro'
+  } finally { imob.enviando = false }
+}
+
+async function saveCadastral(ignorarImobilizado = false) {
   saving.value = true
   error.value = null
   try {
@@ -357,10 +400,12 @@ async function saveCadastral() {
     body.commercial_team = form.commercial_team
     // Equipe de Marketing (nomes livres — mesma semântica).
     body.marketing_teams = [...form.marketing_teams]
-    user.value = await api<UserDetail>(`/api/users/${userId}`, { method: 'PATCH', body })
+    user.value = await api<UserDetail>(`/api/users/${userId}`, {
+      method: 'PATCH', body, query: ignorarImobilizado ? { ignorar_imobilizado: true } : undefined,
+    })
     resetPerms()
   } catch (e: any) {
-    error.value = e?.data?.detail?.code || e?.message || 'erro'
+    if (!(await avisarImobilizado(e, 'salvar'))) error.value = e?.data?.detail?.code || e?.message || 'erro'
   } finally {
     saving.value = false
   }
@@ -382,15 +427,18 @@ async function savePerms() {
   }
 }
 
-async function removeUser() {
-  if (!confirm('Excluir (desabilitar) este usuário?')) return
+async function removeUser(ignorarImobilizado = false, jaConfirmou = false) {
+  // Volta da janela do Imobilizado: a pessoa já confirmou a exclusão.
+  if (!jaConfirmou && !confirm('Excluir (desabilitar) este usuário?')) return
   deleting.value = true
   error.value = null
   try {
-    await api(`/api/users/${userId}`, { method: 'DELETE' })
+    await api(`/api/users/${userId}`, {
+      method: 'DELETE', query: ignorarImobilizado ? { ignorar_imobilizado: true } : undefined,
+    })
     await router.push('/users')
   } catch (e: any) {
-    error.value = e?.data?.detail?.code || e?.message || 'erro'
+    if (!(await avisarImobilizado(e, 'excluir'))) error.value = e?.data?.detail?.code || e?.message || 'erro'
     deleting.value = false
   }
 }
@@ -410,13 +458,47 @@ async function removeUser() {
         size="sm"
         variant="outline"
         :disabled="isSelf || deleting"
-        @click="removeUser"
+        @click="removeUser()"
       >
         <Trash2 class="size-4 mr-1" /> Excluir
       </Button>
     </div>
 
     <div v-if="error" class="text-sm text-red-500">erro: {{ error }}</div>
+
+    <!-- RN08 do Imobilizado: a pessoa ainda responde por bens ativos. -->
+    <div v-if="imob.acao" class="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4" @click.self="imob.acao = null">
+      <div class="bg-background border rounded-lg w-full max-w-lg p-5 space-y-4 max-h-[90vh] overflow-auto">
+        <div class="flex items-center">
+          <h2 class="text-lg font-semibold">Itens do imobilizado com esta pessoa</h2>
+          <Button class="ml-auto" size="sm" variant="ghost" aria-label="Fechar" @click="imob.acao = null"><X class="size-4" /></Button>
+        </div>
+        <p class="text-sm text-muted-foreground">
+          {{ user.name || user.email }} é responsável por {{ imob.itens.length }}
+          {{ imob.itens.length === 1 ? 'item ativo' : 'itens ativos' }}. Transfira para outra pessoa antes de desativar.
+        </p>
+        <ul class="rounded-md border divide-y text-sm max-h-56 overflow-auto">
+          <li v-for="i in imob.itens" :key="i.id" class="px-3 py-2 flex gap-3">
+            <span class="font-mono whitespace-nowrap">{{ i.numero }}</span>
+            <span class="min-w-0 flex-1 break-words">{{ i.descricao }}</span>
+            <span class="tabular-nums whitespace-nowrap">{{ formatBRL(i.valor) }}</span>
+          </li>
+        </ul>
+        <div>
+          <Label for="imob-para">Transferir para</Label>
+          <select id="imob-para" v-model="imob.para_id" class="w-full h-9 rounded-md border bg-background px-2 text-sm">
+            <option value="">— selecione —</option>
+            <option v-for="p in imob.pessoas" :key="p.id" :value="p.id">{{ p.nome }}</option>
+          </select>
+        </div>
+        <p v-if="imob.erro" role="alert" class="text-sm text-destructive">{{ imob.erro }}</p>
+        <div class="flex flex-wrap justify-end gap-2">
+          <Button variant="ghost" :disabled="imob.enviando" @click="imob.acao = null">Cancelar</Button>
+          <Button variant="outline" :disabled="imob.enviando" @click="seguirImobilizado(false)">Desativar sem transferir</Button>
+          <Button :disabled="imob.enviando || !imob.para_id" @click="seguirImobilizado(true)">Transferir e desativar</Button>
+        </div>
+      </div>
+    </div>
 
     <!-- Cadastral -->
     <Card>
@@ -591,7 +673,7 @@ async function removeUser() {
           </div>
         </div>
         <div class="flex justify-end">
-          <Button :disabled="saving" @click="saveCadastral">
+          <Button :disabled="saving" @click="saveCadastral()">
             <Save class="size-4 mr-1" /> {{ saving ? 'salvando…' : 'Salvar dados' }}
           </Button>
         </div>

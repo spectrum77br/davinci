@@ -17,6 +17,7 @@ export type Resource =
   | 'financeiro_suprimentos'
   | 'financeiro_simulacao'
   | 'financeiro_dnp'
+  | 'imobilizado'
   | 'importacao'
   | 'devolucoes'
   | 'reembolso'
@@ -115,6 +116,10 @@ export const RESOURCE_GROUPS: ResourceGroup[] = [
       'emissao_servico', 'segmentos',
       // Marcas e Redes Sociais (15/09/2026) — abas novas do grupo Cadastros.
       'marcas', 'redes_sociais', 'email_padroes',
+      // Imobilizado (06/10/2026): bens da empresa. view = vê todos (Gestor);
+      // edit = cadastra/edita/transfere; delete = dá baixa (Administrador de
+      // patrimônio). Sem view a pessoa vê só os itens dela.
+      'imobilizado',
     ],
   },
   {
@@ -154,6 +159,7 @@ export const RESOURCE_LABELS: Record<Resource, string> = {
   financeiro_suprimentos: 'Certificações',
   financeiro_simulacao: 'Simulação',
   financeiro_dnp: 'DNP',
+  imobilizado: 'Imobilizado (patrimônio)',
   importacao: 'Importação',
   devolucoes: 'Devoluções',
   reembolso: 'Reembolso',

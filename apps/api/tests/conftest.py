@@ -416,6 +416,8 @@ _CLEANUP_TABLES = (
     "marca_email_padroes",
     "marca_emails",
     "marcas",
+    "imobilizado_historico",  # FK RESTRICT -> imobilizado/users
+    "imobilizado",  # FK RESTRICT -> users
     "tarefas",  # FK RESTRICT -> users
     "import_kit_marks",
     "import_kit_bases",
