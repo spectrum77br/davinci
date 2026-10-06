@@ -500,6 +500,12 @@ _CLEANUP_TABLES = (
     "logistica_mensagem_template",
     "logistica",
     "devolucao_rastreio",
+    # Conferência Shopee (0375): a coleta tem FK → execução (CASCADE) e →
+    # conta (SET NULL): vem antes das duas. O saldo não tem FK.
+    "conferencia_shopee_coleta",
+    "conferencia_shopee_execucao",
+    "conferencia_shopee_conta",
+    "conferencia_shopee_saldo",
     "threema_informar_config",
     "user_settings",
     "users",

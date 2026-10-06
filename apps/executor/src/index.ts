@@ -18,11 +18,14 @@
  *
  * Cada máquina liga só as filas dela (EXECUTOR_FILAS): desde 24/09/2026 o
  * "Suspender entrega" do Melhor Envio roda no Mac Santiago, e a Shopee e o
- * Tuta ficam no executor do Eduardo.
+ * Tuta ficam no executor do Eduardo. Desde 06/10/2026 há a `conferencia`
+ * (Conferência Shopee, só leitura): uma loja por ciclo, depois das outras.
  */
 import "dotenv/config";
 
-import { cfg } from "./config";
+import fs from "node:fs";
+
+import { cfg, FILAS } from "./config";
 import { log } from "./log";
 import * as adspower from "./adspower";
 import * as shopee from "./shopee";
@@ -31,9 +34,11 @@ import * as melhorenvio from "./melhorenvio";
 import * as tuta from "./tuta";
 import * as tiktok from "./tiktok";
 import * as davinci from "./davinci";
+import { coletarConferencia, type JobConferencia, type ResultadoConferencia } from "./conferencia";
+import { periodoConferencia, resumoConferencia } from "./conferencia_util";
 import type { LeasedCommand, LeasedLogisticaCommand } from "./davinci";
 
-const VERSION = "1.2.0";
+const VERSION = "1.3.0";
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 let ticking = false;
@@ -287,6 +292,91 @@ function acoesLogistica(): string[] {
   return acoes;
 }
 
+/** O servidor recusa resultado acima de 3 MB (413); folga pro envelope. */
+const MAX_RESULTADO_CONFERENCIA = 2_900_000;
+let adspowerForaAvisado = false;
+
+/** Entrega o resultado da loja. Rede/5xx: tenta de novo (a coleta levou
+ *  minutos; perder por um soluço do servidor faria abrir o perfil de novo).
+ *  Grande demais: manda só o status, sem os dados. */
+async function entregarConferencia(job: JobConferencia, r: ResultadoConferencia): Promise<boolean> {
+  let corpo = r;
+  const tamanho = Buffer.byteLength(JSON.stringify(corpo));
+  if (tamanho > MAX_RESULTADO_CONFERENCIA) {
+    corpo = { status: "erro", erro: `dados grandes demais pro DaVinci (${Math.round(tamanho / 1024)} KB)`, dados: null };
+  }
+  for (let tentativa = 1; tentativa <= 3; tentativa++) {
+    try {
+      await davinci.resultadoConferencia(job.coleta_id, corpo);
+      return true;
+    } catch (err: any) {
+      const msg = String(err?.message || err);
+      if (err instanceof davinci.DavinciHttpError && err.status === 413 && corpo.dados) {
+        corpo = { status: "erro", erro: "dados grandes demais pro DaVinci (413)", dados: null };
+        continue;
+      }
+      // 422 com dados: o DaVinci não reconheceu a forma dos números (executor
+      // desatualizado?). Fecha a loja como erro em vez de deixar a coleta
+      // presa até o lease vencer e abrir o perfil de novo.
+      if (err instanceof davinci.DavinciHttpError && err.status === 422 && corpo.dados) {
+        log.error(`conferência ${job.conta}: o DaVinci recusou os números: ${msg}`);
+        corpo = { status: "erro", erro: `o DaVinci recusou os números desta loja (422): ${msg.slice(0, 300)}`, dados: null };
+        continue;
+      }
+      if (err instanceof davinci.DavinciHttpError && err.status < 500) {
+        log.error(`conferência ${job.conta}: o DaVinci recusou o resultado: ${msg}`);
+        return false;
+      }
+      if (tentativa === 3) {
+        log.error(
+          `conferência ${job.conta}: não consegui entregar o resultado (${msg}) — ` +
+            "o DaVinci devolve a loja pra fila sozinho em 20 min"
+        );
+        return false;
+      }
+      await sleep(tentativa * 10_000);
+    }
+  }
+  return false;
+}
+
+/** Conferência Shopee: UMA loja por ciclo (cada uma leva alguns minutos;
+ *  uma por vez deixa as outras filas respirarem entre as lojas). */
+async function processConferencia(): Promise<void> {
+  // AdsPower fora: nem pede trabalho — senão cada loja voltaria "erro" em
+  // segundos e a execução inteira se perdia.
+  if (!(await adspower.garantirAberto())) {
+    if (!adspowerForaAvisado) log.warn("conferência: AdsPower não responde — não puxo loja até ele voltar");
+    adspowerForaAvisado = true;
+    return;
+  }
+  adspowerForaAvisado = false;
+  let job: JobConferencia | null;
+  try {
+    job = await davinci.leaseConferencia(cfg.agentName);
+  } catch (err: any) {
+    log.warn(`lease conferência falhou: ${String(err?.message || err)}`);
+    return;
+  }
+  if (!job) return;
+  log.info(`conferência ${job.conta} (${job.adspower_user_id}): começando, tentativa ${job.tentativa}`);
+  let r: ResultadoConferencia;
+  try {
+    r = await coletarConferencia(job);
+  } catch (err: any) {
+    r = { status: "erro", erro: String(err?.message || err).slice(0, 500), dados: null };
+  }
+  const entregue = await entregarConferencia(job, r);
+  const d = r.dados;
+  const msg =
+    `conferência ${job.conta} → ${r.status}` +
+    (d ? ` (${d.chamadas} chamadas, ${d.duracao_s}s${d.avisos.length ? `, ${d.avisos.length} aviso(s)` : ""})` : "") +
+    (r.erro ? ` — ${r.erro}` : "") +
+    (entregue ? "" : " [NÃO entregue]");
+  if (r.status === "ok" || r.status === "aguardando_afiliados" || r.status === "perfil_em_uso") log.info(msg);
+  else log.warn(msg);
+}
+
 /** Um ciclo de trabalho: puxa as filas e drena SERIALMENTE (um perfil por vez). */
 async function tick(): Promise<void> {
   if (ticking) return; // sem reentrância — um AdsPower de cada vez
@@ -313,6 +403,11 @@ async function tick(): Promise<void> {
     for (let i = 0; i < logistica.length; i++) {
       if (commands.length || i > 0) await sleep(cfg.profileGapMs);
       await processLogisticaCommand(logistica[i]);
+    }
+    // Conferência Shopee por último: uma loja por ciclo.
+    if (cfg.filas.has("conferencia")) {
+      if (commands.length || logistica.length) await sleep(cfg.profileGapMs);
+      await processConferencia();
     }
   } catch (err: any) {
     log.error(`tick falhou: ${String(err?.message || err)}`);
@@ -385,10 +480,57 @@ async function testeTiktok(conta: string, pedido: string): Promise<void> {
   console.log(JSON.stringify(r, null, 1));
 }
 
+/** `npm start -- --teste-conferencia k1dkeaxv [--parcial] [--login-auto]
+ *  [--json saida.json]`: coleta UMA loja pelo perfil do AdsPower com as
+ *  semanas de agora (semanal, ou parcial com --parcial) e imprime o resumo —
+ *  sem o DaVinci, nada é enviado. Não espera os afiliados do último dia (só
+ *  avisa). Sem --login-auto, loja deslogada não leva clique no Entrar. */
+async function testeConferencia(uid: string): Promise<void> {
+  if (!uid || uid.startsWith("--")) {
+    console.error("uso: npm start -- --teste-conferencia <adspower_user_id> [--parcial] [--login-auto] [--json arquivo]");
+    process.exitCode = 2;
+    return;
+  }
+  const agora = new Date();
+  const p = periodoConferencia(process.argv.includes("--parcial") ? "parcial" : "semanal", agora);
+  const job: JobConferencia = {
+    coleta_id: "teste",
+    execucao_id: "teste",
+    conta: uid,
+    adspower_user_id: uid,
+    grupo: "celular",
+    semanas: p.semanas,
+    afiliados_ate: p.afiliados_ate,
+    esperar_afiliados_ate: agora.toISOString(), // não espera: só avisa
+    corte: new Date(agora.getTime() + 3 * 3600_000).toISOString(),
+    login_auto: process.argv.includes("--login-auto"),
+    tentativa: 1,
+  };
+  console.log(`teste ${p.tipo}: ${p.semanas.map((s) => `${s.inicio}..${s.fim}`).join(" | ")}`);
+  if (!(await adspower.garantirAberto())) {
+    console.error("AdsPower não responde (a Local API está ligada?)");
+    process.exitCode = 1;
+    return;
+  }
+  const r = await coletarConferencia(job);
+  console.log(resumoConferencia(r.status, r.erro, r.dados));
+  const j = process.argv.indexOf("--json");
+  const arquivo = j >= 0 ? process.argv[j + 1] : "";
+  if (arquivo && r.dados) {
+    fs.writeFileSync(arquivo, JSON.stringify(r, null, 1));
+    console.log(`resultado completo em ${arquivo}`);
+  }
+}
+
 async function main(): Promise<void> {
   const i = process.argv.indexOf("--teste-tiktok");
   if (i >= 0) {
     await testeTiktok(process.argv[i + 1] || "", process.argv[i + 2] || "");
+    return;
+  }
+  const k = process.argv.indexOf("--teste-conferencia");
+  if (k >= 0) {
+    await testeConferencia(process.argv[k + 1] || "");
     return;
   }
   log.info(
@@ -397,7 +539,7 @@ async function main(): Promise<void> {
       (cfg.filas.has("shopee") ? ` calibrated=${cfg.calibrated} mode=${cfg.defaultMode}` : "")
   );
   if (!cfg.filas.size) {
-    log.error("EXECUTOR_FILAS sem nenhuma fila válida (shopee, melhorenvio, tuta, tiktok) — nada a fazer.");
+    log.error(`EXECUTOR_FILAS sem nenhuma fila válida (${FILAS.join(", ")}) — nada a fazer.`);
   }
   if (!cfg.agentToken) {
     log.error("MARKETING_AGENT_TOKEN vazio — o DaVinci vai recusar com 401. Preencha o .env.");
@@ -419,6 +561,13 @@ async function main(): Promise<void> {
         : "TikTok: MODO SECO — abre o chat do pedido, confere a conversa e não envia."
     );
   }
+  if (cfg.filas.has("conferencia")) {
+    log.info(
+      "Conferência Shopee: ligada — uma loja por ciclo, só leitura" +
+        (cfg.conferenciaLoginAuto ? "" : " (CONFERENCIA_LOGIN_AUTO=false: nunca clica em Entrar)") +
+        (cfg.filas.has("shopee") || cfg.filas.has("melhorenvio") ? "" : " (esta máquina não manda sinal de vida)")
+    );
+  }
   if (cfg.filas.has("shopee") && !cfg.calibrated) {
     log.warn(
       "SELECTORS_CALIBRATED != true — TRAVA ativa: os comandos vão FALHAR de " +
@@ -427,6 +576,9 @@ async function main(): Promise<void> {
   }
 
   // Heartbeat imediato + periódico (o DaVinci considera ONLINE em < 120s).
+  // Máquina só com `conferencia` não manda nenhum (o da Shopee acenderia o
+  // badge do Marketing com a Shopee parada); quem acompanha a Conferência é a
+  // própria tela, pelo andamento das coletas.
   if (cfg.filas.has("shopee") || cfg.filas.has("melhorenvio")) {
     await sendHeartbeat();
     setInterval(() => {

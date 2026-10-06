@@ -17,11 +17,12 @@ type EnviarOut = { pedidos: number; mensagens: number; sent: string[]; failed: s
 
 const props = defineProps<{
   open: boolean
-  contexto: 'logistica' | 'controle_estoque' | 'margem' | 'devolucoes' | 'juridico' | 'logistica_amazon' | 'chamados_ia' | 'denuncia_robo' | 'denuncia_relatorio'
+  contexto: 'logistica' | 'controle_estoque' | 'margem' | 'devolucoes' | 'juridico' | 'logistica_amazon' | 'chamados_ia' | 'denuncia_robo' | 'denuncia_relatorio' | 'conferencia_shopee'
   // Só cadastro de destinatários (sem 'Enviar agora'): o envio sai de outro lugar
   // (jurídico: POST /api/chamados/{id}/juridico; chamados_ia: a IA de Chamado
   // parada em captcha/login, services/chamados_ia_aviso; denuncia_robo: o robô de
-  // Denúncia precisando de alguém, services/denuncia_robo_aviso).
+  // Denúncia precisando de alguém, services/denuncia_robo_aviso;
+  // conferencia_shopee: o resumo da Conferência Shopee quando ela termina).
   somenteCadastro?: boolean
   // O que este botão informa — aparece como descrição no modal.
   descricao: string

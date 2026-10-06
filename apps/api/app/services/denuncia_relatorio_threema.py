@@ -67,9 +67,14 @@ def token_excel(dia: date, agora: datetime) -> str:
 
 
 def confere_excel(dia: date, token: str, agora: datetime) -> bool:
-    """Token daquele dia, assinado aqui e ainda no prazo."""
+    """Token daquele dia, assinado aqui e ainda no prazo. Link sem login:
+    token torto é 403, nunca 500 — só ASCII (o isdigit aceita "²" e o int()
+    recusa; compare_digest de textos com acento levanta TypeError) e prazo de
+    no máximo 12 dígitos (o int() recusa texto de mais de 4300)."""
     ate_txt, _, assinatura = (token or "").partition(".")
-    if not ate_txt.isdigit() or not assinatura:
+    if not (ate_txt.isascii() and ate_txt.isdigit() and len(ate_txt) <= 12):
+        return False
+    if not assinatura or not assinatura.isascii():
         return False
     if int(ate_txt) < agora.timestamp():
         return False

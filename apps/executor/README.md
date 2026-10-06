@@ -25,6 +25,7 @@ O mesmo código roda em mais de um Mac; cada um liga só o que faz:
 |---|---|---|
 | executor do Eduardo | `shopee,tuta` (default) | anúncios/Oferta Relâmpago da Shopee + caixa do Tuta |
 | Mac Santiago (desde 24/09/2026) | `melhorenvio,tiktok` | "Suspender entrega" da Logística + pedido de senha no chat da TikTok (29/09) |
+| quem for coletar a Conferência | `…,conferencia` | Conferência Shopee (06/10/2026): lê afiliados, Ads, vendas e saldo de cada loja — ver abaixo |
 
 O servidor só entrega a suspensão (`melhorenvio_suspender`) pra quem a declara
 no lease — executor sem `acoes` (versão antiga) não pega mais. Ligue
@@ -56,6 +57,88 @@ não deixa (falta o escopo de atendimento). O texto é o mesmo da Shopee.
 
 O resultado volta pra linha da aba Devoluções ("Senha pedida ao cliente …" ou
 "Senha: na fila — <motivo>") e, quando sai, vira evento no chamado.
+
+## Conferência Shopee (`conferencia`, desde 06/10/2026)
+
+Relatório de terça e quinta (documentação completa em `docs/conferencia-shopee.md`).
+O DaVinci cria uma **coleta por loja**; a máquina com `conferencia` no
+`EXECUTOR_FILAS` pede **uma loja por ciclo** (`POST
+/api/marketing/conferencia-shopee/agent/lease`), depois das outras filas, e
+devolve o resultado (`POST …/agent/coletas/{id}/resultado`). Só **lê**: nada
+muda na Shopee. Ligue em **uma** máquina só (a que tem os perfis das lojas).
+
+Para cada loja (`src/conferencia.ts`):
+
+1. Passou do corte (17:30, ou 3 h depois de uma execução manual à noite) →
+   `erro` sem abrir nada.
+2. Perfil **aberto** = alguém usando: espera 7 s × 3; continua aberto →
+   `perfil_em_uso` e **não mexe nele** (o DaVinci tenta de novo em 10 min, até
+   3 vezes — só as voltas de perfil em uso contam; as de afiliados, não). Só
+   fecha perfil que ele mesmo abriu.
+3. `caffeinate -i -w <pid>` enquanto coleta a loja (o Mac não dorme no meio).
+4. Abre o perfil, **aba nova** (não usa as abas que já estavam lá), Central do
+   Vendedor, confere o login (`/api/v2/login/` — só username, shopid e nome da
+   loja saem da página, mais o código/mensagem de erro; os tokens nunca vão
+   pro log nem pro DaVinci). 403/429/captcha já nessa chamada → `bloqueada`
+   na hora, sem recarregar. Sem resposta (rede) duas vezes → `erro`.
+   Deslogada: recarrega uma vez; continua deslogada e o job permite
+   (`login_auto`) → se a tela de login é da **própria Shopee**
+   (accounts/seller/shopee.com.br, https) e já tem **usuário e senha
+   preenchidos pelo perfil**, dá **um** clique em "Entrar" (nunca digita
+   nada). Tela de outro site, pediu código, OTP ou captcha, ou não tem os
+   campos preenchidos → `deslogada`.
+5. Afiliados do último dia (domingo na terça, ontem na quinta) ainda não
+   publicados e antes das 15:00 → `aguardando_afiliados` (fecha o perfil; o
+   DaVinci devolve pra fila em 10 min). Depois das 15:00 coleta assim mesmo,
+   com o aviso "afiliados só até dd/mm". Semana sem **nenhum** dia na lista
+   (loja sem venda de afiliado) não espera: `afiliados_ultimo_dia` vai null.
+6. 4 semanas × (afiliados, itens de afiliados, Ads, anúncios de Ads, vendas
+   por dia) + saldo de Ads: uma chamada por vez, de dentro da página logada,
+   com 1,2–1,8 s de pausa — cerca de 50 a 90 chamadas, 2 a 4 minutos por loja.
+7. Fecha a aba, desconecta e fecha o perfil (`adspower.stop`), e espera o
+   AdsPower largar o perfil (até 20 s).
+
+| Status | Quando |
+|---|---|
+| `ok` | todas as partes vieram |
+| `parcial` | alguma chamada falhou (não bloqueio): só aquela parte fica sem dados, motivo em `avisos` |
+| `deslogada` | a loja caiu no login (ou pediu código/captcha) |
+| `perfil_em_uso` | perfil aberto por outra pessoa (volta pra fila) |
+| `aguardando_afiliados` | afiliados do último dia ainda não saíram (volta pra fila) |
+| `sem_automacao` | perfil que o puppeteer não controla (núcleo Firefox) |
+| `bloqueada` | a Shopee respondeu 403/429 ou pediu captcha/verificação no meio — para na hora |
+| `interrompida` | o relógio pulou mais de 2 min entre dois passos (o Mac dormiu) — a loja é descartada |
+| `erro` | qualquer outra coisa (AdsPower não abriu, corte, nenhuma parte veio) |
+
+Com o AdsPower fora do ar o executor **nem pede loja** (senão a execução
+inteira virava `erro` em segundos). Se a entrega do resultado falhar por rede
+ou 5xx, tenta mais 2 vezes (10 s e 20 s); se mesmo assim não for, o DaVinci
+devolve a loja pra fila sozinho depois de 20 min. Se o DaVinci recusar os
+números (422: formato que ele não reconhece), manda só o status `erro` com o
+motivo — a loja fecha em vez de abrir o perfil de novo.
+
+**Sinal de vida:** máquina só com `conferencia` não manda heartbeat (o do
+Marketing acenderia o badge "Executor local" com a Shopee parada). O
+acompanhamento é a própria tela da Conferência, pelo andamento das coletas.
+
+**Uma loja ocupa o ciclo inteiro** (2–4 min): na máquina que também faz
+`shopee`, um pause/resume que chegar nesse meio espera a loja acabar. As
+coletas param às 17:30, antes do robô de horários dos anúncios (18h).
+
+Teste manual de uma loja, **sem o DaVinci** (nada é enviado):
+
+```bash
+npm start -- --teste-conferencia k1dkeaxv            # semana fechada
+npm start -- --teste-conferencia k1dkeaxv --parcial  # seg até ontem
+#   --login-auto       deixa clicar em "Entrar" se a loja estiver deslogada
+#   --json saida.json  grava o resultado completo
+```
+
+O teste não espera os afiliados (só avisa) e respeita as mesmas regras de
+perfil aberto.
+
+Teste automático das partes puras e da coleta com uma Shopee falsa (sem
+AdsPower): `npm test`.
 
 ## Por que roda no Mac (e não na nuvem)
 
@@ -139,10 +222,10 @@ O diretório `~/marionete` pode ficar como backup; ele não é mais usado.
 
 | Variável | Default | Papel |
 |---|---|---|
-| `EXECUTOR_FILAS` | `shopee,tuta` | o que esta máquina faz: `shopee`, `melhorenvio`, `tuta`, `tiktok` |
+| `EXECUTOR_FILAS` | `shopee,tuta` | o que esta máquina faz: `shopee`, `melhorenvio`, `tuta`, `tiktok`, `conferencia` |
 | `DAVINCI_API_URL` | `http://localhost:8000` | base da API do DaVinci (sem barra no fim) |
 | `MARKETING_AGENT_TOKEN` | — | token M2M; **igual** ao do DaVinci (vazio → 401) |
-| `AGENT_NAME` | `marionete` | nome no badge do dashboard |
+| `AGENT_NAME` | `marionete` | nome no badge do dashboard (e o `agente` gravado nas coletas da Conferência) |
 | `LEASE_LIMIT` | `10` | comandos puxados por ciclo |
 | `POLL_INTERVAL_MS` | `15000` | frequência do poll |
 | `HEARTBEAT_INTERVAL_MS` | `60000` | frequência do sinal de vida |
@@ -152,6 +235,7 @@ O diretório `~/marionete` pode ficar como backup; ele não é mais usado.
 | `SELECTORS_CALIBRATED` | `false` | trava — `true` libera a ação real |
 | `ADSPOWER_API_BASE` | `http://local.adspower.net:50325` | Local API do AdsPower |
 | `SHOPEE_SELLER_ADS_URL` | (padrão BR) | página de Ads do Seller Center |
+| `CONFERENCIA_LOGIN_AUTO` | `true` | `false` = nesta máquina a Conferência nunca clica em "Entrar", mesmo que o DaVinci permita (`login_auto`) |
 
 ## Arquivos
 
@@ -163,6 +247,9 @@ O diretório `~/marionete` pode ficar como backup; ele não é mais usado.
 | `src/log.ts` | logger mínimo |
 | `src/adspower.ts` | Local API do AdsPower (transplantado do marionete) |
 | `src/shopee.ts` | **núcleo** da automação calibrada (transplantado do marionete) |
+| `src/conferencia.ts` | Conferência Shopee: abre o perfil, confere o login, coleta uma loja |
+| `src/conferencia_util.ts` | Conferência: datas, dinheiro, chamadas e payload (puro, testado) |
+| `test/*.test.ts` | `npm test` — Conferência sem AdsPower (respostas sintéticas) |
 
 ## Retry / robustez
 

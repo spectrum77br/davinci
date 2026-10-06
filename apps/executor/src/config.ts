@@ -17,9 +17,11 @@ function int(name: string, def: number): number {
 /** Trabalhos que um executor pode fazer. Cada máquina liga só os seus
  *  (EXECUTOR_FILAS): desde 24/09/2026 o Melhor Envio roda no Mac Santiago e a
  *  Shopee/Tuta continuam no executor do Eduardo. Desde 29/09 o Santiago também
- *  pede a senha ao comprador no chat da TikTok (`tiktok`). */
-export type Fila = "shopee" | "melhorenvio" | "tuta" | "tiktok";
-const FILAS: readonly Fila[] = ["shopee", "melhorenvio", "tuta", "tiktok"];
+ *  pede a senha ao comprador no chat da TikTok (`tiktok`). Desde 06/10 existe
+ *  a `conferencia` (Conferência Shopee: lê afiliados/Ads/vendas/saldo de cada
+ *  loja, uma por ciclo) — só liga quem pôr no EXECUTOR_FILAS. */
+export type Fila = "shopee" | "melhorenvio" | "tuta" | "tiktok" | "conferencia";
+export const FILAS: readonly Fila[] = ["shopee", "melhorenvio", "tuta", "tiktok", "conferencia"];
 
 export interface Config {
   filas: Set<Fila>;
@@ -46,6 +48,8 @@ export interface Config {
   tiktokCalibrated: boolean;
   tiktokSellerUrl: string;
   tiktokPerfisExtra: Record<string, string>;
+  // Conferência Shopee (só leitura; o servidor manda as lojas e as semanas)
+  conferenciaLoginAuto: boolean;
 }
 
 /** {"Loja 206081932": "k1dkfg0l"} → chave em minúsculas, sem acento, espaço
@@ -74,7 +78,10 @@ const defaultScope: "all" | "ids" | "names" =
   scopeRaw === "ids" || scopeRaw === "names" ? scopeRaw : "all";
 
 // Default = o que o executor antigo fazia, MENOS o Melhor Envio: quem só dá
-// `git pull` não volta a disputar a suspensão com o Mac Santiago.
+// `git pull` não volta a disputar a suspensão com o Mac Santiago. A
+// `conferencia` também fica de fora do default: liga só na máquina que vai
+// coletar (ex.: EXECUTOR_FILAS=shopee,tuta,conferencia). Nome desconhecido é
+// ignorado.
 const filas = new Set<Fila>(
   str("EXECUTOR_FILAS", "shopee,tuta")
     .split(",")
@@ -111,4 +118,8 @@ export const cfg: Config = {
   tiktokCalibrated: str("TIKTOK_CALIBRATED") === "true",
   tiktokSellerUrl: str("TIKTOK_SELLER_URL", "https://seller-br.tiktok.com").replace(/\/$/, ""),
   tiktokPerfisExtra: perfisExtra("TIKTOK_PERFIS_EXTRA"),
+  // Trava local do "Entrar" da Conferência: o servidor diz se pode clicar
+  // (login_auto no job); "false" aqui proíbe o clique NESTA máquina mesmo
+  // assim (loja deslogada volta "deslogada" sem tocar na tela de login).
+  conferenciaLoginAuto: str("CONFERENCIA_LOGIN_AUTO", "true") !== "false",
 };

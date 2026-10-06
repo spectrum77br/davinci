@@ -310,6 +310,7 @@ if settings.enable_marketing:
     # Optional Marketing module — see config.enable_marketing. Import lazily so
     # prod boots even when marketing_* tables don't exist on the DB.
     from app.routers import marketing as marketing_router
+    from app.routers import marketing_conferencia as marketing_conferencia_router
     from app.routers import marketing_creatives as marketing_creatives_router
     from app.routers import marketing_legendas as marketing_legendas_router
     from app.routers import marketing_metricas as marketing_metricas_router
@@ -331,6 +332,11 @@ if settings.enable_marketing:
     app.include_router(marketing_roteiros_router.router)
     app.include_router(marketing_personagens_router.router)
     app.include_router(marketing_legendas_router.router)
+    # Conferência Shopee (06/10/2026, docs/conferencia-shopee.md): relatório
+    # semanal por loja; o executor do Mac coleta pelo /agent/*. O link do
+    # Excel que vai no Threema leva o token na query: fora do access log.
+    app.include_router(marketing_conferencia_router.router)
+    marketing_conferencia_router.mascarar_link_no_access_log()
 
 
 @app.get("/api/health")

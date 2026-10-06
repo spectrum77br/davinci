@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
-  AlertCircle, BarChart3, Bell, Bot, Clapperboard, Clock,
+  AlertCircle, BarChart3, Bell, Bot, Clapperboard, ClipboardCheck, Clock,
   NotebookPen, Pause, Play, RefreshCw, Sparkles, TrendingUp,
 } from 'lucide-vue-next'
 
@@ -16,6 +16,11 @@ const canCriativos = useCan('marketing_criativos', 'view')
 // recurso novo nasceria False pra todo mundo menos admin, e não existe
 // migration de backfill de permissão neste repositório — a aba subiria
 // impossível de usar até alguém liberar usuário por usuário.
+// Conferência Shopee (06/10/2026): pelo mesmo motivo, pendura em "marketing"
+// (quem vê os dashboards de Ads vê o relatório semanal da Shopee).
+const canConferencia = useCan('marketing', 'view')
+const route = useRoute()
+const router = useRouter()
 // ── Types ────────────────────────────────────────────────────────────
 type Account = {
   id: string
@@ -180,8 +185,17 @@ type AgentPresence = {
 // ── State ────────────────────────────────────────────────────────────
 // The page is organised by marketplace — only Mercado Livre + Shopee are
 // surfaced. The platform tab replaces the old mode + department tabs.
-type Platform = 'ml' | 'shopee' | 'criativos' | 'roteiros' | 'desempenho'
-const platform = ref<Platform>('ml')
+type Platform = 'ml' | 'shopee' | 'criativos' | 'roteiros' | 'desempenho' | 'conferencia'
+// ?aba= abre a aba direto (o aviso do Threema manda pra ?aba=conferencia&execucao=<id>).
+// Aba que a pessoa não pode ver cai no padrão.
+function abaDaUrl(): Platform | null {
+  const q = String(route.query.aba || '')
+  if ((q === 'ml' || q === 'shopee') && canAds.value) return q
+  if (q === 'conferencia' && canConferencia.value) return q
+  if ((q === 'criativos' || q === 'roteiros' || q === 'desempenho') && canCriativos.value) return q
+  return null
+}
+const platform = ref<Platform>(abaDaUrl() ?? 'ml')
 
 const focoRoteiro = ref<string | null>(null)
 
@@ -199,8 +213,13 @@ const roteirosEl = ref<{ abrir: (id: string) => void } | null>(null)
 // Abas que NÃO são de Ads. Sem incluir a nova aqui, todo o painel de Ads
 // (gráficos, contas, erros) continuaria renderizando embaixo dela.
 const emOutraAba = computed(
-  () => platform.value === 'criativos' || platform.value === 'roteiros' || platform.value === 'desempenho',
+  () => platform.value === 'criativos' || platform.value === 'roteiros' || platform.value === 'desempenho'
+    || platform.value === 'conferencia',
 )
+// Plataforma que o summary/timeseries de Ads consultam. Numa aba que não é de
+// Ads (aberta direto por ?aba=conferencia, por exemplo) vale o Mercado Livre:
+// pedir platform=conferencia devolvia zero contas e sumia com as abas ML/Shopee.
+const plataformaAds = computed(() => (platform.value === 'shopee' ? 'shopee' : 'ml'))
 
 
 const summary = ref<Summary | null>(null)
@@ -543,7 +562,7 @@ function heatmapTooltip(dow: number, hour: number): string {
 
 // ── Fetchers ─────────────────────────────────────────────────────────
 async function loadSummary() {
-  const qs = `?period1_days=${period1Days.value}&period2_days=${period2Days.value}&platform=${platform.value}`
+  const qs = `?period1_days=${period1Days.value}&period2_days=${period2Days.value}&platform=${plataformaAds.value}`
   summary.value = await api<Summary>(`/api/marketing/metrics/summary${qs}`)
   const accs = summary.value.accounts
   if (accs.length > 0 && (!schedAccountId.value || !accs.find((a) => a.id === schedAccountId.value))) {
@@ -570,7 +589,7 @@ async function loadHeatmap() {
 async function loadTimeseries() {
   const params = new URLSearchParams({
     days: String(chartDays.value),
-    platform: platform.value,
+    platform: plataformaAds.value,
   })
   timeseries.value = await api<Timeseries>(`/api/marketing/timeseries?${params}`)
 }
@@ -735,13 +754,14 @@ async function toggleScheduleCell(dow: number, hour: number) {
 
 let pollTimer: ReturnType<typeof setInterval> | null = null
 onMounted(async () => {
-  if (!canAds.value && !canCriativos.value) {
+  if (!canAds.value && !canCriativos.value && !canConferencia.value) {
     await navigateTo('/403')
     return
   }
   if (!canAds.value) {
-    // Usuário só de Criativos: pula todo o carregamento/polling de Ads.
-    platform.value = 'criativos'
+    // Usuário só de Criativos: pula todo o carregamento/polling de Ads (a aba
+    // pedida no link vale se for dele: Roteiros/Desempenho).
+    if (!emOutraAba.value) platform.value = 'criativos'
     return
   }
   await refresh()
@@ -756,10 +776,19 @@ onBeforeUnmount(() => {
 })
 
 watch(platform, async () => {
-  if (platform.value === 'criativos' || platform.value === 'roteiros' || !canAds.value) return
+  // Aba que não é de Ads (Criativos, Roteiros, Desempenho, Conferência) não
+  // recarrega o dashboard — antes Desempenho ficava de fora e recarregava.
+  if (emOutraAba.value || !canAds.value) return
   await Promise.all([
     loadSummary(), loadCreditAlerts(), loadTimeseries(),
   ])
+})
+// A aba vai pra URL (?aba=), pra dar F5 e mandar link. O id da execução da
+// Conferência só vale lá dentro: sai junto quando a aba muda.
+watch(platform, (p) => {
+  const query: Record<string, any> = { ...route.query, aba: p === 'ml' ? undefined : p }
+  if (p !== 'conferencia') delete query.execucao
+  void router.replace({ query })
 })
 watch(chartDays, () => {
   loadTimeseries().catch(() => {})
@@ -818,7 +847,7 @@ definePageMeta({ middleware: [] })
 
     <!-- Abas: Mercado Livre | Shopee (Ads) + Criativos. Cada uma aparece
          conforme a permissão do usuário (marketing / marketing_criativos). -->
-    <div v-if="(canAds && (summary?.accounts.length ?? 0) > 0) || canCriativos" class="flex flex-wrap items-center gap-3">
+    <div v-if="(canAds && (summary?.accounts.length ?? 0) > 0) || canCriativos || canConferencia" class="flex flex-wrap items-center gap-3">
       <div class="flex gap-1 rounded-md bg-muted/40 p-1 w-fit">
         <template v-if="canAds && (summary?.accounts.length ?? 0) > 0">
           <button v-for="p in (['ml', 'shopee'] as const)" :key="p"
@@ -853,6 +882,15 @@ definePageMeta({ middleware: [] })
           <TrendingUp class="size-3.5" />
           Desempenho
         </button>
+        <!-- Conferência Shopee: o relatório semanal Mala · Celular · Eletro que o
+             robô do Mac coleta terça e quinta. -->
+        <button v-if="canConferencia"
+          class="px-3 py-1.5 rounded-md transition-colors inline-flex items-center gap-1.5"
+          :class="platform === 'conferencia' ? 'bg-background shadow-sm font-medium' : 'hover:bg-background/60 text-muted-foreground'"
+          @click="platform = 'conferencia'">
+          <ClipboardCheck class="size-3.5" />
+          Conferência Shopee
+        </button>
 </div>
     </div>
 
@@ -867,6 +905,7 @@ definePageMeta({ middleware: [] })
       :foco="focoRoteiro"
     />
     <MarketingDesempenho v-else-if="platform === 'desempenho' && canCriativos" />
+    <MarketingConferencia v-else-if="platform === 'conferencia' && canConferencia" />
 
     <!-- ═══════════════════════════════ MÉTRICAS ═══════════════════════ -->
     <template v-if="!emOutraAba && summary">

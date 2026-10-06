@@ -40,6 +40,12 @@ from app.models.chamado import (
 from app.models.claude_conector import ClaudeConector
 from app.models.company import Cadastro, CadastroStore, Company, Store
 from app.models.company_certificate import CompanyCertificate
+from app.models.conferencia_shopee import (
+    ConferenciaShopeeColeta,
+    ConferenciaShopeeConta,
+    ConferenciaShopeeExecucao,
+    ConferenciaShopeeSaldo,
+)
 from app.models.denuncia import (
     DenunciaAnexo,
     DenunciaAnuncio,
@@ -291,6 +297,10 @@ __all__ = [
     "CellStatus",
     "Company",
     "CompanyCertificate",
+    "ConferenciaShopeeColeta",
+    "ConferenciaShopeeConta",
+    "ConferenciaShopeeExecucao",
+    "ConferenciaShopeeSaldo",
     "CotacaoFabricante",
     "CotacaoProduto",
     "CotacaoValor",

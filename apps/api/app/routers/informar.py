@@ -108,6 +108,10 @@ _CONTEXTOS = (
     # 06/10: relatório do dia do robô de Denúncia, todo dia às 7h — services/
     # denuncia_relatorio_threema. Cadastro pela aba Denúncia › Robô › Ocorrências.
     "denuncia_relatorio",
+    # 06/10: aviso da Conferência Shopee quando a rodada fecha (resumo + link
+    # do Excel) — services/conferencia_shopee/threema_aviso. A migration 0375
+    # cria a linha vazia: ninguém recebe até alguém escolher.
+    "conferencia_shopee",
 )
 _CONTEXTOS_ENVIO = ("logistica", "controle_estoque", "margem", "devolucoes", "logistica_amazon")
 

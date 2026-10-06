@@ -2670,6 +2670,48 @@ async def denuncia_relatorio_fechar(ctx: dict) -> None:
         logger.info("denuncia_relatorio_threema_enviado", **r)
 
 
+async def conferencia_shopee_agenda(ctx: dict) -> None:
+    """Conferência Shopee (06/10/2026, docs/conferencia-shopee.md): terça e quinta 13:30 BRT cria
+    a rodada — terça a semana fechada, quinta a parcial seg–qua — com uma coleta por loja ativa; o
+    executor do Mac passa loja por loja. Só com `conferencia_shopee_cron` (e o Marketing ligado:
+    sem o router, o executor não teria de quem puxar). Já tem uma coletando: pula."""
+    if not (_settings.enable_marketing and _settings.conferencia_shopee_cron):
+        return
+    from app.services.conferencia_shopee import fila, periodos
+
+    agora = datetime.now(UTC)
+    tipo = periodos.tipo_da_agenda(periodos.no_fuso(agora).date())
+    if tipo is None:
+        logger.warning("conferencia_shopee_agenda_dia_errado", dia=agora.isoformat())
+        return
+    async with session_scope() as s:
+        try:
+            ex = await fila.criar_execucao(s, tipo, "agenda", None, agora)
+        except fila.FilaError as e:
+            logger.info("conferencia_shopee_agenda_pulou", motivo=e.code)
+            return
+    logger.info("conferencia_shopee_agenda", execucao=str(ex.id), tipo=ex.tipo)
+
+
+async def conferencia_shopee_varrer(ctx: dict) -> None:
+    """Conferência Shopee: de 10 em 10 min e a cada restart — rodada que passou do prazo (corte
+    + 30 min) marca o que sobrou como `expirada` e fecha o relatório com o que chegou; rodada sem
+    loja na fila que ficou aberta também fecha. Depois o aviso no Threema do que ainda não foi
+    (`conferencia_shopee_threema`; carimbo na execução: manda uma vez)."""
+    from app.services.conferencia_shopee import fila, threema_aviso
+
+    async with session_scope() as s:
+        fechadas = await fila.varrer(s, datetime.now(UTC))
+    if fechadas:
+        logger.info("conferencia_shopee_varrer", fechadas=[str(e.id) for e in fechadas])
+    if not _settings.conferencia_shopee_threema:
+        return
+    async with session_scope() as s:
+        enviados = await threema_aviso.enviar_pendentes(s, datetime.now(UTC))
+    if any(r.get("enviado") for r in enviados):
+        logger.info("conferencia_shopee_threema_enviado", envios=enviados)
+
+
 async def denuncia_robo_aviso_tick(ctx: dict) -> None:
     """Robô de Denúncia (05/10/2026, Cairo): Threema quando aparece captcha na tela, robô parado,
     Mac mini sem notícia ou SEI pedindo código — regras em services/denuncia_robo_aviso. A cada
@@ -4462,6 +4504,23 @@ class WorkerSettings:
         cron(tuta_devolucoes_tick, hour=10, minute=0, run_at_startup=False),
         # Relatório do dia do robô de Denúncia: :07 de toda hora (o de ontem fecha 00:07 BRT).
         cron(denuncia_relatorio_fechar, minute=7, run_at_startup=True, timeout=300),
+        # Conferência Shopee: terça (1) e quinta (3) 16:30 UTC = 13:30 BRT. Dias em número — o
+        # arq 0.28 quebra com weekday={'tue', 'thu'} (nome só vale para um dia).
+        cron(
+            conferencia_shopee_agenda,
+            weekday={1, 3},
+            hour=16,
+            minute=30,
+            run_at_startup=False,
+            timeout=120,
+        ),
+        # Prazo das rodadas + fechamento de rodada esquecida + reenvio do Threema (só banco).
+        cron(
+            conferencia_shopee_varrer,
+            minute={2, 12, 22, 32, 42, 52},
+            run_at_startup=True,
+            timeout=300,
+        ),
         # Aviso no Threema do robô de Denúncia (captcha, parado, mini sem notícia, SEI): 2 em 2 min.
         cron(
             denuncia_robo_aviso_tick, minute=set(range(0, 60, 2)), run_at_startup=False, timeout=120
@@ -5112,6 +5171,8 @@ __all__ = [
     "bling_orders_safety_net_tick",
     "bling_orders_period_sync_tick",
     "bling_token_refresh",
+    "conferencia_shopee_agenda",
+    "conferencia_shopee_varrer",
     "daily_sync_scheduler",
     "failed_jobs_alert_scan",
     "import_listings_run",

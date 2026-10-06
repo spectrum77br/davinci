@@ -2,6 +2,7 @@
  *  Todas as chamadas levam o header X-Agent-Token; o DaVinci recusa com 401 se
  *  o token não bater (ou se estiver vazio nas settings dele). */
 import { cfg } from "./config";
+import type { JobConferencia, ResultadoConferencia } from "./conferencia";
 
 /** Um comando entregue por /agent/lease, já enriquecido com o perfil AdsPower
  *  que o executor precisa abrir. */
@@ -34,7 +35,20 @@ export interface HeartbeatPayload {
   info?: Record<string, unknown>;
 }
 
-async function post<T>(path: string, body: unknown): Promise<T> {
+/** Erro HTTP do DaVinci (o status deixa quem chamou decidir se tenta de novo). */
+export class DavinciHttpError extends Error {
+  constructor(
+    readonly status: number,
+    msg: string
+  ) {
+    super(msg);
+    this.name = "DavinciHttpError";
+  }
+}
+
+/** POST com prazo: sem ele, um servidor que aceita a conexão e não responde
+ *  deixava o tick preso pra sempre (`ticking` nunca voltava a false). */
+async function post<T>(path: string, body: unknown, timeoutMs = 60_000): Promise<T> {
   let res: Response;
   try {
     res = await fetch(`${cfg.davinciApiUrl}${path}`, {
@@ -44,6 +58,7 @@ async function post<T>(path: string, body: unknown): Promise<T> {
         "X-Agent-Token": cfg.agentToken,
       },
       body: JSON.stringify(body),
+      signal: AbortSignal.timeout(timeoutMs),
     });
   } catch (e: any) {
     throw new Error(
@@ -52,7 +67,8 @@ async function post<T>(path: string, body: unknown): Promise<T> {
   }
   if (!res.ok) {
     const text = await res.text().catch(() => "");
-    throw new Error(
+    throw new DavinciHttpError(
+      res.status,
       `DaVinci ${path} HTTP ${res.status}${text ? `: ${text.slice(0, 300)}` : ""}`
     );
   }
@@ -137,4 +153,30 @@ export async function heartbeatLogistica(payload: HeartbeatPayload): Promise<voi
     adspower_ok: payload.adspower_ok,
     info: payload.info ?? {},
   });
+}
+
+/** Conferência Shopee: reivindica UMA coleta (uma loja). null = nada a fazer
+ *  agora (sem execução coletando, lojas reagendadas pra depois, ou passou do
+ *  corte). */
+export async function leaseConferencia(agente: string): Promise<JobConferencia | null> {
+  const data = await post<{ job: JobConferencia | null }>(
+    "/api/marketing/conferencia-shopee/agent/lease",
+    { agente },
+    30_000
+  );
+  return data?.job ?? null;
+}
+
+/** Entrega o resultado de uma loja (status + dados; até ~3 MB — o servidor
+ *  recusa acima disso com 413). perfil_em_uso/aguardando_afiliados fazem o
+ *  servidor devolver a loja pra fila. */
+export async function resultadoConferencia(
+  coletaId: string,
+  body: ResultadoConferencia
+): Promise<void> {
+  await post(
+    `/api/marketing/conferencia-shopee/agent/coletas/${encodeURIComponent(coletaId)}/resultado`,
+    body,
+    120_000
+  );
 }

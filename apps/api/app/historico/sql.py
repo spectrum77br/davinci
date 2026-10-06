@@ -76,6 +76,10 @@ TETO_POR_PEDIDO = 200
 # própria linha e na trilha). A aprovação de uma pessoa fica na própria linha
 # (`aprovado_por`) e no log. A tabela de override manual, quando existir, fica
 # COM o gatilho.
+# Conferência Shopee (06/10/2026, migration 0375): a execução (prazos, relatório
+# congelado), a coleta (a fila do executor do Mac, regravada a cada passo) e o
+# saldo de Ads lido em cada coleta são da máquina; quem apertou "Gerar agora"
+# fica na própria execução (`criado_por`).
 EXCLUIDAS = re.compile(
     r"^(historico_(evento|alteracao)$|sync_logs|background_job|alembic_version$|auth_codes$"
     r"|oauth_states$|pricing_push_idempotency$|pricing_push_confirmacao$"
@@ -85,6 +89,9 @@ EXCLUIDAS = re.compile(
     r"|bling_envio_evento$|bling_envio_correcao$|prioridade_estoque_movimentos$|nfse_chamada$"
     # Flex: estado e trilha escritos pela máquina
     r"|flex_(pedido|anuncio_estado|log|conta|emergencia)$"
+    # Conferência Shopee: rodadas, coletas e saldos lidos pela máquina (a lista
+    # de lojas, `conferencia_shopee_conta`, é editada por pessoas: fica COM)
+    r"|conferencia_shopee_(execucao|coleta|saldo)$"
     # texto de comprador (atendimento) e os índices que a máquina escreve
     r"|atendimento_(mensagens|rascunhos|avaliacoes|conversas|avaliacoes_loja"
     r"|pedidos_comprador|etiquetas_historico|reclamacoes|carrinhos|publicacoes|comentarios"

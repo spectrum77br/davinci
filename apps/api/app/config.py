@@ -267,6 +267,26 @@ class Settings(BaseSettings):
     # marionete .env to turn the integration on.
     marketing_agent_token: str = ""
 
+    # ─── Conferência Shopee (06/10/2026, docs/conferencia-shopee.md) ──────
+    # Relatório de marketing por loja (Mala · Celular · Eletro): o executor do
+    # Mac lê a Central do Vendedor de cada loja pelo perfil do AdsPower e o
+    # servidor monta o relatório. Usa o mesmo `marketing_agent_token` acima.
+    #
+    # `conferencia_shopee_cron`: a agenda do worker (terça = semana fechada,
+    # quinta = parcial seg–qua, 13:30 BRT) só cria a rodada com true. O botão
+    # "Gerar agora" da tela funciona com ela desligada. O worker lê na SUBIDA:
+    # mudou, reinicia o worker. Liga com CONFERENCIA_SHOPEE_CRON=true.
+    conferencia_shopee_cron: bool = False
+    # Aviso no Threema quando a rodada fecha (resumo + link do Excel), para
+    # quem estiver no "Quem recebe" do Informar (contexto conferencia_shopee).
+    # Desligado = o relatório fica só na tela. CONFERENCIA_SHOPEE_THREEMA=true.
+    conferencia_shopee_threema: bool = False
+    # Vai para o executor em cada coleta: com true, a loja que caiu na tela de
+    # login e já tem usuário e senha preenchidos no perfil leva UM clique em
+    # "Entrar" (decisão do usuário, 06/10/2026). Código ou captcha nunca: a
+    # loja fica "deslogada". CONFERENCIA_SHOPEE_LOGIN_AUTO=false desliga.
+    conferencia_shopee_login_auto: bool = True
+
     # ─── Robô de postagem dos criativos (Marketing × Redes Sociais) ───────
     # `marketing_postagem_commit` é a TRAVA, no espírito do SELECTORS_
     # CALIBRATED do executor: com False o robô percorre tudo (valida arquivo,
