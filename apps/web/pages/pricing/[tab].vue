@@ -1662,6 +1662,9 @@ type CatalogoAnuncio = {
   listing_type: string | null
   // MLBs dos anúncios comuns presos a este anúncio de catálogo (item_relations)
   sincronizado_com: string[]
+  // Por que ESTE anúncio não recebe: 'sincronizado' | 'pausado' |
+  // 'em_revisao' | 'encerrado' (null = recebe o preço)
+  bloqueio?: string | null
 }
 type CatalogoCelula = {
   anuncios: CatalogoAnuncio[]
@@ -2348,6 +2351,14 @@ const MOTIVOS_BLOQUEIO: Record<string, string> = {
   sem_preco_catalogo: 'Produto sem preço de catálogo (coluna Catálogo em Produtos)',
 }
 
+// Motivo curto por anúncio (campo `bloqueio` de cada anúncio do /grid).
+const MOTIVO_ANUNCIO: Record<string, string> = {
+  sincronizado: 'sincronizado',
+  pausado: 'pausado',
+  em_revisao: 'em revisão',
+  encerrado: 'encerrado',
+}
+
 function catalogoBloqueado(prodId: string, accId: string): CatalogoCelula | null {
   const cat = cellOf(prodId, accId)?.catalogo
   return cat && cat.bloqueio ? cat : null
@@ -2368,7 +2379,8 @@ function tituloCelulaCatalogo(prodId: string, acc: Account): string | undefined 
   for (const an of cat.anuncios ?? []) {
     const extras = [an.status, an.listing_type].filter(Boolean).join(', ')
     const preso = an.sincronizado_com?.length ? ` · preso a ${an.sincronizado_com.join(', ')}` : ''
-    linhas.push(`Catálogo ${an.external_id}${extras ? ` (${extras})` : ''}${preso}`)
+    const fora = an.bloqueio ? ` — não envia (${MOTIVO_ANUNCIO[an.bloqueio] ?? an.bloqueio})` : ''
+    linhas.push(`Catálogo ${an.external_id}${extras ? ` (${extras})` : ''}${preso}${fora}`)
   }
   return linhas.length ? linhas.join('\n') : undefined
 }
