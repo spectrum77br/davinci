@@ -509,6 +509,75 @@ async def test_migration_0377_cria_o_que_o_model_declara_e_o_downgrade_desfaz(db
         await db.commit()
 
 
+@pytest.mark.asyncio
+async def test_migration_0377_com_product_links_ocupada_nao_trava_a_tabela_de_precos(
+    db: AsyncSession, monkeypatch,
+):
+    """Cenário do deploy às 13h UTC: a varredura de vínculos segura uma
+    transação aberta em product_links. A 0377 espera o lock_timeout e cai —
+    sem ter travado pricing_products/pricing_accounts nesse meio tempo (a
+    Tabela de Preços segue abrindo) e sem deixar nada aplicado."""
+    import asyncio
+
+    from app import db as app_db
+    from sqlalchemy.exc import DBAPIError
+
+    mod = _carregar_migration()
+    rascunho = f"{Base.metadata.schema}_mig0377_trava"
+    await db.execute(text(f'DROP SCHEMA IF EXISTS "{rascunho}" CASCADE'))
+    await db.execute(text(f'CREATE SCHEMA "{rascunho}"'))
+    for tabela, colunas in (
+        ("pricing_products", "id uuid PRIMARY KEY"),
+        ("pricing_accounts", "id uuid PRIMARY KEY, integration_id uuid"),
+        ("product_links", "id uuid PRIMARY KEY, integration_id uuid NOT NULL"),
+    ):
+        await db.execute(text(f'CREATE TABLE "{rascunho}".{tabela} ({colunas})'))
+    await db.commit()
+    monkeypatch.setattr(mod, "SCHEMA", rascunho)
+    monkeypatch.setattr(mod, "LOCK_TIMEOUT", "2s")
+
+    def _upgrade(conn) -> None:
+        ctx = MigrationContext.configure(conn, opts={"target_metadata": Base.metadata})
+        with Operations.context(ctx):
+            mod.upgrade()
+
+    async def _migrar() -> None:
+        async with app_db.engine.connect() as conn:
+            async with conn.begin():
+                await conn.run_sync(_upgrade)
+
+    varredura = await app_db.engine.connect()
+    try:
+        # A "varredura": transação aberta lendo product_links (ACCESS SHARE).
+        await varredura.begin()
+        await varredura.execute(text(f'SELECT count(*) FROM "{rascunho}".product_links'))
+
+        migracao = asyncio.create_task(_migrar())
+        await asyncio.sleep(0.5)  # a migration já está na fila da trava
+        assert not migracao.done()
+        # Enquanto ela espera, a Tabela de Preços lê normalmente.
+        async with app_db.engine.connect() as tela:
+            await tela.execute(text("SET lock_timeout = '500ms'"))
+            for tabela in ("pricing_products", "pricing_accounts"):
+                await tela.execute(text(f'SELECT count(*) FROM "{rascunho}".{tabela}'))
+            await tela.rollback()
+
+        with pytest.raises(DBAPIError, match="lock timeout"):
+            await migracao
+        # Nada aplicado: o rollback é total.
+        assert (await _estrutura(db, rascunho)) == {"colunas": [], "constraints": [], "indices": []}
+
+        # Varredura terminou: rodar de novo aplica tudo.
+        await varredura.rollback()
+        await _migrar()
+        assert len((await _estrutura(db, rascunho))["colunas"]) == 8
+    finally:
+        await varredura.close()
+        await db.rollback()
+        await db.execute(text(f'DROP SCHEMA IF EXISTS "{rascunho}" CASCADE'))
+        await db.commit()
+
+
 # =========================================================== ligar/desligar
 
 

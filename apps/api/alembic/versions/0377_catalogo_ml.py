@@ -24,6 +24,22 @@ Só ADD COLUMN (o default constante de `canal` não reescreve a tabela) e
 constraints que as linhas de hoje já cumprem (todas viram canal='kit').
 `in_catalog` e o valor 'catalogo' do enum ficam: saem na 2ª entrega.
 
+TRAVA (deploy): tudo numa transação, com lock_timeout de 10 s. product_links
+é a tabela de vínculos de TODOS os marketplaces e a varredura de vínculos
+(13:00 UTC, worker.varredura_vinculos) segura uma transação aberta nela
+enquanto pagina o ML. Por isso product_links vem PRIMEIRO: se ela estiver
+ocupada, a espera (e a falha por lock timeout, com rollback total) acontece
+antes de travar a Tabela de Preços (pricing_products/pricing_accounts).
+No deploy:
+  - não rodar entre 13:00 UTC e o fim da varredura; antes de migrar, olhar
+    no pg_stat_activity se há sessão "idle in transaction" longa com trava em
+    davinci.product_links (se houver, esperar);
+  - "lock timeout" = nada aplicado: é só rodar de novo depois;
+  - só subir as imagens novas (up -d) se o alembic sair com 0 e
+    davinci.alembic_version = '0377_catalogo_ml' — o model novo de
+    ProductLink lê as colunas novas em TODA consulta (estoque, vínculos e envio
+    de todos os marketplaces dariam UndefinedColumn).
+
 Revision ID: 0377_catalogo_ml
 Revises: 0376_imobilizado
 """
@@ -41,6 +57,8 @@ branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
 SCHEMA = "davinci"
+# Quanto esperar por cada trava antes de desistir (e desfazer tudo).
+LOCK_TIMEOUT = "10s"
 
 _CK_CANAL = "ck_pricing_accounts_canal_valido"
 _CK_BASE = "ck_pricing_accounts_canal_conta_base"
@@ -58,7 +76,38 @@ _LINK_COLUNAS = (
 
 
 def upgrade() -> None:
-    op.execute("SET LOCAL lock_timeout = '10s'")
+    op.execute(f"SET LOCAL lock_timeout = '{LOCK_TIMEOUT}'")
+
+    # 1º product_links (a disputada — ver TRAVA no topo): se ela não sair em
+    # LOCK_TIMEOUT, a migration cai sem ter travado a Tabela de Preços.
+    op.add_column(
+        "product_links", sa.Column("catalog_listing", sa.Boolean(), nullable=True), schema=SCHEMA
+    )
+    op.add_column(
+        "product_links", sa.Column("catalog_product_id", sa.Text(), nullable=True), schema=SCHEMA
+    )
+    op.add_column(
+        "product_links",
+        sa.Column("catalogo_relacionado", sa.Text(), nullable=True),
+        schema=SCHEMA,
+    )
+    op.add_column(
+        "product_links",
+        sa.Column("catalogo_lido_em", sa.DateTime(timezone=True), nullable=True),
+        schema=SCHEMA,
+    )
+    op.add_column(
+        "product_links", sa.Column("anuncio_status", sa.Text(), nullable=True), schema=SCHEMA
+    )
+    # A Tabela de Preços carrega de uma vez os anúncios de catálogo de cada
+    # integração (poucos: ~440 em maio) — índice parcial, nasce vazio.
+    op.create_index(
+        _IX_CATALOGO,
+        "product_links",
+        ["integration_id"],
+        schema=SCHEMA,
+        postgresql_where=sa.text("catalog_listing IS TRUE"),
+    )
 
     op.add_column(
         "pricing_products",
@@ -103,35 +152,6 @@ def upgrade() -> None:
         unique=True,
         schema=SCHEMA,
         postgresql_where=sa.text("canal = 'catalogo'"),
-    )
-
-    op.add_column(
-        "product_links", sa.Column("catalog_listing", sa.Boolean(), nullable=True), schema=SCHEMA
-    )
-    op.add_column(
-        "product_links", sa.Column("catalog_product_id", sa.Text(), nullable=True), schema=SCHEMA
-    )
-    op.add_column(
-        "product_links",
-        sa.Column("catalogo_relacionado", sa.Text(), nullable=True),
-        schema=SCHEMA,
-    )
-    op.add_column(
-        "product_links",
-        sa.Column("catalogo_lido_em", sa.DateTime(timezone=True), nullable=True),
-        schema=SCHEMA,
-    )
-    op.add_column(
-        "product_links", sa.Column("anuncio_status", sa.Text(), nullable=True), schema=SCHEMA
-    )
-    # A Tabela de Preços carrega de uma vez os anúncios de catálogo de cada
-    # integração (poucos: ~440 em maio) — índice parcial, nasce vazio.
-    op.create_index(
-        _IX_CATALOGO,
-        "product_links",
-        ["integration_id"],
-        schema=SCHEMA,
-        postgresql_where=sa.text("catalog_listing IS TRUE"),
     )
 
 
