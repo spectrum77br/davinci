@@ -137,7 +137,9 @@ async def _setup_schema():
             "mercadolivre", "shopee", "temu", "amazon",
             "aliexpress", "tiktok", "magalu",
         ),
-        "cell_status": ("auto", "manual", "locked", "disabled"),
+        # Mesmos valores de produção (0021: NA/SV; 0040: error/no_link) — o
+        # envio grava no_link/error na célula.
+        "cell_status": ("auto", "manual", "locked", "disabled", "NA", "SV", "error", "no_link"),
     }
     async with _test_engine.begin() as conn:
         await conn.execute(text(f'DROP SCHEMA IF EXISTS "{TEST_SCHEMA}" CASCADE'))

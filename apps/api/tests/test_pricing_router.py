@@ -239,22 +239,17 @@ async def test_ean_aceita_1000_caracteres(
 
 
 @pytest.mark.asyncio
-async def test_toggle_catalog(
+async def test_estrela_do_catalogo_antigo_saiu(
     client: AsyncClient,
     user_full: User,
     auth_as: Callable[[User | None], None],
 ):
+    """A ⭐ (POST /products/{id}/catalog) saiu em 06/10/2026: ela copiava o
+    produto para o departamento catálogo. O catálogo do ML agora é a coluna
+    Catálogo (preco_catalogo) — ver test_pricing_catalogo_ml.py."""
     auth_as(user_full)
-    r = await client.post(
-        "/api/pricing/products",
-        json={"sku": "TOGGLE-1", "name": "x", "cost_kit1": "10"},
-    )
-    pid = r.json()["id"]
-    assert r.json()["in_catalog"] is False
-    r = await client.post(f"/api/pricing/products/{pid}/catalog")
-    assert r.json()["in_catalog"] is True
-    r = await client.post(f"/api/pricing/products/{pid}/catalog")
-    assert r.json()["in_catalog"] is False
+    r = await client.post(f"/api/pricing/products/{uuid.uuid4()}/catalog")
+    assert r.status_code in (404, 405)
 
 
 @pytest.mark.asyncio

@@ -1,4 +1,9 @@
-"""Pricing catalog endpoints + batch push (Fase 9c)."""
+"""Push em lote de preços (Fase 9c) + relatório.
+
+Os testes do Catálogo antigo (GET /catalog-listings, POST /push-catalog e a ⭐
+`in_catalog`) saíram em 06/10/2026 junto com as rotas: o catálogo do ML virou
+coluna de catálogo das contas de kit — ver test_pricing_catalogo_ml.py.
+"""
 
 from __future__ import annotations
 
@@ -17,15 +22,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
     Company,
-    Department,
     Integration,
     IntegrationPlatform,
-    Listing,
-    ListingStatus,
+    LinkSyncStatus,
     Marketplace,
     PricingAccount,
     PricingPlatform,
     PricingProduct,
+    Product,
+    ProductLink,
+    Segment,
     Store,
     StoreStatus,
     User,
@@ -72,8 +78,8 @@ async def user_full(db: AsyncSession) -> User:
 
 @pytest_asyncio.fixture
 async def catalog_setup(db: AsyncSession, user_full: User) -> dict[str, Any]:
-    """One ML integration + 2 products (one in_catalog) + 2 listings + 2
-    accounts (one with department=catalogo)."""
+    """Uma integração ML, uma conta de kit (celular) e um produto com vínculo
+    ao anúncio MLB1 (o envio em lote passa pelo push_one de verdade)."""
     company = Company(razao_social="ACME", apelido="acme")
     db.add(company)
     await db.flush()
@@ -90,185 +96,78 @@ async def catalog_setup(db: AsyncSession, user_full: User) -> dict[str, Any]:
         credentials=encrypt_json(_ml_creds()),
     )
     db.add(integ)
+    raiz = Segment(name="Celular", slug="celular", sort_order=0)
+    db.add(raiz)
     await db.flush()
-
-    listings = [
-        Listing(
+    folha = Segment(name="Acessórios", slug="acessorios", sort_order=0, parent_id=raiz.id)
+    db.add(folha)
+    produto = Product(user_id=user_full.id, sku="REG-1", name="Reg")
+    db.add(produto)
+    await db.flush()
+    db.add(
+        ProductLink(
             user_id=user_full.id,
+            product_id=produto.id,
             integration_id=integ.id,
             platform=IntegrationPlatform.ML,
-            external_id=f"MLB{i}",
-            sku=sku,
-            title=f"item {i}",
-            status=ListingStatus.ACTIVE,
-            price=10000,
+            external_id="MLB1",
+            last_sync_status=LinkSyncStatus.OK,
         )
-        for i, sku in enumerate(["CAT-1", "REG-1"], start=1)
-    ]
-    for li in listings:
-        db.add(li)
-
-    p_cat = PricingProduct(
-        user_id=user_full.id,
-        sku="CAT-1",
-        name="Cat product",
-        cost_kit1=Decimal("100.00"),
-        in_catalog=True,
-        department=Department.CATALOGO,
     )
+
     p_reg = PricingProduct(
         user_id=user_full.id,
         sku="REG-1",
         name="Reg product",
+        segment_id=folha.id,
         cost_kit1=Decimal("50.00"),
-        in_catalog=False,
-    )
-    a_cat = PricingAccount(
-        user_id=user_full.id,
-        name="cat-acc",
-        platform=PricingPlatform.ML,
-        kit_number=1,
-        commission=Decimal("0.10"),
-        margin1=Decimal("0.20"),
-        shipping1=Decimal("5.00"),
-        integration_id=integ.id,
-        department=Department.CATALOGO,
     )
     a_reg = PricingAccount(
         user_id=user_full.id,
         name="reg-acc",
         platform=PricingPlatform.ML,
+        segment_id=raiz.id,
         kit_number=1,
         commission=Decimal("0.10"),
         margin1=Decimal("0.20"),
         shipping1=Decimal("5.00"),
         integration_id=integ.id,
     )
-    db.add_all([p_cat, p_reg, a_cat, a_reg])
+    db.add_all([p_reg, a_reg])
     await db.commit()
-    for o in [p_cat, p_reg, a_cat, a_reg]:
+    for o in [p_reg, a_reg]:
         await db.refresh(o)
     return {
         "integration": integ,
-        "p_cat": p_cat,
         "p_reg": p_reg,
-        "a_cat": a_cat,
         "a_reg": a_reg,
     }
 
 
-# =================================================== catalog-listings
-
-
-@pytest.mark.asyncio
-async def test_catalog_listings_returns_only_in_catalog_skus(
-    client: AsyncClient,
-    user_full: User,
-    catalog_setup: dict[str, Any],
-    auth_as: Callable[[User | None], None],
-):
-    auth_as(user_full)
-    r = await client.get("/api/pricing/catalog-listings")
-    assert r.status_code == 200
-    body = r.json()
-    assert len(body) == 1
-    assert body[0]["sku"] == "CAT-1"
-
-
-@pytest.mark.asyncio
-async def test_catalog_listings_no_in_catalog_returns_empty(
-    db: AsyncSession,
-    client: AsyncClient,
-    user_full: User,
-    catalog_setup: dict[str, Any],
-    auth_as: Callable[[User | None], None],
-):
-    auth_as(user_full)
-    catalog_setup["p_cat"].in_catalog = False
-    await db.commit()
-    r = await client.get("/api/pricing/catalog-listings")
-    assert r.json() == []
-
-
-# =================================================== push-catalog (B14)
-
-
-@pytest.mark.asyncio
-async def test_push_catalog_refuses_non_catalog_product(
-    client: AsyncClient,
-    user_full: User,
-    catalog_setup: dict[str, Any],
-    auth_as: Callable[[User | None], None],
-):
-    """B14 — push-catalog must not touch produtos sem in_catalog."""
-    auth_as(user_full)
-    r = await client.post(
-        "/api/pricing/push-catalog",
-        json={
-            "items": [
-                {
-                    "pricing_account_id": str(catalog_setup["a_cat"].id),
-                    "pricing_product_id": str(catalog_setup["p_reg"].id),
-                }
-            ]
-        },
+def _ml_item_ok(router) -> None:
+    router.get(f"{ML_API_BASE}/items/MLB1").mock(
+        return_value=Response(200, json={"id": "MLB1", "status": "active", "variations": []})
     )
-    assert r.status_code == 200
-    item = r.json()["results"][0]
-    assert item["ok"] is False
-    assert item["code"] == "not_in_catalog"
-
-
-@pytest.mark.asyncio
-async def test_push_catalog_refuses_non_catalog_account(
-    client: AsyncClient,
-    user_full: User,
-    catalog_setup: dict[str, Any],
-    auth_as: Callable[[User | None], None],
-):
-    auth_as(user_full)
-    r = await client.post(
-        "/api/pricing/push-catalog",
-        json={
-            "items": [
-                {
-                    "pricing_account_id": str(catalog_setup["a_reg"].id),
-                    "pricing_product_id": str(catalog_setup["p_cat"].id),
-                }
-            ]
-        },
+    router.put(f"{ML_API_BASE}/items/MLB1").mock(
+        return_value=Response(200, json={"id": "MLB1"})
     )
-    item = r.json()["results"][0]
-    assert item["ok"] is False
-    assert item["code"] == "account_not_catalog"
 
 
 @pytest.mark.asyncio
-async def test_push_catalog_success(
+async def test_rotas_do_catalogo_antigo_nao_existem_mais(
     client: AsyncClient,
     user_full: User,
     catalog_setup: dict[str, Any],
     auth_as: Callable[[User | None], None],
 ):
     auth_as(user_full)
-    with respx.mock(base_url=ML_API_BASE) as router:
-        put_route = router.put("/items/MLB1").mock(
-            return_value=Response(200, json={"id": "MLB1"})
-        )
-        r = await client.post(
-            "/api/pricing/push-catalog",
-            json={
-                "items": [
-                    {
-                        "pricing_account_id": str(catalog_setup["a_cat"].id),
-                        "pricing_product_id": str(catalog_setup["p_cat"].id),
-                    }
-                ]
-            },
-        )
-        item = r.json()["results"][0]
-        assert item["ok"] is True
-        assert put_route.called
+    item = {
+        "pricing_account_id": str(catalog_setup["a_reg"].id),
+        "pricing_product_id": str(catalog_setup["p_reg"].id),
+    }
+    assert (await client.get("/api/pricing/catalog-listings")).status_code in (404, 405)
+    r = await client.post("/api/pricing/push-catalog", json={"items": [item]})
+    assert r.status_code in (404, 405)
 
 
 # =================================================== batch service
@@ -299,18 +198,16 @@ async def test_batch_service_records_progress_and_skips_telegram_when_no_chat(
     await db.refresh(job)
 
     # No UserSettings row → no telegram_chat_id → telegram skipped silently.
-    with respx.mock(base_url=ML_API_BASE) as router:
-        router.put("/items/MLB1").mock(
-            return_value=Response(200, json={"id": "MLB1"})
-        )
+    with respx.mock() as router:
+        _ml_item_ok(router)
         await run_push_prices_batch(
             db,
             job_id=job.id,
             user_id=user_full.id,
             items=[
                 {
-                    "pricing_account_id": str(catalog_setup["a_cat"].id),
-                    "pricing_product_id": str(catalog_setup["p_cat"].id),
+                    "pricing_account_id": str(catalog_setup["a_reg"].id),
+                    "pricing_product_id": str(catalog_setup["p_reg"].id),
                 }
             ],
             idempotency_prefix="batch-test-1",
@@ -367,9 +264,7 @@ async def test_batch_service_sends_telegram_when_chat_configured(
     from app.services import telegram as tg_mod
 
     with respx.mock() as router:
-        router.put(f"{ML_API_BASE}/items/MLB1").mock(
-            return_value=Response(200, json={"id": "MLB1"})
-        )
+        _ml_item_ok(router)
         tg_route = router.post(
             f"{tg_mod.TELEGRAM_API_BASE}/botfake-token/sendMessage"
         ).mock(return_value=Response(200, json={"ok": True, "result": {}}))
@@ -379,8 +274,8 @@ async def test_batch_service_sends_telegram_when_chat_configured(
             user_id=user_full.id,
             items=[
                 {
-                    "pricing_account_id": str(catalog_setup["a_cat"].id),
-                    "pricing_product_id": str(catalog_setup["p_cat"].id),
+                    "pricing_account_id": str(catalog_setup["a_reg"].id),
+                    "pricing_product_id": str(catalog_setup["p_reg"].id),
                 }
             ],
             idempotency_prefix="batch-tg",
@@ -430,8 +325,8 @@ async def test_push_batch_endpoint_creates_job(
         json={
             "items": [
                 {
-                    "pricing_account_id": str(catalog_setup["a_cat"].id),
-                    "pricing_product_id": str(catalog_setup["p_cat"].id),
+                    "pricing_account_id": str(catalog_setup["a_reg"].id),
+                    "pricing_product_id": str(catalog_setup["p_reg"].id),
                 }
             ]
         },
