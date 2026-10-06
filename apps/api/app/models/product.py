@@ -4,6 +4,7 @@ from uuid import UUID, uuid4
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     CheckConstraint,
     DateTime,
     Enum,
@@ -122,6 +123,15 @@ class ProductCategory(Base, TimestampMixin):
 
 class ProductLink(Base, TimestampMixin):
     __tablename__ = "product_links"
+    __table_args__ = (
+        # A Tabela de Preços carrega os anúncios de catálogo por integração
+        # (migration 0377).
+        Index(
+            "ix_product_links_catalogo",
+            "integration_id",
+            postgresql_where=text("catalog_listing IS TRUE"),
+        ),
+    )
 
     id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
     user_id: Mapped[UUID] = mapped_column(
@@ -168,6 +178,19 @@ class ProductLink(Base, TimestampMixin):
     # estoque; sai sozinho depois de 30 dias; volta a viver se reaparecer.
     morto_desde: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     morto_motivo: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Marca de catálogo do ML (migration 0377), gravada pela varredura diária
+    # de vínculos com o item que ela já lê (sem chamada nova ao ML).
+    # catalog_listing NULL = ainda não lido. catalogo_relacionado = anúncios de
+    # `item_relations` separados por vírgula: catálogo preso ao anúncio comum
+    # (o ML replica o preço entre os dois). anuncio_status = status lido
+    # (active/paused/under_review/closed/inactive).
+    catalog_listing: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    catalog_product_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    catalogo_relacionado: Mapped[str | None] = mapped_column(Text, nullable=True)
+    catalogo_lido_em: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    anuncio_status: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class BackgroundJob(Base, TimestampMixin):

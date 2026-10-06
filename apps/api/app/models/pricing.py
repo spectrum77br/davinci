@@ -8,6 +8,7 @@ from sqlalchemy import (
     DateTime,
     Enum,
     ForeignKey,
+    Index,
     Integer,
     Numeric,
     String,
@@ -33,8 +34,28 @@ def _enum(py_enum, name: str):
     )
 
 
+# Canais da conta de preço (Catálogo ML, 06/10/2026 — migration 0377).
+CANAL_KIT = "kit"
+CANAL_CATALOGO = "catalogo"
+
+
 class PricingAccount(Base, TimestampMixin):
     __tablename__ = "pricing_accounts"
+    __table_args__ = (
+        CheckConstraint("canal IN ('kit', 'catalogo')", name="canal_valido"),
+        CheckConstraint(
+            "(canal = 'catalogo' AND conta_base_id IS NOT NULL AND integration_id IS NULL)"
+            " OR (canal = 'kit' AND conta_base_id IS NULL)",
+            name="canal_conta_base",
+        ),
+        # Uma coluna de catálogo por conta de kit.
+        Index(
+            "uq_pricing_accounts_catalogo_por_base",
+            "conta_base_id",
+            unique=True,
+            postgresql_where=text("canal = 'catalogo'"),
+        ),
+    )
 
     id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
     user_id: Mapped[UUID] = mapped_column(
@@ -132,6 +153,19 @@ class PricingAccount(Base, TimestampMixin):
     sort_order: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, server_default=text("0")
     )
+    # Catálogo ML (06/10/2026, migration 0377). 'kit' = a conta de sempre.
+    # 'catalogo' = coluna de catálogo ligada numa conta ML de kit (a "base",
+    # `conta_base_id`): sem integração própria (Margem, frete projetado e
+    # Lojas só enxergam a base), e comissão/margens/fretes/anotações vêm da
+    # base na hora do cálculo — a filha não guarda números.
+    canal: Mapped[str] = mapped_column(
+        Text, nullable=False, default=CANAL_KIT, server_default=text("'kit'")
+    )
+    conta_base_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("pricing_accounts.id", ondelete="CASCADE"),
+        nullable=True,
+    )
 
 
 class PricingProduct(Base, TimestampMixin):
@@ -179,6 +213,10 @@ class PricingProduct(Base, TimestampMixin):
     cost_kit6: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True)
     cost_kit7: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True)
     cost_kit8: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True)
+    # Custo base do anúncio de catálogo do ML (coluna "Catálogo" em Produtos,
+    # migration 0377): entra na conta como os Kit 1..8. NULL = sem preço de
+    # catálogo — as colunas de catálogo mostram "—" e não enviam.
+    preco_catalogo: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True)
     description: Mapped[str | None] = mapped_column(String(256), nullable=True)
     model: Mapped[str | None] = mapped_column(String(128), nullable=True)
     # 1000 chars (Eduardo, 03/09): cabe colar VÁRIOS EANs na mesma linha
