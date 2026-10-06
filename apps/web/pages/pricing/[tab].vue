@@ -1630,6 +1630,23 @@ async function submitNewProd() {
 // =========================================================== overrides / grid
 
 type CellColor = 'red' | 'orange' | 'yellow' | 'green' | 'blue' | 'purple' | 'pink' | 'gray'
+// Célula de conta de catálogo: o /grid diz quais anúncios de catálogo a
+// célula atinge e se o envio está bloqueado (o servidor decide; a tela só
+// mostra e não manda célula bloqueada).
+type CatalogoAnuncio = {
+  external_id: string
+  status: string | null
+  listing_type: string | null
+  // MLBs dos anúncios comuns presos a este anúncio de catálogo (item_relations)
+  sincronizado_com: string[]
+}
+type CatalogoCelula = {
+  anuncios: CatalogoAnuncio[]
+  // null = pode enviar; 'sem_anuncio' | 'sincronizado' | 'pausado' |
+  // 'em_revisao' | 'encerrado' | 'sem_tipo' | 'sem_preco_catalogo'
+  bloqueio: string | null
+  texto: string | null
+}
 type GridCell = {
   pricing_account_id: string
   pricing_product_id: string
@@ -1638,6 +1655,7 @@ type GridCell = {
   cell_status: 'auto' | 'manual' | 'locked' | 'disabled' | 'NA' | 'SV' | 'error' | 'no_link'
   has_override: boolean
   cell_color: CellColor | null
+  catalogo?: CatalogoCelula | null
 }
 type GridResponse = {
   accounts: Account[]
@@ -1902,10 +1920,10 @@ function cellTone(c: GridCell | undefined): string {
     const acc = grid.value?.accounts.find(a => a.id === c.pricing_account_id)
     if (prod && acc) {
       const price = Number(c.price)
-      const cost = getKitCost(prod, acc.kit_number)
-      const ms = getMarginShipping(acc, prod.product_type)
+      const cost = custoDaConta(prod, acc)
+      const ms = getMarginShipping(contaParametros(acc), prod.product_type)
       const shipping = ms ? Number(ms.shipping) : 0
-      if (price < cost + shipping) return 'bg-red-100 text-red-700 font-bold'
+      if (cost != null && price < cost + shipping) return 'bg-red-100 text-red-700 font-bold'
     }
   }
   return ''
@@ -1974,6 +1992,11 @@ async function setCellStatus(c: GridCell, status: 'auto' | 'locked' | 'disabled'
 }
 
 async function pushCell(c: GridCell) {
+  const bloq = catalogoBloqueado(c.pricing_product_id, c.pricing_account_id)
+  if (bloq) {
+    toast.warning('Envio bloqueado', textoBloqueio(bloq))
+    return
+  }
   pushing.value = true
   lastPushResults.value = []
   try {
@@ -1987,9 +2010,12 @@ async function pushCell(c: GridCell) {
     lastPushResults.value = r.results
     const okItems = r.results.filter((x) => x.ok)
     const failItems = r.results.filter((x) => !x.ok)
+    const bloqItems = failItems.filter((x) => ehCodigoBloqueio(x.code))
     if (failItems.length === 0) {
       const priceTxt = okItems[0]?.price ? ` — R$ ${Number(okItems[0].price).toFixed(0)}` : ''
       toast.success(`Preço enviado${priceTxt}`, `${okItems.length} variação(ões) ok`)
+    } else if (okItems.length === 0 && bloqItems.length === failItems.length) {
+      toast.warning('Envio bloqueado', bloqItems.map((f) => f.detail || f.code).slice(0, 5))
     } else if (okItems.length === 0) {
       toast.error(
         'Erro no push',
@@ -2026,12 +2052,22 @@ const activeJob = ref<BatchJob | null>(null)
 // must build `items` in the visual order they want (e.g. produto×conta in
 // gridAccounts order) — pushItemsBatch groups by product only to compute
 // the "N/total" label.
+// `bloqueadas` = células de catálogo bloqueadas que o chamador já tirou da
+// fila; entram na contagem final de puladas.
 async function pushItemsBatch(
   items: { pricing_account_id: string; pricing_product_id: string }[],
   keyHint: string,
+  bloqueadas = 0,
 ) {
   if (!items.length) {
-    gridErr.value = 'no_eligible_cells'
+    if (bloqueadas > 0) {
+      toast.warning(
+        'Nada para enviar',
+        `${bloqueadas} célula(s) de catálogo bloqueada(s) — passe o mouse no cadeado para ver o motivo`,
+      )
+    } else {
+      gridErr.value = 'no_eligible_cells'
+    }
     return
   }
   pushing.value = true
@@ -2046,6 +2082,7 @@ async function pushItemsBatch(
   let errors = 0
   let noLinks = 0
   let skipped = 0
+  let recusadas = 0
   const errorDetails: string[] = []
 
   function setCell(ck: string, st: PushCellState) {
@@ -2086,6 +2123,10 @@ async function pushItemsBatch(
           } else if (result.code === 'all_skipped') {
             setCell(ck, 'success')
             skipped++
+          } else if (ehCodigoBloqueio(result.code)) {
+            // servidor recusou: célula de catálogo bloqueada / anúncio de outro canal
+            setCell(ck, 'no_link')
+            recusadas++
           } else {
             setCell(ck, 'error')
             errors++
@@ -2099,17 +2140,25 @@ async function pushItemsBatch(
       }
     }
 
+    const totalBloq = bloqueadas + recusadas
+    const txtBloq = totalBloq > 0 ? `${totalBloq} bloqueada(s) de catálogo pulada(s)` : ''
     if (errors > 0) {
       toast.error(
-        `Envio: ${sent} ok, ${errors} erro(s)${noLinks > 0 ? `, ${noLinks} sem vínculo` : ''}`,
+        `Envio: ${sent} ok, ${errors} erro(s)${noLinks > 0 ? `, ${noLinks} sem vínculo` : ''}${totalBloq > 0 ? `, ${totalBloq} bloqueada(s)` : ''}`,
         errorDetails.slice(0, 5),
       )
-    } else if (sent === 0 && noLinks > 0) {
-      toast.warning(`Nenhum preço enviado. ${noLinks} célula(s) sem vínculo.`)
+    } else if (sent === 0 && (noLinks > 0 || totalBloq > 0)) {
+      toast.warning(
+        'Nenhum preço enviado',
+        [noLinks > 0 ? `${noLinks} célula(s) sem vínculo` : '', txtBloq].filter(Boolean),
+      )
     } else {
       toast.success(
         'Push concluído!',
-        `${sent} preço(s) enviado(s) com sucesso${skipped > 0 ? ` (${skipped} pulado(s))` : ''}`,
+        [
+          `${sent} preço(s) enviado(s) com sucesso${skipped > 0 ? ` (${skipped} pulado(s))` : ''}`,
+          txtBloq,
+        ].filter(Boolean),
       )
     }
 
@@ -2172,14 +2221,16 @@ async function pollJob(jobId: string, attempts = 0): Promise<void> {
 
 async function pushAccountColumn(accId: string) {
   if (!grid.value) return
-  if (!confirm('Disparar push para todos os produtos desta conta?')) return
-  const items = filteredGridProducts.value
+  const elegiveis = filteredGridProducts.value
     .map((p) => ({ pricing_account_id: accId, pricing_product_id: p.id }))
     .filter((it) => {
       const c = cellOf(it.pricing_product_id, it.pricing_account_id)
       return c && c.price != null && c.source !== 'locked' && c.source !== 'disabled'
     })
-  await pushItemsBatch(items, `col:${accId}`)
+  const { items, bloqueadas } = separarBloqueadas(elegiveis)
+  const aviso = bloqueadas > 0 ? `\n\n${bloqueadas} célula(s) de catálogo bloqueada(s) serão puladas.` : ''
+  if (!confirm(`Disparar push para todos os produtos desta conta?${aviso}`)) return
+  await pushItemsBatch(items, `col:${accId}`, bloqueadas)
 }
 
 async function pushAllVisible() {
@@ -2196,8 +2247,10 @@ async function pushAllVisible() {
       }
     }
   }
-  if (!confirm(`Push ${items.length} célula(s)?`)) return
-  await pushItemsBatch(items, 'all-visible')
+  const fila = separarBloqueadas(items)
+  const aviso = fila.bloqueadas > 0 ? ` (${fila.bloqueadas} bloqueada(s) de catálogo serão puladas)` : ''
+  if (!confirm(`Push ${fila.items.length} célula(s)?${aviso}`)) return
+  await pushItemsBatch(fila.items, 'all-visible', fila.bloqueadas)
 }
 
 async function sendManualReport() {
@@ -2214,6 +2267,103 @@ async function sendManualReport() {
   } catch (e: any) {
     gridErr.value = e?.data?.detail?.code ?? 'report_failed'
   }
+}
+
+// =========================================================== grid: conta de catálogo
+
+// Conta de kit de onde a coluna de catálogo tira comissão, margens, fretes e
+// anotações. Procura no /grid (inclui contas fora do filtro de marketplace) e
+// depois na lista da aba Contas.
+const contasPorId = computed(() => {
+  const m = new Map<string, Account>()
+  for (const a of accounts.value) m.set(a.id, a)
+  for (const a of grid.value?.accounts ?? []) m.set(a.id, a)
+  return m
+})
+
+function contaBase(acc: Account): Account | null {
+  if (!ehCatalogo(acc) || !acc.conta_base_id) return null
+  return contasPorId.value.get(acc.conta_base_id) ?? null
+}
+
+// Conta cujos números valem para a coluna: a base, na coluna de catálogo.
+function contaParametros(acc: Account): Account {
+  return contaBase(acc) ?? acc
+}
+
+// Cabeçalho da coluna de catálogo = nome da conta de kit (+ selo "catálogo").
+function nomeColuna(acc: Account): string {
+  return ehCatalogo(acc) ? contaParametros(acc).name : acc.name
+}
+
+function tipoDe(acc: Account): string {
+  return acc.listing_type || contaParametros(acc).listing_type || ''
+}
+
+// Custo base da coluna: Kit N na conta de kit; na coluna de catálogo, o
+// preco_catalogo do produto (vazio/0 = sem preço — nunca cai para o Kit 1).
+function custoDaConta(prod: PricingProduct, acc: Account): number | null {
+  if (ehCatalogo(acc)) {
+    const v = prod.preco_catalogo
+    if (v == null || v === '') return null
+    const n = Number(v)
+    return Number.isFinite(n) && n > 0 ? n : null
+  }
+  return getKitCost(prod, acc.kit_number)
+}
+
+// Frase de reserva caso o /grid não mande o `texto` do bloqueio.
+const MOTIVOS_BLOQUEIO: Record<string, string> = {
+  sem_anuncio: 'Sem anúncio de catálogo vinculado nesta conta',
+  sincronizado: 'Anúncio de catálogo preso ao anúncio comum: o preço dele vem da coluna de kit',
+  pausado: 'Anúncio de catálogo pausado',
+  em_revisao: 'Anúncio de catálogo em revisão no Mercado Livre',
+  encerrado: 'Anúncio de catálogo encerrado',
+  sem_tipo: 'Conta sem tipo (clássico/premium)',
+  sem_preco_catalogo: 'Produto sem preço de catálogo (coluna Catálogo em Produtos)',
+}
+
+function catalogoBloqueado(prodId: string, accId: string): CatalogoCelula | null {
+  const cat = cellOf(prodId, accId)?.catalogo
+  return cat && cat.bloqueio ? cat : null
+}
+
+function textoBloqueio(cat: CatalogoCelula): string {
+  return cat.texto || MOTIVOS_BLOQUEIO[cat.bloqueio ?? ''] || 'Envio bloqueado'
+}
+
+// Hover da célula de catálogo: motivo do bloqueio + anúncios que ela atinge.
+function tituloCelulaCatalogo(prodId: string, acc: Account): string | undefined {
+  if (!ehCatalogo(acc)) return undefined
+  const cat = cellOf(prodId, acc.id)?.catalogo
+  if (!cat) return undefined
+  const linhas: string[] = []
+  if (cat.bloqueio) linhas.push(`Envio bloqueado: ${textoBloqueio(cat)}`)
+  else if (cat.texto) linhas.push(cat.texto)
+  for (const an of cat.anuncios ?? []) {
+    const extras = [an.status, an.listing_type].filter(Boolean).join(', ')
+    const preso = an.sincronizado_com?.length ? ` · preso a ${an.sincronizado_com.join(', ')}` : ''
+    linhas.push(`Catálogo ${an.external_id}${extras ? ` (${extras})` : ''}${preso}`)
+  }
+  return linhas.length ? linhas.join('\n') : undefined
+}
+
+// Respostas do /push que querem dizer "célula bloqueada / anúncio de outro
+// canal", e não falha: contam como puladas, não como erro.
+const CODIGOS_BLOQUEIO = new Set([
+  'sem_anuncio', 'sincronizado', 'pausado', 'em_revisao', 'encerrado',
+  'sem_tipo', 'sem_preco_catalogo', 'canal_errado', 'bloqueado',
+])
+function ehCodigoBloqueio(code: string): boolean {
+  return CODIGOS_BLOQUEIO.has(code) || code.startsWith('catalogo_') || code.startsWith('bloqueado_')
+}
+
+// Separa as células que podem ir das bloqueadas (catálogo), mantendo a ordem.
+function separarBloqueadas(
+  items: { pricing_account_id: string; pricing_product_id: string }[],
+): { items: { pricing_account_id: string; pricing_product_id: string }[]; bloqueadas: number } {
+  const livres = items.filter((it) => !catalogoBloqueado(it.pricing_product_id, it.pricing_account_id))
+  return { items: livres, bloqueadas: items.length - livres.length }
 }
 
 // =========================================================== grid extras (features)
@@ -2234,43 +2384,83 @@ const PLATFORM_ORDER: Record<string, number> = {
 // pushItemsBatch's "send all visible" iteration, the cellOf lookups
 // in keyboard nav) all read from this computed so they inherit the
 // filter automatically.
-const gridAccounts = computed<Account[]>(() => {
-  let accs = (grid.value?.accounts ?? []).slice()
-  if (gridPlatformFilter.value) {
-    accs = accs.filter((a) => a.platform === gridPlatformFilter.value)
-  }
-  return accs.sort((a, b) => {
+function compararContasKit(a: Account, b: Account): number {
+  if (a.kit_number !== b.kit_number) return (a.kit_number || 0) - (b.kit_number || 0)
+  return (a.name || '').localeCompare(b.name || '', 'pt-BR', { sensitivity: 'base' })
+}
+
+// Ordem visual sem filtro (também a do Excel). As colunas de catálogo vêm
+// DEPOIS de todos os grupos "ML kit N" da plataforma, num grupo só ("ML
+// Catálogo"), na mesma ordem das contas de kit de onde saíram.
+const gridAccountsOrdenadas = computed<Account[]>(() => {
+  return (grid.value?.accounts ?? []).slice().sort((a, b) => {
     const pa = PLATFORM_ORDER[a.platform] ?? 99
     const pb = PLATFORM_ORDER[b.platform] ?? 99
     if (pa !== pb) return pa - pb
-    if (a.kit_number !== b.kit_number) return (a.kit_number || 0) - (b.kit_number || 0)
-    return (a.name || '').localeCompare(b.name || '', 'pt-BR', { sensitivity: 'base' })
+    const ca = ehCatalogo(a) ? 1 : 0
+    const cb = ehCatalogo(b) ? 1 : 0
+    if (ca !== cb) return ca - cb
+    if (ca) return compararContasKit(contaParametros(a), contaParametros(b))
+    return compararContasKit(a, b)
   })
+})
+
+// Filtro "Todos marketplaces": plataforma, ou as duas tabelas do ML
+// separadas ('ml_kit' / 'ml_catalogo').
+function passaFiltroPlataforma(a: Account, f: string): boolean {
+  if (!f) return true
+  if (f === 'ml_kit') return a.platform === 'mercadolivre' && !ehCatalogo(a)
+  if (f === 'ml_catalogo') return ehCatalogo(a)
+  return a.platform === f
+}
+
+const gridAccounts = computed<Account[]>(() => {
+  const f = gridPlatformFilter.value
+  return f ? gridAccountsOrdenadas.value.filter((a) => passaFiltroPlataforma(a, f)) : gridAccountsOrdenadas.value
 })
 
 // Dropdown options derived from the unfiltered grid response — only
 // platforms actually present in the current department show up so the
 // operator doesn't see dead-end options like "TikTok" when there are
-// zero TikTok accounts in the loaded department.
-const gridPlatformOptions = computed<string[]>(() => {
+// zero TikTok accounts in the loaded department. Com ML na categoria,
+// entram também "ML Kit" e "ML Catálogo" (este desabilitado, com o caminho
+// para ligar, enquanto nenhuma conta tiver o catálogo ligado).
+const gridPlatformOptions = computed<{ value: string; label: string; disabled?: boolean }[]>(() => {
   const set = new Set<string>()
   for (const a of (grid.value?.accounts ?? [])) set.add(a.platform)
-  return Array.from(set).sort(
+  const temCatalogo = (grid.value?.accounts ?? []).some(ehCatalogo)
+  const out: { value: string; label: string; disabled?: boolean }[] = []
+  const plataformas = Array.from(set).sort(
     (a, b) => (PLATFORM_ORDER[a] ?? 99) - (PLATFORM_ORDER[b] ?? 99),
   )
+  for (const p of plataformas) {
+    out.push({ value: p, label: platformLabel(p) })
+    if (p === 'mercadolivre') {
+      out.push({ value: 'ml_kit', label: 'ML Kit' })
+      out.push(
+        temCatalogo
+          ? { value: 'ml_catalogo', label: 'ML Catálogo' }
+          : { value: 'ml_catalogo', label: 'ML Catálogo (ligue na aba Contas)', disabled: true },
+      )
+    }
+  }
+  return out
 })
 
 const accountGroups = computed<
-  { label: string; platform: string; accounts: Account[] }[]
+  { label: string; platform: string; catalogo: boolean; accounts: Account[] }[]
 >(() => {
   const accs = gridAccounts.value
-  const groups: { label: string; platform: string; accounts: Account[] }[] = []
+  const groups: { label: string; platform: string; catalogo: boolean; accounts: Account[] }[] = []
   let currentKey = ''
   for (const acc of accs) {
-    const key = `${acc.platform}-kit${acc.kit_number}`
-    const label = `${platformLabel(acc.platform)} kit ${acc.kit_number}`
+    const catalogo = ehCatalogo(acc)
+    const key = catalogo ? `${acc.platform}-catalogo` : `${acc.platform}-kit${acc.kit_number}`
+    const label = catalogo
+      ? `${platformLabel(acc.platform)} Catálogo`
+      : `${platformLabel(acc.platform)} kit ${acc.kit_number}`
     if (key !== currentKey) {
-      groups.push({ label, platform: acc.platform, accounts: [acc] })
+      groups.push({ label, platform: acc.platform, catalogo, accounts: [acc] })
       currentKey = key
     } else {
       groups[groups.length - 1].accounts.push(acc)
@@ -2316,12 +2506,14 @@ function getMarginShipping(acc: Account, productType: number): { margin: number;
 
 // Mirrors backend calc.py: (cost * (1 + margin) + shipping) / (1 - commission)
 // Returns null if any required input is missing (margin/commission/cost).
+// Coluna de catálogo: custo = preco_catalogo; margem/frete/comissão da base.
 function computePrice(acc: Account, prod: PricingProduct): number | null {
-  const cost = getKitCost(prod, acc.kit_number)
+  const cost = custoDaConta(prod, acc)
   if (!cost) return null
-  const ms = getMarginShipping(acc, (prod as any).product_type ?? 2)
+  const pa = contaParametros(acc)
+  const ms = getMarginShipping(pa, (prod as any).product_type ?? 2)
   if (!ms) return null
-  const commission = Number(acc.commission || 0)
+  const commission = Number(pa.commission || 0)
   const denom = 1 - commission
   if (denom <= 0) return null
   // SSH rounds the computed price to integer reais (Math.round). Cents
@@ -2362,10 +2554,10 @@ const negativeMarginCount = computed(() => {
       if (!c || c.price == null || c.source === 'disabled' || c.source === 'locked') continue
       if (c.cell_status === 'NA' || c.cell_status === 'SV') continue
       const price = Number(c.price)
-      const cost = getKitCost(prod, acc.kit_number)
-      const ms = getMarginShipping(acc, prod.product_type)
+      const cost = custoDaConta(prod, acc)
+      const ms = getMarginShipping(contaParametros(acc), prod.product_type)
       const shipping = ms ? Number(ms.shipping) : 0
-      if (price < cost + shipping) count++
+      if (cost != null && price < cost + shipping) count++
     }
   }
   return count
@@ -2398,13 +2590,32 @@ function platformHeaderBg(platform: string): string {
   }
 }
 
+// Colunas de catálogo ganham um tom próprio para não se misturar com o kit.
+function colunaBg(acc: Account): string {
+  return ehCatalogo(acc) ? 'bg-indigo-50/50 dark:bg-indigo-900/10' : platformBg(acc.platform)
+}
+function colunaHeaderBg(acc: Account): string {
+  return ehCatalogo(acc) ? 'bg-indigo-50 dark:bg-indigo-900/30' : platformHeaderBg(acc.platform)
+}
+function grupoHeaderBg(group: { platform: string; catalogo: boolean }): string {
+  return group.catalogo ? 'bg-indigo-100 text-indigo-900 dark:bg-indigo-900/40 dark:text-indigo-100' : platformHeaderBg(group.platform)
+}
+
 // Feature 3: header obs editing
-function startEditObs(accId: string, field: string, currentVal: string | null) {
-  editingObsId.value = `${accId}-${field}`
+// Na coluna de catálogo as anotações são as da conta de kit: mostra e grava
+// na base (`colId` = coluna clicada, `accId` = conta que recebe o PATCH).
+function notaDe(acc: Account, field: string): string | null {
+  return (contaParametros(acc) as any)[field] ?? null
+}
+
+function startEditObs(colId: string, field: string, currentVal: string | null) {
+  editingObsId.value = `${colId}-${field}`
   obsValue.value = currentVal || ''
 }
 
-async function commitObs(accId: string, field: string) {
+async function commitObs(colId: string, accId: string, field: string) {
+  // Enter já gravou e fechou o campo: o blur que vem depois não grava de novo.
+  if (editingObsId.value !== `${colId}-${field}`) return
   // Snapshot obsValue synchronously: blur on obs1 → click on obs2 would
   // reassign obsValue before the PATCH fires (same race as commitEditProduct).
   const raw = obsValue.value.trim()
@@ -2469,13 +2680,16 @@ function handleRedo() {
 // Feature 5: Excel/CSV export
 function handleExportExcel() {
   if (!grid.value) return
-  const accs = grid.value.accounts
+  // Ordem da tela (catálogo depois dos kits), sem o filtro de marketplace.
+  const accs = gridAccountsOrdenadas.value
   const prods = filteredGridProducts.value
   const headers = ['SKU', 'Produto', 'Bling', '7d', '30d', department.value === 'celular' ? 'Kit1' : 'Custo']
   if (department.value === 'celular') {
     for (let k = 2; k <= 8; k++) headers.push(`Kit${k}`)
   }
-  for (const acc of accs) headers.push(acc.name)
+  // Coluna Catálogo depois do último kit (Kit8 no celular, Custo nos outros).
+  headers.push('Catálogo')
+  for (const acc of accs) headers.push(ehCatalogo(acc) ? `${nomeColuna(acc)} catálogo` : acc.name)
   const rows = prods.map(p => {
     const row: string[] = [
       p.sku,
@@ -2490,6 +2704,7 @@ function handleExportExcel() {
         row.push(String(Number((p as any)[`cost_kit${k}`] || 0).toFixed(0)))
       }
     }
+    row.push(p.preco_catalogo != null && p.preco_catalogo !== '' ? Number(p.preco_catalogo).toFixed(0) : '')
     for (const acc of accs) {
       const c = cellOf(p.id, acc.id)
       if (c?.cell_status === 'NA') row.push('NA')
@@ -2554,7 +2769,7 @@ function handleGridKeyDown(e: KeyboardEvent) {
   if (editingCell.value) return
   const { row, col } = selectedCell.value
   const maxRow = filteredGridProducts.value.length - 1
-  const maxCol = (grid.value?.accounts.length ?? 0) - 1
+  const maxCol = gridAccounts.value.length - 1
   switch (e.key) {
     case 'ArrowUp': e.preventDefault(); if (row > 0) selectedCell.value = { row: row - 1, col }; break
     case 'ArrowDown': e.preventDefault(); if (row < maxRow) selectedCell.value = { row: row + 1, col }; break
@@ -2563,7 +2778,7 @@ function handleGridKeyDown(e: KeyboardEvent) {
     case 'Enter': {
       e.preventDefault()
       const prod = filteredGridProducts.value[row]
-      const acc = (grid.value?.accounts ?? [])[col]
+      const acc = gridAccounts.value[col]
       if (prod && acc) {
         const c = cellOf(prod.id, acc.id)
         if (c) startCellEdit(c)
@@ -3986,8 +4201,8 @@ watch(department, async () => {
           title="Filtrar colunas por marketplace"
         >
           <option value="">Todos marketplaces</option>
-          <option v-for="p in gridPlatformOptions" :key="p" :value="p">
-            {{ platformLabel(p) }}
+          <option v-for="o in gridPlatformOptions" :key="o.value" :value="o.value" :disabled="o.disabled">
+            {{ o.label }}
           </option>
         </select>
         <button class="btn btn-sm" :disabled="!undoStack.length" title="Desfazer (Ctrl+Z)" @click="handleUndo">
@@ -4034,10 +4249,12 @@ watch(department, async () => {
                 v-for="acc in group.accounts"
                 :key="acc.id"
                 class="w-full text-left px-3 py-1.5 text-sm hover:bg-muted flex justify-between items-center gap-2"
-                @click="pushAccountAndClose(acc.id, acc.name)"
+                @click="pushAccountAndClose(acc.id, ehCatalogo(acc) ? `${nomeColuna(acc)} catálogo` : acc.name)"
               >
-                <span class="truncate">{{ acc.name }}</span>
-                <span class="text-[10px] text-muted-foreground shrink-0">{{ acc.listing_type || acc.platform }}</span>
+                <span class="truncate">{{ nomeColuna(acc) }}</span>
+                <span class="text-[10px] text-muted-foreground shrink-0">
+                  {{ ehCatalogo(acc) ? `${tipoDe(acc) || 'sem tipo'} · catálogo` : (acc.listing_type || acc.platform) }}
+                </span>
               </button>
             </template>
           </div>
@@ -4157,7 +4374,8 @@ watch(department, async () => {
                 :key="`g-${group.label}`"
                 :colspan="group.accounts.length"
                 class="px-2 py-1 text-center text-[11px] font-semibold border-l-[3px] border-gray-500"
-                :class="platformHeaderBg(group.platform)"
+                :class="grupoHeaderBg(group)"
+                :title="group.catalogo ? 'Preço = coluna Catálogo do produto + margem, frete e comissão da conta de kit. Envia só para o anúncio de catálogo; célula com cadeado não envia.' : undefined"
               >
                 {{ group.label }}
               </th>
@@ -4174,10 +4392,15 @@ watch(department, async () => {
                 v-for="acc in gridAccounts"
                 :key="`n-${acc.id}`"
                 class="px-1 py-1 text-left min-w-[110px] align-top border-l"
-                :class="platformHeaderBg(acc.platform)"
+                :class="colunaHeaderBg(acc)"
               >
                 <div class="flex items-center gap-1">
-                  <span class="text-xs font-semibold truncate" :title="acc.name">{{ acc.name }}</span>
+                  <span class="text-xs font-semibold truncate" :title="nomeColuna(acc)">{{ nomeColuna(acc) }}</span>
+                  <span
+                    v-if="ehCatalogo(acc)"
+                    class="shrink-0 rounded border border-indigo-300 bg-indigo-100 px-1 text-[9px] font-semibold leading-tight text-indigo-800 dark:border-indigo-700 dark:bg-indigo-900/40 dark:text-indigo-200"
+                    title="Coluna de catálogo: usa a comissão, margens, fretes e anotações da conta de kit e envia só para o anúncio de catálogo"
+                  >catálogo</span>
                   <button class="p-0.5 hover:bg-muted rounded shrink-0" title="Push para esta conta" @click="pushAccountColumn(acc.id)">
                     <Send class="h-3 w-3" />
                   </button>
@@ -4187,19 +4410,19 @@ watch(department, async () => {
                     <input
                       v-model="obsValue"
                       class="w-full text-[9px] border rounded px-1 py-0.5 bg-background"
-                      @blur="commitObs(acc.id, f.key)"
-                      @keydown.enter="commitObs(acc.id, f.key)"
+                      @blur="commitObs(acc.id, contaParametros(acc).id, f.key)"
+                      @keydown.enter="commitObs(acc.id, contaParametros(acc).id, f.key)"
                       @keydown.escape="editingObsId = null"
                     />
                   </div>
                   <div
                     v-else
                     class="text-[9px] cursor-pointer truncate leading-tight"
-                    :class="(acc as any)[f.key] ? 'text-amber-700 font-medium' : 'text-muted-foreground/60 italic'"
-                    :title="(acc as any)[f.key] ? `${f.label}: ${(acc as any)[f.key]}` : f.label"
-                    @click="startEditObs(acc.id, f.key, (acc as any)[f.key])"
+                    :class="notaDe(acc, f.key) ? 'text-amber-700 font-medium' : 'text-muted-foreground/60 italic'"
+                    :title="(notaDe(acc, f.key) ? `${f.label}: ${notaDe(acc, f.key)}` : f.label) + (ehCatalogo(acc) ? ' (da conta de kit)' : '')"
+                    @click="startEditObs(acc.id, f.key, notaDe(acc, f.key))"
                   >
-                    {{ (acc as any)[f.key] ? `${f.label}: ${(acc as any)[f.key]}` : f.label }}
+                    {{ notaDe(acc, f.key) ? `${f.label}: ${notaDe(acc, f.key)}` : f.label }}
                   </div>
                 </template>
               </th>
@@ -4229,9 +4452,9 @@ watch(department, async () => {
                 v-for="acc in gridAccounts"
                 :key="`lt-${acc.id}`"
                 class="px-1 py-1 text-center text-[10px] text-muted-foreground border-l"
-                :class="platformHeaderBg(acc.platform)"
+                :class="colunaHeaderBg(acc)"
               >
-                {{ acc.listing_type || platformLabel(acc.platform) }}
+                {{ tipoDe(acc) || platformLabel(acc.platform) }}
               </th>
             </tr>
           </thead>
@@ -4342,10 +4565,11 @@ watch(department, async () => {
                 class="px-1 py-1 relative"
                 :class="[
                   cellTone(cellOf(prod.id, acc.id)),
-                  platformBg(acc.platform),
+                  colunaBg(acc),
                   'border-l',
                   selectedCell?.row === rowIdx && selectedCell?.col === accIdx ? 'ring-2 ring-blue-500 ring-inset' : '',
                 ]"
+                :title="tituloCelulaCatalogo(prod.id, acc)"
                 @click="selectedCell = { row: rowIdx, col: accIdx }"
               >
                 <!-- Per-cell push status (SSH-style overlay) -->
@@ -4384,7 +4608,12 @@ watch(department, async () => {
                 <template v-else>
                   <div class="flex flex-col gap-0.5">
                     <div class="flex items-center justify-between gap-1">
-                      <span>{{ liveCellLabel(prod, acc) }}</span>
+                      <!-- catálogo bloqueado: preço esmaecido + cadeado (motivo no hover) -->
+                      <span v-if="catalogoBloqueado(prod.id, acc.id)" class="inline-flex items-center gap-0.5">
+                        <Lock class="h-3 w-3 shrink-0 text-muted-foreground" />
+                        <span class="opacity-50">{{ liveCellLabel(prod, acc) }}</span>
+                      </span>
+                      <span v-else>{{ liveCellLabel(prod, acc) }}</span>
                       <div class="flex items-center gap-0.5 opacity-60 hover:opacity-100">
                         <button v-if="cellOf(prod.id, acc.id)" class="p-0.5 hover:bg-muted rounded" title="Editar override" @click.stop="startCellEdit(cellOf(prod.id, acc.id)!)">
                           <Save class="h-3 w-3" />
@@ -4413,9 +4642,12 @@ watch(department, async () => {
                         >SV</button>
                         <button
                           v-if="cellOf(prod.id, acc.id) && cellOf(prod.id, acc.id)?.price"
-                          class="p-0.5 hover:bg-emerald-100 rounded text-emerald-700"
-                          title="Push esta célula"
-                          :disabled="pushing"
+                          class="p-0.5 rounded"
+                          :class="catalogoBloqueado(prod.id, acc.id) ? 'text-muted-foreground opacity-40 cursor-not-allowed' : 'hover:bg-emerald-100 text-emerald-700'"
+                          :title="catalogoBloqueado(prod.id, acc.id)
+                            ? `Envio bloqueado: ${textoBloqueio(catalogoBloqueado(prod.id, acc.id)!)}`
+                            : 'Push esta célula'"
+                          :disabled="pushing || !!catalogoBloqueado(prod.id, acc.id)"
                           @click.stop="pushCell(cellOf(prod.id, acc.id)!)"
                         >
                           <Send class="h-3 w-3" />
