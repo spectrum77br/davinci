@@ -64,15 +64,20 @@ const team = ref<number | null>(null)
 const teams = computed(() => data.value?.teams ?? [])
 const department = ref('')
 const mobileFiltersOpen = ref(false)
+// "Catálogo" saiu do filtro em 06/10/2026 (o catálogo do ML virou grupo
+// dentro de cada tipo, na Tabela de Preços). O rótulo fica só para loja
+// antiga que ainda tenha o tipo.
 const departmentOptions = [
-  { value: 'catalogo', label: 'Catálogo' },
   { value: 'celular', label: 'Celular' },
   { value: 'eletro', label: 'Eletro' },
   { value: 'mala', label: 'Mala' },
   { value: 'shein', label: 'Shein' },
 ]
+const ROTULOS_TIPO_ANTIGO: Record<string, string> = { catalogo: 'Catálogo' }
 function departmentLabel(slug: string): string {
-  return departmentOptions.find((option) => option.value === slug)?.label ?? slug
+  return departmentOptions.find((option) => option.value === slug)?.label
+    ?? ROTULOS_TIPO_ANTIGO[slug]
+    ?? slug
 }
 function platformLabel(value: string | null): string {
   if (!value) return '—'

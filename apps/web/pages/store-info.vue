@@ -624,12 +624,21 @@ function toggleArchivedView() {
 
 // =========================================================== bind dept
 
-const TIPO_OPTIONS = [
+// "Catálogo" saiu dos tipos de loja em 06/10/2026: o catálogo do ML agora é
+// ligado por conta em Tabela de Preços › Contas (e a API recusa o tipo).
+const TIPO_OPTIONS: { slug: string; label: string }[] = [
   { slug: 'celular',  label: 'Celular' },
   { slug: 'mala',     label: 'Mala' },
   { slug: 'eletro',   label: 'Eletro' },
-  { slug: 'catalogo', label: 'Catálogo' },
-] as const
+]
+
+// Loja antiga que ainda tenha "Catálogo" marcado continua vendo a caixa,
+// só para poder desmarcar.
+function tipoOpcoes(row: StoreInfo): { slug: string; label: string }[] {
+  return row.departments.includes('catalogo')
+    ? [...TIPO_OPTIONS, { slug: 'catalogo', label: 'Catálogo (antigo)' }]
+    : TIPO_OPTIONS
+}
 
 const tipoPopoverFor = ref<string | null>(null)
 const tipoBusy = ref<Set<string>>(new Set())
@@ -733,7 +742,9 @@ async function toggleDepartment(row: StoreInfo, slug: string, input: HTMLInputEl
       ? 'Esta plataforma ainda não permite configurar o tipo da loja.'
       : code === 'invalid_department'
         ? 'Tipo de loja inválido.'
-        : code || e?.message || 'Não foi possível salvar o tipo da loja.'
+        : code === 'departamento_invalido'
+          ? 'Catálogo não é mais tipo de loja: o Catálogo ML agora é ligado na conta, em Tabela de Preços › Contas.'
+          : code || e?.message || 'Não foi possível salvar o tipo da loja.'
   } finally {
     tipoBusy.value.delete(key)
   }
@@ -1402,7 +1413,7 @@ async function copyText(text: string) {
                 @click.stop
               >
                 <label
-                  v-for="opt in TIPO_OPTIONS"
+                  v-for="opt in tipoOpcoes(row)"
                   :key="opt.slug"
                   class="flex items-center gap-2 py-1 cursor-pointer text-xs hover:bg-accent/50 px-1 rounded"
                 >

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import {
   Plus, Trash2, RefreshCw, Save, X, AlertCircle, Loader2, Eye, EyeOff,
-  Star, Send, Ban, Check, Link2, Copy, Minus,
+  Lock, Send, Ban, Check, Link2, Copy, Minus,
   Smartphone, Briefcase, Zap, BarChart3, DollarSign, Settings2, Upload,
   ChevronDown, Download, Undo2, Redo2, Search, Tags, Camera, FolderPlus,
 } from 'lucide-vue-next'
@@ -48,21 +48,24 @@ const DEPT_ICONS: Record<string, any> = {
   celular: Smartphone,
   mala: Briefcase,
   eletro: Zap,
-  catalogo: BarChart3,
 }
+
+// Categorias que não aparecem mais na barra. "Catálogo" saiu em 06/10/2026:
+// o catálogo do ML virou o grupo "ML Catálogo" dentro de cada categoria
+// (ligado por conta na aba Contas). O segmento continua no banco, só some
+// daqui — vale para a lista da API e para a lista fixa abaixo.
+const DEPTS_FORA_DA_BARRA = new Set(['catalogo'])
 
 const DEPARTMENTS_FALLBACK = [
   { value: 'celular', label: 'Celular', icon: Smartphone },
   { value: 'mala', label: 'Mala', icon: Briefcase },
   { value: 'eletro', label: 'Eletro', icon: Zap },
-  { value: 'catalogo', label: 'Catálogo ML', icon: BarChart3 },
 ]
 
 const DEPARTMENTS = ref<{ value: string; label: string; icon: any }[]>([...DEPARTMENTS_FALLBACK])
 
 const TYPE_HEADERS_FALLBACK: Record<string, string[]> = {
   celular: ['Acessórios', 'Diversos', 'Regular', 'Robusto', 'Apple'],
-  catalogo: ['Acessórios', 'Diversos', 'Regular', 'Robusto', 'Apple'],
   eletro: ['1', '2', '3', '4', '5'],
   mala: ['Acessórios', '12"', '18" e 20"', '24" acima', 'Queima de estoque'],
 }
@@ -88,7 +91,7 @@ async function loadSegments() {
     const rows = await api<SegmentRow[]>('/api/segments')
     allSegments.value = rows
     const roots = rows
-      .filter((r) => r.parent_id === null && r.active)
+      .filter((r) => r.parent_id === null && r.active && !DEPTS_FORA_DA_BARRA.has(r.slug))
       .sort((a, b) => a.sort_order - b.sort_order)
     if (roots.length === 0) return
 
@@ -183,10 +186,13 @@ function platformLabel(p: string) {
 // Department lives in the URL (?dept=mala) so it survives the [tab].vue
 // re-mount that happens when the user clicks a different sub-tab. Default
 // is 'celular' when the query is absent.
+// ?dept= que não está na barra (link antigo ?dept=catalogo, slug digitado
+// errado) também abre o Celular, em vez de uma tela vazia sem botão marcado.
 const department = computed<DeptKey>({
   get() {
     const q = route.query.dept
-    return typeof q === 'string' && q ? q : 'celular'
+    const v = typeof q === 'string' && q ? q : 'celular'
+    return DEPARTMENTS.value.some((d) => d.value === v) ? v : 'celular'
   },
   set(v) {
     router.replace({ path: route.path, query: { ...route.query, dept: v } })
@@ -344,10 +350,11 @@ async function setAccountIntegration(acc: Account, integration_id: string | null
 }
 
 const accountsByDept = computed(() => {
-  const m: Record<DeptKey, Account[]> = { celular: [], mala: [], eletro: [], catalogo: [] }
+  const m: Record<DeptKey, Account[]> = { celular: [], mala: [], eletro: [] }
   for (const a of accounts.value) {
     const k = a.department as DeptKey
-    if (m[k]) m[k].push(a)
+    if (!m[k]) m[k] = []
+    m[k].push(a)
   }
   for (const k of Object.keys(m) as DeptKey[]) {
     m[k].sort((a, b) => a.sort_order - b.sort_order || a.name.localeCompare(b.name))
@@ -430,7 +437,6 @@ type PricingProduct = {
   model: string | null
   ean: string | null
   is_active: boolean
-  in_catalog: boolean
   fotos_url: string | null
   fotos_path: string | null
   fotos_count: number | null
@@ -571,10 +577,11 @@ async function loadProducts() {
 }
 
 const productsByDept = computed(() => {
-  const m: Record<DeptKey, PricingProduct[]> = { celular: [], mala: [], eletro: [], catalogo: [] }
+  const m: Record<DeptKey, PricingProduct[]> = { celular: [], mala: [], eletro: [] }
   for (const p of products.value) {
     const k = p.department as DeptKey
-    if (m[k]) m[k].push(p)
+    if (!m[k]) m[k] = []
+    m[k].push(p)
   }
   for (const k of Object.keys(m) as DeptKey[]) {
     m[k].sort((a, b) => (a.name || '').localeCompare(b.name || '', 'pt-BR', { sensitivity: 'base' }))
@@ -1349,18 +1356,6 @@ async function _patchProduct(id: string, field: string, raw: string) {
     // Revert the optimistic update on failure by re-fetching.
     if (grid.value) await loadGrid()
     else await loadProducts()
-  }
-}
-
-async function toggleCatalog(p: PricingProduct) {
-  try {
-    const updated = await api<PricingProduct>(
-      `/api/pricing/products/${p.id}/catalog`,
-      { method: 'POST' },
-    )
-    Object.assign(p, updated)
-  } catch (e: any) {
-    productsErr.value = e?.data?.detail?.code ?? 'toggle_failed'
   }
 }
 
@@ -2638,7 +2633,7 @@ watch(department, async () => {
         @click="department = d.value"
       >
         <component :is="d.icon" class="h-4 w-4" />
-        {{ d.label }} ({{ accountsByDept[d.value].length }} contas)
+        {{ d.label }} ({{ accountsByDept[d.value]?.length ?? 0 }} contas)
       </button>
     </div>
 
@@ -2660,7 +2655,7 @@ watch(department, async () => {
           ({{ accountsCurrent.length }})
         </span>
         <span v-else-if="t.key === 'produtos'" class="text-xs text-muted-foreground">
-          ({{ productsByDept[department].length }})
+          ({{ productsByDept[department]?.length ?? 0 }})
         </span>
       </button>
     </div>
@@ -3259,7 +3254,6 @@ watch(department, async () => {
                 title="Fotos da caixa, PDF da arte e outros arquivos de embalagem. Ficam na subpasta Embalagens, dentro da pasta de fotos do produto no MEGA, e não aparecem para as agências."
               >Embalagens</th>
               <th class="text-center px-2 py-2 font-medium border-b border-border w-24">Tabela</th>
-              <th class="text-center px-2 py-2 font-medium border-b border-border w-16">Catálogo</th>
               <th
                 class="text-center px-2 py-2 font-medium border-b border-border w-20"
                 title="Tag de estoque prioritária: venda que sair em outra tag é trocada pra esta ANTES da nota fiscal (só se o SKU com a tag existir no Bling e tiver saldo). Vazio = nada muda."
@@ -3331,7 +3325,6 @@ watch(department, async () => {
                   </option>
                 </select>
               </td>
-              <td class="border border-border px-1 py-1 text-center text-xs text-muted-foreground">—</td>
               <!-- Prioridade: define depois, na linha criada. -->
               <td class="border border-border px-1 py-1 text-center text-xs text-muted-foreground">—</td>
               <td class="border border-border px-1 py-1 text-center">
@@ -3513,18 +3506,6 @@ watch(department, async () => {
                 <span v-else class="inline-block px-2 py-0.5 rounded text-[10px] font-medium" :class="tabelaBadgeClass(p)">
                   {{ tabelaName(p) }}
                 </span>
-              </td>
-              <td class="border border-border px-1 py-1 text-center">
-                <button
-                  v-if="canEditProdutos"
-                  class="p-1 rounded"
-                  :class="p.in_catalog ? 'text-amber-600' : 'text-muted-foreground hover:text-foreground'"
-                  :title="p.in_catalog ? 'Catálogo ON' : 'Catálogo OFF'"
-                  @click="toggleCatalog(p)"
-                >
-                  <Star class="h-3.5 w-3.5" :fill="p.in_catalog ? 'currentColor' : 'none'" />
-                </button>
-                <span v-else>{{ p.in_catalog ? 'sim' : '—' }}</span>
               </td>
               <!-- Prioridade de estoque: select direto (sem modo edição) —
                    troca o SKU do pedido pra esta tag antes da NF. -->
