@@ -908,6 +908,85 @@ async def test_update_price_automacao_do_ml_vira_erro_claro(ml_falso: MLFalso):
     assert all(j != {"status": "active"} for _m, _p, j in ml_falso.chamadas)
 
 
+# Corpo exato da documentação do ML (automatizações de preços, 18/03/2026):
+# o código é o mesmo do pausado (item.price.not_modifiable); só o texto muda.
+_RECUSA_DOC_ML = {
+    "message": "Cannot modify price on items with dynamic pricing",
+    "error": "item.price.not_modifiable",
+    "status": 400,
+    "cause": [],
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status_item", ["active", "paused"])
+async def test_update_price_automacao_com_o_corpo_da_documentacao(
+    ml_falso: MLFalso, monkeypatch, status_item: str,
+):
+    ml_falso.item("MLB1", status=status_item)
+
+    async def _req(self, method, path, *, params=None, json=None):
+        if method == "PUT" and json and "price" in json:
+            ml_falso.chamadas.append((method, path, json))
+            return httpx.Response(
+                400, json=_RECUSA_DOC_ML, request=httpx.Request(method, "https://ml.falso"),
+            )
+        return await ml_falso.request(method, path, params=params, json=json)
+
+    monkeypatch.setattr(ml_mod.MercadoLivreClient, "_request", _req)
+    r = await _cliente_ml().update_price("MLB1", 120.0, canal_esperado="kit")
+    assert r.status == SyncStatus.FATAL
+    assert r.error_code == "automacao_ml"
+    # Pausado com automação: não reativa nem pausa de novo.
+    assert all(not (j or {}).get("status") for _m, _p, j in ml_falso.chamadas)
+
+
+@pytest.mark.asyncio
+async def test_update_price_200_com_warning_de_automacao_e_erro(
+    ml_falso: MLFalso, monkeypatch,
+):
+    """PUT com variações volta 200, mas o ML ignora o preço e avisa."""
+    ml_falso.item("MLB1", variations=[{"id": 1}, {"id": 2}])
+
+    async def _req(self, method, path, *, params=None, json=None):
+        if method == "PUT" and json and "variations" in json:
+            ml_falso.chamadas.append((method, path, json))
+            return httpx.Response(
+                200,
+                json={
+                    "id": "MLB1",
+                    "warnings": [{
+                        "department": "items",
+                        "cause_id": 502,
+                        "code": "item.price.not_modifiable",
+                        "message": "Cannot modify price on items with dynamic pricing",
+                        "references": ["item.price"],
+                    }],
+                },
+                request=httpx.Request(method, "https://ml.falso"),
+            )
+        return await ml_falso.request(method, path, params=params, json=json)
+
+    monkeypatch.setattr(ml_mod.MercadoLivreClient, "_request", _req)
+    r = await _cliente_ml().update_price("MLB1", 120.0, canal_esperado="kit")
+    assert r.error_code == "automacao_ml"
+
+    # Warning comum (sem automação) continua OK.
+    async def _req_ok(self, method, path, *, params=None, json=None):
+        if method == "PUT":
+            return httpx.Response(
+                200,
+                json={"id": "MLB1", "warnings": [{"code": "item.title.automatically_fixed",
+                                                  "message": "Title adjusted"}]},
+                request=httpx.Request(method, "https://ml.falso"),
+            )
+        return await ml_falso.request(method, path, params=params, json=json)
+
+    monkeypatch.setattr(ml_mod.MercadoLivreClient, "_request", _req_ok)
+    r = await _cliente_ml().update_price("MLB1", 120.0, canal_esperado="kit")
+    assert r.status == SyncStatus.OK
+
+
 @pytest.mark.asyncio
 async def test_kit_pausado_reativa_troca_e_pausa_de_novo_conferindo(ml_falso: MLFalso):
     cli = _cliente_ml()

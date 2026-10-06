@@ -870,6 +870,9 @@ class MercadoLivreClient:
                 error_detail=str(payload.get("_http_error", "unknown"))[:500],
             )
         if status_code < 400:
+            # 200 com warning de automação = o ML ignorou o preço.
+            if _preco_ignorado_por_automacao(payload):
+                return _erro_automacao(item_id)
             return SyncResult(
                 status=SyncStatus.OK,
                 payload={
@@ -1695,17 +1698,35 @@ def _erro_automacao(item_id: str) -> SyncResult:
 
 
 def _recusa_por_automacao(payload: Any) -> bool:
-    """A recusa do PUT de preço é a da automação de preços do ML? Procura
-    "automat" (automation/automatic/automática…) na mensagem, no erro e nas
-    causas da resposta."""
+    """A recusa do PUT de preço é a da automação de preços do ML? A
+    documentação (automatizações de preços, 18/03/2026) devolve
+    {"message": "Cannot modify price on items with dynamic pricing",
+    "error": "item.price.not_modifiable"} — o mesmo código do pausado, por
+    isso olha o TEXTO: "dynamic pricing" ou "automat" (automation/automática…)
+    na mensagem, no erro, nas causas e nos warnings."""
     if not isinstance(payload, dict):
         return False
     partes = [str(payload.get("message") or ""), str(payload.get("error") or "")]
-    for c in payload.get("cause") or []:
+    for c in [*(payload.get("cause") or []), *(payload.get("warnings") or [])]:
         if isinstance(c, dict):
             partes.append(str(c.get("code") or ""))
             partes.append(str(c.get("message") or ""))
-    return "automat" in " ".join(partes).lower()
+    texto = " ".join(partes).lower().replace("_", " ")
+    return "dynamic pricing" in texto or "automat" in texto
+
+
+def _preco_ignorado_por_automacao(payload: Any) -> bool:
+    """PUT com outro campo junto (ex.: variações) volta 200, mas o ML ignora o
+    preço e avisa em `warnings` (automação de preços ligada). Aqui só vale o
+    texto da documentação: warning comum de anúncio não pode virar erro."""
+    if not isinstance(payload, dict):
+        return False
+    for w in payload.get("warnings") or []:
+        if isinstance(w, dict):
+            texto = f"{w.get('code') or ''} {w.get('message') or ''}".lower()
+            if "dynamic pricing" in texto:
+                return True
+    return False
 
 
 def _map_ml_listing_type(listing_type_id: str | None) -> str | None:
