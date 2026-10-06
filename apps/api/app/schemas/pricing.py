@@ -115,6 +115,24 @@ class PricingAccountOut(PricingAccountBase):
     slot3_segment_name: str | None = None
     slot4_segment_name: str | None = None
     slot5_segment_name: str | None = None
+    # Catálogo ML (06/10/2026). Só saída: a filha nasce/morre pelo
+    # POST /accounts/{id}/catalogo. Na filha (canal='catalogo') comissão,
+    # margens, fretes, kit_number e anotações saem com os valores da BASE
+    # (a filha não guarda números). Na base, `conta_catalogo_id` é a filha
+    # (None = catálogo desligado).
+    canal: str = "kit"
+    conta_base_id: UUID | None = None
+    conta_catalogo_id: UUID | None = None
+
+
+class ContaCatalogoIn(BaseModel):
+    ativo: bool
+
+
+class ContaCatalogoOut(BaseModel):
+    ativo: bool
+    conta: PricingAccountOut
+    conta_catalogo: PricingAccountOut | None = None
 
 
 # --------------------------------------------------------------- pricing products
@@ -158,11 +176,12 @@ class PricingProductBase(BaseModel):
     cost_kit6: Decimal | None = None
     cost_kit7: Decimal | None = None
     cost_kit8: Decimal | None = None
+    # Custo base do anúncio de catálogo do ML (coluna "Catálogo"). None = sem.
+    preco_catalogo: Decimal | None = None
     description: str | None = None
     model: str | None = None
     ean: str | None = None
     is_active: bool = True
-    in_catalog: bool = False
     # Link das fotos do produto (pasta do MEGA com todas as cores).
     fotos_url: str | None = None
     # Caminho da pasta na conta MEGA (gerido pela sincronização/upload).
@@ -197,11 +216,11 @@ class PricingProductPatch(BaseModel):
     cost_kit6: Decimal | None = None
     cost_kit7: Decimal | None = None
     cost_kit8: Decimal | None = None
+    preco_catalogo: Decimal | None = None
     description: str | None = None
     model: str | None = None
     ean: str | None = None
     is_active: bool | None = None
-    in_catalog: bool | None = None
     fotos_url: str | None = None
     product_id: UUID | None = None
     prioridade_estoque: str | None = None
@@ -248,11 +267,11 @@ class PricingProductImportItem(BaseModel):
     cost_kit6: Decimal | None = None
     cost_kit7: Decimal | None = None
     cost_kit8: Decimal | None = None
+    preco_catalogo: Decimal | None = None
     description: str | None = None
     model: str | None = None
     ean: str | None = None
     is_active: bool = True
-    in_catalog: bool = False
     product_id: UUID | None = None
 
 
@@ -331,6 +350,24 @@ class PricingPushOut(BaseModel):
     results: list[PricingPushItemOut]
 
 
+class PricingGridCatalogoAnuncio(BaseModel):
+    external_id: str
+    status: str | None = None  # active/paused/under_review/closed/inactive (lido na varredura)
+    listing_type: str | None = None
+    sincronizado_com: list[str] = []
+    # Motivo de ESTE anúncio não receber: sincronizado|pausado|em_revisao|encerrado.
+    bloqueio: str | None = None
+
+
+class PricingGridCatalogo(BaseModel):
+    """Célula de conta de catálogo: para onde vai o preço e, se não vai, por quê."""
+    anuncios: list[PricingGridCatalogoAnuncio] = []
+    # None | sem_anuncio | sincronizado | pausado | em_revisao | encerrado |
+    # sem_tipo | sem_preco_catalogo
+    bloqueio: str | None = None
+    texto: str | None = None
+
+
 class PricingGridCell(BaseModel):
     pricing_account_id: UUID
     pricing_product_id: UUID
@@ -339,27 +376,14 @@ class PricingGridCell(BaseModel):
     cell_status: str = "auto"
     has_override: bool = False
     cell_color: str | None = None
+    # Só nas colunas de catálogo (conta canal='catalogo'); None nas de kit.
+    catalogo: PricingGridCatalogo | None = None
 
 
 class PricingGridOut(BaseModel):
     accounts: list[PricingAccountOut]
     products: list[PricingProductOut]
     cells: list[PricingGridCell]
-
-
-# ----------------------------------------------------------------- catalog (9c)
-
-class PricingCatalogListingItem(BaseModel):
-    """ML catalog listing as seen by the pricing module — slimmer than the
-    full Listing schema; only carries what the pricing UI needs."""
-    id: UUID
-    integration_id: UUID
-    external_id: str
-    sku: str | None = None
-    title: str
-    price: int | None = None
-    status: str
-    in_catalog: bool = True
 
 
 # ----------------------------------------------------------------- bulk push (9c)

@@ -65,7 +65,13 @@ async def resolve_store_departments(
                 Segment.slug,
             )
             .join(Segment, Segment.id == PricingAccount.segment_id)
-            .where(Segment.parent_id.is_(None), user_scope(PricingAccount, user))
+            .where(
+                Segment.parent_id.is_(None),
+                user_scope(PricingAccount, user),
+                # A coluna de catálogo (06/10/2026) tem o nome da conta de kit e
+                # nenhuma loja: não classifica loja (a base já classifica).
+                PricingAccount.canal == "kit",
+            )
         )
     ).all()
     linked: dict[UUID, set[str]] = defaultdict(set)

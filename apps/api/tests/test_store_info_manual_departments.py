@@ -68,8 +68,8 @@ async def test_manual_types_can_be_selected_removed_and_reloaded_without_pricing
     for slug, expected in (
         ("mala", ["mala"]),
         ("celular", ["celular", "mala"]),
-        ("catalogo", ["catalogo", "celular", "mala"]),
-        ("mala", ["catalogo", "celular", "mala"]),
+        ("eletro", ["celular", "eletro", "mala"]),
+        ("mala", ["celular", "eletro", "mala"]),
     ):
         response = await client.post(f"/api/pricing/store-info/{store_id}/department", json={
             "department": slug,
@@ -77,13 +77,20 @@ async def test_manual_types_can_be_selected_removed_and_reloaded_without_pricing
         assert response.status_code == 200, response.text
         _assert_manual(response.json(), store_id, expected)
         _assert_manual(await _listed(client, store_id), store_id, expected)
+    # Catálogo deixou de ser tipo de loja (06/10/2026): recusado, nada muda.
+    response = await client.post(f"/api/pricing/store-info/{store_id}/department", json={
+        "department": "catalogo",
+    })
+    assert response.status_code == 400, response.text
+    assert response.json()["detail"]["code"] == "departamento_invalido"
+    _assert_manual(await _listed(client, store_id), store_id, ["celular", "eletro", "mala"])
 
     # A mesma plataforma e o mesmo nome não compartilham a seleção manual.
     _assert_manual(await _listed(client, other_id), other_id, [])
     for slug, expected in (
-        ("mala", ["catalogo", "celular"]),
-        ("mala", ["catalogo", "celular"]),
-        ("catalogo", ["celular"]),
+        ("mala", ["celular", "eletro"]),
+        ("mala", ["celular", "eletro"]),
+        ("eletro", ["celular"]),
         ("celular", []),
     ):
         response = await client.delete(f"/api/pricing/store-info/{store_id}/department/{slug}")

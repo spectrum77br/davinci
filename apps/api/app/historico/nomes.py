@@ -142,7 +142,6 @@ def tela_da_api(caminho: str) -> str | None:
 ACOES: dict[tuple[str, str], str] = {
     ("POST", "/api/pricing/push"): "enviou preço ao marketplace",
     ("POST", "/api/pricing/push-batch"): "enviou preços em lote ao marketplace",
-    ("POST", "/api/pricing/push-catalog"): "enviou preço ao catálogo",
     ("POST", "/api/pricing/push-report"): "mandou o resumo do envio de preços",
     ("POST", "/api/pricing/jobs/sync-bling-costs"): "mandou puxar os custos do Bling",
     ("POST", "/api/jobs/auto-link"): "disparou o vínculo automático de anúncios",

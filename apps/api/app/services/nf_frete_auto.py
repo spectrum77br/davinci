@@ -140,7 +140,9 @@ async def _resolver_frete_projetado(
     accs = (
         await session.execute(
             select(PricingAccount).where(
-                PricingAccount.store_info_id == store_info_id
+                PricingAccount.store_info_id == store_info_id,
+                # Frete projetado é o da conta de kit (a de catálogo não tem loja).
+                PricingAccount.canal == "kit",
             )
         )
     ).scalars().all()

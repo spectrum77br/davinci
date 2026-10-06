@@ -216,9 +216,15 @@ async def run_audit(
                     summary["missing"] += 1
                     continue
 
+                # Coluna de catálogo: integração e números são os da conta base.
+                base = (
+                    accounts_by_id.get(account.conta_base_id)
+                    if account.canal == "catalogo"
+                    else None
+                )
                 paused, paused_detail = await _classify_listing_status(
                     session,
-                    integration_id=account.integration_id,
+                    integration_id=(base or account).integration_id,
                     sku=sku,
                 )
                 if paused:
@@ -239,7 +245,7 @@ async def run_audit(
                     continue
 
                 ovr = by_pair.get((product.id, account.id))
-                outcome = calculate(account, product, ovr)
+                outcome = calculate(account, product, ovr, conta_base=base)
                 expected = outcome.price
 
                 if expected is None:

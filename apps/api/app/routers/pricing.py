@@ -6,6 +6,7 @@ the data plane.
 
 from __future__ import annotations
 
+from collections import defaultdict
 from typing import Annotated
 from uuid import UUID
 
@@ -25,10 +26,8 @@ from app.models import (
     BackgroundJobType,
     BlingOrder,
     CellStatus,
-    Department,
     Integration,
     IntegrationPlatform,
-    Listing,
     PricingAccount,
     PricingOverride,
     PricingPlatform,
@@ -43,10 +42,11 @@ from app.schemas.pricing import (
     AccountSetDepartmentIn,
     AutoMatchResult,
     CompetitorPriceRow,
+    ContaCatalogoIn,
+    ContaCatalogoOut,
     PricingAccountCreate,
     PricingAccountOut,
     PricingAccountPatch,
-    PricingCatalogListingItem,
     PricingGridCell,
     PricingGridOut,
     PricingOverrideCellColor,
@@ -75,9 +75,16 @@ from app.services.pricing.audit import (
     match_pricing_to_product_keys,
     scan_missing_skus,
 )
+from app.services.pricing.anuncios import (
+    CANAL_CATALOGO,
+    CANAL_KIT,
+    info_celula_catalogo,
+    resolver_anuncios,
+)
 from app.services.pricing.calc import calculate
 from app.services.pricing.competitor import search_competitors
 from app.services.pricing.push import push_one
+from app.services.pricing.sku_match import ml_listing_type_for_account, variants_of
 from app.services.store_departments import (
     MANUAL_DEPARTMENT_PLATFORMS as _MANUAL_DEPARTMENT_PLATFORMS,
 )
@@ -207,11 +214,48 @@ async def _segment_names_by_id(session: AsyncSession) -> dict[UUID, str]:
     return {sid: name for sid, name in rows}
 
 
+# O que a coluna de catálogo ("filha") herda da conta base na hora do cálculo
+# e mostra no cabeçalho: os números da conta e as anotações de texto.
+_CAMPOS_HERDADOS_DA_BASE = (
+    "kit_number",
+    "commission",
+    "margin1", "shipping1",
+    "margin2", "shipping2",
+    "margin3", "shipping3",
+    "margin4", "shipping4",
+    "margin5", "shipping5",
+    "discount", "affiliate", "ads", "coupon", "offer",
+    "observation", "observation2", "observation3",
+)
+
+# O que a filha copia da base na criação e acompanha quando a base muda.
+_CAMPOS_ESPELHADOS_NA_FILHA = (
+    "user_id",
+    "name",
+    "platform",
+    "listing_type",
+    "segment_id",
+    "slot1_segment_id",
+    "slot2_segment_id",
+    "slot3_segment_id",
+    "slot4_segment_id",
+    "slot5_segment_id",
+    "sort_order",
+    "kit_number",
+)
+
+
 def _account_out(
     row: PricingAccount,
     roots_by_id: dict[UUID, str],
     names_by_id: dict[UUID, str] | None = None,
+    *,
+    base: PricingAccount | None = None,
+    conta_catalogo_id: UUID | None = None,
 ) -> PricingAccountOut:
+    """`base`: a conta de kit de uma coluna de catálogo — a filha sai com os
+    números e anotações dela. `conta_catalogo_id`: a filha de uma conta de kit
+    (catálogo ligado)."""
     out = PricingAccountOut.model_validate(row)
     out.has_password = bool(row.password_enc)
     out.department = roots_by_id.get(row.segment_id)
@@ -220,7 +264,92 @@ def _account_out(
             sid = getattr(row, f"slot{n}_segment_id", None)
             if sid is not None:
                 setattr(out, f"slot{n}_segment_name", names_by_id.get(sid))
+    if row.canal == CANAL_CATALOGO and base is not None:
+        for campo in _CAMPOS_HERDADOS_DA_BASE:
+            setattr(out, campo, getattr(base, campo))
+    if row.canal != CANAL_CATALOGO:
+        out.conta_catalogo_id = conta_catalogo_id
     return out
+
+
+def _so_filhas_com_base(rows):
+    """Coluna de catálogo só aparece junto da conta base: se a base ficou de
+    fora (arquivada, outra equipe, outro filtro), a filha sai também."""
+    bases = {r.id for r in rows if r.canal != CANAL_CATALOGO}
+    return [r for r in rows if r.canal != CANAL_CATALOGO or r.conta_base_id in bases]
+
+
+def _accounts_out(
+    rows,
+    roots_by_id: dict[UUID, str],
+    names_by_id: dict[UUID, str] | None = None,
+) -> list[PricingAccountOut]:
+    por_id = {r.id: r for r in rows}
+    filha_de = {r.conta_base_id: r.id for r in rows if r.canal == CANAL_CATALOGO}
+    return [
+        _account_out(
+            r,
+            roots_by_id,
+            names_by_id,
+            base=por_id.get(r.conta_base_id) if r.canal == CANAL_CATALOGO else None,
+            conta_catalogo_id=filha_de.get(r.id),
+        )
+        for r in rows
+    ]
+
+
+async def _filha_de(session: AsyncSession, base_id: UUID) -> PricingAccount | None:
+    return (
+        await session.execute(
+            select(PricingAccount).where(
+                PricingAccount.conta_base_id == base_id,
+                PricingAccount.canal == CANAL_CATALOGO,
+            )
+        )
+    ).scalar_one_or_none()
+
+
+async def _uma_conta_out(
+    session: AsyncSession,
+    row: PricingAccount,
+    roots_by_id: dict[UUID, str],
+    names_by_id: dict[UUID, str] | None = None,
+) -> PricingAccountOut:
+    """Saída de UMA conta (create/patch/department), com a base (se for
+    filha) ou a filha (se for de kit) já resolvida."""
+    if row.canal == CANAL_CATALOGO:
+        base = await session.get(PricingAccount, row.conta_base_id)
+        return _account_out(row, roots_by_id, names_by_id, base=base)
+    filha = await _filha_de(session, row.id)
+    return _account_out(
+        row, roots_by_id, names_by_id, conta_catalogo_id=filha.id if filha else None
+    )
+
+
+async def _sincronizar_filha(session: AsyncSession, base: PricingAccount) -> None:
+    """A conta base mudou (nome, tipo, aba, slots, ordem…): a coluna de
+    catálogo acompanha. Base que deixou de ser do ML perde o catálogo."""
+    filha = await _filha_de(session, base.id)
+    if filha is None:
+        return
+    if base.platform != PricingPlatform.ML:
+        await session.delete(filha)
+        return
+    for campo in _CAMPOS_ESPELHADOS_NA_FILHA:
+        setattr(filha, campo, getattr(base, campo))
+
+
+def _recusar_edicao_da_filha(row: PricingAccount) -> None:
+    if row.canal == CANAL_CATALOGO:
+        raise HTTPException(
+            409,
+            detail={
+                "code": "conta_catalogo_herda_da_base",
+                "message": (
+                    "A coluna de catálogo usa os números da conta de kit: edite a conta base"
+                ),
+            },
+        )
 
 
 def _product_out(
@@ -286,6 +415,9 @@ def _team_scope_accounts(stmt, scope):
         or_(
             PricingAccount.store_info_id.in_(scope.store_info_ids),
             PricingAccount.integration_id.in_(scope.integration_ids),
+            # Coluna de catálogo não tem loja nem integração: passa aqui e só
+            # fica se a base dela ficou (_so_filhas_com_base).
+            PricingAccount.canal == CANAL_CATALOGO,
         )
     )
 
@@ -311,9 +443,9 @@ async def list_accounts(
     stmt = _exclude_archived_accounts(stmt)
     stmt = _team_scope_accounts(stmt, await _escopo_precos(session, user))
     stmt = stmt.order_by(PricingAccount.sort_order, PricingAccount.name)
-    rows = (await session.execute(stmt)).scalars().all()
+    rows = _so_filhas_com_base((await session.execute(stmt)).scalars().all())
     names_by_id = await _segment_names_by_id(session)
-    return [_account_out(r, roots_by_id, names_by_id) for r in rows]
+    return _accounts_out(rows, roots_by_id, names_by_id)
 
 
 @router.post(
@@ -351,7 +483,7 @@ async def create_account(
     await session.refresh(row)
     roots_by_id, _, _ = await _segment_index(session)
     names_by_id = await _segment_names_by_id(session)
-    return _account_out(row, roots_by_id, names_by_id)
+    return await _uma_conta_out(session, row, roots_by_id, names_by_id)
 
 
 @router.patch("/accounts/{account_id}", response_model=PricingAccountOut)
@@ -375,6 +507,7 @@ async def patch_account(
     ).scalar_one_or_none()
     if row is None:
         raise HTTPException(404, detail={"code": "account_not_found"})
+    _recusar_edicao_da_filha(row)
 
     data = body.model_dump(exclude_unset=True)
     if "password" in data:
@@ -404,11 +537,12 @@ async def patch_account(
             data[f"slot{n}_segment_id"] = slots[n - 1]
     for k, v in data.items():
         setattr(row, k, v)
+    await _sincronizar_filha(session, row)
     await session.commit()
     await session.refresh(row)
     roots_by_id, _, _ = await _segment_index(session)
     names_by_id = await _segment_names_by_id(session)
-    return _account_out(row, roots_by_id, names_by_id)
+    return await _uma_conta_out(session, row, roots_by_id, names_by_id)
 
 
 @router.delete(
@@ -446,7 +580,6 @@ async def list_products(
         User, Depends(require_permission("tabela_precos_produtos", "view"))
     ],
     department: str | None = Query(None),
-    in_catalog: bool | None = Query(None),
     is_active: bool | None = Query(None),
 ) -> list[PricingProductOut]:
     _, leaves_by_id, root_id_by_slug = await _segment_index(session)
@@ -457,8 +590,6 @@ async def list_products(
             raise HTTPException(400, detail={"code": "invalid_department"})
         leaf_ids = [lid for lid, (rs, _pt) in leaves_by_id.items() if rs == department]
         stmt = stmt.where(PricingProduct.segment_id.in_(leaf_ids))
-    if in_catalog is not None:
-        stmt = stmt.where(PricingProduct.in_catalog == in_catalog)
     if is_active is not None:
         stmt = stmt.where(PricingProduct.is_active == is_active)
     # Acessório avulso (balança, chaveiro, encosto, rodinha, mochila) vai pro
@@ -629,135 +760,6 @@ async def delete_product(
         return {**out, "mega": "erro", "erro": exc.message}
     logger.info("produto_excluido_pasta_na_lixeira", sku=sku, pasta=pasta, user_id=str(user.id))
     return {**out, "mega": "lixeira", "lixeira": res.get("lixeira")}
-
-
-@router.post(
-    "/products/{product_id}/catalog",
-    response_model=PricingProductOut,
-)
-async def toggle_catalog(
-    product_id: UUID,
-    session: Annotated[AsyncSession, Depends(get_session)],
-    user: Annotated[
-        User, Depends(require_permission("tabela_precos_produtos", "edit"))
-    ],
-) -> PricingProductOut:
-    row = (
-        await session.execute(
-            select(PricingProduct).where(
-                and_(
-                    PricingProduct.id == product_id,
-                    user_scope(PricingProduct, user),
-                )
-            )
-        )
-    ).scalar_one_or_none()
-    if row is None:
-        raise HTTPException(404, detail={"code": "product_not_found"})
-    row.in_catalog = not row.in_catalog
-    await session.flush()
-
-    # SSH parity: clicking the star mirrors the row into the "catalogo"
-    # department so it surfaces on the Catálogo ML tab. The mirror's
-    # `segment_id` is mapped from the source segment by sort_order — the
-    # catalogo subtree has the same five slots (Acessórios/Diversos/…) in
-    # the same positions, so Robusto→Robusto, Apple→Apple, etc.
-    catalogo_root_id = (
-        await session.execute(
-            select(Segment.id).where(
-                and_(Segment.parent_id.is_(None), Segment.slug == "catalogo")
-            )
-        )
-    ).scalar_one_or_none()
-
-    if catalogo_root_id is not None:
-        catalog_children_subq = select(Segment.id).where(
-            Segment.parent_id == catalogo_root_id
-        )
-        catalog_copy = (
-            await session.execute(
-                select(PricingProduct).where(
-                    and_(
-                        user_scope(PricingProduct, user),
-                        PricingProduct.segment_id.in_(catalog_children_subq),
-                        PricingProduct.sku == row.sku,
-                    )
-                )
-            )
-        ).scalar_one_or_none()
-
-        if row.in_catalog:
-            # Skip the mirror when the row being toggled IS the catalog
-            # copy — `existing` would return the same row and we'd add a
-            # duplicate (UQ would error anyway).
-            row_is_in_catalog = row.segment_id in {
-                sid for sid in (
-                    await session.execute(catalog_children_subq)
-                ).scalars().all()
-            }
-            if catalog_copy is None and not row_is_in_catalog:
-                # Resolve target catalogo segment by matching sort_order.
-                source_segment = await session.get(Segment, row.segment_id)
-                catalog_segment_id: UUID | None = None
-                if source_segment is not None:
-                    catalog_segment_id = (
-                        await session.execute(
-                            select(Segment.id).where(
-                                and_(
-                                    Segment.parent_id == catalogo_root_id,
-                                    Segment.sort_order
-                                    == source_segment.sort_order,
-                                )
-                            )
-                        )
-                    ).scalar_one_or_none()
-                # Fallback: Diversos (sort_order=1) if no equivalent slot.
-                if catalog_segment_id is None:
-                    catalog_segment_id = (
-                        await session.execute(
-                            select(Segment.id).where(
-                                and_(
-                                    Segment.parent_id == catalogo_root_id,
-                                    Segment.sort_order == 1,
-                                )
-                            )
-                        )
-                    ).scalar_one_or_none()
-                if catalog_segment_id is not None:
-                    session.add(
-                        PricingProduct(
-                            user_id=row.user_id,
-                            product_id=row.product_id,
-                            sku=row.sku,
-                            name=row.name,
-                            bling_cost_price=row.bling_cost_price,
-                            cost_kit1=row.cost_kit1,
-                            cost_kit2=row.cost_kit2,
-                            cost_kit3=row.cost_kit3,
-                            cost_kit4=row.cost_kit4,
-                            cost_kit5=row.cost_kit5,
-                            cost_kit6=row.cost_kit6,
-                            cost_kit7=row.cost_kit7,
-                            cost_kit8=row.cost_kit8,
-                            description=row.description,
-                            model=row.model,
-                            ean=row.ean,
-                            is_active=row.is_active,
-                            in_catalog=False,
-                            department=Department.CATALOGO,
-                            segment_id=catalog_segment_id,
-                        )
-                    )
-        else:
-            # Toggle off: drop the mirror, but never self-delete if the
-            # row being toggled IS the catalog mirror itself.
-            if catalog_copy is not None and catalog_copy.id != row.id:
-                await session.delete(catalog_copy)
-
-    await session.commit()
-    await session.refresh(row)
-    _, leaves_by_id, _ = await _segment_index(session)
-    return _product_out(row, leaves_by_id)
 
 
 @router.post("/products/import", response_model=PricingProductImportResult)
@@ -1127,7 +1129,7 @@ async def get_grid(
     ],
     department: str | None = Query(None),
 ) -> PricingGridOut:
-    _, leaves_by_id, root_id_by_slug = await _segment_index(session)
+    roots_by_id, leaves_by_id, root_id_by_slug = await _segment_index(session)
     accounts_stmt = select(PricingAccount).where(user_scope(PricingAccount, user))
     products_stmt = select(PricingProduct).where(user_scope(PricingProduct, user))
     if department:
@@ -1145,14 +1147,53 @@ async def get_grid(
     accounts_stmt = _team_scope_accounts(
         accounts_stmt, await _escopo_precos(session, user)
     )
-    accounts = (
-        await session.execute(
-            accounts_stmt.order_by(PricingAccount.sort_order, PricingAccount.name)
-        )
-    ).scalars().all()
+    accounts = _so_filhas_com_base(
+        (
+            await session.execute(
+                accounts_stmt.order_by(PricingAccount.sort_order, PricingAccount.name)
+            )
+        ).scalars().all()
+    )
     products = (
         await session.execute(products_stmt.order_by(PricingProduct.sku))
     ).scalars().all()
+
+    # Colunas de catálogo: a base de cada uma (números + integração) e os
+    # anúncios de catálogo dessas integrações, carregados UMA vez para a grade
+    # inteira (o resolvedor roda em memória por célula).
+    contas_por_id = {a.id: a for a in accounts}
+    filhas = [a for a in accounts if a.canal == CANAL_CATALOGO]
+    links_catalogo: dict[UUID, list[ProductLink]] = defaultdict(list)
+    sku_dos_links: dict[UUID, str] = {}
+    integs_catalogo = {
+        contas_por_id[f.conta_base_id].integration_id
+        for f in filhas
+        if contas_por_id[f.conta_base_id].integration_id is not None
+    }
+    if integs_catalogo:
+        for lk in (
+            await session.execute(
+                select(ProductLink).where(
+                    ProductLink.integration_id.in_(integs_catalogo),
+                    ProductLink.catalog_listing.is_(True),
+                )
+            )
+        ).scalars().all():
+            links_catalogo[lk.integration_id].append(lk)
+        ids_produtos = {lk.product_id for lks in links_catalogo.values() for lk in lks}
+        if ids_produtos:
+            sku_dos_links = {
+                pid: sku
+                for pid, sku in (
+                    await session.execute(
+                        select(Product.id, Product.sku).where(Product.id.in_(ids_produtos))
+                    )
+                ).all()
+                if sku
+            }
+
+    def _dept_da_conta(acc: PricingAccount) -> str | None:
+        return roots_by_id.get(acc.segment_id) or (leaves_by_id.get(acc.segment_id) or (None,))[0]
 
     overrides = (
         await session.execute(
@@ -1171,7 +1212,25 @@ async def get_grid(
         prod_type = pair[1] if pair else None
         for acc in accounts:
             ovr = by_pair.get((prod.id, acc.id))
-            outcome = calculate(acc, prod, ovr, prod_type)
+            base = contas_por_id.get(acc.conta_base_id) if acc.canal == CANAL_CATALOGO else None
+            outcome = calculate(acc, prod, ovr, prod_type, conta_base=base)
+            catalogo = None
+            if acc.canal == CANAL_CATALOGO:
+                integ_id = base.integration_id if base is not None else None
+                resolucao = resolver_anuncios(
+                    links_catalogo.get(integ_id, ()) if integ_id else (),
+                    sku_dos_links,
+                    pricing_sku=prod.sku,
+                    dept=_dept_da_conta(acc),
+                    plataforma="ml",
+                    canal=CANAL_CATALOGO,
+                    listing_type_conta=acc.listing_type,
+                )
+                catalogo = info_celula_catalogo(
+                    resolucao,
+                    sem_preco=outcome.price is None and outcome.detail == "sem_preco_catalogo",
+                    sem_integracao=integ_id is None,
+                )
             cells.append(
                 PricingGridCell(
                     pricing_account_id=acc.id,
@@ -1181,193 +1240,16 @@ async def get_grid(
                     cell_status=(ovr.cell_status.value if ovr else "auto"),
                     has_override=ovr is not None,
                     cell_color=(ovr.cell_color if ovr else None),
+                    catalogo=catalogo,
                 )
             )
 
-    roots_by_id, _, _ = await _segment_index(session)
     names_by_id = await _segment_names_by_id(session)
     return PricingGridOut(
-        accounts=[_account_out(a, roots_by_id, names_by_id) for a in accounts],
+        accounts=_accounts_out(accounts, roots_by_id, names_by_id),
         products=[_product_out(p, leaves_by_id) for p in products],
         cells=cells,
     )
-
-
-# =============================================================================
-# Catalog (9c) — push isolado (B14) + listings filtradas
-# =============================================================================
-
-@router.get("/catalog-listings", response_model=list[PricingCatalogListingItem])
-async def list_catalog_listings(
-    session: Annotated[AsyncSession, Depends(get_session)],
-    user: Annotated[
-        User, Depends(require_permission("tabela_precos", "view"))
-    ],
-    integration_id: Annotated[UUID | None, Query()] = None,
-) -> list[PricingCatalogListingItem]:
-    """Lista listings ML elegíveis para catálogo. Cruza com pricing_products
-    via SKU para incluir só os que estão marcados como `in_catalog=True`."""
-    in_catalog_skus = (
-        await session.execute(
-            select(PricingProduct.sku).where(
-                and_(
-                    user_scope(PricingProduct, user),
-                    PricingProduct.in_catalog.is_(True),
-                )
-            )
-        )
-    ).scalars().all()
-    if not in_catalog_skus:
-        return []
-
-    stmt = select(Listing).where(
-        and_(
-            user_scope(Listing, user),
-            Listing.platform == IntegrationPlatform.ML,
-            Listing.sku.in_(in_catalog_skus),
-        )
-    )
-    if integration_id is not None:
-        stmt = stmt.where(Listing.integration_id == integration_id)
-
-    rows = (await session.execute(stmt.order_by(Listing.title))).scalars().all()
-    return [
-        PricingCatalogListingItem(
-            id=r.id,
-            integration_id=r.integration_id,
-            external_id=r.external_id,
-            sku=r.sku,
-            title=r.title,
-            price=r.price,
-            status=r.status.value if hasattr(r.status, "value") else r.status,
-            in_catalog=True,
-        )
-        for r in rows
-    ]
-
-
-@router.post("/push-catalog", response_model=PricingPushOut)
-async def push_catalog_prices(
-    body: PricingPushBatchIn,
-    session: Annotated[AsyncSession, Depends(get_session)],
-    user: Annotated[
-        User, Depends(require_permission("tabela_precos", "edit"))
-    ],
-    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
-) -> PricingPushOut:
-    """B14 — push exclusivo do canal catálogo. Refuse silently any item whose
-    product não está em catálogo OU cuja conta não tem `department=catalogo`."""
-    if not body.items:
-        return PricingPushOut(results=[])
-
-    catalog_roots_by_id, _, _ = await _segment_index(session)
-
-    # Validate every item belongs to a catalog account + product first.
-    prod_ids = {it.pricing_product_id for it in body.items}
-    acc_ids = {it.pricing_account_id for it in body.items}
-    products_by_id = {
-        p.id: p
-        for p in (
-            await session.execute(
-                select(PricingProduct).where(
-                    and_(
-                        user_scope(PricingProduct, user),
-                        PricingProduct.id.in_(prod_ids),
-                    )
-                )
-            )
-        ).scalars().all()
-    }
-    accounts_by_id = {
-        a.id: a
-        for a in (
-            await session.execute(
-                select(PricingAccount).where(
-                    and_(
-                        user_scope(PricingAccount, user),
-                        PricingAccount.id.in_(acc_ids),
-                    )
-                )
-            )
-        ).scalars().all()
-    }
-
-    results: list[PricingPushItemOut] = []
-    for i, item in enumerate(body.items):
-        prod = products_by_id.get(item.pricing_product_id)
-        acc = accounts_by_id.get(item.pricing_account_id)
-        if prod is None:
-            results.append(
-                PricingPushItemOut(
-                    pricing_account_id=item.pricing_account_id,
-                    pricing_product_id=item.pricing_product_id,
-                    ok=False,
-                    code="product_not_found",
-                )
-            )
-            continue
-        if acc is None:
-            results.append(
-                PricingPushItemOut(
-                    pricing_account_id=item.pricing_account_id,
-                    pricing_product_id=item.pricing_product_id,
-                    ok=False,
-                    code="account_not_found",
-                )
-            )
-            continue
-        if not prod.in_catalog:
-            results.append(
-                PricingPushItemOut(
-                    pricing_account_id=item.pricing_account_id,
-                    pricing_product_id=item.pricing_product_id,
-                    ok=False,
-                    code="not_in_catalog",
-                    detail="produto sem flag in_catalog; use POST /api/pricing/push",
-                )
-            )
-            continue
-        # Roots map loaded once at top of function (see _segment_index call).
-        dept_val = catalog_roots_by_id.get(acc.segment_id, "")
-        if dept_val != "catalogo":
-            results.append(
-                PricingPushItemOut(
-                    pricing_account_id=item.pricing_account_id,
-                    pricing_product_id=item.pricing_product_id,
-                    ok=False,
-                    code="account_not_catalog",
-                    detail="conta com department != catalogo; use POST /api/pricing/push",
-                )
-            )
-            continue
-
-        key = (
-            f"{idempotency_key}:cat:{i}"
-            if idempotency_key and len(body.items) > 1
-            else (f"{idempotency_key}:cat" if idempotency_key else None)
-        )
-        outcome = await push_one(
-            session,
-            user=user,
-            account_id=item.pricing_account_id,
-            product_id=item.pricing_product_id,
-            idempotency_key=key,
-        )
-        results.append(
-            PricingPushItemOut(
-                pricing_account_id=item.pricing_account_id,
-                pricing_product_id=item.pricing_product_id,
-                ok=outcome.ok,
-                code=outcome.code,
-                detail=outcome.detail,
-                price=outcome.price,
-                item_id=outcome.item_id,
-                variation_id=outcome.variation_id,
-                cached=outcome.cached,
-            )
-        )
-    await session.commit()
-    return PricingPushOut(results=results)
 
 
 # =============================================================================
@@ -1678,15 +1560,13 @@ async def get_actual_prices(
 
     Phase 1: ML only. Other platforms return null until their `get_price`
     helper lands.
+
+    Os anúncios lidos são os do resolvedor único (`services/pricing/anuncios`)
+    — os mesmos que o envio usaria, por canal. Na coluna de catálogo entram
+    também os anúncios bloqueados (sincronizado/pausado): o preço vivo deles
+    é justamente o que a tela quer mostrar.
     """
     from app.services.marketplaces.factory import client_for
-    from app.services.pricing.sku_match import (
-        build_prefix_index,
-        dedup_links_for_push,
-        filter_products_by_department,
-        ml_listing_type_for_account,
-        resolve_product_ids,
-    )
 
     product = (
         await session.execute(
@@ -1701,49 +1581,78 @@ async def get_actual_prices(
     if product is None:
         raise HTTPException(404, detail={"code": "product_not_found"})
 
+    roots_by_id, leaves_by_id, root_id_by_slug = await _segment_index(session)
     accounts_stmt = select(PricingAccount).where(user_scope(PricingAccount, user))
     if department:
-        _, _, root_id_by_slug = await _segment_index(session)
         rid = root_id_by_slug.get(department)
         if rid is None:
             raise HTTPException(400, detail={"code": "invalid_department"})
         accounts_stmt = accounts_stmt.where(PricingAccount.segment_id == rid)
     accounts = (await session.execute(accounts_stmt)).scalars().all()
+    contas_por_id = {a.id: a for a in accounts}
+    faltam = {
+        a.conta_base_id
+        for a in accounts
+        if a.canal == CANAL_CATALOGO and a.conta_base_id not in contas_por_id
+    }
+    if faltam:
+        for a in (
+            await session.execute(select(PricingAccount).where(PricingAccount.id.in_(faltam)))
+        ).scalars().all():
+            contas_por_id[a.id] = a
 
-    # Resolve the same davinci.products that push would target so the price
-    # we read corresponds to the listing push would write.
-    products_rows = (
-        await session.execute(
-            select(Product.id, Product.sku).where(user_scope(Product, user))
-        )
-    ).all()
-    prefix_index = build_prefix_index((pid, sku) for pid, sku in products_rows)
-    candidate_ids = set(resolve_product_ids(product.sku, prefix_index))
-    candidate_products = [
-        (pid, sku) for pid, sku in products_rows if pid in candidate_ids
-    ]
+    result: dict[str, float | None] = {str(acc.id): None for acc in accounts}
+
+    # Produtos candidatos: SKU começando por algum código base da linha. É um
+    # superconjunto — quem decide de verdade é o resolvedor.
+    bases = {v.split(".", 1)[0].lower() for v in variants_of(product.sku)}
+    if not bases:
+        return result
+    sku_map: dict[UUID, str] = {
+        pid: sku
+        for pid, sku in (
+            await session.execute(
+                select(Product.id, Product.sku).where(
+                    user_scope(Product, user),
+                    or_(
+                        *[
+                            func.lower(Product.sku).like(_like_prefixo(b), escape="\\")
+                            for b in bases
+                        ]
+                    ),
+                )
+            )
+        ).all()
+        if sku
+    }
+    if not sku_map:
+        return result
+
+    def _dept(acc: PricingAccount) -> str | None:
+        return roots_by_id.get(acc.segment_id) or (leaves_by_id.get(acc.segment_id) or (None,))[0]
 
     integration_cache: dict[UUID, Integration | None] = {}
+    links_cache: dict[UUID, list[ProductLink]] = {}
     client_cache: dict[UUID, object] = {}
-    result: dict[str, float | None] = {}
 
     for acc in accounts:
-        result[str(acc.id)] = None
-        if acc.integration_id is None:
+        dona = contas_por_id.get(acc.conta_base_id) if acc.canal == CANAL_CATALOGO else acc
+        if dona is None or dona.integration_id is None:
             continue
+        integ_id = dona.integration_id
 
-        if acc.integration_id not in integration_cache:
-            integration_cache[acc.integration_id] = (
+        if integ_id not in integration_cache:
+            integration_cache[integ_id] = (
                 await session.execute(
                     select(Integration).where(
                         and_(
-                            Integration.id == acc.integration_id,
+                            Integration.id == integ_id,
                             user_scope(Integration, user),
                         )
                     )
                 )
             ).scalar_one_or_none()
-        integ = integration_cache[acc.integration_id]
+        integ = integration_cache[integ_id]
         if integ is None:
             continue
         # Only platforms with get_listing_price implemented carry real data;
@@ -1752,40 +1661,35 @@ async def get_actual_prices(
         if platform_value not in ("ml", "shopee", "amazon", "tiktok"):
             continue
 
-        # Apply the same SSH match push uses, with the real platform so the
-        # celular ML kit-only filter only fires for ML.
-        target_ids = filter_products_by_department(
-            await _account_department_root(session, acc) or "celular",
-            product.sku,
-            candidate_products,
-            platform=platform_value,
-        )
-        if not target_ids:
-            continue
-
-        links_q = select(ProductLink).where(
-            and_(
-                ProductLink.user_id == user.id,
-                ProductLink.integration_id == acc.integration_id,
-                ProductLink.product_id.in_(list(target_ids)),
+        if integ_id not in links_cache:
+            links_cache[integ_id] = list(
+                (
+                    await session.execute(
+                        select(ProductLink).where(
+                            ProductLink.integration_id == integ_id,
+                            ProductLink.product_id.in_(list(sku_map)),
+                        )
+                    )
+                ).scalars().all()
             )
+        resolucao = resolver_anuncios(
+            links_cache[integ_id],
+            sku_map,
+            pricing_sku=product.sku,
+            dept=_dept(dona),
+            plataforma=platform_value,
+            canal=acc.canal or CANAL_KIT,
+            listing_type_conta=acc.listing_type,
         )
-        links = list((await session.execute(links_q)).scalars().all())
-        if platform_value == "ml":
-            wanted = ml_listing_type_for_account(acc.listing_type)
-            if wanted:
-                links = [lk for lk in links if (lk.listing_type or "") == wanted]
-        links = dedup_links_for_push(platform_value, links)
+        links = resolucao.todos
         if not links:
             continue
 
-        if acc.integration_id not in client_cache:
+        if integ_id not in client_cache:
             from app.security.cipher import decrypt_json
             creds = decrypt_json(integ.credentials)
-            client_cache[acc.integration_id] = client_for(
-                integ.platform, creds
-            )
-        client = client_cache[acc.integration_id]
+            client_cache[integ_id] = client_for(integ.platform, creds)
+        client = client_cache[integ_id]
 
         # Try each candidate link until one returns a price — protects
         # against single-listing failures (closed/under_review) blanking
@@ -1802,20 +1706,10 @@ async def get_actual_prices(
     return result
 
 
-async def _account_department_root(
-    session: AsyncSession, acc: PricingAccount
-) -> str | None:
-    """Same as push._account_department but inlined here to avoid the
-    cross-module dep."""
-    if acc.segment_id is None:
-        return None
-    seg = await session.get(Segment, acc.segment_id)
-    if seg is None:
-        return None
-    if seg.parent_id is None:
-        return seg.slug
-    parent = await session.get(Segment, seg.parent_id)
-    return parent.slug if parent and parent.parent_id is None else None
+def _like_prefixo(codigo: str) -> str:
+    """Padrão LIKE "começa com" para um código de SKU (escapa % e _)."""
+    esc = codigo.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return esc + "%"
 
 
 # =============================================================================
@@ -2032,6 +1926,9 @@ async def auto_match_accounts(
                 and_(
                     user_scope(PricingAccount, user),
                     PricingAccount.integration_id.is_(None),
+                    # Coluna de catálogo fica SEM integração de propósito (usa
+                    # a da base) — o CHECK do banco recusaria.
+                    PricingAccount.canal == CANAL_KIT,
                 )
             )
         )
@@ -2114,12 +2011,102 @@ async def set_account_department(
     ).scalar_one_or_none()
     if row is None:
         raise HTTPException(404, detail={"code": "account_not_found"})
+    _recusar_edicao_da_filha(row)
     row.segment_id = sid
+    await _sincronizar_filha(session, row)
     await session.commit()
     await session.refresh(row)
     roots_by_id, _, _ = await _segment_index(session)
     names_by_id = await _segment_names_by_id(session)
-    return _account_out(row, roots_by_id, names_by_id)
+    return await _uma_conta_out(session, row, roots_by_id, names_by_id)
+
+
+@router.post("/accounts/{account_id}/catalogo", response_model=ContaCatalogoOut)
+async def definir_catalogo_da_conta(
+    account_id: UUID,
+    body: ContaCatalogoIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[
+        User, Depends(require_permission("tabela_precos_contas", "edit"))
+    ],
+) -> ContaCatalogoOut:
+    """Liga/desliga o Catálogo ML de uma conta ML de kit (decisão D4: por
+    conta, na aba Contas; padrão desligado).
+
+    Ligar cria a coluna de catálogo ("filha": canal='catalogo',
+    conta_base_id = esta conta, sem integração) com nome, tipo, aba, slots e
+    ordem da base; os números vêm da base na hora do cálculo. Desligar apaga a
+    filha e os preços fixados nela. Idempotente nos dois sentidos."""
+    base = (
+        await session.execute(
+            select(PricingAccount)
+            .where(
+                and_(
+                    PricingAccount.id == account_id,
+                    user_scope(PricingAccount, user),
+                )
+            )
+            # Dois cliques seguidos não criam duas filhas.
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if base is None:
+        raise HTTPException(404, detail={"code": "account_not_found"})
+    if base.canal != CANAL_KIT or base.platform != PricingPlatform.ML:
+        raise HTTPException(
+            400,
+            detail={
+                "code": "conta_nao_ml_kit",
+                "message": "O Catálogo ML só liga em conta do Mercado Livre (coluna de kit)",
+            },
+        )
+
+    filha = await _filha_de(session, base.id)
+    if body.ativo and filha is None:
+        if ml_listing_type_for_account(base.listing_type) is None:
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "tipo_obrigatorio",
+                    "message": (
+                        "Preencha o tipo (clássico/premium) desta conta antes de "
+                        "ativar o catálogo"
+                    ),
+                },
+            )
+        filha = PricingAccount(
+            canal=CANAL_CATALOGO,
+            conta_base_id=base.id,
+            integration_id=None,
+            **{campo: getattr(base, campo) for campo in _CAMPOS_ESPELHADOS_NA_FILHA},
+        )
+        session.add(filha)
+        await session.commit()
+        await session.refresh(filha)
+        logger.info(
+            "pricing.catalogo_ligado", conta_base_id=str(base.id), user_id=str(user.id)
+        )
+    elif not body.ativo and filha is not None:
+        await session.delete(filha)
+        await session.commit()
+        filha = None
+        logger.info(
+            "pricing.catalogo_desligado", conta_base_id=str(base.id), user_id=str(user.id)
+        )
+    else:
+        await session.commit()
+
+    roots_by_id, _, _ = await _segment_index(session)
+    names_by_id = await _segment_names_by_id(session)
+    return ContaCatalogoOut(
+        ativo=filha is not None,
+        conta=_account_out(
+            base, roots_by_id, names_by_id, conta_catalogo_id=filha.id if filha else None
+        ),
+        conta_catalogo=(
+            _account_out(filha, roots_by_id, names_by_id, base=base) if filha else None
+        ),
+    )
 
 
 # =============================================================================
@@ -2455,7 +2442,22 @@ async def set_store_info_department(
          match (exact or name-prefix), instead of always creating a duplicate.
       4. Only as a last resort, create a fresh account with sort_order placed
          AFTER existing accounts for the same (platform, segment).
+
+    'catalogo' é recusado (06/10/2026): o Catálogo ML deixou de ser um tipo de
+    loja e virou coluna de catálogo das contas ML de kit (aba Contas). Tirar
+    o tipo antigo continua pelo DELETE.
     """
+    if (body.department or "").strip().lower() == "catalogo":
+        raise HTTPException(
+            400,
+            detail={
+                "code": "departamento_invalido",
+                "message": (
+                    "Catálogo não é mais tipo de loja: ligue o Catálogo ML na conta de "
+                    "kit, em Tabela de preços › Contas"
+                ),
+            },
+        )
     sid = await _resolve_root_segment_id(session, body.department)
     if sid is None:
         raise HTTPException(400, detail={"code": "invalid_department"})
@@ -2504,12 +2506,13 @@ async def set_store_info_department(
                     user_scope(PricingAccount, user),
                     PricingAccount.store_info_id == store_info_id,
                     PricingAccount.segment_id == sid,
+                    PricingAccount.canal == CANAL_KIT,
                 )
             )
         )
     ).scalar_one_or_none()
     if existing is not None:
-        return _account_out(existing, roots_by_id, names_by_id)
+        return await _uma_conta_out(session, existing, roots_by_id, names_by_id)
 
     # SSH setDepartment: try to LINK an existing unlinked account whose name
     # matches the store_info account_name (exact or "<name> <suffix>" form),
@@ -2525,6 +2528,9 @@ async def set_store_info_department(
                         PricingAccount.platform == platform,
                         PricingAccount.segment_id == sid,
                         PricingAccount.store_info_id.is_(None),
+                        # A coluna de catálogo tem o nome da base e nunca é
+                        # ligada a loja (ela segue a base).
+                        PricingAccount.canal == CANAL_KIT,
                     )
                 )
             )
@@ -2539,7 +2545,7 @@ async def set_store_info_department(
                 m.store_info_id = store_info_id
             await session.commit()
             await session.refresh(matches[0])
-            return _account_out(matches[0], roots_by_id, names_by_id)
+            return await _uma_conta_out(session, matches[0], roots_by_id, names_by_id)
 
     dept_slug = roots_by_id.get(sid, body.department)
     name = account_name or f"{raw_platform} — {dept_slug}"
@@ -2637,6 +2643,9 @@ async def unbind_store_info_department(
             and_(
                 user_scope(PricingAccount, user),
                 PricingAccount.segment_id == sid,
+                # Coluna de catálogo sai junto com a base (ON DELETE CASCADE),
+                # nunca pelo casamento por nome.
+                PricingAccount.canal == CANAL_KIT,
                 cond,
             )
         )

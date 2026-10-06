@@ -170,7 +170,17 @@ async def parse_sheet(
             select(PricingAccount).where(user_scope(PricingAccount, user))
         )
     ).scalars().all()
-    by_lower_name = {(a.name or "").strip().lower(): a.id for a in accounts}
+    # A coluna de catálogo tem o nome da conta de kit: no Excel ela vem como
+    # "<conta> catálogo" (sufixo da exportação). Sem isso a filha tomava o
+    # lugar da base no casamento pelo nome.
+    by_lower_name: dict[str, UUID] = {}
+    for a in accounts:
+        nome = (a.name or "").strip().lower()
+        if a.canal == "catalogo":
+            by_lower_name[f"{nome} catálogo"] = a.id
+            by_lower_name[f"{nome} catalogo"] = a.id
+        else:
+            by_lower_name[nome] = a.id
     suggested: dict[str, UUID] = {}
     for h in prev.headers:
         key = (h or "").strip().lower()
