@@ -892,20 +892,41 @@ async function autoMatchAccounts() {
 // Tipo do anúncio ML da conta (listing_type). Preenchido, a coluna só manda
 // preço para anúncios desse tipo (clássico = gold_special, premium =
 // gold_pro); vazio = manda para os dois. O Catálogo ML exige o tipo.
+// Grava no mesmo formato das contas que já têm tipo ("ml classico").
 const TIPOS_ML = [
-  { value: 'classico', label: 'Clássico' },
-  { value: 'premium', label: 'Premium' },
+  { value: 'ml classico', label: 'Clássico' },
+  { value: 'ml premium', label: 'Premium' },
 ]
+// Variações que a API entende igual (sku_match._ML_LISTING_TYPE_MAP).
+const APELIDOS_TIPO_ML: Record<string, string> = {
+  'ml classico': 'ml classico',
+  'ml clássico': 'ml classico',
+  classico: 'ml classico',
+  'clássico': 'ml classico',
+  'ml premium': 'ml premium',
+  premium: 'ml premium',
+}
 
-// Conta antiga com outro texto ("ml classico"…) continua aparecendo como está.
+function tipoMlDe(acc: Account): string {
+  const v = (acc.listing_type || '').trim()
+  return v ? APELIDOS_TIPO_ML[v.toLowerCase()] ?? v : ''
+}
+
+function rotuloTipoMl(acc: Account): string {
+  const v = tipoMlDe(acc)
+  return TIPOS_ML.find((o) => o.value === v)?.label ?? (v || '— sem tipo')
+}
+
+// Texto que a API não reconhece continua aparecendo como está (e conta como
+// sem tipo para o envio).
 function opcoesTipoMl(acc: Account): { value: string; label: string }[] {
-  const v = acc.listing_type
+  const v = tipoMlDe(acc)
   if (v && !TIPOS_ML.some((o) => o.value === v)) return [{ value: v, label: v }, ...TIPOS_ML]
   return TIPOS_ML
 }
 
 function definirTipoMl(acc: Account, valor: string) {
-  if ((acc.listing_type || '') === valor) return
+  if (tipoMlDe(acc) === valor) return
   void _patchAccount(acc.id, 'listing_type', valor)
 }
 
@@ -3252,7 +3273,7 @@ watch(department, async () => {
                   v-if="acc.platform === 'mercadolivre' && canEditContas"
                   class="text-xs border rounded px-1 py-0.5 bg-background cursor-pointer"
                   :class="acc.listing_type ? '' : 'text-muted-foreground'"
-                  :value="acc.listing_type || ''"
+                  :value="tipoMlDe(acc)"
                   :title="catalogoAtivo(acc)
                     ? 'Tipo do anúncio ML desta conta — a coluna de catálogo dela acompanha (sem tipo, ela fica bloqueada)'
                     : 'Tipo do anúncio ML desta conta'"
@@ -3262,7 +3283,7 @@ watch(department, async () => {
                   <option v-for="o in opcoesTipoMl(acc)" :key="o.value" :value="o.value">{{ o.label }}</option>
                 </select>
                 <span v-else-if="acc.platform === 'mercadolivre'" class="text-xs" :class="acc.listing_type ? '' : 'text-muted-foreground'">
-                  {{ acc.listing_type || '— sem tipo' }}
+                  {{ rotuloTipoMl(acc) }}
                 </span>
                 <span v-else class="text-xs text-muted-foreground">—</span>
               </td>
