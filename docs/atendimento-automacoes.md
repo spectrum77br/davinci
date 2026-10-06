@@ -17,6 +17,11 @@ quando, e **não envia nada**. Um comparador confere com o que o Duoke mandou de
 verdade. Quando bater, a troca é feita loja por loja e automação por automação:
 desliga no Duoke e liga no DaVinci na mesma hora.
 
+Eduardo, 06/10/2026: os ajustes pequenos que são nossos no motor — a **§16**: o
+ciclo do "ficou alguma dúvida" da Shopee termina quando sai a de 26 h (o
+próximo cartão de produto abre outro, como o Duoke) e o critério da troca
+passa a pedir 7 dias de dados da regra na loja ("faltam N dias" na tela).
+
 Este documento é o **desenho e o que foi implementado** (backend, 05/10/2026).
 A base é o levantamento das automações de 05/10 (SELECTs só de leitura em
 produção, semana de 28/09 a 04/10), as conferências desta página, também só com
@@ -447,7 +452,7 @@ teste não precisar de banco.
 | `shopee_opcao_4` | sem texto: fica `desligado` até o painel (§10) | – | – | – | – | 0 |
 | `shopee_aguarde` | 1ª mensagem do comprador depois da última pessoa **e** do último "aguarde" | 10 min, 24 h; intervalo 4 h | `conversa:<id>:msg:<id>` | texto (`normal`) | atv | 331 |
 | `shopee_convite` | mensagem do comprador que nunca recebeu convite | 1 min, 24 h | comprador: `comprador:<id>` | texto (`auto_reply` se der, §7.3) | as 12 + atv (13) | 1.198 |
-| `shopee_duvida_2h` | 1ª mensagem do comprador do ciclo de pré-venda (7 dias) | 2 h, 24 h | `conversa:<id>:msg:<id>` | texto | 13 | 826 |
+| `shopee_duvida_2h` | 1ª mensagem do comprador do ciclo de pré-venda (7 dias; **depois que a 26 h sai, o próximo cartão de produto já abre outro**, §4.5/§16.1) | 2 h, 24 h | `conversa:<id>:msg:<id>` | texto | 13 | 826 |
 | `shopee_duvida_26h` | o 2 h saiu (simulado ou enviado) | +24 h | a mesma chave do 2 h | texto + figurinha 0007 | 13 | 804 |
 | `shopee_pedido_recebido` | pedido pago visto no Bling | 5 min, 24 h | `pedido:<sn>` | cartão do pedido + texto | 13 | 1.025 |
 | `shopee_entregue` | `TO_CONFIRM_RECEIVE` visto pela varredura | 0, janela 09:00–20:00 | `pedido:<sn>` | cartão + texto (celular ou mala) | celular: atv, barbosa, jlas, kia, mega, mini, victor mei, vita, vortan; mala: inova, kfa, minas, poofy | 595 |
@@ -564,6 +569,21 @@ conta como resposta. Ver §7.3. A Shopee barrou 8 por lista negra
   na conversa nos 7 dias anteriores (`condicoes.ciclo_dias = 7`). O 2 h conta da
   **primeira** mensagem do ciclo; o levantamento corrigido mostrou 120 min desde
   a 1ª, mesmo com várias. O motor grava `devido_em = M + 2 h`.
+- **O ciclo termina quando sai a de 26 h** (06/10, §16.1;
+  `condicoes.recomeca_no_cartao_depois_da_segunda = true`): depois dela, o
+  próximo **cartão de produto** do comprador (`item`/`variation_card`) abre outro
+  ciclo, e a 2 h conta dele. Texto solto depois da 26 h continua no ciclo de 7
+  dias. Medido no Duoke em 30 dias: depois da 2ª, o cartão de quem não comprou
+  recomeçou o ciclo em 43 de 43 (de 22 min a quase 6 dias depois); só texto, em 0 de
+  85. A 26 h fecha o ciclo quando **já saiu**: a nossa linha dela `enviado`,
+  `enviando` ou `revisar`, ou `simulado` quando a 2 h daquele ciclo também foi
+  `simulado` (o modo seco); no ciclo do Duoke, pela 2ª dele (a mensagem, ou no
+  modo seco a linha "só Duoke" que o comparador grava no lugar). Não fecham: a
+  26 h ainda `agendado` (mesmo vencida: a decisão pode pular; a rodada seguinte
+  revê o cartão), a pulada (ou nenhuma, com a 2 h pulada) e a simulada depois
+  de uma 2 h enviada (a 2 h em `enviar` e a 26 h em `simular`: o comprador não
+  recebeu a 2ª). A 1ª do Duoke conta como ciclo desde 2 h 05 antes dela (o
+  gatilho que ele respondeu é dele). Revisão de 06/10: §16.4.
 - Condições do 2 h: nunca comprou na loja. Isso quer dizer: nenhum pedido no
   índice para (loja, comprador) que não esteja `UNPAID`, a conversa sem
   `pedido_marketplace` e **sem cartão de pedido** na conversa (o do comprador ou
@@ -655,7 +675,11 @@ conta como resposta. Ver §7.3. A Shopee barrou 8 por lista negra
   comprador regrava o `devido_em` e o gatilho da linha ainda `agendado`
   (`INSERT … ON CONFLICT DO UPDATE … WHERE estado = 'agendado'`). Sem cartão de
   produto: `sem_cartao_produto`; com cartão de pedido na conversa: `ja_comprou`.
-  `tiktok_duvida_24h`: +24 h depois do de 2 h. Textos do Duoke.
+  `tiktok_duvida_24h`: +24 h depois do de 2 h. Textos do Duoke. O recomeço
+  da Shopee (§4.5) **não** vale aqui: em 2 meses só 2 conversas mandaram cartão
+  de produto depois da 24 h do Duoke — numa ele recomeçou (o cartão 46 h depois,
+  com nova sessão de atendimento da TikTok), na outra não (4,8 h depois). Fica o
+  ciclo de 7 dias até haver caso (§16.1).
 - Tipo: só texto, numa conversa que já existe (`tiktok.enviar_texto`, que já
   existe no código). A TikTok aceita até 2.000 caracteres e não aceita link. Com
   a conversa fechada, o adaptador devolve `bloqueio` e a conversa fica
@@ -877,8 +901,14 @@ e quero trocar mesmo assim" (`troca_sem_criterio`; sem ela, 422
 `criterio_nao_passou` com os motivos).
 
 Uma automação numa loja pode ir para `enviar` quando, em 7 dias seguidos
-(`resumir`, o `pode_trocar` da loja):
+(`resumir` e `com_os_dias`, o `pode_trocar` da loja):
 
+- **7 dias de dados daquela regra na loja** (06/10, §16.2): desde o mais tarde
+  entre `ligada_desde` (em `enviar`, também `enviar_desde`) e a primeira linha
+  do registro dela — 30 casos num dia só não dizem nada da semana (a aba
+  mostrava "pode trocar" no "aguarde" da ATV com 17 h de motor). Faltando, o
+  motivo vem à frente ("faltam 6 dias de dados (o critério pede 7 dias; tem
+  17 h)") e o selo da loja diz "troca: faltam N dias";
 - precisão **e** cobertura **e** concordância ≥ 95%, com pelo menos 30 casos;
 - nenhum alerta (tolerância zero), nenhum `texto_invalido`, e nenhum "só
   DaVinci" nos últimos 2 dias;
@@ -894,7 +924,9 @@ Uma automação numa loja pode ir para `enviar` quando, em 7 dias seguidos
   o Duoke (não o UpSeller nem recurso nativo — desligar no Duoke não para outro
   remetente; em Injox e JLAS no TikTok não se sabe quem manda o "já segue");
   e a troca **em pares** quando o Duoke não separa: menu + opções, 2 h + 26 h
-  (24 h no TikTok).
+  (24 h no TikTok). A API não amarra o par; a 2 h da Shopee trocada sem a 26 h
+  fica no ciclo de 7 dias (a 26 h simulada não fecha o ciclo da 2 h enviada,
+  §16.4).
 
 **A ordem tem dependência**: as respostas de opção do Duoke saem no fim da
 sessão do MENU do Duoke (medido: +12h00 do menu, e quase nunca quando uma
@@ -1336,7 +1368,9 @@ que o Duoke mandou de verdade.
       "h24": CONTA | null, "periodo": CONTA | null,
       "ultimo": {"devido_em", "estado", "motivo"} | null,
       "pode_enviar": bool, "por_que_nao_enviar": ["envio_desligado", ...],
-      "pode_trocar": bool, "por_que_nao_trocar": ["poucos casos (3 de 30)", ...]
+      "pode_trocar": bool, "por_que_nao_trocar": ["poucos casos (3 de 30)", ...],
+      "dados_desde": iso | null, "dias_de_dados": 0.7, "completa_em": iso | null,
+      "faltam_h": 151
     }]
   }]
 }
@@ -1351,10 +1385,14 @@ simulam começa por `so_simulacao`.
 bateu_mandou, bateu_nao_mandou, so_davinci, so_davinci_2d, so_duoke, combinada,
 alertas, texto_invalido, envio_desligado, diferenca_mediana_s, atraso_mediana_s,
 motivos{codigo:n}, casos, precisao, cobertura, concordancia, pode_trocar,
-por_que_nao[]}` (precisão/cobertura/concordância de 0 a 1, `null` sem caso; nas
-opções a precisão e a concordância são `null`, §6.5). O `pode_trocar` da LOJA
+por_que_nao[], dados_desde, dias_de_dados, completa_em, faltam_h}`
+(precisão/cobertura/concordância de 0 a 1, `null` sem caso; nas opções a
+precisão e a concordância são `null`, §6.5; os quatro últimos são os 7 dias de
+dados da regra na loja, `automacoes_comparar.com_os_dias` — na lista e na rota da
+conta vêm sempre, e o `pode_trocar` já os exige). O `pode_trocar` da LOJA
 (`lojas[].pode_trocar`) é sempre o de 7 dias, qualquer que seja o `dias`; o
-`pode_trocar` do `total_periodo` é só a soma das lojas (informação).
+`pode_trocar` do `total_periodo` é só a soma das lojas (informação; os dias
+contam da loja mais antiga).
 
 **`GET /api/atendimento/automacoes/registro?automacao=&integration_id=&estado=&duoke=&so=so_davinci|so_duoke|bateu|alerta|combinada&limite=200&antes=<iso>`**
 
@@ -1384,8 +1422,9 @@ Respostas de erro (`detail.code`):
   `loja_sem_acesso`, `sem_texto` (com `motivos` = a lista toda);
 - 409 também `so_simulacao` (a automação só simula, §15 — o primeiro da lista);
 - 422: `parte_invalida` (a parte `resposta_publica` fora da resposta da avaliação), `confirmar_duoke` (falta "desliguei no Duoke"), `criterio_nao_passou`
-  (o critério desta loja em 7 dias não passou e falta `troca_sem_criterio`; com
-  `motivos` = o `por_que_nao` da loja), `texto_invalido` (com
+  (o critério desta loja em 7 dias não passou — os números ou os 7 dias de
+  dados da regra nela — e falta `troca_sem_criterio`; com `motivos` = o
+  `por_que_nao` da loja; o 409 do envio desligado vem antes de tudo isso), `texto_invalido` (com
   `motivos` do validador, renderizado com o nome de exemplo e sem ele),
   `sem_texto` (opção 4), `janela_invalida`, `condicao_desconhecida`,
   `condicao_invalida`;
@@ -1452,8 +1491,10 @@ Fora da equipe ou linha que não existe: 404 `registro_nao_encontrado`.
   em Simular/Enviar — a API garante).
 - **Uma linha por loja**: o nome e os selos (Duoke hoje, sem acesso, padrão =
   sem regra salva, "ENVIAR sem envio" em vermelho, disjuntor e, em Simular, o
-  selo da troca DA LOJA — "pronta para trocar" / "troca: ainda não", o porquê
-  dos últimos 7 dias no title), o **modo** (Desligado / Simular / Enviar),
+  selo da troca DA LOJA — "pronta para trocar" / "troca: faltam N dias" (sem os
+  7 dias de dados da regra na loja, §16.2) / "troca: ainda não", o porquê dos
+  últimos 7 dias e o dia em que os 7 dias completam no title), o **modo**
+  (Desligado / Simular / Enviar),
   quantas mandaria em 24 h e no período, a % que bateu (a menor entre precisão
   e cobertura; verde a partir de 95%, âmbar de 85%, vermelho abaixo; o title
   tem a conta inteira: precisão, cobertura, concordância, bateu, só DaVinci de
@@ -2745,3 +2786,340 @@ igual ao do Duoke em 279 de 279; o chat das 1–3★ igual em 16 de 16 e o das
 nº nos dois lados, e o mesmo, em 139 de 139. Em 51 carrinhos o lado do Duoke
 tem só o texto: o cartão dele não foi gravado (em produção, 60 de 338 em 7
 dias, 33 deles o 2º carrinho da conversa).
+
+---
+
+## 16. Ajustes de 06/10: o ciclo da dúvida e os 7 dias do critério
+
+Eduardo, 06/10/2026: os ajustes pequenos que são nossos no motor, achados na
+checagem de 06/10 (o motor em produção só simula: `ATENDIMENTO_AUTOMACOES_ATIVA`
+ligada, `ATENDIMENTO_AUTOMACOES_ENVIO` e `ATENDIMENTO_ENVIO_ATIVO` desligadas).
+Nenhuma migration: a condição nova vale pelo padrão do catálogo
+(`_cond` cai no catálogo quando a regra não tem a chave).
+
+### 16.1 "Ficou alguma dúvida?" da Shopee: o ciclo termina quando sai a de 26 h
+
+**O achado**: a 2 h da Shopee estava em 89,8% com o Duoke. O DaVinci esperava 7
+dias desde a anterior; o Duoke reenvia antes — 46 vezes em 30 dias, sempre com
+a 2ª (26 h) no meio.
+
+**A regra do Duoke, por SELECT** (produção, só leitura, sem texto de comprador;
+os principais estão na §16.5):
+
+| O quê | Medido |
+|---|---|
+| Intervalo entre a 1ª anterior e a 2ª dela | 24,00 h em todos os 46 |
+| Da 2ª até o gatilho do novo ciclo | de 22 min a 141 h (mediana ~24 h); nenhum limite mínimo visto |
+| O que dispara o novo ciclo | o **cartão de produto** do comprador (`item`/`variation_card`): depois de cada 2ª dos últimos 30 dias, quem não comprou e mandou cartão nos 7 dias seguintes recebeu a 1ª de novo em **43 de 43** (2 h depois do cartão); quem só mandou texto, **0 de 85** |
+| A 2 h conta de | o cartão: em 7 dos 43 o comprador escreveu texto antes do cartão (depois da 2ª) e a 1ª saiu 2 h depois do cartão, não do texto (no 8º, os dois a menos de 10 min) |
+| Antes da 2ª sair | nada recomeça (0 casos de 1ª com menos de 26 h da anterior; um cartão 2 h antes da 2ª não disparou) |
+| Depois de 7 dias | como antes: a primeira mensagem abre outro ciclo (21 casos ≥ 7 d) |
+
+Também visto: 96% das 1ªs do Duoke (1.471 de 1.528) têm o cartão de produto 2 h
+antes; das 57 sem cartão, 46 são conversas novas, 3 estavam paradas há mais de
+7 dias e 8 não têm mensagem do comprador 2 h antes.
+O gatilho do 1º ciclo **não** mudou (a 1ª mensagem do ciclo); só o recomeço.
+
+**O conserto** (`automacoes_catalogo._duvida`, `_ciclos_da_duvida`, `_no_ciclo`;
+condição `recomeca_no_cartao_depois_da_segunda`, ligada só no
+`shopee_duvida_2h`): cada ciclo aberto é (começo, fim), e o fim é a hora em que
+a 26 h daquele ciclo saiu — a nossa linha seguinte com a mesma chave que **já
+saiu** (`_fim_do_ciclo_nosso`, desde a revisão de 06/10, §16.4: `enviado`,
+`enviando`, `revisar`, ou `simulado` com a 2 h também `simulado`; a agendada, a
+pulada e a que falhou não fecham), a 2ª do Duoke (no histórico de antes do
+corte) ou a linha "só Duoke" da 26 h (no modo seco a mensagem do Duoke sai do
+estado e o comparador grava essa linha no lugar). Depois do fim, só o **cartão de produto** do comprador abre outro
+ciclo; texto continua no de 7 dias. A 1ª do Duoke (e a "só Duoke" dela) conta
+como ciclo desde 2 h 05 antes dela: o gatilho que ele respondeu é dele (sem
+isso, esse gatilho abria um ciclo de 7 dias próprio e segurava o recomeço). A
+regra com a condição desligada volta ao ciclo de 7 dias.
+
+**TikTok**: não vale. Em 2 meses só 2 conversas mandaram cartão de produto
+depois da 24 h do Duoke — uma recomeçou (46 h depois, com nova sessão de
+atendimento da TikTok), a outra não (4,8 h depois); só texto, 0 de 5. O
+`tiktok_duvida_2h` fica no ciclo de 7 dias (teste `test_duvida_do_tiktok_continua_no_ciclo_de_7_dias`).
+
+**Simulação dos últimos 7 dias** (29/09 12h a 06/10 12h UTC; exportados por
+SELECT sem texto de comprador — 44.862 mensagens de 6.025 conversas desde
+20/09, só horários, rótulos e o `payload` mínimo —, banco local, relógio de 2 em
+2 min com o motor de verdade — descobrir → decidir, o comparador a cada 30 min
+—, o índice de pedidos reconstruído rodada a rodada, só as 4 regras da dúvida
+ligadas; a conta é a da tela, `estatisticas`, depois de 1 dia de aquecimento.
+O roteiro e os dados exportados ficaram fora do repositório: são de uma vez só).
+Antes = `origin/main` (06427475), depois = este ajuste (com a revisão da §16.4,
+que não mudou nenhuma linha), com os mesmos dados:
+
+| Automação | | Casos | Bateu (mandou / não) | Só DaVinci | Só Duoke | Precisão | Cobertura | Concordância | % da tela | Lojas prontas* |
+|---|---|---|---|---|---|---|---|---|---|---|
+| Shopee 2 h | antes | 1090 | 677 / 346 | 29 | 38 | 95,8% | 94,6% | 93,8% | 94,6% | 0 de 13 |
+|  | depois | 1090 | 697 / 346 | 29 | 18 | 96,0% | 97,4% | 95,6% | 96,0% | 3 de 13 |
+| Shopee 26 h | antes | 735 | 667 / 19 | 21 | 28 | 96,9% | 95,9% | 93,3% | 95,9% | 0 de 13 |
+|  | depois | 736 | 680 / 19 | 21 | 16 | 97,0% | 97,7% | 94,9% | 97,0% | 0 de 13 |
+| TikTok 2 h | antes | 120 | 20 / 95 | 3 | 2 | 86,9% | 90,9% | 95,8% | 86,9% | 0 de 4 |
+|  | depois | 120 | 20 / 95 | 3 | 2 | 86,9% | 90,9% | 95,8% | 86,9% | 0 de 4 |
+| TikTok 24 h | antes | 23 | 16 / 0 | 5 | 2 | 76,1% | 88,8% | 69,5% | 76,1% | 0 de 4 |
+|  | depois | 23 | 16 / 0 | 5 | 2 | 76,1% | 88,8% | 69,5% | 76,1% | 0 de 4 |
+
+\* Lojas que passariam nos números do critério (≥ 95% e ≥ 30 casos, sem
+alerta, sem "só DaVinci" nos 2 últimos dias) na janela da simulação — sem os 7
+dias de dados da §16.2, que a simulação não cobra.
+
+Leitura:
+
+- **2 h da Shopee**: o "só Duoke" cai de 38 para 18 (os 20 eram exatamente os
+  reenvios do Duoke depois da 26 h); a cobertura vai de 94,6% para 97,4%, a
+  concordância de 93,8% para 95,6% e a % da tela de 94,6% para 96,0%. O "só
+  DaVinci" não muda (29): o ajuste não criou nenhuma linha nova que o Duoke não
+  tenha mandado — linha a linha, entraram 21 da 2 h e 13 da 26 h, todas com o
+  Duoke mandando, e saíram 20 e 12 "só Duoke". Lojas que passam nos números: 0
+  → 3 de 13 (Barbosa, Kia, Minas).
+- **26 h da Shopee, sem piorar**: o "só Duoke" cai de 28 para 16 (a 26 h dos
+  ciclos novos), precisão 96,9% → 97,0%, cobertura 95,9% → 97,7%, concordância
+  93,3% → 94,9%. O "só DaVinci" fica em 21.
+- **TikTok**: idêntico antes e depois (a condição não está ligada lá).
+- **O que sobra na 2 h** (os 18 "só Duoke"): 10 o DaVinci pulou por
+  `ja_comprou` (o índice de pedidos, §4.5); dos 8 sem linha, 2 são a borda do
+  começo da simulação (o ciclo começou antes do corte e a 2ª do Duoke caiu
+  depois dele — some sozinho em produção depois de 7 dias de motor), 4 são 1ªs
+  do Duoke sem mensagem do comprador 2 h antes (só aviso do sistema, convite e
+  menu) e 2 têm outra explicação (o Duoke contou do 2º cartão; o Duoke mandou
+  para quem tinha mandado o cartão de um pedido 2 dias antes) — fora deste
+  ajuste.
+- Em produção (19 h de motor) a 2 h estava em 89,8%. Os 4 "só Duoke" de
+  reenvio de lá tinham todos o cartão de produto 2 h antes e a 2ª do Duoke no
+  meio (o 3º SELECT da §16.5): em 2 a 2ª foi antes de o motor ligar e a regra nova
+  já pega; nos outros 2 a 1ª do ciclo é de antes do motor e a 2ª de depois — a
+  mesma borda do começo, que some quando os ciclos de antes do motor acabarem
+  (até 12/10). A simulação de 7 dias é o número de referência.
+
+### 16.2 Critério da troca: 7 dias de dados da regra na loja
+
+**O achado**: o critério cobrava ≥ 95% e ≥ 30 casos nos últimos 7 dias, mas não
+os 7 dias — a aba já mostrava "pronta para trocar" no "aguarde" da ATV com 17 h
+de motor (os 30 casos vieram num dia só).
+
+**Agora** (`automacoes_comparar.com_os_dias`, `dados_desde`,
+`inicio_dos_dados`, `texto_falta`; a lista, a rota da conta e o `PATCH`):
+
+- `dados_desde` da regra na loja = o mais tarde entre `ligada_desde` (em
+  `enviar`, também `enviar_desde`) e a primeira linha do registro dela (pela
+  `devido_em`, a mesma da conta). Ligada com o motor parado não tem dado; a
+  regra religada não herda a semana de antes; desligada, sem regra ou sem linha
+  nenhuma: sem dados.
+- Os 7 dias são **de relógio** desde `dados_desde` (achado da revisão de 06/10,
+  §16.4, deixado assim de propósito): o motor parado no meio da semana conta
+  como dia de dado, e mudar o texto ou uma condição (sobe a `versao`) não
+  recomeça a contagem — só religar (`desligado` → `simular`, que carimba
+  `ligada_desde`) recomeça. Hoje isso não libera nada: nenhuma regra tem 7 dias
+  antes de 12/10. Se um dia for preciso, recontar da versão quando mudar uma
+  condição que muda a decisão (como `recomeca_no_cartao_depois_da_segunda`).
+- Faltando dias, o motivo vem à frente dos outros —
+  "faltam 6 dias de dados (o critério pede 7 dias; tem 17 h)" — e
+  `pode_trocar` é falso, mesmo com os números bons. A API devolve `dados_desde`,
+  `dias_de_dados`, `completa_em` e `faltam_h` (na loja e em cada `CONTA`; na soma
+  das lojas, desde a loja mais antiga — só informação).
+- Tela: o selo da loja diz **"troca: faltam N dias"** (menos de 1 dia: "faltam
+  N h"; meio dia arredonda para cima, igual à API), e o title mostra o porquê e
+  o dia em que os 7 dias completam. O quadro do Enviar lista o motivo como os
+  outros. Em produção, as regras ligadas em 05/10 completam os 7 dias a partir
+  de 12/10 por volta das 15h (cada uma pela 1ª linha dela; o "aguarde" da ATV,
+  com 19 h de dados às 10h30 de 06/10, completa em 12/10 às 15h07); as 151
+  regras ligadas ainda sem linha nenhuma mostram "faltam 7 dias".
+- O `PATCH` para `enviar` continua recusando primeiro pelo envio desligado
+  (409 `envio_desligado`); com as chaves, o critério sem os dias dá 422
+  `criterio_nao_passou` com o motivo, e `troca_sem_criterio` troca mesmo assim
+  (teste `test_lista_e_patch_pedem_7_dias_de_dados_na_loja`).
+
+### 16.3 Rodado (06/10)
+
+- **Testes novos**: `test_atendimento_automacoes_catalogo.py` — o recomeço no
+  cartão depois da 26 h do Duoke (o texto não recomeça; sem a 2ª, ou com o
+  cartão antes dela, não; a condição desligada volta aos 7 dias), o ciclo das
+  nossas linhas (a 26 h simulada/enviada/a conferir fecha; pulada não; a
+  agendada fechava pela hora — a revisão mudou isso, §16.4), o "só Duoke"
+  contando como a do Duoke e o TikTok nos 7 dias;
+  `test_atendimento_automacoes_motor.py` — `com_os_dias`, `dados_desde`,
+  `texto_falta` e a soma das lojas, a lista + a rota da conta + o `PATCH` com
+  17 h de dados (409 `envio_desligado` antes de tudo; 422 com o motivo dos dias;
+  `troca_sem_criterio` troca) e o `inicio_dos_dados` com a regra religada, o
+  motor parado, a desligada e a sem linha. O teste que já existia do critério
+  por loja passou a ter 8 dias de dados.
+- **Bateria** (`tests/test_atendimento_*.py` + `test_historico_*`), contra o
+  `origin/main` puro (06427475): no 3.14, **2.126 passam e 0 falham** (o
+  `origin/main`: 2.119 e 0; são os 7 testes novos); no 3.12, 2.125 passam e 1
+  falha — a mesma `test_atendimento_ia_claude::test_cliente_do_sdk_sem_nova_tentativa_e_sem_ler_o_ambiente`
+  que falha no `origin/main` com o 3.12 (2.118 e 1). O
+  `test_atendimento_robo::test_status_efetivo_sem_sinal_e_com_evento_recente`
+  (depende do relógio, §15.8) falhou numa rodada com duas baterias ao mesmo
+  tempo; sozinho e nas baterias finais, passa.
+- **Mutação**: 21 (17 no backend: o recomeço desligado, qualquer mensagem
+  recomeçando, o cartão recomeçando sem a 26 h, sem a folga antes da 1ª do
+  Duoke, a 26 h pulada fechando, a 2ª de outro ciclo fechando, o "só Duoke" como
+  linha nossa, o TikTok recomeçando, o critério sem os dias, os dados só pela 1ª
+  linha, sem o `enviar_desde`, a desligada contando dados, o arredondamento, a
+  soma pela loja mais nova e a lista, a rota da conta e o `PATCH` sem os dias;
+  4 na tela: o selo sem o "faltam", o arredondamento, o title sem a data e a
+  condição sem nome) — todas pegas. Uma 22ª (`faltam_h` somado na soma das
+  lojas) era equivalente — a soma refaz o `faltam_h` — e a exclusão saiu do
+  código.
+- **Web**: os `atendimento-*.cjs` passam (15 de 16), menos o
+  `atendimento-so-admin.cjs` (já falha no `origin/main`: `withDefaults is not
+  defined`); o `atendimento-automaticas.cjs` ganhou o contrato dos campos novos
+  (a `CONTA` com os de `com_os_dias`, a loja, as três contas da lista e o
+  `PATCH` com `inicios`, o 409 antes do critério, o arredondamento igual nos
+  dois lados), as funções puras e a tela (o selo "troca: faltam 6 dias" e o
+  title com a data). Typecheck numa cópia isolada só com os 7 erros antigos (os
+  mesmos, linha a linha, do `origin/main`); `nuxi build` exit 0.
+- **Ruff**: `check` e `format` limpos nos arquivos alterados.
+
+### 16.4 A revisão de 06/10: o que mudou depois dela
+
+A revisão (produção só por SELECT; a simulação de 7 dias refeita num schema
+próprio, idêntica linha a linha à do ajuste) não derrubou o ajuste e achou 5
+pontos, todos baixos. O que foi feito:
+
+1. **A 2 h em `enviar` com a 26 h ainda em `simular`.** A 26 h simulada fechava
+   o ciclo e o cartão depois dela ganhava outra 1ª: se o Duoke parar de mandar
+   a 2ª dele, o comprador receberia "Ficou alguma dúvida?" a cada ~26 h sem a 2ª
+   no meio. Pela simulação, esse deve ser o primeiro modo misto (a 2 h passa
+   nos números em 3 lojas, a 26 h em nenhuma). Agora a 26 h simulada só fecha o
+   ciclo de uma 2 h também simulada (`_fim_do_ciclo_nosso`). A 2 h enviada só
+   fecha com a 26 h que saiu de verdade (`enviado`, `enviando`, `revisar`) ou
+   com a 2ª do Duoke. A nossa 1ª enviada, que fica na conversa como mensagem
+   `davinci_auto` com a marca (gravada no envio), já segurava o cartão por 7
+   dias quando não havia a 2ª de verdade na conversa. Agora o registro diz o
+   mesmo. A API continua sem amarrar a 2 h à 26 h, então segue valendo trocar
+   as duas juntas em cada loja (§6.5, "em pares"). Trocada só a 2 h, o comprador recebe a 1ª no ciclo de 7
+   dias, como antes deste ajuste, e não recebe a 2ª. Teste:
+   `test_duvida_da_shopee_a_26h_simulada_nao_fecha_o_ciclo_da_1a_enviada`.
+2. **A corrida da 26 h agendada.** A rodada descobre antes de decidir, e a 26 h
+   `agendado` já vencida contava como saída. Um cartão que chegasse entre o
+   `devido` dela e a decisão abria outra 1ª. Se a 26 h fosse pulada depois
+   (teto, atrasado, regra desligada, canal com erro), o comprador receberia
+   duas 1ªs sem a 2ª. Agora a agendada não fecha o ciclo, e o cartão não se
+   perde: a descoberta relê os últimos 40 min (`LOOKBACK_MENSAGENS`), e a rodada
+   seguinte, com a 26 h já decidida, vê o cartão de novo. Se a 26 h saiu, o
+   cartão abre o ciclo (2 h depois dele); se foi pulada, não abre. Testes:
+   `test_duvida_o_cartao_antes_de_decidir_a_26h` (as duas pontas, com o motor
+   de verdade: descobrir → decidir → descobrir) e
+   `test_duvida_da_shopee_o_ciclo_nosso_termina_quando_a_26h_sai` (a agendada
+   vencida não fecha mais; a que falhou também não).
+3. **`_agora` no JSON.** A soma das lojas (`somar`) levava a chave interna
+   `_agora` para `total_24h` e `total_periodo` da lista e para `por_automacao` da
+   rota da conta. Agora a soma não a grava. As contas das lojas continuam com
+   ela, e a rota já a tirava delas com `sem_internos`. Os testes conferem que
+   nenhuma chave começada por `_` chega na resposta.
+4. **Os 7 dias são de relógio** (motor parado conta; mudar a versão não
+   recomeça). Ficou como está, escrito na §16.2: hoje não libera nada.
+5. **O doc citava arquivos do scratchpad** (os SELECTs e o roteiro da
+   simulação, que somem com a sessão). Os SELECTs principais estão na §16.5, e
+   a simulação está descrita na §16.1.
+
+**Rodado de novo (06/10, depois da revisão)**, sempre contra o `origin/main`
+puro (06427475):
+
+- **Simulação de 7 dias** com o código final: o registro saiu **idêntico** ao
+  do ajuste, linha a linha (2.358 linhas, 0 diferenças), e a tabela da §16.1 é
+  a mesma. Nenhuma linha mudou: a releitura de 40 min cobre a janela entre o
+  `devido` da 26 h e a decisão, e a simulação não tem modo misto (tudo em
+  `simular`).
+- **Bateria** (`tests/test_atendimento_*.py` + `test_historico_*`): no 3.14,
+  **2.129 passam e 0 falham** (3 testes novos da revisão: o modo misto e as
+  duas pontas da corrida); no 3.12, 2.128 passam e 1 falha — a mesma
+  `test_atendimento_ia_claude::test_cliente_do_sdk_sem_nova_tentativa_e_sem_ler_o_ambiente`
+  que falha no `origin/main` com o 3.12. O `test_atendimento_robo` que depende
+  do relógio passou nas duas.
+- **Mutação**: 26 de 26 pegas (22 no backend, 4 na tela). Entraram 5 novas: a
+  26 h agendada e vencida fechando (a corrida), a simulada fechando o ciclo da
+  1ª enviada (o modo misto), a `enviando` não fechando, a simulada não fechando
+  nem a 1ª simulada e o `_agora` de volta na soma. A antiga "a 26 h pulada
+  também fecha" foi refeita no código novo.
+- **Web**: `atendimento-*.cjs` 15 de 16, com o mesmo `atendimento-so-admin.cjs`
+  de antes (`withDefaults is not defined`, fora do diff). A tela não mudou na
+  revisão, então o typecheck e o `nuxi build` da §16.3 valem (o componente é o
+  mesmo, byte a byte).
+- **Ruff**: `check` e `format` limpos nos arquivos alterados.
+
+### 16.5 Os SELECTs da regra do Duoke
+
+Produção, só leitura, rodados com
+`ssh davinci-prod "docker exec -i pg18 psql -U pguser -d davinci -At -F'|'" < arquivo.sql`
+(o arquivo começa com `set search_path=davinci;` e
+`set default_transaction_read_only=on;`). O texto das mensagens só entra no
+`ilike` que reconhece o modelo do Duoke; a saída é só rótulo, hora e contagem.
+
+1. O intervalo entre duas 1ªs na mesma conversa (30 dias) e quantas tinham a 2ª
+   no meio. Em 06/10, na Shopee: 46 entre 26 h e 7 dias, todas com a 2ª; 21 com
+   7 dias ou mais; nenhuma com menos de 26 h.
+
+```sql
+-- Intervalo entre duas 1ªs ("Ficou alguma dúvida?") na mesma conversa, 30 dias,
+-- e quantas tinham a 2ª ("caso ainda esteja em dúvida") no meio.
+with d as (
+  select m.conversa_id cv, c.plataforma plat, coalesce(m.enviada_em, m.created_at) t,
+    case when m.texto ilike 'Ficou alguma d_vida sobre o produto%' then 'D1' else 'D2' end k
+  from atendimento_mensagens m join atendimento_conversas c on c.id = m.conversa_id
+  where c.plataforma in ('shopee', 'tiktok') and c.canal = 'chat' and m.autor <> 'cliente'
+    and coalesce(m.enviada_em, m.created_at) >= now() - interval '37 days'
+    and (m.texto ilike 'Ficou alguma d_vida sobre o produto%'
+         or m.texto ilike '%caso ainda esteja em d_vida%')
+), d1 as (
+  select cv, plat, t, lag(t) over (partition by cv order by t) ant from d where k = 'D1'
+)
+select plat,
+  case when ant is null then 'primeiro' when t - ant < interval '26 hours' then 'a <26h'
+       when t - ant < interval '7 days' then 'b 26h-7d' else 'c >=7d' end faixa,
+  count(*),
+  count(*) filter (where ant is not null and exists (
+    select 1 from d x where x.cv = d1.cv and x.k = 'D2' and x.t > d1.ant and x.t < d1.t)) com_d2
+from d1 where t >= now() - interval '30 days'
+group by 1, 2 order by 1, 2;
+```
+
+2. Depois de cada 2ª do Duoke (Shopee), o primeiro cartão de produto do
+   comprador nos 7 dias seguintes, e se a 1ª saiu 2 h depois dele: o 43 de 43
+   (cartão, sem compra) e o 0 de 85 (só texto).
+
+```sql
+-- Depois de cada D2 do Duoke (Shopee): o 1º cartão de produto do comprador nos 7 dias seguintes → saiu D1 2 h depois?
+with d as (
+select m.conversa_id cv, c.integration_id integ, c.comprador_id comp, coalesce(m.enviada_em,m.created_at) t,
+ case when m.texto ilike 'Ficou alguma d_vida sobre o produto%' then 'D1' else 'D2' end k
+from atendimento_mensagens m join atendimento_conversas c on c.id=m.conversa_id
+where c.plataforma='shopee' and c.canal='chat' and m.autor<>'cliente'
+ and coalesce(m.enviada_em,m.created_at) >= now() - interval '40 days'
+ and (m.texto ilike 'Ficou alguma d_vida sobre o produto%' or m.texto ilike '%caso ainda esteja em d_vida%')),
+d2 as (select * from d where k='D2' and t between now()-interval '33 days' and now()-interval '1 day'),
+x as (select d2.*,
+  (select min(coalesce(b.enviada_em,b.created_at)) from atendimento_mensagens b where b.conversa_id=d2.cv and b.autor='cliente'
+     and coalesce(b.enviada_em,b.created_at) > d2.t and coalesce(b.enviada_em,b.created_at) < d2.t + interval '7 days'
+     and (b.tipo='produto' or b.payload->>'message_type' in ('item','variation_card'))) p,
+  (select min(coalesce(b.enviada_em,b.created_at)) from atendimento_mensagens b where b.conversa_id=d2.cv and b.autor='cliente'
+     and coalesce(b.enviada_em,b.created_at) > d2.t and coalesce(b.enviada_em,b.created_at) < d2.t + interval '7 days') b1
+ from d2),
+y as (select x.*,
+  exists(select 1 from d where d.cv=x.cv and d.k='D1' and d.t between x.p + interval '115 minutes' and x.p + interval '125 minutes') d1_do_cartao,
+  exists(select 1 from d where d.cv=x.cv and d.k='D1' and d.t between x.b1 + interval '115 minutes' and x.b1 + interval '125 minutes') d1_da_1a,
+  exists(select 1 from d where d.cv=x.cv and d.k='D1' and d.t > x.t and d.t < x.t + interval '7 days 3 hours') algum_d1,
+  (exists(select 1 from atendimento_mensagens o where o.conversa_id=x.cv and o.payload->>'message_type'='order' and coalesce(o.enviada_em,o.created_at) < coalesce(x.p,x.b1) + interval '2 hours')
+   or exists(select 1 from atendimento_pedidos_comprador pc where pc.integration_id=x.integ and pc.comprador_id=x.comp and coalesce(pc.status,'') <> 'UNPAID' and pc.criado_em < coalesce(x.p,x.b1) + interval '2 hours')) comprou
+ from x)
+select 'apos_d2',
+ case when b1 is null then 'sem msg em 7d' when p is null then 'so texto/outros (sem cartao)' when p=b1 then 'cartao e a 1a' else 'cartao depois de texto' end caso,
+ comprou, d1_do_cartao, d1_da_1a, algum_d1, count(*)
+from y group by 2,3,4,5,6 order by 2,3,4,5,6;
+```
+
+3. Os "só Duoke" da 2 h da Shopee no registro do motor: se a 1ª do Duoke teve
+   o cartão de produto 2 h antes, e quando saiu a 2ª anterior.
+
+```sql
+-- Os "só Duoke" da 2 h da Shopee em produção: a 1ª do Duoke teve cartão de produto 2 h antes, e a 2ª anterior?
+select left(r.id::text,8), r.estado, coalesce(r.motivo,'-'), to_char(r.evento_em at time zone 'America/Sao_Paulo','DD HH24:MI') evento,
+ exists(select 1 from atendimento_mensagens b where b.conversa_id=r.conversa_id and b.autor='cliente' and (b.tipo='produto' or b.payload->>'message_type' in ('item','variation_card'))
+   and coalesce(b.enviada_em,b.created_at) between coalesce(r.duoke_em, r.evento_em) - interval '123 minutes' and coalesce(r.duoke_em, r.evento_em) - interval '117 minutes') cartao_2h_antes,
+ (select to_char(max(coalesce(m.enviada_em,m.created_at)) at time zone 'America/Sao_Paulo','DD HH24:MI') from atendimento_mensagens m where m.conversa_id=r.conversa_id and m.autor<>'cliente' and m.texto ilike '%caso ainda esteja em d_vida%' and coalesce(m.enviada_em,m.created_at) < coalesce(r.duoke_em, r.evento_em)) d2_antes
+from atendimento_automacao_registros r
+where r.automacao='shopee_duvida_2h' and r.duoke='mandou' and (r.estado='so_duoke' or r.estado='pulado') and r.divergencia is null
+order by r.evento_em;
+```

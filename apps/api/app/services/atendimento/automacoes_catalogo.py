@@ -697,8 +697,9 @@ def _montar() -> dict[str, Automacao]:
             alvo=ALVO_CONVERSA,
             familia=FAMILIA_CONVERSA,
             descricao=(
-                "2 h depois da 1ª mensagem do ciclo (7 dias), só para quem nunca comprou "
-                "na loja; vai mesmo que a equipe já tenha respondido, como o Duoke."
+                "2 h depois da 1ª mensagem do ciclo (7 dias; depois que a de 26 h sai, o "
+                "próximo cartão de produto do comprador já abre outro), só para quem nunca "
+                "comprou na loja; vai mesmo que a equipe já tenha respondido, como o Duoke."
             ),
             partes=(_texto(TEXTO_DUVIDA_1),),
             atraso_min=120,
@@ -706,6 +707,9 @@ def _montar() -> dict[str, Automacao]:
             lojas_duoke=SHOPEE_CAMPANHAS,
             condicoes={
                 "ciclo_dias": 7,
+                # Medido no Duoke (06/10): o ciclo termina quando sai a de 26 h e o
+                # cartão de produto seguinte abre outro (§4.5 do doc).
+                "recomeca_no_cartao_depois_da_segunda": True,
                 "so_quem_nunca_comprou": True,
                 "nao_se_pessoa_respondeu": False,
             },
@@ -1776,29 +1780,116 @@ def _convite(conv: Conversa, aut: Automacao, regra: Any) -> list[Candidato]:
     return []
 
 
-def _ancoras_do_ciclo(conv: Conversa, aut: Automacao) -> list[datetime]:
-    """O começo dos ciclos do "ficou alguma dúvida": o do Duoke e as nossas linhas.
+# A 1ª do Duoke sai 2 h depois do gatilho (medido: 119,8 a 120,0 min); a folga
+# cobre a mensagem que ele respondeu.
+_FOLGA_DA_1A = timedelta(minutes=5)
 
-    As nossas em qualquer estado (até a pulada): o ciclo conta da 1ª mensagem.
+
+# A 2ª nossa que fecha o ciclo é a que JÁ saiu (revisão de 06/10, §16.1):
+# - a agendada não: a decisão dela ainda pode pular (teto, atrasado, regra
+#   desligada, canal com erro) e o cartão que chegou nesse meio-tempo abriria
+#   uma 1ª sem a 2ª no meio. Não se perde o cartão: a descoberta relê os
+#   últimos 40 min (`LOOKBACK_MENSAGENS`), e a rodada seguinte, com a 2ª já
+#   decidida, vê o cartão de novo;
+# - a simulada só fecha o ciclo de uma 1ª também simulada (o modo seco: é o
+#   que o comprador teria visto). Com a 2 h em `enviar` e a 26 h em `simular`,
+#   o comprador recebeu a 1ª e não recebeu a 2ª: o ciclo segue nos 7 dias.
+_SAIU_DE_VERDADE = (ESTADO_ENVIANDO, ESTADO_ENVIADO, ESTADO_REVISAR)
+
+
+def _fim_do_ciclo_nosso(primeira: Linha, seguinte: Linha | None) -> datetime | None:
+    """Quando saiu a 2ª da nossa linha da 1ª (None = ainda não saiu, ou não vai sair)."""
+    if seguinte is None:
+        return None
+    if seguinte.estado in _SAIU_DE_VERDADE:
+        return seguinte.devido_em
+    if seguinte.estado == ESTADO_SIMULADO and primeira.estado == ESTADO_SIMULADO:
+        return seguinte.devido_em
+    return None
+
+
+def _ciclos_da_duvida(
+    conv: Conversa, aut: Automacao, ciclo: timedelta, *, antes_da_1a: timedelta = timedelta(0)
+) -> list[tuple[datetime, datetime | None]]:
+    """Os ciclos do "ficou alguma dúvida" já abertos na conversa: (começo, fim).
+
+    O começo: a 1ª do Duoke (a hora dela, menos `antes_da_1a` — com o fim do
+    ciclo na 26 h, o gatilho que o Duoke respondeu 2 h depois também é dele,
+    senão abriria um ciclo de 7 dias por conta própria) e as nossas linhas da
+    1ª em qualquer estado (até a pulada: o ciclo conta da 1ª mensagem). O fim:
+    quando saiu a 2ª (26 h / 24 h) DAQUELE ciclo — a do Duoke (a primeira
+    depois da 1ª dele, dentro do ciclo) ou, nas nossas, a linha seguinte com a
+    mesma chave que JÁ saiu (`_fim_do_ciclo_nosso`). Sem a 2ª (a 1ª pulada, a
+    2ª pulada, a 2ª ainda agendada), o fim é None: vale o ciclo inteiro. No
+    modo seco a mensagem do Duoke sai do estado (o corte) e fica a linha "só
+    Duoke" que o comparador grava no lugar dela (`evento_em` = a hora da
+    mensagem): ela conta como a do Duoke, a 1ª e a 2ª.
     """
-    saida = [m.em for m in conv.msgs if not m.do_comprador and m.tipo_auto == aut.tipo]
-    saida += [
-        linha.evento_em
+    loja = [m for m in conv.msgs if not m.do_comprador]
+    so_duoke = [
+        linha
         for linha in conv.registro
-        if linha.automacao == aut.codigo and linha.evento_em is not None
+        if linha.estado == ESTADO_SO_DUOKE and linha.evento_em is not None
     ]
-    return sorted(saida)
+    primeiras = [m.em for m in loja if m.tipo_auto == aut.tipo]
+    primeiras += [x.evento_em for x in so_duoke if x.automacao == aut.codigo]
+    segundas = sorted(
+        [m.em for m in loja if m.tipo_auto == TIPO_DUVIDA_2]
+        + [x.evento_em for x in so_duoke if aut.seguinte and x.automacao == aut.seguinte]
+    )
+    saida: list[tuple[datetime, datetime | None]] = [
+        (t - antes_da_1a, next((x for x in segundas if t < x <= t + ciclo), None))
+        for t in primeiras
+    ]
+    seguintes = {
+        linha.chave: linha
+        for linha in conv.registro
+        if aut.seguinte and linha.automacao == aut.seguinte
+    }
+    saida += [
+        (linha.evento_em, _fim_do_ciclo_nosso(linha, seguintes.get(linha.chave)))
+        for linha in conv.registro
+        if linha.automacao == aut.codigo
+        and linha.evento_em is not None
+        and linha.estado != ESTADO_SO_DUOKE
+    ]
+    return sorted(saida, key=lambda c: c[0])
+
+
+def _no_ciclo(
+    b: Msg,
+    inicio: datetime,
+    fim: datetime | None,
+    ciclo: timedelta,
+    *,
+    recomeca_no_cartao: bool,
+) -> bool:
+    """A mensagem do comprador `b` cai no ciclo aberto em `inicio`?
+
+    Medido no Duoke (Shopee, 30 dias até 06/10): depois que a 2ª (26 h) sai, o
+    próximo CARTÃO de produto do comprador abre outro ciclo — 43 de 43 com o
+    cartão (de 22 min a ~6 dias depois), 0 de 85 só com texto. Texto solto
+    continua no ciclo de `ciclo_dias`.
+    """
+    if not b.em - ciclo <= inicio <= b.em:
+        return False
+    fechou = fim is not None and fim <= b.em
+    return not (recomeca_no_cartao and fechou and b.cartao == "produto")
 
 
 def _duvida(conv: Conversa, aut: Automacao, regra: Any) -> list[Candidato]:
     ciclo = timedelta(days=float(_cond(regra, aut, "ciclo_dias", 7)))
-    ancoras = _ancoras_do_ciclo(conv, aut)
+    recomeca = bool(_cond(regra, aut, "recomeca_no_cartao_depois_da_segunda", False))
+    antes = _atraso(regra, aut) + _FOLGA_DA_1A if recomeca else timedelta(0)
+    ciclos = _ciclos_da_duvida(conv, aut, ciclo, antes_da_1a=antes)
     compradores = [m for m in conv.msgs if m.do_comprador]
     saida: list[Candidato] = []
     for i, b in enumerate(compradores):
-        if any(b.em - ciclo <= a <= b.em for a in ancoras):
+        if any(
+            _no_ciclo(b, inicio, fim, ciclo, recomeca_no_cartao=recomeca) for inicio, fim in ciclos
+        ):
             continue
-        ancoras = sorted([*ancoras, b.em])
+        ciclos.append((b.em, None))
         if aut.plataforma == "tiktok":
             # Conta da ÚLTIMA mensagem do ciclo: a linha agendada anda junto.
             fim_ciclo = b.em + ciclo

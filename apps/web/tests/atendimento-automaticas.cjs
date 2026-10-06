@@ -182,13 +182,15 @@ const constPy = (fonte, prefixo) => Object.fromEntries([...fonte.matchAll(new Re
   igual(camposTs('ParteAutomacao'), camposPy('ParteIn'), 'a parte = ParteIn')
   // A CONTA: as colunas do comparador + a mediana + os motivos + o resumo.
   const est = corpoDef(comparar, 'estatisticas')
-  const conta = [
+  const conta = [...new Set([
     ...chavesTopo(dictApos(est, 'colunas = {')),
     'diferenca_mediana_s',
     'atraso_mediana_s',
     'motivos',
     ...chavesTopo(dictApos(corpoDef(comparar, 'resumir'), 'return {')),
-  ]
+    // Os 7 dias de dados (com_os_dias, quando a rota passa `inicios`).
+    ...[...corpoDef(comparar, 'com_os_dias').matchAll(/saida\["([a-z_]+)"\] = /g)].map((m) => m[1]),
+  ])]
   assert.match(est, /contagem\["diferenca_mediana_s"\] = /)
   assert.match(est, /contagem\["atraso_mediana_s"\] = /)
   assert.match(est, /contagem\["motivos"\] = /)
@@ -197,7 +199,19 @@ const constPy = (fonte, prefixo) => Object.fromEntries([...fonte.matchAll(new Re
   assert.match(corpoDef(comparar, 'somar'), /saida\["atraso_mediana_s"\] = /, 'a soma das lojas refaz a mediana do atraso')
   // O critério da troca da loja é sempre de 7 dias (o período da tela muda a conta, não ele).
   assert.match(rota, /^CRITERIO_DIAS = 7$/m)
-  assert.match(listar, /criterio = e7\.get\(\(aut\.codigo, integ\.id\)\) or comparar\.resumir\(\{\}, aut\)/)
+  // ... e 7 dias de DADOS da regra na loja (06/10): a lista, a conta e o PATCH.
+  assert.match(comparar, /^CRITERIO_DIAS = 7$/m)
+  assert.match(listar, /inicios = await comparar\.inicio_dos_dados\(session\)/)
+  assert.equal((listar.match(/inicios=inicios/g) || []).length, 3, 'as três contas da lista com os dias')
+  assert.match(listar, /criterio = e7\.get\(\(aut\.codigo, integ\.id\)\) or comparar\.com_os_dias\(\n\s+comparar\.resumir\(\{\}, aut\), desde=inicios\.get\(\(aut\.codigo, integ\.id\)\), agora=agora\n\s+\)/)
+  const patch = corpoDef(rota, 'mudar_regra')
+  assert.match(patch, /inicios = await comparar\.inicio_dos_dados\(\n\s+session, automacao=aut\.codigo, integration_id=integ\.id\n\s+\)/)
+  assert.match(patch, /inicios=inicios,/)
+  assert.ok(patch.indexOf('_por_que_nao_enviar(aut, canal, chaves())') < patch.indexOf('inicio_dos_dados('), 'o envio desligado recusa antes do critério')
+  assert.match(corpoDef(rota, 'estatisticas'), /inicios=inicios,/, 'a rota da conta também')
+  // O "faltam N dias" da tela = o da API (meio dia arredonda para cima nos dois).
+  assert.match(corpoDef(comparar, 'texto_falta'), /d = max\(1, int\(faltam_h \/ 24 \+ 0\.5\)\)/)
+  assert.match(autSfc.fonte, /const d = Math\.max\(1, Math\.floor\(faltamH \/ 24 \+ 0\.5\)\)/)
   igual(camposTs('ContaAutomacao'), conta, 'a CONTA')
   assert.match(corpoDef(comparar, 'sem_internos'), /if not k\.startswith\("_"\)/)
 
@@ -288,7 +302,8 @@ const MENU = 'Olá, por favor selecione sua dúvida e logo um dos nossos consult
 const conta = (o = {}) => ({
   total: 0, simulado: 0, enviado: 0, pulado: 0, falhou: 0, agendado: 0, pendente: 0, bateu_mandou: 0, bateu_nao_mandou: 0,
   so_davinci: 0, so_davinci_2d: 0, so_duoke: 0, combinada: 0, alertas: 0, texto_invalido: 0, envio_desligado: 0,
-  diferenca_mediana_s: null, atraso_mediana_s: null, motivos: {}, casos: 0, precisao: null, cobertura: null, concordancia: null, pode_trocar: false, por_que_nao: [], ...o,
+  diferenca_mediana_s: null, atraso_mediana_s: null, motivos: {}, casos: 0, precisao: null, cobertura: null, concordancia: null, pode_trocar: false, por_que_nao: [],
+  dados_desde: ISO, dias_de_dados: 8, completa_em: ISO, faltam_h: 0, ...o,
 })
 const regra = (o = {}) => ({
   id: 'r-1', modo: 'simular', padrao: false, partes: [{ tipo: 'texto', texto: MENU }], atraso_min: 1, janela_inicio: null, janela_fim: null,
@@ -299,7 +314,7 @@ const TRAVADO = ['envio_desligado', 'envio_geral_desligado']
 const loja = (o = {}) => ({
   integration_id: 'i-barbosa', loja: 'Barbosa', integracao: 'barbosa', canal_status: 'ok', canal_modo: 'observar', sem_acesso: false,
   duoke_hoje: true, regra: regra(), h24: conta(), periodo: conta(), ultimo: null, pode_enviar: false, por_que_nao_enviar: [...TRAVADO],
-  pode_trocar: false, por_que_nao_trocar: ['poucos casos (0 de 30)'], ...o,
+  pode_trocar: false, por_que_nao_trocar: ['poucos casos (0 de 30)'], dados_desde: ISO, dias_de_dados: 8, completa_em: ISO, faltam_h: 0, ...o,
 })
 const PLACEHOLDERS = { comprador: 'o usuário do comprador na plataforma (some se não houver)' }
 const aut = (o = {}) => ({
@@ -467,7 +482,24 @@ const linhaReg = (o = {}) => ({
   // A troca é por loja: a automação só conta as lojas ligadas prontas.
   assert.deepEqual(A.lojasProntas([loja({ pode_trocar: true }), loja(), loja({ regra: regra({ modo: 'desligado' }), pode_trocar: true })]), { prontas: 1, ligadas: 2 })
   assert.match(A.tituloTroca(loja()), /^Troca nesta loja \(últimos 7 dias\): ainda não — poucos casos \(0 de 30\)$/)
-  assert.match(A.tituloTroca(loja({ pode_trocar: true, por_que_nao_trocar: [] })), /^Pronta para trocar nesta loja/)
+  assert.match(A.tituloTroca(loja({ pode_trocar: true, por_que_nao_trocar: [] })), /^Pronta para trocar nesta loja .*7 dias de dados/)
+  // Os 7 dias de DADOS da regra na loja (06/10): "faltam N dias" no selo e o dia em que completa.
+  assert.equal(A.textoFalta(151), 'faltam 6 dias', '17 h de dados')
+  assert.equal(A.textoFalta(168), 'faltam 7 dias')
+  assert.equal(A.textoFalta(36), 'faltam 2 dias', 'meio dia arredonda para cima')
+  assert.equal(A.textoFalta(30), 'falta 1 dia')
+  assert.equal(A.textoFalta(10), 'faltam 10 h')
+  assert.equal(A.textoFalta(1), 'falta 1 h')
+  const curta = loja({ faltam_h: 151, completa_em: '2026-10-12T17:58:00+00:00', por_que_nao_trocar: ['faltam 6 dias de dados (o critério pede 7 dias; tem 17 h)'] })
+  assert.equal(A.seloTroca(curta), 'troca: faltam 6 dias')
+  assert.equal(A.seloTroca(loja()), 'troca: ainda não', 'com os 7 dias, o que falta são os números')
+  assert.equal(A.seloTroca(loja({ pode_trocar: true, faltam_h: 0 })), 'pronta para trocar')
+  assert.equal(
+    A.tituloTroca(curta, (iso) => `[${iso}]`),
+    'Troca nesta loja (últimos 7 dias): ainda não — faltam 6 dias de dados (o critério pede 7 dias; tem 17 h) (os 7 dias de dados completam [2026-10-12T17:58:00+00:00])',
+  )
+  assert.doesNotMatch(A.tituloTroca(loja(), (iso) => `[${iso}]`), /completam/, 'com os 7 dias, nada de data')
+  assert.match(tela, /:title="tituloTroca\(loja, fmtDataHora\)"\n\s+data-troca-loja\n\s+>\{\{ seloTroca\(loja\) \}\}<\/span>/)
   assert.deepEqual(A.chipsDasChaves(null, 'shopee'), [])
 
   // As {lacunas}.
@@ -1163,6 +1195,17 @@ async function principal() {
     }
     assert.deepEqual(seloDe('i-kfa')[1], 'pronta para trocar')
     assert.equal(seloDe('i-barbosa')[1], 'troca: ainda não')
+    // Os números passam, mas a regra só tem 17 h de dados nesta loja: "faltam 6 dias".
+    srv.gravar('shopee_menu', 'i-kfa', { pode_trocar: false, faltam_h: 151, completa_em: '2026-10-12T17:58:00+00:00', por_que_nao_trocar: ['faltam 6 dias de dados (o critério pede 7 dias; tem 17 h)'] })
+    await m.vm.carregar()
+    html = await render(m)
+    assert.equal(seloDe('i-kfa')[1], 'troca: faltam 6 dias')
+    assert.match(seloDe('i-kfa')[0], /faltam 6 dias de dados \(o critério pede 7 dias; tem 17 h\) \(os 7 dias de dados completam 12\/10/)
+    assert.match(html, /data-troca-automacao[^>]*>0 de 3 lojas prontas para trocar</)
+    srv.gravar('shopee_menu', 'i-kfa', { pode_trocar: true, faltam_h: 0, completa_em: ISO, por_que_nao_trocar: [] })
+    await m.vm.carregar()
+    html = await render(m)
+    assert.deepEqual(seloDe('i-kfa')[1], 'pronta para trocar')
     assert.match(seloDe('i-barbosa')[0], /poucos casos \(25 de 30\); mandaria para quem devolveu/)
     assert.deepEqual(seloDe('i-mini'), [], 'em Enviar não tem selo de troca')
     const a = m.vm.automacoes.value[0]

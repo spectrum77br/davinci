@@ -76,6 +76,7 @@ from app.services.atendimento.constantes import (
 logger = structlog.get_logger()
 
 _R = AtendimentoAutomacaoRegistro
+_G = AtendimentoAutomacaoRegra
 _M = AtendimentoMensagem
 _C = AtendimentoConversa
 
@@ -103,6 +104,9 @@ _SITUACOES_DEVOLUCAO_BLING = cat.SITUACOES_BLING_DEVOLUCAO
 # Critério da troca (proposta; decisão do Eduardo, §6.5 do doc).
 CRITERIO_MINIMO = 0.95
 CRITERIO_CASOS = 30
+# ... e 7 dias de DADOS daquela regra/loja (06/10: a aba mostrava "pode trocar"
+# no "aguarde" da ATV com 17 h de motor — os 30 casos vieram num dia só).
+CRITERIO_DIAS = 7
 
 _ESTADOS_DECIDIDOS = (
     cat.ESTADO_SIMULADO,
@@ -1257,6 +1261,128 @@ def resumir(contagem: dict[str, Any], aut: cat.Automacao | None) -> dict[str, An
     }
 
 
+def dados_desde(
+    *,
+    modo: str | None,
+    ligada_desde: datetime | None,
+    enviar_desde: datetime | None,
+    primeira_linha: datetime | None,
+) -> datetime | None:
+    """Desde quando a regra da loja tem dados no modo de agora. PURA.
+
+    O mais tarde entre a regra ligada (`ligada_desde`; em `enviar`, também
+    `enviar_desde`) e a primeira linha do registro dela (pela `devido_em`, a
+    mesma da conta): ligada com o motor parado não tem dado nenhum, e a regra
+    religada não herda a semana de antes. Desligada, sem regra ou sem linha
+    nenhuma: None.
+    """
+    if modo in (None, cat.MODO_DESLIGADO) or primeira_linha is None:
+        return None
+    marcos = [primeira_linha, ligada_desde]
+    if modo == cat.MODO_ENVIAR:
+        marcos.append(enviar_desde)
+    return max(_utc(x) for x in marcos if x is not None)
+
+
+def _horas(h: int) -> str:
+    return f"{h} h"
+
+
+def _dias(d: int) -> str:
+    return f"{d} dia" if d == 1 else f"{d} dias"
+
+
+def texto_falta(faltam_h: int) -> str:
+    """O que falta: "faltam 6 dias", "falta 1 dia", "faltam 10 h" (como a tela mostra). PURA."""
+    if faltam_h < 24:
+        return f"falta{'' if faltam_h == 1 else 'm'} {_horas(faltam_h)}"
+    d = max(1, int(faltam_h / 24 + 0.5))
+    return f"falta{'' if d == 1 else 'm'} {_dias(d)}"
+
+
+def com_os_dias(
+    criterio: dict[str, Any], *, desde: datetime | None, agora: datetime
+) -> dict[str, Any]:
+    """O critério da troca com os `CRITERIO_DIAS` dias de dados da regra/loja. PURA.
+
+    Acrescenta `dados_desde`, `dias_de_dados`, `completa_em` e `faltam_h` (0 =
+    já tem os 7 dias) e, faltando, o motivo à frente dos outros — `pode_trocar`
+    só com os dias E os números (`resumir`).
+    """
+    agora = _utc(agora)
+    saida = dict(criterio)
+    exigido = timedelta(days=CRITERIO_DIAS)
+    if desde is None:
+        tem = timedelta(0)
+        saida["completa_em"] = None
+    else:
+        desde = _utc(desde)
+        tem = max(timedelta(0), agora - desde)
+        saida["completa_em"] = desde + exigido
+    falta = max(timedelta(0), exigido - tem)
+    faltam_h = int(-(-falta.total_seconds() // 3600))
+    saida["dados_desde"] = desde
+    saida["dias_de_dados"] = round(tem.total_seconds() / 86400, 1)
+    saida["faltam_h"] = faltam_h
+    if faltam_h:
+        if desde is None:
+            motivo = f"sem dados ainda (o critério pede {_dias(CRITERIO_DIAS)})"
+        else:
+            horas = int(tem.total_seconds() // 3600)
+            ja = _horas(horas) if horas < 24 else _dias(int(horas // 24))
+            motivo = (
+                f"{texto_falta(faltam_h)} de dados (o critério pede {_dias(CRITERIO_DIAS)}; "
+                f"tem {ja})"
+            )
+        saida["por_que_nao"] = [motivo, *(saida.get("por_que_nao") or [])]
+        saida["pode_trocar"] = False
+    return saida
+
+
+async def inicio_dos_dados(
+    session: AsyncSession,
+    *,
+    automacao: str | None = None,
+    integration_id: UUID | None = None,
+) -> dict[tuple[str, UUID], datetime | None]:
+    """(automação, loja) → `dados_desde` de cada regra que existe."""
+    filtro_g, filtro_r = [], []
+    if automacao:
+        filtro_g.append(_G.automacao == automacao)
+        filtro_r.append(_R.automacao == automacao)
+    if integration_id:
+        filtro_g.append(_G.integration_id == integration_id)
+        filtro_r.append(_R.integration_id == integration_id)
+    regras = (
+        await session.execute(
+            select(
+                _G.automacao, _G.integration_id, _G.modo, _G.ligada_desde, _G.enviar_desde
+            ).where(*filtro_g)
+        )
+    ).all()
+    if not regras:
+        return {}
+    primeiras = {
+        (codigo, integ): primeira
+        for codigo, integ, primeira in (
+            await session.execute(
+                select(_R.automacao, _R.integration_id, func.min(_R.devido_em))
+                .where(*filtro_r)
+                .group_by(_R.automacao, _R.integration_id)
+            )
+        ).all()
+    }
+    return {
+        (r.automacao, r.integration_id): dados_desde(
+            modo=r.modo,
+            ligada_desde=r.ligada_desde,
+            enviar_desde=r.enviar_desde,
+            primeira_linha=primeiras.get((r.automacao, r.integration_id)),
+        )
+        for r in regras
+    }
+
+
 async def estatisticas(
     session: AsyncSession,
     *,
@@ -1264,8 +1390,13 @@ async def estatisticas(
     ate: datetime,
     automacao: str | None = None,
     integration_id: UUID | None = None,
+    inicios: dict[tuple[str, UUID], datetime | None] | None = None,
 ) -> dict[tuple[str, UUID], dict[str, Any]]:
-    """As contagens por (automação, loja) no período (pela `devido_em`), com a conta pronta."""
+    """As contagens por (automação, loja) no período (pela `devido_em`), com a conta pronta.
+
+    Com `inicios` (`inicio_dos_dados`), o critério da troca de cada par também
+    exige os 7 dias de dados até `ate` (`com_os_dias`).
+    """
     mandam = _R.estado.in_(_ESTADOS_QUE_MANDAM)
     sem_div = _R.divergencia.is_(None)
     so_davinci = and_(mandam, _R.duoke == cat.DUOKE_NAO_MANDOU, sem_div)
@@ -1356,6 +1487,9 @@ async def estatisticas(
         contagem["_atrasos"] = lista_atraso
         contagem["motivos"] = dict(sorted(por_motivo.get(chave, {}).items(), key=lambda kv: -kv[1]))
         contagem.update(resumir(contagem, cat.CATALOGO.get(chave[0])))
+        if inicios is not None:
+            contagem["_agora"] = ate
+            contagem.update(com_os_dias(contagem, desde=inicios.get(chave), agora=ate))
     return saida
 
 
@@ -1382,6 +1516,14 @@ def somar(contagens: list[dict[str, Any]], aut: cat.Automacao | None) -> dict[st
     saida["diferenca_mediana_s"] = int(median(diferencas)) if diferencas else None
     saida["atraso_mediana_s"] = int(median(atrasos)) if atrasos else None
     saida.update(resumir(saida, aut))
+    # Os 7 dias de dados (só com `inicios` na conta das lojas): a soma vale
+    # desde a loja mais antiga — é só informação, a troca é loja por loja. O
+    # `_agora` (interno) fica nas contas das lojas; a soma vai direto para a
+    # resposta da rota e não o leva.
+    agoras = [c["_agora"] for c in contagens if c.get("_agora") is not None]
+    if agoras:
+        desdes = [c["dados_desde"] for c in contagens if c.get("dados_desde") is not None]
+        saida.update(com_os_dias(saida, desde=min(desdes) if desdes else None, agora=max(agoras)))
     return saida
 
 

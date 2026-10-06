@@ -10,7 +10,9 @@ Esta é a aba "Automáticas" do /atendimento:
         contagens de 24 h e do período (simulado, enviado, pulado por motivo,
         só Duoke), a precisão, a cobertura e a % que bateu, o critério da
         troca DA LOJA (sempre em 7 dias: a troca é loja por loja; o total da
-        automação é só informação) e o estado das chaves do `.env`.
+        automação é só informação) — que também pede 7 dias de DADOS da regra
+        na loja (`dados_desde`, `faltam_h`: a tela mostra "faltam N dias") —
+        e o estado das chaves do `.env`.
   GET   /api/atendimento/automacoes/registro?automacao=&integration_id=&estado=
         &duoke=&so=&limite=&antes=
         As linhas do registro, as mais novas primeiro. SEM TEXTO NENHUM —
@@ -28,10 +30,12 @@ Esta é a aba "Automáticas" do /atendimento:
         (`so_simulacao`, também na regra que já estivesse em `enviar`: qualquer
         mudança nela tem de levá-la para simular ou desligado); e pede (422)
         a confirmação "desliguei no Duoke" e, se o critério da troca não
-        passou NESTA loja em 7 dias, a confirmação de que a pessoa sabe disso
-        (`troca_sem_criterio`). O texto passa no validador (422 com os
-        motivos). Sobe a versão, carimba `ligada_desde`/`enviar_desde` e, na
-        troca `simular → enviar`, rearma as linhas ainda válidas.
+        passou NESTA loja em 7 dias (com os 7 dias de dados da regra nela), a
+        confirmação de que a pessoa sabe disso (`troca_sem_criterio`). A chave
+        de envio desligada recusa (409) antes de tudo isso. O texto passa no
+        validador (422 com os motivos). Sobe a versão, carimba
+        `ligada_desde`/`enviar_desde` e, na troca `simular → enviar`, rearma
+        as linhas ainda válidas.
   POST  /api/atendimento/automacoes/{automacao}/simular-nas-lojas-do-duoke
         Cria em `simular` a regra ausente e liga a `desligado` nas lojas onde
         o Duoke manda hoje. NUNCA mexe em regra em `simular` ou `enviar`.
@@ -90,7 +94,9 @@ _G = AtendimentoAutomacaoRegra
 # O nome de exemplo da prévia e da validação do texto na tela.
 NOME_EXEMPLO = "maria.silva"
 LIMITE_REGISTRO = 500
-# O critério da troca é medido sempre nos últimos 7 dias, por loja (§6.5).
+# O critério da troca é medido sempre nos últimos 7 dias, por loja (§6.5) — e
+# pede 7 dias de dados da regra na loja (`automacoes_comparar.com_os_dias`,
+# `automacoes_comparar.CRITERIO_DIAS`).
 CRITERIO_DIAS = 7
 
 
@@ -315,14 +321,20 @@ async def listar_automacoes(
         if ids
         else {}
     )
-    e24 = await comparar.estatisticas(session, desde=agora - timedelta(hours=24), ate=agora)
-    eper = await comparar.estatisticas(session, desde=agora - timedelta(days=dias), ate=agora)
+    # O critério também exige os 7 dias de DADOS de cada regra/loja (`com_os_dias`).
+    inicios = await comparar.inicio_dos_dados(session)
+    e24 = await comparar.estatisticas(
+        session, desde=agora - timedelta(hours=24), ate=agora, inicios=inicios
+    )
+    eper = await comparar.estatisticas(
+        session, desde=agora - timedelta(days=dias), ate=agora, inicios=inicios
+    )
     # O critério da troca é da LOJA, sempre em 7 dias (o período da tela muda a conta, não ele).
     e7 = (
         eper
         if dias == CRITERIO_DIAS
         else await comparar.estatisticas(
-            session, desde=agora - timedelta(days=CRITERIO_DIAS), ate=agora
+            session, desde=agora - timedelta(days=CRITERIO_DIAS), ate=agora, inicios=inicios
         )
     )
     ultimos = (
@@ -359,7 +371,9 @@ async def listar_automacoes(
             if per:
                 per_lista.append(per)
             motivos = _por_que_nao_enviar(aut, canal, ch)
-            criterio = e7.get((aut.codigo, integ.id)) or comparar.resumir({}, aut)
+            criterio = e7.get((aut.codigo, integ.id)) or comparar.com_os_dias(
+                comparar.resumir({}, aut), desde=inicios.get((aut.codigo, integ.id)), agora=agora
+            )
             linhas_lojas.append(
                 {
                     "integration_id": integ.id,
@@ -377,6 +391,11 @@ async def listar_automacoes(
                     "por_que_nao_enviar": motivos,
                     "pode_trocar": bool(criterio["pode_trocar"]),
                     "por_que_nao_trocar": list(criterio["por_que_nao"]),
+                    # Os 7 dias de dados da regra nesta loja ("faltam N dias" na tela).
+                    "dados_desde": criterio["dados_desde"],
+                    "dias_de_dados": criterio["dias_de_dados"],
+                    "completa_em": criterio["completa_em"],
+                    "faltam_h": criterio["faltam_h"],
                 }
             )
         saida.append(
@@ -529,8 +548,16 @@ async def estatisticas(
     agora = datetime.now(UTC)
     desde = agora - timedelta(days=dias)
     scope = await resolve_team_scope(session, user)
+    inicios = await comparar.inicio_dos_dados(
+        session, automacao=automacao, integration_id=integration_id
+    )
     por_par = await comparar.estatisticas(
-        session, desde=desde, ate=agora, automacao=automacao, integration_id=integration_id
+        session,
+        desde=desde,
+        ate=agora,
+        automacao=automacao,
+        integration_id=integration_id,
+        inicios=inicios,
     )
     por_par = {k: v for k, v in por_par.items() if _no_escopo(scope, k[1])}
     integs = {k[1] for k in por_par}
@@ -772,15 +799,22 @@ async def mudar_regra(
                     "detail": "Marque que desligou esta automação desta loja no Duoke.",
                 },
             )
-        # A troca é LOJA por loja: o critério desta loja nos últimos 7 dias.
+        # A troca é LOJA por loja: o critério desta loja nos últimos 7 dias,
+        # com os 7 dias de dados da regra nela (`com_os_dias`).
+        inicios = await comparar.inicio_dos_dados(
+            session, automacao=aut.codigo, integration_id=integ.id
+        )
         conta = await comparar.estatisticas(
             session,
             desde=agora - timedelta(days=CRITERIO_DIAS),
             ate=agora,
             automacao=aut.codigo,
             integration_id=integ.id,
+            inicios=inicios,
         )
-        criterio = conta.get((aut.codigo, integ.id)) or comparar.resumir({}, aut)
+        criterio = conta.get((aut.codigo, integ.id)) or comparar.com_os_dias(
+            comparar.resumir({}, aut), desde=inicios.get((aut.codigo, integ.id)), agora=agora
+        )
         if not criterio["pode_trocar"] and not body.troca_sem_criterio:
             raise HTTPException(
                 422,

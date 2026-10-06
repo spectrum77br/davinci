@@ -89,6 +89,11 @@ export interface ContaAutomacao {
   concordancia: number | null
   pode_trocar: boolean
   por_que_nao: string[]
+  // Os 7 dias de DADOS da regra (automacoes_comparar.com_os_dias): na lista vêm sempre.
+  dados_desde?: string | null
+  dias_de_dados?: number
+  completa_em?: string | null
+  faltam_h?: number
 }
 export interface ParteAutomacao {
   tipo: 'texto' | 'cartao_pedido' | 'figurinha' | 'resposta_publica'
@@ -136,6 +141,12 @@ export interface LojaAutomacao {
   por_que_nao_enviar: string[]
   pode_trocar: boolean
   por_que_nao_trocar: string[]
+  // O critério também pede 7 dias de dados da regra nesta loja: desde quando
+  // há dados, quantos dias, quando completa e quantas horas faltam (0 = completou).
+  dados_desde: string | null
+  dias_de_dados: number
+  completa_em: string | null
+  faltam_h: number
 }
 // = _aut_out + os totais e as lojas
 export interface Automacao {
@@ -396,6 +407,7 @@ export const CONDICOES: Record<string, { label: string; unidade?: string; hint?:
   so_quem_nunca_comprou: { label: 'Só para quem nunca comprou na loja' },
   nao_se_pessoa_respondeu: { label: 'Não mandar se alguém da equipe já respondeu' },
   so_com_cartao_de_produto: { label: 'Só se o comprador mandou o cartão de um produto' },
+  recomeca_no_cartao_depois_da_segunda: { label: 'Depois da de 26 h, o próximo cartão de produto abre outro ciclo', hint: 'como o Duoke (medido em 06/10): texto solto continua no ciclo de 7 dias' },
   so_sem_avaliacao: { label: 'Só se o comprador ainda não avaliou' },
   so_com_conversa: { label: 'Só se já houver conversa com o comprador' },
   um_por_comprador_h: { label: 'Um por comprador a cada', unidade: 'h', hint: 'como o Duoke: quem já recebeu um nas últimas 24 h não recebe outro (o Duoke manda de novo a partir de ~27 h)' },
@@ -561,7 +573,7 @@ export function tituloConta(c: ContaAutomacao | null | undefined, tipo: string, 
   if (top.length) linhas.push(`Não mandaria por: ${top.map(([m, n]) => `${motivos[m] || m} (${n})`).join('; ')}`)
   // A troca vale pelo critério da LOJA nos últimos 7 dias (o selo da linha);
   // aqui é o critério aplicado ao período escolhido, só para ler.
-  linhas.push(c.pode_trocar ? `Critério em ${periodo}: passa (≥ 95%, 30 casos, sem alerta) — a troca vale pelos últimos 7 dias de cada loja` : `Critério em ${periodo}: ainda não — ${(c.por_que_nao || []).join('; ')}`)
+  linhas.push(c.pode_trocar ? `Critério em ${periodo}: passa (≥ 95%, 30 casos, 7 dias de dados, sem alerta) — a troca vale pelos últimos 7 dias de cada loja` : `Critério em ${periodo}: ainda não — ${(c.por_que_nao || []).join('; ')}`)
   return linhas.join('\n')
 }
 
@@ -613,10 +625,21 @@ export function lojasProntas(lojas: Pick<LojaAutomacao, 'regra' | 'pode_trocar'>
   const ligadas = lojas.filter((l) => l.regra.modo !== 'desligado')
   return { prontas: ligadas.filter((l) => l.pode_trocar).length, ligadas: ligadas.length }
 }
-export function tituloTroca(loja: Pick<LojaAutomacao, 'pode_trocar' | 'por_que_nao_trocar'>): string {
-  return loja.pode_trocar
-    ? 'Pronta para trocar nesta loja pelo critério dos últimos 7 dias (≥ 95% em 30 casos, sem alerta; nas opções, a cobertura)'
-    : `Troca nesta loja (últimos 7 dias): ainda não — ${(loja.por_que_nao_trocar || []).join('; ') || 'sem conta'}`
+// O que falta dos 7 dias de dados (= automacoes_comparar.texto_falta).
+export function textoFalta(faltamH: number): string {
+  if (faltamH < 24) return `falta${faltamH === 1 ? '' : 'm'} ${faltamH} h`
+  const d = Math.max(1, Math.floor(faltamH / 24 + 0.5))
+  return `falta${d === 1 ? '' : 'm'} ${d} ${d === 1 ? 'dia' : 'dias'}`
+}
+// O selo da troca na linha da loja: "faltam N dias" enquanto não houver os 7 dias de dados.
+export function seloTroca(loja: Pick<LojaAutomacao, 'pode_trocar' | 'faltam_h'>): string {
+  if (loja.pode_trocar) return 'pronta para trocar'
+  return loja.faltam_h > 0 ? `troca: ${textoFalta(loja.faltam_h)}` : 'troca: ainda não'
+}
+export function tituloTroca(loja: Pick<LojaAutomacao, 'pode_trocar' | 'por_que_nao_trocar'> & Partial<Pick<LojaAutomacao, 'faltam_h' | 'completa_em'>>, fmt: (iso: string) => string = (iso) => iso): string {
+  if (loja.pode_trocar) return 'Pronta para trocar nesta loja pelo critério dos últimos 7 dias (≥ 95% em 30 casos e 7 dias de dados, sem alerta; nas opções, a cobertura)'
+  const completa = loja.faltam_h && loja.completa_em ? ` (os 7 dias de dados completam ${fmt(loja.completa_em)})` : ''
+  return `Troca nesta loja (últimos 7 dias): ainda não — ${(loja.por_que_nao_trocar || []).join('; ') || 'sem conta'}${completa}`
 }
 // O botão "Simular nas lojas do Duoke" só tem o que fazer nas desligadas de lá.
 export function faltaSimularNoDuoke(lojas: Pick<LojaAutomacao, 'duoke_hoje' | 'regra'>[]): number {
@@ -1595,9 +1618,9 @@ onMounted(() => {
                     v-if="loja.regra.modo === 'simular'"
                     class="rounded px-1 py-px text-[10px]"
                     :class="loja.pode_trocar ? CLS_TROCA_PRONTA : 'bg-muted text-muted-foreground'"
-                    :title="tituloTroca(loja)"
+                    :title="tituloTroca(loja, fmtDataHora)"
                     data-troca-loja
-                  >{{ loja.pode_trocar ? 'pronta para trocar' : 'troca: ainda não' }}</span>
+                  >{{ seloTroca(loja) }}</span>
                 </div>
               </div>
               <div class="col-span-3 flex items-center gap-1 md:col-span-1">

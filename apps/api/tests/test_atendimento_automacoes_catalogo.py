@@ -531,6 +531,179 @@ def test_duvida_conta_da_1a_mensagem_do_ciclo_de_7_dias():
     assert _cands(_conv([b1], ["shopee_duvida_2h"], registro=[linha])) == []
 
 
+def _duoke_duvida(tipo, minutos):
+    return _m(autor="sistema", origem="sistema", minutos=minutos, texto=DUOKE[(tipo, None)])
+
+
+def _cartao(minutos, mid):
+    return _m(minutos=minutos, mid=mid, texto="[Produto]", payload={"message_type": "item"})
+
+
+def test_duvida_da_shopee_recomeca_no_cartao_depois_da_26h_do_duoke():
+    """Medido no Duoke (06/10): depois da 26 h, o próximo cartão de produto abre outro ciclo.
+
+    O cartão que o Duoke respondeu (2 h antes da 1ª dele) é do ciclo dele — não
+    abre um de 7 dias por conta própria —, o texto solto depois da 26 h não
+    recomeça, e o cartão depois da 26 h recomeça, contando 2 h dele.
+    """
+    gatilho = _cartao(-28 * 60, "b0")
+    d1 = _duoke_duvida(cat.TIPO_DUVIDA_1, -26 * 60)
+    d2 = _duoke_duvida(cat.TIPO_DUVIDA_2, -2 * 60)
+    texto = _m(minutos=-60, mid="b1")
+    cartao = _cartao(0, "b2")
+    desde = T0 - timedelta(minutes=90)
+    cs = _cands(_conv([gatilho, d1, d2, texto, cartao], ["shopee_duvida_2h"], desde=desde))
+    assert [(c.chave, c.devido_em) for c in cs] == [("conversa:c1:msg:b2", T0 + timedelta(hours=2))]
+    # Só texto depois da 26 h: nada (o ciclo de 7 dias continua).
+    assert _cands(_conv([gatilho, d1, d2, texto], ["shopee_duvida_2h"], desde=desde)) == []
+    # Sem a 26 h (o Duoke não mandou a 2ª): o cartão fica no ciclo de 7 dias.
+    assert _cands(_conv([gatilho, d1, texto, cartao], ["shopee_duvida_2h"], desde=desde)) == []
+    # O cartão ANTES da 26 h sair também fica no ciclo.
+    cedo = _cartao(-3 * 60, "b3")
+    assert _cands(_conv([gatilho, d1, cedo, d2], ["shopee_duvida_2h"], desde=desde)) == []
+    # A condição desligada na regra: volta o ciclo de 7 dias.
+    conv = _conv([gatilho, d1, d2, texto, cartao], ["shopee_duvida_2h"], desde=desde)
+    conv.ativas["shopee_duvida_2h"] = _regra(
+        "shopee_duvida_2h", recomeca_no_cartao_depois_da_segunda=False
+    )
+    assert _cands(conv) == []
+
+
+def test_duvida_da_shopee_o_ciclo_nosso_termina_quando_a_26h_sai():
+    """Modo seco: o ciclo é o das NOSSAS linhas — fecha na hora da 26 h que JÁ saiu."""
+    cartao = _cartao(0, "b2")
+    texto = _m(minutos=5, mid="b4")
+    um = cat.Linha(
+        "shopee_duvida_2h", "simulado", "conversa:c1:msg:b0", T0 - timedelta(hours=28), T0
+    )
+
+    def seguinte(estado, devido):
+        return cat.Linha("shopee_duvida_26h", estado, "conversa:c1:msg:b0", um.evento_em, devido)
+
+    def cands(*registro):
+        return _cands(_conv([cartao, texto], ["shopee_duvida_2h"], registro=list(registro)))
+
+    # A 26 h saiu 1 h antes do cartão: outro ciclo (a 2 h conta do cartão; o texto fica nele).
+    for estado in ("simulado", "enviado", "enviando", "revisar"):
+        cs = cands(um, seguinte(estado, T0 - timedelta(hours=1)))
+        assert [(c.chave, c.devido_em) for c in cs] == [
+            ("conversa:c1:msg:b2", T0 + timedelta(hours=2))
+        ], estado
+    # Agendada para depois do cartão (ainda não saiu): o ciclo continua.
+    assert cands(um, seguinte("agendado", T0 + timedelta(minutes=30))) == []
+    # Agendada e já vencida, mas ainda não decidida: também não fecha (a decisão
+    # pode pular — teto, atrasado, regra desligada). A rodada seguinte, com a 26 h
+    # decidida, revê o cartão (a descoberta relê 40 min; teste no motor).
+    assert cands(um, seguinte("agendado", T0 - timedelta(minutes=1))) == []
+    # A 26 h pulada (ou que falhou, ou nenhuma: a 2 h pulada) não fecha o ciclo: 7 dias.
+    for estado in ("pulado", "falhou"):
+        assert cands(um, seguinte(estado, T0 - timedelta(hours=1))) == [], estado
+    assert cands(um) == []
+    # Depois dos 7 dias, qualquer mensagem abre outro (como antes).
+    velha = cat.Linha(
+        "shopee_duvida_2h", "pulado", "conversa:c1:msg:b9", T0 - timedelta(days=8), T0
+    )
+    assert [c.chave for c in cands(velha)] == ["conversa:c1:msg:b2"]
+
+
+def test_duvida_da_shopee_a_26h_simulada_nao_fecha_o_ciclo_da_1a_enviada():
+    """Revisão de 06/10: a 2 h em `enviar` e a 26 h em `simular` (a 2 h deve passar no
+    critério antes). O comprador recebeu a 1ª e NÃO recebeu a 2ª: a 26 h simulada
+    não fecha o ciclo, e o cartão depois dela não ganha outra 1ª (seria "Ficou
+    alguma dúvida?" a cada ~26 h sem a 2ª no meio). A 26 h enviada fecha; a 1ª
+    simulada com a 26 h enviada (a 26 h trocada antes) também."""
+    cartao = _cartao(0, "b2")
+    chave = "conversa:c1:msg:b0"
+    evento = T0 - timedelta(hours=28)
+
+    def cands(estado_1a, estado_2a):
+        registro = [
+            cat.Linha("shopee_duvida_2h", estado_1a, chave, evento, evento + timedelta(hours=2)),
+            cat.Linha("shopee_duvida_26h", estado_2a, chave, evento, T0 - timedelta(hours=1)),
+        ]
+        return [c.chave for c in _cands(_conv([cartao], ["shopee_duvida_2h"], registro=registro))]
+
+    for estado_1a in ("enviado", "enviando", "revisar"):
+        assert cands(estado_1a, "simulado") == [], estado_1a
+        assert cands(estado_1a, "enviado") == ["conversa:c1:msg:b2"], estado_1a
+    assert cands("simulado", "simulado") == ["conversa:c1:msg:b2"]
+    assert cands("simulado", "enviado") == ["conversa:c1:msg:b2"]
+
+    # Com as nossas mensagens que voltaram pela leitura (`davinci_auto`), o mesmo:
+    # a 1ª enviada sem a 2ª de verdade segura o cartão; com a 2ª enviada, recomeça.
+    def nossa(codigo, texto, minutos):
+        m = _m(
+            autor="loja",
+            origem=cat.ORIGEM_AUTO,
+            minutos=minutos,
+            texto=texto,
+            payload={"automacao": {"codigo": codigo}},
+        )
+        assert m.nossa == codigo
+        return m
+
+    d1 = nossa("shopee_duvida_2h", cat.TEXTO_DUVIDA_1, -26 * 60)
+    d2 = nossa("shopee_duvida_26h", cat.TEXTO_DUVIDA_2, -60)
+
+    def com_msgs(msgs, estado_2a):
+        registro = [
+            cat.Linha("shopee_duvida_2h", "enviado", chave, evento, evento + timedelta(hours=2)),
+            cat.Linha("shopee_duvida_26h", estado_2a, chave, evento, T0 - timedelta(hours=1)),
+        ]
+        conv = _conv([*msgs, cartao], ["shopee_duvida_2h"], registro=registro)
+        return [c.chave for c in _cands(conv)]
+
+    assert com_msgs([d1], "simulado") == []
+    assert com_msgs([d1, d2], "enviado") == ["conversa:c1:msg:b2"]
+
+
+def test_duvida_da_shopee_o_so_duoke_conta_como_a_do_duoke():
+    """No modo seco a mensagem do Duoke sai do estado e fica a linha "só Duoke" do
+    comparador: a 1ª dela abre o ciclo (com o gatilho de 2 h antes) e a 2ª fecha."""
+    gatilho = _cartao(-28 * 60, "b0")
+    cartao = _cartao(0, "b2")
+
+    def so_duoke(codigo, horas, mid):
+        em = T0 - timedelta(hours=horas)
+        return cat.Linha(codigo, "so_duoke", f"duoke:{mid}", em, em)
+
+    um = so_duoke("shopee_duvida_2h", 26, "d1")
+    dois = so_duoke("shopee_duvida_26h", 2, "d2")
+    desde = T0 - timedelta(minutes=90)
+
+    def cands(*registro):
+        conv = _conv([gatilho, cartao], ["shopee_duvida_2h"], registro=list(registro), desde=desde)
+        return [(c.chave, c.devido_em) for c in _cands(conv)]
+
+    assert cands(um, dois) == [("conversa:c1:msg:b2", T0 + timedelta(hours=2))]
+    assert cands(um) == [], "sem a 2ª do Duoke, o ciclo de 7 dias continua"
+    # A 2ª de OUTRO ciclo (antes da 1ª) não fecha este (o gatilho aqui é texto).
+    texto = _m(minutos=-28 * 60, mid="b0")
+    antiga = so_duoke("shopee_duvida_26h", 30, "d0")
+    conv = _conv([texto, cartao], ["shopee_duvida_2h"], registro=[um, antiga], desde=desde)
+    assert _cands(conv) == []
+    conv = _conv([texto, cartao], ["shopee_duvida_2h"], registro=[um, dois], desde=desde)
+    assert [c.chave for c in _cands(conv)] == ["conversa:c1:msg:b2"]
+
+
+def test_duvida_do_tiktok_continua_no_ciclo_de_7_dias():
+    """No TikTok o recomeço não se confirmou (2 casos em 2 meses: 1 recomeçou, 1 não)."""
+    assert "recomeca_no_cartao_depois_da_segunda" not in cat.CATALOGO["tiktok_duvida_2h"].condicoes
+    cartao = _m(minutos=0, mid="b2", texto="[Produto]", payload={"type": "PRODUCT_CARD"})
+    um = cat.Linha(
+        "tiktok_duvida_2h", "simulado", "conversa:c1:ciclo:b0", T0 - timedelta(hours=28), T0
+    )
+    dois = cat.Linha(
+        "tiktok_duvida_24h",
+        "simulado",
+        "conversa:c1:ciclo:b0",
+        um.evento_em,
+        T0 - timedelta(hours=1),
+    )
+    conv = _conv([cartao], ["tiktok_duvida_2h"], plataforma="tiktok", registro=[um, dois])
+    assert _cands(conv) == []
+
+
 def test_duvida_do_tiktok_anda_com_a_ultima_mensagem():
     b1 = _m(minutos=0, mid="b1")
     b2 = _m(minutos=50, mid="b2")

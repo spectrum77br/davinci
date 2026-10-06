@@ -652,6 +652,67 @@ async def test_a_seguinte_nasce_no_horario_da_regra_dela(db, proibido):
     assert seguinte.devido_em == datetime(2026, 10, 7, 12, 0, tzinfo=UTC)
 
 
+@pytest.mark.parametrize("modo_26h", ["simular", "desligado"], ids=["a_26h_sai", "a_26h_pulada"])
+async def test_duvida_o_cartao_antes_de_decidir_a_26h(db, proibido, modo_26h):
+    """Revisão de 06/10: a rodada descobre ANTES de decidir. O cartão que chega
+    entre o `devido` da 26 h e a decisão dela não abre outro ciclo com a 26 h
+    ainda agendada (a decisão pode pular: aqui, a regra desligada). A rodada
+    seguinte relê os 40 min: com a 26 h que saiu, o cartão abre o ciclo novo
+    (2 h depois DELE); com a 26 h pulada, não — sem duas 1ªs sem a 2ª no meio."""
+    dono = await _dono(db)
+    integ, canal = await _loja(db, dono)
+    regra = await _regra(db, integ, "shopee_duvida_2h")
+    regra_26h = await _regra(db, integ, "shopee_duvida_26h", modo=modo_26h)
+    conversa = await _conversa(db, integ, canal)
+    chave = f"conversa:{conversa.id}:msg:gatilho"
+    evento = T - timedelta(hours=28)
+    await _agendada(
+        db,
+        regra,
+        evento=evento,
+        devido=evento + timedelta(hours=2),
+        conversa=conversa,
+        chave=chave,
+        estado="simulado",
+    )
+    await _agendada(
+        db,
+        regra_26h,
+        evento=evento,
+        devido=T - timedelta(minutes=3),
+        conversa=conversa,
+        chave=chave,
+    )
+    cartao = await _msg(
+        db,
+        conversa,
+        texto="[Produto]",
+        payload={"message_type": "item"},
+        em=T - timedelta(minutes=2),
+        visto=T - timedelta(minutes=1),
+    )
+
+    async def descobrir(agora: datetime) -> list[tuple[str, datetime]]:
+        regras = await automacoes.regras_por_chave(db)
+        await automacoes.descobrir_mensagens(db, regras, agora=agora, motor_desde=DESDE)
+        await db.commit()
+        linhas = await _linhas(db, automacao="shopee_duvida_2h")
+        return [(x.chave, x.devido_em) for x in linhas if x.chave != chave]
+
+    assert await descobrir(T) == [], "a 26 h ainda agendada não fecha o ciclo"
+    await automacoes.decidir_vencidas(db, agora=T, motor_desde=DESDE)
+    [seguinte] = await _linhas(db, automacao="shopee_duvida_26h")
+    if modo_26h == "simular":
+        assert seguinte.estado == "simulado", (seguinte.estado, seguinte.motivo)
+        assert await descobrir(T + timedelta(minutes=1)) == [
+            (f"conversa:{conversa.id}:msg:{cartao.id}", cartao.enviada_em + timedelta(hours=2))
+        ]
+    else:
+        assert (seguinte.estado, seguinte.motivo) == ("pulado", "regra_desligada")
+        assert await descobrir(T + timedelta(minutes=1)) == []
+    assert proibido == []
+
+
 # ── Simular NUNCA chama a plataforma ──────────────────────────────────────
 
 
@@ -1505,6 +1566,84 @@ def test_resumir_precisao_cobertura_e_criterio():
     assert poucos["pode_trocar"] is False
 
 
+def test_criterio_pede_7_dias_de_dados_da_regra_na_loja():
+    """06/10: a aba mostrava "pode trocar" no "aguarde" da ATV com 17 h de motor.
+
+    Os números passam (≥ 95%, ≥ 30 casos), mas sem 7 dias de dados daquela
+    regra na loja não troca — e a tela mostra quanto falta.
+    """
+    aut = cat.CATALOGO["shopee_aguarde"]
+    bom = automacoes_comparar.resumir({"bateu_mandou": 34, "so_duoke": 1}, aut)
+    assert bom["pode_trocar"] is True
+    agora = datetime(2026, 10, 6, 11, 0, tzinfo=UTC)
+    desde = agora - timedelta(hours=17)
+    c = automacoes_comparar.com_os_dias(bom, desde=desde, agora=agora)
+    assert c["pode_trocar"] is False
+    assert c["por_que_nao"] == ["faltam 6 dias de dados (o critério pede 7 dias; tem 17 h)"]
+    assert c["faltam_h"] == 151 and c["dias_de_dados"] == 0.7
+    assert c["dados_desde"] == desde and c["completa_em"] == desde + timedelta(days=7)
+    assert bom["pode_trocar"] is True, "não mexe na conta que recebeu"
+    # Os outros motivos continuam, depois do dos dias.
+    fraco = automacoes_comparar.resumir({"bateu_mandou": 5}, aut)
+    c = automacoes_comparar.com_os_dias(
+        fraco, desde=agora - timedelta(days=3, hours=2), agora=agora
+    )
+    assert c["por_que_nao"] == [
+        "faltam 4 dias de dados (o critério pede 7 dias; tem 3 dias)",
+        "poucos casos (5 de 30)",
+    ]
+    # Com os 7 dias: só os números decidem (e a hora exata conta).
+    c = automacoes_comparar.com_os_dias(bom, desde=agora - timedelta(days=7), agora=agora)
+    assert c["pode_trocar"] is True and c["faltam_h"] == 0 and c["por_que_nao"] == []
+    c = automacoes_comparar.com_os_dias(
+        bom, desde=agora - timedelta(days=7) + timedelta(minutes=1), agora=agora
+    )
+    assert c["pode_trocar"] is False and c["faltam_h"] == 1
+    assert c["por_que_nao"][0] == "falta 1 h de dados (o critério pede 7 dias; tem 6 dias)"
+    # Sem dado nenhum (desligada, sem regra, sem linha): faltam os 7.
+    c = automacoes_comparar.com_os_dias(bom, desde=None, agora=agora)
+    assert c["pode_trocar"] is False and c["faltam_h"] == 168 and c["completa_em"] is None
+    assert c["por_que_nao"][0] == "sem dados ainda (o critério pede 7 dias)"
+    # Desde quando há dados: a regra ligada E a 1ª linha (o mais tarde dos dois).
+    ligada = agora - timedelta(days=9)
+    linha = agora - timedelta(days=2)
+    dd = automacoes_comparar.dados_desde
+    assert dd(modo="simular", ligada_desde=ligada, enviar_desde=None, primeira_linha=linha) == linha
+    assert dd(modo="simular", ligada_desde=linha, enviar_desde=None, primeira_linha=ligada) == linha
+    assert dd(modo="simular", ligada_desde=None, enviar_desde=None, primeira_linha=linha) == linha
+    agora_ = agora - timedelta(hours=1)
+    assert (
+        dd(modo="enviar", ligada_desde=ligada, enviar_desde=agora_, primeira_linha=linha) == agora_
+    )
+    assert (
+        dd(modo="simular", ligada_desde=ligada, enviar_desde=agora_, primeira_linha=linha) == linha
+    )
+    assert dd(modo="simular", ligada_desde=ligada, enviar_desde=None, primeira_linha=None) is None
+    assert dd(modo="desligado", ligada_desde=None, enviar_desde=None, primeira_linha=linha) is None
+    assert dd(modo=None, ligada_desde=None, enviar_desde=None, primeira_linha=linha) is None
+    # O texto do que falta (o mesmo da tela).
+    tf = automacoes_comparar.texto_falta
+    assert [tf(151), tf(168), tf(36), tf(30), tf(10), tf(1)] == [
+        "faltam 6 dias",
+        "faltam 7 dias",
+        "faltam 2 dias",
+        "falta 1 dia",
+        "faltam 10 h",
+        "falta 1 h",
+    ]
+    # A soma das lojas (só informação): desde a loja mais antiga.
+    conta = {"bateu_mandou": 34, "so_duoke": 1, "_agora": agora}
+    conta.update(automacoes_comparar.resumir(conta, aut))
+    loja_a = automacoes_comparar.com_os_dias(conta, desde=agora - timedelta(days=8), agora=agora)
+    loja_b = automacoes_comparar.com_os_dias(conta, desde=agora - timedelta(hours=5), agora=agora)
+    total = automacoes_comparar.somar([loja_a, loja_b], aut)
+    assert total["pode_trocar"] is True and total["faltam_h"] == 0
+    assert not [k for k in total if k.startswith("_")], "a soma vai direto para a resposta"
+    assert total["dados_desde"] == agora - timedelta(days=8)
+    so_b = automacoes_comparar.somar([loja_b], aut)
+    assert so_b["pode_trocar"] is False and so_b["faltam_h"] == 163
+
+
 # ── IA, fila e Histórico ──────────────────────────────────────────────────
 
 
@@ -1751,7 +1890,17 @@ async def test_criterio_da_troca_e_da_loja_em_7_dias(db, client, pessoa, _chaves
     fraca, _ = await _loja(db, pessoa, "kfa")
     agora = datetime.now(UTC)
     for integ, n in ((boa, 40), (fraca, 3)):
-        regra = await _regra(db, integ, "shopee_menu")
+        # Ligada há 8 dias, com dado desde então (a conta é dos últimos 7).
+        regra = await _regra(db, integ, "shopee_menu", ligada_desde=agora - timedelta(days=8))
+        await _agendada(
+            db,
+            regra,
+            evento=agora - timedelta(days=8),
+            devido=agora - timedelta(days=8) + timedelta(minutes=1),
+            estado="simulado",
+            modo="simular",
+            duoke="mandou",
+        )
         for i in range(n):
             await _agendada(
                 db,
@@ -1773,6 +1922,7 @@ async def test_criterio_da_troca_e_da_loja_em_7_dias(db, client, pessoa, _chaves
     )
     assert por_loja["kfa"]["pode_trocar"] is False
     assert por_loja["kfa"]["por_que_nao_trocar"] == ["poucos casos (3 de 30)"]
+    assert por_loja["barbosa"]["faltam_h"] == 0 and por_loja["barbosa"]["dias_de_dados"] >= 7.9
     # A soma das lojas passaria (43 casos) — e não vale para a loja fraca.
     assert menu["total_periodo"]["pode_trocar"] is True
     r = await client.patch(
@@ -1791,6 +1941,98 @@ async def test_criterio_da_troca_e_da_loja_em_7_dias(db, client, pessoa, _chaves
         json={"modo": "enviar", "desliguei_no_duoke": True, "troca_sem_criterio": True},
     )
     assert r.status_code == 200, r.text
+
+
+async def test_lista_e_patch_pedem_7_dias_de_dados_na_loja(db, client, pessoa, _chaves):
+    """06/10: o "pode trocar" aparecia com 17 h de motor (30 casos num dia só).
+
+    Com os números bons, a loja sem 7 dias de dados da regra não troca: a lista
+    diz quanto falta ("faltam 6 dias"), a conta do período e a rota da conta
+    também, e o PATCH para enviar continua recusando pela chave de envio
+    desligada ANTES de tudo; com as chaves, recusa pelo critério (422), e a
+    marcação "sei disso" troca mesmo assim.
+    """
+    integ, _ = await _loja(db, pessoa, "atv")
+    agora = datetime.now(UTC)
+    ligada = agora - timedelta(hours=17, minutes=1)
+    regra = await _regra(db, integ, "shopee_menu", ligada_desde=ligada)
+    # 40 casos, todos batendo, desde a hora em que ligou (a 1ª linha é dela).
+    for i in range(40):
+        devido = ligada + timedelta(minutes=20 * i)
+        await _agendada(
+            db,
+            regra,
+            evento=devido - timedelta(minutes=1),
+            devido=devido,
+            estado="simulado",
+            modo="simular",
+            decidido_em=devido,
+            duoke="mandou",
+        )
+    falta = "faltam 6 dias de dados (o critério pede 7 dias; tem 17 h)"
+    r = await client.get("/api/atendimento/automacoes", params={"plataforma": "shopee"})
+    assert r.status_code == 200, r.text
+    menu = next(a for a in r.json()["automacoes"] if a["codigo"] == "shopee_menu")
+    [loja] = menu["lojas"]
+    assert loja["pode_trocar"] is False and loja["por_que_nao_trocar"] == [falta]
+    assert loja["faltam_h"] == 151 and loja["dias_de_dados"] == 0.7
+    assert datetime.fromisoformat(loja["completa_em"]) == regra.ligada_desde + timedelta(days=7)
+    assert loja["periodo"]["casos"] == 40 and loja["periodo"]["precisao"] == 1.0
+    assert loja["periodo"]["pode_trocar"] is False and loja["periodo"]["faltam_h"] == 151
+    assert menu["total_periodo"]["pode_trocar"] is False
+    # Nenhuma chave interna (`_agora`, `_diferencas`) na resposta.
+    for conta in (menu["total_24h"], menu["total_periodo"], loja["periodo"]):
+        assert not [k for k in conta if k.startswith("_")]
+    r = await client.get("/api/atendimento/automacoes/estatisticas", params={"dias": 7})
+    assert r.status_code == 200, r.text
+    [linha] = [x for x in r.json()["linhas"] if x["automacao"] == "shopee_menu"]
+    assert linha["pode_trocar"] is False and linha["por_que_nao"] == [falta]
+    [soma] = [x for x in r.json()["por_automacao"] if x["automacao"] == "shopee_menu"]
+    assert soma["faltam_h"] == 151 and not [k for k in soma if k.startswith("_")]
+    url = f"/api/atendimento/automacoes/shopee_menu/{integ.id}"
+    # A chave de envio desligada recusa antes do critério (e de tudo).
+    corpo = {"modo": "enviar", "desliguei_no_duoke": True, "troca_sem_criterio": True}
+    for tentativa in ({"modo": "enviar", "desliguei_no_duoke": True}, corpo):
+        r = await client.patch(url, json=tentativa)
+        assert r.status_code == 409 and r.json()["detail"]["code"] == "envio_desligado"
+    _chaves.atendimento_automacoes_envio = True
+    _chaves.atendimento_envio_ativo = True
+    r = await client.patch(url, json={"modo": "enviar", "desliguei_no_duoke": True})
+    assert r.status_code == 422 and r.json()["detail"]["code"] == "criterio_nao_passou"
+    assert r.json()["detail"]["motivos"] == [falta]
+    r = await client.patch(url, json=corpo)
+    assert r.status_code == 200, r.text
+    assert r.json()["regra"]["modo"] == "enviar"
+
+
+async def test_dados_desde_a_regra_ligada_e_a_primeira_linha(db, pessoa):
+    """Religada há 2 dias com linhas de antes: conta da religada. Ligada há 10 dias com o
+    motor parado (a 1ª linha é de ontem): conta da 1ª linha. Desligada ou sem linha: nada."""
+    agora = datetime.now(UTC)
+    religada, _ = await _loja(db, pessoa, "barbosa")
+    parado, _ = await _loja(db, pessoa, "kfa")
+    desligada, _ = await _loja(db, pessoa, "mega")
+    sem_linha, _ = await _loja(db, pessoa, "vita")
+    casos = (
+        (religada, agora - timedelta(days=2), agora - timedelta(days=10), "simular"),
+        (parado, agora - timedelta(days=10), agora - timedelta(days=1), "simular"),
+        (desligada, None, agora - timedelta(days=10), "desligado"),
+    )
+    for integ, ligada, primeira, modo in casos:
+        regra = await _regra(db, integ, "shopee_menu", modo=modo, ligada_desde=ligada)
+        for dias in (0, 1):
+            em = primeira + timedelta(days=dias)
+            await _agendada(db, regra, evento=em, devido=em, estado="simulado", modo="simular")
+    await _regra(db, sem_linha, "shopee_menu", ligada_desde=agora - timedelta(days=9))
+    inicios = await automacoes_comparar.inicio_dos_dados(db)
+    assert inicios[("shopee_menu", religada.id)] == agora - timedelta(days=2)
+    assert inicios[("shopee_menu", parado.id)] == agora - timedelta(days=1)
+    assert inicios[("shopee_menu", desligada.id)] is None
+    assert inicios[("shopee_menu", sem_linha.id)] is None
+    so_uma = await automacoes_comparar.inicio_dos_dados(
+        db, automacao="shopee_menu", integration_id=parado.id
+    )
+    assert so_uma == {("shopee_menu", parado.id): agora - timedelta(days=1)}
 
 
 async def test_simular_nas_lojas_do_duoke_nunca_mexe_em_enviar(db, client, pessoa):
