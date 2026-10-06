@@ -23,6 +23,7 @@ from app.security.otp import (
     verify_code,
 )
 from app.security.password import dummy_verify, verify_password
+from app.services.app_uranyx import acesso as app_uranyx_acesso
 from app.services.atendimento import acesso as atendimento_acesso
 from app.services.rate_limit import RateLimitError, sliding_window_check
 from app.services.turnstile import verify_turnstile
@@ -396,6 +397,7 @@ async def me(
     # /atendimento: a mesma regra da trava da API (menu e página leem isto).
     if atendimento_acesso.liberado(user):
         extra["atendimento"] = True
-    if extra:
-        return JSONResponse({**out.model_dump(mode="json"), **extra})
-    return out
+    # Módulo App Uranyx (06/10/2026): a mesma regra da trava da API. Vem
+    # SEMPRE, true ou false (contrato conteudo-e-catalogo-v1, seção 6).
+    extra["app_uranyx"] = app_uranyx_acesso.liberado(user)
+    return JSONResponse({**out.model_dump(mode="json"), **extra})

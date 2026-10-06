@@ -19,6 +19,9 @@ export type AuthUser = {
   // /atendimento (30/09/2026): só vem (true) para quem está em
   // ATENDIMENTO_USUARIOS no .env da api (hoje thorfinn e heisenberg).
   atendimento?: boolean
+  // Módulo App Uranyx (06/10/2026): true só para admin que está em
+  // APP_URANYX_USUARIOS no .env da api (hoje thorfinn e heisenberg).
+  app_uranyx?: boolean
 }
 
 export const useAuthStore = defineStore('auth', {

@@ -1,6 +1,7 @@
 from functools import lru_cache
 from pathlib import Path
 
+from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Resolve .env at monorepo root (3 levels up from this file: app/ → api/ → apps/ → root)
@@ -574,6 +575,20 @@ class Settings(BaseSettings):
     # login separados por vírgula, e só entre os admins. Vazio = todo admin.
     # Fica no .env (não no código) para trocar sem deploy de código.
     atendimento_usuarios: str = ""
+
+    # Módulo "App Uranyx" (06/10/2026; contrato `conteudo-e-catalogo-v1.md`,
+    # seção 6, no repositório app-uranyx): o DaVinci repassa /api/app-uranyx/*
+    # para o painel da API do app (`{APP_URANYX_API_URL}/admin/*`) com o token
+    # da equipe, que fica SÓ aqui no servidor — o navegador nunca o vê, e ele
+    # nunca vai para log (SecretStr). Sem URL ou sem token = 503
+    # `app_uranyx_indisponivel`. Dev: http://localhost:8020/api/app/v1.
+    app_uranyx_api_url: str = ""
+    app_uranyx_admin_token: SecretStr = SecretStr("")
+    # Quem vê o módulo: e-mails de login separados por vírgula, só entre os
+    # admins (Eduardo, 06/10/2026: thorfinn e heisenberg). Vazio = módulo
+    # DESLIGADO para todo mundo — ao contrário do ATENDIMENTO_USUARIOS, em que
+    # vazio libera todo admin.
+    app_uranyx_usuarios: str = ""
 
     # Token M2M do executor de IMPORTAÇÃO DE NF (marionete AdsPower da Fase
     # 3a-4). Guarda os /nf-cadastro/agent/* (lease/result). Vazio = endpoints

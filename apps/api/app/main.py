@@ -12,6 +12,7 @@ from app.historico.middleware import HistoricoMiddleware
 from app.redis_client import redis
 from app.routers import adspower_agent as adspower_agent_router
 from app.routers import alerts as alerts_router
+from app.routers import app_uranyx as app_uranyx_router
 from app.routers import aprovar_margem as aprovar_margem_router
 from app.routers import atendimento as atendimento_router
 from app.routers import atendimento_abas as atendimento_abas_router
@@ -143,6 +144,11 @@ _OPENAPI_TAGS = [
         "description": "Caixa única de conversas (Shopee, ML, TikTok, Amazon; Instagram só "
         "leitura) com o rascunho da IA, a etiqueta (status atual), as reclamações da "
         "plataforma e o painel do pedido.",
+    },
+    {
+        "name": "app-uranyx",
+        "description": "Painel do app dos clientes da Uranyx: repasse para a API do app "
+        "(catálogo, manuais, receitas, apps, contas, reclamações e fila do SAC).",
     },
     {"name": "financeiro", "description": "Consórcio, suprimentos (certificações) e simulação de cotações de importação."},
     {"name": "importacao", "description": "Controle de pedidos de importação de malas — SKUs, lotes, resumo financeiro."},
@@ -278,6 +284,9 @@ app.include_router(atendimento_automacoes_router.router)
 # Temu/AliExpress (30/09/2026): o robô do Mac mini manda o que a página do
 # Seller Center recebe (token próprio; vazio = desligado).
 app.include_router(atendimento_robo_router.router)
+# App Uranyx (06/10/2026): o painel do app dos clientes da Uranyx, repassado
+# para a API do app com o token da equipe (só thorfinn e heisenberg).
+app.include_router(app_uranyx_router.router)
 app.include_router(estoque_router.router)
 app.include_router(faturamento_router.router)
 app.include_router(financeiro_router.router)

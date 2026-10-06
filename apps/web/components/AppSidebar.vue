@@ -6,7 +6,7 @@ import {
   Receipt, TrendingUp, Settings, BarChart3,
   ClipboardList, ChevronDown, ChevronLeft, ChevronRight, Warehouse,
   Coins, FileText, Calculator, FlaskConical, Ship, Landmark, Headset,
-  ReceiptText, MessagesSquare, Radar, History, Flag, Inbox, X,
+  ReceiptText, MessagesSquare, Radar, History, Flag, Inbox, Smartphone, X,
 } from 'lucide-vue-next'
 import { allowedTabs, TABS_CADASTROS, TABS_NF, TABS_SISTEMA } from '~/lib/navGroups'
 
@@ -130,6 +130,8 @@ type Item = {
   historicoOnly?: boolean
   // /atendimento: só quem vem com `atendimento: true` no /me (nem todo admin).
   atendimentoOnly?: boolean
+  // /app-uranyx: só quem vem com `app_uranyx: true` no /me (nem todo admin).
+  appUranyxOnly?: boolean
   featureFlag?: 'marketing'
   // Grupo unificado (lib/navGroups): o item destaca quando QUALQUER rota
   // do grupo está ativa, e some quando o usuário não pode ver nenhuma aba.
@@ -192,6 +194,13 @@ const sections = computed<Section[]>(() => [
       // a mesma regra da página e da API; para abrir, volta para
       // `resource: 'atendimento'` (ver useCan.ts).
       { to: '/atendimento', label: 'Atendimento', icon: Inbox, adminOnly: true, atendimentoOnly: true },
+      // App Uranyx (06/10/2026): o app dos clientes (catálogo, manuais,
+      // receitas, contas, fila do SAC). Só quem está em APP_URANYX_USUARIOS
+      // (Eduardo: thorfinn e heisenberg), a mesma regra da página e da API.
+      {
+        to: '/app-uranyx/catalogo', label: 'App Uranyx', icon: Smartphone,
+        adminOnly: true, appUranyxOnly: true, match: ['/app-uranyx'],
+      },
     ],
   },
   {
@@ -295,6 +304,7 @@ const visibleSections = computed(() => {
         if (it.ownerOnly && !isOwner.value) return false
         if (it.historicoOnly && auth.user?.historico !== true) return false
         if (it.atendimentoOnly && auth.user?.atendimento !== true) return false
+        if (it.appUranyxOnly && auth.user?.app_uranyx !== true) return false
         if (it.featureFlag === 'marketing' && !enableMarketing.value) return false
         return true
       }),
