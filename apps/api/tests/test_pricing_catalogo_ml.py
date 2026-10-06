@@ -197,7 +197,9 @@ async def _segmentos(db: AsyncSession) -> dict[str, Any]:
         await db.flush()
         filhos = []
         for i in range(5):
-            f = Segment(name=f"{slug}-{i + 1}", slug=f"{slug}-{i + 1}", sort_order=i, parent_id=raiz.id)
+            f = Segment(
+                name=f"{slug}-{i + 1}", slug=f"{slug}-{i + 1}", sort_order=i, parent_id=raiz.id
+            )
             db.add(f)
             filhos.append(f)
         await db.flush()
@@ -804,8 +806,8 @@ def test_resolvedor_catalogo_bloqueia_sincronizado_pausado_revisao_encerrado(mon
         _lk("FIM", a, cat=True, status="closed"),
         _lk("MORTO", a, cat=True, morto=True),
     ]
-    kw = dict(pricing_sku="a003", dept="celular", plataforma="ml", canal="catalogo",
-              listing_type_conta="classico")
+    kw = {"pricing_sku": "a003", "dept": "celular", "plataforma": "ml", "canal": "catalogo",
+          "listing_type_conta": "classico"}
     res = resolver_anuncios(links, skus, **kw)
     assert res.links == []
     assert {b.link.external_id: b.motivo for b in res.bloqueados} == {
@@ -881,6 +883,17 @@ async def test_update_price_confere_o_canal_no_item_vivo(ml_falso: MLFalso):
     assert ml_falso.puts_de_preco() == [("MLB2", {"price": 120}), ("MLB1", {"price": 99})]
     # Sem canal: comportamento antigo (manda até para o de catálogo).
     assert (await cli.update_price("MLB3", 50.0)).status == SyncStatus.OK
+
+
+@pytest.mark.asyncio
+async def test_flag_d2_desligada_libera_o_sincronizado_no_item_vivo(
+    ml_falso: MLFalso, monkeypatch,
+):
+    ml_falso.item("MLB3", catalog_listing=True, item_relations=[{"id": "MLB1"}])
+    monkeypatch.setattr(anuncios, "CATALOGO_SINCRONIZADO_BLOQUEIA", False)
+    r = await _cliente_ml().update_price("MLB3", 77.0, canal_esperado="catalogo")
+    assert r.status == SyncStatus.OK
+    assert ml_falso.puts_de_preco() == [("MLB3", {"price": 77})]
 
 
 @pytest.mark.asyncio

@@ -43,12 +43,8 @@ import structlog
 from app.config import get_settings
 from app.services.marketplaces import flex_api
 from app.services.marketplaces.base import SyncResult, SyncStatus, TestResult
-from app.services.pricing.anuncios import (
-    CANAL_CATALOGO,
-    CANAL_KIT,
-    CATALOGO_SINCRONIZADO_BLOQUEIA,
-    motivo_por_status,
-)
+from app.services.pricing import anuncios as _anuncios
+from app.services.pricing.anuncios import CANAL_CATALOGO, CANAL_KIT, motivo_por_status
 from app.services.vinculo_saude import norm_sku
 
 if TYPE_CHECKING:
@@ -1672,7 +1668,8 @@ def _conferir_canal_ml(
         for r in item_info.get("item_relations") or []
         if isinstance(r, dict) and r.get("id")
     ]
-    if CATALOGO_SINCRONIZADO_BLOQUEIA and relacionados:
+    # Lida na hora: a flag D2 mora num lugar só (services/pricing/anuncios).
+    if _anuncios.CATALOGO_SINCRONIZADO_BLOQUEIA and relacionados:
         return SyncResult(
             status=SyncStatus.SKIPPED,
             error_code="sincronizado",
