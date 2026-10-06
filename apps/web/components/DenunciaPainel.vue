@@ -288,7 +288,7 @@ defineExpose({ carregar })
       <button type="button" class="text-left rounded-lg" :class="naAnatel === 'fila' ? 'ring-2 ring-primary' : ''" title="filtrar os que estão na fila da Anatel" @click="porCartao('naAnatel', 'fila')">
         <StatCard
           compact label="Na fila da Anatel" :value="numero(n.na_anatel.fila)" tone="warning"
-          :hint="`${numero(n.na_anatel.falta_print)} sem print · ${numero(n.na_anatel.esperando_recusa)} aguardam a loja`"
+          :hint="`${numero(n.na_anatel.falta_print)} sem print`"
         />
       </button>
     </div>

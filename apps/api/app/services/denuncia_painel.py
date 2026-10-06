@@ -7,12 +7,13 @@ dois status, calculados das denúncias que o mini mandou:
 
 - **na loja** (denúncia no marketplace): não denunciado · aguardando · recusou · removido;
 - **na Anatel**: processo aberto (SEI) ou, sem processo, onde ele está no caminho — na fila,
-  falta o print da página, esperando a loja recusar (o Nosso só vai à Anatel depois da
-  recusa, regra de 01/10), falta denunciar na loja — ou nada a fazer (fora do ar).
+  falta o print da página — ou nada a fazer (fora do ar, removido, sem nº declarado).
 
 A fila de verdade é do sistema do mini (/api/v1/denunciar/pendentes); aqui é o retrato
-pela cópia, com as mesmas regras de 01/10: o Diversos vai sem denúncia na loja, o Nosso
-só com a recusa, e todo anúncio precisa do print da página ("Captura no ato").
+pela cópia, com as mesmas regras: o Diversos vai sem denúncia na loja (01/10), o Nosso
+também (06/10 — antes só ia com a recusa da loja; "esperando a loja recusar" e "falta
+denunciar na loja" não aparecem mais), e todo anúncio precisa do print da página
+("Captura no ato").
 
 Funções puras (sem banco) para serem testadas direto.
 """
@@ -108,13 +109,11 @@ def status_anatel(anuncio: dict, dens: list[dict], loja: dict, tem_print: bool) 
         return {"chave": "nada", **extra}
     grupo, hom = anuncio.get("grupo"), (anuncio.get("hom") or "").strip()
     if grupo == "GRUPO 1":
-        # 01/10 (Vinicius): o Nosso só vai à Anatel depois que a loja recusou
+        # 01/10: o Nosso só ia à Anatel depois que a loja recusava. 06/10 (Vinicius): "pode abrir na
+        # Anatel mesmo sem recusa da loja, pois hoje não vamos mais denunciar na loja os nosso" — vai
+        # direto; só o que a loja já removeu fica fora
         if loja["chave"] == "removido":
             return {"chave": "nada", **extra}
-        if loja["chave"] == "nao":
-            return {"chave": "falta_loja", **extra}
-        if loja["chave"] in ("aguardando", "conferindo"):
-            return {"chave": "esperando_recusa", **extra}
     elif grupo == "GRUPO 2":
         # 01/10: o Diversos vai sem denúncia na loja — com nº declarado (ou TikTok sem nº)
         if not hom and anuncio.get("marketplace") != "TikTok Shop":

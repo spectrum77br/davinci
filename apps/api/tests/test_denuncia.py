@@ -721,13 +721,15 @@ def test_painel_status_na_loja_e_na_anatel():
     assert p.status_loja([pend], "GRUPO 2")["chave"] == "vazio"
     assert p.status_loja([conf], "GRUPO 2")["chave"] == "recusou"
     assert p.status_loja([rec], "GRUPO 2")["chave"] == "recusou"   # desfecho continua valendo
-    assert p.status_anatel(nosso, [conf], p.status_loja([conf]), True)["chave"] == "esperando_recusa"
+    # 06/10 (Vinicius): o Nosso vai à Anatel sem esperar a loja recusar (denúncia nas lojas parada desde 03/10)
+    assert p.status_anatel(nosso, [conf], p.status_loja([conf]), True)["chave"] == "fila"
 
     def anatel(a, ds, tem_print=True):
         return p.status_anatel(a, ds, p.status_loja(ds), tem_print)["chave"]
     sei = {"canal": "Anatel SEI", "protocolo": "53500.144118/2026-11", "data": "2026-10-01"}
-    assert anatel(nosso, [pend]) == "esperando_recusa"
-    assert anatel(nosso, []) == "falta_loja"
+    assert anatel(nosso, [pend]) == "fila"
+    assert anatel(nosso, []) == "fila"
+    assert anatel(nosso, [], tem_print=False) == "falta_print"
     assert anatel(nosso, [rec]) == "fila"
     assert anatel(nosso, [rec], tem_print=False) == "falta_print"
     assert anatel(nosso, [rem]) == "nada"
