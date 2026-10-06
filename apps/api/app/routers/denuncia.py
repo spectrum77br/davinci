@@ -1708,7 +1708,20 @@ async def ver_denuncia(
 # que aconteceu — enviado ao advogado = "Com jurídico"; compra entregue = "Produto recebido"; compra
 # feita = "Aguardando produto"; sem compra = "Aberto". "Ajuizado" e "Encerrado" (marcados à mão no
 # sistema do mini) valem como estão. O status gravado lá vai junto em "status_mini".
-def _status_caso(status: str | None, enviado_em: Any, compra: dict | None) -> str:
+# 06/10 (Vinicius: "clicar no status e conseguir trocar"): o escolhido à mão no DaVinci vale por
+# cima — o fato que o robô não vê (compra do TikTok, Shopee diz entregue e não chegou, envio sem
+# registro).
+STATUS_CASO = (
+    "Aberto", "Aguardando produto", "Produto recebido", "Com jurídico", "Ajuizado", "Encerrado",
+)
+_ANTES_DO_JURIDICO = ("Aberto", "Aguardando produto", "Produto recebido")
+
+
+def _status_caso(
+    status: str | None, enviado_em: Any, compra: dict | None, manual: str | None = None
+) -> str:
+    if manual:
+        return manual
     if status in ("Ajuizado", "Encerrado"):
         return status
     if enviado_em:
@@ -1722,13 +1735,21 @@ def _status_caso(status: str | None, enviado_em: Any, compra: dict | None) -> st
 
 def _extra_dict(x: DenunciaCasoExtra | None) -> dict:
     campos = ("compra_data", "compra_loja", "compra_pedido", "compra_previsao", "processo_numero",
-              "processo_link", "mov_data", "mov_texto", "mov_status", "atualizado_por")
+              "processo_link", "mov_data", "mov_texto", "mov_status", "atualizado_por",
+              "status_manual", "status_manual_por", "status_manual_em", "juridico_data")
     if x is None:
         return dict.fromkeys(campos)
     out = {k: getattr(x, k) for k in campos}
-    for k in ("compra_data", "compra_previsao", "mov_data"):
+    for k in ("compra_data", "compra_previsao", "mov_data", "status_manual_em", "juridico_data"):
         out[k] = out[k].isoformat() if out[k] else None
     return out
+
+
+def _enviado_ao_juridico(dados: dict | None, x: DenunciaCasoExtra | None) -> str | None:
+    """Quando o caso foi ao advogado: a data do sistema do mini; sem ela, a digitada no DaVinci."""
+    return (dados or {}).get("juridico_enviado_em") or (
+        x.juridico_data.isoformat() if x is not None and x.juridico_data else None
+    )
 
 
 @router.get("/casos")
@@ -1776,12 +1797,16 @@ async def listar_casos(
             {k: cp.get(k) for k in ("pedido", "status", "valor_pago", "data", "entregue_em", "comprador")}
             if cp else None
         )
+        x = extras.get(c.id)
+        enviado = _enviado_ao_juridico(d, x)
         itens.append(
             {
                 "id": c.id,
                 "codigo": c.codigo,
                 "titulo": d.get("titulo"),
-                "status": _status_caso(c.status, d.get("juridico_enviado_em"), compra),
+                "status": _status_caso(c.status, enviado, compra, x.status_manual if x else None),
+                # o que os fatos dizem — a tela mostra quando alguém trocou à mão
+                "status_auto": _status_caso(c.status, enviado, compra),
                 "status_mini": c.status,
                 "anuncio_id": c.anuncio_id,
                 "loja": loja,
@@ -1789,7 +1814,7 @@ async def listar_casos(
                 "marketplace": mp,
                 "aberto_em": d.get("aberto_em"),
                 "juridico": d.get("juridico"),
-                "juridico_enviado_em": d.get("juridico_enviado_em"),
+                "juridico_enviado_em": enviado,
                 "url": ad.get("url"),
                 "hom": ad.get("hom"),
                 # 02/10: o preço que a varredura leu no anúncio principal (lista de compra)
@@ -1803,7 +1828,7 @@ async def listar_casos(
                 "nosso": grupos.count("GRUPO 1"),
                 "diversos": grupos.count("GRUPO 2"),
                 "compra": compra,
-                "extra": _extra_dict(extras.get(c.id)),
+                "extra": _extra_dict(x),
             }
         )
     por_status: dict[str, int] = {}
@@ -1939,6 +1964,50 @@ async def editar_caso_extra(
     return {"ok": True, "extra": _extra_dict(x)}
 
 
+@router.put("/casos/{caso_id}/status")
+async def trocar_status_caso(
+    caso_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    u: Annotated[User, Depends(_editar)],
+    corpo: Annotated[dict, Body()],
+) -> dict:
+    """06/10 (Vinicius: "clicar no status e conseguir trocar"): o status escolhido à mão vale por
+    cima do automático. Corpo: {status, juridico_data?}; status vazio = volta ao automático.
+    "Com jurídico" precisa da data do envio ao advogado (a do mini, a já digitada ou a do corpo).
+    Status de antes do jurídico apaga a data digitada aqui (o caso não foi ao advogado)."""
+    c = (
+        await session.execute(select(DenunciaCaso).where(DenunciaCaso.id == caso_id))
+    ).scalar_one_or_none()
+    if c is None or c.status == CASO_EXCLUIDO:
+        raise HTTPException(404, detail={"code": "denuncia_caso_nao_encontrado"})
+    novo = str(corpo.get("status") or "").strip() or None
+    if novo is not None and novo not in STATUS_CASO:
+        raise HTTPException(422, detail={"code": "denuncia_status_invalido"})
+    data_txt = str(corpo.get("juridico_data") or "").strip()
+    try:
+        data = datetime.strptime(data_txt[:10], "%Y-%m-%d").date() if data_txt else None
+    except ValueError:
+        raise HTTPException(
+            422, detail={"code": "denuncia_data_invalida", "campo": "juridico_data"}
+        ) from None
+    x = await session.get(DenunciaCasoExtra, caso_id)
+    if x is None:
+        x = DenunciaCasoExtra(caso_id=caso_id)
+        session.add(x)
+    if data is not None:
+        x.juridico_data = data
+    if novo == "Com jurídico" and not _enviado_ao_juridico(c.dados, x):
+        raise HTTPException(422, detail={"code": "denuncia_juridico_sem_data"})
+    if novo in _ANTES_DO_JURIDICO:
+        x.juridico_data = None
+    x.status_manual = novo
+    x.status_manual_por = (u.name or u.email) if novo else None
+    x.status_manual_em = datetime.now(UTC) if novo else None
+    x.atualizado_por = u.name or u.email
+    await session.commit()
+    return {"ok": True, "extra": _extra_dict(x)}
+
+
 @router.get("/casos/{caso_id}")
 async def ver_caso(
     caso_id: int,
@@ -1992,19 +2061,24 @@ async def ver_caso(
              "url": (por_id[i].dados or {}).get("url"), "preco": (por_id[i].dados or {}).get("preco")}
             for i in ids if i in por_id
         ]
+    extra = await session.get(DenunciaCasoExtra, caso_id)
+    # o envio ao advogado digitado no DaVinci (06/10) aparece na ficha como se viesse do mini
+    caso = {**(c.dados or {}), "juridico_enviado_em": _enviado_ao_juridico(c.dados, extra)}
+    compra = {**(compras[-1].dados or {}), "status": compras[-1].status} if compras else None
     return {
-        "caso": c.dados,
+        "caso": caso,
         "anuncios_do_caso": do_caso,
         "anuncio": anuncio.dados if anuncio else None,
         "compras": [x.dados for x in compras],
         "provas": [_prova_resumo(p) for p in provas],
         "denuncias": [d.dados for d in dens],
         "anexos": await _anexos_do_caso(session, caso_id),
-        "extra": _extra_dict(await session.get(DenunciaCasoExtra, caso_id)),
+        "extra": _extra_dict(extra),
         "status_tela": _status_caso(
-            c.status, (c.dados or {}).get("juridico_enviado_em"),
-            {**(compras[-1].dados or {}), "status": compras[-1].status} if compras else None,
+            c.status, caso["juridico_enviado_em"], compra,
+            extra.status_manual if extra else None,
         ),
+        "status_auto": _status_caso(c.status, caso["juridico_enviado_em"], compra),
         "tipos_anexo": [{"chave": k, "nome": v[1]} for k, v in TIPOS_ANEXO.items()],
     }
 

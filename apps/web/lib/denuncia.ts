@@ -157,6 +157,9 @@ export function prazoVencido(prazo: string | null | undefined, situacao: string 
 
 // 01/10: o status do caso na tela sai dos fatos (API _status_caso): Aberto (sem compra) → Aguardando
 // produto → Produto recebido → Com jurídico (enviado ao advogado) → Ajuizado / Encerrado
+// 06/10: dá pra trocar à mão (a mesma lista da API STATUS_CASO) — vale por cima dos fatos
+export const STATUS_CASO = ['Aberto', 'Aguardando produto', 'Produto recebido', 'Com jurídico', 'Ajuizado', 'Encerrado'] as const
+
 export function pillStatusCaso(s: string | null | undefined): string {
   switch (s) {
     case 'Aberto':

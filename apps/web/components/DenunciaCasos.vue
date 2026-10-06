@@ -7,7 +7,7 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { ExternalLink, Trash2 } from 'lucide-vue-next'
 import {
   type FalhaCaso, type Prova, ativoSimNao, dataBr, dinheiro, nomeGrupo, numero, pillAtivo, pillGrupo, pillResultado,
-  pillSituacaoDenuncia, pillStatusCaso, pillStatusCompra,
+  pillSituacaoDenuncia, pillStatusCompra,
 } from '~/lib/denuncia'
 
 
@@ -24,6 +24,8 @@ type Caso = {
   juridico: string | null
   juridico_enviado_em: string | null
   status_mini: string | null
+  // 06/10: o que os fatos dizem quando alguém trocou o status à mão (extra.status_manual)
+  status_auto?: string | null
   url: string | null
   hom: string | null
   // 02/10: preço que a varredura leu no anúncio (e quando)
@@ -58,6 +60,12 @@ type CasoExtra = {
   mov_texto: string | null
   mov_status: string | null
   atualizado_por: string | null
+  // 06/10 (Vinicius: "clicar no status e conseguir trocar"): o status escolhido à mão e a data do
+  // envio ao advogado quando o mini não tem — salvos por PUT …/status, não pelo formulário do extra
+  status_manual?: string | null
+  status_manual_por?: string | null
+  status_manual_em?: string | null
+  juridico_data?: string | null
 }
 type Resposta = { total: number; itens: Caso[]; por_status: Record<string, number>; falhas_caso?: FalhaCaso[] }
 type Anexo = {
@@ -77,6 +85,7 @@ type Detalhe = {
   anuncios_do_caso?: { id: string; titulo: string | null; situacao: string | null; vendas: number | null; grupo: string | null; url: string | null; preco?: number | null }[]
   extra?: CasoExtra
   status_tela?: string
+  status_auto?: string
   anexos?: Anexo[]
   tipos_anexo?: { chave: string; nome: string }[]
   caso: Record<string, any>
@@ -381,6 +390,29 @@ async function salvarCampo(c: Caso, campo: keyof CasoExtra, valor: string) {
   }
 }
 
+// 06/10 (Vinicius: "clicar no status e conseguir trocar… o caso 2 já foi enviado ao jurídico"):
+// o escolhido vale por cima dos fatos; status vazio = volta ao automático. Recarrega a lista (os
+// números do topo mudam) e, se a ficha do caso está aberta, ela também.
+const ERROS_STATUS: Record<string, string> = {
+  denuncia_juridico_sem_data: 'Falta a data do envio ao advogado.',
+  denuncia_status_invalido: 'Status inválido.',
+  denuncia_data_invalida: 'Data inválida.',
+}
+const trocandoStatus = ref<number | null>(null)
+async function trocarStatus(id: number, codigo: string | null, novo: string | null, juridicoData: string | null) {
+  trocandoStatus.value = id
+  try {
+    await api(`/api/denuncia/casos/${id}/status`, { method: 'PUT', body: { status: novo, juridico_data: juridicoData } })
+    await carregar()
+    if (aberto.value === id) detalhe.value = await api<Detalhe>(`/api/denuncia/casos/${id}`)
+  } catch (e: any) {
+    const code = e?.data?.detail?.code
+    erro.value = `${codigo || `#${id}`}: ${ERROS_STATUS[code] || code || e?.message || 'não trocou o status'}`
+  } finally {
+    trocandoStatus.value = null
+  }
+}
+
 const abasCaso = computed(() => [
   { k: 'resumo' as AbaCaso, t: 'Resumo' },
   { k: 'juridico' as AbaCaso, t: faltam.value.length ? `Jurídico (falta ${faltam.value.length})` : 'Jurídico' },
@@ -529,8 +561,17 @@ defineExpose({ carregar })
               <span v-else-if="c.grupo" :class="pillGrupo(c.grupo)">{{ nomeGrupo(c.grupo) }}</span>
               <span v-else class="text-muted-foreground">—</span>
             </td>
-            <td class="!px-2 text-center">
-              <span class="whitespace-nowrap !px-2.5 !text-xs" :class="pillStatusCaso(c.status)" :title="c.status_mini && c.status_mini !== c.status ? `no sistema do mini: ${c.status_mini}` : ''">{{ c.status || '—' }}</span>
+            <td class="!px-2 text-center" @click.stop>
+              <DenunciaStatusCaso
+                :status="c.status"
+                :auto="c.status_auto"
+                :manual-por="c.extra.status_manual ? c.extra.status_manual_por : null"
+                :manual-em="c.extra.status_manual_em"
+                :juridico-em="c.juridico_enviado_em"
+                :editavel="podeAnexar"
+                :salvando="trocandoStatus === c.id"
+                @trocar="(s, d) => trocarStatus(c.id, c.codigo, s, d)"
+              />
             </td>
             <td class="!px-0 text-center" @click.stop>
               <button
@@ -668,7 +709,18 @@ defineExpose({ carregar })
         <div class="grid grid-cols-2 sm:grid-cols-4 gap-2">
           <div class="rounded-lg border px-3 py-2 space-y-1 min-w-0">
             <div class="text-[10px] uppercase tracking-wider text-muted-foreground">Status</div>
-            <span :class="pillStatusCaso(detalhe.status_tela || k.status)">{{ detalhe.status_tela || k.status || '—' }}</span>
+            <div>
+              <DenunciaStatusCaso
+                :status="detalhe.status_tela || k.status || null"
+                :auto="detalhe.status_auto"
+                :manual-por="detalhe.extra?.status_manual ? detalhe.extra.status_manual_por : null"
+                :manual-em="detalhe.extra?.status_manual_em"
+                :juridico-em="k.juridico_enviado_em"
+                :editavel="podeAnexar"
+                :salvando="trocandoStatus === aberto"
+                @trocar="(s, d) => aberto !== null && trocarStatus(aberto, k.codigo, s, d)"
+              />
+            </div>
           </div>
           <div class="rounded-lg border px-3 py-2 space-y-1 min-w-0">
             <div class="text-[10px] uppercase tracking-wider text-muted-foreground">Compra de prova</div>

@@ -223,6 +223,12 @@ class DenunciaCasoExtra(Base):
     mov_data: Mapped[date | None] = mapped_column(Date)
     mov_texto: Mapped[str | None] = mapped_column(Text)
     mov_status: Mapped[str | None] = mapped_column(Text)
+    # 06/10 (Vinicius: "clicar no status e conseguir trocar"): o status escolhido à mão vale por
+    # cima do que sai dos fatos; juridico_data = envio ao advogado quando o mini não tem a data
+    status_manual: Mapped[str | None] = mapped_column(Text)
+    status_manual_por: Mapped[str | None] = mapped_column(Text)
+    status_manual_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    juridico_data: Mapped[date | None] = mapped_column(Date)
     atualizado_por: Mapped[str | None] = mapped_column(Text)
     atualizado_em: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False

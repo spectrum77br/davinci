@@ -877,6 +877,48 @@ async def test_caso_extra_compra_e_processo(client, make_user, auth_as):
     assert (await client.put("/api/denuncia/casos/99/extra", json={})).status_code == 404
 
 
+async def test_caso_status_trocado_a_mao(client, make_user, auth_as):
+    """06/10 (Vinicius: "clicar no status e conseguir trocar… o caso 2 já foi enviado ao jurídico"):
+    o escolhido à mão vale por cima do automático; "Com jurídico" pede a data do envio."""
+    await _carga(client)
+    auth_as(await make_user(permissions={"denuncia": {"view": True, "edit": True}}))
+
+    async def caso7():
+        return (await client.get("/api/denuncia/casos")).json()["itens"][0]
+
+    assert (await caso7())["status"] == "Produto recebido"
+    # Com jurídico sem data (o mini não tem) → pede a data
+    r = await client.put("/api/denuncia/casos/7/status", json={"status": "Com jurídico"})
+    assert r.status_code == 422 and r.json()["detail"]["code"] == "denuncia_juridico_sem_data"
+    r = await client.put("/api/denuncia/casos/7/status", json={"status": "Com jurídico", "juridico_data": "2026-09-15"})
+    assert r.status_code == 200, r.text
+    c = await caso7()
+    assert (c["status"], c["status_auto"], c["juridico_enviado_em"]) == ("Com jurídico", "Com jurídico", "2026-09-15")
+    assert c["extra"]["status_manual"] == "Com jurídico" and c["extra"]["status_manual_por"]
+    d = (await client.get("/api/denuncia/casos/7")).json()
+    assert d["status_tela"] == "Com jurídico" and d["caso"]["juridico_enviado_em"] == "2026-09-15"
+    assert d["status_auto"] == "Com jurídico"
+    # voltar ao automático: a data do envio é fato, segue "Com jurídico"
+    r = await client.put("/api/denuncia/casos/7/status", json={"status": None})
+    assert r.json()["extra"]["status_manual"] is None
+    assert (await caso7())["status"] == "Com jurídico"
+    # status de antes do jurídico vale por cima e apaga a data digitada aqui
+    r = await client.put("/api/denuncia/casos/7/status", json={"status": "Aguardando produto"})
+    c = await caso7()
+    assert (c["status"], c["status_auto"], c["juridico_enviado_em"]) == ("Aguardando produto", "Produto recebido", None)
+    j = (await client.get("/api/denuncia/casos")).json()
+    assert j["por_status"] == {"Aguardando produto": 1}
+    d = (await client.get("/api/denuncia/casos/7")).json()
+    assert (d["status_tela"], d["status_auto"]) == ("Aguardando produto", "Produto recebido")
+    assert (await client.put("/api/denuncia/casos/7/status", json={"status": "Qualquer"})).status_code == 422
+    assert (await client.put("/api/denuncia/casos/7/status",
+                             json={"status": "Com jurídico", "juridico_data": "15/09"})).status_code == 422
+    assert (await client.put("/api/denuncia/casos/99/status", json={"status": "Aberto"})).status_code == 404
+    # quem só vê não troca
+    auth_as(await make_user(permissions={"denuncia": {"view": True}}))
+    assert (await client.put("/api/denuncia/casos/7/status", json={"status": "Aberto"})).status_code == 403
+
+
 Y = {"lojas": [{"marketplace": "Shopee", "shop_id": "222"}]}
 
 
