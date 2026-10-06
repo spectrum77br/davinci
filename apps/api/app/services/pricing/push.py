@@ -656,6 +656,8 @@ async def push_one(
     first_variation: str | None = None
     last_error_code: str | None = None
     last_error_detail: str | None = None
+    # "MLBx (motivo)" de cada anúncio pulado — para o detalhe do all_skipped.
+    pulados_txt: list[str] = []
     resultados = await enviar_preco_para_links(
         client,
         integration.platform,
@@ -710,6 +712,7 @@ async def push_one(
                 first_variation = link.variation_id
         elif result.status == SyncStatus.SKIPPED:
             skipped_count += 1
+            pulados_txt.append(f"{link.external_id} ({result.error_code or 'pulado'})")
         else:
             fail_count += 1
             last_error_code = result.error_code or result.status.value
@@ -745,7 +748,9 @@ async def push_one(
         # the UI can show it differently from an error.
         agg_ok = False
         agg_code = "all_skipped"
-        agg_detail = f"{skipped_count} anúncio(s) pulado(s) (encerrado/moderação)"
+        # O motivo de cada um (encerrado, moderação, canal_errado…) — antes
+        # dizia sempre "encerrado/moderação".
+        agg_detail = f"{skipped_count} anúncio(s) pulado(s): " + ", ".join(pulados_txt)
         post_status = CellStatus.AUTO
     else:
         agg_ok = False

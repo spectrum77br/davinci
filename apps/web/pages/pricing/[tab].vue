@@ -2033,7 +2033,9 @@ async function pushCell(c: GridCell) {
     lastPushResults.value = r.results
     const okItems = r.results.filter((x) => x.ok)
     const failItems = r.results.filter((x) => !x.ok)
-    const bloqItems = failItems.filter((x) => ehCodigoBloqueio(x.code))
+    // all_skipped = nenhum anúncio recebeu (encerrado, moderação, anúncio de
+    // outro canal no ML): aviso, não erro — igual ao "Enviar todas".
+    const bloqItems = failItems.filter((x) => ehCodigoBloqueio(x.code) || x.code === 'all_skipped')
     if (failItems.length === 0) {
       const priceTxt = okItems[0]?.price ? ` — R$ ${Number(okItems[0].price).toFixed(0)}` : ''
       toast.success(`Preço enviado${priceTxt}`, `${okItems.length} variação(ões) ok`)

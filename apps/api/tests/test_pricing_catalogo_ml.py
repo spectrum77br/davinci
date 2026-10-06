@@ -1188,6 +1188,8 @@ async def test_envio_kit_pula_anuncio_que_virou_catalogo_no_ml(
     ml_falso.item("MLB101", catalog_listing=True)
     out = await _push(client, cenario["base"].id, cenario["a003"].id)
     assert (out["ok"], out["code"]) == (False, "all_skipped")
+    # O detalhe diz qual anúncio pulou e por quê (não "encerrado/moderação").
+    assert "MLB101 (canal_errado)" in out["detail"], out
     assert ml_falso.puts_de_preco() == []
 
     await db.execute(
