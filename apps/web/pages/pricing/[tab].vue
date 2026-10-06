@@ -285,6 +285,8 @@ type Account = {
   // do cálculo — por isso a tela sempre lê esses números da base.
   canal?: 'kit' | 'catalogo'
   conta_base_id?: string | null
+  // Na conta de kit: id da coluna de catálogo dela (catálogo ligado), ou null.
+  conta_catalogo_id?: string | null
 }
 
 // Global toast feedback for push / auto-match outcomes. Rendered by
@@ -372,7 +374,7 @@ const catalogoPorBase = computed(() => {
 })
 
 function catalogoAtivo(acc: Account): boolean {
-  return catalogoPorBase.value.has(acc.id)
+  return catalogoPorBase.value.has(acc.id) || !!acc.conta_catalogo_id
 }
 
 // O Catálogo ML só existe em conta de kit do Mercado Livre.
@@ -935,7 +937,7 @@ async function alternarCatalogo(acc: Account) {
     flash(acc.id, 'catalogo')
     toast.success(
       ativo ? 'Catálogo ML ligado' : 'Catálogo ML desligado',
-      ativo ? `${acc.name}: coluna nova no grupo ML Catálogo da Tabela de Preços` : acc.name,
+      `${acc.name}${acc.listing_type ? ` (${acc.listing_type})` : ''}${ativo ? ': coluna nova no grupo ML Catálogo da Tabela de Preços' : ''}`,
     )
   } catch (e: any) {
     const d = e?.data?.detail
@@ -3248,12 +3250,11 @@ watch(department, async () => {
               >
                 <select
                   v-if="acc.platform === 'mercadolivre' && canEditContas"
-                  class="text-xs border rounded px-1 py-0.5 bg-background cursor-pointer disabled:cursor-not-allowed disabled:opacity-60"
+                  class="text-xs border rounded px-1 py-0.5 bg-background cursor-pointer"
                   :class="acc.listing_type ? '' : 'text-muted-foreground'"
                   :value="acc.listing_type || ''"
-                  :disabled="catalogoAtivo(acc)"
                   :title="catalogoAtivo(acc)
-                    ? 'Desligue o Catálogo ML desta conta antes de trocar o tipo (a coluna de catálogo usa o mesmo tipo)'
+                    ? 'Tipo do anúncio ML desta conta — a coluna de catálogo dela acompanha (sem tipo, ela fica bloqueada)'
                     : 'Tipo do anúncio ML desta conta'"
                   @change="definirTipoMl(acc, ($event.target as HTMLSelectElement).value)"
                 >
