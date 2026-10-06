@@ -14,12 +14,17 @@ Brasília — fechar 00:07 e mandar na hora acordaria todo mundo).
 - Quem recebe: cadastro `denuncia_relatorio` do Informar (botão "Quem recebe o relatório" em
   Robô › Ocorrências; a migração 0373 já deixa Cairo, harry potter e Roma). Sem ninguém salvo,
   não manda e não carimba (quem for cadastrado ainda no dia recebe).
-- Threema só leva texto (o gateway simples não manda arquivo): a mensagem traz os números e o
-  link do relatório com o Excel no DaVinci. O Roma não tem login — pra ele vale o texto.
+- Mensagem CURTA (06/10, depois do 1º envio: "muito grande… coloca só o resumo pequeno e manda o
+  Excel"): o resumo geral em 5 linhas + o link do Excel. O gateway do Threema daqui é o básico (só
+  texto, não manda arquivo), então o Excel vai como LINK QUE BAIXA DIRETO, sem login (escolha dele:
+  o Roma não tem login) — assinado com o jwt_secret, vale só pra aquele dia e por 7 dias
+  (`link_excel` / `confere_excel`; rota GET /api/denuncia/relatorios/{dia}/excel/link).
 """
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
@@ -30,23 +35,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.models import DenunciaRelatorio, ThreemaInformarConfig
 from app.services import threema
-from app.services.denuncia_relatorio import montar
 from app.services.denuncia_robo import FUSO
 
 logger = structlog.get_logger()
 
 CONTEXTO = "denuncia_relatorio"
 HORA_ENVIO = 7  # Brasília
-MAX_OCORRENCIAS = 6
+VALE_LINK = timedelta(days=7)
 _DIA_SEMANA = ("seg", "ter", "qua", "qui", "sex", "sáb", "dom")
-_SITE_CURTO = {"Mercado Livre": "ML", "TikTok Shop": "TikTok"}
-_SITUACAO = (
-    ("Em tratamento", "na fiscalização"),
-    ("Respondida — analisar", "Anatel respondeu"),
-    ("Exigência", "pede complemento"),
-    ("Recebida", "recebido(s)"),
-    ("Enviada", "enviado(s)"),
-)
 
 
 def _n(v: Any) -> int:
@@ -56,106 +52,61 @@ def _n(v: Any) -> int:
         return 0
 
 
-def _por_site(por_site: dict, chaves: tuple[str, ...]) -> str:
-    """'Shopee 58 · ML 40 · TikTok 4' — maior primeiro, sem os zerados."""
+# ─────────────────────────────────────────────── link do Excel (sem login)
+
+
+def _assinatura(dia: date, ate: int) -> str:
+    chave = get_settings().jwt_secret.encode()
+    msg = f"denuncia-relatorio-excel:{dia.isoformat()}:{ate}".encode()
+    return hmac.new(chave, msg, hashlib.sha256).hexdigest()[:32]
+
+
+def token_excel(dia: date, agora: datetime) -> str:
+    ate = int((agora + VALE_LINK).timestamp())
+    return f"{ate}.{_assinatura(dia, ate)}"
+
+
+def confere_excel(dia: date, token: str, agora: datetime) -> bool:
+    """Token daquele dia, assinado aqui e ainda no prazo."""
+    ate_txt, _, assinatura = (token or "").partition(".")
+    if not ate_txt.isdigit() or not assinatura:
+        return False
+    if int(ate_txt) < agora.timestamp():
+        return False
+    return hmac.compare_digest(assinatura, _assinatura(dia, int(ate_txt)))
+
+
+def link_excel(dia: date, agora: datetime) -> str:
+    base = (get_settings().app_url or "").rstrip("/")
+    return (
+        f"{base}/api/denuncia/relatorios/{dia.isoformat()}/excel/link?t={token_excel(dia, agora)}"
+    )
+
+
+# ─────────────────────────────────────────────── mensagem
+
+
+def texto(dia: date, numeros: dict, link: str) -> str:
+    """Resumo geral do dia (os números da gaveta do relatório) + o link do Excel."""
+    n = numeros or {}
+    anatel = n.get("anatel") or {}
+    resp = (n.get("respostas") or {}).get("por_site") or {}
     tot = {
-        _SITE_CURTO.get(s, s): sum(_n((v or {}).get(k)) for k in chaves)
-        for s, v in (por_site or {}).items()
-    }
-    return " · ".join(f"{s} {q}" for s, q in sorted(tot.items(), key=lambda x: -x[1]) if q)
-
-
-def _grupos(por_site: dict) -> tuple[int, int]:
-    nosso = sum(_n((v or {}).get("Nosso")) for v in (por_site or {}).values())
-    outros = sum(
-        _n((v or {}).get("Diversos")) + _n((v or {}).get("Outros"))
-        for v in (por_site or {}).values()
-    )
-    return nosso, outros
-
-
-def texto(rel: dict, link: str) -> str:
-    """A mensagem: os números do dia (mesmos da gaveta do relatório) + o link."""
-    dia = date.fromisoformat(rel["dia"])
-    n = rel.get("numeros") or {}
-    achou, den = n.get("achou") or {}, n.get("denunciou") or {}
-    anatel, resp = n.get("anatel") or {}, n.get("respostas") or {}
-    conf, prints = n.get("conferidos") or {}, n.get("prints") or {}
-    linhas = [f"📊 Robô de Denúncia — relatório de {_DIA_SEMANA[dia.weekday()]} {dia:%d/%m}", ""]
-
-    nosso, outros = _grupos(achou.get("por_site") or {})
-    linhas.append(
-        f"🔎 Achou {_n(achou.get('total'))} anúncio(s) novo(s) (Nosso {nosso} · Diversos {outros})"
-    )
-    if s := _por_site(achou.get("por_site") or {}, ("Nosso", "Diversos", "Outros")):
-        linhas.append(f"   {s}")
-
-    extra = []
-    if _n(den.get("replicas")):
-        extra.append(f"{_n(den['replicas'])} réplica(s)")
-    if _n(den.get("de_novo")):
-        extra.append(f"{_n(den['de_novo'])} de novo")
-    linhas.append(
-        f"📣 Denunciou {_n(den.get('total'))} nas lojas"
-        + (f" ({' · '.join(extra)})" if extra else "")
-    )
-    if s := _por_site(den.get("por_site") or {}, ("Nosso", "Diversos", "Outros")):
-        linhas.append(f"   {s}")
-
-    linhas.append(
-        f"🏛️ Anatel: {_n(anatel.get('lojas'))} loja(s) peticionada(s) no SEI "
-        f"({_n(anatel.get('anuncios'))} anúncio(s))"
-    )
-    situ = anatel.get("situacao") or {}
-    if any(_n(situ.get(k)) for k, _ in _SITUACAO):
-        linhas.append(
-            "   processos: "
-            + " · ".join(f"{_n(situ.get(k))} {nome}" for k, nome in _SITUACAO if _n(situ.get(k)))
-        )
-    if _n(len(anatel.get("movimentos") or [])):
-        linhas.append(f"   {len(anatel['movimentos'])} processo(s) andaram na Anatel no dia")
-
-    tot = {
-        k: sum(_n((v or {}).get(k)) for v in (resp.get("por_site") or {}).values())
+        k: sum(_n((v or {}).get(k)) for v in resp.values())
         for k in ("removidos", "recusados", "sem_resposta")
     }
-    linhas.append(
-        f"📬 Respostas das lojas: {_n(resp.get('total'))} — ✅ removidos {tot['removidos']} · "
-        f"❌ recusados {tot['recusados']} · ⏳ sem resposta {tot['sem_resposta']}"
+    return "\n".join(
+        [
+            f"📊 Relatório geral do robô de Denúncia — {_DIA_SEMANA[dia.weekday()]} {dia:%d/%m}",
+            f"• {_n((n.get('achou') or {}).get('total'))} anúncios novos",
+            f"• {_n((n.get('denunciou') or {}).get('total'))} denúncias nas lojas",
+            f"• {_n(anatel.get('lojas'))} lojas na Anatel ({_n(anatel.get('anuncios'))} anúncios)",
+            f"• Respostas: {tot['removidos']} removidos · {tot['recusados']} recusados · "
+            f"{tot['sem_resposta']} sem resposta",
+            f"• {_n((n.get('sairam') or {}).get('total'))} saíram do ar",
+            f"📎 Excel: {link}",
+        ]
     )
-    linhas.append(
-        f"🗑️ Saíram do ar: {_n((n.get('sairam') or {}).get('total'))} "
-        f"({_n(conf.get('anuncios'))} conferido(s))"
-    )
-    linhas.append(
-        f"📸 Prints: {_n(prints.get('capturas'))} ({_n(prints.get('anuncios'))} anúncio(s))"
-    )
-
-    passos = rel.get("passos") or []
-    erros = sorted({p["nome"] for p in passos if p.get("situacao") == "erro" and p.get("nome")})
-    linhas.append("")
-    linhas.append(f"⚙️ Passos: {len(passos)} rodada(s)" + ("" if erros else " · nenhum erro"))
-    if erros:
-        linhas.append(f"   com erro: {', '.join(erros)}")
-    pessoa = [o for o in rel.get("ocorrencias") or [] if o.get("tipo") == "pessoa"]
-    # "… das 13:00 não começou" aparece uma vez por horário: vira uma linha só
-    atrasos = [o for o in pessoa if "não começou" in str(o.get("titulo") or "")]
-    outras = [o for o in pessoa if o not in atrasos]
-    if pessoa:
-        linhas.append(f"⚠️ Precisou de alguém: {len(pessoa)}")
-        for o in outras[:MAX_OCORRENCIAS]:
-            vezes = f" ({o['vezes']}x)" if _n(o.get("vezes")) > 1 else ""
-            linhas.append(f"   • {str(o.get('titulo') or '').strip()[:110]}{vezes}")
-        if len(outras) > MAX_OCORRENCIAS:
-            linhas.append(f"   … e mais {len(outras) - MAX_OCORRENCIAS}")
-        if atrasos:
-            linhas.append(f"   • {len(atrasos)} horário(s) da agenda não começaram na hora")
-    if buracos := rel.get("sem_noticia") or []:
-        linhas.append(f"📵 Mac mini sem notícia {len(buracos)} vez(es)")
-    if not rel.get("anotado"):
-        linhas.append("(sem anotação dos passos neste dia — só os números)")
-    linhas += ["", f"Relatório completo e Excel: {link}"]
-    return "\n".join(linhas)
 
 
 async def destinatarios(session: AsyncSession) -> list[str]:
@@ -188,9 +139,7 @@ async def enviar_pendente(session: AsyncSession, agora: datetime | None = None) 
             "denuncia_relatorio_threema_sem_destino", dia=ontem.isoformat(), motivo=motivo
         )
         return {"enviado": False, "motivo": motivo}
-    base = (get_settings().app_url or "").rstrip("/")
-    link = f"{base}/denuncia?aba=robo&relatorio={ontem.isoformat()}"
-    msg = texto(montar(ontem, row.numeros, row, agora), link)
+    msg = texto(ontem, row.numeros, link_excel(ontem, agora))
     try:
         r = await client.send_to_all(msg, alvos)
     except threema.ThreemaConfigError as e:

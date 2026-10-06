@@ -864,6 +864,30 @@ async def relatorio_excel(
     )
 
 
+@router.get("/relatorios/{dia}/excel/link")
+async def relatorio_excel_link(
+    dia: date,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    t: str = "",
+) -> StreamingResponse:
+    """06/10 (Vinicius): o Excel do link que vai no Threema — baixa SEM login (o Roma não tem),
+    só com o token assinado daquele dia, que vale 7 dias (services/denuncia_relatorio_threema)."""
+    from app.services.denuncia_relatorio_threema import confere_excel
+
+    agora = datetime.now(UTC)
+    if not confere_excel(dia, t, agora):
+        raise HTTPException(403, detail={"code": "denuncia_relatorio_link_invalido"})
+    rel = await relatorio_dia.relatorio(session, _dia_valido(dia), agora)
+    await session.commit()
+    return StreamingResponse(
+        relatorio_dia.excel(rel),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": f'attachment; filename="robo-denuncia-{dia.isoformat()}.xlsx"'
+        },
+    )
+
+
 @router.post("/relatorios/{dia}/lido")
 async def relatorio_lido(
     dia: date,

@@ -100,30 +100,46 @@ async def _cadastro(db, ids: str = "M5TT27JA,9BH6R7HJ,VBS64V3S") -> None:
     await db.commit()
 
 
-async def test_texto_tem_os_numeros_do_dia(db):
-    from app.services.denuncia_relatorio import montar
+async def test_texto_curto_com_o_link_do_excel():
+    """06/10, depois do 1º envio: "muito grande… coloca só o resumo pequeno e manda o Excel"."""
+    msg = rt.texto(ONTEM, NUMEROS, "https://app/x.xlsx")
+    assert msg == (
+        "📊 Relatório geral do robô de Denúncia — seg 05/10\n"
+        "• 28 anúncios novos\n"
+        "• 102 denúncias nas lojas\n"
+        "• 47 lojas na Anatel (121 anúncios)\n"
+        "• Respostas: 3 removidos · 91 recusados · 77 sem resposta\n"
+        "• 3 saíram do ar\n"
+        "📎 Excel: https://app/x.xlsx"
+    )
 
+
+async def test_link_do_excel_so_daquele_dia_e_por_7_dias():
+    link = rt.link_excel(ONTEM, AS_7H07)
+    assert "/api/denuncia/relatorios/2026-10-05/excel/link?t=" in link
+    t = link.split("t=", 1)[1]
+    assert rt.confere_excel(ONTEM, t, AS_7H07)
+    assert rt.confere_excel(ONTEM, t, datetime(2026, 10, 12, 12, 0, tzinfo=UTC))   # 6 dias depois
+    assert not rt.confere_excel(ONTEM, t, datetime(2026, 10, 13, 11, 0, tzinfo=UTC))  # venceu
+    assert not rt.confere_excel(date(2026, 10, 4), t, AS_7H07)   # token de outro dia
+    ate, _, assina = t.partition(".")
+    assert not rt.confere_excel(ONTEM, f"{int(ate) + 999}.{assina}", AS_7H07)   # prazo mexido
+    assert not rt.confere_excel(ONTEM, "", AS_7H07)
+    assert not rt.confere_excel(ONTEM, "abc", AS_7H07)
+
+
+async def test_excel_pelo_link_baixa_sem_login(db, client, auth_as):
     await _dia(db)
-    row = await db.get(DenunciaRelatorio, ONTEM)
-    msg = rt.texto(montar(ONTEM, row.numeros, row, AS_7H07), "https://app/denuncia?aba=robo&relatorio=2026-10-05")
-    assert msg.startswith("📊 Robô de Denúncia — relatório de seg 05/10")
-    assert "Achou 28 anúncio(s) novo(s) (Nosso 7 · Diversos 21)" in msg
-    assert "ML 18 · TikTok 6 · Amazon 3 · Shopee 1" in msg
-    assert "Denunciou 102 nas lojas (54 réplica(s))" in msg
-    assert "Shopee 58 · ML 40 · TikTok 4" in msg
-    assert "Anatel: 47 loja(s) peticionada(s) no SEI (121 anúncio(s))" in msg
-    assert "81 na fiscalização" in msg and "153 enviado(s)" in msg
-    assert "removidos 3 · ❌ recusados 91 · ⏳ sem resposta 77" in msg
-    assert "Saíram do ar: 3 (652 conferido(s))" in msg
-    assert "Prints: 652 (373 anúncio(s))" in msg
-    assert "com erro: Checagem antes da rodada" in msg
-    # ocorrência de pessoa agrupada por título; aviso não entra
-    assert "Precisou de alguém: 3" in msg and "Captcha da Shopee no perfil 50 (2x)" in msg
-    assert "recuperação automática" not in msg
-    # "… das 12:00 não começou" (um por horário) vira uma linha só
-    assert "não começou" not in msg and "2 horário(s) da agenda não começaram na hora" in msg
-    assert msg.endswith("Relatório completo e Excel: https://app/denuncia?aba=robo&relatorio=2026-10-05")
-    assert len(msg.encode()) < 3500   # limite do send_simple
+    auth_as(None)
+    t = rt.token_excel(ONTEM, datetime.now(UTC))
+    r = await client.get(f"/api/denuncia/relatorios/2026-10-05/excel/link?t={t}")
+    assert r.status_code == 200, r.text
+    assert r.headers["content-type"].startswith("application/vnd.openxmlformats")
+    assert r.content[:2] == b"PK"   # xlsx é um zip
+    assert (await client.get("/api/denuncia/relatorios/2026-10-05/excel/link?t=1.x")).status_code == 403
+    assert (await client.get("/api/denuncia/relatorios/2026-10-05/excel/link")).status_code == 403
+    # o Excel normal continua pedindo login
+    assert (await client.get("/api/denuncia/relatorios/2026-10-05/excel")).status_code in (401, 403)
 
 
 async def test_manda_o_de_ontem_uma_vez_a_partir_das_7h(db, enviados):
@@ -136,7 +152,7 @@ async def test_manda_o_de_ontem_uma_vez_a_partir_das_7h(db, enviados):
     assert r["enviado"] and r["dia"] == "2026-10-05"
     texto, alvos = enviados[0]
     assert alvos == ["M5TT27JA", "9BH6R7HJ", "VBS64V3S"]
-    assert "relatorio=2026-10-05" in texto
+    assert "/api/denuncia/relatorios/2026-10-05/excel/link?t=" in texto
     assert (await db.get(DenunciaRelatorio, ONTEM)).threema_enviado_em is not None
     # a hora seguinte (e um restart) não manda de novo
     r = await rt.enviar_pendente(db, datetime(2026, 10, 6, 11, 7, tzinfo=UTC))
