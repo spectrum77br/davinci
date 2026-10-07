@@ -6,6 +6,7 @@
 //     | foto arq.png | clicar "texto exato" | ponto X Y
 //     | campos | escrever "campo" "texto" [enter] | anexar "campo" tmp/a.jpg[,tmp/b.jpg]
 //     | captcha | tecla Enter | vivo | js "expr"
+//   ferramentas/tela - entrada | encolher "arquivo" [720|540|480] | apagar "arquivo"
 //
 // Abre o perfil se estiver fechado (quem chama FECHA no fim: adspower.py fechar).
 // A aba escolhida fica em tmp/.aba-<perfil>. Coordenadas em px CSS (print ÷ 2).
@@ -211,6 +212,52 @@ if (!perfil || !cmd) {
   process.exit(1);
 }
 
+// 07/10 (290968): o Cairo deixou o vídeo da expedição (101 MB, .MOV) numa pasta
+// que ele criou e a IA não alcançava — o `anexar` só aceitava tmp/, que a rodada
+// apaga. Agora a pasta de entrada vale também, e há 3 comandos sem navegador
+// (perfil "-"): `entrada` lista, `encolher` faz cópia menor em tmp/ (avconvert do
+// macOS) se a plataforma recusar o tamanho, `apagar` tira o arquivo da entrada
+// depois de enviado (pedido do Cairo: "subir o vídeo e depois excluir").
+const ENTRADA = "fotos e videos subir chamado";
+const dentro = (a, pasta) => path.resolve(a).startsWith(path.resolve(pasta) + path.sep);
+if (["entrada", "encolher", "apagar"].includes(cmd)) {
+  const json = (o) => console.log(JSON.stringify(o, null, 1));
+  const mb = (a) => Math.round(fs.statSync(a).size / 1e5) / 10;
+  const alvo = args[0] || "";
+  if (cmd === "entrada") {
+    const lista = fs.existsSync(ENTRADA)
+      ? fs
+          .readdirSync(ENTRADA, { recursive: true })
+          .map((a) => path.join(ENTRADA, a))
+          .filter((a) => !path.basename(a).startsWith(".") && fs.statSync(a).isFile())
+          .map((a) => ({ arquivo: a, mb: mb(a), quando: fs.statSync(a).mtime.toISOString() }))
+      : [];
+    json({ pasta: ENTRADA, arquivos: lista });
+  } else if (!fs.existsSync(alvo) || !(dentro(alvo, ENTRADA) || (cmd === "encolher" && dentro(alvo, "tmp")))) {
+    json({ ok: false, erro: `o arquivo precisa existir dentro de "${ENTRADA}/"${cmd === "encolher" ? " ou tmp/" : ""}`, arquivo: alvo });
+    process.exitCode = 1;
+  } else if (cmd === "apagar") {
+    fs.unlinkSync(alvo);
+    json({ ok: true, apagado: alvo });
+  } else {
+    const preset = { 720: "Preset1280x720", 540: "Preset960x540", 480: "Preset640x480" }[args[1] || "720"];
+    const saidaArq = path.join("tmp", `${path.parse(alvo).name.replace(/[^\w.-]+/g, "-")}-${args[1] || "720"}.mp4`);
+    if (!preset) {
+      json({ ok: false, erro: "tamanho: 720, 540 ou 480" });
+      process.exitCode = 1;
+    } else {
+      fs.mkdirSync("tmp", { recursive: true });
+      const { execFileSync } = await import("node:child_process");
+      execFileSync("/usr/bin/avconvert", ["--source", alvo, "--preset", preset, "--output", saidaArq, "--replace"], {
+        stdio: "ignore",
+        timeout: 15 * 60 * 1000,
+      });
+      json({ ok: true, arquivo: saidaArq, mb: mb(saidaArq), original_mb: mb(alvo) });
+    }
+  }
+  process.exit();
+}
+
 // 02/10 (296985): perfil de FlowerBrowser (Firefox, ex. 110 "JLAS 2 - ml") não fala
 // CDP — o AdsPower devolve `ws://…/session` e o connect padrão morre em
 // "Browser.getVersion"; ele fala WebDriver BiDi. SunBrowser (Chrome) segue no CDP.
@@ -351,9 +398,9 @@ try {
   } else if (cmd === "anexar") {
     const [alvo, lista] = args;
     const arquivos = (lista || "").split(",").map((a) => a.trim()).filter(Boolean);
-    const fora = arquivos.filter((a) => !path.resolve(a).startsWith(path.resolve("tmp") + path.sep) || !fs.existsSync(a));
+    const fora = arquivos.filter((a) => !(dentro(a, "tmp") || dentro(a, ENTRADA)) || !fs.existsSync(a));
     if (!arquivos.length || fora.length) {
-      saida({ ok: false, erro: "arquivos precisam existir dentro de tmp/", fora });
+      saida({ ok: false, erro: `arquivos precisam existir dentro de tmp/ ou "${ENTRADA}/"`, fora });
       process.exitCode = 1;
     } else {
       const r = await acharCampo(alvo, true);

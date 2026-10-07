@@ -27,6 +27,11 @@ Pasta de trabalho: `~/DaVinci/ia-de-chamado`. Tudo o que você baixar vai em
 `tmp/` dentro dela; **a própria rodada apaga `tmp/` no fim** (regra do Vinicius) —
 você não precisa (nem consegue) apagar.
 
+Pasta de entrada: `fotos e videos subir chamado/` (mesma pasta). É onde a pessoa
+deixa foto/vídeo que não está no chamado (ex.: o vídeo da expedição) pra você
+subir na plataforma. Ela **não** é apagada pela rodada. Veja o que tem com
+`ferramentas/tela - entrada` e anexe direto de lá (seção Tela da loja).
+
 ## Comandos: um por vez, no formato exato
 
 Você **já está** na pasta `~/DaVinci/ia-de-chamado`. A lista de permissões só
@@ -134,6 +139,10 @@ ferramentas/tela <perfil> ponto X Y              # clique por coordenada (CSS, n
 ferramentas/tela <perfil> campos                 # caixas da página, numeradas, com o texto de cada uma
 ferramentas/tela <perfil> escrever "#2" "texto" [enter]   # ou "placeholder", ou um pedaço do rótulo
 ferramentas/tela <perfil> anexar "#4" tmp/<pedido>/a.jpg,tmp/<pedido>/b.jpg
+ferramentas/tela <perfil> anexar "#4" "fotos e videos subir chamado/envio 290968.MOV"
+ferramentas/tela - entrada                       # arquivos da pasta de entrada (nome, MB)
+ferramentas/tela - encolher "fotos e videos subir chamado/x.MOV" 720   # cópia menor em tmp/ (720, 540 ou 480)
+ferramentas/tela - apagar "fotos e videos subir chamado/x.MOV"        # só depois de enviado
 ferramentas/tela <perfil> captcha                # tem "não sou robô" na tela?
 ferramentas/tela <perfil> vivo                   # responde "Sim" ao aviso de inatividade do chat
 ferramentas/tela <perfil> js "expressão"         # só pra ler/depurar
@@ -154,6 +163,13 @@ python3 ferramentas/adspower.py fechar <perfil>
   "Comprovante de envio"). Depois do `anexar`, confira pelo `area` (ex.: "Carregar
   (2/6)" e `miniaturas`): no cartão da TikTok o `anexados` volta vazio mesmo com a
   foto lá.
+- **Arquivo da pasta de entrada** (foto/vídeo que a pessoa deixou): `entrada` pra
+  ver o nome exato, `anexar` com o caminho entre aspas. Vídeo grande demora a
+  carregar: espere e confira pelo print/`area` antes de enviar. Se a plataforma
+  recusar pelo tamanho, `encolher` (720; se ainda for grande, 540) e anexe a cópia
+  de `tmp/`. Depois de **enviado com prova na tela**, `apagar` o arquivo da
+  entrada (regra do Vinicius: nada de cliente fica no Mac) e diga no `resumo` que
+  apagou. Não enviou? Não apague.
 - **Sempre feche o perfil no fim** — o executor de leitura pula perfil aberto.
 - O print sai em dobro do tamanho: coordenada do print ÷ 2 = coordenada do `ponto`.
 - Um chamado por perfil de cada vez. Confira loja, pedido e conversa antes de enviar.
