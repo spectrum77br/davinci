@@ -2570,7 +2570,7 @@ async function aplicarStatusBling(c: Logistica) {
                       v-if="c.localizacao_at"
                       class="text-[11px]"
                       :class="leituraVelha(c) ? 'text-amber-700 dark:text-amber-400' : 'text-muted-foreground'"
-                      :title="`Lido nos Correios em ${fmtDataHora(c.localizacao_at)}`"
+                      :title="`Lido nos Correios em ${fmtDataHora(c.rastreio_lido_em || c.localizacao_at)} · último movimento do pacote em ${fmtDataHora(c.localizacao_at)}`"
                     >
                       Correios · lido {{ fmtDesde(c.rastreio_lido_em || c.localizacao_at) }}
                     </div>
@@ -2815,7 +2815,7 @@ async function aplicarStatusBling(c: Logistica) {
                   v-if="c.localizacao_at"
                   :class="leituraVelha(c) ? 'text-amber-700 dark:text-amber-400' : 'text-muted-foreground'"
                 >
-                  · Correios, lido {{ fmtDesde(c.localizacao_at) }}
+                  · Correios, lido {{ fmtDesde(c.rastreio_lido_em || c.localizacao_at) }}
                 </span>
                 <span v-else class="text-muted-foreground">· sem leitura dos Correios ainda</span>
               </template>
