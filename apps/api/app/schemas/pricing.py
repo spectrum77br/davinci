@@ -344,6 +344,9 @@ class PricingPushItemOut(BaseModel):
     item_id: str | None = None
     variation_id: str | None = None
     cached: bool = False
+    # O detalhe do envio (conta usada e um item por anúncio em `links`) — a tela
+    # conta os anúncios que receberam o preço.
+    payload: dict | None = None
 
 
 class PricingPushOut(BaseModel):

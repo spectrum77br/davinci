@@ -1288,6 +1288,8 @@ async def test_envio_catalogo_vai_so_para_o_anuncio_de_catalogo(
     assert Decimal(out["price"]) == Decimal("79")
     assert out["item_id"] == "MLB200"
     assert ml_falso.puts_de_preco() == [("MLB200", {"price": 79})]
+    # A tela conta os anúncios pelo payload devolvido (07/10/2026).
+    assert [lk["external_id"] for lk in out["payload"]["links"] if lk.get("success")] == ["MLB200"]
 
     # A coluna de kit do a003 segue a regra de sempre (no celular, havendo
     # kit, só o kit) e nunca vai para o anúncio de catálogo.
@@ -2093,3 +2095,17 @@ async def test_ligar_catalogo_respeita_a_equipe(
     r = await _ligar(client, contas[1].id)
     assert r.status_code == 200, r.text
     assert r.json()["ativo"] is True
+
+
+def test_push_devolve_o_payload_com_os_anuncios():
+    """07/10/2026: a tela conta os anúncios pelo `payload.links` do /push — o
+    schema de saída precisa carregar o payload do envio."""
+    from app.schemas.pricing import PricingPushItemOut
+
+    item = PricingPushItemOut(
+        pricing_account_id="00000000-0000-0000-0000-000000000001",
+        pricing_product_id="00000000-0000-0000-0000-000000000002",
+        ok=True, code="ok",
+        payload={"links": [{"external_id": "MLB1", "success": True}, {"external_id": "MLB2", "success": True}]},
+    )
+    assert [lk["external_id"] for lk in item.model_dump()["payload"]["links"]] == ["MLB1", "MLB2"]

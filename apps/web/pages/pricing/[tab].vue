@@ -872,7 +872,7 @@ async function _patchAccount(id: string, field: string, raw: string) {
 
 async function deleteAccount(a: Account) {
   const avisoCatalogo = catalogoAtivo(a) ? '\n\nO Catálogo ML desta conta também sai.' : ''
-  if (!confirm(`Excluir conta "${a.name}"?${avisoCatalogo}`)) return
+  if (!confirm(`Excluir conta "${nomeComTipo(a)}"?${avisoCatalogo}`)) return
   try {
     await api(`/api/pricing/accounts/${a.id}`, { method: 'DELETE' })
     accounts.value = accounts.value.filter((x) => x.id !== a.id && x.conta_base_id !== a.id)
@@ -960,7 +960,7 @@ async function alternarCatalogo(acc: Account) {
   if (
     !ativo &&
     !confirm(
-      `Desligar o Catálogo ML de "${acc.name}"?\n\n` +
+      `Desligar o Catálogo ML de "${nomeComTipo(acc)}"?\n\n` +
         'As colunas de catálogo desta conta saem da Tabela de Preços e os preços fixados à mão nelas são apagados.',
     )
   ) return
@@ -1721,7 +1721,7 @@ type PushResult = {
   variation_id: string | null
   cached: boolean
   // Um item por anúncio que recebeu (ou pulou) o preço.
-  payload?: { links?: { success?: boolean }[] } | null
+  payload?: { links?: { success?: boolean; skipped?: boolean }[] } | null
 }
 
 const grid = ref<GridResponse | null>(null)
@@ -2069,7 +2069,13 @@ async function pushCell(c: GridCell) {
         (n, x) => n + (x.payload?.links?.filter((l) => l.success).length || 1),
         0,
       )
-      toast.success(`Preço enviado${priceTxt}`, `${anuncios} anúncio(s) ok`)
+      // 'partial' = parte dos anúncios recebeu, parte não: aviso, não sucesso.
+      const parcial = okItems.filter((x) => x.code === 'partial')
+      if (parcial.length) {
+        toast.warning(`Preço enviado em parte${priceTxt}`, parcial.map((x) => x.detail || x.code).slice(0, 5))
+      } else {
+        toast.success(`Preço enviado${priceTxt}`, `${anuncios} anúncio(s) ok`)
+      }
     } else if (okItems.length === 0 && bloqItems.length === failItems.length) {
       toast.warning('Envio bloqueado', bloqItems.map((f) => f.detail || f.code).slice(0, 5))
     } else if (okItems.length === 0) {
@@ -2375,6 +2381,11 @@ function rotuloTipo(acc: Account): string {
   if (t.includes('classico') || t.includes('clássico')) return 'clássico'
   if (t.includes('premium')) return 'premium'
   return ''
+}
+
+// "aguiar clássico" — onde só o nome deixaria o clássico igual ao premium.
+function nomeComTipo(acc: Account): string {
+  return [nomeColuna(acc), rotuloTipo(acc)].filter(Boolean).join(' ')
 }
 
 // Custo base da coluna: Kit N na conta de kit; na coluna de catálogo, o
@@ -4351,7 +4362,7 @@ watch(department, async () => {
                 v-for="acc in group.accounts"
                 :key="acc.id"
                 class="w-full text-left px-3 py-1.5 text-sm hover:bg-muted flex justify-between items-center gap-2"
-                @click="pushAccountAndClose(acc.id, ehCatalogo(acc) ? `${nomeColuna(acc)} catálogo` : acc.name)"
+                @click="pushAccountAndClose(acc.id, ehCatalogo(acc) ? `${nomeComTipo(acc)} catálogo` : nomeComTipo(acc))"
               >
                 <span class="truncate">{{ nomeColuna(acc) }}</span>
                 <span class="text-[10px] text-muted-foreground shrink-0">

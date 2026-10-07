@@ -1124,6 +1124,7 @@ async def push_prices(
                 item_id=outcome.item_id,
                 variation_id=outcome.variation_id,
                 cached=outcome.cached,
+                payload=outcome.payload or None,
             )
         )
     await session.commit()
