@@ -835,7 +835,7 @@ async function _patchAccount(id: string, field: string, raw: string) {
       catalogoAtivo(acc) &&
       !confirm(
         `Trocar a plataforma de "${acc.name}"?\n\n` +
-          'O Catálogo ML desta conta sai da Tabela de Preços e os preços fixados à mão nele são apagados.',
+          'O Catálogo ML desta conta sai da Tabela de Preços; os preços fixados à mão e as margens próprias do catálogo são apagados.',
       )
     ) return
     payload.platform = raw
@@ -1015,7 +1015,7 @@ async function alternarCatalogo(acc: Account) {
     !ativo &&
     !confirm(
       `Desligar o Catálogo ML de "${nomeComTipo(acc)}"?\n\n` +
-        'As colunas de catálogo desta conta saem da Tabela de Preços e os preços fixados à mão nelas são apagados.',
+        'As colunas de catálogo desta conta saem da Tabela de Preços; os preços fixados à mão e as margens próprias do catálogo são apagados.',
     )
   ) return
   catalogoBusy.value.add(acc.id)
