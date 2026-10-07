@@ -3370,8 +3370,15 @@ watch(department, async () => {
                     : 'Tipo do anúncio ML desta conta'"
                   @change="definirTipoMl(acc, ($event.target as HTMLSelectElement).value)"
                 >
-                  <option value="">— sem tipo</option>
-                  <option v-for="o in opcoesTipoMl(acc)" :key="o.value" :value="o.value">{{ o.label }}</option>
+                  <!-- :selected também (não só o :value do select): na página que vem
+                       pronta do servidor o :value do select não marca a opção. -->
+                  <option value="" :selected="!tipoMlDe(acc)">— sem tipo</option>
+                  <option
+                    v-for="o in opcoesTipoMl(acc)"
+                    :key="o.value"
+                    :value="o.value"
+                    :selected="o.value === tipoMlDe(acc)"
+                  >{{ o.label }}</option>
                 </select>
                 <span v-else-if="acc.platform === 'mercadolivre'" class="text-xs" :class="acc.listing_type ? '' : 'text-muted-foreground'">
                   {{ rotuloTipoMl(acc) }}
@@ -4071,8 +4078,13 @@ watch(department, async () => {
                     : 'Sem prioridade — escolha uma tag pra trocar as vendas deste produto pra ela'"
                   @change="setPrioridade(p, ($event.target as HTMLSelectElement).value)"
                 >
-                  <option value="">—</option>
-                  <option v-for="t in TAGS_PRIORIDADE" :key="t" :value="t">{{ t.toUpperCase() }}</option>
+                  <option value="" :selected="!p.prioridade_estoque">—</option>
+                  <option
+                    v-for="t in TAGS_PRIORIDADE"
+                    :key="t"
+                    :value="t"
+                    :selected="t === p.prioridade_estoque"
+                  >{{ t.toUpperCase() }}</option>
                 </select>
                 <span v-else class="text-xs" :class="p.prioridade_estoque ? 'font-semibold text-amber-700 dark:text-amber-400' : 'text-muted-foreground'">
                   {{ p.prioridade_estoque ? p.prioridade_estoque.toUpperCase() : '—' }}
