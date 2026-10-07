@@ -152,11 +152,14 @@ assert.match(pedido, /plataforma === 'magalu' && !numeroMarketplace\.value/)
 assert.match(pedido, /Pergunta de pré-venda \(no anúncio\): ainda não há pedido\./)
 assert.match(pedido, /v-if="temAbaLogistica"/)
 
-// Ícone próprio (não cai na bolinha cinza) e sem arquivo de logo.
+// Ícone próprio (não cai na bolinha cinza) e sem arquivo de logo — a única
+// imagem é o logo do Mercado Livre (07/10/2026, pedido do Eduardo).
 const icone = fs.readFileSync(path.resolve(__dirname, '../components/AtendimentoIconePlataforma.vue'), 'utf8')
 assert.match(icone, /cod === 'magalu'/)
 assert.match(icone, /magalu: 'Magalu'/)
-assert.doesNotMatch(icone, /<image|\.png|\.svg"/)
+const imagens = icone.match(/<image[^>]*>/g) || []
+assert.deepStrictEqual(imagens.map((t) => (t.match(/href="([^"]+)"/) || [])[1]), ['/logos/mercado-livre.png'])
+assert.doesNotMatch(icone.replace(/<image[^>]*>/g, ''), /<image|\.png|\.svg"/)
 
 // Nada de marcar como lido: a tela não chama o read_by da Magalu.
 for (const f of ['AtendimentoConversa.vue', 'AtendimentoPlataforma.vue', 'AtendimentoObservacao.vue', 'AtendimentoPedido.vue', 'AtendimentoLista.vue']) {

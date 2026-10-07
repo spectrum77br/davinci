@@ -4,7 +4,8 @@
 // os logos. Desenho próprio e simples em SVG (nada baixado da internet, nada
 // de arquivo de logo): só precisa ser reconhecível em 12–20 px —
 // Shopee = sacolinha laranja com "S"; TikTok = nota musical com a sombra
-// ciano/vermelha; Mercado Livre = aperto de mão em fundo amarelo; Amazon = "a"
+// ciano/vermelha; Mercado Livre = o logo de verdade (imagem em public/logos/,
+// 07/10/2026 — a única exceção ao "desenho próprio"); Amazon = "a"
 // com o sorriso laranja; Instagram = câmera no quadrado degradê; Temu = "T"
 // branco no quadrado laranja; AliExpress = "Ae" branco no quadrado vermelho
 // (30/09/2026 — só a cor e a inicial, nada do logo das marcas); Magalu = "M"
@@ -79,15 +80,12 @@ const letra = computed(() => (cod.value[0] || '?').toUpperCase())
       </g>
     </template>
 
-    <!-- Mercado Livre: aperto de mão no oval amarelo -->
+    <!-- Mercado Livre: o LOGO DE VERDADE (07/10/2026, Eduardo mandou a imagem:
+         "coloque essa logo aqui" — os desenhos próprios não pareciam o logo).
+         PNG com fundo transparente em public/logos/, mesma proporção do
+         original (72×51), centrado no quadrado de 24. -->
     <template v-else-if="cod === 'ml'">
-      <ellipse cx="12" cy="12" rx="11" ry="9" fill="#FFE600" stroke="#2D3277" stroke-width="1.4" />
-      <g fill="none" stroke="#2D3277" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M4.6 11.1l3-1.9c.8-.5 1.7-.5 2.4 0l1.4.9 1.7-1.1c.7-.4 1.6-.4 2.3.1l3.9 2.2" />
-        <path d="M7.4 12.3l2.7 2.4c.4.4 1 .4 1.4 0" />
-        <path d="M9.4 11.6l2.9 2.6c.4.4 1 .4 1.4 0" />
-        <path d="M11.5 10.9l2.7 2.4c.4.3 1 .3 1.3-.1l1.2-1.3" />
-      </g>
+      <image href="/logos/mercado-livre.png" x="0" y="3.5" width="24" height="17" preserveAspectRatio="xMidYMid meet" />
     </template>
 
     <!-- Amazon: "a" com o sorriso laranja -->
