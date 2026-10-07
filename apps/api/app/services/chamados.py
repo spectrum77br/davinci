@@ -38,8 +38,9 @@ from uuid import UUID
 from zoneinfo import ZoneInfo
 
 import structlog
-from sqlalchemy import Text, cast, func, or_, select
+from sqlalchemy import Text, and_, cast, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from app.models import (
     BlingOrder,
@@ -90,6 +91,70 @@ NAO_ENCERRADO_SQL = or_(
     Chamado.status_plataforma.is_(None),
     Chamado.status_plataforma.not_in(sorted(STATUS_FINAIS)),
 )
+
+# 07/10 (Vinicius, 296301: "está Encerrado, não deveria estar Aguard. Plataforma?"):
+# a TikTok decidiu contra (perdemos) e a IA de Chamado mandou RECURSO pela tela.
+# Ganhamos/perdemos eram finais pra sempre — o status não saía do Encerrado e a
+# leitura de hora em hora parava. Agora: se a ÚLTIMA análise da IA veio DEPOIS da
+# decisão e diz "aguardar a plataforma", o caso SEGUIU — a coluna mostra Aguard.
+# Plataforma, a plataforma continua sendo lida e, passados RECURSO_LEMBRETE sem
+# novidade, a IA ganha um lembrete pra conferir na tela. Vale até RELER_RECURSO
+# depois da decisão (a TikTok dá ~14 dias pro recurso e até 3 dias úteis pra julgar).
+ACAO_ESPERAR_TXT = "aguardar a plataforma"
+STATUS_DECIDIDOS = (STATUS_GANHAMOS, STATUS_PERDEMOS)
+RELER_RECURSO = timedelta(days=21)
+RECURSO_LEMBRETE = timedelta(days=3)
+
+
+def caso_seguiu_apos_decisao(
+    ch: Chamado,
+    ultima_analise: ChamadoMensagem | None,
+    *,
+    analise_pede_esperar: bool,
+    ultima_fala_em: datetime | None,
+    agora: datetime | None = None,
+) -> bool:
+    """Regra acima, na memória (coluna Status). `ultima_fala_em`: fala nova da
+    plataforma depois da análise ainda não foi lida pela IA — aí não vale.
+    Passado RELER_RECURSO ninguém mais lê nem lembra: volta a Encerrado pra uma
+    pessoa concluir."""
+    return (
+        ch.status_plataforma in STATUS_DECIDIDOS
+        and analise_pede_esperar
+        and ultima_analise is not None
+        and ch.status_plataforma_at is not None
+        and ch.status_plataforma_at >= (agora or datetime.now(UTC)) - RELER_RECURSO
+        and ultima_analise.created_at > ch.status_plataforma_at
+        and (ultima_fala_em is None or ultima_analise.created_at >= ultima_fala_em)
+    )
+
+
+def caso_seguiu_apos_decisao_sql(agora: datetime):
+    """Regra acima em SQL (crons): decisão há menos de RELER_RECURSO e a ÚLTIMA
+    análise do chamado, posterior à decisão, termina em "aguardar a plataforma"."""
+    ana = aliased(ChamadoMensagem)
+    ultima = (
+        select(func.max(ana.created_at))
+        .where(ana.chamado_id == Chamado.id, ana.tipo == "analise")
+        .correlate(Chamado)
+        .scalar_subquery()
+    )
+    esp = aliased(ChamadoMensagem)
+    return and_(
+        Chamado.status_plataforma.in_(STATUS_DECIDIDOS),
+        Chamado.status_plataforma_at >= agora - RELER_RECURSO,
+        exists(
+            select(esp.id)
+            .where(
+                esp.chamado_id == Chamado.id,
+                esp.tipo == "analise",
+                esp.created_at == ultima,
+                esp.created_at > Chamado.status_plataforma_at,
+                esp.texto.like(f"%{ACAO_ESPERAR_TXT}"),
+            )
+            .correlate(Chamado)
+        ),
+    )
 
 # 22/09 (Vinicius, 292592): o número em `chamados.chamado` foi capturado pelo robô
 # NA TELA (Seller Center / Portal de Atendimento), porque não havia caminho pela
@@ -1055,7 +1120,9 @@ def status_e_motivo_da_aba(
          QUALQUER estado, inclusive Encerrado (Vinicius 21/09: "qualquer status
          que esteja, se eu mandar pro robô tem que ir pra análise dele"; até
          19/09 o Encerrado vinha antes e a linha não saía de lá);
-      3. status oficial FINAL sem pessoa fechar → Encerrado (+ sugestão do robô);
+      3. status oficial FINAL sem pessoa fechar → Encerrado (+ sugestão do robô) —
+         menos ganhamos/perdemos em que a IA seguiu o caso depois (recurso) e
+         mandou aguardar (07/10, `caso_seguiu_apos_decisao`) → Aguard. Plataforma;
       4. o cérebro pediu gente e ninguém falou depois → Análise Humano;
       5. Shopee pediu prova e ainda não mandamos NADA depois do pedido → Análise
          Humano (prova é humano — decisão do Vinicius); mandamos → cai na 7;
@@ -1096,6 +1163,18 @@ def status_e_motivo_da_aba(
             and fala_final > ch.status_plataforma_at
         )
     )
+    # 07/10 (296301): ganhamos/perdemos em que a IA seguiu o caso (recurso) e
+    # mandou aguardar — ver `caso_seguiu_apos_decisao`.
+    if caso_seguiu_apos_decisao(
+        ch, ultima_analise, analise_pede_esperar=analise_pede_esperar, ultima_fala_em=fala_final
+    ):
+        decisao = MOTIVO_FINAL.get(ch.status_plataforma or "", ch.status_plataforma or "")
+        dia = ch.status_plataforma_at.astimezone(SAO_PAULO).strftime("%d/%m")
+        return (
+            ABA_AGUARD_PLATAFORMA,
+            ultima_analise.created_at,
+            f"o caso seguiu depois do \"{decisao}\" de {dia} (recurso) — aguardando a plataforma",
+        )
     if ch.status_plataforma in STATUS_FINAIS and not seguiu:
         if ch.status_plataforma == STATUS_ENCERRADO and encerrado_por:
             motivo = encerrado_por

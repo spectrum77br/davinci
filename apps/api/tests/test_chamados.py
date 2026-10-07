@@ -1988,3 +1988,105 @@ def test_encerrado_por_pessoa_le_texto_novo_e_antigo():
         ch, ultima_fala=None, ultima_analise=None, analise_pede_humano=False
     )
     assert motivo == "plataforma encerrou sem decisão"
+
+
+async def _recurso_296301(db, *, analise_txt: str, analise_em: datetime, decidido_em: datetime):
+    """Caso 296301 (07/10): TikTok decidiu contra (perdemos) e a IA mandou recurso
+    pela tela depois — a análise dela é a última coisa do histórico."""
+    ch = Chamado(
+        id=uuid4(), origem="devolucao", plataforma="tiktok", conta="TikTok Barbosa",
+        canal="api", pedido_bling="296301", chamado="4042430062889960806",
+        status_plataforma=svc.STATUS_PERDEMOS, status_plataforma_at=decidido_em,
+    )
+    db.add(ch)
+    await db.flush()
+    db.add_all([
+        ChamadoMensagem(
+            chamado_id=ch.id, direcao="recebida", tipo="resposta", status="registrada",
+            canal="api",
+            texto="Arbitragem da TikTok decidida a favor do COMPRADOR (reembolso).",
+            autor_nome="TikTok Shop", created_at=decidido_em + timedelta(minutes=17),
+        ),
+        ChamadoMensagem(
+            chamado_id=ch.id, direcao="sistema", tipo="analise", status="registrada",
+            canal="api",
+            texto=f"Análise da IA de Chamado [x]: {analise_txt}", autor_nome="IA de Chamado",
+            created_at=analise_em,
+        ),
+    ])
+    await db.commit()
+    return ch
+
+
+async def test_recurso_depois_do_perdemos_volta_pra_aguard_plataforma(
+    client, make_user, auth_as, db
+):
+    """07/10 (Vinicius, 296301: "está Encerrado, não deveria estar Aguard.
+    Plataforma?"): a IA seguiu o caso depois da decisão e mandou aguardar."""
+    from app.services import chamados_devolucao_sync as sync
+
+    auth_as(await make_user(permissions=_perms()))
+    agora = datetime.now(UTC)
+    decidido = agora - timedelta(days=4)
+    ch = await _recurso_296301(
+        db, decidido_em=decidido, analise_em=agora - timedelta(days=2),
+        analise_txt="Recurso enviado na TikTok Barbosa … → aguardar a plataforma",
+    )
+    row = next(i for i in (await client.get("/api/chamados")).json()["items"] if i["id"] == str(ch.id))
+    assert row["status_aba"] == "aguard_plataforma", row
+    assert row["status_aba_motivo"].startswith('o caso seguiu depois do "perdemos" de '), row
+
+    # a plataforma continua sendo lida de hora em hora
+    lidos = (
+        await db.execute(select(Chamado.id).where(sync._le_na_varredura(agora)))
+    ).scalars().all()
+    assert ch.id in lidos
+
+    # 2 dias desde a análise: sem lembrete; 3 dias: um lembrete (instrução) e só um
+    assert (await sync.lembrar_recursos(db, agora=agora))["lembrados"] == 0
+    depois = agora + timedelta(days=1, minutes=1)
+    assert (await sync.lembrar_recursos(db, agora=depois))["lembrados"] == 1
+    assert (await sync.lembrar_recursos(db, agora=depois))["lembrados"] == 0
+    instr = (
+        await db.execute(
+            select(ChamadoMensagem).where(
+                ChamadoMensagem.chamado_id == ch.id, ChamadoMensagem.tipo == "instrucao"
+            )
+        )
+    ).scalars().all()
+    assert len(instr) == 1 and instr[0].autor_nome == "sistema"
+    assert "confira na tela da plataforma" in instr[0].texto
+    # com o lembrete pendente a linha é do robô (a instrução passa na frente)
+    row = next(i for i in (await client.get("/api/chamados")).json()["items"] if i["id"] == str(ch.id))
+    assert row["status_aba"] == "analise_robo", row
+
+
+async def test_perdemos_sem_recurso_continua_encerrado(client, make_user, auth_as, db):
+    """A IA mandou fechar (ou analisou ANTES da decisão): Encerrado, fora da
+    leitura de hora em hora, sem lembrete — como era."""
+    from app.services import chamados_devolucao_sync as sync
+
+    auth_as(await make_user(permissions=_perms()))
+    agora = datetime.now(UTC)
+    fechar = await _recurso_296301(
+        db, decidido_em=agora - timedelta(days=5), analise_em=agora - timedelta(days=4),
+        analise_txt="A TikTok decidiu a favor do comprador … → robô sugere fechar",
+    )
+    antes = await _recurso_296301(
+        db, decidido_em=agora - timedelta(days=5), analise_em=agora - timedelta(days=6),
+        analise_txt="Caso em arbitragem … → aguardar a plataforma",
+    )
+    velho = await _recurso_296301(
+        db, decidido_em=agora - timedelta(days=30), analise_em=agora - timedelta(days=20),
+        analise_txt="Recurso enviado … → aguardar a plataforma",
+    )
+    itens = {i["id"]: i for i in (await client.get("/api/chamados")).json()["items"]}
+    assert itens[str(fechar.id)]["status_aba"] == "encerrado"
+    assert itens[str(antes.id)]["status_aba"] == "encerrado"
+    # passada a janela (3 semanas da decisão) ninguém lê nem lembra: volta a Encerrado
+    assert itens[str(velho.id)]["status_aba"] == "encerrado"
+    lidos = set(
+        (await db.execute(select(Chamado.id).where(sync._le_na_varredura(agora)))).scalars()
+    )
+    assert not lidos & {fechar.id, antes.id, velho.id}
+    assert (await sync.lembrar_recursos(db, agora=agora))["lembrados"] == 0

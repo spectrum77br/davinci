@@ -1185,7 +1185,80 @@ def _le_na_varredura(agora: datetime):
             Chamado.status_plataforma == chamados_svc.STATUS_ENCERRADO,
             Chamado.status_plataforma_at >= agora - RELER_ENCERRADO,
         ),
+        # 07/10 (296301): ganhamos/perdemos em que a IA seguiu o caso (recurso) —
+        # a plataforma continua sendo lida até a decisão nova.
+        chamados_svc.caso_seguiu_apos_decisao_sql(agora),
     )
+
+
+def _lembrete_recurso_txt(ch: Chamado, desde: datetime) -> str:
+    decisao = chamados_svc.MOTIVO_FINAL.get(ch.status_plataforma or "", ch.status_plataforma or "")
+    dia = ch.status_plataforma_at.astimezone(chamados_svc.SAO_PAULO).strftime("%d/%m")
+    ultima = desde.astimezone(chamados_svc.SAO_PAULO).strftime("%d/%m")
+    return (
+        f"Lembrete automático: depois do \"{decisao}\" de {dia} o caso seguiu (recurso) e a "
+        f"última análise, de {ultima}, foi aguardar a plataforma. Já passaram 3 dias sem "
+        "novidade pela API — confira na tela da plataforma se saiu a decisão e diga o "
+        "resultado."
+    )
+
+
+async def lembrar_recursos(session: AsyncSession, *, agora: datetime | None = None) -> dict:
+    """07/10 (Vinicius, 296301): recurso mandado pela TELA depois de a plataforma
+    decidir (`caso_seguiu_apos_decisao`) — a API pode nunca mostrar o resultado.
+    Passados RECURSO_LEMBRETE desde a última análise ("aguardar a plataforma") sem
+    fala nova da plataforma nem instrução, entra uma INSTRUÇÃO do sistema pra IA de
+    Chamado conferir na tela (mesmo caminho da instrução de pessoa: passa na frente
+    da fila e a análise consome). Uma por análise — a resposta da IA zera o relógio.
+    Commita."""
+    ref = agora or datetime.now(UTC)
+    chs = (
+        await session.execute(
+            select(Chamado).where(
+                Chamado.resolvido.is_(False),
+                chamados_svc.caso_seguiu_apos_decisao_sql(ref),
+            )
+        )
+    ).scalars().all()
+    lembrados = 0
+    for ch in chs:
+        ultima = (
+            await session.execute(
+                select(func.max(ChamadoMensagem.created_at)).where(
+                    ChamadoMensagem.chamado_id == ch.id, ChamadoMensagem.tipo == "analise"
+                )
+            )
+        ).scalar_one_or_none()
+        if ultima is None or ref - ultima < chamados_svc.RECURSO_LEMBRETE:
+            continue
+        depois = (
+            await session.execute(
+                select(func.count()).where(
+                    ChamadoMensagem.chamado_id == ch.id,
+                    ChamadoMensagem.created_at > ultima,
+                    or_(
+                        ChamadoMensagem.tipo == "instrucao",
+                        ChamadoMensagem.direcao == "recebida",
+                    ),
+                )
+            )
+        ).scalar_one()
+        if depois:
+            continue  # a IA já tem o que ler (instrução ou fala nova)
+        session.add(
+            chamados_svc.nova_mensagem(
+                ch,
+                texto=_lembrete_recurso_txt(ch, ultima),
+                tipo="instrucao",
+                direcao="sistema",
+                autor_nome=chamados_svc.AUTOR_SISTEMA,
+                status="registrada",
+            )
+        )
+        lembrados += 1
+        logger.info("chamado_recurso_lembrete", chamado_id=str(ch.id), pedido=ch.pedido_bling)
+    await session.commit()
+    return {"seguindo": len(chs), "lembrados": lembrados}
 
 
 # 22/09: o número em `chamados.chamado` foi capturado pelo robô na TELA — nenhuma

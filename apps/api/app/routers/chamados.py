@@ -2442,7 +2442,7 @@ async def _cerebro_pode_reabrir(session: AsyncSession, ch: Chamado) -> bool:
         return True
     return any(ult.startswith(p.rstrip("%")) for p in _FECHOU_REABRIVEL)
 _ACAO_TXT = {
-    "esperar": "aguardar a plataforma",
+    "esperar": svc.ACAO_ESPERAR_TXT,
     "responder": "réplica enfileirada pro robô",
     "resolver": "robô sugere fechar",
     "humano": "precisa de humano",

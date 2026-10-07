@@ -2090,6 +2090,11 @@ async def chamados_replica_automatica(ctx: dict) -> None:
     async with session_scope() as s:
         resp = await chamados_devolucao_sync.sync_respostas(s)
     logger.info("chamados_devolucao_sync_done", **resp)
+    # 07/10 (296301): recurso mandado pela tela depois da decisão — 3 dias sem
+    # novidade, a IA de Chamado ganha uma instrução pra conferir na tela.
+    async with session_scope() as s:
+        lembretes = await chamados_devolucao_sync.lembrar_recursos(s)
+    logger.info("chamados_recurso_lembrete_done", **lembretes)
     # 17/09: abertura que a API não consegue fazer (sem return, sem foto…) parava
     # aqui pra sempre. A varredura roteia pro robô ou pro humano e avisa no Threema.
     async with session_scope() as s:
