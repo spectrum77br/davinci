@@ -2179,20 +2179,18 @@ async def definir_catalogo_da_conta(
     Ligar cria a coluna de catálogo ("filha": canal='catalogo',
     conta_base_id = esta conta, sem integração) com nome, tipo, aba, slots e
     ordem da base; os números vêm da base na hora do cálculo. Desligar apaga a
-    filha e os preços fixados nela. Idempotente nos dois sentidos."""
-    base = (
-        await session.execute(
-            select(PricingAccount)
-            .where(
-                and_(
-                    PricingAccount.id == account_id,
-                    user_scope(PricingAccount, user),
-                )
-            )
-            # Dois cliques seguidos não criam duas filhas.
-            .with_for_update()
+    filha e os preços fixados nela. Idempotente nos dois sentidos.
+
+    Mesma cerca de equipe do `/accounts`: conta de outra equipe → 404."""
+    stmt = select(PricingAccount).where(
+        and_(
+            PricingAccount.id == account_id,
+            user_scope(PricingAccount, user),
         )
-    ).scalar_one_or_none()
+    )
+    stmt = _team_scope_accounts(stmt, await _escopo_precos(session, user))
+    # Dois cliques seguidos não criam duas filhas.
+    base = (await session.execute(stmt.with_for_update())).scalar_one_or_none()
     if base is None:
         raise HTTPException(404, detail={"code": "account_not_found"})
     if base.canal != CANAL_KIT or base.platform != PricingPlatform.ML:

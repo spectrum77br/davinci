@@ -2040,3 +2040,56 @@ async def test_envio_nao_insiste_no_anuncio_que_o_ml_proibe(ml_falso: MLFalso, m
     assert r[link.id].status == SyncStatus.FATAL
     assert [m for m, *_ in ml_falso.chamadas] == ["GET"]
     assert esperas == []
+
+
+@pytest.mark.asyncio
+async def test_ligar_catalogo_respeita_a_equipe(
+    db: AsyncSession, client: AsyncClient, dono: User, auth_as: Callable,
+):
+    """POST /accounts/{id}/catalogo com a mesma cerca de equipe do /accounts:
+    conta de outra equipe → 404 (e a coluna dela não muda)."""
+    seg = await _segmentos(db)
+    contas = {}
+    for equipe, nome in ((1, "loja equipe 1"), (2, "loja equipe 2")):
+        integ = await _integracao_ml(db, dono, nome)
+        db.add(StoreInfo(user_id=dono.id, platform="ml", account_name=nome,
+                         integration_id=integ.id, sales_team=equipe))
+        conta = PricingAccount(user_id=dono.id, name=nome, platform=PricingPlatform.ML,
+                               listing_type="ml classico", segment_id=seg["celular"].id,
+                               commission=Decimal("0.1"), margin1=Decimal("0.2"),
+                               integration_id=integ.id)
+        db.add(conta)
+        contas[equipe] = conta
+    await db.commit()
+    for c in contas.values():
+        await db.refresh(c)
+
+    # Quem não tem equipe liga a coluna da equipe 2.
+    auth_as(dono)
+    assert (await _ligar(client, contas[2].id)).status_code == 200
+
+    membro = User(
+        open_id=f"email:eq-{uuid.uuid4().hex[:6]}@davinci-test.com",
+        email=f"eq-{uuid.uuid4().hex[:6]}@davinci-test.com",
+        role=UserRole.USER,
+        status=UserStatus.ACTIVE,
+        permissions=PERM_FULL,
+        sales_teams=[1],
+    )
+    db.add(membro)
+    await db.commit()
+    auth_as(membro)
+    for ativo in (False, True):
+        r = await _ligar(client, contas[2].id, ativo)
+        assert r.status_code == 404, r.text
+        assert r.json()["detail"]["code"] == "account_not_found"
+    filha = (
+        await db.execute(
+            select(PricingAccount).where(PricingAccount.conta_base_id == contas[2].id)
+        )
+    ).scalar_one_or_none()
+    assert filha is not None
+    # A conta da própria equipe liga normalmente.
+    r = await _ligar(client, contas[1].id)
+    assert r.status_code == 200, r.text
+    assert r.json()["ativo"] is True
