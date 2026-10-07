@@ -54,10 +54,10 @@ PASSOS: dict[str, tuple[int, str, str, str]] = {
                 "procura as marcas no Mercado Livre, Shopee, TikTok e Amazon e salva no sistema"),
     "denuncias": (3, "Denúncias Nossos", "perfil 50 + celular",
                   "denunciava na loja o anúncio com o NOSSO certificado — desligado desde 03/10"),
-    "diversos": (4, "Denúncias Diversos", "perfil 50 + celular + 148 (prints)",
+    "diversos": (4, "Denúncias Diversos", "perfil 50 + 148 (Shopee) + celular",
                  "denuncia uma vez na loja o anúncio com certificado de outra empresa ou nº que não é do aparelho"),
     "prints": (5, "Prints", "perfil 148 (Shopee) + perfil 50 (ML)",
-               "tira o print da página de cada anúncio que vai à Anatel — em criação"),
+               "tira o print da página de cada anúncio que vai à Anatel"),
     "anatel": (6, "Denúncias Anatel", "Safari (SEI) + Tuta",
                "peticiona no SEI, uma petição por loja, com o print e as provas de cada anúncio"),
     "replica_diversos": (7, "Réplica Denúncias Diversos", "contas das lojas (ML 93/78 · Shopee 155/146)",
@@ -66,9 +66,9 @@ PASSOS: dict[str, tuple[int, str, str, str]] = {
                         "abre os anúncios denunciados e vê quem saiu do ar"),
     "juridico": (9, "Jurídico", "escritório", "monta a pasta do caso para o advogado — em criação"),
 }
-# passos que o robô ainda não tem (Prints) ou que estão sendo refeitos (Jurídico): a tela mostra "em criação" e
-# não deixa ligar nem rodar
-EM_CRIACAO = {"prints", "juridico"}
+# passos que estão sendo refeitos (Jurídico): a tela mostra "em criação" e não deixa ligar nem rodar. Prints saiu
+# daqui em 07/10 (agente v36 tem a ação "prints").
+EM_CRIACAO = {"juridico"}
 # 07/10/2026: o que a tela mostra ao abrir o passo — o passo a passo, quem faz (cada perfil pelo nome), quem confere
 # depois e o que ainda está sendo consertado. Texto do mapa do processo, conferido no robô em 07/10.
 _LOJAS = "Contas das lojas da Réplica: ML 93 Mega · ML 78 KIA · Shopee 155 Aguiar · Shopee 146 Vortan · TikTok 137 Atv · TikTok 131 Barbosa"
@@ -83,25 +83,25 @@ EXPLICACAO: dict[str, dict[str, list[str]]] = {
         ],
         "quem": ["Perfil 50 (MAKISA)", "Perfil 148 (Luno – Shopee)", _LOJAS, "Safari do Mac mini", "Tuta (sac@makisa)"],
         "confere": ["É a própria conferência: os avisos vão para Ocorrências e para o Threema."],
-        "consertando": ["A parte das contas das lojas deu erro de programa em 07/10 (\"fc não definido\")."],
+        "consertando": [],
     },
     "ciclo_emails": {
         "passos": [
             "Lê a caixa sac@makisa no Tuta: respostas do Mercado Livre (inclusive as da Réplica, encaminhadas pelas lojas) e da Shopee.",
             "O sistema transforma cada e-mail em resultado da denúncia: recusada, removida ou em análise.",
             "No Safari lê o andamento de cada processo no SEI (60 por vez) e confere se os anexos que mandamos estão no processo.",
-            "Lê os protocolos antigos do Anatel Consumidor.",
-            "Ainda abre os avisos da Shopee no perfil 50 — vai sair: o aviso da Shopee não diz qual anúncio foi recusado.",
+            "Lê os protocolos antigos do Anatel Consumidor (as duas páginas da lista, 15 protocolos).",
+            "Não abre mais os avisos da Shopee no perfil 50: o aviso não diz qual anúncio foi recusado.",
         ],
-        "quem": ["Tuta (sac@makisa)", "Safari: SEI com a conta do advogado e gov.br", "Perfil 50 (avisos da Shopee — sai)"],
+        "quem": ["Tuta (sac@makisa)", "Safari: SEI com a conta do advogado e gov.br"],
         "confere": [
             "Denúncias do Mercado Livre (passo 4) e da Réplica no ML (passo 7) — pelo e-mail.",
             "Processos da Anatel (passo 6) — andamento e anexos no SEI.",
             "TikTok: ainda ninguém lê as respostas — vai entrar a leitura pelo app do celular.",
         ],
         "consertando": [
-            "Tirar a parte da Shopee (não registra recusa nenhuma e cansou a conta do perfil 50).",
-            "Anatel Consumidor: ler os 15 protocolos (hoje só os 10 mais novos).",
+            "TikTok: ler as respostas pelo app do celular.",
+            "Réplica no ML: nenhum e-mail encaminhado da Mega e da KIA chegou no sac@makisa desde 05/10.",
         ],
     },
     "procura": {
@@ -115,7 +115,6 @@ EXPLICACAO: dict[str, dict[str, list[str]]] = {
         "quem": ["Perfil 50 (MAKISA)", "Perfil 148 (Luno – Shopee)", "Celular na nuvem (app do TikTok)", "Safari (UpSeller)"],
         "confere": ["Ainda ninguém confere se a procura cobriu todos os sites (\"ok\" = o programa terminou)."],
         "consertando": [
-            "Mercado Livre lê só a 1ª página da busca (as páginas 2 a 6 repetem a 1ª).",
             "O 148 falha quando o passo 8 ainda está com ele, e o 50 refaz a parte dele.",
         ],
     },
@@ -132,29 +131,29 @@ EXPLICACAO: dict[str, dict[str, list[str]]] = {
     "diversos": {
         "passos": [
             "Pega os anúncios Diversos (certificado de outra empresa, ou nº que não é do aparelho) ainda não denunciados na loja.",
-            "Denuncia uma vez: Mercado Livre (até 25 por hora) e Shopee (até 25 por rodada) no perfil 50; TikTok pelo app do celular.",
+            "Denuncia uma vez: Mercado Livre no perfil 50 (até 25 por hora); Shopee no perfil 148, com 2,5 a 5 min entre uma denúncia e outra; TikTok pelo app do celular.",
             "Grava cada denúncia com o print da tela de denúncia.",
-            "Hoje também tira os prints atrasados (até 200) — vão sair daqui para o passo 5.",
         ],
-        "quem": ["Perfil 50 (MAKISA) — Mercado Livre e Shopee", "Celular na nuvem — TikTok", "Perfil 148 — prints da Shopee"],
+        "quem": ["Perfil 50 (MAKISA) — Mercado Livre", "Perfil 148 (Luno – Shopee) — Shopee", "Celular na nuvem — TikTok"],
         "confere": [
             "Mercado Livre: a resposta chega por e-mail (passo 1).",
             "Shopee: o aviso não diz qual anúncio foi recusado — só o \"saiu do ar\" (passo 8) vale.",
             "TikTok: ninguém lê ainda (vai entrar no passo 1, pelo app).",
             "Saiu do ar: passo 8.",
         ],
-        "consertando": ["São 7 horários, mas na prática é um bloco só — os horários vão ser revistos."],
+        "consertando": ["Sem horário por enquanto: rodar à mão, medir o tempo e depois montar uma vez por dia."],
     },
     "prints": {
         "passos": [
             "Tira o print da página de cada anúncio que vai à Anatel e ainda não tem print que valha.",
             "Só vale print da página do próprio anúncio, sem captcha, com a cópia da página, de até 15 dias.",
             "Captcha na tela: não salva, para aquele site e deixa a conta descansar.",
-            "Shopee no perfil 148, com pausa entre um print e outro; Mercado Livre no perfil 50.",
+            "Shopee no perfil 148, com 1 a 2 min entre um print e outro; Mercado Livre no perfil 50.",
+            "Se a ligação com o navegador cai no meio, reconecta e tenta o mesmo anúncio de novo.",
         ],
         "quem": ["Perfil 148 (Luno – Shopee)", "Perfil 50 (MAKISA) — Mercado Livre"],
         "confere": ["O detector de print confere antes de salvar e de novo antes de anexar na Anatel."],
-        "consertando": ["Em criação: hoje os prints rodam dentro do passo 4 ou à mão."],
+        "consertando": ["Sem horário por enquanto: rodar à mão e medir o tempo."],
     },
     "anatel": {
         "passos": [
@@ -169,13 +168,16 @@ EXPLICACAO: dict[str, dict[str, list[str]]] = {
             "Passo 1: lê o andamento de cada processo e confere se os anexos estão lá.",
             "Denúncias enviadas › \"prints\": miniaturas do que foi anexado, para conferir de olho.",
         ],
-        "consertando": ["35 processos foram com print de captcha (25/09 a 06/10) — conserto à parte, por peticionamento intercorrente."],
+        "consertando": [
+            "35 processos foram com print de captcha (25/09 a 06/10): 11 já consertados por peticionamento intercorrente em 07/10; os outros esperam os prints da Shopee.",
+            "Assinatura não confirmada na tela: antes de devolver a loja à fila, confere a lista de recibos (em 05/10 isso virou processo duplicado).",
+        ],
     },
     "replica_diversos": {
         "passos": [
             "Pega o anúncio Diversos que a loja recusou e que já tem processo na Anatel.",
             "Denuncia de novo com a conta de outra empresa, citando o processo (grupo da loja; a 2ª réplica sai pelo outro grupo).",
-            "Mercado Livre e Shopee; a conta da Shopee abre uma vez por dia.",
+            "Mercado Livre e Shopee; a conta da Shopee abre uma vez por dia. Na Shopee vale o anúncio denunciado há 10 dias ou mais e ainda no ar (a recusa nunca é registrada).",
             "Captcha ou login na conta da loja: o perfil fica aberto para alguém resolver.",
         ],
         "quem": ["Grupo 1: ML 93 Mega · Shopee 155 Aguiar · TikTok 137 Atv (sem uso)",
@@ -185,8 +187,7 @@ EXPLICACAO: dict[str, dict[str, list[str]]] = {
             "Shopee: os avisos da conta não dizem qual anúncio foi recusado.",
         ],
         "consertando": [
-            "Shopee: vai valer \"denunciado há 10 dias ou mais e ainda no ar\" no lugar da recusa (que nunca é registrada).",
-            "Mega: nenhuma resposta chegou — conferir o encaminhamento do e-mail.",
+            "Mega e KIA: nenhuma resposta encaminhada chegou no sac@makisa — conferir o encaminhamento do e-mail das lojas.",
             "Aguiar 155: captcha em toda rodada.",
         ],
     },
@@ -200,8 +201,8 @@ EXPLICACAO: dict[str, dict[str, list[str]]] = {
         "quem": ["Perfil 148 (Luno – Shopee)", "Perfil 50 (MAKISA)"],
         "confere": ["O sistema usa o resultado para fechar as denúncias de anúncio que saiu do ar."],
         "consertando": [
-            "Nunca termina o dia: a checagem das 05:45 corta — o horário vai ser revisto.",
-            "Mercado Livre sem navegador (pela API das nossas contas) — em teste.",
+            "Sem horário por enquanto: rodar à mão e medir o tempo (a checagem das 05:45 cortava o passo).",
+            "Mercado Livre pela API não dá (responde 403 para anúncio de outro vendedor) — segue no perfil 50.",
         ],
     },
     "juridico": {

@@ -335,13 +335,13 @@ def test_painel_frentes_agenda_e_alarme():
     # 05/10: + Réplica no 6 e Tempo parado no 8
     assert [x["ordem"] for x in p["passos"]] == list(range(10))
     assert p["passos"][0]["acao"] == "checagem" and p["passos"][-1]["acao"] == "juridico"
-    # 07/10: numeração nova — 4 Diversos, 5 Prints (em criação), 6 Anatel, 7 Réplica, 8 Ativos; o Tempo parado saiu
+    # 07/10: numeração nova — 4 Diversos, 5 Prints, 6 Anatel, 7 Réplica, 8 Ativos; o Tempo parado saiu
     assert [x["acao"] for x in p["passos"][5:9]] == [
         "prints", "anatel", "replica_diversos", "ativos_inativos"]
     assert "capa_perguntas" not in [x["acao"] for x in p["passos"]]
     assert "aproveitar_parado" not in passos
     assert [x["acao"] for x in p["passos"][2:5]] == ["procura", "denuncias", "diversos"]
-    assert passos["prints"]["em_criacao"] is True and passos["juridico"]["em_criacao"] is True
+    assert passos["prints"]["em_criacao"] is False and passos["juridico"]["em_criacao"] is True
     assert passos["anatel"]["em_criacao"] is False and passos["anatel"]["explicacao"]["passos"]
     assert any("148" in q for q in passos["prints"]["explicacao"]["quem"])
     assert "varredura_mercadolivre" not in passos and "conferencia" not in passos
@@ -538,8 +538,8 @@ async def test_robo_botoes_ligar_e_rodar_passo(client, make_user, auth_as):
     assert r.status_code == 200
     r = await client.post("/api/denuncia/robo/passo", json={"acao": "varredura_mercadolivre"})
     assert r.status_code == 422  # passo antigo (até 02/10) não tem mais botão
-    # 07/10: Prints (o robô ainda não tem) e Jurídico estão "em criação": nem rodar, nem agenda; Tempo parado saiu
-    for acao in ("prints", "juridico"):
+    # 07/10: Jurídico está "em criação": nem rodar, nem agenda (Prints saiu daqui com o agente v36); Tempo parado saiu
+    for acao in ("juridico",):
         r = await client.post("/api/denuncia/robo/passo", json={"acao": acao})
         assert r.status_code == 422 and r.json()["detail"]["code"] == "denuncia_robo_passo_em_criacao"
         r = await client.put(f"/api/denuncia/robo/agenda/{acao}", json={"ligado": True})
