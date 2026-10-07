@@ -64,10 +64,12 @@ const DEPARTMENTS_FALLBACK = [
 
 const DEPARTMENTS = ref<{ value: string; label: string; icon: any }[]>([...DEPARTMENTS_FALLBACK])
 
+// "Queima de estoque" saiu da Mala em 07/10/2026 (segmento desativado; era o
+// último tipo, os outros não mudam de posição).
 const TYPE_HEADERS_FALLBACK: Record<string, string[]> = {
   celular: ['Acessórios', 'Diversos', 'Regular', 'Robusto', 'Apple'],
   eletro: ['1', '2', '3', '4', '5'],
-  mala: ['Acessórios', '12"', '18" e 20"', '24" acima', 'Queima de estoque'],
+  mala: ['Acessórios', '12"', '18" e 20"', '24" acima'],
 }
 
 const TYPE_HEADERS = ref<Record<string, string[]>>({ ...TYPE_HEADERS_FALLBACK })
@@ -397,6 +399,11 @@ const accountsByDept = computed(() => {
 })
 
 const accountsCurrent = computed(() => accountsByDept.value[department.value] ?? [])
+
+// Pares marg/frete da aba Contas: um por tipo ATIVO do departamento (os
+// títulos do cabeçalho). Desenhar sempre 5 desalinhava a tabela quando um
+// tipo é desativado (Mala sem "Queima de estoque", 07/10/2026).
+const nTiposAba = computed(() => (TYPE_HEADERS.value[department.value] ?? []).length)
 
 // SSH-style contas filters
 const contasSearch = ref('')
@@ -3237,8 +3244,8 @@ watch(department, async () => {
                   @keydown.enter="submitNewAcc"
                 />
               </td>
-              <td v-for="i in 10" :key="i" class="border border-border text-center text-xs text-muted-foreground">—</td>
-              <td v-for="i in 3" :key="`obs-${i}`" class="border border-border text-center text-xs text-muted-foreground">—</td>
+              <td v-for="i in nTiposAba * 2" :key="i" class="border border-border text-center text-xs text-muted-foreground">—</td>
+              <td v-for="i in STORE_NOTE_FIELDS.length" :key="`obs-${i}`" class="border border-border text-center text-xs text-muted-foreground">—</td>
               <td class="border border-border px-1 py-1 text-center">
                 <div class="flex gap-0.5 justify-center">
                   <button class="p-1 text-emerald-600 hover:bg-emerald-50 rounded" :disabled="addingAcc" @click="submitNewAcc">
@@ -3463,8 +3470,8 @@ watch(department, async () => {
                 />
                 <span v-else>{{ fmtCommission(acc.commission) }}</span>
               </td>
-              <!-- 5 pairs marg/frete -->
-              <template v-for="t in 5" :key="t">
+              <!-- pares marg/frete: um por tipo ativo da aba -->
+              <template v-for="t in nTiposAba" :key="t">
                 <td
                   class="border border-border px-2 py-1.5 text-xs cursor-pointer text-center"
                   :class="{
