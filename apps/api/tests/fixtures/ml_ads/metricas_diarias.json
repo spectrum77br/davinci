@@ -1,0 +1,108 @@
+{
+ "_fonte": "Formato copiado da doc oficial do ML (developers.mercadolivre.com.br/pt_br/product-ads-para-catalogo-e-user-products-leitura, atualizada 06/07/2026); IDs e valores inventados. A amostra ao vivo de 07/10/2026 nao foi coletada (chamada bloqueada pela permissao do ambiente) — trocar por amostra real sanitizada.",
+ "paging": {
+  "offset": 0,
+  "total": 7,
+  "limit": 50
+ },
+ "results": [
+  {
+   "date": "2026-10-01",
+   "clicks": 260,
+   "prints": 11020,
+   "cost": 95.12,
+   "cpc": 0.37,
+   "ctr": 2.36,
+   "direct_amount": 980.0,
+   "indirect_amount": 210.0,
+   "total_amount": 1190.0,
+   "direct_units_quantity": 6,
+   "indirect_units_quantity": 0,
+   "units_quantity": 6
+  },
+  {
+   "date": "2026-10-02",
+   "clicks": 241,
+   "prints": 10310,
+   "cost": 88.4,
+   "cpc": 0.37,
+   "ctr": 2.34,
+   "direct_amount": 1100.0,
+   "indirect_amount": 90.0,
+   "total_amount": 1190.0,
+   "direct_units_quantity": 7,
+   "indirect_units_quantity": 0,
+   "units_quantity": 7
+  },
+  {
+   "date": "2026-10-03",
+   "clicks": 279,
+   "prints": 12001,
+   "cost": 101.77,
+   "cpc": 0.36,
+   "ctr": 2.32,
+   "direct_amount": 640.0,
+   "indirect_amount": 300.5,
+   "total_amount": 940.5,
+   "direct_units_quantity": 4,
+   "indirect_units_quantity": 0,
+   "units_quantity": 4
+  },
+  {
+   "date": "2026-10-04",
+   "clicks": 215,
+   "prints": 9870,
+   "cost": 79.9,
+   "cpc": 0.37,
+   "ctr": 2.18,
+   "direct_amount": 720.0,
+   "indirect_amount": 120.0,
+   "total_amount": 840.0,
+   "direct_units_quantity": 5,
+   "indirect_units_quantity": 0,
+   "units_quantity": 5
+  },
+  {
+   "date": "2026-10-05",
+   "clicks": 250,
+   "prints": 10544,
+   "cost": 92.31,
+   "cpc": 0.37,
+   "ctr": 2.37,
+   "direct_amount": 860.0,
+   "indirect_amount": 240.0,
+   "total_amount": 1100.0,
+   "direct_units_quantity": 6,
+   "indirect_units_quantity": 0,
+   "units_quantity": 6
+  },
+  {
+   "date": "2026-10-06",
+   "clicks": 235,
+   "prints": 12609,
+   "cost": 93.0,
+   "cpc": 0.4,
+   "ctr": 1.86,
+   "direct_amount": 680.0,
+   "indirect_amount": 420.0,
+   "total_amount": 1100.0,
+   "direct_units_quantity": 4,
+   "indirect_units_quantity": 0,
+   "units_quantity": 4
+  },
+  {
+   "date": "2026-10-07",
+   "clicks": 0,
+   "prints": 0,
+   "cost": 0.0,
+   "cpc": 0.0,
+   "ctr": 0.0,
+   "direct_amount": 0.0,
+   "indirect_amount": 0.0,
+   "total_amount": 0.0,
+   "direct_units_quantity": 0,
+   "indirect_units_quantity": 0,
+   "units_quantity": 0
+  }
+ ]
+}

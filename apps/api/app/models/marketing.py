@@ -113,6 +113,28 @@ class MarketingAccount(Base, TimestampMixin):
         Boolean, nullable=False, default=False, server_default=text("false")
     )
 
+    # ─── Estado da última coleta de Ads pela API (07/10/2026, migration 0379) ─
+    # Antes a coleta do Mercado Livre gravava "deu certo" mesmo quando o ML
+    # respondia 404 — o gasto ficou zerado meses sem ninguém saber. Agora cada
+    # rodada grava aqui o resultado: 'ok' | 'erro' | 'sem_permissao' (conta sem
+    # Publicidade liberada / token sem o escopo de anúncios). NULL = conta que
+    # não passa pela coleta da API (Shopee via AdsPower) ou ainda não rodou.
+    sync_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    sync_erro: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Última tentativa (dê certo ou não) e último sucesso completo.
+    sync_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    sync_ok_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # ─── Conta arquivada (07/10/2026, migration 0379) ────────────────────
+    # != NULL: a conta sai de TODAS as telas e consultas do Marketing, a
+    # coleta não a chama e o robô de demonstração não escreve nela. Nada é
+    # apagado (as linhas antigas continuam no banco). As 2 contas "Kfa" da
+    # Amazon criadas pelo /seed de demonstração nasceram arquivadas pela 0379.
+    arquivada_em: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    arquivada_motivo: Mapped[str | None] = mapped_column(Text, nullable=True)
+
 
 class MarketingCommand(Base, TimestampMixin):
     """Outbox queue for ad actions. Every action — manual (a button click)
@@ -180,6 +202,19 @@ class MarketingSchedule(Base, TimestampMixin):
 
 class MarketingMetric(Base, TimestampMixin):
     __tablename__ = "marketing_metrics"
+    __table_args__ = (
+        # Uma linha DIÁRIA (intensity=0, 12:00 UTC) por conta e dia (0379):
+        # duas coletas ao mesmo tempo (cron + backfill) não duplicam o dia —
+        # a soma das telas contaria o gasto em dobro. As linhas por hora
+        # (intensity != 0) ficam de fora.
+        Index(
+            "uq_marketing_metrics_conta_dia",
+            "account_id",
+            "timestamp",
+            unique=True,
+            postgresql_where=text("intensity = 0"),
+        ),
+    )
 
     id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
     account_id: Mapped[UUID] = mapped_column(

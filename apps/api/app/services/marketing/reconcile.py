@@ -60,6 +60,8 @@ async def reconcile_schedules(session: AsyncSession) -> dict[str, Any]:
             select(MarketingAccount).where(
                 MarketingAccount.schedule_enabled.is_(True),
                 MarketingAccount.platform.in_(tuple(_RECONCILABLE_PLATFORMS)),
+                # Conta arquivada (0379) não recebe comando de agenda.
+                MarketingAccount.arquivada_em.is_(None),
             )
         )
     ).scalars().all()

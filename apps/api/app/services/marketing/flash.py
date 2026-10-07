@@ -59,6 +59,7 @@ async def enqueue_flash_duplicates(session: AsyncSession) -> dict[str, Any]:
                 # não abre a conta. Blinda contra uma linha por vertical
                 # (celular/mala/eletro) que por acaso fique com o flag ligado.
                 MarketingAccount.adspower_user_id.isnot(None),
+                MarketingAccount.arquivada_em.is_(None),
             )
         )
     ).scalars().all()

@@ -249,6 +249,15 @@ class Settings(BaseSettings):
     # explicitly applied. Locally we enable it via ENABLE_MARKETING=true.
     enable_marketing: bool = False
 
+    # Robô de DEMONSTRAÇÃO do Marketing (services/marketing/agent.py + POST
+    # /api/marketing/seed): inventa gasto/faturamento/impressões com números
+    # aleatórios e grava em marketing_metrics a cada 15 min. Foi ele que
+    # encheu as 2 contas "Kfa" da Amazon com ~190 linhas falsas por dia
+    # (descoberto em 07/10/2026). Desligado de fábrica: com False o cron
+    # marketing_agent_cycle, o "rodar ciclo agora" e o /seed não escrevem
+    # nada. Só ligue (MARKETING_AGENTE_SIMULADO=true) numa base de teste.
+    marketing_agente_simulado: bool = False
+
     # Marketing AGENT NODE — the single dedicated machine allowed to talk
     # to Shopee/ML Ads (works around the per-partner rate-limit). ONLY when
     # this is true does the worker REGISTER the marketing command-consumer

@@ -671,6 +671,11 @@ async def marketing_agent_cycle(ctx: dict) -> None:
     """
     if not _settings.enable_marketing:
         return
+    # O "agente" é um robô de DEMONSTRAÇÃO (números aleatórios). Desligado de
+    # fábrica desde 07/10/2026: era ele que gravava ~190 linhas falsas por dia
+    # nas contas "Kfa" da Amazon. Só roda com MARKETING_AGENTE_SIMULADO=true.
+    if not _settings.marketing_agente_simulado:
+        return
     from app.models.marketing import MarketingAccount
     from app.services.marketing.agent import (
         agent_decision_cycle as _marketing_run_cycle,
@@ -679,7 +684,10 @@ async def marketing_agent_cycle(ctx: dict) -> None:
     async with session_scope() as s:
         rows = (
             await s.execute(
-                select(MarketingAccount).where(MarketingAccount.agent_enabled.is_(True))
+                select(MarketingAccount).where(
+                    MarketingAccount.agent_enabled.is_(True),
+                    MarketingAccount.arquivada_em.is_(None),
+                )
             )
         ).scalars().all()
         ids = [a.id for a in rows]
@@ -706,7 +714,7 @@ async def marketing_full_sync(ctx: dict) -> None:
     if not _settings.enable_marketing:
         return
     from app.services.marketing.amazon_sync import sync_all_amazon_integrations
-    from app.services.marketing.ml_sync import sync_all_ml_integrations
+    from app.services.marketing.ml_sync import resumir_status, sync_all_ml_integrations
 
     async with session_scope() as s:
         results: dict[str, list[dict] | str] = {}
@@ -725,7 +733,16 @@ async def marketing_full_sync(ctx: dict) -> None:
     summary = {
         k: (len(v) if isinstance(v, list) else 0) for k, v in results.items()
     }
-    logger.info("marketing_full_sync", **summary)
+    # Por status, para o log mostrar falha em vez de só "mercadolivre=18"
+    # (até 07/10/2026 o 404 do ML aparecia como sucesso aqui).
+    ml = results.get("mercadolivre")
+    if isinstance(ml, list):
+        summary.update({f"ml_{k}": v for k, v in resumir_status(ml).items()})
+    falhou = any(
+        isinstance(v, str) or (isinstance(v, list) and any(r.get("status") == "erro" for r in v))
+        for v in results.values()
+    )
+    (logger.warning if falhou else logger.info)("marketing_full_sync", **summary)
 
 
 async def marketing_shopee_tick(ctx: dict) -> None:

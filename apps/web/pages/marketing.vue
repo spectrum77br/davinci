@@ -37,6 +37,12 @@ type Account = {
   spend_today: number
   revenue_today: number
   impressions_today: number
+  // Última coleta de Ads pela API (ML): 'ok' | 'erro' | 'sem_permissao'.
+  // null = conta fora da coleta (Shopee) ou que ainda não rodou.
+  sync_status?: 'ok' | 'erro' | 'sem_permissao' | string | null
+  sync_erro?: string | null
+  sync_em?: string | null
+  sync_ok_em?: string | null
 }
 type PeriodCell = {
   credit: number | null
@@ -264,6 +270,23 @@ const statusDot: Record<string, string> = {
 }
 const statusLabel: Record<string, string> = {
   active: 'Ativo', reduced: 'Reduzido', paused: 'Pausado', off: 'Desligado',
+}
+// Coleta de Ads que NÃO deu certo aparece no lugar do status: até 07/10/2026
+// o 404 do ML virava "gasto 0" sem aviso nenhum na tela.
+const syncLabel: Record<string, string> = {
+  erro: 'Erro na coleta', sem_permissao: 'Sem permissão de Ads',
+}
+const syncDot: Record<string, string> = {
+  erro: 'bg-red-500', sem_permissao: 'bg-amber-500',
+}
+function syncProblema(a: Account): string | null {
+  return a.sync_status && a.sync_status !== 'ok' ? a.sync_status : null
+}
+function syncTitulo(a: Account): string {
+  const quando = a.sync_ok_em
+    ? `Última coleta boa: ${new Date(a.sync_ok_em).toLocaleString('pt-BR')}`
+    : 'Nenhuma coleta boa ainda'
+  return [a.sync_erro, quando].filter(Boolean).join(' — ')
 }
 const actionLabel: Record<string, string> = {
   no_action: 'Sem ação', enable_all: 'LIGAR ADS', disable_all: 'DESLIGAR ADS',
@@ -965,7 +988,11 @@ definePageMeta({ middleware: [] })
                   </tr>
                   <tr class="border-t"><td class="px-2 py-1 text-muted-foreground">Status</td>
                     <td v-for="a in filteredAccounts" :key="a.id" class="px-2 py-1 whitespace-nowrap">
-                      <span class="inline-flex items-center gap-1">
+                      <span v-if="syncProblema(a)" class="inline-flex items-center gap-1" :title="syncTitulo(a)">
+                        <span class="size-2 rounded-full" :class="syncDot[syncProblema(a) ?? ''] ?? 'bg-red-500'" />
+                        <span class="text-xs">{{ syncLabel[syncProblema(a) ?? ''] ?? syncProblema(a) }}</span>
+                      </span>
+                      <span v-else class="inline-flex items-center gap-1">
                         <span class="size-2 rounded-full" :class="statusDot[a.status] ?? 'bg-zinc-400'" />
                         <span class="text-xs">{{ statusLabel[a.status] ?? a.status }}</span>
                       </span>

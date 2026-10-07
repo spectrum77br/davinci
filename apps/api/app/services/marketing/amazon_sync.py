@@ -143,6 +143,8 @@ async def sync_all_amazon_integrations(session: AsyncSession) -> list[dict[str, 
                     Integration.status == "active",
                     Integration.platform == "amazon",
                     Integration.ads_enabled.is_(True),
+                    # Loja arquivada não é chamada (igual ao ML, 07/10/2026).
+                    Integration.archived_at.is_(None),
                 )
             )
         )

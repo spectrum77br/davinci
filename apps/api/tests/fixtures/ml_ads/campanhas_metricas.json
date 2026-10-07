@@ -1,0 +1,58 @@
+{
+ "_fonte": "Formato copiado da doc oficial do ML (developers.mercadolivre.com.br/pt_br/product-ads-para-catalogo-e-user-products-leitura, atualizada 06/07/2026); IDs e valores inventados. A amostra ao vivo de 07/10/2026 nao foi coletada (chamada bloqueada pela permissao do ambiente) — trocar por amostra real sanitizada.",
+ "paging": {
+  "offset": 0,
+  "total": 2,
+  "limit": 50
+ },
+ "results": [
+  {
+   "id": 111111,
+   "name": "Malas G",
+   "status": "active",
+   "strategy": "PROFITABILITY",
+   "roas_target": 8.0,
+   "channel": "marketplace",
+   "advertiser_id": 900001,
+   "budget": 120.0,
+   "automatic_budget": false,
+   "metrics": {
+    "clicks": 1402,
+    "prints": 61234,
+    "cost": 510.4,
+    "cpc": 0.36,
+    "ctr": 2.29,
+    "direct_amount": 4980.0,
+    "indirect_amount": 1220.5,
+    "total_amount": 6200.5,
+    "direct_units_quantity": 31,
+    "indirect_units_quantity": 0,
+    "units_quantity": 31
+   }
+  },
+  {
+   "id": 222222,
+   "name": "Mochilas",
+   "status": "paused",
+   "strategy": "INCREASE",
+   "roas_target": 5.0,
+   "channel": "marketplace",
+   "advertiser_id": 900001,
+   "budget": 30.0,
+   "automatic_budget": false,
+   "metrics": {
+    "clicks": 88,
+    "prints": 5120,
+    "cost": 40.1,
+    "cpc": 0.46,
+    "ctr": 1.72,
+    "direct_amount": 0.0,
+    "indirect_amount": 159.9,
+    "total_amount": 159.9,
+    "direct_units_quantity": 1,
+    "indirect_units_quantity": 0,
+    "units_quantity": 1
+   }
+  }
+ ]
+}

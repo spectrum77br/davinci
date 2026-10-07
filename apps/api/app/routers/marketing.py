@@ -68,6 +68,12 @@ class AccountOut(BaseModel):
     spend_today: float
     revenue_today: float
     impressions_today: int
+    # Última coleta de Ads pela API (ML/Amazon): 'ok' | 'erro' |
+    # 'sem_permissao'; None = conta fora da coleta (Shopee) ou ainda não rodou.
+    sync_status: str | None = None
+    sync_erro: str | None = None
+    sync_em: datetime | None = None
+    sync_ok_em: datetime | None = None
 
 
 class ScheduleIn(BaseModel):
@@ -204,7 +210,15 @@ def _account_out(a: MarketingAccount) -> AccountOut:
         current_intensity=a.current_intensity, credit_balance=a.credit_balance,
         spend_today=a.spend_today, revenue_today=a.revenue_today,
         impressions_today=a.impressions_today,
+        sync_status=a.sync_status, sync_erro=a.sync_erro,
+        sync_em=a.sync_em, sync_ok_em=a.sync_ok_em,
     )
+
+
+# Conta arquivada (marketing_accounts.arquivada_em, 0379) some de TODAS as
+# listas/somas do Marketing — é como as contas de demonstração da Amazon
+# ficam fora sem apagar nenhuma linha.
+_ATIVA = MarketingAccount.arquivada_em.is_(None)
 
 
 def _assessment(intensity: int) -> str:
@@ -229,7 +243,7 @@ async def list_accounts(
     department: str | None = Query(None),
     platform: str | None = Query(None),
 ) -> list[AccountOut]:
-    stmt = select(MarketingAccount)
+    stmt = select(MarketingAccount).where(_ATIVA)
     if department:
         stmt = stmt.where(MarketingAccount.department == department)
     if platform:
@@ -249,7 +263,7 @@ async def metrics_summary(
     period1_days: int = Query(7, ge=1, le=365),
     period2_days: int = Query(30, ge=1, le=365),
 ) -> dict:
-    stmt = select(MarketingAccount)
+    stmt = select(MarketingAccount).where(_ATIVA)
     if department:
         stmt = stmt.where(MarketingAccount.department == department)
     if platform:
@@ -356,7 +370,7 @@ async def metrics_timeseries(
     """Per-account daily time series for the chart on the Métricas tab.
     Returns one row per (account, day) pre-aggregated so the frontend can
     plot N accounts × M days without further client-side groupBy."""
-    stmt = select(MarketingAccount)
+    stmt = select(MarketingAccount).where(_ATIVA)
     if department:
         stmt = stmt.where(MarketingAccount.department == department)
     if platform:
@@ -575,7 +589,7 @@ async def agents_status(
                     MarketingAccount,
                     MarketingAccount.id == MarketingDecision.account_id,
                 )
-                .where(MarketingAccount.platform == platform)
+                .where(MarketingAccount.platform == platform, _ATIVA)
                 .order_by(MarketingDecision.timestamp.desc())
                 .limit(1)
             )
@@ -592,6 +606,7 @@ async def agents_status(
                     and_(
                         MarketingAccount.platform == platform,
                         MarketingDecision.timestamp >= today_start,
+                        _ATIVA,
                     )
                 )
             )
@@ -622,6 +637,7 @@ async def list_decisions(
     stmt = (
         select(MarketingDecision, MarketingAccount)
         .join(MarketingAccount, MarketingAccount.id == MarketingDecision.account_id)
+        .where(_ATIVA)
     )
     if account_id:
         stmt = stmt.where(MarketingDecision.account_id == account_id)
@@ -651,7 +667,7 @@ async def get_intensity(
     department: str | None = Query(None),
     platform: str | None = Query(None),
 ) -> list[IntensityOut]:
-    stmt = select(MarketingAccount)
+    stmt = select(MarketingAccount).where(_ATIVA)
     if department:
         stmt = stmt.where(MarketingAccount.department == department)
     if platform:
@@ -683,7 +699,9 @@ async def list_patterns(
     account_id: UUID | None = Query(None),
     active: bool | None = Query(True),
 ) -> list[PatternOut]:
-    stmt = select(MarketingPattern)
+    stmt = select(MarketingPattern).join(
+        MarketingAccount, MarketingAccount.id == MarketingPattern.account_id
+    ).where(_ATIVA)
     if account_id:
         stmt = stmt.where(MarketingPattern.account_id == account_id)
     if active is not None:
@@ -711,7 +729,7 @@ async def list_credit_alerts(
     critical ≤2, warning ≤4, ok otherwise."""
     rows = (
         await session.execute(
-            select(MarketingAccount).where(MarketingAccount.platform == "shopee")
+            select(MarketingAccount).where(MarketingAccount.platform == "shopee", _ATIVA)
         )
     ).scalars().all()
     now = datetime.now(UTC)
@@ -770,7 +788,7 @@ async def list_campaigns(
     then by account name, then department, then campaign name."""
     stmt = select(MarketingCampaign, MarketingAccount).join(
         MarketingAccount, MarketingAccount.id == MarketingCampaign.account_id
-    )
+    ).where(_ATIVA)
     if account_id is not None:
         stmt = stmt.where(MarketingCampaign.account_id == account_id)
     if department:
@@ -1273,7 +1291,11 @@ async def trigger_cycle(
     _user: Annotated[User, Depends(require_permission("marketing", "edit"))],
 ) -> dict:
     result = await agent_decision_cycle(account_id)
-    return result or {"status": "skipped", "reason": "agent_disabled"}
+    if result:
+        return result
+    if not get_settings().marketing_agente_simulado:
+        return {"status": "skipped", "reason": "agente_simulado_desligado"}
+    return {"status": "skipped", "reason": "agent_disabled"}
 
 
 @router.post("/trigger-all")
@@ -1283,7 +1305,9 @@ async def trigger_all(
 ) -> list[dict]:
     rows = (
         await session.execute(
-            select(MarketingAccount).where(MarketingAccount.agent_enabled.is_(True))
+            select(MarketingAccount).where(
+                MarketingAccount.agent_enabled.is_(True), _ATIVA
+            )
         )
     ).scalars().all()
     out: list[dict] = []
@@ -1387,7 +1411,19 @@ async def seed(
 ) -> dict:
     """Idempotent: accounts + base schedules + 30 days of metrics + recent
     decisions + 4 learned patterns per account. Re-runs are no-ops once
-    the accounts exist."""
+    the accounts exist.
+
+    DEMONSTRAÇÃO: tudo aqui é inventado (random). Foi daqui que nasceram as 2
+    contas "Kfa" falsas da Amazon. Desde 07/10/2026 só funciona com
+    MARKETING_AGENTE_SIMULADO=true; desligado responde 409."""
+    if not get_settings().marketing_agente_simulado:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail={
+                "code": "seed_desligado",
+                "message": "Dados de demonstração desligados (MARKETING_AGENTE_SIMULADO).",
+            },
+        )
     existing = (
         await session.execute(select(func.count()).select_from(MarketingAccount))
     ).scalar_one()

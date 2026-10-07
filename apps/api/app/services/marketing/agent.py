@@ -24,6 +24,7 @@ import structlog
 from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import get_settings
 from app.db import session_scope
 from app.models.marketing import (
     MarketingAccount,
@@ -317,10 +318,16 @@ async def detect_patterns(
 
 async def agent_decision_cycle(account_id: UUID) -> dict | None:
     """One cycle for one MarketingAccount. Used both by the worker cron and
-    by the manual trigger endpoint, hence its own session_scope."""
+    by the manual trigger endpoint, hence its own session_scope.
+
+    MOCK: grava métricas inventadas em marketing_metrics. Desde 07/10/2026 só
+    roda com MARKETING_AGENTE_SIMULADO=true e nunca em conta arquivada —
+    com a trava desligada devolve None sem abrir sessão."""
+    if not get_settings().marketing_agente_simulado:
+        return None
     async with session_scope() as session:
         account = await session.get(MarketingAccount, account_id)
-        if account is None or not account.agent_enabled:
+        if account is None or not account.agent_enabled or account.arquivada_em is not None:
             return None
 
         signals = await collect_signals(account)

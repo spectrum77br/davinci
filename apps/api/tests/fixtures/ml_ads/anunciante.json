@@ -1,0 +1,11 @@
+{
+ "_fonte": "Formato copiado da doc oficial do ML (developers.mercadolivre.com.br/pt_br/product-ads-para-catalogo-e-user-products-leitura, atualizada 06/07/2026); IDs e valores inventados. A amostra ao vivo de 07/10/2026 nao foi coletada (chamada bloqueada pela permissao do ambiente) — trocar por amostra real sanitizada.",
+ "advertisers": [
+  {
+   "advertiser_id": 900001,
+   "site_id": "MLB",
+   "advertiser_name": "Loja Teste",
+   "account_name": "MLB - LOJA TESTE"
+  }
+ ]
+}
