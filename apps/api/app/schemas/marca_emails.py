@@ -19,7 +19,8 @@ class MarcaEmailsWrite(BaseModel):
 
 
 class MarcaEmailsRef(BaseModel):
-    """Marca enxuta (email_padroes:view): `site` só pra tela sugerir sac@dominio."""
+    """Marca enxuta (email_padroes:view): `site` pra tela sugerir sac@dominio
+    e, com `sac_fone` (WhatsApp da marca), montar a assinatura pro Tuta."""
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -28,6 +29,7 @@ class MarcaEmailsRef(BaseModel):
     slug: str
     ativo: bool
     site: str | None = None
+    sac_fone: str | None = None
     has_logo: bool = False
     updated_at: datetime
 

@@ -14,7 +14,11 @@ async def setup(db, make_user, auth_as, *, edit=True):
     user = await make_user(permissions={"email_padroes": {"view": True, "edit": edit}})
     auth_as(user)
     redes = Marca(
-        nome="uranyx", slug="uranyx", site="https://uranyx.com.br", sac_email="sac@uranyx.com.br"
+        nome="uranyx",
+        slug="uranyx",
+        site="https://uranyx.com.br",
+        sac_email="sac@uranyx.com.br",
+        sac_fone="11983517003",
     )
     reservada = Marca(nome="doscatos", slug="doscatos")
     sem_redes = Marca(nome="12paxion", slug="12paxion")
@@ -42,6 +46,8 @@ async def test_grid_so_marcas_com_conta_em_redes(client, db, make_user, auth_as)
     assert [row["marca"]["nome"] for row in data["rows"]] == ["uranyx"]
     row = data["rows"][0]
     assert row["marca"]["site"] == "https://uranyx.com.br"
+    # WhatsApp da marca vai pra assinatura do Tuta.
+    assert row["marca"]["sac_fone"] == "11983517003"
     # O e-mail de login das redes (sac_email) não é copiado pra cá.
     assert row["emails"] == {"sac": None, "duvidas": None, "atacado": None}
     assert "senha" not in str(data)

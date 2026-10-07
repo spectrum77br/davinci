@@ -4,18 +4,21 @@
 // Sociais. Substituiu a matriz de assinaturas por canal: os endereços são
 // aliases da conta principal do Tuta, que tem uma assinatura só. Só cadastro:
 // nada aqui cria endereço nem envia e-mail.
-import { computed, onMounted, ref } from 'vue'
+// Assinatura (Eduardo, 07/10/2026): prévia por marca e caixa, com "Copiar
+// assinatura" (HTML com logo) pra colar em Configurações → E-mail do Tuta.
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { TABS_CADASTROS } from '~/lib/navGroups'
 import { apiErrMsg, MARCAS_ERROS } from '~/lib/apiError'
 import { MARCA_EMAIL_TIPO_LABELS, type MarcaEmailTipo } from '~/lib/redesSociais'
-import { AlertCircle, Check, Copy, Loader2, RefreshCw, Wand2 } from 'lucide-vue-next'
+import { formatarFone, montarAssinatura, nomeExibicao, visualDe } from '~/lib/assinaturaEmail'
+import { AlertCircle, Check, ClipboardCopy, Code, Copy, Loader2, RefreshCw, Wand2 } from 'lucide-vue-next'
 
 definePageMeta({
   middleware: ['permission'],
   permission: { resource: 'email_padroes', action: 'view' },
 })
 
-type Marca = { id: string; nome: string; slug: string; ativo: boolean; site: string | null; has_logo: boolean; updated_at: string }
+type Marca = { id: string; nome: string; slug: string; ativo: boolean; site: string | null; sac_fone?: string | null; has_logo: boolean; updated_at: string }
 type Emails = Record<MarcaEmailTipo, string | null>
 type Row = { marca: Marca; emails: Emails }
 type Grid = { tipos: MarcaEmailTipo[]; rows: Row[] }
@@ -97,6 +100,62 @@ async function copiar(email: string) {
     setTimeout(() => { if (copiado.value === email) copiado.value = '' }, 1500)
   } catch { error.value = 'Não foi possível copiar. Selecione o e-mail e copie com Ctrl+C ou Cmd+C.' }
 }
+
+// ---- Assinatura pro Tuta
+const sigMarcaId = ref('')
+const sigTipo = ref<MarcaEmailTipo>('sac')
+const sigEmail = ref('')
+const sigFone = ref('')
+const sigAviso = ref('')
+const sigEl = ref<HTMLElement | null>(null)
+// Sem escolha ainda: a primeira marca que já tem e-mail salvo (hoje a uranyx).
+const sigRow = computed(() => grid.value.rows.find(r => r.marca.id === sigMarcaId.value)
+  ?? grid.value.rows.find(r => Object.values(r.emails).some(Boolean)) ?? grid.value.rows[0] ?? null)
+// E-mail da caixa: o que está digitado/salvo na tabela; vazio = sugestão do site.
+function emailDaCaixa(row: Row, tipo: MarcaEmailTipo) {
+  return normal(rascunhos.value[row.marca.id]?.[tipo]) || row.emails[tipo] || sugestao(row.marca, tipo)
+}
+function resetAssinatura() {
+  const row = sigRow.value
+  if (!row) return
+  sigEmail.value = emailDaCaixa(row, sigTipo.value)
+  sigFone.value = formatarFone(row.marca.sac_fone)
+}
+watch([() => sigRow.value?.marca.id, sigTipo], resetAssinatura)
+const assinaturaHtml = computed(() => sigRow.value ? montarAssinatura(sigRow.value.marca, sigTipo.value, sigEmail.value, sigFone.value) : '')
+function avisar(msg: string) {
+  sigAviso.value = msg
+  setTimeout(() => { if (sigAviso.value === msg) sigAviso.value = '' }, 3500)
+}
+// Copia como HTML (o Tuta cola com logo, tabela e links) + texto puro de reserva.
+async function copiarAssinatura() {
+  const html = assinaturaHtml.value
+  if (!html) return
+  await nextTick()
+  const texto = sigEl.value?.innerText ?? ''
+  try {
+    await navigator.clipboard.write([new ClipboardItem({
+      'text/html': new Blob([html], { type: 'text/html' }),
+      'text/plain': new Blob([texto], { type: 'text/plain' }),
+    })])
+    avisar('Assinatura copiada. Cole no Tuta com Cmd+V.')
+  } catch {
+    // Sem Clipboard API: seleciona a prévia renderizada e usa o copiar do navegador.
+    let ok = false
+    if (sigEl.value) {
+      const r = document.createRange()
+      r.selectNodeContents(sigEl.value)
+      const sel = getSelection()
+      sel?.removeAllRanges(); sel?.addRange(r)
+      try { ok = document.execCommand('copy') } catch {}
+    }
+    avisar(ok ? 'Assinatura copiada. Cole no Tuta com Cmd+V.' : 'Não deu para copiar direto. A assinatura ficou selecionada: use Cmd+C.')
+  }
+}
+async function copiarAssinaturaHtml() {
+  try { await navigator.clipboard.writeText(assinaturaHtml.value); avisar('HTML copiado.') }
+  catch { avisar('Não foi possível copiar o HTML.') }
+}
 </script>
 
 <template>
@@ -156,5 +215,67 @@ async function copiar(email: string) {
       <p>Só aparecem as marcas com conta em <NuxtLink to="/redes-sociais" class="underline">Redes Sociais</NuxtLink>. Para incluir outra marca, cadastre a conta dela lá.</p>
       <p>Os endereços são criados no Tuta (Configurações → E-mail). Aqui fica só o cadastro: o DaVinci não cria endereço nem envia e-mail por eles. Deixe vazio e salve para apagar.</p>
     </div>
+
+    <section v-if="sigRow" class="space-y-3 pt-2" aria-labelledby="sig-titulo">
+      <div>
+        <h2 id="sig-titulo" class="text-lg font-semibold">Assinatura</h2>
+        <p class="text-sm text-muted-foreground">Escolha a marca e a caixa, confira a prévia e copie para colar no Tuta. O logo vem do site da marca.</p>
+      </div>
+      <div class="flex flex-wrap gap-2" role="group" aria-label="Marca da assinatura">
+        <button v-for="row in grid.rows" :key="row.marca.id" type="button"
+          class="flex items-center gap-2 rounded-full border px-4 py-1.5 text-sm font-semibold hover:bg-accent"
+          :class="row.marca.id === sigRow.marca.id ? 'border-primary ring-1 ring-primary' : ''"
+          :aria-pressed="row.marca.id === sigRow.marca.id" @click="sigMarcaId = row.marca.id">
+          <span class="size-2.5 rounded-full" :style="{ background: visualDe(row.marca.slug).cor }" />{{ nomeExibicao(row.marca) }}
+        </button>
+      </div>
+      <div class="grid gap-4 lg:grid-cols-[280px_minmax(0,1fr)] items-start">
+        <div class="rounded-lg border p-4 space-y-4">
+          <div class="space-y-1.5">
+            <span class="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Caixa de e-mail</span>
+            <div class="flex gap-1.5" role="group" aria-label="Caixa de e-mail">
+              <Button v-for="t in grid.tipos" :key="t" size="sm" class="flex-1" :variant="sigTipo === t ? 'default' : 'outline'"
+                :aria-pressed="sigTipo === t" @click="sigTipo = t">{{ tipoLabel(t) }}</Button>
+            </div>
+          </div>
+          <div class="space-y-1.5">
+            <label for="sig-email" class="text-xs font-semibold uppercase tracking-wider text-muted-foreground">E-mail</label>
+            <Input id="sig-email" v-model="sigEmail" type="email" autocomplete="off" spellcheck="false" class="h-9" />
+          </div>
+          <div class="space-y-1.5">
+            <label for="sig-fone" class="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Telefone / WhatsApp</label>
+            <Input id="sig-fone" v-model="sigFone" autocomplete="off" class="h-9" placeholder="+55 11 90000-0000" />
+          </div>
+          <p class="text-xs text-muted-foreground">E-mail e telefone vêm do cadastro (tabela acima e Redes Sociais). Mudar aqui vale só para esta cópia.</p>
+          <p v-if="!visualDe(sigRow.marca.slug).logo" class="text-xs rounded-md border border-amber-500/40 bg-amber-500/10 p-2">
+            Sem logo público para {{ nomeExibicao(sigRow.marca) }}: a assinatura usa o nome em texto.
+          </p>
+        </div>
+        <div class="space-y-3 min-w-0">
+          <div class="rounded-lg border overflow-hidden">
+            <div class="border-b px-4 py-2 text-xs text-muted-foreground">De: <span class="font-mono">{{ sigEmail }}</span></div>
+            <div class="bg-white text-[#222] px-6 py-6 overflow-x-auto">
+              <p class="mb-4 text-sm leading-relaxed text-[#333]" style="font-family:Arial,Helvetica,sans-serif">Olá, tudo bem?<br>Segue abaixo como a assinatura vai aparecer no fim do e-mail.</p>
+              <div ref="sigEl" v-html="assinaturaHtml" />
+            </div>
+          </div>
+          <div class="flex flex-wrap items-center gap-2">
+            <Button size="sm" @click="copiarAssinatura"><ClipboardCopy class="size-4 mr-1" /> Copiar assinatura</Button>
+            <Button size="sm" variant="outline" @click="copiarAssinaturaHtml"><Code class="size-4 mr-1" /> Copiar HTML</Button>
+            <span role="status" class="text-sm font-semibold text-emerald-600">{{ sigAviso }}</span>
+          </div>
+          <details class="rounded-lg border px-4 py-3 text-sm">
+            <summary class="cursor-pointer font-semibold">Como colar no Tuta</summary>
+            <ol class="mt-2 list-decimal space-y-1 pl-5 text-muted-foreground">
+              <li>Abra o Tuta logado na conta da marca (ex.: <b class="text-foreground">{{ sigEmail }}</b>).</li>
+              <li>Vá em <b class="text-foreground">Configurações → E-mail → Assinatura de e-mail</b> e escolha <b class="text-foreground">Personalizada</b>.</li>
+              <li>Apague o texto padrão e cole com <b class="text-foreground">Cmd+V</b> o que foi copiado em “Copiar assinatura”.</li>
+              <li>Se a imagem não aparecer na colagem, use “Copiar HTML” e cole no modo HTML/código do editor.</li>
+              <li>Repita para cada endereço que tiver assinatura própria.</li>
+            </ol>
+          </details>
+        </div>
+      </div>
+    </section>
   </div>
 </template>
