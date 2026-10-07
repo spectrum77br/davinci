@@ -1998,6 +1998,12 @@ async function confirmarExcluir() {
                   <Trash2 class="size-3.5" />
                 </button>
               </div>
+              <!-- 07/10 (Vinicius): quando foi posto em Resolver — pra acompanhar os concluídos. -->
+              <div
+                v-if="row.resolvido && row.resolvido_at"
+                class="mt-0.5 text-[11px] tabular-nums text-muted-foreground"
+                :title="`fechado em ${fmtDateTime(row.resolvido_at)}`"
+              >fechado {{ fmtCurto(row.resolvido_at) }}</div>
             </td>
           </tr>
         </tbody>
