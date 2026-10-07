@@ -3203,7 +3203,7 @@ watch(department, async () => {
             Contas de Venda — {{ DEPARTMENTS.find(d => d.value === department)?.label }}
           </h3>
           <p class="text-xs text-muted-foreground">
-            {{ accountsCurrent.length }} conta(s) com 5 pares margem/frete por tipo — clique para editar
+            {{ accountsCurrent.length }} conta(s) com {{ nTiposAba }} pares margem/frete por tipo — clique para editar
           </p>
         </div>
         <div class="flex gap-2">
