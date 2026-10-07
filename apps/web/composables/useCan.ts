@@ -24,6 +24,9 @@ export type Resource =
   | 'logistica'
   | 'notas_fiscais'
   | 'chamados'
+  | 'garantias'
+  | 'garantias_atendimento'
+  | 'garantias_cpf'
   | 'atendimento'
   | 'sincronizacoes'
   | 'sync_logs'
@@ -87,7 +90,16 @@ export const RESOURCE_GROUPS: ResourceGroup[] = [
     // tiraria a caixa de quem acabou de ganhá-la, ou mostraria caixinhas que
     // não mudam nada. O tipo e o rótulo continuam; quando a fase acabar,
     // 'atendimento' volta para o fim desta lista.
-    resources: ['devolucoes', 'reembolso', 'logistica', 'notas_fiscais', 'chamados'],
+    // Garantias (07/10/2026) — Painel de Garantia Uranyx. As três permissões
+    // do documento (§6) não cabem num recurso só (a cascata delete→edit→view):
+    // `garantias` view = Consultar e edit = Cadastrar; `garantias_atendimento`
+    // edit = Registrar atendimento ("Vincular à garantia" no /atendimento);
+    // `garantias_cpf` view = ver o CPF completo no detalhe. Mesmos nomes em
+    // apps/api/app/schemas/permissions.py.
+    resources: [
+      'devolucoes', 'reembolso', 'logistica', 'notas_fiscais', 'chamados',
+      'garantias', 'garantias_atendimento', 'garantias_cpf',
+    ],
   },
   {
     // Financeiro = só Consórcio (na tela de Permissões). Valuation é
@@ -169,6 +181,9 @@ export const RESOURCE_LABELS: Record<Resource, string> = {
   logistica: 'Logística',
   notas_fiscais: 'Notas Fiscais',
   chamados: 'Chamados',
+  garantias: 'Garantias — Consultar (view) e Cadastrar (edit)',
+  garantias_atendimento: 'Garantias — Registrar atendimento (edit)',
+  garantias_cpf: 'Garantias — Ver o CPF completo (view)',
   atendimento: 'Atendimento',
   sincronizacoes: 'Sincronizações',
   sync_logs: 'Sync Logs',

@@ -34,6 +34,7 @@ PAGINAS: dict[str, str] = {
     "/financeiro/simulacao": "Simulação",
     "/financeiro/dnp": "DNP",
     "/imobilizado": "Cadastros › Imobilizado",
+    "/garantias": "Pós-venda › Garantias",
     "/importacao": "Importação",
     "/sincronizacoes": "Integrações › Sincronizações",
     "/integrations": "Integrações",
@@ -108,6 +109,7 @@ API: dict[str, str] = {
     "/api/users": "Admin › Usuários",
     "/api/tarefas": "Tarefas",
     "/api/imobilizado": "Cadastros › Imobilizado",
+    "/api/garantias": "Pós-venda › Garantias",
     "/api/claude-conector": "Tarefas › Conector do Claude",
     "/api/claude-mcp": "Claude (conector)",
     "/api/settings": "Admin › Configurações",
@@ -189,6 +191,13 @@ ACOES: dict[tuple[str, str], str] = {
     # computador de quem clicou — o DaVinci só fica sabendo pelo aviso da tela
     # (nada muda no banco). O corpo leva só conversa, resultado e código.
     ("POST", "/api/atendimento/adspower/aberto"): "abriu o perfil da loja no AdsPower",
+    # Garantias (07/10/2026): as tabelas ficam fora do gatilho (nome/CPF/texto
+    # do comprador), então o evento vem daqui — sem o corpo (SEM_CORPO). O
+    # detalhe (quem e o quê) fica no log da própria garantia.
+    ("POST", "/api/garantias"): "cadastrou uma garantia",
+    ("PUT", "/api/garantias/{garantia_id}"): "corrigiu uma garantia",
+    ("POST", "/api/garantias/{garantia_id}/recalcular"): "conferiu a entrega de uma garantia",
+    ("POST", "/api/garantias/{garantia_id}/atendimentos"): "vinculou atendimento a uma garantia",
 }
 
 # Só a frase (o evento fica se o banco mudou): GET que carimba e retorno de
@@ -211,6 +220,12 @@ REVELACOES: dict[tuple[str, str], str] = {
     ("GET", "/api/redes-sociais/marca/{marca_id}/sac-senha"): "viu a senha do SAC da marca",
     ("GET", "/api/redes-sociais/{rede_id}/senha"): "viu a senha da rede social",
     ("GET", "/api/companies/{company_id}/proxy/senha"): "viu a senha do proxy da empresa",
+    # Garantias (§6 "quem consultou"): abrir o detalhe mostra nome e CPF.
+    ("GET", "/api/garantias/{garantia_id}"): "abriu uma garantia (dados do cliente)",
+    # O "ao informar o pedido" do cadastro sugere nome e — para quem tem
+    # "Ver o CPF completo" — o CPF do pedido, antes de existir garantia (sem
+    # log próprio onde gravar): fica aqui.
+    ("GET", "/api/garantias/pedido"): "consultou pedido para cadastrar garantia (dados do cliente)",
 }
 
 # Pedidos de pessoa que na verdade rodam robô: o recarregar automático da
@@ -236,6 +251,8 @@ GET_QUE_GRAVA = re.compile(
 SEM_CORPO = re.compile(
     r"^/api/(auth/|pricing/mega/login|companies/unlock|financeiro/valuation/unlock|nfse/unlock"
     r"|claude-mcp/|webhooks/|aprovar/|atendimento/(conversas|rascunhos|mensagens)/)"
+    # Garantias (07/10/2026): o corpo leva nome, CPF e a solução do atendimento.
+    r"|^/api/garantias(/|$)"
     r"|/callback|/certificates/[^/]+/download$"
     # Proxy da empresa (26/09/2026): o corpo leva usuário/senha, e colar a
     # linha "ip:porta:usuario:senha" no campo IP escaparia da máscara.
@@ -278,6 +295,10 @@ TABELAS: dict[str, str] = {
     "chamado_mensagem": "Mensagem do chamado",
     "tarefas": "Tarefa",
     "imobilizado": "Item do imobilizado",
+    "garantias": "Garantia",
+    "garantia_atendimentos": "Atendimento da garantia",
+    "garantia_atendimento_anexos": "Anexo do atendimento da garantia",
+    "garantia_log": "Log da garantia",
     "imobilizado_historico": "Histórico do imobilizado",
     "faturas": "Fatura",
     "integrations": "Integração",

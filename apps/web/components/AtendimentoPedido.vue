@@ -149,6 +149,11 @@ export function situacaoDoSaldo(it: Pick<ItemEstoque, 'existe' | 'saldo' | 'quan
 //   anteriores do mesmo cliente. Vem em `avaliacoes` (a mesma resposta do
 //   cartão da conversa, AtendimentoAvaliacao); sem ela, o resumo do
 //   `contexto.avaliacoes` (nota e estado, sem texto nem foto).
+// - Garantia Uranyx (07/10/2026), no topo da aba Pedido: as garantias do
+//   CPF/pedido da conversa, os vínculos já feitos, o alerta de CPF sem
+//   garantia e o "Vincular à garantia" (AtendimentoGarantia). Vem em
+//   `garantia` (a conversa busca); o botão segue a permissão "Registrar
+//   atendimento", não o `canEdit` da caixa (só leitura não bloqueia).
 import {
   CheckCircle2,
   ChevronDown,
@@ -203,6 +208,7 @@ import {
   type EventoCliente,
   type PedidoMkt,
 } from '~/components/AtendimentoPlataforma.vue'
+import type { AcessoGarantia, SituacaoConversa } from '~/lib/garantias'
 
 const props = withDefaults(defineProps<{
   conversa: ConversaDetalhe
@@ -231,7 +237,16 @@ const props = withDefaults(defineProps<{
   // As avaliações de venda (GET /conversas/{id}/avaliacoes, que o cartão da
   // conversa busca). null = ainda não veio (ou falhou): vale o contexto.
   avaliacoes?: AvaliacoesResposta | null
-}>(), { cliente: null, leituraAtiva: true, atualizavel: null, painel: null, painelCarregando: false, painelErro: null, avaliacoes: null })
+  // Garantia Uranyx (GET /api/garantias/conversa/{id}, que a conversa busca)
+  // e o que esta pessoa pode fazer com ela. Sem acesso, o bloco não aparece.
+  garantia?: SituacaoConversa | null
+  garantiaCarregando?: boolean
+  garantiaErro?: string | null
+  garantiaAcesso?: AcessoGarantia | null
+}>(), {
+  cliente: null, leituraAtiva: true, atualizavel: null, painel: null, painelCarregando: false, painelErro: null, avaliacoes: null,
+  garantia: null, garantiaCarregando: false, garantiaErro: null, garantiaAcesso: null,
+})
 const emit = defineEmits<{
   (e: 'fechar'): void
   (e: 'atualizado', r: { pedido_mkt: PedidoMkt | null; produto: CartaoProduto | null }): void
@@ -242,6 +257,10 @@ const emit = defineEmits<{
   (e: 'recarregarPainel', atualizar: boolean): void
   // Foto da avaliação: a conversa abre grande (o mesmo visor das fotos do chat).
   (e: 'abrirImagem', i: { url: string; nome: string }): void
+  // Garantia: abrir o "Vincular à garantia" (o modal mora na conversa, que
+  // tem as mensagens) e reler o bloco.
+  (e: 'vincularGarantia'): void
+  (e: 'recarregarGarantia'): void
 }>()
 const { api } = useApi()
 const toasts = useToasts()
@@ -521,6 +540,18 @@ const avaliacoesPendentes = computed(() => avaliacoesDoPedido.value.filter((a) =
     <div class="min-h-0 flex-1 overflow-y-auto overscroll-contain text-sm">
       <!-- ═══ PEDIDO ═══ -->
       <div v-if="aba === 'pedido'" class="space-y-4 px-3 py-3">
+        <!-- Garantia Uranyx: garantias do CPF/pedido, alerta e o Vincular -->
+        <AtendimentoGarantia
+          v-if="garantiaAcesso?.ve"
+          :situacao="garantia"
+          :carregando="garantiaCarregando"
+          :erro="garantiaErro"
+          :pode-vincular="garantiaAcesso.registra"
+          :pode-abrir="garantiaAcesso.consulta"
+          :pode-cadastrar="garantiaAcesso.cadastra"
+          @vincular="emit('vincularGarantia')"
+          @recarregar="emit('recarregarGarantia')"
+        />
         <!-- nº do Bling e os botões "Abrir no Bling" / "Abrir na plataforma" -->
         <div v-if="pnl?.pedido || linksPedido.bling || linksPedido.plataforma" class="flex flex-wrap items-center gap-1.5 text-xs">
           <span v-if="pnl?.pedido" class="inline-flex min-w-0 items-center gap-1" :title="pnl.pedido.situacao ? `situação no Bling: ${pnl.pedido.situacao}` : ''">

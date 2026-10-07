@@ -111,7 +111,8 @@ const lojaFalsa = () => ({ user: usuarioAtual, isAdmin: usuarioAtual?.role === '
 const can = loadLib('../composables/useCan.ts', { useAuthStore: lojaFalsa })
 {
   const posVenda = can.RESOURCE_GROUPS.find((g) => g.label === 'Pós-venda')
-  assert.deepEqual(posVenda.resources, ['devolucoes', 'reembolso', 'logistica', 'notas_fiscais', 'chamados'],
+  // Garantias (07/10/2026) entra no grupo com as três permissões do documento.
+  assert.deepEqual(posVenda.resources, ['devolucoes', 'reembolso', 'logistica', 'notas_fiscais', 'chamados', 'garantias', 'garantias_atendimento', 'garantias_cpf'],
     'o recurso continua fora da tela de Permissões (quem vê e quem mexe vêm do /me)')
   for (const g of can.RESOURCE_GROUPS) assert.ok(!g.resources.includes('atendimento'), `atendimento fora do grupo ${g.label}`)
   assert.ok(!can.RESOURCES.includes('atendimento'))

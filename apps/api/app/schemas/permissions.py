@@ -33,6 +33,15 @@ Resource = Literal[
     # plataformas (origem Margem/Logística/Devolução), com histórico,
     # réplica manual/automática e alterar status Bling.
     "chamados",
+    # Garantias (07/10/2026) — Painel de Garantia Uranyx, em Pós-venda. As
+    # três permissões do documento não cabem num recurso só (a cascata
+    # delete→edit→view): `garantias` view = Consultar e edit = Cadastrar;
+    # `garantias_atendimento` edit = Registrar atendimento ("Vincular à
+    # garantia" no Comunicador); `garantias_cpf` view = ver o CPF completo no
+    # detalhe (a lista é sempre mascarada). Mesmos nomes no useCan.ts.
+    "garantias",
+    "garantias_atendimento",
+    "garantias_cpf",
     # Atendimento (25/09/2026) — caixa única das conversas de Shopee, ML,
     # TikTok e Amazon, com rascunho da IA. view lê a fila; edit responde e
     # mexe no manual/respostas prontas; delete apaga regra/modelo. Mesmo

@@ -3022,6 +3022,19 @@ async def historico_manutencao(ctx: dict) -> None:
     )
 
 
+async def garantias_recalcular_entrega(ctx: dict) -> None:
+    """Painel de Garantia Uranyx (07/10/2026), ponto 5: relê a data de entrega
+    de cada garantia na Logística. A que estava "Aguardando entrega" ganha os
+    prazos; a que teve a entrega corrigida na origem é recalculada — as duas
+    com linha no log da garantia (em nome do sistema). Só SELECT na Logística
+    e UPDATE nas garantias: nenhuma chamada a marketplace."""
+    from app.services import garantia as garantia_svc
+
+    async with session_scope() as s:
+        contagem = await garantia_svc.recalcular_todas(s)
+    logger.info("garantias_recalcular_entrega", **contagem)
+
+
 async def alerts_cleanup(ctx: dict) -> None:
     """Delete alerts older than 60 days (B10). Carona diária da Ouvidoria:
     rodadas com mais de 30 dias (`ouvidoria_rodadas` cresce centenas de linhas
@@ -4330,6 +4343,7 @@ class WorkerSettings:
         push_lote_stock_to_bling_job,
         alerts_cleanup,
         historico_manutencao,
+        garantias_recalcular_entrega,
         condicao_especial_gc,
         func(mega_midias_recontar, timeout=2400),
         # 2 h: a 1ª rodada com os vídeos converte o acervo inteiro (2,9 GB).
@@ -4629,6 +4643,10 @@ class WorkerSettings:
         cron(alerts_cleanup, hour=6, minute=0, run_at_startup=False),  # 03:00 BRT
         # Sistema › Histórico: gatilho em tabela nova + guarda 1 ano.
         cron(historico_manutencao, hour=6, minute=40, run_at_startup=True),  # 03:40 BRT
+        # Garantias: a data de entrega que apareceu ou foi corrigida (ponto 5).
+        # :57, depois das varreduras da Logística (:09/:14/:29/:39/:44/:49/:59
+        # fecham a hora com a entrega mais nova). Só banco, segundos.
+        cron(garantias_recalcular_entrega, minute=57, run_at_startup=False),
         # Condição Especial de segmento encerrada há 30d (services/condicao_especial).
         cron(condicao_especial_gc, hour=6, minute=10, run_at_startup=False),  # 03:10 BRT
         # Recontagem das pastas do MEGA (fotos/vídeos/embalagens): 04:25 BRT,

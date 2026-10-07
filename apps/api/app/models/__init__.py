@@ -115,6 +115,15 @@ from app.models.financeiro import (
     NCMCache,
 )
 from app.models.flex import FlexAnuncioEstado, FlexConta, FlexEmergencia, FlexLog, FlexPedido
+from app.models.garantia import (
+    GARANTIA_COBERTURAS,
+    GARANTIA_LOG_ACOES,
+    GARANTIA_TIPOS_PROBLEMA,
+    Garantia,
+    GarantiaAtendimento,
+    GarantiaAtendimentoAnexo,
+    GarantiaLog,
+)
 from app.models.imagem_publica import ImagemPublica
 from app.models.imobilizado import IMOBILIZADO_STATUS, Imobilizado, ImobilizadoHistorico
 from app.models.importacao import (
@@ -451,6 +460,13 @@ __all__ = [
     "SyncLogAction",
     "Fatura",
     "Tarefa",
+    "GARANTIA_COBERTURAS",
+    "GARANTIA_LOG_ACOES",
+    "GARANTIA_TIPOS_PROBLEMA",
+    "Garantia",
+    "GarantiaAtendimento",
+    "GarantiaAtendimentoAnexo",
+    "GarantiaLog",
     "IMOBILIZADO_STATUS",
     "Imobilizado",
     "ImobilizadoHistorico",

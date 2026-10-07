@@ -418,6 +418,13 @@ _CLEANUP_TABLES = (
     "marca_email_padroes",
     "marca_emails",
     "marcas",
+    # Garantias (0380): anexo -> atendimento -> garantia; log -> garantia;
+    # todas com FK RESTRICT -> users. As três primeiras só aceitam INSERT (o
+    # gatilho garantia_so_insercao): o _wipe liga a marca de expurgo.
+    "garantia_atendimento_anexos",
+    "garantia_atendimentos",
+    "garantia_log",
+    "garantias",
     "imobilizado_historico",  # FK RESTRICT -> imobilizado/users
     "imobilizado",  # FK RESTRICT -> users
     "tarefas",  # FK RESTRICT -> users
@@ -515,6 +522,8 @@ _CLEANUP_TABLES = (
 
 
 async def _wipe(db: AsyncSession) -> None:
+    # Só nesta transação: libera o DELETE nas tabelas "só inserção" da garantia.
+    await db.execute(text("SELECT set_config('davinci.garantia_expurgo', 'sim', true)"))
     for tbl in _CLEANUP_TABLES:
         await db.execute(text(f"DELETE FROM {tbl}"))  # noqa: S608
     await db.commit()

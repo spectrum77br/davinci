@@ -80,6 +80,11 @@ TETO_POR_PEDIDO = 200
 # congelado), a coleta (a fila do executor do Mac, regravada a cada passo) e o
 # saldo de Ads lido em cada coleta são da máquina; quem apertou "Gerar agora"
 # fica na própria execução (`criado_por`).
+# Garantias (07/10/2026, migration 0380): o cadastro guarda NOME e CPF do
+# cliente, e o atendimento copia o TEXTO e os anexos da conversa — mesma razão
+# do atendimento. As quatro já têm trilha própria (`garantia_log`: quem
+# consultou, cadastrou, alterou — CPF mascarado — e o robô que recalculou), e
+# o Histórico geral continua com o evento de cada ação (nomes.ACOES).
 EXCLUIDAS = re.compile(
     r"^(historico_(evento|alteracao)$|sync_logs|background_job|alembic_version$|auth_codes$"
     r"|oauth_states$|pricing_push_idempotency$|pricing_push_confirmacao$"
@@ -95,7 +100,9 @@ EXCLUIDAS = re.compile(
     # texto de comprador (atendimento) e os índices que a máquina escreve
     r"|atendimento_(mensagens|rascunhos|avaliacoes|conversas|avaliacoes_loja"
     r"|pedidos_comprador|etiquetas_historico|reclamacoes|carrinhos|publicacoes|comentarios"
-    r"|automacao_registros)$)"
+    r"|automacao_registros)$"
+    # Garantias: nome, CPF e texto do comprador (trilha própria em garantia_log)
+    r"|garantias$|garantia_(atendimentos|atendimento_anexos|log)$)"
     r"|(_bak|bkp|backup)",
     re.I,
 )

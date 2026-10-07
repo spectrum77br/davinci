@@ -6,7 +6,7 @@ import {
   Receipt, TrendingUp, Settings, BarChart3,
   ClipboardList, ChevronDown, ChevronLeft, ChevronRight, Warehouse,
   Coins, FileText, Calculator, FlaskConical, Ship, Landmark, Headset,
-  ReceiptText, MessagesSquare, Radar, History, Flag, Inbox, Smartphone, X,
+  ReceiptText, MessagesSquare, Radar, History, Flag, Inbox, Smartphone, ShieldCheck, X,
 } from 'lucide-vue-next'
 import { allowedTabs, TABS_CADASTROS, TABS_NF, TABS_SISTEMA } from '~/lib/navGroups'
 
@@ -133,6 +133,10 @@ type Item = {
   atendimentoOnly?: boolean
   // /app-uranyx: só quem vem com `app_uranyx: true` no /me (nem todo admin).
   appUranyxOnly?: boolean
+  // Some do menu de quem não tem `view` no `resource` (admin sempre vê). Os
+  // itens antigos com `resource` aparecem para todos e a página manda para o
+  // 403; o de Garantias (07/10/2026) já nasce escondido de quem não consulta.
+  soComPermissao?: boolean
   featureFlag?: 'marketing'
   // Grupo unificado (lib/navGroups): o item destaca quando QUALQUER rota
   // do grupo está ativa, e some quando o usuário não pode ver nenhuma aba.
@@ -189,6 +193,11 @@ const sections = computed<Section[]>(() => [
       { to: '/logistica', label: 'Logística', icon: Headset, resource: 'logistica' },
       { to: '/notas-fiscais', label: 'Notas fiscais', icon: FileText, resource: 'notas_fiscais' },
       { to: '/chamados', label: 'Chamados', icon: MessagesSquare, resource: 'chamados' },
+      // Garantias (07/10/2026): Painel de Garantia Uranyx — cadastro, prazos de
+      // hardware/software e os atendimentos vinculados no /atendimento. Só
+      // para quem tem "Consultar" (garantias.view); quem só registra
+      // atendimento vincula pela conversa, sem a página.
+      { to: '/garantias', label: 'Garantias', icon: ShieldCheck, resource: 'garantias', soComPermissao: true },
       // Atendimento (25/09/2026): conversas de Shopee, ML, TikTok e Amazon numa
       // caixa só, com a resposta sugerida pela IA. Fase de observação
       // (07/10/2026): toda pessoa ativa vê (só leitura, com "Sugerir" e 👍/👎);
@@ -306,6 +315,7 @@ const visibleSections = computed(() => {
         if (it.historicoOnly && auth.user?.historico !== true) return false
         if (it.atendimentoOnly && auth.user?.atendimento !== true) return false
         if (it.appUranyxOnly && auth.user?.app_uranyx !== true) return false
+        if (it.soComPermissao && it.resource && !auth.isAdmin && auth.user?.permissions?.[it.resource]?.view !== true) return false
         if (it.featureFlag === 'marketing' && !enableMarketing.value) return false
         return true
       }),

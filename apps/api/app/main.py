@@ -79,6 +79,7 @@ from app.routers import stores as stores_router
 from app.routers import sync as sync_router
 from app.routers import tarefas as tarefas_router
 from app.routers import imobilizado as imobilizado_router
+from app.routers import garantias as garantias_router
 from app.routers import users as users_router
 from app.routers import webhooks as webhooks_router
 from app.services.bootstrap import promote_owner_if_needed
@@ -247,6 +248,9 @@ app.include_router(aprovar_margem_router.router)
 app.include_router(margem_audit_router.router)
 app.include_router(tarefas_router.router)
 app.include_router(imobilizado_router.router)
+app.include_router(garantias_router.router)
+# Garantias: nada de query de /api/garantias no access log (nome/CPF ficam no corpo).
+garantias_router.mascarar_query_no_access_log()
 app.include_router(faturas_router.router)
 app.include_router(automacoes_router.router)
 app.include_router(logistica_router.router)

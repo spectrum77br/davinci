@@ -203,6 +203,7 @@ import { abrirEm, type ReclamacoesResposta } from '~/components/AtendimentoRecla
 import { AVISO_RESPOSTA_PUBLICA, perguntaRespostaPublica, type AvaliacoesResposta } from '~/components/AtendimentoAvaliacao.vue'
 import { PopoverContent, PopoverPortal, PopoverRoot, PopoverTrigger } from 'reka-ui'
 import { onKeyStroke, useMediaQuery } from '@vueuse/core'
+import { errosDaApi as errosDaGarantia, type AtendimentoGarantia as AtendimentoDaGarantia, type SituacaoConversa } from '~/lib/garantias'
 import {
   AVISO_MODERACAO_MAGALU,
   AVISO_SO_LEITURA,
@@ -1760,6 +1761,49 @@ function atualizarTudo() {
   void reclamacaoRef.value?.carregar()
   void avaliacaoRef.value?.carregar()
   void carregarAbas(props.conversaId)
+  void carregarGarantia(props.conversaId)
+}
+
+// ─── Garantia Uranyx (07/10/2026) ───────────────────────────────────────────
+// GET /api/garantias/conversa/{id}: as garantias do CPF/pedido desta
+// conversa, os vínculos já feitos e o alerta de CPF sem garantia (o CPF fica
+// no servidor). Vai para o bloco do painel Pedido; o "Vincular à garantia"
+// (modal GarantiaVincular, aqui porque precisa das mensagens) abre pelo
+// bloco ou pelo botão do cabeçalho. Quem pode é a permissão da garantia
+// ("Registrar atendimento"), não o `canEdit` da caixa: quem só lê o
+// Atendimento também vincula. O Direct do Instagram (`ig:`) não vincula.
+const garantiaAcesso = useGarantiaAcesso()
+const garantiaSituacao = ref<SituacaoConversa | null>(null)
+const garantiaCarregando = ref(false)
+const garantiaErro = ref<string | null>(null)
+const vincularAberto = ref(false)
+let geracaoGarantia = 0
+async function carregarGarantia(id: string) {
+  if (!id || id.startsWith('ig:') || !garantiaAcesso.value.ve) {
+    garantiaSituacao.value = null
+    return
+  }
+  const g = ++geracaoGarantia
+  garantiaCarregando.value = true
+  try {
+    const r = await api<SituacaoConversa>(`/api/garantias/conversa/${encodeURIComponent(id)}`)
+    if (g !== geracaoGarantia || id !== props.conversaId) return
+    garantiaSituacao.value = r
+    garantiaErro.value = null
+  } catch (e: any) {
+    if (g !== geracaoGarantia || id !== props.conversaId) return
+    // 404 sem código = a rota ainda não está no servidor: o bloco some quieto.
+    const semRota = statusDoErro(e) === 404 && !e?.data?.detail?.code
+    garantiaErro.value = semRota ? null : errosDaGarantia(e).geral || 'Não consegui ler a garantia agora.'
+  } finally {
+    if (g === geracaoGarantia) garantiaCarregando.value = false
+  }
+}
+const podeVincularGarantia = computed(() => garantiaAcesso.value.registra && !!conversa.value && !conversa.value.id.startsWith('ig:'))
+function aoVincularGarantia(a: AtendimentoDaGarantia) {
+  vincularAberto.value = false
+  toasts.success(`Vinculado à garantia #${a.garantia_id}`, `${a.tipo_problema === 'hardware' ? 'Hardware' : 'Software'} · ${a.cobertura_rotulo}`)
+  void carregarGarantia(props.conversaId)
 }
 
 // ─── caixa: Responder × Nota interna ────────────────────────────────────────
@@ -1984,6 +2028,10 @@ watch(() => props.conversaId, (novo, velho) => {
   // guardada no AtendimentoNota (por conversa).
   painelDados.value = null
   painelErro.value = null
+  // A garantia também (e o modal de vínculo fecha).
+  garantiaSituacao.value = null
+  garantiaErro.value = null
+  vincularAberto.value = false
   // O cartão da reclamação relê sozinho (watch do conversaId dele).
   reclamacoesQtd.value = 0
   // O da avaliação também; o que ele trouxe era da conversa anterior.
@@ -2014,6 +2062,7 @@ watch(() => props.conversaId, (novo, velho) => {
     void carregarPainel(novo)
     esperarAbas(novo)
     void carregarAbas(novo)
+    void carregarGarantia(novo)
   }
 }, { immediate: true })
 </script>
@@ -2208,6 +2257,23 @@ watch(() => props.conversaId, (novo, velho) => {
                   <span class="ml-1">{{ conversa.situacao === 'fechada' ? 'Reabrir' : 'Fechar conversa' }}</span>
                 </Button>
               </template>
+              <!-- Garantia Uranyx: fora do canEdit — quem tem "Registrar
+                   atendimento" vincula mesmo só lendo a caixa. A bolinha é o
+                   alerta de CPF sem garantia (§5.3). -->
+              <Button
+                v-if="podeVincularGarantia"
+                size="sm"
+                variant="outline"
+                class="relative h-7 px-2 text-xs"
+                :title="garantiaSituacao?.alerta_cpf_sem_garantia ? 'o CPF deste pedido não tem garantia cadastrada — vincular à garantia' : 'vincular esta conversa a uma garantia Uranyx'"
+                aria-label="Vincular à garantia"
+                data-vincular-garantia-cabecalho
+                @click="vincularAberto = true"
+              >
+                <ShieldCheck class="size-3.5" />
+                <span class="ml-1 hidden 2xl:inline">Vincular à garantia</span>
+                <span v-if="garantiaSituacao?.alerta_cpf_sem_garantia" class="absolute -right-1 -top-1 size-2.5 rounded-full bg-amber-500 ring-2 ring-background" aria-hidden="true" />
+              </Button>
               <!-- Só abre o caso na Amazon (outra aba): vale até para quem só lê. -->
               <Button
                 v-if="amazon.caso"
@@ -2924,6 +2990,12 @@ watch(() => props.conversaId, (novo, velho) => {
         :painel-carregando="painelCarregando"
         :painel-erro="painelErro"
         :avaliacoes="avaliacoesDados"
+        :garantia="garantiaSituacao"
+        :garantia-carregando="garantiaCarregando"
+        :garantia-erro="garantiaErro"
+        :garantia-acesso="garantiaAcesso"
+        @vincular-garantia="vincularAberto = true"
+        @recarregar-garantia="carregarGarantia(detalhe!.conversa.id)"
         @fechar="alternarPedido"
         @atualizado="aoAtualizarPedido"
         @ir-para="irPara"
@@ -2931,6 +3003,17 @@ watch(() => props.conversaId, (novo, velho) => {
         @recarregar-painel="(atualizar: boolean) => carregarPainel(detalhe!.conversa.id, atualizar)"
       />
     </aside>
+
+    <!-- Vincular à garantia (§5.1) -->
+    <GarantiaVincular
+      v-if="vincularAberto && detalhe && podeVincularGarantia"
+      :key="detalhe.conversa.id"
+      :conversa="detalhe.conversa"
+      :mensagens="detalhe.mensagens"
+      :situacao="garantiaSituacao"
+      @fechar="vincularAberto = false"
+      @vinculado="aoVincularGarantia"
+    />
 
     <!-- foto do cliente, grande -->
     <div
