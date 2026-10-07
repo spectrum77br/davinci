@@ -6,6 +6,7 @@
 // vermelho. 01/10 (Vinicius: "hoje apareceria tudo junto, certo?"): clicar abre a ficha do
 // anúncio — a mesma da aba — já na parte desta denúncia.
 import { computed, onMounted, ref } from 'vue'
+import { Image as ImageIcon } from 'lucide-vue-next'
 import {
   type DenunciaEnviada, dataBr, numero, pillResultado, pillSituacaoDenuncia, prazoVencido,
 } from '~/lib/denuncia'
@@ -64,6 +65,9 @@ async function carregar() {
     carregando.value = false
   }
 }
+
+// 07/10/2026: o botão "prints" do processo do SEI abre, embaixo da linha, o que foi anexado (DenunciaPrintsAnatel)
+const printsAberto = ref<number | null>(null)
 
 function porCanal(c: string) {
   canal.value = canal.value === c ? '' : c
@@ -130,7 +134,8 @@ defineExpose({ carregar })
           <tr v-else-if="itens.length === 0">
             <td colspan="8" class="text-center text-muted-foreground py-6">nenhuma denúncia neste filtro</td>
           </tr>
-          <tr v-for="g in itens" :key="g.id" class="cursor-pointer" @click="emit('abrir', g)">
+          <template v-for="g in itens" :key="g.id">
+          <tr class="cursor-pointer" @click="emit('abrir', g)">
             <td class="text-xs tabular-nums whitespace-nowrap">
               {{ dataBr(g.data, false) }}
               <div v-if="g.hora" class="text-[11px] text-muted-foreground">{{ g.hora }}</div>
@@ -139,7 +144,19 @@ defineExpose({ carregar })
               {{ g.canal }}
               <div v-if="g.tipo && g.tipo !== 'normal'" class="text-[11px] text-muted-foreground">{{ g.tipo }}</div>
             </td>
-            <td class="font-mono text-xs">{{ g.protocolo || '—' }}</td>
+            <td class="font-mono text-xs whitespace-nowrap">
+              {{ g.protocolo || '—' }}
+              <button
+                v-if="g.canal === 'Anatel SEI' && g.protocolo"
+                type="button"
+                class="ml-1 inline-flex items-center gap-1 rounded border px-1.5 py-0.5 font-sans text-[11px] text-primary hover:border-primary"
+                :class="printsAberto === g.id ? 'border-primary bg-primary/5' : ''"
+                title="ver os prints que foram anexados neste processo"
+                @click.stop="printsAberto = printsAberto === g.id ? null : g.id"
+              >
+                <ImageIcon class="size-3" /> prints
+              </button>
+            </td>
             <td class="text-xs max-w-[260px]">
               <div class="truncate" :title="g.anuncios.map((x) => `${x.id} ${x.loja || ''}`).join('\n')">
                 <template v-if="g.anuncios.length === 1">{{ g.anuncios[0].loja || g.anuncios[0].id }}</template>
@@ -156,6 +173,12 @@ defineExpose({ carregar })
             </td>
             <td class="text-right text-xs tabular-nums">{{ g.tentativa || 1 }}</td>
           </tr>
+          <tr v-if="printsAberto === g.id && g.protocolo">
+            <td colspan="8" class="bg-muted/20">
+              <DenunciaPrintsAnatel :protocolo="g.protocolo" />
+            </td>
+          </tr>
+          </template>
         </tbody>
       </table>
     </div>

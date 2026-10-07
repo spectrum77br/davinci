@@ -4,7 +4,7 @@
 // vendas, na loja, na Anatel, caso), os anúncios dela com o status de cada um e os processos do
 // SEI. Clicar num anúncio mostra a ficha dele aqui mesmo, com "voltar à loja".
 import { computed, ref, watch } from 'vue'
-import { ArrowLeft, ExternalLink } from 'lucide-vue-next'
+import { ArrowLeft, ExternalLink, Image as ImageIcon } from 'lucide-vue-next'
 import {
   type InfoAnuncio, type PainelAnuncio, type PainelLoja, ETIQ_ANATEL, ETIQ_LOJA, ativoSimNao, dataBr,
   etiquetas, nomeGrupo, numero, pillAtivo, pillGrupo, pillTom,
@@ -19,6 +19,9 @@ const carregando = ref(false)
 const erro = ref<string | null>(null)
 const anuncioAberto = ref<string | null>(null)
 const info = ref<InfoAnuncio | null>(null)
+// 07/10/2026: "prints" do processo do SEI = o que foi anexado (DenunciaPrintsAnatel); só nº de processo do SEI
+const printsAberto = ref<string | null>(null)
+const RE_PROCESSO_SEI = /^\d{5}\.\d{6}\/\d{4}-\d{2}$/
 
 const aberta = computed({
   get: () => !!props.loja,
@@ -149,11 +152,26 @@ const subtitulo = computed(() =>
       <section v-if="processos.length">
         <h3 class="text-sm font-semibold mb-2">Processos na Anatel ({{ processos.length }})</h3>
         <ul class="space-y-1 text-sm">
-          <li v-for="p in processos" :key="p.protocolo" class="flex items-center gap-3 rounded-lg border px-3 py-2">
-            <span class="font-mono text-xs">{{ p.protocolo }}</span>
-            <span class="text-xs text-muted-foreground tabular-nums">{{ dataBr(p.data, false) }}</span>
-            <span class="flex-1" />
-            <span class="text-xs text-muted-foreground">{{ p.n }} anúncio{{ p.n > 1 ? 's' : '' }}</span>
+          <li v-for="p in processos" :key="p.protocolo" class="rounded-lg border">
+            <div class="flex items-center gap-3 px-3 py-2">
+              <span class="font-mono text-xs">{{ p.protocolo }}</span>
+              <span class="text-xs text-muted-foreground tabular-nums">{{ dataBr(p.data, false) }}</span>
+              <span class="flex-1" />
+              <span class="text-xs text-muted-foreground">{{ p.n }} anúncio{{ p.n > 1 ? 's' : '' }}</span>
+              <button
+                v-if="RE_PROCESSO_SEI.test(p.protocolo)"
+                type="button"
+                class="inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[11px] text-primary hover:border-primary"
+                :class="printsAberto === p.protocolo ? 'border-primary bg-primary/5' : ''"
+                title="ver os prints que foram anexados neste processo"
+                @click="printsAberto = printsAberto === p.protocolo ? null : p.protocolo"
+              >
+                <ImageIcon class="size-3" /> prints
+              </button>
+            </div>
+            <div v-if="printsAberto === p.protocolo" class="border-t p-2">
+              <DenunciaPrintsAnatel :protocolo="p.protocolo" />
+            </div>
           </li>
         </ul>
       </section>

@@ -2210,3 +2210,75 @@ async def baixar_prova(
         content_disposition_type="attachment" if baixar else "inline",
         headers=headers,
     )
+
+
+# 07/10/2026 (Vinicius: "uma forma muito eficaz de não mandar nada errado para a Anatel"): uma pessoa bate o olho no que
+# FOI para o SEI. Por anúncio do processo: o print original que virou o anexo "captura do anúncio" (o último print do
+# anúncio até a hora da petição, a mesma escolha do robô) e o PDF exato que foi anexado (a prova "Captura enviada à
+# Anatel (SEI) — processo X", que fica só no anúncio, sem denuncia_id). Print que hoje consta como inválido (tela de
+# captcha, catálogo de outro vendedor — remarcados em 07/10) vem marcado.
+_TIPOS_PRINT = ("Captura no ato", "Captura inválida (tela de verificação)", "Captura inválida (não é a página do anúncio)")
+
+
+def _quando_prova(p: DenunciaProva) -> str:
+    return str((p.dados or {}).get("enviado_em") or "").replace("T", " ")[:19]
+
+
+def _eh_imagem(p: DenunciaProva) -> bool:
+    return str(_prova_resumo(p)["mime"] or "").startswith("image/")
+
+
+@router.get("/anatel/prints")
+async def prints_do_processo(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(_ver)],
+    protocolo: str,
+) -> dict:
+    protocolo = protocolo.strip()
+    dens = (
+        await session.execute(
+            select(DenunciaDenuncia)
+            .where(DenunciaDenuncia.canal == "Anatel SEI", DenunciaDenuncia.protocolo == protocolo)
+            .order_by(DenunciaDenuncia.anuncio_id)
+        )
+    ).scalars().all()
+    if not dens:
+        raise HTTPException(404, detail={"code": "denuncia_processo_nao_encontrado"})
+    ids = {d.anuncio_id for d in dens if d.anuncio_id}
+    anuncios = {
+        a.id: a for a in (await session.execute(select(DenunciaAnuncio).where(DenunciaAnuncio.id.in_(ids)))).scalars()
+    }
+    provas_por_anuncio: dict[str, list[DenunciaProva]] = defaultdict(list)
+    for p in (
+        await session.execute(select(DenunciaProva).where(DenunciaProva.anuncio_id.in_(ids)).order_by(DenunciaProva.id))
+    ).scalars():
+        provas_por_anuncio[p.anuncio_id or ""].append(p)
+    itens, data = [], ""
+    for d in dens:
+        dd = d.dados or {}
+        quando = str(dd.get("sei_peticionado_em") or d.data or "").replace("T", " ")[:19]
+        data = max(data, quando)
+        provas = provas_por_anuncio.get(d.anuncio_id or "", [])
+        enviados = [
+            p for p in provas
+            if str((p.dados or {}).get("obs") or "").startswith("Captura enviada à Anatel") and protocolo in str((p.dados or {}).get("obs"))
+        ]
+        originais = [
+            p for p in provas
+            if p.tipo in _TIPOS_PRINT and _eh_imagem(p) and p not in enviados
+            and not str((p.dados or {}).get("obs") or "").startswith("Captura enviada à Anatel")
+            and (not quando or _quando_prova(p) <= quando)
+        ]
+        original = max(originais, key=lambda p: (_quando_prova(p), p.id)) if originais else None
+        enviado = max(enviados, key=lambda p: p.id) if enviados else None
+        a = anuncios.get(d.anuncio_id or "")
+        itens.append({
+            "anuncio_id": d.anuncio_id,
+            "titulo": a.titulo if a else None,
+            "loja": a.loja if a else None,
+            "marketplace": a.marketplace if a else None,
+            "print": _prova_resumo(original) if original else None,
+            "invalido": original.tipo if original and original.tipo != "Captura no ato" else None,
+            "pdf": _prova_resumo(enviado) if enviado else None,
+        })
+    return {"protocolo": protocolo, "data": data or None, "itens": itens}

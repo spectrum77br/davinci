@@ -1310,3 +1310,44 @@ async def test_relatorio_andamento_da_anatel(client, make_user, auth_as):
                               "Respondida — analisar": 0, "Exigência": 0}
     assert an["movimentos"] == [{"processo": "P-1", "situacao": "Em tratamento",
                                  "area": "GR07FI2 - Fiscalização", "loja": "loja_s1", "site": "Shopee"}]
+
+
+# ───────────────────────────────── prints que foram à Anatel (07/10/2026)
+
+
+async def test_prints_do_processo_sei_mostra_original_e_pdf(client, make_user, auth_as):
+    await client.post("/api/denuncia/sync/anuncios", json={"linhas": [_anuncio("B1", titulo="Oukitel WP60"), _anuncio("B2")]}, headers=H)
+    await client.post(
+        "/api/denuncia/sync/denuncias",
+        json={"linhas": [
+            {"id": 51, "anuncio_id": "B1", "canal": "Anatel SEI", "protocolo": "53500.1/2026-1", "data": "2026-10-05",
+             "sei_peticionado_em": "2026-10-05T10:00:00"},
+            {"id": 52, "anuncio_id": "B2", "canal": "Anatel SEI", "protocolo": "53500.1/2026-1", "data": "2026-10-05",
+             "sei_peticionado_em": "2026-10-05T10:00:00"},
+        ]},
+        headers=H,
+    )
+    linhas = [
+        # B1: print bom de antes da petição + um mais novo, de DEPOIS (não foi o anexado) + o PDF que foi ao SEI
+        {"id": 60, "anuncio_id": "B1", "tipo": "Captura no ato", "nome_original": "B1_20261004_120000.png", "enviado_em": "2026-10-04 12:00:00"},
+        {"id": 61, "anuncio_id": "B1", "tipo": "Captura no ato", "nome_original": "B1_20261006_120000.png", "enviado_em": "2026-10-06 12:00:00"},
+        {"id": 62, "anuncio_id": "B1", "tipo": "Captura no ato", "nome_original": "1_captura_B1.pdf", "enviado_em": "2026-10-05 10:01:00",
+         "obs": "Captura enviada à Anatel (SEI) — processo 53500.1/2026-1 (denúncia por loja)"},
+        # B2: o print anexado era a tela de captcha (remarcado inválido em 07/10)
+        {"id": 63, "anuncio_id": "B2", "tipo": "Captura inválida (tela de verificação)", "nome_original": "B2_20261005_090000.png",
+         "enviado_em": "2026-10-05 09:00:00"},
+        {"id": 64, "anuncio_id": "B2", "tipo": "Captura no ato", "nome_original": "B2_20261005_090000.html", "enviado_em": "2026-10-05 09:00:00"},
+    ]
+    assert (await client.post("/api/denuncia/sync/provas", json={"linhas": linhas}, headers=H)).status_code == 200
+    auth_as(await make_user(permissions={"denuncia": {"view": True}}))
+
+    r = await client.get("/api/denuncia/anatel/prints", params={"protocolo": "53500.1/2026-1"})
+    assert r.status_code == 200, r.text
+    j = r.json()
+    por = {x["anuncio_id"]: x for x in j["itens"]}
+    assert j["data"] == "2026-10-05 10:00:00"
+    assert por["B1"]["print"]["id"] == 60 and por["B1"]["pdf"]["id"] == 62 and por["B1"]["invalido"] is None
+    assert por["B1"]["titulo"] == "Oukitel WP60"
+    assert por["B2"]["print"]["id"] == 63 and por["B2"]["invalido"] == "Captura inválida (tela de verificação)"
+    assert por["B2"]["pdf"] is None
+    assert (await client.get("/api/denuncia/anatel/prints", params={"protocolo": "nada"})).status_code == 404
