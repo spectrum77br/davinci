@@ -812,8 +812,12 @@ class MercadoLivreClient:
                 error_detail=str(e)[:500],
             )
         if item_r.status_code != 200:
+            # Só limite de taxa e erro do servidor do ML são passageiros. 401
+            # (já depois do refresh), 403 (PolicyAgent) e 404 não mudam com
+            # espera: FATAL na hora, sem as rodadas de reenvio (~76 s/célula).
+            passageiro = item_r.status_code in (408, 429) or item_r.status_code >= 500
             return SyncResult(
-                status=SyncStatus.RETRYABLE,
+                status=SyncStatus.RETRYABLE if passageiro else SyncStatus.FATAL,
                 error_code=f"ml_get_item_{item_r.status_code}",
                 error_detail=(item_r.text or "")[:500],
             )

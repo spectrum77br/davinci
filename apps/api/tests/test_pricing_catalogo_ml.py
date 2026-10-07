@@ -96,6 +96,8 @@ class MLFalso:
         self.chamadas: list[tuple[str, str, Any]] = []
         self.recusa_automacao: set[str] = set()
         self.pausa_falha: set[str] = set()
+        # GET /items/{id} com resposta fixa: {mlb: (status, corpo)}.
+        self.get_fixo: dict[str, tuple[int, dict]] = {}
 
     def item(self, mlb: str, **campos) -> None:
         self.itens[mlb] = {
@@ -114,6 +116,9 @@ class MLFalso:
         req = httpx.Request(method, f"https://ml.falso{path}")
         mlb = path.rsplit("/", 1)[-1]
         if method == "GET" and path.startswith("/items/"):
+            if mlb in self.get_fixo:
+                status, corpo = self.get_fixo[mlb]
+                return httpx.Response(status, json=corpo, request=req)
             if mlb not in self.itens:
                 return httpx.Response(404, json={"message": "not_found"}, request=req)
             return httpx.Response(200, json=self.itens[mlb], request=req)
@@ -1989,3 +1994,49 @@ async def test_catalogo_sem_anuncio_com_marca_ainda_nao_lida(
     out = await _push(client, filha_id, z.id)
     assert out["detail"] == "Sem anúncio de catálogo vinculado nesta conta"
     assert ml_falso.chamadas == []
+
+
+@pytest.mark.asyncio
+async def test_update_price_get_403_404_401_e_fatal_na_hora(ml_falso: MLFalso):
+    cli = _cliente_ml()
+    policy = {
+        "blocked_by": "PolicyAgent",
+        "code": "PA_UNAUTHORIZED_RESULT_FROM_POLICIES",
+        "message": "At least one policy returned UNAUTHORIZED.",
+    }
+    for status in (401, 403, 404):
+        ml_falso.chamadas.clear()
+        ml_falso.get_fixo["MLB1"] = (status, policy)
+        r = await cli.update_price("MLB1", 100.0, canal_esperado="kit")
+        assert (r.status, r.error_code) == (SyncStatus.FATAL, f"ml_get_item_{status}"), r
+        assert [m for m, *_ in ml_falso.chamadas] == ["GET"]
+    assert "PolicyAgent" in r.error_detail
+    for status in (429, 500, 503):
+        ml_falso.get_fixo["MLB1"] = (status, {"message": "x"})
+        r = await cli.update_price("MLB1", 100.0)
+        assert (r.status, r.error_code) == (SyncStatus.RETRYABLE, f"ml_get_item_{status}"), r
+    assert ml_falso.puts_de_preco() == []
+
+
+@pytest.mark.asyncio
+async def test_envio_nao_insiste_no_anuncio_que_o_ml_proibe(ml_falso: MLFalso, monkeypatch):
+    """403 PolicyAgent no GET: 1 chamada e nenhuma espera (antes: 5 GETs e
+    ~76 s de rodadas de reenvio por célula)."""
+    from app.models import IntegrationPlatform as Plat
+    from app.services.pricing import push as pricing_push
+
+    esperas: list[float] = []
+
+    async def _conta(s):
+        esperas.append(s)
+
+    monkeypatch.setattr(pricing_push.asyncio, "sleep", _conta)
+    ml_falso.get_fixo["MLB1"] = (403, {"blocked_by": "PolicyAgent", "message": "UNAUTHORIZED"})
+    link = SimpleNamespace(id=uuid.uuid4(), external_id="MLB1", variation_id=None,
+                           product_id=uuid.uuid4())
+    r = await pricing_push.enviar_preco_para_links(
+        _cliente_ml(), Plat.ML, [link], 100.0, sku_by_product={}, canal_esperado="kit",
+    )
+    assert r[link.id].status == SyncStatus.FATAL
+    assert [m for m, *_ in ml_falso.chamadas] == ["GET"]
+    assert esperas == []
