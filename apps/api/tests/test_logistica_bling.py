@@ -1639,3 +1639,85 @@ async def test_sweep_ml_nao_marca_pedido_em_transito(db: AsyncSession, make_user
     for linha in em_transito:
         assert str(linha.id) not in marcados, "pedido em trânsito NÃO pode ser marcado"
     assert out["hits"] == 2
+
+
+# ── 07/10: Correios do painel fora da varredura + varredura que o deploy matou ──
+#
+# Vinicius: "teve dois casos hoje que eu precisei apertar no recarregar, o
+# status da plataforma e a localização estavam errados".
+
+
+@pytest.mark.asyncio
+async def test_motor_le_correios_do_painel_fora_da_varredura(db: AsyncSession, monkeypatch):
+    """Pacote dos Correios no painel que a varredura do 17track não cobre (ML
+    cancelado/apreendido) é lido pelo motor; o que a varredura já cobre, o lido
+    há pouco e o que não é Correios ficam de fora."""
+    from datetime import UTC, datetime, timedelta
+
+    from app.services import logistica_ingest, logistica_track_sync
+
+    agora = datetime.now(UTC)
+    apreendido = Logistica(
+        plataforma="Mercado Livre", pedido_bling="291963", rastreio="AD830343173BR",
+        status_bling="Cancelado", rastreio_lido_em=agora - timedelta(days=5),
+    )
+    em_andamento = Logistica(
+        plataforma="Mercado Livre", pedido_bling="300001", rastreio="AD000000001BR",
+        status_bling="Em andamento",
+    )
+    lido_agora = Logistica(
+        plataforma="Mercado Livre", pedido_bling="291809", rastreio="AD828496989BR",
+        status_bling="Cancelado", rastreio_lido_em=agora - timedelta(minutes=10),
+    )
+    spx = Logistica(plataforma="Shopee", pedido_bling="296423", rastreio="BR2661950281729")
+    db.add_all([apreendido, em_andamento, lido_agora, spx])
+    await db.commit()
+
+    pedidos_lidos: list[list[str]] = []
+
+    async def _run(session, *, pedidos=None, puxar=True):
+        pedidos_lidos.append(list(pedidos or []))
+        return {}
+
+    monkeypatch.setattr(logistica_track_sync, "run", _run)
+
+    ids = [apreendido.id, em_andamento.id, lido_agora.id, spx.id]
+    assert await logistica_ingest.ler_correios_do_painel(db, ids) == 1
+    assert pedidos_lidos == [["291963"]]
+
+    # Nada no painel → nem consulta.
+    assert await logistica_ingest.ler_correios_do_painel(db, []) == 0
+    assert len(pedidos_lidos) == 1
+
+
+@pytest.mark.asyncio
+async def test_sweeps_em_dia_repoe_so_a_atrasada(monkeypatch):
+    """No startup do worker, a varredura cujo último sucesso passou do limite
+    (morta pelo deploy) roda de novo; a que está em dia não."""
+    from datetime import UTC, datetime, timedelta
+
+    from app import worker as w
+
+    agora = datetime.now(UTC)
+    carimbos = {
+        "sweep:shopee": str(int((agora - timedelta(minutes=120)).timestamp())),  # morta no deploy
+        "sweep:tiktok": str(int((agora - timedelta(minutes=10)).timestamp())),
+        "sweep:ml": str(int((agora - timedelta(minutes=20)).timestamp())),
+        # amazon sem carimbo (redis novo) → roda
+    }
+
+    class _FakeRedis:
+        async def hget(self, key, job):
+            assert key == w._LOGISTICA_OK_KEY
+            return carimbos.get(job)
+
+    rodou: list[str] = []
+
+    async def _sweep(ctx, plataforma):
+        rodou.append(plataforma)
+        return {}
+
+    monkeypatch.setattr(w, "_sweep_de", _sweep)
+    out = await w.logistica_sweeps_em_dia({"redis": _FakeRedis()})
+    assert rodou == ["shopee", "amazon"]
+    assert out == {"shopee": 1, "amazon": 1}

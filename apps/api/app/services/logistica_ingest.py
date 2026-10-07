@@ -18,6 +18,7 @@ Status (que dependem da situação atual) julgavam um estado velho (caso real:
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Collection
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 import httpx
@@ -38,6 +39,8 @@ from app.services import (
     logistica_rules,
     logistica_shopee,
     logistica_tiktok,
+    logistica_track,
+    logistica_track_sync,
 )
 
 logger = structlog.get_logger()
@@ -656,6 +659,47 @@ async def _enriquecer_e_aplicar(
     return resumo
 
 
+# De quanto em quanto tempo o motor relê nos Correios o pacote do painel que a
+# varredura do 17track não cobre.
+CORREIOS_PAINEL_RELER_APOS = timedelta(hours=1)
+
+
+async def ler_correios_do_painel(session: AsyncSession, ids: Collection[UUID]) -> int:
+    """Correios das linhas do PAINEL que a varredura do 17track não cobre.
+
+    O `logistica_track_sync` só varre ML "Em andamento" e Amazon não final
+    (custo do 17track, Eduardo 07/09). Pacote dos Correios que está no painel
+    fora disso — cancelado, apreendido pela fiscalização, voltando — ficava
+    dias sem leitura e a tela mostrava "Correios · lido há 5 dias" (07/10:
+    291963, 291809; Vinicius: "precisei apertar no recarregar, a localização
+    estava errada"). Aqui o motor lê esses pela busca por pedido (a mesma do
+    botão), no máximo 1×/hora cada. Devolve quantos pedidos pediu."""
+    if not ids:
+        return 0
+    corte = datetime.now(UTC) - CORREIOS_PAINEL_RELER_APOS
+    stmt = select(Logistica).where(Logistica.id.in_(list(ids)))
+    linhas = (await session.execute(stmt)).scalars().all()
+    pedidos = sorted(
+        {
+            r.pedido_bling
+            for r in linhas
+            if r.pedido_bling
+            and logistica_track.is_correios(r.rastreio)
+            and not logistica_track_sync._na_varredura(r)
+            and (r.rastreio_lido_em is None or r.rastreio_lido_em < corte)
+        }
+    )
+    if not pedidos:
+        return 0
+    try:
+        await logistica_track_sync.run(session, pedidos=pedidos)
+    except Exception as e:  # noqa: BLE001 — 17track fora do ar não derruba o motor
+        await session.rollback()
+        logger.warning("logistica_correios_painel_falhou", erro=str(e)[:200])
+        return 0
+    return len(pedidos)
+
+
 async def recarregar_ml(session: AsyncSession) -> dict[str, int]:
     """Motor RÁPIDO da Logística — cron de 5 min e botão "recarregar".
 
@@ -696,11 +740,15 @@ async def recarregar_ml(session: AsyncSession) -> dict[str, int]:
         **{f"alvo_{k}": len(v) for k, v in alvo.items()},
     )
     resumo = await _enriquecer_e_aplicar(session, alvo, origem="recarregar")
+    correios_painel = await ler_correios_do_painel(
+        session, [i for ids in alvo.values() for i in ids]
+    )
     return {
         "status_refresh": len(mudaram),
         "bling_reler": reler,
         "chamados_espelhados": len(com_chamado),
         "cleanup": removed,
+        "correios_painel": correios_painel,
         **resumo,
     }
 

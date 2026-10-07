@@ -2325,13 +2325,54 @@ async def logistica_sweep_amazon(ctx: dict) -> dict[str, int]:
     return await _sweep_de(ctx, "amazon")
 
 
+# Idade máxima do último sucesso de cada varredura antes de o `em_dia` rodá-la
+# de novo: ML/Shopee/TikTok rodam de 30 em 30 min, a Amazon 1×/h.
+_SWEEP_EM_DIA_MIN = {"shopee": 40, "tiktok": 40, "ml": 40, "amazon": 70}
+
+
+async def logistica_sweeps_em_dia(ctx: dict) -> dict[str, int]:
+    """Repõe a varredura que o deploy matou (Vinicius, 07/10: "precisei apertar
+    no recarregar, o status da plataforma e a localização estavam errados").
+
+    Cada deploy recria o worker e mata a varredura que estiver rodando — em
+    07/10 foram 7 publicações entre 09:32 e 11:09 e a da Shopee das 11:09 morreu
+    ("max retries exceeded"): as linhas escondidas da Shopee ficaram 2 h sem
+    releitura. Roda no startup do worker (e 1×/h de rede): toda varredura cujo
+    último sucesso passou do limite roda agora, uma por vez."""
+    redis = ctx.get("redis")
+    agora = datetime.now(UTC)
+    rodadas: dict[str, int] = {}
+    for plataforma, limite_min in _SWEEP_EM_DIA_MIN.items():
+        bruto = None
+        if redis is not None:
+            try:
+                bruto = await redis.hget(_LOGISTICA_OK_KEY, f"sweep:{plataforma}")
+            except Exception:  # noqa: BLE001 — sem carimbo = roda
+                bruto = None
+        if bruto is not None:
+            idade_min = (agora - datetime.fromtimestamp(int(bruto), tz=UTC)).total_seconds() / 60
+            if idade_min <= limite_min:
+                continue
+        try:
+            await _sweep_de(ctx, plataforma)
+            rodadas[plataforma] = 1
+        except Exception as e:  # noqa: BLE001 — uma plataforma não derruba as outras
+            logger.warning(
+                "logistica_sweep_em_dia_falhou", plataforma=plataforma, erro=str(e)[:200]
+            )
+            rodadas[plataforma] = 0
+    logger.info("logistica_sweeps_em_dia", **rodadas)
+    return rodadas
+
+
 # Quanto tempo sem sucesso antes de avisar, por job. Motor: 5 min de cron +
-# folga pra uma rodada longa e um deploy no meio. Varreduras: 1×/h cada.
+# folga pra uma rodada longa e um deploy no meio. Varreduras: ML/Shopee/TikTok
+# de 30 em 30 min (07/10), Amazon 1×/h.
 _LOGISTICA_VIGIA_LIMITES_MIN = {
     "recarregar": 20,
-    "sweep:shopee": 150,
-    "sweep:tiktok": 150,
-    "sweep:ml": 150,
+    "sweep:shopee": 90,
+    "sweep:tiktok": 90,
+    "sweep:ml": 90,
     "sweep:amazon": 150,
 }
 
@@ -4324,6 +4365,7 @@ class WorkerSettings:
         func(logistica_sweep_tiktok, timeout=1800),
         func(logistica_sweep_ml, timeout=1800),
         func(logistica_sweep_amazon, timeout=1800),
+        func(logistica_sweeps_em_dia, timeout=1800),
         logistica_vigia,
         nf_auto_enfileirar_tick,
         nf_recuperar_tick,
@@ -4431,10 +4473,15 @@ class WorkerSettings:
         # PLATAFORMA POR VEZ, 1×/hora cada, em minutos diferentes — juntas
         # levavam minutos e morriam inteiras em qualquer deploy (15/09). O
         # motor rápido (pendentes do painel) vive no worker de marketplace.
-        cron(logistica_sweep_shopee, minute={9}, run_at_startup=False, timeout=1800),
-        cron(logistica_sweep_tiktok, minute={19}, run_at_startup=False, timeout=1800),
-        cron(logistica_sweep_ml, minute={29}, run_at_startup=False, timeout=1800),
+        # 07/10: ML/Shopee/TikTok de 30 em 30 min (era 1×/h — com um deploy no
+        # meio a linha escondida ficava 2 h sem releitura). A Amazon segue 1×/h
+        # (limite da SP-API). O `em_dia` roda no startup e repõe a varredura
+        # que o deploy matou.
+        cron(logistica_sweep_shopee, minute={9, 39}, run_at_startup=False, timeout=1800),
+        cron(logistica_sweep_tiktok, minute={14, 44}, run_at_startup=False, timeout=1800),
+        cron(logistica_sweep_ml, minute={29, 59}, run_at_startup=False, timeout=1800),
         cron(logistica_sweep_amazon, minute={49}, run_at_startup=False, timeout=1800),
+        cron(logistica_sweeps_em_dia, minute={33}, run_at_startup=True, timeout=1800),
         # Vigia da automação: avisa (Threema + sino) se algum desses jobs parar.
         cron(logistica_vigia, minute={13, 43}, run_at_startup=False, timeout=120),
         # Rastreio do pacote que VOLTA (Acompanhamento de Devoluções), a cada
