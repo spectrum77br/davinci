@@ -1,6 +1,11 @@
 // Marketing › Conferência Shopee (06/10/2026) — tipos do relatório congelado
 // (contrato §5, versão 1) e as regras de formatação e de variação.
 //
+// 07/10/2026: o Resumo saiu no formato da planilha antiga do dono ("mais ou
+// menos desse jeito"): métrica × (semana × Mala/Celular/Eletro/Geral) + o bloco
+// Variação. Quem monta as linhas e colunas é planilhaResumo(), aqui embaixo — o
+// Excel e o HTML do servidor seguem o mesmo desenho.
+//
 // As MESMAS regras rodam no servidor (Excel, CSV, MD, HTML e o aviso do
 // Threema): "▲ 12,3%", "▼ 0,8 p.p.", "novo", "=", "—", e a cor pelo que é
 // bom em cada métrica. Mudou aqui, muda lá — senão a tela e a planilha
@@ -22,6 +27,14 @@ export type ChaveMetrica =
   | 'invest_ads'
   | 'pct'
   | 'vendas'
+  // 07/10/2026: cliques, pedidos e conversão (afiliados e Ads). Relatório
+  // congelado antes disso não tem essas chaves: valor() devolve null → "—".
+  | 'cliques_afiliados'
+  | 'pedidos_afiliados'
+  | 'conversao_afiliados'
+  | 'cliques_ads'
+  | 'pedidos_ads'
+  | 'conversao_ads'
 export type ChaveGrupo = 'mala' | 'celular' | 'eletro'
 /** Uma semana de uma linha (ou de um total): número, ou null = "sem dados". */
 export type Valores = Partial<Record<ChaveMetrica, number | null>>
@@ -153,7 +166,12 @@ export const ERROS_CONFERENCIA: Record<string, string> = {
 
 // ---------- helpers puros (travados em tests/conferencia-lib.cjs)
 
-/** As 8 colunas, nesta ordem (contrato §5). O relatório traz a mesma lista. */
+/**
+ * As métricas, nesta ordem (contrato §5 + as 6 de cliques/pedidos/conversão de
+ * 07/10/2026, no fim). O relatório traz a mesma lista; relatório antigo traz só
+ * as 8 primeiras. Conversão = pedidos ÷ cliques × 100 (no total do grupo, das
+ * somas — nunca a média dos percentuais).
+ */
 export const METRICAS: Metrica[] = [
   { chave: 'vendas_afiliados', rotulo: 'Vendas afiliados', tipo: 'dinheiro', bom: 'sobe' },
   { chave: 'vendas_ads', rotulo: 'Vendas Ads', tipo: 'dinheiro', bom: 'sobe' },
@@ -163,7 +181,14 @@ export const METRICAS: Metrica[] = [
   { chave: 'invest_ads', rotulo: 'Invest. Ads', tipo: 'dinheiro', bom: 'neutro' },
   { chave: 'pct', rotulo: '% s/ vendas', tipo: 'percentual', bom: 'desce' },
   { chave: 'vendas', rotulo: 'Vendas', tipo: 'dinheiro', bom: 'sobe' },
+  { chave: 'cliques_afiliados', rotulo: 'Cliques afiliados', tipo: 'inteiro', bom: 'neutro' },
+  { chave: 'pedidos_afiliados', rotulo: 'Pedidos afiliados', tipo: 'inteiro', bom: 'sobe' },
+  { chave: 'conversao_afiliados', rotulo: 'Conversão afiliados', tipo: 'percentual', bom: 'sobe' },
+  { chave: 'cliques_ads', rotulo: 'Cliques Ads', tipo: 'inteiro', bom: 'neutro' },
+  { chave: 'pedidos_ads', rotulo: 'Pedidos Ads', tipo: 'inteiro', bom: 'sobe' },
+  { chave: 'conversao_ads', rotulo: 'Conversão Ads', tipo: 'percentual', bom: 'sobe' },
 ]
+const METRICA: Record<string, Metrica> = Object.fromEntries(METRICAS.map((m) => [m.chave, m]))
 
 const ROTULO_STATUS_COLETA: Record<string, string> = {
   pendente: 'na fila',
@@ -274,15 +299,28 @@ export function inteiro(v: number | null | undefined): string {
   const { inteiro: i } = digitosMeioParaCima(v, 0)
   return `${v < 0 && i !== '0' ? '-' : ''}${milhar(i)}`
 }
-/** 8.2 → "8,2%" (o valor já vem multiplicado por 100); null → "—". */
-export function percentual(v: number | null | undefined): string {
+/**
+ * 8.2 → "8,2%" (o valor já vem multiplicado por 100); null → "—". Com
+ * `casas` = 2 é o da planilha do Resumo: 7.5 → "7,50%" (empates em
+ * tests/conferencia-arredondamento.json, "percentual_2casas").
+ */
+export function percentual(v: number | null | undefined, casas = 1): string {
   if (!ok(v)) return '—'
-  return `${decimais(v, 1)}%`
+  return `${decimais(v, casas)}%`
 }
 export function fmtValor(v: number | null | undefined, tipo: TipoMetrica): string {
   if (tipo === 'dinheiro') return dinheiro(v)
   if (tipo === 'percentual') return percentual(v)
   return inteiro(v)
+}
+/**
+ * Casas do % na planilha do Resumo — no valor ("7,50%") e na variação em p.p.
+ * ("▼ 0,01 p.p."). O CASAS_PLANILHA do servidor (calculo.py) é o mesmo.
+ */
+export const CASAS_PLANILHA = 2
+/** Célula da planilha do Resumo: igual ao fmtValor, mas % com 2 casas ("7,50%"). */
+export function fmtPlanilha(v: number | null | undefined, tipo: TipoMetrica): string {
+  return tipo === 'percentual' ? percentual(v, CASAS_PLANILHA) : fmtValor(v, tipo)
 }
 /** Valor de uma métrica numa semana; ausente ou não-número = null. */
 export function valor(s: Valores | null | undefined, chave: ChaveMetrica): number | null {
@@ -305,6 +343,16 @@ export function pctDe(invest: number | null, vendas: number | null): number | nu
   if (!ok(invest) || !ok(vendas) || vendas === 0) return null
   return (invest / vendas) * 100
 }
+/** Conversão = pedidos ÷ cliques × 100; null sem cliques (0 ou negativo) ou sem pedidos — nunca negativa. */
+export function conversaoDe(pedidos: number | null, cliques: number | null): number | null {
+  if (!ok(pedidos) || !ok(cliques) || cliques <= 0 || pedidos < 0) return null
+  return (pedidos / cliques) * 100
+}
+// Conversão → de onde ela sai (a média das 3 semanas usa as somas, não os %).
+const BASE_CONVERSAO: Partial<Record<ChaveMetrica, [ChaveMetrica, ChaveMetrica]>> = {
+  conversao_afiliados: ['pedidos_afiliados', 'cliques_afiliados'],
+  conversao_ads: ['pedidos_ads', 'cliques_ads'],
+}
 
 // ── variação ────────────────────────────────────────────────────────────
 
@@ -326,7 +374,9 @@ function corDe(direcao: 'sobe' | 'desce', bom: Bom): Cor {
  * Variação de `anterior` para `atual` (regras do contrato §5):
  * - dinheiro/inteiro: (atual − anterior) ÷ |anterior| × 100 → "▲ 12,3%" / "▼ 4,1%";
  *   anterior 0 e atual > 0 → "novo"; os dois 0 (ou iguais) → "="; algum null → "—".
- * - percentual (% s/ vendas): diferença em pontos → "▲ 1,2 p.p." / "▼ 0,8 p.p."; iguais → "=".
+ * - percentual (% s/ vendas, conversão): diferença em pontos → "▲ 1,2 p.p." / "▼ 0,8 p.p.";
+ *   iguais → "=". `casas` = casas dos p.p.: a planilha do Resumo usa CASAS_PLANILHA (2), como o
+ *   % dela ("▼ 0,01 p.p."; com 1 casa, 0,44% → 0,43% sairia "▼ 0,0 p.p." em vermelho).
  * - cor: bom 'sobe' → subir verde, cair vermelho; 'desce' ao contrário; 'neutro' sempre cinza.
  * - Saldo Ads nunca é "novo" (sai "—"): saldo zerado na semana passada não é "conta nova".
  */
@@ -336,13 +386,14 @@ export function variacao(
   tipo: TipoMetrica,
   bom: Bom,
   chave?: ChaveMetrica,
+  casas = 1,
 ): Variacao {
   if (!ok(atual) || !ok(anterior)) return SEM_VARIACAO
   if (tipo === 'percentual') {
     const d = atual - anterior
     if (d === 0) return IGUAL
     const direcao = d > 0 ? 'sobe' : 'desce'
-    return { texto: `${d > 0 ? '▲' : '▼'} ${decimais(Math.abs(d), 1)} p.p.`, direcao, cor: corDe(direcao, bom) }
+    return { texto: `${d > 0 ? '▲' : '▼'} ${decimais(Math.abs(d), casas)} p.p.`, direcao, cor: corDe(direcao, bom) }
   }
   if (anterior === 0) {
     if (atual === 0) return IGUAL
@@ -359,12 +410,17 @@ export function variacao(
 /**
  * Média das 3 semanas anteriores (S2..S4) pra "vs média 3 sem.": só os valores
  * que existem entram na média; nenhum → null. Pro % s/ vendas não é a média dos
- * percentuais: é Σinvestimento ÷ Σvendas das três semanas.
+ * percentuais: é Σinvestimento ÷ Σvendas das três semanas. Pra conversão, do
+ * mesmo jeito: Σpedidos ÷ Σcliques.
  */
 export function media3(semanas: Valores[] | null | undefined, chave: ChaveMetrica): number | null {
   const anteriores = (semanas ?? []).slice(1, 4)
   if (chave === 'pct') {
     return pctDe(soma(anteriores.map((s) => investimento(s))), soma(anteriores.map((s) => valor(s, 'vendas'))))
+  }
+  const base = BASE_CONVERSAO[chave]
+  if (base) {
+    return conversaoDe(soma(anteriores.map((s) => valor(s, base[0]))), soma(anteriores.map((s) => valor(s, base[1]))))
   }
   const vs = anteriores.map((s) => valor(s, chave)).filter(ok)
   return vs.length ? vs.reduce((a, b) => a + b, 0) / vs.length : null
@@ -486,6 +542,121 @@ export function nomeDoCabecalho(cd: string | null | undefined): string | null {
 export function contasTxt(n: number | null | undefined): string {
   const v = n ?? 0
   return `${v} ${v === 1 ? 'conta' : 'contas'}`
+}
+
+// ── planilha do Resumo (07/10/2026) ─────────────────────────────────────
+//
+// O desenho da planilha antiga do dono ("mais ou menos desse jeito"):
+//
+//                   |   07/09 a 13/09   | … |   28/09 a 04/10   | Variação (28/09–04/10 × 21/09–27/09)
+//   Métrica         | Mala|Cel.|Eletro|Geral | … | Mala|Cel.|Eletro|Geral | Mala|Cel.|Eletro|Geral
+//   Vendas    afiliados | …
+//             Ads       | …
+//
+// Semanas da mais VELHA pra mais nova (S4 → S1), da esquerda pra direita, e no
+// fim a variação S1 × S2 de cada grupo, com as regras de sempre (variacao()) —
+// em p.p. com 2 casas, como o % da planilha.
+// O Saldo Ads não entra aqui (continua no relatório e no CSV). O Excel e o HTML
+// do servidor desenham a mesma coisa.
+
+export type ChaveColunaPlanilha = ChaveGrupo | 'geral'
+
+/** As 4 colunas de cada semana (e da Variação), nesta ordem. */
+export const GRUPOS_PLANILHA: { chave: ChaveColunaPlanilha; rotulo: string }[] = [
+  { chave: 'mala', rotulo: 'Mala' },
+  { chave: 'celular', rotulo: 'Celular' },
+  { chave: 'eletro', rotulo: 'Eletro' },
+  { chave: 'geral', rotulo: 'Geral' },
+]
+
+/**
+ * As linhas, na ordem da planilha: categoria (mesclada nas linhas seguidas
+ * dela) + sub-rótulo. `chave` null = não existe na Shopee (impressões de
+ * afiliados): sempre "—".
+ */
+export const LINHAS_PLANILHA: { categoria: string; sub: string; chave: ChaveMetrica | null }[] = [
+  { categoria: 'Vendas', sub: 'afiliados', chave: 'vendas_afiliados' },
+  { categoria: 'Vendas', sub: 'Ads', chave: 'vendas_ads' },
+  { categoria: 'Impressões', sub: 'afiliados', chave: null },
+  { categoria: 'Impressões', sub: 'Ads', chave: 'impressoes' },
+  { categoria: 'Conversão', sub: 'afiliados', chave: 'conversao_afiliados' },
+  { categoria: 'Conversão', sub: 'Ads', chave: 'conversao_ads' },
+  { categoria: 'Investimento', sub: 'afiliados', chave: 'invest_afiliados' },
+  { categoria: 'Investimento', sub: 'Ads', chave: 'invest_ads' },
+  { categoria: 'Resumo', sub: '% investimento / vendas', chave: 'pct' },
+  { categoria: 'Resumo', sub: 'Vendas no período', chave: 'vendas' },
+]
+
+/** Cabeçalho da semana na planilha: "07/09 a 13/09". */
+export function semanaPlanilha(s: SemanaPeriodo | null | undefined): string {
+  if (!s) return '—'
+  return `${ddmm(s.inicio)} a ${ddmm(s.fim)}`
+}
+/** Cabeçalho do bloco final: "Variação (28/09–04/10 × 21/09–27/09)". */
+export function rotuloVariacaoPlanilha(semanas: SemanaPeriodo[] | null | undefined): string {
+  const [s1, s2] = semanas ?? []
+  return s1 && s2 ? `Variação (${rotuloSemana(s1)} × ${rotuloSemana(s2)})` : 'Variação'
+}
+
+export interface LinhaPlanilha {
+  chave: string // única na tabela (a métrica, ou "categoria|sub" pra linha sem métrica)
+  categoria: string
+  sub: string
+  /** Linhas que a célula da categoria cobre (rowspan); 0 = coberta pela de cima, não desenha. */
+  span: number
+  /** [semana, da mais velha pra mais nova][grupo, na ordem de GRUPOS_PLANILHA] → texto. */
+  valores: string[][]
+  /** Variação S1 × S2 por grupo (mesma ordem de GRUPOS_PLANILHA). */
+  variacoes: Variacao[]
+}
+export interface Planilha {
+  semanas: { indice: number; rotulo: string }[] // indice no relatório (0 = S1); da mais velha pra mais nova
+  grupos: { chave: ChaveColunaPlanilha; rotulo: string }[]
+  variacao: string
+  linhas: LinhaPlanilha[]
+}
+
+/**
+ * A planilha do Resumo a partir do relatório congelado: total de cada grupo
+ * (rel.grupos[].total) e o Geral (rel.geral). Grupo que falta, semana que
+ * falta ou métrica que o relatório não tem (relatório de antes de 07/10 não
+ * tem cliques/pedidos/conversão) viram "—"; nunca 0, nunca erro.
+ */
+export function planilhaResumo(
+  rel: Pick<Relatorio, 'semanas' | 'grupos' | 'geral'> | null | undefined,
+): Planilha | null {
+  if (!rel) return null
+  const periodos = (Array.isArray(rel.semanas) ? rel.semanas : []).slice(0, 4)
+  const semanas = periodos.map((s, indice) => ({ indice, rotulo: semanaPlanilha(s) })).reverse()
+  const grupos = Array.isArray(rel.grupos) ? rel.grupos : []
+  const totais = GRUPOS_PLANILHA.map((g) =>
+    g.chave === 'geral' ? rel.geral : grupos.find((x) => x?.chave === g.chave)?.total,
+  )
+  const semanaDe = (t: TotalGrupo | null | undefined, i: number) => (Array.isArray(t?.semanas) ? t.semanas[i] : undefined)
+  const linhas = LINHAS_PLANILHA.map((def, k): LinhaPlanilha => {
+    const m = def.chave ? METRICA[def.chave] : null
+    let span = 0
+    if (k === 0 || LINHAS_PLANILHA[k - 1].categoria !== def.categoria) {
+      span = 1
+      while (LINHAS_PLANILHA[k + span]?.categoria === def.categoria) span++
+    }
+    return {
+      chave: m ? m.chave : `${def.categoria}|${def.sub}`,
+      categoria: def.categoria,
+      sub: def.sub,
+      span,
+      valores: semanas.map((s) => totais.map((t) => (m ? fmtPlanilha(valor(semanaDe(t, s.indice), m.chave), m.tipo) : '—'))),
+      variacoes: totais.map((t) => (m
+        ? variacao(valor(semanaDe(t, 0), m.chave), valor(semanaDe(t, 1), m.chave), m.tipo, m.bom, m.chave, CASAS_PLANILHA)
+        : { ...SEM_VARIACAO })),
+    }
+  })
+  return {
+    semanas,
+    grupos: GRUPOS_PLANILHA.map((g) => ({ ...g })),
+    variacao: rotuloVariacaoPlanilha(periodos),
+    linhas,
+  }
 }
 
 // ---------- fim helpers puros

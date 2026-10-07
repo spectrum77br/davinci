@@ -8,21 +8,38 @@ o HTML e o Threema mostram. "Recalcular" chama de novo com os `dados`
 guardados: nada aqui lê banco nem relógio.
 
 Por conta e semana:
-  • total da conta: afiliados (vendas, comissão), Ads (vendas, gasto,
-    impressões) e vendas pagas;
+  • total da conta: afiliados (vendas, comissão, cliques, pedidos), Ads
+    (vendas, gasto, impressões, cliques, pedidos) e vendas pagas;
   • parte eletro: as mesmas métricas somadas só nos itens eletro
     (classificacao.classificar, item a item);
   • Mala → uma linha em Mala com o total. Celular → linha em Celular com
     total − eletro (seção que veio vazia continua vazia) e linha em Eletro
     com a parte eletro, só se a conta teve algum valor eletro > 0 em alguma
     das 4 semanas;
+  • cliques de afiliados são a exceção: o total (seller_daily → clicks) e os
+    cliques por produto (seller_item_detail → clicks) são contas DIFERENTES
+    da Shopee e não fecham (Barbosa, 06/10/2026: total 18.299, soma dos
+    produtos 20.884). Subtrair daria Celular errado e até negativo; então o
+    total é DIVIDIDO na proporção dos produtos: eletro = total × Σcliques
+    eletro ÷ Σcliques de todos os produtos (arredondado), Celular = o resto;
+  • parte eletro desconhecida (item sem o campo) de cliques OU de pedidos →
+    o par inteiro fica em Celular (pedidos e cliques juntos, senão a
+    conversão de Celular e a de Eletro saem tortas);
+  • Celular que daria negativo (a parte eletro passou do total da conta:
+    fontes que não batem) fica vazio ("—"), Eletro fica com o total e a linha
+    ganha um aviso — nunca um número ou uma conversão negativa;
   • Saldo Ads: S1 = o saldo lido nesta coleta; S2..S4 = a leitura mais
     perto do dia seguinte ao fim da semana, ±1 dia (empate: a mais cedo).
     Em Eletro, sempre vazio (o saldo é da conta inteira).
 
 Totais de grupo somam as linhas (vazio + x = x; tudo vazio = vazio) e o % do
-grupo sai das SOMAS, nunca da média dos percentuais. Geral = Mala + Celular +
-Eletro.
+grupo e as conversões (pedidos ÷ cliques) saem das SOMAS, nunca da média dos
+percentuais. A conversão do total soma pedidos e cliques só das linhas que
+têm os DOIS: linha com pedidos e sem cliques (coleta antiga) não infla a
+conversão do grupo. Geral = Mala + Celular + Eletro.
+
+Coleta antiga (antes de 07/10/2026) não traz os cliques de afiliados: a
+métrica fica vazia ("—"), nunca zero.
 
 As regras de variação ("▲ 12,3%", "▼ 0,8 p.p.", "novo", "=", "—") e da média
 das 3 semanas são as MESMAS de apps/web/lib/conferencia.ts: mudou lá, muda
@@ -55,11 +72,29 @@ METRICAS: tuple[dict[str, str], ...] = (
     {"chave": "invest_ads", "rotulo": "Invest. Ads", "tipo": "dinheiro", "bom": "neutro"},
     {"chave": "pct", "rotulo": "% s/ vendas", "tipo": "percentual", "bom": "desce"},
     {"chave": "vendas", "rotulo": "Vendas", "tipo": "dinheiro", "bom": "sobe"},
+    # Pedido de 07/10/2026 (Resumo no formato da planilha antiga): cliques,
+    # pedidos e conversão de afiliados e de Ads. Vêm DEPOIS das 8 primeiras
+    # para o CSV e o relatório antigo não mudarem de lugar.
+    {"chave": "cliques_afiliados", "rotulo": "Cliques afiliados", "tipo": "inteiro",
+     "bom": "neutro"},
+    {"chave": "pedidos_afiliados", "rotulo": "Pedidos afiliados", "tipo": "inteiro",
+     "bom": "sobe"},
+    {"chave": "conversao_afiliados", "rotulo": "Conversão afiliados", "tipo": "percentual",
+     "bom": "sobe"},
+    {"chave": "cliques_ads", "rotulo": "Cliques Ads", "tipo": "inteiro", "bom": "neutro"},
+    {"chave": "pedidos_ads", "rotulo": "Pedidos Ads", "tipo": "inteiro", "bom": "sobe"},
+    {"chave": "conversao_ads", "rotulo": "Conversão Ads", "tipo": "percentual", "bom": "sobe"},
 )
 CHAVES = tuple(m["chave"] for m in METRICAS)
 METRICA = {m["chave"]: m for m in METRICAS}
-# Tudo menos o %, que é recalculado das somas.
-SOMAVEIS = tuple(c for c in CHAVES if c != "pct")
+# Conversão = pedidos ÷ cliques × 100: (pedidos, cliques) de cada uma.
+CONVERSOES: dict[str, tuple[str, str]] = {
+    "conversao_afiliados": ("pedidos_afiliados", "cliques_afiliados"),
+    "conversao_ads": ("pedidos_ads", "cliques_ads"),
+}
+# Recalculadas das somas (nunca somadas nem tiradas média).
+DERIVADAS = ("pct", *CONVERSOES)
+SOMAVEIS = tuple(c for c in CHAVES if c not in DERIVADAS)
 # As que saem dos itens (a parte eletro); o saldo é da conta inteira.
 DIVISIVEIS = tuple(c for c in SOMAVEIS if c != "saldo_ads")
 
@@ -76,7 +111,24 @@ _SECOES = {
     "invest_ads": ("ads", "gasto", "ads_itens", "gasto"),
     "impressoes": ("ads", "impressoes", "ads_itens", "impressoes"),
     "vendas": ("vendas", "valor", "vendas_itens", "valor"),
+    "cliques_afiliados": ("afiliados", "cliques", "afiliados_itens", "cliques"),
+    "pedidos_afiliados": ("afiliados", "pedidos", "afiliados_itens", "pedidos"),
+    "cliques_ads": ("ads", "cliques", "ads_itens", "cliques"),
+    "pedidos_ads": ("ads", "pedidos", "ads_itens", "pedidos"),
 }
+# Métricas cujo total e cujos itens vêm de chamadas DIFERENTES da Shopee e
+# não fecham: a parte eletro é o total dividido na proporção dos itens (ver o
+# topo do arquivo), nunca a soma dos itens eletro tirada do total.
+_RATEIO = frozenset({"cliques_afiliados"})
+# Campos de item que um executor mais velho pode não mandar (os cliques por
+# item de afiliados chegaram em 07/10/2026). Item eletro SEM o campo → a parte
+# eletro dessa métrica é desconhecida: fica vazia em Eletro e o total inteiro
+# em Celular (como quando a lista de itens não veio), nunca "0 de eletro" — e
+# o par dela (pedidos ↔ cliques da mesma seção) vai junto para Celular. Nos
+# cliques de afiliados (_RATEIO) basta QUALQUER item sem o campo.
+_CAMPO_PODE_FALTAR = frozenset(
+    {"cliques_afiliados", "pedidos_afiliados", "cliques_ads", "pedidos_ads"}
+)
 _NOME_SECAO = {
     "afiliados_itens": "afiliados",
     "ads_itens": "Ads",
@@ -89,6 +141,9 @@ NOTAS_FIXAS = (
     "AdsPower da loja.",
     "% s/ vendas = (Invest. afiliados + Invest. Ads) ÷ Vendas × 100; no total do grupo, "
     "calculado com as somas do grupo.",
+    "Conversão = pedidos ÷ cliques × 100 (afiliados: painel de Afiliados do Vendedor; Ads: "
+    "Shopee Ads); no total do grupo, calculada com as somas. Impressões de afiliados: a "
+    "Shopee não informa (fica \"—\").",
     "Vendas afiliados e Vendas Ads contam pedidos feitos; Vendas conta só os pagos — por "
     "isso podem passar de Vendas.",
     "Comissão de afiliados é estimada; a semana mais recente ainda pode mudar.",
@@ -100,6 +155,9 @@ NOTAS_FIXAS = (
     "Eletro: produto vinculado no DaVinci a SKU de eletro; sem vínculo, categoria da Shopee "
     "(100010 Eletrodomésticos, 100636 Casa e Decoração); sem categoria, pelo título. "
     "Celular = total da conta − Eletro.",
+    "Cliques de afiliados de Eletro: o total de cliques da loja dividido na proporção dos "
+    "cliques por produto (a Shopee conta os cliques por produto de outro jeito e a soma não "
+    "bate com o total). Conversão do grupo: só as lojas que têm pedidos e cliques.",
 )
 
 
@@ -160,11 +218,39 @@ def pct_de(invest: float | None, vendas: float | None) -> float | None:
     return invest / vendas * 100
 
 
+def conversao_de(pedidos: float | None, cliques: float | None) -> float | None:
+    """Pedidos ÷ cliques × 100; vazio sem cliques (0 ou negativo) ou sem
+    pedidos — nunca uma conversão negativa."""
+    if pedidos is None or cliques is None or cliques <= 0 or pedidos < 0:
+        return None
+    return pedidos / cliques * 100
+
+
 def _com_pct(valores: dict[str, Any]) -> dict[str, Any]:
+    """Os valores somáveis + as derivadas (% s/ vendas e as conversões),
+    calculadas dos valores JÁ arredondados, com 2 casas, na ordem de CHAVES."""
+    saida = {c: valores.get(c) for c in SOMAVEIS}
     p = pct_de(investimento(valores), _num(valores.get("vendas")))
-    saida = {c: valores.get(c) for c in CHAVES if c != "pct"}
     saida["pct"] = None if p is None else float(meio_para_cima(p, 2))
+    for chave, (pedidos, cliques) in CONVERSOES.items():
+        c = conversao_de(_num(valores.get(pedidos)), _num(valores.get(cliques)))
+        saida[chave] = None if c is None else float(meio_para_cima(c, 2))
     return {c: saida[c] for c in CHAVES}
+
+
+def _conversoes_pareadas(semanas: Iterable[Mapping[str, Any]]) -> dict[str, float | None]:
+    """As conversões de um TOTAL (grupo ou Geral): Σpedidos ÷ Σcliques só das
+    linhas que têm os dois números. Linha com pedidos e sem cliques (coleta
+    antiga, Celular que ficou vazio) somaria pedidos sem os cliques deles e
+    inflaria a conversão do grupo."""
+    lista = list(semanas)
+    saida: dict[str, float | None] = {}
+    for chave, (pedidos, cliques) in CONVERSOES.items():
+        pares = [(_num(s.get(pedidos)), _num(s.get(cliques))) for s in lista]
+        pares = [(p, c) for p, c in pares if p is not None and c is not None]
+        conv = conversao_de(soma(p for p, _ in pares), soma(c for _, c in pares))
+        saida[chave] = None if conv is None else float(meio_para_cima(conv, 2))
+    return saida
 
 
 def _vazio() -> dict[str, Any]:
@@ -193,9 +279,10 @@ def inteiro(v: float | None) -> str:
     return "—" if v is None else _decimais(round(v), 0)
 
 
-def percentual(v: float | None) -> str:
-    """8.2 → "8,2%" (o valor já vem × 100)."""
-    return "—" if v is None else f"{_decimais(v, 1)}%"
+def percentual(v: float | None, casas: int = 1) -> str:
+    """8.2 → "8,2%" (o valor já vem × 100); com `casas=2` → "8,20%" (o
+    Resumo no formato da planilha)."""
+    return "—" if v is None else f"{_decimais(v, casas)}%"
 
 
 def formatar(v: float | None, tipo: str) -> str:
@@ -204,6 +291,17 @@ def formatar(v: float | None, tipo: str) -> str:
     if tipo == "percentual":
         return percentual(v)
     return inteiro(v)
+
+
+# Casas do % na planilha do Resumo — no valor ("7,50%") e na variação em p.p.
+# ("▼ 0,01 p.p."). O CASAS_PLANILHA de lib/conferencia.ts é o mesmo.
+CASAS_PLANILHA = 2
+
+
+def formatar_planilha(v: float | None, tipo: str) -> str:
+    """Célula do Resumo em formato de planilha: igual ao `formatar`, mas o %
+    com 2 casas ("7,50%") — o `fmtPlanilha` da tela."""
+    return percentual(v, CASAS_PLANILHA) if tipo == "percentual" else formatar(v, tipo)
 
 
 def _cor(direcao: str, bom: str) -> str:
@@ -222,6 +320,7 @@ def variacao(
     tipo: str,
     bom: str,
     chave: str | None = None,
+    casas: int = 1,
 ) -> dict[str, str | None]:
     """{"texto", "cor" (verde | vermelho | cinza), "direcao" (sobe | desce |
     None)} — de `anterior` para `atual`:
@@ -229,7 +328,9 @@ def variacao(
         "▼ 4,1%"; anterior 0 e atual > 0 → "novo"; os dois 0 (ou iguais) →
         "="; algum vazio → "—".
       • percentual: diferença em pontos → "▲ 1,2 p.p." / "▼ 0,8 p.p."; iguais
-        → "=".
+        → "=". `casas` = as casas dos p.p.: a planilha do Resumo mostra o %
+        com 2 casas e a variação também ("▼ 0,01 p.p."; com 1 casa uma
+        conversão de 0,44% → 0,43% sairia "▼ 0,0 p.p." em vermelho).
       • cor: bom `sobe` → subir verde, cair vermelho; `desce` ao contrário;
         `neutro` sempre cinza.
       • Saldo Ads (chave `saldo_ads`) nunca é "novo": sai "—"."""
@@ -242,7 +343,7 @@ def variacao(
             return dict(_IGUAL)
         direcao = "sobe" if d > 0 else "desce"
         seta = "▲" if d > 0 else "▼"
-        return {"texto": f"{seta} {_decimais(abs(d), 1)} p.p.", "direcao": direcao,
+        return {"texto": f"{seta} {_decimais(abs(d), casas)} p.p.", "direcao": direcao,
                 "cor": _cor(direcao, bom)}
     if b == 0:
         if a == 0:
@@ -262,12 +363,19 @@ def variacao(
 
 def media3(semanas: Sequence[Mapping[str, Any]] | None, chave: str) -> float | None:
     """Média de S2..S4 para o "vs média 3 sem.": só os valores que existem
-    entram; nenhum → vazio. Para o % é Σinvestimento ÷ Σvendas das três."""
+    entram; nenhum → vazio. Para o % é Σinvestimento ÷ Σvendas das três; para
+    a conversão, Σpedidos ÷ Σcliques."""
     anteriores = list(semanas or [])[1:4]
     if chave == "pct":
         return pct_de(
             soma(investimento(s) for s in anteriores),
             soma(_num((s or {}).get("vendas")) for s in anteriores),
+        )
+    if chave in CONVERSOES:
+        pedidos, cliques = CONVERSOES[chave]
+        return conversao_de(
+            soma(_num((s or {}).get(pedidos)) for s in anteriores),
+            soma(_num((s or {}).get(cliques)) for s in anteriores),
         )
     valores = [v for v in (_num((s or {}).get(chave)) for s in anteriores) if v is not None]
     return sum(valores) / len(valores) if valores else None
@@ -397,11 +505,13 @@ def _semana_dos_dados(dados: Mapping, semana: Mapping) -> Mapping | None:
 
 def _total_e_eletro(
     s: Mapping | None, classificador: _Classificador | None
-) -> tuple[dict[str, float | None], dict[str, float | None], list[str]]:
-    """(total, parte eletro, seções sem itens) de uma semana de uma conta."""
+) -> tuple[dict[str, float | None], dict[str, float | None], list[str], list[str]]:
+    """(total, parte eletro, seções sem itens, métricas sem o campo nos
+    itens eletro) de uma semana de uma conta."""
     total: dict[str, float | None] = {}
     eletro: dict[str, float | None] = {}
     sem_itens: list[str] = []
+    sem_campo: list[str] = []
     s = s or {}
     for chave, (secao, campo, lista, campo_item) in _SECOES.items():
         bloco = s.get(secao)
@@ -422,16 +532,57 @@ def _total_e_eletro(
             if lista not in sem_itens:
                 sem_itens.append(lista)
             continue
-        eletro[chave] = sum(
-            (
-                _num(it.get(campo_item)) or 0.0
-                for it in itens
-                if isinstance(it, Mapping)
-                and classificador.eletro(it.get("item_id"), it.get("nome"))
-            ),
-            0.0,
-        )
-    return total, eletro, sem_itens
+        validos = [it for it in itens if isinstance(it, Mapping)]
+        valores_eletro = [
+            _num(it.get(campo_item))
+            for it in validos
+            if classificador.eletro(it.get("item_id"), it.get("nome"))
+        ]
+        if chave in _RATEIO:
+            eletro[chave] = _rateio(
+                total[chave], valores_eletro, [_num(it.get(campo_item)) for it in validos]
+            )
+            if eletro[chave] is None:
+                sem_campo.append(chave)
+            continue
+        if chave in _CAMPO_PODE_FALTAR and any(v is None for v in valores_eletro):
+            # Executor antigo: o item eletro veio sem o campo. Não dá para
+            # separar → vazio em Eletro, o total inteiro em Celular.
+            eletro[chave] = None
+            sem_campo.append(chave)
+            continue
+        eletro[chave] = sum((v or 0.0 for v in valores_eletro), 0.0)
+    if classificador is not None:
+        # Pedidos e cliques andam juntos: parte eletro desconhecida de um (o
+        # total veio, a divisão não) → o outro também fica inteiro em Celular.
+        # Senão Celular teria os cliques de eletro sem os pedidos deles (a
+        # conversão de Celular cai) e Eletro os pedidos sem os cliques.
+        for par in CONVERSOES.values():
+            if any(total[c] is not None and eletro[c] is None for c in par):
+                for c in par:
+                    eletro[c] = None
+    return total, eletro, sem_itens, sem_campo
+
+
+def _rateio(
+    total: float | None, eletro: Sequence[float | None], todos: Sequence[float | None]
+) -> float | None:
+    """A parte eletro de um total que NÃO é a soma dos itens (cliques de
+    afiliados): total × Σitens eletro ÷ Σtodos os itens, inteiro (meio para
+    cima). Sem item eletro → 0. Algum item sem o número → desconhecida (None):
+    a proporção sairia torta."""
+    if total is None:
+        return None
+    if not eletro:
+        return 0.0
+    if any(v is None for v in todos):
+        return None
+    soma_eletro = sum(max(v or 0.0, 0.0) for v in eletro)
+    soma_todos = sum(max(v or 0.0, 0.0) for v in todos)
+    if soma_todos <= 0 or soma_eletro <= 0 or total <= 0:
+        return 0.0
+    fracao = min(soma_eletro / soma_todos, 1.0)
+    return float(meio_para_cima(total * fracao, 0))
 
 
 def _linha(coleta: Mapping, semanas: list[dict], status: str) -> dict[str, Any]:
@@ -468,7 +619,9 @@ def _total(linhas: Sequence[Mapping], n_semanas: int) -> dict[str, Any]:
     semanas = []
     for i in range(n_semanas):
         valores = {c: soma(_num(lin["semanas"][i].get(c)) for lin in linhas) for c in SOMAVEIS}
-        semanas.append(_com_pct({c: _arred(c, v) for c, v in valores.items()}))
+        semana = _com_pct({c: _arred(c, v) for c, v in valores.items()})
+        semana.update(_conversoes_pareadas(lin["semanas"][i] for lin in linhas))
+        semanas.append(semana)
     return {
         "contas": len(linhas),
         "sem_dados": sum(1 for lin in linhas if lin["status"] not in STATUS_COM_DADOS),
@@ -545,7 +698,7 @@ def montar_relatorio(
         tem_eletro = False
         for i, sem in enumerate(semanas_exec):
             s = _semana_dos_dados(dados, sem)
-            total, eletro, sem_itens = _total_e_eletro(s, classificador)
+            total, eletro, sem_itens, sem_campo = _total_e_eletro(s, classificador)
             if i == 0:
                 saldo = _num(dados.get("saldo_ads"))
             else:
@@ -557,10 +710,30 @@ def montar_relatorio(
                     c: None if total[c] is None else total[c] - (eletro[c] or 0.0)
                     for c in DIVISIVEIS
                 }
+                quando = rotulo(sem["inicio"], sem["fim"])
+                for c in DIVISIVEIS:
+                    resto = _arred(c, valores[c])
+                    if resto is not None and resto < 0 and (eletro[c] or 0) > 0:
+                        # A parte eletro passou do total da conta (fontes da
+                        # Shopee que não batem): Celular negativo não existe.
+                        # Celular vazio, Eletro com o total — o Geral continua
+                        # sendo o total da conta.
+                        valores[c] = None
+                        eletro[c] = total[c]
+                        avisos.append(
+                            f"{quando}: {METRICA[c]['rotulo']} de eletro passou do total da "
+                            "conta — Celular ficou sem esse número e Eletro com o total"
+                        )
                 for lista in sem_itens:
                     avisos.append(
-                        f"{rotulo(sem['inicio'], sem['fim'])}: sem os itens de "
+                        f"{quando}: sem os itens de "
                         f"{_NOME_SECAO[lista]} — o eletro dessa parte ficou em Celular"
+                    )
+                for chave in sem_campo:
+                    _, _, lista, campo = _SECOES[chave]
+                    avisos.append(
+                        f"{quando}: sem os {campo} por produto de {_NOME_SECAO[lista]} — "
+                        "os cliques e os pedidos de eletro dessa parte ficaram em Celular"
                     )
                 tem_eletro = tem_eletro or any((v or 0) > 0 for v in eletro.values())
                 parte_eletro.append(
@@ -599,7 +772,13 @@ def montar_relatorio(
         valores = {
             c: soma(_num(g["total"]["semanas"][i].get(c)) for g in grupos) for c in SOMAVEIS
         }
-        geral_semanas.append(_com_pct({c: _arred(c, v) for c, v in valores.items()}))
+        semana = _com_pct({c: _arred(c, v) for c, v in valores.items()})
+        # Conversão do Geral: os pares de TODAS as linhas (os totais de grupo
+        # já perderam quais linhas tinham os dois números).
+        semana.update(
+            _conversoes_pareadas(lin["semanas"][i] for g in grupos for lin in g["linhas"])
+        )
+        geral_semanas.append(semana)
 
     return {
         "versao": VERSAO,

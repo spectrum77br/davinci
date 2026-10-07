@@ -285,6 +285,15 @@ async def test_resultado_com_dados_tortos_422_e_nada_gravado(client, db):
         "versão desconhecida": (torto(lambda d: d.update(versao=2)), ["dados", "versao"]),
         "sem semanas": (torto(lambda d: d.pop("semanas")), ["dados", "semanas"]),
         "avisos que não é lista": (torto(lambda d: d.update(avisos=3)), ["dados", "avisos"]),
+        # Os cliques de afiliados (07/10/2026) são opcionais, mas número.
+        "cliques de afiliados que não é número": (
+            torto(lambda d: d["semanas"][0]["afiliados"].update(cliques="muitos")),
+            ["dados", "semanas", 0, "afiliados", "cliques"],
+        ),
+        "cliques do item de afiliados que não é número": (
+            torto(lambda d: d["semanas"][3]["afiliados_itens"][0].update(cliques=[1])),
+            ["dados", "semanas", 3, "afiliados_itens", 0, "cliques"],
+        ),
     }
     for nome, (corpo, onde) in casos.items():
         r = await client.post(url, json=corpo, headers=AGENTE)
@@ -296,12 +305,22 @@ async def test_resultado_com_dados_tortos_422_e_nada_gravado(client, db):
     assert (c.status, c.dados) == ("coletando", None)  # nada gravado
 
     # Campo a mais não é defeito (executor mais novo): passa e guarda o dict cru.
+    # Os cliques de afiliados (07/10/2026) entram no relatório.
     certo = dados_loja(ex.semanas) | {"novidade": {"x": 1}}
     certo["semanas"][0]["extra"] = [1, 2]
+    for sem in certo["semanas"]:
+        sem["afiliados"]["cliques"] = 400
+        sem["afiliados_itens"][0]["cliques"] = 400
     r = await client.post(url, json={"status": "ok", "dados": certo}, headers=AGENTE)
     assert r.status_code == 200, r.text
     (c,) = await coletas_de(db, ex.id)
     assert c.status == "ok" and c.dados["novidade"] == {"x": 1}
+    assert c.dados["semanas"][0]["afiliados"]["cliques"] == 400
+    rel = (await db.get(ConferenciaShopeeExecucao, ex.id, populate_existing=True)).relatorio
+    s1 = rel["geral"]["semanas"][0]
+    assert (s1["cliques_afiliados"], s1["pedidos_afiliados"], s1["conversao_afiliados"]) == (
+        400, 8, 2.0,
+    )
 
 
 async def test_fechamento_que_falha_nao_perde_o_resultado(client, db, monkeypatch):
@@ -444,6 +463,13 @@ async def test_recalcular_e_cancelar(client, db, admin):
     r = await client.post(f"{API}/execucoes/{pronta.id}/recalcular")
     assert r.status_code == 200
     assert r.json()["relatorio"]["gerado_em"] == AGORA.isoformat()
+    # Coleta de antes de 07/10/2026 (sem os cliques de afiliados): recalcula
+    # sem quebrar — cliques e conversão de afiliados vazios, nunca 0; os
+    # pedidos e a conversão de Ads (que sempre vieram) aparecem.
+    s1 = r.json()["relatorio"]["geral"]["semanas"][0]
+    assert (s1["cliques_afiliados"], s1["conversao_afiliados"]) == (None, None)
+    assert s1["pedidos_afiliados"] == 8
+    assert (s1["cliques_ads"], s1["pedidos_ads"], s1["conversao_ads"]) == (100, 6, 6.0)
 
 
 # ───────────────────────────────────────────────────────────── arquivos

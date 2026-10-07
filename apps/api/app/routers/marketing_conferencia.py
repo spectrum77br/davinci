@@ -129,6 +129,9 @@ class _AfiliadosTotais(_Forma):
     vendas: _Numero = None
     comissao: _Numero = None
     pedidos: _Numero = None
+    # 07/10/2026 (seller_daily → data.clicks). Opcional: o executor antigo não
+    # manda e a métrica fica "—" no relatório.
+    cliques: _Numero = None
 
 
 class _AfiliadoItem(_Forma):
@@ -138,6 +141,8 @@ class _AfiliadoItem(_Forma):
     vendas: _Numero = None
     comissao: _Numero = None
     pedidos: _Numero = None
+    # 07/10/2026 (seller_item_detail → clicks). Opcional, como o de cima.
+    cliques: _Numero = None
 
 
 class _AdsTotais(_Forma):

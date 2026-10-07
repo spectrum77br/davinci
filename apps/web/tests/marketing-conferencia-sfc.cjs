@@ -11,8 +11,10 @@
 //  - "Gerar agora" pede confirmação, manda o tipo e trata o 409 de "já tem uma
 //    coletando" levando a pessoa até ela;
 //  - os arquivos saem com o nome do servidor; o HTML abre numa aba nova;
-//  - conta sem dados continua na tabela; cartões, tabelas e "Últimas 4
-//    semanas" usam as regras de lib/conferencia.ts;
+//  - o Resumo é a planilha antiga do dono (07/10/2026): métrica × (semana ×
+//    Mala/Celular/Eletro/Geral), semanas da mais velha pra mais nova, Variação
+//    no fim, as duas colunas de rótulo paradas; tudo de lib/conferencia.ts;
+//  - conta sem dados continua contada (aviso embaixo da tabela);
 //  - só quem edita gera, recalcula, cancela e mexe nas contas; o cadastro do
 //    Threema é só de admin (routers/informar.py).
 // Só dados FALSOS aqui; nenhuma rede.
@@ -22,6 +24,7 @@ const path = require('node:path')
 const ts = require('typescript')
 const Vue = require('vue')
 const { parse, compileTemplate, compileScript } = require('vue/compiler-sfc')
+const { renderToString } = require('vue/server-renderer')
 
 const transpile = (source, module = ts.ModuleKind.CommonJS) => ts.transpileModule(source, {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module },
@@ -74,26 +77,55 @@ assert.match(tpl, /<Button v-if="isAdmin"[^>]*>\s*<Bell[^>]*\/> Quem recebe no T
 assert.match(tpl, /<section v-if="canEdit" class="rounded-xl border bg-card">/, 'Contas só com edit')
 assert.match(tpl, /contexto="conferencia_shopee"\s+somente-cadastro/, 'modal do Threema só cadastro')
 assert.match(modal.script, /\| 'conferencia_shopee'/, 'contexto no union do modal')
-// Layout do relatório: SÓ o Resumo (pedido de 07/10/2026 — "bato o olho e já sei"),
-// igual à aba Resumo do Excel. O detalhe por loja ficou só no Excel.
+// Layout do relatório: SÓ o Resumo, no formato da planilha antiga do dono (pedido
+// de 07/10/2026 — "mais ou menos desse jeito"), igual ao Excel e ao HTML.
 for (const trecho of [
   'tituloRelatorio(rel.semanas)', 'comparadoCom(rel.semanas)', 'gerado em', // título
-  'v-for="b in quatroSemanas"', // Mala · Celular · Eletro · Geral
-  'vs semana anterior', 'vs média 3 sem.',
+  '<div v-if="planilha" class="planilha overflow-x-auto', // a planilha, com rolagem pro lado
+  'v-for="(l, k) in planilha.linhas"', 'Métrica',
   'Sem dados:', 'Afiliados incompletos:', // avisos que mudam a leitura
-  'O detalhe por loja está no Excel',
   'Nenhum relatório ainda', // estado vazio
   'Não consegui carregar a conferência agora.', // erro
   'animate-pulse', // esqueleto
   'Contas da conferência',
 ]) assert.ok(tpl.includes(trecho), `na tela: ${trecho}`)
-for (const fora of ['v-for="c in cartoes"', 'Por conta', 'v-for="g in tabelas"', 'Gasto de Ads sem produto']) {
-  assert.ok(!tpl.includes(fora), `não aparece mais na tela: ${fora}`)
+assert.match(script, /const planilha = computed\(\(\) => planilhaResumo\(rel\.value\)\)/, 'planilha sai da lib')
+for (const fora of [
+  'v-for="c in cartoes"', 'Por conta', 'v-for="g in tabelas"', 'Gasto de Ads sem produto',
+  'quatroSemanas', 'vs semana anterior', 'vs média 3 sem.',
+  // o Excel também é só o Resumo desde d5ab3ba2: não tem detalhe por loja pra mandar ver
+  'O detalhe por loja está no Excel',
+]) {
+  assert.ok(!tpl.includes(fora) && !script.includes(fora), `não aparece mais na tela: ${fora}`)
 }
+// Só o Excel para baixar.
+assert.match(script, /const FORMATOS_NA_TELA = FORMATOS\.filter\(\(f\) => f\.fmt === 'xlsx'\)/)
 // Celular: tabelas largas sempre dentro de rolagem horizontal.
 const tabelas = tpl.match(/<table /g).length
-const rolagens = tpl.match(/table-card[^"]*overflow-x-auto|overflow-x-auto[^"]*table-card/g).length
+const rolagens = tpl.match(/(?:table-card|planilha)[^"]*overflow-x-auto|overflow-x-auto[^"]*table-card/g).length
 assert.equal(rolagens, tabelas, 'toda tabela dentro de overflow-x-auto')
+// Estilo de planilha: azul no cabeçalho, bege nos rótulos e no Geral, grade fina,
+// as duas colunas de rótulo paradas, e o escuro com as mesmas cores (bege escurecido).
+{
+  const estilo = fs.readFileSync(path.join(__dirname, '../components/MarketingConferencia.vue'), 'utf8').split('<style scoped>')[1]
+  assert.match(estilo, /--conf-azul: #1f3864;/)
+  assert.match(estilo, /--conf-bege: #ddd9c4;/)
+  assert.match(estilo, /--conf-grade: #bfbfbf;/)
+  assert.match(estilo, /:global\(\.dark\) \.conferencia \{[^}]*--conf-azul: #1f3864;[^}]*--conf-bege: #[0-9a-f]{6};/, 'escuro mantém o azul e tem um bege próprio')
+  assert.match(estilo, /\.planilha thead th \{[^}]*background: var\(--conf-azul\);[^}]*color: var\(--conf-azul-txt\);[^}]*font-weight: 700;/)
+  assert.match(estilo, /\.planilha td\.geral \{[^}]*background: var\(--conf-bege\);/)
+  assert.match(estilo, /\.planilha tbody th \{[^}]*background: var\(--conf-bege\);/)
+  assert.match(estilo, /\.planilha \.rotulo-cab,\s*\.planilha \.cat,\s*\.planilha \.sub \{\s*position: sticky;/, 'colunas de rótulo paradas')
+  assert.match(estilo, /\.planilha \.sub \{[^}]*left: var\(--conf-cat-w\);/, 'a 2ª para depois da 1ª')
+  assert.match(estilo, /\.planilha \.cat \{[^}]*left: 0;[^}]*width: var\(--conf-cat-w\);/)
+  // A 2ª coluna tem largura fixa (--conf-sub-w) e a data da semana gruda logo depois das
+  // duas: no celular (375 px) a célula mesclada da semana passa da tela e a data sumia.
+  assert.match(estilo, /\.planilha \.sub \{[^}]*width: var\(--conf-sub-w\);[^}]*max-width: var\(--conf-sub-w\);/)
+  assert.match(estilo, /\.planilha \.semana-txt \{[^}]*position: sticky;[^}]*left: calc\(var\(--conf-cat-w\) \+ var\(--conf-sub-w\)[^}]*right: /)
+  assert.match(estilo, /@media \(max-width: 639px\) \{\s*\.conferencia \{[^}]*--conf-sub-w: 6\.5rem;/)
+  // a cor da variação vem das classes do Tailwind: o CSS da planilha não pinta texto de célula
+  assert.ok(!/\.planilha td[^{]*\{[^}]*\bcolor:/.test(estilo), 'td da planilha sem color: (não apaga o verde/vermelho)')
+}
 // Cor fixa sempre com a variante do escuro.
 for (const m of tpl.matchAll(/(?<!dark:)\btext-(?:emerald|red|amber)-\d00\b(?![^"]*dark:)/g)) {
   assert.fail(`cor sem dark: perto de "${tpl.slice(m.index - 40, m.index + 40)}"`)
@@ -155,7 +187,9 @@ const SEMANAS = [
 ]
 const vals = (over = {}) => ({
   vendas_afiliados: 1000, vendas_ads: 500, saldo_ads: 100, impressoes: 10000,
-  invest_afiliados: 50, invest_ads: 30, pct: 8, vendas: 1000, ...over,
+  invest_afiliados: 50, invest_ads: 30, pct: 8, vendas: 1000,
+  cliques_afiliados: 400, pedidos_afiliados: 10, conversao_afiliados: 2.5,
+  cliques_ads: 200, pedidos_ads: 6, conversao_ads: 3, ...over,
 })
 const nulos = () => Object.fromEntries(L.METRICAS.map((m) => [m.chave, null]))
 const linha = (conta, over = {}) => ({
@@ -243,7 +277,7 @@ const RETORNO = `return {
   exec, rel, coletas, opcoes, emAndamento, concluidas, pctConcluidas, prazosTxt, detalheColeta,
   escolher, recarregar, carregarDetalhe,
   tipoNovo, gerando, gerar, recalcular, cancelar, podeAgir, baixar, baixando,
-  quatroSemanas, semanasCab, semDadosTxt, afiliadosIncompletosTxt,
+  planilha, blocosCab, semDadosTxt, afiliadosIncompletosTxt,
   contasAberto, contas, contasOrdenadas, contasErro, nomes, salvarConta, salvarNome, salvandoConta,
   isAdmin, informarAberto, COR,
 }`
@@ -363,6 +397,25 @@ const DET = {
   [ID_LINK]: detalhe(ID_LINK, 'pronto'),
 }
 
+// O trecho da planilha do template, renderizado com o estado da tela (SSR):
+// trava o desenho de verdade — ordem do cabeçalho, mesclas, bege, cores.
+const trechoPlanilha = (() => {
+  const ini = tpl.indexOf('<div v-if="planilha"')
+  assert.ok(ini > 0, 'template tem a planilha')
+  return tpl.slice(ini, tpl.indexOf('</div>', ini) + '</div>'.length)
+})()
+const renderTrecho = (() => {
+  const c = compileTemplate({ source: trechoPlanilha, filename: 'planilha.vue', id: 'planilha-check' })
+  assert.deepEqual(c.errors, [])
+  const mod = {}
+  new Function('exports', 'require', transpile(c.code))(mod, require)
+  return mod.render
+})()
+function renderPlanilha(s) {
+  const estado = { planilha: s.planilha, blocosCab: s.blocosCab, COR: s.COR }
+  return renderToString(Vue.createSSRApp({ setup: () => estado, render: renderTrecho }))
+}
+
 async function run() {
   // Abre no último PRONTO (não na coleta em andamento, que fica num aviso).
   {
@@ -375,20 +428,62 @@ async function run() {
     assert.equal(t.relogio.pendentes().length, 0, 'relatório pronto não fica relendo')
     assert.ok(t.ouvintes.has('visibilitychange'), 'ouve a visibilidade')
 
-    // Últimas 4 semanas: grupos + Geral, métrica × S1..S4 + as 2 variações.
-    const q = s.quatroSemanas.value
-    assert.deepEqual(q.map((b) => b.rotulo), ['Mala', 'Celular', 'Eletro', 'Geral'])
-    const vendasMala = q[0].linhas.find((l) => l.chave === 'vendas')
-    assert.deepEqual(vendasMala.valores, ['R$ 1.200,00', 'R$ 1.000,00', 'R$ 900,00', 'R$ 1.100,00'])
-    assert.equal(vendasMala.vsAnterior.texto, '▲ 20,0%')
-    assert.equal(vendasMala.vsMedia.texto, '▲ 20,0%', 'média de 1000, 900 e 1100')
-    assert.deepEqual(s.semanasCab.value.map((x) => `${x.nome} ${x.datas}`), ['S1 28/09–04/10', 'S2 21/09–27/09', 'S3 14/09–20/09', 'S4 07/09–13/09'])
+    // Planilha do Resumo: semanas da mais velha pra mais nova, Mala/Celular/Eletro/Geral.
+    const p = s.planilha.value
+    assert.deepEqual(p.semanas.map((x) => x.rotulo), ['07/09 a 13/09', '14/09 a 20/09', '21/09 a 27/09', '28/09 a 04/10'])
+    assert.deepEqual(p.grupos.map((g) => g.rotulo), ['Mala', 'Celular', 'Eletro', 'Geral'])
+    assert.equal(p.variacao, 'Variação (28/09–04/10 × 21/09–27/09)')
+    assert.equal(s.blocosCab.value, 5, '4 semanas + a Variação')
+    const linhaP = (sub, cat) => p.linhas.find((l) => l.sub === sub && (!cat || l.categoria === cat))
+    const vendasP = linhaP('Vendas no período')
+    assert.deepEqual(vendasP.valores[0], ['R$ 1.100,00', 'R$ 1.000,00', 'R$ 1.000,00', 'R$ 1.000,00'], '07/09 primeiro')
+    assert.deepEqual(vendasP.valores[3], ['R$ 1.200,00', 'R$ 2.000,00', 'R$ 1.000,00', 'R$ 4.400,00'], '28/09 por último')
+    assert.deepEqual(vendasP.variacoes.map((v) => [v.texto, v.cor]), [
+      ['▲ 20,0%', 'verde'], ['▲ 25,0%', 'verde'], ['=', 'cinza'], ['▲ 22,2%', 'verde'],
+    ])
+    // % com 2 casas e variação em p.p. (cair é bom).
+    const pctP = linhaP('% investimento / vendas')
+    assert.deepEqual(pctP.valores[3], ['8,00%', '8,00%', '8,00%', '5,45%'])
+    assert.deepEqual([pctP.variacoes[3].texto, pctP.variacoes[3].cor], ['▼ 2,55 p.p.', 'verde']) // 8 − 5,45: p.p. com 2 casas, como o % da planilha
+    assert.deepEqual(linhaP('Ads', 'Conversão').valores[3], ['3,00%', '3,00%', '3,00%', '3,00%'])
+    // Impressões de afiliados não existem na Shopee.
+    assert.ok(linhaP('afiliados', 'Impressões').valores.every((x) => x.every((v) => v === '—')))
+    assert.ok(!p.linhas.some((l) => l.chave === 'saldo_ads'), 'Saldo fora do Resumo')
 
-    // Resumo: Geral também, % com p.p., e as contas sem dados contadas no bloco.
-    assert.equal(q[0].semDados, 1, 'Mala: 1 sem dados')
-    const pctGeral = q[3].linhas.find((l) => l.chave === 'pct')
-    assert.equal(pctGeral.vsAnterior.texto, '▼ 2,6 p.p.') // 8 − 5,45 = 2,55: meio pra longe do zero
-    assert.equal(pctGeral.vsAnterior.cor, 'verde', '% caindo é bom')
+    // O HTML de verdade da planilha (o trecho do template, renderizado).
+    const html = await renderPlanilha(s)
+    // (a data da semana vem num <span class="semana-txt">: tira as tags de dentro do th)
+    const cabecalhos = [...html.matchAll(/<th[^>]*>((?:(?!<\/?th\b)[\s\S])*)<\/th>/g)].map((m) => m[1].replace(/<[^>]+>/g, '').trim())
+    assert.deepEqual(cabecalhos.slice(0, 6), [
+      'Métrica', '07/09 a 13/09', '14/09 a 20/09', '21/09 a 27/09', '28/09 a 04/10', 'Variação (28/09–04/10 × 21/09–27/09)',
+    ], '1ª linha: Métrica, as semanas da mais velha pra mais nova, Variação')
+    assert.equal((html.match(/colspan="4"/g) || []).length, 5, 'cada semana (e a Variação) mesclada sobre 4 colunas')
+    // No celular a célula mesclada é mais larga que a tela: a data vai num span
+    // que gruda logo depois das 2 colunas paradas (sticky left/right).
+    assert.equal((html.match(/<span class="semana-txt">/g) || []).length, 5, 'data de cada semana (e a Variação) no span parado')
+    assert.match(html, /<th class="rotulo-cab" colspan="2" rowspan="2"/, 'Métrica sobre as 2 colunas de rótulo')
+    assert.deepEqual(cabecalhos.slice(6, 26), Array(5).fill(['Mala', 'Celular', 'Eletro', 'Geral']).flat(), '2ª linha: os 4 grupos em cada bloco')
+    const linhasHtml = html.split('<tbody>')[1].split('</tr>').filter((x) => x.includes('<td'))
+    assert.equal(linhasHtml.length, 10, '10 linhas de métrica')
+    const rotulosLinha = linhasHtml.map((x) => [...x.matchAll(/<th[^>]*>([^<]*)<\/th>/g)].map((m) => m[1].trim()))
+    assert.deepEqual(rotulosLinha, [
+      ['Vendas', 'afiliados'], ['Ads'], ['Impressões', 'afiliados'], ['Ads'], ['Conversão', 'afiliados'], ['Ads'],
+      ['Investimento', 'afiliados'], ['Ads'], ['Resumo', '% investimento / vendas'], ['Vendas no período'],
+    ], 'categoria mesclada (rowspan) + sub-rótulo')
+    assert.equal((html.match(/rowspan="2" scope="rowgroup"/g) || []).length, 5, 'cada categoria cobre as 2 linhas dela')
+    assert.match(html, /class="cat ultima"[^>]*>\s*Resumo/, 'a última categoria não dobra a borda de baixo')
+    for (const l of linhasHtml) assert.equal((l.match(/<td/g) || []).length, 20, '4 semanas × 4 grupos + 4 variações')
+    const celulas = (l) => [...l.matchAll(/<td class="([^"]*)"[^>]*>([^<]*)<\/td>/g)].map((m) => [m[1], m[2].trim()])
+    const ultima = celulas(linhasHtml[9])
+    assert.deepEqual(ultima.slice(12, 16).map((c) => c[1]), ['R$ 1.200,00', 'R$ 2.000,00', 'R$ 1.000,00', 'R$ 4.400,00'], 'semana atual no 4º bloco')
+    assert.deepEqual(ultima.filter((c) => /\bgeral\b/.test(c[0])).length, 5, 'Geral em bege em cada bloco (+ a Variação)')
+    assert.deepEqual(ultima.slice(16).map((c) => c[1]), ['▲ 20,0%', '▲ 25,0%', '=', '▲ 22,2%'])
+    assert.match(ultima[16][0], /text-emerald-600 dark:text-emerald-400/, 'variação boa em verde')
+    assert.match(ultima[18][0], /text-muted-foreground/, '"=" em cinza')
+    const pctHtml = celulas(linhasHtml[8])
+    assert.match(pctHtml[19][0], /text-emerald-600/, '% caindo em verde')
+    assert.ok(celulas(linhasHtml[2]).every((c) => c[1] === '—'), 'Impressões de afiliados: "—" em tudo')
+    assert.match(html, /class="planilha overflow-x-auto rounded-xl border"/)
 
     // Avisos curtos
     assert.equal(s.semDadosTxt.value, 'Beta (perfil Firefox, o robô não abre)')

@@ -21,6 +21,7 @@ interface Opcoes {
   // "rede" = o fetch da página rejeita (sem resposta nenhuma)
   falhar?: (path: string, body: any) => { status: number; texto: string } | "rede" | null;
   semDiasAfiliadosS1?: boolean; // seller_daily de S1 com a lista vazia
+  semCliquesAfiliados?: boolean; // formato antigo: sem `clicks` no daily nem nos itens
   loginUrl?: string; // pra onde a Central manda quando deslogada
 }
 
@@ -60,6 +61,7 @@ function shopeeFalsa(o: Opcoes) {
           total_order_count: 7,
           dis_total_actual_amount: "700.00",
           dis_total_seller_commission: "35.5",
+          ...(o.semCliquesAfiliados ? {} : { clicks: 1800 }),
         },
       });
     }
@@ -73,6 +75,7 @@ function shopeeFalsa(o: Opcoes) {
         dis_gmv: "28.00",
         dis_spend: "1.42",
         orders: 1,
+        ...(o.semCliquesAfiliados ? {} : { clicks: 40 + i }),
         content_info: [{ pesado: true }],
       }));
       return r(200, { code: 0, data: { list, page_num: pagina, page_size: 20, total_count: 25 } });
@@ -186,9 +189,12 @@ test("loja completa: 4 semanas, paginação, somas e saldo → ok", async () => 
   assert.deepEqual(d.avisos, []);
   const s1 = d.semanas[0];
   assert.equal(s1.inicio, "2026-09-28");
-  assert.deepEqual(s1.afiliados, { vendas: 700, comissao: 35.5, pedidos: 7 });
+  assert.deepEqual(s1.afiliados, { vendas: 700, comissao: 35.5, pedidos: 7, cliques: 1800 });
   assert.equal(s1.afiliados_itens!.length, 25);
   assert.equal(typeof s1.afiliados_itens![0].item_id, "string");
+  assert.equal(s1.afiliados_itens![0].cliques, 40);
+  assert.equal(s1.afiliados_itens![24].cliques, 44, "2ª página: item 4");
+  assert.equal(d.semanas[3].afiliados!.cliques, 1800, "semanas 2–4 também levam os cliques");
   assert.deepEqual(s1.ads, { impressoes: 900, cliques: 30, gasto: 45, vendas: 600, pedidos: 3 });
   assert.equal(s1.ads_itens!.length, 3);
   assert.equal(s1.ads_itens![2].item_id, null);
@@ -317,6 +323,17 @@ test("botão Entrar coberto → não clica", async () => {
   const r = await coletarNaPagina(job, f.page);
   assert.equal(r.status, "deslogada");
   assert.equal(f.cliques.length, 0);
+});
+
+test("Shopee sem `clicks` (formato antigo) → cliques null, a loja continua ok", async () => {
+  const f = paginaFalsa({ ultimoPublicado: "2026-10-04", logada: true, semCliquesAfiliados: true });
+  const r = await coletarNaPagina(job, f.page);
+  assert.equal(r.status, "ok", r.erro || "");
+  for (const s of r.dados!.semanas) {
+    assert.deepEqual(s.afiliados, { vendas: 700, comissao: 35.5, pedidos: 7, cliques: null });
+    assert.ok(s.afiliados_itens!.every((x) => x.cliques === null), "item sem clicks → null, nunca 0");
+    assert.deepEqual(s.avisos, []);
+  }
 });
 
 test("S1 sem nenhum dia de afiliados (loja sem venda de afiliado) → não espera, coleta sem aviso", async () => {

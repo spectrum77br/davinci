@@ -105,19 +105,31 @@ const DAILY = {
   total_order_count: 4,
   dis_total_actual_amount: "220.00",
   dis_total_seller_commission: "11.12345",
+  clicks: 1234,
 };
 
 test("seller_daily: totais e último dia = maior ymd (fora de ordem)", () => {
   const r = u.afiliadosDoDaily(DAILY);
-  assert.deepEqual(r.totais, { vendas: 220, comissao: 11.12, pedidos: 4 });
+  assert.deepEqual(r.totais, { vendas: 220, comissao: 11.12, pedidos: 4, cliques: 1234 });
+  assert.deepEqual(Object.keys(r.totais), ["vendas", "comissao", "pedidos", "cliques"]);
   assert.equal(r.ultimoDia, "2026-10-04");
   assert.equal(u.afiliadosDoDaily({ ...DAILY, list: [] }).ultimoDia, null);
   assert.throws(() => u.afiliadosDoDaily({ list: [] }), u.ErroFormato);
 });
 
+test("seller_daily: clicks é opcional — sem ele a seção vale, com cliques null (nunca 0)", () => {
+  const { clicks: _, ...semCliques } = DAILY;
+  assert.deepEqual(u.afiliadosDoDaily(semCliques).totais, { vendas: 220, comissao: 11.12, pedidos: 4, cliques: null });
+  assert.equal(u.afiliadosDoDaily({ ...DAILY, clicks: null }).totais.cliques, null);
+  assert.equal(u.afiliadosDoDaily({ ...DAILY, clicks: "" }).totais.cliques, null);
+  assert.equal(u.afiliadosDoDaily({ ...DAILY, clicks: "abc" }).totais.cliques, null);
+  assert.equal(u.afiliadosDoDaily({ ...DAILY, clicks: "57" }).totais.cliques, 57);
+  assert.equal(u.afiliadosDoDaily({ ...DAILY, clicks: 0 }).totais.cliques, 0, "0 de verdade continua 0");
+});
+
 test("seller_item_detail: item_id vira string, categoria nível 1", () => {
   const itens = u.afiliadosItens([
-    { item_id: 51234567890, item_name: "Fritadeira Teste", category_id: 100010, dis_gmv: "300.5", dis_spend: "9.87654", orders: 3 },
+    { item_id: 51234567890, item_name: "Fritadeira Teste", category_id: 100010, dis_gmv: "300.5", dis_spend: "9.87654", orders: 3, clicks: 812 },
     { item_id: 51234567891, item_name: "  Capinha   Teste ", category_id: 100013, dis_gmv: "20", dis_spend: "1", orders: 1 },
   ]);
   assert.deepEqual(itens[0], {
@@ -127,8 +139,11 @@ test("seller_item_detail: item_id vira string, categoria nível 1", () => {
     vendas: 300.5,
     comissao: 9.88,
     pedidos: 3,
+    cliques: 812,
   });
   assert.equal(itens[1].nome, "Capinha Teste");
+  assert.equal(itens[1].cliques, null, "item sem clicks → null, nunca 0");
+  assert.ok("cliques" in itens[1], "a chave vai sempre, mesmo null");
   assert.deepEqual(u.afiliadosItens(null), []);
 });
 
@@ -368,7 +383,7 @@ test("pausa 1,2–1,8 s e salto de relógio > 2 min além da pausa", () => {
 function semanaCheia(s: u.Semana): u.SemanaDados {
   return {
     ...u.semanaVazia(s),
-    afiliados: { vendas: 1, comissao: 0.1, pedidos: 1 },
+    afiliados: { vendas: 1, comissao: 0.1, pedidos: 1, cliques: 10 },
     afiliados_itens: [],
     ads: { impressoes: 1, cliques: 0, gasto: 0, vendas: 0, pedidos: 0 },
     ads_itens: [],
@@ -429,6 +444,9 @@ test("payload v1: chaves na ordem do contrato e status ok/parcial/erro", () => {
   const texto = u.resumoConferencia("ok", null, d);
   assert.match(texto, /S1 28\/09–04\/10/);
   assert.match(texto, /loja_teste/);
+  assert.match(texto, /1 ped\. · 10 cliques/);
+  const semCliques = { ...d, semanas: d.semanas.map((s) => ({ ...s, afiliados: { ...s.afiliados!, cliques: null } })) };
+  assert.match(u.resumoConferencia("ok", null, semCliques), /1 ped\. · — cliques/);
 });
 
 test("validarJob recusa job torto antes de abrir perfil", () => {

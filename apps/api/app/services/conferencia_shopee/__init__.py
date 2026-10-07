@@ -12,5 +12,6 @@ peças de cálculo são PURAS (sem banco, sem relógio), testadas sozinhas:
   calculo       — o relatório (versao 1) a partir das coletas: linhas por
                   grupo, totais, Geral, saldo das semanas anteriores, notas; e
                   a regra das variações (▲/▼, novo, =, —, p.p.) e da média.
-  saida         — os arquivos do relatório: Excel, CSV, Markdown, JSON e HTML.
+  saida         — os arquivos do relatório: Excel, CSV, Markdown, JSON e HTML
+                  (o Resumo no desenho da planilha do dono, 07/10/2026).
 """

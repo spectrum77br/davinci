@@ -36,6 +36,13 @@ assert.deepEqual(
     ['invest_ads', 'Invest. Ads', 'dinheiro', 'neutro'],
     ['pct', '% s/ vendas', 'percentual', 'desce'],
     ['vendas', 'Vendas', 'dinheiro', 'sobe'],
+    // 07/10/2026: cliques, pedidos e conversão — no fim, a ordem antiga não muda.
+    ['cliques_afiliados', 'Cliques afiliados', 'inteiro', 'neutro'],
+    ['pedidos_afiliados', 'Pedidos afiliados', 'inteiro', 'sobe'],
+    ['conversao_afiliados', 'Conversão afiliados', 'percentual', 'sobe'],
+    ['cliques_ads', 'Cliques Ads', 'inteiro', 'neutro'],
+    ['pedidos_ads', 'Pedidos Ads', 'inteiro', 'sobe'],
+    ['conversao_ads', 'Conversão Ads', 'percentual', 'sobe'],
   ],
 )
 
@@ -81,6 +88,15 @@ assert.equal(L.inteiro(-1234.6), '-1.235')
 assert.equal(L.fmtValor(1500, 'dinheiro'), 'R$ 1.500,00')
 assert.equal(L.fmtValor(1500, 'inteiro'), '1.500')
 assert.equal(L.fmtValor(3.14159, 'percentual'), '3,1%')
+// Planilha do Resumo (07/10/2026): % com 2 casas ("7,50%"); o resto igual.
+assert.equal(L.percentual(7.5, 2), '7,50%')
+assert.equal(L.percentual(null, 2), '—')
+assert.equal(L.fmtPlanilha(7.5, 'percentual'), '7,50%')
+assert.equal(L.fmtPlanilha(0, 'percentual'), '0,00%', 'zero medido aparece')
+assert.equal(L.fmtPlanilha(1234.5, 'dinheiro'), 'R$ 1.234,50')
+assert.equal(L.fmtPlanilha(72388, 'inteiro'), '72.388')
+assert.equal(L.fmtPlanilha(null, 'percentual'), '—')
+assert.equal(L.fmtPlanilha(undefined, 'dinheiro'), '—')
 
 // ---------------------------------------------------------------- empates: os MESMOS do servidor
 // tests/conferencia-arredondamento.json também é conferido por
@@ -93,6 +109,19 @@ assert.equal(L.fmtValor(3.14159, 'percentual'), '3,1%')
   for (const [atual, anterior, tipo, bom, chave, texto, cor] of casos.variacoes) {
     const r = L.variacao(atual, anterior, tipo, bom, chave ?? undefined)
     assert.deepEqual([r.texto, r.cor], [texto, cor], `${atual} vs ${anterior} (${tipo})`)
+  }
+  // Variação da planilha: p.p. com 2 casas (no servidor, variacao(..., casas=2)).
+  assert.equal(L.CASAS_PLANILHA, 2)
+  assert.ok(casos.variacoes_2casas.length >= 8)
+  for (const [atual, anterior, tipo, bom, chave, texto, cor] of casos.variacoes_2casas) {
+    const r = L.variacao(atual, anterior, tipo, bom, chave ?? undefined, L.CASAS_PLANILHA)
+    assert.deepEqual([r.texto, r.cor], [texto, cor], `${atual} vs ${anterior} (${tipo}, 2 casas)`)
+  }
+  // % com 2 casas da planilha do Resumo (07/10/2026); no servidor, percentual(v, 2).
+  assert.ok(casos.percentual_2casas.length >= 8)
+  for (const [v, texto] of casos.percentual_2casas) {
+    assert.equal(L.percentual(v, 2), texto, `${v} (% 2 casas)`)
+    assert.equal(L.fmtPlanilha(v, 'percentual'), texto, `${v} (célula da planilha)`)
   }
 }
 
@@ -147,6 +176,13 @@ assert.equal(L.pctDe(10, 200), 5)
 assert.equal(L.pctDe(10, 0), null, 'sem vendas → null')
 assert.equal(L.pctDe(null, 100), null, 'sem investimento → null')
 assert.equal(L.pctDe(10, null), null)
+assert.equal(L.conversaoDe(5, 200), 2.5, 'pedidos ÷ cliques × 100')
+assert.equal(L.conversaoDe(5, 0), null, 'sem cliques → null')
+assert.equal(L.conversaoDe(5, -10), null, 'cliques negativos → null (nunca conversão negativa)')
+assert.equal(L.conversaoDe(-5, 10), null)
+assert.equal(L.conversaoDe(5, null), null)
+assert.equal(L.conversaoDe(null, 200), null)
+assert.equal(L.conversaoDe(0, 200), 0, 'zero pedido é 0%')
 assert.equal(L.valor({ vendas: 3 }, 'vendas'), 3)
 assert.equal(L.valor({}, 'vendas'), null, 'ausente vira null')
 assert.equal(L.valor({ vendas: 'x' }, 'vendas'), null, 'não-número vira null')
@@ -180,6 +216,16 @@ assert.equal(L.valor({ vendas: 'x' }, 'vendas'), null, 'não-número vira null')
   )
   assert.equal(lqp.vsMedia.texto, '▲ 1,3 p.p.', '10 − 8,75 = 1,25: meio pra longe do zero, igual ao servidor')
   assert.equal(lqp.vsMedia.cor, 'vermelho')
+  // conversão: Σpedidos ÷ Σcliques das 3, não a média dos percentuais
+  const c = [
+    { pedidos_ads: 99, cliques_ads: 100, conversao_ads: 99 },
+    { pedidos_ads: 10, cliques_ads: 100, conversao_ads: 10 },
+    { pedidos_ads: 10, cliques_ads: 900, conversao_ads: 1.11 },
+    { pedidos_ads: null, cliques_ads: null, conversao_ads: null },
+  ]
+  assert.equal(L.media3(c, 'conversao_ads'), 2, '(10 + 10) ÷ (100 + 900) × 100 — a média dos % daria 5,56')
+  assert.equal(L.media3([{}, { pedidos_afiliados: 3 }, {}, {}], 'conversao_afiliados'), null, 'sem cliques → null')
+  assert.equal(L.media3([{}, {}, {}, {}], 'conversao_ads'), null, 'relatório antigo (sem as chaves) → null')
   // saldo: média sem "novo"
   const saldo = L.METRICAS.find((m) => m.chave === 'saldo_ads')
   const ls = L.linhaQuatroSemanas([{ saldo_ads: 80 }, { saldo_ads: 0 }, { saldo_ads: 0 }, {}], saldo)
@@ -245,6 +291,114 @@ assert.equal(
 assert.equal(L.contasTxt(1), '1 conta')
 assert.equal(L.contasTxt(4), '4 contas')
 assert.equal(L.contasTxt(null), '0 contas')
+
+// ---------------------------------------------------------------- planilha do Resumo (07/10/2026)
+// O desenho da planilha antiga do dono: métrica × (semana × Mala/Celular/Eletro/
+// Geral), semanas da mais velha pra mais nova, e o bloco Variação (S1 × S2).
+{
+  const SEM4 = [
+    { inicio: '2026-09-28', fim: '2026-10-04', rotulo: '28/09–04/10' },
+    { inicio: '2026-09-21', fim: '2026-09-27', rotulo: '21/09–27/09' },
+    { inicio: '2026-09-14', fim: '2026-09-20' },
+    { inicio: '2026-09-07', fim: '2026-09-13' },
+  ]
+  // Cada semana com valores diferentes por grupo, pra a posição da célula importar.
+  const sem = (base, over = {}) => ({
+    vendas_afiliados: 1000 * base, vendas_ads: 500 * base, saldo_ads: 77, impressoes: 10000 * base,
+    invest_afiliados: 50 * base, invest_ads: 25 * base, pct: 7.5, vendas: 1000 * base,
+    cliques_afiliados: 400, pedidos_afiliados: 10, conversao_afiliados: 2.5,
+    cliques_ads: 200, pedidos_ads: 5, conversao_ads: 2.5, ...over,
+  })
+  const tot = (semanas) => ({ contas: 1, sem_dados: 0, semanas })
+  const rel = {
+    semanas: SEM4,
+    grupos: [
+      { chave: 'mala', rotulo: 'Mala', linhas: [], total: tot([sem(4), sem(3), sem(2), sem(1)]) },
+      { chave: 'celular', rotulo: 'Celular', linhas: [], total: tot([sem(2, { pct: 8.25, conversao_ads: 3 }), sem(2, { pct: 8, conversao_ads: 2.5 }), sem(2), sem(2)]) },
+      // Eletro sem nada numa semana e sem Ads em outra: "—", nunca 0.
+      { chave: 'eletro', rotulo: 'Eletro', linhas: [], total: tot([sem(1, { vendas_ads: null, invest_ads: null }), {}, sem(1), sem(1)]) },
+    ],
+    geral: tot([sem(10, { pct: 7.25 }), sem(5, { pct: 7.5 }), sem(6), sem(7)]),
+  }
+  const p = L.planilhaResumo(rel)
+
+  // Cabeçalho: semanas da mais VELHA pra mais nova; Variação no fim.
+  assert.deepEqual(p.semanas.map((s) => [s.indice, s.rotulo]), [
+    [3, '07/09 a 13/09'], [2, '14/09 a 20/09'], [1, '21/09 a 27/09'], [0, '28/09 a 04/10'],
+  ])
+  assert.deepEqual(p.grupos.map((g) => g.rotulo), ['Mala', 'Celular', 'Eletro', 'Geral'])
+  assert.equal(p.variacao, 'Variação (28/09–04/10 × 21/09–27/09)')
+
+  // Linhas: categoria mesclada nas 2 linhas dela + sub-rótulo, na ordem da planilha.
+  assert.deepEqual(p.linhas.map((l) => [l.categoria, l.sub, l.span]), [
+    ['Vendas', 'afiliados', 2], ['Vendas', 'Ads', 0],
+    ['Impressões', 'afiliados', 2], ['Impressões', 'Ads', 0],
+    ['Conversão', 'afiliados', 2], ['Conversão', 'Ads', 0],
+    ['Investimento', 'afiliados', 2], ['Investimento', 'Ads', 0],
+    ['Resumo', '% investimento / vendas', 2], ['Resumo', 'Vendas no período', 0],
+  ])
+  assert.equal(new Set(p.linhas.map((l) => l.chave)).size, p.linhas.length, 'chave única por linha')
+  assert.ok(!p.linhas.some((l) => l.chave === 'saldo_ads'), 'Saldo Ads não entra na planilha')
+  const lin = (cat, sub) => p.linhas.find((l) => l.categoria === cat && l.sub === sub)
+
+  // Valores: [semana velha→nova][Mala, Celular, Eletro, Geral].
+  const va = lin('Vendas', 'afiliados')
+  assert.equal(va.valores.length, 4)
+  assert.deepEqual(va.valores[0], ['R$ 1.000,00', 'R$ 2.000,00', 'R$ 1.000,00', 'R$ 7.000,00'], 'S4 primeiro')
+  assert.deepEqual(va.valores[3], ['R$ 4.000,00', 'R$ 2.000,00', 'R$ 1.000,00', 'R$ 10.000,00'], 'S1 por último')
+  assert.deepEqual(va.valores[2][2], '—', 'Eletro sem a semana → "—"')
+  assert.deepEqual(lin('Vendas', 'Ads').valores[3], ['R$ 2.000,00', 'R$ 1.000,00', '—', 'R$ 5.000,00'], 'Eletro sem Ads → "—"')
+  assert.deepEqual(lin('Impressões', 'Ads').valores[3], ['40.000', '20.000', '10.000', '100.000'])
+  // Impressões de afiliados não existem na Shopee: "—" em tudo, variação "—" cinza.
+  const ia = lin('Impressões', 'afiliados')
+  assert.ok(ia.valores.every((s) => s.every((x) => x === '—')))
+  assert.deepEqual(ia.variacoes.map((v) => [v.texto, v.cor]), Array(4).fill(['—', 'cinza']))
+  // % com 2 casas.
+  assert.deepEqual(lin('Conversão', 'Ads').valores[3], ['2,50%', '3,00%', '2,50%', '2,50%'])
+  assert.deepEqual(lin('Resumo', '% investimento / vendas').valores[3], ['7,50%', '8,25%', '7,50%', '7,25%'])
+  assert.deepEqual(lin('Resumo', 'Vendas no período').valores[0], ['R$ 1.000,00', 'R$ 2.000,00', 'R$ 1.000,00', 'R$ 7.000,00'])
+  assert.deepEqual(lin('Investimento', 'Ads').valores[3], ['R$ 100,00', 'R$ 50,00', '—', 'R$ 250,00'])
+
+  // Variação S1 × S2 por grupo, com as regras de sempre.
+  const vv = (cat, sub) => lin(cat, sub).variacoes.map((v) => [v.texto, v.cor])
+  assert.deepEqual(vv('Vendas', 'afiliados'), [['▲ 33,3%', 'verde'], ['=', 'cinza'], ['—', 'cinza'], ['▲ 100,0%', 'verde']])
+  assert.deepEqual(vv('Investimento', 'afiliados')[0], ['▲ 33,3%', 'cinza'], 'investimento: cinza')
+  // p.p. com 2 casas, como o % da planilha (com 1 casa, 8,25 − 8 sairia "▲ 0,3").
+  assert.deepEqual(vv('Resumo', '% investimento / vendas'), [['=', 'cinza'], ['▲ 0,25 p.p.', 'vermelho'], ['—', 'cinza'], ['▼ 0,25 p.p.', 'verde']], '% em p.p.; cair é bom')
+  assert.deepEqual(vv('Conversão', 'Ads')[1], ['▲ 0,50 p.p.', 'verde'], 'conversão em p.p.; subir é bom')
+  {
+    // Conversão pequena (0,44% → 0,43%): "▼ 0,01 p.p.", nunca "▼ 0,0 p.p." dizendo zero.
+    const r2 = JSON.parse(JSON.stringify(rel))
+    r2.geral.semanas[0].conversao_afiliados = 0.43
+    r2.geral.semanas[1].conversao_afiliados = 0.44
+    const v2 = L.planilhaResumo(r2).linhas.find((l) => l.chave === 'conversao_afiliados').variacoes[3]
+    assert.deepEqual([v2.texto, v2.cor], ['▼ 0,01 p.p.', 'vermelho'])
+  }
+
+  // Relatório de ANTES de 07/10 (sem cliques/pedidos/conversão): "—", nunca 0, nunca erro.
+  const antigo = JSON.parse(JSON.stringify(rel))
+  for (const t of [...antigo.grupos.map((g) => g.total), antigo.geral]) {
+    for (const s of t.semanas) for (const k of Object.keys(s)) if (/cliques|pedidos|conversao/.test(k)) delete s[k]
+  }
+  const pa = L.planilhaResumo(antigo)
+  for (const sub of ['afiliados', 'Ads']) {
+    const l = pa.linhas.find((x) => x.categoria === 'Conversão' && x.sub === sub)
+    assert.ok(l.valores.every((s) => s.every((x) => x === '—')), `conversão ${sub} sem dados → "—"`)
+    assert.ok(l.variacoes.every((v) => v.texto === '—'))
+  }
+  assert.deepEqual(pa.linhas.find((x) => x.sub === 'Vendas no período').valores[3], ['R$ 4.000,00', 'R$ 2.000,00', 'R$ 1.000,00', 'R$ 10.000,00'], 'o resto continua')
+
+  // Grupo faltando, semanas a menos, lixo: não quebra.
+  const torto = L.planilhaResumo({ semanas: SEM4.slice(0, 1), grupos: [{ chave: 'mala', rotulo: 'Mala', linhas: [], total: null }], geral: null })
+  assert.deepEqual(torto.semanas.map((s) => s.rotulo), ['28/09 a 04/10'])
+  assert.equal(torto.variacao, 'Variação', 'sem S2 não diz contra o quê')
+  assert.ok(torto.linhas.every((l) => l.valores.length === 1 && l.valores[0].every((x) => x === '—')))
+  assert.ok(torto.linhas.every((l) => l.variacoes.length === 4 && l.variacoes.every((v) => v.texto === '—')))
+  assert.equal(L.planilhaResumo(null), null)
+  const vazio = L.planilhaResumo({ semanas: undefined, grupos: undefined, geral: undefined })
+  assert.deepEqual([vazio.semanas, vazio.linhas.length], [[], 10])
+  assert.equal(L.semanaPlanilha(null), '—')
+}
 
 // ---------------------------------------------------------------- arquivos
 assert.equal(L.nomeArquivo(SEMANAS, 'xlsx'), 'conferencia-shopee-2026-09-28_2026-10-04.xlsx', 'mesmo nome do servidor')

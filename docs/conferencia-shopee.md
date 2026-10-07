@@ -2,7 +2,8 @@
 
 Relatório de marketing da Shopee, **terça e quinta às 13:30 (BRT)**, com as lojas separadas em
 **Mala · Celular · Eletro** e comparado com as 3 semanas anteriores. Aparece em **Marketing → Conferência
-Shopee** e gera HTML (a própria tela), CSV, MD, JSON e Excel.
+Shopee** e gera HTML (a própria tela), CSV, MD, JSON e Excel. O Resumo segue o desenho da planilha antiga
+do dono (seção 5).
 
 Substitui o `conferencia.js` descrito em `COMO-MONTA-O-RELATORIO.md` (06/10/2026). As diferenças em relação
 a esse documento estão no fim desta página.
@@ -56,17 +57,89 @@ Os itens em que a regra 1 discorda da categoria da Shopee são listados nas Nota
 | Invest. Ads | `get_time_graph` → `report_aggregate.cost ÷ 100.000` (eletro: por anúncio) |
 | % s/ vendas | (Invest. afiliados + Invest. Ads) ÷ Vendas × 100 |
 | Vendas | `mydata/v4/product/performance` por dia, `category_id=-1` → soma de `paid_sales` (eletro: itens eletro) |
+| Cliques afiliados | `seller_daily` → `clicks` (eletro: `seller_item_detail` → `clicks`) — desde 07/10/2026 |
+| Pedidos afiliados | `seller_daily` → `total_order_count` (eletro: `seller_item_detail` → `orders`) |
+| Conversão afiliados | Pedidos afiliados ÷ Cliques afiliados × 100 |
+| Cliques Ads | `get_time_graph` → `report_aggregate.click` (eletro: por anúncio) |
+| Pedidos Ads | `get_time_graph` → `report_aggregate.broad_order` (eletro: por anúncio) |
+| Conversão Ads | Pedidos Ads ÷ Cliques Ads × 100 |
 
-- Celular = total da conta − eletro. Como total e eletro saem da **mesma chamada** (a soma dos itens bate
-  com o total), não há diferença de fonte. Gasto de Ads sem item (ex.: GMV Max da loja) fica em Celular.
+As 6 últimas (cliques, pedidos e conversão) entraram em 07/10/2026 e vêm **depois** das 8 primeiras no
+relatório e no CSV (nada mudou de lugar). Coleta de antes disso não tem os cliques de afiliados: a métrica e
+a conversão de afiliados ficam "—" (nunca 0), também no "Recalcular".
+
+- Celular = total da conta − eletro. Vendas, comissão e pedidos de afiliados e tudo de Ads e de Vendas fecham:
+  a soma dos itens bate com o total (conferido na Barbosa em 06/10/2026: 71 = 71 pedidos de afiliados; cliques,
+  pedidos e impressões de Ads iguais ao agregado). Gasto de Ads sem item (ex.: GMV Max da loja) fica em Celular.
+- **Cliques de afiliados são a exceção**: o total (`seller_daily` → `clicks`) e os cliques por produto
+  (`seller_item_detail` → `clicks`) são contas diferentes da Shopee e **não fecham** (Barbosa, mesma semana:
+  total 18.299, soma dos produtos 20.884). Subtrair a soma dos produtos eletro do total deixava Celular errado
+  (3.139 cliques e 1,24% em vez de ~0,7%) e, com eletro mais pesado, negativo. Por isso o total é **dividido na
+  proporção dos produtos**: eletro = total × Σcliques dos produtos eletro ÷ Σcliques de todos os produtos
+  (inteiro, meio para cima) e Celular = o resto. Celular + Eletro = total, sempre; nada fica negativo. Algum
+  produto sem o número de cliques → não dá para dividir (vai tudo para Celular, com aviso).
+- Celular que daria **negativo** em qualquer métrica (a parte eletro passou do total da conta — fontes que não
+  batem) fica "—", Eletro fica com o total da conta (o Geral continua certo) e a linha da conta ganha o aviso
+  "… de eletro passou do total da conta". Nunca aparece número nem conversão negativa.
 - Se o total de uma seção falhou e só os itens vieram (são chamadas separadas), a métrica fica "—" em
   Celular **e** em Eletro: um número só da parte eletro deixaria o Geral pela metade sem avisar.
-- Totais de grupo usam **somas**; o % do grupo é Σinvestimento ÷ Σvendas.
+- Totais de grupo usam **somas**; o % do grupo é Σinvestimento ÷ Σvendas e a conversão é Σpedidos ÷
+  Σcliques (nunca a média dos percentuais), **só das lojas que têm os dois números**: uma loja com pedidos e
+  sem cliques (coleta antiga, Celular que ficou "—") não entra na conta da conversão — os pedidos dela sem os
+  cliques inflariam a conversão do grupo. Os totais de pedidos e de cliques continuam somando tudo o que veio.
+  Conversão sem cliques (0 ou negativo) fica "—".
+- Se um item **eletro** veio sem os cliques (ou pedidos) por produto, mas o total veio, o **par** cliques +
+  pedidos dessa seção fica "—" em Eletro e inteiro em Celular, com um aviso na linha da conta. Separar só os
+  pedidos deixaria Celular com os cliques de eletro sem os pedidos deles (conversão baixa demais) e Eletro com
+  pedidos sem cliques.
 - Arredondamento (tela, Excel, CSV, MD, HTML e Threema iguais): o número como se escreve, **meio para
   longe do zero** — 8,25% → 8,3%; 6,35% → 6,4%; R$ 0,125 → R$ 0,13 (é como o Excel mostra a célula).
   O relatório guarda dinheiro e % com 2 casas por essa regra; o % sai dos valores já arredondados.
 
-## 5. Detalhes das APIs (conferidos ao vivo na Barbosa em 06/10/2026)
+## 5. O Resumo (tela, Excel e HTML) — formato da planilha
+
+Pedido de 07/10/2026 ("mais ou menos desse jeito"): o Resumo tem o desenho da planilha antiga do dono.
+
+```
+                  |        07/09 a 13/09          | … |        28/09 a 04/10          | Variação (28/09–04/10 × 21/09–27/09)
+ Métrica          | Mala | Celular | Eletro | Geral | … | Mala | Celular | Eletro | Geral | Mala | Celular | Eletro | Geral
+ Vendas       afiliados
+              Ads
+ Impressões   afiliados   ← sempre "—": a Shopee não dá impressões de afiliados
+              Ads
+ Conversão    afiliados   ← pedidos ÷ cliques (%)
+              Ads
+ Investimento afiliados
+              Ads
+ Resumo       % investimento / vendas   ← o "% s/ vendas"
+              Vendas no período         ← "Vendas"
+```
+
+- Duas colunas de rótulo: a categoria (mesclada nas suas 2 linhas) e o detalhe.
+- Semanas da **mais antiga para a mais recente**, da esquerda para a direita; cada semana com Mala, Celular,
+  Eletro e Geral. No fim, **Variação** = semana do relatório × a anterior, por grupo, com as regras de
+  sempre ("▲ 12,3%", "novo", "="; % e conversão em p.p.; verde/vermelho pelo que é bom — conversão boa é
+  subir, % de investimento bom é descer; investimento sempre cinza). Os p.p. têm **2 casas**, como o % da
+  planilha ("▼ 0,01 p.p."): com 1 casa, uma conversão de 0,44% → 0,43% saía "▼ 0,0 p.p." em vermelho. O
+  aviso do Threema (% com 1 casa) continua com 1 casa.
+- Valores: R$ com 2 casas, inteiros com ponto de milhar, % com **2 casas** ("7,50%"). Sem dado = "—" (Eletro
+  sem conta com eletro sai "—").
+- Visual: cabeçalho azul-escuro (#1F3864) com letra branca; as 2 colunas de rótulo e toda coluna **Geral**
+  em bege (#DDD9C4, como na planilha); grade cinza fina (#BFBFBF).
+- Embaixo da tabela, só os avisos curtos: contas sem dados e afiliados incompletos.
+- **Saldo Ads não aparece no Resumo** — continua no relatório, no CSV e no JSON.
+- **Excel**: só a aba Resumo, com as 2 colunas de rótulo e o cabeçalho travados ao rolar; % gravado como
+  fração com formato 0,00% (o Numbers e a pré-visualização do Mac multiplicavam um "%" escrito). Os 2
+  gráficos de linha (Vendas e % investimento / vendas por grupo) ficam **abaixo** da tabela, e os números
+  deles embaixo dos gráficos.
+- **HTML**: a mesma tabela; rola de lado com as 2 colunas de rótulo paradas.
+- Tela e HTML no celular: a data da semana (e o "Variação (…)") gruda logo depois das 2 colunas paradas,
+  então a semana dos números que estão à vista aparece sempre em cima deles (a célula mesclada de 4 colunas
+  é mais larga que a tela e a data centrada caía fora dela). No desktop a data continua centrada.
+- **MD**: o mesmo Resumo em uma tabela por grupo, as vendas por conta, avisos e notas.
+- **CSV**: uma linha por grupo × conta × semana com todas as métricas (inclusive as 6 novas e o Saldo Ads).
+
+## 6. Detalhes das APIs (conferidos ao vivo na Barbosa em 06/10/2026)
 
 - Datas em segundos (epoch) com início 00:00 BRT. `get_time_graph` e `homepage/query` **exigem** fim às
   23:59:59; com 00:00 do dia seguinte respondem `code 5 invalid request`.
@@ -79,7 +152,7 @@ Os itens em que a regra 1 discorda da categoria da Shopee são listados nas Nota
   Às 10:20 de terça só havia até domingo; os afiliados de ontem saem por volta de 12:10–12:50.
 - POST levam `x-csrftoken` (cookie `csrftoken`); as rotas levam `SPC_CDS` e `SPC_CDS_VER=2`.
 
-## 6. Como roda
+## 7. Como roda
 
 1. **Servidor (worker)**: terça e quinta 16:30 UTC (= 13:30 BRT), se `CONFERENCIA_SHOPEE_CRON=true`, cria a
    execução e uma coleta por conta ativa. O botão **Gerar agora** faz o mesmo.
@@ -104,7 +177,7 @@ Os itens em que a regra 1 discorda da categoria da Shopee são listados nas Nota
    num não faz o outro receber de novo). Se os números de uma loja já guardados derrubarem o cálculo, só
    ela fica sem dados ("erro") e a rodada fecha com o resto.
 
-## 7. Diferenças em relação ao documento original
+## 8. Diferenças em relação ao documento original
 
 | Documento | Aqui | Por quê |
 |---|---|---|

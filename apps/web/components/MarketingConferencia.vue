@@ -15,8 +15,15 @@
  *    lista de lojas no lugar dos números da semana.
  * 2. Enquanto a execução coleta, a lista de lojas relê a cada 20 s, só com a
  *    aba visível e montada: ninguém precisa recarregar pra ver chegar.
- * 3. Conta sem dados continua na tabela, com o motivo (deslogada, Firefox,
- *    bloqueada…). Sumir com a linha faria o total do grupo parecer completo.
+ * 3. Conta sem dados continua contada, com o motivo (deslogada, Firefox,
+ *    bloqueada…) no aviso embaixo da tabela: o total do grupo não pode parecer
+ *    completo sem estar.
+ *
+ * 07/10/2026: o Resumo virou a planilha antiga do dono ("mais ou menos desse
+ * jeito"): métrica × (semana × Mala/Celular/Eletro/Geral), semanas da mais
+ * velha pra mais nova, e o bloco Variação (semana atual × anterior) no fim.
+ * As linhas e colunas saem de planilhaResumo() (lib/conferencia.ts), o mesmo
+ * desenho do Excel e do HTML.
  */
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
@@ -25,12 +32,11 @@ import {
 } from 'lucide-vue-next'
 import { apiErrMsg } from '~/lib/apiError'
 import {
-  ERROS_CONFERENCIA, METRICAS,
-  coletaTerminou, comparadoCom, contasTxt, dataHoraBr, ddmm, horaBr,
-  linhaQuatroSemanas, nomeArquivo, nomeDoCabecalho, rotuloExecucao, rotuloSemana,
+  ERROS_CONFERENCIA,
+  coletaTerminou, comparadoCom, dataHoraBr, ddmm, horaBr,
+  nomeArquivo, nomeDoCabecalho, planilhaResumo, rotuloExecucao,
   rotuloStatusColeta, rotuloStatusExecucao, tituloRelatorio, tomStatusColeta,
   type Coleta, type ContaConferencia, type Cor, type DetalheExecucao, type ExecucaoResumo, type Formato,
-  type Metrica,
 } from '~/lib/conferencia'
 
 const { api } = useApi()
@@ -389,26 +395,11 @@ async function baixar(fmt: Formato) {
 
 // ---------- relatório
 
-const metricas = computed<Metrica[]>(() => (rel.value?.metricas?.length ? rel.value.metricas : METRICAS))
-
-const quatroSemanas = computed(() => {
-  const r = rel.value
-  if (!r) return []
-  const blocos = [
-    ...r.grupos.map((g) => ({ chave: g.chave as string, rotulo: g.rotulo, total: g.total })),
-    { chave: 'geral', rotulo: 'Geral', total: r.geral },
-  ]
-  return blocos.map((b) => ({
-    chave: b.chave,
-    rotulo: b.rotulo,
-    contas: b.total?.contas ?? 0,
-    semDados: b.total?.sem_dados ?? 0,
-    linhas: metricas.value.map((m) => ({ chave: m.chave, rotulo: m.rotulo, ...linhaQuatroSemanas(b.total?.semanas, m) })),
-  }))
-})
-
-// Só pra o v-for do cabeçalho: S1..S4 com as datas.
-const semanasCab = computed(() => (rel.value?.semanas ?? []).slice(0, 4).map((s, i) => ({ i, nome: `S${i + 1}`, datas: rotuloSemana(s) })))
+// A planilha do Resumo (linhas, colunas, textos e cores já prontos). Relatório
+// de antes de 07/10 não tem cliques/pedidos/conversão: essas linhas saem "—".
+const planilha = computed(() => planilhaResumo(rel.value))
+// Blocos de 4 colunas no 2º cabeçalho: uma por semana + a Variação.
+const blocosCab = computed(() => (planilha.value ? planilha.value.semanas.length + 1 : 0))
 
 const semDadosTxt = computed(() =>
   (rel.value?.contas_sem_dados ?? []).map((c) => `${c.conta} (${rotuloStatusColeta(c.status)})`).join(', '),
@@ -702,42 +693,66 @@ const informarAberto = ref(false)
           </p>
         </header>
 
-        <!-- RESUMO (pedido de 07/10/2026: "só o resumo, bato o olho e já sei"): igual à
-             aba Resumo do Excel — Mala, Celular, Eletro e Geral, as métricas nas 4 semanas
-             e as duas comparações. O detalhe por loja fica no Excel. -->
-        <section v-for="b in quatroSemanas" :key="b.chave" class="grupo">
-          <h3 class="faixa flex flex-wrap items-baseline gap-x-2 rounded-t-xl text-sm font-semibold">
-            {{ b.rotulo }}
-            <span class="text-xs font-normal opacity-80">
-              ({{ contasTxt(b.contas) }}<template v-if="b.semDados"> · {{ b.semDados }} sem dados</template>)
-            </span>
-          </h3>
-          <div class="table-card colada overflow-x-auto">
-            <table class="w-full min-w-[760px] text-xs">
-              <thead>
-                <tr>
-                  <th>Métrica</th>
-                  <th v-for="s in semanasCab" :key="s.i" class="whitespace-nowrap">{{ s.datas }}</th>
-                  <th class="whitespace-nowrap">vs semana anterior</th>
-                  <th class="whitespace-nowrap">vs média 3 sem.</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="l in b.linhas" :key="l.chave">
-                  <td class="whitespace-nowrap font-medium">{{ l.rotulo }}</td>
+        <!-- RESUMO no formato da planilha antiga do dono (07/10/2026, "mais ou menos
+             desse jeito"): categoria + sub-rótulo, cada semana (da mais velha pra mais
+             nova) com Mala · Celular · Eletro · Geral, e a Variação no fim. Larga: rola
+             pro lado com as duas colunas de rótulo paradas. -->
+        <div v-if="planilha" class="planilha overflow-x-auto rounded-xl border">
+          <table class="text-xs" aria-label="Resumo da conferência por semana e grupo">
+            <thead>
+              <tr>
+                <th class="rotulo-cab" colspan="2" rowspan="2" scope="col">Métrica</th>
+                <!-- o texto num span "parado": no celular a célula mesclada (4 colunas) é mais
+                     larga que o que sobra ao lado das colunas de rótulo, e a data centrada
+                     ficava fora da tela, em cima de números sem semana -->
+                <th
+                  v-for="s in planilha.semanas" :key="s.indice"
+                  colspan="4" scope="colgroup" class="semana-cab whitespace-nowrap"
+                >
+                  <span class="semana-txt">{{ s.rotulo }}</span>
+                </th>
+                <th colspan="4" scope="colgroup" class="semana-cab whitespace-nowrap">
+                  <span class="semana-txt">{{ planilha.variacao }}</span>
+                </th>
+              </tr>
+              <tr>
+                <template v-for="b in blocosCab" :key="b">
+                  <th
+                    v-for="g in planilha.grupos" :key="`${b}-${g.chave}`"
+                    scope="col" class="grupo-cab whitespace-nowrap" :class="g.chave === 'geral' && 'geral'"
+                  >
+                    {{ g.rotulo }}
+                  </th>
+                </template>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="(l, k) in planilha.linhas" :key="l.chave">
+                <th
+                  v-if="l.span" :rowspan="l.span" scope="rowgroup"
+                  class="cat" :class="k + l.span >= planilha.linhas.length && 'ultima'"
+                >
+                  {{ l.categoria }}
+                </th>
+                <th scope="row" class="sub">{{ l.sub }}</th>
+                <template v-for="(sem, i) in l.valores" :key="i">
                   <td
-                    v-for="(v, i) in l.valores" :key="i"
-                    class="whitespace-nowrap text-right tabular-nums" :class="i === 0 && 'font-semibold'"
+                    v-for="(v, j) in sem" :key="j"
+                    class="num" :class="planilha.grupos[j]?.chave === 'geral' && 'geral'"
                   >
                     {{ v }}
                   </td>
-                  <td class="whitespace-nowrap text-center tabular-nums" :class="COR[l.vsAnterior.cor]">{{ l.vsAnterior.texto }}</td>
-                  <td class="whitespace-nowrap text-center tabular-nums" :class="COR[l.vsMedia.cor]">{{ l.vsMedia.texto }}</td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        </section>
+                </template>
+                <td
+                  v-for="(v, j) in l.variacoes" :key="`var-${j}`"
+                  class="var" :class="[COR[v.cor], planilha.grupos[j]?.chave === 'geral' && 'geral']"
+                >
+                  {{ v.texto }}
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
 
         <!-- só os avisos que mudam a leitura -->
         <div
@@ -747,7 +762,6 @@ const informarAberto = ref(false)
           <p v-if="semDadosTxt"><span class="font-medium">Sem dados:</span> {{ semDadosTxt }}</p>
           <p v-if="afiliadosIncompletosTxt"><span class="font-medium">Afiliados incompletos:</span> {{ afiliadosIncompletosTxt }}</p>
         </div>
-        <p class="text-[11px] text-muted-foreground">O detalhe por loja está no Excel (botão Excel acima).</p>
       </div>
     </div>
 
@@ -848,47 +862,39 @@ const informarAberto = ref(false)
 </template>
 
 <style scoped>
-/* Visual de planilha (pedido de 07/10/2026: "deixa no formato de excel … tá muito
-   branco, não tem azul, as colunas separadas"). Mesma paleta do Excel exportado:
-   azul 1F3864 no cabeçalho, grade BFBFBF, total D9E1F2. Sem @layer: ganha do
-   .table-card global (que está em @layer components). */
+/* Visual de planilha (pedidos de 07/10/2026: "deixa no formato de excel … tá muito
+   branco, não tem azul, as colunas separadas" e "mais ou menos desse jeito"). Mesma
+   paleta do Excel exportado e da planilha antiga do dono: azul 1F3864 no
+   cabeçalho, bege DDD9C4 nos rótulos e no Geral, grade BFBFBF. Sem @layer: ganha
+   do .table-card global (que está em @layer components). */
 .conferencia {
   --conf-azul: #1f3864;
   --conf-azul-txt: #ffffff;
   --conf-grade: #bfbfbf;
   --conf-zebra: #f3f6fb;
-  --conf-total: #d9e1f2;
-  --conf-separador: #ddebf7;
-  --conf-separador-txt: #1f3864;
   --conf-hover: #e8eef8;
+  --conf-bege: #ddd9c4;
+  --conf-celula: #ffffff;
+  /* largura da coluna da categoria = onde a 2ª coluna parada começa */
+  --conf-cat-w: 6.5rem;
+  /* largura da 2ª coluna parada: cat + sub = onde a data da semana gruda */
+  --conf-sub-w: 11rem;
 }
 :global(.dark) .conferencia {
   --conf-azul: #1f3864;
   --conf-azul-txt: #f1f5fb;
   --conf-grade: #3a4556;
   --conf-zebra: rgba(255, 255, 255, 0.035);
-  --conf-total: rgba(68, 114, 196, 0.28);
-  --conf-separador: rgba(68, 114, 196, 0.18);
-  --conf-separador-txt: #c9d7ef;
   --conf-hover: rgba(68, 114, 196, 0.14);
+  /* bege escurecido: continua "a coluna bege" e o texto claro se lê em cima */
+  --conf-bege: #3b3829;
+  --conf-celula: hsl(var(--card));
+}
+@media (max-width: 639px) {
+  .conferencia { --conf-cat-w: 5.75rem; --conf-sub-w: 6.5rem; }
 }
 
-/* faixas azuis: título do grupo, dos blocos de 4 semanas e dos cartões */
-.faixa {
-  background: var(--conf-azul);
-  color: var(--conf-azul-txt);
-  padding: 0.5rem 0.875rem;
-}
-.cartao { border-color: var(--conf-grade); }
-
-/* tabela colada embaixo da faixa (sem o arredondado de cima) */
-.grupo > .colada {
-  border-top: 0;
-  border-top-left-radius: 0;
-  border-top-right-radius: 0;
-}
-
-/* grade de planilha */
+/* ── grade das tabelas de apoio (lojas coletando, contas) ── */
 .table-card { border-color: var(--conf-grade); }
 .table-card table { border-collapse: collapse; }
 .table-card thead th {
@@ -912,29 +918,116 @@ const informarAberto = ref(false)
 .table-card tbody tr:last-child > td { border-bottom: 0; }
 .table-card tbody tr:nth-child(even) > td { background: var(--conf-zebra); }
 .table-card tbody tr:hover > td { background: var(--conf-hover); }
-.table-card tbody tr.total > td { background: var(--conf-total); }
-.table-card tbody tr.separador > td {
-  background: var(--conf-separador);
-  color: var(--conf-separador-txt);
+
+/* ── a planilha do Resumo ──
+   border-collapse: separate (cada célula com a sua borda à direita e embaixo):
+   com "collapse" a borda das colunas paradas fica pra trás ao rolar pro lado. */
+.planilha {
+  border-color: var(--conf-grade);
+  background: var(--conf-celula);
+}
+.planilha table {
+  border-collapse: separate;
+  border-spacing: 0;
+  min-width: 100%;
+}
+.planilha th,
+.planilha td {
+  border-right: 1px solid var(--conf-grade);
+  border-bottom: 1px solid var(--conf-grade);
+  padding: 0.4rem 0.6rem;
+  white-space: nowrap;
+}
+.planilha tr > :last-child { border-right: 0; }
+.planilha tbody tr:last-child > *,
+.planilha tbody .cat.ultima { border-bottom: 0; }
+
+/* cabeçalho: as duas linhas em azul, texto branco em negrito */
+.planilha thead th {
+  background: var(--conf-azul);
+  color: var(--conf-azul-txt);
+  font-weight: 700;
+  text-align: center;
 }
 
-/* primeira coluna (Conta / Métrica) fica parada ao rolar para o lado */
-.grupo .table-card tbody td:first-child,
-.grupo .table-card thead th:first-child {
-  position: sticky;
-  left: 0;
-  z-index: 1;
+/* corpo: números à direita, variação no centro, Geral e rótulos em bege */
+.planilha td { background: var(--conf-celula); }
+.planilha td.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.planilha td.var {
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+.planilha td.geral {
+  background: var(--conf-bege);
+  font-weight: 600;
+}
+.planilha tbody th {
+  background: var(--conf-bege);
   text-align: left;
 }
-.grupo .table-card tbody td:first-child { background: hsl(var(--card)); }
-.grupo .table-card tbody tr:nth-child(even) > td:first-child {
-  background-image: linear-gradient(var(--conf-zebra), var(--conf-zebra));
+.planilha tbody th.cat {
+  font-weight: 700;
+  vertical-align: middle;
 }
-.grupo .table-card tbody tr.total > td:first-child {
-  background-image: linear-gradient(var(--conf-total), var(--conf-total));
+.planilha tbody th.sub { font-weight: 500; }
+
+/* as duas colunas de rótulo ficam paradas ao rolar pro lado */
+.planilha .rotulo-cab,
+.planilha .cat,
+.planilha .sub {
+  position: sticky;
+  z-index: 1;
 }
-.grupo .table-card tbody tr.separador > td:first-child {
-  position: static;
-  background: var(--conf-separador);
+.planilha .rotulo-cab {
+  left: 0;
+  z-index: 2;
+  text-align: left;
+}
+.planilha .cat {
+  left: 0;
+  width: var(--conf-cat-w);
+  min-width: var(--conf-cat-w);
+  max-width: var(--conf-cat-w);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.planilha .sub {
+  left: var(--conf-cat-w);
+  width: var(--conf-sub-w);
+  min-width: var(--conf-sub-w);
+  max-width: var(--conf-sub-w);
+  /* separa as colunas paradas do que passa por baixo delas */
+  box-shadow: 2px 0 0 var(--conf-grade);
+}
+/* A data da semana (e o "Variação (…)") fica à vista enquanto o bloco dela
+   estiver na tela: gruda logo depois das 2 colunas paradas e não passa da
+   borda direita. No desktop, com a tabela no começo, fica centrada como na
+   planilha. */
+.planilha .semana-txt {
+  display: inline-block;
+  position: sticky;
+  left: calc(var(--conf-cat-w) + var(--conf-sub-w) + 0.6rem);
+  right: 0.6rem;
+}
+@media (max-width: 639px) {
+  /* celular: células mais justas e "% investimento / vendas" em 2 linhas, pra as
+     duas colunas paradas não comerem a tela dos números */
+  .planilha th,
+  .planilha td { padding: 0.35rem 0.45rem; }
+  .planilha tbody th { font-size: 0.6875rem; }
+  .planilha .sub { white-space: normal; }
+  /* data à esquerda, grudada só pela esquerda, e o "Variação (…)" quebrando em
+     linhas: mais largo que o que sobra da tela, ele escorregava pra baixo das
+     colunas paradas no fim da rolagem e só o fim aparecia */
+  .planilha thead th.semana-cab { text-align: left; }
+  .planilha .semana-txt {
+    left: calc(var(--conf-cat-w) + var(--conf-sub-w) + 0.45rem);
+    right: auto;
+    max-width: 6.5rem;
+    white-space: normal;
+  }
 }
 </style>

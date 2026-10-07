@@ -10,6 +10,9 @@
  *   - afiliados (`dis_*`) já vêm em R$ como string;
  *   - Ads e saldo vêm em inteiros ÷ 100.000;
  *   - `product/performance` vem em R$ (float).
+ * Cliques de afiliados (07/10/2026): `data.clicks` do seller_daily e
+ * `clicks` de cada item do seller_item_detail — chave sempre presente,
+ * null quando a Shopee não manda (nunca 0 inventado).
  */
 
 /** Uma semana do relatório (datas BRT, inclusive). */
@@ -28,6 +31,8 @@ export interface AfiliadosTotais {
   vendas: number;
   comissao: number;
   pedidos: number;
+  /** cliques nos links de afiliados (`data.clicks`); null = a Shopee não mandou. */
+  cliques: number | null;
 }
 export interface AfiliadoItem {
   item_id: string;
@@ -36,6 +41,10 @@ export interface AfiliadoItem {
   vendas: number;
   comissao: number;
   pedidos: number;
+  /** `clicks` do item; null = a Shopee não mandou. A soma dos itens NÃO
+   *  bate com o `data.clicks` do seller_daily (conferido na Barbosa): o
+   *  servidor (calculo.py) divide o total na proporção dos itens. */
+  cliques: number | null;
 }
 export interface AdsTotais {
   impressoes: number;
@@ -238,13 +247,15 @@ function lista(v: unknown, total: unknown, campo: string): any[] {
 // ---------------------------------------------------------------------------
 
 /** `seller_daily` (body.data) → totais da semana + último dia publicado
- *  (maior `ymd` da lista; o `last_update_time` NÃO serve pra isso). */
+ *  (maior `ymd` da lista; o `last_update_time` NÃO serve pra isso).
+ *  `clicks` é opcional: sem ele a seção vale assim mesmo, com cliques null. */
 export function afiliadosDoDaily(data: any): { totais: AfiliadosTotais; ultimoDia: string | null } {
   if (!data || typeof data !== "object") throw new ErroFormato("afiliados sem data");
   const totais: AfiliadosTotais = {
     vendas: exigir(reais(data.dis_total_actual_amount), "dis_total_actual_amount"),
     comissao: exigir(reais(data.dis_total_seller_commission), "dis_total_seller_commission"),
     pedidos: exigir(inteiro(data.total_order_count), "total_order_count"),
+    cliques: inteiro(data.clicks),
   };
   return { totais, ultimoDia: ultimoDiaAfiliados(data.list) };
 }
@@ -268,6 +279,7 @@ export function afiliadosItens(list: unknown): AfiliadoItem[] {
     vendas: exigir(reais(x?.dis_gmv), "dis_gmv"),
     comissao: exigir(reais(x?.dis_spend), "dis_spend"),
     pedidos: inteiro(x?.orders) ?? 0,
+    cliques: inteiro(x?.clicks),
   }));
 }
 
@@ -784,11 +796,11 @@ export function resumoConferencia(status: string, erro: string | null, d: Coleta
   d.semanas.forEach((s, i) => {
     out.push(`S${i + 1} ${ddmm(s.inicio)}–${ddmm(s.fim)}`);
     out.push(
-      `  afiliados: ${s.afiliados ? `${brl(s.afiliados.vendas)} · comissão ${brl(s.afiliados.comissao)} · ${num(s.afiliados.pedidos)} ped.` : "—"}` +
+      `  afiliados: ${s.afiliados ? `${brl(s.afiliados.vendas)} · comissão ${brl(s.afiliados.comissao)} · ${num(s.afiliados.pedidos)} ped. · ${num(s.afiliados.cliques)} cliques` : "—"}` +
         ` (${s.afiliados_itens ? s.afiliados_itens.length : "—"} itens)`
     );
     out.push(
-      `  Ads: ${s.ads ? `${brl(s.ads.vendas)} · gasto ${brl(s.ads.gasto)} · ${num(s.ads.impressoes)} impr. · ${num(s.ads.pedidos)} ped.` : "—"}` +
+      `  Ads: ${s.ads ? `${brl(s.ads.vendas)} · gasto ${brl(s.ads.gasto)} · ${num(s.ads.impressoes)} impr. · ${num(s.ads.cliques)} cliques · ${num(s.ads.pedidos)} ped.` : "—"}` +
         ` (${s.ads_itens ? s.ads_itens.length : "—"} anúncios)`
     );
     out.push(

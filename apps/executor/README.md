@@ -95,6 +95,12 @@ Para cada loja (`src/conferencia.ts`):
 6. 4 semanas × (afiliados, itens de afiliados, Ads, anúncios de Ads, vendas
    por dia) + saldo de Ads: uma chamada por vez, de dentro da página logada,
    com 1,2–1,8 s de pausa — cerca de 50 a 90 chamadas, 2 a 4 minutos por loja.
+   Desde 07/10/2026 os afiliados levam também os **cliques** (`cliques` no
+   total da semana, de `data.clicks`, e em cada item, de `clicks`) para a
+   Conversão do relatório — mesmas chamadas, nenhuma a mais. Se a Shopee não
+   mandar, vai `null` (nunca 0) e a loja continua `ok`. A soma dos cliques
+   por item NÃO bate com o total (são contas diferentes da Shopee): o
+   servidor divide o total na proporção dos itens para separar Eletro.
 7. Fecha a aba, desconecta e fecha o perfil (`adspower.stop`), e espera o
    AdsPower largar o perfil (até 20 s).
 
