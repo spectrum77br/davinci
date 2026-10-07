@@ -2196,7 +2196,7 @@ async function pushItemsBatch(
 
     const totalBloq = bloqueadas + recusadas
     const txtBloq = totalBloq > 0 ? `${totalBloq} bloqueada(s) de catálogo pulada(s)` : ''
-    const txtPulados = skipped > 0 ? `${skipped} célula(s) não enviada(s) — anúncio pulado no ML:` : ''
+    const txtPulados = skipped > 0 ? `${skipped} célula(s) não enviada(s) — anúncio pulado:` : ''
     if (errors > 0) {
       toast.error(
         `Envio: ${sent} ok, ${errors} erro(s)${noLinks > 0 ? `, ${noLinks} sem vínculo` : ''}${totalBloq > 0 ? `, ${totalBloq} bloqueada(s)` : ''}${skipped > 0 ? `, ${skipped} pulada(s)` : ''}`,
