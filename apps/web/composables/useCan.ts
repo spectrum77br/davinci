@@ -79,11 +79,14 @@ export const RESOURCE_GROUPS: ResourceGroup[] = [
     // Atendimento (25/09/2026): caixa única das conversas das lojas com a
     // sugestão da IA. view = ler a fila; edit = responder, mexer no modo da
     // loja, no manual e nas respostas prontas; delete = apagar regra/resposta.
-    // SÓ ADMIN POR ENQUANTO (Eduardo, 30/09/2026): fica FORA desta lista, como
-    // o Valuation, para ninguém receber a permissão pela tela de Permissões
-    // (nem pelo "marcar a coluna toda"). O tipo e o rótulo continuam, e a API
-    // exige admin (SO_ADMIN em apps/api/app/routers/atendimento.py). Para
-    // abrir para a equipe, 'atendimento' volta para o fim desta lista.
+    // FASE DE OBSERVAÇÃO (SO_ADMIN em apps/api/app/routers/atendimento.py):
+    // fica FORA desta lista. Desde 07/10/2026 toda pessoa ativa VÊ (só
+    // leitura, com "Sugerir" e 👍/👎) e só ATENDIMENTO_USUARIOS mexe — quem
+    // vê e quem mexe vêm do /me (`atendimento`, `atendimento_mexe`), não do
+    // JSON de permissões, que ninguém tem: pôr o recurso de volta aqui agora
+    // tiraria a caixa de quem acabou de ganhá-la, ou mostraria caixinhas que
+    // não mudam nada. O tipo e o rótulo continuam; quando a fase acabar,
+    // 'atendimento' volta para o fim desta lista.
     resources: ['devolucoes', 'reembolso', 'logistica', 'notas_fiscais', 'chamados'],
   },
   {

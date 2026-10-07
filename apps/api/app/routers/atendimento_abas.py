@@ -24,8 +24,8 @@ Shopee, o mediador da reclamação), para a tela mostrar cada uma no seu lugar;
 compra do comprador na loja, Shopee: o chat se divide pela mais antiga).
 
 SÓ LEITURA: nada é enviado, marcado como lido ou gravado por esta rota. A
-MESMA TRAVA de acesso do router do atendimento (`_so_admin`: só admin em
-ATENDIMENTO_USUARIOS enquanto a caixa estiver em observação), a permissão de
+MESMA TRAVA de acesso do router do atendimento (`_so_admin`: na observação,
+toda a equipe lê e só ATENDIMENTO_USUARIOS mexe), a permissão de
 leitura (`_view`) e o escopo por equipe (`_conversa_ou_404`; a família é
 toda da mesma loja). Router à parte; o `main.py` o inclui.
 """

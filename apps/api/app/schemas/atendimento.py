@@ -245,6 +245,10 @@ class AvaliacaoResumoOut(BaseModel):
 
     nota: str | None = None
     correcao: str | None = None
+    # A nota é de OUTRA pessoa (não de quem está vendo). Na fase de
+    # observação, quem só lê não a troca (409 `avaliacao_de_outra_pessoa`) e
+    # a tela mostra só o selo.
+    de_outra_pessoa: bool = False
 
 
 class RespostaRealOut(BaseModel):
@@ -450,6 +454,8 @@ class AvaliacaoOut(BaseModel):
     motivo: str | None = None
     nota: str | None = None
     correcao: str | None = None
+    # Ver AvaliacaoResumoOut.de_outra_pessoa.
+    de_outra_pessoa: bool = False
 
 
 class AvaliacaoUnicaOut(BaseModel):

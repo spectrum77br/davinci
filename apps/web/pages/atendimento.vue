@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { BarChart3, BookOpen, Bot, Inbox, MessageSquareText, RotateCcw, Store, TriangleAlert } from 'lucide-vue-next'
+import { BarChart3, BookOpen, Bot, Eye, Inbox, MessageSquareText, RotateCcw, Store, TriangleAlert } from 'lucide-vue-next'
 import { useResizeObserver, useWindowSize } from '@vueuse/core'
 import {
+  AVISO_SO_LEITURA,
   avisoSimulador,
   categoriasDe,
   comoLista,
@@ -19,12 +20,15 @@ import {
 } from '~/components/AtendimentoPlataforma.vue'
 import type { FiltrosLista } from '~/components/AtendimentoLista.vue'
 
-// SÓ ADMIN POR ENQUANTO (Eduardo, 30/09/2026): mesma trava do menu
-// (AppSidebar) e da API (SO_ADMIN em apps/api/app/routers/atendimento.py).
-// Para abrir para a equipe: middleware: ['permission'], permission:
-// { resource: 'atendimento', action: 'view' }. E, entre os admins, só quem
-// está em ATENDIMENTO_USUARIOS (middleware `atendimento`, 30/09/2026).
-definePageMeta({ middleware: ['admin', 'atendimento'] })
+// FASE DE OBSERVAÇÃO (SO_ADMIN em apps/api/app/routers/atendimento.py): a
+// mesma trava do menu (AppSidebar) e da API. Desde 07/10/2026 ("pode liberar
+// pras outras pessoas do DaVinci verem pra já obtermos feedbacks, mas claro
+// por enquanto só leitura"), toda pessoa ativa entra — o /me traz
+// `atendimento: true` (middleware `atendimento`) — e só quem o /me traz com
+// `atendimento_mexe: true` (ATENDIMENTO_USUARIOS) responde e muda a caixa;
+// os outros leem, pedem a sugestão da IA e dão 👍/👎. Quando a fase acabar:
+// middleware: ['permission'], permission: { resource: 'atendimento', action: 'view' }.
+definePageMeta({ middleware: ['atendimento'] })
 
 // Atendimento (Pós-venda, 25/09/2026): a caixa única das conversas de Shopee,
 // Mercado Livre, TikTok, Amazon e Magalu (30/09/2026: pergunta, chat e SAC),
@@ -65,9 +69,19 @@ const { api } = useApi()
 const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
-const canEdit = useCan('atendimento', 'edit')
-const canDelete = useCan('atendimento', 'delete')
-const isAdmin = useIsAdmin()
+// Quem só lê (fase de observação): as ações de mexer somem ou ficam
+// desligadas com o AVISO_SO_LEITURA — inclusive para os outros admins. A API
+// recusa do mesmo jeito (403 `atendimento_so_leitura`).
+const mexe = computed(() => auth.user?.atendimento_mexe === true)
+const soLeitura = computed(() => !mexe.value)
+const podeEditar = useCan('atendimento', 'edit')
+const podeApagar = useCan('atendimento', 'delete')
+const ehAdmin = useIsAdmin()
+const canEdit = computed(() => mexe.value && podeEditar.value)
+const canDelete = computed(() => mexe.value && podeApagar.value)
+const isAdmin = computed(() => mexe.value && ehAdmin.value)
+// "Sugerir agora" e 👍/👎: todo mundo que vê a caixa (é o feedback que o dono quer).
+const canSugerir = computed(() => auth.user?.atendimento === true)
 const agora = useRelogio()
 
 // `?tab=lojas` abre direto na aba; `?conversa=<id>` abre a conversa (é o link
@@ -431,6 +445,16 @@ watch(selecionada, (id) => {
       </template>
     </PageHeader>
 
+    <!-- quem só lê (fase de observação): um aviso discreto, uma linha -->
+    <div
+      v-if="soLeitura"
+      class="flex items-center gap-1.5 rounded-md border border-sky-300/60 bg-sky-50 px-3 py-1 text-xs text-sky-900 dark:border-sky-800/60 dark:bg-sky-900/20 dark:text-sky-200"
+      data-aviso-so-leitura
+    >
+      <Eye class="size-3.5 shrink-0" aria-hidden="true" />
+      <span>{{ AVISO_SO_LEITURA }}</span>
+    </div>
+
     <!-- o que está desligado no servidor: uma linha curta; a frase inteira no title e em "o que isso quer dizer?" -->
     <div
       v-if="avisos.length"
@@ -530,6 +554,7 @@ watch(selecionada, (id) => {
           v-if="selecionada"
           :conversa-id="selecionada"
           :can-edit="canEdit"
+          :can-sugerir="canSugerir"
           :modelos="modelos"
           :flags="resumo?.flags || null"
           :meu-id="auth.user?.id || null"

@@ -13,8 +13,8 @@ SÓ LEITURA: nenhuma ação na plataforma sai daqui (aceitar devolução, oferec
 solução e pedir mediação ficam para depois, com confirmação e auditoria). O
 "Abrir na plataforma" é um link.
 
-A MESMA TRAVA de acesso do router do atendimento (`_so_admin`: só admin em
-ATENDIMENTO_USUARIOS enquanto a caixa estiver em observação) e a mesma
+A MESMA TRAVA de acesso do router do atendimento (`_so_admin`: na
+observação, toda a equipe lê e só ATENDIMENTO_USUARIOS mexe) e a mesma
 permissão de leitura (`_view`) e escopo por equipe (`_conversa_ou_404`).
 Router à parte para não mexer no do atendimento: o `main.py` o inclui.
 """

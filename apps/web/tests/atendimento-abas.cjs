@@ -205,7 +205,8 @@ const resposta = (o = {}) => ({
   // Por que a caixa da aba não responde.
   assert.equal(R.bloqueioDaAba(por('mediador'), true), 'Mediador: só leitura.')
   assert.equal(R.bloqueioDaAba(por('pre_venda'), true), P.ERROS.envio_desligado, 'envio desligado: a frase de sempre')
-  assert.equal(R.bloqueioDaAba(por('pre_venda'), false), 'Você pode ler, mas não responder: falta a permissão de editar o Atendimento.')
+  // Fase de observação (07/10/2026): sem edição = quem só lê.
+  assert.equal(R.bloqueioDaAba(por('pre_venda'), false), P.AVISO_SO_LEITURA)
   assert.equal(R.bloqueioDaAba({ chave: 'pos_venda', responde: resp({ codigo: 'conversa_bloqueada', motivo: 'blocked_by_claim' }) }, true), P.ERROS.conversa_bloqueada)
   assert.equal(R.bloqueioDaAba({ chave: 'pos_venda', responde: resp({ codigo: 'conversa_bloqueada', motivo: 'A janela fechou.' }) }, true), 'A plataforma não deixa mais responder esta conversa: A janela fechou.')
   assert.equal(R.bloqueioDaAba({ chave: 'avaliacao', responde: resp({ codigo: 'ja_respondida', motivo: 'x' }) }, true), P.ERROS.ja_respondida)

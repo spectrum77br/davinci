@@ -209,7 +209,8 @@ for (const a of aval.fonte.match(/<a\s[\s\S]*?>/g)) assert.match(a, /target="_bl
   assert.deepEqual(c({ pendente: true }), { modo: 'desligada', motivo: base.motivo_sem_resposta })
   assert.deepEqual(c({ pode_responder: true, motivo_sem_resposta: null }), { modo: 'caixa', motivo: '' })
   assert.equal(c({ pode_responder: true, motivo_sem_resposta: null }, { canEdit: false }).modo, 'desligada')
-  assert.match(c({ pode_responder: true, motivo_sem_resposta: null }, { canEdit: false }).motivo, /permissão/)
+  // Fase de observação (07/10/2026): sem edição = quem só lê.
+  assert.match(c({ pode_responder: true, motivo_sem_resposta: null }, { canEdit: false }).motivo, /^Só leitura por enquanto/)
   assert.equal(c({ respondida: true, resposta_loja: 'oi' }).modo, 'nenhuma')
   // ML: o motivo no lugar da caixa.
   const ml = c({ plataforma: 'ml', motivo_sem_resposta: 'O Mercado Livre não permite responder a opinião pela API: use “Marcar como tratada”.' })

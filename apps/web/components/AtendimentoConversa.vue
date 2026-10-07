@@ -205,6 +205,7 @@ import { PopoverContent, PopoverPortal, PopoverRoot, PopoverTrigger } from 'reka
 import { onKeyStroke, useMediaQuery } from '@vueuse/core'
 import {
   AVISO_MODERACAO_MAGALU,
+  AVISO_SO_LEITURA,
   CHAVE_CORRECOES,
   ERROS,
   MODERACAO_MAGALU_ENVIADA,
@@ -270,6 +271,10 @@ import {
 const props = defineProps<{
   conversaId: string
   canEdit: boolean
+  // Fase de observação (07/10/2026): quem só lê (`canEdit` falso) ainda pede
+  // a sugestão da IA e dá 👍/👎 nela — o feedback que o dono quer. Sem a prop,
+  // vale o `canEdit` de sempre.
+  canSugerir?: boolean
   modelos: Modelo[]
   flags: Flags | null
   meuId: string | null
@@ -292,6 +297,9 @@ const emit = defineEmits<{
 const { api } = useApi()
 const toasts = useToasts()
 const agora = useRelogio()
+
+// Pedir a sugestão e avaliá-la: quem mexe e quem só lê (fase de observação).
+const canAvaliar = computed(() => props.canEdit || props.canSugerir === true)
 
 const detalhe = ref<Detalhe | null>(null)
 const carregando = ref(false)
@@ -1035,7 +1043,7 @@ const bloqueioEnvio = computed(() => {
       ? 'Direct do Instagram: aqui é só leitura — responda pela caixa de entrada do Instagram.'
       : ERROS.somente_leitura
   }
-  if (!props.canEdit) return 'Você pode ler, mas não responder: falta a permissão de editar o Atendimento.'
+  if (!props.canEdit) return AVISO_SO_LEITURA
   // Conversa da avaliação (RF8) já respondida: a caixa de baixo não manda
   // uma segunda resposta PÚBLICA (o backend do chat não confere isso).
   if (avaliacaoDaConversa.value?.respondida) return 'Esta avaliação já foi respondida — a resposta pública da loja já está no anúncio.'
@@ -1407,7 +1415,7 @@ const gerando = computed(() => gerandoIds.has(props.conversaId))
 // sugeriu nada" sem explicação).
 const podeSugerir = computed(() => {
   const c = conversa.value
-  return !!c && props.canEdit && !c.somente_leitura && !c.ia_pausada && c.situacao !== 'fechada' && c.situacao !== 'bloqueada'
+  return !!c && canAvaliar.value && !c.somente_leitura && !c.ia_pausada && c.situacao !== 'fechada' && c.situacao !== 'bloqueada'
     && props.flags?.ia_ativa !== false && !rascunho.value
 })
 // Por que não veio sugestão, quando a API diz (`motivo`). Sem motivo, a frase
@@ -1777,7 +1785,7 @@ const MAX_FOTO = 10 * 1024 * 1024
 const motivoSemFoto = computed(() => {
   const d = detalhe.value
   if (!d) return ''
-  if (!props.canEdit) return 'Falta a permissão de editar o Atendimento.'
+  if (!props.canEdit) return AVISO_SO_LEITURA
   if (d.conversa.somente_leitura || sellerCenterDe(d.conversa.plataforma)) return bloqueioEnvio.value || 'Esta conversa é só de leitura aqui.'
   const ef = envioFoto.value
   if (!ef) return painelCarregando.value ? 'Conferindo se a foto pode sair…' : 'Não consegui conferir se a foto pode sair agora.'
@@ -2561,7 +2569,7 @@ watch(() => props.conversaId, (novo, velho) => {
                 :key="sg.id"
                 class="mt-1"
                 :sugestao="sg"
-                :can-edit="canEdit"
+                :can-edit="canAvaliar"
                 @avaliada="(a: AvaliacaoIa) => aoAvaliar(sg.id, a)"
               />
             </div>
@@ -2572,7 +2580,7 @@ watch(() => props.conversaId, (novo, velho) => {
               v-for="sg in comparacoes.soltas"
               :key="sg.id"
               :sugestao="sg"
-              :can-edit="canEdit"
+              :can-edit="canAvaliar"
               @avaliada="(a: AvaliacaoIa) => aoAvaliar(sg.id, a)"
             />
           </div>
@@ -2593,8 +2601,9 @@ watch(() => props.conversaId, (novo, velho) => {
           <div v-if="atualizacaoFalhou" class="text-[11px] text-muted-foreground">Não consegui atualizar agora — tento de novo em instantes.</div>
 
           <!-- Responder × Nota interna (a nota vale até no modo observação: não sai
-               para ninguém) e o botão de foto -->
-          <div v-if="!conversa.somente_leitura" class="flex items-center gap-1 text-xs" role="tablist" aria-label="caixa de resposta">
+               para ninguém) e o botão de foto. Quem só lê (fase de observação)
+               não escreve nada aqui: fica o "o que a IA responderia". -->
+          <div v-if="!conversa.somente_leitura && canEdit" class="flex items-center gap-1 text-xs" role="tablist" aria-label="caixa de resposta">
             <button
               type="button"
               role="tab"
@@ -2698,7 +2707,7 @@ watch(() => props.conversaId, (novo, velho) => {
           <AtendimentoObservacao
             v-else-if="observacao"
             :sugestao="sugestaoAtual"
-            :can-edit="canEdit"
+            :can-edit="canAvaliar"
             :pode-sugerir="podeSugerir"
             :gerando="gerando"
             :sem-sugestao-motivo="semSugestaoMotivo"

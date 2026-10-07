@@ -12,7 +12,7 @@
 // Na avaliação a resposta é PÚBLICA: a mesma confirmação do cartão antes de
 // qualquer envio.
 import type { Aba } from '~/components/AtendimentoAbas.vue'
-import { ERROS, motivoLegivel } from '~/components/AtendimentoPlataforma.vue'
+import { AVISO_SO_LEITURA, ERROS, motivoLegivel } from '~/components/AtendimentoPlataforma.vue'
 
 // O texto em escrita, por conversa de origem, enquanto a página está aberta:
 // a caixa some ao voltar para a aba da conversa (fora do componente).
@@ -22,7 +22,8 @@ const rascunhosAba = new Map<string, string>()
 export function bloqueioDaAba(aba: Pick<Aba, 'responde' | 'chave'> | null | undefined, canEdit: boolean): string {
   const r = aba?.responde
   if (!r || !r.conversa_id) return r?.motivo || 'Esta aba é só de leitura.'
-  if (!canEdit) return 'Você pode ler, mas não responder: falta a permissão de editar o Atendimento.'
+  // Fase de observação (07/10/2026): quem só lê não responde.
+  if (!canEdit) return AVISO_SO_LEITURA
   if (r.pode_enviar) return ''
   const codigo = r.codigo || ''
   if (codigo === 'conversa_bloqueada') {

@@ -1420,8 +1420,10 @@ async function principal() {
   assert.match(pagina, /const aba = ref<Aba>\(ABAS\.some\(\(a\) => a\.value === abaQuery\) \? \(abaQuery as Aba\) : 'caixa'\)/)
   assert.match(pagina, /<AtendimentoAutomaticas v-if="aba === 'automaticas'" :can-edit="canEdit" @abrir-conversa="abrirConversaNaCaixa" \/>/)
   assert.match(pagina, /function abrirConversaNaCaixa\(id: string\) \{\n {2}aba\.value = 'caixa'\n {2}selecionar\(id\)\n\}/)
-  // A mesma trava da página (admin + ATENDIMENTO_USUARIOS): a aba não abre nada novo.
-  assert.match(pagina, /definePageMeta\(\{ middleware: \['admin', 'atendimento'\] \}\)/)
+  // A mesma trava da página (fase de observação, 07/10/2026: toda pessoa
+  // ativa vê, só ATENDIMENTO_USUARIOS mexe — `canEdit`): a aba não abre nada novo.
+  assert.match(pagina, /definePageMeta\(\{ middleware: \['atendimento'\] \}\)/)
+  assert.match(pagina, /const canEdit = computed\(\(\) => mexe\.value && podeEditar\.value\)/)
 
   // A conversa: a mensagem automática do DaVinci tem nome, cor e explicação;
   // o "a conferir" vale para ela (o balão não filtra a origem) e o "tentar de

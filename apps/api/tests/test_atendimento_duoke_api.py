@@ -447,7 +447,12 @@ async def test_sugestoes_ia_x_resposta_real(client, db, make_user, pessoa):
         "substituido", "rastreio", 0.9, False,
     )
     assert s1["mensagem_gatilho_id"] == str(p1.id)
-    assert s1["avaliacao"] == {"nota": "erro", "correcao": "Mande o link."}
+    # Quem avaliou é quem está vendo: a nota não é "de outra pessoa".
+    assert s1["avaliacao"] == {
+        "nota": "erro",
+        "correcao": "Mande o link.",
+        "de_outra_pessoa": False,
+    }
     assert s1["resposta_real"]["mensagem_id"] == str(real.id)
     assert (s1["resposta_real"]["texto"], s1["resposta_real"]["origem"]) == (
         "Já saiu! Rastreio BR123.",

@@ -240,7 +240,9 @@ export function caixaDaAvaliacao(
     }
   }
   if (!a.pode_responder) return { modo: 'desligada', motivo: a.motivo_sem_resposta || 'A resposta não pode sair pelo DaVinci agora.' }
-  if (!canEdit) return { modo: 'desligada', motivo: 'Você pode ler, mas não responder: falta a permissão de editar o Atendimento.' }
+  // Quem só lê (fase de observação, 07/10/2026). A frase = AVISO_SO_LEITURA
+  // (AtendimentoPlataforma.vue; atendimento-so-leitura.cjs confere).
+  if (!canEdit) return { modo: 'desligada', motivo: 'Só leitura por enquanto — sugestões e 👍/👎 liberados.' }
   return { modo: 'caixa', motivo: '' }
 }
 

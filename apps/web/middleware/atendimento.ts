@@ -1,6 +1,7 @@
-// /atendimento: só quem o /me devolve com `atendimento: true` — admin que está
-// em ATENDIMENTO_USUARIOS no .env da api (Eduardo, 30/09/2026: thorfinn e
-// heisenberg). Espelha a trava do router (atendimento_restrito).
+// /atendimento: só quem o /me devolve com `atendimento: true`. Fase de
+// observação (07/10/2026): toda pessoa ativa (menos o operador de estoque);
+// quem MEXE é outra chave (`atendimento_mexe`, ATENDIMENTO_USUARIOS), que a
+// página lê. Espelha a trava do router (atendimento_restrito).
 export default defineNuxtRouteMiddleware(() => {
   const auth = useAuthStore()
   const u = auth.user

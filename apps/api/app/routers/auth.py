@@ -395,8 +395,12 @@ async def me(
     if ve:
         extra["historico"] = True
     # /atendimento: a mesma regra da trava da API (menu e página leem isto).
-    if atendimento_acesso.liberado(user):
-        extra["atendimento"] = True
+    # Fase de observação (07/10/2026): `atendimento` = vê a caixa (toda pessoa
+    # ativa, menos o operador de estoque); `atendimento_mexe` = responde e muda
+    # a caixa (ATENDIMENTO_USUARIOS). Quem vê e não mexe lê, pede a sugestão
+    # da IA e dá 👍/👎. As duas vêm SEMPRE, true ou false.
+    extra["atendimento"] = atendimento_acesso.pode_ver(user)
+    extra["atendimento_mexe"] = extra["atendimento"] and atendimento_acesso.pode_mexer(user)
     # Módulo App Uranyx (06/10/2026): a mesma regra da trava da API. Vem
     # SEMPRE, true ou false (contrato conteudo-e-catalogo-v1, seção 6).
     extra["app_uranyx"] = app_uranyx_acesso.liberado(user)

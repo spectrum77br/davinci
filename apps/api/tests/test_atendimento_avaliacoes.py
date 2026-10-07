@@ -1068,10 +1068,15 @@ async def test_aba_avaliacao_e_responder_desligado(
     client, db, make_user, auth_as, redis_falso, rotas, monkeypatch
 ):
     integ, chat_id = await _pendente_shopee(db, make_user, redis_falso)
-    # Só admin (em ATENDIMENTO_USUARIOS) enquanto a caixa é observação.
+    # Fase de observação (07/10/2026): toda pessoa ativa lê a aba (é GET); o
+    # responder/tratar é de quem mexe (ATENDIMENTO_USUARIOS).
+    monkeypatch.setattr(get_settings(), "atendimento_usuarios", "dono@davinci-test.com")
     auth_as(await make_user(role=UserRole.USER))
     r = await client.get(f"/api/atendimento/conversas/{chat_id}/avaliacoes")
-    assert r.status_code == 403 and r.json()["detail"]["code"] == "admin_only"
+    assert r.status_code == 200 and r.json()["pendentes"] == 1
+    linha_lida = await _linha(db, "9301")
+    r = await client.post(f"/api/atendimento/avaliacoes/{linha_lida.id}/tratada", json={})
+    assert r.status_code == 403 and r.json()["detail"]["code"] == "atendimento_so_leitura"
 
     monkeypatch.setattr(rota_atendimento, "SO_ADMIN", False)
     auth_as(await make_user(role=UserRole.ADMIN))

@@ -16,9 +16,13 @@ export type AuthUser = {
   // Sistema › Histórico (25/09/2026): só vem (true) para quem o Eduardo
   // liberou. Para os outros, inclusive admin, a chave nem existe.
   historico?: boolean
-  // /atendimento (30/09/2026): só vem (true) para quem está em
-  // ATENDIMENTO_USUARIOS no .env da api (hoje thorfinn e heisenberg).
+  // /atendimento, fase de observação (07/10/2026): `atendimento` = VÊ a caixa
+  // (toda pessoa ativa, menos o operador de estoque); `atendimento_mexe` =
+  // responde e muda a caixa (ATENDIMENTO_USUARIOS no .env da api: hoje
+  // thorfinn e heisenberg). Quem vê e não mexe lê, pede a sugestão da IA e
+  // dá 👍/👎. As duas vêm sempre (true/false).
   atendimento?: boolean
+  atendimento_mexe?: boolean
   // Módulo App Uranyx (06/10/2026): true só para admin que está em
   // APP_URANYX_USUARIOS no .env da api (hoje thorfinn e heisenberg).
   app_uranyx?: boolean

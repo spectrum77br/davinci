@@ -393,7 +393,10 @@ const TIPOS_EVENTO: TipoEventoCliente[] = ['pergunta', 'compra', 'envio', 'entre
 // Sugestão da IA que o DaVinci NÃO enviou (pendente, substituída pela
 // resposta de fora, bloqueada, descartada) — o "IA × equipe" do teste em
 // observação. `resposta_real` = a primeira resposta da loja depois do gatilho.
-export type AvaliacaoIa = { nota: string | null; correcao: string | null }
+// `de_outra_pessoa`: a nota é de outra pessoa — na fase de observação quem só
+// lê não a troca (a API recusa com 409 `avaliacao_de_outra_pessoa`), e o
+// AtendimentoAvaliarIa mostra só o selo.
+export type AvaliacaoIa = { nota: string | null; correcao: string | null; de_outra_pessoa?: boolean }
 export type SugestaoIa = {
   id: string
   texto: string | null
@@ -1487,6 +1490,16 @@ export function usePollingVisivel(fn: () => Promise<unknown> | unknown, ms: numb
   return { marcar: () => { ultimo = Date.now() } }
 }
 
+// ─── só leitura (fase de observação, 07/10/2026) ───────────────────────────
+// "Pode liberar pras outras pessoas do DaVinci verem pra já obtermos
+// feedbacks, mas claro por enquanto só leitura" (Eduardo): toda pessoa ativa
+// vê a caixa (o /me traz `atendimento: true`), pede a sugestão da IA e dá
+// 👍/👎; responder e mudar a caixa ficam com quem o /me traz
+// `atendimento_mexe: true` (ATENDIMENTO_USUARIOS). Esta é a frase de toda
+// ação escondida/desligada para quem só lê — a mesma do 403 da API
+// (`atendimento_so_leitura`).
+export const AVISO_SO_LEITURA = 'Só leitura por enquanto — sugestões e 👍/👎 liberados.'
+
 // ─── erros da API ───────────────────────────────────────────────────────────
 // Códigos que o /api/atendimento devolve em `detail.code` (EnvioRecusado e
 // companhia) → frase que a pessoa entende. O código cru só aparece se a API
@@ -1549,6 +1562,11 @@ export const ERROS: Record<string, string> = {
   cursor_invalido: 'A lista mudou de ordem — atualize para carregar de novo.',
   forbidden: 'Sem permissão para isso (peça ao admin a permissão do Atendimento).',
   admin_only: 'Só administrador pode fazer isso.',
+  // Fase de observação (07/10/2026): quem só lê tentou mexer (a tela esconde
+  // as ações; isto é para a aba que ficou aberta de antes).
+  atendimento_so_leitura: AVISO_SO_LEITURA,
+  atendimento_restrito: 'O Atendimento não está liberado para o seu usuário.',
+  avaliacao_de_outra_pessoa: 'Esta sugestão já foi avaliada por outra pessoa — a nota dela fica.',
   conversa_nao_encontrada: 'Conversa não encontrada (pode ter sido apagada).',
   not_found: 'Não encontrado.',
 }

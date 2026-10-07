@@ -632,8 +632,16 @@ async def test_resumo_traz_a_faixa_e_ela_some_quando_volta_a_ler(
     r = await client.get("/api/atendimento/resumo")
     assert r.status_code == 200 and r.json()["leitura_parada"] == []
 
-    # Só quem vê o /atendimento: o admin fora da lista não chega no resumo.
+    # Só quem vê o /atendimento: desde 07/10/2026 (fase de observação) toda
+    # pessoa ativa lê — o admin fora da lista vê a mesma faixa; o operador de
+    # estoque (que o web prende no /controle-estoque) não chega no resumo.
     auth_as(await make_user(email="outro@davinci-test.com", role=UserRole.ADMIN))
+    r = await client.get("/api/atendimento/resumo")
+    assert r.status_code == 200 and r.json()["leitura_parada"] == []
+    operador = await make_user(email="op@davinci-test.com")
+    operador.stock_tags = ["ci"]
+    await db.commit()
+    auth_as(operador)
     assert (await client.get("/api/atendimento/resumo")).status_code == 403
 
 

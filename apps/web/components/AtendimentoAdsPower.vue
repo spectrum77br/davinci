@@ -304,7 +304,9 @@ watch(() => props.conversaId, () => {
 
 const url = computed(() => urlIniciar(props.perfil))
 const motivoDesligado = computed(() => {
-  if (!props.canEdit) return 'Falta a permissão de editar o Atendimento para abrir o perfil da loja.'
+  // Quem só lê (fase de observação, 07/10/2026) não abre o perfil da loja
+  // por aqui. A frase = AVISO_SO_LEITURA (AtendimentoPlataforma.vue).
+  if (!props.canEdit) return 'Só leitura por enquanto — sugestões e 👍/👎 liberados.'
   if (props.carregando && !props.perfil) return 'Procurando o perfil da loja…'
   if (!props.perfil) return 'Não consegui ler o cadastro da loja agora.'
   if (!url.value) return props.perfil.motivo || MENSAGENS_ADSPOWER.sem_perfil.titulo

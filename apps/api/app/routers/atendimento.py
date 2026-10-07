@@ -9,11 +9,15 @@ e nas respostas prontas, delete apaga regra/modelo. Modo `auto` (a IA envia
 sozinha) só admin liga — e, com alguma loja em `auto`, só admin mexe nas
 regras do manual que valem para ela (a regra muda o que sai sozinho).
 
-SÓ ADMIN POR ENQUANTO (Eduardo, 30/09/2026): enquanto a caixa estiver no
-primeiro teste em produção, só observando, TODAS as rotas deste router
-exigem admin (`SO_ADMIN`, logo abaixo do `router`), mesmo para quem tiver o
-recurso `atendimento`. As permissões finas (view/edit/delete) continuam nas
-rotas e passam a valer quando `SO_ADMIN` voltar para False.
+FASE DE OBSERVAÇÃO (`SO_ADMIN`, logo abaixo do `router`): a caixa nasceu só
+para os admins de ATENDIMENTO_USUARIOS (Eduardo, 30/09/2026). Desde
+07/10/2026 ("pode liberar pras outras pessoas do DaVinci verem pra já
+obtermos feedbacks, mas claro por enquanto só leitura"), TODA pessoa ativa
+do DaVinci LÊ (`acesso.pode_ver`) — e pode pedir a sugestão da IA e dar
+👍/👎 nela (`ROTAS_DE_QUEM_LE`) —, e só a lista MEXE (`acesso.pode_mexer`):
+qualquer outra escrita de quem só lê responde 403 `atendimento_so_leitura`,
+mesmo para os outros admins. As permissões finas (view/edit/delete)
+continuam nas rotas e passam a valer quando `SO_ADMIN` voltar para False.
 
 ESCOPO POR EQUIPE: como Integrações e Anúncios, pela `integration_id` da
 conversa/canal (`deps/team_scope.py`). Admin e quem não tem equipe veem
@@ -67,7 +71,7 @@ from urllib.parse import urlsplit
 from uuid import UUID
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from fastapi.encoders import jsonable_encoder
 from sqlalchemy import String, and_, case, cast, exists, false, func, not_, or_, select, text, true
 from sqlalchemy.exc import IntegrityError
@@ -204,35 +208,103 @@ from app.services.atendimento.enviar import EnvioRecusado
 
 logger = structlog.get_logger()
 
-# Só admin por enquanto (Eduardo, 30/09/2026): a primeira subida é só
-# observação. Vale para todas as rotas deste router, antes da permissão fina
-# de cada uma, e responde o mesmo 403 `admin_only` do `require_admin`. O
-# /api/atendimento/robo/* é outro router (atendimento_robo.py), com token
-# próprio, e não passa por aqui. Para abrir para a equipe: SO_ADMIN = False
-# e, no web, o recurso volta para a tela de Permissões (RESOURCE_GROUPS do
-# composables/useCan.ts), o item do menu volta para `resource: 'atendimento'`
-# (components/AppSidebar.vue) e a página volta para o middleware
-# `permission` (pages/atendimento.vue).
+# Fase de observação (`SO_ADMIN`): vale para todas as rotas deste router (e
+# dos routers irmãos do mesmo prefixo, que usam a mesma dependência), antes
+# da permissão fina de cada uma. O /api/atendimento/robo/* é outro router
+# (atendimento_robo.py), com token próprio, e não passa por aqui.
+#   - 30/09/2026: só os admins de ATENDIMENTO_USUARIOS (vazio = todo admin).
+#   - 07/10/2026: a equipe LÊ. Toda pessoa ativa (admin ou não; menos o
+#     operador de estoque, que o web prende no /controle-estoque) passa nos
+#     métodos de leitura e nas rotas de `ROTAS_DE_QUEM_LE`; o resto é só de
+#     quem está na lista (`acesso.pode_mexer`) — 403 `atendimento_so_leitura`.
+# Com SO_ADMIN = False volta o fluxo normal de permissões (o recurso
+# `atendimento` view/edit/delete de cada rota): no web, o recurso volta para a
+# tela de Permissões (RESOURCE_GROUPS do composables/useCan.ts), o item do
+# menu para `resource: 'atendimento'` (components/AppSidebar.vue), a página
+# para o middleware `permission` (pages/atendimento.vue) e o /api/auth/me
+# para a permissão (routers/auth.py).
 SO_ADMIN = True
 
+_METODOS_DE_LEITURA = frozenset({"GET", "HEAD", "OPTIONS"})
+# As escritas que quem só lê faz (Eduardo, 07/10/2026: "continua só sugerindo
+# ali se clicar"). Nada delas sai para a plataforma nem muda a conversa:
+#   - "Sugerir agora": a IA escreve uma sugestão para conferir (o pedido pela
+#     tela nunca envia — `ia.gerar_rascunho(forcar=True)` só guarda);
+#   - 👍/👎 na sugestão: o feedback que o dono quer (quem só lê não troca a
+#     nota que OUTRA pessoa deu — `avaliar_rascunho`);
+#   - a prévia do texto de uma automática: só renderiza o exemplo (a aba
+#     Automáticas a pede ao abrir a regra, até para ver);
+#   - o registro de quem abriu o perfil da loja no AdsPower: é só o log de
+#     uma abertura que acontece no computador da pessoa ("Abrir na
+#     plataforma"), e o perfil só vem para quem vê o cadastro de Lojas.
+# A nota interna NÃO entra: fica para sempre na linha do tempo da conversa
+# (não há como apagar), e o recado de quem só lê sobre a IA já vai na
+# correção do 👎. O caminho é o MOLDE da rota, como no decorador.
+ROTAS_DE_QUEM_LE = frozenset(
+    {
+        ("POST", "/api/atendimento/conversas/{conversa_id}/rascunho"),
+        ("POST", "/api/atendimento/rascunhos/{rascunho_id}/avaliacao"),
+        ("POST", "/api/atendimento/automacoes/previa"),
+        ("POST", "/api/atendimento/adspower/aberto"),
+    }
+)
+SO_LEITURA = {
+    "code": "atendimento_so_leitura",
+    "detail": "Só leitura por enquanto — sugestões e 👍/👎 liberados. Responder e mudar a "
+    "caixa ficam com quem cuida do Atendimento.",
+}
 
-async def _so_admin(user: Annotated[User, Depends(require_active_user)]) -> User:
-    if SO_ADMIN and user.role != UserRole.ADMIN:
-        raise HTTPException(status.HTTP_403_FORBIDDEN, detail={"code": "admin_only"})
-    # E, dentro dos admins, só quem está em ATENDIMENTO_USUARIOS (Eduardo,
-    # 30/09/2026: thorfinn e heisenberg). Vazio = todo admin.
-    if SO_ADMIN and not acesso.liberado(user):
+
+def _quem_le_passa(request: Request) -> bool:
+    if request.method in _METODOS_DE_LEITURA:
+        return True
+    rota = request.scope.get("route")
+    return (request.method, getattr(rota, "path", None)) in ROTAS_DE_QUEM_LE
+
+
+async def _so_admin(
+    request: Request, user: Annotated[User, Depends(require_active_user)]
+) -> User:
+    """A trava da caixa (o nome é de 30/09/2026, quando ela era só de admin)."""
+    if not SO_ADMIN or acesso.pode_mexer(user):
+        return user
+    if not acesso.pode_ver(user):
         raise HTTPException(status.HTTP_403_FORBIDDEN, detail={"code": "atendimento_restrito"})
-    return user
+    if _quem_le_passa(request):
+        return user
+    raise HTTPException(status.HTTP_403_FORBIDDEN, detail=SO_LEITURA)
 
 
 router = APIRouter(
     prefix="/api/atendimento", tags=["atendimento"], dependencies=[Depends(_so_admin)]
 )
 
-_view = require_permission("atendimento", "view")
-_edit = require_permission("atendimento", "edit")
+_view_fino = require_permission("atendimento", "view")
+_edit_fino = require_permission("atendimento", "edit")
+_edit = _edit_fino
 _delete = require_permission("atendimento", "delete")
+
+
+async def _view(user: Annotated[User, Depends(require_active_user)]) -> User:
+    """Ler. Na fase de observação, quem a trava deixa ver (`acesso.pode_ver`):
+    o recurso fino saiu da tela de Permissões e ninguém o tem. Fora dela, o
+    `atendimento.view` de sempre."""
+    if SO_ADMIN:
+        if not acesso.pode_ver(user):
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN, detail={"code": "atendimento_restrito"}
+            )
+        return user
+    return await _view_fino(user)
+
+
+async def _quem_le(user: Annotated[User, Depends(require_active_user)]) -> User:
+    """As escritas de `ROTAS_DE_QUEM_LE` (sugerir, 👍/👎, AdsPower): na fase de
+    observação, quem vê também faz; fora dela, o `atendimento.edit` de sempre."""
+    if SO_ADMIN:
+        return await _view(user)
+    return await _edit_fino(user)
+
 
 FILTROS = (
     "todas",
@@ -387,6 +459,52 @@ def _chave_limite_loja(integration_id: UUID) -> str:
 
 def _chave_limite_pessoa(user_id: UUID) -> str:
     return f"atd:pedido:atualizar:pessoa:{user_id}"
+
+
+# "Sugerir agora" de quem só lê (fase de observação, 07/10/2026): a caixa
+# abriu para a equipe inteira. Dois freios, só para quem só lê (quem mexe
+# segue sem nenhum, como antes):
+#   - um teto por PESSOA por hora, para ninguém gastar o dia do servidor
+#     sozinho;
+#   - o teto DIÁRIO da IA (`atendimento_ia_teto_diario`, o freio de gasto do
+#     cron — `ia._dentro_do_teto`): o clique de quem só lê conta no mesmo
+#     contador do dia e para quando ele acaba. Conta 1 chamada por clique (a
+#     classificação, quando há regra de assunto, é a 2ª e fica de fora).
+SUGERIR_POR_HORA_QUEM_LE = 30
+_JANELA_SUGERIR_S = 3600
+TETO_DIARIO_IA = {
+    "code": "teto_diario_ia",
+    "detail": "As sugestões da IA de hoje acabaram (teto diário do servidor) — amanhã voltam.",
+}
+
+
+def _so_le(user: User) -> bool:
+    """Fase de observação e a pessoa NÃO está na lista de quem mexe."""
+    return SO_ADMIN and not acesso.pode_mexer(user)
+
+
+def _chave_sugerir_pessoa(user_id: UUID) -> str:
+    return f"atd:sugerir:pessoa:{user_id}"
+
+
+async def _dentro_do_limite_sugerir(user: User) -> bool:
+    """Quem só lê pede até SUGERIR_POR_HORA_QUEM_LE sugestões por hora.
+
+    Quem mexe não conta. A validade é reposta se a chave ficou sem ela (o
+    processo caiu entre o INCR e o EXPIRE) — senão a pessoa ficaria barrada
+    para sempre, como no `_contar_na_janela`. Redis fora do ar = deixa passar
+    (o limite por minuto do provedor segura)."""
+    if not _so_le(user):
+        return True
+    chave = _chave_sugerir_pessoa(user.id)
+    try:
+        usadas = int(await redis.incr(chave))
+        if usadas == 1 or await redis.ttl(chave) < 0:
+            await redis.expire(chave, _JANELA_SUGERIR_S)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("atendimento_sugerir_limite_indisponivel", err=type(e).__name__)
+        return True
+    return usadas <= SUGERIR_POR_HORA_QUEM_LE
 
 
 # ── Ajudantes ─────────────────────────────────────────────────────────────
@@ -1944,7 +2062,11 @@ async def _envio(session: AsyncSession, conversa: AtendimentoConversa) -> EnvioO
 
 
 async def _sugestoes(
-    session: AsyncSession, conversa_id: UUID, *, so_rascunho: UUID | None = None
+    session: AsyncSession,
+    conversa_id: UUID,
+    *,
+    so_rascunho: UUID | None = None,
+    user_id: UUID | None = None,
 ) -> list[SugestaoOut]:
     """As sugestões da IA que NÃO saíram pelo DaVinci, cada uma com a resposta real.
 
@@ -1957,6 +2079,8 @@ async def _sugestoes(
     mensagem sumiu), vale a hora da sugestão. Uma consulta só (LATERAL), não
     uma por sugestão.
     `so_rascunho` = só aquela sugestão (a avaliação quer a resposta real dela).
+    `user_id` = quem está vendo: a nota dada por OUTRA pessoa vem marcada
+    (`de_outra_pessoa`) — quem só lê não a troca (`_pode_trocar_a_nota`).
     """
     gatilho = aliased(AtendimentoMensagem)
     resposta = aliased(AtendimentoMensagem)
@@ -1987,6 +2111,7 @@ async def _sugestoes(
             AtendimentoRascunho,
             AtendimentoAvaliacao.nota,
             AtendimentoAvaliacao.correcao,
+            AtendimentoAvaliacao.user_id,
             real.c.id,
             real.c.texto,
             real.c.em,
@@ -2014,7 +2139,7 @@ async def _sugestoes(
     saida: list[SugestaoOut] = []
     # As mais novas na consulta (limite), da mais velha para a mais nova na
     # tela — a mesma ordem das mensagens.
-    for r, nota, correcao, real_id, real_texto, real_em, real_origem in reversed(linhas):
+    for r, nota, correcao, autor_id, real_id, real_texto, real_em, real_origem in reversed(linhas):
         saida.append(
             SugestaoOut(
                 id=r.id,
@@ -2029,7 +2154,11 @@ async def _sugestoes(
                     str(r.mensagem_gatilho_id) if r.mensagem_gatilho_id is not None else None
                 ),
                 avaliacao=(
-                    AvaliacaoResumoOut(nota=nota, correcao=correcao)
+                    AvaliacaoResumoOut(
+                        nota=nota,
+                        correcao=correcao,
+                        de_outra_pessoa=_de_outra_pessoa(autor_id, user_id),
+                    )
                     if nota is not None or correcao is not None
                     else None
                 ),
@@ -2102,7 +2231,7 @@ async def detalhe_conversa(
         "envio": await _envio(session, c),
         "pedido_mkt": _do_dados(c, "pedido_mkt"),
         "produto": _do_dados(c, "produto"),
-        "sugestoes": await _sugestoes(session, c.id),
+        "sugestoes": await _sugestoes(session, c.id, user_id=user.id),
         "pedido_atualizavel": await _pedido_atualizavel(session, c),
         "etiqueta_historico": await _historico_etiqueta(session, c.id),
     }
@@ -2226,9 +2355,13 @@ async def responder(
 async def pedir_rascunho(
     conversa_id: str,
     session: Annotated[AsyncSession, Depends(get_session)],
-    user: Annotated[User, Depends(_edit)],
+    user: Annotated[User, Depends(_quem_le)],
 ) -> RascunhoUnicoOut:
-    """Pede uma sugestão da IA agora (mesmo sem o cliente estar esperando)."""
+    """Pede uma sugestão da IA agora (mesmo sem o cliente estar esperando).
+
+    Na fase de observação quem só lê também pede (`ROTAS_DE_QUEM_LE`): a
+    sugestão fica guardada para conferir, nada sai para a plataforma.
+    """
     if instagram.e_instagram(conversa_id):
         raise _somente_leitura()
     if not get_settings().atendimento_ia_ativa:
@@ -2257,6 +2390,20 @@ async def pedir_rascunho(
             409, detail={"code": enviar.RECUSA_CANAL_SEM_ENVIO, "detail": sem_envio}
         )
     from app.services.atendimento import ia as ia_svc
+
+    if not await _dentro_do_limite_sugerir(user):
+        raise HTTPException(
+            429,
+            detail={
+                "code": "limite_sugestoes",
+                "detail": f"Você já pediu {SUGERIR_POR_HORA_QUEM_LE} sugestões nesta hora — "
+                "tente de novo daqui a pouco.",
+            },
+        )
+    # O pedido pela tela (`forcar=True`) não passa pelo teto diário dentro da
+    # IA; o de quem só lê passa aqui (ver SUGERIR_POR_HORA_QUEM_LE).
+    if _so_le(user) and not await ia_svc._dentro_do_teto(1):
+        raise HTTPException(429, detail=TETO_DIARIO_IA)
 
     r = await ia_svc.gerar_rascunho(session, c, forcar=True)
     await session.commit()
@@ -2680,7 +2827,7 @@ async def _avaliacao_de(session: AsyncSession, rascunho_id: UUID) -> Atendimento
     ).scalar_one_or_none()
 
 
-def _avaliacao_out(av: AtendimentoAvaliacao) -> AvaliacaoOut:
+def _avaliacao_out(av: AtendimentoAvaliacao, user_id: UUID | None) -> AvaliacaoOut:
     return AvaliacaoOut(
         id=av.id,
         rascunho_id=av.rascunho_id,
@@ -2690,6 +2837,7 @@ def _avaliacao_out(av: AtendimentoAvaliacao) -> AvaliacaoOut:
         motivo=av.motivo,
         nota=av.nota,
         correcao=av.correcao,
+        de_outra_pessoa=_de_outra_pessoa(av.user_id, user_id),
     )
 
 
@@ -2760,12 +2908,30 @@ async def _preencher_acao(
     )
 
 
+def _pode_trocar_a_nota(user: User, av: AtendimentoAvaliacao) -> bool:
+    """A avaliação que já existe pode ganhar a nota DESTA pessoa?
+
+    Quem mexe, sempre (o de antes: a linha passa a ser de quem avaliou por
+    último). Quem só lê (fase de observação): a linha sem dono, a dela, e a
+    linha SEM NOTA — a do "descartar" de quem mexe ou a do envio, que só
+    guardam a ação (ela só preenche a nota; a ação e o motivo ficam).
+    """
+    if not _so_le(user):
+        return True
+    return av.nota is None or av.user_id is None or av.user_id == user.id
+
+
+def _de_outra_pessoa(autor_id: UUID | None, user_id: UUID | None) -> bool:
+    """A nota é de OUTRA pessoa (a tela de quem só lê esconde o 👍/👎 dela)."""
+    return autor_id is not None and user_id is not None and autor_id != user_id
+
+
 @router.post("/rascunhos/{rascunho_id}/avaliacao", response_model=AvaliacaoUnicaOut)
 async def avaliar_rascunho(
     rascunho_id: UUID,
     body: AvaliacaoIn,
     session: Annotated[AsyncSession, Depends(get_session)],
-    user: Annotated[User, Depends(_edit)],
+    user: Annotated[User, Depends(_quem_le)],
 ) -> AvaliacaoUnicaOut:
     """👍/👎 na sugestão — é o que ensina a IA. Uma por sugestão (upsert).
 
@@ -2782,6 +2948,12 @@ async def avaliar_rascunho(
 
     Sugestão enviada pelo AUTOMÁTICO não tem avaliação (exemplo aprovado é o
     que pessoa aprovou): a nota de uma pessoa aqui é que cria a linha.
+
+    Quem só lê (fase de observação, 07/10/2026) avalia a sugestão sem nota e
+    troca a PRÓPRIA nota, mas não a que outra pessoa deu (409
+    `avaliacao_de_outra_pessoa`): o "IA × equipe" de quem cuida do
+    Atendimento não pode ser apagado por um clique de quem está se
+    ambientando.
     """
     r = await _rascunho_ou_404(session, rascunho_id, await resolve_team_scope(session, user))
     acao = _ACAO_PELO_STATUS.get(r.status, ACAO_OBSERVOU)
@@ -2805,6 +2977,14 @@ async def avaliar_rascunho(
             if av is None:
                 raise
     autor_anterior = av.user_id
+    if not criada and not _pode_trocar_a_nota(user, av):
+        raise HTTPException(
+            409,
+            detail={
+                "code": "avaliacao_de_outra_pessoa",
+                "detail": "Esta sugestão já foi avaliada por outra pessoa — a nota dela fica.",
+            },
+        )
     if not criada:
         if av.acao == ACAO_OBSERVOU and acao != ACAO_OBSERVOU:
             await _preencher_acao(session, av, r, acao)
@@ -2830,7 +3010,7 @@ async def avaliar_rascunho(
             else None
         ),
     )
-    return AvaliacaoUnicaOut(avaliacao=_avaliacao_out(av))
+    return AvaliacaoUnicaOut(avaliacao=_avaliacao_out(av, user.id))
 
 
 # ── Canais (lojas e modo) ─────────────────────────────────────────────────

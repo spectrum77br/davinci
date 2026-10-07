@@ -50,9 +50,10 @@ Esta é a aba "Automáticas" do /atendimento:
         LOJA que o Duoke mandou de verdade (hora, diferença, se bateu). Nunca o
         texto do comprador (`services/atendimento/automacoes_previa.py`).
 
-A MESMA TRAVA do /atendimento (`_so_admin`: só os admins de
-ATENDIMENTO_USUARIOS), a mesma permissão (`_view` para ler, `_edit` para
-mudar) e o escopo por equipe. O Histórico registra quem mudou a regra (a
+A MESMA TRAVA do /atendimento (`_so_admin`: na observação, toda a equipe
+lê — e pede a prévia, que só renderiza — e só ATENDIMENTO_USUARIOS muda
+regra ou simula nas lojas), a mesma permissão (`_view` para ler, `_edit`
+para mudar) e o escopo por equipe. O Histórico registra quem mudou a regra (a
 tabela de regras tem o gatilho; o registro não).
 """
 

@@ -7,6 +7,11 @@
 import { Check, Loader2, Pencil, ThumbsDown, ThumbsUp } from 'lucide-vue-next'
 import { CHAVE_CORRECOES, erroDaApi, type AvaliacaoIa } from '~/components/AtendimentoPlataforma.vue'
 
+// Fase de observação (07/10/2026): quem só lê (o /me sem `atendimento_mexe`)
+// também dá 👍/👎, mas não troca a nota que OUTRA pessoa deu — a API recusa
+// (409 `avaliacao_de_outra_pessoa`). Essa nota vem marcada (`de_outra_pessoa`)
+// e aqui fica só o selo, sem os botões.
+
 const props = withDefaults(defineProps<{
   sugestaoId: string
   avaliacao?: AvaliacaoIa | null
@@ -18,6 +23,7 @@ const emit = defineEmits<{ (e: 'avaliada', a: AvaliacaoIa): void }>()
 
 const { api } = useApi()
 const toasts = useToasts()
+const auth = useAuthStore()
 
 // Mesmo limite do backend (AvaliacaoIn.correcao).
 const MAX_CORRECAO = 4000
@@ -35,6 +41,12 @@ const emCurso = caderno?.get(props.sugestaoId)
 const abrindo = ref(emCurso?.aberto ?? false)
 const correcao = ref(emCurso ? emCurso.texto : props.avaliacao?.correcao || '')
 const salvando = ref(false)
+// A API recusou: outra pessoa avaliou enquanto esta tela estava aberta (a
+// próxima atualização da conversa traz a nota dela).
+const recusadaPorOutra = ref(false)
+const soLe = computed(() => auth.user?.atendimento_mexe !== true)
+const deOutraPessoa = computed(() => soLe.value && (recusadaPorOutra.value || (!!salva.value?.nota && salva.value?.de_outra_pessoa === true)))
+const podeAvaliar = computed(() => props.canEdit && !deOutraPessoa.value)
 
 // Guarda a cada tecla (e ao abrir/fechar a caixa). Sem nada a guardar — caixa
 // fechada e texto igual ao salvo —, apaga: senão a sugestão já avaliada
@@ -53,20 +65,22 @@ watch([correcao, abrindo], lembrar)
 // anterior já está no caderno; esta começa com a dela, se houver.
 watch(() => props.sugestaoId, (id) => {
   salva.value = props.avaliacao ?? null
+  recusadaPorOutra.value = false
   const g = caderno?.get(id)
   abrindo.value = g?.aberto ?? false
   correcao.value = g ? g.texto : props.avaliacao?.correcao || ''
 })
 // A avaliação salva mudou no servidor: acompanha, sem passar por cima do que
 // a pessoa está escrevendo.
-watch(() => [props.avaliacao?.nota, props.avaliacao?.correcao] as const, () => {
+watch(() => [props.avaliacao?.nota, props.avaliacao?.correcao, props.avaliacao?.de_outra_pessoa] as const, () => {
   if (salvando.value) return
   salva.value = props.avaliacao ?? null
+  if (salva.value?.nota) recusadaPorOutra.value = false
   if (!abrindo.value && !caderno?.has(props.sugestaoId)) correcao.value = props.avaliacao?.correcao || ''
 })
 
 async function avaliar(nota: 'ok' | 'erro') {
-  if (!props.canEdit || salvando.value) return
+  if (!podeAvaliar.value || salvando.value) return
   if (nota === 'erro' && !correcao.value.trim()) {
     abrindo.value = true
     return
@@ -89,7 +103,15 @@ async function avaliar(nota: 'ok' | 'erro') {
     toasts.success(nota === 'ok' ? 'Anotado: a sugestão estava boa' : 'Correção guardada', 'A IA aprende com isso.')
   } catch (e: any) {
     const er = erroDaApi(e, 'Não consegui salvar a avaliação')
-    toasts.error(er.texto, er.motivos)
+    if (e?.data?.detail?.code === 'avaliacao_de_outra_pessoa' && props.sugestaoId === id) {
+      // Não é erro de quem clicou: a nota da outra pessoa fica. O texto da
+      // correção continua no caderno (não se perde).
+      recusadaPorOutra.value = true
+      abrindo.value = false
+      toasts.info(er.texto)
+    } else {
+      toasts.error(er.texto, er.motivos)
+    }
   } finally {
     salvando.value = false
   }
@@ -105,7 +127,8 @@ async function avaliar(nota: 'ok' | 'erro') {
       <template v-else-if="salva?.nota === 'erro'">
         <span class="inline-flex items-center gap-1 rounded-full bg-red-500/15 px-2 py-0.5 font-medium text-red-700 dark:text-red-300"><ThumbsDown class="size-3.5" /> avaliada: errou</span>
       </template>
-      <template v-if="canEdit">
+      <span v-if="canEdit && deOutraPessoa" class="text-muted-foreground" data-avaliada-por-outra>{{ salva?.nota ? 'por outra pessoa' : 'já avaliada por outra pessoa' }}</span>
+      <template v-if="podeAvaliar">
         <button
           v-if="salva?.nota !== 'ok'"
           type="button"
@@ -130,7 +153,7 @@ async function avaliar(nota: 'ok' | 'erro') {
     <div v-if="salva?.nota === 'erro' && salva.correcao && !abrindo" class="whitespace-pre-wrap break-words rounded-md border border-red-300/50 bg-red-50/60 px-2 py-1 text-xs dark:border-red-800/50 dark:bg-red-900/15">
       <span class="font-medium">Correção:</span> {{ salva.correcao }}
     </div>
-    <div v-if="abrindo && canEdit" class="flex flex-wrap items-end gap-1.5">
+    <div v-if="abrindo && podeAvaliar" class="flex flex-wrap items-end gap-1.5">
       <textarea
         v-model="correcao"
         rows="2"

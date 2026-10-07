@@ -128,7 +128,8 @@ type Item = {
   ownerOnly?: boolean
   // Sistema › Histórico: só quem o Eduardo liberou (nem todo admin).
   historicoOnly?: boolean
-  // /atendimento: só quem vem com `atendimento: true` no /me (nem todo admin).
+  // /atendimento: só quem vem com `atendimento: true` no /me (fase de
+  // observação: toda pessoa ativa, menos o operador de estoque).
   atendimentoOnly?: boolean
   // /app-uranyx: só quem vem com `app_uranyx: true` no /me (nem todo admin).
   appUranyxOnly?: boolean
@@ -189,11 +190,11 @@ const sections = computed<Section[]>(() => [
       { to: '/notas-fiscais', label: 'Notas fiscais', icon: FileText, resource: 'notas_fiscais' },
       { to: '/chamados', label: 'Chamados', icon: MessagesSquare, resource: 'chamados' },
       // Atendimento (25/09/2026): conversas de Shopee, ML, TikTok e Amazon numa
-      // caixa só, com a resposta sugerida pela IA. Por enquanto só quem está
-      // em ATENDIMENTO_USUARIOS (Eduardo, 30/09/2026: thorfinn e heisenberg),
-      // a mesma regra da página e da API; para abrir, volta para
-      // `resource: 'atendimento'` (ver useCan.ts).
-      { to: '/atendimento', label: 'Atendimento', icon: Inbox, adminOnly: true, atendimentoOnly: true },
+      // caixa só, com a resposta sugerida pela IA. Fase de observação
+      // (07/10/2026): toda pessoa ativa vê (só leitura, com "Sugerir" e 👍/👎);
+      // só ATENDIMENTO_USUARIOS mexe — a mesma regra da página e da API, pelo
+      // /me. Quando a fase acabar, volta para `resource: 'atendimento'` (ver useCan.ts).
+      { to: '/atendimento', label: 'Atendimento', icon: Inbox, atendimentoOnly: true },
       // App Uranyx (06/10/2026): o app dos clientes (catálogo, manuais,
       // receitas, contas, fila do SAC). Só quem está em APP_URANYX_USUARIOS
       // (Eduardo: thorfinn e heisenberg), a mesma regra da página e da API.

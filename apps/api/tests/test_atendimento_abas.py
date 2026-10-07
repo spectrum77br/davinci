@@ -925,13 +925,19 @@ async def test_404_instagram_e_canais_sem_abas(db, client, admin):
 
 
 async def test_mesma_trava_do_atendimento(db, client, make_user, auth_as, monkeypatch):
+    """Fase de observação (07/10/2026): toda pessoa ativa LÊ as abas (é GET);
+    quem a trava barra (o operador de estoque) leva o 403 dela."""
     n = await _cenario_ml(db, await make_user(role=UserRole.ADMIN))
     monkeypatch.setattr(rota_atendimento, "SO_ADMIN", True)
-    auth_as(await make_user(role=UserRole.USER, permissions={"atendimento": {"view": True}}))
-    r = await client.get(URL.format(n.pack.id))
-    assert r.status_code == 403 and r.json()["detail"] == {"code": "admin_only"}
     monkeypatch.setattr(get_settings(), "atendimento_usuarios", "alguem@davinci-test.com")
-    auth_as(await make_user(role=UserRole.ADMIN))
+    for u in (await make_user(role=UserRole.USER), await make_user(role=UserRole.ADMIN)):
+        auth_as(u)
+        r = await client.get(URL.format(n.pack.id))
+        assert r.status_code == 200, r.text
+    operador = await make_user(role=UserRole.USER)
+    operador.stock_tags = ["ci"]
+    await db.commit()
+    auth_as(operador)
     r = await client.get(URL.format(n.pack.id))
     assert r.status_code == 403 and r.json()["detail"] == {"code": "atendimento_restrito"}
 

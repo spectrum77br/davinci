@@ -316,14 +316,22 @@ def test_rotas_novas_tem_a_trava_da_caixa():
         assert rota._so_admin in [d.call for d in r.dependant.dependencies], r.path
 
 
-async def test_rotas_novas_recusam_quem_nao_e_admin(db, client, make_user, auth_as):
+async def test_rotas_novas_na_fase_de_observacao(db, client, make_user, auth_as, monkeypatch):
+    """Quem só lê (07/10/2026): lê o painel e registra o AdsPower (o perfil só
+    vem com o cadastro de Lojas); a nota e a foto são de quem mexe."""
+    monkeypatch.setattr(rota, "SO_ADMIN", True)
+    monkeypatch.setattr(get_settings(), "atendimento_usuarios", "dono@davinci-test.com")
     u = await make_user(permissions={"atendimento": {"view": True, "edit": True}})
     auth_as(u)
     r = await client.get(f"{URL}/conversas/{uuid4()}/painel")
-    assert r.status_code == 403
-    assert r.json()["detail"]["code"] == "admin_only"
+    assert r.status_code == 404, r.text
     r = await client.post(f"{URL}/adspower/aberto", json={"resultado": "aberto"})
     assert r.status_code == 403
+    assert r.json()["detail"]["resource"] == "lojas_info"
+    for caminho in (f"/conversas/{uuid4()}/notas", f"/conversas/{uuid4()}/foto"):
+        r = await client.post(URL + caminho, json={"texto": "x"})
+        assert r.status_code == 403
+        assert r.json()["detail"]["code"] == "atendimento_so_leitura"
 
 
 # ─────────────── estoque ───────────────

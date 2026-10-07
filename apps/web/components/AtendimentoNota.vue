@@ -112,7 +112,7 @@ function aoTeclar(e: KeyboardEvent) {
       :maxlength="NOTA_MAX"
       :disabled="!canEdit || salvando"
       class="block max-h-[40vh] min-h-[68px] w-full resize-y rounded-md border border-amber-300 bg-background px-2.5 py-2 text-sm [field-sizing:content] focus:outline-none focus:ring-1 focus:ring-amber-500 disabled:cursor-not-allowed disabled:opacity-60 dark:border-amber-700/60"
-      :placeholder="canEdit ? 'Escreva a nota para a equipe… (Ctrl+Enter salva)' : 'Falta a permissão de editar o Atendimento para escrever notas.'"
+      :placeholder="canEdit ? 'Escreva a nota para a equipe… (Ctrl+Enter salva)' : 'Só leitura por enquanto — sugestões e 👍/👎 liberados.'"
       aria-label="nota interna (só a equipe vê)"
       @keydown="aoTeclar"
     />

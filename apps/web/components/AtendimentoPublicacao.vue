@@ -176,7 +176,9 @@ export function caixaDe(c: ComentarioRede | null, tipo: TipoResposta, canEdit: b
   const pode = tipo === 'direct' ? c.pode_direct : c.pode_responder
   const motivo = tipo === 'direct' ? c.motivo_direct : c.motivo_responder
   if (!pode) return { modo: 'desligada', motivo: motivo || 'A resposta não pode sair pelo DaVinci agora.' }
-  if (!canEdit) return { modo: 'desligada', motivo: 'Você pode ler, mas não responder: falta a permissão de editar o Atendimento.' }
+  // Quem só lê (fase de observação, 07/10/2026). A frase = AVISO_SO_LEITURA
+  // (AtendimentoPlataforma.vue; atendimento-so-leitura.cjs confere).
+  if (!canEdit) return { modo: 'desligada', motivo: 'Só leitura por enquanto — sugestões e 👍/👎 liberados.' }
   return { modo: 'caixa', motivo: '' }
 }
 

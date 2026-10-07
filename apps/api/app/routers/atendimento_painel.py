@@ -1,9 +1,10 @@
 """Atendimento › painel do pedido, nota interna, foto e AdsPower (item 3, 01/10/2026).
 
 Rotas novas da caixa `/atendimento`, separadas do `routers/atendimento.py`
-(que já tem 3 mil linhas), com a MESMA trava de acesso (`_so_admin`: só
-admin e, dentro deles, só quem está em ATENDIMENTO_USUARIOS) e o mesmo
-escopo por equipe (`_conversa_ou_404`):
+(que já tem 3 mil linhas), com a MESMA trava de acesso (`_so_admin`: na
+fase de observação toda a equipe lê e só ATENDIMENTO_USUARIOS mexe — a nota
+e a foto são de quem mexe; o registro do AdsPower passa para quem lê) e o
+mesmo escopo por equipe (`_conversa_ou_404`):
 
   GET  /api/atendimento/conversas/{id}/painel   estoque por item (lote comprado,
        lotes irmãos, kit), margem (a da aba Margem), Observações do Bling (GET
@@ -39,6 +40,7 @@ from app.routers.atendimento import (
     _edit,
     _mensagem_out,
     _nome,
+    _quem_le,
     _recusa_http,
     _so_admin,
     _somente_leitura,
@@ -204,9 +206,13 @@ async def enviar_foto(
 async def adspower_aberto(
     body: AdsPowerAbertoIn,
     session: Annotated[AsyncSession, Depends(get_session)],
-    user: Annotated[User, Depends(_edit)],
+    user: Annotated[User, Depends(_quem_le)],
 ) -> AdsPowerAbertoOut:
     """Registra quem abriu (ou tentou abrir) qual perfil do AdsPower, e quando.
+
+    Na fase de observação quem só lê também registra (`ROTAS_DE_QUEM_LE`): o
+    "Abrir na plataforma" abre o perfil no computador dela, e o log não pode
+    falhar calado.
 
     O perfil é RELIDO aqui pela conversa (não vem da tela): o registro diz
     o perfil de verdade daquela loja. Só ids e códigos no registro. Exige a

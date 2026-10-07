@@ -813,10 +813,10 @@ async def test_rota_do_cartao_mesma_trava_do_atendimento(
     db.expire_all()
     conversa = await _conversa_da_reclamacao(db)
 
-    # Só admin (em ATENDIMENTO_USUARIOS) enquanto a caixa é observação.
+    # Fase de observação (07/10/2026): toda pessoa ativa lê o cartão (é GET).
     auth_as(await make_user(role=UserRole.USER))
     r = await client.get(f"/api/atendimento/conversas/{conversa.id}/reclamacoes")
-    assert r.status_code == 403 and r.json()["detail"]["code"] == "admin_only"
+    assert r.status_code == 200 and r.json()["abertas"] == 1
 
     monkeypatch.setattr(rota_atendimento, "SO_ADMIN", False)
     auth_as(await make_user(role=UserRole.ADMIN))

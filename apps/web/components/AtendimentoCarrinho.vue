@@ -515,7 +515,7 @@ function quando(iso: string | null | undefined): string {
               Marcar como resolvido
             </button>
           </template>
-          <div v-else class="text-[11px] text-muted-foreground">Você pode ver, mas não marcar como resolvido: falta a permissão de editar o Atendimento.</div>
+          <div v-else class="text-[11px] text-muted-foreground">Só leitura por enquanto — sugestões e 👍/👎 liberados.</div>
         </section>
 
         <!-- os carrinhos anteriores do mesmo lojista -->

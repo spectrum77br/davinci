@@ -591,9 +591,12 @@ class Settings(BaseSettings):
     # "leitura parada" na barra de lojas: o Seller Center continua recebendo,
     # só não chega aqui — ninguém pode achar que "não tem mensagem".
     atendimento_robo_parado_min: int = 5
-    # Quem vê a caixa /atendimento enquanto ela é só observação: e-mails de
-    # login separados por vírgula, e só entre os admins. Vazio = todo admin.
-    # Fica no .env (não no código) para trocar sem deploy de código.
+    # Quem MEXE na caixa /atendimento enquanto ela é só observação: e-mails
+    # de login separados por vírgula, e só entre os admins. Vazio = todo
+    # admin. Fica no .env (não no código) para trocar sem deploy de código.
+    # Até 07/10/2026 era quem VIA a caixa; desde então toda pessoa ativa vê
+    # (só leitura, com "Sugerir" e 👍/👎) e só esta lista responde e muda
+    # (services/atendimento/acesso.py).
     atendimento_usuarios: str = ""
 
     # Módulo "App Uranyx" (06/10/2026; contrato `conteudo-e-catalogo-v1.md`,

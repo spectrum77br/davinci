@@ -117,7 +117,8 @@ const desligado = 'O envio pelo DaVinci está desligado (ATENDIMENTO_ENVIO_ATIVO
 assert.deepEqual(P.caixaDe(c({ pode_responder: false, motivo_responder: desligado }), 'publico', true), { modo: 'desligada', motivo: desligado })
 assert.deepEqual(P.caixaDe(c({ pode_direct: false, motivo_direct: 'prazo' }), 'direct', true), { modo: 'desligada', motivo: 'prazo' })
 assert.equal(P.caixaDe(c(), 'publico', false).modo, 'desligada')
-assert.match(P.caixaDe(c(), 'publico', false).motivo, /permissão/)
+// Fase de observação (07/10/2026): sem edição = quem só lê.
+assert.match(P.caixaDe(c(), 'publico', false).motivo, /^Só leitura por enquanto/)
 assert.equal(P.caixaDe(null, 'publico', true).modo, 'desligada')
 assert.deepEqual(P.caixaDe(c(), 'direct', true), { modo: 'caixa', motivo: '' })
 
