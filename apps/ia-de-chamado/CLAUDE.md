@@ -170,6 +170,13 @@ python3 ferramentas/adspower.py fechar <perfil>
   de `tmp/`. Depois de **enviado com prova na tela**, `apagar` o arquivo da
   entrada (regra do Vinicius: nada de cliente fica no Mac) e diga no `resumo` que
   apagou. Não enviou? Não apague.
+- **Vídeo na contestação da TikTok** (Ver detalhes da contestação › "Compartilhe
+  mais informações"): a caixa só aceita .jpg/.jpeg/.png/.mp4 e recusa vídeo
+  grande **sem avisar** (07/10, 290968: 33 MB recusado, 17 MB aceito). Vídeo
+  .MOV ou acima de ~15 MB: `encolher` **480** e anexe a cópia de `tmp/`. Se o
+  `anexar` voltar com `aviso` de área que não mudou, o arquivo não entrou. Só
+  envie quando o print mostrar o cartão do vídeo (miniatura com a duração).
+  Funciona também nos perfis de FlowerBrowser (Firefox), como o 47.
 - **Sempre feche o perfil no fim** — o executor de leitura pula perfil aberto.
 - O print sai em dobro do tamanho: coordenada do print ÷ 2 = coordenada do `ponto`.
 - Um chamado por perfil de cada vez. Confira loja, pedido e conversa antes de enviar.

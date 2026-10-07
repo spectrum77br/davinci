@@ -287,6 +287,63 @@ async function abas() {
   return todas.filter((_p, i) => topo[i]);
 }
 
+// 07/10 (290968): no FlowerBrowser (Firefox/BiDi) o `uploadFile` morre em
+// "input.setFiles … InvalidStateError" (com 101 MB e com 50 MB — não é tamanho):
+// o Firefox não deixa a página abrir o arquivo do disco. O jeito que funciona:
+// mandar o arquivo em pedaços pra dentro da página, montar o File lá e pôr na
+// caixa por DataTransfer + evento change — o mesmo que a página recebe quando a
+// pessoa escolhe o arquivo. No SunBrowser (Chrome) segue o uploadFile.
+const TIPOS = {
+  ".mov": "video/quicktime",
+  ".mp4": "video/mp4",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".png": "image/png",
+  ".webp": "image/webp",
+  ".heic": "image/heic",
+  ".pdf": "application/pdf",
+};
+const PEDACO = 2 * 1024 * 1024;
+async function anexarPorDentro(page, seletor, arquivos) {
+  await page.evaluate(() => {
+    window.__iaArquivos = [];
+  });
+  for (const a of arquivos) {
+    await page.evaluate(() => window.__iaArquivos.push([]));
+    const fd = fs.openSync(a, "r");
+    try {
+      const total = fs.fstatSync(fd).size;
+      const buf = Buffer.alloc(PEDACO);
+      for (let pos = 0; pos < total; pos += PEDACO) {
+        const n = fs.readSync(fd, buf, 0, Math.min(PEDACO, total - pos), pos);
+        await page.evaluate((b64) => {
+          const s = atob(b64);
+          const u = new Uint8Array(s.length);
+          for (let i = 0; i < s.length; i++) u[i] = s.charCodeAt(i);
+          window.__iaArquivos[window.__iaArquivos.length - 1].push(u);
+        }, buf.subarray(0, n).toString("base64"));
+      }
+    } finally {
+      fs.closeSync(fd);
+    }
+  }
+  const nomes = arquivos.map((a) => [path.basename(a), TIPOS[path.extname(a).toLowerCase()] || "application/octet-stream"]);
+  return page.evaluate(
+    (sel, nomes) => {
+      const e = document.querySelector(sel);
+      const dt = new DataTransfer();
+      window.__iaArquivos.forEach((partes, i) => dt.items.add(new File(partes, nomes[i][0], { type: nomes[i][1] })));
+      delete window.__iaArquivos;
+      e.files = dt.files;
+      e.dispatchEvent(new Event("input", { bubbles: true }));
+      e.dispatchEvent(new Event("change", { bubbles: true }));
+      return [...dt.files].map((f) => f.size);
+    },
+    seletor,
+    nomes,
+  );
+}
+
 const browser = await conectar(await ws());
 try {
   const paginas = await abas();
@@ -409,24 +466,55 @@ try {
         process.exitCode = 1;
       } else {
         const h = await page.$(`[data-ia-campo="${r.campo.n}"]`);
-        await h.uploadFile(...arquivos.map((a) => path.resolve(a)));
-        await espera(3000);
-        const nomes = await h.evaluate((e) => [...e.files].map((f) => f.name));
-        // 05/10 (296301): o cartão de foto da TikTok limpa o input depois de ler o
-        // arquivo — `anexados` volta vazio com a foto no cartão. Quem confirma é o
-        // que aparece na área ("Carregar (1/6)" + miniatura).
-        const area = await h.evaluate((e) => {
-          let a = e.parentElement;
-          for (let i = 0; a && i < 6; i++, a = a.parentElement) {
-            const b = a.getBoundingClientRect();
-            if (b.width > 0 && b.height > 0) {
-              const texto = (a.innerText || "").replace(/\s+/g, " ").trim().slice(0, 120);
-              return { texto, miniaturas: a.querySelectorAll("img").length };
-            }
-          }
-          return null;
-        });
-        saida({ ok: true, campo: `#${r.campo.n} ${r.campo.rotulo}`, anexados: nomes, area, captcha: await captcha() });
+        // 07/10 (290968): a caixa da contestação da TikTok aceita só
+        // .jpg,.jpeg,.png,.mp4 — o .MOV sumia sem erro nenhum. Confere antes.
+        const aceita = (await h.evaluate((e) => e.accept || "")).toLowerCase();
+        const cabe = (a) => {
+          if (!aceita.trim()) return true;
+          const ext = path.extname(a).toLowerCase();
+          const tipo = TIPOS[ext] || "";
+          return aceita.split(",").map((x) => x.trim()).some(
+            (x) => x === ext || x === tipo || (x.endsWith("/*") && tipo.startsWith(x.slice(0, -1))),
+          );
+        };
+        const recusados = arquivos.filter((a) => !cabe(a));
+        if (recusados.length) {
+          saida({ ok: false, erro: `a caixa só aceita: ${aceita} (vídeo .MOV: use encolher, que gera .mp4)`, recusados });
+          process.exitCode = 1;
+        } else {
+          // 05/10 (296301): o cartão de foto da TikTok limpa o input depois de ler o
+          // arquivo — `anexados` volta vazio com a foto no cartão. Quem confirma é o
+          // que aparece na área ("Carregar (1/6)" + miniatura).
+          const lerArea = () =>
+            h.evaluate((e) => {
+              let a = e.parentElement;
+              for (let i = 0; a && i < 6; i++, a = a.parentElement) {
+                const b = a.getBoundingClientRect();
+                if (b.width > 0 && b.height > 0) {
+                  const texto = (a.innerText || "").replace(/\s+/g, " ").trim().slice(0, 120);
+                  return { texto, miniaturas: a.querySelectorAll("img").length };
+                }
+              }
+              return null;
+            });
+          const antes = await lerArea();
+          if (bidi) await anexarPorDentro(page, `[data-ia-campo="${r.campo.n}"]`, arquivos);
+          else await h.uploadFile(...arquivos.map((a) => path.resolve(a)));
+          await espera(3000);
+          const nomes = await h.evaluate((e) => [...e.files].map((f) => f.name));
+          const area = await lerArea();
+          // 07/10 (290968): vídeo grande demais (TikTok: 33 MB recusado, 17 MB
+          // aceito) também some sem aviso — a área fica igual à de antes.
+          const igual = antes && area && antes.texto.replace(/^Carregando /, "") === area.texto.replace(/^Carregando /, "") && antes.miniaturas === area.miniaturas;
+          saida({
+            ok: true,
+            campo: `#${r.campo.n} ${r.campo.rotulo}`,
+            anexados: nomes,
+            area,
+            ...(igual && !nomes.length ? { aviso: "a área não mudou: a plataforma pode ter recusado o arquivo (tamanho?) — confira no print; vídeo grande: encolher 480" } : {}),
+            captcha: await captcha(),
+          });
+        }
       }
     }
   } else if (cmd === "captcha") {
