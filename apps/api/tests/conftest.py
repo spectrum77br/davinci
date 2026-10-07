@@ -135,7 +135,7 @@ async def _setup_schema():
         "department": ("celular", "mala", "eletro", "catalogo"),
         "pricing_platform": (
             "mercadolivre", "shopee", "temu", "amazon",
-            "aliexpress", "tiktok", "magalu",
+            "aliexpress", "tiktok", "magalu", "shein", "carrefour", "netshoes",
         ),
         # Mesmos valores de produção (0021: NA/SV; 0040: error/no_link) — o
         # envio grava no_link/error na célula.

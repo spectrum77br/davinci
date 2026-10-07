@@ -16,7 +16,7 @@ from sqlalchemy import func, select, text
 
 from app.models import Integration, NfFaturador, PricingAccount, Segment
 
-MANUAL_PLATFORMS = ("site", "carrefour", "netshoes")
+MANUAL_PLATFORMS = ("site",)
 EDIT_PERMISSION = {"lojas_info": {"view": True, "edit": True, "delete": True}}
 
 
@@ -143,13 +143,13 @@ async def test_manual_types_survive_patch_and_archive_without_changing_invoice_r
     await _assert_no_automatic_accounts(db)
 
 
-async def test_switching_between_manual_platforms_preserves_types(client, db, manual_editor):
+async def test_reselecting_manual_platform_preserves_types(client, db, manual_editor):
     store_id = await _create_store(client, "site")
     response = await client.post(f"/api/pricing/store-info/{store_id}/department", json={
         "department": "mala",
     })
     assert response.status_code == 200, response.text
-    for platform in ("carrefour", "netshoes", "site"):
+    for platform in ("site",):
         response = await client.patch(f"/api/pricing/store-info/{store_id}", json={
             "platform": platform,
         })
@@ -190,7 +190,7 @@ async def test_manual_types_require_valid_root_and_cannot_be_written_via_raw_pat
 async def test_manual_type_edits_respect_permissions_and_store_team_scope(
     client, db, manual_editor, make_user, auth_as,
 ):
-    store_id = await _create_store(client, "carrefour", sales_team=1)
+    store_id = await _create_store(client, "site", sales_team=1)
     for permissions, teams, expected in (
         ({"lojas_info": {"view": True}}, [1], 403),
         (EDIT_PERMISSION, [2], 404),
@@ -233,7 +233,7 @@ async def test_unknown_platform_and_missing_store_do_not_gain_manual_type_suppor
 async def test_concurrent_manual_checkbox_edits_preserve_each_selection(
     client, db, manual_editor,
 ):
-    store_id = await _create_store(client, "carrefour")
+    store_id = await _create_store(client, "site")
     endpoint = f"/api/pricing/store-info/{store_id}/department"
     response = await client.post(endpoint, json={"department": "mala"})
     assert response.status_code == 200, response.text
@@ -247,7 +247,7 @@ async def test_concurrent_manual_checkbox_edits_preserve_each_selection(
     await _assert_no_automatic_accounts(db)
 
 
-@pytest.mark.parametrize("platform", ("ml", "mercadolivre", "amazon"))
+@pytest.mark.parametrize("platform", ("ml", "mercadolivre", "amazon", "carrefour", "netshoes"))
 async def test_existing_pricing_platforms_keep_the_account_contract(
     client, db, manual_editor, platform,
 ):
@@ -328,7 +328,9 @@ async def test_tirar_tipo_da_loja_ml_nao_apaga_conta_sem_loja_de_mesmo_nome(
     celular = await db.scalar(select(Segment.id).where(Segment.slug == "celular"))
 
     ml_store = await _create_store(client, "ml", account_name="velasco")
-    r = await client.post(f"/api/pricing/store-info/{ml_store}/department", json={"department": "celular"})
+    r = await client.post(
+        f"/api/pricing/store-info/{ml_store}/department", json={"department": "celular"},
+    )
     assert r.status_code == 200, r.text
     ligada = r.json()["id"]
     sem_loja = PricingAccount(

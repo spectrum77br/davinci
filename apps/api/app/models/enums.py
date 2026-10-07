@@ -163,6 +163,8 @@ class PricingPlatform(StrEnum):
     TIKTOK = "tiktok"
     MAGALU = "magalu"
     SHEIN = "shein"
+    CARREFOUR = "carrefour"
+    NETSHOES = "netshoes"
 
 
 class CellStatus(StrEnum):

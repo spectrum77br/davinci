@@ -25,11 +25,13 @@ STORE_TO_PRICING_PLATFORM = {
     "aliexpress": "aliexpress",
     "magalu": "magalu",
     "shein": "shein",
+    "carrefour": "carrefour",
+    "netshoes": "netshoes",
 }
 
 # These platforms support registration without a price table. Choosing a
 # product type must not create pricing accounts or invented fee rules.
-MANUAL_DEPARTMENT_PLATFORMS = frozenset({"site", "carrefour", "netshoes"})
+MANUAL_DEPARTMENT_PLATFORMS = frozenset({"site"})
 
 
 def manual_store_departments(row: StoreInfo) -> set[str]:

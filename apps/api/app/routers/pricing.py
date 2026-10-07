@@ -2438,17 +2438,55 @@ async def patch_store_info(
                     StoreInfo.id == store_info_id,
                     user_scope(StoreInfo, user),
                 )
-            )
+            ).with_for_update().execution_options(populate_existing=True)
         )
     ).scalar_one_or_none()
     if row is None:
         raise HTTPException(404, detail={"code": "store_info_not_found"})
     data = body.model_dump(exclude_unset=True)
+    if "platform" in data:
+        old_platform = (row.platform or "").strip().lower()
+        new_platform = (data["platform"] or "").strip().lower()
+        old_pricing = _STORE_TO_PRICING_PLATFORM.get(old_platform, old_platform)
+        new_pricing = _STORE_TO_PRICING_PLATFORM.get(new_platform, new_platform)
+        if (
+            old_pricing != new_pricing
+            and {old_platform, new_platform} & {"carrefour", "netshoes"}
+        ):
+            linked_platforms = (
+                await session.execute(
+                    select(PricingAccount.platform).where(
+                        user_scope(PricingAccount, user),
+                        PricingAccount.store_info_id == row.id,
+                    )
+                )
+            ).scalars().all()
+            if any(platform.value != new_pricing for platform in linked_platforms):
+                raise HTTPException(400, detail={
+                    "code": "store_info_platform_has_pricing_accounts",
+                    "message": (
+                        "Retire os tipos ou desvincule as contas da tabela de preços "
+                        "antes de mudar a plataforma desta loja."
+                    ),
+                })
     if "password" in data:
         pwd = data.pop("password")
         row.password_enc = encrypt(pwd) if pwd else None
     for k, v in data.items():
         setattr(row, k, v)
+    # Types selected while the store was registration-only must remain visible
+    # when moving to one of the newly supported pricing platforms. Reuse linked
+    # accounts without changing their configured money or external integrations.
+    if "platform" in data and (row.platform or "").strip().lower() in {"carrefour", "netshoes"}:
+        remaining = set(row.manual_departments or [])
+        for slug in sorted(remaining - {"catalogo"}):
+            sid = await _resolve_root_segment_id(session, slug)
+            if sid is not None:
+                await _ensure_store_pricing_account(session, user, row, sid, slug)
+                remaining.discard(slug)
+        # Pricing becomes the source of truth. A later account deletion must
+        # not resurrect a type from a stale manual tag on an ordinary edit.
+        row.manual_departments = sorted(remaining) or None
     await session.commit()
     await session.refresh(row)
     # Recompute the Tab.Preço / Integração badges so the response doesn't
@@ -2676,6 +2714,19 @@ async def set_store_info_department(
         return _store_info_out(
             info, departments=depts, has_pricing=has_pricing, has_integration=has_integ
         )
+    row = await _ensure_store_pricing_account(session, user, info, sid, body.department)
+    await session.commit()
+    await session.refresh(row)
+    roots_by_id, _, _ = await _segment_index(session)
+    names_by_id = await _segment_names_by_id(session)
+    return await _uma_conta_out(session, row, roots_by_id, names_by_id)
+
+
+async def _ensure_store_pricing_account(
+    session: AsyncSession, user: User, info: StoreInfo, sid: UUID, dept_slug: str
+) -> PricingAccount:
+    """Caller holds the store row lock; fees remain unset on newly created accounts."""
+    raw_platform = (info.platform or "").strip().lower()
     pricing_value = _STORE_TO_PRICING_PLATFORM.get(raw_platform)
     if not pricing_value:
         raise HTTPException(400, detail={"code": "store_info_platform_unsupported"})
@@ -2686,23 +2737,20 @@ async def set_store_info_department(
             400, detail={"code": "store_info_platform_unsupported"},
         ) from e
 
-    roots_by_id, _, _ = await _segment_index(session)
-    names_by_id = await _segment_names_by_id(session)
-
     existing = (
         await session.execute(
             select(PricingAccount).where(
                 and_(
                     user_scope(PricingAccount, user),
-                    PricingAccount.store_info_id == store_info_id,
+                    PricingAccount.store_info_id == info.id,
                     PricingAccount.segment_id == sid,
                     PricingAccount.canal == CANAL_KIT,
                 )
             )
         )
-    ).scalar_one_or_none()
+    ).scalars().first()
     if existing is not None:
-        return await _uma_conta_out(session, existing, roots_by_id, names_by_id)
+        return existing
 
     # SSH setDepartment: try to LINK an existing unlinked account whose name
     # matches the store_info account_name (exact or "<name> <suffix>" form),
@@ -2732,12 +2780,10 @@ async def set_store_info_department(
         ]
         if matches:
             for m in matches:
-                m.store_info_id = store_info_id
-            await session.commit()
-            await session.refresh(matches[0])
-            return await _uma_conta_out(session, matches[0], roots_by_id, names_by_id)
+                m.store_info_id = info.id
+            await session.flush()
+            return matches[0]
 
-    dept_slug = roots_by_id.get(sid, body.department)
     name = account_name or f"{raw_platform} — {dept_slug}"
 
     max_sort = (
@@ -2753,17 +2799,16 @@ async def set_store_info_department(
     ).scalar() or 0
 
     row = PricingAccount(
-        user_id=user.id,
+        user_id=info.user_id,
         name=name,
         platform=platform,
         segment_id=sid,
-        store_info_id=store_info_id,
+        store_info_id=info.id,
         sort_order=int(max_sort) + 1,
     )
     session.add(row)
-    await session.commit()
-    await session.refresh(row)
-    return _account_out(row, roots_by_id, names_by_id)
+    await session.flush()
+    return row
 
 
 @router.delete(

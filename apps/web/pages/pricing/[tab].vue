@@ -171,18 +171,24 @@ async function saveSlotPopover(accId: string) {
 }
 
 const PLATFORMS = [
-  { value: 'mercadolivre', label: 'ML' },
-  { value: 'shopee', label: 'Shopee' },
-  { value: 'shein', label: 'Shein' },
-  { value: 'amazon', label: 'Amazon' },
-  { value: 'temu', label: 'Temu' },
   { value: 'aliexpress', label: 'AliExpress' },
-  { value: 'tiktok', label: 'TikTok' },
+  { value: 'amazon', label: 'Amazon' },
+  { value: 'carrefour', label: 'Carrefour' },
   { value: 'magalu', label: 'Magalu' },
+  { value: 'mercadolivre', label: 'ML' },
+  { value: 'netshoes', label: 'Netshoes' },
+  { value: 'shein', label: 'Shein' },
+  { value: 'shopee', label: 'Shopee' },
+  { value: 'temu', label: 'Temu' },
+  { value: 'tiktok', label: 'TikTok' },
 ] as const
 
 function platformLabel(p: string) {
   return PLATFORMS.find((x) => x.value === p)?.label ?? p
+}
+
+function comparePlatformLabels(a: string, b: string) {
+  return platformLabel(a).localeCompare(platformLabel(b), 'pt-BR', { sensitivity: 'base' })
 }
 
 // Department lives in the URL (?dept=mala) so it survives the [tab].vue
@@ -506,7 +512,7 @@ const accountsGrouped = computed<{ platform: string; label: string; rows: Accoun
     if (!groups.has(key)) groups.set(key, [])
     groups.get(key)!.push(a)
   }
-  const order = ['amazon', 'magalu', 'mercadolivre', 'shopee', 'shein', 'temu', 'aliexpress', 'tiktok']
+  const order = ['amazon', 'magalu', 'mercadolivre', 'shopee', 'shein', 'temu', 'aliexpress', 'tiktok', 'carrefour', 'netshoes']
   return Array.from(groups.entries())
     .sort(([a], [b]) => {
       const ia = order.indexOf(a)
@@ -529,7 +535,7 @@ const accountsGrouped = computed<{ platform: string; label: string; rows: Accoun
 const platformsPresentInDept = computed(() => {
   const set = new Set<string>()
   for (const a of accountsCurrent.value) set.add(a.platform)
-  return Array.from(set)
+  return Array.from(set).sort(comparePlatformLabels)
 })
 
 // =========================================================== products state
@@ -2613,9 +2619,11 @@ function separarBloqueadas(
 // Feature 1: account groups by platform + kit (SSH order)
 // Platform order chosen to match the SSH UI (Shein sits next to Shopee):
 //   amazon → magalu → mercadolivre → shopee → shein → temu → aliexpress → tiktok
+// Carrefour e Netshoes ficam no fim, preservando a posição das contas existentes.
 const PLATFORM_ORDER: Record<string, number> = {
   amazon: 0, magalu: 1, mercadolivre: 2, shopee: 3,
   shein: 4, temu: 5, aliexpress: 6, tiktok: 7,
+  carrefour: 8, netshoes: 9,
 }
 
 // Same SSH order is reused by the body iteration so each data column lines
@@ -2682,9 +2690,7 @@ const gridPlatformOptions = computed<{ value: string; label: string; disabled?: 
   for (const a of (grid.value?.accounts ?? [])) set.add(a.platform)
   const temCatalogo = (grid.value?.accounts ?? []).some(ehCatalogo)
   const out: { value: string; label: string; disabled?: boolean }[] = []
-  const plataformas = Array.from(set).sort(
-    (a, b) => (PLATFORM_ORDER[a] ?? 99) - (PLATFORM_ORDER[b] ?? 99),
-  )
+  const plataformas = Array.from(set).sort(comparePlatformLabels)
   for (const p of plataformas) {
     out.push({ value: p, label: platformLabel(p) })
     if (p === 'mercadolivre') {
@@ -2750,19 +2756,23 @@ function getKitCost(prod: PricingProduct, kitNumber: number): number {
 
 function getMarginShipping(acc: Account, productType: number): { margin: number; shipping: number } | null {
   const t = Math.max(1, Math.min(5, productType || 1))
-  const margin = Number((acc as any)[`margin${t}`] || 0)
-  const shipping = Number((acc as any)[`shipping${t}`] || 0)
-  if (!margin && !shipping) return null
+  const rawMargin = (acc as any)[`margin${t}`]
+  if (rawMargin == null || rawMargin === '') return null
+  const margin = Number(rawMargin)
+  const shipping = Number((acc as any)[`shipping${t}`] ?? 0)
+  if (!Number.isFinite(margin) || !Number.isFinite(shipping)) return null
   return { margin, shipping }
 }
 
 // Margem e frete da coluna no tipo do produto: na de catálogo, a margem
 // própria do tipo (se houver) com o frete da conta de kit.
 function margemFreteDaColuna(acc: Account, productType: number): { margin: number; shipping: number } | null {
-  const ms = getMarginShipping(contaParametros(acc), productType)
-  const propria = margemPropria(acc, Math.max(1, Math.min(5, productType || 1)))
-  if (propria == null) return ms
-  return { margin: propria, shipping: ms?.shipping ?? 0 }
+  const params = contaParametros(acc)
+  const t = Math.max(1, Math.min(5, productType || 1))
+  const propria = margemPropria(acc, t)
+  if (propria == null) return getMarginShipping(params, productType)
+  const shipping = Number((params as any)[`shipping${t}`] ?? 0)
+  return Number.isFinite(shipping) ? { margin: propria, shipping } : null
 }
 
 // Mirrors backend calc.py: (cost * (1 + margin) + shipping) / (1 - commission)
@@ -2770,12 +2780,15 @@ function margemFreteDaColuna(acc: Account, productType: number): { margin: numbe
 // Coluna de catálogo: custo = preco_catalogo; comissão/frete da base; margem
 // própria do tipo quando preenchida, senão a da base.
 function computePrice(acc: Account, prod: PricingProduct): number | null {
+  if (ehCatalogo(acc) && !contaBase(acc)) return null
   const cost = custoDaConta(prod, acc)
-  if (!cost) return null
+  if (cost == null || !Number.isFinite(cost) || cost <= 0) return null
   const pa = contaParametros(acc)
+  if (pa.commission == null || pa.commission === '') return null
   const ms = margemFreteDaColuna(acc, (prod as any).product_type ?? 2)
   if (!ms) return null
-  const commission = Number(pa.commission || 0)
+  const commission = Number(pa.commission)
+  if (!Number.isFinite(commission)) return null
   const denom = 1 - commission
   if (denom <= 0) return null
   // SSH rounds the computed price to integer reais (Math.round). Cents

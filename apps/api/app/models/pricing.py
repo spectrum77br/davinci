@@ -329,8 +329,8 @@ class StoreInfo(Base, TimestampMixin):
         nullable=False,
     )
     platform: Mapped[str] = mapped_column(String(64), nullable=False)
-    # Tipo da loja sem tabela de preços (Site/Carrefour/Netshoes). Não representa
-    # uma PricingAccount e não habilita comissão, integração ou sincronização.
+    # Tipo da loja sem tabela de preços (Site). Carrefour/Netshoes usam
+    # PricingAccount desde a migration 0379, que converte os tipos legados.
     manual_departments: Mapped[list[str] | None] = mapped_column(ARRAY(Text), nullable=True)
     segment: Mapped[str | None] = mapped_column(String(128), nullable=True)
     freight: Mapped[str | None] = mapped_column(String(128), nullable=True)
