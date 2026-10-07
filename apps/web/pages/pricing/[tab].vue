@@ -289,6 +289,10 @@ type Account = {
   conta_base_id?: string | null
   // Na conta de kit: id da coluna de catálogo dela (catálogo ligado), ou null.
   conta_catalogo_id?: string | null
+  // Margem própria do catálogo (07/10/2026), só na conta de catálogo:
+  // {"1".."5": margem do tipo, ou null = usa a da conta de kit}. Os
+  // margin1..5 dela continuam vindo com os da base.
+  margens_catalogo?: Record<string, string | number | null> | null
 }
 
 // Global toast feedback for push / auto-match outcomes. Rendered by
@@ -382,6 +386,13 @@ function catalogoAtivo(acc: Account): boolean {
 // O Catálogo ML só existe em conta de kit do Mercado Livre.
 function podeTerCatalogo(acc: Account): boolean {
   return acc.platform === 'mercadolivre' && !ehCatalogo(acc)
+}
+
+// Sub-linha "↳ catálogo" da aba Contas: a coluna de catálogo da conta (lista
+// de 0 ou 1, para o v-for do template).
+function catalogoDaConta(acc: Account): Account[] {
+  const filha = catalogoPorBase.value.get(acc.id)
+  return filha ? [filha] : []
 }
 
 const accountsByDept = computed(() => {
@@ -756,7 +767,10 @@ function startEditAccount(acc: Account, field: string) {
     commitEditAccount()
   }
   editing.value = { id: acc.id, field }
-  const raw = (acc as any)[field]
+  // Na coluna de catálogo a margem editada é a própria (vazio = a da conta).
+  const raw = ehCatalogo(acc) && field.startsWith('margin')
+    ? acc.margens_catalogo?.[field.slice('margin'.length)] ?? null
+    : (acc as any)[field]
   if (field === 'commission' || field.startsWith('margin')) {
     const n = raw == null || raw === '' ? null : Number(raw)
     editValue.value = n == null || Number.isNaN(n) ? '' : (n * 100).toFixed(2).replace(/\.?0+$/, '')
@@ -801,6 +815,11 @@ function commitEditAccount(): void {
 async function _patchAccount(id: string, field: string, raw: string) {
   const acc = accounts.value.find((x) => x.id === id)
   if (!acc) return
+  // Coluna de catálogo: só a margem própria dos tipos se edita.
+  if (ehCatalogo(acc)) {
+    if (field.startsWith('margin')) await _patchMargemCatalogo(acc, field, raw)
+    return
+  }
 
   const payload: Record<string, unknown> = {}
 
@@ -873,6 +892,34 @@ async function _patchAccount(id: string, field: string, raw: string) {
   } catch (e: any) {
     accountsErr.value = e?.data?.detail?.code ?? 'save_failed'
     // Reload to revert the optimistic update on failure.
+    await loadAccounts()
+  }
+}
+
+// Margem própria do catálogo (07/10/2026): PATCH na conta de catálogo só com
+// a margem do tipo. Vazio grava null = volta a usar a margem da conta de kit.
+async function _patchMargemCatalogo(filha: Account, field: string, raw: string) {
+  const t = field.slice('margin'.length)
+  let valor: string | null = null
+  if (raw && raw !== '-' && raw !== '—') {
+    const pct = parseDec(raw)
+    if (Number.isNaN(pct)) return
+    valor = (pct / 100).toFixed(4)
+  }
+  const antes = filha.margens_catalogo ?? {}
+  const atual = antes[t] == null || antes[t] === '' ? null : Number(antes[t])
+  if (atual === (valor == null ? null : Number(valor))) return
+  // Pinta já; a resposta do servidor confirma.
+  filha.margens_catalogo = { ...antes, [t]: valor }
+  try {
+    const updated = await api<Account>(`/api/pricing/accounts/${filha.id}`, {
+      method: 'PATCH',
+      body: { [field]: valor },
+    })
+    Object.assign(filha, updated)
+    flash(filha.id, field)
+  } catch (e: any) {
+    accountsErr.value = e?.data?.detail?.message ?? e?.data?.detail?.code ?? 'save_failed'
     await loadAccounts()
   }
 }
@@ -2373,6 +2420,28 @@ function contaParametros(acc: Account): Account {
   return contaBase(acc) ?? acc
 }
 
+// Margem própria do catálogo (07/10/2026): na coluna de catálogo, a margem do
+// tipo é a dela quando preenchida (aba Contas, linha "↳ catálogo"); senão a da
+// conta de kit. Comissão e frete são sempre os da conta de kit.
+function margemPropria(acc: Account, t: number): number | null {
+  if (!ehCatalogo(acc)) return null
+  const v = acc.margens_catalogo?.[String(t)]
+  if (v == null || v === '') return null
+  const n = Number(v)
+  return Number.isFinite(n) ? n : null
+}
+
+// "Acessórios 40.0% · Regular 25.0%" — os tipos com margem própria.
+function resumoMargemPropria(acc: Account): string {
+  const nomes = TYPE_HEADERS.value[acc.department as DeptKey] ?? []
+  const partes: string[] = []
+  for (let t = 1; t <= 5; t++) {
+    const m = margemPropria(acc, t)
+    if (m != null) partes.push(`${nomes[t - 1] ?? `tipo ${t}`} ${fmtMargin(m)}`)
+  }
+  return partes.join(' · ')
+}
+
 // Cabeçalho da coluna de catálogo = nome da conta de kit (+ selo "catálogo").
 function nomeColuna(acc: Account): string {
   return ehCatalogo(acc) ? contaParametros(acc).name : acc.name
@@ -2622,14 +2691,24 @@ function getMarginShipping(acc: Account, productType: number): { margin: number;
   return { margin, shipping }
 }
 
+// Margem e frete da coluna no tipo do produto: na de catálogo, a margem
+// própria do tipo (se houver) com o frete da conta de kit.
+function margemFreteDaColuna(acc: Account, productType: number): { margin: number; shipping: number } | null {
+  const ms = getMarginShipping(contaParametros(acc), productType)
+  const propria = margemPropria(acc, Math.max(1, Math.min(5, productType || 1)))
+  if (propria == null) return ms
+  return { margin: propria, shipping: ms?.shipping ?? 0 }
+}
+
 // Mirrors backend calc.py: (cost * (1 + margin) + shipping) / (1 - commission)
 // Returns null if any required input is missing (margin/commission/cost).
-// Coluna de catálogo: custo = preco_catalogo; margem/frete/comissão da base.
+// Coluna de catálogo: custo = preco_catalogo; comissão/frete da base; margem
+// própria do tipo quando preenchida, senão a da base.
 function computePrice(acc: Account, prod: PricingProduct): number | null {
   const cost = custoDaConta(prod, acc)
   if (!cost) return null
   const pa = contaParametros(acc)
-  const ms = getMarginShipping(pa, (prod as any).product_type ?? 2)
+  const ms = margemFreteDaColuna(acc, (prod as any).product_type ?? 2)
   if (!ms) return null
   const commission = Number(pa.commission || 0)
   const denom = 1 - commission
@@ -3172,7 +3251,7 @@ watch(department, async () => {
               >Tipo ML</th>
               <th
                 class="text-center px-2 py-2 font-medium border-b border-border w-28"
-                title="Liga a tabela ML Catálogo desta conta: colunas próprias na Tabela de Preços, calculadas pela coluna Catálogo dos produtos (com a comissão, margens e fretes desta conta), que mandam preço só para o anúncio de catálogo."
+                title="Liga a tabela ML Catálogo desta conta: colunas próprias na Tabela de Preços, calculadas pela coluna Catálogo dos produtos (com a comissão e os fretes desta conta; a margem é a desta conta ou a própria do catálogo, na linha ↳ catálogo), que mandam preço só para o anúncio de catálogo."
               >Catálogo ML</th>
               <th class="text-center px-2 py-2 font-medium border-b border-border w-12">Kit</th>
               <th class="text-center px-2 py-2 font-medium border-b border-border w-20">Comissão</th>
@@ -3266,7 +3345,8 @@ watch(department, async () => {
                   {{ group.label }} · {{ group.rows.length }} CONTA(S)
                 </td>
               </tr>
-              <tr v-for="acc in group.rows" :key="acc.id" class="hover:bg-accent/30">
+              <template v-for="acc in group.rows" :key="acc.id">
+              <tr class="hover:bg-accent/30">
                 <!-- name -->
               <td
                 class="border border-border px-2 py-1.5 text-xs text-left relative"
@@ -3550,6 +3630,60 @@ watch(department, async () => {
                 </button>
               </td>
               </tr>
+              <!-- ↳ catálogo: coluna de catálogo da conta (Catálogo ML ligado).
+                   Só a margem dos tipos é dela; o resto vem da conta de cima. -->
+              <tr
+                v-for="filha in catalogoDaConta(acc)"
+                :key="`cat-${filha.id}`"
+                class="bg-indigo-50/40 hover:bg-indigo-50 dark:bg-indigo-900/10 dark:hover:bg-indigo-900/20"
+                data-linha="catalogo"
+              >
+                <td
+                  class="border border-border py-1 pl-4 pr-2 text-left text-[11px] font-medium text-indigo-800 dark:text-indigo-200"
+                  title="Coluna Catálogo ML desta conta. Margem vazia usa a margem da conta; comissão, frete e anotações são sempre os da conta."
+                >↳ catálogo</td>
+                <td class="border border-border" />
+                <td class="border border-border" />
+                <td class="border border-border" />
+                <td class="border border-border text-center text-xs text-muted-foreground/60" title="Mesmo kit da conta">=</td>
+                <td class="border border-border text-center text-xs text-muted-foreground/60" title="Mesma comissão da conta">=</td>
+                <template v-for="t in nTiposAba" :key="t">
+                  <td
+                    class="border border-border px-2 py-1 text-xs text-center"
+                    :class="{
+                      'cursor-pointer': canEditContas,
+                      'ring-2 ring-blue-500 ring-inset bg-background': isEditing(filha.id, `margin${t}`),
+                      'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(filha.id, `margin${t}`),
+                    }"
+                    :title="margemPropria(filha, t) != null
+                      ? 'Margem própria do catálogo — apague para voltar a usar a margem da conta'
+                      : 'usa a margem da conta — digite para dar ao catálogo uma margem própria'"
+                    :data-margem-catalogo="t"
+                    @click="!isEditing(filha.id, `margin${t}`) && startEditAccount(filha, `margin${t}`)"
+                  >
+                    <input
+                      v-if="isEditing(filha.id, `margin${t}`)"
+                      :ref="setEditInputRef"
+                      v-model="editValue"
+                      type="text" inputmode="decimal"
+                      :placeholder="fmtMargin((acc as any)[`margin${t}`])"
+                      class="w-full text-xs bg-transparent outline-none text-center"
+                      @blur="commitEditAccount"
+                      @keydown.enter.prevent="commitEditAccount"
+                      @keydown.escape.prevent="cancelEdit"
+                    />
+                    <span
+                      v-else-if="margemPropria(filha, t) != null"
+                      class="font-semibold text-indigo-700 dark:text-indigo-300"
+                    >{{ fmtMargin(margemPropria(filha, t)) }}</span>
+                    <span v-else class="text-muted-foreground/50">{{ fmtMargin((acc as any)[`margin${t}`]) }}</span>
+                  </td>
+                  <td class="border border-border text-center text-xs text-muted-foreground/60" title="Mesmo frete da conta">=</td>
+                </template>
+                <td v-for="f in STORE_NOTE_FIELDS" :key="`cat-${f.key}`" class="border border-border" />
+                <td class="border border-border" />
+              </tr>
+              </template>
             </template>
           </tbody>
         </table>
@@ -4507,7 +4641,7 @@ watch(department, async () => {
                 :colspan="group.accounts.length"
                 class="px-2 py-1 text-center text-[11px] font-semibold border-l-[3px] border-gray-500"
                 :class="grupoHeaderBg(group)"
-                :title="group.catalogo ? 'Preço = coluna Catálogo do produto + margem, frete e comissão da conta de kit. Envia só para o anúncio de catálogo; célula com cadeado não envia.' : undefined"
+                :title="group.catalogo ? 'Preço = coluna Catálogo do produto + frete e comissão da conta de kit; margem da conta de kit, ou a própria do catálogo quando preenchida (aba Contas, linha ↳ catálogo). Envia só para o anúncio de catálogo; célula com cadeado não envia.' : undefined"
               >
                 {{ group.label }}
               </th>
@@ -4531,12 +4665,18 @@ watch(department, async () => {
                   <span
                     v-if="ehCatalogo(acc)"
                     class="shrink-0 rounded border border-indigo-300 bg-indigo-100 px-1 text-[9px] font-semibold leading-tight text-indigo-800 dark:border-indigo-700 dark:bg-indigo-900/40 dark:text-indigo-200"
-                    title="Coluna de catálogo: usa a comissão, margens, fretes e anotações da conta de kit e envia só para o anúncio de catálogo"
+                    title="Coluna de catálogo: usa a comissão, fretes e anotações da conta de kit (a margem também, salvo a própria do catálogo) e envia só para o anúncio de catálogo"
                   >catálogo</span>
                   <button class="p-0.5 hover:bg-muted rounded shrink-0" title="Push para esta conta" @click="pushAccountColumn(acc.id)">
                     <Send class="h-3 w-3" />
                   </button>
                 </div>
+                <div
+                  v-if="ehCatalogo(acc) && resumoMargemPropria(acc)"
+                  class="text-[9px] font-semibold leading-tight text-indigo-700 dark:text-indigo-300 truncate"
+                  :title="`Margem própria do catálogo: ${resumoMargemPropria(acc)}. Os outros tipos usam a margem da conta de kit.`"
+                  data-selo="margem-propria"
+                >margem própria</div>
                 <template v-for="f in STORE_NOTE_FIELDS" :key="f.key">
                   <div v-if="editingObsId === `${acc.id}-${f.key}`">
                     <input
