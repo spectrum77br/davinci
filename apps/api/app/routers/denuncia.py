@@ -72,7 +72,7 @@ from app.models.denuncia import (
 from app.models.user import User
 from app.services import denuncia_painel as painel
 from app.services import denuncia_relatorio as relatorio_dia
-from app.services.denuncia_robo import PASSOS, montar_painel, normalizar_horarios
+from app.services.denuncia_robo import EM_CRIACAO, PASSOS, montar_painel, normalizar_horarios
 
 logger = structlog.get_logger()
 
@@ -766,6 +766,8 @@ async def robo_passo(
     acao = corpo.get("acao")
     if acao not in PASSOS:
         raise HTTPException(422, detail={"code": "denuncia_robo_passo_invalido", "acao": acao})
+    if acao in EM_CRIACAO:   # 07/10: o robô ainda não tem este passo (Prints) ou ele está sendo refeito (Jurídico)
+        raise HTTPException(422, detail={"code": "denuncia_robo_passo_em_criacao", "acao": acao})
     return await _comando(session, u, "passo", {"acao": acao})
 
 
@@ -780,6 +782,8 @@ async def robo_agenda(
     passa a seguir na hora (comando "agenda"; e o mini relê a agenda a cada minuto)."""
     if acao not in PASSOS:
         raise HTTPException(422, detail={"code": "denuncia_robo_passo_invalido", "acao": acao})
+    if acao in EM_CRIACAO:   # 07/10: o robô ainda não tem este passo (Prints) ou ele está sendo refeito (Jurídico)
+        raise HTTPException(422, detail={"code": "denuncia_robo_passo_em_criacao", "acao": acao})
     if "ligado" in corpo and not isinstance(corpo["ligado"], bool):
         raise HTTPException(422, detail={"code": "denuncia_robo_ligado_invalido"})
     horarios = None

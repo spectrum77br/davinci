@@ -33,7 +33,13 @@ type Ultima = {
   vezes: number
 }
 type Agenda = { ligado: boolean; horarios: string[]; no_robo: boolean | null }
-type PassoLinha = { acao: string; ordem: number; nome: string; onde: string; faz: string; ultima: Ultima | null; agenda: Agenda }
+// 07/10/2026 (Vinicius: "até agora não entendo o que cada passo faz"): ao abrir o passo, o passo a passo, quem faz (cada
+// perfil pelo nome), quem confere depois e o que está sendo consertado — o log técnico fica num link pequeno
+type Explicacao = { passos: string[]; quem: string[]; confere: string[]; consertando: string[] }
+type PassoLinha = {
+  acao: string; ordem: number; nome: string; onde: string; faz: string; ultima: Ultima | null; agenda: Agenda
+  explicacao: Explicacao | null; em_criacao: boolean
+}
 type Frente = { fila: string; nome: string; fazendo: string | null; acao: string | null; desde: string | null; progresso: string }
 type Ocorrencia = {
   chave: string
@@ -192,6 +198,7 @@ function passoPendente(acao: string): boolean {
 }
 
 function podeRodar(p: PassoLinha): boolean {
+  if (p.em_criacao) return false
   return !mandando.value && !passoPendente(p.acao) && !['rodando', 'fila'].includes(p.ultima?.status || '')
 }
 
@@ -448,7 +455,10 @@ function relLido() {
                   </span>
                 </td>
                 <td>
-                  <div class="text-sm font-medium" :class="p.agenda.ligado ? '' : 'text-muted-foreground'">{{ p.nome }}</div>
+                  <div class="flex items-center gap-2 text-sm font-medium" :class="p.agenda.ligado ? '' : 'text-muted-foreground'">
+                    <span class="truncate">{{ p.nome }}</span>
+                    <span v-if="p.em_criacao" class="pill-warning shrink-0 text-[10px]">em criação</span>
+                  </div>
                   <div class="truncate text-[11px] text-muted-foreground" :title="p.faz">{{ p.faz }}</div>
                 </td>
                 <!-- 03/10 (Vinicius): a coluna "Onde roda" voltou (perfil 50 + 148 + celular…) -->
@@ -461,7 +471,7 @@ function relLido() {
                       role="switch"
                       :aria-checked="p.agenda.ligado"
                       :aria-label="`${p.agenda.ligado ? 'Desligar' : 'Ligar'} ${p.nome}`"
-                      :disabled="!podeMandar || mudandoAgenda === p.acao"
+                      :disabled="!podeMandar || mudandoAgenda === p.acao || p.em_criacao"
                       :title="p.agenda.ligado ? 'Ligado: roda sozinho nos horários' : 'Desligado: só roda pelo Rodar'"
                       class="relative h-5 w-9 shrink-0 rounded-full transition-colors disabled:cursor-default"
                       :class="[p.agenda.ligado ? 'bg-emerald-500' : 'bg-gray-300 dark:bg-gray-600', mudandoAgenda === p.acao ? 'animate-pulse' : '', podeMandar ? 'cursor-pointer' : 'opacity-60']"
@@ -541,7 +551,7 @@ function relLido() {
                     variant="outline"
                     class="h-7"
                     :disabled="!podeRodar(p)"
-                    :title="podeRodar(p) ? 'pedir este passo ao robô agora' : 'já está na fila ou rodando'"
+                    :title="p.em_criacao ? 'em criação: o robô ainda não tem este passo' : podeRodar(p) ? 'pedir este passo ao robô agora' : 'já está na fila ou rodando'"
                     @click="rodar(p)"
                   >
                     <Loader2 v-if="mandando === p.acao || passoPendente(p.acao)" class="mr-1 size-3.5 animate-spin" />
@@ -552,18 +562,50 @@ function relLido() {
               <tr v-if="aberto === p.acao">
                 <td />
                 <td colspan="7" class="bg-muted/30">
-                  <div class="space-y-1 py-1 text-xs">
-                    <div class="text-muted-foreground">{{ p.faz }} · roda em: {{ p.onde }}</div>
-                    <template v-if="p.ultima">
-                      <div v-if="p.ultima.erro" class="whitespace-pre-wrap break-words text-red-700 dark:text-red-400">{{ p.ultima.erro }}</div>
-                      <div>
-                        Hoje: {{ p.ultima.vezes }} vez{{ p.ultima.vezes > 1 ? 'es' : '' }} ·
-                        última de {{ quando(p.ultima.inicio) || '—' }}<template v-if="p.ultima.fim && p.ultima.status !== 'rodando'"> a {{ quando(p.ultima.fim) }}</template>
-                      </div>
-                      <pre v-if="p.ultima.log" class="max-h-72 overflow-auto whitespace-pre-wrap rounded border bg-background p-2 text-[11px] leading-snug">{{ p.ultima.log }}</pre>
-                      <div v-else class="text-muted-foreground">sem log ainda</div>
+                  <div class="grid gap-3 py-2 text-xs sm:grid-cols-2" style="max-width: 1180px">
+                    <template v-if="p.explicacao">
+                      <section class="space-y-1">
+                        <div class="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">O que faz</div>
+                        <ol class="list-decimal space-y-0.5 pl-4">
+                          <li v-for="(t, i) in p.explicacao.passos" :key="i">{{ t }}</li>
+                        </ol>
+                      </section>
+                      <section class="space-y-1">
+                        <div class="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Quem faz</div>
+                        <ul class="space-y-0.5">
+                          <li v-for="(t, i) in p.explicacao.quem" :key="i" class="flex gap-1.5"><span class="text-muted-foreground">•</span>{{ t }}</li>
+                        </ul>
+                        <div class="pt-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Quem confere depois</div>
+                        <ul v-if="p.explicacao.confere.length" class="space-y-0.5">
+                          <li v-for="(t, i) in p.explicacao.confere" :key="i" class="flex gap-1.5"><span class="text-muted-foreground">→</span>{{ t }}</li>
+                        </ul>
+                        <div v-else class="text-muted-foreground">—</div>
+                      </section>
+                      <section v-if="p.explicacao.consertando.length" class="space-y-1 sm:col-span-2">
+                        <div class="text-[10px] font-semibold uppercase tracking-wider text-amber-700 dark:text-amber-400">Sendo consertado</div>
+                        <ul class="space-y-0.5">
+                          <li v-for="(t, i) in p.explicacao.consertando" :key="i" class="flex gap-1.5"><span class="text-amber-600">•</span>{{ t }}</li>
+                        </ul>
+                      </section>
                     </template>
-                    <div v-else class="text-muted-foreground">Não rodou hoje.</div>
+                    <div v-else class="text-muted-foreground sm:col-span-2">{{ p.faz }} · roda em: {{ p.onde }}</div>
+                    <section class="space-y-1 border-t pt-2 sm:col-span-2">
+                      <div class="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Hoje</div>
+                      <template v-if="p.ultima">
+                        <div>
+                          <span :class="(STATUS[p.ultima.status] || ['', 'pill-muted'])[1]">{{ (STATUS[p.ultima.status] || [p.ultima.status])[0] }}</span>
+                          · {{ p.ultima.vezes }} vez{{ p.ultima.vezes > 1 ? 'es' : '' }} · última de {{ quando(p.ultima.inicio) || '—' }}<template v-if="p.ultima.fim && p.ultima.status !== 'rodando'"> a {{ quando(p.ultima.fim) }}</template>
+                          <template v-if="p.ultima.progresso && !p.ultima.erro"> · {{ p.ultima.progresso }}</template>
+                        </div>
+                        <div v-if="p.ultima.erro" class="whitespace-pre-wrap break-words text-red-700 dark:text-red-400">{{ p.ultima.erro }}</div>
+                        <!-- log técnico: pequeno e fechado (Vinicius: "só você usa, algo bem restrito que você aperta e abre") -->
+                        <details v-if="p.ultima.log" class="pt-1">
+                          <summary class="cursor-pointer select-none text-[10px] text-muted-foreground/70 hover:text-muted-foreground">log técnico</summary>
+                          <pre class="mt-1 max-h-72 overflow-auto whitespace-pre-wrap rounded border bg-background p-2 text-[11px] leading-snug">{{ p.ultima.log }}</pre>
+                        </details>
+                      </template>
+                      <div v-else class="text-muted-foreground">{{ p.em_criacao ? 'Em criação: o robô ainda não roda este passo.' : 'Não rodou hoje.' }}</div>
+                    </section>
                   </div>
                 </td>
               </tr>

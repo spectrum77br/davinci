@@ -38,88 +38,178 @@ TOLERANCIA_INICIO = timedelta(minutes=20)
 SEM_NOTICIA = timedelta(minutes=5)
 
 # passo → (ordem na tela, nome, onde roda, o que faz)
-# 02/10 (Vinicius, agente v27 no mini): os passos 2 a 6 viraram dois — 2 procura nos
-# quatro sites e 3 denúncias (prints, resultados da Shopee, recusadas de novo e novas).
+# 07/10/2026 (Vinicius: "mexemos e mexemos e até agora não entendo o que cada passo faz"; "Passos" remodelado a
+# partir do mapa do processo): numeração nova — 0 Checagem · 1 Conferência · 2 Procura · 3 Nossos · 4 Diversos ·
+# 5 Prints · 6 Anatel · 7 Réplica · 8 Ativos/inativos · 9 Jurídico. O "Tempo parado" saiu (ele: "pode excluir; quando
+# ver necessidade criamos novamente") — fora daqui ele também sai da agenda do mini (só vão os passos desta lista).
+# A chave de cada passo NÃO muda (agenda e "Rodar" de antes valem). Histórico até 06/10: 02/10 a procura e as
+# denúncias viraram passos próprios; 03/10 o Nosso parou nas lojas; 05/10 o passo 1 virou a conferência inteira
+# (e-mails + Shopee no perfil 50 + Anatel/SEI) e entrou a Réplica.
 PASSOS: dict[str, tuple[int, str, str, str]] = {
-    # 05/10 (Vinicius: "cadê os do Mercado Livre da réplica, cadê os da Shopee?"): a checagem já
-    # conferia as 6 contas da Réplica (checagem_pre_rodada.py → checar_perfis_replica), só a tela
-    # não dizia. A Shopee só na 1ª checagem do dia — abrir de novo o perfil pedia captcha.
-    "checagem": (0, "Checagem antes da rodada",
-                 "perfil 50 + 148 + Safari + contas da Réplica (ML 93 e 78 · Shopee 155 e 146 · "
-                 "TikTok 137 e 131)",
-                 "confere logins, AdsPower, captcha, Safari e Tuta; e se as 6 contas da Réplica "
-                 "estão logadas (a Shopee só na 1ª checagem do dia, pra não pedir captcha; com "
-                 "captcha ou deslogada, o perfil fica ABERTO pra resolver) — não muda nada"),
-    # 01/10: o robô lê o Tuta sozinho (o leitor do Claude do mini parou em 17/09).
-    # 05/10 (Vinicius: "e se colocar tudo no passo 1?"): o 1 vira a conferência das respostas
-    # inteira, em três filas ao mesmo tempo — e-mails (Tuta), resultados da Shopee no perfil 50
-    # (antes da procura; antes nos passos 3 e 7) e, no Safari, o Anatel Consumidor + o SEI
-    # (intimações e andamento dos processos; antes no passo 4). A chave segue "ciclo_emails"
-    # (agenda e botão "Rodar" de antes valem); no mini são as ações ciclo_emails,
-    # conferencia_perfil50 e conferencia_safari (agente v33).
-    "ciclo_emails": (1, "Conferência das respostas", "Tuta + perfil 50 + Safari",
-                     "e-mails das plataformas (Tuta) · resultados da Shopee no perfil 50, antes da "
-                     "procura · Anatel Consumidor e SEI (intimações e andamento dos processos) no "
-                     "Safari. As respostas das réplicas: ML por e-mail encaminhado das contas das "
-                     "lojas; Shopee lidas no passo 6, na conta de cada loja"),
-    # 05/10: o TikTok também pelo app do celular (Cloud Phone), ao mesmo tempo (agente v33)
-    "procura": (2, "Procurar anúncios novos", "perfil 50 + 148 + celular",
-                "Mercado Livre → Shopee → TikTok → Amazon (TikTok também pelo app do celular, ao "
-                "mesmo tempo), salva no sistema e confere no UpSeller quais lojas são nossas"),
-    # 01/10 (Vinicius): nas lojas o robô denuncia só o "Nosso", pela conta da MAKISA
-    # (config.json → denunciar_nas_lojas no mini); o "Diversos" só é salvo. 02/10: até 40
-    # prints por rodada — 1º recusadas do Nosso, 2º os da Anatel, 3º o resto. 03/10: vira
-    # "Denúncias Nossos"; a denúncia do Nosso nas lojas está parada por enquanto (grupos = []
-    # no mini) — ligado, o passo só tira prints e lê os resultados da Shopee.
-    "denuncias": (3, "Denúncias Nossos", "perfil 50 + 148 (prints da Shopee) + celular",
-                  "prints (até 40, Nosso primeiro) → recusadas de novo "
-                  "→ novas (ML, Shopee e TikTok; só o Nosso; Amazon ainda não)"),
-    # 05/10: só envia — o andamento das antigas é lido no passo 1
-    "anatel": (4, "Denúncias Anatel", "Safari (SEI)",
-               "peticiona as novas no SEI — só depois dos passos 2 e 3 (as respostas são lidas "
-               "no passo 1)"),
-    # 05/10 (Vinicius): saíram da lista o 5 (Compras de prova, desligado e com o login quebrado
-    # desde 27/09) e o 8 (Perguntas nos anúncios disfarçados); o Jurídico foi pro fim e os números
-    # ficaram em sequência. Os programas ficam no mini; a chave de cada passo não muda (agenda e
-    # "Rodar" seguem valendo). A "Réplica Denúncias Diversos" (planejada) entra depois do Diversos.
-    # 02/10 (Vinicius): denunciar na loja uma vez só e tirar os prints, de noite
-    "diversos": (5, "Denúncias Diversos", "perfil 50 + 148 (prints da Shopee) + celular",
-                 "denúncia nova do Diversos no ML, Shopee e TikTok (uma vez só, sem denunciar de "
-                 "novo) → prints (até 200, Nosso → Anatel → Diversos); "
-                 "para quando o próximo passo chega"),
-    # 05/10 (Vinicius): anúncio do Diversos recusado pela loja e já com processo na Anatel é
-    # denunciado de novo no marketplace por OUTRA empresa, citando o processo SEI. Dois grupos de
-    # contas de lojas (1 = Mega/Aguiar/Atv, 2 = KIA/Vortan/Barbosa), divididos por loja; a 2ª
-    # réplica sai pelo outro grupo. No mini é a ação extra replica_diversos (replica_diversos.py
-    # --ml; Shopee e TikTok depois).
-    "replica_diversos": (6, "Réplica Denúncias Diversos",
-                         "grupo 1: ML 93 · Shopee 155 · TikTok 137 — grupo 2: ML 78 · Shopee 146 · "
-                         "TikTok 131",
-                         "Diversos recusado na loja e já com processo na Anatel: outra empresa "
-                         "denuncia de novo citando o processo SEI (grupo da loja; a 2ª réplica "
-                         "pelo outro grupo). Mercado Livre e Shopee (a conta da Shopee abre uma "
-                         "vez por dia: lê as respostas das réplicas dela e envia as novas); TikTok "
-                         "sem Diversos ativo. Captcha ou login: o perfil fica ABERTO pra resolver"),
-    # 01/10 (Vinicius): o "saiu do ar?" levava 3–4 h e virou passo próprio, feito com o
-    # robô parado (para quando a rodada chega e continua depois).
-    "ativos_inativos": (7, "Conferência de anúncios ativos/inativos",
-                        "perfil 50 + 148",
-                        "abre um por um os anúncios que acompanhamos e vê quem saiu do ar; "
-                        "roda com o robô parado, para se a rodada chegar e continua depois"),
-    # 05/10 (Vinicius perguntou se rodar 0→9 sem parar seria melhor): manter os horários e
-    # aproveitar o tempo em que o perfil 50 fica parado com o que trava o resultado — prints
-    # atrasados (sem print não vai pra Anatel) e a conferência de ativos/inativos pela metade.
-    # Desiste se o próximo passo do perfil 50 vem em menos de 30 min e para 15 min antes dele.
-    # No mini: ação extra aproveitar_parado (aproveitar_parado.py).
-    # v34 do agente (05/10): o print SÓ da Shopee roda no perfil 148, ao lado (vale também nos
-    # passos 3 e 5); 148 ocupado → vai pro 50 como antes.
-    "aproveitar_parado": (8, "Tempo parado: prints e ativos/inativos",
-                          "perfil 50 (ML) + 148 (Shopee)",
-                          "nos buracos da agenda: tira os prints atrasados — ML no perfil 50 e "
-                          "Shopee no 148, ao mesmo tempo — e retoma a conferência de "
-                          "ativos/inativos (50 + 148); para 15 min antes do próximo passo do "
-                          "perfil 50"),
-    "juridico": (9, "Jurídico", "escritório", "monta a pasta do caso pro advogado (não envia)"),
+    "checagem": (0, "Checagem antes da rodada", "perfil 50 + 148 + contas das lojas + Safari + Tuta",
+                 "confere logins, perfis, captcha, Safari e Tuta antes da rodada — não muda nada"),
+    "ciclo_emails": (1, "Conferência das respostas", "Tuta + Safari (SEI) + perfil 50",
+                     "lê as respostas das denúncias (e-mails no Tuta) e o andamento dos processos da Anatel no SEI"),
+    "procura": (2, "Procurar anúncios novos", "perfil 50 + 148 + celular + Safari",
+                "procura as marcas no Mercado Livre, Shopee, TikTok e Amazon e salva no sistema"),
+    "denuncias": (3, "Denúncias Nossos", "perfil 50 + celular",
+                  "denunciava na loja o anúncio com o NOSSO certificado — desligado desde 03/10"),
+    "diversos": (4, "Denúncias Diversos", "perfil 50 + celular + 148 (prints)",
+                 "denuncia uma vez na loja o anúncio com certificado de outra empresa ou nº que não é do aparelho"),
+    "prints": (5, "Prints", "perfil 148 (Shopee) + perfil 50 (ML)",
+               "tira o print da página de cada anúncio que vai à Anatel — em criação"),
+    "anatel": (6, "Denúncias Anatel", "Safari (SEI) + Tuta",
+               "peticiona no SEI, uma petição por loja, com o print e as provas de cada anúncio"),
+    "replica_diversos": (7, "Réplica Denúncias Diversos", "contas das lojas (ML 93/78 · Shopee 155/146)",
+                         "denuncia de novo, com a conta de outra empresa, o Diversos que a loja recusou e já está na Anatel"),
+    "ativos_inativos": (8, "Ativos/inativos", "perfil 148 (Shopee) + perfil 50",
+                        "abre os anúncios denunciados e vê quem saiu do ar"),
+    "juridico": (9, "Jurídico", "escritório", "monta a pasta do caso para o advogado — em criação"),
+}
+# passos que o robô ainda não tem (Prints) ou que estão sendo refeitos (Jurídico): a tela mostra "em criação" e
+# não deixa ligar nem rodar
+EM_CRIACAO = {"prints", "juridico"}
+# 07/10/2026: o que a tela mostra ao abrir o passo — o passo a passo, quem faz (cada perfil pelo nome), quem confere
+# depois e o que ainda está sendo consertado. Texto do mapa do processo, conferido no robô em 07/10.
+_LOJAS = "Contas das lojas da Réplica: ML 93 Mega · ML 78 KIA · Shopee 155 Aguiar · Shopee 146 Vortan · TikTok 137 Atv · TikTok 131 Barbosa"
+EXPLICACAO: dict[str, dict[str, list[str]]] = {
+    "checagem": {
+        "passos": [
+            "Abre o perfil 50 e confere se Mercado Livre, Shopee, TikTok e Amazon estão logados.",
+            "Abre o perfil 148 e faz uma busca de teste na Shopee.",
+            "Confere se as contas das lojas da Réplica estão logadas (a Shopee só na 1ª checagem do dia, para não pedir captcha).",
+            "No Safari confere UpSeller, gov.br e SEI; confere se o Tuta está recebendo.",
+            "Não muda nada: o que estiver errado vira Ocorrência e aviso no Threema.",
+        ],
+        "quem": ["Perfil 50 (MAKISA)", "Perfil 148 (Luno – Shopee)", _LOJAS, "Safari do Mac mini", "Tuta (sac@makisa)"],
+        "confere": ["É a própria conferência: os avisos vão para Ocorrências e para o Threema."],
+        "consertando": ["A parte das contas das lojas deu erro de programa em 07/10 (\"fc não definido\")."],
+    },
+    "ciclo_emails": {
+        "passos": [
+            "Lê a caixa sac@makisa no Tuta: respostas do Mercado Livre (inclusive as da Réplica, encaminhadas pelas lojas) e da Shopee.",
+            "O sistema transforma cada e-mail em resultado da denúncia: recusada, removida ou em análise.",
+            "No Safari lê o andamento de cada processo no SEI (60 por vez) e confere se os anexos que mandamos estão no processo.",
+            "Lê os protocolos antigos do Anatel Consumidor.",
+            "Ainda abre os avisos da Shopee no perfil 50 — vai sair: o aviso da Shopee não diz qual anúncio foi recusado.",
+        ],
+        "quem": ["Tuta (sac@makisa)", "Safari: SEI com a conta do advogado e gov.br", "Perfil 50 (avisos da Shopee — sai)"],
+        "confere": [
+            "Denúncias do Mercado Livre (passo 4) e da Réplica no ML (passo 7) — pelo e-mail.",
+            "Processos da Anatel (passo 6) — andamento e anexos no SEI.",
+            "TikTok: ainda ninguém lê as respostas — vai entrar a leitura pelo app do celular.",
+        ],
+        "consertando": [
+            "Tirar a parte da Shopee (não registra recusa nenhuma e cansou a conta do perfil 50).",
+            "Anatel Consumidor: ler os 15 protocolos (hoje só os 10 mais novos).",
+        ],
+    },
+    "procura": {
+        "passos": [
+            "Mercado Livre no perfil 50: busca hotwav, oukitel, fossibot, uranyx e oscal.",
+            "Shopee: o perfil 50 busca hotwav e uranyx e o 148 busca oukitel, fossibot e oscal, ao mesmo tempo.",
+            "TikTok pelo app no celular e pelo site no perfil 50.",
+            "Amazon no perfil 50 (só procura — a Amazon não é denunciada por enquanto).",
+            "Salva no sistema depois de cada site e confere no UpSeller (Safari) quais lojas são nossas.",
+        ],
+        "quem": ["Perfil 50 (MAKISA)", "Perfil 148 (Luno – Shopee)", "Celular na nuvem (app do TikTok)", "Safari (UpSeller)"],
+        "confere": ["Ainda ninguém confere se a procura cobriu todos os sites (\"ok\" = o programa terminou)."],
+        "consertando": [
+            "Mercado Livre lê só a 1ª página da busca (as páginas 2 a 6 repetem a 1ª).",
+            "O 148 falha quando o passo 8 ainda está com ele, e o 50 refaz a parte dele.",
+        ],
+    },
+    "denuncias": {
+        "passos": [
+            "Pegava os anúncios que usam o NOSSO certificado e denunciava na loja (Mercado Livre, Shopee, TikTok).",
+            "Denunciava de novo as que a loja recusou (a \"refação\").",
+            "Desligado desde 03/10: desde 06/10 o Nosso vai direto à Anatel (passo 6), sem passar pela loja.",
+        ],
+        "quem": ["Perfil 50 (MAKISA)", "Celular na nuvem (TikTok)"],
+        "confere": ["Desligado. As respostas antigas do ML ainda chegam pelo e-mail (passo 1)."],
+        "consertando": [],
+    },
+    "diversos": {
+        "passos": [
+            "Pega os anúncios Diversos (certificado de outra empresa, ou nº que não é do aparelho) ainda não denunciados na loja.",
+            "Denuncia uma vez: Mercado Livre (até 25 por hora) e Shopee (até 25 por rodada) no perfil 50; TikTok pelo app do celular.",
+            "Grava cada denúncia com o print da tela de denúncia.",
+            "Hoje também tira os prints atrasados (até 200) — vão sair daqui para o passo 5.",
+        ],
+        "quem": ["Perfil 50 (MAKISA) — Mercado Livre e Shopee", "Celular na nuvem — TikTok", "Perfil 148 — prints da Shopee"],
+        "confere": [
+            "Mercado Livre: a resposta chega por e-mail (passo 1).",
+            "Shopee: o aviso não diz qual anúncio foi recusado — só o \"saiu do ar\" (passo 8) vale.",
+            "TikTok: ninguém lê ainda (vai entrar no passo 1, pelo app).",
+            "Saiu do ar: passo 8.",
+        ],
+        "consertando": ["São 7 horários, mas na prática é um bloco só — os horários vão ser revistos."],
+    },
+    "prints": {
+        "passos": [
+            "Tira o print da página de cada anúncio que vai à Anatel e ainda não tem print que valha.",
+            "Só vale print da página do próprio anúncio, sem captcha, com a cópia da página, de até 15 dias.",
+            "Captcha na tela: não salva, para aquele site e deixa a conta descansar.",
+            "Shopee no perfil 148, com pausa entre um print e outro; Mercado Livre no perfil 50.",
+        ],
+        "quem": ["Perfil 148 (Luno – Shopee)", "Perfil 50 (MAKISA) — Mercado Livre"],
+        "confere": ["O detector de print confere antes de salvar e de novo antes de anexar na Anatel."],
+        "consertando": ["Em criação: hoje os prints rodam dentro do passo 4 ou à mão."],
+    },
+    "anatel": {
+        "passos": [
+            "Entra no SEI com a conta do advogado (o código de acesso chega por e-mail no Tuta).",
+            "Faz uma petição por loja: Nosso, Diversos com nº que não é do aparelho, e sem nº (TikTok, Mercado Livre e Shopee).",
+            "Cada anúncio vai com o print que vale, a consulta pública do nº e, no Nosso, o nosso certificado. Sem print que valha, fica de fora.",
+            "Confere de novo que o anúncio está no ar e guarda o nº do processo e os nomes dos anexos.",
+            "Começa só depois que a procura (passo 2) termina.",
+        ],
+        "quem": ["Safari do Mac mini: SEI com a conta do advogado", "Tuta (código de acesso)", "Gustavo (encaminha o código)"],
+        "confere": [
+            "Passo 1: lê o andamento de cada processo e confere se os anexos estão lá.",
+            "Denúncias enviadas › \"prints\": miniaturas do que foi anexado, para conferir de olho.",
+        ],
+        "consertando": ["35 processos foram com print de captcha (25/09 a 06/10) — conserto à parte, por peticionamento intercorrente."],
+    },
+    "replica_diversos": {
+        "passos": [
+            "Pega o anúncio Diversos que a loja recusou e que já tem processo na Anatel.",
+            "Denuncia de novo com a conta de outra empresa, citando o processo (grupo da loja; a 2ª réplica sai pelo outro grupo).",
+            "Mercado Livre e Shopee; a conta da Shopee abre uma vez por dia.",
+            "Captcha ou login na conta da loja: o perfil fica aberto para alguém resolver.",
+        ],
+        "quem": ["Grupo 1: ML 93 Mega · Shopee 155 Aguiar · TikTok 137 Atv (sem uso)",
+                 "Grupo 2: ML 78 KIA · Shopee 146 Vortan · TikTok 131 Barbosa (sem uso)"],
+        "confere": [
+            "Mercado Livre: a resposta vai ao e-mail da loja, encaminhada ao sac@makisa e lida no passo 1.",
+            "Shopee: os avisos da conta não dizem qual anúncio foi recusado.",
+        ],
+        "consertando": [
+            "Shopee: vai valer \"denunciado há 10 dias ou mais e ainda no ar\" no lugar da recusa (que nunca é registrada).",
+            "Mega: nenhuma resposta chegou — conferir o encaminhamento do e-mail.",
+            "Aguiar 155: captcha em toda rodada.",
+        ],
+    },
+    "ativos_inativos": {
+        "passos": [
+            "Abre um por um os anúncios denunciados e vê quem saiu do ar.",
+            "Saiu do ar: a denúncia fecha como \"removido\".",
+            "Shopee no perfil 148; Mercado Livre, Amazon e TikTok no perfil 50, ao mesmo tempo.",
+            "Para quando a checagem das 05:45 chega e continua depois.",
+        ],
+        "quem": ["Perfil 148 (Luno – Shopee)", "Perfil 50 (MAKISA)"],
+        "confere": ["O sistema usa o resultado para fechar as denúncias de anúncio que saiu do ar."],
+        "consertando": [
+            "Nunca termina o dia: a checagem das 05:45 corta — o horário vai ser revisto.",
+            "Mercado Livre sem navegador (pela API das nossas contas) — em teste.",
+        ],
+    },
+    "juridico": {
+        "passos": ["Monta a pasta do caso para o advogado (não envia).", "Em criação: hoje o pacote é montado à mão quando precisa."],
+        "quem": ["Escritório"],
+        "confere": [],
+        "consertando": [],
+    },
 }
 # passos de antes de 02/10: só pra dar nome às rodadas que ainda os têm (não têm botão)
 ANTIGOS: dict[str, tuple[int, str]] = {
@@ -131,6 +221,8 @@ ANTIGOS: dict[str, tuple[int, str]] = {
     "relatorio": (7, "Relatório (fora da rotina)"),
     "compras": (5, "Compras de prova (fora da lista)"),
     "capa_perguntas": (8, "Perguntas nos anúncios (fora da lista)"),
+    # 07/10: o "Tempo parado" saiu da lista (Vinicius: "pode excluir; quando ver necessidade criamos novamente")
+    "aproveitar_parado": (8, "Tempo parado (fora da lista)"),
     # 05/10: as partes do passo 1 que rodam no perfil 50 e no Safari (a de e-mail é o próprio
     # ciclo_emails)
     "conferencia_perfil50": (1, "Conferência — resultados da Shopee"),
@@ -150,7 +242,7 @@ def _ordem_nome(acao: str, nome: str | None) -> tuple[int, str]:
 FRENTES = (
     ("M", "Navegador (perfil 50)", "Mercado Livre, Shopee, TikTok, Amazon e conferências"),
     ("S", "Anatel / SEI (Safari)",
-     "conferência da Anatel e do SEI (passo 1) e as petições (passo 4)"),
+     "conferência da Anatel e do SEI (passo 1) e as petições (passo 6)"),
     ("E", "Escritório", "e-mails, jurídico e relatório"),
 )
 # itens do resumo que, com estado "erro", só uma pessoa resolve
@@ -425,7 +517,8 @@ def montar_painel(
 
     passos = [
         {"acao": acao, "ordem": ordem, "nome": nome, "onde": onde, "faz": faz,
-         "ultima": ultimas.get(acao), "agenda": _agenda(acao)}
+         "ultima": ultimas.get(acao), "agenda": _agenda(acao),
+         "explicacao": EXPLICACAO.get(acao), "em_criacao": acao in EM_CRIACAO}
         for acao, (ordem, nome, onde, faz) in sorted(PASSOS.items(), key=lambda x: x[1][0])
     ]
 
