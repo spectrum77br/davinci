@@ -1364,3 +1364,35 @@ async def test_prints_do_processo_sei_mostra_original_e_pdf(client, make_user, a
     assert por["B2"]["print"]["id"] == 63 and por["B2"]["invalido"] == "Captura inválida (tela de verificação)"
     assert por["B2"]["pdf"] is None
     assert (await client.get("/api/denuncia/anatel/prints", params={"protocolo": "nada"})).status_code == 404
+
+
+async def test_ml_itens_le_status_pela_api_com_conta_nossa(client, db, make_user):
+    """07/10/2026: o mini pergunta o status de anúncios do ML sem abrir o perfil 50."""
+    import httpx
+    import respx
+
+    from app.models import Integration, IntegrationPlatform
+    from app.security.cipher import encrypt_json
+
+    dono = await make_user()
+    db.add(Integration(user_id=dono.id, platform=IntegrationPlatform.ML, name="aguiar",
+                       credentials=encrypt_json({"access_token": "t", "expires_at": 9999999999})))
+    await db.commit()
+    assert (await client.get("/api/denuncia/sync/ml-itens", params={"ids": "MLB1234567"})).status_code == 401
+    assert (await client.get("/api/denuncia/sync/ml-itens", params={"ids": "x;rm"}, headers=H)).status_code == 422
+    resposta = [
+        {"code": 200, "body": {"id": "MLB1234567", "status": "active", "seller_id": 9, "title": "Oukitel"}},
+        {"code": 200, "body": {"id": "MLB7654321", "status": "closed", "sub_status": ["deleted"], "seller_id": 8}},
+    ]
+    with respx.mock(assert_all_called=True) as m:
+        rota = m.get("https://api.mercadolibre.com/items").mock(return_value=httpx.Response(200, json=resposta))
+        r = await client.get("/api/denuncia/sync/ml-itens", params={"ids": "MLB1234567, mlb7654321,MLB1234567"}, headers=H)
+    assert r.status_code == 200, r.text
+    j = r.json()
+    assert j["ok"] is True and j["conta"] == "aguiar" and j["pedidos"] == ["MLB1234567", "MLB7654321"]
+    assert j["itens"]["MLB1234567"]["status"] == "active" and j["itens"]["MLB7654321"]["status"] == "closed"
+    assert rota.calls[0].request.headers["Authorization"] == "Bearer t"
+    with respx.mock() as m:
+        m.get("https://api.mercadolibre.com/items").mock(return_value=httpx.Response(403, json={"code": "PA_UNAUTHORIZED"}))
+        r = await client.get("/api/denuncia/sync/ml-itens", params={"ids": "MLB1234567"}, headers=H)
+    assert r.json()["ok"] is False and r.json()["tentativas"][0]["status"] == 403
