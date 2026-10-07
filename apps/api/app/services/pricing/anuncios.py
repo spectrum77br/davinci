@@ -293,6 +293,14 @@ TEXTO_BLOQUEIO = {
     ),
 }
 
+# Célula de catálogo sem anúncio numa integração em que a varredura ainda não
+# leu a marca de nenhum vínculo (catalogo_lido_em vazio em todos): "sem
+# anúncio" seria falso — ainda não se sabe.
+TEXTO_MARCA_NAO_LIDA = (
+    "Marca de catálogo ainda não lida nesta conta (a varredura diária lê às 10h; "
+    "ou rode Vincular Automático)"
+)
+
 
 def _texto_anuncio(b: AnuncioBloqueado) -> str:
     rel = ", ".join(relacionados_do_link(b.link)) or "?"
@@ -305,6 +313,7 @@ def info_celula_catalogo(
     *,
     sem_preco: bool,
     sem_integracao: bool = False,
+    marca_nao_lida: bool = False,
 ) -> dict:
     """O campo `catalogo` de uma célula de conta de catálogo no /grid.
 
@@ -312,7 +321,8 @@ def info_celula_catalogo(
     pausado | em_revisao | encerrado | sem_preco_catalogo; `texto` é a frase
     do tooltip.
     Com parte dos anúncios livres a célula envia (só para os livres) e o texto
-    diz quais ficam de fora."""
+    diz quais ficam de fora. `marca_nao_lida`: a integração ainda não teve a
+    marca de catálogo lida — muda só o texto do 'sem_anuncio'."""
     anuncios = [
         {
             "external_id": lk.external_id,
@@ -339,6 +349,8 @@ def info_celula_catalogo(
         texto = TEXTO_BLOQUEIO["sem_anuncio"]
         if sem_integracao:
             texto = "Conta de kit sem integração do Mercado Livre — sem anúncio de catálogo"
+        elif marca_nao_lida:
+            texto = TEXTO_MARCA_NAO_LIDA
         return {"anuncios": [], "bloqueio": "sem_anuncio", "texto": texto}
     if not resolucao.links:
         presentes = {b.motivo for b in resolucao.bloqueados}
@@ -359,9 +371,11 @@ def info_celula_catalogo(
     return {"anuncios": anuncios, "bloqueio": None, "texto": texto}
 
 
-def texto_bloqueio_envio(resolucao: Resolucao) -> tuple[str, str] | None:
+def texto_bloqueio_envio(
+    resolucao: Resolucao, *, marca_nao_lida: bool = False
+) -> tuple[str, str] | None:
     """(bloqueio, texto) quando a célula de catálogo não tem para onde enviar."""
-    info = info_celula_catalogo(resolucao, sem_preco=False)
+    info = info_celula_catalogo(resolucao, sem_preco=False, marca_nao_lida=marca_nao_lida)
     if info["bloqueio"] is None:
         return None
     return info["bloqueio"], info["texto"]

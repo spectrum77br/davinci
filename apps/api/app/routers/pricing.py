@@ -90,6 +90,7 @@ from app.services.pricing.calc import CalcOutcome, calculate
 from app.services.pricing.competitor import search_competitors
 from app.services.pricing.push import (
     bases_com_catalogo_ligado,
+    integracoes_com_marca_lida,
     push_one,
 )
 from app.services.pricing.sku_match import ml_listing_type_for_account, variants_of
@@ -1194,6 +1195,8 @@ async def get_grid(
     com_catalogo = await bases_com_catalogo_ligado(session, [a.id for a in kits_ml])
     kits_d3 = [a for a in kits_ml if kit_pula_catalogo(a.id in com_catalogo)]
     integs_com_links = integs_catalogo | {a.integration_id for a in kits_d3}
+    # Integração sem nenhuma marca lida ainda: "sem anúncio" vira "não lida".
+    marca_lida = await integracoes_com_marca_lida(session, integs_catalogo)
     if integs_com_links:
         for lk in (
             await session.execute(
@@ -1280,6 +1283,11 @@ async def get_grid(
                     resolucoes[(prod.id, acc.id)],
                     sem_preco=outcome.price is None and outcome.detail == "sem_preco_catalogo",
                     sem_integracao=base is None or base.integration_id is None,
+                    marca_nao_lida=(
+                        base is not None
+                        and base.integration_id is not None
+                        and base.integration_id not in marca_lida
+                    ),
                 )
             cells.append(
                 PricingGridCell(

@@ -1945,3 +1945,47 @@ async def test_kit_com_catalogo_ligado_so_catalogo_e_bloqueado_nao_sem_vinculo(
     assert celulas[(str(base.id), str(cenario["dg052"].id))]["catalogo"]["bloqueio"] == (
         "so_catalogo"
     )
+
+
+@pytest.mark.asyncio
+async def test_catalogo_sem_anuncio_com_marca_ainda_nao_lida(
+    db: AsyncSession, client: AsyncClient, dono: User, cenario, auth_as: Callable,
+    ml_falso: MLFalso,
+):
+    auth_as(dono)
+    filha_id = (await _ligar(client, cenario["base"].id)).json()["conta_catalogo"]["id"]
+    z = PricingProduct(user_id=dono.id, sku="z999", name="Sem anúncio",
+                       segment_id=cenario["seg"]["celular_filhos"][0].id,
+                       cost_kit1=Decimal("10"), preco_catalogo=Decimal("12"))
+    db.add(z)
+    await db.commit()
+    nao_lida = (
+        "Marca de catálogo ainda não lida nesta conta (a varredura diária lê às 10h; "
+        "ou rode Vincular Automático)"
+    )
+
+    async def _celula():
+        corpo = (await client.get("/api/pricing/grid", params={"department": "celular"})).json()
+        return next(c for c in corpo["cells"]
+                    if (c["pricing_account_id"], c["pricing_product_id"]) == (filha_id, str(z.id)))
+
+    # Nenhum vínculo da integração com a marca lida → "ainda não lida".
+    cel = await _celula()
+    assert cel["catalogo"]["bloqueio"] == "sem_anuncio"
+    assert cel["catalogo"]["texto"] == nao_lida
+    out = await _push(client, filha_id, z.id)
+    assert (out["ok"], out["code"], out["detail"]) == (False, "bloqueado", nao_lida)
+
+    # A varredura leu um vínculo qualquer: agora "sem anúncio" é verdade.
+    await db.execute(
+        ProductLink.__table__.update()
+        .where(ProductLink.external_id == "MLB100")
+        .values(catalogo_lido_em=datetime.now(UTC))
+    )
+    await db.commit()
+    cel = await _celula()
+    assert cel["catalogo"]["bloqueio"] == "sem_anuncio"
+    assert cel["catalogo"]["texto"] == "Sem anúncio de catálogo vinculado nesta conta"
+    out = await _push(client, filha_id, z.id)
+    assert out["detail"] == "Sem anúncio de catálogo vinculado nesta conta"
+    assert ml_falso.chamadas == []

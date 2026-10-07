@@ -270,6 +270,28 @@ async def bases_com_catalogo_ligado(
     )
 
 
+async def integracoes_com_marca_lida(
+    session: AsyncSession, ids: Iterable[UUID | None]
+) -> set[UUID]:
+    """Das integrações `ids`, as que já tiveram a marca de catálogo lida em
+    algum vínculo (catalogo_lido_em preenchido pela varredura)."""
+    ids = [i for i in ids if i is not None]
+    if not ids:
+        return set()
+    return set(
+        (
+            await session.execute(
+                select(ProductLink.integration_id)
+                .where(
+                    ProductLink.integration_id.in_(ids),
+                    ProductLink.catalogo_lido_em.is_not(None),
+                )
+                .distinct()
+            )
+        ).scalars()
+    )
+
+
 async def resolver_para_envio(
     session: AsyncSession,
     *,
@@ -728,7 +750,12 @@ async def push_one(
         # Célula de catálogo bloqueada (sem tipo, sem anúncio de catálogo, ou
         # todos sincronizados/pausados): recusa ANTES de chamar o ML e não
         # mexe no status da célula — é o estado normal dela, não erro.
-        bloqueio, texto = texto_bloqueio_envio(resolucao) or ("sem_anuncio", "")
+        marca_nao_lida = dona.integration_id not in await integracoes_com_marca_lida(
+            session, [dona.integration_id]
+        )
+        bloqueio, texto = texto_bloqueio_envio(
+            resolucao, marca_nao_lida=marca_nao_lida
+        ) or ("sem_anuncio", "")
         return PushOutcome(
             ok=False,
             code="bloqueado",
