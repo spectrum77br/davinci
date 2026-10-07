@@ -52,7 +52,7 @@ ROTULO_STATUS = {
     "parcial": "parcial",
     "deslogada": "deslogada",
     "perfil_em_uso": "perfil em uso",
-    "sem_automacao": "sem automação",
+    "sem_automacao": "perfil Firefox, o robô não abre",
     "bloqueada": "bloqueada pela Shopee",
     "interrompida": "interrompida",
     "erro": "erro",
@@ -690,7 +690,7 @@ def _avisos_finais(rel: Mapping) -> list[str]:
             "Sem dados: "
             + ", ".join(
                 f"{c['conta']} ({_status(c.get('status'))}"
-                + (f": {c['erro']}" if c.get("erro") else "")
+                + (f": {c['erro']}" if c.get("erro") and c.get("status") != "sem_automacao" else "")
                 + ")"
                 for c in rel["contas_sem_dados"]
             )
@@ -727,30 +727,39 @@ body { margin: 0; padding: 24px 16px 48px; background: #ffffff; color: #1f2937;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
   font-size: 14px; line-height: 1.4; }
 main { max-width: 1280px; margin: 0 auto; }
-h1 { font-size: 22px; margin: 0 0 4px; }
-h2 { font-size: 18px; margin: 32px 0 4px; }
-h3 { font-size: 15px; margin: 20px 0 6px; }
-.sub, .nota-grupo { color: #6b7280; margin: 0 0 12px; }
+h1 { font-size: 22px; margin: 0 0 4px; color: #1F3864; }
+/* faixas azuis como no Excel: grupo (h2) e blocos (h3), coladas na tabela de baixo */
+h2 { font-size: 15px; margin: 32px 0 0; padding: 8px 12px; background: #1F3864; color: #ffffff;
+  border-radius: 8px 8px 0 0; text-transform: uppercase; letter-spacing: .04em; }
+h3 { font-size: 13px; margin: 18px 0 0; padding: 6px 12px; background: #2F5597; color: #ffffff;
+  border-radius: 6px 6px 0 0; }
+.sub { color: #6b7280; margin: 0 0 12px; }
+.nota-grupo { margin: 0; padding: 4px 12px; background: #DDEBF7; color: #1F3864; font-size: 12px;
+  border: 1px solid #BFBFBF; border-bottom: 0; }
 .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
   gap: 12px; margin: 20px 0 8px; }
-.card { border: 1px solid #e5e7eb; border-radius: 10px; padding: 12px 14px; background: #f9fafb; }
-.card h3 { margin: 0 0 8px; }
-.card .lin { margin-bottom: 8px; }
-.card .rot { color: #6b7280; font-size: 12px; }
+.card { border: 1px solid #BFBFBF; border-radius: 10px; background: #ffffff; overflow: hidden; }
+.card h3 { margin: 0; padding: 8px 14px; background: #1F3864; color: #ffffff; border-radius: 0;
+  font-size: 14px; }
+.card h3 .cinza { color: #c9d7ef; font-weight: 400; font-size: 12px; }
+.card .lin { margin: 10px 14px; text-align: right; }
+.card .rot { color: #6b7280; font-size: 12px; text-align: left; }
 .card .val { font-size: 18px; font-weight: 600; }
 .ant { display: block; font-size: 11px; color: #6b7280; white-space: nowrap; }
-.rolar { overflow-x: auto; }
-table { border-collapse: collapse; width: 100%; margin: 4px 0 8px; }
+.rolar { overflow-x: auto; margin: 0 0 8px; }
+table { border-collapse: collapse; width: 100%; margin: 0; border: 1px solid #BFBFBF; }
 th { background: #1F3864; color: #ffffff; font-weight: 600; padding: 6px 8px; text-align: center;
   font-size: 12px; border: 1px solid #BFBFBF; }
-td { border: 1px solid #e5e7eb; padding: 6px 8px; text-align: right; vertical-align: top;
+td { border: 1px solid #BFBFBF; padding: 6px 8px; text-align: right; vertical-align: top;
   white-space: nowrap; }
-td.conta, td.txt { text-align: left; }
-td.conta small { display: block; color: #6b7280; font-size: 11px; }
+tbody tr:nth-child(even) td { background: #F3F6FB; }
+td.conta, td.txt { text-align: left; font-weight: 600; }
+td.conta small { display: block; color: #6b7280; font-size: 11px; font-weight: 400; }
 tr.total td { font-weight: 700; background: #D9E1F2; }
 .verde { color: #1a7f37; } .vermelho { color: #c62828; } .cinza { color: #6b7280; }
-.aviso { color: #b45309; font-size: 11px; display: block; white-space: normal; }
-ul.notas { padding-left: 18px; color: #374151; } ul.notas li { margin-bottom: 4px; }
+.aviso { color: #b45309; font-size: 11px; display: block; white-space: normal; font-weight: 400; }
+ul.notas { padding: 10px 12px 10px 30px; margin: 0; color: #374151; border: 1px solid #BFBFBF;
+  border-top: 0; } ul.notas li { margin-bottom: 4px; }
 """
 
 
@@ -777,7 +786,8 @@ def _conta_html(lin: Mapping) -> str:
         partes.append(f"<small>{escape(lin['usuario'])}</small>")
     if lin.get("status") not in ("ok", None):
         detalhe = _status(lin.get("status"))
-        if lin.get("erro"):
+        # "sem automação" já diz tudo no rótulo; o erro cru do navegador só confunde.
+        if lin.get("erro") and lin.get("status") != "sem_automacao":
             detalhe += f": {lin['erro']}"
         partes.append(f'<span class="aviso">⚠️ {escape(detalhe)}</span>')
     for a in lin.get("avisos") or []:

@@ -257,7 +257,7 @@ assert.equal(L.nomeDoCabecalho('inline'), null)
 assert.equal(L.nomeDoCabecalho(null), null)
 
 // ---------------------------------------------------------------- status
-assert.equal(L.rotuloStatusColeta('sem_automacao'), 'sem automação')
+assert.equal(L.rotuloStatusColeta('sem_automacao'), 'perfil Firefox, o robô não abre')
 assert.equal(L.rotuloStatusColeta('pendente'), 'na fila')
 assert.equal(L.rotuloStatusColeta('expirada'), 'não coletada a tempo')
 assert.equal(L.rotuloStatusColeta('status_novo'), 'status novo', 'desconhecido aparece legível')

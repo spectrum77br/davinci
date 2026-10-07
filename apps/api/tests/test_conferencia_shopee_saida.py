@@ -188,7 +188,7 @@ def test_csv_ponto_e_virgula_e_virgula_decimal():
     assert inova[11] == "5000"  # impressões (inteiro)
     assert inova[14] == "7,00"  # %
     luno = next(x.split(";") for x in linhas if ";Luno;" in x)
-    assert luno[3] == "sem automação" and luno[4] == "perfil Firefox"
+    assert luno[3] == "perfil Firefox, o robô não abre" and luno[4] == "perfil Firefox"
     assert luno[8:] == [""] * 8
 
 
@@ -205,9 +205,12 @@ def test_html_pagina_unica_com_os_grupos():
         assert trecho in pagina
     # Cartões dos 4 grupos.
     assert pagina.count('<div class="card">') == 4
+    # Visual de planilha: faixa azul nos títulos e grade cinza nas células.
+    assert "background: #1F3864" in pagina and "border: 1px solid #BFBFBF" in pagina
     # A variação vem colorida pelo significado.
     assert '<span class="verde">' in pagina or '<span class="vermelho">' in pagina
-    assert "sem automação: perfil Firefox" in pagina
+    # Sem automação: só o rótulo simples, sem o erro cru do navegador.
+    assert "perfil Firefox, o robô não abre" in pagina and "o robô não abre: " not in pagina
 
 
 def test_html_e_md_escapam_o_nome():
@@ -222,7 +225,7 @@ def test_markdown():
     md = saida.markdown(rel)
     assert md.startswith("# Conferência Shopee — 28/09 a 04/10/2026\n")
     for trecho in ("## Mala", "## Celular", "## Eletro", "## Últimas 4 semanas", "## Notas",
-                   "**Total Mala (1 conta)**", "Sem dados: Luno (sem automação: perfil Firefox)",
+                   "**Total Mala (1 conta)**", "Sem dados: Luno (perfil Firefox, o robô não abre)",
                    "Afiliados incompletos: Barbosa (até 03/10)",
                    "Gasto de Ads sem produto (ficou em Celular): Barbosa R$ 10,00"):
         assert trecho in md

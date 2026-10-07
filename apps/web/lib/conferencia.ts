@@ -172,7 +172,7 @@ const ROTULO_STATUS_COLETA: Record<string, string> = {
   parcial: 'parcial',
   deslogada: 'deslogada',
   perfil_em_uso: 'perfil em uso',
-  sem_automacao: 'sem automação',
+  sem_automacao: 'perfil Firefox, o robô não abre',
   bloqueada: 'bloqueada pela Shopee',
   interrompida: 'interrompida',
   erro: 'erro',

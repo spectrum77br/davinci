@@ -769,14 +769,14 @@ const informarAberto = ref(false)
 
         <!-- cartões: Mala · Celular · Eletro · Geral -->
         <div class="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
-          <div v-for="c in cartoes" :key="c.chave" class="min-w-0 space-y-2 rounded-xl border bg-card p-4">
-            <div class="flex items-baseline justify-between gap-2">
+          <div v-for="c in cartoes" :key="c.chave" class="cartao min-w-0 overflow-hidden rounded-xl border bg-card">
+            <div class="faixa flex items-baseline justify-between gap-2">
               <span class="text-sm font-semibold">{{ c.rotulo }}</span>
-              <span class="text-[11px] text-muted-foreground">
+              <span class="text-[11px] opacity-80">
                 {{ contasTxt(c.contas) }}<template v-if="c.semDados"> · {{ c.semDados }} sem dados</template>
               </span>
             </div>
-            <dl class="space-y-1.5">
+            <dl class="space-y-1.5 p-4 pt-3">
               <div v-for="l in c.linhas" :key="l.rotulo">
                 <div class="flex items-baseline justify-between gap-2">
                   <dt class="text-xs text-muted-foreground">{{ l.rotulo }}</dt>
@@ -792,12 +792,12 @@ const informarAberto = ref(false)
         </div>
 
         <!-- uma tabela por grupo -->
-        <section v-for="g in tabelas" :key="g.chave" class="space-y-2">
-          <div class="flex flex-wrap items-baseline gap-x-2">
-            <h3 class="text-sm font-semibold">{{ g.rotulo }}</h3>
-            <span v-if="LEGENDA_GRUPO[g.chave]" class="text-xs text-muted-foreground">({{ LEGENDA_GRUPO[g.chave] }})</span>
+        <section v-for="g in tabelas" :key="g.chave" class="grupo">
+          <div class="faixa flex flex-wrap items-baseline gap-x-2 rounded-t-xl">
+            <h3 class="text-sm font-semibold uppercase tracking-wide">{{ g.rotulo }}</h3>
+            <span v-if="LEGENDA_GRUPO[g.chave]" class="text-xs opacity-80">({{ LEGENDA_GRUPO[g.chave] }})</span>
           </div>
-          <div class="table-card overflow-x-auto">
+          <div class="table-card colada overflow-x-auto">
             <table class="w-full min-w-[1080px] text-xs">
               <thead>
                 <tr>
@@ -819,7 +819,7 @@ const informarAberto = ref(false)
                       </span>
                     </div>
                     <div
-                      v-if="semDados(l) && l.erro"
+                      v-if="semDados(l) && l.erro && l.status !== 'sem_automacao'"
                       class="max-w-[14rem] truncate text-[11px] text-muted-foreground" :title="l.erro"
                     >
                       {{ l.erro }}
@@ -834,7 +834,7 @@ const informarAberto = ref(false)
                     </div>
                   </td>
                 </tr>
-                <tr v-if="g.linhas.length" class="bg-muted/40 font-semibold align-top">
+                <tr v-if="g.linhas.length" class="total font-semibold align-top">
                   <td>
                     Total {{ g.rotulo }} ({{ contasTxt(g.total?.contas) }})
                     <div v-if="g.total?.sem_dados" class="text-[11px] font-normal text-muted-foreground">
@@ -858,11 +858,11 @@ const informarAberto = ref(false)
         <section class="space-y-3">
           <h3 class="text-sm font-semibold">Últimas 4 semanas</h3>
           <div class="grid grid-cols-1 gap-4 2xl:grid-cols-2">
-            <div v-for="b in quatroSemanas" :key="b.chave" class="min-w-0 space-y-1.5">
-              <h4 class="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                {{ b.rotulo }} <span class="font-normal normal-case">({{ contasTxt(b.contas) }})</span>
+            <div v-for="b in quatroSemanas" :key="b.chave" class="grupo min-w-0">
+              <h4 class="faixa rounded-t-xl text-xs font-semibold uppercase tracking-wide">
+                {{ b.rotulo }} <span class="font-normal normal-case opacity-80">({{ contasTxt(b.contas) }})</span>
               </h4>
-              <div class="table-card overflow-x-auto">
+              <div class="table-card colada overflow-x-auto">
                 <table class="w-full min-w-[760px] text-xs">
                   <thead>
                     <tr>
@@ -893,9 +893,9 @@ const informarAberto = ref(false)
           </div>
 
           <!-- por conta: vendas das 4 semanas, as 2 variações e o % de cada semana -->
-          <div class="space-y-1.5">
-            <h4 class="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Por conta</h4>
-            <div class="table-card overflow-x-auto">
+          <div class="grupo">
+            <h4 class="faixa rounded-t-xl text-xs font-semibold uppercase tracking-wide">Por conta</h4>
+            <div class="table-card colada overflow-x-auto">
               <table class="w-full min-w-[1100px] text-xs">
                 <thead>
                   <tr>
@@ -916,7 +916,7 @@ const informarAberto = ref(false)
                 </thead>
                 <tbody>
                   <template v-for="g in porConta" :key="g.chave">
-                    <tr class="bg-muted/20">
+                    <tr class="separador">
                       <td :colspan="3 + semanasCab.length * 2" class="text-[11px] font-semibold uppercase tracking-wide">{{ g.rotulo }}</td>
                     </tr>
                     <tr v-if="!g.linhas.length">
@@ -951,7 +951,7 @@ const informarAberto = ref(false)
             <p class="font-medium">Contas sem dados</p>
             <ul class="mt-1 space-y-0.5">
               <li v-for="s in rel.contas_sem_dados" :key="s.conta">
-                {{ s.conta }} — {{ rotuloStatusColeta(s.status) }}<template v-if="s.erro">: {{ s.erro }}</template>
+                {{ s.conta }} — {{ rotuloStatusColeta(s.status) }}<template v-if="s.erro && s.status !== 'sem_automacao'">: {{ s.erro }}</template>
               </li>
             </ul>
           </div>
@@ -1094,3 +1094,95 @@ const informarAberto = ref(false)
     />
   </div>
 </template>
+
+<style scoped>
+/* Visual de planilha (pedido de 07/10/2026: "deixa no formato de excel … tá muito
+   branco, não tem azul, as colunas separadas"). Mesma paleta do Excel exportado:
+   azul 1F3864 no cabeçalho, grade BFBFBF, total D9E1F2. Sem @layer: ganha do
+   .table-card global (que está em @layer components). */
+.conferencia {
+  --conf-azul: #1f3864;
+  --conf-azul-txt: #ffffff;
+  --conf-grade: #bfbfbf;
+  --conf-zebra: #f3f6fb;
+  --conf-total: #d9e1f2;
+  --conf-separador: #ddebf7;
+  --conf-separador-txt: #1f3864;
+  --conf-hover: #e8eef8;
+}
+:global(.dark) .conferencia {
+  --conf-azul: #1f3864;
+  --conf-azul-txt: #f1f5fb;
+  --conf-grade: #3a4556;
+  --conf-zebra: rgba(255, 255, 255, 0.035);
+  --conf-total: rgba(68, 114, 196, 0.28);
+  --conf-separador: rgba(68, 114, 196, 0.18);
+  --conf-separador-txt: #c9d7ef;
+  --conf-hover: rgba(68, 114, 196, 0.14);
+}
+
+/* faixas azuis: título do grupo, dos blocos de 4 semanas e dos cartões */
+.faixa {
+  background: var(--conf-azul);
+  color: var(--conf-azul-txt);
+  padding: 0.5rem 0.875rem;
+}
+.cartao { border-color: var(--conf-grade); }
+
+/* tabela colada embaixo da faixa (sem o arredondado de cima) */
+.grupo > .colada {
+  border-top: 0;
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
+}
+
+/* grade de planilha */
+.table-card { border-color: var(--conf-grade); }
+.table-card table { border-collapse: collapse; }
+.table-card thead th {
+  background: var(--conf-azul);
+  color: var(--conf-azul-txt);
+  font-weight: 600;
+  text-align: center;
+  border: 1px solid var(--conf-grade);
+  border-top: 0;
+  padding: 0.45rem 0.6rem;
+}
+.table-card tbody td {
+  border: 1px solid var(--conf-grade);
+  padding: 0.4rem 0.6rem;
+  font-size: 0.75rem;
+}
+.table-card thead th:first-child,
+.table-card tbody td:first-child { border-left: 0; }
+.table-card thead th:last-child,
+.table-card tbody td:last-child { border-right: 0; }
+.table-card tbody tr:last-child > td { border-bottom: 0; }
+.table-card tbody tr:nth-child(even) > td { background: var(--conf-zebra); }
+.table-card tbody tr:hover > td { background: var(--conf-hover); }
+.table-card tbody tr.total > td { background: var(--conf-total); }
+.table-card tbody tr.separador > td {
+  background: var(--conf-separador);
+  color: var(--conf-separador-txt);
+}
+
+/* primeira coluna (Conta / Métrica) fica parada ao rolar para o lado */
+.grupo .table-card tbody td:first-child,
+.grupo .table-card thead th:first-child {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  text-align: left;
+}
+.grupo .table-card tbody td:first-child { background: hsl(var(--card)); }
+.grupo .table-card tbody tr:nth-child(even) > td:first-child {
+  background-image: linear-gradient(var(--conf-zebra), var(--conf-zebra));
+}
+.grupo .table-card tbody tr.total > td:first-child {
+  background-image: linear-gradient(var(--conf-total), var(--conf-total));
+}
+.grupo .table-card tbody tr.separador > td:first-child {
+  position: static;
+  background: var(--conf-separador);
+}
+</style>

@@ -150,7 +150,7 @@ async def test_texto_do_contrato():
         "Mala: vendas R$ 120.345 (▲ 8,2%) · invest. R$ 9.876 · 8,2% s/ vendas (▼ 0,4 p.p.)\n"
         "Celular: vendas R$ 50.000 · invest. R$ 2.000 · 4,0% s/ vendas\n"
         "Geral: vendas R$ 170.345 (▲ 53,2%) · invest. R$ 11.876 · 7,0% s/ vendas (▼ 1,1 p.p.)\n"
-        "⚠️ Sem dados: Luno (sem automação), Oliveira (perfil em uso)\n"
+        "⚠️ Sem dados: Luno (perfil Firefox, o robô não abre), Oliveira (perfil em uso)\n"
         "⚠️ Afiliados incompletos: Mega (até 03/10)\n"
         "📎 Excel: https://app/x\n"
         "🔗 No DaVinci: https://app/marketing?aba=conferencia&execucao=1"
@@ -185,7 +185,7 @@ async def test_texto_do_relatorio_de_verdade():
     linhas = msg.split("\n")
     assert linhas[0] == "📊 Conferência Shopee — 28/09 a 04/10/2026 (semana fechada)"
     assert [linha.split(":")[0] for linha in linhas[1:5]] == ["Mala", "Celular", "Eletro", "Geral"]
-    assert "⚠️ Sem dados: Luno (sem automação)" in linhas
+    assert "⚠️ Sem dados: Luno (perfil Firefox, o robô não abre)" in linhas
     assert "⚠️ Afiliados incompletos: Barbosa (até 03/10)" in linhas
 
 
