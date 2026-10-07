@@ -32,8 +32,7 @@ from typing import Any
 from openpyxl import Workbook
 from openpyxl.chart import LineChart, Reference
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
-from openpyxl.utils import column_index_from_string, get_column_letter
-from openpyxl.worksheet.datavalidation import DataValidation
+from openpyxl.utils import get_column_letter
 
 from app.services.conferencia_shopee.calculo import (
     METRICAS,
@@ -60,25 +59,17 @@ ROTULO_STATUS = {
 }
 
 # Nome da aba de cada métrica (o Excel não aceita "/" em nome de aba).
-ABA_METRICA = {
-    "vendas_afiliados": "Vendas afiliados",
-    "vendas_ads": "Vendas Ads",
-    "saldo_ads": "Saldo Ads",
-    "impressoes": "Impressões",
-    "invest_afiliados": "Invest. afiliados",
-    "invest_ads": "Invest. Ads",
-    "pct": "% sobre vendas",
-    "vendas": "Vendas",
-}
+
+
+
+# ───────────────────────────────────────────────────────────── textos comuns
+
 
 _NOTA_GRUPO = {
     "mala": "",
     "celular": "total da conta − eletro; saldo de Ads da conta inteira",
     "eletro": "só os produtos de eletro das contas de celular; Saldo Ads = —",
 }
-
-
-# ───────────────────────────────────────────────────────────── textos comuns
 
 
 def _ddmm(d: str) -> str:
@@ -168,7 +159,6 @@ _TITULO = Font(name=_FONTE, bold=True, size=13)
 _CAB_FILL = PatternFill("solid", fgColor="1F3864")
 _CAB_FONT = Font(name=_FONTE, bold=True, color="FFFFFF", size=10)
 _TOTAL_FILL = PatternFill("solid", fgColor="D9E1F2")
-_ENTRADA_FILL = PatternFill("solid", fgColor="FFFF00")
 _NORMAL = Font(name=_FONTE, size=10)
 _NEGRITO = Font(name=_FONTE, size=10, bold=True)
 _CINZA = Font(name=_FONTE, size=10, color="808080")
@@ -178,7 +168,10 @@ _COR_XLSX = {"verde": "008000", "vermelho": "C00000", "cinza": "808080"}
 _FORMATO = {
     "dinheiro": '"R$" #,##0.00',
     "inteiro": "#,##0",
-    "percentual": '0.0"%"',
+    # % gravado como FRAÇÃO (0,0234) com o formato padrão de porcentagem. Com o
+    # número 2,34 e um "%" literal o Excel mostrava 2,3%, mas o Numbers e a
+    # pré-visualização do Mac mostravam 234,0% (print de 07/10/2026).
+    "percentual": "0.0%",
 }
 
 
@@ -202,7 +195,9 @@ def _celula(
     c.border = _BORDA
     if total:
         c.fill = _TOTAL_FILL
-    if tipo and isinstance(valor, int | float):
+    if tipo and isinstance(valor, int | float) and not isinstance(valor, bool):
+        if tipo == "percentual":
+            c.value = valor / 100
         c.number_format = _FORMATO[tipo]
     return c
 
@@ -270,7 +265,7 @@ def _aba_resumo(wb: Workbook, rel: Mapping) -> None:
     for n, (chave, nome_grafico, formato) in enumerate(
         (
             ("vendas", "Vendas por grupo", '"R$" #,##0'),
-            ("pct", "% s/ vendas por grupo", '0.0"%"'),
+            ("pct", "% s/ vendas por grupo", "0.0%"),
         )
     ):
         inicio, fim = blocos[chave]
@@ -315,200 +310,15 @@ def _linhas_dados(rel: Mapping) -> list[dict]:
     return saida
 
 
-_COLS_DADOS = ["Chave", "Semana", "Início", "Fim", "Grupo", "Conta", "Conta (id)", "Usuário",
-               "Status"]
-_COL_METRICA_DADOS = {
-    m["chave"]: get_column_letter(len(_COLS_DADOS) + 1 + k) for k, m in enumerate(METRICAS)
-}
-
-
-def _aba_dados(wb: Workbook, linhas: list[dict]) -> int:
-    ws = wb.create_sheet("Dados")
-    _cab(ws, 1, [*_COLS_DADOS, *[m["rotulo"] for m in METRICAS]])
-    for n, d in enumerate(linhas, 2):
-        for j, v in enumerate(
-            [d["chave"], d["semana"], d["inicio"], d["fim"], d["grupo"], d["conta"], d["ident"],
-             d["usuario"], _status(d["status"])],
-            1,
-        ):
-            _celula(ws, n, j, v)
-        for k, m in enumerate(METRICAS, len(_COLS_DADOS) + 1):
-            _celula(ws, n, k, d["valores"].get(m["chave"]), m["tipo"])
-    _larguras(ws, [58, 13, 11, 11, 9, 16, 38, 18, 14, *[15] * len(METRICAS)])
-    ws.freeze_panes = ws.cell(2, 1)
-    ws.auto_filter.ref = f"A1:{get_column_letter(len(_COLS_DADOS) + len(METRICAS))}" + str(
-        max(len(linhas), 1) + 1
-    )
-    return max(len(linhas), 1) + 1
-
-
-def _texto_xlsx(v: str) -> str:
-    return '"' + v.replace('"', '""') + '"'
-
-
-# Variação no Excel: a célula guarda o número (fração para %, pontos para
-# p.p.) e o formato desenha a seta e a cor — como o texto de calculo.variacao.
-_VERDE, _VERMELHO = "[Color10]", "[Red]"
-
-
-def _formato_variacao(tipo: str, bom: str) -> str:
-    sobe = _VERDE if bom == "sobe" else _VERMELHO if bom == "desce" else ""
-    desce = _VERMELHO if bom == "sobe" else _VERDE if bom == "desce" else ""
-    if tipo == "percentual":
-        return f'{sobe}"▲ "0.0" p.p.";{desce}"▼ "0.0" p.p.";"="'
-    return f'{sobe}"▲ "0.0%;{desce}"▼ "0.0%;"="'
-
-
-def _aba_semana(wb: Workbook, rel: Mapping, n_dados: int) -> None:
-    ws = wb.create_sheet("Semana", 1)
-    rotulos = _rotulos(rel)
-    ws.cell(1, 1, "Semana").font = _NEGRITO
-    ws.cell(2, 1, "Comparar com").font = _NEGRITO
-    for linha, valor in ((1, rotulos[0] if rotulos else ""),
-                         (2, rotulos[1] if len(rotulos) > 1 else "")):
-        c = ws.cell(linha, 2, valor)
-        c.fill, c.font, c.border = _ENTRADA_FILL, _NEGRITO, _BORDA
-        c.alignment = Alignment(horizontal="center")
-    ws.cell(1, 3, "← escolha as semanas na lista (células amarelas)").font = _CINZA
-    lista = DataValidation(
-        type="list", formula1=_texto_xlsx(",".join(rotulos)), allow_blank=False
-    )
-    lista.error = "Escolha uma das semanas da lista."
-    lista.errorTitle = "Semana"
-    ws.add_data_validation(lista)
-    lista.add("B1")
-    lista.add("B2")
-
-    # Cabeçalho: Grupo | Conta | para cada métrica: Semana, Comparação, Var.
-    _cab(ws, 4, ["Grupo", "Conta"])
-    _cab(ws, 5, ["", ""])
-    ws.merge_cells("A4:A5")
-    ws.merge_cells("B4:B5")
-    col = 3
-    colunas: dict[str, tuple[str, str, str]] = {}
-    for m in METRICAS:
-        _cab(ws, 4, [m["rotulo"], "", ""], col)
-        ws.merge_cells(start_row=4, start_column=col, end_row=4, end_column=col + 2)
-        _cab(ws, 5, ["Semana", "Comparação", "Var."], col)
-        colunas[m["chave"]] = tuple(get_column_letter(col + k) for k in range(3))
-        col += 3
-
-    def faixa(letra: str) -> str:
-        return f"Dados!${letra}$2:${letra}${n_dados}"
-
-    semana_col, grupo_col, ident_col = faixa("B"), faixa("E"), faixa("G")
-
-    def criterios(celula_semana: str, grupo: str | None, ident: str | None) -> str:
-        partes = [semana_col, celula_semana]
-        if grupo is not None:
-            partes += [grupo_col, _texto_xlsx(grupo)]
-        if ident is not None:
-            partes += [ident_col, _texto_xlsx(ident)]
-        return ",".join(partes)
-
-    def escrever(linha: int, rot_grupo: str, nome: str, grupo: str | None, ident: str | None,
-                 total: bool) -> None:
-        _celula(ws, linha, 1, rot_grupo, total=total)
-        _celula(ws, linha, 2, nome, total=total)
-        for m in METRICAS:
-            c_sem, c_cmp, c_var = colunas[m["chave"]]
-            for letra, entrada in ((c_sem, "$B$1"), (c_cmp, "$B$2")):
-                crit = criterios(entrada, grupo, ident)
-                if m["chave"] == "pct":
-                    ia = f"{colunas['invest_afiliados'][0 if letra == c_sem else 1]}{linha}"
-                    iads = f"{colunas['invest_ads'][0 if letra == c_sem else 1]}{linha}"
-                    vend = f"{colunas['vendas'][0 if letra == c_sem else 1]}{linha}"
-                    # ROUND(…;2): o relatório guarda o % com 2 casas e a
-                    # variação compara ESSE número — sem arredondar, 6,40 ×
-                    # 6,40 daria "▲ 0,0 p.p." colorido aqui e "=" na tela.
-                    expr = (
-                        f'=IF(OR(ISTEXT({vend}),AND(ISTEXT({ia}),ISTEXT({iads}))),"—",'
-                        f'IF({vend}=0,"—",ROUND((N({ia})+N({iads}))/{vend}*100,2)))'
-                    )
-                else:
-                    metrica = faixa(_COL_METRICA_DADOS[m["chave"]])
-                    expr = (
-                        f'=IF(COUNTIFS({crit},{metrica},"<>")=0,"—",SUMIFS({metrica},{crit}))'
-                    )
-                c = _celula(
-                    ws, linha, column_index_from_string(letra), expr, total=total,
-                    formula=True,
-                )
-                c.number_format = _FORMATO[m["tipo"]]
-            x, y = f"{c_sem}{linha}", f"{c_cmp}{linha}"
-            if m["tipo"] == "percentual":
-                expr = f'=IF(OR(ISTEXT({x}),ISTEXT({y})),"—",IF({x}={y},"=",{x}-{y}))'
-            else:
-                novo = '"—"' if m["chave"] == "saldo_ads" else '"novo"'
-                expr = (
-                    f'=IF(OR(ISTEXT({x}),ISTEXT({y})),"—",IF({y}=0,IF({x}=0,"=",'
-                    f'IF({x}>0,{novo},"—")),IF({x}={y},"=",({x}-{y})/ABS({y}))))'
-                )
-            c = _celula(
-                ws, linha, column_index_from_string(c_var), expr, total=total, formula=True
-            )
-            c.number_format = _formato_variacao(m["tipo"], m["bom"])
-            c.alignment = Alignment(horizontal="center")
-
-    linha = 6
-    for g in rel["grupos"]:
-        for lin in g["linhas"]:
-            ident = lin.get("conta_id") or lin["conta"]
-            escrever(linha, g["rotulo"], lin["conta"], g["rotulo"], ident, total=False)
-            linha += 1
-        escrever(linha, g["rotulo"], f"Total {g['rotulo']} ({_contas_txt(len(g['linhas']))})",
-                 g["rotulo"], None, total=True)
-        linha += 1
-    escrever(linha, "Geral", f"Geral ({_contas_txt(rel['geral']['contas'])})", None, None,
-             total=True)
-    _larguras(ws, [12, 30, *[14, 14, 11] * len(METRICAS)])
-    ws.freeze_panes = ws.cell(6, 3)
-
-
-def _aba_metrica(wb: Workbook, rel: Mapping, m: Mapping) -> None:
-    ws = wb.create_sheet(ABA_METRICA[m["chave"]])
-    rotulos = _rotulos(rel)
-    ws.cell(1, 1, f"{m['rotulo']} — últimas 4 semanas").font = _TITULO
-    _cab(ws, 3, ["Grupo", "Conta", *rotulos, "vs anterior", "vs média 3 sem."])
-    linha = 4
-
-    def escrever(rot_grupo: str, nome: str, semanas: Sequence[Mapping], total: bool) -> None:
-        _celula(ws, linha, 1, rot_grupo, total=total)
-        _celula(ws, linha, 2, nome, total=total)
-        for i in range(len(rotulos)):
-            _celula(ws, linha, 3 + i, _valor(semanas, i, m["chave"]), m["tipo"], total=total)
-        v_ant, v_media = variacoes(semanas, m["chave"])
-        _celula_variacao(ws, linha, 3 + len(rotulos), v_ant, total=total)
-        _celula_variacao(ws, linha, 4 + len(rotulos), v_media, total=total)
-
-    for g in rel["grupos"]:
-        for lin in g["linhas"]:
-            escrever(g["rotulo"], lin["conta"], lin["semanas"], total=False)
-            linha += 1
-        escrever(
-            g["rotulo"],
-            f"Total {g['rotulo']} ({_contas_txt(g['total']['contas'])})",
-            g["total"]["semanas"],
-            total=True,
-        )
-        linha += 1
-    escrever("Geral", f"Geral ({_contas_txt(rel['geral']['contas'])})", rel["geral"]["semanas"],
-             total=True)
-    _larguras(ws, [12, 30, *[15] * len(rotulos), 14, 16])
-    ws.freeze_panes = ws.cell(4, 3)
 
 
 def excel(rel: Mapping) -> BytesIO:
-    """A planilha das 4 semanas (Resumo, Semana, uma aba por métrica, Dados)."""
+    """Só a aba Resumo (Mala, Celular, Eletro e Geral nas 4 semanas + os 2
+    gráficos). Pedido de 07/10/2026: "é só do resumo que eu preciso" — as abas
+    Semana, uma por métrica e Dados saíram; o detalhe por loja segue no sistema
+    (JSON/CSV e o próprio relatório guardado)."""
     wb = Workbook()
     _aba_resumo(wb, rel)
-    linhas = _linhas_dados(rel)
-    for m in METRICAS:
-        _aba_metrica(wb, rel, m)
-    n_dados = _aba_dados(wb, linhas)
-    _aba_semana(wb, rel, n_dados)
-    # As fórmulas da aba "Semana" recalculam ao abrir (o openpyxl não calcula).
-    wb.calculation.fullCalcOnLoad = True
     buf = BytesIO()
     wb.save(buf)
     buf.seek(0)
@@ -758,6 +568,11 @@ td.conta small { display: block; color: #6b7280; font-size: 11px; font-weight: 4
 tr.total td { font-weight: 700; background: #D9E1F2; }
 .verde { color: #1a7f37; } .vermelho { color: #c62828; } .cinza { color: #6b7280; }
 .aviso { color: #b45309; font-size: 11px; display: block; white-space: normal; font-weight: 400; }
+h2 .qtd { font-weight: 400; text-transform: none; letter-spacing: 0; opacity: .8; font-size: 13px; }
+td.s1 { font-weight: 700; }
+td.var { text-align: center; }
+.avisos { margin: 16px 0 0; padding: 8px 12px; border: 1px solid #f59e0b55; background: #fffbeb;
+  color: #b45309; border-radius: 6px; font-size: 13px; } .avisos p { margin: 2px 0; }
 ul.notas { padding: 10px 12px 10px 30px; margin: 0; color: #374151; border: 1px solid #BFBFBF;
   border-top: 0; } ul.notas li { margin-bottom: 4px; }
 """
@@ -796,7 +611,9 @@ def _conta_html(lin: Mapping) -> str:
 
 
 def html(rel: Mapping) -> str:
-    """Página única (CSS embutido, tema claro) com o mesmo desenho da aba."""
+    """Página única (CSS embutido, tema claro) com o mesmo Resumo da aba e do
+    Excel: Mala, Celular, Eletro e Geral nas 4 semanas, as duas comparações e
+    só os avisos que mudam a leitura (pedido de 07/10/2026: "só o resumo")."""
     rotulos = _rotulos(rel)
     p: list[str] = [
         "<!doctype html>",
@@ -808,98 +625,53 @@ def html(rel: Mapping) -> str:
         f'<p class="sub">{escape(comparado_com(rel))} · {escape(tipo_texto(rel))} · '
         f"gerado em {escape(_quando(rel.get('gerado_em')))}</p>",
     ]
-
-    # 2. Cartões
-    p.append('<section class="cards">')
-    for _, rot, total in _grupos_e_geral(rel):
-        p.append(f'<div class="card"><h3>{escape(rot)} '
-                 f'<span class="cinza">({escape(_contas_txt(total["contas"]))})</span></h3>')
-        for rotulo_lin, valor, anterior, var in _cartao(total):
-            p.append(
-                f'<div class="lin"><div class="rot">{escape(rotulo_lin)}</div>'
-                f'<div class="val">{escape(valor)}</div>'
-                f'<span class="ant">ant. {escape(anterior)} {_var_html(var)}</span></div>'
-            )
-        p.append("</div>")
-    p.append("</section>")
-
-    # 3. Uma tabela por grupo
-    cab = "<tr><th>Conta</th>" + "".join(f"<th>{escape(m['rotulo'])}</th>" for m in METRICAS)
-    cab += "</tr>"
-    for g in rel["grupos"]:
-        p.append(f"<h2>{escape(g['rotulo'])}</h2>")
-        if _NOTA_GRUPO.get(g["chave"]):
-            p.append(f'<p class="nota-grupo">{escape(_NOTA_GRUPO[g["chave"]])}</p>')
-        if not g["linhas"]:
-            p.append('<p class="sub">Nenhuma conta neste grupo nestas 4 semanas.</p>')
-            continue
-        p.append(f'<div class="rolar"><table><thead>{cab}</thead><tbody>')
-        for lin in g["linhas"]:
-            p.append(
-                "<tr>" + _conta_html(lin)
-                + "".join(_celula_html(lin["semanas"], m) for m in METRICAS) + "</tr>"
-            )
-        total = g["total"]
-        p.append(
-            f'<tr class="total"><td class="conta">Total {escape(g["rotulo"])} '
-            f"({escape(_contas_txt(total['contas']))})</td>"
-            + "".join(_celula_html(total["semanas"], m) for m in METRICAS) + "</tr>"
-        )
-        p.append("</tbody></table></div>")
-
-    # 4. Últimas 4 semanas
-    p.append("<h2>Últimas 4 semanas</h2>")
-    cab4 = (
+    cab = (
         "<tr><th>Métrica</th>" + "".join(f"<th>{escape(r)}</th>" for r in rotulos)
-        + "<th>vs anterior</th><th>vs média 3 sem.</th></tr>"
+        + "<th>vs semana anterior</th><th>vs média 3 sem.</th></tr>"
     )
-    for _, rot, total in _grupos_e_geral(rel):
-        p.append(f"<h3>{escape(rot)}</h3>")
-        p.append(f'<div class="rolar"><table><thead>{cab4}</thead><tbody>')
+    for chave, rot, total in _grupos_e_geral(rel):
+        sem_dados = total.get("sem_dados") if chave != "geral" else None
+        extra = f" · {sem_dados} sem dados" if sem_dados else ""
+        qtd = escape(_contas_txt(total["contas"]) + extra)
+        p.append(f'<h2>{escape(rot)} <span class="qtd">({qtd})</span></h2>')
+        p.append(f'<div class="rolar"><table><thead>{cab}</thead><tbody>')
         for m in METRICAS:
             v_ant, v_media = variacoes(total["semanas"], m["chave"])
             p.append(
                 f'<tr><td class="txt">{escape(m["rotulo"])}</td>'
                 + "".join(
-                    f"<td>{escape(formatar(_valor(total['semanas'], i, m['chave']), m['tipo']))}"
-                    "</td>"
+                    f"<td{' class=\"s1\"' if i == 0 else ''}>"
+                    f"{escape(formatar(_valor(total['semanas'], i, m['chave']), m['tipo']))}</td>"
                     for i in range(len(rotulos))
                 )
-                + f"<td>{_var_html(v_ant)}</td><td>{_var_html(v_media)}</td></tr>"
+                + f'<td class="var">{_var_html(v_ant)}</td>'
+                + f'<td class="var">{_var_html(v_media)}</td></tr>'
             )
         p.append("</tbody></table></div>")
 
-    p.append("<h3>Por conta</h3>")
-    cab_conta = (
-        "<tr><th>Conta</th>" + "".join(f"<th>Vendas {escape(r)}</th>" for r in rotulos)
-        + "<th>vs anterior</th><th>vs média 3 sem.</th>"
-        + "".join(f"<th>% {escape(r)}</th>" for r in rotulos) + "</tr>"
-    )
-    for g in rel["grupos"]:
-        if not g["linhas"]:
-            continue
-        p.append(f"<h3>{escape(g['rotulo'])}</h3>")
-        p.append(f'<div class="rolar"><table><thead>{cab_conta}</thead><tbody>')
-        for lin in g["linhas"]:
-            v_ant, v_media = variacoes(lin["semanas"], "vendas")
-            p.append(
-                f'<tr><td class="conta">{escape(lin["conta"])}</td>'
-                + "".join(
-                    f"<td>{escape(dinheiro(_valor(lin['semanas'], i, 'vendas')))}</td>"
-                    for i in range(len(rotulos))
-                )
-                + f"<td>{_var_html(v_ant)}</td><td>{_var_html(v_media)}</td>"
-                + "".join(
-                    f"<td>{escape(formatar(_valor(lin['semanas'], i, 'pct'), 'percentual'))}</td>"
-                    for i in range(len(rotulos))
-                )
-                + "</tr>"
-            )
-        p.append("</tbody></table></div>")
-
-    # 5. Notas
-    p.append('<h2>Notas</h2><ul class="notas">')
-    p += [f"<li>{escape(n)}</li>" for n in rel.get("notas") or []]
-    p += [f"<li>⚠️ {escape(t)}</li>" for t in _avisos_finais(rel)]
-    p.append("</ul></main></body></html>")
+    avisos = _avisos_curtos(rel)
+    if avisos:
+        p.append('<div class="avisos">' + "".join(f"<p>⚠️ {escape(a)}</p>" for a in avisos)
+                 + "</div>")
+    p.append("</main></body></html>")
     return "\n".join(p)
+
+
+def _avisos_curtos(rel: Mapping) -> list[str]:
+    """Só o que muda a leitura do resumo: contas sem dados e afiliados incompletos."""
+    saida = []
+    if rel.get("contas_sem_dados"):
+        saida.append(
+            "Sem dados: "
+            + ", ".join(
+                f"{c['conta']} ({_status(c.get('status'))})" for c in rel["contas_sem_dados"]
+            )
+        )
+    if rel.get("afiliados_incompletos"):
+        saida.append(
+            "Afiliados incompletos: "
+            + ", ".join(
+                f"{c['conta']} (até {_ddmm(c['ate'])})" for c in rel["afiliados_incompletos"]
+            )
+        )
+    return saida

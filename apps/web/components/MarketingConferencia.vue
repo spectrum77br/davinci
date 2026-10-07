@@ -26,11 +26,11 @@ import {
 import { apiErrMsg } from '~/lib/apiError'
 import {
   ERROS_CONFERENCIA, METRICAS,
-  celula, coletaTerminou, comparadoCom, contasTxt, dataHoraBr, ddmm, dinheiro, horaBr,
-  linhaQuatroSemanas, nomeArquivo, nomeDoCabecalho, resumoCartao, rotuloExecucao, rotuloSemana,
-  rotuloStatusColeta, rotuloStatusExecucao, tituloRelatorio, tomStatusColeta, valor, variacao, fmtValor, media3,
+  coletaTerminou, comparadoCom, contasTxt, dataHoraBr, ddmm, horaBr,
+  linhaQuatroSemanas, nomeArquivo, nomeDoCabecalho, rotuloExecucao, rotuloSemana,
+  rotuloStatusColeta, rotuloStatusExecucao, tituloRelatorio, tomStatusColeta,
   type Coleta, type ContaConferencia, type Cor, type DetalheExecucao, type ExecucaoResumo, type Formato,
-  type LinhaConta, type Metrica,
+  type Metrica,
 } from '~/lib/conferencia'
 
 const { api } = useApi()
@@ -60,21 +60,6 @@ const PILL_EXECUCAO: Record<string, string> = {
   coletando: 'pill-info', pronto: 'pill-success', cancelado: 'pill-muted',
 }
 const ROTULO_GRUPO: Record<string, string> = { mala: 'Mala', celular: 'Celular', eletro: 'Eletro' }
-const LEGENDA_GRUPO: Record<string, string> = {
-  mala: '',
-  celular: 'total da conta menos o eletro · saldo de Ads da conta inteira',
-  eletro: 'só os produtos de eletro · saldo de Ads fica na linha de Celular',
-}
-const VAZIO_GRUPO: Record<string, string> = {
-  mala: 'Nenhuma conta de Mala nesta conferência.',
-  celular: 'Nenhuma conta de Celular nesta conferência.',
-  eletro: 'Nenhuma conta vendeu eletro (venda, afiliado ou Ads) nessas 4 semanas.',
-}
-const CATEGORIA_SHOPEE: Record<number, string> = {
-  100010: 'Eletrodomésticos',
-  100636: 'Casa e Decoração',
-  100013: 'Celulares',
-}
 const FORMATOS: { fmt: Formato; rotulo: string; icone: any; dica: string }[] = [
   { fmt: 'xlsx', rotulo: 'Excel', icone: FileSpreadsheet, dica: 'Planilha com as 4 semanas' },
   { fmt: 'csv', rotulo: 'CSV', icone: FileText, dica: 'Separado por ";" com vírgula decimal (abre no Excel)' },
@@ -82,6 +67,9 @@ const FORMATOS: { fmt: Formato; rotulo: string; icone: any; dica: string }[] = [
   { fmt: 'json', rotulo: 'JSON', icone: FileJson, dica: 'Dados brutos do relatório' },
   { fmt: 'html', rotulo: 'HTML', icone: FileCode, dica: 'Abre o relatório numa aba nova (dá pra imprimir)' },
 ]
+// Na tela só o Excel (pedido de 07/10/2026: "só o resumo"). Os outros formatos
+// seguem na API para quem precisar dos dados.
+const FORMATOS_NA_TELA = FORMATOS.filter((f) => f.fmt === 'xlsx')
 
 // ---------- lista de execuções e a escolhida
 
@@ -403,41 +391,6 @@ async function baixar(fmt: Formato) {
 
 const metricas = computed<Metrica[]>(() => (rel.value?.metricas?.length ? rel.value.metricas : METRICAS))
 
-function semDados(l: LinhaConta): boolean {
-  return l.status !== 'ok' && l.status !== 'parcial'
-}
-
-const cartoes = computed(() => {
-  const r = rel.value
-  if (!r) return []
-  const blocos = [
-    ...r.grupos.map((g) => ({ chave: g.chave as string, rotulo: g.rotulo, total: g.total })),
-    { chave: 'geral', rotulo: 'Geral', total: r.geral },
-  ]
-  return blocos.map((b) => {
-    const c = resumoCartao(b.total)
-    return {
-      chave: b.chave,
-      rotulo: b.rotulo,
-      contas: b.total?.contas ?? 0,
-      semDados: b.total?.sem_dados ?? 0,
-      linhas: [
-        { rotulo: 'Vendas', ...c.vendas },
-        { rotulo: 'Investimento', ...c.investimento },
-        { rotulo: '% s/ vendas', ...c.pct },
-      ],
-    }
-  })
-})
-
-const tabelas = computed(() => (rel.value?.grupos ?? []).map((g) => ({
-  chave: g.chave,
-  rotulo: g.rotulo,
-  total: g.total,
-  linhas: g.linhas.map((l) => ({ ...l, celulas: metricas.value.map((m) => celula(l.semanas, m)) })),
-  celulasTotal: metricas.value.map((m) => celula(g.total?.semanas, m)),
-})))
-
 const quatroSemanas = computed(() => {
   const r = rel.value
   if (!r) return []
@@ -449,38 +402,20 @@ const quatroSemanas = computed(() => {
     chave: b.chave,
     rotulo: b.rotulo,
     contas: b.total?.contas ?? 0,
+    semDados: b.total?.sem_dados ?? 0,
     linhas: metricas.value.map((m) => ({ chave: m.chave, rotulo: m.rotulo, ...linhaQuatroSemanas(b.total?.semanas, m) })),
   }))
 })
 
-const porConta = computed(() => (rel.value?.grupos ?? []).map((g) => ({
-  chave: g.chave,
-  rotulo: g.rotulo,
-  linhas: g.linhas.map((l) => {
-    const atual = valor(l.semanas?.[0], 'vendas')
-    return {
-      chave: l.conta_id ?? l.conta,
-      conta: l.conta,
-      vendas: [0, 1, 2, 3].map((i) => fmtValor(valor(l.semanas?.[i], 'vendas'), 'dinheiro')),
-      vsAnterior: variacao(atual, valor(l.semanas?.[1], 'vendas'), 'dinheiro', 'sobe', 'vendas'),
-      vsMedia: variacao(atual, media3(l.semanas, 'vendas'), 'dinheiro', 'sobe', 'vendas'),
-      pcts: [0, 1, 2, 3].map((i) => fmtValor(valor(l.semanas?.[i], 'pct'), 'percentual')),
-    }
-  }),
-})))
 // Só pra o v-for do cabeçalho: S1..S4 com as datas.
 const semanasCab = computed(() => (rel.value?.semanas ?? []).slice(0, 4).map((s, i) => ({ i, nome: `S${i + 1}`, datas: rotuloSemana(s) })))
 
+const semDadosTxt = computed(() =>
+  (rel.value?.contas_sem_dados ?? []).map((c) => `${c.conta} (${rotuloStatusColeta(c.status)})`).join(', '),
+)
 const afiliadosIncompletosTxt = computed(() =>
   (rel.value?.afiliados_incompletos ?? []).map((a) => `${a.conta} (até ${ddmm(a.ate)})`).join(', '),
 )
-const naoAtribuidoTxt = computed(() =>
-  (rel.value?.nao_atribuido_ads ?? []).map((n) => `${n.conta} ${dinheiro(n.gasto)}`).join(' · '),
-)
-function categoriaTxt(c: number | null | undefined): string {
-  if (c === null || c === undefined) return '—'
-  return CATEGORIA_SHOPEE[c] ? `${CATEGORIA_SHOPEE[c]} (${c})` : String(c)
-}
 
 // ---------- contas (quem entra, grupo e nome)
 
@@ -612,7 +547,7 @@ const informarAberto = ref(false)
       <template v-if="rel">
         <span class="text-xs text-muted-foreground">Baixar:</span>
         <Button
-          v-for="f in FORMATOS" :key="f.fmt"
+          v-for="f in FORMATOS_NA_TELA" :key="f.fmt"
           size="sm" variant="outline" class="h-8"
           :title="f.dica" :disabled="!!baixando"
           @click="baixar(f.fmt)"
@@ -767,235 +702,52 @@ const informarAberto = ref(false)
           </p>
         </header>
 
-        <!-- cartões: Mala · Celular · Eletro · Geral -->
-        <div class="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
-          <div v-for="c in cartoes" :key="c.chave" class="cartao min-w-0 overflow-hidden rounded-xl border bg-card">
-            <div class="faixa flex items-baseline justify-between gap-2">
-              <span class="text-sm font-semibold">{{ c.rotulo }}</span>
-              <span class="text-[11px] opacity-80">
-                {{ contasTxt(c.contas) }}<template v-if="c.semDados"> · {{ c.semDados }} sem dados</template>
-              </span>
-            </div>
-            <dl class="space-y-1.5 p-4 pt-3">
-              <div v-for="l in c.linhas" :key="l.rotulo">
-                <div class="flex items-baseline justify-between gap-2">
-                  <dt class="text-xs text-muted-foreground">{{ l.rotulo }}</dt>
-                  <dd class="text-base font-semibold tabular-nums">{{ l.valor }}</dd>
-                </div>
-                <div class="flex justify-end gap-1.5 text-[11px] tabular-nums">
-                  <span class="text-muted-foreground">ant. {{ l.anterior }}</span>
-                  <span :class="COR[l.variacao.cor]">{{ l.variacao.texto }}</span>
-                </div>
-              </div>
-            </dl>
-          </div>
-        </div>
-
-        <!-- uma tabela por grupo -->
-        <section v-for="g in tabelas" :key="g.chave" class="grupo">
-          <div class="faixa flex flex-wrap items-baseline gap-x-2 rounded-t-xl">
-            <h3 class="text-sm font-semibold uppercase tracking-wide">{{ g.rotulo }}</h3>
-            <span v-if="LEGENDA_GRUPO[g.chave]" class="text-xs opacity-80">({{ LEGENDA_GRUPO[g.chave] }})</span>
-          </div>
+        <!-- RESUMO (pedido de 07/10/2026: "só o resumo, bato o olho e já sei"): igual à
+             aba Resumo do Excel — Mala, Celular, Eletro e Geral, as métricas nas 4 semanas
+             e as duas comparações. O detalhe por loja fica no Excel. -->
+        <section v-for="b in quatroSemanas" :key="b.chave" class="grupo">
+          <h3 class="faixa flex flex-wrap items-baseline gap-x-2 rounded-t-xl text-sm font-semibold">
+            {{ b.rotulo }}
+            <span class="text-xs font-normal opacity-80">
+              ({{ contasTxt(b.contas) }}<template v-if="b.semDados"> · {{ b.semDados }} sem dados</template>)
+            </span>
+          </h3>
           <div class="table-card colada overflow-x-auto">
-            <table class="w-full min-w-[1080px] text-xs">
+            <table class="w-full min-w-[760px] text-xs">
               <thead>
                 <tr>
-                  <th>Conta</th>
-                  <th v-for="m in metricas" :key="m.chave" class="whitespace-nowrap text-right">{{ m.rotulo }}</th>
+                  <th>Métrica</th>
+                  <th v-for="s in semanasCab" :key="s.i" class="whitespace-nowrap">{{ s.datas }}</th>
+                  <th class="whitespace-nowrap">vs semana anterior</th>
+                  <th class="whitespace-nowrap">vs média 3 sem.</th>
                 </tr>
               </thead>
               <tbody>
-                <tr v-if="!g.linhas.length">
-                  <td :colspan="metricas.length + 1" class="py-4 text-center text-muted-foreground">{{ VAZIO_GRUPO[g.chave] }}</td>
-                </tr>
-                <tr v-for="l in g.linhas" :key="l.conta_id ?? l.conta" class="align-top">
-                  <td class="min-w-[9rem]">
-                    <div class="font-medium">{{ l.conta }}</div>
-                    <div v-if="l.usuario" class="text-[11px] text-muted-foreground">{{ l.usuario }}</div>
-                    <div v-if="semDados(l) || l.status === 'parcial'" class="mt-0.5">
-                      <span :class="PILL_TOM[tomStatusColeta(l.status)]" :title="l.erro || ''">
-                        {{ semDados(l) ? `sem dados: ${rotuloStatusColeta(l.status)}` : rotuloStatusColeta(l.status) }}
-                      </span>
-                    </div>
-                    <div
-                      v-if="semDados(l) && l.erro && l.status !== 'sem_automacao'"
-                      class="max-w-[14rem] truncate text-[11px] text-muted-foreground" :title="l.erro"
-                    >
-                      {{ l.erro }}
-                    </div>
-                    <div v-for="a in l.avisos ?? []" :key="a" class="text-[11px] text-amber-700 dark:text-amber-400">⚠︎ {{ a }}</div>
+                <tr v-for="l in b.linhas" :key="l.chave">
+                  <td class="whitespace-nowrap font-medium">{{ l.rotulo }}</td>
+                  <td
+                    v-for="(v, i) in l.valores" :key="i"
+                    class="whitespace-nowrap text-right tabular-nums" :class="i === 0 && 'font-semibold'"
+                  >
+                    {{ v }}
                   </td>
-                  <td v-for="(c, i) in l.celulas" :key="i" class="whitespace-nowrap text-right tabular-nums">
-                    <div>{{ c.valor }}</div>
-                    <div v-if="!c.vazia" class="text-[10px] leading-4">
-                      <span class="text-muted-foreground">ant. {{ c.anterior }}</span>
-                      <span class="ml-1" :class="COR[c.variacao.cor]">{{ c.variacao.texto }}</span>
-                    </div>
-                  </td>
-                </tr>
-                <tr v-if="g.linhas.length" class="total font-semibold align-top">
-                  <td>
-                    Total {{ g.rotulo }} ({{ contasTxt(g.total?.contas) }})
-                    <div v-if="g.total?.sem_dados" class="text-[11px] font-normal text-muted-foreground">
-                      {{ g.total.sem_dados }} sem dados
-                    </div>
-                  </td>
-                  <td v-for="(c, i) in g.celulasTotal" :key="i" class="whitespace-nowrap text-right tabular-nums">
-                    <div>{{ c.valor }}</div>
-                    <div v-if="!c.vazia" class="text-[10px] font-normal leading-4">
-                      <span class="text-muted-foreground">ant. {{ c.anterior }}</span>
-                      <span class="ml-1" :class="COR[c.variacao.cor]">{{ c.variacao.texto }}</span>
-                    </div>
-                  </td>
+                  <td class="whitespace-nowrap text-center tabular-nums" :class="COR[l.vsAnterior.cor]">{{ l.vsAnterior.texto }}</td>
+                  <td class="whitespace-nowrap text-center tabular-nums" :class="COR[l.vsMedia.cor]">{{ l.vsMedia.texto }}</td>
                 </tr>
               </tbody>
             </table>
           </div>
         </section>
 
-        <!-- últimas 4 semanas -->
-        <section class="space-y-3">
-          <h3 class="text-sm font-semibold">Últimas 4 semanas</h3>
-          <div class="grid grid-cols-1 gap-4 2xl:grid-cols-2">
-            <div v-for="b in quatroSemanas" :key="b.chave" class="grupo min-w-0">
-              <h4 class="faixa rounded-t-xl text-xs font-semibold uppercase tracking-wide">
-                {{ b.rotulo }} <span class="font-normal normal-case opacity-80">({{ contasTxt(b.contas) }})</span>
-              </h4>
-              <div class="table-card colada overflow-x-auto">
-                <table class="w-full min-w-[760px] text-xs">
-                  <thead>
-                    <tr>
-                      <th>Métrica</th>
-                      <th v-for="s in semanasCab" :key="s.i" class="whitespace-nowrap text-right">
-                        {{ s.nome }} <span class="font-normal">{{ s.datas }}</span>
-                      </th>
-                      <th class="whitespace-nowrap text-right">vs semana anterior</th>
-                      <th class="whitespace-nowrap text-right">vs média 3 sem.</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <tr v-for="l in b.linhas" :key="l.chave">
-                      <td class="whitespace-nowrap font-medium">{{ l.rotulo }}</td>
-                      <td
-                        v-for="(v, i) in l.valores" :key="i"
-                        class="whitespace-nowrap text-right tabular-nums" :class="i === 0 && 'font-semibold'"
-                      >
-                        {{ v }}
-                      </td>
-                      <td class="whitespace-nowrap text-right tabular-nums" :class="COR[l.vsAnterior.cor]">{{ l.vsAnterior.texto }}</td>
-                      <td class="whitespace-nowrap text-right tabular-nums" :class="COR[l.vsMedia.cor]">{{ l.vsMedia.texto }}</td>
-                    </tr>
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          </div>
-
-          <!-- por conta: vendas das 4 semanas, as 2 variações e o % de cada semana -->
-          <div class="grupo">
-            <h4 class="faixa rounded-t-xl text-xs font-semibold uppercase tracking-wide">Por conta</h4>
-            <div class="table-card colada overflow-x-auto">
-              <table class="w-full min-w-[1100px] text-xs">
-                <thead>
-                  <tr>
-                    <th rowspan="2">Conta</th>
-                    <th :colspan="semanasCab.length" class="text-center">Vendas</th>
-                    <th rowspan="2" class="whitespace-nowrap text-right">vs semana anterior</th>
-                    <th rowspan="2" class="whitespace-nowrap text-right">vs média 3 sem.</th>
-                    <th :colspan="semanasCab.length" class="text-center">% s/ vendas</th>
-                  </tr>
-                  <tr>
-                    <th v-for="s in semanasCab" :key="`v${s.i}`" class="whitespace-nowrap text-right">
-                      {{ s.nome }} <span class="font-normal">{{ s.datas }}</span>
-                    </th>
-                    <th v-for="s in semanasCab" :key="`p${s.i}`" class="whitespace-nowrap text-right">
-                      {{ s.nome }} <span class="font-normal">{{ s.datas }}</span>
-                    </th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <template v-for="g in porConta" :key="g.chave">
-                    <tr class="separador">
-                      <td :colspan="3 + semanasCab.length * 2" class="text-[11px] font-semibold uppercase tracking-wide">{{ g.rotulo }}</td>
-                    </tr>
-                    <tr v-if="!g.linhas.length">
-                      <td :colspan="3 + semanasCab.length * 2" class="py-3 text-center text-muted-foreground">{{ VAZIO_GRUPO[g.chave] }}</td>
-                    </tr>
-                    <tr v-for="l in g.linhas" :key="`${g.chave}-${l.chave}`">
-                      <td class="whitespace-nowrap font-medium">{{ l.conta }}</td>
-                      <td
-                        v-for="(v, i) in l.vendas" :key="`v${i}`"
-                        class="whitespace-nowrap text-right tabular-nums" :class="i === 0 && 'font-semibold'"
-                      >
-                        {{ v }}
-                      </td>
-                      <td class="whitespace-nowrap text-right tabular-nums" :class="COR[l.vsAnterior.cor]">{{ l.vsAnterior.texto }}</td>
-                      <td class="whitespace-nowrap text-right tabular-nums" :class="COR[l.vsMedia.cor]">{{ l.vsMedia.texto }}</td>
-                      <td v-for="(v, i) in l.pcts" :key="`p${i}`" class="whitespace-nowrap text-right tabular-nums">{{ v }}</td>
-                    </tr>
-                  </template>
-                </tbody>
-              </table>
-            </div>
-          </div>
-        </section>
-
-        <!-- notas -->
-        <section class="space-y-2">
-          <h3 class="text-sm font-semibold">Notas</h3>
-          <div
-            v-if="rel.contas_sem_dados?.length"
-            class="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-400"
-          >
-            <p class="font-medium">Contas sem dados</p>
-            <ul class="mt-1 space-y-0.5">
-              <li v-for="s in rel.contas_sem_dados" :key="s.conta">
-                {{ s.conta }} — {{ rotuloStatusColeta(s.status) }}<template v-if="s.erro && s.status !== 'sem_automacao'">: {{ s.erro }}</template>
-              </li>
-            </ul>
-          </div>
-          <div
-            v-if="rel.afiliados_incompletos?.length"
-            class="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-400"
-          >
-            <span class="font-medium">Afiliados incompletos:</span> {{ afiliadosIncompletosTxt }}
-          </div>
-          <ul class="list-disc space-y-1 pl-5 text-xs text-muted-foreground">
-            <li v-for="(n, i) in rel.notas ?? []" :key="i">{{ n }}</li>
-            <li v-if="rel.nao_atribuido_ads?.length">
-              Gasto de Ads sem produto (fica em Celular): {{ naoAtribuidoTxt }}
-            </li>
-          </ul>
-          <details v-if="rel.divergencias?.length" class="rounded-md border px-3 py-2 text-xs">
-            <summary class="cursor-pointer font-medium">
-              {{ rel.divergencias.length }} {{ rel.divergencias.length === 1 ? 'produto' : 'produtos' }} em que o DaVinci e a
-              categoria da Shopee discordam (vale o DaVinci)
-            </summary>
-            <div class="table-card mt-2 overflow-x-auto">
-              <table class="w-full min-w-[640px] text-xs">
-                <thead>
-                  <tr>
-                    <th>Conta</th>
-                    <th>Item</th>
-                    <th>Nome</th>
-                    <th>No DaVinci</th>
-                    <th>Categoria Shopee</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr v-for="d in rel.divergencias" :key="`${d.conta}-${d.item_id}`">
-                    <td class="whitespace-nowrap">{{ d.conta }}</td>
-                    <td class="whitespace-nowrap font-mono text-[11px]">{{ d.item_id }}</td>
-                    <td class="max-w-[22rem]"><span class="line-clamp-2 break-words" :title="d.nome">{{ d.nome }}</span></td>
-                    <td class="whitespace-nowrap">{{ d.davinci === 'eletro' ? 'eletro' : 'não é eletro' }}</td>
-                    <td class="whitespace-nowrap">{{ categoriaTxt(d.categoria_shopee) }}</td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-          </details>
-        </section>
+        <!-- só os avisos que mudam a leitura -->
+        <div
+          v-if="semDadosTxt || afiliadosIncompletosTxt"
+          class="space-y-0.5 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-400"
+        >
+          <p v-if="semDadosTxt"><span class="font-medium">Sem dados:</span> {{ semDadosTxt }}</p>
+          <p v-if="afiliadosIncompletosTxt"><span class="font-medium">Afiliados incompletos:</span> {{ afiliadosIncompletosTxt }}</p>
+        </div>
+        <p class="text-[11px] text-muted-foreground">O detalhe por loja está no Excel (botão Excel acima).</p>
       </div>
     </div>
 

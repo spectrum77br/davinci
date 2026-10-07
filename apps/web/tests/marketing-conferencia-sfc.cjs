@@ -74,21 +74,22 @@ assert.match(tpl, /<Button v-if="isAdmin"[^>]*>\s*<Bell[^>]*\/> Quem recebe no T
 assert.match(tpl, /<section v-if="canEdit" class="rounded-xl border bg-card">/, 'Contas só com edit')
 assert.match(tpl, /contexto="conferencia_shopee"\s+somente-cadastro/, 'modal do Threema só cadastro')
 assert.match(modal.script, /\| 'conferencia_shopee'/, 'contexto no union do modal')
-// Layout do relatório (contrato §5 / COMO-MONTA-O-RELATORIO §6).
+// Layout do relatório: SÓ o Resumo (pedido de 07/10/2026 — "bato o olho e já sei"),
+// igual à aba Resumo do Excel. O detalhe por loja ficou só no Excel.
 for (const trecho of [
   'tituloRelatorio(rel.semanas)', 'comparadoCom(rel.semanas)', 'gerado em', // título
-  'v-for="c in cartoes"', // cartões Mala · Celular · Eletro · Geral
-  'ant. {{ c.anterior }}', // "ant. <valor>" embaixo de cada célula
-  'Total {{ g.rotulo }} ({{ contasTxt(g.total?.contas) }})', // "Total Mala (4 contas)"
-  '⚠︎ {{ a }}', // aviso da linha (afiliados só até dd/mm)
-  'sem dados: ${rotuloStatusColeta(l.status)}', // motivo de conta sem dados
-  'Últimas 4 semanas', 'vs semana anterior', 'vs média 3 sem.', 'Por conta',
-  'Notas', 'Contas sem dados', 'Afiliados incompletos', 'Gasto de Ads sem produto',
+  'v-for="b in quatroSemanas"', // Mala · Celular · Eletro · Geral
+  'vs semana anterior', 'vs média 3 sem.',
+  'Sem dados:', 'Afiliados incompletos:', // avisos que mudam a leitura
+  'O detalhe por loja está no Excel',
   'Nenhum relatório ainda', // estado vazio
   'Não consegui carregar a conferência agora.', // erro
   'animate-pulse', // esqueleto
   'Contas da conferência',
 ]) assert.ok(tpl.includes(trecho), `na tela: ${trecho}`)
+for (const fora of ['v-for="c in cartoes"', 'Por conta', 'v-for="g in tabelas"', 'Gasto de Ads sem produto']) {
+  assert.ok(!tpl.includes(fora), `não aparece mais na tela: ${fora}`)
+}
 // Celular: tabelas largas sempre dentro de rolagem horizontal.
 const tabelas = tpl.match(/<table /g).length
 const rolagens = tpl.match(/table-card[^"]*overflow-x-auto|overflow-x-auto[^"]*table-card/g).length
@@ -242,7 +243,7 @@ const RETORNO = `return {
   exec, rel, coletas, opcoes, emAndamento, concluidas, pctConcluidas, prazosTxt, detalheColeta,
   escolher, recarregar, carregarDetalhe,
   tipoNovo, gerando, gerar, recalcular, cancelar, podeAgir, baixar, baixando,
-  cartoes, tabelas, quatroSemanas, porConta, semanasCab, afiliadosIncompletosTxt, naoAtribuidoTxt, categoriaTxt, semDados,
+  quatroSemanas, semanasCab, semDadosTxt, afiliadosIncompletosTxt,
   contasAberto, contas, contasOrdenadas, contasErro, nomes, salvarConta, salvarNome, salvandoConta,
   isAdmin, informarAberto, COR,
 }`
@@ -374,37 +375,6 @@ async function run() {
     assert.equal(t.relogio.pendentes().length, 0, 'relatório pronto não fica relendo')
     assert.ok(t.ouvintes.has('visibilitychange'), 'ouve a visibilidade')
 
-    // Cartões: Mala · Celular · Eletro · Geral, com Vendas / Investimento / %.
-    const c = s.cartoes.value
-    assert.deepEqual(c.map((x) => x.rotulo), ['Mala', 'Celular', 'Eletro', 'Geral'])
-    assert.deepEqual(c[3].linhas.map((l) => l.rotulo), ['Vendas', 'Investimento', '% s/ vendas'])
-    assert.deepEqual(
-      c[3].linhas.map((l) => [l.valor, l.anterior, l.variacao.texto, l.variacao.cor]),
-      [
-        ['R$ 4.400,00', 'R$ 3.600,00', '▲ 22,2%', 'verde'],
-        ['R$ 240,00', 'R$ 80,00', '▲ 200,0%', 'cinza'],
-        ['5,5%', '8,0%', '▼ 2,6 p.p.', 'verde'], // 8 − 5,45 = 2,55: meio pra longe do zero (igual ao servidor)
-      ],
-    )
-    assert.equal(c[0].semDados, 1)
-
-    // Tabela do grupo: 8 colunas na ordem; célula com "ant." e variação.
-    const mala = s.tabelas.value[0]
-    assert.equal(mala.linhas.length, 2, 'conta sem dados continua na tabela')
-    const alfa = mala.linhas[0]
-    assert.equal(alfa.celulas.length, 8)
-    const iVendas = L.METRICAS.findIndex((m) => m.chave === 'vendas')
-    assert.deepEqual([alfa.celulas[iVendas].valor, alfa.celulas[iVendas].anterior, alfa.celulas[iVendas].variacao.texto], ['R$ 1.200,00', 'R$ 1.000,00', '▲ 20,0%'])
-    const iPct = L.METRICAS.findIndex((m) => m.chave === 'pct')
-    assert.deepEqual([alfa.celulas[iPct].valor, alfa.celulas[iPct].variacao.texto, alfa.celulas[iPct].variacao.cor], ['6,7%', '▼ 1,3 p.p.', 'verde'])
-    const beta = mala.linhas[1]
-    assert.equal(s.semDados(beta), true)
-    assert.ok(beta.celulas.every((x) => x.valor === '—' && x.vazia), 'sem dados: tudo "—", sem linha "ant."')
-    assert.equal(s.semDados(s.tabelas.value[1].linhas[0]), false, 'parcial tem dados')
-    const iSaldo = L.METRICAS.findIndex((m) => m.chave === 'saldo_ads')
-    assert.equal(s.tabelas.value[2].linhas[0].celulas[iSaldo].valor, '—', 'Eletro: saldo "—"')
-    assert.equal(mala.celulasTotal[iVendas].valor, 'R$ 1.200,00', 'linha de total')
-
     // Últimas 4 semanas: grupos + Geral, métrica × S1..S4 + as 2 variações.
     const q = s.quatroSemanas.value
     assert.deepEqual(q.map((b) => b.rotulo), ['Mala', 'Celular', 'Eletro', 'Geral'])
@@ -414,20 +384,15 @@ async function run() {
     assert.equal(vendasMala.vsMedia.texto, '▲ 20,0%', 'média de 1000, 900 e 1100')
     assert.deepEqual(s.semanasCab.value.map((x) => `${x.nome} ${x.datas}`), ['S1 28/09–04/10', 'S2 21/09–27/09', 'S3 14/09–20/09', 'S4 07/09–13/09'])
 
-    // Por conta: vendas S1..S4, as 2 variações e o % de cada semana.
-    const pc = s.porConta.value
-    assert.deepEqual(pc.map((g) => g.chave), ['mala', 'celular', 'eletro'], 'separado por grupo')
-    const pAlfa = pc[0].linhas[0]
-    assert.deepEqual(pAlfa.vendas, ['R$ 1.200,00', 'R$ 1.000,00', 'R$ 900,00', 'R$ 1.100,00'])
-    assert.equal(pAlfa.vsMedia.texto, '▲ 20,0%')
-    assert.deepEqual(pAlfa.pcts, ['6,7%', '8,0%', '8,0%', '8,0%'])
+    // Resumo: Geral também, % com p.p., e as contas sem dados contadas no bloco.
+    assert.equal(q[0].semDados, 1, 'Mala: 1 sem dados')
+    const pctGeral = q[3].linhas.find((l) => l.chave === 'pct')
+    assert.equal(pctGeral.vsAnterior.texto, '▼ 2,6 p.p.') // 8 − 5,45 = 2,55: meio pra longe do zero
+    assert.equal(pctGeral.vsAnterior.cor, 'verde', '% caindo é bom')
 
-    // Notas
+    // Avisos curtos
+    assert.equal(s.semDadosTxt.value, 'Beta (perfil Firefox, o robô não abre)')
     assert.equal(s.afiliadosIncompletosTxt.value, 'Alfa (até 03/10)')
-    assert.equal(s.naoAtribuidoTxt.value, 'Gama R$ 12,30')
-    assert.equal(s.categoriaTxt(100010), 'Eletrodomésticos (100010)')
-    assert.equal(s.categoriaTxt(123), '123')
-    assert.equal(s.categoriaTxt(null), '—')
 
     // Ações de quem edita num relatório pronto: Recalcular sim, Cancelar não.
     assert.equal(s.podeAgir.value, true)
