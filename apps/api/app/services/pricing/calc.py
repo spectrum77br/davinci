@@ -30,10 +30,13 @@ calc returns `None` and the caller treats the cell as "not configured"
 
 Catálogo ML (06/10/2026): a conta com `canal == 'catalogo'` (coluna de
 catálogo, "filha" de uma conta ML de kit) usa como custo o
-`product.preco_catalogo` e TODOS os outros números da conta base
-(`conta_base`: comissão, margem/frete do tipo, kit_number). Sem preço de
-catálogo (NULL ou 0) → `missing_inputs` com detail "sem_preco_catalogo" —
-nunca cai para o Kit 1.
+`product.preco_catalogo` e os outros números da conta base (`conta_base`:
+comissão, frete do tipo, kit_number). Sem preço de catálogo (NULL ou 0) →
+`missing_inputs` com detail "sem_preco_catalogo" — nunca cai para o Kit 1.
+
+Margem própria do catálogo (07/10/2026): a margem do tipo T é a
+`margin{T}` da própria filha quando preenchida; NULL = a da base. Comissão
+e frete continuam sempre os da base.
 
 The result is a `Decimal` quantized to 2 decimals (cents-precision in BRL),
 ROUND_HALF_UP — closer to seller intuition than banker's rounding.
@@ -138,7 +141,8 @@ def calculate(
             )
 
     catalogo = (getattr(account, "canal", None) or "kit") == "catalogo"
-    # Coluna de catálogo: os números são os da conta base (a filha não guarda).
+    # Coluna de catálogo: os números são os da conta base; só a margem pode
+    # ser da própria filha (por tipo, quando preenchida).
     params = account
     if catalogo:
         if conta_base is None:
@@ -163,6 +167,11 @@ def calculate(
     else:
         cost = _kit_value(product, kit) or _kit_value(product, 1)
     margin, shipping = _account_pair(params, slot)
+    margem_propria = None
+    if catalogo:
+        margem_propria, _ = _account_pair(account, slot)
+        if margem_propria is not None:
+            margin = margem_propria
     commission = (
         Decimal(params.commission) if params.commission is not None else None
     )
@@ -177,6 +186,7 @@ def calculate(
     }
     if catalogo:
         inputs["canal"] = "catalogo"
+        inputs["margem_propria"] = margem_propria is not None
         if cost is None:
             return CalcOutcome(
                 price=None,

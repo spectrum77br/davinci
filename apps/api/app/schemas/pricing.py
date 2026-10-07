@@ -123,6 +123,12 @@ class PricingAccountOut(PricingAccountBase):
     canal: str = "kit"
     conta_base_id: UUID | None = None
     conta_catalogo_id: UUID | None = None
+    # Margem própria do catálogo (07/10/2026), só na filha: {"1".."5": margem
+    # própria do tipo, ou null = usa a da base}. Os margin1..5 acima continuam
+    # com os da base. Grava com PATCH /accounts/{filha} {"marginN": ...} (só
+    # margens; null volta à da base). Desligar o catálogo apaga a filha e as
+    # margens próprias: ao religar, a filha nova nasce sem nenhuma.
+    margens_catalogo: dict[str, Decimal | None] | None = None
 
 
 class ContaCatalogoIn(BaseModel):

@@ -224,7 +224,9 @@ async def _segment_names_by_id(session: AsyncSession) -> dict[UUID, str]:
 
 
 # O que a coluna de catálogo ("filha") herda da conta base na hora do cálculo
-# e mostra no cabeçalho: os números da conta e as anotações de texto.
+# e mostra no cabeçalho: os números da conta e as anotações de texto. As
+# margens saem com as da base também (a tela não quebra); as próprias da filha
+# vão à parte em `margens_catalogo`.
 _CAMPOS_HERDADOS_DA_BASE = (
     "kit_number",
     "commission",
@@ -253,6 +255,10 @@ _CAMPOS_ESPELHADOS_NA_FILHA = (
     "kit_number",
 )
 
+# Margem própria do catálogo (07/10/2026): o único número que a filha guarda.
+# Por tipo; NULL = usa a margem da conta base.
+_MARGENS_PROPRIAS = ("margin1", "margin2", "margin3", "margin4", "margin5")
+
 
 def _account_out(
     row: PricingAccount,
@@ -263,8 +269,8 @@ def _account_out(
     conta_catalogo_id: UUID | None = None,
 ) -> PricingAccountOut:
     """`base`: a conta de kit de uma coluna de catálogo — a filha sai com os
-    números e anotações dela. `conta_catalogo_id`: a filha de uma conta de kit
-    (catálogo ligado)."""
+    números e anotações dela, e as margens próprias em `margens_catalogo`.
+    `conta_catalogo_id`: a filha de uma conta de kit (catálogo ligado)."""
     out = PricingAccountOut.model_validate(row)
     out.has_password = bool(row.password_enc)
     out.department = roots_by_id.get(row.segment_id)
@@ -273,6 +279,10 @@ def _account_out(
             sid = getattr(row, f"slot{n}_segment_id", None)
             if sid is not None:
                 setattr(out, f"slot{n}_segment_name", names_by_id.get(sid))
+    if row.canal == CANAL_CATALOGO:
+        out.margens_catalogo = {
+            campo.removeprefix("margin"): getattr(row, campo) for campo in _MARGENS_PROPRIAS
+        }
     if row.canal == CANAL_CATALOGO and base is not None:
         for campo in _CAMPOS_HERDADOS_DA_BASE:
             setattr(out, campo, getattr(base, campo))
@@ -337,7 +347,8 @@ async def _uma_conta_out(
 
 async def _sincronizar_filha(session: AsyncSession, base: PricingAccount) -> None:
     """A conta base mudou (nome, tipo, aba, slots, ordem…): a coluna de
-    catálogo acompanha. Base que deixou de ser do ML perde o catálogo."""
+    catálogo acompanha. Base que deixou de ser do ML perde o catálogo. As
+    margens próprias da filha não estão na lista: nunca são sobrescritas."""
     filha = await _filha_de(session, base.id)
     if filha is None:
         return
@@ -355,10 +366,44 @@ def _recusar_edicao_da_filha(row: PricingAccount) -> None:
             detail={
                 "code": "conta_catalogo_herda_da_base",
                 "message": (
-                    "A coluna de catálogo usa os números da conta de kit: edite a conta base"
+                    "A coluna de catálogo usa os números da conta de kit (só a margem "
+                    "dos tipos é dela): edite a conta base"
                 ),
             },
         )
+
+
+async def _patch_margens_da_filha(
+    session: AsyncSession,
+    user: User,
+    filha: PricingAccount,
+    body: PricingAccountPatch,
+) -> PricingAccountOut:
+    """Margem própria do catálogo (07/10/2026): na coluna de catálogo só as
+    margens dos tipos (margin1..5) se editam; null volta a usar a da conta
+    de kit. Qualquer outro campo → 409, como antes. Cerca de equipe: a da
+    conta base (a filha não tem loja nem integração), igual ao ligar/desligar."""
+    campos = body.model_fields_set
+    if not campos <= set(_MARGENS_PROPRIAS):
+        _recusar_edicao_da_filha(filha)
+    stmt = select(PricingAccount).where(PricingAccount.id == filha.conta_base_id)
+    stmt = _team_scope_accounts(stmt, await _escopo_precos(session, user))
+    base = (await session.execute(stmt)).scalar_one_or_none()
+    if base is None:
+        raise HTTPException(404, detail={"code": "account_not_found"})
+    for campo in campos:
+        setattr(filha, campo, getattr(body, campo))
+    await session.commit()
+    await session.refresh(filha)
+    logger.info(
+        "pricing.catalogo_margem",
+        conta_catalogo_id=str(filha.id),
+        campos=sorted(campos),
+        user_id=str(user.id),
+    )
+    roots_by_id, _, _ = await _segment_index(session)
+    names_by_id = await _segment_names_by_id(session)
+    return _account_out(filha, roots_by_id, names_by_id, base=base)
 
 
 def _product_out(
@@ -516,7 +561,8 @@ async def patch_account(
     ).scalar_one_or_none()
     if row is None:
         raise HTTPException(404, detail={"code": "account_not_found"})
-    _recusar_edicao_da_filha(row)
+    if row.canal == CANAL_CATALOGO:
+        return await _patch_margens_da_filha(session, user, row, body)
 
     data = body.model_dump(exclude_unset=True)
     if "password" in data:
@@ -2180,7 +2226,9 @@ async def definir_catalogo_da_conta(
     Ligar cria a coluna de catálogo ("filha": canal='catalogo',
     conta_base_id = esta conta, sem integração) com nome, tipo, aba, slots e
     ordem da base; os números vêm da base na hora do cálculo. Desligar apaga a
-    filha e os preços fixados nela. Idempotente nos dois sentidos.
+    filha, os preços fixados nela e as margens próprias dela: religar cria uma
+    filha nova, sem margem própria (usa as da base). Idempotente nos dois
+    sentidos.
 
     Mesma cerca de equipe do `/accounts`: conta de outra equipe → 404."""
     stmt = select(PricingAccount).where(
