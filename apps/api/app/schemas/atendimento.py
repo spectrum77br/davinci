@@ -453,7 +453,9 @@ class RascunhoUnicoOut(BaseModel):
     # (sem_chave, provedor_falhou, conversa_fechada, conversa_bloqueada,
     # ia_pausada, sem_mensagem_do_cliente). A tela traduz o código. Exceção:
     # o limite do provedor vem como FRASE (`ia.MOTIVO_LIMITE_PROVEDOR`, "limite
-    # do provedor (tente de novo em 1 min)") — a tela mostra como veio o motivo
+    # do provedor (tente de novo em 1 min)"), e a conta sem crédito também
+    # (`ia.motivo_sem_credito`: "A IA está sem crédito no provedor (OpenAI) —
+    # adicione créditos ou troque a chave") — a tela mostra como veio o motivo
     # que não conhece.
     motivo: str | None = None
 

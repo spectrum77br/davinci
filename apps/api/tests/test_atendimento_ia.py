@@ -343,7 +343,7 @@ async def test_rascunho_ok_com_lacunas_preenchidas_pelo_codigo(
     assert r.mensagem_gatilho_id == gatilho.id
     assert (r.tokens_entrada, r.tokens_saida) == (812, 64)
     assert r.modelo == "modelo-falso"
-    assert r.prompt_versao == ia.PROMPT_VERSAO == "v5"
+    assert r.prompt_versao == ia.PROMPT_VERSAO == "v6"
     assert r.manual_hash is None  # sem regras cadastradas
     assert r.fatos["lacunas"]["rastreio"] == RASTREIO
     assert r.fatos["pedido"]["itens"][1] == {
@@ -3296,7 +3296,7 @@ async def test_manual_base_classificacao_e_resposta_nos_tetos_e_max_tokens(
     assert falso.max_tokens == [300, 900]
     assert "Pedido postado: onde está, quando chega ou atraso." in sis_r  # regra do assunto
     assert "REGRAS DE SEGURANÇA DA LOJA" in sis_r
-    assert r.categoria == "rastreio" and r.prompt_versao == "v5"
+    assert r.categoria == "rastreio" and r.prompt_versao == "v6"
     assert r.fatos["categoria_classificada"] == "rastreio"
 
 

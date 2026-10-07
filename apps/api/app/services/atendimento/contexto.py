@@ -55,10 +55,32 @@ para o provedor do modelo. Datas em ISO (texto), para caber em JSON.
 Nunca levanta. Cada bloco roda num SAVEPOINT: uma consulta que falha (tabela
 de outro ambiente, dado torto) volta só ela — a transação de quem chamou
 segue viva e a conversa abre com o que deu para achar.
+
+GARANTIA PARA A IA (07/10/2026, combinado com o dono: "quando perguntarem de
+validade, a IA vai puxar ali na tabela e dizer se tem validade ou não").
+`garantia_para_ia` consulta o Painel de Garantia (`garantias`, cadastrada à
+mão) e devolve o que a IA pode dizer: status, início (e de onde veio a
+data), fim do hardware e do software — NADA de CPF nem nome. Não entra no
+`contexto_da_conversa` (que vai para a tela): a tela tem o bloco próprio,
+com permissão e escopo por equipe (`routers/garantias.situacao_da_conversa`).
+Acha a garantia pelo pedido da conversa, pelo CPF do pedido (outras compras
+do mesmo comprador) e pelo pedido/NF que o COMPRADOR citou nas mensagens
+recentes. O CPF só serve para achar. NUNCA a garantia de outro comprador por
+um número que se chuta: garantia de OUTRO CPF só entra pelo pedido da
+própria conversa ou pelo número LONGO de marketplace que o comprador citou
+(ML, TikTok, Amazon, Shopee, Temu — não se adivinha). NF e nº curto do Bling
+(sequenciais, fáceis de chutar) só valem com o CPF da conversa conhecido (o
+do pedido da conversa casado pelo nº do Bling, ou o da garantia do pedido) e
+se forem desse mesmo CPF. O CPF que vem SÓ da nota emitida (casada pelo
+complemento do endereço = nº do marketplace) vale só quando esse
+complemento tem notas de um CPF só. CPF digitado pelo comprador não acha nada: não se
+puxa a garantia de alguém digitando o CPF dele. Sem CPF da conversa, só o
+pedido da conversa e o nº longo citado.
 """
 
 from __future__ import annotations
 
+import re
 from collections.abc import Awaitable, Callable
 from datetime import date, datetime
 from typing import Any
@@ -76,9 +98,11 @@ from app.models import (
     ChamadoPedido,
     DevolucaoRastreio,
     Devolution,
+    Garantia,
     Logistica,
     NfNota,
 )
+from app.services import garantia as garantia_svc
 from app.services.chamados import lookup_pedido
 
 logger = structlog.get_logger()
@@ -500,6 +524,325 @@ async def _outras_perguntas(session: AsyncSession, conversa: AtendimentoConversa
             }
         )
     return saida
+
+
+# ── Garantia (Painel de Garantia Uranyx) para a IA ────────────────────────
+
+# Quantas garantias vão para o modelo (as do pedido da conversa primeiro).
+MAX_GARANTIAS_IA = 3
+MAX_CHARS_PRODUTO_GARANTIA = 60
+# Teto do que se procura por citação (uma mensagem colada com 50 números não
+# vira 50 consultas).
+MAX_CITADOS = 5
+# Teto das garantias lidas por consulta (as mais novas primeiro).
+MAX_ACHADAS = 50
+
+DE_ONDE_PEDIDO = "pedido desta conversa"
+DE_ONDE_CITADA = "pedido ou NF que o comprador citou na conversa"
+DE_ONDE_MESMO_COMPRADOR = "outra compra do mesmo comprador"
+_ORDEM_DE_ONDE = {
+    DE_ONDE_PEDIDO: 0,
+    DE_ONDE_CITADA: 1,
+    DE_ONDE_MESMO_COMPRADOR: 2,
+}
+
+# Status além dos do painel: sem data de entrega, mas o Bling já dá o pedido
+# como entregue (`garantia.entregue_sem_data`).
+STATUS_ENTREGUE_SEM_DATA = "entregue_sem_data"
+STATUS_GARANTIA_IA = {
+    **garantia_svc.STATUS_ROTULOS,
+    STATUS_ENTREGUE_SEM_DATA: "Entregue sem data no DaVinci",
+}
+# Os que COBREM alguma coisa hoje (o validador barra promessa de cobertura
+# sem um destes no bloco).
+STATUS_COM_COBERTURA = (garantia_svc.STATUS_ATIVA, garantia_svc.STATUS_SOMENTE_SOFTWARE)
+
+# De onde veio a data de início, em palavras que o modelo pode repetir — o
+# rótulo do painel fala no "DaVinci" e em 17track.
+_ORIGEM_DA_DATA_IA = {
+    "ml": "data oficial da entrega no Mercado Livre",
+    "shopee": "evento de entrega da transportadora na Shopee",
+    "tiktok": "pedido entregue no TikTok Shop",
+    "amazon": "entrega registrada na Amazon (EasyShip)",
+    garantia_svc.FONTE_RASTREIO: "rastreio da transportadora (data aproximada)",
+}
+
+# O que o COMPRADOR cita (texto cru do banco, na forma de busca: minúsculo e
+# sem acento). Formatos de produção (07/10/2026): Bling 5–6 dígitos (hoje
+# 2xxxxx–3xxxxx), ML/Magalu/AliExpress 16 dígitos, TikTok 18, Amazon
+# 3-7-7, Shopee AAMMDD + 8 letras/dígitos, Temu PO-999-…, NF 1 a 4 dígitos
+# (com zeros à esquerda e pontos no DANFE: 000.001.234).
+# Entre a palavra e o número, só o que se escreve ali ("nº", "número", "#",
+# ":", "é"): "nota fiscal de 2 aparelhos" e "pedido de 10 unidades" não são
+# número de nota nem de pedido.
+_ENTRE = r"\s*(?:(?:n[o°]?\.?|numero|num\.?|e|eh|#|:|-)\s*){0,3}"
+# O nº do Bling é curto e se confunde com qualquer número: só depois da palavra.
+_RX_PEDIDO_BLING = re.compile(
+    rf"\b(?:pedido|compra|venda)s?\b{_ENTRE}(?<![\w.])(\d{{5,6}})(?!\w|[.,]\d)"
+)
+_RX_PEDIDO_AMAZON = re.compile(r"(?<![\d-])\d{3}-\d{7}-\d{7}(?![\d-])")
+_RX_PEDIDO_TEMU = re.compile(r"\bpo-\d{3}-\d{8,20}\b")
+_RX_PEDIDO_SHOPEE = re.compile(r"(?<![a-z0-9])\d{6}[a-z0-9]{8}(?![a-z0-9])")
+_RX_PEDIDO_LONGO = re.compile(r"(?<![\d-])(?:\d{18}|\d{16})(?![\d-])")
+# NF de 1 dígito existe (15 em produção), mas "NF 2" é mais vezes outra coisa.
+_RX_NF = re.compile(
+    rf"\b(?:nf-?e?|nfs?|nota\s+fiscal|danfe)\b{_ENTRE}"
+    r"(?<![\d.])(\d{1,3}(?:\.\d{3}){1,2}|\d{2,9})(?!\w|[.,]\d)"
+)
+_RX_CPF = re.compile(r"(?<![\d.\-/])\d{3}[.\s]?\d{3}[.\s]?\d{3}[-.\s]?\d{2}(?![\d\-/])")
+
+
+def _forma_de_busca(texto: str | None) -> str:
+    # Import tardio: o validador é do lote do cérebro (e importa constantes).
+    from app.services.atendimento.validador import plano_de
+
+    return plano_de(texto or "")
+
+
+def citacoes_do_comprador(textos: list[str | None]) -> dict[str, list[str]]:
+    """Pedidos, NFs e CPFs (válidos) que o comprador escreveu, na ordem, sem repetir.
+
+    `pedidos` = como escritos (a Shopee em maiúsculas); `nfs` = só dígitos,
+    sem zero à esquerda; `cpfs` = 11 dígitos com dígito verificador certo.
+    Um número de pedido que também casa como CPF conta só como pedido. O
+    CPF citado NÃO acha garantia (`garantia_para_ia` não o usa): fica aqui
+    só para o texto do comprador ser lido inteiro, sem virar pedido nem NF.
+    """
+    pedidos: list[str] = []
+    nfs: list[str] = []
+    cpfs: list[str] = []
+
+    def _por(lista: list[str], valor: str) -> None:
+        if valor and valor not in lista and len(lista) < MAX_CITADOS:
+            lista.append(valor)
+
+    for bruto in textos:
+        plano = _forma_de_busca(bruto)
+        if not plano:
+            continue
+        for m in _RX_PEDIDO_AMAZON.finditer(plano):
+            _por(pedidos, m.group(0))
+        for m in _RX_PEDIDO_TEMU.finditer(plano):
+            _por(pedidos, m.group(0).upper())
+        for m in _RX_PEDIDO_SHOPEE.finditer(plano):
+            if re.search(r"[a-z]", m.group(0)[6:]):
+                _por(pedidos, m.group(0).upper())
+        for m in _RX_PEDIDO_LONGO.finditer(plano):
+            _por(pedidos, m.group(0))
+        for m in _RX_PEDIDO_BLING.finditer(plano):
+            _por(pedidos, m.group(1))
+        for m in _RX_NF.finditer(plano):
+            _por(nfs, garantia_svc.normalizar_nf(m.group(1)))
+        for m in _RX_CPF.finditer(plano):
+            digitos = garantia_svc.so_digitos(m.group(0))
+            if digitos not in pedidos and garantia_svc.cpf_valido(digitos):
+                _por(cpfs, digitos)
+    return {"pedidos": pedidos, "nfs": nfs, "cpfs": cpfs}
+
+
+# O nº do Bling (5–6 dígitos) é sequencial: qualquer um chuta um vizinho.
+_BLING_CURTO = re.compile(r"\d{5,6}")
+
+
+def _de_onde(
+    g: Garantia,
+    *,
+    numero_bling: str | None,
+    chaves: list[str],
+    longos_citados: set[str],
+    bling_citados: set[str],
+    nfs_citadas: set[str],
+    cpf_conversa: str | None,
+) -> str | None:
+    """Por que a garantia entra no bloco (None = não entra).
+
+    De QUALQUER CPF, só duas portas: o pedido da própria conversa e os
+    números LONGOS de marketplace que o comprador citou (`longos_citados`,
+    com o nº do Bling deles) — ninguém adivinha um pedido de 16 dígitos;
+    quem cita tem o pedido em mãos. O resto (nº curto do Bling citado, NF
+    citada, outras compras) só do MESMO CPF da conversa: a NF tem 1 a 4
+    dígitos e se repete entre compradores (2 séries, 3 emitentes), e o nº do
+    Bling é sequencial — um dígito trocado cai na compra de outra pessoa.
+    Sem o CPF da conversa, nada disso entra.
+    """
+    if (numero_bling and g.pedido_bling == numero_bling) or (
+        g.pedido_marketplace and g.pedido_marketplace in chaves
+    ):
+        return DE_ONDE_PEDIDO
+    if g.pedido_bling in longos_citados or (
+        g.pedido_marketplace and g.pedido_marketplace in longos_citados
+    ):
+        return DE_ONDE_CITADA
+    if cpf_conversa is None or g.cpf != cpf_conversa:
+        return None
+    if g.pedido_bling in bling_citados or (g.nf_numero or "") in nfs_citadas:
+        return DE_ONDE_CITADA
+    return DE_ONDE_MESMO_COMPRADOR
+
+
+def _produto(g: Garantia) -> str | None:
+    for item in g.itens or []:
+        if isinstance(item, dict) and (desc := " ".join(str(item.get("descricao") or "").split())):
+            if len(desc) > MAX_CHARS_PRODUTO_GARANTIA:
+                desc = desc[: MAX_CHARS_PRODUTO_GARANTIA - 1].rstrip() + "…"
+            return desc
+    return None
+
+
+async def garantia_para_ia(
+    session: AsyncSession,
+    conversa: AtendimentoConversa,
+    textos_cliente: list[str | None],
+    pedido: dict | None,
+) -> dict:
+    """As garantias que a IA pode citar nesta conversa (ver o topo).
+
+    `textos_cliente` = as mensagens recentes do comprador (texto cru: é só
+    para achar pedido/NF citado — nada dele volta). `pedido` = o
+    `ctx["pedido"]` do `contexto_da_conversa` (o nº do Bling que o pedido da
+    conversa achou). Devolve {"consultada": True, "garantias": [...]}, cada
+    uma {id, de_onde, status, status_rotulo, inicio, inicio_origem,
+    fim_hardware, fim_software, produto} — datas ISO, SEM CPF e SEM nome.
+    Lista vazia = sem garantia cadastrada. Quem chama roda num SAVEPOINT
+    (`_seguro`): erro vira {"consultada": False, "garantias": []}.
+    """
+    # Tabela vazia (o começo: as garantias são cadastradas à mão): nada a
+    # procurar — poupa as consultas do pedido e do CPF a cada sugestão.
+    if await session.scalar(select(Garantia.id).limit(1)) is None:
+        return {"consultada": True, "garantias": []}
+    chaves = _chaves_do_pedido(conversa) if (conversa.pedido_marketplace or "").strip() else []
+    numero_bling = str((pedido or {}).get("numero") or "").strip() or None
+    citados = citacoes_do_comprador(textos_cliente)
+    do_pedido = []
+    if numero_bling:
+        do_pedido.append(Garantia.pedido_bling == numero_bling)
+    if chaves:
+        do_pedido.append(Garantia.pedido_marketplace.in_(chaves))
+
+    # O CPF da conversa = o do pedido (NF de produto, contato do Bling, nota
+    # emitida); sem ele, o da garantia do pedido da conversa — só para achar
+    # e comparar; nunca sai daqui. Só o pedido casado pelo NÚMERO do Bling:
+    # `buscar_pedido` também casa pelo nº do marketplace (`numeroloja`), e um
+    # pedido mais novo com aquele `numeroloja` é outra compra, de outra
+    # pessoa. O CPF que o comprador DIGITA não entra: ninguém puxa a garantia
+    # de outra pessoa digitando o CPF dela.
+    cpf_conversa = None
+    if numero_bling:
+        info = await garantia_svc.buscar_pedido(session, numero_bling)
+        if info is not None and info.numero == numero_bling:
+            cpf_conversa = info.cpf
+            so_da_nota_emitida = (
+                cpf_conversa is not None
+                and cpf_conversa == garantia_svc.so_digitos(info.cpf_nota_emitida)
+                and cpf_conversa
+                not in {
+                    garantia_svc.so_digitos(info.documento),
+                    garantia_svc.so_digitos(
+                        info.nota_produto.destinatario_doc if info.nota_produto else None
+                    ),
+                }
+            )
+            if so_da_nota_emitida:
+                # A nota emitida casa pelo COMPLEMENTO do endereço (= numeroloja):
+                # com notas de 2+ CPFs nele, não se sabe de quem é o pedido.
+                n_cpfs = await session.scalar(
+                    select(func.count(func.distinct(BlingNotaEmitida.cpf_dest))).where(
+                        BlingNotaEmitida.complemento == info.numeroloja,
+                        BlingNotaEmitida.cpf_dest.is_not(None),
+                    )
+                )
+                if n_cpfs != 1:
+                    cpf_conversa = None
+    if cpf_conversa is None and do_pedido:
+        cpf_conversa = await session.scalar(
+            select(Garantia.cpf).where(or_(*do_pedido)).order_by(Garantia.id.desc()).limit(1)
+        )
+
+    # Pedido citado: o nº curto do Bling à parte (só do mesmo CPF, ver
+    # `_de_onde`); o longo do marketplace também pelo nº do Bling dele (o
+    # pack/order do ML, que o Bling grava em `numeroloja`).
+    bling_citados = {p for p in citados["pedidos"] if _BLING_CURTO.fullmatch(p)}
+    longos_citados = set(citados["pedidos"]) - bling_citados
+    if longos_citados:
+        longos_citados |= {
+            str(n)
+            for n in (
+                await session.execute(
+                    select(BlingOrder.numero)
+                    .where(
+                        BlingOrder.numeroloja.in_(longos_citados),
+                        BlingOrder.numero.is_not(None),
+                    )
+                    .distinct()
+                    .limit(MAX_CITADOS * 2)
+                )
+            ).scalars()
+        }
+    nfs_citadas = set(citados["nfs"])
+
+    # Só o que PODE entrar sai do banco: o pedido da conversa, o nº longo
+    # citado e — com o CPF da conversa — as compras desse CPF (que já trazem
+    # o nº curto do Bling e a NF citados, quando são dele).
+    conds = list(do_pedido)
+    if longos_citados:
+        conds.append(Garantia.pedido_bling.in_(longos_citados))
+        conds.append(Garantia.pedido_marketplace.in_(longos_citados))
+    if cpf_conversa:
+        conds.append(Garantia.cpf == cpf_conversa)
+    if not conds:
+        return {"consultada": True, "garantias": []}
+    achadas = list(
+        (
+            await session.execute(
+                select(Garantia).where(or_(*conds)).order_by(Garantia.id.desc()).limit(MAX_ACHADAS)
+            )
+        ).scalars()
+    )
+    escolhidas: dict[int, str] = {}
+    for g in achadas:
+        motivo = _de_onde(
+            g,
+            numero_bling=numero_bling,
+            chaves=chaves,
+            longos_citados=longos_citados,
+            bling_citados=bling_citados,
+            nfs_citadas=nfs_citadas,
+            cpf_conversa=cpf_conversa,
+        )
+        if motivo is not None:
+            escolhidas[g.id] = motivo
+
+    por_id = {g.id: g for g in achadas}
+    ordem = sorted(escolhidas, key=lambda i: (_ORDEM_DE_ONDE[escolhidas[i]], -i))
+    garantias = [por_id[i] for i in ordem[:MAX_GARANTIAS_IA]]
+    situacoes = await garantia_svc.situacoes_dos_pedidos(
+        session, [g.pedido_bling for g in garantias]
+    )
+    dia = garantia_svc.hoje()
+    saida = []
+    for g in garantias:
+        status = garantia_svc.status_da(g, dia)
+        if garantia_svc.entregue_sem_data(g.data_inicio, situacoes.get(g.pedido_bling)):
+            status = STATUS_ENTREGUE_SEM_DATA
+        saida.append(
+            {
+                "id": g.id,
+                "de_onde": escolhidas[g.id],
+                "status": status,
+                "status_rotulo": STATUS_GARANTIA_IA[status],
+                "inicio": _iso(g.data_inicio),
+                "inicio_origem": (
+                    _ORIGEM_DA_DATA_IA.get(g.entrega_origem or "")
+                    or garantia_svc.ORIGEM_ROTULOS.get(g.entrega_origem or "")
+                    if g.data_inicio
+                    else None
+                ),
+                "fim_hardware": _iso(g.fim_hardware),
+                "fim_software": _iso(g.fim_software),
+                "produto": _produto(g),
+            }
+        )
+    return {"consultada": True, "garantias": saida}
 
 
 # ── Entrada ───────────────────────────────────────────────────────────────

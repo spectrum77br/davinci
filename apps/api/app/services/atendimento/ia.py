@@ -108,6 +108,32 @@ Parte 2 (28/09/2026):
   espera curta (o Retry-After, até 20 s); falhou de novo → sem rascunho,
   com o motivo "limite do provedor (tente de novo em 1 min)", e a rodada
   do cron para ali (as outras conversas bateriam no mesmo limite).
+  SEM CRÉDITO (07/10/2026): a OpenAI ficou sem crédito e a tela dizia
+  "limite do provedor (tente de novo em 1 min)". Agora 429/402/400 com
+  corpo de falta de crédito/cota (`falta_de_credito`: OpenAI
+  insufficient_quota, Anthropic billing_error/"credit balance is too low",
+  402 de qualquer um) é DEFINITIVO para a conta: sem nova tentativa, sem
+  rascunho, a rodada para 10 min, o log leva só provedor e código, e a tela
+  diz "A IA está sem crédito no provedor (OpenAI) — adicione créditos ou
+  troque a chave". O limite por minuto continua como era.
+
+  GARANTIA (07/10/2026, combinado com o dono): na conversa de garantia (o
+  comprador falou de garantia/validade/defeito, ou a classificação deu um
+  desses — `conversa_de_garantia`), o código consulta o Painel de Garantia
+  (`contexto.garantia_para_ia`: pelo pedido da conversa, pelo CPF do
+  pedido e pelo pedido/NF que o comprador citou — de outro CPF, só o nº
+  longo de marketplace citado; nunca pelo CPF digitado) e põe nos FATOS um
+  bloco curto — status, o que cobre hoje, início e de onde veio a data,
+  fim do hardware e do software, SEM CPF e SEM nome. O modelo só redige com
+  essas datas; `validador.conferir_garantia` reprova data de garantia que
+  não é do bloco (ou no lugar errado) e "está coberto" sem garantia ativa
+  (com só o software valendo, a promessa de cobrir o defeito também).
+  Garantia continua assunto só de pessoa: a resposta que fala de garantia
+  (`validador.fala_de_garantia`: a palavra, paráfrase como "é garantido" ou
+  "assistência da fábrica", promessa de cobertura) vai para pessoa — a IA
+  sugere, não envia, nem numa conversa de rastreio. Na conversa que não é
+  de garantia (bloco não consultado), a promessa não bloqueia a sugestão:
+  só vai para pessoa.
 
   PROVEDOR (28/09). Dois caminhos, escolhidos só pelo `.env`
   (`escolher_provedor`): o Groq — ou qualquer API compatível com a da
@@ -230,7 +256,9 @@ SAO_PAULO = ZoneInfo("America/Sao_Paulo")
 # do rascunho diz qual foi.
 # v5 (05/10): os exemplos "da equipe" também vêm do que a equipe respondeu
 # PELO DaVinci — o texto não diz mais "dadas fora do DaVinci".
-PROMPT_VERSAO = "v5"
+# v6 (07/10): GARANTIA — o bloco "garantia" dos FATOS (Painel de Garantia) e
+# a regra de usar só as datas dele.
+PROMPT_VERSAO = "v6"
 
 # Cliente escreve em rajada ("oi" / "meu pedido" / "não chegou"). Esperar
 # 90 s de silêncio junta a rajada numa sugestão só, em vez de três.
@@ -460,8 +488,11 @@ class ErroProvedor(Exception):  # noqa: N818 — é um resultado do provedor, n�
 
     `definitivo` = o provedor recusou ESTE pedido (não adianta repetir);
     `limite` = recusou por tamanho/limite por minuto (413/429), e `espera`
-    é o Retry-After em segundos, quando veio. Fora isso é passageiro (rede,
-    5xx, chave) e a próxima rodada tenta.
+    é o Retry-After em segundos, quando veio. `sem_credito` = a CONTA do
+    provedor ficou sem crédito/cota (`provedor` = o nome, `codigo` = o tipo
+    do erro): repetir não adianta para nenhuma conversa até alguém pôr
+    crédito ou trocar a chave. Fora isso é passageiro (rede, 5xx, chave) e
+    a próxima rodada tenta.
     """
 
     def __init__(
@@ -471,12 +502,140 @@ class ErroProvedor(Exception):  # noqa: N818 — é um resultado do provedor, n�
         definitivo: bool = False,
         limite: bool = False,
         espera: float | None = None,
+        sem_credito: bool = False,
+        provedor: str | None = None,
+        codigo: str | None = None,
     ) -> None:
         self.motivo = motivo
         self.definitivo = definitivo
         self.limite = limite
         self.espera = espera
+        self.sem_credito = sem_credito
+        self.provedor = provedor
+        self.codigo = codigo
         super().__init__(motivo)
+
+
+# ── Provedor sem crédito (07/10/2026) ──
+# A OpenAI ficou sem crédito e a tela dizia "limite do provedor (tente de
+# novo em 1 min)" — enganoso: não volta em 1 min. A falta de crédito vem
+# como 429 (OpenAI `insufficient_quota`), 402 (Payment Required; a
+# Anthropic `billing_error`) ou 400 (Anthropic "credit balance is too low").
+# É DEFINITIVA para a conta (sem a nova tentativa do limite) mas não para a
+# conversa: nada de rascunho bloqueado — quando o crédito voltar, a mesma
+# mensagem ganha sugestão. O limite POR MINUTO (Groq `rate_limit_exceeded`,
+# OpenAI `rate_limit_exceeded`, Anthropic `rate_limit_error`) segue como era.
+_HTTP_SEM_CREDITO = (400, 402, 403, 429)
+_CODIGOS_SEM_CREDITO = frozenset(
+    {
+        "insufficient_quota",
+        "credit_balance_exhausted",
+        "credit_balance_too_low",
+        "billing_hard_limit_reached",
+        "billing_not_active",
+        "billing_error",
+        "insufficient_balance",
+        "insufficient_credits",
+        "insufficient_funds",
+        "payment_required",
+        "spend_limit_exceeded",
+        "spend_limit_reached",
+        "organization_spend_limit_exceeded",
+    }
+)
+# (frase da mensagem, o código que vai para o log) — para quem não manda o
+# código (a Anthropic manda `invalid_request_error` com a frase do crédito).
+_FRASES_SEM_CREDITO = (
+    ("exceeded your current quota", "insufficient_quota"),
+    ("credit balance is too low", "credit_balance_too_low"),
+    ("credit balance exhausted", "credit_balance_exhausted"),
+    ("insufficient credit", "insufficient_credits"),
+    ("insufficient balance", "insufficient_balance"),
+    ("insufficient funds", "insufficient_funds"),
+    ("out of credits", "insufficient_credits"),
+    ("no credits", "insufficient_credits"),
+    ("spend limit", "spend_limit_reached"),
+    ("spending limit", "spend_limit_reached"),
+    ("billing hard limit", "billing_hard_limit_reached"),
+)
+# Os do limite por minuto/dia: com eles, nunca é falta de crédito (a mensagem
+# do Groq traz o link de "billing" para quem quiser subir de plano).
+_CODIGOS_LIMITE = frozenset({"rate_limit_exceeded", "rate_limit_error", "tokens", "requests"})
+# Pausa da rodada do cron depois de "sem crédito": crédito não volta em 1 min,
+# e cada rodada gastaria um pedido recusado. O "Sugerir" da tela tenta sempre.
+PAUSA_SEM_CREDITO_S = 600.0
+
+
+def _erro_do_corpo(corpo: Any) -> tuple[str, str, str]:
+    """(code, type, message) do JSON de erro — OpenAI/Groq {"error": {...}} ou
+    Anthropic {"type": "error", "error": {...}} —, em minúsculas; "" o que faltar."""
+    erro = corpo.get("error") if isinstance(corpo, dict) else None
+    if not isinstance(erro, dict):
+        erro = corpo if isinstance(corpo, dict) else {}
+    return tuple(  # type: ignore[return-value]
+        str(erro.get(k) or "").strip().lower() for k in ("code", "type", "message")
+    )
+
+
+def falta_de_credito(status: int, corpo: Any) -> str | None:
+    """O código/tipo da falta de crédito (ex.: "insufficient_quota"), ou None.
+
+    402 é sempre falta de pagamento. 400/403/429 só com o código ou a frase
+    de crédito/cota no corpo — e nunca com o código do limite por minuto.
+    """
+    if status not in _HTTP_SEM_CREDITO:
+        return None
+    codigo, tipo, mensagem = _erro_do_corpo(corpo)
+    if codigo in _CODIGOS_LIMITE or tipo in _CODIGOS_LIMITE:
+        return None
+    for valor in (codigo, tipo):
+        if valor in _CODIGOS_SEM_CREDITO:
+            return valor
+    for frase, codigo_da_frase in _FRASES_SEM_CREDITO:
+        if frase in mensagem:
+            return codigo_da_frase
+    if status == 402:
+        return (codigo or tipo or "payment_required")[:64]
+    return None
+
+
+def nome_do_provedor(p: Provedor) -> str:
+    """O nome que a tela mostra ("OpenAI", "Groq", "Anthropic (Claude)", ou o host)."""
+    if p.tipo == PROVEDOR_CLAUDE:
+        return "Anthropic (Claude)"
+    try:
+        host = (urlsplit((p.base_url or "").strip()).hostname or "").lower().rstrip(".")
+    except ValueError:
+        host = ""
+    for dominio, nome in (
+        ("openai.com", "OpenAI"),
+        ("openai.azure.com", "Azure OpenAI"),
+        ("groq.com", "Groq"),
+        ("openrouter.ai", "OpenRouter"),
+        ("anthropic.com", "Anthropic"),
+    ):
+        if host == dominio or host.endswith("." + dominio):
+            return nome
+    return host or "desconhecido"
+
+
+def motivo_sem_credito(provedor_nome: str | None) -> str:
+    """A frase da tela: diz o que fazer (não "tente de novo em 1 min")."""
+    return (
+        f"A IA está sem crédito no provedor ({provedor_nome or 'desconhecido'}) — "
+        "adicione créditos ou troque a chave"
+    )
+
+
+def _sem_credito(p: Provedor, status: int, codigo: str) -> ErroProvedor:
+    nome = nome_do_provedor(p)
+    return ErroProvedor(
+        f"provedor sem crédito ({status} {codigo})",
+        definitivo=True,
+        sem_credito=True,
+        provedor=nome,
+        codigo=codigo,
+    )
 
 
 def _espera_pedida(valor: str | None) -> float | None:
@@ -556,6 +715,14 @@ async def _chamar_modelo(
             )
     except httpx.HTTPError as e:
         raise ErroProvedor(f"falha de rede ({type(e).__name__})") from e
+    if resp.status_code in _HTTP_SEM_CREDITO:
+        try:
+            corpo = resp.json()
+        except ValueError:
+            corpo = None
+        codigo = falta_de_credito(resp.status_code, corpo)
+        if codigo:
+            raise _sem_credito(p, resp.status_code, codigo)
     if resp.status_code in _HTTP_LIMITE:
         raise ErroProvedor(
             f"provedor devolveu {resp.status_code}",
@@ -757,6 +924,9 @@ async def _chamar_claude(
     except anthropic.APIConnectionError as e:  # inclui o APITimeoutError
         raise ErroProvedor(f"falha de rede ({type(e).__name__})") from e
     except anthropic.APIStatusError as e:
+        codigo = falta_de_credito(e.status_code, e.body)
+        if codigo:
+            raise _sem_credito(p, e.status_code, codigo) from e
         if e.status_code in _HTTP_LIMITE:
             raise ErroProvedor(
                 f"provedor devolveu {e.status_code}",
@@ -794,19 +964,32 @@ _dormir = asyncio.sleep
 # esperando até 20 s). Chave = id da conversa: o "Sugerir" da tela diz o
 # motivo — o router chama `motivo_sem_rascunho` logo depois, no mesmo
 # processo. Memória, não Redis: é um aviso de um minuto, não um estado.
-_limites: dict[UUID | None, float] = {}
+# Valor = (até quando, a frase da tela). A falta de crédito usa a mesma
+# memória, com a frase dela e a pausa de `PAUSA_SEM_CREDITO_S`.
+_limites: dict[UUID | None, tuple[float, str]] = {}
 
 
-def _anotar_limite(conversa_id: UUID) -> None:
+def _anotar_limite(
+    conversa_id: UUID,
+    *,
+    motivo: str = MOTIVO_LIMITE_PROVEDOR,
+    pausa: float = PAUSA_APOS_LIMITE_S,
+) -> None:
     agora = time.monotonic()
-    for chave in [k for k, ate in _limites.items() if ate <= agora]:
+    for chave in [k for k, (ate, _m) in _limites.items() if ate <= agora]:
         del _limites[chave]
-    _limites[None] = _limites[conversa_id] = agora + PAUSA_APOS_LIMITE_S
+    _limites[None] = _limites[conversa_id] = (agora + pausa, motivo)
 
 
 def _no_limite(conversa_id: UUID | None = None) -> bool:
-    """O provedor recusou por limite há menos de 1 min (a conversa dada, ou qualquer uma)?"""
-    return _limites.get(conversa_id, 0.0) > time.monotonic()
+    """O provedor recusou por limite (ou sem crédito) há pouco — esta conversa, ou qualquer uma?"""
+    return _limites.get(conversa_id, (0.0, ""))[0] > time.monotonic()
+
+
+def _motivo_do_limite(conversa_id: UUID | None = None) -> str | None:
+    """A frase da tela da última recusa que ainda vale (limite ou sem crédito)."""
+    ate, motivo = _limites.get(conversa_id, (0.0, ""))
+    return motivo if ate > time.monotonic() else None
 
 
 def esquecer_limites() -> None:
@@ -983,7 +1166,15 @@ _PISTAS_CATEGORIA: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("reembolso", re.compile(r"\b(?:reembols\w*|estorn\w*|dinheiro\s+de\s+volta)")),
     ("defeito", re.compile(r"\b(?:defeit\w*|quebrad\w*|nao\s+funciona\w*|estragad\w*|avariad\w*)")),
     ("troca_devolucao", re.compile(r"\b(?:troc\w*|devolv\w*|devoluc\w*)")),
-    ("garantia", re.compile(r"\bgarantia\b")),
+    # "Validade" é como o dono e o comprador chamam a garantia ("quando
+    # perguntarem de validade") — menos a do cupom/oferta.
+    (
+        "garantia",
+        re.compile(
+            r"\bgarantia\b|\bvalidade\b(?!\s+d[oa]s?\s+(?:cupo\w*|desconto|oferta|promocao|link"
+            r"|codigo|boleto|pix)\b)"
+        ),
+    ),
     ("nota_fiscal", re.compile(r"\b(?:nota\s+fiscal|nfe?|danfe)\b")),
     (
         "rastreio",
@@ -2171,6 +2362,90 @@ def _fatos_para_o_modelo(
     }
 
 
+# ── Garantia (Painel de Garantia) nos FATOS ───────────────────────────────
+
+GARANTIA_SEM_CADASTRO = "sem garantia cadastrada"
+MOTIVO_RESPOSTA_DE_GARANTIA = "a resposta fala de garantia — só pessoa"
+# Os assuntos em que a IA consulta o Painel de Garantia (os ids das
+# constantes e do manual base de produção, 07/10/2026).
+CATEGORIAS_DE_GARANTIA = ("garantia", "defeito")
+
+
+def conversa_de_garantia(textos_cliente: list[str], classificada: str | None = None) -> bool:
+    """A conversa é de garantia? O comprador falou de garantia/validade ou de
+    defeito nas mensagens recentes, ou a classificação deu um desses assuntos."""
+    if classificada in CATEGORIAS_DE_GARANTIA:
+        return True
+    return any(
+        c in CATEGORIAS_DE_GARANTIA for t in textos_cliente for c in pistas_de_categoria(t or "")
+    )
+
+
+GARANTIA_NAO_CONSULTADA = (
+    "não deu para consultar a garantia agora — não cite datas nem cobertura; diga que a "
+    "equipe vai verificar"
+)
+# O que cobre HOJE, por status (o modelo não precisa comparar datas).
+_COBRE_HOJE = {
+    "ativa": "hardware e software",
+    "somente_software": "só software (o hardware já venceu)",
+    "expirada": "nada (hardware e software vencidos)",
+    "aguardando_entrega": "ainda nada: sem data de entrega, os prazos não começaram",
+    "entregue_sem_data": (
+        "não dá para dizer: o pedido consta entregue, mas sem a data de entrega os prazos "
+        "não foram calculados"
+    ),
+}
+
+
+def bloco_garantia(garantia: dict | None) -> list[dict] | str | None:
+    """O bloco "garantia" dos FATOS, a partir de `contexto.garantia_para_ia`.
+
+    Curto e factual: de onde veio a garantia (o pedido da conversa, um
+    citado, outra compra do mesmo comprador), o status, o que cobre hoje, o
+    início (e de onde veio a data), o fim do hardware e do software — datas
+    como o cliente lê (dd/mm/aaaa). SEM CPF e SEM nome (nem entram aqui).
+    None = não consultada (pergunta pré-venda, ou conversa que não é de
+    garantia): o bloco não vai.
+    """
+    if garantia is None:
+        return None
+    if not garantia.get("consultada"):
+        return GARANTIA_NAO_CONSULTADA
+    linhas: list[dict] = []
+    for g in garantia.get("garantias") or []:
+        linha: dict[str, Any] = {
+            "de_onde": g.get("de_onde"),
+            "status": g.get("status_rotulo"),
+            "cobre_hoje": _COBRE_HOJE.get(str(g.get("status") or "")),
+        }
+        if g.get("inicio"):
+            linha["inicio"] = _data_br(g["inicio"])
+            if g.get("inicio_origem"):
+                linha["inicio_veio_de"] = g["inicio_origem"]
+            linha["fim_hardware"] = _data_br(g.get("fim_hardware"))
+            linha["fim_software"] = _data_br(g.get("fim_software"))
+        if g.get("produto"):
+            linha["produto"] = g["produto"]
+        linhas.append({k: v for k, v in linha.items() if v})
+    return linhas or GARANTIA_SEM_CADASTRO
+
+
+def datas_da_garantia_por_extenso(garantia: dict | None) -> str:
+    """As datas do bloco nas formas em que o modelo pode escrevê-las ("7", "1",
+    "07", "01", "2027", "27"): os números delas não são "inventados" — quem
+    confere se a DATA é do bloco é `validador.conferir_garantia`."""
+    partes: list[str] = []
+    for g in (garantia or {}).get("garantias") or []:
+        for chave in ("inicio", "fim_hardware", "fim_software"):
+            br = _data_br(g.get(chave))
+            if not br:
+                continue
+            dia, mes, ano = (int(x) for x in br.split("/"))
+            partes.append(f"{dia} {mes} {dia:02d} {mes:02d} {ano} {ano % 100:02d}")
+    return " ".join(partes)
+
+
 _LACUNA = re.compile(r"\{\{?\s*([A-Za-z_]+)\s*\}?\}")
 
 
@@ -2295,7 +2570,7 @@ NUNCA escreva:
 - pedido de avaliação, de estrelas ou de mudança de avaliação; nada que
   desestimule reclamação, disputa, mediação ou chamado;
 - preço, valor, desconto, percentual, frete grátis, prazo com número (dias,
-  horas, datas) ou garantia com número;
+  horas, datas) ou garantia com número (exceção: as datas do bloco "garantia");
 - pedido de CPF, telefone, e-mail ou endereço, nem repetição desses dados.
 
 Nunca invente prazo, preço, rastreio, nota fiscal ou política da loja. Fato do
@@ -2303,6 +2578,12 @@ pedido entra SÓ por lacuna, escrita exatamente assim, que o sistema preenche:
 {numero_pedido} {rastreio} {transportadora} {previsao_entrega} {data_envio} {nf_numero}
 Use só as lacunas listadas como disponíveis nos FATOS. Se a resposta precisa de
 um fato sem dado, não invente: diga que vai verificar e marque precisa_humano=true.
+
+GARANTIA (validade, se ainda está coberto): use SÓ o bloco "garantia" dos FATOS —
+o status e as datas de lá, escritas como estão (dd/mm/aaaa), sem calcular nem
+dizer quantos meses. Hardware vale até "fim_hardware"; software, até
+"fim_software". Sem o bloco, sem garantia cadastrada, aguardando entrega ou sem
+data de entrega: não diga que está coberto — diga que a equipe vai verificar.
 
 Troca, devolução, cancelamento, defeito, reembolso, garantia, endereço, desconto
 e reclamação forte: escreva uma resposta acolhedora, sem prometer nada, e marque
@@ -3195,6 +3476,22 @@ async def _gerar(
         return None
 
     async def _falha(e: ErroProvedor, hash_manual: str | None, uso: dict | None):
+        if e.sem_credito:
+            # A CONTA ficou sem crédito: nenhuma outra conversa passaria. Sem
+            # rascunho (bloqueado contaria como "já tratada" e a mensagem não
+            # ganharia sugestão quando o crédito voltasse); a rodada do cron
+            # para por `PAUSA_SEM_CREDITO_S`, e a tela diz o que fazer. No
+            # log, só o provedor e o código — nunca a chave nem o corpo.
+            _anotar_limite(
+                conversa.id, motivo=motivo_sem_credito(e.provedor), pausa=PAUSA_SEM_CREDITO_S
+            )
+            logger.warning(
+                "atendimento_ia_provedor_sem_credito",
+                conversa_id=str(conversa.id),
+                provedor=e.provedor,
+                codigo=e.codigo,
+            )
+            return None
         if e.limite:
             # Já tentou de novo (`_chamar`). Sem rascunho: bloqueado contaria
             # como "já tratada" e o cron nunca mais tentaria esta mensagem —
@@ -3255,6 +3552,36 @@ async def _gerar(
             motivos.append("a IA não classificou o assunto — as regras do assunto ficaram de fora")
             logger.warning("atendimento_ia_classificacao_invalida", conversa_id=str(conversa.id))
         fatos_gravados["categoria_classificada"] = classificada
+
+    # A garantia (Painel de Garantia): pelo pedido da conversa, pelo CPF do
+    # pedido e pelo pedido/NF que o comprador citou (de outro CPF, só o nº
+    # longo de marketplace) — o CPF só acha, não entra no bloco. Só quando a
+    # conversa É de garantia (`conversa_de_garantia`: o comprador falou de
+    # garantia/validade/defeito, ou a classificação deu um desses): numa
+    # conversa de rastreio o modelo não recebe data de
+    # garantia nenhuma para repetir. Na pergunta pré-venda não há compra: nem
+    # consulta. Fica fora da classificação (que não precisa dela).
+    garantia: dict | None = None
+    if conversa.canal != CANAL_PERGUNTA and conversa_de_garantia(textos_cliente, classificada):
+        garantia = await contexto_svc._seguro(
+            session,
+            "garantia",
+            lambda: contexto_svc.garantia_para_ia(
+                session, conversa, textos_cliente, ctx.get("pedido")
+            ),
+            {"consultada": False, "garantias": []},
+            conversa.id,
+        )
+        fatos["garantia"] = fatos_gravados["garantia"] = bloco_garantia(garantia)
+        fatos_gravados["garantia_ids"] = [g["id"] for g in garantia["garantias"]]
+    # O que o validador confere: o bloco; [] = nenhuma garantia dada ao
+    # modelo (não há data para citar nem cobertura para prometer); None = a
+    # pergunta pré-venda (sem compra a cobrir).
+    garantias_conferidas: list[dict] | None = (
+        None
+        if conversa.canal == CANAL_PERGUNTA
+        else (garantia["garantias"] if garantia is not None else [])
+    )
 
     referencia = classificada or categoria_provavel(" ".join(textos_rajada), conversa.canal)
     # Canal no automático: só o 👍/👎 de admin molda o prompt (ver
@@ -3335,6 +3662,7 @@ async def _gerar(
     permitidos = "\n".join(
         [
             json.dumps(fatos, ensure_ascii=False),
+            datas_da_garantia_por_extenso(garantia),
             *(f"{r.quando} {r.faca}" for r in regras),
             *(c.get("descricao") or "" for c in categorias),
         ]
@@ -3365,8 +3693,37 @@ async def _gerar(
     erros = validador.validar(
         final, plataforma=conversa.plataforma, canal=conversa.canal, origem=ORIGEM_IA
     )
+    # A data de garantia tem de ser a do bloco; "está coberto" só com
+    # garantia ativa. As datas das lacunas e a da compra valem fora das
+    # frases de garantia. Conversa que não é de garantia (o bloco nem foi
+    # consultado): a promessa de cobertura não BLOQUEIA a sugestão — vai
+    # para pessoa (`fala_de_garantia`, logo abaixo); a data de garantia
+    # inventada continua bloqueando.
+    erros = list(
+        dict.fromkeys(
+            [
+                *erros,
+                *validador.conferir_garantia(
+                    final,
+                    garantias_conferidas,
+                    outras_datas=(
+                        valores.get("previsao_entrega"),
+                        valores.get("data_envio"),
+                        (fatos.get("pedido") or {}).get("data_da_compra"),
+                    ),
+                    conferir_promessa=garantia is not None,
+                ),
+            ]
+        )
+    )
     if erros:
         motivos.append("validador: " + "; ".join(erros))
+    # Garantia é assunto só de pessoa no automático: a resposta que fala dela
+    # (a palavra, uma paráfrase — "é garantido", "assistência da fábrica" —,
+    # uma promessa de cobertura ou uma data do bloco) não sai sozinha — nem
+    # numa conversa de rastreio. Vai para a caixa (pendente), não bloqueada.
+    if validador.fala_de_garantia(final, garantias_conferidas):
+        motivos.append(MOTIVO_RESPOSTA_DE_GARANTIA)
 
     # Pendente = vai para a caixa de resposta, pronto para a pessoa conferir.
     # O que a regra SÓ da IA barrou (prazo, valor, frete, promessa, número
@@ -3562,8 +3919,10 @@ async def motivo_sem_rascunho(session: AsyncSession, conversa: AtendimentoConver
     provedor (falha passageira: `_gerar` devolve None e tenta de novo). A
     tela traduz o código (AtendimentoConversa.vue, SEM_SUGESTAO). A recusa
     por limite (413/429) desta conversa, há menos de 1 min, volta como a
-    FRASE `MOTIVO_LIMITE_PROVEDOR` — a tela mostra o motivo que não conhece
-    como veio (`motivoLegivel`).
+    FRASE `MOTIVO_LIMITE_PROVEDOR`; a conta do provedor sem crédito, como a
+    frase de `motivo_sem_credito` ("A IA está sem crédito no provedor (…) —
+    adicione créditos ou troque a chave") — a tela mostra o motivo que não
+    conhece como veio (`motivoLegivel`).
     """
     try:
         if not provedor().chave:
@@ -3581,7 +3940,7 @@ async def motivo_sem_rascunho(session: AsyncSession, conversa: AtendimentoConver
         if await _ultima_do_cliente(session, conversa) is None:
             return "sem_mensagem_do_cliente"
         if _no_limite(conversa.id):
-            return MOTIVO_LIMITE_PROVEDOR
+            return _motivo_do_limite(conversa.id) or MOTIVO_LIMITE_PROVEDOR
     except Exception:  # noqa: BLE001, S110 — o motivo é só a frase do aviso
         pass
     return "provedor_falhou"
@@ -3751,8 +4110,13 @@ async def _gerar_pendentes(session: AsyncSession, *, limite: int, modos: tuple[s
         if _no_limite():
             # O provedor recusou por limite há menos de 1 min: as outras
             # bateriam no mesmo limite, cada uma esperando a nova tentativa.
-            # Ficam para a próxima rodada (nenhuma ganhou rascunho).
-            logger.info("atendimento_ia_rodada_parou_no_limite", adiadas=len(ids) - n)
+            # Ficam para a próxima rodada (nenhuma ganhou rascunho). Sem
+            # crédito na conta, a pausa é mais longa (`PAUSA_SEM_CREDITO_S`).
+            logger.info(
+                "atendimento_ia_rodada_parou_no_limite",
+                adiadas=len(ids) - n,
+                motivo=_motivo_do_limite(),
+            )
             break
         # Relê a cada volta, do BANCO: um rollback na conversa anterior expira
         # tudo, e a tela pode ter mexido nesta enquanto a anterior era gerada.
