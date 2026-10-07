@@ -9,7 +9,8 @@ parecidas e não iguais.
   SKU por departamento, kits primeiro no ML celular/eletro) MENOS os anúncios
   marcados como catálogo (decisão D3: a coluna de Kit não manda mais preço
   direto para anúncio de catálogo; o anúncio comum, inclusive o "gêmeo"
-  sincronizado, continua recebendo).
+  sincronizado, continua recebendo). A D3 só vale na conta de Kit que tem a
+  coluna Catálogo ligada (`kit_pula_catalogo`); sem ela, nada muda.
 - canal 'catalogo' (coluna de catálogo, "filha" de uma conta ML de kit): só
   anúncios com `catalog_listing` TRUE (NULL não serve), do tipo da conta
   (clássico/premium, obrigatório), SKU simples (sem '+'); celular/eletro casam
@@ -51,6 +52,20 @@ CANAL_CATALOGO = "catalogo"
 # resolvedor e a conferência do item vivo no ML).
 CATALOGO_SINCRONIZADO_BLOQUEIA = True
 
+# D3 só na conta de Kit que tem a coluna Catálogo LIGADA (existe a filha
+# canal='catalogo' com conta_base_id = a conta). Sem ela, a coluna de Kit
+# continua mandando também para o anúncio de catálogo, como antes (o dono,
+# 07/10/2026: nada muda para quem não ligou o catálogo). Trocar para False
+# aplica a D3 em toda conta ML de Kit (vale para o resolvedor, o /grid, o
+# /actual-prices e a conferência do item vivo no envio).
+KIT_PULA_CATALOGO_SO_COM_CATALOGO_LIGADO = True
+
+
+def kit_pula_catalogo(catalogo_ligado: bool) -> bool:
+    """A coluna de Kit desta conta deixa de fora os anúncios de catálogo (D3)?
+    Lida na hora: a flag mora num lugar só."""
+    return catalogo_ligado or not KIT_PULA_CATALOGO_SO_COM_CATALOGO_LIGADO
+
 # Status do anúncio (como o ML devolve / a varredura grava) → motivo de não
 # enviar ao catálogo (D6). 'inactive' é anúncio parado pelo ML: igual a pausado.
 _MOTIVO_POR_STATUS = {
@@ -62,6 +77,10 @@ _MOTIVO_POR_STATUS = {
 
 # Anúncio de catálogo que receberia o preço de duas linhas da tabela.
 MOTIVO_MESMO_ANUNCIO = "mesmo_anuncio"
+
+# Coluna de Kit (com o catálogo ligado) em que o único anúncio que casa é de
+# catálogo: não é "sem vínculo" — o preço vai pela coluna Catálogo.
+BLOQUEIO_SO_CATALOGO = "so_catalogo"
 
 # Quando todos os anúncios da célula estão bloqueados, o motivo mostrado é o
 # primeiro desta lista que aparecer (o mais "de regra" antes do "de estado").
@@ -117,6 +136,9 @@ class Resolucao:
     bloqueados: list[AnuncioBloqueado] = field(default_factory=list)
     # Canal catálogo numa conta sem tipo clássico/premium válido.
     sem_tipo: bool = False
+    # Só no canal kit com a D3 valendo: nenhum anúncio comum casou, mas estes
+    # anúncios de catálogo casariam (o preço deles vem da coluna Catálogo).
+    so_catalogo: list[ProductLink] = field(default_factory=list)
 
     @property
     def todos(self) -> list[ProductLink]:
@@ -141,13 +163,17 @@ def resolver_anuncios(
     plataforma: str,
     canal: str,
     listing_type_conta: str | None,
+    pula_catalogo: bool = True,
 ) -> Resolucao:
     """Quais anúncios recebem o preço desta célula.
 
     `links` são os vínculos da integração (a da BASE, no canal catálogo) — pode
     vir um superconjunto; `sku_por_produto` é {products.id: sku} desses
     vínculos. Função pura: quem chama carrega do banco (uma vez por
-    integração no /grid)."""
+    integração no /grid).
+
+    `pula_catalogo` (só canal kit, ML): aplica a D3 — quem chama decide com
+    `kit_pula_catalogo(conta tem a coluna Catálogo ligada?)`."""
     variantes = variants_of(pricing_sku)
     if not variantes:
         return Resolucao()
@@ -180,26 +206,34 @@ def resolver_anuncios(
                 out.links.append(lk)
         return out
 
-    # canal kit — a regra de sempre, sem os anúncios de catálogo (D3).
+    # canal kit — a regra de sempre; com a D3 valendo, sem os anúncios de
+    # catálogo (guardados para dizer "só catálogo" se nada mais casar).
     candidatos = list(links)
+    de_catalogo: list[ProductLink] = []
     if plataforma == "ml":
-        candidatos = [lk for lk in candidatos if lk.catalog_listing is not True]
+        if pula_catalogo:
+            de_catalogo = [lk for lk in candidatos if lk.catalog_listing is True]
+            candidatos = [lk for lk in candidatos if lk.catalog_listing is not True]
         tipo = ml_listing_type_for_account(listing_type_conta)
         if tipo:
             candidatos = [lk for lk in candidatos if (lk.listing_type or "") == tipo]
-    casados = [
-        lk
-        for lk in candidatos
-        if sku_casa_no_departamento(
+            de_catalogo = [lk for lk in de_catalogo if (lk.listing_type or "") == tipo]
+
+    def _casa(lk: ProductLink) -> bool:
+        return sku_casa_no_departamento(
             (sku_por_produto.get(lk.product_id) or "").lower(),
             dept=dept_lc, sku_full_set=full, sku_base_set=base,
         )
-    ]
+
+    casados = [lk for lk in candidatos if _casa(lk)]
     # ML celular/eletro: havendo kit, só os kits (paridade SSH).
     if dept_lc not in ("mala", "catalogo") and plataforma == "ml":
         if any("+" in (sku_por_produto.get(lk.product_id) or "") for lk in casados):
             casados = [lk for lk in casados if "+" in (sku_por_produto.get(lk.product_id) or "")]
-    return Resolucao(links=dedup_links_for_push(plataforma, casados))
+    out = Resolucao(links=dedup_links_for_push(plataforma, casados))
+    if not out.links and de_catalogo:
+        out.so_catalogo = dedup_links_for_push(plataforma, [lk for lk in de_catalogo if _casa(lk)])
+    return out
 
 
 def celula_manda_preco(outcome: Any, override: Any = None) -> bool:
@@ -253,6 +287,10 @@ TEXTO_BLOQUEIO = {
     ),
     "sem_anuncio": "Sem anúncio de catálogo vinculado nesta conta",
     "sem_preco_catalogo": "Produto sem preço de catálogo (coluna Catálogo em Produtos)",
+    BLOQUEIO_SO_CATALOGO: (
+        "Este produto só tem anúncio de catálogo nesta conta — o preço vai pela "
+        "coluna Catálogo"
+    ),
 }
 
 
@@ -327,3 +365,26 @@ def texto_bloqueio_envio(resolucao: Resolucao) -> tuple[str, str] | None:
     if info["bloqueio"] is None:
         return None
     return info["bloqueio"], info["texto"]
+
+
+def info_celula_kit_so_catalogo(resolucao: Resolucao) -> dict | None:
+    """O campo `catalogo` de uma célula de KIT (conta com o catálogo ligado)
+    cujo único anúncio que casa é de catálogo — o mesmo formato da célula de
+    catálogo, para a tela mostrar o cadeado e pular no envio. None nos outros
+    casos (a célula de kit fica como sempre)."""
+    if resolucao.links or not resolucao.so_catalogo:
+        return None
+    return {
+        "anuncios": [
+            {
+                "external_id": lk.external_id,
+                "status": lk.anuncio_status,
+                "listing_type": lk.listing_type,
+                "sincronizado_com": relacionados_do_link(lk),
+                "bloqueio": BLOQUEIO_SO_CATALOGO,
+            }
+            for lk in resolucao.so_catalogo
+        ],
+        "bloqueio": BLOQUEIO_SO_CATALOGO,
+        "texto": TEXTO_BLOQUEIO[BLOQUEIO_SO_CATALOGO],
+    }

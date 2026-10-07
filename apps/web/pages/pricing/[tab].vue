@@ -1681,13 +1681,16 @@ type CatalogoAnuncio = {
   sincronizado_com: string[]
   // Por que ESTE anúncio não recebe: 'mesmo_anuncio' (outra linha da tabela
   // também casa com ele) | 'sincronizado' | 'pausado' | 'em_revisao' |
-  // 'encerrado' (null = recebe o preço)
+  // 'encerrado' | 'so_catalogo' (célula de Kit) (null = recebe o preço)
   bloqueio?: string | null
 }
+// Também vem na célula de KIT de conta com o catálogo ligado quando o único
+// anúncio que casa é de catálogo (bloqueio 'so_catalogo'): cadeado, não envia.
 type CatalogoCelula = {
   anuncios: CatalogoAnuncio[]
   // null = pode enviar; 'sem_anuncio' | 'mesmo_anuncio' | 'sincronizado' |
-  // 'pausado' | 'em_revisao' | 'encerrado' | 'sem_tipo' | 'sem_preco_catalogo'
+  // 'pausado' | 'em_revisao' | 'encerrado' | 'sem_tipo' | 'sem_preco_catalogo' |
+  // 'so_catalogo'
   bloqueio: string | null
   texto: string | null
 }
@@ -2381,6 +2384,7 @@ const MOTIVOS_BLOQUEIO: Record<string, string> = {
   encerrado: 'Anúncio de catálogo encerrado',
   sem_tipo: 'Conta sem tipo (clássico/premium)',
   sem_preco_catalogo: 'Produto sem preço de catálogo (coluna Catálogo em Produtos)',
+  so_catalogo: 'Este produto só tem anúncio de catálogo nesta conta — o preço vai pela coluna Catálogo',
 }
 
 // Motivo curto por anúncio (campo `bloqueio` de cada anúncio do /grid).
@@ -2390,6 +2394,7 @@ const MOTIVO_ANUNCIO: Record<string, string> = {
   pausado: 'pausado',
   em_revisao: 'em revisão',
   encerrado: 'encerrado',
+  so_catalogo: 'vai pela coluna Catálogo',
 }
 
 function catalogoBloqueado(prodId: string, accId: string): CatalogoCelula | null {
@@ -2401,9 +2406,9 @@ function textoBloqueio(cat: CatalogoCelula): string {
   return cat.texto || MOTIVOS_BLOQUEIO[cat.bloqueio ?? ''] || 'Envio bloqueado'
 }
 
-// Hover da célula de catálogo: motivo do bloqueio + anúncios que ela atinge.
+// Hover da célula de catálogo (e da de Kit 'só catálogo'): motivo do
+// bloqueio + anúncios que ela atinge. Célula de Kit comum não tem `catalogo`.
 function tituloCelulaCatalogo(prodId: string, acc: Account): string | undefined {
-  if (!ehCatalogo(acc)) return undefined
   const cat = cellOf(prodId, acc.id)?.catalogo
   if (!cat) return undefined
   const linhas: string[] = []
@@ -2422,7 +2427,7 @@ function tituloCelulaCatalogo(prodId: string, acc: Account): string | undefined 
 // canal", e não falha: contam como puladas, não como erro.
 const CODIGOS_BLOQUEIO = new Set([
   'sem_anuncio', 'mesmo_anuncio', 'sincronizado', 'pausado', 'em_revisao', 'encerrado',
-  'sem_tipo', 'sem_preco_catalogo', 'canal_errado', 'tipo_errado', 'bloqueado',
+  'sem_tipo', 'sem_preco_catalogo', 'canal_errado', 'tipo_errado', 'bloqueado', 'so_catalogo',
 ])
 function ehCodigoBloqueio(code: string): boolean {
   return CODIGOS_BLOQUEIO.has(code) || code.startsWith('catalogo_') || code.startsWith('bloqueado_')

@@ -1309,8 +1309,10 @@ async def test_envio_kit_pula_anuncio_que_virou_catalogo_no_ml(
     ml_falso: MLFalso,
 ):
     """Marca gravada como comum (ou não lida), mas o item VIVO é de catálogo:
-    a conferência antes do PUT pula (canal_errado) e o preço não vai."""
+    na conta com o catálogo ligado (D3), a conferência antes do PUT pula
+    (canal_errado) e o preço não vai."""
     auth_as(dono)
+    await _ligar(client, cenario["base"].id)
     ml_falso.item("MLB101", catalog_listing=True)
     out = await _push(client, cenario["base"].id, cenario["a003"].id)
     assert (out["ok"], out["code"]) == (False, "all_skipped")
@@ -1759,3 +1761,187 @@ async def test_varredura_grava_a_marca_de_catalogo(
     assert novo.catalogo_lido_em is not None
     assert links["MLB700"].catalog_listing is None
     assert links["MLB700"].catalogo_lido_em is None
+
+
+# =========================================================== revisão final (07/10/2026)
+# D3 só com o catálogo ligado; Kit "só catálogo" = bloqueado (não no_link);
+# marca ainda não lida; GET 403/404 do ML sem insistir; escopo de equipe.
+
+
+def test_d3_so_vale_com_o_catalogo_ligado(monkeypatch):
+    a = uuid.uuid4()
+    skus = {a: "a003.sa"}
+    links = [_lk("COMUM", a, cat=False), _lk("CAT", a, cat=True)]
+    kw = {"pricing_sku": "a003", "dept": "celular", "plataforma": "ml", "canal": "kit",
+          "listing_type_conta": "ml classico"}
+    assert anuncios.kit_pula_catalogo(True) is True
+    assert anuncios.kit_pula_catalogo(False) is False
+    # Sem o catálogo ligado: a regra de antes (manda também para o catálogo).
+    res = resolver_anuncios(links, skus, pula_catalogo=False, **kw)
+    assert sorted(lk.external_id for lk in res.links) == ["CAT", "COMUM"]
+    assert res.so_catalogo == []
+    res = resolver_anuncios(links, skus, pula_catalogo=True, **kw)
+    assert [lk.external_id for lk in res.links] == ["COMUM"]
+    # Flag desligada: a D3 vale em toda conta ML de Kit.
+    monkeypatch.setattr(anuncios, "KIT_PULA_CATALOGO_SO_COM_CATALOGO_LIGADO", False)
+    assert anuncios.kit_pula_catalogo(False) is True
+
+
+def test_kit_so_com_anuncio_de_catalogo_vira_so_catalogo():
+    a, b = uuid.uuid4(), uuid.uuid4()
+    skus = {a: "a003.sa", b: "b999.sa"}
+    kw = {"pricing_sku": "a003", "dept": "celular", "plataforma": "ml", "canal": "kit",
+          "listing_type_conta": "ml classico"}
+    links = [
+        _lk("CAT", a, cat=True),
+        _lk("CAT_PREMIUM", a, cat=True, tipo="gold_pro"),  # outro tipo: não conta
+        _lk("OUTRO", b, cat=True),  # outra linha: não conta
+    ]
+    res = resolver_anuncios(links, skus, pula_catalogo=True, **kw)
+    assert res.links == []
+    assert [lk.external_id for lk in res.so_catalogo] == ["CAT"]
+    info = anuncios.info_celula_kit_so_catalogo(res)
+    assert info["bloqueio"] == "so_catalogo"
+    assert info["texto"] == (
+        "Este produto só tem anúncio de catálogo nesta conta — o preço vai pela coluna Catálogo"
+    )
+    assert [x["external_id"] for x in info["anuncios"]] == ["CAT"]
+    # Havendo anúncio comum, a célula envia normalmente (sem "só catálogo").
+    res = resolver_anuncios([*links, _lk("COMUM", a, cat=False)], skus, pula_catalogo=True, **kw)
+    assert [lk.external_id for lk in res.links] == ["COMUM"]
+    assert res.so_catalogo == [] and anuncios.info_celula_kit_so_catalogo(res) is None
+    # Sem a D3 (catálogo desligado) não existe "só catálogo": vai para o CAT.
+    res = resolver_anuncios(links, skus, pula_catalogo=False, **kw)
+    assert [lk.external_id for lk in res.links] == ["CAT"]
+    assert anuncios.info_celula_kit_so_catalogo(res) is None
+
+
+@pytest.mark.asyncio
+async def test_kit_sem_catalogo_ligado_manda_para_o_anuncio_de_catalogo_como_antes(
+    db: AsyncSession, client: AsyncClient, dono: User, cenario, auth_as: Callable,
+    ml_falso: MLFalso, monkeypatch,
+):
+    """Nada muda para quem não ligou o catálogo: a coluna de Kit continua
+    mandando para o anúncio de catálogo (banco E item vivo)."""
+    auth_as(dono)
+    base = cenario["base"]
+    await db.execute(ProductLink.__table__.delete().where(ProductLink.external_id == "MLB101"))
+    await db.commit()
+    ml_falso.item("MLB100")
+    ml_falso.item("MLB200", catalog_listing=True)
+    ml_falso.item("MLB202", catalog_listing=True)  # marca não lida; vivo é catálogo
+
+    out = await _push(client, base.id, cenario["a003"].id)
+    assert (out["ok"], out["code"]) == (True, "ok"), out
+    assert sorted(m for m, _ in ml_falso.puts_de_preco()) == ["MLB100", "MLB200", "MLB202"]
+
+    # Ligou o catálogo: a D3 vale — o MLB200 sai pelo banco e o MLB202 pelo
+    # item vivo (canal_errado).
+    await _ligar(client, base.id)
+    ml_falso.chamadas.clear()
+    out = await _push(client, base.id, cenario["a003"].id)
+    assert (out["ok"], out["code"]) == (True, "partial"), out
+    assert [m for m, _ in ml_falso.puts_de_preco()] == ["MLB100"]
+    assert out["detail"] == "1/2 variations ok; 1 pulado(s)"
+
+    # Desligou: volta a ser como antes.
+    await _ligar(client, base.id, False)
+    ml_falso.chamadas.clear()
+    out = await _push(client, base.id, cenario["a003"].id)
+    assert sorted(m for m, _ in ml_falso.puts_de_preco()) == ["MLB100", "MLB200", "MLB202"]
+
+    # Flag trocada (D3 em toda conta ML de Kit): pula mesmo sem o catálogo ligado.
+    monkeypatch.setattr(anuncios, "KIT_PULA_CATALOGO_SO_COM_CATALOGO_LIGADO", False)
+    ml_falso.chamadas.clear()
+    out = await _push(client, base.id, cenario["a003"].id)
+    assert [m for m, _ in ml_falso.puts_de_preco()] == ["MLB100"]
+    assert out["detail"] == "1/2 variations ok; 1 pulado(s)"
+
+
+@pytest.mark.asyncio
+async def test_actual_prices_e_grid_do_kit_sem_catalogo_ligado_ficam_como_antes(
+    db: AsyncSession, client: AsyncClient, dono: User, cenario, auth_as: Callable,
+    ml_falso: MLFalso,
+):
+    auth_as(dono)
+    base = cenario["base"]
+    a003 = cenario["a003"]
+    # O a003 do counhago passa a ter SÓ o anúncio de catálogo do tipo da conta.
+    await db.execute(
+        ProductLink.__table__.delete().where(
+            ProductLink.external_id.in_(["MLB100", "MLB101", "MLB202"])
+        )
+    )
+    await db.commit()
+    ml_falso.item("MLB200", catalog_listing=True, price=99)
+    url = f"/api/pricing/actual-prices/{a003.id}"
+
+    # Sem o catálogo ligado: o Kit lê (e mandaria para) o anúncio de catálogo.
+    precos = (await client.get(url, params={"department": "celular"})).json()
+    assert precos[str(base.id)] == 99.0
+    grid = (await client.get("/api/pricing/grid", params={"department": "celular"})).json()
+    par = (str(base.id), str(a003.id))
+    kit = next(c for c in grid["cells"]
+               if (c["pricing_account_id"], c["pricing_product_id"]) == par)
+    assert kit["catalogo"] is None
+
+    # Com o catálogo ligado: o Kit não lê mais o de catálogo; a filha lê.
+    filha_id = (await _ligar(client, base.id)).json()["conta_catalogo"]["id"]
+    precos = (await client.get(url, params={"department": "celular"})).json()
+    assert precos[str(base.id)] is None
+    assert precos[filha_id] == 99.0
+
+
+@pytest.mark.asyncio
+async def test_kit_com_catalogo_ligado_so_catalogo_e_bloqueado_nao_sem_vinculo(
+    db: AsyncSession, client: AsyncClient, dono: User, cenario, auth_as: Callable,
+    ml_falso: MLFalso,
+):
+    """Achado da revisão: a célula de Kit cujo único anúncio que casa é de
+    catálogo não pode virar 'no_link' (sem vínculo) — o vínculo está certo, o
+    preço é que vai pela coluna Catálogo."""
+    auth_as(dono)
+    base = cenario["base"]
+    a003 = cenario["a003"]
+    await db.execute(
+        ProductLink.__table__.delete().where(
+            ProductLink.external_id.in_(["MLB100", "MLB101", "MLB202"])
+        )
+    )
+    await db.commit()
+    ml_falso.item("MLB200", catalog_listing=True)
+    await _ligar(client, base.id)
+
+    out = await _push(client, base.id, a003.id)
+    assert (out["ok"], out["code"]) == (False, "bloqueado"), out
+    assert out["detail"].startswith(
+        "Este produto só tem anúncio de catálogo nesta conta — o preço vai pela coluna Catálogo"
+    )
+    assert "MLB200" in out["detail"]
+    assert "no product_links" not in out["detail"]
+    assert ml_falso.chamadas == []
+    assert (await db.execute(select(PricingOverride))).first() is None
+
+    from app.services.pricing.push import push_one
+
+    res = await push_one(db, user=dono, account_id=base.id, product_id=a003.id)
+    assert res.payload["bloqueio"] == "so_catalogo"
+    assert [e["externalId"] for e in res.payload["links"]] == ["MLB200"]
+
+    # /grid: a célula de Kit mostra o cadeado 'so_catalogo', sem status de erro.
+    grid = (await client.get("/api/pricing/grid", params={"department": "celular"})).json()
+    celulas = {(c["pricing_account_id"], c["pricing_product_id"]): c for c in grid["cells"]}
+    kit = celulas[(str(base.id), str(a003.id))]
+    assert kit["cell_status"] == "auto"
+    assert kit["catalogo"]["bloqueio"] == "so_catalogo"
+    assert kit["catalogo"]["texto"] == (
+        "Este produto só tem anúncio de catálogo nesta conta — o preço vai pela coluna Catálogo"
+    )
+    assert [x["external_id"] for x in kit["catalogo"]["anuncios"]] == ["MLB200"]
+    # A outra conta de Kit da mesma integração (eron, sem catálogo ligado)
+    # continua sem o campo — nada muda para ela.
+    assert celulas[(str(cenario["sem_tipo"].id), str(a003.id))]["catalogo"] is None
+    # dg052 só tem anúncio de catálogo também (sincronizado/pausado).
+    assert celulas[(str(base.id), str(cenario["dg052"].id))]["catalogo"]["bloqueio"] == (
+        "so_catalogo"
+    )

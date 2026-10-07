@@ -356,7 +356,8 @@ class PricingGridCatalogoAnuncio(BaseModel):
     listing_type: str | None = None
     sincronizado_com: list[str] = []
     # Motivo de ESTE anúncio não receber: mesmo_anuncio (outra linha da tabela
-    # também casa com ele) | sincronizado | pausado | em_revisao | encerrado.
+    # também casa com ele) | sincronizado | pausado | em_revisao | encerrado |
+    # so_catalogo (célula de Kit: o anúncio é da coluna Catálogo).
     bloqueio: str | None = None
 
 
@@ -364,7 +365,7 @@ class PricingGridCatalogo(BaseModel):
     """Célula de conta de catálogo: para onde vai o preço e, se não vai, por quê."""
     anuncios: list[PricingGridCatalogoAnuncio] = []
     # None | sem_anuncio | mesmo_anuncio | sincronizado | pausado | em_revisao |
-    # encerrado | sem_tipo | sem_preco_catalogo
+    # encerrado | sem_tipo | sem_preco_catalogo | so_catalogo (só célula de Kit)
     bloqueio: str | None = None
     texto: str | None = None
 
@@ -377,7 +378,9 @@ class PricingGridCell(BaseModel):
     cell_status: str = "auto"
     has_override: bool = False
     cell_color: str | None = None
-    # Só nas colunas de catálogo (conta canal='catalogo'); None nas de kit.
+    # Nas colunas de catálogo (conta canal='catalogo'). Na de Kit só quando a
+    # conta tem o catálogo ligado e o único anúncio que casa é de catálogo
+    # (bloqueio 'so_catalogo'); None nas outras.
     catalogo: PricingGridCatalogo | None = None
 
 

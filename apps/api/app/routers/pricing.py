@@ -81,12 +81,17 @@ from app.services.pricing.anuncios import (
     Resolucao,
     celula_manda_preco,
     info_celula_catalogo,
+    info_celula_kit_so_catalogo,
+    kit_pula_catalogo,
     resolver_anuncios,
     separar_anuncios_disputados,
 )
 from app.services.pricing.calc import CalcOutcome, calculate
 from app.services.pricing.competitor import search_competitors
-from app.services.pricing.push import push_one
+from app.services.pricing.push import (
+    bases_com_catalogo_ligado,
+    push_one,
+)
 from app.services.pricing.sku_match import ml_listing_type_for_account, variants_of
 from app.services.store_departments import (
     MANUAL_DEPARTMENT_PLATFORMS as _MANUAL_DEPARTMENT_PLATFORMS,
@@ -1177,11 +1182,23 @@ async def get_grid(
         for f in filhas
         if contas_por_id[f.conta_base_id].integration_id is not None
     }
-    if integs_catalogo:
+    # Colunas de Kit em que a D3 vale (a conta tem a coluna Catálogo ligada):
+    # a célula cujo único anúncio que casa é de catálogo diz "só catálogo".
+    kits_ml = [
+        a
+        for a in accounts
+        if a.canal != CANAL_CATALOGO
+        and a.platform == PricingPlatform.ML
+        and a.integration_id is not None
+    ]
+    com_catalogo = await bases_com_catalogo_ligado(session, [a.id for a in kits_ml])
+    kits_d3 = [a for a in kits_ml if kit_pula_catalogo(a.id in com_catalogo)]
+    integs_com_links = integs_catalogo | {a.integration_id for a in kits_d3}
+    if integs_com_links:
         for lk in (
             await session.execute(
                 select(ProductLink).where(
-                    ProductLink.integration_id.in_(integs_catalogo),
+                    ProductLink.integration_id.in_(integs_com_links),
                     ProductLink.catalog_listing.is_(True),
                 )
             )
@@ -1247,12 +1264,16 @@ async def get_grid(
     for por_linha in disputa.values():
         separar_anuncios_disputados(por_linha, skus_das_linhas)
 
+    so_catalogo = await _celulas_kit_so_catalogo(
+        session, products, kits_d3, links_catalogo, sku_dos_links, _dept_da_conta
+    )
+
     cells: list[PricingGridCell] = []
     for prod in products:
         for acc in accounts:
             ovr = by_pair.get((prod.id, acc.id))
             outcome = outcomes[(prod.id, acc.id)]
-            catalogo = None
+            catalogo = so_catalogo.get((prod.id, acc.id))
             if acc.canal == CANAL_CATALOGO:
                 base = contas_por_id.get(acc.conta_base_id)
                 catalogo = info_celula_catalogo(
@@ -1279,6 +1300,86 @@ async def get_grid(
         products=[_product_out(p, leaves_by_id) for p in products],
         cells=cells,
     )
+
+
+async def _celulas_kit_so_catalogo(
+    session: AsyncSession,
+    products,
+    kits_d3: list[PricingAccount],
+    links_catalogo: dict[UUID, list[ProductLink]],
+    sku_dos_links: dict[UUID, str],
+    dept_da_conta,
+) -> dict[tuple[UUID, UUID], dict]:
+    """{(linha, conta de Kit): campo `catalogo`} das células de Kit (D3
+    valendo) cujo único anúncio que casa é de catálogo — o mesmo resolvedor
+    do envio, que nelas responde 'bloqueado' (so_catalogo) e não 'no_link'.
+
+    Em lote: primeiro só com os anúncios de catálogo (poucos) acha as
+    candidatas; depois, numa consulta por integração, os vínculos comuns
+    das linhas candidatas (SKU começando pelo código base) decidem."""
+    candidatas: list[tuple[PricingProduct, PricingAccount]] = []
+    for acc in kits_d3:
+        cats = links_catalogo.get(acc.integration_id) or []
+        if not cats:
+            continue
+        for prod in products:
+            pre = resolver_anuncios(
+                cats,
+                sku_dos_links,
+                pricing_sku=prod.sku,
+                dept=dept_da_conta(acc),
+                plataforma="ml",
+                canal=CANAL_KIT,
+                listing_type_conta=acc.listing_type,
+                pula_catalogo=True,
+            )
+            if pre.so_catalogo:
+                candidatas.append((prod, acc))
+    if not candidatas:
+        return {}
+
+    bases_por_integ: dict[UUID, set[str]] = defaultdict(set)
+    for prod, acc in candidatas:
+        bases_por_integ[acc.integration_id] |= {
+            v.split(".", 1)[0].lower() for v in variants_of(prod.sku)
+        }
+    links_por_integ: dict[UUID, list[ProductLink]] = {}
+    skus: dict[UUID, str] = dict(sku_dos_links)
+    for integ_id, bases in bases_por_integ.items():
+        linhas = (
+            await session.execute(
+                select(ProductLink, Product.sku)
+                .join(Product, Product.id == ProductLink.product_id)
+                .where(
+                    ProductLink.integration_id == integ_id,
+                    or_(
+                        *[
+                            func.lower(Product.sku).like(_like_prefixo(b), escape="\\")
+                            for b in sorted(bases)
+                        ]
+                    ),
+                )
+            )
+        ).all()
+        links_por_integ[integ_id] = [lk for lk, _sku in linhas]
+        skus.update({lk.product_id: sku for lk, sku in linhas if sku})
+
+    out: dict[tuple[UUID, UUID], dict] = {}
+    for prod, acc in candidatas:
+        res = resolver_anuncios(
+            links_por_integ.get(acc.integration_id, ()),
+            skus,
+            pricing_sku=prod.sku,
+            dept=dept_da_conta(acc),
+            plataforma="ml",
+            canal=CANAL_KIT,
+            listing_type_conta=acc.listing_type,
+            pula_catalogo=True,
+        )
+        info = info_celula_kit_so_catalogo(res)
+        if info is not None:
+            out[(prod.id, acc.id)] = info
+    return out
 
 
 # =============================================================================
@@ -1663,6 +1764,10 @@ async def get_actual_prices(
     integration_cache: dict[UUID, Integration | None] = {}
     links_cache: dict[UUID, list[ProductLink]] = {}
     client_cache: dict[UUID, object] = {}
+    # D3 só nas contas de Kit com a coluna Catálogo ligada (como no envio).
+    com_catalogo = await bases_com_catalogo_ligado(
+        session, [a.id for a in accounts if a.canal != CANAL_CATALOGO]
+    )
 
     for acc in accounts:
         dona = contas_por_id.get(acc.conta_base_id) if acc.canal == CANAL_CATALOGO else acc
@@ -1709,6 +1814,7 @@ async def get_actual_prices(
             plataforma=platform_value,
             canal=acc.canal or CANAL_KIT,
             listing_type_conta=acc.listing_type,
+            pula_catalogo=kit_pula_catalogo(acc.id in com_catalogo),
         )
         links = resolucao.todos
         if not links:

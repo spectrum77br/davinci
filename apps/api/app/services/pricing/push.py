@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -47,10 +48,13 @@ from app.services.marketplaces.amazon import AmazonClient
 from app.services.marketplaces.tiktok import TikTokClient
 from app.services.marketplaces.temu import TemuClient
 from app.services.pricing.anuncios import (
+    BLOQUEIO_SO_CATALOGO,
     CANAL_CATALOGO,
     CANAL_KIT,
+    TEXTO_BLOQUEIO,
     Resolucao,
     celula_manda_preco,
+    kit_pula_catalogo,
     resolver_anuncios,
     separar_anuncios_disputados,
     texto_bloqueio_envio,
@@ -246,6 +250,26 @@ _ESPERAS_LIMITE_S = (3.0, 8.0, 20.0, 45.0)
 _INTERVALO_APOS_LIMITE_S = 0.25
 
 
+async def bases_com_catalogo_ligado(
+    session: AsyncSession, ids: Iterable[UUID | None]
+) -> set[UUID]:
+    """Das contas de Kit `ids`, as que têm a coluna Catálogo ligada (existe a
+    filha canal='catalogo'). É o que decide se a D3 vale na conta."""
+    ids = [i for i in ids if i is not None]
+    if not ids:
+        return set()
+    return set(
+        (
+            await session.execute(
+                select(PricingAccount.conta_base_id).where(
+                    PricingAccount.canal == CANAL_CATALOGO,
+                    PricingAccount.conta_base_id.in_(ids),
+                )
+            )
+        ).scalars()
+    )
+
+
 async def resolver_para_envio(
     session: AsyncSession,
     *,
@@ -254,6 +278,7 @@ async def resolver_para_envio(
     department: str | None,
     platform_str: str,
     conta_base: PricingAccount | None = None,
+    pula_catalogo: bool | None = None,
 ) -> Resolucao:
     """Resolução SSH-style: busca TODOS os product_links da integração
     primeiro e só depois filtra pelos SKUs do pricing_product.
@@ -267,6 +292,8 @@ async def resolver_para_envio(
     A regra em si (canal kit × catálogo) é a do resolvedor único
     (`services/pricing/anuncios.py`), o mesmo do /grid e do /actual-prices.
     No canal catálogo os vínculos são os da integração da conta BASE.
+    `pula_catalogo` (canal kit): a D3 vale? None = descobre aqui (a conta tem
+    a coluna Catálogo ligada?).
     """
     if not pricing_product.sku or not variants_of(pricing_product.sku):
         return Resolucao()
@@ -294,6 +321,10 @@ async def resolver_para_envio(
     ).all()
     product_map: dict[UUID, str] = {pid: sku for pid, sku in sku_rows if sku}
 
+    if canal == CANAL_KIT and pula_catalogo is None:
+        pula_catalogo = kit_pula_catalogo(
+            account.id in await bases_com_catalogo_ligado(session, [account.id])
+        )
     resolucao = resolver_anuncios(
         all_links,
         product_map,
@@ -302,6 +333,7 @@ async def resolver_para_envio(
         plataforma=platform_str,
         canal=canal,
         listing_type_conta=account.listing_type,
+        pula_catalogo=bool(pula_catalogo),
     )
     if canal == CANAL_CATALOGO and resolucao.links:
         await _separar_disputados(
@@ -672,6 +704,16 @@ async def push_one(
         )
 
     department = await _account_department(session, dona)
+    # D3 (a coluna de Kit não manda para anúncio de catálogo) só na conta de
+    # Kit com a coluna Catálogo ligada — decide o resolvedor E a conferência
+    # do item vivo (canal_esperado).
+    pula_catalogo = (
+        canal == CANAL_KIT
+        and integration.platform == IntegrationPlatform.ML
+        and kit_pula_catalogo(
+            account.id in await bases_com_catalogo_ligado(session, [account.id])
+        )
+    )
     resolucao = await resolver_para_envio(
         session,
         account=account,
@@ -679,6 +721,7 @@ async def push_one(
         department=department,
         platform_str=integration.platform.value,
         conta_base=conta_base,
+        pula_catalogo=pula_catalogo,
     )
     links = resolucao.links
     if canal == CANAL_CATALOGO and not links:
@@ -694,6 +737,23 @@ async def push_one(
             payload={
                 "bloqueio": bloqueio,
                 "links": [_entrada_bloqueada(b) for b in resolucao.bloqueados],
+            },
+        )
+    if not links and resolucao.so_catalogo:
+        # Kit com o catálogo ligado e só anúncio de catálogo casando: o vínculo
+        # existe e está certo — não é "sem vínculo" (nada de NO_LINK); o preço
+        # vai pela coluna Catálogo.
+        ids = ", ".join(lk.external_id for lk in resolucao.so_catalogo)
+        return PushOutcome(
+            ok=False,
+            code="bloqueado",
+            detail=f"{TEXTO_BLOQUEIO[BLOQUEIO_SO_CATALOGO]} ({ids})",
+            price=outcome.price,
+            payload={
+                "bloqueio": BLOQUEIO_SO_CATALOGO,
+                "links": [
+                    _entrada_pulada(lk, BLOQUEIO_SO_CATALOGO) for lk in resolucao.so_catalogo
+                ],
             },
         )
     if not links:
@@ -767,7 +827,13 @@ async def push_one(
         sku_by_product=sku_by_product,
         # Só o ML confere o canal e o tipo no item vivo (o catálogo é só do
         # ML; clássico/premium também). Conta sem tipo → None (não confere).
-        canal_esperado=canal if integration.platform == IntegrationPlatform.ML else None,
+        # Kit sem a coluna Catálogo ligada não confere o canal (sem D3).
+        canal_esperado=(
+            canal
+            if integration.platform == IntegrationPlatform.ML
+            and (canal == CANAL_CATALOGO or pula_catalogo)
+            else None
+        ),
         tipo_esperado=(
             ml_listing_type_for_account(account.listing_type)
             if integration.platform == IntegrationPlatform.ML
@@ -913,16 +979,20 @@ async def push_one(
 def _entrada_bloqueada(b) -> dict:  # b: anuncios.AnuncioBloqueado
     """Linha do resultado por anúncio para um anúncio de catálogo que o
     resolvedor bloqueou (não foi chamado no ML)."""
+    return _entrada_pulada(b.link, b.motivo)
+
+
+def _entrada_pulada(link: ProductLink, motivo: str) -> dict:
     return {
-        "externalId": b.link.external_id,
-        "variationId": b.link.variation_id,
+        "externalId": link.external_id,
+        "variationId": link.variation_id,
         "success": False,
         "skipped": True,
-        "message": f"não enviado: {b.motivo}",
-        "external_id": b.link.external_id,
-        "variation_id": b.link.variation_id,
+        "message": f"não enviado: {motivo}",
+        "external_id": link.external_id,
+        "variation_id": link.variation_id,
         "status": SyncStatus.SKIPPED.value,
-        "error_code": b.motivo,
+        "error_code": motivo,
     }
 
 
