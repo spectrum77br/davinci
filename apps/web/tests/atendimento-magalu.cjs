@@ -139,10 +139,14 @@ assert.match(obs, /v-else-if="portal"[\s\S]{0,120}:href="portal\.url"/)
 const lojas = fs.readFileSync(path.resolve(__dirname, '../components/AtendimentoLojas.vue'), 'utf8')
 assert.match(lojas, /const ORDEM = \['shopee', 'tiktok', 'ml', 'amazon', 'magalu', 'temu', 'aliexpress', 'site', 'instagram', 'facebook'\]/)
 
-// Lista: canal na linha (variasCaixas) e a Magalu no filtro só com o /resumo.
+// Lista: canal na linha (variasCaixas) e a Magalu no filtro só com o /resumo
+// (08/10/2026: o filtro de plataforma virou os chips do topo da lista — só a
+// plataforma com loja da pessoa no /resumo, ou conversa esperando).
 const lista = fs.readFileSync(path.resolve(__dirname, '../components/AtendimentoLista.vue'), 'utf8')
 assert.match(lista, /return variasCaixas\(c\.plataforma\) \?/)
-assert.match(lista, /const SO_COM_RESUMO = new Set\(\['instagram', 'magalu', 'site', 'facebook'\]\)/)
+const chips = fs.readFileSync(path.resolve(__dirname, '../components/AtendimentoFiltroPlataforma.vue'), 'utf8')
+assert.match(chips, /\{ valor: 'magalu', plataformas: \['magalu'\], nome: 'Magalu' \}/)
+assert.match(chips, /\.filter\(\(g\) => g\.plataformas\.some\(\(p\) => comLoja\.has\(p\)\) \|\| g\.aguardando > 0/)
 
 // Painel do pedido: sem retrato pela API (enriquecer só tem Shopee e ML), e
 // pergunta de pré-venda não finge que "falta a API".

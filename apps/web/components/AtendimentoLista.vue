@@ -62,20 +62,21 @@ export const FILTROS_RAPIDOS: OpcaoFiltro[] = [...ABAS_LISTA, ...FILTROS_MENU]
 // discreto: selo de prazo, "IA sugeriu", "a conferir", atribuída.
 // Os contadores dos filtros rápidos vêm do /resumo (a lista é paginada,
 // contar os itens carregados mentiria). Setas ↑/↓ andam pela lista sem mouse.
-// A plataforma e a loja se escolhem na barra de lojas (AtendimentoLojas); em
-// tela estreita, onde a barra some, voltam os dois seletores aqui.
+// A PLATAFORMA se escolhe nos chips logo acima da Caixa (08/10/2026,
+// AtendimentoFiltroPlataforma na página — "só Mercado Livre, só Shopee"), em
+// qualquer largura; "Redes" é um grupo (`instagram,facebook`). A loja se
+// escolhe na barra de lojas (AtendimentoLojas); em tela estreita, onde a
+// barra some, volta o seletor de loja aqui.
 import { onClickOutside } from '@vueuse/core'
 import { Bot, Check, Inbox, ListFilter, Loader2, Lock, PauseCircle, RotateCcw, Search, Sparkles, TriangleAlert, UserRound, X } from 'lucide-vue-next'
 import { ETIQUETAS_INFO, faixaDaEtiqueta, secundariasDe } from '~/components/AtendimentoEtiqueta.vue'
 import {
-  PLATAFORMAS_ATENDIMENTO,
   canaisDa,
   canalLabel,
   horaLista,
   plataformaInfo,
   prazoDe,
   variasCaixas,
-  viaRobo,
   type ConversaResumo,
   type Resumo,
 } from '~/components/AtendimentoPlataforma.vue'
@@ -170,7 +171,9 @@ const contagem = computed((): Record<string, number | null> => {
       ...porEtiqueta(l ? [l.etiquetas] : []),
     }
   }
-  const ps = f.plataforma ? r.plataformas.filter((p) => p.plataforma === f.plataforma) : r.plataformas
+  // Uma plataforma ou um grupo dos chips ("Redes" = "instagram,facebook").
+  const escolhidas = (f.plataforma || '').split(',').filter(Boolean)
+  const ps = escolhidas.length ? r.plataformas.filter((p) => escolhidas.includes(p.plataforma)) : r.plataformas
   const porPlataforma = ps.length > 0 && ps.every((p) => typeof p.a_conferir === 'number')
   return {
     aguardando: ps.reduce((s, p) => s + (p.aguardando || 0), 0),
@@ -204,33 +207,18 @@ function escolherDoMenu(value: string) {
   mudar('filtro', filtros.value.filtro === value ? 'todas' : value)
 }
 
-function aguardandoDaPlataforma(p: string): number | null {
-  const x = props.resumo?.plataformas.find((y) => y.plataforma === p)
-  return x ? x.aguardando : null
-}
-// O Instagram só entra na escolha quando o /resumo o traz (quem vê todas as
-// equipes, havendo DM) — como na barra de lojas: para os outros a opção só
-// levava a uma lista vazia. Se o filtro já está nele, fica, para aparecer.
-// Temu e AliExpress (robô do Mac mini), do mesmo jeito: só quando o /resumo
-// tem a plataforma ou uma loja dela — antes do robô existir, a opção só
-// levava a uma lista vazia (ou recusada pela API). A Magalu (30/09/2026)
-// também: o backend que ainda não lê a Magalu recusa o filtro
-// (`plataforma_invalida`); o que já lê manda a plataforma no /resumo.
-// Site e Facebook (02/10/2026: carrinho e comentários) também: só existem
-// quando o leitor deles abriu o canal.
-const SO_COM_RESUMO = new Set(['instagram', 'magalu', 'site', 'facebook'])
-const plataformasDoFiltro = computed(() =>
-  PLATAFORMAS_ATENDIMENTO.filter((p) =>
-    (!SO_COM_RESUMO.has(p.value) && !viaRobo(p.value))
-    || filtros.value.plataforma === p.value
-    || !!props.resumo?.plataformas.some((y) => y.plataforma === p.value)
-    || ((viaRobo(p.value) || SO_COM_RESUMO.has(p.value)) && !!props.resumo?.lojas.some((l) => l.plataforma === p.value))),
-)
+// A escolha da plataforma (antes um <select> só em tela estreita) virou os
+// chips acima da Caixa (AtendimentoFiltroPlataforma), que só mostram as
+// plataformas que existem para a pessoa.
 
 // O seletor de loja (tela estreita, onde a barra some): as lojas com
 // integração e, como na barra (02/10/2026), as linhas sem integração que
 // filtram — o site (`externo_ref`) e a conta de rede (`rede_social_id`: o
 // Direct e os comentários dela). A chave diz qual filtro a opção liga.
+// A plataforma pode ser um GRUPO dos chips ("Redes" = "instagram,facebook").
+const escolhidas = computed(() => (filtros.value.plataforma || '').split(',').filter(Boolean))
+// UMA plataforma escolhida (os nomes de caixa e a loja dizem respeito a ela).
+const umaPlataforma = computed(() => (escolhidas.value.length === 1 ? escolhidas.value[0] : ''))
 type ResumoLojaLista = NonNullable<Resumo['lojas']>[number]
 function chaveDaLoja(l: Pick<ResumoLojaLista, 'integration_id' | 'externo_ref' | 'rede_social_id'>): string {
   if (l.integration_id) return `i:${l.integration_id}`
@@ -240,14 +228,14 @@ function chaveDaLoja(l: Pick<ResumoLojaLista, 'integration_id' | 'externo_ref' |
 }
 const lojas = computed(() => {
   const ls = props.resumo?.lojas || []
-  const f = filtros.value.plataforma
+  const f = escolhidas.value
   // Conversa de loja que saiu do DaVinci fica sem integration_id: não dá
   // para filtrar por ela (aparece em "todas lojas"). A loja do robô sem
   // integração também não (só a plataforma inteira).
   return ls
     .map((l) => ({ ...l, chave: chaveDaLoja(l) }))
     .filter((l) => !!l.chave)
-    .filter((l) => !f || l.plataforma === f)
+    .filter((l) => !f.length || f.includes(l.plataforma))
     .sort((a, b) => a.plataforma.localeCompare(b.plataforma) || (a.conta || '').localeCompare(b.conta || '', 'pt-BR'))
 })
 const lojaEscolhida = computed(() => chaveDaLoja({
@@ -281,7 +269,7 @@ const CAIXAS_INSTAGRAM = [
 ]
 const instagramComComentarios = computed(() => !!props.resumo?.canais?.some((c) => c.plataforma === 'instagram' && c.canal === 'comentario'))
 const canais = computed(() =>
-  filtros.value.plataforma === 'instagram' && instagramComComentarios.value ? CAIXAS_INSTAGRAM : canaisDa(filtros.value.plataforma),
+  umaPlataforma.value === 'instagram' && instagramComComentarios.value ? CAIXAS_INSTAGRAM : canaisDa(umaPlataforma.value),
 )
 
 // ─── itens ──────────────────────────────────────────────────────────────────
@@ -391,20 +379,9 @@ function mover(delta: number) {
           <X class="size-3.5" />
         </button>
       </div>
-      <!-- Plataforma e loja: na barra de lojas em tela larga; aqui só quando ela
-           some (tela estreita). A caixa do ML (Pergunta/Pós-venda) fica sempre. -->
+      <!-- A loja: na barra de lojas em tela larga; aqui só quando ela some (tela
+           estreita). A caixa do ML (Pergunta/Pós-venda) fica sempre. -->
       <div class="gap-1.5" :class="canais.length > 1 ? 'flex' : 'flex lg:hidden'">
-        <select
-          :value="filtros.plataforma"
-          class="h-8 min-w-0 flex-1 rounded-md border bg-background px-1.5 text-xs lg:hidden"
-          aria-label="plataforma"
-          @change="mudar('plataforma', ($event.target as HTMLSelectElement).value)"
-        >
-          <option value="">todas plataformas</option>
-          <option v-for="p in plataformasDoFiltro" :key="p.value" :value="p.value">
-            {{ p.nome }}<template v-if="aguardandoDaPlataforma(p.value)"> ({{ aguardandoDaPlataforma(p.value) }})</template>
-          </option>
-        </select>
         <select
           :value="lojaEscolhida"
           class="h-8 min-w-0 flex-1 rounded-md border bg-background px-1.5 text-xs lg:hidden"
@@ -414,7 +391,7 @@ function mover(delta: number) {
         >
           <option value="">todas lojas</option>
           <option v-for="l in lojas" :key="l.chave" :value="l.chave">
-            {{ filtros.plataforma ? '' : `${plataformaInfo(l.plataforma).curto} · ` }}{{ l.conta || 'sem nome' }}<template v-if="l.aguardando"> ({{ l.aguardando }})</template>
+            {{ umaPlataforma ? '' : `${plataformaInfo(l.plataforma).curto} · ` }}{{ l.conta || 'sem nome' }}<template v-if="l.aguardando"> ({{ l.aguardando }})</template>
           </option>
         </select>
         <select
@@ -424,7 +401,7 @@ function mover(delta: number) {
           aria-label="canal"
           @change="mudar('canal', ($event.target as HTMLSelectElement).value)"
         >
-          <option value="">{{ plataformaInfo(filtros.plataforma).curto }}: todas as caixas</option>
+          <option value="">{{ plataformaInfo(umaPlataforma).curto }}: todas as caixas</option>
           <option v-for="c in canais" :key="c.value" :value="c.value">{{ c.label }}</option>
         </select>
       </div>

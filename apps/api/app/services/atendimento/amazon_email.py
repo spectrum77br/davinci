@@ -50,13 +50,19 @@ Três coisas desenham este arquivo:
    real, 28/09/2026): `donotreply@amazon.com`, cabeçalho
    `X-Space-Notification-Type: BBC_MESSAGE_CONFIRMATION_TO_MERCHANT`,
    assunto "Seu e-mail para <nome do comprador>", só HTML. Ela não traz
-   caso, pedido (na pergunta pré-venda) nem endereço de retransmissão: liga
-   à conversa pela conta (o "+conta") e pelo pedido que ela cita ou, sem
-   ele, pelo NOME do comprador — em conversa com pergunta anterior à cópia.
+   caso, endereço de retransmissão, citação da pergunta nem link do caso
+   (conferido nas 15 cópias reais de 28/09 a 07/10/2026); traz, no MODELO
+   antes do "Iniciar mensagem", o "ID do pedido" quando a conversa é de um
+   pedido (13 das 15). Liga à conversa pela conta (o "+conta") e pelo
+   pedido do modelo (senão o que a loja cita no texto) ou, sem pedido, pelo
+   NOME do comprador — em conversa com pergunta anterior à cópia.
    Vira mensagem da LOJA com origem `externo`, no lugar dela pelo Date: se
    é a resposta mais nova, a conversa sai da fila e a IA se cala. Nunca
-   cria conversa e nunca chuta: duas conversas do mesmo nome → nenhuma sai
-   da fila (a tela avisa "conferir"); cópia da NOSSA resposta (a Amazon
+   cria conversa e nunca chuta: duas candidatas do mesmo pedido/nome →
+   nenhuma sai da fila e a cópia fica guardada nelas para a pessoa escolher
+   com 1 clique (`resolver_copia`) — sem desempate automático: "a única que
+   esperava" fecharia a errada quando a loja manda um segundo recado na
+   conversa já respondida; cópia da NOSSA resposta (a Amazon
    pode copiar o que sai pelo DaVinci) → só confirma a nossa; pergunta que
    ainda não chegou → a cópia espera no cursor. Os outros avisos do
    `donotreply` continuam ignorados. Resposta dada por um e-mail que não
@@ -102,7 +108,7 @@ from urllib.parse import parse_qs, urlsplit
 from uuid import UUID
 
 import structlog
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -173,6 +179,24 @@ MAX_COPIAS_PENDENTES = 50
 # (relógios diferentes).
 JANELA_NOSSA_ANTES = timedelta(hours=2)
 JANELA_NOSSA_DEPOIS = timedelta(minutes=10)
+
+# A cópia que empatou entre conversas do mesmo pedido/nome fica guardada NAS
+# candidatas (`conversa.dados`), inteira, para a pessoa dizer com 1 clique
+# qual foi a respondida (`resolver_copia`). A marca antiga (até 07/10/2026:
+# só o Message-ID e a hora, sem o texto) é reavaliada pela leitura seguinte.
+CHAVE_COPIAS_A_CONFERIR = "amazon_copias_a_conferir"
+CHAVE_COPIA_LEGADA = "amazon_copia_a_conferir"
+# As que a pessoa disse "não foi esta": reler a caixa não marca de novo.
+CHAVE_COPIAS_DESCARTADAS = "amazon_copias_descartadas"
+MAX_COPIAS_POR_CONVERSA = 5
+MAX_DESCARTADAS = 20
+# Uma vez (por versão), a leitura relê as cópias do Seller Central dos
+# últimos 30 dias: as que empataram pela regra antiga (sem olhar o "ID do
+# pedido" do modelo) passam pela nova.
+# Reler não duplica nada (`_ja_gravados`).
+VERSAO_REAVALIACAO = 1
+JANELA_REAVALIACAO = timedelta(days=30)
+LIMITE_REAVALIACAO = 100
 
 # O tipo de notificação da Amazon (cabeçalho `X-Space-Notification-Type`).
 # A do comprador é BBC_MESSAGE_SENT_TO_MERCHANT; a cópia do que a loja mandou
@@ -976,6 +1000,9 @@ class ConfirmacaoAmazon:
     pedido: str | None
     enviada_em: datetime | None
     uid: int | None = None
+    # O pedido veio do MODELO da Amazon ("ID do pedido: ...", antes do
+    # "Iniciar mensagem") — e não de um número que a loja escreveu.
+    pedido_do_modelo: bool = False
 
 
 _RE_ASSUNTO_CONFIRMACAO = re.compile(
@@ -988,6 +1015,28 @@ _RE_COPIA_PARA = re.compile(
     r"|copy\s+of\s+the\s+e-?mail\s+you\s+sent\s+to)\s+(?P<nome>[^\n]+?)\s*\.?\s*$",
     re.IGNORECASE | re.MULTILINE,
 )
+
+
+# O pedido no MODELO da cópia, ANTES do "Iniciar mensagem": "ID do pedido:
+# 702-...". É a Amazon dizendo de que pedido é a conversa respondida — veio
+# em 13 das 15 cópias reais de 28/09 a 07/10/2026 (as 2 sem ele eram de
+# pergunta sem pedido). Até 07/10 a leitura só olhava o texto da loja e o
+# assunto, e a cópia com o pedido no modelo caía no nome — e empatava
+# quando o comprador tinha duas conversas (caso KIA, 07/10/2026).
+_RE_PEDIDO_DO_MODELO = re.compile(
+    r"(?:\bid\s+do\s+pedido|\bn[uú]mero\s+do\s+pedido|\border\s+id|\border\s+number)"
+    r"\s*[:#]?\s*(?P<pedido>\d{3}-\d{7}-\d{7})\b",
+    re.IGNORECASE,
+)
+
+
+def _pedido_do_modelo(fatias: _Fatias) -> str | None:
+    """O "ID do pedido" do modelo — só com o marcador de início achado (sem
+    ele não há como separar o modelo do texto da loja) e só se for UM."""
+    if not fatias.achou_inicio:
+        return None
+    achados = {m.group("pedido") for m in _RE_PEDIDO_DO_MODELO.finditer(fatias.antes)}
+    return achados.pop() if len(achados) == 1 else None
 
 
 def _nome_limpo(nome: str | None) -> str | None:
@@ -1040,15 +1089,20 @@ def interpretar_confirmacao(bruto: bytes, *, uid: int | None = None) -> Confirma
     nome = _nome_limpo(pelo_assunto.group("nome")) if pelo_assunto else None
     if nome is None and (achado := _RE_COPIA_PARA.search(fatias.antes)):
         nome = _nome_limpo(achado.group("nome"))
-    pedido = RE_PEDIDO.search(texto) or RE_PEDIDO.search(assunto)
+    # O do modelo primeiro: é o pedido da conversa; o que a loja escreveu no
+    # texto pode ser de outro assunto.
+    do_modelo = _pedido_do_modelo(fatias)
+    citado = RE_PEDIDO.search(texto) or RE_PEDIDO.search(assunto)
+    pedido = do_modelo or (citado.group(0) if citado else None)
     return ConfirmacaoAmazon(
         message_id=_message_id(msg, bruto),
         tag=_tag_do_destinatario(msg),
         comprador_nome=nome,
         texto=texto or None,
-        pedido=pedido.group(0) if pedido else None,
+        pedido=pedido,
         enviada_em=_data(msg),
         uid=uid,
+        pedido_do_modelo=do_modelo is not None,
     )
 
 
@@ -1143,6 +1197,12 @@ class LeituraCaixa:
     restantes: int = 0
     recomecou: bool = False
     copias_pendentes: list[ConfirmacaoAmazon] = field(default_factory=list)
+    # A releitura única das cópias do Seller Central (`VERSAO_REAVALIACAO`):
+    # os e-mails relidos (já passaram pelo cursor; só a cópia é aproveitada)
+    # e se a versão está em dia depois desta rodada (feita agora, feita antes
+    # ou desnecessária porque a leitura recomeçou dos 7 dias).
+    relidas: list[tuple[int, bytes]] = field(default_factory=list)
+    reavaliacao_em_dia: bool = False
 
 
 def _abrir_imap(config: ConfigCaixa) -> imaplib.IMAP4:
@@ -1217,6 +1277,36 @@ def _extrair_fetch(dados: Sequence[Any] | None) -> list[tuple[int, bytes]]:
     return saida
 
 
+def _buscar(imap: Any, uids: Sequence[int]) -> list[tuple[int, bytes]]:
+    """Os e-mails crus destes UIDs, em lotes, por BODY.PEEK[] (não marca lido)."""
+    mensagens: list[tuple[int, bytes]] = []
+    for i in range(0, len(uids), LOTE_FETCH):
+        parte = uids[i : i + LOTE_FETCH]
+        tipo, dados = imap.uid("FETCH", ",".join(str(u) for u in parte), "(BODY.PEEK[])")
+        if tipo != "OK":
+            raise ErroCaixa(f"fetch recusado ({tipo})")
+        mensagens.extend(_extrair_fetch(dados))
+    return mensagens
+
+
+def _reler_copias(imap: Any, ultimo: int) -> tuple[list[tuple[int, bytes]], bool]:
+    """A releitura ÚNICA das cópias do Seller Central (`VERSAO_REAVALIACAO`).
+
+    Só as que o cursor já passou (até `ultimo`; as mais novas vêm na leitura
+    normal), dos últimos 30 dias, as mais novas até o teto. Busca recusada
+    não derruba a rodada: fica para a próxima (devolve `False`).
+    """
+    desde = datetime.now(UTC).date() - JANELA_REAVALIACAO
+    tipo, dados = imap.uid(
+        "SEARCH", "SINCE", _data_imap(desde), "HEADER", CABECALHO_NOTIFICACAO, TIPO_CONFIRMACAO
+    )
+    if tipo != "OK":
+        logger.warning("atendimento_amazon_email_reavaliacao_recusada", tipo=str(tipo))
+        return [], False
+    uids = sorted(u for u in set(_uids(dados)) if u <= ultimo)[-LIMITE_REAVALIACAO:]
+    return _buscar(imap, uids), True
+
+
 def _ler_caixa(config: ConfigCaixa, cursor: dict, limite: int = LIMITE_POR_RODADA) -> LeituraCaixa:
     """Uma rodada de leitura, SÓ LEITURA: EXAMINE + UID SEARCH + BODY.PEEK[].
 
@@ -1227,6 +1317,8 @@ def _ler_caixa(config: ConfigCaixa, cursor: dict, limite: int = LIMITE_POR_RODAD
         mais) → recomeça pelos 7 dias. A gravação pula o Message-ID que já
         está em QUALQUER conversa Amazon (`_ja_gravados`), então reler não
         duplica nada.
+    Cursor sem `copias_reavaliadas` na versão de agora → também relê, uma
+    vez, as cópias do Seller Central dos últimos 30 dias (`_reler_copias`).
     """
     imap = _abrir_imap(config)
     try:
@@ -1252,19 +1344,21 @@ def _ler_caixa(config: ConfigCaixa, cursor: dict, limite: int = LIMITE_POR_RODAD
         uids = sorted({u for u in _uids(dados) if ultimo is None or u > ultimo})
         lote = uids[:limite]
 
-        mensagens: list[tuple[int, bytes]] = []
-        for i in range(0, len(lote), LOTE_FETCH):
-            parte = lote[i : i + LOTE_FETCH]
-            tipo, dados = imap.uid("FETCH", ",".join(str(u) for u in parte), "(BODY.PEEK[])")
-            if tipo != "OK":
-                raise ErroCaixa(f"fetch recusado ({tipo})")
-            mensagens.extend(_extrair_fetch(dados))
+        mensagens = _buscar(imap, lote)
+        # Cursor novo (1ª leitura, caixa recriada): os 7 dias acima já trazem
+        # as cópias de novo — a releitura não faz falta.
+        relidas: list[tuple[int, bytes]] = []
+        em_dia = ultimo is None or cursor.get("copias_reavaliadas") == VERSAO_REAVALIACAO
+        if not em_dia:
+            relidas, em_dia = _reler_copias(imap, ultimo)
         return LeituraCaixa(
             uidvalidity=uidvalidity,
             ultimo_uid=max(lote) if lote else ultimo,
             mensagens=mensagens,
             restantes=len(uids) - len(lote),
             recomecou=bool(cursor.get("uidvalidity")) and not mesma_caixa,
+            relidas=relidas,
+            reavaliacao_em_dia=em_dia,
         )
     finally:
         try:
@@ -1421,6 +1515,8 @@ async def _cursor_compartilhado(session: AsyncSession) -> dict:
     cursor = {"uidvalidity": escolhido["uidvalidity"], "ultimo_uid": escolhido.get("ultimo_uid")}
     if isinstance(escolhido.get("copias_pendentes"), list):
         cursor["copias_pendentes"] = escolhido["copias_pendentes"]
+    if isinstance(escolhido.get("copias_reavaliadas"), int):
+        cursor["copias_reavaliadas"] = escolhido["copias_reavaliadas"]
     return cursor
 
 
@@ -1833,10 +1929,15 @@ async def _conversa_da_confirmacao(
         nenhuma (a resposta é de outro assunto, e cair no nome fecharia a
         pergunta errada do mesmo comprador);
       - sem pedido → a do mesmo nome (sem acento, caixa ou pontuação).
+    O pedido vem do MODELO da cópia ("ID do pedido:", `_pedido_do_modelo`)
+    ou, sem ele, do texto da loja/assunto.
     Uma só → ela. Duas ou mais (dois casos do mesmo comprador — cada
     "+caso" do endereço de retransmissão é uma conversa —, ou duas "Maria
-    Silva") → nenhuma: a mais recente tiraria da fila a pergunta que
-    ninguém respondeu e deixaria a respondida esperando.
+    Silva") → nenhuma: a pessoa escolhe com 1 clique (`resolver_copia`).
+    Sem desempate automático: a mais recente tiraria da fila a pergunta que
+    ninguém respondeu; "a única que esperava" também — a loja manda um
+    segundo recado pelo Seller Central na conversa já respondida enquanto o
+    mesmo comprador (ou o mesmo pedido, em outro caso) espera na outra.
     """
     referencia = confirmacao.enviada_em or datetime.now(UTC)
     momento = _momento_da_mensagem()
@@ -1970,34 +2071,172 @@ async def _ja_gravados(session: AsyncSession, ids: Iterable[str]) -> set[str]:
     )
 
 
+@dataclass
+class CopiaAConferir:
+    """Uma cópia do Seller Central que empatou, guardada numa candidata.
+
+    `legada` = a marca de antes de 08/10/2026 (só Message-ID e hora): avisa,
+    mas não dá para gravar com 1 clique — a leitura seguinte a reavalia.
+    """
+
+    message_id: str
+    em: datetime
+    texto: str | None = None
+    pedido: str | None = None
+    uid: int | None = None
+    candidatas: list[str] = field(default_factory=list)
+    legada: bool = False
+
+
+def _copia_da_marca(dado: Any, *, legada: bool = False) -> CopiaAConferir | None:
+    """A marca gravada em `conversa.dados` → `CopiaAConferir` (torta → None)."""
+    if not isinstance(dado, dict):
+        return None
+    message_id, em = dado.get("message_id"), dado.get("em")
+    if not isinstance(message_id, str) or not message_id or not isinstance(em, str):
+        return None
+    try:
+        quando = _utc(datetime.fromisoformat(em))
+    except ValueError:
+        return None
+    if quando is None:
+        return None
+    texto, pedido, uid = dado.get("texto"), dado.get("pedido"), dado.get("uid")
+    candidatas = dado.get("candidatas")
+    return CopiaAConferir(
+        message_id=message_id,
+        em=quando,
+        texto=texto if isinstance(texto, str) and texto else None,
+        pedido=pedido if isinstance(pedido, str) and pedido else None,
+        uid=uid if isinstance(uid, int) and not isinstance(uid, bool) else None,
+        candidatas=[c for c in candidatas if isinstance(c, str)]
+        if isinstance(candidatas, list)
+        else [],
+        legada=legada,
+    )
+
+
+def copias_a_conferir(dados: Any) -> list[CopiaAConferir]:
+    """As cópias empatadas guardadas na conversa, da mais velha para a mais nova.
+
+    A lista nova (`amazon_copias_a_conferir`) e a marca legada
+    (`amazon_copia_a_conferir`, se o Message-ID não está na lista).
+    """
+    if not isinstance(dados, dict):
+        return []
+    lista = dados.get(CHAVE_COPIAS_A_CONFERIR)
+    copias = [
+        c for d in (lista if isinstance(lista, list) else []) if (c := _copia_da_marca(d))
+    ]
+    vistas = {c.message_id for c in copias}
+    legada = _copia_da_marca(dados.get(CHAVE_COPIA_LEGADA), legada=True)
+    if legada is not None and legada.message_id not in vistas:
+        copias.append(legada)
+    return sorted(copias, key=lambda c: c.em)
+
+
+def _sem_a_marca(dados: Any, message_id: str, *, descartar: bool = False) -> dict:
+    """`dados` sem a marca desta cópia (lista e legada). Dicionário NOVO —
+    JSONB mutado no lugar não marca a coluna como suja. `descartar` guarda o
+    Message-ID em "não foi esta" (reler a caixa não marca de novo)."""
+    dados = dict(dados) if isinstance(dados, dict) else {}
+    lista = dados.get(CHAVE_COPIAS_A_CONFERIR)
+    if isinstance(lista, list):
+        resto = [
+            d for d in lista if not (isinstance(d, dict) and d.get("message_id") == message_id)
+        ]
+        if resto:
+            dados[CHAVE_COPIAS_A_CONFERIR] = resto
+        else:
+            dados.pop(CHAVE_COPIAS_A_CONFERIR, None)
+    legada = dados.get(CHAVE_COPIA_LEGADA)
+    if not isinstance(legada, dict) or legada.get("message_id") == message_id:
+        dados.pop(CHAVE_COPIA_LEGADA, None)
+    if descartar:
+        antigas = dados.get(CHAVE_COPIAS_DESCARTADAS)
+        antigas = [m for m in antigas if isinstance(m, str)] if isinstance(antigas, list) else []
+        dados[CHAVE_COPIAS_DESCARTADAS] = [
+            *[m for m in antigas if m != message_id], message_id
+        ][-MAX_DESCARTADAS:]
+    return dados
+
+
+def _descartada(c: AtendimentoConversa, message_id: str) -> bool:
+    dados = c.dados if isinstance(c.dados, dict) else {}
+    lista = dados.get(CHAVE_COPIAS_DESCARTADAS)
+    return isinstance(lista, list) and message_id in lista
+
+
 def _marcar_a_conferir(
     confirmacao: ConfirmacaoAmazon, candidatas: list[AtendimentoConversa]
 ) -> int:
-    """A cópia ambígua deixa aviso nas candidatas que ela PODE ter respondido.
+    """A cópia ambígua fica guardada nas candidatas que ela PODE ter respondido.
 
     Nenhuma sai da fila (seria chute), mas a pessoa precisa saber que a
     Central respondeu alguém com este nome — senão responde de novo, ou o
-    alerta de prazo dispara para quem já foi atendido. Só nas que aguardam
-    com a pergunta anterior à cópia; a tela mostra enquanto a conversa
-    aguarda e nenhuma pergunta mais nova chegou (`routers.atendimento`).
-    Devolve quantas marcou.
+    alerta de prazo dispara para quem já foi atendido. A cópia vai INTEIRA
+    (texto, pedido, as candidatas): na tela vira a escolha de 1 clique "Esta
+    foi a respondida" / "Não foi esta" (`resolver_copia`). Só nas que
+    aguardam com a pergunta anterior à cópia e não disseram "não foi esta";
+    a tela mostra enquanto a conversa aguarda e nenhuma pergunta mais nova
+    chegou (`routers.atendimento`). Devolve quantas marcou.
     """
     referencia = confirmacao.enviada_em or datetime.now(UTC)
+    # A que já disse "não foi esta" (reler a caixa) nem conta como candidata.
+    candidatas = [c for c in candidatas if not _descartada(c, confirmacao.message_id)]
+    marca = {
+        "message_id": confirmacao.message_id,
+        "em": referencia.isoformat(),
+        "texto": confirmacao.texto,
+        "pedido": confirmacao.pedido,
+        "uid": confirmacao.uid,
+        "candidatas": [str(c.id) for c in candidatas],
+    }
     marcadas = 0
     for c in candidatas:
         do_cliente = _utc(c.ultima_do_cliente_em)
         if not c.aguardando_resposta or do_cliente is None or do_cliente > referencia:
             continue
-        # Dicionário NOVO: JSONB mutado no lugar não marca a coluna como suja.
-        c.dados = {
-            **(c.dados or {}),
-            "amazon_copia_a_conferir": {
-                "message_id": confirmacao.message_id,
-                "em": referencia.isoformat(),
-            },
-        }
+        dados = _sem_a_marca(c.dados, confirmacao.message_id)
+        lista = dados.get(CHAVE_COPIAS_A_CONFERIR)
+        lista = [d for d in lista if isinstance(d, dict)] if isinstance(lista, list) else []
+        dados[CHAVE_COPIAS_A_CONFERIR] = [*lista, marca][-MAX_COPIAS_POR_CONVERSA:]
+        c.dados = dados
         marcadas += 1
     return marcadas
+
+
+async def _com_marca_legada(session: AsyncSession) -> dict[str, list[AtendimentoConversa]]:
+    """As conversas com a marca de antes de 08/10/2026, por Message-ID da cópia.
+
+    Quando a cópia passa de novo pela regra (a releitura única), a marca
+    velha sai — virou gravação, marca nova ou "nossa".
+    """
+    conversas = (
+        await session.execute(
+            select(AtendimentoConversa).where(
+                AtendimentoConversa.plataforma == PLATAFORMA,
+                AtendimentoConversa.canal == CANAL,
+                AtendimentoConversa.dados.has_key(CHAVE_COPIA_LEGADA),
+            )
+        )
+    ).scalars().all()
+    por_mid: dict[str, list[AtendimentoConversa]] = {}
+    for c in conversas:
+        marca = (c.dados or {}).get(CHAVE_COPIA_LEGADA)
+        mid = marca.get("message_id") if isinstance(marca, dict) else None
+        if isinstance(mid, str) and mid:
+            por_mid.setdefault(mid, []).append(c)
+    return por_mid
+
+
+def _tirar_marca_legada(por_mid: dict[str, list[AtendimentoConversa]], message_id: str) -> None:
+    for c in por_mid.pop(message_id, []):
+        marca = (c.dados or {}).get(CHAVE_COPIA_LEGADA)
+        if isinstance(marca, dict) and marca.get("message_id") == message_id:
+            dados = dict(c.dados or {})
+            dados.pop(CHAVE_COPIA_LEGADA, None)
+            c.dados = dados
 
 
 @dataclass
@@ -2025,13 +2264,20 @@ async def _aplicar_confirmacoes(
 
     Nunca cria conversa e nunca chuta: sem conta → só log; cópia da NOSSA
     resposta → só anota na nossa mensagem (`amazon_confirmacao_mid`);
-    ambígua → aviso nas candidatas, nenhuma sai da fila; sem conversa (a
-    pergunta ainda não chegou) → volta como pendente.
+    ambígua → a cópia fica guardada nas candidatas (a pessoa escolhe com 1
+    clique), nenhuma sai da fila; sem conversa (a pergunta ainda não chegou)
+    → volta como pendente. A marca de antes de 08/10/2026 de uma cópia que
+    passou de novo pela regra (gravada, nossa, repetida ou empatada outra
+    vez) sai.
     """
     resultado = _ResultadoCopias()
     contagem = dict.fromkeys(
-        ("sem_conta", "sem_nome", "sem_conversa", "ambiguas", "nossas", "repetidas", "marcadas"), 0
+        ("sem_conta", "sem_nome", "sem_conversa", "ambiguas", "nossas", "repetidas", "marcadas"),
+        0,
     )
+    if not confirmacoes:
+        return resultado
+    legadas = await _com_marca_legada(session)
     ja_gravadas = await _ja_gravados(session, (c.message_id for c in confirmacoes))
     for confirmacao in sorted(
         confirmacoes, key=lambda c: (c.enviada_em or datetime.max.replace(tzinfo=UTC), c.uid or 0)
@@ -2043,10 +2289,12 @@ async def _aplicar_confirmacoes(
             continue
         if confirmacao.message_id in ja_gravadas:
             contagem["repetidas"] += 1
+            _tirar_marca_legada(legadas, confirmacao.message_id)
             continue
         nossa = await _resposta_nossa_da_copia(session, confirmacao, integ)
         if nossa is not None:
             contagem["nossas"] += 1
+            _tirar_marca_legada(legadas, confirmacao.message_id)
             if (nossa.payload or {}).get("amazon_confirmacao_mid") != confirmacao.message_id:
                 nossa.payload = {
                     **(nossa.payload or {}),
@@ -2064,6 +2312,7 @@ async def _aplicar_confirmacoes(
             if destino.motivo == "ambigua":
                 contagem["ambiguas"] += 1
                 contagem["marcadas"] += _marcar_a_conferir(confirmacao, destino.candidatas)
+                _tirar_marca_legada(legadas, confirmacao.message_id)
                 logger.warning(
                     "atendimento_amazon_email_confirmacao_ambigua",
                     uid=confirmacao.uid,
@@ -2089,6 +2338,7 @@ async def _aplicar_confirmacoes(
                 )
             continue
         conversa = destino.conversa
+        _tirar_marca_legada(legadas, confirmacao.message_id)
         _mensagem, nova = await gravar.gravar_mensagem(
             session,
             conversa,
@@ -2110,15 +2360,146 @@ async def _aplicar_confirmacoes(
                 por=destino.motivo,
                 sem_texto=confirmacao.texto is None,
             )
-    if confirmacoes:
-        logger.info(
-            "atendimento_amazon_email_confirmacoes",
-            copias=len(confirmacoes),
-            gravadas=resultado.gravadas,
-            pendentes=len(resultado.pendentes),
-            **contagem,
-        )
+    logger.info(
+        "atendimento_amazon_email_confirmacoes",
+        copias=len(confirmacoes),
+        gravadas=resultado.gravadas,
+        pendentes=len(resultado.pendentes),
+        **contagem,
+    )
     return resultado
+
+
+# ── A escolha da pessoa (cópia empatada) ──────────────────────────────────
+
+ESCOLHA_GRAVADA = "gravada"
+ESCOLHA_JA_GRAVADA = "ja_gravada"
+ESCOLHA_DESCARTADA = "descartada"
+
+
+async def resolver_copia(
+    session: AsyncSession,
+    conversa: AtendimentoConversa,
+    message_id: str,
+    *,
+    foi_esta: bool,
+    user_id: UUID | None,
+) -> str | None:
+    """A pessoa conferiu no Seller Central: a cópia empatada foi (ou não) a
+    resposta DESTA conversa. Quem chama trava a conversa e commita.
+
+    - "Esta foi a respondida" → a cópia vira a resposta da loja (`externo`)
+      nesta conversa, como se a leitura tivesse achado sozinha (sai da fila
+      se é a resposta mais nova; a sugestão da IA se aposenta), e a marca
+      sai de TODAS as candidatas. Já gravada em alguma (outra pessoa
+      escolheu antes) → só tira as marcas.
+    - "Não foi esta" → a marca sai só desta, e as outras candidatas contam
+      uma a menos. Nada é gravado: a que sobrou NÃO vira a respondida por
+      eliminação (a resposta pode ter sido de uma conversa fora da lista).
+
+    As outras candidatas são travadas sem esperar (SKIP LOCKED): a que o
+    sync estiver mexendo fica com a marca, e o clique lá cai no "já gravada".
+    Dois "Esta foi" ao mesmo tempo em candidatas diferentes: a trava da
+    cópia (advisory, pelo Message-ID) faz o segundo esperar o primeiro
+    commitar e cair no "já gravada" — a cópia não é gravada nas duas.
+    Devolve o que aconteceu, ou None se a conversa não tem esta cópia (só
+    a marca nova dá para escolher: a legada não tem o texto).
+    """
+    copia = next(
+        (
+            c
+            for c in copias_a_conferir(conversa.dados)
+            if c.message_id == message_id and not c.legada
+        ),
+        None,
+    )
+    if copia is None:
+        return None
+    outras_ids = [
+        UUID(i) for i in copia.candidatas if _uuid_valido(i) and UUID(i) != conversa.id
+    ]
+    outras = (
+        list(
+            (
+                await session.execute(
+                    select(AtendimentoConversa)
+                    .where(AtendimentoConversa.id.in_(outras_ids))
+                    .with_for_update(skip_locked=True)
+                    .execution_options(populate_existing=True)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        if outras_ids
+        else []
+    )
+    if not foi_esta:
+        conversa.dados = _sem_a_marca(conversa.dados, message_id, descartar=True)
+        for outra in outras:
+            dados = dict(outra.dados or {})
+            lista = dados.get(CHAVE_COPIAS_A_CONFERIR)
+            if isinstance(lista, list):
+                dados[CHAVE_COPIAS_A_CONFERIR] = [
+                    _sem_candidata(d, str(conversa.id))
+                    if isinstance(d, dict) and d.get("message_id") == message_id
+                    else d
+                    for d in lista
+                ]
+                outra.dados = dados
+        logger.info(
+            "atendimento_amazon_copia_descartada",
+            conversa_id=str(conversa.id),
+            user_id=str(user_id) if user_id else None,
+        )
+        return ESCOLHA_DESCARTADA
+
+    resultado = ESCOLHA_JA_GRAVADA
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtext(:k))"), {"k": f"amazon_copia:{message_id}"}
+    )
+    if message_id not in await _ja_gravados(session, [message_id]):
+        conversa.dados = _sem_a_marca(conversa.dados, message_id)
+        _mensagem, nova = await gravar.gravar_mensagem(
+            session,
+            conversa,
+            externo_id=message_id,
+            autor=AUTOR_LOJA,
+            origem=ORIGEM_EXTERNO,
+            texto=copia.texto,
+            enviada_em=copia.em,
+            payload={
+                "imap_uid": copia.uid,
+                "amazon_confirmacao": True,
+                "amazon_copia_escolhida_por": str(user_id) if user_id else None,
+            },
+        )
+        resultado = ESCOLHA_GRAVADA if nova else ESCOLHA_JA_GRAVADA
+    conversa.dados = _sem_a_marca(conversa.dados, message_id)
+    for outra in outras:
+        outra.dados = _sem_a_marca(outra.dados, message_id)
+    logger.info(
+        "atendimento_amazon_copia_escolhida",
+        conversa_id=str(conversa.id),
+        resultado=resultado,
+        outras=len(outras),
+        user_id=str(user_id) if user_id else None,
+    )
+    return resultado
+
+
+def _sem_candidata(marca: dict, conversa_id: str) -> dict:
+    candidatas = marca.get("candidatas")
+    lista = candidatas if isinstance(candidatas, list) else []
+    return {**marca, "candidatas": [i for i in lista if i != conversa_id]}
+
+
+def _uuid_valido(texto: str) -> bool:
+    try:
+        UUID(texto)
+    except (ValueError, TypeError, AttributeError):
+        return False
+    return True
 
 
 # ── Cópias à espera da pergunta (no cursor) ───────────────────────────────
@@ -2273,6 +2654,22 @@ async def _gravar_leitura(session: AsyncSession, leitura: LeituraCaixa) -> Resul
             continue
         emails.append(interpretado)
     emails.sort(key=_ordem)
+    # A releitura única (`VERSAO_REAVALIACAO`): dos e-mails relidos, só a
+    # cópia do Seller Central interessa — o resto já passou pelo cursor.
+    da_rodada = {c.message_id for c in confirmacoes}
+    relidas = 0
+    for uid, bruto in leitura.relidas:
+        try:
+            copia = interpretar_confirmacao(bruto, uid=uid)
+        except Exception as exc:  # noqa: BLE001 — um e-mail torto não para a caixa
+            logger.warning(
+                "atendimento_amazon_email_ilegivel", uid=uid, erro=type(exc).__name__
+            )
+            continue
+        if copia is not None and copia.message_id not in da_rodada:
+            da_rodada.add(copia.message_id)
+            confirmacoes.append(copia)
+            relidas += 1
 
     agora = datetime.now(UTC)
     cache_pedidos: dict[str, Integration | None] = {}
@@ -2368,7 +2765,8 @@ async def _gravar_leitura(session: AsyncSession, leitura: LeituraCaixa) -> Resul
         lidos=len(leitura.mensagens),
         de_comprador=len(emails),
         devolucoes=len(devolucoes),
-        copias_da_loja=len(confirmacoes),
+        copias_da_loja=len(confirmacoes) - relidas,
+        copias_relidas=relidas,
         copias_pendentes=len(leitura.copias_pendentes),
         repetidos=repetidos,
         ignorados=ignorados,
@@ -2444,6 +2842,10 @@ async def sincronizar(
             novo_cursor["copias_pendentes"] = [
                 _copia_para_cursor(c) for c in leitura.copias_pendentes
             ]
+        if leitura.reavaliacao_em_dia:
+            novo_cursor["copias_reavaliadas"] = VERSAO_REAVALIACAO
+        elif isinstance(cursor.get("copias_reavaliadas"), int):
+            novo_cursor["copias_reavaliadas"] = cursor["copias_reavaliadas"]
         await _gravar_cursor(session, canal, novo_cursor)
         resultado = lido
         return resultado

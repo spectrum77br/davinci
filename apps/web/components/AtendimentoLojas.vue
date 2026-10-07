@@ -25,6 +25,10 @@
 // (`rede_social_id`). A conta com Direct esperando fica ACESA mesmo com a
 // caixa de comentários sem permissão (token sem o escopo novo): o Direct
 // continua sendo lido — apagar a linha esconderia a bolinha dele.
+// O NOME da plataforma (cabeçalho do grupo) filtra a plataforma inteira —
+// todas as lojas dela (08/10/2026: "ver só Mercado Livre, só Shopee"). Com a
+// barra recolhida o cabeçalho vira uma etiqueta curta, clicável do mesmo
+// jeito (antes era só um traço). Os chips do topo da lista fazem o mesmo.
 import { ChevronsLeft, ChevronsRight, Inbox, Lock, TriangleAlert, Unplug } from 'lucide-vue-next'
 import type { FiltrosLista } from '~/components/AtendimentoLista.vue'
 import {
@@ -276,8 +280,10 @@ function escolherLoja(l: LojaBarra) {
   }
 }
 const ativaTodas = computed(() => !filtros.value.plataforma)
+// A plataforma inteira escolhida — sozinha ou num grupo dos chips ("Redes" =
+// "instagram,facebook" acende Instagram e Facebook).
 function ativaPlataforma(p: string) {
-  return filtros.value.plataforma === p && !filtros.value.integration_id && !filtros.value.externo_ref && !filtros.value.rede_social_id
+  return (filtros.value.plataforma || '').split(',').includes(p) && !filtros.value.integration_id && !filtros.value.externo_ref && !filtros.value.rede_social_id
 }
 function ativaLoja(l: LojaBarra) {
   if (l.rede_social_id) return filtros.value.rede_social_id === l.rede_social_id
@@ -334,14 +340,26 @@ function ativaLoja(l: LojaBarra) {
           class="mx-1 mt-2 flex w-[calc(100%-0.5rem)] items-center gap-1.5 rounded px-2 py-1 text-left text-[11px] font-semibold uppercase tracking-wider"
           :class="ativaPlataforma(g.plataforma) ? 'bg-primary/10 text-primary' : 'text-muted-foreground hover:bg-muted hover:text-foreground'"
           :aria-pressed="ativaPlataforma(g.plataforma)"
-          :title="`todas as lojas ${g.nome}`"
+          :title="`Só ${g.nome}: todas as lojas ${g.nome}`"
+          :data-grupo="g.plataforma"
           @click="escolherPlataforma(g.plataforma)"
         >
           <AtendimentoIconePlataforma :plataforma="g.plataforma" :tamanho="14" decorativo />
-          <span class="min-w-0 flex-1 truncate">{{ g.nome }}</span>
+          <span class="min-w-0 flex-1 truncate underline-offset-2 hover:underline">{{ g.nome }}</span>
           <span v-if="g.nao_lidas" class="font-semibold normal-case tracking-normal text-red-600 tabular-nums dark:text-red-400">{{ contador(g.nao_lidas) }}</span>
         </button>
-        <div v-else class="mx-2 mt-1.5 border-t pt-1.5" />
+        <!-- recolhida: a etiqueta curta da plataforma, clicável do mesmo jeito -->
+        <button
+          v-else
+          type="button"
+          class="mx-1 mt-1.5 block w-[calc(100%-0.5rem)] truncate rounded border-t px-0.5 pb-0.5 pt-1 text-center text-[9px] font-semibold uppercase leading-none tracking-tight"
+          :class="ativaPlataforma(g.plataforma) ? 'bg-primary/10 text-primary' : 'text-muted-foreground hover:bg-muted hover:text-foreground'"
+          :aria-pressed="ativaPlataforma(g.plataforma)"
+          :aria-label="`Só ${g.nome}: todas as lojas ${g.nome}`"
+          :title="`Só ${g.nome}: todas as lojas ${g.nome}${g.nao_lidas ? ` — ${g.nao_lidas} esperando resposta` : ''}`"
+          :data-grupo="g.plataforma"
+          @click="escolherPlataforma(g.plataforma)"
+        >{{ plataformaInfo(g.plataforma).curto }}</button>
 
         <button
           v-for="l in g.lojas"

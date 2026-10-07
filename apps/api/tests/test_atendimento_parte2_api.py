@@ -16,7 +16,11 @@
   base no automático;
 - Amazon: o cabeçalho da conversa (GET e PATCH) traz os links do rodapé do
   e-mail (`amazon_link_sem_resposta`, `amazon_link_caso`, `amazon_caso_id`),
-  só se forem o https do próprio Seller Central.
+  só se forem o https do próprio Seller Central; a cópia do Seller Central
+  que empatou vem inteira (`amazon_copias_a_conferir`) e vira a escolha de 1
+  clique (POST /conversas/{id}/amazon-copia, 08/10/2026);
+- a lista filtra por uma plataforma ou um GRUPO delas (`?plataforma=a,b`,
+  os chips do topo da Caixa), sempre dentro do escopo da equipe.
 
 `cliente.py` e `manual.py` são de outros lotes: entram falsos, pelo contrato,
 no lugar do módulo inteiro (`sys.modules`). O último teste usa o `manual.py`
@@ -1107,6 +1111,17 @@ async def test_aviso_da_copia_ambigua_so_enquanto_a_pergunta_espera(
         ]
 
     assert datetime.fromisoformat(await _aviso()) == copia_em
+    # A marca de antes de 08/10/2026 (sem o texto) só avisa: sem 1 clique.
+    detalhe = (await client.get(f"{URL}/conversas/{conversa.id}")).json()["conversa"]
+    [copia] = detalhe["amazon_copias_a_conferir"]
+    assert (copia["message_id"], copia["pode_escolher"], copia["texto"]) == (
+        "<c@amazon.com>", False, None
+    )
+    r = await client.post(
+        f"{URL}/conversas/{conversa.id}/amazon-copia",
+        json={"message_id": "<c@amazon.com>", "foi_esta": True},
+    )
+    assert r.status_code == 404 and r.json()["detail"]["code"] == "copia_nao_encontrada"
     # Pergunta MAIS NOVA que a cópia: o aviso é sobre a anterior, some.
     await gravar.gravar_mensagem(
         db, conversa, externo_id="amb-c2", autor="cliente", texto="e verde?",
@@ -1114,3 +1129,156 @@ async def test_aviso_da_copia_ambigua_so_enquanto_a_pergunta_espera(
     )
     await db.commit()
     assert await _aviso() is None
+    detalhe = (await client.get(f"{URL}/conversas/{conversa.id}")).json()["conversa"]
+    assert detalhe["amazon_copias_a_conferir"] == []
+
+
+async def _do_rui(db, integ, canal, externo_id: str, horas: float):
+    """Conversa Amazon do "Rui Costa" com a pergunta de `horas` atrás, esperando."""
+    conversa, _ = await gravar.upsert_conversa(
+        db, canal=canal, integration=integ, plataforma="amazon", canal_nome="email",
+        externo_id=externo_id, comprador_nome="Rui Costa",
+    )  # fmt: skip
+    await gravar.gravar_mensagem(
+        db, conversa, externo_id=f"{externo_id}-c", autor="cliente", texto="e o reembolso?",
+        enviada_em=AGORA - timedelta(hours=horas),
+    )  # fmt: skip
+    await db.commit()
+    return conversa
+
+
+async def test_copia_empatada_vira_escolha_de_um_clique(client, db, make_user, pessoa):
+    """07/10/2026 (caso KIA): a cópia que empatou entre duas conversas do
+    mesmo comprador vira, na tela, "Esta foi a respondida" / "Não foi esta"."""
+    from app.services.atendimento import amazon_email
+
+    dono = await make_user()
+    integ, canais = await _loja(db, dono, "kia", "amazon")
+    a = await _do_rui(db, integ, canais["email"], "rui-a|-", 5)
+    b = await _do_rui(db, integ, canais["email"], "rui-b|702-1", 3)
+    copia = amazon_email.ConfirmacaoAmazon(
+        message_id="<rb@amazon.com>", tag="kia", comprador_nome="Rui Costa",
+        texto="O reembolso sai quando o produto chegar.", pedido=None,
+        enviada_em=AGORA - timedelta(hours=1), uid=77,
+    )  # fmt: skip
+    assert amazon_email._marcar_a_conferir(copia, [a, b]) == 2
+    await db.commit()
+
+    async def _detalhe(c):
+        return (await client.get(f"{URL}/conversas/{c.id}")).json()["conversa"]
+
+    d = await _detalhe(a)
+    [marca] = d["amazon_copias_a_conferir"]
+    assert marca["texto"] == "O reembolso sai quando o produto chegar."
+    assert (marca["outras"], marca["pode_escolher"], marca["pedido"]) == (1, True, None)
+    assert datetime.fromisoformat(d["amazon_copia_a_conferir_em"]) == copia.enviada_em
+
+    # "Não foi esta" na A: a marca sai dela; a B passa a contar 0 outras.
+    r = await client.post(
+        f"{URL}/conversas/{a.id}/amazon-copia",
+        json={"message_id": "<rb@amazon.com>", "foi_esta": False},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["conversa"]["amazon_copias_a_conferir"] == []
+    assert r.json()["conversa"]["aguardando_resposta"] is True  # nada gravado
+    assert (await _detalhe(b))["amazon_copias_a_conferir"][0]["outras"] == 0
+
+    # "Esta foi a respondida" na B: vira a resposta da loja e sai da fila.
+    r = await client.post(
+        f"{URL}/conversas/{b.id}/amazon-copia",
+        json={"message_id": "<rb@amazon.com>", "foi_esta": True},
+    )
+    assert r.status_code == 200, r.text
+    conversa = r.json()["conversa"]
+    assert conversa["aguardando_resposta"] is False
+    assert conversa["amazon_copias_a_conferir"] == []
+    mensagens = (await client.get(f"{URL}/conversas/{b.id}")).json()["mensagens"]
+    ultima = mensagens[-1]
+    assert (ultima["autor"], ultima["origem"]) == ("loja", "externo")
+    assert ultima["texto"] == "O reembolso sai quando o produto chegar."
+    # De novo (outra aba): a marca já saiu.
+    r = await client.post(
+        f"{URL}/conversas/{b.id}/amazon-copia",
+        json={"message_id": "<rb@amazon.com>", "foi_esta": True},
+    )
+    assert r.status_code == 404 and r.json()["detail"]["code"] == "copia_nao_encontrada"
+
+
+async def test_escolha_da_copia_so_amazon_e_so_dentro_da_equipe(
+    client, db, make_user, auth_as
+):
+    from app.models.pricing import StoreInfo
+    from app.services.atendimento import amazon_email
+
+    dono = await make_user()
+    integ, canais = await _loja(db, dono, "kia", "amazon")
+    a = await _do_rui(db, integ, canais["email"], "rui-a|-", 5)
+    copia = amazon_email.ConfirmacaoAmazon(
+        message_id="<rb@amazon.com>", tag="kia", comprador_nome="Rui Costa", texto="ok",
+        pedido=None, enviada_em=AGORA - timedelta(hours=1),
+    )  # fmt: skip
+    amazon_email._marcar_a_conferir(copia, [a])
+    shopee, canais_s = await _loja(db, dono, "loja-s", "shopee")
+    s = await _conversa(db, shopee, canais_s["chat"], "s-1")
+    db.add(StoreInfo(user_id=dono.id, platform="shopee", account_name="s", sales_team=7,
+                     integration_id=shopee.id))  # fmt: skip
+    membro = await make_user(permissions=PODE_TUDO)
+    membro.sales_teams = [7]
+    await db.commit()
+    corpo = {"message_id": "<rb@amazon.com>", "foi_esta": True}
+    auth_as(membro)
+    r = await client.post(f"{URL}/conversas/{a.id}/amazon-copia", json=corpo)
+    assert r.status_code == 404 and r.json()["detail"]["code"] == "conversa_nao_encontrada"
+    r = await client.post(f"{URL}/conversas/{s.id}/amazon-copia", json=corpo)
+    assert r.status_code == 409 and r.json()["detail"]["code"] == "nao_e_amazon"
+    so_le = await make_user(permissions={"atendimento": {"view": True}})
+    auth_as(so_le)
+    r = await client.post(f"{URL}/conversas/{a.id}/amazon-copia", json=corpo)
+    assert r.status_code == 403
+
+
+async def test_lista_filtra_por_uma_ou_varias_plataformas_dentro_da_equipe(
+    client, db, make_user, auth_as
+):
+    """O filtro por plataforma do topo da lista (08/10/2026): "só Mercado
+    Livre", "só Shopee" — e o grupo (Redes = Instagram + Facebook) numa
+    chamada só, `?plataforma=a,b`. Sempre dentro do escopo da equipe."""
+    from app.models.pricing import StoreInfo
+
+    dono = await make_user()
+    lojas = {p: await _loja(db, dono, f"loja-{p}", p) for p in ("shopee", "ml", "amazon")}
+    ids = {
+        p: str((await _conversa(db, integ, canais[CANAL_PADRAO[p]], f"{p}-1", plataforma=p)).id)
+        for p, (integ, canais) in lojas.items()
+    }
+    pessoa = await make_user(permissions=PODE_TUDO)
+    auth_as(pessoa)
+
+    async def _ids(plataforma: str) -> set[str]:
+        r = await client.get(f"{URL}/conversas", params={"plataforma": plataforma})
+        assert r.status_code == 200, r.text
+        return {i["id"] for i in r.json()["itens"]}
+
+    assert await _ids("ml") == {ids["ml"]}
+    assert await _ids("shopee,ml") == {ids["shopee"], ids["ml"]}
+    assert await _ids(" ML , ml ,") == {ids["ml"]}  # espaço, caixa e repetida
+    assert await _ids("") == set(ids.values())
+    assert await _ids("instagram,facebook") == set()  # o grupo Redes: válido
+    for torto in ("ml,nada", "ml;shopee"):
+        r = await client.get(f"{URL}/conversas", params={"plataforma": torto})
+        assert r.status_code == 422 and r.json()["detail"]["code"] == "plataforma_invalida"
+    # Aguardando junto (a aba "Falta responder") e a busca continuam valendo.
+    r = await client.get(
+        f"{URL}/conversas", params={"plataforma": "shopee,ml", "filtro": "aguardando"}
+    )
+    assert r.status_code == 200 and r.json()["itens"] == []  # todas respondidas
+
+    # Quem é de uma equipe só vê as lojas dela, com ou sem o filtro.
+    db.add(StoreInfo(user_id=dono.id, platform="ml", account_name="ml", sales_team=7,
+                     integration_id=lojas["ml"][0].id))  # fmt: skip
+    membro = await make_user(permissions=PODE_TUDO)
+    membro.sales_teams = [7]
+    await db.commit()
+    auth_as(membro)
+    assert await _ids("shopee,ml") == {ids["ml"]}
+    assert await _ids("shopee") == set()

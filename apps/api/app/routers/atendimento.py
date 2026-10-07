@@ -111,6 +111,8 @@ from app.schemas.atendimento import (
     ConversaOut,
     ConversaPatch,
     ConversaUnicaOut,
+    CopiaAmazonIn,
+    CopiaAmazonOut,
     DescartarIn,
     EnvioOut,
     EtiquetaHistoricoOut,
@@ -145,6 +147,7 @@ from app.schemas.atendimento import (
 from app.services import vigia_leitura_atendimento
 from app.services.atendimento import (
     acesso,
+    amazon_email,
     canais_externos,
     clientes,
     enviar,
@@ -900,52 +903,59 @@ def _link_seller_central(valor: Any) -> str | None:
     return link
 
 
-def _copia_a_conferir(c: AtendimentoConversa) -> datetime | None:
-    """Quando a Central respondeu alguém com o nome desta conversa — se ainda vale avisar.
+def _copias_a_conferir(c: AtendimentoConversa) -> list[CopiaAmazonOut]:
+    """As cópias do Seller Central que empataram nesta conversa — se ainda vale avisar.
 
-    O leitor da caixa (`amazon_email._marcar_a_conferir`) marca as conversas
-    do mesmo nome quando a cópia da resposta do Seller Central empata entre
-    duas ou mais: nenhuma sai da fila (seria chute), mas a pessoa precisa
-    saber que talvez já tenha sido respondida. Só enquanto a conversa aguarda
-    e nenhuma pergunta MAIS NOVA que a cópia chegou — depois disso o aviso é
-    sobre outra pergunta.
+    O leitor da caixa (`amazon_email._marcar_a_conferir`) guarda a cópia nas
+    conversas do mesmo pedido/nome quando ela empata entre duas ou mais:
+    nenhuma sai da fila (seria chute), mas a pessoa precisa saber que talvez
+    já tenha sido respondida — e escolhe com 1 clique. Só enquanto a
+    conversa aguarda e nenhuma pergunta MAIS NOVA que a cópia chegou —
+    depois disso o aviso é sobre outra pergunta.
     """
-    aviso = c.dados.get("amazon_copia_a_conferir") if isinstance(c.dados, dict) else None
-    em = aviso.get("em") if isinstance(aviso, dict) else None
-    if not isinstance(em, str) or not c.aguardando_resposta:
-        return None
-    try:
-        quando = _utc(datetime.fromisoformat(em))
-    except ValueError:
-        return None
+    if c.plataforma != "amazon" or not c.aguardando_resposta:
+        return []
     do_cliente = _utc(c.ultima_do_cliente_em)
-    if quando is None or (do_cliente is not None and do_cliente > quando):
-        return None
-    return quando
+    return [
+        CopiaAmazonOut(
+            message_id=copia.message_id,
+            em=copia.em,
+            texto=copia.texto,
+            pedido=copia.pedido,
+            outras=len([i for i in copia.candidatas if i != str(c.id)]),
+            pode_escolher=not copia.legada,
+        )
+        for copia in amazon_email.copias_a_conferir(c.dados)
+        if do_cliente is None or do_cliente <= copia.em
+    ]
 
 
 def _links_amazon(c: AtendimentoConversa) -> dict[str, Any]:
     """Os links do rodapé do e-mail da Amazon para o cabeçalho da conversa.
 
     Outra plataforma (ou `dados` estranho) → tudo None: a tela esconde os
-    botões. Quem grava é `amazon_email._dados_do_email` (e, o aviso da
-    cópia ambígua, `amazon_email._marcar_a_conferir`).
+    botões. Quem grava é `amazon_email._dados_do_email` (e, a cópia
+    ambígua, `amazon_email._marcar_a_conferir`; `amazon_copia_a_conferir_em`
+    é a hora da mais nova delas, para a tela antiga).
     """
     vazio: dict[str, Any] = {
         "amazon_link_sem_resposta": None,
         "amazon_link_caso": None,
         "amazon_caso_id": None,
         "amazon_copia_a_conferir_em": None,
+        "amazon_copias_a_conferir": [],
     }
     if c.plataforma != "amazon" or not isinstance(c.dados, dict):
         return vazio
     caso_id = c.dados.get("amazon_caso_id")
     caso_id = caso_id.strip() if isinstance(caso_id, str) else None
+    copias = _copias_a_conferir(c)
     return {
         "amazon_link_sem_resposta": _link_seller_central(c.dados.get("amazon_link_sem_resposta")),
         "amazon_link_caso": _link_seller_central(c.dados.get("amazon_link_caso")),
         "amazon_caso_id": caso_id if caso_id and _RE_CASO_AMAZON.fullmatch(caso_id) else None,
-        "amazon_copia_a_conferir_em": _copia_a_conferir(c),
+        "amazon_copia_a_conferir_em": copias[-1].em if copias else None,
+        "amazon_copias_a_conferir": copias,
     }
 
 
@@ -1607,7 +1617,7 @@ async def _listar_marketplace(
     *,
     scope: TeamScope,
     user: User,
-    plataforma: str | None,
+    plataforma: tuple[str, ...],
     integration_id: UUID | None,
     canal: str | None,
     filtro: str,
@@ -1634,8 +1644,11 @@ async def _listar_marketplace(
     cond = _clausula_escopo(scope, AtendimentoConversa.integration_id)
     if cond is not None:
         consulta = consulta.where(cond)
-    if plataforma:
-        consulta = consulta.where(AtendimentoConversa.plataforma == plataforma)
+    if len(plataforma) == 1:
+        consulta = consulta.where(AtendimentoConversa.plataforma == plataforma[0])
+    elif plataforma:
+        # Um GRUPO da caixa (08/10/2026): "Redes" = Instagram + Facebook.
+        consulta = consulta.where(AtendimentoConversa.plataforma.in_(plataforma))
     if integration_id:
         consulta = consulta.where(AtendimentoConversa.integration_id == integration_id)
     if canal_id:
@@ -1784,7 +1797,7 @@ async def _listar_marketplace(
 async def listar_conversas(
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[User, Depends(_view)],
-    plataforma: Annotated[str | None, Query()] = None,
+    plataforma: Annotated[str | None, Query(max_length=200)] = None,
     integration_id: Annotated[UUID | None, Query()] = None,
     canal: Annotated[str | None, Query()] = None,
     filtro: Annotated[str, Query()] = "todas",
@@ -1803,6 +1816,9 @@ async def listar_conversas(
     `externo_ref` filtra um site ("site:charlots" — todas as caixas dele) e
     `rede_social_id` uma conta de rede social: os comentários E o Direct da
     conta (02/10/2026; os dois vêm da barra de lojas do /resumo).
+    `plataforma` aceita uma plataforma ou várias separadas por vírgula — o
+    filtro por plataforma do topo da lista (08/10/2026): "Redes" é
+    `instagram,facebook`. Sempre dentro do escopo da equipe de quem pede.
     `etiqueta` filtra pela etiqueta (status atual), junto de qualquer filtro;
     os filtros `pre_venda`/`pos_venda`/`reclamacao`/`devolucao`/
     `ag_cancelamento`/`avaliacao` são a mesma coisa vinda do menu Filtrar.
@@ -1810,12 +1826,12 @@ async def listar_conversas(
     "Falta responder" (`aguardando`) vem pelo PRAZO mais curto, sem prazo no
     fim — e o cursor (`proximo`) é o do prazo.
     """
-    plataforma = (plataforma or "").strip().lower() or None
+    plataformas = _plataformas_do_filtro(plataforma)
     canal = (canal or "").strip().lower() or None
     filtro = (filtro or "todas").strip().lower()
     etiqueta = (etiqueta or "").strip().lower() or None
     externo_ref = (externo_ref or "").strip() or None
-    if plataforma and plataforma not in PLATAFORMAS_LISTA:
+    if any(p not in PLATAFORMAS_LISTA for p in plataformas):
         raise HTTPException(422, detail={"code": "plataforma_invalida"})
     if externo_ref and canais_externos.partes(externo_ref) is None:
         raise HTTPException(422, detail={"code": "externo_ref_invalido"})
@@ -1832,12 +1848,12 @@ async def listar_conversas(
     itens: list[dict[str, Any]] = []
     # A caixa (marketplaces, sites e os COMENTÁRIOS das redes) — menos quando
     # o pedido é só o Direct do Instagram (`canal=dm`).
-    if not (plataforma == instagram.PLATAFORMA and canal == instagram.CANAL):
+    if not (plataformas == (instagram.PLATAFORMA,) and canal == instagram.CANAL):
         itens += await _listar_marketplace(
             session,
             scope=scope,
             user=user,
-            plataforma=plataforma,
+            plataforma=plataformas,
             integration_id=integration_id,
             canal=canal,
             filtro=filtro,
@@ -1851,7 +1867,7 @@ async def listar_conversas(
             perguntas_primeiro=perguntas_primeiro,
         )
     quer_instagram = (
-        plataforma in (None, instagram.PLATAFORMA)
+        (not plataformas or instagram.PLATAFORMA in plataformas)
         and integration_id is None
         and canal_id is None
         and externo_ref is None
@@ -1910,6 +1926,17 @@ async def listar_conversas(
     await _com_nome_da_loja(session, pagina)
     await _com_estrelas_da_avaliacao(session, pagina)
     return ListaConversasOut(itens=pagina, proximo=proximo)
+
+
+def _plataformas_do_filtro(texto: str | None) -> tuple[str, ...]:
+    """`?plataforma=` → as plataformas, sem repetir e na ordem: "ml",
+    "instagram,facebook" (um grupo da caixa). Vazio → nenhuma (todas)."""
+    saida: list[str] = []
+    for parte in (texto or "").split(","):
+        p = parte.strip().lower()
+        if p and p not in saida:
+            saida.append(p)
+    return tuple(saida)
 
 
 def _grupo_da_pergunta(item: dict[str, Any]) -> int:
@@ -2748,6 +2775,44 @@ async def editar_conversa(
         "atendimento_conversa_editada",
         conversa_id=str(c.id),
         campos=sorted(campos),
+        user_id=str(user.id),
+    )
+    return ConversaUnicaOut(conversa=await _conversa_out(session, c))
+
+
+@router.post("/conversas/{conversa_id}/amazon-copia", response_model=ConversaUnicaOut)
+async def escolher_copia_amazon(
+    conversa_id: str,
+    body: CopiaAmazonIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(_edit)],
+) -> ConversaUnicaOut:
+    """A cópia do Seller Central que empatou: "Esta foi a respondida" / "Não foi esta".
+
+    A pessoa conferiu no Seller Central (07/10/2026: o DaVinci não sabia
+    qual das duas conversas do mesmo comprador a loja tinha respondido).
+    "Foi esta" grava a cópia como resposta da loja nesta conversa (sai da
+    fila se for a resposta mais nova) e tira a marca das outras; "não foi
+    esta" só tira a marca desta. Só quem mexe na caixa (a trava do router e
+    o `atendimento.edit`). Ver `amazon_email.resolver_copia`.
+    """
+    scope = await resolve_team_scope(session, user)
+    c = await _conversa_ou_404(session, conversa_id, scope)
+    if c.plataforma != "amazon":
+        raise HTTPException(409, detail={"code": "nao_e_amazon"})
+    await _travar_ou_409(session, c, "conversa_ocupada")
+    resultado = await amazon_email.resolver_copia(
+        session, c, body.message_id, foi_esta=body.foi_esta, user_id=user.id
+    )
+    if resultado is None:
+        # Outra pessoa já resolveu (ou a leitura reavaliou): a tela relê.
+        raise HTTPException(404, detail={"code": "copia_nao_encontrada"})
+    await session.commit()
+    logger.info(
+        "atendimento_amazon_copia_resolvida",
+        conversa_id=str(c.id),
+        foi_esta=body.foi_esta,
+        resultado=resultado,
         user_id=str(user.id),
     )
     return ConversaUnicaOut(conversa=await _conversa_out(session, c))

@@ -155,6 +155,25 @@ class ConversaResumoOut(BaseModel):
     rede_social_id: UUID | None = None
 
 
+class CopiaAmazonOut(BaseModel):
+    """Uma cópia do Seller Central que empatou entre esta e outra conversa do
+    mesmo pedido/nome (`amazon_email.copias_a_conferir`).
+
+    `texto` é o que a LOJA escreveu no Seller Central (a pessoa confere se
+    responde esta conversa). `outras` = quantas outras conversas ela pode ter
+    respondido. `pode_escolher` = dá para gravar com 1 clique ("Esta foi a
+    respondida" / "Não foi esta"); a marca de antes de 08/10/2026 só avisa
+    até a leitura seguinte reavaliá-la.
+    """
+
+    message_id: str
+    em: datetime
+    texto: str | None = None
+    pedido: str | None = None
+    outras: int = 0
+    pode_escolher: bool = False
+
+
 class ConversaOut(ConversaResumoOut):
     """A conversa aberta: a linha da lista + o que só o detalhe precisa."""
 
@@ -181,6 +200,10 @@ class ConversaOut(ConversaResumoOut):
     #   saiu da fila). Só enquanto esta aguarda e nenhuma pergunta mais nova
     #   chegou: a tela pede para conferir no Seller Central.
     amazon_copia_a_conferir_em: datetime | None = None
+    # - `amazon_copias_a_conferir`: essas cópias, inteiras (08/10/2026), para a
+    #   escolha de 1 clique (POST /conversas/{id}/amazon-copia). Mesma regra
+    #   de quando aparecem; a mais nova por último.
+    amazon_copias_a_conferir: list[CopiaAmazonOut] = Field(default_factory=list)
 
 
 class ListaConversasOut(BaseModel):
@@ -403,6 +426,14 @@ class ConversaPatch(BaseModel):
     situacao: Literal["aberta", "fechada"] | None = None
     sem_resposta_necessaria: bool | None = None
     integration_id: UUID | None = None
+
+
+class CopiaAmazonIn(BaseModel):
+    """A pessoa conferiu no Seller Central a cópia que empatou: foi (ou não) a
+    resposta DESTA conversa (POST /conversas/{id}/amazon-copia)."""
+
+    message_id: str = Field(min_length=1, max_length=255)
+    foi_esta: bool
 
 
 class ConferirIn(BaseModel):

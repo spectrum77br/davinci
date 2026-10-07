@@ -2422,13 +2422,7 @@ watch(() => props.conversaId, (novo, velho) => {
             <span v-else class="text-muted-foreground">(peça a quem pode editar o Atendimento)</span>
           </div>
         </div>
-        <!-- Amazon: a cópia de uma resposta do Seller Central empatou entre esta e
-             outra conversa do mesmo nome. O DaVinci não chuta (nenhuma saiu da
-             fila) — a pessoa confere na Amazon. Só vem enquanto esta aguarda. -->
-        <div v-if="conversa.plataforma === 'amazon' && conversa.amazon_copia_a_conferir_em" class="shrink-0 border-b border-amber-500/40 bg-amber-500/10 px-3 py-1.5 text-xs text-amber-900 dark:text-amber-200">
-          <TriangleAlert class="mr-1 inline size-3.5" />O Seller Central respondeu alguém com este nome em {{ fmtDataHora(conversa.amazon_copia_a_conferir_em) }}, mas há outra conversa com o mesmo nome e o DaVinci não sabe qual foi.
-          Confira<template v-if="amazon.caso"> <a :href="amazon.caso" target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-0.5 underline hover:text-foreground">no Seller Central<ExternalLink class="size-3" /></a></template><template v-else> no Seller Central</template>: se esta já foi respondida, marque "não precisa de resposta".
-        </div>
+        <AtendimentoAmazonCopia v-if="conversa.plataforma === 'amazon'" :conversa="conversa" :pode-mexer="canEdit" :link-caso="amazon.caso" @recarregar="carregar(conversa.id, true)" />
         <div v-if="conversa.sem_resposta_necessaria" class="shrink-0 border-b bg-muted/50 px-3 py-1.5 text-xs text-muted-foreground">
           Marcada como "não precisa de resposta".<template v-if="canalExterno === 'comentario' && ehMencao"> A menção chega assim: a Meta não deixa o DaVinci ler os comentários do post de outra pessoa, então a resposta da marca pelo app não volta para cá. Se precisar de atenção, use "Precisa de resposta".</template><template v-if="conversa.plataforma === 'amazon'">
             <!-- O link fica aqui também: a aba pode ter sido fechada antes de a Amazon confirmar. -->

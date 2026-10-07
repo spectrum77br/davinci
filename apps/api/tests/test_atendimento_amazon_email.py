@@ -32,6 +32,13 @@ O que estes testes seguram:
   cria conversa nem chuta: empate de nome não fecha nenhuma (aviso
   "conferir"), cópia da NOSSA resposta só confirma a nossa, e a que chega
   antes da pergunta espera no cursor;
+- caso KIA (07/10/2026): o "ID do pedido" do MODELO da cópia liga à conversa
+  do pedido; empate do mesmo pedido/nome NUNCA desempata sozinho (nem pela
+  "única que esperava": o segundo recado na conversa já respondida fecharia
+  a outra) — fica guardado nas candidatas para a escolha de 1 clique ("Esta
+  foi a respondida" / "Não foi esta"), e dois cliques ao mesmo tempo não
+  gravam a cópia duas vezes; a leitura relê UMA vez as cópias dos últimos
+  30 dias, para as que empataram pela regra velha;
 - os links do rodapé são só os do rodapé (o comprador não troca o botão);
 - reler a caixa não grava de novo o e-mail que a thread mandaria para outra
   conversa.
@@ -43,6 +50,7 @@ links são inventados (só o formato é o de verdade).
 
 from __future__ import annotations
 
+import asyncio
 import imaplib
 import smtplib
 from datetime import UTC, datetime, timedelta
@@ -50,6 +58,7 @@ from email import message_from_bytes
 from email import policy as politica_email
 from email.message import EmailMessage
 from email.utils import format_datetime
+from uuid import UUID
 
 import pytest
 from sqlalchemy import func, select
@@ -82,6 +91,8 @@ PEDIDO_KFA = "701-1111111-1111111"
 PEDIDO_KIA = "702-2222222-2222222"
 PEDIDO_SEM_DONO = "703-3333333-3333333"
 CAIXA = "atendimento@loja-teste.com.br"
+# A releitura única das cópias (08/10/2026) já em dia: cursor novo nasce com ela.
+_REAVALIADAS = {"copias_reavaliadas": amazon_email.VERSAO_REAVALIACAO}
 
 
 # ─────────────── falsos: e-mail, caixa IMAP, SMTP, Redis ───────────────
@@ -690,7 +701,7 @@ async def test_primeira_rodada_so_leitura_e_cada_email_na_sua_conta(
     assert ana.aguardando_resposta is True  # sem dono, mas na fila: o prazo corre
 
     # O cursor é o MESMO nos três canais Amazon.
-    assert await _cursores(db) == [{"uidvalidity": 777, "ultimo_uid": 14}] * 3
+    assert await _cursores(db) == [{"uidvalidity": 777, "ultimo_uid": 14, **_REAVALIADAS}] * 3
     assert redis_falso.dados[amazon_email.CHAVE_TRAVA] == "ok"
     assert redis_falso.ttl[amazon_email.CHAVE_TRAVA] == amazon_email.TRAVA_RODADA_S
 
@@ -733,7 +744,7 @@ async def test_rodadas_seguintes_andam_por_uid_sem_duplicar(
     # A resposta vai presa ao ÚLTIMO e-mail do comprador.
     assert conversa.dados["ultimo_message_id"] == "<m9@amazon.com.br>"
     assert conversa.dados["assunto"] == f"RE: Pergunta sobre o pedido {PEDIDO_KFA}"
-    assert await _cursores(db) == [{"uidvalidity": 777, "ultimo_uid": 20}]
+    assert await _cursores(db) == [{"uidvalidity": 777, "ultimo_uid": 20, **_REAVALIADAS}]
 
     # Nada novo: o IMAP devolve o maior UID para `21:*` — não pode reprocessar.
     redis_falso.proxima_rodada()
@@ -787,7 +798,7 @@ async def test_uidvalidity_mudou_recomeca_pelos_7_dias_sem_duplicar(
     assert caixa.comandos("uid")[0][1:3] == ("SEARCH", "SINCE")
     assert r.mensagens_novas == 0  # idempotente pelo Message-ID
     assert await db.scalar(select(func.count()).select_from(AtendimentoMensagem)) == antes
-    assert await _cursores(db) == [{"uidvalidity": 888, "ultimo_uid": 5}]
+    assert await _cursores(db) == [{"uidvalidity": 888, "ultimo_uid": 5, **_REAVALIADAS}]
 
 
 async def test_caixa_lida_uma_vez_por_rodada_com_cursor_do_banco(
@@ -824,7 +835,7 @@ async def test_caixa_lida_uma_vez_por_rodada_com_cursor_do_banco(
         assert caixa.comandos("uid") == [("uid", "SEARCH", "UID", "15:*")]
         assert r.mensagens_novas == 0
 
-    assert await _cursores(db) == [{"uidvalidity": 777, "ultimo_uid": 14}] * 2
+    assert await _cursores(db) == [{"uidvalidity": 777, "ultimo_uid": 14, **_REAVALIADAS}] * 2
 
 
 async def test_outro_canal_lendo_agora_nao_abre_a_caixa(
@@ -1476,15 +1487,21 @@ def _email_real(
     return msg.as_bytes()
 
 
-def _html_confirmacao(nome: str, resposta: str, *, em_blocos: bool = False) -> str:
+def _html_confirmacao(
+    nome: str, resposta: str, *, em_blocos: bool = False, pedido_no_modelo: str | None = None
+) -> str:
     """O HTML da cópia. `em_blocos=False` = tudo num parágrafo, como a amostra
-    convertida; `True` = tabela, parágrafos e a resposta num blockquote."""
+    convertida; `True` = tabela, parágrafos e a resposta num blockquote.
+    `pedido_no_modelo`: o "ID do pedido:" que a Amazon põe ANTES do "Iniciar
+    mensagem" (13 das 15 cópias reais de 28/09 a 07/10/2026)."""
     resposta_html = resposta.replace("\n", "<br>")
+    modelo = f"ID do pedido: {pedido_no_modelo} " if pedido_no_modelo else ""
     if em_blocos:
         miolo = (
             "<table><tr><td><p>Prezado Loja Teste,</p>"
             f"<p>Aqui está uma cópia do e-mail que você enviou para {nome}.</p>"
-            "<p>------------- Iniciar mensagem -------------</p>"
+            + (f"<p>{modelo}</p>" if modelo else "")
+            + "<p>------------- Iniciar mensagem -------------</p>"
             f"<blockquote>{resposta_html}</blockquote>"
             "<p>------------- Mensagem final -------------</p>"
             "<p>Atenciosamente,<br>Amazon.com.br</p></td></tr></table>"
@@ -1492,7 +1509,7 @@ def _html_confirmacao(nome: str, resposta: str, *, em_blocos: bool = False) -> s
     else:
         miolo = (
             f"<div>Prezado Loja Teste, Aqui está uma cópia do e-mail que você enviou para {nome}. "
-            f"------------- Iniciar mensagem ------------- {resposta_html} "
+            f"{modelo}------------- Iniciar mensagem ------------- {resposta_html} "
             "------------- Mensagem final ------------- Atenciosamente, Amazon.com.br "
             '<a href="http://www.amazon.com.br">http://www.amazon.com.br</a> '
             f"{_RODAPE_AMAZON} Este e-mail foi útil? [commMgrTok:ATESTE0000000000003]</div>"
@@ -1512,6 +1529,7 @@ def _confirmacao(
     de: str = '"Amazon.com.br" <donotreply@amazon.com>',
     em_blocos: bool = False,
     autenticacao: str | None = None,
+    pedido_no_modelo: str | None = None,
 ) -> bytes:
     """A cópia da resposta dada no Seller Central: só HTML, sem caso nem relay."""
     msg = EmailMessage()
@@ -1526,7 +1544,10 @@ def _confirmacao(
     msg["X-Marketplace-ID"] = "A2Q3Y263D00KWC"
     if autenticacao:
         msg["Authentication-Results"] = autenticacao
-    msg.set_content(_html_confirmacao(nome, resposta, em_blocos=em_blocos), subtype="html")
+    msg.set_content(
+        _html_confirmacao(nome, resposta, em_blocos=em_blocos, pedido_no_modelo=pedido_no_modelo),
+        subtype="html",
+    )
     return msg.as_bytes()
 
 
@@ -1801,11 +1822,16 @@ async def test_copia_escolhe_a_conversa_certa_ou_so_loga(
     assert [(m.conversa_id, m.externo_id) for m in externas] == [
         (por_relay["carla"].id, "<c6@amazon.com>")
     ]
-    # O empate deixa aviso nas duas Marias do kfa (a tela mostra "conferir").
+    # O empate guarda a cópia INTEIRA nas duas Marias do kfa — a tela vira
+    # a escolha de 1 clique.
+    marias = {por_relay[n].id for n in ("maria-velha", "maria-nova")}
     for nome in ("maria-velha", "maria-nova"):
-        aviso = por_relay[nome].dados["amazon_copia_a_conferir"]
-        assert aviso["message_id"] == "<c1@amazon.com>", nome
-    assert "amazon_copia_a_conferir" not in (por_relay["maria-kia"].dados or {})
+        [marca] = por_relay[nome].dados["amazon_copias_a_conferir"]
+        assert marca["message_id"] == "<c1@amazon.com>", nome
+        assert marca["texto"] == "Olá, Maria!\nTem cadeado TSA e cabe, sim."
+        assert {UUID(i) for i in marca["candidatas"]} == marias
+        assert "amazon_copia_a_conferir" not in por_relay[nome].dados  # a legada não
+    assert "amazon_copias_a_conferir" not in (por_relay["maria-kia"].dados or {})
     # A do João espera a pergunta que ela responde (pode ser aviso atrasado).
     [cursor, *_] = await _cursores(db)
     assert "<c2@amazon.com>" in [c["message_id"] for c in cursor["copias_pendentes"]]
@@ -2238,3 +2264,439 @@ def test_aviso_da_amazon_vai_pro_log_com_remetente_e_assunto():
     }
     de_gente = _email(de="Fulano <fulano@gmail.com>", assunto="oi", marcadores=False)
     assert amazon_email.aviso_da_amazon(de_gente) is None
+
+
+# ─────────────── caso KIA (07/10/2026): o pedido do MODELO da cópia ───────────────
+
+
+def test_copia_traz_o_id_do_pedido_no_modelo():
+    """13 das 15 cópias reais (28/09–07/10/2026) trazem "ID do pedido: ..."
+    no MODELO, antes do "Iniciar mensagem". A leitura só olhava o texto da
+    loja e o assunto: a cópia caía no nome do comprador."""
+    for em_blocos in (False, True):
+        c = amazon_email.interpretar_confirmacao(
+            _confirmacao(
+                pedido_no_modelo=PEDIDO_KIA,
+                resposta="Bom dia! O reembolso sai em até 2 dias.",
+                em_blocos=em_blocos,
+            )
+        )
+        assert (c.pedido, c.pedido_do_modelo) == (PEDIDO_KIA, True), em_blocos
+        assert c.texto == "Bom dia! O reembolso sai em até 2 dias."  # o modelo fica fora
+    # O do modelo vale mais que um número que a loja escreveu no texto.
+    c = amazon_email.interpretar_confirmacao(
+        _confirmacao(pedido_no_modelo=PEDIDO_KIA, resposta=f"Veja também o {PEDIDO_KFA}.")
+    )
+    assert (c.pedido, c.pedido_do_modelo) == (PEDIDO_KIA, True)
+    # Sem o modelo: o do texto, como antes.
+    c = amazon_email.interpretar_confirmacao(_confirmacao(resposta=f"Seu pedido {PEDIDO_KFA}."))
+    assert (c.pedido, c.pedido_do_modelo) == (PEDIDO_KFA, False)
+    # "ID do pedido" escrito pela LOJA (depois do "Iniciar mensagem") não é modelo.
+    c = amazon_email.interpretar_confirmacao(_confirmacao(resposta=f"ID do pedido: {PEDIDO_KFA}"))
+    assert (c.pedido, c.pedido_do_modelo) == (PEDIDO_KFA, False)
+    # Dois pedidos DIFERENTES no modelo: não dá para saber qual — nenhum dele.
+    dois = _confirmacao(pedido_no_modelo=f"{PEDIDO_KIA} ID do pedido: {PEDIDO_KFA}")
+    c = amazon_email.interpretar_confirmacao(dois)
+    assert (c.pedido, c.pedido_do_modelo) == (None, False)
+    # O mesmo pedido duas vezes no modelo é um só.
+    igual = _confirmacao(pedido_no_modelo=f"{PEDIDO_KIA} ID do pedido: {PEDIDO_KIA}")
+    assert amazon_email.interpretar_confirmacao(igual).pedido == PEDIDO_KIA
+
+
+def _pergunta_de(relay: str, nome: str, conta: str, quando: str, mid: str, *, assunto=None):
+    return _email(
+        de=f'"{nome}" <{relay}@marketplace.amazon.com.br>',
+        para=f"atendimento+{conta}@loja-teste.com.br",
+        assunto=assunto or "Pergunta do cliente",
+        data=quando,
+        message_id=mid,
+        texto="Tem outra cor?",
+        marcadores=False,  # o modelo do `_email` cita o pedido do KFA
+    )
+
+
+async def _duas_do_rui(db, make_user, redis_falso, monkeypatch):
+    """O caso real, mascarado: na KIA o "Rui" tem a pergunta SEM pedido (já
+    respondida pelo Seller Central, cópia sem "ID do pedido") e a DEVOLUÇÃO
+    do pedido, esperando."""
+    agora = datetime.now(UTC).replace(microsecond=0)
+    caixa = _instalar_caixa(
+        monkeypatch,
+        CaixaFalsa(
+            {10: _pergunta_de("rui-pre", "Rui Costa", "kia", _data_rel(agora, hours=30), "<pre@a>")}
+        ),
+    )
+    user = await make_user()
+    kia, canal = await _conta(db, user, "kia")
+    await amazon_email.sincronizar(db, canal, kia, None)
+    await db.commit()
+    # A loja respondeu a pré-venda no Seller Central: cópia sem pedido, uma candidata só.
+    resposta_pre = _confirmacao(
+        nome="Rui Costa", para="atendimento+kia@loja-teste.com.br",
+        message_id="<pre-resp@amazon.com>", data=_data_rel(agora, hours=29),
+        resposta="Bom dia, segundo o site oficial do fabricante, sim.",
+    )  # fmt: skip
+    await _rodada(db, canal, kia, redis_falso, caixa, (11, resposta_pre))
+    devolucao = _pergunta_de(
+        "rui-dev", "Rui Costa", "kia", _data_rel(agora, hours=20), "<dev@a>",
+        assunto=f"Devolução do pedido {PEDIDO_KIA}",
+    )  # fmt: skip
+    await _rodada(db, canal, kia, redis_falso, caixa, (12, devolucao))
+    por_relay = {c.comprador_id.split("@")[0]: c for c in await _conversas(db)}
+    return agora, caixa, kia, canal, por_relay["rui-pre"], por_relay["rui-dev"]
+
+
+async def test_caso_kia_copia_com_pedido_no_modelo_vai_para_a_devolucao(
+    db: AsyncSession, make_user, caixa_configurada, redis_falso, monkeypatch
+):
+    """07/10/2026: "respondi pela conta (Seller Central) e não apareceu no
+    DaVinci". A cópia trazia o pedido no modelo; caiu no nome, empatou entre
+    as duas conversas do Rui e a devolução ficou com o aviso "conferir"."""
+    agora, caixa, kia, canal, pre, dev = await _duas_do_rui(db, make_user, redis_falso, monkeypatch)
+    assert (pre.aguardando_resposta, dev.aguardando_resposta) == (False, True)
+    assert dev.pedido_marketplace == PEDIDO_KIA and pre.pedido_marketplace is None
+
+    copia = _confirmacao(
+        nome="Rui Costa", para="atendimento+kia@loja-teste.com.br",
+        message_id="<dev-resp@amazon.com>", data=_data_rel(agora, hours=1),
+        resposta="O reembolso é feito pela Amazon assim que o produto chegar.",
+        pedido_no_modelo=PEDIDO_KIA,
+    )  # fmt: skip
+    r = await _rodada(db, canal, kia, redis_falso, caixa, (13, copia))
+    assert r.mensagens_novas == 1
+    await db.refresh(dev)
+    await db.refresh(pre)
+    assert dev.aguardando_resposta is False and dev.situacao == "respondida"
+    *_, resposta = await _mensagens(db, dev.id)
+    assert (resposta.externo_id, resposta.origem) == ("<dev-resp@amazon.com>", "externo")
+    assert len(await _mensagens(db, pre.id)) == 2  # a pré-venda não ganhou nada
+    for c in (pre, dev):
+        assert "amazon_copias_a_conferir" not in (c.dados or {})
+
+
+@pytest.mark.parametrize(
+    "resposta_da_outra",
+    [
+        # A outra já tinha resposta da loja depois da pergunta: mesmo assim a
+        # cópia pode ser um SEGUNDO recado nela — a pessoa escolhe.
+        "enviada_antes",
+        # A resposta da outra FALHOU: as duas esperavam.
+        "falhou_antes",
+        # A outra foi respondida DEPOIS da cópia.
+        "enviada_depois",
+    ],
+)
+async def test_copia_sem_pedido_empatada_nunca_desempata_sozinha(
+    db: AsyncSession, make_user, caixa_configurada, redis_falso, monkeypatch, resposta_da_outra
+):
+    agora = datetime.now(UTC).replace(microsecond=0)
+    caixa = _instalar_caixa(
+        monkeypatch,
+        CaixaFalsa(
+            {
+                10: _pergunta_de("rui-a", "Rui Costa", "kfa", _data_rel(agora, hours=10), "<a@a>"),
+                11: _pergunta_de("rui-b", "Rui Costa", "kfa", _data_rel(agora, hours=5), "<b@a>"),
+            }
+        ),
+    )
+    user = await make_user()
+    kfa, canal = await _conta(db, user, "kfa")
+    await amazon_email.sincronizar(db, canal, kfa, None)
+    await db.commit()
+    por_relay = {c.comprador_id.split("@")[0]: c for c in await _conversas(db)}
+    a, b = por_relay["rui-a"], por_relay["rui-b"]
+    antes = resposta_da_outra.endswith("antes")
+    quando = agora - (timedelta(hours=9) if antes else timedelta(minutes=30))
+    await gravar.gravar_mensagem(
+        db, a, externo_id="nossa-a", autor="loja", origem="davinci_humano",
+        texto="Temos sim.", enviada_em=quando,
+    )  # fmt: skip
+    if resposta_da_outra == "falhou_antes":
+        [nossa] = [m for m in await _mensagens(db, a.id) if m.externo_id == "nossa-a"]
+        nossa.status = "falhou"
+        await gravar.recalcular_conversa(db, a)
+    await db.commit()
+
+    copia = _confirmacao(
+        nome="Rui Costa", message_id="<rb@amazon.com>", data=_data_rel(agora, hours=1)
+    )
+    await _rodada(db, canal, kfa, redis_falso, caixa, (20, copia))
+    await db.refresh(a)
+    await db.refresh(b)
+    assert await _onde_gravou(db, "<rb@amazon.com>") == []
+    assert b.aguardando_resposta is True
+    # A marca fica nas que aguardam (a respondida não precisa do aviso);
+    # as candidatas são as duas.
+    assert a.aguardando_resposta is (resposta_da_outra == "falhou_antes")
+    for c in (a, b):
+        marcas = amazon_email.copias_a_conferir(c.dados)
+        if not c.aguardando_resposta:
+            assert marcas == []
+            continue
+        [marca] = marcas
+        assert marca.message_id == "<rb@amazon.com>"
+        assert {UUID(i) for i in marca.candidatas} == {a.id, b.id}
+
+
+async def _onde_gravou(db: AsyncSession, message_id: str) -> list[UUID]:
+    return [
+        m.conversa_id
+        for m in (
+            await db.execute(
+                select(AtendimentoMensagem).where(AtendimentoMensagem.externo_id == message_id)
+            )
+        ).scalars()
+    ]
+
+
+async def test_segundo_recado_na_pre_venda_nao_fecha_a_devolucao(
+    db: AsyncSession, make_user, caixa_configurada, redis_falso, monkeypatch
+):
+    """O caso KIA com os papéis trocados (achado da revisão): a loja manda
+    um SEGUNDO recado pelo Seller Central na pré-venda já respondida — cópia
+    sem "ID do pedido", como as 2 de pré-venda reais — enquanto a devolução
+    do mesmo comprador espera. Nunca chuta: a devolução continua na fila e
+    a cópia fica para a escolha de 1 clique nas duas."""
+    agora, caixa, kia, canal, pre, dev = await _duas_do_rui(db, make_user, redis_falso, monkeypatch)
+    assert (pre.aguardando_resposta, dev.aguardando_resposta) == (False, True)
+    segundo = _confirmacao(
+        nome="Rui Costa", para="atendimento+kia@loja-teste.com.br",
+        message_id="<pre-resp2@amazon.com>", data=_data_rel(agora, hours=1),
+        resposta="Complementando: o modelo novo também é compatível.",
+    )  # fmt: skip
+    await _rodada(db, canal, kia, redis_falso, caixa, (13, segundo))
+    await db.refresh(dev)
+    await db.refresh(pre)
+    assert await _onde_gravou(db, "<pre-resp2@amazon.com>") == []
+    assert dev.aguardando_resposta is True
+    # O aviso fica na que aguarda (a pré-venda já respondida não o mostra).
+    assert amazon_email.copias_a_conferir(pre.dados) == []
+    [marca] = amazon_email.copias_a_conferir(dev.dados)
+    assert marca.message_id == "<pre-resp2@amazon.com>"
+    assert {UUID(i) for i in marca.candidatas} == {pre.id, dev.id}
+
+
+async def test_segundo_recado_no_mesmo_pedido_nao_fecha_o_outro_caso(
+    db: AsyncSession, make_user, caixa_configurada, redis_falso, monkeypatch
+):
+    """Dois casos do MESMO pedido (achado da revisão): A já respondido pelo
+    DaVinci, B esperando; a loja manda um segundo recado em A pelo Seller
+    Central, com o pedido no modelo. B continua na fila; a pessoa escolhe."""
+    agora = datetime.now(UTC).replace(microsecond=0)
+    caixa = _instalar_caixa(
+        monkeypatch,
+        CaixaFalsa(
+            {
+                10: _pergunta_de("rui-a", "Rui Costa", "kia", _data_rel(agora, hours=10), "<a@a>",
+                                 assunto=f"Pedido {PEDIDO_KIA}"),
+                11: _pergunta_de("rui-b", "Rui Costa", "kia", _data_rel(agora, hours=5), "<b@a>",
+                                 assunto=f"Devolução do pedido {PEDIDO_KIA}"),
+            }
+        ),
+    )  # fmt: skip
+    user = await make_user()
+    kia, canal = await _conta(db, user, "kia")
+    await amazon_email.sincronizar(db, canal, kia, None)
+    await db.commit()
+    por_relay = {c.comprador_id.split("@")[0]: c for c in await _conversas(db)}
+    a, b = por_relay["rui-a"], por_relay["rui-b"]
+    assert a.pedido_marketplace == b.pedido_marketplace == PEDIDO_KIA
+    await gravar.gravar_mensagem(
+        db, a, externo_id="nossa-a", autor="loja", origem="davinci_humano",
+        texto="Já está a caminho.", enviada_em=agora - timedelta(hours=9),
+    )  # fmt: skip
+    await db.commit()
+    copia = _confirmacao(
+        nome="Rui Costa", para="atendimento+kia@loja-teste.com.br",
+        message_id="<a2@amazon.com>", data=_data_rel(agora, hours=1),
+        resposta="Só reforçando: chega amanhã.", pedido_no_modelo=PEDIDO_KIA,
+    )  # fmt: skip
+    await _rodada(db, canal, kia, redis_falso, caixa, (20, copia))
+    await db.refresh(a)
+    await db.refresh(b)
+    assert await _onde_gravou(db, "<a2@amazon.com>") == []
+    assert b.aguardando_resposta is True
+    assert amazon_email.copias_a_conferir(a.dados) == []  # já respondida: sem aviso
+    [marca] = amazon_email.copias_a_conferir(b.dados)
+    assert (marca.message_id, marca.pedido) == ("<a2@amazon.com>", PEDIDO_KIA)
+    assert {UUID(i) for i in marca.candidatas} == {a.id, b.id}
+
+
+async def test_releitura_unica_reavalia_a_copia_que_empatou_pela_regra_velha(
+    db: AsyncSession, make_user, caixa_configurada, redis_falso, monkeypatch
+):
+    """A cópia do caso KIA já foi lida (e empatou) antes da regra nova: o
+    cursor passou dela e só ficou a marca velha (Message-ID + hora). A
+    primeira leitura depois da troca relê as cópias dos últimos 30 dias,
+    UMA vez: a cópia vai para a devolução e as marcas velhas somem."""
+    agora, caixa, kia, canal, pre, dev = await _duas_do_rui(db, make_user, redis_falso, monkeypatch)
+    copia = _confirmacao(
+        nome="Rui Costa", para="atendimento+kia@loja-teste.com.br",
+        message_id="<dev-resp@amazon.com>", data=_data_rel(agora, hours=1),
+        resposta="O reembolso é feito pela Amazon.", pedido_no_modelo=PEDIDO_KIA,
+    )  # fmt: skip
+    # Como estava em produção: a cópia na caixa ATRÁS do cursor, a marca
+    # velha na devolução e na pré-venda, e o cursor sem a releitura.
+    caixa.emails[5] = copia
+    legada = {"message_id": "<dev-resp@amazon.com>", "em": (agora - timedelta(hours=1)).isoformat()}
+    for c in (pre, dev):
+        c.dados = {**(c.dados or {}), "amazon_copia_a_conferir": legada}
+    for canal_amazon in (await db.execute(select(AtendimentoCanal))).scalars():
+        cursor = dict(canal_amazon.cursor or {})
+        cursor.pop("copias_reavaliadas", None)
+        canal_amazon.cursor = cursor
+    await db.commit()
+
+    r = await _rodada(db, canal, kia, redis_falso, caixa)
+    assert r.mensagens_novas == 1
+    for c in (pre, dev):
+        await db.refresh(c)
+        assert "amazon_copia_a_conferir" not in (c.dados or {})
+    assert dev.aguardando_resposta is False
+    *_, resposta = await _mensagens(db, dev.id)
+    assert resposta.externo_id == "<dev-resp@amazon.com>"
+    buscas = [c for c in caixa.comandos("uid") if c[1] == "SEARCH" and "HEADER" in c]
+    assert len(buscas) == 1 and amazon_email.TIPO_CONFIRMACAO in buscas[0]
+    [cursor, *_] = await _cursores(db)
+    assert cursor["copias_reavaliadas"] == amazon_email.VERSAO_REAVALIACAO
+
+    # Uma vez só: a rodada seguinte não relê.
+    await _rodada(db, canal, kia, redis_falso, caixa)
+    buscas = [c for c in caixa.comandos("uid") if c[1] == "SEARCH" and "HEADER" in c]
+    assert len(buscas) == 1
+
+
+async def test_escolha_de_um_clique_grava_ou_descarta(
+    db: AsyncSession, make_user, caixa_configurada, redis_falso, monkeypatch
+):
+    """A cópia que continuou empatada: "Não foi esta" tira a marca só da
+    conversa (e reler não marca de novo); "Esta foi a respondida" grava a
+    cópia como resposta da loja ali e tira a marca de todas."""
+    agora = datetime.now(UTC).replace(microsecond=0)
+    caixa = _instalar_caixa(
+        monkeypatch,
+        CaixaFalsa(
+            {
+                10: _pergunta_de("rui-a", "Rui Costa", "kfa", _data_rel(agora, hours=10), "<a@a>"),
+                11: _pergunta_de("rui-b", "Rui Costa", "kfa", _data_rel(agora, hours=5), "<b@a>"),
+            }
+        ),
+    )
+    user = await make_user()
+    kfa, canal = await _conta(db, user, "kfa")
+    await amazon_email.sincronizar(db, canal, kfa, None)
+    await db.commit()
+    copia = _confirmacao(
+        nome="Rui Costa", message_id="<rb@amazon.com>", data=_data_rel(agora, hours=1)
+    )
+    await _rodada(db, canal, kfa, redis_falso, caixa, (20, copia))
+    por_relay = {c.comprador_id.split("@")[0]: c for c in await _conversas(db)}
+    a, b = por_relay["rui-a"], por_relay["rui-b"]
+    [marca_a] = amazon_email.copias_a_conferir(a.dados)
+    assert (marca_a.message_id, marca_a.legada, marca_a.uid) == ("<rb@amazon.com>", False, 20)
+    assert marca_a.texto == "Olá, Maria!\nTem cadeado TSA e cabe, sim."
+
+    # Mensagem que a conversa não tem: nada.
+    resolver = amazon_email.resolver_copia
+    assert await resolver(db, a, "<outra@amazon.com>", foi_esta=True, user_id=user.id) is None
+    # "Não foi esta" na A: só a A perde a marca; a B passa a contar 0 outras.
+    feito = await resolver(db, a, "<rb@amazon.com>", foi_esta=False, user_id=user.id)
+    await db.commit()
+    assert feito == amazon_email.ESCOLHA_DESCARTADA
+    await db.refresh(a)
+    await db.refresh(b)
+    assert amazon_email.copias_a_conferir(a.dados) == []
+    assert a.dados["amazon_copias_descartadas"] == ["<rb@amazon.com>"]
+    [marca_b] = amazon_email.copias_a_conferir(b.dados)
+    assert marca_b.candidatas == [str(b.id)]
+    assert a.aguardando_resposta is True  # nada gravado
+    # Reler a caixa (UIDVALIDITY nova) não marca de novo quem disse "não foi esta".
+    caixa.uidvalidity = 999
+    await _rodada(db, canal, kfa, redis_falso, caixa)
+    await db.refresh(a)
+    await db.refresh(b)
+    assert amazon_email.copias_a_conferir(a.dados) == []
+    [marca_b] = amazon_email.copias_a_conferir(b.dados)
+    assert marca_b.candidatas == [str(b.id)]  # a A nem conta mais
+
+    # "Esta foi a respondida" na B: grava ali, sai da fila, a marca some.
+    feito = await resolver(db, b, "<rb@amazon.com>", foi_esta=True, user_id=user.id)
+    await db.commit()
+    assert feito == amazon_email.ESCOLHA_GRAVADA
+    await db.refresh(b)
+    assert b.aguardando_resposta is False
+    *_, resposta = await _mensagens(db, b.id)
+    assert (resposta.externo_id, resposta.autor) == ("<rb@amazon.com>", "loja")
+    assert resposta.origem == "externo"
+    assert resposta.payload["amazon_copia_escolhida_por"] == str(user.id)
+    assert resposta.enviada_em == agora - timedelta(hours=1)  # o Date da cópia
+    assert amazon_email.copias_a_conferir(b.dados) == []
+    # A marca LEGADA (sem o texto) não dá para escolher.
+    legada = {"message_id": "<x@amazon.com>", "em": agora.isoformat()}
+    b.dados = {**b.dados, "amazon_copia_a_conferir": legada}
+    await db.commit()
+    [marca] = amazon_email.copias_a_conferir(b.dados)
+    assert marca.legada is True
+    assert await resolver(db, b, "<x@amazon.com>", foi_esta=True, user_id=None) is None
+
+
+async def test_dois_cliques_esta_foi_ao_mesmo_tempo_gravam_uma_vez(
+    db: AsyncSession, make_user, caixa_configurada, redis_falso, monkeypatch
+):
+    """Duas pessoas clicam "Esta foi a respondida" ao mesmo tempo, cada uma
+    numa candidata (achado da revisão). Cada requisição trava a SUA conversa
+    e pula a outra (SKIP LOCKED); a trava da cópia faz a segunda esperar a
+    primeira commitar e cair no "já gravada": uma mensagem só, uma conversa
+    fora da fila."""
+    agora = datetime.now(UTC).replace(microsecond=0)
+    caixa = _instalar_caixa(
+        monkeypatch,
+        CaixaFalsa(
+            {
+                10: _pergunta_de("rui-a", "Rui Costa", "kfa", _data_rel(agora, hours=10), "<a@a>"),
+                11: _pergunta_de("rui-b", "Rui Costa", "kfa", _data_rel(agora, hours=5), "<b@a>"),
+            }
+        ),
+    )
+    user = await make_user()
+    kfa, canal = await _conta(db, user, "kfa")
+    await amazon_email.sincronizar(db, canal, kfa, None)
+    await db.commit()
+    copia = _confirmacao(
+        nome="Rui Costa", message_id="<rb@amazon.com>", data=_data_rel(agora, hours=1)
+    )
+    await _rodada(db, canal, kfa, redis_falso, caixa, (20, copia))
+    por_relay = {c.comprador_id.split("@")[0]: c for c in await _conversas(db)}
+    a, b = por_relay["rui-a"], por_relay["rui-b"]
+
+    async def _travada(sessao, conversa_id):
+        return (
+            await sessao.execute(
+                select(AtendimentoConversa)
+                .where(AtendimentoConversa.id == conversa_id)
+                .with_for_update()
+            )
+        ).scalar_one()
+
+    async with _db.SessionLocal() as s1, _db.SessionLocal() as s2:
+        # Como o router: cada requisição trava a conversa do clique primeiro.
+        a1 = await _travada(s1, a.id)
+        b2 = await _travada(s2, b.id)
+        r1 = await amazon_email.resolver_copia(
+            s1, a1, "<rb@amazon.com>", foi_esta=True, user_id=user.id
+        )
+        segundo = asyncio.create_task(
+            amazon_email.resolver_copia(s2, b2, "<rb@amazon.com>", foi_esta=True, user_id=user.id)
+        )
+        await asyncio.sleep(0.3)
+        assert not segundo.done()  # espera a primeira (a trava da cópia)
+        await s1.commit()
+        r2 = await asyncio.wait_for(segundo, timeout=10)
+        await s2.commit()
+    assert (r1, r2) == (amazon_email.ESCOLHA_GRAVADA, amazon_email.ESCOLHA_JA_GRAVADA)
+    assert await _onde_gravou(db, "<rb@amazon.com>") == [a.id]
+    await db.refresh(a)
+    await db.refresh(b)
+    assert (a.aguardando_resposta, b.aguardando_resposta) == (False, True)
+    assert amazon_email.copias_a_conferir(a.dados) == []
+    assert amazon_email.copias_a_conferir(b.dados) == []
