@@ -1832,7 +1832,18 @@ async def test_motivo_limpo_encerra_chamado_e_avisa_da_contestacao(client, make_
     assert ch.status_plataforma == "encerrado" and ch.valor_sugerido is None
     assert (await _status_aba(db, ch)) == ("encerrado", "plataforma encerrou sem decisão")
     hist = [m["texto"] for m in (await client.get(f"/api/chamados/{ch.id}/mensagens")).json()]
-    assert any('"Não recebido"' in t and '"—"' in t and "sem razão de existir" in t for t in hist), hist
+    # 07/10 (296512): o evento diz em uma linha que foi GENTE que encerrou, e a
+    # coluna Status diz quem — não "a plataforma encerrou"
+    assert any(
+        t.startswith("Encerrado: ")
+        and 'tirou o motivo "Não recebido" na aba Devoluções' in t
+        and "sem razão de existir" in t
+        for t in hist
+    ), hist
+    lst = (await client.get("/api/chamados", params={"mostrar": "abertos"})).json()["items"]
+    row = next(i for i in lst if i["id"] == str(ch.id))
+    assert row["status_aba"] == "encerrado"
+    assert row["status_aba_motivo"].endswith('tirou o motivo "Não recebido" na aba Devoluções'), row
     assert any("desista dela" in t and "Mercado Livre" in t for t in hist), hist
 
     # 3) salvar de novo sem mudar o motivo (o front manda o motivo em todo save) não repete nada
@@ -1871,7 +1882,7 @@ async def test_motivo_que_nao_abre_chamado_encerra_e_abertura_pendente_sai_da_fi
     assert p.json()["chamado_ml_status"] == "registrada"
     assert p.json()["chamado_ml_erro"] == "contestacao_cancelada"
     hist = [m["texto"] for m in (await client.get(f"/api/chamados/{ch.id}/mensagens")).json()]
-    assert any('"Item Incorreto"' in t and "aguardando fechamento" in t for t in hist), hist
+    assert any(t.startswith("Encerrado: ") and '"Item Incorreto"' in t and "não abre chamado" in t for t in hist), hist
     assert any("pendente na fila" in t for t in hist), hist
 
 

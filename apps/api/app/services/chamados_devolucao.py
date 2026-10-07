@@ -854,9 +854,17 @@ async def encerrar_chamado_por_motivo(
     await _encerrar_chamado(
         session,
         ch,
+        # 07/10 (Vinicius, 296512): o histórico diz em uma linha que foi GENTE que
+        # encerrou — "Encerrado: thatcher tirou o motivo "Bloqueado" na aba Devoluções".
         evento=(
-            f"Motivo da devolução retirado (de \"{de}\" para \"{para}\", por {quem}) — "
-            "chamado sem razão de existir, aguardando fechamento"
+            f"{chamados_svc.ENCERRADO_PREFIXO}"
+            f"{chamados_svc.quem_mexeu_no_motivo(quem, de, para)} — "
+            + (
+                "o chamado ficou sem razão de existir"
+                if para == "—"
+                else "o motivo novo não abre chamado"
+            )
+            + ". Falta concluir pela aba Chamados."
         ),
     )
     logger.info(
@@ -983,8 +991,9 @@ async def trocar_motivo_chamado(
             session,
             ch,
             evento=(
-                f"{quem} trocou o motivo da devolução de \"{de}\" para \"{para}\" — "
-                "chamado encerrado; outro chamado foi aberto com o motivo novo"
+                f"{chamados_svc.ENCERRADO_PREFIXO}"
+                f"{chamados_svc.quem_mexeu_no_motivo(quem, de, para)} — "
+                "outro chamado foi aberto com o motivo novo"
             ),
         )
         novo = await chamados_svc.abrir_chamado_devolucao(

@@ -7,6 +7,7 @@ import {
   CheckCircle2,
   ChevronLeft,
   ChevronRight,
+  ExternalLink,
   Gavel,
   History,
   Hourglass,
@@ -76,7 +77,7 @@ const STATUS_ABA: { value: string; label: string; cls: string; hint: string }[] 
   { value: 'analise_humano', label: 'Análise Humano', cls: 'bg-red-500/15 text-red-700 dark:text-red-300', hint: 'o robô não conseguiu — precisa de gente' },
   { value: 'analise_robo', label: 'Análise Robô', cls: 'bg-indigo-500/15 text-indigo-700 dark:text-indigo-300', hint: 'a IA de Chamado ou o robô têm trabalho aqui: decidir, responder, reenviar, achar outro caminho, ou uma instrução sua' },
   { value: 'aguard_plataforma', label: 'Aguard. Plataforma', cls: 'bg-sky-500/15 text-sky-700 dark:text-sky-300', hint: 'a bola está com a plataforma' },
-  { value: 'encerrado', label: 'Encerrado', cls: 'bg-amber-500/15 text-amber-700 dark:text-amber-300', hint: 'a plataforma encerrou o caso — falta fechar com lucro/prejuízo' },
+  { value: 'encerrado', label: 'Encerrado', cls: 'bg-amber-500/15 text-amber-700 dark:text-amber-300', hint: 'a plataforma encerrou o caso (ou tiraram o motivo na Devoluções) — falta fechar com lucro/prejuízo' },
   { value: 'concluido', label: 'Concluído', cls: 'bg-muted text-muted-foreground', hint: 'fechado por uma pessoa' },
 ]
 const STATUS_POR_CODIGO = Object.fromEntries(STATUS_ABA.map((s) => [s.value, s]))
@@ -477,7 +478,14 @@ type Bolha = {
   // 25/09 (lixeirinha): a mensagem de onde o balão saiu — uma mensagem com a
   // conversa colada vira vários balões, e excluir leva todos.
   origem?: { id: string; tipo: string; status: Mensagem['status']; direcao: Mensagem['direcao'] }
+  // 07/10: evento que pôs o chamado em Encerrado — destacado, com a data à vista.
+  encerramento?: boolean
 }
+
+// 07/10 (Vinicius, 296512: "consegue colocar no histórico 'encerrado, thatcher tirou
+// o motivo'?"): os eventos de Encerrado saíam em cinza miúdo e passavam batido.
+// Textos novos começam com "Encerrado: "; os outros são os já gravados.
+const RE_ENCERRAMENTO = /^(Encerrado: |Motivo da devolução retirado |Plataforma encerrou o caso|Monitor: plataforma encerrou)|— chamado encerrado;/
 
 // "Mercado Livre" / "Você" seguido da data, do jeito que o ML escreve na página
 // do caso e no corpo do e-mail.
@@ -902,6 +910,7 @@ const bolhas = computed<Bolha[]>(() => {
           chave: m.id, lado: 'sistema', autor: m.autor_nome || 'sistema',
           quando: fmtDateTime(m.created_at), texto: m.texto, meta: 'sistema',
           status: null, erro: null, anexos: m.anexos, origem: origemDe(m),
+          encerramento: RE_ENCERRAMENTO.test(m.texto),
         },
       })
       continue
@@ -2082,6 +2091,18 @@ async function confirmarExcluir() {
             </div>
           </div>
           <div class="flex items-center gap-2">
+            <!-- 07/10 (Vinicius): atalho pra Devoluções numa aba nova, já na aba
+                 Lançamentos e buscando este pedido (é lá que fica o motivo). -->
+            <NuxtLink
+              v-if="hist.row.origem === 'devolucao' && (hist.row.pedido_bling || hist.row.pedido_marketplace)"
+              :to="{ path: '/devolucoes', query: { tab: 'lancamentos', search: hist.row.pedido_bling || hist.row.pedido_marketplace } }"
+              target="_blank"
+              class="inline-flex h-7 items-center whitespace-nowrap rounded-md border border-input bg-background px-2 text-sm font-medium hover:bg-accent hover:text-accent-foreground"
+              title="Abrir a Devoluções numa aba nova, na aba Lançamentos, já buscando este pedido"
+            >
+              <ExternalLink class="size-3.5 mr-1" />
+              Devoluções
+            </NuxtLink>
             <Button
               v-if="hist.row.canal === 'api' || hist.row.chamado_de_tela"
               size="sm"
@@ -2121,7 +2142,11 @@ async function confirmarExcluir() {
             }"
           >
             <div
-              v-if="b.lado === 'sistema'"
+              v-if="b.lado === 'sistema' && b.encerramento"
+              class="max-w-[85%] whitespace-pre-wrap break-words rounded-2xl border border-amber-300/70 bg-amber-50 px-3 py-1.5 text-center text-xs text-amber-800 dark:border-amber-800/60 dark:bg-amber-900/20 dark:text-amber-200"
+            ><span class="font-semibold">{{ b.quando }}</span> · {{ b.texto }}</div>
+            <div
+              v-else-if="b.lado === 'sistema'"
               class="max-w-[85%] whitespace-pre-wrap break-words rounded-2xl bg-muted px-3 py-1 text-center text-[11px] italic text-muted-foreground"
               :title="b.quando"
             >{{ b.texto }}</div>
@@ -2417,9 +2442,10 @@ async function confirmarExcluir() {
         <div class="flex items-start justify-between gap-3 border-b px-4 py-3">
           <div>
             <div class="text-sm font-semibold">Resolver chamado · pedido {{ resolver.row.pedido_bling || resolver.row.pedido_marketplace }}</div>
-            <!-- 19/09: a plataforma já encerrou (ganhamos/perdemos/sem decisão) — a pessoa só confirma o resultado. -->
+            <!-- 19/09: a plataforma já encerrou (ganhamos/perdemos/sem decisão) — a pessoa só confirma o resultado.
+                 07/10: ou alguém tirou o motivo na Devoluções — aí o motivo diz quem. -->
             <div v-if="resolver.row.status_aba === 'encerrado'" class="text-xs text-amber-700 dark:text-amber-300">
-              Plataforma encerrou: {{ resolver.row.status_aba_motivo || 'sem decisão' }}
+              Encerrado: {{ resolver.row.status_aba_motivo || 'plataforma encerrou sem decisão' }}
             </div>
             <!-- 21/09 (Vinicius): a sugestão do robô fica só aqui em cima (o valor já
                  vem preenchido no campo); sem a linha repetida embaixo do Valor. -->

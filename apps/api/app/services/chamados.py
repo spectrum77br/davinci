@@ -31,6 +31,7 @@ não altera; Devolução ficou em branco (sem padrão).
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID
@@ -177,6 +178,49 @@ MOTIVO_STATUS_OFICIAL = {
 }
 # Motivo dos status finais (Encerrado / Concluído).
 MOTIVO_FINAL = {STATUS_GANHAMOS: "ganhamos", STATUS_PERDEMOS: "perdemos"}
+
+# 07/10 (Vinicius, 296512: "está aguardando a plataforma, por que aparece
+# Encerrado?"): Encerrado porque uma PESSOA tirou/trocou o motivo na Devoluções não
+# é "a plataforma encerrou". O evento começa com ENCERRADO_PREFIXO + quem fez, e a
+# coluna Status / janela Resolver mostram isso (`encerrado_por_pessoa`).
+ENCERRADO_PREFIXO = "Encerrado: "
+# Textos antigos (até 07/10) dos mesmos eventos — os casos já gravados seguem lidos.
+_RE_ENCERRADO_MOTIVO_ANTIGO = re.compile(
+    r'^Motivo da devolução retirado \(de "(.*?)" para "(.*?)", por (.+?)\) — '
+)
+_RE_ENCERRADO_TROCA_ANTIGO = re.compile(
+    r'^(.+?) trocou o motivo da devolução de "(.*?)" para "(.*?)" — chamado encerrado'
+)
+_RE_AUTOR_DEVOLUCOES = re.compile(r"^Devoluções \((.+)\)$")
+
+
+def quem_mexeu_no_motivo(autor: str | None, de: str, para: str) -> str:
+    """'thatcher tirou o motivo "Bloqueado" na aba Devoluções' (motivo limpo) ou
+    'thatcher trocou o motivo de "X" para "Y" na aba Devoluções'. `autor` vem como
+    a Devoluções grava ("Devoluções (thatcher)")."""
+    autor = (autor or "").strip() or AUTOR_SISTEMA
+    m = _RE_AUTOR_DEVOLUCOES.match(autor)
+    nome, onde = (m.group(1), " na aba Devoluções") if m else (autor, "")
+    if (para or "").strip() in ("", "—"):
+        return f'{nome} tirou o motivo "{de}"{onde}'
+    return f'{nome} trocou o motivo de "{de}" para "{para}"{onde}'
+
+
+def encerrado_por_pessoa(mensagens: list[ChamadoMensagem]) -> str | None:
+    """Quem pôs o chamado em Encerrado mexendo no motivo da devolução (o evento
+    mais recente), ou None quando foi a plataforma/robô."""
+    for m in reversed(mensagens):
+        if m.direcao != "sistema":
+            continue
+        t = (m.texto or "").strip()
+        if t.startswith(ENCERRADO_PREFIXO):
+            return t[len(ENCERRADO_PREFIXO):].split(" — ", 1)[0].strip() or None
+        if mm := _RE_ENCERRADO_MOTIVO_ANTIGO.match(t):
+            return quem_mexeu_no_motivo(mm.group(3), mm.group(1), mm.group(2))
+        if mm := _RE_ENCERRADO_TROCA_ANTIGO.match(t):
+            return quem_mexeu_no_motivo(mm.group(1), mm.group(2), mm.group(3))
+    return None
+
 
 # 18/09 (Eduardo: "está uma zona, precisamos dos status verdadeiros"): o erro da
 # última mensagem nossa diz DE QUEM é a vez — e a coluna tem que dizer isso.
@@ -989,8 +1033,13 @@ def status_e_motivo_da_aba(
     analise_pede_esperar: bool = False,
     instrucao_pendente: ChamadoMensagem | None = None,
     nossa_fala_apos_status: bool = False,
+    encerrado_por: str | None = None,
 ) -> tuple[str, datetime | None, str | None]:
     """(código ABA_*, desde quando, motivo curto) que a coluna Status mostra.
+
+    `encerrado_por` (07/10): quem pôs em Encerrado mexendo no motivo da devolução
+    (`encerrado_por_pessoa`) — vira o motivo do Encerrado sem decisão no lugar de
+    "plataforma encerrou sem decisão".
 
     `nossa_fala_apos_status` (19/09): a listagem olha o histórico inteiro e diz se
     existe ALGUMA fala nossa que saiu (`enviada`/`registrada`) depois do status
@@ -1048,7 +1097,10 @@ def status_e_motivo_da_aba(
         )
     )
     if ch.status_plataforma in STATUS_FINAIS and not seguiu:
-        motivo = MOTIVO_FINAL.get(ch.status_plataforma, "plataforma encerrou sem decisão")
+        if ch.status_plataforma == STATUS_ENCERRADO and encerrado_por:
+            motivo = encerrado_por
+        else:
+            motivo = MOTIVO_FINAL.get(ch.status_plataforma, "plataforma encerrou sem decisão")
         if ch.valor_sugerido is not None:
             motivo = f"{motivo} · robô sugere {resultado_texto(ch.valor_sugerido)}"
         return ABA_ENCERRADO, ch.status_plataforma_at, motivo

@@ -332,6 +332,13 @@ async def _to_out(session: AsyncSession, rows: list[Chamado]) -> list[ChamadoOut
             ),
             instrucao_pendente=instrucao,
             nossa_fala_apos_status=nossa_apos_status,
+            # 07/10: Encerrado porque alguém mexeu no motivo da devolução (só os
+            # eventos DESTA linha — a irmã do caso ML tem a sua história).
+            encerrado_por=(
+                svc.encerrado_por_pessoa(por_chamado.get(r.id, []))
+                if r.status_plataforma == svc.STATUS_ENCERRADO
+                else None
+            ),
         )
         o.auto_proximo_envio_at = svc.auto_proximo_envio(r)
         o.anexos_auto = anexos_auto.get(r.id, [])

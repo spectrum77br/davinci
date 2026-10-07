@@ -1941,3 +1941,50 @@ async def test_lista_custo_do_produto_so_mostrar(client, make_user, auth_as, db)
     lst = (await client.get("/api/chamados")).json()["items"]
     assert float(next(i for i in lst if i["id"] == r.json()["id"])["custo_produto"]) == 421.0
 
+
+
+def test_encerrado_por_pessoa_le_texto_novo_e_antigo():
+    """07/10 (Vinicius, 296512): Encerrado porque alguém tirou o motivo na
+    Devoluções diz QUEM foi — inclusive nos eventos gravados com o texto antigo."""
+
+    def ev(texto: str, direcao: str = "sistema") -> ChamadoMensagem:
+        return ChamadoMensagem(direcao=direcao, tipo="sistema", texto=texto, status="registrada")
+
+    antigo = (
+        'Motivo da devolução retirado (de "Bloqueado" para "—", por Devoluções (thatcher)) — '
+        "chamado sem razão de existir, aguardando fechamento"
+    )
+    assert svc.encerrado_por_pessoa([ev("Chamado aberto"), ev(antigo)]) == (
+        'thatcher tirou o motivo "Bloqueado" na aba Devoluções'
+    )
+    troca_antiga = (
+        'Devoluções (thays) trocou o motivo da devolução de "Não recebido" para "Novo" — '
+        "chamado encerrado; outro chamado foi aberto com o motivo novo"
+    )
+    assert svc.encerrado_por_pessoa([ev(troca_antiga)]) == (
+        'thays trocou o motivo de "Não recebido" para "Novo" na aba Devoluções'
+    )
+    novo = (
+        "Encerrado: "
+        + svc.quem_mexeu_no_motivo("Devoluções (thatcher)", "Bloqueado", "—")
+        + " — o chamado ficou sem razão de existir. Falta concluir pela aba Chamados."
+    )
+    assert novo.startswith('Encerrado: thatcher tirou o motivo "Bloqueado" na aba Devoluções — ')
+    quem = 'thatcher tirou o motivo "Bloqueado" na aba Devoluções'
+    assert svc.encerrado_por_pessoa([ev(novo)]) == quem
+    # fala da plataforma com o mesmo texto não conta; sem evento → None
+    assert svc.encerrado_por_pessoa([ev(novo, direcao="recebida")]) is None
+    plataforma = "Plataforma encerrou o caso (shopee:CLOSED) — aguardando fechamento"
+    assert svc.encerrado_por_pessoa([ev(plataforma)]) is None
+
+    ch = Chamado(status_plataforma=svc.STATUS_ENCERRADO, resolvido=False)
+    ch.status_plataforma_at = datetime.now(UTC)
+    _cod, _q, motivo = svc.status_e_motivo_da_aba(
+        ch, ultima_fala=None, ultima_analise=None, analise_pede_humano=False,
+        encerrado_por='thatcher tirou o motivo "Bloqueado" na aba Devoluções',
+    )
+    assert motivo == 'thatcher tirou o motivo "Bloqueado" na aba Devoluções'
+    _cod, _q, motivo = svc.status_e_motivo_da_aba(
+        ch, ultima_fala=None, ultima_analise=None, analise_pede_humano=False
+    )
+    assert motivo == "plataforma encerrou sem decisão"

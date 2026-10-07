@@ -1114,7 +1114,13 @@ type Tab = 'acompanhamento' | 'fraude' | 'lancamentos'
 // (Vinicius 17/09) é a mesma tabela, só com os pedidos em que NÃO volta
 // pacote (só dinheiro) — outra pessoa cuida; a aba Lançamentos guarda TODO o
 // conteúdo antigo da página, intacto.
-const tab = ref<Tab>('acompanhamento')
+// 07/10 (Vinicius): `?tab=lancamentos&search=296512` — o atalho do histórico do
+// chamado abre a página já na aba e com o pedido buscado.
+const _route = useRoute()
+const _abaQuery = String(_route.query.tab || '')
+const tab = ref<Tab>(
+  _abaQuery === 'fraude' || _abaQuery === 'lancamentos' ? _abaQuery : 'acompanhamento',
+)
 // As abas Acompanhamento e Fraude compartilham a lista e o markup: o que muda
 // é o painel (`fila`) de cada linha.
 const abaDePedidos = computed(() => tab.value === 'acompanhamento' || tab.value === 'fraude')
@@ -1427,6 +1433,14 @@ function goLancar(row: AcompanhamentoRow) {
   openAdd()
   lookupPedido.value = row.pedido_bling
   void lookupOrder()
+}
+
+// Busca vinda da URL (ver `_abaQuery`) entra antes da 1ª carga — na caixa de busca
+// da aba aberta.
+const _buscaQuery = _route.query.search
+if (typeof _buscaQuery === 'string' && _buscaQuery.trim()) {
+  if (tab.value === 'lancamentos') search.value = _buscaQuery.trim()
+  else acompSearch.value = _buscaQuery.trim()
 }
 
 // As duas abas carregam juntas (paralelo): trocar de aba é instantâneo.

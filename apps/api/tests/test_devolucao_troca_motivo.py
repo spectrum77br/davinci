@@ -173,7 +173,7 @@ async def test_robo_shopee_pendente_encerra_o_antigo_e_abre_outro_pela_api(clien
     await db.refresh(ab)
     assert ab.status == "registrada" and ab.erro == "contestacao_cancelada"
     hist = await _sistema_txts(db, antigo.id)
-    assert any('Devoluções (thays@davinci-test.com) trocou o motivo da devolução de "Não recebido" para "Danificado (Outros)" — chamado encerrado; outro chamado foi aberto com o motivo novo' in t for t in hist), hist
+    assert any('Encerrado: thays@davinci-test.com trocou o motivo de "Não recebido" para "Danificado (Outros)" na aba Devoluções — outro chamado foi aberto com o motivo novo' in t for t in hist), hist
     assert any("pendente na fila do robô" in t for t in hist), hist
     assert (await _status_aba(db, antigo))[0] == "encerrado"
     # novo: canal api, esperando a foto do dano; observação diz de onde veio
