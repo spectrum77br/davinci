@@ -341,11 +341,11 @@ async def _ligar(client: AsyncClient, conta_id, ativo: bool = True):
 # =========================================================== migration
 
 
-_MIGRATION = Path(__file__).resolve().parent.parent / "alembic" / "versions" / "0377_catalogo_ml.py"
+_MIGRATION = Path(__file__).resolve().parent.parent / "alembic" / "versions" / "0378_catalogo_ml.py"
 
 
 def _carregar_migration():
-    spec = importlib.util.spec_from_file_location("migration_0377", _MIGRATION)
+    spec = importlib.util.spec_from_file_location("migration_0378", _MIGRATION)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
@@ -414,15 +414,15 @@ async def _estrutura(db: AsyncSession, schema: str) -> dict[str, list]:
 
 
 @pytest.mark.asyncio
-async def test_migration_0377_cria_o_que_o_model_declara_e_o_downgrade_desfaz(db: AsyncSession):
+async def test_migration_0378_cria_o_que_o_model_declara_e_o_downgrade_desfaz(db: AsyncSession):
     mod = _carregar_migration()
-    assert mod.revision == "0377_catalogo_ml"
-    assert mod.down_revision == "0376_imobilizado"
+    assert mod.revision == "0378_catalogo_ml"
+    assert mod.down_revision == "0377_conferencia_shopee"
     schema_model = Base.metadata.schema
-    rascunho = f"{schema_model}_mig0377"
+    rascunho = f"{schema_model}_mig0378"
     await db.execute(text(f'DROP SCHEMA IF EXISTS "{rascunho}" CASCADE'))
     await db.execute(text(f'CREATE SCHEMA "{rascunho}"'))
-    # Só o que a 0377 toca (as colunas antigas que os CHECKs citam).
+    # Só o que a 0378 toca (as colunas antigas que os CHECKs citam).
     await db.execute(text(f'CREATE TABLE "{rascunho}".pricing_products (id uuid PRIMARY KEY)'))
     await db.execute(
         text(
@@ -510,11 +510,11 @@ async def test_migration_0377_cria_o_que_o_model_declara_e_o_downgrade_desfaz(db
 
 
 @pytest.mark.asyncio
-async def test_migration_0377_com_product_links_ocupada_nao_trava_a_tabela_de_precos(
+async def test_migration_0378_com_product_links_ocupada_nao_trava_a_tabela_de_precos(
     db: AsyncSession, monkeypatch,
 ):
     """Cenário do deploy às 13h UTC: a varredura de vínculos segura uma
-    transação aberta em product_links. A 0377 espera o lock_timeout e cai —
+    transação aberta em product_links. A 0378 espera o lock_timeout e cai —
     sem ter travado pricing_products/pricing_accounts nesse meio tempo (a
     Tabela de Preços segue abrindo) e sem deixar nada aplicado."""
     import asyncio
@@ -523,7 +523,7 @@ async def test_migration_0377_com_product_links_ocupada_nao_trava_a_tabela_de_pr
     from sqlalchemy.exc import DBAPIError
 
     mod = _carregar_migration()
-    rascunho = f"{Base.metadata.schema}_mig0377_trava"
+    rascunho = f"{Base.metadata.schema}_mig0378_trava"
     await db.execute(text(f'DROP SCHEMA IF EXISTS "{rascunho}" CASCADE'))
     await db.execute(text(f'CREATE SCHEMA "{rascunho}"'))
     for tabela, colunas in (

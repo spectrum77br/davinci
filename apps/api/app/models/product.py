@@ -125,7 +125,7 @@ class ProductLink(Base, TimestampMixin):
     __tablename__ = "product_links"
     __table_args__ = (
         # A Tabela de Preços carrega os anúncios de catálogo por integração
-        # (migration 0377).
+        # (migration 0378).
         Index(
             "ix_product_links_catalogo",
             "integration_id",
@@ -178,7 +178,7 @@ class ProductLink(Base, TimestampMixin):
     # estoque; sai sozinho depois de 30 dias; volta a viver se reaparecer.
     morto_desde: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     morto_motivo: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # Marca de catálogo do ML (migration 0377), gravada pela varredura diária
+    # Marca de catálogo do ML (migration 0378), gravada pela varredura diária
     # de vínculos com o item que ela já lê (sem chamada nova ao ML).
     # catalog_listing NULL = ainda não lido. catalogo_relacionado = anúncios de
     # `item_relations` separados por vírgula: catálogo preso ao anúncio comum

@@ -34,7 +34,7 @@ def _enum(py_enum, name: str):
     )
 
 
-# Canais da conta de preço (Catálogo ML, 06/10/2026 — migration 0377).
+# Canais da conta de preço (Catálogo ML, 06/10/2026 — migration 0378).
 CANAL_KIT = "kit"
 CANAL_CATALOGO = "catalogo"
 
@@ -153,7 +153,7 @@ class PricingAccount(Base, TimestampMixin):
     sort_order: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, server_default=text("0")
     )
-    # Catálogo ML (06/10/2026, migration 0377). 'kit' = a conta de sempre.
+    # Catálogo ML (06/10/2026, migration 0378). 'kit' = a conta de sempre.
     # 'catalogo' = coluna de catálogo ligada numa conta ML de kit (a "base",
     # `conta_base_id`): sem integração própria (Margem, frete projetado e
     # Lojas só enxergam a base), e comissão/margens/fretes/anotações vêm da
@@ -214,7 +214,7 @@ class PricingProduct(Base, TimestampMixin):
     cost_kit7: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True)
     cost_kit8: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True)
     # Custo base do anúncio de catálogo do ML (coluna "Catálogo" em Produtos,
-    # migration 0377): entra na conta como os Kit 1..8. NULL = sem preço de
+    # migration 0378): entra na conta como os Kit 1..8. NULL = sem preço de
     # catálogo — as colunas de catálogo mostram "—" e não enviam.
     preco_catalogo: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True)
     description: Mapped[str | None] = mapped_column(String(256), nullable=True)

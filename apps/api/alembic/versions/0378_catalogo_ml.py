@@ -36,12 +36,12 @@ No deploy:
     davinci.product_links (se houver, esperar);
   - "lock timeout" = nada aplicado: é só rodar de novo depois;
   - só subir as imagens novas (up -d) se o alembic sair com 0 e
-    davinci.alembic_version = '0377_catalogo_ml' — o model novo de
+    davinci.alembic_version = '0378_catalogo_ml' — o model novo de
     ProductLink lê as colunas novas em TODA consulta (estoque, vínculos e envio
     de todos os marketplaces dariam UndefinedColumn).
 
-Revision ID: 0377_catalogo_ml
-Revises: 0376_imobilizado
+Revision ID: 0378_catalogo_ml
+Revises: 0377_conferencia_shopee
 """
 
 from collections.abc import Sequence
@@ -51,8 +51,8 @@ from sqlalchemy.dialects import postgresql
 
 from alembic import op
 
-revision: str = "0377_catalogo_ml"
-down_revision: str | None = "0376_imobilizado"
+revision: str = "0378_catalogo_ml"
+down_revision: str | None = "0377_conferencia_shopee"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
