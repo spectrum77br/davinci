@@ -2267,6 +2267,10 @@ async def prints_do_processo(
             p for p in provas
             if str((p.dados or {}).get("obs") or "").startswith("Captura enviada à Anatel") and protocolo in str((p.dados or {}).get("obs"))
         ]
+        # 07/10/2026: o conserto por peticionamento intercorrente juntou no MESMO processo uma captura nova (obs
+        # "Captura enviada à Anatel (SEI, intercorrente) — processo X") — fica separado do que foi na petição
+        consertos = [p for p in enviados if "intercorrente" in str((p.dados or {}).get("obs") or "")]
+        enviados = [p for p in enviados if p not in consertos]
         originais = [
             p for p in provas
             if p.tipo in _TIPOS_PRINT and _eh_imagem(p) and p not in enviados
@@ -2275,6 +2279,16 @@ async def prints_do_processo(
         ]
         original = max(originais, key=lambda p: (_quando_prova(p), p.id)) if originais else None
         enviado = max(enviados, key=lambda p: p.id) if enviados else None
+        conserto = max(consertos, key=lambda p: p.id) if consertos else None
+        print_novo = None
+        if conserto:
+            novos = [
+                p for p in provas
+                if p.tipo == "Captura no ato" and _eh_imagem(p) and p not in consertos
+                and not str((p.dados or {}).get("obs") or "").startswith("Captura enviada à Anatel")
+                and quando < _quando_prova(p) <= _quando_prova(conserto)
+            ]
+            print_novo = max(novos, key=lambda p: (_quando_prova(p), p.id)) if novos else None
         a = anuncios.get(d.anuncio_id or "")
         itens.append({
             "anuncio_id": d.anuncio_id,
@@ -2284,5 +2298,10 @@ async def prints_do_processo(
             "print": _prova_resumo(original) if original else None,
             "invalido": original.tipo if original and original.tipo != "Captura no ato" else None,
             "pdf": _prova_resumo(enviado) if enviado else None,
+            "conserto": {
+                "pdf": _prova_resumo(conserto),
+                "print": _prova_resumo(print_novo) if print_novo else None,
+                "em": _quando_prova(conserto) or None,
+            } if conserto else None,
         })
     return {"protocolo": protocolo, "data": data or None, "itens": itens}

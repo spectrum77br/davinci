@@ -4,8 +4,10 @@
 // anexado. Serve para uma pessoa bater o olho: print em vermelho = hoje consta como inválido (tela de captcha ou
 // catálogo de outro vendedor), e aí o processo precisa de conserto (peticionamento intercorrente).
 // Os arquivos ficam no Mac mini: a tela pede (POST …/preparar) e o mini manda em uns segundos, 3 de cada vez.
+// Conserto (07/10): print novo juntado no MESMO processo por peticionamento intercorrente — a miniatura passa a ser a do
+// print novo e o anúncio deixa de contar como "precisa de conserto".
 import { onUnmounted, reactive, ref, watch } from 'vue'
-import { ExternalLink, FileText, Loader2, TriangleAlert } from 'lucide-vue-next'
+import { CircleCheck, ExternalLink, FileText, Loader2, TriangleAlert } from 'lucide-vue-next'
 import { type Prova, dataBr, urlProva } from '~/lib/denuncia'
 
 type Item = {
@@ -16,6 +18,7 @@ type Item = {
   print: Prova | null
   invalido: string | null
   pdf: Prova | null
+  conserto: { pdf: Prova; print: Prova | null; em: string | null } | null
 }
 
 const props = defineProps<{ protocolo: string }>()
@@ -76,7 +79,7 @@ async function carregar() {
     itens.value = r.itens
     data.value = r.data
     for (const it of r.itens) {
-      for (const p of [it.print, it.pdf]) {
+      for (const p of [it.print, it.pdf, it.conserto?.print, it.conserto?.pdf]) {
         if (p && !(p.id in estado)) {
           estado[p.id] = 'pedindo'
           fila.push(p.id)
@@ -96,7 +99,9 @@ onUnmounted(() => {
   vivo = false
 })
 
-const invalidos = () => itens.value.filter((i) => i.invalido || !i.print).length
+const invalidos = () => itens.value.filter((i) => (i.invalido || !i.print) && !i.conserto).length
+const consertados = () => itens.value.filter((i) => i.conserto).length
+const miniatura = (i: Item) => i.conserto?.print || i.print
 </script>
 
 <template>
@@ -111,33 +116,40 @@ const invalidos = () => itens.value.filter((i) => i.invalido || !i.print).length
           {{ invalidos() }} com print errado ou sem print — este processo precisa de conserto.
         </span>
         <span v-else class="text-emerald-700 dark:text-emerald-400">Todos os prints constam como válidos — confira pela imagem.</span>
+        <span v-if="consertados()" class="text-emerald-700 dark:text-emerald-400">
+          {{ consertados() }} corrigido{{ consertados() === 1 ? '' : 's' }} por peticionamento intercorrente.
+        </span>
       </p>
       <ul class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2">
         <li
           v-for="it in itens"
           :key="it.anuncio_id || ''"
           class="rounded-lg border overflow-hidden flex flex-col min-w-0"
-          :class="it.invalido || !it.print ? 'border-red-400 ring-1 ring-red-300' : ''"
+          :class="it.conserto ? 'border-emerald-400 ring-1 ring-emerald-300' : it.invalido || !it.print ? 'border-red-400 ring-1 ring-red-300' : ''"
         >
           <a
-            v-if="it.print && estado[it.print.id] === 'pronto'"
-            :href="urlProva(it.print.id)"
+            v-if="miniatura(it) && estado[miniatura(it)!.id] === 'pronto'"
+            :href="urlProva(miniatura(it)!.id)"
             target="_blank"
             rel="noopener"
             class="block bg-muted/30"
             :title="`abrir o print de ${it.anuncio_id}`"
           >
-            <img :src="urlProva(it.print.id)" :alt="`print do anúncio ${it.anuncio_id}`" loading="lazy" class="h-40 w-full object-cover object-top">
+            <img :src="urlProva(miniatura(it)!.id)" :alt="`print do anúncio ${it.anuncio_id}`" loading="lazy" class="h-40 w-full object-cover object-top">
           </a>
           <div v-else class="h-40 flex items-center justify-center bg-muted/30 text-xs text-muted-foreground text-center px-2">
-            <template v-if="!it.print">sem print encontrado</template>
-            <template v-else-if="estado[it.print.id] === 'erro'">o Mac mini não mandou o arquivo (desligado?)</template>
+            <template v-if="!miniatura(it)">sem print encontrado</template>
+            <template v-else-if="estado[miniatura(it)!.id] === 'erro'">o Mac mini não mandou o arquivo (desligado?)</template>
             <span v-else class="inline-flex items-center gap-1.5"><Loader2 class="size-4 animate-spin" /> pedindo ao Mac mini…</span>
           </div>
           <div class="p-2 space-y-1 text-[11px] min-w-0">
             <div class="font-mono text-muted-foreground truncate">{{ it.anuncio_id }} · {{ it.marketplace || '' }}</div>
             <div class="truncate" :title="it.titulo || ''">{{ it.titulo || '—' }}</div>
-            <div v-if="it.invalido" class="flex items-center gap-1 font-medium text-red-700 dark:text-red-400">
+            <div v-if="it.conserto" class="flex items-center gap-1 font-medium text-emerald-700 dark:text-emerald-400">
+              <CircleCheck class="size-3.5 shrink-0" />
+              <span class="truncate">corrigido por intercorrente<template v-if="it.conserto.em"> em {{ dataBr(it.conserto.em) }}</template></span>
+            </div>
+            <div v-if="it.invalido" class="flex items-center gap-1 font-medium" :class="it.conserto ? 'text-muted-foreground line-through' : 'text-red-700 dark:text-red-400'">
               <TriangleAlert class="size-3.5 shrink-0" /> <span class="truncate" :title="it.invalido">{{ it.invalido.replace('Captura inválida ', 'inválido ') }}</span>
             </div>
             <div class="flex items-center gap-2">
@@ -153,6 +165,16 @@ const invalidos = () => itens.value.filter((i) => i.invalido || !i.print).length
               </a>
               <span v-else-if="it.pdf" class="text-muted-foreground">PDF enviado…</span>
               <span v-else class="text-muted-foreground">sem a cópia do PDF</span>
+              <a
+                v-if="it.conserto && estado[it.conserto.pdf.id] === 'pronto'"
+                :href="urlProva(it.conserto.pdf.id)"
+                target="_blank"
+                rel="noopener"
+                class="inline-flex items-center gap-1 text-primary hover:underline"
+                title="o PDF juntado no processo pelo peticionamento intercorrente"
+              >
+                <FileText class="size-3.5" /> PDF do conserto <ExternalLink class="size-3" />
+              </a>
             </div>
           </div>
         </li>

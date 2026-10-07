@@ -1363,4 +1363,17 @@ async def test_prints_do_processo_sei_mostra_original_e_pdf(client, make_user, a
     assert por["B1"]["titulo"] == "Oukitel WP60"
     assert por["B2"]["print"]["id"] == 63 and por["B2"]["invalido"] == "Captura inválida (tela de verificação)"
     assert por["B2"]["pdf"] is None
+    assert por["B1"]["conserto"] is None and por["B2"]["conserto"] is None
+    # 07/10: conserto por intercorrente — print novo (depois da petição) + o PDF juntado no mesmo processo
+    conserto = [
+        {"id": 65, "anuncio_id": "B2", "tipo": "Captura no ato", "nome_original": "B2_20261007_110000.png", "enviado_em": "2026-10-07 11:00:00"},
+        {"id": 66, "anuncio_id": "B2", "tipo": "Captura no ato", "nome_original": "1_captura_B2.pdf", "enviado_em": "2026-10-07 11:30:00",
+         "obs": "Captura enviada à Anatel (SEI, intercorrente) — processo 53500.1/2026-1 — substitui a captura com a tela de verificação · recibo 16406634"},
+    ]
+    assert (await client.post("/api/denuncia/sync/provas", json={"linhas": conserto}, headers=H)).status_code == 200
+    por = {x["anuncio_id"]: x for x in (await client.get("/api/denuncia/anatel/prints", params={"protocolo": "53500.1/2026-1"})).json()["itens"]}
+    assert por["B2"]["print"]["id"] == 63 and por["B2"]["pdf"] is None
+    assert por["B2"]["conserto"]["pdf"]["id"] == 66 and por["B2"]["conserto"]["print"]["id"] == 65
+    assert por["B2"]["conserto"]["em"] == "2026-10-07 11:30:00"
+    assert por["B1"]["pdf"]["id"] == 62 and por["B1"]["conserto"] is None
     assert (await client.get("/api/denuncia/anatel/prints", params={"protocolo": "nada"})).status_code == 404
