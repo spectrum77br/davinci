@@ -200,6 +200,11 @@ export type PainelStatus = {
   tentativas?: number
   protocolo?: string | null
   consumidor?: string | null
+  // 07/10: situação na Anatel (na_fila, enviada, recebida, em_analise, respondida, complemento, encerrada, nada) e o
+  // protocolo em que ela respondeu (Consumidor ou SEI) — o clique abre o texto da Anatel
+  fase?: string
+  resposta_protocolo?: string | null
+  resposta_em?: string | null
 }
 export type PainelAnuncio = {
   id: string
@@ -235,6 +240,7 @@ export type PainelLoja = {
   outros: number
   na_loja: Record<string, number>
   na_anatel: Record<string, number>
+  anatel_fases: Record<string, number>
   processos: string[]
   casos: PainelCaso[]
   caso_pendente?: boolean
@@ -262,10 +268,22 @@ export const ETIQ_LOJA: [string, string, string, string][] = [
 export const ETIQ_ANATEL: [string, string, string, string][] = [
   ['processo', 'pill-info', 'com processo', 'com processo'],
   ['fila', 'pill-warning', 'na fila', 'na fila'],
-  ['falta_print', 'pill-warning', 'falta o print', 'falta o print'],
+  ['falta_print', 'pill-muted', 'na fila', 'na fila'],
   ['esperando_recusa', 'pill-muted', 'esperando recusa', 'esperando recusa'],
   ['falta_loja', 'pill-muted', 'falta denunciar na loja', 'falta denunciar na loja'],
 ]
+// 07/10/2026 (Vinicius: "esse falta print ficou ruim… eu preciso saber assim, respondida, encerrada"): a coluna
+// Anatel por loja conta pela situação NA ANATEL. O que pede ação vem primeiro.
+export const ETIQ_ANATEL_FASE: [string, string, string, string][] = [
+  ['complemento', 'pill-danger', 'pede complemento', 'pedem complemento'],
+  ['respondida', 'pill-warning', 'respondida', 'respondidas'],
+  ['em_analise', 'pill-info', 'em análise', 'em análise'],
+  ['recebida', 'pill-info', 'recebida', 'recebidas'],
+  ['enviada', 'pill-info', 'enviada', 'enviadas'],
+  ['encerrada', 'pill-muted', 'encerrada', 'encerradas'],
+  ['na_fila', 'pill-muted', 'na fila', 'na fila'],
+]
+export const FASE_COM_RESPOSTA = ['respondida', 'complemento']
 export function etiquetas(cont: Record<string, number>, tabela: [string, string, string, string][]) {
   return tabela
     .filter(([k]) => cont[k])

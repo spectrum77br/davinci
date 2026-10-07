@@ -45,21 +45,28 @@ LOJA = {
 _RESPONDEU = ("respondeu", "não identific", "provável", "medidas cab")
 _RECUSOU = ("não identific", "continua ativo", "improcedente")
 ANATEL = {
-    "processo": ("processo aberto", "info"),
-    "fila": ("na fila", "warning"),
-    "falta_print": ("falta o print", "warning"),
+    # 07/10/2026 (Vinicius: "esse falta print ficou ruim… eu preciso saber assim, respondida, encerrada"): a tela
+    # mostra a situação NA ANATEL; o que falta para o robô mandar (o print) é detalhe dele — "na fila" nos dois
+    "processo": ("enviada", "info"),
+    "fila": ("na fila", "muted"),
+    "falta_print": ("na fila", "muted"),
     "esperando_recusa": ("esperando a loja recusar", "muted"),
     "falta_loja": ("falta denunciar na loja", "muted"),
     "nada": ("—", "muted"),
 }
 # 05/10: fase do processo no SEI (status_anatel que o sistema do mini grava com a leitura do
-# passo 1)
+# passo 1). 07/10: as palavras que ele usa — e a chave curta da fase (contagem por loja)
 FASE_SEI = {
-    "Recebida": ("processo recebido", "info"),
-    "Em tratamento": ("na fiscalização", "info"),
-    "Respondida — analisar": ("Anatel respondeu", "success"),
-    "Exigência": ("Anatel pede complemento", "danger"),
+    "Recebida": ("recebida", "info"),
+    "Em tratamento": ("em análise", "info"),
+    "Respondida — analisar": ("respondida", "warning"),
+    "Exigência": ("pede complemento", "danger"),
+    "Encerrada": ("encerrada", "muted"),
 }
+FASE_CHAVE = {"Recebida": "recebida", "Em tratamento": "em_analise", "Respondida — analisar": "respondida",
+              "Exigência": "complemento", "Encerrada": "encerrada"}
+# a Anatel respondeu e é preciso ler/agir: vale por cima da fase do SEI, venha do SEI ou do Anatel Consumidor
+_PEDE_ACAO = ("Exigência", "Respondida — analisar")
 
 
 def _quando(d: dict) -> tuple:
@@ -96,31 +103,41 @@ def status_anatel(anuncio: dict, dens: list[dict], loja: dict, tem_print: bool) 
     sei = [d for d in dens if d.get("canal") == CANAL_SEI]
     consumidor = [d for d in dens if d.get("canal") == CANAL_CONSUMIDOR and d.get("protocolo")]
     extra = {"consumidor": max(consumidor, key=_quando).get("protocolo") if consumidor else None}
+    # 07/10: a Anatel respondeu (ou pede complemento) em algum protocolo do anúncio — Consumidor ou SEI — e isso é o
+    # que a tela mostra, com o protocolo da resposta (o clique abre o texto da Anatel)
+    resp = [d for d in sei + consumidor if d.get("status_anatel") in _PEDE_ACAO]
+    if resp:
+        r = max(resp, key=lambda d: (_PEDE_ACAO.index(d["status_anatel"]) == 0, d.get("status_anatel_em") or ""))
+        fr = FASE_SEI[r["status_anatel"]]
+        extra.update(rotulo_fase=fr[0], tom_fase=fr[1], fase=FASE_CHAVE[r["status_anatel"]],
+                     resposta_protocolo=r.get("protocolo"), resposta_em=r.get("status_anatel_em"))
     if sei:
         ult = max(sei, key=_quando)
         proc = ult.get("protocolo") or ult.get("sei_processo")
         # 05/10: o passo 1 lê o andamento do processo no SEI (status_anatel) — a etiqueta diz a
         # fase; a chave continua "processo" (contas e filtros de "com processo" não mudam)
         fase = FASE_SEI.get(ult.get("status_anatel") or "")
-        return {"chave": "processo", "protocolo": proc, "data": ult.get("data"),
+        base = {"chave": "processo", "protocolo": proc, "data": ult.get("data"),
                 "area": ult.get("status_anatel_area"), "desde": ult.get("status_anatel_em"),
-                **({"rotulo_fase": fase[0], "tom_fase": fase[1]} if fase else {}), **extra}
+                "fase": FASE_CHAVE.get(ult.get("status_anatel") or "", "enviada"),
+                **({"rotulo_fase": fase[0], "tom_fase": fase[1]} if fase else {})}
+        return {**base, **extra}
     if anuncio.get("situacao") != "ativo" or anuncio.get("propria"):
-        return {"chave": "nada", **extra}
+        return {"chave": "nada", "fase": "nada", **extra}
     grupo, hom = anuncio.get("grupo"), (anuncio.get("hom") or "").strip()
     if grupo == "GRUPO 1":
         # 01/10: o Nosso só ia à Anatel depois que a loja recusava. 06/10 (Vinicius): "pode abrir na
         # Anatel mesmo sem recusa da loja, pois hoje não vamos mais denunciar na loja os nosso" — vai
         # direto; só o que a loja já removeu fica fora
         if loja["chave"] == "removido":
-            return {"chave": "nada", **extra}
+            return {"chave": "nada", "fase": "nada", **extra}
     elif grupo == "GRUPO 2":
         # 01/10: o Diversos vai sem denúncia na loja — com nº declarado (ou TikTok sem nº)
         if not hom and anuncio.get("marketplace") != "TikTok Shop":
-            return {"chave": "nada", **extra}
+            return {"chave": "nada", "fase": "nada", **extra}
     else:
-        return {"chave": "nada", **extra}
-    return {"chave": "fila" if tem_print else "falta_print", **extra}
+        return {"chave": "nada", "fase": "nada", **extra}
+    return {"chave": "fila" if tem_print else "falta_print", "fase": "na_fila", **extra}
 
 
 def rotular(st: dict, tabela: dict) -> dict:
@@ -141,6 +158,7 @@ def somar_lojas(itens: list[dict]) -> list[dict]:
                 "anuncios": 0, "no_ar": 0, "fora_do_ar": 0, "vendas": 0,
                 "nosso": 0, "diversos": 0, "outros": 0,
                 "na_loja": dict.fromkeys(LOJA, 0), "na_anatel": dict.fromkeys(ANATEL, 0),
+                "anatel_fases": {},
                 "processos": set(), "casos": {}, "caso_pendente": False,
                 "ultimo_achado": "", "ultima_denuncia": "",
             }
@@ -153,6 +171,8 @@ def somar_lojas(itens: list[dict]) -> list[dict]:
         lj["nosso" if g == "GRUPO 1" else "diversos" if g == "GRUPO 2" else "outros"] += 1
         lj["na_loja"][a["loja_st"]["chave"]] += 1
         lj["na_anatel"][a["anatel_st"]["chave"]] += 1
+        f = a["anatel_st"].get("fase") or "nada"   # 07/10: a coluna Anatel por loja conta pela situação na Anatel
+        lj["anatel_fases"][f] = lj["anatel_fases"].get(f, 0) + 1
         if a["anatel_st"].get("protocolo"):
             lj["processos"].add(a["anatel_st"]["protocolo"])
         for k in a.get("casos") or []:
@@ -177,11 +197,13 @@ def numeros(itens: list[dict], lojas: list[dict]) -> dict:
         "lojas": len(lojas), "anuncios": len(itens),
         "no_ar": sum(a.get("situacao") == "ativo" for a in itens),
         "fora_do_ar": sum(a.get("situacao") == "fora do ar" for a in itens),
-        "na_loja": dict.fromkeys(LOJA, 0), "na_anatel": dict.fromkeys(ANATEL, 0),
+        "na_loja": dict.fromkeys(LOJA, 0), "na_anatel": dict.fromkeys(ANATEL, 0), "anatel_fases": {},
     }
     for a in itens:
         n["na_loja"][a["loja_st"]["chave"]] += 1
         n["na_anatel"][a["anatel_st"]["chave"]] += 1
+        f = a["anatel_st"].get("fase") or "nada"
+        n["anatel_fases"][f] = n["anatel_fases"].get(f, 0) + 1
     n["processos"] = len({p for lj in lojas for p in lj["processos"]})
     return n
 

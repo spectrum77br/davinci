@@ -2,15 +2,16 @@
 // ── Ouvidoria › Denúncia › aba "Anúncios e denúncias" (01/10/2026) ──────────────────────────
 // Vinicius: as abas Anúncios e Denúncias "são quase as mesmas informações" — virou uma só.
 // Cada loja (e cada anúncio) com o que a loja fez com a nossa denúncia ("Na loja") e onde
-// está no caminho da Anatel ("Na Anatel": processo aberto, na fila, falta o print, esperando
-// a loja recusar…), no formato de etiqueta que ele escolheu ("9 removidos · 21 recusadas").
+// está na Anatel (07/10: a situação na própria Anatel — na fila, enviada, em análise, respondida, pede
+// complemento; "respondida" abre o texto da Anatel), no formato de etiqueta que ele escolheu ("9 removidos · 21 recusadas").
 // Sub-abas: Por loja (padrão, sempre na frente) · Por anúncio · Denúncias enviadas (o
 // histórico). Clicar num anúncio — ou numa denúncia enviada — abre a ficha com tudo junto.
 // Cópia só leitura do sistema do Mac mini; os status vêm de services/denuncia_painel (API).
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ChevronDown, ChevronLeft, ChevronRight, ExternalLink, Loader2 } from 'lucide-vue-next'
 import {
-  type DenunciaEnviada, type FalhaCaso, type PainelAnuncio as Anuncio, type PainelLoja as Loja, ETIQ_ANATEL, ETIQ_LOJA,
+  type DenunciaEnviada, type FalhaCaso, type PainelAnuncio as Anuncio, type PainelLoja as Loja, ETIQ_ANATEL_FASE, ETIQ_LOJA,
+  FASE_COM_RESPOSTA,
   ativoSimNao, dataBr, etiquetas, nomeGrupo, numero, pillAtivo, pillGrupo, pillTom,
 } from '~/lib/denuncia'
 
@@ -22,6 +23,7 @@ type Numeros = {
   processos: number
   na_loja: Record<string, number>
   na_anatel: Record<string, number>
+  anatel_fases: Record<string, number>
 }
 type Opcoes = {
   marketplaces: string[]
@@ -69,6 +71,12 @@ function irCaso(id: number) {
 const foco = ref<number | null>(null)
 const enviadas = ref<{ carregar: () => Promise<void> } | null>(null)
 const respostasAnatel = ref<{ carregar: () => Promise<void> } | null>(null)
+// 07/10: o clique em "respondida" (anúncio ou loja) abre a sub-aba Respostas da Anatel já buscando aquilo
+const filtroRespostas = ref('')
+function verResposta(q: string | null | undefined) {
+  filtroRespostas.value = q || ''
+  visao.value = 'anatel'
+}
 
 function chaveLoja(l: Loja): string {
   return `${l.marketplace || ''}|${l.chave}`
@@ -293,7 +301,7 @@ defineExpose({ carregar })
       <button type="button" class="text-left rounded-lg" :class="naAnatel === 'fila' ? 'ring-2 ring-primary' : ''" title="filtrar os que estão na fila da Anatel" @click="porCartao('naAnatel', 'fila')">
         <StatCard
           compact label="Na fila da Anatel" :value="numero(n.na_anatel.fila)" tone="warning"
-          :hint="`${numero(n.na_anatel.falta_print)} sem print`"
+          :hint="`${numero((n.anatel_fases.respondida || 0) + (n.anatel_fases.complemento || 0))} com resposta da Anatel`"
         />
       </button>
     </div>
@@ -315,7 +323,7 @@ defineExpose({ carregar })
 
     <DenunciaEnviadas v-if="visao === 'enviadas'" ref="enviadas" @abrir="abrirEnviada" />
     <!-- 07/10/2026: o que a Anatel respondeu (texto) e o que fizemos depois -->
-    <DenunciaRespostasAnatel v-else-if="visao === 'anatel'" ref="respostasAnatel" @abrir="(a, d) => abrirAnuncio(a, d)" />
+    <DenunciaRespostasAnatel v-else-if="visao === 'anatel'" ref="respostasAnatel" v-model:filtro="filtroRespostas" @abrir="(a, d) => abrirAnuncio(a, d)" />
 
     <template v-else>
       <div v-if="falhas.length" class="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900 dark:border-amber-700 dark:bg-amber-900/20 dark:text-amber-200">
@@ -465,8 +473,17 @@ defineExpose({ carregar })
                 </td>
                 <td>
                   <div class="flex flex-wrap gap-1" :title="l.processos.join('\n')">
-                    <span v-for="e in etiquetas(l.na_anatel, ETIQ_ANATEL)" :key="e.k" :class="e.cls">{{ e.texto }}</span>
-                    <span v-if="!etiquetas(l.na_anatel, ETIQ_ANATEL).length" class="text-xs text-muted-foreground">—</span>
+                    <template v-for="e in etiquetas(l.anatel_fases || {}, ETIQ_ANATEL_FASE)" :key="e.k">
+                      <button
+                        v-if="FASE_COM_RESPOSTA.includes(e.k)"
+                        type="button"
+                        :class="[e.cls, 'hover:underline']"
+                        title="ver a resposta da Anatel"
+                        @click.stop="verResposta(l.shop_id || l.loja)"
+                      >{{ e.texto }}</button>
+                      <span v-else :class="e.cls">{{ e.texto }}</span>
+                    </template>
+                    <span v-if="!etiquetas(l.anatel_fases || {}, ETIQ_ANATEL_FASE).length" class="text-xs text-muted-foreground">—</span>
                   </div>
                 </td>
                 <td>
@@ -517,7 +534,14 @@ defineExpose({ carregar })
                     <div v-if="a.loja_st.data && a.loja_st.chave !== 'vazio'" class="text-[11px] text-muted-foreground mt-0.5 whitespace-nowrap">{{ dataBr(a.loja_st.data, false) }}<template v-if="(a.loja_st.tentativas || 0) > 1"> · {{ a.loja_st.tentativas }} tentativas</template></div>
                   </td>
                   <td>
-                    <span :class="pillTom(a.anatel_st.tom)">{{ a.anatel_st.rotulo }}</span>
+                    <button
+                  v-if="FASE_COM_RESPOSTA.includes(a.anatel_st.fase || '')"
+                  type="button"
+                  :class="[pillTom(a.anatel_st.tom), 'hover:underline']"
+                  title="ver a resposta da Anatel"
+                  @click.stop="verResposta(a.anatel_st.resposta_protocolo || a.id)"
+                >{{ a.anatel_st.rotulo }}</button>
+                <span v-else :class="pillTom(a.anatel_st.tom)">{{ a.anatel_st.rotulo }}</span>
                     <div v-if="a.anatel_st.protocolo" class="font-mono text-[11px] text-muted-foreground mt-0.5 truncate">{{ a.anatel_st.protocolo }}</div>
                   </td>
                   <td><span :class="pillAtivo(a.situacao)">{{ ativoSimNao(a.situacao) }}</span></td>
@@ -595,7 +619,14 @@ defineExpose({ carregar })
                 <div v-if="a.loja_st.data && a.loja_st.chave !== 'vazio'" class="text-[11px] text-muted-foreground mt-0.5 whitespace-nowrap">{{ dataBr(a.loja_st.data, false) }}<template v-if="(a.loja_st.tentativas || 0) > 1"> · {{ a.loja_st.tentativas }} tentativas</template></div>
               </td>
               <td>
-                <span :class="pillTom(a.anatel_st.tom)">{{ a.anatel_st.rotulo }}</span>
+                <button
+                  v-if="FASE_COM_RESPOSTA.includes(a.anatel_st.fase || '')"
+                  type="button"
+                  :class="[pillTom(a.anatel_st.tom), 'hover:underline']"
+                  title="ver a resposta da Anatel"
+                  @click.stop="verResposta(a.anatel_st.resposta_protocolo || a.id)"
+                >{{ a.anatel_st.rotulo }}</button>
+                <span v-else :class="pillTom(a.anatel_st.tom)">{{ a.anatel_st.rotulo }}</span>
                 <div v-if="a.anatel_st.protocolo" class="font-mono text-[11px] text-muted-foreground mt-0.5 truncate">{{ a.anatel_st.protocolo }}</div>
               </td>
               <td><span :class="pillAtivo(a.situacao)">{{ ativoSimNao(a.situacao) }}</span></td>

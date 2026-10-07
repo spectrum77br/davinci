@@ -6,7 +6,7 @@
 import { computed, ref, watch } from 'vue'
 import { ArrowLeft, ExternalLink, Image as ImageIcon } from 'lucide-vue-next'
 import {
-  type InfoAnuncio, type PainelAnuncio, type PainelLoja, ETIQ_ANATEL, ETIQ_LOJA, ativoSimNao, dataBr,
+  type InfoAnuncio, type PainelAnuncio, type PainelLoja, ETIQ_ANATEL_FASE, ETIQ_LOJA, ativoSimNao, dataBr,
   etiquetas, nomeGrupo, numero, pillAtivo, pillGrupo, pillTom,
 } from '~/lib/denuncia'
 
@@ -107,8 +107,8 @@ const subtitulo = computed(() =>
         <div class="rounded-lg border px-3 py-2 space-y-1 min-w-0">
           <div class="text-[10px] uppercase tracking-wider text-muted-foreground">Na Anatel</div>
           <div class="flex flex-wrap gap-1">
-            <span v-for="e in etiquetas(loja.na_anatel, ETIQ_ANATEL)" :key="e.k" :class="e.cls">{{ e.texto }}</span>
-            <span v-if="!etiquetas(loja.na_anatel, ETIQ_ANATEL).length" class="text-sm text-muted-foreground">—</span>
+            <span v-for="e in etiquetas(loja.anatel_fases || {}, ETIQ_ANATEL_FASE)" :key="e.k" :class="e.cls">{{ e.texto }}</span>
+            <span v-if="!etiquetas(loja.anatel_fases || {}, ETIQ_ANATEL_FASE).length" class="text-sm text-muted-foreground">—</span>
           </div>
         </div>
         <div class="rounded-lg border px-3 py-2 space-y-1 min-w-0">

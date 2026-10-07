@@ -1459,7 +1459,11 @@ async def painel_anuncios_e_denuncias(
     if na_loja in painel.LOJA:
         itens = [a for a in itens if a["loja_st"]["chave"] == na_loja]
     if na_anatel in painel.ANATEL:
-        itens = [a for a in itens if a["anatel_st"]["chave"] == na_anatel]
+        # 07/10: "na fila" na tela junta a fila e o que ainda espera o print
+        quais = ("fila", "falta_print") if na_anatel in ("fila", "falta_print") else (na_anatel,)
+        itens = [a for a in itens if a["anatel_st"]["chave"] in quais]
+    elif na_anatel in painel.FASE_CHAVE.values():   # 07/10: filtra pela situação na Anatel (respondida, em análise…)
+        itens = [a for a in itens if a["anatel_st"].get("fase") == na_anatel]
     lojas = painel.somar_lojas(itens)
     marketplaces = (await session.execute(select(A.marketplace).distinct())).scalars().all()
     grupos = (await session.execute(select(A.grupo).distinct())).scalars().all()
@@ -1473,7 +1477,10 @@ async def painel_anuncios_e_denuncias(
                 {"chave": k, "rotulo": v[0]} for k, v in painel.LOJA.items() if k != "vazio"
             ],
             "na_anatel": [
-                {"chave": k, "rotulo": v[0]} for k, v in painel.ANATEL.items() if k != "nada"
+                {"chave": k, "rotulo": v[0]} for k, v in painel.ANATEL.items()
+                if k not in ("nada", "falta_print", "esperando_recusa", "falta_loja")
+            ] + [
+                {"chave": painel.FASE_CHAVE[k], "rotulo": v[0]} for k, v in painel.FASE_SEI.items()
             ],
         },
     }
@@ -2328,10 +2335,14 @@ async def respostas_da_anatel(
     session: Annotated[AsyncSession, Depends(get_session)],
     _u: Annotated[User, Depends(_ver)],
     todas: bool = False,
+    q: str | None = None,
 ) -> dict:
     """Uma linha por protocolo (Anatel Consumidor) ou processo (SEI) em que a Anatel respondeu: situação, data, área,
     o texto dela, os anúncios (e se seguem no ar) e o que fizemos depois. Padrão: só o que pede ação (respondida ou
-    exigência); `todas=1` traz também as que já tratamos (reabertas, com o texto da resposta antiga)."""
+    exigência); `todas=1` traz também as que já tratamos (reabertas, com o texto da resposta antiga). `q` (protocolo,
+    anúncio, loja ou shop_id — o clique na coluna Anatel do painel) busca entre todas."""
+    busca = (q or "").strip().lower()
+    todas = todas or bool(busca)
     D = DenunciaDenuncia
     rows = (
         await session.execute(select(D).where(D.canal.in_(("Anatel", "Anatel SEI"))).order_by(D.id))
@@ -2372,6 +2383,18 @@ async def respostas_da_anatel(
             g["_anuncios"].append(d.anuncio_id)
             if d.canal == "Anatel" and d.anuncio_id in sei_do_anuncio:
                 g["_sei"].add(sei_do_anuncio[d.anuncio_id])
+    if busca:
+        ids_busca = {aid for g in grupos.values() for aid in g["_anuncios"]}
+        lojas_de = {
+            a.id: f"{a.loja or ''} {a.shop_id or ''}".lower()
+            for a in (await session.execute(
+                select(DenunciaAnuncio).where(DenunciaAnuncio.id.in_(ids_busca)))).scalars()
+        } if ids_busca else {}
+        grupos = {
+            k: g for k, g in grupos.items()
+            if busca in g["protocolo"].lower()
+            or any(busca == aid.lower() or busca in lojas_de.get(aid, "") for aid in g["_anuncios"])
+        }
     ids = {aid for g in grupos.values() for aid in g["_anuncios"]}
     anuncios = {
         a.id: a for a in (await session.execute(select(DenunciaAnuncio).where(DenunciaAnuncio.id.in_(ids)))).scalars()

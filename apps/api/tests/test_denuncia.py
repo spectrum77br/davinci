@@ -752,16 +752,36 @@ def test_painel_status_na_loja_e_na_anatel():
     assert anatel({**diversos, "situacao": "fora do ar"}, []) == "nada"
     st = p.status_anatel(diversos, [pend, sei], p.status_loja([pend]), False)
     assert st["chave"] == "processo" and st["protocolo"] == "53500.144118/2026-11"
-    assert p.rotular(st, p.ANATEL)["rotulo"] == "processo aberto"
+    assert p.rotular(st, p.ANATEL)["rotulo"] == "enviada" and st["fase"] == "enviada"
+    # 07/10: "falta o print" não aparece mais — é "na fila" (a chave segue separada pro robô)
+    assert p.rotular(p.status_anatel(nosso, [], loja(), False), p.ANATEL)["rotulo"] == "na fila"
     # 05/10: o passo 1 lê o andamento no SEI — a etiqueta diz a fase (a chave segue "processo")
     fisc = {**sei, "status_anatel": "Em tratamento", "status_anatel_area": "GR07FI2 - Fiscalização",
             "status_anatel_em": "2026-10-02"}
     st = p.rotular(p.status_anatel(diversos, [fisc], p.status_loja([]), True), p.ANATEL)
-    assert (st["chave"], st["rotulo"], st["area"], st["desde"]) == (
-        "processo", "na fiscalização", "GR07FI2 - Fiscalização", "2026-10-02")
+    assert (st["chave"], st["rotulo"], st["area"], st["desde"], st["fase"]) == (
+        "processo", "em análise", "GR07FI2 - Fiscalização", "2026-10-02", "em_analise")
     resp = {**fisc, "status_anatel": "Respondida — analisar"}
     st = p.rotular(p.status_anatel(diversos, [resp], p.status_loja([]), True), p.ANATEL)
-    assert (st["rotulo"], st["tom"]) == ("Anatel respondeu", "success")
+    assert (st["rotulo"], st["tom"], st["fase"]) == ("respondida", "warning", "respondida")
+    # 07/10: a resposta veio no Anatel Consumidor e o processo do SEI segue em análise — a tela mostra "respondida"
+    # com o protocolo da resposta; sem SEI, idem (a chave segue "fila" pro robô)
+    cons = {"canal": "Anatel", "protocolo": "202609144379840", "data": "2026-09-14",
+            "status_anatel": "Respondida — analisar", "status_anatel_em": "2026-09-29"}
+    st = p.rotular(p.status_anatel(diversos, [fisc, cons], p.status_loja([]), True), p.ANATEL)
+    assert (st["chave"], st["rotulo"], st["protocolo"], st["resposta_protocolo"]) == (
+        "processo", "respondida", "53500.144118/2026-11", "202609144379840")
+    st = p.rotular(p.status_anatel(diversos, [cons], p.status_loja([]), True), p.ANATEL)
+    assert (st["chave"], st["rotulo"], st["fase"]) == ("fila", "respondida", "respondida")
+    exig = {**sei, "status_anatel": "Exigência", "status_anatel_em": "2026-09-01"}
+    st = p.status_anatel(diversos, [exig, cons], p.status_loja([]), True)
+    assert st["fase"] == "complemento"   # pedido de complemento vale por cima da resposta
+    lojas = p.somar_lojas([
+        {"marketplace": "Shopee", "shop_id": "1", "loja_st": {"chave": "nao"}, "anatel_st": st},
+        {"marketplace": "Shopee", "shop_id": "1", "loja_st": {"chave": "nao"},
+         "anatel_st": p.status_anatel(diversos, [], p.status_loja([]), False)},
+    ])
+    assert lojas[0]["anatel_fases"] == {"complemento": 1, "na_fila": 1}
 
 
 async def test_painel_junta_anuncios_e_denuncias(client, make_user, auth_as):
@@ -1425,4 +1445,10 @@ async def test_respostas_da_anatel_lista_texto_anuncios_e_o_que_fizemos(client, 
     assert j["total"] == 3 and j["pede_acao"] == 2
     t = j["itens"][-1]
     assert t["protocolo"] == "202609144373915" and t["pede_acao"] is False
+    # o clique na coluna Anatel do painel busca pelo protocolo / anúncio / loja — entre todas
+    j = (await client.get("/api/denuncia/anatel/respostas", params={"q": "202609144373915"})).json()
+    assert [x["protocolo"] for x in j["itens"]] == ["202609144373915"]
+    j = (await client.get("/api/denuncia/anatel/respostas", params={"q": "morcego"})).json()
+    assert {x["protocolo"] for x in j["itens"]} == {"202609144379840", "202609144373915"}
+    assert (await client.get("/api/denuncia/anatel/respostas", params={"q": "R3"})).json()["total"] == 1
     assert t["acoes"] == ["07/10/2026: reaberta no Anatel Consumidor — Shopee exige login; capturas no SEI 53500.141784/2026-06"]

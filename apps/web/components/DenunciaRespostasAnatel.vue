@@ -5,7 +5,7 @@
 // ninguém ver. Uma linha por protocolo (Anatel Consumidor) ou processo (SEI): o texto da Anatel, a data, os
 // anúncios e se seguem no ar, e o que fizemos depois (o robô anota na denúncia quando reabre ou junta documento).
 // Padrão: só o que pede ação (respondida ou exigência); "todas" mostra também as já tratadas.
-import { onMounted, ref } from 'vue'
+import { onMounted, ref, watch } from 'vue'
 import { CircleAlert, CircleCheck, TriangleAlert } from 'lucide-vue-next'
 import { dataBr, numero, pillSituacaoAnuncio } from '~/lib/denuncia'
 
@@ -35,6 +35,8 @@ type Resposta = {
 }
 
 const emit = defineEmits<{ (e: 'abrir', anuncio: string, denuncia: number): void }>()
+// 07/10: o clique em "respondida" no painel chega aqui com o protocolo (ou a loja) — busca entre todas
+const filtro = defineModel<string>('filtro', { default: '' })
 
 const { api } = useApi()
 const itens = ref<Resposta[]>([])
@@ -47,9 +49,10 @@ async function carregar() {
   carregando.value = true
   erro.value = null
   try {
-    const r = await api<{ total: number; pede_acao: number; itens: Resposta[] }>(
-      `/api/denuncia/anatel/respostas${todas.value ? '?todas=1' : ''}`,
-    )
+    const qs = new URLSearchParams()
+    if (todas.value) qs.set('todas', '1')
+    if (filtro.value.trim()) qs.set('q', filtro.value.trim())
+    const r = await api<{ total: number; pede_acao: number; itens: Resposta[] }>(`/api/denuncia/anatel/respostas?${qs}`)
     itens.value = r.itens
     pedeAcao.value = r.pede_acao
   } catch (e: any) {
@@ -83,6 +86,7 @@ function ha(d: number | null): string {
   return d === 1 ? 'há 1 dia' : `há ${d} dias`
 }
 
+watch(filtro, () => void carregar())
 onMounted(carregar)
 defineExpose({ carregar })
 </script>
@@ -108,6 +112,15 @@ defineExpose({ carregar })
           Todas com resposta
         </button>
       </div>
+      <Input
+        id="respostas-anatel-busca"
+        :model-value="filtro"
+        placeholder="protocolo, anúncio ou loja…"
+        class="w-60"
+        @keyup.enter="(e: KeyboardEvent) => (filtro = (e.target as HTMLInputElement).value)"
+        @change="(e: Event) => (filtro = (e.target as HTMLInputElement).value)"
+      />
+      <button v-if="filtro" type="button" class="text-xs text-primary hover:underline" @click="filtro = ''">limpar busca</button>
       <p class="text-xs text-muted-foreground">
         O robô lê os protocolos do Anatel Consumidor e os processos do SEI no passo 1. Aqui aparece o que a Anatel respondeu e o texto dela.
       </p>
@@ -116,7 +129,7 @@ defineExpose({ carregar })
     <div v-if="erro" class="rounded-md border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700">{{ erro }}</div>
     <div v-else-if="carregando && !itens.length" class="text-sm text-muted-foreground">carregando…</div>
     <div v-else-if="!itens.length" class="rounded-md border px-3 py-6 text-center text-sm text-muted-foreground">
-      {{ todas ? 'A Anatel ainda não respondeu nenhuma denúncia.' : 'Nenhuma resposta da Anatel esperando ação.' }}
+      {{ filtro ? `Nenhuma resposta da Anatel para "${filtro}".` : todas ? 'A Anatel ainda não respondeu nenhuma denúncia.' : 'Nenhuma resposta da Anatel esperando ação.' }}
     </div>
 
     <article
