@@ -34,7 +34,7 @@ type Resposta<T> = { total: number; itens: T[]; numeros: Numeros; opcoes: Opcoes
 const { api } = useApi()
 const LIMITE = 100
 
-const visao = ref<'loja' | 'anuncio' | 'enviadas'>('loja')
+const visao = ref<'loja' | 'anuncio' | 'enviadas' | 'anatel'>('loja')
 const lojas = ref<Loja[]>([])
 const itens = ref<Anuncio[]>([])
 const total = ref(0)
@@ -68,6 +68,7 @@ function irCaso(id: number) {
 }
 const foco = ref<number | null>(null)
 const enviadas = ref<{ carregar: () => Promise<void> } | null>(null)
+const respostasAnatel = ref<{ carregar: () => Promise<void> } | null>(null)
 
 function chaveLoja(l: Loja): string {
   return `${l.marketplace || ''}|${l.chave}`
@@ -87,6 +88,10 @@ function filtros(): URLSearchParams {
 async function carregar() {
   if (visao.value === 'enviadas') {
     await enviadas.value?.carregar()
+    return
+  }
+  if (visao.value === 'anatel') {
+    await respostasAnatel.value?.carregar()
     return
   }
   carregando.value = true
@@ -223,11 +228,11 @@ async function abrirLoja(l: Loja) {
   }
 }
 
-function trocarVisao(v: 'loja' | 'anuncio' | 'enviadas') {
+function trocarVisao(v: 'loja' | 'anuncio' | 'enviadas' | 'anatel') {
   if (visao.value === v) return
   visao.value = v
   offset.value = 0
-  if (v !== 'enviadas') void carregar()
+  if (v !== 'enviadas' && v !== 'anatel') void carregar()
 }
 
 function filtrar() {
@@ -240,7 +245,7 @@ function filtrar() {
 function porCartao(campo: 'situacao' | 'naLoja' | 'naAnatel', valor: string) {
   const alvo = { situacao, naLoja, naAnatel }[campo]
   alvo.value = alvo.value === valor ? '' : valor
-  if (visao.value === 'enviadas') visao.value = 'loja'
+  if (visao.value === 'enviadas' || visao.value === 'anatel') visao.value = 'loja'
   filtrar()
 }
 
@@ -297,18 +302,20 @@ defineExpose({ carregar })
 
     <div class="flex items-center gap-1 border-b border-border">
       <button
-        v-for="v in [{ k: 'loja', t: 'Por loja' }, { k: 'anuncio', t: 'Por anúncio' }, { k: 'enviadas', t: 'Denúncias enviadas' }]"
+        v-for="v in [{ k: 'loja', t: 'Por loja' }, { k: 'anuncio', t: 'Por anúncio' }, { k: 'enviadas', t: 'Denúncias enviadas' }, { k: 'anatel', t: 'Respostas da Anatel' }]"
         :key="v.k"
         type="button"
         class="-mb-px inline-flex h-9 items-center border-b-2 px-3 text-sm font-medium transition-colors"
         :class="visao === v.k ? 'border-primary text-foreground' : 'border-transparent text-muted-foreground hover:text-foreground'"
-        @click="trocarVisao(v.k as 'loja' | 'anuncio' | 'enviadas')"
+        @click="trocarVisao(v.k as 'loja' | 'anuncio' | 'enviadas' | 'anatel')"
       >
         {{ v.t }}
       </button>
     </div>
 
     <DenunciaEnviadas v-if="visao === 'enviadas'" ref="enviadas" @abrir="abrirEnviada" />
+    <!-- 07/10/2026: o que a Anatel respondeu (texto) e o que fizemos depois -->
+    <DenunciaRespostasAnatel v-else-if="visao === 'anatel'" ref="respostasAnatel" @abrir="(a, d) => abrirAnuncio(a, d)" />
 
     <template v-else>
       <div v-if="falhas.length" class="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900 dark:border-amber-700 dark:bg-amber-900/20 dark:text-amber-200">

@@ -2305,3 +2305,101 @@ async def prints_do_processo(
             } if conserto else None,
         })
     return {"protocolo": protocolo, "data": data or None, "itens": itens}
+
+
+# 07/10/2026 (Vinicius: "pode fazer a lista das respostas da Anatel no DaVinci"; "vamos conseguir ver no painel qual
+# teve resposta da Anatel e qual o texto?"): duas respostas de 29/09 ("URL inexistente na Shopee") ficaram 8 dias sem
+# ninguém ver — só o sistema do mini sabia. O passo 1 grava em cada denúncia da Anatel (Consumidor e SEI) a situação
+# (status_anatel), a data (status_anatel_em) e o texto da Anatel (resposta_anatel); a cópia chega aqui em `dados`.
+_ANATEL_PEDE_ACAO = ("Respondida — analisar", "Exigência")
+# o que fizemos depois: o robô anota na obs da denúncia ("… reaberta no Anatel Consumidor …", "… juntada por intercorrente …")
+_RE_NOSSA_ACAO = re.compile(r"[^·]*(?:reabert|intercorrente|juntad|respondemos)[^·]*", re.I)
+
+
+def _anatel_sim(v: Any) -> bool:
+    try:
+        return int(v or 0) == 1
+    except (TypeError, ValueError):
+        return False
+
+
+@router.get("/anatel/respostas")
+async def respostas_da_anatel(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(_ver)],
+    todas: bool = False,
+) -> dict:
+    """Uma linha por protocolo (Anatel Consumidor) ou processo (SEI) em que a Anatel respondeu: situação, data, área,
+    o texto dela, os anúncios (e se seguem no ar) e o que fizemos depois. Padrão: só o que pede ação (respondida ou
+    exigência); `todas=1` traz também as que já tratamos (reabertas, com o texto da resposta antiga)."""
+    D = DenunciaDenuncia
+    rows = (
+        await session.execute(select(D).where(D.canal.in_(("Anatel", "Anatel SEI"))).order_by(D.id))
+    ).scalars().all()
+    sei_do_anuncio: dict[str, str] = {}
+    for d in rows:
+        if d.canal == "Anatel SEI" and d.anuncio_id and d.protocolo:
+            sei_do_anuncio[d.anuncio_id] = d.protocolo
+    grupos: dict[tuple, dict] = {}
+    for d in rows:
+        dd = d.dados or {}
+        if _anatel_sim(dd.get("teste")) or not d.protocolo:
+            continue
+        st = str(dd.get("status_anatel") or "")
+        texto = str(dd.get("resposta_anatel") or "").strip()
+        if st not in _ANATEL_PEDE_ACAO and not (todas and texto):
+            continue
+        g = grupos.setdefault((d.canal, d.protocolo), {
+            "canal": "Anatel Consumidor" if d.canal == "Anatel" else "Anatel SEI",
+            "protocolo": d.protocolo, "situacao": st, "pede_acao": False, "area": "", "respondida_em": "",
+            "lido_em": "", "prazo_oficial": "", "texto": "", "acoes": [], "_anuncios": [], "_sei": set(),
+            "denuncia_id": d.id,
+        })
+        quando = str(dd.get("status_anatel_em") or "")
+        if quando >= g["respondida_em"]:
+            g.update(situacao=st or g["situacao"], respondida_em=quando,
+                     area=str(dd.get("status_anatel_area") or "") or g["area"])
+        g["pede_acao"] = g["pede_acao"] or st in _ANATEL_PEDE_ACAO
+        if len(texto) > len(g["texto"]):
+            g["texto"] = texto
+        g["lido_em"] = max(g["lido_em"], str(dd.get("anatel_lido_em") or ""))
+        g["prazo_oficial"] = g["prazo_oficial"] or str(dd.get("prazo_oficial") or "")
+        for m in _RE_NOSSA_ACAO.finditer(str(dd.get("obs") or "")):
+            a = m.group(0).strip(" ·;")
+            if a and a not in g["acoes"]:
+                g["acoes"].append(a)
+        if d.anuncio_id and d.anuncio_id not in g["_anuncios"]:
+            g["_anuncios"].append(d.anuncio_id)
+            if d.canal == "Anatel" and d.anuncio_id in sei_do_anuncio:
+                g["_sei"].add(sei_do_anuncio[d.anuncio_id])
+    ids = {aid for g in grupos.values() for aid in g["_anuncios"]}
+    anuncios = {
+        a.id: a for a in (await session.execute(select(DenunciaAnuncio).where(DenunciaAnuncio.id.in_(ids)))).scalars()
+    } if ids else {}
+    hoje = date.today()
+    itens = []
+    for g in grupos.values():
+        g["anuncios"] = [
+            {
+                "id": aid,
+                "titulo": anuncios[aid].titulo if aid in anuncios else None,
+                "loja": anuncios[aid].loja if aid in anuncios else None,
+                "marketplace": anuncios[aid].marketplace if aid in anuncios else None,
+                "situacao": anuncios[aid].situacao if aid in anuncios else None,
+                "verificado_em": ((anuncios[aid].dados or {}).get("verificado_em") or None) if aid in anuncios else None,
+            }
+            for aid in g.pop("_anuncios")
+        ]
+        g["processo_sei"] = sorted(g.pop("_sei"))
+        try:
+            g["dias"] = (hoje - date.fromisoformat(g["respondida_em"][:10])).days
+        except ValueError:
+            g["dias"] = None
+        for k in ("respondida_em", "lido_em", "prazo_oficial"):
+            g[k] = g[k] or None
+        itens.append(g)
+    # o que pede ação primeiro; dentro de cada parte, a resposta mais nova primeiro
+    itens.sort(key=lambda g: g["respondida_em"] or "", reverse=True)
+    itens.sort(key=lambda g: not g["pede_acao"])
+    resumo = {s: sum(1 for g in itens if g["situacao"] == s) for s in sorted({g["situacao"] for g in itens})}
+    return {"total": len(itens), "pede_acao": sum(1 for g in itens if g["pede_acao"]), "resumo": resumo, "itens": itens}

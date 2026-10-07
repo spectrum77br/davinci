@@ -1377,3 +1377,52 @@ async def test_prints_do_processo_sei_mostra_original_e_pdf(client, make_user, a
     assert por["B2"]["conserto"]["em"] == "2026-10-07 11:30:00"
     assert por["B1"]["pdf"]["id"] == 62 and por["B1"]["conserto"] is None
     assert (await client.get("/api/denuncia/anatel/prints", params={"protocolo": "nada"})).status_code == 404
+
+
+# ───────────────────────────────── respostas da Anatel (07/10/2026)
+
+
+async def test_respostas_da_anatel_lista_texto_anuncios_e_o_que_fizemos(client, make_user, auth_as):
+    await client.post("/api/denuncia/sync/anuncios", json={"linhas": [
+        _anuncio("R1", titulo="Oukitel G5", loja="morcego_cell", verificado_em="2026-10-07 03:03:54"),
+        _anuncio("R2", titulo="Oukitel WP58", loja="morcego_cell"),
+        _anuncio("R3", titulo="Hotwav A17", loja="outra", situacao="removido"),
+    ]}, headers=H)
+    resposta = "Prezado(a) Senhor(a) A URL apresentada na denúncia de Vossa Senhoria é inexistente no sítio eletrônico da plataforma de marketplace Shopee."
+    await client.post("/api/denuncia/sync/denuncias", json={"linhas": [
+        # Anatel Consumidor respondida — pede ação; o mesmo anúncio também está num processo do SEI
+        {"id": 49, "anuncio_id": "R1", "canal": "Anatel", "protocolo": "202609144379840", "data": "2026-09-14",
+         "status_anatel": "Respondida — analisar", "status_anatel_em": "2026-09-29", "status_anatel_area": "GR07FI2",
+         "resposta_anatel": resposta, "anatel_lido_em": "2026-10-07 12:17:17"},
+        {"id": 919, "anuncio_id": "R1", "canal": "Anatel SEI", "protocolo": "53500.141784/2026-06", "data": "2026-09-25",
+         "status_anatel": "Em tratamento", "status_anatel_em": "2026-10-02"},
+        # já tratada (reaberta): não pede ação, só aparece com todas=1
+        {"id": 50, "anuncio_id": "R2", "canal": "Anatel", "protocolo": "202609144373915", "data": "2026-09-14",
+         "status_anatel": "Em tratamento", "status_anatel_em": "2026-10-07", "resposta_anatel": resposta,
+         "obs": "denúncia enviada pelo portal · 07/10/2026: reaberta no Anatel Consumidor — Shopee exige login; capturas no SEI 53500.141784/2026-06"},
+        # SEI pedindo complemento
+        {"id": 930, "anuncio_id": "R3", "canal": "Anatel SEI", "protocolo": "53500.999999/2026-01", "data": "2026-10-01",
+         "status_anatel": "Exigência", "status_anatel_em": "2026-10-06", "resposta_anatel": "Apresente a procuração."},
+        # teste não entra
+        {"id": 931, "anuncio_id": "R3", "canal": "Anatel SEI", "protocolo": "53500.888888/2026-01", "data": "2026-10-01",
+         "status_anatel": "Exigência", "status_anatel_em": "2026-10-06", "teste": 1},
+    ]}, headers=H)
+    auth_as(await make_user(permissions={"denuncia": {"view": True}}))
+
+    r = await client.get("/api/denuncia/anatel/respostas")
+    assert r.status_code == 200, r.text
+    j = r.json()
+    assert j["total"] == 2 and j["pede_acao"] == 2
+    assert [x["protocolo"] for x in j["itens"]] == ["53500.999999/2026-01", "202609144379840"]   # mais nova primeiro
+    c = j["itens"][1]
+    assert c["canal"] == "Anatel Consumidor" and c["texto"] == resposta and c["respondida_em"] == "2026-09-29"
+    assert c["processo_sei"] == ["53500.141784/2026-06"] and c["acoes"] == []
+    assert c["anuncios"][0] == {"id": "R1", "titulo": "Oukitel G5", "loja": "morcego_cell", "marketplace": "Shopee",
+                                "situacao": "ativo", "verificado_em": "2026-10-07 03:03:54"}
+    assert j["itens"][0]["situacao"] == "Exigência" and j["itens"][0]["anuncios"][0]["situacao"] == "removido"
+
+    j = (await client.get("/api/denuncia/anatel/respostas", params={"todas": 1})).json()
+    assert j["total"] == 3 and j["pede_acao"] == 2
+    t = j["itens"][-1]
+    assert t["protocolo"] == "202609144373915" and t["pede_acao"] is False
+    assert t["acoes"] == ["07/10/2026: reaberta no Anatel Consumidor — Shopee exige login; capturas no SEI 53500.141784/2026-06"]
