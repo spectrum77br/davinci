@@ -2769,8 +2769,12 @@ async def unbind_store_info_department(
     # Build the delete predicate: FK match OR (FK-less + same platform + same
     # name). The `store_info_id IS NULL` guard keeps the name branch from
     # nuking an account that is FK-wired to a *different* store_info row.
+    # Mercado Livre fica SÓ com o vínculo (07/10/2026): o clássico e o premium
+    # passaram a se chamar como a loja ("aguiar"), e o casamento por nome
+    # começaria a apagar as contas sem loja — com os preços fixados nelas —
+    # que antes ficavam de fora por causa do sufixo no nome.
     cond = PricingAccount.store_info_id == store_info_id
-    if sname and pricing_plat is not None:
+    if sname and pricing_plat is not None and pricing_plat != PricingPlatform.ML:
         cond = or_(
             cond,
             and_(

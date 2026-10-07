@@ -1288,7 +1288,12 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
               :class="!r.pricing_account_name && !r.pricing_leaf_segment_name ? 'text-red-400' : ''"
               :title="freteProjMissingReason(r) || ''"
             >
-              <template v-if="r.pricing_account_name">{{ r.pricing_account_name }}</template>
+              <template v-if="r.pricing_account_name">
+                {{ r.pricing_account_name }}<span
+                  v-if="r.pricing_account_listing_type"
+                  class="ml-1 text-[10px] text-muted-foreground"
+                >{{ /premium/i.test(r.pricing_account_listing_type) ? 'premium' : /cl[aá]ss?ico/i.test(r.pricing_account_listing_type) ? 'clássico' : r.pricing_account_listing_type }}</span>
+              </template>
               <template v-else-if="!r.pricing_leaf_segment_name">⚠️ sem cadastro</template>
               <template v-else-if="r.conta"><span class="text-muted-foreground">{{ r.conta }}</span></template>
               <template v-else><span class="text-amber-500">sem account</span></template>

@@ -437,7 +437,8 @@ const accountsGrouped = computed<{ platform: string; label: string; rows: Accoun
       platform,
       label: platformLabel(platform).toUpperCase(),
       rows: rows.slice().sort((a, b) =>
-        (a.name || '').localeCompare(b.name || '', 'pt-BR', { sensitivity: 'base' }),
+        (a.name || '').localeCompare(b.name || '', 'pt-BR', { sensitivity: 'base' }) ||
+        ordemTipo(a) - ordemTipo(b),
       ),
     }))
 })
@@ -1719,6 +1720,8 @@ type PushResult = {
   item_id: string | null
   variation_id: string | null
   cached: boolean
+  // Um item por anúncio que recebeu (ou pulou) o preço.
+  payload?: { links?: { success?: boolean }[] } | null
 }
 
 const grid = ref<GridResponse | null>(null)
@@ -2062,7 +2065,11 @@ async function pushCell(c: GridCell) {
     const bloqItems = failItems.filter((x) => ehCodigoBloqueio(x.code) || x.code === 'all_skipped')
     if (failItems.length === 0) {
       const priceTxt = okItems[0]?.price ? ` — R$ ${Number(okItems[0].price).toFixed(0)}` : ''
-      toast.success(`Preço enviado${priceTxt}`, `${okItems.length} variação(ões) ok`)
+      const anuncios = okItems.reduce(
+        (n, x) => n + (x.payload?.links?.filter((l) => l.success).length || 1),
+        0,
+      )
+      toast.success(`Preço enviado${priceTxt}`, `${anuncios} anúncio(s) ok`)
     } else if (okItems.length === 0 && bloqItems.length === failItems.length) {
       toast.warning('Envio bloqueado', bloqItems.map((f) => f.detail || f.code).slice(0, 5))
     } else if (okItems.length === 0) {
@@ -2362,6 +2369,14 @@ function tipoDe(acc: Account): string {
   return acc.listing_type || contaParametros(acc).listing_type || ''
 }
 
+// "clássico" / "premium" (ou vazio) — para cabeçalhos que não têm a linha do tipo.
+function rotuloTipo(acc: Account): string {
+  const t = tipoDe(acc).toLowerCase()
+  if (t.includes('classico') || t.includes('clássico')) return 'clássico'
+  if (t.includes('premium')) return 'premium'
+  return ''
+}
+
 // Custo base da coluna: Kit N na conta de kit; na coluna de catálogo, o
 // preco_catalogo do produto (vazio/0 = sem preço — nunca cai para o Kit 1).
 function custoDaConta(prod: PricingProduct, acc: Account): number | null {
@@ -2459,9 +2474,19 @@ const PLATFORM_ORDER: Record<string, number> = {
 // pushItemsBatch's "send all visible" iteration, the cellOf lookups
 // in keyboard nav) all read from this computed so they inherit the
 // filter automatically.
+// Desde 07/10/2026 o clássico e o premium do ML têm o MESMO nome ("aguiar") e
+// o tipo fica só na coluna Tipo ML: com o nome igual, clássico vem primeiro.
+function ordemTipo(acc: Account): number {
+  const t = (acc.listing_type || '').toLowerCase()
+  if (t.includes('classico') || t.includes('clássico')) return 0
+  if (t.includes('premium')) return 1
+  return 2
+}
+
 function compararContasKit(a: Account, b: Account): number {
   if (a.kit_number !== b.kit_number) return (a.kit_number || 0) - (b.kit_number || 0)
-  return (a.name || '').localeCompare(b.name || '', 'pt-BR', { sensitivity: 'base' })
+  const n = (a.name || '').localeCompare(b.name || '', 'pt-BR', { sensitivity: 'base' })
+  return n !== 0 ? n : ordemTipo(a) - ordemTipo(b)
 }
 
 // Ordem visual sem filtro (também a do Excel). As colunas de catálogo vêm
@@ -2764,7 +2789,10 @@ function handleExportExcel() {
   }
   // Coluna Catálogo depois do último kit (Kit8 no celular, Custo nos outros).
   headers.push('Catálogo')
-  for (const acc of accs) headers.push(ehCatalogo(acc) ? `${nomeColuna(acc)} catálogo` : acc.name)
+  for (const acc of accs) {
+    const nome = [nomeColuna(acc), rotuloTipo(acc)].filter(Boolean).join(' ')
+    headers.push(ehCatalogo(acc) ? `${nome} catálogo` : nome)
+  }
   const rows = prods.map(p => {
     const row: string[] = [
       p.sku,

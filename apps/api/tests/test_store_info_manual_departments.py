@@ -316,3 +316,40 @@ async def test_manual_departments_migration_preserves_existing_stores(db, monkey
         await db.rollback()
         await db.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
         await db.commit()
+
+
+async def test_tirar_tipo_da_loja_ml_nao_apaga_conta_sem_loja_de_mesmo_nome(
+    client, db, manual_editor,
+):
+    """07/10/2026: no ML o clássico e o premium agora têm o nome da loja
+    ("velasco"). Tirar o tipo da loja apaga só as contas LIGADAS a ela; a conta
+    sem loja de mesmo nome (e os preços fixados nela) fica. Nas outras
+    plataformas o casamento por nome continua como antes."""
+    celular = await db.scalar(select(Segment.id).where(Segment.slug == "celular"))
+
+    ml_store = await _create_store(client, "ml", account_name="velasco")
+    r = await client.post(f"/api/pricing/store-info/{ml_store}/department", json={"department": "celular"})
+    assert r.status_code == 200, r.text
+    ligada = r.json()["id"]
+    sem_loja = PricingAccount(
+        user_id=manual_editor.id, name="velasco", platform="mercadolivre",
+        listing_type="ml premium", segment_id=celular,
+    )
+    shopee_store = await _create_store(client, "shopee", account_name="loja x")
+    shopee_sem_loja = PricingAccount(
+        user_id=manual_editor.id, name="loja x", platform="shopee", segment_id=celular,
+    )
+    db.add_all([sem_loja, shopee_sem_loja])
+    await db.commit()
+    ids = (sem_loja.id, shopee_sem_loja.id)
+
+    r = await client.delete(f"/api/pricing/store-info/{ml_store}/department/celular")
+    assert r.status_code == 204, r.text
+    r = await client.delete(f"/api/pricing/store-info/{shopee_store}/department/celular")
+    assert r.status_code == 204, r.text
+
+    db.expire_all()
+    restantes = set((await db.execute(select(PricingAccount.id))).scalars())
+    assert ligada not in {str(i) for i in restantes}
+    assert ids[0] in restantes        # ML sem loja, mesmo nome: fica
+    assert ids[1] not in restantes    # Shopee sem loja, mesmo nome: sai, como antes
