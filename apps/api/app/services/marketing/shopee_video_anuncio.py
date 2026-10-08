@@ -113,6 +113,13 @@ def _base(sku: str) -> str:
     return sku.split(".")[0]
 
 
+def _base_aparelho(sku: str) -> str:
+    """A base do APARELHO do SKU: num kit ("dg088.ci+a001.ci") é a do
+    primeiro item (o aparelho); o acessório que vem junto não é outro
+    aparelho e não conta pra dizer quão "vitrine" o anúncio é."""
+    return _base(sku.split("+")[0])
+
+
 def _eh_kit(sku: str) -> bool:
     return "+" in sku or "kit" in sku
 
@@ -183,8 +190,9 @@ async def _melhor_item(
 
     itens = sorted({str(i) for i, _s in avulsos})
     exatos = {str(i) for i, s in avulsos if s == sku}
-    # Todas as variações VIVAS de cada candidato: quantos aparelhos (bases)
-    # o anúncio carrega e quanto estoque ele tem.
+    itens_kit = sorted({str(i) for i, _s in kits} - set(itens))
+    # Todas as variações VIVAS de cada candidato (avulso E kit): quantos
+    # aparelhos (bases) o anúncio carrega e quanto estoque ele tem.
     todas = (
         await session.execute(
             select(
@@ -195,17 +203,17 @@ async def _melhor_item(
             ).where(
                 ProductLink.integration_id == integration_id,
                 ProductLink.morto_desde.is_(None),
-                ProductLink.external_id.in_(itens),
+                ProductLink.external_id.in_(itens + itens_kit),
             )
         )
     ).all()
     por_item: dict[str, dict[str, Any]] = {
-        i: {"bases": set(), "estoque": 0, "titulo": None} for i in itens
+        i: {"bases": set(), "estoque": 0, "titulo": None} for i in itens + itens_kit
     }
     for item, s, estoque, titulo in todas:
         d = por_item[str(item)]
         if s:
-            d["bases"].add(_base(s))
+            d["bases"].add(_base_aparelho(s))
         d["estoque"] += max(0, int(estoque or 0))
         d["titulo"] = d["titulo"] or titulo
     ordem = sorted(
@@ -219,6 +227,17 @@ async def _melhor_item(
     )
     melhor = ordem[0]
     d = por_item[melhor]
+    # O kit nunca é vinculado — mas ele DIZ qual é o anúncio próprio do
+    # aparelho. Na Barbosa o S5/A18 tem o anúncio dele (58266122162, 2 bases)
+    # só em KIT, e o único avulso que o carrega é o "A17 Pro Max" (8 bases,
+    # dois aparelhos): o avulso "menos vitrine" ali é a vitrine de OUTRO
+    # modelo, e vídeo de um aparelho vinculado ao anúncio de outro é o
+    # "irrelevante" que a Shopee apaga (e tira ponto da conta). Quando o kit
+    # é mais específico que o melhor avulso, o aparelho não tem avulso
+    # dedicado nesta loja: o vídeo não sai nela.
+    bases_kit = [len(por_item[i]["bases"]) for i in itens_kit if por_item[i]["bases"]]
+    if bases_kit and min(bases_kit) < (len(d["bases"]) or 999):
+        return SO_KIT
     if d["estoque"] <= 0:
         # O dedicado sem estoque NÃO cai pra vitrine: vídeo de aparelho
         # vinculado na vitrine é o "irrelevante" que a Shopee apaga.
@@ -264,6 +283,13 @@ async def anuncio_para(
     if not achados:
         return max(motivos, key=lambda m: _PESO.get(m, 0)) if motivos else SEM_ANUNCIO
     if len({a.item_id for a in achados}) > 1:
+        return SKU_AMBIGUO
+    if any(m in (SO_KIT, SEM_ESTOQUE) for m in motivos):
+        # Um SKU do vídeo TEM anúncio próprio nesta loja (só que em kit, ou
+        # sem estoque) e outro caiu num avulso: os SKUs não convergem pro
+        # mesmo anúncio dedicado. Vincular o avulso do outro seria pôr um
+        # aparelho do vídeo no anúncio errado. (SKU sem anúncio NENHUM aqui
+        # continua não pesando: é a cor que esta loja não vende.)
         return SKU_AMBIGUO
     escolhido = achados[0]
     escolhido.skus = [s for a in achados for s in a.skus]
@@ -468,7 +494,15 @@ async def conferir_ao_vivo(
     if item.get("has_model") or estoque is None:
         try:
             modelos = (await cliente.get_model_list(item_id)).get("model") or []
-        except Exception:  # noqa: BLE001 — sem a lista de variações, fica o resumo
+        except Exception:
+            # No anúncio com variação (todos os da Barbosa) o item não traz o
+            # estoque: sem a lista de variações NÃO DEU PRA PERGUNTAR — um
+            # soluço da API da loja (limite, rede, renovação) não pode virar
+            # "sem estoque" definitivo e queimar o vídeo nesta conta. Quem
+            # chama trata como "tenta no próximo tique". Com o resumo do item
+            # em mãos, ele basta.
+            if estoque is None:
+                raise
             modelos = []
         if modelos:
             soma = 0
@@ -477,9 +511,9 @@ async def conferir_ao_vivo(
                 soma += max(0, int(r.get("total_available_stock") or 0))
             estoque = soma
     if estoque is None:
-        return Conferencia(
-            ok=False, status=status, motivo="a Shopee não informou o estoque do anúncio"
-        )
+        # Mesma coisa: a Shopee respondeu sem o número. Não é "sem estoque" —
+        # é "não sei", e o publicador espera e pergunta de novo.
+        raise RuntimeError("shopee_estoque_nao_informado")
     if estoque <= 0:
         return Conferencia(
             ok=False,

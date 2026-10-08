@@ -717,6 +717,7 @@ const CONTA_MOTIVO_PT: Record<string, string> = {
   conta_sem_loja: 'conta sem loja Shopee — escolha em Cadastros › Redes Sociais',
   conta_sem_autorizacao_shopee: 'loja ainda não autorizou o app de vídeo — autorize em Cadastros › Redes Sociais',
   conta_shopee_reautorizar: 'autorização da Shopee vencida — autorize de novo',
+  conta_shopee_bloqueada: 'Shopee parada: ela recusou (Termos, toggle…) — resolva e libere em Cadastros › Redes Sociais',
   sem_anuncio_na_loja: 'sem anúncio desse aparelho nesta loja',
   anuncio_so_em_kit: 'nesta loja o aparelho só está em kit',
   anuncio_sem_estoque: 'anúncio desta loja sem estoque',
@@ -927,6 +928,8 @@ const POSTAGEM_ERROS: Record<string, string> = {
   conta_sem_loja: 'A conta da Shopee não tem loja — escolha em Cadastros › Redes Sociais.',
   conta_sem_autorizacao_shopee: 'A loja ainda não autorizou o app de vídeo da Shopee — autorize em Cadastros › Redes Sociais.',
   conta_shopee_reautorizar: 'A autorização da Shopee venceu — autorize de novo em Cadastros › Redes Sociais.',
+  conta_shopee_bloqueada:
+    'A conta da Shopee está parada: a Shopee recusou por algo que só gente resolve (Termos do Shopee Vídeo, liberação da API…). Resolva e libere a conta em Cadastros › Redes Sociais.',
   sem_anuncio_na_loja: 'A loja não tem anúncio avulso desse aparelho — o vídeo não sai nela.',
   anuncio_so_em_kit: 'Nessa loja o aparelho só está em anúncio de kit — vídeo de aparelho sozinho não vai em kit.',
   anuncio_sem_estoque: 'O anúncio desse aparelho na loja está sem estoque.',

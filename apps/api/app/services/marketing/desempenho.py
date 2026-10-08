@@ -109,7 +109,10 @@ MES_DIAS = 30
 
 NUMEROS = ("views", "curtidas", "comentarios", "compartilhamentos", "salvamentos", "alcance")
 INTERACOES = ("curtidas", "comentarios", "compartilhamentos", "salvamentos")
-ORDEM_REDES = ("instagram", "youtube", "tiktok", "facebook")
+# Shopee Vídeo (08/10/2026) no fim: a tela só abre coluna pra ela quando há
+# post lá (como o Facebook) — as views dela entram no total do vídeo, e a
+# coluna é o que faz o total bater com a soma das redes.
+ORDEM_REDES = ("instagram", "youtube", "tiktok", "facebook", "shopee")
 
 _CONTADOS = ("ok", "falhou")
 _NA_TELA = ("ok", "falhou", "aguardando")

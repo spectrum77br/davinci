@@ -290,3 +290,103 @@ async def test_lista_aceita_objeto_unico_no_lugar_de_lista():
 def test_repr_do_cliente_sem_segredo():
     c = _cliente(token="TOKEN-SECRETO-NUNCA")
     assert "TOKEN-SECRETO-NUNCA" not in repr(c) and CHAVE not in repr(c)
+
+
+# ───────────────────────────────────── lote que falhou e post sem confirmação
+
+
+def _lote_falho(motivo: str) -> httpx.Response:
+    """O corpo REAL de um lote em que o único vídeo falhou: `error` no topo
+    com a mensagem genérica, o motivo de verdade só na `failure_list`."""
+    return httpx.Response(
+        200,
+        json={
+            "error": "batch_process_failed",
+            "message": "Please check failure_list for detailed reason",
+            "request_id": "rq-lote",
+            "response": {
+                "success_list": [],
+                "failure_list": [{"fail_video_upload_id": "br-1", "failed_reason": motivo}],
+            },
+        },
+    )
+
+
+@respx.mock
+async def test_lote_falho_traz_o_motivo_do_item_no_post_e_no_edit():
+    respx.post(f"{HOST}{sv.PATH_POSTAR}").mock(
+        return_value=_lote_falho("task can not be process under the current status")
+    )
+    with pytest.raises(sv.ShopeeVideoError) as ei:
+        await _cliente().postar("br-1")
+    e = ei.value
+    assert not isinstance(e, sv.ShopeeVideoRedeError)  # recusa explícita, não dúvida
+    assert e.code == "batch_process_failed" and e.request_id == "rq-lote"
+    assert e.tem("current status")
+    assert "Please check failure_list" not in e.texto()
+
+    respx.post(f"{HOST}{sv.PATH_EDITAR}").mock(
+        return_value=_lote_falho("can not edit video info,please retry")
+    )
+    with pytest.raises(sv.ShopeeVideoError) as ei:
+        await _cliente().editar("br-1", legenda="x", capa="c", item_id=1)
+    assert ei.value.tem("please retry")
+
+
+@respx.mock
+async def test_lote_falho_sem_motivo_fica_com_a_mensagem():
+    respx.post(f"{HOST}{sv.PATH_APAGAR}").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "error": "batch_process_failed",
+                "message": "Please check failure_list",
+                "response": {"failure_list": []},
+            },
+        )
+    )
+    with pytest.raises(sv.ShopeeVideoError) as ei:
+        await _cliente().apagar_rascunho("br-1")
+    assert ei.value.tem("please check failure_list")
+
+
+@pytest.mark.parametrize(
+    "resposta",
+    [
+        # o nosso id na lista de sucesso, mas sem post_id
+        {"success_list": [{"success_video_upload_id": "br-1", "post_id": ""}], "failure_list": []},
+        # listas vazias
+        {"success_list": [], "failure_list": []},
+        # sem `response`
+        None,
+    ],
+)
+@respx.mock
+async def test_post_aceito_sem_post_id_e_ambiguo_nunca_recusa(resposta):
+    corpo = {"error": "", "message": "", "request_id": "rq-amb"}
+    if resposta is not None:
+        corpo["response"] = resposta
+    respx.post(f"{HOST}{sv.PATH_POSTAR}").mock(return_value=httpx.Response(200, json=corpo))
+    with pytest.raises(sv.ShopeeVideoAmbiguoError) as ei:
+        await _cliente().postar("br-1")
+    # Quem trata "sem resposta" trata isto: o post pode ter saído.
+    assert isinstance(ei.value, sv.ShopeeVideoRedeError)
+    assert ei.value.request_id == "rq-amb"
+
+
+@respx.mock
+async def test_post_com_o_video_na_lista_de_falha_e_recusa_explicita():
+    respx.post(f"{HOST}{sv.PATH_POSTAR}").mock(
+        return_value=_ok(
+            {
+                "success_list": [],
+                "failure_list": [
+                    {"fail_video_upload_id": "br-1", "failed_reason": "video not exist"}
+                ],
+            }
+        )
+    )
+    with pytest.raises(sv.ShopeeVideoError) as ei:
+        await _cliente().postar("br-1")
+    assert not isinstance(ei.value, sv.ShopeeVideoRedeError)
+    assert ei.value.tem("video not exist")

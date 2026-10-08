@@ -20,8 +20,11 @@ credencial do app de vídeo (partner_id/partner_key/tokens) vai cifrada em
 
 Só ADD COLUMN nulável + índice pequeno (a tabela tem dezenas de linhas).
 
-Revision ID: 0383_redes_sociais_loja_shopee
-Revises: 0382_conferencia_plataformas
+Revision ID: 0384_redes_sociais_loja_shopee
+Revises: 0383_atendimento_trocas
+
+Nasceu 0383 em 08/10 e foi renumerada para 0384 no mesmo dia, quando o origin
+chegou primeiro com a 0383 (trocas de produto do atendimento).
 """
 
 from collections.abc import Sequence
@@ -31,8 +34,8 @@ from sqlalchemy.dialects import postgresql as pg
 
 from alembic import op
 
-revision: str = "0383_redes_sociais_loja_shopee"
-down_revision: str | None = "0382_conferencia_plataformas"
+revision: str = "0384_redes_sociais_loja_shopee"
+down_revision: str | None = "0383_atendimento_trocas"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

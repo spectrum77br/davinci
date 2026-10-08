@@ -34,6 +34,7 @@ intervalo, nada em voo pro mesmo vídeo. Um robô que pula as guardas do humano
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
@@ -49,6 +50,7 @@ from app.models import (
     MarketingPostagem,
     RedeSocial,
 )
+from app.services.marketing import shopee_video_anuncio as _anuncio_shopee
 from app.services.marketing.postagens import (
     BRT,
     PLATAFORMA_SHOPEE,
@@ -335,20 +337,33 @@ async def fila(
             )
         ).all()
     }
+    tem_shopee = any((c.plataforma or "").strip().lower() == PLATAFORMA_SHOPEE for c in contas)
+    if tem_shopee:
+        # O ffprobe de cada arquivo ANTES do laço, 4 de cada vez: o resultado
+        # fica no cache do `sondar_video` (por caminho+tamanho+mtime), e o
+        # laço abaixo só lê de lá. Sem isto a primeira carga da tela rodaria
+        # um ffprobe por vídeo, um atrás do outro.
+        trava = asyncio.Semaphore(4)
+
+        async def _sonda(arquivo: MarketingCreativeFile) -> None:
+            async with trava:
+                await _anuncio_shopee.sondar_video(_anuncio_shopee.caminho_do_arquivo(arquivo))
+
+        await asyncio.gather(*(_sonda(f) for _c, f in linhas if (f.file_rel or "").strip()))
     itens = []
     for criativo, arquivo in linhas:
         pendente = [c for c in contas if (arquivo.id, c.id) not in saiu]
-        # Conta de Shopee Vídeo só "espera" o vídeo que a loja dela aceita
-        # (anúncio avulso com estoque). Sem isto a tela prometeria "ainda não
-        # saiu na Shopee" pra vídeo que nunca vai sair lá. Sem ffprobe aqui:
-        # a tela lista a fila inteira — o formato o robô confere ao escolher.
+        # Conta de Shopee Vídeo só "espera" o vídeo que a loja dela aceita —
+        # anúncio avulso com estoque E o formato (3–60 s, 720p+, H.264): é a
+        # MESMA conferência do robô (`proximo_criativo`). Sem o formato aqui,
+        # o vídeo HEVC que já saiu nas outras redes voltava pra "Fila do robô"
+        # como pendente na Shopee, e o selo "#n na fila" contava vídeo que o
+        # robô pula — a promessa falsa que esta tela existe pra não fazer.
         pendente = [
             c
             for c in pendente
             if (c.plataforma or "").strip().lower() != PLATAFORMA_SHOPEE
-            or await motivo_do_video_na_loja(
-                session, criativo, arquivo, c, com_formato=False
-            ) is None
+            or await motivo_do_video_na_loja(session, criativo, arquivo, c) is None
         ]
         if pendente:
             itens.append(ItemFila(criativo, arquivo, pendente, motivo_do_arquivo(arquivo)))

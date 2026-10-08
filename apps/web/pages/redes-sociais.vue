@@ -124,6 +124,8 @@ type RedeSocialOut = {
   integration_id?: string | null
   integration_nome?: string | null
   shopee_app_configurado?: boolean
+  // Shopee Vídeo PARADA (bloqueada pela Shopee ou autorização vencida): o motivo.
+  token_erro?: string | null
   created_at: string
   updated_at: string
 }
@@ -399,6 +401,9 @@ function senhaHintTexto(o: {
 function shopeePillTexto(r: (TokenEstado & { shopee_app_configurado?: boolean }) | null | undefined): string {
   if (!r?.shopee_app_configurado) return 'sem app de vídeo'
   if (!r.has_token) return 'falta autorizar na Shopee'
+  // Bloqueada: a Shopee recusou por algo que só gente resolve (Termos do
+  // Shopee Vídeo, toggle da API…). O robô para até alguém liberar.
+  if (r.token_status === 'bloqueado') return 'parada — a Shopee recusou; resolva e libere'
   if ((r.token_status || 'ok') !== 'ok') return 'autorização vencida — autorize de novo'
   const loja = (r.token_conta_externa || '').trim()
   return loja ? `autorizado · ${loja}` : 'autorizado'
@@ -429,7 +434,7 @@ const SHOPEE_ERROS: Record<string, string> = {
   loja_sem_shop_id: 'a integração da loja não tem o shop_id — reconecte a loja em Integrações',
   conta_sem_app_shopee: 'digite o Partner ID e a Partner Key do app de vídeo',
   partner_incompleto: 'preencha o Partner ID E a Partner Key (os dois são do mesmo app)',
-  partner_key_invalida: 'Partner Key inválida — cole a chave inteira, sem espaços',
+  partner_key_invalida: 'a Partner Key não confere com o Partner ID — cole a chave live inteira do app de vídeo, sem espaços',
   shopee_usa_autorizacao: 'na Shopee a conexão é pelo botão Autorizar na Shopee',
   missing_shopee_video_redirect: 'endereço de retorno da Shopee não configurado no servidor',
   state_not_found: 'link de autorização inválido — clique em Autorizar na Shopee de novo',
@@ -441,6 +446,14 @@ const SHOPEE_ERROS: Record<string, string> = {
   autorizacao_ambigua: 'a Shopee devolveu mais de um usuário — autorize de novo pela loja',
   autorizacao_sem_token: 'a Shopee não devolveu os tokens — tente de novo',
   troca_recusada: 'a Shopee recusou o código — tente de novo (o código vale 10 min, uma vez)',
+  partner_e_da_integracao:
+    'esse é o app da INTEGRAÇÃO da loja (pedidos/estoque), não o de vídeo — use o Partner ID e a Partner Key do app DaVinci Videos',
+  partner_key_vencida: 'a Partner Key do app de vídeo venceu — gere outra no Console da Shopee e digite de novo',
+  app_invalido:
+    'a Shopee recusou o app — confira se o Partner ID/Key são do app de vídeo (Shopee Video Management) e se ele está live',
+  shopee_sem_resposta: 'a Shopee não respondeu na troca do código — clique em Autorizar na Shopee de novo',
+  loja_nao_confirmada: 'a Shopee não confirmou de que loja é a autorização — entre com o login principal da loja (não a conta principal)',
+  conta_shopee_reautorizar: 'a autorização da Shopee venceu — clique em autorizar de novo',
 }
 
 // `?shopee=ok|erro&code=…` da volta da autorização → aviso pra tela.
@@ -1344,6 +1357,29 @@ async function autorizarShopee() {
   }
 }
 
+// Conta PARADA pela Shopee (`bloqueado`: Termos do Shopee Vídeo, toggle da
+// API, permissão do app…): a pessoa resolveu fora e manda o robô voltar. Não
+// autoriza nada — autorização vencida continua pedindo "autorizar de novo".
+const liberando = ref(false)
+async function liberarShopee() {
+  const rede = modal.value?.rede
+  if (!rede || !canEdit.value || liberando.value || rede.token_status !== 'bloqueado') return
+  if (!confirm(
+    'Liberar a conta de Shopee Vídeo?\n\nSó libere depois de resolver o que a Shopee recusou '
+    + '(Termos do Shopee Vídeo aceitos, toggle liberado…) — senão o próximo vídeo para de novo.',
+  )) return
+  liberando.value = true
+  modalErr.value = null
+  try {
+    const out = await api<RedeSocialOut>(`/api/redes-sociais/${rede.id}/shopee/liberar`, { method: 'POST' })
+    aplicaConta(rede, { token_status: out.token_status, token_erro: out.token_erro ?? null })
+  } catch (e: any) {
+    modalErr.value = apiErrMsg(e, { ...MARCAS_ERROS, ...SHOPEE_ERROS })
+  } finally {
+    liberando.value = false
+  }
+}
+
 // Volta da Shopee: aviso e a URL limpa (recarregar não repete o aviso).
 const route = useRoute()
 const router = useRouter()
@@ -1855,6 +1891,16 @@ await load()
                 <!-- Shopee Vídeo: nada de token colado — app de vídeo + login da loja. -->
                 <template v-if="redeDeLoja">
                   <Button
+                    v-if="modal.rede.token_status === 'bloqueado'"
+                    size="sm"
+                    variant="outline"
+                    :disabled="saving || liberando"
+                    title="a Shopee recusou por algo que já foi resolvido? o robô volta a publicar nesta conta"
+                    @click="liberarShopee"
+                  >
+                    <Check class="size-4 mr-1" /> liberar
+                  </Button>
+                  <Button
                     v-if="modal.rede.has_token || modal.rede.shopee_app_configurado"
                     size="sm"
                     variant="ghost"
@@ -1907,6 +1953,12 @@ await load()
               {{ redeDeLoja
                 ? 'ligado, mas a loja ainda não autorizou o app de vídeo — clique em Autorizar na Shopee.'
                 : 'ligado, mas sem credencial — conecte o token para o robô conseguir publicar.' }}
+            </p>
+            <p
+              v-if="redeDeLoja && modal.rede.token_erro"
+              class="text-[11px] text-amber-700 dark:text-amber-400 whitespace-pre-line"
+            >
+              {{ modal.rede.token_erro }}
             </p>
             <p v-if="redeDeLoja" class="text-[11px] text-muted-foreground">
               Shopee Vídeo: só sai vídeo aprovado, de 3 a 60 s, 720p ou mais (H.264), vinculado ao anúncio avulso

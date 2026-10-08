@@ -211,6 +211,21 @@ assert.deepEqual(H.redesDaTabela(['tiktok']), ['instagram', 'youtube', 'tiktok']
   assert.match(celula[0], /:class="\(plat\(m, r\)\?\.no_periodo\?\.views \?\? 0\) > 0 \? 'text-emerald/)
 }
 assert.deepEqual(H.redesDaTabela(['facebook']), ['instagram', 'youtube', 'tiktok', 'facebook'], 'Facebook só se houver post')
+// Shopee Vídeo (08/10/2026): as views dela entram no total do vídeo, então ela
+// ganha coluna quando há post lá — senão o total não bate com a soma das redes.
+assert.deepEqual(H.redesDaTabela(['shopee']), ['instagram', 'youtube', 'tiktok', 'shopee'], 'Shopee só se houver post')
+assert.deepEqual(
+  H.redesDaTabela(['facebook', 'shopee']), ['instagram', 'youtube', 'tiktok', 'facebook', 'shopee'], 'as cinco juntas',
+)
+assert.equal(H.ORDEM_REDES.at(-1), 'shopee', 'Shopee no fim, na mesma ordem da API')
+assert.deepEqual([3, 4, 5].map((n) => H.colunasDaGrade(H.ORDEM_REDES.slice(0, n))), [3, 4, 5])
+assert.equal(H.colunasDaGrade([]), 3)
+for (const nome of ['MarketingDesempenho', 'MarketingDesempenhoVideos']) {
+  const src = sfc[nome].source
+  assert.match(src, /\b5: \{[\s\S]*?repeat\(5,/, `${nome}: grade de cinco colunas de rede`)
+  assert.match(src, /colunasDaGrade\(/, `${nome}: escolhe a grade pelo número de redes`)
+  assert.ok(!/length > 3 \? 4 : 3/.test(src), `${nome}: sem a grade presa em 4 colunas`)
+}
 
 // ---------------------------------------------------------------- higiene estática
 // A checagem é sobre CREDENCIAL, não sobre a palavra: o componente comenta que

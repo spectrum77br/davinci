@@ -276,13 +276,14 @@ export type OrdemGrupos = 'servidor' | 'mes' | 'semana' | 'por_video'
 
 // A mesma ordem em que a API manda `resumo.redes`: cartão, coluna e filtro
 // nunca trocam de lugar entre si. O Facebook quase não recebe post — só ganha
-// coluna quando houver um (redesDaTabela).
-export const ORDEM_REDES = ['instagram', 'youtube', 'tiktok', 'facebook']
+// coluna quando houver um (redesDaTabela). A Shopee Vídeo (08/10/2026) idem:
+// as views dela entram no total do vídeo, então a coluna tem de existir
+// quando há post lá — senão o total não bate com a soma das colunas.
+export const ORDEM_REDES = ['instagram', 'youtube', 'tiktok', 'facebook', 'shopee']
+// Redes que só ganham coluna quando alguém postou lá.
+const REDES_SO_COM_POST = ['facebook', 'shopee']
 export const ROTULO_REDE: Record<string, string> = {
-  instagram: 'Instagram', youtube: 'YouTube', tiktok: 'TikTok', facebook: 'Facebook',
-  // Shopee Vídeo (08/10/2026): entra nos totais e no cartão do vídeo; coluna
-  // própria nas tabelas fica pra quando houver volume (hoje é 1 loja).
-  shopee: 'Shopee',
+  instagram: 'Instagram', youtube: 'YouTube', tiktok: 'TikTok', facebook: 'Facebook', shopee: 'Shopee',
 }
 // Sigla do cartão de vídeo no celular, onde "● Instagram" não cabe três vezes.
 export const SIGLA_REDE: Record<string, string> = {
@@ -294,9 +295,14 @@ export function corRede(plataforma: string): string {
   return `var(--rede-${plataforma}, currentColor)`
 }
 
-/** Colunas das tabelas: as três redes de sempre, e o Facebook só se alguém postou lá. */
+/** Colunas das tabelas: as três redes de sempre, e o Facebook/a Shopee só se alguém postou lá. */
 export function redesDaTabela(presentes: string[]): string[] {
-  return ORDEM_REDES.filter((r) => r !== 'facebook' || presentes.includes('facebook'))
+  return ORDEM_REDES.filter((r) => !REDES_SO_COM_POST.includes(r) || presentes.includes(r))
+}
+
+/** Quantas colunas de rede a grade monta (3, 4 ou 5) — a chave das classes de grade. */
+export function colunasDaGrade(redes: string[]): 3 | 4 | 5 {
+  return redes.length >= 5 ? 5 : redes.length === 4 ? 4 : 3
 }
 
 /** Número da tela: ausente vira "—", nunca 0 (decisão 1 do topo de MarketingDesempenho.vue). */

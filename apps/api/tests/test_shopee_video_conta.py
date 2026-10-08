@@ -223,3 +223,114 @@ def test_escolhe_o_user_id_da_loja_certa():
     with pytest.raises(conta.ContaShopeeError) as ei:
         conta.escolher_user_id({"shop_id_list": [1725800210], "user_id_list": []}, 1725800210)
     assert ei.value.code == "autorizacao_sem_user_id"
+
+
+@pytest.mark.parametrize(
+    ("erro", "mensagem", "reautorizar"),
+    [
+        # A autorização (até 365 dias) venceu: só autorizando de novo.
+        ("user_access_expired", "The access of user is expired", True),
+        ("shop_access_expired", "Your shop authorization is expired", True),
+        # Relógio fora de hora NÃO é autorização vencida.
+        ("error_param", "Timestamp is expired.", False),
+    ],
+)
+@respx.mock
+async def test_autorizacao_vencida_pede_autorizar_e_relogio_nao(db, erro, mensagem, reautorizar):
+    r = await _conta(db, expira_em_s=10)
+    respx.post(REFRESH_URL).mock(
+        return_value=httpx.Response(
+            200, json={"error": erro, "message": mensagem, "request_id": "rq-exp"}
+        )
+    )
+    with pytest.raises(conta.ContaShopeeError) as ei:
+        await conta.credencial(r.id)
+    assert isinstance(ei.value, conta.ReautorizarError) is reautorizar
+    _b, tok = await _blob(db, r.id)
+    assert tok.status == ("expirado" if reautorizar else "ok")
+
+
+def test_conta_principal_sem_lista_de_lojas_so_com_a_loja_provada():
+    """Retorno pela conta principal (`main_account_id`): a resposta sem
+    `shop_id_list` não diz de que loja é o user_id. Sem o `shop_id` do
+    retorno batendo com o da integração, nada é gravado."""
+    resp = {"shop_id_list": [], "user_id_list": [USER]}
+    with pytest.raises(conta.ContaShopeeError) as ei:
+        conta.escolher_user_id(resp, 1725800210)
+    assert ei.value.code == "loja_nao_confirmada"
+    assert conta.escolher_user_id(resp, 1725800210, loja_confirmada=True) == (USER, 1725800210)
+    # Mesmo provada, dois usuários sem loja continuam ambíguos.
+    with pytest.raises(conta.ContaShopeeError) as ei:
+        conta.escolher_user_id(
+            {"shop_id_list": [], "user_id_list": [1, 2]}, 1725800210, loja_confirmada=True
+        )
+    assert ei.value.code == "autorizacao_ambigua"
+
+
+async def test_conta_bloqueada_segue_renovando_e_nao_se_libera_sozinha(db, monkeypatch):
+    """Bloqueada (Termos/toggle) pode levar semanas: o cron renova a cadeia
+    mesmo assim — e renovar NÃO libera a conta nem apaga o motivo."""
+    r = await _conta(db, expira_em_s=10, status="bloqueado")
+    await db.execute(
+        text(
+            "UPDATE redes_sociais_tokens SET last_error = 'Shopee: Termos'"
+            " WHERE rede_social_id = :r"
+        ),
+        {"r": r.id},
+    )
+    await db.commit()
+    chamadas: list[str] = []
+
+    async def renovar(self, refresh_token, user_id):
+        chamadas.append(refresh_token)
+        return {"access_token": "a2", "refresh_token": f"r{len(chamadas) + 1}", "expire_in": 14400}
+
+    monkeypatch.setattr(sv.ClienteShopeeVideo, "renovar", renovar)
+    cred = await conta.credencial(r.id)  # o reconciliador e as métricas ainda leem
+    assert cred.access_token == "a2" and chamadas == ["refresh-1"]
+    blob, tok = await _blob(db, r.id)
+    assert tok.status == "bloqueado" and tok.last_error == "Shopee: Termos"
+    assert blob["refresh_token"] == "r2"
+    # O cron diário também a renova (token_expires_at recarimbado → volta pro cron só perto).
+    await db.execute(
+        text(
+            "UPDATE redes_sociais_tokens SET token_expires_at = now() + interval '3 days'"
+            " WHERE rede_social_id = :r"
+        ),
+        {"r": r.id},
+    )
+    await db.commit()
+    out = await conta.renovar_todas()
+    assert out["renovadas"] == 1 and chamadas == ["refresh-1", "r2"]
+    _b, tok = await _blob(db, r.id)
+    assert tok.status == "bloqueado"
+
+
+async def test_bloquear_registrar_saude_e_liberar(db):
+    rid = (await _conta(db, expira_em_s=3600)).id  # o rollback abaixo expira `r`
+    await conta.bloquear(rid, motivo="não aceitou os Termos (copyright_not_agree)")
+    _b, tok = await _blob(db, rid)
+    assert tok.status == "bloqueado" and "Termos" in tok.last_error
+    # O erro de uma postagem (ou o sucesso de outra) não apaga o motivo.
+    await conta.registrar_saude(rid, erro="Shopee: outra coisa")
+    await conta.registrar_saude(rid, erro=None)
+    _b, tok = await _blob(db, rid)
+    assert tok.status == "bloqueado" and "Termos" in tok.last_error
+    # Expirado não é rebaixado pra bloqueado; reautorizar=True ganha.
+    await conta.bloquear(rid, motivo="autorização desfeita", reautorizar=True)
+    await conta.bloquear(rid, motivo="toggle")
+    _b, tok = await _blob(db, rid)
+    assert tok.status == "expirado" and "desfeita" in tok.last_error
+    # Liberar não inventa autorização: expirado continua pedindo autorizar.
+    with pytest.raises(conta.ReautorizarError):
+        await conta.liberar(db, rid)
+    await db.rollback()
+    await db.execute(
+        text("UPDATE redes_sociais_tokens SET status = 'bloqueado' WHERE rede_social_id = :r"),
+        {"r": rid},
+    )
+    await db.commit()
+    tok = await conta.liberar(db, rid)
+    await db.commit()
+    _b, tok = await _blob(db, rid)
+    assert tok.status == "ok" and tok.last_error is None

@@ -343,7 +343,17 @@ async def do_shopee(rede_social_id: UUID, post_ids: list[str]) -> dict[str, dict
         if not faltam or not r.get("has_more"):
             break
     for pid in faltam:
-        d = await cliente.detalhe(post_id=pid)
+        # Um a um, e a falha de UM fica nele: sem isto um único vídeo apagado
+        # (a Shopee responde "no record in database" em vez do status 400)
+        # derrubava a leitura de todos os posts da conta, em toda rodada.
+        try:
+            d = await cliente.detalhe(post_id=pid)
+        except shopee_video.ShopeeVideoError as e:
+            if e.tem("no record", "not exist", "illegal"):
+                saida[pid] = {"erro": f"{REMOVIDO} o vídeo não está mais na Shopee"}
+            else:
+                saida[pid] = {"erro": _msg(e)[:400]}
+            continue
         if int(d.get("status") or 0) == shopee_video.STATUS_APAGADO:
             saida[pid] = {"erro": f"{REMOVIDO} o vídeo não está mais na Shopee"}
         else:

@@ -29,7 +29,7 @@ from uuid import UUID
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from fastapi.responses import RedirectResponse
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -122,6 +122,14 @@ def rede_out(
         )
         if r.integration_id is not None:
             out.integration_nome = (lojas or {}).get(r.integration_id)
+        # Conta PARADA (bloqueada pela Shopee ou com a autorização vencida):
+        # o motivo vai pra tela — é o que diz à pessoa o que resolver. O texto
+        # é nosso (código + mensagem da Shopee + request_id), nunca segredo.
+        if token is not None and token.status in (
+            shopee_video_conta.STATUS_BLOQUEADO,
+            shopee_video_conta.STATUS_EXPIRADO,
+        ):
+            out.token_erro = (token.last_error or "")[:500] or None
     out.marca_nome = marca.nome
     out.has_senha = bool(r.senha_enc)
     # Efetivos: o que a conta tem, senão o da marca (planilha: uma credencial
@@ -234,7 +242,7 @@ def _casa_conta(
 
 
 def _conflict_code(conta: str | None, e: IntegrityError | None = None) -> str:
-    # Uma conta de Shopee Vídeo por loja (índice único parcial da 0383).
+    # Uma conta de Shopee Vídeo por loja (índice único parcial da 0384).
     if e is not None and "uq_redes_sociais_integration_id" in str(e.orig):
         return "loja_ja_tem_conta_shopee"
     return "rede_social_conta_conflict" if conta else "rede_social_placeholder_conflict"
@@ -767,6 +775,52 @@ def _shop_id_da_loja(integ: Integration) -> int | None:
     return n if n > 0 else None
 
 
+async def _partners_das_integracoes(session: AsyncSession) -> set[int]:
+    """Os partner_id dos apps das INTEGRAÇÕES Shopee (pedidos, estoque e
+    anúncios — o Stock Sync Hub da Barbosa é um deles), mais o do servidor,
+    que a integração usa quando o blob não tem o dela.
+
+    Só LEITURA, e só deste número (mesmo cuidado do `_shop_id_da_loja`). É a
+    trava da regra do dono: o app de VÍDEO nunca pode ser o da integração —
+    autorizar a loja de novo nesse app renovaria o refresh token da
+    integração por fora dela, e os pedidos, o estoque e os anúncios da loja
+    parariam até alguém reautorizar."""
+
+    def _n(v: object) -> int | None:
+        try:
+            n = int(str(v or "").strip())
+        except ValueError:
+            return None
+        return n if n > 0 else None
+
+    padrao = _n(get_settings().shopee_partner_id)
+    out: set[int] = {padrao} if padrao else set()
+    blobs = (
+        await session.execute(
+            select(Integration.credentials).where(
+                Integration.platform == IntegrationPlatform.SHOPEE
+            )
+        )
+    ).scalars().all()
+    for blob in blobs:
+        try:
+            creds = decrypt_json(blob) if blob else {}
+        except Exception:  # noqa: BLE001 — blob ilegível não tem partner a comparar
+            logger.warning("shopee_video_integracao_blob_ilegivel")
+            continue
+        pid = _n((creds or {}).get("partner_id")) if isinstance(creds, dict) else None
+        if pid:
+            out.add(pid)
+    return out
+
+
+def _partner_key_valida(chave: str) -> bool:
+    """A partner_key é um hex longo; curta ou com espaço é colagem errada.
+    Validada AQUI, e não no schema: o 422 do schema devolve o `input` — a
+    chave — no corpo da resposta."""
+    return len(chave) >= 16 and not any(c.isspace() for c in chave)
+
+
 @router.post("/{rede_id}/shopee/iniciar", response_model=ShopeeIniciarOut)
 async def shopee_iniciar(
     rede_id: UUID,
@@ -786,6 +840,8 @@ async def shopee_iniciar(
         raise HTTPException(422, detail={"code": "conta_sem_loja"})
     if (body.partner_id is None) != (body.partner_key is None):
         raise HTTPException(422, detail={"code": "partner_incompleto"})
+    if body.partner_key is not None and not _partner_key_valida(body.partner_key):
+        raise HTTPException(422, detail={"code": "partner_key_invalida"})
     integ = await session.get(Integration, r.integration_id)
     if integ is None or integ.platform != IntegrationPlatform.SHOPEE:
         raise HTTPException(422, detail={"code": "loja_nao_e_shopee"})
@@ -796,6 +852,12 @@ async def shopee_iniciar(
     base = _shopee_video_base()
     if not base.startswith("https://") and not base.startswith("http://"):
         raise HTTPException(400, detail={"code": "missing_shopee_video_redirect"})
+    # O app de VÍDEO nunca é o da integração (Stock Sync Hub): o link de
+    # autorização com o partner dela faria a loja reautorizar o app de
+    # pedidos/estoque por fora, e a integração perderia o token.
+    da_integracao = await _partners_das_integracoes(session)
+    if body.partner_id is not None and int(body.partner_id) in da_integracao:
+        raise HTTPException(422, detail={"code": "partner_e_da_integracao"})
 
     if body.partner_id is not None and body.partner_key is not None:
         tok = await shopee_video_conta.salvar_partner(
@@ -810,6 +872,9 @@ async def shopee_iniciar(
     blob = shopee_video_conta.blob_de(tok)
     if not shopee_video_conta.tem_partner(blob):
         raise HTTPException(422, detail={"code": "conta_sem_app_shopee"})
+    if int(blob["partner_id"]) in da_integracao:
+        # O app já salvo (de antes desta trava) é o da integração: nada de link.
+        raise HTTPException(422, detail={"code": "partner_e_da_integracao"})
 
     state = token_urlsafe(32)
     session.add(
@@ -831,6 +896,38 @@ async def shopee_iniciar(
     )
     logger.info("shopee_video_autorizacao_iniciada", rede_id=str(r.id), user_id=str(user.id))
     return ShopeeIniciarOut(url=url)
+
+
+def _motivo_da_troca(e: shopee_video.ShopeeVideoError) -> str:
+    """O erro do `token/get` → código pra tela, com o que FAZER.
+
+    A chave digitada errada só aparece aqui (o link de autorização não leva
+    assinatura): chamar tudo de "código recusado" mandava o Eduardo autorizar
+    de novo com a mesma chave, em laço, sem pista."""
+    if e.tem("error_sign", "wrong sign"):
+        return "partner_key_invalida"
+    if e.tem("error_partner_key_expired"):
+        return "partner_key_vencida"
+    if e.tem("invalid_code", "invalid code"):
+        return "troca_recusada"
+    if e.tem("error_auth", "error_api_permission", "invalid_partner_id", "no permission"):
+        return "app_invalido"
+    if isinstance(e, shopee_video.ShopeeVideoRedeError):
+        return "shopee_sem_resposta"
+    return "troca_recusada"
+
+
+async def _registrar_erro_da_troca(session: AsyncSession, rede_id: UUID, texto: str) -> None:
+    try:
+        await session.execute(
+            update(RedeSocialToken)
+            .where(RedeSocialToken.rede_social_id == rede_id)
+            .values(last_error=texto[:500])
+        )
+        await session.commit()
+    except Exception:  # noqa: BLE001 — o aviso na tela já diz o essencial
+        await session.rollback()
+        logger.warning("shopee_video_troca_erro_nao_gravado", rede_id=str(rede_id))
 
 
 def _volta(resultado: str, code: str | None = None) -> RedirectResponse:
@@ -901,6 +998,12 @@ async def shopee_callback(
     blob = shopee_video_conta.blob_de(tok)
     if tok is None or not shopee_video_conta.tem_partner(blob):
         return _volta("erro", "conta_sem_app_shopee")
+    if int(blob["partner_id"]) in await _partners_das_integracoes(session):
+        # Segunda trava (a primeira é no iniciar): o code de um app da
+        # integração NUNCA é trocado aqui — o token/get emitiria um par novo
+        # pra loja no app de pedidos/estoque, por fora da integração.
+        await session.rollback()
+        return _volta("erro", "partner_e_da_integracao")
     cliente = shopee_video.ClienteShopeeVideo(int(blob["partner_id"]), str(blob["partner_key"]))
     try:
         resposta = await cliente.trocar_code(
@@ -908,7 +1011,12 @@ async def shopee_callback(
             shop_id=shop_id if shop_id is not None else None,
             main_account_id=main_account_id if shop_id is None else None,
         )
-        uid, sid = shopee_video_conta.escolher_user_id(resposta, esperado)
+        uid, sid = shopee_video_conta.escolher_user_id(
+            resposta,
+            esperado,
+            # Só o retorno com `shop_id` (já conferido acima) prova a loja.
+            loja_confirmada=shop_id is not None and int(shop_id) == esperado,
+        )
         shopee_video_conta.gravar_autorizacao(
             tok,
             resposta=resposta,
@@ -926,7 +1034,12 @@ async def shopee_callback(
             code=e.code,
             request_id=e.request_id,
         )
-        return _volta("erro", "troca_recusada")
+        motivo = _motivo_da_troca(e)
+        # O rollback desfez tudo: o erro vai pra linha numa transação NOVA —
+        # é o que o suporte da Shopee pede (código + request_id), e nada nele
+        # é segredo (a chave e o code nunca entram no texto do erro).
+        await _registrar_erro_da_troca(session, rede_id, f"{motivo}: {e.texto()}")
+        return _volta("erro", motivo)
     except shopee_video_conta.ContaShopeeError as e:
         await session.rollback()
         logger.warning("shopee_video_autorizacao_recusada", rede_id=str(rede_id), code=e.code)
@@ -935,3 +1048,29 @@ async def shopee_callback(
     await session.commit()
     logger.info("shopee_video_autorizada", rede_id=str(rede_id))
     return _volta("ok")
+
+
+@router.post("/{rede_id}/shopee/liberar", response_model=RedeSocialOut)
+async def shopee_liberar(
+    rede_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(_edit)],
+) -> RedeSocialOut:
+    """Volta a conta BLOQUEADA a publicar: a pessoa resolveu fora o que a
+    Shopee recusou (aceitou os Termos do Shopee Vídeo, a Shopee liberou o
+    toggle, declarou o IP…). Não autoriza nada — conta com a autorização
+    vencida continua pedindo "autorizar de novo"."""
+    r = await _get_or_404(session, rede_id)
+    if r.plataforma != shopee_video.PLATAFORMA_SHOPEE:
+        raise HTTPException(422, detail={"code": "conta_nao_e_shopee"})
+    try:
+        await shopee_video_conta.liberar(session, r.id)
+    except shopee_video_conta.ContaShopeeError as e:
+        await session.rollback()
+        raise HTTPException(422, detail={"code": e.code}) from None
+    await session.commit()
+    logger.info("shopee_video_conta_liberada", rede_id=str(rede_id), user_id=str(user.id))
+    await session.refresh(r)
+    m = await _marca_or_404(session, r.marca_id)
+    tokens = await _tokens_por_rede(session, [r.id])
+    return rede_out(r, m, tokens.get(r.id), await _nomes_das_lojas(session, [r]))

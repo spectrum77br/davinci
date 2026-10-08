@@ -428,6 +428,16 @@ function redeOut(over = {}) {
     'autorizado · Barbosa')
   assert.match(H.shopeePillTexto({ shopee_app_configurado: true, has_token: true, token_status: 'expirado' }),
     /autorize de novo/)
+  // Bloqueada pela Shopee (Termos, toggle…): parada até alguém liberar.
+  assert.match(H.shopeePillTexto({ shopee_app_configurado: true, has_token: true, token_status: 'bloqueado' }),
+    /parada.*libere/)
+  assert.match(H.shopeePillClass({ shopee_app_configurado: true, has_token: true, token_status: 'bloqueado' }), /amber/)
+  // Os códigos novos do retorno dizem o que FAZER.
+  assert.match(H.shopeeRetorno({ shopee: 'erro', code: 'partner_e_da_integracao' }).texto, /INTEGRAÇÃO/)
+  assert.match(H.shopeeRetorno({ shopee: 'erro', code: 'partner_key_invalida' }).texto, /não confere/)
+  for (const c of ['partner_key_vencida', 'app_invalido', 'shopee_sem_resposta', 'loja_nao_confirmada', 'conta_shopee_reautorizar']) {
+    assert.ok(H.SHOPEE_ERROS[c], `mensagem para ${c}`)
+  }
   assert.match(H.shopeePillClass({ shopee_app_configurado: true, has_token: true }), /emerald/)
   assert.match(H.shopeePillClass({ shopee_app_configurado: true, has_token: false }), /amber/)
   assert.match(H.shopeePillClass(null), /bg-muted/)
@@ -458,6 +468,8 @@ function redeOut(over = {}) {
   assert.match(script, /\/shopee\/iniciar`, \{\s*\n?\s*method: 'POST'/, 'POST /{id}/shopee/iniciar')
   assert.match(tpl, /Loja Shopee \*/, 'select da loja no modal')
   assert.match(tpl, /Autorizar na Shopee/, 'botão de autorizar')
+  assert.match(tpl, /v-if="modal\.rede\.token_status === 'bloqueado'"[\s\S]{0,300}@click="liberarShopee"/, 'botão liberar só na bloqueada')
+  assert.match(tpl, /\{\{ modal\.rede\.token_erro \}\}/, 'o motivo da conta parada aparece')
 }
 
 // ---------------------------------------------------------------- script setup
@@ -477,7 +489,7 @@ const exportsForTest = `return {
   abrirConexao, fecharConexao, conectar, desconectar, tokenPillTexto, tokenPillTitle, postagemAutoOn,
   conexaoPlataformaLabel, contaExternaId,
   formDeLoja, redeDeLoja, lojasShopee, shopeeAut, partnerId, partnerKey, partnerKeyVisible, autorizando, shopeeAutErr,
-  abrirShopee, fecharShopee, autorizarShopee,
+  abrirShopee, fecharShopee, autorizarShopee, liberando, liberarShopee,
 }`
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor
 const factory = new AsyncFunction(
@@ -568,6 +580,13 @@ async function page({
     if (url === '/api/redes-sociais/grid') return Promise.resolve(gridOf(marcas, contas))
     if (url === '/api/redes-sociais/lojas-shopee') {
       return Promise.resolve([{ id: 'i-barbosa', nome: 'Barbosa', arquivada: false }])
+    }
+    if (/\/shopee\/liberar$/.test(url)) {
+      assert.equal(opts?.method, 'POST', 'liberar é POST')
+      const r = contas.find((x) => `/api/redes-sociais/${x.id}/shopee/liberar` === url)
+      assert.ok(r, `conta conhecida: ${url}`)
+      Object.assign(r, { token_status: 'ok', token_erro: null })
+      return Promise.resolve({ ...r })
     }
     if (/\/shopee\/iniciar$/.test(url)) {
       assert.equal(opts?.method, 'POST', 'iniciar é POST')
@@ -1237,6 +1256,36 @@ async function run() {
     const nada = await page()
     assert.equal(nada.avisos.length, 0)
     assert.equal(nada.replaces.length, 0)
+  }
+
+  // Conta PARADA pela Shopee: o motivo aparece e "liberar" pede confirmação.
+  {
+    const bloqueada = shopeeRede({
+      shopee_app_configurado: true, has_token: true, token_status: 'bloqueado',
+      token_erro: 'Shopee: a loja ainda não aceitou os Termos do Shopee Vídeo',
+    })
+    const { state: s, calls } = await page({ contas: [bloqueada], confirmAnswer: false })
+    s.openEdit(s.grid.value.rows[0].cells.shopee[0])
+    await s.liberarShopee()
+    assert.equal(calls.filter((c) => /\/shopee\/liberar$/.test(c.url)).length, 0, 'sem confirmar não libera')
+    const ok = await page({ contas: [{ ...bloqueada }] })
+    ok.state.openEdit(ok.state.grid.value.rows[0].cells.shopee[0])
+    await ok.state.liberarShopee()
+    assert.equal(ok.calls.filter((c) => /\/shopee\/liberar$/.test(c.url)).length, 1)
+    assert.equal(ok.state.modal.value.rede.token_status, 'ok')
+    assert.equal(ok.state.modal.value.rede.token_erro, null)
+    // Conta que não está bloqueada nem chama.
+    await ok.state.liberarShopee()
+    assert.equal(ok.calls.filter((c) => /\/shopee\/liberar$/.test(c.url)).length, 1)
+  }
+  // Só-view não libera.
+  {
+    const { state: s, calls } = await page({
+      canEdit: false, contas: [shopeeRede({ shopee_app_configurado: true, has_token: true, token_status: 'bloqueado' })],
+    })
+    s.openEdit(s.grid.value.rows[0].cells.shopee[0])
+    await s.liberarShopee()
+    assert.equal(calls.filter((c) => /\/shopee\/liberar$/.test(c.url)).length, 0)
   }
 
   // Desconectar uma conta da Shopee só com o app salvo (sem autorização).

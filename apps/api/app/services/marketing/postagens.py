@@ -267,6 +267,12 @@ def motivo_da_conta(
         # nenhum cron conserta — só autorizando de novo.
         if token.status == "expirado":
             return "conta_shopee_reautorizar"
+        # `bloqueado`: a Shopee recusou por algo que só gente resolve (Termos
+        # do Shopee Vídeo, toggle da API, permissão do app). Segue parada —
+        # robô E clique manual — até alguém liberar a conta na tela: cada
+        # tentativa subiria o vídeo inteiro só pra ouvir o mesmo "não".
+        if token.status == "bloqueado":
+            return "conta_shopee_bloqueada"
     # Interruptor por conta (`redes_sociais.postagem_auto`): vale pro que o
     # ROBÔ faz sozinho (agendamento). O clique manual do operador passa —
     # quem decidiu foi uma pessoa olhando o vídeo.

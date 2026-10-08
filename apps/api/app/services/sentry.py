@@ -97,6 +97,10 @@ def init_sentry(*, component: str) -> bool:
             "input_token",
             "page_access_token",
             "page_token",
+            # Shopee Vídeo: a chave do app de vídeo entra pelo body do
+            # POST /redes-sociais/{id}/shopee/iniciar. Com ela (e o
+            # partner_id, que é público) dá pra assinar chamadas do app.
+            "partner_key",
         ],
         recursive=True,
     )

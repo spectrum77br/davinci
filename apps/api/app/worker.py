@@ -1320,6 +1320,12 @@ async def marketing_postagens_publicar(ctx: dict) -> None:
             }
             for p in fila
         ]
+        # Shopee Vídeo por ÚLTIMO (sort estável: IG/FB/YT mantêm a ordem do
+        # lease). A máquina da Shopee é retomável e pode esperar a
+        # transcodificação dela dentro do tique; na frente, essa espera
+        # seguraria o Reel das outras contas da marca — que caem na mesma
+        # grade das 12h/19h.
+        alvos.sort(key=lambda a: a["plataforma"] == _postagens.PLATAFORMA_SHOPEE)
         publicadas = secas = falhas = adiadas = 0
         # Orçamento do tick: o job tem 1200s no cron, e um Reel sozinho pode
         # levar 600s de upload + 300s de poll. Passado o teto, o que ainda NÃO
@@ -1330,11 +1336,28 @@ async def marketing_postagens_publicar(ctx: dict) -> None:
         for indice, alvo in enumerate(alvos):
             conta = alvo["conta"]
             if datetime.now(UTC) - comeco > orcamento:
+                restantes = alvos[indice:]
                 await _postagens.devolver_para_fila(
                     s,
-                    [a["id"] for a in alvos[indice:]],
+                    [
+                        a["id"]
+                        for a in restantes
+                        if a["plataforma"] != _postagens.PLATAFORMA_SHOPEE
+                    ],
                     motivo="a fila do minuto encheu — volta no próximo ciclo",
                 )
+                # A linha da Shopee retomada tem `container_id` (o upload em
+                # andamento), e o `devolver_para_fila` genérico não toca em
+                # linha com container: ela ficaria `publicando` até o
+                # reconciliador. Volta pela própria máquina, sem chamar a
+                # Shopee e com o progresso intacto.
+                from app.services.marketing import shopee_video_publicador
+
+                for a in restantes:
+                    if a["plataforma"] == _postagens.PLATAFORMA_SHOPEE:
+                        await shopee_video_publicador.devolver(
+                            s, a["id"], "a fila do minuto encheu — continua no próximo ciclo"
+                        )
                 break
             try:
                 # AGENDAR NÃO É AUTORIZAR PRA SEMPRE. Entre o agendamento e
@@ -1352,6 +1375,19 @@ async def marketing_postagens_publicar(ctx: dict) -> None:
                     adiadas += 1
                     continue
                 if motivo:
+                    if alvo["plataforma"] == _postagens.PLATAFORMA_SHOPEE:
+                        # A da Shopee pode estar no meio do caminho (upload
+                        # feito, rascunho pronto na loja): fecha pela máquina,
+                        # que apaga o rascunho órfão e zera o container — sem
+                        # isso o "tentar de novo" ficaria travado e o rascunho
+                        # sobraria na Shopee.
+                        from app.services.marketing import shopee_video_publicador
+
+                        await shopee_video_publicador.recusar(
+                            s, alvo["id"], f"não pôde publicar em {conta}: {motivo}"
+                        )
+                        falhas += 1
+                        continue
                     await _postagens.registrar_resultado(
                         s,
                         alvo["id"],
@@ -1400,8 +1436,17 @@ async def marketing_postagens_publicar(ctx: dict) -> None:
                     # passa pelo token genérico abaixo.
                     from app.services.marketing import shopee_video_publicador
 
+                    # O que sobra do orçamento do minuto, no máximo o teto da
+                    # máquina: ela espera a Shopee só dentro disso e devolve a
+                    # linha pra fila (o próximo tique continua).
+                    sobra = (orcamento - (datetime.now(UTC) - comeco)).total_seconds()
                     acao = await shopee_video_publicador.publicar_postagem(
-                        s, alvo["id"], caminho
+                        s,
+                        alvo["id"],
+                        caminho,
+                        orcamento_s=max(
+                            0.0, min(shopee_video_publicador.ORCAMENTO_TICK_S, sobra)
+                        ),
                     )
                     if acao == shopee_video_publicador.PUBLICADO:
                         publicadas += 1

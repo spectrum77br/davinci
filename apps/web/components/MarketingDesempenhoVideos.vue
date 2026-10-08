@@ -17,7 +17,7 @@ import { AlertTriangle, ChevronRight, Clock, ExternalLink, EyeOff, Info, X } fro
 import { apiErrMsg } from '~/lib/apiError'
 import {
   ERROS_DESEMPENHO, ROTULO_REDE, SIGLA_REDE,
-  celula, corRede, ddmm, fmtViews, frescor, geomCurva, hhmm, num, pct, qtd, redesDaTabela, sinal,
+  celula, colunasDaGrade, corRede, ddmm, fmtViews, frescor, geomCurva, hhmm, num, pct, qtd, redesDaTabela, sinal,
   type Celula, type CriativoDesempenho, type PostagemDesempenho,
 } from '~/utils/desempenho'
 
@@ -57,8 +57,15 @@ const GRADE = {
     celular: 'xl:hidden',
     tela: 'hidden xl:block',
   },
+  // Facebook E Shopee Vídeo com post: cinco colunas, um pouco mais estreitas.
+  5: {
+    cab: 'hidden xl:grid xl:grid-cols-[minmax(0,1fr)_repeat(5,7.5rem)_5rem]',
+    linha: 'xl:grid xl:grid-cols-[minmax(0,1fr)_repeat(5,7.5rem)_5rem] xl:gap-x-3',
+    celular: 'xl:hidden',
+    tela: 'hidden xl:block',
+  },
 }
-const grade = computed(() => GRADE[redes.value.length > 3 ? 4 : 3])
+const grade = computed(() => GRADE[colunasDaGrade(redes.value)])
 
 type Coluna = { rede: string; post?: PostagemDesempenho; extra: number; cel: Celula }
 type Linha = {

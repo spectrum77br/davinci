@@ -16,7 +16,9 @@ O que fica EM CLARO na linha, pra tela e pros crons não decifrarem nada:
   • `token_expires_at` = validade do REFRESH (30 dias, recarimbada a cada
     renovação) — nunca a do access de 4 h. É o que o `meta_token_refresh`
     varre pra avisar os admins quando a cadeia estiver pra morrer.
-  • `status`: pendente | ok | expirado (a cadeia morreu: autorizar de novo).
+  • `status`: pendente | ok | expirado (a cadeia morreu: autorizar de novo)
+    | bloqueado (a Shopee recusou por algo que só gente resolve: o robô para
+    até alguém liberar a conta na tela).
 
 O cuidado que atravessa o arquivo: **o refresh token é de USO ÚNICO**.
 Renovou, o velho morre. Por isso a renovação acontece numa SESSÃO PRÓPRIA,
@@ -36,7 +38,7 @@ from typing import Any
 from uuid import UUID
 
 import structlog
-from sqlalchemy import select, update
+from sqlalchemy import case, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import app.db as _db
@@ -53,6 +55,14 @@ logger = structlog.get_logger()
 STATUS_PENDENTE = "pendente"
 STATUS_OK = "ok"
 STATUS_EXPIRADO = "expirado"
+# A Shopee recusou por algo que só GENTE resolve fora do DaVinci (Termos do
+# Shopee Vídeo não aceitos, conta fora do "toggle" da API, app sem permissão,
+# IP não declarado, assinatura recusada). A autorização continua viva — a
+# cadeia de tokens segue sendo renovada —, mas o robô não agenda nem publica
+# nesta conta até alguém LIBERAR (ou autorizar de novo). Sem isto cada vaga
+# da grade subiria um vídeo inteiro só pra ouvir o mesmo "não", e o vídeo
+# sairia da fila do robô naquela conta.
+STATUS_BLOQUEADO = "bloqueado"
 
 # Refresh token: 30 dias, uso único. Access token: 4 h; renova quando faltam
 # menos de 5 min (o velho ainda vale 5 min depois do novo nascer).
@@ -73,6 +83,10 @@ _REAUTORIZAR = (
     "no linked",
     "error_auth",
     "invalid_code",
+    # A autorização (até 365 dias) venceu: `shop_access_expired` na loja, e o
+    # mesmo padrão `*_access_expired` no user_id. NÃO "expired" sozinho, que
+    # casaria com "Timestamp is expired." — relógio, não autorização.
+    "access_expired",
 )
 
 
@@ -207,7 +221,9 @@ async def salvar_partner(
     return tok
 
 
-def escolher_user_id(resposta: dict[str, Any], shop_id_esperado: int) -> tuple[int, int]:
+def escolher_user_id(
+    resposta: dict[str, Any], shop_id_esperado: int, *, loja_confirmada: bool = False
+) -> tuple[int, int]:
     """(user_id, shop_id) da loja certa na resposta do `token/get`.
 
     "The shop_id_list and user_id_list are in a one-to-one order" (guia 669):
@@ -215,6 +231,11 @@ def escolher_user_id(resposta: dict[str, Any], shop_id_esperado: int) -> tuple[i
     integração ligada à conta — outra loja na lista quer dizer que alguém
     entrou na Shopee com o login errado, e publicar na loja errada não tem
     desfazer.
+
+    `loja_confirmada`: o retorno da Shopee trouxe `shop_id` e ele É o da
+    integração. Só com essa prova uma resposta SEM `shop_id_list` é aceita —
+    no caminho da conta principal (`main_account_id`) nada mais diz de que
+    loja é o user_id, e gravar o token de outra loja publicaria nela.
     """
     lojas = [_int(x) for x in (resposta.get("shop_id_list") or [])]
     usuarios = [_int(x) for x in (resposta.get("user_id_list") or [])]
@@ -238,7 +259,14 @@ def escolher_user_id(resposta: dict[str, Any], shop_id_esperado: int) -> tuple[i
                 "a autorização trouxe a loja mas não o user_id dela",
             )
         return int(usuarios[i]), shop_id_esperado
-    # Sem lista de lojas: só aceita quando há UM usuário e nenhuma dúvida.
+    # Sem lista de lojas: só aceita quando o retorno PROVOU a loja e há UM
+    # usuário — sem dúvida nenhuma.
+    if not loja_confirmada:
+        raise ContaShopeeError(
+            "loja_nao_confirmada",
+            "a Shopee não confirmou de que loja é esta autorização — autorize de novo "
+            "entrando com o login principal da loja (não pela conta principal)",
+        )
     unicos = [u for u in usuarios if u]
     if len(unicos) != 1:
         raise ContaShopeeError(
@@ -363,9 +391,14 @@ async def credencial(
                     request_id=e.request_id,
                 )
                 raise ReautorizarError("conta_shopee_reautorizar", MSG_REAUTORIZAR) from None
-            tok.last_error = f"renovação do token da Shopee falhou: {e.texto()}"[:500]
+            falha = f"renovação do token da Shopee falhou: {e.texto()}"[:500]
+            if tok.status != STATUS_BLOQUEADO:
+                # Conta bloqueada guarda o MOTIVO do bloqueio (é o que a tela
+                # mostra pra pessoa resolver) — um soluço da renovação não o
+                # apaga.
+                tok.last_error = falha
             await s.commit()
-            raise ContaShopeeError("renovacao_falhou", tok.last_error) from None
+            raise ContaShopeeError("renovacao_falhou", falha) from None
         novo_access = str(resp.get("access_token") or "").strip()
         novo_refresh = str(resp.get("refresh_token") or "").strip()
         if not novo_access or not novo_refresh:
@@ -379,8 +412,11 @@ async def credencial(
         )
         tok.token_enc = encrypt_json(blob)
         tok.token_expires_at = agora + VALIDADE_REFRESH
-        tok.status = STATUS_OK
-        tok.last_error = None
+        if tok.status != STATUS_BLOQUEADO:
+            # Renovar a cadeia NÃO libera a conta bloqueada: o que a bloqueou
+            # (Termos, toggle, permissão) não tem nada a ver com o token.
+            tok.status = STATUS_OK
+            tok.last_error = None
         try:
             # ANTES de usar: o refresh velho já morreu na Shopee.
             await s.commit()
@@ -409,22 +445,70 @@ async def registrar_saude(rede_social_id: UUID, *, erro: str | None) -> None:
     """`last_ok_at`/`last_error` da linha (o que a tela mostra), numa sessão
     própria e só nessas colunas — nunca reescreve o blob."""
     agora = datetime.now(UTC)
-    valores: dict[str, Any] = (
-        {"last_error": erro[:500]} if erro else {"last_ok_at": agora, "last_error": None}
-    )
-    async with _db.SessionLocal() as s:
-        await s.execute(
-            update(RedeSocialToken)
-            .where(RedeSocialToken.rede_social_id == rede_social_id)
-            .values(**valores)
+    q = update(RedeSocialToken).where(RedeSocialToken.rede_social_id == rede_social_id)
+    # Conta bloqueada/expirada guarda em `last_error` o MOTIVO de estar
+    # parada — é o que a tela mostra pra pessoa resolver. O erro de uma
+    # postagem (ou o sucesso de outra) não o apaga.
+    parada = RedeSocialToken.status.in_((STATUS_BLOQUEADO, STATUS_EXPIRADO))
+    if erro:
+        q = q.where(~parada).values(last_error=erro[:500])
+    else:
+        q = q.values(
+            last_ok_at=agora,
+            last_error=case((parada, RedeSocialToken.last_error), else_=None),
         )
+    async with _db.SessionLocal() as s:
+        await s.execute(q)
         await s.commit()
+
+
+async def bloquear(rede_social_id: UUID, *, motivo: str, reautorizar: bool = False) -> None:
+    """Para a conta: a Shopee recusou por algo que só gente resolve.
+
+    `reautorizar` (autorização desfeita, conta suspensa, partner_key vencida)
+    vira `expirado` — a tela pede autorizar de novo. O resto vira `bloqueado`,
+    com o motivo em `last_error`. Sessão própria e só estas colunas: o
+    publicador chama no meio de uma linha, e o blob nunca é reescrito aqui.
+    Nunca rebaixa um `expirado` pra `bloqueado` (o expirado pede mais)."""
+    status = STATUS_EXPIRADO if reautorizar else STATUS_BLOQUEADO
+    q = update(RedeSocialToken).where(RedeSocialToken.rede_social_id == rede_social_id)
+    if not reautorizar:
+        q = q.where(RedeSocialToken.status != STATUS_EXPIRADO)
+    async with _db.SessionLocal() as s:
+        await s.execute(q.values(status=status, last_error=f"Shopee: {motivo}"[:500]))
+        await s.commit()
+    logger.warning(
+        "shopee_video_conta_bloqueada", rede_social_id=str(rede_social_id), status=status
+    )
+
+
+async def liberar(session: AsyncSession, rede_social_id: UUID) -> RedeSocialToken:
+    """Uma pessoa resolveu o que bloqueou a conta (aceitou os Termos, a Shopee
+    liberou o toggle…) e manda o robô voltar. Só desfaz o `bloqueado` — o
+    `expirado` precisa de autorização nova, e liberar não a inventa. Não
+    comita (o router comita com o log dele)."""
+    tok = await _token_da_rede(session, rede_social_id, travar=True)
+    if tok is None or not autorizada(tok):
+        raise ContaShopeeError(
+            "conta_sem_autorizacao_shopee",
+            "a loja ainda não autorizou o app de vídeo — clique em Autorizar na Shopee",
+        )
+    if tok.status == STATUS_EXPIRADO:
+        raise ReautorizarError("conta_shopee_reautorizar", MSG_REAUTORIZAR)
+    if tok.status == STATUS_BLOQUEADO:
+        tok.status = STATUS_OK
+        tok.last_error = None
+    return tok
 
 
 async def renovar_todas(*, agora: datetime | None = None) -> dict[str, int]:
     """Cron diário: renova a cadeia das contas autorizadas que faltam menos
     de 20 dias pro refresh vencer. Sem post nenhum, a cadeia nunca chega ao
-    fim (30 dias) — e com post ela já renova sozinha a cada uso."""
+    fim (30 dias) — e com post ela já renova sozinha a cada uso.
+
+    A conta BLOQUEADA também renova: o bloqueio (toggle da Shopee, Termos)
+    pode levar semanas pra resolver, e deixar a cadeia morrer nesse meio-tempo
+    obrigaria a autorizar de novo além de liberar."""
     agora = agora or datetime.now(UTC)
     async with _db.SessionLocal() as s:
         ids = (
@@ -432,7 +516,7 @@ async def renovar_todas(*, agora: datetime | None = None) -> dict[str, int]:
                 await s.execute(
                     select(RedeSocialToken.rede_social_id).where(
                         RedeSocialToken.provedor == PROVEDOR_SHOPEE,
-                        RedeSocialToken.status == STATUS_OK,
+                        RedeSocialToken.status.in_((STATUS_OK, STATUS_BLOQUEADO)),
                         RedeSocialToken.external_user_id.isnot(None),
                         RedeSocialToken.token_enc.isnot(None),
                         RedeSocialToken.token_expires_at.isnot(None),

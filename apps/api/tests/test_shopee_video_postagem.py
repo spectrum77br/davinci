@@ -25,8 +25,10 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
-from sqlalchemy import select
+import respx
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
@@ -48,10 +50,18 @@ from app.models import (
 from app.security.cipher import encrypt_json
 from app.services.marketing import autopostagem
 from app.services.marketing import postagens as svc
+from app.services.marketing import shopee_video as sv
 from app.services.marketing import shopee_video_anuncio as anuncio
 from app.services.marketing import shopee_video_conta as conta
 from app.services.marketing import shopee_video_publicador as pub
-from app.services.marketing.shopee_video import ShopeeVideoError, ShopeeVideoRedeError
+from app.services.marketing.shopee_video import (
+    ShopeeVideoAmbiguoError,
+    ShopeeVideoError,
+    ShopeeVideoRedeError,
+)
+
+# A conferência ao vivo de verdade (o shopee fixture a troca por um dublê).
+_CONFERIR_REAL = anuncio.conferir_ao_vivo
 
 pytestmark = pytest.mark.asyncio
 
@@ -289,16 +299,38 @@ async def test_dedicado_ganha_da_vitrine_mesmo_com_menos_estoque(db, make_user):
     assert r.estoque == 56
 
 
-async def test_nunca_kit_e_dois_skus_no_mesmo_anuncio_valem(db, make_user):
+async def test_s5_so_tem_anuncio_proprio_em_kit_nao_cai_na_vitrine_do_a17(db, make_user):
+    """O retrato real da Barbosa (dados.md): o anúncio PRÓPRIO do S5/A18
+    (58266122162, 2 bases) é KIT, e o único avulso que carrega o S5 é o "A17
+    Pro Max" (22499563693), que mistura dois aparelhos. Vincular o vídeo do S5
+    ao anúncio do A17 é o "irrelevante" que a Shopee apaga (e tira ponto da
+    conta) — o vídeo não sai nesta loja, nem o kit é vinculado."""
     user = await make_user()
     integ = await _cenario_barbosa(db, user)
     marca = await _marca(db)
     rede = await _conta_shopee(db, marca, integ)
-    c, _ = await _criativo(db, marca, sku="dg089.ci, dg088.ci")
+    for sku in ("dg089.ci, dg088.ci", "dg088.ci"):
+        c, _ = await _criativo(db, marca, sku=sku, nome=f"{sku[:5]}.mp4")
+        assert await anuncio.anuncio_para(db, c, rede) == anuncio.SO_KIT, sku
+
+
+async def test_dois_skus_no_mesmo_avulso_valem_e_kit_menos_especifico_nao_atrapalha(db, make_user):
+    """O F112 tem várias cores (bases) no MESMO avulso dedicado: o vídeo com
+    duas cores vale e cai nele. Um kit do aparelho que é TÃO vitrine quanto
+    (ou mais) não muda nada — e nunca é o vinculado."""
+    user = await make_user()
+    integ = await _loja(db, user)
+    for sku in ("dg082.ra", "dg084.ra", "dg085.ra"):
+        await _link(db, user, integ, item="58208057789", sku=sku, estoque=20)
+    for sku in ("dg082.ra+a001.ci", "dg084.ra+a001.ci", "dg085.ra+a001.ci", "dg086.ra+a001.ci"):
+        await _link(db, user, integ, item="777", sku=sku, estoque=50)
+    marca = await _marca(db)
+    rede = await _conta_shopee(db, marca, integ)
+    c, _ = await _criativo(db, marca, sku="dg082.ra, dg084.ra")
     r = await anuncio.anuncio_para(db, c, rede)
     assert isinstance(r, anuncio.AnuncioEscolhido), r
-    assert r.item_id == 22499563693  # o avulso — nunca o kit 58266122162
-    assert r.skus == ["dg089.ci", "dg088.ci"]
+    assert r.item_id == 58208057789
+    assert r.skus == ["dg082.ra", "dg084.ra"]
 
 
 async def test_so_kit_na_loja_recusa(db, make_user):
@@ -553,6 +585,7 @@ class ShopeeFake:
         self.detalhe_resposta: dict[str, Any] = {"status": 300}
         self.lista_resposta: dict[str, Any] = {"list": [], "has_more": False}
         self.editado: dict[str, Any] = {}
+        self.apagados: list[str] = []
         self._token = TOKEN_FALSO
 
     async def iniciar_upload(self, *, file_name, file_size, duracao_s):
@@ -609,6 +642,10 @@ class ShopeeFake:
         self.chamadas.append("lista")
         return dict(self.lista_resposta)
 
+    async def apagar_rascunho(self, vid):
+        self.chamadas.append("apagar")
+        self.apagados.append(vid)
+
 
 @pytest.fixture
 def shopee(monkeypatch):
@@ -642,6 +679,17 @@ async def _sem_espera(_s: float) -> None:
     return None
 
 
+# Orçamento folgado: o tique inteiro (subir → capa → rascunho → postar) cabe
+# num só. O de produção (50 s) não espera os 65 s das capas — vira 2 tiques.
+FOLGA = 600.0
+
+
+async def _tique(db, pid, caminho, **kw):
+    return await pub.publicar_postagem(
+        db, pid, caminho, dormir=_sem_espera, **{"orcamento_s": FOLGA, **kw}
+    )
+
+
 async def _postagem_publicando(db, make_user, *, legenda="F110L na lama #uranyx"):
     user = await make_user()
     integ = await _cenario_barbosa(db, user)
@@ -667,7 +715,7 @@ async def _relida(db: AsyncSession, pid) -> MarketingPostagem:
 
 async def test_caminho_feliz_num_tique(db, make_user, shopee):
     p, caminho, _rede = await _postagem_publicando(db, make_user)
-    acao = await pub.publicar_postagem(db, p.id, caminho, dormir=_sem_espera)
+    acao = await _tique(db, p.id, caminho)
     assert acao == pub.PUBLICADO
     linha = await _relida(db, p.id)
     assert linha.status == "publicado"
@@ -691,7 +739,7 @@ async def test_caminho_feliz_num_tique(db, make_user, shopee):
 async def test_processando_devolve_pra_fila_e_continua_sem_subir_de_novo(db, make_user, shopee):
     p, caminho, _rede = await _postagem_publicando(db, make_user)
     shopee.status_upload = ["PROCESSING"]
-    acao = await pub.publicar_postagem(db, p.id, caminho, dormir=_sem_espera, orcamento_s=0)
+    acao = await _tique(db, p.id, caminho, orcamento_s=25)
     assert acao == pub.AGUARDANDO
     linha = await _relida(db, p.id)
     assert linha.status == "pendente"
@@ -702,7 +750,7 @@ async def test_processando_devolve_pra_fila_e_continua_sem_subir_de_novo(db, mak
     shopee.status_upload = ["SUCCEEDED"]
     (lease,) = await svc.proximas_para_publicar(db)
     assert lease.id == p.id
-    acao = await pub.publicar_postagem(db, p.id, caminho, dormir=_sem_espera)
+    acao = await _tique(db, p.id, caminho)
     assert acao == pub.PUBLICADO
     assert shopee.chamadas.count("init") == 1
 
@@ -710,7 +758,7 @@ async def test_processando_devolve_pra_fila_e_continua_sem_subir_de_novo(db, mak
 async def test_post_sem_resposta_vai_pra_revisar_e_reconciliador_confirma(db, make_user, shopee):
     p, caminho, _rede = await _postagem_publicando(db, make_user)
     shopee.erro_postar = [ShopeeVideoRedeError("sem_resposta", "ReadTimeout")]
-    acao = await pub.publicar_postagem(db, p.id, caminho, dormir=_sem_espera)
+    acao = await _tique(db, p.id, caminho)
     assert acao == pub.REVISAR
     linha = await _relida(db, p.id)
     assert linha.status == "revisar"
@@ -731,14 +779,28 @@ async def test_post_sem_resposta_vai_pra_revisar_e_reconciliador_confirma(db, ma
     assert shopee.chamadas.count("init") == 1
 
 
-async def test_rascunho_que_nao_saiu_fica_em_revisar_com_frase_clara(db, make_user, shopee):
+async def test_rascunho_que_nao_saiu_volta_pra_postar_o_mesmo_rascunho(db, make_user, shopee):
+    """O post não respondeu e o reconciliador acha o vídeo ainda RASCUNHO: a
+    linha volta pra fila na etapa de postar, com o MESMO video_upload_id — e
+    nunca pede "publique de novo" (que subiria outro vídeo)."""
     p, caminho, _rede = await _postagem_publicando(db, make_user)
     shopee.erro_postar = [ShopeeVideoRedeError("sem_resposta", "ReadTimeout")]
-    await pub.publicar_postagem(db, p.id, caminho, dormir=_sem_espera)
+    await _tique(db, p.id, caminho)
     shopee.detalhe_resposta = {"status": 200}
-    assert await pub.reconciliar(db, p.id) == pub.REVISAR
+    assert await pub.reconciliar(db, p.id) == pub.AGUARDANDO
     linha = await _relida(db, p.id)
-    assert "RASCUNHO" in linha.result
+    assert linha.status == "pendente" and linha.container_id == "br-1"
+    prog = linha.opcoes["shopee"]["progresso"]
+    assert prog["etapa"] == "postar" and prog["video_upload_id"] == "br-1"
+    assert prog["post_recusado"] is True and prog["post_chamado_em"]
+    assert "publique de novo" not in linha.result.lower()
+    # O próximo tique publica o MESMO rascunho: nada de subir de novo.
+    (lease,) = await svc.proximas_para_publicar(db)
+    assert lease.id == p.id
+    assert await _tique(db, p.id, caminho) == pub.PUBLICADO
+    assert shopee.chamadas.count("init") == 1
+    assert shopee.chamadas.count("postar") == 2
+    assert (await _relida(db, p.id)).post_external_id == "POST-ID-1=="
 
 
 @pytest.mark.parametrize(
@@ -761,7 +823,7 @@ async def test_erro_que_so_gente_resolve_vira_frase_e_nao_volta(
 ):
     p, caminho, _rede = await _postagem_publicando(db, make_user)
     shopee.erro_postar = [erro]
-    acao = await pub.publicar_postagem(db, p.id, caminho, dormir=_sem_espera)
+    acao = await _tique(db, p.id, caminho)
     assert acao == pub.FALHOU
     linha = await _relida(db, p.id)
     assert linha.status == "falhou"
@@ -779,7 +841,7 @@ async def test_post_ja_feito_no_tique_que_morreu_vira_publicado(db, make_user, s
         ShopeeVideoError("batch_process_failed", "task can not be process under the current status")
     ]
     shopee.detalhe_resposta = {"status": 300, "post_id": "JA-SAIU"}
-    assert await pub.publicar_postagem(db, p.id, caminho, dormir=_sem_espera) == pub.PUBLICADO
+    assert await _tique(db, p.id, caminho) == pub.PUBLICADO
     assert (await _relida(db, p.id)).post_external_id == "JA-SAIU"
 
 
@@ -788,7 +850,7 @@ async def test_anuncio_sem_estoque_ao_vivo_nao_posta(db, make_user, shopee):
     shopee.conferencia = anuncio.Conferencia(
         ok=False, motivo="anúncio 58262693089 está sem estoque na Shopee"
     )
-    acao = await pub.publicar_postagem(db, p.id, caminho, dormir=_sem_espera)
+    acao = await _tique(db, p.id, caminho)
     assert acao == pub.FALHOU
     assert "postar" not in shopee.chamadas and "editar" not in shopee.chamadas
     assert "sem estoque" in (await _relida(db, p.id)).result
@@ -797,7 +859,7 @@ async def test_anuncio_sem_estoque_ao_vivo_nao_posta(db, make_user, shopee):
 async def test_token_recusado_renova_uma_vez_e_segue(db, make_user, shopee):
     p, caminho, _rede = await _postagem_publicando(db, make_user)
     shopee.erro_editar = [ShopeeVideoError("error_auth", "Invalid access_token")]
-    assert await pub.publicar_postagem(db, p.id, caminho, dormir=_sem_espera) == pub.PUBLICADO
+    assert await _tique(db, p.id, caminho) == pub.PUBLICADO
     assert TOKEN_FALSO in shopee.recusados  # pediu a renovação COM o token recusado
     assert shopee.chamadas.count("editar") == 2
 
@@ -805,7 +867,7 @@ async def test_token_recusado_renova_uma_vez_e_segue(db, make_user, shopee):
 async def test_transcodificacao_recusada_falha_sem_ambiguo(db, make_user, shopee):
     p, caminho, _rede = await _postagem_publicando(db, make_user)
     shopee.status_upload = ["FAILED"]
-    assert await pub.publicar_postagem(db, p.id, caminho, dormir=_sem_espera) == pub.FALHOU
+    assert await _tique(db, p.id, caminho) == pub.FALHOU
     linha = await _relida(db, p.id)
     assert "recusou o vídeo" in linha.result and linha.container_id is None
 
@@ -813,7 +875,7 @@ async def test_transcodificacao_recusada_falha_sem_ambiguo(db, make_user, shopee
 async def test_capa_ainda_nao_pronta_espera(db, make_user, shopee):
     p, caminho, _rede = await _postagem_publicando(db, make_user)
     shopee.capas_respostas = [ShopeeVideoError("error_param", "upload video less than 1 min")]
-    acao = await pub.publicar_postagem(db, p.id, caminho, dormir=_sem_espera, orcamento_s=0)
+    acao = await _tique(db, p.id, caminho, orcamento_s=25)
     assert acao == pub.AGUARDANDO
     assert (await _relida(db, p.id)).opcoes["shopee"]["progresso"]["etapa"] == "capa"
 
@@ -821,11 +883,22 @@ async def test_capa_ainda_nao_pronta_espera(db, make_user, shopee):
 async def test_worker_morto_antes_do_post_volta_pra_fila(db, make_user, shopee):
     p, caminho, _rede = await _postagem_publicando(db, make_user)
     shopee.status_upload = ["PROCESSING"]
-    await pub.publicar_postagem(db, p.id, caminho, dormir=_sem_espera, orcamento_s=0)
+    await _tique(db, p.id, caminho, orcamento_s=25)
     # Simula o lease seguinte morrendo no meio: linha `publicando`, sem post.
     (lease,) = await svc.proximas_para_publicar(db)
+    # Com menos de 25 min o tique que pegou a linha pode estar vivo (o cron
+    # tem timeout de 1200 s): o reconciliador não mexe.
     assert await pub.reconciliar(db, lease.id) == pub.AGUARDANDO
-    assert (await _relida(db, p.id)).status == "pendente"
+    assert (await _relida(db, p.id)).status == "publicando"
+    await db.execute(
+        update(MarketingPostagem)
+        .where(MarketingPostagem.id == p.id)
+        .values(claimed_at=datetime.now(UTC) - timedelta(minutes=26))
+    )
+    await db.commit()
+    assert await pub.reconciliar(db, lease.id) == pub.AGUARDANDO
+    linha = await _relida(db, p.id)
+    assert linha.status == "pendente" and linha.container_id == "br-1"
 
 
 async def test_worker_publica_shopee_pelo_tique(db, make_user, shopee, monkeypatch):
@@ -898,3 +971,726 @@ async def test_metricas_da_shopee_pela_lista_e_apagado_vira_removido(db, make_us
     assert (no_ar.views, no_ar.curtidas, no_ar.comentarios) == (120, 7, 2)
     assert no_ar.compartilhamentos is None and no_ar.erro is None
     assert metricas.foi_removido(por_post["P-APAGADO"].erro)
+
+
+# ═══════════════════════════════════════ correções da revisão (08/10/2026)
+
+
+async def _token_da_conta(db: AsyncSession, rede_id) -> RedeSocialToken:
+    return (
+        await db.execute(
+            select(RedeSocialToken)
+            .where(RedeSocialToken.rede_social_id == rede_id)
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one()
+
+
+# ─────────────────────── o lote que falha, pelo cliente HTTP DE VERDADE
+
+
+@pytest.fixture
+def shopee_http(monkeypatch):
+    """Credencial e conferência de anúncio dubladas, mas o cliente de vídeo é o
+    de verdade: a Shopee responde por respx no formato REAL (corpo do lote)."""
+
+    async def credencial(rede_social_id, *, recusado=None, forcar=False, agora=None):
+        return conta.Credencial(
+            rede_social_id, 2047721, CHAVE_FALSA, TOKEN_FALSO, USER_SHOPEE, SHOP_ID, 0
+        )
+
+    async def conferir(_s, _integ, item_id):
+        return anuncio.Conferencia(ok=True, status="NORMAL", estoque=26)
+
+    monkeypatch.setattr(conta, "credencial", credencial)
+    monkeypatch.setattr(anuncio, "conferir_ao_vivo", conferir)
+
+
+def _ok_http(resp: dict | None = None) -> httpx.Response:
+    return httpx.Response(
+        200, json={"error": "", "message": "", "request_id": "rq", "response": resp or {}}
+    )
+
+
+def _lote_falho_http(motivo: str) -> httpx.Response:
+    return httpx.Response(
+        200,
+        json={
+            "error": "batch_process_failed",
+            "message": "Please check failure_list for detailed reason",
+            "request_id": "rq-lote",
+            "response": {
+                "success_list": [],
+                "failure_list": [{"fail_video_upload_id": "br-1", "failed_reason": motivo}],
+            },
+        },
+    )
+
+
+def _shopee_ate_o_rascunho() -> dict[str, Any]:
+    h = sv.API_HOST
+    return {
+        "init": respx.post(f"{h}{sv.PATH_INIT}").mock(
+            return_value=_ok_http({"video_upload_id": "br-1", "part_size": 1024})
+        ),
+        "parte": respx.post(f"{h}{sv.PATH_PARTE}").mock(return_value=_ok_http()),
+        "concluir": respx.post(f"{h}{sv.PATH_CONCLUIR}").mock(return_value=_ok_http()),
+        "resultado": respx.get(f"{h}{sv.PATH_RESULTADO}").mock(
+            return_value=_ok_http({"status": "SUCCEEDED", "video_info": {"duration": 24}})
+        ),
+        "capas": respx.get(f"{h}{sv.PATH_CAPAS}").mock(
+            return_value=_ok_http({"image_url_list": ["https://img/1"]})
+        ),
+    }
+
+
+@respx.mock
+async def test_post_ja_feito_pelo_corpo_real_do_lote_vira_publicado(db, make_user, shopee_http):
+    """O `post_video` volta `batch_process_failed` no topo, com "current
+    status" SÓ na failure_list: a conferência pelo detalhe roda e acha o post
+    no ar — nada de `falhou` (que liberaria subir e postar de novo)."""
+    p, caminho, _rede = await _postagem_publicando(db, make_user)
+    rotas = _shopee_ate_o_rascunho()
+    respx.post(f"{sv.API_HOST}{sv.PATH_EDITAR}").mock(
+        return_value=_ok_http({"success_list": ["br-1"], "failure_list": []})
+    )
+    postar = respx.post(f"{sv.API_HOST}{sv.PATH_POSTAR}").mock(
+        return_value=_lote_falho_http("task can not be process under the current status")
+    )
+    detalhe = respx.get(f"{sv.API_HOST}{sv.PATH_DETALHE}").mock(
+        return_value=_ok_http({"status": 300, "post_id": "JA-NO-AR=="})
+    )
+    assert await _tique(db, p.id, caminho) == pub.PUBLICADO
+    linha = await _relida(db, p.id)
+    assert linha.status == "publicado" and linha.post_external_id == "JA-NO-AR=="
+    assert postar.call_count == 1 and detalhe.call_count == 1
+    assert rotas["init"].call_count == 1
+
+
+@respx.mock
+async def test_please_retry_pelo_corpo_real_repete_o_edit_uma_vez(db, make_user, shopee_http):
+    p, caminho, _rede = await _postagem_publicando(db, make_user)
+    _shopee_ate_o_rascunho()
+    editar = respx.post(f"{sv.API_HOST}{sv.PATH_EDITAR}").mock(
+        side_effect=[
+            _lote_falho_http("can not edit video info,please retry"),
+            _ok_http({"success_list": ["br-1"], "failure_list": []}),
+        ]
+    )
+    respx.post(f"{sv.API_HOST}{sv.PATH_POSTAR}").mock(
+        return_value=_ok_http(
+            {
+                "success_list": [{"success_video_upload_id": "br-1", "post_id": "P1"}],
+                "failure_list": [],
+            }
+        )
+    )
+    respx.get(f"{sv.API_HOST}{sv.PATH_DETALHE}").mock(return_value=_ok_http({"status": 300}))
+    assert await _tique(db, p.id, caminho) == pub.PUBLICADO
+    assert editar.call_count == 2
+    assert (await _relida(db, p.id)).post_external_id == "P1"
+
+
+@respx.mock
+async def test_post_aceito_sem_post_id_pelo_corpo_real_vai_pra_revisar(db, make_user, shopee_http):
+    """`error` vazio, o vídeo na lista de sucesso SEM post_id: pode ter saído.
+    `revisar` com o container mantido — o "tentar de novo" se recusa."""
+    p, caminho, _rede = await _postagem_publicando(db, make_user)
+    _shopee_ate_o_rascunho()
+    respx.post(f"{sv.API_HOST}{sv.PATH_EDITAR}").mock(
+        return_value=_ok_http({"success_list": ["br-1"], "failure_list": []})
+    )
+    respx.post(f"{sv.API_HOST}{sv.PATH_POSTAR}").mock(
+        return_value=_ok_http(
+            {
+                "success_list": [{"success_video_upload_id": "br-1", "post_id": ""}],
+                "failure_list": [],
+            }
+        )
+    )
+    assert await _tique(db, p.id, caminho) == pub.REVISAR
+    linha = await _relida(db, p.id)
+    assert linha.status == "revisar" and linha.container_id == "br-1"
+    with pytest.raises(svc.RoboError):
+        await svc.retentar(db, linha)
+
+
+@pytest.mark.parametrize(
+    "erro",
+    [
+        ShopeeVideoAmbiguoError("post_sem_confirmacao", "sem post_id"),
+        ShopeeVideoError("resposta_invalida", "HTTP 502 sem JSON"),
+        ShopeeVideoError("error_server", "Internal error"),
+    ],
+)
+async def test_post_sem_recusa_explicita_nunca_libera_subir_de_novo(db, make_user, shopee, erro):
+    p, caminho, _rede = await _postagem_publicando(db, make_user)
+    shopee.erro_postar = [erro]
+    assert await _tique(db, p.id, caminho) == pub.REVISAR
+    linha = await _relida(db, p.id)
+    assert linha.status == "revisar" and linha.container_id == "br-1"
+    assert linha.opcoes["shopee"]["progresso"].get("post_recusado") is None
+    assert shopee.apagados == []
+
+
+# ───────────────────────────────────────── erro que só gente resolve PARA a conta
+
+
+async def test_termos_nao_aceitos_param_a_conta_mantem_o_rascunho_e_o_robo_nao_agenda(
+    db, make_user, shopee
+):
+    p, caminho, rede = await _postagem_publicando(db, make_user)
+    rede_id = rede.id
+    shopee.erro_postar = [
+        ShopeeVideoError("copyright_not_agree", "Not Agree Shopee videos Terms of Service")
+    ]
+    assert await _tique(db, p.id, caminho) == pub.FALHOU
+    linha = await _relida(db, p.id)
+    assert linha.status == "falhou" and linha.container_id is None
+    prog = linha.opcoes["shopee"]["progresso"]
+    # O rascunho pronto FICA (só a conta parou) — e não é apagado.
+    assert prog["etapa"] == "postar" and prog["video_upload_id"] == "br-1"
+    assert prog.get("post_chamado_em") is None and prog.get("post_recusado") is None
+    assert shopee.apagados == []
+    assert "tentar de novo" in linha.result
+    tok = await _token_da_conta(db, rede_id)
+    assert tok.status == "bloqueado" and "Termos" in tok.last_error
+    assert svc.motivo_da_conta(await db.get(RedeSocial, rede_id), tok) == "conta_shopee_bloqueada"
+
+    # O robô NÃO agenda outro vídeo nesta conta (cada vaga queimaria um vídeo).
+    db.add(MarketingLegendaModelo(marca_id=rede.marca_id, texto="{{ marca }} #uranyx"))
+    await db.commit()
+    marca = await db.get(Marca, rede.marca_id)
+    await _criativo(db, marca, sku="dg046.pi", nome="outro.mp4")
+    r = await autopostagem.rodada(db, agora=datetime.now(UTC).replace(hour=23, minute=0))
+    assert r["agendadas"] == 0 and r["recusadas"] == 1, r
+    assert len((await db.execute(select(MarketingPostagem))).scalars().all()) == 1
+
+    # Resolvido fora (Termos aceitos): libera e o "tentar de novo" só POSTA.
+    await conta.liberar(db, rede_id)
+    await db.commit()
+    voltou = await svc.retentar(db, await _relida(db, p.id))
+    assert voltou.status == "pendente"
+    (lease,) = await svc.proximas_para_publicar(db)
+    assert lease.id == p.id
+    assert await _tique(db, p.id, caminho) == pub.PUBLICADO
+    assert shopee.chamadas.count("init") == 1  # sem subir o vídeo de novo
+    assert shopee.chamadas.count("postar") == 2
+
+
+async def test_autorizacao_desfeita_pede_autorizar_de_novo(db, make_user, shopee):
+    p, caminho, rede = await _postagem_publicando(db, make_user)
+    shopee.erro_editar = [ShopeeVideoError("user_no_linked", "Partner and user has no linked")]
+    assert await _tique(db, p.id, caminho) == pub.FALHOU
+    tok = await _token_da_conta(db, rede.id)
+    assert tok.status == "expirado"
+    assert svc.motivo_da_conta(await db.get(RedeSocial, rede.id), tok) == "conta_shopee_reautorizar"
+
+
+# ─────────────────────────────── "can not find video meta" não é laço eterno
+
+
+async def test_video_meta_que_nao_aparece_espera_com_teto_e_recusa_upload_falho(
+    db, make_user, shopee
+):
+    p, caminho, _rede = await _postagem_publicando(db, make_user)
+    meta = ShopeeVideoError("error_param", "can not find video meta")
+    shopee.erro_editar = [meta]
+    assert await _tique(db, p.id, caminho) == pub.AGUARDANDO
+    linha = await _relida(db, p.id)
+    assert linha.status == "pendente"
+    assert linha.opcoes["shopee"]["progresso"]["etapa"] == "rascunho"
+    assert shopee.conferencias == [58262693089]
+
+    # Próximo tique (dentro de 10 min): NÃO pergunta à loja de novo antes do edit.
+    shopee.erro_editar = [meta]
+    await svc.proximas_para_publicar(db)
+    assert await _tique(db, p.id, caminho) == pub.AGUARDANDO
+    assert shopee.conferencias == [58262693089]
+
+    # Passado o teto de 30 min desde o pronto: desiste (nada foi publicado).
+    linha = await _relida(db, p.id)
+    opcoes = dict(linha.opcoes)
+    opcoes["shopee"]["progresso"]["pronto_em"] = (
+        datetime.now(UTC) - pub.TETO_META - timedelta(minutes=1)
+    ).isoformat()
+    await db.execute(
+        update(MarketingPostagem).where(MarketingPostagem.id == p.id).values(opcoes=opcoes)
+    )
+    await db.commit()
+    shopee.erro_editar = [meta]
+    await svc.proximas_para_publicar(db)
+    assert await _tique(db, p.id, caminho) == pub.FALHOU
+    assert "30 min" in (await _relida(db, p.id)).result
+
+
+async def test_video_meta_com_upload_falho_recusa_na_hora(db, make_user, shopee):
+    p, caminho, _rede = await _postagem_publicando(db, make_user)
+    shopee.erro_editar = [ShopeeVideoError("error_param", "can not find video meta")]
+    shopee.status_upload = ["SUCCEEDED", "FAILED"]
+    assert await _tique(db, p.id, caminho) == pub.FALHOU
+    assert "FAILED" in (await _relida(db, p.id)).result
+
+
+# ─────────────────────────────────── o upload não volta pro começo em laço
+
+
+async def test_upload_task_not_found_sobe_de_novo_so_uma_vez(db, make_user, shopee, monkeypatch):
+    p, caminho, _rede = await _postagem_publicando(db, make_user)
+    perdido = ShopeeVideoError("error_param", "Upload task not found.")
+
+    async def resultado(vid):
+        shopee.chamadas.append("resultado")
+        raise perdido
+
+    monkeypatch.setattr(shopee, "resultado_upload", resultado)
+    assert await _tique(db, p.id, caminho) == pub.FALHOU
+    assert shopee.chamadas.count("init") == 2  # o original + UMA vez de novo
+    assert "subido de novo" in (await _relida(db, p.id)).result
+
+
+async def test_not_found_de_outra_coisa_nao_manda_subir_de_novo(db, make_user, shopee, monkeypatch):
+    p, caminho, _rede = await _postagem_publicando(db, make_user)
+
+    async def resultado(vid):
+        raise ShopeeVideoError("error_param", "item not found in shop")
+
+    monkeypatch.setattr(shopee, "resultado_upload", resultado)
+    assert await _tique(db, p.id, caminho) == pub.FALHOU
+    assert shopee.chamadas.count("init") == 1
+
+
+async def test_sem_folga_no_ciclo_nem_comeca_a_subir(db, make_user, shopee):
+    p, caminho, _rede = await _postagem_publicando(db, make_user)
+    assert await _tique(db, p.id, caminho, orcamento_s=pub.MIN_SOBRA_SUBIR_S - 1) == pub.AGUARDANDO
+    assert "init" not in shopee.chamadas
+    assert (await _relida(db, p.id)).status == "pendente"
+
+
+# ───────────────────────────────── a cerca do lease (nada de dois tiques na linha)
+
+
+async def _outro_tique_pega(pid) -> None:
+    """Outro tique (ou o reconciliador) assumiu a linha: claim novo."""
+    import app.db as _db
+
+    async with _db.SessionLocal() as s2:
+        await s2.execute(
+            update(MarketingPostagem)
+            .where(MarketingPostagem.id == pid)
+            .values(claimed_at=datetime.now(UTC) + timedelta(seconds=5))
+        )
+        await s2.commit()
+
+
+async def test_cerca_do_lease_para_antes_de_subir_o_arquivo(db, make_user, shopee, monkeypatch):
+    p, caminho, _rede = await _postagem_publicando(db, make_user)
+    original = shopee.iniciar_upload
+
+    async def iniciar(**kw):
+        await _outro_tique_pega(p.id)
+        return await original(**kw)
+
+    monkeypatch.setattr(shopee, "iniciar_upload", iniciar)
+    assert await _tique(db, p.id, caminho) == pub.AGUARDANDO
+    assert not any(c.startswith("parte") for c in shopee.chamadas)
+    linha = await _relida(db, p.id)
+    assert linha.status == "publicando" and linha.container_id is None
+
+
+async def test_cerca_do_lease_para_antes_de_postar(db, make_user, shopee, monkeypatch):
+    p, caminho, _rede = await _postagem_publicando(db, make_user)
+    original = shopee.editar
+
+    async def editar(vid, **kw):
+        await original(vid, **kw)
+        await _outro_tique_pega(p.id)
+
+    monkeypatch.setattr(shopee, "editar", editar)
+    assert await _tique(db, p.id, caminho) == pub.AGUARDANDO
+    assert "postar" not in shopee.chamadas
+    prog = (await _relida(db, p.id)).opcoes["shopee"]["progresso"]
+    assert prog.get("post_chamado_em") is None
+
+
+# ─────────────────────── "current status" sem conseguir conferir = dúvida
+
+
+async def test_current_status_sem_conferencia_vai_pra_revisar_nunca_pra_fila(
+    db, make_user, shopee, monkeypatch
+):
+    p, caminho, _rede = await _postagem_publicando(db, make_user)
+    shopee.erro_postar = [
+        ShopeeVideoError("batch_process_failed", "task can not be process under the current status")
+    ]
+
+    async def detalhe(**kw):
+        raise conta.ContaShopeeError("renovacao_falhou", "a Shopee não respondeu")
+
+    monkeypatch.setattr(shopee, "detalhe", detalhe)
+    assert await _tique(db, p.id, caminho) == pub.REVISAR
+    linha = await _relida(db, p.id)
+    assert linha.status == "revisar" and linha.container_id == "br-1"
+
+
+async def test_aguardar_com_post_possivelmente_no_ar_vira_revisar(
+    db, make_user, shopee, monkeypatch
+):
+    """A renovação do token falha DEPOIS de o post ter sido chamado (recusado
+    só pelo token): a linha não pode voltar pra `pendente`."""
+    p, caminho, _rede = await _postagem_publicando(db, make_user)
+    shopee.erro_postar = [ShopeeVideoError("error_auth", "Invalid access_token")]
+
+    async def credencial(rede_social_id, *, recusado=None, forcar=False, agora=None):
+        if recusado:
+            raise conta.ContaShopeeError("renovacao_falhou", "sem resposta")
+        return conta.Credencial(
+            rede_social_id, 2047721, CHAVE_FALSA, TOKEN_FALSO, USER_SHOPEE, SHOP_ID, 0
+        )
+
+    monkeypatch.setattr(conta, "credencial", credencial)
+    assert await _tique(db, p.id, caminho) == pub.REVISAR
+    assert (await _relida(db, p.id)).status == "revisar"
+
+
+# ─────────────────────────────────── rascunho órfão não fica na loja
+
+
+async def test_falha_depois_do_rascunho_apaga_o_rascunho(db, make_user, shopee):
+    p, caminho, _rede = await _postagem_publicando(db, make_user)
+    # 1º tique: rascunho pronto, o post esbarra no limite (recusa explícita).
+    shopee.erro_postar = [ShopeeVideoError("error_rate_limit", "Too many requests")]
+    assert await _tique(db, p.id, caminho) == pub.AGUARDANDO
+    linha = await _relida(db, p.id)
+    assert linha.status == "pendente"
+    assert linha.opcoes["shopee"]["progresso"]["post_recusado"] is True
+    # 2º tique: o estoque acabou → não posta, e o rascunho sai da Shopee.
+    shopee.conferencia = anuncio.Conferencia(ok=False, motivo="anúncio sem estoque na Shopee")
+    shopee.detalhe_resposta = {"status": 200}
+    await svc.proximas_para_publicar(db)
+    assert await _tique(db, p.id, caminho) == pub.FALHOU
+    linha = await _relida(db, p.id)
+    assert linha.status == "falhou" and linha.container_id is None
+    assert shopee.apagados == ["br-1"]
+    assert shopee.chamadas.count("postar") == 1
+
+
+async def test_rascunho_que_ja_saiu_nunca_e_apagado(db, make_user, shopee):
+    """A limpeza confere o status antes: o que a Shopee mostra publicado não
+    é tocado."""
+    p, caminho, _rede = await _postagem_publicando(db, make_user)
+    shopee.erro_postar = [ShopeeVideoError("error_rate_limit", "Too many requests")]
+    await _tique(db, p.id, caminho)
+    shopee.conferencia = anuncio.Conferencia(ok=False, motivo="sem estoque")
+    shopee.detalhe_resposta = {"status": 300, "post_id": "X"}
+    await svc.proximas_para_publicar(db)
+    assert await _tique(db, p.id, caminho) == pub.FALHOU
+    assert shopee.apagados == []
+
+
+# ───────────────────── soluço da API da LOJA não queima o vídeo (conferir_ao_vivo real)
+
+
+@respx.mock
+async def test_soluco_da_api_da_loja_espera_em_vez_de_falhar(db, make_user, shopee, monkeypatch):
+    from app.models import Integration
+
+    monkeypatch.setattr(anuncio, "conferir_ao_vivo", _CONFERIR_REAL)
+    monkeypatch.setattr(get_settings(), "shopee_use_sandbox", False)
+    p, caminho, rede = await _postagem_publicando(db, make_user)
+    integ = await db.get(Integration, rede.integration_id)
+    integ.credentials = encrypt_json(
+        {
+            "shop_id": SHOP_ID,
+            "access_token": "da-loja",
+            "refresh_token": "rt-loja",
+            "partner_id": 1,
+            "partner_key": "k",
+            "expires_at": int(datetime.now(UTC).timestamp()) + 3600,
+        }
+    )
+    await db.commit()
+    respx.get("https://partner.shopeemobile.com/api/v2/product/get_item_base_info").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "error": "",
+                "response": {
+                    "item_list": [
+                        {"item_id": 58262693089, "item_status": "NORMAL", "has_model": True}
+                    ]
+                },
+            },
+        )
+    )
+    respx.get("https://partner.shopeemobile.com/api/v2/product/get_model_list").mock(
+        return_value=httpx.Response(200, json={"error": "error_server", "message": "system busy"})
+    )
+    assert await _tique(db, p.id, caminho) == pub.AGUARDANDO
+    linha = await _relida(db, p.id)
+    assert linha.status == "pendente" and linha.attempts == 0
+    assert "editar" not in shopee.chamadas
+    assert linha.opcoes["shopee"]["progresso"]["falhas_seguidas"] == 1
+
+
+# ─────────────────────────────────────────────── o worker com as outras redes
+
+
+async def test_worker_tique_misto_instagram_sai_antes_e_shopee_espera_sem_segurar(
+    db, make_user, shopee, monkeypatch
+):
+    """IG e Shopee da mesma marca no MESMO tique (a grade das 12h): o Reel
+    sai primeiro, a Shopee recebe no máximo o orçamento curto e, ainda
+    processando, volta pra fila com o upload guardado."""
+    from app import worker
+    from app.services.marketing import meta_client
+
+    monkeypatch.setattr(worker._settings, "enable_marketing", True)
+    monkeypatch.setattr(worker._settings, "marketing_postagem_commit", True)
+    monkeypatch.setattr(worker._settings, "marketing_postagem_upload", "binario")
+    user = await make_user()
+    integ = await _cenario_barbosa(db, user)
+    marca = await _marca(db)
+    shopee_conta = await _conta_shopee(db, marca, integ)
+    ig = await _conta_ig(db, marca)
+    c, f = await _criativo(db, marca)
+    criadas = await svc.agendar(
+        db, creative=c, file=f, redes=[shopee_conta, ig], legenda="F110L #uranyx"
+    )
+    por = {x.plataforma: x.id for x in criadas}
+    # A da Shopee é a MAIS ANTIGA: o lease a devolve primeiro — é o tique
+    # que tem de pô-la por último.
+    await db.execute(
+        update(MarketingPostagem)
+        .where(MarketingPostagem.id == por["shopee"])
+        .values(created_at=datetime.now(UTC) - timedelta(minutes=5))
+    )
+    await db.commit()
+    shopee.status_upload = ["PROCESSING"]
+    ordem: list[str] = []
+
+    async def reel(**kw):
+        ordem.append(f"ig:shopee_tocada={'init' in shopee.chamadas}")
+        return meta_client.ResultadoPublicacao(
+            ok=True, post_external_id="ig-1", post_url="https://ig/p/1"
+        )
+
+    monkeypatch.setattr(meta_client, "publicar_reel_instagram", reel)
+    orcamentos: list[float] = []
+    original = pub.publicar_postagem
+
+    async def publicar(s, pid, caminho, **kw):
+        orcamentos.append(kw.get("orcamento_s"))
+        return await original(s, pid, caminho, dormir=_sem_espera, **kw)
+
+    monkeypatch.setattr(pub, "publicar_postagem", publicar)
+    await worker.marketing_postagens_publicar({})
+    assert ordem == ["ig:shopee_tocada=False"]
+    linha_ig = await _relida(db, por["instagram"])
+    assert linha_ig.status == "publicado" and linha_ig.post_external_id == "ig-1"
+    linha_sh = await _relida(db, por["shopee"])
+    assert linha_sh.status == "pendente" and linha_sh.container_id == "br-1"
+    assert orcamentos and 0 < orcamentos[0] <= pub.ORCAMENTO_TICK_S
+
+
+async def test_reconciliador_do_worker_com_instagram_e_shopee(db, make_user, shopee, monkeypatch):
+    from app import worker
+    from app.services.marketing import meta_client
+
+    monkeypatch.setattr(worker._settings, "enable_marketing", True)
+    monkeypatch.setattr(worker._settings, "marketing_postagem_commit", True)
+    user = await make_user()
+    integ = await _cenario_barbosa(db, user)
+    marca = await _marca(db)
+    shopee_conta = await _conta_shopee(db, marca, integ)
+    ig = await _conta_ig(db, marca)
+    c, f = await _criativo(db, marca)
+    _c2, f2 = await _criativo(db, marca, nome="b.mp4")
+    agora = datetime.now(UTC)
+
+    def presa(rede, arquivo, criativo_id, *, minutos, container, progresso=None):
+        return MarketingPostagem(
+            creative_id=criativo_id,
+            file_id=arquivo.id,
+            rede_social_id=rede.id,
+            plataforma=rede.plataforma,
+            conta=rede.conta,
+            status="publicando",
+            claimed_at=agora - timedelta(minutes=minutos),
+            container_id=container,
+            opcoes={"shopee": {"item_id": 58262693089, "progresso": progresso}}
+            if progresso
+            else {},
+        )
+
+    p_ig = presa(ig, f, c.id, minutos=20, container="ig-container")
+    p_sh_morta = presa(
+        shopee_conta,
+        f,
+        c.id,
+        minutos=30,
+        container="br-7",
+        progresso={"etapa": "processando", "video_upload_id": "br-7"},
+    )
+    p_sh_viva = presa(
+        shopee_conta,
+        f2,
+        _c2.id,
+        minutos=20,
+        container="br-8",
+        progresso={"etapa": "processando", "video_upload_id": "br-8"},
+    )
+    db.add_all([p_ig, p_sh_morta, p_sh_viva])
+    await db.commit()
+    consultas: list[str] = []
+
+    async def consultar(**kw):
+        consultas.append(kw["container_id"])
+        return meta_client.ResultadoPublicacao(
+            ok=True, post_external_id="ig-9", post_url="https://ig/p/9"
+        )
+
+    monkeypatch.setattr(meta_client, "consultar_publicacao", consultar)
+    await worker.marketing_postagens_reconciliar({})
+    assert consultas == ["ig-container"]
+    assert (await _relida(db, p_ig.id)).status == "publicado"
+    morta = await _relida(db, p_sh_morta.id)
+    assert morta.status == "pendente" and morta.container_id == "br-7"
+    # Pega há 20 min: o tique (timeout 1200 s) pode estar vivo — intocada.
+    assert (await _relida(db, p_sh_viva.id)).status == "publicando"
+    assert "init" not in shopee.chamadas
+
+
+async def test_worker_recusa_na_guarda_fecha_a_shopee_pela_maquina(
+    db, make_user, shopee, monkeypatch
+):
+    """A guarda da hora de publicar recusou (criativo reprovado) uma linha
+    Shopee que já tinha rascunho pronto: falhou com o container zerado (o
+    "tentar de novo" funciona) e o rascunho sai da Shopee."""
+    from app import worker
+
+    monkeypatch.setattr(worker._settings, "enable_marketing", True)
+    monkeypatch.setattr(worker._settings, "marketing_postagem_commit", True)
+    p, caminho, _rede = await _postagem_publicando(db, make_user)
+    shopee.erro_postar = [ShopeeVideoError("error_rate_limit", "Too many requests")]
+    assert await _tique(db, p.id, caminho) == pub.AGUARDANDO
+    c = await db.get(MarketingCreative, p.creative_id)
+    c.aprovado = False
+    await db.commit()
+    shopee.detalhe_resposta = {"status": 200}
+    await worker.marketing_postagens_publicar({})
+    linha = await _relida(db, p.id)
+    assert linha.status == "falhou" and linha.container_id is None
+    assert "criativo_nao_aprovado" in linha.result
+    assert shopee.apagados == ["br-1"]
+
+
+async def test_devolver_sem_tocar_na_shopee_e_sem_perder_o_progresso(db, make_user, shopee):
+    p, caminho, _rede = await _postagem_publicando(db, make_user)
+    shopee.status_upload = ["PROCESSING"]
+    await _tique(db, p.id, caminho, orcamento_s=25)
+    (lease,) = await svc.proximas_para_publicar(db)
+    antes = list(shopee.chamadas)
+    assert await pub.devolver(db, lease.id, "a fila do minuto encheu") == pub.AGUARDANDO
+    linha = await _relida(db, p.id)
+    assert linha.status == "pendente" and linha.container_id == "br-1"
+    assert linha.opcoes["shopee"]["progresso"]["etapa"] == "processando"
+    assert shopee.chamadas == antes
+
+
+# ──────────────────────────────── desempenho: um post apagado não derruba os outros
+
+
+async def test_metricas_post_sem_registro_vira_removido_e_os_outros_seguem(
+    db, make_user, shopee, monkeypatch
+):
+    from app.models import MarketingPostagemMetrica
+    from app.services.marketing import metricas
+
+    user = await make_user()
+    integ = await _cenario_barbosa(db, user)
+    marca = await _marca(db)
+    rede = await _conta_shopee(db, marca, integ)
+    c, f = await _criativo(db, marca)
+    c2, f2 = await _criativo(db, marca, nome="b.mp4")
+    c3, f3 = await _criativo(db, marca, nome="c.mp4")
+    agora = datetime.now(UTC)
+    for cr, arquivo, pid in ((c, f, "P-NO-AR"), (c2, f2, "P-SUMIU"), (c3, f3, "P-ERRO")):
+        db.add(
+            MarketingPostagem(
+                creative_id=cr.id,
+                file_id=arquivo.id,
+                rede_social_id=rede.id,
+                plataforma="shopee",
+                conta="barbosa",
+                status="publicado",
+                post_external_id=pid,
+                publicado_em=agora - timedelta(hours=3),
+            )
+        )
+    await db.commit()
+    shopee.lista_resposta = {
+        "list": [{"post_id": "P-NO-AR", "views": 50, "likes": 3, "comments": 1}],
+        "has_more": False,
+    }
+
+    async def detalhe(*, post_id=None, video_upload_id=None):
+        if post_id == "P-SUMIU":
+            raise ShopeeVideoError(
+                "error_param", "videoUploadIdList all illegal,no record in database"
+            )
+        raise ShopeeVideoError("error_server", "system busy")
+
+    monkeypatch.setattr(shopee, "detalhe", detalhe)
+    await metricas.coletar(db, modo="completo")
+    linhas = {
+        m.postagem_id: m
+        for m in (await db.execute(select(MarketingPostagemMetrica))).scalars().all()
+    }
+    por_post = {
+        p.post_external_id: linhas[p.id]
+        for p in (await db.execute(select(MarketingPostagem))).scalars().all()
+    }
+    assert por_post["P-NO-AR"].views == 50 and por_post["P-NO-AR"].erro is None
+    assert metricas.foi_removido(por_post["P-SUMIU"].erro)
+    assert por_post["P-ERRO"].erro and not metricas.foi_removido(por_post["P-ERRO"].erro)
+
+
+# ─────────────────────── a fila da tela não promete Shopee pra vídeo que o robô pula
+
+
+async def test_fila_da_tela_tira_da_shopee_o_video_em_formato_que_o_robo_pula(
+    db, make_user, _video_bom
+):
+    user = await make_user()
+    integ = await _cenario_barbosa(db, user)
+    marca = await _marca(db)
+    shopee_conta = await _conta_shopee(db, marca, integ)
+    ig = await _conta_ig(db, marca)
+    ig.postagem_hora_inicio = 12
+    await db.commit()
+    _c, f = await _criativo(db, marca, sku="dg046.pi")
+    db.add(
+        MarketingPostagem(
+            creative_id=_c.id,
+            file_id=f.id,
+            rede_social_id=ig.id,
+            plataforma="instagram",
+            conta=ig.conta,
+            status="publicado",
+            publicado_em=datetime.now(UTC) - timedelta(days=1),
+        )
+    )
+    await db.commit()
+    _video_bom["v"] = anuncio.InfoVideo(1080, 1920, 25.4, "hevc")  # o flat_3c.mp4
+    itens = await autopostagem.fila(db, marca.id)
+    assert f.id not in {it.arquivo.id for it in itens}
+    assert await autopostagem.proximo_criativo(db, shopee_conta) is None
+    # Em H.264 o mesmo vídeo volta a esperar a Shopee — e o robô o pega.
+    _video_bom["v"] = anuncio.InfoVideo(1080, 1920, 25.4, "h264")
+    anuncio._CACHE.clear()
+    itens = await autopostagem.fila(db, marca.id)
+    assert {it.arquivo.id: [x.id for x in it.pendente_em] for it in itens}[f.id] == [
+        shopee_conta.id
+    ]
+    assert (await autopostagem.proximo_criativo(db, shopee_conta))[1].id == f.id

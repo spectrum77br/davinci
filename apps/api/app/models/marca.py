@@ -204,7 +204,7 @@ class RedeSocial(Base, TimestampMixin):
     # mesmo navegador é exatamente o que o AdsPower existe pra evitar.
     # NULL nas contas publicadas por API (Instagram, Facebook, YouTube).
     adspower_user_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    # Loja do marketplace que esta conta representa (migration 0383). Só a
+    # Loja do marketplace que esta conta representa (migration 0384). Só a
     # Shopee Vídeo usa: o vídeo é publicado DENTRO de uma loja e leva o anúncio
     # dela junto — é por aqui que o robô acha o anúncio certo (product_links da
     # integração) e que a autorização da Shopee é conferida (o shop_id que
@@ -303,7 +303,7 @@ Index(
     unique=True,
     postgresql_where=text("conta IS NULL"),
 )
-# Uma conta de Shopee Vídeo por loja (migration 0383): duas contas na mesma
+# Uma conta de Shopee Vídeo por loja (migration 0384): duas contas na mesma
 # loja dobrariam o teto do dia sem ninguém ver.
 Index(
     "uq_redes_sociais_integration_id",

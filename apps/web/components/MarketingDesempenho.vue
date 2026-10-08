@@ -42,7 +42,7 @@ import { apiErrMsg } from '~/lib/apiError'
 import {
   ERROS_DESEMPENHO, ROTULO_REDE, SIGLA_REDE,
   corRede, ddmm, deltaTxt, diaRelativo, frescor, ganho, geomBarras, hhmm,
-  maisCompacto, num, qtd, redesDaTabela, sinal,
+  colunasDaGrade, maisCompacto, num, qtd, redesDaTabela, sinal,
   type CriativoDesempenho, type Dimensao, type GrupoDesempenho, type Janelas, type LinhaMarca,
   type RespostaDesempenho,
 } from '~/utils/desempenho'
@@ -314,8 +314,16 @@ const GRADE_MARCAS = {
     celular: 'xl:hidden',
     direita: 'xl:text-right',
   },
+  // Facebook E Shopee Vídeo com post: cinco colunas de rede.
+  5: {
+    cab: 'hidden xl:grid xl:grid-cols-[minmax(0,1fr)_repeat(5,6.5rem)_6rem]',
+    linha: 'grid-cols-5 xl:grid-cols-[minmax(0,1fr)_repeat(5,6.5rem)_6rem]',
+    larga: 'col-span-5 xl:col-span-1',
+    celular: 'xl:hidden',
+    direita: 'xl:text-right',
+  },
 }
-const gradeMarcas = computed(() => GRADE_MARCAS[redesMarcas.value.length > 3 ? 4 : 3])
+const gradeMarcas = computed(() => GRADE_MARCAS[colunasDaGrade(redesMarcas.value)])
 
 function plat(m: LinhaMarca, rede: string) {
   return m.plataformas.find((p) => p.plataforma === rede)

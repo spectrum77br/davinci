@@ -427,6 +427,9 @@ class RedeSocialOut(BaseModel):
     integration_id: UUID | None = None
     integration_nome: str | None = None
     shopee_app_configurado: bool = False
+    # Shopee Vídeo PARADA (bloqueada pela Shopee, ou a autorização venceu): o
+    # motivo, pra tela dizer o que resolver. Nunca segredo.
+    token_erro: str | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -485,7 +488,12 @@ class ShopeeIniciarIn(BaseModel):
 
     Os dois são opcionais pra reautorizar com o que já está salvo; mandar um
     exige o outro (o par é um app só). A chave é `repr=False` pelo mesmo
-    motivo da senha: o repr do body vai pro Sentry num 500."""
+    motivo da senha: o repr do body vai pro Sentry num 500 (e `partner_key`
+    está no denylist do Sentry, pro corpo do request).
+
+    A chave NUNCA é recusada aqui: o 422 padrão do FastAPI devolve o `input`
+    — a própria chave — no corpo da resposta. Este validador só normaliza
+    (nunca levanta); o formato é conferido na rota, com um código seco."""
 
     partner_id: int | None = Field(default=None, gt=0)
     partner_key: str | None = Field(default=None, repr=False)
@@ -493,12 +501,8 @@ class ShopeeIniciarIn(BaseModel):
     @field_validator("partner_key", mode="before")
     @classmethod
     def _v_key(cls, v: Any) -> str | None:
-        s = str(v or "").strip()
-        if not s:
-            return None
-        if len(s) < 16 or any(c.isspace() for c in s):
-            raise ValueError("partner_key_invalida")
-        return s
+        s = str(v or "").strip() if isinstance(v, str | int) else ""
+        return s or None
 
 
 class ShopeeIniciarOut(BaseModel):

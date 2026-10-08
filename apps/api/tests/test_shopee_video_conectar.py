@@ -379,3 +379,210 @@ async def test_trocar_a_loja_derruba_a_autorizacao(client, db, make_user, auth_a
     ).scalar_one_or_none() is None
     rede = await db.get(RedeSocial, rede_id)
     assert rede is not None
+
+
+# ═══════════════════════════════════════ correções da revisão (08/10/2026)
+
+
+async def _iniciar(client, rede_id, partner_id=2047721, chave=CHAVE):
+    return await client.post(
+        f"{API}/{rede_id}/shopee/iniciar", json={"partner_id": partner_id, "partner_key": chave}
+    )
+
+
+async def _tok(db, rede_id) -> RedeSocialToken | None:
+    return (
+        await db.execute(
+            select(RedeSocialToken)
+            .where(RedeSocialToken.rede_social_id == rede_id)
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+
+
+async def test_app_da_integracao_nunca_vira_app_de_video(client, db, make_user, auth_as, troca):
+    """REGRA DO DONO: o Stock Sync Hub (o app da integração de pedidos e
+    estoque) não pode ser reautorizado por aqui — isso renovaria o token da
+    integração por fora dela e a loja pararia."""
+    u = await _admin(make_user, auth_as)
+    marca = await _marca(db)
+    barbosa = await _loja(db, u)  # credentials.partner_id = 2032110
+    rede_id = (await _cria(client, marca, barbosa)).json()["id"]
+    r = await _iniciar(client, rede_id, partner_id=2032110, chave="chave-do-stock-sync-hub-0123")
+    assert r.status_code == 422 and r.json()["detail"]["code"] == "partner_e_da_integracao"
+    assert "chave-do-stock-sync-hub-0123" not in r.text
+    assert await _tok(db, rede_id) is None  # nada foi salvo, nenhum link saiu
+
+    # Integração sem partner no blob usa o do servidor: esse também é dela.
+    from app.config import get_settings
+
+    sem_partner = Integration(
+        user_id=u.id,
+        platform=IntegrationPlatform.SHOPEE,
+        name="Mega",
+        credentials=encrypt_json({"shop_id": 99, "access_token": "x"}),
+    )
+    db.add(sem_partner)
+    await db.commit()
+    s = get_settings()
+    original = s.shopee_partner_id
+    s.shopee_partner_id = "1999999"
+    try:
+        r = await _iniciar(client, rede_id, partner_id=1999999)
+        assert r.status_code == 422 and r.json()["detail"]["code"] == "partner_e_da_integracao"
+    finally:
+        s.shopee_partner_id = original
+    assert troca["chamadas"] == []
+
+
+async def test_callback_nao_troca_code_com_app_da_integracao(client, db, make_user, auth_as, troca):
+    """Segunda trava: blob salvo (antes da trava do iniciar) com o partner da
+    integração — o retorno não troca o code nem grava nada."""
+    u = await _admin(make_user, auth_as)
+    marca = await _marca(db)
+    barbosa = await _loja(db, u)
+    rede_id = (await _cria(client, marca, barbosa)).json()["id"]
+    url = (await _iniciar(client, rede_id)).json()["url"]
+    state = parse_qs(urlsplit(url).query)["state"][0]
+    tok = await _tok(db, rede_id)
+    tok.token_enc = encrypt_json({"partner_id": 2032110, "partner_key": "da-integracao-0123456789"})
+    await db.commit()
+    auth_as(None)
+    cb = await client.get(
+        f"{API}/shopee/callback/{state}",
+        params={"code": "C", "shop_id": SHOP_ID},
+        follow_redirects=False,
+    )
+    assert cb.headers["location"].endswith("shopee=erro&code=partner_e_da_integracao")
+    assert troca["chamadas"] == []
+    assert (await _tok(db, rede_id)).external_user_id is None
+
+
+@pytest.mark.parametrize("chave", ["curta", "chave com espaco no meio 0123456789"])
+async def test_partner_key_invalida_nao_volta_na_resposta(client, db, make_user, auth_as, chave):
+    u = await _admin(make_user, auth_as)
+    marca = await _marca(db)
+    barbosa = await _loja(db, u)
+    rede_id = (await _cria(client, marca, barbosa)).json()["id"]
+    r = await _iniciar(client, rede_id, chave=chave)
+    assert r.status_code == 422
+    assert r.json()["detail"] == {"code": "partner_key_invalida"}
+    assert chave not in r.text and chave.split()[0] not in r.text
+
+
+def test_sentry_mascara_a_partner_key():
+    import inspect
+
+    from app.services import sentry
+
+    assert '"partner_key"' in inspect.getsource(sentry.init_sentry)
+
+
+@pytest.mark.parametrize(
+    ("erro", "codigo"),
+    [
+        (
+            sv.ShopeeVideoError("error_sign", "Wrong sign.", request_id="rq-sign"),
+            "partner_key_invalida",
+        ),
+        (sv.ShopeeVideoError("error_auth", "Invalid code", request_id="rq-c"), "troca_recusada"),
+        (
+            sv.ShopeeVideoError("invalid_code", "The code is expired", request_id="rq-c"),
+            "troca_recusada",
+        ),
+        (
+            sv.ShopeeVideoError(
+                "error_api_permission", "This app type has no permission", request_id="rq-p"
+            ),
+            "app_invalido",
+        ),
+        (
+            sv.ShopeeVideoError("error_partner_key_expired", "", request_id="rq-k"),
+            "partner_key_vencida",
+        ),
+        (sv.ShopeeVideoRedeError("sem_resposta", "ReadTimeout"), "shopee_sem_resposta"),
+    ],
+)
+async def test_erro_da_troca_diz_o_que_fazer_e_fica_na_linha(
+    client, db, make_user, auth_as, monkeypatch, erro, codigo
+):
+    async def trocar_code(self, code, *, shop_id=None, main_account_id=None):
+        raise erro
+
+    monkeypatch.setattr(sv.ClienteShopeeVideo, "trocar_code", trocar_code)
+    u = await _admin(make_user, auth_as)
+    marca = await _marca(db)
+    barbosa = await _loja(db, u)
+    rede_id = (await _cria(client, marca, barbosa)).json()["id"]
+    url = (await _iniciar(client, rede_id)).json()["url"]
+    state = parse_qs(urlsplit(url).query)["state"][0]
+    auth_as(None)
+    cb = await client.get(
+        f"{API}/shopee/callback/{state}",
+        params={"code": "CODE-SECRETO", "shop_id": SHOP_ID},
+        follow_redirects=False,
+    )
+    assert cb.headers["location"].endswith(f"shopee=erro&code={codigo}")
+    tok = await _tok(db, rede_id)
+    assert tok.external_user_id is None and tok.status == "pendente"
+    # O erro fica na linha (código + request_id, o que o suporte pede) — sem segredo.
+    assert erro.code in tok.last_error
+    if erro.request_id:
+        assert erro.request_id in tok.last_error
+    assert CHAVE not in tok.last_error and "CODE-SECRETO" not in tok.last_error
+
+
+async def test_conta_principal_sem_loja_provada_nao_grava(client, db, make_user, auth_as, troca):
+    """Retorno pela conta principal (`main_account_id`, sem `shop_id`) e o
+    token/get sem `shop_id_list`: nada prova que é a loja da integração."""
+    u = await _admin(make_user, auth_as)
+    marca = await _marca(db)
+    barbosa = await _loja(db, u)
+    rede_id = (await _cria(client, marca, barbosa)).json()["id"]
+    url = (await _iniciar(client, rede_id)).json()["url"]
+    state = parse_qs(urlsplit(url).query)["state"][0]
+    troca["resposta"].update(shop_id_list=[], user_id_list=[987654321])
+    auth_as(None)
+    cb = await client.get(
+        f"{API}/shopee/callback/{state}",
+        params={"code": "C", "main_account_id": 9},
+        follow_redirects=False,
+    )
+    assert cb.headers["location"].endswith("shopee=erro&code=loja_nao_confirmada")
+    assert (await _tok(db, rede_id)).external_user_id is None
+
+
+async def test_liberar_conta_bloqueada_e_motivo_na_tela(client, db, make_user, auth_as, troca):
+    u = await _admin(make_user, auth_as)
+    marca = await _marca(db)
+    barbosa = await _loja(db, u)
+    rede_id = (await _cria(client, marca, barbosa)).json()["id"]
+    url = (await _iniciar(client, rede_id)).json()["url"]
+    state = parse_qs(urlsplit(url).query)["state"][0]
+    auth_as(None)
+    await client.get(
+        f"{API}/shopee/callback/{state}",
+        params={"code": "C", "shop_id": SHOP_ID},
+        follow_redirects=False,
+    )
+    await _admin(make_user, auth_as)
+    tok = await _tok(db, rede_id)
+    tok.status = "bloqueado"
+    tok.last_error = (
+        "Shopee: a loja ainda não aceitou os Termos do Shopee Vídeo (copyright_not_agree)"
+    )
+    await db.commit()
+    out = (await client.get(f"{API}/{rede_id}")).json()
+    assert out["token_status"] == "bloqueado" and "Termos" in out["token_erro"]
+    _sem_segredo(str(out))
+
+    r = await client.post(f"{API}/{rede_id}/shopee/liberar")
+    assert r.status_code == 200, r.text
+    assert r.json()["token_status"] == "ok" and r.json()["token_erro"] is None
+    _sem_segredo(r.text)
+
+    tok = await _tok(db, rede_id)
+    tok.status = "expirado"
+    await db.commit()
+    r = await client.post(f"{API}/{rede_id}/shopee/liberar")
+    assert r.status_code == 422 and r.json()["detail"]["code"] == "conta_shopee_reautorizar"

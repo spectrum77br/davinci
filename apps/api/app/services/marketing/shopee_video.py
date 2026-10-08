@@ -200,6 +200,23 @@ class ShopeeVideoRedeError(ShopeeVideoError):
     """
 
 
+class ShopeeVideoAmbiguoError(ShopeeVideoRedeError):
+    """A Shopee ACEITOU a chamada (`error` vazio) mas a resposta não diz o que
+    aconteceu com o nosso vídeo — nem o `post_id`, nem o motivo na lista de
+    falha. No `post_video` isto é tão ambíguo quanto um timeout: o post pode
+    estar no ar, e subir de novo duplicaria. Por isso herda de
+    `ShopeeVideoRedeError` (quem trata um trata o outro)."""
+
+
+def _motivos_do_lote(corpo: dict) -> str:
+    """Os `failed_reason` da `failure_list` (edit, post e delete são em lote)."""
+    falhas = _resposta(corpo).get("failure_list") or []
+    motivos = [
+        str(f.get("failed_reason") or "").strip() for f in falhas if isinstance(f, dict)
+    ]
+    return "; ".join(m for m in motivos if m)
+
+
 def _corpo(resp: httpx.Response) -> dict:
     try:
         corpo = resp.json()
@@ -213,12 +230,23 @@ def _corpo(resp: httpx.Response) -> dict:
 
 
 def _checa(corpo: dict, *, http_status: int | None = None) -> dict:
-    """Levanta quando `error` vem preenchido; devolve o corpo inteiro."""
+    """Levanta quando `error` vem preenchido; devolve o corpo inteiro.
+
+    Lote em que o (único) vídeo falhou volta `error: batch_process_failed` no
+    topo com a mensagem genérica "Please check failure_list for detailed
+    reason" — o motivo de VERDADE ("can not edit video info,please retry",
+    "task can not be process under the current status", "cover is illegal")
+    vem por item. É ele que decide repetir, refazer a capa ou conferir se o
+    post já saiu, então vira o `detalhe` do erro. Um vídeo por chamada: a
+    lista é a dele."""
     erro = str(corpo.get("error") or "").strip()
     if erro:
+        detalhe = str(corpo.get("message") or "")
+        if erro == "batch_process_failed":
+            detalhe = _motivos_do_lote(corpo) or detalhe
         raise ShopeeVideoError(
             erro,
-            str(corpo.get("message") or ""),
+            detalhe,
             request_id=str(corpo.get("request_id") or "") or None,
             http_status=http_status,
         )
@@ -490,11 +518,18 @@ class ClienteShopeeVideo:
         )
 
     async def postar(self, video_upload_id: str) -> str:
-        """Publica o rascunho. Devolve o `post_id` (string tipo base64)."""
+        """Publica o rascunho. Devolve o `post_id` (string tipo base64).
+
+        Recusa EXPLÍCITA (o `error` do topo, ou o nosso id na `failure_list`)
+        levanta `ShopeeVideoError`: a Shopee disse que não publicou. Já a
+        chamada aceita (`error` vazio) que não devolve o `post_id` nem o motivo
+        levanta `ShopeeVideoAmbiguoError` — o post pode ter saído, e quem
+        chama não pode tratar isso como "não saiu"."""
         corpo = await self._usuario(
             "POST", PATH_POSTAR, json={"video_upload_id_list": [video_upload_id]}
         )
         r = _resposta(corpo)
+        rid = str(corpo.get("request_id") or "") or None
         for s in r.get("success_list") or []:
             if isinstance(s, dict) and str(s.get("success_video_upload_id")) == video_upload_id:
                 pid = str(s.get("post_id") or "").strip()
@@ -508,10 +543,16 @@ class ClienteShopeeVideo:
             ),
             None,
         )
-        raise ShopeeVideoError(
-            "batch_process_failed",
-            str((falha or {}).get("failed_reason") or "o vídeo não voltou na lista de sucesso"),
-            request_id=str(corpo.get("request_id") or "") or None,
+        if falha is not None:
+            raise ShopeeVideoError(
+                "batch_process_failed",
+                str(falha.get("failed_reason") or "a Shopee recusou o vídeo sem dizer o motivo"),
+                request_id=rid,
+            )
+        raise ShopeeVideoAmbiguoError(
+            "post_sem_confirmacao",
+            "a Shopee aceitou a chamada mas não devolveu o post_id do vídeo",
+            request_id=rid,
         )
 
     async def detalhe(
