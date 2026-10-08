@@ -456,8 +456,14 @@ class ClienteShopeeVideo:
         r = _resposta(corpo)
         info = r.get("video_info") if isinstance(r.get("video_info"), dict) else {}
         dur = info.get("duration")
+        st = str(r.get("status") or "").strip().upper()
+        # A doc diz SUCCEEDED/FAILED/CANCELLED; a Shopee de verdade devolve
+        # "SUCCEED" (Barbosa, 08/10/2026 — vídeo pronto e o post parado em
+        # "processando"). Normaliza aqui pra o publicador ver um nome só.
+        st = {"SUCCEED": "SUCCEEDED", "SUCCESS": "SUCCEEDED", "FAIL": "FAILED",
+              "CANCEL": "CANCELLED", "CANCELED": "CANCELLED"}.get(st, st)
         return ResultadoUpload(
-            status=str(r.get("status") or "").upper(),
+            status=st,
             motivo=str(r.get("reason") or "") or None,
             video_url=str(info.get("video_url") or "") or None,
             duracao=float(dur) if isinstance(dur, int | float) else None,

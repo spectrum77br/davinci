@@ -136,6 +136,21 @@ def _cliente(token: str = "tok_teste_123", user: int = 987654321) -> sv.ClienteS
 
 
 @respx.mock
+async def test_upload_pronto_vem_como_succeed_na_vida_real():
+    """A doc diz SUCCEEDED; a Shopee de verdade devolve "SUCCEED" (Barbosa,
+    08/10/2026, vídeo pronto com 24 s e video_url). Sem normalizar, o post
+    ficou em "processando o vídeo" com o vídeo já pronto do lado de lá."""
+    respx.get(f"{HOST}{sv.PATH_RESULTADO}").mock(
+        return_value=_ok({"status": "SUCCEED", "reason": "",
+                          "video_info": {"duration": 24, "video_url": "http://x/v.mp4"}})
+    )
+    r = await sv.ClienteShopeeVideo(PID, CHAVE).resultado_upload("br-1")
+    assert r.status == "SUCCEEDED" and r.duracao == 24.0
+    respx.get(f"{HOST}{sv.PATH_RESULTADO}").mock(return_value=_ok({"status": "FAIL", "reason": "x"}))
+    assert (await sv.ClienteShopeeVideo(PID, CHAVE).resultado_upload("br-2")).status == "FAILED"
+
+
+@respx.mock
 async def test_troca_do_code_de_vendedor_manda_so_code_e_partner_id():
     """Autorização de VENDEDOR (link novo, auth_type=seller): o token/get leva
     só o `code` (guia 669, "Business Request Parameters: code"). Mandar o
