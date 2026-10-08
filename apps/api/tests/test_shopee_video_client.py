@@ -136,6 +136,30 @@ def _cliente(token: str = "tok_teste_123", user: int = 987654321) -> sv.ClienteS
 
 
 @respx.mock
+async def test_troca_do_code_de_vendedor_manda_so_code_e_partner_id():
+    """Autorização de VENDEDOR (link novo, auth_type=seller): o token/get leva
+    só o `code` (guia 669, "Business Request Parameters: code"). Mandar o
+    `shop_id` do retorno — formato da autorização antiga, por loja, que a
+    integração usa — fez a Shopee responder `invalid_code` duas vezes na
+    Barbosa em 08/10/2026 (shop_id=1725800210 veio certo no retorno).
+    A loja é conferida depois, pela `shop_id_list` da resposta."""
+    rota = respx.post(f"{HOST}{sv.PATH_TOKEN}").mock(
+        return_value=httpx.Response(
+            200,
+            json={"error": "", "message": "", "request_id": "rq-t", "access_token": "a",
+                  "refresh_token": "r", "expire_in": 14400,
+                  "shop_id_list": [1725800210], "user_id_list": [555]},
+        )
+    )
+    cli = sv.ClienteShopeeVideo(PID, CHAVE)
+    await cli.trocar_code("codigo-de-teste", shop_id=1725800210)
+    corpo = json.loads(rota.calls.last.request.content)
+    assert corpo == {"code": "codigo-de-teste", "partner_id": PID}
+    await cli.trocar_code("codigo-2", main_account_id=42)
+    assert json.loads(rota.calls.last.request.content) == {"code": "codigo-2", "partner_id": PID}
+
+
+@respx.mock
 async def test_chamada_user_assina_com_user_id_e_sem_shop_id():
     rota = respx.get(f"{HOST}{sv.PATH_CAPAS}").mock(
         return_value=_ok({"image_url_list": ["https://img/1", "https://img/2"]})

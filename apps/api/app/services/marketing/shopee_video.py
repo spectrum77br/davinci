@@ -375,13 +375,18 @@ class ClienteShopeeVideo:
     async def trocar_code(
         self, code: str, *, shop_id: int | None = None, main_account_id: int | None = None
     ) -> dict:
-        """`code` do retorno → par de tokens + listas de shop_id/user_id."""
+        """`code` do retorno → par de tokens + listas de shop_id/user_id.
+
+        Autorização de VENDEDOR (link novo, `auth_type=seller`): o corpo leva
+        só o `code` (+ partner_id) — guia 669, "Business Request Parameters:
+        code". O `shop_id`/`main_account_id` no corpo é do formato antigo, por
+        loja (o da integração); mandado aqui, a Shopee respondeu `invalid_code`
+        duas vezes na Barbosa em 08/10/2026. Os parâmetros ficam na assinatura
+        só por compatibilidade: a loja é provada pelo retorno e pela
+        `shop_id_list` da resposta (`escolher_user_id`), não pelo corpo.
+        """
+        del shop_id, main_account_id
         corpo: dict[str, Any] = {"code": code, "partner_id": self.partner_id}
-        # "input 1 only": loja OU conta principal, nunca os dois.
-        if shop_id:
-            corpo["shop_id"] = int(shop_id)
-        elif main_account_id:
-            corpo["main_account_id"] = int(main_account_id)
         return await self._publica("POST", PATH_TOKEN, json=corpo)
 
     async def renovar(self, refresh_token: str, user_id: int) -> dict:
