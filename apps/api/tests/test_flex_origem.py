@@ -339,7 +339,7 @@ async def test_aprovacao_pendente_faz_a_rodada_reler_a_conta(db, mundo, monkeypa
 
 @pytest.mark.asyncio
 async def test_conta_in_sem_origem_e_perguntada_na_hora(db, mundo, monkeypatch):
-    """A linha gravada antes da 0383 (assinatura "in", origem NULL, lida há
+    """A linha gravada antes da 0385 (assinatura "in", origem NULL, lida há
     5 min): o motor pergunta de novo já — sem esperar a validade de 1 h."""
     monkeypatch.setattr(mundo["cfg"], "flex_modo", "piloto")
     ml = mundo["ml"]

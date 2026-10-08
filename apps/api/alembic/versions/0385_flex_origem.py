@@ -24,8 +24,8 @@ espera a validade de 1 h) — até lá a conta fica bloqueada ("não deu para le
 de onde sai"). O gatilho do Histórico entra na flex_local quando o worker
 sobe (historico_manutencao, run_at_startup).
 
-Revision ID: 0383_flex_origem
-Revises: 0382_conferencia_plataformas
+Revision ID: 0385_flex_origem
+Revises: 0384_redes_sociais_loja_shopee
 """
 
 from collections.abc import Sequence
@@ -35,8 +35,8 @@ from sqlalchemy.dialects import postgresql as pg
 
 from alembic import op
 
-revision: str = "0383_flex_origem"
-down_revision: str | None = "0382_conferencia_plataformas"
+revision: str = "0385_flex_origem"
+down_revision: str | None = "0384_redes_sociais_loja_shopee"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

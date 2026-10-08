@@ -27,13 +27,13 @@ from app.models import Base
 
 _VERSOES = Path(__file__).resolve().parent.parent / "alembic" / "versions"
 _MIGRATION = _VERSOES / "0367_flex.py"
-# 0383 (08/10/2026): a origem da assinatura do Flex em flex_conta.
-_MIGRATION_ORIGEM = _VERSOES / "0383_flex_origem.py"
+# 0385 (08/10/2026): a origem da assinatura do Flex, o local de saída e o lote do pedido.
+_MIGRATION_ORIGEM = _VERSOES / "0385_flex_origem.py"
 TABELAS = [
     "flex_anuncio_estado",
     "flex_conta",
     "flex_emergencia",
-    "flex_local",  # 0383: o local de saída do Flex (editado por pessoas)
+    "flex_local",  # 0385: o local de saída do Flex (editado por pessoas)
     "flex_log",
     "flex_pedido",
 ]
@@ -113,8 +113,8 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
     assert mod.revision == "0367_flex"
     assert mod.down_revision == "0366_atendimento_automacoes"
     origem = _carregar(_MIGRATION_ORIGEM)
-    assert origem.revision == "0383_flex_origem"
-    assert origem.down_revision == "0382_conferencia_plataformas"
+    assert origem.revision == "0385_flex_origem"
+    assert origem.down_revision == "0384_redes_sociais_loja_shopee"
 
     await db.execute(text(f'DROP SCHEMA IF EXISTS "{rascunho}" CASCADE'))
     await db.execute(text(f'CREATE SCHEMA "{rascunho}"'))
@@ -127,7 +127,7 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
     def _rodar(conn, passo: str) -> None:
         ctx = MigrationContext.configure(conn, opts={"target_metadata": Base.metadata})
         with Operations.context(ctx):
-            # A 0367 cria; a 0383 completa a flex_conta (o model é o das duas).
+            # A 0367 cria; a 0385 completa a flex_conta (o model é o das duas).
             for m in [mod, origem] if passo == "upgrade" else [origem, mod]:
                 getattr(m, passo)()
 
@@ -182,10 +182,10 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
         assert cols[("logistica", "envio_tipo")][3:5] == ("YES", None)
         assert cols[("flex_pedido", "no_sp")][3:5] == ("NO", "false")
         assert cols[("flex_log", "id")][5] == "YES"  # identity
-        # 0383: a origem nasce vazia e sem default (o motor pergunta de novo).
+        # 0385: a origem nasce vazia e sem default (o motor pergunta de novo).
         assert cols[("flex_conta", "origem_cep")][2:5] == ("text", "YES", None)
         assert cols[("flex_conta", "origem_cidade")][2:5] == ("text", "YES", None)
-        # 0383: o local de saída nasce com São Bernardo do Campo / .sp (o que
+        # 0385: o local de saída nasce com São Bernardo do Campo / .sp (o que
         # o código fazia fixo) e aceita uma linha só.
         local = (
             await db.execute(text(f'SELECT id, cidade, lote FROM "{rascunho}".flex_local'))

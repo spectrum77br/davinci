@@ -1320,7 +1320,7 @@ async def _conferir_contas(
         respostas: dict[UUID, flex_api.AssinaturaFlex] = {}
         for iid, integ in integracoes.items():
             atual = out[iid]
-            # Conta do ML com Flex e SEM a origem (lida antes da 0383, ou a
+            # Conta do ML com Flex e SEM a origem (lida antes da 0385, ou a
             # resposta não trouxe): pergunta já — sem a origem ela fica
             # bloqueada (bloqueio_da_origem), não espera a validade de 1 h.
             sem_origem = (
