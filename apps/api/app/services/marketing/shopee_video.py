@@ -53,10 +53,14 @@ PLATAFORMA_SHOPEE = "shopee"
 # `redes_sociais_tokens.provedor` das contas de Shopee Vídeo.
 PROVEDOR_SHOPEE = "shopee"
 
-# Mesmo host que a integração da loja usa em produção (perto de Singapura,
-# atende as lojas BR). O Sandbox V2 NÃO tem Vídeo nem Media — o teste é em
-# produção, numa loja de verdade, por isso nem existe host de teste aqui.
-API_HOST = "https://partner.shopeemobile.com"
+# Host da REGIÃO BRASIL — o par do link de autorização brasileiro abaixo (o SDK
+# oficial casa BRAZIL: open.shopee.com.br/auth ↔ openplatform.shopee.com.br).
+# O code nasce na região BR; trocado no host global (partner.shopeemobile.com,
+# o da integração de pedidos, que usa o link ANTIGO /shop/auth_partner, também
+# global) a Shopee responde `invalid_code` — foi o que aconteceu 3 vezes na
+# Barbosa em 08/10/2026. Token, renovação, media e vídeo: tudo neste host.
+# O Sandbox V2 NÃO tem Vídeo nem Media — o teste é em produção.
+API_HOST = "https://openplatform.shopee.com.br"
 # Autorização de vendedor do Brasil (link NOVO: `auth_type=seller`, sem sign).
 AUTH_URL_BR = "https://open.shopee.com.br/auth"
 
