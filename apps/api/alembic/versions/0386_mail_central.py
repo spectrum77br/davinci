@@ -1,8 +1,8 @@
 """Private mailboxes, encrypted messages/attachments and a human reply outbox.
 
 No mailbox credentials, seed accounts, automatic replies or production data changes.
-Revision ID: 0383_mail_central
-Revises: 0382_conferencia_plataformas
+Revision ID: 0386_mail_central
+Revises: 0385_flex_origem
 """
 
 import sqlalchemy as sa
@@ -10,8 +10,8 @@ from sqlalchemy.dialects import postgresql as pg
 
 from alembic import op
 
-revision = "0383_mail_central"
-down_revision = "0382_conferencia_plataformas"
+revision = "0386_mail_central"
+down_revision = "0385_flex_origem"
 branch_labels = None
 depends_on = None
 SCHEMA = "davinci"

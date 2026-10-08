@@ -4,15 +4,27 @@ import importlib.util
 from pathlib import Path
 from uuid import uuid4
 
+from alembic.config import Config
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
+from alembic.script import ScriptDirectory
 from sqlalchemy import inspect, text
 
 from app.models import Base
 
 
+def test_mail_migration_extends_main_without_creating_another_head():
+    config = Config()
+    config.set_main_option("script_location", str(Path(__file__).resolve().parents[1] / "alembic"))
+    scripts = ScriptDirectory.from_config(config)
+    assert len(scripts.get_heads()) == 1, "mail migration must extend the current main chain"
+    migration = scripts.get_revision("0386_mail_central")
+    assert migration.down_revision == "0385_flex_origem"
+    assert migration.revision in {item.revision for item in scripts.walk_revisions()}
+
+
 async def test_mail_migration_matches_models_and_downgrades(db):
-    path = Path(__file__).resolve().parents[1] / "alembic/versions/0383_mail_central.py"
+    path = Path(__file__).resolve().parents[1] / "alembic/versions/0386_mail_central.py"
     spec = importlib.util.spec_from_file_location("mail_migration_test", path)
     migration = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(migration)
